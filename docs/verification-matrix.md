@@ -982,8 +982,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   세 component군과 boundary 1개를 Debug·ReleaseFast에서 실행한다. process bootstrap/writer thread/Client publication은 후속
   CR0b gate가 닫기 전 구현 완료로 세지 않는다.
   네 번째 runtime gate는 final-address heap owner, exact 한 writer, nonblocking wake coalescing, lowest-bit drain, disk 실패 뒤 ring 보존,
-  정상 join과 200 ms timeout detach/backing 보존, fork-before-pipe 거부, aggregate issuer exhaustion의 실제 runtime fatal leaf를
-  Debug·ReleaseFast component 4개와 실제 daemon bootstrap boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
+  clean join·timeout detach와 writer failure 뒤 degraded join, stopping clock/poll 실패 뒤 degraded detach/backing 보존,
+  fork-before-pipe 거부, aggregate issuer exhaustion의 실제 runtime fatal leaf를
+  Debug·ReleaseFast component 7개와 실제 daemon bootstrap boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
   최초 suffix 선행 substrate 5개는 service mutex 아래 모든 fallible ring plan을 준비하고 evidence commit 뒤에도 pending bit을 숨기며,
   pristine abort/reuse와 service alias·copied/plan/seal drift·evidence 이후 abort 거부 및 pending exact-once publication을
   Debug·ReleaseFast exact-count로 검증한다. public prepared DTO는 재귀 pointer 0이다. 네 단계 API는 같은 모듈의 기존 compatibility
@@ -994,9 +995,39 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   HostPool reservation·generation·capacity·copy/replay·capacity OOM 원복·보호 범위 alias·copied pool 거부·managed source alias 11개, final-address ClientSlot binding 7개, AppSession current/restore 공용 publication leaf
   publication leaf scenario 4개와 HostPool capacity OOM 1개, boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 제품 `HostPool.addOwned` caller 0,
   HostPool의 Client import/역참조 0, map publication 뒤 binding store 0, binding publication 뒤 fallible/callback 0을 함께 검증한다.
-  이 gate는 binding publication, suffix가 소비할 pointer-free `IncidentInput`·`IncidentRepeatKey`와 canonical service record·input digest·aggregate fingerprint 계약 5개,
+  이 gate는 binding publication, suffix가 소비할 pointer-free `IncidentInput`·`PreparedManagedPoison`·`ReconnectAdmission`·`IncidentRepeatKey`와 canonical service record·input digest·aggregate fingerprint 계약 7개,
   held Client operation의 `id -> key -> reason` publication, owner-storage alias 거부, copied/bind drift 회수 prerequisite 3개만 닫으며
   first-reason+incident 단일 poison suffix는 여섯 번째 gate가 닫기 전 구현 완료로 세지 않는다.
+  composite coordinator 선행 gate 6개는 실제 managed ClientSlot·publisher Registry·ConnectionIncidentRuntime/service를 함께 사용한다.
+  `CR0b composite coordinator는 Client operation publisher lease service lock 순서로 first를 준비한다`,
+  `CR0b composite coordinator는 service prepare 실패를 publisher와 Client operation 역순으로 회수한다`,
+  `CR0b composite coordinator는 bind drift를 service abort publisher release Client release 역순으로 회수한다`,
+  `CR0b composite coordinator는 ring id key reason pending wake lease operation 순서로 first를 게시한다`,
+  `CR0b composite coordinator는 같은 fingerprint repeat에서 first Client 필드와 sequence를 보존하고 aggregate만 갱신한다`,
+  `CR0b composite coordinator는 다른 fingerprint repeat를 mutation 없이 거부하고 first 권위를 보존한다`를 Debug·ReleaseFast exact 6으로
+  실행한다. 여섯 행 모두 제품 owner를 실제 조합한다. 첫 행은 `client held -> publisher acquired -> runtime projection validated -> service prepared -> client bound -> composite held`,
+  둘째는 service가 lock을 얻기 전 실패 뒤 `publisher released -> client released`, 셋째는 실제 binding validator 실패 뒤
+  `service aborted -> publisher released -> client released`, 넷째는 coordinator의 `ring evidence -> client committed -> pending unlock -> wake outcome ->
+  publisher release -> client operation release` transcript와 Client operation prerequisite의 별도 `id -> key -> reason` store oracle을 함께 요구한다. 실패 행은 ring/pending/Client first fields 0,
+  mutex 재획득, active lease 0, 같은 node operation 재사용을 함께 검증한다. repeat 두 행은 same-fingerprint aggregate-only 성공과
+  fingerprint mismatch의 ring/pending/Client mutation 0을 고정한다. 이 6개는 composite prerequisite일 뿐 suffix 10·managed caller 6 완료로 세지 않는다.
+  publisher authority 7개와 exhaustion child 1개는 canonical child artifact 경로를 주입하는 CR0b 전용 runner에서만 완료 증거가 된다.
+  일반 aggregate에서는 두 exhaustion entry가 의도적으로 skip되므로 aggregate green을 이 fail-stop 증거로 대체하지 않는다.
+  별도 GUI incident owner prerequisite 4개는 final-address runtime+registry 설치, current/restore 역할의 동일 owner 재사용,
+  copied owner·process/app nonce 교체 거부를 닫는다. allocator/create 실패는 whole owner pristine rollback과 같은 owner 재사용을,
+  active lease가 있는 shutdown은 closing owner/runtime 보존과 lease release 뒤 same-owner joined retry, 200 ms deadline의 detached
+  backing 보존을 검증한다. 이는 실제 AppHost callback/outcome matrix인 bootstrap 5와는 별도 선행 증거다. 실제 AppSession
+  current-first, restore-first→current, multi-window 제품 entrypoint 3개와 조기·foreign ABI mutation 0 및 joined/replay,
+  runtime failure의 degraded/replay와 active-lease timeout detached/replay prerequisite 3개는
+  managed adapter 연결 전에 이 owner를 설치·정산하는 별도 GUI gate로 실행한다.
+  daemon bootstrap prerequisite 1개는 실제 제품 bootstrap leaf로 daemon PID, process/service nonce, runtime/service generation,
+  최초 sequence 0과 unpublished joined 정산을 검증한다. pointer-free fixed-64 transcript 계약 1개는 두 child 비교에 필요한
+  PID/nonces/generations/sequence scalar 및 closed GUI/daemon role·zero reserved만 허용한다. bootstrap 4는 서로 다른 canonical artifact인 dedicated GUI child(actual 4: named 1+root/import sentinel 3)와
+  daemon child(actual 1)를 fresh exec하고, exact 64-byte transcript·EOF·exit 0을 child별 2초 absolute watchdog으로 회수한다.
+  두 transcript의 PID/process nonce/service nonce/app-instance nonce가 모두 다르고 양쪽 최초 sequence가 0임을 실제 비교한다.
+  runtime 수명 prerequisite 7개는 clean `joined|detached`와 `degraded_joined|degraded_detached`를 구분하며 writer failure 뒤
+  정상 join도 degraded provenance를 보존한다. stopping 이후 injected clock 실패와 실제 completion poll 오류는 backing을 보존하는
+  degraded detach로 닫는다.
   여섯 번째 Client poison publication gate는 아래 32개 unique component와 boundary 1개, 총 33개를 Debug·ReleaseFast에서
   exact-count한다. 각 행은 제품 API를 직접 실행하며 같은 fixture helper의 별칭으로 개수를 채우지 않는다.
 
@@ -1050,6 +1081,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   ReleaseFast에서 같은 commit/wake/release evidence 뒤 scheduler continuation exact success를 요구하며
   optimize-mode skip은 허용하지 않는다.
 
+  현재 별도 managed poison publication prerequisite는 final-address HostAdapter handoff와 app-global publisher owner를 실제 조합해
+  held Client 상태로 first/repeat를 선택하고 handoff를 exact once consume한다. first는 held Client terminalization과 fd close,
+  reconnect admission publication까지 실행하지만 실제 scheduler consumer와 poison ingress가 없으므로 위 `caller 1` 행을 완료한 것으로 세지 않는다.
+  reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
+  event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
+  capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.
+
   32개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
 
   | component | exact 내부 행 |
@@ -1061,11 +1099,18 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   | suffix 6 | source-site raw, parser phase, outbound phase, outbound offset/length, request count, stream count, event count, queue count/bytes, input digest = 10 |
   | suffix 7 | copied key, client-address splice, first-id splice, fingerprint splice, binding-seal splice, replay after connection generation = 6 |
   | suffix 8 | clock error, negative timestamp, earlier repeat min, later repeat max = 4 |
-  | bootstrap 5 | Window deinit shutdown 0, AppSession deinit shutdown 0, last AppSession 전 ABI 0, backend settlement 전 ABI 0, 모두 완료 뒤 ABI 1, inactive outcome, joined outcome, active-lease timeout detached outcome, runtime shutdown error degraded outcome, ABI replay inactive = 10 |
+  | bootstrap 5 | ordinary Window/AppSession deinit shutdown 0, last AppSession 전 incident ABI 0, backend settlement 전 incident ABI 0, session shutdown 뒤 backend settlement ABI 1, 모두 완료 뒤 incident ABI 1, inactive outcome, joined outcome, active-lease timeout detached outcome, runtime shutdown error degraded outcome, ABI replay inactive = 10 |
   | subprocess 1 | copied authority, fork authority = 2 |
   | subprocess 2 | authority seal, service seal = 2 |
   | subprocess 3 | ring, first id, repeat key, first reason = 4 |
   | subprocess 4 | Debug evidence 뒤 common fatal `_exit(86)`, ReleaseFast evidence 뒤 scheduler success = optimize mode별 1 |
+
+  bootstrap 5 prerequisite의 joined 행은 빈 shell이 아니라 owned HostAdapter/Client row가 있는 실제 HostPool을 정산한다.
+  settlement preflight는 실제 AppSession init/deinit이 소유하는 live-session counter와 backend의 residual runtime·reservation·close operation·close sweep를 각각
+  `.inactive`로 거부하고 backend/pool/incident owner를 보존한 뒤, blocker 원복 후 같은 제품 leaf가 `.settled`로 수렴해야 한다.
+  AppSession publication prerequisite는 current/restore 제품 caller가 공유하는 singleton claim leaf를 실제 created-pool과
+  existing-pool sibling topology로 실행한다. claim 경쟁 실패는 새 backend를 먼저 정산하고, created pool은 전체 회수하며,
+  existing pool은 기존 sibling을 보존한 채 실패한 신규 row와 그 row의 spawn-host 선택을 함께 제거해야 한다.
   이 gate가 green이 되기 전 CR0b를 구현 완료로 세지 않는다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,

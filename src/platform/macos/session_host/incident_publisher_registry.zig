@@ -5,11 +5,26 @@
 
 const std = @import("std");
 const process_seal = @import("process_seal_service.zig");
+const publication = @import("maru").observability.incident_publication_contract;
 
 const PublisherTestChannel = if (@import("builtin").is_test) struct {
-    extern var maru_cr0b_publisher_child_path: [1024]u8;
-    extern var maru_cr0b_publisher_child_path_len: usize;
+    pub export var maru_cr0b_publisher_child_path: [1024]u8 = [_]u8{0} ** 1024;
+    pub export var maru_cr0b_publisher_child_path_len: usize = 0;
 } else struct {};
+
+const PublicationTrace = if (@import("builtin").is_test) struct {
+    threadlocal var callback: ?*const fn (u8) void = null;
+} else struct {};
+
+pub const transaction_testing = if (@import("builtin").is_test) struct {
+    pub fn armTrace(trace: ?*const fn (u8) void) void {
+        PublicationTrace.callback = trace;
+    }
+} else struct {};
+
+fn tracePublication(stage: u8) void {
+    if (@import("builtin").is_test) if (PublicationTrace.callback) |trace| trace(stage);
+}
 
 pub const Error = error{ InvalidOwner, Busy, Closing };
 pub const Lifecycle = enum(u8) { pristine = 0, ready = 1, closing = 2, detached = 3 };
@@ -158,6 +173,7 @@ pub const Registry = struct {
         publish_slot.* = .{ .lease_addr = @intFromPtr(out), .lease_generation = generation };
         self.active_lease_count += 1;
         out.* = candidate;
+        tracePublication(1); // publisher lease acquired
     }
 
     pub fn release(self: *Registry, lease: *IncidentPublisherLease) Error!void {
@@ -174,6 +190,35 @@ pub const Registry = struct {
         active_slot.* = .{};
         self.active_lease_count -= 1;
         lease.* = consumed;
+        tracePublication(2); // publisher lease released
+    }
+
+    /// raw owner 주소를 소비자에게 맡기지 않고 live row와 seal을 같은 mutex 아래 재검증한다.
+    pub fn projectValidatedLease(
+        self: *Registry,
+        lease: *const IncidentPublisherLease,
+    ) Error!publication.PublisherLeaseProjection {
+        try self.validateBeforeLock();
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        if (!self.validOwner() or !self.validAuthority() or !validLease(self, lease) or
+            findActiveLease(self, lease.*) == null)
+            return error.InvalidOwner;
+        return .{
+            .lease_addr = lease.self_addr,
+            .registry_addr = lease.registry_addr,
+            .registry_generation = lease.registry_generation,
+            .authority_addr = lease.authority_addr,
+            .runtime_addr = lease.runtime_addr,
+            .runtime_generation = lease.runtime_generation,
+            .service_addr = lease.service_addr,
+            .service_generation = lease.service_generation,
+            .pid = lease.pid,
+            .process_nonce = lease.process_nonce,
+            .owner_thread = lease.owner_thread,
+            .lease_generation = lease.lease_generation,
+            .seal = lease.seal,
+        };
     }
 
     pub fn beginClosing(self: *Registry) Error!bool {
@@ -480,11 +525,13 @@ test "CR0b publisher registry는 canonical owner를 재사용하고 second owner
 
 test "CR0b publisher authority generation exhaustion은 publication 전에 fail-stop한다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // 이 행은 canonical child artifact 경로를 주입하는 전용 CR0b runner에서만 실행한다.
+    // 일반 aggregate runner에는 해당 권위가 없으므로 여기서 child를 추측하거나 self-exec하지 않는다.
+    if (PublisherTestChannel.maru_cr0b_publisher_child_path_len == 0) return error.SkipZigTest;
     var registry: Registry = .{};
     try registry.initInPlace(try ensureProcessSealForTest());
     registry.next_registry_generation = std.math.maxInt(u64);
     const before = registry;
-    if (PublisherTestChannel.maru_cr0b_publisher_child_path_len == 0) return error.TestUnexpectedResult;
     const executable = PublisherTestChannel.maru_cr0b_publisher_child_path[0..PublisherTestChannel.maru_cr0b_publisher_child_path_len :0];
     var marker_pipe: [2]c_int = undefined;
     if (std.c.pipe(&marker_pipe) != 0) return error.TestUnexpectedResult;
@@ -534,10 +581,11 @@ test "CR0b publisher authority generation exhaustion은 publication 전에 fail-
 }
 
 test "CR0b authority exhaustion child는 실제 counter owner에서 fail-stop한다" {
+    // 전용 parent가 marker FD를 넘긴 fresh artifact에서만 실행한다. aggregate runner는 이 child entry를 소유하지 않는다.
+    const marker_text = std.c.getenv("MARU_CR0B_PUBLISHER_MARKER_FD") orelse return error.SkipZigTest;
     var registry: Registry = .{};
     try registry.initInPlace(try ensureProcessSealForTest());
     registry.next_registry_generation = std.math.maxInt(u64);
-    const marker_text = std.c.getenv("MARU_CR0B_PUBLISHER_MARKER_FD") orelse std.c._exit(126);
     if (!std.mem.eql(u8, std.mem.span(marker_text), "198") or
         std.c.write(198, &[_]u8{0x51}, 1) != 1)
         std.c._exit(126);

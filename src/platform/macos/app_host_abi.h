@@ -553,6 +553,12 @@ int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabiliti
    path는 workspace.v1.lock UTF-8 bytes다. Zig는 final leaf를 no-follow/0600/current-UID regular로
    검증하고 CLOEXEC flock fd를 process lifetime 동안 보관한다. */
 uint32_t maru_macos_app_instance_lease_acquire(const uint8_t *path, size_t path_len);
+/* CR0b bootstrap 5: 모든 AppSession teardown 뒤 app-global remote backend/pool/client를 정산한다.
+   0=inactive, 1=settled. incident owner shutdown보다 반드시 먼저 호출한다. */
+uint32_t maru_macos_remote_backend_settle(void);
+/* CR0b: all AppSession/backend settlement 뒤 app-global incident writer를 exact once 정산한다.
+   0=inactive, 1=joined, 2=detached, 3=degraded. */
+uint32_t maru_macos_incident_owner_shutdown(void);
 int32_t maru_macos_app_session_create(
     const MaruAppHostSessionConfig *config,
     MaruAppHostSession **out_session

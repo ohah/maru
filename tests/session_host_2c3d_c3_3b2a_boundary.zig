@@ -69,8 +69,8 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // C3-3b3의 final-address receipt/permit owner 7개도 service를 모듈당 한 번만 가져오며 inline 중복은 허용하지 않는다.
     // C3-3b5 close authority, backend admission, window close graph가 같은 process-seal 경계를 직접 사용한다.
     // C3-3b6 shutdown owner와 2d2 terminal handoff registry도 같은 process domain을 직접 검증한다.
-    // CR0b HostAdapter·incident publisher registry·incident runtime fatal adapter가 같은 process domain을 직접 검증한다.
-    try std.testing.expectEqual(@as(usize, 23), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // CR0b HostAdapter·publisher registry·runtime·composite coordinator·GUI process owner와 daemon bootstrap이 같은 process domain을 직접 검증한다.
+    try std.testing.expectEqual(@as(usize, 27), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     const publisher_registry = try readSource(allocator, "src/platform/macos/session_host/incident_publisher_registry.zig");
     defer allocator.free(publisher_registry);
     try std.testing.expectEqual(@as(usize, 1), count(publisher_registry, "@import(\"process_seal_service.zig\")"));
@@ -79,10 +79,11 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     const incident_runtime = try readSource(allocator, "src/platform/macos/session_host/incident_runtime.zig");
     defer allocator.free(incident_runtime);
     try std.testing.expectEqual(@as(usize, 1), count(incident_runtime, "@import(\"process_seal_service.zig\")"));
-    try std.testing.expectEqual(@as(usize, 1), count(incident_runtime, "fatalIntegrity(.counter_exhausted)"));
+    // aggregate issuer와 runtime/service generation issuer가 각각 자기 publication 전에 fail-stop한다.
+    try std.testing.expectEqual(@as(usize, 2), count(incident_runtime, "fatalIntegrity(.counter_exhausted)"));
     const daemon = try readSource(allocator, "src/platform/macos/session_host/daemon.zig");
     defer allocator.free(daemon);
-    try std.testing.expectEqual(@as(usize, 0), count(daemon, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(batch_registry, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(shutdown_attempt, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(shutdown_connector, "@import(\"process_seal_service.zig\")"));

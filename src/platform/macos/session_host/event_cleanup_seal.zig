@@ -214,6 +214,51 @@ pub const IncidentRepeatKeySealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PreparedIncidentPublicationSealInput = struct {
+    self_addr: u64,
+    kind_raw: u8,
+    lease_addr: u64,
+    lease_generation: u64,
+    lease_seal: CleanupSeal,
+    runtime_generation: u64,
+    service_generation: u64,
+    service_token_addr: u64,
+    service_token_seal: CleanupSeal,
+    service_lifecycle_raw: u8,
+    client_token_addr: u64,
+    client_token_seal: CleanupSeal,
+    client_lifecycle_raw: u8,
+    input_digest: CleanupSeal,
+    lifecycle_raw: u8,
+};
+
+/// One-shot handoff from a held Client mutation to the later managed publication owner.
+/// The canonical input digest binds the complete pointer-free incident projection without
+/// duplicating its wire schema in this platform seal module.
+pub const PreparedManagedPoisonSealInput = struct {
+    self_addr: u64,
+    owner_thread: u64,
+    slot_addr: u64,
+    slot_generation: u64,
+    node_addr: u64,
+    node_generation: u64,
+    binding_seal: CleanupSeal,
+    input_digest: CleanupSeal,
+    lifecycle_raw: u8,
+};
+
+pub const ReconnectAdmissionSealInput = struct {
+    self_addr: u64,
+    owner_thread: u64,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+    incident_app_instance_nonce: u128,
+    incident_sequence: u64,
+    disposition_raw: u8,
+    lifecycle_raw: u8,
+};
+
 pub const PendingTermCloseSealInput = struct {
     self_addr: u64,
     app_session_addr: u64,

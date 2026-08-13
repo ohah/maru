@@ -2268,9 +2268,23 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b poison publication 계약은"},
         });
         const run_cr0b_publication_contract_tests = b.addRunArtifact(cr0b_publication_contract_tests);
-        run_cr0b_publication_contract_tests.addArg("--maru-expect-tests=5");
+        run_cr0b_publication_contract_tests.addArg("--maru-expect-tests=7");
         run_cr0b_publication_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_publication_contract_tests.step);
+        const cr0b_reconnect_admission_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_admission_owner.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b reconnect admission owner는"},
+        });
+        const run_cr0b_reconnect_admission_tests = b.addRunArtifact(cr0b_reconnect_admission_tests);
+        run_cr0b_reconnect_admission_tests.addArg("--maru-expect-tests=2");
+        run_cr0b_reconnect_admission_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_reconnect_admission_tests.step);
         const cr0b_service_transaction_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/observability/connection_incident.zig"),
@@ -2350,9 +2364,37 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b Client incident operation은"},
         });
         const run_cr0b_poison_suffix_tests = b.addRunArtifact(cr0b_poison_suffix_tests);
-        run_cr0b_poison_suffix_tests.addArg("--maru-expect-tests=3");
+        run_cr0b_poison_suffix_tests.addArg("--maru-expect-tests=4");
         run_cr0b_poison_suffix_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_poison_suffix_tests.step);
+        const cr0b_composite_coordinator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_publication_coordinator.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b composite coordinator는"},
+        });
+        const run_cr0b_composite_coordinator_tests = b.addRunArtifact(cr0b_composite_coordinator_tests);
+        run_cr0b_composite_coordinator_tests.addArg("--maru-expect-tests=6");
+        run_cr0b_composite_coordinator_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_composite_coordinator_tests.step);
+        const cr0b_gui_incident_owner_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/app_process_incident_owner.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "CR0b GUI incident owner prerequisite는", "CR0b managed public poison prerequisite는" },
+        });
+        const run_cr0b_gui_incident_owner_tests = b.addRunArtifact(cr0b_gui_incident_owner_tests);
+        run_cr0b_gui_incident_owner_tests.addArg("--maru-expect-tests=5");
+        run_cr0b_gui_incident_owner_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_gui_incident_owner_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -2370,10 +2412,106 @@ pub fn build(b: *std.Build) void {
         cr0b_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr0b_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         const run_cr0b_app_session_tests = b.addRunArtifact(cr0b_app_session_tests);
-        // app_session root/import sentinel 3개와 이름 있는 제품 증거 4개를 함께 실행한다.
-        run_cr0b_app_session_tests.addArg("--maru-expect-tests=7");
+        // app_session root/import sentinel 3개와 이름 있는 제품 증거 5개를 함께 실행한다.
+        run_cr0b_app_session_tests.addArg("--maru-expect-tests=8");
         run_cr0b_app_session_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_app_session_tests.step);
+        const cr0b_gui_bootstrap_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "CR0b GUI current first는", "CR0b GUI restore first 뒤 current는", "CR0b GUI multiple window와 adapter는", "CR0b AppHost incident ABI prerequisite는" },
+        });
+        cr0b_gui_bootstrap_tests.root_module.link_libc = true;
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("AppKit", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("Metal", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("MetalKit", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("QuartzCore", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreText", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr0b_gui_bootstrap_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_cr0b_gui_bootstrap_tests = b.addRunArtifact(cr0b_gui_bootstrap_tests);
+        // app_session/session_host root sentinel 3개와 실제 제품 bootstrap/prerequisite 이름 6개를 함께 실행한다.
+        run_cr0b_gui_bootstrap_tests.addArg("--maru-expect-tests=9");
+        run_cr0b_gui_bootstrap_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_gui_bootstrap_tests.step);
+        const cr0b_daemon_incident_bootstrap_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b daemon incident bootstrap prerequisite는"},
+        });
+        const run_cr0b_daemon_incident_bootstrap_tests = b.addRunArtifact(cr0b_daemon_incident_bootstrap_tests);
+        run_cr0b_daemon_incident_bootstrap_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_daemon_incident_bootstrap_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_daemon_incident_bootstrap_tests.step);
+        const cr0b_bootstrap_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_bootstrap_contract.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b bootstrap transcript 계약은"},
+        });
+        const run_cr0b_bootstrap_contract_tests = b.addRunArtifact(cr0b_bootstrap_contract_tests);
+        run_cr0b_bootstrap_contract_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_bootstrap_contract_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_bootstrap_contract_tests.step);
+        const cr0b_bootstrap4_parent = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_bootstrap_contract.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b daemon bootstrap은 GUI와 독립된 nonce와 sequence owner를 설치한다"},
+            .test_runner = .{
+                .path = b.path("tools/session_host_cr0b_bootstrap_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        cr0b_bootstrap4_parent.root_module.link_libc = true;
+        const cr0b_bootstrap4_gui_child = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b bootstrap 4 GUI child는"},
+        });
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("AppKit", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("Metal", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("MetalKit", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("QuartzCore", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreText", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreGraphics", .{});
+        const cr0b_bootstrap4_daemon_child = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b bootstrap 4 daemon child는"},
+        });
+        const run_cr0b_bootstrap4_parent = b.addRunArtifact(cr0b_bootstrap4_parent);
+        run_cr0b_bootstrap4_parent.addArtifactArg(cr0b_bootstrap4_gui_child);
+        run_cr0b_bootstrap4_parent.addArtifactArg(cr0b_bootstrap4_daemon_child);
+        run_cr0b_bootstrap4_parent.addArg("--maru-expect-tests=1");
+        run_cr0b_bootstrap4_parent.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_bootstrap4_parent.step);
         const cr0b_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/observability/connection_incident.zig"),
@@ -2423,7 +2561,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b 기록기 수명은"},
         });
         const run_cr0b_runtime_tests = b.addRunArtifact(cr0b_runtime_tests);
-        run_cr0b_runtime_tests.addArg("--maru-expect-tests=4");
+        run_cr0b_runtime_tests.addArg("--maru-expect-tests=7");
         run_cr0b_runtime_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_runtime_tests.step);
         const cr0b_boundary_tests = addProjectTest(b, .{

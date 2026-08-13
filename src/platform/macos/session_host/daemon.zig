@@ -36,6 +36,9 @@ const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
 const poll_owner = @import("poll_owner.zig");
 const incident_runtime = @import("incident_runtime.zig");
+const incident_publisher_registry = @import("incident_publisher_registry.zig");
+const process_seal_service = @import("process_seal_service.zig");
+const incident_bootstrap_contract = @import("incident_bootstrap_contract.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
@@ -99,6 +102,12 @@ fn bootstrapIncidentRuntime(
     if (app_instance_nonce == 0) app_instance_nonce = newHostId();
     var process_nonce: u64 = 0;
     while (process_nonce == 0) process_nonce = @truncate(newHostId());
+    if (builtin.is_test)
+        process_seal_service.testing_api.resetInheritedForkedDaemonProcessSealIfPresent() catch
+            return error.ManifestFailed;
+    const prepared_seal = process_seal_service.prepare(@intCast(c.getpid()), process_nonce) catch
+        return error.ManifestFailed;
+    process_seal_service.commitReady(prepared_seal);
     return incident_runtime.ConnectionIncidentRuntime.create(
         allocator,
         @intCast(c.getpid()),
@@ -418,8 +427,27 @@ fn runSessionHostImpl(
     // 기록기 backing은 daemon lifetime보다 길 수 있으므로 stack owner에 두지 않는다. 정상 종료에서는 join 뒤
     // 해제하고, regular-file I/O가 200 ms를 넘긴 경우 runtime 스스로 detach하며 process 종료까지 backing을 보존한다.
     const incident_owner = bootstrapIncidentRuntime(allocator, dir_path) catch return error.ManifestFailed;
-    defer removeEmptyIncidentDirectory(dir_path);
-    defer _ = incident_owner.shutdown() catch {};
+    var incident_registry: incident_publisher_registry.Registry = .{};
+    var incident_published = false;
+    // publication 전·후 소유권을 하나의 defer에서만 정산한다. detached writer는
+    // open directory FD에 나중에도 쓸 수 있으므로 pathname을 보존하고, joined/abort 정산 뒤에만 빈 directory를 제거한다.
+    defer {
+        var remove_empty = false;
+        if (incident_published) {
+            if (incident_owner.shutdownPublished(&incident_registry)) |outcome|
+                remove_empty = outcome == .joined or outcome == .degraded_joined
+            else |_| {}
+        } else {
+            // registry publication 전에도 runtime writer는 이미 시작했으므로 detached outcome은 pathname을 보존한다.
+            if (incident_owner.abortUnpublished()) |outcome|
+                remove_empty = outcome == .joined or outcome == .degraded_joined
+            else |_| {}
+        }
+        if (remove_empty) removeEmptyIncidentDirectory(dir_path);
+    }
+    incident_registry.initInPlace(incident_owner.process_nonce) catch return error.ManifestFailed;
+    incident_owner.installPublisherRegistry(&incident_registry) catch return error.ManifestFailed;
+    incident_published = true;
 
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
@@ -802,4 +830,64 @@ test "daemon 자연 종료: 서빙 이력·runtime 0·client 0·유예를 모두
     // 유예가 차기 전에는 물러나지 않는다 — 마지막 runtime 소멸 직후 재접속하려는 GUI를 위한 창이다.
     try testing.expect(!shouldExitNaturally(true, 0, 0, enough - 1));
     try testing.expect(!shouldExitNaturally(true, 0, 0, 0));
+}
+
+test "CR0b daemon incident bootstrap prerequisite는 실제 daemon process owner domain을 발급한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // PID 기반 /tmp 이름은 stale crash나 병렬 실행과 충돌할 수 있다. tmpDir가 원자적으로 소유한
+    // 경로와 recursive cleanup을 사용해 이 테스트가 다른 process의 artifact를 관측하지 않게 한다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const runtime = try bootstrapIncidentRuntime(std.testing.allocator, path);
+    var runtime_settled = false;
+    defer if (!runtime_settled) {
+        _ = runtime.abortUnpublished() catch {};
+    };
+    try std.testing.expectEqual(@as(u64, @intCast(c.getpid())), runtime.pid);
+    try std.testing.expect(runtime.process_nonce != 0);
+    try std.testing.expect(runtime.service.process_nonce != 0);
+    try std.testing.expectEqual(runtime.process_nonce, runtime.service.process_nonce);
+    try std.testing.expectEqual(runtime.process_nonce, runtime.store.process_nonce);
+    try std.testing.expect(runtime.service.app_instance_nonce != 0);
+    try std.testing.expectEqual(runtime.service.app_instance_nonce, runtime.store.app_instance_nonce);
+    try std.testing.expect(runtime.runtime_generation != 0 and runtime.service_generation != 0);
+    try std.testing.expect(runtime.runtime_generation != runtime.service_generation);
+    try std.testing.expectEqual(runtime.service_generation, runtime.service.service_generation);
+    try std.testing.expectEqual(@as(u64, 0), runtime.service.last_issued_sequence);
+    const shutdown_outcome = try runtime.abortUnpublished();
+    // joined는 backing을 이미 free하고 detached는 process-lifetime backing으로 전환한다. 어느 쪽이든
+    // 반환 뒤에는 같은 runtime을 다시 정산할 수 없으므로 assertion보다 먼저 settled를 게시한다.
+    runtime_settled = true;
+    try std.testing.expectEqual(incident_runtime.ShutdownResult.joined, shutdown_outcome);
+}
+
+test "CR0b bootstrap 4 daemon child는 실제 bootstrap transcript를 게시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const runtime = try bootstrapIncidentRuntime(std.testing.allocator, path);
+    var settled = false;
+    defer if (!settled) {
+        _ = runtime.abortUnpublished() catch {};
+    };
+    try incident_bootstrap_contract.testing_api.writeChildTranscript(.{
+        .pid = @intCast(runtime.pid),
+        .role_raw = @intFromEnum(incident_bootstrap_contract.Role.daemon),
+        .reserved = .{ 0, 0, 0 },
+        .process_nonce = runtime.process_nonce,
+        .service_process_nonce = runtime.service.process_nonce,
+        .app_instance_nonce = runtime.service.app_instance_nonce,
+        .runtime_generation = runtime.runtime_generation,
+        .service_generation = runtime.service_generation,
+        .last_issued_sequence = runtime.service.last_issued_sequence,
+    });
+    const outcome = try runtime.abortUnpublished();
+    settled = true;
+    try std.testing.expectEqual(incident_runtime.ShutdownResult.joined, outcome);
 }

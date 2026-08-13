@@ -16,17 +16,43 @@ const generation_contract = @import("generation_attachment_contract.zig");
 const connection_lease = @import("connection_lease.zig");
 const host_manifest = @import("host_manifest.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
+const incident_publication_contract = @import("maru").observability.incident_publication_contract;
 const process_seal_service = @import("process_seal_service.zig");
 
 pub const Kind = enum {
     current,
     previous,
 };
+pub const ManagedPoisonError = client_slot_mod.ManagedPoisonError;
 
 pub const HostAdapter = struct {
     slot: client_slot_mod.ClientSlot,
     kind: Kind,
     shutdown_manifest: ShutdownManifest = .{},
+
+    pub const testing_api = if (@import("builtin").is_test) struct {
+        pub const DeinitTrace = struct {
+            host_ids: [8]u128 = [_]u128{0} ** 8,
+            len: usize = 0,
+        };
+        var armed: ?*DeinitTrace = null;
+
+        pub fn arm(trace: *DeinitTrace) void {
+            std.debug.assert(armed == null and trace.len == 0);
+            armed = trace;
+        }
+
+        pub fn disarm() void {
+            armed = null;
+        }
+
+        fn record(host_id: u128) void {
+            const trace = armed orelse return;
+            if (trace.len == trace.host_ids.len) @panic("HostAdapter deinit trace overflow");
+            trace.host_ids[trace.len] = host_id;
+            trace.len += 1;
+        }
+    } else struct {};
 
     pub const ShutdownManifest = struct {
         host_id: u128 = 0,
@@ -72,6 +98,44 @@ pub const HostAdapter = struct {
 
     pub fn connectionGeneration(self: *const HostAdapter) u64 {
         return self.slot.connectionGeneration();
+    }
+
+    /// The adapter owns the final ClientSlot address but never stores publisher/runtime pointers.
+    pub fn prepareManagedPoison(
+        self: *HostAdapter,
+        input: incident_publication_contract.IncidentInput,
+        out: *incident_publication_contract.PreparedManagedPoison,
+    ) ManagedPoisonError!void {
+        return client_slot_mod.prepareManagedPoison(&self.slot, input, out);
+    }
+
+    pub fn managedPoisonQuery(
+        self: *HostAdapter,
+        prepared: *const incident_publication_contract.PreparedManagedPoison,
+    ) ManagedPoisonError!client_slot_mod.IncidentOperationQuery {
+        return client_slot_mod.managedPoisonQuery(&self.slot, prepared);
+    }
+
+    pub fn consumeManagedPoison(
+        self: *HostAdapter,
+        prepared: *incident_publication_contract.PreparedManagedPoison,
+    ) ManagedPoisonError!void {
+        return client_slot_mod.consumeManagedPoison(&self.slot, prepared);
+    }
+
+    pub fn managedPoisonWillPublishFirst(
+        self: *HostAdapter,
+        prepared: *const incident_publication_contract.PreparedManagedPoison,
+    ) ManagedPoisonError!bool {
+        return client_slot_mod.managedPoisonWillPublishFirst(&self.slot, prepared);
+    }
+
+    pub fn terminalizeManagedPoisonNoFail(
+        self: *HostAdapter,
+        prepared: *const incident_publication_contract.PreparedManagedPoison,
+        result: incident_publication_contract.IncidentCommitResult,
+    ) ?std.c.fd_t {
+        return client_slot_mod.terminalizeManagedPoisonNoFail(&self.slot, prepared, result);
     }
 
     /// reconnect 준비는 Client를 꺼내지 않고 exact current generation의 신규 admission만 봉인한다.
@@ -293,6 +357,7 @@ pub const HostAdapter = struct {
     }
 
     pub fn deinit(self: *HostAdapter) void {
+        const host_id = self.hostId();
         const outcome = self.slot.tryDeinit();
         const final_outcome = if (outcome == .terminal_handoff)
             self.slot.tryDeinitWithTerminalCleanup()
@@ -300,6 +365,7 @@ pub const HostAdapter = struct {
             outcome;
         if (final_outcome != .cleaned)
             @panic("session-host HostAdapter teardown invariant violated");
+        if (@import("builtin").is_test) testing_api.record(host_id);
         self.shutdown_manifest = .{};
         self.kind = undefined;
     }

@@ -49,6 +49,9 @@ const incident_publisher_authority_domain = "maru.incident-publisher-authority.v
 const incident_publisher_lease_domain = "maru.incident-publisher-lease.v1";
 const incident_client_operation_domain = "maru.incident-client-operation.v1";
 const incident_repeat_key_domain = "maru.incident-repeat-key.v1";
+const prepared_incident_publication_domain = "maru.prepared-incident-publication.v1";
+const prepared_managed_poison_domain = "maru.prepared-managed-poison.v1";
+const reconnect_admission_domain = "maru.reconnect-admission.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
 const shutdown_attempt_authority_domain = "maru.shutdown-attempt-authority.v1";
@@ -94,6 +97,9 @@ pub const IncidentPublisherAuthoritySealInput = cleanup_seal.IncidentPublisherAu
 pub const IncidentPublisherLeaseSealInput = cleanup_seal.IncidentPublisherLeaseSealInput;
 pub const IncidentClientOperationSealInput = cleanup_seal.IncidentClientOperationSealInput;
 pub const IncidentRepeatKeySealInput = cleanup_seal.IncidentRepeatKeySealInput;
+pub const PreparedIncidentPublicationSealInput = cleanup_seal.PreparedIncidentPublicationSealInput;
+pub const PreparedManagedPoisonSealInput = cleanup_seal.PreparedManagedPoisonSealInput;
+pub const ReconnectAdmissionSealInput = cleanup_seal.ReconnectAdmissionSealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
 pub const ShutdownAttemptAuthoritySealInput = cleanup_seal.ShutdownAttemptAuthoritySealInput;
@@ -524,6 +530,24 @@ fn updateCleanupTranscript(
 
 var process_service: Service = .{};
 
+pub const testing_api = if (builtin.is_test) struct {
+    /// fork child가 상속한 ready seal만 exec의 fresh global 상태로 되돌린다.
+    /// pristine 프로세스는 손대지 않고, 같은 PID의 live seal은 절대 초기화하지 않는다.
+    pub fn resetInheritedForkedDaemonProcessSealIfPresent() error{InvalidTestState}!void {
+        const current_pid = currentProcessId();
+        if (current_pid == 0) return error.InvalidTestState;
+        switch (process_service.loadState(.acquire)) {
+            .uninitialized => return,
+            .ready => {
+                if (process_service.owner_pid == 0 or process_service.owner_pid == current_pid)
+                    return error.InvalidTestState;
+                process_service = .{};
+            },
+            .initializing, .terminal => return error.InvalidTestState,
+        }
+    }
+} else struct {};
+
 pub fn currentProcessId() u32 {
     return process_identity.currentProcessId();
 }
@@ -721,6 +745,30 @@ pub fn incidentClientOperationSeal(pid: u32, process_nonce: u64, input: Incident
 
 pub fn incidentRepeatKeySeal(pid: u32, process_nonce: u64, input: IncidentRepeatKeySealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, incident_repeat_key_domain, input);
+}
+
+pub fn preparedIncidentPublicationSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: PreparedIncidentPublicationSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_incident_publication_domain, input);
+}
+
+pub fn preparedManagedPoisonSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: PreparedManagedPoisonSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_managed_poison_domain, input);
+}
+
+pub fn reconnectAdmissionSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: ReconnectAdmissionSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, reconnect_admission_domain, input);
 }
 
 pub fn pendingTermCloseSeal(pid: u32, process_nonce: u64, input: PendingTermCloseSealInput) ReadyError!CleanupSeal {

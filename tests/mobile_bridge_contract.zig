@@ -453,6 +453,81 @@ test "Ctrl 을 다시 누르면 꺼진다" {
     bridge.maru_mobile_clear_error();
 }
 
+// 셀 (row,col) 을 가리키는 화면 좌표를 **브리지에 물어** 찾는다. 좌표를 손으로 적으면
+// 레이아웃이 바뀔 때 테스트만 맞고(엉뚱한 자리를 눌러) 제품이 틀린 줄 모른다 — 실제로
+// 공백을 눌러 "선택이 안 된다" 로 보인 적이 있다.
+fn pointForCell(row: u16, col: u16) ?struct { x: f32, y: f32 } {
+    const want: u32 = (@as(u32, col) << 16) | row;
+    var y: f32 = 0;
+    while (y < 900) : (y += 2) {
+        var x: f32 = 0;
+        while (x < 402) : (x += 2) {
+            if (bridge.maru_mobile_hit_cell(x, y) == want) return .{ .x = x, .y = y };
+        }
+    }
+    return null;
+}
+
+// 손가락 하나가 **끌면 스크롤, 길게 누르면 선택**이다. 그 판단이 플랫폼마다 갈리면 같은
+// 동작이 기기에 따라 다른 뜻이 되므로 코어가 정한다(§3.1). 여기서 그 갈림을 고정한다.
+test "끌면 스크롤이고 길게 누르면 선택이다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    // **개행으로 줄을 못 늘린다.** `maru_mobile_input` 의 개행은 Enter 키(CR)라 열만 0 으로
+    // 가고 행은 그대로다 — 줄을 넘겨 주는 셸 에코가 아직 없기 때문이다(원격 세션 M3 전까지).
+    // 스크롤백은 앞선 테스트들이 긴 줄의 자동 줄바꿈으로 이미 만들어 뒀다.
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("hello world", 11);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+
+    // ① 곧바로 끌면 스크롤이다 — 선택이 아니다.
+    bridge.maru_mobile_pointer(0, 200, 400, 1000);
+    bridge.maru_mobile_pointer(1, 200, 500, 1030); // 100px 아래로(과거로)
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+    bridge.maru_mobile_pointer(2, 200, 500, 1060);
+    bridge.maru_mobile_scroll_to_bottom();
+
+    // ② 거의 안 움직인 채 시간이 지나면 선택이다 — 그리고 그때는 **스크롤이 안 된다**.
+    const before_off = bridge.maru_mobile_view_offset();
+    const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
+    bridge.maru_mobile_pointer(0, p.x, p.y, 2000);
+    bridge.maru_mobile_pointer(1, p.x + 2, p.y + 1, 2600); // 600ms 뒤, 2px 만 움직였다
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    try std.testing.expectEqual(before_off, bridge.maru_mobile_view_offset());
+
+    // ③ 선택은 **손을 떼도 남는다** — 떼자마자 사라지면 복사할 수가 없다.
+    bridge.maru_mobile_pointer(2, p.x + 2, p.y + 1, 2700);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // ④ 다시 누르면 사라진다(데스크톱에서 클릭이 선택을 푸는 것과 같다).
+    bridge.maru_mobile_pointer(0, p.x, p.y, 3000);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+    bridge.maru_mobile_pointer(3, p.x, p.y, 3010); // cancel 로 정리
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+// 선택이 서면 **화면에 보여야** 한다 — 코어만 알고 있으면 사용자는 무엇이 잡혔는지 모른다.
+test "선택은 화면에 quad 로 나타난다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("hello world", 11);
+    const plain = bridge.maru_mobile_build(402, 874);
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
+    bridge.maru_mobile_pointer(0, q.x, q.y, 5000);
+    bridge.maru_mobile_pointer(1, q.x + 2, q.y + 1, 5600); // 길게 누름 → 단어 선택
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    const with_sel = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(with_sel > plain); // 표시 quad 가 늘었다
+
+    bridge.maru_mobile_pointer(3, q.x + 2, q.y + 1, 5700);
+    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874));
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

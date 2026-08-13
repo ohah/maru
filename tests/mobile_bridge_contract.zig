@@ -64,10 +64,15 @@ test "선택을 복사로 꺼낸다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
 
     // `copy` 는 표의 마지막이다. 선택이 있으므로 줄에 나타나 있다.
+    const sent_before = bridge.maru_mobile_input("", 0);
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(c.x, c.y));
     const n = bridge.maru_mobile_take_copy(&buf, buf.len);
     try std.testing.expectEqualStrings("copyme", buf[0..n]);
+    // **copy 는 키를 안 보낸다.** 키 경로로 새면 코드포인트 0 이 인코더로 가서 `key_unknown_id`
+    // 가 서고, 화면에는 아무 일도 없어 보인다 — 오류가 비어 있는지로 잡는다.
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    try std.testing.expectEqual(sent_before, bridge.maru_mobile_input("", 0)); // 바이트가 안 나갔다
 
     // **한 번 가져가면 사라진다** — 매 프레임 같은 것을 다시 쓰지 않게.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
@@ -684,17 +689,50 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     bridge.maru_mobile_clear_error();
 }
 
+// **`copy` 가 나타나도 다른 키는 안 움직인다.** 전부 flex 로 나눠 가지면 마지막 키가 30px
+// 밀리고(실측), 선택을 잡은 직후 그 자리를 누르면 옆 키가 눌린다. 키 폭은 고정이고 `copy` 만
+// 남는 자리를 쓴다.
+test "copy 가 나타나도 다른 키 자리는 그대로다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("word here", 9);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const before_first = bridge.maru_mobile_keybar_rect(0);
+    const before_last = bridge.maru_mobile_keybar_rect(10);
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(before_first, bridge.maru_mobile_keybar_rect(0));
+    try std.testing.expectEqual(before_last, bridge.maru_mobile_keybar_rect(10));
+    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    bridge.maru_mobile_clear_error();
+}
+
 // 선택이 없으면 `copy` 는 **줄에서 빠진다** — 누를 수 없는 버튼이 계속 보이면 안 된다.
 test "copy 는 선택이 있을 때만 줄에 있다" {
     _ = bridge.maru_mobile_build(402, 874, now());
-    const last = bridge.maru_mobile_keybar_count() - 1;
-    // 선택이 없는 상태: 그 자리를 눌러도 안 먹는다.
-    const before = bridge.maru_mobile_keybar_rect(last);
-    _ = before;
-    var buf: [16]u8 = undefined;
-    const c0 = keyCenter(last);
-    _ = bridge.maru_mobile_keybar_tap(c0.x, c0.y);
-    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("word here", 9);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // **개수로 본다** — 눌러서 아무 일도 안 나는 것만 보면 "안 보인다" 와 "보이는데 빈손" 이
+    // 구분되지 않는다.
+    const without = bridge.maru_mobile_keybar_count();
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(without + 1, bridge.maru_mobile_keybar_count());
+
+    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(without, bridge.maru_mobile_keybar_count());
     bridge.maru_mobile_clear_error();
 }
 

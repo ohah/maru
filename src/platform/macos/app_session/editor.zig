@@ -12,6 +12,11 @@ const std = @import("std");
 const maru = @import("maru");
 
 const editor = maru.session.editor;
+const app_session_mod = @import("../app_session.zig");
+const AppSession = app_session_mod.AppSession;
+const Term = app_session_mod.Term;
+const pane_ops = @import("pane.zig");
+const term_ops = @import("term.zig");
 
 /// 읽기 상한. **§3.5는 "열지 않음이 아니라 축소"를 요구하지만**, 축소 단계(①미니맵 ②랩 ③파싱
 /// ④읽기 전용)는 그것을 실제로 만드는 슬라이스에서 붙는다. 그때까지 이 값은 **메모리를 지키는
@@ -81,6 +86,70 @@ fn isWritable(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     return std.c.access(buf[0..path.len :0].ptr, std.posix.W_OK) == 0;
+}
+
+/// N1: **편집기 Term** 하나를 만든다 — `createWebTerm`과 대칭이다(web-panel.md §6의 그 구조).
+/// registry가 `LiveSurface` **editor arm** 슬롯을 소유하고, 그 arm의 sentinel `Surface`(빈 core)를
+/// 제자리 init한다. **PTY spawn·attachSurface·pump가 없다** — 편집기는 셸이 아니다.
+///
+/// **sentinel surface가 왜 필요한가.** `Term.surface.id`가 유효해야 `surface_ptrs`·`activeSurface`
+/// 계약이 깨지지 않는다(web이 같은 이유로 sentinel을 든다). 화면에 그리는 것은 그 core가 아니라
+/// 편집기 프레임이다(§4).
+///
+/// 문서를 붙이는 것은 호출자다 — 이 함수는 Term과 슬롯만 만든다. Pane에 거는 것도 호출자 몫이다.
+pub fn createEditorTerm(self: *AppSession) !*Term {
+    const term = try self.allocator.create(Term);
+    errdefer self.allocator.destroy(term);
+    term.* = .{ .kind = .editor };
+
+    const id = self.surface_ids.next(); // 앱 전역 발급(비재사용) — terminal·web과 같은 네임스페이스
+    const slot = try self.live_registry.create(id, 0);
+    // editor arm 확정 후 sentinel surface를 제자리 init. init 실패 시 슬롯은 아직 uninit이라
+    // removeUninitialized로 deinit 없이 슬롯만 해제한다(web과 같은 규칙).
+    slot.* = .{ .editor = .{ .internal_allocator = self.allocator } };
+    term.surface = &slot.editor.surface;
+    errdefer self.live_registry.removeUninitialized(id) catch {};
+    term.surface.* = try maru.session.Surface.init(self.allocator, id, .{ .cols = 1, .rows = 1 });
+    return term;
+}
+
+/// 경로를 열어 **활성 pane에 편집기 Term으로 붙인다**. N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
+///
+/// 실패는 호출자가 사용자에게 알린다 — §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고 정했으므로
+/// 나머지 이유를 같은 메시지로 뭉개면 그 계약을 확인할 수 없다.
+pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*Term {
+    var opened = try openPath(self.io, self.allocator, path);
+    errdefer opened.deinit(self.allocator);
+
+    // **줄 슬라이스를 미리 만든다.** `frame.build`는 문서 전체를 받아야 스크롤바 길이가 맞는데(§4.1a),
+    // 매 프레임 다시 만들면 프레임마다 할당이 생긴다. 줄들은 문서 버퍼를 빌리므로 문서보다 오래 살면 안 된다.
+    const n = opened.file.lineCount();
+    const lines = self.allocator.alloc([]const u8, n) catch return error.OutOfMemory;
+    errdefer self.allocator.free(lines);
+    for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
+
+    const term = createEditorTerm(self) catch return error.OutOfMemory;
+    errdefer term_ops.destroyTerm(self, term);
+
+    term.rt.editor_doc = opened;
+    term.rt.editor_lines = lines;
+    term.rt.editor_path = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
+
+    const pane = pane_ops.activePane(self);
+    pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
+    self.focusTerm(pane.terms.items.len - 1);
+    self.metal_dirty = true;
+    return term;
+}
+
+/// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
+pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_doc) |*d| d.deinit(self.allocator);
+    term.rt.editor_doc = null;
+    if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
+    term.rt.editor_lines = &.{};
+    if (term.rt.editor_path) |p| self.allocator.free(p);
+    term.rt.editor_path = null;
 }
 
 const testing = std.testing;

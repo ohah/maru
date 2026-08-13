@@ -183,8 +183,9 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         try countProductSourcesExcept(allocator, "AppProcessIncidentOwner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(
-        // app-global storage 1, 두 ABI outcome type 2, testing_api call 1, hostile prerequisite outcome oracle 10.
-        @as(usize, 14),
+        // app-global storage와 owner testing facade만 macOS 전용 namespace를 직접 쓴다. ABI outcome은
+        // Linux cross-compile 가능한 app_session 중립 enum이라 owner namespace를 참조하지 않는다.
+        @as(usize, 3),
         try countProductSourcesExcept(allocator, ".app_process_incident_owner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     // daemon의 한 acquire는 incident registry가 아니라 owner-lock lifetime lease다.

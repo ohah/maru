@@ -2142,6 +2142,15 @@ pub const RemoteBackendSettlementOutcome = enum(u32) {
     inactive = 0,
     settled = 1,
 };
+
+/// AppHost ABI는 Linux cross-compile에서도 같은 raw 값을 가져야 한다. macOS 전용 owner 타입을
+/// 반환형으로 노출하면 non-macOS barrel의 빈 stub을 역참조하므로 ABI contract는 이 중립 enum이 소유한다.
+pub const IncidentOwnerTerminationOutcome = enum(u32) {
+    inactive = 0,
+    joined = 1,
+    detached = 2,
+    degraded = 3,
+};
 // 연결 incident 기록기는 창이 아니라 GUI 프로세스가 소유한다. 값 자체를 module storage에 두어 첫 Window가 설치한
 // final address를 restore-first/current-first와 뒤의 모든 Window가 그대로 재사용한다. AppSession.deinit은 건드리지 않고
 // AppHost termination ABI가 정산한다.
@@ -16859,7 +16868,8 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
 }
 
 /// Swift AppHost가 모든 Window/AppSession 및 remote backend settlement 뒤 exact 한 번 호출한다.
-pub fn shutdownProcessIncidentOwner() session_host.app_process_incident_owner.TerminationOutcome {
+pub fn shutdownProcessIncidentOwner() IncidentOwnerTerminationOutcome {
+    if (comptime !is_macos) return .inactive;
     // ABI는 공개 symbol이므로 Swift 외 foreign thread도 호출할 수 있다. owner thread/PID를 mutation 전에 확인하고
     // exact-once latch를 CAS로 소비해야 lifecycle 오염과 동시 shutdown UAF를 함께 막는다.
     // Mutable owner graph를 읽기 전에 acquire-load한 publication token으로 pristine/foreign caller를 닫는다.
@@ -16873,12 +16883,18 @@ pub fn shutdownProcessIncidentOwner() session_host.app_process_incident_owner.Te
         return .inactive;
     const result = app_process_incident_owner.shutdownForTermination();
     app_process_incident_owner_thread.store(0, .release);
-    return result;
+    return switch (result) {
+        .inactive => .inactive,
+        .joined => .joined,
+        .detached => .detached,
+        .degraded => .degraded,
+    };
 }
 
 /// 모든 Window/AppSession teardown 뒤 AppHost가 incident owner보다 먼저 호출하는 process-global settlement leaf.
 /// backend가 pool/client를 빌리므로 backend를 먼저 해제하고, 그 다음 exact owner를 해제한다. ordinary Window close caller는 0이다.
 pub fn settleProcessRemoteBackendForTermination() RemoteBackendSettlementOutcome {
+    if (comptime !is_macos) return .inactive;
     const owner_thread = app_process_incident_owner_thread.load(.acquire);
     if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId()))) return .inactive;
     if (live_app_sessions != 0) return .inactive;
@@ -56158,7 +56174,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     defer AppSession.endIncidentBootstrapTest();
     // pristine 호출은 exact-once latch를 소비하지 않아 이후 실제 owner를 종료할 수 있어야 한다.
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
     var session: AppSession = undefined;
@@ -56173,7 +56189,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     defer if (!live_session_closed) session.deinit();
     session.ensureRemoteBackend();
     const ForeignShutdown = struct {
-        result: session_host.app_process_incident_owner.TerminationOutcome = .joined,
+        result: IncidentOwnerTerminationOutcome = .joined,
 
         fn run(self: *@This()) void {
             self.result = shutdownProcessIncidentOwner();
@@ -56183,7 +56199,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     const thread = try std.Thread.spawn(.{}, ForeignShutdown.run, .{&foreign});
     thread.join();
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         foreign.result,
     );
     try std.testing.expect(app_process_incident_owner.publisher() != null);
@@ -56230,7 +56246,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
             _ = settleProcessRemoteBackendForTermination();
     };
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
     try std.testing.expect(app_process_incident_owner.publisher() != null);
@@ -56265,11 +56281,11 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     try std.testing.expectEqual(RemoteBackendSettlementOutcome.settled, settlement);
     try std.testing.expect(app_remote_backend == null and app_remote_host_pool == null and app_remote_client == null);
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.joined,
+        IncidentOwnerTerminationOutcome.joined,
         shutdownProcessIncidentOwner(),
     );
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
 }
@@ -56285,11 +56301,11 @@ test "CR0b AppHost incident ABI prerequisite는 runtime 오류를 degraded outco
     session.ensureRemoteBackend();
     try AppSession.markProcessIncidentWriterFailedForTest();
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.degraded,
+        IncidentOwnerTerminationOutcome.degraded,
         shutdownProcessIncidentOwner(),
     );
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
 }
@@ -56310,7 +56326,7 @@ test "CR0b AppHost incident ABI prerequisite는 active lease timeout을 detached
     try std.testing.expectEqual(@as(c_int, 0), std.c.clock_gettime(.MONOTONIC, &started_ts));
     const started = @as(i128, started_ts.sec) * 1000 + @divFloor(@as(i128, started_ts.nsec), 1_000_000);
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.detached,
+        IncidentOwnerTerminationOutcome.detached,
         shutdownProcessIncidentOwner(),
     );
     var ended_ts: std.c.timespec = undefined;
@@ -56321,7 +56337,7 @@ test "CR0b AppHost incident ABI prerequisite는 active lease timeout을 detached
     try std.testing.expect(app_process_incident_owner.runtime == runtime);
     try std.testing.expectEqual(@as(u64, 1), app_process_incident_owner.registry.active_lease_count);
     try std.testing.expectEqual(
-        session_host.app_process_incident_owner.TerminationOutcome.inactive,
+        IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
     // ABI는 one-shot이지만 test process는 계속되므로 preserved backing을 owner API로 명시 정산한다.

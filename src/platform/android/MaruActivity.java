@@ -121,6 +121,18 @@ public class MaruActivity extends android.app.NativeActivity {
 
     private InputView input;
 
+    /** OS 값을 코어에 알린다. **재개할 때마다** 다시 읽는다 — 사용자가 설정을 바꾸고
+     *  돌아올 수 있고, 그때 옛 값을 쓰면 접근성 설정이 무시된다. */
+    private void applyLongPressTimeout() {
+        nativeLongPressMs(android.view.ViewConfiguration.get(this).getLongPressTimeout());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyLongPressTimeout();
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -131,7 +143,7 @@ public class MaruActivity extends android.app.NativeActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         input.requestFocus();
         // **OS 값을 코어에 알린다.** 이 값은 기기·설정마다 다르다(실측: 에뮬레이터 400ms).
-        nativeLongPressMs(android.view.ViewConfiguration.get(this).getLongPressTimeout());
+        applyLongPressTimeout();
     }
 
     /// **익명 클래스를 안 쓴다.** `d8` 8.2.2 가 익명 내부 클래스(`MaruActivity$1`)에서

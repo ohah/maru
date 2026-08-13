@@ -54,7 +54,11 @@ test "뷰 사각을 한 op으로 덮는다" {
     try testing.expectEqual(@as(usize, 1), w.ops);
     try testing.expectEqual(@as(u32, 480), ops[0].quad.rect.w);
     try testing.expectEqual(@as(u32, 96), ops[0].quad.rect.h);
-    try testing.expectEqual(background_role, ops[0].quad.fill_role);
+    // **리터럴로 판정한다.** `background_role`과 비교하면 그 상수를 무엇으로 바꿔도 통과하는
+    // 항등식이다 — 실제로 그런 상태였고, Chrome Lab 캡처도 이것을 못 잡는다(Lab 픽스처가
+    // `sidebar_background`를 터미널 배경과 같은 값으로 뭉개 둬서 두 역할이 같은 색으로 나온다).
+    // 그래서 이 한 줄이 "편집기 바탕 = 터미널 바탕" 계약의 유일한 자동 판정이다.
+    try testing.expectEqual(tokens.ColorRole.terminal_bg, ops[0].quad.fill_role);
 }
 
 test "빈 사각이면 그리지 않는다" {

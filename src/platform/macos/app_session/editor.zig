@@ -17,6 +17,7 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
+const workspace_ops = @import("workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const chrome_editor = maru.chrome.components.editor_view;
@@ -256,7 +257,20 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
     // 층은 `background_layer` 하나가 정한다(위 doc — Lab과 공유하는 단일 출처). §4.1b의 "op 순서상
     // 맨 처음"은 op 배열 안에서만 참이다 — quad와 셀은 파이프라인이 갈리므로 층을 따로 맞춰야 한다.
-    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, background_layer);
+    // **창 투명도를 함께 건다.** 터미널은 배경을 그리지 않고 clear color가 그 자리인데, 그 alpha에
+    // `window.opacity`가 곱해진다(`maru_metal_renderer.m`). 편집기만 불투명 solid로 덮으면 투명 배경을
+    // 쓰는 창에서 이 pane만 데스크톱이 안 비쳐 두 뷰가 갈린다. `terminal_bg` 역할 quad에만 걸리므로
+    // 스크롤바는 그대로다(반투명해지면 안 보인다).
+    chrome_draw_lowering.appendBackgroundQuadsWithTerminalOpacity(
+        self.allocator,
+        &.{draws},
+        &tokens,
+        rect.x,
+        rect.y,
+        &self.gpu_quads,
+        background_layer,
+        workspace_ops.windowOpacityByte(self),
+    );
 
     const cols: u16 = @intCast(@min(rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
     const rows: u16 = @intCast(@min(rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
@@ -445,6 +459,57 @@ test "편집기 본문 사각은 pane body다 — 탭 바는 빼고 창 padding�
     try testing.expectEqual(g.body.y, drawn.rect.y);
     try testing.expectEqual(g.body.w, drawn.rect.w);
     try testing.expectEqual(g.body.h, drawn.rect.h);
+}
+
+test "편집기 배경만 창 투명도를 따른다 — 스크롤바 알파는 그대로다" {
+    // 터미널은 배경을 그리지 않고 **clear color**가 그 자리인데, 그 alpha에 `window.opacity`가 곱해진다.
+    // 편집기만 불투명 solid로 덮으면 투명 배경 창에서 이 pane만 데스크톱이 안 비쳐 두 뷰가 갈린다.
+    //
+    // **판정을 "같은 프레임을 두 투명도로 그려 비교"로 한다.** 알파 상수와 비교하면 그 상수를 바꿔도
+    // 통과하고, "반투명인 quad가 하나라도 있나"로 보면 **스크롤바까지 흐려지는 뮤턴트를 놓친다**
+    // (실제로 놓쳤다 — thumb의 원래 알파가 0x66이라 곱해도 배경 알파와 달라 대조군처럼 보였다).
+    // 두 실행의 알파 배열을 원소별로 비교하면 "무엇이 바뀌었고 무엇이 안 바뀌었나"가 그대로 나온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 스크롤바가 실제로 나와야 대조군이 산다. 픽스처 문서는 4줄이므로 보이는 행이 그보다 적도록
+    // 높이를 잡는다 — 바 높이는 테마가 정하므로 재서 더한다.
+    const bar_h = pane_ops.paneBarHeightPx(fx.session);
+    const short: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 400, .h = bar_h + 2 * 16 };
+
+    var alphas_full: [8]u8 = undefined;
+    var n_full: usize = 0;
+    fx.session.appearance.window_opacity = 1.0;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    {
+        var d = appendPaneFrame(fx.session, short, fx.term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        for (fx.session.gpu_quads.items) |q| {
+            if (n_full == alphas_full.len) break;
+            alphas_full[n_full] = @intCast(q.fill_color0 >> 24);
+            n_full += 1;
+        }
+    }
+    try testing.expect(n_full >= 2); // 전제: 배경 + 스크롤바가 둘 다 나왔다
+
+    fx.session.appearance.window_opacity = 0.5;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, short, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer d2.dl.deinit(allocator);
+    try testing.expectEqual(n_full, fx.session.gpu_quads.items.len); // 같은 프레임이어야 비교가 성립한다
+
+    var changed: usize = 0;
+    for (fx.session.gpu_quads.items, 0..) |q, i| {
+        const a: u8 = @intCast(q.fill_color0 >> 24);
+        if (a == alphas_full[i]) continue;
+        changed += 1;
+        // 바뀐 것은 배경 하나뿐이고, 정확히 창 투명도만큼이어야 한다.
+        try testing.expectEqual(@as(u8, 255), alphas_full[i]);
+        try testing.expectEqual(workspace_ops.windowOpacityByte(fx.session), a);
+    }
+    try testing.expectEqual(@as(usize, 1), changed); // 하나만 — 스크롤바는 그대로다
 }
 
 test "편집기 배경 quad와 글자 셀은 같은 자리에 선다 — origin이 갈리면 배경만 옮겨간다" {

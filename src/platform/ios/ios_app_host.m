@@ -281,6 +281,18 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
     if (maru_mobile_keybar_tap(lx, ly)) {
         NSLog(@"MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, maru_mobile_armed_mods());
+        // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
+        // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3: 브리지엔 OS 호출이 없다).
+        static unsigned char copy_buf[8192];
+        unsigned int cn = maru_mobile_take_copy(copy_buf, sizeof copy_buf);
+        if (cn > 0) {
+            NSString *s = [[NSString alloc] initWithBytes:copy_buf length:cn
+                                                 encoding:NSUTF8StringEncoding];
+            if (s) {
+                UIPasteboard.generalPasteboard.string = s;
+                NSLog(@"MARU_COPY len=%u", cn);
+            }
+        }
         return;
     }
     unsigned int cell = maru_mobile_hit_cell(lx, ly);

@@ -65,6 +65,8 @@ pub const ShapeDrawListFn = *const fn (
     bold_family_len: usize,
     italic_family: [*]const u8,
     italic_family_len: usize,
+    // 합자(liga/clig/calt) 적용 여부 — 0이면 ObjC가 셋을 모두 꺼 글자 그대로 셰이핑한다(config font.ligatures).
+    ligatures_enabled: u32,
     cells: [*]const NativeDrawCell,
     cell_count: usize,
     // grapheme cluster 본체 풀(base 제외한 extra 코드포인트). NativeDrawCell.grapheme_offset/count가 가리킨다.
@@ -155,6 +157,7 @@ pub const CoreTextDrawListShaper = struct {
             self.appearance.font.family_bold.len,
             self.appearance.font.family_italic.ptr,
             self.appearance.font.family_italic.len,
+            if (self.appearance.font.ligatures) 1 else 0,
             native_cells.items.ptr,
             native_cells.items.len,
             list.grapheme_pool.ptr,
@@ -518,6 +521,7 @@ fn fakeShapeDrawList(
     _: usize, // bold family len
     _: [*]const u8, // italic family ptr (F2-3)
     _: usize, // italic family len
+    _: u32, // ligatures_enabled(config font.ligatures) — fake shaper는 feature를 안 쓴다
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     _: [*]const u32, // grapheme_pool ptr (fake shaper는 풀 미사용 — codepoint 기반 색판정)
@@ -581,6 +585,7 @@ fn failingShapeDrawList(
     _: usize, // bold family len
     _: [*]const u8, // italic family ptr (F2-3)
     _: usize, // italic family len
+    _: u32, // ligatures_enabled(config font.ligatures) — fake shaper는 feature를 안 쓴다
     _: [*]const NativeDrawCell,
     _: usize,
     _: [*]const u32, // grapheme_pool ptr
@@ -611,6 +616,7 @@ fn outOfRangeRecordShapeDrawList(
     _: usize, // bold family len
     _: [*]const u8, // italic family ptr (F2-3)
     _: usize, // italic family len
+    _: u32, // ligatures_enabled(config font.ligatures) — fake shaper는 feature를 안 쓴다
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     _: [*]const u32, // grapheme_pool ptr

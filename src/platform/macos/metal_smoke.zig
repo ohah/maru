@@ -542,6 +542,7 @@ fn testShapeDrawList(
     _: usize, // bold family len
     _: [*]const u8, // italic family ptr (F2-3)
     _: usize, // italic family len
+    _: u32, // ligatures_enabled(config font.ligatures) — fake shaper는 feature를 안 쓴다
     cells_ptr: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
     _: [*]const u32, // grapheme_pool ptr (fake shaper는 풀 미사용)

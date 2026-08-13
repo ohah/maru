@@ -23,6 +23,8 @@ pub const ResolvedFontRequest = struct {
     /// (근거는 theme.FontConfig.family_bold/italic 주석 단일 출처, F2-3).
     family_bold: []const u8 = "",
     family_italic: []const u8 = "",
+    /// 합자 적용 여부(근거는 theme.FontConfig.ligatures 주석 단일 출처). 셰이퍼가 CoreText feature로 넘긴다.
+    ligatures: bool = true,
 };
 
 pub const ResolvedTheme = struct {
@@ -170,6 +172,7 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
         // 패밀리는 CoreText가 NULL→주 variant 폴백, family처럼 막진 않음 — best-effort, F2-3).
         .family_bold = config.family_bold,
         .family_italic = config.family_italic,
+        .ligatures = config.ligatures,
     };
 }
 

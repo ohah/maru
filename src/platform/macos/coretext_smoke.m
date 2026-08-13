@@ -618,6 +618,164 @@ static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFInde
     return true;
 }
 
+// run 하나에 담는 상한. CTLine 호출을 줄이는 것이 목적이지만 스택 버퍼가 무한히 커지면 안 되므로 셀 수·UTF-16
+// 유닛 수를 묶어 둔다. 한 행(보통 80~300열)이 한 run에 들어가는 크기이며, 넘치면 run만 나뉠 뿐 결과는 같다.
+#define MARU_SHAPE_RUN_MAX_CELLS 128
+#define MARU_SHAPE_RUN_MAX_UNITS 512
+// CTRunGetGlyphs/StringIndices를 한 번에 읽는 크기. run당 glyph가 이보다 많으면 여러 번 나눠 읽는다.
+#define MARU_SHAPE_RUN_GLYPH_CHUNK 64
+
+/// 셀이 쓸 face 인덱스 — (bold?1:0)|(italic?2:0). styled 캐시 인덱스이자 **run 경계 판정의 단일 출처**다.
+/// 같은 face끼리만 한 CTLine으로 묶어야 셰이핑 결과가 셀별로 face를 따로 고르던 때와 같다.
+static int maru_style_index_for_cell(MaruCoreTextDrawCell cell) {
+    const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
+    const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
+    return (want_bold ? 1 : 0) | (want_italic ? 2 : 0);
+}
+
+/// glyph record를 만들지 않는 셀(공백·zero-width). run **문자열에는 넣어** 호출이 잘게 쪼개지지 않게 하되,
+/// record는 만들지 않아 "공백은 glyph record가 없다"는 기존 출력 계약을 그대로 지킨다.
+static bool maru_cell_is_blank(MaruCoreTextDrawCell cell) {
+    return cell.width == 0 || maru_category_for_codepoint(cell.codepoint) == MaruGlyphCategorySpace;
+}
+
+/// 셀의 UTF-16 유닛을 run 버퍼에 이어 붙이고 각 유닛이 **어느 셀에서 왔는지**를 나란히 기록한다.
+/// CTRun이 돌려주는 string index를 셀로 되돌리는 유일한 수단이라 유닛과 1:1로 채워야 한다. 버퍼가 모자라면
+/// false를 돌려 호출자가 이 셀 앞에서 run을 끊게 한다(잘림 없이 다음 run으로 넘어간다).
+static bool maru_append_cell_units(
+    MaruCoreTextDrawCell cell,
+    const uint32_t *grapheme_pool,
+    size_t grapheme_pool_len,
+    UniChar *units,
+    uint32_t *unit_cell,
+    CFIndex *unit_len,
+    CFIndex capacity,
+    size_t cell_index
+) {
+    UniChar scratch[2];
+    CFIndex n = 0;
+    if (!maru_append_utf16_scalar(cell.codepoint, scratch, &n, 2)) {
+        return false;
+    }
+    if (*unit_len + n > capacity) {
+        return false;
+    }
+    for (CFIndex i = 0; i < n; i++) {
+        units[*unit_len] = scratch[i];
+        unit_cell[*unit_len] = (uint32_t)cell_index;
+        (*unit_len)+= 1;
+    }
+    // cluster 본체(악센트·VS16·NFD 한글 V/T·키캡)도 같은 셀 소유로 이어 붙인다 — 셀 단위 경로가 base 뒤에
+    // 풀 전체를 무손실로 붙이던 것과 동일하다(maru_create_string_for_draw_cell 참고).
+    if (cell.grapheme_count == 0 ||
+        (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count > grapheme_pool_len) {
+        return true;
+    }
+    for (uint16_t g = 0; g < cell.grapheme_count; g++) {
+        UniChar extra[2];
+        CFIndex m = 0;
+        if (!maru_append_utf16_scalar(grapheme_pool[cell.grapheme_offset + g], extra, &m, 2)) {
+            continue;
+        }
+        if (*unit_len + m > capacity) {
+            return false;
+        }
+        for (CFIndex i = 0; i < m; i++) {
+            units[*unit_len] = extra[i];
+            unit_cell[*unit_len] = (uint32_t)cell_index;
+            (*unit_len)+= 1;
+        }
+    }
+    return true;
+}
+
+/// 셰이핑용 속성 딕셔너리. **리가처를 끈다**: 터미널은 등폭 격자인데 run 단위로 묶으면 문맥이 생겨 CoreText가
+/// 리가처를 적용하고, 그러면 glyph 수가 셀 수보다 적어져 `//`가 한 칸으로 합쳐지며 격자가 깨진다(#2123).
+/// 합자는 v1 품질 기준에서 제외라는 결정과도 같다(docs/font-strategy.md "Ligature").
+/// `calt`(contextual alternates)를 끈 폰트 사본. 반환은 +1 참조라 호출자가 놓아야 한다.
+///
+/// **왜 필요한가**: 셀마다 CTLine을 만들던 때는 글자 하나뿐이라 문맥이 없어 `calt`가 발동할 수 없었다. run으로
+/// 묶으면 문맥이 생겨 코딩 폰트(JetBrains Mono·Fira Code·Cascadia)가 `=>`·`//`를 이어진 모양으로 바꾼다 —
+/// **성능만 바꾸려던 변경이 사용자 화면을 조용히 바꾸는 것**이라 끈다. `kCTLigatureAttributeName=0`은 `liga`/`clig`만
+/// 끄고 `calt`는 건드리지 않으므로 이 사본이 따로 필요하다(실측: 끄기 전 `/`가 glyph 12137·11977로 갈렸다).
+/// 리가처를 켜고 끄는 것은 나중에 config로 사용자가 정할 문제이고, 그때까지는 기존 화면을 그대로 보존한다.
+static CTFontRef maru_font_without_contextual_alternates(CTFontRef font) {
+    if (font == NULL) {
+        return NULL;
+    }
+    // 어느 단계든 실패하면 원본을 그대로 쓴다(셰이핑을 막느니 기존 동작으로 두는 편이 안전하다).
+    const int off = 0;
+    CFNumberRef value = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &off);
+    if (value == NULL) {
+        return (CTFontRef)CFRetain(font);
+    }
+    const void *feature_keys[] = { kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue };
+    const void *feature_values[] = { CFSTR("calt"), value };
+    CFDictionaryRef feature = CFDictionaryCreate(
+        kCFAllocatorDefault, feature_keys, feature_values, 2,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(value);
+    if (feature == NULL) {
+        return (CTFontRef)CFRetain(font);
+    }
+    CFArrayRef features = CFArrayCreate(kCFAllocatorDefault, (const void **)&feature, 1, &kCFTypeArrayCallBacks);
+    CFRelease(feature);
+    if (features == NULL) {
+        return (CTFontRef)CFRetain(font);
+    }
+    const void *desc_keys[] = { kCTFontFeatureSettingsAttribute };
+    const void *desc_values[] = { features };
+    CFDictionaryRef desc_attrs = CFDictionaryCreate(
+        kCFAllocatorDefault, desc_keys, desc_values, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(features);
+    if (desc_attrs == NULL) {
+        return (CTFontRef)CFRetain(font);
+    }
+    CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithAttributes(desc_attrs);
+    CFRelease(desc_attrs);
+    if (descriptor == NULL) {
+        return (CTFontRef)CFRetain(font);
+    }
+    CTFontRef copy = CTFontCreateCopyWithAttributes(font, 0.0, NULL, descriptor);
+    CFRelease(descriptor);
+    return copy != NULL ? copy : (CTFontRef)CFRetain(font);
+}
+
+static CFDictionaryRef maru_create_shape_attributes(CTFontRef font, bool ligatures_enabled) {
+    const int off = 0;
+    CFNumberRef no_ligature = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &off);
+    if (no_ligature == NULL) {
+        return NULL;
+    }
+    // 합자를 켜면 폰트가 정의한 feature를 그대로 둔다(폰트 기본). 끄면 `liga`/`clig`는 아래 속성으로,
+    // `calt`는 폰트 사본으로 — 셋을 다 꺼야 글자가 그대로 선다.
+    if (ligatures_enabled) {
+        CFRelease(no_ligature);
+        const void *on_keys[] = { kCTFontAttributeName };
+        const void *on_values[] = { font };
+        return CFDictionaryCreate(kCFAllocatorDefault, on_keys, on_values, 1,
+                                  &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    }
+    CTFontRef shaping_font = maru_font_without_contextual_alternates(font);
+    if (shaping_font == NULL) {
+        CFRelease(no_ligature);
+        return NULL;
+    }
+    const void *keys[] = { kCTFontAttributeName, kCTLigatureAttributeName };
+    const void *values[] = { shaping_font, no_ligature };
+    CFDictionaryRef attrs = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        keys,
+        values,
+        2,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks
+    );
+    CFRelease(no_ligature);
+    return attrs;
+}
+
 static CFStringRef maru_create_string_for_draw_cell(
     MaruCoreTextDrawCell cell,
     const uint32_t *grapheme_pool,
@@ -1052,6 +1210,8 @@ void maru_macos_coretext_shape_draw_list(
     size_t bold_family_len,
     const char *italic_family, // F2-3: italic 글자용 폰트 패밀리(len 0=주 family italic variant)
     size_t italic_family_len,
+    // 합자 적용 여부(config font.ligatures). 0이면 liga/clig/calt를 모두 꺼 글자 그대로 셰이핑한다.
+    uint32_t ligatures_enabled,
     const MaruCoreTextDrawCell *cells,
     size_t cell_count,
     // grapheme cluster 본체 풀(base 제외한 extra 코드포인트). cell.grapheme_offset/count가 가리킨다.
@@ -1105,16 +1265,7 @@ void maru_macos_coretext_shape_draw_list(
         }
 
         CFStringRef primary_name = CTFontCopyPostScriptName(primary_font);
-        const void *keys[] = { kCTFontAttributeName };
-        const void *values[] = { primary_font };
-        CFDictionaryRef attributes = CFDictionaryCreate(
-            kCFAllocatorDefault,
-            keys,
-            values,
-            1,
-            &kCFTypeDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks
-        );
+        CFDictionaryRef attributes = maru_create_shape_attributes(primary_font, ligatures_enabled != 0);
         if (attributes == NULL) {
             if (primary_name != NULL) {
                 CFRelease(primary_name);
@@ -1132,12 +1283,19 @@ void maru_macos_coretext_shape_draw_list(
         CFDictionaryRef styled_attrs[4] = { attributes, NULL, NULL, NULL };
         bool styled_attempted[4] = { true, false, false, false };
 
-        for (size_t cell_index = 0; cell_index < cell_count; cell_index++) {
-            const MaruCoreTextDrawCell cell = cells[cell_index];
-            // 이 cell의 스타일(bold/italic)을 정해 해당 face를 lazy 생성·재사용한다. 없으면(NULL) regular 폴백.
-            const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
-            const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
-            const int style_index = (want_bold ? 1 : 0) | (want_italic ? 2 : 0);
+        // [run 셰이핑] 예전에는 **셀 하나마다** CTLine을 만들었다. CTLine 생성은 호출당 고정비(속성 조회·
+        // typesetter 생성·폰트 캐스케이드 준비)가 커서, 글리프 수가 같아도 호출 수가 시간을 지배한다 —
+        // 135x72·문자 25% 화면을 셀 단위와 행 단위로 재보면 3.785ms → 0.146ms(26배)였다. 그래서 같은 행에서
+        // 열이 이어지고 face(bold/italic)가 같은 셀들을 한 run으로 묶어 CTLine 하나로 셰이핑한다.
+        //
+        // 공백 셀도 **문자열에는 넣는다**(그래야 run이 단어마다 끊기지 않아 호출이 크게 준다). 다만 record는
+        // 만들지 않아 "공백은 glyph record가 없다"는 기존 출력 계약을 그대로 지킨다. glyph를 다시 셀로 되돌리는
+        // 것은 `CTRunGetStringIndices` + `unit_cell`(유닛→셀 표)이며, 이 표가 run 셰이핑의 정확성을 지탱한다.
+        size_t cell_index = 0;
+        while (cell_index < cell_count) {
+            // run의 face는 시작 셀이 정한다. run 안의 셀은 아래 연속 조건에서 같은 face만 받아들인다.
+            const MaruCoreTextDrawCell first_cell = cells[cell_index];
+            const int style_index = maru_style_index_for_cell(first_cell);
             if (style_index != 0 && !styled_attempted[style_index]) {
                 styled_attempted[style_index] = true;
                 CTFontRef styled = maru_create_styled_font(
@@ -1145,41 +1303,79 @@ void maru_macos_coretext_shape_draw_list(
                     fallback_families, fallback_families_len,
                     bold_family, bold_family_len,
                     italic_family, italic_family_len,
-                    want_bold, want_italic);
+                    (style_index & 1) != 0, (style_index & 2) != 0);
                 if (styled != NULL) {
                     styled_fonts[style_index] = styled;
                     styled_names[style_index] = CTFontCopyPostScriptName(styled);
-                    const void *styled_values[] = { styled };
-                    styled_attrs[style_index] = CFDictionaryCreate(
-                        kCFAllocatorDefault, keys, styled_values, 1,
-                        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                    styled_attrs[style_index] = maru_create_shape_attributes(styled, ligatures_enabled != 0);
                 }
             }
             // styled face가 만들어졌으면 그걸로, 실패했으면(없는 face) regular(0)로 폴백.
             const int use_index = (styled_attrs[style_index] != NULL) ? style_index : 0;
-            CFDictionaryRef cell_attributes = styled_attrs[use_index];
-            // run의 폰트가 이 cell이 의도한 face와 다르면(진짜 fallback) 표시한다. styled cell은 그 face name과 비교해야
-            // bold/italic variant를 fallback으로 오탐하지 않는다.
+            CFDictionaryRef run_attributes = styled_attrs[use_index];
+            // run의 폰트가 이 run이 의도한 face와 다르면(진짜 fallback) 표시한다. styled run은 그 face name과
+            // 비교해야 bold/italic variant를 fallback으로 오탐하지 않는다.
             CFStringRef expected_name = styled_names[use_index];
-            const uint32_t category = maru_category_for_codepoint(cell.codepoint);
-            if (category == MaruGlyphCategorySpace || cell.width == 0) {
+
+            UniChar units[MARU_SHAPE_RUN_MAX_UNITS];
+            uint32_t unit_cell[MARU_SHAPE_RUN_MAX_UNITS];
+            CFIndex unit_len = 0;
+            // 마지막 **비공백** 셀까지의 길이. 행 끝 여백은 run에 담아 봐야 glyph만 늘고(실측 4.1배) record는
+            // 하나도 안 만든다 — 아래에서 이 길이로 잘라 여백을 셰이핑에서 뺀다. 단어 사이 공백은 잘리지 않아
+            // run이 끊기지 않는다(호출 수 이득은 그대로).
+            CFIndex unit_len_through_last_shaped = 0;
+            size_t run_end = cell_index;
+            bool any_shaped_cell = false;
+            while (run_end < cell_count) {
+                const MaruCoreTextDrawCell cur = cells[run_end];
+                if (run_end > cell_index) {
+                    const MaruCoreTextDrawCell prev = cells[run_end - 1];
+                    // 셀이 실제로 화면에서 이어져 있어야 한 문자열로 묶을 수 있다. wide 셀은 자기 폭만큼
+                    // 열을 차지하므로 그만큼 건너뛴 열이 다음 셀이어야 한다(width 0은 1열로 본다).
+                    const uint32_t prev_advance = prev.width == 0 ? 1u : (uint32_t)prev.width;
+                    if (cur.row != prev.row) break;
+                    if ((uint32_t)prev.col + prev_advance != (uint32_t)cur.col) break;
+                    if (maru_style_index_for_cell(cur) != style_index) break;
+                    if (run_end - cell_index >= MARU_SHAPE_RUN_MAX_CELLS) break;
+                }
+                if (!maru_append_cell_units(cur, grapheme_pool, grapheme_pool_len,
+                                            units, unit_cell, &unit_len,
+                                            MARU_SHAPE_RUN_MAX_UNITS, run_end)) {
+                    break;
+                }
+                if (!maru_cell_is_blank(cur)) {
+                    any_shaped_cell = true;
+                    unit_len_through_last_shaped = unit_len;
+                }
+                run_end += 1;
+            }
+            // 행 끝 여백 잘라내기(위 주석). 비공백이 하나도 없으면 0이 되어 아래에서 run 전체를 건너뛴다.
+            unit_len = unit_len_through_last_shaped;
+
+            if (run_end == cell_index) {
+                // 첫 셀조차 담지 못했다(인코딩 불가 코드포인트 등). 셀 단위 경로가 string==NULL에서 하던 것과
+                // 같이 missing으로 세고 **반드시 한 칸 전진**해 무한 루프를 막는다.
+                result->missing_glyph_count += 1;
+                cell_index += 1;
+                continue;
+            }
+            if (!any_shaped_cell || unit_len == 0) {
+                // 전부 공백인 구간 — 셰이핑할 것이 없다(기존에도 record를 만들지 않았다).
+                cell_index = run_end;
                 continue;
             }
 
-            // 이 cell이 실제 glyph record를 하나라도 만들었는지 보려고 처리 전 record 수를
-            // 기억한다. 모든 glyph가 .notdef(glyph 0)면 record가 안 늘므로 shaped로 세지 않는다.
-            const uint32_t records_before_cell = result->glyph_record_count;
-
-            CFStringRef string = maru_create_string_for_draw_cell(cell, grapheme_pool, grapheme_pool_len);
+            CFStringRef string = CFStringCreateWithCharacters(kCFAllocatorDefault, units, unit_len);
             if (string == NULL) {
                 result->missing_glyph_count += 1;
+                cell_index = run_end;
                 continue;
             }
 
             CFAttributedStringRef attributed = CFAttributedStringCreate(
                 kCFAllocatorDefault,
                 string,
-                cell_attributes
+                run_attributes
             );
             if (attributed == NULL) {
                 CFRelease(string);
@@ -1195,6 +1391,11 @@ void maru_macos_coretext_shape_draw_list(
                 break;
             }
 
+            // glyph record를 하나라도 만든 cell만 shaped로 센다(셀 단위 경로와 같은 의미). run 안에서 셀별로
+            // 모아 두었다가 마지막에 한 번 더한다 — 모든 glyph가 .notdef인 셀은 record가 없어 세지 않는다.
+            bool cell_shaped[MARU_SHAPE_RUN_MAX_CELLS];
+            memset(cell_shaped, 0, sizeof(cell_shaped));
+
             CFArrayRef runs = CTLineGetGlyphRuns(line);
             CFIndex run_count = runs == NULL ? 0 : CFArrayGetCount(runs);
             for (CFIndex run_index = 0; run_index < run_count; run_index++) {
@@ -1205,11 +1406,11 @@ void maru_macos_coretext_shape_draw_list(
 
                 uint32_t run_fallback = 0;
                 CFStringRef run_name = NULL;
-                CFDictionaryRef run_attributes = CTRunGetAttributes(run);
-                CTFontRef run_font = run_attributes == NULL
+                CFDictionaryRef run_attrs = CTRunGetAttributes(run);
+                CTFontRef run_font = run_attrs == NULL
                     ? NULL
-                    : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
-                // 이 run을 그릴 실제 폰트의 컬러 여부(sbix/COLR) — color_glyph_kind의 단일 출처(아래).
+                    : (CTFontRef)CFDictionaryGetValue(run_attrs, kCTFontAttributeName);
+                // 이 run을 그릴 실제 폰트의 컬러 여부(sbix/COLR) — color_glyph_kind의 단일 출처.
                 const bool run_is_color = run_font != NULL ? maru_font_is_color(run_font) : false;
                 if (run_font != NULL) {
                     run_name = CTFontCopyPostScriptName(run_font);
@@ -1218,39 +1419,64 @@ void maru_macos_coretext_shape_draw_list(
                         CFStringCompare(run_name, expected_name, 0) != kCFCompareEqualTo)
                     {
                         run_fallback = 1;
+                        // **의미 변화 주의**: 이 카운터는 이제 "fallback을 탄 CTRun 수"다. 셀마다 CTLine을 만들던
+                        // 때는 셀 수만큼 세어졌으므로(한글 3셀 = 3), 같은 화면이라도 값이 작아진다(3 → 1).
+                        // record의 per-glyph `fallback` 플래그는 그대로라 렌더 결과·진단 정확도에는 영향이 없다.
                         result->fallback_run_count += 1;
                     }
                 }
                 CFStringRef record_font_name = run_name != NULL ? run_name : expected_name;
 
-                CFIndex glyph_count = CTRunGetGlyphCount(run);
-                if (glyph_count > 16) {
-                    result->glyph_record_overflow = 1;
-                    result->status = 7;
-                    if (run_name != NULL) {
-                        CFRelease(run_name);
+                const CFIndex glyph_count = CTRunGetGlyphCount(run);
+                CFIndex processed = 0;
+                while (processed < glyph_count && result->status == -1) {
+                    const CFIndex remaining = glyph_count - processed;
+                    const CFIndex chunk = remaining > MARU_SHAPE_RUN_GLYPH_CHUNK
+                        ? (CFIndex)MARU_SHAPE_RUN_GLYPH_CHUNK
+                        : remaining;
+                    CGGlyph glyphs[MARU_SHAPE_RUN_GLYPH_CHUNK];
+                    CFIndex indices[MARU_SHAPE_RUN_GLYPH_CHUNK];
+                    CTRunGetGlyphs(run, CFRangeMake(processed, chunk), glyphs);
+                    // 각 glyph가 원문 어느 위치에서 왔는지 — 이 값이 있어야 run을 셀로 되돌릴 수 있다.
+                    CTRunGetStringIndices(run, CFRangeMake(processed, chunk), indices);
+                    for (CFIndex g = 0; g < chunk; g++) {
+                        const CFIndex source_index = indices[g];
+                        if (source_index < 0 || source_index >= unit_len) {
+                            continue;
+                        }
+                        const uint32_t owner = unit_cell[source_index];
+                        if (owner >= cell_count) {
+                            continue;
+                        }
+                        const MaruCoreTextDrawCell owner_cell = cells[owner];
+                        // 공백은 run 문자열에 넣었을 뿐이다 — record는 만들지 않는다(기존 출력 보존).
+                        if (maru_cell_is_blank(owner_cell)) {
+                            continue;
+                        }
+                        const uint32_t records_before = result->glyph_record_count;
+                        maru_append_draw_glyph_record(
+                            result,
+                            glyph_records,
+                            glyph_record_capacity,
+                            owner,
+                            owner_cell,
+                            record_font_name,
+                            glyphs[g],
+                            run_fallback,
+                            run_is_color
+                        );
+                        if (result->glyph_record_overflow != 0) {
+                            result->status = 7;
+                            break;
+                        }
+                        if (result->glyph_record_count > records_before &&
+                            owner >= cell_index &&
+                            owner - cell_index < MARU_SHAPE_RUN_MAX_CELLS)
+                        {
+                            cell_shaped[owner - cell_index] = true;
+                        }
                     }
-                    break;
-                }
-
-                CGGlyph glyphs[16];
-                CTRunGetGlyphs(run, CFRangeMake(0, glyph_count), glyphs);
-                for (CFIndex glyph_index = 0; glyph_index < glyph_count; glyph_index++) {
-                    maru_append_draw_glyph_record(
-                        result,
-                        glyph_records,
-                        glyph_record_capacity,
-                        cell_index,
-                        cell,
-                        record_font_name,
-                        glyphs[glyph_index],
-                        run_fallback,
-                        run_is_color
-                    );
-                    if (result->glyph_record_overflow != 0) {
-                        result->status = 7;
-                        break;
-                    }
+                    processed += chunk;
                 }
 
                 if (run_name != NULL) {
@@ -1261,10 +1487,13 @@ void maru_macos_coretext_shape_draw_list(
                 }
             }
 
-            // glyph record를 하나라도 만든 cell만 shaped로 센다. CTLine/run은 만들어졌지만
-            // 모든 glyph가 .notdef라 record가 0개인 cell은 "shape됨"이 아니라 missing이다.
-            if (result->status == -1 && result->glyph_record_count > records_before_cell) {
-                result->shaped_cell_count += 1;
+            if (result->status == -1) {
+                const size_t run_cells = run_end - cell_index;
+                for (size_t i = 0; i < run_cells && i < MARU_SHAPE_RUN_MAX_CELLS; i++) {
+                    if (cell_shaped[i]) {
+                        result->shaped_cell_count += 1;
+                    }
+                }
             }
 
             CFRelease(line);
@@ -1274,6 +1503,7 @@ void maru_macos_coretext_shape_draw_list(
             if (result->status == 4 || result->status == 5 || result->status == 7) {
                 break;
             }
+            cell_index = run_end;
         }
 
         if (result->status == -1) {

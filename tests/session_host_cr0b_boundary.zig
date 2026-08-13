@@ -34,6 +34,12 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(pool);
     const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
+    const publisher = try readSource(allocator, "src/platform/macos/session_host/incident_publisher_registry.zig");
+    defer allocator.free(publisher);
+    const seal_service = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
+    defer allocator.free(seal_service);
+    const seal_types = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
+    defer allocator.free(seal_types);
 
     try std.testing.expectEqual(@as(usize, 1), count(incident, "const std = @import(\"std\");"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const payload_size: usize = 208;"));
@@ -113,6 +119,20 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(client, "connection_incident.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "connection_incident.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "connection_incident.zig"));
+    try std.testing.expectEqual(@as(usize, 7), count(publisher, "test \"CR0b publisher"));
+    try std.testing.expectEqual(@as(usize, 1), count(publisher, "const process_seal = @import(\"process_seal_service.zig\");"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher, "incident_runtime.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher, "client.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher, "client_slot.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher, "app_session.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "maru.incident-publisher-authority.v1"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "maru.incident-publisher-lease.v1"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_types, "pub const IncidentPublisherAuthoritySealInput = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_types, "pub const IncidentPublisherLeaseSealInput = struct"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "incident_publisher_registry.Registry", "platform/macos/session_host/incident_publisher_registry.zig"),
+    );
 
     const reason_names = [_][]const u8{
         "connection_eof",          "read_timeout",              "transport_read_failure",        "planned_upgrade_reconnect",

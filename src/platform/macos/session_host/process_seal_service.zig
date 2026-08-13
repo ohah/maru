@@ -45,6 +45,8 @@ const window_close_ticket_reservation_domain = "maru.window-close-ticket-reserva
 const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
 const prepared_host_publication_domain = "maru.prepared-host-publication.v1";
 const incident_binding_domain = "maru.incident-binding.v1";
+const incident_publisher_authority_domain = "maru.incident-publisher-authority.v1";
+const incident_publisher_lease_domain = "maru.incident-publisher-lease.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
 const shutdown_attempt_authority_domain = "maru.shutdown-attempt-authority.v1";
@@ -86,6 +88,8 @@ pub const WindowCloseTicketReservationSealInput = cleanup_seal.WindowCloseTicket
 pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
 pub const PreparedHostPublicationSealInput = cleanup_seal.PreparedHostPublicationSealInput;
 pub const IncidentBindingSealInput = cleanup_seal.IncidentBindingSealInput;
+pub const IncidentPublisherAuthoritySealInput = cleanup_seal.IncidentPublisherAuthoritySealInput;
+pub const IncidentPublisherLeaseSealInput = cleanup_seal.IncidentPublisherLeaseSealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
 pub const ShutdownAttemptAuthoritySealInput = cleanup_seal.ShutdownAttemptAuthoritySealInput;
@@ -695,6 +699,14 @@ pub fn preparedHostPublicationSeal(pid: u32, process_nonce: u64, input: Prepared
 
 pub fn incidentBindingSeal(pid: u32, process_nonce: u64, input: IncidentBindingSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, incident_binding_domain, input);
+}
+
+pub fn incidentPublisherAuthoritySeal(pid: u32, process_nonce: u64, input: IncidentPublisherAuthoritySealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_publisher_authority_domain, input);
+}
+
+pub fn incidentPublisherLeaseSeal(pid: u32, process_nonce: u64, input: IncidentPublisherLeaseSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_publisher_lease_domain, input);
 }
 
 pub fn pendingTermCloseSeal(pid: u32, process_nonce: u64, input: PendingTermCloseSealInput) ReadyError!CleanupSeal {

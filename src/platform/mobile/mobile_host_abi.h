@@ -44,6 +44,11 @@ typedef struct {
     float radius;
     /// 0=단색 quad · 1=아틀라스 글리프(슬롯 전체) · 2=아이콘 coverage
     /// · 3=아틀라스 글리프의 **왼쪽 절반**
+    /// · 4=**컬러** 아틀라스 글리프(슬롯 전체) · 5=컬러 아틀라스 글리프의 왼쪽 절반
+    ///
+    /// 컬러(4·5)는 **다른 텍스처**다. 글자 아틀라스는 커버리지(R8)라 컬러 비트맵을 넣으면
+    /// 실루엣이 되므로 이모지는 RGBA 아틀라스를 따로 쓴다(아이콘 아틀라스와 같은 모양).
+    /// 커버리지는 전경색을 곱해 그리고, 컬러는 아틀라스 색을 그대로 쓴다.
     ///
     /// 슬롯 하나는 **양폭(한글) 상자**라, 단폭 글자는 그 왼쪽 절반만 쓴다. 셰이더는 안 고친다 —
     /// `uv = (cell.xy + t) / cell.zw` 이므로 host 가 **열과 나누는 수를 함께 2배** 로 주면
@@ -86,6 +91,15 @@ unsigned int maru_mobile_missing_count(void);
 unsigned int maru_mobile_missing_cp(unsigned int i);
 /// i번째 놓친 것의 스타일 비트. 코드포인트와 **함께** 읽어야 어느 폰트로 구울지 안다.
 unsigned int maru_mobile_missing_style(unsigned int i);
+/// i번째 놓친 것이 **컬러 글리프**(이모지)인가. 1이면 커버리지 아틀라스가 아니라 **컬러
+/// 아틀라스**에 구워 `maru_mobile_color_atlas_add` 로 등록한다 — 커버리지에 구우면 실루엣이
+/// 되고, 그 반대는 색이 사라진다. 판정은 코어(`width.isEmojiPresentation`)가 단일 출처다.
+unsigned int maru_mobile_missing_is_color(unsigned int i);
+/// 컬러 아틀라스 등록·슬롯 배정(글자 아틀라스의 add/next_slot 과 짝, 같은 인코딩).
+void maru_mobile_color_atlas_add(unsigned int cp, unsigned int style,
+                                 unsigned int col, unsigned int row, unsigned int advance);
+unsigned int maru_mobile_next_color_slot(unsigned int cols);
+unsigned int maru_mobile_color_atlas_count(void);
 /// 합성 글리프를 슬롯 버퍼에 채운다. **폰트 경로보다 먼저 부른다** — 박스 드로잉·블록·
 /// 브라유·파워라인은 maru 가 절차 합성해 셀을 가장자리까지 채운다(폰트 글리프는 셀에 안 맞아
 /// 끊기고 이음매가 보인다). 반환값은 잉크 픽셀 수이고 **0 이면 합성 대상이 아니다**(폰트로).

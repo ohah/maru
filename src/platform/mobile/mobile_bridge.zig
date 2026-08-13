@@ -845,7 +845,12 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
                 .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
                 .a = 1.0,
                 .radius = 0,
-                .kind = if (wide) 1 else 3, // 3 = 슬롯의 왼쪽 절반
+                // 3 = 슬롯의 왼쪽 절반. 컬러(4·5)는 **다른 텍스처**를 가리킨다 — 아틀라스가
+                // 둘이라 kind 로 가르지 않으면 host 가 어느 텍스처를 샘플링할지 알 수 없다.
+                .kind = if (glyph.color)
+                    (if (wide) @as(u32, 4) else 5)
+                else
+                    (if (wide) @as(u32, 1) else 3),
                 .cell_x = glyph.col,
                 .cell_y = glyph.row,
             };
@@ -1059,6 +1064,63 @@ pub export fn maru_mobile_next_slot(cols: u32) u32 {
     return ((idx % cols) << 16) | (idx / cols);
 }
 
+// ── 컬러 글리프(이모지) ────────────────────────────────────────────────────────
+// **글자 아틀라스는 커버리지(R8)라 컬러를 못 담는다.** 컬러 비트맵을 거기 넣으면 실루엣이
+// 된다. 그래서 컬러 전용 아틀라스를 따로 세운다 — 아이콘 아틀라스가 이미 RGBA8 로 서 있어
+// 같은 모양이 하나 더 서는 것뿐이고, 텍스트 아틀라스의 **커버리지 계약(§4)은 안 흔든다**.
+//
+// **컬러인지는 코어가 정한다.** `width.isEmojiPresentation` 이 단일 출처라, 여기서 규칙을
+// 다시 쓰면 컬러 판정이 갈린다(데스크톱 렌더러도 같은 함수를 본다).
+fn isColorGlyph(cp: u32) bool {
+    if (cp > 0x10FFFF) return false;
+    return maru.width.isEmojiPresentation(@intCast(cp));
+}
+
+var color_cp: [atlas_cap]u32 = undefined;
+var color_col: [atlas_cap]u32 = undefined;
+var color_row: [atlas_cap]u32 = undefined;
+var color_adv: [atlas_cap]u32 = undefined;
+var color_n: usize = 0;
+
+/// i번째 놓친 것이 **컬러 글리프인가**. host 는 이 값으로 어느 아틀라스에 구울지 고른다 —
+/// 커버리지 아틀라스에 컬러를 구우면 실루엣이 되고, 그 반대는 색이 사라진다.
+pub export fn maru_mobile_missing_is_color(i: u32) u32 {
+    if (i >= miss_n) return 0;
+    return if (isColorGlyph(miss_cp[i] & 0xFFFFFF)) 1 else 0;
+}
+
+/// 컬러 아틀라스에 구운 글리프를 등록한다(글자 아틀라스의 `maru_mobile_atlas_add` 와 짝).
+pub export fn maru_mobile_color_atlas_add(cp: u32, style: u32, col: u32, row: u32, advance: u32) void {
+    const key = atlasKey(cp, style);
+    var i: usize = 0;
+    while (i < miss_n) : (i += 1) {
+        if (miss_cp[i] == key) {
+            miss_cp[i] = miss_cp[miss_n - 1];
+            miss_n -= 1;
+            break;
+        }
+    }
+    for (0..color_n) |j| if (color_cp[j] == key) return;
+    if (color_n == color_cp.len) return;
+    color_cp[color_n] = key;
+    color_col[color_n] = col;
+    color_row[color_n] = row;
+    color_adv[color_n] = advance;
+    color_n += 1;
+}
+
+/// 컬러 아틀라스의 다음 빈 슬롯(글자 쪽과 같은 인코딩·같은 소진 규약).
+pub export fn maru_mobile_next_color_slot(cols: u32) u32 {
+    if (color_n >= atlas_cap) return 0xFFFFFFFF;
+    const idx: u32 = @intCast(color_n);
+    return ((idx % cols) << 16) | (idx / cols);
+}
+
+/// 등록된 컬러 글리프 수(테스트·진단용 — 등록이 실제로 됐는지 값으로 본다).
+pub export fn maru_mobile_color_atlas_count() u32 {
+    return @intCast(color_n);
+}
+
 /// 합성 글리프를 슬롯에 채운다. 플랫폼은 **폰트 경로보다 먼저** 이걸 부른다 —
 /// `renderer.synthesizeGlyph` 의 계약이 그렇다("rasterizer 는 폰트 경로 전에 한 번 호출한다").
 /// 반환값은 잉크 픽셀 수이고, **0 이면 합성 대상이 아니라서** 플랫폼이 폰트로 굽는다.
@@ -1100,8 +1162,22 @@ pub export fn maru_mobile_missing_clear() void {
     miss_n = 0;
 }
 
-fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32 } {
+fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color: bool = false } {
     const key = atlasKey(cp, style);
+    // **컬러 글자는 컬러 등록부에서 찾는다.** 두 아틀라스가 슬롯 번호를 각자 세므로, 글자
+    // 아틀라스에서 찾으면 엉뚱한 슬롯을 가리킨다.
+    if (isColorGlyph(cp)) {
+        for (0..color_n) |i| if (color_cp[i] == key)
+            return .{ .col = color_col[i], .row = color_row[i], .adv = color_adv[i], .color = true };
+        // **컬러 아틀라스가 없으면 커버리지에 구워 둔 것이라도 쓴다.** 컬러를 모르는 host 는
+        // 이모지를 커버리지에 굽고 `atlas_add` 로 등록하는데, 여기서 컬러 등록부만 보면 영영
+        // 못 찾아 **매 프레임 다시 굽는다**(실측: 3프레임 내내 미스 목록에 남았다). 이 저장소가
+        // 아틀라스가 꽉 찼을 때 이미 한 번 겪은 실패 모드다.
+        for (0..atlas_n) |i| if (atlas_cp[i] == key)
+            return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
+        noteMiss(key);
+        return null;
+    }
     for (0..atlas_n) |i| if (atlas_cp[i] == key)
         return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
     noteMiss(key);
@@ -1144,7 +1220,10 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
                         .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
                         .a = 1.0,
                         .radius = 0,
-                        .kind = 3, // 슬롯의 왼쪽 절반
+                        // 슬롯의 왼쪽 절반. **컬러면 컬러 텍스처(5)** — 같은 조회를 쓰면서
+                        // kind 를 안 따라오면 이모지가 든 탭 제목이 커버리지 텍스처의 같은
+                        // 슬롯을 샘플링해 엉뚱한 글자가 나온다(적대적 검증 2라운드).
+                        .kind = if (c.color) 5 else 3,
                         .cell_x = c.col,
                         .cell_y = c.row,
                     };

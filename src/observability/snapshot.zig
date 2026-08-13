@@ -496,7 +496,9 @@ test "terminal snapshot records wide and grapheme cluster cell metadata" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered,
-        "cell row=0 col=2 codepoint=U+0020 width=0 continuation=true grapheme=none\n",
+        // wide glyph의 둘째 슬롯은 글자를 담지 않는다 — 셀에 쓴 codepoint가 없으므로 U+0000이다
+        // (안 쓴 칸과 같은 표현, types.Cell). 행 텍스트(`row 0:`)는 공백으로 보이는 것과 별개다.
+        "cell row=0 col=2 codepoint=U+0000 width=0 continuation=true grapheme=none\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -114,7 +114,7 @@ pub const FakeGlyphRasterizer = struct {
 
         // buffer는 buildGlyphRasterFrame이 이미 0으로 지워 넘긴다(계약). 그래서 여기서 다시
         // clear하지 않는다. space는 ink가 없으므로 그대로 두고 zero-ink로 보고한다.
-        if (request.run.codepoint == ' ') return .{ .non_clear_pixels = 0 };
+        if (request.run.codepoint == ' ' or request.run.codepoint == 0) return .{ .non_clear_pixels = 0 }; // 안 쓴 칸도 잉크 없음
 
         const red: u8 = @truncate(request.run.glyph_id);
         const green: u8 = @truncate(request.run.glyph_id >> 8);

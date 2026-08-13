@@ -126,20 +126,23 @@ pub const FakeFontBackend = struct {
         // 이 fake backend는 실제 폰트 품질을 흉내 내려는 코드가 아니다. 기본 CI에서
         // CoreText 없이도 "primary/fallback/replacement가 어느 데이터로 흘러가는가"를
         // 고정하기 위한 테스트용 shaper다.
-        if (isPrimaryCodepoint(cell.codepoint)) {
+        // 안 쓴 칸(codepoint 0)은 그릴 잉크가 없다 — 공백과 같이 본다. 안 그러면 화면의 빈 칸이
+        // 전부 "지원 못 하는 글자"로 분류돼 replacement glyph로 샌다(§안 쓴 칸, types.Cell).
+        const codepoint: u21 = if (cell.codepoint == 0) ' ' else cell.codepoint;
+        if (isPrimaryCodepoint(codepoint)) {
             return .{
                 .font_id = self.primary_font_id,
-                .glyph_id = glyphIdFor(cell.codepoint),
-                .color_glyph_kind = colorGlyphKind(cell.codepoint),
+                .glyph_id = glyphIdFor(codepoint),
+                .color_glyph_kind = colorGlyphKind(codepoint),
             };
         }
 
-        if (isFallbackCodepoint(cell.codepoint)) {
+        if (isFallbackCodepoint(codepoint)) {
             return .{
                 .font_id = self.fallback_font_id,
-                .glyph_id = glyphIdFor(cell.codepoint),
+                .glyph_id = glyphIdFor(codepoint),
                 .fallback = true,
-                .color_glyph_kind = colorGlyphKind(cell.codepoint),
+                .color_glyph_kind = colorGlyphKind(codepoint),
             };
         }
 

@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
+const test_scratch = @import("test_scratch.zig");
 const posix = std.posix;
 const handoff = @import("handoff_codec.zig");
 const attempt_record = @import("upgrade_attempt_record.zig");
@@ -493,10 +494,9 @@ fn testExpected(host_id: u128, attempt_id: u128, next_handle: u64) ExpectedAutho
 
 test "handoff store commits identical primary backup and unlinks secret paths before exec" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-handoff-store-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-store") orelse
         return error.SkipZigTest;
-    if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     const record = try testAttemptRecord(std.testing.allocator, 0xAA, 0x11);
     defer std.testing.allocator.free(record);
     const bytes = try handoff.encodeHost(std.testing.allocator, .{
@@ -571,10 +571,9 @@ test "handoff store commits identical primary backup and unlinks secret paths be
 
 test "handoff store rejects malformed or divergent state and removes attempt residue" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-handoff-store-fail-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-store-fail") orelse
         return error.SkipZigTest;
-    if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     var raised_budget = CommitBudget.testing();
     raised_budget.max_bytes = std.math.maxInt(usize);
     try std.testing.expectError(
@@ -692,13 +691,12 @@ test "handoff store rejects malformed or divergent state and removes attempt res
 
 test "handoff store directory fd stays on the approved generation after path replacement" {
     var owner_buf: [192]u8 = undefined;
-    const owner = std.fmt.bufPrintZ(&owner_buf, "/tmp/maru-handoff-dir-pin-{d}", .{c.getpid()}) catch
+    const owner = test_scratch.open(std.testing.io, &owner_buf, "handoff-dir-pin") orelse
         return error.SkipZigTest;
     var pinned_buf: [208]u8 = undefined;
     const pinned = try std.fmt.bufPrintZ(&pinned_buf, "{s}.pinned", .{owner});
-    _ = c.rmdir(owner.ptr);
-    _ = c.rmdir(pinned.ptr);
-    if (c.mkdir(owner.ptr, 0o700) != 0) return error.SkipZigTest;
+    // `.pinned`는 이 테스트가 rename으로 만드는 **대상**이라 미리 만들지 않는다 — 잔여물만 걷는다.
+    test_scratch.close(std.testing.io, pinned);
     const owner_fd = try openOwnerDir(owner);
     defer _ = c.close(owner_fd);
     if (c.rename(owner.ptr, pinned.ptr) != 0) return error.SkipZigTest;
@@ -722,11 +720,9 @@ test "handoff store directory fd stays on the approved generation after path rep
 
 test "handoff store exact cleanup preserves a swapped replacement leaf" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-handoff-cleanup-pin-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-cleanup-pin") orelse
         return error.SkipZigTest;
-    _ = c.rmdir(dir.ptr);
-    if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     const dir_fd = try openOwnerDir(dir);
     defer _ = c.close(dir_fd);
 

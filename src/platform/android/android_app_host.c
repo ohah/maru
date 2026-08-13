@@ -539,14 +539,19 @@ static int initVulkan(ANativeWindow *win) {
     vkMapMemory(g.dev, g.quad_mem, 0, VK_WHOLE_SIZE, 0, &g.quad_map);
     VkDescriptorBufferInfo qdbi = {.buffer = g.quad_buf, .offset = 0, .range = VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet wds[3] = {
+    // **넷을 다 쓴다.** 레이아웃·풀만 늘리고 쓰기를 3 으로 두면 셰이더가 **한 번도 안 쓴
+    // 디스크립터**를 샘플링해 UB 가 된다 — 에뮬레이터에서 VkDevice 는 만들어지는데 그 뒤로
+    // 화면이 영영 안 나오고 그래픽 스택이 통째로 막혔다(실측).
+    VkWriteDescriptorSet wds[4] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 0,
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 1,
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 2,
-         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &qdbi}};
-    vkUpdateDescriptorSets(g.dev, 3, wds, 0, NULL);
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &qdbi},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 3,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[2]}};
+    vkUpdateDescriptorSets(g.dev, 4, wds, 0, NULL);
 
     // push constant 는 없앴다 — quad 마다 다른 값을 한 번의 draw call 에 실을 수 없다.
     VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,

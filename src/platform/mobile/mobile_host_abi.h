@@ -175,6 +175,12 @@ unsigned int maru_mobile_view_offset(void);
 /// 관성만 플랫폼이 갖는다: 손을 뗀 뒤 흘리는 것은 여전히 `maru_mobile_scroll` 로 넣는다.
 void maru_mobile_pointer(unsigned int phase, float x, float y, unsigned long long time_ms);
 
+/// **길게 누름 지연을 OS 값으로 맞춘다.** 두 플랫폼 다 사용자 접근성 설정으로 바꿀 수 있어
+/// (Android "길게 누르기 지연", iOS "터치 조절 → 유지 시간") 코어가 박아 두면 그 설정을
+/// 무시하게 된다. Android 는 `ViewConfiguration.getLongPressTimeout()`, iOS 는
+/// `UILongPressGestureRecognizer` 기본값(0.5초)이다. 0 이면 무시(폴백 유지).
+void maru_mobile_set_long_press_ms(unsigned int ms);
+
 /// 선택 범위(뷰포트 기준, 각 16비트: start_row·start_col·end_row·end_col). **끝 열은 포함**
 /// 이다. 선택이 없으면 전부 1. host 가 복사 버튼 자리를 잡을 때 쓴다.
 unsigned long long maru_mobile_selection_span(void);

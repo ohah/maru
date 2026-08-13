@@ -42,6 +42,11 @@ public class MaruActivity extends android.app.NativeActivity {
     /** 키를 **인코딩 전** 상태로 넘긴다 — 바이트는 코어의 encodeKey 가 만든다(수정자 포함). */
     private static native void nativeKey(int keyCode, int metaState);
 
+    /** OS 가 정한 **길게 누름 지연**(ms). 사용자가 접근성 설정("길게 누르기 지연")으로 바꿀 수
+     *  있어서 코어가 박아 두면 그 설정을 무시하게 된다 — 손이 느린 사용자가 길게 눌러도
+     *  선택이 안 잡힌다. */
+    private static native void nativeLongPressMs(int ms);
+
     /// IME 가 입력 대상으로 인정할 View. `NativeActivity` 의 SurfaceView 는 텍스트 편집기가
     /// 아니라서 키보드가 이 View 를 봐야 한다. 그리지 않으므로 화면에는 영향이 없다.
     private static final class InputView extends View {
@@ -125,6 +130,8 @@ public class MaruActivity extends android.app.NativeActivity {
         addContentView(input, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         input.requestFocus();
+        // **OS 값을 코어에 알린다.** 이 값은 기기·설정마다 다르다(실측: 에뮬레이터 400ms).
+        nativeLongPressMs(android.view.ViewConfiguration.get(this).getLongPressTimeout());
     }
 
     /// **익명 클래스를 안 쓴다.** `d8` 8.2.2 가 익명 내부 클래스(`MaruActivity$1`)에서

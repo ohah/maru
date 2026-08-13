@@ -36,8 +36,11 @@ test "코어가 없을 때는 세지 않고 알린다" {
 
 // **이 테스트는 스크롤백이 쌓이기 전에 있어야 한다**(아래 큰 격자 테스트들보다 앞).
 // 뒤에 두면 선택 범위는 0행 `copyme` 라고 답하는데 **추출은 옛 스크롤백 행(W 로 가득 찬 줄)을
-// 내놨다** — 화면을 지우고(`ED 2`) 다시 써도 그랬다. 순서를 바꿔 통과시켰지만 그 둘이 어긋난
-// 것 자체는 설명하지 못했다(코어 쪽 절대-행 조회 문제로 보인다. PR 에 적어 뒀다).
+// 내놨다** — 화면을 지워도(`ED 2`) 그랬다.
+//
+// **스크롤백이 있을 때만 그렇다**: 아래 "복사 버퍼가 모자라면" 테스트는 `ED 3` 로 스크롤백까지
+// 지우니 같은 자리에서 정상이다. 즉 뷰포트 범위와 절대-행 추출이 **스크롤백 길이만큼 어긋난다**
+// — 코어 쪽 문제로 보이고 모바일만의 것은 아닐 수 있다(PR 에 적어 뒀다).
 //
 // **복사는 잡은 것을 꺼내는 일이다.** 추출은 코어가 하고(soft-wrap 잇기·2셀 뒷칸 제외가
 // 거기 있다) 플랫폼은 클립보드에 쓰기만 한다 — 브리지엔 OS 호출이 없다(§3).
@@ -687,6 +690,41 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     }
     bridge.maru_mobile_pointer(3, q.x, q.y, now());
     bridge.maru_mobile_clear_error();
+}
+
+// 버퍼가 모자라면 **자르되 조용히 자르지 않는다**. 자른 것을 모르면 잘린 명령을 붙여넣고
+// 왜 안 되는지 모른다 — 경계(딱 맞음)와 한 칸 모자람을 함께 본다.
+test "복사 버퍼가 모자라면 알린다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    // **스크롤백까지 지운다**(`ED 3`). 스크롤백이 쌓인 상태에서는 선택 범위와 추출이 서로
+    // 다른 행을 가리키는 것을 두 번 겪었다 — 지우면 그 모호함이 사라진다(진단 근거이기도 하다).
+    _ = bridge.maru_mobile_input("\x1b[3J\x1b[2J\x1b[H", 11);
+    _ = bridge.maru_mobile_input("abcdef rest", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
+
+    // ① 딱 맞으면 자르지 않고 알리지도 않는다.
+    var exact: [6]u8 = undefined;
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_keybar_tap(c.x, c.y);
+    try std.testing.expectEqual(@as(u32, 6), bridge.maru_mobile_take_copy(&exact, exact.len));
+    try std.testing.expectEqualStrings("abcdef", &exact);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // ② 한 칸 모자라면 채울 만큼 채우고 **알린다**.
+    var small: [5]u8 = undefined;
+    _ = bridge.maru_mobile_keybar_tap(c.x, c.y);
+    try std.testing.expectEqual(@as(u32, 5), bridge.maru_mobile_take_copy(&small, small.len));
+    try std.testing.expectEqualStrings("abcde", &small);
+    try std.testing.expectEqualStrings("copy_truncated", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    bridge.maru_mobile_pointer(3, q.x, q.y, now());
 }
 
 // **`copy` 가 나타나도 다른 키는 안 움직인다.** 전부 flex 로 나눠 가지면 마지막 키가 30px

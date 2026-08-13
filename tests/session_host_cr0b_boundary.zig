@@ -67,7 +67,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(storage_product, "takePendingForWriter("));
     try std.testing.expectEqual(@as(usize, 0), count(storage_product, "completeWriterHandoff("));
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "takePendingForWriter(",

@@ -2259,6 +2259,18 @@ pub fn build(b: *std.Build) void {
         run_cr0b_binding_contract_tests.addArg("--maru-expect-tests=6");
         run_cr0b_binding_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_binding_contract_tests.step);
+        const cr0b_publication_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/observability/incident_publication_contract.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b poison publication 계약은"},
+        });
+        const run_cr0b_publication_contract_tests = b.addRunArtifact(cr0b_publication_contract_tests);
+        run_cr0b_publication_contract_tests.addArg("--maru-expect-tests=3");
+        run_cr0b_publication_contract_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_publication_contract_tests.step);
         const cr0b_service_transaction_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/observability/connection_incident.zig"),
@@ -2571,6 +2583,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = b3_optimize,
                 .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{"C3-3b2b1 trusted preparation"},
         });
@@ -2607,6 +2620,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2b2_metadata_wire_module = b.createModule(.{
             .root_source_file = b.path(

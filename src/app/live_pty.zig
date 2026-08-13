@@ -497,6 +497,17 @@ pub const LiveSurface = union(control_surface.SurfaceKind) {
     terminal: Terminal,
     /// web arm: sentinel surface만(빈 core — 4e-1은 렌더 안 함). WKWebView 부착·콘텐츠는 후속(4e-3/Phase 5).
     web: Web,
+    /// editor arm: sentinel surface만. **web과 같은 모양인 이유**는 둘 다 "PTY가 없다"는 사실만
+    /// 이 층에 실리기 때문이다 — 편집기 문서(bytes·논리행 인덱스)는 파일을 읽는 platform이 소유하고
+    /// (`app_session/editor.zig`), 이 층은 OS도 파일도 모른다. 렌더가 갈리는 것은 상위의 관심사다.
+    editor: Editor,
+
+    /// 편집기 Term의 슬롯. `Web`과 필드가 같지만 **타입을 나눈다** — 합치면 `kind`가 둘을 가르는
+    /// 유일한 축이 되어, 웹 전용 teardown이 편집기에 도는 실수를 타입이 막지 못한다.
+    pub const Editor = struct {
+        surface: surface_mod.Surface = undefined,
+        internal_allocator: std.mem.Allocator = undefined,
+    };
 
     /// terminal Term의 라이브 소유(surface + live PTY + 번들 allocator). 필드·수명은 M3a와 동일.
     pub const Terminal = struct {
@@ -536,6 +547,10 @@ pub const LiveSurface = union(control_surface.SurfaceKind) {
             .web => |*w| {
                 if (w.surface.custom_name) |n| w.internal_allocator.free(n);
                 w.surface.deinit();
+            },
+            .editor => |*e| {
+                if (e.surface.custom_name) |n| e.internal_allocator.free(n);
+                e.surface.deinit();
             },
         }
         self.* = undefined;

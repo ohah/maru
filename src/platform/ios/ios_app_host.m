@@ -674,16 +674,48 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         }
         CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);
-        unichar c = (unichar)cp;
-        CGGlyph glyph = 0;
-        CTFontGetGlyphsForCharacters(face, &c, &glyph, 1);
+        // BMP 밖 글자도 이 경로로 온다(컬러가 아닌 것들) — 서러게이트 쌍으로 조립한다.
+        unichar units[2];
+        CFIndex unit_n = 0;
+        if (cp > 0xFFFF) {
+            unsigned int v = cp - 0x10000;
+            units[unit_n++] = (unichar)(0xD800 + (v >> 10));
+            units[unit_n++] = (unichar)(0xDC00 + (v & 0x3FF));
+        } else {
+            units[unit_n++] = (unichar)cp;
+        }
+        CGGlyph glyphs[2] = {0, 0};
+        CTFontRef draw_face = (CTFontRef)CFRetain(face);
+        BOOL got = CTFontGetGlyphsForCharacters(face, units, glyphs, unit_n);
+        // **번들 폰트에 없으면 시스템에서 찾는다.** 예전에는 여기서 **안 그린 채 등록**해
+        // 등록부에 "있음" 으로 박혔고, 다시 굽지도 않아 **영구 공백**이 됐다 — `❤`·`✔` 처럼
+        // Jetendard 에 없는 기호가 통째로 빈칸으로 나왔다(화면으로 확인).
+        if (!got) {
+            NSString *str = [NSString stringWithCharacters:units length:(NSUInteger)unit_n];
+            CTFontRef fb = CTFontCreateForString(face, (__bridge CFStringRef)str,
+                                                 CFRangeMake(0, unit_n));
+            if (fb) {
+                CGGlyph fbg[2] = {0, 0};
+                if (CTFontGetGlyphsForCharacters(fb, units, fbg, unit_n)) {
+                    CFRelease(draw_face);
+                    draw_face = fb;
+                    glyphs[0] = fbg[0];
+                    glyphs[1] = fbg[1];
+                    got = YES;
+                } else {
+                    CFRelease(fb);
+                }
+            }
+        }
+        CGGlyph glyph = got ? glyphs[0] : 0;
         if (glyph) {
             CGPoint pos = CGPointMake(1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
-            CTFontDrawGlyphs(face, &glyph, &pos, 1, ctx);
+            CTFontDrawGlyphs(draw_face, &glyph, &pos, 1, ctx);
         }
         CGContextRelease(ctx);
         CGSize adv = CGSizeZero;
-        if (glyph) CTFontGetAdvancesForGlyphs(face, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+        if (glyph) CTFontGetAdvancesForGlyphs(draw_face, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+        CFRelease(draw_face);
         unsigned int advance = (unsigned int)(adv.width + 0.5);
         if (advance == 0) advance = CW / 2;
         [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0

@@ -5665,6 +5665,27 @@ pub fn build(b: *std.Build) void {
 
     const perf_step = b.step("perf", "Run local performance budget harness");
     perf_step.dependOn(&run_perf.step);
+
+    // 셰이핑 run 분포 조사 도구(예산 게이트가 아니라 measure-first용). 지금 native 셰이퍼는 셀마다
+    // CTLine을 만드는데, 연속 run 하나로 묶으면 호출이 몇 배 줄어드는지를 실제 출력으로 재서 묶기
+    // 작업의 기대 이득을 추정이 아닌 실측으로 확정한다.
+    const shape_run_probe_exe = b.addExecutable(.{
+        .name = "maru-shape-run-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/shape_run_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_shape_run_probe = b.addRunArtifact(shape_run_probe_exe);
+    run_shape_run_probe.setCwd(b.path("."));
+    if (b.args) |args| run_shape_run_probe.addArgs(args);
+
+    const shape_run_probe_step = b.step("shape-run-probe", "Measure shaping run distribution (measure-first)");
+    shape_run_probe_step.dependOn(&run_shape_run_probe.step);
 }
 
 fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {

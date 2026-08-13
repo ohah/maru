@@ -101,6 +101,18 @@ pub const FontConfig = struct {
     /// 폴백). italic 렌더 자체가 F2-3에서 추가됐다(이전엔 SGR 3이 안 그려짐). bold+italic은 bold face(family-bold 또는
     /// 주 bold)에 italic trait을 더한다. loader가 `font.family-italic` 키로 파싱.
     family_italic: []const u8 = "",
+    /// 프로그래밍 합자(ligature). 켜면 폰트가 정의한 `liga`/`clig`/`calt`를 그대로 두어 JetBrains Mono·Fira Code
+    /// 같은 코딩 폰트가 `=>`·`!=`·`//`를 이어진 모양으로 그린다. 끄면 셋을 모두 꺼 글자 그대로 그린다.
+    ///
+    /// **베이스/결정(사실상 표준)**: 단일 표준이 없어 터미널마다 갈린다 — Ghostty(`font-feature`에 `-calt`를 넣어야
+    /// 꺼짐)·kitty(`disable_ligatures none`)·WezTerm은 **기본 켬**이고, iTerm2만 "Use ligatures" 기본 해제다.
+    /// maru는 다수 관례를 따라 **기본 켬**을 택한다(사용자 결정 2026-08). 합자를 쓰려고 코딩 폰트를 고른 사용자가
+    /// 별도 설정 없이 기대한 모양을 보는 쪽이 놀람이 적다는 판단이다.
+    ///
+    /// 등폭 격자는 깨지지 않는다: 코딩 폰트의 합자는 대개 `calt`(문맥 대체)로 구현돼 **글자 수를 유지**하고 칸마다
+    /// 조각을 하나씩 놓는다. 셀 수를 줄이는 `liga`는 셀이 비는 문제([#2123](https://github.com/ohah/maru/issues/2123))가
+    /// 있었으나, 셰이핑이 run 단위로 바뀌며 CoreText가 각 칸에 glyph를 배정해 해소됐다. loader가 `font.ligatures` 키로 파싱.
+    ligatures: bool = true,
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
     // size만 예외 구조: **GUI 입력 박스·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위
@@ -116,6 +128,7 @@ pub const FontConfig = struct {
         .fallback = Meta{ .doc = "폴백 폰트(쉼표 구분)", .widget = .text, .section = .font },
         .family_bold = Meta{ .doc = "bold 폰트 패밀리(빈 값=주 폰트 bold)", .widget = .text, .section = .font },
         .family_italic = Meta{ .doc = "italic 폰트 패밀리(빈 값=주 폰트 italic)", .widget = .text, .section = .font },
+        .ligatures = Meta{ .doc = "프로그래밍 합자(=> != // 등)", .widget = .toggle, .section = .font },
     };
 };
 

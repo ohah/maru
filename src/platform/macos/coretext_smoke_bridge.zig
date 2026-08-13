@@ -54,6 +54,8 @@ pub extern fn maru_macos_coretext_shape_draw_list(
     bold_family_len: usize,
     italic_family: [*]const u8, // italic 글자용 폰트 패밀리(F2-3)
     italic_family_len: usize,
+    // 합자(liga/clig/calt) 적용 여부 — 0이면 ObjC가 셋을 모두 꺼 글자 그대로 셰이핑한다(config font.ligatures).
+    ligatures_enabled: u32,
     cells: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
     grapheme_pool: [*]const u32, // grapheme cluster 본체 풀(NativeDrawCell.grapheme_offset/count가 가리킴)

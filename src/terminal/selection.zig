@@ -869,6 +869,30 @@ fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator
     return try out.toOwnedSlice(allocator);
 }
 
+// 화면을 지우면(ED 2) **스크롤백에서 이어지던 줄도 끊긴다**. 활성 화면의 wrap 표시만 지우면
+// 스크롤백 마지막 행이 계속 "다음 줄로 이어짐"을 주장하고, 지운 뒤 새로 쓴 첫 줄이 그 줄의
+// 연속으로 취급된다 — 그 줄에서 단어를 잡으면 스크롤백의 wrap 뭉치까지 통째로 선택된다.
+//
+// 모바일 복사에서 드러났다: 화면의 `copyme`를 길게 눌러 복사했더니 클립보드에 스크롤백의
+// W 수천 자가 담겼다. 선택 **범위**(뷰포트로 잘린다)는 멀쩡해 보여서 화면만 봐서는 못 잡는다.
+test "화면을 지운 뒤 쓴 줄은 스크롤백 wrap의 연속이 아니다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+    defer c.deinit();
+    // 자동 줄바꿈으로 스크롤백을 만든다(개행이 아니라 wrap 이어야 한다 — 그게 이 결함의 조건).
+    var i: usize = 0;
+    while (i < 40) : (i += 1) try c.write("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+    try std.testing.expect(c.screen.sb.count > 0);
+
+    try c.write("\x1b[2J\x1b[H");
+    try c.write("copyme rest");
+
+    c.selectWordAt(0, 1, &.{});
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("copyme", text);
+}
+
 // host-backed Find의 좌표계 계약. `runtime_manager.findOp`는 요청받은 매치로 host 화면을 먼저 스크롤한 뒤
 // 그 **스크롤된 화면 기준**으로 span을 계산해 응답한다. client는 그 스크롤을 delta로 받기 전이라, 응답 span을
 // 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다. 그래서 client가 view_offset을 대조해 정합할 때만

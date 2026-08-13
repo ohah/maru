@@ -158,6 +158,13 @@ pub const Scrollback = struct {
         return loc.page.descs.items[loc.row].wrapped;
     }
 
+    /// i번째 스크롤백 행의 "다음 줄로 이어짐"(soft-wrap) 표시를 바꾼다. 화면을 지울 때 마지막
+    /// 행의 이어짐을 끊는 데 쓴다 — 지워진 화면으로 이어지는 줄은 없다.
+    pub fn setRowWrapped(self: *Scrollback, i: usize, v: bool) void {
+        const loc = self.locate(i) orelse return;
+        loc.page.descs.items[loc.row].wrapped = v;
+    }
+
     pub fn rowPrompt(self: *const Scrollback, i: usize) types.RowPrompt {
         const loc = self.locate(i) orelse return .{};
         return loc.page.descs.items[loc.row].prompt;
@@ -1052,6 +1059,11 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
         2, 3 => {
             @memset(self.screen.cells, blank);
             @memset(self.screen.wrapped, false);
+            // **스크롤백에서 이어지던 줄도 끊는다.** 활성 화면의 표시만 지우면 스크롤백 마지막
+            // 행이 계속 "다음 줄로 이어짐" 을 주장하고, 지운 뒤 새로 쓴 첫 줄이 그 줄의 연속으로
+            // 취급된다 — 그 줄에서 단어를 잡으면 **스크롤백의 wrap 뭉치까지 통째로 선택**된다
+            // (모바일에서 복사가 W 수천 자를 담아 오는 것으로 드러났다).
+            if (self.screen.sb.count > 0) self.screen.sb.setRowWrapped(self.screen.sb.count - 1, false);
             @memset(self.screen.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다
             self.semantic_state = .unknown; // 진행 중 영역도 끝낸다(셸이 곧 프롬프트를 재마킹)
             if (mode == 3) clearScrollback(self);

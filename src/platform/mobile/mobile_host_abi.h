@@ -166,6 +166,18 @@ void maru_mobile_scroll_to_bottom(void);
 /// 지금 스크롤백을 보고 있는가(0=바닥). host 가 스크롤 인디케이터를 그릴 때 쓴다.
 unsigned int maru_mobile_view_offset(void);
 
+/// 손가락 하나의 원시 이벤트(논리 px). **무엇으로 해석할지는 코어가 정한다**(§3.1) —
+/// 끌면 스크롤이고 길게 누르면 선택이라는 판단이 플랫폼마다 갈리면 안 된다.
+///
+/// `phase`: 0=down · 1=move · 2=up · 3=cancel.
+/// `time_ms`: 단조 증가하는 밀리초. **길게 누름 판정에 쓴다** — 코어에는 시계가 없다.
+///
+/// 관성만 플랫폼이 갖는다: 손을 뗀 뒤 흘리는 것은 여전히 `maru_mobile_scroll` 로 넣는다.
+void maru_mobile_pointer(unsigned int phase, float x, float y, unsigned long long time_ms);
+
+/// 선택이 살아 있는가(1/0). host 가 복사 버튼을 띄울지 정할 때 쓴다.
+unsigned int maru_mobile_has_selection(void);
+
 /// 보조 키바 탭(논리 px). **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다** — 그것 없이는
 /// 프로세스를 못 멈추고(Ctrl+C) vim 에서 못 빠져나온다.
 ///

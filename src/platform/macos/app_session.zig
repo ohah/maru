@@ -1537,6 +1537,20 @@ const TermRuntime = struct {
     /// 창을 닫지 않는다), `findTerminatedTerm`(자동 reap 대상 아님), `resizeTermForLayout`(core를 직접 resize),
     /// 드롭 배리어(읽기 전용).
     ended_placeholder: bool = false,
+
+    /// N1 편집기 Term(`kind == .editor`)이 여는 문서. **`rt`에 있는 이유**는 파일을 읽는 것이 OS를
+    /// 아는 층이기 때문이다 — 중립 세션 모델(`session_model.zig`)은 파일도 인코딩도 모른다(§2 레이어).
+    ///
+    /// 아래 셋은 함께 산다: 문서·그 줄 슬라이스·경로. 줄들은 **문서 버퍼를 빌리므로** 문서보다 오래
+    /// 살면 안 되고, 그래서 해제도 한 곳(`editor_ops.releaseEditorTerm`)이 한다.
+    editor_doc: ?editor_ops.Opened = null,
+    /// 위 문서의 논리 줄들(문서 버퍼를 빌린다). `frame.build`가 **문서 전체**를 받아야 스크롤바
+    /// 길이가 맞으므로(§4.1a) 열 때 한 번 만들어 둔다 — 매 프레임 만들면 프레임마다 할당이 생긴다.
+    editor_lines: []const []const u8 = &.{},
+    /// 열려 있는 파일의 절대 경로(owned). 탭 라벨과 컨트롤 플레인 `EditorMeta.path`가 읽는다.
+    editor_path: ?[]u8 = null,
+    /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 붙으면 여기가 움직인다(지금은 0 고정).
+    editor_first_line: usize = 0,
     /// 위 안내 텍스트를 이미 core에 썼는가(멱등 래치). 매 resize·재적용마다 덧쓰면 화면이 안내로 도배된다.
     ended_guidance_written: bool = false,
     /// 묘비가 다시 저장될 때 쓸 마지막 command. `surface.command`가 아니라 여기 드는 이유: `Surface.command`는 spawn이

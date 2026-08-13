@@ -55,6 +55,7 @@ const TermLoc = AppSession.TermLoc;
 const agent_ops = @import("agent.zig");
 const app = app_session_mod.app;
 const pane_ops = @import("pane.zig");
+const editor_ops = @import("editor.zig");
 const tab_ops = @import("tab.zig");
 const terminal = app_session_mod.terminal;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
@@ -595,6 +596,9 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
         self.allocator.free(u);
         term.pending_url = null;
     }
+    // 편집기 Term이 소유한 문서·줄·경로를 먼저 놓는다. 아래 슬롯 해제가 돌면 `term.surface`가
+    // 무효가 되므로 순서가 중요하다(문서는 surface와 무관하지만 한 곳에서 끝내는 편이 안전하다).
+    if (term.kind == .editor) editor_ops.releaseEditorTerm(self, term);
     if (term.kind == .web or term.kind == .editor or term.rt.ended_placeholder) {
         // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
         // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.

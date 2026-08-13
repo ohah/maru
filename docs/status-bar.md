@@ -587,19 +587,27 @@ id로 쓰지 말라고 못 박아 뒀다). 클릭 동작은 없지만(`statusBar
 | §5.1 배경 레이어 | ✅ 값으로 못박음(`status_bar_layer == 2` + over/header/under 배제) |
 | §5.2 strip 클리핑 | ✅ **Chrome Lab 골든이 픽셀로 본다**(`sidebar-status-strip` 시나리오 → `sidebar-strip-stops-above-status-bar`). Zig 쪽 스탬프 테스트에 더해 `.m`이 그 값으로 실제로 자르는지까지 덮는다 |
 | §5.3 scissor **구간 값** | ✅ **산술을 Zig로 옮겼다**(`sidebarViewportPx` → `sidebarScissorPx`) — 구간·게이트·클램프·뒤집힘 방지를 순수 함수 테스트가 덮는다. `.m`은 받은 구간을 그대로 쓴다 |
-| §5.3 그 구간이 **layer 0 quad에 실제로 걸리는가** | ✅ **Chrome Lab 골든이 픽셀로 본다**(`sidebar-status-strip` 시나리오 → `sidebar-under-quad-stops-above-status-bar`). §5.2가 strip에 쓴 것과 같은 방법이다 — 시나리오가 뷰포트 바닥을 가로지르는 layer 0 quad를 심고 브리지가 scissor 구간을 실제로 넘긴다. `.m`의 under 클립을 지우는 뮤테이션에 골든이 죽는 것을 확인했다(840px 차이). 제품 화면 자체는 `MARU_FORCE_SIDEBAR_HOVER=edge` 캡처가 본다 |
+| §5.3 그 구간이 **layer 0 quad에 실제로 걸리는가**(아래를 자른다) | ✅ **Chrome Lab 골든**(`sidebar-status-strip` → `sidebar-under-quad-stops-above-status-bar`). §5.2가 strip에 쓴 것과 같은 방법이다 — 시나리오가 뷰포트 바닥을 가로지르는 layer 0 quad를 심고 브리지가 scissor 구간을 실제로 넘긴다. under 클립을 지우는 뮤테이션에 골든이 죽는다(840px 차이). 제품 화면은 `MARU_FORCE_SIDEBAR_HOVER=edge` 캡처가 본다 |
+| §5.3 quad에 **위는 안 거는가**(헤더 고정 quad 보존) | ✅ **Chrome Lab 골든**(같은 시나리오 → `sidebar-header-quad-survives-scissor`). 시나리오가 `sidebar_scissor_top_px`에 0이 아닌 값을 싣고 그 위에 quad를 심는다 — `top`을 0으로 두면 "안 건다"는 결정이 그림에 나타나지 않아 골든이 침묵한다. 셀과 통일해 `scissor_top`을 거는 뮤테이션에 죽는다(1,440px 차이). 그전까지 이 계약은 **제품 캡처를 사람이 열어 봐야만** 보였다 |
 | §5.4 소비처 축소 | ✅ grid 높이·사이드바 뷰포트 단언들이 수치로 고정 |
 | §5.5 포인터 삼킴 | ✅ **그려진 quad에서 rect를 읽어** 판정과 대조한다(폰트를 바꿔 가며 3회). 판정식을 테스트에 다시 쓰면 같은 실수를 두 번 적는 것이라 드리프트를 못 잡는다 |
 
-**여섯 다 자동 가드가 붙었다.** §5.2는 Chrome Lab에 사이드바 strip 시나리오를 더해 닫았고, §5.3이 셀에서
+**일곱 다 자동 가드가 붙었다.** §5.2는 Chrome Lab에 사이드바 strip 시나리오를 더해 닫았고, §5.3이 셀에서
 quad로 넓어지면서 잠시 다시 열렸다 — 구간 값은 순수 함수가 덮지만 `.m`이 그 값을 quad draw에 실제로 거는지는
 아무도 안 봤다(그 사이 클립을 지워도 전 테스트가 green이었다). **같은 캡처에 layer 0 quad를 더해** 닫았다.
 
-두 case는 **같은 캡처의 좌우를 나눠 본다** — 왼쪽 절반이 밴드(§5.3), 오른쪽이 strip(§5.2)이다. 한 사각형에
-두 표면을 담으면 실패했을 때 어느 쪽이 샜는지 사람이 캡처를 열어 봐야 하므로, 시나리오가 밴드를 사이드바
-절반에만 그린다. 각 case는 자기 뮤테이션으로 죽는 것을 확인했다 — strip은 §5.2 때(`.m`이 창 바닥까지 그리게
-되돌리기), 밴드는 §5.3 때(under quad 클립 제거). **밴드 뮤테이션에서 strip case는 통과했다** — 그 통과가
-좌우 분리가 실제로 작동한다는 증거다.
+세 case가 **한 캡처를 나눠 본다.** 하나에 여러 표면을 담으면 실패했을 때 어느 쪽이 샜는지 사람이 캡처를 열어
+봐야 하므로, 시나리오가 각 quad를 겹치지 않는 자리에 그린다:
+
+| case | 자리 | 지키는 것 |
+|---|---|---|
+| `sidebar-strip-stops-above-status-bar` | 아래·오른쪽 절반 | strip이 상태바 위에서 끊긴다(§5.2) |
+| `sidebar-under-quad-stops-above-status-bar` | 아래·왼쪽 절반 | under quad도 거기서 끊긴다(§5.3 **아래**) |
+| `sidebar-header-quad-survives-scissor` | 헤더(위) | 헤더 고정 quad는 **안 잘린다**(§5.3 **위**) |
+
+각 case는 자기 뮤테이션으로만 죽는 것을 확인했다 — strip은 `.m`이 창 바닥까지 그리게 되돌리기, 아래 quad는
+under 클립 제거, 위 quad는 `scissor_top`을 거는 것. **한 뮤테이션에서 나머지 case는 통과했다** — 그 통과가
+분리가 실제로 작동한다는 증거다(한 사각형에 뭉쳐 있었다면 셋 다 같이 죽어 원인을 못 가른다).
 
 ### 5.1 배경 quad는 layer 2(bottom)여야 한다
 
@@ -639,6 +647,8 @@ strip은 `.m`이 바닥을 직접 정하는 표면이다([metal-ui-layout-paint.
 **위쪽은 두 표면이 다르다 — quad에는 `top`을 걸지 않는다.** under 버킷에는 스크롤을 타지 않는 **헤더 고정 quad**가 섞여 있다(검색 줄 밑줄 `y = header − 1`·헤더 아이콘 호버 배경·접힘 토글 호버). 셀 쪽 상단 scissor가 무해한 것은 헤더 glyph가 **터미널 셀 패스**라 애초에 그 구간에 없기 때문이고, quad는 사정이 반대다 — 같이 자르면 **스크롤 중에 헤더 밑줄과 아이콘 호버가 사라진다**(첫 구현이 그랬고, 넣기 전에 잡았다).
 
 스크롤된 카드 quad의 상단은 `sidebarScrollClipQuad`가 발행 시점에 이미 자르므로 비는 곳이 없다. 그 산술은 안전망이 아니라 **시각 규칙**이기도 하다 — 헤더에 걸린 밴드는 둥근 모서리를 죽여야 하는데, scissor는 자를 수는 있어도 모서리를 각지게 만들 수는 없다.
+
+**이 비대칭에도 골든이 붙어 있다**(`sidebar-header-quad-survives-scissor`). 한동안은 아니었다 — Lab 시나리오가 `sidebar_scissor_top_px`를 0으로 넘기고 헤더에 quad를 심지 않아, `top`을 쓰든 안 쓰든 그림이 같았다. 즉 "위는 안 자른다"는 **결정이 캡처에 나타나지 않아** 되돌리는 변경을 아무것도 못 잡았다(제품 캡처를 사람이 열어 `y=66` 픽셀을 봐야 했다). 시나리오에 0이 아닌 `top`과 헤더 quad를 더해 닫았다. 자동 가드를 붙이려면 **그 결정이 픽셀을 바꾸는 상태**를 시나리오가 만들어야 한다는 것이 여기서 얻은 규칙이다.
 
 **구간 값의 단일 출처는 `SidebarViewport`**(`sidebarViewportPx` = `[헤더 아래, 상태바 위)`)다. 예전엔 같은 구간을 넷이 각자 계산했고(셀 scissor·스크롤바 트랙·최대 스크롤·quad 클립) **하단을 아는 곳이 셋뿐**이었다 — 루트커즈는 밴드가 아니라 그 흩어짐이다. 이제 창 바닥에 무엇이 더 붙어도 그 한 곳만 바뀐다.
 

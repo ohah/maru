@@ -770,6 +770,8 @@ fn labTokens() chrome.Tokens {
     return chrome.Tokens.rich(.{
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        // Lab의 터미널 배경 = clear color와 같은 값. 편집기 시나리오의 바탕이 제품과 같은 관계를 갖는다.
+        .terminal_background = .{ .r = terminal_background[0], .g = terminal_background[1], .b = terminal_background[2] },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
         .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
         .search_match = .{ .r = 1, .g = 2, .b = 3 },

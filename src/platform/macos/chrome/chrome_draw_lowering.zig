@@ -512,6 +512,7 @@ test "Chrome draw lowering preserves an NFD cluster and paints cards behind text
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const ops_text = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 2, .y = 3 }, .runs = &.{.{ .text = "e\u{301}" }}, .role = .surface_fg } }};
@@ -542,6 +543,7 @@ test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const runs = [_]chrome.draw.Run{.{ .text = icons.utf8(.recent) }};
@@ -568,6 +570,7 @@ test "icon-only lowering excludes ordinary Session Dock text" {
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const ops = [_]chrome.draw.Op{
@@ -590,6 +593,7 @@ test "rich text artifact preserves fractional pixel origin instead of coercing i
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const runs = [_]chrome.draw.Run{.{ .text = "가" }};
@@ -615,6 +619,7 @@ test "rich text artifact keeps side-by-side origins independent on one cell row"
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const left_runs = [_]chrome.draw.Run{.{ .text = "A" }};
@@ -641,6 +646,7 @@ test "rich text fingerprint changes for placement semantic color and typography 
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const runs = [_]chrome.draw.Run{.{ .text = "가A" }};
@@ -672,6 +678,7 @@ test "rich text fingerprint is invariant to pure scroll translation" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     const header_runs = [_]chrome.draw.Run{.{ .text = "Agent 세션 기록" }};
@@ -728,6 +735,7 @@ test "rich text fingerprint pins a floating sticky head instead of translating i
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     const head_runs = [_]chrome.draw.Run{.{ .text = "sample-workspace" }};
@@ -777,6 +785,7 @@ test "rich text fingerprint and the shaping request share one filter" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     const real_runs = [_]chrome.draw.Run{.{ .text = "카드 제목" }};
@@ -814,6 +823,7 @@ test "rich text fingerprint ignores animated wide icon-only ops" {
         .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
         .selection = .{ .r = 19, .g = 20, .b = 21 },
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const text_runs = [_]chrome.draw.Run{.{ .text = "Stable label" }};

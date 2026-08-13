@@ -274,6 +274,7 @@ fn testTokens() tokens.Tokens {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 }

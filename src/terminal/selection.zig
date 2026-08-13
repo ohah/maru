@@ -827,7 +827,7 @@ pub fn selectionViewportSpan(self: *const TerminalCore) ?types.SelectionSpan {
 }
 
 /// 선택된 텍스트를 추출한다(클립보드 복사용). 행 단위 선형 선택 — soft-wrap으로 이어진 행은 줄바꿈 없이 잇고,
-/// hard 줄끝에서만 \n을 넣는다. 각 행은 뒤 빈칸을 trim한다(soft 행 제외). 블록 모드면 직사각형 추출로 분기한다.
+/// hard 줄끝에서만 \n을 넣는다. 각 행은 뒤 빈칸을 trim한다(soft 행도 같다 — 아래 주석). 블록 모드면 직사각형 추출로 분기한다.
 pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator) !?[]u8 {
     const sel = normalizedSelection(self) orelse return null;
     if (self.selection_block) return extractBlockSelection(self, allocator, sel.start, sel.end);
@@ -840,8 +840,16 @@ pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator)
         const wrapped_flag = screen.absRowWrapped(self, abs);
         const from: usize = if (abs == sel.start.row) sel.start.col else 0;
         const full_to: usize = if (abs == sel.end.row) @min(@as(usize, sel.end.col) + 1, row_cells.len) else row_cells.len;
-        // hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게.
-        const to: usize = if (wrapped_flag and abs != sel.end.row) full_to else @max(from, @min(full_to, screen.trimmedLen(row_cells)));
+        // **어느 행이든** 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게. soft-wrap 행도
+        // 예외가 아니다: 폭을 넓히는 resize는 커서 줄을 reflow하지 않고 새 폭으로 pad하므로(screen.zig
+        // §resize), `wrapped`인데 내용이 행 끝에 못 미치는 행이 생긴다. 그때 행 폭 전체를 읽으면
+        // **아무도 쓰지 않은 공백**이 클립보드로 샌다.
+        //
+        // 대가를 안다: 진짜로 뒤가 공백인 채 wrap된 행("ab" + 공백 8칸에서 넘어간 줄)은 그 공백을
+        // 잃는다. 두 규칙이 짝을 이뤄야 한다 — 커서 줄까지 항상 reflow하면 이 상태가 아예 안 생겨
+        // 행 폭 전체를 읽어도 되지만, Maru는 커서 줄을 안 건드리는 쪽을 골랐으므로(위 이유) 추출이
+        // trim하는 쪽으로 맞춰야 없는 문자가 안 생긴다. 흔한 쪽(줄바꿈된 텍스트 복사)을 지킨다.
+        const to: usize = @max(from, @min(full_to, screen.trimmedLen(row_cells)));
         try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
         if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
     }
@@ -967,6 +975,39 @@ test "이어지던 줄은 그대로, alt 의 ED 는 주 화면과 무관" {
 // 그 **스크롤된 화면 기준**으로 span을 계산해 응답한다. client는 그 스크롤을 delta로 받기 전이라, 응답 span을
 // 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다. 그래서 client가 view_offset을 대조해 정합할 때만
 // 적용한다(app_session.remoteFindSpansApplicable). 이 테스트는 그 대조가 왜 필요한지를 코어 수준에서 고정한다.
+// **폭을 넓히면 커서 줄은 reflow하지 않는다**(위 §resize — 셸이 SIGWINCH로 다시 그린다). 그래서
+// 그 줄의 행들은 옛 폭 내용을 가진 채 새 폭 행에 앉고, 남는 칸은 resize가 넣은 **패딩**이다.
+// 이 행들도 `wrapped`라 추출이 행 폭 전체를 읽으면 **아무도 쓰지 않은 공백**이 클립보드에 들어간다.
+// wrap 이어짐도 뒤 빈칸을 trim해 잇는다(대가는 아래 「알려진 대가」 테스트가 값으로 박아 둔다).
+test "넓히는 resize 뒤 커서 줄을 복사해도 패딩이 안 낀다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    const written = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"; // 46자 = 10칸에서 자동 줄바꿈 5행
+    try c.write(written);
+    try c.resize(20, 4);
+
+    c.selectWordAt(1, 1, &.{});
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings(written, text);
+}
+
+// **대가를 값으로 박아 둔다.** 진짜로 뒤가 공백인 채 wrap된 줄은 그 공백을 잃는다. 주석의
+// 주장이 아니라 판정자로 남겨야, 나중에 이 줄을 되돌릴 사람이 무엇을 사는지 본다.
+test "알려진 대가: 뒤가 공백인 채 wrap된 줄은 그 공백을 잃는다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    try c.write("ab        cd"); // "ab"+공백 8칸으로 10칸을 채우고 wrap, 다음 행에 "cd"
+    try std.testing.expect(c.screen.wrapped[0]);
+
+    c.selectWordAt(0, 0, &.{}); // 단어 경계는 wrap을 타고 "cd"까지 간다(soft-wrap = 한 논리 줄)
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("abcd", text); // 이 수정 전에는 "ab" + 공백 8칸 + "cd" 였다
+}
+
 test "find span은 scroll 후 좌표계라 스크롤 전 화면과 어긋난다(host-backed 대조의 근거)" {
     const allocator = std.testing.allocator;
     var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });

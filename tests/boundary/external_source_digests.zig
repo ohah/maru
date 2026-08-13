@@ -334,11 +334,16 @@ pub const inventory = [_]Proof{
     // 편집기 뷰별 랩 override(`Term.rt.editor_wrap`)와 `toggle_editor_wrap` dispatch가 붙어 또 바뀐다.
     // count는 2 그대로다 — 필드 하나와 switch 분기 한 줄이고 필드를 이름으로 읽지 않는다.
     //
-    // 로컬 세션이 원격으로 오판되던 결함을 고치며 또 바뀐다: `localHostname`이 자리 잡지 않은 이름
-    // (빈 값·`localhost`)을 더는 캐시하지 않고(+ 순수 판정 `hostnameIsSettled`), SCM 빈 안내의 문구
-    // 선택이 `git_ops.scmEmptyNotice` 호출 한 줄로 줄었으며, 재현 테스트가 추가됐다. count는 2 그대로다 —
-    // 셋 다 `@field` 반사 접근이나 Client 구성·receiver 집합을 건드리지 않는다(문자열 비교·switch·테스트).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "832234d5296c672c5462bb4bbe6de4614291d8394154e3ca0aa9412d188f65b2" },
+    // 로컬 세션이 원격으로 오판되던 결함을 고치며 또 바뀐다: `localHostname`이 hostname을 **더는 캐시하지
+    // 않고**(프로세스 수명 동안 바뀌는 값이라 굳히면 기준값이 낡는다 — 코드 리뷰가 "시작 뒤 변경"을 짚어
+    // 자리 잡음 판정마저 걷어냈다), SCM 빈 안내의 문구 선택이 `git_ops.scmEmptyNotice` 호출 한 줄로 줄었으며,
+    // 재현 테스트가 추가됐다. count는 2 그대로다 — 셋 다 `@field` 반사 접근이나 Client 구성·receiver 집합을
+    // 건드리지 않는다(syscall 한 줄·switch·테스트).
+    // 이어서 `localHostname`이 전역 버퍼 대신 **호출자 버퍼**를 받도록 바뀌며 또 움직인다(코드 리뷰 지적 —
+    // 캐시가 사라진 뒤로는 매 호출이 그 전역을 덮으므로, 값을 잠깐 들고 있는 두 번째 소비처가 조용히 뒤바뀐
+    // 이름을 읽는다). 같은 파일의 `termCwd(self, term, buf)` 관행과 맞췄다. count는 2 그대로다 — 파라미터
+    // 하나와 호출부 한 줄이고 반사 접근과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d09d94993939487db685164bd97a59f63715144835f655d45f8bc3d5459250f3" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

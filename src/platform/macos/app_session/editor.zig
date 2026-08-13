@@ -17,6 +17,9 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
+const chrome_draw = maru.chrome.draw;
+const chrome_editor = maru.chrome.components.editor_view;
+const chrome_scroll_area = maru.chrome.ui.scroll_area;
 
 /// 읽기 상한. **§3.5는 "열지 않음이 아니라 축소"를 요구하지만**, 축소 단계(①미니맵 ②랩 ③파싱
 /// ④읽기 전용)는 그것을 실제로 만드는 슬라이스에서 붙는다. 그때까지 이 값은 **메모리를 지키는
@@ -86,6 +89,79 @@ fn isWritable(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     return std.c.access(buf[0..path.len :0].ptr, std.posix.W_OK) == 0;
+}
+
+/// 편집기 프레임 한 번의 산출물.
+pub const PaneFrame = struct {
+    /// 배경·스크롤바 quad와 텍스트 op. 호출자가 lowering으로 내린다.
+    ops: []const chrome_draw.Op,
+    ops_len: usize,
+    /// 그린 시각 행 수(스크롤 clamp용).
+    visual_rows: usize,
+};
+
+/// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
+pub const FrameScratch = struct {
+    ops: []chrome_draw.Op,
+    text_bytes: []u8,
+    runs: []chrome_draw.Run,
+    content_rows: []chrome_editor.content.Row,
+    visual_rows: []chrome_editor.visual_map.VisualRow,
+    gutter_rows: []chrome_editor.gutter.Row,
+    row_counts: []u32,
+    count_scratch: []u8,
+};
+
+/// pane 사각과 셀 크기로 편집기 op을 만든다. 반환값은 `scratch.ops[0..ops_len]`이 유효하다는 뜻이다.
+pub fn buildPaneOps(
+    lines: []const []const u8,
+    first_line: usize,
+    wrap: bool,
+    rect: chrome_draw.Rect,
+    cell_w_px: u16,
+    cell_h_px: u16,
+    font_px: u16,
+    scratch: FrameScratch,
+) PaneFrame {
+    // **스크롤바가 자리를 먹는다**(§4.1a) — 본문 위에 겹치면 오른쪽 끝 글자가 막대에 가려지고,
+    // §3.8이 "보이는 것과 파일 내용이 달라지면 안 된다"를 요구하는 편집기에서 그것은 특히 나쁘다.
+    const metrics = chrome_scroll_area.ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
+    const cw: u32 = @max(cell_w_px, 1);
+    const ch: u32 = @max(cell_h_px, 1);
+    const total_cols: u16 = @intCast(@min(
+        (rect.w -| metrics.gutterPx()) / cw,
+        @as(u32, std.math.maxInt(u16)),
+    ));
+    // **남은 폭 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
+    // 요구한 폭보다 넓은 자투리가 생긴다 — 그것을 포함하지 않으면 막대가 오른쪽 끝에서 뜬다.
+    const scrollbar_gutter_px: u32 = rect.w -| (@as(u32, total_cols) * cw);
+    const visible_rows: u16 = @intCast(@min(rect.h / ch, @as(u32, std.math.maxInt(u16))));
+
+    const w = chrome_editor.frame.build(.{
+        .lines = lines,
+        .first_line = first_line,
+        .total_lines = lines.len,
+        .visible_rows = visible_rows,
+        .wrap = wrap,
+        .rect = rect,
+        .cell_w_px = cell_w_px,
+        .cell_h_px = cell_h_px,
+        .font_px = font_px,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = scrollbar_gutter_px,
+        .metrics = metrics,
+    }, .{
+        .ops = scratch.ops,
+        .text_bytes = scratch.text_bytes,
+        .runs = scratch.runs,
+        .content_rows = scratch.content_rows,
+        .visual_rows = scratch.visual_rows,
+        .gutter_rows = scratch.gutter_rows,
+        .row_counts = scratch.row_counts,
+        .count_scratch = scratch.count_scratch,
+    });
+
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows };
 }
 
 /// N1: **편집기 Term** 하나를 만든다 — `createWebTerm`과 대칭이다(web-panel.md §6의 그 구조).

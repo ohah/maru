@@ -17,9 +17,19 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
+const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const chrome_editor = maru.chrome.components.editor_view;
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
+const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
+const renderer = app_session_mod.renderer;
+const diag_gate = app_session_mod.diag_gate;
+
+/// 편집기 pane 렌더 진단 logger. MARU_DEBUG일 때 프레임 한 번의 입력(사각·문서 줄 수)과 산출(op 수·
+/// 시각 행 수·lowering이 만든 셀 수)을 한 줄로 찍는다. "본문이 비었다"의 원인이 ⑴ 사각이 0이라 op이
+/// 안 나온 것인지 ⑵ op은 나왔는데 셀이 0이 된 것인지 ⑶ 셀까지 갔는데 합성이 덮은 것인지를 가른다 —
+/// 셋은 고치는 자리가 전부 다르다. 게이트는 diag.zig 단일 출처.
+const editor_diag = std.log.scoped(.editor);
 
 /// 읽기 상한. **§3.5는 "열지 않음이 아니라 축소"를 요구하지만**, 축소 단계(①미니맵 ②랩 ③파싱
 /// ④읽기 전용)는 그것을 실제로 만드는 슬라이스에서 붙는다. 그때까지 이 값은 **메모리를 지키는
@@ -164,6 +174,96 @@ pub fn buildPaneOps(
     return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows };
 }
 
+/// 한 leaf에 편집기 프레임을 그린 결과. 배경·스크롤바 quad는 이미 `gpu_quads`에 실렸고, 글자는
+/// 호출자가 셀로 내리도록 DrawList로 돌려준다.
+pub const PaneDraw = struct {
+    /// 그린 사각(pane grid). 호출자가 셀 origin으로 쓴다 — quad와 셀이 같은 자리에 서야 한다.
+    rect: maru.session.SplitRect,
+    /// 본문·gutter 글자. **호출자가 소유한다**(`collectShaped`가 가져가거나 직접 해제).
+    dl: renderer.DrawList,
+};
+
+/// leaf 하나에 편집기 프레임을 그린다. 편집기 Term이 아니거나 그릴 것이 없으면 `null`.
+///
+/// **왜 tick에서 뽑아 왔나.** 이 함수가 정하는 셋(사각·quad layer·lowering 격자)은 전부 조용히
+/// 틀릴 수 있는 판정이고, tick 안에 있으면 프레임 전체를 돌리지 않고는 검사할 수 없다. 실제로
+/// 배경 layer 하나가 뒤집혀 본문이 통째로 안 보이는 동안 테스트는 전부 초록이었다 — 아래 테스트가
+/// 그 두 뮤턴트(layer 3·leaf 사각)를 잡는다.
+///
+/// 조립 자체는 `editor_view.frame`이 한다 — Chrome Lab과 **같은 함수**라 캡처가 제품을 예고한다.
+pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, term: *Term) ?PaneDraw {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_lines.len == 0) return null;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+
+    // **본문 사각은 grid다**(`paneGeometry` 단일 출처) — leaf 사각 전체를 쓰면 탭 바와 창 padding까지
+    // 편집기가 덮는다. 터미널 셀·hit-test·IME가 모두 이 grid를 쓰므로, 편집기만 다른 사각을 쓰면
+    // "보이는 자리"와 "누르는 자리"가 갈린다.
+    const rect = pane_ops.paneGeometry(self, leaf_rect).grid;
+    if (rect.w == 0 or rect.h == 0) return null;
+
+    var ops: [1024]chrome_draw.Op = undefined;
+    var text: [16384]u8 = undefined;
+    var runs: [1024]chrome_draw.Run = undefined;
+    var content_rows: [256]chrome_editor.content.Row = undefined;
+    var visual_rows: [256]chrome_editor.visual_map.VisualRow = undefined;
+    var gutter_rows: [256]chrome_editor.gutter.Row = undefined;
+    var counts: [4096]u32 = undefined;
+    var count_scratch: [8192]u8 = undefined;
+
+    // **원점은 0,0이다.** 컴포넌트가 내는 좌표는 pane **상대**여야 한다 — 창 절대 좌표를 주면
+    // `buildTextDrawList`가 셀 인덱스로 바꿀 때 pane 폭을 넘어 글자가 잘린다. 화면상의 자리는
+    // 호출자의 `PanePlacement.origin_*`(= `PaneDraw.rect`)이 정한다.
+    const pf = buildPaneOps(
+        term.rt.editor_lines,
+        term.rt.editor_first_line,
+        self.loaded_config.config.editor.wrap,
+        .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h },
+        @intCast(self.cell_width_px),
+        @intCast(self.cell_height_px),
+        @intCast(self.cell_height_px),
+        .{
+            .ops = &ops,
+            .text_bytes = &text,
+            .runs = &runs,
+            .content_rows = &content_rows,
+            .visual_rows = &visual_rows,
+            .gutter_rows = &gutter_rows,
+            .row_counts = &counts,
+            .count_scratch = &count_scratch,
+        },
+    );
+    if (pf.ops_len == 0) return null;
+
+    const tokens = self.buildChromeTokens();
+    const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
+    // **bottom(2)** — 셀 패스 **앞**에 그리는 유일한 quad 층이다. 0/1/3/4는 셀 뒤라 배경이 자기
+    // 글자를 덮는다(`maru_metal_renderer.m`의 네 패스 배치). 실제로 3으로 두어 편집기 본문이
+    // 통째로 안 보였다 — 배경만 칠해진 빈 pane. §4.1b의 "op 순서상 맨 처음"은 op 배열 안에서만
+    // 참이고, quad와 셀은 파이프라인이 갈리므로 합성 층을 여기서 따로 맞춘다.
+    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, 2);
+
+    const cols: u16 = @intCast(@min(rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
+    const rows: u16 = @intCast(@min(rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
+    const dl = chrome_draw_lowering.buildTextDrawList(
+        self.allocator,
+        pf.ops,
+        &tokens,
+        self.cell_width_px,
+        self.cell_height_px,
+        cols,
+        rows,
+    ) catch |e| {
+        if (diag_gate.maruDebugEnabled()) editor_diag.debug("pane lowering failed: {s}", .{@errorName(e)});
+        return null;
+    };
+    if (diag_gate.maruDebugEnabled()) editor_diag.debug(
+        "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} grid={d}x{d} cells={d}",
+        .{ rect.x, rect.y, rect.w, rect.h, term.rt.editor_lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
+    );
+    return .{ .rect = rect, .dl = dl };
+}
+
 /// N1: **편집기 Term** 하나를 만든다 — `createWebTerm`과 대칭이다(web-panel.md §6의 그 구조).
 /// registry가 `LiveSurface` **editor arm** 슬롯을 소유하고, 그 arm의 sentinel `Surface`(빈 core)를
 /// 제자리 init한다. **PTY spawn·attachSurface·pump가 없다** — 편집기는 셸이 아니다.
@@ -229,6 +329,151 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
 }
 
 const testing = std.testing;
+const builtin = @import("builtin");
+
+// ── `appendPaneFrame` — 편집기 pane 한 프레임의 기하·합성 계약 ────────────────────────────────
+//
+// **이 테스트들이 증명하는 것**: 편집기가 그린 배경이 자기 본문을 덮지 않고, 본문이 pane의 grid에
+// 선다는 것. 왜 중요한가 — 둘 다 **조용히** 틀린다. 배경 layer가 뒤집혀도 op·셀은 정상으로 나오고
+// 좌표도 맞아, 실패는 오직 화면에서만 보인다(실제로 그 상태로 커밋됐고 캡처 픽셀을 재고서야 잡혔다).
+// 사각도 같다 — leaf 전체를 쓰면 탭 바를 덮고 hit-test와 갈리지만 어떤 단위 테스트도 안 깨진다.
+
+/// 헤드리스 세션 + 실제 파일을 연 편집기 Term. 렌더 상태(셀 크기·padding)는 init이 안 세우므로 준다.
+const PaneFixture = struct {
+    session: *AppSession,
+    term: *Term,
+    dir: testing.TmpDir,
+    /// `paneGeometry`가 실제로 줄여야 할 leaf 사각. 아래 테스트가 grid와 이것을 대조한다.
+    leaf_rect: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 },
+
+    fn init(allocator: std.mem.Allocator) !PaneFixture {
+        const io = std.testing.io;
+        var dir = testing.tmpDir(.{});
+        errdefer dir.cleanup();
+        try dir.dir.writeFile(io, .{ .sub_path = "doc.zig", .data = "const a = 1;\nconst b = 2;\nconst c = 3;\n" });
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+        const path = try std.fs.path.join(allocator, &.{ root, "doc.zig" });
+        defer allocator.free(path);
+
+        const session = try allocator.create(AppSession);
+        errdefer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = app_session_mod.abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        });
+        errdefer session.deinit();
+        session.cell_width_px = 8;
+        session.cell_height_px = 16;
+        // **padding을 0이 아닌 값으로 둔다.** 0이면 grid가 leaf 사각과 (탭 바 높이를 빼면) 같아져,
+        // 사각을 잘못 골라도 테스트가 통과한다 — 판정이 성립하려면 둘이 실제로 달라야 한다.
+        session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+
+        const term = try openPathInActivePane(session, path);
+        return .{ .session = session, .term = term, .dir = dir };
+    }
+
+    fn deinit(self: *PaneFixture, allocator: std.mem.Allocator) void {
+        self.session.deinit();
+        allocator.destroy(self.session);
+        self.dir.cleanup();
+    }
+};
+
+test "편집기 배경 quad는 셀 패스 앞 층(2)이다 — 뒤 층이면 자기 본문을 덮는다" {
+    // `maru_metal_renderer.m`은 quad를 네 패스로 그리고 그중 layer 2(bottom)만 셀 패스 **앞**에 온다.
+    // 0/1/3/4는 셀 뒤라 배경이 글자를 덮는다 — 그 파일 주석이 이미 그렇게 적어 두었는데도 3으로
+    // 실려 편집기 본문이 통째로 안 보였다. 이 테스트가 그 뮤턴트를 잡는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // ⑴ 배경이 실제로 나왔다. quad가 0이면 아래 for가 공허하게 통과한다.
+    try testing.expect(fx.session.gpu_quads.items.len > 0);
+    for (fx.session.gpu_quads.items) |q| try testing.expectEqual(@as(u32, 2), q.layer);
+
+    // ⑵ **그리고 글자도 나왔다.** 이것이 없으면 배경만 칠하고 본문을 안 그리는 상태(=우리가 고친
+    //    바로 그 화면)도 초록이 된다 — 두 축을 함께 봐야 판정이 된다.
+    try testing.expect(drawn.dl.cells.len > 0);
+}
+
+test "편집기 본문 사각은 pane grid다 — leaf 사각 전체가 아니다" {
+    // leaf 전체를 쓰면 탭 바와 창 padding까지 배경이 덮고, 터미널 셀·hit-test·IME가 쓰는 사각과
+    // 갈려 "보이는 자리"와 "누르는 자리"가 어긋난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const grid = pane_ops.paneGeometry(fx.session, fx.leaf_rect).grid;
+    // **대조군 먼저.** grid와 leaf가 같은 픽스처에서는 이 테스트가 아무것도 판정하지 못한다.
+    try testing.expect(grid.x != fx.leaf_rect.x or grid.y != fx.leaf_rect.y);
+    try testing.expect(grid.w != fx.leaf_rect.w or grid.h != fx.leaf_rect.h);
+
+    try testing.expectEqual(grid.x, drawn.rect.x);
+    try testing.expectEqual(grid.y, drawn.rect.y);
+    try testing.expectEqual(grid.w, drawn.rect.w);
+    try testing.expectEqual(grid.h, drawn.rect.h);
+}
+
+test "편집기 배경 quad와 글자 셀은 같은 자리에 선다 — origin이 갈리면 배경만 옮겨간다" {
+    // 배경은 GpuQuad(절대 px), 글자는 셀(origin + col×cw)이라 **서로 다른 경로로** 화면에 간다.
+    // 두 origin이 갈리면 배경이 엉뚱한 데 칠해지는데, 각자만 보는 테스트로는 안 잡힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 배경 quad(첫 op = surface.build)는 pane 사각을 그대로 덮는다(§4.1b "뷰포트 전체를 덮는다").
+    const bg = fx.session.gpu_quads.items[0];
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.x)), bg.x);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.y)), bg.y);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.w)), bg.w);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.h)), bg.h);
+}
+
+test "편집기가 아닌 Term은 이 경로를 타지 않는다 — 터미널 pane을 덮어쓰지 않는다" {
+    // `appendPaneFrame`은 모든 leaf에 대해 불린다. kind 가드가 없으면 터미널 pane 위에 편집기
+    // 배경을 칠하게 되고, 그 pane의 셀은 그대로라 "터미널이 흐려졌다"로만 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const shell = pane_ops.activePane(fx.session).terms.items[0];
+    try testing.expect(shell.kind != .editor); // 픽스처 전제: 첫 Term은 편집기가 아니다
+    fx.session.gpu_quads.clearRetainingCapacity();
+    try testing.expect(appendPaneFrame(fx.session, fx.leaf_rect, shell) == null);
+    try testing.expectEqual(@as(usize, 0), fx.session.gpu_quads.items.len); // quad도 안 남긴다
+}
+
+test "사각이 0으로 접히면 그리지 않는다 — 빈 DrawList를 흘리지 않는다" {
+    // padding이 pane보다 크거나 창이 접히는 순간이 실재한다. 그때 op을 내면 셀 격자가 0열/0행이라
+    // lowering이 실패하거나 빈 프레임이 합성에 들어간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    try testing.expect(appendPaneFrame(fx.session, .{ .x = 0, .y = 0, .w = 0, .h = 0 }, fx.term) == null);
+    try testing.expectEqual(@as(usize, 0), fx.session.gpu_quads.items.len);
+}
 
 test "빈 파일도 열린다 — 기존 readFileAlloc은 null을 준다" {
     const io = std.testing.io;

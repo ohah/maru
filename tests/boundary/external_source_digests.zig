@@ -318,9 +318,10 @@ pub const inventory = [_]Proof{
     // SurfaceKind에 `editor`가 들어오며 또 바뀐다 — 세션 생존 판정·registry 슬롯·터미널 프레임
     // 스킵 세 곳이 편집기를 함께 본다. count는 2 그대로다(값 비교만 늘었다).
     // N1 편집기 렌더 블록이 배경 quad layer를 3→2로 내리고 본문 사각을 leaf rect 대신
-    // `paneGeometry(...).grid`로 바꾸며 또 바뀐다(+ MARU_DEBUG 계측 한 줄). count는 2 그대로다 —
-    // 새 코드는 필드를 이름으로 읽지 않고 기하 값과 상수만 다룬다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "1f483a8fda54ca4327e58c6f438785cee97184cc53b1f5d133cf1d8d09c09a56" },
+    // `paneGeometry(...).grid`로 바꾸며 바뀐다. 이어서 그 블록을 `editor_ops.appendPaneFrame`으로
+    // 통째로 옮기고(테스트 가능한 seam), deinit의 Term 소유 해제 목록에 편집기 문서 해제를 더하며
+    // 또 바뀐다. count는 2 그대로다 — 옮긴 코드도 새 코드도 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "06d72354b0782da0362d8ea9295ef5541d36d081d95b2e8bc138c551b2abf6da" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

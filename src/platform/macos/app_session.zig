@@ -1343,6 +1343,11 @@ const frametime_slow_ns: i128 = 8 * std.time.ns_per_ms;
 // (`resize_delivery_failures`)와 같은 도메인 데이터를 헤드리스 테스트가 읽는다(관측 가능성 원칙).
 // 게이트는 diag.zig 단일 출처.
 const resize_diag = std.log.scoped(.resize);
+// N1 편집기 렌더 진단 logger. MARU_DEBUG일 때 편집기 pane 프레임 한 번의 입력(leaf 사각·문서 줄 수)과
+// 산출(op 수·시각 행 수·lowering이 만든 셀 수)을 한 줄로 찍는다. "본문이 비었다"의 원인이 ⑴ 사각이
+// 0이라 op이 안 나온 것인지 ⑵ op은 나왔는데 lowering에서 셀이 0이 된 것인지 ⑶ 셀까지 갔는데 합성이
+// 덮은 것인지를 가른다 — 셋은 고치는 자리가 전부 다르다. 게이트는 diag.zig 단일 출처(sync_diag와 동형).
+const editor_diag = std.log.scoped(.editor);
 pub const diag_gate = @import("diag.zig");
 
 fn nsToMs(ns: i128) f64 {
@@ -13783,7 +13788,8 @@ pub const AppSession = struct {
                 //
                 //    **터미널 셀과 겹치지 않는다.** `activeTermIsTerminal`이 `== .terminal` 양성
                 //    판정이라 편집기가 활성이면 활성 셀 수집이 아예 돌지 않는다(web과 같은 취급).
-                //    그래서 painter 순서를 다툴 상대가 없다.
+                //    그래서 **터미널과는** painter 순서를 다툴 상대가 없다 — 다만 편집기 배경 quad와
+                //    자기 글자 셀은 서로 다른 파이프라인이라 그 z는 아래 layer 인자가 정한다.
                 //
                 //    조립은 `editor_view.frame`이 한다 — Chrome Lab과 **같은 함수**라 캡처가 제품을
                 //    예고한다. 여기서는 pane 기하를 넘기고 나온 op을 lowering에 태우기만 한다.
@@ -13792,6 +13798,11 @@ pub const AppSession = struct {
                         const term = lr.leaf.activeTerm();
                         if (term.kind != .editor) continue;
                         if (term.rt.editor_lines.len == 0) continue;
+                        // **본문 사각은 grid다**(`paneGeometry` 단일 출처) — leaf 사각 전체를 쓰면 탭 바와
+                        // 창 padding까지 편집기가 덮는다. 터미널 셀·hit-test·IME가 모두 이 grid를 쓰므로
+                        // 편집기만 다른 사각을 쓰면 "보이는 자리"와 "누르는 자리"가 갈린다.
+                        const ed_rect = pane_ops.paneGeometry(self, lr.rect).grid;
+                        if (ed_rect.w == 0 or ed_rect.h == 0) continue;
 
                         var ed_ops: [1024]chrome.draw.Op = undefined;
                         var ed_text: [16384]u8 = undefined;
@@ -13809,7 +13820,7 @@ pub const AppSession = struct {
                             term.rt.editor_lines,
                             term.rt.editor_first_line,
                             self.loaded_config.config.editor.wrap,
-                            .{ .x = 0, .y = 0, .w = lr.rect.w, .h = lr.rect.h },
+                            .{ .x = 0, .y = 0, .w = ed_rect.w, .h = ed_rect.h },
                             @intCast(self.cell_width_px),
                             @intCast(self.cell_height_px),
                             @intCast(self.cell_height_px),
@@ -13828,10 +13839,12 @@ pub const AppSession = struct {
 
                         const ed_tokens = self.buildChromeTokens();
                         const ed_draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
-                        // **over(3)** — 편집기 배경은 pane 배경 위에 와야 그 아래가 안 비친다.
-                        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{ed_draws}, &ed_tokens, lr.rect.x, lr.rect.y, &self.gpu_quads, 3);
-                        const ed_cols: u16 = @intCast(@min(lr.rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
-                        const ed_rows: u16 = @intCast(@min(lr.rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
+                        // **bottom(2)** — 셀 패스 **앞**에 그리는 유일한 quad 층이다. 0/1/3/4는 셀 뒤라
+                        // 배경이 자기 글자를 덮는다(`maru_metal_renderer.m`의 네 패스 배치. 실제로 3으로
+                        // 두어 편집기 본문이 통째로 안 보였다 — 배경만 칠해진 빈 pane).
+                        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{ed_draws}, &ed_tokens, ed_rect.x, ed_rect.y, &self.gpu_quads, 2);
+                        const ed_cols: u16 = @intCast(@min(ed_rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
+                        const ed_rows: u16 = @intCast(@min(ed_rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
                         if (chrome_draw_lowering.buildTextDrawList(
                             self.allocator,
                             pf.ops,
@@ -13841,12 +13854,18 @@ pub const AppSession = struct {
                             ed_cols,
                             ed_rows,
                         )) |ed_dl| {
+                            if (diag_gate.maruDebugEnabled()) editor_diag.debug(
+                                "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} grid={d}x{d} cells={d}",
+                                .{ ed_rect.x, ed_rect.y, ed_rect.w, ed_rect.h, term.rt.editor_lines.len, pf.ops_len, pf.visual_rows, ed_cols, ed_rows, ed_dl.cells.len },
+                            );
                             self.collectShaped(&collected, ed_dl, pane_frame_builder, .{ .pane = .{
-                                .origin_x = lr.rect.x,
-                                .origin_y = lr.rect.y,
+                                .origin_x = ed_rect.x,
+                                .origin_y = ed_rect.y,
                                 .colors = tabbar_colors,
                             } });
-                        } else |_| {}
+                        } else |e| {
+                            if (diag_gate.maruDebugEnabled()) editor_diag.debug("pane lowering failed: {s}", .{@errorName(e)});
+                        }
                     }
                 }
 

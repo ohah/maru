@@ -797,7 +797,8 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
     const path = std.mem.span(raw);
     if (path.len == 0) return;
 
-    var opened = editor_ops.openPath(self.io, self.allocator, path) catch |e| {
+    // **연 파일을 활성 pane에 편집기 Term으로 붙인다** — N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
+    _ = editor_ops.openPathInActivePane(self, path) catch |e| {
         // **왜 못 열었는지 구분해서 알린다.** §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고
         // 정했으므로, 나머지 이유가 같은 메시지로 뭉개지면 그 계약을 확인할 수 없다.
         self.showNotice(switch (e) {
@@ -808,16 +809,7 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
         });
         return;
     };
-    defer opened.deinit(self.allocator);
-
-    var buf: [160]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "네이티브 편집기: {d}줄 · {s} · {s}{s}", .{
-        opened.file.lineCount(),
-        @tagName(opened.file.doc.format.dominant_ending),
-        if (opened.file.doc.read_only) "읽기 전용" else "쓰기 가능",
-        if (opened.file.doc.format.has_bom) " · BOM" else "",
-    }) catch return;
-    self.showNotice(msg);
+    self.metal_dirty = true;
 }
 
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {

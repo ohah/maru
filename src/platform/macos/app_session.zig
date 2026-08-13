@@ -13779,6 +13779,77 @@ pub const AppSession = struct {
                 var tab_title_batch: pane_ops.TabTitleBatch = .{};
                 defer tab_title_batch.deinit(self.allocator);
 
+                // 0) 편집기 Term이 활성인 pane에 편집기 프레임을 그린다(N1 — "화면에 파일이 뜬다").
+                //
+                //    **터미널 셀과 겹치지 않는다.** `activeTermIsTerminal`이 `== .terminal` 양성
+                //    판정이라 편집기가 활성이면 활성 셀 수집이 아예 돌지 않는다(web과 같은 취급).
+                //    그래서 painter 순서를 다툴 상대가 없다.
+                //
+                //    조립은 `editor_view.frame`이 한다 — Chrome Lab과 **같은 함수**라 캡처가 제품을
+                //    예고한다. 여기서는 pane 기하를 넘기고 나온 op을 lowering에 태우기만 한다.
+                if (self.cell_width_px > 0 and self.cell_height_px > 0) {
+                    for (leaf_rects.items) |lr| {
+                        const term = lr.leaf.activeTerm();
+                        if (term.kind != .editor) continue;
+                        if (term.rt.editor_lines.len == 0) continue;
+
+                        var ed_ops: [1024]chrome.draw.Op = undefined;
+                        var ed_text: [16384]u8 = undefined;
+                        var ed_runs: [1024]chrome.draw.Run = undefined;
+                        var ed_content_rows: [256]chrome.components.editor_view.content.Row = undefined;
+                        var ed_visual_rows: [256]chrome.components.editor_view.visual_map.VisualRow = undefined;
+                        var ed_gutter_rows: [256]chrome.components.editor_view.gutter.Row = undefined;
+                        var ed_counts: [4096]u32 = undefined;
+                        var ed_count_scratch: [8192]u8 = undefined;
+
+                        // **원점은 0,0이다.** 컴포넌트가 내는 좌표는 pane **상대**여야 한다 —
+                        // 창 절대 좌표를 주면 `buildTextDrawList`가 셀 인덱스로 바꿀 때 pane 폭을
+                        // 넘어 글자가 잘린다. 화면상의 자리는 아래 `PanePlacement.origin_*`이 정한다.
+                        const pf = editor_ops.buildPaneOps(
+                            term.rt.editor_lines,
+                            term.rt.editor_first_line,
+                            self.loaded_config.config.editor.wrap,
+                            .{ .x = 0, .y = 0, .w = lr.rect.w, .h = lr.rect.h },
+                            @intCast(self.cell_width_px),
+                            @intCast(self.cell_height_px),
+                            @intCast(self.cell_height_px),
+                            .{
+                                .ops = &ed_ops,
+                                .text_bytes = &ed_text,
+                                .runs = &ed_runs,
+                                .content_rows = &ed_content_rows,
+                                .visual_rows = &ed_visual_rows,
+                                .gutter_rows = &ed_gutter_rows,
+                                .row_counts = &ed_counts,
+                                .count_scratch = &ed_count_scratch,
+                            },
+                        );
+                        if (pf.ops_len == 0) continue;
+
+                        const ed_tokens = self.buildChromeTokens();
+                        const ed_draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
+                        // **over(3)** — 편집기 배경은 pane 배경 위에 와야 그 아래가 안 비친다.
+                        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{ed_draws}, &ed_tokens, lr.rect.x, lr.rect.y, &self.gpu_quads, 3);
+                        const ed_cols: u16 = @intCast(@min(lr.rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
+                        const ed_rows: u16 = @intCast(@min(lr.rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
+                        if (chrome_draw_lowering.buildTextDrawList(
+                            self.allocator,
+                            pf.ops,
+                            &ed_tokens,
+                            self.cell_width_px,
+                            self.cell_height_px,
+                            ed_cols,
+                            ed_rows,
+                        )) |ed_dl| {
+                            self.collectShaped(&collected, ed_dl, pane_frame_builder, .{ .pane = .{
+                                .origin_x = lr.rect.x,
+                                .origin_y = lr.rect.y,
+                                .colors = tabbar_colors,
+                            } });
+                        } else |_| {}
+                    }
+                }
+
                 // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
                 for (leaf_rects.items) |lr| {

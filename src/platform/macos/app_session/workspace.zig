@@ -77,7 +77,7 @@ pub fn resolveWorkspaceScope(self: *AppSession) CloseScope {
 /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
 /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
 fn windowCloseTarget(term: *app_session_mod.Term) bool {
-    return term.rt.live_initialized and term.kind != .web and !term.rt.ended_placeholder and !term.rt.close_complete;
+    return term_ops.hasClosablePty(term);
 }
 
 fn windowCloseGraphTarget(term: *app_session_mod.Term, preparing: bool) bool {

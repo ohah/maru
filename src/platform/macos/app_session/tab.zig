@@ -1374,6 +1374,10 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 if (e.kind != .diff) restored_active += 1;
                 continue;
             }
+            // **편집기 Term은 아직 여기 오지 않는다** — 저장 경로에 들어간 적이 없어 복원 목록에
+            // 나타날 수 없다. 복원이 붙을 때(workspace-restore) "편집기가 활성 후보인가"를 함께
+            // 정하고 이 조건을 고쳐야 한다 — 빠뜨리면 복원 후 엉뚱한 탭이 활성이 되고, 원인을
+            // 찾기 어렵다(`kind == .web` 비교라 컴파일러가 안 잡는다).
             if (t.kind != .web) restored_active += 1;
         }
         // **범위로 clamp한다.** "활성이 브라우저면 다음 persisted Term을 가리킨다"는 **다음이 있을 때만** 참이다 —

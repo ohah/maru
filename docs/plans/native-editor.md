@@ -184,7 +184,7 @@
 | [file-panel.md](../file-panel.md) §1 (탭 계약) | **파일 Term을 `RenameTarget.term`에서 제외**한다. 현재 "파일 탭은 터미널 탭 계약을 그대로 쓴다"라 예외가 없어, 파일 탭 라벨을 임의로 바꿀 수 있고 사용자가 **디스크 rename으로 착각**한다(native-editor §2.3) | N1 |
 | [link-detection.md](../link-detection.md) | 편집기 pane에서의 Cmd+클릭이 터미널 링크 열기와 겹치는 경계 | N4(정의로 이동이 붙을 때) |
 | [file-panel.md](../file-panel.md) | ⑴ **"파일 1개 = Term 1개" 불변식에 명시 명령 예외 추가**(같은 파일 두 뷰 — native-editor §2.4, **2026-08-09 사용자 결정**). "경로로 열면 기존 Term 활성화"는 유지. ⑵ **미저장 내용의 디스크 백업**(hot exit 상당) 도입 — **2026-08-09 사용자 결정**. 계약은 native-editor §3.10(전체 내용·debounce+종료 시·fingerprint 동봉·백업 존재=비정상 종료·undo는 제외)이고 **파일 경로와 정책은 이 문서가 소유**한다 | ⑴ N2 · ⑵ N2 |
-| [workspace-restore.md](../workspace-restore.md) | 파일 Term의 커서·스크롤·접힘 복원 범위(native-editor §12) | 후속 |
+| [workspace-restore.md](../workspace-restore.md) | 파일 Term의 커서·스크롤·접힘 복원 범위(native-editor §12). **그때 함께 정해야 하는 자리**: `app_session/tab.zig`의 복원 활성 인덱스 보정(`kind != .web` 카운트) — 편집기가 활성 후보인가를 정해 조건을 고쳐야 하고, 빠뜨리면 복원 후 엉뚱한 탭이 활성이 된다(`==` 비교라 컴파일러가 안 잡는다) | 후속 |
 | [performance-budget.md](../performance-budget.md) | 편집기 프레임 예산 항목(native-editor §10). **N0 철회로 선행 baseline은 없어졌지만 이 갱신은 남는다** — 예산은 CM6 측정이 아니라 기존 프레임 예산에서 유도하는 것이라 baseline과 무관하다 | N1(뷰가 프레임에 들어갈 때) |
 
 **중간에 멈춰도 제품이 온전한 지점은 N1.5와 N5다.** N2~N4 사이에서 멈추면 "일부 파일만 네이티브"라는 상태가

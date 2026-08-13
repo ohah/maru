@@ -332,6 +332,15 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
     try std.testing.expectEqual(@as(u8, 0x05), record.flags);
     try std.testing.expect(!std.mem.allEqual(u8, &(try inputDigest(value)), 0));
     try std.testing.expect(!std.mem.allEqual(u8, &(try fingerprint(value)), 0));
+    var expected_record = record;
+    expected_record.incident_id = .{ .app_instance_nonce = 1, .sequence = 1 };
+    const expected_payload = try incident.encodeIncident(expected_record);
+    var expected_hasher = std.crypto.hash.Blake3.init(.{});
+    expected_hasher.update("maru.incident-input.v1");
+    expected_hasher.update(&expected_payload);
+    var expected_digest: Digest = undefined;
+    expected_hasher.final(&expected_digest);
+    try std.testing.expectEqualSlices(u8, &expected_digest, &(try inputDigest(value)));
 
     const base_digest = try inputDigest(value);
     const base_fingerprint = try fingerprint(value);
@@ -355,12 +364,18 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
         try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(changed)));
     }
 
-    var outbound = value;
-    outbound.outbound_phase_raw = @intFromEnum(incident.OutboundPhase.partial);
-    outbound.outbound_length = 2;
-    outbound.outbound_offset = 1;
-    try std.testing.expect(!std.mem.eql(u8, &base_digest, &(try inputDigest(outbound))));
-    try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(outbound)));
+    var outbound_base = value;
+    outbound_base.outbound_phase_raw = @intFromEnum(incident.OutboundPhase.queued);
+    outbound_base.outbound_length = 1;
+    const outbound_base_digest = try inputDigest(outbound_base);
+    var outbound_cases = [_]IncidentInput{outbound_base} ** 3;
+    outbound_cases[0].outbound_phase_raw = @intFromEnum(incident.OutboundPhase.partial);
+    outbound_cases[1].outbound_offset = 1;
+    outbound_cases[2].outbound_length = 2;
+    for (outbound_cases) |changed| {
+        try std.testing.expect(!std.mem.eql(u8, &outbound_base_digest, &(try inputDigest(changed))));
+        try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(changed)));
+    }
 
     var identity_cases = [_]IncidentInput{value} ** 4;
     identity_cases[0].reason_raw = @intFromEnum(incident.ConnectionReason.read_timeout);
@@ -374,14 +389,41 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
     // connection-only wire v1에서는 scope 변화가 closed validation에서 거부된다.
     try std.testing.expectError(error.InvalidInput, fingerprint(identity_cases[3]));
 
-    inline for (std.meta.fields(incident.ConnectionReason)) |field| {
-        const reason: incident.ConnectionReason = @enumFromInt(field.value);
+    const decision_cases = [_]struct {
+        reason: incident.ConnectionReason,
+        expected: bool,
+        disposition: incident.Disposition,
+    }{
+        .{ .reason = .connection_eof, .expected = true, .disposition = .reconnect },
+        .{ .reason = .read_timeout, .expected = true, .disposition = .reconnect },
+        .{ .reason = .transport_read_failure, .expected = true, .disposition = .reconnect },
+        .{ .reason = .planned_upgrade_reconnect, .expected = true, .disposition = .reconnect },
+        .{ .reason = .capability_incompatible, .expected = true, .disposition = .no_retry },
+        .{ .reason = .outbound_partial_write, .expected = true, .disposition = .reconnect },
+        .{ .reason = .outbound_write_ambiguous, .expected = true, .disposition = .reconnect },
+        .{ .reason = .event_queue_overflow, .expected = false, .disposition = .reconnect },
+        .{ .reason = .local_queue_exhausted, .expected = false, .disposition = .reconnect },
+        .{ .reason = .local_resource_exhausted, .expected = true, .disposition = .reconnect },
+        .{ .reason = .frame_malformed, .expected = false, .disposition = .reconnect },
+        .{ .reason = .response_correlation_lost, .expected = false, .disposition = .reconnect },
+        .{ .reason = .peer_contract_violation, .expected = false, .disposition = .reconnect },
+        .{ .reason = .local_invariant_violation, .expected = false, .disposition = .reconnect },
+        .{ .reason = .external_transfer_quarantined, .expected = false, .disposition = .reconnect },
+        .{ .reason = .attachment_cleanup_failed, .expected = false, .disposition = .reconnect },
+    };
+    try std.testing.expectEqual(std.meta.fields(incident.ConnectionReason).len, decision_cases.len);
+    for (decision_cases) |case| {
+        const reason = case.reason;
         var decision_case = value;
         decision_case.reason_raw = @intFromEnum(reason);
         const decision = incident.decisionForReason(reason);
-        decision_case.disposition_raw = @intFromEnum(decision.disposition);
+        try std.testing.expectEqual(case.expected, decision.expected);
+        try std.testing.expectEqual(case.disposition, decision.disposition);
+        decision_case.disposition_raw = @intFromEnum(case.disposition);
         const decision_record = try serviceInput(decision_case);
-        try std.testing.expectEqual(decision.expected, decision_record.flags & 1 != 0);
-        try std.testing.expectEqual(@intFromEnum(decision.disposition), decision_record.disposition_raw);
+        try std.testing.expectEqual(case.expected, decision_record.flags & 1 != 0);
+        try std.testing.expectEqual(@intFromEnum(case.disposition), decision_record.disposition_raw);
+        try std.testing.expect(!std.mem.allEqual(u8, &(try inputDigest(decision_case)), 0));
+        try std.testing.expect(!std.mem.allEqual(u8, &(try fingerprint(decision_case)), 0));
     }
 }

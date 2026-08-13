@@ -175,6 +175,10 @@ unsigned int maru_mobile_view_offset(void);
 /// 관성만 플랫폼이 갖는다: 손을 뗀 뒤 흘리는 것은 여전히 `maru_mobile_scroll` 로 넣는다.
 void maru_mobile_pointer(unsigned int phase, float x, float y, unsigned long long time_ms);
 
+/// 선택 범위(뷰포트 기준, 각 16비트: start_row·start_col·end_row·end_col). **끝 열은 포함**
+/// 이다. 선택이 없으면 전부 1. host 가 복사 버튼 자리를 잡을 때 쓴다.
+unsigned long long maru_mobile_selection_span(void);
+
 /// 선택이 살아 있는가(1/0). host 가 복사 버튼을 띄울지 정할 때 쓴다.
 unsigned int maru_mobile_has_selection(void);
 

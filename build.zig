@@ -2247,6 +2247,65 @@ pub fn build(b: *std.Build) void {
     );
     session_host_cr0b_step.dependOn(session_host_cr3b_r1_step);
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr0b_optimize| {
+        const cr0b_binding_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/observability/incident_binding_contract.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b binding 계약은"},
+        });
+        const run_cr0b_binding_contract_tests = b.addRunArtifact(cr0b_binding_contract_tests);
+        run_cr0b_binding_contract_tests.addArg("--maru-expect-tests=6");
+        run_cr0b_binding_contract_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_binding_contract_tests.step);
+        const cr0b_host_pool_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_adapter.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b HostPool publication은"},
+        });
+        const run_cr0b_host_pool_tests = b.addRunArtifact(cr0b_host_pool_tests);
+        run_cr0b_host_pool_tests.addArg("--maru-expect-tests=11");
+        run_cr0b_host_pool_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_host_pool_tests.step);
+        const cr0b_client_slot_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_adapter.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b ClientSlot binding은"},
+        });
+        const run_cr0b_client_slot_tests = b.addRunArtifact(cr0b_client_slot_tests);
+        run_cr0b_client_slot_tests.addArg("--maru-expect-tests=7");
+        run_cr0b_client_slot_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_client_slot_tests.step);
+        const cr0b_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b AppSession publication은"},
+        });
+        cr0b_app_session_tests.root_module.link_libc = true;
+        cr0b_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr0b_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr0b_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr0b_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr0b_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr0b_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        const run_cr0b_app_session_tests = b.addRunArtifact(cr0b_app_session_tests);
+        // app_session root/import sentinel 3개와 이름 있는 제품 증거 4개를 함께 실행한다.
+        run_cr0b_app_session_tests.addArg("--maru-expect-tests=7");
+        run_cr0b_app_session_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_app_session_tests.step);
         const cr0b_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/observability/connection_incident.zig"),

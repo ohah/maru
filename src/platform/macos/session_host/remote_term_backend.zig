@@ -204,6 +204,13 @@ pub const RemoteTermBackend = struct {
         };
     }
 
+    /// restore-first attach-only backend가 같은 pool의 current host publication을 얻은 뒤 새 backend를 만들지 않고
+    /// spawn owner로 승격한다. runtime map과 기존 N-1 lease는 그대로 유지한다.
+    pub fn promoteToSpawnAndAttach(self: *RemoteTermBackend, pool: *AdapterPool) !void {
+        if (self.host_pool != pool or pool.spawnHost() == null) return error.SpawnHostUnavailable;
+        self.mode = .spawn_and_attach;
+    }
+
     /// 남은 원격 runtime을 회수한다(각각 라우팅 표에서 detach + host terminate + client-side deinit). client connection과
     /// surface_runtime은 borrowed라 안 건드린다(소유는 caller).
     pub fn deinit(self: *RemoteTermBackend) void {

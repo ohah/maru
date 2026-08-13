@@ -1231,6 +1231,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "incident_binding" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdStatIdentity" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdSocketIdentity" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "fdStatIdentity" },
@@ -1499,6 +1501,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PublicationProcessIdentity" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publicationProcessIdentity" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "initManagedInPlace" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparationProjectionTestHook" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "preparation_projection_test_hook" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "testing" },
@@ -2378,7 +2384,7 @@ test "CR3a-2c2b3b product process bootstrap stays explicit before AppSession own
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 7),
         countOccurrences(
             app_session,
             "RemoteSessionAdapter.initializeProcessRuntime()",
@@ -7574,10 +7580,14 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     );
     defer allocator.free(pool);
 
-    // 제품 restore caller 두 곳과 C3-3b6 실제 AppSession fixture 두 곳만 허용한다.
+    // 두 제품 caller는 managed publication으로 전환했고 C3-3b6 fixture 둘만 legacy init을 쓴다.
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 2),
         countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(app, "RemoteSessionAdapter.initManagedInPlace("),
     );
     // R1은 pooled adapter의 raw Client escape 두 곳을 closed HostAdapter operation으로 치환한다.
     try std.testing.expectEqual(

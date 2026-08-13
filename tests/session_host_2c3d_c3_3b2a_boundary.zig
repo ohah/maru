@@ -69,7 +69,8 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // C3-3b3의 final-address receipt/permit owner 7개도 service를 모듈당 한 번만 가져오며 inline 중복은 허용하지 않는다.
     // C3-3b5 close authority, backend admission, window close graph가 같은 process-seal 경계를 직접 사용한다.
     // C3-3b6 shutdown owner와 2d2 terminal handoff registry도 같은 process domain을 직접 검증한다.
-    try std.testing.expectEqual(@as(usize, 20), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // CR0b HostAdapter가 final Client incident binding과 HostPool permit을 같은 process domain에 봉인한다.
+    try std.testing.expectEqual(@as(usize, 21), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     const daemon = try readSource(allocator, "src/platform/macos/session_host/daemon.zig");
     defer allocator.free(daemon);
     try std.testing.expectEqual(@as(usize, 0), count(daemon, "@import(\"process_seal_service.zig\")"));

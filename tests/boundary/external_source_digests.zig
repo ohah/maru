@@ -304,7 +304,9 @@ pub const inventory = [_]Proof{
     //
     // N1 네이티브 편집기의 파일 읽기가 붙어 또 바뀐다(`app_session/editor.zig` import + 디버그 훅
     // 플래그 하나 + 훅 호출 한 줄). count는 2 그대로다 — 새 코드는 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "84a7b00e1832a0b7e1dbd08578bd4cfcd42f76fc4bcd5adba07098889ad770cb" },
+    // CR0b는 current와 N-1 restore의 Client 생성 경로를 managed publication으로 바꾼다. 검토된
+    // 생성 경로 두 곳은 그대로이며, digest만 새 prepare -> bind -> commit 순서를 봉인한다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "612efc4addeb4437ab19350c42902cf3572f3c394c55b5a0ef0fc0a4e33cbab6" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

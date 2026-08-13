@@ -139,6 +139,25 @@ pub const RemoteBackendSingletonSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PreparedHostPublicationSealInput = struct {
+    self_addr: u64,
+    pool_addr: u64,
+    host_id: u128,
+    adapter_addr: u64,
+    adapter_generation: u64,
+    owned_raw: u8,
+    lifecycle_raw: u8,
+};
+
+pub const IncidentBindingSealInput = struct {
+    client_addr: u64,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+    wire_major: u16,
+    host_class_raw: u8,
+};
+
 pub const PendingTermCloseSealInput = struct {
     self_addr: u64,
     app_session_addr: u64,

@@ -479,6 +479,22 @@ const background_image_id: u32 = 0xFFFF_FFFF;
 /// not put filesystem work on the render or key-input path.
 pub const AgentSessionArchiveScope = enum { workspace, project, all };
 
+test "CR0b AppSession publication은 current adapter를 shared transaction으로 게시한다" {
+    try AppSession.testCR0bCurrentManagedPublication();
+}
+
+test "CR0b AppSession publication은 restore-first sibling을 current 게시 뒤에도 보존한다" {
+    try AppSession.testCR0bRestoreFirstSiblingPreservation();
+}
+
+test "CR0b AppSession publication은 duplicate host 실패에서 기존 row와 source를 보존한다" {
+    try AppSession.testCR0bDuplicateFailureAtomicity();
+}
+
+test "CR0b AppSession publication은 init 실패 permit을 abort하고 capacity를 재사용한다" {
+    try AppSession.testCR0bInitFailureAbortReuse();
+}
+
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
     const parsed = maru.session.agent_session_archive.Parsed{
         .provider = .codex,
@@ -4852,7 +4868,10 @@ pub const AppSession = struct {
     pub fn ensureRemoteBackend(self: *AppSession) void {
         // 원격 host는 macOS 전용 — Linux ABI 컴파일에선 아래 블록이 comptime 가지치기돼 no-op이다.
         if (is_macos) {
-            if (app_remote_backend != null) return; // 이미 앱 전역으로 세워짐 — 재사용(창마다 새 연결 금지).
+            // restore-first attach-only backend는 존재 자체가 current spawn host 준비 완료를 뜻하지 않는다.
+            // 같은 pool에 current adapter를 게시하고 기존 backend를 승격해야 N-1 runtime과 신규 Term을 함께 보존한다.
+            if (app_remote_backend != null and
+                (app_remote_host_pool == null or app_remote_host_pool.?.spawnHostId() != null)) return;
             // §6 L291: 이미 실패로 판명됐으면 재시도(각 3s backoff) 없이 바로 notice + in-process 폴백.
             if (host_connect_failed) {
                 self.host_connect_notice_pending = true;
@@ -4884,17 +4903,27 @@ pub const AppSession = struct {
                 self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
-            RemoteSessionAdapter.initInPlace(owned_adapter, alloc, &client) catch |err| {
+            RemoteSessionAdapter.initializeProcessRuntime() catch |err| {
+                client.deinit();
+                alloc.destroy(owned_adapter);
+                self.markHostConnectFailedError(.adapter, err);
+                return;
+            };
+            const created_pool = app_remote_host_pool == null;
+            if (created_pool) app_remote_host_pool = RemoteHostPool.init(alloc);
+            publishManagedRemoteAdapter(&app_remote_host_pool.?, owned_adapter, alloc, &client) catch |err| {
+                client.deinit();
+                alloc.destroy(owned_adapter);
+                if (created_pool) {
+                    app_remote_host_pool.?.deinit();
+                    app_remote_host_pool = null;
+                }
                 switch (err) {
                     error.UnsupportedProtocol => {
-                        client.deinit();
-                        alloc.destroy(owned_adapter);
                         self.markHostConnectFailedReason(.adapter, .incompatible_version);
                         return;
                     },
-                    error.IdentityExhausted, error.OutOfMemory => {
-                        client.deinit();
-                        alloc.destroy(owned_adapter);
+                    error.IdentityExhausted, error.OutOfMemory, error.PublicationBusy, error.AdapterGenerationExhausted, error.DuplicateHost, error.InvalidDestination => {
                         self.markHostConnectFailedReason(.adapter, .resource_exhausted);
                         return;
                     },
@@ -4905,16 +4934,16 @@ pub const AppSession = struct {
                 }
             };
             self.bindShutdownManifest(alloc, base, host_id, owned_adapter);
-            app_remote_host_pool = RemoteHostPool.init(alloc);
-            app_remote_host_pool.?.addOwned(host_id, owned_adapter) catch {
-                owned_adapter.deinit();
-                alloc.destroy(owned_adapter);
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
-                self.markHostConnectFailedReason(.adapter, .out_of_memory);
-                return;
-            };
             app_remote_host_pool.?.setSpawnHost(host_id) catch unreachable;
+            if (app_remote_backend) |*backend| {
+                backend.promoteToSpawnAndAttach(&app_remote_host_pool.?) catch {
+                    _ = app_remote_host_pool.?.remove(host_id) catch
+                        @panic("session-host current adapter rollback proof loss");
+                    self.markHostConnectFailedReason(.adapter, .resource_exhausted);
+                    return;
+                };
+                return;
+            }
             // backend 하나가 host pool을 통해 old/current runtime을 host_id별로 라우팅한다.
             app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initWithPool(
                 alloc,
@@ -4922,16 +4951,26 @@ pub const AppSession = struct {
                 &app_remote_host_pool.?,
                 self.runtime,
             ) catch {
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
+                if (created_pool) {
+                    app_remote_host_pool.?.deinit();
+                    app_remote_host_pool = null;
+                } else {
+                    _ = app_remote_host_pool.?.remove(host_id) catch
+                        @panic("session-host current adapter rollback proof loss");
+                }
                 self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
             app_remote_backend.?.claimProductSingleton() catch {
                 app_remote_backend.?.deinit();
                 app_remote_backend = null;
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
+                if (created_pool) {
+                    app_remote_host_pool.?.deinit();
+                    app_remote_host_pool = null;
+                } else {
+                    _ = app_remote_host_pool.?.remove(host_id) catch
+                        @panic("session-host current adapter rollback proof loss");
+                }
                 self.markHostConnectFailedReason(.adapter, .resource_exhausted);
                 return;
             };
@@ -4981,6 +5020,144 @@ pub const AppSession = struct {
         unavailable,
     };
 
+    /// 두 AppSession 진입점이 같은 prepare -> bind -> commit transaction을 써야 restore-first pool과
+    /// current publication이 서로를 덮어쓰지 않는다. 실패는 binding 전 permit을 exact abort한다.
+    fn publishManagedRemoteAdapter(
+        host_pool: *RemoteHostPool,
+        adapter: *RemoteSessionAdapter,
+        node_allocator: std.mem.Allocator,
+        source: *session_host.client.Client,
+    ) !void {
+        var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+        try host_pool.prepareManagedOwnedPublication(source.host_id, adapter, source, &permit);
+        RemoteSessionAdapter.initManagedInPlace(adapter, node_allocator, source, &permit) catch |err| {
+            host_pool.abortOwnedPublication(adapter, &permit);
+            return err;
+        };
+        host_pool.commitOwnedPublication(adapter, &permit);
+    }
+
+    fn testCR0bCurrentManagedPublication() !void {
+        try RemoteSessionAdapter.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var host_pool = RemoteHostPool.init(allocator);
+        defer host_pool.deinit();
+        const adapter = try allocator.create(RemoteSessionAdapter);
+        var pool_owns_adapter = false;
+        errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+        var source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA001,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        try publishManagedRemoteAdapter(&host_pool, adapter, allocator, &source);
+        pool_owns_adapter = true;
+        try std.testing.expect(host_pool.get(0xA001) == adapter);
+        try std.testing.expectEqual(
+            @intFromEnum(maru.observability.incident_binding_contract.HostClass.current),
+            adapter.slot.logicalClientConst().incident_binding.host_class_raw,
+        );
+    }
+
+    fn testCR0bRestoreFirstSiblingPreservation() !void {
+        try RemoteSessionAdapter.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var host_pool = RemoteHostPool.init(allocator);
+        defer host_pool.deinit();
+        const previous = try allocator.create(RemoteSessionAdapter);
+        var previous_owned = false;
+        errdefer if (!previous_owned) allocator.destroy(previous);
+        var previous_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA002,
+            .wire_major = session_host.protocol.version_major - 1,
+            .screen_codec_version = session_host.screen_stream.codec_version - 1,
+            .parser = session_host.framing.FrameParser.initForMajor(allocator, session_host.protocol.version_major - 1),
+        };
+        try publishManagedRemoteAdapter(&host_pool, previous, allocator, &previous_source);
+        previous_owned = true;
+
+        const current = try allocator.create(RemoteSessionAdapter);
+        var current_owned = false;
+        errdefer if (!current_owned) allocator.destroy(current);
+        var current_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA003,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        try publishManagedRemoteAdapter(&host_pool, current, allocator, &current_source);
+        current_owned = true;
+        try std.testing.expect(host_pool.get(0xA002) == previous);
+        try std.testing.expect(host_pool.get(0xA003) == current);
+    }
+
+    fn testCR0bDuplicateFailureAtomicity() !void {
+        try RemoteSessionAdapter.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var host_pool = RemoteHostPool.init(allocator);
+        defer host_pool.deinit();
+        const existing = try allocator.create(RemoteSessionAdapter);
+        var existing_owned = false;
+        errdefer if (!existing_owned) allocator.destroy(existing);
+        var first_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA004,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        try publishManagedRemoteAdapter(&host_pool, existing, allocator, &first_source);
+        existing_owned = true;
+
+        const rejected = try allocator.create(RemoteSessionAdapter);
+        defer allocator.destroy(rejected);
+        var second_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA004,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        defer second_source.deinit();
+        const source_before = second_source;
+        try std.testing.expectError(error.DuplicateHost, publishManagedRemoteAdapter(&host_pool, rejected, allocator, &second_source));
+        try std.testing.expect(host_pool.get(0xA004) == existing);
+        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&second_source)));
+    }
+
+    fn testCR0bInitFailureAbortReuse() !void {
+        try RemoteSessionAdapter.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var host_pool = RemoteHostPool.init(allocator);
+        defer host_pool.deinit();
+        const adapter = try allocator.create(RemoteSessionAdapter);
+        var pool_owns_adapter = false;
+        errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+        var invalid_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA005,
+            .screen_codec_version = session_host.screen_stream.codec_version + 1,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        defer invalid_source.deinit();
+        const source_before = invalid_source;
+        try std.testing.expectError(error.UnsupportedProtocol, publishManagedRemoteAdapter(&host_pool, adapter, allocator, &invalid_source));
+        try std.testing.expect(host_pool.get(0xA005) == null);
+        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&invalid_source)));
+
+        var valid_source: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xA005,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        try publishManagedRemoteAdapter(&host_pool, adapter, allocator, &valid_source);
+        pool_owns_adapter = true;
+        try std.testing.expect(host_pool.get(0xA005) == adapter);
+    }
+
     /// workspace가 가리키는 host가 current spawn host와 다르면 지원하는 N-1 endpoint를 조회해 pool에 추가한다.
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
     pub fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
@@ -5015,14 +5192,28 @@ pub const AppSession = struct {
             connected.deinit();
             return .unavailable;
         };
-        RemoteSessionAdapter.initInPlace(adapter, alloc, &connected) catch |err| {
+        RemoteSessionAdapter.initializeProcessRuntime() catch |err| {
+            self.logRestoreAdapterInitFailure(err);
+            connected.deinit();
+            alloc.destroy(adapter);
+            return .unavailable;
+        };
+        const created_pool = app_remote_host_pool == null;
+        if (created_pool)
+            app_remote_host_pool = RemoteHostPool.init(alloc);
+        publishManagedRemoteAdapter(&app_remote_host_pool.?, adapter, alloc, &connected) catch |err| {
+            connected.deinit();
+            alloc.destroy(adapter);
+            if (created_pool) {
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+            }
             switch (err) {
                 error.UnsupportedProtocol, error.IdentityExhausted, error.OutOfMemory => {
                     self.logRestoreAdapterInitFailure(err);
-                    connected.deinit();
-                    alloc.destroy(adapter);
                     return .unavailable;
                 },
+                error.PublicationBusy, error.AdapterGenerationExhausted, error.DuplicateHost, error.InvalidDestination => return .unavailable,
                 else => {
                     self.markHostConnectFailedError(.adapter, err);
                     @panic("session-host restore adapter ownership invariant violated");
@@ -5030,24 +5221,10 @@ pub const AppSession = struct {
             }
         };
         self.bindShutdownManifest(alloc, base, wanted_host_id, adapter);
-        if (app_remote_host_pool) |*pool| {
-            pool.addOwned(wanted_host_id, adapter) catch {
-                adapter.deinit();
-                alloc.destroy(adapter);
-                return .unavailable;
-            };
-        } else {
+        if (app_remote_backend == null) {
             // current host launch/connect가 실패해도 건강한 N-1 runtime restore는 독립적으로 열려야 한다.
             // attach-only backend가 spawn host 부재를 직접 표현하므로 전역 flag에 기대 구 host를 spawn owner로
             // 위장하지 않는다. 새 Term은 host_connect_failed 때문에 local이고, 직접 remote spawn도 fail-close한다.
-            app_remote_host_pool = RemoteHostPool.init(alloc);
-            app_remote_host_pool.?.addOwned(wanted_host_id, adapter) catch {
-                adapter.deinit();
-                alloc.destroy(adapter);
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
-                return .unavailable;
-            };
             app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
                 alloc,
                 self.io,
@@ -5057,8 +5234,13 @@ pub const AppSession = struct {
             app_remote_backend.?.claimProductSingleton() catch {
                 app_remote_backend.?.deinit();
                 app_remote_backend = null;
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
+                if (created_pool) {
+                    app_remote_host_pool.?.deinit();
+                    app_remote_host_pool = null;
+                } else {
+                    _ = app_remote_host_pool.?.remove(wanted_host_id) catch
+                        @panic("session-host restore adapter rollback proof loss");
+                }
                 return .unavailable;
             };
         }

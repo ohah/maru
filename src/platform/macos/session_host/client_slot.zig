@@ -33,6 +33,7 @@ const response_payload_allocation = @import("response_payload_allocation.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const generation_event_quarantine = @import("generation_event_quarantine.zig");
 const settlement_contract = @import("pending_event_settlement_contract.zig");
+const incident_binding_contract = @import("maru").observability.incident_binding_contract;
 
 const c = std.c;
 extern "c" fn getdtablesize() c_int;
@@ -802,6 +803,11 @@ pub const ClientNode = struct {
 };
 
 pub const AdmissionLifecycle = enum(u8) { open, closed };
+
+pub const PublicationProcessIdentity = struct {
+    pid: u32,
+    process_nonce: u64,
+};
 
 pub const PreparedAdmissionClose = struct {
     pub const Lifecycle = enum(u8) { pristine, prepared, committed, cancelled, consumed };
@@ -10190,6 +10196,49 @@ pub const ClientSlot = struct {
             try productionIssuer(),
             currentPid(),
         );
+    }
+
+    pub fn publicationProcessIdentity() ?PublicationProcessIdentity {
+        const issuer = productionIssuer() catch return null;
+        return .{ .pid = currentPid(), .process_nonce = issuer.process_nonce };
+    }
+
+    pub fn initManagedInPlace(
+        out: *ClientSlot,
+        node_allocator: std.mem.Allocator,
+        source: *client_mod.Client,
+        host_id: u128,
+        host_adapter_generation: u64,
+        host_class: incident_binding_contract.HostClass,
+        publication_out: *incident_binding_contract.IncidentBindingPublication,
+    ) InitError!void {
+        if (host_adapter_generation == 0 or
+            !std.mem.allEqual(u8, std.mem.asBytes(publication_out), 0) or
+            rangesOverlapTyped(publication_out, out) or rangesOverlapTyped(publication_out, source))
+            return error.InvalidDestination;
+        try initInPlace(out, node_allocator, source, host_id);
+        const client = &out.current.client;
+        var binding: incident_binding_contract.IncidentBinding = .{
+            .client_addr = @intFromPtr(client),
+            .host_id = host_id,
+            .host_adapter_generation = host_adapter_generation,
+            .connection_generation = out.current.connection_generation,
+            .wire_major = client.wire_major,
+            .host_class_raw = @intFromEnum(host_class),
+        };
+        binding.seal = process_seal_service.incidentBindingSeal(out.pid, out.process_nonce, .{
+            .client_addr = binding.client_addr,
+            .host_id = binding.host_id,
+            .host_adapter_generation = binding.host_adapter_generation,
+            .connection_generation = binding.connection_generation,
+            .wire_major = binding.wire_major,
+            .host_class_raw = binding.host_class_raw,
+        }) catch @panic("managed Client incident binding seal unavailable");
+        client.incident_binding = binding;
+        publication_out.* = .{
+            .client_addr = binding.client_addr,
+            .binding_seal = binding.seal,
+        };
     }
 
     fn initInPlaceWithIssuer(

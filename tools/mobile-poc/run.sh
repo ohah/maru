@@ -133,15 +133,15 @@ scroll-android)
         sleep 1
     done
     sleep 2
-    "$ADB" exec-out screencap -p > "$OUT/scroll-bottom.png"
+    "$ADB" exec-out screencap -p > "$OUT/scroll-android-bottom.png"
     "$ADB" shell input swipe 500 700 500 1800 300   # 아래로 끄는 손가락 = 과거로
     sleep 2
-    "$ADB" exec-out screencap -p > "$OUT/scroll-up.png"
+    "$ADB" exec-out screencap -p > "$OUT/scroll-android-up.png"
     "$ADB" shell input text "x"                     # 입력하면 바닥으로 스냅(브리지 계약)
     sleep 2
-    "$ADB" exec-out screencap -p > "$OUT/scroll-snap.png"
+    "$ADB" exec-out screencap -p > "$OUT/scroll-android-snap.png"
     "$ADB" logcat -d -s MaruChrome 2>/dev/null | grep MARU_SCROLL | tail -1
-    echo "  scroll-bottom.png · scroll-up.png · scroll-snap.png"
+    echo "  scroll-android-bottom.png · scroll-android-up.png · scroll-android-snap.png"
     ;;
 scroll-ios)
     # **스크롤은 스크롤백이 있어야 볼 게 생긴다.** 데모 대본은 화면보다 짧아 그대로는
@@ -156,16 +156,16 @@ scroll-ios)
     sh "$0" chrome-ios >/dev/null 2>&1
     cp "$BAK" "$BR"
     sleep 3
-    xcrun simctl io "$UDID" screenshot "$OUT/scroll-bottom.png" >/dev/null 2>&1
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-ios-bottom.png" >/dev/null 2>&1
     # 아래로 끄는 손가락 = 과거로. 여러 번 해야 관성까지 눈에 들어온다.
     for _ in 1 2 3; do idb ui swipe 200 700 200 1600 --udid "$UDID" >/dev/null 2>&1; done
     sleep 2
-    xcrun simctl io "$UDID" screenshot "$OUT/scroll-up.png" >/dev/null 2>&1
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-ios-up.png" >/dev/null 2>&1
     # 입력하면 바닥으로 스냅해야 한다(브리지 계약).
     idb ui text "x" --udid "$UDID" >/dev/null 2>&1
     sleep 1
-    xcrun simctl io "$UDID" screenshot "$OUT/scroll-snap.png" >/dev/null 2>&1
-    echo "  scroll-bottom.png · scroll-up.png · scroll-snap.png"
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-ios-snap.png" >/dev/null 2>&1
+    echo "  scroll-ios-bottom.png · scroll-ios-up.png · scroll-ios-snap.png"
     ;;
 features-ios)
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \

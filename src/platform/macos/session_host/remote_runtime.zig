@@ -7387,7 +7387,14 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
     const metadata =
         \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
     ;
-    runPreparationDtoDriftChild(metadata);
+    const child = std.c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) runPreparationDtoDriftChild(metadata);
+    var status: c_int = 0;
+    try testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    const unsigned: c_uint = @bitCast(status);
+    try testing.expect(std.c.W.IFEXITED(unsigned));
+    try testing.expectEqual(@as(u8, 86), @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
 }
 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {

@@ -2114,7 +2114,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    callback-class 전용 filter 1개는 서로 겹치지 않으며 callback-class는 한 번만 실행된다. 전체 `test-session-host`와 기본 test의 core/exe
    aggregate에서는 process-keyed seal을 이미 초기화한 process의 fork가 의도대로 inherited authority를 거부하므로, DTO callback probe를
    aggregate 안에서 중복 실행하지 않는다.
-   대신 같은 exact test 하나만 담은 fresh filtered artifact를 Debug·ReleaseFast 선행 dependency로 실행하고 aggregate는 나머지 행을 다시 검증한다.
+   대신 같은 exact test 하나만 담은 fresh filtered artifact를 Debug·ReleaseFast 선행 dependency로 실행하고, 그 artifact가 fork child의 exact fail-stop status를 검증하며 aggregate는 나머지 행을 다시 검증한다.
    fork probe 선택은 mutable environment marker가 아니라 `builtin.test_functions.len == 1`을 사용하며, build runner의
    `--maru-expect-tests=1` 검사가 fresh artifact의 exact-one 전제를 독립적으로 고정한다.
    따라서 focused gate는 위 unique 39개에 canonical adapter의 fresh replay 1개를 더해 최적화 모드당 실제 40회를 실행한다.

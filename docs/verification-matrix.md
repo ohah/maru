@@ -584,7 +584,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   handoff를 고정한다. 구현은 prepared types 7+lifetime 1+owner 7+preparation 10+hostile 5+fork/proof-loss/abort subprocess 3+
   callback-class 독립 subprocess 1+runtime control 1+queued control 1+real-take adapter 2+boundary 1의 unique exact-39와 canonical adapter fresh replay 1,
   즉 최적화 모드당 actual exact-40 실행이며 non-test topology sentinel은 별도 source assertion이다.
-  callback-class는 여섯 authority mutation 외에 DTO free 중 retained observation content 변조도 실제 callback으로 실행해 `_exit(86)`을 고정한다.
+  callback-class는 여섯 authority mutation 외에 DTO free 중 retained observation content 변조도 fresh artifact의 child callback으로 실행하고 부모가 `_exit(86)`을 고정한다.
   전체 session-host 및 기본 core/exe aggregate는 이미 초기화된 process seal을 fork로 상속하지 않도록 이 DTO probe만 exact-filter fresh artifact를
   Debug·ReleaseFast 선행 실행한다. aggregate copy의 중복 fork 제외는 mutable environment marker가 아니라 compile-time test count로 결정하며,
   fresh artifact는 runner의 `--maru-expect-tests=1`로 exact-one 선택을 별도 검증한다.

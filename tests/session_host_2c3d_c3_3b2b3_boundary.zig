@@ -110,7 +110,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests={d}"));
     // 상속 gate에는 b3의 pointer-free facade와 ClientSlot focused 4개가 추가된다.
     try std.testing.expectEqual(@as(usize, 11), count(gate, ", 1);"));
-    try std.testing.expectEqual(@as(usize, 3), count(gate, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 4), count(gate, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(
         gate,
         "session_host_2c3d_c3_3b2b3_step.dependOn(\n            &run_event_c3_3b2b3_dto_drift_tests.step,\n        );",

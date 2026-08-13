@@ -2936,7 +2936,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_event_c3_3b2b3_dto_drift_child =
             b.addRunArtifact(event_c3_3b2b3_dto_drift_child);
-        run_event_c3_3b2b3_dto_drift_child.expectExitCode(86);
+        run_event_c3_3b2b3_dto_drift_child.addArg("--maru-expect-tests=1");
         run_event_c3_3b2b3_dto_drift_child.setCwd(b.path("."));
         session_host_2c3d_c3_3b2b3_step.dependOn(
             &run_event_c3_3b2b3_dto_drift_child.step,

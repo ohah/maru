@@ -208,9 +208,15 @@ pub fn main(init: std.process.Init) !void {
     // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
     const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;
     const status_bar_height_px: u32 = if (scenario_id == .sidebar_status_strip) 26 else 0;
-    // SB1 §5.3: 사이드바 표면을 자를 구간. 제품에서는 `sidebarScissorPx`가 뷰포트에서 뽑지만 Lab에는 헤더도
-    // 사이드바 셀도 없으므로 시나리오가 같은 계약의 값을 직접 준다 — `[0, 창 높이 − 상태바)`.
-    const sidebar_scissor_top_px: u32 = 0;
+    // SB1 §5.3: 사이드바 표면을 자를 구간. 제품에서는 `sidebarScissorPx`가 뷰포트에서 뽑지만 Lab에는 사이드바
+    // 셀이 없으므로 시나리오가 같은 계약의 값을 직접 준다 — `[헤더 아래, 창 높이 − 상태바)`.
+    //
+    // **`top`이 0이 아닌 것이 이 시나리오의 요점 절반이다.** `.m`은 under quad(layer 0)에 `bottom`만 걸고
+    // `top`은 **일부러 안 건다** — 그 버킷에는 스크롤을 타지 않는 헤더 고정 quad가 섞여 있어서다(§5.3).
+    // top을 0으로 두면 그 결정이 그림에 나타나지 않아, 누가 셀과 통일한답시고 `scissor_top`을 쓰게 바꿔도
+    // 골든이 침묵한다. 0이 아닌 값을 실어야 아래 헤더 quad가 그 회귀에서 사라지고 골든이 red가 된다.
+    const sidebar_header_px: u32 = 60; // 제품 사이드바 헤더(검색 줄 + 아이콘 줄)에 해당하는 자리
+    const sidebar_scissor_top_px: u32 = if (scenario_id == .sidebar_status_strip) sidebar_header_px else 0;
     const sidebar_scissor_bottom_px: u32 = if (scenario_id == .sidebar_status_strip)
         @as(u32, @intFromFloat(viewport.height)) - status_bar_height_px
     else
@@ -309,6 +315,28 @@ pub fn main(init: std.process.Init) !void {
             .border_color = 0,
             .gradient_kind = 0,
             .layer = 0, // under — 제품의 사이드바 밴드와 같은 버킷
+        });
+
+        // SB1 §5.3 나머지 절반 — **헤더 안에 있는 layer 0 quad.** 제품에서 이 자리에 오는 것은 검색 줄
+        // 밑줄(`y = header − 두께`)이고, 헤더 아이콘 호버 배경·접힘 토글 호버도 같은 버킷·같은 성격이다:
+        // **스크롤을 타지 않는 고정 표면**이라 `sidebarScrollClipQuad`를 지나지 않는다.
+        //
+        // 그래서 `.m`이 under quad에 `scissor_top`을 걸면 이것들이 통째로 사라진다. 셀 쪽에서 같은 top이
+        // 무해한 이유는 헤더 glyph가 **터미널 셀 패스**라 그 구간에 없기 때문이고, quad는 사정이 반대다.
+        // 이 quad가 골든에 남아 있는 한 그 비대칭이 지켜진다 — top을 쓰도록 되돌리면 여기가 빈다.
+        const underline_bg: u32 = 0xFF00_0000 | (lift(base.r, 96) << 16) | (lift(base.g, 96) << 8) | lift(base.b, 96);
+        try gpu_quads.append(allocator, .{
+            .x = 0,
+            .y = @as(f32, @floatFromInt(sidebar_header_px)) - 8.0, // 헤더 하단에 붙는다(제품 밑줄과 같은 자리)
+            .w = @floatFromInt(sidebar_width_px), // 밑줄은 사이드바 전폭 — 밴드와 달리 세로로 갈려 crop이 안 겹친다
+            .h = 8.0,
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = underline_bg,
+            .fill_color1 = underline_bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 0, // under — 밴드와 같은 버킷이지만 스크롤을 타지 않는 쪽이다
         });
     }
     const cell = cellSizeFor(scenario_id);

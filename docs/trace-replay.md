@@ -308,10 +308,72 @@ runtime detach, timeout 뒤 backing/dir FD 해제, 무기한 join은 금지한�
 writer는 Client/HostAdapter를 호출하지 않는다. fork child는 inherited runtime의 pipe·mutex·service를 만지기 전에 PID domain mismatch로
 거부한다.
 
+GUI와 daemon은 서로 다른 프로세스이므로 incident runtime도 process별 exact 하나를 소유한다. daemon bootstrap은 기존 host-owned
+runtime을 설치하고, GUI는 첫 managed remote adapter publication보다 먼저 heap-pinned `AppProcessIncidentOwner`를 app-global
+coordinator에 게시한다. GUI owner의 directory는 `${XDG_CACHE_HOME:-$HOME/.cache}/maru/incidents`이고 window/AppSession allocator가
+아니라 app-global allocator를 쓴다. restore-first와 current-first는 같은 owner를 재사용하고 두 번째 owner 설치, 다른 final address
+교체, fork child 재사용을 mutation 0으로 거부한다. daemon과 GUI가 같은 incident sequence나 nonce를 공유한다고 가정하지 않는다.
+
+개별 Window/AppSession deinit과 remote backend init rollback은 process owner를 해제하지 않는다. Swift
+`applicationWillTerminate`가 호출하는 exact 한 AppHost ABI가 app-global owner를 `ready -> closing`으로 revoke하고 active publisher
+lease가 0이 될 때까지 200 ms absolute deadline으로 drain한 뒤 writer shutdown을 수행한다. ordinary window close의 이 ABI caller는
+0이고, owner가 아직 없던 앱 종료는 inactive success다. 반환은 closed `IncidentShutdownOutcome {inactive,joined,detached,degraded}`다.
+publisher lease가 deadline에 남으면 runtime/service/wake FD/registry backing 전체를 process-lifetime detached 상태로 보존하고
+`.detached`를 반환하며 shutdown/free를 호출하지 않는다. lease 0 뒤 runtime shutdown의 clock/wake/pipe 오류도 backing 보존과 sticky
+failure를 거쳐 `.degraded`로 수렴하고 AppKit termination을 막거나 재시도하지 않는다. 제품 종료 hook과 daemon teardown 외
+`ConnectionIncidentRuntime.shutdown` caller는 0이다.
+AppHost의 exact 순서는 `control stop -> workspace save -> 모든 AppSession shutdown과 remote backend close/detach settlement -> incident
+owner termination ABI -> native termination return`이다. AppSession/backend teardown 중 발생한 managed poison은 아직 ready owner에
+게시할 수 있고, incident ABI 뒤 AppSession shutdown caller는 0이다. Swift source-boundary가 incident ABI의
+`shutdownAppSession` 이전 caller 0, 이후 exact 1을 고정한다.
+
+`Client`와 `IncidentBinding`에는 runtime/service 포인터를 저장하지 않는다. process registry의 canonical entry는
+`IncidentPublisherAuthority {self_addr,registry_addr,registry_generation,runtime_addr,runtime_generation,service_addr,
+service_generation,pid,client_process_nonce,service_process_nonce,owner_thread,app_instance_nonce,lifecycle,seal}`과 active lease count를
+소유한다. 모든 entry는 process-sealed final-address storage이며 PID를 secret·mutex·pointer 역참조보다 먼저 검증한다. registry는
+단일 process-global mutex로 lifecycle과 active count를 선형화한다. acquire는 PID를 먼저 검사하고 mutex 아래 authority를 다시
+검증해 `ready`일 때 count를 checked 증가한 뒤 mutex를 즉시 놓는다. release는 service mutex를 놓고 wake를 끝낸 뒤 registry mutex
+아래 exact lease seal/generation을 검증해 count를 감소한다. teardown은 registry mutex 아래 `ready -> closing`을 게시한 뒤 mutex를
+놓고 deadline까지 count를 재조회하며, mutex를 잡은 채 기다리지 않는다. 정확한 순서는 `Client fence -> registry mutex(acquire 후
+unlock) -> service mutex`; writer는 service mutex만, lease release와 teardown은 service mutex를 잡지 않는다. closing publication 뒤
+새 acquire는 mutation 0 typed reject이고 teardown은 active count 0 전 runtime/service를 해제하지 않는다.
+copied/moved owner·lease, same-address generation ABA, service/runtime address splice, lifecycle replay, fork child 사용을 fail-stop으로
+닫는다. 제품 poison suffix가 raw global pointer를 직접 읽거나 `ConnectionIncidentRuntime`을 import하는 caller는 0이고, platform
+runtime adapter만 ClientSlot의 pointer-free 등록 facade를 호출한다.
+
+publication은 generic callback 대신 final-address `PreparedIncidentPublication`을 사용한다. closed kind는 `first|repeat`다. prepare는
+fallible clock/input/binding 검증과 sequence/detail/aggregate preflight를 마치고 service mutex를 계속 소유한 채
+`{self_addr,kind,mutex_owner_thread,service_lock_generation,lease seal,service generation,client_addr,slot_addr,node_addr,
+slot_generation,node_generation,connection_generation,operation_id,operation_receipt_seal,binding_seal,input_digest,
+first_id_destination,key_destination,reason_destination,incident id,existing repeat-key seal,fingerprint,detail slot,
+aggregate slot/generation,lifecycle,seal}`을 봉인한다. 모든 destination extent는 service/runtime/permit/서로 간 exact·partial overlap과
+checked-add overflow를 prepare 전에 거부한다. commit 직전 held Client operation 아래 주소·generation·receipt·binding·input digest를
+전부 다시 검증한다. prepare 뒤에는 allocation/callback/syscall/error return 0이다. copied/moved/foreign-thread token, lock generation
+drift, destination/operation drift는 common `fatalIntegrity(.incident_authority)`로 즉시 종료하며 unlock·lease release를 시도하지 않는다.
+
+`.first` commit은 먼저 committed ring evidence를 쓰고 `Client.first_incident_id -> IncidentRepeatKey -> first_poison_reason`을
+no-fail로 게시한 뒤 service pending bit을 게시하고 mutex를 해제한다. `.repeat` prepare는 현재 Client의 sealed repeat key와 first ID,
+binding, 새 projection fingerprint를 결속하고 canonical key fingerprint와 exact equality를 요구해 aggregate generation만 예약한다.
+다른 fingerprint는 Client/ring/sequence/aggregate mutation 0 typed reject다. repeat commit은 detail/sequence/Client first fields를
+바꾸지 않고 같은 fingerprint aggregate occurrence와 last timestamp, pending bit만 게시한 뒤 mutex를 해제한다. first/repeat 모두 abort는 ring/Client
+publication 전 prepared transaction만 mutex 아래 exact once 허용하며, ring commit 이후 abort/rollback은 없다. writer는 pending bit이
+보인 record만 취하므로 Client reason보다 앞서 disk handoff가 시작되지 않는다.
+
+wake는 mutex 해제 뒤 publisher lease를 가진 platform facade가 수행한다. 반환은 error union이 아니라
+`IncidentCommitResult {publication:PublishResult,wake:queued|coalesced|degraded}`이고, pipe write 실패는 sticky writer failure와
+`degraded`를 게시한 committed success다. caller는 같은 poison을 재시도하지 않으며 ring/Client publication을 되돌리지 않는다.
+lease release는 wake outcome과 무관하게 exact once 수행한다.
+
+여섯 번째 CR0b gate는 위 제품 순서를 exact named TDD inventory로 고정한다. reason-only wrapper는 identity-absent fixture와 등록 전
+typed failure에만 남고 managed Client 제품 caller는 0이다. Debug unexpected poison은 canonical publication 뒤 common fatal leaf로
+종료하고 ReleaseFast는 같은 publication 뒤 scheduler continuation을 증명한다. Debug fatal의 exact 순서는
+`commit(pending bit+mutex unlock) -> wake outcome publication -> publisher lease release -> fatalIntegrity`다. subprocess는 ring-resident
+evidence와 Client contextual snapshot을 검증하되 writer disk completion은 기다리거나 성공 조건으로 삼지 않는다.
+
 timestamp와 `IncidentInput`은 service mutex 진입 전에 operation owner가 process-monotonic clock에서 만들며 clock failure나 음수 값은
 mutation 0 typed reject다. aggregate의 first/last는 각각 `min`/`max`로 갱신해 caller 간 관측 순서가 바뀌어도 역전되지 않는다.
-Debug/test의 unexpected poison은 ring evidence와 first reason의 마지막 store가 끝난 직후 common
-`fatalIntegrity(.unexpected_connection_poison)` leaf로만 종료한다. expected poison과 Release 제품은 같은 publication 뒤 scheduler로
+Debug/test의 unexpected poison은 위 exact `commit -> wake outcome -> publisher lease release`가 모두 끝난 뒤에만 common
+`fatalIntegrity(.unexpected_connection_poison)` leaf로 종료한다. expected poison과 Release 제품은 같은 publication 뒤 scheduler로
 진행하며 artifact writer 성공을 기다리지 않는다.
 
 Release는 preallocated 32 KiB ring handoff를 reconnect scheduling보다 먼저 끝낸다. disk writer는 별도 bounded owner이며

@@ -1226,6 +1226,9 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
     if (cmd == APP_CMD_GAINED_FOCUS || cmd == APP_CMD_LOST_FOCUS) {
         pthread_mutex_lock(&g_bridge_lock);
         maru_mobile_report_focus(cmd == APP_CMD_GAINED_FOCUS);
+        // 누르고 있던 손가락을 정리한다 — 이 OS 는 취소를 보내 주지만(실측) 그것에
+        // 기대지 않는다. 두 플랫폼이 같은 자리에서 같은 정리를 한다.
+        if (cmd == APP_CMD_LOST_FOCUS) maru_mobile_pointer(3, 0, 0, 0);
         pthread_mutex_unlock(&g_bridge_lock);
         return;
     }

@@ -64,6 +64,33 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
     };
 }
 
+/// 이 시나리오의 배경 quad가 실릴 합성 층.
+///
+/// **컴포넌트에 제품 call site가 있으면 그 값을 읽는다.** Lab이 자체 값을 들면 "캡처가 제품을
+/// 예고한다"가 성립하지 않는다 — 두 리터럴이 갈려도 Lab은 늘 자기 쪽만 옳게 그린다.
+///
+/// 나머지 시나리오가 `layers.bottom`인 것은 임시가 아니라 **현재 사실**이다: 도크·사이드바·detail은
+/// 전부 텍스트 아래에 배경을 깐다.
+///
+/// **이 함수가 정하는 것은 컴포넌트 배경의 층뿐이다.** 하네스가 직접 심는 quad(`sidebar_status_strip`의
+/// under 밴드)는 여기를 안 지나므로, 그런 시나리오는 아래 `quad_layer_exempt`에 이유와 함께 적는다.
+fn labQuadLayer(id: lab.ScenarioId) u32 {
+    return switch (id) {
+        .editor_gutter,
+        .editor_scrolled,
+        .editor_font_large,
+        .editor_hazard,
+        .editor_wide_glyph,
+        .editor_wrap,
+        .editor_hscroll,
+        .editor_wrap_scrolled,
+        .editor_wrap_stale_scroll,
+        .editor_real_file,
+        => editor_ops.background_layer,
+        else => chrome_draw_lowering.layers.bottom,
+    };
+}
+
 fn fontPxFor(id: lab.ScenarioId) u16 {
     const cell = cellSizeFor(id);
     const px = @as(f32, @floatFromInt(cell.h)) / 1.25;
@@ -280,9 +307,12 @@ pub fn main(init: std.process.Init) !void {
     // a gray rounded rectangle look like a completed UI capture.
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
-    // **제품과 같은 이름의 층을 쓴다.** 양쪽 다 리터럴 `2`였고, 제품이 `3`으로 흘러간 순간
-    // Lab 캡처는 여전히 옳은데 제품만 빈 화면이었다 — 이름을 공유하면 그 드리프트가 눈에 띈다.
-    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, chrome_draw_lowering.layers.bottom);
+    // **제품이 쓰는 그 값을 읽는다** — Lab이 자기 리터럴을 들면 캡처가 제품을 예고하지 못한다.
+    // 실제로 양쪽 다 리터럴 `2`였고, 제품만 `3`으로 흘러간 순간 Lab 캡처는 여전히 옳은데 제품만
+    // 빈 화면이었다. 이제 편집기 시나리오는 `editor_ops.background_layer`를 그대로 태우므로,
+    // 그 값이 잘못되면 **이 캡처가 통째로 빈다**(실측: non-background 9,203 → 2,391).
+    const quad_layer = labQuadLayer(scenario_id);
+    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, quad_layer);
     // SB1 §5.3 — **뷰포트 바닥을 가로지르는 layer 0(under) quad.** 제품에서 이 자리에 오는 것은 카드 호버
     // 밴드다(rich 토큰에서 둥근 GPU quad로 내려간다). Lab은 `app_session`을 import하지 않아 그 밴드를 제품
     // 경로로 만들 수 없으므로, **같은 버킷·같은 기하**의 quad 하나를 하네스가 직접 심는다 — 골든이 보려는
@@ -341,6 +371,27 @@ pub fn main(init: std.process.Init) !void {
             .layer = 0, // under — 밴드와 같은 버킷이지만 스크롤을 타지 않는 쪽이다
         });
     }
+    // **텍스트 아래가 아닌 층에 배경을 실으면 실패한다.** 예전 게이트는 `non_background_pixels > 0`
+    // 뿐이라, 배경만 남은 캡처(글자가 통째로 덮인 상태)가 그대로 초록으로 통과했다 — 사람이 PNG를
+    // 봐야만 알 수 있었다.
+    //
+    // **캡처는 그대로 쓴다.** 이 판정은 아래 `success`에만 실리고 아티팩트는 먼저 디스크에 남는다 —
+    // 실패한 캡처야말로 보고 싶은 증거이기 때문이다(다른 게이트도 같은 순서다). 바뀌는 것은
+    // 프로세스 종료 코드뿐이고, 그것이 "초록으로 오인"을 막는다.
+    //
+    // **예외 하나 — `sidebar_status_strip`.** 위 블록이 layer 0(under) quad를 **일부러** 심는다:
+    // 그 시나리오가 보려는 것이 "`.m`이 under 버킷을 상태바 띠 위에서 자르는가"이기 때문이다.
+    // 덮을 글자도 없다(chrome 텍스트를 안 내므로 `requires_text`도 이미 제외한다). 예외를 여기
+    // 한 줄로 두는 이유는, 늘리려면 "이 시나리오는 왜 텍스트 위에 그려도 되는가"를 적어야 하기 때문이다.
+    // **측정은 늘 하고 면제는 게이트에만 건다.** 면제 시 측정을 건너뛰면 summary가 `true`로 나가
+    // 사실과 달라진다 — 이 시나리오의 유일한 quad는 layer 0이다. JSON은 실측을 싣고, `success`만
+    // 면제를 본다(그래야 리뷰어가 "면제된 시나리오가 무엇을 하고 있는지"를 캡처 없이 읽는다).
+    const quad_layer_exempt = scenario_id == .sidebar_status_strip;
+    var quad_layer_below_text = true;
+    for (gpu_quads.items) |q| {
+        if (!chrome_draw_lowering.isBelowText(q.layer)) quad_layer_below_text = false;
+    }
+    const quad_layer_ok = quad_layer_below_text or quad_layer_exempt;
     const cell = cellSizeFor(scenario_id);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell.w)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell.h)));
@@ -583,8 +634,8 @@ pub fn main(init: std.process.Init) !void {
     // 대신 그 시나리오는 `pixel_ok`가 실질 가드다: strip이 안 그려지면 non_background_pixels가 0이라 잡힌다.
     const requires_text = scenario_id != .sidebar_status_strip;
     const text_ok = !requires_text or (text_rasterized and rich_text_rasterized and rich_text_matches_artifact);
-    const success = native_ok and pixel_ok and valid_png and text_ok;
-    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
+    const success = native_ok and pixel_ok and valid_png and text_ok and quad_layer_ok;
+    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, quad_layer, quad_layer_below_text, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);
 
@@ -775,6 +826,8 @@ fn renderSummary(
     ppm: PpmProbe,
     valid_png: bool,
     quad_count: usize,
+    quad_layer: u32,
+    quad_layer_ok: bool,
     glyph_cell_count: usize,
     text_rasterized: bool,
     rich_glyph_count: usize,
@@ -793,7 +846,7 @@ fn renderSummary(
         \\  "artifacts": {{ "ppm": "{s}", "png": "{s}" }},
         \\  "product_renderer": {{ "status": {d}, "created": {}, "atlas_ready": {}, "draw_submitted": {} }},
         \\  "readback": {{ "ppm_written": {}, "png_written": {}, "valid_png": {}, "width": {d}, "height": {d}, "non_background_pixels": {d} }},
-        \\  "lowered": {{ "gpu_quads": {d}, "glyph_cells": {d}, "text_rasterized": {}, "gpu_glyphs": {d}, "rich_text_rasterized": {}, "rich_text_matches_artifact": {} }},
+        \\  "lowered": {{ "gpu_quads": {d}, "quad_layer": {d}, "quad_layer_below_text": {}, "glyph_cells": {d}, "text_rasterized": {}, "gpu_glyphs": {d}, "rich_text_rasterized": {}, "rich_text_matches_artifact": {} }},
         \\  "font_usage": {{ "primary_glyphs": {d}, "fallback_glyphs": {d}, "distinct_font_faces": {d} }},
         \\  "success": {}
         \\}}
@@ -817,6 +870,8 @@ fn renderSummary(
         ppm.height,
         ppm.non_background_pixels,
         quad_count,
+        quad_layer,
+        quad_layer_ok,
         glyph_cell_count,
         text_rasterized,
         rich_glyph_count,
@@ -906,9 +961,12 @@ test "Chrome Lab summary records component text rasterization and artifact paths
         .draw_submitted = 1,
         .ppm_written = 1,
         .png_written = 1,
-    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, 2, true, 2, true, true, .{ .primary_glyphs = 1, .fallback_glyphs = 2, .distinct_font_faces = 3 }, true);
+    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, chrome_draw_lowering.layers.bottom, true, 2, true, 2, true, true, .{ .primary_glyphs = 1, .fallback_glyphs = 2, .distinct_font_faces = 3 }, true);
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"glyph_cells\": 2") != null);
+    // 층이 summary에 실려야 리뷰어·CI가 "이 캡처가 어느 패스로 그려졌나"를 캡처 없이 읽는다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"quad_layer\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"quad_layer_below_text\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"text_rasterized\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"gpu_glyphs\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"rich_text_rasterized\": true") != null);

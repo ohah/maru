@@ -174,6 +174,14 @@ pub fn buildPaneOps(
     return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows };
 }
 
+/// 편집기 배경·스크롤바 quad가 실리는 합성 층. **제품과 Chrome Lab이 함께 읽는 단일 출처다.**
+///
+/// 왜 상수인가: 예전엔 양쪽이 각자 리터럴을 들었고 제품만 `3`으로 흘러갔다. 렌더러가 이름 없는
+/// 값을 전부 over로 몰아넣어 오타가 "동작"했고, 그동안 Lab 캡처는 옳은데 제품만 빈 화면이었다.
+/// 값이 하나면 그 상태가 만들어지지 않는다 — 이것을 잘못 바꾸면 **세 곳이 동시에** 신호를 낸다:
+/// 제품 단위 테스트(층 단언), Lab 스모크 게이트(`isBelowText`), 그리고 Lab 캡처가 통째로 빈다.
+pub const background_layer: u32 = chrome_draw_lowering.layers.bottom;
+
 /// 한 leaf에 편집기 프레임을 그린 결과. 배경·스크롤바 quad는 이미 `gpu_quads`에 실렸고, 글자는
 /// 호출자가 셀로 내리도록 DrawList로 돌려준다.
 pub const PaneDraw = struct {
@@ -237,12 +245,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
 
     const tokens = self.buildChromeTokens();
     const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
-    // **`layers.bottom`** — 셀 패스 앞에 그리는 유일한 층이다. 다른 층은 셀 뒤라 배경이 자기 글자를
-    // 덮는다. 실제로 여기 `3`이 들어가 편집기 본문이 통째로 안 보였다(배경만 칠해진 빈 pane) —
-    // 렌더러가 이름 없는 값을 전부 over로 몰아넣어 오타가 조용히 "동작"했다. 같은 컴포넌트를 그리는
-    // Chrome Lab은 처음부터 bottom이었고, 두 호출처가 갈린 것을 아무것도 강제하지 않았다.
-    // §4.1b의 "op 순서상 맨 처음"은 op 배열 안에서만 참이다 — quad와 셀은 파이프라인이 갈린다.
-    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, chrome_draw_lowering.layers.bottom);
+    // 층은 `background_layer` 하나가 정한다(위 doc — Lab과 공유하는 단일 출처). §4.1b의 "op 순서상
+    // 맨 처음"은 op 배열 안에서만 참이다 — quad와 셀은 파이프라인이 갈리므로 층을 따로 맞춰야 한다.
+    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, background_layer);
 
     const cols: u16 = @intCast(@min(rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
     const rows: u16 = @intCast(@min(rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));

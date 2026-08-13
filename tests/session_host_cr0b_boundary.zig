@@ -20,6 +20,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(publication);
     const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");
     defer allocator.free(client);
+    const client_slot = try readSource(allocator, "src/platform/macos/session_host/client_slot.zig");
+    defer allocator.free(client_slot);
     const adapter = try readSource(allocator, "src/platform/macos/session_host/host_adapter.zig");
     defer allocator.free(adapter);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
@@ -85,6 +87,38 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 11), count(adapter, "test \"CR0b HostPool publication은"));
     try std.testing.expectEqual(@as(usize, 3), count(pool, "return error.ManagedPublicationRequired;"));
     try std.testing.expectEqual(@as(usize, 7), count(adapter, "test \"CR0b ClientSlot binding은"));
+    try std.testing.expectEqual(@as(usize, 3), count(client_slot, "test \"CR0b Client incident operation은"));
+    inline for (.{
+        "pub fn beginIncidentClientOperation(",
+        "pub fn bindIncidentClientPublication(",
+        "pub fn commitFirstIncidentClientPublicationNoFail(",
+        "pub fn finishIncidentClientOperationNoFail(",
+    }) |facade| {
+        try std.testing.expectEqual(@as(usize, 1), count(client_slot, facade));
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try countProductSourcesExcept(allocator, facade, "platform/macos/session_host/client_slot.zig"),
+        );
+    }
+    inline for (.{
+        // declaration 1 + success/reuse 4 + alias exact/partial/table/canonical 4다.
+        .{ "beginIncidentClientOperation(", 9 },
+        // declaration 1 + success 1 + copied/seal/digest/coherent/commit drift 5행이다.
+        .{ "bindIncidentClientPublication(", 7 },
+        .{ "commitFirstIncidentClientPublicationNoFail(", 2 },
+        .{ "finishIncidentClientOperationNoFail(", 6 },
+    }) |entry| try std.testing.expectEqual(@as(usize, entry[1]), count(client_slot, entry[0]));
+    // 중첩 owner는 상위 extent가 같은 공격을 막을 수 있으므로 각 보호 역할의 source clause도 별도로 고정한다.
+    inline for (.{
+        "rangesOverlapTyped(out, slot_before)",
+        "rangesOverlapTyped(out, node_before)",
+        "rangesOverlapTyped(out, client_before)",
+        "rangesOverlapTyped(out, &client_before.incident_binding)",
+        "rangesOverlapTyped(out, &client_before.incident_repeat_key)",
+        "rangesOverlapTyped(out, &client_slot_registry)",
+        "rangesOverlapTyped(out, &registered_node_operations)",
+        "rangesOverlapTyped(out, &registered_node_operation_free_stack)",
+    }) |protected_range| try std.testing.expectEqual(@as(usize, 1), count(client_slot, protected_range));
     try std.testing.expectEqual(@as(usize, 0), count(binding, "@import(\"../platform"));
     try std.testing.expectEqual(@as(usize, 0), count(binding, "client_slot.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(binding, "host_pool.zig"));

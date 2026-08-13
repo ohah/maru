@@ -1912,6 +1912,23 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromEventReleasePermit" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_publication_contract" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "IncidentOperationQuery" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "IncidentOperationError" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishSemanticDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentAuthorityDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentCommitDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationReceiptDigest" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "IncidentPublicationTestHook" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentRepeatKeySeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationProofLoss" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginIncidentClientOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "resolveIncidentClientOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bindIncidentClientPublication" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitFirstIncidentClientPublicationNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishIncidentClientOperationNoFail" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainRunnerChannel" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "terminal_contract" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "extern", .name = "getdtablesize" },
@@ -2927,7 +2944,7 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         // One declaration plus the reviewed direct accesses sealed below. C3-3a2 adds four
         // transaction-registry accesses and three whole-registry fail-stop/alias references.
         // b2b3 adds one registered-operation lookup for candidate-range revalidation.
-        @as(usize, 21),
+        @as(usize, 23),
         countIdentifierOutsideTopLevelTests(slot_product, "registered_node_operations"),
     );
     const registered_operation_direct_accesses = [_]struct {
@@ -2938,7 +2955,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .expected = 1, .source = "registered_node_operations[index].state" },
         .{ .expected = 1, .source = "registered_node_operations[index] = entry" },
         .{ .expected = 2, .source = "&registered_node_operations[reservation.index]" },
-        .{ .expected = 4, .source = "registered_node_operations.len" },
+        // Incident publication reconstructs one sealed operation handle and validates its index
+        // before any Client destination access.
+        .{ .expected = 5, .source = "registered_node_operations.len" },
         .{ .expected = 1, .source = "const candidate = registered_node_operations[index];" },
         .{ .expected = 1, .source = "const candidate = &registered_node_operations[index];" },
         .{ .expected = 1, .source = "const entry = &registered_node_operations[index];" },
@@ -2947,11 +2966,17 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .expected = 1, .source = "const entry = registered_node_operations[operation.registry_index];" },
         // Includes the bounded production fail-stop scan and the existing test oracle scan.
         .{ .expected = 2, .source = "for (registered_node_operations) |entry|" },
-        .{ .expected = 1, .source = "@intFromPtr(&registered_node_operations)" },
+        // 제품 alias preflight와 closed hostile table이 같은 backing 시작 주소를 각각 고정한다.
+        .{ .expected = 2, .source = "@intFromPtr(&registered_node_operations)" },
         .{ .expected = 1, .source = "@sizeOf(@TypeOf(registered_node_operations))" },
+        .{ .expected = 1, .source = "rangesOverlapTyped(out, &registered_node_operations)" },
     };
     for (registered_operation_direct_accesses) |access|
         try std.testing.expectEqual(access.expected, countOccurrences(slot_product, access.source));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, "rangesOverlapTyped(out, &registered_node_operation_free_stack)"),
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(
@@ -2975,8 +3000,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        // 기존 일곱 leaf와 C3-3b3 effect, CR3a-2d3 terminal drain proof-loss leaf만 noreturn 권위를 가진다.
-        @as(usize, 9),
+        // 기존 일곱 leaf와 C3-3b3 effect, CR3a-2d3 terminal drain, CR0b incident operation만
+        // 검토된 noreturn 권위를 가진다.
+        @as(usize, 10),
         countOccurrences(slot_product, ") noreturn {"),
     );
     try std.testing.expectEqual(
@@ -7135,7 +7161,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "fn reasonProjection(",
             ) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(usize, 7), countFieldAssignments(source, "unusable"));
-            try std.testing.expectEqual(@as(usize, 3), countFieldAssignments(source, "first_poison_reason"));
+            try std.testing.expectEqual(@as(usize, 4), countFieldAssignments(source, "first_poison_reason"));
             const confirmed_z = try allocator.dupeZ(u8, confirmed);
             defer allocator.free(confirmed_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "unusable"));
@@ -7149,6 +7175,14 @@ test "session host has zero raw untyped Client invalidation callsites" {
             defer allocator.free(effect_executor_z);
             try std.testing.expectEqual(@as(usize, 2), countFieldAssignments(effect_executor_z, "unusable"));
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(effect_executor_z, "first_poison_reason"));
+            const incident_suffix = betweenMarkers(
+                source,
+                "pub fn commitFirstIncidentClientPublicationNoFail(",
+                "pub fn finishIncidentClientOperationNoFail(",
+            ) orelse return error.TestUnexpectedResult;
+            const incident_suffix_z = try allocator.dupeZ(u8, incident_suffix);
+            defer allocator.free(incident_suffix_z);
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(incident_suffix_z, "first_poison_reason"));
         } else if (std.mem.eql(u8, entry.path, "generation_attachment.zig")) {
             const testing_facade = betweenMarkers(
                 source,

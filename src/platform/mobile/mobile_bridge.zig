@@ -299,6 +299,13 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
         return;
     });
     if (body_line_h <= 0) return;
+    // **선택 중에는 안 흘린다.** 플랫폼은 관성(느낌)만 갖고 그것을 적용할지는 의미라 코어가
+    // 정한다 — host 는 MOVE 마다 관성 속도를 세워 두므로, 여기서 안 막으면 길게 눌러 선택하는
+    // 동안에도 화면이 계속 흐른다(끌어서 범위를 넓히는 내내 글자가 도망간다).
+    if (selecting) {
+        scroll_px_carry = 0;
+        return;
+    }
     scroll_px_carry += dy_px;
     const lines_f = @trunc(scroll_px_carry / @as(f32, @floatFromInt(body_line_h)));
     if (lines_f == 0) return; // 나머지는 다음 호출로 넘긴다

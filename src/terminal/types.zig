@@ -75,14 +75,17 @@ pub const Cell = struct {
     link: u32 = 0,
 };
 
-/// **아무도 안 쓴 칸인가** — 터미널이 만든 빈 칸(codepoint 0)이다. 프로그램이 쓴 공백(' ')은 여기 안 든다.
-/// soft-wrap 이음처럼 "wrap 채움만 버리고 쓴 공백은 지켜야" 하는 자리가 이걸 쓴다. 배경색·continuation·
-/// grapheme가 있으면 화면상 의미가 있으므로 `isTextTrimBlank`과 같은 이유로 제외한다.
+/// **글자가 없는 칸인가** — 터미널이 만든 빈 칸(codepoint 0)이다. 프로그램이 쓴 공백(' ')은 여기 안 든다.
+/// 배경색은 보지 않는다: 텍스트를 뽑는 자리에서 배경은 글자가 아니다. BCE로 배경을 칠해 둔 화면에서도
+/// wrap 채움은 채움이라, 배경을 보면 유령 공백이 되살아난다(적대적 검증 2라운드에서 재서 찾았다).
+pub fn hasNoText(cell: Cell) bool {
+    return cell.codepoint == 0 and !cell.continuation and cell.grapheme_id == 0;
+}
+
+/// **아무도 안 쓰지도, 칠하지도 않은 칸인가** — `hasNoText`에 "배경도 default"를 더한 것.
+/// 화면 저장·reflow처럼 **눈에 보이는 것을 잃으면 안 되는** 자리가 쓴다(칠해진 칸은 버리면 색이 사라진다).
 pub fn isUnwritten(cell: Cell) bool {
-    return cell.codepoint == 0 and
-        !cell.continuation and
-        cell.grapheme_id == 0 and
-        std.meta.activeTag(cell.style.background) == .default;
+    return hasNoText(cell) and std.meta.activeTag(cell.style.background) == .default;
 }
 
 /// 텍스트 추출/reflow가 뒤 padding을 자를 때 쓰는 blank-cell 단일 출처. 배경색·continuation·grapheme가 있으면
@@ -105,11 +108,22 @@ pub fn textTrimmedLen(cells: []const Cell) usize {
     return len;
 }
 
-/// **누가 쓴 칸까지**의 길이 — 뒤에 붙은 "안 쓴 칸"만 제외한다. 쓴 공백은 남는다.
-/// soft-wrap 행이 쓰는 길이다: wrap 이음은 논리 줄 가운데라 쓴 공백을 지워선 안 되고, 반대로
-/// wrap 채움(터미널이 만든 빈 칸)은 내용이 아니므로 이어 붙이면 없던 공백이 된다.
+/// **글자가 있는 마지막 칸까지**의 길이 — 뒤에 붙은 "글자 없는 칸"만 제외한다. 쓴 공백은 남는다.
+/// soft-wrap 행이 **텍스트**(복사·검색)에 기여하는 길이다: wrap 이음은 논리 줄 가운데라 쓴 공백을
+/// 지워선 안 되고, 반대로 wrap 채움은 글자가 아니므로 이어 붙이면 없던 공백이 된다.
 /// hard 줄끝은 `textTrimmedLen`(쓴 공백도 자름)을 쓴다 — 거기선 뒤 공백이 진짜 뒤 공백이다.
-pub fn writtenLen(cells: []const Cell) usize {
+pub fn textLen(cells: []const Cell) usize {
+    var len = cells.len;
+    while (len > 0) : (len -= 1) {
+        if (!hasNoText(cells[len - 1])) break;
+    }
+    return len;
+}
+
+/// **글자든 배경이든 있는 마지막 칸까지**의 길이. 화면 저장·reflow가 쓴다 — 텍스트만 보고 자르면
+/// BCE로 칠해 둔 칸의 색이 사라진다. 텍스트 경로는 위 `textLen`을 쓴다(둘의 차이가 곧 "칠했지만
+/// 글자는 없는 칸"이고, 그 칸은 눈엔 보이되 복사엔 안 들어가야 한다).
+pub fn paintedLen(cells: []const Cell) usize {
     var len = cells.len;
     while (len > 0) : (len -= 1) {
         if (!isUnwritten(cells[len - 1])) break;

@@ -911,6 +911,33 @@ test "홈에서의 ED 0·ED 1 도 스크롤백 wrap 을 끊는다" {
     }
 }
 
+// **지우기만이 아니다.** 0행을 빈 줄로 바꾸거나 통째로 덮는 연산도 이어짐을 끊어야 한다 —
+// EL(줄 지우기)·DECALN·IL/SD(0행에 빈 줄)·DL(0행 삭제)이 전부 같은 자리다. 적대적 검증
+// 3라운드에서 하나씩 재서 찾았다(ED 만 고쳤을 때 여섯 경로가 남아 있었다).
+test "0행을 비우거나 덮는 연산도 스크롤백 wrap 을 끊는다" {
+    const allocator = std.testing.allocator;
+    const seqs = [_][]const u8{
+        "\x1b[H\x1b[2K", // EL 2 — 줄 전체
+        "\x1b[H\x1b[K", // EL 0 — 커서~끝(홈)
+        "\x1b#8", // DECALN — 화면을 통째로 덮는다
+        "\x1b[H\x1b[L", // IL — 0행에 빈 줄
+        "\x1b[H\x1b[T", // SD — 아래로 스크롤
+        "\x1b[H\x1b[M", // DL — 0행 삭제
+    };
+    for (seqs) |seq| {
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+        defer c.deinit();
+        var i: usize = 0;
+        while (i < 40) : (i += 1) try c.write("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+        try c.write(seq);
+        try c.write("\x1b[Hcopyme rest");
+        c.selectWordAt(0, 1, &.{});
+        const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("copyme", text);
+    }
+}
+
 // 수정이 **정상 경우를 안 깨뜨리는지**. ED 없이 스크롤백에서 활성 화면으로 이어지는 줄은
 // 그대로 한 논리 줄이어야 하고, alt screen 의 ED 는 주 화면 스크롤백을 안 건드려야 한다.
 test "이어지던 줄은 그대로, alt 의 ED 는 주 화면과 무관" {

@@ -963,6 +963,9 @@ pub fn eraseInLine(self: *TerminalCore, mode: u16) void {
     // (시작~커서)은 오른쪽 끝이 멀쩡해 줄이 여전히 다음 행으로 이어질 수 있으므로 wrapped를 끄지
     // 않는다 — 안 그러면 reflow가 한 논리 줄을 둘로 쪼갠다.
     if (mode != 1) self.screen.wrapped[row] = false;
+    // **0행의 0열이 지워지면 스크롤백에서 이어지던 줄도 끊는다**(ED 와 같은 이유). mode 0 은
+    // 커서가 0열일 때만 0열을 지운다.
+    if (row == 0 and (mode != 0 or self.screen.cursor.col == 0)) breakScrollbackWrapLink(self);
     markDirty(self, row);
     // 모든 EL 모드는 deferred autowrap을 무효화한다(xterm/Ghostty 동작). 안 끄면 마지막 칸
     // 출력(pending) 후 EL+글자 시퀀스가 한 줄 일찍 wrap돼 상대 커서 이동이 어긋난다.
@@ -1111,6 +1114,7 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
 pub fn decAlign(self: *TerminalCore) void {
     for (self.screen.cells) |*c| c.* = .{ .codepoint = 'E', .width = 1 };
     @memset(self.screen.wrapped, false);
+    breakScrollbackWrapLink(self); // 화면을 통째로 덮어쓴다 — 이어지던 줄이 없어진다
     const old_cursor = self.screen.cursor;
     self.screen.cursor = .{};
     self.screen.pending_wrap = false;
@@ -1181,6 +1185,9 @@ fn scrollRegionDown(self: *TerminalCore) void {
 /// 스크롤백에 보관한다 — LF 스크롤만 history고, DL(줄 삭제) 같은 편집 연산은 보관하지 않는다
 /// (xterm 동작). n줄을 한 번의 블록 이동으로 처리해 IL/DL n이 O(범위)다(줄당 반복 아님).
 pub fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, push_history: bool) void {
+    // **정상 스크롤(push_history)은 건드리지 않는다** — 그쪽이 이어짐을 만드는 경로다. DL 처럼
+    // 히스토리로 안 밀고 0행을 다른 내용으로 덮는 경우만 끊는다.
+    if (top == 0 and !push_history) breakScrollbackWrapLink(self);
     if (self.size.cols == 0 or self.size.rows == 0 or count == 0) return;
     // bottom == top(한 줄 범위)도 허용한다 — IL/DL이 region 마지막 행에서 그 행만 비운다.
     if (bottom < top or bottom >= self.size.rows) return;
@@ -1261,6 +1268,9 @@ pub fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16, count: u16) v
         self.screen.wrapped[row] = self.screen.wrapped[row - n];
         self.screen.prompt_marks[row] = self.screen.prompt_marks[row - n]; // OSC 133 태그도 옮긴 내용과 함께(scrollRangeUp 대칭)
     }
+
+    // 0행이 빈 줄로 바뀌면 스크롤백에서 이어지던 줄이 없어진다(ED 와 같은 불변식).
+    if (top == 0) breakScrollbackWrapLink(self);
 
     var blank_row: u16 = top;
     while (blank_row < top + n) : (blank_row += 1) {

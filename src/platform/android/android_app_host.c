@@ -821,6 +821,17 @@ Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
 
 // IME 가 문자로 주지 않는 키만 여기로 온다(백스페이스·엔터 등).
 JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
+    (void)env; (void)cls;
+    // **OS 가 정한 값을 그대로 넘긴다.** 사용자가 접근성 설정으로 바꿀 수 있는 값이라
+    // 코어가 박아 두면 그 설정을 무시하게 된다.
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_set_long_press_ms((unsigned int)ms);
+    pthread_mutex_unlock(&g_bridge_lock);
+    LOGI("MARU_INPUT long_press_ms=%d", ms);
+}
+
+JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta) {
     (void)env; (void)cls;
     // **바이트를 손으로 적지 않는다.** 키를 그대로 넘기면 코어의 `encodeKey` 가 DECCKM(커서키

@@ -185,7 +185,7 @@ pub const background_layer: u32 = chrome_draw_lowering.layers.bottom;
 /// 한 leaf에 편집기 프레임을 그린 결과. 배경·스크롤바 quad는 이미 `gpu_quads`에 실렸고, 글자는
 /// 호출자가 셀로 내리도록 DrawList로 돌려준다.
 pub const PaneDraw = struct {
-    /// 그린 사각(pane grid). 호출자가 셀 origin으로 쓴다 — quad와 셀이 같은 자리에 서야 한다.
+    /// 그린 사각(pane body — 탭 바 아래, 창 padding은 적용하지 않는다). 호출자가 셀 origin으로 쓴다.
     rect: maru.session.SplitRect,
     /// 본문·gutter 글자. **호출자가 소유한다**(`collectShaped`가 가져가거나 직접 해제).
     dl: renderer.DrawList,
@@ -204,10 +204,19 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     if (term.rt.editor_lines.len == 0) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
 
-    // **본문 사각은 grid다**(`paneGeometry` 단일 출처) — leaf 사각 전체를 쓰면 탭 바와 창 padding까지
-    // 편집기가 덮는다. 터미널 셀·hit-test·IME가 모두 이 grid를 쓰므로, 편집기만 다른 사각을 쓰면
-    // "보이는 자리"와 "누르는 자리"가 갈린다.
-    const rect = pane_ops.paneGeometry(self, leaf_rect).grid;
+    // **본문 사각은 `body`다 — `grid`가 아니다**(`paneGeometry` 단일 출처).
+    //
+    // 셋의 차이: `leaf_rect`(탭 바 포함) ⊃ `body`(탭 바 제외) ⊃ `grid`(body에서 `window_padding_px`만큼 더 안쪽).
+    //
+    // 탭 바는 반드시 빼야 한다 — 안 그러면 편집기 배경이 탭을 덮는다. **창 padding은 빼지 않는다**:
+    // 그 여백은 터미널 셀이 창 가장자리에 붙지 않게 하려는 것이고, 편집기는 자기 배경·gutter·
+    // 스크롤바로 이미 경계를 만든다. padding까지 적용하면 pane 안에 쓰이지 않는 띠가 한 겹 더 생겨
+    // 문서가 차지할 자리가 줄고, 배경이 그 띠에서 끊겨 pane 배경이 비친다(2026-08-13 사용자 결정).
+    //
+    // **hit-test는 아직 이 사각을 소비하지 않는다.** N1은 읽기 전용이라 편집기 pane에 포인터·IME
+    // 경로가 없다. 그것이 붙을 때(N2~) 그쪽도 같은 `body`를 읽어야 "보이는 자리"와 "누르는 자리"가
+    // 갈리지 않는다 — 터미널이 `grid`를 쓰는 것과 달라지는 지점이므로 그때 함께 정한다.
+    const rect = pane_ops.paneGeometry(self, leaf_rect).body;
     if (rect.w == 0 or rect.h == 0) return null;
 
     var ops: [1024]chrome_draw.Op = undefined;
@@ -264,7 +273,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         return null;
     };
     if (diag_gate.maruDebugEnabled()) editor_diag.debug(
-        "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} grid={d}x{d} cells={d}",
+        "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} cells_grid={d}x{d} cells={d}",
         .{ rect.x, rect.y, rect.w, rect.h, term.rt.editor_lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
     );
     return .{ .rect = rect, .dl = dl };
@@ -339,7 +348,7 @@ const builtin = @import("builtin");
 
 // ── `appendPaneFrame` — 편집기 pane 한 프레임의 기하·합성 계약 ────────────────────────────────
 //
-// **이 테스트들이 증명하는 것**: 편집기가 그린 배경이 자기 본문을 덮지 않고, 본문이 pane의 grid에
+// **이 테스트들이 증명하는 것**: 편집기가 그린 배경이 자기 본문을 덮지 않고, 본문이 pane의 body에
 // 선다는 것. 왜 중요한가 — 둘 다 **조용히** 틀린다. 배경 layer가 뒤집혀도 op·셀은 정상으로 나오고
 // 좌표도 맞아, 실패는 오직 화면에서만 보인다(실제로 그 상태로 커밋됐고 캡처 픽셀을 재고서야 잡혔다).
 // 사각도 같다 — leaf 전체를 쓰면 탭 바를 덮고 hit-test와 갈리지만 어떤 단위 테스트도 안 깨진다.
@@ -349,7 +358,7 @@ const PaneFixture = struct {
     session: *AppSession,
     term: *Term,
     dir: testing.TmpDir,
-    /// `paneGeometry`가 실제로 줄여야 할 leaf 사각. 아래 테스트가 grid와 이것을 대조한다.
+    /// `paneGeometry`가 실제로 줄여야 할 leaf 사각. 아래 테스트가 body·grid와 이것을 대조한다.
     leaf_rect: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 },
 
     fn init(allocator: std.mem.Allocator) !PaneFixture {
@@ -374,8 +383,8 @@ const PaneFixture = struct {
         errdefer session.deinit();
         session.cell_width_px = 8;
         session.cell_height_px = 16;
-        // **padding을 0이 아닌 값으로 둔다.** 0이면 grid가 leaf 사각과 (탭 바 높이를 빼면) 같아져,
-        // 사각을 잘못 골라도 테스트가 통과한다 — 판정이 성립하려면 둘이 실제로 달라야 한다.
+        // **padding을 0이 아닌 값으로 둔다.** 0이면 `body`와 `grid`가 같아져 둘 중 무엇을 골라도
+        // 테스트가 통과한다 — 판정이 성립하려면 셋이 실제로 달라야 한다.
         session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
 
         const term = try openPathInActivePane(session, path);
@@ -413,9 +422,11 @@ test "편집기 배경은 셀 패스 앞 층에 실린다 — 뒤 층이면 자�
     try testing.expect(drawn.dl.cells.len > 0);
 }
 
-test "편집기 본문 사각은 pane grid다 — leaf 사각 전체가 아니다" {
-    // leaf 전체를 쓰면 탭 바와 창 padding까지 배경이 덮고, 터미널 셀·hit-test·IME가 쓰는 사각과
-    // 갈려 "보이는 자리"와 "누르는 자리"가 어긋난다.
+test "편집기 본문 사각은 pane body다 — 탭 바는 빼고 창 padding은 빼지 않는다" {
+    // **세 사각 중 하나를 고르는 판정이다.** leaf 전체를 쓰면 배경이 탭 바를 덮고, `grid`를 쓰면
+    // 창 padding만큼 안쪽으로 들어가 pane 안에 쓰이지 않는 띠가 생긴다(사용자 결정: 편집기는 그
+    // 여백을 쓰지 않는다). 그래서 `body`가 아닌 **둘 다**와 다름을 함께 못박는다 — 하나만 보면
+    // 나머지로 잘못 바꿔도 초록이다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -424,15 +435,16 @@ test "편집기 본문 사각은 pane grid다 — leaf 사각 전체가 아니�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
-    const grid = pane_ops.paneGeometry(fx.session, fx.leaf_rect).grid;
-    // **대조군 먼저.** grid와 leaf가 같은 픽스처에서는 이 테스트가 아무것도 판정하지 못한다.
-    try testing.expect(grid.x != fx.leaf_rect.x or grid.y != fx.leaf_rect.y);
-    try testing.expect(grid.w != fx.leaf_rect.w or grid.h != fx.leaf_rect.h);
+    const g = pane_ops.paneGeometry(fx.session, fx.leaf_rect);
+    // **대조군 먼저.** 셋이 서로 다른 픽스처라야 이 테스트가 무언가를 판정한다(픽스처는 바 높이와
+    // 0이 아닌 padding을 둘 다 세운다).
+    try testing.expect(g.body.y != fx.leaf_rect.y); // 탭 바만큼 내려갔다
+    try testing.expect(g.body.x != g.grid.x or g.body.w != g.grid.w); // padding만큼 다르다
 
-    try testing.expectEqual(grid.x, drawn.rect.x);
-    try testing.expectEqual(grid.y, drawn.rect.y);
-    try testing.expectEqual(grid.w, drawn.rect.w);
-    try testing.expectEqual(grid.h, drawn.rect.h);
+    try testing.expectEqual(g.body.x, drawn.rect.x);
+    try testing.expectEqual(g.body.y, drawn.rect.y);
+    try testing.expectEqual(g.body.w, drawn.rect.w);
+    try testing.expectEqual(g.body.h, drawn.rect.h);
 }
 
 test "편집기 배경 quad와 글자 셀은 같은 자리에 선다 — origin이 갈리면 배경만 옮겨간다" {
@@ -534,10 +546,11 @@ test "스크롤바 gutter가 폭을 다 먹는 좁은 pane에서도 죽지 않�
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    // padding(6+6)을 뺀 뒤에도 남는 아주 좁은 leaf. grid.w는 0이 아니지만 gutter보다 좁다.
-    const narrow: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 20, .h = 300 };
-    const grid = pane_ops.paneGeometry(fx.session, narrow).grid;
-    try testing.expect(grid.w > 0 and grid.w < 12); // 전제: 정말 gutter보다 좁다
+    // **`body`는 padding을 빼지 않으므로 leaf 폭이 곧 본문 폭이다.** gutter(12px)보다 좁은 값을 직접 준다
+    // — 예전엔 padding이 빼주던 몫에 기대고 있었고, 그 전제가 바뀌자 이 테스트가 즉시 빨간불이 됐다.
+    const narrow: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 10, .h = 300 };
+    const body = pane_ops.paneGeometry(fx.session, narrow).body;
+    try testing.expect(body.w > 0 and body.w < 12); // 전제: 정말 gutter보다 좁다
 
     fx.session.gpu_quads.clearRetainingCapacity();
     // **`if (…) |d|`로 감싸지 않는다.** null이면 조용히 통과하는 테스트가 되고, 그 순간 이 경계는
@@ -545,9 +558,9 @@ test "스크롤바 gutter가 폭을 다 먹는 좁은 pane에서도 죽지 않�
     // 정책이 "이 폭에서는 안 그린다"로 바뀌면 여기서 빨간불이 나야 사람이 그 결정을 마주한다.
     var drawn = appendPaneFrame(fx.session, narrow, fx.term) orelse return error.NarrowPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
-    try testing.expectEqual(grid.w, drawn.rect.w);
+    try testing.expectEqual(body.w, drawn.rect.w);
     for (fx.session.gpu_quads.items) |q| {
-        try testing.expect(q.w <= @as(f32, @floatFromInt(grid.w)));
+        try testing.expect(q.w <= @as(f32, @floatFromInt(body.w)));
         try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(narrow.x + narrow.w)));
     }
 }
@@ -567,16 +580,16 @@ test "문서 끝을 넘긴 스크롤에서도 그리고 사각을 안 넘는다"
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
-    const grid = pane_ops.paneGeometry(fx.session, fx.leaf_rect).grid;
-    try testing.expectEqual(grid.w, drawn.rect.w);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+    try testing.expectEqual(body.w, drawn.rect.w);
     for (fx.session.gpu_quads.items) |q| {
-        try testing.expect(q.x >= @as(f32, @floatFromInt(grid.x)));
-        try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(grid.x + grid.w)));
-        try testing.expect(q.y + q.h <= @as(f32, @floatFromInt(grid.y + grid.h)));
+        try testing.expect(q.x >= @as(f32, @floatFromInt(body.x)));
+        try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(body.x + body.w)));
+        try testing.expect(q.y + q.h <= @as(f32, @floatFromInt(body.y + body.h)));
     }
     // 셀도 격자 밖으로 안 나간다 — 음수 origin은 lowering이 버리지만 과대 row/col은 안 버린다.
-    const cols: u16 = @intCast(grid.w / fx.session.cell_width_px);
-    const rows: u16 = @intCast(grid.h / fx.session.cell_height_px);
+    const cols: u16 = @intCast(body.w / fx.session.cell_width_px);
+    const rows: u16 = @intCast(body.h / fx.session.cell_height_px);
     for (drawn.dl.cells) |c| {
         try testing.expect(c.col < cols);
         try testing.expect(c.row < rows);

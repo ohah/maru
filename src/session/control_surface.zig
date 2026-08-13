@@ -55,7 +55,14 @@ const wm = @import("window_membership.zig");
 // ── Surface 엔티티 DTO(§3) ────────────────────────────────────────────────────────────────────────────────
 
 /// surface 종류 판별자(§3 `surface.kind = terminal | web`). `detail` union의 tag이자 wire `kind` 필드.
-pub const SurfaceKind = enum { terminal, web };
+/// surface의 종류. **닫힌 열거다** — 새 값은 사용자 승인 사안이고(`app_session.zig` 묘비 주석),
+/// 값마다 `SurfaceDetail`·`LiveSurface` arm이 따라온다.
+///
+/// `editor`는 N1 네이티브 편집기다([native-editor.md](../../docs/native-editor.md)). **`web`과 갈리는
+/// 이유**: 기존 `kind == .web` 분기들이 "PTY 없음"과 "터미널 셀 렌더 안 함"을 함께 뜻하는데, 편집기는
+/// **PTY는 없지만 렌더는 한다**(자기 셀 프레임을 그린다). 그 조합을 `web`에 얹으면 웹 전용 경로(URL·
+/// trust·WKWebView 부착)까지 딸려 오므로 자기 값을 갖는다.
+pub const SurfaceKind = enum { terminal, web, editor };
 
 /// at_prompt 3상(§3, OSC 133 기반). wire: `.at_prompt`→JSON true, `.not_at_prompt`→JSON false, `.unknown`→JSON null.
 /// unknown의 주 출처는 OSC 133 미통합 셸(대다수)이라 known-not-prompt(false)와 절대 접지 않는다(§3).
@@ -117,6 +124,15 @@ pub const TerminalMeta = struct {
 };
 
 /// web surface 전용 메타(§3). collector가 WKWebView 상태에서 채운다(Phase 4·5, 여긴 스키마만).
+/// 편집기 surface의 컨트롤 플레인 메타. **web과 달리 URL·trust가 없다** — 여는 대상이 로컬 파일
+/// 하나이고 신뢰 경계가 파일 시스템 권한이라(§3.5 읽기 전용 판정) 웹의 축이 그대로 오지 않는다.
+pub const EditorMeta = struct {
+    /// 열려 있는 파일의 절대 경로. 없으면 생략(아직 파일이 안 붙은 편집기).
+    path: ?[]const u8 = null,
+    /// 쓸 수 없는 파일이라 읽기 전용으로 열렸는가(§3.5 — 여는 것을 막지는 않는다).
+    read_only: bool = false,
+};
+
 pub const WebMeta = struct {
     /// 현재 URL. 없으면 생략.
     url: ?[]const u8 = null,
@@ -133,6 +149,7 @@ pub const WebMeta = struct {
 pub const SurfaceDetail = union(SurfaceKind) {
     terminal: TerminalMeta,
     web: WebMeta,
+    editor: EditorMeta,
 };
 
 /// 컨트롤 플레인 Surface 엔티티(§3). 공통 메타 + kind-분기 detail. 슬라이스(title/cwd/…)는 collector 소유 버퍼를
@@ -260,6 +277,7 @@ fn kindWire(k: SurfaceKind) []const u8 {
     return switch (k) {
         .terminal => "terminal",
         .web => "web",
+        .editor => "editor",
     };
 }
 
@@ -329,6 +347,17 @@ fn writeSurface(s: *std.json.Stringify, dto: SurfaceDto) !void {
             try s.write(w.loading);
             try s.objectField("trust");
             try s.write(trustWire(w.trust));
+        },
+        // **web의 축(url·trust·loading)을 그대로 쓰지 않는다.** 편집기가 여는 것은 로컬 파일 하나이고
+        // 신뢰 경계가 파일 시스템 권한이라, 있는 값만 낸다 — 없는 축을 null로 채우면 소비자가 웹과
+        // 같은 것으로 오인한다.
+        .editor => |e| {
+            if (e.path) |pth| {
+                try s.objectField("path");
+                try s.write(pth);
+            }
+            try s.objectField("read_only");
+            try s.write(e.read_only);
         },
     }
 

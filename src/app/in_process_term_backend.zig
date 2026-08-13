@@ -84,7 +84,8 @@ pub const InProcessTermBackend = struct {
         const slot = self.registry.findBySurface(handle) orelse return null;
         return switch (slot.*) {
             .terminal => |*t| t,
-            .web => null,
+            // PTY가 없는 두 갈래. 편집기도 여기 온다 — 이 함수가 찾는 것은 live PTY 슬롯이다.
+            .web, .editor => null,
         };
     }
 

@@ -494,7 +494,7 @@ pub fn sidebarSearchActivateFirst(self: *AppSession) void {
 /// transcript 보강(4·5단계)이 붙으면 여기서 함께 센다. 카드와 같은 규율로 이 값이 행 높이의 입력이다.
 pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceSession) u8 {
     const term = agentTermOf(tab, ag) orelse return 1;
-    // 라벨 줄은 항상 있다 — 에이전트면 (종류 · 상태), 아니면 Term 라벨(2026-08-11). 아래 세 조건은 종류로
+    // 라벨 줄은 항상 있다 — 에이전트면 (마커 + 프롬프트/종류·문구), 아니면 Term 라벨(2026-08-11). 아래 세 조건은 종류로
     // 분기하지 않는다: PTY 없는 Term(브라우저·파일)은 관측이 `.unavailable`이라 폴더·브랜치가 자연히 0줄이고,
     // 에이전트 아닌 Term은 transcript가 비어 응답 줄도 0이다. 즉 비-에이전트 행은 라벨 1줄로 수렴한다.
     var n: u8 = 1;
@@ -1605,9 +1605,6 @@ pub fn workspaceStatusLine(self: *AppSession, tab: *Tab) ![]const u8 {
 /// 한 Term의 상태줄 텍스트(owned). 에이전트 아니면(none) "" — 그 줄은 생략된다. running이면 "▁▅▇▃ 진행중"(파형),
 /// blocked/idle/unknown도 오해 없는 짧은 상태 문구로 표시한다.
 /// 사이드바는 workspaceStatusLine이 고른 대표 Term을 이 함수로 넘긴다.
-/// 에이전트 행 **1행 텍스트**(owned) — 종류 이름 + 상태 문구. 카드 상태줄(agentStatusLine)이 상태 마커·문구의
-/// 단일 출처이므로 그대로 쓰고, 앞에 종류 이름을 붙여 "무엇이 어떤 상태인지"를 한 줄로 읽게 한다.
-/// 예: `✓ 대기중` → `Claude Code · ✓ 대기중`. 마지막 프롬프트로 이 자리를 대체하는 것은 transcript 보강(4·5단계)이다.
 /// 세션 목록 행의 **gutter 아이콘** codepoint(0 = 아이콘 없음). 에이전트는 kind 아이콘(✶/◆)을 그대로 쓰고,
 /// 비-에이전트 Term은 종류로 가른다 — 목록이 터미널·브라우저·파일을 함께 담게 되면서(2026-08-11) 아이콘이
 /// 없으면 행이 전부 라벨 한 줄로만 구분돼 종류를 눈으로 못 가른다.
@@ -1625,6 +1622,30 @@ pub fn sessionRowIconCodepoint(term: *Term) u21 {
     return 0;
 }
 
+/// 상태줄(`agentStatusLine`)을 **마커**와 **문구**로 가른 것. 상태줄은 `"<마커> <문구>"` 꼴 하나뿐이라 첫 공백이
+/// 경계다. 마커를 따로 만들지 않고 잘라 쓰는 이유는 상태 문구가 바뀔 때 둘이 어긋나지 않게 하려는 것이고,
+/// 자르는 코드를 여기 한 곳에 두는 이유는 소비처가 둘(프롬프트 있는 행·없는 행)이기 때문이다 — 각자 자르면
+/// 한쪽만 옛 규칙에 남는다(그 어긋남이 바로 이 구조를 만든 결함이다: 아래 `agentRowLabelOwned` 주석).
+const StatusParts = struct { marker: []const u8, text: []const u8 };
+
+fn splitStatusLine(status: []const u8) StatusParts {
+    const sep = std.mem.indexOfScalar(u8, status, ' ') orelse return .{ .marker = status, .text = "" };
+    return .{ .marker = status[0..sep], .text = status[sep + 1 ..] };
+}
+
+/// 에이전트 행 **1행 텍스트**(owned) — `<상태 마커> <본문>`. 본문은 마지막 사용자 프롬프트이고, 그것을 아직
+/// 모르면 `<종류 이름> <상태 문구>`로 폴백한다(§2 표). 상태 마커·문구의 단일 출처는 `agentStatusLine`이다.
+///
+/// **마커는 두 형태 모두 맨 앞이다**(사용자 결정 2026-08-13). 예전 폴백은 상태줄을 통째로 뒤에 붙여
+/// `◆ Codex · ▁▅▇▃ 진행중`이었고, 프롬프트가 있는 행은 `◆ ▁▅▇▃ 지금 용량 …`이라 **같은 목록에서 파형이 서로
+/// 다른 열에 섰다**(사용자 보고 — "코덱스 스피너 도는 위치가 다르다"). 두 파형은 같은 `agent_spin_frame`을 쓰므로
+/// 어긋난 것은 애니메이션이 아니라 **자리**다. 원인은 폴백만 마커를 본문 뒤에 두는 것이었으므로, 폴백도 마커를
+/// 앞으로 빼 "아이콘 다음이 상태 마커"라는 읽기 규칙을 목록 전체에서 하나로 만든다(비-에이전트 행의 dirty `*`가
+/// 이미 그 자리를 쓴다).
+///
+/// 종류와 문구를 가르던 `·`는 함께 걷는다 — 마커가 앞으로 오면 `▁▅▇▃ Codex 진행중`처럼 종류와 문구가 한 구절로
+/// 읽혀 구분자가 할 일이 없고, 좁은 사이드바에서 두 칸은 그대로 프롬프트·문구의 말줄임이 된다.
+/// 덤으로 unknown의 `Codex · · 상태 확인 중`(마커 `·`와 구분자 `·`가 겹쳐 점이 둘)도 사라진다.
 pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
     // **비-에이전트 행**(터미널·브라우저·파일, 2026-08-11)은 상태 문구도 프롬프트도 없다 — 아래 경로를 그대로
     // 태우면 kind_name·status가 모두 빈 문자열이라 라벨 없는 행이 나온다. 탭 바·창 제목과 **같은** `termLabel`
@@ -1642,24 +1663,24 @@ pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
     }
     const status = try agentStatusLine(self, term);
     defer self.allocator.free(status);
+    const parts = splitStatusLine(status);
     // 마지막 **사용자 프롬프트**가 있으면 종류 이름·상태 문구 대신 그것을 싣는다(§7). 사용자가 이 행에서 알고
     // 싶은 건 "무엇을 시켰는가"이고, 진행 여부는 앞의 마커(파형·✓)가 이미 말한다. 종류는 gutter 아이콘에 남는다.
     const prompt = term.agent_transcript.prompt();
     if (prompt.len > 0) {
-        // 상태 문구는 "<마커> <문구>" 꼴이라(agentStatusLine 단일 출처) 첫 공백 앞이 마커다 — 파형 애니메이션도
-        // 그 자리에서 그대로 살아 있다. 마커를 따로 만들지 않는 이유는 상태 문구가 바뀔 때 둘이 어긋나지 않게.
-        const marker_end = std.mem.indexOfScalar(u8, status, ' ') orelse status.len;
-        const marker = status[0..marker_end];
-        if (marker.len == 0) return self.allocator.dupe(u8, prompt);
-        return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ marker, prompt });
+        if (parts.marker.len == 0) return self.allocator.dupe(u8, prompt);
+        return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ parts.marker, prompt });
     }
     const kind_name: []const u8 = switch (term.agent_kind) {
         .claude => "Claude Code",
         .codex => "Codex",
         .none => "",
     };
-    if (status.len == 0) return self.allocator.dupe(u8, kind_name);
-    return std.fmt.allocPrint(self.allocator, "{s} \u{00b7} {s}", .{ kind_name, status });
+    // 폴백도 **마커가 먼저**다(위 주석). 마커만 있고 문구가 없는 상태 문자열이 생겨도 종류 이름은 남긴다 —
+    // 라벨이 마커 하나로 쪼그라들면 그 행이 무엇인지 gutter 아이콘 말고는 답할 것이 없다.
+    if (parts.marker.len == 0) return self.allocator.dupe(u8, kind_name);
+    if (parts.text.len == 0) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ parts.marker, kind_name });
+    return std.fmt.allocPrint(self.allocator, "{s} {s} {s}", .{ parts.marker, kind_name, parts.text });
 }
 
 /// 에이전트 행 **마지막 활동 시각**(owned, `"5m"`·`"now"`·빈 문자열).

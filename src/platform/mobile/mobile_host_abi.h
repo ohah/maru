@@ -180,6 +180,9 @@ void maru_mobile_pointer(unsigned int phase, float x, float y, unsigned long lon
 /// 무시하게 된다. Android 는 `ViewConfiguration.getLongPressTimeout()`, iOS 는
 /// `UILongPressGestureRecognizer` 기본값(0.5초)이다. 0 이면 무시(폴백 유지).
 void maru_mobile_set_long_press_ms(unsigned int ms);
+/// 코어가 실제로 들고 있는 값. host 가 보낸 값을 스스로 로그하는 것으로는 **닿았다는 증명이
+/// 안 된다** — 되물어야 안다.
+unsigned int maru_mobile_long_press_ms(void);
 
 /// 선택 범위(뷰포트 기준, 각 16비트: start_row·start_col·end_row·end_col). **끝 열은 포함**
 /// 이다. 선택이 없으면 전부 1. host 가 복사 버튼 자리를 잡을 때 쓴다.

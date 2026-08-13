@@ -360,6 +360,12 @@ var long_press_ms: u64 = 500;
 pub export fn maru_mobile_set_long_press_ms(ms: u32) void {
     if (ms > 0) long_press_ms = ms;
 }
+
+/// 코어가 **실제로 들고 있는** 값. host 가 자기가 보낸 값을 로그해 봐야 "닿았다" 는 증명이
+/// 안 된다 — 되물어야 안다(그렇게 안 해서 안 닿은 것을 못 본 적이 있다).
+pub export fn maru_mobile_long_press_ms() u32 {
+    return @intCast(long_press_ms);
+}
 /// 이만큼 움직이면 "누르고 있는" 것이 아니라 끄는 것이다(논리 px).
 const long_press_slop: f32 = 10;
 

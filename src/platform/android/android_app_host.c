@@ -827,8 +827,9 @@ Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
     // 코어가 박아 두면 그 설정을 무시하게 된다.
     pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_set_long_press_ms((unsigned int)ms);
+    unsigned int got = maru_mobile_long_press_ms();
     pthread_mutex_unlock(&g_bridge_lock);
-    LOGI("MARU_INPUT long_press_ms=%d", ms);
+    LOGI("MARU_INPUT long_press_ms=%u (sent %d)", got, ms);
 }
 
 JNIEXPORT void JNICALL

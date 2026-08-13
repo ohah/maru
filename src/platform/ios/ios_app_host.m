@@ -650,7 +650,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // GestureRecognizer` 를 쓰는 쪽으로 가야 한다(§3.1 의 "판단은 코어" 와 갈리는 자리다).
     UILongPressGestureRecognizer *lp = [UILongPressGestureRecognizer new];
     maru_mobile_set_long_press_ms((unsigned int)(lp.minimumPressDuration * 1000.0));
-    NSLog(@"MARU_INPUT long_press_ms=%.0f", lp.minimumPressDuration * 1000.0);
+    NSLog(@"MARU_INPUT long_press_ms=%u (sent %.0f)", maru_mobile_long_press_ms(),
+          lp.minimumPressDuration * 1000.0);
     return self;
 }
 

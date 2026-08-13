@@ -123,7 +123,6 @@ pub const TerminalMeta = struct {
     at_prompt: AtPrompt = .unknown,
 };
 
-/// web surface 전용 메타(§3). collector가 WKWebView 상태에서 채운다(Phase 4·5, 여긴 스키마만).
 /// 편집기 surface의 컨트롤 플레인 메타. **web과 달리 URL·trust가 없다** — 여는 대상이 로컬 파일
 /// 하나이고 신뢰 경계가 파일 시스템 권한이라(§3.5 읽기 전용 판정) 웹의 축이 그대로 오지 않는다.
 pub const EditorMeta = struct {
@@ -133,6 +132,7 @@ pub const EditorMeta = struct {
     read_only: bool = false,
 };
 
+/// web surface 전용 메타(§3). collector가 WKWebView 상태에서 채운다(Phase 4·5, 여긴 스키마만).
 pub const WebMeta = struct {
     /// 현재 URL. 없으면 생략.
     url: ?[]const u8 = null,

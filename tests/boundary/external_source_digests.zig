@@ -321,7 +321,7 @@ pub const inventory = [_]Proof{
     // `paneGeometry(...).grid`로 바꾸며 바뀐다. 이어서 그 블록을 `editor_ops.appendPaneFrame`으로
     // 통째로 옮기고(테스트 가능한 seam), deinit의 Term 소유 해제 목록에 편집기 문서 해제를 더하며
     // 또 바뀐다. count는 2 그대로다 — 옮긴 코드도 새 코드도 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "06d72354b0782da0362d8ea9295ef5541d36d081d95b2e8bc138c551b2abf6da" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3c2c7b09c8f0e2e3b4b569683ad63f121eaab99b92f0c4f5cd7f63cf8e7c51f8" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

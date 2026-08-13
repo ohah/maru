@@ -270,15 +270,25 @@ aggregate slot/generation, sequence, Client destination을 전부 preflight한 �
 쓴 뒤 마지막 store로 `committed=1`을 게시한다. writer도 같은 mutex 아래 committed record 전체를 value-copy하므로 갱신 중 payload를
 볼 수 없다. producer 경로에는 allocation, callback, filesystem syscall이 없다.
 
-service는 exact 한 개 writer thread와 128-bit `pending_slots` bitmap, wake primitive를 bootstrap 때 함께 준비한다. producer는 record의
-마지막 store 뒤 해당 slot bit를 idempotent set하고 non-allocating wake만 수행한다. queue node나 receipt를 동적으로 만들지 않으며 같은
+process bootstrap은 heap에 final-address `ConnectionIncidentRuntime` 하나를 먼저 고정하고 그 안에 service, secure store,
+nonblocking CLOEXEC wake pipe, completion pipe와 exact 한 개 writer thread를 둔다. service 단독 중립 테스트는 wake를 소유하지 않고,
+제품 publication facade가 record의 마지막 store 뒤 해당 slot bit를 idempotent set한 다음 wake pipe에 한 바이트를 쓴다. pipe가 가득 찬
+`EAGAIN`은 이미 wake가 보류 중이라는 뜻이므로 성공으로 취급하고, 그 밖의 write 실패는 ring evidence를 되돌리지 않은 채 writer 상태만
+failed로 게시한다. queue node나 receipt를 동적으로 만들지 않으며 같은
 aggregate의 여러 갱신은 한 bit로 coalesce된다. writer는 mutex 아래
-`{pid,process_nonce,slot_index,record_generation,digest}` receipt와 exact record를 value-copy하고 bit를 clear한 뒤
+`IncidentWriterHandoff`와 exact record를 value-copy하고 bit를 clear한 뒤
 lock을 놓고 disk I/O를 수행한다. completion 때 record generation이 복사본보다 새로우면 bit를 다시 set하고, 같으면 disk 상태만
 게시한다. reconnect/quit은 writer를 기다리지 않는다. late completion은 ring storage를 free하거나 incident/aggregate를 변경하지
-않는다. writer는 별도 작업 ID를 발급하지 않고 record generation만 stale completion 판정에 사용한다. process teardown은 writer를
-bounded deadline까지 join한 뒤 미완료 작업을 ring-only로 남기며 ring backing을 writer보다
-먼저 파괴하지 않는다. producer lock→writer lock 외의 역방향 lock 획득은 0이고 writer는 Client/HostAdapter를 호출하지 않는다.
+않는다. writer는 별도 작업 ID를 발급하지 않고 record generation만 stale completion 판정에 사용한다.
+
+정상 종료 owner는 `stopping`을 release-store하고 wake한 뒤 completion pipe를 process-monotonic 200 ms deadline까지 poll한다. deadline
+전에 writer가 store/service 접근을 끝내고 completion byte를 게시하면 exact thread를 join하고 backing을 free한다. regular-file
+`write/fsync`는 취소 가능한 syscall이 아니므로 deadline을 넘기면 join하지 않고 thread를 detach하며, runtime backing과 그 FD를 process
+종료까지 의도적으로 남긴다. 이 bounded leak은 최대 service+32 KiB ring, 제어 pipe FD 네 개와 저장소 directory FD 한 개이며 reconnect나 일반 quit 경로에는 생기지
+않는다. detached writer가 늦게 반환해도 backing은 살아 있고 Client/HostAdapter나 해제된 allocator를 호출하지 않는다. stack-local
+runtime detach, timeout 뒤 backing/dir FD 해제, 무기한 join은 금지한다. producer lock→writer lock 외의 역방향 lock 획득은 0이고
+writer는 Client/HostAdapter를 호출하지 않는다. fork child는 inherited runtime의 pipe·mutex·service를 만지기 전에 PID domain mismatch로
+거부한다.
 
 timestamp와 `IncidentInput`은 service mutex 진입 전에 operation owner가 process-monotonic clock에서 만들며 clock failure나 음수 값은
 mutation 0 typed reject다. aggregate의 first/last는 각각 `min`/`max`로 갱신해 caller 간 관측 순서가 바뀌어도 역전되지 않는다.

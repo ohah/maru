@@ -10,7 +10,7 @@ fn count(haystack: []const u8, needle: []const u8) usize {
     return total;
 }
 
-test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
+test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     const allocator = std.testing.allocator;
     const incident = try readSource(allocator, "src/observability/connection_incident.zig");
     defer allocator.free(incident);
@@ -24,6 +24,10 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     defer allocator.free(poison);
     const storage = try readSource(allocator, "src/platform/macos/session_host/incident_artifact_store.zig");
     defer allocator.free(storage);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/incident_runtime.zig");
+    defer allocator.free(runtime);
+    const daemon = try readSource(allocator, "src/platform/macos/session_host/daemon.zig");
+    defer allocator.free(daemon);
 
     try std.testing.expectEqual(@as(usize, 1), count(incident, "const std = @import(\"std\");"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const payload_size: usize = 208;"));
@@ -35,8 +39,17 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
     try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
     try std.testing.expectEqual(@as(usize, 6), count(storage, "test \"CR0b 저장소"));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"CR0b 기록기 수명은"));
+    const runtime_product = runtime[0 .. std.mem.indexOf(u8, runtime, "\ntest \"") orelse runtime.len];
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, ".takePendingForWriter("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, ".completeWriterHandoff("));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "const incident_runtime = @import(\"incident_runtime.zig\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "incident_runtime.ConnectionIncidentRuntime.create("));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "incident_owner.shutdown()"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "host_adapter.HostAdapter.initializeProcessRuntime()"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "process_seal.currentReadyIdentity()"));
     const storage_product = storage[0 .. std.mem.indexOf(u8, storage, "\ntest \"") orelse storage.len];
-    try std.testing.expectEqual(@as(usize, 1), count(storage, "const incident = @import(\"connection_incident\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(storage, "const incident = @import(\"maru\").observability.connection_incident;"));
     try std.testing.expectEqual(@as(usize, 0), count(storage, "client.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(storage, "host_adapter.zig"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub fn takePendingForWriter("));
@@ -47,10 +60,12 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(client, "completeWriterHandoff"));
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "completeWriterHandoff"));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "completeWriterHandoff"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "@import(\"maru\").observability.connection_incident"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "@import(\"incident_artifact_store.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), count(storage_product, "takePendingForWriter("));
     try std.testing.expectEqual(@as(usize, 0), count(storage_product, "completeWriterHandoff("));
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 2),
         try countProductSourcesExceptTwo(
             allocator,
             "takePendingForWriter(",
@@ -59,7 +74,7 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "completeWriterHandoff(",

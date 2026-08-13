@@ -35,6 +35,9 @@ const upgrade_owner = @import("upgrade_owner.zig");
 const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
 const poll_owner = @import("poll_owner.zig");
+const incident_runtime = @import("incident_runtime.zig");
+const host_adapter = @import("host_adapter.zig");
+const process_seal = @import("process_seal_service.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
@@ -69,6 +72,42 @@ fn newHostId() u128 {
         id = std.mem.readInt(u128, &bytes, .big);
     }
     return id;
+}
+
+fn bootstrapIncidentRuntime(
+    allocator: std.mem.Allocator,
+    dir_path: [:0]const u8,
+) !*incident_runtime.ConnectionIncidentRuntime {
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = try process_seal.currentReadyIdentity();
+    const owner_fd = c.open(dir_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (owner_fd < 0) return error.ManifestFailed;
+    defer _ = c.close(owner_fd);
+    const mkdir_result = c.mkdirat(owner_fd, "incidents", 0o700);
+    if (mkdir_result != 0 and posix.errno(mkdir_result) != .EXIST) return error.ManifestFailed;
+    const incident_fd = c.openat(
+        owner_fd,
+        "incidents",
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0),
+    );
+    if (incident_fd < 0) return error.ManifestFailed;
+    var incident_stat: posix.Stat = undefined;
+    if (c.fstat(incident_fd, &incident_stat) != 0 or !posix.S.ISDIR(incident_stat.mode) or
+        incident_stat.uid != c.getuid() or c.fchmod(incident_fd, 0o700) != 0)
+        return error.ManifestFailed;
+    defer _ = c.close(incident_fd);
+    var app_instance_nonce = newHostId();
+    // host_id와 별도 발급한다. artifact identity가 endpoint 교체나 host manifest generation에 종속되면
+    // 같은 프로세스의 장애 sequence가 외부 routing identity 변화로 갈라질 수 있다.
+    if (app_instance_nonce == 0) app_instance_nonce = newHostId();
+    return incident_runtime.ConnectionIncidentRuntime.create(
+        allocator,
+        identity.pid,
+        identity.process_nonce,
+        app_instance_nonce,
+        incident_fd,
+    ) catch return error.ManifestFailed;
 }
 
 /// session host 본체. `dir_path`(0700)에 `socket_path`(0600)로 bind하고 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
@@ -369,6 +408,11 @@ fn runSessionHostImpl(
         if (exact_host_id) |host_id| host_manifest.removeEmptyHostDirectories(dir_path, host_id);
     }
 
+    // 기록기 backing은 daemon lifetime보다 길 수 있으므로 stack owner에 두지 않는다. 정상 종료에서는 join 뒤
+    // 해제하고, regular-file I/O가 200 ms를 넘긴 경우 runtime 스스로 detach하며 process 종료까지 backing을 보존한다.
+    const incident_owner = bootstrapIncidentRuntime(allocator, dir_path) catch return error.ManifestFailed;
+    defer _ = incident_owner.shutdown() catch {};
+
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
 
@@ -642,6 +686,8 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
+        var incidents_buf: [320]u8 = undefined;
+        if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
         _ = c.rmdir(dir_path.ptr);
     }
 
@@ -687,6 +733,8 @@ test "daemon: competing host is rejected before it can unlink the live owner soc
         _ = c.unlink(socket_path.ptr);
         var owner_buf: [320]u8 = undefined;
         if (discovery.ownerLockPathIn(&owner_buf, dir_path)) |path| _ = c.unlink(path.ptr) else |_| {}
+        var incidents_buf: [320]u8 = undefined;
+        if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
         _ = c.rmdir(dir_path.ptr);
     }
     const first = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;

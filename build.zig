@@ -2271,18 +2271,13 @@ pub fn build(b: *std.Build) void {
         run_cr0b_writer_tests.addArg("--maru-expect-tests=11");
         run_cr0b_writer_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_writer_tests.step);
-        const cr0b_incident_module = b.createModule(.{
-            .root_source_file = b.path("src/observability/connection_incident.zig"),
-            .target = target,
-            .optimize = cr0b_optimize,
-        });
         const cr0b_storage_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/incident_artifact_store.zig"),
                 .target = target,
                 .optimize = cr0b_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "connection_incident", .module = cr0b_incident_module }},
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{"CR0b 저장소"},
         });
@@ -2290,6 +2285,20 @@ pub fn build(b: *std.Build) void {
         run_cr0b_storage_tests.addArg("--maru-expect-tests=6");
         run_cr0b_storage_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_storage_tests.step);
+        const cr0b_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b 기록기 수명은"},
+        });
+        const run_cr0b_runtime_tests = b.addRunArtifact(cr0b_runtime_tests);
+        run_cr0b_runtime_tests.addArg("--maru-expect-tests=3");
+        run_cr0b_runtime_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_runtime_tests.step);
         const cr0b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),

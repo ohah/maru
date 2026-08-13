@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const incident = @import("connection_incident");
+const incident = @import("maru").observability.connection_incident;
 
 const c = std.c;
 const posix = std.posix;

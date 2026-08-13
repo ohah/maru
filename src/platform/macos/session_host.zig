@@ -84,6 +84,11 @@ pub const incident_publisher_registry = if (builtin.os.tag == .macos)
     @import("session_host/incident_publisher_registry.zig")
 else
     struct {};
+pub const app_process_incident_owner = if (builtin.os.tag == .macos)
+    @import("session_host/app_process_incident_owner.zig")
+else
+    struct {};
+pub const incident_bootstrap_contract = @import("session_host/incident_bootstrap_contract.zig");
 pub const subscription_identity = @import("session_host/subscription_identity.zig");
 pub const connection_turn = if (builtin.os.tag == .macos)
     @import("session_host/connection_turn.zig")

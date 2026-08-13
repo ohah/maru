@@ -1,9 +1,8 @@
 const std = @import("std");
 const simple = @import("simple_test_runner.zig");
 extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
-
-pub export var maru_cr0b_publisher_child_path: [1024]u8 = [_]u8{0} ** 1024;
-pub export var maru_cr0b_publisher_child_path_len: usize = 0;
+extern var maru_cr0b_publisher_child_path: [1024]u8;
+extern var maru_cr0b_publisher_child_path_len: usize;
 
 pub fn main(init: std.process.Init.Minimal) void {
     var iterator = std.process.Args.Iterator.init(init.args);

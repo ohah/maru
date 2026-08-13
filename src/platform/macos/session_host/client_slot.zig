@@ -2387,6 +2387,7 @@ pub const IncidentOperationQuery = struct {
 };
 
 pub const IncidentOperationError = error{ InvalidOwner, Busy };
+pub const ManagedPoisonError = error{ InvalidOwner, Busy, InvalidInput };
 
 fn finishSemanticDigest(hasher: *std.crypto.hash.Blake3) [32]u8 {
     var digest: [32]u8 = undefined;
@@ -2416,6 +2417,17 @@ fn incidentCommitDigest(value: incident_publication_contract.FirstPublicationCom
     return finishSemanticDigest(&hasher);
 }
 
+fn incidentRepeatCommitDigest(value: incident_publication_contract.RepeatPublicationCommit) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-repeat-publication-commit.v1");
+    hasher.update(&incidentAuthorityDigest(value.authority));
+    hasher.update(&value.input_digest);
+    hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u128, value.incident_id.app_instance_nonce)));
+    hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u64, value.incident_id.sequence)));
+    hasher.update(&value.fingerprint);
+    return finishSemanticDigest(&hasher);
+}
+
 fn incidentOperationReceiptDigest(operation_id: u64, node_incarnation: u64, process_nonce: u64) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update("maru.incident-operation-receipt.v1");
@@ -2429,7 +2441,18 @@ const IncidentPublicationTestHook = struct {
     threadlocal var id_only: bool = false;
     threadlocal var id_and_key: bool = false;
     threadlocal var complete: bool = false;
+    threadlocal var trace: ?*const fn (u8) void = null;
 };
+
+pub const incident_publication_testing = if (builtin.is_test) struct {
+    pub fn armTrace(trace: ?*const fn (u8) void) void {
+        IncidentPublicationTestHook.trace = trace;
+    }
+} else struct {};
+
+fn traceIncidentPublication(stage: u8) void {
+    if (builtin.is_test) if (IncidentPublicationTestHook.trace) |trace| trace(stage);
+}
 
 fn incidentOperationSeal(
     value: incident_publication_contract.PreparedIncidentClientOperation,
@@ -2468,6 +2491,147 @@ fn incidentRepeatKeySeal(
         .binding_seal = key.binding_seal,
         .lifecycle_raw = key.lifecycle_raw,
     }) catch process_seal_service.fatalIntegrity(.incident_authority);
+}
+
+fn managedPoisonSeal(
+    value: incident_publication_contract.PreparedManagedPoison,
+    input_digest: incident_publication_contract.Digest,
+) [32]u8 {
+    return process_seal_service.preparedManagedPoisonSeal(value.pid, value.process_nonce, .{
+        .self_addr = value.self_addr,
+        .owner_thread = value.owner_thread,
+        .slot_addr = value.slot_addr,
+        .slot_generation = value.slot_generation,
+        .node_addr = value.node_addr,
+        .node_generation = value.node_generation,
+        .binding_seal = value.binding_seal,
+        .input_digest = input_digest,
+        .lifecycle_raw = value.lifecycle_raw,
+    }) catch process_seal_service.fatalIntegrity(.incident_authority);
+}
+
+/// Captures the canonical incident projection while the final Client node is pinned, then returns
+/// only a sealed scalar handoff. Publication deliberately happens after this operation is released.
+pub fn prepareManagedPoison(
+    self: *ClientSlot,
+    input: incident_publication_contract.IncidentInput,
+    out: *incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!void {
+    if (!std.meta.eql(out.*, incident_publication_contract.PreparedManagedPoison{}) or
+        rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
+        rangesOverlapTyped(out, &self.current.client))
+        return error.InvalidOwner;
+    const input_digest = incident_publication_contract.inputDigest(input) catch return error.InvalidInput;
+    const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+        error.MovedOrCopied => error.InvalidOwner,
+        error.AdminBusy => error.Busy,
+    };
+    defer self.endRegisteredClientOperation(operation);
+    if (!self.valid() or operation.node != self.current) return error.InvalidOwner;
+    const binding = operation.node.client.incident_binding;
+    if (!incident_binding_contract.validBindingShape(binding) or
+        binding.client_addr != @intFromPtr(&operation.node.client) or
+        binding.host_id != input.host_id or
+        binding.host_adapter_generation != input.host_adapter_generation or
+        binding.connection_generation != input.connection_generation or
+        binding.wire_major != input.wire_major or
+        binding.host_class_raw != input.host_class_raw)
+        return error.InvalidInput;
+    var candidate: incident_publication_contract.PreparedManagedPoison = .{
+        .self_addr = @intFromPtr(out),
+        .pid = self.pid,
+        .process_nonce = self.process_nonce,
+        .owner_thread = @intCast(std.Thread.getCurrentId()),
+        .slot_addr = @intFromPtr(self),
+        .slot_generation = self.incarnation.tagged,
+        .node_addr = @intFromPtr(operation.node),
+        .node_generation = operation.node.incarnation.tagged,
+        .binding_seal = binding.seal,
+        .input = input,
+        .lifecycle_raw = @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared),
+    };
+    candidate.seal = managedPoisonSeal(candidate, input_digest);
+    out.* = candidate;
+}
+
+/// Revalidates the final slot/node/binding graph and yields the only query that the coordinator may
+/// use. Raw query construction remains inside the ClientSlot owner boundary.
+pub fn managedPoisonQuery(
+    self: *ClientSlot,
+    prepared: *const incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!IncidentOperationQuery {
+    if (!self.valid() or prepared.self_addr != @intFromPtr(prepared) or
+        prepared.pid != self.pid or prepared.process_nonce != self.process_nonce or
+        prepared.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())) or
+        prepared.slot_addr != @intFromPtr(self) or prepared.slot_generation != self.incarnation.tagged or
+        prepared.node_addr != @intFromPtr(self.current) or prepared.node_generation != self.current.incarnation.tagged or
+        !incident_publication_contract.validManagedPoisonShape(prepared.*, @intFromPtr(prepared)))
+        return error.InvalidOwner;
+    const binding = self.current.client.incident_binding;
+    if (!incident_binding_contract.validBindingShape(binding) or
+        !std.mem.eql(u8, &binding.seal, &prepared.binding_seal) or
+        binding.host_id != prepared.input.host_id or
+        binding.host_adapter_generation != prepared.input.host_adapter_generation or
+        binding.connection_generation != prepared.input.connection_generation or
+        binding.wire_major != prepared.input.wire_major or
+        binding.host_class_raw != prepared.input.host_class_raw)
+        return error.InvalidOwner;
+    const digest = incident_publication_contract.inputDigest(prepared.input) catch return error.InvalidInput;
+    if (!std.mem.eql(u8, &prepared.seal, &managedPoisonSeal(prepared.*, digest)))
+        return error.InvalidOwner;
+    return .{
+        .slot_addr = prepared.slot_addr,
+        .slot_generation = prepared.slot_generation,
+        .node_addr = prepared.node_addr,
+    };
+}
+
+pub fn consumeManagedPoison(
+    self: *ClientSlot,
+    prepared: *incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!void {
+    _ = try managedPoisonQuery(self, prepared);
+    const digest = incident_publication_contract.inputDigest(prepared.input) catch return error.InvalidInput;
+    var consumed = prepared.*;
+    consumed.lifecycle_raw = @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.consumed);
+    consumed.seal = managedPoisonSeal(consumed, digest);
+    prepared.* = consumed;
+}
+
+pub fn managedPoisonWillPublishFirst(
+    self: *ClientSlot,
+    prepared: *const incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!bool {
+    const query = try managedPoisonQuery(self, prepared);
+    var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(query, &operation);
+    defer finishIncidentClientOperationNoFail(&operation);
+    const client: *const client_mod.Client = @ptrFromInt(operation.authority.client_addr);
+    return client.first_poison_reason == null and client.first_incident_id.sequence == 0 and
+        std.meta.eql(client.incident_repeat_key, incident_publication_contract.IncidentRepeatKey{});
+}
+
+/// First incident commit가 끝난 뒤 exact Client operation 아래 terminal state를 게시한다.
+/// 반환된 fd는 operation release 뒤 상위 owner가 닫으며 repeat는 이 suffix에 들어오지 않는다.
+pub fn terminalizeManagedPoisonNoFail(
+    self: *ClientSlot,
+    prepared: *const incident_publication_contract.PreparedManagedPoison,
+    result: incident_publication_contract.IncidentCommitResult,
+) ?std.c.fd_t {
+    const query = managedPoisonQuery(self, prepared) catch incidentOperationProofLoss("managed terminal query");
+    if (result.kind_raw != @intFromEnum(incident_publication_contract.PublicationKind.first) or
+        result.publication.incident_id.app_instance_nonce == 0 or result.publication.incident_id.sequence == 0)
+        incidentOperationProofLoss("managed terminal result");
+    var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    beginIncidentClientOperation(query, &operation) catch incidentOperationProofLoss("managed terminal begin");
+    defer finishIncidentClientOperationNoFail(&operation);
+    const client: *client_mod.Client = @ptrFromInt(operation.authority.client_addr);
+    if (!std.meta.eql(client.first_incident_id, result.publication.incident_id) or
+        client.first_poison_reason == null or
+        @intFromEnum(client.first_poison_reason.?) != prepared.input.reason_raw)
+        incidentOperationProofLoss("managed terminal commit");
+    return client.terminalizePublishedIncidentChecked(client.first_poison_reason.?) catch
+        incidentOperationProofLoss("managed terminal leaf");
 }
 
 fn incidentOperationProofLoss(comptime stage: []const u8) noreturn {
@@ -2543,6 +2707,7 @@ pub fn beginIncidentClientOperation(
     candidate.authority_digest = incidentAuthorityDigest(candidate.authority);
     candidate.seal = incidentOperationSeal(candidate, slot.process_nonce);
     out.* = candidate;
+    traceIncidentPublication(1); // Client operation held
 }
 
 fn resolveIncidentClientOperation(
@@ -2610,6 +2775,37 @@ pub fn bindIncidentClientPublication(
     prepared.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound);
     const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
     prepared.seal = incidentOperationSeal(prepared.*, slot.process_nonce);
+    traceIncidentPublication(2); // Client publication bound
+}
+
+pub fn bindIncidentClientRepeatPublication(
+    prepared: *incident_publication_contract.PreparedIncidentClientOperation,
+    commit: incident_publication_contract.RepeatPublicationCommit,
+) IncidentOperationError!void {
+    const operation = resolveIncidentClientOperation(prepared) orelse return error.InvalidOwner;
+    if (!std.meta.eql(commit.authority, prepared.authority) or
+        std.mem.allEqual(u8, &commit.input_digest, 0) or
+        commit.incident_id.app_instance_nonce == 0 or commit.incident_id.sequence == 0 or
+        std.mem.allEqual(u8, &commit.fingerprint, 0))
+        return error.InvalidOwner;
+    const client = &operation.node.client;
+    const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
+    const key = client.incident_repeat_key;
+    if (client.first_poison_reason == null or !std.meta.eql(client.first_incident_id, commit.incident_id) or
+        !incident_publication_contract.validRepeatKeyShape(key, @intFromPtr(&client.incident_repeat_key)) or
+        key.pid != prepared.pid or key.process_nonce != slot.process_nonce or
+        key.client_addr != prepared.authority.client_addr or
+        key.connection_generation != prepared.authority.connection_generation or
+        !std.meta.eql(key.incident_id, commit.incident_id) or
+        !std.mem.eql(u8, &key.fingerprint, &commit.fingerprint) or
+        !std.mem.eql(u8, &key.binding_seal, &prepared.authority.binding_seal) or
+        !std.mem.eql(u8, &key.seal, &incidentRepeatKeySeal(prepared.pid, slot.process_nonce, key)))
+        return error.InvalidOwner;
+    prepared.commit_digest = incidentRepeatCommitDigest(commit);
+    prepared.repeat_key_seal = key.seal;
+    prepared.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound);
+    prepared.seal = incidentOperationSeal(prepared.*, slot.process_nonce);
+    traceIncidentPublication(2);
 }
 
 pub fn commitFirstIncidentClientPublicationNoFail(
@@ -2640,18 +2836,42 @@ pub fn commitFirstIncidentClientPublicationNoFail(
     if (!std.mem.eql(u8, &key.seal, &incidentRepeatKeySeal(prepared.pid, key.process_nonce, key)))
         incidentOperationProofLoss("repeat key seal");
     client.first_incident_id = commit.incident_id;
+    traceIncidentPublication(3); // first incident id stored
     if (builtin.is_test and IncidentPublicationTestHook.enabled)
         IncidentPublicationTestHook.id_only = client.first_incident_id.sequence != 0 and
             std.meta.eql(client.incident_repeat_key, incident_publication_contract.IncidentRepeatKey{}) and
             client.first_poison_reason == null;
     client.incident_repeat_key = key;
+    traceIncidentPublication(4); // repeat key stored
     if (builtin.is_test and IncidentPublicationTestHook.enabled)
         IncidentPublicationTestHook.id_and_key = client.first_incident_id.sequence != 0 and
             client.incident_repeat_key.incident_id.sequence != 0 and client.first_poison_reason == null;
     client.first_poison_reason = @enumFromInt(commit.reason_raw);
+    traceIncidentPublication(5); // first reason stored
     if (builtin.is_test and IncidentPublicationTestHook.enabled)
         IncidentPublicationTestHook.complete = client.first_incident_id.sequence != 0 and
             client.incident_repeat_key.incident_id.sequence != 0 and client.first_poison_reason != null;
+}
+
+/// repeat는 first Client 필드를 쓰지 않고 held operation 아래 key 권위만 재검증한다.
+pub fn commitRepeatIncidentClientPublicationNoFail(
+    prepared: *incident_publication_contract.PreparedIncidentClientOperation,
+    commit: incident_publication_contract.RepeatPublicationCommit,
+) void {
+    const operation = resolveIncidentClientOperation(prepared) orelse
+        incidentOperationProofLoss("repeat commit resolve");
+    if (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound) or
+        !std.mem.eql(u8, &prepared.commit_digest, &incidentRepeatCommitDigest(commit)))
+        incidentOperationProofLoss("repeat commit digest");
+    const client = &operation.node.client;
+    const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
+    const key = client.incident_repeat_key;
+    if (client.first_poison_reason == null or !std.meta.eql(client.first_incident_id, commit.incident_id) or
+        !incident_publication_contract.validRepeatKeyShape(key, @intFromPtr(&client.incident_repeat_key)) or
+        !std.mem.eql(u8, &key.fingerprint, &commit.fingerprint) or
+        !std.mem.eql(u8, &key.seal, &prepared.repeat_key_seal) or
+        !std.mem.eql(u8, &key.seal, &incidentRepeatKeySeal(prepared.pid, slot.process_nonce, key)))
+        incidentOperationProofLoss("repeat key authority");
 }
 
 pub fn finishIncidentClientOperationNoFail(
@@ -2664,6 +2884,7 @@ pub fn finishIncidentClientOperationNoFail(
     consumed.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.consumed);
     consumed.seal = incidentOperationSeal(consumed, slot.process_nonce);
     endRegisteredNodeOperation(operation);
+    traceIncidentPublication(6); // Client operation released
     // Lifetime pin 반환 뒤에는 slot/node/client를 다시 읽지 않고 미리 봉인한 값만 게시한다.
     prepared.* = consumed;
 }
@@ -14254,6 +14475,62 @@ test "CR0b Client incident operation은 held owner에서 id key reason을 순서
     }, &second);
     try std.testing.expect(second.authority.operation_id != operation.authority.operation_id);
     finishIncidentClientOperationNoFail(&second);
+}
+
+test "CR0b Client incident operation은 managed poison handoff를 pin 아래 봉인하고 operation 반환 뒤 조회한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xC0B4);
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(&slot, std.testing.allocator, &source, 0xC0B4, 10, .current, &binding_publication);
+    defer slot.deinit();
+    const binding = slot.current.client.incident_binding;
+    const incident = @import("maru").observability.connection_incident;
+    const input: incident_publication_contract.IncidentInput = .{
+        .timestamp_ns = 101,
+        .host_id = binding.host_id,
+        .host_adapter_generation = binding.host_adapter_generation,
+        .connection_generation = binding.connection_generation,
+        .wire_major = binding.wire_major,
+        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        .scope_raw = @intFromEnum(incident.Scope.connection),
+        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .host_class_raw = binding.host_class_raw,
+        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
+        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .last_success_request_id = 103,
+        .pending_request_count = 2,
+        .pending_stream_count = 3,
+        .pending_event_count = 5,
+        .queue_item_count = 7,
+        .queue_bytes = 11,
+        .controller_generation = 13,
+        .upgrade_epoch = 17,
+    };
+    var prepared: incident_publication_contract.PreparedManagedPoison = .{};
+    try prepareManagedPoison(&slot, input, &prepared);
+    try std.testing.expect(slot.current.client.first_poison_reason == null);
+    try std.testing.expectEqual(@as(i32, -1), slot.current.client.fd);
+    const query = try managedPoisonQuery(&slot, &prepared);
+    try std.testing.expectEqual(@as(u64, @intFromPtr(&slot)), query.slot_addr);
+    try std.testing.expectEqual(@as(u64, @intFromPtr(slot.current)), query.node_addr);
+    var copied = prepared;
+    try std.testing.expectError(error.InvalidOwner, managedPoisonQuery(&slot, &copied));
+    prepared.input.queue_bytes += 1;
+    try std.testing.expectError(error.InvalidOwner, managedPoisonQuery(&slot, &prepared));
+    prepared.input.queue_bytes -= 1;
+    _ = try managedPoisonQuery(&slot, &prepared);
+    var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(query, &operation);
+    finishIncidentClientOperationNoFail(&operation);
+    try consumeManagedPoison(&slot, &prepared);
+    try std.testing.expect(incident_publication_contract.validManagedPoisonConsumedShape(
+        prepared,
+        @intFromPtr(&prepared),
+    ));
+    try std.testing.expectError(error.InvalidOwner, managedPoisonQuery(&slot, &prepared));
+    try std.testing.expectError(error.InvalidOwner, consumeManagedPoison(&slot, &prepared));
 }
 
 test "CR0b Client incident operation은 owner 저장소와 겹친 destination을 발급 전에 거부한다" {

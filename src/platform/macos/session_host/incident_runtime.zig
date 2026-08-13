@@ -8,6 +8,8 @@ const builtin = @import("builtin");
 const incident = @import("maru").observability.connection_incident;
 const artifact = @import("incident_artifact_store.zig");
 const process_seal = @import("process_seal_service.zig");
+const publisher_registry = @import("incident_publisher_registry.zig");
+const publication = @import("maru").observability.incident_publication_contract;
 
 const c = std.c;
 const posix = std.posix;
@@ -20,15 +22,25 @@ pub const Error = incident.ServiceError || artifact.Error || std.mem.Allocator.E
     ClockFailed,
 };
 
-pub const ShutdownResult = enum(u8) { joined = 1, detached = 2 };
+pub const ShutdownResult = enum(u8) {
+    joined = 1,
+    detached = 2,
+    degraded_joined = 3,
+    degraded_detached = 4,
+};
 const Lifecycle = enum(u8) { pristine = 0, ready = 1, stopping = 2, detached = 3 };
 const shutdown_deadline_ms: i32 = 200;
+var next_publication_owner_generation = std.atomic.Value(u64).init(1);
 
 pub const ConnectionIncidentRuntime = struct {
     allocator: std.mem.Allocator,
     self_addr: usize = 0,
     pid: u64 = 0,
     process_nonce: u64 = 0,
+    runtime_generation: u64 = 0,
+    service_generation: u64 = 0,
+    publisher_registry_addr: u64 = 0,
+    publisher_registry_generation: u64 = 0,
     wake_read_fd: c.fd_t = -1,
     wake_write_fd: c.fd_t = -1,
     completion_read_fd: c.fd_t = -1,
@@ -41,10 +53,38 @@ pub const ConnectionIncidentRuntime = struct {
     service: incident.ConnectionIncidentService = .{},
     store: artifact.IncidentArtifactStore = .{},
     testing_block_writer: if (builtin.is_test) std.atomic.Value(u8) else void = if (builtin.is_test) .init(0) else {},
+    testing_shutdown_clock_failure: if (builtin.is_test) std.atomic.Value(u8) else void = if (builtin.is_test) .init(0) else {},
 
     const testing = if (builtin.is_test) struct {
         var fatal_marker_fd: c_int = -1;
+        threadlocal var publication_trace: ?*const fn (u8) void = null;
     } else struct {};
+
+    pub const testing_api = if (builtin.is_test) struct {
+        pub fn armPublicationTrace(trace: ?*const fn (u8) void) void {
+            testing.publication_trace = trace;
+        }
+
+        pub fn exhaustServiceSequence(runtime: *ConnectionIncidentRuntime) void {
+            runtime.service.last_issued_sequence = std.math.maxInt(u64);
+        }
+
+        pub fn restoreServiceSequence(runtime: *ConnectionIncidentRuntime, value: u64) void {
+            runtime.service.last_issued_sequence = value;
+        }
+
+        pub fn markWriterFailed(runtime: *ConnectionIncidentRuntime) void {
+            runtime.writer_failed.store(1, .release);
+        }
+
+        pub fn failNextShutdownClock(runtime: *ConnectionIncidentRuntime) void {
+            runtime.testing_shutdown_clock_failure.store(1, .release);
+        }
+    } else struct {};
+
+    fn tracePublication(stage: u8) void {
+        if (builtin.is_test) if (testing.publication_trace) |trace| trace(stage);
+    }
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -57,9 +97,17 @@ pub const ConnectionIncidentRuntime = struct {
             return error.InvalidAuthority;
         const self = try allocator.create(ConnectionIncidentRuntime);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .pid = pid, .process_nonce = process_nonce };
+        const runtime_generation = issuePublicationOwnerGeneration();
+        const service_generation = issuePublicationOwnerGeneration();
+        self.* = .{
+            .allocator = allocator,
+            .pid = pid,
+            .process_nonce = process_nonce,
+            .runtime_generation = runtime_generation,
+            .service_generation = service_generation,
+        };
         self.self_addr = @intFromPtr(self);
-        try self.service.initInPlace(pid, process_nonce, app_instance_nonce);
+        try self.service.initInPlaceWithGeneration(pid, process_nonce, app_instance_nonce, service_generation);
 
         var wake_pipe: [2]c.fd_t = undefined;
         if (c.pipe(&wake_pipe) != 0) return error.PipeFailed;
@@ -103,7 +151,7 @@ pub const ConnectionIncidentRuntime = struct {
         return self;
     }
 
-    pub fn publish(self: *ConnectionIncidentRuntime, input: incident.ConnectionIncident) Error!incident.PublishResult {
+    fn publish(self: *ConnectionIncidentRuntime, input: incident.ConnectionIncident) Error!incident.PublishResult {
         if (!self.valid(.ready)) return error.InvalidAuthority;
         const result = self.service.publish(self.pid, self.process_nonce, input) catch |err| switch (err) {
             error.CounterExhausted => {
@@ -119,16 +167,176 @@ pub const ConnectionIncidentRuntime = struct {
         return result;
     }
 
-    pub fn shutdown(self: *ConnectionIncidentRuntime) Error!ShutdownResult {
+    /// Registry install projection은 final owner 자신만 발급한다.
+    fn publisherProjection(self: *const ConnectionIncidentRuntime) Error!publisher_registry.RuntimeProjection {
+        if (!self.valid(.ready) or self.runtime_generation == 0 or self.service_generation == 0 or
+            self.service.self_addr != @intFromPtr(&self.service) or
+            self.service.service_generation != self.service_generation)
+            return error.InvalidAuthority;
+        return .{
+            .runtime_addr = self.self_addr,
+            .runtime_generation = self.runtime_generation,
+            .service_addr = self.service.self_addr,
+            .service_generation = self.service_generation,
+            .service_process_nonce = self.service.process_nonce,
+            .app_instance_nonce = self.service.app_instance_nonce,
+        };
+    }
+
+    /// Runtime 하나는 process-global publisher registry 하나에만 설치된다.
+    pub fn installPublisherRegistry(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+    ) Error!void {
+        if (self.publisher_registry_addr != 0 or self.publisher_registry_generation != 0)
+            return error.InvalidAuthority;
+        registry.install(try self.publisherProjection()) catch return error.InvalidAuthority;
+        if (registry.authority.runtime_addr != self.self_addr or registry.authority.runtime_generation != self.runtime_generation)
+            process_seal.fatalIntegrity(.incident_authority);
+        // registry publication 뒤에는 fallible/callback suffix가 없다. 두 backlink를 연속 게시해
+        // caller rollback이 published runtime을 unpublished로 오인할 수 없게 한다.
+        self.publisher_registry_addr = @intFromPtr(registry);
+        self.publisher_registry_generation = registry.authority.registry_generation;
+    }
+
+    pub fn validatesPublisherLease(
+        self: *const ConnectionIncidentRuntime,
+        lease: publication.PublisherLeaseProjection,
+    ) bool {
+        const projection = self.publisherProjection() catch return false;
+        return lease.lease_addr != 0 and lease.pid == self.pid and lease.process_nonce == self.process_nonce and
+            lease.registry_addr == self.publisher_registry_addr and
+            lease.registry_generation == self.publisher_registry_generation and
+            lease.owner_thread == @as(u64, @intCast(std.Thread.getCurrentId())) and
+            lease.runtime_addr == projection.runtime_addr and lease.runtime_generation == projection.runtime_generation and
+            lease.service_addr == projection.service_addr and lease.service_generation == projection.service_generation;
+    }
+
+    pub fn prepareFirstPublication(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        input: incident.ConnectionIncident,
+        out: *incident.PreparedServicePublication,
+    ) Error!void {
+        const projection = registry.projectValidatedLease(lease) catch return error.InvalidAuthority;
+        if (!self.validatesPublisherLease(projection)) return error.InvalidAuthority;
+        try self.service.prepareFirstPublication(self.pid, self.process_nonce, input, out);
+    }
+
+    pub fn prepareRepeatPublication(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        input: incident.ConnectionIncident,
+        out: *incident.PreparedServicePublication,
+    ) Error!void {
+        const projection = registry.projectValidatedLease(lease) catch return error.InvalidAuthority;
+        if (!self.validatesPublisherLease(projection)) return error.InvalidAuthority;
+        try self.service.prepareRepeatPublication(self.pid, self.process_nonce, input, out);
+    }
+
+    pub fn abortPreparedPublication(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        prepared: *incident.PreparedServicePublication,
+    ) Error!void {
+        const projection = registry.projectValidatedLease(lease) catch return error.InvalidAuthority;
+        if (!self.validatesPublisherLease(projection)) return error.InvalidAuthority;
+        try self.service.abortPreparedPublication(self.pid, self.process_nonce, prepared);
+    }
+
+    pub fn commitPreparedEvidenceChecked(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        prepared: *incident.PreparedServicePublication,
+    ) void {
+        const projection = registry.projectValidatedLease(lease) catch process_seal.fatalIntegrity(.incident_authority);
+        if (!self.validatesPublisherLease(projection)) process_seal.fatalIntegrity(.incident_authority);
+        if (!self.service.commitPreparedEvidenceChecked(self.pid, self.process_nonce, prepared))
+            process_seal.fatalIntegrity(.incident_authority);
+    }
+
+    pub fn commitPreparedRepeatEvidenceChecked(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        prepared: *incident.PreparedServicePublication,
+    ) void {
+        const projection = registry.projectValidatedLease(lease) catch process_seal.fatalIntegrity(.incident_authority);
+        if (!self.validatesPublisherLease(projection)) process_seal.fatalIntegrity(.incident_authority);
+        if (!self.service.commitPreparedRepeatEvidenceChecked(self.pid, self.process_nonce, prepared))
+            process_seal.fatalIntegrity(.incident_authority);
+    }
+
+    pub fn publishPreparedPendingAndUnlockChecked(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        prepared: *incident.PreparedServicePublication,
+    ) void {
+        const projection = registry.projectValidatedLease(lease) catch process_seal.fatalIntegrity(.incident_authority);
+        if (!self.validatesPublisherLease(projection)) process_seal.fatalIntegrity(.incident_authority);
+        if (!self.service.publishPreparedPendingAndUnlockChecked(self.pid, self.process_nonce, prepared))
+            process_seal.fatalIntegrity(.incident_authority);
+    }
+
+    pub fn wakeCommittedPublication(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+        lease: *const publisher_registry.IncidentPublisherLease,
+        prepared: *const publication.PreparedIncidentPublication,
+    ) publication.WakeOutcome {
+        const projection = registry.projectValidatedLease(lease) catch process_seal.fatalIntegrity(.incident_authority);
+        if (!self.validatesPublisherLease(projection) or prepared.self_addr != @intFromPtr(prepared) or
+            prepared.lifecycle_raw != @intFromEnum(publication.PublicationLifecycle.wake_ready) or
+            !std.meta.eql(prepared.publisher, projection) or !validPreparedCompositeSeal(prepared))
+            process_seal.fatalIntegrity(.incident_authority);
+        const outcome = self.wakeOutcome();
+        tracePublication(1); // committed publication wake observed
+        return outcome;
+    }
+
+    /// 제품 teardown은 registry가 신규 lease를 닫고 기존 lease가 모두 정산됐음을 먼저 증명한다.
+    pub fn shutdownPublished(
+        self: *ConnectionIncidentRuntime,
+        registry: *publisher_registry.Registry,
+    ) Error!ShutdownResult {
+        if (@intFromPtr(registry) != self.publisher_registry_addr or
+            registry.authority.registry_generation != self.publisher_registry_generation or
+            !(registry.beginClosing() catch return error.InvalidAuthority)) return error.InvalidAuthority;
+        return self.shutdown();
+    }
+
+    /// Registry publication 전 bootstrap 실패만 회수한다. 게시된 runtime의 teardown 우회로는 사용할 수 없다.
+    pub fn abortUnpublished(self: *ConnectionIncidentRuntime) Error!ShutdownResult {
+        if (self.publisher_registry_addr != 0 or self.publisher_registry_generation != 0)
+            return error.InvalidAuthority;
+        return self.shutdown();
+    }
+
+    fn shutdown(self: *ConnectionIncidentRuntime) Error!ShutdownResult {
         if (!self.valid(.ready)) return error.InvalidAuthority;
         self.lifecycle.store(@intFromEnum(Lifecycle.stopping), .release);
         // wake pipe가 이미 깨졌어도 completion pipe는 writer 종료를 증명할 수 있다. 여기서 일찍 반환하면
         // joinable thread와 backing을 무기한 남기므로 실패를 기록하되 같은 bounded shutdown을 계속한다.
         self.wake() catch self.writer_failed.store(1, .release);
-        const deadline = try monotonicMs() + @as(u64, @intCast(shutdown_deadline_ms));
+        const started = self.shutdownMonotonicMs() catch {
+            self.writer_failed.store(1, .release);
+            return self.detachWriter();
+        };
+        const deadline = std.math.add(u64, started, @intCast(shutdown_deadline_ms)) catch {
+            self.writer_failed.store(1, .release);
+            return self.detachWriter();
+        };
         var poll_fd = c.pollfd{ .fd = self.completion_read_fd, .events = c.POLL.IN, .revents = 0 };
         while (true) {
-            const now = try monotonicMs();
+            const now = self.shutdownMonotonicMs() catch {
+                self.writer_failed.store(1, .release);
+                return self.detachWriter();
+            };
             if (now >= deadline) return self.detachWriter();
             const remaining: c_int = @intCast(deadline - now);
             const rc = c.poll(@ptrCast(&poll_fd), 1, remaining);
@@ -136,15 +344,23 @@ pub const ConnectionIncidentRuntime = struct {
                 var marker: [1]u8 = undefined;
                 const count = c.read(self.completion_read_fd, &marker, 1);
                 if (count < 0 and (posix.errno(count) == .INTR or posix.errno(count) == .AGAIN)) continue;
-                if (count != 1 or marker[0] != 1) return error.InvalidAuthority;
-                const thread = self.thread orelse return error.InvalidAuthority;
+                if (count != 1 or marker[0] != 1) {
+                    self.writer_failed.store(1, .release);
+                    return self.detachWriter();
+                }
+                const thread = self.thread orelse process_seal.fatalIntegrity(.incident_authority);
                 self.thread = null;
                 thread.join();
+                const degraded = self.writer_failed.load(.acquire) != 0;
                 self.destroyJoined();
-                return .joined;
+                return if (degraded) .degraded_joined else .joined;
             }
             if (rc < 0 and posix.errno(rc) == .INTR) continue;
-            if (rc < 0) return error.InvalidAuthority;
+            if (rc < 0) {
+                self.writer_failed.store(1, .release);
+                return self.detachWriter();
+            }
+            if (rc > 0) self.writer_failed.store(1, .release);
             return self.detachWriter();
         }
     }
@@ -194,6 +410,24 @@ pub const ConnectionIncidentRuntime = struct {
         }
     }
 
+    fn wakeOutcome(self: *ConnectionIncidentRuntime) publication.WakeOutcome {
+        const marker = [1]u8{1};
+        while (true) {
+            const count = c.write(self.wake_write_fd, &marker, 1);
+            if (count == 1) return .queued;
+            if (count < 0 and posix.errno(count) == .INTR) continue;
+            if (count < 0 and posix.errno(count) == .AGAIN) return .coalesced;
+            self.writer_failed.store(1, .release);
+            return .degraded;
+        }
+    }
+
+    fn shutdownMonotonicMs(self: *ConnectionIncidentRuntime) Error!u64 {
+        if (builtin.is_test and self.testing_shutdown_clock_failure.swap(0, .acq_rel) != 0)
+            return error.ClockFailed;
+        return monotonicMs();
+    }
+
     fn valid(self: *const ConnectionIncidentRuntime, expected: Lifecycle) bool {
         return self.self_addr == @intFromPtr(self) and self.pid == @as(u64, @intCast(c.getpid())) and
             self.process_nonce != 0 and self.lifecycle.load(.acquire) == @intFromEnum(expected);
@@ -209,14 +443,45 @@ pub const ConnectionIncidentRuntime = struct {
         allocator.destroy(self);
     }
 
-    fn detachWriter(self: *ConnectionIncidentRuntime) Error!ShutdownResult {
-        const thread = self.thread orelse return error.InvalidAuthority;
+    fn detachWriter(self: *ConnectionIncidentRuntime) ShutdownResult {
+        const thread = self.thread orelse process_seal.fatalIntegrity(.incident_authority);
         self.thread = null;
         self.lifecycle.store(@intFromEnum(Lifecycle.detached), .release);
         thread.detach();
-        return .detached;
+        return if (self.writer_failed.load(.acquire) != 0) .degraded_detached else .detached;
     }
 };
+
+fn validPreparedCompositeSeal(value: *const publication.PreparedIncidentPublication) bool {
+    const expected = process_seal.preparedIncidentPublicationSeal(value.publisher.pid, value.publisher.process_nonce, .{
+        .self_addr = value.self_addr,
+        .kind_raw = value.kind_raw,
+        .lease_addr = value.publisher.lease_addr,
+        .lease_generation = value.publisher.lease_generation,
+        .lease_seal = value.publisher.seal,
+        .runtime_generation = value.publisher.runtime_generation,
+        .service_generation = value.publisher.service_generation,
+        .service_token_addr = value.service.self_addr,
+        .service_token_seal = value.service.seal,
+        .service_lifecycle_raw = value.service.lifecycle_raw,
+        .client_token_addr = value.client.self_addr,
+        .client_token_seal = value.client.seal,
+        .client_lifecycle_raw = value.client.lifecycle_raw,
+        .input_digest = value.input_digest,
+        .lifecycle_raw = value.lifecycle_raw,
+    }) catch return false;
+    return std.mem.eql(u8, &expected, &value.seal);
+}
+
+fn issuePublicationOwnerGeneration() u64 {
+    while (true) {
+        const value = next_publication_owner_generation.load(.acquire);
+        if (value == 0 or value == std.math.maxInt(u64))
+            process_seal.fatalIntegrity(.counter_exhausted);
+        if (next_publication_owner_generation.cmpxchgWeak(value, value + 1, .acq_rel, .acquire) == null)
+            return value;
+    }
+}
 
 fn monotonicMs() Error!u64 {
     var ts: c.timespec = undefined;
@@ -284,6 +549,51 @@ test "CR0b 기록기 수명은 정확히 한 스레드가 실제 artifact를 저
     var iterator = tmp.dir.iterate();
     while (try iterator.next(std.testing.io)) |_| count += 1;
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "CR0b 기록기 수명은 writer 실패 뒤 정상 join도 degraded outcome으로 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const fd = c.dup(tmp.dir.handle);
+    try std.testing.expect(fd >= 0);
+    const runtime = try ConnectionIncidentRuntime.create(std.testing.allocator, @intCast(c.getpid()), 19, 21, fd);
+    try waitAtomic(&runtime.writer_started, 1);
+    ConnectionIncidentRuntime.testing_api.markWriterFailed(runtime);
+    try std.testing.expectEqual(ShutdownResult.degraded_joined, try runtime.shutdown());
+}
+
+test "CR0b 기록기 수명은 stopping clock 실패를 degraded detach로 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const fd = c.dup(tmp.dir.handle);
+    try std.testing.expect(fd >= 0);
+    const runtime = try ConnectionIncidentRuntime.create(std.heap.page_allocator, @intCast(c.getpid()), 29, 31, fd);
+    runtime.testing_block_writer.store(1, .release);
+    ConnectionIncidentRuntime.testing_api.failNextShutdownClock(runtime);
+    try std.testing.expectEqual(ShutdownResult.degraded_detached, try runtime.shutdown());
+    try std.testing.expectEqual(@intFromEnum(Lifecycle.detached), runtime.lifecycle.load(.acquire));
+    runtime.testing_block_writer.store(0, .release);
+    try waitAtomic(&runtime.writer_completed, 1);
+    tmp.cleanup();
+}
+
+test "CR0b 기록기 수명은 completion poll 오류를 degraded detach로 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const fd = c.dup(tmp.dir.handle);
+    try std.testing.expect(fd >= 0);
+    const runtime = try ConnectionIncidentRuntime.create(std.heap.page_allocator, @intCast(c.getpid()), 39, 41, fd);
+    runtime.testing_block_writer.store(1, .release);
+    _ = c.close(runtime.completion_read_fd);
+    try std.testing.expectEqual(ShutdownResult.degraded_detached, try runtime.shutdown());
+    try std.testing.expectEqual(@intFromEnum(Lifecycle.detached), runtime.lifecycle.load(.acquire));
+    runtime.testing_block_writer.store(0, .release);
+    try waitAtomic(&runtime.writer_completed, 1);
+    tmp.cleanup();
 }
 
 test "CR0b 기록기 수명은 막힌 스레드를 200 ms 뒤 detach하고 backing을 보존한다" {

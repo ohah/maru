@@ -195,6 +195,159 @@ test "Swift startup acquires the writer lease before AppKit and mutable app boot
     }
 }
 
+test "CR0b AppHost termination transcript는 session settlement 뒤 incident ABI를 exact 한 번 호출한다" {
+    const source = @embedFile("MaruAppHost.swift");
+    const termination_start = std.mem.indexOf(u8, source, "func applicationWillTerminate(_ notification: Notification) {") orelse
+        return error.MissingTerminateCallback;
+    const termination_end = std.mem.indexOfPos(u8, source, termination_start, "\n    func applicationShouldTerminateAfterLastWindowClosed(") orelse
+        return error.MissingTerminateCallback;
+    const termination = source[termination_start..termination_end];
+    const session_shutdown = std.mem.indexOf(u8, termination, "shutdownAppSession(preserveWebPanelsFor: mainSurface)") orelse
+        return error.MissingSessionShutdown;
+    const backend_settlement = std.mem.indexOf(u8, termination, "maru_macos_remote_backend_settle()") orelse
+        return error.MissingSessionShutdown;
+    const incident_shutdown = std.mem.indexOf(u8, termination, "maru_macos_incident_owner_shutdown()") orelse
+        return error.MissingIncidentShutdown;
+    try std.testing.expect(session_shutdown < backend_settlement and backend_settlement < incident_shutdown);
+    try expectExecutableSwiftStatement(termination, session_shutdown, "shutdownAppSession(");
+    try expectExecutableSwiftStatement(termination, backend_settlement, "_ = maru_macos_remote_backend_settle()");
+    try expectExecutableSwiftStatement(termination, incident_shutdown, "_ = maru_macos_incident_owner_shutdown()");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, termination, "shutdownAppSession(preserveWebPanelsFor: mainSurface)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, termination, "maru_macos_remote_backend_settle()"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, termination, "maru_macos_incident_owner_shutdown()"));
+
+    const ordinary_start = std.mem.indexOf(u8, source, "func windowWillClose(_ notification: Notification) {") orelse
+        return error.MissingWindowClose;
+    const ordinary_end = std.mem.indexOfPos(u8, source, ordinary_start, "\n    func windowDidResize(") orelse
+        return error.MissingWindowClose;
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source[ordinary_start..ordinary_end], "maru_macos_incident_owner_shutdown()"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source[ordinary_start..ordinary_end], "maru_macos_remote_backend_settle()"));
+
+    const shutdown_start = std.mem.indexOf(u8, source, "private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {") orelse
+        return error.MissingSessionShutdown;
+    const shutdown_end = std.mem.indexOfPos(u8, source, shutdown_start, "\n    private func smokeDurationMs(") orelse
+        return error.MissingSessionShutdown;
+    const shutdown = source[shutdown_start..shutdown_end];
+    inline for (.{ "tearDownQuickTerminalAfterGlobalPreflight()", "let snapshot = windows", "for surface in snapshot", "teardownWindowSurface(surface," }) |needle|
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shutdown, needle));
+    const quick = std.mem.indexOf(u8, shutdown, "tearDownQuickTerminalAfterGlobalPreflight()") orelse return error.MissingSessionShutdown;
+    const snapshot = std.mem.indexOf(u8, shutdown, "let snapshot = windows") orelse return error.MissingSessionShutdown;
+    const loop = std.mem.indexOf(u8, shutdown, "for surface in snapshot") orelse return error.MissingSessionShutdown;
+    const teardown = std.mem.indexOf(u8, shutdown, "teardownWindowSurface(surface,") orelse return error.MissingSessionShutdown;
+    try std.testing.expect(quick < snapshot and snapshot < loop and loop < teardown);
+    try expectExecutableSwiftStatement(shutdown, quick, "tearDownQuickTerminalAfterGlobalPreflight()");
+    try expectExecutableSwiftStatement(shutdown, snapshot, "let snapshot = windows");
+    try expectExecutableSwiftStatement(shutdown, loop, "for surface in snapshot");
+    try expectExecutableSwiftStatement(shutdown, teardown, "teardownWindowSurface(surface,");
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, shutdown, "maru_macos_incident_owner_shutdown()"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, shutdown, "maru_macos_remote_backend_settle()"));
+}
+
+fn expectExecutableSwiftStatement(source: []const u8, position: usize, expected: []const u8) !void {
+    if (!swiftCodeAt(source, position)) return error.CommentedSwiftEvidence;
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..position], '\n')) |at| at + 1 else 0;
+    const line_end = std.mem.indexOfScalarPos(u8, source, position, '\n') orelse source.len;
+    const line = std.mem.trim(u8, source[line_start..line_end], " \t\r");
+    if (!std.mem.startsWith(u8, line, expected)) return error.CommentedSwiftEvidence;
+}
+
+fn swiftCodeAt(source: []const u8, position: usize) bool {
+    const State = enum { code, line_comment, block_comment, string, multiline_string };
+    var state: State = .code;
+    var block_depth: usize = 0;
+    var escaped = false;
+    var i: usize = 0;
+    while (i < position) {
+        switch (state) {
+            .code => {
+                // 이 좁은 source oracle은 extended/raw Swift string을 허용하지 않는다. 새 문법이 callback slice에
+                // 들어오면 parser를 확장하기 전까지 fail-closed한다.
+                if (source[i] == '#' and i + 1 < position and source[i + 1] == '"') return false;
+                if (i + 1 < position and source[i] == '/' and source[i + 1] == '/') {
+                    state = .line_comment;
+                    i += 2;
+                    continue;
+                }
+                if (i + 1 < position and source[i] == '/' and source[i + 1] == '*') {
+                    state = .block_comment;
+                    block_depth = 1;
+                    i += 2;
+                    continue;
+                }
+                if (i + 2 < position and std.mem.eql(u8, source[i .. i + 3], "\"\"\"")) {
+                    state = .multiline_string;
+                    i += 3;
+                    continue;
+                }
+                if (source[i] == '"') {
+                    state = .string;
+                    escaped = false;
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+            },
+            .line_comment => {
+                if (source[i] == '\n') state = .code;
+                i += 1;
+            },
+            .block_comment => {
+                if (i + 1 < position and source[i] == '/' and source[i + 1] == '*') {
+                    block_depth += 1;
+                    i += 2;
+                    continue;
+                }
+                if (i + 1 < position and source[i] == '*' and source[i + 1] == '/') {
+                    block_depth -= 1;
+                    i += 2;
+                    if (block_depth == 0) state = .code;
+                    continue;
+                }
+                i += 1;
+            },
+            .string => {
+                if (escaped) {
+                    escaped = false;
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '\\') {
+                    escaped = true;
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '"') state = .code;
+                i += 1;
+            },
+            .multiline_string => {
+                if (i + 2 < position and std.mem.eql(u8, source[i .. i + 3], "\"\"\"") and !swiftDelimiterEscaped(source, i)) {
+                    state = .code;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+            },
+        }
+    }
+    return state == .code;
+}
+
+fn swiftDelimiterEscaped(source: []const u8, position: usize) bool {
+    var slash_count: usize = 0;
+    var i = position;
+    while (i > 0 and source[i - 1] == '\\') : (i -= 1) slash_count += 1;
+    return slash_count % 2 == 1;
+}
+
+test "CR0b Swift transcript lexer는 escaped multiline delimiter와 raw string evidence를 거부한다" {
+    const escaped = "\"\"\"fixture\\\"\"\"\n_ = maru_macos_incident_owner_shutdown()\n\"\"\"";
+    const fake = std.mem.indexOf(u8, escaped, "_ = maru_macos_incident_owner_shutdown()") orelse unreachable;
+    try std.testing.expect(!swiftCodeAt(escaped, fake));
+    const raw = "#\"fake _ = maru_macos_incident_owner_shutdown()\"#\n_ = maru_macos_incident_owner_shutdown()";
+    const after_raw = std.mem.lastIndexOf(u8, raw, "_ = maru_macos_incident_owner_shutdown()") orelse unreachable;
+    try std.testing.expect(!swiftCodeAt(raw, after_raw));
+}
+
 test "Swift workspace checkpoint validates the assembled manifest before backup or write" {
     const source = @embedFile("MaruAppHost.swift");
     const save_start = std.mem.indexOf(u8, source, "private func saveWorkspace()") orelse
@@ -350,6 +503,14 @@ pub export fn maru_macos_app_instance_lease_acquire(path_ptr: ?[*]const u8, path
     path_buf[path.len] = 0;
     const path_z: [:0]const u8 = path_buf[0..path.len :0];
     return @intFromEnum(app_instance_lease_slot.acquire(path_z));
+}
+
+pub export fn maru_macos_incident_owner_shutdown() u32 {
+    return @intFromEnum(session_mod.shutdownProcessIncidentOwner());
+}
+
+pub export fn maru_macos_remote_backend_settle() u32 {
+    return @intFromEnum(session_mod.settleProcessRemoteBackendForTermination());
 }
 
 pub export fn maru_macos_app_session_create(

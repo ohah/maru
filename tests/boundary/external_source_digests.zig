@@ -323,7 +323,13 @@ pub const inventory = [_]Proof{
     // 또 바뀐다. count는 2 그대로다 — 옮긴 코드도 새 코드도 필드를 이름으로 읽지 않는다.
     // 편집기 배경이 `terminal_bg` 토큰을 쓰게 되며 또 바뀐다(`buildChromeTokens`가 `theme.background`를
     // ThemeColors에 실어 보낸다). count는 2 그대로다 — 필드 하나를 값으로 넘길 뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "cf577a1a04b611924684ed34867a04787133b097a54a1d9cf30b733059e9d47c" },
+    // CR0b bootstrap 5가 AppSession 종료 뒤 app-global backend/pool/client를 별도 제품 leaf로 정산하고
+    // incident latch가 그 정산 전에는 소비되지 않게 한다. @field 반사와 Client 구성 경로 count는 2 그대로다.
+    // CR0b AppSession publication이 current/restore singleton claim 실패 rollback을 공용 leaf와 실제 두 pool topology로
+    // 고정하고 existing-pool spawn marker도 함께 회수해 digest가 바뀐다. @field 반사 owner와 Client 구성 경로 count는 2 그대로다.
+    // 같은 rollback fixture가 HostAdapter test-only deinit trace로 created/rejected/sibling exact-once 회수를 역할별로
+    // 관측해 digest가 다시 바뀐다. @field 반사 owner와 Client 구성 경로 count는 여전히 2다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5c419dfb313025bbae902f5554b584cfb993b3b3ea0673f9c60f9d8dcd566f2c" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

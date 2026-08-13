@@ -484,6 +484,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "commitPreparedExecutionRecoveryPoisonNoFail", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "commitPreparedExecutionRecoveryCleanupNoFail", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "poisonDuringClientSlotOperationNoFail", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "terminalizePublishedIncidentChecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "setNextExecutionCapabilityIdentityForTest", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
@@ -1459,6 +1460,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpRxDemuxUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonDuringClientSlotOperationNoFail" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizePublishedIncidentChecked" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markDeferredPoisonForTest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ValidatedGenerationEventTake" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventHeldError" },
@@ -1918,8 +1920,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishSemanticDigest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentAuthorityDigest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentCommitDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentRepeatCommitDigest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationReceiptDigest" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "IncidentPublicationTestHook" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "incident_publication_testing" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "traceIncidentPublication" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationSeal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentRepeatKeySeal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOperationProofLoss" },
@@ -1927,7 +1932,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginIncidentClientOperation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "resolveIncidentClientOperation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bindIncidentClientPublication" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bindIncidentClientRepeatPublication" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitFirstIncidentClientPublicationNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitRepeatIncidentClientPublicationNoFail" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishIncidentClientOperationNoFail" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainRunnerChannel" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "terminal_contract" },
@@ -1982,6 +1989,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "cancelAdmissionClose" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ManagedPoisonError" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareManagedPoison" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "managedPoisonQuery" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "managedPoisonWillPublishFirst" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "consumeManagedPoison" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeManagedPoisonNoFail" },
             },
         },
     };
@@ -2142,12 +2156,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        // R1 stack borrow와 admission prepare·commit도 같은 registered operation으로 current node를 고정한다.
-        @as(usize, 9),
+        // R1 stack borrow, admission, managed poison snapshot도 같은 registered operation으로 current node를 고정한다.
+        @as(usize, 10),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 13),
+        @as(usize, 14),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
@@ -2405,7 +2419,7 @@ test "CR3a-2c2b3b product process bootstrap stays explicit before AppSession own
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 7),
+        @as(usize, 9),
         countOccurrences(
             app_session,
             "RemoteSessionAdapter.initializeProcessRuntime()",
@@ -7223,11 +7237,11 @@ test "session host has zero raw untyped Client invalidation callsites" {
     for (allowed) |slice|
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(slice, ".unusable ="));
 
-    // The first-fatal latch is immutable in product code. The other three assignments are an
-    // ownership snapshot and two deliberately scoped mutation tests; adding or moving any direct
+    // The first-fatal latch is immutable in product code. The other five assignments are an
+    // ownership snapshot and four deliberately scoped mutation tests; adding or moving any direct
     // assignment must update this inventory instead of silently bypassing poison(reason).
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 6),
         countFieldAssignments(source, "first_poison_reason"),
     );
     const reason_assignment_owners = [_][]const u8{
@@ -7236,11 +7250,11 @@ test "session host has zero raw untyped Client invalidation callsites" {
         betweenMarkers(source, "test \"client source seal binds explicit schema descriptors and ordered payload bytes\"", "test \"external source fold keeps seed tags and scans terminal FIFO tails\"") orelse return error.TestUnexpectedResult,
         betweenMarkers(source, "test \"client poison reason participates in projection authority", "test \"external transfer normalize quarantine") orelse return error.TestUnexpectedResult,
     };
-    for (reason_assignment_owners) |slice| {
+    for (reason_assignment_owners, 0..) |slice, index| {
         const sentinel_slice = try allocator.dupeZ(u8, slice);
         defer allocator.free(sentinel_slice);
         try std.testing.expectEqual(
-            @as(usize, 1),
+            @as(usize, if (index == 2) 3 else 1),
             countFieldAssignments(sentinel_slice, "first_poison_reason"),
         );
     }
@@ -7618,9 +7632,10 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     );
     defer allocator.free(pool);
 
-    // 두 제품 caller는 managed publication으로 전환했고 C3-3b6 fixture 둘만 legacy init을 쓴다.
+    // 두 제품 caller는 managed publication으로 전환했고 singleton rollback fixture 3개, C3-3b6 fixture 2개,
+    // bootstrap5 owned-pool settlement fixture 1개만 legacy init을 쓴다.
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 6),
         countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
     );
     try std.testing.expectEqual(

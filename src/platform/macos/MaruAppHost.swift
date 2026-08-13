@@ -4446,6 +4446,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminationTiming.record(.teardown, elapsedNs: measureElapsedNs {
             shutdownAppSession(preserveWebPanelsFor: mainSurface)
         })
+        // 모든 AppSession이 자기 runtime을 remove/detach한 뒤 app-global backend/pool/client를 exact once 정산한다.
+        // incident leaf도 이 전역들이 남아 있으면 latch를 소비하지 않아 source 순서 회귀를 fail-close한다.
+        _ = maru_macos_remote_backend_settle()
+        // 모든 AppSession과 remote backend close/detach settlement가 끝난 뒤에만 incident owner를 revoke한다.
+        // ordinary Window close에서는 부르지 않으며 AppHost termination이 process-global writer를 exact 한 번 정산한다.
+        _ = maru_macos_incident_owner_shutdown()
         if let mainSurface {
             // quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게 메인 창을 명시 대상으로.
             withSurface(mainSurface) {

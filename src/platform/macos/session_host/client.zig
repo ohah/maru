@@ -13996,6 +13996,16 @@ pub const Client = struct {
         self.markPoisonedForDeferredCleanup(reason);
     }
 
+    /// Incident publication commit 뒤 ClientSlot-held operation에서만 쓰는 no-reread suffix다.
+    /// first reason은 coordinator가 이미 게시했으므로 여기서는 다시 latch하지 않는다.
+    pub fn terminalizePublishedIncidentChecked(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) error{InvalidOwner}!?c.fd_t {
+        if (self.operation_fence == null or self.first_poison_reason != reason) return error.InvalidOwner;
+        return self.poisonAndTakeFd();
+    }
+
     pub fn terminalReasonInvariant(self: *const Client) bool {
         const operation_fence_held = self.beginPublicMutation() catch return false;
         defer if (operation_fence_held) self.endPublicMutation();
@@ -21702,6 +21712,29 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     client.attach_instance_id = 77;
     client.next_request_id = 0;
+    client.incident_binding = .{
+        .client_addr = 0x2100,
+        .host_id = 0x2200,
+        .host_adapter_generation = 3,
+        .connection_generation = 4,
+        .wire_major = protocol.version_major,
+        .host_class_raw = 1,
+        .seal = [_]u8{0x23} ** 32,
+    };
+    client.first_poison_reason = .connection_eof;
+    client.first_incident_id = .{ .app_instance_nonce = 0x2400, .sequence = 5 };
+    client.incident_repeat_key = .{
+        .self_addr = 0x2500,
+        .pid = 6,
+        .process_nonce = 7,
+        .client_addr = 0x2100,
+        .connection_generation = 4,
+        .incident_id = client.first_incident_id,
+        .fingerprint = [_]u8{0x26} ** 32,
+        .binding_seal = client.incident_binding.seal,
+        .lifecycle_raw = 1,
+        .seal = [_]u8{0x27} ** 32,
+    };
     client.build_id = try allocator.dupe(u8, "build");
     client.lifecycle = try allocator.dupe(u8, "running");
     try client.parser.buf.appendSlice(allocator, "parser");
@@ -21761,8 +21794,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\xfb\xd9\xa8\xdb\x6d\x1c\x54\x8b\x32\x42\x31\xc0\x1a\x0f\xf5\x2d" ++
-        "\xd7\xc8\xcb\x11\x1a\x42\xd2\xda\xee\x4d\xd4\xcf\x89\xee\x11\xa5";
+        "\x62\xe4\x44\x4f\x78\x7c\x94\xa0\x07\x9b\xac\x0b\xd6\xa3\xf5\x12" ++
+        "\xbe\xc6\x7a\x32\x96\x5c\x52\x74\x74\xf6\xca\xa7\xf0\xef\x1c\x47";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -21790,6 +21823,19 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expectEqual(@as(usize, 4), seal.screen_source_count);
     try std.testing.expectEqual(@as(usize, 1), seal.event_count);
     try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
+
+    client.incident_binding.connection_generation += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.incident_binding.connection_generation -= 1;
+    client.first_poison_reason.? = .frame_malformed;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.first_poison_reason.? = .connection_eof;
+    client.first_incident_id.sequence += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.first_incident_id.sequence -= 1;
+    client.incident_repeat_key.fingerprint[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.incident_repeat_key.fingerprint[0] ^= 1;
 
     const validated = try validateExternalAdoptionSourceQueues(&client, 7);
     var encoder: ExternalSourceSealEncoder = undefined;
@@ -21877,11 +21923,13 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.ownership = .standalone;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.ownership = .external_pump;
+    const saved_first_poison_reason = client.first_poison_reason;
     client.markPoisonedForDeferredCleanup(.local_invariant_violation);
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.unusable = false;
+    client.first_poison_reason = .local_invariant_violation;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.first_poison_reason = null;
+    client.first_poison_reason = saved_first_poison_reason;
     try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
     client.build_id.?[0] ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));

@@ -225,6 +225,14 @@ pub const RemoteTermBackend = struct {
         self.* = undefined;
     }
 
+    /// AppHost의 process-global owner settlement는 남은 runtime을 terminate하는 일반 deinit을 준비 검사로 쓰지 않는다.
+    /// 모든 AppSession이 자기 runtime을 이미 remove/detach했고 reservation/close operation도 없을 때만 true다.
+    pub fn readyForProcessSettlement(self: *const RemoteTermBackend) bool {
+        if (self.runtimes.count() != 0 or self.reserved_runtime_count != 0 or self.close_operation_owner.active)
+            return false;
+        return self.close_sweep == .inactive;
+    }
+
     /// AppSession 전역 슬롯에 설치된 뒤에만 제품 singleton을 claim한다. 반환형 생성자 안에서 봉인하면
     /// 대입 이동이 final address를 바꾸므로, 이 호출의 exact 두 제품 caller가 설치와 publication 사이를 소유한다.
     pub fn claimProductSingleton(self: *RemoteTermBackend) !void {
@@ -809,6 +817,40 @@ pub const RemoteTermBackend = struct {
     }
 
     pub const testing_api = if (builtin.is_test) struct {
+        pub const SettlementBlocker = enum {
+            runtime,
+            reservation,
+            close_operation,
+            close_sweep,
+        };
+
+        /// AppHost settlement의 closed preflight 네 항을 제품 필드에서 각각 실행한다. 테스트가 끝나기 전
+        /// `clearProcessSettlementBlocker`로 원복해야 일반 deinit의 proof-loss guard를 건드리지 않는다.
+        pub fn setProcessSettlementBlocker(remote_backend: *RemoteTermBackend, blocker: SettlementBlocker) !void {
+            if (remote_backend.runtimes.count() != 0 or remote_backend.reserved_runtime_count != 0 or
+                remote_backend.close_operation_owner.active or remote_backend.close_sweep != .inactive)
+                return error.InvalidTestState;
+            switch (blocker) {
+                .runtime => try remote_backend.runtimes.put(remote_backend.allocator, 1, .{
+                    .runtime = @ptrFromInt(@alignOf(RemoteRuntime)),
+                    .host_id = 1,
+                    .runtime_generation = 1,
+                }),
+                .reservation => remote_backend.reserved_runtime_count = 1,
+                .close_operation => remote_backend.close_operation_owner.active = true,
+                .close_sweep => remote_backend.close_sweep = .{ .active = .{ .max_ticket = 1, .cursor_after_ticket = 0 } },
+            }
+        }
+
+        pub fn clearProcessSettlementBlocker(remote_backend: *RemoteTermBackend, blocker: SettlementBlocker) void {
+            switch (blocker) {
+                .runtime => _ = remote_backend.runtimes.remove(1),
+                .reservation => remote_backend.reserved_runtime_count = 0,
+                .close_operation => remote_backend.close_operation_owner = .{},
+                .close_sweep => remote_backend.close_sweep = .inactive,
+            }
+        }
+
         pub const AppQuitSnapshot = struct {
             routing_tombstoned: bool,
             connections_terminalized: bool,

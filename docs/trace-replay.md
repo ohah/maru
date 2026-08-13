@@ -250,6 +250,21 @@ poison caller는 `SourceSite`와 parser/outbound/count projection을 담은 poin
 전달한다. 기존 reason-only poison wrapper는 identity-absent·reconnect-ineligible 경로에만 남기고, managed Client 제품 caller는
 source-boundary가 reason-only wrapper를 호출하지 못하게 한다.
 
+managed poison은 기존 Client mutation/registered operation 안에서 coordinator를 재진입하지 않는다. 실패를 발견한 exact owner는
+operation pin 아래 `PreparedManagedPoison`만 준비한다. 이 값은 final-address prepared storage, PID/process nonce/thread,
+slot/node generation, binding seal, 전체 `IncidentInput`과 `prepared` lifecycle을 process seal로 결속하는 pointer-free one-shot
+handoff다. 이 단계는 first reason·fd·pending outbound·ring·scheduler를 바꾸지 않는다. 기존 operation이 반환된 뒤 app-process
+incident owner의 단일 facade가 handoff와 final `HostAdapter`를 다시 검증하고 ClientSlot operation을 새로 획득한다. 이 facade
+내부에서만 app-global publisher를 ephemeral borrow하고 coordinator를 호출한다. 제품 caller가 raw `Registry`·
+`ConnectionIncidentRuntime`·`IncidentOperationQuery`를 서로 조합하거나 adapter/Client에 publisher pointer를 저장하는 경로는 0이다.
+
+coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
+first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.
+publication이 끝나면 같은 registered owner가 handoff에 봉인된 terminalization disposition을 no-reread continuation으로 적용한다.
+fd/pending outbound를 먼저 닫거나 기존 reason-only poison을 호출한 뒤 publication을 시도하는 순서는 금지한다. precommit typed
+실패는 terminalization/reconnect admission을 수행하지 않고 prepared handoff를 canonical owner에게 남기며, ring evidence 이후
+proof loss만 common fatal로 수렴한다.
+
 최초 incident 선형화는 `Client`의 canonical first-reason publication과 분리하지 않는다. public poison, registered-operation
 deferred poison, allocator-callback deferred poison은 모두 같은 private suffix에서 ring evidence와
 `Client.first_incident_id`를 먼저 게시하고, 마지막 store로 `first_poison_reason:null -> reason`을 게시한다. raw 두 저장소를
@@ -310,8 +325,9 @@ writer는 Client/HostAdapter를 호출하지 않는다. fork child는 inherited 
 거부한다.
 
 GUI와 daemon은 서로 다른 프로세스이므로 incident runtime도 process별 exact 하나를 소유한다. daemon bootstrap은 기존 host-owned
-runtime을 설치하고, GUI는 첫 managed remote adapter publication보다 먼저 heap-pinned `AppProcessIncidentOwner`를 app-global
-coordinator에 게시한다. GUI owner의 directory는 `${XDG_CACHE_HOME:-$HOME/.cache}/maru/incidents`이고 window/AppSession allocator가
+runtime을 설치하고, GUI는 첫 managed remote adapter publication보다 먼저 module-static final-address `AppProcessIncidentOwner`를
+app-global coordinator에 게시한다. 이 owner가 heap-pinned runtime과 inline registry를 소유한다. GUI owner의 directory는
+`${XDG_CACHE_HOME:-$HOME/.cache}/maru/incidents`이고 window/AppSession allocator가
 아니라 app-global allocator를 쓴다. restore-first와 current-first는 같은 owner를 재사용하고 두 번째 owner 설치, 다른 final address
 교체, fork child 재사용을 mutation 0으로 거부한다. daemon과 GUI가 같은 incident sequence나 nonce를 공유한다고 가정하지 않는다.
 
@@ -320,11 +336,15 @@ coordinator에 게시한다. GUI owner의 directory는 `${XDG_CACHE_HOME:-$HOME/
 lease가 0이 될 때까지 200 ms absolute deadline으로 drain한 뒤 writer shutdown을 수행한다. ordinary window close의 이 ABI caller는
 0이고, owner가 아직 없던 앱 종료는 inactive success다. 반환은 closed `IncidentShutdownOutcome {inactive,joined,detached,degraded}`다.
 publisher lease가 deadline에 남으면 runtime/service/wake FD/registry backing 전체를 process-lifetime detached 상태로 보존하고
-`.detached`를 반환하며 shutdown/free를 호출하지 않는다. lease 0 뒤 runtime shutdown의 clock/wake/pipe 오류도 backing 보존과 sticky
-failure를 거쳐 `.degraded`로 수렴하고 AppKit termination을 막거나 재시도하지 않는다. 제품 종료 hook과 daemon teardown 외
+`.detached`를 반환하며 shutdown/free를 호출하지 않는다. lease 0 뒤 runtime shutdown의 clock/wake/pipe 오류도 sticky failure를 거쳐
+`.degraded`로 수렴하고 AppKit termination을 막거나 재시도하지 않는다. writer completion을 확인한 `degraded_joined`는 backing과 빈
+pathname을 회수하고, deadline·clock·poll 오류의 `degraded_detached`만 runtime/service/FD와 pathname을 process lifetime까지 보존한다. 제품 종료 hook과 daemon teardown 외
 `ConnectionIncidentRuntime.shutdown` caller는 0이다.
-AppHost의 exact 순서는 `control stop -> workspace save -> 모든 AppSession shutdown과 remote backend close/detach settlement -> incident
-owner termination ABI -> native termination return`이다. AppSession/backend teardown 중 발생한 managed poison은 아직 ready owner에
+AppHost의 exact 순서는 `control stop -> workspace save -> 모든 AppSession shutdown -> app-global remote backend/pool/client settlement ABI
+-> incident owner termination ABI -> native termination return`이다. backend settlement ABI는 모든 Window가 자기 runtime을
+remove/detach한 뒤에만 backend를 먼저 deinit하고 그 다음 pool 또는 legacy client를 exact once 해제한다. 전역 backend/pool/client 중
+하나라도 남아 있으면 incident termination leaf 자체가 latch를 소비하지 않고 inactive로 거부하므로 Swift의 source 순서만을 신뢰하지
+않는다. AppSession/backend teardown 중 발생한 managed poison은 아직 ready owner에
 게시할 수 있고, incident ABI 뒤 AppSession shutdown caller는 0이다. Swift source-boundary가 incident ABI의
 `shutdownAppSession` 이전 caller 0, 이후 exact 1을 고정한다.
 
@@ -353,18 +373,50 @@ checked-add overflow를 prepare 전에 거부한다. commit 직전 held Client o
 전부 다시 검증한다. prepare 뒤에는 allocation/callback/syscall/error return 0이다. copied/moved/foreign-thread token, lock generation
 drift, destination/operation drift는 common `fatalIntegrity(.incident_authority)`로 즉시 종료하며 unlock·lease release를 시도하지 않는다.
 
+runtime과 service generation은 임의의 registry 입력이 아니다. `incident_runtime`의 process-global checked issuer가 heap runtime 생성 전에
+서로 다른 nonzero generation을 발급하고 final-address `ConnectionIncidentRuntime`과 inline `ConnectionIncidentService`에 각각 저장한다.
+runtime의 `publisherProjection()`만 `{runtime addr+generation, service addr+generation, service process nonce, app instance nonce}`를 만들며
+registry install은 이 projection만 소비한다. issuer exhaustion은 owner publication 전에 common counter-exhausted fatal로 닫는다. coordinator는
+raw lease 주소를 역참조하지 않는다. registry의 `projectValidatedLease()`가 mutex 아래 live row·lease seal·authority를 대조해 pointer-free
+`PublisherLeaseProjection`을 만들고, runtime의 좁은 publication facade가 그 projection을 현재 final-address runtime/service generation과 다시
+대조한 뒤에만 service transaction과 committed wake를 수행한다.
+
+`PreparedIncidentPublication.seal`은 장식 필드가 아니다. 별도 `maru.prepared-incident-publication.v1` process-seal domain은 composite final
+address, kind/lifecycle, lease final address·generation·seal, runtime/service generation, embedded service/client token의 final address·seal·lifecycle,
+canonical input digest를 봉인한다. 현재 first composite prerequisite의 public `publishFirst`는 destination을 caller에게 받지 않고 자기 stack의
+`PreparedFirstOwner` 안에서 composite와 lease를 함께 소유하므로 외부 destination alias surface가 없다. 각 embedded Client/service leaf의 owner-storage
+exact·partial overlap 검사는 그대로 선행한다. 후속 first/repeat prepared API가 caller destination을 열 때에는 전체 composite와 실제 lease,
+runtime/service/registry/authority, Client slot/node/client/binding/repeat-key/operation registry의 모든 extent 및 embedded token 상호 간 exact·partial
+overlap을 checked-add로 거부하는 RED를 먼저 추가한다.
+
+first의 현재 composite prerequisite에서 fallible acquisition 순서는 `canonical input/clock -> Client operation -> publisher lease -> runtime projection 재검증 ->
+service prepare(lock held) -> Client bind -> composite seal`이다. service prepare 전 실패는 `publisher lease release -> Client operation finish`,
+service prepare 뒤 Client bind 실패는 반드시 `service abort/unlock -> publisher lease release -> Client operation finish` 순서로 exact once
+회수한다. 각 단계의 typed failure는 ring·pending·Client first fields를 바꾸지 않는다. service의 checked stage validation은 mutation 전 closed
+proof를 반환하고 platform coordinator가 false를 common `fatalIntegrity(.incident_authority)`로 변환한다. neutral service가 `@panic`을
+보안 provenance로 소유하거나 unchecked commit API를 외부에 공개하지 않는다.
+
 `.first` commit은 먼저 committed ring evidence를 쓰고 `Client.first_incident_id -> IncidentRepeatKey -> first_poison_reason`을
-no-fail로 게시한 뒤 service pending bit을 게시하고 mutex를 해제한다. `.repeat` prepare는 현재 Client의 sealed repeat key와 first ID,
+no-fail로 게시한 뒤 service pending bit을 게시하고 mutex를 해제한다. 현재 composite prerequisite의 `.repeat` prepare는 Client의 sealed repeat key와 first ID,
 binding, 새 projection fingerprint를 결속하고 canonical key fingerprint와 exact equality를 요구해 aggregate generation만 예약한다.
 다른 fingerprint는 Client/ring/sequence/aggregate mutation 0 typed reject다. repeat commit은 detail/sequence/Client first fields를
 바꾸지 않고 같은 fingerprint aggregate occurrence와 last timestamp, pending bit만 게시한 뒤 mutex를 해제한다. first/repeat 모두 abort는 ring/Client
 publication 전 prepared transaction만 mutex 아래 exact once 허용하며, ring commit 이후 abort/rollback은 없다. writer는 pending bit이
 보인 record만 취하므로 Client reason보다 앞서 disk handoff가 시작되지 않는다.
 
+`.repeat`도 first와 같은 private final-address composite를 사용한다. service는 mutex를 계속 소유하는 `prepareRepeatPublication`과 checked
+`commitPreparedRepeatEvidenceChecked`를 제공하고, Client facade는 held operation 아래 기존 sealed repeat key·first ID·binding·canonical fingerprint를
+검증해 repeat arm을 bind한다. repeat에는 새 incident sequence/detail/Client first-field publication이 없으며 다른 fingerprint는 service
+aggregate reservation 전에 typed mutation-0 reject다. 이 prerequisite는 제품 transaction primitive만 닫으며 실제 managed poison ingress 여섯 family 연결은
+아래 여섯 번째 gate의 남은 범위다.
+
 wake는 mutex 해제 뒤 publisher lease를 가진 platform facade가 수행한다. 반환은 error union이 아니라
 `IncidentCommitResult {publication:PublishResult,wake:queued|coalesced|degraded}`이고, pipe write 실패는 sticky writer failure와
 `degraded`를 게시한 committed success다. caller는 같은 poison을 재시도하지 않으며 ring/Client publication을 되돌리지 않는다.
 lease release는 wake outcome과 무관하게 exact once 수행한다.
+runtime의 wake-only facade는 validated live lease projection과 pending 게시 뒤 다시 봉인한 `wake_ready` composite를 함께 요구한다. pipe write 1 byte는 `queued`,
+`EAGAIN`은 `coalesced`, 그 밖의 write 실패는 sticky writer failure를 세운 `degraded`다. raw wake FD와 service 포인터는 coordinator에
+노출하지 않으며 legacy `runtime.publish`는 composite 제품 caller가 될 수 없다.
 
 여섯 번째 CR0b gate는 위 제품 순서를 exact named TDD inventory로 고정한다. reason-only wrapper는 identity-absent fixture와 등록 전
 typed failure에만 남고 managed Client 제품 caller는 0이다. Debug unexpected poison은 canonical publication 뒤 common fatal leaf로

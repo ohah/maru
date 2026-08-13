@@ -208,6 +208,7 @@ pub const ConnectionIncidentService = struct {
     self_addr: usize = 0,
     pid: u64 = 0,
     process_nonce: u64 = 0,
+    service_generation: u64 = 0,
     app_instance_nonce: u128 = 0,
     last_issued_sequence: u64 = 0,
     next_lock_generation: u64 = 1,
@@ -222,20 +223,44 @@ pub const ConnectionIncidentService = struct {
     disk_status: [incident_slot_count + aggregate_slot_count]IncidentDiskStatus =
         [_]IncidentDiskStatus{.pristine} ** (incident_slot_count + aggregate_slot_count),
     lifecycle_raw: u8 = 0,
-    ring: EmergencyRing = .{},
+    // ring 내부 record를 hostile alias fixture와 writer handoff가 같은 정렬 계약으로 해석한다.
+    ring: EmergencyRing align(@alignOf(IncidentWriterHandoff)) = .{},
 
     const testing = if (builtin.is_test) struct {
         var writer_prelock_entered: ?*std.atomic.Value(u8) = null;
+        threadlocal var publication_trace: ?*const fn (u8) void = null;
     } else struct {};
 
+    pub const transaction_testing = if (builtin.is_test) struct {
+        pub fn armTrace(trace: ?*const fn (u8) void) void {
+            testing.publication_trace = trace;
+        }
+    } else struct {};
+
+    fn tracePublication(stage: u8) void {
+        if (builtin.is_test) if (testing.publication_trace) |trace| trace(stage);
+    }
+
     pub fn initInPlace(out: *ConnectionIncidentService, pid: u64, process_nonce: u64, app_instance_nonce: u128) ServiceError!void {
+        return out.initInPlaceWithGeneration(pid, process_nonce, app_instance_nonce, 1);
+    }
+
+    pub fn initInPlaceWithGeneration(
+        out: *ConnectionIncidentService,
+        pid: u64,
+        process_nonce: u64,
+        app_instance_nonce: u128,
+        service_generation: u64,
+    ) ServiceError!void {
         _ = pid;
         const process_pid = currentProcessId();
-        if (process_pid == 0 or process_nonce == 0 or app_instance_nonce == 0) return error.InvalidAuthority;
+        if (process_pid == 0 or process_nonce == 0 or app_instance_nonce == 0 or service_generation == 0)
+            return error.InvalidAuthority;
         out.* = .{
             .self_addr = @intFromPtr(out),
             .pid = process_pid,
             .process_nonce = process_nonce,
+            .service_generation = service_generation,
             .app_instance_nonce = app_instance_nonce,
             .lifecycle_raw = 1,
         };
@@ -249,9 +274,11 @@ pub const ConnectionIncidentService = struct {
     ) ServiceError!PublishResult {
         var prepared: PreparedServicePublication = .{};
         try self.prepareFirstPublication(current_pid, current_process_nonce, input, &prepared);
-        self.commitPreparedEvidenceNoFail(current_pid, current_process_nonce, &prepared);
+        if (!self.commitPreparedEvidenceChecked(current_pid, current_process_nonce, &prepared))
+            return error.InvalidAuthority;
         const result = prepared.result;
-        self.publishPreparedPendingAndUnlockNoFail(current_pid, current_process_nonce, &prepared);
+        if (!self.publishPreparedPendingAndUnlockChecked(current_pid, current_process_nonce, &prepared))
+            return error.InvalidAuthority;
         return result;
     }
 
@@ -304,35 +331,107 @@ pub const ConnectionIncidentService = struct {
         self.next_lock_generation = generation + 1;
         self.active_publication_addr = @intFromPtr(out);
         self.active_publication_seal = out.seal;
+        tracePublication(1); // service prepared with mutex held
     }
 
-    pub fn commitPreparedEvidenceNoFail(
+    /// 기존 first incident와 같은 aggregate만 갱신할 repeat transaction을 준비한다.
+    /// 이 단계는 detail, sequence, aggregate record와 pending bit을 바꾸지 않는다.
+    pub fn prepareRepeatPublication(
+        self: *ConnectionIncidentService,
+        current_pid: u64,
+        current_process_nonce: u64,
+        input: ConnectionIncident,
+        out: *PreparedServicePublication,
+    ) ServiceError!void {
+        if (!self.validAuthority(current_pid, current_process_nonce) or
+            input.incident_id.app_instance_nonce != self.app_instance_nonce or input.incident_id.sequence == 0 or
+            input.incident_id.sequence > self.last_issued_sequence or
+            rangesOverlap(@intFromPtr(self), @sizeOf(ConnectionIncidentService), @intFromPtr(out), @sizeOf(PreparedServicePublication)) or
+            !std.meta.eql(out.*, PreparedServicePublication{}))
+            return error.InvalidAuthority;
+        lock(&self.mutex);
+        errdefer self.mutex.unlock();
+        if (!self.validAuthority(current_pid, current_process_nonce) or self.active_publication_addr != 0)
+            return error.InvalidAuthority;
+        if (self.next_lock_generation == std.math.maxInt(u64)) return error.CounterExhausted;
+        const plan = self.ring.prepareRepeat(input) catch |err| switch (err) {
+            error.AggregateGenerationExhausted => return error.CounterExhausted,
+            else => return err,
+        };
+        const result: PublishResult = .{
+            .incident_id = input.incident_id,
+            .detail_present = false,
+            .detail_slot = null,
+            .aggregate_slot = plan.aggregate_slot,
+            .aggregate_generation = plan.aggregate_generation,
+        };
+        const generation = self.next_lock_generation;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .service_addr = self.self_addr,
+            .pid = self.pid,
+            .process_nonce = current_process_nonce,
+            .owner_thread = @intCast(std.Thread.getCurrentId()),
+            .lock_generation = generation,
+            .incident_id = input.incident_id,
+            .result = result,
+            .plan = plan,
+            .lifecycle_raw = 1,
+        };
+        out.seal = preparedServiceSeal(out.*);
+        self.next_lock_generation = generation + 1;
+        self.active_publication_addr = @intFromPtr(out);
+        self.active_publication_seal = out.seal;
+        tracePublication(1);
+    }
+
+    pub fn commitPreparedEvidenceChecked(
         self: *ConnectionIncidentService,
         current_pid: u64,
         current_process_nonce: u64,
         prepared: *PreparedServicePublication,
-    ) void {
-        if (!self.validPrepared(current_pid, current_process_nonce, prepared, 1)) @panic("incident prepared evidence authority drift");
+    ) bool {
+        if (!self.validPrepared(current_pid, current_process_nonce, prepared, 1)) return false;
         self.ring.commitFirstPlan(prepared.plan);
         self.last_issued_sequence = prepared.incident_id.sequence;
         prepared.lifecycle_raw = 2;
         prepared.seal = preparedServiceSeal(prepared.*);
         self.active_publication_seal = prepared.seal;
+        tracePublication(2); // ring evidence committed
+        return true;
     }
 
-    pub fn publishPreparedPendingAndUnlockNoFail(
+    pub fn commitPreparedRepeatEvidenceChecked(
         self: *ConnectionIncidentService,
         current_pid: u64,
         current_process_nonce: u64,
         prepared: *PreparedServicePublication,
-    ) void {
-        if (!self.validPrepared(current_pid, current_process_nonce, prepared, 2)) @panic("incident prepared pending authority drift");
+    ) bool {
+        if (!self.validPrepared(current_pid, current_process_nonce, prepared, 1) or prepared.plan.detail_present)
+            return false;
+        self.ring.commitRepeatPlan(prepared.plan);
+        prepared.lifecycle_raw = 2;
+        prepared.seal = preparedServiceSeal(prepared.*);
+        self.active_publication_seal = prepared.seal;
+        tracePublication(2);
+        return true;
+    }
+
+    pub fn publishPreparedPendingAndUnlockChecked(
+        self: *ConnectionIncidentService,
+        current_pid: u64,
+        current_process_nonce: u64,
+        prepared: *PreparedServicePublication,
+    ) bool {
+        if (!self.validPrepared(current_pid, current_process_nonce, prepared, 2)) return false;
         if (prepared.result.detail_slot) |slot| self.pending_slots |= @as(u128, 1) << @intCast(slot);
         self.pending_slots |= @as(u128, 1) << @intCast(incident_slot_count + prepared.result.aggregate_slot);
         self.active_publication_addr = 0;
         self.active_publication_seal = [_]u8{0} ** 32;
         prepared.lifecycle_raw = 3;
+        tracePublication(3); // pending bits published before unlock
         self.mutex.unlock();
+        return true;
     }
 
     pub fn abortPreparedPublication(
@@ -345,6 +444,7 @@ pub const ConnectionIncidentService = struct {
         self.active_publication_addr = 0;
         self.active_publication_seal = [_]u8{0} ** 32;
         prepared.lifecycle_raw = 3;
+        tracePublication(4); // pristine service transaction aborted
         self.mutex.unlock();
     }
 
@@ -354,17 +454,13 @@ pub const ConnectionIncidentService = struct {
         current_process_nonce: u64,
         input: ConnectionIncident,
     ) ServiceError!PublishResult {
-        if (!self.validAuthority(current_pid, current_process_nonce) or
-            input.incident_id.app_instance_nonce != self.app_instance_nonce or input.incident_id.sequence == 0 or
-            input.incident_id.sequence > self.last_issued_sequence)
+        var prepared: PreparedServicePublication = .{};
+        try self.prepareRepeatPublication(current_pid, current_process_nonce, input, &prepared);
+        if (!self.commitPreparedRepeatEvidenceChecked(current_pid, current_process_nonce, &prepared))
             return error.InvalidAuthority;
-        lock(&self.mutex);
-        defer self.mutex.unlock();
-        if (!self.validAuthority(current_pid, current_process_nonce) or
-            input.incident_id.app_instance_nonce != self.app_instance_nonce or
-            input.incident_id.sequence > self.last_issued_sequence) return error.InvalidAuthority;
-        const result = try self.ring.recordRepeat(input);
-        self.pending_slots |= @as(u128, 1) << @intCast(incident_slot_count + result.aggregate_slot);
+        const result = prepared.result;
+        if (!self.publishPreparedPendingAndUnlockChecked(current_pid, current_process_nonce, &prepared))
+            return error.InvalidAuthority;
         return result;
     }
 
@@ -457,6 +553,7 @@ pub const ConnectionIncidentService = struct {
     fn validAuthority(self: *const ConnectionIncidentService, current_pid: u64, current_process_nonce: u64) bool {
         _ = current_pid;
         return self.pid == currentProcessId() and self.lifecycle_raw == 1 and self.self_addr == @intFromPtr(self) and
+            self.service_generation != 0 and
             self.process_nonce == current_process_nonce and self.app_instance_nonce != 0;
     }
 
@@ -654,7 +751,7 @@ pub const EmergencyRing = struct {
         return &self.records[slot];
     }
 
-    fn recordRepeat(self: *EmergencyRing, incident: ConnectionIncident) PublishError!PublishResult {
+    fn prepareRepeat(self: *const EmergencyRing, incident: ConnectionIncident) PublishError!PreparedRingPublication {
         _ = try encodeIncident(incident);
         const aggregate_index = (try self.findAggregate(incident)) orelse 7;
         const old_generation = self.aggregate_generations[aggregate_index];
@@ -666,15 +763,18 @@ pub const EmergencyRing = struct {
         aggregate.last_timestamp_ns = @max(aggregate.last_timestamp_ns, incident.timestamp_ns);
         const payload = try encodeAggregate(aggregate);
         const generation = old_generation + 1;
-        publishEnvelope(&self.records[incident_slot_count + aggregate_index], 2, generation, &payload);
-        self.aggregate_generations[aggregate_index] = generation;
-        return .{
-            .incident_id = incident.incident_id,
-            .detail_present = false,
-            .detail_slot = null,
+        var plan: PreparedRingPublication = .{
             .aggregate_slot = @intCast(aggregate_index),
             .aggregate_generation = generation,
         };
+        publishEnvelope(&plan.aggregate_envelope, 2, generation, &payload);
+        return plan;
+    }
+
+    fn commitRepeatPlan(self: *EmergencyRing, plan: PreparedRingPublication) void {
+        std.debug.assert(!plan.detail_present);
+        self.records[incident_slot_count + plan.aggregate_slot] = plan.aggregate_envelope;
+        self.aggregate_generations[plan.aggregate_slot] = plan.aggregate_generation;
     }
 
     fn findAggregate(self: *const EmergencyRing, incident: ConnectionIncident) ValidationError!?usize {
@@ -1343,7 +1443,7 @@ test "CR0b service transaction evidence 뒤 pending은 Client suffix까지 숨�
     try service.initInPlace(7, 9, 11);
     var prepared: PreparedServicePublication = .{};
     try service.prepareFirstPublication(7, 9, unpublishedFixture(), &prepared);
-    service.commitPreparedEvidenceNoFail(7, 9, &prepared);
+    try std.testing.expect(service.commitPreparedEvidenceChecked(7, 9, &prepared));
     const WriterProbe = struct {
         started: std.atomic.Value(u8) = .init(0),
         done: std.atomic.Value(u8) = .init(0),
@@ -1368,7 +1468,7 @@ test "CR0b service transaction evidence 뒤 pending은 Client suffix까지 숨�
     try std.testing.expect(service.ring.record(prepared.result.aggregate_slot + incident_slot_count) != null);
     try std.testing.expect(!service.mutex.tryLock());
     try std.testing.expectEqual(@as(u8, 0), probe.done.load(.acquire));
-    service.publishPreparedPendingAndUnlockNoFail(7, 9, &prepared);
+    try std.testing.expect(service.publishPreparedPendingAndUnlockChecked(7, 9, &prepared));
     writer.join();
     try std.testing.expectEqual(WriterTakeResult.taken, probe.result);
     try std.testing.expectEqual(@as(u8, 0), probe.handoff.receipt.slot_index);
@@ -1437,11 +1537,11 @@ test "CR0b service transaction은 evidence 이후 abort를 거부하고 pending�
     try service.initInPlace(7, 9, 11);
     var prepared: PreparedServicePublication = .{};
     try service.prepareFirstPublication(7, 9, unpublishedFixture(), &prepared);
-    service.commitPreparedEvidenceNoFail(7, 9, &prepared);
+    try std.testing.expect(service.commitPreparedEvidenceChecked(7, 9, &prepared));
     const evidence = service;
     try std.testing.expectError(error.InvalidAuthority, service.abortPreparedPublication(7, 9, &prepared));
     try std.testing.expectEqualDeep(evidence, service);
-    service.publishPreparedPendingAndUnlockNoFail(7, 9, &prepared);
+    try std.testing.expect(service.publishPreparedPendingAndUnlockChecked(7, 9, &prepared));
     try std.testing.expectError(error.InvalidAuthority, service.abortPreparedPublication(7, 9, &prepared));
 }
 

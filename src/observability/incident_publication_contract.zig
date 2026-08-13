@@ -33,6 +33,43 @@ pub const IncidentInput = struct {
     upgrade_epoch: u64 = 0,
 };
 
+/// 기존 Client operation이 살아 있는 동안 캡처하고 operation 반환 뒤 canonical publisher owner가 소비하는
+/// pointer-free handoff다. raw publisher/runtime 주소는 포함하지 않는다.
+pub const PreparedManagedPoison = struct {
+    self_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread: u64 = 0,
+    slot_addr: u64 = 0,
+    slot_generation: u64 = 0,
+    node_addr: u64 = 0,
+    node_generation: u64 = 0,
+    binding_seal: Digest = [_]u8{0} ** 32,
+    input: IncidentInput = .{},
+    lifecycle_raw: u8 = 0,
+    seal: Digest = [_]u8{0} ** 32,
+};
+
+pub const ManagedPoisonLifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
+
+/// First publication과 Client terminalization이 끝난 뒤 scheduler owner에게 넘기는 값이다.
+/// Client/runtime 포인터를 포함하지 않으며 같은 connection generation에서 exact once만 게시한다.
+pub const ReconnectAdmission = struct {
+    self_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread: u64 = 0,
+    host_id: u128 = 0,
+    host_adapter_generation: u64 = 0,
+    connection_generation: u64 = 0,
+    incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
+    disposition_raw: u8 = 0,
+    lifecycle_raw: u8 = 0,
+    seal: Digest = [_]u8{0} ** 32,
+};
+
+pub const ReconnectAdmissionLifecycle = enum(u8) { pristine = 0, admitted = 1, consumed = 2 };
+
 pub const IncidentRepeatKey = struct {
     self_addr: u64 = 0,
     pid: u32 = 0,
@@ -68,6 +105,15 @@ pub const FirstPublicationCommit = struct {
     reason_raw: u8 = 0,
 };
 
+/// 이미 게시된 first 권위를 같은 aggregate 갱신에만 사용할 repeat 결속이다.
+/// Client first 필드는 바꾸지 않으며 service-issued ID와 canonical fingerprint를 재검증한다.
+pub const RepeatPublicationCommit = struct {
+    authority: IncidentOperationAuthority = .{},
+    input_digest: Digest = [_]u8{0} ** 32,
+    incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
+    fingerprint: Digest = [_]u8{0} ** 32,
+};
+
 pub const ClientOperationLifecycle = enum(u8) { pristine = 0, held = 1, bound = 2, consumed = 3 };
 
 pub const PreparedIncidentClientOperation = struct {
@@ -84,9 +130,10 @@ pub const PreparedIncidentClientOperation = struct {
 };
 
 pub const PublicationKind = enum(u8) { first = 1, repeat = 2 };
-pub const PublicationLifecycle = enum(u8) { pristine = 0, held = 1, evidence_committed = 2, published = 3 };
+pub const PublicationLifecycle = enum(u8) { pristine = 0, held = 1, evidence_committed = 2, wake_ready = 3, published = 4 };
 
 pub const PublisherLeaseProjection = struct {
+    lease_addr: u64 = 0,
     registry_addr: u64 = 0,
     registry_generation: u64 = 0,
     authority_addr: u64 = 0,
@@ -99,6 +146,14 @@ pub const PublisherLeaseProjection = struct {
     owner_thread: u64 = 0,
     lease_generation: u64 = 0,
     seal: Digest = [_]u8{0} ** 32,
+};
+
+pub const WakeOutcome = enum(u8) { queued = 1, coalesced = 2, degraded = 3 };
+
+pub const IncidentCommitResult = struct {
+    publication: incident.PublishResult,
+    wake: WakeOutcome,
+    kind_raw: u8 = 0,
 };
 
 /// Platform coordinator가 service mutex와 Client operation을 동시에 소유하는 동안만 유효하다.
@@ -200,6 +255,34 @@ pub fn validRepeatKeyShape(value: IncidentRepeatKey, expected_addr: usize) bool 
         !std.mem.allEqual(u8, &value.seal, 0);
 }
 
+pub fn validManagedPoisonShape(value: PreparedManagedPoison, expected_addr: usize) bool {
+    return value.self_addr == expected_addr and value.pid != 0 and value.process_nonce != 0 and
+        value.owner_thread != 0 and value.slot_addr != 0 and value.slot_generation != 0 and
+        value.node_addr != 0 and value.node_generation != 0 and
+        !std.mem.allEqual(u8, &value.binding_seal, 0) and validInputShape(value.input) and
+        value.lifecycle_raw == @intFromEnum(ManagedPoisonLifecycle.prepared) and
+        !std.mem.allEqual(u8, &value.seal, 0);
+}
+
+pub fn validManagedPoisonConsumedShape(value: PreparedManagedPoison, expected_addr: usize) bool {
+    return value.self_addr == expected_addr and value.pid != 0 and value.process_nonce != 0 and
+        value.owner_thread != 0 and value.slot_addr != 0 and value.slot_generation != 0 and
+        value.node_addr != 0 and value.node_generation != 0 and
+        !std.mem.allEqual(u8, &value.binding_seal, 0) and validInputShape(value.input) and
+        value.lifecycle_raw == @intFromEnum(ManagedPoisonLifecycle.consumed) and
+        !std.mem.allEqual(u8, &value.seal, 0);
+}
+
+pub fn validReconnectAdmissionShape(value: ReconnectAdmission, expected_addr: usize) bool {
+    return value.self_addr == expected_addr and value.pid != 0 and value.process_nonce != 0 and
+        value.owner_thread != 0 and value.host_id != 0 and value.host_adapter_generation != 0 and
+        value.connection_generation != 0 and value.incident_id.app_instance_nonce != 0 and
+        value.incident_id.sequence != 0 and
+        value.disposition_raw == @intFromEnum(incident.Disposition.reconnect) and
+        value.lifecycle_raw == @intFromEnum(ReconnectAdmissionLifecycle.admitted) and
+        !std.mem.allEqual(u8, &value.seal, 0);
+}
+
 fn recursivelyPointerFree(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer, .@"fn" => false,
@@ -220,12 +303,70 @@ fn recursivelyPointerFree(comptime T: type) bool {
 
 test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-free로 유지한다" {
     try std.testing.expect(recursivelyPointerFree(IncidentInput));
+    try std.testing.expect(recursivelyPointerFree(PreparedManagedPoison));
+    try std.testing.expect(recursivelyPointerFree(ReconnectAdmission));
     try std.testing.expect(recursivelyPointerFree(IncidentRepeatKey));
     try std.testing.expect(recursivelyPointerFree(IncidentOperationAuthority));
     try std.testing.expect(recursivelyPointerFree(FirstPublicationCommit));
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentClientOperation));
     try std.testing.expect(recursivelyPointerFree(PublisherLeaseProjection));
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentPublication));
+}
+
+test "CR0b poison publication 계약은 reconnect admission을 first incident와 one-shot lifecycle에 결속한다" {
+    var admission: ReconnectAdmission = .{
+        .pid = 1,
+        .process_nonce = 2,
+        .owner_thread = 3,
+        .host_id = 4,
+        .host_adapter_generation = 5,
+        .connection_generation = 6,
+        .incident_id = .{ .app_instance_nonce = 7, .sequence = 8 },
+        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+        .lifecycle_raw = @intFromEnum(ReconnectAdmissionLifecycle.admitted),
+    };
+    admission.self_addr = @intFromPtr(&admission);
+    admission.seal[0] = 1;
+    try std.testing.expect(validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
+    try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission) + 1));
+    admission.disposition_raw = @intFromEnum(incident.Disposition.no_retry);
+    try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
+    admission.disposition_raw = @intFromEnum(incident.Disposition.reconnect);
+    admission.lifecycle_raw = @intFromEnum(ReconnectAdmissionLifecycle.consumed);
+    try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
+}
+
+test "CR0b poison publication 계약은 managed poison handoff의 final address와 closed lifecycle을 요구한다" {
+    var prepared: PreparedManagedPoison = .{
+        .pid = 1,
+        .process_nonce = 2,
+        .owner_thread = 3,
+        .slot_addr = 4,
+        .slot_generation = 5,
+        .node_addr = 6,
+        .node_generation = 7,
+        .input = .{
+            .host_id = 8,
+            .host_adapter_generation = 9,
+            .connection_generation = 10,
+            .wire_major = 1,
+            .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+            .scope_raw = @intFromEnum(incident.Scope.connection),
+            .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+            .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+            .host_class_raw = @intFromEnum(incident.HostClass.current),
+            .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
+            .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        },
+        .lifecycle_raw = @intFromEnum(ManagedPoisonLifecycle.prepared),
+    };
+    prepared.self_addr = @intFromPtr(&prepared);
+    prepared.binding_seal[0] = 1;
+    prepared.seal[0] = 2;
+    try std.testing.expect(validManagedPoisonShape(prepared, @intFromPtr(&prepared)));
+    try std.testing.expect(!validManagedPoisonShape(prepared, @intFromPtr(&prepared) + 1));
+    prepared.lifecycle_raw = 3;
+    try std.testing.expect(!validManagedPoisonShape(prepared, @intFromPtr(&prepared)));
 }
 
 test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫힌 값으로 유지한다" {
@@ -236,9 +377,10 @@ test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫�
         PublicationLifecycle.pristine,
         PublicationLifecycle.held,
         PublicationLifecycle.evidence_committed,
+        PublicationLifecycle.wake_ready,
         PublicationLifecycle.published,
     }) |lifecycle| try std.testing.expect(std.enums.fromInt(PublicationLifecycle, @intFromEnum(lifecycle)) != null);
-    try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 4) == null);
+    try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 5) == null);
 }
 
 test "CR0b poison publication 계약은 입력의 closed raw 값과 outbound 범위를 검증한다" {

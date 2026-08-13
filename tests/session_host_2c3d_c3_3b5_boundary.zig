@@ -61,7 +61,9 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "self.surface_runtime.linkMatches(handle, &entry.runtime.surface, handle, entry.runtime)"));
     try std.testing.expectEqual(@as(usize, 1), count(cleanup_source, "pub const WindowCloseTicketReservationSealInput = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(seal_source, "maru.window-close-ticket-reservation.v1"));
+    // current/restore 제품 설치 두 곳과 CR0b bootstrap 5의 실제 global-backend settlement fixture 한 곳이다.
     try std.testing.expectEqual(@as(usize, 2), count(app_source, "app_remote_backend.?.claimProductSingleton()"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_source, "if (!claimInstalledRemoteBackend("));
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "pub fn claimProductSingleton("));
     try std.testing.expectEqual(@as(usize, 1), count(close_graph_source, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(app_source, "workspace_ops.advancePendingWindowClose(self);"));

@@ -166,6 +166,23 @@ void maru_mobile_scroll_to_bottom(void);
 /// 지금 스크롤백을 보고 있는가(0=바닥). host 가 스크롤 인디케이터를 그릴 때 쓴다.
 unsigned int maru_mobile_view_offset(void);
 
+/// 보조 키바 탭(논리 px). **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다** — 그것 없이는
+/// 프로세스를 못 멈추고(Ctrl+C) vim 에서 못 빠져나온다.
+///
+/// 1=키바가 먹었다(플랫폼은 더 할 일이 없다), 0=키바 밖이니 본문 처리로 넘어가라.
+/// **좌표 해석은 코어 쪽이 한다** — 그리는 자리와 판정하는 자리가 갈리면 눌러도 다른 키가
+/// 나간다(docs/mobile-platform.md §3).
+unsigned int maru_mobile_keybar_tap(float x, float y);
+
+/// 눌러 둔 수정자(sticky). 0=없음. 화면 표시는 브리지가 이미 하므로 host 가 꼭 볼 필요는
+/// 없고, 계측·접근성 라벨에 쓴다.
+unsigned int maru_mobile_armed_mods(void);
+
+/// 키바 키 개수와 `index` 번째 사각형(논리 px, x·y·w·h 를 각각 16비트). 아직 안 섰으면 0.
+/// 자리를 밖에서 다시 계산하지 말라고 내주는 값이다.
+unsigned int maru_mobile_keybar_count(void);
+unsigned long long maru_mobile_keybar_rect(unsigned int index);
+
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);
 

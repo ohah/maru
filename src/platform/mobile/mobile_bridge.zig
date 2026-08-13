@@ -164,6 +164,23 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
         return @intCast(delivered_len);
     });
     snapToBottomOnInput(core);
+    // **눌러 둔 수정자가 있으면 첫 글자는 키 경로를 탄다.** 보조 키바에서 Ctrl 을 누르고
+    // 소프트 키보드로 `c` 를 치는 것이 이 기능의 실제 쓰임인데, 여기서 안 받으면 Ctrl 이
+    // 하드웨어 키보드에서만 듣는다 — 그러면 키바를 만든 이유가 없다.
+    //
+    // **타이핑한 글자에만 실린다.** 제어문자(ESC·CR…)는 타이핑이 아니라 시퀀스라, 여기에
+    // 실으면 `\x1b[2J` 같은 것이 눌러 둔 Ctrl 을 먹고 **ESC 는 문자 키 표에 없어 바이트가
+    // 조용히 사라진다**(테스트에서 그렇게 잡혔다).
+    if (armed_mods != 0 and len > 0 and ptr[0] >= 0x20 and ptr[0] != 0x7F) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(ptr[0]) catch 1;
+        const first = std.unicode.utf8Decode(ptr[0..seq_len]) catch {
+            armed_mods = 0;
+            return @intCast(delivered_len);
+        };
+        _ = maru_mobile_key(0, first, 0); // armed 는 그 안에서 소비된다
+        if (seq_len >= len) return @intCast(delivered_len);
+        return maru_mobile_input(ptr + seq_len, len - seq_len);
+    }
     // **개행은 문자가 아니라 Enter 키다.** IME 는 소프트 Return 을 `"\n"` 으로 커밋하는데,
     // 그대로 쓰면 LF 가 나간다 — 터미널은 CR 이고, 그 판단은 `encodeKey` 것이다. 하드웨어
     // Return 은 이미 키 경로로 CR 이 나가므로, 안 가르면 **같은 Enter 가 입력 수단에 따라
@@ -247,11 +264,16 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
         return @intCast(delivered_len);
     };
     snapToBottomOnInput(core);
+    // **눌러 둔 수정자를 여기서 소비한다.** 보조 키바의 Ctrl 은 다음 **한 키**에만 실린다 —
+    // 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가 된다. 소비 자리를 한 곳에 두어야
+    // 키바 탭과 하드웨어 키가 같은 규칙을 탄다.
+    const eff = mods | armed_mods;
+    armed_mods = 0;
     const ev: terminal.input.KeyEvent = .{ .key = key, .modifiers = .{
-        .shift = mods & 1 != 0,
-        .control = mods & 2 != 0,
-        .option = mods & 4 != 0,
-        .command = mods & 8 != 0,
+        .shift = eff & 1 != 0,
+        .control = eff & 2 != 0,
+        .option = eff & 4 != 0,
+        .command = eff & 8 != 0,
     } };
     writeKey(core, ev.key, ev.modifiers);
     drainUnconsumed(core);
@@ -321,6 +343,47 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
     }
     // clamp 는 코어가 한다 — 여기서 또 하면 두 곳이 갈린다.
     core.scrollViewport(lines);
+}
+
+/// 보조 키바 탭. **좌표는 여기서만 해석한다** — 그리는 자리와 판정하는 자리가 갈리면
+/// 눌러도 다른 키가 나간다. 1=이 탭은 키바가 먹었다, 0=키바 밖(플랫폼이 본문 처리로).
+pub export fn maru_mobile_keybar_tap(x: f32, y: f32) u32 {
+    if (!key_bar_ready) return 0;
+    for (key_bar_rects, 0..) |r, i| {
+        if (x < r.x or x >= r.x + r.w or y < r.y or y >= r.y + r.h) continue;
+        const item = key_bar[i];
+        if (item.sticky_mod != 0) {
+            // 토글이다 — 잘못 눌렀을 때 되돌릴 방법이 있어야 한다.
+            armed_mods = if (armed_mods & item.sticky_mod != 0) 0 else item.sticky_mod;
+            return 1;
+        }
+        // 수정자를 여기서 안 실는다 — `maru_mobile_key` 가 눌러 둔 것을 소비한다(한 곳).
+        _ = maru_mobile_key(item.key_id, item.codepoint, 0);
+        return 1;
+    }
+    return 0;
+}
+
+/// 눌러 둔 수정자(0 이면 없음). 화면 표시는 브리지가 이미 한다 — 계측·접근성 라벨용이다.
+pub export fn maru_mobile_armed_mods() u32 {
+    return armed_mods;
+}
+
+pub export fn maru_mobile_keybar_count() u32 {
+    return key_bar.len;
+}
+
+/// 키 `index` 의 사각형(논리 px). x·y·w·h 를 각각 16비트로 담는다. 아직 안 섰으면 0.
+/// **자리를 밖에서 다시 계산하지 말라고 내주는 값이다** — 손으로 적으면 레이아웃이 바뀔 때
+/// 부르는 쪽만 맞고 화면은 틀리게 된다.
+pub export fn maru_mobile_keybar_rect(index: u32) u64 {
+    if (!key_bar_ready or index >= key_bar.len) return 0;
+    const r = key_bar_rects[index];
+    const x: u64 = @intFromFloat(@max(0, r.x));
+    const y: u64 = @intFromFloat(@max(0, r.y));
+    const w: u64 = @intFromFloat(@max(0, r.w));
+    const h: u64 = @intFromFloat(@max(0, r.h));
+    return (x << 48) | (y << 32) | (w << 16) | h;
 }
 
 pub export fn maru_mobile_scroll_to_bottom() void {
@@ -881,7 +944,9 @@ fn styleBits(s: terminal.types.Style) u32 {
 fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void {
     // 셀 종횡비를 지킨다 — 임의 크기 상자에 셀을 넣으면 글자가 늘어난다.
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
-    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale);
+    // **슬롯 하나는 양폭(한글) 상자고 단폭 글자는 왼쪽 절반만 쓴다**(M4a3, §글리프 기하).
+    // 여기가 그 절반 규칙을 안 따라와 슬롯 **전체**를 샘플링하고 있었다.
+    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5);
     var pen = x0;
     var view = std.unicode.Utf8View.init(text) catch return;
     var it = view.iterator();
@@ -905,7 +970,7 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
                         .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
                         .a = 1.0,
                         .radius = 0,
-                        .kind = 1,
+                        .kind = 3, // 슬롯의 왼쪽 절반
                         .cell_x = c.col,
                         .cell_y = c.row,
                     };
@@ -1015,7 +1080,27 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         tree.card(.{ .id = 402, .style = .{ .flex = .{ .grow = 1.4 }, .height = .{ .px = 16.0 } }, .variant = .raised }, &.{}),
     });
 
-    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, status });
+    // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
+    var bar_kids: [key_bar.len][1]tree.UiNode = undefined;
+    var bar_children: [key_bar.len]tree.UiNode = undefined;
+    for (&bar_children, 0..) |*c, i| {
+        bar_kids[i] = .{tree.text(.{
+            .id = key_bar_id_base + 100 + i,
+            .style = .{ .width = .{ .px = 26.0 }, .height = .{ .px = 13.0 }, .margin = .{ .left = 5.0, .top = 9.0 } },
+            .value = key_bar[i].label,
+            // 눌러 둔 수정자는 **켜져 있다는 것이 보여야** 한다 — 안 보이면 왜 제어문자가
+            // 나가는지 알 수 없다.
+            .tone = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .accent else .primary,
+        })};
+        c.* = tree.card(.{
+            .id = key_bar_id_base + i,
+            .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } },
+            .variant = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .selected else .surface,
+        }, &bar_kids[i]);
+    }
+    const bar = tree.container(.{ .id = key_bar_id_base - 1, .direction = .row, .style = .{ .height = .{ .px = 40.0 }, .padding = .{ .left = 6.0, .right = 6.0, .top = 4.0, .bottom = 4.0 } } }, &bar_children);
+
+    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, bar, status });
 
     const built = try tree.build(root, .{
         .root_size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
@@ -1058,6 +1143,19 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 15, tk.get(tone_role));
     }
 
+    // 키바의 각 사각형을 기록한다 — **그리는 자리와 판정하는 자리가 같아야** 눌러도
+    // 다른 키가 나가지 않는다(따로 계산하면 갈린다).
+    for (built.entries) |entry| {
+        if (entry.id < key_bar_id_base or entry.id >= key_bar_id_base + key_bar.len) continue;
+        key_bar_rects[entry.id - key_bar_id_base] = .{
+            .x = entry.rect.x,
+            .y = entry.rect.y,
+            .w = entry.rect.width,
+            .h = entry.rect.height,
+        };
+        key_bar_ready = true;
+    }
+
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
     for (built.entries) |entry| {
         if (entry.id != 300) continue;
@@ -1093,7 +1191,52 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 
 /// UiId → 문자열. `RectEntry` 는 문자열을 들고 있지 않으므로(레이아웃만 담는다) 조립할 때
 /// 쓴 값을 여기서 되찾는다.
+// ── 보조 키바 ─────────────────────────────────────────────────────────────────
+// **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다.** 그것 없이는 프로세스를 못 멈추고
+// (Ctrl+C) vim 에서 못 빠져나온다 — 문장부호는 123 레이어로 칠 수 있지만 이 키들은 아예
+// 칠 방법이 없다. 모바일 터미널이 전부 이 한 줄을 두는 이유다.
+//
+// **정의를 한곳에 둔다.** 레이아웃·라벨·탭 판정이 같은 표를 보게 해야 셋이 갈리지 않는다
+// (라벨만 고치고 판정을 안 고치면 **엉뚱한 키가 나가고 화면에는 맞게 보인다**).
+const KeyBarItem = struct {
+    label: []const u8,
+    key_id: u32, // mobile_host_abi.h 의 MARU_KEY_*
+    codepoint: u32 = 0, // key_id == 0(문자)일 때만
+    /// 누르면 **다음 글자에 실릴** 수정자. 0 이면 바로 나가는 키다.
+    sticky_mod: u32 = 0,
+};
+
+/// 한 줄에 들어가야 한다 — 폰 세로 폭(~400 논리 px)에 11개가 상한이다.
+const key_bar = [_]KeyBarItem{
+    .{ .label = "esc", .key_id = 2 },
+    .{ .label = "tab", .key_id = 3 },
+    .{ .label = "ctrl", .key_id = 0, .sticky_mod = 2 }, // MARU_MOD_CTRL
+    .{ .label = "\u{2191}", .key_id = 5 },
+    .{ .label = "\u{2193}", .key_id = 6 },
+    .{ .label = "\u{2190}", .key_id = 7 },
+    .{ .label = "\u{2192}", .key_id = 8 },
+    .{ .label = "|", .key_id = 0, .codepoint = '|' },
+    .{ .label = "~", .key_id = 0, .codepoint = '~' },
+    .{ .label = "/", .key_id = 0, .codepoint = '/' },
+    .{ .label = "-", .key_id = 0, .codepoint = '-' },
+};
+
+/// 레이아웃 id 는 이 값에 인덱스를 더한다. 라벨 id 는 카드 id + 100.
+const key_bar_id_base: u64 = 500;
+
+/// 마지막 build 가 잡아 준 각 키의 사각형. **판정도 배치를 아는 쪽이 한다**(§3) —
+/// 플랫폼은 점만 넘긴다.
+var key_bar_rects: [key_bar.len]struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 } = undefined;
+var key_bar_ready = false;
+
+/// 눌러 둔 수정자(sticky). **다음 한 글자**에만 실린다 — 계속 걸려 있으면 그 다음 타이핑이
+/// 전부 제어문자가 된다.
+var armed_mods: u32 = 0;
+
 fn labelFor(id: u64) ?[]const u8 {
+    if (id >= key_bar_id_base + 100 and id < key_bar_id_base + 100 + key_bar.len) {
+        return key_bar[id - key_bar_id_base - 100].label;
+    }
     return switch (id) {
         111 => "zsh",
         112 => "vim",

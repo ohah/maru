@@ -908,6 +908,15 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         g.touch_last_y = ly;
         g.touch_total_dy = 0;
         g.fling_vy = 0;
+        // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+        pthread_mutex_lock(&g_bridge_lock);
+        unsigned int on_bar = maru_mobile_keybar_tap(lx, ly);
+        unsigned int armed = maru_mobile_armed_mods();
+        pthread_mutex_unlock(&g_bridge_lock);
+        if (on_bar) {
+            LOGI("MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, armed);
+            return 1;
+        }
         unsigned int cell = maru_mobile_hit_cell(lx, ly);
         LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
              px, py, lx, ly, cell >> 16, cell & 0xFFFF);

@@ -80,7 +80,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     );
     try std.testing.expectEqual(@as(usize, 0), count(incident, "fatalIntegrity("));
     try std.testing.expectEqual(@as(usize, 6), count(binding, "test \"CR0b binding 계약은"));
-    try std.testing.expectEqual(@as(usize, 3), count(publication, "test \"CR0b poison publication 계약은"));
+    try std.testing.expectEqual(@as(usize, 4), count(publication, "test \"CR0b poison publication 계약은"));
     try std.testing.expectEqual(@as(usize, 0), count(publication, "../platform"));
     try std.testing.expectEqual(@as(usize, 0), count(publication, "client.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(publication, "std.mem.Allocator"));

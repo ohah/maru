@@ -462,8 +462,13 @@ pub export fn maru_mobile_has_selection() u32 {
 pub export fn maru_mobile_keybar_tap(x: f32, y: f32) u32 {
     if (!key_bar_ready) return 0;
     for (key_bar_rects, 0..) |r, i| {
+        if (!keyBarVisible(i)) continue; // 안 보이는 키는 못 누른다
         if (x < r.x or x >= r.x + r.w or y < r.y or y >= r.y + r.h) continue;
         const item = key_bar[i];
+        if (item.is_copy) {
+            copy_pending = true;
+            return 1;
+        }
         if (item.sticky_mod != 0) {
             // 토글이다 — 잘못 눌렀을 때 되돌릴 방법이 있어야 한다.
             armed_mods = if (armed_mods & item.sticky_mod != 0) 0 else item.sticky_mod;
@@ -477,6 +482,25 @@ pub export fn maru_mobile_keybar_tap(x: f32, y: f32) u32 {
 }
 
 /// 눌러 둔 수정자(0 이면 없음). 화면 표시는 브리지가 이미 한다 — 계측·접근성 라벨용이다.
+/// 복사할 것이 있으면 `out` 에 채우고 바이트 수를 답한다(없으면 0). **추출은 코어가 하고**
+/// (soft-wrap 잇기·줄끝 개행·2셀 뒷칸 제외가 전부 거기 있다) 플랫폼은 클립보드에 쓰기만 한다.
+///
+/// 한 번 가져가면 요청은 사라진다 — 매 프레임 같은 것을 다시 쓰지 않게.
+pub export fn maru_mobile_take_copy(out: [*]u8, cap: u32) u32 {
+    if (!copy_pending) return 0;
+    copy_pending = false;
+    const core = &(term_core orelse return 0);
+    const text = (core.extractSelection(term_allocator) catch {
+        setLastError("copy_extract");
+        return 0;
+    }) orelse return 0;
+    defer term_allocator.free(text);
+    const n = @min(text.len, cap);
+    if (n < text.len) setLastError("copy_truncated"); // 조용히 자르지 않는다
+    @memcpy(out[0..n], text[0..n]);
+    return @intCast(n);
+}
+
 pub export fn maru_mobile_armed_mods() u32 {
     return armed_mods;
 }
@@ -1221,7 +1245,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
     var bar_kids: [key_bar.len][1]tree.UiNode = undefined;
     var bar_children: [key_bar.len]tree.UiNode = undefined;
-    for (&bar_children, 0..) |*c, i| {
+    // 안 보이는 키(선택 없을 때의 `copy`)는 자리도 안 차지한다 — 빈 칸으로 두면 줄이
+    // 어색하게 벌어지고, 그 자리를 눌렀을 때 뭐가 되는지도 애매해진다.
+    var bar_n: usize = 0;
+    for (0..key_bar.len) |i| {
+        if (!keyBarVisible(i)) continue;
+        const c = &bar_children[bar_n];
+        bar_n += 1;
         bar_kids[i] = .{tree.text(.{
             .id = key_bar_id_base + 100 + i,
             .style = .{ .width = .{ .px = 26.0 }, .height = .{ .px = 13.0 }, .margin = .{ .left = 5.0, .top = 9.0 } },
@@ -1236,7 +1266,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             .variant = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .selected else .surface,
         }, &bar_kids[i]);
     }
-    const bar = tree.container(.{ .id = key_bar_id_base - 1, .direction = .row, .style = .{ .height = .{ .px = 40.0 }, .padding = .{ .left = 6.0, .right = 6.0, .top = 4.0, .bottom = 4.0 } } }, &bar_children);
+    const bar = tree.container(.{ .id = key_bar_id_base - 1, .direction = .row, .style = .{ .height = .{ .px = 40.0 }, .padding = .{ .left = 6.0, .right = 6.0, .top = 4.0, .bottom = 4.0 } } }, bar_children[0..bar_n]);
 
     const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, bar, status });
 
@@ -1296,7 +1326,12 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         };
         bar_found += 1;
     }
-    key_bar_ready = bar_found == key_bar.len;
+    // 보이는 키만큼만 자리가 잡힌다(선택이 없으면 `copy` 가 빠진다).
+    var want_bar: usize = 0;
+    for (0..key_bar.len) |i| {
+        if (keyBarVisible(i)) want_bar += 1;
+    }
+    key_bar_ready = bar_found == want_bar;
 
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
     for (built.entries) |entry| {
@@ -1346,6 +1381,9 @@ const KeyBarItem = struct {
     codepoint: u32 = 0, // key_id == 0(문자)일 때만
     /// 누르면 **다음 글자에 실릴** 수정자. 0 이면 바로 나가는 키다.
     sticky_mod: u32 = 0,
+    /// 키가 아니라 **복사**다. 선택이 있을 때만 줄에 나타난다 — 늘 두면 한 줄에 자리가
+    /// 모자라고(11개가 상한), 누를 수 없는 버튼이 계속 보이는 것도 어색하다.
+    is_copy: bool = false,
 };
 
 /// 한 줄에 들어가야 한다 — 폰 세로 폭(~400 논리 px)에 11개가 상한이다.
@@ -1361,7 +1399,19 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "~", .key_id = 0, .codepoint = '~' },
     .{ .label = "/", .key_id = 0, .codepoint = '/' },
     .{ .label = "-", .key_id = 0, .codepoint = '-' },
+    .{ .label = "copy", .key_id = 0, .is_copy = true },
 };
+
+/// 선택이 없으면 `copy` 는 줄에서 빠진다.
+fn keyBarVisible(i: usize) bool {
+    if (!key_bar[i].is_copy) return true;
+    const core = &(term_core orelse return false);
+    return core.selectionViewportSpan() != null;
+}
+
+/// 복사 요청. host 가 다음에 `maru_mobile_take_copy` 로 가져간다 — **클립보드는 OS 것이라
+/// 브리지가 못 쓴다**(§3: 여기엔 OS 호출이 없다).
+var copy_pending = false;
 
 /// 레이아웃 id 는 이 값에 인덱스를 더한다. 라벨 id 는 카드 id + 100.
 const key_bar_id_base: u64 = 500;

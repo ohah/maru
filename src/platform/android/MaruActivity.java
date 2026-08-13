@@ -121,6 +121,21 @@ public class MaruActivity extends android.app.NativeActivity {
 
     private InputView input;
 
+    /** **클립보드는 OS 것이라 코어가 못 쓴다**(브리지엔 OS 호출이 없다). 네이티브가 코어에서
+     *  꺼낸 텍스트를 여기로 넘기면 이 자리가 시스템 클립보드에 넣는다. */
+    private static MaruActivity current;
+
+    /** 네이티브가 JNI 로 부른다. Context 가 필요해서 액티비티 참조를 통해 간다. */
+    public static void setClipboard(String text) {
+        MaruActivity a = current;
+        if (a == null || text == null) return;
+        android.content.ClipboardManager cm =
+                (android.content.ClipboardManager) a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("maru", text));
+        android.util.Log.i("MaruChrome", "MARU_COPY len=" + text.length());
+    }
+
     /** OS 값을 코어에 알린다. **재개할 때마다** 다시 읽는다 — 사용자가 설정을 바꾸고
      *  돌아올 수 있고, 그때 옛 값을 쓰면 접근성 설정이 무시된다. */
     private void applyLongPressTimeout() {
@@ -136,6 +151,7 @@ public class MaruActivity extends android.app.NativeActivity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        current = this;
         input = new InputView(this);
         // NativeActivity 가 만든 content view 위에 얹는다. 0x0 이면 포커스를 못 받는 기기가
         // 있어 전체 크기로 두고, 그리지 않아 화면에는 안 보인다.

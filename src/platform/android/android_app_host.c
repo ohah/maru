@@ -101,6 +101,7 @@ static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선�
 static void recreateVulkan(struct android_app *app);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
+static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
 
 // **기기에서 굽는다.** NDK 에는 폰트 래스터가 없지만(폰트 *탐색* API 인 `AFontMatcher` 뿐),
@@ -825,7 +826,10 @@ Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
 // IME 가 문자로 주지 않는 키만 여기로 온다(백스페이스·엔터 등).
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
-    (void)env; (void)cls;
+    // **여기서 클래스를 잡아 둔다.** 네이티브 스레드에서 `FindClass` 로 앱 클래스를 찾으면
+    // 시스템 클래스로더를 보게 돼 **조용히 못 찾는다**(복사가 그 자리에서 말없이 죽었다).
+    // Java 에서 들어온 호출은 올바른 클래스로더 위에 있으므로 그때 전역 참조로 붙든다.
+    if (!g_activity_cls) g_activity_cls = (jclass)(*env)->NewGlobalRef(env, cls);
     // **OS 가 정한 값을 그대로 넘긴다.** 사용자가 접근성 설정으로 바꿀 수 있는 값이라
     // 코어가 박아 두면 그 설정을 무시하게 된다.
     pthread_mutex_lock(&g_bridge_lock);
@@ -887,7 +891,6 @@ static void showKeyboard(struct android_app *app) {
 }
 
 static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
-    (void)app;
     // **터치**: 누른 지점을 셀 좌표로 바꿔 조회한다. iOS `touchesBegan:` 과 같은 자리이고,
     // 좌표계 환산도 같다 — 물리 px 를 density 로 나누고 상태바 inset 을 뺀 **논리 좌표**로
     // 되돌려야 셀이 안 어긋난다(그 값은 렌더가 쓴 것과 같은 변수에서 나온다).
@@ -932,7 +935,38 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         unsigned int armed = maru_mobile_armed_mods();
         pthread_mutex_unlock(&g_bridge_lock);
         if (on_bar) {
-            LOGI("MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, armed);
+            pthread_mutex_lock(&g_bridge_lock);
+            unsigned int had_sel = maru_mobile_has_selection();
+            pthread_mutex_unlock(&g_bridge_lock);
+            LOGI("MARU_KEYBAR pt=(%.0f,%.0f) armed=%u sel=%u", lx, ly, armed, had_sel);
+            // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
+            // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3).
+            static char copy_buf[8192];
+            pthread_mutex_lock(&g_bridge_lock);
+            unsigned int cn = maru_mobile_take_copy((unsigned char *)copy_buf, sizeof copy_buf);
+            pthread_mutex_unlock(&g_bridge_lock);
+            LOGI("MARU_COPY taken=%u", cn);
+            if (cn > 0) {
+                copy_buf[cn < sizeof copy_buf ? cn : sizeof copy_buf - 1] = 0;
+                JNIEnv *env = NULL;
+                JavaVM *vm = app->activity->vm;
+                if ((*vm)->AttachCurrentThread(vm, &env, NULL) == 0 && env) {
+                    if (g_activity_cls) {
+                        jmethodID mid = (*env)->GetStaticMethodID(env, g_activity_cls, "setClipboard",
+                                                                  "(Ljava/lang/String;)V");
+                        if (mid) {
+                            jstring s = (*env)->NewStringUTF(env, copy_buf);
+                            (*env)->CallStaticVoidMethod(env, g_activity_cls, mid, s);
+                            (*env)->DeleteLocalRef(env, s);
+                        } else {
+                            LOGI("MARU_COPY no_method");
+                        }
+                    } else {
+                        LOGI("MARU_COPY no_class");
+                    }
+                    (*vm)->DetachCurrentThread(vm);
+                }
+            }
             return 1;
         }
         pthread_mutex_lock(&g_bridge_lock);

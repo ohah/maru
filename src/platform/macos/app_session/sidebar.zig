@@ -1635,6 +1635,15 @@ pub fn sessionRowIconCodepoint(term: *Term) u21 {
         return chrome.file_tree_icon.codepoint(kind) orelse icons.codepoint(.document);
     }
     if (term.kind == .web) return icons.codepoint(.web);
+    // N1 편집기 Term도 파일을 여는 것이므로 확장자 아이콘을 쓴다 — 위 파일 패널 분기와 같은
+    // 규칙이다(폴백은 `.document`). 이 가드가 없으면 `0`으로 떨어져 **아이콘만 빠진 행**이 된다.
+    if (term.kind == .editor) {
+        if (term.rt.editor_path) |p| {
+            const kind = chrome.file_tree_icon.classify(.file, std.fs.path.basename(p), false);
+            return chrome.file_tree_icon.codepoint(kind) orelse icons.codepoint(.document);
+        }
+        return icons.codepoint(.document);
+    }
     return 0;
 }
 

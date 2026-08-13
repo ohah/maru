@@ -21,6 +21,7 @@ const StatInfo = struct {
 const staged_image = @import("staged_image.zig");
 const host_identity = @import("host_identity.zig");
 const short_endpoint = @import("short_endpoint.zig");
+const test_scratch = @import("test_scratch.zig");
 
 extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
 const RENAME_SWAP: c_uint = 0x00000002;
@@ -953,10 +954,9 @@ test "host manifest codec preserves exact discovery authority and rejects non-ex
 
 test "host manifest publish-load is atomic owner-only and exact-host keyed" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-host-manifest-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest") orelse
         return error.SkipZigTest;
-    _ = c.mkdir(dir.ptr, 0o700);
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     const descriptor: Descriptor = .{
         .host_id = 0xCAFE,
         .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -992,13 +992,12 @@ test "host manifest publish-load is atomic owner-only and exact-host keyed" {
 
 test "host manifest restoring adoption discard preserves disk and commit transfers exact cleanup authority" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(
+    const dir = test_scratch.open(
+        std.testing.io,
         &dir_buf,
-        "/tmp/maru-host-manifest-adopt-{d}",
-        .{c.getpid()},
-    ) catch return error.SkipZigTest;
-    _ = c.mkdir(dir.ptr, 0o700);
-    defer _ = c.rmdir(dir.ptr);
+        "host-manifest-adopt",
+    ) orelse return error.SkipZigTest;
+    defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xAD07;
     var endpoint_buf: [128]u8 = undefined;
     const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
@@ -1072,10 +1071,9 @@ test "host manifest restoring adoption discard preserves disk and commit transfe
 
 test "host manifest initial publish is exclusive and old owner cleanup cannot unlink a replacement generation" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-host-manifest-aba-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest-aba") orelse
         return error.SkipZigTest;
-    _ = c.mkdir(dir.ptr, 0o700);
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xBEEF;
     var endpoint_buf: [128]u8 = undefined;
     const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
@@ -1107,10 +1105,9 @@ test "host manifest initial publish is exclusive and old owner cleanup cannot un
 
 test "host manifest transaction rolls back precommit failure and poisons indeterminate rollback" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-host-manifest-txn-{d}", .{c.getpid()}) catch
+    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest-txn") orelse
         return error.SkipZigTest;
-    _ = c.mkdir(dir.ptr, 0o700);
-    defer _ = c.rmdir(dir.ptr);
+    defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xD00D;
     var endpoint_buf: [128]u8 = undefined;
     const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);

@@ -778,6 +778,47 @@ test "copy 는 선택이 있을 때만 줄에 있다" {
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이
 // 안 된 채 매 프레임 다시 구워진다 — 그래서 슬롯을 다 쓰면 `next_slot` 이 "없음" 을 답해야 한다.
+// **컬러를 모르는 host 를 굶기지 않는다.** 컬러 글리프를 컬러 등록부에서만 찾으면, 이모지를
+// 커버리지 아틀라스에 구워 등록하는 옛 host 는 영영 못 찾아 **매 프레임 다시 굽는다**(실측:
+// 폴백을 빼면 3프레임 내내 미스로 남는다). 아틀라스가 꽉 찼을 때 이미 한 번 겪은 실패 모드라,
+// 컬러 아틀라스가 없으면 커버리지에 구운 것이라도 쓴다(색은 없지만 글자는 보이고, 굽기는 멈춘다).
+//
+// 이 테스트는 **아틀라스를 채우는 아래 테스트보다 먼저** 있어야 한다 — 그 뒤에서는 글자 등록이
+// 조용히 무시돼(슬롯 소진) 무엇을 재도 의미가 없다.
+test "컬러를 모르는 host 가 등록하면 다시 굽지 않는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("\u{1F607}", 4);
+
+    // 1프레임: 미스로 올라온다(host 가 굽는다).
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(missCount(0x1F607) == 1);
+
+    // 옛 host 처럼 **커버리지** 아틀라스에 등록한다.
+    bridge.maru_mobile_atlas_add(0x1F607, 0, 4, 4, 22);
+    bridge.maru_mobile_missing_clear();
+
+    // 2·3프레임: 다시 굽지 않는다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), missCount(0x1F607));
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), missCount(0x1F607));
+}
+
+fn missCount(cp: u32) u32 {
+    var n: u32 = 0;
+    var i: u32 = 0;
+    while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
+        if (bridge.maru_mobile_missing_cp(i) == cp) n += 1;
+    }
+    return n;
+}
+
+// **이 테스트는 등록부를 끝까지 채우고 되돌리지 않는다.** Zig 는 선언 순서대로 도므로, 뒤에
+// 오는 테스트에서는 `maru_mobile_atlas_add` 가 조용히 무시된다(슬롯 소진). 글자 등록이 필요한
+// 새 테스트는 **이 위에** 둔다 — 아래에 두면 등록이 안 된 채로 통과해 무엇을 재도 의미가 없다
+// (이번에 이모지 회전을 여기 아래에서 재다가 세 번 헛짚었다).
 test "슬롯이 다 차면 없음을 답한다" {
     const cols = bridge.maru_mobile_atlas_cols();
     const rows = bridge.maru_mobile_atlas_rows();
@@ -788,6 +829,105 @@ test "슬롯이 다 차면 없음을 답한다" {
         bridge.maru_mobile_atlas_add(cp + n, 0, 0, 0, 1);
     }
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(cols));
+}
+
+// **이모지는 커버리지 아틀라스에 못 담는다.** 글자 아틀라스가 R8(커버리지)이라 컬러 비트맵을
+// 넣으면 실루엣이 된다 — 그래서 컬러 전용 아틀라스를 따로 세우고, 어느 쪽에 구울지를
+// 브리지가 알린다. 판정의 단일 출처는 코어(`width.isEmojiPresentation`)다.
+test "이모지는 컬러로 보고되고 보통 글자는 아니다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    bridge.maru_mobile_missing_clear();
+    _ = bridge.maru_mobile_input("Z\u{1F600}\u{AC00}", 8); // Z + 😀 + 가
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var saw_emoji = false;
+    var i: u32 = 0;
+    while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
+        const cp = bridge.maru_mobile_missing_cp(i);
+        const is_color = bridge.maru_mobile_missing_is_color(i) == 1;
+        switch (cp) {
+            0x1F600 => {
+                saw_emoji = true;
+                try std.testing.expect(is_color); // 이모지 → 컬러 아틀라스
+            },
+            'Z', 0xAC00 => try std.testing.expect(!is_color), // 라틴·한글 → 커버리지 아틀라스
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_emoji); // 전제: 이모지가 실제로 미스로 올라왔다
+}
+
+// 두 아틀라스는 **슬롯 번호를 각자 센다**. 한 등록부만 세면 컬러 글리프가 글자 슬롯을 가리켜
+// 엉뚱한 칸을 샘플링한다.
+test "컬러 등록부와 글자 등록부는 슬롯을 각자 센다" {
+    const cols = bridge.maru_mobile_atlas_cols();
+    const text_before = bridge.maru_mobile_next_slot(cols);
+    const color_before = bridge.maru_mobile_next_color_slot(cols);
+
+    bridge.maru_mobile_color_atlas_add(0x1F601, 0, 7, 3, 22);
+    try std.testing.expectEqual(text_before, bridge.maru_mobile_next_slot(cols)); // 글자 쪽은 안 움직인다
+    try std.testing.expect(color_before != bridge.maru_mobile_next_color_slot(cols));
+
+    const color_mid = bridge.maru_mobile_next_color_slot(cols);
+    bridge.maru_mobile_atlas_add(0x2604, 0, 5, 5, 11);
+    try std.testing.expectEqual(color_mid, bridge.maru_mobile_next_color_slot(cols)); // 컬러 쪽도 안 움직인다
+
+    bridge.maru_mobile_color_atlas_add(0x1F601, 0, 9, 9, 22); // 같은 글자 재등록은 슬롯을 안 먹는다
+    try std.testing.expectEqual(color_mid, bridge.maru_mobile_next_color_slot(cols));
+}
+
+// 등록하면 **그 자리에서 그려진다** — 컬러 quad(kind 4/5)로, 컬러 등록부의 슬롯을 가리켜야 한다.
+test "컬러 글리프는 kind 4 로 컬러 슬롯을 가리킨다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    bridge.maru_mobile_color_atlas_add(0x1F600, 0, 3, 2, 22);
+    _ = bridge.maru_mobile_input("\u{1F600}", 4);
+
+    const n = bridge.maru_mobile_build(402, 874, now());
+    const quads = bridge.maru_mobile_quads();
+    var found = false;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const q = quads[i];
+        if (q.kind != 4 and q.kind != 5) continue;
+        found = true;
+        try std.testing.expectEqual(@as(u32, 4), q.kind); // 이모지는 2셀이라 슬롯 전체
+        try std.testing.expectEqual(@as(u32, 3), q.cell_x); // 컬러 등록부가 준 슬롯
+        try std.testing.expectEqual(@as(u32, 2), q.cell_y);
+    }
+    try std.testing.expect(found);
+}
+
+// **같은 조회를 쓰는 자리는 kind 도 같이 따라와야 한다.** chrome 텍스트(IME 조합 문자열·키바
+// 라벨)는 `atlasCell` 을 그대로 쓰면서 kind 를 3 으로 못박고 있었다 — 컬러 슬롯을 받아 커버리지
+// 텍스처의 같은 자리를 샘플링하면 엉뚱한 글자가 나온다(적대적 검증 2라운드에서 찾았다).
+test "chrome 텍스트의 이모지도 컬러 텍스처를 가리킨다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    bridge.maru_mobile_color_atlas_add(0x1F602, 0, 6, 4, 22);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    bridge.maru_mobile_set_preedit("\u{1F602}", 4); // 조합 중 문자열에 이모지
+    const n = bridge.maru_mobile_build(402, 874, now());
+    const quads = bridge.maru_mobile_quads();
+
+    var found = false;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const q = quads[i];
+        if (q.kind == 4 or q.kind == 5) std.debug.print("\n  color quad kind={d} cell=({d},{d})\n", .{ q.kind, q.cell_x, q.cell_y });
+        if (q.cell_x != 6 or q.cell_y != 4) continue; // 컬러 등록부가 준 슬롯
+        found = true;
+        try std.testing.expectEqual(@as(u32, 5), q.kind); // 컬러 텍스처의 왼쪽 절반
+    }
+    std.debug.print("  quads={d} preedit rendered={}\n", .{ n, found });
+    bridge.maru_mobile_set_preedit("", 0);
+    try std.testing.expect(found); // 전제: 그 조합 문자열이 실제로 그려졌다
 }
 
 // **조합 중 문자열이 통째로 사라지던 자리.** `set_preedit` 는 버퍼에 다 안 들어가는 마지막

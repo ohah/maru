@@ -194,9 +194,10 @@ pub const Scrollback = struct {
     /// 하지 않는다(pushScrollback 래퍼가 eviction 여부로 처리). cap==0이면 무동작.
     pub fn pushRow(self: *Scrollback, allocator: std.mem.Allocator, cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
         if (self.cap == 0) return false;
-        // hard 행은 끝-default 셀을 잘라 가변폭 저장(메모리 절감, §11 A2). soft-wrap 행은 full 폭 유지 —
-        // 내부 trailing space가 wrap-fill의 일부라 trim하면 rewrap이 논리 줄을 잘못 잇는다(§11.7, 검증됨).
-        const stored: []const types.Cell = if (wrapped_flag) cells else cells[0..trimmedLen(cells)];
+        // hard 행은 끝-default 셀을 잘라 가변폭 저장(메모리 절감, §11 A2). soft-wrap 행은 **쓴 칸까지**만 —
+        // 뒤 trailing space가 내용의 일부라 trim하면 rewrap이 논리 줄을 잘못 잇지만(§11.7, 검증됨), 안 쓴 칸은
+        // 애초에 내용이 아니라 그대로 저장하면 재-wrap이 wrap 채움을 진짜 공백으로 구워 버린다.
+        const stored: []const types.Cell = if (wrapped_flag) cells[0..writtenLen(cells)] else cells[0..trimmedLen(cells)];
         const w = stored.len;
         const page = blk: {
             const last: ?*ScrollbackPage = if (self.pages.items.len > 0) self.pages.items[self.pages.items.len - 1] else null;
@@ -634,8 +635,10 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
             // 불필요 — 행 단위면 보던 내용이 화면 안에 유지된다).
             if (anchor_row != null and r == anchor_row.?) anchor_out = emitted;
             const src = self.scrollbackRow(r) orelse continue;
-            // soft 행은 저장 폭 전체가 내용(꽉 찼다는 뜻), hard(마지막) 행은 뒤 빈칸 trim.
-            const contrib: usize = if (r < j) src.len else trimmedLen(src);
+            // soft 행은 쓴 칸까지, hard(마지막) 행은 뒤 빈칸 trim. pushScrollback이 이미 soft 행을 쓴 칸까지
+            // 저장하므로 보통 `src.len`과 같지만, 옛 바이너리가 인코딩한 핸드오프 행은 wrap 채움을 달고 올 수
+            // 있어(그때는 soft 행을 full 폭으로 저장했다) 여기서도 같은 기준으로 읽는다.
+            const contrib: usize = if (r < j) writtenLen(src) else trimmedLen(src);
             var c: usize = 0;
             while (c < contrib) : (c += 1) {
                 const cell = src[c];
@@ -706,7 +709,7 @@ fn countRewrapRows(self: *const TerminalCore, first: usize, last: usize, new_col
     var r = first;
     while (r <= last) : (r += 1) {
         const src = self.scrollbackRow(r) orelse continue;
-        const contrib: usize = if (r < last) src.len else trimmedLen(src);
+        const contrib: usize = if (r < last) writtenLen(src) else trimmedLen(src); // 위 rewrap과 같은 기준
         var c: usize = 0;
         while (c < contrib) : (c += 1) {
             const needs: u16 = if (src[c].width == 2) 2 else 1;
@@ -724,6 +727,12 @@ fn countRewrapRows(self: *const TerminalCore, first: usize, last: usize, new_col
 /// 행(저장 폭이 현재와 다를 수 있음)에 적용한다. selection(core 잔류)도 호출하므로 pub.
 pub fn trimmedLen(row: []const types.Cell) usize {
     return types.textTrimmedLen(row);
+}
+
+/// soft-wrap 행의 내용 길이 — 뒤에 붙은 "안 쓴 칸"만 제외한다(쓴 공백은 내용). 논리 줄을 이을 때
+/// 이 길이를 넘겨 읽으면 wrap 채움이 없던 공백으로 들어간다.
+pub fn writtenLen(row: []const types.Cell) usize {
+    return types.writtenLen(row);
 }
 
 /// 행을 스크롤백에 보관한다(§11 A1 page 저장에 위임). OOM 등으로 실제 보관에 실패하면 false — 호출자
@@ -1685,6 +1694,16 @@ fn trimmedRowLen(self: *const TerminalCore, row: u16) u16 {
     return len;
 }
 
+/// 활성 행의 "쓴 칸까지" 길이 — soft-wrap 행이 논리 줄에 기여하는 길이다(`writtenLen`과 같은 기준).
+/// soft 행이 꽉 찼다고 가정하고 `cols`를 쓰면, 넓히는 resize가 남긴 wrap 채움이 내용으로 섞인다.
+fn writtenRowLen(self: *const TerminalCore, row: u16) u16 {
+    var len: u16 = self.size.cols;
+    while (len > 0) : (len -= 1) {
+        if (!types.isUnwritten(self.screen.cells[self.index(row, len - 1)])) break;
+    }
+    return len;
+}
+
 /// 기본 배경의 빈 공백 셀인지(reflow trim 기준). continuation/grapheme cluster/배경색이 있으면 내용이다.
 /// core의 selection(wordBounds)도 cross-file 호출 — pub.
 pub fn isBlankCell(cell: types.Cell) bool {
@@ -1846,7 +1865,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     {
         var r: u16 = 0;
         while (r < old_rows) : (r += 1) {
-            total_content += if (self.screen.wrapped[r]) old_cols else trimmedRowLen(self, r);
+            total_content += if (self.screen.wrapped[r]) writtenRowLen(self, r) else trimmedRowLen(self, r);
         }
     }
     // 출력 행 상한. soft-flush마다 행에 들어가는 최소 내용은 new_cols-1(줄 끝에서 wide glyph가
@@ -1910,8 +1929,9 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // 논리 줄 시작이면 leader의 exit를 잡는다 — 이 줄의 첫 산출 행에만 실린다(아래 finalize).
         if (old_r == 0 or !self.screen.wrapped[old_r - 1]) rewrap_exit = self.screen.prompt_marks[old_r].exit;
         const soft = self.screen.wrapped[old_r];
-        // 기여 길이: soft 행은 꽉 찼으므로 전체, hard 행은 뒤 빈칸을 잘라낸 길이.
-        const contrib: u16 = if (soft) old_cols else trimmedRowLen(self, old_r);
+        // 기여 길이: soft 행은 **쓴 칸까지**(넓히는 resize가 남긴 wrap 채움을 내용으로 삼지 않게),
+        // hard 행은 뒤 빈칸을 잘라낸 길이.
+        const contrib: u16 = if (soft) writtenRowLen(self, old_r) else trimmedRowLen(self, old_r);
 
         var c: u16 = 0;
         while (c < contrib) : (c += 1) {

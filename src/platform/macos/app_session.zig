@@ -24187,6 +24187,166 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
     }
 }
 
+// [회귀 2026-08-13] 같은 목록의 두 codex 행에서 **파형이 서로 다른 열에 섰다**(사용자 보고 — 스크린샷).
+// 프롬프트를 아는 행은 `◆ ▁▅▇▃ 지금 용량 …`, 아직 모르는 행은 `◆ Codex · ▁▅▇▃ 진행중`이라 폴백만 마커를
+// 본문 뒤에 뒀기 때문이다. 두 파형은 같은 `agent_spin_frame`을 쓰므로 어긋난 것은 애니메이션이 아니라 자리다.
+//
+// 마커 위치는 두 형태를 **함께** 봐야만 판정된다 — 한쪽만 보는 테스트는 어긋남 자체를 표현할 수 없다.
+// 그래서 같은 Term에서 프롬프트만 붙였다 떼며 라벨 전문을 비교한다.
+test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가 같은 자리(선두)에 온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const term = session.tabs.items[0].panes.items[0].terms.items[0];
+    term.agent_kind = .codex;
+    term.agent_state = .running;
+    // 파형은 프레임마다 바 높이가 달라 문자열이 바뀐다. 고정하지 않으면 아래 기대값이 비결정적이다.
+    session.agent_spin_frame = 0;
+    const bars = try sidebar_ops.spinnerBarsUtf8(session, a);
+    defer a.free(bars);
+
+    // (1) 프롬프트를 모를 때(§7 보강 실패·미도달) — 종류 이름 폴백. 마커가 **맨 앞**이고 `·` 구분자는 없다.
+    {
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        const expected = try std.fmt.allocPrint(a, "{s} Codex " ++ sidebar_ops.running_label, .{bars});
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, label);
+    }
+
+    // (2) 프롬프트를 알 때 — 본문만 갈리고 **마커 자리는 그대로**다. 두 라벨의 공통 prefix가 마커라는 것이
+    // 이 회귀의 핵심 계약이므로, 프롬프트 포함 여부가 아니라 그 prefix를 단언한다.
+    term.agent_transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
+    {
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        const expected = try std.fmt.allocPrint(a, "{s} 지금 용량 없는데 용량 늘려줘", .{bars});
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, label);
+    }
+
+    // (3) running이 아닌 상태도 같은 규칙이다. unknown은 마커 자체가 `·`라, 옛 형태에서는 구분자와 겹쳐
+    // `Codex · · 상태 확인 중`으로 점이 둘이었다.
+    term.agent_transcript.reset();
+    term.agent_state = .unknown;
+    {
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        try std.testing.expectEqualStrings("\u{00b7} Codex 상태 확인 중", label);
+    }
+
+    // (4) **claude도 같은 규칙**이다(사용자 확인 2026-08-13). 종류는 `kind_name`으로만 갈리고 경로는 하나지만,
+    // 사용자가 보는 화면에서는 두 provider가 같은 목록에 섞이므로 한쪽만 고쳐졌다면 그 목록에서 다시 어긋난다.
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+    {
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        try std.testing.expectEqualStrings("\u{2713} Claude Code 대기중", label);
+    }
+}
+
+// [적대적 검증 1회차] 위 테스트는 **문자열**만 본다. 사용자가 신고한 것은 화면의 열이므로, 라벨이 맞아도 그
+// 문자열이 draw list에서 어디에 놓이는지는 별개다(사이드바에는 "존재하지만 안 보인다"·"보이는 곳과 눌리는 곳이
+// 다르다" 계열 회귀가 이미 여러 번 있었다). 그런데 기존 렌더 테스트는 전부 **토글 행(slot 1)**만 본다 —
+// 에이전트 행의 파형은 렌더 가드가 없었고, 이번 변경이 바로 그 자리를 옮긴다.
+//
+// 그래서 두 형태를 **한 화면에 나란히** 세우고 파형의 시작 열을 직접 비교한다. 이것이 신고된 증상 그 자체다.
+test "에이전트 행 렌더: 프롬프트 유무가 갈린 두 행의 파형이 같은 열에서 시작한다(정렬 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    try pane_ops.newTermInActivePane(session); // Term 2개 → 목록이 생긴다(카드 0·토글 1·행 2·행 3)
+    const tab = session.tabs.items[0];
+    const terms = tab.panes.items[0].terms.items;
+    // **같은 종류로 둔다.** 종류가 다르면 색이 갈려 "왜 어긋났는가"에 kind 아이콘 폭까지 섞인다 — 사용자가 본
+    // 화면도 codex 둘이었고, 이 테스트가 재려는 것은 오직 라벨 형태에서 오는 열 차이다.
+    for (terms) |t| {
+        t.agent_kind = .codex;
+        t.agent_state = .running;
+    }
+    terms[1].agent_transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
+    session.agent_spin_frame = 0; // 파형은 애니메이션 — 고정하지 않으면 칸 수가 실행마다 다르다
+
+    // 기본 fixture 사이드바는 20칸이라 라벨이 통째로 말줄임된다. 잘린 화면에서는 파형이 아예 안 나와 아래
+    // 판정이 공허해진다(토글 요약 테스트가 실측으로 겪은 함정과 같은 것).
+    sidebar_ops.setSidebarWidthPx(session, @floatFromInt(sidebar_ops.sidebar_max_pt * session.scale_milli / 1000));
+    sidebar_ops.rebuildSidebar(session) catch {};
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(a);
+
+    const codex_brand = agent_ops.agentBrandColor(.codex).?;
+    var first_col = [_]?u16{ null, null }; // slot 2·3의 이름줄 첫 파형 열
+    var painted = [_]usize{ 0, 0 }; // 그중 브랜드색을 받은 칸
+    var prompt_glyphs: usize = 0; // 프롬프트가 실제로 그려졌는가(아래 전제)
+    for (dl.cells) |c| {
+        const slot = c.row / coretext_frame_builder.sidebar_line_base;
+        if (slot < 2 or slot > 3) continue;
+        if ((c.row % coretext_frame_builder.sidebar_line_base) % 4 != 0) continue; // 이름줄만
+        if (slot == 3 and c.codepoint == '\u{c6a9}') prompt_glyphs += 1; // 프롬프트의 `용`
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        const i = slot - 2;
+        if (first_col[i] == null or c.col < first_col[i].?) first_col[i] = c.col;
+        switch (c.style.foreground) {
+            .rgb => |rgb| if (std.meta.eql(rgb, codex_brand)) {
+                painted[i] += 1;
+            },
+            else => {},
+        }
+    }
+
+    // **전제부터 단언한다.** 두 행이 실제로 다른 형태여야 이 비교가 의미를 갖는다 — 프롬프트가 안 그려졌다면
+    // 두 행이 같은 폴백이라 열이 같은 것이 당연해지고, 통과가 아무것도 증명하지 않는다.
+    try std.testing.expect(prompt_glyphs >= 2); // "용량"이 두 번
+    var expected_bars: usize = 0;
+    for (0..sidebar_ops.spinner_bar_count) |bar| {
+        if (sidebar_ops.isAgentSpinnerCp(sidebar_ops.spinnerBarCp(0, bar))) expected_bars += 1;
+    }
+    try std.testing.expect(expected_bars > 0);
+
+    // 두 행 모두 파형이 그려지고 브랜드색을 받는다 — 자리를 옮기면서 색칠 게이트(codepoint + row 종류) 밖으로
+    // 나가지 않았다는 확인이다.
+    try std.testing.expectEqual(expected_bars, painted[0]);
+    try std.testing.expectEqual(expected_bars, painted[1]);
+
+    // **핵심**: 두 형태의 파형 시작 열이 같다. 옛 폴백(`Codex · ▁▅▇▃ …`)이면 slot 2가 `Codex · ` 만큼 밀려
+    // 여기서 갈린다 — 사용자가 신고한 그 차이다.
+    const c0 = first_col[0] orelse return error.SpinnerMissingOnFallbackRow;
+    const c1 = first_col[1] orelse return error.SpinnerMissingOnPromptRow;
+    try std.testing.expectEqual(c1, c0);
+
+    // **claude도 같은 화면 판정을 받는다.** 위 판정은 codex 둘이라(사용자가 신고한 구성) claude 행이 렌더에서
+    // 어긋나도 통과한다 — 실측으로 확인했다: `claude`만 옛 형태로 되돌리는 mutation에서 이 테스트는 green이고
+    // 문자열 테스트만 red였다(적대적 검증 2회차). 종류 이름 길이가 다르므로(`Claude Code` vs `Codex`) 폴백에서
+    // 마커를 앞으로 빼지 않으면 밀리는 폭도 달라진다. 같은 행을 종류만 바꿔 다시 재는 것으로 그 공백을 덮는다.
+    for (terms) |t| t.agent_kind = .claude;
+    sidebar_ops.rebuildSidebar(session) catch {};
+    var dl2 = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl2.deinit(a);
+
+    var claude_col = [_]?u16{ null, null };
+    for (dl2.cells) |c| {
+        const slot = c.row / coretext_frame_builder.sidebar_line_base;
+        if (slot < 2 or slot > 3) continue;
+        if ((c.row % coretext_frame_builder.sidebar_line_base) % 4 != 0) continue;
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        const i = slot - 2;
+        if (claude_col[i] == null or c.col < claude_col[i].?) claude_col[i] = c.col;
+    }
+    const k0 = claude_col[0] orelse return error.SpinnerMissingOnClaudeFallbackRow;
+    const k1 = claude_col[1] orelse return error.SpinnerMissingOnClaudePromptRow;
+    try std.testing.expectEqual(k1, k0);
+    // 종류가 바뀌어도 **파형의 절대 열은 같다** — 아이콘은 종류와 무관하게 한 슬롯이고, 마커가 그 바로 뒤이기
+    // 때문이다. 종류 이름이 파형 앞에 끼어드는 순간 이 등식이 먼저 깨진다.
+    try std.testing.expectEqual(c0, k0);
+}
+
 test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지막 Term에서도 크래시하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

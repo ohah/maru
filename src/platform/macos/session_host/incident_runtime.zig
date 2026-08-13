@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const incident = @import("maru").observability.connection_incident;
 const artifact = @import("incident_artifact_store.zig");
+const process_seal = @import("process_seal_service.zig");
 
 const c = std.c;
 const posix = std.posix;
@@ -40,6 +41,10 @@ pub const ConnectionIncidentRuntime = struct {
     service: incident.ConnectionIncidentService = .{},
     store: artifact.IncidentArtifactStore = .{},
     testing_block_writer: if (builtin.is_test) std.atomic.Value(u8) else void = if (builtin.is_test) .init(0) else {},
+
+    const testing = if (builtin.is_test) struct {
+        var fatal_marker_fd: c_int = -1;
+    } else struct {};
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -100,7 +105,16 @@ pub const ConnectionIncidentRuntime = struct {
 
     pub fn publish(self: *ConnectionIncidentRuntime, input: incident.ConnectionIncident) Error!incident.PublishResult {
         if (!self.valid(.ready)) return error.InvalidAuthority;
-        const result = try self.service.publish(self.pid, self.process_nonce, input);
+        const result = self.service.publish(self.pid, self.process_nonce, input) catch |err| switch (err) {
+            error.CounterExhausted => {
+                if (builtin.is_test and testing.fatal_marker_fd >= 0) {
+                    const marker = [_]u8{0x52};
+                    _ = c.write(testing.fatal_marker_fd, &marker, marker.len);
+                }
+                process_seal.fatalIntegrity(.counter_exhausted);
+            },
+            else => return err,
+        };
         try self.wake();
         return result;
     }
@@ -309,5 +323,66 @@ test "CR0b 기록기 수명은 fork child를 pipe와 service 접근 전에 거�
     const wait_status: u32 = @bitCast(status);
     try std.testing.expect(c.W.IFEXITED(wait_status));
     try std.testing.expectEqual(@as(u8, 73), c.W.EXITSTATUS(wait_status));
+    try std.testing.expectEqual(ShutdownResult.joined, try runtime.shutdown());
+}
+
+test "CR0b 기록기 수명은 aggregate exhaustion을 제품 fatal leaf로 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const fd = c.dup(tmp.dir.handle);
+    try std.testing.expect(fd >= 0);
+    const runtime = try ConnectionIncidentRuntime.create(std.testing.allocator, @intCast(c.getpid()), 9, 11, fd);
+    try waitAtomic(&runtime.writer_started, 1);
+    runtime.service.ring.aggregate_generations[0] = std.math.maxInt(u64);
+    var marker_pipe: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&marker_pipe));
+    ConnectionIncidentRuntime.testing.fatal_marker_fd = marker_pipe[1];
+    const child = c.fork();
+    if (child < 0) {
+        ConnectionIncidentRuntime.testing.fatal_marker_fd = -1;
+        _ = c.close(marker_pipe[0]);
+        _ = c.close(marker_pipe[1]);
+        return error.TestUnexpectedResult;
+    }
+    if (child == 0) {
+        _ = c.close(marker_pipe[0]);
+        runtime.pid = @intCast(c.getpid());
+        runtime.service.pid = runtime.pid;
+        _ = runtime.publish(fixtureInput()) catch c._exit(74);
+        c._exit(75);
+    }
+    ConnectionIncidentRuntime.testing.fatal_marker_fd = -1;
+    _ = c.close(marker_pipe[1]);
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, c.W.NOHANG);
+        if (waited == child) break;
+        if (waited < 0) {
+            _ = c.kill(child, c.SIG.KILL);
+            _ = c.waitpid(child, &status, 0);
+            _ = c.close(marker_pipe[0]);
+            return error.TestUnexpectedResult;
+        }
+        var delay = [_]c.pollfd{};
+        _ = c.poll(&delay, 0, 1);
+    } else {
+        _ = c.kill(child, c.SIG.KILL);
+        _ = c.waitpid(child, &status, 0);
+        _ = c.close(marker_pipe[0]);
+        return error.TestUnexpectedResult;
+    }
+    var marker: [2]u8 = undefined;
+    const marker_count = c.read(marker_pipe[0], &marker, marker.len);
+    _ = c.close(marker_pipe[0]);
+    try std.testing.expectEqual(@as(isize, 1), marker_count);
+    try std.testing.expectEqual(@as(u8, 0x52), marker[0]);
+    const wait_status: u32 = @bitCast(status);
+    try std.testing.expect(c.W.IFEXITED(wait_status));
+    try std.testing.expectEqual(@as(u8, 86), c.W.EXITSTATUS(wait_status));
+    try std.testing.expectEqual(@as(u64, 0), runtime.service.last_issued_sequence);
+    try std.testing.expectEqual(@as(u128, 0), runtime.service.pending_slots);
     try std.testing.expectEqual(ShutdownResult.joined, try runtime.shutdown());
 }

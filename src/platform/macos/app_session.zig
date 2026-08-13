@@ -1255,6 +1255,16 @@ pub fn termLabel(term: *const Term) []const u8 {
     // 4e-1 web Term: 자동 제목(OSC)이 없으니 kind 파생 라벨("Browser"/"Markdown")을 auto로 쓴다 — 사용자 rename
     // (custom_name)이 있으면 그게 우선(pickLabel 단일 해석). terminal 경로는 `if` 아래로 **byte-identical**.
     if (term.kind == .web) return app.pickLabel(term.surface.custom_name, term.webPanelLabel());
+    // N1 편집기 Term도 자동 제목(OSC)이 없다 — **파일 이름**이 auto 라벨이다. 아래 terminal 경로로
+    // 흘리면 sentinel `surface.title`을 읽게 되는데, 그건 빈 core라 유효한 라벨이 아니다(적대적
+    // 검증에서 collector가 이 경로로 `Invalid free`까지 갔다).
+    if (term.kind == .editor) {
+        const auto_name: []const u8 = if (term.rt.editor_path) |p|
+            std.fs.path.basename(p)
+        else
+            "편집기";
+        return app.pickLabel(term.surface.custom_name, auto_name);
+    }
     const auto = if (term.auto_title.items.len > 0) term.auto_title.items else term.surface.title;
     return app.pickLabel(term.surface.custom_name, auto);
 }
@@ -11629,6 +11639,27 @@ pub const AppSession = struct {
                     // core lock을 건너뛰고 `.web` detail을 emit한다(§3 web 전용 메타). url은 Phase 7e-1a nav 상태
                     // (web_nav_states, Swift KVO가 upsert·메인 스레드 소유)에서 읽는다 — 없거나 빈 문자열이면 null(로드 전).
                     // trust는 §8.1(browser=임의 URL=untrusted, markdown=trusted).
+                    // N1 편집기 Term도 sentinel core라 같은 이유로 core를 안 만진다. 다만 web의
+                    // 축(url·trust·loading)은 쓰지 않는다 — 여는 것이 로컬 파일 하나이고 신뢰 경계가
+                    // 파일 시스템 권한이라(native-editor-document-model.md §3.5), 없는 축을 null로
+                    // 채우면 소비자가 웹과 같은 것으로 오인한다(docs/control-plane.md §3).
+                    if (term.kind == .editor) {
+                        const ed_sid = term.surface.id;
+                        try surfaces.append(arena, .{
+                            .surface_id = ed_sid,
+                            .generation = 0,
+                            .title = try arena.dupe(u8, termLabel(term)),
+                            .window = window_id,
+                            .tab = @intCast(ti),
+                            .pane = @intCast(pi),
+                            .focused = (focused_surface_id != null and ed_sid == focused_surface_id.?),
+                            .detail = .{ .editor = .{
+                                .path = if (term.rt.editor_path) |p| try arena.dupe(u8, p) else null,
+                                .read_only = if (term.rt.editor_doc) |d| d.file.doc.read_only else false,
+                            } },
+                        });
+                        continue;
+                    }
                     if (term.kind == .web) {
                         const web_sid = term.surface.id;
                         // 콘텐츠 URL: nav 상태 맵에서 조회(§9.6 browser.list·주소창이 같은 출처). arena 복사(snapshot 수명).
@@ -46466,6 +46497,90 @@ fn findOverlayHasText(allocator: std.mem.Allocator, session: *AppSession, needle
 // WP-F1 적대적: **게이트가 종류를 빠뜨리거나 남의 탭을 보면 안 된다.** 판정이 `activeWebSurfaceIdAnyKind`라
 // browser도 막혀야 하고(제보는 마크다운이었지만 같은 문제다), **웹 탭이 열려 있어도 활성이 터미널이면**
 // 평소처럼 열려야 한다 — 후자를 놓치면 "웹 탭 하나 열어 두면 터미널에서 ⌘F가 죽는" 더 나쁜 회귀가 된다.
+// N1: 편집기 Term은 **문서·줄 슬라이스·경로 셋**을 소유한다. 셋 중 하나라도 `destroyTerm`이 놓지
+// 않으면 파일을 열 때마다 샌다 — `std.testing.allocator`가 그것을 잡는다.
+//
+// **`destroyTerm`을 직접 부르지 않는다.** 그러면 "release가 있으면 통과"만 보게 되고, 실제 teardown
+// 경로(세션 deinit → pane → term)가 편집기를 빠뜨려도 초록이 된다. 세션을 그냥 닫아 그 경로를 태운다.
+test "N1: 편집기 Term을 열고 세션을 닫으면 문서·줄·경로가 전부 해제된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.txt", .data = "one\ntwo\nthree\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "s.txt" });
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const term = try editor_ops.openPathInActivePane(session, path);
+    try std.testing.expectEqual(control_surface.SurfaceKind.editor, term.kind);
+    try std.testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 끝 개행이 만든 빈 줄까지
+    try std.testing.expect(term.rt.editor_doc != null);
+    try std.testing.expectEqualStrings(path, term.rt.editor_path.?);
+    // 누수 판정은 `defer session.deinit()`과 testing.allocator가 한다.
+}
+
+// 편집기 Term은 sentinel core라 cwd/git/at_prompt를 읽으면 안 되고, wire에 `kind: "editor"`로 나가야
+// 한다. 이 단언이 없으면 collector가 편집기를 terminal 경로로 흘려도(실제로 그랬다) 아무도 모른다.
+test "N1: 컨트롤 플레인이 편집기를 editor detail로 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "w.txt", .data = "x\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try editor_ops.openPathInActivePane(session, path);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    // **리스트도 arena가 회수한다** — collector가 arena로 append하므로 여기서 testing.allocator로
+    // 놓으면 남의 메모리를 free한다(적대적 검증에서 `Invalid free`로 잡혔다).
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionInto(arena_state.allocator(), 0, .normal, &surfaces, &windows);
+
+    var seen: usize = 0;
+    for (surfaces.items) |dto| {
+        if (dto.detail != .editor) continue;
+        seen += 1;
+        try std.testing.expectEqualStrings(path, dto.detail.editor.path.?);
+        try std.testing.expect(!dto.detail.editor.read_only);
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
 test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면 스크롤백 검색이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

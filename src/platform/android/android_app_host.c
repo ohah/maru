@@ -60,9 +60,10 @@ static struct {
     VkCommandBuffer *cbs;
     VkSemaphore acquire_sem, submit_sem;
     VkFence fence;
-    VkImageView glyph_view, icon_view;
-    VkImage glyph_image, icon_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
-    VkDeviceMemory glyph_mem, icon_mem;
+    VkImageView glyph_view, icon_view, color_view;
+    VkImage glyph_image, icon_image, color_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
+    // color_* 는 이모지 전용 RGBA 아틀라스다 — 글자 아틀라스는 커버리지(R8)라 컬러를 못 담는다.
+    VkDeviceMemory glyph_mem, icon_mem, color_mem;
     VkSampler sampler;
     VkDescriptorSetLayout dsl;
     VkDescriptorPool dpool;
@@ -467,6 +468,16 @@ static int initVulkan(ANativeWindow *win) {
         uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view, &g.glyph_image, &g.glyph_mem);
         g.glyph_w = g_gw; g.glyph_h = g_gh;
     }
+    // 이모지 전용 RGBA 아틀라스. 글자 아틀라스와 **같은 격자**라 슬롯 좌표 규칙을 공유한다.
+    // 빈 픽셀로 세우고 미스가 생길 때마다 그 칸만 채운다(글자 아틀라스와 같은 성장 경로).
+    if (g_gw && g_gh) {
+        uint8_t *empty = calloc((size_t)g_gw * g_gh * 4, 1);
+        if (empty) {
+            uploadTexture(empty, g_gw, g_gh, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                          &g.color_view, &g.color_image, &g.color_mem);
+            free(empty);
+        }
+    }
     uint32_t filled = maru_mobile_icon_build();
     uint32_t slot = maru_mobile_icon_slot_px(), cnt = maru_mobile_icon_count();
     uploadTexture(maru_mobile_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM,
@@ -477,19 +488,22 @@ static int initVulkan(ANativeWindow *win) {
                                   .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
     VkSampler samp; vkCreateSampler(g.dev, &sampci, NULL, &samp);
     g.sampler = samp;
-    VkDescriptorSetLayoutBinding binds[3] = {
+    VkDescriptorSetLayoutBinding binds[4] = {
         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
         // binding 2 = draw-list. vertex 가 gl_InstanceIndex 로 읽는다.
         {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT}};
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT},
+        // binding 3 = 이모지 컬러 아틀라스(계약 §이모지 — 커버리지와 다른 텍스처).
+        {.binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT}};
     VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                             .bindingCount = 3, .pBindings = binds};
+                                             .bindingCount = 4, .pBindings = binds};
     VkDescriptorSetLayout dsl; vkCreateDescriptorSetLayout(g.dev, &dslci, NULL, &dsl);
     g.dsl = dsl;
-    VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+    VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3},
                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
     VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                        .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = dps};
@@ -498,9 +512,11 @@ static int initVulkan(ANativeWindow *win) {
     VkDescriptorSetAllocateInfo dsai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                         .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl};
     vkAllocateDescriptorSets(g.dev, &dsai, &g.dset);
-    VkDescriptorImageInfo dii[2] = {
+    VkDescriptorImageInfo dii[3] = {
         {samp, g.glyph_view ? g.glyph_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {samp, g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        {samp, g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        // 컬러 아틀라스가 아직 없으면 아이콘 뷰로 채운다 — 바인딩이 비면 검증 계층이 막는다.
+        {samp, g.color_view ? g.color_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
     // draw-list 버퍼: 프레임마다 새로 만들지 않고 한 번 잡아 persistent map 한다.
     // **크기는 코어가 답한다.** 4096 을 손으로 적어 뒀을 때는 그보다 많이 오면 `drawn` 이
     // 조용히 잘라 화면 아래가 사라졌다 — 게다가 iOS 는 늘리고 있어 둘이 달랐다.
@@ -696,11 +712,14 @@ static void drawFrame(void) {
         const MaruQuad *q = &quads[i];
         // kind=3 은 슬롯의 **왼쪽 절반**이다(슬롯 하나가 양폭 상자다). 셰이더를 안 고치고
         // 열과 나누는 수를 함께 2배로 줘서 낸다 — 셰이더에는 kind=1 로 넘긴다.
-        int half = (q->kind == 3);
+        // kind 4·5 는 **컬러 아틀라스**(다른 텍스처)다. 5 는 그 왼쪽 절반이라 3 과 같은 배수
+        // 규칙을 쓰고, 셰이더에는 3(=컬러)으로 넘긴다 — 텍스처만 다르고 좌표 규칙은 같다.
+        int half = (q->kind == 3 || q->kind == 5);
+        int is_color = (q->kind == 4 || q->kind == 5);
         float cols = (q->kind == 2) ? 1.0f : (float)g.atlas_cols * (half ? 2.0f : 1.0f);
         float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)g.atlas_rows;
         float cx = (float)q->cell_x * (half ? 2.0f : 1.0f);
-        float qkind = half ? 1.0f : (float)q->kind;
+        float qkind = is_color ? 3.0f : (half ? 1.0f : (float)q->kind);
         float oy = (float)g.inset_top;
         Push p = {{q->x * scale, q->y * scale + oy, (q->x + q->w) * scale, (q->y + q->h) * scale + oy},
                   {q->r, q->g, q->b, q->a},
@@ -1011,7 +1030,10 @@ static void teardownVulkan(void) {
     if (g.glyph_mem) vkFreeMemory(g.dev, g.glyph_mem, NULL);
     if (g.icon_view) vkDestroyImageView(g.dev, g.icon_view, NULL);
     if (g.icon_image) vkDestroyImage(g.dev, g.icon_image, NULL);
+    if (g.color_view) vkDestroyImageView(g.dev, g.color_view, NULL);
+    if (g.color_image) vkDestroyImage(g.dev, g.color_image, NULL);
     if (g.icon_mem) vkFreeMemory(g.dev, g.icon_mem, NULL);
+    if (g.color_mem) vkFreeMemory(g.dev, g.color_mem, NULL);
     if (g.rp) vkDestroyRenderPass(g.dev, g.rp, NULL);
     if (g.acquire_sem) vkDestroySemaphore(g.dev, g.acquire_sem, NULL);
     if (g.submit_sem) vkDestroySemaphore(g.dev, g.submit_sem, NULL);
@@ -1043,6 +1065,7 @@ typedef struct {
     jobject faces[4];
     jmethodID draw, measure, set_typeface;
     int ok;
+    jobject cbmp, ccanvas;   // 이모지(컬러) 전용 ARGB 비트맵
 } GlyphBaker;
 
 /// asset 에서 폰트 하나를 읽는다. 없으면 NULL — 부르는 쪽이 보통 판으로 되돌린다.
@@ -1070,6 +1093,16 @@ static int bakerOpen(struct android_app *app, GlyphBaker *b, uint32_t CW, uint32
     jclass cvCls = (*env)->FindClass(env, "android/graphics/Canvas");
     b->canvas = (*env)->NewObject(env, cvCls,
         (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), b->bmp);
+    // **이모지는 ARGB 로 굽는다.** ALPHA_8 에 그리면 색이 사라져 실루엣이 된다(계약 §이모지).
+    jobject cfg8888 = (*env)->GetStaticObjectField(env, cfgCls,
+        (*env)->GetStaticFieldID(env, cfgCls, "ARGB_8888", "Landroid/graphics/Bitmap$Config;"));
+    b->cbmp = (*env)->CallStaticObjectMethod(env, bmCls,
+        (*env)->GetStaticMethodID(env, bmCls, "createBitmap",
+            "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"),
+        (jint)CW, (jint)CH, cfg8888);
+    if (b->cbmp)
+        b->ccanvas = (*env)->NewObject(env, cvCls,
+            (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), b->cbmp);
     jclass pCls = (*env)->FindClass(env, "android/graphics/Paint");
     b->paint = (*env)->NewObject(env, pCls,
         (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1);
@@ -1148,6 +1181,112 @@ static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
     return ok;
 }
 
+/// 이모지 한 글자를 **컬러 아틀라스**에 굽는다(iOS `bakeColorGlyph:` 와 짝).
+///
+/// ① BMP 밖 글자는 UTF-16 **서러게이트 쌍**이라야 한 글자로 그려진다 — `(jchar)cp` 로 자르면
+/// 엉뚱한 글자가 된다. ② 이모지 폰트는 Android 가 알아서 폴백한다(`Canvas.drawText`).
+/// ③ ARGB 비트맵에 그려야 색이 남는다.
+static int bakeColorGlyph(GlyphBaker *b, unsigned int cp, unsigned int style,
+                          uint8_t *out, uint32_t CW, uint32_t CH) {
+    JNIEnv *env = b->env;
+    if (!b->cbmp || !b->ccanvas) return 0;
+    (*env)->CallObjectMethod(env, b->paint, b->set_typeface, b->faces[style & 3]);
+    jclass bmCls = (*env)->GetObjectClass(env, b->cbmp);
+    (*env)->CallVoidMethod(env, b->cbmp,
+        (*env)->GetMethodID(env, bmCls, "eraseColor", "(I)V"), (jint)0);
+
+    jchar units[2];
+    jsize unit_n = 0;
+    if (cp > 0xFFFF) {
+        unsigned int v = cp - 0x10000;
+        units[unit_n++] = (jchar)(0xD800 + (v >> 10));
+        units[unit_n++] = (jchar)(0xDC00 + (v & 0x3FF));
+    } else {
+        units[unit_n++] = (jchar)cp;
+    }
+    jstring s = (*env)->NewString(env, units, unit_n);
+    (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
+
+    void *pixels = NULL;
+    AndroidBitmapInfo info;
+    int ok = 0;
+    if (AndroidBitmap_getInfo(env, b->cbmp, &info) == 0 &&
+        AndroidBitmap_lockPixels(env, b->cbmp, &pixels) == 0) {
+        for (uint32_t y = 0; y < CH; y++)
+            memcpy(out + (size_t)y * CW * 4, (uint8_t *)pixels + (size_t)y * info.stride, (size_t)CW * 4);
+        AndroidBitmap_unlockPixels(env, b->cbmp);
+        ok = 1;
+    }
+    (*env)->DeleteLocalRef(env, s);
+    return ok;
+}
+
+/// 아틀라스 한 칸을 GPU 이미지에 올린다. 글자(R8)와 이모지(RGBA) 가 **같은 경로**를 쓴다 —
+/// 두 벌로 두면 배리어·정리 중 한쪽만 고쳐져 조용히 어긋난다.
+static int uploadSlot(VkImage target, uint32_t col, uint32_t row,
+                      const void *src, uint32_t bytes, uint32_t cw, uint32_t ch) {
+    if (!target || !g.dev) return 0;
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                              .size = bytes, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    VkBuffer stage;
+    if (vkCreateBuffer(g.dev, &bci, NULL, &stage) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.dev, stage, &mr);
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
+    uint32_t mt = UINT32_MAX;
+    for (uint32_t k = 0; k < mp.memoryTypeCount; k++) {
+        int want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if ((mr.memoryTypeBits & (1u << k)) && (mp.memoryTypes[k].propertyFlags & want) == want) { mt = k; break; }
+    }
+    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                .allocationSize = mr.size, .memoryTypeIndex = mt};
+    VkDeviceMemory mem;
+    if (vkAllocateMemory(g.dev, &mai, NULL, &mem) != VK_SUCCESS) { vkDestroyBuffer(g.dev, stage, NULL); return 0; }
+    vkBindBufferMemory(g.dev, stage, mem, 0);
+    void *map = NULL;
+    vkMapMemory(g.dev, mem, 0, VK_WHOLE_SIZE, 0, &map);
+    memcpy(map, src, bytes);
+    vkUnmapMemory(g.dev, mem);
+
+    VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                        .commandPool = g.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                        .commandBufferCount = 1};
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(g.dev, &cbai, &cb);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(cb, &bi);
+    // 이미 셰이더가 읽는 레이아웃이라 transfer 로 내렸다가 되돌린다.
+    VkImageMemoryBarrier tb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                               .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                               .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                               .image = target,
+                               .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                               .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                               .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &tb);
+    VkBufferImageCopy region = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageOffset = {(int32_t)(col * cw), (int32_t)(row * ch), 0},
+                                .imageExtent = {cw, ch, 1}};
+    vkCmdCopyBufferToImage(cb, stage, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    tb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    tb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    tb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    tb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &tb);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+    vkQueueSubmit(g.queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(g.queue);
+    vkFreeCommandBuffers(g.dev, g.pool, 1, &cb);
+    vkDestroyBuffer(g.dev, stage, NULL);
+    vkFreeMemory(g.dev, mem, NULL);
+    return 1;
+}
+
 // **아틀라스를 키운다.** 텍스처를 다시 만들지 않고 그 셀 자리에만 복사한다 —
 // 아틀라스 부분 업데이트(여섯 기능 4번)를 그대로 쓴다. iOS `replaceRegion:` 과 같은 자리다.
 static void growAtlas(struct android_app *app) {
@@ -1165,7 +1304,22 @@ static void growAtlas(struct android_app *app) {
     for (int i = (int)n - 1; i >= 0; i--) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         unsigned int style = maru_mobile_missing_style((unsigned int)i);
-        if (cp == 0 || cp > 0xFFFF) continue;
+        if (cp == 0 || cp > 0x10FFFF) continue;
+        // **컬러 글리프는 다른 아틀라스로 간다**(커버리지에 구우면 실루엣).
+        if (maru_mobile_missing_is_color((unsigned int)i)) {
+            unsigned int cslot = maru_mobile_next_color_slot(g.atlas_cols);
+            if (cslot == 0xFFFFFFFF) continue;   // 축출 정책은 아직 없다(계약 §4)
+            uint32_t ccol = cslot >> 16, crow = cslot & 0xFFFF;
+            uint8_t *rgba = calloc((size_t)CW * CH * 4, 1);
+            if (!rgba) continue;
+            if (bakeColorGlyph(&baker, cp, style, rgba, CW, CH) &&
+                uploadSlot(g.color_image, ccol, crow, rgba, (uint32_t)(CW * CH * 4), CW, CH)) {
+                maru_mobile_color_atlas_add(cp, style, ccol, crow, CW); // 이모지는 2셀 = 슬롯 전체
+                added++;
+            }
+            free(rgba);
+            continue;
+        }
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
         // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
         // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
@@ -1179,65 +1333,8 @@ static void growAtlas(struct android_app *app) {
             if (!bakeGlyph(&baker, cp, style, cell, CW, CH, &advance)) continue;
         }
 
-        // staging 버퍼 → 이미지의 그 사각형만 복사.
-        VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                  .size = sizeof cell, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
-        VkBuffer stage;
-        if (vkCreateBuffer(g.dev, &bci, NULL, &stage) != VK_SUCCESS) continue;
-        VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.dev, stage, &mr);
-        VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
-        uint32_t mt = UINT32_MAX;
-        for (uint32_t k = 0; k < mp.memoryTypeCount; k++) {
-            int want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            if ((mr.memoryTypeBits & (1u << k)) && (mp.memoryTypes[k].propertyFlags & want) == want) { mt = k; break; }
-        }
-        VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                    .allocationSize = mr.size, .memoryTypeIndex = mt};
-        VkDeviceMemory mem;
-        if (vkAllocateMemory(g.dev, &mai, NULL, &mem) != VK_SUCCESS) { vkDestroyBuffer(g.dev, stage, NULL); continue; }
-        vkBindBufferMemory(g.dev, stage, mem, 0);
-        void *map = NULL;
-        vkMapMemory(g.dev, mem, 0, VK_WHOLE_SIZE, 0, &map);
-        memcpy(map, cell, sizeof cell);
-        vkUnmapMemory(g.dev, mem);
-
-        VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                            .commandPool = g.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                            .commandBufferCount = 1};
-        VkCommandBuffer cb;
-        vkAllocateCommandBuffers(g.dev, &cbai, &cb);
-        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-        vkBeginCommandBuffer(cb, &bi);
-        // 이미 셰이더가 읽는 레이아웃이라 transfer 로 내렸다가 되돌린다.
-        VkImageMemoryBarrier tb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                                   .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .image = g.glyph_image,
-                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-                                   .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                                   .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, NULL, 0, NULL, 1, &tb);
-        VkBufferImageCopy region = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                                    .imageOffset = {(int32_t)(col * CW), (int32_t)(row * CH), 0},
-                                    .imageExtent = {CW, CH, 1}};
-        vkCmdCopyBufferToImage(cb, stage, g.glyph_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        tb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        tb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        tb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        tb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, NULL, 0, NULL, 1, &tb);
-        vkEndCommandBuffer(cb);
-        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
-        vkQueueSubmit(g.queue, 1, &si, VK_NULL_HANDLE);
-        vkQueueWaitIdle(g.queue);
-        vkFreeCommandBuffers(g.dev, g.pool, 1, &cb);
-        vkDestroyBuffer(g.dev, stage, NULL);
-        vkFreeMemory(g.dev, mem, NULL);
+        // staging 버퍼 → 이미지의 그 사각형만 복사(글자·이모지 공용 경로).
+        if (!uploadSlot(g.glyph_image, col, row, cell, (uint32_t)sizeof cell, CW, CH)) continue;
 
         // **원본 버퍼에도 넣는다.** 창이 죽었다 살아나면 이 버퍼로 텍스처를 다시 올리는데,
         // GPU 이미지에만 넣으면 그때 성장분이 통째로 사라진다. 등록부는 그대로라 코어는

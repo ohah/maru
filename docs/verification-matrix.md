@@ -990,6 +990,76 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   publication leaf scenario 4개와 HostPool capacity OOM 1개, boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 제품 `HostPool.addOwned` caller 0,
   HostPool의 Client import/역참조 0, map publication 뒤 binding store 0, binding publication 뒤 fallible/callback 0을 함께 검증한다.
   이 gate는 binding publication만 닫으며 first-reason+incident 단일 poison suffix는 여섯 번째 gate가 닫기 전 구현 완료로 세지 않는다.
+  여섯 번째 Client poison publication gate는 아래 32개 unique component와 boundary 1개, 총 33개를 Debug·ReleaseFast에서
+  exact-count한다. 각 행은 제품 API를 직접 실행하며 같은 fixture helper의 별칭으로 개수를 채우지 않는다.
+
+  | owner | exact test name |
+  | --- | --- |
+  | authority 1 | `CR0b publisher authority는 final address에 등록하고 lease를 조회한다` |
+  | authority 2 | `CR0b publisher authority는 copied moved owner를 mutation 없이 거부한다` |
+  | authority 3 | `CR0b publisher authority는 fork PID를 lock 전에 거부한다` |
+  | authority 4 | `CR0b publisher authority는 runtime service address와 generation splice를 거부한다` |
+  | authority 5 | `CR0b publisher lease는 replay와 double release를 거부한다` |
+  | authority 6 | `CR0b publisher registry는 canonical owner를 재사용하고 second owner 교체를 거부한다` |
+  | authority 7 | `CR0b publisher authority generation exhaustion은 publication 전에 fail-stop한다` |
+  | suffix 1 | `CR0b 최초 poison은 ring id key reason 순서와 reconnect admission을 고정한다` |
+  | suffix 2 | `CR0b repeat poison은 first id와 detail sequence를 보존하고 aggregate를 한 번 증가시킨다` |
+  | suffix 3 | `CR0b 다른 fingerprint repeat는 mutation 없이 거부하고 first key와 reason을 보존한다` |
+  | suffix 4 | `CR0b ring full poison은 detail drop 뒤에도 nonzero correlation을 게시한다` |
+  | suffix 5 | `CR0b poison prepare는 binding splice를 mutation 없이 거부한다` |
+  | suffix 6 | `CR0b poison prepare는 input source outbound closed case drift를 mutation 없이 거부한다` |
+  | suffix 7 | `CR0b repeat key는 copy splice replay를 모두 거부한다` |
+  | suffix 8 | `CR0b poison clock은 failure negative timestamp와 min max reorder를 닫는다` |
+  | suffix 9 | `CR0b wake degraded는 committed publication을 보존하고 재시도하지 않는다` |
+  | suffix 10 | `CR0b poison callback reentry는 Busy이고 Client와 ring을 바꾸지 않는다` |
+  | caller 1 | `CR0b managed public poison은 canonical suffix만 호출한다` |
+  | caller 2 | `CR0b prepared execution poison은 held operation suffix를 호출한다` |
+  | caller 3 | `CR0b registered operation deferred poison은 canonical suffix를 호출한다` |
+  | caller 4 | `CR0b allocator callback deferred poison은 canonical suffix를 호출한다` |
+  | caller 5 | `CR0b actual read event pump poison은 canonical suffix를 호출한다` |
+  | caller 6 | `CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다` |
+  | bootstrap 1 | `CR0b GUI current first는 managed adapter 전에 process owner를 한 번 설치한다` |
+  | bootstrap 2 | `CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다` |
+  | bootstrap 3 | `CR0b GUI multiple window와 adapter는 process owner를 재사용한다` |
+  | bootstrap 4 | `CR0b daemon bootstrap은 GUI와 독립된 nonce와 sequence owner를 설치한다` |
+  | bootstrap 5 | `CR0b AppHost termination은 revoke drain bounded shutdown을 한 번 수행한다` |
+  | subprocess 1 | `CR0b subprocess는 copied fork authority를 service 전에 거부한다` |
+  | subprocess 2 | `CR0b subprocess는 authority service seal splice를 common fatal로 닫는다` |
+  | subprocess 3 | `CR0b subprocess는 ring id key reason 중간 drift를 common fatal로 닫는다` |
+  | subprocess 4 | `CR0b subprocess는 optimize mode별 unexpected poison 결과를 고정한다` |
+
+  suffix 1은 ring/id/key 각 중간 stage의 실제 reconnect-admission probe가 0이고 reason store 뒤 exact 1임을 검증한다. 모든 이름의
+  conjunction과 matrix는 closed case table과 exact executed-case count를 함께 assert한다. subprocess 3은 ring/id/key/reason 각 drift
+  injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~6은 공용 facade를 직접 부르지 않고 이름에
+  적힌 실제 제품 trigger를 실행하며 boundary가 각 ingress의 canonical suffix caller exact 1과 reason-only caller 0을 고정한다.
+  bootstrap 1~3은 실제 AppSession current/restore/multi-window entrypoint를 실행한다. bootstrap 4는 dedicated GUI child와 daemon
+  child의 실제 bootstrap transcript를 함께 비교해 PID/process nonce/service nonce/첫 sequence domain 비공유를 증명한다. bootstrap 5는
+  실제 AppHost termination entrypoint transcript로 ordinary Window/AppSession deinit의 revoke/shutdown/writer join 0, 마지막 AppSession
+  shutdown 전 incident ABI 0, 모든 remote backend close/detach settlement 전 ABI 0, 둘 모두 완료 뒤 exported AppHost ABI exact 1과
+  closed outcome을 검증한다. GUI process owner는 첫 managed adapter보다 먼저 설치되고 restore-first/current-first가
+  공유한다. managed reason-only caller 0, product runtime direct import 0, product shutdown caller exact AppHost 1+daemon 1을 함께 검증한다.
+  subprocess 4개는 모두 dedicated fresh child, fixed marker transcript, exact exit/signal·EOF, 2초 absolute watchdog을 사용한다. 마지막
+  행은 Debug에서 exact `commit -> wake outcome -> publisher lease release -> common fatal _exit(86)` marker와 final lease count 0을,
+  ReleaseFast에서 같은 commit/wake/release evidence 뒤 scheduler continuation exact success를 요구하며
+  optimize-mode skip은 허용하지 않는다.
+
+  32개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
+
+  | component | exact 내부 행 |
+  | --- | --- |
+  | authority 2 | copy, move = 2 |
+  | authority 4 | runtime address, service address, runtime generation, service generation = 4 |
+  | authority 5 | copied lease, replayed lease, double release = 3 |
+  | authority 6 | same-owner idempotent reuse, second-owner address, second-owner generation = 3 |
+  | suffix 6 | source-site raw, parser phase, outbound phase, outbound offset/length, request count, stream count, event count, queue count/bytes, input digest = 10 |
+  | suffix 7 | copied key, client-address splice, first-id splice, fingerprint splice, binding-seal splice, replay after connection generation = 6 |
+  | suffix 8 | clock error, negative timestamp, earlier repeat min, later repeat max = 4 |
+  | bootstrap 5 | Window deinit shutdown 0, AppSession deinit shutdown 0, last AppSession 전 ABI 0, backend settlement 전 ABI 0, 모두 완료 뒤 ABI 1, inactive outcome, joined outcome, active-lease timeout detached outcome, runtime shutdown error degraded outcome, ABI replay inactive = 10 |
+  | subprocess 1 | copied authority, fork authority = 2 |
+  | subprocess 2 | authority seal, service seal = 2 |
+  | subprocess 3 | ring, first id, repeat key, first reason = 4 |
+  | subprocess 4 | Debug evidence 뒤 common fatal `_exit(86)`, ReleaseFast evidence 뒤 scheduler success = optimize mode별 1 |
+  이 gate가 green이 되기 전 CR0b를 구현 완료로 세지 않는다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote

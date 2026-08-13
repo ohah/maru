@@ -1413,7 +1413,9 @@ var frame_ms: u64 = 0;
 /// 누르고 있는 채로 시간이 지났는지 매 프레임 본다. **여기가 유일한 판정 자리다** —
 /// 두 곳에 두면 한쪽만 고쳐져 갈린다.
 fn checkLongPress(core: *terminal.core.TerminalCore) void {
-    if (!ptr_down or selecting or ptr_moved) return;
+    // `selecting` 을 또 보지 않는다 — 선택을 늘리려면 누른 칸을 벗어나야 하고 그 순간
+    // `ptr_moved` 가 선다. 변이로 확인했다(그 조건을 지워도 아무 차이가 없었다).
+    if (!ptr_down or ptr_moved) return;
     if (frame_ms < ptr_down_ms or frame_ms - ptr_down_ms < long_press_ms) return;
     if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
         core.selectWordAt(c.row, c.col, &.{});

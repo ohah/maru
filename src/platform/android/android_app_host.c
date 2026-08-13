@@ -884,24 +884,27 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         // **스크롤: 관성만 우리 것이고 의미는 코어 것이다**(docs/mobile-platform.md §3.1).
         // Android 에는 iOS 의 `UIPanGestureRecognizer` 같은 것이 NativeActivity 경로에 없어서
         // 이동량을 직접 센다. 줄 환산·clamp·alt screen 변환은 전부 코어가 한다.
+        // **원시 이벤트를 넘긴다 — 뜻은 코어가 정한다**(§3.1: 끌면 스크롤, 길게 누르면 선택).
+        // 여기서 스크롤로 단정하면 길게 누름이 영영 안 온다.
+        int64_t ev_ms = AMotionEvent_getEventTime(ev) / 1000000;
         if (action == AMOTION_EVENT_ACTION_MOVE) {
             float dy = ly - g.touch_last_y;
             g.touch_last_y = ly;
-            // 손을 뗀 뒤 흘릴 관성. 마지막 이동량을 프레임 몫으로 그대로 쓴다.
-            g.fling_vy = dy;
+            g.fling_vy = dy;  // 손을 뗀 뒤 흘릴 관성 — 그것만 플랫폼 몫이다
             g.touch_total_dy += dy;
             pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_scroll(dy);
+            maru_mobile_pointer(1, lx, ly, (unsigned long long)ev_ms);
             pthread_mutex_unlock(&g_bridge_lock);
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
-            // 제스처마다 한 줄. "손가락이 앱까지 닿았나" 를 로그로 판정할 수 있어야 한다 —
-            // 화면이 안 바뀔 때 코어까지 갔는지 아닌지를 이 줄이 가른다(실제로 그렇게 잡았다).
             pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_pointer(action == AMOTION_EVENT_ACTION_UP ? 2 : 3, lx, ly,
+                                (unsigned long long)ev_ms);
             unsigned int vo = maru_mobile_view_offset();
+            unsigned int has_sel = maru_mobile_has_selection();
             pthread_mutex_unlock(&g_bridge_lock);
-            LOGI("MARU_SCROLL dy=%.1f view_offset=%u", g.touch_total_dy, vo);
+            LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
             return 1;
         }
         if (action != AMOTION_EVENT_ACTION_DOWN) return 0;
@@ -917,6 +920,9 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             LOGI("MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, armed);
             return 1;
         }
+        pthread_mutex_lock(&g_bridge_lock);
+        maru_mobile_pointer(0, lx, ly, (unsigned long long)ev_ms);
+        pthread_mutex_unlock(&g_bridge_lock);
         unsigned int cell = maru_mobile_hit_cell(lx, ly);
         LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
              px, py, lx, ly, cell >> 16, cell & 0xFFFF);

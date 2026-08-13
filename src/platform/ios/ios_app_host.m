@@ -642,6 +642,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // 느낌이 어색해진다(§3.1: 관성·러버밴딩·시스템 제스처 협조는 플랫폼 몫).
     [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                       action:@selector(handlePan:)]];
+    // **길게 누름 지연은 OS 가 정한다.** 코어에 박으면 플랫폼 차이를 지운다 — 실측으로 iOS 는
+    // 500ms, Android 는 400ms 였다(같은 값이 아니다). UIKit 의 기본값을 그대로 넘긴다.
+    //
+    // 한계: 접근성 "터치 조절 → 유지 시간" 은 공개 API 로 못 읽는다. UIKit 은 자기 인식기에
+    // 그것을 내부에서 적용하므로, 그 설정까지 따르려면 우리가 판단하는 대신 `UILongPress-
+    // GestureRecognizer` 를 쓰는 쪽으로 가야 한다(§3.1 의 "판단은 코어" 와 갈리는 자리다).
+    UILongPressGestureRecognizer *lp = [UILongPressGestureRecognizer new];
+    maru_mobile_set_long_press_ms((unsigned int)(lp.minimumPressDuration * 1000.0));
+    NSLog(@"MARU_INPUT long_press_ms=%.0f", lp.minimumPressDuration * 1000.0);
     return self;
 }
 

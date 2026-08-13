@@ -494,8 +494,7 @@ fn testExpected(host_id: u128, attempt_id: u128, next_handle: u64) ExpectedAutho
 
 test "handoff store commits identical primary backup and unlinks secret paths before exec" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-store") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store");
     defer test_scratch.close(std.testing.io, dir);
     const record = try testAttemptRecord(std.testing.allocator, 0xAA, 0x11);
     defer std.testing.allocator.free(record);
@@ -571,8 +570,7 @@ test "handoff store commits identical primary backup and unlinks secret paths be
 
 test "handoff store rejects malformed or divergent state and removes attempt residue" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-store-fail") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-fail");
     defer test_scratch.close(std.testing.io, dir);
     var raised_budget = CommitBudget.testing();
     raised_budget.max_bytes = std.math.maxInt(usize);
@@ -691,8 +689,7 @@ test "handoff store rejects malformed or divergent state and removes attempt res
 
 test "handoff store directory fd stays on the approved generation after path replacement" {
     var owner_buf: [192]u8 = undefined;
-    const owner = test_scratch.open(std.testing.io, &owner_buf, "handoff-dir-pin") orelse
-        return error.SkipZigTest;
+    const owner = try test_scratch.open(std.testing.io, &owner_buf, "handoff-dir-pin");
     var pinned_buf: [208]u8 = undefined;
     const pinned = try std.fmt.bufPrintZ(&pinned_buf, "{s}.pinned", .{owner});
     // `.pinned`는 이 테스트가 rename으로 만드는 **대상**이라 미리 만들지 않는다 — 잔여물만 걷는다.
@@ -720,8 +717,7 @@ test "handoff store directory fd stays on the approved generation after path rep
 
 test "handoff store exact cleanup preserves a swapped replacement leaf" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "handoff-cleanup-pin") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-cleanup-pin");
     defer test_scratch.close(std.testing.io, dir);
     const dir_fd = try openOwnerDir(dir);
     defer _ = c.close(dir_fd);

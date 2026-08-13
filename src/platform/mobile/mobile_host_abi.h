@@ -54,7 +54,10 @@ typedef struct {
 } MaruQuad;
 
 /// 논리 크기를 주고 그릴 quad 개수를 받는다. 목록은 `maru_mobile_quads()`.
-unsigned int maru_mobile_build(unsigned int width, unsigned int height);
+/// `time_ms` 는 **단조 증가하는 프레임 시각**이다. 코어에 시계가 없어서 시간이 걸린 판정을
+/// 여기서 받는다 — 길게 누름이 그것이다. move 이벤트에서만 보면 **손가락이 가만히 있을 때
+/// 이벤트가 안 와서 영영 안 잡힌다**(2초를 눌러도 아무 일도 안 났다, 실측).
+unsigned int maru_mobile_build(unsigned int width, unsigned int height, unsigned long long time_ms);
 const MaruQuad *maru_mobile_quads(void);
 /// build 가 낼 수 있는 **최대** quad 수. GPU 버퍼를 이만큼 잡으면 잘릴 일이 없다. 상한을
 /// host 마다 손으로 적으면 어긋난다 — iOS 는 늘리고 Android 는 4096 에서 조용히 자르고 있었다.

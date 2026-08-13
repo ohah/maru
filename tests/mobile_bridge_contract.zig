@@ -6,6 +6,20 @@
 const std = @import("std");
 const bridge = @import("mobile_bridge");
 
+// 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
+var fake_ms: u64 = 0;
+fn now() u64 {
+    fake_ms += 16;
+    return fake_ms;
+}
+
+/// 시계를 앞으로 돌리고 한 프레임 돌린다. **길게 누름은 프레임에서 판정**되므로, 시간만
+/// 흘려서는 안 잡힌다(손가락이 가만히 있으면 move 가 안 오는 그 상황과 같다).
+fn holdPast(ms: u64) void {
+    fake_ms += ms;
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+}
+
 // 아래 순서에 의존한다: 이 테스트는 build 가 한 번도 안 돈 상태를 봐야 해 **맨 앞**이다.
 // 반환값은 **코어에 전달한** 누적 바이트다(헤더가 그 값으로 입력이 죽었는지 판정하라고
 // 적어 뒀다). 코어가 아직 없을 때도 그냥 더하고 있어서, 값이 "닿았다" 고 거짓말했다.
@@ -15,7 +29,7 @@ test "코어가 없을 때는 세지 않고 알린다" {
     try std.testing.expectEqualStrings("input_before_core", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
 
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     const after = bridge.maru_mobile_input("abc", 3);
     try std.testing.expectEqual(@as(u32, 3), after);
 }
@@ -35,7 +49,7 @@ test "크기를 계속 바꿔도 본문이 살아 있다" {
     while (i < 60) : (i += 1) {
         // 키보드 토글이 만드는 것과 같은 왕복(본문 높이가 오르내린다)
         const h: u32 = if (i % 2 == 0) 900 else 620;
-        const n = bridge.maru_mobile_build(420, h);
+        const n = bridge.maru_mobile_build(420, h, now());
         try std.testing.expect(n > 0);
         const err = std.mem.span(bridge.maru_mobile_last_error());
         try std.testing.expectEqualStrings("", err);
@@ -47,16 +61,16 @@ test "크기를 계속 바꿔도 본문이 살아 있다" {
 // 걸려 앱이 죽는다). 지금은 순회 기준이 코어가 들고 있는 크기라 갈릴 자리가 없다 —
 // 그 사실을 "아주 큰 요청 뒤에도 멀쩡하다"로 확인한다.
 test "감당 못 할 크기를 요청해도 격자를 넘겨 읽지 않는다" {
-    _ = bridge.maru_mobile_build(420, 900);
-    _ = bridge.maru_mobile_build(20000, 20000);
-    const n = bridge.maru_mobile_build(420, 900);
+    _ = bridge.maru_mobile_build(420, 900, now());
+    _ = bridge.maru_mobile_build(20000, 20000, now());
+    const n = bridge.maru_mobile_build(420, 900, now());
     try std.testing.expect(n > 0);
 }
 
 // 셀 판정은 **본문 사각형이 아니라 격자**를 기준으로 한다. 사각형은 나머지 여백만큼 격자보다
 // 클 수 있고(cols/rows 상한도 있다), 그 여백을 셀로 답하면 없는 셀을 가리키게 된다.
 test "본문 밖과 격자 밖은 둘 다 없음으로 답한다" {
-    _ = bridge.maru_mobile_build(420, 900);
+    _ = bridge.maru_mobile_build(420, 900, now());
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_hit_cell(-10, -10));
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_hit_cell(100000, 100000));
 }
@@ -69,7 +83,7 @@ test "본문 밖과 격자 밖은 둘 다 없음으로 답한다" {
 // 같은 함수가 셸 이벤트(OSC 133)도 비운다. 그쪽은 브리지 밖에서 볼 방법이 없어서
 // (읽는 ABI 가 없다) 여기 호출이 도는 것으로 대신 잡는다.
 test "코어가 만든 답을 치우고 그 사실을 알린다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     _ = bridge.maru_mobile_input("\x1b[c", 3); // DA1 — 장치 속성 질의
     try std.testing.expectEqualStrings("response_dropped", std.mem.span(bridge.maru_mobile_last_error()));
@@ -86,7 +100,7 @@ test "화면을 꽉 채워도 quad 가 안 잘린다" {
 
     const sizes = [_][2]u32{ .{ 402, 874 }, .{ 874, 402 }, .{ 1024, 1366 }, .{ 1366, 1024 } };
     for (sizes) |s| {
-        _ = bridge.maru_mobile_build(s[0], s[1]); // 코어를 그 크기로 세운다
+        _ = bridge.maru_mobile_build(s[0], s[1], now()); // 코어를 그 크기로 세운다
         var line: [256]u8 = undefined;
         @memset(&line, 'W');
         line[254] = '\r';
@@ -94,7 +108,7 @@ test "화면을 꽉 채워도 quad 가 안 잘린다" {
         var i: u32 = 0;
         while (i < 80) : (i += 1) _ = bridge.maru_mobile_input(&line, line.len);
 
-        const n = bridge.maru_mobile_build(s[0], s[1]);
+        const n = bridge.maru_mobile_build(s[0], s[1], now());
         try std.testing.expect(n > 0);
         try std.testing.expect(n <= bridge.maru_mobile_max_quads());
         try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
@@ -104,7 +118,7 @@ test "화면을 꽉 채워도 quad 가 안 잘린다" {
 // 굵은 글자는 **다른 글리프**라 슬롯도 달라야 한다. 등록부 키가 코드포인트뿐이면 굵은 판이
 // 보통 판 자리를 덮어써서, 한 줄이 굵어지면 그 글자가 화면 전체에서 굵어진다.
 test "굵기가 다르면 다른 슬롯을 쓴다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     const before = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
     bridge.maru_mobile_atlas_add(0x2600, 0, 1, 1, 11); // 보통
     const mid = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
@@ -137,7 +151,7 @@ test "합성 대상은 잉크를 내고 보통 글자는 0" {
 // 키는 **코어의 인코더**를 타야 한다. host 가 바이트를 손으로 적으면 DECCKM·수정자·kitty
 // 프로토콜이 전부 빠진다. 화살표가 실제로 `CSI A` 로 나가는지로 확인한다.
 test "화살표는 코어가 인코딩한다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const before = bridge.maru_mobile_input("", 0);
     const after = bridge.maru_mobile_key(5, 0, 0); // MARU_KEY_UP
@@ -153,7 +167,7 @@ test "화살표는 코어가 인코딩한다" {
 // 쓰면 LF 가 나가고, 하드웨어 Return 은 키 경로로 CR 이 나간다 — 같은 Enter 가 입력 수단에
 // 따라 다른 바이트가 되면 안 된다.
 test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const base = bridge.maru_mobile_input("", 0);
     const hard = bridge.maru_mobile_key(1, 0, 0); // MARU_KEY_ENTER
@@ -180,23 +194,23 @@ test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
 test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    const plain = bridge.maru_mobile_build(402, 874);
+    const plain = bridge.maru_mobile_build(402, 874, now());
     const before = bridge.maru_mobile_input("", 0); // 누적 바이트만 읽는다
 
     bridge.maru_mobile_set_preedit("abc", 3);
-    const with_ghost = bridge.maru_mobile_build(402, 874);
+    const with_ghost = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(with_ghost > plain); // 겉치레가 그려졌다
     try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0)); // 코어엔 안 들어갔다
 
     // 확정하면 겉치레가 사라진다.
     _ = bridge.maru_mobile_input("x", 1);
-    const after = bridge.maru_mobile_build(402, 874);
+    const after = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(after < with_ghost);
 
     // **UTF-8 경계에서 자른다.** 한글이 반토막 나면 그리는 쪽이 문자열을 통째로 버려
     // 조합이 화면에서 사라진다 — 3바이트 글자를 2바이트만 준다.
     bridge.maru_mobile_set_preedit("한", 2);
-    const truncated = bridge.maru_mobile_build(402, 874);
+    const truncated = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(truncated > 0); // 화면이 안 죽는다
     bridge.maru_mobile_set_preedit("", 0);
 }
@@ -205,7 +219,7 @@ test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
 // 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
 test "헤더의 키 id 를 브리지가 전부 안다" {
     const src = @embedFile("mobile_host_abi_for_test");
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     var checked: u32 = 0;
     var it = std.mem.tokenizeScalar(u8, src, '\n');
     while (it.next()) |line| {
@@ -241,22 +255,22 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
 test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 
     // DECTCEM 으로 숨긴 상태를 기준선으로 잡는다 — 커서 quad 가 빠진 수다.
     _ = bridge.maru_mobile_input("\x1b[?25l", 6);
-    const hidden = bridge.maru_mobile_build(402, 874);
+    const hidden = bridge.maru_mobile_build(402, 874, now());
 
     // 세 모양 모두 quad 를 하나 더 낸다(모양은 rect 로 갈리고 개수는 같다).
     const shapes = [_][]const u8{ "\x1b[2 q", "\x1b[4 q", "\x1b[6 q" }; // block · underline · bar
     for (shapes) |seq| {
         _ = bridge.maru_mobile_input("\x1b[?25h", 6); // 다시 보이게
         _ = bridge.maru_mobile_input(seq.ptr, seq.len);
-        const shown = bridge.maru_mobile_build(402, 874);
+        const shown = bridge.maru_mobile_build(402, 874, now());
         try std.testing.expectEqual(hidden + 1, shown);
         _ = bridge.maru_mobile_input("\x1b[?25l", 6);
-        try std.testing.expectEqual(hidden, bridge.maru_mobile_build(402, 874));
+        try std.testing.expectEqual(hidden, bridge.maru_mobile_build(402, 874, now()));
     }
     _ = bridge.maru_mobile_input("\x1b[?25h", 6);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
@@ -273,25 +287,25 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
 test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안에는 안 그린다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
     // **비교는 같은 내용 안에서 한다.** 스크롤하면 보이는 줄이 통째로 달라져 quad 수가
     // 바뀌므로, 상태를 건너뛰어 세면 커서 때문인지 내용 때문인지 갈리지 않는다. 각 상태에서
     // DECTCEM 만 껐다 켜서 **그 차이**를 본다.
-    const bottom_on = bridge.maru_mobile_build(402, 874);
+    const bottom_on = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_input("\x1b[?25l", 6);
-    const bottom_off = bridge.maru_mobile_build(402, 874);
+    const bottom_off = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqual(bottom_off + 1, bottom_on); // 바닥에서는 커서가 quad 하나
 
     _ = bridge.maru_mobile_input("\x1b[?25h", 6); // 다시 켠다 — 이제 스크롤이 판정 대상이다
     bridge.maru_mobile_scroll(400); // 아래로 끄는 손가락 = 과거로
     try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
-    const up_on = bridge.maru_mobile_build(402, 874);
+    const up_on = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_scroll_to_bottom(); // 입력은 바닥으로 스냅하므로 DECTCEM 은 여기서
     _ = bridge.maru_mobile_input("\x1b[?25l", 6);
     bridge.maru_mobile_scroll(400);
-    const up_off = bridge.maru_mobile_build(402, 874);
+    const up_off = bridge.maru_mobile_build(402, 874, now());
     // **커서가 켜져 있어도 스크롤백에서는 안 그린다** — 껐을 때와 수가 같아야 한다.
     try std.testing.expectEqual(up_off, up_on);
 
@@ -303,7 +317,7 @@ test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안�
 // 누적해야 한다 — 그리고 그 누적은 바닥으로 스냅할 때 함께 비워져야 한다(안 그러면 다음
 // 스크롤이 옛 나머지만큼 튄다).
 test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
     bridge.maru_mobile_scroll_to_bottom();
@@ -321,7 +335,7 @@ test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
 // **입력하면 바닥으로 스냅한다.** 과거를 보는 중에 친 글자가 화면 밖에 찍히면 친 것이
 // 사라진 것처럼 보인다(데스크톱의 "입력하면 live 복귀" 와 같은 규칙).
 test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
     bridge.maru_mobile_scroll(400);
@@ -340,7 +354,7 @@ test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
 // **alt screen 의 스크롤은 프로그램의 것이다**(DECSET 1007). less·vim 이 자기 스크롤을 갖고
 // 있으므로 뷰포트를 움직이는 대신 화살표를 보낸다 — 데스크톱이 정한 것과 같은 규칙이다.
 test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
     bridge.maru_mobile_scroll_to_bottom();
@@ -376,7 +390,7 @@ fn keyCenter(index: u32) struct { x: f32, y: f32 } {
 // 좌표는 **build 가 잡아 준 것**을 쓴다 — 테스트가 자리를 손으로 적으면 레이아웃이 바뀔 때
 // 테스트만 맞고 제품이 틀리게 된다.
 test "키바 탭이 키를 내고, 밖은 안 먹는다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 
     // 키바가 서기 전(build 전)에는 아무것도 안 먹어야 한다 — 위에서 build 했으므로 여기서는
@@ -395,7 +409,7 @@ test "키바 탭이 키를 내고, 밖은 안 먹는다" {
 // 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가
 // 되고, 소프트 키보드로 친 글자에 안 실리면 키바를 만든 이유가 없다(그게 실제 쓰임이다).
 test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
 
@@ -406,16 +420,16 @@ test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
     // **빈 화면에서 본다.** 앞 테스트들이 화면을 글자로 채워 놨으면 새 글자가 기존 칸을
     // 덮어써서 quad 수가 안 늘고, 그러면 "제어문자라 안 찍혔다" 와 구분되지 않는다.
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
-    const n0 = bridge.maru_mobile_build(402, 874);
+    const n0 = bridge.maru_mobile_build(402, 874, now());
 
     _ = bridge.maru_mobile_input("c", 1); // 소프트 키보드로 친 글자 — Ctrl 이 실려야 한다
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods()); // 소비됐다
-    const n1 = bridge.maru_mobile_build(402, 874);
+    const n1 = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqual(n0, n1); // Ctrl+C 는 0x03 — 화면에 글자를 안 남긴다
 
     // **한 번만 듣는다**: 다음 글자는 평범한 `c` 라 화면에 남는다.
     _ = bridge.maru_mobile_input("c", 1);
-    const n2 = bridge.maru_mobile_build(402, 874);
+    const n2 = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(n2 > n1);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
@@ -424,7 +438,7 @@ test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
 // 깨진다 — 사용자가 누른 Ctrl 이 엉뚱한 데 쓰이고, ESC 는 문자 키 표에 없어서 **그 바이트가
 // 조용히 사라진다**(구현 중 실제로 그렇게 났다).
 test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const ctrl = keyCenter(2);
     _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
@@ -444,7 +458,7 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
 // 같은 키를 또 누르면 꺼져야 한다 — 잘못 눌렀을 때 되돌릴 방법이 없으면 다음 글자가
 // 제어문자가 되는 것을 보고만 있어야 한다.
 test "Ctrl 을 다시 누르면 꺼진다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     const ctrl = keyCenter(2);
     _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
@@ -471,7 +485,7 @@ fn pointForCell(row: u16, col: u16) ?struct { x: f32, y: f32 } {
 // 손가락 하나가 **끌면 스크롤, 길게 누르면 선택**이다. 그 판단이 플랫폼마다 갈리면 같은
 // 동작이 기기에 따라 다른 뜻이 되므로 코어가 정한다(§3.1). 여기서 그 갈림을 고정한다.
 test "끌면 스크롤이고 길게 누르면 선택이다" {
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     // **개행으로 줄을 못 늘린다.** `maru_mobile_input` 의 개행은 Enter 키(CR)라 열만 0 으로
     // 가고 행은 그대로다 — 줄을 넘겨 주는 셸 에코가 아직 없기 때문이다(원격 세션 M3 전까지).
     // 스크롤백은 앞선 테스트들이 긴 줄의 자동 줄바꿈으로 이미 만들어 뒀다.
@@ -481,29 +495,29 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
     bridge.maru_mobile_clear_error();
 
     // ① 곧바로 끌면 스크롤이다 — 선택이 아니다.
-    bridge.maru_mobile_pointer(0, 200, 400, 1000);
-    bridge.maru_mobile_pointer(1, 200, 500, 1030); // 100px 아래로(과거로)
+    bridge.maru_mobile_pointer(0, 200, 400, now());
+    bridge.maru_mobile_pointer(1, 200, 500, now()); // 100px 아래로(과거로)
     try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(2, 200, 500, 1060);
+    bridge.maru_mobile_pointer(2, 200, 500, now());
     bridge.maru_mobile_scroll_to_bottom();
 
     // ② 거의 안 움직인 채 시간이 지나면 선택이다 — 그리고 그때는 **스크롤이 안 된다**.
     const before_off = bridge.maru_mobile_view_offset();
     const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
-    bridge.maru_mobile_pointer(0, p.x, p.y, 2000);
-    bridge.maru_mobile_pointer(1, p.x + 2, p.y + 1, 2600); // 600ms 뒤, 2px 만 움직였다
+    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    holdPast(600); // 손가락은 가만히 — move 없이 시간만 지나도 잡혀야 한다
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     try std.testing.expectEqual(before_off, bridge.maru_mobile_view_offset());
 
     // ③ 선택은 **손을 떼도 남는다** — 떼자마자 사라지면 복사할 수가 없다.
-    bridge.maru_mobile_pointer(2, p.x + 2, p.y + 1, 2700);
+    bridge.maru_mobile_pointer(2, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
     // ④ 다시 누르면 사라진다(데스크톱에서 클릭이 선택을 푸는 것과 같다).
-    bridge.maru_mobile_pointer(0, p.x, p.y, 3000);
+    bridge.maru_mobile_pointer(0, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(3, p.x, p.y, 3010); // cancel 로 정리
+    bridge.maru_mobile_pointer(3, p.x, p.y, now()); // cancel 로 정리
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
@@ -511,16 +525,16 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
 test "선택은 화면에 quad 로 나타난다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("hello world", 11);
-    const plain = bridge.maru_mobile_build(402, 874);
+    const plain = bridge.maru_mobile_build(402, 874, now());
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
-    bridge.maru_mobile_pointer(0, q.x, q.y, 5000);
-    bridge.maru_mobile_pointer(1, q.x + 2, q.y + 1, 5600); // 길게 누름 → 단어 선택
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600); // 길게 누름 → 단어 선택
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
-    const with_sel = bridge.maru_mobile_build(402, 874);
+    const with_sel = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(with_sel > plain); // 표시 quad 가 늘었다
 
     // **범위가 단어와 정확히 같아야 한다.** 눈으로는 한 칸 차이를 못 센다 — 실제로 끝 열을
@@ -533,12 +547,12 @@ test "선택은 화면에 quad 로 나타난다" {
 
     // **누른 칸 안에서 계속 움직여도 단어가 안 줄어든다.** 길게 누른 뒤에도 move 는 계속
     // 오는데 그때마다 head 를 당기면 3칸 단어가 2칸이 된다(픽셀로 재서 잡은 결함).
-    bridge.maru_mobile_pointer(1, q.x + 1, q.y + 1, 5650);
-    bridge.maru_mobile_pointer(1, q.x + 2, q.y, 5700);
+    bridge.maru_mobile_pointer(1, q.x + 1, q.y + 1, now());
+    bridge.maru_mobile_pointer(1, q.x + 2, q.y, now());
     try std.testing.expectEqual(span, bridge.maru_mobile_selection_span());
 
-    bridge.maru_mobile_pointer(3, q.x + 2, q.y + 1, 5700);
-    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874));
+    bridge.maru_mobile_pointer(3, q.x + 2, q.y + 1, now());
+    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874, now()));
     bridge.maru_mobile_clear_error();
 }
 
@@ -548,19 +562,19 @@ test "선택은 화면에 quad 로 나타난다" {
 test "여러 줄에 걸쳐 선택된다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    _ = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     // 개행은 Enter(CR)라 줄이 안 넘어간다(§3.1) — 출력 쪽 경로로 세 줄을 만든다.
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("alpha bravo\x1b[2;1Hcharlie delta\x1b[3;1Hecho foxtrot", 47);
-    const plain = bridge.maru_mobile_build(402, 874);
+    const plain = bridge.maru_mobile_build(402, 874, now());
 
     // 첫 줄에서 잡아 셋째 줄까지 끈다.
     const from = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     const to = pointForCell(2, 6) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, from.x, from.y, 9000);
-    bridge.maru_mobile_pointer(1, from.x + 1, from.y, 9600); // 길게 누름 → 단어
+    bridge.maru_mobile_pointer(0, from.x, from.y, now());
+    holdPast(600); // 길게 누름 → 단어
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(1, to.x, to.y, 9700); // 누른 칸을 벗어나 끈다 → 확장
+    bridge.maru_mobile_pointer(1, to.x, to.y, now()); // 누른 칸을 벗어나 끈다 → 확장
 
     const span = bridge.maru_mobile_selection_span();
     try std.testing.expectEqual(@as(u64, 0), (span >> 48) & 0xFFFF); // start_row
@@ -574,11 +588,11 @@ test "여러 줄에 걸쳐 선택된다" {
     try std.testing.expectEqual(off_before, bridge.maru_mobile_view_offset());
 
     // **세 줄이 다 칠해져야 한다** — 중간 행 전체를 칠하는 분기가 여기서 처음 돈다.
-    const multi = bridge.maru_mobile_build(402, 874);
+    const multi = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(multi >= plain + 3);
 
-    bridge.maru_mobile_pointer(3, to.x, to.y, 9800);
-    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874));
+    bridge.maru_mobile_pointer(3, to.x, to.y, now());
+    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874, now()));
     bridge.maru_mobile_clear_error();
 }
 

@@ -426,17 +426,9 @@ pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void
                 ptr_last_y = y;
                 return;
             }
-            // 아직 선택이 아니면 **길게 누름을 먼저 본다** — 손가락이 거의 안 움직인 채로
-            // 시간이 지났으면 그 자리에서 단어를 잡는다(데스크톱 더블클릭 자리).
-            if (!ptr_moved and time_ms - ptr_down_ms >= long_press_ms) {
-                if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
-                    core.selectWordAt(c.row, c.col, &.{});
-                    selecting = true;
-                    ptr_last_y = y;
-                    return;
-                }
-            }
-            // 그 밖에는 스크롤이다. 델타는 직전 move 대비다.
+            // **길게 누름은 여기서 안 본다** — 프레임마다 도는 `checkLongPress` 가 판정한다.
+            // 손가락이 가만히 있으면 move 가 아예 안 오기 때문이다.
+            // 스크롤이다. 델타는 직전 move 대비다.
             maru_mobile_scroll(y - ptr_last_y);
             ptr_last_y = y;
         },
@@ -1414,7 +1406,24 @@ fn setLastError(name: []const u8) void {
     @memcpy(last_error[0..n], name[0..n]);
 }
 
-pub export fn maru_mobile_build(width: u32, height: u32) u32 {
+/// 프레임 시각(ms). **길게 누름은 시계가 있어야 판정된다** — move 핸들러에서만 보면 손가락이
+/// 가만히 있을 때 이벤트가 안 와서 영영 안 잡힌다(2초를 눌러도 아무 일도 안 났다, 실측).
+var frame_ms: u64 = 0;
+
+/// 누르고 있는 채로 시간이 지났는지 매 프레임 본다. **여기가 유일한 판정 자리다** —
+/// 두 곳에 두면 한쪽만 고쳐져 갈린다.
+fn checkLongPress(core: *terminal.core.TerminalCore) void {
+    if (!ptr_down or selecting or ptr_moved) return;
+    if (frame_ms < ptr_down_ms or frame_ms - ptr_down_ms < long_press_ms) return;
+    if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
+        core.selectWordAt(c.row, c.col, &.{});
+        selecting = true;
+    }
+}
+
+pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
+    frame_ms = time_ms;
+    if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패
     // (`maru_mobile_input` 의 core write)가 아무도 읽기 전에 지워진다 — 키가 조용히

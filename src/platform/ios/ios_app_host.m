@@ -43,12 +43,21 @@ static NSString *const kShader =
      "}\n"
      "fragment float4 f_main(VOut in [[stage_in]],\n"
      "                       texture2d<float> glyphs [[texture(0)]],\n"
-     "                       texture2d<float> icons [[texture(1)]]) {\n"
+     "                       texture2d<float> icons [[texture(1)]],\n"
+     "                       texture2d<float> colors [[texture(2)]]) {\n"
      "  float r = min(in.radius, min(in.half_size.x, in.half_size.y));\n"
      "  float2 q = abs(in.local) - (in.half_size - r);\n"
      "  float d = length(max(q, 0.0)) - r;\n"
      "  if (d > 0.5) discard_fragment();\n"
      "  constexpr sampler s(filter::linear);\n"
+     "  if (in.kind > 2.5) {\n"                    // 컬러 글리프(이모지) — 아틀라스 색을 그대로
+     "    // 커버리지는 전경색을 곱하지만 컬러는 **아틀라스 색이 곧 결과**다. 전경색을 곱하면\n"
+     "    // 이모지가 글자색으로 물든다.\n"
+     "    float2 ht = 0.5 / float2(colors.get_width(), colors.get_height());\n"
+     "    float4 c = colors.sample(s, clamp(in.uv, in.uvb.xy + ht, in.uvb.zw - ht));\n"
+     "    if (c.a < 0.04) discard_fragment();\n"
+     "    return float4(c.rgb, c.a * in.color.a);\n"
+     "  }\n"
      "  if (in.kind > 1.5) {\n"                    // 아이콘 coverage
      "    float2 ht = 0.5 / float2(icons.get_width(), icons.get_height());\n"
      "    float cov = icons.sample(s, clamp(in.uv, in.uvb.xy + ht, in.uvb.zw - ht)).a;\n"
@@ -100,6 +109,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLRenderPipelineState> _pipe;
     id<MTLTexture> _glyphTex;
     id<MTLTexture> _iconTex;
+    id<MTLTexture> _colorTex;  // 이모지(컬러) 전용 RGBA 아틀라스
     unsigned int _atlasCols, _atlasRows;
     id<MTLBuffer> _quadBuf;   // draw-list 를 통째로 올리는 자리
     NSUInteger _quadCap;
@@ -217,6 +227,12 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
     _glyphTex = [_dev newTextureWithDescriptor:td];
+    // **컬러 전용 아틀라스**(이모지). 글자 아틀라스는 커버리지(R8)라 컬러 비트맵을 넣으면
+    // 실루엣이 된다 — 같은 격자 크기로 RGBA 텍스처를 하나 더 세운다(계약 §이모지).
+    MTLTextureDescriptor *ctd =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           width:W height:H mipmapped:NO];
+    _colorTex = [_dev newTextureWithDescriptor:ctd];
     [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:gray bytesPerRow:W];
     // 래스터 결과를 남긴다 — 두 플랫폼의 픽셀 차이를 재는 하네스(`atlas_diff.py`)가 읽는다.
     // **요청할 때만 쓴다.** 제품이 매 실행마다 384KB 를 남길 이유가 없다.
@@ -558,6 +574,68 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 // **아틀라스를 키운다.** Zig 가 모은 미등록 코드포인트를 그 슬롯에만 구워 올린다 —
 // 텍스처 전체를 다시 만들지 않고 `replaceRegion` 으로 그 칸만 바꾼다(여섯 기능 4번과 같은 경로).
+/// 이모지 한 글자를 **컬러 아틀라스**에 굽는다.
+///
+/// 세 가지가 함께 필요하다(계약 §이모지): ① BMP 밖 글자는 UTF-16 **서러게이트 쌍**이라야
+/// CoreText 가 한 글자로 본다 — `(unichar)cp` 로 자르면 엉뚱한 글자가 되거나(0x1F600→0xF600)
+/// 아예 없다. ② 번들 폰트에 이모지가 없으므로 `CTFontCreateForString` 으로 시스템이 고르게
+/// 한다. ③ 컬러 비트맵이라 RGBA 컨텍스트에 그린다(커버리지 R8 에 그리면 실루엣).
+- (BOOL)bakeColorGlyph:(unsigned int)cp style:(unsigned int)style {
+    if (!_colorTex) return NO;
+    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
+    unsigned int slot = maru_mobile_next_color_slot(_atlasCols);
+    if (slot == 0xFFFFFFFF) return NO;   // 축출 정책은 아직 없다(계약 §4)
+    unsigned int col = slot >> 16, row = slot & 0xFFFF;
+
+    // ① 서러게이트 쌍
+    unichar units[2];
+    NSUInteger unit_n = 0;
+    if (cp > 0xFFFF) {
+        unsigned int v = cp - 0x10000;
+        units[unit_n++] = (unichar)(0xD800 + (v >> 10));
+        units[unit_n++] = (unichar)(0xDC00 + (v & 0x3FF));
+    } else {
+        units[unit_n++] = (unichar)cp;
+    }
+    NSString *str = [NSString stringWithCharacters:units length:unit_n];
+
+    // ② 이 글자를 실제로 가진 폰트를 시스템이 고르게 한다(번들 폰트엔 이모지가 없다).
+    CTFontRef base = _atlasFaces[style & 3] ?: _atlasFont;
+    CTFontRef face = CTFontCreateForString(base, (__bridge CFStringRef)str,
+                                           CFRangeMake(0, (CFIndex)unit_n));
+    if (!face) return NO;
+
+    // ③ RGBA 로 굽는다 — 컬러 비트맵을 커버리지에 넣으면 색이 사라진다.
+    uint8_t *rgba = calloc(CW * CH * 4, 1);
+    if (!rgba) { CFRelease(face); return NO; }
+    CGColorSpaceRef rgb_cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(rgba, CW, CH, 8, CW * 4, rgb_cs,
+                                             kCGImageAlphaPremultipliedLast);
+    BOOL ok = NO;
+    if (ctx) {
+        CTLineRef line = CTLineCreateWithAttributedString(
+            (__bridge CFAttributedStringRef)[[NSAttributedString alloc]
+                initWithString:str
+                    attributes:@{(__bridge NSString *)kCTFontAttributeName: (__bridge id)face}]);
+        if (line) {
+            CGContextSetTextPosition(ctx, 1, 6);
+            CTLineDraw(line, ctx);   // 컬러 글리프(sbix/COLR)는 CTLineDraw 가 색까지 그린다
+            CFRelease(line);
+            ok = YES;
+        }
+        CGContextRelease(ctx);
+    }
+    CGColorSpaceRelease(rgb_cs);
+    if (ok) {
+        [_colorTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
+                       withBytes:rgba bytesPerRow:CW * 4];
+        maru_mobile_color_atlas_add(cp, style, col, row, CW);  // 이모지는 2셀 = 슬롯 전체
+    }
+    free(rgba);
+    CFRelease(face);
+    return ok;
+}
+
 - (void)growAtlas {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !_atlasFont || !_glyphTex) return;
@@ -572,7 +650,12 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     for (int i = (int)n - 1; i >= 0; i--) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         unsigned int style = maru_mobile_missing_style((unsigned int)i);
-        if (cp == 0 || cp > 0xFFFF) continue;
+        if (cp == 0 || cp > 0x10FFFF) continue;
+        // **컬러 글리프는 다른 아틀라스로 간다.** 커버리지(R8)에 컬러를 구우면 실루엣이 된다.
+        if (maru_mobile_missing_is_color((unsigned int)i)) {
+            if ([self bakeColorGlyph:cp style:style]) added++;
+            continue;
+        }
         CTFontRef face = _atlasFaces[style & 3] ?: _atlasFont;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
         // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
@@ -647,6 +730,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (!_pipe) { NSLog(@"MARU_CHROME pipeline_fail=%@", err); return self; }
     _queue = [_dev newCommandQueue];
     [self loadAtlas];
+
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
     // 사용자에게 보인다. Android 도 같은 값이고, 데스크톱 maru 의 present 정책과 같다.
@@ -756,11 +840,14 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         // kind=3 은 슬롯의 **왼쪽 절반**이다 — 슬롯 하나가 양폭 상자라 단폭 글자는 절반만 쓴다.
         // 셰이더는 `(cell.xy + t)/cell.zw` 뿐이라, 열과 나누는 수를 함께 2배로 주면 그대로
         // 왼쪽 절반이 나온다. 셰이더에는 kind=1 로 넘긴다.
-        int half = (q->kind == 3);
+        // kind 4·5 는 **컬러 아틀라스**(다른 텍스처)다. 5 는 그 왼쪽 절반이라 3 과 같은 배수
+        // 규칙을 쓰고, 셰이더에는 3(=컬러)으로 넘긴다 — 텍스처만 다르고 좌표 규칙은 같다.
+        int half = (q->kind == 3 || q->kind == 5);
+        int color = (q->kind == 4 || q->kind == 5);
         float cols = (q->kind == 2) ? 1.0f : (float)_atlasCols * (half ? 2.0f : 1.0f);
         float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)_atlasRows;
         float cx = (float)q->cell_x * (half ? 2.0f : 1.0f);
-        float kind = half ? 1.0f : (float)q->kind;
+        float kind = color ? 3.0f : (half ? 1.0f : (float)q->kind);
         Uni u = {{q->x + (float)safe.left, q->y + (float)safe.top,
                   q->x + q->w + (float)safe.left, q->y + q->h + (float)safe.top},
                  {q->r, q->g, q->b, q->a},
@@ -772,6 +859,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         [e setVertexBuffer:_quadBuf offset:0 atIndex:0];
         if (_glyphTex) [e setFragmentTexture:_glyphTex atIndex:0];
         if (_iconTex) [e setFragmentTexture:_iconTex atIndex:1];
+        if (_colorTex) [e setFragmentTexture:_colorTex atIndex:2];
         [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4
                 instanceCount:n];
         if (!_loggedDraw) { _loggedDraw = YES; NSLog(@"MARU_DRAW calls=1 instances=%u", n); }

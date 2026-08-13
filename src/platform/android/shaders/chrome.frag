@@ -6,6 +6,7 @@
 // vertex 가 넘긴 varying 으로 온다 — 한 번의 draw call 안에서 quad 마다 달라야 한다.
 layout(set = 0, binding = 0) uniform sampler2D glyphs;   // 한글·영어 아틀라스(R8)
 layout(set = 0, binding = 1) uniform sampler2D icons;    // Zig 가 만든 아이콘 coverage(RGBA8, alpha)
+layout(set = 0, binding = 3) uniform sampler2D colors;   // 이모지 컬러 아틀라스(RGBA8, 색이 곧 결과)
 layout(location = 0) in vec2 vLocal;
 layout(location = 1) in vec2 vHalf;
 layout(location = 2) in vec2 vUV;
@@ -20,6 +21,14 @@ void main() {
     float d = length(max(q, 0.0)) - r;
     if (d > 0.5) discard;
 
+    if (vKind > 2.5) {                           // 컬러 글리프(이모지) — 아틀라스 색이 곧 결과
+        // 커버리지는 전경색을 곱하지만 컬러는 곱하면 안 된다(이모지가 글자색으로 물든다).
+        vec2 ht = 0.5 / vec2(textureSize(colors, 0));
+        vec4 c = texture(colors, clamp(vUV, vUVBounds.xy + ht, vUVBounds.zw - ht));
+        if (c.a < 0.04) discard;
+        outColor = vec4(c.rgb, c.a * vColor.a);
+        return;
+    }
     if (vKind > 1.5) {                           // 아이콘 — alpha 가 coverage 다
         vec2 ht = 0.5 / vec2(textureSize(icons, 0));
         float cov = texture(icons, clamp(vUV, vUVBounds.xy + ht, vUVBounds.zw - ht)).a;

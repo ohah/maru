@@ -542,6 +542,46 @@ test "선택은 화면에 quad 로 나타난다" {
     bridge.maru_mobile_clear_error();
 }
 
+// **여러 줄에 걸친 선택.** 렌더가 시작 행 일부·중간 행 전체·끝 행 일부로 갈리는데, 한 줄
+// 단어만 확인하면 그 분기가 한 번도 안 돈다. 값으로 먼저 고정한다 — 화면은 한 칸 차이를
+// 눈으로 못 세고, 실제로 그래서 결함을 놓친 적이 있다.
+test "여러 줄에 걸쳐 선택된다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874);
+    // 개행은 Enter(CR)라 줄이 안 넘어간다(§3.1) — 출력 쪽 경로로 세 줄을 만든다.
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("alpha bravo\x1b[2;1Hcharlie delta\x1b[3;1Hecho foxtrot", 47);
+    const plain = bridge.maru_mobile_build(402, 874);
+
+    // 첫 줄에서 잡아 셋째 줄까지 끈다.
+    const from = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    const to = pointForCell(2, 6) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, from.x, from.y, 9000);
+    bridge.maru_mobile_pointer(1, from.x + 1, from.y, 9600); // 길게 누름 → 단어
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    bridge.maru_mobile_pointer(1, to.x, to.y, 9700); // 누른 칸을 벗어나 끈다 → 확장
+
+    const span = bridge.maru_mobile_selection_span();
+    try std.testing.expectEqual(@as(u64, 0), (span >> 48) & 0xFFFF); // start_row
+    try std.testing.expectEqual(@as(u64, 2), (span >> 16) & 0xFFFF); // end_row — 셋째 줄까지
+    try std.testing.expectEqual(@as(u64, 6), span & 0xFFFF); // end_col(포함)
+
+    // **선택 중에는 화면이 안 흐른다.** 플랫폼은 관성 속도를 계속 세워 두므로(그게 느낌이다)
+    // 코어가 막지 않으면 범위를 넓히는 내내 글자가 도망간다 — 기기에서 그렇게 나왔다.
+    const off_before = bridge.maru_mobile_view_offset();
+    bridge.maru_mobile_scroll(400); // host 의 관성이 흘러 들어온 것과 같다
+    try std.testing.expectEqual(off_before, bridge.maru_mobile_view_offset());
+
+    // **세 줄이 다 칠해져야 한다** — 중간 행 전체를 칠하는 분기가 여기서 처음 돈다.
+    const multi = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(multi >= plain + 3);
+
+    bridge.maru_mobile_pointer(3, to.x, to.y, 9800);
+    try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874));
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

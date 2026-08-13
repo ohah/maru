@@ -208,6 +208,13 @@ pub fn main(init: std.process.Init) !void {
     // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
     const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;
     const status_bar_height_px: u32 = if (scenario_id == .sidebar_status_strip) 26 else 0;
+    // SB1 §5.3: 사이드바 표면을 자를 구간. 제품에서는 `sidebarScissorPx`가 뷰포트에서 뽑지만 Lab에는 헤더도
+    // 사이드바 셀도 없으므로 시나리오가 같은 계약의 값을 직접 준다 — `[0, 창 높이 − 상태바)`.
+    const sidebar_scissor_top_px: u32 = 0;
+    const sidebar_scissor_bottom_px: u32 = if (scenario_id == .sidebar_status_strip)
+        @as(u32, @intFromFloat(viewport.height)) - status_bar_height_px
+    else
+        0;
     // strip 색은 **제품의 파생 규칙**을 따른다 — `config/theme.zig`의 "sidebar_background는 배경 +24
     // (코히어런트하게 살짝 밝게)". Lab 테마는 그 파생을 뭉개 sidebar_background를 배경과 **같은 값**으로
     // 두고 있어(둘 다 20), 그대로 쓰면 strip이 배경에 묻혀 골든이 아무것도 못 본다. 색을 지어내는 대신
@@ -268,6 +275,42 @@ pub fn main(init: std.process.Init) !void {
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
     chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, 2);
+    // SB1 §5.3 — **뷰포트 바닥을 가로지르는 layer 0(under) quad.** 제품에서 이 자리에 오는 것은 카드 호버
+    // 밴드다(rich 토큰에서 둥근 GPU quad로 내려간다). Lab은 `app_session`을 import하지 않아 그 밴드를 제품
+    // 경로로 만들 수 없으므로, **같은 버킷·같은 기하**의 quad 하나를 하네스가 직접 심는다 — 골든이 보려는
+    // 것은 밴드의 모양이 아니라 "`.m`이 under 버킷을 상태바 띠 위에서 자르는가" 하나다.
+    //
+    // 아래로 띠 안까지 넉넉히 걸치게 둔다(클립이 없으면 상태바 자리를 덮고, 있으면 경계에서 잘린다).
+    //
+    // **폭은 사이드바의 왼쪽 절반이다.** 제품 밴드는 전폭이지만, 전폭으로 두면 같은 캡처의 strip 골든
+    // (§5.2)이 보는 자리를 밴드가 덮어 두 계약이 한 사각형에 섞인다 — 그러면 실패했을 때 strip이 샌 것인지
+    // 밴드가 샌 것인지 사람이 캡처를 열어 봐야 안다. 절반만 덮으면 왼쪽은 밴드 경계, 오른쪽은 strip 경계를
+    // 각자 순수하게 본다. 이 시나리오가 증명하는 것은 밴드의 폭이 아니라 **잘리는 y** 하나다.
+    if (scenario_id == .sidebar_status_strip) {
+        const floor_px = viewport.height - @as(f32, @floatFromInt(status_bar_height_px));
+        const band_top = floor_px - 40.0;
+        // 밴드 색은 strip보다 한 단계 더 밝게 — 배경·strip·밴드가 세 톤으로 갈려야 골든이 경계를 본다.
+        const base = tokens.palette.get(.surface_bg);
+        const lift = struct {
+            fn f(v: u8, by: u32) u32 {
+                return @min(@as(u32, v) + by, 255);
+            }
+        }.f;
+        const band_bg: u32 = 0xFF00_0000 | (lift(base.r, 56) << 16) | (lift(base.g, 56) << 8) | lift(base.b, 56);
+        try gpu_quads.append(allocator, .{
+            .x = 0,
+            .y = band_top,
+            .w = @as(f32, @floatFromInt(sidebar_width_px)) / 2.0, // 왼쪽 절반(위 주석 — 골든 둘을 갈라 둔다)
+            .h = 80.0, // 바닥을 40px 넘어선다 — 클립 없이는 상태바 띠를 덮는 높이
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = band_bg,
+            .fill_color1 = band_bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 0, // under — 제품의 사이드바 밴드와 같은 버킷
+        });
+    }
     const cell = cellSizeFor(scenario_id);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell.w)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell.h)));
@@ -475,6 +518,11 @@ pub fn main(init: std.process.Init) !void {
         sidebar_width_px,
         sidebar_bg,
         status_bar_height_px,
+        // SB1 §5.3: 사이드바 표면 클립 구간. 제품에서는 `sidebarScissorPx`가 정하지만 Lab은 `app_session`을
+        // 안 지나므로(사이드바 셀도 없다) 시나리오가 같은 계약의 값을 직접 준다 — top은 0(헤더가 없다),
+        // bottom은 상태바 위. 나머지 시나리오는 0,0이라 클립 없음이다.
+        sidebar_scissor_top_px,
+        sidebar_scissor_bottom_px,
         &native,
     );
 

@@ -949,8 +949,10 @@ static void maru_draw_cells_clipped(const MaruDrawPass *c, size_t cell_start, si
     if (scissored) [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }];
 }
 
-/* 터미널 레이어 pass(맨 아래): 탭 밴드 quad → kitty(텍스트 뒤) → 사이드바 bg strip → 헤더 배지 quad →
-   터미널 본문 셀 → 터미널 커서 페이드(모달 없을 때) → kitty(텍스트 앞) → 사이드바 밴드 quad → 사이드바 셀.
+/* 터미널 레이어 pass(맨 아래): 탭 밴드·상태바 quad → kitty(텍스트 뒤) → 사이드바 bg strip → 헤더 배지 quad →
+   터미널 본문 셀(상태바 항목 텍스트 포함) → 터미널 커서 페이드(모달 없을 때) → kitty(텍스트 앞) →
+   사이드바 밴드 quad → 사이드바 셀. 뒤의 둘(사이드바 표면)은 **같은 scissor**로 잘린다 — 앞의 상태바를
+   덮지 않게 하는 것이 그 클립의 일이다.
    b2에서 이 함수가 터미널 CAMetalLayer의 drawable/encoder를 받는다. */
 static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, c->bottom_vertex_count); // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
@@ -972,7 +974,39 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     if (c->draw_cursor && c->cursor_in_terminal)
         maru_draw_cells_clipped(c, c->cursor_start, c->cursor_cells, c->cursor_opacity);
     MARU_DRAW_IMAGES(c->image_above_start, c->gpu_image_n);                        // 1.5 kitty 이미지(텍스트 앞)
-    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count, c->under_vertex_count); // 3. under quad(사이드바 밴드)
+    // 자를 구간은 호스트가 정해 준다(`sidebar_scissor_top/bottom_px` — 아래 4번 주석 참조). under quad와 사이드바
+    // cells가 **같은 rect**를 쓰므로 여기서 한 번 읽는다.
+    const NSUInteger scissor_dw = (NSUInteger)c->drawable_size.width;
+    const NSUInteger scissor_dh = (NSUInteger)c->drawable_size.height;
+    // 스탬프된 기하와 **지금** drawable이 한 프레임 어긋날 수 있다 — 창을 줄이는 순간 구간은 직전 투영의
+    // `backing_height_px`에서 나오고 drawable은 이미 새 크기다. `MTLScissorRect`가 렌더 타겟을 넘으면 Metal이
+    // 죽으므로 여기서 접는다. 이건 배치 산술이 아니라 **하드웨어 계약 방어**라 `.m`의 일이다(§5의 "배치를 아는
+    // 곳은 하나"와 충돌하지 않는다 — 자를 자리는 여전히 Zig가 정하고 여기서는 그릴 수 없는 값만 막는다).
+    NSUInteger scissor_top = (NSUInteger)c->sidebar_scissor_top_px;
+    NSUInteger scissor_bottom = (NSUInteger)c->sidebar_scissor_bottom_px;
+    if (scissor_top > scissor_dh) scissor_top = scissor_dh;
+    if (scissor_bottom > scissor_dh) scissor_bottom = scissor_dh;
+    // 3. under quad(사이드바 밴드·배경 tint·accent 막대·드래그 고스트). **뷰포트 바닥에서 자른다.**
+    //    이 버킷(layer 0)은 사이드바 전용인데, 그리는 순서가 상태바 배경(위 0번 bottom 버킷)과 상태바 항목
+    //    텍스트(위 1b 터미널 셀 패스)보다 **뒤**다. 그래서 클립이 없으면 뷰포트를 넘은 밴드가 상태바 띠를
+    //    통째로 덮는다 — 실제로 카드에 마우스를 올리면 상태바가 사라졌다(사용자 제보). 클립을 quad를 만드는
+    //    쪽마다 반복하지 않고 여기 한 곳에 두는 이유는, 사이드바에 quad가 하나 늘 때마다 그 안전망을 다시
+    //    기억해야 하는 구조가 바로 그 결함을 만들었기 때문이다.
+    //
+    //    ⚠️ **위쪽은 셀과 같이 자르면 안 된다**(`scissor_top`을 쓰지 않고 0에서 시작하는 이유). 이 버킷에는
+    //    스크롤을 타지 않는 **헤더 고정 quad**가 섞여 있다 — 검색 줄 밑줄(y = header − 1), 헤더 아이콘 호버
+    //    배경, 접힘 토글 호버. 셀 쪽 상단 scissor가 무해한 것은 헤더 glyph가 **터미널 셀 패스**라 애초에 이
+    //    구간에 없기 때문이고, quad는 사정이 반대다. 스크롤 중에 상단까지 자르면 그 셋이 사라진다.
+    //    스크롤된 카드의 상단 클립은 `sidebarScrollClipQuad`가 이미 발행 시점에 해 둔다(둥근 모서리를 죽이는
+    //    시각 규칙이 거기 있어야 해서 어차피 산술이 필요하다).
+    if (c->quad_vertex_buffer != nil) {
+        const bool under_clip = (c->under_vertex_count > 0 && scissor_bottom > 0);
+        if (under_clip)
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = scissor_dw, .height = scissor_bottom }];
+        MARU_DRAW_QUADS(c->bottom_vertex_count, c->under_vertex_count);
+        if (under_clip)
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = scissor_dw, .height = scissor_dh }]; // full 복원(다음 패스용)
+    }
     // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 헤더 영역 [0, header_h)를
     //    scissor 밖으로 둬 [header_h, drawable_h]만 그린다. **MTLScissorRect는 좌상단 원점**(Apple 문서 — framebuffer
     //    픽셀 좌표, y가 아래로 증가). 정점 셰이더가 py_top(좌상단 px)→NDC로 매핑해 framebuffer가 표준 방향이라, 상단
@@ -981,19 +1015,12 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //    **자를 구간은 호스트가 정해 준다**(`sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가
     //    있나")와 클램프가 전부 Zig의 `sidebarScissorPx`에 있어 여기엔 산술이 없다 — 배치를 아는 곳을 하나로
     //    두는 규율이다(docs/metal-ui-layout-paint.md §5). bottom <= top이면 scissor 없음.
-    const NSUInteger scissor_top = (NSUInteger)c->sidebar_scissor_top_px;
-    const NSUInteger scissor_bottom = (NSUInteger)c->sidebar_scissor_bottom_px;
     const bool sidebar_clip = (c->sidebar_cells_n > 0 && scissor_bottom > scissor_top);
-    if (sidebar_clip) {
-        const NSUInteger dw = (NSUInteger)c->drawable_size.width;
-        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = scissor_top, .width = dw, .height = scissor_bottom - scissor_top }];
-    }
+    if (sidebar_clip)
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = scissor_top, .width = scissor_dw, .height = scissor_bottom - scissor_top }];
     if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->pre_sidebar_vertices, c->total_vertices - c->pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
-    if (sidebar_clip) {
-        const NSUInteger dw = (NSUInteger)c->drawable_size.width;
-        const NSUInteger dh = (NSUInteger)c->drawable_size.height;
-        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }]; // full 복원(다음 패스용)
-    }
+    if (sidebar_clip)
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = scissor_dw, .height = scissor_dh }]; // full 복원(다음 패스용)
 }
 
 /* 모달 오버레이 레이어 pass(맨 위): 그림자 → over quad(모달 배경) → 모달 텍스트 셀(clip scissor) →

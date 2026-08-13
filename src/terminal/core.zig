@@ -1621,7 +1621,7 @@ pub const TerminalCore = struct {
             const cells = self.screen.cells[row_start..][0..self.size.cols];
             var has_text = false;
             for (cells) |cell| {
-                if (cell.codepoint != ' ') {
+                if (cell.codepoint != ' ' and cell.codepoint != 0) { // 안 쓴 칸(0)도 빈칸이다
                     has_text = true;
                     break;
                 }
@@ -3621,7 +3621,8 @@ test "BCE: 스크롤로 들어오는 빈 줄·ED가 현재 pen 배경을 잇는�
     // 화면을 채우고 LF로 한 번 스크롤 → 새로 들어온 맨 아래 빈 줄이 pen 배경을 이어야 한다(BCE).
     try core.write("A\r\nB\r\n");
     const scrolled = core.screen.cells[core.index(1, 0)];
-    try std.testing.expectEqual(@as(u21, ' '), scrolled.codepoint);
+    // 텍스트는 없고(안 쓴 칸) 배경만 이어받는다 — `isUnwritten`은 배경이 default일 때만 참이라 여기선 못 쓴다.
+    try std.testing.expectEqual(@as(u21, 0), scrolled.codepoint);
     try std.testing.expectEqual(bg, scrolled.style.background);
 
     // ED(\e[2J)도 같은 규칙: 전체를 pen 배경으로 지운다(기존 동작 고정).
@@ -3823,7 +3824,7 @@ test "rewrap commit OOM은 옛 스크롤백 내용을 보존한다(transactional
         while (i < core.scrollbackLen()) : (i += 1) {
             const r = core.scrollbackRow(i) orelse continue;
             for (r) |cell| {
-                if (cell.codepoint != ' ' and n < buf.len) {
+                if (cell.codepoint != ' ' and cell.codepoint != 0 and n < buf.len) {
                     buf[n] = @intCast(cell.codepoint);
                     n += 1;
                 }
@@ -3870,8 +3871,8 @@ test "A2: trim된 행도 스크롤하면 cols 폭으로 pad되어 보인다(rend
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(@as(u21, 'o'), snap.cells[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'k'), snap.cells[1].codepoint);
-    try std.testing.expectEqual(@as(u21, ' '), snap.cells[2].codepoint); // trim된 뒤는 blank로 pad
-    try std.testing.expectEqual(@as(u21, ' '), snap.cells[7].codepoint);
+    try std.testing.expect(types.isUnwritten(snap.cells[2])); // trim된 뒤는 blank로 pad
+    try std.testing.expect(types.isUnwritten(snap.cells[7]));
     try std.testing.expectEqual(@as(usize, 8), snap.cells.len); // 뷰포트는 항상 cols 폭
     core.scrollToBottom();
 }
@@ -6396,7 +6397,7 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
     try std.testing.expect(snap.cells[3].continuation);
     try std.testing.expect(!snap.cursor.visible); // 조합 중 블록 커서 숨김(반전 preedit이 커서 역할)
     // 실제 그리드는 오염되지 않는다.
-    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[2].codepoint);
+    try std.testing.expect(types.isUnwritten(core.screen.cells[2]));
 
     // 조합 갱신('않' 등 다른 글자로 교체)도 같은 자리에.
     try overlay.replace("않");
@@ -6406,7 +6407,7 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
     // 조합 종료 — 합성이 사라지고 일반 snapshot으로 돌아간다.
     try overlay.replace("");
     const snap3 = overlay.compose(core.renderSnapshot());
-    try std.testing.expectEqual(@as(u21, ' '), snap3.cells[2].codepoint);
+    try std.testing.expect(types.isUnwritten(snap3.cells[2]));
     try std.testing.expectEqual(@as(u16, 2), snap3.cursor.col);
 }
 
@@ -6534,7 +6535,7 @@ test "preedit overlay clears the orphan continuation when a narrow glyph covers 
     try std.testing.expectEqual(@as(u21, 'a'), snap.cells[0].codepoint); // 'a'(조합, 폭1)
     try std.testing.expectEqual(@as(u2, 1), snap.cells[0].width);
     try std.testing.expect(!snap.cells[1].continuation); // 짝 잃은 continuation 정리됨(잔상 없음)
-    try std.testing.expectEqual(@as(u21, ' '), snap.cells[1].codepoint);
+    try std.testing.expect(types.isUnwritten(snap.cells[1]));
     try std.testing.expectEqual(@as(u16, 1), snap.cursor.col); // 커서는 조합 끝
     try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid의 '응' 불변
 }
@@ -6553,7 +6554,7 @@ test "preedit clears the truncated wide base when the cursor sits on a continuat
 
     try overlay.replace("\xeb\x9d\xbc"); // "라"(wide) 조합 중
     const snap = overlay.compose(core.renderSnapshot());
-    try std.testing.expectEqual(@as(u21, ' '), snap.cells[0].codepoint); // 잘린 '응' base 정리됨
+    try std.testing.expect(types.isUnwritten(snap.cells[0])); // 잘린 '응' base 정리됨
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[1].codepoint); // 라(조합, col1)
     try std.testing.expectEqual(@as(u2, 2), snap.cells[1].width);
     try std.testing.expect(snap.cells[2].continuation);
@@ -6598,7 +6599,7 @@ test "OSC 8 pen_link resets on alt-screen switch and RIS (no stale clickable cel
     try core.write("\x1bc"); // RIS
     try std.testing.expectEqual(@as(usize, 0), core.link_store.items.len);
     try std.testing.expectEqual(@as(u32, 0), core.pen_link);
-    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[0].codepoint); // 화면 비움
+    try std.testing.expect(types.isUnwritten(core.screen.cells[0])); // 화면 비움
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 스크롤백 비움
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 }
@@ -6898,7 +6899,7 @@ test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 �
     defer core.deinit();
     // kitty graphics APC — control+payload가 셀에 안 찍히고 소비된다(과거 ESC_ 미처리면 누수).
     try core.write("\x1b_Ga=T,f=32;AAAA\x1b\\");
-    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[0].codepoint); // 텍스트 누수 없음
+    try std.testing.expect(types.isUnwritten(core.screen.cells[0])); // 텍스트 누수 없음
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col); // 커서 안 움직임
     // APC 종료(ESC \) 후 일반 텍스트는 정상 — ground 복귀 확인.
     try core.write("hi");
@@ -7639,7 +7640,7 @@ test "mode 2027: emoji promotion at the last column wraps to next line as width 
     try core.write("abcd"); // cols 0-3, 커서 col4(마지막)
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(col4, width1) + VS16 -> 마지막 칸 승격 불가 -> wrap
     // 이전 줄 마지막 칸은 비워지고, ❤️가 다음 줄에 width 2로.
-    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[4].codepoint); // row0 col4 비움
+    try std.testing.expect(types.isUnwritten(core.screen.cells[4])); // row0 col4 비움
     try std.testing.expect(core.screen.wrapped[0]); // soft-wrap 표시
     try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[5].codepoint); // row1 col0
     try expectCluster(&core, core.screen.cells[5].grapheme_id, &.{0xFE0F});
@@ -8237,7 +8238,7 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[0].codepoint);
     try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{0xFE0F});
     try std.testing.expectEqual(@as(u2, 1), core.screen.cells[0].width); // EAW Neutral = 1(zsh 일치)
-    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[1].codepoint); // 다음 칸은 빈칸
+    try std.testing.expect(types.isUnwritten(core.screen.cells[1])); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.col);
 }
 

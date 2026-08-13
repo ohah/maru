@@ -38,7 +38,7 @@ fn isWordSeparatorCell(cell: types.Cell, separators: []const u21) bool {
 /// default)도 경계로 본다. continuation(wide 2번째 칸)은 공백이 아니다. isBlankCell의 배경 기본값 조건은 복사
 /// trim 등 다른 용도라 그대로 둔다.
 fn isBoundarySpace(cell: types.Cell) bool {
-    return cell.codepoint == ' ' and !cell.continuation;
+    return (cell.codepoint == ' ' or cell.codepoint == 0) and !cell.continuation;
 }
 
 /// 단어 경계 셀인가 — 공백(isBoundarySpace, 배경 무관) 또는 separators 집합 멤버. URL 감지는 separators=&.{}라
@@ -122,7 +122,8 @@ fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cell
         const cell = row_cells[c];
         if (cell.continuation) continue;
         var buf: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
+        // 안 쓴 칸(0)은 텍스트로는 공백이다 — 어디까지 읽을지는 호출자가 정하고, 읽기로 한 칸은 공백으로 낸다.
+        const n = std.unicode.utf8Encode(if (cell.codepoint == 0) ' ' else cell.codepoint, &buf) catch continue;
         try out.appendSlice(allocator, buf[0..n]);
         if (cell.grapheme_id != 0 and cell.grapheme_id <= graphemes.len) {
             for (graphemes[cell.grapheme_id - 1]) |cp| {

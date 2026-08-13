@@ -55,6 +55,7 @@ const GapDropPlan = AppSession.GapDropPlan;
 const HeaderPart = AppSession.HeaderPart;
 const SidebarScissor = AppSession.SidebarScissor;
 const SidebarScrollExtent = AppSession.SidebarScrollExtent;
+const SidebarViewport = AppSession.SidebarViewport;
 const SidebarSearchLine = AppSession.SidebarSearchLine;
 const WorkspaceSession = AppSession.WorkspaceSession;
 const clampMoveToGroup = app_session_mod.clampMoveToGroup;
@@ -710,8 +711,21 @@ pub fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
     return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, sidebarMetrics(self), self.sidebar_scroll_offset_px);
 }
 
-/// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
-/// 순수 산술은 sidebarMaxScrollPx에 둬(헤드리스 단위 테스트) self는 필드만 떠 넘긴다.
+/// 사이드바 뷰포트의 세로 구간(backing px) — **하단 경계의 단일 출처**(`AppSession.SidebarViewport` 문서 참조).
+/// 순수 산술이라 헤드리스로 단언할 수 있고, self 래퍼는 아래 `sidebarViewport`다.
+pub fn sidebarViewportPx(backing_height_px: u32, header_height_px: u32, status_bar_height_px: u32) SidebarViewport {
+    return .{ .top = header_height_px, .bottom = backing_height_px -| status_bar_height_px };
+}
+
+/// 세션 필드로 `sidebarViewportPx`를 부르는 래퍼. 소비처(스크롤·scissor·스크롤바)가 "헤더는 빼고 상태바도
+/// 빼고"라는 조합을 각자 다시 적지 않게 한다 — 그렇게 흩어져 있다가 한 곳이 상태바를 빠뜨린 것이 이 함수가
+/// 생긴 이유다.
+pub fn sidebarViewport(self: *const AppSession) SidebarViewport {
+    return sidebarViewportPx(self.backing_height_px, self.sidebar_header_height_px, self.statusBarHeightPx());
+}
+
+/// 사이드바 콘텐츠(표시 카드 전체 높이)가 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
+/// 순수 산술은 sidebarMaxScrollPx에 둬(헤드리스 단위 테스트) self는 뷰포트 높이만 떠 넘긴다.
 pub fn sidebarMaxScroll(self: *const AppSession) u32 {
     // 가변 높이(카드=slot_h·헤더=header_row_h): 콘텐츠 높이를 rows.len*slot_h 대신 contentHeight 누적으로 구한다
     // (code-review #7 — 헤더를 slot_h로 세면 over-travel). 카드만이면 rows.len*slot_h와 같아 동작 보존.
@@ -719,8 +733,8 @@ pub fn sidebarMaxScroll(self: *const AppSession) u32 {
     // 보다 길어지는데, 짧은 sidebar_rows로 content 높이를 재면 스크롤이 안 되고(max=0) thumb가 과대해진다. 렌더가
     // 보는 rows와 같은 도메인으로 재야 정합. 비드래그면 preview=null이라 sidebar_rows와 동일(byte-identical).
     const content_h = chrome.components.sidebar.contentHeight(sidebarRenderRows(self), sidebarMetrics(self));
-    // 사이드바 뷰포트도 상태바 위에서 끝난다 — 안 빼면 마지막 카드가 상태바 뒤로 숨고 스크롤로 꺼낼 수 없다.
-    return sidebarMaxScrollPx(content_h, self.backing_height_px -| self.statusBarHeightPx(), self.sidebar_header_height_px);
+    // 뷰포트는 헤더 아래에서 시작해 상태바 위에서 끝난다 — 그 산술은 sidebarViewport가 소유한다.
+    return sidebarMaxScrollPx(content_h, sidebarViewport(self).height());
 }
 
 /// 사이드바 스크롤 오프셋을 [0, sidebarMaxScroll]로 잡는다. 탭 추가/삭제·검색 필터·resize·휠로 콘텐츠/뷰포트가
@@ -1190,23 +1204,22 @@ pub fn sidebarScissorPx(
     const none = SidebarScissor{ .top = 0, .bottom = 0 };
     if (!sidebar_cells_present or backing_height_px == 0) return none;
 
-    const scroll_clip = scroll_offset_px > 0 and header_height_px < backing_height_px;
+    // 구간 값은 뷰포트가 소유하고, 여기서는 "언제 자르나"만 정한다(위아래 이유가 다르다 — SidebarScissor 문서).
+    const viewport = sidebarViewportPx(backing_height_px, header_height_px, status_bar_height_px);
+    const scroll_clip = scroll_offset_px > 0 and viewport.top < backing_height_px;
     const bottom_clip = status_bar_height_px > 0;
     if (!scroll_clip and !bottom_clip) return none;
 
-    const top: u32 = if (scroll_clip) header_height_px else 0;
-    const bottom: u32 = if (status_bar_height_px < backing_height_px)
-        backing_height_px - status_bar_height_px
-    else
-        0;
-    if (bottom <= top) return none; // 겹친 구간을 내느니 안 자른다(뒤집힌 rect 방지)
-    return .{ .top = top, .bottom = bottom };
+    const top: u32 = if (scroll_clip) viewport.top else 0;
+    if (viewport.bottom <= top) return none; // 겹친 구간을 내느니 안 자른다(뒤집힌 rect 방지)
+    return .{ .top = top, .bottom = viewport.bottom };
 }
 
-pub fn sidebarMaxScrollPx(content_height_px: u32, backing_height_px: u32, header_height_px: u32) u32 {
-    const viewport: u64 = if (backing_height_px > header_height_px) backing_height_px - header_height_px else 0;
-    if (content_height_px <= viewport) return 0;
-    return @intCast(@min(@as(u64, content_height_px) - viewport, @as(u64, std.math.maxInt(u32))));
+/// 콘텐츠가 **뷰포트 높이**를 넘는 양. 뷰포트를 직접 받는다 — 예전엔 (backing, header)를 받아 여기서 다시
+/// 빼는 바람에 "상태바를 빼야 한다"를 아는 곳이 하나 더 생겼다. 뺄셈은 큰 쪽에서 작은 쪽을 빼므로 u32로 닫힌다.
+pub fn sidebarMaxScrollPx(content_height_px: u32, viewport_height_px: u32) u32 {
+    if (content_height_px <= viewport_height_px) return 0;
+    return content_height_px - viewport_height_px;
 }
 
 /// 사이드바 스크롤바를 **공용 paint 경로**로 그린다(SV4a). 발행된 tree를 `ui_paint`가 quad op으로
@@ -1247,8 +1260,12 @@ pub fn appendSidebarScrollbar(self: *AppSession) void {
 /// 이걸 안 거친다. 반환 null = 완전히 헤더 위(스킵). clipped=true면 위쪽이 잘려(상단이 헤더 경계에 abut) 호출자가 둥근
 /// 상단 모서리를 죽인다(라운드 quad가 헤더 경계에서 어색하지 않게). 셀(밴드 sentinel·glyph)은 .m이 frame 오프셋으로
 /// 따로 스크롤+scissor하므로 이 경로는 GpuQuad 전용이다(둘 다 같은 sidebar_scroll_offset_px를 쓴다 — 단일 출처).
+///
+/// **하단은 여기서 자르지 않는다.** 뷰포트 아래(상태바 띠)는 렌더러가 `SidebarScissor`로 셀과 quad를 함께
+/// 자른다 — 안전망을 호출자마다 반복하지 않기 위해서다. 여기 남은 상단 산술은 "라운드 모서리를 죽인다"는
+/// **시각 규칙** 때문이지 안전망이 아니다: scissor는 자를 수 있어도 모서리를 각지게 만들 수는 없다.
 pub fn sidebarScrollClipQuad(self: *const AppSession, abs_y: f32, h: f32) ?struct { y: f32, h: f32, clipped: bool } {
-    const header: f32 = @floatFromInt(self.sidebar_header_height_px);
+    const header: f32 = @floatFromInt(sidebarViewport(self).top);
     const off: f32 = @floatFromInt(self.sidebar_scroll_offset_px);
     var y = abs_y - off;
     var hh = h;
@@ -1319,13 +1336,12 @@ pub fn sidebarScrollGutterPx(self: *const AppSession) u32 {
 
 pub fn sidebarScrollExtent(self: *const AppSession) ?SidebarScrollExtent {
     if (self.sidebar_width_px == 0) return null;
-    const header = self.sidebar_header_height_px;
-    const bottom = self.backing_height_px -| self.statusBarHeightPx();
-    if (bottom <= header) return null;
+    const viewport = sidebarViewport(self); // 트랙 = 뷰포트. thumb이 끝에 닿는 순간 스크롤도 끝나야 하므로 같은 구간이다.
+    if (viewport.isEmpty()) return null;
     const max_offset = sidebarMaxScroll(self);
     if (max_offset == 0) return null; // 안 넘침 — 스크롤바 없음
     return .{
-        .rect = .{ .x = 0, .y = header, .w = self.sidebar_width_px, .h = bottom - header },
+        .rect = .{ .x = 0, .y = viewport.top, .w = self.sidebar_width_px, .h = viewport.height() },
         .content_h_px = chrome.components.sidebar.contentHeight(sidebarRenderRows(self), sidebarMetrics(self)),
         .max_offset_px = max_offset,
     };

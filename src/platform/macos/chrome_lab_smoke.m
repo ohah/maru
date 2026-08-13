@@ -71,6 +71,10 @@ void maru_macos_chrome_lab_smoke_render(
     uint32_t sidebar_width_px,
     uint32_t sidebar_bg, /* Zig(토큰)가 준다 — `.m`은 색을 지어내지 않는다 */
     uint32_t status_bar_height_px,
+    /* SB1 §5.3: 사이드바 표면(셀·layer 0 quad)을 자를 구간. 제품과 같은 계약으로 그대로 넘긴다 —
+       bottom <= top이면 클립 없음이라 기존 시나리오는 0,0으로 캡처가 바이트 동일하다. */
+    uint32_t sidebar_scissor_top_px,
+    uint32_t sidebar_scissor_bottom_px,
     MaruChromeLabSmokeResult *result
 ) {
     if (result == NULL) {
@@ -166,7 +170,7 @@ void maru_macos_chrome_lab_smoke_render(
         glyphs,
         glyph_count,
         status_bar_height_px, // SB1 §5.2: strip 바닥을 여기서 끊는다(0이면 창 바닥까지 = 기존 동작)
-        0, 0, // 사이드바 셀 scissor — lab은 사이드바 셀을 안 그린다(bottom <= top → scissor 없음, v168)
+        sidebar_scissor_top_px, sidebar_scissor_bottom_px, // SB1 §5.3: 사이드바 표면 클립(0,0이면 클립 없음, v168)
         NULL, 0 // 셀 clip 표 — lab은 어떤 셀도 자르지 않는다(모든 clip_index=0, v169)
     );
     result->draw_submitted = drew ? 1 : 0;

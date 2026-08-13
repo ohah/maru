@@ -80,6 +80,29 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             _ = notification_ops.pushNotificationHistory(self, "MARU", "self-verify", 0);
         }
     }
+    // MARU_FORCE_SIDEBAR_CARDS=<n> — 워크스페이스 카드를 n개까지 늘려 사이드바 콘텐츠가 뷰포트(헤더 아래 ~
+    // 상태바 위)를 넘치게 만든다. 아래 호버 픽스처와 짝이다: 경계를 넘는 카드가 있어야 "뷰포트 밖으로 샜나"가
+    // 화면에 나타난다. 상한은 캡처 편의상 32(각 카드가 실제 PTY를 띄우므로 무한정 늘리지 않는다).
+    if (std.c.getenv("MARU_FORCE_SIDEBAR_CARDS")) |raw| {
+        const want = @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1, 32);
+        while (self.tabs.items.len < want) _ = tab_ops.newTab(self) catch break;
+        sidebar_ops.rebuildSidebar(self) catch {};
+    }
+    // MARU_FORCE_SIDEBAR_SCROLL=<px|max> — 사이드바를 그만큼 굴려 둔 것처럼 만든다. 스크롤은 휠 이벤트라
+    // 캡처 하니스로 도달할 수 없는데, **스크롤 중에만 걸리는 클립 분기**(셀 상단 scissor)가 있어 그 상태의
+    // 헤더 밑줄·아이콘 호버가 살아남는지 볼 수단이 필요했다. `max`는 끝까지 굴린다.
+    if (std.c.getenv("MARU_FORCE_SIDEBAR_SCROLL")) |raw| {
+        const spec = std.mem.span(raw);
+        const max = sidebar_ops.sidebarMaxScroll(self);
+        self.sidebar_scroll_offset_px = if (std.mem.eql(u8, spec, "max"))
+            max
+        else
+            @min(std.fmt.parseInt(u32, spec, 10) catch 0, max);
+        sidebar_ops.rebuildSidebar(self) catch {};
+    }
+    // MARU_FORCE_SIDEBAR_HOVER=<슬롯 인덱스|edge|last> — 그 카드 슬롯에 포인터가 얹힌 것처럼 호버 밴드를 세운다.
+    // 여기서 한 번 세우고 **매 tick 다시 세운다**(reapplyForcedSidebarHover) — 이유는 그 함수 주석에 있다.
+    reapplyForcedSidebarHover(self);
     // MARU_FORCE_STICKY=1 — 첫 frame에 sticky 명령 배너를 세운다(SV6b 시각 검증). 실제로는 OSC 133 마크가 붙은
     // 명령 출력이 스크롤백을 채우고 사용자가 위로 굴려야 나타나므로(`core.stickyCommand`: view_offset>0 +
     // 위쪽에 `.input` 행) 캡처로는 절대 만들 수 없다 — 그래서 훅이 필요하다.
@@ -627,6 +650,61 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 ///
 /// 실제 상태는 셸 화면 관측이 정한다 — 그것을 캡처로 만들 방법이 없어서 훅이 필요하다(MARU_FORCE_AGENT와
 /// 같은 성격). env 미설정이면 무동작이라 일반 실행에 영향이 없다.
+/// 강제된 **사이드바 카드 호버**를 다시 세운다(캡처 전용, `MARU_FORCE_SIDEBAR_HOVER=<슬롯|last>`).
+///
+/// 호버 밴드는 rich 토큰에서 **layer 0 GPU quad**라 사이드바 셀과 다른 경로로 잘린다. 그 클립이 상태바
+/// 위에서 실제로 끊기는지는 캡처 하니스에 포인터가 없어 확인할 방법이 없었고, 뷰포트를 넘은 밴드가 상태바를
+/// 덮은 결함(docs/status-bar.md §5.3)이 그래서 헤드리스로 안 잡혔다.
+///
+/// **매 tick 다시 세운다.** 첫 frame에 한 번 세운 값은 렌더까지 살아남지 못한다 — 포인터가 사이드바 밖에
+/// 있으면 `hoverCursor`가 곧바로 `setHoveredSlot(null)`로 지운다(마우스가 창 위를 지나기만 해도 그렇다).
+/// 실측으로 그 때문에 첫 픽스처가 조용히 무동작이었다. `reapplyForcedAgentStates`가 폴링에 맞서 같은 일을
+/// 하는 것과 같은 규율이다. 이미 그 슬롯이면 재빌드하지 않는다(매 tick 재빌드 방지).
+///
+/// 값은 셋 중 하나다:
+/// - `edge` — **뷰포트 바닥을 가로지르는 슬롯**. 이 결함을 겨냥하는 값이다(밴드가 상태바와 겹칠 수 있는
+///   유일한 카드). 창 크기·폰트가 달라도 경계 카드를 스스로 찾으므로 인덱스를 손으로 맞출 필요가 없다.
+/// - `last` — 마지막 표시 슬롯. 콘텐츠가 뷰포트를 넘치면 **화면 밖**이라 아무것도 안 보인다(실측으로 그
+///   차이에 한 번 속았다). 목록 끝 렌더를 볼 때만 쓴다.
+/// - 정수 — 그 표시 슬롯(범위 밖은 마지막으로 clamp).
+///
+/// env 미설정이면 무동작.
+pub fn reapplyForcedSidebarHover(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_SIDEBAR_HOVER") orelse return;
+    const rows = self.sidebar_rows.items.len;
+    if (rows == 0) return;
+    const spec = std.mem.span(raw);
+    const want: usize = if (std.mem.eql(u8, spec, "edge"))
+        (sidebarViewportEdgeSlot(self) orelse return) // 넘치지 않는 창이면 겨냥할 경계가 없다 — 무동작
+    else if (std.mem.eql(u8, spec, "last"))
+        rows - 1
+    else
+        @min(std.fmt.parseInt(usize, spec, 10) catch 0, rows - 1);
+    if (self.hovered_slot) |cur| {
+        if (cur == want) return;
+    }
+    self.hovered_slot = want;
+    sidebar_ops.rebuildSidebar(self) catch {}; // 호버 밴드는 재빌드가 발행한다(setHoveredSlot과 같은 경로)
+    self.metal_dirty = true;
+}
+
+/// 뷰포트 바닥(상태바 위)을 **가로지르는** 표시 슬롯. 위아래가 온전히 안/밖인 카드는 경계를 증언하지
+/// 못하므로, 클립을 검증하려면 걸친 카드를 골라야 한다. 콘텐츠가 안 넘치면 null(그럴 땐 겨냥할 경계가 없다).
+/// 누적 산술은 렌더와 같은 도메인(`sidebarRenderRows`·`rowHeight`)을 쓴다 — 다른 도메인으로 세면 한 칸 밀린다.
+fn sidebarViewportEdgeSlot(self: *AppSession) ?usize {
+    const viewport = sidebar_ops.sidebarViewport(self);
+    if (viewport.isEmpty()) return null;
+    const metrics = sidebar_ops.sidebarMetrics(self);
+    const bottom: i64 = @intCast(viewport.bottom);
+    var row_top: i64 = @as(i64, @intCast(viewport.top)) - @as(i64, @intCast(self.sidebar_scroll_offset_px));
+    for (sidebar_ops.sidebarRenderRows(self), 0..) |row, i| {
+        const row_bottom = row_top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(row, metrics)));
+        if (row_top < bottom and row_bottom > bottom) return i;
+        row_top = row_bottom;
+    }
+    return null;
+}
+
 pub fn reapplyForcedAgentStates(self: *AppSession) void {
     const running_raw = std.c.getenv("MARU_FORCE_AGENT");
     const blocked_raw = std.c.getenv("MARU_FORCE_BLOCKED");

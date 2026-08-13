@@ -12986,6 +12986,7 @@ pub const AppSession = struct {
         }
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
+        debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -14781,18 +14782,55 @@ pub const AppSession = struct {
         }) catch {};
     }
 
-    /// 사이드바 세로 스크롤의 최대 오프셋(backing px) — 표시 카드 전체 높이가 헤더 아래 뷰포트를 넘는 양. 순수 함수라
-    /// 헤드리스 단위 테스트 가능. content = 표시 탭 수 × 슬롯 높이, viewport = backing 높이 − 헤더(카드 아래 "+"는
-    /// 헤더로 이동해 콘텐츠에 없음). content ≤ viewport(또는 슬롯 0)면 0(스크롤 불필요). u64로 계산해 곱셈 overflow 회피.
-    /// 사이드바 셀을 자를 세로 구간 `[top, bottom)`(backing px). **렌더러는 이 값을 그대로 쓴다** —
-    /// 게이트·클램프가 전부 여기 있어 `.m`에는 산술이 남지 않는다(docs/metal-ui-layout-paint.md §5 "배치를 아는
-    /// 곳은 하나"). `bottom <= top`이면 scissor 없음(전체 그리기)이라는 뜻이다.
+    /// 사이드바 스크롤 뷰포트의 세로 구간 `[top, bottom)`(backing px). **이 구간의 단일 출처다.**
+    ///
+    /// 예전엔 같은 구간을 넷이 각자 계산했다 — 셀 scissor(`sidebarScissorPx`)·스크롤바 트랙
+    /// (`sidebarScrollExtent`)·최대 스크롤(`sidebarMaxScroll`)·quad 클립(`sidebarScrollClipQuad`).
+    /// 그중 **quad 클립만 하단을 몰랐고**, 그래서 카드 호버 밴드(layer 0 quad)가 뷰포트를 넘어 상태바
+    /// 띠 위에 그려졌다 — 사이드바에 마우스를 올리면 상태바가 사라졌다(사용자 제보). 경계가 한 곳이면
+    /// 나중에 창 바닥에 무엇이 더 붙어도 그 한 곳만 바뀐다.
+    ///
+    /// - `top` = **헤더 아래**. 검색·아이콘 줄은 고정이라 스크롤 콘텐츠가 그 위를 지나면 안 된다.
+    /// - `bottom` = **상태바 위**. 상태바는 창 전폭이라 사이드바 아래를 지난다(docs/status-bar.md §1).
+    ///   안 빼면 마지막 카드가 상태바 뒤로 숨고 스크롤로 꺼낼 수 없다.
+    ///
+    /// `bottom <= top`(창이 헤더+상태바보다 낮다)이면 뷰포트가 없다 — `height()`가 0이고, 소비처는 각자
+    /// "클립 없음"·"스크롤 없음"으로 접는다.
+    pub const SidebarViewport = struct {
+        top: u32,
+        bottom: u32,
+
+        /// 뷰포트 높이. 뒤집힌 구간은 0이다 — 음수 높이를 만들어 아래로 흘리지 않는다.
+        pub fn height(self: SidebarViewport) u32 {
+            return self.bottom -| self.top;
+        }
+
+        /// 그릴 자리가 없다(창이 헤더+상태바보다 낮다).
+        pub fn isEmpty(self: SidebarViewport) bool {
+            return self.bottom <= self.top;
+        }
+    };
+
+    /// 사이드바 **표면**(셀 + layer 0 quad)을 자를 세로 구간 `[top, bottom)`(backing px). 값은
+    /// `SidebarViewport`에서 나오고, 여기서는 "언제 자르나"라는 게이트만 얹는다. **렌더러는 이 값을 그대로
+    /// 쓴다** — 게이트·클램프가 전부 여기 있어 `.m`에는 산술이 남지 않는다(docs/metal-ui-layout-paint.md §5
+    /// "배치를 아는 곳은 하나"). `bottom <= top`이면 scissor 없음(전체 그리기)이라는 뜻이다.
     ///
     /// 자르는 이유가 위아래 서로 다르다:
     /// - **위**(header): 스크롤된 카드가 헤더 위로 새는 것을 막는다. 스크롤이 0이면 샐 것이 없으므로 안 자른다
     ///   (기존 동작 보존 — 헤더를 늘 자르면 헤더 영역에 걸친 표면이 없는데도 scissor가 걸린다).
     /// - **아래**(status bar): `sidebar_ops.sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
     ///   맨 아래 카드가 상태바 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
+    ///
+    /// **사이드바 quad(layer 0 = under 버킷)도 이 구간의 `bottom`으로 자른다.** 그 버킷은 사이드바 전용이고,
+    /// 그리는 순서가 상태바 배경(bottom 버킷)·상태바 텍스트(터미널 셀 패스)보다 **뒤**라서 클립이 없으면
+    /// 뷰포트를 넘은 밴드가 상태바를 덮는다 — 실제로 카드 호버에서 그랬다. 클립이 렌더 순서 한 곳에 있으므로
+    /// 사이드바에 quad를 새로 추가해도 각자 안전망을 기억할 필요가 없다.
+    ///
+    /// ⚠️ **`top`은 셀 전용이다.** under 버킷에는 스크롤을 타지 않는 헤더 고정 quad(검색 줄 밑줄·헤더 아이콘
+    /// 호버 배경·접힘 토글 호버)가 섞여 있어, 상단까지 같이 자르면 스크롤 중에 그것들이 사라진다. 셀 쪽에서
+    /// 상단 clip이 무해한 것은 헤더 glyph가 **터미널 셀 패스**라 애초에 이 구간에 없기 때문이다 — quad는
+    /// 사정이 반대다. 스크롤된 카드 quad의 상단은 `sidebarScrollClipQuad`가 발행 시점에 이미 자른다.
     pub const SidebarScissor = struct { top: u32, bottom: u32 };
 
     /// 배경 이미지(window.background-image, F2-1) 디코드 캐시를 config 경로와 동기화한다. 경로가 바뀐 frame에만
@@ -49392,19 +49430,57 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     try std.testing.expect(!session.hasPendingPaste()); // 둘 다 다 나갔다
 }
 
-test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스크롤 불필요면 0, overflow 안전)" {
-    // content 0이면 항상 0(빈 사이드바). 이제 content_height_px를 직접 받는다(가변 높이라 count*slot_h 대신 contentHeight 누적).
-    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(0, 600, 60));
-    // viewport = backing(600) − header(60) = 540. content 400 ≤ 540 → 0(안 넘침).
-    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(400, 600, 60));
+test "sidebarMaxScrollPx: 콘텐츠가 뷰포트를 넘는 양(스크롤 불필요면 0, 언더플로 없음)" {
+    // content 0이면 항상 0(빈 사이드바). content_height_px를 직접 받는다(가변 높이라 count*slot_h 대신 contentHeight 누적).
+    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(0, 540));
+    // content 400 ≤ viewport 540 → 0(안 넘침).
+    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(400, 540));
     // content 800 > 540 → max = 800 − 540 = 260.
-    try std.testing.expectEqual(@as(u32, 260), sidebar_ops.sidebarMaxScrollPx(800, 600, 60));
-    // 정확히 뷰포트와 같으면 0(경계). content 540, viewport 540.
-    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(540, 600, 60));
-    // 헤더가 backing보다 크면 viewport 0 → content 전부가 스크롤 범위(degenerate but 안전, 음수 언더플로 없음).
-    try std.testing.expectEqual(@as(u32, 160), sidebar_ops.sidebarMaxScrollPx(160, 50, 60));
-    // content 0이면 0.
-    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(0, 600, 60));
+    try std.testing.expectEqual(@as(u32, 260), sidebar_ops.sidebarMaxScrollPx(800, 540));
+    // 정확히 뷰포트와 같으면 0(경계).
+    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarMaxScrollPx(540, 540));
+    // 뷰포트 0(창이 헤더+상태바보다 낮다)이면 content 전부가 스크롤 범위 — degenerate지만 음수 언더플로는 없다.
+    try std.testing.expectEqual(@as(u32, 160), sidebar_ops.sidebarMaxScrollPx(160, 0));
+}
+
+// 사이드바 뷰포트 `[top, bottom)`은 **하단 경계의 단일 출처**다. 이 테스트가 증명하는 계약이 곧
+// 이번 버그의 루트커즈다: 예전엔 셀 scissor·스크롤바 트랙·max scroll·quad 클립이 각자 구간을 계산했고
+// quad 클립만 상태바를 몰라서 카드 호버 밴드가 상태바를 덮었다. 넷이 같은 값을 쓰는지 여기서 못박는다.
+test "sidebarViewportPx: 헤더 아래에서 시작해 상태바 위에서 끝난다(뒤집히면 빈 뷰포트)" {
+    // 상태바 22px, 헤더 60px, 창 600px → [60, 578), 높이 518.
+    const vp = sidebar_ops.sidebarViewportPx(600, 60, 22);
+    try std.testing.expectEqual(@as(u32, 60), vp.top);
+    try std.testing.expectEqual(@as(u32, 578), vp.bottom);
+    try std.testing.expectEqual(@as(u32, 518), vp.height());
+    try std.testing.expect(!vp.isEmpty());
+
+    // 상태바가 꺼지면(status-bar.show=false → 높이 0) 바닥은 창 끝이다 — 게이트가 하나라 소비처는 안 바뀐다.
+    const no_bar = sidebar_ops.sidebarViewportPx(600, 60, 0);
+    try std.testing.expectEqual(@as(u32, 600), no_bar.bottom);
+
+    // 창이 헤더+상태바보다 낮으면 구간이 뒤집힌다 → 빈 뷰포트(높이 0). 음수 높이를 아래로 흘리지 않는다.
+    const tiny = sidebar_ops.sidebarViewportPx(70, 60, 22);
+    try std.testing.expect(tiny.isEmpty());
+    try std.testing.expectEqual(@as(u32, 0), tiny.height());
+
+    // 상태바가 창보다 크다(degenerate) → bottom 0, 빈 뷰포트. saturating 뺄셈이라 언더플로가 없다.
+    const inverted = sidebar_ops.sidebarViewportPx(20, 0, 22);
+    try std.testing.expectEqual(@as(u32, 0), inverted.bottom);
+    try std.testing.expect(inverted.isEmpty());
+}
+
+test "사이드바 셀 scissor의 하단은 뷰포트 bottom과 같은 값이다(단일 출처)" {
+    // scissor는 "언제 자르나"라는 게이트만 얹고 구간 값은 뷰포트에서 가져온다. 둘이 갈리면 셀은 상태바 위에서
+    // 끊기는데 quad는 안 끊기는(또는 그 반대) 상태가 되고, 그것이 이번 결함의 모양이었다.
+    const vp = sidebar_ops.sidebarViewportPx(600, 60, 22);
+    // 스크롤 0: 상단은 안 자르고(기존 동작 보존) 하단만 뷰포트 bottom에서 자른다.
+    const unscrolled = sidebar_ops.sidebarScissorPx(600, true, 60, 0, 22);
+    try std.testing.expectEqual(@as(u32, 0), unscrolled.top);
+    try std.testing.expectEqual(vp.bottom, unscrolled.bottom);
+    // 스크롤 중: 상단도 헤더(=뷰포트 top)에서 자른다. 두 경계 모두 뷰포트에서 나온다.
+    const scrolled = sidebar_ops.sidebarScissorPx(600, true, 60, 40, 22);
+    try std.testing.expectEqual(vp.top, scrolled.top);
+    try std.testing.expectEqual(vp.bottom, scrolled.bottom);
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

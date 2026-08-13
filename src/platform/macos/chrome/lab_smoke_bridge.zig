@@ -46,5 +46,13 @@ pub extern fn maru_macos_chrome_lab_smoke_render(
     /// SB1 §5.2: 그 strip의 바닥을 끊을 상태바 높이. **이 둘이 있어야 strip 클리핑이 Lab에서 그려진다** —
     /// 그전까지는 `.m`이 두 값을 0으로 박아 두어 §5.2가 자동 가드 없이 남아 있었다.
     status_bar_height_px: u32,
+    /// SB1 §5.3: 사이드바 표면(셀·layer 0 quad)을 자를 세로 구간 `[top, bottom)`. `.m`은 받은 값을 그대로
+    /// 쓴다(제품과 같은 계약). `bottom <= top`이면 클립 없음이라, 기존 시나리오는 둘 다 0을 넘겨 캡처가
+    /// 바이트 동일하다 — §5.2가 strip 두 값을 더할 때 쓴 것과 같은 방식이다.
+    ///
+    /// 이 둘이 없던 동안 §5.3은 **값만 테스트되고 적용은 아무도 안 보는** 상태였다: `.m`에서 under quad
+    /// 클립을 지워도 Zig 테스트가 전부 green이었다.
+    sidebar_scissor_top_px: u32,
+    sidebar_scissor_bottom_px: u32,
     result: *NativeResult,
 ) void;

@@ -689,6 +689,10 @@ GPU 로 UI 를 그리는 선택의 대가라 나중에 붙이기 비싸다. 지�
     래스터 결과를 꺼내려고 넣었다). **배포 빌드에서는 반드시 빼야 한다.**
   - 앱 아이콘·런치 스크린이 없다.
   - iOS 는 privacy manifest(`PrivacyInfo.xcprivacy`)와 프로비저닝이 필요하다.
+  - **`Info.plist` 를 새로 짜면 `CADisableMinimumFrameDuration` 을 옮겨 실어야 한다.** 지금은
+    하네스 템플릿(`tools/mobile-poc/Info.plist.in`)에만 있고 `doc_claims.sh` 도 거기를 본다 —
+    제품 번들을 따로 만들면 **판정자는 계속 통과하는데 번들에서만 빠진다**. 없으면 주기를
+    config(M10)로 열어도 ProMotion 기기에서 조용히 60 으로 잘린다([계약 §3.2](../mobile-platform.md)).
   - Play 는 targetSdk 하한과 App Bundle 을 요구한다 — Gradle 을 안 쓰기로 한 결정([계약 §1])과
     다시 만나는 지점이라, 그때 Gradle 도입을 재검토한다.
 

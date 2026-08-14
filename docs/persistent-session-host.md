@@ -712,8 +712,14 @@ checked-add한 뒤 stable `RemoteRuntime`의 direct-input byte owner와 typed re
 생기지 않고 tick은 backend-owned queue를 다시 복사하거나 재시도하지 않는다.
 
 epoch은 runtime stable owner가 발급하는 nonzero 값이고 sequence는 epoch 안에서 1부터 checked-monotonic으로 증가한다.
-CR2d1의 record는 아직 paste 계열 batch만 분류하며 기존 blocking key bytes와 control barrier는 CR2d2까지 현 경로를
-사용한다. reconnect sealing과 `PausedPaste` quarantine은 CR2e가 이 epoch/sequence transcript를 소비할 때 열고, CR2d1이
+CR2d2는 paste-family admission enum을 넓히지 않고 별도 closed `QueueRecordKind`에 `key_bytes`,
+`scroll_to_bottom`, `core_command`를 더한다. blocking key, paste-family batch, scroll/core barrier는 한 stable epoch의 checked sequence를 공유한다.
+byte와 record, 또는 control과 record 양쪽 capacity를 먼저 reserve한 뒤에만 append해 실패 시 queue/offset/record/sequence를
+바꾸지 않는다. 기존 direct-input backing과 control FIFO의 byte barrier가 물리 wire 순서를 계속 소유하며, byte prefix 또는
+control이 Client outbound owner로 넘어간 시점에 transcript 앞 record도 같은 순서로 retire한다. 이 단계는
+`writeNonBlocking`의 partial-progress API, event cursor, Window 이동을 바꾸지 않는다.
+
+reconnect sealing과 `PausedPaste` quarantine은 CR2e가 이 epoch/sequence transcript를 소비할 때 열고, CR2d1/2가
 원문을 별도 복제하거나 Window move를 구현하지 않는다. CR2d1 golden trace는 blocked remote wire에서
 `paste(1) -> ime_commit(2, commit+replay atomic) -> osc52_response(3)`와 normalized bytes, AppSession queue 0,
 Client pending frame이 막힌 동안 세 record와 byte backing이 그대로 남고, 해제 뒤 기존 pending frame 다음에 batch wire가

@@ -1188,8 +1188,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   closed kind와 nonzero epoch/checked sequence, IME commit+replay atomicity, LF→CR, cap/OOM/sequence 실패 mutation 0,
   blocked-wire retained queue와 eventual ordered wire golden trace, remote `AppSession.pending_pastes` entry 0을
   Debug·ReleaseFast에서 고정한다.
-  local은 `caller_owned`로 기존 queue 의미가 변하지 않으며 key/control merge와 Window 이동은 각각 CR2d2/CR2d4다.
-  CR2d2~d4: key/control ordered merge, event cursor, Window 이동·close 및 cross-Window parity. CR2e: fake
+  local은 `caller_owned`로 기존 queue 의미가 변하지 않는다. CR2d2는 remote blocking key, paste-family batch,
+  scroll-to-bottom, core-command를 closed six-kind record와 한 epoch/checked sequence에 합치고, blocked wire에서
+  `key -> paste -> scroll -> key -> scroll -> core-command` transcript와 같은 physical frame 순서, sequence exhaustion
+  mutation 0, byte/control 순차 retire, control transcript drift의 wire 전 거부를 Debug·ReleaseFast에서 고정한다. 기존 direct-input/control barrier와
+  `writeNonBlocking` partial 의미는 유지한다. CR2d3~d4는 event cursor, Window 이동·close 및 cross-Window parity다. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

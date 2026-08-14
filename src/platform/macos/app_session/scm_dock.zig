@@ -51,7 +51,8 @@ pub const ScrollItems = struct {
 fn listViewportHeightPx(self: *const AppSession, has_branch: bool) u32 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    const fixed = m.summary_h + if (has_branch) m.branch_h else 0;
+    // 탭 줄도 고정 chrome이다 — 빼지 않으면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가 어긋난다.
+    const fixed = m.tab_h + m.summary_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }
 
@@ -143,6 +144,9 @@ pub const Projection = struct {
     behind: u32,
     has_ab: bool,
     summary: component.types.Summary,
+    /// 탭 이름 옆의 **전체** 파일 수. 섹션 헤더의 `count`를 더해서 낸다 — 그 값은 접혀 있어도 잘려
+    /// 있어도 전체를 말하므로, 화면 행을 세는 것과 달리 10행 상한·접기에 흔들리지 않는다.
+    file_count: u32,
 };
 
 /// 모델 → 항목 열 + 스크롤 투영. **렌더와 포인터가 같은 함수를 지난다** — 두 곳이 각자 만들면 스크롤한
@@ -156,6 +160,12 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     for (model.rows, items, 0..) |row, *item, index| {
         item.* = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
     }
+
+    var file_count: u32 = 0;
+    for (model.rows) |row| switch (row) {
+        .section => |section| file_count += @intCast(section.count),
+        else => {},
+    };
 
     const branch: []const u8 = if (model.head.detached)
         "(detached)"
@@ -177,6 +187,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .behind = model.head.behind,
         .has_ab = model.head.has_ab,
         .summary = .{ .added = model.total_added, .removed = model.total_removed },
+        .file_count = file_count,
     };
 }
 
@@ -200,6 +211,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .behind = projection.behind,
         .has_ab = projection.has_ab,
         .summary = projection.summary,
+        .changed_file_count = projection.file_count,
     };
 }
 

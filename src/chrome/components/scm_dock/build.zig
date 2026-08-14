@@ -18,6 +18,7 @@ pub const NodeIds = struct {
     pub const branch: u64 = 0x5343_0003;
     pub const scroll_track: u64 = 0x5343_0004;
     pub const scroll_thumb: u64 = 0x5343_0005;
+    pub const tabs: u64 = 0x5343_0006;
 
     /// 항목 하나가 쓰는 id 차선. 행 자신과 그 행의 동작 버튼이 같은 차선을 나눠 쓰므로, 가상화로 창이
     /// 밀려도 같은 항목이 같은 id 구조를 유지한다.
@@ -67,8 +68,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 행 + 행 동작 버튼 + 상단 요약/스크롤/브랜치 셋.
-    const node_count = items.len + action_buttons + 3;
+    // 행 + 행 동작 버튼 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
+    const node_count = items.len + action_buttons + 4;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -164,8 +165,19 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const scroll_track = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
     const scroll_thumb = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
 
-    const top = buffers.nodes[action_cursor..][0..3];
+    const top = buffers.nodes[action_cursor..][0..4];
+    // 탭 줄은 뷰 스위처와 요약 줄 **사이**다(§3.5.1 목업). **action을 붙이지 않는다** — 히스토리·에이전트
+    // 탭은 P4·P5에 생기고, 지금 눌러도 갈 곳이 없다. 그래도 그리는 이유는 P1 계약이 "누를 수 없는
+    // 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"이기 때문이다: 탭 줄이 통째로 없으면 사용자는
+    // 이 뷰가 목록 하나뿐인 화면이라고 읽는다.
     top[0] = tree.card(.{
+        .id = NodeIds.tabs,
+        .style = .{ .height = .{ .px = @floatFromInt(m.tab_h) } },
+        .variant = .surface,
+        .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
+        .overflow = .clip,
+    }, &.{});
+    top[1] = tree.card(.{
         .id = NodeIds.summary,
         .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
         .variant = .surface,
@@ -173,7 +185,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
-    top[1] = tree.scrollArea(.{
+    top[2] = tree.scrollArea(.{
         .id = NodeIds.content,
         .style = .{ .height = .{ .fill = 1 } },
         .scroll = .{
@@ -195,7 +207,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         },
     }, row_nodes);
     // 브랜치 줄은 **목록 아래**다(2판 — §3.5). 브랜치를 못 잡았으면 높이 0으로 두어 그 줄이 아예 없다.
-    top[2] = tree.card(.{
+    top[3] = tree.card(.{
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
         .variant = .surface,
@@ -318,7 +330,7 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     // 호출처가 이 실패를 삼키면 도크가 통째로 멈추므로, 상한 산술은 `bufferSizes` 하나가 소유한다.
     const items = testItems();
     const sizes = bufferSizes(&items);
-    try testing.expectEqual(items.len + 3 + 3, sizes.nodes); // 행 4 + 버튼 3 + 고정 3
+    try testing.expectEqual(items.len + 3 + 4, sizes.nodes); // 행 4 + 버튼 3 + 고정 4(탭·요약·목록·브랜치)
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -365,4 +377,48 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
         .section_action, .scroll_thumb, .scroll_track => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
+}
+
+test "탭 줄은 요약 줄·목록 위에 있고 목록에서 자기 높이만큼 가져간다" {
+    // 목업 순서: 뷰 스위처 → 탭 줄 → 요약 줄 → 목록 → 브랜치 줄. 순서가 어긋나면 "무엇을 커밋할
+    // 것인가"를 고르기 전에 그 합계를 먼저 보게 된다. 그리고 탭 줄이 자리를 차지한 만큼 목록이
+    // 줄지 않으면 목록이 브랜치 줄 아래로 흘러 잘린다.
+    var storage: Storage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+    };
+    const frame = try buildTest(props, &storage);
+
+    const tabs = frame.tree.entries[frame.tree.find(NodeIds.tabs) orelse return error.MissingTabs].rect;
+    const summary = frame.tree.entries[frame.tree.find(NodeIds.summary) orelse return error.MissingSummary].rect;
+    const content = frame.tree.entries[frame.tree.find(NodeIds.content) orelse return error.MissingContent].rect;
+    const branch = frame.tree.entries[frame.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+
+    try testing.expect(tabs.y < summary.y);
+    try testing.expect(summary.y < content.y);
+    try testing.expect(content.y < branch.y);
+
+    const m = types.DockMetrics.resolve(props.scale_milli);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.tab_h)), tabs.height);
+    // 고정 chrome 셋을 뺀 나머지가 목록이다.
+    try testing.expectEqual(
+        props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h)),
+        content.height,
+    );
+}
+
+test "탭 줄에는 action이 없다(누를 수 없는 컨트롤을 누를 수 있게 두지 않는다)" {
+    // 히스토리·에이전트 탭은 P4·P5에 생긴다. 지금 action을 달면 눌러도 아무 일 없는 컨트롤이 된다 —
+    // 그리는 것(비활성 표시)과 누를 수 있는 것은 다른 결정이다.
+    var storage: Storage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+    };
+    const frame = try buildTest(props, &storage);
+    const tabs = frame.tree.entries[frame.tree.find(NodeIds.tabs) orelse return error.MissingTabs];
+    try testing.expectEqual(@as(?tree.UiAction, null), tabs.action);
 }

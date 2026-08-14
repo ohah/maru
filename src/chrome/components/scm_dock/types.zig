@@ -13,6 +13,10 @@ const ui_icon = @import("../../ui/icon.zig");
 /// platform이 값을 옮기고, 값이 갈리면 그 변환 함수가 exhaustive switch에서 컴파일로 걸린다.
 pub const Section = enum { staged, changes };
 
+/// 도크 탭(§3.5.1). **축이 다르면 화면을 나눈다** — 세 탭은 서로 다른 질문에 답하고 항목 단위도 다르다
+/// (변경 사항=파일, 히스토리=커밋, 에이전트=턴). 그래서 한 목록으로 합칠 수 없다.
+pub const Tab = enum { changes, history, agent };
+
 /// 행에 붙는 주 동작. 호버할 때만 보이는 컨트롤이다(§3.5.2).
 pub const RowAction = enum { stage, unstage, none };
 
@@ -92,11 +96,19 @@ pub const Props = struct {
     summary: Summary = .{},
     /// 목록 대신 그릴 한 줄 안내(`변경 사항 없음`·`읽는 중…`). 있으면 목록은 비어 있다.
     empty_notice: []const u8 = "",
+    /// 지금 열려 있는 탭. 모르는 값은 platform이 `.changes`로 clamp한다(§3.5.1) — component는 받은 값을
+    /// 그대로 그린다.
+    active_tab: Tab = .changes,
+    /// `변경 사항` 탭 이름 옆에 붙는 **전체** 파일 수. **`items`로 셀 수 없다** — 그쪽은 가상화된 창이라
+    /// 보이는 만큼만 오고, 스크롤 위치에 따라 숫자가 흔들린다.
+    changed_file_count: u32 = 0,
 };
 
 /// 도크 치수. Session Dock과 같은 방식으로 zoom을 곱해 만든다 — 두 뷰가 같은 축으로 커지고 줄어야
 /// 같은 컬럼에서 뷰를 갈아 끼울 때 행 높이가 튀지 않는다.
 pub const DockMetrics = struct {
+    /// 탭 줄(`변경 사항 (N) │ 히스토리 │ 에이전트`).
+    tab_h: u32,
     /// 요약 줄(`+N -N`).
     summary_h: u32,
     /// 그룹 헤더 높이.
@@ -129,6 +141,7 @@ pub const DockMetrics = struct {
             }
         };
         return .{
+            .tab_h = s.px(28, scale_milli),
             .summary_h = s.px(24, scale_milli),
             .section_h = s.px(24, scale_milli),
             .row_h = s.px(24, scale_milli),

@@ -586,6 +586,67 @@ test "git diff --numstat과 총 변경 줄 수가 같다 — §7이 그 근거�
     }
 }
 
+test "행을 되돌리면 두 원문이 그대로 나온다 — 무작위 200쌍" {
+    // **지금까지의 테스트는 전부 손으로 고른 예제였다.** 고른 사람이 생각하지 못한 모양은 검사되지 않는다.
+    // 여기서는 결과가 무엇이든 반드시 참이어야 하는 것만 본다 —
+    //   ① 왼쪽 행에서 filler를 빼고 이으면 왼쪽 원문이다(줄 순서·내용 그대로),
+    //   ② 오른쪽도 마찬가지,
+    //   ③ 두 행 배열의 길이가 같고,
+    //   ④ 줄 번호는 각 문서에서 1씩 증가한다,
+    //   ⑤ 같은 자리에 removed 없이 filler만 오는 일이 없다(짝이 어긋난 자리).
+    // 하나라도 깨지면 화면에 **틀린 대응**이 그려진다 — 빈 화면보다 나쁜 실패다.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0xD1FF);
+    const rnd = prng.random();
+    var case_i: usize = 0;
+    while (case_i < 200) : (case_i += 1) {
+        _ = arena.reset(.retain_capacity);
+        const alloc = arena.allocator();
+
+        // 같은 줄이 자주 겹치도록 어휘를 작게 잡는다 — 대응이 헷갈리는 모양이 여기서 나온다.
+        const vocab = [_][]const u8{ "a", "b", "c", "", "  ", "긴 줄 하나" };
+        const na = rnd.uintLessThan(usize, 12);
+        const nb = rnd.uintLessThan(usize, 12);
+        const left = try alloc.alloc([]const u8, na);
+        const right = try alloc.alloc([]const u8, nb);
+        for (left) |*l| l.* = vocab[rnd.uintLessThan(usize, vocab.len)];
+        for (right) |*r| r.* = vocab[rnd.uintLessThan(usize, vocab.len)];
+
+        const v = try compute(alloc, left, right, .{});
+        if (v != .compare) continue; // unchanged / too_large는 이 불변식의 대상이 아니다
+
+        const rows = v.compare;
+        try testing.expectEqual(rows.left.len, rows.right.len);
+
+        var li: usize = 0;
+        var ri: usize = 0;
+        for (rows.left, rows.right) |lr, rr| {
+            if (lr.kind != .filler) {
+                try testing.expect(li < left.len);
+                try testing.expectEqualStrings(left[li], lr.text);
+                try testing.expectEqual(@as(?u32, @intCast(li + 1)), lr.line);
+                li += 1;
+            } else {
+                try testing.expectEqual(@as(?u32, null), lr.line);
+            }
+            if (rr.kind != .filler) {
+                try testing.expect(ri < right.len);
+                try testing.expectEqualStrings(right[ri], rr.text);
+                try testing.expectEqual(@as(?u32, @intCast(ri + 1)), rr.line);
+                ri += 1;
+            } else {
+                try testing.expectEqual(@as(?u32, null), rr.line);
+            }
+            // 양쪽이 동시에 filler인 행은 아무것도 말하지 않는 빈 줄이다 — 서면 안 된다.
+            try testing.expect(!(lr.kind == .filler and rr.kind == .filler));
+        }
+        try testing.expectEqual(left.len, li);
+        try testing.expectEqual(right.len, ri);
+    }
+}
+
 test "2,000줄 규모에서도 git과 같은 수를 낸다 — 작은 예제만으로는 못 믿을 주장이다" {
     // **작은 예제 다섯 개로는 §7의 근거가 서지 않는다.** 위 대조는 한두 줄짜리라 어떤 알고리즘이든
     // 같은 답을 낸다. 여기서는 반복 줄이 많은 2,000줄 파일에 200군데 수정과 60군데 삽입을 섞는다 —

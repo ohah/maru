@@ -1199,8 +1199,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   boundary 1개를 Debug·ReleaseFast로 실행한다. CR2d4는 local queue transfer를 유지하면서 remote Term을 옛 Window
   transfer에서 제외하고, 실제 workspace move/source close와 full-window merge 뒤 같은 stable input record 및 BEL/OSC52
   cursor를 소비하는 AppSession 2개(root/import sentinel 3개 포함 actual 5)+boundary 1개를 Debug·ReleaseFast로
-  exact-count한다. CR2e: fake
-  `PreparedReconnect`, allocator fail-index, old destructor exact 1.
+  exact-count한다. CR2e-a는 pointer-free reducer의 job/runtime/local/mutation/close closed state와 job-generation-bound terminal
+  summary를 reducer 5개+boundary 1개로 Debug·ReleaseFast에서 고정한다. closed enum inventory와 authority-prefix
+  independent legal-event table에서 clean failure만 즉시 old writable로
+  복귀하고 ambiguous failure는 old-usability evidence 또는 frozen retry reservation을 요구하며, controller evidence 없는
+  publish와 close-pending 뒤 reconnect mutation은 illegal이다. 제품 caller는 0이다. CR2e-b는 final-address mutation
+  owner의 active ordinal lease 64개 상한·drain과 copied replay 거부, kind별 paused metadata, 1 MiB/runtime 1개/app-global 8 MiB
+  `PausedPaste`, `Clock.boot` 10분 TTL, resend peak reservation과 owned-buffer secure wipe를 substrate 4개+boundary 1개로
+  Debug·ReleaseFast에서 고정한다. 제품 caller와 actual stable queue splice는 0이다. CR2e-c~e의 heap-pinned generation slot,
+  제품 `PreparedReconnect`, allocator fail-index,
+  old destructor exact 1, 모든 reachable state sequence와 executor parity가 모두 green이기 전에는 CR2e 완료가 아니다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의

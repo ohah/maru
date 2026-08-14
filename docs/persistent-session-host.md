@@ -660,6 +660,14 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   claim으로 exact-once retirement를 결정한다. reconnect job은 backend map lock 아래 `RuntimeEntry`의
   `{shell_ptr,shell_generation,lifecycle=live}`를 검증해 `reconnect_pin_count`를 얻는다. close는 먼저 `closing`을 publish하고
   pin/callback 0을 기다린 뒤 shell을 파괴하며, move는 membership을 바꾸지 않으므로 허용한다.
+- stable shell의 `GenerationSlot`은 초기 inline `RemoteGenerationNode`와 exact current pointer, 최대 1개의 retiring row를
+  소유한다. reconnect candidate는 별도 heap final-address node에서 완성하고 값을 shell 안으로 move하지 않는다. initial inline
+  node는 retire 뒤 재사용하지 않는 tombstone이며 heap node만 canonical allocator가 회수한다. retiring row가 busy이면 같은
+  runtime의 다음 reconnect는 backoff한다. candidate, retiring screen/attachment와 frozen retry row는 첫 takeover 전에
+  app-global count/byte budget을 함께 예약하며, budget의 exact 수치와 peak RSS artifact가 없는 구현은 제품 publish를 열지 않는다.
+  `StableScreenSource`의 writer gate를 잡은 동안 slot current pointer와 screen target을 함께 바꾸므로 reader가 서로 다른
+  generation과 target의 중간 조합을 관측하지 않는다. publish 뒤 old node authority는 prepared token이 아니라 slot의 sealed
+  retiring row로 원자 이전한다.
 - host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정
   bytes는 enqueue할 때 `{shell_generation,input_epoch,sequence}`를 받아 shell queue로 소유권을 넘기고, Window 이동은 이
   queue를 옮기지 않는다. preedit 화면 자체는 기존처럼 Surface의 GUI-local 상태다. AppSession은 shell이 dedup해 낸 typed
@@ -5200,6 +5208,11 @@ state를 먼저 publish한 다음 owner turn에서 selection/search/viewport/pre
   payload와 resend staging을 zeroize한 뒤 free한다. 8 MiB는 live payload와 staging duplicate peak를 함께 센다. TTL은 sleep을
   포함하는 continuous monotonic deadline이며 wake/background에서 eager expiry한다. mutation freeze 이후 새 입력은 buffer하지 않고
   reconnect-busy로 거부한다.
+  CR2e-b substrate는 `std.Io.Clock.boot`를 이 continuous monotonic SSOT로 사용하고, 제품 배선 때 app-global 단일
+  owner로 설치할 final-address atomic byte budget을 payload copy 전과 resend staging copy 전에 각각 선점한다. 이 단계의
+  제품 caller는 0이므로 process singleton 설치 완료를 주장하지 않는다. stable queue view는 seal 호출 동안만 빌리며 저장하지
+  않고, `PreparedResend`에서 실제 queue로 옮기는 exact-once consume과 제품 queue/Client pending splice 및
+  wake/background eager-expiry caller는 CR2e-d/e가 연다.
 - host-backed pending paste/IME commit은 stable shell의 input epoch queue가 소유한다. old transport가 인수한 X가
   ambiguous면 뒤의 Y/input/control/paste/IME suffix를 같은 owner가 한 번에 quarantine한다. 새 controller generation이 publish되기
   전 stale Window callback은 generation mismatch로 queue를 consume하거나 free할 수 없다.
@@ -5311,6 +5324,10 @@ tagged phase payload가 job/runtime/local/mutation의 legal 조합만 표현하�
 sequence test는 모든 declared transition과 illegal pair의 fail-close를 검증한다. publish suffix는 pointer, generation,
 cursor store만 포함하며 notice/localization/history projection은 committed record를 tick-end에 best-effort로 만든다.
 allocation 실패가 이미 완료된 authority commit을 rollback하지 않는다.
+runtime 하나의 terminal publication은 job을 `healthy`로 바꾸지 않는다. coordinator가 exact runtime table을 전부 순회해 만든
+pointer-free terminal summary가 exact `job_generation`, `published_old=0`, `published_new+frozen_unavailable+ended=total`,
+`retry_reserved=frozen_unavailable`을 증명한 뒤에만 `healthy`를 “진행 중 job 없음” 의미로 게시한다. runtime input admission은
+이 job phase가 아니라 local `published_new`, ledger `new_controller_evidenced`, mutation `open`의 conjunction을 요구한다.
 
 `Shell.canDestroy()`는 `{render_borrows=0,reconnect_pins=0,pump_callbacks=0,mutation_leases=0,connection_leases=0,
 notice_action_leases=0,paused_pastes=0,close_intents=0}`의 conjunct다. UI projection 수명과 shell 수명은 별개다. Window가 닫혀

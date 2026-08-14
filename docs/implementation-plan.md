@@ -124,9 +124,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    두며 `RemoteRuntime`은 CR2d2 기준 Debug 32바이트, ReleaseFast 48바이트 증가한다. 기존 4,096-runtime 상한의 추가
    inline budget은 각각 128 KiB와 192 KiB다. **CR2d4 완료:** cross-Window move/merge의 기존
    `PreparedPendingPasteTransfer`는 local caller-owned queue만 옮기고 remote Term은 제외한다. 마지막 source Window를
-   닫은 뒤에도 stable input transcript와 BEL/OSC52 cursor가 같은 `RemoteRuntime`에 남는 parity를 golden test로 닫는다. CR2e에서 순수
-   `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
-   allocator fail-index를 검증한다.
+   닫은 뒤에도 stable input transcript와 BEL/OSC52 cursor가 같은 `RemoteRuntime`에 남는 parity를 golden test로 닫는다.
+   **CR2e-a 완료:** pointer-free `ReconnectReducer`가 job phase, runtime authority ledger, local publication,
+   mutation gate와 close overlay의 닫힌 전이를 소유한다. clean·ambiguous precommit 실패, controller evidence 없는
+   writable publish, frozen retry reservation 누락, terminal summary 위조를 closed enum inventory와
+   authority-prefix independent legal-event table로 거부한다. 제품 executor caller는 아직 0이다.
+   **CR2e-b 완료:** final-address owner-thread mutation lease는 runtime당 64개를 상한으로 sealing 게시 뒤 active ordinal set 0을 기다리고 copied
+   lease replay와 신규 admission을 거부한다. kind별 count/bytes/sequence range metadata를 남기며 완전본 paste 하나만
+   paste당 1 MiB·app-global 8 MiB atomic budget 아래 secure buffer로 격리한다. resend staging도 같은 budget에 포함하고
+   `Clock.boot` 10분 TTL과 prepared staging deinit/discard/expiry에서 non-elidable wipe 뒤 free한다. allocation 전 실패는
+   caller-owned source와 budget을 mutation 없이 보존한다. 제품 caller는 아직 0이며 실제 queue enqueue의 single-use consume은
+   CR2e-d/e가 닫는다.
+   **CR2e-c~e 미착수:** c는 heap-pinned
+   generation slot 저장 구조와 parity, d는 제품 타입 `PreparedReconnect` prepare/publish/retire와 allocator
+   fail-index, e는 reducer Decision과 실제 executor의 전수 parity·모든 reachable state sequence·close 경쟁·mixed
+   outcome·메모리 상한을 닫는다.
+   a~e 다섯 gate가 모두 green이기 전에는 CR2e 완료가 아니다.
 5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현
    Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인
    transport-neutral `ConnectionLease`와 generation 1 전용 `HostAdapter.ClientSlot` skeleton을 넣는다. `HostAdapter`는

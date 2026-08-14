@@ -117,7 +117,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `RemoteRuntime` queue로 소유 이전한다. batch는 checked-nonzero epoch/sequence와 byte range를 함께 기록하고 IME
    확정+replay 두 slice 및 LF→CR 정규화를 한 allocation transaction으로 수락한다. local Term은 closed
    `caller_owned` 결과로 기존 `AppSession.pending_pastes`를 계속 사용하며, remote 성공 뒤에는 Window-local queue entry를
-   만들지 않는다. CR2d2는 key/control ordered merge, CR2d3은 event
+   만들지 않는다. CR2d2는 paste 전용 public kind와 분리된 closed `QueueRecordKind`를 두고 blocking key bytes,
+   scroll-to-bottom 및 core-command barrier도 같은 stable epoch/checked sequence transcript에 합친다. byte backing과
+   control FIFO/barrier는 기존 물리 wire 순서를 유지하며 두 backing reserve 뒤에만 record를 게시하고, record는 실제
+   byte/control ownership이 Client로 넘어갈 때 같은 순서로 retire한다. CR2d3은 event
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.

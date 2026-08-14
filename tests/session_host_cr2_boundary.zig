@@ -245,12 +245,14 @@ test "CR2d1 경계는 remote stable batch queue와 Window queue exclusion을 고
 
     try std.testing.expectEqual(@as(usize, 2), count(owner, "test \"CR2d1 InputOwner batch"));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const InputBatchKind = enum(u8) {"));
+    const batch_kind = between(owner, "pub const InputBatchKind = enum(u8) {", "pub const InputBatch = struct {") orelse
+        return error.TestUnexpectedResult;
     inline for (.{ "paste = 1,", "ime_commit = 2,", "osc52_response = 3," }) |entry|
-        try std.testing.expectEqual(@as(usize, 1), count(owner, entry));
+        try std.testing.expectEqual(@as(usize, 1), count(batch_kind, entry));
     inline for (.{
         "epoch: u64 = 1,",
         "next_sequence: u64 = 0,",
-        "records: std.ArrayListUnmanaged(BatchRecord) = .empty,",
+        "records: std.ArrayListUnmanaged(QueueRecord) = .empty,",
         "enqueue_batch:",
     }) |entry| try std.testing.expectEqual(@as(usize, 1), count(owner, entry));
 
@@ -279,6 +281,44 @@ test "CR2d1 경계는 remote stable batch queue와 Window queue exclusion을 고
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "session.pending_pastes.get(target_id) == null"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, ".osc52_response, resp, false"));
     try std.testing.expectEqual(@as(usize, 2), count(app_input, ".ime_commit"));
+}
+
+test "CR2d2 경계는 key와 control의 단일 epoch sequence transcript를 고정한다" {
+    const allocator = std.testing.allocator;
+    const owner = try readSource(allocator, "src/app/input_owner.zig");
+    defer allocator.free(owner);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const QueueRecordKind = enum(u8) {"));
+    const kinds = between(owner, "pub const QueueRecordKind = enum(u8) {", "pub const QueueRecord = struct {") orelse
+        return error.TestUnexpectedResult;
+    inline for (.{
+        "paste = 1,",
+        "ime_commit = 2,",
+        "osc52_response = 3,",
+        "key_bytes = 4,",
+        "scroll_to_bottom = 5,",
+        "core_command = 6,",
+    }) |entry| try std.testing.expectEqual(@as(usize, 1), count(kinds, entry));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2d2 remote"));
+    const key_admission = between(runtime, "pub fn sendInput(", "pub fn sendInputNonBlocking(") orelse
+        return error.TestUnexpectedResult;
+    const scroll_admission = between(runtime, "pub fn requestScrollToBottom(", "pub fn queueCoreCommand(") orelse
+        return error.TestUnexpectedResult;
+    const command_admission = between(runtime, "pub fn queueCoreCommand(", "const max_direct_input_bytes") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(key_admission, ".kind = .key_bytes,"));
+    try std.testing.expectEqual(@as(usize, 1), count(scroll_admission, ".kind = .scroll_to_bottom,"));
+    try std.testing.expectEqual(@as(usize, 1), count(command_admission, ".kind = .core_command,"));
+    try std.testing.expectEqual(@as(usize, 5), count(runtime, "const sequence = try self.nextInputSequence();"));
+    const testing_queue = between(runtime, "const queue_testing = if (builtin.is_test) struct {", "fn failControlAdmission(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(testing_queue, "const sequence = try self.nextInputSequence();"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn validateControlRecord("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "try self.validateControlRecord("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn retireControlRecordNoFail("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "self.retireControlRecordNoFail();"));
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

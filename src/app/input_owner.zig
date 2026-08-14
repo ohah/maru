@@ -9,8 +9,8 @@ const core_command = @import("../session/core_command.zig");
 
 pub const RuntimeHandle = u64;
 
-/// AppKit callback에서 blocking write를 피해야 하는 완성된 byte batch의 출처다. key/control은 CR2d2가
-/// 같은 ordered owner로 합치기 전까지 이 enum에 넣지 않는다.
+/// AppKit callback에서 blocking write를 피해야 하는 완성된 byte batch의 출처다. CR2d2의 key/control은
+/// public batch admission이 아니므로 아래 enum을 넓히지 않고 별도 QueueRecordKind에서만 합친다.
 pub const InputBatchKind = enum(u8) {
     paste = 1,
     ime_commit = 2,
@@ -30,20 +30,43 @@ pub const BatchAdmission = enum(u8) {
     backend_owned,
 };
 
-pub const BatchRecord = struct {
-    kind: InputBatchKind,
+/// Stable remote input owner가 byte/control을 한 epoch 안에서 관측하는 closed 순서 역할이다.
+/// paste-family public admission 종류와 key/control transport 역할을 섞지 않기 위해 InputBatchKind와 분리한다.
+pub const QueueRecordKind = enum(u8) {
+    paste = 1,
+    ime_commit = 2,
+    osc52_response = 3,
+    key_bytes = 4,
+    scroll_to_bottom = 5,
+    core_command = 6,
+
+    pub fn fromBatch(kind: InputBatchKind) QueueRecordKind {
+        return switch (kind) {
+            .paste => .paste,
+            .ime_commit => .ime_commit,
+            .osc52_response => .osc52_response,
+        };
+    }
+
+    pub fn isControl(self: QueueRecordKind) bool {
+        return self == .scroll_to_bottom or self == .core_command;
+    }
+};
+
+pub const QueueRecord = struct {
+    kind: QueueRecordKind,
     epoch: u64,
     sequence: u64,
-    /// `RemoteRuntime.direct_input`에서 이 batch가 끝나는 exclusive byte offset.
+    /// byte record는 exclusive byte end, control record는 그 명령의 byte barrier다.
     end_offset: usize,
 };
 
-/// RemoteRuntime final owner에 inline으로 놓이는 CR2d1 queue transcript. byte backing은 기존
-/// `direct_input`이 소유하고 이 값은 typed boundary와 checked epoch/sequence만 소유한다.
+/// RemoteRuntime final owner에 inline으로 놓이는 stable ordered transcript. byte/control backing은 기존
+/// `direct_input`/`pending_controls`가 소유하고 이 값은 typed boundary와 checked epoch/sequence만 소유한다.
 pub const StableQueueState = struct {
     epoch: u64 = 1,
     next_sequence: u64 = 0,
-    records: std.ArrayListUnmanaged(BatchRecord) = .empty,
+    records: std.ArrayListUnmanaged(QueueRecord) = .empty,
 
     pub fn deinit(self: *StableQueueState, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);

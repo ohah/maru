@@ -18,6 +18,15 @@ fn colorAdd1(cp: u32, style: u32, col: u32, row: u32, adv: u32) void {
     bridge.maru_mobile_color_atlas_add(&one, 1, style, col, row, adv);
 }
 
+/// 키바를 **탭한다**(누르고 그 자리에서 뗀다). 계약은 이제 포인터 단계를 받는다 — 키가 손가락
+/// 크기라 화면을 넘치고, 가로로 밀면 스크롤이라 **손을 뗄 때** 키가 정해지기 때문이다.
+fn keybarTap(x: f32, y: f32) u32 {
+    const took = bridge.maru_mobile_keybar_pointer(0, x, y);
+    if (took == 0) return 0;
+    _ = bridge.maru_mobile_keybar_pointer(2, x, y);
+    return 1;
+}
+
 // 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
 var fake_ms: u64 = 0;
 fn now() u64 {
@@ -81,7 +90,7 @@ test "선택을 복사로 꺼낸다" {
     // `copy` 는 표의 마지막이다. 선택이 있으므로 줄에 나타나 있다.
     const sent_before = bridge.maru_mobile_input("", 0);
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(c.x, c.y));
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(c.x, c.y));
     const n = bridge.maru_mobile_take_copy(&buf, buf.len);
     try std.testing.expectEqualStrings("copyme", buf[0..n]);
     // **copy 는 키를 안 보낸다.** 키 경로로 새면 코드포인트 0 이 인코더로 가서 `key_unknown_id`
@@ -459,12 +468,12 @@ test "키바 탭이 키를 내고, 밖은 안 먹는다" {
 
     // 키바가 서기 전(build 전)에는 아무것도 안 먹어야 한다 — 위에서 build 했으므로 여기서는
     // "본문 한가운데" 로 확인한다.
-    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_keybar_tap(200, 400));
+    try std.testing.expectEqual(@as(u32, 0), keybarTap(200, 400));
 
     // esc: 첫 칸. 화면 폭 402 에 11개가 들어가므로 첫 칸은 왼쪽 끝 근처다.
     const esc = keyCenter(0);
     const before = bridge.maru_mobile_input("", 0);
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(esc.x, esc.y));
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(esc.x, esc.y));
     const after = bridge.maru_mobile_input("", 0);
     try std.testing.expectEqual(@as(u32, 1), after - before); // ESC = 1바이트
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
@@ -478,7 +487,7 @@ test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
 
     const ctrl = keyCenter(2); // 표의 셋째가 ctrl
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y));
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(ctrl.x, ctrl.y));
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods()); // MARU_MOD_CTRL
 
     // **빈 화면에서 본다.** 앞 테스트들이 화면을 글자로 채워 놨으면 새 글자가 기존 칸을
@@ -505,7 +514,7 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const ctrl = keyCenter(2);
-    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    _ = keybarTap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
 
     const before = bridge.maru_mobile_input("", 0);
@@ -524,9 +533,9 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
 test "Ctrl 을 다시 누르면 꺼진다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     const ctrl = keyCenter(2);
-    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    _ = keybarTap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
-    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    _ = keybarTap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
     bridge.maru_mobile_clear_error();
 }
@@ -723,14 +732,14 @@ test "복사 버퍼가 모자라면 알린다" {
     // ① 딱 맞으면 자르지 않고 알리지도 않는다.
     var exact: [6]u8 = undefined;
     bridge.maru_mobile_clear_error();
-    _ = bridge.maru_mobile_keybar_tap(c.x, c.y);
+    _ = keybarTap(c.x, c.y);
     try std.testing.expectEqual(@as(u32, 6), bridge.maru_mobile_take_copy(&exact, exact.len));
     try std.testing.expectEqualStrings("abcdef", &exact);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 
     // ② 한 칸 모자라면 채울 만큼 채우고 **알린다**.
     var small: [5]u8 = undefined;
-    _ = bridge.maru_mobile_keybar_tap(c.x, c.y);
+    _ = keybarTap(c.x, c.y);
     try std.testing.expectEqual(@as(u32, 5), bridge.maru_mobile_take_copy(&small, small.len));
     try std.testing.expectEqualStrings("abcde", &small);
     try std.testing.expectEqualStrings("copy_truncated", std.mem.span(bridge.maru_mobile_last_error()));

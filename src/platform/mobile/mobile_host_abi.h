@@ -239,13 +239,19 @@ unsigned long long maru_mobile_selection_span(void);
 /// 선택이 살아 있는가(1/0). host 가 복사 버튼을 띄울지 정할 때 쓴다.
 unsigned int maru_mobile_has_selection(void);
 
-/// 보조 키바 탭(논리 px). **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다** — 그것 없이는
+/// 보조 키바 포인터(논리 px). **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다** — 그것 없이는
 /// 프로세스를 못 멈추고(Ctrl+C) vim 에서 못 빠져나온다.
 ///
+/// `phase`: 0=down · 1=move · 2=up · 3=cancel (`maru_mobile_pointer` 와 같은 값).
 /// 1=키바가 먹었다(플랫폼은 더 할 일이 없다), 0=키바 밖이니 본문 처리로 넘어가라.
+///
+/// **탭과 가로 스크롤을 브리지가 가른다.** 키가 손가락 크기(44)라 폰 세로 폭을 넘으므로 밀어서
+/// 나머지에 닿아야 하고, 그래서 down 에서 바로 키를 칠 수 없다(밀려던 것이 입력이 된다).
+/// up 까지 기다려 움직인 거리가 임계 아래일 때만 키로 친다 — host 는 그 판정을 몰라도 된다.
+///
 /// **좌표 해석은 코어 쪽이 한다** — 그리는 자리와 판정하는 자리가 갈리면 눌러도 다른 키가
 /// 나간다(docs/mobile-platform.md §3).
-unsigned int maru_mobile_keybar_tap(float x, float y);
+unsigned int maru_mobile_keybar_pointer(unsigned int phase, float x, float y);
 
 /// 눌러 둔 수정자(sticky). 0=없음. 화면 표시는 브리지가 이미 하므로 host 가 꼭 볼 필요는
 /// 없고, 계측·접근성 라벨에 쓴다.

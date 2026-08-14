@@ -475,9 +475,113 @@ pub export fn maru_mobile_has_selection() u32 {
     return if (core.selectionViewportSpan() != null) 1 else 0;
 }
 
+/// 키 하나의 크기와 간격. **44 는 손가락 기준**(iOS HIG 44pt·Android 48dp)이고, 이 값을 지키면
+/// 키 11개가 폰 세로 폭을 넘는다 — 그래서 가로 스크롤이 함께 온다. 줄이거나 키를 버리는 대신
+/// **크기를 지키고 스크롤한다**(사용자 결정).
+const key_w: f32 = 44.0;
+const key_gap: f32 = 4.0;
+const key_h: f32 = 44.0;
+const key_bar_pad_x: f32 = 6.0;
+/// 키 라벨 크기. 44 카드에 15px 는 작아 눈에 안 들어왔다(화면으로 확인).
+const key_font: f32 = 20.0;
+/// 좌우 스크롤 여지 표시(`<`/`>`)가 차지하는 폭. **키가 지나가는 창은 이 안쪽**이라, 표시가
+/// 가장자리 키 위에 얹혀 라벨을 지우지 않는다.
+const edge_w: f32 = 26.0;
+
+/// 키바 밴드의 **세로 범위**(스크롤 판정용). 레이아웃이 매 프레임 채운다.
+var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
+var key_bar_max_scroll: f32 = 0;
+/// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
+var key_bar_scroll: f32 = 0;
+/// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
+var key_bar_fling: f32 = 0;
+
+var kb_active = false;
+var kb_down_x: f32 = 0;
+var kb_down_y: f32 = 0;
+var kb_last_x: f32 = 0;
+var kb_moved: f32 = 0;
+
+/// 키 하나를 그린다 — 테두리 + 키캡 면 + 가운데 라벨.
+fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
+    const armed = key_bar[i].sticky_mod != 0 and armed_mods != 0;
+    const r: draw.Rect = .{
+        .x = @intFromFloat(kx),
+        .y = @intFromFloat(ky),
+        .w = @intFromFloat(key_w),
+        .h = @intFromFloat(key_h),
+    };
+    // **경계선을 또렷하게 긋는다.** 손가락은 마우스와 달리 hover 로 더듬을 수 없어 **눌리는
+    // 자리가 보이는 것이 크기보다 먼저**다(테두리 없이 44 로 키웠더니 어디까지가 한 키인지
+    // 화면에서 안 보였다).
+    push(r, tk.get(if (armed) .accent_bar else .muted_fg), 0xFF, 10, 0);
+    const in: i32 = 2;
+    // **키캡처럼 면을 띄운다.** 채움이 본문 배경과 같으면 속이 빈 윤곽선으로 보인다 — 실제
+    // 키보드처럼 눌리는 면이 배경보다 밝아야 "누를 것" 으로 읽힌다.
+    push(.{ .x = r.x + in, .y = r.y + in, .w = r.w - 2 * @as(u32, @intCast(in)), .h = r.h - 2 * @as(u32, @intCast(in)) }, tk.get(if (armed) .tab_active_bg else .tab_hover_bg), 0xFF, 8, 0);
+    // 라벨은 키 한가운데. **실제 폭으로 잰다** — 글자 수 × 근사치로 재면 화살표처럼 advance 가
+    // 다른 글자가 왼쪽으로 쏠린다(화면으로 확인).
+    const label_w: f32 = @floatFromInt(textWidth(key_bar[i].label, @intFromFloat(key_font)));
+    pushText(key_bar[i].label, @intFromFloat(kx + (key_w - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed) .accent_bar else .surface_fg));
+}
+
+fn clampKeyBarScroll() void {
+    if (key_bar_scroll < 0) key_bar_scroll = 0;
+    if (key_bar_scroll > key_bar_max_scroll) key_bar_scroll = key_bar_max_scroll;
+}
+
+/// 남은 가로 관성을 한 프레임 몫만큼 흘린다. 터미널 세로 관성(host `fling_vy`)과 같은 모양이다.
+///
+/// **손가락이 닿아 있는 동안에는 안 흘린다.** `move` 가 이미 그만큼 스크롤했는데 여기서 또
+/// 흘리면 **같은 이동량이 두 번** 적용돼 손가락보다 두 배로 미끄러진다. 관성은 손을 뗀 뒤의 것이다.
+fn stepKeyBarFling() void {
+    if (kb_active or key_bar_fling == 0) return;
+    key_bar_scroll -= key_bar_fling;
+    clampKeyBarScroll();
+    key_bar_fling *= 0.92;
+    if (@abs(key_bar_fling) < 0.5) key_bar_fling = 0;
+}
+
+/// 보조 키바 포인터. **탭과 가로 스크롤을 여기서 가른다** — 키가 화면을 넘치므로 손가락으로
+/// 밀어 나머지에 닿아야 하고, 그러면 down 에서 바로 키를 누를 수 없다(밀려던 것이 입력이 된다).
+/// up 까지 기다려 **움직인 거리가 임계 아래일 때만** 키로 친다.
+///
+/// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
+pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
+    if (phase == 0) {
+        // 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고, 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
+        if (!key_bar_ready) return 0;
+        if (y < key_bar_band.top or y >= key_bar_band.bot) return 0;
+        kb_active = true;
+        kb_down_x = x;
+        kb_down_y = y;
+        kb_last_x = x;
+        kb_moved = 0;
+        key_bar_fling = 0; // 흐르는 중에 짚으면 멈춘다
+        return 1;
+    }
+    if (!kb_active) return 0;
+    if (phase == 1) {
+        const dx = x - kb_last_x;
+        kb_last_x = x;
+        kb_moved += @abs(dx);
+        key_bar_scroll -= dx;
+        clampKeyBarScroll();
+        key_bar_fling = dx; // 마지막 이동량이 곧 관성(터미널 세로와 같은 규칙)
+        return 1;
+    }
+    kb_active = false;
+    // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
+    if (phase == 2 and kb_moved < 10) {
+        key_bar_fling = 0;
+        _ = keybarTapAt(kb_down_x, kb_down_y);
+    }
+    return 1;
+}
+
 /// 보조 키바 탭. **좌표는 여기서만 해석한다** — 그리는 자리와 판정하는 자리가 갈리면
 /// 눌러도 다른 키가 나간다. 1=이 탭은 키바가 먹었다, 0=키바 밖(플랫폼이 본문 처리로).
-pub export fn maru_mobile_keybar_tap(x: f32, y: f32) u32 {
+fn keybarTapAt(x: f32, y: f32) u32 {
     if (!key_bar_ready) return 0;
     for (key_bar_rects, 0..) |r, i| {
         if (!keyBarVisible(i)) continue; // 안 보이는 키는 못 누른다
@@ -1397,6 +1501,26 @@ fn styleBits(s: terminal.types.Style) u32 {
 }
 
 /// 문자열을 글자 quad 로 분해한다. **폭은 maru 의 EAW 규칙을 따른다** — 한글은 2셀이다.
+/// `pushText` 가 그릴 폭. **가운데 정렬은 이 값으로 해야 한다** — 글자 수 × 근사치로 재면
+/// 화살표(`↑`)처럼 advance 가 다른 글자에서 눈에 띄게 왼쪽으로 쏠린다(화면으로 확인).
+/// 진행 규칙(0폭 건너뛰기·폰트 advance·폴백)을 `pushText` 와 **그대로 공유**한다.
+fn textWidth(text: []const u8, font_px: i32) i32 {
+    const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
+    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5);
+    var w: i32 = 0;
+    var view = std.unicode.Utf8View.init(text) catch return 0;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (isZeroWidthFormat(cp)) continue;
+        const cell = atlasCell(&.{cp}, 0);
+        w += if (cell) |c|
+            @as(i32, @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale))
+        else
+            @divTrunc(draw_w, 2);
+    }
+    return w;
+}
+
 fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void {
     // 셀 종횡비를 지킨다 — 임의 크기 상자에 셀을 넣으면 글자가 늘어난다.
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
@@ -1545,36 +1669,24 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     });
 
     // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
-    var bar_kids: [key_bar.len][1]tree.UiNode = undefined;
-    var bar_children: [key_bar.len]tree.UiNode = undefined;
+    //
+    // **레이아웃은 자리만 잡고 키는 브리지가 직접 그린다.** 키가 손가락 크기(44)라 화면을 넘쳐
+    // 가로 스크롤이 필요한데, `tree` 는 스크롤 개념이 없고 음수 margin 으로 밀면 레이아웃이
+    // `error.NegativeValue` 로 거부한다(실측 — 화면이 통째로 검게 나갔다). `chrome/ui/scroll_area`
+    // 는 세로 전용이라 여기 못 쓴다. 키바는 "고정 크기 버튼의 가로 나열" 이라 엔진 없이도
+    // 그릴 수 있고, 스크롤·클리핑을 직접 쥐는 편이 낫다 — **U1 이 닫을 공백이 여기 남는다**
+    // (컴포넌트 계층에 가로 스크롤이 생기면 이 직접 그리기를 그쪽으로 옮긴다).
     // 안 보이는 키(선택 없을 때의 `copy`)는 자리도 안 차지한다 — 빈 칸으로 두면 줄이
     // 어색하게 벌어지고, 그 자리를 눌렀을 때 뭐가 되는지도 애매해진다.
     var bar_n: usize = 0;
     for (0..key_bar.len) |i| {
-        if (!keyBarVisible(i)) continue;
-        const c = &bar_children[bar_n];
-        bar_n += 1;
-        bar_kids[i] = .{tree.text(.{
-            .id = key_bar_id_base + 100 + i,
-            .style = .{ .width = .{ .px = 26.0 }, .height = .{ .px = 13.0 }, .margin = .{ .left = 5.0, .top = 9.0 } },
-            .value = key_bar[i].label,
-            // 눌러 둔 수정자는 **켜져 있다는 것이 보여야** 한다 — 안 보이면 왜 제어문자가
-            // 나가는지 알 수 없다.
-            .tone = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .accent else .primary,
-        })};
-        c.* = tree.card(.{
-            .id = key_bar_id_base + i,
-            // **키 폭을 고정한다.** 전부 flex 로 나눠 가지면 `copy` 가 나타날 때 나머지 키가
-            // 전부 왼쪽으로 밀린다(실측: 마지막 키가 30px — 거의 한 칸). 선택을 잡은 직후
-            // 그 자리를 누르면 옆 키가 눌린다. `copy` 만 남는 자리를 쓴다.
-            .style = if (key_bar[i].is_copy)
-                .{ .flex = .{ .grow = 1 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } }
-            else
-                .{ .width = .{ .px = 30.0 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } },
-            .variant = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .selected else .surface,
-        }, &bar_kids[i]);
+        if (keyBarVisible(i)) bar_n += 1;
     }
-    const bar = tree.container(.{ .id = key_bar_id_base - 1, .direction = .row, .style = .{ .height = .{ .px = 40.0 }, .padding = .{ .left = 6.0, .right = 6.0, .top = 4.0, .bottom = 4.0 } } }, bar_children[0..bar_n]);
+    // 자식 없는 카드 하나가 **밴드 자리**만 잡는다. 키는 아래에서 직접 그린다.
+    const bar = tree.card(.{
+        .id = key_bar_id_base - 1,
+        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = key_h + 10.0 } },
+    }, &.{});
 
     const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, bar, status });
 
@@ -1591,7 +1703,24 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 배경 먼저
     push(.{ .x = 0, .y = 0, .w = width, .h = height }, tk.get(.surface_bg), 0xFF, 0, 0);
     for (cd.ops) |op| switch (op) {
-        .quad => |q| push(q.rect, tk.get(q.fill_role), q.alpha, q.corner_radii[0], 0),
+        // **테두리를 그린다.** 예전에는 `border_widths`/`border_role` 을 통째로 버려서, 컴포넌트가
+        // 테두리를 요청해도 화면에는 채움만 나왔다 — 손가락은 hover 로 더듬을 수 없어 **눌리는
+        // 자리의 경계가 보이는 것이 크기보다 먼저**인데, 그게 아예 안 그려지고 있었다.
+        // 바깥을 테두리 색으로 칠하고 그 안에 채움을 얹는다(quad 둘 — 셰이더에 테두리 개념이 없다).
+        .quad => |q| {
+            const bw: u32 = q.border_widths[0];
+            if (q.border_role) |role| if (bw > 0 and q.rect.w > 2 * bw and q.rect.h > 2 * bw) {
+                push(q.rect, tk.get(role), q.alpha, q.corner_radii[0], 0);
+                push(.{
+                    .x = q.rect.x + @as(i32, @intCast(bw)),
+                    .y = q.rect.y + @as(i32, @intCast(bw)),
+                    .w = q.rect.w - 2 * bw,
+                    .h = q.rect.h - 2 * bw,
+                }, tk.get(q.fill_role), q.alpha, if (q.corner_radii[0] > bw) q.corner_radii[0] - @as(u16, @intCast(bw)) else 0, 0);
+                continue;
+            };
+            push(q.rect, tk.get(q.fill_role), q.alpha, q.corner_radii[0], 0);
+        },
         .fill => |f| push(f.rect, tk.get(f.role), f.alpha, 0, 0),
         .border => |b| push(b.rect, tk.get(b.role), 0x60, 0, 0),
         .rule => |r| push(.{ .x = r.from.x, .y = r.from.y, .w = @intCast(@max(1, r.to.x - r.from.x)), .h = @intCast(@max(1, r.to.y - r.from.y)) }, tk.get(r.role), 0xFF, 0, 0),
@@ -1623,23 +1752,79 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 다른 키가 나가지 않는다(따로 계산하면 갈린다).
     // **자리를 다 못 채웠으면 안 섰다고 답한다.** 세우기만 하고 안 내리면, 레이아웃에서
     // 키바가 빠진 프레임에도 **옛 자리를 그대로 답해** 없는 키가 눌린다.
-    var bar_found: usize = 0;
+    key_bar_ready = false;
     for (built.entries) |entry| {
-        if (entry.id < key_bar_id_base or entry.id >= key_bar_id_base + key_bar.len) continue;
-        key_bar_rects[entry.id - key_bar_id_base] = .{
-            .x = entry.rect.x,
-            .y = entry.rect.y,
-            .w = entry.rect.width,
-            .h = entry.rect.height,
-        };
-        bar_found += 1;
+        if (entry.id != key_bar_id_base - 1) continue;
+        const band = entry.rect;
+        key_bar_band = .{ .top = band.y, .bot = band.y + band.height };
+        // **키가 지나가는 창은 화살표 안쪽**이다. 창을 밴드 전체로 두면 `<`/`>` 배경이 가장자리
+        // 키 위에 얹혀 그 라벨을 지운다(화면으로 확인 — 첫 키가 빈 칸이 됐다).
+        const view_x = band.x + edge_w;
+        // **`copy` 자리는 늘 예약한다.** 선택을 잡으면 줄 끝에 생기는데, 스크롤 창에 섞으면
+        // 그 순간 창 폭이 바뀌어 **나머지 키가 전부 밀린다** — "선택을 잡은 직후 그 자리를
+        // 누르면 옆 키가 눌린다" 는 이 저장소가 이미 실측한 함정이다. 오른쪽 끝에 고정 자리를
+        // 비워 두고 스크롤과 무관하게 그 자리에만 그린다(없을 때는 빈 자리로 둔다).
+        const copy_slot_w = key_w + key_gap;
+        const view_w = band.width - 2 * edge_w - copy_slot_w;
+        const scroll_n = if (keyBarVisible(key_bar.len - 1)) bar_n - 1 else bar_n;
+        const content = @as(f32, @floatFromInt(scroll_n)) * (key_w + key_gap);
+        key_bar_max_scroll = @max(0, content - view_w);
+        clampKeyBarScroll();
+
+        // 창 왼쪽에서 스크롤 오프셋만큼 물러난 자리에서 시작한다. 창 밖으로 나간 키는
+        // 그리지도 않는다 — 화면 밖 quad 는 낭비이고, 잘린 조각이 옆 UI 위에 얹힌다.
+        var kx = view_x - key_bar_scroll;
+        const ky = band.y + 5.0;
+        var slot: usize = 0;
+        for (0..key_bar.len) |i| {
+            if (!keyBarVisible(i)) continue;
+            slot += 1;
+            // `copy` 는 스크롤을 안 탄다 — 오른쪽 끝 예약 자리에 고정으로 그린다.
+            if (key_bar[i].is_copy) {
+                const cx = band.x + band.width - edge_w - key_w;
+                key_bar_rects[i] = .{ .x = cx, .y = ky, .w = key_w, .h = key_h };
+                drawKey(i, cx, ky, tk);
+                continue;
+            }
+            defer kx += key_w + key_gap;
+            // **창 밖 키는 자리도 안 남긴다.** rect 를 그대로 두면 화살표 아래로 숨은 키가
+            // 여전히 눌린다 — 보이지 않는 것이 눌리면 사용자는 왜 그 키가 나갔는지 알 수 없다.
+            if (kx < view_x - 0.5 or kx + key_w > view_x + view_w + 0.5) {
+                key_bar_rects[i] = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+            } else {
+                key_bar_rects[i] = .{ .x = kx, .y = ky, .w = key_w, .h = key_h };
+            }
+            if (kx + key_w <= band.x or kx >= band.x + band.width) continue;
+            drawKey(i, kx, ky, tk);
+        }
+        // **밴드를 찾았고 키를 다 놓았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가
+        // 키바를 안 먹는다 — 레이아웃에서 키바가 빠진 프레임에 **옛 자리를 그대로 답해 없는 키가
+        // 눌리는 것**을 막는 판정이다. `slot` 은 직접 그리기라 항상 `bar_n` 이지만, 밴드 entry 를
+        // 못 찾으면 이 블록에 아예 안 들어와 `false` 로 남는다(위에서 그렇게 초기화한다).
+        key_bar_ready = slot == bar_n and bar_n > 0;
+
+        // **더 있다는 것을 알린다.** 잘린 자리는 화면에서 "끝" 과 구별되지 않는다 — 밀 수 있다는
+        // 신호가 없으면 사용자는 `~ / -` 가 존재하는 줄도 모른다. 키 **위에** 그리므로 지나가는
+        // 키가 화살표를 덮지 않는다(그리기 순서가 곧 위아래다).
+        // **불투명하게, 밝게, 크게.** 처음엔 14px 폭에 흐린 색으로 얹었더니 지나가는 키가 비쳐
+        // 화살표인지도 알아보기 어려웠다(화면으로 확인). 이건 "더 있다" 를 알리는 신호라
+        // 본문보다 또렷해야 한다 — 배경을 완전히 덮고, 안쪽 경계에 선을 그어 잘리는 자리를 못박는다.
+        const edge_bg = tk.get(.surface_bg);
+        const edge_fg = tk.get(.surface_fg);
+        if (key_bar_scroll > 0.5) {
+            const er: draw.Rect = .{ .x = @intFromFloat(band.x), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
+            push(er, edge_bg, 0xFF, 0, 0);
+            push(.{ .x = er.x + @as(i32, @intFromFloat(edge_w)) - 1, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
+            pushText("<", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth("<", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
+        }
+        if (key_bar_scroll < key_bar_max_scroll - 0.5) {
+            const ex = band.x + band.width - edge_w;
+            const er: draw.Rect = .{ .x = @intFromFloat(ex), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
+            push(er, edge_bg, 0xFF, 0, 0);
+            push(.{ .x = er.x, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
+            pushText(">", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth(">", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
+        }
     }
-    // 보이는 키만큼만 자리가 잡힌다(선택이 없으면 `copy` 가 빠진다).
-    var want_bar: usize = 0;
-    for (0..key_bar.len) |i| {
-        if (keyBarVisible(i)) want_bar += 1;
-    }
-    key_bar_ready = bar_found == want_bar;
 
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
     for (built.entries) |entry| {
@@ -1786,6 +1971,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
+    stepKeyBarFling();
     if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패

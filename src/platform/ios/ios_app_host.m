@@ -196,7 +196,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
         int advance = (int)(adv.width + 0.5);
         if (advance <= 0) advance = CW / 2;
-        maru_mobile_atlas_add(c, 0, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
+        unsigned int one = c; // 미리 굽는 집합은 전부 단일 코드포인트(ASCII·박스)다
+        maru_mobile_atlas_add(&one, 1, 0, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
     }
     // 온디맨드 성장이 같은 폰트를 계속 쓰므로 여기서 소유권을 넘겨받는다 —
     // 아래 release 뒤에 retain 하면 해제된 객체를 만진다(그렇게 짰다가 앱이 죽었다).
@@ -580,24 +581,38 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 /// CoreText 가 한 글자로 본다 — `(unichar)cp` 로 자르면 엉뚱한 글자가 되거나(0x1F600→0xF600)
 /// 아예 없다. ② 번들 폰트에 이모지가 없으므로 `CTFontCreateForString` 으로 시스템이 고르게
 /// 한다. ③ 컬러 비트맵이라 RGBA 컨텍스트에 그린다(커버리지 R8 에 그리면 실루엣).
-- (BOOL)bakeColorGlyph:(unsigned int)cp style:(unsigned int)style {
+/// 코드포인트 **열**을 `NSString` 으로 편다(BMP 밖은 서러게이트 쌍).
+///
+/// 열째로 넘겨야 CoreText 가 결합한다 — `❤`+VS16 을 따로 그리면 하트와 보이지 않는 선택자가
+/// 각각 그려질 뿐 컬러 하트가 안 된다.
+static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
+    unichar units[MARU_MAX_CLUSTER * 2];
+    NSUInteger k = 0;
+    for (unsigned int i = 0; i < n && k + 2 <= sizeof units / sizeof units[0]; i++) {
+        unsigned int cp = cps[i];
+        if (cp > 0x10FFFF) continue;
+        if (cp > 0xFFFF) {
+            unsigned int v = cp - 0x10000;
+            units[k++] = (unichar)(0xD800 + (v >> 10));
+            units[k++] = (unichar)(0xDC00 + (v & 0x3FF));
+        } else {
+            units[k++] = (unichar)cp;
+        }
+    }
+    if (k == 0) return nil;
+    return [NSString stringWithCharacters:units length:k];
+}
+
+- (BOOL)bakeColorGlyph:(const unsigned int *)cps count:(unsigned int)ncp style:(unsigned int)style {
     if (!_colorTex) return NO;
     const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     unsigned int slot = maru_mobile_next_color_slot(_atlasCols);
-    if (slot == 0xFFFFFFFF) return NO;   // 축출 정책은 아직 없다(계약 §4)
+    if (slot == 0xFFFFFFFF) return NO;   // 버릴 자리도 없다(전부 이번 프레임 것)
     unsigned int col = slot >> 16, row = slot & 0xFFFF;
 
-    // ① 서러게이트 쌍
-    unichar units[2];
-    NSUInteger unit_n = 0;
-    if (cp > 0xFFFF) {
-        unsigned int v = cp - 0x10000;
-        units[unit_n++] = (unichar)(0xD800 + (v >> 10));
-        units[unit_n++] = (unichar)(0xDC00 + (v & 0x3FF));
-    } else {
-        units[unit_n++] = (unichar)cp;
-    }
-    NSString *str = [NSString stringWithCharacters:units length:unit_n];
+    NSString *str = MaruClusterString(cps, ncp);
+    if (!str) return NO;
+    const NSUInteger unit_n = str.length;
 
     // ② 이 글자를 실제로 가진 폰트를 시스템이 고르게 한다(번들 폰트엔 이모지가 없다).
     CTFontRef base = _atlasFaces[style & 3] ?: _atlasFont;
@@ -629,7 +644,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (ok) {
         [_colorTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                        withBytes:rgba bytesPerRow:CW * 4];
-        maru_mobile_color_atlas_add(cp, style, col, row, CW);  // 이모지는 2셀 = 슬롯 전체
+        maru_mobile_color_atlas_add(cps, ncp, style, col, row, CW);  // 이모지는 2셀 = 슬롯 전체
     }
     free(rgba);
     CFRelease(face);
@@ -648,12 +663,16 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
     for (int i = (int)n - 1; i >= 0; i--) {
-        unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
+        // **열을 통째로 읽는다.** base 만 읽으면 `❤` 와 `❤️` 가 같아 보여 VS16 결합이 단색이 된다.
+        unsigned int cps[MARU_MAX_CLUSTER];
+        unsigned int ncp = maru_mobile_missing_len((unsigned int)i);
+        if (ncp > MARU_MAX_CLUSTER) ncp = MARU_MAX_CLUSTER;
+        for (unsigned int j = 0; j < ncp; j++) cps[j] = maru_mobile_missing_cp_at((unsigned int)i, j);
         unsigned int style = maru_mobile_missing_style((unsigned int)i);
-        if (cp == 0 || cp > 0x10FFFF) continue;
+        if (ncp == 0 || cps[0] == 0 || cps[0] > 0x10FFFF) continue;
         // **컬러 글리프는 다른 아틀라스로 간다.** 커버리지(R8)에 컬러를 구우면 실루엣이 된다.
         if (maru_mobile_missing_is_color((unsigned int)i)) {
-            if ([self bakeColorGlyph:cp style:style]) added++;
+            if ([self bakeColorGlyph:cps count:ncp style:style]) added++;
             continue;
         }
         CTFontRef face = _atlasFaces[style & 3] ?: _atlasFont;
@@ -667,62 +686,49 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         memset(cell, 0, CW * CH);
         // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아
         // 끊긴다 — 합성은 셀을 가장자리까지 채운다. 0 이면 합성 대상이 아니라 폰트로 간다.
-        if (maru_mobile_synthesize(cp, cell, CW) != 0) {
+        // 합성 대상(박스·블록·브라유)은 전부 단일 코드포인트라 base 만 넘긴다.
+        if (maru_mobile_synthesize(cps[0], cell, CW) != 0) {
             [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                            withBytes:cell bytesPerRow:CW];
-            maru_mobile_atlas_add(cp, style, col, row, CW / 2);
+            maru_mobile_atlas_add(cps, ncp, style, col, row, CW / 2);
             added++;
             continue;
         }
+        // **CTLine 으로 그린다**(글리프 1:1 이 아니라). 예전에는 `CTFontGetGlyphsForCharacters` +
+        // `CTFontDrawGlyphs` 로 **코드포인트 하나당 글리프 하나**를 그려서 클러스터가 결합되지
+        // 않았다 — `❤`+VS16 이 하트와 보이지 않는 선택자로 갈렸다. CTLine 은 결합·리거처·**폰트
+        // 폴백**을 다 처리한다(번들 폰트에 없는 기호를 시스템 폰트로 잇던 수동 폴백도 여기에
+        // 흡수된다 — 두 벌로 두면 한쪽만 고쳐져 조용히 어긋난다).
+        NSString *str = MaruClusterString(cps, ncp);
+        if (!str) continue;
         CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
-        CGContextSetGrayFillColor(ctx, 1.0, 1.0);
-        // BMP 밖 글자도 이 경로로 온다(컬러가 아닌 것들) — 서러게이트 쌍으로 조립한다.
-        unichar units[2];
-        CFIndex unit_n = 0;
-        if (cp > 0xFFFF) {
-            unsigned int v = cp - 0x10000;
-            units[unit_n++] = (unichar)(0xD800 + (v >> 10));
-            units[unit_n++] = (unichar)(0xDC00 + (v & 0x3FF));
-        } else {
-            units[unit_n++] = (unichar)cp;
-        }
-        CGGlyph glyphs[2] = {0, 0};
-        CTFontRef draw_face = (CTFontRef)CFRetain(face);
-        BOOL got = CTFontGetGlyphsForCharacters(face, units, glyphs, unit_n);
-        // **번들 폰트에 없으면 시스템에서 찾는다.** 예전에는 여기서 **안 그린 채 등록**해
-        // 등록부에 "있음" 으로 박혔고, 다시 굽지도 않아 **영구 공백**이 됐다 — `❤`·`✔` 처럼
-        // Jetendard 에 없는 기호가 통째로 빈칸으로 나왔다(화면으로 확인).
-        if (!got) {
-            NSString *str = [NSString stringWithCharacters:units length:(NSUInteger)unit_n];
-            CTFontRef fb = CTFontCreateForString(face, (__bridge CFStringRef)str,
-                                                 CFRangeMake(0, unit_n));
-            if (fb) {
-                CGGlyph fbg[2] = {0, 0};
-                if (CTFontGetGlyphsForCharacters(fb, units, fbg, unit_n)) {
-                    CFRelease(draw_face);
-                    draw_face = fb;
-                    glyphs[0] = fbg[0];
-                    glyphs[1] = fbg[1];
-                    got = YES;
-                } else {
-                    CFRelease(fb);
-                }
-            }
-        }
-        CGGlyph glyph = got ? glyphs[0] : 0;
-        if (glyph) {
-            CGPoint pos = CGPointMake(1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
-            CTFontDrawGlyphs(draw_face, &glyph, &pos, 1, ctx);
+        if (!ctx) continue;
+        // **색을 문자열에 실어야 한다.** `CTLineDraw` 는 컨텍스트 fill color 가 아니라 run 의
+        // 전경색 속성을 보고, 없으면 **검정**을 쓴다 — 커버리지(회색조 0) 아틀라스에서 검정은
+        // 곧 빈칸이라, 온디맨드로 굽는 글자가 통째로 사라졌다(화면으로 잡았다). 앞서 쓰던
+        // `CTFontDrawGlyphs` 는 컨텍스트 색을 따라가서 이 함정이 없었다.
+        CGColorRef ink = CGColorCreateGenericGray(1.0, 1.0);
+        CTLineRef line = CTLineCreateWithAttributedString(
+            (__bridge CFAttributedStringRef)[[NSAttributedString alloc]
+                initWithString:str
+                    attributes:@{
+                        (__bridge NSString *)kCTFontAttributeName: (__bridge id)face,
+                        (__bridge NSString *)kCTForegroundColorAttributeName: (__bridge id)ink,
+                    }]);
+        CGColorRelease(ink);
+        double width = 0;
+        if (line) {
+            CGContextSetTextPosition(ctx, 1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
+            CTLineDraw(line, ctx);
+            width = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
+            CFRelease(line);
         }
         CGContextRelease(ctx);
-        CGSize adv = CGSizeZero;
-        if (glyph) CTFontGetAdvancesForGlyphs(draw_face, kCTFontOrientationHorizontal, &glyph, &adv, 1);
-        CFRelease(draw_face);
-        unsigned int advance = (unsigned int)(adv.width + 0.5);
+        unsigned int advance = (unsigned int)(width + 0.5);
         if (advance == 0) advance = CW / 2;
         [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                        withBytes:cell bytesPerRow:CW];
-        maru_mobile_atlas_add(cp, style, col, row, advance);
+        maru_mobile_atlas_add(cps, ncp, style, col, row, advance);
         added++;
     }
     CGColorSpaceRelease(cs);

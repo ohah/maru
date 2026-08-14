@@ -82,21 +82,35 @@ void maru_mobile_clear_error(void);
 #define MARU_STYLE_BOLD 1
 #define MARU_STYLE_ITALIC 2
 void maru_mobile_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
-void maru_mobile_atlas_add(unsigned int cp, unsigned int style,
+/// 구운 글자를 등록한다. **코드포인트 열을 통째로 받는다** — 단일 코드포인트면 `n=1` 이다.
+/// `cps` 는 `maru_mobile_missing_cp_at` 로 읽은 **그 열**이어야 한다(다른 열을 넘기면 구운 그림과
+/// 등록부가 어긋나 엉뚱한 글리프가 그려진다). 한 글자의 상한은 `MARU_MAX_CLUSTER` 다.
+void maru_mobile_atlas_add(const unsigned int *cps, unsigned int n, unsigned int style,
                            unsigned int col, unsigned int row, unsigned int advance);
 
-/// 아직 아틀라스에 없어 못 그린 코드포인트들. 플랫폼이 그것만 구워 넣는다.
+/// 한 글자가 실을 수 있는 코드포인트 수. 가족 이모지(👨‍👩‍👧‍👦)가 7, 스킨톤이 붙으면 더 길어진다.
+#define MARU_MAX_CLUSTER 12
+
+/// 아직 아틀라스에 없어 못 그린 **글자**들. 플랫폼이 그것만 구워 넣는다.
 /// 고정 집합으로 두면 처음 보는 글자가 **조용히** 안 그려진다(실측으로 드러났다).
 unsigned int maru_mobile_missing_count(void);
-unsigned int maru_mobile_missing_cp(unsigned int i);
+/// i번째 놓친 글자의 코드포인트 **개수**. 1이면 단일, 2 이상이면 클러스터다.
+unsigned int maru_mobile_missing_len(unsigned int i);
+/// i번째 놓친 글자의 j번째 코드포인트.
+///
+/// **`0..missing_len(i)` 를 이어 붙여 문자열 하나로 구워야 한다.** 코드포인트를 따로 구우면
+/// 결합이 안 일어난다 — `❤`(U+2764)와 `❤️`(U+2764 U+FE0F)가 host 에게 같아 보여 VS16 결합이
+/// 단색으로 그려지던 것이 그 결함이었다.
+unsigned int maru_mobile_missing_cp_at(unsigned int i, unsigned int j);
 /// i번째 놓친 것의 스타일 비트. 코드포인트와 **함께** 읽어야 어느 폰트로 구울지 안다.
 unsigned int maru_mobile_missing_style(unsigned int i);
 /// i번째 놓친 것이 **컬러 글리프**(이모지)인가. 1이면 커버리지 아틀라스가 아니라 **컬러
 /// 아틀라스**에 구워 `maru_mobile_color_atlas_add` 로 등록한다 — 커버리지에 구우면 실루엣이
-/// 되고, 그 반대는 색이 사라진다. 판정은 코어(`width.isEmojiPresentation`)가 단일 출처다.
+/// 되고, 그 반대는 색이 사라진다. 판정은 **열 전체**를 본다(base 는 코어의
+/// `width.isEmojiPresentation`, 그 위에 VS16/VS15 가 표현을 뒤집는다).
 unsigned int maru_mobile_missing_is_color(unsigned int i);
-/// 컬러 아틀라스 등록·슬롯 배정(글자 아틀라스의 add/next_slot 과 짝, 같은 인코딩).
-void maru_mobile_color_atlas_add(unsigned int cp, unsigned int style,
+/// 컬러 아틀라스 등록·슬롯 배정(글자 아틀라스의 add/next_slot 과 짝, 같은 열 규약).
+void maru_mobile_color_atlas_add(const unsigned int *cps, unsigned int n, unsigned int style,
                                  unsigned int col, unsigned int row, unsigned int advance);
 unsigned int maru_mobile_next_color_slot(unsigned int cols);
 unsigned int maru_mobile_color_atlas_count(void);

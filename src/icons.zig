@@ -92,6 +92,14 @@ pub const Icon = enum(u21) {
     host = 0xF0025,
     /// standard: assets/icons/hourglass.svg (0xF0026)
     hourglass = 0xF0026,
+    /// standard: assets/icons/arrow-up.svg (0xF0027)
+    arrow_up = 0xF0027,
+    /// standard: assets/icons/arrow-down.svg (0xF0028)
+    arrow_down = 0xF0028,
+    /// standard: assets/icons/arrow-left.svg (0xF0029)
+    arrow_left = 0xF0029,
+    /// standard: assets/icons/arrow-right.svg (0xF002A)
+    arrow_right = 0xF002A,
 };
 
 /// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
@@ -132,6 +140,10 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
         .chevron_right => fit == .standard or fit == .tight,
         .host => fit == .standard,
         .hourglass => fit == .standard,
+        .arrow_up => fit == .standard,
+        .arrow_down => fit == .standard,
+        .arrow_left => fit == .standard,
+        .arrow_right => fit == .standard,
     };
 }
 
@@ -192,6 +204,10 @@ pub fn utf8(icon: Icon) []const u8 {
         .chevron_right => "\u{F0020}",
         .host => "\u{F0025}",
         .hourglass => "\u{F0026}",
+        .arrow_up => "\u{F0027}",
+        .arrow_down => "\u{F0028}",
+        .arrow_left => "\u{F0029}",
+        .arrow_right => "\u{F002A}",
     };
 }
 
@@ -252,6 +268,10 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0024 => .{ .icon = .chevron_right, .fit = .tight },
         0xF0025 => .{ .icon = .host, .fit = .standard },
         0xF0026 => .{ .icon = .hourglass, .fit = .standard },
+        0xF0027 => .{ .icon = .arrow_up, .fit = .standard },
+        0xF0028 => .{ .icon = .arrow_down, .fit = .standard },
+        0xF0029 => .{ .icon = .arrow_left, .fit = .standard },
+        0xF002A => .{ .icon = .arrow_right, .fit = .standard },
         else => null,
     };
 }

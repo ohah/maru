@@ -451,7 +451,7 @@ pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
 pub fn sendCommittedTextTo(self: *AppSession, target_id: u64, bytes: []const u8) bool {
     if (!self.surface_initialized or bytes.len == 0) return true;
     if (imeTerminalSurfaceById(self, target_id) == null) return false;
-    if (!self.enqueueInputBytes(target_id, bytes, true)) return false;
+    if (!self.enqueueTypedInputBytes(target_id, .ime_commit, bytes, true)) return false;
     // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
     self.total_terminal_input_events += 1;
     self.total_terminal_input_bytes += bytes.len;
@@ -571,25 +571,7 @@ pub fn queueInputPair(
     normalize_first_newlines: bool,
     second: []const u8,
 ) bool {
-    const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return false;
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    const additional = std.math.add(usize, first.len, second.len) catch {
-        if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
-        return false;
-    };
-    gop.value_ptr.buf.ensureUnusedCapacity(self.allocator, additional) catch {
-        if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
-        return false;
-    };
-    const start = gop.value_ptr.buf.items.len;
-    gop.value_ptr.buf.appendSliceAssumeCapacity(first);
-    if (normalize_first_newlines) {
-        for (gop.value_ptr.buf.items[start..][0..first.len]) |*b| {
-            if (b.* == '\n') b.* = '\r';
-        }
-    }
-    gop.value_ptr.buf.appendSliceAssumeCapacity(second);
-    return true;
+    return self.queueInputBatch(target_id, .ime_commit, first, normalize_first_newlines, second);
 }
 
 /// 전역(OS) 단축키 기술자 목록(global_hotkeys)을 loaded_config.global_bindings에서 다시 빌드한다. init이 한 번 부르고,

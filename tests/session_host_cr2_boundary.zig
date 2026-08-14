@@ -65,8 +65,8 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9136,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9088,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9184,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9120,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -202,10 +202,10 @@ test "CR2c 경계는 InputOwner facade와 local remote parity를 고정한다" {
     }) |field| try std.testing.expectEqual(@as(usize, 1), count(runtime, field));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "input_owner.InputOwner"));
 
-    // CR2c는 아직 제품 입력 caller를 전환하지 않는 구조 gate다. 다른 source가 facade를 임의
-    // materialize하거나 backend input vtable을 새로 발급하면 CR2d의 owner 이관을 우회하므로 막는다.
+    // CR2d1은 AppSession 한 곳만 facade를 materialize한다. 그 밖의 제품 source가 facade를 임의
+    // 발급하면 stable queue owner 이관을 우회하므로 계속 막는다.
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptThree(
             allocator,
             "inputOwner(",
@@ -214,6 +214,9 @@ test "CR2c 경계는 InputOwner facade와 local remote parity를 고정한다" {
             "platform/macos/session_host/remote_term_backend.zig",
         ),
     );
+    const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, ".inputOwner(term.rt.handle)"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExceptTwo(
@@ -223,6 +226,59 @@ test "CR2c 경계는 InputOwner facade와 local remote parity를 고정한다" {
             "app/term_runtime_backend.zig",
         ),
     );
+}
+
+test "CR2d1 경계는 remote stable batch queue와 Window queue exclusion을 고정한다" {
+    const allocator = std.testing.allocator;
+    const owner = try readSource(allocator, "src/app/input_owner.zig");
+    defer allocator.free(owner);
+    const local = try readSource(allocator, "src/app/in_process_term_backend.zig");
+    defer allocator.free(local);
+    const remote = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(remote);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    const app_input = try readSource(allocator, "src/platform/macos/app_session/input.zig");
+    defer allocator.free(app_input);
+
+    try std.testing.expectEqual(@as(usize, 2), count(owner, "test \"CR2d1 InputOwner batch"));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const InputBatchKind = enum(u8) {"));
+    inline for (.{ "paste = 1,", "ime_commit = 2,", "osc52_response = 3," }) |entry|
+        try std.testing.expectEqual(@as(usize, 1), count(owner, entry));
+    inline for (.{
+        "epoch: u64 = 1,",
+        "next_sequence: u64 = 0,",
+        "records: std.ArrayListUnmanaged(BatchRecord) = .empty,",
+        "enqueue_batch:",
+    }) |entry| try std.testing.expectEqual(@as(usize, 1), count(owner, entry));
+
+    try std.testing.expectEqual(@as(usize, 1), count(local, "test \"CR2d1 local InputOwner batch는"));
+    const local_batch = between(local, "fn enqueueInputBatch(", "pub fn init(") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(local_batch, "return .caller_owned;"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote, "test \"CR2d1 remote InputOwner batch는"));
+    const remote_batch = between(remote, "fn enqueueInputBatch(", "fn resize(") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(remote_batch, "try rr.enqueueInputBatch(batch);"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_batch, "return .backend_owned;"));
+
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2d1 remote input owner는"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "input_batches: input_owner_mod.StableQueueState,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn enqueueInputBatch("));
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptTwo(
+        allocator,
+        "enqueueInputBatch(batch)",
+        "platform/macos/session_host/remote_runtime.zig",
+        "platform/macos/session_host/remote_term_backend.zig",
+    ));
+
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "test \"CR2d1 AppSession batch routing은"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "fn remoteInputOwner("));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "if (admission == .backend_owned) return true;"));
+    // 기존 focus-loss OOM mutation0 행과 CR2d1 backend-owned 행이 각각 queue absence를 고정한다.
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "session.pending_pastes.get(target_id) == null"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, ".osc52_response, resp, false"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_input, ".ime_commit"));
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

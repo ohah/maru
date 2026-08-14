@@ -1184,7 +1184,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   blocking bytes, nonblocking partial progress/error, `CoreCommand`가 같은 opaque handle과 기존 backend leaf로 전달되며
   local/remote `TermRuntimeBackend` 함수표가 facade를 구현함을 고정한다. queue/epoch/sequence/paused paste storage와
   `RemoteRuntime`의 기존 direct-input/control field·동작은 이 단계에서 바뀌지 않고 제품 facade caller는 0이다.
-  CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
+  CR2d1: remote paste·IME 확정·OSC52 응답은 `InputOwner.enqueueBatch`로 stable runtime owner에 직접 들어간다.
+  closed kind와 nonzero epoch/checked sequence, IME commit+replay atomicity, LF→CR, cap/OOM/sequence 실패 mutation 0,
+  blocked-wire retained queue와 eventual ordered wire golden trace, remote `AppSession.pending_pastes` entry 0을
+  Debug·ReleaseFast에서 고정한다.
+  local은 `caller_owned`로 기존 queue 의미가 변하지 않으며 key/control merge와 Window 이동은 각각 CR2d2/CR2d4다.
+  CR2d2~d4: key/control ordered merge, event cursor, Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

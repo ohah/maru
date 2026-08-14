@@ -15,6 +15,7 @@ const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const runtime_pump_mod = maru.app.runtime_pump;
+const input_owner_mod = maru.app.input_owner;
 const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
 const client_poison = @import("client_poison.zig");
@@ -507,6 +508,7 @@ pub const RemoteRuntime = struct {
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
+    input_batches: input_owner_mod.StableQueueState,
     pending_controls: std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),
     // A blocking drain owns both mutation queues until it either commits or returns an error.
     // Allocator callbacks and other same-thread callbacks must not recursively consume the
@@ -686,6 +688,7 @@ pub const RemoteRuntime = struct {
         self.generation.resize_baseline_present = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
+        self.input_batches = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
         self.generation.pump_ended = false;
@@ -781,6 +784,7 @@ pub const RemoteRuntime = struct {
         self.generation.resize_baseline_present = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
+        self.input_batches = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
         self.generation.pump_ended = false;
@@ -1129,6 +1133,7 @@ pub const RemoteRuntime = struct {
         self.generation.attachment.deinitWithConnection(self.generation.connection);
         self.generation.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
+        self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
         self.* = undefined;
     }
@@ -1146,6 +1151,7 @@ pub const RemoteRuntime = struct {
         self.generation.attachment.deinitWithConnection(self.generation.connection); // stream demux queue + attachment-owned screen.
         self.generation.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
+        self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
         self.* = undefined;
     }
@@ -1208,6 +1214,43 @@ pub const RemoteRuntime = struct {
             .generation => self.generation.attachment.generation.sendInputNonBlocking(bytes) catch |err|
                 return mapGenerationInputError(err),
         };
+    }
+
+    /// AppSession의 remote paste/IME/OSC52 batch를 stable runtime queue가 한 번에 인수한다.
+    /// reserve가 모두 끝난 뒤에만 bytes/record/sequence를 게시하므로 실패는 mutation 0이다.
+    pub fn enqueueInputBatch(self: *RemoteRuntime, batch: input_owner_mod.InputBatch) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
+        if (!self.mutationAllowed()) return error.Unauthorized;
+        const total = std.math.add(usize, batch.first.len, batch.second.len) catch return error.OutOfMemory;
+        if (total == 0) return;
+        const pending = self.direct_input.items.len - self.direct_input_offset;
+        if (total > max_direct_input_bytes -| pending) return error.OutOfMemory;
+        const sequence = std.math.add(u64, self.input_batches.next_sequence, 1) catch return error.OutOfMemory;
+        if (sequence == 0 or self.input_batches.epoch == 0) return error.ProtocolError;
+        // consumed prefix compaction도 observable mutation이다. 두 backing의 reserve를 먼저 끝내고 나서만
+        // compact해야 allocator 실패가 byte/offset/record를 전혀 바꾸지 않는다.
+        try self.direct_input.ensureTotalCapacity(self.allocator, pending + total);
+        try self.input_batches.records.ensureUnusedCapacity(self.allocator, 1);
+        self.compactDirectInput();
+
+        const start = self.direct_input.items.len;
+        self.direct_input.appendSliceAssumeCapacity(batch.first);
+        if (batch.normalize_first_newlines) {
+            for (self.direct_input.items[start..][0..batch.first.len]) |*byte| {
+                if (byte.* == '\n') byte.* = '\r';
+            }
+        }
+        self.direct_input.appendSliceAssumeCapacity(batch.second);
+        self.input_batches.records.appendAssumeCapacity(.{
+            .kind = batch.kind,
+            .epoch = self.input_batches.epoch,
+            .sequence = sequence,
+            .end_offset = self.direct_input.items.len,
+        });
+        self.input_batches.next_sequence = sequence;
+        // queue ownership은 이미 이전됐다. hard transport 오류도 caller 재복사를 유도하면 중복 입력이 되므로
+        // 다음 pump/terminalization이 stable queue를 정산하게 두고 admission은 성공으로 유지한다.
+        _ = self.pumpQueuedInput() catch false;
     }
 
     /// AppKit callback-safe live-bottom 요청. socket read/blocking write를 하지 않고 stream-local intent만
@@ -1330,7 +1373,22 @@ pub const RemoteRuntime = struct {
             std.debug.assert(control.barrier >= consumed);
             control.barrier -= @intCast(consumed);
         }
+        for (self.input_batches.records.items) |*record| {
+            std.debug.assert(record.end_offset >= consumed);
+            record.end_offset -= consumed;
+        }
         self.direct_input_offset = 0;
+    }
+
+    fn retireInputBatchRecords(self: *RemoteRuntime) void {
+        var retired: usize = 0;
+        while (retired < self.input_batches.records.items.len and
+            self.input_batches.records.items[retired].end_offset <= self.direct_input_offset) : (retired += 1)
+        {}
+        if (retired == 0) return;
+        const remaining = self.input_batches.records.items[retired..];
+        std.mem.copyForwards(input_owner_mod.BatchRecord, self.input_batches.records.items[0..remaining.len], remaining);
+        self.input_batches.records.items.len = remaining.len;
     }
 
     /// 직접 key FIFO와 control FIFO를 단일 시간 순서로 Client outbound에 넘긴다.
@@ -1364,6 +1422,7 @@ pub const RemoteRuntime = struct {
                     };
                     if (accepted == 0) return false;
                     self.direct_input_offset += accepted;
+                    self.retireInputBatchRecords();
                     continue;
                 }
                 if (!(try self.admitControl(control))) return false;
@@ -1385,8 +1444,10 @@ pub const RemoteRuntime = struct {
                 };
                 if (accepted == 0) return false;
                 self.direct_input_offset += accepted;
+                self.retireInputBatchRecords();
                 continue;
             }
+            self.retireInputBatchRecords();
             self.direct_input.clearRetainingCapacity();
             self.direct_input_offset = 0;
             return true;
@@ -1421,6 +1482,7 @@ pub const RemoteRuntime = struct {
                         ) catch |err| return mapGenerationInputError(err),
                     }
                     self.direct_input_offset = barrier;
+                    self.retireInputBatchRecords();
                     continue;
                 }
                 try self.flushControlBlocking(control);
@@ -1438,8 +1500,10 @@ pub const RemoteRuntime = struct {
                     ) catch |err| return mapGenerationInputError(err),
                 }
                 self.direct_input_offset = self.direct_input.items.len;
+                self.retireInputBatchRecords();
                 continue;
             }
+            self.retireInputBatchRecords();
             self.direct_input.clearRetainingCapacity();
             self.direct_input_offset = 0;
             return;
@@ -1618,6 +1682,7 @@ pub const RemoteRuntime = struct {
     fn discardQueuedMutations(self: *RemoteRuntime) void {
         self.direct_input.clearRetainingCapacity();
         self.direct_input_offset = 0;
+        self.input_batches.records.clearRetainingCapacity();
         self.pending_controls.clearRetainingCapacity();
     }
 
@@ -4136,6 +4201,7 @@ fn run2eAttachFailureSocket(selected: Attach2eFailureCase) !void {
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -4241,6 +4307,7 @@ test "CR3a-2e actual socket malformed accepted는 cache를 보존하고 준비 �
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -4335,6 +4402,7 @@ test "CR3a-2e actual socket accepted 뒤 snapshot EOF는 committed stream 권위
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -4781,6 +4849,7 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -5043,6 +5112,7 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -5165,6 +5235,7 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -5384,6 +5455,7 @@ const B4SemanticFixture = struct {
         self.runtime.generation.resize_generation = 0;
         self.runtime.generation.resize_baseline_present = false;
         self.runtime.direct_input = .empty;
+        self.runtime.input_batches = .{};
         self.runtime.direct_input_offset = 0;
         self.runtime.pending_controls = .empty;
         self.runtime.blocking_flush_active = false;
@@ -5804,6 +5876,7 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
     rr.generation.resize_generation = 0;
     rr.generation.resize_baseline_present = false;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -5997,6 +6070,7 @@ fn expectObservationBarrierDisposition(
     });
     defer rr.generation.attachment.deinit();
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     defer rr.direct_input.deinit(allocator);
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -6737,6 +6811,7 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
     runtime.generation.event_generation_tracking = .tracked;
     defer runtime.generation.attachment.deinit();
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     defer runtime.direct_input.deinit(allocator);
     try runtime.direct_input.appendSlice(allocator, "queued");
     runtime.direct_input_offset = 0;
@@ -6826,6 +6901,7 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
     runtime.generation.event_generation_tracking = .tracked;
     defer runtime.generation.attachment.deinit();
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     defer runtime.direct_input.deinit(allocator);
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
@@ -6870,6 +6946,7 @@ fn initGenerationRuntimeForAdapter(
         7,
     );
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -7757,6 +7834,7 @@ fn runC3ResponsePredecessor(
     try runtime.initializePendingEventOwner();
     runtime.generation.observation = .{};
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -7844,6 +7922,7 @@ fn runC3ResponseFollower(
     try runtime.initializePendingEventOwner();
     runtime.generation.observation = .{};
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -7940,6 +8019,7 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
     try runtime.initializePendingEventOwner();
     runtime.generation.observation = .{};
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -8030,6 +8110,7 @@ fn runC3InvalidCadence(
     try runtime.initializePendingEventOwner();
     runtime.generation.observation = .{};
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -8182,6 +8263,7 @@ fn runC3UnreadRevokeBeforeTx(mode: C3CadenceAttachmentMode) !void {
     try runtime.initializePendingEventOwner();
     runtime.generation.observation = .{};
     runtime.direct_input = .empty;
+    runtime.input_batches = .{};
     try runtime.direct_input.appendSlice(testing.allocator, "stale-input");
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
@@ -8222,6 +8304,7 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
             var runtime: RemoteRuntime = undefined;
             runtime.allocator = testing.allocator;
             runtime.direct_input = .empty;
+            runtime.input_batches = .{};
             runtime.direct_input_offset = 0;
             runtime.pending_controls = .empty;
             runtime.blocking_flush_active = false;
@@ -8261,13 +8344,13 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9136,
-        .ReleaseFast => 9088,
+        .Debug => 9184,
+        .ReleaseFast => 9120,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6416,
-        .ReleaseFast => 6368,
+        .Debug => 6464,
+        .ReleaseFast => 6400,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -8288,13 +8371,15 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             view: anytype,
             correlation: anytype,
         ) !void {
-            var runtime: RemoteRuntime = undefined;
+            const runtime = try testing.allocator.create(RemoteRuntime);
+            defer testing.allocator.destroy(runtime);
             var failing = testing.FailingAllocator.init(
                 testing.allocator,
                 .{ .fail_index = fail_index },
             );
             runtime.allocator = failing.allocator();
             runtime.direct_input = .empty;
+            runtime.input_batches = .{};
             defer runtime.direct_input.deinit(runtime.allocator);
             runtime.direct_input_offset = 0;
             runtime.pending_controls = .empty;
@@ -8448,6 +8533,7 @@ test "C3-3b2b3 integration adapter rejects every preflight before source mutatio
             var runtime: RemoteRuntime = undefined;
             runtime.allocator = testing.allocator;
             runtime.direct_input = .empty;
+            runtime.input_batches = .{};
             defer runtime.direct_input.deinit(runtime.allocator);
             runtime.direct_input_offset = 0;
             runtime.pending_controls = .empty;
@@ -8983,6 +9069,7 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9025,6 +9112,102 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
 }
 
+test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden queue로 소유한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.generation.connection = .{ .legacy = &client };
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+    rr.generation.attachment = .init(allocator, .{ .runtime_id = 1, .stream_id = 91, .role = .controller, .controller_generation = 1 });
+    rr.direct_input = .empty;
+    rr.input_batches = .{};
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.input_batches.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    rr.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, rr.enqueueInputBatch(.{ .kind = .paste, .first = "no-mutation" }));
+    rr.allocator = allocator;
+    try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+    try testing.expectEqual(@as(u64, 0), rr.input_batches.next_sequence);
+
+    rr.input_batches.epoch = 0;
+    try testing.expectError(error.ProtocolError, rr.enqueueInputBatch(.{ .kind = .paste, .first = "zero-epoch" }));
+    rr.input_batches.epoch = 1;
+    try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+    try testing.expectEqual(@as(u64, 0), rr.input_batches.next_sequence);
+
+    try rr.direct_input.appendNTimes(allocator, 'q', RemoteRuntime.max_direct_input_bytes);
+    try testing.expectError(error.OutOfMemory, rr.enqueueInputBatch(.{ .kind = .paste, .first = "over-cap" }));
+    try testing.expectEqual(@as(usize, RemoteRuntime.max_direct_input_bytes), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+    try testing.expectEqual(@as(u64, 0), rr.input_batches.next_sequence);
+    rr.direct_input.clearRetainingCapacity();
+
+    const filler_len = try fillRemoteTestSendBuffer(fds[0]);
+    try testing.expect(filler_len > 0);
+    // Client가 이미 한 frame을 소유하게 해 첫 batch도 Client pending 뒤에 머물게 한다. 단순 socket fill만으로는
+    // Client 자체의 pending slot이 비어 첫 batch가 그 slot으로 이동해 runtime transcript에서 먼저 retire될 수 있다.
+    try testing.expectEqual(@as(usize, 1), try client.sendInputNonBlocking(91, "X"));
+    try rr.enqueueInputBatch(.{ .kind = .paste, .first = "paste|" });
+    try rr.enqueueInputBatch(.{ .kind = .ime_commit, .first = "ime\n", .second = "replay|", .normalize_first_newlines = true });
+    try rr.enqueueInputBatch(.{ .kind = .osc52_response, .first = "osc52" });
+    try testing.expectEqualStrings("paste|ime\rreplay|osc52", rr.direct_input.items[rr.direct_input_offset..]);
+    try testing.expectEqual(@as(usize, 3), rr.input_batches.records.items.len);
+    inline for (.{ input_owner_mod.InputBatchKind.paste, .ime_commit, .osc52_response }, 1..) |kind, sequence| {
+        const record = rr.input_batches.records.items[sequence - 1];
+        try testing.expectEqual(kind, record.kind);
+        try testing.expectEqual(@as(u64, 1), record.epoch);
+        try testing.expectEqual(@as(u64, sequence), record.sequence);
+    }
+
+    const bytes_before = rr.direct_input.items.len;
+    rr.input_batches.next_sequence = std.math.maxInt(u64);
+    try testing.expectError(error.OutOfMemory, rr.enqueueInputBatch(.{ .kind = .paste, .first = "overflow" }));
+    try testing.expectEqual(bytes_before, rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 3), rr.input_batches.records.items.len);
+
+    const filler = try allocator.alloc(u8, filler_len);
+    defer allocator.free(filler);
+    try readRemoteTestExact(fds[1], filler);
+    while (!(try client.pumpPendingOutput())) {}
+    while (!(try rr.pumpQueuedInput())) {}
+    while (!(try client.pumpPendingOutput())) {}
+
+    const x_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 91 }, "X");
+    defer allocator.free(x_frame);
+    const paste_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 91 }, "paste|ime\rreplay|osc52");
+    defer allocator.free(paste_frame);
+    const received = try allocator.alloc(u8, x_frame.len + paste_frame.len);
+    defer allocator.free(received);
+    try readRemoteTestExact(fds[1], received);
+    try testing.expectEqualSlices(u8, x_frame, received[0..x_frame.len]);
+    try testing.expectEqualSlices(u8, paste_frame, received[x_frame.len..]);
+    try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+}
+
 test "remote runtime preserves input core-command input order under socket backpressure" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -9049,6 +9232,7 @@ test "remote runtime preserves input core-command input order under socket backp
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9109,6 +9293,7 @@ test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of si
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9149,6 +9334,7 @@ test "CR3a-2c3c C2 remote runtime control allocation failure also fail-closes in
     rr.allocator = failing.allocator();
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9185,6 +9371,7 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 11, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9222,6 +9409,7 @@ test "remote runtime compaction rebases a pending scroll barrier" {
     const allocator = testing.allocator;
     var rr: RemoteRuntime = undefined;
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     defer rr.direct_input.deinit(allocator);
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9259,6 +9447,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 13, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9353,6 +9542,7 @@ test "CR3a-2c3c C3 detach OOM sends no RPC and fail-closes for host lease cleanu
     rr.allocator = allocator;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 17, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9399,6 +9589,7 @@ test "CR3a-2c3c C3 terminate OOM discards superseded queued mutation before clea
         .controller_generation = 1,
     });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -9452,6 +9643,7 @@ test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wir
         .controller_generation = 1,
     });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -10052,6 +10244,7 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     rr.io = testing.io;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -10106,6 +10299,7 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
     rr.io = testing.io;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -10158,6 +10352,7 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     rr.io = testing.io;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -10212,6 +10407,7 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     rr.io = testing.io;
     rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
+    rr.input_batches = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -10590,8 +10786,8 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9136,
-        .ReleaseFast => 9088,
+        .Debug => 9184,
+        .ReleaseFast => 9120,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));

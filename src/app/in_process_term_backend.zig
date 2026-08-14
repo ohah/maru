@@ -71,7 +71,20 @@ pub const InProcessTermBackend = struct {
         .write = writeInput,
         .write_nonblocking = writeInputNonBlocking,
         .enqueue_core_command = enqueueCoreCommand,
+        .enqueue_batch = enqueueInputBatch,
     };
+
+    fn enqueueInputBatch(
+        ctx: *anyopaque,
+        handle: RuntimeHandle,
+        batch: @import("input_owner.zig").InputBatch,
+    ) anyerror!@import("input_owner.zig").BatchAdmission {
+        _ = ctx;
+        _ = handle;
+        _ = batch;
+        // Local PTY의 surface별 pending queue와 callback-safe tick drain은 AppSession이 계속 소유한다.
+        return .caller_owned;
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -401,4 +414,18 @@ test "CR2c local InputOwner는 기존 UnknownSurface와 partial 의미를 그대
     try std.testing.expectError(error.UnknownSurface, owner.write("late"));
     try std.testing.expectError(error.UnknownSurface, owner.writeNonBlocking("late"));
     try std.testing.expectError(error.UnknownSurface, owner.enqueueCoreCommand(.scroll_to_bottom, std.testing.io));
+}
+
+test "CR2d1 local InputOwner batch는 기존 AppSession queue ownership을 보존한다" {
+    const allocator = std.testing.allocator;
+    var registry = LiveRegistry.init(allocator);
+    defer registry.deinit();
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var backend_impl = InProcessTermBackend.init(allocator, std.testing.io, &registry, &runtime);
+    const owner = backend_impl.backend().inputOwner(0xD101);
+    try std.testing.expectEqual(
+        @import("input_owner.zig").BatchAdmission.caller_owned,
+        try owner.enqueueBatch(.{ .kind = .paste, .first = "local" }),
+    );
 }

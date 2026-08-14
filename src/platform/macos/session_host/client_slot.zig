@@ -12489,6 +12489,34 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         stream_id: u64,
     ) BatchError!AttachmentBatchRead {
+        return self.readAttachmentBatchInternal(stream_id);
+    }
+
+    pub fn beginReadPumpPoisonCapture(
+        self: *ClientSlot,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+    ) bool {
+        return self.valid() and
+            self.current.active_operation_generation == 0 and
+            capture.slot_addr == @intFromPtr(self) and
+            capture.client_addr == @intFromPtr(&self.current.client) and
+            self.current.client.beginReadPumpPoisonCapture(capture);
+    }
+
+    pub fn endReadPumpPoisonCapture(
+        self: *ClientSlot,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+    ) void {
+        if (!self.valid() or capture.slot_addr != @intFromPtr(self) or
+            capture.client_addr != @intFromPtr(&self.current.client))
+            @panic("read pump poison slot authority drifted");
+        self.current.client.endReadPumpPoisonCapture(capture);
+    }
+
+    fn readAttachmentBatchInternal(
+        self: *ClientSlot,
+        stream_id: u64,
+    ) BatchError!AttachmentBatchRead {
         if (!self.valid()) return error.MovedOrCopied;
         if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (terminal_drain_callback_binding.continuation_addr != 0) return error.AdminBusy;

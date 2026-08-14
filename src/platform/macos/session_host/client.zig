@@ -13,6 +13,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 threadlocal var checked_allocator_owner_addr: usize = 0;
+threadlocal var read_pump_poison_capture_addr: usize = 0;
 
 /// ClientSlot admission must reject an expected allocator callback before it dereferences the
 /// heap-pinned node or enters its operation fence. This TLS query intentionally needs no Client.
@@ -9586,6 +9587,70 @@ pub const Client = struct {
         return true;
     }
 
+    pub fn beginReadPumpPoisonCapture(
+        self: *Client,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+    ) bool {
+        if (read_pump_poison_capture_addr != 0 or
+            capture.self_addr != @intFromPtr(capture) or
+            capture.client_addr != @intFromPtr(self) or
+            capture.timestamp_ns < 0 or capture.controller_generation == 0 or
+            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            capture.reason_raw != 0 or capture.reason_present_raw != 0 or
+            capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed))
+            return false;
+        read_pump_poison_capture_addr = @intFromPtr(capture);
+        return true;
+    }
+
+    pub fn endReadPumpPoisonCapture(
+        self: *Client,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+    ) void {
+        if (read_pump_poison_capture_addr != @intFromPtr(capture) or
+            capture.self_addr != @intFromPtr(capture) or
+            capture.client_addr != @intFromPtr(self) or
+            (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)) or
+            (capture.lifecycle_raw == @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+                (capture.reason_present_raw != 0 or capture.reason_raw != 0)) or
+            (capture.lifecycle_raw == @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured) and
+                (capture.reason_present_raw != 1 or
+                    std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)))
+            @panic("read pump poison capture authority drifted");
+        read_pump_poison_capture_addr = 0;
+    }
+
+    fn captureReadPumpPoison(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) bool {
+        if (read_pump_poison_capture_addr == 0) return false;
+        const capture: *incident_publication_contract.ReadPumpPoisonCapture =
+            @ptrFromInt(read_pump_poison_capture_addr);
+        const lifecycle = std.enums.fromInt(
+            incident_publication_contract.ReadPumpPoisonCaptureLifecycle,
+            capture.lifecycle_raw,
+        ) orelse @panic("read pump poison capture lifecycle drifted");
+        if (capture.self_addr != read_pump_poison_capture_addr or
+            capture.client_addr != @intFromPtr(self) or capture.batch_adapter_addr == 0 or
+            capture.slot_addr == 0 or capture.timestamp_ns < 0 or
+            capture.controller_generation == 0 or
+            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            (lifecycle != .armed and lifecycle != .captured) or
+            (lifecycle == .armed and (capture.reason_present_raw != 0 or capture.reason_raw != 0)))
+            @panic("read pump poison capture authority drifted");
+        if (lifecycle == .captured) {
+            if (capture.reason_present_raw != 1 or capture.reason_raw != @intFromEnum(reason))
+                @panic("read pump poison reason drifted");
+            return true;
+        }
+        capture.reason_raw = @intFromEnum(reason);
+        capture.reason_present_raw = 1;
+        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured);
+        return true;
+    }
+
     fn poisonWhilePreparedExecutionHeld(
         self: *Client,
         reason: client_poison.ConnectionReason,
@@ -14145,6 +14210,7 @@ pub const Client = struct {
             if (self.capturePreparedExecutionPoison(reason, lease.poison_allocator_source_site_raw))
                 return;
         }
+        if (self.captureReadPumpPoison(reason)) return;
         // The cross-thread fence must win over the same-thread allocator diagnostic. During an
         // exclusive cleanup callback even the deferred poison path may not touch Client storage;
         // the rejected shared entry records intrusion and the owner converges to quarantine.

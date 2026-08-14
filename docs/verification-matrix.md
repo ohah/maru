@@ -1085,7 +1085,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   현재 별도 managed public poison caller 1 gate는 caller가 closed reason/source/controller generation만 제출하고 app-process owner clock과
   registered Client pin이 binding, parser/outbound phase, last successful request, queue/count/upgrade 상태를 canonical `IncidentInput`으로
   투영한 뒤 final-address HostAdapter와 app-global publisher owner를 실제 조합한다. held Client 상태로 first/repeat를 선택하고 first의
-  terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer와 failure-site caller 3~6은
+  terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer와 failure-site caller 6은
   아직 후속 gate 범위이며 caller 1 green을 전체 제품 ingress 완료로 확대하지 않는다.
   caller 2 gate는 actual generation prepared execution이 app-process owner의 sealed timestamp receipt를 먼저 받고, registered operation
   아래 stack-local poison capture와 `PreparedManagedPoison`을 완성한 뒤 operation release 후 process publication port로 게시하는 경로를
@@ -1103,6 +1103,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   first reason·usable/fd와 ring/pending/admission은 그대로다. response allocation failure의 일반 cleanup이 같은 reason을 다시
   관측해도 최초 allocator source를 보존하고, registered operation release 뒤 기존 publication port가 canonical first incident,
   terminal fd close와 reconnect admission을 exact 1회 게시한다. allocator와 attachment/runtime에는 publisher pointer를 저장하지 않는다.
+  caller 5 gate는 actual generation `RemoteRuntime.pumpDelta`가 첫 event/screen read 전 final batch adapter와 ClientSlot에
+  caller-final capture를 결속한 뒤 socket EOF를 읽는 제품 pump 전체를 실행한다. read callback 안에서는 caller-final capture에
+  별도 presence bit와 `connection_eof`가 기록되고(raw 0을 absence로 해석하지 않음) Client first reason·usable/fd,
+  batch registry, ring/pending/admission은 mutation 0이다. batch reservation·allocator scope·RemoteAttachment callback과 public mutation
+  fence가 모두 unwind된 뒤 publication port가 `SourceSite.client_read` canonical first incident, terminal fd close, reconnect admission을
+  exact 1회 게시한다. error tag를 reason으로 재분류하거나 batch adapter/runtime에 publisher pointer를 저장하지 않는다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect

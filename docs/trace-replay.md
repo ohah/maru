@@ -292,6 +292,17 @@ reconnect admission을 바꾸지 않는다. 이후 같은 failure가 일반 resp
 publication port가 `PreparedManagedPoison`을 canonical suffix에 제출한다. callback이 publisher·registry·runtime pointer를 보관하거나
 operation 안에서 coordinator를 재진입하는 경로는 0이다.
 
+caller 5의 read-event pump는 `RemoteRuntime.pumpDelta` 전체를 actual product ingress로 사용하며, screen batch는
+`RemoteAttachment.pumpScreen -> GenerationBatchAdapter.readBatch -> ClientSlot.readAttachmentBatch -> Client.readGenerationBatch`
+하위 경로를 지난다. runtime은 첫 event/screen read 전에 owner clock receipt를 한 번 받고, final-address batch adapter가
+caller-final read capture를 exact adapter·slot·Client·thread와 `SourceSite.client_read`에 임시 결속한다. Client가 public mutation fence 아래 EOF, read failure,
+partial frame 또는 parser resource failure를 확정하면 `Client.poison`은 first reason·unusable·fd·ring·pending·admission을 바꾸지 않고
+closed reason과 별도 presence bit만 capture한다(`connection_eof`의 raw 0은 absence로 해석하지 않는다). event drain, batch ingress
+reservation, guarded allocator scope, RemoteAttachment read callback이 모두 unwind되고 capture
+binding이 해제된 뒤에만 RemoteRuntime이 final HostAdapter로 canonical `PreparedManagedPoison`을 만들고 publication port에 제출한다.
+read callback이나 batch adapter가 publisher·registry·incident runtime pointer를 저장하거나 error tag에서 reason을 다시 추론하는 경로는
+0이다. capture가 없거나 서로 다른 Client/adapter/source로 drift하면 graph mutation 전 typed reject 또는 incident-authority fail-stop이다.
+
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.
 publication이 끝나면 같은 registered owner가 handoff에 봉인된 terminalization disposition을 no-reread continuation으로 적용한다.

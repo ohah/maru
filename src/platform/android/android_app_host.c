@@ -192,7 +192,8 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
         uint32_t advance = (uint32_t)(adv + 0.5f);
         if (advance == 0) advance = CW / 2;
-        maru_mobile_atlas_add(cps[i], 0, col, row, advance);
+        unsigned int one = cps[i]; // 미리 굽는 집합은 전부 단일 코드포인트(ASCII·박스)다
+        maru_mobile_atlas_add(&one, 1, 0, col, row, advance);
         (*env)->DeleteLocalRef(env, s);
     }
 
@@ -1152,8 +1153,28 @@ static void bakerClose(struct android_app *app, GlyphBaker *b) {
 
 /// 한 글자를 셀 크기 버퍼에 굽는다. 아틀라스를 처음 만들 때와 **같은 폰트·같은 배치**를
 /// 써야 새로 넣은 글리프가 기존 것과 어긋나지 않는다(baseline = CH-8).
-static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
-                     uint32_t CW, uint32_t CH, uint32_t *advance) {
+/// 코드포인트 **열**을 UTF-16 으로 편다. 반환값은 채운 unit 수.
+///
+/// 열째로 그려야 결합이 일어난다 — `❤`+VS16 을 따로 그리면 하트와 보이지 않는 선택자가 각각
+/// 그려질 뿐 컬러 하트가 안 된다. BMP 밖 코드포인트는 서러게이트 쌍으로 편다.
+static jsize clusterToUtf16(const unsigned int *cps, unsigned int n, jchar *units, jsize cap) {
+    jsize k = 0;
+    for (unsigned int i = 0; i < n && k + 2 <= cap; i++) {
+        unsigned int cp = cps[i];
+        if (cp > 0x10FFFF) continue;
+        if (cp > 0xFFFF) {
+            unsigned int v = cp - 0x10000;
+            units[k++] = (jchar)(0xD800 + (v >> 10));
+            units[k++] = (jchar)(0xDC00 + (v & 0x3FF));
+        } else {
+            units[k++] = (jchar)cp;
+        }
+    }
+    return k;
+}
+
+static int bakeGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int ncp, uint32_t style,
+                     uint8_t *out, uint32_t CW, uint32_t CH, uint32_t *advance) {
     if (!b->ok) return 0;
     JNIEnv *env = b->env;
     // 스타일에 맞는 폰트로 갈아 끼운다. advance 도 이 폰트에서 나와야 자간이 안 어긋난다.
@@ -1165,17 +1186,11 @@ static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
     (*env)->CallVoidMethod(env, b->bmp,
         (*env)->GetMethodID(env, bmCls2, "eraseColor", "(I)V"), (jint)0);
 
-    // **BMP 밖 글자도 이 경로로 온다**(컬러가 아닌 것들 — 수학 기호·CJK 확장 등). `(jchar)cp` 로
-    // 자르면 엉뚱한 글자가 된다. iOS 와 같은 규칙으로 서러게이트 쌍을 조립한다(비대칭 금지).
-    jchar units[2];
-    jsize unit_n = 0;
-    if (cp > 0xFFFF) {
-        unsigned int v = cp - 0x10000;
-        units[unit_n++] = (jchar)(0xD800 + (v >> 10));
-        units[unit_n++] = (jchar)(0xDC00 + (v & 0x3FF));
-    } else {
-        units[unit_n++] = (jchar)cp;
-    }
+    // **열을 통째로 그린다.** BMP 밖 글자(수학 기호·CJK 확장)는 서러게이트 쌍이 되고, 클러스터는
+    // 문자열 하나가 되어 Android 가 결합을 처리한다.
+    jchar units[MARU_MAX_CLUSTER * 2];
+    jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
+    if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
     (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
     jfloat adv = (*env)->CallFloatMethod(env, b->paint, b->measure, s);
@@ -1198,11 +1213,11 @@ static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
 
 /// 이모지 한 글자를 **컬러 아틀라스**에 굽는다(iOS `bakeColorGlyph:` 와 짝).
 ///
-/// ① BMP 밖 글자는 UTF-16 **서러게이트 쌍**이라야 한 글자로 그려진다 — `(jchar)cp` 로 자르면
-/// 엉뚱한 글자가 된다. ② 이모지 폰트는 Android 가 알아서 폴백한다(`Canvas.drawText`).
-/// ③ ARGB 비트맵에 그려야 색이 남는다.
-static int bakeColorGlyph(GlyphBaker *b, unsigned int cp, unsigned int style,
-                          uint8_t *out, uint32_t CW, uint32_t CH) {
+/// ① 코드포인트 **열**을 문자열 하나로 그려야 결합이 일어난다 — `❤`+VS16 을 따로 그리면 컬러
+/// 하트가 안 된다. BMP 밖은 서러게이트 쌍이다. ② 이모지 폰트는 Android 가 알아서 폴백한다
+/// (`Canvas.drawText`). ③ ARGB 비트맵에 그려야 색이 남는다.
+static int bakeColorGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int ncp,
+                          unsigned int style, uint8_t *out, uint32_t CW, uint32_t CH) {
     JNIEnv *env = b->env;
     if (!b->cbmp || !b->ccanvas) return 0;
     (*env)->CallObjectMethod(env, b->paint, b->set_typeface, b->faces[style & 3]);
@@ -1210,15 +1225,9 @@ static int bakeColorGlyph(GlyphBaker *b, unsigned int cp, unsigned int style,
     (*env)->CallVoidMethod(env, b->cbmp,
         (*env)->GetMethodID(env, bmCls, "eraseColor", "(I)V"), (jint)0);
 
-    jchar units[2];
-    jsize unit_n = 0;
-    if (cp > 0xFFFF) {
-        unsigned int v = cp - 0x10000;
-        units[unit_n++] = (jchar)(0xD800 + (v >> 10));
-        units[unit_n++] = (jchar)(0xDC00 + (v & 0x3FF));
-    } else {
-        units[unit_n++] = (jchar)cp;
-    }
+    jchar units[MARU_MAX_CLUSTER * 2];
+    jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
+    if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
     (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
 
@@ -1317,19 +1326,23 @@ static void growAtlas(struct android_app *app) {
     GlyphBaker baker;
     if (!bakerOpen(app, &baker, CW, CH)) { maru_mobile_missing_clear(); return; }
     for (int i = (int)n - 1; i >= 0; i--) {
-        unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
+        // **열을 통째로 읽는다.** base 만 읽으면 `❤` 와 `❤️` 가 같아 보여 VS16 결합이 단색이 된다.
+        unsigned int cps[MARU_MAX_CLUSTER];
+        unsigned int ncp = maru_mobile_missing_len((unsigned int)i);
+        if (ncp > MARU_MAX_CLUSTER) ncp = MARU_MAX_CLUSTER;
+        for (unsigned int j = 0; j < ncp; j++) cps[j] = maru_mobile_missing_cp_at((unsigned int)i, j);
         unsigned int style = maru_mobile_missing_style((unsigned int)i);
-        if (cp == 0 || cp > 0x10FFFF) continue;
+        if (ncp == 0 || cps[0] == 0 || cps[0] > 0x10FFFF) continue;
         // **컬러 글리프는 다른 아틀라스로 간다**(커버리지에 구우면 실루엣).
         if (maru_mobile_missing_is_color((unsigned int)i)) {
             unsigned int cslot = maru_mobile_next_color_slot(g.atlas_cols);
-            if (cslot == 0xFFFFFFFF) continue;   // 축출 정책은 아직 없다(계약 §4)
+            if (cslot == 0xFFFFFFFF) continue;   // 버릴 자리도 없다(전부 이번 프레임 것)
             uint32_t ccol = cslot >> 16, crow = cslot & 0xFFFF;
             uint8_t *rgba = calloc((size_t)CW * CH * 4, 1);
             if (!rgba) continue;
-            if (bakeColorGlyph(&baker, cp, style, rgba, CW, CH) &&
+            if (bakeColorGlyph(&baker, cps, ncp, style, rgba, CW, CH) &&
                 uploadSlot(g.color_image, ccol, crow, rgba, (uint32_t)(CW * CH * 4), CW, CH)) {
-                maru_mobile_color_atlas_add(cp, style, ccol, crow, CW); // 이모지는 2셀 = 슬롯 전체
+                maru_mobile_color_atlas_add(cps, ncp, style, ccol, crow, CW); // 이모지는 2셀 = 슬롯 전체
                 added++;
             }
             free(rgba);
@@ -1346,8 +1359,9 @@ static void growAtlas(struct android_app *app) {
         uint32_t advance = CW / 2;
         // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아
         // 끊긴다 — 합성은 셀을 가장자리까지 채운다. 0 이면 합성 대상이 아니라 폰트로 간다.
-        if (maru_mobile_synthesize(cp, cell, CW) == 0) {
-            if (!bakeGlyph(&baker, cp, style, cell, CW, CH, &advance)) continue;
+        // 합성 대상(박스·블록·브라유)은 전부 단일 코드포인트라 base 만 넘긴다.
+        if (maru_mobile_synthesize(cps[0], cell, CW) == 0) {
+            if (!bakeGlyph(&baker, cps, ncp, style, cell, CW, CH, &advance)) continue;
         }
 
         // staging 버퍼 → 이미지의 그 사각형만 복사(글자·이모지 공용 경로).
@@ -1360,7 +1374,7 @@ static void growAtlas(struct android_app *app) {
             for (uint32_t y = 0; y < CH; y++)
                 memcpy(g_glyph_px + (row * CH + y) * g_gw + col * CW, cell + y * CW, CW);
         }
-        maru_mobile_atlas_add(cp, style, col, row, advance);
+        maru_mobile_atlas_add(cps, ncp, style, col, row, advance);
         added++;
     }
     bakerClose(app, &baker);

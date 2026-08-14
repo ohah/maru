@@ -133,6 +133,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
+    /// 이번 터치를 키바가 잡고 있나. down 에서 정해지고 up/cancel 에서 풀린다.
+    BOOL _keybarActive;
 }
 
 /// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
@@ -313,8 +315,28 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
     // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
-    if (maru_mobile_keybar_tap(lx, ly)) {
-        NSLog(@"MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, maru_mobile_armed_mods());
+    // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
+    if (maru_mobile_keybar_pointer(0, lx, ly)) {
+        _keybarActive = YES;
+        return;
+    }
+    _keybarActive = NO;
+    unsigned int cell = maru_mobile_hit_cell(lx, ly);
+    NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
+          p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
+    [self sendPointer:0 touches:touches];
+}
+
+/// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
+- (BOOL)routeKeybar:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
+    if (!_keybarActive) return NO;
+    UITouch *touch = touches.anyObject;
+    CGPoint p = [touch locationInView:self];
+    UIEdgeInsets safe = self.safeAreaInsets;
+    maru_mobile_keybar_pointer(phase, (float)(p.x - safe.left), (float)(p.y - safe.top));
+    if (phase >= 2) {
+        _keybarActive = NO;
+        NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
         // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
         // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3: 브리지엔 OS 호출이 없다).
         static unsigned char copy_buf[8192];
@@ -327,25 +349,24 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                 NSLog(@"MARU_COPY len=%u", cn);
             }
         }
-        return;
     }
-    unsigned int cell = maru_mobile_hit_cell(lx, ly);
-    NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
-          p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
-    [self sendPointer:0 touches:touches];
+    return YES;
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeKeybar:1 touches:touches]) return;
     [self sendPointer:1 touches:touches];
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeKeybar:2 touches:touches]) return;
     [self sendPointer:2 touches:touches];
     NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
           maru_mobile_view_offset(), maru_mobile_has_selection());
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeKeybar:3 touches:touches]) return;
     [self sendPointer:3 touches:touches];
     _flingVy = 0;
     // **취소도 남긴다.** 로그가 없어서 "배경으로 나갈 때 iOS 가 취소를 보내는가" 를 두 번

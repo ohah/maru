@@ -83,6 +83,7 @@ static struct {
     float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
     float fling_vy;       // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
+    int keybar_active;    // 이번 터치를 보조 키바가 잡고 있나(down 에서 서고 up/cancel 에서 풀린다)
     int ready;
     int frames;
     double last_ms;
@@ -924,6 +925,37 @@ Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jin
 }
 
 // 창이 서면 키보드를 올린다 — 터미널은 켜지면 바로 입력을 받는다.
+/// 코어가 꺼내 놓은 복사 텍스트를 시스템 클립보드에 넣는다.
+/// **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3 — 브리지엔 OS 호출이 없다).
+/// 꺼낼 것이 없으면 아무것도 안 한다(키바를 밀기만 했을 때가 그렇다).
+static void drainClipboard(struct android_app *app) {
+    static char copy_buf[8192];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int cn = maru_mobile_take_copy((unsigned char *)copy_buf, sizeof copy_buf);
+    unsigned int armed = maru_mobile_armed_mods();
+    pthread_mutex_unlock(&g_bridge_lock);
+    LOGI("MARU_KEYBAR armed=%u copy=%u", armed, cn);
+    if (cn == 0) return;
+    copy_buf[cn < sizeof copy_buf ? cn : sizeof copy_buf - 1] = 0;
+    JNIEnv *env = NULL;
+    JavaVM *vm = app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0 || !env) return;
+    if (g_activity_cls) {
+        jmethodID mid = (*env)->GetStaticMethodID(env, g_activity_cls, "setClipboard",
+                                                  "(Ljava/lang/String;)V");
+        if (mid) {
+            jstring s = (*env)->NewStringUTF(env, copy_buf);
+            (*env)->CallStaticVoidMethod(env, g_activity_cls, mid, s);
+            (*env)->DeleteLocalRef(env, s);
+        } else {
+            LOGI("MARU_COPY no_method");
+        }
+    } else {
+        LOGI("MARU_COPY no_class");
+    }
+    (*vm)->DetachCurrentThread(vm);
+}
+
 static void showKeyboard(struct android_app *app) {
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
@@ -950,6 +982,21 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         // **원시 이벤트를 넘긴다 — 뜻은 코어가 정한다**(§3.1: 끌면 스크롤, 길게 누르면 선택).
         // 여기서 스크롤로 단정하면 길게 누름이 영영 안 온다.
         int64_t ev_ms = AMotionEvent_getEventTime(ev) / 1000000;
+        // **키바가 잡고 있으면 그쪽이 먼저다.** 손을 뗄 때까지 본문 경로로 안 간다 —
+        // 키바를 가로로 미는 동작이 본문 스크롤로도 해석되면 둘 다 움직인다.
+        if (g.keybar_active) {
+            unsigned int ph = action == AMOTION_EVENT_ACTION_MOVE ? 1
+                            : action == AMOTION_EVENT_ACTION_UP   ? 2
+                            : action == AMOTION_EVENT_ACTION_CANCEL ? 3 : 1;
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_keybar_pointer(ph, lx, ly);
+            pthread_mutex_unlock(&g_bridge_lock);
+            if (ph >= 2) {
+                g.keybar_active = 0;
+                drainClipboard(app);
+            }
+            return 1;
+        }
         if (action == AMOTION_EVENT_ACTION_MOVE) {
             float dy = ly - g.touch_last_y;
             g.touch_last_y = ly;
@@ -975,43 +1022,12 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         g.touch_total_dy = 0;
         g.fling_vy = 0;
         // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+        // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
         pthread_mutex_lock(&g_bridge_lock);
-        unsigned int on_bar = maru_mobile_keybar_tap(lx, ly);
-        unsigned int armed = maru_mobile_armed_mods();
+        unsigned int on_bar = maru_mobile_keybar_pointer(0, lx, ly);
         pthread_mutex_unlock(&g_bridge_lock);
         if (on_bar) {
-            pthread_mutex_lock(&g_bridge_lock);
-            unsigned int had_sel = maru_mobile_has_selection();
-            pthread_mutex_unlock(&g_bridge_lock);
-            LOGI("MARU_KEYBAR pt=(%.0f,%.0f) armed=%u sel=%u", lx, ly, armed, had_sel);
-            // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
-            // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3).
-            static char copy_buf[8192];
-            pthread_mutex_lock(&g_bridge_lock);
-            unsigned int cn = maru_mobile_take_copy((unsigned char *)copy_buf, sizeof copy_buf);
-            pthread_mutex_unlock(&g_bridge_lock);
-            LOGI("MARU_COPY taken=%u", cn);
-            if (cn > 0) {
-                copy_buf[cn < sizeof copy_buf ? cn : sizeof copy_buf - 1] = 0;
-                JNIEnv *env = NULL;
-                JavaVM *vm = app->activity->vm;
-                if ((*vm)->AttachCurrentThread(vm, &env, NULL) == 0 && env) {
-                    if (g_activity_cls) {
-                        jmethodID mid = (*env)->GetStaticMethodID(env, g_activity_cls, "setClipboard",
-                                                                  "(Ljava/lang/String;)V");
-                        if (mid) {
-                            jstring s = (*env)->NewStringUTF(env, copy_buf);
-                            (*env)->CallStaticVoidMethod(env, g_activity_cls, mid, s);
-                            (*env)->DeleteLocalRef(env, s);
-                        } else {
-                            LOGI("MARU_COPY no_method");
-                        }
-                    } else {
-                        LOGI("MARU_COPY no_class");
-                    }
-                    (*vm)->DetachCurrentThread(vm);
-                }
-            }
+            g.keybar_active = 1;
             return 1;
         }
         pthread_mutex_lock(&g_bridge_lock);

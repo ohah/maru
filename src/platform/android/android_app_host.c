@@ -30,8 +30,8 @@
 // 이 문제가 없다 — 대칭이 아니라 사정이 다른 것이고, 그 차이를 여기 적어 둔다.
 static pthread_mutex_t g_bridge_lock = PTHREAD_MUTEX_INITIALIZER;
 
-#define PACE_WARMUP 20
-#define PACE_SAMPLES 60
+// 표본 수·워밍업은 **ABI 헤더가 소유한다**(`MARU_FRAME_PACE_*`) — 두 host 가 같은 방식으로
+// 재야 두 수를 나란히 놓을 수 있다.
 
 #define TAG "MaruChrome"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -87,7 +87,7 @@ static struct {
     int ready;
     int frames;
     double last_ms;
-    double pace_ms[PACE_SAMPLES];
+    double pace_ms[MARU_FRAME_PACE_SAMPLES];
     int n_pace;
     int pace_done;
     int64_t last_vsync_ns;  // 직전 vsync 시각 — 패널 주기를 여기서 잰다(하드코딩하지 않는다)
@@ -766,11 +766,11 @@ static void drawFrame(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double now = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
-    if (g.frames >= PACE_WARMUP && g.last_ms > 0 && g.n_pace < PACE_SAMPLES)
+    if (g.frames >= MARU_FRAME_PACE_WARMUP && g.last_ms > 0 && g.n_pace < MARU_FRAME_PACE_SAMPLES)
         g.pace_ms[g.n_pace++] = now - g.last_ms;
     g.last_ms = now;
-    if (g.n_pace == PACE_SAMPLES) {
-        for (int i = 1; i < PACE_SAMPLES; i++) {
+    if (g.n_pace == MARU_FRAME_PACE_SAMPLES) {
+        for (int i = 1; i < MARU_FRAME_PACE_SAMPLES; i++) {
             double k = g.pace_ms[i]; int j = i - 1;
             while (j >= 0 && g.pace_ms[j] > k) { g.pace_ms[j + 1] = g.pace_ms[j]; j--; }
             g.pace_ms[j + 1] = k;
@@ -779,10 +779,10 @@ static void drawFrame(void) {
             g.pace_done = 1;
             // **계측은 동작을 바꾸지 않는다.** 예전에는 여기서 앱을 30Hz 로 전환해, 측정의
             // 부산물이 제품 동작이 됐다(그리고 iOS 엔 그 전환이 없어 두 플랫폼이 달랐다).
-            double med = g.pace_ms[PACE_SAMPLES / 2];
+            double med = g.pace_ms[MARU_FRAME_PACE_SAMPLES / 2];
             int paced = (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS);
             LOGI("MARU_PACE median_ms=%.2f n=%d target=%.2f verdict=%s",
-                 med, PACE_SAMPLES, MARU_FRAME_TARGET_MS, paced ? "PASS" : "FAIL");
+                 med, MARU_FRAME_PACE_SAMPLES, MARU_FRAME_TARGET_MS, paced ? "PASS" : "FAIL");
         }
     }
     g.frames++;

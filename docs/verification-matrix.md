@@ -1087,6 +1087,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   투영한 뒤 final-address HostAdapter와 app-global publisher owner를 실제 조합한다. held Client 상태로 first/repeat를 선택하고 first의
   terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer와 failure-site caller 2~6은
   아직 후속 gate 범위이며 caller 1 green을 그 제품 ingress 완료로 확대하지 않는다.
+  caller 2 RED는 actual generation prepared execution이 app-process owner의 sealed timestamp receipt를 먼저 받고, registered operation
+  아래 stack-local poison capture와 `PreparedManagedPoison`을 완성한 뒤 operation release 후 process publication port로 게시하는 경로를
+  소유한다. response/transport failure 중간에는 first reason·fd·pending outbound·ring·admission이 0이고, 최종 publication은 caller 1과
+  동일한 canonical suffix를 exact 1회 사용해야 한다. `GenerationAttachment`·`RemoteRuntime`의 publisher/registry/runtime pointer 저장,
+  managed product reason-only poison, operation 안 coordinator 재진입은 모두 0이다. 이 행이 GREEN되기 전 caller 2는 미완료다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
   event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
   capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.

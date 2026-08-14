@@ -268,6 +268,21 @@ incident owner의 단일 facade가 handoff와 final `HostAdapter`를 다시 검�
 내부에서만 app-global publisher를 ephemeral borrow하고 coordinator를 호출한다. 제품 caller가 raw `Registry`·
 `ConnectionIncidentRuntime`·`IncidentOperationQuery`를 서로 조합하거나 adapter/Client에 publisher pointer를 저장하는 경로는 0이다.
 
+failure-site caller 2~6이 GUI `AppSession` 모듈을 역수입하거나 `GenerationAttachment`/`RemoteRuntime`에 publisher pointer를
+보관하지 않도록, app-process owner 모듈은 bootstrap이 완전히 성공한 뒤 final-address owner 주소를 PID/process nonce/thread와
+함께 process-sealed 단일 publication port에 게시한다. port는 owner shutdown admission 전에 revoke하며, 다른 주소·PID·thread,
+pristine/closing owner, replay된 handoff를 graph 역참조 전에 거부한다. failure-site는 port나 owner 주소를 보지 않고 operation 반환 뒤
+`publishPreparedManagedPoison(adapter, handoff)`만 호출한다. 이 module-level facade만 sealed owner 주소를 해석하고 instance facade에
+위임하며, product source의 port install/revoke caller는 각각 app bootstrap/termination exact 1이다.
+
+caller 2의 prepared execution 경로는 request write/response classification을 소유한 registered operation이 시작되기 전에 owner port에서
+timestamp receipt를 한 번 받고, 실패가 확정되면 operation pin 아래 final-address `PreparedManagedPoison`을 완성한다. Client의
+prepared-execution poison capture는 해당 operation과 handoff 주소에 결속된 stack-local one-shot이며 reason만 기록한다. capture가
+armed인 동안 `poisonWhilePreparedExecutionHeld`는 first reason, unusable, fd, pending outbound를 바꾸지 않는다. cleanup registry와
+prepared request authority가 terminal settlement를 끝내고 registered operation이 release된 뒤에만 port facade가 canonical publication,
+Client terminalization, fd close, reconnect admission을 수행한다. capture 미설치인 identity-absent/test-only execution은 기존 reason-only
+동작을 유지하되 managed product caller에서는 0으로 고정한다.
+
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.
 publication이 끝나면 같은 registered owner가 handoff에 봉인된 terminalization disposition을 no-reread continuation으로 적용한다.

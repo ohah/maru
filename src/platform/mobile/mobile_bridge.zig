@@ -497,6 +497,10 @@ var key_bar_scroll: f32 = 0;
 /// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
 var key_bar_fling: f32 = 0;
 
+/// 손가락이 지금 누르고 있는 키. **hover 가 없는 자리를 메우는 것이 눌림 표시**다(§2.4) —
+/// 없으면 눌렀는지 화면이 답하지 않는다. 밀기로 판정되면 즉시 푼다(누른 것이 아니었으므로).
+var kb_pressed: ?usize = null;
+
 var kb_active = false;
 var kb_down_x: f32 = 0;
 var kb_down_y: f32 = 0;
@@ -505,7 +509,14 @@ var kb_moved: f32 = 0;
 
 /// 키 하나를 그린다 — 테두리 + 키캡 면 + 가운데 라벨.
 fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
+    // **눌린 키는 눌린 것처럼 보인다.** armed(sticky 수정자가 켜진 상태)와 다른 축이다 —
+    // armed 는 `ctrl` 처럼 **다음 글자까지 유지되는 상태**이고, pressed 는 **지금 손가락이
+    // 닿아 있다**는 순간 표시다. 이게 없으면 `ctrl` 말고는 눌러도 화면이 답하지 않는다.
+    const pressed = kb_pressed != null and kb_pressed.? == i;
     const armed = key_bar[i].sticky_mod != 0 and armed_mods != 0;
+    // **못 쓰는 키는 흐리다.** `copy` 는 늘 줄에 있지만 선택이 없으면 눌러도 아무 일이 없다 —
+    // 그것이 화면에 보여야 한다(눌렀는데 무반응이면 고장으로 읽힌다).
+    const dimmed = key_bar[i].is_copy and !copyEnabled();
     const r: draw.Rect = .{
         .x = @intFromFloat(kx),
         .y = @intFromFloat(ky),
@@ -515,18 +526,18 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
     // **경계선을 또렷하게 긋는다.** 손가락은 마우스와 달리 hover 로 더듬을 수 없어 **눌리는
     // 자리가 보이는 것이 크기보다 먼저**다(테두리 없이 44 로 키웠더니 어디까지가 한 키인지
     // 화면에서 안 보였다).
-    push(r, tk.get(if (armed) .accent_bar else .muted_fg), 0xFF, 10, 0);
+    push(r, tk.get(if (armed or pressed) .accent_bar else if (dimmed) .divider else .muted_fg), 0xFF, 10, 0);
     const in: i32 = 2;
     // **키캡처럼 면을 띄운다.** 채움이 본문 배경과 같으면 속이 빈 윤곽선으로 보인다 — 실제
     // 키보드처럼 눌리는 면이 배경보다 밝아야 "누를 것" 으로 읽힌다.
-    push(.{ .x = r.x + in, .y = r.y + in, .w = r.w - 2 * @as(u32, @intCast(in)), .h = r.h - 2 * @as(u32, @intCast(in)) }, tk.get(if (armed) .tab_active_bg else .tab_hover_bg), 0xFF, 8, 0);
+    push(.{ .x = r.x + in, .y = r.y + in, .w = r.w - 2 * @as(u32, @intCast(in)), .h = r.h - 2 * @as(u32, @intCast(in)) }, tk.get(if (armed or pressed) .tab_active_bg else .tab_hover_bg), 0xFF, 8, 0);
     // **아이콘이 있으면 아이콘을 그린다**(kind=2 — 아이콘 아틀라스 슬롯). 방향키가 그렇다:
     // 폰트 글리프는 폰트마다 작게 디자인돼 글자 라벨보다 훨씬 작아 보였다(화면으로 확인).
     // 합성 아이콘은 슬롯을 가장자리까지 채워 크기를 우리가 정한다.
     if (key_bar[i].icon_slot) |slot| {
         const ic: f32 = 22.0; // 44 키캡 안에서 여백을 남기는 크기
         if (!reserveQuad()) return;
-        const rgb = tk.get(if (armed) .accent_bar else .surface_fg);
+        const rgb = tk.get(if (armed or pressed) .accent_bar else if (dimmed) .muted_fg else .surface_fg);
         quad_buf[quad_count] = .{
             .x = kx + (key_w - ic) / 2,
             .y = ky + (key_h - ic) / 2,
@@ -549,7 +560,7 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
     // 라벨은 키 한가운데. **실제 폭으로 잰다** — 글자 수 × 근사치로 재면 advance 가 다른 글자가
     // 왼쪽으로 쏠린다(화면으로 확인).
     const label_w: f32 = @floatFromInt(textWidth(key_bar[i].label, @intFromFloat(key_font)));
-    pushText(key_bar[i].label, @intFromFloat(kx + (key_w - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed) .accent_bar else .surface_fg));
+    pushText(key_bar[i].label, @intFromFloat(kx + (key_w - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed or pressed) .accent_bar else if (dimmed) .muted_fg else .surface_fg));
 }
 
 fn clampKeyBarScroll() void {
@@ -583,6 +594,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
     if (phase == 3) {
         kb_active = false;
+        kb_pressed = null;
         key_bar_fling = 0;
         return 0;
     }
@@ -596,6 +608,9 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         kb_last_x = x;
         kb_moved = 0;
         key_bar_fling = 0; // 흐르는 중에 짚으면 멈춘다
+        // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
+        // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
+        kb_pressed = keybarIndexAt(x, y);
         return 1;
     }
     if (!kb_active) return 0;
@@ -603,12 +618,19 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         const dx = x - kb_last_x;
         kb_last_x = x;
         kb_moved += @abs(dx);
+        // **임계를 넘기 전에는 스크롤도 안 한다.** 예전에는 이동량을 늘 반영해서, 살짝 민 손짓이
+        // **화면도 조금 움직이고 키도 나가는** 두 일을 한꺼번에 했다 — 같은 손짓이 어떨 때는
+        // 스크롤로, 어떨 때는 입력으로 보이는 원인이었다(사용자가 화면에서 짚었다).
+        // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
+        if (kb_moved < 10) return 1;
+        kb_pressed = null;
         key_bar_scroll -= dx;
         clampKeyBarScroll();
         key_bar_fling = dx; // 마지막 이동량이 곧 관성(터미널 세로와 같은 규칙)
         return 1;
     }
     kb_active = false;
+    kb_pressed = null;
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and kb_moved < 10) {
         key_bar_fling = 0;
@@ -626,25 +648,33 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
 /// 보조 키바 탭. **좌표는 여기서만 해석한다** — 그리는 자리와 판정하는 자리가 갈리면
 /// 눌러도 다른 키가 나간다. 1=이 탭은 키바가 먹었다, 0=키바 밖(플랫폼이 본문 처리로).
 fn keybarTapAt(x: f32, y: f32) u32 {
-    if (!key_bar_ready) return 0;
+    const i = keybarIndexAt(x, y) orelse return 0;
+    const item = key_bar[i];
+    if (item.is_copy) {
+        // 선택이 없으면 **아무 일도 안 한다** — 흐리게 그려져 있어 눌러도 안 된다는 것이 보인다.
+        if (copyEnabled()) copy_pending = true;
+        return 1;
+    }
+    if (item.sticky_mod != 0) {
+        // 토글이다 — 잘못 눌렀을 때 되돌릴 방법이 있어야 한다.
+        armed_mods = if (armed_mods & item.sticky_mod != 0) 0 else item.sticky_mod;
+        return 1;
+    }
+    // 수정자를 여기서 안 실는다 — `maru_mobile_key` 가 눌러 둔 것을 소비한다(한 곳).
+    _ = maru_mobile_key(item.key_id, item.codepoint, 0);
+    return 1;
+}
+
+/// 그 자리에 있는 키의 인덱스. **누르는 것과 그리는 것이 같은 판정을 쓴다** — 눌림 표시가
+/// 실제로 나갈 키와 어긋나면 손가락이 거짓말을 본다.
+fn keybarIndexAt(x: f32, y: f32) ?usize {
+    if (!key_bar_ready) return null;
     for (key_bar_rects, 0..) |r, i| {
         if (!keyBarVisible(i)) continue; // 안 보이는 키는 못 누른다
         if (x < r.x or x >= r.x + r.w or y < r.y or y >= r.y + r.h) continue;
-        const item = key_bar[i];
-        if (item.is_copy) {
-            copy_pending = true;
-            return 1;
-        }
-        if (item.sticky_mod != 0) {
-            // 토글이다 — 잘못 눌렀을 때 되돌릴 방법이 있어야 한다.
-            armed_mods = if (armed_mods & item.sticky_mod != 0) 0 else item.sticky_mod;
-            return 1;
-        }
-        // 수정자를 여기서 안 실는다 — `maru_mobile_key` 가 눌러 둔 것을 소비한다(한 곳).
-        _ = maru_mobile_key(item.key_id, item.codepoint, 0);
-        return 1;
+        return i;
     }
-    return 0;
+    return null;
 }
 
 /// 눌러 둔 수정자(0 이면 없음). 화면 표시는 브리지가 이미 한다 — 계측·접근성 라벨용이다.
@@ -1811,14 +1841,29 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         key_bar_band = .{ .top = band.y, .bot = band.y + band.height };
         // **키가 지나가는 창은 화살표 안쪽**이다. 창을 밴드 전체로 두면 `<`/`>` 배경이 가장자리
         // 키 위에 얹혀 그 라벨을 지운다(화면으로 확인 — 첫 키가 빈 칸이 됐다).
-        const view_x = band.x + edge_w;
-        // **`copy` 자리는 늘 예약한다.** 선택을 잡으면 줄 끝에 생기는데, 스크롤 창에 섞으면
-        // 그 순간 창 폭이 바뀌어 **나머지 키가 전부 밀린다** — "선택을 잡은 직후 그 자리를
-        // 누르면 옆 키가 눌린다" 는 이 저장소가 이미 실측한 함정이다. 오른쪽 끝에 고정 자리를
-        // 비워 두고 스크롤과 무관하게 그 자리에만 그린다(없을 때는 빈 자리로 둔다).
-        const copy_slot_w = key_w + key_gap;
-        const view_w = band.width - 2 * edge_w - copy_slot_w;
-        const scroll_n = if (keyBarVisible(key_bar.len - 1)) bar_n - 1 else bar_n;
+        // **가장자리에서 띄운다.** `>` 가 화면 끝에 딱 붙으면 잘려 보인다(사용자가 화면에서
+        // 짚었다). 밴드 자체는 화면 폭이므로 여기서 좌우를 물린다.
+        const band_x = band.x + key_bar_pad_x;
+        const band_w = band.width - 2 * key_bar_pad_x;
+        // 자투리(`slack`)는 아래에서 좌우 표시 영역이 나눠 먹는다 — `view_x` 는 그만큼 오른쪽에서
+        // 시작한다(왼쪽 표시가 넓어진다).
+        var view_x: f32 = band_x + edge_w;
+        // **`copy` 자리는 예약한다.** 없애 보니 `copy` 가 창 밖으로 밀려 **누르려면 찾아 밀어야
+        // 했다**(선택을 잡자마자 쓰는 버튼이라 그건 못 쓴다). 오른쪽 끝 고정 자리에 둔다.
+        // **`copy` 도 스크롤을 탄다**(사용자 결정). 늘 줄에 있으므로 나타났다 사라지며 나머지
+        // 키를 미는 일이 없고, 고정 자리를 예약할 이유도 없다 — 예약은 오른쪽에 죽은 공간을
+        // 남길 뿐이었다. 목록 끝이 그 자리이고 밀어서 닿는다.
+        const copy_slot_w: f32 = 0;
+        // **창을 키 단위로 맞춘다.** 자투리를 남기면 스크롤 0 에서도 오른쪽에 **아무것도 없는
+        // 자리**가 뜬다(사용자가 화면에서 짚었다) — 완전히 들어온 키만 그리므로 그 자투리는
+        // 영영 안 채워진다. 남는 폭은 좌우 표시 영역이 나눠 먹어 눈에 안 띈다.
+        const per_key = key_w + key_gap;
+        const raw_view_w = band_w - 2 * edge_w - copy_slot_w;
+        const fit_n = @max(1.0, @floor((raw_view_w + key_gap) / per_key));
+        const view_w = fit_n * per_key - key_gap;
+        const slack = raw_view_w - view_w;
+        view_x += @floor(slack / 2);
+        const scroll_n = bar_n;
         // **마지막 키 뒤에는 gap 이 없다.** `n * (w + gap)` 으로 재면 끝까지 밀었을 때 gap 만큼
         // 빈 자리가 남는다(화면으로 확인). 키 n개 사이의 gap 은 n-1 개다.
         const content = if (scroll_n == 0) 0 else @as(f32, @floatFromInt(scroll_n)) * key_w + @as(f32, @floatFromInt(scroll_n - 1)) * key_gap;
@@ -1833,25 +1878,22 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         for (0..key_bar.len) |i| {
             if (!keyBarVisible(i)) continue;
             slot += 1;
-            // `copy` 는 스크롤을 안 탄다 — 오른쪽 끝 예약 자리에 고정으로 그린다.
-            if (key_bar[i].is_copy) {
-                const cx = @floor(band.x + band.width - edge_w - key_w);
-                key_bar_rects[i] = .{ .x = cx, .y = ky, .w = key_w, .h = key_h };
-                drawKey(i, cx, ky, tk);
-                continue;
-            }
             defer kx += key_w + key_gap;
             // **창 밖 키는 자리도 안 남긴다.** rect 를 그대로 두면 화살표 아래로 숨은 키가
             // 여전히 눌린다 — 보이지 않는 것이 눌리면 사용자는 왜 그 키가 나갔는지 알 수 없다.
-            // **그리는 자리와 판정하는 자리를 같은 값으로 만든다.** 그리기는 정수 px 로 절삭되는데
-            // 히트가 f32 를 그대로 쓰면 최대 1px 어긋나 가장자리를 눌렀을 때 옆 키가 나간다.
+            // **창에 완전히 들어온 키만 그리고, 그것만 누른다.** 조건이 하나다 — 걸친 것을 그리면
+            // 반쯤 잘린 키가 `>` 옆에 붙어 **표시를 묻고**(사용자가 화면에서 짚었다), 그리는
+            // 범위와 누르는 범위가 갈리면 **보이는데 안 눌리는 키**가 생긴다. 스크롤 중 키가
+            // 44px 단위로 나타났다 사라지지만, "보이는 것이 눌린다" 가 그보다 중요하다.
+            //
+            // 좌표는 `@floor` 로 정수에 맞춘다 — 그리기는 절삭되는데 히트가 f32 면 1px 어긋나
+            // 가장자리에서 옆 키가 나간다.
             const kxi = @floor(kx);
             if (kx < view_x - 0.5 or kx + key_w > view_x + view_w + 0.5) {
                 key_bar_rects[i] = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-            } else {
-                key_bar_rects[i] = .{ .x = kxi, .y = ky, .w = key_w, .h = key_h };
+                continue;
             }
-            if (kx + key_w <= band.x or kx >= band.x + band.width) continue;
+            key_bar_rects[i] = .{ .x = kxi, .y = ky, .w = key_w, .h = key_h };
             drawKey(i, kxi, ky, tk);
         }
         // **밴드를 찾았고 키를 다 놓았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가
@@ -1869,13 +1911,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         const edge_bg = tk.get(.surface_bg);
         const edge_fg = tk.get(.surface_fg);
         if (key_bar_scroll > 0.5) {
-            const er: draw.Rect = .{ .x = @intFromFloat(band.x), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
+            const er: draw.Rect = .{ .x = @intFromFloat(band_x), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
             push(er, edge_bg, 0xFF, 0, 0);
             push(.{ .x = er.x + @as(i32, @intFromFloat(edge_w)) - 1, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
             pushText("<", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth("<", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
         }
         if (key_bar_scroll < key_bar_max_scroll - 0.5) {
-            const ex = band.x + band.width - edge_w;
+            const ex = band_x + band_w - edge_w;
             const er: draw.Rect = .{ .x = @intFromFloat(ex), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
             push(er, edge_bg, 0xFF, 0, 0);
             push(.{ .x = er.x, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
@@ -1957,9 +1999,16 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "copy", .key_id = 0, .is_copy = true },
 };
 
-/// 선택이 없으면 `copy` 는 줄에서 빠진다.
+/// **모든 키가 늘 줄에 있다.** 한때 `copy` 만 선택이 있을 때 나타났는데, 나타났다 사라지며 줄이
+/// 흔들리고 그 자리가 평소엔 죽은 공간이었다(사용자 결정으로 상시 표시). 선택이 없을 때는
+/// `copyEnabled` 가 거짓이라 흐리게 그려지고 눌러도 아무 일이 없다.
 fn keyBarVisible(i: usize) bool {
-    if (!key_bar[i].is_copy) return true;
+    _ = i;
+    return true;
+}
+
+/// `copy` 가 지금 쓸 수 있나(선택이 있나). 표시와 판정이 같은 값을 본다.
+fn copyEnabled() bool {
     const core = &(term_core orelse return false);
     return core.selectionViewportSpan() != null;
 }

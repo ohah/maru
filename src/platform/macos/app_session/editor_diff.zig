@@ -639,3 +639,45 @@ test "내용만 바뀌고 플래그가 같으면 판정을 유지한다 — 그�
     poll(fx.session, fx.term);
     try testing.expect(fx.term.rt.editor_diff.?.view.compare.changed != before);
 }
+
+test "긴 비교가 스크롤된다 — 좌우가 함께 움직이고 끝에서 멈춘다" {
+    // **비교의 문서는 행 배열이다**(줄 배열이 아니다). 그 둘을 헷갈리면 스크롤 상한이 문서 줄 수로
+    // 잡혀, 짝을 맞추려 넣은 빈 행만큼 화면이 일찍 멈추거나 끝을 넘어간다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    const body = pane_ops.paneGeometry(fx.session, leaf).body;
+
+    // 왼쪽에만 있는 줄이 잔뜩 — 오른쪽은 그만큼 빈 행이라 **행 수 > 오른쪽 문서 줄 수**다.
+    var left_buf: std.ArrayList(u8) = .empty;
+    defer left_buf.deinit(allocator);
+    for (0..300) |i| {
+        var num: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&num, "line {d}\n", .{i});
+        try left_buf.appendSlice(allocator, line);
+    }
+    var entry = testEntry(left_buf.items, "line 0\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
+
+    const rows = fx.term.rt.editor_diff.?.left_texts.len;
+    try testing.expect(rows > 200);
+
+    try testing.expect(editor_ops.scrollLines(fx.session, fx.term, body, -5));
+    try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_first_line);
+
+    _ = editor_ops.scrollLines(fx.session, fx.term, body, -10_000);
+    const visible = (body.h -| chrome_editor.frame.content_inset_px * 2) / fx.session.cell_height_px;
+    // **행 수** 기준으로 멈춘다(오른쪽 문서 줄 수(1)로 잡으면 곧바로 0이 된다).
+    try testing.expectEqual(rows - visible, fx.term.rt.editor_first_line);
+
+    // 그 자리에서 그려도 좌우가 함께 그 행부터다 — 두 열이 같은 `first_line`을 쓴다.
+    var draw_result = editor_ops.appendPaneFrame(fx.session, leaf, fx.term);
+    try testing.expect(draw_result != null);
+    defer draw_result.?.dl.deinit(allocator);
+    try testing.expect(draw_result.?.dl.cells.len > 0);
+}

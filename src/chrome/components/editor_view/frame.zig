@@ -99,6 +99,10 @@ pub const band_alpha: u8 = 41; // ≈16%
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
 pub const strip_alpha: u8 = 153; // ≈60%
+///
+/// **창 투명도는 이 밴드에 곱해지지 않는다**(`terminal_bg` 역할만 곱해진다). 밴드는 바탕이 아니라
+/// 바탕 위에 얹는 표시라, 글자와 같은 취급이 맞다 — 투명한 창에서 바탕이 옅어질수록 밴드가 함께
+/// 옅어지면 "어느 줄이 바뀌었나"가 창 설정에 따라 사라진다.
 pub const strip_width_px: u16 = 2;
 
 pub const Scratch = struct {
@@ -189,6 +193,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // ── 4) 스크롤바 ────────────────────────────────────────────────────────────
     // **문서 전체의 시각 행 수**라야 막대 길이가 맞는다(§4.1a) — 논리 줄로 세면 랩된 문서에서
     // 실제보다 짧아 보이고, 화면에 그린 행으로 세면 늘 꽉 찬 것으로 판정돼 막대가 사라진다.
+    // 랩이 켜지면 논리 줄 하나가 여러 시각 행이 되므로, 막대의 위치도 **시각 행**으로 세야 한다.
+    // `first_line`(논리)을 그대로 쓰면 랩된 문서에서 막대가 실제보다 위에 선다 — 세로 스크롤이
+    // 붙기 전에는 늘 0이라 아무도 못 봤다(적대적 검증에서 드러났다).
+    var first_visual: u32 = @intCast(@min(props.first_line, std.math.maxInt(u32)));
     const total_visual: u32 = props.total_visual_rows orelse blk: {
         var sum: u32 = 0;
         var counted: usize = 0;
@@ -206,6 +214,13 @@ pub fn build(props: Props, scratch: Scratch) Written {
         // **못 센 줄은 논리 줄 하나로 친다.** `row_counts`가 문서보다 짧으면 나머지를 0으로 두게
         // 되는데, 그러면 막대가 문서 끝에 닿아 있는 것처럼 보인다 — 랩을 모르니 최소값으로 잡는다.
         if (props.lines.len > counted) sum +|= @intCast(props.lines.len - counted);
+        // 화면 맨 위 줄까지의 시각 행 수 = 막대가 서야 할 자리. 못 센 줄은 논리 줄 하나로 친다
+        // (위 합계와 같은 규칙 — 두 값이 다른 가정을 쓰면 막대가 문서 끝에서 안 맞는다).
+        var prefix: u32 = 0;
+        for (0..@min(props.first_line, props.lines.len)) |i| {
+            prefix +|= if (i < counted) scratch.row_counts[i] else 1;
+        }
+        first_visual = prefix;
         break :blk sum;
     };
 
@@ -220,7 +235,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .gutter_w = @floatFromInt(props.scrollbar_gutter_px),
         },
         .total_visual_rows = total_visual,
-        .first_visual_row = @intCast(@min(props.first_line, std.math.maxInt(u32))),
+        .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
     }, scratch.ops[bg.ops + cw.ops + gw.ops ..]);
@@ -498,4 +513,157 @@ test "밴드는 바뀐 줄에만 서고 빈 행에는 안 선다" {
     }
     try testing.expectEqual(@as(usize, 1), band_quads);
     try testing.expectEqual(@as(usize, 1), strip_quads);
+}
+
+test "밴드는 스크롤을 따라간다 — 표를 절대 인덱스로 읽는다" {
+    // gutter 번호에서 같은 구멍이 있었다(뷰포트 기준으로 읽으면 화면 맨 위가 늘 표의 0번이 된다).
+    // 밴드가 그러면 스크롤한 비교에서 **엉뚱한 줄에 색이 깔린다** — 그것은 틀린 정보다.
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [128]u8 = undefined;
+
+    const lines = [_][]const u8{ "a", "b", "c", "d", "e" };
+    const bands = [_]RowBand{ .none, .none, .none, .added, .none }; // 4번째 줄만 추가
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 2, // 화면 맨 위가 문서의 3번째 줄
+        .total_lines = 5,
+        .row_bands = &bands,
+        .visible_rows = 3,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 48 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var found: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diff_added_bg) continue;
+        // 문서 4번째 줄 = 화면 두 번째 행(첫 행이 3번째 줄) → y = 16.
+        try testing.expectEqual(@as(i32, 16), op.quad.rect.y);
+        found += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), found); // 줄 배경 + 좌측 띠
+}
+
+test "랩된 줄은 이어진 조각까지 한 색이다 — 한 줄로 읽혀야 한다" {
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    // 본문 폭보다 긴 줄 하나 — 랩이 켜지면 여러 조각으로 접힌다.
+    const lines = [_][]const u8{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+    const bands = [_]RowBand{.removed};
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .visible_rows = 6,
+        .wrap = true,
+        .rect = .{ .x = 0, .y = 0, .w = 120, .h = 96 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 10,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var rows_painted: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diff_removed_bg) continue;
+        if (op.quad.rect.w != strip_width_px) rows_painted += 1; // 줄 배경만 센다
+    }
+    // 접힌 조각이 둘 이상이고, **그 전부**에 색이 깔린다(한 조각만 칠하면 줄이 끊겨 보인다).
+    try testing.expect(w.visual_rows > 1);
+    try testing.expectEqual(w.visual_rows, rows_painted);
+}
+
+test "랩된 문서에서 막대가 시각 행 자리에 선다 — 논리 줄로 세면 위에 붙는다" {
+    // 세로 스크롤이 붙기 전에는 `first_line`이 늘 0이라 이 차이가 안 보였다. 스크롤이 살아나면
+    // 랩된 문서에서 막대가 실제 위치보다 **위**에 서고, 사용자는 문서 중간에서 막대를 위쪽에서 본다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [32]content.Row = undefined;
+    var visual_rows: [32]visual_map.VisualRow = undefined;
+    var gutter_rows: [32]gutter.Row = undefined;
+    var counts: [32]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    // 줄마다 본문 폭의 두 배 → 랩이 켜지면 줄당 시각 행 2개.
+    const long_line = "aaaaaaaaaaaaaaaaaaaa";
+    var lines_buf: [10][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = long_line;
+
+    const scratch: Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+    const base: Props = .{
+        .lines = &lines_buf,
+        .first_line = 0,
+        .total_lines = lines_buf.len,
+        .visible_rows = 4,
+        .wrap = true,
+        .rect = .{ .x = 0, .y = 0, .w = 160, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 10,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    };
+
+    const top = build(base, scratch);
+    var scrolled = base;
+    scrolled.first_line = 5; // 문서의 절반 — 랩 때문에 시각 행으로는 10번째다
+    const mid = build(scrolled, scratch);
+
+    const a = top.scrollbar orelse return error.NoScrollbar;
+    const b = mid.scrollbar orelse return error.NoScrollbar;
+    try testing.expect(b.thumb_y > a.thumb_y);
+    // **논리 줄로 세면 5/10 = 절반이 아니라 5/20 = 1/4 자리에 선다.** 그 차이를 여기서 고정한다:
+    // 시각 행 기준이면 thumb이 트랙의 대략 절반 아래에 있어야 한다.
+    const track_mid = a.track_y + (a.track_h - b.thumb_h) / 2;
+    try testing.expect(b.thumb_y >= track_mid - 1);
 }

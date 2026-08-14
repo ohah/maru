@@ -43,6 +43,7 @@ const ScrollRef = app_session_mod.ScrollRef;
 const default_scrollbar_visible_ticks = app_session_mod.default_scrollbar_visible_ticks;
 const file_panel_ops = @import("file_panel.zig");
 const pane_ops = @import("pane.zig");
+const editor_ops = @import("editor.zig");
 const scrollbar_alpha_full = app_session_mod.scrollbar_alpha_full;
 const scrollbar_fade_ms = app_session_mod.scrollbar_fade_ms;
 const scrollbar_visible_ms = app_session_mod.scrollbar_visible_ms;
@@ -352,6 +353,9 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
     // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
     const hit = pane_ops.paneTargetAt(self, x_px, y_px);
+    // **편집기 pane은 문서를 스크롤한다.** 셸이 아니므로 아래의 스크롤백·mouse reporting 경로를
+    // 타면 안 되고(둘 다 core가 있어야 한다), 안 소유하면 편집기 위 휠이 뒤 터미널을 굴린다.
+    if (hit) |h| if (editor_ops.scrollLines(self, h.term, h.rect, lines)) return;
     const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ term_ops.activeSurface(self), self.active_pane_rect };
     // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
     // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).

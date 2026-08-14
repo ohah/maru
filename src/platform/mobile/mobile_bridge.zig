@@ -836,7 +836,19 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             const cell = snap.cells[core.index(row, col)];
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
-            const glyph = atlasCell(cell.codepoint, styleBits(cell.style)) orelse continue;
+            // **클러스터를 열째로 넘긴다.** 코어는 base 를 셀에 두고 나머지를 `grapheme_id` 로
+            // 따로 보관한다 — base 만 보면 `❤` 와 `❤️` 가 같아 보여 VS16 결합이 단색이 됐다.
+            var seq: [max_cluster]u21 = undefined;
+            seq[0] = cell.codepoint;
+            var seq_len: usize = 1;
+            if (cell.grapheme_id != 0 and cell.grapheme_id <= snap.graphemes.len) {
+                for (snap.graphemes[cell.grapheme_id - 1]) |extra| {
+                    if (seq_len == max_cluster) break;
+                    seq[seq_len] = extra;
+                    seq_len += 1;
+                }
+            }
+            const glyph = atlasCell(seq[0..seq_len], styleBits(cell.style)) orelse continue;
             if (!reserveQuad()) return;
             const rgb = paintCell(cell.style, tk).fg;
             // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
@@ -983,7 +995,10 @@ pub export fn maru_mobile_atlas_rows() u32 {
     return atlas_rows_n;
 }
 
-var atlas_cp: [atlas_cap]u32 = undefined;
+var atlas_cp: [atlas_cap]u32 = undefined; // base+style — 1차 비교
+/// 등록된 글자의 **코드포인트 열**. `❤` 와 `❤️` 는 base 가 같아 여기까지 봐야 갈린다.
+var atlas_seq: [atlas_cap][max_cluster]u32 = undefined;
+var atlas_len: [atlas_cap]u8 = undefined;
 var atlas_col: [atlas_cap]u32 = undefined;
 var atlas_row: [atlas_cap]u32 = undefined;
 var atlas_adv: [atlas_cap]u32 = undefined;
@@ -1036,20 +1051,28 @@ fn atlasKey(cp: u32, style: u32) u32 {
     return (cp & 0xFFFFFF) | (style << 24);
 }
 
-pub export fn maru_mobile_atlas_add(cp: u32, style: u32, col: u32, row: u32, advance: u32) void {
-    const key = atlasKey(cp, style);
+/// 구운 글자를 등록한다. **열을 통째로 받는다** — 단일 코드포인트면 `n=1` 이다.
+/// `cps` 는 `maru_mobile_missing_cp_at` 로 읽은 그 열이어야 한다(다른 열을 넘기면 host 가 구운
+/// 그림과 등록부가 어긋나 엉뚱한 글리프가 그려진다).
+pub export fn maru_mobile_atlas_add(cps: [*]const u32, n: u32, style: u32, col: u32, row: u32, advance: u32) void {
+    if (n == 0) return;
+    const seq = cps[0..@min(n, max_cluster)];
+    const key = atlasKey(seq[0], style);
     // 등록되면 "없음" 목록에서 뺀다. 안 그러면 아틀라스가 서기 **전에** 한 번 돈 build 가
     // 남긴 목록 때문에 이미 있는 글자를 슬롯만 축내며 다시 굽는다(실측: grew=15 가 전부
     // 'z' 같은 ASCII 중복이었다).
     var i: usize = 0;
     while (i < miss_n) : (i += 1) {
-        if (miss_cp[i] == key) {
+        if (miss_cp[i] == key and seqEqlU32(miss_seq[i][0..miss_len[i]], seq)) {
             miss_cp[i] = miss_cp[miss_n - 1];
+            miss_seq[i] = miss_seq[miss_n - 1];
+            miss_len[i] = miss_len[miss_n - 1];
             miss_n -= 1;
             break;
         }
     }
-    for (0..atlas_n) |j| if (atlas_cp[j] == key) return; // 이미 있으면 슬롯을 안 쓴다
+    // 이미 있으면 슬롯을 안 쓴다. **열까지 봐야 한다** — base 만 보면 `❤️` 가 `❤` 자리를 쓴다.
+    for (0..atlas_n) |j| if (atlas_cp[j] == key and seqEqlU32(atlas_seq[j][0..atlas_len[j]], seq)) return;
     if (atlas_n == atlas_cp.len) {
         // **꽉 찼으면 덮어쓴다.** `maru_mobile_next_slot` 이 고른 자리가 곧 버릴 자리다.
         const v = pending_victim orelse return;
@@ -1057,12 +1080,14 @@ pub export fn maru_mobile_atlas_add(cp: u32, style: u32, col: u32, row: u32, adv
         // 그린다. 좌표는 **검증용**이고, 자리는 위 인덱스가 정한다.
         if (atlas_col[v] != col or atlas_row[v] != row) return;
         atlas_cp[v] = key;
+        storeSeq(&atlas_seq[v], &atlas_len[v], seq);
         atlas_adv[v] = advance;
         atlas_used[v] = frame_seq;
         pending_victim = null;
         return;
     }
     atlas_cp[atlas_n] = key;
+    storeSeq(&atlas_seq[atlas_n], &atlas_len[atlas_n], seq);
     atlas_col[atlas_n] = col;
     atlas_row[atlas_n] = row;
     atlas_adv[atlas_n] = advance;
@@ -1070,31 +1095,69 @@ pub export fn maru_mobile_atlas_add(cp: u32, style: u32, col: u32, row: u32, adv
     atlas_n += 1;
 }
 
+fn storeSeq(dst: *[max_cluster]u32, len: *u8, seq: []const u32) void {
+    for (seq, 0..) |cp, j| dst[j] = cp;
+    len.* = @intCast(seq.len);
+}
+
+fn seqEqlU32(a: []const u32, b: []const u32) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x != y) return false;
+    return true;
+}
+
 // **아틀라스는 자란다.** 처음 보는 글자는 그릴 글리프가 없어 조용히 안 그려진다 — 고정
 // 집합으로 두면 입력·원격 출력의 새 글자가 전부 사라진다(실측으로 드러났다: 키를 넣었더니
 // 코어엔 들어왔는데 화면이 그대로였다).
 // 여기서는 **놓친 코드포인트를 모아** 플랫폼이 그것만 구워 넣게 한다. 슬롯 추가는
 // 아틀라스 부분 업데이트(여섯 기능 4번)를 그대로 쓴다.
-var miss_cp: [64]u32 = undefined;
+/// 한 글자가 실을 수 있는 코드포인트 수. 가족 이모지(👨‍👩‍👧‍👦)가 7, 스킨톤이 붙으면 더 길어진다.
+/// 넘치는 꼬리는 버린다 — 자르면 host 가 다른 글자를 굽지만, 무한정 이고 갈 수는 없다.
+pub const max_cluster: usize = 12;
+
+var miss_cp: [64]u32 = undefined; // base+style — 1차 비교용(대부분 여기서 갈린다)
+var miss_seq: [64][max_cluster]u32 = undefined;
+var miss_len: [64]u8 = undefined;
 var miss_n: usize = 0;
 
-/// 못 그린 것은 **(코드포인트, 스타일) 짝**으로 모은다 — 같은 글자라도 굵은 판은 따로 구워야 한다.
-fn noteMiss(key: u32) void {
-    for (0..miss_n) |i| if (miss_cp[i] == key) return;
+/// 못 그린 것은 **(코드포인트 열, 스타일)** 로 모은다. 열인 이유: 코어는 base 를 셀에 두고
+/// 나머지를 `grapheme_id` 로 따로 보관하는데, base 만 넘기면 host 에게 `❤`(U+2764)와
+/// `❤️`(U+2764 U+FE0F)가 **같아 보인다** — 그래서 VS16 결합이 단색으로 나왔다.
+/// 스타일도 함께 싣는다 — 같은 글자라도 굵은 판은 따로 구워야 한다.
+fn noteMiss(seq: []const u21, style: u32) void {
+    const key = atlasKey(seq[0], style);
+    for (0..miss_n) |i| if (miss_cp[i] == key and seqEql(miss_seq[i][0..miss_len[i]], seq)) return;
     if (miss_n == miss_cp.len) return;
     miss_cp[miss_n] = key;
+    const n = @min(seq.len, max_cluster);
+    for (0..n) |j| miss_seq[miss_n][j] = seq[j];
+    miss_len[miss_n] = @intCast(n);
     miss_n += 1;
 }
 
-/// 플랫폼이 부른다: 아직 아틀라스에 없는 코드포인트 개수.
+/// 열이 같은가. base 는 이미 `atlasKey` 로 걸러졌지만 꼬리까지 봐야 `❤` 와 `❤️` 가 갈린다.
+fn seqEql(a: []const u32, b: []const u21) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x != y) return false;
+    return true;
+}
+
+/// 플랫폼이 부른다: 아직 아틀라스에 없는 **글자** 개수(코드포인트 개수가 아니다).
 pub export fn maru_mobile_missing_count() u32 {
     return @intCast(miss_n);
 }
 
-/// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_mobile_atlas_add` 로 넣는다.
-pub export fn maru_mobile_missing_cp(i: u32) u32 {
+/// i번째 놓친 글자의 코드포인트 **개수**. 1이면 단일 코드포인트, 2 이상이면 클러스터다.
+pub export fn maru_mobile_missing_len(i: u32) u32 {
     if (i >= miss_n) return 0;
-    return miss_cp[i] & 0xFFFFFF;
+    return miss_len[i];
+}
+
+/// i번째 놓친 글자의 j번째 코드포인트. host 는 `0..missing_len(i)` 를 이어 붙여 **문자열 하나로**
+/// 구워야 한다 — 코드포인트를 따로 구우면 결합이 안 일어난다.
+pub export fn maru_mobile_missing_cp_at(i: u32, j: u32) u32 {
+    if (i >= miss_n or j >= miss_len[i]) return 0;
+    return miss_seq[i][j];
 }
 
 /// i번째 놓친 것의 **스타일**(1=굵게·2=기울임, Android `Typeface` 상수와 같은 값).
@@ -1127,12 +1190,25 @@ pub export fn maru_mobile_next_slot(cols: u32) u32 {
 //
 // **컬러인지는 코어가 정한다.** `width.isEmojiPresentation` 이 단일 출처라, 여기서 규칙을
 // 다시 쓰면 컬러 판정이 갈린다(데스크톱 렌더러도 같은 함수를 본다).
-fn isColorGlyph(cp: u32) bool {
-    if (cp > 0x10FFFF) return false;
-    return maru.width.isEmojiPresentation(@intCast(cp));
+/// 컬러로 구울 글자인가. **열을 본다** — `❤`(U+2764)는 텍스트 표현이지만 `❤️`(+VS16)는 컬러다.
+/// base 만 보면 둘이 같아 보여 VS16 결합이 단색으로 나왔다(화면으로 확인한 결함).
+///
+/// base 판정의 단일 출처는 코어(`width.isEmojiPresentation`)다. VS16 은 그 위에 얹는 **표현
+/// 선택자**라 열에서만 보이고, 코어의 셀 모델에는 `grapheme_id` 뒤에 숨어 있다.
+fn isColorGlyph(seq: []const u21) bool {
+    if (seq.len == 0 or seq[0] > 0x10FFFF) return false;
+    // VS16(U+FE0F)이 붙으면 그 글자는 이모지 표현으로 그린다 — VS15(U+FE0E)는 반대(텍스트).
+    for (seq[1..]) |cp| {
+        if (cp == 0xFE0F) return true;
+        if (cp == 0xFE0E) return false;
+    }
+    return maru.width.isEmojiPresentation(seq[0]);
 }
 
 var color_cp: [atlas_cap]u32 = undefined;
+/// 글자 아틀라스의 `atlas_seq` 와 짝 — `❤` 와 `❤️` 를 가르는 열.
+var color_seq: [atlas_cap][max_cluster]u32 = undefined;
+var color_len: [atlas_cap]u8 = undefined;
 var color_col: [atlas_cap]u32 = undefined;
 var color_row: [atlas_cap]u32 = undefined;
 var color_adv: [atlas_cap]u32 = undefined;
@@ -1144,32 +1220,42 @@ var color_n: usize = 0;
 /// 커버리지 아틀라스에 컬러를 구우면 실루엣이 되고, 그 반대는 색이 사라진다.
 pub export fn maru_mobile_missing_is_color(i: u32) u32 {
     if (i >= miss_n) return 0;
-    return if (isColorGlyph(miss_cp[i] & 0xFFFFFF)) 1 else 0;
+    var seq: [max_cluster]u21 = undefined;
+    const n = miss_len[i];
+    for (0..n) |j| seq[j] = @intCast(miss_seq[i][j] & 0x1FFFFF);
+    return if (isColorGlyph(seq[0..n])) 1 else 0;
 }
 
-/// 컬러 아틀라스에 구운 글리프를 등록한다(글자 아틀라스의 `maru_mobile_atlas_add` 와 짝).
-pub export fn maru_mobile_color_atlas_add(cp: u32, style: u32, col: u32, row: u32, advance: u32) void {
-    const key = atlasKey(cp, style);
+/// 컬러 아틀라스에 구운 글리프를 등록한다(글자 아틀라스의 `maru_mobile_atlas_add` 와 짝, 같은
+/// 열 규약).
+pub export fn maru_mobile_color_atlas_add(cps: [*]const u32, n: u32, style: u32, col: u32, row: u32, advance: u32) void {
+    if (n == 0) return;
+    const seq = cps[0..@min(n, max_cluster)];
+    const key = atlasKey(seq[0], style);
     var i: usize = 0;
     while (i < miss_n) : (i += 1) {
-        if (miss_cp[i] == key) {
+        if (miss_cp[i] == key and seqEqlU32(miss_seq[i][0..miss_len[i]], seq)) {
             miss_cp[i] = miss_cp[miss_n - 1];
+            miss_seq[i] = miss_seq[miss_n - 1];
+            miss_len[i] = miss_len[miss_n - 1];
             miss_n -= 1;
             break;
         }
     }
-    for (0..color_n) |j| if (color_cp[j] == key) return;
+    for (0..color_n) |j| if (color_cp[j] == key and seqEqlU32(color_seq[j][0..color_len[j]], seq)) return;
     if (color_n == color_cp.len) {
         // 글자 아틀라스와 같은 규칙 — 꽉 차면 `next_color_slot` 이 고른 자리를 덮어쓴다.
         const v = pending_color_victim orelse return;
         if (color_col[v] != col or color_row[v] != row) return;
         color_cp[v] = key;
+        storeSeq(&color_seq[v], &color_len[v], seq);
         color_adv[v] = advance;
         color_used[v] = frame_seq;
         pending_color_victim = null;
         return;
     }
     color_cp[color_n] = key;
+    storeSeq(&color_seq[color_n], &color_len[color_n], seq);
     color_col[color_n] = col;
     color_row[color_n] = row;
     color_adv[color_n] = advance;
@@ -1257,13 +1343,13 @@ fn isZeroWidthFormat(cp: u21) bool {
     };
 }
 
-fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color: bool = false } {
-    if (isZeroWidthFormat(cp)) return null;
-    const key = atlasKey(cp, style);
+fn atlasCell(seq: []const u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color: bool = false } {
+    if (seq.len == 0 or isZeroWidthFormat(seq[0])) return null;
+    const key = atlasKey(seq[0], style);
     // **컬러 글자는 컬러 등록부에서 찾는다.** 두 아틀라스가 슬롯 번호를 각자 세므로, 글자
     // 아틀라스에서 찾으면 엉뚱한 슬롯을 가리킨다.
-    if (isColorGlyph(cp)) {
-        for (0..color_n) |i| if (color_cp[i] == key) {
+    if (isColorGlyph(seq)) {
+        for (0..color_n) |i| if (color_cp[i] == key and seqEql(color_seq[i][0..color_len[i]], seq)) {
             color_used[i] = frame_seq; // 축출의 유일한 근거 — 여기가 빠지면 쓰는 글자를 버린다
             return .{ .col = color_col[i], .row = color_row[i], .adv = color_adv[i], .color = true };
         };
@@ -1271,18 +1357,18 @@ fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color:
         // 이모지를 커버리지에 굽고 `atlas_add` 로 등록하는데, 여기서 컬러 등록부만 보면 영영
         // 못 찾아 **매 프레임 다시 굽는다**(실측: 3프레임 내내 미스 목록에 남았다). 이 저장소가
         // 아틀라스가 꽉 찼을 때 이미 한 번 겪은 실패 모드다.
-        for (0..atlas_n) |i| if (atlas_cp[i] == key) {
+        for (0..atlas_n) |i| if (atlas_cp[i] == key and seqEql(atlas_seq[i][0..atlas_len[i]], seq)) {
             atlas_used[i] = frame_seq;
             return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
         };
-        noteMiss(key);
+        noteMiss(seq, style);
         return null;
     }
-    for (0..atlas_n) |i| if (atlas_cp[i] == key) {
+    for (0..atlas_n) |i| if (atlas_cp[i] == key and seqEql(atlas_seq[i][0..atlas_len[i]], seq)) {
         atlas_used[i] = frame_seq; // 축출의 유일한 근거 — 여기가 빠지면 쓰는 글자를 버린다
         return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
     };
-    noteMiss(key);
+    noteMiss(seq, style);
     return null;
 }
 
@@ -1306,7 +1392,9 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
         // 0폭 format 문자는 **진행도 안 시킨다** — 폴백 advance(`draw_w/2`)를 태우면 보이지 않는
         // 글자가 자간을 벌린다.
         if (isZeroWidthFormat(cp)) continue;
-        const cell = atlasCell(cp, 0);
+        // chrome 텍스트는 클러스터를 안 만든다 — 코어 격자가 아니라 UTF-8 문자열이라 결합 정보가
+        // 없다. 단일 코드포인트 열로 넘긴다.
+        const cell = atlasCell(&.{cp}, 0);
         // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).
         const adv_px: i32 = if (cell) |c|
             @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale)

@@ -477,7 +477,7 @@ const Writer = struct {
         const icon_slot = metrics.group_disclosure_extent + metrics.group_disclosure_label_gap;
         // 치수·자리·"안 들어가면 안 그린다"는 badge 프리미티브가 소유한다. 여기서 다시 풀면
         // 그 산수가 컴포넌트마다 갈린다(pill이 행 밖으로 내려간 회귀가 그 산수였다).
-        const pill = badge.countPill(rect.rect, horizontal_inset, count_cols, cw, scale, icon_slot, .wide) orelse return;
+        const pill = badge.countPill(rect.rect, .{ .inset_x = horizontal_inset, .label_cols = count_cols, .cell_width_px = cw, .scale_milli = scale, .reserved_x = icon_slot }) orelse return;
         try self.appendQuadClippedBy(rect, .{
             .rect = pill.box,
             .fill_role = .inset_bg,

@@ -199,12 +199,25 @@ const Writer = struct {
         const count = std.fmt.bufPrint(&buf, "{d}", .{section.count}) catch "";
         const cols = @max(@as(u16, @intCast(count.len)), 1);
         const scale = effectiveScale(self.props.scale_milli);
+        // 개수는 제목보다 작은 보조 정보다. **상자 높이가 이 역할의 줄높이에서 나오므로**(`.snug`)
+        // 그리는 역할과 `label_role`이 같아야 한다 — 다르면 숫자가 상자보다 크거나 상자가 헐거워진다.
+        const count_role: typography.ChromeTextRole = .supporting;
         // 개수는 **배지(pill)**다. 치수·자리·"안 들어가면 안 그린다"는 `ui/badge`가 소유한다 — 여기서
         // 다시 풀면 그 산수가 컴포넌트마다 갈리고, 실제로 pill이 행 밖으로 내려간 회귀가 그 산수였다.
         // Session Dock 그룹 개수와 같은 프리미티브·같은 색이다: 같은 뜻이 두 도크에서 다르게 보이면 안 된다.
         //
         // 동작 버튼 자리는 `reserved_x`로 넘긴다 — 호버 때 버튼이 떠도 배지가 그 아래 깔리지 않는다.
-        const pill = badge.countPill(rect.rect, m.inset_x, cols, self.cell_width_px, scale, m.action_extent + m.gap, .snug);
+        const pill = badge.countPill(rect.rect, .{
+            .inset_x = m.inset_x,
+            .label_cols = cols,
+            .cell_width_px = self.cell_width_px,
+            .scale_milli = scale,
+            .reserved_x = m.action_extent + m.gap,
+            // 행이 24px로 촘촘하다. `roomy`면 상자가 행 높이를 그대로 먹어 지름 24px 원이 되고 행
+            // 위아래 경계에 닿는다(사용자 지적 2026-08-15) — 라벨 기준으로 잡아 여백을 남긴다.
+            .fit = .snug,
+            .label_role = count_role,
+        });
 
         // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
         const title_x = rect.rect.x + inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap));
@@ -240,7 +253,7 @@ const Writer = struct {
         });
         // 라벨이 상자보다 높으면 **숫자만** 생략한다 — 배지·화살표·제목은 그대로 둔다.
         if (placed.label_fits)
-            try self.emit(placed.label_x, placed.label_y, count, cols, .surface_bg, .control, false, @intFromFloat(placed.label_w), .origin);
+            try self.emit(placed.label_x, placed.label_y, count, cols, .surface_bg, count_role, false, @intFromFloat(placed.label_w), .origin);
     }
 
     /// 파일 행: `아이콘 · 이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.

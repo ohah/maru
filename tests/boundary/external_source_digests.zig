@@ -333,7 +333,7 @@ pub const inventory = [_]Proof{
     // Linux cross-compile에서도 같은 raw ABI를 갖게 했다. @field 반사 owner count는 2 그대로다.
     // 편집기 뷰별 랩 override(`Term.rt.editor_wrap`)와 `toggle_editor_wrap` dispatch가 붙어 또 바뀐다.
     // count는 2 그대로다 — 필드 하나와 switch 분기 한 줄이고 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "33800828ce4f38ef5bb7c9ac28375e58171f4dab390a3e76be2dee07c631b4f1" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6bfc2bff0ab6f7b059057ae8731839b17f6edb5530a491c86fbc5d6b46aa8f36" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

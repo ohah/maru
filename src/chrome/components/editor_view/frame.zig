@@ -22,6 +22,24 @@ const surface = @import("surface.zig");
 const visual_map = @import("visual_map.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 
+/// 내용(gutter·본문·스크롤바)이 뷰 사각에서 안쪽으로 들어가는 여백(px).
+///
+/// **배경은 이 여백을 쓰지 않는다** — 배경은 뷰 사각 전체를 덮고(§4.1b "뷰포트 전체를 덮는다") 내용만
+/// 들어간다. 그래서 pane 가장자리까지 색이 차면서도 글자가 경계에 붙지 않는다.
+///
+/// **왜 필요한가(2026-08-14 실측).** 활성 pane의 **포커스 테두리**가 pane body 사각에 2px로 그려지는데
+/// 그것이 **셀 위 층**(over)이라 여백이 없으면 첫 글자 행의 윗부분과 스크롤바를 덮는다. 터미널은 창
+/// padding이 그 자리를 비워 줘서 겪지 않던 문제이고, 편집기는 창 padding을 쓰지 않기로 했으므로
+/// (visual-mapping §4.1b) **뷰가 자기 여백을 갖는다.** 값은 테두리 두께(2px)보다 커야 한다.
+pub const content_inset_px: u32 = 4;
+
+/// 배경이 덮을 사각에서 **내용이 설 사각**을 뽑는다. 호출자가 열 수·스크롤바 gutter를 이 사각으로
+/// 계산해야 스크롤바가 뷰 밖으로 밀려나지 않는다 — 제품과 Chrome Lab이 같은 함수를 쓴다.
+pub fn contentRect(rect: draw.Rect) draw.Rect {
+    const e: u16 = @intCast(content_inset_px);
+    return rect.inset(.{ .left = e, .right = e, .top = e, .bottom = e });
+}
+
 pub const Props = struct {
     /// **문서 전체의 논리 줄들.** 화면 몫만 잘라 넘기면 안 된다 — 스크롤바 길이가 문서 전체의
     /// 시각 행 수에서 나오는데(§4.1a), 잘린 배열로는 그것을 셀 수 없어 막대가 실제보다 짧아진다
@@ -47,8 +65,10 @@ pub const Props = struct {
     wrap: bool,
     tab_width: u8 = 4,
 
-    /// 뷰 전체가 차지하는 픽셀 사각. 배경이 이것을 덮는다(§4.1b).
+    /// **내용**(gutter·본문·스크롤바)이 설 사각. 호출자가 `contentRect`로 뽑아 넘긴다.
     rect: draw.Rect,
+    /// 배경이 덮을 사각(§4.1b "뷰포트 전체"). `null`이면 `rect`와 같다 — 여백 없이 그리는 호출자용.
+    background_rect: ?draw.Rect = null,
     cell_w_px: u16,
     cell_h_px: u16,
     font_px: u16,
@@ -93,7 +113,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
 
     // ── 1) 배경 ────────────────────────────────────────────────────────────────
     // **맨 앞이어야 한다**(painter). 뒤로 가면 글자를 덮는다(§4.1b).
-    const bg = surface.build(.{ .rect = props.rect }, scratch.ops);
+    const bg = surface.build(.{ .rect = props.background_rect orelse props.rect }, scratch.ops);
 
     // ── 2) 본문 ────────────────────────────────────────────────────────────────
     // **gutter보다 먼저 돈다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해 나눠 본

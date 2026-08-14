@@ -84,6 +84,7 @@ static struct {
     float fling_vy;       // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
     int keybar_active;    // 이번 터치를 보조 키바가 잡고 있나(down 에서 서고 up/cancel 에서 풀린다)
+    int chrome_active;    // 이번 터치를 밀린 화면(설정)이 잡고 있나 — 키바보다 먼저 본다
     int ready;
     int frames;
     double last_ms;
@@ -877,6 +878,16 @@ Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
 /// **`adjustResize` 로는 안 된다** — targetSdk 35(Android 15)부터 edge-to-edge 가 강제되어
 /// 그 값이 무시된다. 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라 하단(보조 키바·
 /// 상태바)이 통째로 가려진다. iOS 는 같은 일을 `UIKeyboardWillChangeFrame` 으로 한다.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int popped = maru_mobile_pop_screen();
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)popped;
+}
+
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px) {
     (void)env;
@@ -985,6 +996,17 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         int64_t ev_ms = AMotionEvent_getEventTime(ev) / 1000000;
         // **키바가 잡고 있으면 그쪽이 먼저다.** 손을 뗄 때까지 본문 경로로 안 간다 —
         // 키바를 가로로 미는 동작이 본문 스크롤로도 해석되면 둘 다 움직인다.
+        // **밀린 화면이 잡고 있으면 가장 먼저다**(설정 — 그 아래는 없는 것과 같다).
+        if (g.chrome_active) {
+            unsigned int ph = action == AMOTION_EVENT_ACTION_MOVE ? 1
+                            : action == AMOTION_EVENT_ACTION_UP   ? 2
+                            : action == AMOTION_EVENT_ACTION_CANCEL ? 3 : 1;
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_chrome_pointer(ph, lx, ly);
+            pthread_mutex_unlock(&g_bridge_lock);
+            if (ph >= 2) g.chrome_active = 0;
+            return 1;
+        }
         if (g.keybar_active) {
             unsigned int ph = action == AMOTION_EVENT_ACTION_MOVE ? 1
                             : action == AMOTION_EVENT_ACTION_UP   ? 2
@@ -1022,7 +1044,15 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         g.touch_last_y = ly;
         g.touch_total_dy = 0;
         g.fling_vy = 0;
-        // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+        // **밀린 화면(설정)이 먼저다.** 톱니를 누르면 여기서 먹고, 설정이 떠 있으면 전부 먹는다.
+        pthread_mutex_lock(&g_bridge_lock);
+        unsigned int on_chrome = maru_mobile_chrome_pointer(0, lx, ly);
+        pthread_mutex_unlock(&g_bridge_lock);
+        if (on_chrome) {
+            g.chrome_active = 1;
+            return 1;
+        }
+        // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
         // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
         pthread_mutex_lock(&g_bridge_lock);
         unsigned int on_bar = maru_mobile_keybar_pointer(0, lx, ly);
@@ -1434,6 +1464,8 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
             maru_mobile_pointer(3, 0, 0, 0);
             // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
             maru_mobile_keybar_pointer(3, 0, 0);
+            maru_mobile_chrome_pointer(3, 0, 0);
+            g.chrome_active = 0;
             g.keybar_active = 0;
         }
         pthread_mutex_unlock(&g_bridge_lock);

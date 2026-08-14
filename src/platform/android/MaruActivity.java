@@ -54,6 +54,18 @@ public class MaruActivity extends android.app.NativeActivity {
      *  레이아웃은 그대로라 하단이 통째로 가려진다(iOS 에서 보조 키바가 그렇게 사라졌다). */
     private static native void nativeKeyboardHeight(int px);
 
+    /** 밀린 화면을 하나 뺀다. 1=뺐다, 0=뺄 것이 없다(그러면 앱을 내린다). */
+    private static native int nativePopScreen();
+
+    /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
+     *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
+     *  뺄 화면이 없을 때만 기본 동작(앱 내리기)으로 넘긴다. */
+    @Override
+    public void onBackPressed() {
+        if (nativePopScreen() != 0) return;
+        super.onBackPressed();
+    }
+
     /// IME 가 입력 대상으로 인정할 View. `NativeActivity` 의 SurfaceView 는 텍스트 편집기가
     /// 아니라서 키보드가 이 View 를 봐야 한다. 그리지 않으므로 화면에는 영향이 없다.
     private static final class InputView extends View {

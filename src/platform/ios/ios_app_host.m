@@ -136,7 +136,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
     /// 이번 터치를 키바가 잡고 있나. down 에서 정해지고 up/cancel 에서 풀린다.
-    BOOL _keybarActive;
+    BOOL _keybarActive, _chromeActive;
 }
 
 /// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
@@ -316,7 +316,12 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
-    // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+    // **밀린 화면이 가장 먼저다.** 설정이 올라와 있으면 그 아래 키바·본문은 없는 것과 같다.
+    if (maru_mobile_chrome_pointer(0, lx, ly)) {
+        _chromeActive = YES;
+        return;
+    }
+    // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
     // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
     if (maru_mobile_keybar_pointer(0, lx, ly)) {
         _keybarActive = YES;
@@ -335,6 +340,17 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 /// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
+/// 밀린 화면(설정)이 잡고 있는 동안의 나머지 위상. 키바와 같은 모양이다.
+- (BOOL)routeChrome:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
+    if (!_chromeActive) return NO;
+    UITouch *touch = touches.anyObject;
+    CGPoint p = [touch locationInView:self];
+    UIEdgeInsets safe = self.safeAreaInsets;
+    maru_mobile_chrome_pointer(phase, (float)(p.x - safe.left), (float)(p.y - safe.top));
+    if (phase >= 2) _chromeActive = NO;
+    return YES;
+}
+
 - (BOOL)routeKeybar:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     if (!_keybarActive) return NO;
     UITouch *touch = touches.anyObject;
@@ -361,11 +377,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeChrome:1 touches:touches]) return;
     if ([self routeKeybar:1 touches:touches]) return;
     [self sendPointer:1 touches:touches];
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeChrome:2 touches:touches]) return;
     if ([self routeKeybar:2 touches:touches]) return;
     [self sendPointer:2 touches:touches];
     NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
@@ -373,6 +391,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if ([self routeChrome:3 touches:touches]) return;
     if ([self routeKeybar:3 touches:touches]) return;
     [self sendPointer:3 touches:touches];
     _flingVy = 0;

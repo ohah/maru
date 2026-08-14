@@ -1169,8 +1169,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   existing runtime tests를 결합해 connection/attachment/screen, event tracking, resize state, pump state, raw observation의 값과
   allocator-backed ownership/deinit 결과가 중첩 전후 동일하고 nested 정렬 증가가 Debug/ReleaseFast exact 16바이트
   (4,096 runtime에서 64 KiB)임을 검증한다. CR2a는 proxy, InputOwner, reconnect publish와 제품
-  generation 교체 caller를 추가하지 않는다. CR2b: stable proxy gate의 exact pinned-target unlock,
-  reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
+  generation 교체 caller를 추가하지 않는다.
+- CR2b: `zig build test-session-host-cr2b`가 CR2a를 상속하고 Debug·ReleaseFast에서 stable proxy test 6개, actual runtime wiring
+  test 1개와 source boundary 1개를 exact-count한다. final-address `ScreenSource`가 bounded unavailable target에서 시작하고 actual attach가
+  같은 proxy에 live screen을 게시한다. reader는 exact `{generation,target}`을 pin해 current를 다시 읽지 않고 unlock하며,
+  nested lock은 blocking 전에 거부한다. writer-pending 뒤 late reader는 기존 reader보다 먼저 들어가지 못하고, publish/close는
+  기존 borrow 반환 뒤에만 retired live target을 돌려준다. render critical section과 writer wait는 count·total·max ns로 계측한다.
+  zero/stale/skip/max generation과 copied final owner·foreign writer는 fail-close하고,
+  detach/deinit은 proxy close 뒤 attachment screen을 파괴한다. 실제 socket reconnect와 `RemoteGeneration` swap/reclaim은 아직
+  CR2e/CR4 범위다.
+- CR2c: local/remote
   `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제

@@ -2738,6 +2738,54 @@ pub fn build(b: *std.Build) void {
         session_host_cr2a_step.dependOn(&run_cr2a_boundary_tests.step);
         boundary_step.dependOn(&run_cr2a_boundary_tests.step);
     }
+    const session_host_cr2b_step = b.step(
+        "test-session-host-cr2b",
+        "CR2b stable ScreenSource proxy Debug and ReleaseFast gates",
+    );
+    session_host_cr2b_step.dependOn(session_host_cr2a_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2b_optimize| {
+        const cr2b_proxy_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/stable_screen_source.zig"),
+                .target = target,
+                .optimize = cr2b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2b stable proxy는"},
+        });
+        const run_cr2b_proxy_tests = b.addRunArtifact(cr2b_proxy_tests);
+        run_cr2b_proxy_tests.addArg("--maru-expect-tests=6");
+        run_cr2b_proxy_tests.setCwd(b.path("."));
+        session_host_cr2b_step.dependOn(&run_cr2b_proxy_tests.step);
+        const cr2b_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr2b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한다"},
+        });
+        const run_cr2b_runtime_tests = b.addRunArtifact(cr2b_runtime_tests);
+        run_cr2b_runtime_tests.addArg("--maru-expect-tests=1");
+        run_cr2b_runtime_tests.setCwd(b.path("."));
+        session_host_cr2b_step.dependOn(&run_cr2b_runtime_tests.step);
+        const cr2b_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2b_optimize,
+            }),
+            .filters = &.{"CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다"},
+        });
+        const run_cr2b_boundary_tests = b.addRunArtifact(cr2b_boundary_tests);
+        run_cr2b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2b_boundary_tests.setCwd(b.path("."));
+        session_host_cr2b_step.dependOn(&run_cr2b_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2b_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

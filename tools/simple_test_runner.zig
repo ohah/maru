@@ -109,15 +109,23 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
     root_node.end();
 
-    if (passed == test_functions.len) {
-        std.debug.print("All {d} tests passed.\n", .{passed});
-    } else {
-        std.debug.print("{d} passed; {d} skipped; {d} failed.\n", .{ passed, skipped, failed });
-    }
+    const passed_count = passed;
+    const skipped_count = skipped;
+    const failed_count = failed;
+    const leaked_count = leaked;
     const logged_errors = log_err_count.load(.acquire);
+    if (passed_count == test_functions.len) {
+        std.debug.print("All {d} tests passed.\n", .{passed_count});
+    } else {
+        std.debug.print("{d} passed; {d} skipped; {d} failed.\n", .{
+            passed_count,
+            skipped_count,
+            failed_count,
+        });
+    }
     if (logged_errors != 0) std.debug.print("{d} errors were logged.\n", .{logged_errors});
-    if (leaked != 0) std.debug.print("{d} tests leaked memory.\n", .{leaked});
-    if (failed != 0 or leaked != 0 or logged_errors != 0) std.process.exit(1);
+    if (leaked_count != 0) std.debug.print("{d} tests leaked memory.\n", .{leaked_count});
+    if (failed_count != 0 or leaked_count != 0 or logged_errors != 0) std.process.exit(1);
     // 모든 test-local defer와 progress 정산 뒤에는 C runtime 종료 hook이
     // aggregate의 검증 결과를 다시 바꾸지 못하도록 확정된 status를 게시한다.
     if (builtin.link_libc) std.c._exit(0) else std.process.exit(0);

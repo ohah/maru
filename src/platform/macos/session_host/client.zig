@@ -3391,6 +3391,7 @@ pub const ClientSourceSeal = struct {
     target_stream: u64,
     attach_instance_id: u64,
     raw_next_request_id: u64,
+    raw_last_success_request_id: u64,
     screen_source_count: usize,
     screen_payload_bytes: usize,
     event_count: usize,
@@ -3475,6 +3476,7 @@ const ExternalSourceSealEncoder = struct {
     target_stream: u64,
     attach_instance_id: u64,
     raw_next_request_id: u64,
+    raw_last_success_request_id: u64,
     screen_source_count: usize,
     screen_payload_bytes: usize,
     event_payload_bytes: usize,
@@ -3556,6 +3558,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeU64(client.first_incident_id.sequence);
         try writer.writeBytes(std.mem.asBytes(&client.incident_repeat_key));
         writer.writeU64(client.next_request_id);
+        writer.writeU64(client.last_success_request_id);
 
         try writeSourceAllocator(&writer, client.parser.allocator, encoding, 0x1400);
         writer.writeU16(client.parser.expected_major);
@@ -3646,6 +3649,7 @@ const ExternalSourceSealEncoder = struct {
             .target_stream = target_stream,
             .attach_instance_id = client.attach_instance_id,
             .raw_next_request_id = client.next_request_id,
+            .raw_last_success_request_id = client.last_success_request_id,
             .screen_source_count = validated.screen_source_count,
             .screen_payload_bytes = validated.screen_payload_bytes,
             .event_payload_bytes = validated.event_payload_bytes,
@@ -3748,6 +3752,7 @@ const ExternalSourceSealEncoder = struct {
             .target_stream = self.target_stream,
             .attach_instance_id = self.attach_instance_id,
             .raw_next_request_id = self.raw_next_request_id,
+            .raw_last_success_request_id = self.raw_last_success_request_id,
             .screen_source_count = self.screen_source_count,
             .screen_payload_bytes = self.screen_payload_bytes,
             .event_count = self.event_count,
@@ -6547,6 +6552,9 @@ pub const Client = struct {
     /// repeat는 raw incident ID 대신 final-address Client에 봉인된 이 권위만 소비한다.
     incident_repeat_key: incident_publication_contract.IncidentRepeatKey = .{},
     next_request_id: u64 = 1,
+    /// Correlated response frame가 deadline과 request-id 검증을 모두 통과한 뒤에만 게시한다.
+    /// `next_request_id - 1`은 write 시도일 뿐 성공 증거가 아니므로 incident projection이 추측하지 않는다.
+    last_success_request_id: u64 = 0,
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
@@ -9874,6 +9882,7 @@ pub const Client = struct {
                 resp.deinit(self.allocator);
                 return error.DeadlineExceeded;
             }
+            self.last_success_request_id = request_id;
             // FrameParser already returned an owned payload. Transfer it directly so a committed
             // mutating response cannot be consumed and then lost to a second allocation failure.
             return .{
@@ -14116,6 +14125,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "first_incident_id",
     "incident_repeat_key",
     "next_request_id",
+    "last_success_request_id",
     "pending_stream",
     "pending_stream_bytes",
     "pending_events",
@@ -15339,6 +15349,7 @@ test "B3-4/5 response-only lease read rejects wrong correlation and closes conne
         client_poison.ConnectionReason.response_correlation_lost,
         client.first_poison_reason.?,
     );
+    try std.testing.expectEqual(@as(u64, 0), client.last_success_request_id);
     try client.finishPreparedRequestExecution(&lease);
 }
 
@@ -15540,6 +15551,7 @@ test "prepared blocking RPC execute consumes id and settles backing on write fai
     try client.prepareBlockingRpc(&prepared, "host.info", null);
     try std.testing.expectError(error.WriteFailed, client.executePreparedBlockingRpc(&prepared));
     try std.testing.expectEqual(@as(u64, 2), client.next_request_id);
+    try std.testing.expectEqual(@as(u64, 0), client.last_success_request_id);
     try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
     try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
     try std.testing.expectError(error.InvalidPreparedRpc, client.executePreparedBlockingRpc(&prepared));
@@ -15584,6 +15596,7 @@ test "prepared blocking RPC execute reuses exact response correlation and settle
     try std.testing.expect(peer_ok);
     try std.testing.expectEqualStrings("{\"result\":{\"prepared\":true}}", response);
     try std.testing.expectEqual(@as(u64, 2), client.next_request_id);
+    try std.testing.expectEqual(@as(u64, 1), client.last_success_request_id);
     try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
     try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
 }
@@ -21712,6 +21725,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     client.attach_instance_id = 77;
     client.next_request_id = 0;
+    client.last_success_request_id = 0x2026;
     client.incident_binding = .{
         .client_addr = 0x2100,
         .host_id = 0x2200,
@@ -21794,8 +21808,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\x62\xe4\x44\x4f\x78\x7c\x94\xa0\x07\x9b\xac\x0b\xd6\xa3\xf5\x12" ++
-        "\xbe\xc6\x7a\x32\x96\x5c\x52\x74\x74\xf6\xca\xa7\xf0\xef\x1c\x47";
+        "\xa1\x73\xbb\x77\xf8\xda\x6a\x77\x21\xc8\x4b\xa0\x0b\xb9\x36\x47" ++
+        "\xc0\xf1\x78\xe8\xc2\x94\x37\x07\xdd\x99\xd9\xe7\x2b\xd8\x28\x6c";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -21820,6 +21834,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expect(std.meta.eql(seal, repeated));
     try std.testing.expectEqual(@as(u64, 77), seal.attach_instance_id);
     try std.testing.expectEqual(@as(u64, 0), seal.raw_next_request_id);
+    try std.testing.expectEqual(@as(u64, 0x2026), seal.raw_last_success_request_id);
     try std.testing.expectEqual(@as(usize, 4), seal.screen_source_count);
     try std.testing.expectEqual(@as(usize, 1), seal.event_count);
     try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
@@ -22015,6 +22030,10 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.next_request_id = 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.next_request_id = 0;
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.last_success_request_id += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.last_success_request_id -= 1;
     try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
 
     client.attach_instance_id = 0;

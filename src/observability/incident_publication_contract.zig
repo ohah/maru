@@ -33,6 +33,19 @@ pub const IncidentInput = struct {
     upgrade_epoch: u64 = 0,
 };
 
+/// Managed 제품 caller가 실제 failure site에서만 아는 최소 입력이다. Timestamp와 Client-owned
+/// 상태를 여기에 넣으면 operation pin 밖의 stale snapshot이 새 publication 권위가 될 수 있다.
+pub const ManagedPoisonRequest = struct {
+    reason_raw: u8 = 0,
+    source_site_raw: u8 = 0,
+    controller_generation: u64 = 0,
+};
+
+pub fn validManagedPoisonRequest(value: ManagedPoisonRequest) bool {
+    return std.enums.fromInt(incident.ConnectionReason, value.reason_raw) != null and
+        std.enums.fromInt(incident.SourceSite, value.source_site_raw) != null;
+}
+
 /// 기존 Client operation이 살아 있는 동안 캡처하고 operation 반환 뒤 canonical publisher owner가 소비하는
 /// pointer-free handoff다. raw publisher/runtime 주소는 포함하지 않는다.
 pub const PreparedManagedPoison = struct {
@@ -302,6 +315,7 @@ fn recursivelyPointerFree(comptime T: type) bool {
 }
 
 test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-free로 유지한다" {
+    try std.testing.expect(recursivelyPointerFree(ManagedPoisonRequest));
     try std.testing.expect(recursivelyPointerFree(IncidentInput));
     try std.testing.expect(recursivelyPointerFree(PreparedManagedPoison));
     try std.testing.expect(recursivelyPointerFree(ReconnectAdmission));
@@ -311,6 +325,18 @@ test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-f
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentClientOperation));
     try std.testing.expect(recursivelyPointerFree(PublisherLeaseProjection));
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentPublication));
+    try std.testing.expect(validManagedPoisonRequest(.{
+        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+    }));
+    try std.testing.expect(!validManagedPoisonRequest(.{
+        .reason_raw = 0xff,
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+    }));
+    try std.testing.expect(!validManagedPoisonRequest(.{
+        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+        .source_site_raw = 0,
+    }));
 }
 
 test "CR0b poison publication 계약은 reconnect admission을 first incident와 one-shot lifecycle에 결속한다" {

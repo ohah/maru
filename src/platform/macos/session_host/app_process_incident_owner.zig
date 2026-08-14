@@ -16,7 +16,7 @@ const c = std.c;
 extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const Error = runtime_mod.Error || registry_mod.Error || reconnect_owner_mod.Error || error{ InvalidOwner, AlreadyClosed };
-pub const PublicationError = Error || host_adapter_mod.ManagedPoisonError || coordinator.Error;
+pub const PublicationError = Error || host_adapter_mod.ManagedPoisonError || coordinator.Error || error{ClockFailed};
 
 pub const TerminationOutcome = enum(u32) {
     inactive = 0,
@@ -92,7 +92,20 @@ pub const AppProcessIncidentOwner = struct {
 
     /// Sole product composition point: adapter authority yields the query and this owner supplies
     /// the ephemeral publisher borrow. Neither raw pointer is stored in the prepared handoff.
+    /// Managed public poison entrypoint. Caller는 failure-site identity만 제출하며 timestamp와
+    /// Client-owned diagnostic projection은 final owners가 publication 전에 한 번 만든다.
     pub fn publishManagedPoison(
+        self: *AppProcessIncidentOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        request: publication.ManagedPoisonRequest,
+    ) PublicationError!publication.IncidentCommitResult {
+        const timestamp_ns = monotonicNs() orelse return error.ClockFailed;
+        var prepared: publication.PreparedManagedPoison = .{};
+        try adapter.prepareManagedPoisonRequest(timestamp_ns, request, &prepared);
+        return self.publishPreparedManagedPoison(adapter, &prepared);
+    }
+
+    fn publishPreparedManagedPoison(
         self: *AppProcessIncidentOwner,
         adapter: *host_adapter_mod.HostAdapter,
         prepared: *publication.PreparedManagedPoison,
@@ -182,6 +195,12 @@ fn monotonicMs() ?u64 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return null;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+fn monotonicNs() ?i128 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return null;
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
 }
 
 fn testDirectory() !struct { dir: std.testing.TmpDir, fd: c.fd_t } {
@@ -291,7 +310,7 @@ test "CR0b GUI incident owner prerequisite는 copied owner와 다른 nonce 교�
     try std.testing.expectEqual(runtime_mod.ShutdownResult.joined, try owner.shutdown());
 }
 
-test "CR0b managed public poison prerequisite는 canonical suffix가 first와 repeat를 contextual 선택한다" {
+test "CR0b managed public poison은 canonical suffix만 호출한다" {
     const client_mod = @import("client.zig");
     const protocol = @import("protocol.zig");
     const screen_stream = @import("screen_stream.zig");
@@ -304,15 +323,22 @@ test "CR0b managed public poison prerequisite는 canonical suffix가 first와 re
     defer _ = c.close(directory.fd);
     var owner: AppProcessIncidentOwner = .{};
     try owner.ensureReady(std.testing.allocator, directory.fd, identity.process_nonce, 0xA101);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        _ = owner.shutdown() catch {};
+    };
 
     var pool = Pool.init(std.testing.allocator);
     defer pool.deinit();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
     const adapter = try std.testing.allocator.create(host_adapter_mod.HostAdapter);
     var pool_owns = false;
     errdefer if (!pool_owns) std.testing.allocator.destroy(adapter);
     var source: client_mod.Client = .{
         .allocator = std.testing.allocator,
-        .fd = -1,
+        .fd = fds[0],
         .host_id = 0xA102,
         .wire_major = protocol.version_major,
         .screen_codec_version = screen_stream.codec_version,
@@ -323,60 +349,46 @@ test "CR0b managed public poison prerequisite는 canonical suffix가 first와 re
     try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, std.testing.allocator, &source, &permit);
     pool.commitOwnedPublication(adapter, &permit);
     pool_owns = true;
-    const binding = adapter.slot.logicalClientConst().incident_binding;
     const incident = @import("maru").observability.connection_incident;
-    var input: publication.IncidentInput = .{
-        .timestamp_ns = 101,
-        .host_id = binding.host_id,
-        .host_adapter_generation = binding.host_adapter_generation,
-        .connection_generation = binding.connection_generation,
-        .wire_major = binding.wire_major,
+    const binding = adapter.slot.logicalClientConst().incident_binding;
+    const request: publication.ManagedPoisonRequest = .{
         .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
         .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = binding.host_class_raw,
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
-        .last_success_request_id = 103,
-        .pending_request_count = 2,
-        .pending_stream_count = 3,
-        .pending_event_count = 5,
-        .queue_item_count = 7,
-        .queue_bytes = 11,
         .controller_generation = 13,
-        .upgrade_epoch = 17,
     };
-    var first_handoff: publication.PreparedManagedPoison = .{};
-    try adapter.prepareManagedPoison(input, &first_handoff);
-    const first = try owner.publishManagedPoison(adapter, &first_handoff);
+    var invalid_request = request;
+    invalid_request.source_site_raw = 0;
+    try std.testing.expectError(error.InvalidInput, owner.publishManagedPoison(adapter, invalid_request));
+    try std.testing.expectEqual(fds[0], adapter.slot.logicalClientConst().fd);
+    try std.testing.expect(adapter.slot.logicalClientConst().first_poison_reason == null);
+    try std.testing.expectEqual(@as(u8, 0), owner.reconnect_admissions.count);
+    const first = try owner.publishManagedPoison(adapter, request);
     try std.testing.expect(first.publication.detail_present);
     try std.testing.expectEqual(@intFromEnum(publication.PublicationKind.first), first.kind_raw);
-    try std.testing.expect(publication.validManagedPoisonConsumedShape(first_handoff, @intFromPtr(&first_handoff)));
     const first_id = adapter.slot.logicalClientConst().first_incident_id;
     try std.testing.expect(first_id.sequence != 0);
     const client_after_first = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
     try std.testing.expect(client_after_first.unusable);
     try std.testing.expectEqual(@as(c.fd_t, -1), client_after_first.fd);
     try std.testing.expect(client_after_first.pending_outbound == null);
+    var closed_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &closed_byte, closed_byte.len));
     const admission = (try owner.reconnect_admissions.peek()).?;
     try std.testing.expectEqual(first_id, admission.incident_id);
-    try std.testing.expectEqual(input.host_id, admission.host_id);
-    try std.testing.expectEqual(input.connection_generation, admission.connection_generation);
+    try std.testing.expectEqual(binding.host_id, admission.host_id);
+    try std.testing.expectEqual(binding.connection_generation, admission.connection_generation);
     try std.testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
 
-    input.timestamp_ns += 1;
-    var repeat_handoff: publication.PreparedManagedPoison = .{};
-    try adapter.prepareManagedPoison(input, &repeat_handoff);
-    const repeat = try owner.publishManagedPoison(adapter, &repeat_handoff);
+    const repeat = try owner.publishManagedPoison(adapter, request);
     try std.testing.expect(!repeat.publication.detail_present);
     try std.testing.expectEqual(@intFromEnum(publication.PublicationKind.repeat), repeat.kind_raw);
     try std.testing.expectEqual(first_id, repeat.publication.incident_id);
     try std.testing.expectEqual(first.publication.aggregate_generation + 1, repeat.publication.aggregate_generation);
     try std.testing.expectEqual(first_id, adapter.slot.logicalClientConst().first_incident_id);
-    try std.testing.expect(publication.validManagedPoisonConsumedShape(repeat_handoff, @intFromPtr(&repeat_handoff)));
     try std.testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
     try owner.reconnect_admissions.consume(admission);
     try std.testing.expect((try owner.reconnect_admissions.peek()) == null);
-    try std.testing.expectEqual(runtime_mod.ShutdownResult.joined, try owner.shutdown());
+    const shutdown_outcome = try owner.shutdown();
+    owner_settled = true;
+    try std.testing.expectEqual(runtime_mod.ShutdownResult.joined, shutdown_outcome);
 }

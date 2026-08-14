@@ -35,6 +35,7 @@ const generation_event_quarantine = @import("generation_event_quarantine.zig");
 const settlement_contract = @import("pending_event_settlement_contract.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
 const incident_publication_contract = @import("maru").observability.incident_publication_contract;
+const connection_incident = @import("maru").observability.connection_incident;
 
 const c = std.c;
 extern "c" fn getdtablesize() c_int;
@@ -2512,7 +2513,7 @@ fn managedPoisonSeal(
 
 /// Captures the canonical incident projection while the final Client node is pinned, then returns
 /// only a sealed scalar handoff. Publication deliberately happens after this operation is released.
-pub fn prepareManagedPoison(
+fn prepareManagedPoison(
     self: *ClientSlot,
     input: incident_publication_contract.IncidentInput,
     out: *incident_publication_contract.PreparedManagedPoison,
@@ -2521,16 +2522,126 @@ pub fn prepareManagedPoison(
         rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
         rangesOverlapTyped(out, &self.current.client))
         return error.InvalidOwner;
-    const input_digest = incident_publication_contract.inputDigest(input) catch return error.InvalidInput;
     const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
         error.MovedOrCopied => error.InvalidOwner,
         error.AdminBusy => error.Busy,
     };
     defer self.endRegisteredClientOperation(operation);
     if (!self.valid() or operation.node != self.current) return error.InvalidOwner;
-    const binding = operation.node.client.incident_binding;
+    return prepareManagedPoisonPinned(self, operation.node, input, out);
+}
+
+/// Managed public caller의 최소 request와 owner clock을 Client-owned canonical projection으로
+/// 확장한다. 모든 queue/parser read는 registered node pin 아래 끝나며 pointer는 handoff에 남지 않는다.
+pub fn prepareManagedPoisonRequest(
+    self: *ClientSlot,
+    timestamp_ns: i128,
+    request: incident_publication_contract.ManagedPoisonRequest,
+    out: *incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!void {
+    if (timestamp_ns < 0 or !incident_publication_contract.validManagedPoisonRequest(request) or
+        !std.meta.eql(out.*, incident_publication_contract.PreparedManagedPoison{}) or
+        rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
+        rangesOverlapTyped(out, &self.current.client))
+        return error.InvalidInput;
+    const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+        error.MovedOrCopied => error.InvalidOwner,
+        error.AdminBusy => error.Busy,
+    };
+    defer self.endRegisteredClientOperation(operation);
+    if (!self.valid() or operation.node != self.current) return error.InvalidOwner;
+    const client = &operation.node.client;
+    const binding = client.incident_binding;
+    if (!incident_binding_contract.validBindingShape(binding)) return error.InvalidOwner;
+    const reason: connection_incident.ConnectionReason = @enumFromInt(request.reason_raw);
+    const decision = connection_incident.decisionForReason(reason);
+    const pending_stream_count = std.math.cast(u32, client.pending_stream.items.len) orelse
+        return error.InvalidInput;
+    const pending_event_count = std.math.cast(u32, client.pending_events.items.len) orelse
+        return error.InvalidInput;
+    var queue_items = std.math.add(usize, client.pending_stream.items.len, client.pending_events.items.len) catch
+        return error.InvalidInput;
+    queue_items = std.math.add(usize, queue_items, client.pending_batches.items.len) catch
+        return error.InvalidInput;
+    queue_items = std.math.add(usize, queue_items, @intFromBool(client.partial_batch != null)) catch
+        return error.InvalidInput;
+    queue_items = std.math.add(usize, queue_items, @intFromBool(client.pending_outbound != null)) catch
+        return error.InvalidInput;
+    var queue_bytes = std.math.add(usize, client.pending_stream_bytes, client.pending_event_bytes) catch
+        return error.InvalidInput;
+    queue_bytes = std.math.add(usize, queue_bytes, client.pending_batch_bytes) catch
+        return error.InvalidInput;
+    if (client.partial_batch) |partial|
+        queue_bytes = std.math.add(usize, queue_bytes, partial.bytes.items.len) catch
+            return error.InvalidInput;
+    var outbound_offset: u64 = 0;
+    var outbound_length: u64 = 0;
+    if (client.pending_outbound) |pending| {
+        if (pending.offset > pending.frame.len) return error.InvalidInput;
+        outbound_offset = std.math.cast(u64, pending.offset) orelse return error.InvalidInput;
+        outbound_length = std.math.cast(u64, pending.frame.len) orelse return error.InvalidInput;
+        queue_bytes = std.math.add(usize, queue_bytes, pending.frame.len - pending.offset) catch
+            return error.InvalidInput;
+    }
+    const input: incident_publication_contract.IncidentInput = .{
+        .timestamp_ns = timestamp_ns,
+        .host_id = binding.host_id,
+        .host_adapter_generation = binding.host_adapter_generation,
+        .connection_generation = binding.connection_generation,
+        .wire_major = binding.wire_major,
+        .reason_raw = request.reason_raw,
+        .scope_raw = @intFromEnum(connection_incident.Scope.connection),
+        .disposition_raw = @intFromEnum(decision.disposition),
+        .source_site_raw = request.source_site_raw,
+        .host_class_raw = binding.host_class_raw,
+        .parser_phase_raw = incidentParserPhase(client),
+        .outbound_phase_raw = incidentOutboundPhase(client),
+        .last_success_request_id = client.last_success_request_id,
+        .pending_request_count = @intFromBool(client.prepared_request_execution_lease_addr != 0 or client.pending_outbound != null),
+        .pending_stream_count = pending_stream_count,
+        .pending_event_count = pending_event_count,
+        .queue_item_count = std.math.cast(u32, queue_items) orelse return error.InvalidInput,
+        .queue_bytes = std.math.cast(u64, queue_bytes) orelse return error.InvalidInput,
+        .outbound_offset = outbound_offset,
+        .outbound_length = outbound_length,
+        .controller_generation = request.controller_generation,
+        .upgrade_epoch = client.upgrade_epoch,
+    };
+    return prepareManagedPoisonPinned(self, operation.node, input, out);
+}
+
+fn incidentParserPhase(client: *const client_mod.Client) u8 {
+    if (client.unusable) return @intFromEnum(connection_incident.ParserPhase.terminal);
+    const pending = client.parser.buf.items[client.parser.head..];
+    if (pending.len == 0) return @intFromEnum(connection_incident.ParserPhase.idle);
+    if (pending.len < protocol.header_size) return @intFromEnum(connection_incident.ParserPhase.header);
+    const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
+    _ = protocol.Header.decode(header_bytes) catch
+        return @intFromEnum(connection_incident.ParserPhase.header);
+    return @intFromEnum(connection_incident.ParserPhase.payload);
+}
+
+fn incidentOutboundPhase(client: *const client_mod.Client) u8 {
+    const pending = client.pending_outbound orelse
+        return @intFromEnum(connection_incident.OutboundPhase.idle);
+    if (client.unusable) return @intFromEnum(connection_incident.OutboundPhase.terminal);
+    return @intFromEnum(if (pending.offset == 0)
+        connection_incident.OutboundPhase.queued
+    else
+        connection_incident.OutboundPhase.partial);
+}
+
+fn prepareManagedPoisonPinned(
+    self: *ClientSlot,
+    node: *ClientNode,
+    input: incident_publication_contract.IncidentInput,
+    out: *incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!void {
+    if (node != self.current) return error.InvalidOwner;
+    const input_digest = incident_publication_contract.inputDigest(input) catch return error.InvalidInput;
+    const binding = node.client.incident_binding;
     if (!incident_binding_contract.validBindingShape(binding) or
-        binding.client_addr != @intFromPtr(&operation.node.client) or
+        binding.client_addr != @intFromPtr(&node.client) or
         binding.host_id != input.host_id or
         binding.host_adapter_generation != input.host_adapter_generation or
         binding.connection_generation != input.connection_generation or
@@ -2544,8 +2655,8 @@ pub fn prepareManagedPoison(
         .owner_thread = @intCast(std.Thread.getCurrentId()),
         .slot_addr = @intFromPtr(self),
         .slot_generation = self.incarnation.tagged,
-        .node_addr = @intFromPtr(operation.node),
-        .node_generation = operation.node.incarnation.tagged,
+        .node_addr = @intFromPtr(node),
+        .node_generation = node.incarnation.tagged,
         .binding_seal = binding.seal,
         .input = input,
         .lifecycle_raw = @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared),
@@ -14531,6 +14642,116 @@ test "CR0b Client incident operation은 managed poison handoff를 pin 아래 봉
     ));
     try std.testing.expectError(error.InvalidOwner, managedPoisonQuery(&slot, &prepared));
     try std.testing.expectError(error.InvalidOwner, consumeManagedPoison(&slot, &prepared));
+}
+
+test "CR0b Client incident operation은 managed request를 Client 상태의 canonical input으로 투영한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xC0B5);
+    source.upgrade_epoch = 43;
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(
+        &slot,
+        allocator,
+        &source,
+        0xC0B5,
+        11,
+        .current,
+        &binding_publication,
+    );
+    defer slot.deinit();
+    const client = &slot.current.client;
+    defer {
+        for (client.pending_stream.items) |frame| allocator.free(frame.payload);
+        client.pending_stream.deinit(allocator);
+        client.pending_stream = .empty;
+        client.pending_stream_bytes = 0;
+        for (client.pending_events.items) |event| allocator.free(event.payload);
+        client.pending_events.deinit(allocator);
+        client.pending_events = .empty;
+        client.pending_event_bytes = 0;
+        for (client.pending_batches.items) |batch| batch.deinit();
+        client.pending_batches.deinit(allocator);
+        client.pending_batches = .empty;
+        client.pending_batch_bytes = 0;
+        if (client.partial_batch) |*partial| partial.bytes.deinit(allocator);
+        client.partial_batch = null;
+        if (client.pending_outbound) |pending| allocator.free(pending.frame);
+        client.pending_outbound = null;
+    }
+    client.last_success_request_id = 41;
+    const parser_header = (protocol.Header{
+        .kind = .response,
+        .request_id = 41,
+        .payload_len = 2,
+    }).encode();
+    try client.parser.buf.appendSlice(allocator, &parser_header);
+    try client.parser.buf.append(allocator, 0xaa);
+
+    const stream_payload = try allocator.dupe(u8, "str");
+    try client.pending_stream.append(allocator, .{
+        .header = .{ .kind = .delta_chunk, .stream_id = 3, .payload_len = 3 },
+        .payload = stream_payload,
+    });
+    client.pending_stream_bytes = stream_payload.len;
+    const event_payload = try allocator.dupe(u8, "event");
+    try client.pending_events.append(allocator, .{
+        .header = .{ .kind = .event, .stream_id = 3, .payload_len = 5 },
+        .payload = event_payload,
+    });
+    client.pending_event_bytes = event_payload.len;
+    const batch_payload = try allocator.dupe(u8, "batch-7");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 3,
+        .bytes = batch_payload,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = batch_payload.len;
+    client.partial_batch = .{ .stream_id = 3, .is_snapshot = false };
+    try client.partial_batch.?.bytes.appendSlice(allocator, "partial-011");
+    client.partial_batch.?.chunk_count = 1;
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "outbound-0013"),
+        .stream_id = 3,
+        .offset = 2,
+    };
+
+    const binding = client.incident_binding;
+    var prepared: incident_publication_contract.PreparedManagedPoison = .{};
+    try prepareManagedPoisonRequest(&slot, 101, .{
+        .reason_raw = @intFromEnum(connection_incident.ConnectionReason.connection_eof),
+        .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+        .controller_generation = 47,
+    }, &prepared);
+    const expected: incident_publication_contract.IncidentInput = .{
+        .timestamp_ns = 101,
+        .host_id = binding.host_id,
+        .host_adapter_generation = binding.host_adapter_generation,
+        .connection_generation = binding.connection_generation,
+        .wire_major = binding.wire_major,
+        .reason_raw = @intFromEnum(connection_incident.ConnectionReason.connection_eof),
+        .scope_raw = @intFromEnum(connection_incident.Scope.connection),
+        .disposition_raw = @intFromEnum(connection_incident.Disposition.reconnect),
+        .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+        .host_class_raw = binding.host_class_raw,
+        .parser_phase_raw = @intFromEnum(connection_incident.ParserPhase.payload),
+        .outbound_phase_raw = @intFromEnum(connection_incident.OutboundPhase.partial),
+        .last_success_request_id = 41,
+        .pending_request_count = 1,
+        .pending_stream_count = 1,
+        .pending_event_count = 1,
+        .queue_item_count = 5,
+        .queue_bytes = 37,
+        .outbound_offset = 2,
+        .outbound_length = 13,
+        .controller_generation = 47,
+        .upgrade_epoch = 43,
+    };
+    try std.testing.expectEqualDeep(expected, prepared.input);
+    _ = try managedPoisonQuery(&slot, &prepared);
+    try consumeManagedPoison(&slot, &prepared);
 }
 
 test "CR0b Client incident operation은 owner 저장소와 겹친 destination을 발급 전에 거부한다" {

@@ -246,9 +246,19 @@ adapter/client destroy, unbound fallback 없이 `fatalIntegrity(.incident_author
 test-only identity-absent fixture만 별도 helper를 쓴다. Client를 값으로 move한 뒤 binding을 복사하거나 pool publication 뒤 binding을
 늦게 채우는 경로는 금지한다. standalone fixture나 등록 전 Client는 identity-absent binding만 가질 수 있고 artifact-required reconnect
 경로에 들어갈 수 없다.
-poison caller는 `SourceSite`와 parser/outbound/count projection을 담은 pointer-free `IncidentInput`을 만든 뒤 canonical poison suffix에
-전달한다. 기존 reason-only poison wrapper는 identity-absent·reconnect-ineligible 경로에만 남기고, managed Client 제품 caller는
+poison caller는 failure-site가 소유한 closed request만 canonical public facade에 전달하고, final owner가 완성한 pointer-free
+`IncidentInput`만 private poison suffix에 전달한다. 기존 reason-only poison wrapper는 identity-absent·reconnect-ineligible 경로에만 남기고, managed Client 제품 caller는
 source-boundary가 reason-only wrapper를 호출하지 못하게 한다.
+
+managed public poison caller가 제출하는 값은 closed `ConnectionReason`, exact `SourceSite`, source-specific
+`controller_generation`뿐이다. timestamp는 app-process incident owner가 `CLOCK_MONOTONIC`에서 exact 한 번 읽고, 나머지는
+ClientSlot registered-operation pin 아래 Client가 투영한다. host/binding/wire/class와 upgrade epoch는 final Client binding/state,
+parser phase는 unread parser bytes(`idle`, partial header, decoded-header 뒤 partial/complete payload, terminal Client), outbound phase와
+offset/length는 single pending outbound owner, `last_success_request_id`는 correlated response를 실제 반환하기 직전에만 증가하는
+Client scalar가 단일 출처다. pending request는 prepared execution 또는 pending outbound의 closed 0/1, stream/event count는 각
+Client-owned queue 길이, queue item/bytes는 pending stream/event/batch/partial/outbound owner의 checked 합이다. caller가 완성된
+`IncidentInput`, timestamp, disposition, binding identity나 queue counter를 제출하는 제품 경로는 0이다. count/byte cast·합 또는 clock이
+실패하면 handoff, Client reason/fd, ring, admission을 모두 바꾸지 않는 typed prepare 실패다.
 
 managed poison은 기존 Client mutation/registered operation 안에서 coordinator를 재진입하지 않는다. 실패를 발견한 exact owner는
 operation pin 아래 `PreparedManagedPoison`만 준비한다. 이 값은 final-address prepared storage, PID/process nonce/thread,

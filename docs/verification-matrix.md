@@ -996,7 +996,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   publication leaf scenario 4개와 HostPool capacity OOM 1개, boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 제품 `HostPool.addOwned` caller 0,
   HostPool의 Client import/역참조 0, map publication 뒤 binding store 0, binding publication 뒤 fallible/callback 0을 함께 검증한다.
   이 gate는 binding publication, suffix가 소비할 pointer-free `IncidentInput`·`PreparedManagedPoison`·`ReconnectAdmission`·`IncidentRepeatKey`와 canonical service record·input digest·aggregate fingerprint 계약 7개,
-  held Client operation의 `id -> key -> reason` publication, owner-storage alias 거부, copied/bind drift 회수 prerequisite 3개만 닫으며
+  held Client operation의 `id -> key -> reason` publication, owner-storage alias 거부, copied/bind drift 회수와 managed request의
+  Client-owned canonical projection prerequisite 5개만 닫으며
   first-reason+incident 단일 poison suffix는 여섯 번째 gate가 닫기 전 구현 완료로 세지 않는다.
   composite coordinator 선행 gate 6개는 실제 managed ClientSlot·publisher Registry·ConnectionIncidentRuntime/service를 함께 사용한다.
   `CR0b composite coordinator는 Client operation publisher lease service lock 순서로 first를 준비한다`,
@@ -1081,9 +1082,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   ReleaseFast에서 같은 commit/wake/release evidence 뒤 scheduler continuation exact success를 요구하며
   optimize-mode skip은 허용하지 않는다.
 
-  현재 별도 managed poison publication prerequisite는 final-address HostAdapter handoff와 app-global publisher owner를 실제 조합해
-  held Client 상태로 first/repeat를 선택하고 handoff를 exact once consume한다. first는 held Client terminalization과 fd close,
-  reconnect admission publication까지 실행하지만 실제 scheduler consumer와 poison ingress가 없으므로 위 `caller 1` 행을 완료한 것으로 세지 않는다.
+  현재 별도 managed public poison caller 1 gate는 caller가 closed reason/source/controller generation만 제출하고 app-process owner clock과
+  registered Client pin이 binding, parser/outbound phase, last successful request, queue/count/upgrade 상태를 canonical `IncidentInput`으로
+  투영한 뒤 final-address HostAdapter와 app-global publisher owner를 실제 조합한다. held Client 상태로 first/repeat를 선택하고 first의
+  terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer와 failure-site caller 2~6은
+  아직 후속 gate 범위이며 caller 1 green을 그 제품 ingress 완료로 확대하지 않는다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
   event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
   capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.

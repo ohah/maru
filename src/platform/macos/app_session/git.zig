@@ -171,7 +171,16 @@ fn clearScmResult(self: *AppSession) void {
     // git_inflight`로 통과해 남의 저장소 목록으로 화면을 채운다. 0으로 두면 기존 "늦게 온 응답은 버린다"
     // 규칙이 그대로 그 응답을 걸러낸다.
     self.git_inflight = 0;
+    // 목록이 바뀌면 **옛 화면을 겨냥한 늦은 클릭**을 거부해야 한다(component action 표의 세대 대조).
+    bumpScmDockGeneration(self);
     self.metal_dirty = true;
+}
+
+/// 소스 컨트롤 도크의 스냅샷 세대를 올린다. 늦게 도착한 포인터가 옛 목록의 행 인덱스로 엉뚱한 파일을
+/// 열지 못하게 하는 유일한 장치다. **그리는 쪽에서 올리면 안 된다** — 그 프레임의 클릭이 전부 거부된다.
+pub fn bumpScmDockGeneration(self: *AppSession) void {
+    self.scm_dock_snapshot_generation +%= 1;
+    if (self.scm_dock_snapshot_generation == 0) self.scm_dock_snapshot_generation = 1;
 }
 
 /// 이미 비어 있나. `.none`이 매 tick 반복되므로 무효화가 한 번만 돌게 하는 가드다 — 없으면 `metal_dirty`가
@@ -276,6 +285,8 @@ pub fn drainGitStatus(self: *AppSession) void {
         self.git_failed = false;
         if (self.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
         self.git_result = result;
+        // 새 목록이다 — 옛 화면을 겨냥한 늦은 클릭을 거부한다(세대 대조).
+        bumpScmDockGeneration(self);
         // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번
         // 유계화하지만 **raw 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다. 탐색기가
         // `updateFileTree`에서 같은 일을 하는 것과 같은 자리다.
@@ -528,37 +539,15 @@ fn repoRootForCached(self: *AppSession, cwd: []const u8, buf: []u8) ?[]const u8 
     return buf[0..self.repo_root_len];
 }
 
-/// 소스 컨트롤 목록에서 그 좌표의 **파일 행**을 찾는다(섹션 헤더는 null). 렌더와 같은 모델을 같은 입력으로
-/// 다시 만들어 판정한다 — 그린 자리와 눌리는 자리가 어긋나지 않게 한다(행 목록을 따로 캐시하지 않는 이유다).
-/// 반환 슬라이스는 `git_result` 소유라 다음 갱신 전까지만 유효하다(호출자가 그 자리에서 쓴다).
-pub fn scmRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
-    if (self.dock.view != .source_control or !dock_ops.dockVisible(self) or self.cell_height_px == 0) return null;
-    const rect = dock_ops.dockGeometry(self).tree_content;
-    if (!layout_math.pointInRect(x_px, y_px, rect)) return null;
-    // 스크롤바 위 클릭이 행 선택으로 새면 안 된다(탐색기와 같은 규율, SV3b).
-    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
-    // **첫 줄은 브랜치 헤더다**(렌더와 같은 자리 규칙 — 여기서 빼지 않으면 한 줄씩 어긋나 엉뚱한 행이
-    // 열린다). 헤더는 스크롤 좌표 밖이므로 목록 좌표는 그 아래에서 시작한다.
-    const list_top = @as(f64, @floatFromInt(rect.y + self.cell_height_px));
-    if (y_px < list_top) return null;
-    // 픽셀 스크롤이라 뷰포트 안 y를 content 좌표로 올린 뒤 나눈다(SV3a — 탐색기와 같은 식).
-    const content_y = @as(f64, @floatFromInt(scroll_ops.scmEffectiveScrollPx(self))) + (y_px - list_top);
-    const index: usize = @intFromFloat(content_y / @as(f64, @floatFromInt(self.cell_height_px)));
-    const row = scmRowAtIndex(self, index, out, scratch) orelse return null;
-    self.scm_selected_row = index;
-    self.metal_dirty = true;
-    return row;
-}
-
-/// 목록 모델을 만든다. **렌더·히트테스트·스크롤 상한이 전부 이 함수를 지난다** — 셋이 각자 `scm_view.build`를
+/// 목록 모델을 만든다. **렌더·포인터·스크롤 상한이 전부 이 함수를 지난다** — 각자 `scm_view.build`를
 /// 부르던 동안에는 인자 하나만 어긋나도 그린 자리와 눌리는 자리가 갈렸다(입력을 한 곳에서 고른다).
 ///
 /// **증감의 출처는 셋이다**: 행은 자기가 선 섹션의 범위(`--cached` / 작업트리)를 쓰고, 요약 줄의 합계만
 /// `HEAD ↔ 작업트리` 한 범위에서 낸다 — 두 섹션의 numstat을 더하면 `MM` 파일이 두 번 세어진다.
 ///
-/// **합계의 폴백 조건이 "출력이 비었나"가 아니라 "unborn인가"인 이유**(적대적 검증 2026-08-14): 평범한 저장소에서
-/// `numstat_head`가 실패해도 출력은 똑같이 비어 있다. 빈 값으로 갈아타면 **index 기준 숫자를 HEAD 기준인 척**
-/// 보여 준다 — 사용자는 커밋 직전에 그 숫자를 본다. unborn이 아닌데 비었으면 그건 "모른다"이고 합계는 0이 된다.
+/// **합계의 폴백 조건이 "출력이 비었나"가 아니라 "unborn인가"인 이유**(적대적 검증 2026-08-14): 평범한
+/// 저장소에서 `numstat_head`가 실패해도 출력은 똑같이 비어 있다. 빈 값으로 갈아타면 **index 기준 숫자를
+/// HEAD 기준인 척** 보여 준다 — 사용자는 커밋 직전에 그 숫자를 본다.
 pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm_view.Model {
     const result = self.git_result orelse return null;
     const total = if (maru.session.git_status.parseHead(result.status).unborn)
@@ -579,24 +568,9 @@ pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm
     );
 }
 
-/// 모델에서 그 인덱스의 행. 렌더와 **같은 입력**으로 만든다(그린 자리와 눌리는 자리를 하나로 유지).
-pub fn scmRowAtIndex(self: *AppSession, index: usize, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
-    const model = buildScmModel(self, out, scratch) orelse return null;
-    if (index >= model.rows.len) return null;
-    return model.rows[index];
-}
-
-/// 목록 전체 행 수(스크롤 상한 계산용). 화면 크기와 무관하게 모델이 만들 수 있는 만큼 센다.
-///
-/// **버퍼는 렌더·hit-test와 같은 크기여야 한다.** 이 값이 스크롤 content 높이의 출처이므로, 여기서만
-/// 더 많이 세면 그리지 못하는 행까지 스크롤 범위에 들어가 목록 아래에 빈 곳이 생긴다(적대적 검증에서
-/// 512 vs 128로 어긋나 있던 것을 맞췄다).
-pub fn scmTotalRows(self: *AppSession) usize {
-    var buf: [scm_row_capacity]scm_view.Row = undefined;
-    var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = buildScmModel(self, &buf, &scratch) orelse return 0;
-    return model.rows.len;
-}
+/// **셀 그리드 히트테스트(`scmRowAt`·`scmRowAtIndex`·`scmTotalRows`)는 P1b에서 제거했다.** 좌표를 행
+/// 인덱스로 바꾸는 일은 이제 published component tree 하나가 하고(`scm_dock.zig`), 그 tree가 렌더와
+/// 같은 기하를 쓴다 — 두 곳이 각자 행 높이를 곱하던 것이 "그린 자리와 눌리는 자리"가 어긋난 원인이었다.
 
 /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
 pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {

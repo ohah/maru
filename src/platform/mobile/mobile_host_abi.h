@@ -37,6 +37,13 @@ extern "C" {
 /// 도달 가능한 값을 봐야 한다).
 #define MARU_FRAME_PACE_MIN_MS (MARU_FRAME_TARGET_MS * 0.75)
 #define MARU_FRAME_PACE_MAX_MS (MARU_FRAME_TARGET_MS * 1.30)
+/// 그 창에 넣을 표본을 **어떻게 모으는가**. 여기도 두 플랫폼이 같아야 한다 — 판정 기준만
+/// 같고 재는 방식이 다르면 두 수를 나란히 놓는 것 자체가 무의미하다(실제로 Android 는 첫
+/// 프레임들을 버렸고 iOS 는 안 버려, 같은 이름의 로그가 다른 것을 재고 있었다).
+/// 워밍업은 첫 프레임들을 버린다 — 아틀라스를 굽고 스왑체인이 서는 동안의 간격은 정상
+/// 주기가 아니다. 표본은 짝수 개를 모아 위쪽 중앙값(`/2`)을 쓴다.
+#define MARU_FRAME_PACE_WARMUP 20
+#define MARU_FRAME_PACE_SAMPLES 60
 /// 아틀라스 격자 크기는 **Zig 가 소유한다**(`maru_mobile_atlas_cols/rows`). 매크로로 두면
 /// 등록부보다 큰 슬롯을 약속하게 되고, 남는 슬롯은 등록이 안 된 채 매 프레임 다시 구워진다.
 /// 셀 크기만 매크로로 남긴다 — 스택 배열 크기에 쓰이기 때문이다.

@@ -66,6 +66,12 @@ ck "iOS 가 OS 에 주기를 선언한다" 1 "$(grep -c 'preferredFrameRateRange
 # 같은 규율로 **헤더가 단일 출처**다 — host 에 남은 날 숫자가 0 이어야 한다.
 ck "헤더의 주기 정의" 1 "$(grep -c 'define MARU_FRAME_TARGET_HZ' $H)"
 ck "host 에 남은 주기 하드코딩" 0 "$(grep -cE '33333333|target=33\.33|>= 25\.0|<= 42\.0' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+# **판정 기준이 같아도 재는 방식이 다르면 두 수를 나란히 못 놓는다.** Android 만 첫 프레임을
+# 버리고 iOS 는 안 버려, 같은 이름의 로그가 다른 것을 재고 있었다. 표본 수·워밍업도 헤더가
+# 소유하고, host 에 제 것을 다시 두지 않는다.
+ck "헤더의 표본 정의" 2 "$(grep -cE 'define MARU_FRAME_PACE_(WARMUP|SAMPLES)' $H)"
+ck "host 에 남은 표본 하드코딩" 0 "$(grep -cE 'define PACE_(SAMPLES|WARMUP)|_paceMs\[60\]|_paceN < 60|n=60' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "두 host 다 워밍업을 버린다" 2 "$(grep -l MARU_FRAME_PACE_WARMUP $I $A | wc -l | tr -d ' ')"
 # `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"

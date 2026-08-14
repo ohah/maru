@@ -128,7 +128,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (failed_count != 0 or leaked_count != 0 or logged_errors != 0) std.process.exit(1);
     // 모든 test-local defer와 progress 정산 뒤에는 C runtime 종료 hook이
     // aggregate의 검증 결과를 다시 바꾸지 못하도록 확정된 status를 게시한다.
-    if (builtin.link_libc) std.c._exit(0) else std.process.exit(0);
+    switch (builtin.os.tag) {
+        .linux => std.os.linux.exit_group(0),
+        else => if (builtin.link_libc) std.c._exit(0) else std.process.exit(0),
+    }
 }
 
 pub fn log(

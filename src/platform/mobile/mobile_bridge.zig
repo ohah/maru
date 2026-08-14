@@ -2204,16 +2204,18 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
         switch (item.*) {
             .header => |title| {
                 set_row_rects[i] = .{}; // 헤더는 **누를 수 없다** — 글자일 뿐이다
-                if (ry + h < list_top or ry > list_top + list_h) continue;
+                if (ry + h < list_top or ry + h > list_top + list_h + 0.5) continue;
                 pushText(title, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(ry + (set_header_h - 13) / 2), 13, tk.get(.accent_bar));
             },
             .field => |*row| {
-                // **그리기는 걸친 것도 그리고, 히트는 보이는 만큼만 준다.** 키바(가로)에서는
-                // "완전히 들어온 것만" 이 맞았지만 세로 목록에서 그대로 하면 창 위아래에
-                // **한 행짜리 빈 구멍**이 생긴다(화면으로 잡았다). 대신 rect 를 보이는 구간과
-                // 교차시켜 **가려진 부분은 안 눌리게** 한다 — 붙임 헤더 밑을 눌러 안 보이는
-                // 값이 바뀌는 것이 진짜 막아야 할 것이다.
-                if (ry + h < list_top or ry > list_top + list_h) {
+                // **위아래 규칙이 다르다 — 덮는 것이 있느냐로 갈린다.**
+                // 위: 붙임 헤더가 **불투명하게 덮으므로** 걸쳐도 그린다(안 그러면 밴드 밑에
+                //     한 행짜리 빈 구멍이 생긴다 — 화면으로 잡았다). 히트만 보이는 구간과
+                //     교차시켜 **가려진 부분은 안 눌리게** 한다.
+                // 아래: **덮을 것이 없다.** 걸쳐 그리면 하단 바 위로 반쯤 잘린 행이 삐져나온다
+                //     (사용자가 화면에서 짚었다 — "벨 표시 레이아웃이 이상하다"). 그래서
+                //     아래는 **완전히 들어온 것만** 그린다. 남는 자리는 목록 여백으로 읽힌다.
+                if (ry + h < list_top or ry + h > list_top + list_h + 0.5) {
                     set_row_rects[i] = .{};
                     continue;
                 }
@@ -2241,6 +2243,22 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 push(.{ .x = @intFromFloat(set_list.x + set_pad_x), .y = @intFromFloat(ry + h - 1), .w = @intFromFloat(set_list.w - 2 * set_pad_x), .h = 1 }, tk.get(.divider), 0x80, 0, 0);
             },
         }
+    }
+
+    // **스크롤바.** 55줄을 한 줄기로 두면 **얼마나 남았는지**가 화면에 없다 — 목록을 나누지
+    // 않기로 한 대가라 위치 표시가 그 자리를 메운다. 밀 수 있을 때만 그린다.
+    if (set_max_scroll > 0) {
+        const track_h = list_h;
+        const thumb_h = @max(28.0, track_h * (track_h / content));
+        const t = set_scroll / set_max_scroll;
+        const thumb_y = list_top + t * (track_h - thumb_h);
+        const bar_w: f32 = 3;
+        push(.{
+            .x = @intFromFloat(set_list.x + set_list.w - bar_w - 2),
+            .y = @intFromFloat(thumb_y),
+            .w = @intFromFloat(bar_w),
+            .h = @intFromFloat(thumb_h),
+        }, tk.get(.muted_fg), 0xB0, 1, 0);
     }
 
     // **지나간 섹션 이름을 맨 위에 붙인다.** 목록을 하나로 두면 "지금 어디" 가 사라지는데,

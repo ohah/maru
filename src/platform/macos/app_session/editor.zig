@@ -388,6 +388,44 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     return term;
 }
 
+/// 편집기 pane의 세로 스크롤. **휠은 이 pane이 통째로 소유한다** — 편집기는 셸이 아니라 문서라
+/// 스크롤백도 mouse reporting도 없고, 안 소유하면 뒤 터미널이 굴러가는 위화감이 남는다.
+/// 편집기가 아니면 `false`(호출자가 지금까지의 경로로 흘린다).
+///
+/// **논리 줄 단위로 움직인다.** `editor_first_line`이 시각 행이 아니라 논리 줄이라 랩이 바뀌어도
+/// 화면 맨 위 줄이 그대로다(그 필드 주석). 대가는 랩이 켜졌을 때 긴 줄이 한 번에 지나간다는 것이고,
+/// 조각 단위 스크롤(`first_piece`)이 붙으면 여기가 그것을 함께 움직인다.
+pub fn scrollLines(self: *AppSession, term: *Term, body_rect: maru.session.SplitRect, lines: i32) bool {
+    if (term.kind != .editor) return false;
+    if (lines == 0) return true; // 0줄이어도 **소유는 한다**(잔여 델타는 호출자의 accumulator가 든다)
+
+    // 비교 Term은 좌우 **행** 배열이 문서다(좌우 길이가 같다). 문서 편집기는 줄 배열이다.
+    const total: usize = if (term.rt.editor_diff) |st|
+        (if (st.view == .compare) st.left_texts.len else 0)
+    else
+        term.rt.editor_lines.len;
+    if (total == 0) return true;
+
+    // **마지막 화면이 비지 않게 멈춘다.** 끝을 넘겨 스크롤하게 두면 배경만 남은 화면이 나오고,
+    // 사용자는 문서가 끝났는지 뷰가 깨졌는지 알 수 없다.
+    //
+    // 호출자가 주는 사각은 **이미 pane 안쪽**이다(`paneTargetAt` → `paneTermRect`). 여기서
+    // `paneGeometry`를 다시 태우면 탭 바를 두 번 빼 보이는 행 수가 실제보다 적어진다.
+    const inner_h = body_rect.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible: usize = @max(inner_h / @max(self.cell_height_px, 1), 1);
+    const max_first: usize = total -| visible;
+
+    const current: i64 = @intCast(term.rt.editor_first_line);
+    // `lines > 0` = 휠 위 = 문서의 **앞쪽**으로(터미널 스크롤백과 같은 방향 규약).
+    const next = std.math.clamp(current - @as(i64, lines), 0, @as(i64, @intCast(max_first)));
+    const clamped: usize = @intCast(next);
+    if (clamped != term.rt.editor_first_line) {
+        term.rt.editor_first_line = clamped;
+        self.metal_dirty = true;
+    }
+    return true;
+}
+
 /// 활성 Term이 편집기면 그 뷰의 랩을 뒤집는다. 아니면 무동작(true를 안 돌려주므로 호출자가 안다).
 ///
 /// **override를 세우는 방식이다** — 지금 보이는 값의 반대를 뷰에 박는다. config를 바꾸지 않는 이유는
@@ -958,4 +996,125 @@ test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하
     try testing.expect(rn >= 2);
     try testing.expectEqual(left_ys[0], right_ys[0]); // 첫 행
     try testing.expectEqual(left_ys[2], right_ys[1]); // 마지막 행 — filler 한 칸을 건너뛴 그 높이
+}
+
+// ── 세로 스크롤 ──────────────────────────────────────────────────────────────────────────────
+
+test "휠 위는 문서 앞쪽으로, 아래는 뒤쪽으로 — 터미널 스크롤백과 같은 방향" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+
+    // 문서를 화면보다 길게 만든다(픽스처는 3줄이라 스크롤이 성립하지 않는다).
+    const long = try allocator.alloc([]const u8, 200);
+    defer allocator.free(long);
+    for (long) |*l| l.* = "line";
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    try testing.expect(scrollLines(fx.session, fx.term, body, -3)); // 아래로 세 줄
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_first_line);
+    try testing.expect(scrollLines(fx.session, fx.term, body, 1)); // 위로 한 줄
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_first_line);
+}
+
+test "문서 앞뒤로 넘어가지 않는다 — 마지막 화면이 비지 않게 멈춘다" {
+    // 끝을 넘겨 스크롤하게 두면 배경만 남은 화면이 나오고, 사용자는 문서가 끝났는지 뷰가 깨졌는지 모른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+
+    const long = try allocator.alloc([]const u8, 200);
+    defer allocator.free(long);
+    for (long) |*l| l.* = "line";
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    _ = scrollLines(fx.session, fx.term, body, 10); // 위로 — 이미 맨 앞
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+
+    _ = scrollLines(fx.session, fx.term, body, -10_000); // 아래로 한참
+    const visible = (body.h -| chrome_editor.frame.content_inset_px * 2) / fx.session.cell_height_px;
+    try testing.expectEqual(long.len - visible, fx.term.rt.editor_first_line);
+    // **마지막 화면이 꽉 찬다** — 남은 줄이 화면 행 수와 같다.
+    try testing.expectEqual(@as(usize, visible), long.len - fx.term.rt.editor_first_line);
+}
+
+test "문서가 화면보다 짧으면 움직이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+    _ = scrollLines(fx.session, fx.term, body, -50); // 픽스처는 3줄
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}
+
+test "편집기가 아니면 휠을 소유하지 않는다 — 터미널 스크롤백으로 흘러야 한다" {
+    // 여기서 true를 돌려주면 셸 pane 위 휠이 **아무것도 안 하는** 상태가 된다(호출자가 곧바로 반환한다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+    const term = pane_ops.activePane(fx.session).terms.items[0];
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    defer term.kind = saved_kind;
+    try testing.expect(!scrollLines(fx.session, term, body, -3));
+}
+
+test "0줄이어도 편집기가 소유한다 — 잔여 델타가 뒤 터미널을 굴리면 안 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+    try testing.expect(scrollLines(fx.session, fx.term, body, 0));
+}
+
+test "스크롤하면 화면이 실제로 바뀐다 — 상태만 움직이고 렌더가 안 따라오면 아무 일도 안 일어난다" {
+    // **`editor_first_line`이 바뀌는 것만 보는 테스트는 통과하면서 화면은 멈춰 있을 수 있다**(렌더가
+    // 그 값을 안 읽으면). 여기서는 같은 pane을 두 번 그려 **셀 내용이 달라지는지**를 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
+
+    // 줄마다 다른 글자를 둔다 — 같은 글자면 스크롤해도 셀이 같아 보인다.
+    const alphabet = "abcdefghijklmnopqrstuvwxyz";
+    const long = try allocator.alloc([]const u8, 200);
+    defer allocator.free(long);
+    for (long, 0..) |*l, i| l.* = alphabet[i % 26 ..][0..1];
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    var before = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer before.dl.deinit(allocator);
+    const first_before: u32 = blk: {
+        for (before.dl.cells) |c| if (c.row == 0 and c.codepoint >= 'a' and c.codepoint <= 'z') break :blk c.codepoint;
+        break :blk 0;
+    };
+
+    _ = scrollLines(fx.session, fx.term, body, -5);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer after.dl.deinit(allocator);
+    const first_after: u32 = blk: {
+        for (after.dl.cells) |c| if (c.row == 0 and c.codepoint >= 'a' and c.codepoint <= 'z') break :blk c.codepoint;
+        break :blk 0;
+    };
+
+    try testing.expect(first_before != 0);
+    // 다섯 줄 내려갔으니 맨 윗줄 글자가 다섯 칸 뒤다.
+    try testing.expectEqual(alphabet[5], @as(u8, @intCast(first_after)));
+    try testing.expectEqual(alphabet[0], @as(u8, @intCast(first_before)));
 }

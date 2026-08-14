@@ -27,6 +27,9 @@ pub const Side = struct {
     numbers: ?[]const ?u32 = null,
     /// 가로 스크롤(열). **각자다** — 공유하면 반대쪽이 엉뚱한 곳을 본다.
     first_col: u16 = 0,
+    /// 행마다 추가/삭제/없음. **왼쪽은 삭제만, 오른쪽은 추가만** 담는 것이 §3.5의 배치 계약이다 —
+    /// 한쪽에 둘 다 담으면 좌우를 나눈 이유가 사라진다.
+    bands: ?[]const frame.RowBand = null,
 };
 
 pub const Props = struct {
@@ -131,6 +134,7 @@ pub fn buildSide(
         .first_col = side.first_col,
         .total_lines = side.total_lines orelse side.lines.len,
         .line_numbers = side.numbers,
+        .row_bands = side.bands,
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,
         .tab_width = shared.tab_width,

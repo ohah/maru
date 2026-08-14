@@ -352,6 +352,9 @@ pub const inventory = [_]Proof{
     // hostname 변경이 같은 파일을 건드렸다). 양쪽 사유 주석을 모두 남기고 값만 재계산했다. count는 2 그대로다.
     // CR0b caller2 publication port install/revoke와 owner-thread timestamp oracle이 추가됐다.
     // Client 반사 owner count는 2 그대로이며 raw publisher pointer는 새로 저장하지 않는다.
+    // N1.5 d(색)로 또 움직인다: `buildChromeTokens`가 `ThemeColors`에 비교 밴드 색 둘을 더 싣는다
+    // (`syntax_theme.diffFromTheme` — 웹이 CSS 변수로 받던 그 함수). count는 2 그대로다 — 값 두 개를
+    // 채우는 필드 대입이고 `@field` 반사나 Client 구성과는 무관하다.
     // N1.5 b·c로 다시 움직인다: diff Term의 네 상태를 tick에서 폴링하는 루프 하나(`editor_diff_ops.poll`),
     // `Term.rt`의 diff 상태 필드, 그리고 컨트롤 플레인 `EditorMeta`가 `editor_diff_ops.editorMeta`에서
     // 값을 받도록 바꾼 블록이다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver

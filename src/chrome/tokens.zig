@@ -109,6 +109,15 @@ pub const ColorRole = enum {
     /// 네이티브 편집기 뷰가 이것을 쓴다(§4.1b) — 편집기는 도크가 아니라 **터미널이 있던 자리**를
     /// 채우므로, 탭을 오갈 때 같은 pane의 바탕이 밝아졌다 어두워지면 안 된다(2026-08-13 사용자 결정).
     terminal_bg,
+    /// **비교 본문의 추가·삭제 밴드**(native-editor-ui.md §7). 배경 위에 **알파로 얹는 색**이라
+    /// 본문 토큰만큼 밝힐 필요가 없고(대비 목표 3.0), 그래서 `syntax_theme.diffFromTheme`가
+    /// 터미널 팔레트의 bright green/red에서 파생한다 — 사용자가 테마를 바꾸면 diff도 같이 바뀌어야
+    /// 한 창 안에서 색 언어가 갈리지 않는다.
+    ///
+    /// **역할은 색만 정하고 세기는 op이 정한다**(`Quad.alpha`) — 같은 색이 줄 배경(옅게)과 좌측
+    /// 띠(진하게)에 함께 쓰이므로, 세기까지 역할로 나누면 토큰이 두 배가 되고 둘이 어긋난다.
+    diff_added_bg,
+    diff_removed_bg,
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -209,6 +218,11 @@ pub const ThemeColors = struct {
     /// 둘은 테마에서 서로 다른 값이고, 편집기·터미널이 같은 바탕을 공유하려면 이 값이 필요하다.
     terminal_background: Rgb,
     accent: Rgb, // maru accent(테마-구동) — accent_bar 역할이 소비. 호출자가 ResolvedTheme.accent를 넘긴다(null은 resolve가 앰버로 폴백).
+    /// 비교 본문의 추가·삭제 색. 호출자가 `syntax_theme.diffFromTheme(theme)`를 넘긴다 — chrome은
+    /// 그 파생 규칙(팔레트 bright green/red + 최소 대비)을 몰라도 되고, 웹(CM6)과 네이티브가 **같은
+    /// 함수**에서 색을 받는다.
+    diff_added: Rgb,
+    diff_removed: Rgb,
 };
 
 /// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
@@ -253,6 +267,8 @@ pub const Tokens = struct {
         palette.set(.git_added_fg, .{ .r = 87, .g = 166, .b = 74 });
         palette.set(.git_deleted_fg, .{ .r = 199, .g = 84, .b = 80 });
         palette.set(.terminal_bg, theme.terminal_background);
+        palette.set(.diff_added_bg, theme.diff_added);
+        palette.set(.diff_removed_bg, theme.diff_removed);
         return .{ .palette = palette };
     }
 
@@ -327,6 +343,8 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
         .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
+        .diff_added = c.rgb(64, 160, 64), // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = c.rgb(176, 64, 64),
         .accent = c.rgb(9, 9, 9),
     });
     try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
@@ -345,7 +363,7 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
             return .{ .r = r, .g = g, .b = b };
         }
         fn theme(bg: Rgb) ThemeColors {
-            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9) };
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9), .diff_added = rgb(64, 160, 64), .diff_removed = rgb(176, 64, 64) };
         }
     };
     // 어두운 패널 → keycap이 더 밝게(대비).
@@ -366,7 +384,7 @@ test "inset_bg는 dark/light 테마에서 surface와 반대 방향으로 분리�
             return .{ .r = r, .g = g, .b = b };
         }
         fn theme(bg: Rgb) ThemeColors {
-            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9) };
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9), .diff_added = rgb(64, 160, 64), .diff_removed = rgb(176, 64, 64) };
         }
     };
     inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(40, 40, 40))), Tokens.rich(c.theme(c.rgb(40, 40, 40))) }) |tk| {
@@ -393,6 +411,8 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
         .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
+        .diff_added = c.rgb(64, 160, 64), // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = c.rgb(176, 64, 64),
         .accent = c.rgb(9, 9, 9),
     };
     const t = Tokens.tui(theme);
@@ -429,6 +449,8 @@ test "divider is always distinct from the panel in tui and rich, including the p
                 .selection = rgb(7),
                 .cursor = rgb(8),
                 .terminal_background = rgb(8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
+                .diff_added = rgb(96),
+                .diff_removed = rgb(112),
                 .accent = rgb(9),
             };
         }
@@ -453,6 +475,8 @@ test "divider keeps the documented 24-channel separation away from gamut endpoin
         .selection = .{ .r = 7, .g = 7, .b = 7 },
         .cursor = .{ .r = 8, .g = 8, .b = 8 },
         .terminal_background = .{ .r = 8, .g = 8, .b = 8 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
     inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
@@ -473,6 +497,8 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
         .selection = .{ .r = 7, .g = 7, .b = 7 },
         .cursor = .{ .r = 8, .g = 8, .b = 8 },
         .terminal_background = .{ .r = 8, .g = 8, .b = 8 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
     const t = Tokens.tui(theme);

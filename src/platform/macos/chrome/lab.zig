@@ -524,6 +524,10 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const right_texts = [_][]const u8{ "fn main() {", "  var b = 2;", "  var c = 3;", "  log(b);", "}" };
     const left_numbers = [_]?u32{ 1, 2, null, 3, 4 };
     const right_numbers = [_]?u32{ 1, 2, 3, 4, 5 };
+    // **왼쪽은 삭제만, 오른쪽은 추가만.** 2행은 자리에서 바뀐 줄(양쪽에 색), 3행은 오른쪽에만 있는 줄
+    // (왼쪽은 빈 행이라 색이 없다) — 좌우를 나눈 이유가 이 두 모양에서 보인다.
+    const left_bands = [_]editor_view.frame.RowBand{ .none, .removed, .none, .none, .none };
+    const right_bands = [_]editor_view.frame.RowBand{ .none, .added, .added, .none, .none };
 
     var content_rows: [64]editor_view.content.Row = undefined;
     var visual_rows: [64]editor_view.visual_map.VisualRow = undefined;
@@ -532,8 +536,8 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var count_scratch: [1024]u8 = undefined;
 
     const w = editor_view.diff_frame.build(.{
-        .left = .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4 },
-        .right = .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5 },
+        .left = .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4, .bands = &left_bands },
+        .right = .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands },
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
         .cell_w_px = scenario.cell_w_px,
@@ -743,6 +747,8 @@ test "Chrome Lab has no implicit surface and fails closed for an empty synthetic
 
 test "Chrome Lab builds a deterministic font specimen card and records only its action" {
     const tokens = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },

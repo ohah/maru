@@ -53,6 +53,11 @@ const PreparedPublicationSnapshot = struct {
     reason_raw: u8 = 0,
     source_site_raw: u8 = 0,
     controller_generation: u64 = 0,
+    pending_request_count: u32 = 0,
+    outbound_phase_raw: u8 = 0,
+    outbound_offset: u64 = 0,
+    outbound_length: u64 = 0,
+    queue_bytes: u64 = 0,
 };
 
 const PublicationPortTestState = if (@import("builtin").is_test) struct {
@@ -198,6 +203,11 @@ pub fn publishPreparedManagedPoison(
                 .reason_raw = prepared.input.reason_raw,
                 .source_site_raw = prepared.input.source_site_raw,
                 .controller_generation = prepared.input.controller_generation,
+                .pending_request_count = prepared.input.pending_request_count,
+                .outbound_phase_raw = prepared.input.outbound_phase_raw,
+                .outbound_offset = prepared.input.outbound_offset,
+                .outbound_length = prepared.input.outbound_length,
+                .queue_bytes = prepared.input.queue_bytes,
             };
         }
     }

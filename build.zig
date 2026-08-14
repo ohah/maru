@@ -2437,6 +2437,20 @@ pub fn build(b: *std.Build) void {
         run_cr0b_read_event_pump_poison_tests.addArg("--maru-expect-tests=1");
         run_cr0b_read_event_pump_poison_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_read_event_pump_poison_tests.step);
+        const cr0b_outbound_rpc_ambiguity_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b actual outbound RPC ambiguity는"},
+        });
+        const run_cr0b_outbound_rpc_ambiguity_tests = b.addRunArtifact(cr0b_outbound_rpc_ambiguity_tests);
+        run_cr0b_outbound_rpc_ambiguity_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_outbound_rpc_ambiguity_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_outbound_rpc_ambiguity_tests.step);
         const cr0b_allocator_callback_poison_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),

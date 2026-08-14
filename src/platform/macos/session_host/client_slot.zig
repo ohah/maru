@@ -4806,6 +4806,25 @@ const PreparedExecutionTxn = struct {
         reason: client_poison.ConnectionReason,
         lease: ?*client_mod.PreparedRequestExecutionLease,
     ) SettlementError!SettlementOutcome {
+        return self.settlePreWireTerminalWithLeaseImpl(operation, reason, lease, false);
+    }
+
+    fn settlePreWireTerminalForDeferredPublication(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) SettlementError!SettlementOutcome {
+        return self.settlePreWireTerminalWithLeaseImpl(operation, reason, lease, true);
+    }
+
+    fn settlePreWireTerminalWithLeaseImpl(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+        defer_client_terminalization: bool,
+    ) SettlementError!SettlementOutcome {
         try self.requireCleanupClosed(operation);
         const expected = self.canonicalExecuting(operation) orelse return error.ProtocolError;
         const abort_result = if (lease) |held|
@@ -4837,19 +4856,23 @@ const PreparedExecutionTxn = struct {
             self.failStopSettlement(node, .authority_drift);
             return error.ProtocolError;
         };
-        if (lease) |held|
-            node.client.poisonPreparedRequestExecution(held, reason) catch {
-                self.failStopSettlement(node, .authority_drift);
-                return error.ProtocolError;
-            }
+        if (!defer_client_terminalization) {
+            if (lease) |held|
+                node.client.poisonPreparedRequestExecution(held, reason) catch {
+                    self.failStopSettlement(node, .authority_drift);
+                    return error.ProtocolError;
+                }
+            else
+                node.client.poison(reason);
+        }
+        const published_reason = if (defer_client_terminalization)
+            reason
+        else if (lease) |held|
+            (node.client.preparedRequestExecutionPoisonReason(held) catch
+                return error.ProtocolError) orelse reason
         else
-            node.client.poison(reason);
-        const published_reason = if (lease) |held|
-            node.client.preparedRequestExecutionPoisonReason(held) catch
-                return error.ProtocolError
-        else
-            node.client.firstPoisonReason();
-        return self.publishTerminal(published_reason orelse reason);
+            node.client.firstPoisonReason() orelse reason;
+        return self.publishTerminal(published_reason);
     }
 
     fn retireIssuerExhausted(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
@@ -5361,10 +5384,31 @@ const PreparedRpcExecutionTxn = struct {
             try node_before.client.preparedRequestExecutionPoisonReason(held)
         else
             node_before.client.firstPoisonReason();
-        const outcome = if (poison_reason) |reason|
-            try self.request.settlePreWireTerminalWithLease(operation, reason, lease)
+        return self.settlePreWireWithResolvedReason(operation, lease, poison_reason, false);
+    }
+
+    fn settlePreWireForDeferredPublication(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+        poison_reason: ?client_poison.ConnectionReason,
+    ) !SettlementOutcome {
+        return self.settlePreWireWithResolvedReason(operation, lease, poison_reason, true);
+    }
+
+    fn settlePreWireWithResolvedReason(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+        poison_reason: ?client_poison.ConnectionReason,
+        defer_client_terminalization: bool,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .response_reserved)
+            return error.ProtocolError;
+        const outcome = if (poison_reason) |reason| if (defer_client_terminalization)
+            try self.request.settlePreWireTerminalForDeferredPublication(operation, reason, lease)
         else
-            try self.request.rollbackPreWireWithLease(operation, lease);
+            try self.request.settlePreWireTerminalWithLease(operation, reason, lease) else try self.request.rollbackPreWireWithLease(operation, lease);
         const node = self.request.ownerNode(operation) orelse return error.ProtocolError;
         switch (outcome) {
             .reusable => try node.cleanup_registry.rollbackRpcResponseExecution(
@@ -6291,10 +6335,26 @@ fn settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
     txn: *PreparedRpcExecutionTxn,
     operation: RegisteredNodeOperation,
 ) void {
-    const storage: *const client_mod.PreparedBlockingRpcStorage =
-        @ptrFromInt(txn.request.canonical_prepared.descriptor.storage_addr);
     const poison_reason = node.client.preparedRequestExecutionPoisonReason(lease) catch
         failStopPreparedExecution(.authority_drift);
+    settlePreparedRpcLeaseOwnedWithReasonAndReleaseOrFailStop(
+        node,
+        lease,
+        txn,
+        operation,
+        poison_reason,
+    );
+}
+
+fn settlePreparedRpcLeaseOwnedWithReasonAndReleaseOrFailStop(
+    node: *ClientNode,
+    lease: *client_mod.PreparedRequestExecutionLease,
+    txn: *PreparedRpcExecutionTxn,
+    operation: RegisteredNodeOperation,
+    poison_reason: ?client_poison.ConnectionReason,
+) void {
+    const storage: *const client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(txn.request.canonical_prepared.descriptor.storage_addr);
     const outcome = if (client_mod.Client.preparedBlockingRpcStorageSettled(storage))
         txn.settlePostWriteTerminalWithLease(
             operation,
@@ -6302,10 +6362,53 @@ fn settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
             lease,
         ) catch failStopPreparedExecution(.cleanup_failure)
     else
-        txn.settlePreWireWithLease(operation, lease) catch
+        txn.settlePreWireForDeferredPublication(operation, lease, poison_reason) catch
             failStopPreparedExecution(.cleanup_failure);
     txn.request.finishOrFailStop(operation, outcome);
     finishPreparedRpcLeaseOrFailStop(node, lease, txn, operation);
+}
+
+fn finalizePreparedExecutionPoisonCaptureNoFail(
+    request: GenerationRequestAbort,
+    operation: RegisteredNodeOperation,
+    node: *ClientNode,
+    lease: *client_mod.PreparedRequestExecutionLease,
+    capture: *incident_publication_contract.PreparedExecutionPoisonCapture,
+) bool {
+    const lifecycle = std.enums.fromInt(
+        incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle,
+        capture.lifecycle_raw,
+    ) orelse failStopPreparedExecution(.authority_drift);
+    if (lifecycle == .armed) return false;
+    if (lifecycle != .captured or capture.operation_id != operation.operation_id or
+        capture.client_addr != @intFromPtr(&node.client) or
+        capture.lease_addr != @intFromPtr(lease) or
+        std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null or
+        capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw)
+        failStopPreparedExecution(.authority_drift);
+    const reason = (node.client.preparedRequestExecutionPoisonReason(lease) catch
+        failStopPreparedExecution(.authority_drift)) orelse
+        failStopPreparedExecution(.authority_drift);
+    if (capture.reason_raw != @intFromEnum(reason))
+        failStopPreparedExecution(.authority_drift);
+    const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
+    const prepared: *incident_publication_contract.PreparedManagedPoison =
+        @ptrFromInt(capture.prepared_addr);
+    prepareManagedPoisonRequestPinned(
+        slot,
+        node,
+        capture.timestamp_ns,
+        .{
+            .reason_raw = capture.reason_raw,
+            .source_site_raw = capture.source_site_raw,
+            .controller_generation = capture.controller_generation,
+        },
+        prepared,
+    ) catch failStopPreparedExecution(.authority_drift);
+    capture.lifecycle_raw = @intFromEnum(
+        incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.finalized,
+    );
+    return true;
 }
 
 /// B3-3 product-shaped private caller. It deliberately has no public facade and publishes no
@@ -6474,15 +6577,32 @@ fn executePreparedRpcPrivate(
         &lease,
         poison_capture,
     ) catch |err| {
-        publication.finish(node, null);
-        if (lease.wireProgress() != null) {
-            settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
+        const lease_began = lease.wireProgress() != null;
+        const frozen_reason = if (lease_began)
+            node.client.preparedRequestExecutionPoisonReason(&lease) catch
+                failStopPreparedExecution(.authority_drift)
+        else
+            null;
+        if (poison_capture) |capture| {
+            _ = finalizePreparedExecutionPoisonCaptureNoFail(
+                request,
+                admission.operation,
+                node,
+                &lease,
+                capture,
+            );
+        }
+        if (lease_began) {
+            publication.finish(node, &lease);
+            settlePreparedRpcLeaseOwnedWithReasonAndReleaseOrFailStop(
                 node,
                 &lease,
                 &txn,
                 admission.operation,
+                frozen_reason,
             );
         } else {
+            publication.finish(node, null);
             const outcome = try txn.settlePreWire(admission.operation);
             txn.request.finishOrFailStop(admission.operation, outcome);
         }
@@ -6642,27 +6762,14 @@ fn publishPreparedRpcResponse(
                 failStopRpcPublication(node, payload_cleanup, .ledger_drift);
             txn.request.finishOrFailStop(operation, outcome);
             if (poison_capture) |capture| {
-                if (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
-                    capture.operation_id != operation.operation_id or capture.client_addr != @intFromPtr(&node.client) or
-                    capture.lease_addr != @intFromPtr(lease) or capture.reason_raw != @intFromEnum(reason) or
-                    std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null or
-                    capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw)
-                    failStopRpcPublication(node, payload_cleanup, .ledger_drift);
-                const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
-                const prepared: *incident_publication_contract.PreparedManagedPoison =
-                    @ptrFromInt(capture.prepared_addr);
-                prepareManagedPoisonRequestPinned(
-                    slot,
-                    node,
-                    capture.timestamp_ns,
-                    .{
-                        .reason_raw = capture.reason_raw,
-                        .source_site_raw = capture.source_site_raw,
-                        .controller_generation = capture.controller_generation,
-                    },
-                    prepared,
-                ) catch failStopRpcPublication(node, payload_cleanup, .ledger_drift);
-                capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.finalized);
+                if (capture.reason_raw != @intFromEnum(reason) or
+                    !finalizePreparedExecutionPoisonCaptureNoFail(
+                        request,
+                        operation,
+                        node,
+                        lease,
+                        capture,
+                    )) failStopRpcPublication(node, payload_cleanup, .ledger_drift);
             }
             return err;
         },

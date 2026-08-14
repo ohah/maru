@@ -118,8 +118,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     BOOL _loggedDraw;
     char _lastErr[64];
     // 주기 관측: 표시 클럭 간격을 모아 한 번 기록한다.
-    double _paceLast, _paceMs[60];
-    int _paceN;
+    double _paceLast, _paceMs[MARU_FRAME_PACE_SAMPLES];
+    int _paceN, _paceWarm;
     BOOL _paceDone;
     CTFontRef _atlasFont;
     /// 스타일 비트(0~3)로 바로 찾는다 — SGR 1/3 은 **다른 글리프**라 폰트 파일이 따로 있어야 한다.
@@ -859,17 +859,27 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 - (void)recordPace {
     if (_paceDone) return;
     double now = _link.timestamp;
-    if (_paceLast > 0 && now > _paceLast && _paceN < 60) _paceMs[_paceN++] = (now - _paceLast) * 1000.0;
+    // **첫 프레임들은 버린다.** 아틀라스를 굽고 스왑체인이 서는 동안의 간격은 정상 주기가
+    // 아니다. Android 만 이걸 하고 여기엔 없어서, 같은 이름의 로그가 **다른 것을 재고
+    // 있었다** — 표본 수와 함께 헤더가 소유한다.
+    if (_paceWarm < MARU_FRAME_PACE_WARMUP) {
+        _paceWarm++;
+        _paceLast = now;
+        return;
+    }
+    if (_paceLast > 0 && now > _paceLast && _paceN < MARU_FRAME_PACE_SAMPLES)
+        _paceMs[_paceN++] = (now - _paceLast) * 1000.0;
     _paceLast = now;
-    if (_paceN < 60) return;
-    for (int i = 1; i < 60; i++) {
+    if (_paceN < MARU_FRAME_PACE_SAMPLES) return;
+    for (int i = 1; i < MARU_FRAME_PACE_SAMPLES; i++) {
         double k = _paceMs[i]; int j = i - 1;
         while (j >= 0 && _paceMs[j] > k) { _paceMs[j + 1] = _paceMs[j]; j--; }
         _paceMs[j + 1] = k;
     }
     _paceDone = YES;
-    double med = _paceMs[30];
-    NSLog(@"MARU_PACE median_ms=%.2f n=60 target=%.2f verdict=%s", med, MARU_FRAME_TARGET_MS,
+    double med = _paceMs[MARU_FRAME_PACE_SAMPLES / 2];
+    NSLog(@"MARU_PACE median_ms=%.2f n=%d target=%.2f verdict=%s", med, MARU_FRAME_PACE_SAMPLES,
+          MARU_FRAME_TARGET_MS,
           (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS) ? "PASS" : "FAIL");
 }
 

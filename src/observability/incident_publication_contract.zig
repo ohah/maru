@@ -65,6 +65,29 @@ pub const PreparedManagedPoison = struct {
 
 pub const ManagedPoisonLifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
 
+/// Prepared RPC execution 중에는 Client의 reason/fd를 먼저 바꿀 수 없다. ClientSlot이 이
+/// caller-final stack value를 exact operation/lease에 결속하고, Client는 실패 원인만 한 번
+/// 기록한다. 같은 operation owner가 cleanup 뒤 `PreparedManagedPoison`을 봉인한다.
+pub const PreparedExecutionPoisonCapture = struct {
+    self_addr: u64 = 0,
+    prepared_addr: u64 = 0,
+    client_addr: u64 = 0,
+    operation_id: u64 = 0,
+    lease_addr: u64 = 0,
+    timestamp_ns: i128 = 0,
+    controller_generation: u64 = 0,
+    source_site_raw: u8 = 0,
+    reason_raw: u8 = 0,
+    lifecycle_raw: u8 = 0,
+};
+
+pub const PreparedExecutionPoisonCaptureLifecycle = enum(u8) {
+    pristine = 0,
+    armed = 1,
+    captured = 2,
+    finalized = 3,
+};
+
 /// First publication과 Client terminalization이 끝난 뒤 scheduler owner에게 넘기는 값이다.
 /// Client/runtime 포인터를 포함하지 않으며 같은 connection generation에서 exact once만 게시한다.
 pub const ReconnectAdmission = struct {

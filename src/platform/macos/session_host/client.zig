@@ -306,6 +306,11 @@ pub const PreparedRequestExecutionLease = struct {
     operation_fence_generation: u64 = 0,
     operation_fence_incarnation: u64 = 0,
     operation_fence_lease_identity: u64 = 0,
+    poison_capture_addr: usize = 0,
+    poison_prepared_addr: usize = 0,
+    poison_timestamp_ns: i128 = 0,
+    poison_controller_generation: u64 = 0,
+    poison_source_site_raw: u8 = 0,
     ownership_raw: u8 = 0,
     io_mode_raw: u8 = 0,
     progress: PreparedRequestWireProgress = .request_zero_clean,
@@ -323,7 +328,9 @@ pub const PreparedRequestExecutionLease = struct {
             self.allocator_ptr == 0 and self.allocator_vtable == 0 and
             self.fd == -1 and self.operation_fence_addr == 0 and
             self.operation_fence_generation == 0 and self.operation_fence_incarnation == 0 and
-            self.operation_fence_lease_identity == 0 and
+            self.operation_fence_lease_identity == 0 and self.poison_capture_addr == 0 and
+            self.poison_prepared_addr == 0 and self.poison_timestamp_ns == 0 and
+            self.poison_controller_generation == 0 and self.poison_source_site_raw == 0 and
             self.ownership_raw == 0 and self.io_mode_raw == 0 and
             self.progress == .request_zero_clean and self.lifecycle == .pristine and
             self.fence_held == 0 and self.fence_mode == .unbound and
@@ -361,6 +368,11 @@ fn preparedExecutionLeaseSeal(lease: *const PreparedRequestExecutionLease) u64 {
         lease.operation_fence_generation,
         lease.operation_fence_incarnation,
         lease.operation_fence_lease_identity,
+        lease.poison_capture_addr,
+        lease.poison_prepared_addr,
+        lease.poison_timestamp_ns,
+        lease.poison_controller_generation,
+        lease.poison_source_site_raw,
         lease.ownership_raw,
         lease.io_mode_raw,
         @as(usize, @intFromEnum(lease.progress)),
@@ -8949,7 +8961,7 @@ pub const Client = struct {
         identity: PreparedBlockingRpcIdentity,
         lease: *PreparedRequestExecutionLease,
     ) PreparedBlockingRpcError!std.mem.Allocator {
-        return self.beginPreparedRequestExecutionMode(storage, identity, lease, false);
+        return self.beginPreparedRequestExecutionMode(storage, identity, lease, null, false);
     }
 
     pub fn beginPreparedRequestExecutionFromRegisteredOperation(
@@ -8957,8 +8969,9 @@ pub const Client = struct {
         storage: *PreparedBlockingRpcStorage,
         identity: PreparedBlockingRpcIdentity,
         lease: *PreparedRequestExecutionLease,
+        poison_capture: ?*incident_publication_contract.PreparedExecutionPoisonCapture,
     ) PreparedBlockingRpcError!std.mem.Allocator {
-        return self.beginPreparedRequestExecutionMode(storage, identity, lease, true);
+        return self.beginPreparedRequestExecutionMode(storage, identity, lease, poison_capture, true);
     }
 
     fn beginPreparedRequestExecutionMode(
@@ -8966,6 +8979,7 @@ pub const Client = struct {
         storage: *PreparedBlockingRpcStorage,
         identity: PreparedBlockingRpcIdentity,
         lease: *PreparedRequestExecutionLease,
+        poison_capture: ?*incident_publication_contract.PreparedExecutionPoisonCapture,
         upgrade_registered_shared: bool,
     ) PreparedBlockingRpcError!std.mem.Allocator {
         const lease_range = checkedExternalRange(
@@ -8980,6 +8994,24 @@ pub const Client = struct {
             externalRangesOverlap(lease_range.?, storage_range.?) or
             (externalRangeOverlapsClient(self, lease_range.?) catch return error.InvalidPreparedRpc))
             return error.InvalidPreparedRpc;
+        if (poison_capture) |capture| {
+            const capture_range = checkedExternalRange(
+                @intFromPtr(capture),
+                @sizeOf(incident_publication_contract.PreparedExecutionPoisonCapture),
+            ) catch return error.InvalidPreparedRpc;
+            if (capture_range == null or externalRangesOverlap(lease_range.?, capture_range.?) or
+                externalRangesOverlap(storage_range.?, capture_range.?) or
+                (externalRangeOverlapsClient(self, capture_range.?) catch return error.InvalidPreparedRpc))
+                return error.InvalidPreparedRpc;
+            if (capture.self_addr != @intFromPtr(capture) or
+                capture.client_addr != @intFromPtr(self) or
+                capture.lease_addr != @intFromPtr(lease) or
+                capture.prepared_addr == 0 or capture.operation_id == 0 or
+                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed) or
+                capture.controller_generation == 0 or
+                std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null)
+                return error.InvalidPreparedRpc;
+        }
         if (!identity.descriptor.valid()) return error.InvalidPreparedRpc;
         const frame_range = checkedExternalRange(
             identity.descriptor.frame_addr,
@@ -9068,6 +9100,11 @@ pub const Client = struct {
             .operation_fence_generation = frozen_fence_generation,
             .operation_fence_incarnation = frozen_fence_incarnation,
             .operation_fence_lease_identity = fence_lease_identity,
+            .poison_capture_addr = if (poison_capture) |capture| @intFromPtr(capture) else 0,
+            .poison_prepared_addr = if (poison_capture) |capture| capture.prepared_addr else 0,
+            .poison_timestamp_ns = if (poison_capture) |capture| capture.timestamp_ns else 0,
+            .poison_controller_generation = if (poison_capture) |capture| capture.controller_generation else 0,
+            .poison_source_site_raw = if (poison_capture) |capture| capture.source_site_raw else 0,
             .ownership_raw = @intFromEnum(self.ownership),
             .io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode)),
             .progress = .request_zero_clean,
@@ -9147,6 +9184,20 @@ pub const Client = struct {
     ) PreparedBlockingRpcError!?client_poison.ConnectionReason {
         if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease))
             return error.InvalidPreparedRpc;
+        if (lease.poison_capture_addr != 0) {
+            const capture: *const incident_publication_contract.PreparedExecutionPoisonCapture =
+                @ptrFromInt(lease.poison_capture_addr);
+            if (capture.self_addr != lease.poison_capture_addr or
+                capture.client_addr != @intFromPtr(self) or capture.lease_addr != @intFromPtr(lease) or
+                capture.prepared_addr != lease.poison_prepared_addr or
+                capture.timestamp_ns != lease.poison_timestamp_ns or
+                capture.controller_generation != lease.poison_controller_generation or
+                capture.source_site_raw != lease.poison_source_site_raw or
+                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
+                std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)
+                return error.InvalidPreparedRpc;
+            return @enumFromInt(capture.reason_raw);
+        }
         return self.first_poison_reason;
     }
 
@@ -9487,6 +9538,38 @@ pub const Client = struct {
         self: *Client,
         reason: client_poison.ConnectionReason,
     ) void {
+        if (self.prepared_request_execution_lease_addr != 0) {
+            const lease: *PreparedRequestExecutionLease =
+                @ptrFromInt(self.prepared_request_execution_lease_addr);
+            if (lease.poison_capture_addr != 0 and
+                lease.self_addr == @intFromPtr(lease) and lease.client_addr == @intFromPtr(self) and
+                lease.lifecycle == .active and lease.seal == preparedExecutionLeaseSeal(lease))
+            {
+                const capture: *incident_publication_contract.PreparedExecutionPoisonCapture =
+                    @ptrFromInt(lease.poison_capture_addr);
+                const lifecycle: incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle =
+                    std.enums.fromInt(
+                        incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle,
+                        capture.lifecycle_raw,
+                    ) orelse @panic("prepared execution poison capture authority drifted");
+                if (capture.self_addr != lease.poison_capture_addr or
+                    capture.client_addr != @intFromPtr(self) or capture.lease_addr != @intFromPtr(lease) or
+                    capture.prepared_addr != lease.poison_prepared_addr or
+                    capture.timestamp_ns != lease.poison_timestamp_ns or
+                    capture.controller_generation != lease.poison_controller_generation or
+                    capture.source_site_raw != lease.poison_source_site_raw or
+                    (lifecycle != .armed and lifecycle != .captured))
+                    @panic("prepared execution poison capture authority drifted");
+                if (lifecycle == .captured) {
+                    if (capture.reason_raw != @intFromEnum(reason))
+                        @panic("prepared execution poison reason drifted");
+                    return;
+                }
+                capture.reason_raw = @intFromEnum(reason);
+                capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
+                return;
+            }
+        }
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
     }

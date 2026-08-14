@@ -2409,6 +2409,20 @@ pub fn build(b: *std.Build) void {
         run_cr0b_managed_poison_caller_tests.addArg("--maru-expect-tests=1");
         run_cr0b_managed_poison_caller_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_managed_poison_caller_tests.step);
+        const cr0b_prepared_execution_poison_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b prepared execution poison은"},
+        });
+        const run_cr0b_prepared_execution_poison_tests = b.addRunArtifact(cr0b_prepared_execution_poison_tests);
+        run_cr0b_prepared_execution_poison_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_prepared_execution_poison_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_prepared_execution_poison_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),

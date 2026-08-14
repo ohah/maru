@@ -2066,6 +2066,15 @@ pub const GenerationRpcDecodedExecute = struct {
     decoder: contract.RpcDecoder,
     pre_decode_context: *anyopaque,
     pre_decode: contract.RpcPreDecode,
+    poison_capture: ?PreparedExecutionPoisonCaptureRequest = null,
+};
+
+pub const PreparedExecutionPoisonCaptureRequest = struct {
+    timestamp_ns: i128,
+    controller_generation: u64,
+    source_site_raw: u8,
+    capture_addr: usize,
+    prepared_addr: usize,
 };
 
 pub const GenerationExecuteError = GenerationRequestError ||
@@ -2550,7 +2559,27 @@ pub fn prepareManagedPoisonRequest(
     };
     defer self.endRegisteredClientOperation(operation);
     if (!self.valid() or operation.node != self.current) return error.InvalidOwner;
-    const client = &operation.node.client;
+    return prepareManagedPoisonRequestPinned(
+        self,
+        operation.node,
+        timestamp_ns,
+        request,
+        out,
+    );
+}
+
+fn prepareManagedPoisonRequestPinned(
+    self: *ClientSlot,
+    node: *ClientNode,
+    timestamp_ns: i128,
+    request: incident_publication_contract.ManagedPoisonRequest,
+    out: *incident_publication_contract.PreparedManagedPoison,
+) ManagedPoisonError!void {
+    if (!self.valid() or node != self.current or timestamp_ns < 0 or
+        !incident_publication_contract.validManagedPoisonRequest(request) or
+        !std.meta.eql(out.*, incident_publication_contract.PreparedManagedPoison{}))
+        return error.InvalidInput;
+    const client = &node.client;
     const binding = client.incident_binding;
     if (!incident_binding_contract.validBindingShape(binding)) return error.InvalidOwner;
     const reason: connection_incident.ConnectionReason = @enumFromInt(request.reason_raw);
@@ -2607,7 +2636,7 @@ pub fn prepareManagedPoisonRequest(
         .controller_generation = request.controller_generation,
         .upgrade_epoch = client.upgrade_epoch,
     };
-    return prepareManagedPoisonPinned(self, operation.node, input, out);
+    return prepareManagedPoisonPinned(self, node, input, out);
 }
 
 fn incidentParserPhase(client: *const client_mod.Client) u8 {
@@ -6311,6 +6340,7 @@ fn executePreparedRpcPrivate(
     requested_destination: RpcExecutionDestination,
     mode: PreparedRpcExecutionMode,
     test_failure: PreparedRpcExecutionTestFailure,
+    poison_request: ?PreparedExecutionPoisonCaptureRequest,
 ) !void {
     const admission = try beginGenerationRequestOwner(request, false);
     defer endRegisteredNodeOperation(admission.operation);
@@ -6365,6 +6395,38 @@ fn executePreparedRpcPrivate(
     var lease: client_mod.PreparedRequestExecutionLease = .{};
     var publication: PreparedRpcPublicationScope = .{};
     var payload_cleanup: RpcPublicationPayloadCleanup = .{};
+    const poison_capture: ?*incident_publication_contract.PreparedExecutionPoisonCapture = if (poison_request) |capture_request| blk: {
+        if (capture_request.timestamp_ns < 0 or capture_request.controller_generation == 0 or
+            std.enums.fromInt(connection_incident.SourceSite, capture_request.source_site_raw) == null or
+            capture_request.capture_addr == 0 or capture_request.prepared_addr == 0)
+            return error.InvalidOwner;
+        const capture: *incident_publication_contract.PreparedExecutionPoisonCapture =
+            @ptrFromInt(capture_request.capture_addr);
+        const prepared: *incident_publication_contract.PreparedManagedPoison =
+            @ptrFromInt(capture_request.prepared_addr);
+        if (!std.meta.eql(capture.*, incident_publication_contract.PreparedExecutionPoisonCapture{}) or
+            !std.meta.eql(prepared.*, incident_publication_contract.PreparedManagedPoison{}) or
+            byteRangesOverlap(@intFromPtr(capture), @sizeOf(@TypeOf(capture.*)), @intFromPtr(prepared), @sizeOf(@TypeOf(prepared.*))) or
+            rangesOverlapTyped(capture, node) or rangesOverlapTyped(capture, &node.client) or
+            rangesOverlapTyped(prepared, node) or rangesOverlapTyped(prepared, &node.client) or
+            rangesOverlapTyped(capture, &lease) or rangesOverlapTyped(prepared, &lease))
+            return error.InvalidOwner;
+        capture.* = .{
+            .self_addr = @intFromPtr(capture),
+            .prepared_addr = @intFromPtr(prepared),
+            .client_addr = @intFromPtr(&node.client),
+            .operation_id = admission.operation.operation_id,
+            .lease_addr = @intFromPtr(&lease),
+            .timestamp_ns = capture_request.timestamp_ns,
+            .controller_generation = capture_request.controller_generation,
+            .source_site_raw = capture_request.source_site_raw,
+            .lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed),
+        };
+        break :blk capture;
+    } else null;
+    defer {
+        if (poison_capture) |capture| capture.* = .{};
+    }
     if (mode == .correlated_response) publication.begin(
         node,
         admission.operation,
@@ -6383,6 +6445,7 @@ fn executePreparedRpcPrivate(
         storage,
         txn.request.prepared_identity,
         &lease,
+        poison_capture,
     ) catch |err| {
         publication.finish(node, null);
         if (lease.wireProgress() != null) {
@@ -6494,6 +6557,7 @@ fn executePreparedRpcPrivate(
             response_allocator,
             &publication,
             &payload_cleanup,
+            poison_capture,
         );
         lease_active = false;
         return;
@@ -6518,6 +6582,7 @@ fn publishPreparedRpcResponse(
     response_allocator: std.mem.Allocator,
     publication: *PreparedRpcPublicationScope,
     payload_cleanup: *RpcPublicationPayloadCleanup,
+    poison_capture: ?*incident_publication_contract.PreparedExecutionPoisonCapture,
 ) !void {
     const response = node.client.readPreparedResponseUnderExecutionLease(
         lease,
@@ -6549,6 +6614,27 @@ fn publishPreparedRpcResponse(
             const outcome = txn.settleRecoveredTerminal(operation, reason) catch
                 failStopRpcPublication(node, payload_cleanup, .ledger_drift);
             txn.request.finishOrFailStop(operation, outcome);
+            if (poison_capture) |capture| {
+                if (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
+                    capture.operation_id != operation.operation_id or capture.client_addr != @intFromPtr(&node.client) or
+                    capture.lease_addr != @intFromPtr(lease) or capture.reason_raw != @intFromEnum(reason))
+                    failStopRpcPublication(node, payload_cleanup, .ledger_drift);
+                const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
+                const prepared: *incident_publication_contract.PreparedManagedPoison =
+                    @ptrFromInt(capture.prepared_addr);
+                prepareManagedPoisonRequestPinned(
+                    slot,
+                    node,
+                    capture.timestamp_ns,
+                    .{
+                        .reason_raw = capture.reason_raw,
+                        .source_site_raw = capture.source_site_raw,
+                        .controller_generation = capture.controller_generation,
+                    },
+                    prepared,
+                ) catch failStopRpcPublication(node, payload_cleanup, .ledger_drift);
+                capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.finalized);
+            }
             return err;
         },
         error.PayloadProvenanceRejected, error.InvalidPreparedRpc => failStopRpcPublication(
@@ -6712,6 +6798,7 @@ fn executePreparedRpcTerminalSink(
         .{ .test_explicit = destination },
         .terminal_sink,
         test_failure,
+        null,
     );
 }
 
@@ -6726,6 +6813,7 @@ fn executePreparedRpcCorrelatedResponseForTest(
         .{ .test_explicit = destination },
         .correlated_response,
         .none,
+        null,
     );
 }
 
@@ -6739,6 +6827,7 @@ pub fn executeGenerationRpcSubstrate(execution: GenerationRpcSubstrateExecute) G
         .{ .canonical = {} },
         .correlated_response,
         .none,
+        null,
     ) catch |err| {
         return switch (err) {
             error.CapacityExhausted,
@@ -6779,6 +6868,7 @@ pub fn executeGenerationRpcDecoded(
         .{ .canonical = {} },
         .correlated_response,
         .none,
+        execution.poison_capture,
     ) catch |err| {
         return switch (err) {
             error.CapacityExhausted,

@@ -15,7 +15,7 @@ test "2c3e C2 경계는 열두 제품 RPC family를 typed decoder 경로로만 �
         constructor: []const u8,
         call: []const u8,
     }{
-        .{ .start = "pub fn resize(", .end = "const ResizeDecodeContext", .constructor = "RuntimeRequest.resize(", .call = "self.attachment.callDecoded(" },
+        .{ .start = "pub fn resize(", .end = "const ResizeDecodeContext", .constructor = "RuntimeRequest.resize(", .call = "self.executeDecodedWithManagedPoison(" },
         .{ .start = "pub fn refreshObservation(", .end = "fn applyObservationResponse(", .constructor = "RuntimeRequest.observation()", .call = "self.callDecoded(" },
         .{ .start = "pub fn selectedText(", .end = "fn applySelectedTextResponse(", .constructor = "RuntimeRequest.selectedText(", .call = "self.callDecoded(" },
         .{ .start = "pub fn linkAt(", .end = "fn applyLinkAtResponse(", .constructor = "RuntimeRequest.linkAt(", .call = "self.callDecoded(" },

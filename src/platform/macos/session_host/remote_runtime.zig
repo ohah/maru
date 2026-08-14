@@ -42,6 +42,9 @@ const runtime_event_prepared_types_mod = @import("runtime_event_prepared_types.z
 const runtime_observation_digest_mod = @import("runtime_observation_digest.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+const app_process_incident_owner = @import("app_process_incident_owner.zig");
+const incident_publication_contract = maru.observability.incident_publication_contract;
+const connection_incident = @import("maru").observability.connection_incident;
 const host_manifest_mod = @import("host_manifest.zig");
 const client_poison_mod = @import("client_poison.zig");
 
@@ -257,6 +260,7 @@ const RuntimeAttachment = union(enum) {
         legacy_params_json: ?[]const u8,
         context: *anyopaque,
         decoder: generation_contract.RpcDecoder,
+        poison_capture: ?client_slot_mod.PreparedExecutionPoisonCaptureRequest,
     ) client_mod.ClientError!generation_contract.RpcDecodeDisposition {
         if (!generation_contract.runtimeRequestTagRawValid(@ptrCast(&request.tag)))
             return error.ProtocolError;
@@ -288,6 +292,7 @@ const RuntimeAttachment = union(enum) {
                 decoder,
                 self,
                 preDecodeBufferedEvents,
+                poison_capture,
             ) catch |err| {
                 if (self.statePtr().role == .observer) return error.Unauthorized;
                 return mapGenerationDecodedError(err);
@@ -1511,8 +1516,7 @@ pub const RemoteRuntime = struct {
             .output = output,
             .apply = apply,
         };
-        const disposition = try self.attachment.callDecoded(
-            self.legacyConnectionOrNull(),
+        const disposition = try self.executeDecodedWithManagedPoison(
             request,
             legacy_method,
             legacy_params_json,
@@ -1521,6 +1525,63 @@ pub const RemoteRuntime = struct {
         );
         if (context.decode_error) |err| return err;
         if (disposition != .reusable) return error.ProtocolError;
+    }
+
+    /// Every generation prepared-execution caller crosses this owner once. Timestamp authority is
+    /// acquired before ClientSlot enters the registered operation; publication runs only after the
+    /// attachment call has unwound that operation.
+    fn executeDecodedWithManagedPoison(
+        self: *RemoteRuntime,
+        request: generation_contract.RuntimeRequest,
+        legacy_method: []const u8,
+        legacy_params_json: ?[]const u8,
+        context: *anyopaque,
+        decoder: generation_contract.RpcDecoder,
+    ) client_mod.ClientError!generation_contract.RpcDecodeDisposition {
+        var poison_capture: incident_publication_contract.PreparedExecutionPoisonCapture = .{};
+        var prepared_poison: incident_publication_contract.PreparedManagedPoison = .{};
+        var timestamp_receipt: ?app_process_incident_owner.PublicationTimestampReceipt = null;
+        const poison_request: ?client_slot_mod.PreparedExecutionPoisonCaptureRequest = switch (self.connection) {
+            .legacy => null,
+            .generation => blk: {
+                const receipt = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+                    if (builtin.is_test and err == error.InvalidOwner) break :blk null;
+                    return error.ProtocolError;
+                };
+                timestamp_receipt = receipt;
+                break :blk .{
+                    .timestamp_ns = receipt.timestamp_ns,
+                    .controller_generation = self.attachment.statePtr().controller_generation,
+                    .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+                    .capture_addr = @intFromPtr(&poison_capture),
+                    .prepared_addr = @intFromPtr(&prepared_poison),
+                };
+            },
+        };
+        const disposition = self.attachment.callDecoded(
+            self.legacyConnectionOrNull(),
+            request,
+            legacy_method,
+            legacy_params_json,
+            context,
+            decoder,
+            poison_request,
+        ) catch |err| {
+            if (prepared_poison.lifecycle_raw ==
+                @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared))
+            {
+                const adapter = self.generationConnection() orelse return error.ProtocolError;
+                _ = app_process_incident_owner.publishPreparedManagedPoison(
+                    adapter,
+                    &prepared_poison,
+                    timestamp_receipt orelse return error.ProtocolError,
+                ) catch return error.ProtocolError;
+            } else if (!std.meta.eql(prepared_poison, incident_publication_contract.PreparedManagedPoison{})) {
+                return error.ProtocolError;
+            }
+            return err;
+        };
+        return disposition;
     }
 
     fn discardQueuedMutations(self: *RemoteRuntime) void {
@@ -1583,8 +1644,7 @@ pub const RemoteRuntime = struct {
             .client_sequence = self.resize_seq,
         };
         try self.flushQueuedInputBlocking();
-        const disposition = self.attachment.callDecoded(
-            self.legacyConnectionOrNull(),
+        const disposition = self.executeDecodedWithManagedPoison(
             generation_contract.RuntimeRequest.resize(.{
                 .cols = cols,
                 .rows = rows,
@@ -6634,6 +6694,13 @@ fn initGenerationRuntimeAggregateFixture(
 ) !void {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     try host_adapter_mod.HostAdapter.initInPlace(adapter, testing.allocator, client);
+    try initGenerationRuntimeForAdapter(runtime, adapter);
+}
+
+fn initGenerationRuntimeForAdapter(
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+) !void {
     runtime.connection = .{ .generation = adapter };
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -6665,11 +6732,120 @@ fn deinitGenerationRuntimeAggregateFixture(
     runtime: *RemoteRuntime,
     adapter: *host_adapter_mod.HostAdapter,
 ) void {
+    deinitGenerationRuntimeForAdapter(runtime);
+    adapter.deinit();
+}
+
+fn deinitGenerationRuntimeForAdapter(runtime: *RemoteRuntime) void {
     runtime.observation.deinit(testing.allocator);
     runtime.direct_input.deinit(testing.allocator);
     runtime.pending_controls.deinit(testing.allocator);
     runtime.attachment.deinitWithConnection(runtime.connection);
-    adapter.deinit();
+}
+
+test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC002);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const Peer = struct {
+        fn run(fd: c.fd_t) void {
+            defer _ = c.close(fd);
+            const request_frame = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request_frame.payload);
+        }
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{fds[1]});
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC003,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    runtime.pump_ended = false;
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+    const Apply = struct {
+        fn apply(_: *RemoteRuntime, _: *anyopaque, _: []const u8) client_mod.ClientError!void {}
+    };
+    var output: u8 = 0;
+    try testing.expectError(
+        error.ConnectionClosed,
+        runtime.callDecodedAfterFlush(
+            generation_contract.RuntimeRequest.observation(),
+            generation_contract.requestMethod(.observation),
+            null,
+            &output,
+            Apply.apply,
+        ),
+    );
+    peer.join();
+
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expect(pre_publication.client_was_usable);
+    try testing.expectEqual(fds[0], pre_publication.fd);
+    try testing.expect(!pre_publication.pending_outbound_present);
+    try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
+    try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.connection_eof, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
+    try testing.expect(!std.mem.eql(
+        u8,
+        &published.incident_repeat_key.fingerprint,
+        &([_]u8{0} ** 32),
+    ));
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
 }
 
 fn deinitGenerationAttachmentFixture(

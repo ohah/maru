@@ -853,6 +853,7 @@ pub fn executePreparedRequestWithDecoderOwned(
     decoder: contract.RpcDecoder,
     pre_decode_owner: *anyopaque,
     pre_decode: contract.RpcPreDecode,
+    poison_capture: ?client_slot_mod.PreparedExecutionPoisonCaptureRequest,
 ) Error!contract.RpcDecodeDisposition {
     if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
         transport.owner_addr != attachment_owner_addr)
@@ -864,6 +865,7 @@ pub fn executePreparedRequestWithDecoderOwned(
         .decoder = decoder,
         .pre_decode_context = pre_decode_owner,
         .pre_decode = pre_decode,
+        .poison_capture = poison_capture,
     }) catch |err| return mapGenerationExecuteToLegacyError(err);
 }
 
@@ -1809,6 +1811,7 @@ fn runScopedDecoderSocket(case: ScopedDecoderSocketCase) !void {
         Decoder.decode,
         &decoder,
         acceptBufferedPreDecode,
+        null,
     );
     peer.join();
     try std.testing.expect(peer_complete);

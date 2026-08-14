@@ -1097,6 +1097,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   corruption을 operation-bound caller-final capture에만 기록한다. Client first reason·fd·ring·admission은 operation 반환까지 0이며,
   `RemoteRuntime` 제품 drain이 반환된 pointer-free handoff를 같은 publication port에 exact 1회 제출해 canonical first incident,
   terminal fd close와 reconnect admission을 게시한다. event transport/attachment에는 publisher pointer를 저장하지 않는다.
+  caller 4 gate는 actual generation RPC response allocation의 checked allocator callback이 active prepared-execution lease 아래
+  `Client.poison(.local_resource_exhausted)`을 호출하는 제품 trigger를 실행한다. callback은 public mutation fence나 coordinator를
+  재진입하지 않고 caller 2의 sealed stack capture에 reason과 `SourceSite.client_cleanup`만 한 번 기록하며, callback 중 Client
+  first reason·usable/fd와 ring/pending/admission은 그대로다. response allocation failure의 일반 cleanup이 같은 reason을 다시
+  관측해도 최초 allocator source를 보존하고, registered operation release 뒤 기존 publication port가 canonical first incident,
+  terminal fd close와 reconnect admission을 exact 1회 게시한다. allocator와 attachment/runtime에는 publisher pointer를 저장하지 않는다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect

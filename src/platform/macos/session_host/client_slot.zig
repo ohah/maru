@@ -2096,6 +2096,7 @@ pub const PreparedExecutionPoisonCaptureRequest = struct {
     timestamp_ns: i128,
     controller_generation: u64,
     source_site_raw: u8,
+    allocator_source_site_raw: u8,
     capture_addr: usize,
     prepared_addr: usize,
 };
@@ -6421,6 +6422,8 @@ fn executePreparedRpcPrivate(
     const poison_capture: ?*incident_publication_contract.PreparedExecutionPoisonCapture = if (poison_request) |capture_request| blk: {
         if (capture_request.timestamp_ns < 0 or capture_request.controller_generation == 0 or
             std.enums.fromInt(connection_incident.SourceSite, capture_request.source_site_raw) == null or
+            std.enums.fromInt(connection_incident.SourceSite, capture_request.allocator_source_site_raw) == null or
+            capture_request.source_site_raw == capture_request.allocator_source_site_raw or
             capture_request.capture_addr == 0 or capture_request.prepared_addr == 0)
             return error.InvalidOwner;
         const capture: *incident_publication_contract.PreparedExecutionPoisonCapture =
@@ -6443,6 +6446,7 @@ fn executePreparedRpcPrivate(
             .timestamp_ns = capture_request.timestamp_ns,
             .controller_generation = capture_request.controller_generation,
             .source_site_raw = capture_request.source_site_raw,
+            .allocator_source_site_raw = capture_request.allocator_source_site_raw,
             .lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed),
         };
         break :blk capture;
@@ -6640,7 +6644,9 @@ fn publishPreparedRpcResponse(
             if (poison_capture) |capture| {
                 if (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
                     capture.operation_id != operation.operation_id or capture.client_addr != @intFromPtr(&node.client) or
-                    capture.lease_addr != @intFromPtr(lease) or capture.reason_raw != @intFromEnum(reason))
+                    capture.lease_addr != @intFromPtr(lease) or capture.reason_raw != @intFromEnum(reason) or
+                    std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null or
+                    capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw)
                     failStopRpcPublication(node, payload_cleanup, .ledger_drift);
                 const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
                 const prepared: *incident_publication_contract.PreparedManagedPoison =

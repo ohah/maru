@@ -1553,6 +1553,7 @@ pub const RemoteRuntime = struct {
                     .timestamp_ns = receipt.timestamp_ns,
                     .controller_generation = self.attachment.statePtr().controller_generation,
                     .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+                    .allocator_source_site_raw = @intFromEnum(connection_incident.SourceSite.client_cleanup),
                     .capture_addr = @intFromPtr(&poison_capture),
                     .prepared_addr = @intFromPtr(&prepared_poison),
                 };
@@ -6885,6 +6886,221 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
         &published.incident_repeat_key.fingerprint,
         &([_]u8{0} ** 32),
     ));
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+}
+
+test "CR0b allocator callback deferred poison은 canonical suffix를 호출한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    const PoisoningAllocator = struct {
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        parent: std.mem.Allocator,
+        client: ?*client_mod.Client = null,
+        armed: std.atomic.Value(bool) = .init(false),
+        fired: bool = false,
+        first_reason_absent: bool = false,
+        client_was_usable: bool = false,
+        fd_unchanged: bool = false,
+        expected_fd: c.fd_t = -1,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        fn inject(self: *@This()) bool {
+            if (!self.armed.swap(false, .acq_rel)) return false;
+            const client = self.client orelse return false;
+            if (!client_mod.generationAllocatorCallbackActive()) return false;
+            client.poison(.local_resource_exhausted);
+            self.fired = true;
+            self.first_reason_absent = client.first_poison_reason == null;
+            self.client_was_usable = !client.unusable;
+            self.fd_unchanged = client.fd == self.expected_fd;
+            return true;
+        }
+
+        fn alloc(
+            context: *anyopaque,
+            len: usize,
+            alignment: std.mem.Alignment,
+            return_address: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.inject()) return null;
+            return self.parent.vtable.alloc(self.parent.ptr, len, alignment, return_address);
+        }
+
+        fn resize(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            return_address: usize,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.inject()) return false;
+            return self.parent.vtable.resize(
+                self.parent.ptr,
+                memory,
+                alignment,
+                new_len,
+                return_address,
+            );
+        }
+
+        fn remap(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            return_address: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.inject()) return null;
+            return self.parent.vtable.remap(
+                self.parent.ptr,
+                memory,
+                alignment,
+                new_len,
+                return_address,
+            );
+        }
+
+        fn free(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            return_address: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
+        }
+    };
+
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC022);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var poison_allocator: PoisoningAllocator = .{ .parent = testing.allocator };
+    const Peer = struct {
+        fn run(fd: c.fd_t, armed: *std.atomic.Value(bool)) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                "{\"result\":{\"metadata_revision\":1,\"metadata\":{\"cwd\":\"/tmp\",\"window_title\":\"allocator\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}}",
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            armed.store(true, .release);
+            socket_server.writeAll(fd, response) catch return;
+        }
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], &poison_allocator.armed });
+    var peer_joined = false;
+    defer if (!peer_joined) peer.join();
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = poison_allocator.allocator(),
+        .fd = fds[0],
+        .host_id = 0xC023,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(poison_allocator.allocator()),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    runtime.pump_ended = false;
+    poison_allocator.client = runtime.testingClient();
+    poison_allocator.expected_fd = fds[0];
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+    const Apply = struct {
+        fn apply(_: *RemoteRuntime, _: *anyopaque, _: []const u8) client_mod.ClientError!void {}
+    };
+    var output: u8 = 0;
+    try testing.expectError(
+        error.OutOfMemory,
+        runtime.callDecodedAfterFlush(
+            generation_contract.RuntimeRequest.observation(),
+            generation_contract.requestMethod(.observation),
+            null,
+            &output,
+            Apply.apply,
+        ),
+    );
+    peer.join();
+    peer_joined = true;
+
+    try testing.expect(poison_allocator.fired);
+    try testing.expect(poison_allocator.first_reason_absent);
+    try testing.expect(poison_allocator.client_was_usable);
+    try testing.expect(poison_allocator.fd_unchanged);
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expect(pre_publication.client_was_usable);
+    try testing.expectEqual(fds[0], pre_publication.fd);
+    try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
+    try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.SourceSite.client_cleanup),
+        pre_publication.source_site_raw,
+    );
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.local_resource_exhausted, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
     try testing.expect(published.unusable);
     try testing.expectEqual(@as(c.fd_t, -1), published.fd);
     try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);

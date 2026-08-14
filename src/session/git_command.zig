@@ -19,7 +19,12 @@ const std = @import("std");
 pub const Kind = enum {
     /// 네 섹션의 상태 문자 + 브랜치/upstream/ahead·behind를 **한 번에**. `--branch` 덕에 rev-list가 따로 필요 없다.
     status,
-    /// 스테이지된 변경의 +N -N (`HEAD ↔ index`).
+    /// **목록 행의 +N -N** (`HEAD ↔ 작업트리`). 2판은 파일 하나가 한 행이고 그 행의 기본 비교가 HEAD 기준이므로
+    /// 증감도 같은 범위여야 한다 — index 기준 숫자를 쓰면 화면의 `+3 -1`과 눌러서 열리는 diff의 줄 수가 다르다
+    /// (docs/editor-surface-dock.md §3.5.2). **unborn(첫 커밋 전)에서는 실패한다** — HEAD가 없다. 그건 오류가 아니라
+    /// 그 상태의 정상이고, 호출자가 `numstat_staged`를 대신 쓴다(그때는 추적된 파일이 전부 index에 새로 올라간 것이다).
+    numstat_head,
+    /// 스테이지된 변경의 +N -N (`HEAD ↔ index`). unborn 폴백이자, 컨텍스트 메뉴의 스테이지 쪽 비교가 쓴다.
     numstat_staged,
     /// 아직 스테이지되지 않은 변경의 +N -N (`index ↔ worktree`).
     numstat_worktree,
@@ -193,7 +198,7 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "--renames";
             n += 1;
         },
-        .numstat_staged, .numstat_worktree => {
+        .numstat_head, .numstat_staged, .numstat_worktree => {
             buf[n] = "diff";
             n += 1;
             buf[n] = "--numstat";
@@ -207,6 +212,16 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             if (kind == .numstat_staged) {
                 buf[n] = "--cached";
+                n += 1;
+            }
+            if (kind == .numstat_head) {
+                buf[n] = "HEAD";
+                n += 1;
+                // **`--`가 반드시 붙는다**(2026-08-14 실측). 저장소에 `HEAD`라는 이름의 **파일**이 있으면 git이
+                // `fatal: ambiguous argument 'HEAD': both revision and filename`으로 exit 128을 낸다 — 목록 전체가
+                // 증감을 잃는다. `--`는 "앞은 rev, 뒤는 경로"를 못박으므로 그 저장소에서도 정상 출력이 나온다
+                // (실측: 같은 저장소에서 `--` 없이 128, 붙이면 `1\t0\tx.txt`).
+                buf[n] = "--";
                 n += 1;
             }
         },
@@ -341,6 +356,24 @@ test "numstat은 staged/worktree를 --cached로만 가른다" {
     const worktree = build(.numstat_worktree, "/usr/bin/git", "/repo", null, &buf2);
     try testing.expect(has(worktree, "--numstat") and !has(worktree, "--cached"));
     try testing.expect(has(worktree, "--find-renames"));
+}
+
+test "numstat_head는 HEAD 뒤에 `--`를 붙인다(HEAD라는 이름의 파일이 있는 저장소)" {
+    // 실측(2026-08-14): `HEAD`라는 **파일**이 있는 저장소에서 `git diff --numstat HEAD`는
+    // `fatal: ambiguous argument 'HEAD': both revision and filename`으로 exit 128을 낸다 — 목록 전체가 증감을
+    // 잃는다. `--`를 붙이면 같은 저장소에서 정상 출력이 나온다. 순서도 계약이다: rev가 `--`보다 **앞**이다.
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.numstat_head, "/usr/bin/git", "/repo", null, &buf);
+    try testing.expect(has(argv, "--numstat") and !has(argv, "--cached"));
+    var head_at: ?usize = null;
+    var dashdash_at: ?usize = null;
+    for (argv, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "HEAD")) head_at = i;
+        if (std.mem.eql(u8, a, "--")) dashdash_at = i;
+    }
+    try testing.expect(head_at != null and dashdash_at != null);
+    try testing.expect(head_at.? < dashdash_at.?);
+    try testing.expectEqual(argv.len - 1, dashdash_at.?); // `--`가 마지막이라 경로 인자가 붙지 않는다
 }
 
 test "모든 명령이 외부 프로세스 실행 경로를 닫는다" {

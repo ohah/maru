@@ -1,6 +1,6 @@
 //! `git status --porcelain=v2 --branch`와 `git diff --numstat` 출력의 **순수 파서**(L2, I/O 없음).
 //!
-//! 도크 소스 컨트롤 뷰(docs/editor-surface-dock.md §3.5)가 그리는 네 섹션과 행의 데이터가 전부 여기서 나온다. git 실행은
+//! 도크 소스 컨트롤 뷰(docs/editor-surface-dock.md §3.5)가 그리는 섹션과 행의 데이터가 전부 여기서 나온다. git 실행은
 //! platform adapter가 하고 이 모듈은 **바이트만** 본다 — 그래야 헤드리스로 전수 검증이 되고, 파싱 실수가 프로세스
 //! 실행 코드와 섞이지 않는다.
 //!
@@ -8,7 +8,8 @@
 //! 같은 규율). 목록이 커도 파서가 메모리를 늘리지 않으므로 상한은 호출자가 읽어 온 바이트로 이미 정해져 있다.
 //!
 //! **베이스**: git의 `--porcelain=v2` 포맷(git 공식 문서 `git-status(1)` "Porcelain Format Version 2")과 `--numstat`.
-//! v1이 아니라 v2를 쓰는 이유는 ⑴ staged/worktree 상태가 `XY` 두 칸으로 분리돼 섹션을 뭉개지 않아도 되고,
+//! v1이 아니라 v2를 쓰는 이유는 ⑴ staged/worktree 상태가 `XY` 두 칸으로 분리돼 **두 축을 뭉개지 않아도 되고**
+//!    (2판의 체크박스 3-상태가 바로 그 두 축이다 — 하나로 접힌 v1으로는 '일부만 스테이지'를 말할 수 없다),
 //! ⑵ rename의 원래 경로가 같은 줄에 오며, ⑶ `--branch`가 ahead/behind를 함께 준다(별도 rev-list 호출이 필요 없다).
 
 const std = @import("std");
@@ -70,28 +71,18 @@ pub const Entry = struct {
         return self.staged == .unmerged or self.worktree == .unmerged;
     }
 
-    /// "스테이지된 변경" 섹션에 드는가. **충돌은 여기 들지 않는다** — 스테이지된 것이 아니라 해결되지 않은
-    /// 상태이고, 양쪽 섹션에 같은 파일을 두 번 띄우면 "일부만 스테이지한 파일"(MM)과 구분되지 않는다.
-    pub fn isStaged(self: Entry) bool {
-        if (self.isConflicted()) return false;
-        return self.staged != .unchanged and self.staged != .untracked;
-    }
-
-    /// "변경 사항"(index↔worktree) 섹션에 드는가. **한 파일이 두 섹션에 동시에 들 수 있다**(`MM`) — git이 그렇게
-    /// 보고하고, 사용자도 "일부만 스테이지한 파일"을 양쪽에서 봐야 하므로 여기서 하나로 접지 않는다.
-    /// 충돌은 이 섹션에만 든다(해결해야 하는 작업트리 상태다).
-    pub fn isUnstaged(self: Entry) bool {
-        if (self.isConflicted()) return true;
-        return self.worktree != .unchanged and self.worktree != .untracked;
-    }
+    // **`isStaged`/`isUnstaged`는 2판에서 삭제했다**(2026-08-14). 그 둘은 "행이 어느 섹션에 드는가"를 답하던
+    // 술어인데, 2판은 섹션이 추적 여부만 가르고 스테이지 여부는 행의 체크박스 상태다
+    // (docs/editor-surface-dock.md §3.5.2). 판정의 단일 출처는 `scm_view.stageOf` 하나여야 한다 — 남겨 두면
+    // "스테이지됨"의 정의가 둘이 되고, 한쪽만 고쳐지는 순간 목록과 체크박스가 다른 말을 한다.
 
     pub fn isUntracked(self: Entry) bool {
         return self.worktree == .untracked;
     }
 };
 
-/// `# branch.*` 헤더. upstream이 없으면 `upstream`/`ahead`/`behind`가 비고, 그때는 "브랜치에 COMMIT 됨" 섹션을
-/// 계산할 기준이 없다(docs/editor-surface-dock.md §3.5 — 그 섹션만 숨긴다).
+/// `# branch.*` 헤더. upstream이 없으면 `upstream`/`ahead`/`behind`가 비고, 그때는 브랜치 줄이 ahead/behind 자리를
+/// 비운다(docs/editor-surface-dock.md §3.5 — 오류가 아니다).
 pub const Head = struct {
     branch: ?[]const u8 = null,
     upstream: ?[]const u8 = null,
@@ -100,6 +91,11 @@ pub const Head = struct {
     /// `# branch.head`가 `(detached)`면 참. 브랜치 이름 자리에 그 문자열이 오므로 별도로 구분한다.
     detached: bool = false,
     has_ab: bool = false,
+    /// 첫 커밋 전(`# branch.oid (initial)`). **HEAD가 없다** — 그래서 `git diff … HEAD`류가 exit 128로 실패한다.
+    /// 그건 오류가 아니라 그 상태의 정상이고, 호출자는 이 값을 보고 index 기준 명령으로 갈아탄다
+    /// (docs/editor-surface-dock.md §3.5.2). **"명령이 빈 출력을 냈다"로 대신 판정하면 안 된다** — 평범한
+    /// 저장소에서 그 명령이 실패해도 같은 빈 값이 되어, 다른 범위의 숫자를 HEAD 범위인 척 보여 준다.
+    unborn: bool = false,
 };
 
 pub fn parseHead(text: []const u8) Head {
@@ -109,7 +105,10 @@ pub fn parseHead(text: []const u8) Head {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (!std.mem.startsWith(u8, line, "# branch.")) continue;
         const rest = line["# branch.".len..];
-        if (std.mem.startsWith(u8, rest, "head ")) {
+        if (std.mem.startsWith(u8, rest, "oid ")) {
+            // 첫 커밋 전에는 git이 해시 자리에 `(initial)`을 적는다(실측).
+            head.unborn = std.mem.eql(u8, rest["oid ".len..], "(initial)");
+        } else if (std.mem.startsWith(u8, rest, "head ")) {
             const value = rest["head ".len..];
             if (std.mem.eql(u8, value, "(detached)")) {
                 head.detached = true;
@@ -286,19 +285,20 @@ const real_status =
     "2 R. N... 100644 100644 100644 587be6b4c3f93f93c489c0111bba5596147a26cb 587be6b4c3f93f93c489c0111bba5596147a26cb R100 renamed.txt\tgone.txt\n" ++
     "? untracked.txt\n";
 
-test "실측 porcelain v2: 네 종류 레코드를 섹션 축으로 가른다" {
+test "실측 porcelain v2: 네 종류 레코드를 두 축으로 가른다" {
     var it = iterate(real_status);
 
     const added = it.next().?;
     try testing.expectEqualStrings("blob.bin", added.path);
     try testing.expectEqual(Change.added, added.staged);
     try testing.expectEqual(Change.unchanged, added.worktree);
-    try testing.expect(added.isStaged() and !added.isUnstaged());
+    // 두 축을 **따로** 낸다는 것이 이 파서의 계약이다 — 어느 섹션에 드는지는 상위(scm_view)가 정한다.
 
-    // `MM` — **양쪽 섹션에 동시에 든다**(일부만 스테이지한 파일). 하나로 접지 않는 것이 계약이다.
+    // `MM` — 두 축이 **동시에** 변경이다(일부만 스테이지한 파일). 2판은 이걸 한 행의 부분 체크박스로 그린다.
     const both = it.next().?;
     try testing.expectEqualStrings("keep.txt", both.path);
-    try testing.expect(both.isStaged() and both.isUnstaged());
+    try testing.expectEqual(Change.modified, both.staged);
+    try testing.expectEqual(Change.modified, both.worktree);
 
     const renamed = it.next().?;
     try testing.expectEqualStrings("renamed.txt", renamed.path);
@@ -307,7 +307,8 @@ test "실측 porcelain v2: 네 종류 레코드를 섹션 축으로 가른다" {
 
     const untracked = it.next().?;
     try testing.expectEqualStrings("untracked.txt", untracked.path);
-    try testing.expect(untracked.isUntracked() and !untracked.isStaged());
+    try testing.expect(untracked.isUntracked());
+    try testing.expectEqual(Change.unchanged, untracked.staged);
 
     try testing.expect(it.next() == null);
 }
@@ -460,15 +461,15 @@ test "name-status: 잘린 줄은 건너뛴다(엉뚱한 경로를 만들지 않�
     try std.testing.expect(it.next() == null);
 }
 
-test "충돌은 변경 사항 섹션에만 들고, 하위 모듈은 표시된다(실측 출력)" {
+test "충돌은 두 축 모두 unmerged로 오고, 하위 모듈은 표시된다(실측 출력)" {
     // 실제 `git merge` 충돌과 `git submodule add`에서 뜬 출력을 그대로 쓴다.
     const conflict_line = "u UU N... 100644 100644 100644 100644 c0d0fb4 f563088 19ec3b0 f.txt\n";
     var it = iterate(conflict_line);
     const conflicted = it.next().?;
     try std.testing.expect(conflicted.isConflicted());
-    // 충돌은 "스테이지된 변경"이 아니다 — 스테이지된 게 아니라 해결되지 않은 상태다.
-    try std.testing.expect(!conflicted.isStaged());
-    try std.testing.expect(conflicted.isUnstaged());
+    // 충돌은 스테이지 여부의 문제가 아니라 **해결되지 않은 상태**라 두 축 모두 `unmerged`로 온다.
+    try std.testing.expectEqual(Change.unmerged, conflicted.staged);
+    try std.testing.expectEqual(Change.unmerged, conflicted.worktree);
     try std.testing.expect(!conflicted.isUntracked());
 
     const submodule_line = "1 AM S.M. 000000 160000 160000 0000000 0b4a6aa vendor\n";
@@ -487,4 +488,10 @@ test "unborn 저장소도 브랜치 이름을 읽는다(oid가 (initial))" {
     const head = parseHead("# branch.oid (initial)\n# branch.head main\n? a.txt\n");
     try std.testing.expectEqualStrings("main", head.branch.?);
     try std.testing.expect(!head.has_ab); // upstream이 없으니 ahead/behind도 없다
+    // **unborn을 값으로 말한다**: 이 상태에서는 `git diff … HEAD`가 실패하므로(실측 exit 128) 목록이 증감을
+    // index 기준 명령에서 얻어야 한다. "출력이 비었다"로 그 판단을 대신하면 평범한 저장소의 실패까지 같은
+    // 폴백을 타서, 다른 범위의 숫자를 HEAD 범위인 척 보여 준다.
+    try std.testing.expect(head.unborn);
+    // 커밋이 하나라도 있으면 그 자리에 해시가 온다 — 폴백을 타면 안 된다.
+    try std.testing.expect(!parseHead("# branch.oid 995e148\n# branch.head main\n").unborn);
 }

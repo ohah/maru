@@ -56143,6 +56143,9 @@ test "CR0b GUI multiple window와 adapter는 process owner를 재사용한다" {
 
 test "CR0b bootstrap 4 GUI child는 실제 bootstrap transcript를 게시한다" {
     if (!is_macos) return error.SkipZigTest;
+    // app_session root/import sentinel 3개와 이 named child 한 개를 담은
+    // bootstrap4 전용 artifact에서만 fresh-process transcript를 게시한다.
+    if (builtin.test_functions.len != 4) return;
     var directory = try AppSession.incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);

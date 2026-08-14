@@ -14,7 +14,9 @@ pub fn main(init: std.process.Init.Minimal) void {
         const arg: []const u8 = arg_z;
         if (std.mem.startsWith(u8, arg, "--")) continue;
         const target = if (index == 0) &maru_cr0b_gui_bootstrap_child_path else if (index == 1)
-            &maru_cr0b_daemon_bootstrap_child_path else std.process.exit(122);
+            &maru_cr0b_daemon_bootstrap_child_path
+        else
+            std.process.exit(122);
         const canonical = realpath(arg_z.ptr, target) orelse std.process.exit(122);
         const len = std.mem.len(canonical);
         if (len == 0 or len >= target.len or target[0] != '/') std.process.exit(122);

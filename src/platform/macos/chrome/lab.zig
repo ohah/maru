@@ -354,11 +354,15 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .inset_x_px = 4,
         .min_thumb_px = 24,
     };
-    const total_cols: u16 = @intCast((viewport_w -| scrollbar_metrics.gutterPx()) / cell_w_px);
+    // **제품과 같은 내용 여백을 쓴다**(`frame.content_inset_px`) — Lab이 안 쓰면 캡처가 제품보다
+    // 넓은 본문을 보여 주고, 포커스 테두리에 덮이는 경계를 예고하지 못한다.
+    const view_rect_full = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h });
+    const content_w = view_rect_full.w;
+    const total_cols: u16 = @intCast((content_w -| scrollbar_metrics.gutterPx()) / cell_w_px);
     // **남은 공간 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
     // 요구한 gutter(12px)보다 넓은 자투리가 생긴다 — 그것을 gutter에 포함하지 않으면 막대가 화면
     // 오른쪽 끝에서 어중간하게 떠 있다(실측 6px). 남은 폭을 그대로 주면 막대가 그 안에 가운데로 선다.
-    const scrollbar_gutter_px: u32 = viewport_w -| (@as(u32, total_cols) * cell_w_px);
+    const scrollbar_gutter_px: u32 = content_w -| (@as(u32, total_cols) * cell_w_px);
     // **호출자가 준 줄이 있으면 그것을 그린다**(`editor_real_file`) — 디스크에서 읽어 온 것이라
     // Lab이 픽스처로 흉내낼 수 없다.
     const lines: []const []const u8 = scenario.lines orelse switch (scenario.id) {
@@ -470,7 +474,8 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .visible_rows = @min(vp.rows, row_capacity),
         .wrap = wrap_on,
 
-        .rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px },
+        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px }),
+        .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px }, // 배경은 뷰 전체(§4.1b)
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .font_px = scenario.font_px,

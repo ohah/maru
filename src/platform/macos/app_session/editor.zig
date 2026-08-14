@@ -136,17 +136,22 @@ pub fn buildPaneOps(
 ) PaneFrame {
     // **스크롤바가 자리를 먹는다**(§4.1a) — 본문 위에 겹치면 오른쪽 끝 글자가 막대에 가려지고,
     // §3.8이 "보이는 것과 파일 내용이 달라지면 안 된다"를 요구하는 편집기에서 그것은 특히 나쁘다.
+    // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
+    // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
+    // (2026-08-14 실측). 열 수·스크롤바 gutter를 **이 사각으로** 계산해야 막대가 뷰 밖으로 안 밀린다.
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const metrics = chrome_scroll_area.ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     const cw: u32 = @max(cell_w_px, 1);
     const ch: u32 = @max(cell_h_px, 1);
     const total_cols: u16 = @intCast(@min(
-        (rect.w -| metrics.gutterPx()) / cw,
+        (inner.w -| metrics.gutterPx()) / cw,
         @as(u32, std.math.maxInt(u16)),
     ));
     // **남은 폭 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
     // 요구한 폭보다 넓은 자투리가 생긴다 — 그것을 포함하지 않으면 막대가 오른쪽 끝에서 뜬다.
-    const scrollbar_gutter_px: u32 = rect.w -| (@as(u32, total_cols) * cw);
-    const visible_rows: u16 = @intCast(@min(rect.h / ch, @as(u32, std.math.maxInt(u16))));
+    const scrollbar_gutter_px: u32 = inner.w -| (@as(u32, total_cols) * cw);
+    const visible_rows: u16 = @intCast(@min(inner.h / ch, @as(u32, std.math.maxInt(u16))));
 
     const w = chrome_editor.frame.build(.{
         .lines = lines,
@@ -154,7 +159,11 @@ pub fn buildPaneOps(
         .total_lines = lines.len,
         .visible_rows = visible_rows,
         .wrap = wrap,
-        .rect = rect,
+        .rect = inner,
+        // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
+        // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
+        // 그만큼 음수로 밀어 뷰 사각 전체를 덮는다(§4.1b).
+        .background_rect = .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .font_px = font_px,
@@ -232,6 +241,16 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **원점은 0,0이다.** 컴포넌트가 내는 좌표는 pane **상대**여야 한다 — 창 절대 좌표를 주면
     // `buildTextDrawList`가 셀 인덱스로 바꿀 때 pane 폭을 넘어 글자가 잘린다. 화면상의 자리는
     // 호출자의 `PanePlacement.origin_*`(= `PaneDraw.rect`)이 정한다.
+    // 여백은 **원점**에 건다(위 `buildPaneOps` 주석) — 셀 격자는 이 원점에서 시작한다.
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner: maru.session.SplitRect = .{
+        .x = rect.x + inset,
+        .y = rect.y + inset,
+        .w = rect.w -| inset * 2,
+        .h = rect.h -| inset * 2,
+    };
+    if (inner.w == 0 or inner.h == 0) return null;
+
     const pf = buildPaneOps(
         term.rt.editor_lines,
         term.rt.editor_first_line,
@@ -265,15 +284,15 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         self.allocator,
         &.{draws},
         &tokens,
-        rect.x,
-        rect.y,
+        inner.x,
+        inner.y,
         &self.gpu_quads,
         background_layer,
         workspace_ops.windowOpacityByte(self),
     );
 
-    const cols: u16 = @intCast(@min(rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
-    const rows: u16 = @intCast(@min(rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
+    const cols: u16 = @intCast(@min(inner.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
+    const rows: u16 = @intCast(@min(inner.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
     const dl = chrome_draw_lowering.buildTextDrawList(
         self.allocator,
         pf.ops,
@@ -290,7 +309,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} cells_grid={d}x{d} cells={d}",
         .{ rect.x, rect.y, rect.w, rect.h, term.rt.editor_lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
     );
-    return .{ .rect = rect, .dl = dl };
+    return .{ .rect = inner, .dl = dl }; // 원점 = 여백 안쪽(배경은 op이 음수로 덮는다)
 }
 
 /// N1: **편집기 Term** 하나를 만든다 — `createWebTerm`과 대칭이다(web-panel.md §6의 그 구조).
@@ -484,7 +503,7 @@ test "편집기 배경은 셀 패스 앞 층에 실린다 — 뒤 층이면 자�
     try testing.expect(drawn.dl.cells.len > 0);
 }
 
-test "편집기 본문 사각은 pane body다 — 탭 바는 빼고 창 padding은 빼지 않는다" {
+test "편집기 본문 사각은 pane body에서 내용 여백만 들어간다" {
     // **세 사각 중 하나를 고르는 판정이다.** leaf 전체를 쓰면 배경이 탭 바를 덮고, `grid`를 쓰면
     // 창 padding만큼 안쪽으로 들어가 pane 안에 쓰이지 않는 띠가 생긴다(사용자 결정: 편집기는 그
     // 여백을 쓰지 않는다). 그래서 `body`가 아닌 **둘 다**와 다름을 함께 못박는다 — 하나만 보면
@@ -498,15 +517,19 @@ test "편집기 본문 사각은 pane body다 — 탭 바는 빼고 창 padding�
     defer drawn.dl.deinit(allocator);
 
     const g = pane_ops.paneGeometry(fx.session, fx.leaf_rect);
-    // **대조군 먼저.** 셋이 서로 다른 픽스처라야 이 테스트가 무언가를 판정한다(픽스처는 바 높이와
-    // 0이 아닌 padding을 둘 다 세운다).
+    const inset = chrome_editor.frame.content_inset_px;
+    // **대조군 먼저.** `body`·`grid`·leaf가 서로 다른 픽스처라야 판정이 성립한다(픽스처는 바 높이와
+    // 0이 아닌 창 padding을 둘 다 세운다).
     try testing.expect(g.body.y != fx.leaf_rect.y); // 탭 바만큼 내려갔다
-    try testing.expect(g.body.x != g.grid.x or g.body.w != g.grid.w); // padding만큼 다르다
+    try testing.expect(g.body.x != g.grid.x or g.body.w != g.grid.w); // 창 padding만큼 다르다
 
-    try testing.expectEqual(g.body.x, drawn.rect.x);
-    try testing.expectEqual(g.body.y, drawn.rect.y);
-    try testing.expectEqual(g.body.w, drawn.rect.w);
-    try testing.expectEqual(g.body.h, drawn.rect.h);
+    // **`grid`가 아니라 `body`에서 출발한다**(창 padding 미적용) — 다만 내용은 뷰 자기 여백만큼
+    // 들어간다(포커스 테두리가 셀 위 층이라 첫 행을 덮는다). 그래서 셋 중 어느 것과도 같지 않다.
+    try testing.expectEqual(g.body.x + inset, drawn.rect.x);
+    try testing.expectEqual(g.body.y + inset, drawn.rect.y);
+    try testing.expectEqual(g.body.w - inset * 2, drawn.rect.w);
+    try testing.expectEqual(g.body.h - inset * 2, drawn.rect.h);
+    try testing.expect(drawn.rect.x != g.grid.x or drawn.rect.w != g.grid.w);
 }
 
 test "편집기 배경만 창 투명도를 따른다 — 스크롤바 알파는 그대로다" {
@@ -572,12 +595,15 @@ test "편집기 배경 quad와 글자 셀은 같은 자리에 선다 — origin�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
-    // 배경 quad(첫 op = surface.build)는 pane 사각을 그대로 덮는다(§4.1b "뷰포트 전체를 덮는다").
+    // **배경은 내용 사각이 아니라 pane body 전체를 덮는다**(§4.1b "뷰포트 전체를 덮는다") — 내용은
+    // 여백만큼 안쪽이므로 배경 quad는 그 여백만큼 **밖으로** 나가 있어야 한다. 둘이 같아지면
+    // 가장자리에 pane 배경이 비치는 띠가 생긴다.
+    const inset: f32 = @floatFromInt(chrome_editor.frame.content_inset_px);
     const bg = fx.session.gpu_quads.items[0];
-    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.x)), bg.x);
-    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.y)), bg.y);
-    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.w)), bg.w);
-    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.h)), bg.h);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.x)) - inset, bg.x);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.y)) - inset, bg.y);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.w)) + inset * 2, bg.w);
+    try testing.expectEqual(@as(f32, @floatFromInt(drawn.rect.h)) + inset * 2, bg.h);
 }
 
 test "편집기가 아닌 Term은 이 경로를 타지 않는다 — 터미널 pane을 덮어쓰지 않는다" {
@@ -661,9 +687,11 @@ test "스크롤바 gutter가 폭을 다 먹는 좁은 pane에서도 죽지 않�
 
     // **`body`는 padding을 빼지 않으므로 leaf 폭이 곧 본문 폭이다.** gutter(12px)보다 좁은 값을 직접 준다
     // — 예전엔 padding이 빼주던 몫에 기대고 있었고, 그 전제가 바뀌자 이 테스트가 즉시 빨간불이 됐다.
-    const narrow: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 10, .h = 300 };
+    // 내용 여백(사방 4px)을 뺀 뒤에도 0이 아니면서 gutter(12px)보다 좁아야 한다 → 10 + 8 = 18.
+    const narrow: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 18, .h = 300 };
     const body = pane_ops.paneGeometry(fx.session, narrow).body;
-    try testing.expect(body.w > 0 and body.w < 12); // 전제: 정말 gutter보다 좁다
+    const content_w = body.w - chrome_editor.frame.content_inset_px * 2;
+    try testing.expect(content_w > 0 and content_w < 12); // 전제: 정말 gutter보다 좁다
 
     fx.session.gpu_quads.clearRetainingCapacity();
     // **`if (…) |d|`로 감싸지 않는다.** null이면 조용히 통과하는 테스트가 되고, 그 순간 이 경계는
@@ -671,7 +699,7 @@ test "스크롤바 gutter가 폭을 다 먹는 좁은 pane에서도 죽지 않�
     // 정책이 "이 폭에서는 안 그린다"로 바뀌면 여기서 빨간불이 나야 사람이 그 결정을 마주한다.
     var drawn = appendPaneFrame(fx.session, narrow, fx.term) orelse return error.NarrowPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
-    try testing.expectEqual(body.w, drawn.rect.w);
+    try testing.expectEqual(content_w, drawn.rect.w);
     for (fx.session.gpu_quads.items) |q| {
         try testing.expect(q.w <= @as(f32, @floatFromInt(body.w)));
         try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(narrow.x + narrow.w)));
@@ -693,8 +721,9 @@ test "문서 끝을 넘긴 스크롤에서도 그리고 사각을 안 넘는다"
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
+    // 내용 사각은 body에서 여백만큼 안쪽이다(위 사각 테스트가 그 관계를 소유한다).
     const body = pane_ops.paneGeometry(fx.session, fx.leaf_rect).body;
-    try testing.expectEqual(body.w, drawn.rect.w);
+    try testing.expectEqual(body.w - chrome_editor.frame.content_inset_px * 2, drawn.rect.w);
     for (fx.session.gpu_quads.items) |q| {
         try testing.expect(q.x >= @as(f32, @floatFromInt(body.x)));
         try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(body.x + body.w)));

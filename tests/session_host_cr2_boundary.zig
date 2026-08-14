@@ -372,6 +372,41 @@ test "CR2d3 경계는 stable shell event cursor와 Window cursor 제거를 고�
     );
 }
 
+test "CR2d4 경계는 remote Window transfer 제거와 stable runtime parity를 고정한다" {
+    const allocator = std.testing.allocator;
+    const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "test \"CR2d4 마지막 workspace 이동과 source close는 stable input과 event cursor를 보존한다\"",
+        "test \"CR2d4 window merge는 옛 Window transfer 없이 stable runtime 상태만 보존한다\"",
+    }) |named_test| try std.testing.expectEqual(@as(usize, 1), count(app_session, named_test));
+
+    const transfer = between(
+        app_session,
+        "pub fn preparePendingPasteTransfer(",
+        "pub fn mergeSessionInto(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(transfer, "if (term.surface.remote != null) continue;"));
+    try std.testing.expectEqual(@as(usize, 1), count(transfer, "src.pending_pastes.get(term.surface.id)"));
+    try std.testing.expectEqual(@as(usize, 1), count(transfer, "dst.pending_pastes.get(term.surface.id)"));
+
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "try installCr2d4StableRuntime(&runtime, handle);"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "defer removeCr2d4StableRuntime(handle);"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "src.pending_pastes.get(term.surface.id) == null"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "dst.pending_pastes.get(term.surface.id) == null"));
+    const build_gate = between(
+        build,
+        "const session_host_cr2d4_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2d4\"},"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=5"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, source, start_marker) orelse return null;
     const tail = source[start..];

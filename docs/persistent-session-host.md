@@ -729,8 +729,10 @@ stable `RemoteRuntime.takeNotification`의 소비형 RPC가 소유하므로 별�
 `TermRuntime.last_bell_count|last_clipboard_*`는 제거하며 Window move/close는 cursor를 이동·초기화하지 않는다.
 inline cursor로 `RemoteRuntime`은 CR2d2 기준 Debug 32바이트, ReleaseFast 48바이트 증가하며 4,096-runtime 상한의
 추가 budget은 각각 128 KiB와 192 KiB다.
-CR2d3은 cursor owner와 single-runtime AppSession routing만 닫고, 실제 cross-Window move/close parity와 옛 transfer 제거는
-CR2d4가 소유한다.
+Cross-Window move/merge의 `PreparedPendingPasteTransfer`는 local Term의 caller-owned queue만 destination Window로
+옮긴다. remote Term의 input transcript와 event cursor는 stable `RemoteRuntime`이 이미 소유하므로 Window-local
+`pending_pastes` 복사본을 전송하지 않는다. 마지막 source Window를 닫아도 같은 runtime 주소·queued input·BEL/OSC52
+cursor가 destination에서 이어지며, 오래된 Window 복사본은 재생되지 않는다.
 
 reconnect sealing과 `PausedPaste` quarantine은 CR2e가 이 epoch/sequence transcript를 소비할 때 열고, CR2d1/2가
 원문을 별도 복제하거나 Window move를 구현하지 않는다. CR2d1 golden trace는 blocked remote wire에서

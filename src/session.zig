@@ -97,6 +97,7 @@ pub const editor = struct {
     pub const open = @import("session/editor/open.zig");
     /// N1.5: diff 본문의 줄 대응(§7 — git은 두 쪽 전문만 주고 대응은 여기서 만든다).
     pub const diff = @import("session/editor/diff.zig");
+    pub const diff_state = @import("session/editor/diff_state.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

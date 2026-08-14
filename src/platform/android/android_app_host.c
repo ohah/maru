@@ -1473,7 +1473,8 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
 // **경과 시간으로 정한다. vsync 를 세지 않는다.** 전에는 "한 번 걸러" 그렸는데, 그건 30Hz 가
 // 아니라 **패널 주사율의 절반**이다 — 90Hz 폰에서 45, 120Hz 에서 60 이 나온다. comfort 값을
 // 배터리·발열 때문에 골라 놓고 고주사율 기기에서 두 배로 그리고 있었다(에뮬레이터가 60Hz 라
-// 안 드러났다). `MARU_PACE` 의 PASS 창(25~42ms)도 120Hz 에서는 16.7ms 로 떨어져 실패한다.
+// 안 드러났다). `MARU_PACE` 의 PASS 창(`MARU_FRAME_PACE_MIN_MS`~`MAX_MS`)도 120Hz 에서는
+// 16.7ms 로 떨어져 실패한다 — 숫자는 헤더가 소유하므로 여기 다시 적지 않는다.
 static void frameCallback(int64_t frame_time_ns, void *data) {
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
     // 사용자에게 보인다. iOS 도 같은 값이다(`preferredFrameRateRange`). 데스크톱은 60 이라

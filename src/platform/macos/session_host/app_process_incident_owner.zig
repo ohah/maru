@@ -50,6 +50,9 @@ const PreparedPublicationSnapshot = struct {
     incident_count: u8 = 0,
     pending_slots: u128 = 0,
     reconnect_count: u8 = 0,
+    reason_raw: u8 = 0,
+    source_site_raw: u8 = 0,
+    controller_generation: u64 = 0,
 };
 
 const PublicationPortTestState = if (@import("builtin").is_test) struct {
@@ -192,6 +195,9 @@ pub fn publishPreparedManagedPoison(
                 .incident_count = owner.runtime.?.service.ring.incident_count,
                 .pending_slots = owner.runtime.?.service.pending_slots,
                 .reconnect_count = owner.reconnect_admissions.count,
+                .reason_raw = prepared.input.reason_raw,
+                .source_site_raw = prepared.input.source_site_raw,
+                .controller_generation = prepared.input.controller_generation,
             };
         }
     }

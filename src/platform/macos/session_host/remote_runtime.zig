@@ -1794,6 +1794,45 @@ pub const RemoteRuntime = struct {
         return self.drainGenerationObservationEventsWithHook(null);
     }
 
+    /// Event-take corruption is discovered while ClientSlot owns a registered operation. Capture
+    /// only the reason there, then publish through the process owner after `takeEvent` has unwound
+    /// the operation. This is the caller-3 product ingress; it never stores publisher pointers.
+    fn takeGenerationEventWithManagedPoison(
+        self: *RemoteRuntime,
+        generation: *generation_attachment_mod.GenerationAttachment,
+    ) @import("generation_transport.zig").EventError!@import("generation_transport.zig").EventTakeOutcome {
+        var capture: incident_publication_contract.RegisteredOperationPoisonCapture = .{};
+        var prepared: incident_publication_contract.PreparedManagedPoison = .{};
+        const timestamp = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+            if (builtin.is_test and err == error.InvalidOwner) return generation.takeEvent();
+            return error.Corrupt;
+        };
+        const outcome = generation.takeEventWithPoisonCapture(.{
+            .timestamp_ns = timestamp.timestamp_ns,
+            .controller_generation = self.attachment.statePtr().controller_generation,
+            .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_slot_operation),
+            .capture_addr = @intFromPtr(&capture),
+            .prepared_addr = @intFromPtr(&prepared),
+        }) catch |err| {
+            if (prepared.lifecycle_raw ==
+                @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared))
+            {
+                const adapter = self.generationConnection() orelse return error.Corrupt;
+                _ = app_process_incident_owner.publishPreparedManagedPoison(
+                    adapter,
+                    &prepared,
+                    timestamp,
+                ) catch return error.Corrupt;
+            } else if (!std.meta.eql(prepared, incident_publication_contract.PreparedManagedPoison{})) {
+                return error.Corrupt;
+            }
+            return err;
+        };
+        if (!std.meta.eql(prepared, incident_publication_contract.PreparedManagedPoison{}))
+            return error.Corrupt;
+        return outcome;
+    }
+
     fn drainGenerationObservationEventsWithHook(
         self: *RemoteRuntime,
         comptime hook: ?GenerationDrainHook,
@@ -1829,7 +1868,8 @@ pub const RemoteRuntime = struct {
                     _ = run(self, .after_purge_not_ended);
                 },
             }
-            switch (generation.takeEvent() catch |err| return mapGenerationEventError(err)) {
+            switch (self.takeGenerationEventWithManagedPoison(generation) catch |err|
+                return mapGenerationEventError(err)) {
                 .idle => return result,
                 .ended_pending => return error.AdminBusy,
                 .taken => {},
@@ -6827,6 +6867,15 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.SourceSite.client_response),
+        pre_publication.source_site_raw,
+    );
+    try testing.expectEqual(runtime.attachment.statePtr().controller_generation, pre_publication.controller_generation);
 
     const published = adapter.slot.logicalClientConst();
     try testing.expectEqual(client_poison.ConnectionReason.connection_eof, published.first_poison_reason.?);
@@ -6842,6 +6891,95 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     const admission = (try owner.reconnect_admissions.peek()).?;
     try testing.expectEqual(published.first_incident_id, admission.incident_id);
     try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+}
+
+test "CR0b registered operation deferred poison은 canonical suffix를 호출한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC012);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC013,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    try runtime.testingClient().bufferGenerationEventForTest(7, "{\"event\":\"snapshot.invalidated\"}");
+    client_slot_mod.registered_operation_poison_testing_api.armAfterValidation();
+    defer client_slot_mod.registered_operation_poison_testing_api.reset();
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+    try testing.expectError(error.ProtocolError, runtime.drainObservationEvents());
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expect(pre_publication.client_was_usable);
+    try testing.expectEqual(fds[0], pre_publication.fd);
+    try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
+    try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @intFromEnum(client_poison.ConnectionReason.local_invariant_violation),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.SourceSite.client_slot_operation),
+        pre_publication.source_site_raw,
+    );
+    try testing.expectEqual(runtime.attachment.statePtr().controller_generation, pre_publication.controller_generation);
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.local_invariant_violation, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+
     app_process_incident_owner.publication_port_testing_api.reset();
     const shutdown = try owner.shutdown();
     owner_settled = true;

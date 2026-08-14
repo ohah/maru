@@ -1093,6 +1093,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   동일한 canonical suffix를 exact 1회 사용해야 한다. `GenerationAttachment`·`RemoteRuntime`의 publisher/registry/runtime pointer 저장,
   managed product reason-only poison, operation 안 coordinator 재진입은 모두 0이다. actual socket EOF가 이 경로를 통과해 canonical
   first incident, terminal fd close와 reconnect admission을 게시하고 Debug·ReleaseFast exact 1로 실행한다.
+  caller 3 gate는 actual generation event take가 registered operation 진입 전에 같은 sealed timestamp receipt를 받고, validation 뒤
+  corruption을 operation-bound caller-final capture에만 기록한다. Client first reason·fd·ring·admission은 operation 반환까지 0이며,
+  `RemoteRuntime` 제품 drain이 반환된 pointer-free handoff를 같은 publication port에 exact 1회 제출해 canonical first incident,
+  terminal fd close와 reconnect admission을 게시한다. event transport/attachment에는 publisher pointer를 저장하지 않는다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect

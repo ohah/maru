@@ -67,7 +67,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         // C3-3b3 source tombstone과 phase receipt projection이 canonical EventOwner 참조 3개를 추가한다.
         .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 39, .top_level_test = 1 },
         // C3-3b3 tombstone owner API의 mutable owner 인자와 final validation의 const owner 인자가 각각 하나씩 추가된다.
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 27, .top_level_test = 17 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 28, .top_level_test = 17 },
         .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .product = 2, .top_level_test = 2 },
         // b2b3's dormant RemoteRuntime orchestration names the canonical source owner once.
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
@@ -76,7 +76,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         // 보수적 lexical inventory에는 builtin.is_test facade 2개와 product release consume 1개가 함께 잡힌다.
         .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 23, .mutable_test = 0, .const_product = 14, .const_test = 0 },
         // C3-3b3 tombstone owner API와 final validation이 canonical owner를 변경 가능 pointer로 각각 하나씩 받는다.
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 12, .mutable_test = 1, .const_product = 6, .const_test = 4 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 13, .mutable_test = 1, .const_product = 6, .const_test = 4 },
         .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .mutable_product = 0, .mutable_test = 0, .const_product = 1, .const_test = 1 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .mutable_product = 1, .mutable_test = 0, .const_product = 0, .const_test = 0 },
     });
@@ -97,7 +97,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "releaseEvent", 0);
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "dropBufferedStream", 0);
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "purgeEndedStream", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "takeEvent", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "takeGenerationEventWithManagedPoison", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "takeGenerationEventWithManagedPoison", "takeEventWithPoisonCapture", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "viewEvent", 0);
     try expectIdentifierCountInFunction(allocator, runtime, "settleAndCommitPreparedEvent", "settlePreparedEvent", 1);
     const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");

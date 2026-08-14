@@ -766,10 +766,10 @@ test "복사 버퍼가 모자라면 알린다" {
     bridge.maru_mobile_pointer(3, q.x, q.y, now());
 }
 
-// **`copy` 가 나타나도 다른 키는 안 움직인다.** 전부 flex 로 나눠 가지면 마지막 키가 30px
-// 밀리고(실측), 선택을 잡은 직후 그 자리를 누르면 옆 키가 눌린다. 키 폭은 고정이고 `copy` 만
-// 남는 자리를 쓴다.
-test "copy 가 나타나도 다른 키 자리는 그대로다" {
+// **선택이 생겨도 줄은 한 픽셀도 안 움직인다.** `copy` 는 늘 줄에 있고 쓸 수 있는지만 바뀐다
+// (흐리게 그린다) — 나타났다 사라지던 시절에는 나머지 키가 밀려, 선택을 잡은 직후 겨눈 자리를
+// 누르면 옆 키가 나갔다. `copy` 자신의 자리도 함께 본다.
+test "선택이 생겨도 키 자리는 그대로다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -777,6 +777,10 @@ test "copy 가 나타나도 다른 키 자리는 그대로다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     const before_first = bridge.maru_mobile_keybar_rect(0);
     const before_last = bridge.maru_mobile_keybar_rect(10);
+    // `copy` 는 맨 끝이다. 선택 전에도 **자리를 갖고 있어야** 한다 — 0 이면 줄에서 빠진 것이다.
+    const copy_i = bridge.maru_mobile_keybar_count() - 1;
+    const before_copy = bridge.maru_mobile_keybar_rect(copy_i);
+    try std.testing.expect(before_copy != 0);
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, q.x, q.y, now());
@@ -786,34 +790,16 @@ test "copy 가 나타나도 다른 키 자리는 그대로다" {
 
     try std.testing.expectEqual(before_first, bridge.maru_mobile_keybar_rect(0));
     try std.testing.expectEqual(before_last, bridge.maru_mobile_keybar_rect(10));
+    try std.testing.expectEqual(before_copy, bridge.maru_mobile_keybar_rect(copy_i));
     bridge.maru_mobile_pointer(3, q.x, q.y, now());
     bridge.maru_mobile_clear_error();
 }
 
-// 선택이 없으면 `copy` 는 **줄에서 빠진다** — 누를 수 없는 버튼이 계속 보이면 안 된다.
-// **`copy` 는 늘 줄에 있다**(계약이 바뀌었다). 예전에는 선택이 있을 때만 나타났는데, 나타났다
-// 사라지며 줄이 흔들리고 그 자리가 평소엔 죽은 공간이었다 — 이제 상시 표시하고 **쓸 수 없을 때는
-// 흐리게** 그린다(눌러도 아무 일이 없다). 개수가 안 흔들리는 것이 그 계약이다.
-test "copy 는 늘 줄에 있고 선택이 없으면 눌러도 아무 일이 없다" {
-    _ = bridge.maru_mobile_build(402, 874, now());
-    bridge.maru_mobile_scroll_to_bottom();
-    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
-    _ = bridge.maru_mobile_input("word here", 9);
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const without = bridge.maru_mobile_keybar_count();
-
-    // 선택을 잡아도 **개수가 안 변한다** — 자리가 고정이라 나머지 키가 안 밀린다.
-    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
-    holdPast(600);
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(without, bridge.maru_mobile_keybar_count());
-
-    bridge.maru_mobile_pointer(3, q.x, q.y, now());
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(without, bridge.maru_mobile_keybar_count());
-    bridge.maru_mobile_clear_error();
-}
+// **개수로 `copy` 상시 표시를 지키려던 테스트는 지웠다.** `maru_mobile_keybar_count` 가
+// 고정값이 되어 **무엇을 지워도 통과하는 테스트**였다(선택 전후로 같은 상수를 두 번 비교했다).
+// 자리가 안 흔들린다는 계약은 위 "선택이 생겨도 키 자리는 그대로다" 가 rect 로 지킨다 —
+// `copy` 자신의 rect 가 0 이 아닌 것까지 본다. **흐리게 그린다** 는 쪽은 ABI 로 안 보여서
+// 여기서 못 지킨다(판정자는 캡처다 — [검증 매트릭스](../docs/verification-matrix.md)).
 
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).

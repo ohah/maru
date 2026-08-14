@@ -345,7 +345,9 @@ pub const inventory = [_]Proof{
     // 하나와 호출부 한 줄이고 반사 접근과는 무관하다.
     // main 리베이스로 값이 다시 움직인다 — 이 원장이 예고한 그 충돌이다(위 두 항목의 CR0b 변경과 이 PR의
     // hostname 변경이 같은 파일을 건드렸다). 양쪽 사유 주석을 모두 남기고 값만 재계산했다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9675b77e1db0aee90c492aa1904bfc1df179ffe022ee677a0e05644e01b2caee" },
+    // CR0b caller2 publication port install/revoke와 owner-thread timestamp oracle이 추가됐다.
+    // Client 반사 owner count는 2 그대로이며 raw publisher pointer는 새로 저장하지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6b46c2e716b34ddfc75059a03f0b64705a3b4d2490a71ae3f1790881c1127375" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

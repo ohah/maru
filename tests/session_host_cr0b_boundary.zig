@@ -164,7 +164,41 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 4), count(gui_owner, "test \"CR0b GUI incident owner prerequisite는"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "test \"CR0b managed public poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publishManagedPoison("));
-    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "fn publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 2), count(gui_owner, "fn publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn installPublicationPort("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn revokePublicationPort("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn revokePublicationPortNoFail("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PublicationTimestampReceipt = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publicationTimestampReceipt("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const publication_port_testing_api = if (@import(\"builtin\").is_test) struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "const incident_publication_port = session_host.app_process_incident_owner;"));
+    try std.testing.expectEqual(@as(usize, 3), count(app_session, "incident_publication_port.publication_port_testing_api.driftSeal()"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.publication_port_testing_api.reset()"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_types, "pub const IncidentPublicationPortSealInput = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_types, "pub const IncidentPublicationTimestampSealInput = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "const incident_publication_port_domain = \"maru.incident-publication-port.v1\";"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "const incident_publication_timestamp_domain = \"maru.incident-publication-timestamp.v1\";"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "pub fn incidentPublicationPortSeal("));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "pub fn incidentPublicationTimestampSeal("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "process_seal.incidentPublicationPortSeal("));
+    // existing-owner 재검증 branch와 fresh bootstrap publication branch가 같은 function 안에서 각각 호출한다.
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.installPublicationPort(&app_process_incident_owner)"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "incident_publication_port.revokePublicationPortNoFail(&app_process_incident_owner)"));
+    inline for (.{
+        "installPublicationPort(",
+        "revokePublicationPort(",
+        "revokePublicationPortNoFail(",
+        "publishPreparedManagedPoison(",
+        "publicationTimestampReceipt(",
+    }) |port_api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            port_api,
+            "platform/macos/session_host/app_process_incident_owner.zig",
+            "platform/macos/app_session.zig",
+        ),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareManagedPoisonRequest("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn prepareManagedPoisonRequest("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "fn prepareManagedPoison("));
@@ -193,7 +227,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(
         // app-global storage와 owner testing facade만 macOS 전용 namespace를 직접 쓴다. ABI outcome은
         // Linux cross-compile 가능한 app_session 중립 enum이라 owner namespace를 참조하지 않는다.
-        @as(usize, 3),
+        @as(usize, 4),
         try countProductSourcesExcept(allocator, ".app_process_incident_owner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     // daemon의 한 acquire는 incident registry가 아니라 owner-lock lifetime lease다.

@@ -27,6 +27,181 @@ pub const TerminationOutcome = enum(u32) {
 
 const Lifecycle = enum(u8) { pristine = 0, ready = 1, closing = 2, closed = 3 };
 
+const PublicationPort = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    owner_addr: u64 = 0,
+    owner_thread: u64 = 0,
+    registry_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    app_instance_nonce: u128 = 0,
+    owner_lifecycle_raw: u8 = 0,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
+var publication_port: PublicationPort = .{};
+
+pub const PublicationTimestampReceipt = struct {
+    owner_addr: u64 = 0,
+    owner_thread: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    app_instance_nonce: u128 = 0,
+    timestamp_ns: i128 = -1,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
+fn lockPublicationPort() void {
+    while (!publication_port.mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn clearPublicationPortLocked() void {
+    publication_port.owner_addr = 0;
+    publication_port.owner_thread = 0;
+    publication_port.registry_addr = 0;
+    publication_port.pid = 0;
+    publication_port.process_nonce = 0;
+    publication_port.app_instance_nonce = 0;
+    publication_port.owner_lifecycle_raw = 0;
+    publication_port.seal = [_]u8{0} ** 32;
+}
+
+fn publicationPortSeal(port: *const PublicationPort) process_seal.CleanupSeal {
+    return process_seal.incidentPublicationPortSeal(port.pid, port.process_nonce, .{
+        .owner_addr = port.owner_addr,
+        .owner_thread = port.owner_thread,
+        .registry_addr = port.registry_addr,
+        .pid = port.pid,
+        .process_nonce = port.process_nonce,
+        .app_instance_nonce = port.app_instance_nonce,
+        .owner_lifecycle_raw = port.owner_lifecycle_raw,
+    }) catch process_seal.fatalIntegrity(.incident_authority);
+}
+
+fn publicationTimestampSeal(receipt: PublicationTimestampReceipt) process_seal.CleanupSeal {
+    return process_seal.incidentPublicationTimestampSeal(receipt.pid, receipt.process_nonce, .{
+        .owner_addr = receipt.owner_addr,
+        .owner_thread = receipt.owner_thread,
+        .pid = receipt.pid,
+        .process_nonce = receipt.process_nonce,
+        .app_instance_nonce = receipt.app_instance_nonce,
+        .timestamp_ns = receipt.timestamp_ns,
+    }) catch process_seal.fatalIntegrity(.incident_authority);
+}
+
+fn publicationTimestampReceiptValid(receipt: PublicationTimestampReceipt) bool {
+    lockPublicationPort();
+    defer publication_port.mutex.unlock();
+    if (publication_port.owner_addr == 0 or
+        publication_port.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId()))) return false;
+    const owner: *AppProcessIncidentOwner = @ptrFromInt(publication_port.owner_addr);
+    return owner.validReady() and publicationPortMatchesOwner(&publication_port, owner) and
+        receipt.owner_addr == publication_port.owner_addr and
+        receipt.owner_thread == publication_port.owner_thread and
+        receipt.pid == publication_port.pid and receipt.process_nonce == publication_port.process_nonce and
+        receipt.app_instance_nonce == publication_port.app_instance_nonce and receipt.timestamp_ns >= 0 and
+        std.crypto.timing_safe.eql(process_seal.CleanupSeal, receipt.seal, publicationTimestampSeal(receipt));
+}
+
+fn publicationPortMatchesOwner(port: *const PublicationPort, owner: *const AppProcessIncidentOwner) bool {
+    return port.owner_addr == @intFromPtr(owner) and
+        port.owner_thread == owner.owner_thread and
+        port.registry_addr == @intFromPtr(&owner.registry) and
+        port.pid == owner.pid and port.process_nonce == owner.process_nonce and
+        port.app_instance_nonce == owner.app_instance_nonce and
+        port.owner_lifecycle_raw == owner.lifecycle_raw and
+        std.crypto.timing_safe.eql(process_seal.CleanupSeal, port.seal, publicationPortSeal(port));
+}
+
+fn resolvePublicationPortOwner() ?*AppProcessIncidentOwner {
+    lockPublicationPort();
+    defer publication_port.mutex.unlock();
+    if (publication_port.owner_addr == 0 or publication_port.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())))
+        return null;
+    const owner: *AppProcessIncidentOwner = @ptrFromInt(publication_port.owner_addr);
+    if (!owner.validReady() or !publicationPortMatchesOwner(&publication_port, owner)) return null;
+    return owner;
+}
+
+/// Installs only the final app-process owner address. Registry/runtime pointers remain private to
+/// the owner and are revalidated on every later publication-port lookup.
+pub fn installPublicationPort(owner: *AppProcessIncidentOwner) Error!void {
+    if (!owner.validReady()) return error.InvalidOwner;
+    lockPublicationPort();
+    defer publication_port.mutex.unlock();
+    if (publication_port.owner_addr != 0) {
+        if (publicationPortMatchesOwner(&publication_port, owner)) return;
+        return error.InvalidOwner;
+    }
+    publication_port.owner_addr = @intFromPtr(owner);
+    publication_port.owner_thread = owner.owner_thread;
+    publication_port.registry_addr = @intFromPtr(&owner.registry);
+    publication_port.pid = owner.pid;
+    publication_port.process_nonce = owner.process_nonce;
+    publication_port.app_instance_nonce = owner.app_instance_nonce;
+    publication_port.owner_lifecycle_raw = owner.lifecycle_raw;
+    publication_port.seal = publicationPortSeal(&publication_port);
+}
+
+/// Revocation precedes shutdown admission, so no failure-site can borrow a closing publisher.
+pub fn revokePublicationPort(owner: *AppProcessIncidentOwner) Error!void {
+    lockPublicationPort();
+    defer publication_port.mutex.unlock();
+    if (!publicationPortMatchesOwner(&publication_port, owner)) return error.InvalidOwner;
+    clearPublicationPortLocked();
+}
+
+pub fn revokePublicationPortNoFail(owner: *AppProcessIncidentOwner) void {
+    revokePublicationPort(owner) catch process_seal.fatalIntegrity(.incident_authority);
+}
+
+/// Failure-site callers use this facade after releasing their registered Client operation. The
+/// facade resolves the sealed owner internally and never returns a raw publisher pointer.
+pub fn publishPreparedManagedPoison(
+    adapter: *host_adapter_mod.HostAdapter,
+    prepared: *publication.PreparedManagedPoison,
+    timestamp: PublicationTimestampReceipt,
+) PublicationError!publication.IncidentCommitResult {
+    if (!publicationTimestampReceiptValid(timestamp) or prepared.input.timestamp_ns != timestamp.timestamp_ns)
+        return error.InvalidOwner;
+    const owner = resolvePublicationPortOwner() orelse return error.InvalidOwner;
+    return owner.publishPreparedManagedPoison(adapter, prepared);
+}
+
+pub fn publicationTimestampReceipt() PublicationError!PublicationTimestampReceipt {
+    const owner = resolvePublicationPortOwner() orelse return error.InvalidOwner;
+    var receipt: PublicationTimestampReceipt = .{
+        .owner_addr = @intFromPtr(owner),
+        .owner_thread = owner.owner_thread,
+        .pid = owner.pid,
+        .process_nonce = owner.process_nonce,
+        .app_instance_nonce = owner.app_instance_nonce,
+        .timestamp_ns = monotonicNs() orelse return error.ClockFailed,
+    };
+    receipt.seal = publicationTimestampSeal(receipt);
+    return receipt;
+}
+
+pub const publication_port_testing_api = if (@import("builtin").is_test) struct {
+    pub fn driftSeal() void {
+        lockPublicationPort();
+        defer publication_port.mutex.unlock();
+        publication_port.seal[0] ^= 1;
+    }
+
+    pub fn timestampReceiptValid(receipt: PublicationTimestampReceipt) bool {
+        return publicationTimestampReceiptValid(receipt);
+    }
+
+    /// AppSession tests share one process-global owner across thousands of cases. A fixture may
+    /// reset that owner storage only after its own cleanup; clear the test-only lookup token too.
+    pub fn reset() void {
+        lockPublicationPort();
+        defer publication_port.mutex.unlock();
+        clearPublicationPortLocked();
+    }
+} else struct {};
+
 pub const AppProcessIncidentOwner = struct {
     self_addr: u64 = 0,
     pid: u32 = 0,

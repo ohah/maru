@@ -67,9 +67,6 @@ pub const EntryKind = enum {
 /// 전역 기본 base도 선택기도 두지 않는다). 같은 경로가 스테이지·미스테이지 양쪽에 있을 수 있으므로 diff Term의
 /// 유일성 키는 `(경로, kind, base)`다 — 한 파일의 두 diff를 나란히 보는 것은 정상 리뷰 흐름이다(§3.5).
 pub const DiffBase = enum {
-    /// `HEAD ↔ 작업트리` — **2판 목록 행의 기본 비교**(docs/editor-surface-dock.md §3.5.2). 섹션이 더 이상 기준이
-    /// 아니므로, 행을 누를 때 여는 것은 "이 파일이 마지막 커밋 이후 어떻게 달라졌나"다(스테이지 여부와 무관).
-    head_worktree,
     /// `HEAD ↔ index`(스테이지된 변경).
     staged,
     /// `index ↔ worktree`(변경 사항).
@@ -88,9 +85,6 @@ pub const DiffBase = enum {
     /// 구분할 수 없다 — 무엇을 보고 있는지 탭에서 바로 알 수 있어야 한다.
     pub fn label(self: DiffBase) []const u8 {
         return switch (self) {
-            // 기본 비교는 이름에 기준을 적지 않는다 — 목록에서 연 것 대부분이 이것이라 탭이 전부 같은 꼬리표를
-            // 달면 구분에 쓸모가 없다. 꼬리표는 **기본이 아닌 비교**를 가리키는 표시다.
-            .head_worktree => "",
             .staged => "스테이지됨",
             .unstaged => "작업트리",
             .untracked => "새 파일",

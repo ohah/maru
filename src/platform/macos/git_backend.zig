@@ -595,9 +595,8 @@ fn diffWorker(job: *Job) void {
 
     if (target.base != .untracked) {
         // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
-        // 기본 비교(`head_worktree`)도 왼쪽이 HEAD다 — 오른쪽은 아래에서 작업트리를 읽는다.
         const side: git_command.BlobSide = switch (target.base) {
-            .staged, .conflict, .head_worktree => .head,
+            .staged, .conflict => .head,
             .unstaged, .untracked, .branch, .turn => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
@@ -795,6 +794,10 @@ fn worker(job: *Job) void {
     }) |pair| {
         if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
             @field(result, pair[1]) = out.bytes;
+            // **선택 명령의 잘림도 화면에 말한다**(적대적 검증 2026-08-14). 여기서 삼키면 `numstat_head`가
+            // 상한에 걸렸을 때 앞쪽 파일만 숫자를 갖고 나머지는 조용히 빈 채로 남는다 — 사용자는 그것을
+            // "안 바뀐 파일"로 읽는다. 실패(그 값이 없는 것)와 잘림(값이 반만 있는 것)은 다른 상태다.
+            if (out.truncated) truncated = true;
         } else |_| {}
     }
     inline for (.{

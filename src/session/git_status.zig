@@ -9,7 +9,7 @@
 //!
 //! **베이스**: git의 `--porcelain=v2` 포맷(git 공식 문서 `git-status(1)` "Porcelain Format Version 2")과 `--numstat`.
 //! v1이 아니라 v2를 쓰는 이유는 ⑴ staged/worktree 상태가 `XY` 두 칸으로 분리돼 **두 축을 뭉개지 않아도 되고**
-//!    (2판의 체크박스 3-상태가 바로 그 두 축이다 — 하나로 접힌 v1으로는 '일부만 스테이지'를 말할 수 없다),
+//!    (2판의 두 그룹이 바로 그 두 축이다 — 하나로 접힌 v1으로는 '일부만 스테이지'를 말할 수 없다),
 //! ⑵ rename의 원래 경로가 같은 줄에 오며, ⑶ `--branch`가 ahead/behind를 함께 준다(별도 rev-list 호출이 필요 없다).
 
 const std = @import("std");
@@ -72,9 +72,8 @@ pub const Entry = struct {
     }
 
     // **`isStaged`/`isUnstaged`는 2판에서 삭제했다**(2026-08-14). 그 둘은 "행이 어느 섹션에 드는가"를 답하던
-    // 술어인데, 2판은 섹션이 추적 여부만 가르고 스테이지 여부는 행의 체크박스 상태다
-    // (docs/editor-surface-dock.md §3.5.2). 판정의 단일 출처는 `scm_view.stageOf` 하나여야 한다 — 남겨 두면
-    // "스테이지됨"의 정의가 둘이 되고, 한쪽만 고쳐지는 순간 목록과 체크박스가 다른 말을 한다.
+    // 술어이고, 그 판정은 이제 `scm_view.belongs` 하나가 소유한다(docs/editor-surface-dock.md §3.5.2).
+    // 남겨 두면 "스테이지됨"의 정의가 둘이 되고, 한쪽만 고쳐지는 순간 목록과 행 동작이 다른 말을 한다.
 
     pub fn isUntracked(self: Entry) bool {
         return self.worktree == .untracked;
@@ -103,6 +102,11 @@ pub fn parseHead(text: []const u8) Head {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
+        // **첫 레코드에서 멈춘다.** porcelain v2는 헤더(`#`)를 전부 앞에 낸다(실측·형식 규약). 끝까지 훑으면
+        // 이 함수가 status 전체 크기에 비례하는데, 목록·히트테스트·스크롤 상한이 **매 프레임 각각** 부르므로
+        // 변경이 수천 개인 저장소에서 프레임마다 수 MB를 다시 읽게 된다. 빈 줄은 마지막 개행이라 건너뛴다.
+        if (line.len == 0) continue;
+        if (line[0] != '#') break;
         if (!std.mem.startsWith(u8, line, "# branch.")) continue;
         const rest = line["# branch.".len..];
         if (std.mem.startsWith(u8, rest, "oid ")) {
@@ -294,7 +298,7 @@ test "실측 porcelain v2: 네 종류 레코드를 두 축으로 가른다" {
     try testing.expectEqual(Change.unchanged, added.worktree);
     // 두 축을 **따로** 낸다는 것이 이 파서의 계약이다 — 어느 섹션에 드는지는 상위(scm_view)가 정한다.
 
-    // `MM` — 두 축이 **동시에** 변경이다(일부만 스테이지한 파일). 2판은 이걸 한 행의 부분 체크박스로 그린다.
+    // `MM` — 두 축이 **동시에** 변경이다(일부만 스테이지한 파일). 2판은 이걸 두 그룹에 각각 한 행씩 그린다.
     const both = it.next().?;
     try testing.expectEqualStrings("keep.txt", both.path);
     try testing.expectEqual(Change.modified, both.staged);

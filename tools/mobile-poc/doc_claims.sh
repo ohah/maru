@@ -58,8 +58,14 @@ echo "§3.2 주기는 기기 주사율과 무관하다"
 # 나온다. 60Hz 에뮬레이터에서는 우연히 맞아떨어져 `MARU_PACE` 도 PASS 라, 이 부류는 코드
 # 모양으로 막는 수밖에 없다(실기기가 붙기 전까지).
 ck "Android 가 vsync 를 세지 않는다" 0 "$(grep -cE 'vsync_count' $A)"
-ck "Android 목표 주기가 ns 상수로 있다" 1 "$(grep -c '33333333' $A)"
-ck "iOS 가 OS 에 주기를 선언한다" 1 "$(grep -c 'CAFrameRateRangeMake(30, 30, 30)' $I)"
+# **시각을 버리면 다시 세는 수밖에 없다.** 전에 `(void)frame_time_ns;` 로 버려 두고 vsync 를
+# 셌다 — 위 조건만으로는 이름을 바꿔 다시 세는 것을 못 막으므로 쓰는 쪽도 못박는다.
+ck "Android 가 vsync 시각을 버리지 않는다" 0 "$(grep -c '(void)frame_time_ns' $A)"
+ck "iOS 가 OS 에 주기를 선언한다" 1 "$(grep -c 'preferredFrameRateRange =' $I)"
+# 주기는 정책 하나인데 host 두 곳에 Hz·ns·ms·PASS창 네 표현으로 흩어져 있었다. 셀 기하와
+# 같은 규율로 **헤더가 단일 출처**다 — host 에 남은 날 숫자가 0 이어야 한다.
+ck "헤더의 주기 정의" 1 "$(grep -c 'define MARU_FRAME_TARGET_HZ' $H)"
+ck "host 에 남은 주기 하드코딩" 0 "$(grep -cE '33333333|target=33\.33|>= 25\.0|<= 42\.0' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 # `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"

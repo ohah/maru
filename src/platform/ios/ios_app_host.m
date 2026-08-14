@@ -831,9 +831,10 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // `Info.plist` 에 `CADisableMinimumFrameDuration` 이 필요하다 — 지금은 없고, 없으면
     // ProMotion 기기에서도 60 에서 잘린다. config(M10)로 열 때 함께 본다.
     if (@available(iOS 15.0, *)) {
-        _link.preferredFrameRateRange = CAFrameRateRangeMake(30, 30, 30);
+        _link.preferredFrameRateRange =
+            CAFrameRateRangeMake(MARU_FRAME_TARGET_HZ, MARU_FRAME_TARGET_HZ, MARU_FRAME_TARGET_HZ);
     } else {
-        _link.preferredFramesPerSecond = 30;
+        _link.preferredFramesPerSecond = MARU_FRAME_TARGET_HZ;
     }
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
     // **제스처 인식기를 안 쓴다.** 인식되는 순간 UIKit 이 touchesMoved 를 끊어(cancel) 길게
@@ -868,8 +869,8 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     }
     _paceDone = YES;
     double med = _paceMs[30];
-    NSLog(@"MARU_PACE median_ms=%.2f n=60 target=33.33 verdict=%s",
-          med, (med >= 25.0 && med <= 42.0) ? "PASS" : "FAIL");
+    NSLog(@"MARU_PACE median_ms=%.2f n=60 target=%.2f verdict=%s", med, MARU_FRAME_TARGET_MS,
+          (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS) ? "PASS" : "FAIL");
 }
 
 - (void)tick {

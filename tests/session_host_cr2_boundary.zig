@@ -144,6 +144,87 @@ test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
     );
 }
 
+test "CR2c 경계는 InputOwner facade와 local remote parity를 고정한다" {
+    const allocator = std.testing.allocator;
+    const owner = try readSource(allocator, "src/app/input_owner.zig");
+    defer allocator.free(owner);
+    const app_facade = try readSource(allocator, "src/app.zig");
+    defer allocator.free(app_facade);
+    const backend = try readSource(allocator, "src/app/term_runtime_backend.zig");
+    defer allocator.free(backend);
+    const local = try readSource(allocator, "src/app/in_process_term_backend.zig");
+    defer allocator.free(local);
+    const remote = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(remote);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+
+    try std.testing.expectEqual(@as(usize, 3), count(owner, "test \"CR2c InputOwner facade는 "));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR2c TermRuntimeBackend는 opaque handle을 InputOwner facade에 exact 결속한다\""));
+    try std.testing.expectEqual(@as(usize, 1), count(local, "test \"CR2c local InputOwner는 기존 UnknownSurface와 partial 의미를 그대로 쓴다\""));
+    try std.testing.expectEqual(@as(usize, 1), count(remote, "test \"CR2c remote InputOwner는 기존 UnknownSurface와 partial 의미를 그대로 쓴다\""));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const InputOwner = struct {"));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const VTable = struct {"));
+    const input_vtable = between(owner, "pub const VTable = struct {", "pub const InputOwner = struct {") orelse
+        return error.TestUnexpectedResult;
+    inline for (.{
+        "write:",
+        "write_nonblocking:",
+        "enqueue_core_command:",
+    }) |field| try std.testing.expectEqual(@as(usize, 1), count(input_vtable, field));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn inputOwner("));
+    try std.testing.expectEqual(@as(usize, 1), count(local, ".input_owner = &input_vtable,"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote, ".input_owner = &input_vtable,"));
+    inline for (.{
+        ".write = writeInput,",
+        ".write_nonblocking = writeInputNonBlocking,",
+        ".enqueue_core_command = enqueueCoreCommand,",
+    }) |binding| {
+        try std.testing.expectEqual(@as(usize, 1), count(
+            between(local, "const input_vtable = InputOwnerVTable{", "pub fn init(") orelse
+                return error.TestUnexpectedResult,
+            binding,
+        ));
+        try std.testing.expectEqual(@as(usize, 1), count(
+            between(remote, "const input_vtable = InputOwnerVTable{", "pub fn init(") orelse
+                return error.TestUnexpectedResult,
+            binding,
+        ));
+    }
+    try std.testing.expectEqual(@as(usize, 1), count(app_facade, "pub const InputOwner = input_owner.InputOwner;"));
+
+    // CR2c는 구조 seam만 만든다. ordered queue 이동을 앞당기거나 기존 RemoteRuntime field를 없애면 RED다.
+    inline for (.{
+        "direct_input: std.ArrayListUnmanaged(u8),",
+        "direct_input_offset: usize,",
+        "pending_controls: std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),",
+        "blocking_flush_active: bool = false,",
+    }) |field| try std.testing.expectEqual(@as(usize, 1), count(runtime, field));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "input_owner.InputOwner"));
+
+    // CR2c는 아직 제품 입력 caller를 전환하지 않는 구조 gate다. 다른 source가 facade를 임의
+    // materialize하거나 backend input vtable을 새로 발급하면 CR2d의 owner 이관을 우회하므로 막는다.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            "inputOwner(",
+            "app/term_runtime_backend.zig",
+            "app/in_process_term_backend.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "InputOwner{",
+            "app/input_owner.zig",
+            "app/term_runtime_backend.zig",
+        ),
+    );
+}
+
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, source, start_marker) orelse return null;
     const tail = source[start..];
@@ -176,6 +257,32 @@ fn countProductSourcesExceptTwo(
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
         if (std.mem.eql(u8, entry.path, excluded_path) or
             std.mem.eql(u8, entry.path, second_excluded_path)) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += count(source, needle);
+    }
+    return total;
+}
+
+fn countProductSourcesExceptThree(
+    allocator: std.mem.Allocator,
+    needle: []const u8,
+    first_excluded_path: []const u8,
+    second_excluded_path: []const u8,
+    third_excluded_path: []const u8,
+) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, first_excluded_path) or
+            std.mem.eql(u8, entry.path, second_excluded_path) or
+            std.mem.eql(u8, entry.path, third_excluded_path)) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         defer allocator.free(path);
         const source = try readSource(allocator, path);

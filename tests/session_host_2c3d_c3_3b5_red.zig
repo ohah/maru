@@ -45,24 +45,25 @@ test "C3-3b5 중립 계약 close ticket은 1과 max를 허용하고 0과 exhaust
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), issuer.issue());
     try std.testing.expect(issuer.issue() == null);
 }
-test "C3-3b5 중립 계약 VTable은 field 순서를 유지하고 close 반환형만 바꾼다" {
+test "C3-3b5 중립 계약 VTable은 InputOwner와 close 반환형의 field 순서를 고정한다" {
     const Backend = maru.app.term_runtime_backend;
     const fields = @typeInfo(Backend.VTable).@"struct".fields;
-    try std.testing.expectEqual(@as(usize, 18), fields.len);
+    try std.testing.expectEqual(@as(usize, 19), fields.len);
     const expected_names = [_][]const u8{
-        "spawn",            "attach",                   "pump",        "write_input",              "write_input_nonblocking", "enqueue_core_command",
-        "resize",           "close_and_detach",         "close",       "finish_after_termination", "remove",                  "foreground_process_group",
-        "resource_samples", "foreground_process_names", "process_cwd", "read_observation",         "refresh_observation",     "dump_recent_text",
+        "input_owner",              "spawn",            "attach",                   "pump",        "write_input",              "write_input_nonblocking",
+        "enqueue_core_command",     "resize",           "close_and_detach",         "close",       "finish_after_termination", "remove",
+        "foreground_process_group", "resource_samples", "foreground_process_names", "process_cwd", "read_observation",         "refresh_observation",
+        "dump_recent_text",
     };
     inline for (fields, expected_names, 0..) |field, expected_name, index| {
         _ = index;
         try std.testing.expectEqualStrings(expected_name, field.name);
     }
-    inline for (.{ 7, 8, 9 }) |index| {
+    inline for (.{ 8, 9, 10 }) |index| {
         const function_info = @typeInfo(@typeInfo(fields[index].type).pointer.child).@"fn";
         try std.testing.expectEqual(Backend.CloseProgress, function_info.return_type.?);
     }
-    const remove_info = @typeInfo(@typeInfo(fields[10].type).pointer.child).@"fn";
+    const remove_info = @typeInfo(@typeInfo(fields[11].type).pointer.child).@"fn";
     try std.testing.expectEqual(Backend.RemoveProgress, remove_info.return_type.?);
 }
 

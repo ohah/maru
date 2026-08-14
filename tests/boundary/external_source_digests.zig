@@ -356,7 +356,11 @@ pub const inventory = [_]Proof{
     // `Term.rt`의 diff 상태 필드, 그리고 컨트롤 플레인 `EditorMeta`가 `editor_diff_ops.editorMeta`에서
     // 값을 받도록 바꾼 블록이다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
     // 집합을 건드리지 않는다(추가된 것은 전부 편집기 축이다).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4953745ee6d6e41939b41315f29d64e3b2d2af280661095f06c89a5f407b5b27" },
+    // 소스 컨트롤 도크 2판(P1b)이 도크 렌더를 셀 그리드에서 component로 옮기며 또 움직인다: 목록 렌더
+    // 블록 교체, `scm_dock_*` 상태 필드(published tree·action 표·interaction·셰이핑 캐시), 포인터 라우팅
+    // 두 자리, 그리고 셀 그리드 히트테스트(`scmDrawWindow`) 제거다. count는 2 그대로다 — 새 `@field` 반사가
+    // 없고 Client 구성·receiver 집합을 건드리지 않는다(전부 chrome 표시 축이다).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7650c6a50604130f0c65160c9b990f59e21002deb514027662ae667c363e4d67" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

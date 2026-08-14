@@ -1037,9 +1037,11 @@ pub const Config = struct {
     /// EAW Ambiguous(동그란 번호 등) 문자의 셀 폭. 기본 narrow(1칸 — 정렬 안전·Ghostty/xterm.js 호환).
     /// loader가 `text.ambiguous-width` 키로 파싱. 자세한 트레이드오프는 AmbiguousWidth 참고.
     ambiguous_width: AmbiguousWidth = .narrow,
-    /// 이모지 표현(base+VS16, 키캡 2️⃣ 등)의 셀 폭. **기본 wide(2칸)** — Ghostty·iTerm2·kitty 및 모던 TUI가 쓰는
-    /// string-width 라이브러리가 이모지를 2칸으로 세므로, maru도 2칸으로 맞춰 ❤️·2️⃣가 1칸에 욱여넣어져 작아지던
-    /// 것을 풀고 TUI 레이아웃과도 정합한다(`core.emoji_wide` → putCell이 VS16 base를 width 2로 승격). narrow면
+    /// 이모지 표현(base+VS16, 키캡 2️⃣ 등)의 셀 폭. **기본 wide(2칸)** — **레퍼런스와 반대 선택이다.** Ghostty·xterm.js는
+    /// 앱/임베더가 합의(2027·grapheme 애드온)해야 2칸이고 그 전엔 1칸이다(소스 확인). maru가 뒤집은 근거는 터미널이
+    /// 아니라 **앱 쪽**이다 — 모던 TUI가 쓰는 string-width 라이브러리가 이모지를 2칸으로 세는데 그 TUI들이 2027을
+    /// 안 켜므로, 1칸으로 두면 ❤️·2️⃣가 욱여넣어져 작아지고 레이아웃이 어긋난다. 대가는 합의 없이 폭을 올리는
+    /// 것이므로 opt-out을 둔다(`core.emoji_wide` → putCell이 VS16 base를 width 2로 승격). narrow면
     /// EAW 그대로 1칸 — zsh ZLE가 base+VS16을 1칸으로 가정하는 환경에서 줄 편집 드리프트를 피하려는 opt-out.
     /// mode 2027(grapheme cluster)을 켜는 앱은 이 설정과 무관하게 항상 2칸. loader가 `text.emoji-width` 키로 파싱.
     emoji_width: EmojiWidth = .wide,

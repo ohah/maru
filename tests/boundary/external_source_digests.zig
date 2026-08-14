@@ -364,6 +364,11 @@ pub const inventory = [_]Proof{
     // 두 자리, 그리고 셀 그리드 히트테스트(`scmDrawWindow`) 제거다. count는 2 그대로다 — 새 `@field` 반사가
     // 없고 Client 구성·receiver 집합을 건드리지 않는다(전부 chrome 표시 축이다). CR2d4는 같은 파일에
     // cross-Window stable owner parity 테스트와 remote transfer 제외 분기를 추가하지만 이 Client receiver count는 유지한다.
+    // N1.5 d(색)·세로 스크롤·리뷰 수정으로 또 움직인다: `buildChromeTokens`가 비교 밴드 색 둘을 더 싣고,
+    // 휠 라우팅이 편집기 pane을 먼저 보며(폴백 포함), 프레임이 센 시각 행 수를 `Term.rt`에 싣고, 비교
+    // 훅을 init에서 한 번 읽어 세션 필드로 든다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client
+    // 구성·receiver 집합을 안 건드린다. **main의 CR2d4와 같은 파일에서 만나 또 충돌했다**(이 원장이
+    // 예고한 그 충돌이다) — 양쪽 사유를 모두 남기고 값만 재계산했다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6a32d77f771f6827cd73a60275aefc71cc24cf84e3e4ddac618d7cd2fba2bf4e" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

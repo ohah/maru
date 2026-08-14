@@ -122,7 +122,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    control FIFO/barrier는 기존 물리 wire 순서를 유지하며 두 backing reserve 뒤에만 record를 게시하고, record는 실제
    byte/control ownership이 Client로 넘어갈 때 같은 순서로 retire한다. **CR2d3 완료:** event cursor를 stable shell에
    두며 `RemoteRuntime`은 CR2d2 기준 Debug 32바이트, ReleaseFast 48바이트 증가한다. 기존 4,096-runtime 상한의 추가
-   inline budget은 각각 128 KiB와 192 KiB다. CR2d4는 cross-Window old transfer 제거/parity를 golden trace로 닫는다. CR2e에서 순수
+   inline budget은 각각 128 KiB와 192 KiB다. **CR2d4 완료:** cross-Window move/merge의 기존
+   `PreparedPendingPasteTransfer`는 local caller-owned queue만 옮기고 remote Term은 제외한다. 마지막 source Window를
+   닫은 뒤에도 stable input transcript와 BEL/OSC52 cursor가 같은 `RemoteRuntime`에 남는 parity를 golden test로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.
 5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현

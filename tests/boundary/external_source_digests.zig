@@ -359,8 +359,9 @@ pub const inventory = [_]Proof{
     // 소스 컨트롤 도크 2판(P1b)이 도크 렌더를 셀 그리드에서 component로 옮기며 또 움직인다: 목록 렌더
     // 블록 교체, `scm_dock_*` 상태 필드(published tree·action 표·interaction·셰이핑 캐시), 포인터 라우팅
     // 두 자리, 그리고 셀 그리드 히트테스트(`scmDrawWindow`) 제거다. count는 2 그대로다 — 새 `@field` 반사가
-    // 없고 Client 구성·receiver 집합을 건드리지 않는다(전부 chrome 표시 축이다).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d6700c5f926ee6a482a058f7f27385577ca005a504f89074f8c062f9cb86e0cc" },
+    // 없고 Client 구성·receiver 집합을 건드리지 않는다(전부 chrome 표시 축이다). CR2d4는 같은 파일에
+    // cross-Window stable owner parity 테스트와 remote transfer 제외 분기를 추가하지만 이 Client receiver count는 유지한다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6a32d77f771f6827cd73a60275aefc71cc24cf84e3e4ddac618d7cd2fba2bf4e" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

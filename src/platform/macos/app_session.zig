@@ -6284,6 +6284,10 @@ pub const AppSession = struct {
         for (tabs) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    // Remote input과 event cursor는 stable RemoteRuntime이 소유한다. 옛 Window-local paste
+                    // 복사본까지 옮기면 cross-Window adoption 뒤 stale bytes를 재생하므로 제외한다. local Term의
+                    // caller-owned queue는 계속 이 transaction으로 transfer한다.
+                    if (term.surface.remote != null) continue;
                     const source_len = if (src.pending_pastes.get(term.surface.id)) |source|
                         if (source.offset < source.buf.items.len) source.buf.items.len - source.offset else 0
                     else
@@ -52758,6 +52762,14 @@ fn removeCr2d3EventRuntime(handle: app.TermRuntimeHandle) void {
     }
 }
 
+fn installCr2d4StableRuntime(runtime: *session_host.remote_runtime.RemoteRuntime, handle: app.TermRuntimeHandle) !void {
+    return installCr2d3EventRuntime(runtime, handle);
+}
+
+fn removeCr2d4StableRuntime(handle: app.TermRuntimeHandle) void {
+    return removeCr2d3EventRuntime(handle);
+}
+
 // host-backed 벨 회귀 가드. host core가 BEL을 파싱해도 client로 나갈 통로가 없어 원격 세션에서 벨(소리·시각 flash·
 // Dock 배지)이 통째로 무동작이었다. 이제 host가 관측에 누적 카운터를 실어 보내고 client가 delta로 판정한다.
 // 소비형 bool이 아니라 카운터인 이유와, host live-upgrade로 카운터가 리셋될 때 가짜 벨이 울리지 않아야 한다는
@@ -52929,6 +52941,153 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     try std.testing.expect(notification_ops.takeBell(session));
     runtime.generation.observation.clipboard_read_seq = 6;
     try std.testing.expect(session.takeClipboardReadRequest());
+}
+
+fn seedCr2d4StableState(
+    allocator: std.mem.Allocator,
+    runtime: *session_host.remote_runtime.RemoteRuntime,
+    bytes: []const u8,
+) !void {
+    runtime.allocator = allocator;
+    runtime.direct_input = .empty;
+    runtime.direct_input_offset = 0;
+    runtime.input_batches = .{};
+    try runtime.direct_input.appendSlice(allocator, bytes);
+    try runtime.input_batches.records.append(allocator, .{
+        .kind = .paste,
+        .epoch = runtime.input_batches.epoch,
+        .sequence = 1,
+        .end_offset = bytes.len,
+    });
+    runtime.input_batches.next_sequence = 1;
+}
+
+fn deinitCr2d4StableState(
+    allocator: std.mem.Allocator,
+    runtime: *session_host.remote_runtime.RemoteRuntime,
+) void {
+    runtime.direct_input.deinit(allocator);
+    runtime.input_batches.deinit(allocator);
+}
+
+fn installCr2d4StaleWindowPaste(session: *AppSession, surface_id: u64, bytes: []const u8) !void {
+    var queue: AppSession.PasteQueue = .{};
+    errdefer queue.buf.deinit(session.allocator);
+    try queue.buf.appendSlice(session.allocator, bytes);
+    try session.pending_pastes.put(session.allocator, surface_id, queue);
+}
+
+test "CR2d4 마지막 workspace 이동과 source close는 stable input과 event cursor를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    var src_live = true;
+    defer if (src_live) src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const term = pane_ops.activePane(src).activeTerm();
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    term.surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer term.surface.remote = null;
+    const handle: app.TermRuntimeHandle = 0xD401;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    runtime.event_cursor = .{
+        .observer_generation = 7,
+        .bell_count = 3,
+        .clipboard_write_seq = 4,
+        .clipboard_read_seq = 5,
+    };
+    runtime.generation.observation = .{
+        .observer_generation = 7,
+        .bell_count = 3,
+        .clipboard_write_seq = 4,
+        .clipboard_read_seq = 5,
+    };
+    try seedCr2d4StableState(allocator, &runtime, "STABLE-MOVE");
+    defer deinitCr2d4StableState(allocator, &runtime);
+    try installCr2d4StableRuntime(&runtime, handle);
+    defer removeCr2d4StableRuntime(handle);
+    try installCr2d4StaleWindowPaste(src, term.surface.id, "OLD-WINDOW-COPY");
+
+    const runtime_addr = @intFromPtr(&runtime);
+    var moved_ids: [8]u64 = undefined;
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 0, &moved_ids);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
+    try std.testing.expect(src.pending_pastes.get(term.surface.id) == null);
+    try std.testing.expect(dst.pending_pastes.get(term.surface.id) == null);
+    try std.testing.expectEqual(runtime_addr, @intFromPtr(app_remote_backend.?.runtimes.get(handle).?.runtime));
+    try std.testing.expectEqualStrings("STABLE-MOVE", runtime.direct_input.items);
+    try std.testing.expectEqual(@as(u64, 1), runtime.input_batches.records.items[0].sequence);
+
+    // Native source window close와 같은 AppSession 정산 뒤에도 moved Tab/Runtime은 destination 소유로 생존한다.
+    src.deinit();
+    src_live = false;
+    try std.testing.expectEqual(runtime_addr, @intFromPtr(app_remote_backend.?.runtimes.get(handle).?.runtime));
+    try std.testing.expectEqual(@as(u64, 5), runtime.event_cursor.clipboard_read_seq);
+
+    dst.audible_bell = true;
+    dst.loaded_config.config.osc52.read = .allow;
+    runtime.generation.observation.bell_count = 4;
+    runtime.generation.observation.clipboard_read_seq = 6;
+    _ = notification_ops.takeBell(dst);
+    notification_ops.dispatchBell(dst);
+    try std.testing.expect(notification_ops.takeBell(dst));
+    try std.testing.expect(dst.takeClipboardReadRequest());
+}
+
+test "CR2d4 window merge는 옛 Window transfer 없이 stable runtime 상태만 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    var src_live = true;
+    defer if (src_live) src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const term = pane_ops.activePane(src).activeTerm();
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    term.surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer term.surface.remote = null;
+    const handle: app.TermRuntimeHandle = 0xD402;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    runtime.event_cursor = .{ .observer_generation = 9, .bell_count = 11 };
+    runtime.generation.observation = .{ .observer_generation = 9, .bell_count = 11 };
+    try seedCr2d4StableState(allocator, &runtime, "STABLE-MERGE");
+    defer deinitCr2d4StableState(allocator, &runtime);
+    try installCr2d4StableRuntime(&runtime, handle);
+    defer removeCr2d4StableRuntime(handle);
+    try installCr2d4StaleWindowPaste(src, term.surface.id, "OLD-MERGE-COPY");
+
+    var moved_ids: [8]u64 = undefined;
+    const outcome = try src.mergeSessionInto(dst, &moved_ids);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expect(src.pending_pastes.get(term.surface.id) == null);
+    try std.testing.expect(dst.pending_pastes.get(term.surface.id) == null);
+    try std.testing.expectEqualStrings("STABLE-MERGE", runtime.direct_input.items);
+    try std.testing.expectEqual(@as(usize, 1), runtime.input_batches.records.items.len);
+
+    src.deinit();
+    src_live = false;
+    runtime.generation.observation.bell_count = 12;
+    dst.audible_bell = true;
+    _ = notification_ops.takeBell(dst);
+    notification_ops.dispatchBell(dst);
+    try std.testing.expect(notification_ops.takeBell(dst));
+    try std.testing.expectEqual(@as(u64, 12), runtime.event_cursor.bell_count);
 }
 
 // browser 전용 chrome(주소창 밴드)이 파일/markdown web Term에 걸리지 않는다는 것을 `isBrowserTerm` 한 곳으로

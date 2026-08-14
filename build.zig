@@ -3055,6 +3055,52 @@ pub fn build(b: *std.Build) void {
         session_host_cr2d3_step.dependOn(&run_cr2d3_boundary_tests.step);
         boundary_step.dependOn(&run_cr2d3_boundary_tests.step);
     }
+    const session_host_cr2d4_step = b.step(
+        "test-session-host-cr2d4",
+        "CR2d4 cross-Window stable state Debug and ReleaseFast gates",
+    );
+    session_host_cr2d4_step.dependOn(session_host_cr2d3_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d4_optimize| {
+        const cr2d4_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr2d4_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2d4"},
+        });
+        cr2d4_app_session_tests.root_module.link_libc = true;
+        cr2d4_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr2d4_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_cr2d4_app_session_tests = b.addRunArtifact(cr2d4_app_session_tests);
+        // 이름 있는 cross-Window parity 2개 + app_session/session_host root sentinel 3개.
+        run_cr2d4_app_session_tests.addArg("--maru-expect-tests=5");
+        run_cr2d4_app_session_tests.setCwd(b.path("."));
+        session_host_cr2d4_step.dependOn(&run_cr2d4_app_session_tests.step);
+
+        const cr2d4_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2d4_optimize,
+            }),
+            .filters = &.{"CR2d4"},
+        });
+        const run_cr2d4_boundary_tests = b.addRunArtifact(cr2d4_boundary_tests);
+        run_cr2d4_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2d4_boundary_tests.setCwd(b.path("."));
+        session_host_cr2d4_step.dependOn(&run_cr2d4_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2d4_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

@@ -12,5 +12,11 @@
   <key>UILaunchScreen</key><dict/>
   <key>MinimumOSVersion</key><string>17.0</string>
   <key>UIDeviceFamily</key><array><integer>1</integer></array>
+  <!-- **주기 상한을 푼다.** 이 키가 없으면 iOS 가 ProMotion 기기에서도 60 에서 자르고,
+       `preferredFrameRateRange` 로 그 위를 요청해도 무시된다. 지금 요청값은 30 이라
+       **켜도 동작이 안 바뀐다** — 다만 이건 설정이 아니라 **번들에 박히는 능력 선언**이라
+       나중에 config(M10)로 주기를 열 때 런타임에 추가할 수가 없다. 그래서 미리 켠다.
+       계약: mobile-platform.md §3.2 -->
+  <key>CADisableMinimumFrameDuration</key><true/>
 </dict>
 </plist>

@@ -70,16 +70,10 @@ pub const View = union(enum) {
     compare: Rows,
 };
 
-/// 계산 상한. 넘으면 `.unavailable = .too_large`다.
-///
-/// **왜 편집 횟수로 재는가.** 파일 크기가 아니라 **차이의 양**이 비용을 정한다(Myers는 O(N·D)).
-/// 큰 파일이라도 몇 줄만 바뀌었으면 싸고, 작은 파일이라도 전면 재작성이면 비싸다. 그래서 줄 수가
-/// 아니라 D에 상한을 둔다.
-///
-/// **숫자는 잠정이다.** §10이 선행 측정 게이트를 두지 않으므로 여기서 근거 없는 값을 계약처럼 굳히지
-/// 않는다 — 실측이 붙는 슬라이스에서 정한다. 전면 재작성 diff가 이 값에 걸리면 화면은 "보여 줄 수
-/// 없음"이 되는데, 그것이 **틀린 대응을 보여 주는 것보다 낫다**.
-pub const default_max_edits: usize = 20_000;
+/// 편집 횟수 상한(보조 손잡이). **실질 상한은 이것이 아니라 `max_trace_bytes`에서 역산된 D다** —
+/// 둘 중 작은 쪽이 걸린다. 임의의 상수는 메모리를 막지 못하므로(6.4 GB짜리 trace를 허용했다) 상한의
+/// 근거를 메모리로 옮겼고, 이 값은 테스트가 작은 상한을 주입할 때만 의미가 있다.
+pub const default_max_edits: usize = 20_000; // 실질 상한은 `max_trace_bytes`에서 역산된 D다(아래).
 
 pub const Options = struct {
     max_edits: usize = default_max_edits,
@@ -95,11 +89,24 @@ pub fn compute(
     right_lines: []const []const u8,
     opts: Options,
 ) error{OutOfMemory}!View {
-    const script = myers(allocator, left_lines, right_lines, opts.max_edits) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.TooManyEdits => return .{ .unavailable = .too_large },
-    };
-    defer allocator.free(script);
+    // **양 끝의 같은 줄을 먼저 떼어 낸다.** Myers의 비용은 차이의 양(D)에 붙으므로, 큰 파일에서 몇 줄만
+    // 바뀐 흔한 경우가 이 한 줄로 거의 공짜가 된다(diff 구현들이 공통으로 쓰는 전처리다). 결과(대응)는 바뀌지 않는다 —
+    // 떼어 낸 줄들은 정의상 context다.
+    var head: usize = 0;
+    while (head < left_lines.len and head < right_lines.len and
+        std.mem.eql(u8, left_lines[head], right_lines[head])) : (head += 1)
+    {}
+    var tail: usize = 0;
+    while (tail < left_lines.len - head and tail < right_lines.len - head and
+        std.mem.eql(u8, left_lines[left_lines.len - 1 - tail], right_lines[right_lines.len - 1 - tail])) : (tail += 1)
+    {}
+    const core_left = left_lines[head .. left_lines.len - tail];
+    const core_right = right_lines[head .. right_lines.len - tail];
+
+    const script = try scriptFor(allocator, core_left, core_right, opts.max_edits, head, tail);
+    defer if (script) |sc| allocator.free(sc);
+    if (script == null) return .{ .unavailable = .too_large };
+    const ops = script.?;
 
     var left: std.ArrayList(Row) = .empty;
     errdefer left.deinit(allocator);
@@ -110,8 +117,8 @@ pub fn compute(
     var ri: u32 = 0;
     var changed: usize = 0;
     var i: usize = 0;
-    while (i < script.len) {
-        switch (script[i]) {
+    while (i < ops.len) {
+        switch (ops[i]) {
             .equal => {
                 try left.append(allocator, .{ .kind = .context, .line = li + 1, .text = left_lines[li] });
                 try right.append(allocator, .{ .kind = .context, .line = ri + 1, .text = right_lines[ri] });
@@ -125,8 +132,8 @@ pub fn compute(
                 var dels: usize = 0;
                 var adds: usize = 0;
                 var j = i;
-                while (j < script.len and script[j] != .equal) : (j += 1) {
-                    switch (script[j]) {
+                while (j < ops.len and ops[j] != .equal) : (j += 1) {
+                    switch (ops[j]) {
                         .delete => dels += 1,
                         .insert => adds += 1,
                         .equal => unreachable,
@@ -159,21 +166,77 @@ pub fn compute(
         right.deinit(allocator);
         return .unchanged;
     }
-    return .{ .compare = .{
-        .left = try left.toOwnedSlice(allocator),
-        .right = try right.toOwnedSlice(allocator),
-        .changed = changed,
-    } };
+    // **두 슬라이스를 한 리터럴에서 넘기지 않는다.** `toOwnedSlice`가 성공하는 순간 소유권이 리스트를
+    // 떠나므로, 왼쪽이 성공하고 오른쪽이 OOM이면 위의 `errdefer left.deinit`은 이미 빈 리스트를 해제한다 —
+    // 넘어간 슬라이스가 샌다. 하나씩 받아서 각자 errdefer를 건다.
+    //
+    // 지금 allocator에서는 이 경로가 실행되지 않는다(축소 `remap`이 성공해 재할당이 없어, 실패 주입
+    // 테스트로 이 형태를 되돌려도 통과한다). 그래도 계약은 실패할 수 있는 함수이므로 방어를 남긴다.
+    const left_rows = try left.toOwnedSlice(allocator);
+    errdefer allocator.free(left_rows);
+    const right_rows = try right.toOwnedSlice(allocator);
+    return .{ .compare = .{ .left = left_rows, .right = right_rows, .changed = changed } };
 }
 
 // ── Myers ───────────────────────────────────────────────────────────────────────
 
 const Op = enum { equal, delete, insert };
 
-/// 줄 단위 Myers(O(N·D)). 되짚기용 trace를 D단계마다 저장한다.
+/// 떼어 낸 접두/접미를 다시 붙여 **문서 전체**의 편집 스크립트를 만든다. 상한을 넘으면 `null`.
+fn scriptFor(
+    allocator: std.mem.Allocator,
+    a: []const []const u8,
+    b: []const []const u8,
+    max_edits: usize,
+    head: usize,
+    tail: usize,
+) error{OutOfMemory}!?[]Op {
+    // **한쪽이 비면 Myers가 필요 없다.** 새 파일·삭제된 파일이 그 경우이고, 에이전트 변경에서 가장 흔하다.
+    // 이것을 특수화하지 않으면 3,000줄 새 파일이 D=3,000짜리 탐색을 돌아 메모리를 수백 MB 먹는다(실측).
+    if (a.len == 0 or b.len == 0) {
+        const total = head + a.len + b.len + tail;
+        const out = try allocator.alloc(Op, total);
+        var i: usize = 0;
+        while (i < head) : (i += 1) out[i] = .equal;
+        for (a) |_| {
+            out[i] = .delete;
+            i += 1;
+        }
+        for (b) |_| {
+            out[i] = .insert;
+            i += 1;
+        }
+        while (i < total) : (i += 1) out[i] = .equal;
+        return out;
+    }
+
+    const core = myers(allocator, a, b, max_edits) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.TooManyEdits => return null,
+    };
+    defer allocator.free(core);
+
+    const out = try allocator.alloc(Op, head + core.len + tail);
+    @memset(out[0..head], .equal);
+    @memcpy(out[head .. head + core.len], core);
+    @memset(out[head + core.len ..], .equal);
+    return out;
+}
+
+/// 줄 단위 Myers(O(N·D) 시간). 되짚기용 trace를 D단계마다 저장하므로 **메모리는 O(D²)**다.
 ///
 /// **왜 Myers인가**: git의 xdiff도 Myers 계열이라 **최소 편집 횟수가 같다** — 목록의 `+N -N`(numstat)과
-/// 우리 결과의 변경 줄 수가 어긋나지 않는다(§7). 다른 것은 경계 위치뿐이고, 그 차이는 §7이 한계로 적었다.
+/// 우리 결과의 변경 줄 수가 어긋나지 않는다(§7, 실측 대조 테스트가 그것을 고정한다). 다른 것은 경계
+/// 위치뿐이고 그 차이는 §7이 한계로 적었다.
+///
+/// **상한은 메모리에서 역산한다.** 예전에는 편집 횟수에 임의의 상수(20,000)를 두었는데, 그 값이면
+/// trace가 **6.4 GB**(= (D+1)(2D+3)·8B)가 되어 상한이 아무것도 막지 못했다. 실측으로도 확인했다 —
+/// 1,500줄 전면 재작성(D=3,000)의 **피크 할당이 128~256 MiB**였다(allocator 한도를 걸어 이분 탐색).
+/// 지금은 예산(`max_trace_bytes`)에서 D를 역산하므로 상한이 실제로 메모리를 막는다.
+///
+/// **남은 한계**: 전면 재작성처럼 D가 큰 경우는 여전히 "보여 줄 수 없음"이다. 선형 공간 Myers
+/// (middle snake 분할 정복)를 쓰면 O(N+M) 공간으로 그것까지 그릴 수 있다 — 그 교체는 이 계약을
+/// 바꾸지 않으므로(같은 최소 스크립트) 필요해질 때 안에서 갈아 끼운다.
 fn myers(
     allocator: std.mem.Allocator,
     a: []const []const u8,
@@ -182,7 +245,8 @@ fn myers(
 ) error{ OutOfMemory, TooManyEdits }![]Op {
     const n: isize = @intCast(a.len);
     const m: isize = @intCast(b.len);
-    const max_d: isize = @intCast(@min(max_edits, a.len + b.len));
+    const budget_d = maxDForBudget(max_trace_bytes);
+    const max_d: isize = @intCast(@min(@min(max_edits, budget_d), a.len + b.len));
 
     // v[k]는 대각선 k에서 가장 멀리 간 x. 음수 k를 담으려 offset을 둔다.
     // **여유 둘을 더 잡는다.** `k == -d`일 때 `v[k+1]`을 읽는데 d가 0이면 그 인덱스가 1이라, 딱 맞게
@@ -201,7 +265,10 @@ fn myers(
 
     var d: isize = 0;
     while (d <= max_d) : (d += 1) {
-        try trace.append(allocator, try allocator.dupe(isize, v));
+        // **자리를 먼저 잡고 복사한다.** `append(dupe(...))`로 쓰면 복사는 성공하고 append가 OOM일 때
+        // 그 복사본에 주인이 없다(할당 실패 주입 테스트가 잡았다).
+        try trace.ensureUnusedCapacity(allocator, 1);
+        trace.appendAssumeCapacity(try allocator.dupe(isize, v));
         var k: isize = -d;
         while (k <= d) : (k += 2) {
             const idx: usize = @intCast(k + offset);
@@ -220,6 +287,24 @@ fn myers(
         }
     }
     return error.TooManyEdits;
+}
+
+/// trace가 쓸 수 있는 최대 바이트. **이 값이 실질 상한이다** — D는 여기서 역산된다.
+///
+/// 64 MiB면 D ≈ 2,000(줄 2,000개가 통째로 바뀌는 규모)까지 그린다. 그보다 큰 차이는 "보여 줄 수 없음"이고,
+/// 그것이 **수 GB를 잡고 죽는 것보다 낫다**. 숫자는 잠정이며 선형 공간 Myers가 들어오면 사라진다.
+pub const max_trace_bytes: usize = 64 << 20;
+
+/// trace 메모리 `(D+1)·(2D+3)·8B`가 예산에 들어가는 최대 D.
+fn maxDForBudget(bytes: usize) usize {
+    var lo: usize = 0;
+    var hi: usize = 100_000;
+    while (lo < hi) {
+        const mid = lo + (hi - lo + 1) / 2;
+        const need = (mid + 1) *| (2 * mid + 3) *| @sizeOf(isize);
+        if (need <= bytes) lo = mid else hi = mid - 1;
+    }
+    return lo;
 }
 
 /// trace를 거꾸로 훑어 편집 스크립트를 만든다.
@@ -279,6 +364,87 @@ fn expectView(v: View, comptime tag: std.meta.Tag(View)) !void {
     try testing.expectEqual(tag, std.meta.activeTag(v));
 }
 
+/// 좌·우 **양쪽**에 거는 불변식. 한쪽만 보면 반대쪽이 깨져도 통과한다 — 실제로 적대적 검증에서
+/// "왼쪽 filler에 번호를 붙이는" 뮤턴트가 오른쪽만 보던 테스트를 그대로 통과했다.
+fn expectRowInvariants(rows: Rows) !void {
+    try testing.expectEqual(rows.left.len, rows.right.len); // 같은 인덱스 = 같은 화면 높이
+    for (rows.left) |r| try expectLineMatchesKind(r);
+    for (rows.right) |r| try expectLineMatchesKind(r);
+    // 같은 행에서 양쪽이 동시에 filler인 자리는 없다(둘 다 비면 그 행은 존재할 이유가 없다).
+    for (rows.left, rows.right) |l, r| try testing.expect(!(l.kind == .filler and r.kind == .filler));
+}
+
+fn expectLineMatchesKind(r: Row) !void {
+    switch (r.kind) {
+        .filler => {
+            try testing.expect(r.line == null); // 없는 줄에 번호를 붙이면 거짓이다
+            try testing.expectEqual(@as(usize, 0), r.text.len);
+        },
+        .context, .added, .removed => try testing.expect(r.line != null),
+    }
+}
+
+test "할당이 어디서 실패해도 새지 않는다 — 실패 지점을 전부 주입한다" {
+    // **손으로 고른 실패 지점은 놓친다.** 실제로 이 테스트가 `myers`의 누수를 잡았다 —
+    // `trace.append(allocator, try allocator.dupe(...))`는 복사가 성공하고 append가 OOM일 때
+    // 그 복사본을 아무도 해제하지 않는다. 눈으로 읽어서는 넘어갔던 줄이다.
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, left: []const []const u8, right: []const []const u8) !void {
+            var v = try compute(allocator, left, right, .{});
+            defer if (v == .compare) v.compare.deinit(allocator);
+        }
+    };
+    const left: []const []const u8 = &.{ "머리", "가운데", "바뀐다", "꼬리" };
+    const right: []const []const u8 = &.{ "머리", "가운데", "바뀌었다", "하나 더", "꼬리" };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{ left, right });
+}
+
+test "상한이 실제로 메모리를 막는다 — 큰 재작성에서 OOM 대신 '보여 줄 수 없음'이 나온다" {
+    // **예전 상한은 아무것도 막지 못했다.** 편집 횟수에 임의의 상수를 두었는데 trace는 O(D²)라,
+    // 그 값이면 수 GB가 필요했다(1,500줄 전면 재작성의 피크 할당 128~256 MiB — allocator 한도를 걸어
+    // 이분 탐색으로 쟀다). 지금은 예산에서 D를 역산한다.
+    //
+    // **이 테스트는 "느리지 않다"가 아니라 "죽지 않는다"를 본다** — 예산보다 빠듯한 allocator를 주고,
+    // OOM으로 터지지 않고 typed 상태로 빠져나오는지 확인한다.
+    var da = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    defer _ = da.deinit();
+    da.requested_memory_limit = max_trace_bytes + (16 << 20); // 예산 + 여유
+    const a = da.allocator();
+
+    const n = 4000; // 예산이 감당하는 D(≈2,000)를 훌쩍 넘는 전면 재작성
+    const left = try a.alloc([]const u8, n);
+    defer a.free(left);
+    const right = try a.alloc([]const u8, n);
+    defer a.free(right);
+    for (left, 0..) |*l, i| l.* = if (i % 2 == 0) "aaaa" else "bbbb";
+    for (right, 0..) |*r, i| r.* = if (i % 2 == 0) "cccc" else "dddd";
+
+    var v = try compute(a, left, right, .{});
+    defer if (v == .compare) v.compare.deinit(a);
+    try expectView(v, .unavailable);
+    try testing.expectEqual(Unavailable.too_large, v.unavailable);
+}
+
+test "새 파일은 상한과 무관하게 그려진다 — 한쪽이 비면 Myers가 필요 없다" {
+    // 에이전트 변경에서 가장 흔한 모양이다. 특수화가 없으면 3,000줄 새 파일이 D=3,000짜리 탐색을 돌아
+    // 예산에 걸려 "보여 줄 수 없음"이 된다 — 정상 파일을 못 보여 주는 셈이다.
+    var da = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    defer _ = da.deinit();
+    da.requested_memory_limit = 4 << 20; // 아주 빠듯하게
+    const a = da.allocator();
+
+    const n = 3000;
+    const right = try a.alloc([]const u8, n);
+    defer a.free(right);
+    for (right, 0..) |*r, i| r.* = if (i % 2 == 0) "line a" else "line b";
+
+    var v = try compute(a, &.{}, right, .{});
+    defer if (v == .compare) v.compare.deinit(a);
+    try expectView(v, .compare);
+    try testing.expectEqual(@as(usize, n), v.compare.right.len);
+    for (v.compare.left) |r| try testing.expectEqual(RowKind.filler, r.kind);
+}
+
 test "같은 내용이면 변경 없음 — 빈 화면이 아니라 상태로 말한다" {
     const a = [_][]const u8{ "one", "two", "" };
     var v = try compute(testing.allocator, &a, &a, .{});
@@ -293,7 +459,7 @@ test "한쪽이 비어 있어도 대응이 선다 — 새 파일" {
     try expectView(v, .compare);
     const rows = v.compare;
     try testing.expectEqual(@as(usize, 2), rows.left.len);
-    try testing.expectEqual(rows.left.len, rows.right.len); // 불변식
+    try expectRowInvariants(rows);
     for (rows.left) |r| try testing.expectEqual(RowKind.filler, r.kind);
     try testing.expectEqual(RowKind.added, rows.right[0].kind);
     try testing.expectEqual(@as(u32, 1), rows.right[0].line.?);
@@ -308,7 +474,7 @@ test "가운데 줄만 바뀌면 그 줄만 짝이 되고 나머지는 context�
     try expectView(v, .compare);
     const rows = v.compare;
     try testing.expectEqual(@as(usize, 3), rows.left.len);
-    try testing.expectEqual(rows.left.len, rows.right.len);
+    try expectRowInvariants(rows);
     try testing.expectEqual(RowKind.context, rows.left[0].kind);
     // **같은 높이에 removed/added가 선다** — 그래야 "이 줄이 저 줄로 바뀌었다"로 읽힌다.
     try testing.expectEqual(RowKind.removed, rows.left[1].kind);
@@ -324,7 +490,7 @@ test "줄 번호는 각자 문서를 가리키고 filler에는 없다" {
     var v = try compute(testing.allocator, &a, &b, .{});
     defer if (v == .compare) v.compare.deinit(testing.allocator);
     const rows = v.compare;
-    try testing.expectEqual(rows.left.len, rows.right.len);
+    try expectRowInvariants(rows);
 
     var saw_removed = false;
     for (rows.left, rows.right) |l, r| {
@@ -348,7 +514,7 @@ test "삭제가 추가보다 많으면 남는 쪽에 filler가 선다" {
     defer if (v == .compare) v.compare.deinit(testing.allocator);
     const rows = v.compare;
     try testing.expectEqual(@as(usize, 3), rows.left.len);
-    try testing.expectEqual(rows.left.len, rows.right.len);
+    try expectRowInvariants(rows);
     try testing.expectEqual(RowKind.added, rows.right[0].kind);
     try testing.expectEqual(RowKind.filler, rows.right[1].kind);
     try testing.expectEqual(RowKind.filler, rows.right[2].kind);
@@ -379,6 +545,94 @@ test "총 변경 줄 수가 최소 편집 횟수와 같다 — 목록의 +N -N�
     for (rows.right) |r| added += @intFromBool(r.kind == .added);
     try testing.expectEqual(@as(usize, 1), removed); // "2" 하나
     try testing.expectEqual(@as(usize, 2), added); // "9"와 "5"
+}
+
+test "git diff --numstat과 총 변경 줄 수가 같다 — §7이 그 근거로 자체 differ를 택했다" {
+    // **실측 대조다.** 아래 기대값은 같은 내용을 실제 저장소에 넣고 `git diff --numstat`이 낸 숫자다
+    // (2026-08-14, git이 준 `추가 삭제`). §7이 옛 규칙을 뒤집으며 든 근거가 *"둘 다 최소 diff라 총량이
+    // 같다"*였으므로, 그 근거가 실제로 성립하는지를 여기서 고정한다. 어긋나면 §7의 판단이 틀린 것이다.
+    //
+    // 케이스는 **총량이 갈릴 만한 자리**로 골랐다: 이동된 블록·중복 줄·전면 재작성·접두접미 동일.
+    const Case = struct {
+        name: []const u8,
+        a: []const []const u8,
+        b: []const []const u8,
+        git_added: usize,
+        git_removed: usize,
+    };
+    const cases = [_]Case{
+        .{ .name = "가운데 치환", .a = &.{ "keep", "old", "tail", "" }, .b = &.{ "keep", "new", "tail", "" }, .git_added = 1, .git_removed = 1 },
+        .{ .name = "블록 이동", .a = &.{ "A", "B", "C", "D", "" }, .b = &.{ "C", "D", "A", "B", "" }, .git_added = 2, .git_removed = 2 },
+        .{ .name = "중복 줄", .a = &.{ "x", "x", "x", "y", "" }, .b = &.{ "x", "y", "x", "x", "" }, .git_added = 1, .git_removed = 1 },
+        .{ .name = "전면 재작성", .a = &.{ "1", "2", "3", "" }, .b = &.{ "a", "b", "c", "" }, .git_added = 3, .git_removed = 3 },
+        .{ .name = "접두접미 동일", .a = &.{ "h", "m1", "m2", "t", "" }, .b = &.{ "h", "m2", "m1", "t", "" }, .git_added = 1, .git_removed = 1 },
+    };
+    for (cases) |c| {
+        var v = try compute(testing.allocator, c.a, c.b, .{});
+        defer if (v == .compare) v.compare.deinit(testing.allocator);
+        try testing.expect(v == .compare);
+        var added: usize = 0;
+        var removed: usize = 0;
+        for (v.compare.left) |r| removed += @intFromBool(r.kind == .removed);
+        for (v.compare.right) |r| added += @intFromBool(r.kind == .added);
+        testing.expectEqual(c.git_added, added) catch |e| {
+            std.debug.print("[{s}] 추가: git={d} 우리={d}\n", .{ c.name, c.git_added, added });
+            return e;
+        };
+        testing.expectEqual(c.git_removed, removed) catch |e| {
+            std.debug.print("[{s}] 삭제: git={d} 우리={d}\n", .{ c.name, c.git_removed, removed });
+            return e;
+        };
+    }
+}
+
+test "2,000줄 규모에서도 git과 같은 수를 낸다 — 작은 예제만으로는 못 믿을 주장이다" {
+    // **작은 예제 다섯 개로는 §7의 근거가 서지 않는다.** 위 대조는 한두 줄짜리라 어떤 알고리즘이든
+    // 같은 답을 낸다. 여기서는 반복 줄이 많은 2,000줄 파일에 200군데 수정과 60군데 삽입을 섞는다 —
+    // 휴리스틱이 갈리기 쉬운 모양이다.
+    //
+    // 기준선은 실제 git이 같은 내용에 대해 낸 값이다(`git diff --numstat` → `250\t190`, 즉 추가 250 ·
+    // 삭제 190). 내용을 여기서 **결정적으로 생성**하므로 픽스처 파일이 필요 없다.
+    //
+    // **주의**: numstat 열 순서는 `추가<TAB>삭제`다. 반대로 읽으면 대칭 예제에서는 티가 안 나고
+    // 이런 비대칭 예제에서만 틀린다.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var a: std.ArrayList([]const u8) = .empty;
+    var b: std.ArrayList([]const u8) = .empty;
+    var prng = std.Random.DefaultPrng.init(20260814);
+    const rnd = prng.random();
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        const line = try std.fmt.allocPrint(alloc, "{s}{d}", .{ if (i % 3 == 0) "y" else "x", i % 40 });
+        try a.append(alloc, line);
+        try b.append(alloc, line);
+    }
+    var n: usize = 0;
+    while (n < 200) : (n += 1) {
+        const idx = rnd.uintLessThan(usize, b.items.len);
+        b.items[idx] = try std.fmt.allocPrint(alloc, "CHANGED{d}", .{idx});
+    }
+    n = 0;
+    while (n < 60) : (n += 1) {
+        const idx = rnd.uintLessThan(usize, b.items.len);
+        try b.insert(alloc, idx, try std.fmt.allocPrint(alloc, "INS{d}", .{idx}));
+    }
+
+    const v = try compute(alloc, a.items, b.items, .{});
+    try expectView(v, .compare);
+    var removed: usize = 0;
+    var added: usize = 0;
+    for (v.compare.left) |r| {
+        if (r.kind == .removed) removed += 1;
+    }
+    for (v.compare.right) |r| {
+        if (r.kind == .added) added += 1;
+    }
+    try testing.expectEqual(@as(usize, 250), added);
+    try testing.expectEqual(@as(usize, 190), removed);
 }
 
 test "빈 문서 둘은 변경 없음이다" {

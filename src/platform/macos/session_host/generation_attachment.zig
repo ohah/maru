@@ -854,6 +854,29 @@ pub const GenerationAttachment = struct {
         return self.payloadMut().pumpScreen(io);
     }
 
+    pub fn armReadPumpPoisonCapture(
+        self: *GenerationAttachment,
+        capture: *maru.observability.incident_publication_contract.ReadPumpPoisonCapture,
+        timestamp_ns: i128,
+        controller_generation: u64,
+    ) @import("generation_batch_adapter.zig").Error!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.MovedOrCopied;
+        try self.batch_adapter.armReadPumpPoisonCapture(
+            capture,
+            timestamp_ns,
+            controller_generation,
+        );
+    }
+
+    pub fn disarmReadPumpPoisonCapture(
+        self: *GenerationAttachment,
+        capture: *maru.observability.incident_publication_contract.ReadPumpPoisonCapture,
+    ) void {
+        if (!self.valid() or self.lifecycle != .attached)
+            @panic("read pump poison attachment authority drifted");
+        self.batch_adapter.disarmReadPumpPoisonCapture(capture);
+    }
+
     pub fn applyValidatedRevokedAndFence(
         self: *GenerationAttachment,
         generation: u64,

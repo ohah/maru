@@ -1707,10 +1707,86 @@ pub const RemoteRuntime = struct {
     /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
     pub const PumpResult = enum { idle, event_pending, metadata, screen, ended };
 
+    fn publishReadPumpPoisonCapture(
+        self: *RemoteRuntime,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+        timestamp: app_process_incident_owner.PublicationTimestampReceipt,
+    ) client_mod.ClientError!void {
+        if (capture.self_addr != @intFromPtr(capture) or
+            capture.timestamp_ns != timestamp.timestamp_ns or
+            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            capture.reason_present_raw != 1 or
+            std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null or
+            capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized))
+            return error.ProtocolError;
+        const generation = switch (self.attachment) {
+            .legacy => return error.ProtocolError,
+            .generation => |*value| value,
+        };
+        const adapter = self.generationConnection() orelse return error.ProtocolError;
+        if (capture.batch_adapter_addr != @intFromPtr(&generation.batch_adapter) or
+            capture.slot_addr != @intFromPtr(&adapter.slot) or
+            capture.controller_generation != self.attachment.statePtr().controller_generation or
+            capture.client_addr != @intFromPtr(adapter.slot.logicalClient()))
+            return error.ProtocolError;
+        var prepared: incident_publication_contract.PreparedManagedPoison = .{};
+        adapter.prepareManagedPoisonRequest(capture.timestamp_ns, .{
+            .reason_raw = capture.reason_raw,
+            .source_site_raw = capture.source_site_raw,
+            .controller_generation = capture.controller_generation,
+        }, &prepared) catch return error.ProtocolError;
+        _ = app_process_incident_owner.publishPreparedManagedPoison(
+            adapter,
+            &prepared,
+            timestamp,
+        ) catch return error.ProtocolError;
+    }
+
     pub fn pumpDelta(
         self: *RemoteRuntime,
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
         try self.admitRuntimeOperation();
+        switch (self.attachment) {
+            .legacy => return self.pumpDeltaInner(),
+            .generation => {},
+        }
+        const timestamp = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+            if (builtin.is_test and err == error.InvalidOwner) return self.pumpDeltaInner();
+            return error.ProtocolError;
+        };
+        var capture: incident_publication_contract.ReadPumpPoisonCapture = .{};
+        const generation = switch (self.attachment) {
+            .legacy => unreachable,
+            .generation => |*value| value,
+        };
+        generation.armReadPumpPoisonCapture(
+            &capture,
+            timestamp.timestamp_ns,
+            self.attachment.statePtr().controller_generation,
+        ) catch return error.ProtocolError;
+        const result = self.pumpDeltaInner() catch |err| {
+            generation.disarmReadPumpPoisonCapture(&capture);
+            if (capture.reason_present_raw == 1) {
+                try self.publishReadPumpPoisonCapture(&capture, timestamp);
+                return err;
+            }
+            if (capture.reason_present_raw != 0 or capture.reason_raw != 0)
+                return error.ProtocolError;
+            return err;
+        };
+        generation.disarmReadPumpPoisonCapture(&capture);
+        if (capture.reason_present_raw == 1) {
+            try self.publishReadPumpPoisonCapture(&capture, timestamp);
+            return error.ConnectionClosed;
+        }
+        if (capture.reason_present_raw != 0 or capture.reason_raw != 0)
+            return error.ProtocolError;
+        return result;
+    }
+
+    fn pumpDeltaInner(
+        self: *RemoteRuntime,
+    ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
         // Revoke/ended events fence mutation. Consume already-buffered authority events before
         // advancing any input/control that was accepted on a previous UI turn.
         var events = self.drainObservationEvents() catch |err| switch (err) {
@@ -6874,6 +6950,102 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     );
     try testing.expectEqual(
         @intFromEnum(connection_incident.SourceSite.client_response),
+        pre_publication.source_site_raw,
+    );
+    try testing.expectEqual(runtime.attachment.statePtr().controller_generation, pre_publication.controller_generation);
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.connection_eof, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
+    try testing.expect(!std.mem.eql(
+        u8,
+        &published.incident_repeat_key.fingerprint,
+        &([_]u8{0} ** 32),
+    ));
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+}
+
+test "CR0b actual read event pump poison은 canonical suffix를 호출한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC032);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    // Keep the peer's read half alive so the pre-read output pump cannot race the EOF path.
+    // Only the peer write half closes: the actual generation read must therefore observe EOF.
+    try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC033,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    runtime.pump_ended = false;
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+    try testing.expectError(error.ConnectionClosed, runtime.pumpDelta());
+
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expect(pre_publication.client_was_usable);
+    try testing.expectEqual(fds[0], pre_publication.fd);
+    try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
+    try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.SourceSite.client_read),
         pre_publication.source_site_raw,
     );
     try testing.expectEqual(runtime.attachment.statePtr().controller_generation, pre_publication.controller_generation);

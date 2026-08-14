@@ -7,11 +7,27 @@ const std = @import("std");
 const client_mod = @import("client.zig");
 const client_poison = @import("client_poison.zig");
 const client_slot_mod = @import("client_slot.zig");
+const incident_publication_contract = @import("maru").observability.incident_publication_contract;
 const generation_batch_registry = @import("generation_batch_registry.zig");
 const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_attachment = @import("remote_attachment.zig");
 
 const Lifecycle = enum(u8) { pristine, prepared, live, draining, terminal };
+
+const ReadPumpPoisonBinding = struct {
+    adapter_addr: usize = 0,
+    capture_addr: usize = 0,
+};
+
+threadlocal var read_pump_poison_binding: ReadPumpPoisonBinding = .{};
+
+fn rangesOverlapTyped(a: anytype, b: anytype) bool {
+    const a_start = @intFromPtr(a);
+    const b_start = @intFromPtr(b);
+    const a_end = std.math.add(usize, a_start, @sizeOf(@TypeOf(a.*))) catch return true;
+    const b_end = std.math.add(usize, b_start, @sizeOf(@TypeOf(b.*))) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
 
 pub const Error = error{
     DestinationOccupied,
@@ -29,6 +45,59 @@ pub const GenerationBatchAdapter = struct {
     stream_id: u64 = 0,
     owner_thread_id: std.Thread.Id = 0,
     lifecycle: Lifecycle = .pristine,
+
+    pub fn armReadPumpPoisonCapture(
+        self: *GenerationBatchAdapter,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+        timestamp_ns: i128,
+        controller_generation: u64,
+    ) Error!void {
+        const slot = self.borrowSlot(.live) orelse return error.MovedOrCopied;
+        if (!std.meta.eql(read_pump_poison_binding, ReadPumpPoisonBinding{}) or
+            timestamp_ns < 0 or controller_generation == 0 or
+            rangesOverlapTyped(capture, self) or rangesOverlapTyped(capture, slot) or
+            rangesOverlapTyped(capture, slot.current) or
+            rangesOverlapTyped(capture, &slot.current.client) or
+            !std.meta.eql(capture.*, incident_publication_contract.ReadPumpPoisonCapture{}))
+            return error.InvalidState;
+        capture.* = .{
+            .self_addr = @intFromPtr(capture),
+            .batch_adapter_addr = @intFromPtr(self),
+            .slot_addr = @intFromPtr(slot),
+            .client_addr = @intFromPtr(&slot.current.client),
+            .timestamp_ns = timestamp_ns,
+            .controller_generation = controller_generation,
+            .source_site_raw = @intFromEnum(@import("maru").observability.connection_incident.SourceSite.client_read),
+            .lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed),
+        };
+        read_pump_poison_binding = .{
+            .adapter_addr = @intFromPtr(self),
+            .capture_addr = @intFromPtr(capture),
+        };
+        if (!slot.beginReadPumpPoisonCapture(capture)) {
+            read_pump_poison_binding = .{};
+            capture.* = .{};
+            return error.InvalidState;
+        }
+    }
+
+    pub fn disarmReadPumpPoisonCapture(
+        self: *GenerationBatchAdapter,
+        capture: *incident_publication_contract.ReadPumpPoisonCapture,
+    ) void {
+        if (read_pump_poison_binding.adapter_addr != @intFromPtr(self) or
+            read_pump_poison_binding.capture_addr != @intFromPtr(capture) or
+            capture.self_addr != @intFromPtr(capture) or
+            capture.batch_adapter_addr != @intFromPtr(self) or
+            (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)))
+            @panic("read pump poison binding authority drifted");
+        const slot = self.borrowLiveOrDraining() orelse
+            @panic("read pump poison slot authority lost");
+        slot.endReadPumpPoisonCapture(capture);
+        read_pump_poison_binding = .{};
+        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized);
+    }
 
     pub fn initPreparedInPlace(
         out: *GenerationBatchAdapter,

@@ -58,6 +58,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(generation_transport);
     const generation_attachment = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
     defer allocator.free(generation_attachment);
+    const generation_batch_adapter = try readSource(allocator, "src/platform/macos/session_host/generation_batch_adapter.zig");
+    defer allocator.free(generation_batch_adapter);
     const app_host_abi = try readSource(allocator, "src/platform/macos/app_host_abi.zig");
     defer allocator.free(app_host_abi);
     const app_host_header = try readSource(allocator, "src/platform/macos/app_host_abi.h");
@@ -178,12 +180,12 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publicationTimestampReceipt("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const publication_port_testing_api = if (@import(\"builtin\").is_test) struct"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn install(owner: *AppProcessIncidentOwner) Error!void"));
-    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
+    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PrePublicationSnapshot = PreparedPublicationSnapshot"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn armPrePublicationSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn disarmPrePublicationSnapshot() void"));
-    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
-    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
+    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
+    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "const incident_publication_port = session_host.app_process_incident_owner;"));
     try std.testing.expectEqual(@as(usize, 3), count(app_session, "incident_publication_port.publication_port_testing_api.driftSeal()"));
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.publication_port_testing_api.reset()"));
@@ -224,14 +226,60 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b prepared execution poison은"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b actual read event pump poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b allocator callback deferred poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b registered operation deferred poison은"));
-    try std.testing.expectEqual(@as(usize, 2), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
-    try std.testing.expectEqual(@as(usize, 2), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
+    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.attachment.callDecoded("));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const PreparedExecutionPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const RegisteredOperationPoisonCapture = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCapture = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCaptureLifecycle = enum(u8)"));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "reason_present_raw: u8 = 0"));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn beginReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn endReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "fn captureReadPumpPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "self.captureReadPumpPoison(reason)"));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn beginReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn endReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "fn readAttachmentBatchInternal("));
+    try std.testing.expectEqual(@as(usize, 1), count(generation_batch_adapter, "pub fn armReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(generation_batch_adapter, "pub fn disarmReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(generation_batch_adapter, "ReadPumpPoisonCaptureLifecycle.finalized"));
+    try std.testing.expectEqual(@as(usize, 1), count(generation_attachment, "pub fn armReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(generation_attachment, "pub fn disarmReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "fn publishReadPumpPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "fn pumpDeltaInner("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "ReadPumpPoisonCaptureLifecycle.finalized"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, ".legacy => return self.pumpDeltaInner()"));
+    inline for (.{
+        "beginReadPumpPoisonCapture(",
+        "endReadPumpPoisonCapture(",
+    }) |capture_api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            capture_api,
+            "platform/macos/session_host/client.zig",
+            "platform/macos/session_host/client_slot.zig",
+            "platform/macos/session_host/generation_batch_adapter.zig",
+        ),
+    );
+    inline for (.{
+        "armReadPumpPoisonCapture(",
+        "disarmReadPumpPoisonCapture(",
+    }) |capture_api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            capture_api,
+            "platform/macos/session_host/generation_batch_adapter.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub const PreparedExecutionPoisonCaptureRequest = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "allocator_source_site_raw"));
     try std.testing.expectEqual(@as(usize, 7), count(client_slot, "allocator_source_site_raw"));
@@ -285,7 +333,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         try countProductSourcesExcept(allocator, "app_process_incident_owner.zig", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(
-        @as(usize, 5),
+        @as(usize, 6),
         try countProductSourcesExcept(allocator, "AppProcessIncidentOwner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(

@@ -1523,17 +1523,6 @@ const TermRuntime = struct {
     handle: app.TermRuntimeHandle = 0,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
-    /// host-backed Term에서 마지막으로 처리한 BEL 누적 횟수(관측 `bell_count` 미러). 로컬은 core의 소비형
-    /// `takeBell()`을 쓰므로 이 값을 안 쓴다 — 원격은 full-state 관측이라 소비형 플래그를 실을 수 없어 카운터
-    /// delta로 판정한다(docs/persistent-session-host.md §기능을 어느 쪽에 둘 것인가).
-    /// null이면 **아직 기준선을 안 잡았다**는 뜻이다. 0으로 두면 재접속 때 host의 누적값(예: 12)이 곧바로 "증가"로
-    /// 보여 이미 지나간 벨·클립보드 요청이 재생된다 — read 요청이 재생되면 **사용자 클립보드가 복원된 셸에 주입**된다.
-    /// 첫 관측에서 현재 값으로 시딩하고 발화하지 않는다.
-    last_bell_count: ?u64 = null,
-    /// host-backed OSC 52 요청 seq 중 이미 처리한 값(관측 미러). 벨과 같은 delta 판정이며, host live-upgrade로
-    /// seq가 0에서 재시작하면 감소를 재동기화로 보고 요청으로 오인하지 않는다.
-    last_clipboard_write_seq: ?u64 = null,
-    last_clipboard_read_seq: ?u64 = null,
     // workspace restore staging에서 **기존** host runtime에 attach한 Term. publish 전 rollback은 이 runtime을 종료하면
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
@@ -11805,20 +11794,11 @@ pub const AppSession = struct {
         // provideClipboardRead가 PTY로 쓰므로(원격이면 host PTY) 추가 왕복이 필요 없다.
         if (is_macos and s.remote != null) {
             const term = pane_ops.activePane(self).activeTerm();
-            const seq = term.rt.observation.clipboard_read_seq;
-            const last = term.rt.last_clipboard_read_seq orelse {
-                // 첫 관측은 기준선만 잡는다. 이게 없으면 재접속 때 host의 누적 read seq가 곧바로 요청으로 보여
-                // **사용자 클립보드가 복원된 셸의 입력 줄에 주입**된다(요청자는 이미 사라진 상태).
-                term.rt.last_clipboard_read_seq = seq;
-                return false;
-            };
-            if (seq <= last) {
-                term.rt.last_clipboard_read_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
-                return false;
-            }
-            term.rt.last_clipboard_read_seq = seq;
+            const rb = &(app_remote_backend orelse return false);
+            const target = rb.takeClipboardReadFor(term.rt.handle) orelse return false;
+            defer rb.allocator.free(target);
             self.clipboard_read_target_buf.clearRetainingCapacity();
-            self.clipboard_read_target_buf.appendSlice(self.allocator, term.rt.observation.clipboard_read_target.items) catch {};
+            self.clipboard_read_target_buf.appendSlice(self.allocator, target) catch {};
             return self.loaded_config.config.osc52.read == .allow; // deny면 클립보드 안 읽음(로컬과 같은 판정)
         }
         s.lockCore(self.io);
@@ -52741,6 +52721,43 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     try std.testing.expect(geom.h > 0); // thumb이 실제로 그려질 크기를 가진다
 }
 
+fn installCr2d3EventRuntime(runtime: *session_host.remote_runtime.RemoteRuntime, handle: app.TermRuntimeHandle) !void {
+    try std.testing.expect(app_remote_backend == null and app_remote_host_pool == null);
+    app_remote_host_pool = RemoteHostPool.init(std.testing.allocator);
+    errdefer {
+        app_remote_host_pool.?.deinit();
+        app_remote_host_pool = null;
+    }
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
+        std.testing.allocator,
+        std.Io.Threaded.global_single_threaded.io(),
+        &app_remote_host_pool.?,
+        &app_runtime.routing,
+    );
+    errdefer {
+        app_remote_backend.?.deinit();
+        app_remote_backend = null;
+    }
+    try session_host.remote_term_backend.RemoteTermBackend.testing_api.installEventCursorRuntime(
+        &app_remote_backend.?,
+        handle,
+        runtime,
+    );
+}
+
+fn removeCr2d3EventRuntime(handle: app.TermRuntimeHandle) void {
+    if (app_remote_backend) |*backend| {
+        if (!session_host.remote_term_backend.RemoteTermBackend.testing_api.removeEventCursorRuntime(backend, handle))
+            @panic("CR2d3 event runtime fixture lost its row");
+        backend.deinit();
+        app_remote_backend = null;
+    }
+    if (app_remote_host_pool) |*pool| {
+        pool.deinit();
+        app_remote_host_pool = null;
+    }
+}
+
 // host-backed 벨 회귀 가드. host core가 BEL을 파싱해도 client로 나갈 통로가 없어 원격 세션에서 벨(소리·시각 flash·
 // Dock 배지)이 통째로 무동작이었다. 이제 host가 관측에 누적 카운터를 실어 보내고 client가 delta로 판정한다.
 // 소비형 bool이 아니라 카운터인 이유와, host live-upgrade로 카운터가 리셋될 때 가짜 벨이 울리지 않아야 한다는
@@ -52764,7 +52781,15 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
-    term.rt.observation.availability = .current;
+    const handle: app.TermRuntimeHandle = 0xD301;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    runtime.event_cursor = .{};
+    runtime.generation.observation = .{ .observer_generation = 1 };
+    try installCr2d3EventRuntime(&runtime, handle);
+    defer removeCr2d3EventRuntime(handle);
     session.audible_bell = true;
 
     // 카운터 변화 없음 → 안 울린다.
@@ -52773,7 +52798,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // host가 벨을 실어 보내면(1회) 울린다 — 예전에는 placeholder core라 통째로 무동작이었다.
-    term.rt.observation.bell_count = 1;
+    runtime.generation.observation.bell_count = 1;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 
@@ -52782,16 +52807,16 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // 여러 번 울린 뒤 한 번에 관측이 오면 1회로 합친다(로컬 bool 합침과 같은 동작).
-    term.rt.observation.bell_count = 5;
+    runtime.generation.observation.bell_count = 5;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 
     // host live-upgrade(exec)로 카운터가 0에서 다시 시작 → **가짜 벨을 울리지 않고** 조용히 맞춘다.
-    term.rt.observation.bell_count = 0;
+    runtime.generation.observation.bell_count = 0;
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBell(session));
     // 재동기화 후 새 벨은 정상 동작한다.
-    term.rt.observation.bell_count = 1;
+    runtime.generation.observation.bell_count = 1;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 }
@@ -52819,15 +52844,24 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
-    term.rt.observation.availability = .current;
+    const handle: app.TermRuntimeHandle = 0xD302;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    runtime.event_cursor = .{};
+    runtime.generation.observation = .{ .observer_generation = 1 };
+    try installCr2d3EventRuntime(&runtime, handle);
+    defer removeCr2d3EventRuntime(handle);
 
     // 요청 없음 → false.
     try std.testing.expect(!session.takeClipboardReadRequest());
 
     // host가 read 요청을 알리고 target을 실어 준다. 기본 정책은 deny라 **클립보드를 읽지 않는다**(탈취 방지).
     session.loaded_config.config.osc52.read = .deny;
-    term.rt.observation.clipboard_read_seq = 1;
-    try term.rt.observation.clipboard_read_target.appendSlice(allocator, "p");
+    runtime.generation.observation.clipboard_read_seq = 1;
+    try runtime.generation.observation.clipboard_read_target.appendSlice(allocator, "p");
+    defer runtime.generation.observation.clipboard_read_target.deinit(allocator);
     try std.testing.expect(!session.takeClipboardReadRequest());
 
     // 같은 seq는 재트리거하지 않는다(full-state 관측이 반복 전송돼도 중복 요청 금지).
@@ -52835,12 +52869,12 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     try std.testing.expect(!session.takeClipboardReadRequest());
 
     // 새 요청 + allow → true(Swift가 클립보드를 읽어 provideClipboardRead로 응답), target도 캡처된다.
-    term.rt.observation.clipboard_read_seq = 2;
+    runtime.generation.observation.clipboard_read_seq = 2;
     try std.testing.expect(session.takeClipboardReadRequest());
     try std.testing.expectEqualStrings("p", session.clipboard_read_target_buf.items);
 
     // host live-upgrade(exec)로 seq가 0에서 재시작 → 요청으로 오인하지 않는다.
-    term.rt.observation.clipboard_read_seq = 0;
+    runtime.generation.observation.clipboard_read_seq = 0;
     try std.testing.expect(!session.takeClipboardReadRequest());
 }
 
@@ -52866,26 +52900,34 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
-    term.rt.observation.availability = .current;
+    const handle: app.TermRuntimeHandle = 0xD303;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    runtime.event_cursor = .{};
+    runtime.generation.observation = .{ .observer_generation = 1 };
+    try installCr2d3EventRuntime(&runtime, handle);
+    defer removeCr2d3EventRuntime(handle);
     session.audible_bell = true;
     session.loaded_config.config.osc52.read = .allow;
 
     // 재접속 상황: host는 이미 벨 12회·read 5회를 누적한 상태다. 첫 관측이 그대로 들어온다.
-    term.rt.observation.bell_count = 12;
-    term.rt.observation.clipboard_read_seq = 5;
-    term.rt.observation.clipboard_write_seq = 9;
+    runtime.generation.observation.bell_count = 12;
+    runtime.generation.observation.clipboard_read_seq = 5;
+    runtime.generation.observation.clipboard_write_seq = 9;
 
     _ = notification_ops.takeBell(session);
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBell(session)); // 지난 벨을 울리지 않는다
     try std.testing.expect(!session.takeClipboardReadRequest()); // 클립보드를 읽지 않는다(유출 금지)
-    try std.testing.expectEqual(@as(usize, 0), term_ops.pendingClipboard(session).len); // 지난 복사를 재생하지 않는다
+    try std.testing.expectEqual(@as(u64, 9), runtime.event_cursor.clipboard_write_seq); // 지난 복사를 재생하지 않는다
 
     // 기준선을 잡은 뒤의 **새** 요청은 정상 동작한다.
-    term.rt.observation.bell_count = 13;
+    runtime.generation.observation.bell_count = 13;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
-    term.rt.observation.clipboard_read_seq = 6;
+    runtime.generation.observation.clipboard_read_seq = 6;
     try std.testing.expect(session.takeClipboardReadRequest());
 }
 

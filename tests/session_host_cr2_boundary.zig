@@ -65,8 +65,8 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9184,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9120,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9216,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9168,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -319,6 +319,57 @@ test "CR2d2 경계는 key와 control의 단일 epoch sequence transcript를 고�
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "try self.validateControlRecord("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn retireControlRecordNoFail("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "self.retireControlRecordNoFail();"));
+}
+
+test "CR2d3 경계는 stable shell event cursor와 Window cursor 제거를 고정한다" {
+    const allocator = std.testing.allocator;
+    const cursor = try readSource(allocator, "src/app/event_cursor.zig");
+    defer allocator.free(cursor);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    const term = try readSource(allocator, "src/platform/macos/app_session/term.zig");
+    defer allocator.free(term);
+    const notification = try readSource(allocator, "src/platform/macos/app_session/notification.zig");
+    defer allocator.free(notification);
+
+    try std.testing.expectEqual(@as(usize, 2), count(cursor, "test \"CR2d3 event cursor"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "event_cursor: maru.app.EventCursor = .{},"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2d3 remote stable shell"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn takeBellFor("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn takeClipboardReadFor("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn installEventCursorRuntime("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn removeEventCursorRuntime("));
+    const backend_testing = between(
+        backend,
+        "pub const testing_api = if (builtin.is_test) struct {",
+        "pub const SettlementBlocker = enum {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(backend_testing, "pub fn installEventCursorRuntime("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend_testing, "pub fn removeEventCursorRuntime("));
+    inline for (.{
+        "test \"host-backed 벨:",
+        "test \"host-backed OSC 52 read:",
+        "test \"host-backed 재접속:",
+    }) |named_test| try std.testing.expectEqual(@as(usize, 1), count(app_session, named_test));
+    try std.testing.expectEqual(@as(usize, 3), count(app_session, "try installCr2d3EventRuntime(&runtime, handle);"));
+    try std.testing.expectEqual(@as(usize, 3), count(app_session, "defer removeCr2d3EventRuntime(handle);"));
+    inline for (.{ "last_bell_count", "last_clipboard_write_seq", "last_clipboard_read_seq" }) |old|
+        try std.testing.expectEqual(@as(usize, 0), count(app_session, old));
+    try std.testing.expectEqual(@as(usize, 1), count(term, "rb.clipboardWriteFor(term.rt.handle)"));
+    try std.testing.expectEqual(@as(usize, 1), count(notification, "backend.takeBellFor(term.rt.handle)"));
+    inline for (.{ ".event_cursor.prepare(", ".event_cursor.commit(" }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            callee,
+            "app/event_cursor.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

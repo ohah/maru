@@ -826,6 +826,25 @@ pub const RemoteTermBackend = struct {
     }
 
     pub const testing_api = if (builtin.is_test) struct {
+        /// CR2d3 AppSession routing fixture. `runtime`은 caller 소유이며 두 값이 scope를 벗어나기 전에
+        /// 반드시 remove해야 한다. 제품 runtime admission은 이 test-only 경로를 보지 않는다.
+        pub fn installEventCursorRuntime(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+            runtime: *RemoteRuntime,
+        ) !void {
+            if (handle == 0 or remote_backend.runtimes.contains(handle)) return error.InvalidTestState;
+            try remote_backend.runtimes.put(remote_backend.allocator, handle, .{
+                .runtime = runtime,
+                .host_id = 1,
+                .runtime_generation = 1,
+            });
+        }
+
+        pub fn removeEventCursorRuntime(remote_backend: *RemoteTermBackend, handle: RuntimeHandle) bool {
+            return remote_backend.runtimes.remove(handle);
+        }
+
         pub const SettlementBlocker = enum {
             runtime,
             reservation,
@@ -1019,6 +1038,16 @@ pub const RemoteTermBackend = struct {
     pub fn clipboardWriteFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?remote_runtime.RemoteRuntime.ClipboardWrite {
         const entry = self.runtimes.get(handle) orelse return null;
         return (entry.runtime.clipboardWrite() catch return null) orelse null;
+    }
+
+    pub fn takeBellFor(self: *RemoteTermBackend, handle: RuntimeHandle) bool {
+        const entry = self.runtimes.get(handle) orelse return false;
+        return entry.runtime.takeBellEvent();
+    }
+
+    pub fn takeClipboardReadFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?[]u8 {
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.runtime.takeClipboardReadTarget(self.allocator) catch null;
     }
 
     /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을

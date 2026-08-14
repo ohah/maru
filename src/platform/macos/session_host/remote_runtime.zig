@@ -509,6 +509,7 @@ pub const RemoteRuntime = struct {
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
     input_batches: input_owner_mod.StableQueueState,
+    event_cursor: maru.app.EventCursor = .{},
     pending_controls: std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),
     // A blocking drain owns both mutation queues until it either commits or returns an error.
     // Allocator callbacks and other same-thread callbacks must not recursively consume the
@@ -689,6 +690,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
+        self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
         self.generation.pump_ended = false;
@@ -785,6 +787,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
+        self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
         self.generation.pump_ended = false;
@@ -2698,6 +2701,35 @@ pub const RemoteRuntime = struct {
     /// 그 둘을 가른다 — client는 too_large면 로컬과 같은 "복사가 너무 큼" 안내를 띄운다(조용한 유실 금지).
     pub const ClipboardWrite = struct { text: ?[]u8, too_large: bool };
 
+    fn eventCursorSnapshot(self: *const RemoteRuntime) maru.app.event_cursor.Snapshot {
+        const observation = &self.generation.observation;
+        return .{
+            .observer_generation = observation.observer_generation,
+            .bell_count = observation.bell_count,
+            .clipboard_write_seq = observation.clipboard_write_seq,
+            .clipboard_read_seq = observation.clipboard_read_seq,
+        };
+    }
+
+    pub fn takeBellEvent(self: *RemoteRuntime) bool {
+        return self.event_cursor.takeBell(self.eventCursorSnapshot());
+    }
+
+    pub fn takeClipboardReadTarget(self: *RemoteRuntime, allocator: std.mem.Allocator) !?[]u8 {
+        const prepared = self.event_cursor.prepare(.clipboard_read, self.eventCursorSnapshot()) orelse return null;
+        const owned = try allocator.dupe(u8, self.generation.observation.clipboard_read_target.items);
+        errdefer allocator.free(owned);
+        const after = self.eventCursorSnapshot();
+        if (after.observer_generation != prepared.observer_generation or
+            after.clipboard_read_seq != prepared.sequence or
+            !std.mem.eql(u8, owned, self.generation.observation.clipboard_read_target.items))
+        {
+            return error.ProtocolError;
+        }
+        if (!self.event_cursor.commit(prepared)) return error.InvalidOwner;
+        return owned;
+    }
+
     /// OSC 52 write 텍스트를 host에서 가져온다(host는 넘기면 비운다). capability 없는 구 host면 null —
     /// 원격 클립보드 쓰기가 비활성이다(모르는 RPC를 시험하지 않는다). 반환 텍스트는 caller 소유.
     ///
@@ -2707,6 +2739,7 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.connectionCapabilities().runtime_clipboard) return null;
+        const prepared = self.event_cursor.prepare(.clipboard_write, self.eventCursorSnapshot()) orelse return null;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.generation.attachment.streamId()}) catch return error.OutOfMemory;
         var output: ?ClipboardWrite = null;
@@ -2717,6 +2750,15 @@ pub const RemoteRuntime = struct {
             &output,
             applyClipboardWriteResponse,
         );
+        if (output == null) return null;
+        errdefer if (output.?.text) |text| self.allocator.free(text);
+        const after = self.eventCursorSnapshot();
+        if (after.observer_generation != prepared.observer_generation or
+            after.clipboard_write_seq != prepared.sequence)
+        {
+            return error.ProtocolError;
+        }
+        if (!self.event_cursor.commit(prepared)) return error.ProtocolError;
         return output;
     }
 
@@ -7769,6 +7811,10 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
     runtime.generation.resize_seq = 0;
     runtime.generation.pump_ended = false;
+    if (tag == .clipboard_write) {
+        runtime.event_cursor = .{ .observer_generation = runtime.generation.observation.observer_generation };
+        runtime.generation.observation.clipboard_write_seq = 1;
+    }
     switch (tag) {
         .resize => try runtime.resize(80, 24),
         .observation => try runtime.refreshObservation(),
@@ -8439,13 +8485,13 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9184,
-        .ReleaseFast => 9120,
+        .Debug => 9216,
+        .ReleaseFast => 9168,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6464,
-        .ReleaseFast => 6400,
+        .Debug => 6496,
+        .ReleaseFast => 6448,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -9451,6 +9497,38 @@ test "CR2d2 remote control transcript drift는 wire admission 전에 거부된�
     try testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
     try testing.expectEqual(@as(usize, 1), rr.input_batches.records.items.len);
     try testing.expectEqual(input_owner_mod.QueueRecordKind.core_command, rr.input_batches.records.items[0].kind);
+}
+
+test "CR2d3 remote stable shell은 BEL과 OSC52 read cursor를 Window 밖에서 소유한다" {
+    var runtime: RemoteRuntime = undefined;
+    runtime.event_cursor = .{};
+    runtime.generation.observation = .{
+        .observer_generation = 4,
+        .bell_count = 7,
+        .clipboard_write_seq = 8,
+        .clipboard_read_seq = 9,
+    };
+    try testing.expect(!runtime.takeBellEvent());
+    try testing.expect((try runtime.takeClipboardReadTarget(testing.allocator)) == null);
+
+    runtime.generation.observation.bell_count = 8;
+    runtime.generation.observation.clipboard_read_seq = 10;
+    try runtime.generation.observation.clipboard_read_target.appendSlice(testing.allocator, "c");
+    defer runtime.generation.observation.clipboard_read_target.deinit(testing.allocator);
+    try testing.expect(runtime.takeBellEvent());
+    try testing.expect(!runtime.takeBellEvent());
+    const target = (try runtime.takeClipboardReadTarget(testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(target);
+    try testing.expectEqualStrings("c", target);
+    try testing.expect((try runtime.takeClipboardReadTarget(testing.allocator)) == null);
+
+    runtime.generation.observation.clipboard_read_seq = 11;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, runtime.takeClipboardReadTarget(failing.allocator()));
+    try testing.expectEqual(@as(u64, 10), runtime.event_cursor.clipboard_read_seq);
+    const retried = (try runtime.takeClipboardReadTarget(testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(retried);
+    try testing.expectEqualStrings("c", retried);
 }
 
 test "remote runtime preserves input core-command input order under socket backpressure" {
@@ -11042,8 +11120,8 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9184,
-        .ReleaseFast => 9120,
+        .Debug => 9216,
+        .ReleaseFast => 9168,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));

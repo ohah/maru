@@ -363,16 +363,13 @@ pub fn dispatchBell(self: *AppSession) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (!term.rt.live_initialized or term.rt.terminated) continue;
-                if (term.surface.remote != null) {
-                    // host-backed: core는 빈 placeholder라 BEL이 안 들어온다. host가 관측으로 실어 준 누적
-                    // 카운터를 마지막으로 본 값과 비교한다. **증가일 때만** 울린다 — host live-upgrade(exec)로
-                    // 카운터가 0에서 다시 시작하면 감소가 보이는데, 그건 벨이 아니라 재동기화이므로 조용히 맞춘다.
-                    const count = term.rt.observation.bell_count;
-                    if (term.rt.last_bell_count) |last| {
-                        if (count > last) rang = true; // 증가일 때만(감소=host exec 재시작 → 재동기화)
-                    } // else: 첫 관측은 기준선만 잡고 울리지 않는다(재접속 시 지난 벨 재생 금지)
-                    term.rt.last_bell_count = count;
-                    continue;
+                if (comptime is_macos) {
+                    if (term.surface.remote != null) {
+                        if (app_session_mod.app_remote_backend) |*backend| {
+                            if (backend.takeBellFor(term.rt.handle)) rang = true;
+                        }
+                        continue;
+                    }
                 }
                 if (term.surface.core.takeBell()) rang = true; // 매 live core drain(클리어) — OR로 누적
             }

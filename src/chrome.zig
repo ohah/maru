@@ -71,6 +71,7 @@ pub const components = struct {
         pub const diff_frame = @import("chrome/components/editor_view/diff_frame.zig"); // 나란한 비교 — `frame`을 두 번 부르는 조합(§7)
     };
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
+    pub const scm_dock = @import("chrome/components/scm_dock.zig"); // 소스 컨트롤 도크 typed layout/action/view facade(도크 2판)
     pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade
 };
 

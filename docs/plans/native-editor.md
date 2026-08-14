@@ -132,6 +132,15 @@
   |---|---|---|
   | **a. L2 모델** | `session/editor/diff.zig` — **줄 단위 Myers** + 좌/우 행 배열(`kind: context\|added\|removed\|filler`, 줄 번호 `?u32`), 네 상태(`읽는 중·보여 줄 수 없음(이유)·변경 없음·비교`)를 **typed 결과**로. 순수·헤드리스 | 화면 없음(테스트만) |
   | **b. 배선** | 기존 `submitDiff`(두 쪽 전문) 폴링 → 상태 전이 → diff Term(두 문서·행 배열 소유). 유일성 키·workspace 미저장. **git 호출은 안 바꾼다**(CM6가 그대로 쓴다) | 상태 문구까지 화면에 뜬다 |
+
+  **b가 지켜야 할 두 가지**(a를 만들며 실측으로 드러났다 — 어기면 목록과 본문이 정면으로 어긋난다):
+
+  - **줄 끝 문자를 줄에 포함해 넘긴다.** 개행을 떼고 넘기면 `"a\nb\n"`와 `"a\nb"`가 같은 배열이 되어 본문은
+    "변경 없음"인데 git은 `+1 -1`을 낸다(끝 개행 제거는 마지막 줄의 변경이다). CRLF도 같다 — `\r`를 떼면
+    본문 "변경 없음" 대 git `+2 -2`다. 표시할 때 떼는 것은 뷰의 몫이다(`diff.zig`가 두 경우를 테스트로 고정).
+  - **목록의 `git diff --numstat` 호출에 `--diff-algorithm=myers`를 명시한다.** numstat은 사용자의
+    `diff.algorithm` 설정을 따르고, 같은 입력에서 `histogram`은 `+1756 -1696`을 냈다 — 기본값의 **7배**다
+    (../native-editor-ui.md §7).
   | **c. 좌우 렌더** | 한 pane 안에 `frame.build` 둘. **가로는 각자, 세로는 동기**(§3.5). gutter 폭은 좌우 독립 | **여기서 diff가 보인다 — 출하 가능** |
   | **d. 색** | `diffFromTheme` → chrome `ColorRole`(`terminal_bg`를 올린 그 방식). 배경=diff 밴드, 좌측 색 띠(색만으로 구분하지 않기) | 색이 붙는다 |
   | **e. intra-line** | `session/editor/intraline.zig` — 대응된 줄 쌍 **안**에서만 문자 단위 차이. §5 스팬 층으로 얹는다. 초장문 줄은 §3.8 축소로 건너뛴다 | 정밀도가 오른다 |

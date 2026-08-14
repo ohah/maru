@@ -292,6 +292,7 @@ fn testFold(
             .target_stream = 4,
             .attach_instance_id = 2,
             .raw_next_request_id = next_request_id,
+            .raw_last_success_request_id = 0,
             .screen_source_count = screen_count,
             .screen_payload_bytes = screen_bytes,
             .event_count = 0,

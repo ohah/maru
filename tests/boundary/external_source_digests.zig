@@ -343,7 +343,9 @@ pub const inventory = [_]Proof{
     // 캐시가 사라진 뒤로는 매 호출이 그 전역을 덮으므로, 값을 잠깐 들고 있는 두 번째 소비처가 조용히 뒤바뀐
     // 이름을 읽는다). 같은 파일의 `termCwd(self, term, buf)` 관행과 맞췄다. count는 2 그대로다 — 파라미터
     // 하나와 호출부 한 줄이고 반사 접근과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d09d94993939487db685164bd97a59f63715144835f655d45f8bc3d5459250f3" },
+    // main 리베이스로 값이 다시 움직인다 — 이 원장이 예고한 그 충돌이다(위 두 항목의 CR0b 변경과 이 PR의
+    // hostname 변경이 같은 파일을 건드렸다). 양쪽 사유 주석을 모두 남기고 값만 재계산했다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9675b77e1db0aee90c492aa1904bfc1df179ffe022ee677a0e05644e01b2caee" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -77,6 +77,7 @@ pub const PreparedExecutionPoisonCapture = struct {
     timestamp_ns: i128 = 0,
     controller_generation: u64 = 0,
     source_site_raw: u8 = 0,
+    allocator_source_site_raw: u8 = 0,
     reason_raw: u8 = 0,
     lifecycle_raw: u8 = 0,
 };

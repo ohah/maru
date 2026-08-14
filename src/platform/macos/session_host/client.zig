@@ -311,6 +311,7 @@ pub const PreparedRequestExecutionLease = struct {
     poison_timestamp_ns: i128 = 0,
     poison_controller_generation: u64 = 0,
     poison_source_site_raw: u8 = 0,
+    poison_allocator_source_site_raw: u8 = 0,
     ownership_raw: u8 = 0,
     io_mode_raw: u8 = 0,
     progress: PreparedRequestWireProgress = .request_zero_clean,
@@ -331,6 +332,7 @@ pub const PreparedRequestExecutionLease = struct {
             self.operation_fence_lease_identity == 0 and self.poison_capture_addr == 0 and
             self.poison_prepared_addr == 0 and self.poison_timestamp_ns == 0 and
             self.poison_controller_generation == 0 and self.poison_source_site_raw == 0 and
+            self.poison_allocator_source_site_raw == 0 and
             self.ownership_raw == 0 and self.io_mode_raw == 0 and
             self.progress == .request_zero_clean and self.lifecycle == .pristine and
             self.fence_held == 0 and self.fence_mode == .unbound and
@@ -373,6 +375,7 @@ fn preparedExecutionLeaseSeal(lease: *const PreparedRequestExecutionLease) u64 {
         lease.poison_timestamp_ns,
         lease.poison_controller_generation,
         lease.poison_source_site_raw,
+        lease.poison_allocator_source_site_raw,
         lease.ownership_raw,
         lease.io_mode_raw,
         @as(usize, @intFromEnum(lease.progress)),
@@ -9009,7 +9012,9 @@ pub const Client = struct {
                 capture.prepared_addr == 0 or capture.operation_id == 0 or
                 capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed) or
                 capture.controller_generation == 0 or
-                std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null)
+                std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null or
+                std.enums.fromInt(connection_incident.SourceSite, capture.allocator_source_site_raw) == null or
+                capture.source_site_raw == capture.allocator_source_site_raw)
                 return error.InvalidPreparedRpc;
         }
         if (!identity.descriptor.valid()) return error.InvalidPreparedRpc;
@@ -9105,6 +9110,7 @@ pub const Client = struct {
             .poison_timestamp_ns = if (poison_capture) |capture| capture.timestamp_ns else 0,
             .poison_controller_generation = if (poison_capture) |capture| capture.controller_generation else 0,
             .poison_source_site_raw = if (poison_capture) |capture| capture.source_site_raw else 0,
+            .poison_allocator_source_site_raw = if (poison_capture) |capture| capture.allocator_source_site_raw else 0,
             .ownership_raw = @intFromEnum(self.ownership),
             .io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode)),
             .progress = .request_zero_clean,
@@ -9192,7 +9198,9 @@ pub const Client = struct {
                 capture.prepared_addr != lease.poison_prepared_addr or
                 capture.timestamp_ns != lease.poison_timestamp_ns or
                 capture.controller_generation != lease.poison_controller_generation or
-                capture.source_site_raw != lease.poison_source_site_raw or
+                (capture.source_site_raw != lease.poison_source_site_raw and
+                    capture.source_site_raw != lease.poison_allocator_source_site_raw) or
+                capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw or
                 capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
                 std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)
                 return error.InvalidPreparedRpc;
@@ -9534,41 +9542,58 @@ pub const Client = struct {
         return true;
     }
 
+    fn capturePreparedExecutionPoison(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+        source_site_raw: u8,
+    ) bool {
+        if (self.prepared_request_execution_lease_addr == 0) return false;
+        const lease: *PreparedRequestExecutionLease =
+            @ptrFromInt(self.prepared_request_execution_lease_addr);
+        if (lease.poison_capture_addr == 0) return false;
+        if (lease.self_addr != @intFromPtr(lease) or lease.client_addr != @intFromPtr(self) or
+            lease.lifecycle != .active or lease.seal != preparedExecutionLeaseSeal(lease))
+            @panic("prepared execution poison lease authority drifted");
+        const capture: *incident_publication_contract.PreparedExecutionPoisonCapture =
+            @ptrFromInt(lease.poison_capture_addr);
+        const lifecycle: incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle =
+            std.enums.fromInt(
+                incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle,
+                capture.lifecycle_raw,
+            ) orelse @panic("prepared execution poison capture authority drifted");
+        if (capture.self_addr != lease.poison_capture_addr or
+            capture.client_addr != @intFromPtr(self) or capture.lease_addr != @intFromPtr(lease) or
+            capture.prepared_addr != lease.poison_prepared_addr or
+            capture.timestamp_ns != lease.poison_timestamp_ns or
+            capture.controller_generation != lease.poison_controller_generation or
+            capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw or
+            (capture.source_site_raw != lease.poison_source_site_raw and
+                capture.source_site_raw != lease.poison_allocator_source_site_raw) or
+            (source_site_raw != lease.poison_source_site_raw and
+                source_site_raw != lease.poison_allocator_source_site_raw) or
+            (lifecycle != .armed and lifecycle != .captured))
+            @panic("prepared execution poison capture authority drifted");
+        if (lifecycle == .captured) {
+            if (capture.reason_raw != @intFromEnum(reason))
+                @panic("prepared execution poison reason drifted");
+            return true;
+        }
+        if (capture.source_site_raw != lease.poison_source_site_raw)
+            @panic("prepared execution poison source drifted");
+        capture.source_site_raw = source_site_raw;
+        capture.reason_raw = @intFromEnum(reason);
+        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
+        return true;
+    }
+
     fn poisonWhilePreparedExecutionHeld(
         self: *Client,
         reason: client_poison.ConnectionReason,
     ) void {
         if (self.prepared_request_execution_lease_addr != 0) {
-            const lease: *PreparedRequestExecutionLease =
+            const lease: *const PreparedRequestExecutionLease =
                 @ptrFromInt(self.prepared_request_execution_lease_addr);
-            if (lease.poison_capture_addr != 0 and
-                lease.self_addr == @intFromPtr(lease) and lease.client_addr == @intFromPtr(self) and
-                lease.lifecycle == .active and lease.seal == preparedExecutionLeaseSeal(lease))
-            {
-                const capture: *incident_publication_contract.PreparedExecutionPoisonCapture =
-                    @ptrFromInt(lease.poison_capture_addr);
-                const lifecycle: incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle =
-                    std.enums.fromInt(
-                        incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle,
-                        capture.lifecycle_raw,
-                    ) orelse @panic("prepared execution poison capture authority drifted");
-                if (capture.self_addr != lease.poison_capture_addr or
-                    capture.client_addr != @intFromPtr(self) or capture.lease_addr != @intFromPtr(lease) or
-                    capture.prepared_addr != lease.poison_prepared_addr or
-                    capture.timestamp_ns != lease.poison_timestamp_ns or
-                    capture.controller_generation != lease.poison_controller_generation or
-                    capture.source_site_raw != lease.poison_source_site_raw or
-                    (lifecycle != .armed and lifecycle != .captured))
-                    @panic("prepared execution poison capture authority drifted");
-                if (lifecycle == .captured) {
-                    if (capture.reason_raw != @intFromEnum(reason))
-                        @panic("prepared execution poison reason drifted");
-                    return;
-                }
-                capture.reason_raw = @intFromEnum(reason);
-                capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
-                return;
-            }
+            if (self.capturePreparedExecutionPoison(reason, lease.poison_source_site_raw)) return;
         }
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
@@ -14009,6 +14034,10 @@ pub const Client = struct {
         return generationAllocatorCallbackActive();
     }
 
+    fn exactAllocatorCallbackOwner(self: *const Client) bool {
+        return checked_allocator_owner_addr == @intFromPtr(self);
+    }
+
     pub fn enterGenerationAllocatorCallback(self: *Client) bool {
         if (checked_allocator_owner_addr != 0) return false;
         checked_allocator_owner_addr = @intFromPtr(self);
@@ -14107,6 +14136,15 @@ pub const Client = struct {
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
     /// 명시적으로 닫는 fail-closed fallback.
     pub fn poison(self: *Client, reason: client_poison.ConnectionReason) void {
+        // A checked allocator callback inside managed prepared execution cannot reacquire the
+        // operation fence. It may only write the caller-final capture already sealed into that
+        // lease; post-operation publication remains the sole Client/ring mutation owner.
+        if (self.exactAllocatorCallbackOwner() and self.prepared_request_execution_lease_addr != 0) {
+            const lease: *const PreparedRequestExecutionLease =
+                @ptrFromInt(self.prepared_request_execution_lease_addr);
+            if (self.capturePreparedExecutionPoison(reason, lease.poison_allocator_source_site_raw))
+                return;
+        }
         // The cross-thread fence must win over the same-thread allocator diagnostic. During an
         // exclusive cleanup callback even the deferred poison path may not touch Client storage;
         // the rejected shared entry records intrusion and the owner converges to quarantine.

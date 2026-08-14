@@ -283,6 +283,15 @@ prepared request authority가 terminal settlement를 끝내고 registered operat
 Client terminalization, fd close, reconnect admission을 수행한다. capture 미설치인 identity-absent/test-only execution은 기존 reason-only
 동작을 유지하되 managed product caller에서는 0으로 고정한다.
 
+caller 4의 allocator callback은 caller 2와 같은 prepared execution transaction 안에서만 deferred poison capture를 공유한다. checked
+allocator callback의 thread-local owner가 exact Client이고 active execution lease와 caller-final capture의 주소·operation·timestamp·
+controller generation이 모두 일치할 때, `Client.poison`은 public mutation fence를 재진입하지 않고 reason과 allocator 전용
+`SourceSite.client_cleanup`만 stack capture에 한 번 기록한다. callback 안에서는 first reason, unusable, fd, pending outbound, ring,
+reconnect admission을 바꾸지 않는다. 이후 같은 failure가 일반 response error 경로에서도 관측되면 최초 allocator source를 보존하고,
+서로 다른 reason은 proof loss로 fail-stop한다. allocator callback이 반환하고 caller 2의 cleanup/operation unwind가 끝난 뒤에만 기존
+publication port가 `PreparedManagedPoison`을 canonical suffix에 제출한다. callback이 publisher·registry·runtime pointer를 보관하거나
+operation 안에서 coordinator를 재진입하는 경로는 0이다.
+
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.
 publication이 끝나면 같은 registered owner가 handoff에 봉인된 terminalization disposition을 no-reread continuation으로 적용한다.

@@ -822,8 +822,14 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
-    // 사용자에게 보인다. Android 도 같은 값이고, 데스크톱 maru 의 present 정책과 같다.
-    // 실측으로 이 경로가 33.33ms 를 낸다는 것을 확인했다(`present-ios`).
+    // 사용자에게 보인다. Android 도 같은 값이다. **데스크톱은 60 이라 다르다**(`render.frame-rate`
+    // 기본값 — hover/scroll 지연을 우선하고 전력 여유가 있다). 실측으로 이 경로가 33.33ms 를
+    // 낸다는 것을 확인했다(`present-ios`).
+    //
+    // **여기가 값을 정하는 유일한 자리다** — OS 에 범위를 선언하면 기기 주사율과 무관하게
+    // 지켜진다(Android 는 vsync 콜백에서 경과 시간으로 직접 재야 한다). 60 을 넘기려면
+    // `Info.plist` 에 `CADisableMinimumFrameDuration` 이 필요하다 — 지금은 없고, 없으면
+    // ProMotion 기기에서도 60 에서 잘린다. config(M10)로 열 때 함께 본다.
     if (@available(iOS 15.0, *)) {
         _link.preferredFrameRateRange = CAFrameRateRangeMake(30, 30, 30);
     } else {

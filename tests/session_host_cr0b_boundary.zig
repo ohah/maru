@@ -52,6 +52,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(gui_owner);
     const reconnect_owner = try readSource(allocator, "src/platform/macos/session_host/reconnect_admission_owner.zig");
     defer allocator.free(reconnect_owner);
+    const remote_runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(remote_runtime);
     const app_host_abi = try readSource(allocator, "src/platform/macos/app_host_abi.zig");
     defer allocator.free(app_host_abi);
     const app_host_header = try readSource(allocator, "src/platform/macos/app_host_abi.h");
@@ -171,6 +173,13 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PublicationTimestampReceipt = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publicationTimestampReceipt("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const publication_port_testing_api = if (@import(\"builtin\").is_test) struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn install(owner: *AppProcessIncidentOwner) Error!void"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PrePublicationSnapshot = PreparedPublicationSnapshot"));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn armPrePublicationSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn disarmPrePublicationSnapshot() void"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "const incident_publication_port = session_host.app_process_incident_owner;"));
     try std.testing.expectEqual(@as(usize, 3), count(app_session, "incident_publication_port.publication_port_testing_api.driftSeal()"));
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.publication_port_testing_api.reset()"));
@@ -188,8 +197,6 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         "installPublicationPort(",
         "revokePublicationPort(",
         "revokePublicationPortNoFail(",
-        "publishPreparedManagedPoison(",
-        "publicationTimestampReceipt(",
     }) |port_api| try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExceptTwo(
@@ -199,6 +206,26 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
             "platform/macos/app_session.zig",
         ),
     );
+    inline for (.{
+        "publishPreparedManagedPoison(",
+        "publicationTimestampReceipt(",
+    }) |port_api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            port_api,
+            "platform/macos/session_host/app_process_incident_owner.zig",
+            "platform/macos/app_session.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b prepared execution poison은"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.attachment.callDecoded("));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const PreparedExecutionPoisonCapture = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub const PreparedExecutionPoisonCaptureRequest = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareManagedPoisonRequest("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn prepareManagedPoisonRequest("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "fn prepareManagedPoison("));
@@ -217,11 +244,11 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(session_host_barrel);
     try std.testing.expectEqual(@as(usize, 1), count(session_host_barrel, "@import(\"session_host/app_process_incident_owner.zig\")"));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         try countProductSourcesExcept(allocator, "app_process_incident_owner.zig", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         try countProductSourcesExcept(allocator, "AppProcessIncidentOwner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(

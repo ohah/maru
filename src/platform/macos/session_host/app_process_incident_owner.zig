@@ -41,6 +41,21 @@ const PublicationPort = struct {
 
 var publication_port: PublicationPort = .{};
 
+const PreparedPublicationSnapshot = struct {
+    observed: bool = false,
+    first_reason_present: bool = false,
+    client_was_usable: bool = false,
+    fd: c.fd_t = -1,
+    pending_outbound_present: bool = false,
+    incident_count: u8 = 0,
+    pending_slots: u128 = 0,
+    reconnect_count: u8 = 0,
+};
+
+const PublicationPortTestState = if (@import("builtin").is_test) struct {
+    threadlocal var snapshot: ?*PreparedPublicationSnapshot = null;
+} else struct {};
+
 pub const PublicationTimestampReceipt = struct {
     owner_addr: u64 = 0,
     owner_thread: u64 = 0,
@@ -165,6 +180,21 @@ pub fn publishPreparedManagedPoison(
     if (!publicationTimestampReceiptValid(timestamp) or prepared.input.timestamp_ns != timestamp.timestamp_ns)
         return error.InvalidOwner;
     const owner = resolvePublicationPortOwner() orelse return error.InvalidOwner;
+    if (@import("builtin").is_test) {
+        if (PublicationPortTestState.snapshot) |snapshot| {
+            const client = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
+            snapshot.* = .{
+                .observed = true,
+                .first_reason_present = client.first_poison_reason != null,
+                .client_was_usable = !client.unusable,
+                .fd = client.fd,
+                .pending_outbound_present = client.pending_outbound != null,
+                .incident_count = owner.runtime.?.service.ring.incident_count,
+                .pending_slots = owner.runtime.?.service.pending_slots,
+                .reconnect_count = owner.reconnect_admissions.count,
+            };
+        }
+    }
     return owner.publishPreparedManagedPoison(adapter, prepared);
 }
 
@@ -183,6 +213,22 @@ pub fn publicationTimestampReceipt() PublicationError!PublicationTimestampReceip
 }
 
 pub const publication_port_testing_api = if (@import("builtin").is_test) struct {
+    pub const PrePublicationSnapshot = PreparedPublicationSnapshot;
+
+    pub fn armPrePublicationSnapshot(snapshot: *PrePublicationSnapshot) void {
+        if (PublicationPortTestState.snapshot != null or !std.meta.eql(snapshot.*, PrePublicationSnapshot{}))
+            @panic("prepared publication snapshot is already armed");
+        PublicationPortTestState.snapshot = snapshot;
+    }
+
+    pub fn disarmPrePublicationSnapshot() void {
+        PublicationPortTestState.snapshot = null;
+    }
+
+    pub fn install(owner: *AppProcessIncidentOwner) Error!void {
+        try installPublicationPort(owner);
+    }
+
     pub fn driftSeal() void {
         lockPublicationPort();
         defer publication_port.mutex.unlock();

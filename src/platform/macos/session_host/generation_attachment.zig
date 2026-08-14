@@ -903,6 +903,7 @@ pub fn executeRequestWithDecoderOwned(
     decoder: contract.RpcDecoder,
     pre_decode_context: *anyopaque,
     pre_decode: contract.RpcPreDecode,
+    poison_capture: ?@import("client_slot.zig").PreparedExecutionPoisonCaptureRequest,
 ) generation_transport_mod.Error!contract.RpcDecodeDisposition {
     if (!attachment.valid() or attachment.lifecycle != .attached)
         return error.InvalidTransport;
@@ -922,6 +923,7 @@ pub fn executeRequestWithDecoderOwned(
         decoder,
         pre_decode_context,
         pre_decode,
+        poison_capture,
     ) catch |err| {
         attachment.transport.abortPreparedRequest(receipt) catch {};
         return err;

@@ -1995,6 +1995,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoison" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareManagedPoisonRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedExecutionPoisonCaptureRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoisonRequestPinned" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentParserPhase" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOutboundPhase" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoisonPinned" },

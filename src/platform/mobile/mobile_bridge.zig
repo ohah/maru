@@ -537,6 +537,9 @@ fn clampKeyBarScroll() void {
 fn stepKeyBarFling() void {
     if (kb_active or key_bar_fling == 0) return;
     key_bar_scroll -= key_bar_fling;
+    // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,
+    // 되돌리려 손을 대면 죽은 속도가 남아 있다가 튄다.
+    if (key_bar_scroll <= 0 or key_bar_scroll >= key_bar_max_scroll) key_bar_fling = 0;
     clampKeyBarScroll();
     key_bar_fling *= 0.92;
     if (@abs(key_bar_fling) < 0.5) key_bar_fling = 0;
@@ -548,6 +551,14 @@ fn stepKeyBarFling() void {
 ///
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
 pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
+    // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
+    // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 `kb_active` 가 남아 **복귀 후
+    // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
+    if (phase == 3) {
+        kb_active = false;
+        key_bar_fling = 0;
+        return 0;
+    }
     if (phase == 0) {
         // 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고, 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
         if (!key_bar_ready) return 0;
@@ -1774,14 +1785,14 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 창 왼쪽에서 스크롤 오프셋만큼 물러난 자리에서 시작한다. 창 밖으로 나간 키는
         // 그리지도 않는다 — 화면 밖 quad 는 낭비이고, 잘린 조각이 옆 UI 위에 얹힌다.
         var kx = view_x - key_bar_scroll;
-        const ky = band.y + 5.0;
+        const ky = @floor(band.y + 5.0); // 세로도 같은 이유로 정수에 맞춘다(위 `kxi` 주석)
         var slot: usize = 0;
         for (0..key_bar.len) |i| {
             if (!keyBarVisible(i)) continue;
             slot += 1;
             // `copy` 는 스크롤을 안 탄다 — 오른쪽 끝 예약 자리에 고정으로 그린다.
             if (key_bar[i].is_copy) {
-                const cx = band.x + band.width - edge_w - key_w;
+                const cx = @floor(band.x + band.width - edge_w - key_w);
                 key_bar_rects[i] = .{ .x = cx, .y = ky, .w = key_w, .h = key_h };
                 drawKey(i, cx, ky, tk);
                 continue;
@@ -1789,13 +1800,16 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             defer kx += key_w + key_gap;
             // **창 밖 키는 자리도 안 남긴다.** rect 를 그대로 두면 화살표 아래로 숨은 키가
             // 여전히 눌린다 — 보이지 않는 것이 눌리면 사용자는 왜 그 키가 나갔는지 알 수 없다.
+            // **그리는 자리와 판정하는 자리를 같은 값으로 만든다.** 그리기는 정수 px 로 절삭되는데
+            // 히트가 f32 를 그대로 쓰면 최대 1px 어긋나 가장자리를 눌렀을 때 옆 키가 나간다.
+            const kxi = @floor(kx);
             if (kx < view_x - 0.5 or kx + key_w > view_x + view_w + 0.5) {
                 key_bar_rects[i] = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
             } else {
-                key_bar_rects[i] = .{ .x = kx, .y = ky, .w = key_w, .h = key_h };
+                key_bar_rects[i] = .{ .x = kxi, .y = ky, .w = key_w, .h = key_h };
             }
             if (kx + key_w <= band.x or kx >= band.x + band.width) continue;
-            drawKey(i, kx, ky, tk);
+            drawKey(i, kxi, ky, tk);
         }
         // **밴드를 찾았고 키를 다 놓았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가
         // 키바를 안 먹는다 — 레이아웃에서 키바가 빠진 프레임에 **옛 자리를 그대로 답해 없는 키가

@@ -101,6 +101,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 @end
 
 @interface ChromeView : UIView <UITextInput>
+/// 배경으로 나갈 때 AppDelegate 가 부른다 — 키바가 잡고 있던 터치를 푼다.
+- (void)releaseKeybarGrab;
 @end
 
 @implementation ChromeView {
@@ -325,6 +327,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
           p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
     [self sendPointer:0 touches:touches];
+}
+
+/// 배경으로 나갈 때 키바 잡음을 푼다(AppDelegate 가 부른다 — ivar 에 직접 못 닿는다).
+- (void)releaseKeybarGrab {
+    _keybarActive = NO;
 }
 
 /// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
@@ -973,6 +980,11 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // 보내지 않는다(로그로 확인했다) — 안 정리하면 브리지가 "누르고 있다" 를 들고 있다가
     // 돌아온 프레임에서 옛 자리를 길게 누른 것으로 판정할 수 있다.
     maru_mobile_pointer(3, 0, 0, 0);
+    // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
+    // 브리지와 뷰 **양쪽**을 푼다: 브리지만 풀면 뷰가 계속 키바로 라우팅하고, 뷰만 풀면
+    // 브리지의 `kb_active` 가 남는다.
+    maru_mobile_keybar_pointer(3, 0, 0);
+    [(ChromeView *)self.window.rootViewController.view releaseKeybarGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
     // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.

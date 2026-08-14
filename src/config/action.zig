@@ -114,6 +114,12 @@ pub const Action = union(enum) {
     // (선택 시 acceptPalette가 팝업을 닫고 Find를 연다) — 자기 토글이라 재귀인 toggle_command_palette와 달리 Find는
     // 별개 모달이라 띄워도 된다. 단 메뉴 Find 서브메뉴는 keyEquivalent 없이 따로(키바인딩 가림 방지).
     toggle_find,
+    // 활성 편집기 뷰의 랩(긴 줄 자동 줄바꿈)을 뒤집는다(visual-mapping §4 "가로 스크롤이 기본이고 랩은 토글").
+    // **기본 chord가 없다** — VSCode의 `⌥Z`를 그대로 두면 터미널의 Meta-z를 전역으로 가져간다. 키 계약의
+    // context-aware resolver에는 파일 트리·웹 편집기 컨텍스트만 있고 **편집기 Term 컨텍스트가 아직 없어서**,
+    // 조건부로 양보할 자리가 없다(그 컨텍스트는 편집 입력이 붙는 N2의 몫이다). 그때까지는 커맨드 팝업과
+    // 사용자 키바인딩으로 쓴다 — 아무 chord도 뺏지 않는다.
+    toggle_editor_wrap,
     // 스크롤백 Find의 다음/이전 매치로 이동(⌘G/⌘⇧G) — **오버레이가 닫혀 있어도** 동작한다(보존된 검색어로
     // 재검색해 네비게이션, macOS Find Next 관례). dispatchAppAction이 findNavigate로 넘긴다. 오버레이가 열린
     // 동안엔 모달 라우팅이 키를 가로채므로(Enter/Shift+Enter가 next/prev) 이 액션은 닫힌 경우를 위한 것이다.
@@ -185,6 +191,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_settings")) return .toggle_settings;
     if (std.mem.eql(u8, value, "install_cli")) return .install_cli;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
+    if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
     if (std.mem.eql(u8, value, "find_previous")) return .find_previous;
     if (std.mem.eql(u8, value, "increase_font_size")) return .increase_font_size;

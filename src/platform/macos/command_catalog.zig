@@ -86,6 +86,7 @@ pub const entries = [_]Entry{
     // Find는 별개 모달이라 팝업에 띄운다(선택 시 acceptPalette가 팝업을 닫고 Find를 연다). 메뉴 Find 서브메뉴는
     // keyEquivalent 없이(키바인딩 가림 방지) 별도지만, 팝업은 chord를 표시만 한다(가로채지 않음 — 안전).
     .{ .action = .toggle_find, .key = "toggle_find", .title = "Find" },
+    .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .find_next, .key = "find_next", .title = "Find Next" },
     .{ .action = .find_previous, .key = "find_previous", .title = "Find Previous" },
     .{ .action = .{ .select_tab = 0 }, .key = "select_tab:0", .title = "Select Workspace 1" },

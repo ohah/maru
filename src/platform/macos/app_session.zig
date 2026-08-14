@@ -1565,6 +1565,16 @@ const TermRuntime = struct {
     editor_path: ?[]u8 = null,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 붙으면 여기가 움직인다(지금은 0 고정).
     editor_first_line: usize = 0,
+    /// 이 뷰의 랩 override. `null`이면 config(`editor.wrap`)를 따르고, 값이 있으면 그것이 이긴다.
+    ///
+    /// **뷰별로 두는 이유**: 랩은 "이 문서를 지금 어떻게 볼까"라 문서가 아니라 뷰의 상태다(VSCode의
+    /// `⌥Z`도 편집기 단위다). 전역으로 두면 파일 하나를 랩해서 보려다 열려 있는 모든 편집기가 함께
+    /// 바뀐다. config는 **기본값**으로 남아 새로 여는 뷰가 그것을 따른다.
+    ///
+    /// **세로 위치는 이 토글이 건드리지 않는다** — `editor_first_line`이 시각 행이 아니라 **논리 줄**이라
+    /// 랩이 바뀌어도 화면 맨 위 줄이 그대로다(visual-mapping §4가 VSCode의 `setWrappingSettings`를 두고
+    /// "부산물이 아니라 별도 로직"이라 적은 그 처리가 여기서는 필요 없다).
+    editor_wrap: ?bool = null,
     /// 위 안내 텍스트를 이미 core에 썼는가(멱등 래치). 매 resize·재적용마다 덧쓰면 화면이 안내로 도배된다.
     ended_guidance_written: bool = false,
     /// 묘비가 다시 저장될 때 쓸 마지막 command. `surface.command`가 아니라 여기 드는 이유: `Surface.command`는 spawn이
@@ -6813,6 +6823,7 @@ pub const AppSession = struct {
             //
             // 대상 자체는 여기서 정하지 않는다 — tick이 매 프레임 동기화한다(전환 경로마다 세우면 새는 문이 남는다).
             .toggle_find => self.toggleFind(),
+            .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),

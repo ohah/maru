@@ -947,7 +947,7 @@ pub const EditorConfig = struct {
         // 전이라 이 값이 렌더에 닿는 경로가 없다 — 지금 UI에 띄우면 사용자가 토글해도 아무 일이
         // 없어 **버그로 보인다**. `hidden`의 용도가 정확히 그것이다("미완성·실험 opt-in을 일반
         // 사용자 UI에서 가린다"). config 파일로는 지금도 켤 수 있고, 편집기가 배선될 때 벗긴다.
-        .wrap = Meta{ .doc = "긴 줄 자동 줄바꿈", .widget = .toggle, .section = .editor, .hidden = true },
+        .wrap = Meta{ .doc = "긴 줄 자동 줄바꿈", .widget = .toggle, .section = .editor },
     };
 };
 

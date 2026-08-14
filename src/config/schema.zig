@@ -1374,18 +1374,25 @@ test "parseDocRange: 괄호·백틱·음수·설명 위치 range를 모두 파�
     // range가 없으면 null(bool/enum 등은 애초에 이 가드 대상 아님).
     try std.testing.expect(parseDocRange("| `k` | `true`\\|`false` | `true` | 설명") == null);
 }
-test "editor.wrap은 아직 설정 UI에 뜨지 않는다 — 값이 렌더에 닿는 경로가 없다" {
+test "editor.wrap은 설정 UI에 뜬다 — 값이 렌더에 닿는다" {
+    // **뒤집은 테스트다.** 편집기가 제품 pane에 배선되기 전에는 토글해도 아무 일이 없어 `Meta.hidden`으로
+    // 가려 두었고, 이 테스트가 그 상태를 고정했다. 이제 값이 `appendPaneFrame` → `content.Props.wrap`까지
+    // 닿으므로 가릴 이유가 사라졌다.
+    //
+    // **이 테스트가 배선을 잡아 주지는 못했다는 사실을 남긴다.** 옛 주석은 "배선할 때 이 테스트가 실패하므로
+    // 잊을 수 없다"고 했지만, 판정 대상이 `hidden` 여부뿐이라 값이 렌더에 닿은 뒤에도 초록이었다 — 배선
+    // 슬라이스는 그것을 모른 채 끝났고 다음 슬라이스에서 문서 드리프트로 발견됐다. "소비처가 있는가"를
+    // 정적으로 판정할 방법이 없어 그 형태로 고치지는 않았다. 같은 종류의 게이트를 만들 때의 실패 사례다.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var list: std.ArrayList(BoolField) = .empty;
     try appendBoolFields(arena, .{}, &list);
 
+    var seen = false;
     for (list.items) |f| {
-        // 편집기가 제품 화면에 배선되기 전이라 토글해도 아무 일이 없다 — 그 상태로 UI에 띄우면
-        // 버그로 보인다(`Meta.hidden`의 용도). **배선할 때 `hidden`을 벗기고 이 테스트를 뒤집는다.**
-        try std.testing.expect(!std.mem.eql(u8, f.key, "editor.wrap"));
+        if (std.mem.eql(u8, f.key, "editor.wrap")) seen = true;
     }
-    // 다만 **파싱은 살아 있다** — config 파일로는 지금도 켤 수 있다(loader 테스트가 확인한다).
+    try std.testing.expect(seen);
     try std.testing.expectEqual(true, (theme.EditorConfig{}).wrap);
 }

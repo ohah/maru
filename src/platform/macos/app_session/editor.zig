@@ -235,7 +235,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = buildPaneOps(
         term.rt.editor_lines,
         term.rt.editor_first_line,
-        self.loaded_config.config.editor.wrap,
+        term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap, // 뷰 override가 config를 이긴다
         .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h },
         @intCast(self.cell_width_px),
         @intCast(self.cell_height_px),
@@ -347,6 +347,19 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     return term;
 }
 
+/// 활성 Term이 편집기면 그 뷰의 랩을 뒤집는다. 아니면 무동작(true를 안 돌려주므로 호출자가 안다).
+///
+/// **override를 세우는 방식이다** — 지금 보이는 값의 반대를 뷰에 박는다. config를 바꾸지 않는 이유는
+/// 그것이 **기본값**이고(다음에 여는 뷰가 따른다) 토글은 이 뷰의 일이기 때문이다.
+pub fn toggleWrap(self: *AppSession) bool {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return false;
+    const now = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+    term.rt.editor_wrap = !now;
+    self.metal_dirty = true;
+    return true;
+}
+
 /// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
 pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_doc) |*d| d.deinit(self.allocator);
@@ -411,6 +424,41 @@ const PaneFixture = struct {
         self.dir.cleanup();
     }
 };
+
+test "랩 토글은 뷰 override를 세우고 config를 안 건드린다" {
+    // **뷰별 상태다**(VSCode `⌥Z`와 같은 축) — 전역으로 두면 파일 하나를 랩해 보려다 열린 편집기가
+    // 전부 바뀐다. config는 **기본값**으로 남아 새로 여는 뷰가 그것을 따라야 하므로, 토글이 config를
+    // 건드리지 않는 것까지 함께 본다(건드리면 다음에 여는 파일의 기본이 조용히 뒤집힌다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const config_default = fx.session.loaded_config.config.editor.wrap;
+    try testing.expect(fx.term.rt.editor_wrap == null); // 시작은 config 추종
+
+    try testing.expect(toggleWrap(fx.session));
+    try testing.expectEqual(!config_default, fx.term.rt.editor_wrap.?);
+    try testing.expectEqual(config_default, fx.session.loaded_config.config.editor.wrap); // config 불변
+
+    try testing.expect(toggleWrap(fx.session)); // 다시 누르면 되돌아온다
+    try testing.expectEqual(config_default, fx.term.rt.editor_wrap.?);
+}
+
+test "편집기가 아닌 Term에서는 랩 토글이 무동작이다" {
+    // 커맨드 팝업은 어디서든 부를 수 있다. 터미널이 활성일 때 이 액션이 무언가를 바꾸면
+    // "아무 일도 안 일어나야 하는데 상태가 움직인" 것이라 다음 편집기 뷰가 이상해진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const shell = pane_ops.activePane(fx.session).terms.items[0];
+    try testing.expect(shell.kind != .editor);
+    term_ops.focusTerm(fx.session, 0); // 터미널을 활성으로
+    try testing.expect(!toggleWrap(fx.session));
+    try testing.expect(fx.term.rt.editor_wrap == null); // 편집기 뷰 상태도 그대로
+}
 
 test "편집기 배경은 셀 패스 앞 층에 실린다 — 뒤 층이면 자기 본문을 덮는다" {
     // `maru_metal_renderer.m`은 quad를 네 패스로 그리고 그중 `layers.bottom`만 셀 패스 **앞**에 온다.

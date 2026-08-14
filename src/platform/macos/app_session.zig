@@ -7450,7 +7450,6 @@ pub const AppSession = struct {
         self.scm_selected_row = null;
     }
 
-
     /// diff entry가 들고 있는 소유 문자열을 **전부** 푼다(Term 파괴 시). path와 같은 자리에서 부른다.
     pub fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
         self.freeDiffPaths(entry);

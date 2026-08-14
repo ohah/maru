@@ -43,7 +43,12 @@ pub const inventory = [_]Proof{
     // 진짜 원인은 "refcount가 객체는 붙들지만 그 객체가 나온 allocator는 못 붙든다"였고, 요구되는 프로세스 수명
     // allocator를 호출자에게 맡겨 두어 테스트가 조용히 어길 수 있었다. 이제 `init`이 인자를 받지 않고
     // `worker_allocator`를 고정하므로 어길 호출자가 없고, 창 닫기는 예전처럼 기다리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "e7bf4d877f416a39ae241622d618a21ae4a94457889868bcb4ddbce0845f1214" },
+    // 소스 컨트롤 도크 2판(P1a)이 `numstat_head`(`git diff --numstat HEAD --`) 명령과 그 결과 필드를 더하고,
+    // **선택 명령의 출력 잘림도 결과에 싣게** 하면서 바뀐다(잘림을 삼키면 화면이 "변경 없음"과 구별되지
+    // 않는다 — docs/editor-surface-dock.md §3.5.2). count는 2 그대로다: 더한 것은 argv 한 종류와 `Result`
+    // 필드 하나, 그리고 기존 루프의 `truncated` 대입뿐이고 `@field` 반사 접근이나 Client 구성·receiver
+    // 집합은 건드리지 않는다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "f6189866a0e07f8d0821172e2546c5a1adb44cb0fd60052c8fd72c8266eb8cce" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.

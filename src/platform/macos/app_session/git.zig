@@ -571,7 +571,6 @@ pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm
 /// **셀 그리드 히트테스트(`scmRowAt`·`scmRowAtIndex`·`scmTotalRows`)는 P1b에서 제거했다.** 좌표를 행
 /// 인덱스로 바꾸는 일은 이제 published component tree 하나가 하고(`scm_dock.zig`), 그 tree가 렌더와
 /// 같은 기하를 쓴다 — 두 곳이 각자 행 높이를 곱하던 것이 "그린 자리와 눌리는 자리"가 어긋난 원인이었다.
-
 /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
 pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
     // git 출력이 이상하거나 우리 파싱이 어긋나면 루트 밖 경로가 여기까지 올 수 있다. **여는 단계에서** 막는다 —

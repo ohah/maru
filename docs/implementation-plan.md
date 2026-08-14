@@ -44,6 +44,7 @@ macOS 로컬 shell 1개 surface
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
+- [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
 - [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)

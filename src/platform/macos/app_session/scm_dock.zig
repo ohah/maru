@@ -59,27 +59,31 @@ fn listViewportHeightPx(self: *const AppSession, has_branch: bool) u32 {
 /// 동안 살아 있고, component는 immutable snapshot만 읽는다.
 fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapsed: [scm_view.section_count]bool) component.types.Item {
     return switch (row) {
-        .section => |section| .{ .section = .{
-            .section = sectionOf(section.section),
-            .count = @intCast(section.count),
-            .collapsed = collapsed[@intFromEnum(section.section)],
-            // **행 동작은 아직 켜지 않는다.** `+`/`−`는 git **쓰기**라 P2의 안전 계약
-            // (docs/editor-surface-dock-write.md)이 먼저 있어야 한다. component는 이미 그릴 수 있지만,
-            // 눌러도 아무 일 없는 컨트롤을 화면에 두지 않는 것이 이 문서의 규칙이다.
-            .action = .none,
-        } },
-        .file => |file| .{ .file = .{
-            .name = std.fs.path.basename(file.path),
-            .dir = file.path[0 .. file.path.len - std.fs.path.basename(file.path).len],
-            .status = statusOf(file),
-            .letter = file.letter,
-            .added = file.added,
-            .removed = file.removed,
-            .has_delta = !file.unknown_delta and !file.binary,
-            .binary = file.binary,
-            .action = .none, // 위와 같은 이유(P2)
-            .selected = selected_row != null and selected_row.? == model_index,
-        } },
+        .section => |section| .{
+            .section = .{
+                .section = sectionOf(section.section),
+                .count = @intCast(section.count),
+                .collapsed = collapsed[@intFromEnum(section.section)],
+                // **행 동작은 아직 켜지 않는다.** `+`/`−`는 git **쓰기**라 P2의 안전 계약
+                // (docs/editor-surface-dock-write.md)이 먼저 있어야 한다. component는 이미 그릴 수 있지만,
+                // 눌러도 아무 일 없는 컨트롤을 화면에 두지 않는 것이 이 문서의 규칙이다.
+                .action = .none,
+            },
+        },
+        .file => |file| .{
+            .file = .{
+                .name = std.fs.path.basename(file.path),
+                .dir = file.path[0 .. file.path.len - std.fs.path.basename(file.path).len],
+                .status = statusOf(file),
+                .letter = file.letter,
+                .added = file.added,
+                .removed = file.removed,
+                .has_delta = !file.unknown_delta and !file.binary,
+                .binary = file.binary,
+                .action = .none, // 위와 같은 이유(P2)
+                .selected = selected_row != null and selected_row.? == model_index,
+            },
+        },
         .more => |more| .{ .more = .{ .section = sectionOf(more.section), .hidden = @intCast(more.hidden) } },
         .notice => |notice| .{ .notice = notice.text() },
     };

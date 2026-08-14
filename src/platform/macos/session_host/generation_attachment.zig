@@ -358,6 +358,20 @@ pub const GenerationAttachment = struct {
     pub fn takeEvent(
         self: *GenerationAttachment,
     ) generation_transport_mod.EventError!generation_transport_mod.EventTakeOutcome {
+        return self.takeEventInternal(null);
+    }
+
+    pub fn takeEventWithPoisonCapture(
+        self: *GenerationAttachment,
+        poison_capture: @import("client_slot.zig").RegisteredOperationPoisonCaptureRequest,
+    ) generation_transport_mod.EventError!generation_transport_mod.EventTakeOutcome {
+        return self.takeEventInternal(poison_capture);
+    }
+
+    fn takeEventInternal(
+        self: *GenerationAttachment,
+        poison_capture: ?@import("client_slot.zig").RegisteredOperationPoisonCaptureRequest,
+    ) generation_transport_mod.EventError!generation_transport_mod.EventTakeOutcome {
         if (!self.valid() or self.lifecycle != .attached)
             return error.InvalidOwner;
         const readiness = generation_transport_mod.eventReadinessOwned(
@@ -373,10 +387,17 @@ pub const GenerationAttachment = struct {
             };
         }
         if (readiness == .invalid) return error.Corrupt;
-        const projected = try generation_transport_mod.takeEventProjected(
-            &self.transport,
-            &self.event_owner,
-        );
+        const projected = if (poison_capture) |capture|
+            try generation_transport_mod.takeEventProjectedWithPoisonCapture(
+                &self.transport,
+                &self.event_owner,
+                capture,
+            )
+        else
+            try generation_transport_mod.takeEventProjected(
+                &self.transport,
+                &self.event_owner,
+            );
         if (projected.outcome == .taken) {
             if (projected.generation == 0) @panic("canonical event generation was empty");
             self.event_generation_mirror = projected.generation;

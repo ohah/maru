@@ -58,9 +58,9 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
     try std.testing.expectEqual(@as(usize, 0), count(attachment_product, ".transport.takeEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "takeGenerationEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(attachment, "takeGenerationEvent("));
-    // EventCorrelation과 CR0b prepared-execution capture request 두 type reference만 열고,
+    // EventCorrelation, 두 CR0b capture request, registered-operation test seam만 열고,
     // ClientSlot의 event take/release registry 직접 호출은 계속 닫는다.
-    try std.testing.expectEqual(@as(usize, 4), count(runtime, "client_slot_mod"));
+    try std.testing.expectEqual(@as(usize, 6), count(runtime, "client_slot_mod"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "client_slot_mod.takeGenerationEvent("));
 
     try std.testing.expectEqual(@as(usize, 1), count(client, "try self.bufferCanonicalEvent(frame)"));

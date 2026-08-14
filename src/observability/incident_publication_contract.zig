@@ -88,6 +88,28 @@ pub const PreparedExecutionPoisonCaptureLifecycle = enum(u8) {
     finalized = 3,
 };
 
+/// Registered event operation 중 발견한 corruption도 Client reason/fd를 먼저 바꾸지 않는다.
+/// 이 caller-final stack value는 operation 안에서 실패 원인만 받으며, 같은 ClientSlot owner가
+/// operation을 놓기 전에 pointer-free `PreparedManagedPoison`으로 완성한다.
+pub const RegisteredOperationPoisonCapture = struct {
+    self_addr: u64 = 0,
+    prepared_addr: u64 = 0,
+    client_addr: u64 = 0,
+    operation_id: u64 = 0,
+    timestamp_ns: i128 = 0,
+    controller_generation: u64 = 0,
+    source_site_raw: u8 = 0,
+    reason_raw: u8 = 0,
+    lifecycle_raw: u8 = 0,
+};
+
+pub const RegisteredOperationPoisonCaptureLifecycle = enum(u8) {
+    pristine = 0,
+    armed = 1,
+    captured = 2,
+    finalized = 3,
+};
+
 /// First publication과 Client terminalization이 끝난 뒤 scheduler owner에게 넘기는 값이다.
 /// Client/runtime 포인터를 포함하지 않으며 같은 connection generation에서 exact once만 게시한다.
 pub const ReconnectAdmission = struct {
@@ -341,6 +363,8 @@ test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-f
     try std.testing.expect(recursivelyPointerFree(ManagedPoisonRequest));
     try std.testing.expect(recursivelyPointerFree(IncidentInput));
     try std.testing.expect(recursivelyPointerFree(PreparedManagedPoison));
+    try std.testing.expect(recursivelyPointerFree(PreparedExecutionPoisonCapture));
+    try std.testing.expect(recursivelyPointerFree(RegisteredOperationPoisonCapture));
     try std.testing.expect(recursivelyPointerFree(ReconnectAdmission));
     try std.testing.expect(recursivelyPointerFree(IncidentRepeatKey));
     try std.testing.expect(recursivelyPointerFree(IncidentOperationAuthority));

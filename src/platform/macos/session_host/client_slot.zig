@@ -100,6 +100,7 @@ const EventTakeActivationTestHook = struct {
     var reentry_busy: bool = false;
     var teardown_busy: bool = false;
     var foreign_busy: bool = false;
+    var managed_poison_after_validation: bool = false;
 
     fn reset() void {
         if (!builtin.is_test) unreachable;
@@ -109,12 +110,25 @@ const EventTakeActivationTestHook = struct {
         reentry_busy = false;
         teardown_busy = false;
         foreign_busy = false;
+        managed_poison_after_validation = false;
     }
 
     fn failAt(expected: Fault) bool {
         return builtin.is_test and fault == expected;
     }
 };
+
+pub const registered_operation_poison_testing_api = if (builtin.is_test) struct {
+    pub fn armAfterValidation() void {
+        if (EventTakeActivationTestHook.managed_poison_after_validation)
+            @panic("registered operation poison hook already armed");
+        EventTakeActivationTestHook.managed_poison_after_validation = true;
+    }
+
+    pub fn reset() void {
+        EventTakeActivationTestHook.managed_poison_after_validation = false;
+    }
+} else struct {};
 
 const RpcSubstrateFailStopTestHook = struct {
     const version: u8 = 1;
@@ -1759,6 +1773,15 @@ pub const GenerationEventTakeRequest = struct {
     bound_stream_id: u64,
     event_owner_addr: usize,
     event_lease_addr: usize,
+    poison_capture: ?RegisteredOperationPoisonCaptureRequest = null,
+};
+
+pub const RegisteredOperationPoisonCaptureRequest = struct {
+    timestamp_ns: i128,
+    controller_generation: u64,
+    source_site_raw: u8,
+    capture_addr: usize,
+    prepared_addr: usize,
 };
 
 pub const GenerationEventIdentity = struct {
@@ -8187,6 +8210,71 @@ fn generationEventCorrupt(slot: *ClientSlot) GenerationEventError {
     return error.Corrupt;
 }
 
+fn armRegisteredOperationPoisonCapture(
+    request: ?RegisteredOperationPoisonCaptureRequest,
+    operation: RegisteredNodeOperation,
+) GenerationEventError!?*incident_publication_contract.RegisteredOperationPoisonCapture {
+    const input = request orelse return null;
+    if (input.timestamp_ns < 0 or input.controller_generation == 0 or
+        std.enums.fromInt(connection_incident.SourceSite, input.source_site_raw) == null or
+        input.capture_addr == 0 or input.prepared_addr == 0)
+        return error.InvalidOwner;
+    const capture: *incident_publication_contract.RegisteredOperationPoisonCapture =
+        @ptrFromInt(input.capture_addr);
+    const prepared: *incident_publication_contract.PreparedManagedPoison =
+        @ptrFromInt(input.prepared_addr);
+    if (!std.meta.eql(capture.*, incident_publication_contract.RegisteredOperationPoisonCapture{}) or
+        !std.meta.eql(prepared.*, incident_publication_contract.PreparedManagedPoison{}) or
+        byteRangesOverlap(@intFromPtr(capture), @sizeOf(@TypeOf(capture.*)), @intFromPtr(prepared), @sizeOf(@TypeOf(prepared.*))) or
+        rangesOverlapTyped(capture, operation.node) or rangesOverlapTyped(capture, &operation.node.client) or
+        rangesOverlapTyped(prepared, operation.node) or rangesOverlapTyped(prepared, &operation.node.client))
+        return error.InvalidOwner;
+    capture.* = .{
+        .self_addr = @intFromPtr(capture),
+        .prepared_addr = @intFromPtr(prepared),
+        .client_addr = @intFromPtr(&operation.node.client),
+        .operation_id = operation.operation_id,
+        .timestamp_ns = input.timestamp_ns,
+        .controller_generation = input.controller_generation,
+        .source_site_raw = input.source_site_raw,
+        .lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed),
+    };
+    return capture;
+}
+
+fn captureRegisteredOperationPoison(
+    slot: *ClientSlot,
+    operation: RegisteredNodeOperation,
+    capture: ?*incident_publication_contract.RegisteredOperationPoisonCapture,
+    reason: client_poison.ConnectionReason,
+) GenerationEventError {
+    const active = capture orelse {
+        operation.node.client.poisonDuringClientSlotOperationNoFail(reason);
+        return error.Corrupt;
+    };
+    if (active.self_addr != @intFromPtr(active) or
+        active.client_addr != @intFromPtr(&operation.node.client) or
+        active.operation_id != operation.operation_id or active.prepared_addr == 0 or
+        active.lifecycle_raw != @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed))
+        process_seal_service.fatalIntegrity(.incident_authority);
+    active.reason_raw = @intFromEnum(reason);
+    active.lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.captured);
+    const prepared: *incident_publication_contract.PreparedManagedPoison = @ptrFromInt(active.prepared_addr);
+    prepareManagedPoisonRequestPinned(
+        slot,
+        operation.node,
+        active.timestamp_ns,
+        .{
+            .reason_raw = active.reason_raw,
+            .source_site_raw = active.source_site_raw,
+            .controller_generation = active.controller_generation,
+        },
+        prepared,
+    ) catch return error.Corrupt;
+    active.lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.finalized);
+    return error.Corrupt;
+}
+
 pub fn takeGenerationEvent(
     request: GenerationEventTakeRequest,
 ) GenerationEventError!GenerationEventTakeOutcome {
@@ -8252,6 +8340,10 @@ pub fn takeGenerationEvent(
         error.Busy => error.Busy,
         error.InvalidOwner => error.InvalidOwner,
     };
+    const poison_capture = try armRegisteredOperationPoisonCapture(request.poison_capture, operation);
+    defer if (poison_capture) |capture| {
+        capture.* = .{};
+    };
     defer {
         endRegisteredNodeOperation(operation);
         if (builtin.is_test and EventTakeActivationTestHook.probe_contention)
@@ -8289,12 +8381,24 @@ pub fn takeGenerationEvent(
         &owned,
     ) catch |err| {
         if (err == error.Corrupt or err == error.InvalidPrepared)
-            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+            return captureRegisteredOperationPoison(
+                slot,
+                operation,
+                poison_capture,
+                .local_invariant_violation,
+            );
         return switch (err) {
             error.Terminal => error.Terminal,
             error.Corrupt, error.InvalidPrepared => error.Corrupt,
         };
     };
+    if (builtin.is_test and EventTakeActivationTestHook.managed_poison_after_validation)
+        return captureRegisteredOperationPoison(
+            slot,
+            operation,
+            poison_capture,
+            .local_invariant_violation,
+        );
     if (validated.payload.len == 0 or
         byteRangesOverlap(
             @intFromPtr(validated.payload.ptr),
@@ -8321,8 +8425,12 @@ pub fn takeGenerationEvent(
             @sizeOf(lease_mod.ConnectionLease),
         ))
     {
-        slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-        return error.Corrupt;
+        return captureRegisteredOperationPoison(
+            slot,
+            operation,
+            poison_capture,
+            .local_invariant_violation,
+        );
     }
     const trusted_admission = runtime_event_wire.preflightEvent(
         validated.payload,
@@ -8348,8 +8456,12 @@ pub fn takeGenerationEvent(
             .ordering = .non_revoke_effect,
         },
         else => {
-            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-            return error.Corrupt;
+            return captureRegisteredOperationPoison(
+                slot,
+                operation,
+                poison_capture,
+                .local_invariant_violation,
+            );
         },
     };
     const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
@@ -8392,8 +8504,12 @@ pub fn takeGenerationEvent(
         error.InvalidIdentity,
         error.InvalidState,
         => blk: {
-            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-            break :blk error.Corrupt;
+            break :blk captureRegisteredOperationPoison(
+                slot,
+                operation,
+                poison_capture,
+                .local_invariant_violation,
+            );
         },
     };
     var quarantine_live = true;
@@ -8416,8 +8532,12 @@ pub fn takeGenerationEvent(
     ) catch |err| return switch (err) {
         error.PinOverflow => error.Terminal,
         error.InvalidOwner, error.InvalidStream => blk: {
-            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-            break :blk error.Corrupt;
+            break :blk captureRegisteredOperationPoison(
+                slot,
+                operation,
+                poison_capture,
+                .local_invariant_violation,
+            );
         },
     };
     var pin_live = true;
@@ -8486,8 +8606,12 @@ pub fn takeGenerationEvent(
         return switch (err) {
             error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
             else => blk: {
-                slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-                break :blk error.Corrupt;
+                break :blk captureRegisteredOperationPoison(
+                    slot,
+                    operation,
+                    poison_capture,
+                    .local_invariant_violation,
+                );
             },
         };
     };
@@ -8506,8 +8630,12 @@ pub fn takeGenerationEvent(
     ) catch |err| return switch (err) {
         error.Terminal => error.Terminal,
         error.Corrupt, error.InvalidPrepared => blk: {
-            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
-            break :blk error.Corrupt;
+            break :blk captureRegisteredOperationPoison(
+                slot,
+                operation,
+                poison_capture,
+                .local_invariant_violation,
+            );
         },
     };
     const event = owned orelse unreachable;

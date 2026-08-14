@@ -318,7 +318,7 @@ pub const GenerationTransport = struct {
         self: *GenerationTransport,
         out: *EventOwner,
     ) EventError!EventTakeOutcome {
-        return (try self.takeEventProjectedInternal(out)).outcome;
+        return (try self.takeEventProjectedInternal(out, null)).outcome;
     }
 
     pub fn releaseEvent(self: *GenerationTransport, owner: *EventOwner) EventError!void {
@@ -345,6 +345,7 @@ pub const GenerationTransport = struct {
     fn takeEventProjectedInternal(
         self: *GenerationTransport,
         out: *EventOwner,
+        poison_capture: ?client_slot_mod.RegisteredOperationPoisonCaptureRequest,
     ) EventError!ProjectedEventTake {
         if (!self.requestIdentityValid()) return error.InvalidOwner;
         if (!eventDestinationValid(self, out) or !generation_event.pristineExact(out))
@@ -355,6 +356,7 @@ pub const GenerationTransport = struct {
             .bound_stream_id = self.bound_stream_id,
             .event_owner_addr = @intFromPtr(out),
             .event_lease_addr = generation_event.leaseAddress(out),
+            .poison_capture = poison_capture,
         }) catch |err| return switch (err) {
             error.Busy => error.Busy,
             error.InvalidOwner => error.InvalidOwner,
@@ -879,7 +881,15 @@ pub fn takeEventProjected(
     transport: *GenerationTransport,
     out: *EventOwner,
 ) EventError!ProjectedEventTake {
-    return transport.takeEventProjectedInternal(out);
+    return transport.takeEventProjectedInternal(out, null);
+}
+
+pub fn takeEventProjectedWithPoisonCapture(
+    transport: *GenerationTransport,
+    out: *EventOwner,
+    poison_capture: client_slot_mod.RegisteredOperationPoisonCaptureRequest,
+) EventError!ProjectedEventTake {
+    return transport.takeEventProjectedInternal(out, poison_capture);
 }
 
 /// Owner-bound preparation view for the dormant b2b3 path. The caller must present the exact

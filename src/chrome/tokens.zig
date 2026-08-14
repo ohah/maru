@@ -564,6 +564,8 @@ test "git 상태 역할: 셋이 서로 다르고, 고친 것은 테마 accent를
     // 소스 컨트롤 목록이 `M`·`A`/`U`·`D`를 색으로도 가른다(글자와 **함께** — 색만으로 구분하지 않는다).
     // 셋이 같은 값으로 접히면 그 보조 신호가 사라지므로 역할 분리 자체를 고정한다.
     const theme: ThemeColors = .{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 200, .g = 200, .b = 200 },
         .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
         .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },

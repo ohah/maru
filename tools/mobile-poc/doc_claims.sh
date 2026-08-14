@@ -53,6 +53,17 @@ ck "두 host 다 포인터를 넘긴다" 2 "$(grep -l maru_mobile_pointer $I $A 
 # 길게 누름 지연은 OS 값이다 — 코어에 박으면 플랫폼 차이와 접근성 설정을 지운다.
 ck "두 host 다 OS 값을 넘긴다" 2 "$(grep -l maru_mobile_set_long_press_ms $I $A | wc -l | tr -d ' ')"
 
+echo "§3.2 주기는 기기 주사율과 무관하다"
+# **vsync 를 세면 그건 30Hz 가 아니라 패널의 절반이다** — 90Hz 폰에서 45, 120Hz 에서 60 이
+# 나온다. 60Hz 에뮬레이터에서는 우연히 맞아떨어져 `MARU_PACE` 도 PASS 라, 이 부류는 코드
+# 모양으로 막는 수밖에 없다(실기기가 붙기 전까지).
+ck "Android 가 vsync 를 세지 않는다" 0 "$(grep -cE 'vsync_count' $A)"
+ck "Android 목표 주기가 ns 상수로 있다" 1 "$(grep -c '33333333' $A)"
+ck "iOS 가 OS 에 주기를 선언한다" 1 "$(grep -c 'CAFrameRateRangeMake(30, 30, 30)' $I)"
+# `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
+# 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
+ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

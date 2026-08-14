@@ -90,7 +90,6 @@ static struct {
     double pace_ms[PACE_SAMPLES];
     int n_pace;
     int pace_done;
-    int64_t vsync_count;
     int64_t last_vsync_ns;  // 직전 vsync 시각 — 패널 주기를 여기서 잰다(하드코딩하지 않는다)
     int64_t last_draw_ns;   // 마지막으로 그린 vsync 시각. 목표 주기를 재는 기준
 } g;
@@ -1086,7 +1085,10 @@ static void teardownVulkan(void) {
     vkDestroyDevice(g.dev, NULL);
     if (g.surface) vkDestroySurfaceKHR(g.inst, g.surface, NULL);
     if (g.inst) vkDestroyInstance(g.inst, NULL);
-    // 페이싱 계측과 화면 설정은 살린다 — 재개 후에도 같은 상태로 이어져야 한다.
+    // **화면 설정만 살린다** — 밀도·inset·아틀라스 격자는 창이 부서져도 같은 값이다.
+    // 페이싱 계측(`pace_ms`·`n_pace`·`last_ms`)과 주기 기준(`last_draw_ns`)은 **일부러
+    // 지운다**: 창이 부서졌다 서는 사이의 공백이 표본에 섞이면 중앙값이 거짓말을 하고,
+    // 주기 기준이 남으면 재개 첫 프레임이 옛 시각과 비교돼 한 프레임을 건너뛴다.
     float scale = g.scale;
     int it = g.inset_top, ib = g.inset_bottom;
     uint32_t ac = g.atlas_cols, ar = g.atlas_rows;
@@ -1473,7 +1475,6 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
 // 배터리·발열 때문에 골라 놓고 고주사율 기기에서 두 배로 그리고 있었다(에뮬레이터가 60Hz 라
 // 안 드러났다). `MARU_PACE` 의 PASS 창(25~42ms)도 120Hz 에서는 16.7ms 로 떨어져 실패한다.
 static void frameCallback(int64_t frame_time_ns, void *data) {
-    g.vsync_count++;
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
     // 사용자에게 보인다. iOS 도 같은 값이다(`preferredFrameRateRange`). 데스크톱은 60 이라
     // **다르다** — 데스크톱은 hover/scroll 지연을 우선하고 전력 여유가 있다.

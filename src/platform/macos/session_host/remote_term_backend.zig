@@ -38,6 +38,7 @@ const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const TermRuntimeBackend = term_backend.TermRuntimeBackend;
+const InputOwnerVTable = maru.app.input_owner.VTable;
 const RuntimeHandle = term_backend.RuntimeHandle;
 const SpawnParams = term_backend.SpawnParams;
 const RuntimeLink = maru.app.RuntimeLink;
@@ -160,6 +161,7 @@ pub const RemoteTermBackend = struct {
     next_shutdown_connection_identity: u64 = 0,
 
     const vtable = term_backend.VTable{
+        .input_owner = &input_vtable,
         .spawn = spawn,
         .attach = attach,
         .pump = pump,
@@ -178,6 +180,12 @@ pub const RemoteTermBackend = struct {
         .read_observation = readObservation,
         .refresh_observation = refreshObservation,
         .dump_recent_text = dumpRecentText,
+    };
+
+    const input_vtable = InputOwnerVTable{
+        .write = writeInput,
+        .write_nonblocking = writeInputNonBlocking,
+        .enqueue_core_command = enqueueCoreCommand,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
@@ -1720,6 +1728,19 @@ test "remote nonblocking input policy consumes at most one bounded chunk per tic
     try std.testing.expectEqual(@as(usize, 0), boundedInputLen(0));
     try std.testing.expectEqual(nonblocking_input_chunk, boundedInputLen(nonblocking_input_chunk));
     try std.testing.expectEqual(nonblocking_input_chunk, boundedInputLen(nonblocking_input_chunk + 1));
+}
+
+test "CR2c remote InputOwner는 기존 UnknownSurface와 partial 의미를 그대로 쓴다" {
+    const allocator = std.testing.allocator;
+    var surface_runtime = SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+    const unused_client: *client_mod.Client = @ptrFromInt(4096);
+    var backend_impl = RemoteTermBackend.init(allocator, std.testing.io, unused_client, &surface_runtime);
+    defer backend_impl.deinit();
+    const owner = backend_impl.backend().inputOwner(0xC203);
+    try std.testing.expectError(error.UnknownSurface, owner.write("late"));
+    try std.testing.expectError(error.UnknownSurface, owner.writeNonBlocking("late"));
+    try std.testing.expectError(error.UnknownSurface, owner.enqueueCoreCommand(.scroll_to_bottom, std.testing.io));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

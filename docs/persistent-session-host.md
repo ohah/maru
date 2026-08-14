@@ -696,6 +696,13 @@ writer gate wait의 count·total·max nanoseconds를 allocation-free atomic metr
 fake target 교체까지이며 writer/close/reclaim admission은 proxy를 초기화한 owner thread로 제한한다. 실제
 `PreparedReconnect`/old generation reclaim은 CR2e가 소유한다.
 
+CR2c는 `src/app/input_owner.zig`의 transport-neutral `InputOwner` 값 facade를 추가한다. facade는 backend ctx,
+opaque runtime handle, backend별 입력 함수표만 결속하고 blocking bytes, nonblocking partial progress, `CoreCommand`를
+기존 local/remote leaf에 그대로 전달한다. 이 단계에서는 `RemoteRuntime`의 `direct_input`,
+`direct_input_offset`, `pending_controls`, `blocking_flush_active`를 이동하거나 새 queue/epoch/sequence를 만들지 않는다.
+따라서 CR2c green은 local/remote 호출 표면의 parity 증거이지 Window 이동, reconnect 보존 또는 ordered queue owner
+완료 증거가 아니다. 그 상태 이동과 golden trace는 CR2d1~d4가 소유한다.
+
 앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
 `RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
 Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을

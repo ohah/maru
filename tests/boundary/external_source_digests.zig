@@ -32,7 +32,7 @@ pub const inventory = [_]Proof{
     // C3-3b5가 공통 close/remove progress enum을 추가했다. 값 타입 선언뿐이라 기존 `@field` 세 곳과 Client receiver는 그대로다.
     // AppSession close 순서를 실제 제품 래퍼에서 검증하는 test-only progress sequence가 붙었다. 제품 vtable과
     // `@field` 세 곳은 그대로이고, 조건부 testing facade 밖의 Client receiver도 늘지 않는다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "17ae7e01906456140e04adbc121993e89acfdf4509c785cfb8aaea0a6b86e340" },
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "6b3925b7139005f44454cb4dab05fd58fe5eff883d763da909d8756b006c6b24" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —

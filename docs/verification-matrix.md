@@ -1178,8 +1178,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   zero/stale/skip/max generation과 copied final owner·foreign writer는 fail-close하고,
   detach/deinit은 proxy close 뒤 attachment screen을 파괴한다. 실제 socket reconnect와 `RemoteGeneration` swap/reclaim은 아직
   CR2e/CR4 범위다.
-- CR2c: local/remote
-  `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
+- CR2c: `zig build test-session-host-cr2c`가 CR2b를 상속하고 Debug·ReleaseFast에서 neutral `InputOwner` 3개,
+  `TermRuntimeBackend` handle 결속 1개, local backend parity 1개(root/import sentinel 7개 포함 app artifact 실제 12회),
+  remote backend parity 1개와 source boundary 1개를 exact-count한다.
+  blocking bytes, nonblocking partial progress/error, `CoreCommand`가 같은 opaque handle과 기존 backend leaf로 전달되며
+  local/remote `TermRuntimeBackend` 함수표가 facade를 구현함을 고정한다. queue/epoch/sequence/paused paste storage와
+  `RemoteRuntime`의 기존 direct-input/control field·동작은 이 단계에서 바뀌지 않고 제품 facade caller는 0이다.
+  CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

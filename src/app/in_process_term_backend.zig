@@ -28,6 +28,7 @@ const live_pty = @import("live_pty.zig");
 const term_backend = @import("term_runtime_backend.zig");
 
 const TermRuntimeBackend = term_backend.TermRuntimeBackend;
+const InputOwnerVTable = @import("input_owner.zig").VTable;
 const RuntimeHandle = term_backend.RuntimeHandle;
 const SpawnParams = term_backend.SpawnParams;
 const CloseProgress = term_backend.CloseProgress;
@@ -45,6 +46,7 @@ pub const InProcessTermBackend = struct {
     runtime: *runtime_mod.SurfaceRuntime,
 
     const vtable = term_backend.VTable{
+        .input_owner = &input_vtable,
         .spawn = spawn,
         .attach = attach,
         .pump = pump,
@@ -63,6 +65,12 @@ pub const InProcessTermBackend = struct {
         .read_observation = readObservation,
         .refresh_observation = readObservation,
         .dump_recent_text = dumpRecentText,
+    };
+
+    const input_vtable = InputOwnerVTable{
+        .write = writeInput,
+        .write_nonblocking = writeInputNonBlocking,
+        .enqueue_core_command = enqueueCoreCommand,
     };
 
     pub fn init(
@@ -380,4 +388,17 @@ test "in-process term backend: web-arm handle is not treated as a terminal runti
     // web 슬롯 정리(remove가 web arm deinit = sentinel surface.deinit + 슬롯 해제).
     try std.testing.expectEqual(RemoveProgress.removed, be.remove(handle));
     try std.testing.expect(registry.findBySurface(handle) == null);
+}
+
+test "CR2c local InputOwner는 기존 UnknownSurface와 partial 의미를 그대로 쓴다" {
+    const allocator = std.testing.allocator;
+    var registry = LiveRegistry.init(allocator);
+    defer registry.deinit();
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var backend_impl = InProcessTermBackend.init(allocator, std.testing.io, &registry, &runtime);
+    const owner = backend_impl.backend().inputOwner(0xC202);
+    try std.testing.expectError(error.UnknownSurface, owner.write("late"));
+    try std.testing.expectError(error.UnknownSurface, owner.writeNonBlocking("late"));
+    try std.testing.expectError(error.UnknownSurface, owner.enqueueCoreCommand(.scroll_to_bottom, std.testing.io));
 }

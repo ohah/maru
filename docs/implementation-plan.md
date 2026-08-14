@@ -109,8 +109,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    checked-monotonic generation, unavailable placeholder와 shell destroy drain을 소유한다. `RemoteRuntime`은 proxy pointer를
    stable field로 두고 attach 때 live target을 게시하며 detach/deinit 때 proxy를 먼저 닫은 뒤 attachment screen을 파괴한다.
    CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
-   바꾸지 않는다. transport-neutral facade/ordered policy는 `src/app`의 `TermRuntimeBackend` 계약 옆 중립 모듈이 소유하고
-   local/remote backend가 구현한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event
+   바꾸지 않는다. transport-neutral facade는 `src/app/input_owner.zig`가 opaque runtime handle과
+   blocking input·nonblocking partial progress·`CoreCommand` dispatch만 결속하고, `TermRuntimeBackend`가 backend별 함수표를
+   공급한다. local/remote 구현은 기존 write leaf를 그대로 재사용하므로 오류·부분 수락·ordering이 달라지지 않는다.
+   ordered queue/epoch/sequence/paused paste storage의 실제 소유권 이동은 CR2d가 담당한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.

@@ -2786,6 +2786,66 @@ pub fn build(b: *std.Build) void {
         session_host_cr2b_step.dependOn(&run_cr2b_boundary_tests.step);
         boundary_step.dependOn(&run_cr2b_boundary_tests.step);
     }
+    const session_host_cr2c_step = b.step(
+        "test-session-host-cr2c",
+        "CR2c local and remote InputOwner facade Debug and ReleaseFast gates",
+    );
+    session_host_cr2c_step.dependOn(session_host_cr2b_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2c_optimize| {
+        const cr2c_app_module = b.createModule(.{
+            .root_source_file = b.path("src/app.zig"),
+            .target = target,
+            .optimize = cr2c_optimize,
+            .link_libc = true,
+        });
+        cr2c_app_module.addAnonymousImport(
+            "maru_terminfo",
+            .{ .root_source_file = b.path("terminfo/maru.terminfo") },
+        );
+        cr2c_app_module.addAnonymousImport(
+            "config_doc_md",
+            .{ .root_source_file = b.path("docs/configuration.md") },
+        );
+        const cr2c_app_tests = addProjectTest(b, .{
+            .root_module = cr2c_app_module,
+            .filters = &.{"CR2c "},
+        });
+        const run_cr2c_app_tests = b.addRunArtifact(cr2c_app_tests);
+        // input owner 3 + TermRuntimeBackend 1 + local backend 1, plus app/root import
+        // sentinels 7. Exact 12 prevents a nested module from silently dropping out.
+        run_cr2c_app_tests.addArg("--maru-expect-tests=12");
+        run_cr2c_app_tests.setCwd(b.path("."));
+        session_host_cr2c_step.dependOn(&run_cr2c_app_tests.step);
+
+        const cr2c_remote_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr2c_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2c remote InputOwner는"},
+        });
+        const run_cr2c_remote_tests = b.addRunArtifact(cr2c_remote_tests);
+        run_cr2c_remote_tests.addArg("--maru-expect-tests=1");
+        run_cr2c_remote_tests.setCwd(b.path("."));
+        session_host_cr2c_step.dependOn(&run_cr2c_remote_tests.step);
+
+        const cr2c_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2c_optimize,
+            }),
+            .filters = &.{"CR2c 경계는 InputOwner facade와 local remote parity를 고정한다"},
+        });
+        const run_cr2c_boundary_tests = b.addRunArtifact(cr2c_boundary_tests);
+        run_cr2c_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2c_boundary_tests.setCwd(b.path("."));
+        session_host_cr2c_step.dependOn(&run_cr2c_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2c_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

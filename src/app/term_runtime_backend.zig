@@ -28,6 +28,7 @@ const surface_mod = @import("../session/surface.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const core_command = @import("../session/core_command.zig");
+const input_owner = @import("input_owner.zig");
 
 /// terminal runtime 하나를 가리키는 opaque 상관키. **의미를 비트에 인코딩하지 않는다.**
 ///
@@ -36,7 +37,7 @@ const core_command = @import("../session/core_command.zig");
 /// surface_id로 **해석하면 안 되고** backend에 되돌려 주는 불투명 handle로만 다뤄야 한다. P3에서 host가 발급하는
 /// `runtime_id`(host process를 건너는 128-bit opaque)로 승격될 자리라, 지금 u64 별칭으로 그 경계를 미리 긋는다
 /// (docs/persistent-session-host.md §4 `runtime_id`).
-pub const RuntimeHandle = u64;
+pub const RuntimeHandle = input_owner.RuntimeHandle;
 
 /// close가 같은 호출에서 끝났는지 다음 maintenance tick이 이어야 하는지 나타낸다.
 pub const CloseProgress = enum(u8) {
@@ -305,6 +306,9 @@ pub const SpawnParams = struct {
 /// in-process는 `RuntimeError || Thread.SpawnError || 프로세스 spawn 오류`, 원격 host는 transport 오류라 구현마다
 /// 에러 집합이 달라서, vtable 고정 시그니처는 `anyerror`가 유일하게 맞는 선택이다(PtyIo도 `anyerror`를 쓴다).
 pub const VTable = struct {
+    /// 같은 runtime handle에 결속된 입력 전용 facade 구현. CR2c에서는 기존 write 의미를 그대로 재사용한다.
+    input_owner: *const input_owner.VTable,
+
     /// terminal runtime(PTY + 셸)을 만든다. 반환값은 그 runtime에 붙은 **복구 가능한 `Surface`**(그리드/스크롤백/
     /// 메타)의 안정 포인터다 — GUI는 이 포인터를 `Term.surface`로 참조만 하고(소유는 backend), config 설정(스크롤백
     /// arena/palette 등)을 여기에 적용한다. live PTY handle은 반환하지 않는다(그것이 seam 목표). 아직 `attach`
@@ -387,6 +391,10 @@ pub const VTable = struct {
 pub const TermRuntimeBackend = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
+
+    pub fn inputOwner(self: TermRuntimeBackend, handle: RuntimeHandle) input_owner.InputOwner {
+        return .{ .ctx = self.ctx, .handle = handle, .vtable = self.vtable.input_owner };
+    }
 
     pub fn spawn(self: TermRuntimeBackend, params: SpawnParams) anyerror!*surface_mod.Surface {
         return self.vtable.spawn(self.ctx, params);
@@ -514,6 +522,7 @@ const FakeTermBackend = struct {
     const Entry = struct { handle: RuntimeHandle, rt: *FakeBackendRuntime };
 
     const vtable = VTable{
+        .input_owner = &input_vtable,
         .spawn = spawn,
         .attach = attach,
         .pump = pump,
@@ -532,6 +541,12 @@ const FakeTermBackend = struct {
         .read_observation = readObservation,
         .refresh_observation = readObservation,
         .dump_recent_text = dumpRecentText,
+    };
+
+    const input_vtable = input_owner.VTable{
+        .write = writeInput,
+        .write_nonblocking = writeInputNonBlocking,
+        .enqueue_core_command = enqueueCoreCommand,
     };
 
     fn init(allocator: std.mem.Allocator) FakeTermBackend {
@@ -743,6 +758,27 @@ test "term runtime backend: fake drives spawn/attach/input/resize through the co
     try std.testing.expectEqual(@as(?i32, 4242), be.foregroundProcessGroup(7));
     var names: [4]pty.types.ForegroundProcessName = undefined;
     try std.testing.expectEqual(@as(usize, 1), be.foregroundProcessNames(7, &names));
+}
+
+test "CR2c TermRuntimeBackend는 opaque handle을 InputOwner facade에 exact 결속한다" {
+    const allocator = std.testing.allocator;
+    var fake = FakeTermBackend.init(allocator);
+    defer fake.deinit();
+    const backend = fake.backend();
+    const surface = try backend.spawn(.{
+        .handle = 0xC201,
+        .request = .{ .command = "/bin/true" },
+        .size = .{ .cols = 8, .rows = 2 },
+        .queue_capacity = 8,
+    });
+    _ = try backend.attach(0xC201, false);
+
+    const owner = backend.inputOwner(0xC201);
+    try owner.write("A");
+    try std.testing.expectEqual(@as(usize, 1), try owner.writeNonBlocking("B"));
+    try owner.enqueueCoreCommand(.scroll_to_bottom, std.testing.io);
+    try std.testing.expectEqualStrings("AB", fake.find(0xC201).?.writes.items);
+    try std.testing.expectEqual(@as(u64, 0xC201), surface.id);
 }
 
 test "term runtime backend: processCwd는 계약을 통해서만 오고 모르는 handle·좁은 버퍼는 null이다" {

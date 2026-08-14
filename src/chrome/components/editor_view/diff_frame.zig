@@ -321,3 +321,80 @@ test "op 배열이 비어도 죽지 않는다" {
     });
     try testing.expectEqual(@as(usize, 0), w.ops);
 }
+
+test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane은 실제로 이만큼 좁아진다" {
+    // 두 열로 갈리면 **각 열이 pane의 절반**이라, 단일 편집기가 겪지 않던 폭에서 돈다. 0폭·1픽셀·
+    // 셀보다 좁은 폭에서 나눗셈이나 인덱스가 터지면 화면이 아니라 앱이 죽는다.
+    var ops: [128]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]@import("content.zig").Row = undefined;
+    var visual_rows: [16]@import("visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [16]@import("gutter.zig").Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [128]u8 = undefined;
+    const scratch: frame.Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+    const left = [_][]const u8{ "aaaa", "" };
+    const right = [_][]const u8{ "", "bbbb" };
+
+    var w: u32 = 0;
+    while (w <= 64) : (w += 1) {
+        var h: u32 = 0;
+        while (h <= 40) : (h += 8) {
+            const out = build(.{
+                .left = .{ .lines = &left, .total_lines = 1 },
+                .right = .{ .lines = &right, .total_lines = 1 },
+                .rect = .{ .x = 0, .y = 0, .w = w, .h = h },
+                .cell_w_px = 8,
+                .cell_h_px = 16,
+                .font_px = 16,
+            }, scratch);
+            // 그린 op이 저장소를 넘지 않는다(넘으면 아래 호출자가 남의 메모리를 읽는다).
+            try testing.expect(out.ops <= ops.len);
+            // 두 열이 서로를 침범하지 않는다 — 폭이 0이어도 오른쪽이 왼쪽 앞에 서지 않는다.
+            const cols = columns(.{ .x = 0, .y = 0, .w = w, .h = h }, 8);
+            try testing.expect(cols.right.x >= cols.left.x + @as(i32, @intCast(cols.left.w)));
+        }
+    }
+}
+
+test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임이 그렇다" {
+    // 제품은 `cell_width_px == 0`이면 프레임을 아예 건너뛰지만, 컴포넌트가 그 가정에 기대면 안 된다
+    // (Lab·다른 호출자는 그 가드를 지나지 않는다). 나눗셈이 0을 만나면 그 자리에서 죽는다.
+    var ops: [32]draw.Op = undefined;
+    var text: [128]u8 = undefined;
+    var runs: [32]draw.Run = undefined;
+    var content_rows: [8]@import("content.zig").Row = undefined;
+    var visual_rows: [8]@import("visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [8]@import("gutter.zig").Row = undefined;
+    var counts: [8]u32 = undefined;
+    var count_scratch: [64]u8 = undefined;
+    const line = [_][]const u8{"x"};
+    const out = build(.{
+        .left = .{ .lines = &line },
+        .right = .{ .lines = &line },
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+        .cell_w_px = 0,
+        .cell_h_px = 0,
+        .font_px = 0,
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+    try testing.expect(out.ops <= ops.len);
+}

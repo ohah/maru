@@ -26,8 +26,12 @@ pub const Feed = struct {
 /// 우리는 폴링 간격이 tick이라 회수 대신 총 시간으로 잰다(같은 6초).
 pub const retry_window_ms: u64 = 120 * 50;
 
-/// git이 바이너리로 판정하는 창. 앞쪽 이만큼에 NUL이 있으면 텍스트가 아니라고 본다(git `buffer_is_binary`와
-/// 같은 규칙 — 그래야 목록이 "Binary files differ"라 말한 파일을 본문도 같게 판정한다).
+/// git이 바이너리로 판정하는 창. 앞쪽 이만큼에 NUL이 있으면 텍스트가 아니라고 본다 — 그래야 목록이
+/// "Binary files differ"라 말한 파일을 본문도 같게 판정한다.
+///
+/// **관측으로 확인했다(2026-08-14).** 같은 파일에서 NUL이 7,000바이트에 있으면 `git diff --numstat`이
+/// `- -`(바이너리)를, 9,000바이트에 있으면 `1 1`(텍스트)을 낸다. 내부 구현이 아니라 **git이 밖으로
+/// 드러내는 동작**에 맞춘 값이다.
 pub const binary_probe_bytes: usize = 8000;
 
 /// 이번 tick에 할 일.

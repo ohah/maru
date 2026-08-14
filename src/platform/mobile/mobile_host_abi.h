@@ -106,8 +106,17 @@ unsigned int maru_mobile_color_atlas_count(void);
 /// 합성은 슬롯의 **왼쪽 절반**만 쓴다 — 대상이 전부 단폭이고 그리는 쪽도 절반만 샘플링한다.
 unsigned int maru_mobile_synthesize(unsigned int cp, unsigned char *out, unsigned int stride);
 
-/// 다음 빈 슬롯 — 상위 16비트=열, 하위 16비트=행.
+/// 다음 슬롯 — 상위 16비트=열, 하위 16비트=행.
+///
+/// **꽉 차면 가장 안 쓰인 슬롯을 재사용하라고 내준다**(축출). host 는 빈 자리인지 재사용인지
+/// 구분할 필요가 없다 — 어느 쪽이든 그 자리에 굽고 `atlas_add` 로 등록하면 된다. 다만 **그 자리의
+/// 옛 글리프는 사라지므로 부분 업로드가 슬롯을 완전히 덮어써야 한다**(잔상 방지).
+///
+/// `0xFFFFFFFF` 는 **이번 프레임에 그려진 글자만 남아 버릴 것이 없다**는 뜻이다(한 화면이 용량을
+/// 넘겼다). 그땐 host 가 이번 프레임에 그 글자를 못 그린다.
 unsigned int maru_mobile_next_slot(unsigned int cols);
+/// 등록된 글자 글리프 수. 축출이 들어온 뒤로는 `next_slot` 만으로 "찼다"를 못 본다(진단·테스트용).
+unsigned int maru_mobile_atlas_count(void);
 void maru_mobile_missing_clear(void);
 
 /// 아이콘 coverage 는 Zig 가 만든다(등록 SVG 자산). 플랫폼은 텍스처로 올려 샘플링만 한다.

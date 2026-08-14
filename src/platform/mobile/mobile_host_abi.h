@@ -37,9 +37,11 @@ extern "C" {
 /// 도달 가능한 값을 봐야 한다).
 #define MARU_FRAME_PACE_MIN_MS (MARU_FRAME_TARGET_MS * 0.75)
 #define MARU_FRAME_PACE_MAX_MS (MARU_FRAME_TARGET_MS * 1.30)
-/// 그 창에 넣을 표본을 **어떻게 모으는가**. 여기도 두 플랫폼이 같아야 한다 — 판정 기준만
-/// 같고 재는 방식이 다르면 두 수를 나란히 놓는 것 자체가 무의미하다(실제로 Android 는 첫
+/// 그 창에 넣을 표본을 **어떻게 고르는가**. 여기도 두 플랫폼이 같아야 한다 — 판정 기준만
+/// 같고 표본이 다르면 두 수를 나란히 놓는 것 자체가 무의미하다(실제로 Android 는 첫
 /// 프레임들을 버렸고 iOS 는 안 버려, 같은 이름의 로그가 다른 것을 재고 있었다).
+/// **시계까지 같을 필요는 없다** — iOS 는 `CADisplayLink.timestamp`, Android 는
+/// `CLOCK_MONOTONIC` 이 각자 가장 정확하고, 둘 다 표시 간격을 잰다.
 /// 워밍업은 첫 프레임들을 버린다 — 아틀라스를 굽고 스왑체인이 서는 동안의 간격은 정상
 /// 주기가 아니다. 표본은 짝수 개를 모아 위쪽 중앙값(`/2`)을 쓴다.
 #define MARU_FRAME_PACE_WARMUP 20

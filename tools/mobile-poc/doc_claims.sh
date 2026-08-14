@@ -72,6 +72,10 @@ ck "host 에 남은 주기 하드코딩" 0 "$(grep -cE '33333333|target=33\.33|>
 ck "헤더의 표본 정의" 2 "$(grep -cE 'define MARU_FRAME_PACE_(WARMUP|SAMPLES)' $H)"
 ck "host 에 남은 표본 하드코딩" 0 "$(grep -cE 'define PACE_(SAMPLES|WARMUP)|_paceMs\[60\]|_paceN < 60|n=60' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 ck "두 host 다 워밍업을 버린다" 2 "$(grep -l MARU_FRAME_PACE_WARMUP $I $A | wc -l | tr -d ' ')"
+ck "두 host 다 같은 표본 수를 쓴다" 2 "$(grep -l MARU_FRAME_PACE_SAMPLES $I $A | wc -l | tr -d ' ')"
+# **중앙값 색인을 손으로 적으면 표본 수를 바꿀 때 한쪽만 조용히 틀린 값을 읽는다**(iOS 가
+# `_paceMs[30]` 이었다). 상수에서 파생시킨다.
+ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 # `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"

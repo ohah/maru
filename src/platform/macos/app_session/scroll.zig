@@ -34,6 +34,7 @@ const Term = app_session_mod.Term;
 const default_scrollbar_fade_ticks = app_session_mod.default_scrollbar_fade_ticks;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const dock_ops = @import("dock.zig");
+const scm_dock_ops = @import("scm_dock.zig");
 const overlay_scroll_max_entries = app_session_mod.overlay_scroll_max_entries;
 const tab_ops = @import("tab.zig");
 const FileTreeScrollExtent = AppSession.FileTreeScrollExtent;
@@ -167,15 +168,15 @@ pub fn applyPendingScrollbarScroll(self: *AppSession) void {
 /// 소스 컨트롤 목록의 스크롤 좌표계(SV3a). **브랜치 헤더 한 줄을 뺀** 나머지가 뷰포트다 — 헤더는
 /// 스크롤에서 고정이므로 스크롤 좌표에 들어가지 않는다. 탐색기와 같은 이유로 세 값을 한 자리에서
 /// 만든다(상한이 호출부마다 갈리면 목록이 빈 곳으로 스크롤된다).
+/// 목록 스크롤 상한. **기하의 단일 출처는 component**다(P1b) — 예전에는 여기서 셀 높이를 다시 곱했고,
+/// 그 산술이 렌더와 갈리면 목록 아래에 빈 곳이 생기거나 마지막 행이 잘렸다.
 pub fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
-    const row_h = self.cell_height_px;
-    const rect = dock_ops.dockGeometry(self).tree_content;
-    const viewport = rect.h -| row_h; // 헤더 한 줄
-    const content: u32 = @intCast(@min(
-        @as(u64, git_ops.scmTotalRows(self)) * @as(u64, row_h),
-        @as(u64, std.math.maxInt(u32)),
-    ));
-    return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
+    const extent = scm_dock_ops.scrollExtent(self);
+    return .{
+        .content_h_px = extent.content_h_px,
+        .viewport_h_px = extent.viewport_h_px,
+        .max_offset_px = extent.max_offset_px,
+    };
 }
 
 pub fn scmEffectiveScrollPx(self: *AppSession) u32 {

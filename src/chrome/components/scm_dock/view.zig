@@ -97,6 +97,12 @@ pub fn view(
             }
         }
     }
+    // 목록이 비었으면 그 자리에 한 줄 안내를 낸다. **빈 화면과 구별돼야 한다** — "변경 사항 없음"과
+    // "읽는 중"과 "저장소가 아님"은 사용자에게 서로 다른 사실이다(§3.5 빈 상태 표).
+    if (props.items.len == 0 and props.empty_notice.len > 0) {
+        const content = frame.tree.entries[content_index];
+        try writer.line(content, @floatFromInt(m.inset_x + m.disclosure_extent), props.empty_notice, .muted_fg, .supporting, false);
+    }
     writer.scroll_clipped = false;
     writer.active_clip = null;
     writer.container_clip = null;
@@ -219,13 +225,18 @@ const Writer = struct {
         return @floatFromInt(cols * self.cell_width_px);
     }
 
+    /// 행 안의 한 줄. **행 높이 안에서 세로 중앙**이다 — 목록 rect처럼 큰 상자에서 부르면 글자가
+    /// 한가운데로 내려가므로, 그런 자리는 `topLine`을 쓴다.
     fn line(self: *Writer, rect: tree.RectEntry, x_offset: f32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool) ViewError!void {
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
         if (rect.rect.height < line_h or rect.rect.width <= x_offset) return;
         const width = rect.rect.width - x_offset;
+        // 큰 상자(목록 content)에서는 중앙이 아니라 위에 붙인다 — 안내가 화면 한가운데 떠 있으면
+        // 목록이 있다가 사라진 것처럼 보인다.
+        const y = if (rect.rect.height > line_h * 3) rect.rect.y + line_h / 2 else rect.rect.y + (rect.rect.height - line_h) / 2;
         try self.emit(
             rect.rect.x + x_offset,
-            rect.rect.y + (rect.rect.height - line_h) / 2,
+            y,
             source,
             self.colsFor(width),
             role,
@@ -528,4 +539,32 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .empty_notice = "변경 사항 없음",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, 8, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+    const text = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+    // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
+    try testing.expect(findText(draws, "main") != null);
 }

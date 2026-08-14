@@ -85,6 +85,7 @@ pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 g
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
+pub const scm_dock_ops = @import("app_session/scm_dock.zig"); // 소스 컨트롤 도크 component 배선(P1b)
 const file_panel_ops = @import("app_session/file_panel.zig");
 const pane_ops = @import("app_session/pane.zig");
 const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
@@ -3504,11 +3505,19 @@ pub const AppSession = struct {
     agent_session_archive_projection: agent_session_archive_view.Projection = .{},
     /// The completed component tree/action table that was actually painted in the latest
     /// frame. Mouse events consume this snapshot rather than rebuilding archive geometry.
+    /// 소스 컨트롤 도크의 published hit tree·action 표. Session Dock과 같은 규율로 **마지막으로 온전히
+    /// 그린 것**만 남는다(반쯤 만든 tree가 이전 스냅샷을 덮지 않는다).
+    scm_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    scm_dock_actions: std.ArrayList(chrome.components.scm_dock.ids.Entry) = .empty,
+    scm_dock_interaction: chrome.ui.interaction.InteractionState = .{},
+    scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
     // B1 rich-text artifact. The detached CoreText worker owns only an immutable scalar DTO;
     // this cache owns renderer-neutral records after the main actor resolves its font names.
     agent_session_dock_rich_text_cache: ?MeasuredTextCache = null,
+    /// 소스 컨트롤 도크의 measured 텍스트 캐시(같은 fingerprint면 CoreText를 다시 부르지 않는다).
+    scm_dock_rich_text_cache: ?MeasuredTextCache = null,
     /// 사이드바 헤더 검색 줄의 measured 셰이핑 캐시(이관 2단계). 슬롯이 도크와 따로인 이유는 fingerprint가
     /// 각자의 ops에서 나오기 때문이다 — 한 슬롯을 공유하면 검색어를 칠 때마다 도크 아티팩트가 버려진다.
     sidebar_search_text_cache: ?MeasuredTextCache = null,
@@ -7441,21 +7450,6 @@ pub const AppSession = struct {
         self.scm_selected_row = null;
     }
 
-    fn scmDrawWindow(self: *AppSession) struct { start: usize, count: u16, origin_shift_px: u32 } {
-        const row_h = self.cell_height_px;
-        if (row_h == 0) return .{ .start = 0, .count = 0, .origin_shift_px = 0 };
-        const extent = scroll_ops.scmScrollExtent(self);
-        const offset = @min(self.scm_scroll.offset_y_px, extent.max_offset_px);
-        const start: usize = offset / row_h;
-        const shift = offset % row_h;
-        const needed: usize = (@as(usize, extent.viewport_h_px) + shift + row_h - 1) / row_h;
-        const remaining = git_ops.scmTotalRows(self) -| start;
-        return .{
-            .start = start,
-            .count = @intCast(@min(@min(needed, remaining), @as(usize, std.math.maxInt(u16)))),
-            .origin_shift_px = shift,
-        };
-    }
 
     /// diff entry가 들고 있는 소유 문자열을 **전부** 푼다(Term 파괴 시). path와 같은 자리에서 부른다.
     pub fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
@@ -8607,6 +8601,7 @@ pub const AppSession = struct {
     /// 호출부가 자기 슬롯을 기억할 필요가 없다.
     fn clearMeasuredTextCaches(self: *AppSession) void {
         MeasuredTextCache.clear(&self.agent_session_dock_rich_text_cache, self.allocator);
+        MeasuredTextCache.clear(&self.scm_dock_rich_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.sidebar_search_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.pane_tab_title_text_cache, self.allocator);
     }
@@ -9660,6 +9655,18 @@ pub const AppSession = struct {
                 return;
             }
         }
+        // 소스 컨트롤 도크도 같은 규칙을 쓴다(도크 뷰가 달라도 포인터 수명은 하나여야 한다).
+        if (dock_ops.dockVisible(self) and self.dock.view == .source_control and button == 0 and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
+        {
+            const content = dock_ops.dockGeometry(self).tree_content;
+            const captured = self.scm_dock_interaction.capture != null;
+            if (captured or layout_math.pointInRect(x_px, y_px, content)) {
+                const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
+                if (scm_dock_ops.scmDockPointer(self, phase, x_px, y_px)) |intent| scm_dock_ops.applyScmDockIntent(self, intent);
+                return;
+            }
+        }
         // 새 primary down은 잃은 mouse-up/blur가 남긴 파일 탭 arm을 먼저 취소한다. 새 arm은 아래 도크 tab
         // hit-test가 같은 이벤트에서 다시 세운다.
         // 우클릭(button==2, down) → rename 대상이면 컨텍스트 메뉴("Rename")를 띄운다. 대상이 없을 때:
@@ -9804,35 +9811,13 @@ pub const AppSession = struct {
                 // 폴더 선택 다이얼로그가 되고(실측), 트리 포커스도 뺏는다 — setDockView가 뷰를 바꿀 때 그 포커스를
                 // 놓는 것과 모순된다. 도크 안이라는 사실만으로 클릭을 소비하는 건 아래 dock rect 분기가 한다.
                 if (self.dock.view == .source_control) {
-                    // 행 클릭 = 그 비교 열기(§3.5 표). 섹션 헤더·여백은 아래 dock rect 분기가 소비만 한다.
-                    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
-                    var row_scratch: [std.fs.max_path_bytes]u8 = undefined;
-                    if (git_ops.scmRowAt(self, x_px, y_px, &rows_buf, &row_scratch)) |row| switch (row) {
-                        .file => |file| {
-                            git_ops.openDiffForScmRow(self, file);
-                            return;
-                        },
-                        .section => |sec| {
-                            // 섹션 헤더 클릭 = 접기/펴기. 개수는 접혀도 남아 몇 개가 숨었는지 보인다.
-                            const idx = @intFromEnum(sec.section);
-                            if (idx < self.scm_collapsed.len) self.scm_collapsed[idx] = !self.scm_collapsed[idx];
-                            clearScmSelection(self);
-                            self.metal_dirty = true;
-                            return;
-                        },
-                        .notice => {
-                            // 상태 진술이라 누를 것이 없다 — 클릭을 소비만 하고 아무 일도 하지 않는다.
-                            return;
-                        },
-                        .more => |more| {
-                            // "모두 보기" = 그 섹션만 전부 편다(다른 섹션 상한은 그대로 — 한 섹션이 화면을 먹지 않게).
-                            const idx = @intFromEnum(more.section);
-                            if (idx < self.scm_expanded.len) self.scm_expanded[idx] = true;
-                            clearScmSelection(self);
-                            self.metal_dirty = true;
-                            return;
-                        },
-                    };
+                    // **published tree 하나가 히트테스트를 소유한다**(P1b). 예전에는 여기서 행 높이를
+                    // 다시 곱해 좌표를 인덱스로 바꿨는데, 그 산술이 렌더와 갈리는 순간 누른 것과 열리는
+                    // 것이 어긋났다.
+                    // down은 **무장만** 한다. 실제 적용은 아래 up 경로 한 곳이다 — 그래야 드래그나
+                    // 스냅샷 교체가 "누른 적 없는 행 열기"가 되지 않는다(Session Dock과 같은 규율).
+                    _ = scm_dock_ops.scmDockPointer(self, .down, x_px, y_px);
+                    return;
                 }
                 if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // 도크를 눌렀다 = 키보드도 도크로. 아래 dispatch가 세우는 component-local focus는
@@ -11453,6 +11438,7 @@ pub const AppSession = struct {
             // Do this before the view-bar return as well: moving from a card to a scope/view
             // selector is a leave transition for the SessionDock tree, not a frozen hover.
             if (self.dock.view == .agent_sessions) _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
+            if (self.dock.view == .source_control) _ = scm_dock_ops.scmDockPointer(self, .move, x_px, y_px);
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
@@ -14371,78 +14357,13 @@ pub const AppSession = struct {
                             @as(u32, std.math.maxInt(u16)),
                         ));
                         if (self.dock.view == .source_control and scm_cols > 0 and visible_rows > 0) {
-                            var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
-                            var scratch: [std.fs.max_path_bytes]u8 = undefined;
-                            // 히트테스트(scmRowAt)·스크롤 상한과 **같은 함수**로 만든다 — 그린 자리와 눌리는
-                            // 자리가 어긋나지 않게. 첫 줄은 브랜치 헤더라 파일·섹션 행은 한 줄 아래부터다.
-                            const model = git_ops.buildScmModel(self, &rows_buf, &scratch);
-                            if (model) |m| {
-                                if (m.empty) {
-                                    // 빈 상태는 오류가 아니다(§3.5) — 경고색을 쓰지 않는다.
-                                    if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, scm_cols, "변경 사항 없음", dock_fg)) |pdl| {
-                                        self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
-                                            .origin_x = dg.tree_content.x,
-                                            .origin_y = dg.tree_content.y,
-                                            .colors = tabbar_colors,
-                                        } });
-                                    } else |_| {}
-                                } else {
-                                    // 헤더와 목록을 **따로** 그린다(SV3a). 헤더는 스크롤에서 고정이라 편향을
-                                    // 받으면 안 되고, 목록만 픽셀만큼 밀려 부분 행이 생긴다.
-                                    if (coretext_frame_builder.buildDockScmDrawList(
-                                        self.allocator,
-                                        scm_cols,
-                                        1,
-                                        m.head,
-                                        &.{},
-                                        &self.scm_collapsed,
-                                        null,
-                                        0,
-                                        dock_active_fg,
-                                        dock_fg,
-                                        .{ .rgb = self.appearance.theme.accent },
-                                    )) |hdl| {
-                                        self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
-                                            .origin_x = dg.tree_content.x,
-                                            .origin_y = dg.tree_content.y,
-                                            .colors = tabbar_colors,
-                                        } });
-                                    } else |_| {}
-
-                                    const window = self.scmDrawWindow();
-                                    const start = @min(window.start, m.rows.len);
-                                    const window_rows = m.rows[start..];
-                                    if (window.count > 0) if (coretext_frame_builder.buildDockScmDrawList(
-                                        self.allocator,
-                                        scm_cols,
-                                        window.count,
-                                        null, // 헤더는 위에서 이미 그렸다
-                                        window_rows,
-                                        &self.scm_collapsed,
-                                        self.scm_selected_row,
-                                        start,
-                                        dock_active_fg,
-                                        dock_fg,
-                                        .{ .rgb = self.appearance.theme.accent },
-                                    )) |sdl| {
-                                        // 목록의 뷰포트는 헤더 **아래**다. 창의 첫 행이 그 위로 밀린 만큼
-                                        // 원점을 올리고, 삐져나온 몫은 clip이 자른다.
-                                        const list_top = dg.tree_content.y + self.cell_height_px;
-                                        self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
-                                            .origin_x = dg.tree_content.x,
-                                            .origin_y = list_top -| window.origin_shift_px,
-                                            .colors = tabbar_colors,
-                                            .clip_rect = .{
-                                                .x = dg.tree_content.x,
-                                                .y = list_top,
-                                                .w = dg.tree_content.w,
-                                                .h = dg.tree_content.h -| self.cell_height_px,
-                                            },
-                                        } });
-                                    } else |_| {};
-                                }
+                            if (self.git_result != null) {
+                                // **목록은 typed component가 그린다**(P1b). 셀 그리드 경로는 비례 폰트·
+                                // 상태 색·호버를 표현할 수 없어 제거했다 — 기하·히트테스트의 단일 출처도
+                                // 그 tree 하나다.
+                                scm_dock_ops.collectScmDock(self, &collected, pane_frame_builder, tabbar_colors);
                             } else {
-                                // 아직 못 읽었거나 git 저장소가 아니다 — 둘을 구분해 적는다(정상 상태이므로 경고 아님).
+                                // 아직 못 읽었거나 git 저장소가 아니다 — 셋을 구분해 적는다(정상 상태이므로 경고 아님).
                                 var repo_probe: [std.fs.max_path_bytes]u8 = undefined;
                                 // 문구 선택은 `git_ops.scmEmptyNotice`가 소유한다 — 판정의 3-상태를 문구에서도
                                 // 지켜야 하고(`.none`과 `.unknown`은 다른 사실이다), 렌더 안 표현식으로 두면
@@ -16579,6 +16500,8 @@ pub const AppSession = struct {
                 self.agent_session_archive_records.deinit(self.allocator);
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
                 self.agent_session_archive_projection.deinit(self.allocator);
+                self.scm_dock_entries.deinit(self.allocator);
+                self.scm_dock_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);
                 for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
@@ -53762,221 +53685,124 @@ test "dock list viewport ends exactly where the status bar begins" {
     }
 }
 
-test "scm list scrolls in pixels under a fixed header and gets its own scrollbar" {
+test "소스 컨트롤 스크롤 상한은 component 기하에서 나온다" {
+    // P1b: 예전에는 여기서 셀 높이를 다시 곱했다. 그 산술이 렌더와 갈리면 목록 아래에 빈 곳이 생기거나
+    // 마지막 행이 잘린다 — 이제 상한과 그린 자리가 같은 `DockMetrics`를 지난다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.resize(1400, 900, 1000);
-    file_panel_ops.activateFilePanelDockControl(session);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
     dock_ops.setDockView(session, .source_control);
-    git_ops.rememberGitRepo(session, "/repo");
 
-    // 뷰포트를 **넘치도록** 채운다. 넘치지 않으면 offset이 0으로 눌려 이 테스트가 아무것도 판정하지
-    // 못한다(§10.1 "단언이 판정할 수 있는 상태인지 본다").
     var status: std.ArrayList(u8) = .empty;
     defer status.deinit(allocator);
-    var numstat: std.ArrayList(u8) = .empty;
-    defer numstat.deinit(allocator);
     try status.appendSlice(allocator, "# branch.head main\n");
-    const file_count: usize = 200;
-    for (0..file_count) |i| {
+    for (0..80) |i| {
         var line: [64]u8 = undefined;
         try status.appendSlice(allocator, try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b f{d}.txt\n", .{i}));
-        try numstat.appendSlice(allocator, try std.fmt.bufPrint(&line, "1\t0\tf{d}.txt\n", .{i}));
     }
     session.git_result = .{
         .status = try git_backend_mod.worker_allocator.dupe(u8, status.items),
-        .numstat_staged = try git_backend_mod.worker_allocator.dupe(u8, ""),
-        .numstat_worktree = try git_backend_mod.worker_allocator.dupe(u8, numstat.items),
         .ok = true,
     };
+    session.scm_expanded[@intFromEnum(scm_view.Section.changes)] = true;
 
-    // 목록이 뷰포트를 **넘치게** 만든다. `scmTotalRows`는 행 문자열을 한 scratch 버퍼에 담아 실제 행
-    // 수가 그 용량에서 멈추므로(이 fixture에서 12행), 파일을 더 넣는 대신 **뷰포트를 줄여** 넘침을
-    // 만든다. 넘치지 않으면 offset이 0으로 눌려 이 테스트가 아무것도 판정하지 못한다.
-    const cell_h = session.cell_height_px;
-    const half = cell_h / 2;
-    if (half == 0) return error.SkipZigTest;
-    const saved_backing_height_px = session.backing_height_px;
-    defer session.backing_height_px = saved_backing_height_px;
-    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + cell_h * 5 + session.statusBarHeightPx();
-    const rect = dock_ops.dockGeometry(session).tree_content;
     const extent = scroll_ops.scmScrollExtent(session);
-    if (extent.max_offset_px == 0) return error.ScmFixtureDoesNotOverflow;
+    const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    // 헤더 1 + 파일 80 — 높이는 component가 정한다(여기서 숫자를 다시 고르지 않는다).
+    try std.testing.expectEqual(m.section_h + m.row_h * 80, extent.content_h_px);
+    try std.testing.expect(extent.max_offset_px > 0);
 
-    // ① 뷰포트는 **헤더 한 줄을 뺀** 나머지다. 이 한 줄을 빼지 않으면 목록이 바닥에서 한 줄만큼 넘친다.
-    try std.testing.expectEqual(rect.h - cell_h, extent.viewport_h_px);
-
-    const x: f64 = @floatFromInt(rect.x + rect.w / 2);
-    var rows_buf: [512]scm_view.Row = undefined;
-    var scratch: [std.fs.max_path_bytes]u8 = undefined;
-
-    // ② 헤더 줄은 행이 아니고, 그 **바로 아래**가 목록의 첫 행이다.
-    try std.testing.expect(git_ops.scmRowAt(session, x, @floatFromInt(rect.y), &rows_buf, &scratch) == null);
-    try std.testing.expect(git_ops.scmRowAt(session, x, @floatFromInt(rect.y + cell_h), &rows_buf, &scratch) != null);
-
-    // ③ 반 행만 굴리면 창의 첫 행이 그만큼 밀리고, 그 행은 여전히 뷰포트 첫 픽셀에 걸쳐 있다.
-    session.scm_scroll.offset_y_px = half;
-    {
-        const window = session.scmDrawWindow();
-        try std.testing.expectEqual(@as(usize, 0), window.start);
-        try std.testing.expectEqual(half, window.origin_shift_px);
-        try expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, extent.viewport_h_px);
-        // 뷰포트 첫 픽셀은 아직 0번 행이다(반쯤 잘린 채로 보인다).
-        const first = git_ops.scmRowAt(session, x, @floatFromInt(rect.y + cell_h), &rows_buf, &scratch);
-        try std.testing.expect(first != null);
-        // 그 행이 끝나는 지점 아래는 다음 행이다.
-        const next = git_ops.scmRowAt(session, x, @floatFromInt(rect.y + cell_h + (cell_h - half) + 1), &rows_buf, &scratch);
-        try std.testing.expect(next != null);
-    }
-
-    // ④ 한 행을 꽉 채워 굴리면 창이 한 칸 내려가고 편향이 사라진다.
-    session.scm_scroll.offset_y_px = cell_h;
-    {
-        const window = session.scmDrawWindow();
-        try std.testing.expectEqual(@as(usize, 1), window.start);
-        try std.testing.expectEqual(@as(u32, 0), window.origin_shift_px);
-    }
-
-    // ⑤ 상한은 content 바닥이 뷰포트 바닥에 붙는 지점이다 — 행 좌표 시절에는 그 아래 나머지 픽셀만큼
-    //    배경이 남았다. clamp도 같은 상한을 본다.
+    // 상한을 넘겨 요청해도 그 값에서 멈춘다.
     session.scm_scroll.offset_y_px = std.math.maxInt(u32);
-    try std.testing.expectEqual(extent.max_offset_px, scroll_ops.scmEffectiveScrollPx(session));
     scroll_ops.clampScmScroll(session);
     try std.testing.expectEqual(extent.max_offset_px, session.scm_scroll.offset_y_px);
 
-    // ⑥ 휠이 그 상태를 픽셀로 움직인다 — 트랙패드는 논리 픽셀이라 행 경계에서 멈추지 않는다.
-    session.scm_scroll.reset();
-    scroll_ops.scrollWheel(session, -1, 0, true, x, @floatFromInt(rect.y + cell_h + 1));
-    const after_wheel = session.scm_scroll.offset_y_px;
-    try std.testing.expect(after_wheel > 0);
-    try std.testing.expect(after_wheel < cell_h); // 한 행을 통째로 건너뛰지 않았다
-
-    // ⑦ **스크롤 상한이 실제로 그릴 수 있는 것을 넘지 않는다.** `scmTotalRows`가 렌더·hit-test보다
-    //    큰 버퍼를 쓰면(적대적 검증에서 512 vs 128로 어긋나 있었다) 그리지 못하는 행까지 스크롤 범위에
-    //    들어가 목록 아래에 빈 곳이 생긴다. 맨 아래로 굴렸을 때 마지막 픽셀이 **행이어야** 한다.
-    session.scm_scroll.offset_y_px = extent.max_offset_px;
-    {
-        const bottom_y: f64 = @floatFromInt(rect.y + rect.h - 1);
-        try std.testing.expect(git_ops.scmRowAt(session, x, bottom_y, &rows_buf, &scratch) != null);
-    }
-
-    // ⑧ **스크롤바가 이 목록에도 뜬다**(SV3b). 발행은 탐색기와 같은 `scrollArea` 선언 하나에서 나오고,
-    //    뷰포트가 헤더 아래에서 시작하므로 track도 그 아래에 놓인다 — 헤더 옆에 막대가 뜨면 안 된다.
-    session.scm_scroll.reset();
-    file_panel_ops.refreshDockListScrollbar(session);
-    {
-        const bar = dock_ops.dockListScrollbarGeometry(session) orelse return error.ScmScrollbarMissing;
-        try std.testing.expect(bar.track_y >= @as(f32, @floatFromInt(rect.y + cell_h)));
-        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(extent.viewport_h_px)), bar.track_h, 1.0);
-        try std.testing.expectEqual(extent.max_offset_px, bar.max_offset_px);
-        // 트랙 위 클릭은 행 선택으로 새지 않는다.
-        const track_x: f64 = bar.track_x + bar.track_w / 2;
-        const track_y: f64 = bar.track_y + bar.track_h / 2;
-        try std.testing.expect(git_ops.scmRowAt(session, track_x, track_y, &rows_buf, &scratch) == null);
-        // 그리고 글자는 그 트랙 왼쪽에서 끝난다(gutter).
-        const content_right = rect.x + (dock_ops.dockListTextWidthPx(session) / session.cell_width_px) * session.cell_width_px;
-        try std.testing.expect(@as(f32, @floatFromInt(content_right)) <= bar.track_x);
-    }
-
-    // ⑨ **thumb 드래그가 이 목록을 움직인다** — 탐색기 offset이 아니라. 두 뷰가 발행 저장소를 공유하므로
-    //    라우팅이 갈리면 보이지 않는 목록이 스크롤된다(그 결함을 막는 것이 뷰별 setter의 존재 이유다).
-    {
-        const bar = dock_ops.dockListScrollbarGeometry(session).?;
-        const before_file_tree = session.file_tree_scroll.offset_y_px;
-        try std.testing.expect(dock_ops.beginDockListScrollbarGesture(
-            session,
-            bar.track_x + bar.track_w / 2,
-            bar.track_y + bar.track_h - 1, // 트랙 아래쪽 = 점프
-        ));
-        try std.testing.expect(scroll_ops.scmEffectiveScrollPx(session) > 0);
-        try std.testing.expectEqual(before_file_tree, session.file_tree_scroll.offset_y_px);
-        scroll_ops.endScrollbarCapture(session);
-    }
-
-    // ⑩ 다른 뷰에서 굴리면 이 목록은 움직이지 않는다(뷰별로 상태를 나눠 둔 이유).
-    dock_ops.setDockView(session, .explorer);
-    const before = session.scm_scroll.offset_y_px;
-    scroll_ops.scrollWheel(session, -600, 0, false, x, @floatFromInt(rect.y + cell_h + 1));
-    try std.testing.expectEqual(before, session.scm_scroll.offset_y_px);
+    // 목록이 비면 스크롤도 없다(빈 화면에서 스크롤 막대가 남지 않게).
+    if (session.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    try std.testing.expectEqual(@as(u32, 0), scroll_ops.scmScrollExtent(session).max_offset_px);
 }
 
-test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" {
+test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component 경로)" {
+    // P1b: 좌표 → 행 판정을 published component tree가 소유한다. 이 테스트는 그 tree를 실제로 발행한 뒤
+    // 그 안의 행 rect를 눌러, **그린 자리가 곧 눌리는 자리**임을 고정한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.resize(1400, 900, 1000);
 
-    // 검증 대상은 좌표→행 매핑과 "두 번째 클릭도 diff Term을 연다"이지 git 실행이 아니다. 그런데 diff Term을
-    // 열면 `requestDiffContent`가 백그라운드 `diffWorker`를 띄우고, 그 스레드는 **detach라 테스트가 기다릴 수
-    // 없다**. 테스트 함수가 반환할 때 워커가 아직 `git show` 중이면 그 argv 버퍼가 leak으로 판정돼 테스트가
-    // ABRT로 죽는다(제품 코드는 refcount라 늦게 끝나도 안전하게 회수된다). 10회 반복에서 3/3 재현했다.
-    //
-    // backend를 미리 만들고 `shutting_down`을 세워 `submitDiff`가 워커를 **띄우지 않게** 한다. 실제 git
-    // 프로세스를 fork하고 기다리는 것보다 빠르고, 환경(git 설치 여부·PATH)에 의존하지 않는다.
-    // PATH를 비우는 방법은 통하지 않는다 — `git_locate`가 PATH 뒤에 `fallback_dirs`(/usr/bin 등)를 훑는다.
-    //
-    // **이 준비는 도크를 소스 컨트롤로 바꾸기 전에 해야 한다.** 뷰 전환은 곧바로 `refreshGitStatus`를 부르고,
-    // 그 안의 `gitRepoRoot`는 활성 터미널의 cwd(= 테스트 프로세스의 cwd = maru 저장소)를 잡아 목록 워커를
-    // 띄운다. 뒤에서 backend를 새로 만들면 그 워커를 붙든 backend를 통째로 버려 leak/ABRT가 된다.
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
-
-    // 도크를 열고 소스 컨트롤 뷰로.
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     dock_ops.setDockView(session, .source_control);
 
-    // 실제 git 없이 목록만 채운다(클릭 경로 검증이 목적).
     session.git_result = .{
         .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
-        .numstat_staged = try git_backend_mod.worker_allocator.dupe(u8, ""),
-        // 2판의 증감 출처는 `HEAD ↔ 작업트리`다(§3.5.2) — 행의 기본 비교와 같은 범위여야 화면 숫자와 여는
-        // diff가 어긋나지 않는다.
         .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
         .ok = true,
     };
-
-    const rect = dock_ops.dockGeometry(session).tree_content;
-    const x: f64 = @floatFromInt(rect.x + rect.w / 2);
-    const row_y = struct {
-        fn at(s: *AppSession, r: u32, top: u32) f64 {
-            return @floatFromInt(top + r * s.cell_height_px + 1);
-        }
-    }.at;
-    // 목록이 읽힌 저장소를 기억시켜 둔다(실제로는 refreshGitStatus가 한다). 이게 없으면 클릭이 조용히 무시된다.
     git_ops.rememberGitRepo(session, "/repo");
 
-    // 0=브랜치 헤더, 1=섹션 헤더, 2=one.txt, 3=two.txt
-    var rows_buf: [16]scm_view.Row = undefined;
-    var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expect(git_ops.scmRowAt(session, x, row_y(session, 0, rect.y), &rows_buf, &scratch) == null); // 헤더는 행이 아니다
-    try std.testing.expectEqualStrings(
-        "one.txt",
-        git_ops.scmRowAt(session, x, row_y(session, 2, rect.y), &rows_buf, &scratch).?.file.path,
-    );
-    try std.testing.expectEqualStrings(
-        "two.txt",
-        git_ops.scmRowAt(session, x, row_y(session, 3, rect.y), &rows_buf, &scratch).?.file.path,
-    );
+    // 렌더 없이 tree만 발행한다(스크린샷 하니스 없이 클릭 경로를 그대로 태우기 위해).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame);
 
-    session.mouse(1, x, row_y(session, 2, rect.y), 0, 0);
-    session.mouse(1, x, row_y(session, 3, rect.y), 0, 0);
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const rowCenter = struct {
+        fn at(s: *AppSession, index: usize, origin_x: u32, origin_y: u32) struct { x: f64, y: f64 } {
+            const entries = s.scm_dock_entries.items;
+            for (entries) |entry| {
+                if (entry.id != chrome.components.scm_dock.build.NodeIds.item(index)) continue;
+                return .{
+                    .x = @as(f64, @floatFromInt(origin_x)) + entry.rect.x + entry.rect.width / 2,
+                    .y = @as(f64, @floatFromInt(origin_y)) + entry.rect.y + entry.rect.height / 2,
+                };
+            }
+            return .{ .x = -1, .y = -1 };
+        }
+    }.at;
+
+    // 0=그룹 헤더, 1=one.txt, 2=two.txt
+    const first = rowCenter(session, 1, content.x, content.y);
+    const second = rowCenter(session, 2, content.x, content.y);
+    try std.testing.expect(first.y > 0 and second.y > first.y);
+
+    // **down은 무장, up이 적용**이다 — 실제 클릭과 같은 순서로 보낸다.
+    session.mouse(1, first.x, first.y, 0, 0);
+    session.mouse(3, first.x, first.y, 0, 0);
+    session.mouse(1, second.x, second.y, 0, 0);
+    session.mouse(3, second.x, second.y, 0, 0);
 
     var diffs: usize = 0;
     var it = file_panel_ops.fileEntries(session);
     while (it.next()) |entry| {
         if (entry.kind == .diff) diffs += 1;
     }
-    // **두 번째 클릭도 열려야 한다** — 첫 diff가 활성이 된 뒤 저장소를 다시 구하면 여기서 1이 된다.
     try std.testing.expectEqual(@as(usize, 2), diffs);
 
-    // 섹션 헤더 클릭은 접힘을 토글한다(열기가 아니다).
-    session.mouse(1, x, row_y(session, 1, rect.y), 0, 0);
+    // 그룹 헤더를 누르면 접힌다(열기가 아니다).
+    const header = rowCenter(session, 0, content.x, content.y);
+    session.mouse(1, header.x, header.y, 0, 0);
+    session.mouse(3, header.x, header.y, 0, 0);
     try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
 }
 

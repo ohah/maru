@@ -552,10 +552,11 @@ SV1~SV5를 마치며 실제 실패 셋을 겪었고, 코드로 확인해 보니 
 
 **그래서 다음으로 나눈다.**
 
-- **SV6a — 공용 lowering이 layer를 받는다.** `chrome_draw_lowering.appendBackgroundQuads`가 layer 2를
+- **SV6a — 공용 lowering이 layer를 받는다(완료).** `chrome_draw_lowering.appendBackgroundQuads`가 layer 2를
   고정 출력해, 그 경로를 타는 소비처 중 둘(사이드바·오버레이 스크롤바)이 뒤에서 `q.layer = 3`으로
-  **되돌리고 있다.** 같은 역할이 두 층에 흩어진 원인이 이것이다. 인자로 받고 기본값을 2로 두면 기존
-  넷(도크·탐색기·Lab·테스트)은 무변경이고 되돌리기 코드가 사라진다.
+  **되돌리고 있었다.** 같은 역할이 두 층에 흩어진 원인이 이것이다. 이제 인자로 받는다 — **기본값은 두지
+  않고 호출자가 명시한다**(처음에는 기본값 2를 두려 했으나, 그러면 "이 draws가 어느 층인가"를 다시 호출부
+  밖에 숨기게 된다). 되돌리기 코드는 사라졌다.
 - **SV6b — 오버레이 quad를 프레임 끝에 한 덩어리로 붓는다(완료).**
 
   **처음 적은 계획("각 소비처가 손으로 순서를 지키니 규약으로 적는다")은 틀렸다.** 코드를 확인해 보니
@@ -731,20 +732,20 @@ SV1a는 좌표계를 옮기는 작은 이관이었는데, 계약을 하나씩 �
 
 ## 11. API 스케치
 
-아래 흐름에서 **상태와 투영은 이미 존재하고**(`chrome/ui/scroll_area.zig`), 측정 pass·`scrollView` 노드·
-drag 헬퍼는 아직 없다. 각 조각에 어느 쪽인지 적었다. 없는 부분은 계약이 실제 호출부에서 어떤 모양이
-되는지 보이기 위한 것이고, 구현이 그 시그니처를 그대로 따라야 한다는 뜻은 아니다.
+아래는 계약이 실제 호출부에서 어떤 모양이 되는지 보이는 흐름이고, 소유는 `chrome/ui/scroll_area.zig`와
+`chrome/ui/tree.zig`가 나눠 갖는다(좌표계·투영·스크롤바 기하·drag 수명은 앞이, 발행과 clip은 뒤가).
+이름과 시그니처는 계약이 아니라 예시다 — 실제 호출부가 이 형태를 그대로 따라야 한다는 뜻은 아니다.
 
 ```zig
-// [있음] 상태는 소비처가 소유한다. ScrollArea는 그 값의 legal range와 전이만 정한다.
+// 상태는 소비처가 소유한다. ScrollArea는 그 값의 legal range와 전이만 정한다.
 scroll: chrome.ui.scroll_area.State = .{},
 
-// ── 1. [없음 — SV1c] 측정 pass. 고정 chrome과 **자식 없는** 스크롤 컨테이너만 layout해 viewport를
+// ── 1. 측정 pass. 고정 chrome과 **자식 없는** 스크롤 컨테이너만 layout해 viewport를
 //      확정한다. 뷰포트 높이를 손으로 예측하지 않는다(§4.2).
 const measured = try tree.build(self.chromeRoot(&.{}), options, measure_buffers);
 const viewport_h_px = measured.rectOf(NodeIds.content).height;
 
-// ── 2. [있음] 그 viewport로 창을 정한다. 무엇을 build할지가 여기서 나온다(div와 반대 방향, §2.1).
+// ── 2. 그 viewport로 창을 정한다. 무엇을 build할지가 여기서 나온다(div와 반대 방향, §2.1).
 //      항목 높이는 **함수로** 묻는다 — 균일 높이를 전제하면 §3의 walk 계약이 깨진다. 도크는 그룹
 //      헤더·카드·펼친 카드가 각각 다르므로, 그 예외 전부가 `items` 한 자리에 모인다.
 const items = self.dockScrollItems(); // entries + 높이 규칙
@@ -755,11 +756,10 @@ const window = chrome.ui.scroll_area.project(
     self.scroll.offset_y_px,
 );
 
-// ── 3. [있음 — 도크가 이미 이렇게 한다] 그 창의 item만 만든다. 보이지 않는 행은 노드도 텍스트도
-//      만들지 않는다.
+// ── 3. 그 창의 item만 만든다. 보이지 않는 행은 노드도 텍스트도 만들지 않는다.
 const item_nodes = try self.buildItems(arena, window.first_index, window.end_exclusive);
 
-// ── 4. [없음 — SV1b] 선언은 한 줄이다. clip·자식 shrink 금지·가상화 평행이동·track/thumb 발행은 `build`가 한다.
+// ── 4. 선언은 한 줄이다. clip·자식 shrink 금지·가상화 평행이동·sticky·track/thumb 발행은 `build`가 한다.
 top[3] = tree.scrollArea(.{
     .id = NodeIds.content,
     .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
@@ -775,20 +775,20 @@ top[3] = tree.scrollArea(.{
 const built = try tree.build(root, options, buffers);
 ```
 
-host 쪽은 세 지점뿐이고, 그 셋이 §6의 drag 계약을 그대로 만든다. 지금 도크는 같은 일을 host 안에
-손으로 쓴 세 함수(`beginAgentSessionDockScrollDrag`·`absorb…`·`apply…`)로 하고 있으며, SV1c가 이 모양으로
-모은다.
+host 쪽은 세 지점뿐이고, 그 셋이 §6의 drag 계약을 그대로 만든다 — `scroll_area.Drag`가 그 수명을 소유한다.
 
 ```zig
-// down이 스크롤바 위면 grab 지점을 확정한다(track이면 먼저 점프하고 thumb 중앙을 잡는다).
-// 기하는 **published tree에서 읽는다** — 두 번째 기하 출처를 만들지 않는다(§4).
-if (phase == .down) scroll_area.beginDrag(&self.scroll_drag, built, NodeIds.content, local_x, local_y);
+// down이 스크롤바 위면 grab 지점을 확정한다(track의 빈 곳이면 그 지점으로 먼저 점프할 offset을
+// 돌려주고, 이어지는 드래그는 옮긴 뒤의 기하를 쓴다). 기하는 **published tree에서 읽는다** —
+// 두 번째 기하 출처를 만들지 않는다(§4).
+if (phase == .down) _ = self.scroll_drag.begin(bar, local_x, local_y);
 
 // dispatch가 낸 drag는 **좌표만 흡수**한다. 여기서 offset을 적용하지 않는다.
-if (dispatched.drag) |event| scroll_area.absorb(&self.scroll_drag, event);
+if (dispatched.drag) |event| self.scroll_drag.absorb(event.x, event.y);
 
-// tick 하나가 소비한다 — move 수가 아니라 tick 수가 상한이다.
-scroll_area.applyPending(&self.scroll_drag, &self.scroll);
+// tick 하나가 소비한다 — move 수가 아니라 tick 수가 상한이다. 값이 직전과 같으면 null이라
+// track 끝에 닿은 채 계속 미는 동안 같은 effect를 반복하지 않는다.
+if (self.scroll_drag.takeOffset()) |offset| self.scroll.offset_y_px = offset;
 ```
 
 tree를 다시 발행할 때는 스크롤바 drag만 좁은 carry 문을 태운다(§6).
@@ -796,7 +796,7 @@ tree를 다시 발행할 때는 스크롤바 drag만 좁은 carry 문을 태운�
 ```zig
 if (scroll_area.isDraggingScrollbar(interaction)) {
     _ = try interaction_mod.reconcileCarryingCapture(&interaction, new_tree, previous_key, current_key);
-    if (interaction.capture == null) scroll_area.endDrag(&self.scroll_drag);
+    if (interaction.capture == null) self.scroll_drag.end();
 } else {
     _ = try interaction_mod.reconcile(&interaction, old_tree, new_tree);
 }

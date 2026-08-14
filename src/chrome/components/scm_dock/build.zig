@@ -151,10 +151,11 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 동작 버튼은 행의 **오른쪽 끝**에 붙는다. 글자는 `view`가 rect 안에 직접 놓으므로 자식이 아니다.
             .justify = .end,
             .align_items = .center,
-            // 선택된 행만 표면을 칠한다. 나머지는 `surface`이되 paint override가 비어 있어 배경이
-            // 그려지지 않는다 — 목록 행마다 카드 상자가 보이면 VS Code 목업과 달리 시끄러워진다.
+            // **행에는 테두리가 없다.** `surface` 기본값은 사방 divider 테두리라, 그대로 두면 행마다
+            // 가로줄이 생겨 목업(VS Code)과 달리 표가 된다(사용자 지적 2026-08-14). 배경은 상태
+            // 해석이 얹으므로(hover=`row_hover_bg`, 누름=`tab_active_bg`) 여기서 지우지 않는다.
             .variant = if (isSelected(item)) .selected else .surface,
-            .paint = if (isSelected(item)) .{} else .{ .shadow = .none },
+            .paint = .{ .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
             .action = row_action_id,
             .overflow = .clip,
         }, action_nodes);

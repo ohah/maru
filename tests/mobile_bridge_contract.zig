@@ -6,6 +6,18 @@
 const std = @import("std");
 const bridge = @import("mobile_bridge");
 
+/// 단일 코드포인트 등록. 계약은 **열**을 받지만(`❤` 와 `❤️` 를 갈라야 해서) 대부분의 테스트는
+/// 클러스터를 안 쓴다.
+fn atlasAdd1(cp: u32, style: u32, col: u32, row: u32, adv: u32) void {
+    const one = [_]u32{cp};
+    bridge.maru_mobile_atlas_add(&one, 1, style, col, row, adv);
+}
+
+fn colorAdd1(cp: u32, style: u32, col: u32, row: u32, adv: u32) void {
+    const one = [_]u32{cp};
+    bridge.maru_mobile_color_atlas_add(&one, 1, style, col, row, adv);
+}
+
 // 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
 var fake_ms: u64 = 0;
 fn now() u64 {
@@ -46,7 +58,7 @@ test "코어가 없을 때는 세지 않고 알린다" {
 // 거기 있다) 플랫폼은 클립보드에 쓰기만 한다 — 브리지엔 OS 호출이 없다(§3).
 test "선택을 복사로 꺼낸다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     // 앞 테스트가 뷰포트를 올려 뒀을 수 있다 — 바닥이 아니면 화면 0행은 스크롤백이라
     // 엉뚱한 글자가 잡힌다(실제로 옛 행의 'W' 가 복사됐다).
@@ -148,7 +160,7 @@ test "코어가 만든 답을 치우고 그 사실을 알린다" {
 test "화면을 꽉 채워도 quad 가 안 잘린다" {
     // 헤드리스에는 굽는 host 가 없다 — 등록부만 채워 "그릴 글리프가 있는" 상태로 만든다.
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
 
     const sizes = [_][2]u32{ .{ 402, 874 }, .{ 874, 402 }, .{ 1024, 1366 }, .{ 1366, 1024 } };
     for (sizes) |s| {
@@ -172,16 +184,16 @@ test "화면을 꽉 채워도 quad 가 안 잘린다" {
 test "굵기가 다르면 다른 슬롯을 쓴다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     const before = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
-    bridge.maru_mobile_atlas_add(0x2600, 0, 1, 1, 11); // 보통
+    atlasAdd1(0x2600, 0, 1, 1, 11); // 보통
     const mid = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
     try std.testing.expect(mid != before); // 슬롯 하나를 썼다
 
-    bridge.maru_mobile_atlas_add(0x2600, bridge.style_bold, 2, 2, 11); // 같은 글자의 굵은 판
+    atlasAdd1(0x2600, bridge.style_bold, 2, 2, 11); // 같은 글자의 굵은 판
     const after = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
     try std.testing.expect(after != mid); // **또 하나를 썼다** — 덮어쓰지 않았다
 
     // 같은 (글자, 스타일) 을 또 넣으면 슬롯을 더 쓰지 않는다.
-    bridge.maru_mobile_atlas_add(0x2600, bridge.style_bold, 3, 3, 11);
+    atlasAdd1(0x2600, bridge.style_bold, 3, 3, 11);
     try std.testing.expectEqual(after, bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols()));
 }
 
@@ -245,7 +257,7 @@ test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
 // 절반 — 받으면 그리고, 확정되면 지우고, 코어를 안 더럽힌다 — 만 여기서 고정한다.
 test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     const plain = bridge.maru_mobile_build(402, 874, now());
     const before = bridge.maru_mobile_input("", 0); // 누적 바이트만 읽는다
 
@@ -306,7 +318,7 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
 // 다 그리는지, 그리고 TUI 가 숨기면(`CSI ?25 l`) 실제로 사라지는지 본다.
 test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 
@@ -338,7 +350,7 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
 // 을 지워도 그대로 통과했다(변이로 확인). 이제 만들 수 있으므로 양쪽을 다 본다.
 test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안에는 안 그린다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
@@ -585,7 +597,7 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
 // 선택이 서면 **화면에 보여야** 한다 — 코어만 알고 있으면 사용자는 무엇이 잡혔는지 모른다.
 test "선택은 화면에 quad 로 나타난다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("hello world", 11);
@@ -625,7 +637,7 @@ test "선택은 화면에 quad 로 나타난다" {
 // 눈으로 못 세고, 실제로 그래서 결함을 놓친 적이 있다.
 test "여러 줄에 걸쳐 선택된다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     // 개행은 Enter(CR)라 줄이 안 넘어간다(§3.1) — 출력 쪽 경로로 세 줄을 만든다.
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -665,7 +677,7 @@ test "여러 줄에 걸쳐 선택된다" {
 // 들고 있으므로 뷰포트 span 은 저절로 따라와야 한다 — 그것을 값으로 고정한다.
 test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("target word here", 16);
@@ -796,7 +808,7 @@ test "컬러를 모르는 host 가 등록하면 다시 굽지 않는다" {
     try std.testing.expect(missCount(0x1F607) == 1);
 
     // 옛 host 처럼 **커버리지** 아틀라스에 등록한다.
-    bridge.maru_mobile_atlas_add(0x1F607, 0, 4, 4, 22);
+    atlasAdd1(0x1F607, 0, 4, 4, 22);
     bridge.maru_mobile_missing_clear();
 
     // 2·3프레임: 다시 굽지 않는다.
@@ -810,7 +822,7 @@ fn missCount(cp: u32) u32 {
     var n: u32 = 0;
     var i: u32 = 0;
     while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
-        if (bridge.maru_mobile_missing_cp(i) == cp) n += 1;
+        if (bridge.maru_mobile_missing_cp_at(i, 0) == cp) n += 1;
     }
     return n;
 }
@@ -832,8 +844,8 @@ fn bakeMisses() u32 {
             unbaked += 1;
             continue;
         }
-        bridge.maru_mobile_atlas_add(
-            bridge.maru_mobile_missing_cp(i),
+        atlasAdd1(
+            bridge.maru_mobile_missing_cp_at(i, 0),
             bridge.maru_mobile_missing_style(i),
             slot >> 16,
             slot & 0xFFFF,
@@ -873,6 +885,62 @@ test "0폭 format 문자(ZWJ)는 미스로 안 올라간다" {
     try std.testing.expectEqual(@as(u32, 0), missCount(0x200D));
     // 피드가 실제로 격자에 닿았다는 대조군 — 이게 0이면 위 단정은 아무것도 안 잰 것이다.
     try std.testing.expect(missCount(0x1F468) >= 1);
+}
+
+/// 미스 목록에서 그 코드포인트가 실린 항목의 **열 전체**를 받아 적는다. 없으면 null.
+fn missSeq(base: u32, out: []u32) ?[]const u32 {
+    var i: u32 = 0;
+    while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
+        if (bridge.maru_mobile_missing_cp_at(i, 0) != base) continue;
+        const n = bridge.maru_mobile_missing_len(i);
+        var j: u32 = 0;
+        while (j < n and j < out.len) : (j += 1) out[j] = bridge.maru_mobile_missing_cp_at(i, j);
+        return out[0..@min(n, out.len)];
+    }
+    return null;
+}
+
+/// 그 base 로 시작하는 미스가 컬러로 보고되는가.
+fn missIsColor(base: u32) u32 {
+    var i: u32 = 0;
+    while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
+        if (bridge.maru_mobile_missing_cp_at(i, 0) == base) return bridge.maru_mobile_missing_is_color(i);
+    }
+    return 0xFFFF; // 못 찾음 — 0/1 어느 쪽으로도 통과하지 않게
+}
+
+// **클러스터는 열째로 host 에 간다.**
+//
+// 코어는 base 코드포인트를 셀에 두고 나머지를 `grapheme_id` 로 따로 보관한다. 브리지가 base 만
+// 넘기던 동안 host 에게는 `❤`(U+2764)와 `❤️`(U+2764 U+FE0F)가 **같아 보였다** — 그래서 VS16
+// 결합이 단색으로 나오고, 국기는 지역 표시자 둘이 각각 구워져 글리프 두 개가 됐다.
+test "미스는 클러스터 열을 통째로 싣는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+
+    var buf: [8]u32 = undefined;
+    {
+        _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+        bridge.maru_mobile_missing_clear();
+        const heart = "\u{2764}\u{FE0F}"; // ❤️ = 하트 + VS16
+        _ = bridge.maru_mobile_input(heart.ptr, heart.len);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const seq = missSeq(0x2764, &buf) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualSlices(u32, &.{ 0x2764, 0xFE0F }, seq);
+        // **컬러로 간다.** `isEmojiPresentation(U+2764)` 는 거짓이지만 VS16 이 표현을 뒤집는다 —
+        // 이 판정이 base 만 보던 동안 `❤️` 가 커버리지 아틀라스로 가 단색으로 그려졌다.
+        try std.testing.expectEqual(@as(u32, 1), missIsColor(0x2764));
+    }
+    {
+        // 그냥 `❤` 는 열이 하나다 — 둘이 **구분된다**는 것이 이 테스트의 핵심이다.
+        _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+        bridge.maru_mobile_missing_clear();
+        _ = bridge.maru_mobile_input("\u{2764}", 3);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const seq = missSeq(0x2764, &buf) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualSlices(u32, &.{0x2764}, seq);
+        try std.testing.expectEqual(@as(u32, 0), missIsColor(0x2764)); // 텍스트 표현
+    }
 }
 
 // **아틀라스가 차도 새 글자는 그려진다**(축출).
@@ -968,7 +1036,7 @@ test "버릴 것이 없을 때만 슬롯 없음을 답한다" {
     while (n < cols * rows) : (n += 1) {
         const slot = bridge.maru_mobile_next_slot(cols);
         if (slot == 0xFFFFFFFF) break; // 이미 전부 이번 프레임 것
-        bridge.maru_mobile_atlas_add(cp + n, 0, slot >> 16, slot & 0xFFFF, 1);
+        atlasAdd1(cp + n, 0, slot >> 16, slot & 0xFFFF, 1);
     }
     // 등록부가 전부 **이번 프레임** 것이라 버릴 게 없다.
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(cols));
@@ -992,7 +1060,7 @@ test "이모지는 컬러로 보고되고 보통 글자는 아니다" {
     var saw_emoji = false;
     var i: u32 = 0;
     while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
-        const cp = bridge.maru_mobile_missing_cp(i);
+        const cp = bridge.maru_mobile_missing_cp_at(i, 0);
         const is_color = bridge.maru_mobile_missing_is_color(i) == 1;
         switch (cp) {
             0x1F600 => {
@@ -1013,26 +1081,26 @@ test "컬러 등록부와 글자 등록부는 슬롯을 각자 센다" {
     const text_before = bridge.maru_mobile_next_slot(cols);
     const color_before = bridge.maru_mobile_next_color_slot(cols);
 
-    bridge.maru_mobile_color_atlas_add(0x1F601, 0, 7, 3, 22);
+    colorAdd1(0x1F601, 0, 7, 3, 22);
     try std.testing.expectEqual(text_before, bridge.maru_mobile_next_slot(cols)); // 글자 쪽은 안 움직인다
     try std.testing.expect(color_before != bridge.maru_mobile_next_color_slot(cols));
 
     const color_mid = bridge.maru_mobile_next_color_slot(cols);
-    bridge.maru_mobile_atlas_add(0x2604, 0, 5, 5, 11);
+    atlasAdd1(0x2604, 0, 5, 5, 11);
     try std.testing.expectEqual(color_mid, bridge.maru_mobile_next_color_slot(cols)); // 컬러 쪽도 안 움직인다
 
-    bridge.maru_mobile_color_atlas_add(0x1F601, 0, 9, 9, 22); // 같은 글자 재등록은 슬롯을 안 먹는다
+    colorAdd1(0x1F601, 0, 9, 9, 22); // 같은 글자 재등록은 슬롯을 안 먹는다
     try std.testing.expectEqual(color_mid, bridge.maru_mobile_next_color_slot(cols));
 }
 
 // 등록하면 **그 자리에서 그려진다** — 컬러 quad(kind 4/5)로, 컬러 등록부의 슬롯을 가리켜야 한다.
 test "컬러 글리프는 kind 4 로 컬러 슬롯을 가리킨다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
-    bridge.maru_mobile_color_atlas_add(0x1F600, 0, 3, 2, 22);
+    colorAdd1(0x1F600, 0, 3, 2, 22);
     _ = bridge.maru_mobile_input("\u{1F600}", 4);
 
     const n = bridge.maru_mobile_build(402, 874, now());
@@ -1055,8 +1123,8 @@ test "컬러 글리프는 kind 4 로 컬러 슬롯을 가리킨다" {
 // 텍스처의 같은 자리를 샘플링하면 엉뚱한 글자가 나온다(적대적 검증 2라운드에서 찾았다).
 test "chrome 텍스트의 이모지도 컬러 텍스처를 가리킨다" {
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
-    bridge.maru_mobile_color_atlas_add(0x1F602, 0, 6, 4, 22);
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    colorAdd1(0x1F602, 0, 6, 4, 22);
     _ = bridge.maru_mobile_build(402, 874, now());
 
     bridge.maru_mobile_set_preedit("\u{1F602}", 4); // 조합 중 문자열에 이모지
@@ -1091,7 +1159,7 @@ test "조합 중 문자열: 뒤에 여러 바이트 글자가 와도 앞 글자�
     while (cp < 127) : (cp += 1) {
         const slot = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
         if (slot == 0xFFFFFFFF) break;
-        bridge.maru_mobile_atlas_add(cp, 0, slot >> 16, slot & 0xFFFF, 11);
+        atlasAdd1(cp, 0, slot >> 16, slot & 0xFFFF, 11);
     }
     _ = bridge.maru_mobile_build(402, 874, now());
 

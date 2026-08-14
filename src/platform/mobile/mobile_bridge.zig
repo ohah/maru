@@ -520,8 +520,34 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
     // **키캡처럼 면을 띄운다.** 채움이 본문 배경과 같으면 속이 빈 윤곽선으로 보인다 — 실제
     // 키보드처럼 눌리는 면이 배경보다 밝아야 "누를 것" 으로 읽힌다.
     push(.{ .x = r.x + in, .y = r.y + in, .w = r.w - 2 * @as(u32, @intCast(in)), .h = r.h - 2 * @as(u32, @intCast(in)) }, tk.get(if (armed) .tab_active_bg else .tab_hover_bg), 0xFF, 8, 0);
-    // 라벨은 키 한가운데. **실제 폭으로 잰다** — 글자 수 × 근사치로 재면 화살표처럼 advance 가
-    // 다른 글자가 왼쪽으로 쏠린다(화면으로 확인).
+    // **아이콘이 있으면 아이콘을 그린다**(kind=2 — 아이콘 아틀라스 슬롯). 방향키가 그렇다:
+    // 폰트 글리프는 폰트마다 작게 디자인돼 글자 라벨보다 훨씬 작아 보였다(화면으로 확인).
+    // 합성 아이콘은 슬롯을 가장자리까지 채워 크기를 우리가 정한다.
+    if (key_bar[i].icon_slot) |slot| {
+        const ic: f32 = 22.0; // 44 키캡 안에서 여백을 남기는 크기
+        if (!reserveQuad()) return;
+        const rgb = tk.get(if (armed) .accent_bar else .surface_fg);
+        quad_buf[quad_count] = .{
+            .x = kx + (key_w - ic) / 2,
+            .y = ky + (key_h - ic) / 2,
+            .w = ic,
+            .h = ic,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            // **슬롯은 세로 인덱스다** — 아이콘 아틀라스가 슬롯을 세로로 쌓는다(host 가
+            // `slot_px × slot_px*count` 텍스처를 만든다). `cell_x` 에 넣으면 빈 칸이 나온다.
+            .cell_x = 0,
+            .cell_y = slot,
+        };
+        quad_count += 1;
+        return;
+    }
+    // 라벨은 키 한가운데. **실제 폭으로 잰다** — 글자 수 × 근사치로 재면 advance 가 다른 글자가
+    // 왼쪽으로 쏠린다(화면으로 확인).
     const label_w: f32 = @floatFromInt(textWidth(key_bar[i].label, @intFromFloat(key_font)));
     pushText(key_bar[i].label, @intFromFloat(kx + (key_w - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed) .accent_bar else .surface_fg));
 }
@@ -1590,7 +1616,8 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
 
 /// 등록된 SVG 아이콘의 coverage 를 Zig 에서 만든다 — 두 플랫폼이 같은 코드를 쓴다.
 const icon_slot_px = 32;
-const icon_slots = 6;
+/// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
+const icon_slots = 10;
 /// **RGBA8** 이어야 한다 — `glyph_pixels.slotFits` 가 `bytes_per_row >= width*4` 를 요구한다
 /// (단일 채널을 주면 조용히 0을 돌려준다. 실측: filled=0/6 으로 헤맸다). 셰이더는 alpha 를
 /// coverage 로 읽는다.
@@ -1618,6 +1645,13 @@ pub export fn maru_mobile_icon_build() u32 {
         maru.icons.codepoint(.search),
         maru.icons.codepoint(.bell),
         maru.icons.codepoint(.sidebar_collapse),
+        // 보조 키바 방향키. **폰트 글리프(`↑↓←→`)로는 안 됐다** — 폰트마다 작게 디자인돼 44px
+        // 키캡 안에서 `esc`·`tab` 보다 훨씬 작아 보였다(화면으로 확인). 합성 아이콘은 슬롯을
+        // 가장자리까지 채우므로 라벨 크기와 무관하게 또렷하다.
+        maru.icons.codepoint(.arrow_up),
+        maru.icons.codepoint(.arrow_down),
+        maru.icons.codepoint(.arrow_left),
+        maru.icons.codepoint(.arrow_right),
     };
     var filled: u32 = 0;
     for (cps, 0..) |cp, i| {
@@ -1900,6 +1934,9 @@ const KeyBarItem = struct {
     /// 키가 아니라 **복사**다. 선택이 있을 때만 줄에 나타난다 — 늘 두면 한 줄에 자리가
     /// 모자라고(11개가 상한), 누를 수 없는 버튼이 계속 보이는 것도 어색하다.
     is_copy: bool = false,
+    /// 라벨 대신 그릴 **아이콘 슬롯**(없으면 null). 방향키가 여기 해당한다 — 폰트 글리프
+    /// (`↑↓←→`)는 폰트마다 작게 디자인돼 44px 키캡에서 글자 라벨보다 훨씬 작아 보였다.
+    icon_slot: ?u32 = null,
 };
 
 /// 한 줄에 들어가야 한다 — 폰 세로 폭(~400 논리 px)에 11개가 상한이다.
@@ -1907,10 +1944,12 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "esc", .key_id = 2 },
     .{ .label = "tab", .key_id = 3 },
     .{ .label = "ctrl", .key_id = 0, .sticky_mod = 2 }, // MARU_MOD_CTRL
-    .{ .label = "\u{2191}", .key_id = 5 },
-    .{ .label = "\u{2193}", .key_id = 6 },
-    .{ .label = "\u{2190}", .key_id = 7 },
-    .{ .label = "\u{2192}", .key_id = 8 },
+    // 방향키는 **아이콘**이다(슬롯 6~9 — `maru_mobile_icon_build` 순서). 라벨은 접근성·계측용
+    // 이름으로 남긴다.
+    .{ .label = "\u{2191}", .key_id = 5, .icon_slot = 6 },
+    .{ .label = "\u{2193}", .key_id = 6, .icon_slot = 7 },
+    .{ .label = "\u{2190}", .key_id = 7, .icon_slot = 8 },
+    .{ .label = "\u{2192}", .key_id = 8, .icon_slot = 9 },
     .{ .label = "|", .key_id = 0, .codepoint = '|' },
     .{ .label = "~", .key_id = 0, .codepoint = '~' },
     .{ .label = "/", .key_id = 0, .codepoint = '/' },

@@ -115,6 +115,14 @@ ICONS = [
     ("chevron_right", FIT_TIGHT, 0xF0024, "assets/icons/chevron-right-tight.svg"),
     ("host", FIT_STANDARD, 0xF0025, "assets/icons/host.svg"),
     ("hourglass", FIT_STANDARD, 0xF0026, "assets/icons/hourglass.svg"),
+    # 모바일 보조 키바의 방향키. **폰트 글리프로는 안 됐다** — `↑↓←→`(U+2190~2193)는 폰트마다
+    # 작게 디자인돼 44px 키캡 안에서 `esc`·`tab` 보다 훨씬 작아 보였다(화면으로 확인). 합성
+    # 아이콘은 슬롯을 가장자리까지 채우므로 크기가 라벨과 무관하다. Maru 자작(chevron 획 굵기
+    # .75 를 맞췄다).
+    ("arrow_up", FIT_STANDARD, 0xF0027, "assets/icons/arrow-up.svg"),
+    ("arrow_down", FIT_STANDARD, 0xF0028, "assets/icons/arrow-down.svg"),
+    ("arrow_left", FIT_STANDARD, 0xF0029, "assets/icons/arrow-left.svg"),
+    ("arrow_right", FIT_STANDARD, 0xF002A, "assets/icons/arrow-right.svg"),
 ]
 
 

@@ -635,6 +635,59 @@ test "줄 끝 문자를 줄에 포함해야 git과 맞는다 — 떼고 넘기�
     }
 }
 
+/// 브루트포스 편집 거리(삽입·삭제만, 교체 없음). **작은 입력에서만** 쓴다 — O(N·M) DP다.
+/// Myers가 내는 D와 이 값이 다르면 우리 스크립트가 최소가 아니라는 뜻이고, 그러면 §7의 근거
+/// ("git과 총량이 같다")가 무너진다.
+fn bruteForceEditDistance(a: []const []const u8, b: []const []const u8, buf: []usize) usize {
+    const w = b.len + 1;
+    for (0..a.len + 1) |i| {
+        for (0..b.len + 1) |j| {
+            buf[i * w + j] = if (i == 0) j else if (j == 0) i else if (std.mem.eql(u8, a[i - 1], b[j - 1]))
+                buf[(i - 1) * w + (j - 1)]
+            else
+                1 + @min(buf[(i - 1) * w + j], buf[i * w + (j - 1)]);
+        }
+    }
+    return buf[a.len * w + b.len];
+}
+
+test "우리 대응이 정말 최소다 — 브루트포스 편집 거리와 대조(무작위 300쌍)" {
+    // **지금까지는 총량을 git과만 맞춰 봤다.** git도 같은 계열이라, 둘이 함께 틀리면 대조가 통과한다.
+    // 여기서는 독립적인 판정자(삽입·삭제만 쓰는 DP)를 두고 편집 횟수가 같은지 본다 — 다르면 우리
+    // 스크립트가 최소가 아니고, §7이 자체 differ를 택한 근거가 무너진다.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var prng = std.Random.DefaultPrng.init(0x31D);
+    const rnd = prng.random();
+    var case_i: usize = 0;
+    while (case_i < 300) : (case_i += 1) {
+        _ = arena.reset(.retain_capacity);
+        const alloc = arena.allocator();
+        // 어휘를 아주 작게 잡는다 — 같은 줄이 자주 겹쳐야 대응이 헷갈리는 모양이 나온다.
+        const vocab = [_][]const u8{ "a", "b", "c" };
+        const na = rnd.uintLessThan(usize, 9);
+        const nb = rnd.uintLessThan(usize, 9);
+        const left = try alloc.alloc([]const u8, na);
+        const right = try alloc.alloc([]const u8, nb);
+        for (left) |*l| l.* = vocab[rnd.uintLessThan(usize, vocab.len)];
+        for (right) |*r| r.* = vocab[rnd.uintLessThan(usize, vocab.len)];
+
+        const v = try compute(alloc, left, right, .{});
+        var ours: usize = 0;
+        switch (v) {
+            .compare => |rows| {
+                for (rows.left) |r| ours += @intFromBool(r.kind == .removed);
+                for (rows.right) |r| ours += @intFromBool(r.kind == .added);
+            },
+            .unchanged => ours = 0,
+            else => continue,
+        }
+        const buf = try alloc.alloc(usize, (na + 1) * (nb + 1));
+        const best = bruteForceEditDistance(left, right, buf);
+        try testing.expectEqual(best, ours);
+    }
+}
+
 test "행을 되돌리면 두 원문이 그대로 나온다 — 무작위 200쌍" {
     // **지금까지의 테스트는 전부 손으로 고른 예제였다.** 고른 사람이 생각하지 못한 모양은 검사되지 않는다.
     // 여기서는 결과가 무엇이든 반드시 참이어야 하는 것만 본다 —

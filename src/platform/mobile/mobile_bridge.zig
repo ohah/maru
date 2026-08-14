@@ -488,8 +488,9 @@ const key_font: f32 = 20.0;
 /// 가장자리 키 위에 얹혀 라벨을 지우지 않는다.
 const edge_w: f32 = 26.0;
 
-/// 키바 밴드(스크롤 판정용). 세로는 밴드 전체, 가로는 `<`/`>` 를 눌렀는지 가리는 데 쓴다.
-var key_bar_band: struct { top: f32 = 0, bot: f32 = 0, left: f32 = 0, right: f32 = 0 } = .{};
+/// 키바 밴드의 **세로 범위**(스크롤 판정용). 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고,
+/// 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
+var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
 var key_bar_max_scroll: f32 = 0;
 /// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
 var key_bar_scroll: f32 = 0;
@@ -585,19 +586,12 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and kb_moved < 10) {
         key_bar_fling = 0;
-        // **`<`/`>` 는 눌러도 움직인다.** 데스크톱 탭바의 `‹›` 가 클릭 가능한데 여기만 장식이면
-        // 같은 기호가 플랫폼마다 다른 것이 된다. 한 화면씩 옮긴다(미는 것보다 정확하다).
-        const page = @max(key_w + key_gap, key_bar_band.right - key_bar_band.left - 2 * edge_w - (key_w + key_gap));
-        if (kb_down_x < key_bar_band.left + edge_w) {
-            key_bar_scroll -= page;
-            clampKeyBarScroll();
-            return 1;
-        }
-        if (kb_down_x >= key_bar_band.right - edge_w) {
-            key_bar_scroll += page;
-            clampKeyBarScroll();
-            return 1;
-        }
+        // **`<`/`>` 는 누르는 것이 아니라 신호다.** 한때 데스크톱 탭바의 `‹›` 가 클릭 가능하다는
+        // 이유로 한 화면씩 옮기게 했는데, 두 가지가 어긋났다 — ① 데스크톱이 그런 것은 **마우스**
+        // 이기 때문이고 터치에서는 **밀면 된다**(§2.4 "입력 방식이 다르면 같은 요소도 다르게
+        // 동작한다"), ② 표시 폭이 26px 이라 **44 기준에 미달하는 버튼**을 새로 만드는 꼴이었다
+        // (44 를 지키려고 시작한 작업에서). 그래서 표시로만 두고, 그 자리를 눌러도 스크롤의
+        // 시작점일 뿐 아무 키도 안 나간다.
         _ = keybarTapAt(kb_down_x, kb_down_y);
     }
     return 1;
@@ -1780,7 +1774,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     for (built.entries) |entry| {
         if (entry.id != key_bar_id_base - 1) continue;
         const band = entry.rect;
-        key_bar_band = .{ .top = band.y, .bot = band.y + band.height, .left = band.x, .right = band.x + band.width };
+        key_bar_band = .{ .top = band.y, .bot = band.y + band.height };
         // **키가 지나가는 창은 화살표 안쪽**이다. 창을 밴드 전체로 두면 `<`/`>` 배경이 가장자리
         // 키 위에 얹혀 그 라벨을 지운다(화면으로 확인 — 첫 키가 빈 칸이 됐다).
         const view_x = band.x + edge_w;

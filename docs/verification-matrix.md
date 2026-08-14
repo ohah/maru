@@ -1192,7 +1192,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   scroll-to-bottom, core-command를 closed six-kind record와 한 epoch/checked sequence에 합치고, blocked wire에서
   `key -> paste -> scroll -> key -> scroll -> core-command` transcript와 같은 physical frame 순서, sequence exhaustion
   mutation 0, byte/control 순차 retire, control transcript drift의 wire 전 거부를 Debug·ReleaseFast에서 고정한다. 기존 direct-input/control barrier와
-  `writeNonBlocking` partial 의미는 유지한다. CR2d3~d4는 event cursor, Window 이동·close 및 cross-Window parity다. CR2e: fake
+  `writeNonBlocking` partial 의미는 유지한다. CR2d3은 stable shell의 observer-generation baseline과 BEL/OSC52 cursor를
+  고정한다. 첫 관측·generation 교체·counter 감소는 재생 0, write RPC 실패는 cursor mutation 0, 성공/oversize만
+  exact-once commit이며 AppSession `Term`의 Window-local cursor 필드는 0이다. notification은 기존 stable runtime 소비형
+  RPC를 유지한다. focused gate는 cursor 2개, RemoteRuntime 1개, 실제 AppSession BEL/read/reconnect routing 3개와
+  boundary 1개를 Debug·ReleaseFast로 실행한다. CR2d4는 Window 이동·close 및 cross-Window parity다. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

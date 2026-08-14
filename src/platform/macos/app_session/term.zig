@@ -1043,19 +1043,8 @@ pub fn pendingClipboard(self: *AppSession) []const u8 {
     // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
     if (is_macos and activeSurface(self).remote != null) {
         const term = pane_ops.activePane(self).activeTerm();
-        const seq = term.rt.observation.clipboard_write_seq;
-        const last = term.rt.last_clipboard_write_seq orelse {
-            term.rt.last_clipboard_write_seq = seq; // 첫 관측 = 기준선(재접속 시 지난 복사 재생 금지)
-            return &.{};
-        };
-        if (seq <= last) {
-            term.rt.last_clipboard_write_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
-            return &.{};
-        }
         const rb = &(app_session_mod.app_remote_backend orelse return &.{});
-        const fetched = rb.clipboardWriteFor(term.rt.handle) orelse return &.{}; // 실패면 seq 유지 → 다음 tick 재시도
-        // **가져온 뒤에** seq를 전진시킨다 — 먼저 올리면 전송 실패가 요청을 소비해 복사가 영영 사라진다.
-        term.rt.last_clipboard_write_seq = seq;
+        const fetched = rb.clipboardWriteFor(term.rt.handle) orelse return &.{};
         if (fetched.too_large) {
             // 로컬의 오버사이즈 안내와 같은 자리(조용한 유실 금지). 텍스트는 없다.
             var nbuf: [128]u8 = undefined;

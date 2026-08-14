@@ -70,7 +70,7 @@ macOS 로컬 shell 1개 surface
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR3a·CR3b R1 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2d3·CR3a·CR3b R1 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -108,20 +108,21 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    유지하는 final-address stable proxy gate를 배선했다. proxy는 exact pinned target unlock, writer-pending 우선권,
    checked-monotonic generation, unavailable placeholder와 shell destroy drain을 소유한다. `RemoteRuntime`은 proxy pointer를
    stable field로 두고 attach 때 live target을 게시하며 detach/deinit 때 proxy를 먼저 닫은 뒤 attachment screen을 파괴한다.
-   CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
+   **CR2c 완료:** local/remote `InputOwner` facade를 도입하되 입력 의미를
    바꾸지 않는다. transport-neutral facade는 `src/app/input_owner.zig`가 opaque runtime handle과
    blocking input·nonblocking partial progress·`CoreCommand` dispatch만 결속하고, `TermRuntimeBackend`가 backend별 함수표를
    공급한다. local/remote 구현은 기존 write leaf를 그대로 재사용하므로 오류·부분 수락·ordering이 달라지지 않는다.
-   ordered queue/epoch/sequence/paused paste storage의 실제 소유권 이동은 CR2d가 담당한다. CR2d1은
+   ordered queue/epoch/sequence/paused paste storage의 실제 소유권 이동은 CR2d가 담당한다. **CR2d1 완료:**
    remote paste·IME 확정·OSC52 응답을 `InputBatchKind`로 구분해 `InputOwner.enqueueBatch` 한 번에 stable
    `RemoteRuntime` queue로 소유 이전한다. batch는 checked-nonzero epoch/sequence와 byte range를 함께 기록하고 IME
    확정+replay 두 slice 및 LF→CR 정규화를 한 allocation transaction으로 수락한다. local Term은 closed
    `caller_owned` 결과로 기존 `AppSession.pending_pastes`를 계속 사용하며, remote 성공 뒤에는 Window-local queue entry를
-   만들지 않는다. CR2d2는 paste 전용 public kind와 분리된 closed `QueueRecordKind`를 두고 blocking key bytes,
+   만들지 않는다. **CR2d2 완료:** paste 전용 public kind와 분리된 closed `QueueRecordKind`를 두고 blocking key bytes,
    scroll-to-bottom 및 core-command barrier도 같은 stable epoch/checked sequence transcript에 합친다. byte backing과
    control FIFO/barrier는 기존 물리 wire 순서를 유지하며 두 backing reserve 뒤에만 record를 게시하고, record는 실제
-   byte/control ownership이 Client로 넘어갈 때 같은 순서로 retire한다. CR2d3은 event
-   cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
+   byte/control ownership이 Client로 넘어갈 때 같은 순서로 retire한다. **CR2d3 완료:** event cursor를 stable shell에
+   두며 `RemoteRuntime`은 CR2d2 기준 Debug 32바이트, ReleaseFast 48바이트 증가한다. 기존 4,096-runtime 상한의 추가
+   inline budget은 각각 128 KiB와 192 KiB다. CR2d4는 cross-Window old transfer 제거/parity를 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.
 5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현

@@ -719,6 +719,19 @@ byte와 record, 또는 control과 record 양쪽 capacity를 먼저 reserve한 �
 control이 Client outbound owner로 넘어간 시점에 transcript 앞 record도 같은 순서로 retire한다. 이 단계는
 `writeNonBlocking`의 partial-progress API, event cursor, Window 이동을 바꾸지 않는다.
 
+CR2d3은 host-backed 관측의 one-shot platform effect cursor를 `Term`/Window에서 stable `RemoteRuntime` shell로
+옮긴다. cursor는 `{observer_generation,bell_count,clipboard_write_seq,clipboard_read_seq}` baseline을 소유한다.
+첫 관측, observer generation 교체, 같은 generation의 counter 감소는 이미 지나간 BEL·OSC 52를 재생하지 않고 새
+baseline만 게시한다. BEL과 OSC 52 read는 shell이 typed consume한 뒤 AppSession에 전달하고, OSC 52 write는 shell이
+prepared sequence를 만든 뒤 host RPC가 실제 payload 또는 typed oversize 결과를 돌려준 경우에만 cursor를 commit한다.
+RPC 실패/빈 응답은 cursor mutation 0이라 다음 tick이 같은 sequence를 재시도한다. host-backed notification은 이미
+stable `RemoteRuntime.takeNotification`의 소비형 RPC가 소유하므로 별도 Window cursor를 만들지 않는다. AppSession의
+`TermRuntime.last_bell_count|last_clipboard_*`는 제거하며 Window move/close는 cursor를 이동·초기화하지 않는다.
+inline cursor로 `RemoteRuntime`은 CR2d2 기준 Debug 32바이트, ReleaseFast 48바이트 증가하며 4,096-runtime 상한의
+추가 budget은 각각 128 KiB와 192 KiB다.
+CR2d3은 cursor owner와 single-runtime AppSession routing만 닫고, 실제 cross-Window move/close parity와 옛 transfer 제거는
+CR2d4가 소유한다.
+
 reconnect sealing과 `PausedPaste` quarantine은 CR2e가 이 epoch/sequence transcript를 소비할 때 열고, CR2d1/2가
 원문을 별도 복제하거나 Window move를 구현하지 않는다. CR2d1 golden trace는 blocked remote wire에서
 `paste(1) -> ime_commit(2, commit+replay atomic) -> osc52_response(3)`와 normalized bytes, AppSession queue 0,

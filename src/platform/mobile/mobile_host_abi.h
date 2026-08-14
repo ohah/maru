@@ -21,6 +21,22 @@ extern "C" {
 /// 따로 적혀 있었고, 한쪽만 고치면 두 플랫폼이 서로 다른 굵기로 구워 픽셀 대조가 조용히
 /// 무의미해진다. 셀 높이(32)에 어센더·디센더가 들어갈 만큼이어야 한다.
 #define MARU_ATLAS_TEXT_PX 22
+/// 표시 주기(comfort). **두 플랫폼이 같은 값을 써야 한다** — 다르면 같은 손짓이 기기마다
+/// 다르게 미끄러진다(관성 감쇠가 그리는 횟수를 탄다). 흩어져 있으면 정책을 바꿀 때 한쪽만
+/// 고치게 되므로 여기가 단일 출처다: iOS 는 Hz 로 OS 에 선언하고, Android 는 ns 로 경과를
+/// 재고, 두 host 의 `MARU_PACE` 로그와 판정은 ms 로 쓴다 — **표현이 셋이지 값은 하나다.**
+/// 데스크톱(`render.frame-rate` 기본 60)과는 다른 값이다([계약 §3.2](../../../docs/mobile-platform.md)).
+#define MARU_FRAME_TARGET_HZ 30
+#define MARU_FRAME_TARGET_NS (1000000000LL / MARU_FRAME_TARGET_HZ)
+#define MARU_FRAME_TARGET_MS (1000.0 / MARU_FRAME_TARGET_HZ)
+/// `MARU_PACE` 가 PASS 로 볼 창. 목표를 바꾸면 창도 따라 움직이게 **곱으로** 적는다.
+/// 폭은 vsync 지터와, 목표가 패널 주기의 정수배가 아닐 때 생기는 **반 주기 오차**를 품는다 —
+/// 144Hz→34.7ms · 72Hz→27.8ms · 48Hz→41.7ms 가 전부 참이어야 해서 위쪽이 1.3 이다.
+/// **주사율이 목표의 배수가 아니면 목표에 못 닿는다**: 45Hz 패널은 45 나 22.5 뿐이라 30 이
+/// 없고, 그 기기는 FAIL 로 나온다 — 회귀가 아니라 사실이다(그때는 이 창이 아니라 그 기기의
+/// 도달 가능한 값을 봐야 한다).
+#define MARU_FRAME_PACE_MIN_MS (MARU_FRAME_TARGET_MS * 0.75)
+#define MARU_FRAME_PACE_MAX_MS (MARU_FRAME_TARGET_MS * 1.30)
 /// 아틀라스 격자 크기는 **Zig 가 소유한다**(`maru_mobile_atlas_cols/rows`). 매크로로 두면
 /// 등록부보다 큰 슬롯을 약속하게 되고, 남는 슬롯은 등록이 안 된 채 매 프레임 다시 구워진다.
 /// 셀 크기만 매크로로 남긴다 — 스택 배열 크기에 쓰이기 때문이다.

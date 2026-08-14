@@ -305,12 +305,23 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 ## 3.2 프레임 주기
 
 **30Hz(comfort)로 그린다 — 처음부터.** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은
-배터리·발열이 **사용자에게 보인다**. 데스크톱 maru 의 present 정책과 같은 값이다.
+배터리·발열이 **사용자에게 보인다**. **데스크톱과는 다른 값이다** — 데스크톱은
+`render.frame-rate` 기본이 60 이고([io-render-present](io-render-present.md)), hover/scroll
+지연을 우선하며 전력 여유가 있다. 모바일은 그 둘이 뒤집힌다.
 
 | | 어떻게 |
 |---|---|
-| iOS | `CADisplayLink.preferredFrameRateRange = 30` |
-| Android | `AChoreographer` vsync 를 받아 **한 번 걸러** present(Vulkan 에는 하위 주기 모드가 없다) |
+| iOS | `CADisplayLink.preferredFrameRateRange = 30` — **OS 에 선언한다** |
+| Android | `AChoreographer` vsync 를 받아 **경과 시간으로** present(Vulkan 에는 하위 주기 모드가 없어 앱이 잰다) |
+
+**주기는 기기 주사율과 무관해야 한다.** Android 를 "vsync 한 번 걸러" 로 두면 그건 30Hz 가
+아니라 **패널의 절반**이다 — 90Hz 폰에서 45, 120Hz 에서 60 이 나온다. 배터리·발열 때문에 고른
+값이 정작 고주사율 기기에서 두 배가 되므로, 경과 시간으로 재고 문턱은 **패널 반 주기만큼**
+당긴다(정확히 목표를 요구하면 vsync 지터로 한 주기를 통째로 놓쳐 실효 주기가 널뛴다).
+
+**60 을 넘기려면 iOS 는 `Info.plist` 에 `CADisableMinimumFrameDuration` 이 필요하다.** 없으면
+ProMotion 기기에서도 60 에서 잘린다 — 지금은 없다. 주기를 config 로 여는 것은 이 계약 밖이다
+([M10](plans/mobile-platform.md)).
 
 **두 플랫폼 다 자기 주기를 확인한다.** iOS 의 `preferredFrameRateRange` 는 **힌트라 무시될 수
 있고**, Android 는 우리가 직접 세는 것이라 어긋날 수 있다. 그래서 둘 다 표시 클럭 간격의

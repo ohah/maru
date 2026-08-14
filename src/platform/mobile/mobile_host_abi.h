@@ -278,6 +278,16 @@ unsigned int maru_mobile_has_selection(void);
 /// 나간다(docs/mobile-platform.md §3).
 unsigned int maru_mobile_keybar_pointer(unsigned int phase, float x, float y);
 
+/// chrome(설정 화면·그 입구인 톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 —
+/// 설정이 밀려 올라와 있으면 그 아래 키바·본문은 없는 것과 같다(스택 — docs/mobile-ux.md §3).
+/// 1=먹었다, 0=아니니 키바→본문 순으로 넘겨라. 위상은 keybar_pointer 와 같다(0=down·1=move·
+/// 2=up·3=cancel).
+unsigned int maru_mobile_chrome_pointer(unsigned int phase, float x, float y);
+
+/// 밀린 화면을 하나 뺀다(Android 하드웨어 뒤로가기 · iOS 좌측 가장자리 스와이프).
+/// 1=뺐다, 0=뺄 것이 없다 — 0이면 host 가 자기 관례대로 처리한다(Android 는 앱을 내린다).
+unsigned int maru_mobile_pop_screen(void);
+
 /// 눌러 둔 수정자(sticky). 0=없음. 화면 표시는 브리지가 이미 하므로 host 가 꼭 볼 필요는
 /// 없고, 계측·접근성 라벨에 쓴다.
 unsigned int maru_mobile_armed_mods(void);

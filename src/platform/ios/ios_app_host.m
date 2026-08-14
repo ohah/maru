@@ -131,6 +131,23 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UITextInputStringTokenizer *_tokenizer;
     float _flingVy;   // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
     float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
+    /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
+    CGFloat _keyboardH;
+}
+
+/// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
+///
+/// **`WillChangeFrame` 하나만 본다.** show/hide 를 따로 받으면 회전·분할 키보드·높이 변화(예:
+/// 예측 입력 줄 토글)에서 상태가 갈린다 — 이 알림은 그 전부를 같은 모양으로 준다.
+/// 화면 밖으로 나간 프레임(숨김)은 교집합이 0 이라 자연히 0 이 된다.
+- (void)maruKeyboardFrameChanged:(NSNotification *)note {
+    CGRect end = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect inView = [self convertRect:[self.window convertRect:end fromWindow:nil] fromView:nil];
+    CGRect overlap = CGRectIntersection(self.bounds, inView);
+    CGFloat h = CGRectIsNull(overlap) ? 0 : overlap.size.height;
+    if (fabs(h - _keyboardH) < 0.5) return;
+    _keyboardH = h;
+    NSLog(@"MARU_KEYBOARD height=%.0f", (double)h);
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
@@ -748,6 +765,10 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 - (instancetype)initWithFrame:(CGRect)f {
     self = [super initWithFrame:f];
     if (!self) return nil;
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(maruKeyboardFrameChanged:)
+                                               name:UIKeyboardWillChangeFrameNotification
+                                             object:nil];
     _dev = MTLCreateSystemDefaultDevice();
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     l.device = _dev;
@@ -836,8 +857,16 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // (처음에 그렇게 나왔다). 데스크톱에서 타이틀바 inset 을 다루는 것과 같은 종류의 일이고,
     // 실제 이식에서는 이 inset 을 L1 DTO 로 chrome 에 전달해야 한다.
     UIEdgeInsets safe = self.safeAreaInsets;
+    // **소프트 키보드도 같은 종류의 inset 이다.** 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은
+    // 그대로라, 하단에 있는 것이 통째로 가려진다 — **보조 키바가 그렇게 사라졌다**(화면으로
+    // 확인). 그 키바의 존재 이유가 "소프트 키보드에 Ctrl·Esc·Tab·화살표가 없다" 인데, 정작
+    // 키보드가 뜨면 못 쓰게 되는 상태였다. 키보드 높이를 빼면 column 레이아웃이라 키바가
+    // 자동으로 키보드 **위**로 올라온다.
+    //
+    // safe area 하단과 겹치는 만큼은 두 번 빼지 않는다 — 키보드는 홈 인디케이터 영역을 덮는다.
+    CGFloat kb = _keyboardH > safe.bottom ? _keyboardH - safe.bottom : 0;
     CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
-                                self.bounds.size.height - safe.top - safe.bottom);
+                                self.bounds.size.height - safe.top - safe.bottom - kb);
     unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height,
                                        (unsigned long long)(CACurrentMediaTime() * 1000.0));
     // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어

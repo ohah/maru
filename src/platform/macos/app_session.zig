@@ -10586,7 +10586,7 @@ pub const AppSession = struct {
                 self.ime_terminal_target_id = null;
                 return true;
             }
-            if (!self.queueInputBytes(target_id, bytes, true)) return false;
+            if (!self.queueInputBatch(target_id, .ime_commit, bytes, true, &.{})) return false;
             committed = s.takePreeditLocked();
             std.debug.assert(committed != null);
             self.metal_dirty = true;
@@ -11177,29 +11177,101 @@ pub const AppSession = struct {
     /// (IME 음절·Cmd+V·OSC 52 응답이 전부 이 경로), 큰 paste(멀티MB)는 다 쓰고 나면 반납한다.
     const paste_queue_retain_max: usize = 64 * 1024;
 
-    /// `target_id` surface 큐에 바이트를 넣는다(**flush 안 함** — 큐 상태를 관측/테스트할 수 있게 분리).
-    /// `normalize_newlines`면 `\n`→`\r`(IME 확정 텍스트 규약 — sendTextAsKeys와 동일). 담았으면 true.
-    /// OOM이면 false(입력 유실 < 크래시) — 이때 **방금 만든 빈 엔트리는 회수**한다(빈 껍데기가 남지 않게).
-    fn queueInputBytes(self: *AppSession, target_id: u64, bytes: []const u8, normalize_newlines: bool) bool {
+    /// remote surface만 현재 stable backend input owner를 순간 조회한다. Term 값이나 backend 포인터를 Window queue에
+    /// 저장하지 않아 close/reconnect가 이후 슬라이스에서 owner를 교체할 수 있게 한다.
+    fn remoteInputOwner(self: *AppSession, target_id: u64) ?app.InputOwner {
+        if (!is_macos) return null;
+        const loc = term_ops.findTermWhere(self, target_id, struct {
+            fn pred(id: u64, term: *Term) bool {
+                return term.kind == .terminal and term.surface.id == id;
+            }
+        }.pred) orelse return null;
+        const term = loc.pane.terms.items[loc.term_index];
+        if (term.surface.remote == null) return null;
+        return self.backendFor(term).inputOwner(term.rt.handle);
+    }
+
+    pub fn queueInputBatch(
+        self: *AppSession,
+        target_id: u64,
+        kind: app.input_owner.InputBatchKind,
+        first: []const u8,
+        normalize_first_newlines: bool,
+        second: []const u8,
+    ) bool {
+        return self.queueInputBatchWithOwner(
+            target_id,
+            kind,
+            first,
+            normalize_first_newlines,
+            second,
+            self.remoteInputOwner(target_id),
+        );
+    }
+
+    /// `target_id`의 backend owner에 완성된 batch를 넘긴다(**blocking flush 없음**). remote가 인수하면 Window-local
+    /// `pending_pastes`를 만들지 않고, local/caller-owned면 두 slice를 한 allocation transaction으로 기존 큐에 넣는다.
+    /// `normalize_first_newlines`는 첫 slice의 `\n`만 `\r`로 바꾼다. OOM이면 false이고 새 빈 entry도 회수한다.
+    fn queueInputBatchWithOwner(
+        self: *AppSession,
+        target_id: u64,
+        kind: app.input_owner.InputBatchKind,
+        first: []const u8,
+        normalize_first_newlines: bool,
+        second: []const u8,
+        remote_owner: ?app.InputOwner,
+    ) bool {
+        if (remote_owner) |owner| {
+            const admission = owner.enqueueBatch(.{
+                .kind = kind,
+                .first = first,
+                .second = second,
+                .normalize_first_newlines = normalize_first_newlines,
+            }) catch return false;
+            if (admission == .backend_owned) return true;
+        }
+
         const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return false;
         if (!gop.found_existing) gop.value_ptr.* = .{};
+        const additional = std.math.add(usize, first.len, second.len) catch {
+            if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
+            return false;
+        };
         const start = gop.value_ptr.buf.items.len;
-        gop.value_ptr.buf.appendSlice(self.allocator, bytes) catch {
+        gop.value_ptr.buf.ensureUnusedCapacity(self.allocator, additional) catch {
             if (!gop.found_existing) _ = self.pending_pastes.remove(target_id); // 방금 만든 빈 엔트리 회수
             return false;
         };
-        if (normalize_newlines) {
-            for (gop.value_ptr.buf.items[start..]) |*b| {
+        gop.value_ptr.buf.appendSliceAssumeCapacity(first);
+        if (normalize_first_newlines) {
+            for (gop.value_ptr.buf.items[start..][0..first.len]) |*b| {
                 if (b.* == '\n') b.* = '\r';
             }
         }
+        gop.value_ptr.buf.appendSliceAssumeCapacity(second);
         return true;
+    }
+
+    fn queueInputBytes(self: *AppSession, target_id: u64, bytes: []const u8, normalize_newlines: bool) bool {
+        return self.queueInputBatch(target_id, .paste, bytes, normalize_newlines, &.{});
     }
 
     /// 큐에 넣고 즉시 흘려보낸다(non-blocking). enqueue 시점에 대상이 확정되므로, 뒤에 탭/pane이 바뀌어도
     /// 이 바이트는 원래 surface로 간다. 담기 실패(OOM)면 false — 호출자가 회계를 건너뛸 수 있다.
     pub fn enqueueInputBytes(self: *AppSession, target_id: u64, bytes: []const u8, normalize_newlines: bool) bool {
         if (!self.queueInputBytes(target_id, bytes, normalize_newlines)) return false;
+        self.flushPendingPaste();
+        return true;
+    }
+
+    pub fn enqueueTypedInputBytes(
+        self: *AppSession,
+        target_id: u64,
+        kind: app.input_owner.InputBatchKind,
+        bytes: []const u8,
+        normalize_newlines: bool,
+    ) bool {
+        if (!self.queueInputBatch(target_id, kind, bytes, normalize_newlines, &.{})) return false;
         self.flushPendingPaste();
         return true;
     }
@@ -11770,7 +11842,7 @@ pub const AppSession = struct {
         const resp = self.formatOsc52ReadResponse(self.clipboard_read_target_buf.items, bytes) orelse return;
         defer self.allocator.free(resp);
         // 요청 surface PTY로 비차단 전송(paste 큐 재사용 — 순서·#10 데드락 회피). 응답은 program stdin에서 읽힌다.
-        _ = self.enqueueInputBytes(term_ops.activeSurface(self).id, resp, false); // OOM이면 응답 유실(best-effort)
+        _ = self.enqueueTypedInputBytes(term_ops.activeSurface(self).id, .osc52_response, resp, false); // OOM이면 응답 유실(best-effort)
     }
 
     /// 클립보드 바이트를 OSC 52 읽기 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 인코딩한다(owned, 호출자 free).
@@ -49685,6 +49757,81 @@ test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10
     input_ops.imeInsert(session, "을");
     try std.testing.expect(session.total_terminal_input_bytes > bytes2);
     try std.testing.expectEqual(keys2, session.total_key_events);
+}
+
+const CR2d1InputOwnerFixture = struct {
+    admission: app.input_owner.BatchAdmission,
+    kind: ?app.input_owner.InputBatchKind = null,
+    first: []const u8 = &.{},
+    second: []const u8 = &.{},
+    normalize: bool = false,
+
+    const vtable = app.input_owner.VTable{
+        .write = write,
+        .write_nonblocking = writeNonBlocking,
+        .enqueue_core_command = enqueueCoreCommand,
+        .enqueue_batch = enqueueBatch,
+    };
+
+    fn owner(self: *CR2d1InputOwnerFixture, handle: u64) app.InputOwner {
+        return .{ .ctx = self, .vtable = &vtable, .handle = handle };
+    }
+
+    fn write(_: *anyopaque, _: u64, _: []const u8) anyerror!void {}
+    fn writeNonBlocking(_: *anyopaque, _: u64, bytes: []const u8) anyerror!usize {
+        return bytes.len;
+    }
+    fn enqueueCoreCommand(_: *anyopaque, _: u64, _: maru.session.core_command.CoreCommand, _: std.Io) anyerror!void {}
+    fn enqueueBatch(ctx: *anyopaque, _: u64, batch: app.input_owner.InputBatch) anyerror!app.input_owner.BatchAdmission {
+        const self: *CR2d1InputOwnerFixture = @ptrCast(@alignCast(ctx));
+        self.kind = batch.kind;
+        self.first = batch.first;
+        self.second = batch.second;
+        self.normalize = batch.normalize_first_newlines;
+        return self.admission;
+    }
+};
+
+test "CR2d1 AppSession batch routing은 remote ownership 뒤 Window queue를 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const target_id: u64 = 0xD103;
+    var remote = CR2d1InputOwnerFixture{ .admission = .backend_owned };
+    try std.testing.expect(session.queueInputBatchWithOwner(
+        target_id,
+        .ime_commit,
+        "commit\n",
+        true,
+        "replay",
+        remote.owner(target_id),
+    ));
+    try std.testing.expectEqual(app.input_owner.InputBatchKind.ime_commit, remote.kind.?);
+    try std.testing.expectEqualStrings("commit\n", remote.first);
+    try std.testing.expectEqualStrings("replay", remote.second);
+    try std.testing.expect(remote.normalize);
+    try std.testing.expect(session.pending_pastes.get(target_id) == null);
+
+    var local = CR2d1InputOwnerFixture{ .admission = .caller_owned };
+    try std.testing.expect(session.queueInputBatchWithOwner(
+        target_id,
+        .ime_commit,
+        "local\n",
+        true,
+        "tail",
+        local.owner(target_id),
+    ));
+    try std.testing.expectEqualStrings("local\rtail", session.pending_pastes.get(target_id).?.buf.items);
 }
 
 test "imeEnd commit and Enter replay remain ordered in one surface FIFO under backpressure" {

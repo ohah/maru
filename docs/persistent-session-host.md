@@ -703,6 +703,23 @@ opaque runtime handle, backend별 입력 함수표만 결속하고 blocking byte
 따라서 CR2c green은 local/remote 호출 표면의 parity 증거이지 Window 이동, reconnect 보존 또는 ordered queue owner
 완료 증거가 아니다. 그 상태 이동과 golden trace는 CR2d1~d4가 소유한다.
 
+CR2d1은 `InputOwner.enqueueBatch`에 `paste | ime_commit | osc52_response`의 closed `InputBatchKind`, 첫 slice의
+LF→CR 여부, 선택적인 두 번째 slice를 넘긴다. local backend는 `caller_owned`를 반환해 기존
+`AppSession.pending_pastes`의 surface별 nonblocking queue를 유지한다. remote backend는 두 slice의 합과 sequence 증가를
+checked-add한 뒤 stable `RemoteRuntime`의 direct-input byte owner와 typed record를 한 transaction으로 게시하고
+`backend_owned`를 반환한다. 따라서 IME 확정+Enter replay는 둘 다 수락되거나 둘 다 거부되며, allocation/cap/sequence
+실패는 byte queue·record·epoch·sequence를 전혀 바꾸지 않는다. remote 성공 뒤 AppSession map에는 같은 surface entry가
+생기지 않고 tick은 backend-owned queue를 다시 복사하거나 재시도하지 않는다.
+
+epoch은 runtime stable owner가 발급하는 nonzero 값이고 sequence는 epoch 안에서 1부터 checked-monotonic으로 증가한다.
+CR2d1의 record는 아직 paste 계열 batch만 분류하며 기존 blocking key bytes와 control barrier는 CR2d2까지 현 경로를
+사용한다. reconnect sealing과 `PausedPaste` quarantine은 CR2e가 이 epoch/sequence transcript를 소비할 때 열고, CR2d1이
+원문을 별도 복제하거나 Window move를 구현하지 않는다. CR2d1 golden trace는 blocked remote wire에서
+`paste(1) -> ime_commit(2, commit+replay atomic) -> osc52_response(3)`와 normalized bytes, AppSession queue 0,
+Client pending frame이 막힌 동안 세 record와 byte backing이 그대로 남고, 해제 뒤 기존 pending frame 다음에 batch wire가
+정확한 순서로 전달되며 runtime record가 함께 retire됨을 고정한다. CR2d1 record는 physical socket ACK receipt가 아니라
+stable runtime queue에서 기존 Client outbound owner로 넘어가기 전까지의 ownership transcript다.
+
 앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
 `RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
 Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을

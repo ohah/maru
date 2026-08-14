@@ -32,7 +32,7 @@ pub const inventory = [_]Proof{
     // C3-3b5가 공통 close/remove progress enum을 추가했다. 값 타입 선언뿐이라 기존 `@field` 세 곳과 Client receiver는 그대로다.
     // AppSession close 순서를 실제 제품 래퍼에서 검증하는 test-only progress sequence가 붙었다. 제품 vtable과
     // `@field` 세 곳은 그대로이고, 조건부 testing facade 밖의 Client receiver도 늘지 않는다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "6b3925b7139005f44454cb4dab05fd58fe5eff883d763da909d8756b006c6b24" },
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "c878f073ab79366baa0e22af36f9490bf11098773ef48f19032d292c06349239" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
@@ -360,7 +360,7 @@ pub const inventory = [_]Proof{
     // 블록 교체, `scm_dock_*` 상태 필드(published tree·action 표·interaction·셰이핑 캐시), 포인터 라우팅
     // 두 자리, 그리고 셀 그리드 히트테스트(`scmDrawWindow`) 제거다. count는 2 그대로다 — 새 `@field` 반사가
     // 없고 Client 구성·receiver 집합을 건드리지 않는다(전부 chrome 표시 축이다).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7650c6a50604130f0c65160c9b990f59e21002deb514027662ae667c363e4d67" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d9488f0d3e34bd38136db6d2bcafa361cf6b146b2801776d029637b0aac39fa1" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

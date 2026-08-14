@@ -145,6 +145,13 @@ Maru 작업에서 사용하는 기본 명령이다.
   app artifact 실제 12회), remote parity 1개와 source boundary 1개를
   exact-count한다. 기존 blocking/nonblocking/core-command leaf의 성공·오류·partial progress를 그대로 전달하며,
   제품 facade caller 0을 유지한다. queue/epoch/sequence/paused paste storage 이동과 Window/reconnect 보존은 CR2d 이후 범위다.
+- 영속 세션 호스트 CR2d1 remote input queue gate: `zig build test-session-host-cr2d1`. CR2c gate를 상속하고
+  `InputOwner.enqueueBatch`의 local `caller_owned`와 remote `backend_owned`, paste·IME 확정·OSC52 closed kind,
+  nonzero epoch/checked sequence, IME commit+replay atomic append, LF→CR, cap/OOM/exhaustion mutation 0, blocked-wire retained
+  queue와 ordered drain golden trace, remote AppSession queue 0을 Debug·ReleaseFast에서 InputOwner 2개+local 1개(root/import sentinel 7개 포함
+  app artifact 실제 10회), remote backend 1개, RemoteRuntime 1개, AppSession routing 1개(root/import sentinel 3개 포함
+  실제 4회), source boundary 1개로 exact-count한다. key/control merge, event cursor,
+  cross-Window transfer와 reconnect `PausedPaste`는 CR2d2~d4/CR2e 범위다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

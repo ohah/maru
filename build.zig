@@ -2846,6 +2846,106 @@ pub fn build(b: *std.Build) void {
         session_host_cr2c_step.dependOn(&run_cr2c_boundary_tests.step);
         boundary_step.dependOn(&run_cr2c_boundary_tests.step);
     }
+    const session_host_cr2d1_step = b.step(
+        "test-session-host-cr2d1",
+        "CR2d1 remote paste IME and OSC52 stable queue Debug and ReleaseFast gates",
+    );
+    session_host_cr2d1_step.dependOn(session_host_cr2c_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d1_optimize| {
+        const cr2d1_app_module = b.createModule(.{
+            .root_source_file = b.path("src/app.zig"),
+            .target = target,
+            .optimize = cr2d1_optimize,
+            .link_libc = true,
+        });
+        cr2d1_app_module.addAnonymousImport(
+            "maru_terminfo",
+            .{ .root_source_file = b.path("terminfo/maru.terminfo") },
+        );
+        cr2d1_app_module.addAnonymousImport(
+            "config_doc_md",
+            .{ .root_source_file = b.path("docs/configuration.md") },
+        );
+        const cr2d1_app_tests = addProjectTest(b, .{
+            .root_module = cr2d1_app_module,
+            .filters = &.{ "CR2d1 InputOwner batch", "CR2d1 local InputOwner batch는" },
+        });
+        const run_cr2d1_app_tests = b.addRunArtifact(cr2d1_app_tests);
+        // InputOwner 2 + local parity 1 + app/root import sentinel 7.
+        run_cr2d1_app_tests.addArg("--maru-expect-tests=10");
+        run_cr2d1_app_tests.setCwd(b.path("."));
+        session_host_cr2d1_step.dependOn(&run_cr2d1_app_tests.step);
+
+        const cr2d1_remote_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr2d1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2d1 remote InputOwner batch는"},
+        });
+        const run_cr2d1_remote_backend_tests = b.addRunArtifact(cr2d1_remote_backend_tests);
+        run_cr2d1_remote_backend_tests.addArg("--maru-expect-tests=1");
+        run_cr2d1_remote_backend_tests.setCwd(b.path("."));
+        session_host_cr2d1_step.dependOn(&run_cr2d1_remote_backend_tests.step);
+
+        const cr2d1_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr2d1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2d1 remote input owner는"},
+        });
+        const run_cr2d1_runtime_tests = b.addRunArtifact(cr2d1_runtime_tests);
+        run_cr2d1_runtime_tests.addArg("--maru-expect-tests=1");
+        run_cr2d1_runtime_tests.setCwd(b.path("."));
+        session_host_cr2d1_step.dependOn(&run_cr2d1_runtime_tests.step);
+
+        const cr2d1_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr2d1_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2d1 AppSession batch routing은"},
+        });
+        cr2d1_app_session_tests.root_module.link_libc = true;
+        cr2d1_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr2d1_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_cr2d1_app_session_tests = b.addRunArtifact(cr2d1_app_session_tests);
+        // app_session/session_host root sentinels 3개와 이름 있는 제품 routing 증거 1개.
+        run_cr2d1_app_session_tests.addArg("--maru-expect-tests=4");
+        run_cr2d1_app_session_tests.setCwd(b.path("."));
+        session_host_cr2d1_step.dependOn(&run_cr2d1_app_session_tests.step);
+
+        const cr2d1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2d1_optimize,
+            }),
+            .filters = &.{"CR2d1 경계는 remote stable batch queue와 Window queue exclusion을 고정한다"},
+        });
+        const run_cr2d1_boundary_tests = b.addRunArtifact(cr2d1_boundary_tests);
+        run_cr2d1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2d1_boundary_tests.setCwd(b.path("."));
+        session_host_cr2d1_step.dependOn(&run_cr2d1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2d1_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

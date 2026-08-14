@@ -112,7 +112,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    바꾸지 않는다. transport-neutral facade는 `src/app/input_owner.zig`가 opaque runtime handle과
    blocking input·nonblocking partial progress·`CoreCommand` dispatch만 결속하고, `TermRuntimeBackend`가 backend별 함수표를
    공급한다. local/remote 구현은 기존 write leaf를 그대로 재사용하므로 오류·부분 수락·ordering이 달라지지 않는다.
-   ordered queue/epoch/sequence/paused paste storage의 실제 소유권 이동은 CR2d가 담당한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event
+   ordered queue/epoch/sequence/paused paste storage의 실제 소유권 이동은 CR2d가 담당한다. CR2d1은
+   remote paste·IME 확정·OSC52 응답을 `InputBatchKind`로 구분해 `InputOwner.enqueueBatch` 한 번에 stable
+   `RemoteRuntime` queue로 소유 이전한다. batch는 checked-nonzero epoch/sequence와 byte range를 함께 기록하고 IME
+   확정+replay 두 slice 및 LF→CR 정규화를 한 allocation transaction으로 수락한다. local Term은 closed
+   `caller_owned` 결과로 기존 `AppSession.pending_pastes`를 계속 사용하며, remote 성공 뒤에는 Window-local queue entry를
+   만들지 않는다. CR2d2는 key/control ordered merge, CR2d3은 event
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.

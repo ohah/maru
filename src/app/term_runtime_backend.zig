@@ -547,7 +547,19 @@ const FakeTermBackend = struct {
         .write = writeInput,
         .write_nonblocking = writeInputNonBlocking,
         .enqueue_core_command = enqueueCoreCommand,
+        .enqueue_batch = enqueueInputBatch,
     };
+
+    fn enqueueInputBatch(
+        ctx: *anyopaque,
+        handle: RuntimeHandle,
+        batch: input_owner.InputBatch,
+    ) anyerror!input_owner.BatchAdmission {
+        _ = ctx;
+        _ = handle;
+        _ = batch;
+        return .caller_owned;
+    }
 
     fn init(allocator: std.mem.Allocator) FakeTermBackend {
         return .{ .allocator = allocator, .runtime = runtime_mod.SurfaceRuntime.init(allocator) };

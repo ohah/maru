@@ -186,6 +186,7 @@ pub const RemoteTermBackend = struct {
         .write = writeInput,
         .write_nonblocking = writeInputNonBlocking,
         .enqueue_core_command = enqueueCoreCommand,
+        .enqueue_batch = enqueueInputBatch,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
@@ -1162,6 +1163,8 @@ pub const RemoteTermBackend = struct {
         rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
+        rr.input_batches = .{};
+        defer rr.input_batches.deinit(allocator);
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
@@ -1205,6 +1208,8 @@ pub const RemoteTermBackend = struct {
         rr.generation.resize_seq = 0;
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
+        rr.input_batches = .{};
+        defer rr.input_batches.deinit(allocator);
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
@@ -1252,6 +1257,17 @@ pub const RemoteTermBackend = struct {
         _ = io;
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return routeCoreCommand(rr, cmd);
+    }
+
+    fn enqueueInputBatch(
+        ctx: *anyopaque,
+        handle: RuntimeHandle,
+        batch: maru.app.input_owner.InputBatch,
+    ) anyerror!maru.app.input_owner.BatchAdmission {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
+        try rr.enqueueInputBatch(batch);
+        return .backend_owned;
     }
 
     fn resize(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
@@ -1741,6 +1757,20 @@ test "CR2c remote InputOwner는 기존 UnknownSurface와 partial 의미를 그�
     try std.testing.expectError(error.UnknownSurface, owner.write("late"));
     try std.testing.expectError(error.UnknownSurface, owner.writeNonBlocking("late"));
     try std.testing.expectError(error.UnknownSurface, owner.enqueueCoreCommand(.scroll_to_bottom, std.testing.io));
+}
+
+test "CR2d1 remote InputOwner batch는 unknown handle을 backend ownership으로 laundering하지 않는다" {
+    const allocator = std.testing.allocator;
+    var surface_runtime = SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+    const unused_client: *client_mod.Client = @ptrFromInt(4096);
+    var backend_impl = RemoteTermBackend.init(allocator, std.testing.io, unused_client, &surface_runtime);
+    defer backend_impl.deinit();
+    const owner = backend_impl.backend().inputOwner(0xD102);
+    try std.testing.expectError(
+        error.UnknownSurface,
+        owner.enqueueBatch(.{ .kind = .osc52_response, .first = "late" }),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

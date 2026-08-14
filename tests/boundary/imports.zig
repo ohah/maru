@@ -1238,6 +1238,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "connection_incident" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "first_incident_id" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "incident_repeat_key" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "last_success_request_id" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdStatIdentity" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdSocketIdentity" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "fdStatIdentity" },
@@ -1915,6 +1916,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_publication_contract" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "connection_incident" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "IncidentOperationQuery" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "IncidentOperationError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishSemanticDigest" },
@@ -1991,7 +1993,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "cancelAdmissionClose" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ManagedPoisonError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
-                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareManagedPoison" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoison" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareManagedPoisonRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentParserPhase" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "incidentOutboundPhase" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoisonPinned" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "managedPoisonQuery" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "managedPoisonWillPublishFirst" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "consumeManagedPoison" },
@@ -2156,12 +2162,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        // R1 stack borrow, admission, managed poison snapshot도 같은 registered operation으로 current node를 고정한다.
-        @as(usize, 10),
+        // R1 stack borrow, admission, managed poison snapshot/projection도 같은 registered operation으로 current node를 고정한다.
+        @as(usize, 11),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 14),
+        @as(usize, 15),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(

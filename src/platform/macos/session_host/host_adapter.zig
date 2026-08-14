@@ -101,12 +101,13 @@ pub const HostAdapter = struct {
     }
 
     /// The adapter owns the final ClientSlot address but never stores publisher/runtime pointers.
-    pub fn prepareManagedPoison(
+    pub fn prepareManagedPoisonRequest(
         self: *HostAdapter,
-        input: incident_publication_contract.IncidentInput,
+        timestamp_ns: i128,
+        request: incident_publication_contract.ManagedPoisonRequest,
         out: *incident_publication_contract.PreparedManagedPoison,
     ) ManagedPoisonError!void {
-        return client_slot_mod.prepareManagedPoison(&self.slot, input, out);
+        return client_slot_mod.prepareManagedPoisonRequest(&self.slot, timestamp_ns, request, out);
     }
 
     pub fn managedPoisonQuery(

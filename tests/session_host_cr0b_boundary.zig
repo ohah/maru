@@ -162,8 +162,16 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "@import(\"incident_runtime.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 4), count(gui_owner, "test \"CR0b GUI incident owner prerequisite는"));
-    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "test \"CR0b managed public poison prerequisite는"));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "test \"CR0b managed public poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publishManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "fn publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareManagedPoisonRequest("));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn prepareManagedPoisonRequest("));
+    try std.testing.expectEqual(@as(usize, 1), count(client_slot, "fn prepareManagedPoison("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "publishManagedPoison(", "platform/macos/session_host/app_process_incident_owner.zig"),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "coordinator.publishCanonical("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn ensureReady("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publisher("));
@@ -233,7 +241,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 11), count(adapter, "test \"CR0b HostPool publication은"));
     try std.testing.expectEqual(@as(usize, 3), count(pool, "return error.ManagedPublicationRequired;"));
     try std.testing.expectEqual(@as(usize, 7), count(adapter, "test \"CR0b ClientSlot binding은"));
-    try std.testing.expectEqual(@as(usize, 4), count(client_slot, "test \"CR0b Client incident operation은"));
+    try std.testing.expectEqual(@as(usize, 5), count(client_slot, "test \"CR0b Client incident operation은"));
     inline for (.{
         "pub fn beginIncidentClientOperation(",
         "pub fn bindIncidentClientPublication(",

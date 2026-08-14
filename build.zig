@@ -2364,7 +2364,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b Client incident operation은"},
         });
         const run_cr0b_poison_suffix_tests = b.addRunArtifact(cr0b_poison_suffix_tests);
-        run_cr0b_poison_suffix_tests.addArg("--maru-expect-tests=4");
+        run_cr0b_poison_suffix_tests.addArg("--maru-expect-tests=5");
         run_cr0b_poison_suffix_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_poison_suffix_tests.step);
         const cr0b_composite_coordinator_tests = addProjectTest(b, .{
@@ -2389,12 +2389,26 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{ "CR0b GUI incident owner prerequisite는", "CR0b managed public poison prerequisite는" },
+            .filters = &.{"CR0b GUI incident owner prerequisite는"},
         });
         const run_cr0b_gui_incident_owner_tests = b.addRunArtifact(cr0b_gui_incident_owner_tests);
-        run_cr0b_gui_incident_owner_tests.addArg("--maru-expect-tests=5");
+        run_cr0b_gui_incident_owner_tests.addArg("--maru-expect-tests=4");
         run_cr0b_gui_incident_owner_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_gui_incident_owner_tests.step);
+        const cr0b_managed_poison_caller_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/app_process_incident_owner.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b managed public poison은"},
+        });
+        const run_cr0b_managed_poison_caller_tests = b.addRunArtifact(cr0b_managed_poison_caller_tests);
+        run_cr0b_managed_poison_caller_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_managed_poison_caller_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_managed_poison_caller_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),

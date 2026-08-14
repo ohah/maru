@@ -8,6 +8,7 @@ const icons = @import("../../../icons.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
 const badge = @import("../../ui/badge.zig");
+const spacing = @import("../../ui/spacing.zig");
 const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const paint_style = @import("../../ui/paint_style.zig");
@@ -57,6 +58,11 @@ pub fn view(
     };
 
     const m = types.DockMetrics.resolve(props.scale_milli);
+
+    // ── 탭 줄: `변경 사항 (N) │ 히스토리 │ 에이전트`(§3.5.1).
+    if (frame.tree.find(build.NodeIds.tabs)) |index| {
+        try writer.tabRow(frame.tree.entries[index], m);
+    }
 
     // ── 요약 줄: `+N -N`. 커밋 직전에 보는 숫자라 목록보다 위에 고정한다.
     if (frame.tree.find(build.NodeIds.summary)) |index| {
@@ -132,6 +138,15 @@ pub fn view(
     return .{ .layer = painted.layer, .ops = writer.ops[0..writer.op_count] };
 }
 
+/// 탭 제목. 그룹 제목과 같은 이유로 **컴포넌트가 소유한다**.
+fn tabTitle(tab: types.Tab) []const u8 {
+    return switch (tab) {
+        .changes => "변경 사항",
+        .history => "히스토리",
+        .agent => "에이전트",
+    };
+}
+
 /// 그룹 제목. **컴포넌트가 소유한다** — platform이 문자열을 넘기면 같은 목록의 제목이 창마다 갈릴 수 있다.
 fn sectionTitle(section: types.Section) []const u8 {
     return switch (section) {
@@ -188,6 +203,50 @@ const Writer = struct {
     scroll_clipped: bool = false,
     active_clip: ?draw.Rect = null,
     container_clip: ?draw.Rect = null,
+
+    /// 탭 줄. 세 탭을 **전부** 그리고, 지금 갈 수 없는 탭은 흐리게 둔다 — P1 계약이 "누를 수 없는
+    /// 컨트롤은 비활성으로 표시한다(감추지 않는다)"이다. 탭 줄이 통째로 없으면 사용자는 이 뷰가 목록
+    /// 하나뿐인 화면이라고 읽는다.
+    fn tabRow(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
+        const scale = effectiveScale(self.props.scale_milli);
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        if (rect.rect.height < line_h) return;
+        const baseline = rect.rect.y + (rect.rect.height - line_h) / 2;
+
+        var x = rect.rect.x + @as(f32, @floatFromInt(m.inset_x));
+        for ([_]types.Tab{ .changes, .history, .agent }) |tab| {
+            // 활성 탭 이름 옆에만 개수를 붙인다. 나머지 둘은 아직 셀 것이 없다(P4·P5).
+            var buf: [48]u8 = undefined;
+            const label: []const u8 = if (tab == .changes)
+                std.fmt.bufPrint(&buf, "{s} ({d})", .{ tabTitle(tab), self.props.changed_file_count }) catch tabTitle(tab)
+            else
+                tabTitle(tab);
+
+            const width = self.measureBudget(label);
+            const right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
+            if (x + width > right) return; // 폭이 모자라면 남은 탭을 그리지 않는다(잘린 글자를 흘리지 않는다)
+
+            const active = tab == self.props.active_tab;
+            // **비활성 탭은 색으로만 구별하지 않는다** — 굵기도 함께 간다(§3.5.2와 같은 규율).
+            try self.emit(x, baseline, label, self.colsFor(width), if (active) .surface_fg else .muted_fg, .control, active, @intFromFloat(width), .origin);
+
+            // 활성 표시는 **밑줄**이다(테마 accent — `accent_bar`가 탭 언더바를 소유하는 그 역할).
+            // 아래 divider 위에 겹쳐 그린다.
+            if (active) {
+                const thickness = @max(spacing.px(.xxs, scale) / 2, 1);
+                try self.appendQuad(.{
+                    .rect = .{
+                        .x = @intFromFloat(@floor(x)),
+                        .y = @intFromFloat(@floor(rect.rect.y + rect.rect.height - @as(f32, @floatFromInt(thickness)))),
+                        .w = @intFromFloat(@floor(width)),
+                        .h = thickness,
+                    },
+                    .fill_role = .accent_bar,
+                });
+            }
+            x += width + @as(f32, @floatFromInt(m.inset_x + m.gap));
+        }
+    }
 
     /// 그룹 헤더: `접힘표시 제목 · 개수 배지`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려
     /// 사라지지 않는다.
@@ -797,4 +856,58 @@ test "긴 제목은 배지 밑으로 파고들지 않는다" {
     const title = findExactText(draws, sectionTitle(.staged)) orelse return error.MissingTitle;
     const budget = title.max_width_px orelse return error.MissingBudget;
     try testing.expect(title.origin.x + @as(i32, @intCast(budget)) <= left);
+}
+
+test "탭 줄은 세 탭을 전부 그리고 활성만 강조한다" {
+    // P1 계약: 갈 수 없는 탭도 **감추지 않고** 비활성으로 표시한다. 탭 줄이 통째로 없으면 사용자는
+    // 이 뷰가 목록 하나뿐인 화면이라고 읽는다.
+    var storage: TestStorage = .{};
+    const draws = try renderFixture(&storage, .{}, &.{});
+
+    const changes = findText(draws, "변경 사항") orelse return error.MissingChangesTab;
+    const history = findExactText(draws, "히스토리") orelse return error.MissingHistoryTab;
+    const agent = findExactText(draws, "에이전트") orelse return error.MissingAgentTab;
+
+    // 활성은 색과 **굵기** 둘 다로 구별한다 — 색만으로 구별하지 않는다는 규율(§3.5.2)이 여기도 간다.
+    try testing.expectEqual(tokens.ColorRole.surface_fg, changes.role);
+    try testing.expect(changes.runs[0].bold);
+    try testing.expectEqual(tokens.ColorRole.muted_fg, history.role);
+    try testing.expect(!history.runs[0].bold);
+    try testing.expectEqual(tokens.ColorRole.muted_fg, agent.role);
+
+    // 왼쪽에서 오른쪽으로 이 순서다.
+    try testing.expect(changes.origin.x < history.origin.x);
+    try testing.expect(history.origin.x < agent.origin.x);
+    // 셋 다 같은 줄이다.
+    try testing.expectEqual(changes.origin.y, history.origin.y);
+    try testing.expectEqual(history.origin.y, agent.origin.y);
+}
+
+test "활성 탭 이름에만 전체 파일 수가 붙는다" {
+    // 개수의 출처는 platform이 준 총계다. **보이는 행을 세지 않는다** — 목록은 가상화되어 있어
+    // 스크롤 위치에 따라 숫자가 흔들린다.
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .branch = "main",
+        .changed_file_count = 42,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, 8, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+
+    try testing.expect(findExactText(draws, "변경 사항 (42)") != null);
+    // 나머지 두 탭은 아직 셀 것이 없다(P4·P5) — 개수를 붙이지 않는다.
+    try testing.expect(findExactText(draws, "히스토리") != null);
 }

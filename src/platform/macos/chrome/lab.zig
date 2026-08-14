@@ -93,6 +93,11 @@ pub const ScenarioId = enum {
     /// 것은 그 다음 구간이다 — 읽은 줄이 셀 격자에 놓이기까지 경로가 이어져 있는가. BOM을 안 떼면
     /// §3.8 가시화가 `<U+FEFF>`를 첫 줄에 그리고, 탭 전개가 틀리면 들여쓴 행의 열이 어긋난다.
     editor_real_file,
+    /// N1.5 §7 — **나란한 비교.** 좌우 두 열이 같은 행을 같은 높이에 세우는지, 짝을 맞추려 넣은 빈
+    /// 행이 반대쪽 줄을 밀지 않는지, 두 gutter가 **각자 문서의 번호**를 다는지를 픽셀로 본다.
+    /// 세로 어긋남은 단위 테스트로도 잡히지만(같은 y), **한 칸 어긋난 gutter 폭이나 가운데 틈이
+    /// 사라진 것**은 캡처로만 드러난다. 색 띠는 다음 슬라이스라 여기서는 배치만 본다.
+    editor_diff,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -169,6 +174,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
+        .editor_diff => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -500,6 +506,57 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     };
 }
 
+/// N1.5 c — 나란한 비교 한 프레임. **제품과 같은 함수를 부른다**(`diff_frame.build`) — 조합을 Lab이
+/// 따로 들면 캡처가 제품을 예고하지 못한다(편집기 배경 층에서 실제로 그 상태가 됐었다).
+fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
+    const editor_view = chrome.components.editor_view;
+    const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
+    const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
+
+    // **행이 좌우로 나란한 fixture다.** 셋을 한 화면에 담는다:
+    //   ① 양쪽에 있는 줄(context), ② 왼쪽에만 있는 줄(삭제) + 오른쪽 빈 행,
+    //   ③ 오른쪽에만 있는 줄(추가) + 왼쪽 빈 행, ④ 자리에서 바뀐 줄(짝).
+    // 번호가 **각자 문서**의 것이라, 빈 행을 지나면 반대쪽 번호가 한 칸 앞서 나간다 — 순차 번호로
+    // 그리면 그 어긋남이 캡처에 그대로 보인다.
+    // 줄을 **열 폭 안에** 둔다. 넘치면 골든이 우연한 잘림을 고정하고, 배치가 틀렸는지 폭이 좁았는지
+    // 캡처만 보고는 갈리지 않는다(첫 렌더에서 오른쪽 `;` 하나가 그렇게 잘렸다).
+    const left_texts = [_][]const u8{ "fn main() {", "  var a = 1;", "", "  log(a);", "}" };
+    const right_texts = [_][]const u8{ "fn main() {", "  var b = 2;", "  var c = 3;", "  log(b);", "}" };
+    const left_numbers = [_]?u32{ 1, 2, null, 3, 4 };
+    const right_numbers = [_]?u32{ 1, 2, 3, 4, 5 };
+
+    var content_rows: [64]editor_view.content.Row = undefined;
+    var visual_rows: [64]editor_view.visual_map.VisualRow = undefined;
+    var gutter_rows: [64]editor_view.gutter.Row = undefined;
+    var row_counts: [64]u32 = undefined;
+    var count_scratch: [1024]u8 = undefined;
+
+    const w = editor_view.diff_frame.build(.{
+        .left = .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4 },
+        .right = .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5 },
+        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
+        .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
+        .cell_w_px = scenario.cell_w_px,
+        .cell_h_px = scenario.cell_h_px,
+        .font_px = scenario.font_px,
+    }, .{
+        .ops = buffers.ops,
+        .text_bytes = buffers.text_bytes,
+        .runs = buffers.text_runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &row_counts,
+        .count_scratch = &count_scratch,
+    });
+
+    return .{
+        // 아직 hit-test 대상이 없다(읽기 전용 비교다). 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..w.ops] },
+    };
+}
+
 fn buildDockFrame(
     scenario: Scenario,
     tokens: *const chrome.Tokens,
@@ -596,7 +653,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

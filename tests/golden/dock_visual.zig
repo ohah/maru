@@ -373,6 +373,15 @@ const cases = [_]Case{
     //
     // **CRLF는 이 골든이 판정하지 않는다.** `hazard.zig`가 `0x0D`를 가시화에서 빼므로 `\r`이 남아도
     // 줄 끝에 아무것도 안 그려진다 — 그쪽은 `session/editor/open.zig`의 문자열 비교가 판정한다.
+    // N1.5 c §7 — 나란한 비교의 **배치**. 좌우가 같은 행을 같은 높이에 세우고, 짝을 맞추려 넣은 빈
+    // 행이 반대쪽을 밀지 않으며, 두 gutter가 각자 문서의 번호를 단다. 세로 어긋남은 단위 테스트도
+    // 잡지만 **gutter 폭과 가운데 틈**은 여기서만 보인다. 색 띠는 다음 슬라이스다.
+    .{
+        .name = "editor-diff-side-by-side",
+        .capture = "editor-diff.ppm",
+        .contract = "좌우 두 열이 같은 행을 같은 높이에 세우고 번호는 각자 문서의 것이다",
+        .rect = .{ .x = 0, .y = 0, .w = 480, .h = 128 },
+    },
     .{
         .name = "editor-real-file-from-disk",
         .capture = "editor-real-file.ppm",

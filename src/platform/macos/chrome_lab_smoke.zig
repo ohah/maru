@@ -59,6 +59,7 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
         .editor_real_file,
+        .editor_diff,
         => .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback },
         else => .{},
     };
@@ -86,6 +87,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
         .editor_real_file,
+        .editor_diff,
         => editor_ops.background_layer,
         else => chrome_draw_lowering.layers.bottom,
     };
@@ -725,6 +727,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
+    if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
     return null;
 }
 
@@ -755,6 +758,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",
+        .editor_diff => "editor-diff",
     };
 }
 

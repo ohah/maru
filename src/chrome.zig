@@ -68,6 +68,7 @@ pub const components = struct {
         pub const scrollbar = @import("chrome/components/editor_view/scrollbar.zig");
         pub const surface = @import("chrome/components/editor_view/surface.zig");
         pub const frame = @import("chrome/components/editor_view/frame.zig"); // 위 넷의 조립 — Lab과 제품이 같은 순서·저장소 규칙을 쓴다
+        pub const diff_frame = @import("chrome/components/editor_view/diff_frame.zig"); // 나란한 비교 — `frame`을 두 번 부르는 조합(§7)
     };
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
     pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade

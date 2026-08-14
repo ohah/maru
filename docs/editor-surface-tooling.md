@@ -14,7 +14,11 @@ bounded diff/git API, 빌드·에디터 엔진·CSP gate, 포맷·린트·LSP se
 - `diff.list` 첫 응답은 `diff_snapshot_id`와 stable cursor를 발급한다. pagination 중 index/worktree가 바뀌면 서로 다른 시점의 목록을 섞지 않고 `stale_snapshot`으로 다시 시작하게 한다.
 - `diff.open`: `{diff_snapshot_id, path}`로 한 파일의 original/modified를 명시적 byte 상한 안에서 반환한다. 너무 크거나 binary면 typed `too_large`/`binary` 결과와 external-open fallback을 준다.
 - UI bridge와 외부 socket은 같은 의미 DTO를 쓰되 각각의 transport 상한 안에서 chunk/page한다.
-- `git.stage`/`unstage`는 저장·conflict 모델이 안정된 후 별도 write capability로 추가한다.
+- `git.stage`/`unstage`는 저장·conflict 모델이 안정된 후 별도 write capability로 추가한다. **이 항목은 웹 브리지
+  method에 대한 것이고 그대로 유효하다.** 도크(native chrome)의 stage/unstage/commit/fetch는 브리지를 거치지 않으며
+  2026-08-14 결정으로 구현에 들어갔다 — 그 명령들의 안전 계약은 [소스 컨트롤 쓰기·원격](editor-surface-dock-write.md)이
+  단일 출처다. **이 절(§6)의 읽기 전용 규칙은 읽기 명령에만 걸린다** — 쓰기는 index 잠금·hook·stderr 처리가 반대이며,
+  그 차이를 그 문서 §1의 표가 명령 종류별로 고정한다.
 - `git discard`는 파괴적이고 복구 의미가 달라 초기 roadmap에서 제외한다. 후속으로 하더라도 명시 확인·복구 경로를 별도 설계한다.
 
 상한은 raw blob뿐 아니라 UTF-8 decode와 JSON escape 뒤 전송 bytes, 파일 수, hunk 수, line length를 각각 센다. 압축/escape 전 크기만 검사해 메모리 증폭을 허용하지 않는다.
@@ -93,8 +97,10 @@ git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**�
   직접 비교하면 추적되지 않은 파일이 빠진다(실측).
 - **같은 tree가 연달아 오면 링에 안 넣는다.** 파일을 안 건드린 턴까지 쌓으면 "마지막 턴"이 빈 비교가 된다.
 - **저장소가 바뀌면 링을 버린다.** 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
-- 화면에서는 **다섯 번째 섹션**("에이전트가 방금 바꾼 것")이고, 행 클릭 시 `스냅샷 tree ↔ 작업트리`다 —
-  "섹션이 곧 기준"(§10.10)에 그대로 얹힌다(base 선택기가 없는 이유이기도 하다).
+- ~~화면에서는 **다섯 번째 섹션**("에이전트가 방금 바꾼 것")이고, 행 클릭 시 `스냅샷 tree ↔ 작업트리`다.~~
+  **개정(2026-08-14)**: 도크 2판에서 이 base는 섹션이 아니라 **에이전트 탭의 턴 타임라인**이 소유한다
+  ([§3.5.4](editor-surface-dock.md)). 항목이 턴이므로 기준도 `latest ↔ 작업트리` 하나가 아니라 **스냅샷 두 개
+  사이**(`[K+1] ↔ [K]`)이고, 그 변경이 "턴이 끝나는 순간 목록이 비는" 현행 결함을 함께 고친다.
 
 ## 7. 빌드·에디터 엔진·CSP gate
 

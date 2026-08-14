@@ -47,6 +47,7 @@ const incident_publication_contract = maru.observability.incident_publication_co
 const connection_incident = @import("maru").observability.connection_incident;
 const host_manifest_mod = @import("host_manifest.zig");
 const client_poison_mod = @import("client_poison.zig");
+const stable_screen_source = @import("stable_screen_source.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
@@ -516,6 +517,7 @@ pub const RemoteRuntime = struct {
     shutdown_attempt_authority: shutdown_attempt_authority_mod.ShutdownAttemptAuthority = .{},
     shutdown_current_admin: shutdown_current_admin_mod.CurrentAdminCoordinator = .{},
     runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
+    screen_source: *stable_screen_source.StableScreenSource,
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
     fn generationConnection(self: *const RemoteRuntime) ?*host_adapter_mod.HostAdapter {
@@ -914,6 +916,13 @@ pub const RemoteRuntime = struct {
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
+        self.screen_source = try self.allocator.create(stable_screen_source.StableScreenSource);
+        errdefer self.allocator.destroy(self.screen_source);
+        try self.screen_source.initUnavailableInPlace(self.allocator, self.io, size);
+        errdefer {
+            _ = self.screen_source.close() catch null;
+            self.screen_source.deinit();
+        }
         self.generation.frame_summary_ready = false;
         self.generation.frame_summary = .{};
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
@@ -1090,12 +1099,24 @@ pub const RemoteRuntime = struct {
 
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
         self.surface = try Surface.init(self.allocator, surface_id, size);
-        self.surface.remote = self.generation.attachment.screenPtr().?.screenSource();
+        errdefer self.surface.deinit();
+        _ = try self.screen_source.publishLive(
+            self.generation.attachment.screenPtr().?.screenSource(),
+            2,
+        );
+        self.surface.remote = self.screen_source.screenSource();
     }
 
     /// host가 발급한 runtime_id(hex)를 돌려준다 — workspace가 저장해 재실행 시 `attachExisting`으로 재접속한다(§7, e3-5).
     pub fn runtimeIdHex(self: *const RemoteRuntime) [32]u8 {
         return self.runtime_id_hex;
+    }
+
+    fn deinitScreenSource(self: *RemoteRuntime) void {
+        _ = self.screen_source.close() catch
+            @panic("stable screen proxy close lost final owner");
+        self.screen_source.deinit();
+        self.allocator.destroy(self.screen_source);
     }
 
     /// runtime을 종료하고(host `runtime.terminate`) client-side 자원을 회수한다. 멱등 시도(종료 실패는 무시).
@@ -1104,6 +1125,7 @@ pub const RemoteRuntime = struct {
         self.terminateBestEffort();
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
         self.surface.deinit();
+        self.deinitScreenSource();
         self.generation.attachment.deinitWithConnection(self.generation.connection);
         self.generation.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
@@ -1120,6 +1142,7 @@ pub const RemoteRuntime = struct {
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
         self.detachBestEffort();
         self.surface.deinit();
+        self.deinitScreenSource();
         self.generation.attachment.deinitWithConnection(self.generation.connection); // stream demux queue + attachment-owned screen.
         self.generation.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
@@ -4781,6 +4804,7 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     defer {
         if (attachment_live) {
             rr.surface.deinit();
+            rr.deinitScreenSource();
             rr.generation.attachment.deinitWithConnection(rr.generation.connection);
         }
     }
@@ -4932,6 +4956,7 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expect(rr.usesGenerationAttachment());
     try std.testing.expectEqual(@as(u21, 'x'), rr.generation.attachment.screenPtr().?.grid.cells[0].codepoint);
     rr.surface.deinit();
+    rr.deinitScreenSource();
     rr.generation.attachment.deinitWithConnection(rr.generation.connection);
     attachment_live = false;
 }
@@ -5054,6 +5079,7 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     try std.testing.expectEqual(remote_attachment.Role.observer, rr.generation.attachment.statePtr().role);
     try std.testing.expectError(error.Unauthorized, rr.sendInputNonBlocking("late"));
     rr.surface.deinit();
+    rr.deinitScreenSource();
     rr.generation.attachment.deinitWithConnection(rr.generation.connection);
 }
 
@@ -5272,6 +5298,7 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     try std.testing.expectEqual(@as(u21, 'x'), rr.generation.attachment.screenPtr().?.grid.cells[0].codepoint);
 
     rr.surface.deinit();
+    rr.deinitScreenSource();
     rr.generation.attachment.deinitWithConnection(rr.generation.connection);
 }
 
@@ -5372,6 +5399,7 @@ const B4SemanticFixture = struct {
 
     pub fn deinit(self: *@This()) void {
         self.runtime.surface.deinit();
+        self.runtime.deinitScreenSource();
         self.runtime.direct_input.deinit(self.allocator);
         self.runtime.pending_controls.deinit(self.allocator);
         self.runtime.generation.observation.deinit(self.allocator);
@@ -6397,9 +6425,13 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
     var rr: RemoteRuntime = undefined;
     const runtime_id: [32]u8 = "00112233445566778899aabbccddeeff".*;
     try rr.attachExisting(&client, allocator, std.testing.io, 77, runtime_id, .{ .cols = 4, .rows = 1 });
-    const snapshot = rr.surface.renderSnapshot();
-    try std.testing.expectEqual(@as(u16, 4), snapshot.size.cols);
-    try std.testing.expectEqual(@as(u21, 'o'), snapshot.cells[0].codepoint);
+    {
+        rr.surface.lockCore(std.testing.io);
+        defer rr.surface.unlockCore(std.testing.io);
+        const snapshot = rr.surface.renderSnapshot();
+        try std.testing.expectEqual(@as(u16, 4), snapshot.size.cols);
+        try std.testing.expectEqual(@as(u21, 'o'), snapshot.cells[0].codepoint);
+    }
     rr.detachClientSide();
     peer.join();
     try std.testing.expect(peer_ok);
@@ -8230,12 +8262,12 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
         .Debug => 9136,
-        .ReleaseFast => 9072,
+        .ReleaseFast => 9088,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
         .Debug => 6416,
-        .ReleaseFast => 6352,
+        .ReleaseFast => 6368,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -10559,7 +10591,7 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.mode) {
         .Debug => 9136,
-        .ReleaseFast => 9072,
+        .ReleaseFast => 9088,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -10635,6 +10667,21 @@ test "CR2a RemoteGeneration 추출은 distinct state와 allocator ownership을 �
     try testing.expectEqual(@as(usize, 0xF6), generation.frame_summary.output_events);
     try testing.expectEqual(@as(usize, 0x17), generation.frame_summary.exit_events);
     try testing.expectEqualStrings("/cr2a", generation.observation.cwd.items);
+}
+
+test "CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+
+    const remote = fixture.runtime.surface.remote orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@intFromPtr(fixture.runtime.screen_source), @intFromPtr(remote.ctx));
+    try testing.expect(@intFromPtr(fixture.runtime.generation.attachment.screenPtr().?) != @intFromPtr(remote.ctx));
+    fixture.runtime.surface.lockCore(std.testing.io);
+    const snapshot = fixture.runtime.surface.renderSnapshot();
+    try testing.expectEqual(@as(u21, 'x'), snapshot.cells[0].codepoint);
+    fixture.runtime.surface.unlockCore(std.testing.io);
 }
 
 fn countField(comptime fields: []const std.builtin.Type.StructField, comptime name: []const u8) usize {

@@ -685,6 +685,17 @@ allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner�
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
+CR2b는 heap final-address `StableScreenSource` pointer를 stable shell에 추가한다. 기존 Debug tail padding을 재사용해
+Debug는 `9,136`으로 유지되고 ReleaseFast만 `9,072 -> 9,088`로 exact 16바이트(4,096 runtime에서 64 KiB) 증가한다.
+proxy 자체는 현재 viewport cell 수로 제한된
+`UnavailableCore`를 소유하고 첫 행의 고정 marker만 미리 채우며 old scrollback/link/image를 빌리지 않는다. attach는
+`Surface.remote`에 proxy source를 한 번만 넣고 live screen은 generation 2로 게시한다. render lock은 writer-pending을 먼저
+확인한 뒤 gate 아래 exact target을 pin하고, unlock은 current를 재조회하지 않는다. detach/deinit은 close가 기존 borrow를
+drain해 retired live target을 반환한 뒤 proxy placeholder와 attachment screen을 순서대로 회수한다. proxy는 render 임계구역과
+writer gate wait의 count·total·max nanoseconds를 allocation-free atomic metric으로 남긴다. 이 단계의 publish tests는
+fake target 교체까지이며 writer/close/reclaim admission은 proxy를 초기화한 owner thread로 제한한다. 실제
+`PreparedReconnect`/old generation reclaim은 CR2e가 소유한다.
+
 앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
 `RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
 Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을

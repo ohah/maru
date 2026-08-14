@@ -104,8 +104,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    (`connection`, `attachment`, `event_generation_tracking`, resize wire state 3개, pump state 4개, `observation`)와
    stable-shell 잔류 owner를 closed inventory로 고정하고 `RemoteGeneration`만 추출한다. Zig의 nested aggregate 정렬로
    `RemoteRuntime`은 Debug/ReleaseFast 모두 정확히 16바이트만 증가하며 기존 4,096-runtime 상한에서 64 KiB가 추가된다. direct-input/control queue와
-   allocator/io/runtime ID, Surface, pending/close/lifetime owner는 이 단계에서 이동하지 않는다. CR2b는 기존 Surface API를
-   유지하는 stable proxy gate와 shell lifecycle pin을 배선한다. CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
+   allocator/io/runtime ID, Surface, pending/close/lifetime owner는 이 단계에서 이동하지 않는다. **CR2b 완료:** 기존 Surface API를
+   유지하는 final-address stable proxy gate를 배선했다. proxy는 exact pinned target unlock, writer-pending 우선권,
+   checked-monotonic generation, unavailable placeholder와 shell destroy drain을 소유한다. `RemoteRuntime`은 proxy pointer를
+   stable field로 두고 attach 때 live target을 게시하며 detach/deinit 때 proxy를 먼저 닫은 뒤 attachment screen을 파괴한다.
+   CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
    바꾸지 않는다. transport-neutral facade/ordered policy는 `src/app`의 `TermRuntimeBackend` 계약 옆 중립 모듈이 소유하고
    local/remote backend가 구현한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수

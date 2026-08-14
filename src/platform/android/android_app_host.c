@@ -91,6 +91,8 @@ static struct {
     int n_pace;
     int pace_done;
     int64_t vsync_count;
+    int64_t last_vsync_ns;  // 직전 vsync 시각 — 패널 주기를 여기서 잰다(하드코딩하지 않는다)
+    int64_t last_draw_ns;   // 마지막으로 그린 vsync 시각. 목표 주기를 재는 기준
 } g;
 
 // drawFrame 은 app 을 안 받는다 — 온디맨드 래스터가 JNI 를 쓰려면 필요해서 들고 있는다.
@@ -1462,15 +1464,28 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
     }
 }
 
-// vsync 마다 불린다. **한 번 걸러** 그려서 30Hz 를 만든다 — Vulkan present mode 에는
-// 하위 주기 선택지가 없으므로(FIFO/MAILBOX/IMMEDIATE 는 전부 "언제"지 "얼마나 자주"가
-// 아니다) 주기는 앱이 정한다. iOS 의 `preferredFrameRateRange` 에 대응하는 자리다.
+// vsync 마다 불린다. Vulkan present mode 에는 하위 주기 선택지가 없으므로
+// (FIFO/MAILBOX/IMMEDIATE 는 전부 "언제"지 "얼마나 자주"가 아니다) **주기는 앱이 정한다** —
+// iOS 의 `preferredFrameRateRange` 에 대응하는 자리다.
+//
+// **경과 시간으로 정한다. vsync 를 세지 않는다.** 전에는 "한 번 걸러" 그렸는데, 그건 30Hz 가
+// 아니라 **패널 주사율의 절반**이다 — 90Hz 폰에서 45, 120Hz 에서 60 이 나온다. comfort 값을
+// 배터리·발열 때문에 골라 놓고 고주사율 기기에서 두 배로 그리고 있었다(에뮬레이터가 60Hz 라
+// 안 드러났다). `MARU_PACE` 의 PASS 창(25~42ms)도 120Hz 에서는 16.7ms 로 떨어져 실패한다.
 static void frameCallback(int64_t frame_time_ns, void *data) {
-    (void)frame_time_ns;
     g.vsync_count++;
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
-    // 사용자에게 보인다. 데스크톱 maru 의 present 정책과 같은 값이다.
-    if ((g.vsync_count & 1) == 0) drawFrame();
+    // 사용자에게 보인다. iOS 도 같은 값이다(`preferredFrameRateRange`). 데스크톱은 60 이라
+    // **다르다** — 데스크톱은 hover/scroll 지연을 우선하고 전력 여유가 있다.
+    const int64_t target_ns = 33333333; // 30Hz
+    // 패널 주기를 재서 문턱을 반 주기 당긴다. 정확히 `target_ns` 를 요구하면 vsync 지터로
+    // 한 주기를 통째로 놓쳐 **실효 주기가 절반으로 떨어졌다 돌아오는** 널뛰기가 된다.
+    const int64_t vsync_dt = (g.last_vsync_ns != 0) ? frame_time_ns - g.last_vsync_ns : 0;
+    g.last_vsync_ns = frame_time_ns;
+    if (g.last_draw_ns == 0 || frame_time_ns - g.last_draw_ns >= target_ns - vsync_dt / 2) {
+        g.last_draw_ns = frame_time_ns;
+        drawFrame();
+    }
     // **여기서도 재생성을 봐야 한다.** 이 단계에서는 메인 루프가 pollOnce(-1) 로 막혀 있어
     // 리사이즈 신호를 받아 줄 사람이 없다 — 그러면 화면이 그대로 언다.
     if (g.needs_recreate && data) {

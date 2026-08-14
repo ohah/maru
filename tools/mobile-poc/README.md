@@ -117,8 +117,10 @@ gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL �
 
 **Android 하위 주기는 앱이 만든다.** Vulkan present mode(FIFO/MAILBOX/IMMEDIATE)는 전부
 "언제 내보낼까"지 "얼마나 자주"가 아니라 30Hz 를 고르는 칸이 없다. `AChoreographer` 로
-vsync 를 받아 한 번 걸러 present 하면 33.3ms 가 나온다 — iOS 의 `preferredFrameRateRange`
-에 대응하는 자리다.
+vsync 를 받아 **경과 시간을 재서** present 한다 — iOS 의 `preferredFrameRateRange` 에
+대응하는 자리다. **PoC 때 쓰던 "한 번 걸러" 는 제품에서 뺐다**: 그건 30Hz 가 아니라 패널
+주사율의 절반이라 120Hz 기기에서 60 이 나온다(이 하네스의 에뮬레이터가 60Hz 라 PoC 에서는
+같은 값이었다).
 
 ### chrome 컴포넌트 + 텍스트 + 아이콘 (PoC 6)
 

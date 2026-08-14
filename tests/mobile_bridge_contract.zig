@@ -815,6 +815,49 @@ fn missCount(cp: u32) u32 {
     return n;
 }
 
+/// host 흉내 — 미스를 받아 다음 빈 슬롯에 구워 등록한다. **못 구운 개수**를 돌려준다
+/// (슬롯이 없으면 host 는 아무것도 못 한다). 실제 iOS/Android 가 매 프레임 도는 그 루프다.
+///
+/// **뒤에서부터 훑는다.** `atlas_add` 가 미스 목록에서 그 항목을 swap-remove 하므로(마지막
+/// 항목을 그 자리로 당긴다), 증가 인덱스로 돌면 당겨진 항목을 **건너뛴다**. 실제 host 두 곳이
+/// 같은 이유로 역순이고, 여기서 그걸 안 따라 해 대조군이 5개 중 4개만 구워졌다(실측).
+fn bakeMisses() u32 {
+    const cols = bridge.maru_mobile_atlas_cols();
+    var unbaked: u32 = 0;
+    var i: u32 = bridge.maru_mobile_missing_count();
+    while (i > 0) {
+        i -= 1;
+        const slot = bridge.maru_mobile_next_slot(cols);
+        if (slot == 0xFFFFFFFF) {
+            unbaked += 1;
+            continue;
+        }
+        bridge.maru_mobile_atlas_add(
+            bridge.maru_mobile_missing_cp(i),
+            bridge.maru_mobile_missing_style(i),
+            slot >> 16,
+            slot & 0xFFFF,
+            11,
+        );
+    }
+    bridge.maru_mobile_missing_clear();
+    return unbaked;
+}
+
+/// 글자 quad(kind=1·3·4·5) 개수. 단색 배경(0)·아이콘(2)은 뺀다.
+fn glyphQuads(n: u32) u32 {
+    const quads = bridge.maru_mobile_quads();
+    var count: u32 = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        switch (quads[i].kind) {
+            1, 3, 4, 5 => count += 1,
+            else => {},
+        }
+    }
+    return count;
+}
+
 // **보이지 않는 글자는 굽지 않는다.** 코어는 grapheme cluster mode(DECSET 2027) 합의가 없으면
 // ZWJ 를 제 셀에 담는다 — 그건 코어의 계약이라 여기서 바꾸지 않는다. 다만 그 셀을 미스로 올리면
 // host 가 **빈 글리프**를 구워 아틀라스 512칸 중 하나를 영구히 먹는다. 미스에 안 올리고 안 굽는다.
@@ -830,6 +873,81 @@ test "0폭 format 문자(ZWJ)는 미스로 안 올라간다" {
     try std.testing.expectEqual(@as(u32, 0), missCount(0x200D));
     // 피드가 실제로 격자에 닿았다는 대조군 — 이게 0이면 위 단정은 아무것도 안 잰 것이다.
     try std.testing.expect(missCount(0x1F468) >= 1);
+}
+
+// **재현: 아틀라스가 차면 그 뒤 글자는 조용히 사라진다.**
+//
+// 축출이 없다(`atlas_add` 는 꽉 차면 그냥 `return`). 512칸(16x32)은 데모 피드로는 안 차지만
+// **실제 셸은 금방 채운다** — ASCII 95 + 한글 음절 + CJK + 박스 문자에, 굵게/기울임이 각각
+// **별도 슬롯**(`atlasKey(cp, style)`)이다. 차고 나면 새 글자는 미스로 올라오지만 host 가
+// 구울 자리가 없어 **영영 안 그려진다**. 오류도 로그도 없다.
+//
+// **이 테스트도 등록부를 채우고 되돌리지 않는다** — 아래 "슬롯이 다 차면" 과 같은 부류라
+// 나란히 둔다. 글자 등록이 필요한 새 테스트는 이 **위에** 둔다.
+test "재현: 아틀라스가 차면 새 글자가 조용히 안 그려진다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+
+    // ── 대조군: **자리가 있을 때는** 같은 절차가 글자를 그린다.
+    // 이게 없으면 뒤의 "안 그려진다" 가 아틀라스 탓인지 절차 탓인지 못 가른다.
+    {
+        // 먼저 **안정 상태**로 만든다 — chrome(탭 라벨·사이드바) 글자가 아직 안 구워져 있으면
+        // 그것들이 차이에 섞인다(실측: +5 를 기대한 자리에서 +9 가 나왔다).
+        _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+        var settle: u32 = 0;
+        while (settle < 8) : (settle += 1) {
+            _ = bridge.maru_mobile_build(402, 874, now());
+            if (bridge.maru_mobile_missing_count() == 0) break;
+            _ = bakeMisses();
+        }
+        const before = glyphQuads(bridge.maru_mobile_build(402, 874, now()));
+
+        const five = "\u{4E10}\u{4E11}\u{4E12}\u{4E13}\u{4E14}";
+        _ = bridge.maru_mobile_input(five.ptr, five.len);
+        _ = bridge.maru_mobile_build(402, 874, now()); // 미스로 올린다
+        try std.testing.expectEqual(@as(u32, 0), bakeMisses()); // host 가 다 구웠다
+        const after = glyphQuads(bridge.maru_mobile_build(402, 874, now()));
+        try std.testing.expectEqual(before + 5, after);
+    }
+
+    // 한글 음절로 아틀라스를 채운다. 매 프레임 host 가 굽는 것을 흉내낸다.
+    var filled = false;
+    var base: u21 = 0xAC00;
+    var round: u32 = 0;
+    while (round < 60) : (round += 1) {
+        _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+        var line: [64]u8 = undefined;
+        var used: usize = 0;
+        var k: u21 = 0;
+        while (k < 20) : (k += 1) {
+            used += std.unicode.utf8Encode(base + k, line[used..]) catch break;
+        }
+        base += 20;
+        _ = bridge.maru_mobile_input(&line, used);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        if (bakeMisses() > 0) {
+            filled = true;
+            break;
+        }
+    }
+    try std.testing.expect(filled); // 512칸이 실제로 찼다
+
+    // **판정은 차이로 한다** — glyph quad 총계에는 chrome(탭 라벨·사이드바) 글자가 섞여 있어
+    // 절대값으로는 아무것도 못 잰다(실측: 빈 화면에서도 51개).
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    const empty = glyphQuads(bridge.maru_mobile_build(402, 874, now()));
+
+    // 이제 **한 번도 안 나온 글자** 다섯을 넣는다.
+    const fresh = "\u{4E00}\u{4E01}\u{4E02}\u{4E03}\u{4E04}"; // 一丁丂七丄
+    _ = bridge.maru_mobile_input(fresh.ptr, fresh.len);
+    const with_fresh = glyphQuads(bridge.maru_mobile_build(402, 874, now()));
+
+    // 미스로는 올라온다 — host 는 구우려 한다.
+    try std.testing.expect(missCount(0x4E00) == 1);
+    // 그런데 구울 자리가 없다.
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols()));
+    // 그래서 **다섯 글자가 통째로 안 그려진다**. 이게 화면에서 보이는 증상이다.
+    try std.testing.expectEqual(empty, with_fresh);
 }
 
 // **이 테스트는 등록부를 끝까지 채우고 되돌리지 않는다.** Zig 는 선언 순서대로 도므로, 뒤에

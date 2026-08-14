@@ -16199,6 +16199,10 @@ pub const AppSession = struct {
             .selection = t.selection,
             .cursor = t.cursor,
             .accent = t.accent, // 테마-구동 accent(탭/포커스 언더바·활성 카드 막대·세팅 강조) — 프리셋별 시그니처 색
+            // 비교 밴드 색은 **웹과 같은 함수**에서 온다(`syntax_theme.diffFromTheme`) — CM6 화면이 CSS
+            // 변수로 받던 그 값이라, 두 화면이 같은 초록·빨강을 쓴다(§7).
+            .diff_added = maru.session.syntax_theme.diffFromTheme(t).added,
+            .diff_removed = maru.session.syntax_theme.diffFromTheme(t).removed,
         };
         // chrome theme = 토큰셋 교체(컴포넌트 불변). rich는 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로(C4a).
         var tk = switch (self.appearance.chrome_theme) {
@@ -32167,6 +32171,8 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
     };
     // 2색이 구분되게 토큰을 만든다: surface_bg=(2,2,2), selection=(7,7,7).
     const tk = chrome.tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = c.rgb(1, 1, 1),
         .sidebar_background = c.rgb(2, 2, 2),
         .sidebar_foreground = c.rgb(3, 3, 3),
@@ -32222,6 +32228,8 @@ test "rasterizeOverlayCells: 셀보다 얇은 fill은 셀 배경이 아니라 GP
         }
     };
     const tk = chrome.tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = c.rgb(1, 1, 1),
         .sidebar_background = c.rgb(2, 2, 2),
         .sidebar_foreground = c.rgb(3, 3, 3),
@@ -32267,6 +32275,8 @@ test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 
         }
     };
     const tk = chrome.tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = cc.rgb(1, 1, 1),
         .sidebar_background = cc.rgb(2, 2, 2),
         .sidebar_foreground = cc.rgb(3, 3, 3),
@@ -32312,6 +32322,8 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
         }
     };
     const tk = chrome.tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = cc.rgb(1, 1, 1),
         .sidebar_background = cc.rgb(2, 2, 2),
         .sidebar_foreground = cc.rgb(3, 3, 3),

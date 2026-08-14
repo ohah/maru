@@ -510,6 +510,8 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
         } },
     };
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -545,6 +547,8 @@ test "prepareRequest keeps runs scrolled above the pane so a translated cache st
         .{ .text = .{ .origin = .{ .x = 20, .y = 120 }, .runs = &visible_runs, .role = .surface_fg, .text_role = .body, .max_cols = 20, .scroll_clipped = true } },
     };
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -576,6 +580,8 @@ test "prepareRequest owns the face bytes instead of borrowing the caller's appea
         .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 20 } },
     };
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -613,6 +619,8 @@ test "chrome text shapes with the requested family and keeps the system face whe
         .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 40 } },
     };
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -656,6 +664,8 @@ test "tail anchor truncates the head so the caret end survives" {
     const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZ";
     const runs = [_]chrome.draw.Run{.{ .text = long }};
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -714,6 +724,8 @@ test "an unknown chrome family falls back to the system face instead of blanking
         .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 40 } },
     };
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1154,6 +1166,8 @@ test "owned request shapes proportional text before renderer registry resolution
         .max_cols = 40,
     } }};
     const tokens = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 10, .g = 10, .b = 10 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },

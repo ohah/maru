@@ -534,6 +534,8 @@ test "텍스트 아래 층은 bottom 하나뿐이다 — under는 이름과 달�
 
 test "Chrome draw lowering preserves an NFD cluster and paints cards behind text" {
     const tk = chrome.tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -565,6 +567,8 @@ test "Chrome draw lowering preserves an NFD cluster and paints cards behind text
 
 test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
     const tk = chrome.tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -592,6 +596,8 @@ test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
 
 test "icon-only lowering excludes ordinary Session Dock text" {
     const tk = chrome.tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -615,6 +621,8 @@ test "icon-only lowering excludes ordinary Session Dock text" {
 
 test "rich text artifact preserves fractional pixel origin instead of coercing it to a cell row" {
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -641,6 +649,8 @@ test "rich text artifact preserves fractional pixel origin instead of coercing i
 
 test "rich text artifact keeps side-by-side origins independent on one cell row" {
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -668,6 +678,8 @@ test "rich text artifact keeps side-by-side origins independent on one cell row"
 
 test "rich text fingerprint changes for placement semantic color and typography inputs" {
     var tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
@@ -700,6 +712,8 @@ test "rich text fingerprint changes for placement semantic color and typography 
 // 달라져 키가 정상적으로 바뀌어야 한다.
 test "rich text fingerprint is invariant to pure scroll translation" {
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -757,6 +771,8 @@ test "rich text fingerprint is invariant to pure scroll translation" {
 // 채로 재사용되고, Lab 골든은 이것을 못 본다(그 경로는 delta가 늘 0이라 캐시 재사용이 없다).
 test "rich text fingerprint pins a floating sticky head instead of translating it" {
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -807,6 +823,8 @@ test "rich text fingerprint pins a floating sticky head instead of translating i
 test "rich text fingerprint and the shaping request share one filter" {
     const allocator = std.testing.allocator;
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -845,6 +863,8 @@ test "rich text fingerprint and the shaping request share one filter" {
 
 test "rich text fingerprint ignores animated wide icon-only ops" {
     const tk = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
         .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },

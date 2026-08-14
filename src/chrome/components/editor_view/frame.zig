@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const draw = @import("../../draw.zig");
+const tokens = @import("../../tokens.zig");
 const content = @import("content.zig");
 const geometry = @import("geometry.zig");
 const gutter = @import("gutter.zig");
@@ -57,6 +58,9 @@ pub const Props = struct {
     /// 문서 전체의 논리 줄 수. 보통 `lines.len`이지만, 줄 번호 자릿수(gutter 폭)를 문서 전체
     /// 기준으로 잡아야 하므로 따로 받는다.
     total_lines: usize,
+    /// **이 줄이 추가인가 삭제인가**(비교 본문). 논리 줄 인덱스로 읽는다. `null`이면 밴드를 그리지
+    /// 않는다 — 문서 편집기는 이 축이 없다.
+    row_bands: ?[]const RowBand = null,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -85,6 +89,18 @@ pub const Props = struct {
 
 /// 호출자 소유 저장소. **어느 것이든 모자라면 그 부분이 잘릴 뿐 죽지 않는다** — 화면이 조금 빈
 /// 것이 크래시보다 낫고, 그 상태는 골든이 즉시 잡는다.
+/// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
+/// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
+pub const RowBand = enum { none, added, removed };
+
+/// 줄 배경의 세기. **알파로 얹는다** — 배경색을 가정하면 한쪽 테마에서 글자가 안 읽힌다
+/// (CM6 `diff-theme.ts`가 같은 이유로 16%를 썼다. 여기 값은 그 관측을 옮긴 것이다).
+pub const band_alpha: u8 = 41; // ≈16%
+/// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
+/// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
+pub const strip_alpha: u8 = 153; // ≈60%
+pub const strip_width_px: u16 = 2;
+
 pub const Scratch = struct {
     ops: []draw.Op,
     text_bytes: []u8,
@@ -209,12 +225,50 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .metrics = props.metrics,
     }, scratch.ops[bg.ops + cw.ops + gw.ops ..]);
 
+    // ── 5) diff 밴드 ──────────────────────────────────────────────────────────
+    // **본문이 정한 시각 배치를 그대로 따른다**(gutter와 같은 이유) — 랩된 줄은 이어진 조각에도
+    // 같은 색이 깔려야 한 줄로 읽힌다.
+    //
+    // **quad로 낸다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`) 이 밴드는 gutter와
+    // 스크롤바 자리까지 덮어 격자 밖으로 나간다 — 배경(`surface`)이 같은 이유로 quad인 것과 같다.
+    // op 순서상 배경 뒤이므로 배경 위에 얹히고, 글자는 셀 파이프라인이라 늘 그 위에 그려진다.
+    const band_ops = paintBands(props, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + sw.ops ..]);
+
     return .{
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
     };
+}
+
+/// 시각 행마다 밴드를 깐다. 반환 = 쓴 op 수(저장소가 모자라면 거기서 멈춘다 — 잘릴 뿐 죽지 않는다).
+fn paintBands(props: Props, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+    const bands = props.row_bands orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n + 2 > out.len) break; // 줄 배경 + 띠 = 둘씩 든다
+        const idx = props.first_line + v.line;
+        if (idx >= bands.len) continue;
+        const role: tokens.ColorRole = switch (bands[idx]) {
+            .none => continue,
+            .added => .diff_added_bg,
+            .removed => .diff_removed_bg,
+        };
+        const y = props.rect.y + @as(i32, @intCast(i * props.cell_h_px));
+        out[n] = .{ .quad = .{
+            .rect = .{ .x = props.rect.x, .y = y, .w = props.rect.w, .h = props.cell_h_px },
+            .fill_role = role,
+            .alpha = band_alpha,
+        } };
+        out[n + 1] = .{ .quad = .{
+            .rect = .{ .x = props.rect.x, .y = y, .w = strip_width_px, .h = props.cell_h_px },
+            .fill_role = role,
+            .alpha = strip_alpha,
+        } };
+        n += 2;
+    }
+    return n;
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -391,4 +445,57 @@ test "미리 센 시각 행 수를 주면 그것을 쓴다" {
     props.total_visual_rows = 400; // 문서는 2줄인데 캐시가 400행이라고 한다
     const w = build(props, bufs.scratch());
     try testing.expect(w.scrollbar != null); // 캐시 값을 따랐다
+}
+
+test "밴드는 바뀐 줄에만 서고 빈 행에는 안 선다" {
+    // **빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다.** 좌우를 나란히 놓는 배치에서
+    // 그것은 반대쪽 줄이 이 문서에도 있는 것처럼 읽힌다.
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [128]u8 = undefined;
+
+    const lines = [_][]const u8{ "keep", "gone", "", "tail" };
+    const bands = [_]RowBand{ .none, .removed, .none, .none }; // 3행은 짝을 맞추려 넣은 빈 행
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 4,
+        .row_bands = &bands,
+        .visible_rows = 4,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var band_quads: usize = 0;
+    var strip_quads: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        const q = op.quad;
+        if (q.fill_role != .diff_removed_bg and q.fill_role != .diff_added_bg) continue;
+        if (q.rect.w == strip_width_px) strip_quads += 1 else band_quads += 1;
+        // 밴드가 붙는 행은 **하나뿐**이다 — 줄 하나가 바뀌었다.
+        try testing.expectEqual(@as(i32, 16), q.rect.y); // 두 번째 행(0-based 1 × 16px)
+    }
+    try testing.expectEqual(@as(usize, 1), band_quads);
+    try testing.expectEqual(@as(usize, 1), strip_quads);
 }

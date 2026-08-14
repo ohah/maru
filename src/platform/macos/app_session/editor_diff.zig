@@ -17,6 +17,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const dock_panel = maru.session.dock_panel;
+const chrome_editor = maru.chrome.components.editor_view;
 // 테스트 픽스처가 쓰는 형제 모듈. `editor.zig`가 이 파일을 부르고 이쪽이 그쪽을 부르지만, 파일 단위
 // 순환 import는 Zig에서 문제가 없다(타입이 서로를 comptime으로 품지 않는다).
 const editor_ops = @import("editor.zig");
@@ -43,6 +44,10 @@ pub const State = struct {
     /// 각 행이 달 줄 번호. 짝을 맞추려 넣은 빈 행은 `null`이다(없는 줄에 번호를 붙이면 거짓이다).
     left_numbers: []const ?u32 = &.{},
     right_numbers: []const ?u32 = &.{},
+    /// 각 행의 밴드. **왼쪽은 삭제만, 오른쪽은 추가만** 칠한다 — 좌우를 나눈 이유가 그것이고,
+    /// 빈 행은 `none`이다(색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
+    left_bands: []const chrome_editor.frame.RowBand = &.{},
+    right_bands: []const chrome_editor.frame.RowBand = &.{},
     /// 요청을 건 시각. 재시도 창(6초)을 여기서 잰다.
     requested_ms: u64 = 0,
     /// 판정이 끝났는가. **끝난 판정을 매 tick 다시 계산하지 않는다** — 2,000줄 대응을 프레임마다
@@ -105,12 +110,16 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     if (st.right_texts.len > 0) self.allocator.free(st.right_texts);
     if (st.left_numbers.len > 0) self.allocator.free(st.left_numbers);
     if (st.right_numbers.len > 0) self.allocator.free(st.right_numbers);
+    if (st.left_bands.len > 0) self.allocator.free(st.left_bands);
+    if (st.right_bands.len > 0) self.allocator.free(st.right_bands);
     st.left_lines = &.{};
     st.right_lines = &.{};
     st.left_texts = &.{};
     st.right_texts = &.{};
     st.left_numbers = &.{};
     st.right_numbers = &.{};
+    st.left_bands = &.{};
+    st.right_bands = &.{};
     st.settled = false;
 }
 
@@ -196,18 +205,27 @@ fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
     errdefer self.allocator.free(ln);
     const rn = try self.allocator.alloc(?u32, rows.right.len);
     errdefer self.allocator.free(rn);
+    const lb = try self.allocator.alloc(chrome_editor.frame.RowBand, rows.left.len);
+    errdefer self.allocator.free(lb);
+    const rb = try self.allocator.alloc(chrome_editor.frame.RowBand, rows.right.len);
+    errdefer self.allocator.free(rb);
     for (rows.left, 0..) |r, i| {
         lt[i] = displayText(r.text);
         ln[i] = r.line;
+        // **왼쪽은 삭제만 칠한다.** context와 빈 행은 색이 없다.
+        lb[i] = if (r.kind == .removed) .removed else .none;
     }
     for (rows.right, 0..) |r, i| {
         rt[i] = displayText(r.text);
         rn[i] = r.line;
+        rb[i] = if (r.kind == .added) .added else .none;
     }
     st.left_texts = lt;
     st.right_texts = rt;
     st.left_numbers = ln;
     st.right_numbers = rn;
+    st.left_bands = lb;
+    st.right_bands = rb;
 }
 
 /// 줄 끝 문자를 뗀 표시용 슬라이스. **입력을 빌린다**(복사하지 않는다).

@@ -842,6 +842,8 @@ test "SessionDock 헤더는 잘림과 분석 중을 개수와 분리해 말한�
             .actions = &actions,
         });
         const tk = tokens.Tokens.rich(.{
+            .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+            .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
             .foreground = .{ .r = 240, .g = 240, .b = 240 },
             .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
             .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -898,6 +900,8 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1138,6 +1142,8 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1238,6 +1244,8 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
         },
     };
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1509,6 +1517,8 @@ test "SessionDock group count pill is vertically centred in its row" {
 
 fn fixtureTokens() tokens.Tokens {
     return tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1559,6 +1569,8 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 28, .g = 28, .b = 28 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1626,6 +1638,8 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1698,6 +1712,8 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1766,6 +1782,8 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1858,6 +1876,8 @@ test "SessionDock scroll-area decoration quads inherit the container clip" {
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -1941,6 +1961,8 @@ test "SessionDock never emits a quad whose clip has collapsed to zero area" {
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -2018,6 +2040,8 @@ test "SessionDock segment and sort labels carry the exact slot width as their me
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -2101,6 +2125,8 @@ test "SessionDock segment labels take their foreground from the same resolver as
         .actions = &actions,
     });
     const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
@@ -2183,6 +2209,8 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
         published += 1;
 
         const tk = tokens.Tokens.rich(.{
+            .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+            .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
             .foreground = .{ .r = 240, .g = 240, .b = 240 },
             .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
             .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },

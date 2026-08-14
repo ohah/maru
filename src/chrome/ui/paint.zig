@@ -163,6 +163,8 @@ fn emptyOp() draw.Op {
 
 fn testTokens() tokens.Tokens {
     return tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },

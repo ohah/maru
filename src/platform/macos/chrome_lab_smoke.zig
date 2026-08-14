@@ -776,6 +776,12 @@ fn labTokens() chrome.Tokens {
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         // Lab의 터미널 배경 = clear color와 같은 값. 편집기 시나리오의 바탕이 제품과 같은 관계를 갖는다.
         .terminal_background = .{ .r = terminal_background[0], .g = terminal_background[1], .b = terminal_background[2] },
+        // 비교 밴드 색. **제품은 테마에서 파생하지만**(`syntax_theme.diffFromTheme` — 팔레트의 bright
+        // green/red) Lab은 위 주석대로 입력을 고정한다. 여기 값은 그 함수가 어두운 기본 테마에서 내는
+        // 자리(초록·빨강)와 같은 계열이고, 이 시나리오가 판정하는 것은 색상값이 아니라 **어느 행에
+        // 밴드와 띠가 서는가**다.
+        .diff_added = .{ .r = 87, .g = 171, .b = 90 },
+        .diff_removed = .{ .r = 205, .g = 90, .b = 90 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
         .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
         .search_match = .{ .r = 1, .g = 2, .b = 3 },

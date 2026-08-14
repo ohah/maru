@@ -276,7 +276,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
 
     const ordered = between(runtime, "    fn callOrdered(self: *RemoteRuntime,", "    fn discardQueuedMutations(") orelse
         return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), count(ordered, "self.attachment.callOrdered("));
+    try std.testing.expectEqual(@as(usize, 1), count(ordered, "self.generation.attachment.callOrdered("));
     try std.testing.expectEqual(@as(usize, 0), count(ordered, "self.client.call("));
 
     const attachment_ordered = between(runtime, "    fn callOrdered(\n        self: *RuntimeAttachment,", "    fn hasBufferedControllerRevoke(") orelse

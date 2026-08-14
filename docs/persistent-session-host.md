@@ -674,6 +674,17 @@ field ownership은 다음처럼 겹치지 않는다.
 | stable shell event consumer | delivered BEL/notification/OSC 52 cursor와 generation baseline |
 | AppSession/Surface | preedit 표시, selection/search/viewport, notice projection만 소유하고 remote raw queue/cursor는 소유하지 않음 |
 
+CR2a의 extraction inventory는 현재 구현에서 세대와 함께 교체되어야 하는 field만 먼저 묶는다. exact field는
+`{connection,attachment,event_generation_tracking,resize_seq,resize_generation,resize_baseline_present,pump_ended,
+resync_needed,frame_summary_ready,frame_summary,observation}` 11개다. 여기서 direct-input/control **delivery state**는 active
+generation의 resize wire sequence·baseline과 pump summary를 뜻한다. payload queue인 `direct_input`, `direct_input_offset`,
+`pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
+allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
+정렬 패딩은 Debug `9,120 -> 9,136`, ReleaseFast `9,056 -> 9,072`로 exact 16바이트이며 4,096 runtime 상한의 추가분은
+64 KiB다. CR2a는 이 물리적
+중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
+`InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
+
 앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
 `RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
 Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을

@@ -6974,6 +6974,126 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
 }
 
+test "CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC062);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    const flags = c.fcntl(fds[0], c.F.GETFL, @as(c_int, 0));
+    try testing.expect(flags >= 0);
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try testing.expectEqual(@as(c_int, 0), c.fcntl(fds[0], c.F.SETFL, flags | nonblocking));
+
+    const pending_len = 1024 * 1024;
+    const pending_frame = try testing.allocator.alloc(u8, pending_len);
+    @memset(pending_frame, 0xA5);
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC063,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+        .pending_outbound = .{
+            .frame = pending_frame,
+            .stream_id = 0xC064,
+            .offset = 1,
+        },
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    runtime.pump_ended = false;
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+    try testing.expectError(error.WriteFailed, runtime.resize(91, 27));
+
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expect(pre_publication.client_was_usable);
+    try testing.expectEqual(fds[0], pre_publication.fd);
+    try testing.expect(pre_publication.pending_outbound_present);
+    try testing.expectEqual(@as(u8, 0), pre_publication.incident_count);
+    try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @intFromEnum(client_poison.ConnectionReason.outbound_write_ambiguous),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.SourceSite.client_response),
+        pre_publication.source_site_raw,
+    );
+    try testing.expectEqual(runtime.attachment.statePtr().controller_generation, pre_publication.controller_generation);
+    try testing.expectEqual(@as(u32, 1), pre_publication.pending_request_count);
+    try testing.expectEqual(
+        @intFromEnum(connection_incident.OutboundPhase.partial),
+        pre_publication.outbound_phase_raw,
+    );
+    try testing.expect(pre_publication.outbound_offset > 1);
+    try testing.expect(pre_publication.outbound_offset < pending_len);
+    try testing.expectEqual(@as(u64, pending_len), pre_publication.outbound_length);
+    try testing.expectEqual(
+        @as(u64, pending_len) - pre_publication.outbound_offset,
+        pre_publication.queue_bytes,
+    );
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.outbound_write_ambiguous, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
+    try testing.expect(!std.mem.eql(
+        u8,
+        &published.incident_repeat_key.fingerprint,
+        &([_]u8{0} ** 32),
+    ));
+    try testing.expect(published.pending_outbound == null);
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+}
+
 test "CR0b actual read event pump poison은 canonical suffix를 호출한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);

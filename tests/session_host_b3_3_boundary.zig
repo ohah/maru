@@ -96,7 +96,7 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
         "fn settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(",
         "/// B3-3 product-shaped private caller.",
     ) orelse return error.TestExpectedEqual;
-    const settle_authorities = std.mem.indexOf(u8, held_suffix, "txn.settlePreWireWithLease(") orelse
+    const settle_authorities = std.mem.indexOf(u8, held_suffix, "txn.settlePreWireForDeferredPublication(") orelse
         return error.TestExpectedEqual;
     const finish_request = std.mem.indexOf(u8, held_suffix, "txn.request.finishOrFailStop(") orelse
         return error.TestExpectedEqual;

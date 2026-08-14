@@ -303,6 +303,16 @@ binding이 해제된 뒤에만 RemoteRuntime이 final HostAdapter로 canonical `
 read callback이나 batch adapter가 publisher·registry·incident runtime pointer를 저장하거나 error tag에서 reason을 다시 추론하는 경로는
 0이다. capture가 없거나 서로 다른 Client/adapter/source로 drift하면 graph mutation 전 typed reject 또는 incident-authority fail-stop이다.
 
+caller 6의 outbound RPC ambiguity는 actual generation `RemoteRuntime.resize`에서 이미 일부 전송된 pending outbound를 먼저
+flush하는 제품 경로를 사용한다. nonblocking socket의 partial write 뒤 `EAGAIN`은 execution lease에
+`outbound_write_ambiguous`를 capture하고, caller는 allocator/operation guard가 살아 있는 동안 Client-owned pending frame의 exact
+offset/length, 남은 queue bytes, pending request 1을 `SourceSite.client_response` handoff에 봉인한다. prepared request backing을
+terminal settlement하되 Client first reason·fd·pending outbound는 건드리지 않고 publication scope와 execution lease, registered
+operation을 모두 release한 뒤에만 기존 publication port가 canonical first suffix를 호출한다. coordinator가 ring evidence와
+id/key/reason을 게시한 다음 terminalization이 pending outbound를 회수하고 fd를 exact once 닫으며 reconnect admission을 한 번
+게시한다. caller가 write error tag로 reason을 다시 추론하거나 부분 전송 상태를 settlement 뒤 읽거나 operation 안에서
+coordinator를 재진입하는 경로는 0이다.
+
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.
 publication이 끝나면 같은 registered owner가 handoff에 봉인된 terminalization disposition을 no-reread continuation으로 적용한다.

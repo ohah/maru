@@ -1085,8 +1085,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   현재 별도 managed public poison caller 1 gate는 caller가 closed reason/source/controller generation만 제출하고 app-process owner clock과
   registered Client pin이 binding, parser/outbound phase, last successful request, queue/count/upgrade 상태를 canonical `IncidentInput`으로
   투영한 뒤 final-address HostAdapter와 app-global publisher owner를 실제 조합한다. held Client 상태로 first/repeat를 선택하고 first의
-  terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer와 failure-site caller 6은
-  아직 후속 gate 범위이며 caller 1 green을 전체 제품 ingress 완료로 확대하지 않는다.
+  terminalization·fd close·reconnect admission, repeat의 admission 0까지 실행한다. 실제 scheduler consumer는
+  아직 후속 gate 범위이며 caller 1 green만으로 전체 제품 ingress 완료를 주장하지 않는다.
   caller 2 gate는 actual generation prepared execution이 app-process owner의 sealed timestamp receipt를 먼저 받고, registered operation
   아래 stack-local poison capture와 `PreparedManagedPoison`을 완성한 뒤 operation release 후 process publication port로 게시하는 경로를
   소유한다. response/transport failure 중간에는 first reason·fd·pending outbound·ring·admission이 0이고, 최종 publication은 caller 1과
@@ -1109,6 +1109,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   batch registry, ring/pending/admission은 mutation 0이다. batch reservation·allocator scope·RemoteAttachment callback과 public mutation
   fence가 모두 unwind된 뒤 publication port가 `SourceSite.client_read` canonical first incident, terminal fd close, reconnect admission을
   exact 1회 게시한다. error tag를 reason으로 재분류하거나 batch adapter/runtime에 publisher pointer를 저장하지 않는다.
+  caller 6 gate는 actual generation `RemoteRuntime.resize`가 pre-existing 1 MiB pending outbound를 nonblocking socket에 부분 전송한 뒤
+  `EAGAIN`으로 `outbound_write_ambiguous`를 확정하는 제품 ingress를 실행한다. execution lease 아래 caller-final handoff에는
+  `SourceSite.client_response`, pending request 1, partial outbound의 실제 nonzero offset·전체 length·남은 queue bytes를 Client-owned
+  snapshot으로 봉인하고, pre-publication 시점의 first reason·usable/fd·pending outbound·ring/pending/admission은 mutation 0이다.
+  publication scope와 execution lease, registered operation을 모두 정산한 뒤 기존 publication port가 canonical first incident,
+  terminal fd close·pending outbound 회수와 reconnect admission을 exact 1회 게시한다. write error tag 재분류나 operation 안
+  coordinator 재진입은 0이다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect

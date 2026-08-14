@@ -7433,6 +7433,14 @@ pub const AppSession = struct {
 
     /// 목록이 그리는 창. 탐색기와 같은 세 값이고 같은 계약이다 — `count`는 밀린 양까지 덮는 **올림**이라
     /// 뷰포트 바닥에 배경 띠가 남지 않는다.
+    /// 선택 강조를 내린다. **선택은 모델 인덱스**라 접기/펴기로 행 수가 바뀌면 같은 번호가 다른 파일을 가리킨다 —
+    /// 그대로 두면 방금 접은 것과 무관한 행이 "지금 보고 있는 비교"인 척 강조된다(적대적 검증 2026-08-14).
+    /// 경로로 따라가게 만들려면 선택을 인덱스가 아니라 identity로 들어야 하고, 그건 컴포넌트 이관(P1b)에서
+    /// 행 identity가 생길 때 할 일이다. 그때까지는 **틀린 강조 대신 강조 없음**을 택한다.
+    fn clearScmSelection(self: *AppSession) void {
+        self.scm_selected_row = null;
+    }
+
     fn scmDrawWindow(self: *AppSession) struct { start: usize, count: u16, origin_shift_px: u32 } {
         const row_h = self.cell_height_px;
         if (row_h == 0) return .{ .start = 0, .count = 0, .origin_shift_px = 0 };
@@ -9808,13 +9816,19 @@ pub const AppSession = struct {
                             // 섹션 헤더 클릭 = 접기/펴기. 개수는 접혀도 남아 몇 개가 숨었는지 보인다.
                             const idx = @intFromEnum(sec.section);
                             if (idx < self.scm_collapsed.len) self.scm_collapsed[idx] = !self.scm_collapsed[idx];
+                            clearScmSelection(self);
                             self.metal_dirty = true;
+                            return;
+                        },
+                        .notice => {
+                            // 상태 진술이라 누를 것이 없다 — 클릭을 소비만 하고 아무 일도 하지 않는다.
                             return;
                         },
                         .more => |more| {
                             // "모두 보기" = 그 섹션만 전부 편다(다른 섹션 상한은 그대로 — 한 섹션이 화면을 먹지 않게).
                             const idx = @intFromEnum(more.section);
                             if (idx < self.scm_expanded.len) self.scm_expanded[idx] = true;
+                            clearScmSelection(self);
                             self.metal_dirty = true;
                             return;
                         },
@@ -15321,9 +15335,8 @@ pub const AppSession = struct {
         const base = termLabel(term);
         if (term.file_entry) |entry| {
             if (entry.kind == .diff) {
-                // **기본 비교(`head_worktree`)는 꼬리표가 없다** — 목록에서 여는 것 대부분이 그것이라 전부 같은
-                // 꼬리표를 달면 구분에 쓸모가 없다. 라벨이 비었는데 `· `를 그대로 이어 붙이면 탭이
-                // `README.md · `로 끝나 무언가 잘린 것처럼 보인다(적대적 검증 2026-08-14에서 잡힌 결함).
+                // 라벨이 비면 탭이 `README.md · `로 끝나 무언가 잘린 것처럼 보인다(적대적 검증 2026-08-14).
+                // 지금은 모든 base가 이름을 갖지만, 새 base를 더할 때 이 가드가 그 실수를 막는다.
                 const label = entry.diff_base.label();
                 if (label.len == 0) return allocator.dupe(u8, base);
                 return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, label });
@@ -53964,7 +53977,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
 
     // 섹션 헤더 클릭은 접힘을 토글한다(열기가 아니다).
     session.mouse(1, x, row_y(session, 1, rect.y), 0, 0);
-    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.tracked)]);
+    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
 }
 
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.
@@ -53995,9 +54008,9 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
     try std.testing.expect(git_ops.diffTermFor(session, "/repo/b.txt", .unstaged) != null);
 }
 
-// [적대적 검증 2026-08-14] 2판의 기본 비교(`head_worktree`)는 꼬리표가 없다. 라벨을 무조건 `· `로 이어 붙이던
-// 탭 제목이 **목록에서 여는 거의 모든 diff**를 `a.txt · `로 끝나게 만들었다(무언가 잘린 것처럼 보인다).
-test "diff 탭 라벨: 기본 비교는 꼬리표 없이, 그 외 기준은 이름을 남긴다" {
+// [적대적 검증 2026-08-14] 같은 파일이 두 그룹에 동시에 있을 수 있으므로(`MM`) 탭 제목이 비교 기준으로 갈려야
+// 한다. 잠시 있던 빈 라벨 base가 탭을 `a.txt · `로 끝나게 만들었던 것을 함께 막는다(가드는 남겨 뒀다).
+test "diff 탭 라벨: 같은 파일의 두 비교가 탭에서 갈린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -54006,14 +54019,13 @@ test "diff 탭 라벨: 기본 비교는 꼬리표 없이, 그 외 기준은 이�
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
 
-    git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .head_worktree);
-    const plain = git_ops.diffTermFor(session, "/repo/a.txt", .head_worktree) orelse return error.MissingDiffTerm;
+    git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .unstaged);
+    const plain = git_ops.diffTermFor(session, "/repo/a.txt", .unstaged) orelse return error.MissingDiffTerm;
     const plain_label = try session.diffAwareLabel(allocator, plain);
     defer allocator.free(plain_label);
-    try std.testing.expect(std.mem.indexOf(u8, plain_label, "·") == null);
-    try std.testing.expect(!std.mem.endsWith(u8, plain_label, " "));
+    try std.testing.expect(std.mem.indexOf(u8, plain_label, "작업트리") != null);
 
-    // 기본이 아닌 비교는 무엇을 보고 있는지 탭에서 알 수 있어야 한다(같은 파일을 둘 다 열 수 있으므로).
+    // 같은 파일의 다른 비교는 무엇을 보고 있는지 탭에서 갈려야 한다(양쪽 그룹에 동시에 있을 수 있으므로).
     git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .staged);
     const staged = git_ops.diffTermFor(session, "/repo/a.txt", .staged) orelse return error.MissingDiffTerm;
     const staged_label = try session.diffAwareLabel(allocator, staged);

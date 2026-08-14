@@ -1,11 +1,12 @@
 //! 도크 소스 컨트롤 뷰 **변경 사항 탭의 행 모델**(L2 순수, docs/editor-surface-dock.md §3.5.2).
 //!
 //! git 출력(status + numstat)을 받아 화면에 그릴 행 목록을 만든다. 렌더는 이 결과를 그리기만 한다 — 어느 섹션에
-//! 무엇이 몇 개 드는지, 체크박스가 어떤 상태인지, 증감이 얼마인지를 결정하는 곳은 여기 하나다.
+//! 무엇이 몇 개 드는지, 행에 어떤 동작이 붙는지, 증감이 얼마인지를 결정하는 곳은 여기 하나다.
 //!
-//! **2판에서 축이 바뀌었다.** 초판은 "섹션 = 비교 기준"이라 `MM`(일부만 스테이지한) 파일이 두 섹션에 두 번 났다.
-//! 2판은 각 행에 체크박스가 붙으므로 **파일 하나 = 행 하나**여야 한다 — 같은 파일이 두 행이면 어느 체크박스가
-//! 무엇을 스테이지하는지 말할 수 없다. 그래서 섹션은 **추적 여부**만 가르고, 스테이지 여부는 행의 `stage` 상태다.
+//! **섹션은 다시 비교 기준이다**(2026-08-14 사용자 결정 2차). 스테이징을 체크박스가 아니라 **행 호버의 `+`**로
+//! 하기로 하면서, "누르면 그 행이 위 그룹으로 올라간다"가 곧 피드백이 된다. 그래서 그룹은 `스테이지된 변경`과
+//! `변경 사항` 둘이고, `MM`(일부만 스테이지한) 파일은 **양쪽에 각각** 난다 — 두 행이 서로 다른 것을 가리키므로
+//! 애매하지 않다(위 행은 커밋될 것, 아래 행은 아직 아닌 것). 추적되지 않은 파일은 `변경 사항` 안에 `U`로 든다.
 //!
 //! **할당하지 않는다.** 행은 입력 텍스트를 가리키는 슬라이스와 숫자뿐이고, 호출자가 준 `out` 배열에 채운다.
 //! rename 경로 복원만 scratch 버퍼를 쓴다(numstat이 `A => B` 한 필드로 적어 status 경로와 다르기 때문 — git_status 참고).
@@ -22,38 +23,28 @@ pub const section_count = 2;
 pub const default_section_rows: usize = 10;
 
 pub const Section = enum {
-    /// git이 아는 파일의 변경. 스테이지됐든 아니든 **한 행**이고, 스테이지 여부는 체크박스가 말한다.
-    tracked,
-    /// worktree 전용(`?` 레코드). 비교 대상이 없어 증감이 존재하지 않는다.
-    untracked,
+    /// `HEAD ↔ index` — 지금 커밋하면 들어갈 것. 행 호버의 `−`가 여기서 내린다.
+    staged,
+    /// `index ↔ 작업트리` + 추적되지 않은 파일. 행 호버의 `+`가 여기서 올린다.
+    changes,
 
-    /// 섹션 제목. 목업의 문구를 그대로 쓴다.
     pub fn title(self: Section) []const u8 {
         return switch (self) {
-            .tracked => "추적됨",
-            .untracked => "추적되지 않음",
+            .staged => "스테이지된 변경",
+            .changes => "변경 사항",
         };
     }
 };
 
-/// 행 체크박스의 상태. **권위는 git index다** — 로컬에 따로 들고 있는 값이 아니라 매번 status에서 유도한다
-/// (docs/editor-surface-dock.md §3.5.2). 누르는 순간의 낙관적 반영은 platform이 하고, 목록을 다시 읽으면
-/// index가 답을 준다.
-pub const Stage = enum {
-    /// 스테이지되지 않았다(worktree 축만 변경). 추적되지 않은 파일도 여기다.
+/// 행 호버에 뜨는 주 동작. **체크박스가 아니다** — 누르면 그 행이 다른 그룹으로 옮겨 가는 것이 피드백이다.
+pub const RowAction = enum {
+    /// `git add` — `변경 사항`의 행.
+    stage,
+    /// `git restore --staged` — `스테이지된 변경`의 행.
+    unstage,
+    /// 동작을 붙이지 않는다. 병합 충돌은 스테이지 여부의 문제가 아니라 **해결되지 않은 상태**이고, 여기에
+    /// `+`를 두면 누르는 순간 충돌 표시가 든 파일이 "해결됨"으로 커밋된다(§3.5 경계 상태표).
     none,
-    /// 전부 스테이지됐다(staged 축만 변경).
-    full,
-    /// 일부만(`MM` — 두 축 모두 변경).
-    partial,
-    /// **체크박스를 두지 않는다.** 병합 충돌은 스테이지 여부의 문제가 아니라 해결되지 않은 상태이고, 체크박스를
-    /// 두면 누르는 순간 `git add`가 돌아 충돌 표시가 든 파일이 "해결됨"으로 커밋된다(§3.5 경계 상태표).
-    conflicted,
-
-    /// 이 상태의 행이 스테이지 일괄 동작(섹션 체크박스·모두 스테이지)의 대상인가.
-    pub fn stageable(self: Stage) bool {
-        return self != .conflicted;
-    }
 };
 
 pub const FileRow = struct {
@@ -61,10 +52,11 @@ pub const FileRow = struct {
     path: []const u8,
     /// rename/copy의 원래 경로(그 외 null). 목록은 새 경로를 보여 주고 원래 경로는 보조 정보다.
     orig_path: ?[]const u8 = null,
-    /// 행 왼쪽 아이콘의 상태 문자. **`HEAD → 작업트리`를 말한다** — 행의 기본 비교와 같은 방향이어야 아이콘과
-    /// 열리는 diff가 어긋나지 않는다.
+    /// 행 오른쪽의 상태 문자. **그 행이 선 섹션의 축**을 말한다(스테이지 행은 index 축, 변경 행은 작업트리 축) —
+    /// 같은 파일이 두 행일 때 각 행이 서로 다른 글자를 갖는 것이 정상이다(`AM`처럼).
     letter: u8,
-    stage: Stage,
+    /// 호버에 뜰 동작.
+    action: RowAction,
     added: u32 = 0,
     removed: u32 = 0,
     /// numstat이 `-`를 준 파일. 숫자 대신 그 사실을 표시한다 — **0/0으로 거짓 표시하지 않는다.**
@@ -73,6 +65,8 @@ pub const FileRow = struct {
     unknown_delta: bool = false,
     /// 병합 충돌 중(해결 전). diff는 `HEAD ↔ 작업트리`로 열어 충돌 표시를 그대로 보여 준다.
     conflicted: bool = false,
+    /// 추적되지 않은 파일(`?`). 비교 대상이 없어 열면 파일 내용을 그대로 보여 준다.
+    untracked: bool = false,
     /// 하위 모듈(gitlink). **텍스트 비교가 없다** — 열면 빈 화면이 되므로 호출자가 그 사실을 말한다.
     submodule: bool = false,
 };
@@ -81,8 +75,21 @@ pub const SectionRow = struct {
     section: Section,
     /// 그 섹션의 **전체** 파일 수(접혀 있어도, 잘려 있어도 전체를 말한다).
     count: usize,
-    /// 섹션 체크박스. 스테이지할 수 있는 행이 하나도 없으면(전부 충돌) `null`이고 체크박스를 그리지 않는다.
-    stage: ?Stage,
+    /// 섹션 헤더 호버에 뜰 일괄 동작(`모두 스테이지`/`모두 언스테이지`). 대상이 하나도 없으면(전부 충돌) `.none`.
+    action: RowAction,
+};
+
+/// 목록이 **불완전하다**는 사실을 말하는 행. 누를 수 없다(컨트롤이 아니라 상태 진술이다).
+pub const Notice = enum {
+    /// git 출력이 백엔드 상한에 걸려 잘렸다 — 뒤쪽 파일은 아예 오지 않았거나 증감이 없다.
+    /// **"변경이 없다"와 구별돼야 한다**: 같은 빈 화면이지만 원인이 정반대다.
+    output_truncated,
+
+    pub fn text(self: Notice) []const u8 {
+        return switch (self) {
+            .output_truncated => "git 출력이 너무 커서 목록이 잘렸습니다",
+        };
+    }
 };
 
 pub const Row = union(enum) {
@@ -91,6 +98,7 @@ pub const Row = union(enum) {
     /// "모두 보기" 행 — 그 섹션에 **아직 안 보여 준 파일이 몇 개인지** 말한다. 누르면 그 섹션만 전부 편다.
     /// 이 행이 없으면 목록이 조용히 잘려, 사용자는 자기가 바꾼 파일이 없어졌다고 읽는다.
     more: struct { section: Section, hidden: usize },
+    notice: Notice,
 };
 
 pub const Model = struct {
@@ -98,7 +106,8 @@ pub const Model = struct {
     rows: []const Row,
     /// 변경이 하나도 없다(섹션 헤더도 안 낸다 — 빈 안내를 대신 그린다).
     empty: bool,
-    /// 요약 줄(`+N -N`)이 쓸 합계. **추적된 파일의 것만** 센다 — 추적되지 않은 파일은 비교 대상이 없어 숫자가 없다.
+    /// 요약 줄이 쓸 합계. **`HEAD ↔ 작업트리` 한 범위에서** 낸다 — 두 섹션의 numstat을 더하면 `MM` 파일이
+    /// 두 번 세어져 실제보다 부풀어 오른다.
     total_added: u32 = 0,
     total_removed: u32 = 0,
     /// 커밋 버튼을 켤 수 있나 = index에 무언가 올라가 있나. 낙관적으로 추정하지 않고 status가 말한 것만 쓴다
@@ -107,123 +116,125 @@ pub const Model = struct {
 };
 
 /// status와 numstat에서 행 목록을 만든다. **개수가 0인 섹션은 헤더도 내지 않는다**(빈 헤더가 컬럼 위쪽을
-/// 잡아먹지 않게). `out`이 모자라면 거기서 자른다 — 화면에 안 들어가는 행을 만들 이유가 없다.
+/// 잡아먹지 않게). `out`이 모자라면 마지막 줄로 "더 있다"를 말한다.
 pub fn build(
     status_text: []const u8,
-    /// `git diff --numstat HEAD`(추적된 파일의 `HEAD ↔ 작업트리` 증감). **행의 기본 비교와 같은 범위여야 한다** —
-    /// 숫자가 index 기준인데 행을 누르면 HEAD 기준 diff가 열리면, 화면의 `+3 -1`과 그 안의 줄 수가 다르다.
-    /// unborn(첫 커밋 전)은 HEAD가 없어 이 명령이 실패하므로 호출자가 `--cached` 출력을 대신 준다(그 상태에서는
-    /// 추적된 파일이 전부 index에 새로 올라간 것이라 같은 값이 나온다).
-    numstat: []const u8,
+    /// `git diff --numstat --cached` — **스테이지된 변경** 행의 증감(`HEAD ↔ index`).
+    numstat_staged: []const u8,
+    /// `git diff --numstat` — **변경 사항** 행의 증감(`index ↔ 작업트리`).
+    numstat_worktree: []const u8,
+    /// `git diff --numstat HEAD --` — **요약 줄 합계**만 여기서 낸다. 위 둘을 더하면 `MM` 파일이 두 번 세어진다.
+    /// unborn(첫 커밋 전)은 HEAD가 없어 이 명령이 실패하므로 호출자가 `--cached` 출력을 대신 준다.
+    numstat_total: []const u8,
     /// 접힌 섹션(Section 순서). 접혀 있으면 헤더만 내고 파일 행은 만들지 않는다 — **화면에 있는 것과 이 목록이
     /// 같아야** 클릭 좌표가 그린 자리와 어긋나지 않는다.
     collapsed: [section_count]bool,
     /// 그 섹션을 **전부** 보여 줄지(사용자가 "모두 보기"를 누른 상태). 안 눌렀으면 `default_section_rows`까지만.
     expanded: [section_count]bool,
+    /// git 출력이 상한에 걸려 잘렸나(백엔드가 알려 준다). **모델이 받아서 행으로 만든다** — 플래그만 세워 두면
+    /// 아무도 안 읽어서 화면은 "변경이 없다"와 같은 모습이 된다(적대적 검증 2026-08-14에서 실제로 그랬다).
+    output_truncated: bool,
     out: []Row,
     scratch: []u8,
 ) Model {
     var n: usize = 0;
-    var total_added: u32 = 0;
-    var total_removed: u32 = 0;
     var has_staged = false;
+    // 버퍼에 못 담은 파일 수와, 잘림이 **시작된** 섹션. 마지막 한 줄을 이 사실에 내주기 위해 센다.
+    var dropped: usize = 0;
+    var dropped_section: ?Section = null;
 
-    inline for (.{ Section.tracked, Section.untracked }) |section| {
-        const tally = tallyFor(status_text, section);
-        if (tally.count > 0 and n < out.len) {
-            out[n] = .{ .section = .{ .section = section, .count = tally.count, .stage = tally.stage } };
+    inline for (.{ Section.staged, Section.changes }) |section| {
+        const count = countFor(status_text, section);
+        if (section == .staged) has_staged = count > 0;
+        // **헤더조차 못 넣은 섹션이 있다**(앞 섹션이 버퍼를 다 썼다). 이게 조용한 잘림의 실제 모양이다.
+        if (count > 0 and n >= out.len) {
+            dropped += count;
+            if (dropped_section == null) dropped_section = section;
+        }
+        if (count > 0 and n < out.len) {
+            out[n] = .{ .section = .{ .section = section, .count = count, .action = sectionAction(status_text, section) } };
             n += 1;
             var it = git_status.iterate(status_text);
             var shown: usize = 0;
-            const limit = if (expanded[@intFromEnum(section)]) tally.count else @min(tally.count, default_section_rows);
+            const limit = if (expanded[@intFromEnum(section)]) count else @min(count, default_section_rows);
             // 접힌 섹션은 헤더만 낸다(반복문을 아예 안 돈다 — inline for 안이라 continue를 쓰지 않는다).
             while (!collapsed[@intFromEnum(section)]) {
                 if (shown >= limit) break;
                 const entry = it.next() orelse break;
                 if (n >= out.len) break;
-                if (sectionOf(entry) != section) continue;
+                if (!belongs(entry, section)) continue;
                 var row: FileRow = .{
                     .section = section,
                     .path = entry.path,
                     .orig_path = entry.orig_path,
-                    .letter = rowLetter(entry),
-                    .stage = stageOf(entry),
+                    .letter = rowLetter(entry, section),
+                    .action = rowAction(entry, section),
                     .conflicted = entry.isConflicted(),
+                    .untracked = entry.isUntracked(),
                     .submodule = entry.submodule,
                 };
                 // 추적되지 않은 파일은 비교 대상이 없어 증감이 존재하지 않는다 — 숫자 자리를 비운다.
                 // **충돌도 마찬가지다**: numstat이 같은 경로에 여러 줄(스테이지별)을 내는데 그 첫 줄이 `0 0`이라
                 // 그대로 쓰면 "안 바뀐 파일"로 보인다(실측). 하위 모듈은 커밋 포인터라 줄 수가 의미가 없다.
-                if (section == .untracked or entry.isConflicted() or entry.submodule) {
+                if (entry.isUntracked() or entry.isConflicted() or entry.submodule) {
                     row.unknown_delta = true;
-                } else if (findDelta(numstat, entry.path, scratch)) |d| {
-                    row.added = d.added;
-                    row.removed = d.removed;
-                    row.binary = d.binary;
-                } else row.unknown_delta = true;
+                } else {
+                    // **섹션마다 다른 numstat을 본다** — 행이 선 그룹이 곧 비교 기준이라, 숫자도 그 범위여야 한다.
+                    const numstat = if (section == .staged) numstat_staged else numstat_worktree;
+                    if (findDelta(numstat, entry.path, scratch)) |d| {
+                        row.added = d.added;
+                        row.removed = d.removed;
+                        row.binary = d.binary;
+                    } else row.unknown_delta = true;
+                }
                 out[n] = .{ .file = row };
                 n += 1;
                 shown += 1;
             }
             // 남은 게 있으면 그 사실을 행으로 말한다(조용히 자르지 않는다).
-            if (!collapsed[@intFromEnum(section)] and shown < tally.count and n < out.len) {
-                out[n] = .{ .more = .{ .section = section, .hidden = tally.count - shown } };
-                n += 1;
+            if (!collapsed[@intFromEnum(section)] and shown < count) {
+                if (n < out.len) {
+                    out[n] = .{ .more = .{ .section = section, .hidden = count - shown } };
+                    n += 1;
+                } else {
+                    dropped += count - shown;
+                    if (dropped_section == null) dropped_section = section;
+                }
             }
         }
-        if (section == .tracked) has_staged = tally.staged_any;
     }
 
-    // **합계는 화면에 보이는 행이 아니라 numstat 전체에서 낸다.** 상한(10행)이나 접힘 때문에 `+N -N`이 달라지면
-    // 사용자가 커밋 직전에 보는 숫자가 화면 상태에 따라 흔들린다.
-    const totals = sumDeltas(numstat);
-    total_added = totals.added;
-    total_removed = totals.removed;
+    // **버퍼 상한에 걸렸으면 마지막 한 줄로 그 사실을 말한다.** 조용히 끝내면 변경이 수백 개인 저장소에서
+    // 사용자는 자기가 바꾼 파일이 없어졌다고 읽는다 — 파일(또는 헤더) 한 줄을 잃는 편이 "없다"고 거짓말하는
+    // 것보다 낫다. 자리를 내주는 그 행도 숨은 수에 함께 센다.
+    if (dropped > 0 and n > 0) {
+        const extra: usize = switch (out[n - 1]) {
+            .file => 1, // 그 파일 행을 자리로 내준다
+            .section => 0, // 헤더만 있던 섹션 — 그 파일들은 이미 dropped에 들어 있다
+            .more => |m| m.hidden, // 이미 세고 있던 수를 흡수한다
+            .notice => 0, // 잘림 알림은 아래에서 마지막에 얹는다
+        };
+        out[n - 1] = .{ .more = .{ .section = dropped_section.?, .hidden = dropped + extra } };
+    }
 
+    // **잘림은 마지막 줄을 이긴다.** 둘 다 "전부가 아니다"를 말하지만, 출력 잘림은 데이터 자체가 없다는 뜻이라
+    // 숨은 개수보다 먼저 알아야 한다(그 개수마저 못 믿는 상태다).
+    if (output_truncated) {
+        if (n < out.len) {
+            out[n] = .{ .notice = .output_truncated };
+            n += 1;
+        } else if (n > 0) out[n - 1] = .{ .notice = .output_truncated };
+    }
+
+    const totals = sumDeltas(numstat_total);
     return .{
         .head = git_status.parseHead(status_text),
         .rows = out[0..n],
         .empty = n == 0,
-        .total_added = total_added,
-        .total_removed = total_removed,
+        .total_added = totals.added,
+        .total_removed = totals.removed,
         .has_staged = has_staged,
     };
-}
-
-const Tally = struct {
-    count: usize = 0,
-    /// 섹션 체크박스 상태(스테이지 가능한 행이 없으면 null).
-    stage: ?Stage = null,
-    /// index에 올라간 행이 하나라도 있나(커밋 버튼 활성 판정).
-    staged_any: bool = false,
-};
-
-/// 섹션 하나의 개수·체크박스·합계를 **한 번의 순회로** 낸다. 셋을 따로 세면 같은 판정을 세 번 적게 되고,
-/// 그중 하나만 고쳐지는 어긋남이 생긴다.
-fn tallyFor(status_text: []const u8, section: Section) Tally {
-    var tally: Tally = .{};
-    var stageable: usize = 0;
-    var staged_full: usize = 0;
-    var it = git_status.iterate(status_text);
-    while (it.next()) |entry| {
-        if (sectionOf(entry) != section) continue;
-        tally.count += 1;
-        const stage = stageOf(entry);
-        if (!stage.stageable()) continue;
-        stageable += 1;
-        switch (stage) {
-            .full => {
-                staged_full += 1;
-                tally.staged_any = true;
-            },
-            .partial => tally.staged_any = true,
-            .none, .conflicted => {},
-        }
-    }
-    if (stageable > 0) {
-        tally.stage = if (staged_full == stageable) .full else if (tally.staged_any) .partial else .none;
-    }
-    return tally;
 }
 
 /// 합계는 numstat을 그대로 접는다 — status를 다시 훑지 않는다(같은 파일이 numstat에 없을 수 있고, 그때는
@@ -240,32 +251,54 @@ fn sumDeltas(numstat: []const u8) struct { added: u32, removed: u32 } {
     return .{ .added = added, .removed = removed };
 }
 
-fn sectionOf(entry: git_status.Entry) Section {
-    return if (entry.isUntracked()) .untracked else .tracked;
+/// 그 항목이 이 섹션에 드는가. **한 파일이 두 섹션에 동시에 들 수 있다**(`MM`) — git이 그렇게 보고하고,
+/// 사용자도 "일부만 스테이지한 파일"을 양쪽에서 봐야 한다(위 행은 커밋될 것, 아래 행은 아직 아닌 것).
+fn belongs(entry: git_status.Entry, section: Section) bool {
+    if (entry.isConflicted()) return section == .changes; // 충돌은 스테이지된 것이 아니라 해결 안 된 상태다
+    return switch (section) {
+        .staged => entry.staged != .unchanged and entry.staged != .untracked,
+        // 추적되지 않은 파일도 여기 든다(VS Code와 같은 묶음 — 별도 그룹을 만들지 않는다).
+        .changes => entry.worktree != .unchanged,
+    };
 }
 
-/// 행의 체크박스 상태(docs/editor-surface-dock.md §3.5.2 표).
-fn stageOf(entry: git_status.Entry) Stage {
-    if (entry.isConflicted()) return .conflicted;
-    if (entry.isUntracked()) return .none;
-    const staged = entry.staged != .unchanged and entry.staged != .untracked;
-    const worktree = entry.worktree != .unchanged and entry.worktree != .untracked;
-    if (staged and worktree) return .partial;
-    if (staged) return .full;
+fn countFor(status_text: []const u8, section: Section) usize {
+    var it = git_status.iterate(status_text);
+    var count: usize = 0;
+    while (it.next()) |entry| {
+        if (belongs(entry, section)) count += 1;
+    }
+    return count;
+}
+
+/// 섹션 헤더의 일괄 동작. 그 섹션에 **동작을 붙일 수 있는 행이 하나도 없으면**(전부 충돌) `.none`이다 —
+/// 눌러도 아무 일 없는 컨트롤을 두지 않는다.
+fn sectionAction(status_text: []const u8, section: Section) RowAction {
+    var it = git_status.iterate(status_text);
+    while (it.next()) |entry| {
+        if (!belongs(entry, section)) continue;
+        const action = rowAction(entry, section);
+        if (action != .none) return action;
+    }
     return .none;
 }
 
-/// 행 아이콘의 상태 문자. 행의 기본 비교가 `HEAD ↔ 작업트리`이므로 **HEAD에서 무슨 일이 일어났는지**를 말한다.
-fn rowLetter(entry: git_status.Entry) u8 {
+fn rowAction(entry: git_status.Entry, section: Section) RowAction {
+    if (entry.isConflicted()) return .none;
+    return switch (section) {
+        .staged => .unstage,
+        .changes => .stage,
+    };
+}
+
+/// 행 오른쪽의 상태 문자. **그 행이 선 섹션의 축**을 쓴다 — 같은 파일이 두 행일 때 각각 다른 글자가 나오는 것이
+/// 정상이다(`AM`이면 위 행은 `A`, 아래 행은 `M`).
+fn rowLetter(entry: git_status.Entry, section: Section) u8 {
     if (entry.isConflicted()) return 'U';
-    if (entry.isUntracked()) return 'U';
-    if (entry.staged != .unchanged and entry.staged != .untracked) {
-        // 스테이지에 새로 올린 뒤 작업트리에서 지운 파일은 HEAD 기준으로는 **없는 파일**이다 — 'A'로 적으면
-        // 목록에는 추가로 보이는데 여는 diff는 삭제가 된다.
-        if (entry.staged == .added and entry.worktree == .deleted) return 'D';
-        return entry.staged.letter();
-    }
-    return entry.worktree.letter();
+    return switch (section) {
+        .staged => entry.staged.letter(),
+        .changes => entry.worktree.letter(),
+    };
 }
 
 /// numstat에서 그 경로의 증감을 찾는다. rename은 numstat 경로가 status 경로와 달라(`A => B`) 복원해 대조한다.
@@ -289,209 +322,181 @@ const fixture_status =
     "1 MM N... 100644 100644 100644 9aff573 b840a0d keep.txt\n" ++
     "2 R. N... 100644 100644 100644 de98044 de98044 R100 renamed.txt\tgone.txt\n" ++
     "? untracked.txt\n";
-// `git diff --numstat --find-renames --no-ext-diff --no-textconv HEAD --` (실측).
-const fixture_numstat = "-\t-\tblob.bin\n2\t0\tkeep.txt\n0\t0\tgone.txt => renamed.txt\n";
-// **같은 시점의 `--cached` 출력**(실측). `keep.txt`가 `+2`가 아니라 `+1`이다 — 범위가 다르면 숫자가 다르다는
-// 직접 증거이고, 목록이 index 기준 숫자를 쓰면 화면과 열리는 diff가 어긋난다는 뜻이다(§3.5.2).
-const fixture_numstat_cached = "-\t-\tblob.bin\n1\t0\tkeep.txt\n0\t0\tgone.txt => renamed.txt\n";
+// `git diff --numstat --cached` (실측) — 스테이지된 변경 행의 증감.
+const fixture_staged = "-\t-\tblob.bin\n1\t0\tkeep.txt\n0\t0\tgone.txt => renamed.txt\n";
+// `git diff --numstat` (실측) — 변경 사항 행의 증감. 셋 다 **같은 저장소·같은 시점**에서 받았다
+// (2026-08-14 — 적대적 검증에서 손으로 지어낸 fixture가 한 번 걸렸기에, 세 출력의 출처를 여기 못박는다).
+const fixture_worktree = "-\t-\tblob.bin\n1\t0\tkeep.txt\n";
+// `git diff --numstat … HEAD --` (실측) — 요약 합계만 여기서 낸다.
+const fixture_total = "-\t-\tblob.bin\n2\t0\tkeep.txt\n0\t0\tgone.txt => renamed.txt\n";
 
-test "2섹션: 파일 하나가 한 행이고 스테이지 여부는 체크박스가 말한다" {
+fn buildFixture(out: []Row, scratch: []u8) Model {
+    return build(fixture_status, fixture_staged, fixture_worktree, fixture_total, .{false} ** section_count, .{true} ** section_count, false, out, scratch);
+}
+
+test "섹션은 비교 기준이고 MM 파일은 양쪽에 각각 난다" {
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_numstat, .{false} ** section_count, .{true} ** section_count, &out, &scratch);
+    const model = buildFixture(&out, &scratch);
     try testing.expect(!model.empty);
     try testing.expectEqualStrings("main", model.head.branch.?);
 
-    // 추적됨 3개(blob.bin·keep.txt·renamed.txt) → 헤더 + 파일 3행. **MM 파일이 두 번 나지 않는다**(초판과의 차이).
-    try testing.expectEqual(Section.tracked, model.rows[0].section.section);
+    // 스테이지된 변경 3개(blob.bin·keep.txt·renamed.txt) — 헤더 동작은 `−`(언스테이지)다.
+    try testing.expectEqual(Section.staged, model.rows[0].section.section);
     try testing.expectEqual(@as(usize, 3), model.rows[0].section.count);
-    // 부분 스테이지가 섞여 있으므로 섹션 체크박스는 부분이다.
-    try testing.expectEqual(Stage.partial, model.rows[0].section.stage.?);
-
+    try testing.expectEqual(RowAction.unstage, model.rows[0].section.action);
     try testing.expect(model.rows[1].file.binary); // blob.bin — 0/0이 아니라 binary
-    try testing.expectEqual(@as(u8, 'M'), model.rows[1].file.letter);
-    try testing.expectEqual(Stage.partial, model.rows[1].file.stage);
-
-    try testing.expectEqualStrings("keep.txt", model.rows[2].file.path);
-    try testing.expectEqual(Stage.partial, model.rows[2].file.stage); // MM = 일부만 스테이지
-    try testing.expectEqual(@as(u32, 2), model.rows[2].file.added); // HEAD 기준 값이 붙는다(실측)
-
-    // rename은 numstat 경로가 `gone.txt => renamed.txt`라 복원해야 붙는다.
+    try testing.expectEqual(RowAction.unstage, model.rows[1].file.action);
+    try testing.expectEqual(@as(u32, 1), model.rows[2].file.added); // keep.txt: index 기준(실측 --cached)
     try testing.expectEqualStrings("renamed.txt", model.rows[3].file.path);
-    try testing.expect(!model.rows[3].file.unknown_delta);
     try testing.expectEqualStrings("gone.txt", model.rows[3].file.orig_path.?);
 
-    // 추적되지 않음은 비교 대상이 없어 숫자를 비우고, 체크박스는 비어 있다.
-    try testing.expectEqual(Section.untracked, model.rows[4].section.section);
-    try testing.expectEqual(Stage.none, model.rows[4].section.stage.?);
-    try testing.expect(model.rows[5].file.unknown_delta);
-    try testing.expectEqual(@as(u8, 'U'), model.rows[5].file.letter);
-    try testing.expectEqual(Stage.none, model.rows[5].file.stage);
-    try testing.expectEqual(@as(usize, 6), model.rows.len);
+    // 변경 사항 3개(blob.bin·keep.txt·untracked.txt) — **같은 파일이 위에도 있다**(MM).
+    try testing.expectEqual(Section.changes, model.rows[4].section.section);
+    try testing.expectEqual(@as(usize, 3), model.rows[4].section.count);
+    try testing.expectEqual(RowAction.stage, model.rows[4].section.action);
+    try testing.expectEqualStrings("blob.bin", model.rows[5].file.path);
+    try testing.expectEqual(RowAction.stage, model.rows[5].file.action);
+    try testing.expectEqual(@as(u32, 1), model.rows[6].file.added); // keep.txt: 작업트리 기준(실측)
 
-    // 커밋 버튼 판정: index에 올라간 것이 있다.
+    // 추적되지 않은 파일은 별도 그룹이 아니라 변경 사항 안에 `U`로 든다(VS Code와 같은 묶음).
+    try testing.expectEqualStrings("untracked.txt", model.rows[7].file.path);
+    try testing.expectEqual(@as(u8, 'U'), model.rows[7].file.letter);
+    try testing.expect(model.rows[7].file.untracked);
+    try testing.expect(model.rows[7].file.unknown_delta); // 비교 대상이 없어 숫자가 없다
+    try testing.expectEqual(@as(usize, 8), model.rows.len);
+
     try testing.expect(model.has_staged);
-    // 합계는 binary를 빼고 센다(줄 수가 없는 파일을 0으로 세지 않는다).
+    // 합계는 **한 범위**에서 낸다 — 두 numstat을 더하면 keep.txt가 1+1=2로 두 번 세어져 실제(2)와 우연히
+    // 같아 보이지만, 스테이지·작업트리 변경이 다른 줄이면 곧바로 어긋난다.
     try testing.expectEqual(@as(u32, 2), model.total_added);
     try testing.expectEqual(@as(u32, 0), model.total_removed);
 }
 
-test "증감의 범위가 다르면 숫자가 다르다(실측 두 출력)" {
-    // 같은 시점의 `HEAD` 범위와 `--cached` 범위를 나란히 넣으면 `keep.txt`가 `+2`와 `+1`로 갈린다. 목록이
-    // index 기준 숫자를 쓰면 화면의 `+N`과 행을 눌러 여는 `HEAD ↔ 작업트리` diff의 줄 수가 어긋난다는 뜻이다.
-    // 그래서 폴백은 "출력이 비었나"가 아니라 **unborn인가**로만 갈라야 한다(git.zig buildScmModel).
-    var out: [32]Row = undefined;
-    var scratch: [256]u8 = undefined;
-    const head_range = build(fixture_status, fixture_numstat, .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(@as(u32, 2), head_range.rows[2].file.added);
-
-    var out2: [32]Row = undefined;
-    const index_range = build(fixture_status, fixture_numstat_cached, .{false} ** section_count, .{true} ** section_count, &out2, &scratch);
-    try testing.expectEqual(@as(u32, 1), index_range.rows[2].file.added);
+test "행의 상태 문자는 그 행이 선 섹션의 축을 말한다" {
+    // `AM` — index에는 새 파일, 작업트리에는 그 뒤 수정. 위 행은 `A`, 아래 행은 `M`이어야 한다.
+    var out: [8]Row = undefined;
+    var scratch: [64]u8 = undefined;
+    const model = build("# branch.head main\n1 AM N... 1 2 3 a b f.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(@as(u8, 'A'), model.rows[1].file.letter);
+    try testing.expectEqual(Section.staged, model.rows[1].file.section);
+    try testing.expectEqual(@as(u8, 'M'), model.rows[3].file.letter);
+    try testing.expectEqual(Section.changes, model.rows[3].file.section);
 }
 
-test "합계는 화면에 보이는 행이 아니라 저장소 전체에서 낸다" {
-    // 상한(10행)이나 접힘 때문에 `+N -N`이 흔들리면 커밋 직전에 보는 숫자가 화면 상태에 따라 달라진다.
-    var out: [64]Row = undefined;
+test "충돌에는 동작을 붙이지 않고 변경 사항에만 든다" {
+    // 충돌은 스테이지 여부의 문제가 아니라 해결되지 않은 상태다. `+`를 두면 누르는 순간 충돌 표시가 든 파일이
+    // "해결됨"으로 커밋된다.
+    var out: [16]Row = undefined;
     var scratch: [256]u8 = undefined;
-    var status: std.ArrayList(u8) = .empty;
-    defer status.deinit(testing.allocator);
-    var numstat: std.ArrayList(u8) = .empty;
-    defer numstat.deinit(testing.allocator);
-    try status.appendSlice(testing.allocator, "# branch.head main\n");
-    for (0..25) |i| {
-        var line: [64]u8 = undefined;
-        try status.appendSlice(testing.allocator, try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b f{d}.txt\n", .{i}));
-        try numstat.appendSlice(testing.allocator, try std.fmt.bufPrint(&line, "2\t1\tf{d}.txt\n", .{i}));
-    }
+    const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n";
+    const model = build(status, "", "0\t0\tf.txt\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(Section.changes, model.rows[0].section.section); // 스테이지 그룹에는 안 든다
+    try testing.expectEqual(RowAction.none, model.rows[0].section.action); // 일괄 동작도 없다
+    try testing.expect(model.rows[1].file.conflicted);
+    try testing.expectEqual(RowAction.none, model.rows[1].file.action);
+    try testing.expect(model.rows[1].file.unknown_delta); // `+0 -0`을 쓰지 않는다
+    try testing.expectEqual(@as(u8, 'U'), model.rows[1].file.letter);
+}
 
-    const capped = build(status.items, numstat.items, .{false} ** section_count, .{false} ** section_count, &out, &scratch);
-    // 헤더 + 상한만큼의 파일 + "모두 보기" 한 줄.
-    try testing.expectEqual(default_section_rows + 2, capped.rows.len);
-    try testing.expectEqual(@as(usize, 25), capped.rows[0].section.count); // 개수는 전체를 말한다
-    try testing.expectEqual(@as(u32, 50), capped.total_added); // 25개 × +2 — 화면에 10개만 보여도 합계는 전체
-    try testing.expectEqual(@as(u32, 25), capped.total_removed);
-    const more = capped.rows[capped.rows.len - 1].more;
-    try testing.expectEqual(Section.tracked, more.section);
-    try testing.expectEqual(@as(usize, 25 - default_section_rows), more.hidden);
-    try testing.expect(!capped.has_staged); // 전부 작업트리 변경뿐이라 커밋할 것이 없다
+test "하위 모듈은 숫자를 비운다(커밋 포인터라 줄 수가 의미 없다)" {
+    var out: [16]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const model = build("# branch.head main\n1 AM S.M. 000000 160000 160000 000 0b4 vendor\n", "1\t0\tvendor\n", "1\t0\tvendor\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    var saw = false;
+    for (model.rows) |row| switch (row) {
+        .file => |f| if (f.submodule) {
+            saw = true;
+            try testing.expect(f.unknown_delta);
+        },
+        .section, .more, .notice => {},
+    };
+    try testing.expect(saw);
+}
 
-    // 접어도 합계는 그대로다.
-    const folded = build(status.items, numstat.items, .{true} ** section_count, .{false} ** section_count, &out, &scratch);
-    try testing.expectEqual(@as(u32, 50), folded.total_added);
-    try testing.expectEqual(@as(usize, 1), folded.rows.len);
+test "출력이 잘리면 그 사실을 행으로 말한다(빈 화면과 구별한다)" {
+    // 백엔드가 상한에 걸려 출력을 자르면 뒤쪽 파일은 아예 오지 않는다. 플래그만 세워 두면 화면은 "변경이 없다"와
+    // 똑같이 보이는데 원인은 정반대다 — 적대적 검증에서 `Result.truncated`에 **소비자가 하나도 없다**는 것이 드러나
+    // 이 행을 만들었다.
+    var out: [16]Row = undefined;
+    var scratch: [64]u8 = undefined;
+    const model = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", .{false} ** section_count, .{true} ** section_count, true, &out, &scratch);
+    try testing.expectEqual(Notice.output_truncated, model.rows[model.rows.len - 1].notice);
+    try testing.expect(model.rows[0] == .section); // 앞선 목록은 그대로 남는다(있는 것까지는 보여 준다)
+
+    const clean = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    for (clean.rows) |row| try testing.expect(row != .notice);
 }
 
 test "개수가 0인 섹션은 헤더도 내지 않는다" {
     var out: [16]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n? only.txt\n", "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(@as(usize, 2), model.rows.len); // 추적되지 않음 헤더 + 1행뿐
-    try testing.expectEqual(Section.untracked, model.rows[0].section.section);
+    const model = build("# branch.head main\n? only.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(@as(usize, 2), model.rows.len); // 변경 사항 헤더 + 1행뿐
+    try testing.expectEqual(Section.changes, model.rows[0].section.section);
+    try testing.expect(!model.has_staged); // 커밋할 것이 없다
 }
 
 test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
     var out: [8]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n", "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
+    const model = build("# branch.head main\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
     try testing.expect(model.empty);
     try testing.expectEqual(@as(usize, 0), model.rows.len);
     try testing.expectEqualStrings("main", model.head.branch.?);
 }
 
-test "out이 모자라면 거기서 자른다(화면 밖 행을 만들지 않는다)" {
+test "out이 모자라면 마지막 줄로 '더 있다'를 말한다(조용히 자르지 않는다)" {
     var out: [2]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_numstat, .{false} ** section_count, .{true} ** section_count, &out, &scratch);
+    const model = buildFixture(&out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len);
-    try testing.expectEqual(Section.tracked, model.rows[0].section.section);
+    try testing.expectEqual(Section.staged, model.rows[0].section.section);
+    // 스테이지 3 + 변경 3 = 6개 가운데 화면에 남은 파일 행이 0개다(자리를 내준 한 줄까지 센다).
+    try testing.expectEqual(@as(usize, 6), model.rows[1].more.hidden);
+
+    // 자리가 충분하면 이 행이 아예 안 나온다(눌러도 아무 일 없는 컨트롤을 두지 않는다).
+    var full: [16]Row = undefined;
+    const complete = buildFixture(&full, &scratch);
+    for (complete.rows) |row| try testing.expect(row != .more);
 }
 
 test "numstat에 없는 파일은 숫자를 비운다(0으로 채우지 않는다)" {
     var out: [8]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
+    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
     try testing.expect(model.rows[1].file.unknown_delta);
     try testing.expectEqual(@as(u32, 0), model.rows[1].file.added);
 }
 
-test "접힌 섹션은 헤더만 내고 개수·체크박스는 그대로 보여 준다" {
+test "접힌 섹션은 헤더만 내고 개수·일괄 동작은 그대로 보여 준다" {
     var collapsed = [_]bool{false} ** section_count;
-    collapsed[@intFromEnum(Section.tracked)] = true;
+    collapsed[@intFromEnum(Section.staged)] = true;
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_numstat, collapsed, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(Section.tracked, model.rows[0].section.section);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, collapsed, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(Section.staged, model.rows[0].section.section);
     try testing.expectEqual(@as(usize, 3), model.rows[0].section.count); // 개수는 접혀도 그대로
-    try testing.expectEqual(Stage.partial, model.rows[0].section.stage.?); // 체크박스도 그대로(눌러서 일괄 스테이지)
-    try testing.expectEqual(Section.untracked, model.rows[1].section.section); // 바로 다음 섹션이 온다
+    try testing.expectEqual(RowAction.unstage, model.rows[0].section.action); // 접어도 일괄 동작은 남는다
+    try testing.expectEqual(Section.changes, model.rows[1].section.section); // 바로 다음 섹션이 온다
 
-    // 전부 접으면 헤더 두 줄만 남는다.
-    const all = build(fixture_status, fixture_numstat, .{true} ** section_count, .{true} ** section_count, &out, &scratch);
+    const all = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, .{true} ** section_count, .{true} ** section_count, false, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), all.rows.len);
     try testing.expect(!all.empty); // 변경이 없는 것과 접은 것은 다르다
 }
 
-test "충돌은 체크박스가 없고, 하위 모듈은 숫자를 비운다" {
-    var out: [16]Row = undefined;
+test "섹션은 기본 상한까지만 보여 주고 남은 개수를 말한다" {
+    var status: std.ArrayList(u8) = .empty;
+    defer status.deinit(testing.allocator);
+    try status.appendSlice(testing.allocator, "# branch.head main\n");
+    for (0..25) |i| {
+        var line: [64]u8 = undefined;
+        try status.appendSlice(testing.allocator, try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b f{d}.txt\n", .{i}));
+    }
+    var out: [64]Row = undefined;
     var scratch: [256]u8 = undefined;
-    // 실측: 충돌 파일은 numstat이 같은 경로에 두 줄을 내고 첫 줄이 `0 0`이다.
-    const status = "# branch.head main\n" ++
-        "u UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n" ++
-        "1 AM S.M. 000000 160000 160000 000 0b4 vendor\n";
-    const numstat = "0\t0\tf.txt\n4\t0\tf.txt\n1\t0\tvendor\n";
-    const model = build(status, numstat, .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-
-    var saw_conflict = false;
-    var saw_submodule = false;
-    for (model.rows) |row| switch (row) {
-        .file => |f| {
-            if (f.conflicted) {
-                saw_conflict = true;
-                try testing.expectEqual(Section.tracked, f.section); // 2섹션 모델에서는 한 행이다
-                try testing.expectEqual(Stage.conflicted, f.stage); // 체크박스를 그리지 않는다
-                try testing.expect(!f.stage.stageable()); // 일괄 스테이지 대상도 아니다
-                try testing.expect(f.unknown_delta); // `+0 -0`을 쓰지 않는다
-                try testing.expectEqual(@as(u8, 'U'), f.letter);
-            }
-            if (f.submodule) {
-                saw_submodule = true;
-                try testing.expect(f.unknown_delta);
-            }
-        },
-        .section, .more => {},
-    };
-    try testing.expect(saw_conflict);
-    try testing.expect(saw_submodule);
-}
-
-test "섹션 체크박스: 전부 스테이지면 full, 하나도 없으면 none, 충돌뿐이면 아예 없다" {
-    var out: [16]Row = undefined;
-    var scratch: [256]u8 = undefined;
-
-    const all_staged = "# branch.head main\n1 M. N... 1 2 3 a b x.txt\n1 A. N... 1 2 3 a b y.txt\n";
-    const full = build(all_staged, "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(Stage.full, full.rows[0].section.stage.?);
-    try testing.expect(full.has_staged);
-
-    const none_staged = "# branch.head main\n1 .M N... 1 2 3 a b x.txt\n";
-    const none = build(none_staged, "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(Stage.none, none.rows[0].section.stage.?);
-    try testing.expect(!none.has_staged);
-
-    // 스테이지할 수 있는 행이 하나도 없으면 섹션 체크박스를 그리지 않는다(눌러도 아무 일 없는 컨트롤을 두지 않는다).
-    const only_conflict = "# branch.head main\nu UU N... 1 1 1 1 a b c f.txt\n";
-    const conflict = build(only_conflict, "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expect(conflict.rows[0].section.stage == null);
-    try testing.expect(!conflict.has_staged);
-}
-
-test "스테이지 후 지운 파일은 HEAD 기준으로 삭제다" {
-    // `AD` — index에는 새로 올렸는데 작업트리에서 지웠다. 행의 기본 비교가 HEAD↔작업트리이므로 'A'로 적으면
-    // 목록은 추가로 보이는데 여는 diff는 삭제가 된다.
-    var out: [8]Row = undefined;
-    var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n1 AD N... 1 2 3 a b gone.txt\n", "", .{false} ** section_count, .{true} ** section_count, &out, &scratch);
-    try testing.expectEqual(@as(u8, 'D'), model.rows[1].file.letter);
-    try testing.expectEqual(Stage.partial, model.rows[1].file.stage);
+    const capped = build(status.items, "", "", "", .{false} ** section_count, .{false} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(default_section_rows + 2, capped.rows.len); // 헤더 + 10행 + "모두 보기"
+    try testing.expectEqual(@as(usize, 25), capped.rows[0].section.count);
+    try testing.expectEqual(@as(usize, 25 - default_section_rows), capped.rows[capped.rows.len - 1].more.hidden);
 }

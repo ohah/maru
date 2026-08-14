@@ -1171,7 +1171,25 @@ pub export fn maru_mobile_missing_clear() void {
     miss_n = 0;
 }
 
+/// **눈에 보이는 것이 없는 format 문자**(Cf). 코어는 grapheme cluster mode(DECSET 2027) 합의가
+/// 없으면 이것들을 제 셀에 담는다 — 그건 코어의 계약이고 여기서 바꾸지 않는다. 다만 **굽는 것은
+/// 다른 문제**다: host 에게 미스로 올리면 CoreText·Canvas 가 빈 글리프를 굽고 그것이 아틀라스
+/// 슬롯(512칸)을 영구히 차지한다. 실측에서 `👨‍👩‍👧` 한 줄이 U+200D 를 미스로 두 번 올렸다.
+///
+/// 안 굽고 **미스에도 안 올린다**. 미스에 올린 채 안 구우면 매 프레임 다시 올라와 목록이 찬다.
+fn isZeroWidthFormat(cp: u21) bool {
+    return switch (cp) {
+        0x200B...0x200F, // ZWSP·ZWNJ·ZWJ·LRM·RLM
+        0x2028...0x202E, // 줄/문단 분리자·양방향 제어
+        0x2060...0x2064, // word joiner·invisible operators
+        0xFEFF, // ZWNBSP(BOM)
+        => true,
+        else => false,
+    };
+}
+
 fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color: bool = false } {
+    if (isZeroWidthFormat(cp)) return null;
     const key = atlasKey(cp, style);
     // **컬러 글자는 컬러 등록부에서 찾는다.** 두 아틀라스가 슬롯 번호를 각자 세므로, 글자
     // 아틀라스에서 찾으면 엉뚱한 슬롯을 가리킨다.
@@ -1210,6 +1228,9 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
     var view = std.unicode.Utf8View.init(text) catch return;
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
+        // 0폭 format 문자는 **진행도 안 시킨다** — 폴백 advance(`draw_w/2`)를 태우면 보이지 않는
+        // 글자가 자간을 벌린다.
+        if (isZeroWidthFormat(cp)) continue;
         const cell = atlasCell(cp, 0);
         // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).
         const adv_px: i32 = if (cell) |c|

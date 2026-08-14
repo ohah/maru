@@ -93,6 +93,16 @@ pub const ColorRole = enum {
     /// layer owns the conservative fallback instead of leaking literal RGB into a component.
     danger_bg,
     danger_fg,
+    /// git 상태 색(소스 컨트롤 목록의 상태 문자·아이콘). **`danger_*`와 같은 규율**로 이 층이 보수적
+    /// 폴백을 소유한다 — `ThemeColors`에 semantic 입력(성공/경고)이 아직 없기 때문이고, 생기면 이
+    /// 매핑만 바뀐다(컴포넌트 코드는 역할만 읽으므로 불변).
+    ///
+    /// **역할이 셋인 이유**: 사용자가 목록을 훑을 때 가르는 것은 "고친 것 / 새로 생긴 것 / 없어진 것"
+    /// 셋이다. 추적되지 않은 파일(`U`)은 "새로 생긴 것"이라 `git_added_fg`를 함께 쓴다(VS Code 관례).
+    /// **색만으로 구분하지 않는다** — 상태 문자가 함께 있고, 색은 그 글자를 빨리 찾게 돕는 보조다.
+    git_modified_fg,
+    git_added_fg,
+    git_deleted_fg,
     /// **터미널 본문 배경.** chrome 표면(`surface_bg` — 사이드바·도크)과 **다른 색**이고, 그 차이가
     /// 의미다: 이 색이 칠해진 자리는 "셸/문서 내용이 사는 곳"이다.
     ///
@@ -235,6 +245,13 @@ pub const Tokens = struct {
         // replace this mapping once, without changing Card variants or Metal lowering.
         palette.set(.danger_bg, .{ .r = 176, .g = 52, .b = 60 });
         palette.set(.danger_fg, .{ .r = 255, .g = 255, .b = 255 });
+        // 고친 것은 **테마 accent**를 쓴다 — 목록에서 가장 흔한 상태이고, 창 전체의 시그니처 색과 같은
+        // 계열이어야 도크만 남의 팔레트로 보이지 않는다(VS Code도 M을 노랑/앰버 계열로 둔다).
+        palette.set(.git_modified_fg, theme.accent);
+        // 새로 생긴 것·없어진 것은 테마에 대응 입력이 없어 보수적 폴백을 둔다(danger_*와 같은 자리).
+        // 어두운 배경·밝은 배경 양쪽에서 읽히도록 중간 명도를 고른다.
+        palette.set(.git_added_fg, .{ .r = 87, .g = 166, .b = 74 });
+        palette.set(.git_deleted_fg, .{ .r = 199, .g = 84, .b = 80 });
         palette.set(.terminal_bg, theme.terminal_background);
         return .{ .palette = palette };
     }
@@ -515,4 +532,32 @@ fn channelDistance(a: Rgb, b: Rgb) u16 {
     const dg = if (a.g > b.g) a.g - b.g else b.g - a.g;
     const db = if (a.b > b.b) a.b - b.b else b.b - a.b;
     return (@as(u16, dr) + @as(u16, dg) + @as(u16, db)) / 3;
+}
+
+test "git 상태 역할: 셋이 서로 다르고, 고친 것은 테마 accent를 따라간다" {
+    // 소스 컨트롤 목록이 `M`·`A`/`U`·`D`를 색으로도 가른다(글자와 **함께** — 색만으로 구분하지 않는다).
+    // 셋이 같은 값으로 접히면 그 보조 신호가 사라지므로 역할 분리 자체를 고정한다.
+    const theme: ThemeColors = .{
+        .foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
+        .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_active = .{ .r = 60, .g = 60, .b = 60 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
+        .accent = .{ .r = 221, .g = 161, .b = 94 },
+    };
+    const tk = Tokens.tui(theme);
+    const modified = tk.get(.git_modified_fg);
+    const added = tk.get(.git_added_fg);
+    const deleted = tk.get(.git_deleted_fg);
+    try std.testing.expectEqual(theme.accent, modified); // 창 시그니처 색을 따라간다
+    try std.testing.expect(!std.meta.eql(added, deleted));
+    try std.testing.expect(!std.meta.eql(added, modified));
+    // rich도 같은 값을 물려받는다(룩이 달라도 상태 색의 의미는 같다).
+    const rich_tokens = Tokens.rich(theme);
+    try std.testing.expectEqual(modified, rich_tokens.get(.git_modified_fg));
+    try std.testing.expectEqual(added, rich_tokens.get(.git_added_fg));
 }

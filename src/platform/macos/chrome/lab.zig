@@ -98,6 +98,10 @@ pub const ScenarioId = enum {
     /// 세로 어긋남은 단위 테스트로도 잡히지만(같은 y), **한 칸 어긋난 gutter 폭이나 가운데 틈이
     /// 사라진 것**은 캡처로만 드러난다. 색 띠는 다음 슬라이스라 여기서는 배치만 본다.
     editor_diff,
+    /// N1.5 §7 — **긴 비교를 스크롤한 상태.** 짧은 fixture의 첫 화면만 보면 세 가지가 무판정으로
+    /// 남는다: 스크롤한 뒤 밴드가 **그 줄**에 붙는지(표를 뷰포트 기준으로 읽으면 어긋난다), 두 열이
+    /// 같은 행에서 시작하는지, 그리고 막대가 문서 중간 자리에 서는지.
+    editor_diff_scrolled,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -174,7 +178,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
-        .editor_diff => buildEditorDiffFrame(scenario, buffers),
+        .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -524,20 +528,64 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const right_texts = [_][]const u8{ "fn main() {", "  var b = 2;", "  var c = 3;", "  log(b);", "}" };
     const left_numbers = [_]?u32{ 1, 2, null, 3, 4 };
     const right_numbers = [_]?u32{ 1, 2, 3, 4, 5 };
+
+    // **스크롤 시나리오는 뷰포트보다 긴 비교를 만든다.** 화면에 다 들어가면 막대가 아예 안 그려져
+    // (그것이 옳은 동작이다) 스크롤 관련 계약이 무판정으로 남는다. 90행이면 45행 뷰포트의 두 배라,
+    // 문서 중간에서 막대가 트랙 가운데 자리에 선다 — 그 자리가 논리 줄이 아니라 **시각 행** 기준임을
+    // 이 캡처가 픽셀로 고정한다.
+    const long_rows = 90;
+    // **줄 문자열은 프레임보다 오래 살아야 한다.** op은 줄 슬라이스를 **빌린다**(복사하지 않는다) —
+    // 스택 버퍼에 만들어 넣으면 이 함수가 반환하는 순간 죽고, 캡처에는 번호만 남고 본문이 사라진다
+    // (실제로 그렇게 한 번 뽑혔다). comptime 문자열은 정적이라 그 문제가 없다.
+    const long_labels = comptime blk: {
+        @setEvalBranchQuota(200_000);
+        var out: [long_rows][]const u8 = undefined;
+        for (0..long_rows) |i| out[i] = std.fmt.comptimePrint("row {d:0>2}", .{i});
+        break :blk out;
+    };
+    var long_left: [long_rows][]const u8 = undefined;
+    var long_right: [long_rows][]const u8 = undefined;
+    var long_left_nums: [long_rows]?u32 = undefined;
+    var long_right_nums: [long_rows]?u32 = undefined;
+    var long_left_bands: [long_rows]editor_view.frame.RowBand = undefined;
+    var long_right_bands: [long_rows]editor_view.frame.RowBand = undefined;
+    for (0..long_rows) |i| {
+        // 다섯 줄마다 한 줄이 바뀐다 — 스크롤한 화면 안에 밴드가 반드시 들어온다.
+        const changed = i % 5 == 3;
+        long_left[i] = long_labels[i];
+        long_right[i] = if (changed) "changed" else long_labels[i];
+        long_left_nums[i] = @intCast(i + 1);
+        long_right_nums[i] = @intCast(i + 1);
+        long_left_bands[i] = if (changed) .removed else .none;
+        long_right_bands[i] = if (changed) .added else .none;
+    }
+    const scrolled = scenario.id == .editor_diff_scrolled;
     // **왼쪽은 삭제만, 오른쪽은 추가만.** 2행은 자리에서 바뀐 줄(양쪽에 색), 3행은 오른쪽에만 있는 줄
     // (왼쪽은 빈 행이라 색이 없다) — 좌우를 나눈 이유가 이 두 모양에서 보인다.
     const left_bands = [_]editor_view.frame.RowBand{ .none, .removed, .none, .none, .none };
     const right_bands = [_]editor_view.frame.RowBand{ .none, .added, .added, .none, .none };
 
-    var content_rows: [64]editor_view.content.Row = undefined;
-    var visual_rows: [64]editor_view.visual_map.VisualRow = undefined;
-    var gutter_rows: [64]editor_view.gutter.Row = undefined;
-    var row_counts: [64]u32 = undefined;
+    // **두 열로 갈리므로 열당 절반이다**(`splitScratch`). 64면 열당 32행인데 뷰포트는 45행이라,
+    // 캡처에 **제품에는 없을 스크롤바**가 뜬다(막대는 "보이는 높이"를 그린 행 수로 잡는다).
+    // 골든이 제품을 예고하려면 이 저장소가 뷰포트를 덮어야 한다.
+    var content_rows: [128]editor_view.content.Row = undefined;
+    var visual_rows: [128]editor_view.visual_map.VisualRow = undefined;
+    var gutter_rows: [128]editor_view.gutter.Row = undefined;
+    var row_counts: [128]u32 = undefined;
     var count_scratch: [1024]u8 = undefined;
 
     const w = editor_view.diff_frame.build(.{
-        .left = .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4, .bands = &left_bands },
-        .right = .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands },
+        .left = if (scrolled)
+            .{ .lines = &long_left, .numbers = &long_left_nums, .total_lines = long_rows, .bands = &long_left_bands }
+        else
+            .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4, .bands = &left_bands },
+        .right = if (scrolled)
+            .{ .lines = &long_right, .numbers = &long_right_nums, .total_lines = long_rows, .bands = &long_right_bands }
+        else
+            .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands },
+        // **문서 중간부터 그린다** — 막대가 트랙 가운데 자리에 서고, 맨 위 줄 번호가 12다.
+        // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
+        .first_line = if (scrolled) 40 else 0,
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
         .cell_w_px = scenario.cell_w_px,
@@ -657,7 +705,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

@@ -243,9 +243,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     var ops: [1024]chrome_draw.Op = undefined;
     var text: [16384]u8 = undefined;
     var runs: [1024]chrome_draw.Run = undefined;
-    var content_rows: [256]chrome_editor.content.Row = undefined;
-    var visual_rows: [256]chrome_editor.visual_map.VisualRow = undefined;
-    var gutter_rows: [256]chrome_editor.gutter.Row = undefined;
+    // **두 열로 갈리면 열당 절반이다**(`diff_frame.splitScratch`). 256이면 열당 128행 = 2,048px라,
+    // 큰 화면을 꽉 채운 pane에서 아래쪽 행이 조용히 잘리고 스크롤바까지 틀린 자리에 선다(막대는
+    // "보이는 높이"를 그린 행 수로 잡는다). 512면 열당 256행 = 4,096px로 실사용 화면을 덮는다.
+    var content_rows: [512]chrome_editor.content.Row = undefined;
+    var visual_rows: [512]chrome_editor.visual_map.VisualRow = undefined;
+    var gutter_rows: [512]chrome_editor.gutter.Row = undefined;
     var counts: [4096]u32 = undefined;
     var count_scratch: [8192]u8 = undefined;
 

@@ -18,6 +18,13 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 
+// **이 값들은 제품과 따로다 — 일부러 그렇다.** 제품 host 는 `mobile_host_abi.h` 의
+// `MARU_FRAME_*` 를 쓰지만, 여기는 "iOS 가 30Hz 를 낼 수 있는가" 를 재는 **능력 프로브**라
+// 제품 정책을 가져오면 정책이 바뀔 때 질문 자체가 바뀐다. 아래 창(25~42ms)도 제품의 ±25/30%
+// 와 다른 근거로 유도했다 — 한 vsync(16.7ms)의 절반이다.
+//
+// **대신 자동으로 안 따라온다**: 제품 주기가 30 이 아니게 되면 여기 30 은 그대로 남아
+// README 의 측정표가 제품과 다른 것을 재게 된다. 그때 이 파일도 함께 손봐야 한다.
 #define WARMUP 20
 #define SAMPLES 60
 

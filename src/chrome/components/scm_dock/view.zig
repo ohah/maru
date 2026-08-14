@@ -7,6 +7,7 @@ const std = @import("std");
 const icons = @import("../../../icons.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
+const badge = @import("../../ui/badge.zig");
 const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const paint_style = @import("../../ui/paint_style.zig");
@@ -188,15 +189,56 @@ const Writer = struct {
     active_clip: ?draw.Rect = null,
     container_clip: ?draw.Rect = null,
 
-    /// 그룹 헤더: `접힘표시 제목 · 개수`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려 사라지지 않는다.
+    /// 그룹 헤더: `접힘표시 제목 · 개수 배지`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려
+    /// 사라지지 않는다.
     fn sectionRow(self: *Writer, rect: tree.RectEntry, section: types.SectionItem, m: types.DockMetrics) ViewError!void {
         const inset: f32 = @floatFromInt(m.inset_x);
         try self.icon(rect, inset, if (section.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
-        try self.line(rect, inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap)), sectionTitle(section.section), .surface_fg, .control, true);
+
         var buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&buf, "{d}", .{section.count}) catch "";
-        // 개수는 동작 버튼 자리를 피해 그 왼쪽에 앉는다(호버 때 버튼이 떠도 숫자가 가리지 않는다).
-        try self.trailing(rect, count, .muted_fg, .supporting, m.inset_x + m.action_extent + m.gap);
+        const cols = @max(@as(u16, @intCast(count.len)), 1);
+        const scale = effectiveScale(self.props.scale_milli);
+        // 개수는 **배지(pill)**다. 치수·자리·"안 들어가면 안 그린다"는 `ui/badge`가 소유한다 — 여기서
+        // 다시 풀면 그 산수가 컴포넌트마다 갈리고, 실제로 pill이 행 밖으로 내려간 회귀가 그 산수였다.
+        // Session Dock 그룹 개수와 같은 프리미티브·같은 색이다: 같은 뜻이 두 도크에서 다르게 보이면 안 된다.
+        //
+        // 동작 버튼 자리는 `reserved_x`로 넘긴다 — 호버 때 버튼이 떠도 배지가 그 아래 깔리지 않는다.
+        const pill = badge.countPill(rect.rect, m.inset_x, cols, self.cell_width_px, scale, m.action_extent + m.gap);
+
+        // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
+        const title_x = rect.rect.x + inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap));
+        const title_end: f32 = if (pill) |p|
+            @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
+        else
+            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        if (rect.rect.height >= line_h and title_end > title_x) {
+            const width = title_end - title_x;
+            try self.emit(
+                title_x,
+                rect.rect.y + (rect.rect.height - line_h) / 2,
+                sectionTitle(section.section),
+                self.colsFor(width),
+                .surface_fg,
+                .control,
+                true,
+                @intFromFloat(width),
+                .origin,
+            );
+        }
+
+        const placed = pill orelse return;
+        try self.appendQuad(.{
+            .rect = placed.box,
+            .fill_role = .inset_bg,
+            .corner_radii = .{ placed.radius_px, placed.radius_px, placed.radius_px, placed.radius_px },
+            .border_widths = .{ 1, 1, 1, 1 },
+            .border_role = .divider,
+        });
+        // 라벨이 상자보다 높으면 **숫자만** 생략한다 — 배지·화살표·제목은 그대로 둔다.
+        if (placed.label_fits)
+            try self.emit(placed.label_x, placed.label_y, count, cols, .surface_fg, .control, false, @intFromFloat(placed.label_w), .origin);
     }
 
     /// 파일 행: `아이콘 · 이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.
@@ -346,6 +388,17 @@ const Writer = struct {
         );
     }
 
+    /// **모든** 장식 quad는 이 한 곳을 지난다. clip을 명시하지 않은 quad에는 지금 열려 있는 컨테이너의
+    /// clip을 싣는다 — clip을 그리는 쪽의 opt-in으로 두면 한 군데만 빠뜨려도 그 quad가 스크롤 영역 밖으로
+    /// 새어 고정 chrome 위에 그려진다(Session Dock에서 실제로 겪은 회귀다).
+    fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        var owned = quad;
+        if (owned.clip == null) owned.clip = self.active_clip orelse self.container_clip;
+        self.ops[self.op_count] = .{ .quad = owned };
+        self.op_count += 1;
+    }
+
     fn colsFor(self: *Writer, width_px: f32) u16 {
         const cols = @floor(width_px / @as(f32, @floatFromInt(self.cell_width_px)));
         return @intFromFloat(@min(@max(cols, 1), @as(f32, @floatFromInt(std.math.maxInt(u16)))));
@@ -431,6 +484,15 @@ fn findExactText(draws: draw.ChromeDraw, needle: []const u8) ?draw.Op.Text {
                 if (std.mem.eql(u8, run.text, needle)) return text;
             }
         },
+        else => {},
+    };
+    return null;
+}
+
+/// 개수 배지 quad. **모서리가 둥근 것**으로 고른다 — 이 컴포넌트에서 행 배경은 반지름이 0이라 섞이지 않는다.
+fn findBadgeQuad(draws: draw.ChromeDraw) ?draw.Op.Quad {
+    for (draws.ops) |op| switch (op) {
+        .quad => |quad| if (quad.corner_radii[0] > 0) return quad,
         else => {},
     };
     return null;
@@ -674,4 +736,41 @@ test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
     try testing.expect(icon_right > 0);
     const name = findExactText(draws, "build.zig") orelse return error.MissingName;
     try testing.expect(name.origin.x >= icon_right);
+}
+
+test "그룹 개수는 배지 상자 안에 놓인다(숫자만 떠 있지 않다)" {
+    // 배지는 quad 하나 + 그 안의 숫자다. 상자를 그려 놓고 숫자를 행 baseline에 두면 숫자가 어두운
+    // pill 위로 떠오른다(Session Dock에서 겪은 회귀) — 그래서 "안에 들어간다"를 좌표로 고정한다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .changes, .count = 7, .collapsed = false, .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+
+    const label = findExactText(draws, "7") orelse return error.MissingCount;
+    const pill = findBadgeQuad(draws) orelse return error.MissingBadgeQuad;
+    const box = pill.rect;
+
+    try testing.expect(label.origin.x >= box.x);
+    try testing.expect(label.origin.x <= box.x + @as(i32, @intCast(box.w)));
+    try testing.expect(label.origin.y >= box.y);
+    try testing.expect(label.origin.y <= box.y + @as(i32, @intCast(box.h)));
+    // 반지름은 높이의 절반 — 양끝이 반원인 pill이다(모서리만 살짝 둥근 카드가 아니다).
+    try testing.expectEqual(@as(u16, @intCast(box.h / 2)), pill.corner_radii[0]);
+    // 스크롤 영역 밖으로 새지 않게 clip을 달고 나간다.
+    try testing.expect(pill.clip != null);
+}
+
+test "긴 제목은 배지 밑으로 파고들지 않는다" {
+    // 제목 폭을 배지 왼쪽에서 끊지 않으면 긴 제목이 배지 아래로 들어간다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .staged, .count = 128, .collapsed = false, .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+
+    const left = (findBadgeQuad(draws) orelse return error.MissingBadgeQuad).rect.x;
+    const title = findExactText(draws, sectionTitle(.staged)) orelse return error.MissingTitle;
+    const budget = title.max_width_px orelse return error.MissingBudget;
+    try testing.expect(title.origin.x + @as(i32, @intCast(budget)) <= left);
 }

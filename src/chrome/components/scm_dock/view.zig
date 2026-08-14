@@ -11,6 +11,7 @@ const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const paint_style = @import("../../ui/paint_style.zig");
 const text_layout = @import("../../text_layout.zig");
+const file_tree_icon = @import("../../file_tree_icon.zig");
 const tree = @import("../../ui/tree.zig");
 const typography = @import("../../ui/typography.zig");
 const build = @import("build.zig");
@@ -59,9 +60,13 @@ pub fn view(
     // ── 요약 줄: `+N -N`. 커밋 직전에 보는 숫자라 목록보다 위에 고정한다.
     if (frame.tree.find(build.NodeIds.summary)) |index| {
         const rect = frame.tree.entries[index];
-        var buf: [48]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "+{d} -{d}", .{ props.summary.added, props.summary.removed }) catch "";
-        try writer.line(rect, @floatFromInt(m.inset_x), text, .muted_fg, .supporting, false);
+        var added_buf: [24]u8 = undefined;
+        const added = std.fmt.bufPrint(&added_buf, "+{d}", .{props.summary.added}) catch "";
+        try writer.line(rect, @floatFromInt(m.inset_x), added, .git_added_fg, .supporting, false);
+        var removed_buf: [24]u8 = undefined;
+        const removed = std.fmt.bufPrint(&removed_buf, "-{d}", .{props.summary.removed}) catch "";
+        const gap: f32 = @floatFromInt(m.inset_x + m.gap);
+        try writer.line(rect, gap + writer.measureBudget(added), removed, .git_deleted_fg, .supporting, false);
     }
 
     // ── 목록. 스크롤 영역 안이므로 backend가 "스크롤은 순수 평행이동"임을 쓸 수 있게 표시한다.
@@ -194,21 +199,36 @@ const Writer = struct {
         try self.trailing(rect, count, .muted_fg, .supporting, m.inset_x + m.action_extent + m.gap);
     }
 
-    /// 파일 행: `이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.
+    /// 파일 행: `아이콘 · 이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.
     fn fileRow(self: *Writer, rect: tree.RectEntry, file: types.FileItem, m: types.DockMetrics) ViewError!void {
-        const inset: f32 = @floatFromInt(m.inset_x + m.disclosure_extent + m.gap);
+        // 이름은 **아이콘 폭만큼 더** 들어간다. 그룹 헤더의 화살표 자리(`disclosure_extent`)만 비우면
+        // 아이콘이 이름 위에 겹쳐 그려진다(제품 캡처에서 실제로 그랬다 — 슬롯 폭과 gap은 다른 값이다).
+        const inset: f32 = @floatFromInt(m.inset_x + m.disclosure_extent + m.icon_extent + m.gap);
+        // **종류 아이콘은 탐색기와 같은 분류기**를 쓴다 — 같은 파일이 두 화면에서 다른 아이콘이면 안 된다.
+        if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
+            var glyph_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &glyph_buf) catch 0;
+            if (len > 0) try self.icon(rect, @floatFromInt(m.inset_x + m.disclosure_extent), glyph_buf[0..len], m.icon_extent, .muted_fg);
+        }
         // 상태 문자는 오른쪽 끝(VS Code 배치). 색은 종류가 정하고, 글자는 그대로 그린다.
         var letter_buf: [1]u8 = .{file.letter};
         try self.trailing(rect, letter_buf[0..], statusRole(file.status), .control, m.inset_x);
 
-        var delta_buf: [32]u8 = undefined;
-        const delta: []const u8 = if (file.binary)
-            "bin"
-        else if (file.has_delta)
-            std.fmt.bufPrint(&delta_buf, "+{d} -{d}", .{ file.added, file.removed }) catch ""
-        else
-            "";
-        if (delta.len > 0) try self.trailing(rect, delta, .muted_fg, .supporting, m.inset_x + m.status_extent + m.gap);
+        // **증감도 색을 갖는다**(목업이 그렇다 — `+14` 초록, `−59` 빨강). 한 덩어리로 그리면 둘 다
+        // 흐린 회색이 되어 "얼마나 늘고 줄었나"가 한눈에 안 들어온다(사용자 지적 2026-08-14).
+        var right_inset = m.inset_x + m.status_extent + m.gap;
+        if (file.binary) {
+            try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
+        } else if (file.has_delta) {
+            var removed_buf: [16]u8 = undefined;
+            const removed = std.fmt.bufPrint(&removed_buf, "-{d}", .{file.removed}) catch "";
+            try self.trailing(rect, removed, .git_deleted_fg, .supporting, right_inset);
+            right_inset += @intFromFloat(self.measureBudget(removed));
+            right_inset += m.gap;
+            var added_buf: [16]u8 = undefined;
+            const added = std.fmt.bufPrint(&added_buf, "+{d}", .{file.added}) catch "";
+            try self.trailing(rect, added, .git_added_fg, .supporting, right_inset);
+        }
 
         // 이름은 굵게, 경로는 흐리게. 이름 뒤에 경로를 이어 그리되 폭 예산은 **이름 우선**이다.
         try self.line(rect, inset, file.name, if (file.selected) .focus_accent else .surface_fg, .control, true);
@@ -490,8 +510,11 @@ test "행 글자와 요약·브랜치가 한 번에 나온다" {
     try testing.expect(findText(draws, "변경 사항") != null); // 그룹 제목
     try testing.expect(findText(draws, "scm_view.zig") != null);
     try testing.expect(findText(draws, "src/session/") != null);
-    try testing.expect(findText(draws, "+4 -2") != null);
-    try testing.expect(findText(draws, "+12 -3") != null); // 요약 줄
+    // 증감은 **두 조각**이다 — 색이 다르기 때문이다(늘어난 것 초록, 줄어든 것 빨강).
+    try testing.expectEqual(tokens.ColorRole.git_added_fg, findExactText(draws, "+4").?.role);
+    try testing.expectEqual(tokens.ColorRole.git_deleted_fg, findExactText(draws, "-2").?.role);
+    try testing.expectEqual(tokens.ColorRole.git_added_fg, findExactText(draws, "+12").?.role); // 요약 줄
+    try testing.expectEqual(tokens.ColorRole.git_deleted_fg, findExactText(draws, "-3").?.role);
     try testing.expect(findText(draws, "main") != null); // 브랜치 줄
     try testing.expect(findText(draws, "↑2") != null);
 }
@@ -607,4 +630,48 @@ test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 �
         else => {},
     };
     try testing.expect(saw_icon);
+}
+
+test "파일 행에 종류 아이콘이 붙는다(탐색기와 같은 분류기)" {
+    // 같은 파일이 두 화면에서 다른 아이콘이면 안 된다. 아이콘은 이름으로만 정해지므로 확장자가 다른
+    // 두 파일이 서로 다른 슬롯을 받는지로 그 연결을 고정한다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "a.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    var icons_seen: usize = 0;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| switch (text.placement) {
+            .icon_in_rect => icons_seen += 1,
+            else => {},
+        },
+        else => {},
+    };
+    // 브랜치 줄 아이콘 + 파일 종류 아이콘 = 둘(그룹 헤더가 없는 fixture다).
+    try testing.expectEqual(@as(usize, 2), icons_seen);
+}
+
+test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
+    // 슬롯 폭(`icon_extent`)과 간격(`gap`)은 다른 값이다. 이름 들여쓰기에 아이콘 폭을 빼먹으면 글자가
+    // 아이콘 위에 겹쳐 그려진다(제품 캡처에서 실제로 그랬다).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "build.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    var icon_right: i32 = 0;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| switch (text.placement) {
+            .icon_in_rect => |placed| {
+                // 파일 행의 아이콘만 본다(브랜치 줄은 y가 훨씬 아래다).
+                if (placed.content_rect.y < 100) icon_right = placed.content_rect.x + @as(i32, @intCast(placed.content_rect.w));
+            },
+            else => {},
+        },
+        else => {},
+    };
+    try testing.expect(icon_right > 0);
+    const name = findExactText(draws, "build.zig") orelse return error.MissingName;
+    try testing.expect(name.origin.x >= icon_right);
 }

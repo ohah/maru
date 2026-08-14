@@ -500,3 +500,61 @@ test "섹션은 기본 상한까지만 보여 주고 남은 개수를 말한다"
     try testing.expectEqual(@as(usize, 25), capped.rows[0].section.count);
     try testing.expectEqual(@as(usize, 25 - default_section_rows), capped.rows[capped.rows.len - 1].more.hidden);
 }
+
+test "무작위 status 입력에도 불변식이 깨지지 않는다" {
+    // 적대적 검증 7회차: 손으로 고른 경계만 보면 "내가 생각한 입력"만 검증한다. 결정적 LCG로 상태 코드·경로·
+    // 버퍼 크기를 섞어 돌리며 **모델이 스스로 지켜야 하는 것**만 단언한다 — 넘치지 않는가, 헤더 없는 파일 행이
+    // 나오지 않는가, 개수가 실제 행보다 작지 않은가.
+    var seed: u64 = 0x9E3779B97F4A7C15;
+    const codes = [_][]const u8{ "M.", ".M", "MM", "A.", "AD", "R.", "D.", ".D", "??", "UU" };
+    var iter: usize = 0;
+    while (iter < 200) : (iter += 1) {
+        var status: std.ArrayList(u8) = .empty;
+        defer status.deinit(testing.allocator);
+        try status.appendSlice(testing.allocator, "# branch.oid abc\n# branch.head main\n");
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const file_count = (seed >> 33) % 40;
+        for (0..file_count) |i| {
+            seed = seed *% 6364136223846793005 +% 1442695040888963407;
+            const code = codes[(seed >> 33) % codes.len];
+            var line: [96]u8 = undefined;
+            const text = if (std.mem.eql(u8, code, "??"))
+                try std.fmt.bufPrint(&line, "? f{d}.txt\n", .{i})
+            else if (std.mem.eql(u8, code, "UU"))
+                try std.fmt.bufPrint(&line, "u UU N... 1 1 1 1 a b c f{d}.txt\n", .{i})
+            else if (code[0] == 'R')
+                try std.fmt.bufPrint(&line, "2 {s} N... 1 2 3 a b R100 f{d}.txt\told{d}.txt\n", .{ code, i, i })
+            else
+                try std.fmt.bufPrint(&line, "1 {s} N... 1 2 3 a b f{d}.txt\n", .{ code, i });
+            try status.appendSlice(testing.allocator, text);
+        }
+
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const cap = 1 + (seed >> 33) % 48;
+        var out: [64]Row = undefined;
+        var scratch: [256]u8 = undefined;
+        const collapsed: [section_count]bool = .{ (seed >> 3) & 1 == 0, (seed >> 4) & 1 == 0 };
+        const expanded: [section_count]bool = .{ (seed >> 5) & 1 == 0, (seed >> 6) & 1 == 0 };
+        const model = build(status.items, "", "", "", collapsed, expanded, (seed >> 7) & 1 == 0, out[0..cap], &scratch);
+
+        try testing.expect(model.rows.len <= cap); // 버퍼를 넘겨 쓰지 않는다
+        var seen_section: ?Section = null;
+        var counts: [section_count]usize = .{ 0, 0 };
+        for (model.rows) |row| switch (row) {
+            .section => |sec| {
+                seen_section = sec.section;
+                counts[@intFromEnum(sec.section)] = sec.count;
+            },
+            // **파일 행은 항상 자기 섹션 헤더 뒤에 온다.** 헤더가 잘려 나갔는데 파일만 남으면 화면에서 그 행이
+            // 어느 그룹인지 알 수 없다.
+            .file => |f| try testing.expectEqual(seen_section.?, f.section),
+            .more => |m| try testing.expect(m.hidden > 0), // "0개 더"는 눌러도 아무 일 없는 컨트롤이다
+            .notice => {},
+        };
+        // 섹션 헤더가 말한 개수는 그 섹션의 실제 항목 수와 같아야 한다(화면에 몇 개를 그렸는지와 무관하게).
+        inline for (.{ Section.staged, Section.changes }) |section| {
+            if (counts[@intFromEnum(section)] > 0)
+                try testing.expectEqual(countFor(status.items, section), counts[@intFromEnum(section)]);
+        }
+    }
+}

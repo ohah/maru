@@ -153,7 +153,16 @@ pub fn scratchNeeded(row_count: usize, max_line_number: usize) usize {
 /// **본문이 답을 내고 gutter가 따른다.** 둘이 각자 세면 번호가 본문과 어긋난다.
 ///
 /// `first_line`은 뷰포트 첫 논리 줄의 0-based 인덱스다.
-pub fn rowsForVisual(visual: []const visual_map.VisualRow, first_line: usize, out: []Row) []Row {
+pub fn rowsForVisual(
+    visual: []const visual_map.VisualRow,
+    first_line: usize,
+    /// **번호를 밖에서 준다면** 그 표를 논리 줄 인덱스로 읽는다(`null` 항목 = 번호 없는 줄).
+    /// diff 본문이 이 자리를 쓴다 — 좌우 행은 나란히 서지만 번호는 **각자 문서**의 것이고,
+    /// 짝을 맞추려고 넣은 빈 행에는 번호가 없다(없는 줄에 번호를 붙이면 거짓이다).
+    /// `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
+    numbers: ?[]const ?u32,
+    out: []Row,
+) []Row {
     const n = @min(visual.len, out.len);
     var i: u16 = 0;
     while (i < n) : (i += 1) {
@@ -161,7 +170,10 @@ pub fn rowsForVisual(visual: []const visual_map.VisualRow, first_line: usize, ou
         out[i] = .{
             // **랩으로 이어진 행은 번호를 비운다**(§4). 판정은 `VisualRow`가 소유한다 — 여기서
             // `piece == 0`을 다시 쓰면 규칙이 두 곳에 생긴다.
-            .number = if (v.showsLineNumber()) first_line + v.line + 1 else null,
+            .number = if (!v.showsLineNumber()) null else if (numbers) |table| blk: {
+                const idx = first_line + v.line;
+                break :blk if (idx < table.len) (if (table[idx]) |num| @as(usize, num) else null) else null;
+            } else first_line + v.line + 1,
             .visual_row = i,
         };
     }
@@ -183,7 +195,7 @@ test "랩 + 세로 스크롤: 뷰포트가 문서 중간부터여도 번호가 �
         .{ .line = 2, .piece = 0 }, // 번호 4
     };
     var buf: [8]Row = undefined;
-    const rows = rowsForVisual(&visual, 1, &buf); // first_line = 1
+    const rows = rowsForVisual(&visual, 1, null, &buf); // first_line = 1
 
     try testing.expectEqual(@as(usize, 5), rows.len);
     try testing.expectEqual(@as(usize, 2), rows[0].number.?);
@@ -393,4 +405,41 @@ test "각 op이 자기 run을 가리킨다 — 공유 버퍼를 덮어쓰지 않
     // 두 op이 같은 run을 가리키면 마지막 글자가 둘 다에 나온다.
     try testing.expectEqualStrings("7", ops[0].text.runs[0].text);
     try testing.expectEqualStrings("8", ops[1].text.runs[0].text);
+}
+
+test "번호를 밖에서 주면 그것을 쓴다 — diff는 좌우가 각자 문서의 번호를 단다" {
+    // **순차 번호로는 diff를 그릴 수 없다.** 왼쪽에서 삭제된 줄과 오른쪽에서 추가된 줄이 같은 높이에
+    // 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가 아예 없어야 한다.
+    const visual = [_]visual_map.VisualRow{
+        .{ .line = 0, .piece = 0 },
+        .{ .line = 1, .piece = 0 },
+        .{ .line = 2, .piece = 0 },
+    };
+    const numbers = [_]?u32{ 7, null, 8 }; // 가운데가 빈 행(filler)
+    var buf: [8]Row = undefined;
+    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    try testing.expectEqual(@as(?usize, 7), rows[0].number);
+    try testing.expectEqual(@as(?usize, null), rows[1].number);
+    try testing.expectEqual(@as(?usize, 8), rows[2].number);
+}
+
+test "밖에서 준 번호도 랩 이어짐에는 안 붙는다 — 두 규칙이 겹치는 자리" {
+    const visual = [_]visual_map.VisualRow{
+        .{ .line = 0, .piece = 0 },
+        .{ .line = 0, .piece = 1 }, // 이어진 조각
+    };
+    const numbers = [_]?u32{42};
+    var buf: [4]Row = undefined;
+    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    try testing.expectEqual(@as(?usize, 42), rows[0].number);
+    try testing.expectEqual(@as(?usize, null), rows[1].number);
+}
+
+test "표가 짧으면 번호를 지어내지 않는다" {
+    const visual = [_]visual_map.VisualRow{ .{ .line = 0, .piece = 0 }, .{ .line = 1, .piece = 0 } };
+    const numbers = [_]?u32{5};
+    var buf: [4]Row = undefined;
+    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    try testing.expectEqual(@as(?usize, 5), rows[0].number);
+    try testing.expectEqual(@as(?usize, null), rows[1].number);
 }

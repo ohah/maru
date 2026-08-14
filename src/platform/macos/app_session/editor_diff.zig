@@ -31,6 +31,18 @@ pub const State = struct {
     /// 왼쪽/오른쪽 줄 배열(우리가 할당, entry 버퍼를 빌린다).
     left_lines: []const []const u8 = &.{},
     right_lines: []const []const u8 = &.{},
+    /// 화면이 그릴 것. **행마다 한 칸**이라 좌우 인덱스가 같은 높이다(§3.5).
+    ///
+    /// 왜 미리 만드는가: `frame.build`는 `[]const []const u8`을 받는데 우리 행은 구조체 배열이다.
+    /// 매 프레임 옮겨 담으면 프레임마다 할당이 생긴다(N1이 `editor_lines`를 미리 만든 것과 같은 이유).
+    ///
+    /// **줄 끝 문자는 여기서 뗀다.** 대응은 그것을 포함해 계산해야 목록과 맞고(끝 개행·CRLF 변경),
+    /// 화면에 남기면 §3.8 가시화가 제어 문자로 그린다 — 계산과 표시의 요구가 갈리는 자리다.
+    left_texts: []const []const u8 = &.{},
+    right_texts: []const []const u8 = &.{},
+    /// 각 행이 달 줄 번호. 짝을 맞추려 넣은 빈 행은 `null`이다(없는 줄에 번호를 붙이면 거짓이다).
+    left_numbers: []const ?u32 = &.{},
+    right_numbers: []const ?u32 = &.{},
     /// 요청을 건 시각. 재시도 창(6초)을 여기서 잰다.
     requested_ms: u64 = 0,
     /// 판정이 끝났는가. **끝난 판정을 매 tick 다시 계산하지 않는다** — 2,000줄 대응을 프레임마다
@@ -70,8 +82,16 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     st.view = .loading;
     if (st.left_lines.len > 0) self.allocator.free(st.left_lines);
     if (st.right_lines.len > 0) self.allocator.free(st.right_lines);
+    if (st.left_texts.len > 0) self.allocator.free(st.left_texts);
+    if (st.right_texts.len > 0) self.allocator.free(st.right_texts);
+    if (st.left_numbers.len > 0) self.allocator.free(st.left_numbers);
+    if (st.right_numbers.len > 0) self.allocator.free(st.right_numbers);
     st.left_lines = &.{};
     st.right_lines = &.{};
+    st.left_texts = &.{};
+    st.right_texts = &.{};
+    st.left_numbers = &.{};
+    st.right_numbers = &.{};
     st.settled = false;
 }
 
@@ -130,6 +150,47 @@ fn computeRows(self: *AppSession, entry: *dock_panel.Entry, st: *State) void {
         st.view = .{ .unavailable = .unknown };
         return;
     };
+    if (st.view != .compare) return;
+    materialize(self, st) catch {
+        st.view.compare.deinit(self.allocator);
+        st.view = .{ .unavailable = .unknown };
+    };
+}
+
+/// 행 배열을 **화면이 받는 모양**으로 한 번 옮겨 담는다.
+fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
+    const rows = st.view.compare;
+    const lt = try self.allocator.alloc([]const u8, rows.left.len);
+    errdefer self.allocator.free(lt);
+    const rt = try self.allocator.alloc([]const u8, rows.right.len);
+    errdefer self.allocator.free(rt);
+    const ln = try self.allocator.alloc(?u32, rows.left.len);
+    errdefer self.allocator.free(ln);
+    const rn = try self.allocator.alloc(?u32, rows.right.len);
+    errdefer self.allocator.free(rn);
+    for (rows.left, 0..) |r, i| {
+        lt[i] = displayText(r.text);
+        ln[i] = r.line;
+    }
+    for (rows.right, 0..) |r, i| {
+        rt[i] = displayText(r.text);
+        rn[i] = r.line;
+    }
+    st.left_texts = lt;
+    st.right_texts = rt;
+    st.left_numbers = ln;
+    st.right_numbers = rn;
+}
+
+/// 줄 끝 문자를 뗀 표시용 슬라이스. **입력을 빌린다**(복사하지 않는다).
+///
+/// CRLF의 `\r`도 함께 뗀다 — 남기면 화면에 제어 문자 표기가 뜨는데, 그 줄이 실제로 바뀌었다는
+/// 사실은 이미 대응(계산은 `\r`를 포함해 했다)이 말해 준다.
+fn displayText(text: []const u8) []const u8 {
+    var out = text;
+    if (out.len > 0 and out[out.len - 1] == '\n') out = out[0 .. out.len - 1];
+    if (out.len > 0 and out[out.len - 1] == '\r') out = out[0 .. out.len - 1];
+    return out;
 }
 
 /// 화면이 말할 문장. **내부 값을 노출하지 않는다**(§7) — 세 이유를 사람 문장으로만 옮긴다.

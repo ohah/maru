@@ -113,16 +113,14 @@ pub const PaneFrame = struct {
 };
 
 /// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
-pub const FrameScratch = struct {
-    ops: []chrome_draw.Op,
-    text_bytes: []u8,
-    runs: []chrome_draw.Run,
-    content_rows: []chrome_editor.content.Row,
-    visual_rows: []chrome_editor.visual_map.VisualRow,
-    gutter_rows: []chrome_editor.gutter.Row,
-    row_counts: []u32,
-    count_scratch: []u8,
-};
+///
+/// **컴포넌트의 것을 그대로 쓴다**(별칭). 같은 모양을 여기서 다시 선언하면 Zig에서 다른 타입이 되어,
+/// 제품과 컴포넌트 사이에 뜻 없는 변환이 하나 생긴다.
+pub const FrameScratch = chrome_editor.frame.Scratch;
+
+/// 한 열이 쓸 자리에서 나오는 값들은 **컴포넌트가 소유한다**(`diff_frame.sideMetrics`) — 제품과
+/// Chrome Lab이 같은 값을 써야 캡처가 제품을 예고한다.
+const diff_frame = chrome_editor.diff_frame;
 
 /// pane 사각과 셀 크기로 편집기 op을 만든다. 반환값은 `scratch.ops[0..ops_len]`이 유효하다는 뜻이다.
 pub fn buildPaneOps(
@@ -135,53 +133,55 @@ pub fn buildPaneOps(
     font_px: u16,
     scratch: FrameScratch,
 ) PaneFrame {
-    // **스크롤바가 자리를 먹는다**(§4.1a) — 본문 위에 겹치면 오른쪽 끝 글자가 막대에 가려지고,
-    // §3.8이 "보이는 것과 파일 내용이 달라지면 안 된다"를 요구하는 편집기에서 그것은 특히 나쁘다.
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
     // (2026-08-14 실측). 열 수·스크롤바 gutter를 **이 사각으로** 계산해야 막대가 뷰 밖으로 안 밀린다.
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
-    const metrics = chrome_scroll_area.ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const cw: u32 = @max(cell_w_px, 1);
-    const ch: u32 = @max(cell_h_px, 1);
-    const total_cols: u16 = @intCast(@min(
-        (inner.w -| metrics.gutterPx()) / cw,
-        @as(u32, std.math.maxInt(u16)),
-    ));
-    // **남은 폭 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
-    // 요구한 폭보다 넓은 자투리가 생긴다 — 그것을 포함하지 않으면 막대가 오른쪽 끝에서 뜬다.
-    const scrollbar_gutter_px: u32 = inner.w -| (@as(u32, total_cols) * cw);
-    const visible_rows: u16 = @intCast(@min(inner.h / ch, @as(u32, std.math.maxInt(u16))));
-
-    const w = chrome_editor.frame.build(.{
-        .lines = lines,
-        .first_line = first_line,
-        .total_lines = lines.len,
-        .visible_rows = visible_rows,
-        .wrap = wrap,
-        .rect = inner,
+    const w = diff_frame.buildSide(
+        .{ .lines = lines },
+        .{ .first_line = first_line, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
         // 그만큼 음수로 밀어 뷰 사각 전체를 덮는다(§4.1b).
+        .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
+        scratch,
+    );
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows };
+}
+
+/// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
+/// 여기서는 pane 여백만 반영한다 — Chrome Lab이 같은 함수를 불러 캡처가 제품을 예고한다.
+pub fn buildDiffPaneOps(
+    left: chrome_editor.diff_frame.Side,
+    right: chrome_editor.diff_frame.Side,
+    first_line: usize,
+    wrap: bool,
+    rect: chrome_draw.Rect,
+    cell_w_px: u16,
+    cell_h_px: u16,
+    font_px: u16,
+    scratch: FrameScratch,
+) PaneFrame {
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const inner: chrome_draw.Rect = .{
+        .x = 0,
+        .y = 0,
+        .w = rect.w -| chrome_editor.frame.content_inset_px * 2,
+        .h = rect.h -| chrome_editor.frame.content_inset_px * 2,
+    };
+    const w = diff_frame.build(.{
+        .left = left,
+        .right = right,
+        .first_line = first_line,
+        .wrap = wrap,
+        .rect = inner,
         .background_rect = .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .font_px = font_px,
-        .total_cols = total_cols,
-        .scrollbar_gutter_px = scrollbar_gutter_px,
-        .metrics = metrics,
-    }, .{
-        .ops = scratch.ops,
-        .text_bytes = scratch.text_bytes,
-        .runs = scratch.runs,
-        .content_rows = scratch.content_rows,
-        .visual_rows = scratch.visual_rows,
-        .gutter_rows = scratch.gutter_rows,
-        .row_counts = scratch.row_counts,
-        .count_scratch = scratch.count_scratch,
-    });
-
+    }, scratch);
     return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows };
 }
 
@@ -214,10 +214,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     if (term.kind != .editor) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
 
-    // **비교 Term은 문서 대신 판정을 말한다**(N1.5 b). 좌우 배치는 슬라이스 c가 그리므로, 지금은 네 상태를
-    // 한 줄로 낸다 — 조용한 빈 화면을 남기지 않는 것이 §7의 요구다. 문구는 정적 문자열이라 수명이 길다.
+    // **비교 Term은 문서 대신 판정을 말한다**(N1.5 b·c). 비교가 서면 좌우 두 열이고(c), 아직이거나
+    // 보여 줄 수 없으면 그 사실을 한 줄로 말한다 — 조용한 빈 화면을 남기지 않는 것이 §7의 요구다.
+    const diff_state_opt: ?*const editor_diff_ops.State = if (term.rt.editor_diff) |*st| st else null;
     var status_line: [1][]const u8 = undefined;
-    const lines: []const []const u8 = if (term.rt.editor_diff) |st| blk: {
+    const lines: []const []const u8 = if (diff_state_opt) |st| blk: {
+        if (st.view == .compare) break :blk st.left_texts; // 아래 두 열 경로가 쓴다
         status_line[0] = editor_diff_ops.statusText(st.view);
         break :blk status_line[0..1];
     } else term.rt.editor_lines;
@@ -260,25 +262,36 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     };
     if (inner.w == 0 or inner.h == 0) return null;
 
-    const pf = buildPaneOps(
-        lines,
-        term.rt.editor_first_line,
-        term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap, // 뷰 override가 config를 이긴다
-        .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h },
-        @intCast(self.cell_width_px),
-        @intCast(self.cell_height_px),
-        @intCast(self.cell_height_px),
-        .{
-            .ops = &ops,
-            .text_bytes = &text,
-            .runs = &runs,
-            .content_rows = &content_rows,
-            .visual_rows = &visual_rows,
-            .gutter_rows = &gutter_rows,
-            .row_counts = &counts,
-            .count_scratch = &count_scratch,
-        },
-    );
+    const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap; // 뷰 override가 config를 이긴다
+    const scratch: FrameScratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+
+    const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
+    const pf = if (diff_state_opt) |st| blk: {
+        if (st.view != .compare) break :blk buildPaneOps(lines, term.rt.editor_first_line, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
+        // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
+        // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
+        break :blk buildDiffPaneOps(
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len },
+            term.rt.editor_first_line,
+            wrap,
+            pane_rect,
+            @intCast(self.cell_width_px),
+            @intCast(self.cell_height_px),
+            @intCast(self.cell_height_px),
+            scratch,
+        );
+    } else buildPaneOps(lines, term.rt.editor_first_line, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
 
     const tokens = self.buildChromeTokens();
@@ -868,4 +881,81 @@ test "여러 줄 파일의 줄 내용이 줄바꿈 없이 나온다" {
     try testing.expectEqualStrings("const 한글 = 2;", opened.file.lineText(1).?);
     try testing.expectEqualStrings("\tconst c = 3;", opened.file.lineText(2).?); // 탭은 전개 전이다
     try testing.expect(opened.file.doc.format.mixed_endings);
+}
+
+// ── N1.5 c: 좌우 두 열 ───────────────────────────────────────────────────────────────────────
+//
+// **이 테스트들이 증명하는 것**: 같은 행이 좌우에서 **같은 높이**에 서고(비교의 전부다), 두 열이
+// 서로를 침범하지 않으며, 번호가 각자 문서의 것이라는 것. 셋 다 조용히 틀린다 — 한 픽셀 어긋난
+// 세로는 스크롤해야 보이고, 겹친 저장소는 한쪽 글자가 다른 쪽으로 바뀌어도 op 수는 그대로다.
+
+const DiffFixture = struct {
+    ops: [1024]chrome_draw.Op = undefined,
+    text: [16384]u8 = undefined,
+    runs: [1024]chrome_draw.Run = undefined,
+    content_rows: [256]chrome_editor.content.Row = undefined,
+    visual_rows: [256]chrome_editor.visual_map.VisualRow = undefined,
+    gutter_rows: [256]chrome_editor.gutter.Row = undefined,
+    counts: [4096]u32 = undefined,
+    count_scratch: [8192]u8 = undefined,
+
+    fn scratch(self: *DiffFixture) FrameScratch {
+        return .{
+            .ops = &self.ops,
+            .text_bytes = &self.text,
+            .runs = &self.runs,
+            .content_rows = &self.content_rows,
+            .visual_rows = &self.visual_rows,
+            .gutter_rows = &self.gutter_rows,
+            .row_counts = &self.counts,
+            .count_scratch = &self.count_scratch,
+        };
+    }
+};
+
+test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하는 유일한 조건" {
+    var fx = DiffFixture{};
+    const left_texts = [_][]const u8{ "keep", "gone", "tail" };
+    const right_texts = [_][]const u8{ "keep", "", "tail" }; // 가운데가 filler
+    const left_numbers = [_]?u32{ 1, 2, 3 };
+    const right_numbers = [_]?u32{ 1, null, 2 };
+
+    const pf = buildDiffPaneOps(
+        .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 3 },
+        .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 2 },
+        0,
+        false,
+        .{ .x = 0, .y = 0, .w = 800, .h = 300 },
+        8,
+        16,
+        16,
+        fx.scratch(),
+    );
+    try testing.expect(pf.ops_len > 0);
+
+    const split = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = 800 - chrome_editor.frame.content_inset_px * 2, .h = 300 - chrome_editor.frame.content_inset_px * 2 }, 8).right.x;
+    // 각 열에서 **본문 글자**의 y를 모은다(gutter·배경 제외를 위해 x로 가른다).
+    var left_ys: [8]i32 = undefined;
+    var right_ys: [8]i32 = undefined;
+    var ln: usize = 0;
+    var rn: usize = 0;
+    for (pf.ops) |op| {
+        if (op != .text) continue;
+        const t = op.text;
+        if (t.role != chrome_editor.content.text_role) continue; // 줄 번호는 다른 역할이다
+        if (t.origin.x < split) {
+            if (ln < left_ys.len) {
+                left_ys[ln] = t.origin.y;
+                ln += 1;
+            }
+        } else if (rn < right_ys.len) {
+            right_ys[rn] = t.origin.y;
+            rn += 1;
+        }
+    }
+    // 왼쪽 3행, 오른쪽 2행(filler는 빈 문자열이라 글자 op이 없다)이고 **y가 같은 자리에 선다**.
+    try testing.expect(ln >= 3);
+    try testing.expect(rn >= 2);
+    try testing.expectEqual(left_ys[0], right_ys[0]); // 첫 행
+    try testing.expectEqual(left_ys[2], right_ys[1]); // 마지막 행 — filler 한 칸을 건너뛴 그 높이
 }

@@ -670,7 +670,8 @@ fn keybarTapAt(x: f32, y: f32) u32 {
 fn keybarIndexAt(x: f32, y: f32) ?usize {
     if (!key_bar_ready) return null;
     for (key_bar_rects, 0..) |r, i| {
-        if (!keyBarVisible(i)) continue; // 안 보이는 키는 못 누른다
+        // 창 밖 키는 그리기 쪽에서 rect 를 0 으로 지운다 — 빈 사각형은 어떤 점도 안 품으므로
+        // **여기 따로 가시성 조건이 없다**. 조건이 둘이면 그리는 자리와 누르는 자리가 갈린다.
         if (x < r.x or x >= r.x + r.w or y < r.y or y >= r.y + r.h) continue;
         return i;
     }
@@ -701,14 +702,11 @@ pub export fn maru_mobile_armed_mods() u32 {
     return armed_mods;
 }
 
-/// **지금 줄에 있는** 키 수. 총 개수가 아니라 보이는 수다 — `copy` 는 선택이 있을 때만
-/// 나타나므로, 총 개수를 답하면 host 도 테스트도 없는 키를 있다고 믿는다.
+/// 줄에 있는 키 수. **모든 키가 늘 줄에 있으므로 고정값이다** — 스크롤로 화면 밖에 나간 키도
+/// 여기 센다(그건 `maru_mobile_keybar_rect` 가 0 으로 답해 가른다). 부르는 쪽이 rect 를 훑을
+/// 상한으로 쓴다.
 pub export fn maru_mobile_keybar_count() u32 {
-    var n: u32 = 0;
-    for (0..key_bar.len) |i| {
-        if (keyBarVisible(i)) n += 1;
-    }
-    return n;
+    return key_bar.len;
 }
 
 /// 키 `index` 의 사각형(논리 px). x·y·w·h 를 각각 16비트로 담는다. 아직 안 섰으면 0.
@@ -1758,12 +1756,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 는 세로 전용이라 여기 못 쓴다. 키바는 "고정 크기 버튼의 가로 나열" 이라 엔진 없이도
     // 그릴 수 있고, 스크롤·클리핑을 직접 쥐는 편이 낫다 — **U1 이 닫을 공백이 여기 남는다**
     // (컴포넌트 계층에 가로 스크롤이 생기면 이 직접 그리기를 그쪽으로 옮긴다).
-    // 안 보이는 키(선택 없을 때의 `copy`)는 자리도 안 차지한다 — 빈 칸으로 두면 줄이
-    // 어색하게 벌어지고, 그 자리를 눌렀을 때 뭐가 되는지도 애매해진다.
-    var bar_n: usize = 0;
-    for (0..key_bar.len) |i| {
-        if (keyBarVisible(i)) bar_n += 1;
-    }
+    // **줄에서 빠지는 키는 없다.** 조건부로 나타나는 키를 두면 나머지가 밀려 손가락이 겨눈
+    // 자리가 바뀐다 — `copy` 도 늘 있고 못 쓸 때만 흐리다.
+    const bar_n: usize = key_bar.len;
     // 자식 없는 카드 하나가 **밴드 자리**만 잡는다. 키는 아래에서 직접 그린다.
     const bar = tree.card(.{
         .id = key_bar_id_base - 1,
@@ -1874,10 +1869,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 그리지도 않는다 — 화면 밖 quad 는 낭비이고, 잘린 조각이 옆 UI 위에 얹힌다.
         var kx = view_x - key_bar_scroll;
         const ky = @floor(band.y + 5.0); // 세로도 같은 이유로 정수에 맞춘다(위 `kxi` 주석)
-        var slot: usize = 0;
         for (0..key_bar.len) |i| {
-            if (!keyBarVisible(i)) continue;
-            slot += 1;
             defer kx += key_w + key_gap;
             // **창 밖 키는 자리도 안 남긴다.** rect 를 그대로 두면 화살표 아래로 숨은 키가
             // 여전히 눌린다 — 보이지 않는 것이 눌리면 사용자는 왜 그 키가 나갔는지 알 수 없다.
@@ -1896,11 +1888,12 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             key_bar_rects[i] = .{ .x = kxi, .y = ky, .w = key_w, .h = key_h };
             drawKey(i, kxi, ky, tk);
         }
-        // **밴드를 찾았고 키를 다 놓았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가
-        // 키바를 안 먹는다 — 레이아웃에서 키바가 빠진 프레임에 **옛 자리를 그대로 답해 없는 키가
-        // 눌리는 것**을 막는 판정이다. `slot` 은 직접 그리기라 항상 `bar_n` 이지만, 밴드 entry 를
-        // 못 찾으면 이 블록에 아예 안 들어와 `false` 로 남는다(위에서 그렇게 초기화한다).
-        key_bar_ready = slot == bar_n and bar_n > 0;
+        // **밴드를 찾았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가 키바를 안 먹는다 —
+        // 레이아웃에서 키바가 빠진 프레임에 **옛 자리를 그대로 답해 없는 키가 눌리는 것**을 막는
+        // 판정이다. 밴드 entry 를 못 찾으면 이 블록에 아예 안 들어와 `false` 로 남는다(위에서
+        // 그렇게 초기화한다). 놓은 키 수를 여기 또 세지 않는다 — 늘 `bar_n` 이라 **항상 참인
+        // 조건**이 되어 판정이 죽는다(전에 그랬다).
+        key_bar_ready = bar_n > 0;
 
         // **더 있다는 것을 알린다.** 잘린 자리는 화면에서 "끝" 과 구별되지 않는다 — 밀 수 있다는
         // 신호가 없으면 사용자는 `~ / -` 가 존재하는 줄도 모른다. 키 **위에** 그리므로 지나가는
@@ -1973,15 +1966,16 @@ const KeyBarItem = struct {
     codepoint: u32 = 0, // key_id == 0(문자)일 때만
     /// 누르면 **다음 글자에 실릴** 수정자. 0 이면 바로 나가는 키다.
     sticky_mod: u32 = 0,
-    /// 키가 아니라 **복사**다. 선택이 있을 때만 줄에 나타난다 — 늘 두면 한 줄에 자리가
-    /// 모자라고(11개가 상한), 누를 수 없는 버튼이 계속 보이는 것도 어색하다.
+    /// 키가 아니라 **복사**다. 다른 키와 똑같이 늘 줄에 있고, 선택이 없으면 흐리게 그려진다
+    /// (`copyEnabled`). 한때 선택이 있을 때만 나타났는데 줄이 흔들렸다 — [UX §5.4](../../../docs/mobile-ux.md).
     is_copy: bool = false,
     /// 라벨 대신 그릴 **아이콘 슬롯**(없으면 null). 방향키가 여기 해당한다 — 폰트 글리프
     /// (`↑↓←→`)는 폰트마다 작게 디자인돼 44px 키캡에서 글자 라벨보다 훨씬 작아 보였다.
     icon_slot: ?u32 = null,
 };
 
-/// 한 줄에 들어가야 한다 — 폰 세로 폭(~400 논리 px)에 11개가 상한이다.
+/// **개수 상한이 없다** — 44px 를 지키고 가로로 스크롤하므로 폰 폭에 안 들어가도 된다
+/// (한때 11개가 상한이었다). 늘어나면 미는 거리가 길어지는 것이 유일한 대가다.
 const key_bar = [_]KeyBarItem{
     .{ .label = "esc", .key_id = 2 },
     .{ .label = "tab", .key_id = 3 },
@@ -1998,14 +1992,6 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "-", .key_id = 0, .codepoint = '-' },
     .{ .label = "copy", .key_id = 0, .is_copy = true },
 };
-
-/// **모든 키가 늘 줄에 있다.** 한때 `copy` 만 선택이 있을 때 나타났는데, 나타났다 사라지며 줄이
-/// 흔들리고 그 자리가 평소엔 죽은 공간이었다(사용자 결정으로 상시 표시). 선택이 없을 때는
-/// `copyEnabled` 가 거짓이라 흐리게 그려지고 눌러도 아무 일이 없다.
-fn keyBarVisible(i: usize) bool {
-    _ = i;
-    return true;
-}
 
 /// `copy` 가 지금 쓸 수 있나(선택이 있나). 표시와 판정이 같은 값을 본다.
 fn copyEnabled() bool {

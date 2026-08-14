@@ -815,6 +815,23 @@ fn missCount(cp: u32) u32 {
     return n;
 }
 
+// **보이지 않는 글자는 굽지 않는다.** 코어는 grapheme cluster mode(DECSET 2027) 합의가 없으면
+// ZWJ 를 제 셀에 담는다 — 그건 코어의 계약이라 여기서 바꾸지 않는다. 다만 그 셀을 미스로 올리면
+// host 가 **빈 글리프**를 구워 아틀라스 512칸 중 하나를 영구히 먹는다. 미스에 안 올리고 안 굽는다.
+test "0폭 format 문자(ZWJ)는 미스로 안 올라간다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    bridge.maru_mobile_missing_clear();
+    const family = "\u{1F468}\u{200D}\u{1F469}"; // 👨 + ZWJ + 👩
+    _ = bridge.maru_mobile_input(family.ptr, family.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(@as(u32, 0), missCount(0x200D));
+    // 피드가 실제로 격자에 닿았다는 대조군 — 이게 0이면 위 단정은 아무것도 안 잰 것이다.
+    try std.testing.expect(missCount(0x1F468) >= 1);
+}
+
 // **이 테스트는 등록부를 끝까지 채우고 되돌리지 않는다.** Zig 는 선언 순서대로 도므로, 뒤에
 // 오는 테스트에서는 `maru_mobile_atlas_add` 가 조용히 무시된다(슬롯 소진). 글자 등록이 필요한
 // 새 테스트는 **이 위에** 둔다 — 아래에 두면 등록이 안 된 채로 통과해 무엇을 재도 의미가 없다

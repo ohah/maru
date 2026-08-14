@@ -7,6 +7,7 @@
 const std = @import("std");
 const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
+const ui_icon = @import("../../ui/icon.zig");
 
 /// 목록 그룹. `scm_view.Section`과 **같은 값 집합**이지만 component는 그쪽을 import하지 않는다 —
 /// platform이 값을 옮기고, 값이 갈리면 그 변환 함수가 exhaustive switch에서 컴파일로 걸린다.
@@ -112,8 +113,11 @@ pub const DockMetrics = struct {
     status_extent: u32,
     /// 호버 동작 버튼 하나의 폭·높이.
     action_extent: u32,
-    /// 그룹 헤더의 접힘 표시 폭.
+    /// 그룹 헤더의 접힘 표시가 차지하는 가로 자리.
     disclosure_extent: u32,
+    /// **아이콘 한 변(logical px)**. 셀 크기가 아니라 디자인 토큰(`ui/icon.Size`)에서 온다 — 셀로 그리면
+    /// 행 높이와 무관하게 구워져 화살표가 글자보다 크고 세로도 어긋난다(사용자 지적 2026-08-14).
+    icon_extent: u32,
     scrollbar_width: u32,
     scrollbar_inset_x: u32,
     scrollbar_min_thumb: u32,
@@ -133,7 +137,9 @@ pub const DockMetrics = struct {
             .gap = s.px(6, scale_milli),
             .status_extent = s.px(14, scale_milli),
             .action_extent = s.px(20, scale_milli),
-            .disclosure_extent = s.px(14, scale_milli),
+            .disclosure_extent = s.px(16, scale_milli),
+            // 행 높이 24px에 18pt 아이콘은 꽉 차 보인다 — 목록 행은 밀집한 자리라 `compact`가 맞다.
+            .icon_extent = s.px(ui_icon.Size.compact.extentPt(), scale_milli),
             .scrollbar_width = s.px(8, scale_milli),
             .scrollbar_inset_x = s.px(2, scale_milli),
             .scrollbar_min_thumb = s.px(24, scale_milli),

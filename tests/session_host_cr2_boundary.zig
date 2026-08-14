@@ -400,10 +400,100 @@ test "CR2d4 경계는 remote Window transfer 제거와 stable runtime parity를 
     const build_gate = between(
         build,
         "const session_host_cr2d4_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_a_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2d4\"},"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=5"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-a 경계는 pointer-free reducer와 dormant 제품 caller를 고정한다" {
+    const allocator = std.testing.allocator;
+    const reducer = try readSource(allocator, "src/platform/macos/session_host/reconnect_reducer.zig");
+    defer allocator.free(reducer);
+    const tests = try readSource(allocator, "tests/session_host_cr2e_reducer.zig");
+    defer allocator.free(tests);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "pub const JobPhase = enum(u8) {",
+        "pub const RuntimeLedger = enum(u8) {",
+        "pub const LocalState = enum(u8) {",
+        "pub const MutationState = enum(u8) {",
+        "pub const CloseTag = enum(u8) {",
+        "pub const CloseState = union(CloseTag) {",
+        "pub const EventTag = enum(u8) {",
+        "pub const Event = union(EventTag) {",
+        "pub const Decision = enum(u8) {",
+        "pub const TerminalSummary = struct {",
+        "pub fn reduce(before: State, event: Event) Error!Result {",
+        "pub fn completeJob(before: State, summary: TerminalSummary) Error!Result {",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(reducer, declaration));
+    try std.testing.expectEqual(@as(usize, 5), count(tests, "test \"CR2e-a reducer는"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "@import(\"reconnect_reducer",
+            "platform/macos/session_host/reconnect_reducer.zig",
+            "platform/macos/session_host/reconnect_reducer.zig",
+        ),
+    );
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_a_step = b.step(",
+        "const session_host_cr2e_b_step = b.step(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-a"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=5"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 substrate로 고정한다" {
+    const allocator = std.testing.allocator;
+    const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_mutation_seal.zig");
+    defer allocator.free(source);
+    const tests = try readSource(allocator, "tests/session_host_cr2e_mutation.zig");
+    defer allocator.free(tests);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "pub const MutationLifecycle = enum(u8)",
+        "pub const MutationLease = struct {",
+        "pub const MutationOwner = struct {",
+        "pub const GlobalPasteBudget = struct {",
+        "pub const PausedInputMetadata = struct {",
+        "pub const PausedPasteProjection = struct {",
+        "pub const PreparedResend = struct {",
+        "pub const PausedPasteStore = struct {",
+        "pub const testing_api = if (@import(\"builtin\").is_test) struct {",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(source, declaration));
+    inline for (.{
+        "pub const max_paste_bytes: usize = 1024 * 1024;",
+        "pub const max_global_bytes: usize = 8 * 1024 * 1024;",
+        "pub const max_mutation_leases: usize = 64;",
+        "pub const ttl_ns: i96 = 10 * 60 * std.time.ns_per_s;",
+    }) |constant| try std.testing.expectEqual(@as(usize, 1), count(source, constant));
+    try std.testing.expectEqual(@as(usize, 1), count(source, "std.crypto.secureZero(u8, bytes);"));
+    try std.testing.expectEqual(@as(usize, 4), count(tests, "test \"CR2e-b"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "@import(\"reconnect_mutation_seal",
+            "platform/macos/session_host/reconnect_mutation_seal.zig",
+            "platform/macos/session_host/reconnect_mutation_seal.zig",
+        ),
+    );
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_b_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-b"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 

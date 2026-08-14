@@ -83,6 +83,12 @@ pub const Options = struct {
 ///
 /// **`unchanged`를 문자열 비교로 판정하지 않는다.** 대응 결과의 변경 행이 0인지로 본다 — 같은 뜻이면서,
 /// 줄 분할이 달랐던 경우(끝 개행 유무)를 "변경 있음"으로 정직하게 남긴다.
+///
+/// **줄을 무엇으로 볼지는 호출자가 정하고, 그 선택이 목록과의 일치를 좌우한다.** 이 함수는 받은 배열만
+/// 본다. 개행을 떼고 넘기면 `"a\nb\n"`와 `"a\nb"`가 **같은 배열**이 되어 여기서는 "변경 없음"이 나오는데,
+/// 같은 파일에 git은 `+1 -1`을 낸다(끝 개행 제거는 마지막 줄의 변경이다). CRLF도 같다 — `\r`를 떼면
+/// 우리는 "변경 없음", git은 `+2 -2`다. **줄 끝 문자를 줄에 포함해 넘기면** 둘 다 git과 맞는다
+/// (아래 테스트가 두 경우를 나란히 고정한다). 표시할 때 떼는 것은 뷰의 몫이다.
 pub fn compute(
     allocator: std.mem.Allocator,
     left_lines: []const []const u8,
@@ -583,6 +589,49 @@ test "git diff --numstat과 총 변경 줄 수가 같다 — §7이 그 근거�
             std.debug.print("[{s}] 삭제: git={d} 우리={d}\n", .{ c.name, c.git_removed, removed });
             return e;
         };
+    }
+}
+
+test "줄 끝 문자를 줄에 포함해야 git과 맞는다 — 떼고 넘기면 목록과 본문이 정면으로 어긋난다" {
+    // **이것이 §7이 막으려던 모순의 마지막 구멍이다.** 목록은 `git diff --numstat`을 그리고 본문은 여기를
+    // 그리는데, 줄 분할이 다르면 두 숫자가 갈린다. 아래 기대값은 실제 git이 낸 값이다(2026-08-14).
+    //
+    // ① 끝 개행 제거: git `+1 -1`.
+    {
+        // 개행을 떼고 넘긴 경우 — **함정**. 두 배열이 같아져 "변경 없음"이 된다.
+        const stripped_a = [_][]const u8{ "a", "b" };
+        const stripped_b = [_][]const u8{ "a", "b" };
+        var v = try compute(testing.allocator, &stripped_a, &stripped_b, .{});
+        defer if (v == .compare) v.compare.deinit(testing.allocator);
+        try expectView(v, .unchanged); // git은 +1 -1 — 어긋난다
+
+        // 줄 끝 문자를 포함해 넘긴 경우 — git과 같다.
+        const kept_a = [_][]const u8{ "a\n", "b\n" };
+        const kept_b = [_][]const u8{ "a\n", "b" };
+        var v2 = try compute(testing.allocator, &kept_a, &kept_b, .{});
+        defer if (v2 == .compare) v2.compare.deinit(testing.allocator);
+        try expectView(v2, .compare);
+        var removed: usize = 0;
+        var added: usize = 0;
+        for (v2.compare.left) |r| removed += @intFromBool(r.kind == .removed);
+        for (v2.compare.right) |r| added += @intFromBool(r.kind == .added);
+        try testing.expectEqual(@as(usize, 1), removed);
+        try testing.expectEqual(@as(usize, 1), added);
+    }
+
+    // ② LF → CRLF: git `+2 -2`.
+    {
+        const kept_a = [_][]const u8{ "a\n", "b\n" };
+        const kept_b = [_][]const u8{ "a\r\n", "b\r\n" };
+        var v = try compute(testing.allocator, &kept_a, &kept_b, .{});
+        defer if (v == .compare) v.compare.deinit(testing.allocator);
+        try expectView(v, .compare);
+        var removed: usize = 0;
+        var added: usize = 0;
+        for (v.compare.left) |r| removed += @intFromBool(r.kind == .removed);
+        for (v.compare.right) |r| added += @intFromBool(r.kind == .added);
+        try testing.expectEqual(@as(usize, 2), removed);
+        try testing.expectEqual(@as(usize, 2), added);
     }
 }
 

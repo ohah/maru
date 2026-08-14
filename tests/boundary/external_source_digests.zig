@@ -347,7 +347,11 @@ pub const inventory = [_]Proof{
     // hostname 변경이 같은 파일을 건드렸다). 양쪽 사유 주석을 모두 남기고 값만 재계산했다. count는 2 그대로다.
     // CR0b caller2 publication port install/revoke와 owner-thread timestamp oracle이 추가됐다.
     // Client 반사 owner count는 2 그대로이며 raw publisher pointer는 새로 저장하지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6b46c2e716b34ddfc75059a03f0b64705a3b4d2490a71ae3f1790881c1127375" },
+    // N1.5 b·c로 다시 움직인다: diff Term의 네 상태를 tick에서 폴링하는 루프 하나(`editor_diff_ops.poll`),
+    // `Term.rt`의 diff 상태 필드, 그리고 컨트롤 플레인 `EditorMeta`가 `editor_diff_ops.editorMeta`에서
+    // 값을 받도록 바꾼 블록이다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
+    // 집합을 건드리지 않는다(추가된 것은 전부 편집기 축이다).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4953745ee6d6e41939b41315f29d64e3b2d2af280661095f06c89a5f407b5b27" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -283,9 +283,18 @@ pub fn drainGitStatus(self: *AppSession) void {
         self.metal_dirty = true;
         // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다
         // (docs/editor-surface-tooling.md §8.3의 민감정보 경계와 같은 규율).
+        // `head`가 0인데 unborn이 아니면 **증감이 통째로 빈 화면**이라는 뜻이라, 그 갈림이 로그에 보여야 한다
+        // (목록은 숫자 자리를 조용히 비우므로 화면만 봐서는 "변경이 없다"와 구별되지 않는다).
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.scm).info(
-            "git status bytes={d}/{d}/{d} truncated={} req={d}",
-            .{ result.status.len, result.numstat_staged.len, result.numstat_worktree.len, result.truncated, result.request_id },
+            "git status bytes={d} head={d} staged={d} unborn={} truncated={} req={d}",
+            .{
+                result.status.len,
+                result.numstat_head.len,
+                result.numstat_staged.len,
+                maru.session.git_status.parseHead(result.status).unborn,
+                result.truncated,
+                result.request_id,
+            },
         );
     }
 }
@@ -541,22 +550,28 @@ pub fn scmRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, sc
     return row;
 }
 
+/// 목록 모델을 만든다. **렌더·히트테스트·스크롤 상한이 전부 이 함수를 지난다** — 셋이 각자 `scm_view.build`를
+/// 부르던 동안에는 인자 하나만 어긋나도 그린 자리와 눌리는 자리가 갈렸다(입력을 한 곳에서 고른다).
+///
+/// **증감의 출처를 고르는 것도 여기다**: 기본은 `HEAD ↔ 작업트리`이고, unborn 저장소는 HEAD가 없어 그 명령이
+/// 실패하므로 `--cached` 출력을 대신 쓴다(그 상태에서는 추적된 파일이 전부 index에 새로 올라간 것이라 같은 값이다).
+///
+/// **폴백 조건이 "출력이 비었나"가 아니라 "unborn인가"인 이유**(적대적 검증 2026-08-14): 평범한 저장소에서
+/// `numstat_head`가 실패해도 출력은 똑같이 비어 있다. 빈 값으로 갈아타면 **index 기준 숫자를 HEAD 기준인 척**
+/// 보여 준다 — 사용자는 커밋 직전에 그 숫자를 본다. unborn이 아닌데 비었으면 그건 "모른다"이고, 행은 숫자 자리를
+/// 비운다(빈 numstat은 모든 행을 `unknown_delta`로 만든다).
+pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm_view.Model {
+    const result = self.git_result orelse return null;
+    const numstat = if (maru.session.git_status.parseHead(result.status).unborn)
+        result.numstat_staged
+    else
+        result.numstat_head;
+    return scm_view.build(result.status, numstat, self.scm_collapsed, self.scm_expanded, out, scratch);
+}
+
 /// 모델에서 그 인덱스의 행. 렌더와 **같은 입력**으로 만든다(그린 자리와 눌리는 자리를 하나로 유지).
 pub fn scmRowAtIndex(self: *AppSession, index: usize, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
-    const result = self.git_result orelse return null;
-    const model = scm_view.build(
-        result.status,
-        result.numstat_staged,
-        result.numstat_worktree,
-        result.branch_name_status,
-        result.branch_numstat,
-        result.turn_name_status,
-        result.turn_numstat,
-        self.scm_collapsed,
-        self.scm_expanded,
-        out,
-        scratch,
-    );
+    const model = buildScmModel(self, out, scratch) orelse return null;
     if (index >= model.rows.len) return null;
     return model.rows[index];
 }
@@ -569,20 +584,7 @@ pub fn scmRowAtIndex(self: *AppSession, index: usize, out: []scm_view.Row, scrat
 pub fn scmTotalRows(self: *AppSession) usize {
     var buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const result = self.git_result orelse return 0;
-    const model = scm_view.build(
-        result.status,
-        result.numstat_staged,
-        result.numstat_worktree,
-        result.branch_name_status,
-        result.branch_numstat,
-        result.turn_name_status,
-        result.turn_numstat,
-        self.scm_collapsed,
-        self.scm_expanded,
-        &buf,
-        &scratch,
-    );
+    const model = buildScmModel(self, &buf, &scratch) orelse return 0;
     return model.rows.len;
 }
 
@@ -606,12 +608,12 @@ pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
         self.showNotice("하위 모듈은 비교를 표시하지 않습니다");
         return;
     }
+    // **섹션은 더 이상 기준이 아니다**(§3.5.2). 추적된 파일은 스테이지 여부와 무관하게 `HEAD ↔ 작업트리`를 열고,
+    // 추적되지 않은 파일은 비교 대상이 없어 내용을 그대로 연다. 스테이지 쪽·미스테이지 쪽만 보는 비교는
+    // 컨텍스트 메뉴가 `.staged`/`.unstaged`로 따로 연다(같은 파일을 동시에 열 수 있게 base가 키에 든다).
     const base: dock_panel.DiffBase = if (row.conflicted) .conflict else switch (row.section) {
-        .staged => .staged,
-        .unstaged => .unstaged,
+        .tracked => .head_worktree,
         .untracked => .untracked,
-        .branch => .branch,
-        .turn => .turn,
     };
     // rename은 왼쪽이 옛 경로다(`R` 행의 orig_path). 스테이지된 rename만 그 구분이 의미 있다.
     openDiffTerm(self, repo, abs, row.path, row.orig_path, base);

@@ -1084,18 +1084,26 @@ pub fn buildDockScmDrawList(
                 const count = std.fmt.bufPrint(&buf, "{d}", .{sec.count}) catch "";
                 // 접힘 표시를 제목 앞에 둔다 — 눌러서 접을 수 있다는 것이 보여야 한다(눌러보기 전에 알 수 있게).
                 const folded = @intFromEnum(sec.section) < collapsed.len and collapsed[@intFromEnum(sec.section)];
-                try cells.append(allocator, .{
+                // 들여쓰기 한 칸조차 못 들어가는 폭이 실제로 온다(도크를 끝까지 좁히면 cols=1) — 그때 이
+                // 셀을 그대로 쓰면 격자 밖 열이 된다.
+                if (inset < cols) try cells.append(allocator, .{
                     .row = r,
                     .col = inset,
                     .codepoint = if (folded) '>' else 'v',
                     .width = 1,
                     .style = .{ .foreground = muted },
                 });
+                // 섹션 체크박스는 오른쪽 끝이다(행 체크박스와 같은 열 — 세로로 줄이 맞아야 일괄 동작임이 보인다).
+                // 스테이지할 수 있는 행이 없으면(전부 충돌) 아예 그리지 않는다.
+                const check = if (sec.stage) |stage| checkboxText(stage) else "";
+                if (check.len > 0 and cols > check.len)
+                    appendAscii(&cells, allocator, check, r, cols - @as(u16, @intCast(check.len)), .{ .foreground = accent }) catch {};
+                const count_col = cols -| @as(u16, @intCast(check.len)) -| @as(u16, @intCast(count.len)) -| 1;
                 const title_col = inset + 2;
-                if (cols > title_col)
-                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, sec.section.title(), r, title_col, cols -| @as(u16, @intCast(count.len)) -| 1, .{ .foreground = fg, .bold = true }, false, .head);
-                // 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 개수가 밀려 사라지지 않는다.
-                if (cols > count.len) appendAscii(&cells, allocator, count, r, cols - @as(u16, @intCast(count.len)), .{ .foreground = muted }) catch {};
+                if (cols > title_col and count_col > title_col)
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, sec.section.title(), r, title_col, count_col, .{ .foreground = fg, .bold = true }, false, .head);
+                // 개수는 체크박스 왼쪽에 고정한다 — 제목이 길어져도 개수가 밀려 사라지지 않는다.
+                if (count_col > title_col) appendAscii(&cells, allocator, count, r, count_col, .{ .foreground = muted }) catch {};
             },
             .more => |more| {
                 // "모두 보기 (N개 더)" — 숨은 개수를 말한다. 조용히 자르면 사용자는 파일이 사라졌다고 읽는다.
@@ -1105,7 +1113,7 @@ pub fn buildDockScmDrawList(
                     _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, r, inset + 4, cols, .{ .foreground = accent }, false, .head);
             },
             .file => |file| {
-                // 오른쪽부터 자리를 잡는다: 상태 문자 1칸 + 증감. 남는 폭이 이름·경로 몫이다.
+                // 오른쪽부터 자리를 잡는다: 체크박스 + 증감. 남는 폭이 이름·경로 몫이다.
                 var delta_buf: [24]u8 = undefined;
                 const delta: []const u8 = if (file.unknown_delta)
                     ""
@@ -1113,16 +1121,22 @@ pub fn buildDockScmDrawList(
                     "bin"
                 else
                     std.fmt.bufPrint(&delta_buf, "+{d} -{d}", .{ file.added, file.removed }) catch "";
-                const letter_col = cols -| 1;
-                const delta_col = letter_col -| @as(u16, @intCast(delta.len)) -| 1;
+                // **충돌 행에는 체크박스를 두지 않는다**(§3.5.2) — 누르면 `git add`가 돌아 충돌 표시가 든 파일이
+                // "해결됨"으로 커밋된다. 해결은 편집기에서 하는 일이다.
+                const check = if (file.stage == .conflicted) "" else checkboxText(file.stage);
+                const check_col = cols -| @as(u16, @intCast(check.len));
+                const delta_col = check_col -| @as(u16, @intCast(delta.len)) -| 1;
                 const name = std.fs.path.basename(file.path);
                 const dir = file.path[0 .. file.path.len - name.len];
+                // 상태 문자는 **행 왼쪽**이다(2판) — 오른쪽 끝은 체크박스가 쓴다.
+                if (inset < cols) try cells.append(allocator, .{ .row = r, .col = inset, .codepoint = file.letter, .width = 1, .style = .{ .foreground = accent, .bold = true } });
                 // 종류 아이콘은 탐색기와 **같은 분류기**를 쓴다 — 같은 파일이 두 화면에서 다른 아이콘이면 안 된다.
                 if (file_tree_icon.codepoint(file_tree_icon.classify(.file, name, false))) |cp| {
-                    if (inset + 2 < cols)
-                        try cells.append(allocator, .{ .row = r, .col = inset + 1, .codepoint = cp, .width = 2, .style = .{ .foreground = muted } });
+                    // 아이콘은 **2칸**이라 시작 열 + 2가 끝을 넘지 않아야 한다(1칸짜리 판정으로 재면 반 칸이 샌다).
+                    if (inset + 2 + 2 <= cols)
+                        try cells.append(allocator, .{ .row = r, .col = inset + 2, .codepoint = cp, .width = 2, .style = .{ .foreground = muted } });
                 }
-                var col = inset + 4;
+                var col = inset + 5;
                 const name_style: terminal.Style = if (is_selected)
                     .{ .foreground = accent, .bold = true } // 선택 행은 이름을 강조 — 어느 비교를 보고 있는지 남는다
                 else
@@ -1131,9 +1145,12 @@ pub fn buildDockScmDrawList(
                     col = try appendEllipsizedTitle(allocator, &cells, &pool, name, r, col, @min(delta_col, cols), name_style, false, .head);
                 if (dir.len > 0 and col + 1 < delta_col)
                     _ = try appendEllipsizedTitle(allocator, &cells, &pool, dir, r, col + 1, delta_col, .{ .foreground = muted }, false, .head);
-                if (delta.len > 0 and delta_col < cols)
+                // **끝 열까지 들어가는지로 판정한다.** `check_col`/`delta_col`은 포화 뺄셈이라 폭이 아주 좁으면
+                // 0으로 내려앉는데, 시작 열만 보면 그때 격자 **밖** 열에 셀을 쓴다(도크를 좁게 끌면 재현).
+                if (delta.len > 0 and delta_col +| @as(u16, @intCast(delta.len)) <= cols)
                     appendAscii(&cells, allocator, delta, r, delta_col, .{ .foreground = muted }) catch {};
-                try cells.append(allocator, .{ .row = r, .col = letter_col, .codepoint = file.letter, .width = 1, .style = .{ .foreground = accent, .bold = true } });
+                if (check.len > 0 and check_col +| @as(u16, @intCast(check.len)) <= cols)
+                    appendAscii(&cells, allocator, check, r, check_col, .{ .foreground = accent }) catch {};
             },
         }
         r += 1;
@@ -1147,6 +1164,18 @@ pub fn buildDockScmDrawList(
         .cells = try cells.toOwnedSlice(allocator),
         .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+/// 체크박스를 **ASCII 세 칸**으로 그린다. 이 셀-그리드 렌더는 컴포넌트 이관(계획 P1b) 전까지의 임시 표면이라,
+/// 폰트마다 있을지 없을지 모르는 `☑`류 기호 대신 어떤 등폭 폰트에서도 같게 보이는 형태를 쓴다. 부분 스테이지가
+/// 빈 칸과 구별돼야 하므로 세 상태가 **모두 다른 글자**다.
+fn checkboxText(stage: scm_view.Stage) []const u8 {
+    return switch (stage) {
+        .full => "[x]",
+        .partial => "[-]",
+        .none => "[ ]",
+        .conflicted => "", // 호출자가 이미 걸렀지만, 여기서도 아무것도 그리지 않는다
     };
 }
 
@@ -3292,25 +3321,71 @@ test "buildDockScmDrawList: 브랜치 헤더가 첫 줄이고 접힌 섹션은 �
     // 여기서 깨지면 사용자가 누른 행과 열리는 행이 어긋난다.
     const allocator = std.testing.allocator;
     const rows = [_]scm_view.Row{
-        .{ .section = .{ .section = .staged, .count = 2 } },
-        .{ .file = .{ .section = .staged, .path = "src/main.zig", .letter = 'M', .added = 3, .removed = 1 } },
+        .{ .section = .{ .section = .tracked, .count = 2, .stage = .partial } },
+        .{ .file = .{ .section = .tracked, .path = "src/main.zig", .letter = 'M', .stage = .full, .added = 3, .removed = 1 } },
     };
     const head: git_status.Head = .{ .branch = "feat/x", .ahead = 2, .behind = 1, .has_ab = true };
-    var dl = try buildDockScmDrawList(allocator, 40, 3, head, &rows, &.{ false, false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+    var dl = try buildDockScmDrawList(allocator, 40, 3, head, &rows, &.{ false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
     defer dl.deinit(allocator);
 
     // 0행: git 아이콘 + 브랜치 이름 + ahead/behind.
     try std.testing.expect(hasCell(dl.cells, 0, icons.codepoint(.git_branch)));
     try std.testing.expect(hasCell(dl.cells, 0, 'f')); // feat/x
     try std.testing.expect(hasCell(dl.cells, 0, '2')); // ↑2
-    // 1행: 섹션 헤더(펼침 표시 v) — 2행: 파일 행(아이콘 + 상태 문자 M).
+    // 1행: 섹션 헤더(펼침 표시 v) — 2행: 파일 행(상태 문자 M).
     try std.testing.expect(hasCell(dl.cells, 1, 'v'));
     try std.testing.expect(hasCell(dl.cells, 2, 'M'));
+    // 체크박스는 두 줄 다 **같은 오른쪽 끝 열**에서 시작한다 — 세로로 안 맞으면 섹션 체크박스가 그 섹션의
+    // 일괄 동작이라는 것이 안 보인다. 부분(`-`)과 전체(`x`)는 다른 글자다.
+    const section_check = cellAt(dl.cells, 1, 40 - 3).?;
+    const file_check = cellAt(dl.cells, 2, 40 - 3).?;
+    try std.testing.expectEqual(@as(u32, '['), section_check.codepoint);
+    try std.testing.expectEqual(@as(u32, '['), file_check.codepoint);
+    try std.testing.expectEqual(@as(u32, '-'), cellAt(dl.cells, 1, 40 - 2).?.codepoint);
+    try std.testing.expectEqual(@as(u32, 'x'), cellAt(dl.cells, 2, 40 - 2).?.codepoint);
 
-    var folded = try buildDockScmDrawList(allocator, 40, 3, head, rows[0..1], &.{ true, false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+    var folded = try buildDockScmDrawList(allocator, 40, 3, head, rows[0..1], &.{ true, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
     defer folded.deinit(allocator);
     try std.testing.expect(hasCell(folded.cells, 1, '>')); // 접힘 표시
     try std.testing.expect(!hasCell(folded.cells, 1, 'v'));
+}
+
+test "buildDockScmDrawList: 충돌 행에는 체크박스를 그리지 않는다" {
+    // 누르면 `git add`가 도는 컨트롤을 충돌 파일에 두면, 충돌 표시가 든 파일이 "해결됨"으로 커밋된다(§3.5.2).
+    const allocator = std.testing.allocator;
+    const rows = [_]scm_view.Row{
+        .{ .file = .{ .section = .tracked, .path = "f.txt", .letter = 'U', .stage = .conflicted, .unknown_delta = true } },
+    };
+    var dl = try buildDockScmDrawList(allocator, 40, 2, null, &rows, &.{ false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+    defer dl.deinit(allocator);
+    try std.testing.expect(hasCell(dl.cells, 0, 'U'));
+    try std.testing.expect(!hasCell(dl.cells, 0, '[')); // 체크박스 자체가 없다
+}
+
+test "buildDockScmDrawList: 폭이 아주 좁아도 격자 밖 열에 쓰지 않는다" {
+    // 도크를 좁게 끌면 cols가 한 자리까지 내려간다. 시작 열만 보고 그리면 포화 뺄셈으로 0이 된 자리에서
+    // 체크박스·증감이 오른쪽으로 흘러 격자 밖 열을 만든다(적대적 검증 2026-08-14).
+    const allocator = std.testing.allocator;
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .tracked, .count = 1, .stage = .full } },
+        .{ .file = .{ .section = .tracked, .path = "a.txt", .letter = 'M', .stage = .full, .added = 12, .removed = 34 } },
+    };
+    var width: u16 = 1;
+    while (width <= 12) : (width += 1) {
+        var dl = try buildDockScmDrawList(allocator, width, 3, null, &rows, &.{ false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+        defer dl.deinit(allocator);
+        for (dl.cells) |c| {
+            try std.testing.expect(c.col < width);
+            try std.testing.expect(c.col + c.width <= width); // 2칸 아이콘도 끝을 넘지 않는다
+        }
+    }
+}
+
+fn cellAt(cells: []const renderer.DrawCell, row: u16, col: u16) ?renderer.DrawCell {
+    for (cells) |c| {
+        if (c.row == row and c.col == col) return c;
+    }
+    return null;
 }
 
 fn hasCell(cells: []const renderer.DrawCell, row: u16, codepoint: u32) bool {

@@ -84,6 +84,9 @@ pub const max_output_bytes: usize = 16 << 20;
 pub const Result = struct {
     /// `git status --porcelain=v2 --branch` 출력.
     status: []u8 = &.{},
+    /// `git diff --numstat HEAD` 출력 — **목록 행의 증감**(행의 기본 비교와 같은 범위). unborn 저장소에서는
+    /// HEAD가 없어 실패하므로 **빈 문자열**이고, 그때는 호출자가 `numstat_staged`를 대신 쓴다(§3.5.2).
+    numstat_head: []u8 = &.{},
     /// `git diff --numstat --cached` 출력.
     numstat_staged: []u8 = &.{},
     /// `git diff --numstat` 출력.
@@ -106,6 +109,7 @@ pub const Result = struct {
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.status);
+        allocator.free(self.numstat_head);
         allocator.free(self.numstat_staged);
         allocator.free(self.numstat_worktree);
         allocator.free(self.branch_name_status);
@@ -591,7 +595,11 @@ fn diffWorker(job: *Job) void {
 
     if (target.base != .untracked) {
         // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
-        const side: git_command.BlobSide = if (target.base == .staged or target.base == .conflict) .head else .index;
+        // 기본 비교(`head_worktree`)도 왼쪽이 HEAD다 — 오른쪽은 아래에서 작업트리를 읽는다.
+        const side: git_command.BlobSide = switch (target.base) {
+            .staged, .conflict, .head_worktree => .head,
+            .unstaged, .untracked, .branch, .turn => .index,
+        };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
@@ -780,6 +788,10 @@ fn worker(job: *Job) void {
         .{ git_command.Kind.merge_base, "merge_base" },
         .{ git_command.Kind.branch_name_status, "branch_name_status" },
         .{ git_command.Kind.branch_numstat, "branch_numstat" },
+        // **`numstat_head`도 선택이다**: unborn 저장소에는 HEAD가 없어 실패하는데, 그건 그 상태의 정상이고
+        // 그때는 목록이 `numstat_staged`로 증감을 붙인다. 여기서 ok를 내리면 첫 커밋 전 저장소가 통째로
+        // "git 읽기에 실패했습니다"가 된다.
+        .{ git_command.Kind.numstat_head, "numstat_head" },
     }) |pair| {
         if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
             @field(result, pair[1]) = out.bytes;

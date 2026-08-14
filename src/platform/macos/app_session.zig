@@ -14359,22 +14359,9 @@ pub const AppSession = struct {
                         if (self.dock.view == .source_control and scm_cols > 0 and visible_rows > 0) {
                             var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
                             var scratch: [std.fs.max_path_bytes]u8 = undefined;
-                            const result = self.git_result;
-                            // 히트테스트(scmRowAt)와 **같은 입력·같은 상한**으로 만든다 — 그린 자리와 눌리는
+                            // 히트테스트(scmRowAt)·스크롤 상한과 **같은 함수**로 만든다 — 그린 자리와 눌리는
                             // 자리가 어긋나지 않게. 첫 줄은 브랜치 헤더라 파일·섹션 행은 한 줄 아래부터다.
-                            const model = if (result) |r| scm_view.build(
-                                r.status,
-                                r.numstat_staged,
-                                r.numstat_worktree,
-                                r.branch_name_status,
-                                r.branch_numstat,
-                                r.turn_name_status,
-                                r.turn_numstat,
-                                self.scm_collapsed,
-                                self.scm_expanded,
-                                &rows_buf,
-                                &scratch,
-                            ) else null;
+                            const model = git_ops.buildScmModel(self, &rows_buf, &scratch);
                             if (model) |m| {
                                 if (m.empty) {
                                     // 빈 상태는 오류가 아니다(§3.5) — 경고색을 쓰지 않는다.
@@ -15334,7 +15321,12 @@ pub const AppSession = struct {
         const base = termLabel(term);
         if (term.file_entry) |entry| {
             if (entry.kind == .diff) {
-                return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, entry.diff_base.label() });
+                // **기본 비교(`head_worktree`)는 꼬리표가 없다** — 목록에서 여는 것 대부분이 그것이라 전부 같은
+                // 꼬리표를 달면 구분에 쓸모가 없다. 라벨이 비었는데 `· `를 그대로 이어 붙이면 탭이
+                // `README.md · `로 끝나 무언가 잘린 것처럼 보인다(적대적 검증 2026-08-14에서 잡힌 결함).
+                const label = entry.diff_base.label();
+                if (label.len == 0) return allocator.dupe(u8, base);
+                return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, label });
             }
         }
         return flagPrefixedLabel(allocator, base, term.agent_state == .running);
@@ -53930,7 +53922,9 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     session.git_result = .{
         .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
         .numstat_staged = try git_backend_mod.worker_allocator.dupe(u8, ""),
-        .numstat_worktree = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
+        // 2판의 증감 출처는 `HEAD ↔ 작업트리`다(§3.5.2) — 행의 기본 비교와 같은 범위여야 화면 숫자와 여는
+        // diff가 어긋나지 않는다.
+        .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
         .ok = true,
     };
 
@@ -53970,7 +53964,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
 
     // 섹션 헤더 클릭은 접힘을 토글한다(열기가 아니다).
     session.mouse(1, x, row_y(session, 1, rect.y), 0, 0);
-    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.unstaged)]);
+    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.tracked)]);
 }
 
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.
@@ -53999,6 +53993,35 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
     try std.testing.expectEqual(@as(usize, 2), diffs);
     try std.testing.expect(git_ops.diffTermFor(session, "/repo/a.txt", .unstaged) != null);
     try std.testing.expect(git_ops.diffTermFor(session, "/repo/b.txt", .unstaged) != null);
+}
+
+// [적대적 검증 2026-08-14] 2판의 기본 비교(`head_worktree`)는 꼬리표가 없다. 라벨을 무조건 `· `로 이어 붙이던
+// 탭 제목이 **목록에서 여는 거의 모든 diff**를 `a.txt · `로 끝나게 만들었다(무언가 잘린 것처럼 보인다).
+test "diff 탭 라벨: 기본 비교는 꼬리표 없이, 그 외 기준은 이름을 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .head_worktree);
+    const plain = git_ops.diffTermFor(session, "/repo/a.txt", .head_worktree) orelse return error.MissingDiffTerm;
+    const plain_label = try session.diffAwareLabel(allocator, plain);
+    defer allocator.free(plain_label);
+    try std.testing.expect(std.mem.indexOf(u8, plain_label, "·") == null);
+    try std.testing.expect(!std.mem.endsWith(u8, plain_label, " "));
+
+    // 기본이 아닌 비교는 무엇을 보고 있는지 탭에서 알 수 있어야 한다(같은 파일을 둘 다 열 수 있으므로).
+    git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .staged);
+    const staged = git_ops.diffTermFor(session, "/repo/a.txt", .staged) orelse return error.MissingDiffTerm;
+    const staged_label = try session.diffAwareLabel(allocator, staged);
+    defer allocator.free(staged_label);
+    try std.testing.expect(std.mem.indexOf(u8, staged_label, "스테이지됨") != null);
+
+    // 두 Term은 서로 다른 Term이다 — 유일성 키에 base가 들어 있다는 계약의 반대쪽 확인.
+    try std.testing.expect(plain != staged);
 }
 
 // [E1 종료 조건] 읽는 중에 그 Term을 닫는 경로. 늦게 도착한 결과가 **사라진 entry를 건드리면** 크래시고, 그냥

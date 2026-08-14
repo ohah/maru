@@ -52,6 +52,11 @@ ime-ios)
     # **하드웨어 키보드가 붙어 있으면 iOS 가 소프트 키보드를 숨긴다.** 앱이 강제할 공개 API 는
     # 없다(실기기에는 하드웨어 키보드가 없어 늘 뜬다). 시뮬레이터 설정을 끄고 다시 띄운다 —
     # 이 단계를 사람 손에 맡기면 "왜 로그가 안 나오지" 로 한 시간을 쓴다(실제로 그랬다).
+    #
+    # **`defaults` 만으로는 부족하다(실측).** 값이 이미 0 이어도 실행 중인 시뮬레이터는 여전히
+    # 하드웨어 키보드를 붙들고 있어 소프트 키보드가 안 뜬다 — 시뮬레이터를 껐다 켜도 그랬고,
+    # 같은 상태에서 **Safari 조차 키보드가 안 떴다**(앱 결함이 아니라는 증거). 지배권은
+    # I/O ▸ Keyboard 메뉴에 있으므로 아래에서 메뉴를 직접 누른다.
     if [ "$(defaults read com.apple.iphonesimulator ConnectHardwareKeyboard 2>/dev/null)" != "0" ]; then
         echo "하드웨어 키보드를 끄고 시뮬레이터를 다시 띄운다"
         defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
@@ -69,8 +74,12 @@ ime-ios)
     # backspace 가 섞여 나온다). 화면 키를 눌러야 진짜 IME 가 `setMarkedText` 를 보낸다.
     #
     # 좌표는 접근성에서 뽑았다(`idb ui describe-all` 의 AXLabel). 두벌식 ㅎ+ㅏ+ㄴ = "한".
-    # 하드웨어 키보드가 붙어 있으면 소프트 키보드가 안 뜬다:
-    #   defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
+    #
+    # **소프트 키보드를 메뉴로 켠다.** `defaults` 가 안 통하는 경우가 있어(위 주석) 여기서
+    # I/O ▸ Keyboard ▸ Toggle Software Keyboard 를 직접 누른다. 토글이라 이미 떠 있으면 내려간다 —
+    # 그래서 아래 탭이 실패하면 한 번 더 돌리면 된다.
+    osascript -e 'tell application "System Events" to tell process "Simulator" to click menu item "Toggle Software Keyboard" of menu 1 of menu item "Keyboard" of menu 1 of menu bar item "I/O" of menu bar 1' >/dev/null 2>&1 || true
+    sleep 1
     for xy in "202 671" "320 671" "83 671"; do
         idb ui tap $xy --udid "$DEV" >/dev/null 2>&1
         sleep 1

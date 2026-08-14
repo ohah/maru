@@ -82,6 +82,7 @@ static struct {
     float touch_last_y;   // 직전 MOVE 의 논리 y — 이동량을 내는 기준
     float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
     float fling_vy;       // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
+    int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
     int ready;
     int frames;
     double last_ms;
@@ -648,7 +649,12 @@ static void drawFrame(void) {
     float scale = g.scale;
     // 상태바·제스처바를 뺀 영역만 준다 — iOS 의 safeAreaInsets 와 같은 자리다.
     unsigned int lw = (unsigned int)(g.extent.width / scale);
-    unsigned int lh = (unsigned int)((g.extent.height - g.inset_top - g.inset_bottom) / scale);
+    // **소프트 키보드도 inset 이다.** 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라
+    // 하단(보조 키바·상태바)이 통째로 가려진다 — 그 키바의 존재 이유가 "소프트 키보드에
+    // Ctrl·Esc·Tab·화살표가 없다" 인데 정작 키보드가 뜨면 못 쓰게 된다.
+    int avail_px = (int)g.extent.height - (int)g.inset_top - (int)g.inset_bottom - g.keyboard_px;
+    if (avail_px < 1) avail_px = 1;
+    unsigned int lh = (unsigned int)(avail_px / scale);
     // **입력 스레드와 겹치는 구간만 막는다.** IME 가 `maru_mobile_input` 으로 코어에 쓰는
     // 것과 여기서 격자를 읽는 것이 겹치면 셀을 반쯤 쓴 상태로 읽는다. 오류 문자열도 두
     // 스레드가 만지므로 같이 넣는다.
@@ -862,6 +868,20 @@ Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
     unsigned int got = maru_mobile_long_press_ms();
     pthread_mutex_unlock(&g_bridge_lock);
     LOGI("MARU_INPUT long_press_ms=%u (sent %d)", got, ms);
+}
+
+/// 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
+///
+/// **`adjustResize` 로는 안 된다** — targetSdk 35(Android 15)부터 edge-to-edge 가 강제되어
+/// 그 값이 무시된다. 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라 하단(보조 키바·
+/// 상태바)이 통째로 가려진다. iOS 는 같은 일을 `UIKeyboardWillChangeFrame` 으로 한다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px) {
+    (void)env;
+    (void)cls;
+    if (g.keyboard_px == (int)px) return;
+    g.keyboard_px = (int)px;
+    LOGI("MARU_KEYBOARD height=%d", (int)px);
 }
 
 JNIEXPORT void JNICALL

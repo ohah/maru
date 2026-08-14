@@ -1598,7 +1598,12 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
     // **슬롯 하나는 양폭(한글) 상자고 단폭 글자는 왼쪽 절반만 쓴다**(M4a3, §글리프 기하).
     // 여기가 그 절반 규칙을 안 따라와 슬롯 **전체**를 샘플링하고 있었다.
-    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5);
+    //
+    // **그런데 양폭 글자는 슬롯 전체가 맞다.** 절반 규칙을 모든 글자에 똑같이 적용하면 한글이
+    // **왼쪽 반쪽만** 그려져 자모 조각처럼 보인다(설정 화면에 한글 라벨을 처음 넣고서 화면으로
+    // 잡았다 — 그전 chrome 라벨은 `zsh`·`esc` 뿐이라 안 드러났다). 폭 판정은 코어와 같은
+    // 자리(`maru.width.cellWidth`)를 쓴다 — 여기서 따로 세면 본문과 chrome 이 갈린다.
+    const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
     var pen = x0;
     var view = std.unicode.Utf8View.init(text) catch return;
     var it = view.iterator();
@@ -1609,6 +1614,9 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
         // chrome 텍스트는 클러스터를 안 만든다 — 코어 격자가 아니라 UTF-8 문자열이라 결합 정보가
         // 없다. 단일 코드포인트 열로 넘긴다.
         const cell = atlasCell(&.{cp}, 0);
+        // **양폭이면 슬롯 전체, 단폭이면 왼쪽 절반.** 폭이 그리는 크기와 kind 를 함께 정한다.
+        const wide = maru.width.cellWidth(cp) == 2;
+        const draw_w: i32 = @intFromFloat(if (wide) half_w * 2 else half_w);
         // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).
         const adv_px: i32 = if (cell) |c|
             @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale)
@@ -1630,7 +1638,7 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
                         // 슬롯의 왼쪽 절반. **컬러면 컬러 텍스처(5)** — 같은 조회를 쓰면서
                         // kind 를 안 따라오면 이모지가 든 탭 제목이 커버리지 텍스처의 같은
                         // 슬롯을 샘플링해 엉뚱한 글자가 나온다(적대적 검증 2라운드).
-                        .kind = if (c.color) 5 else 3,
+                        .kind = if (c.color) (if (wide) @as(u32, 4) else 5) else (if (wide) @as(u32, 1) else 3),
                         .cell_x = c.col,
                         .cell_y = c.row,
                     };
@@ -1933,6 +1941,14 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     for (0..6) |i| {
         if (!reserveQuad()) break;
         const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
+        // 톱니(슬롯 1)가 설정 화면 입구다. **그리는 자리를 그대로 히트로 쓰되 44 로 넓힌다** —
+        // 아이콘은 18px 이라 그대로 받으면 손가락 기준의 절반도 안 된다(§5.1 "작게 그리고
+        // 넓게 받는다" — 아이콘은 서로 떨어져 있어 목록과 달리 이 기법이 통한다).
+        if (i == 1) {
+            const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + 9;
+            const cy = @as(f32, @floatFromInt(icon_y)) + 9;
+            set_gear_rect = .{ .x = cx - 22, .y = cy - 22, .w = 44, .h = 44 };
+        }
         quad_buf[quad_count] = .{
             .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),
             .y = @floatFromInt(icon_y),
@@ -1953,6 +1969,299 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 
 /// UiId → 문자열. `RectEntry` 는 문자열을 들고 있지 않으므로(레이아웃만 담는다) 조립할 때
 /// 쓴 값을 여기서 되찾는다.
+// ── 설정 화면 (PoC) ───────────────────────────────────────────────────────────
+//
+// **라우터 하나로 민다 — 모달이 아니다**([UX 계약 §3](../../../docs/mobile-ux.md)). 폰에서
+// 전체화면 모달과 push 는 **보이는 것이 똑같고**, 다른 것은 되돌아가는 손짓의 의미뿐이다:
+// Android 하드웨어 뒤로가기와 iOS 좌측 스와이프가 pop 이어야 하는데, 모달을 스택 밖에 두면
+// 그 둘이 갈 곳이 없어 **스택을 두 벌** 두게 된다.
+//
+// **PoC 다.** 값은 아직 config 로 안 간다 — 스키마는 M10 이 짠다. 여기서 확인하려는 것은
+// **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
+// 전부 실제로 눌린다.
+
+const Screen = enum { terminal, settings };
+var screen: Screen = .terminal;
+
+/// 행 높이. **한 셀(22)이 아니라 손가락(44)이다** — 목록에서는 "작게 그리고 넓게 받는다"
+/// 가 안 통한다(22 간격에 44 히트를 주면 위아래 행이 11px 씩 겹쳐 어느 행인지 모호해진다).
+/// 그래서 **행 자체를 키우고 행 전체를 히트로** 쓴다(iOS·Android 설정 앱 관례).
+const set_row_h: f32 = 44.0;
+const set_head_h: f32 = 52.0;
+const set_pad_x: f32 = 16.0;
+
+const SetKind = union(enum) {
+    toggle: bool,
+    choice: struct { idx: usize, items: []const []const u8 },
+    number: i32,
+};
+const SetRow = struct { label: []const u8, kind: SetKind };
+
+/// **데스크톱 키를 그대로 옮기지 않았다.** 모바일에 뜻이 있는 것만 골랐다 — `shell.*`·
+/// `quick-terminal.*`·`window.blur` 처럼 로컬 셸·여러 창·마우스를 전제하는 키는 빠진다
+/// (계약 §1 원격 전용, [UX §2.4](../../../docs/mobile-ux.md)).
+var set_rows = [_]SetRow{
+    .{ .label = "테마", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "maru", "nord", "dracula", "one-dark" } } } },
+    .{ .label = "폰트 크기", .kind = .{ .number = 15 } },
+    .{ .label = "커서 깜빡임", .kind = .{ .toggle = true } },
+    .{ .label = "표시 주기", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "30Hz", "60Hz" } } } },
+    .{ .label = "스크롤백 줄 수", .kind = .{ .number = 1000 } },
+    .{ .label = "키바 표시", .kind = .{ .toggle = true } },
+    .{ .label = "링크 감지", .kind = .{ .toggle = true } },
+    .{ .label = "벨 소리", .kind = .{ .toggle = false } },
+};
+
+const SetRect = struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 };
+fn setHit(r: SetRect, x: f32, y: f32) bool {
+    return r.w > 0 and r.h > 0 and x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h;
+}
+
+var set_row_rects: [set_rows.len]SetRect = @splat(.{});
+var set_back_rect: SetRect = .{};
+var set_gear_rect: SetRect = .{};
+var set_list: SetRect = .{}; // 목록이 보이는 창(헤더 아래) — 클리핑·스크롤 한계의 기준
+var set_scroll: f32 = 0;
+var set_max_scroll: f32 = 0;
+var set_fling: f32 = 0;
+var set_pressed: ?usize = null;
+var set_back_pressed: bool = false;
+var set_open: ?usize = null; // 팝업이 열린 행
+var set_item_rects: [8]SetRect = @splat(.{});
+var set_item_n: usize = 0;
+var set_active: bool = false;
+var set_down_x: f32 = 0;
+var set_down_y: f32 = 0;
+var set_last_y: f32 = 0;
+var set_moved: f32 = 0;
+
+fn clampSetScroll() void {
+    if (set_scroll < 0) set_scroll = 0;
+    if (set_scroll > set_max_scroll) set_scroll = set_max_scroll;
+}
+
+/// 키바 가로 관성과 같은 모양이다(프레임당 감쇠 — wall-clock 이관은 U1 잔여).
+fn stepSetFling() void {
+    if (set_active or set_fling == 0) return;
+    set_scroll -= set_fling;
+    if (set_scroll <= 0 or set_scroll >= set_max_scroll) set_fling = 0;
+    clampSetScroll();
+    set_fling *= 0.92;
+    if (@abs(set_fling) < 0.5) set_fling = 0;
+}
+
+fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
+    const w: f32 = 44;
+    const h: f32 = 26;
+    const x = cx - w;
+    const y = cy - h / 2;
+    push(.{ .x = @intFromFloat(x), .y = @intFromFloat(y), .w = @intFromFloat(w), .h = @intFromFloat(h) }, tk.get(if (on) .accent_bar else .divider), 0xFF, 13, 0);
+    const k: f32 = 20;
+    const kx = if (on) x + w - k - 3 else x + 3;
+    push(.{ .x = @intFromFloat(kx), .y = @intFromFloat(y + 3), .w = @intFromFloat(k), .h = @intFromFloat(k) }, tk.get(.surface_fg), 0xFF, 10, 0);
+}
+
+/// 설정 화면을 창 전체에 그린다. **그리는 자리를 그대로 히트 사각형에 기록한다** — 따로
+/// 계산하면 갈린다(키바에서 1px 어긋나 옆 키가 나갔던 그 결함).
+fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    // ── 헤더: 뒤로 + 제목
+    set_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h }; // 44 이상 정사각
+    if (set_back_pressed) push(.{ .x = @intFromFloat(set_back_rect.x), .y = @intFromFloat(set_back_rect.y), .w = @intFromFloat(set_back_rect.w), .h = @intFromFloat(set_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = set_back_rect.x + (set_head_h - 22) / 2,
+            .y = set_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = 8, // arrow_left
+        };
+        quad_count += 1;
+    }
+    pushText("설정", @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    // ── 목록
+    set_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
+    const content = @as(f32, @floatFromInt(set_rows.len)) * set_row_h;
+    set_max_scroll = @max(0, content - set_list.h);
+    clampSetScroll();
+
+    for (&set_rows, 0..) |*row, i| {
+        const ry = set_list.y + @as(f32, @floatFromInt(i)) * set_row_h - set_scroll;
+        // **창에 완전히 들어온 행만 그리고, 그것만 누른다**(키바와 같은 규칙 — 조건이 하나다).
+        if (ry < set_list.y - 0.5 or ry + set_row_h > set_list.y + set_list.h + 0.5) {
+            set_row_rects[i] = .{};
+            continue;
+        }
+        set_row_rects[i] = .{ .x = set_list.x, .y = ry, .w = set_list.w, .h = set_row_h };
+        if (set_pressed != null and set_pressed.? == i)
+            push(.{ .x = @intFromFloat(set_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(set_list.w), .h = @intFromFloat(set_row_h) }, tk.get(.row_hover_bg), 0xFF, 0, 0);
+        pushText(row.label, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(ry + (set_row_h - 15) / 2), 15, tk.get(.surface_fg));
+        const right = set_list.x + set_list.w - set_pad_x;
+        switch (row.kind) {
+            .toggle => |on| drawSetToggle(on, right, ry + set_row_h / 2, tk),
+            .number => |n| {
+                var buf: [16]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "?";
+                pushText(s, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(s, 15)))), @intFromFloat(ry + (set_row_h - 15) / 2), 15, tk.get(.muted_fg));
+            },
+            .choice => |c| {
+                const v = c.items[c.idx];
+                const chev_w: f32 = 14;
+                pushText("\u{25BE}", @intFromFloat(right - chev_w), @intFromFloat(ry + (set_row_h - 15) / 2), 15, tk.get(.muted_fg));
+                pushText(v, @intFromFloat(right - chev_w - 6 - @as(f32, @floatFromInt(textWidth(v, 15)))), @intFromFloat(ry + (set_row_h - 15) / 2), 15, tk.get(.muted_fg));
+            },
+        }
+        push(.{ .x = @intFromFloat(set_list.x + set_pad_x), .y = @intFromFloat(ry + set_row_h - 1), .w = @intFromFloat(set_list.w - 2 * set_pad_x), .h = 1 }, tk.get(.divider), 0x80, 0, 0);
+    }
+
+    // ── 팝업: **행 옆에 얹는다**(하위 화면으로 밀지 않는다). 배경이 보여야 즉시-적용이
+    // 그대로 미리보기가 되기 때문이다 — 하위 화면으로 밀면 바꾼 결과가 가려진다.
+    set_item_n = 0;
+    if (set_open) |oi| switch (set_rows[oi].kind) {
+        .choice => |c| {
+            const r = set_row_rects[oi];
+            if (r.w == 0) {
+                set_open = null;
+            } else {
+                const pw: f32 = 200;
+                const px = set_list.x + set_list.w - set_pad_x - pw;
+                var py = r.y + set_row_h;
+                const ph = @as(f32, @floatFromInt(c.items.len)) * set_row_h;
+                if (py + ph > set_list.y + set_list.h) py = @max(set_list.y, r.y - ph);
+                push(.{ .x = @intFromFloat(px - 1), .y = @intFromFloat(py - 1), .w = @intFromFloat(pw + 2), .h = @intFromFloat(ph + 2) }, tk.get(.muted_fg), 0xFF, 9, 0);
+                push(.{ .x = @intFromFloat(px), .y = @intFromFloat(py), .w = @intFromFloat(pw), .h = @intFromFloat(ph) }, tk.get(.surface_bg), 0xFF, 8, 0);
+                for (c.items, 0..) |it, k| {
+                    if (k >= set_item_rects.len) break;
+                    const iy = py + @as(f32, @floatFromInt(k)) * set_row_h;
+                    set_item_rects[k] = .{ .x = px, .y = iy, .w = pw, .h = set_row_h };
+                    set_item_n = k + 1;
+                    if (k == c.idx)
+                        push(.{ .x = @intFromFloat(px + 2), .y = @intFromFloat(iy + 2), .w = @intFromFloat(pw - 4), .h = @intFromFloat(set_row_h - 4) }, tk.get(.tab_active_bg), 0xFF, 6, 0);
+                    pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (k == c.idx) .accent_bar else .surface_fg));
+                }
+            }
+        },
+        else => set_open = null,
+    };
+}
+
+/// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
+/// 있으면 그 아래 키바·본문은 없는 것과 같다.
+pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
+    if (screen == .terminal) {
+        // 톱니를 누르면 설정을 민다. down 에서 바로 밀지 않고 up 까지 기다린다 — 밀려던
+        // 손짓이 화면 전환이 되면 안 된다(키바와 같은 규율).
+        if (phase == 0 and setHit(set_gear_rect, x, y)) {
+            set_active = true;
+            set_down_x = x;
+            set_down_y = y;
+            set_moved = 0;
+            return 1;
+        }
+        if (!set_active) return 0;
+        if (phase == 1) {
+            set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
+            return 1;
+        }
+        set_active = false;
+        if (phase == 2 and set_moved < 10 and setHit(set_gear_rect, x, y)) {
+            screen = .settings;
+            set_scroll = 0;
+            set_fling = 0;
+        }
+        return 1;
+    }
+
+    // 설정 화면이 떠 있으면 **전부 먹는다**.
+    switch (phase) {
+        0 => {
+            set_active = true;
+            set_down_x = x;
+            set_down_y = y;
+            set_last_y = y;
+            set_moved = 0;
+            set_fling = 0;
+            set_back_pressed = setHit(set_back_rect, x, y);
+            set_pressed = null;
+            if (set_open == null and !set_back_pressed) {
+                for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
+                    set_pressed = i;
+                    break;
+                };
+            }
+        },
+        1 => {
+            if (!set_active) return 1;
+            set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
+            // **임계를 넘기 전에는 스크롤도 안 한다** — 살짝 민 손짓이 화면도 움직이고
+            // 값도 바꾸면 같은 손짓이 어떨 때는 스크롤, 어떨 때는 입력으로 보인다.
+            if (set_moved < 10) return 1;
+            set_pressed = null;
+            set_back_pressed = false;
+            if (set_open == null) {
+                set_scroll -= y - set_last_y;
+                clampSetScroll();
+                set_fling = y - set_last_y;
+            }
+            set_last_y = y;
+        },
+        else => {
+            const was = set_active;
+            set_active = false;
+            const pressed = set_pressed;
+            const back = set_back_pressed;
+            set_pressed = null;
+            set_back_pressed = false;
+            if (!was or phase == 3 or set_moved >= 10) return 1;
+            if (set_open) |oi| {
+                // 팝업이 열려 있으면 **항목 아니면 닫기**(바깥 탭 = 취소).
+                var picked: ?usize = null;
+                for (set_item_rects[0..set_item_n], 0..) |r, k| if (setHit(r, x, y)) {
+                    picked = k;
+                    break;
+                };
+                if (picked) |k| switch (set_rows[oi].kind) {
+                    .choice => |*c| c.idx = k, // 탭 = 즉시 적용
+                    else => {},
+                };
+                set_open = null;
+                return 1;
+            }
+            if (back) {
+                screen = .terminal; // pop
+                return 1;
+            }
+            if (pressed) |i| switch (set_rows[i].kind) {
+                .toggle => |*v| v.* = !v.*,
+                .choice => set_open = i,
+                .number => {}, // 숫자 편집은 PoC 밖(키보드가 필요하다)
+            };
+        },
+    }
+    return 1;
+}
+
+/// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
+pub export fn maru_mobile_pop_screen() u32 {
+    if (set_open != null) {
+        set_open = null;
+        return 1;
+    }
+    if (screen == .terminal) return 0;
+    screen = .terminal;
+    return 1;
+}
+
 // ── 보조 키바 ─────────────────────────────────────────────────────────────────
 // **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다.** 그것 없이는 프로세스를 못 멈추고
 // (Ctrl+C) vim 에서 못 빠져나온다 — 문장부호는 123 레이어로 칠 수 있지만 이 키들은 아예
@@ -2069,6 +2378,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
     stepKeyBarFling();
+    stepSetFling();
     if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패
@@ -2080,6 +2390,12 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         setLastError(@errorName(err));
         return 0;
     };
+    // **밀린 화면은 아래를 덮는다**(스택 — UX §3). 터미널을 먼저 세우는 이유는 두 가지다:
+    // 코어 격자·아틀라스가 계속 살아 있어야 돌아왔을 때 화면이 그대로이고, 키바 사각형이
+    // 서 있어야 `key_bar_ready` 가 거짓말을 안 한다.
+    if (screen == .settings) {
+        drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk);
+    }
     return @intCast(quad_count);
 }
 

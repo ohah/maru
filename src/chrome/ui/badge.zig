@@ -44,6 +44,16 @@ pub const Layout = struct {
 /// 안 들어가면 `null`이다 — 호출자가 "그리지 않는다"를 한 번만 판단하게 하려는 것이다. 폭이
 /// 모자란데 그리면 이름 라벨을 덮고, 높이가 라벨 줄높이보다 작은데 그리면 숫자가 상자 밖으로 나간다.
 ///
+/// pill 폭을 정하는 규칙. **소비자마다 다르다** — 하나로 합치면 한쪽이 반드시 어색해진다.
+pub const Width = enum {
+    /// 한 자리 수여도 가로로 긴 pill. Session Dock 그룹 개수의 디자인이다 — 목록이 짧고 개수가
+    /// 그 행의 주인공이라 넓은 자리가 어울린다.
+    wide,
+    /// 라벨에 딱 맞는 폭(좌우 패딩만). 소스 컨트롤처럼 행이 촘촘하고 배지가 **보조 정보**일 때 쓴다 —
+    /// 넓은 pill은 한 자리 수에서 속이 빈 상자로 보인다(사용자 지적 2026-08-14).
+    snug,
+};
+
 /// `label_cols`는 호출자가 센 표시 칸 수다(측정은 backend가 하고 chrome은 셀 추정만 하는 계약).
 pub fn countPill(
     parent: layout_mod.UiRect,
@@ -54,16 +64,23 @@ pub fn countPill(
     scale_milli: u32,
     /// pill 오른쪽에 이미 자리를 잡은 것들(disclosure 아이콘 슬롯 등). 이만큼은 pill이 침범하지 않는다.
     reserved_x: u32,
+    width_rule: Width,
 ) ?Layout {
     if (cell_width_px == 0) return null;
     const pad = spacing.px(.xs, scale_milli);
     const cols = @max(label_cols, 1);
-    // 한 자리 수도 가로로 긴 pill을 유지한다(디자인). 셀 추정은 더 긴 라벨이 들어갈 자리만 확보한다.
-    const width = @max(spacing.pointsPx(min_pill_width_pt, scale_milli), @as(u32, cols) * cell_width_px + pad * 2);
-    if (parent.width < @as(f32, @floatFromInt(inset_x * 2 + width + reserved_x))) return null;
 
     const height = @min(spacing.pointsPx(max_pill_height_pt, scale_milli), @as(u32, @intFromFloat(@floor(parent.height))));
     if (height == 0) return null;
+
+    // 셀 추정은 더 긴 라벨이 들어갈 자리만 확보한다.
+    const label_box = @as(u32, cols) * cell_width_px + pad * 2;
+    const width = switch (width_rule) {
+        .wide => @max(spacing.pointsPx(min_pill_width_pt, scale_milli), label_box),
+        // 세로보다 좁아지지는 않게 둔다 — 한 자리 수에서 세로로 긴 알약이 되면 그것대로 어색하다.
+        .snug => @max(label_box, height),
+    };
+    if (parent.width < @as(f32, @floatFromInt(inset_x * 2 + width + reserved_x))) return null;
 
     const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale_milli));
 
@@ -126,7 +143,7 @@ const max_pill_height_pt: u16 = 32;
 test "countPill: 상자와 라벨이 각각 자기 부모의 세로 중앙에 온다" {
     // 행 높이 40, pill 높이는 32pt 상한에 걸린다 → (40-32)/2 = 4만큼 내려온다.
     const parent = layout_mod.UiRect{ .x = 0, .y = 100, .width = 300, .height = 40 };
-    const layout = countPill(parent, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const layout = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 32), layout.box.h);
     try std.testing.expectEqual(@as(i32, 104), layout.box.y);
     // 라벨은 행이 아니라 **상자** 기준 중앙이다.
@@ -138,7 +155,7 @@ test "countPill: 세로 중앙 산수가 상자를 부모 밖으로 내보내지
     // 사용자 보고 회귀(`y + (h - box/2)`)의 고정: 상자 아래끝이 항상 부모 안이다.
     for ([_]f32{ 24, 33, 40, 64, 100 }) |height| {
         const parent = layout_mod.UiRect{ .x = 0, .y = 50, .width = 300, .height = height };
-        const layout = countPill(parent, 12, 1, 8, 1000, 28) orelse continue;
+        const layout = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse continue;
         const bottom = @as(f32, @floatFromInt(layout.box.y + @as(i32, @intCast(layout.box.h))));
         try std.testing.expect(bottom <= parent.y + parent.height + 1);
         try std.testing.expect(@as(f32, @floatFromInt(layout.box.y)) >= parent.y - 1);
@@ -147,7 +164,7 @@ test "countPill: 세로 중앙 산수가 상자를 부모 밖으로 내보내지
 
 test "countPill: 한 자리 수도 최소 폭을 유지하고 라벨은 가로 중앙" {
     const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 40 };
-    const layout = countPill(parent, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const layout = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 44), layout.box.w); // 1칸(8px)+패딩보다 최소 폭이 크다
     const box_x: f32 = @floatFromInt(layout.box.x);
     const left_gap = layout.label_x - box_x;
@@ -157,36 +174,36 @@ test "countPill: 한 자리 수도 최소 폭을 유지하고 라벨은 가로 �
 
 test "countPill: 라벨이 길면 셀 추정만큼 넓어진다" {
     const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 40 };
-    const wide = countPill(parent, 12, 6, 16, 1000, 28) orelse return error.TestUnexpectedResult;
+    const wide = countPill(parent, 12, 6, 16, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 6 * 16 + 8 * 2), wide.box.w);
 }
 
 test "countPill: 안 들어가면 null이다 — 호출자가 판단을 반복하지 않는다" {
     const narrow = layout_mod.UiRect{ .x = 0, .y = 0, .width = 60, .height = 40 };
-    try std.testing.expectEqual(@as(?Layout, null), countPill(narrow, 12, 1, 8, 1000, 28));
+    try std.testing.expectEqual(@as(?Layout, null), countPill(narrow, 12, 1, 8, 1000, 28, .wide));
 
     // cell_width 0(측정 전 프레임)은 폭을 못 정한다.
     const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 40 };
-    try std.testing.expectEqual(@as(?Layout, null), countPill(parent, 12, 1, 0, 1000, 28));
+    try std.testing.expectEqual(@as(?Layout, null), countPill(parent, 12, 1, 0, 1000, 28, .wide));
 }
 
 test "countPill: 라벨이 안 들어가도 상자는 남는다 — 둘은 다른 상황이다" {
     // 행이 control 줄높이(17px @1x)보다 낮다. 예전 dock view는 이때 pill·chevron·이름은 그리고
     // 숫자만 생략했다. 이걸 `null`로 합치면 그 행이 통째로 사라진다(빈 그룹 헤더).
     const short = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 12 };
-    const layout = countPill(short, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const layout = countPill(short, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 12), layout.box.h);
     try std.testing.expect(!layout.label_fits);
 
     // 넉넉한 행에서는 들어간다.
     const tall = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 40 };
-    const ok = countPill(tall, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const ok = countPill(tall, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expect(ok.label_fits);
 }
 
 test "countPill: pill이 오른쪽 여백과 예약 슬롯을 침범하지 않는다" {
     const parent = layout_mod.UiRect{ .x = 20, .y = 0, .width = 300, .height = 40 };
-    const layout = countPill(parent, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const layout = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     const right = @as(f32, @floatFromInt(layout.box.x + @as(i32, @intCast(layout.box.w))));
     try std.testing.expectApproxEqAbs(parent.x + parent.width - 12, right, 1.0);
     try std.testing.expect(@as(f32, @floatFromInt(layout.box.x)) > parent.x + 28);
@@ -194,7 +211,7 @@ test "countPill: pill이 오른쪽 여백과 예약 슬롯을 침범하지 않�
 
 test "countPill: 반지름은 높이의 절반이라 양끝이 반원이다" {
     const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 40 };
-    const layout = countPill(parent, 12, 1, 8, 1000, 28) orelse return error.TestUnexpectedResult;
+    const layout = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 16), layout.radius_px);
 }
 
@@ -219,4 +236,28 @@ test "keycap: 셀이 0이거나 라벨이 비면 null" {
     try std.testing.expectEqual(@as(?Layout, null), keycap(element, 0, 8, 16));
     try std.testing.expectEqual(@as(?Layout, null), keycap(element, 2, 0, 16));
     try std.testing.expectEqual(@as(?Layout, null), keycap(element, 2, 8, 0));
+}
+
+test "countPill: snug은 라벨에 맞고 wide는 최소 폭을 지킨다" {
+    // 두 규칙이 갈리는 이유가 이 테스트다 — 합치면 한쪽이 반드시 어색해진다. 한 자리 수에서
+    // wide는 44pt 최소 폭을, snug은 "세로보다 좁지 않게"만 지킨다.
+    const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 24 };
+    const wide_pill = countPill(parent, 12, 1, 8, 1000, 28, .wide) orelse return error.TestUnexpectedResult;
+    const snug_pill = countPill(parent, 12, 1, 8, 1000, 28, .snug) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(snug_pill.box.w < wide_pill.box.w);
+    try std.testing.expectEqual(snug_pill.box.h, snug_pill.box.w); // 세로보다 좁아지지 않는다
+    try std.testing.expectEqual(@as(u32, 44), wide_pill.box.w);
+    // 둘 다 오른쪽 끝 기준이라 오른쪽 변은 같은 자리다.
+    try std.testing.expectEqual(
+        wide_pill.box.x + @as(i32, @intCast(wide_pill.box.w)),
+        snug_pill.box.x + @as(i32, @intCast(snug_pill.box.w)),
+    );
+}
+
+test "countPill: snug은 자릿수가 늘면 넓어진다" {
+    const parent = layout_mod.UiRect{ .x = 0, .y = 0, .width = 300, .height = 24 };
+    const one = countPill(parent, 12, 1, 8, 1000, 28, .snug) orelse return error.TestUnexpectedResult;
+    const three = countPill(parent, 12, 3, 8, 1000, 28, .snug) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(three.box.w > one.box.w);
 }

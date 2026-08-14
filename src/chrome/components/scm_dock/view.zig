@@ -204,7 +204,7 @@ const Writer = struct {
         // Session Dock 그룹 개수와 같은 프리미티브·같은 색이다: 같은 뜻이 두 도크에서 다르게 보이면 안 된다.
         //
         // 동작 버튼 자리는 `reserved_x`로 넘긴다 — 호버 때 버튼이 떠도 배지가 그 아래 깔리지 않는다.
-        const pill = badge.countPill(rect.rect, m.inset_x, cols, self.cell_width_px, scale, m.action_extent + m.gap);
+        const pill = badge.countPill(rect.rect, m.inset_x, cols, self.cell_width_px, scale, m.action_extent + m.gap, .snug);
 
         // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
         const title_x = rect.rect.x + inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap));
@@ -229,16 +229,18 @@ const Writer = struct {
         }
 
         const placed = pill orelse return;
+        // **채운 칩**이다(테두리만 있는 상자가 아니다 — 속이 빈 사각형으로 보였다). 색은 테마 accent
+        // (`accent_bar`)이고 숫자는 `surface_bg`다: accent는 "사이드바 배경 위 글자로 읽히는 색"으로
+        // 고른 값이라(같은 색을 `git_modified_fg`가 글자색으로 쓴다) 그 둘의 대비는 테마가 보장한다.
+        // 반대로 `focus_accent`를 쓰면 포커스 신호와 겹쳐, 아무 데도 포커스가 없는데 있는 것처럼 보인다.
         try self.appendQuad(.{
             .rect = placed.box,
-            .fill_role = .inset_bg,
+            .fill_role = .accent_bar,
             .corner_radii = .{ placed.radius_px, placed.radius_px, placed.radius_px, placed.radius_px },
-            .border_widths = .{ 1, 1, 1, 1 },
-            .border_role = .divider,
         });
         // 라벨이 상자보다 높으면 **숫자만** 생략한다 — 배지·화살표·제목은 그대로 둔다.
         if (placed.label_fits)
-            try self.emit(placed.label_x, placed.label_y, count, cols, .surface_fg, .control, false, @intFromFloat(placed.label_w), .origin);
+            try self.emit(placed.label_x, placed.label_y, count, cols, .surface_bg, .control, false, @intFromFloat(placed.label_w), .origin);
     }
 
     /// 파일 행: `아이콘 · 이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.
@@ -757,8 +759,15 @@ test "그룹 개수는 배지 상자 안에 놓인다(숫자만 떠 있지 않�
     try testing.expect(label.origin.y <= box.y + @as(i32, @intCast(box.h)));
     // 반지름은 높이의 절반 — 양끝이 반원인 pill이다(모서리만 살짝 둥근 카드가 아니다).
     try testing.expectEqual(@as(u16, @intCast(box.h / 2)), pill.corner_radii[0]);
+    // **채운 칩**이다. 테두리만 있는 상자는 속이 빈 사각형으로 보였다(사용자 지적).
+    try testing.expectEqual(tokens.ColorRole.accent_bar, pill.fill_role);
+    try testing.expectEqual(@as(?tokens.ColorRole, null), pill.border_role);
+    // 숫자는 그 칠 위에서 읽혀야 한다 — 배경색 글자(reverse)다.
+    try testing.expectEqual(tokens.ColorRole.surface_bg, label.role);
     // 스크롤 영역 밖으로 새지 않게 clip을 달고 나간다.
     try testing.expect(pill.clip != null);
+    // 한 자리 수에서 넓은 pill이 되지 않는다(`.snug`) — 세로보다 아주 넓으면 빈 상자로 보인다.
+    try testing.expect(box.w <= box.h * 2);
 }
 
 test "긴 제목은 배지 밑으로 파고들지 않는다" {

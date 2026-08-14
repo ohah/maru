@@ -111,7 +111,7 @@ pub fn view(
     if (props.branch.len > 0) {
         if (frame.tree.find(build.NodeIds.branch)) |index| {
             const rect = frame.tree.entries[index];
-            try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, .muted_fg);
+            try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
             try writer.line(rect, @floatFromInt(m.inset_x + m.disclosure_extent + m.gap), props.branch, .surface_fg, .control, true);
             if (props.has_ab) {
                 var buf: [32]u8 = undefined;
@@ -186,7 +186,7 @@ const Writer = struct {
     /// 그룹 헤더: `접힘표시 제목 · 개수`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려 사라지지 않는다.
     fn sectionRow(self: *Writer, rect: tree.RectEntry, section: types.SectionItem, m: types.DockMetrics) ViewError!void {
         const inset: f32 = @floatFromInt(m.inset_x);
-        try self.icon(rect, inset, if (section.collapsed) chevron_right_icon else chevron_down_icon, .muted_fg);
+        try self.icon(rect, inset, if (section.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
         try self.line(rect, inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap)), sectionTitle(section.section), .surface_fg, .control, true);
         var buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&buf, "{d}", .{section.count}) catch "";
@@ -297,20 +297,31 @@ const Writer = struct {
         );
     }
 
-    /// 등록 SVG 아이콘 하나. 셀 두 칸 슬롯을 쓰므로 `wide_icons`를 켠다.
-    fn icon(self: *Writer, rect: tree.RectEntry, x_offset: f32, glyph: []const u8, role: tokens.ColorRole) ViewError!void {
-        if (rect.rect.width <= x_offset) return;
-        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+    /// 등록 SVG 아이콘 하나. **터미널 셀이 아니라 logical 슬롯**에 놓는다(`icon_in_rect`) — 셀 경로로
+    /// 그리면 아이콘이 행 높이와 무관하게 구워져 글자보다 크고 세로도 어긋난다(사용자 지적 2026-08-14).
+    /// 슬롯은 행 안에서 세로 중앙이고, 한 변은 `DockMetrics.icon_extent`가 정한다.
+    fn icon(self: *Writer, rect: tree.RectEntry, x_offset: f32, glyph: []const u8, extent: u32, role: tokens.ColorRole) ViewError!void {
+        if (rect.rect.width <= x_offset or rect.rect.height <= 0) return;
+        const size: f32 = @floatFromInt(extent);
+        const slot = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x + x_offset)),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - size) / 2)),
+            .w = extent,
+            .h = extent,
+        };
+        const codepoint = std.unicode.utf8Decode(glyph) catch return;
+        // PUA 바이트는 글자로 셰이핑되지 않는다(`icon_in_rect`가 등록 SVG를 직접 해석한다) — 다만 atlas
+        // 요청의 안정된 입력으로 남긴다(빈 run은 어느 경로도 확실히 통과하지 못한다).
         try self.emitPlaced(
-            rect.rect.x + x_offset,
-            rect.rect.y + (rect.rect.height - line_h) / 2,
+            @floatFromInt(slot.x),
+            @floatFromInt(slot.y),
             glyph,
-            2,
+            1,
             role,
             .control,
-            true,
-            null,
-            .origin,
+            false,
+            slot.w,
+            .{ .icon_in_rect = .{ .content_rect = slot, .icon_codepoint = codepoint, .icon_extent_px = @intCast(extent) } },
             false,
         );
     }
@@ -567,4 +578,33 @@ test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
     // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
     try testing.expect(findText(draws, "main") != null);
+}
+
+test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 맞는 크기)" {
+    // 셀 경로로 그리면 아이콘이 행 높이와 무관하게 구워져 글자보다 크고 세로도 어긋난다(사용자 지적
+    // 2026-08-14: "화살표랑 하단 아이콘 별론데"). 슬롯 배치는 그 크기를 `DockMetrics`가 정하게 한다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .changes, .count = 1, .collapsed = false, .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const m = types.DockMetrics.resolve(1000);
+    var saw_icon = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| switch (text.placement) {
+            .icon_in_rect => |placed| {
+                saw_icon = true;
+                // 슬롯은 정사각이고 한 변이 metrics 값이며, **행 높이를 넘지 않는다**.
+                try testing.expectEqual(m.icon_extent, placed.content_rect.w);
+                try testing.expectEqual(m.icon_extent, placed.content_rect.h);
+                try testing.expectEqual(@as(u16, @intCast(m.icon_extent)), placed.icon_extent_px);
+                try testing.expect(placed.content_rect.h <= m.section_h);
+                // 셀 2칸 폭을 쓰던 옛 경로의 흔적(`wide_icons`)이 남아 있으면 안 된다.
+                try testing.expect(!text.wide_icons);
+            },
+            else => {},
+        },
+        else => {},
+    };
+    try testing.expect(saw_icon);
 }

@@ -255,3 +255,69 @@ test "저장소가 겹치지 않는다 — 겹치면 한쪽 글자가 반대쪽 
     try testing.expect(@intFromPtr(pair.first.runs.ptr) + pair.first.runs.len * @sizeOf(draw.Run) <= @intFromPtr(pair.second.runs.ptr));
     try testing.expectEqual(ops.len / 2, pair.first.ops.len);
 }
+
+test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩만 받는다" {
+    // 컴포넌트의 기존 계약이다(*"어느 것이든 모자라면 그 부분이 잘릴 뿐 죽지 않는다"*). 두 열로
+    // 갈리면 열당 예산이 절반이라 **한 열만 그려지는** 상태가 새로 생긴다 — 그때도 죽지 않아야 하고,
+    // `truncated`가 그 사실을 말해야 한다(캡처에는 빈 자리로 나타난다).
+    var ops: [3]draw.Op = undefined; // 열당 1개 — 배경 하나면 끝난다
+    var text: [8]u8 = undefined;
+    var runs: [2]draw.Run = undefined;
+    var content_rows: [2]@import("content.zig").Row = undefined;
+    var visual_rows: [2]@import("visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [2]@import("gutter.zig").Row = undefined;
+    var counts: [2]u32 = undefined;
+    var count_scratch: [8]u8 = undefined;
+
+    const left = [_][]const u8{ "aaaa", "bbbb" };
+    const right = [_][]const u8{ "cccc", "dddd" };
+    const w = build(.{
+        .left = .{ .lines = &left },
+        .right = .{ .lines = &right },
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 100 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+    try testing.expect(w.ops <= ops.len);
+    try testing.expect(w.truncated); // 잘렸다는 사실이 조용히 사라지지 않는다
+}
+
+test "op 배열이 비어도 죽지 않는다" {
+    var ops: [0]draw.Op = undefined;
+    var text: [0]u8 = undefined;
+    var runs: [0]draw.Run = undefined;
+    var content_rows: [0]@import("content.zig").Row = undefined;
+    var visual_rows: [0]@import("visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [0]@import("gutter.zig").Row = undefined;
+    var counts: [0]u32 = undefined;
+    var count_scratch: [0]u8 = undefined;
+    const line = [_][]const u8{"x"};
+    const w = build(.{
+        .left = .{ .lines = &line },
+        .right = .{ .lines = &line },
+        .rect = .{ .x = 0, .y = 0, .w = 200, .h = 50 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+    try testing.expectEqual(@as(usize, 0), w.ops);
+}

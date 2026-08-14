@@ -272,8 +272,10 @@ pub const TerminalCore = struct {
     // 같은 폭을 본다(단일 출처). app_session이 loaded_config에서 set(max_scrollback과 같은 직접 대입 패턴).
     ambiguous_wide: bool = false,
     // 이모지 표현(base+VS16, 키캡 2️⃣ 등)을 mode 2027 합의가 없어도 풀사이즈 width 2로 승격할지(text.emoji-width=wide).
-    // 기본 false(core 단독)지만 app_session이 config(기본 wide)에서 true로 켠다 — Ghostty/iTerm2처럼 이모지를 2칸으로
-    // 본다. ❤️·2️⃣가 1칸에 욱여넣어져 작아지던 것을 푼다. grapheme_cluster_mode(2027)면 이 플래그와 무관하게 항상 승격.
+    // 기본 false(core 단독)지만 app_session이 config(기본 wide)에서 true로 켠다. **레퍼런스와 반대 선택이다** —
+    // Ghostty는 2027이 꺼져 있으면 VS16을 셀에 붙이되 폭은 narrow로 두고(소스 확인), xterm.js도 grapheme 애드온을
+    // 붙인 임베더에서만 2칸이다. 근거는 앱 쪽이다: 모던 TUI의 string-width 라이브러리가 2칸으로 세는데 그 TUI들이
+    // 2027을 안 켠다. ❤️·2️⃣가 1칸에 욱여넣어져 작아지던 것을 푼다. grapheme_cluster_mode(2027)면 이 플래그와 무관하게 항상 승격.
     // 트레이드오프: zsh ZLE가 base+VS16을 1칸으로 가정하면 줄 편집이 어긋날 수 있어 narrow로 끌 수 있다(text.emoji-width).
     emoji_wide: bool = false,
     // 뷰포트: 바닥(0=활성 화면)에서 위로 스크롤한 줄 수. [0, sb_count] 범위. >0이면 화면 윗부분에

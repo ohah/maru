@@ -92,8 +92,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    Client publication은 실제 `Client -> ClientSlot -> HostAdapter -> HostPool` 소유권을 따르며, HostPool의 fallible generation/map
    reservation을 먼저 봉인하고 final-address Client binding을 게시한 뒤 같은 permit의 no-fail map suffix로 끝낸다. HostPool이
    Client를 직접 import하거나 pool publication 뒤 binding을 채우는 역방향 경로는 허용하지 않는다.
-3. **CR1 — poison 범위 축소와 scheduler:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록 callsite를
-   정리하고 partial read/write, sibling stream, artifact 실패를 결정적으로 교차하는 scheduler fixture를 만든다.
+3. **CR1 — poison 범위 축소와 scheduler admission:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록
+   callsite를 정리하고 partial read/write, sibling stream, artifact 실패를 결정적으로 교차하는 production-type scheduler
+   admission fixture를 만든다. CR1의 scheduler는 host에 접속하거나 runtime generation을 교체하지 않는다. CR0b의 sealed
+   `ReconnectAdmission`을 exact 한 번 claim하고 `scheduled|retry_later|discarded_stale`로 정산하는 bounded owner와 closed decision만
+   소유한다. `scheduled`는 같은 inline row를 scheduled job으로 바꾸고, `retry_later`는 admitted row를 보존하되 claim만 exact once 회수하며,
+   `discarded_stale`는 pool membership/connection generation이 바뀌었다는 owner 증거가 있을 때만 소비한다. 실제
+   `connectExistingHost`와 `PreparedReconnect`는 각각 CR4와 CR2e가 소유하므로 CR1이 raw socket, HostPool adapter 교체 또는
+   Window tree 순회를 추가하면 선행 gate 우회다.
 4. **CR2 — stable shell 기반:** CR2a는 field inventory를 고정하고 `RemoteGeneration`만 추출한다. CR2b는 기존 Surface API를
    유지하는 stable proxy gate와 shell lifecycle pin을 배선한다. CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
    바꾸지 않는다. transport-neutral facade/ordered policy는 `src/app`의 `TermRuntimeBackend` 계약 옆 중립 모듈이 소유하고

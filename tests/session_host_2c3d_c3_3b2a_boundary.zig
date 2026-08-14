@@ -70,7 +70,8 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // C3-3b5 close authority, backend admission, window close graph가 같은 process-seal 경계를 직접 사용한다.
     // C3-3b6 shutdown owner와 2d2 terminal handoff registry도 같은 process domain을 직접 검증한다.
     // CR0b HostAdapter·publisher registry·runtime·composite coordinator·GUI process owner와 daemon bootstrap이 같은 process domain을 직접 검증한다.
-    try std.testing.expectEqual(@as(usize, 27), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // CR1 reconnect scheduler가 prepared dispatch의 post-claim fail-stop을 같은 process seal owner에 추가한다.
+    try std.testing.expectEqual(@as(usize, 28), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     const publisher_registry = try readSource(allocator, "src/platform/macos/session_host/incident_publisher_registry.zig");
     defer allocator.free(publisher_registry);
     try std.testing.expectEqual(@as(usize, 1), count(publisher_registry, "@import(\"process_seal_service.zig\")"));

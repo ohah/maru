@@ -1146,7 +1146,23 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   existing-pool sibling topology로 실행한다. claim 경쟁 실패는 새 backend를 먼저 정산하고, created pool은 전체 회수하며,
   existing pool은 기존 sibling을 보존한 채 실패한 신규 row와 그 row의 spawn-host 선택을 함께 제거해야 한다.
   이 gate가 green이 되기 전 CR0b를 구현 완료로 세지 않는다.
-- CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
+- CR1: `zig build test-session-host-cr1`이 CR0b actual caller gate를 상속하고 production-type scheduler admission 4개와 boundary 1개를
+  Debug·ReleaseFast에서 exact-count한다. 기존 `client_poison` production decision이 bounded semantic 오류를 stream scope·usable
+  transport로 유지하고 CR1 owner가 admission 0/idle임을 결합한다. CR0b actual ingress는 partial read/write admission 생성을 소유하고,
+  CR1 fixture는 그 동일 production DTO를 scheduler owner에 넣어 sealed dispatch를 exact 한 번 claim해 같은 inline row를
+  `.scheduled` job으로 전환한다. 실제 writer failure의 `wake=degraded`도 disk completion을 기다리거나 publication을
+  재시도하지 않고 동일 scheduled outcome으로 끝난다. closed transition table은 `scheduled|retry_later|discarded_stale` exact 3이며,
+  retry는 row 보존+새 attempt generation, copied/moved/wrong-thread/replay는 mutation 0을 검증한다. stale 제품 정산 caller는
+  canonical HostPool/ClientSlot generation projection이 생기는 CR3b/CR5 전까지 0이고 이 gate에서는 model-only transition으로만
+  고정한다. `runOnce` 제품 caller도 CR5 coordinator 전까지 0이다. 증거 수준은 production-type unit이며 host connect/runtime
+  generation publish는 0이다.
+
+  | CR1 owner | exact test name |
+  | --- | --- |
+  | scheduler 1 | `CR1 bounded semantic 오류는 reconnect admission을 만들지 않는다` |
+  | scheduler 2 | `CR1 partial read와 write는 sealed dispatch를 exact once schedule한다` |
+  | scheduler 3 | `CR1 artifact degraded는 disk를 기다리지 않고 dispatch를 schedule한다` |
+  | scheduler 4 | `CR1 scheduler dispatch는 retry stale copy replay를 closed transition으로 정산한다` |
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
   `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake

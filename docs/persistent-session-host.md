@@ -5151,6 +5151,39 @@ state를 먼저 publish한 다음 owner turn에서 selection/search/viewport/pre
   `Client.failClosed`는 typed poison 내부로 숨기고 모든 callsite가 exhaustive expected tuple을 갖게 한다. 한 stream의 bounded
   semantic 오류가 sibling reconnect storm을 만들면 안 된다.
 
+#### CR1 scheduler admission 경계
+
+CR1은 실제 host reconnect를 시작하지 않고 CR0b publication과 이후 `PreparedReconnect` 사이의 bounded admission handoff만
+제품 타입으로 닫는다. process-local scheduler admission owner는 CR0b의 sealed row를 raw pointer로 내보내지 않는다. owner thread가
+caller-provided final-address `PreparedReconnectDispatch`를 pristine 검사한 뒤 `{self_addr,pid,process_nonce,owner_thread,
+admission slot+generation,host_id,host_adapter_generation(CR3 이후 pool_membership_generation),expected_connection_generation,
+incident_id,attempt_generation,
+lifecycle,seal}`로 봉인한다. 같은 row의 동시 claim, copied/moved dispatch, 다른 owner/thread/PID, generation replay와 attempt
+overflow는 admission과 Client/ring을 바꾸지 않고 typed reject한다.
+
+dispatch 정산은 closed `scheduled|retry_later|discarded_stale` 세 결과뿐이다. `scheduled`는 별도 동적 queue를 만들지 않고 같은
+fixed-cap row를 `admitted -> scheduled`로 exact once 바꾼다. scheduled row의 tuple은 이후 CR5 coordinator가 claim할 제품 job의
+단일 출처이며 CR1에서는 raw socket이나 callback을 소유하지 않는다. `retry_later`는 allocation/socket/callback 없이 claim만 회수하고
+동일 admitted row를 보존하므로 다음 owner turn에서 새 attempt generation으로 다시 claim할 수 있다. `discarded_stale`는 HostPool의 현재
+membership generation 또는 ClientSlot connection generation이 admission tuple과 다르다는 canonical owner projection이 있을 때만
+row를 소비한다. caller가 bool이나 raw generation을 임의로 제출해 stale을 선언하는 경로는 0이다. CR1에는 아직 실제 HostPool/
+ClientSlot stale projection이 없으므로 focused gate는 `discarded_stale`을 model-only closed transition으로 고정하고 제품 caller를 0으로
+유지한다. 이 제품 caller는 CR3b/CR5가 canonical projection과 coordinator job을 갖춘 뒤 열린다.
+
+오류 분류는 publication과 scheduler에서 다시 추론하지 않는다. bounded semantic stream 결과인 `invalid_generation`과
+`controller_busy`는 usable transport의 status/authority 결과이며 shared Client poison과 reconnect admission이 모두 0이다. frame
+boundary를 잃은 partial read, 이미 prefix를 보낸 partial/ambiguous write, response correlation 상실만 connection-scoped reconnect
+admission을 만든다. 같은 Client의 sibling stream은 semantic 실패 전후 같은 connection generation에서 계속 usable해야 한다.
+incident wake가 `queued|coalesced|degraded` 중 무엇이든 ring commit과 reconnect admission은 이미 완료된 success다. scheduler는 disk
+writer completion을 기다리거나 degraded를 원 incident 재시도 사유로 바꾸지 않는다.
+
+CR1 gate는 CR0b actual generation ingress를 상속하고 scheduler root에서는 같은 production `client_poison.Decision`·
+`IncidentCommitResult`·`IncidentInput`·`ReconnectAdmission` 타입만 사용한다. semantic 행은 closed decision의 stream scope와 usable
+transport를 admission 0/idle owner와 결합하고, partial read/write publication은 상속한 actual-socket caller가 증명한다. scheduler
+네 행은 그 admission의 claim·closed transition을 별도 pointer-free oracle로 고정한다. artifact 행은 production
+`wake=degraded` 결과로 만든 admission도 dispatch claim/정산이 같고 writer retry·disk wait API가 scheduler에 없음을 검증한다.
+이 gate의 증거 수준은 `production-type unit`이며 actual socket connect/takeover/input/resize 성공은 CR4 전까지 주장하지 않는다.
+
 세부 구현 순서와 완료 gate는 구현 계획의 CR 단계와 검증 매트릭스가 소유한다.
 
 lock order는 `shell lifecycle/map -> shell mutation epoch -> ScreenSource proxy gate -> target screen/core -> ClientSlot`의

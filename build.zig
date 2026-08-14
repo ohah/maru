@@ -2662,6 +2662,45 @@ pub fn build(b: *std.Build) void {
         session_host_cr0b_step.dependOn(&run_cr0b_boundary_tests.step);
         boundary_step.dependOn(&run_cr0b_boundary_tests.step);
     }
+    const session_host_cr1_step = b.step(
+        "test-session-host-cr1",
+        "CR1 reconnect scheduler admission Debug and ReleaseFast gates",
+    );
+    session_host_cr1_step.dependOn(session_host_cr0b_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr1_optimize| {
+        const cr1_scheduler_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_scheduler.zig"),
+                .target = target,
+                .optimize = cr1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "CR1 bounded semantic 오류는 reconnect admission을 만들지 않는다",
+                "CR1 partial read와 write는 sealed dispatch를 exact once schedule한다",
+                "CR1 artifact degraded는 disk를 기다리지 않고 dispatch를 schedule한다",
+                "CR1 scheduler dispatch는 retry stale copy replay를 closed transition으로 정산한다",
+            },
+        });
+        const run_cr1_scheduler_tests = b.addRunArtifact(cr1_scheduler_tests);
+        run_cr1_scheduler_tests.addArg("--maru-expect-tests=4");
+        run_cr1_scheduler_tests.setCwd(b.path("."));
+        session_host_cr1_step.dependOn(&run_cr1_scheduler_tests.step);
+        const cr1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),
+                .target = target,
+                .optimize = cr1_optimize,
+            }),
+            .filters = &.{"CR1 reconnect scheduler 경계는"},
+        });
+        const run_cr1_boundary_tests = b.addRunArtifact(cr1_boundary_tests);
+        run_cr1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr1_boundary_tests.setCwd(b.path("."));
+        session_host_cr1_step.dependOn(&run_cr1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr1_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

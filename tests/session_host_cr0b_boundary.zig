@@ -381,7 +381,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn consume("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn ownedBy("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.ownedBy("));
-    try std.testing.expectEqual(@as(usize, 1), try countProductSourcesExcept(
+    // CR0b publication owner와 CR1 scheduler가 이 bounded row owner를 각각 한 번 import한다.
+    try std.testing.expectEqual(@as(usize, 2), try countProductSourcesExcept(
         allocator,
         "reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_admission_owner.zig",
@@ -625,6 +626,56 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         const poison_tag = try std.fmt.bufPrint(&implicit, "{s},", .{name});
         try std.testing.expectEqual(@as(usize, 1), count(poison_reason_block, poison_tag));
     }
+}
+
+test "CR1 reconnect scheduler 경계는 sealed inline transition만 제품에 연다" {
+    const allocator = std.testing.allocator;
+    const owner = try readSource(allocator, "src/platform/macos/session_host/reconnect_admission_owner.zig");
+    defer allocator.free(owner);
+    const scheduler = try readSource(allocator, "src/platform/macos/session_host/reconnect_scheduler.zig");
+    defer allocator.free(scheduler);
+    const seal_service = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
+    defer allocator.free(seal_service);
+    const seal_types = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
+    defer allocator.free(seal_types);
+
+    try std.testing.expectEqual(@as(usize, 4), count(scheduler, "test \"CR1 "));
+    try std.testing.expectEqual(@as(usize, 8), count(scheduler, "@import("));
+    try std.testing.expectEqual(@as(usize, 1), count(scheduler, "@import(\"std\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(scheduler, "@import(\"reconnect_admission_owner.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(scheduler, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(scheduler, "@import(\"client_poison.zig\")"));
+    try std.testing.expectEqual(@as(usize, 2), count(scheduler, "@import(\"maru\")"));
+    try std.testing.expectEqual(@as(usize, 2), count(scheduler, "@import(\"client_slot.zig\")"));
+    try std.testing.expectEqual(@as(usize, 0), count(scheduler, "incident_runtime.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(scheduler, "pub fn runOnce("));
+    // 제품 `runOnce` 1회와 같은 파일 hostile oracle 1회를 역할별 exact inventory로 고정한다.
+    try std.testing.expectEqual(@as(usize, 2), count(scheduler, "owner.prepareDispatch(&dispatch)"));
+    try std.testing.expectEqual(@as(usize, 5), count(scheduler, "owner.settleDispatch(&dispatch,"));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn prepareDispatch("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn settleDispatch("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn peekScheduled("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn consumeScheduled("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "objectsOverlap(self, out)"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_types, "pub const PreparedReconnectDispatchSealInput"));
+    try std.testing.expectEqual(@as(usize, 1), count(seal_service, "pub fn preparedReconnectDispatchSeal("));
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExcept(
+        allocator,
+        "reconnect_scheduler.zig",
+        "platform/macos/session_host/reconnect_scheduler.zig",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptTwo(
+        allocator,
+        ".prepareDispatch(",
+        "platform/macos/session_host/reconnect_admission_owner.zig",
+        "platform/macos/session_host/reconnect_scheduler.zig",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptTwo(
+        allocator,
+        ".settleDispatch(",
+        "platform/macos/session_host/reconnect_admission_owner.zig",
+        "platform/macos/session_host/reconnect_scheduler.zig",
+    ));
 }
 
 fn expectExecutableSwiftStatement(source: []const u8, position: usize, expected: []const u8) !void {

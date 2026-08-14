@@ -280,6 +280,21 @@ pub const ReconnectAdmissionSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PreparedReconnectDispatchSealInput = struct {
+    self_addr: u64,
+    owner_addr: u64,
+    owner_thread: u64,
+    slot_index: u8,
+    slot_generation: u64,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+    incident_app_instance_nonce: u128,
+    incident_sequence: u64,
+    attempt_generation: u64,
+    lifecycle_raw: u8,
+};
+
 pub const PendingTermCloseSealInput = struct {
     self_addr: u64,
     app_session_addr: u64,

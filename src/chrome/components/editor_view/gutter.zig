@@ -443,3 +443,18 @@ test "표가 짧으면 번호를 지어내지 않는다" {
     try testing.expectEqual(@as(?usize, 5), rows[0].number);
     try testing.expectEqual(@as(?usize, null), rows[1].number);
 }
+
+test "밖에서 준 번호 + 세로 스크롤: 표를 절대 인덱스로 읽는다" {
+    // **이 조합이 늘 빈다.** 위 랩+스크롤 테스트가 그것을 두고 *"둘이 겹치는 자리를 아무도 보지
+    // 않았다"*고 적었는데, 번호 주입이 들어오며 같은 자리가 하나 더 생겼다 — 표를 뷰포트 기준으로
+    // 읽으면 스크롤한 diff에서 번호가 통째로 어긋난다(화면 맨 위가 늘 표의 0번이 된다).
+    const visual = [_]visual_map.VisualRow{
+        .{ .line = 0, .piece = 0 }, // first_line=2 → 표의 2번
+        .{ .line = 1, .piece = 0 }, // 표의 3번
+    };
+    const numbers = [_]?u32{ 10, 11, 12, null, 13 };
+    var buf: [4]Row = undefined;
+    const rows = rowsForVisual(&visual, 2, &numbers, &buf);
+    try testing.expectEqual(@as(?usize, 12), rows[0].number);
+    try testing.expectEqual(@as(?usize, null), rows[1].number); // 그 자리가 빈 행이다
+}

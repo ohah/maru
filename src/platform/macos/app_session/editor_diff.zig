@@ -48,6 +48,25 @@ pub const State = struct {
     /// 판정이 끝났는가. **끝난 판정을 매 tick 다시 계산하지 않는다** — 2,000줄 대응을 프레임마다
     /// 돌리면 화면이 멈춘다. 내용이 갈리면 `invalidate`가 이 래치를 푼다.
     settled: bool = false,
+    /// 그 판정을 내릴 때 본 플래그. **래치를 플래그와 무관하게 두면 화면이 거짓말을 한다** —
+    /// 파일이 바뀌어 비교를 다시 요청했는데 그 요청이 실패하면, 폴링이 곧바로 반환해 옛 비교가
+    /// 그대로 남는다(사용자는 지금 파일과 다른 비교를 계속 읽는다).
+    settled_on: Flags = .{},
+};
+
+/// 판정의 입력이 된 백엔드 플래그. 시간은 뺀다 — 시간은 늘 흐르므로 넣으면 래치가 무의미해진다.
+pub const Flags = struct {
+    ready: bool = false,
+    failed: bool = false,
+    truncated: bool = false,
+
+    fn of(entry: *const dock_panel.Entry) Flags {
+        return .{ .ready = entry.diff_ready, .failed = entry.diff_failed, .truncated = entry.diff_truncated };
+    }
+
+    fn eql(a: Flags, b: Flags) bool {
+        return a.ready == b.ready and a.failed == b.failed and a.truncated == b.truncated;
+    }
 };
 
 /// 이 Term이 네이티브 diff인가. 편집기 Term이면서 dock entry가 비교인 것.
@@ -107,9 +126,17 @@ pub fn poll(self: *AppSession, term: *Term) void {
     const entry = term.file_entry orelse return;
     if (term.rt.editor_diff == null) term.rt.editor_diff = .{ .requested_ms = nowMs(self) };
     const st = &term.rt.editor_diff.?;
-    if (st.settled) return;
-
     const now = nowMs(self);
+    const flags = Flags.of(entry);
+    if (st.settled) {
+        // 입력이 그대로면 판정을 재사용한다(대응을 프레임마다 다시 돌리지 않는다).
+        if (Flags.eql(flags, st.settled_on)) return;
+        // **플래그가 바뀌었다 = 새 요청이 시작됐다.** 옛 행을 놓고 시계도 다시 잡는다 — 옛 요청
+        // 시각을 두면 재시도 창이 이미 지나 있어 새 요청이 첫 폴링에서 곧바로 접힌다.
+        invalidate(self, term);
+        st.requested_ms = now;
+    }
+
     switch (diff_state.step(.{
         .ready = entry.diff_ready,
         .failed = entry.diff_failed,
@@ -123,6 +150,7 @@ pub fn poll(self: *AppSession, term: *Term) void {
         },
         .compare => computeRows(self, entry, st),
     }
+    st.settled_on = flags;
     self.metal_dirty = true;
 }
 
@@ -187,10 +215,32 @@ fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
 /// CRLF의 `\r`도 함께 뗀다 — 남기면 화면에 제어 문자 표기가 뜨는데, 그 줄이 실제로 바뀌었다는
 /// 사실은 이미 대응(계산은 `\r`를 포함해 했다)이 말해 준다.
 fn displayText(text: []const u8) []const u8 {
-    var out = text;
-    if (out.len > 0 and out[out.len - 1] == '\n') out = out[0 .. out.len - 1];
+    if (text.len == 0 or text[text.len - 1] != '\n') return text;
+    var out = text[0 .. text.len - 1];
+    // **CR은 개행과 함께 올 때만 줄 끝 표시다.** 끝 개행이 없는 파일의 마지막 바이트가 CR이면 그것은
+    // 내용이라, 떼면 화면이 파일과 달라진다(§3.8 — 가시화가 그것을 드러내야 한다).
     if (out.len > 0 and out[out.len - 1] == '\r') out = out[0 .. out.len - 1];
     return out;
+}
+
+/// 이 편집기 Term이 컨트롤 플레인에 말할 것(`EditorMeta`, docs/control-plane.md §3).
+///
+/// **비교 Term이 여기서 갈린다.** 문서를 여는 편집기는 `rt.editor_path`·`rt.editor_doc`에서 나오지만,
+/// 비교는 그 둘이 비어 있고 파일은 dock entry가 안다 — 그대로 두면 밖에서 보기에 *"파일이 안 붙은,
+/// 편집 가능한 편집기"*가 된다(둘 다 사실이 아니다).
+///
+/// `read_only`가 참인 이유는 파일 권한이 아니라 **비교 자체가 읽기 전용**이라서다(§3.5가 v1에서
+/// stage 버튼을 숨기는 것과 같은 사실). 소비자가 보는 것은 "이 화면은 편집할 수 없다"이므로,
+/// 이유가 달라도 값은 참이어야 한다.
+pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool } {
+    if (isDiffTerm(term)) {
+        const entry = term.file_entry.?;
+        return .{ .path = if (entry.path.len == 0) null else entry.path, .read_only = true };
+    }
+    return .{
+        .path = if (term.rt.editor_path) |p| p else null,
+        .read_only = if (term.rt.editor_doc) |d| d.file.doc.read_only else false,
+    };
 }
 
 /// 화면이 말할 문장. **내부 값을 노출하지 않는다**(§7) — 세 이유를 사람 문장으로만 옮긴다.
@@ -392,4 +442,80 @@ test "판정이 서면 다시 계산하지 않는다 — 매 프레임 2,000줄 
     poll(fx.session, fx.term);
     // 같은 배열이 그대로다 — 다시 계산했다면 주소가 달라진다(그리고 옛 것이 샌다).
     try testing.expectEqual(first, fx.term.rt.editor_diff.?.view.compare.left.ptr);
+}
+
+test "새로 고침이 실패하면 옛 비교가 화면에 남지 않는다" {
+    // **래치가 플래그와 무관하면 화면이 거짓말을 한다.** 파일이 바뀌면 세션이 비교를 다시 요청하는데
+    // (`requestDiffContent`), 그 요청이 실패해도 판정이 이미 서 있으면 폴링이 곧바로 반환해 **옛 비교가
+    // 그대로 남는다** — 사용자는 지금 파일과 다른 비교를 계속 읽는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
+
+    // 파일이 바뀌어 다시 요청했고, 그 요청이 실패했다.
+    entry.diff_ready = false;
+    entry.diff_failed = true;
+    poll(fx.session, fx.term);
+
+    try testing.expectEqual(diff.Unavailable.unknown, fx.term.rt.editor_diff.?.view.unavailable);
+}
+
+test "새로 고침이 떠 있는 동안은 읽는 중이다 — 재시도 창도 그 요청부터 다시 센다" {
+    // 위 수정의 이면이다. 플래그가 바뀌면 **새 요청이 시작된 것**이므로 시계도 다시 잡아야 한다 —
+    // 옛 요청 시각을 그대로 두면 6초가 이미 지나 있어 새 요청이 첫 폴링에서 곧바로 접힌다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
+
+    // 요청이 떠 있는 상태(결과 전)로 되돌린다. 시계를 6초 전으로 밀어 두어도 접히면 안 된다.
+    fx.term.rt.editor_diff.?.requested_ms -|= diff_state.retry_window_ms + 1;
+    entry.diff_ready = false;
+    entry.diff_failed = false;
+    poll(fx.session, fx.term);
+
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .loading);
+    // 옛 행을 놓았는지도 본다 — 새 내용이 오면 그 버퍼가 풀리므로, 들고 있으면 해제된 메모리를 가리킨다.
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff.?.left_texts.len);
+}
+
+test "줄 끝 CR은 개행과 함께 올 때만 뗀다 — 홀로 남은 CR은 파일 내용이다" {
+    // §3.8: 보이는 것과 파일 내용이 달라지면 안 된다. 끝 개행이 없는 파일의 마지막 바이트가 CR이면
+    // 그것은 줄 끝 표시가 아니라 **내용**이라, 떼면 화면이 파일과 달라진다(가시화가 그것을 그려야 한다).
+    try testing.expectEqualStrings("abc", displayText("abc\n"));
+    try testing.expectEqualStrings("abc", displayText("abc\r\n"));
+    try testing.expectEqualStrings("abc\r", displayText("abc\r"));
+    try testing.expectEqualStrings("", displayText("\n"));
+    try testing.expectEqualStrings("", displayText("\r\n"));
+    try testing.expectEqualStrings("\r", displayText("\r"));
+}
+
+test "비교 Term은 파일이 붙어 있고 읽기 전용이라고 말한다 — 컨트롤 플레인이 거짓말하지 않게" {
+    // 그대로 두면 밖에서 보기에 "파일이 안 붙은, 편집 가능한 편집기"다. 둘 다 사실이 아니다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 비교가 붙기 전(문서 편집기)에는 지금까지대로 문서 쪽에서 나온다.
+    const before = editorMeta(fx.term);
+    try testing.expect(before.path == null);
+    try testing.expect(!before.read_only);
+
+    var entry = testEntry("a\n", "b\n");
+    fx.term.file_entry = &entry;
+    const meta = editorMeta(fx.term);
+    try testing.expectEqualStrings("/tmp/t.txt", meta.path.?);
+    try testing.expect(meta.read_only);
 }

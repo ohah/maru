@@ -11928,9 +11928,15 @@ pub const AppSession = struct {
                             .tab = @intCast(ti),
                             .pane = @intCast(pi),
                             .focused = (focused_surface_id != null and ed_sid == focused_surface_id.?),
-                            .detail = .{ .editor = .{
-                                .path = if (term.rt.editor_path) |p| try arena.dupe(u8, p) else null,
-                                .read_only = if (term.rt.editor_doc) |d| d.file.doc.read_only else false,
+                            // **판정은 `editor_diff_ops.editorMeta`가 소유한다** — 비교 Term은 파일이
+                            // dock entry에 있고 읽기 전용이라, 여기서 `rt`만 읽으면 밖에서 보기에
+                            // "파일 없는 편집 가능한 편집기"가 된다(둘 다 사실이 아니다).
+                            .detail = .{ .editor = blk: {
+                                const meta = editor_diff_ops.editorMeta(term);
+                                break :blk .{
+                                    .path = if (meta.path) |p| try arena.dupe(u8, p) else null,
+                                    .read_only = meta.read_only,
+                                };
                             } },
                         });
                         continue;

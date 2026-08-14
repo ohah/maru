@@ -57,6 +57,17 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 | 공통/파일 형식 | `recent.svg`, `folder-open.svg`, `file.svg`, `file-code.svg`, `document.svg`, `image.svg`, `file-config.svg`, `archive.svg`, `package.svg`, `web.svg`, `data.svg` |
 | 의미 폴더 | `folder-source.svg`, `folder-test.svg`, `folder-docs.svg`, `folder-assets.svg`, `folder-config.svg`, `folder-dependency.svg`, `folder-output.svg` |
 
+### Maru 자작 방향키 아이콘
+
+`arrow-up.svg`·`arrow-down.svg`·`arrow-left.svg`·`arrow-right.svg` 넷은 **모바일 보조 키바**용으로
+이 작업에서 처음 만든 **Maru 원본 자산**이며 외부 SVG를 복사·변형하지 않았다. 기존
+`chevron-*.svg`의 획 굵기(.75)와 `0 0 16 16` viewBox를 맞춰 같은 세트로 보이게 그렸다.
+라이선스는 Maru 본체와 같은 MIT([LICENSE](../LICENSE)), 저작권자는 Maru contributors다.
+
+**왜 폰트 글자가 아니라 아이콘인가**: `↑↓←→`(U+2190~2193)는 폰트마다 작게 디자인돼 44px 키캡
+안에서 `esc`·`tab` 라벨보다 훨씬 작아 보였다(화면으로 확인). 합성 아이콘은 슬롯을 가장자리까지
+채우므로 크기를 우리가 정한다. 같은 이유가 §9.6(헤더 아이콘)에도 적혀 있다.
+
 `tools/svg_to_coverage.py`의 manifest는 각 exact path/codepoint/SHA-256을 커밋된 Zig 데이터에 기록한다. 기본 Zig test는 외부 도구 없이 실제 SVG SHA-256과 C/Zig registry를 검증하고, `mise run icons:check`는 `rsvg-convert`/Pillow가 있는 개발 환경에서 SVG→coverage 재생성 drift까지 확인하는 opt-in gate다.
 
 ## 파일 패널 웹 런타임

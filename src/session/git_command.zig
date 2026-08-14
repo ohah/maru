@@ -135,7 +135,7 @@ pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 24;
+pub const max_argv = 26; // 기본 3 + config 덮어쓰기 16 + kind별 최대 6 + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 const config_overrides = [_][]const u8{
@@ -147,6 +147,11 @@ const config_overrides = [_][]const u8{
     // 경로를 **있는 그대로** 받는다. 기본값(true)이면 비ASCII 경로를 `"\355\225\234..."`처럼 C-quote해서 내주는데,
     // 그 문자열을 다시 git에 넘기거나 open(2)에 쓰면 "그런 파일 없음"이 된다 — 한글·일본어 파일명이 전부 안 열렸다.
     "-c", "core.quotePath=false",
+    // **비교 알고리즘을 못 박는다.** `--numstat`이 주는 `+N -N`은 사용자의 `diff.algorithm` 설정을 따르는데,
+    // 본문(네이티브 differ)은 Myers 최소 편집이라 설정이 `histogram`이면 두 숫자가 갈린다 — 실측으로
+    // 같은 입력에서 기본 `+250 -190` 대 histogram `+1756 -1696`(7배)이 나왔다. 목록과 본문이 같은 판정을
+    // 쓰게 하려면 여기서 정해야 한다(docs/native-editor-ui.md §7).
+    "-c", "diff.algorithm=myers",
 };
 
 /// 하위 프로세스에 **덮어써서** 넘길 환경변수. 상속만 하면 사용자 환경의 GIT_* 가 계약을 깬다.
@@ -301,6 +306,17 @@ test "경로를 C-quote하지 않게 강제한다(비ASCII 파일명)" {
     var buf: [max_argv][]const u8 = undefined;
     inline for (.{ Kind.status, Kind.numstat_staged, Kind.show_blob }) |kind| {
         try testing.expect(has(build(kind, "/usr/bin/git", "/repo", "HEAD:x", &buf), "core.quotePath=false"));
+    }
+}
+
+test "숫자를 내는 diff는 알고리즘을 못 박는다 — 사용자 설정이 목록과 본문을 갈라놓는다" {
+    // `--numstat`의 `+N -N`은 `diff.algorithm`을 따른다. 본문은 네이티브 Myers라, 사용자가
+    // `histogram`을 켜 두면 같은 파일에 목록은 `+1756 -1696`, 본문은 `+250 -190`을 말한다(실측).
+    // **둘 중 하나를 고쳐야 한다면 목록이다** — 본문 계산은 우리 것이고 설정을 따를 이유가 없다.
+    var buf: [max_argv][]const u8 = undefined;
+    inline for (.{ Kind.numstat_staged, Kind.numstat_worktree, Kind.branch_numstat, Kind.snapshot_numstat }) |kind| {
+        const argv = build(kind, "/usr/bin/git", "/repo", "deadbeef", &buf);
+        try testing.expect(has(argv, "diff.algorithm=myers"));
     }
 }
 

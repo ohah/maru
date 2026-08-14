@@ -24,6 +24,7 @@ const git_command = app_session_mod.git_command;
 const layout_math = app_session_mod.layout_math;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
+const editor_diff_ops = @import("editor_diff.zig");
 const settings_ops = @import("settings.zig");
 const tab_ops = @import("tab.zig");
 const Term = app_session_mod.Term;
@@ -239,6 +240,9 @@ pub fn drainGitStatus(self: *AppSession) void {
                     const entry = term.file_entry orelse continue;
                     if (entry.kind != .diff or entry.diff_request_id != diff_result.request_id) continue;
                     if (diff_result.ok) {
+                        // **우리 행이 그 버퍼를 빌린다.** 내용을 풀기 전에 먼저 놓지 않으면 해제된
+                        // 메모리를 가리키는 행이 남는다(네이티브 diff Term일 때만 동작).
+                        editor_diff_ops.invalidate(self, term);
                         self.freeDiffContent(entry); // rel_path는 남긴다 — 새로 고칠 때 다시 읽을 대상이다
                         entry.diff_original = diff_result.original;
                         entry.diff_modified = diff_result.modified;
@@ -639,6 +643,8 @@ pub fn openDiffTerm(
     // null이 되어 영영 실패로 굳는다(리뷰에서 잡힌 결함) — 목록을 만든 그 루트를 그대로 쓴다.
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
     self.requestDiffContent(entry);
+    // 재시도 창(6초)은 **요청 시점**부터 흐른다. 네이티브가 아니면 무동작이다.
+    editor_diff_ops.markRequested(self, opened.term);
 }
 
 pub fn diffTermFor(self: *AppSession, abs_path: []const u8, base: dock_panel.DiffBase) ?*Term {

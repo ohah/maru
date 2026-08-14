@@ -2,6 +2,7 @@ const std = @import("std");
 const debug_fixtures = @import("app_session/debug_fixtures.zig");
 /// N1: 네이티브 편집기의 platform 쪽(파일 읽기·권한). L2는 OS를 모르므로 여기서 읽어 넘긴다.
 const editor_ops = @import("app_session/editor.zig");
+pub const editor_diff_ops = @import("app_session/editor_diff.zig");
 const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
 const agent_ops = @import("app_session/agent.zig");
@@ -1577,6 +1578,9 @@ const TermRuntime = struct {
     editor_path: ?[]u8 = null,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 붙으면 여기가 움직인다(지금은 0 고정).
     editor_first_line: usize = 0,
+    /// N1.5 diff Term(`kind == .editor` + entry가 비교)의 상태. **행은 줄 배열을, 줄 배열은 entry의
+    /// 두 쪽 버퍼를 빌린다** — 그래서 내용이 갈리기 전에 `editor_diff_ops.invalidate`가 불려야 한다.
+    editor_diff: ?editor_diff_ops.State = null,
     /// 이 뷰의 랩 override. `null`이면 config(`editor.wrap`)를 따르고, 값이 있으면 그것이 이긴다.
     ///
     /// **뷰별로 두는 이유**: 랩은 "이 문서를 지금 어떻게 볼까"라 문서가 아니라 뷰의 상태다(VSCode의
@@ -13239,6 +13243,13 @@ pub const AppSession = struct {
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다 + 활성 터미널이 옮겨 갔는지 확인(저주기 cwd 조회)
+        // N1.5 b: 네이티브 diff Term의 네 상태를 옮긴다. **결과가 안 와도 매 tick 봐야 한다** — 재시도 창
+        // (6초)이 지났는지는 결과가 아니라 시간이 말한다. 판정이 선 Term은 곧바로 반환하므로 비용이 없다.
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| editor_diff_ops.poll(self, term);
+            }
+        }
         // **웹이 활성인 동안 스크롤백 매치가 살아 있으면 안 된다**(불변식). 슬라이스 ①에서는 오버레이를 통째로
         // 닫았지만, ②가 웹 탭에도 find를 주므로 이제 **닫지 않고 대상만 바꾼다** — 남겨야 할 것은 오버레이가
         // 아니라 "보이지도 않는 스크롤백을 검색하지 않는다"는 원래 의도다.

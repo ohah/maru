@@ -28,6 +28,8 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
+const editor_ops = @import("editor.zig");
+const editor_diff_ops = @import("editor_diff.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -160,7 +162,13 @@ pub fn openFileTermInActivePane(
         .kind = kind,
         .mode = dock_panel.Mode.defaultFor(kind),
     };
-    const term = try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
+    // **비교는 네이티브 편집기로도 열 수 있다**(N1.5 b). 훅이 꺼져 있으면 지금까지대로 CM6 웹 Term이다 —
+    // 화면이 서고 골든이 붙는 슬라이스 c 전에는 기본 경로를 바꾸지 않는다. entry 소유·`surface_id` 배선은
+    // 아래에서 그대로 이어지므로, 결과를 흘리는 배관(`takeDiffResult` → entry)이 두 경우에 같다.
+    const term = if (kind == .diff and editor_diff_ops.nativeDiffEnabled())
+        try editor_ops.createEditorTerm(self)
+    else
+        try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
     // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
     errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);

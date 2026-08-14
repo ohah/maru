@@ -17,6 +17,7 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
+const editor_diff_ops = @import("editor_diff.zig");
 const workspace_ops = @import("workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
@@ -211,8 +212,16 @@ pub const PaneDraw = struct {
 /// 조립 자체는 `editor_view.frame`이 한다 — Chrome Lab과 **같은 함수**라 캡처가 제품을 예고한다.
 pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, term: *Term) ?PaneDraw {
     if (term.kind != .editor) return null;
-    if (term.rt.editor_lines.len == 0) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+
+    // **비교 Term은 문서 대신 판정을 말한다**(N1.5 b). 좌우 배치는 슬라이스 c가 그리므로, 지금은 네 상태를
+    // 한 줄로 낸다 — 조용한 빈 화면을 남기지 않는 것이 §7의 요구다. 문구는 정적 문자열이라 수명이 길다.
+    var status_line: [1][]const u8 = undefined;
+    const lines: []const []const u8 = if (term.rt.editor_diff) |st| blk: {
+        status_line[0] = editor_diff_ops.statusText(st.view);
+        break :blk status_line[0..1];
+    } else term.rt.editor_lines;
+    if (lines.len == 0) return null;
 
     // **본문 사각은 `body`다 — `grid`가 아니다**(`paneGeometry` 단일 출처).
     //
@@ -252,7 +261,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     if (inner.w == 0 or inner.h == 0) return null;
 
     const pf = buildPaneOps(
-        term.rt.editor_lines,
+        lines,
         term.rt.editor_first_line,
         term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap, // 뷰 override가 config를 이긴다
         .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h },
@@ -307,7 +316,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     };
     if (diag_gate.maruDebugEnabled()) editor_diag.debug(
         "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} cells_grid={d}x{d} cells={d}",
-        .{ rect.x, rect.y, rect.w, rect.h, term.rt.editor_lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
+        .{ rect.x, rect.y, rect.w, rect.h, lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
     );
     return .{ .rect = inner, .dl = dl }; // 원점 = 여백 안쪽(배경은 op이 음수로 덮는다)
 }
@@ -381,6 +390,7 @@ pub fn toggleWrap(self: *AppSession) bool {
 
 /// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
 pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
+    editor_diff_ops.release(self, term); // N1.5 diff 행·줄 배열(entry 버퍼를 빌린다)
     if (term.rt.editor_doc) |*d| d.deinit(self.allocator);
     term.rt.editor_doc = null;
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);

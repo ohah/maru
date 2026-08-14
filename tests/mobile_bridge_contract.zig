@@ -87,8 +87,9 @@ test "선택을 복사로 꺼낸다" {
     // **누르기 전에는 아무것도 안 나온다** — 선택이 있다고 저절로 복사되면 안 된다.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
 
-    // `copy` 는 표의 마지막이다. 선택이 있으므로 줄에 나타나 있다.
+    // `copy` 는 표의 마지막이다. **밀어야 창 안에 들어온다** — 키가 손가락 크기라 폰 폭을 넘친다.
     const sent_before = bridge.maru_mobile_input("", 0);
+    keybarScrollToEnd();
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
     try std.testing.expectEqual(@as(u32, 1), keybarTap(c.x, c.y));
     const n = bridge.maru_mobile_take_copy(&buf, buf.len);
@@ -448,6 +449,22 @@ test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
 
 // 키 `index` 의 한가운데. **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다
 // (적어 두면 레이아웃이 바뀔 때 테스트만 맞고 제품이 틀리게 된다).
+/// 키바를 **끝까지 민다.** 키가 손가락 크기(44)라 폰 폭을 넘치므로 오른쪽 키(`copy` 등)는
+/// 밀어야 창 안에 들어온다 — 실제 사용자가 하는 일과 같다. 먼저 보이는 키에서 시작해야
+/// 밴드 세로 범위 안이다.
+fn keybarScrollToEnd() void {
+    const c = keyCenter(0);
+    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    var x = c.x;
+    var step: u32 = 0;
+    while (step < 40) : (step += 1) {
+        x -= 20;
+        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+    }
+    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
 fn keyCenter(index: u32) struct { x: f32, y: f32 } {
     const packed_rect = bridge.maru_mobile_keybar_rect(index);
     const x: f32 = @floatFromInt((packed_rect >> 48) & 0xFFFF);
@@ -727,6 +744,7 @@ test "복사 버퍼가 모자라면 알린다" {
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, q.x, q.y, now());
     holdPast(600);
+    keybarScrollToEnd(); // `copy` 는 줄 끝이라 밀어야 창 안에 들어온다
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
 
     // ① 딱 맞으면 자르지 않고 알리지도 않는다.
@@ -773,21 +791,23 @@ test "copy 가 나타나도 다른 키 자리는 그대로다" {
 }
 
 // 선택이 없으면 `copy` 는 **줄에서 빠진다** — 누를 수 없는 버튼이 계속 보이면 안 된다.
-test "copy 는 선택이 있을 때만 줄에 있다" {
+// **`copy` 는 늘 줄에 있다**(계약이 바뀌었다). 예전에는 선택이 있을 때만 나타났는데, 나타났다
+// 사라지며 줄이 흔들리고 그 자리가 평소엔 죽은 공간이었다 — 이제 상시 표시하고 **쓸 수 없을 때는
+// 흐리게** 그린다(눌러도 아무 일이 없다). 개수가 안 흔들리는 것이 그 계약이다.
+test "copy 는 늘 줄에 있고 선택이 없으면 눌러도 아무 일이 없다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("word here", 9);
     _ = bridge.maru_mobile_build(402, 874, now());
-    // **개수로 본다** — 눌러서 아무 일도 안 나는 것만 보면 "안 보인다" 와 "보이는데 빈손" 이
-    // 구분되지 않는다.
     const without = bridge.maru_mobile_keybar_count();
 
+    // 선택을 잡아도 **개수가 안 변한다** — 자리가 고정이라 나머지 키가 안 밀린다.
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, q.x, q.y, now());
     holdPast(600);
     _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(without + 1, bridge.maru_mobile_keybar_count());
+    try std.testing.expectEqual(without, bridge.maru_mobile_keybar_count());
 
     bridge.maru_mobile_pointer(3, q.x, q.y, now());
     _ = bridge.maru_mobile_build(402, 874, now());

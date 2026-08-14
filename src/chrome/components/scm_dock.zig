@@ -5,6 +5,8 @@
 
 pub const types = @import("scm_dock/types.zig");
 pub const ids = @import("scm_dock/ids.zig");
+pub const build = @import("scm_dock/build.zig");
+pub const view = @import("scm_dock/view.zig");
 
 test {
     // 자식 파일의 테스트를 빌드에 집계한다(chrome.zig와 같은 관용구 — `refAllDecls`는 한 단계라

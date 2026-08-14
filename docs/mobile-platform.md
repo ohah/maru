@@ -319,6 +319,11 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 값이 정작 고주사율 기기에서 두 배가 되므로, 경과 시간으로 재고 문턱은 **패널 반 주기만큼**
 당긴다(정확히 목표를 요구하면 vsync 지터로 한 주기를 통째로 놓쳐 실효 주기가 널뛴다).
 
+**목표는 패널 주기의 배수로만 맞는다 — 오차 상한은 반 주기다.** present 는 vsync 에만 나가므로
+30Hz 가 정수배로 떨어지는 패널(60·90·120·240)에서는 정확히 30 이고, 아닌 패널에서는 가장 가까운
+배수로 간다(144Hz→28.8, 72Hz→36). 전부 `MARU_PACE` PASS 창(25~42ms) 안이다. 이보다 좁히려면
+프레임을 vsync 사이에 내보내야 하는데 그건 티어링이라 안 한다.
+
 **iOS 는 `Info.plist` 에 `CADisableMinimumFrameDuration` 을 켜 둔다.** 없으면 ProMotion
 기기에서도 60 에서 잘리고 `preferredFrameRateRange` 로 그 위를 요청해도 무시된다. **지금
 요청값이 30 이라 켜도 동작은 안 바뀐다** — 그런데도 미리 켜는 이유는 이것이 설정이 아니라

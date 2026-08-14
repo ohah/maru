@@ -519,3 +519,105 @@ test "비교 Term은 파일이 붙어 있고 읽기 전용이라고 말한다 �
     try testing.expectEqualStrings("/tmp/t.txt", meta.path.?);
     try testing.expect(meta.read_only);
 }
+
+test "네 상태가 모두 화면에 op을 낸다 — 조용한 빈 화면이 남지 않는다" {
+    // **§7의 요구는 '말한다'이지 '판정을 든다'가 아니다.** 판정이 서도 렌더 분기가 그것을 안 그리면
+    // 사용자에게는 빈 pane이다 — 이 저장소에서 편집기 본문이 실제로 그렇게 비어 있었고, 층 하나가
+    // 뒤집혀 있어도 op·좌표는 정상이라 단위 테스트가 전부 통과했다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+
+    // ① 읽는 중 — 결과가 아직 없다.
+    entry.diff_ready = false;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .loading);
+    {
+        var draw_result = editor_ops.appendPaneFrame(fx.session, leaf, fx.term);
+        try testing.expect(draw_result != null);
+        defer draw_result.?.dl.deinit(allocator);
+        try testing.expect(draw_result.?.dl.cells.len > 0); // 문구가 셀로 내려갔다
+    }
+
+    // ② 보여 줄 수 없음.
+    entry.diff_failed = true;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .unavailable);
+    {
+        var draw_result = editor_ops.appendPaneFrame(fx.session, leaf, fx.term);
+        try testing.expect(draw_result != null);
+        defer draw_result.?.dl.deinit(allocator);
+        try testing.expect(draw_result.?.dl.cells.len > 0);
+    }
+
+    // ③ 변경 없음 — 빈 화면이 아니라 문장이다.
+    entry.diff_failed = false;
+    entry.diff_ready = true;
+    invalidate(fx.session, fx.term);
+    entry.diff_modified = @constCast("a\nb\n");
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .unchanged);
+    {
+        var draw_result = editor_ops.appendPaneFrame(fx.session, leaf, fx.term);
+        try testing.expect(draw_result != null);
+        defer draw_result.?.dl.deinit(allocator);
+        try testing.expect(draw_result.?.dl.cells.len > 0);
+    }
+
+    // ④ 비교. **내용을 바꿀 때는 배수가 하는 순서를 그대로 따른다** — `invalidate` → 내용 교체.
+    // 플래그가 그대로면 래치가 판정을 재사용하므로(그것이 계약이다), 이 순서를 어기면 옛 판정이 남는다.
+    invalidate(fx.session, fx.term);
+    entry.diff_modified = @constCast("a\nB\n");
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
+    {
+        var draw_result = editor_ops.appendPaneFrame(fx.session, leaf, fx.term);
+        try testing.expect(draw_result != null);
+        defer draw_result.?.dl.deinit(allocator);
+        // **"셀이 있다"로는 부족하다** — 한 열만 그려도 통과한다. 셀이 분할선 양쪽에 모두 있어야
+        // 비교가 화면에 선 것이다(제품 경로에서 그것을 본다 — 컴포넌트 테스트는 op 좌표만 본다).
+        const cell_w: i32 = @intCast(fx.session.cell_width_px);
+        const inner_w: u32 = draw_result.?.rect.w -| maru.chrome.components.editor_view.frame.content_inset_px * 2;
+        const split_cell = @divTrunc(maru.chrome.components.editor_view.diff_frame.columns(
+            .{ .x = 0, .y = 0, .w = inner_w, .h = 1 },
+            @intCast(fx.session.cell_width_px),
+        ).right.x, cell_w);
+        var left_cells: usize = 0;
+        var right_cells: usize = 0;
+        for (draw_result.?.dl.cells) |cell| {
+            if (@as(i32, @intCast(cell.col)) < split_cell) left_cells += 1 else right_cells += 1;
+        }
+        try testing.expect(left_cells > 0);
+        try testing.expect(right_cells > 0);
+    }
+}
+
+test "내용만 바뀌고 플래그가 같으면 판정을 유지한다 — 그래서 배수가 invalidate를 부른다" {
+    // 래치의 계약을 **밖에서 보이게** 못 박는다. 이것이 참이기 때문에 `git.drainGitStatus`가 내용을
+    // 풀기 전에 `invalidate`를 부른다 — 그 호출이 사라지면 화면이 옛 비교를 그대로 그린다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const before = fx.term.rt.editor_diff.?.view.compare.changed;
+
+    // 플래그는 그대로 두고 내용만 바꾼다(배수를 흉내내지 않은 경로).
+    entry.diff_modified = @constCast("X\nY\nZ\n");
+    poll(fx.session, fx.term);
+    try testing.expectEqual(before, fx.term.rt.editor_diff.?.view.compare.changed); // 판정 그대로
+
+    // 배수가 하는 대로 하면 새 내용이 반영된다.
+    invalidate(fx.session, fx.term);
+    poll(fx.session, fx.term);
+    try testing.expect(fx.term.rt.editor_diff.?.view.compare.changed != before);
+}

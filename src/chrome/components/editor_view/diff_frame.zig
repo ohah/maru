@@ -50,7 +50,8 @@ pub const Written = struct {
     ops: usize,
     visual_rows: usize,
     truncated: bool,
-    /// 오른쪽 열이 시작하는 x. 테스트·히트테스트가 두 열을 가를 때 쓴다.
+    /// 오른쪽 열이 시작하는 x. **아직 소비처가 없다** — 히트테스트(어느 열을 눌렀나)가 붙을 때
+    /// 쓰라고 함께 낸다. 지금 두 열을 가르는 테스트들은 `columns()`를 다시 불러 같은 값을 얻는다.
     split_x: i32,
 };
 

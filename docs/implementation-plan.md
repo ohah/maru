@@ -100,7 +100,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `discarded_stale`는 pool membership/connection generation이 바뀌었다는 owner 증거가 있을 때만 소비한다. 실제
    `connectExistingHost`와 `PreparedReconnect`는 각각 CR4와 CR2e가 소유하므로 CR1이 raw socket, HostPool adapter 교체 또는
    Window tree 순회를 추가하면 선행 gate 우회다.
-4. **CR2 — stable shell 기반:** CR2a는 field inventory를 고정하고 `RemoteGeneration`만 추출한다. CR2b는 기존 Surface API를
+4. **CR2 — stable shell 기반:** CR2a는 current `RemoteRuntime`의 generation-owned field 11개
+   (`connection`, `attachment`, `event_generation_tracking`, resize wire state 3개, pump state 4개, `observation`)와
+   stable-shell 잔류 owner를 closed inventory로 고정하고 `RemoteGeneration`만 추출한다. Zig의 nested aggregate 정렬로
+   `RemoteRuntime`은 Debug/ReleaseFast 모두 정확히 16바이트만 증가하며 기존 4,096-runtime 상한에서 64 KiB가 추가된다. direct-input/control queue와
+   allocator/io/runtime ID, Surface, pending/close/lifetime owner는 이 단계에서 이동하지 않는다. CR2b는 기존 Surface API를
    유지하는 stable proxy gate와 shell lifecycle pin을 배선한다. CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
    바꾸지 않는다. transport-neutral facade/ordered policy는 `src/app`의 `TermRuntimeBackend` 계약 옆 중립 모듈이 소유하고
    local/remote backend가 구현한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event

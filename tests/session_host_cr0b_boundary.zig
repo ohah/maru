@@ -233,7 +233,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));
-    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.attachment.callDecoded("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.generation.attachment.callDecoded("));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const PreparedExecutionPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const RegisteredOperationPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCapture = struct"));

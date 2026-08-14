@@ -1163,7 +1163,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   | scheduler 2 | `CR1 partial read와 write는 sealed dispatch를 exact once schedule한다` |
   | scheduler 3 | `CR1 artifact degraded는 disk를 기다리지 않고 dispatch를 schedule한다` |
   | scheduler 4 | `CR1 scheduler dispatch는 retry stale copy replay를 closed transition으로 정산한다` |
-- CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
+- CR2a: `zig build test-session-host-cr2a`가 CR1을 상속하고 Debug·ReleaseFast에서 `RemoteGeneration` production-type test 2개와
+  source boundary 1개를 exact-count한다. field inventory는 generation-owned 11개만 허용하고 allocator/io/runtime ID, Surface,
+  direct-input/control queue, pending/close/lifetime owner가 bundle로 섞이면 RED다. extraction parity는 distinct nonzero fixture와
+  existing runtime tests를 결합해 connection/attachment/screen, event tracking, resize state, pump state, raw observation의 값과
+  allocator-backed ownership/deinit 결과가 중첩 전후 동일하고 nested 정렬 증가가 Debug/ReleaseFast exact 16바이트
+  (4,096 runtime에서 64 KiB)임을 검증한다. CR2a는 proxy, InputOwner, reconnect publish와 제품
+  generation 교체 caller를 추가하지 않는다. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
   `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.

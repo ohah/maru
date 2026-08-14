@@ -247,6 +247,27 @@ pub const PreparedManagedPoisonSealInput = struct {
     lifecycle_raw: u8,
 };
 
+/// Process-global lookup token for the GUI incident owner. The token contains no publisher
+/// pointer; resolving it always revalidates the final owner graph before use.
+pub const IncidentPublicationPortSealInput = struct {
+    owner_addr: u64,
+    owner_thread: u64,
+    registry_addr: u64,
+    pid: u32,
+    process_nonce: u64,
+    app_instance_nonce: u128,
+    owner_lifecycle_raw: u8,
+};
+
+pub const IncidentPublicationTimestampSealInput = struct {
+    owner_addr: u64,
+    owner_thread: u64,
+    pid: u32,
+    process_nonce: u64,
+    app_instance_nonce: u128,
+    timestamp_ns: i128,
+};
+
 pub const ReconnectAdmissionSealInput = struct {
     self_addr: u64,
     owner_thread: u64,

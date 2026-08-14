@@ -2177,6 +2177,7 @@ pub const IncidentOwnerTerminationOutcome = enum(u32) {
 // final address를 restore-first/current-first와 뒤의 모든 Window가 그대로 재사용한다. AppSession.deinit은 건드리지 않고
 // AppHost termination ABI가 정산한다.
 var app_process_incident_owner: session_host.app_process_incident_owner.AppProcessIncidentOwner = .{};
+const incident_publication_port = session_host.app_process_incident_owner;
 var app_process_incident_nonce: u128 = 0;
 // 공개 종료 ABI는 mutable owner graph를 읽기 전에 이 immutable publication token으로 caller thread를 거른다.
 var app_process_incident_owner_thread = std.atomic.Value(u64).init(0);
@@ -5455,12 +5456,13 @@ pub const AppSession = struct {
         _ = self;
         const identity = RemoteSessionAdapter.publicationProcessIdentity() orelse return error.InvalidOwner;
         if (app_process_incident_owner.publisher() != null) {
-            return app_process_incident_owner.ensureReady(
+            try app_process_incident_owner.ensureReady(
                 std.heap.smp_allocator,
                 if (builtin.is_test) app_incident_testing.directory_fd else 0,
                 identity.process_nonce,
                 app_process_incident_nonce,
             );
+            return incident_publication_port.installPublicationPort(&app_process_incident_owner);
         }
         if (app_process_incident_nonce == 0) {
             var bytes: [16]u8 = undefined;
@@ -5480,6 +5482,7 @@ pub const AppSession = struct {
             identity.process_nonce,
             app_process_incident_nonce,
         );
+        try incident_publication_port.installPublicationPort(&app_process_incident_owner);
         app_process_incident_owner_thread.store(@intCast(std.Thread.getCurrentId()), .release);
     }
 
@@ -5500,6 +5503,7 @@ pub const AppSession = struct {
 
     fn beginIncidentBootstrapTest(directory_fd: std.c.fd_t) !void {
         try RemoteSessionAdapter.initializeProcessRuntime();
+        incident_publication_port.publication_port_testing_api.reset();
         app_process_incident_owner = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
@@ -5511,12 +5515,15 @@ pub const AppSession = struct {
     fn endIncidentBootstrapTest() void {
         app_incident_testing.stop_after_bootstrap = false;
         app_incident_testing.directory_fd = -1;
-        if (app_process_incident_owner.publisher() != null)
+        if (app_process_incident_owner.publisher() != null) {
+            incident_publication_port.revokePublicationPort(&app_process_incident_owner) catch unreachable;
             _ = app_process_incident_owner.shutdown() catch unreachable;
+        }
         app_process_incident_owner = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
         app_process_incident_termination_consumed.store(0, .release);
+        incident_publication_port.publication_port_testing_api.reset();
     }
 
     fn incidentBootstrapTestDirectory() !struct { dir: std.testing.TmpDir, fd: std.c.fd_t } {
@@ -16899,6 +16906,7 @@ pub fn shutdownProcessIncidentOwner() IncidentOwnerTerminationOutcome {
     if (app_remote_backend != null or app_remote_host_pool != null or app_remote_client != null) return .inactive;
     if (app_process_incident_termination_consumed.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null)
         return .inactive;
+    incident_publication_port.revokePublicationPortNoFail(&app_process_incident_owner);
     const result = app_process_incident_owner.shutdownForTermination();
     app_process_incident_owner_thread.store(0, .release);
     return switch (result) {
@@ -56255,6 +56263,25 @@ test "CR0b GUI current first는 managed adapter 전에 process owner를 한 번 
     var session: AppSession = undefined;
     session.ensureRemoteBackend();
     const publisher = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
+    const timestamp = try incident_publication_port.publicationTimestampReceipt();
+    try std.testing.expect(timestamp.timestamp_ns > 0);
+    try std.testing.expect(incident_publication_port.publication_port_testing_api.timestampReceiptValid(timestamp));
+    var timestamp_drift = timestamp;
+    timestamp_drift.timestamp_ns += 1;
+    try std.testing.expect(!incident_publication_port.publication_port_testing_api.timestampReceiptValid(timestamp_drift));
+    incident_publication_port.publication_port_testing_api.driftSeal();
+    var port_seal_drifted = true;
+    defer {
+        if (port_seal_drifted)
+            incident_publication_port.publication_port_testing_api.driftSeal();
+    }
+    try std.testing.expectError(
+        error.InvalidOwner,
+        incident_publication_port.publicationTimestampReceipt(),
+    );
+    incident_publication_port.publication_port_testing_api.driftSeal();
+    port_seal_drifted = false;
+    try std.testing.expect((try incident_publication_port.publicationTimestampReceipt()).timestamp_ns > 0);
     try std.testing.expectEqual(@intFromPtr(&app_process_incident_owner), app_process_incident_owner.self_addr);
     try std.testing.expectEqual(@intFromPtr(&app_process_incident_owner.registry), publisher.registry.self_addr);
     try std.testing.expect(app_remote_host_pool == null and app_remote_backend == null);
@@ -56346,8 +56373,13 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     session.ensureRemoteBackend();
     const ForeignShutdown = struct {
         result: IncidentOwnerTerminationOutcome = .joined,
+        timestamp_rejected: bool = false,
 
         fn run(self: *@This()) void {
+            _ = incident_publication_port.publicationTimestampReceipt() catch |err| rejected: {
+                self.timestamp_rejected = err == error.InvalidOwner;
+                break :rejected 0;
+            };
             self.result = shutdownProcessIncidentOwner();
         }
     };
@@ -56358,6 +56390,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
         IncidentOwnerTerminationOutcome.inactive,
         foreign.result,
     );
+    try std.testing.expect(foreign.timestamp_rejected);
     try std.testing.expect(app_process_incident_owner.publisher() != null);
     // 실제 AppSession init/deinit 수명이 shipping counter를 소유한다. 마지막 세션 전에는 backend/pool graph와
     // incident latch가 그대로 남고, deinit 뒤 같은 settlement leaf가 진행돼야 한다.
@@ -56439,6 +56472,10 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
     try std.testing.expectEqual(
         IncidentOwnerTerminationOutcome.joined,
         shutdownProcessIncidentOwner(),
+    );
+    try std.testing.expectError(
+        error.InvalidOwner,
+        incident_publication_port.publicationTimestampReceipt(),
     );
     try std.testing.expectEqual(
         IncidentOwnerTerminationOutcome.inactive,

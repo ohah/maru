@@ -1092,6 +1092,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   소유한다. response/transport failure 중간에는 first reason·fd·pending outbound·ring·admission이 0이고, 최종 publication은 caller 1과
   동일한 canonical suffix를 exact 1회 사용해야 한다. `GenerationAttachment`·`RemoteRuntime`의 publisher/registry/runtime pointer 저장,
   managed product reason-only poison, operation 안 coordinator 재진입은 모두 0이다. 이 행이 GREEN되기 전 caller 2는 미완료다.
+  선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
+  조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
   event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
   capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.

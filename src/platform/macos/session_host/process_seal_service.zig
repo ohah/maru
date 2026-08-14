@@ -51,6 +51,8 @@ const incident_client_operation_domain = "maru.incident-client-operation.v1";
 const incident_repeat_key_domain = "maru.incident-repeat-key.v1";
 const prepared_incident_publication_domain = "maru.prepared-incident-publication.v1";
 const prepared_managed_poison_domain = "maru.prepared-managed-poison.v1";
+const incident_publication_port_domain = "maru.incident-publication-port.v1";
+const incident_publication_timestamp_domain = "maru.incident-publication-timestamp.v1";
 const reconnect_admission_domain = "maru.reconnect-admission.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
@@ -99,6 +101,8 @@ pub const IncidentClientOperationSealInput = cleanup_seal.IncidentClientOperatio
 pub const IncidentRepeatKeySealInput = cleanup_seal.IncidentRepeatKeySealInput;
 pub const PreparedIncidentPublicationSealInput = cleanup_seal.PreparedIncidentPublicationSealInput;
 pub const PreparedManagedPoisonSealInput = cleanup_seal.PreparedManagedPoisonSealInput;
+pub const IncidentPublicationPortSealInput = cleanup_seal.IncidentPublicationPortSealInput;
+pub const IncidentPublicationTimestampSealInput = cleanup_seal.IncidentPublicationTimestampSealInput;
 pub const ReconnectAdmissionSealInput = cleanup_seal.ReconnectAdmissionSealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
@@ -761,6 +765,22 @@ pub fn preparedManagedPoisonSeal(
     input: PreparedManagedPoisonSealInput,
 ) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, prepared_managed_poison_domain, input);
+}
+
+pub fn incidentPublicationPortSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: IncidentPublicationPortSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_publication_port_domain, input);
+}
+
+pub fn incidentPublicationTimestampSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: IncidentPublicationTimestampSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_publication_timestamp_domain, input);
 }
 
 pub fn reconnectAdmissionSeal(

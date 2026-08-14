@@ -780,9 +780,9 @@ static void drawFrame(void) {
             // **계측은 동작을 바꾸지 않는다.** 예전에는 여기서 앱을 30Hz 로 전환해, 측정의
             // 부산물이 제품 동작이 됐다(그리고 iOS 엔 그 전환이 없어 두 플랫폼이 달랐다).
             double med = g.pace_ms[PACE_SAMPLES / 2];
-            int paced = (med >= 25.0 && med <= 42.0);
-            LOGI("MARU_PACE median_ms=%.2f n=%d target=33.33 verdict=%s",
-                 med, PACE_SAMPLES, paced ? "PASS" : "FAIL");
+            int paced = (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS);
+            LOGI("MARU_PACE median_ms=%.2f n=%d target=%.2f verdict=%s",
+                 med, PACE_SAMPLES, MARU_FRAME_TARGET_MS, paced ? "PASS" : "FAIL");
         }
     }
     g.frames++;
@@ -1478,12 +1478,16 @@ static void frameCallback(int64_t frame_time_ns, void *data) {
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
     // 사용자에게 보인다. iOS 도 같은 값이다(`preferredFrameRateRange`). 데스크톱은 60 이라
     // **다르다** — 데스크톱은 hover/scroll 지연을 우선하고 전력 여유가 있다.
-    const int64_t target_ns = 33333333; // 30Hz
+    const int64_t target_ns = MARU_FRAME_TARGET_NS; // 값은 ABI 헤더가 소유한다
     // 패널 주기를 재서 문턱을 반 주기 당긴다. 정확히 `target_ns` 를 요구하면 vsync 지터로
     // 한 주기를 통째로 놓쳐 **실효 주기가 절반으로 떨어졌다 돌아오는** 널뛰기가 된다.
     const int64_t vsync_dt = (g.last_vsync_ns != 0) ? frame_time_ns - g.last_vsync_ns : 0;
     g.last_vsync_ns = frame_time_ns;
-    if (g.last_draw_ns == 0 || frame_time_ns - g.last_draw_ns >= target_ns - vsync_dt / 2) {
+    // **동률이면 한 번 더 기다린다**(`>` 지 `>=` 가 아니다). 목표가 패널 주기의 딱 1.5배인
+    // 45Hz 에서 `>=` 면 매 vsync 를 그려 **45Hz 가 된다** — 페이싱이 통째로 사라지는, 이
+    // 커밋이 고치려는 바로 그 상태다. `>` 면 22.5Hz 로 목표엔 못 미치지만 comfort 방향이다
+    // (45Hz 패널은 45 나 22.5 뿐이라 30 이 애초에 없다).
+    if (g.last_draw_ns == 0 || frame_time_ns - g.last_draw_ns > target_ns - vsync_dt / 2) {
         g.last_draw_ns = frame_time_ns;
         drawFrame();
     }

@@ -875,16 +875,16 @@ test "0폭 format 문자(ZWJ)는 미스로 안 올라간다" {
     try std.testing.expect(missCount(0x1F468) >= 1);
 }
 
-// **재현: 아틀라스가 차면 그 뒤 글자는 조용히 사라진다.**
+// **아틀라스가 차도 새 글자는 그려진다**(축출).
 //
-// 축출이 없다(`atlas_add` 는 꽉 차면 그냥 `return`). 512칸(16x32)은 데모 피드로는 안 차지만
-// **실제 셸은 금방 채운다** — ASCII 95 + 한글 음절 + CJK + 박스 문자에, 굵게/기울임이 각각
-// **별도 슬롯**(`atlasKey(cp, style)`)이다. 차고 나면 새 글자는 미스로 올라오지만 host 가
-// 구울 자리가 없어 **영영 안 그려진다**. 오류도 로그도 없다.
+// 예전에는 `atlas_add` 가 꽉 차면 그냥 `return` 했다 — 그 뒤 나온 글자는 미스로 올라오는데
+// 구울 자리가 없어 **영영 안 그려졌다**(오류도 로그도 없이). 512칸(16x32)은 데모 피드로는 안
+// 차서 아무도 안 보고 있었지만 **실제 셸은 금방 채운다**: ASCII 95 + 한글 음절 + CJK + 박스
+// 문자에, 굵게/기울임이 각각 **별도 슬롯**(`atlasKey(cp, style)`)이다.
 //
-// **이 테스트도 등록부를 채우고 되돌리지 않는다** — 아래 "슬롯이 다 차면" 과 같은 부류라
+// **이 테스트는 등록부를 채우고 되돌리지 않는다** — 아래 "슬롯이 다 차면" 과 같은 부류라
 // 나란히 둔다. 글자 등록이 필요한 새 테스트는 이 **위에** 둔다.
-test "재현: 아틀라스가 차면 새 글자가 조용히 안 그려진다" {
+test "아틀라스가 차도 새 글자가 그려진다 (축출)" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
 
@@ -911,10 +911,10 @@ test "재현: 아틀라스가 차면 새 글자가 조용히 안 그려진다" {
     }
 
     // 한글 음절로 아틀라스를 채운다. 매 프레임 host 가 굽는 것을 흉내낸다.
-    var filled = false;
+    const cap = bridge.maru_mobile_atlas_cols() * bridge.maru_mobile_atlas_rows();
     var base: u21 = 0xAC00;
     var round: u32 = 0;
-    while (round < 60) : (round += 1) {
+    while (round < 60 and bridge.maru_mobile_atlas_count() < cap) : (round += 1) {
         _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
         var line: [64]u8 = undefined;
         var used: usize = 0;
@@ -925,12 +925,9 @@ test "재현: 아틀라스가 차면 새 글자가 조용히 안 그려진다" {
         base += 20;
         _ = bridge.maru_mobile_input(&line, used);
         _ = bridge.maru_mobile_build(402, 874, now());
-        if (bakeMisses() > 0) {
-            filled = true;
-            break;
-        }
+        _ = bakeMisses();
     }
-    try std.testing.expect(filled); // 512칸이 실제로 찼다
+    try std.testing.expectEqual(cap, bridge.maru_mobile_atlas_count()); // 512칸이 실제로 찼다
 
     // **판정은 차이로 한다** — glyph quad 총계에는 chrome(탭 라벨·사이드바) 글자가 섞여 있어
     // 절대값으로는 아무것도 못 잰다(실측: 빈 화면에서도 51개).
@@ -940,30 +937,45 @@ test "재현: 아틀라스가 차면 새 글자가 조용히 안 그려진다" {
     // 이제 **한 번도 안 나온 글자** 다섯을 넣는다.
     const fresh = "\u{4E00}\u{4E01}\u{4E02}\u{4E03}\u{4E04}"; // 一丁丂七丄
     _ = bridge.maru_mobile_input(fresh.ptr, fresh.len);
+    _ = bridge.maru_mobile_build(402, 874, now()); // 미스로 올린다
+    try std.testing.expectEqual(@as(u32, 0), bakeMisses()); // 꽉 찼어도 host 가 다 구웠다
     const with_fresh = glyphQuads(bridge.maru_mobile_build(402, 874, now()));
 
-    // 미스로는 올라온다 — host 는 구우려 한다.
-    try std.testing.expect(missCount(0x4E00) == 1);
-    // 그런데 구울 자리가 없다.
-    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols()));
-    // 그래서 **다섯 글자가 통째로 안 그려진다**. 이게 화면에서 보이는 증상이다.
-    try std.testing.expectEqual(empty, with_fresh);
+    // 다섯 글자가 **그려진다**. 예전에는 여기가 `empty` 와 같았다(통째로 사라짐).
+    try std.testing.expectEqual(empty + 5, with_fresh);
+    // 용량은 안 넘는다 — 자리를 늘린 게 아니라 **바꿔 끼운** 것이다.
+    try std.testing.expectEqual(cap, bridge.maru_mobile_atlas_count());
 }
 
-// **이 테스트는 등록부를 끝까지 채우고 되돌리지 않는다.** Zig 는 선언 순서대로 도므로, 뒤에
-// 오는 테스트에서는 `maru_mobile_atlas_add` 가 조용히 무시된다(슬롯 소진). 글자 등록이 필요한
-// 새 테스트는 **이 위에** 둔다 — 아래에 두면 등록이 안 된 채로 통과해 무엇을 재도 의미가 없다
-// (이번에 이모지 회전을 여기 아래에서 재다가 세 번 헛짚었다).
-test "슬롯이 다 차면 없음을 답한다" {
+// **버릴 것이 없으면 그때만 없음을 답한다.**
+//
+// 축출이 들어오기 전에는 "꽉 참 = 없음"이었다. 이제 꽉 차도 가장 안 쓰인 자리를 내주므로,
+// `0xFFFFFFFF` 가 뜨는 경우는 하나뿐이다 — **등록부가 전부 이번 프레임에 쓰인 것**. 그 상태에서
+// 축출하면 방금 그린 글자를 지우게 되어 한 프레임 안에서 서로 밀어낸다(깜빡임).
+//
+// **이 테스트는 등록부를 끝까지 채우고 되돌리지 않는다.** Zig 는 선언 순서대로 도므로, 글자
+// 등록이 필요한 새 테스트는 **이 위에** 둔다 — 아래에 두면 등록이 축출로 서로를 밀어내
+// 무엇을 재도 흔들린다(이번에 이모지 회전을 여기 아래에서 재다가 세 번 헛짚었다).
+test "버릴 것이 없을 때만 슬롯 없음을 답한다" {
     const cols = bridge.maru_mobile_atlas_cols();
     const rows = bridge.maru_mobile_atlas_rows();
     try std.testing.expect(cols > 0 and rows > 0);
+    // **`next_slot` 이 주는 자리를 그대로 쓴다** — 그게 host 의 계약이고, 그래야 축출이 매번
+    // 다른 자리를 골라 등록부 전체가 이번 프레임 것이 된다. 임의 좌표로 부르면 브리지가
+    // "host 가 엉뚱한 자리에 구웠다"로 보고 안 받는다.
     const cp: u32 = 0x4000; // 대본에 없는 코드포인트로 등록부만 채운다
     var n: u32 = 0;
     while (n < cols * rows) : (n += 1) {
-        bridge.maru_mobile_atlas_add(cp + n, 0, 0, 0, 1);
+        const slot = bridge.maru_mobile_next_slot(cols);
+        if (slot == 0xFFFFFFFF) break; // 이미 전부 이번 프레임 것
+        bridge.maru_mobile_atlas_add(cp + n, 0, slot >> 16, slot & 0xFFFF, 1);
     }
+    // 등록부가 전부 **이번 프레임** 것이라 버릴 게 없다.
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(cols));
+
+    // 프레임이 넘어가면 그것들은 "이번 프레임" 이 아니게 되고, 축출할 자리가 생긴다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(bridge.maru_mobile_next_slot(cols) != 0xFFFFFFFF);
 }
 
 // **이모지는 커버리지 아틀라스에 못 담는다.** 글자 아틀라스가 R8(커버리지)이라 컬러 비트맵을
@@ -1071,8 +1083,16 @@ test "chrome 텍스트의 이모지도 컬러 텍스처를 가리킨다" {
 // ASCII 까지 통째로** 안 그려졌다. 아래는 그 "통째로" 를 값으로 잡는다 — 화면에도 같은 글자가
 // 있어 절대 개수로는 못 가르므로 **빈 preedit 대비 증분**으로 본다.
 test "조합 중 문자열: 뒤에 여러 바이트 글자가 와도 앞 글자가 안 사라진다" {
+    // ASCII 를 **직접 등록해 전제를 세운다.** 앞 테스트들이 등록부를 채워 두므로 축출이 돌고,
+    // 그 과정에서 ASCII 가 밀려나 있을 수 있다(실측: 'Q' 가 사라져 이 테스트가 깨졌다).
+    // 먼저 프레임을 넘겨야 축출할 자리가 생긴다 — 직전 프레임에 쓰인 것은 버리지 않는다.
+    _ = bridge.maru_mobile_build(402, 874, now());
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    while (cp < 127) : (cp += 1) {
+        const slot = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
+        if (slot == 0xFFFFFFFF) break;
+        bridge.maru_mobile_atlas_add(cp, 0, slot >> 16, slot & 0xFFFF, 11);
+    }
     _ = bridge.maru_mobile_build(402, 874, now());
 
     bridge.maru_mobile_set_preedit("", 0);

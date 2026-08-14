@@ -658,9 +658,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         }
         CTFontRef face = _atlasFaces[style & 3] ?: _atlasFont;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
-        // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
-        // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
-        if (slot == 0xFFFFFFFF) break;  // 축출 정책은 아직 없다(계약 §4)
+        // 꽉 차면 브리지가 **가장 안 쓰인 자리를 재사용하라고** 내준다(축출). 여기서 빈 자리와
+        // 재사용 자리를 가릴 필요가 없다 — 아래 `memset` + 슬롯 전체 `replaceRegion` 이 옛 글리프를
+        // 완전히 덮으므로 잔상이 안 남는다. sentinel 은 **이번 프레임에 그려진 것만 남아 버릴 것이
+        // 없다**는 뜻이라(한 화면이 512종을 넘겼다) 이번 프레임은 포기한다.
+        if (slot == 0xFFFFFFFF) break;
         unsigned int col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, CW * CH);
         // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아

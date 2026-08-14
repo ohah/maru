@@ -1336,9 +1336,11 @@ static void growAtlas(struct android_app *app) {
             continue;
         }
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
-        // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
-        // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
-        if (slot == 0xFFFFFFFF) break;  // 축출 정책은 아직 없다(계약 §4)
+        // 꽉 차면 브리지가 **가장 안 쓰인 자리를 재사용하라고** 내준다(축출). 여기서 빈 자리와
+        // 재사용 자리를 가릴 필요가 없다 — 아래 `memset` + 슬롯 전체 `uploadSlot` 이 옛 글리프를
+        // 완전히 덮으므로 잔상이 안 남는다(원본 버퍼 `g_glyph_px` 도 같은 사각형을 덮는다).
+        // sentinel 은 **이번 프레임에 그려진 것만 남아 버릴 것이 없다**는 뜻이라 이번 프레임은 포기한다.
+        if (slot == 0xFFFFFFFF) break;
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;

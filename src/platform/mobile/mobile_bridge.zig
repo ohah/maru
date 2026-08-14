@@ -987,7 +987,35 @@ var atlas_cp: [atlas_cap]u32 = undefined;
 var atlas_col: [atlas_cap]u32 = undefined;
 var atlas_row: [atlas_cap]u32 = undefined;
 var atlas_adv: [atlas_cap]u32 = undefined;
+/// 마지막으로 **그려진** 프레임 순번. 축출이 이것만 본다.
+var atlas_used: [atlas_cap]u64 = undefined;
 var atlas_n: usize = 0;
+/// 프레임 순번. `maru_mobile_build` 가 올린다.
+var frame_seq: u64 = 0;
+
+/// 꽉 찬 등록부에서 **버릴 것**을 고른다 — 이번 프레임에 안 쓰인 것 중 가장 오래된 것.
+///
+/// **이번 프레임에 쓰인 것은 후보에서 뺀다.** 안 그러면 한 화면이 512종을 넘겼을 때 글자들이
+/// 서로를 밀어내며 매 프레임 다시 구워진다(깜빡임 + CPU 낭비). 전부 이번 프레임 것이면 `null`
+/// 이고, 그건 **버릴 수 있는 것이 없다**는 뜻이라 호출자가 소진을 알린다.
+/// `next_slot` 이 고른 자리. `atlas_add` 가 **그 인덱스를 그대로** 쓴다.
+///
+/// 좌표로 되찾으면 안 된다 — 같은 (열,행)을 가진 항목이 둘이면 첫 번째가 걸려 **엉뚱한 항목을
+/// 덮어쓰고**, 고른 자리는 옛 상태로 남아 다음 호출이 또 같은 자리를 고른다. 실측에서 다섯
+/// 글자를 구웠는데 하나만 등록됐다.
+var pending_victim: ?usize = null;
+var pending_color_victim: ?usize = null;
+
+fn oldestVictim(used: []const u64, n: usize) ?usize {
+    var victim: ?usize = null;
+    for (0..n) |i| {
+        if (used[i] == frame_seq) continue;
+        if (victim) |v| {
+            if (used[i] < used[v]) victim = i;
+        } else victim = i;
+    }
+    return victim;
+}
 /// 아틀라스 셀 크기(px). 종횡비를 지켜 그려야 글자가 안 늘어난다.
 var atlas_cell_w: u32 = 24;
 var atlas_cell_h: u32 = 32;
@@ -1022,11 +1050,23 @@ pub export fn maru_mobile_atlas_add(cp: u32, style: u32, col: u32, row: u32, adv
         }
     }
     for (0..atlas_n) |j| if (atlas_cp[j] == key) return; // 이미 있으면 슬롯을 안 쓴다
-    if (atlas_n == atlas_cp.len) return;
+    if (atlas_n == atlas_cp.len) {
+        // **꽉 찼으면 덮어쓴다.** `maru_mobile_next_slot` 이 고른 자리가 곧 버릴 자리다.
+        const v = pending_victim orelse return;
+        // host 가 다른 자리에 구웠으면 안 받는다 — 없는 슬롯을 가리키는 등록은 화면에 쓰레기를
+        // 그린다. 좌표는 **검증용**이고, 자리는 위 인덱스가 정한다.
+        if (atlas_col[v] != col or atlas_row[v] != row) return;
+        atlas_cp[v] = key;
+        atlas_adv[v] = advance;
+        atlas_used[v] = frame_seq;
+        pending_victim = null;
+        return;
+    }
     atlas_cp[atlas_n] = key;
     atlas_col[atlas_n] = col;
     atlas_row[atlas_n] = row;
     atlas_adv[atlas_n] = advance;
+    atlas_used[atlas_n] = frame_seq;
     atlas_n += 1;
 }
 
@@ -1068,9 +1108,16 @@ pub export fn maru_mobile_missing_style(i: u32) u32 {
 /// 다음 빈 슬롯. **꽉 차면 0xFFFFFFFF 를 돌려준다** — 예전에는 같은 자리를 계속 돌려줘,
 /// 등록되지 못한 글자가 매 프레임 다시 구워지며 CPU·GPU 만 먹었다.
 pub export fn maru_mobile_next_slot(cols: u32) u32 {
-    if (atlas_n >= atlas_cap) return 0xFFFFFFFF;
-    const idx: u32 = @intCast(atlas_n);
-    return ((idx % cols) << 16) | (idx / cols);
+    if (atlas_n < atlas_cap) {
+        const idx: u32 = @intCast(atlas_n);
+        return ((idx % cols) << 16) | (idx / cols);
+    }
+    // **차면 가장 안 쓰인 자리를 내준다.** 예전에는 여기서 끝이라, 아틀라스가 찬 뒤 나온 글자가
+    // 미스로는 올라오는데 구울 자리가 없어 **영영 안 그려졌다**(오류도 로그도 없이). 실제 셸은
+    // 512칸을 금방 채운다 — 굵게/기울임이 각각 별도 슬롯이라 더 빠르다.
+    const v = oldestVictim(&atlas_used, atlas_n) orelse return 0xFFFFFFFF;
+    pending_victim = v;
+    return (atlas_col[v] << 16) | atlas_row[v];
 }
 
 // ── 컬러 글리프(이모지) ────────────────────────────────────────────────────────
@@ -1089,6 +1136,8 @@ var color_cp: [atlas_cap]u32 = undefined;
 var color_col: [atlas_cap]u32 = undefined;
 var color_row: [atlas_cap]u32 = undefined;
 var color_adv: [atlas_cap]u32 = undefined;
+/// 글자 아틀라스의 `atlas_used` 와 짝 — 축출 판정용 마지막 사용 프레임.
+var color_used: [atlas_cap]u64 = undefined;
 var color_n: usize = 0;
 
 /// i번째 놓친 것이 **컬러 글리프인가**. host 는 이 값으로 어느 아틀라스에 구울지 고른다 —
@@ -1110,24 +1159,44 @@ pub export fn maru_mobile_color_atlas_add(cp: u32, style: u32, col: u32, row: u3
         }
     }
     for (0..color_n) |j| if (color_cp[j] == key) return;
-    if (color_n == color_cp.len) return;
+    if (color_n == color_cp.len) {
+        // 글자 아틀라스와 같은 규칙 — 꽉 차면 `next_color_slot` 이 고른 자리를 덮어쓴다.
+        const v = pending_color_victim orelse return;
+        if (color_col[v] != col or color_row[v] != row) return;
+        color_cp[v] = key;
+        color_adv[v] = advance;
+        color_used[v] = frame_seq;
+        pending_color_victim = null;
+        return;
+    }
     color_cp[color_n] = key;
     color_col[color_n] = col;
     color_row[color_n] = row;
     color_adv[color_n] = advance;
+    color_used[color_n] = frame_seq;
     color_n += 1;
 }
 
 /// 컬러 아틀라스의 다음 빈 슬롯(글자 쪽과 같은 인코딩·같은 소진 규약).
 pub export fn maru_mobile_next_color_slot(cols: u32) u32 {
-    if (color_n >= atlas_cap) return 0xFFFFFFFF;
-    const idx: u32 = @intCast(color_n);
-    return ((idx % cols) << 16) | (idx / cols);
+    if (color_n < atlas_cap) {
+        const idx: u32 = @intCast(color_n);
+        return ((idx % cols) << 16) | (idx / cols);
+    }
+    const v = oldestVictim(&color_used, color_n) orelse return 0xFFFFFFFF;
+    pending_color_victim = v;
+    return (color_col[v] << 16) | color_row[v];
 }
 
 /// 등록된 컬러 글리프 수(테스트·진단용 — 등록이 실제로 됐는지 값으로 본다).
 pub export fn maru_mobile_color_atlas_count() u32 {
     return @intCast(color_n);
+}
+
+/// 등록된 글자 글리프 수. **축출이 들어온 뒤로는 `next_slot` 만으로 "찼다"를 못 본다** —
+/// 꽉 차도 재사용 슬롯을 돌려주기 때문이다. 용량(`cols*rows`)과 비교해 판정한다.
+pub export fn maru_mobile_atlas_count() u32 {
+    return @intCast(atlas_n);
 }
 
 /// 합성 글리프를 슬롯에 채운다. 플랫폼은 **폰트 경로보다 먼저** 이걸 부른다 —
@@ -1194,19 +1263,25 @@ fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32, color:
     // **컬러 글자는 컬러 등록부에서 찾는다.** 두 아틀라스가 슬롯 번호를 각자 세므로, 글자
     // 아틀라스에서 찾으면 엉뚱한 슬롯을 가리킨다.
     if (isColorGlyph(cp)) {
-        for (0..color_n) |i| if (color_cp[i] == key)
+        for (0..color_n) |i| if (color_cp[i] == key) {
+            color_used[i] = frame_seq; // 축출의 유일한 근거 — 여기가 빠지면 쓰는 글자를 버린다
             return .{ .col = color_col[i], .row = color_row[i], .adv = color_adv[i], .color = true };
+        };
         // **컬러 아틀라스가 없으면 커버리지에 구워 둔 것이라도 쓴다.** 컬러를 모르는 host 는
         // 이모지를 커버리지에 굽고 `atlas_add` 로 등록하는데, 여기서 컬러 등록부만 보면 영영
         // 못 찾아 **매 프레임 다시 굽는다**(실측: 3프레임 내내 미스 목록에 남았다). 이 저장소가
         // 아틀라스가 꽉 찼을 때 이미 한 번 겪은 실패 모드다.
-        for (0..atlas_n) |i| if (atlas_cp[i] == key)
+        for (0..atlas_n) |i| if (atlas_cp[i] == key) {
+            atlas_used[i] = frame_seq;
             return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
+        };
         noteMiss(key);
         return null;
     }
-    for (0..atlas_n) |i| if (atlas_cp[i] == key)
+    for (0..atlas_n) |i| if (atlas_cp[i] == key) {
+        atlas_used[i] = frame_seq; // 축출의 유일한 근거 — 여기가 빠지면 쓰는 글자를 버린다
         return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
+    };
     noteMiss(key);
     return null;
 }
@@ -1602,6 +1677,9 @@ fn checkLongPress(core: *terminal.core.TerminalCore) void {
 
 pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     frame_ms = time_ms;
+    // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
+    // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
+    frame_seq +%= 1;
     if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패

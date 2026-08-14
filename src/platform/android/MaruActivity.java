@@ -47,6 +47,13 @@ public class MaruActivity extends android.app.NativeActivity {
      *  선택이 안 잡힌다. */
     private static native void nativeLongPressMs(int ms);
 
+    /** 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
+     *
+     *  manifest 의 `windowSoftInputMode=adjustResize` 로는 부족하다 — targetSdk 35(Android 15)
+     *  부터 edge-to-edge 가 강제되어 그 값이 **무시된다**. 안 빼면 키보드가 화면 절반을 덮는데
+     *  레이아웃은 그대로라 하단이 통째로 가려진다(iOS 에서 보조 키바가 그렇게 사라졌다). */
+    private static native void nativeKeyboardHeight(int px);
+
     /// IME 가 입력 대상으로 인정할 View. `NativeActivity` 의 SurfaceView 는 텍스트 편집기가
     /// 아니라서 키보드가 이 View 를 봐야 한다. 그리지 않으므로 화면에는 영향이 없다.
     private static final class InputView extends View {
@@ -160,6 +167,27 @@ public class MaruActivity extends android.app.NativeActivity {
         input.requestFocus();
         // **OS 값을 코어에 알린다.** 이 값은 기기·설정마다 다르다(실측: 에뮬레이터 400ms).
         applyLongPressTimeout();
+        // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
+        // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
+        getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());
+    }
+
+    /// IME inset 을 native 로 넘긴다. **익명 클래스를 안 쓴다**(위 `ShowKeyboard` 와 같은 이유 —
+    /// `d8` 이 익명 내부 클래스에서 죽는다).
+    ///
+    /// `WindowInsets.Type.ime()` 를 직접 읽는다. `adjustResize` 는 Android 15 에서 무시되고,
+    /// `getSystemWindowInsetBottom` 은 navigation bar 와 IME 를 섞어 준다.
+    private static final class ImeInsets implements View.OnApplyWindowInsetsListener {
+        @Override
+        public android.view.WindowInsets onApplyWindowInsets(View v, android.view.WindowInsets insets) {
+            int ime = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom;
+            int nav = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom;
+            // 키보드는 navigation bar 를 덮는다 — 두 번 빼지 않는다(iOS 의 safe area 처리와 같다).
+            nativeKeyboardHeight(ime > nav ? ime - nav : 0);
+            // **기본 처리를 대체하지 않는다.** decorView 리스너는 시스템 경로를 가로채므로
+            // 원래 동작을 그대로 돌려줘야 한다(안 그러면 다른 inset 처리가 통째로 죽는다).
+            return v.onApplyWindowInsets(insets);
+        }
     }
 
     /// **익명 클래스를 안 쓴다.** `d8` 8.2.2 가 익명 내부 클래스(`MaruActivity$1`)에서

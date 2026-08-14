@@ -279,11 +279,20 @@ workspace 포맷 개정과 같이 다룬다.)
 로컬 hostname의 어긋남 — ssh-integration.md §9.2). 문구 선택은 `git_ops.scmEmptyNotice` 한 자리가 소유하고, 렌더는
 그것을 부르기만 한다 — 렌더 안 표현식으로 두면 세 상태를 테스트에서 짚을 수 없어 같은 회귀가 조용히 돌아온다.
 
-**안내를 내는 소비처는 전수로 같은 구분을 쓴다.** 저장소 판정을 쓰는 자리는 넷이고(`refreshGitStatus`·
-`openDiffForScmRow`·`captureTurnSnapshot`·`requestBranchMenu`), 앞의 셋은 답이 없으면 **조용히 돌아간다**(사용자에게
-말하지 않으므로 문구 문제가 없다). 사용자에게 말하는 것은 도크의 빈 안내와 **브랜치 메뉴**(`requestBranchMenu`)
-둘뿐이라, 두 곳이 같은 상수(`git_ops.notice_not_a_repo`·`notice_repo_unknown`)를 참조한다. 도크만 고치고 브랜치
-메뉴를 놓쳤던 것을 적대적 검증에서 잡았다 — 새로 안내를 내는 소비처를 추가하면 이 목록에 함께 적는다.
+**안내를 내는 소비처는 전수로 같은 구분을 쓴다.** 저장소 판정을 쓰는 자리는 다섯이다.
+
+| 소비처 | 답이 없을 때 |
+|---|---|
+| `refreshGitStatus` | 조용히 돌아간다(읽을 저장소가 없다) |
+| `followActiveTerminalRepo` | `.none`이면 목록을 버리고 `.unknown`이면 유지한다(§3.5) — 문구를 내지 않는다 |
+| `openDiffForScmRow` | 조용히 돌아간다 |
+| `captureTurnSnapshot` | 조용히 돌아간다(다음 턴에 다시 시도) |
+| `requestBranchMenu` | **사용자에게 말한다** |
+
+사용자에게 말하는 것은 도크의 빈 안내(`scmEmptyNotice`)와 **브랜치 메뉴** 둘뿐이라, 두 곳이 같은 상수
+(`git_ops.notice_not_a_repo`·`notice_repo_unknown`)를 참조한다. 도크만 고치고 브랜치 메뉴를 놓쳤던 것을 적대적
+검증에서 잡았고, 그때 적은 목록이 `followActiveTerminalRepo`를 빠뜨려 "전수"가 아니었던 것도 같은 방식으로 잡았다 —
+새로 판정을 쓰는 자리를 추가하면 이 표에 함께 적는다.
 
 **목록은 스스로 갱신된다.** `<repo>/.git`을 감시해 stage·commit·checkout을 잡고, 작업트리 파일 변경도 같이 본다.
 폴링하지 않는다 — 안 보는 화면 때문에 프로세스를 띄우지 않고, 이벤트가 몰려도 진행 중이면 건너뛴다. **작업트리만

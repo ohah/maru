@@ -53476,7 +53476,10 @@ test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통�
     const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
     // 격리된 저장소를 쓴다 — maru 저장소 안에서 돌면 하네스의 cwd가 walk-up으로 같은 답을 줘서, 판정이 바뀐 것인지
     // 원래 그랬던 것인지 구별되지 않는다.
-    const repo = "/tmp/maru-stale-hostname-test";
+    // **경로에 pid를 붙인다**(이 파일의 `/tmp/maru-e3-app-{d}` 관행). 고정 이름이면 같은 머신에서 두 test
+    // 바이너리가 겹칠 때 서로의 저장소를 `rm -rf`로 지워, skip이 아니라 엉뚱한 실패가 난다.
+    var repo_path_buf: [64]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_path_buf, "/tmp/maru-stale-host-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
@@ -53499,7 +53502,8 @@ test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통�
     // 화면은 사용자가 본 그대로가 된다 — host 접두가 붙고 `~` 축약이 사라진다.
     const shown = try sidebarCwdPath(session, term);
     defer allocator.free(shown);
-    try std.testing.expectEqualStrings("stale-name.example:" ++ repo, shown);
+    var expect_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expect_buf, "stale-name.example:{s}", .{repo}), shown);
     // 판정은 1순위를 통째로 잃는다 — **저장소 안에 서 있는데도** 아무도 답하지 못한다.
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
     try std.testing.expectEqual(
@@ -53522,10 +53526,11 @@ test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통�
     );
 }
 
-// 안내를 내는 소비처는 **전수로** 같은 3-상태 구분을 써야 한다. 저장소 판정을 쓰는 자리는 넷인데 셋
-// (`refreshGitStatus`·`openDiffForScmRow`·`captureTurnSnapshot`)은 답이 없으면 조용히 돌아가고, 사용자에게
-// 말하는 것은 도크의 빈 안내와 **브랜치 메뉴** 둘뿐이다. 도크만 고치고 브랜치 메뉴를 놓쳤던 것을 적대적
-// 검증에서 잡았다.
+// 안내를 내는 소비처는 **전수로** 같은 3-상태 구분을 써야 한다. 저장소 판정을 쓰는 자리는 다섯인데 넷
+// (`refreshGitStatus`·`followActiveTerminalRepo`·`openDiffForScmRow`·`captureTurnSnapshot`)은 문구를 내지 않고,
+// 사용자에게 말하는 것은 도크의 빈 안내와 **브랜치 메뉴** 둘뿐이다(전수 표: editor-surface-dock.md "빈 상태").
+// 도크만 고치고 브랜치 메뉴를 놓쳤던 것을 적대적 검증에서 잡았고, 그때 적은 목록이 `followActiveTerminalRepo`를
+// 빠뜨려 "전수"가 아니었던 것도 같은 방식으로 잡았다.
 //
 // **위 재현 테스트와 분리해 둔다.** 한 함수에 담으면 앞 단계가 깨질 때 이 소비처는 실행조차 되지 않아 서로
 // 다른 소비처의 회귀가 한 신호로 뭉개진다 — mutation 검증에서 실제로 그 일이 일어났다(도크 문구를 되돌리자
@@ -53539,7 +53544,8 @@ test "브랜치 메뉴도 `.unknown`을 저장소 없음으로 단정하지 않�
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
-    const repo = "/tmp/maru-branch-menu-unknown-test";
+    var repo_path_buf: [64]u8 = undefined; // pid 접미 — 위 재현 테스트와 같은 이유(동시 실행 시 서로를 지운다)
+    const repo = std.fmt.bufPrint(&repo_path_buf, "/tmp/maru-branch-unknown-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;

@@ -488,8 +488,8 @@ const key_font: f32 = 20.0;
 /// 가장자리 키 위에 얹혀 라벨을 지우지 않는다.
 const edge_w: f32 = 26.0;
 
-/// 키바 밴드의 **세로 범위**(스크롤 판정용). 레이아웃이 매 프레임 채운다.
-var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
+/// 키바 밴드(스크롤 판정용). 세로는 밴드 전체, 가로는 `<`/`>` 를 눌렀는지 가리는 데 쓴다.
+var key_bar_band: struct { top: f32 = 0, bot: f32 = 0, left: f32 = 0, right: f32 = 0 } = .{};
 var key_bar_max_scroll: f32 = 0;
 /// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
 var key_bar_scroll: f32 = 0;
@@ -585,6 +585,19 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and kb_moved < 10) {
         key_bar_fling = 0;
+        // **`<`/`>` 는 눌러도 움직인다.** 데스크톱 탭바의 `‹›` 가 클릭 가능한데 여기만 장식이면
+        // 같은 기호가 플랫폼마다 다른 것이 된다. 한 화면씩 옮긴다(미는 것보다 정확하다).
+        const page = @max(key_w + key_gap, key_bar_band.right - key_bar_band.left - 2 * edge_w - (key_w + key_gap));
+        if (kb_down_x < key_bar_band.left + edge_w) {
+            key_bar_scroll -= page;
+            clampKeyBarScroll();
+            return 1;
+        }
+        if (kb_down_x >= key_bar_band.right - edge_w) {
+            key_bar_scroll += page;
+            clampKeyBarScroll();
+            return 1;
+        }
         _ = keybarTapAt(kb_down_x, kb_down_y);
     }
     return 1;
@@ -1767,7 +1780,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     for (built.entries) |entry| {
         if (entry.id != key_bar_id_base - 1) continue;
         const band = entry.rect;
-        key_bar_band = .{ .top = band.y, .bot = band.y + band.height };
+        key_bar_band = .{ .top = band.y, .bot = band.y + band.height, .left = band.x, .right = band.x + band.width };
         // **키가 지나가는 창은 화살표 안쪽**이다. 창을 밴드 전체로 두면 `<`/`>` 배경이 가장자리
         // 키 위에 얹혀 그 라벨을 지운다(화면으로 확인 — 첫 키가 빈 칸이 됐다).
         const view_x = band.x + edge_w;
@@ -1778,7 +1791,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         const copy_slot_w = key_w + key_gap;
         const view_w = band.width - 2 * edge_w - copy_slot_w;
         const scroll_n = if (keyBarVisible(key_bar.len - 1)) bar_n - 1 else bar_n;
-        const content = @as(f32, @floatFromInt(scroll_n)) * (key_w + key_gap);
+        // **마지막 키 뒤에는 gap 이 없다.** `n * (w + gap)` 으로 재면 끝까지 밀었을 때 gap 만큼
+        // 빈 자리가 남는다(화면으로 확인). 키 n개 사이의 gap 은 n-1 개다.
+        const content = if (scroll_n == 0) 0 else @as(f32, @floatFromInt(scroll_n)) * key_w + @as(f32, @floatFromInt(scroll_n - 1)) * key_gap;
         key_bar_max_scroll = @max(0, content - view_w);
         clampKeyBarScroll();
 

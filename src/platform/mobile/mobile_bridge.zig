@@ -743,6 +743,21 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         };
         term_cols = cols;
         term_rows = rows;
+        // **이모지는 2칸이다**(데스크톱 기본 `text.emoji-width=wide` 와 같은 값). 이게 꺼져 있으면
+        // 코어가 base+VS16 을 width 1 로 두는데, host 는 컬러 글리프를 **슬롯 전체(2셀)** 로 굽는다 —
+        // 그리는 쪽이 단폭 규칙대로 **왼쪽 절반만** 샘플링해 `❤️` 가 세로로 반 잘려 나왔다(화면으로
+        // 잡았다). 코어 주석이 데스크톱에서 겪은 같은 증상을 적어 두고 있다("1칸에 욱여넣어져").
+        // 모바일은 아직 config 를 안 읽으므로(§1) 여기서 데스크톱 기본값과 맞춘다.
+        //
+        // **여기가 최종 자리는 아니다.** 이건 사용자 설정(`text.emoji-width`)이고 트레이드오프가
+        // 있다 — 2칸은 모던 TUI 의 string-width 와 정합하지만, zsh ZLE 가 base+VS16 을 1칸으로
+        // 가정하는 환경에서는 줄 편집이 밀린다. 지금은 데모 피드뿐이라 합의할 상대가 없어 무해하고,
+        // **원격(M3)으로 실제 셸에 붙으면 사용자가 고를 수 있어야 한다** — M10(모바일 config
+        // 스키마)에서 이 대입을 config 로 옮긴다.
+        //
+        // mode 2027 을 켜서 우회하지 않는다. 그건 **앱이 켜는 opt-in** 이고(DECRQM 으로 먼저 묻는다),
+        // 터미널이 일방적으로 켜면 폭 합의가 한쪽만 바뀌어 커서·지우기가 통째로 어긋난다.
+        term_core.?.emoji_wide = true;
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
         drainUnconsumed(&term_core.?);
     }

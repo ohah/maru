@@ -319,9 +319,12 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 값이 정작 고주사율 기기에서 두 배가 되므로, 경과 시간으로 재고 문턱은 **패널 반 주기만큼**
 당긴다(정확히 목표를 요구하면 vsync 지터로 한 주기를 통째로 놓쳐 실효 주기가 널뛴다).
 
-**60 을 넘기려면 iOS 는 `Info.plist` 에 `CADisableMinimumFrameDuration` 이 필요하다.** 없으면
-ProMotion 기기에서도 60 에서 잘린다 — 지금은 없다. 주기를 config 로 여는 것은 이 계약 밖이다
-([M10](plans/mobile-platform.md)).
+**iOS 는 `Info.plist` 에 `CADisableMinimumFrameDuration` 을 켜 둔다.** 없으면 ProMotion
+기기에서도 60 에서 잘리고 `preferredFrameRateRange` 로 그 위를 요청해도 무시된다. **지금
+요청값이 30 이라 켜도 동작은 안 바뀐다** — 그런데도 미리 켜는 이유는 이것이 설정이 아니라
+**번들에 박히는 능력 선언**이기 때문이다. config 로는 못 켠다. 주기를 config 로 여는 것
+자체는 이 계약 밖이지만([M10](plans/mobile-platform.md)), **그때 런타임에 추가할 수 없는
+것은 지금 넣어 둔다.**
 
 **두 플랫폼 다 자기 주기를 확인한다.** iOS 의 `preferredFrameRateRange` 는 **힌트라 무시될 수
 있고**, Android 는 우리가 직접 세는 것이라 어긋날 수 있다. 그래서 둘 다 표시 클럭 간격의

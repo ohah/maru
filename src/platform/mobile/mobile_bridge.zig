@@ -1952,8 +1952,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + 9;
             const cy = @as(f32, @floatFromInt(icon_y)) + 9;
             // **위로는 키바 밴드를 넘지 않는다.** chrome 을 키바보다 먼저 묻기 때문에, 44 를
-            // 그대로 위로 펴면 그 x 에 있는 키의 **밑동 몇 px 이 조용히 안 눌린다**. 가로로는
-            // 이웃이 같은 아이콘뿐이라 "작게 그리고 넓게 받는다" 가 통하지만 세로는 아니다.
+            // 그대로 위로 펴면 그 x 에 있는 키의 **밑동 몇 px 이 조용히 안 눌린다**.
+            //
+            // **그래서 남는 세로는 26px 뿐이다 — 기준(44/48) 미달이다.** 상태바 자체가 26px 라
+            // rect 를 어떻게 잡아도 못 채운다. 지금은 이 줄에서 눌리는 것이 톱니 하나뿐이라
+            // 넘어가지만, **줄 높이를 키우지 않는 한 이 줄의 어떤 아이콘도 기준을 못 맞춘다**
+            // (실제 하단 바는 iOS 49pt·Android 56dp 다). 가로도 마찬가지다 — 아이콘 간격이
+            // 26 이라 이웃까지 44 로 넓히면 좌우로 9px 씩 겹친다. [UX §5.6](../../../docs/mobile-ux.md).
             const gear_top = @max(cy - 22, key_bar_band.bot);
             set_gear_rect = .{ .x = cx - 22, .y = gear_top, .w = 44, .h = @max(0, cy + 22 - gear_top) };
         }

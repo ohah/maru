@@ -282,6 +282,11 @@ unsigned int maru_mobile_keybar_pointer(unsigned int phase, float x, float y);
 /// 설정이 밀려 올라와 있으면 그 아래 키바·본문은 없는 것과 같다(스택 — docs/mobile-ux.md §3).
 /// 1=먹었다, 0=아니니 키바→본문 순으로 넘겨라. 위상은 keybar_pointer 와 같다(0=down·1=move·
 /// 2=up·3=cancel).
+///
+/// **답을 보는 것은 `down` 뿐이다.** 한 번 먹었으면 host 가 자기 플래그로 잡고 있다가 up/cancel
+/// 에서 푼다 — 손짓 도중에 소유가 바뀌면 같은 손짓이 두 곳에서 해석되기 때문이다(키바도 같은
+/// 모양이다). 그래서 `down` 이 아닌 위상의 답은 host 가 무시해도 맞다. 뒤로가기처럼 **손을 뗀
+/// 적 없이** 화면이 바뀌는 경로는 브리지 쪽 상태만 정리되고, host 의 잡음은 up 에서 풀린다.
 unsigned int maru_mobile_chrome_pointer(unsigned int phase, float x, float y);
 
 /// 밀린 화면을 하나 뺀다(Android 하드웨어 뒤로가기 · iOS 좌측 가장자리 스와이프).

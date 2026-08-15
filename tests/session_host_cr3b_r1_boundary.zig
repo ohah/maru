@@ -33,7 +33,10 @@ test "CR3b R1 경계는 raw Client escape 없이 admission close만 연다" {
     // 제품 초기화와 같은 모듈의 기존 fixture 여섯 곳만 generation 1을 만든다. R1은 증가 문법을 추가하지 않는다.
     try std.testing.expectEqual(@as(usize, 6), count(slot, ".connection_generation = 1"));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "connection_generation +="));
-    try std.testing.expectEqual(@as(usize, 7), count(slot, "retired_node"));
+    // R3가 exact-capacity retired 배열, oldest reclaim 준비와 guarded-address hostile oracle에서
+    // 네 번 더 참조한다.
+    // 이 누적 경계는 phrase 증가를 명시적으로 승인하되 R3 의미 계약은 R3 경계가 소유한다.
+    try std.testing.expectEqual(@as(usize, 11), count(slot, "retired_node"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {

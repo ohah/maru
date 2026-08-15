@@ -403,6 +403,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "terminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
 
         .{ .name = "canMoveToGenerationNode", .receiver_type = immutable, .class = .construction },
+        .{ .name = "canRetireFromGenerationNode", .receiver_type = immutable, .class = .construction },
+        .{ .name = "retirementRangeAliasesOwnedBacking", .receiver_type = immutable, .class = .construction },
         .{ .name = "bindGenerationAccountingLedger", .receiver_type = mutable, .class = .construction },
         .{ .name = "moveToGenerationNode", .receiver_type = mutable, .class = .construction },
         .{ .name = "clientProjectionAuthorityDigest", .receiver_type = immutable, .class = .construction },
@@ -568,6 +570,12 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = client_path, .enclosing_fn = "moveToGenerationNode" },
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
             .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
+        } },
+        .{ .receiver = "canRetireFromGenerationNode", .kind = .generation_init, .uses = &.{
+            .{ .path = slot_path, .enclosing_fn = "retiredNodeReadyForReclaim" },
+        } },
+        .{ .receiver = "retirementRangeAliasesOwnedBacking", .kind = .generation_init, .uses = &.{
+            .{ .path = slot_path, .enclosing_fn = "overlapsRetiredNode" },
         } },
         .{ .receiver = "bindGenerationAccountingLedger", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
@@ -745,7 +753,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = slot_path, .enclosing_container = "<root>", .enclosing_fn = "enterExternalMode" },
         },
     }};
-    var reviewed_manifest: [36]ClientReceiverSpec = undefined;
+    var reviewed_manifest: [38]ClientReceiverSpec = undefined;
     var reviewed_index: usize = 0;
     for (manifest) |entry| {
         if (entry.class != .construction) continue;
@@ -755,7 +763,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
     reviewed_manifest[reviewed_index] = external_mode_manifest[0];
     reviewed_index += 1;
     try std.testing.expectEqual(reviewed_manifest.len, reviewed_index);
-    var reviewed_proofs: [36]ClientConstructionProof = undefined;
+    var reviewed_proofs: [38]ClientConstructionProof = undefined;
     @memcpy(reviewed_proofs[0..construction.len], &construction);
     reviewed_proofs[construction.len] = external_mode_proof[0];
     try expectClientConstructionPolicies(allocator, &reviewed_manifest, &reviewed_proofs);
@@ -1270,6 +1278,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bufferGenerationEventForTest" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferCanonicalEvent" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientOperationFence" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "pub", .modifier = "", .name = "retirementAuthorityDigest" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "canRetireFromGenerationNode" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "retirementRangeAliasesOwnedBacking" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
@@ -1530,6 +1541,23 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             },
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "max_retired_clients" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedRetiredClientReclaim" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedRetiredClientReclaimLifecycleRawValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredNodeValidAt" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredNodesValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredClientCountUnchecked" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "firstEmptyRetiredIndex" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "overlapsRetiredNode" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "retiredClientCount" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredClientNodeDigest" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetiredClientReclaimError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredClientReclaimSeal" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedRetiredClientReclaimValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredNodeReadyForReclaim" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareRetiredClientReclaim" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitRetiredClientReclaimNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetiredClientReclaim" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PublicationProcessIdentity" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "registered_operation_poison_testing_api" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RegisteredOperationPoisonCaptureRequest" },
@@ -8903,7 +8931,7 @@ fn expectClientOperationFenceSchema(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 39), members.len);
+    try std.testing.expectEqual(@as(usize, 40), members.len);
     const constants = [_][]const u8{
         "shared_count_mask",
         "execution_lease_bit",
@@ -8970,6 +8998,7 @@ fn expectClientOperationFenceSchema(
         "recordIntrusionIfExactExclusive",
         "sealExclusiveForPublication",
         "intruded",
+        "retirementAuthorityDigest",
         "abortExclusive",
         "releaseExclusiveClean",
         "commitExclusiveTerminal",
@@ -9550,6 +9579,8 @@ fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bo
     for (proofs) |proof| {
         const expected: ClientConstructionKind = if (stringInSet(proof.receiver, &.{
             "canMoveToGenerationNode",
+            "canRetireFromGenerationNode",
+            "retirementRangeAliasesOwnedBacking",
             "moveToGenerationNode",
             "bindOperationFence",
             "bindGenerationAccountingLedger",
@@ -9575,7 +9606,7 @@ fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bo
         if (expected != proof.kind) return false;
         counts[@intFromEnum(proof.kind)] += 1;
     }
-    return std.mem.eql(usize, &.{ 4, 4, 22, 5 }, &counts);
+    return std.mem.eql(usize, &.{ 6, 4, 22, 5 }, &counts);
 }
 
 fn stringInSet(value: []const u8, set: []const []const u8) bool {

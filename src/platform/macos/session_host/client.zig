@@ -5978,6 +5978,27 @@ pub const ClientOperationFence = struct {
         return observed & exclusive_bit == 0 or observed & intrusion_bit != 0;
     }
 
+    /// Retired Client seal projection. Atomic members are acquired explicitly so a rejected stale
+    /// public call cannot race a raw-byte node digest while it records exclusive intrusion.
+    pub fn retirementAuthorityDigest(self: *const ClientOperationFence) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("maru.client-operation-fence.retirement.v1");
+        writer.writeUsize(self.self_addr);
+        writer.writeUsize(self.client_addr);
+        writer.writeU64(self.owner_process_id);
+        writer.writeU64(self.owner_process_nonce);
+        writer.writeU64(self.slot_incarnation);
+        writer.writeU64(self.node_incarnation);
+        writer.writeU64(self.fence_generation);
+        writer.writeU64(self.fence_incarnation);
+        writer.writeU64(self.state.load(.acquire));
+        writer.writeUsize(self.execution_capability_addr.load(.acquire));
+        writer.writeU64(self.execution_capability_identity.load(.acquire));
+        writer.writeU64(self.execution_owner_thread_id.load(.acquire));
+        writer.writeU64(self.execution_owner_thread_incarnation.load(.acquire));
+        writer.writeU64(self.next_execution_capability_identity.load(.acquire));
+        return writer.finish();
+    }
+
     fn abortExclusive(
         self: *ClientOperationFence,
         client_addr: usize,
@@ -7008,6 +7029,43 @@ pub const Client = struct {
             }
         } else if (!self.prepareExternalModeDeinit()) return false;
         return true;
+    }
+
+    /// CR3b R3의 retired generation owner가 destroy 전 사용하는 pure preflight다.
+    /// callback, free, poison publication과 fence mutation을 수행하지 않는다.
+    pub fn canRetireFromGenerationNode(self: *const Client) bool {
+        if (checkedAllocatorReentry(self) or self.ownership == .moved or
+            self.fd != -1 or !self.unusable or self.pending_outbound != null or
+            self.io_mode != .blocking)
+            return false;
+        const fence = self.operation_fence orelse return false;
+        if (fence.intruded(@intFromPtr(self), self.operation_fence_generation)) return false;
+        if (self.pending_stream.items.len != 0 or self.pending_stream_bytes != 0 or
+            self.pending_events.items.len != 0 or self.pending_event_bytes != 0 or
+            self.pending_batches.items.len != 0 or self.pending_batch_bytes != 0 or
+            self.partial_batch != null or self.parser.bufferedBytes() != 0)
+            return false;
+        if (self.prepared_request_execution_lease_addr != 0 or
+            self.prepared_request_execution_fence_addr != 0 or
+            self.prepared_request_execution_fence_incarnation != 0 or
+            self.prepared_request_execution_fence_lease_identity != 0 or
+            self.prepared_request_execution_fence_mode != .unbound or
+            self.active_generation_allocator_scope != null)
+            return false;
+        return self.generation_batch_accounting.valid(@intFromPtr(self)) and
+            (self.generation_batch_accounting.ledger == null or
+                self.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned);
+    }
+
+    /// R3 prepared destination/source ranges must not alias any backing that Client deinit owns.
+    /// Malformed range metadata fails closed and this projection never allocates or mutates.
+    pub fn retirementRangeAliasesOwnedBacking(
+        self: *const Client,
+        start: usize,
+        len: usize,
+    ) bool {
+        const target = checkedExternalRange(start, len) catch return true;
+        return externalRangeOverlapsClient(self, target orelse return false) catch true;
     }
 
     fn finishDeinitGraph(self: *Client) void {

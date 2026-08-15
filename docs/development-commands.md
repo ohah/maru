@@ -288,6 +288,12 @@ Maru 작업에서 사용하는 기본 명령이다.
   wire·codec·binding·owner graph 변조를 거부한다. 두 번째 행은 candidate codec drift와 max generation의 checked-add 실패도 mutation 0으로 고정한다.
   이 dormant leaf의 제품 caller는 0이고,
   R3 reclaim과 CR3c 실제 reconnect integration은 아직 완료 증거가 아니다.
+- 영속 세션 호스트 CR3b R3 retired reclaim gate: `zig build test-session-host-cr3b-r3`. R2c를 상속하고
+  Debug·ReleaseFast에서 exact 2-slot retired inventory의 generation 1→2→3 publication, cap 2 세 번째 prepare mutation-0 reject,
+  pure Client readiness와 final-address `PreparedRetiredClientReclaim`, generation 1 첫 tick 뒤 generation 4 게시와 generation 2→3 tick destroy/final zero 행 1개,
+  copied/stale/digest-readiness drift destroy-0 행 1개, HostAdapter tick-end facade 1개와 source boundary 1개를 exact-count한다.
+  reclaim no-fail suffix만 Client graph·node registry·accounting과 allocator destroy를 소유한다. 이 dormant facade의 제품 caller는 0이고
+  CR3c actual `RemoteGeneration` integration과 CR4 socket reconnect 완료 증거가 아니다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

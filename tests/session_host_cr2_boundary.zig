@@ -874,7 +874,8 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
         "pub const Role = enum(u8) { candidate, current, retiring, retry };",
         "pub const Lease = struct {",
         "pub const Snapshot = struct {",
-        "pub const Budget = struct {",
+        "fn BudgetType(",
+        "const StructuralInventoryBudget = BudgetType(",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(budget, phrase));
     try std.testing.expectEqual(@as(usize, 5), count(budget, "test \"CR2e-e3a2 resident budget은"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const rss_testing_api = if (builtin.is_test) struct {"));
@@ -927,6 +928,99 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
         "run_cr2e_e3a2_rss_tests.addArtifactArg(cr2e_e3a2_rss_child_tests)",
         "run_cr2e_e3a2_rss_tests.addArg(\"--maru-expect-tests=2\")",
         "tests/artifacts/perf/session-host-reconnect-rss-macos.json",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(gate, phrase));
+}
+
+test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한다" {
+    const allocator = std.testing.allocator;
+    const budget = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_resident_budget.zig",
+    );
+    defer allocator.free(budget);
+    const policy = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_admission_policy.zig",
+    );
+    defer allocator.free(policy);
+    const queue_owner = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_admission_owner.zig",
+    );
+    defer allocator.free(queue_owner);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "pub const max_queued_admissions: usize = policy.max_queued_admissions;",
+        "pub const max_active_entries: usize = policy.max_active_resident_entries;",
+        "pub const max_policy_bytes: usize = policy.max_resident_bytes;",
+        "pub const ReconnectAdmissionBudget = BudgetType(",
+        "const StructuralInventoryBudget = BudgetType(",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(budget, phrase));
+    try std.testing.expectEqual(@as(usize, 3), count(budget, "owner_incarnation: u64 = 0,"));
+    try std.testing.expectEqual(@as(usize, 3), count(budget, "process_nonce: u64 = 0,"));
+    try std.testing.expectEqual(@as(usize, 3), count(budget, "owner_pid: u32 = 0,"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(budget, "var next_budget_owner_incarnation: std.atomic.Value(u64) = .init(1);"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(budget, "pub fn initInPlace(self: *Self, process_nonce: u64) !void {"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(budget, "const process_seal = @import(\"process_seal_service.zig\");"),
+    );
+    inline for (.{
+        "fn readExactBeforeForTest(",
+        "fn reapChildForTest(",
+        "std.c.waitpid(pid, &status, std.c.W.NOHANG)",
+        "std.c.poll(@ptrCast(&ready), 1, @intCast(deadline_ms - now))",
+        "reapChildForTest(child, true, &child_reaped)",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(budget, phrase));
+    inline for (.{
+        "pub const max_queued_admissions: usize = 64;",
+        "pub const max_active_resident_entries: usize = 8;",
+        "pub const max_resident_bytes: usize = 128 * 1024 * 1024;",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(policy, phrase));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(queue_owner, "pub const capacity: usize = policy.max_queued_admissions;"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "reconnect_admission_policy.zig",
+            "platform/macos/session_host/reconnect_admission_owner.zig",
+            "platform/macos/session_host/reconnect_resident_budget.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(budget, "test \"CR2e-e3b1 reconnect admission budget은"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "reconnect_resident_budget.zig",
+            "platform/macos/session_host/reconnect_resident_budget.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+
+    const gate = between(
+        build,
+        "const session_host_cr2e_e3b1_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(b, .{",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "session_host_cr2e_e3b1_step.dependOn(session_host_cr2e_e3a2_step)",
+        "run_cr2e_e3b1_budget_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3b1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(gate, phrase));
 }
 

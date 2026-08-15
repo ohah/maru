@@ -129,6 +129,34 @@ flowchart TD
 - **백엔드 선택은 시점에 결정**: 후속은 WebGPU(WezTerm 선례, 통일·큰 의존성) 또는 OS별 OpenGL/Vulkan(Ghostty 선례, 다중 백엔드·의존성 작음). **중립 계약이 둘 다 지원**하므로 지금 고를 필요 없다. [renderer-strategy.md]가 WebGPU 검토 조건의 단일 출처.
 - **OS 창 속성 = L4 platform adapter 계약의 깨끗한 사례**(window.blur, F3-1): "창 뒤 데스크톱 블러"는 어느 OS도 **GPU 렌더러로 못 한다**(Metal/WebGPU는 backdrop 픽셀을 못 읽음 — WindowServer/컴포지터가 창 뒤를 합성). 그래서 **정책은 Zig 단일 출처**(`app_session.effectiveWindowBlur` — opacity 게이트 + 유효 반경, ABI getter `window_blur_radius`)가 정하고, **실제 OS 호출만 platform host가 타깃별로** 채운다: macOS=`CGSSetWindowBackgroundBlurRadius`(비공개 CGS, Ghostty·Terminal.app 동일), Windows=`DwmSetWindowAttribute`(추후), Linux=`_KDE_NET_WM_BLUR_BEHIND_REGION`(X11)/kde-blur(Wayland, 컴포지터 의존 best-effort, 추후). GPU 백엔드와 완전 무관 — 백엔드를 WebGPU로 바꿔도 이 계약은 그대로다. 같은 모양: 시스템 외관(`set_system_appearance`)·클립보드·알림.
 
+### 4.1 실측 — non-macOS 호스트에서 중립 레이어가 실제로 어디까지 서는가 (2026-08-15, Windows)
+
+위 표는 **추정**이었다. Windows 호스트(zig 0.16.0)에서 실제로 빌드해 본 결과를 기록한다 — 이식 목표를 앞당기거나 Windows를
+지원 대상으로 올리는 결정이 **아니고**, §4의 추정을 실측으로 대체하는 것이다.
+
+| 관측 | 값 |
+|---|---|
+| `build.zig` configure | 통과. `target.result.os.tag == .macos` 게이트가 macOS 전용 스텝 39개를 자동 제외한다 |
+| L1 `terminal`·`renderer` / L2 `session` / L3 `chrome` 컴파일 | **전부 통과**(중립 3층이 무수정에 가깝게 선다 — §4의 "L1 ~85–95% 재사용" 추정과 부합) |
+| `zig build test` | **2,323 통과 / 12 skip / 21 실패** |
+| `check-boundaries`·`check-doc-links`·`check-config-docs` | 전부 통과 |
+| `zig build`(CLI exe) | 실패 — `src/main.zig`의 unix domain socket(`AF.UNIX`·`sockaddr.un`)과 POSIX 파일 모드(0600) |
+
+**드러난 것 — 중립성은 import 경계로만 지켜지고 있었다.** `check-boundaries`는 중립 레이어에 OS *타입명*이 새는 것을 막지만
+(§8), **std의 호스트 의존 동작**은 못 잡는다. 실제로 L2가 `std.fs.path.join`/`resolve`(호스트 native 구분자)를 써서 같은
+코드가 macOS에서는 `/repo/docs`를, Windows에서는 `/repo\docs`를 만들었다 — 그 자리의 L2 코드는 입력의 역슬래시를 이미
+거부하고 있었으므로 **자기 계약과도 어긋난 상태**였다. 그래서 규칙을 명문화한다:
+
+> **L2에서 경로 구분자를 만들어 내는 자리는 항상 POSIX 구분자(`/`)를 쓴다.** 구분자를 *읽는* 쪽(`isAbsolute`·`dirname`·
+> `basename`)은 Windows 구현도 `/`를 함께 받아들이므로 그대로 둔다. macOS/Linux에서는 native == posix라 무변화다.
+
+**남은 21개 실패는 하나의 원인**이다: `src/observability/connection_incident.zig`의 `currentProcessId()`가 macOS/Linux 외
+호스트에서 `0`을 반환하는 **의도적 fail-closed** 스위치라, process authority가 서지 않아 incident 서비스 전체가
+`error.InvalidAuthority`로 닫힌다. Windows PID를 이 신뢰 도메인에 넣을지는 보안 결정이라 **여기서 정하지 않는다**.
+
+**여전히 없는 것**: `src/platform/windows/`는 README 한 장이고 ConPTY 백엔드·Win32 호스트·렌더러는 0줄이다. 즉 이 실측이
+말하는 것은 "L4가 통째로 비어 있다"이지 "이식이 진행 중이다"가 아니다.
+
 ## 5. 시퀀싱 (의존성 순서, 각 단계 green)
 
 1. **C0 — Notice + chrome 백엔드 골격** (greenfield) ✅ **완료**. 손상 알림(`workspace_window_count < 0`) 연결, ChromeDraw→backend 패턴 증명.

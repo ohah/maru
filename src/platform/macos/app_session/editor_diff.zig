@@ -251,7 +251,7 @@ fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
     st.right_bands = rb;
 
     // 문자 단위 강조는 **줄 대응이 끝난 뒤**에 온다(§7 경계 규칙 — 이 계산이 대응을 바꾸지 않는다).
-    try computeMarks(self, st);
+    try computeMarks(self.allocator, st);
 }
 
 fn freeMarks(allocator: std.mem.Allocator, marks: []const []const chrome_editor.frame.Mark) void {
@@ -263,31 +263,36 @@ fn freeMarks(allocator: std.mem.Allocator, marks: []const []const chrome_editor.
 /// 짝이 된 줄 쌍마다 **바뀐 글자**를 계산한다(§3.5). 실패는 조용히 넘긴다 — 강조가 없으면 밴드만
 /// 남고, 그것은 정보가 적을 뿐 틀리지 않는다.
 ///
+/// **allocator를 인자로 받는다**(세션에서 꺼내지 않는다) — 그래야 할당 실패를 전 지점에 주입해
+/// 누수를 확인할 수 있다. 세션 allocator는 init에 고정돼 있어 그 방법이 통하지 않는다.
+///
 /// **무엇이 한 글자인지 여기서 정한다.** L2(`intraline`)는 chrome을 몰라 토큰 경계를 받는데, 그 규칙
 /// (grapheme cluster)이 chrome의 `text_layout`에 있고 이 층은 chrome을 안다. 코드포인트로 자르면
 /// 이모지 ZWJ 시퀀스가 반으로 갈린다.
-fn computeMarks(self: *AppSession, st: *State) error{OutOfMemory}!void {
+fn computeMarks(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!void {
     const rows = st.view.compare;
-    const left = try self.allocator.alloc([]const chrome_editor.frame.Mark, rows.left.len);
-    errdefer self.allocator.free(left);
-    const right = try self.allocator.alloc([]const chrome_editor.frame.Mark, rows.right.len);
-    errdefer self.allocator.free(right);
+    // **주인이 하나여야 한다.** 배열을 `st`에 넘긴 뒤에도 `errdefer`로 해제하면, 뒤에서 실패했을 때
+    // 여기서 한 번 풀고 `invalidate`가 또 푼다 — **이중 해제**다(할당 실패 주입 테스트가 잡았다).
+    // 그래서 잡자마자 넘기고 errdefer를 두지 않는다. 뒤에서 실패해도 `st`가 들고 있으므로
+    // `invalidate`가 정확히 한 번 푼다.
+    const left = try allocator.alloc([]const chrome_editor.frame.Mark, rows.left.len);
     @memset(left, &.{});
-    @memset(right, &.{});
     st.left_marks = left;
-    st.right_marks = right; // 여기서부터는 `invalidate`가 해제를 책임진다
+    const right = try allocator.alloc([]const chrome_editor.frame.Mark, rows.right.len);
+    @memset(right, &.{});
+    st.right_marks = right;
 
     for (rows.left, rows.right, 0..) |lrow, rrow, i| {
         // **짝이 된 쌍에서만 본다**(§7 경계 규칙). 한쪽이 빈 행이면 순수 추가·삭제라 줄 전체가 밴드다.
         if (lrow.kind != .removed or rrow.kind != .added) continue;
-        const lt = try clusterTokens(self.allocator, st.left_texts[i]);
-        defer self.allocator.free(lt);
-        const rt = try clusterTokens(self.allocator, st.right_texts[i]);
-        defer self.allocator.free(rt);
-        var result = (try intraline.compute(self.allocator, lt, st.left_texts[i], rt, st.right_texts[i], .{})) orelse continue;
-        defer result.deinit(self.allocator);
-        left[i] = try copyMarks(self.allocator, result.left);
-        right[i] = try copyMarks(self.allocator, result.right);
+        const lt = try clusterTokens(allocator, st.left_texts[i]);
+        defer allocator.free(lt);
+        const rt = try clusterTokens(allocator, st.right_texts[i]);
+        defer allocator.free(rt);
+        var result = (try intraline.compute(allocator, lt, st.left_texts[i], rt, st.right_texts[i], .{})) orelse continue;
+        defer result.deinit(allocator);
+        left[i] = try copyMarks(allocator, result.left);
+        right[i] = try copyMarks(allocator, result.right);
     }
 }
 
@@ -1039,4 +1044,44 @@ test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
         "/repo/one/src/app.zig",
         maru.session.repo_path.displayRelative(entry.path, app_session_mod.breadcrumbRootFor(fx.session, &entry)),
     );
+}
+
+test "강조 계산이 어디서 할당에 실패해도 새지 않는다 — 실패 지점을 전부 주입한다" {
+    // L2(`intraline`)는 이미 이 검사를 통과했지만, **이 층이 그 위에 배열 셋을 더 잡는다**
+    // (행별 마크 배열 둘 + cluster 토큰 둘 + 복사본). 부분 실패에서 앞서 잡은 것이 주인을 잃기 쉬운
+    // 모양이라 여기도 같은 방법으로 본다.
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, left_src: []const u8, right_src: []const u8) !void {
+            const left_lines = try diff_state.splitLines(allocator, left_src);
+            defer if (left_lines.len > 0) allocator.free(left_lines);
+            const right_lines = try diff_state.splitLines(allocator, right_src);
+            defer if (right_lines.len > 0) allocator.free(right_lines);
+
+            var view = try diff.compute(allocator, left_lines, right_lines, .{});
+            defer if (view == .compare) view.compare.deinit(allocator);
+            if (view != .compare) return;
+
+            // `materialize`가 만드는 표시 텍스트를 같은 방식으로 세운다(줄 끝 문자를 뗀다).
+            const rows = view.compare;
+            const lt = try allocator.alloc([]const u8, rows.left.len);
+            defer allocator.free(lt);
+            const rt = try allocator.alloc([]const u8, rows.right.len);
+            defer allocator.free(rt);
+            for (rows.left, 0..) |r, i| lt[i] = displayText(r.text);
+            for (rows.right, 0..) |r, i| rt[i] = displayText(r.text);
+
+            var st: State = .{ .view = view, .left_texts = lt, .right_texts = rt };
+            defer {
+                freeMarks(allocator, st.left_marks);
+                freeMarks(allocator, st.right_marks);
+            }
+            try computeMarks(allocator, &st);
+            st.view = .loading; // 위 defer가 rows를 두 번 해제하지 않게 한다(소유는 이 함수에 있다)
+        }
+    };
+    // 여러 줄이 짝을 이루고 각 줄에 강조가 여러 덩어리 — 할당 지점이 가장 많은 모양이다.
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{
+        "a=1 and b=2\nkeep\nx=3 or y=4\n",
+        "a=9 and b=8\nkeep\nx=7 or y=6\n",
+    });
 }

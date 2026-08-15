@@ -198,8 +198,24 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 실으면 `\x1b[2J` 같은 것이 눌러 둔 Ctrl 을 먹고 **ESC 는 문자 키 표에 없어 바이트가
     // 조용히 사라진다**(테스트에서 그렇게 잡혔다).
     if (armed_mods != 0 and len > 0 and ptr[0] >= 0x20 and ptr[0] != 0x7F) {
-        const seq_len = std.unicode.utf8ByteSequenceLength(ptr[0]) catch 1;
+        // **길이를 먼저 확인하고 자른다.** `ptr` 은 many-item 포인터라 길이가 없어 Zig 이
+        // 경계를 못 잡는다 — lead 바이트가 말하는 길이를 그대로 믿고 자르면 host 가 준 버퍼
+        // **밖**을 읽는다. 옛 코드는 이 확인을 `utf8Decode` **뒤**에 뒀다.
+        const seq_len = std.unicode.utf8ByteSequenceLength(ptr[0]) catch {
+            // 이어지는 바이트(0x80~0xBF)나 불가능한 lead. 조용히 흘리면 그 글자가 사라진 채
+            // 아무 신호가 없다(§5).
+            setLastError("input_bad_utf8_lead");
+            armed_mods = 0;
+            return @intCast(delivered_len);
+        };
+        if (seq_len > len) {
+            // host 가 글자를 조각으로 넘겼다. 밖을 읽느니 **여기서 멈추고 남긴다**.
+            setLastError("input_partial_utf8");
+            armed_mods = 0;
+            return @intCast(delivered_len);
+        }
         const first = std.unicode.utf8Decode(ptr[0..seq_len]) catch {
+            setLastError("input_bad_utf8_seq");
             armed_mods = 0;
             return @intCast(delivered_len);
         };
@@ -715,7 +731,12 @@ pub export fn maru_mobile_take_copy(out: [*]u8, cap: u32) u32 {
         return 0;
     }) orelse return 0;
     defer term_allocator.free(text);
-    const n = @min(text.len, cap);
+    // **문자 경계에서 자른다.** 바이트로만 자르면 한글·이모지가 반 토막 나고, iOS 는 그
+    // 조각으로 NSString 을 못 만들어 **클립보드를 아예 안 쓴다**(그 자리에 else 가 없어
+    // 로그도 안 남는다) — 사용자는 복사된 줄 알고 옛 내용을 붙여넣는다. Android 는
+    // `NewStringUTF` 가 잘못된 바이트를 받아 CheckJNI 에서 abort 한다.
+    // 규칙은 `width.truncateToBoundary` 가 단일 출처다(여기서 다시 세면 또 갈린다).
+    const n = maru.width.truncateToBoundary(text, cap);
     if (n < text.len) setLastError("copy_truncated"); // 조용히 자르지 않는다
     @memcpy(out[0..n], text[0..n]);
     return @intCast(n);

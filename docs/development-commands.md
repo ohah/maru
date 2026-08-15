@@ -269,6 +269,14 @@ Maru 작업에서 사용하는 기본 명령이다.
   mutation 0이다. 이 dormant leaf의 제품 caller는 0이다. final-address cleanup handle과 callback/fd close, 새 Client
   allocation/current 교체, retired Client destroy는 각각 R2b·R2c·R3 범위이며
   이 gate만으로 R2 또는 실제 reconnect 완료를 뜻하지 않는다.
+- 영속 세션 호스트 CR3b R2b final cleanup handle gate: `zig build test-session-host-cr3b-r2b`. R2a를 상속하고
+  Debug·ReleaseFast에서 production `RemoteGeneration` cleanup 행 3개, ClientSlot hostile 행 1개와 source boundary 1개를
+  exact-count한다. admission close 뒤 caller-owned final-address handle이 실제 socket fd, nonzero pending frame와 allocator,
+  external-mode deinit reservation을 봉인한다. stable proxy writer gate에서는 Client의 fd/pending owner만 handle로 이동하고,
+  callback-bearing external cleanup과 close/free는 gate 밖에서 exact once 수행한다. copied handle, wrong generation과
+  Client-owned allocation에 겹친 handle destination은 proxy·Client·permit·resource mutation 0이며 abort 뒤 admission을 다시 열 수 있다. 이 dormant leaf의 제품 caller는 0이고,
+  새 Client allocation/current 교체와 retired Client destroy는 각각 R2c·R3 범위다. 따라서 이 gate만으로 R2 또는 실제
+  reconnect 완료를 뜻하지 않는다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

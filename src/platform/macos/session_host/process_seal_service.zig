@@ -41,6 +41,7 @@ const close_authority_state_domain = "maru.close-authority-state.v1";
 const close_operation_pin_domain = "maru.close-operation-pin.v1";
 const runtime_admission_domain = "maru.runtime-admission.v1";
 const prepared_admission_close_domain = "maru.prepared-admission-close.v1";
+const prepared_retirement_cleanup_domain = "maru.prepared-retirement-cleanup.v1";
 const window_close_ticket_reservation_domain = "maru.window-close-ticket-reservation.v1";
 const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
 const session_host_coordinator_domain = "maru.session-host-coordinator.v1";
@@ -96,6 +97,7 @@ pub const CloseAuthorityStateSealInput = cleanup_seal.CloseAuthorityStateSealInp
 pub const CloseOperationPinSealInput = cleanup_seal.CloseOperationPinSealInput;
 pub const RuntimeAdmissionSealInput = cleanup_seal.RuntimeAdmissionSealInput;
 pub const PreparedAdmissionCloseSealInput = cleanup_seal.PreparedAdmissionCloseSealInput;
+pub const PreparedRetirementCleanupSealInput = cleanup_seal.PreparedRetirementCleanupSealInput;
 pub const WindowCloseTicketReservationSealInput = cleanup_seal.WindowCloseTicketReservationSealInput;
 pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
 pub const SessionHostCoordinatorSealInput = cleanup_seal.SessionHostCoordinatorSealInput;
@@ -727,6 +729,14 @@ pub fn preparedAdmissionCloseSeal(
     input: PreparedAdmissionCloseSealInput,
 ) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, prepared_admission_close_domain, input);
+}
+
+pub fn preparedRetirementCleanupSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: PreparedRetirementCleanupSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_retirement_cleanup_domain, input);
 }
 
 pub fn windowCloseTicketReservationSeal(pid: u32, process_nonce: u64, input: WindowCloseTicketReservationSealInput) ReadyError!CleanupSeal {

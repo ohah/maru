@@ -631,6 +631,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions", .count = 2 },
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+            .{ .path = slot_path, .enclosing_fn = "prepareRetirementCleanup", .count = 4 },
         } },
         .{ .receiver = "preflightExternalAdoptionDestinationWithScratch", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalRecoveryDiscard", .count = 2 },
@@ -695,15 +696,19 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
             .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+            .{ .path = slot_path, .enclosing_fn = "prepareRetirementCleanup" },
         } },
         .{ .receiver = "finishReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "closeUncommittedOwned" },
             .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
             .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+            .{ .path = slot_path, .enclosing_fn = "finishRetirementCleanup" },
         } },
         .{ .receiver = "cancelReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+            .{ .path = slot_path, .enclosing_fn = "prepareRetirementCleanup" },
+            .{ .path = slot_path, .enclosing_fn = "abortRetirementCleanup" },
         } },
         .{ .receiver = "transferReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease", .count = 2 },
@@ -733,6 +738,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = "src/platform/macos/session_host/external_attach.zig", .enclosing_fn = "enterExternalMode" },
             .{ .path = "src/platform/macos/session_host/external_attach_evidence.zig", .enclosing_fn = "init" },
             .{ .path = "src/platform/macos/session_host/external_pump_owner.zig", .enclosing_fn = "exerciseD3SocketpairRevokePosition" },
+            .{ .path = slot_path, .enclosing_container = "<root>", .enclosing_fn = "enterExternalMode" },
         },
     }};
     var reviewed_manifest: [36]ClientReceiverSpec = undefined;
@@ -1503,6 +1509,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendDontWait" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "ingestReadableOutOfBandEvidence" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pollReadableOrTerminal" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "retirement_cleanup_testing_api" },
             },
         },
         .{
@@ -1537,6 +1544,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "preparation_projection_test_hook" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "testing" },
                 .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armPreparationProjectionReentry" },
+                .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "enterExternalMode" },
                 .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "rollbackGenerationEventPreparationPending" },
                 .{ .parent = "testing", .kind = "const", .visibility = "pub", .modifier = "", .name = "AttachmentLease" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPreparationProjection" },
@@ -1995,9 +2003,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitWithTerminalCleanup" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "AdmissionLifecycle" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedAdmissionClose" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedRetirementCleanup" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "cr3bR1Client" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "admissionLifecycleRawValid" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedAdmissionCloseLifecycleRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedRetirementCleanupLifecycleRawValid" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "CurrentBorrowError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "AdmissionCloseError" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "admissionCloseSeal" },
@@ -2012,6 +2022,15 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "cancelAdmissionClose" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retirementCleanupSeal" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retirementCleanupValid" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetirementCleanupError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareRetirementCleanup" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retirementCleanupMatchesClient" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementCleanup" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortRetirementCleanup" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitRetirementCleanupNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishRetirementCleanup" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetirementLifecycle" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "retirementLifecycleRawValid" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetirementDetachError" },
@@ -2191,12 +2210,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        // R1 stack borrow/admission, managed poison과 R2a preflight/teardown validation도 같은 operation으로 current node를 고정한다.
-        @as(usize, 13),
+        // R1 stack borrow/admission, managed poison, R2a detach와 R2b cleanup prepare/commit/finish가 같은 operation으로 current node를 고정한다.
+        @as(usize, 18),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 17),
+        @as(usize, 22),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
@@ -4674,15 +4693,23 @@ test "generation batch Client ownership mutations have one node-bound production
     // 일반 release와 2d2 terminal aggregate drain이 같은 canonical accounting permit을 쓴다.
     try std.testing.expectEqual(@as(usize, 2), prepare_references);
     try std.testing.expectEqual(@as(usize, 1), bind_references);
-    // Batch, one-shot initial snapshot, RPC prepare/execute/publication은 purpose-tagged node-local
-    // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
-    try std.testing.expectEqual(@as(usize, 5), begin_allocator_references);
-    try std.testing.expectEqual(@as(usize, 6), restore_allocator_references);
+    // Batch, one-shot initial snapshot, RPC prepare/execute/publication과 R2b test-only external
+    // fixture는 purpose-tagged node-local allocator scope를 공유한다. 그 밖의 파일에는 raw
+    // allocator authority가 없다.
+    try std.testing.expectEqual(@as(usize, 6), begin_allocator_references);
+    try std.testing.expectEqual(@as(usize, 7), restore_allocator_references);
     // C3-3b3 effect settlement가 여섯 번째 guarded cleanup callback owner다.
     try std.testing.expectEqual(@as(usize, 6), enter_callback_references);
     try std.testing.expectEqual(@as(usize, 6), leave_callback_references);
     const slot_source = try readZigFileZ(allocator, "src/platform/macos/session_host/client_slot.zig");
     defer allocator.free(slot_source);
+    const retirement_fixture = betweenMarkers(
+        slot_source,
+        "pub fn enterExternalMode(slot: *ClientSlot) !void {",
+        "pub fn rpcDecoderCallbackActive() bool",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(retirement_fixture, ".beginGenerationAllocatorScope("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(retirement_fixture, ".restoreGenerationAllocatorScope("));
     const effect_executor = betweenMarkers(
         slot_source,
         "fn executeCanonicalEffectPlanNoFail(",
@@ -7209,7 +7236,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "pub fn poisonGenerationConnection(",
                 "fn reasonProjection(",
             ) orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 7), countFieldAssignments(source, "unusable"));
+            try std.testing.expectEqual(@as(usize, 8), countFieldAssignments(source, "unusable"));
             try std.testing.expectEqual(@as(usize, 4), countFieldAssignments(source, "first_poison_reason"));
             const confirmed_z = try allocator.dupeZ(u8, confirmed);
             defer allocator.free(confirmed_z);
@@ -7232,6 +7259,15 @@ test "session host has zero raw untyped Client invalidation callsites" {
             const incident_suffix_z = try allocator.dupeZ(u8, incident_suffix);
             defer allocator.free(incident_suffix_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(incident_suffix_z, "first_poison_reason"));
+            const retirement_cleanup_suffix = betweenMarkers(
+                source,
+                "pub fn commitRetirementCleanupNoFail(",
+                "pub fn finishRetirementCleanup(",
+            ) orelse return error.TestUnexpectedResult;
+            const retirement_cleanup_suffix_z = try allocator.dupeZ(u8, retirement_cleanup_suffix);
+            defer allocator.free(retirement_cleanup_suffix_z);
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(retirement_cleanup_suffix_z, "unusable"));
+            try std.testing.expectEqual(@as(usize, 0), countFieldAssignments(retirement_cleanup_suffix_z, "first_poison_reason"));
         } else if (std.mem.eql(u8, entry.path, "generation_attachment.zig")) {
             const testing_facade = betweenMarkers(
                 source,

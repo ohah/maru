@@ -72,7 +72,7 @@ macOS 로컬 shell 1개 surface
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2e·CR3a·CR3b R1·R2a 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2e·CR3a·CR3b R1·R2a·R2b 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -1099,7 +1099,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    committed admission-close와 exact current identity를 봉인한 final-address permit으로 stable proxy writer gate 안에서
    `live -> unavailable`과 Client의 detached tombstone만 callback·allocation 없이 함께 게시한다. **R2b**는 R2a 호출 전에
    준비할 caller-owned final-address cleanup handle을 도입하고, R2a commit 뒤 그 handle만 소비해 fd/attachment pending owner를
-   gate 밖에서 exact once 정산하며, **R2c**는 새 Client node를 완성한 뒤
+   gate 밖에서 exact once 정산한다. **R2b 완료:** 실제 fd·pending frame allocator와 external-mode deinit reservation을 keyed
+   final-address handle에 봉인하고, writer gate에서는 Client owner를 callback 없이 handle로 옮긴 뒤 gate 밖에서 external cleanup,
+   close/free를 exact once 수행한다. copied handle·wrong generation·Client-owned allocation alias는 mutation 0이고 abort는 admission cancel 권위를 보존한다.
+   **R2c**는 새 Client node를 완성한 뒤
    checked-monotonic connection generation과 current pointer를 no-fail suffix로 게시한다. R2a는 cleanup callback, 새 Client
    allocation/current 교체, retired Client destroy를 소유하지 않고, R2b는 새 generation publication을 소유하지 않으며,
    R2c는 old node destroy를 소유하지 않는다. CR3c는 R2/R3 결과를 CR2의 실제 `RemoteGeneration` slot에

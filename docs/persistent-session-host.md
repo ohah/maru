@@ -5168,6 +5168,14 @@ tombstone callback 중 reader exclusion 행, invalid raw lifecycle fail-close �
 test-only conditional facade에만 있고 dormant R2a 제품 caller는 0이다. 따라서 이 증거는 R2a의 callback/allocation-free publication만 닫고 cleanup handle,
 replacement Client/current publication, retired destroy 또는 실제 reconnect socket 경로를 완료로 세지 않는다.
 
+R2b의 focused gate는 `zig build test-session-host-cr3b-r2b`다. R2a를 상속하고 Debug·ReleaseFast 각각에서 actual socket fd와
+nonzero pending outbound frame을 final-address cleanup handle로 옮긴 뒤 writer gate 밖에서 close/free하는 행, 실제 external-mode
+deinit reservation을 commit 뒤 정산하는 행, copied handle·wrong-generation preflight mutation 0과 abort/reopen 행을 실행한다.
+ClientSlot hostile 행은 invalid raw lifecycle, copied address와 Client-owned allocation에 겹친 handle destination을 resource mutation 전에 거부하고 source boundary는 cleanup handle의
+seal·prepare/preflight/commit/abort/finish, HostAdapter facade, sole runtime composition과 제품 caller 0을 exact-count한다. R2b는
+새 Client allocation/current publication이나 retired Client destroy를 하지 않으므로 R2c·R3 전에는 R2 또는 실제 reconnect 완료로
+세지 않는다.
+
 #### CR3a ownership target inventory
 
 CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.

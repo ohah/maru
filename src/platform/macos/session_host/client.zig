@@ -59,6 +59,12 @@ const FdStatIdentity = struct {
     mode_type: u32,
 };
 
+pub const retirement_cleanup_testing_api = if (builtin.is_test) struct {
+    pub fn enterExternalMode(client: *Client) EnterExternalModeError!void {
+        return client.enterExternalModeWithOps(client_deadline.posix_ops);
+    }
+} else struct {};
+
 const FdSocketIdentity = struct {
     stat: FdStatIdentity,
     socket_type: c_int,

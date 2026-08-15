@@ -164,6 +164,29 @@ pub const HostAdapter = struct {
         return self.slot.cancelAdmissionClose(permit);
     }
 
+    pub fn prepareRetirementCleanup(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+        placeholder_generation: u64,
+        out: *client_slot_mod.PreparedRetirementCleanup,
+    ) client_slot_mod.ClientSlot.RetirementCleanupError!void {
+        return self.slot.prepareRetirementCleanup(permit, placeholder_generation, out);
+    }
+
+    pub fn abortRetirementCleanup(
+        self: *HostAdapter,
+        cleanup: *client_slot_mod.PreparedRetirementCleanup,
+    ) client_slot_mod.ClientSlot.RetirementCleanupError!void {
+        return self.slot.abortRetirementCleanup(cleanup);
+    }
+
+    pub fn finishRetirementCleanup(
+        self: *HostAdapter,
+        cleanup: *client_slot_mod.PreparedRetirementCleanup,
+    ) client_slot_mod.ClientSlot.RetirementCleanupError!void {
+        return self.slot.finishRetirementCleanup(cleanup);
+    }
+
     pub fn initInPlace(
         out: *HostAdapter,
         node_allocator: std.mem.Allocator,

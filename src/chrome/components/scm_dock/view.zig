@@ -59,9 +59,11 @@ pub fn view(
 
     const m = types.DockMetrics.resolve(props.scale_milli);
 
-    // ── 탭 줄: `변경 사항 (N) │ 히스토리 │ 에이전트`(§3.5.1).
-    if (frame.tree.find(build.NodeIds.tabs)) |index| {
-        try writer.tabRow(frame.tree.entries[index]);
+    // ── 탭 줄: `변경 사항 (N) │ 히스토리 │ 에이전트`(§3.5.1). **칸은 tree가 나눠 놨다** — 여기서는
+    // 그 rect를 받아 글자만 얹는다.
+    for (build.tab_order, 0..) |tab, index| {
+        const slot = frame.tree.find(build.NodeIds.tab(index)) orelse continue;
+        try writer.tabSlot(frame.tree.entries[slot], tab);
     }
 
     // ── 요약 줄: `+N -N`. 커밋 직전에 보는 숫자라 목록보다 위에 고정한다.
@@ -204,58 +206,58 @@ const Writer = struct {
     active_clip: ?draw.Rect = null,
     container_clip: ?draw.Rect = null,
 
-    /// 탭 줄. 세 탭을 **전부** 그리고, 지금 갈 수 없는 탭은 흐리게 둔다 — P1 계약이 "누를 수 없는
-    /// 컨트롤은 비활성으로 표시한다(감추지 않는다)"이다. 탭 줄이 통째로 없으면 사용자는 이 뷰가 목록
-    /// 하나뿐인 화면이라고 읽는다.
-    fn tabRow(self: *Writer, rect: tree.RectEntry) ViewError!void {
+    /// 탭 칸 하나. **칸을 나누는 산수는 여기 없다** — `build`가 `fill = 1` 셋으로 나눠 둔 rect를 받는다.
+    /// 그 결정이 두 곳에 있으면 P4·P5에서 히트테스트가 세 번째 벌을 만들게 된다.
+    ///
+    /// 갈 수 없는 탭도 **감추지 않고** 비활성으로 표시한다 — P1 계약이 그렇다. 탭 줄이 통째로 없으면
+    /// 사용자는 이 뷰가 목록 하나뿐인 화면이라고 읽는다.
+    fn tabSlot(self: *Writer, rect: tree.RectEntry, tab: types.Tab) ViewError!void {
         const scale = effectiveScale(self.props.scale_milli);
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
-        if (rect.rect.height < line_h) return;
-        const baseline = rect.rect.y + (rect.rect.height - line_h) / 2;
+        if (rect.rect.height < line_h or rect.rect.width <= 0) return;
 
-        // **탭은 줄을 3등분해 나눠 갖는다.** 라벨 폭대로 왼쪽에 몰아 두면 이름 길이가 자리를 정해
-        // 버려서, `변경 사항 (128)`처럼 개수가 커질 때 탭 줄 전체가 흔들린다. 등분이면 개수가 바뀌어도
-        // 탭 경계가 제자리에 있다.
-        const tabs = [_]types.Tab{ .changes, .history, .agent };
-        const slot_w = rect.rect.width / @as(f32, @floatFromInt(tabs.len));
-        if (slot_w <= 0) return;
+        // 활성 탭 이름 옆에만 개수를 붙인다. 나머지 둘은 아직 셀 것이 없다(P4·P5).
+        var buf: [48]u8 = undefined;
+        const label: []const u8 = if (tab == .changes)
+            std.fmt.bufPrint(&buf, "{s} ({d})", .{ tabTitle(tab), self.props.changed_file_count }) catch tabTitle(tab)
+        else
+            tabTitle(tab);
 
-        for (tabs, 0..) |tab, index| {
-            // 활성 탭 이름 옆에만 개수를 붙인다. 나머지 둘은 아직 셀 것이 없다(P4·P5).
-            var buf: [48]u8 = undefined;
-            const label: []const u8 = if (tab == .changes)
-                std.fmt.bufPrint(&buf, "{s} ({d})", .{ tabTitle(tab), self.props.changed_file_count }) catch tabTitle(tab)
-            else
-                tabTitle(tab);
+        const label_w = self.measureBudget(label);
+        // 칸 안에서 가운데. 라벨이 칸보다 넓으면 왼쪽에 붙이고 칸 폭으로 자른다 — 가운데에 두면 잘린
+        // 글자가 **양쪽** 이웃으로 넘친다.
+        const fits = label_w <= rect.rect.width;
+        const label_x = if (fits) rect.rect.x + (rect.rect.width - label_w) / 2 else rect.rect.x;
+        const budget = if (fits) label_w else rect.rect.width;
 
-            const slot_x = rect.rect.x + slot_w * @as(f32, @floatFromInt(index));
-            const label_w = self.measureBudget(label);
-            // 칸 안에서 가운데. 라벨이 칸보다 넓으면 왼쪽에 붙이고 칸 폭으로 자른다 — 가운데에 두면
-            // 잘린 글자가 **양쪽** 이웃으로 넘친다.
-            const fits = label_w <= slot_w;
-            const label_x = if (fits) slot_x + (slot_w - label_w) / 2 else slot_x;
-            const budget = if (fits) label_w else slot_w;
+        const active = tab == self.props.active_tab;
+        // **비활성 탭은 색으로만 구별하지 않는다** — 굵기도 함께 간다(§3.5.2와 같은 규율).
+        try self.emit(
+            label_x,
+            rect.rect.y + (rect.rect.height - line_h) / 2,
+            label,
+            self.colsFor(budget),
+            if (active) .surface_fg else .muted_fg,
+            .control,
+            active,
+            @intFromFloat(budget),
+            .origin,
+        );
 
-            const active = tab == self.props.active_tab;
-            // **비활성 탭은 색으로만 구별하지 않는다** — 굵기도 함께 간다(§3.5.2와 같은 규율).
-            try self.emit(label_x, baseline, label, self.colsFor(budget), if (active) .surface_fg else .muted_fg, .control, active, @intFromFloat(budget), .origin);
-
-            // 활성 표시는 **밑줄**이고 라벨이 아니라 **칸 전체**를 긋는다(등분한 탭 줄의 관례 —
-            // 라벨 폭만 그으면 칸 가운데에 짧은 막대가 떠 있는 꼴이 된다). 색은 테마 accent
-            // (`accent_bar`가 탭 언더바를 소유하는 그 역할)이고, 아래 divider 위에 겹쳐 그린다.
-            if (active) {
-                const thickness = @max(spacing.px(.xxs, scale) / 2, 1);
-                try self.appendQuad(.{
-                    .rect = .{
-                        .x = @intFromFloat(@floor(slot_x)),
-                        .y = @intFromFloat(@floor(rect.rect.y + rect.rect.height - @as(f32, @floatFromInt(thickness)))),
-                        .w = @intFromFloat(@floor(slot_w)),
-                        .h = thickness,
-                    },
-                    .fill_role = .accent_bar,
-                });
-            }
-        }
+        // 활성 표시는 **밑줄**이고 라벨이 아니라 **칸 전체**를 긋는다(등분한 탭 줄의 관례 — 라벨 폭만
+        // 그으면 칸 가운데에 짧은 막대가 떠 있는 꼴이 된다). 색은 테마 accent(`accent_bar`가 탭 언더바를
+        // 소유하는 그 역할)이고, 탭 줄 아래 divider 위에 겹쳐 그린다.
+        if (!active) return;
+        const thickness = @max(spacing.px(.xxs, scale) / 2, 1);
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(rect.rect.x)),
+                .y = @intFromFloat(@floor(rect.rect.y + rect.rect.height - @as(f32, @floatFromInt(thickness)))),
+                .w = @intFromFloat(@floor(rect.rect.width)),
+                .h = thickness,
+            },
+            .fill_role = .accent_bar,
+        });
     }
 
     /// 그룹 헤더: `접힘표시 제목 · 개수 배지`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려

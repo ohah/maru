@@ -11,6 +11,10 @@ const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
 const types = @import("types.zig");
 
+/// 탭이 놓이는 **순서**. build가 칸을, view가 라벨을 이 순서로 읽는다 — 두 곳이 각자 배열을 들면
+/// 라벨이 남의 칸에 그려진다.
+pub const tab_order = [_]types.Tab{ .changes, .history, .agent };
+
 pub const NodeIds = struct {
     pub const root: u64 = 0x5343_0000;
     pub const summary: u64 = 0x5343_0001;
@@ -19,6 +23,15 @@ pub const NodeIds = struct {
     pub const scroll_track: u64 = 0x5343_0004;
     pub const scroll_thumb: u64 = 0x5343_0005;
     pub const tabs: u64 = 0x5343_0006;
+
+    /// 탭 하나의 칸. **칸을 나누는 결정은 여기(tree) 하나가 소유한다** — `view`가 자기 산수로 다시
+    /// 나누면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(옛 셀 그리드 경로가 그렇게 갈렸다).
+    /// 바로 위 뷰 스위처(`dock_view_bar`)가 같은 규율을 쓴다.
+    pub const tab_base: u64 = 0x5343_2000;
+
+    pub fn tab(index: usize) u64 {
+        return tab_base + @as(u64, @intCast(index));
+    }
 
     /// 항목 하나가 쓰는 id 차선. 행 자신과 그 행의 동작 버튼이 같은 차선을 나눠 쓰므로, 가상화로 창이
     /// 밀려도 같은 항목이 같은 id 구조를 유지한다.
@@ -68,8 +81,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 행 + 행 동작 버튼 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
-    const node_count = items.len + action_buttons + 4;
+    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
+    const node_count = items.len + action_buttons + tab_order.len + 4;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -165,7 +178,26 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const scroll_track = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
     const scroll_thumb = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
 
-    const top = buffers.nodes[action_cursor..][0..4];
+    // 탭 칸은 **레이아웃 엔진이 나눈다**(`fill = 1` 셋 = `flex: 1` 셋). 손으로 `width / 3`을 하면
+    // 정수 나머지를 직접 처리해야 하고, 무엇보다 그 산수가 `view` 안에만 있어 **칸 rect가 남지 않는다** —
+    // P4·P5에서 탭을 누를 수 있게 될 때 히트테스트가 폭을 한 번 더 나누게 되고, 그 순간 "각 탭이
+    // 어디인가"의 주인이 둘이 된다.
+    const tab_nodes = buffers.nodes[action_cursor..][0..tab_order.len];
+    for (tab_nodes, 0..) |*node, index| {
+        node.* = tree.card(.{
+            .id = NodeIds.tab(index),
+            // `width = .fill`이 아니라 `grow`다. `fill`은 **그 노드 자신의 방향**을 기준으로 검증되는데
+            // (`tree.containerFor`), 자식 없는 카드의 방향은 column이라 width가 cross축으로 걸린다.
+            // grow는 부모(row)가 남는 폭을 가중치대로 나눠 주는 표준 경로다 — 셋이 같은 무게면 3등분.
+            .style = .{ .flex = .{ .grow = 1 } },
+            .variant = .surface,
+            // 칸은 자리를 잡을 뿐 스스로 칠하지 않는다 — 배경·경계는 탭 줄이 갖는다.
+            .paint = .{ .background = .surface_bg, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
+            .overflow = .clip,
+        }, &.{});
+    }
+
+    const top = buffers.nodes[action_cursor + tab_order.len ..][0..4];
     // 탭 줄은 뷰 스위처와 요약 줄 **사이**다(§3.5.1 목업). **action을 붙이지 않는다** — 히스토리·에이전트
     // 탭은 P4·P5에 생기고, 지금 눌러도 갈 곳이 없다. 그래도 그리는 이유는 P1 계약이 "누를 수 없는
     // 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"이기 때문이다: 탭 줄이 통째로 없으면 사용자는
@@ -173,10 +205,11 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     top[0] = tree.card(.{
         .id = NodeIds.tabs,
         .style = .{ .height = .{ .px = @floatFromInt(m.tab_h) } },
+        .direction = .row,
         .variant = .surface,
         .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
-    }, &.{});
+    }, tab_nodes);
     top[1] = tree.card(.{
         .id = NodeIds.summary,
         .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
@@ -330,7 +363,8 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     // 호출처가 이 실패를 삼키면 도크가 통째로 멈추므로, 상한 산술은 `bufferSizes` 하나가 소유한다.
     const items = testItems();
     const sizes = bufferSizes(&items);
-    try testing.expectEqual(items.len + 3 + 4, sizes.nodes); // 행 4 + 버튼 3 + 고정 4(탭·요약·목록·브랜치)
+    // 행 4 + 버튼 3 + 탭 칸 3 + 고정 4(탭 줄·요약·목록·브랜치)
+    try testing.expectEqual(items.len + 3 + tab_order.len + 4, sizes.nodes);
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -421,4 +455,31 @@ test "탭 줄에는 action이 없다(누를 수 없는 컨트롤을 누를 수 �
     const frame = try buildTest(props, &storage);
     const tabs = frame.tree.entries[frame.tree.find(NodeIds.tabs) orelse return error.MissingTabs];
     try testing.expectEqual(@as(?tree.UiAction, null), tabs.action);
+}
+
+test "탭 칸 rect가 tree에 있고 줄을 균등하게 덮는다" {
+    // 이 rect가 **존재한다**는 것이 이 변경의 요점이다. 없으면 P4·P5에서 히트테스트가 폭을 다시
+    // 나누게 되고, 그 순간 "각 탭이 어디인가"의 주인이 둘이 된다(옛 셀 그리드 경로가 그렇게 갈렸다).
+    for ([_]f32{ 180, 240, 331, 480, 1024 }) |width| {
+        var storage: Storage = .{};
+        const frame = try buildTest(.{
+            .viewport_px = .{ .x = 0, .y = 0, .width = width, .height = 400 },
+            .items = &.{},
+            .branch = "main",
+        }, &storage);
+
+        const row = frame.tree.entries[frame.tree.find(NodeIds.tabs) orelse return error.MissingTabs].rect;
+        var prev_right = row.x;
+        for (tab_order, 0..) |_, index| {
+            const slot = frame.tree.entries[frame.tree.find(NodeIds.tab(index)) orelse return error.MissingTab].rect;
+            // 칸끼리 겹치지도 벌어지지도 않는다.
+            try testing.expectEqual(prev_right, slot.x);
+            // 셋이 같은 폭이다(정수 나머지는 레이아웃 엔진이 float으로 들고 있어 생기지 않는다).
+            try testing.expectEqual(row.width / @as(f32, @floatFromInt(tab_order.len)), slot.width);
+            try testing.expectEqual(row.height, slot.height);
+            prev_right = slot.x + slot.width;
+        }
+        // 마지막 칸이 줄 오른쪽 끝에 정확히 닿는다 — 손으로 나눌 때 2px 모자라던 자리다.
+        try testing.expectEqual(row.x + row.width, prev_right);
+    }
 }

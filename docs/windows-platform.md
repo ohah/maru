@@ -442,47 +442,60 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 경로는 `/`로 정규화된 상태여야 한다. 안 하면 `file_tree`·`git_ops`·소스 컨트롤이 `/repo\docs` 문제를
 그대로 다시 겪는다(그 버그는 이미 한 번 고쳤다).
 
-**그런데 정규화만 하면 안 된다 — 중립 레이어가 "선두가 `/`인가"로 절대경로를 판정한다.** 적대적 검증에서
-네 자리가 나왔고, 성격이 갈린다:
+**그런데 정규화만 하면 안 된다 — 중립 레이어가 "선두가 `/`인가"로 절대경로를 판정하고 있었다.** 적대적 검증과
+후속 코드 리뷰에서 **여섯 자리**가 나왔고, 성격이 갈린다. 전부 W1.5에서 `src/path_shape.zig`로 옮겨 닫았다:
 
-| 위치 | 지금 | Windows 경로에서 | 성격 |
+| 위치 | 옛 판정 | Windows 경로에서 | 성격 |
 |---|---|---|---|
 | `session/file_panel_bridge.zig` `normalizeAssetPath` | `raw[0]=='/'`→Absolute, 역슬래시→InvalidCharacter | **가드가 무력화된다** — 아래 | 가드 |
-| `session/repo_path.zig` | `path[0]=='/'`이면 절대로 보고 거부 | `C:/x`가 **상대 경로로 통과**한다 | 가드 |
-| `session/file_tree.zig`·`file_tree_mutation.zig` | root 포함 판정이 `root=="/"` 특수 케이스를 둠 | 드라이브 루트(`C:/`)에 대응이 없다 | 가드 |
-| `terminal/selection.zig` | 링크 감지가 `word[0]=='/'`로 절대경로 판정 | `C:\…`를 절대경로 링크로 못 잡는다(기능 결손) | **감지** |
+| `session/repo_path.zig` `isSafeRelative` | `path[0]=='/'`이면 절대로 보고 거부 | `C:/x`가 **상대 경로로 통과**했다 | 가드 |
+| `session/git_write_command.zig` `validatePath` | 위와 같은 판정, `/`로만 세그먼트 분할 | `..\..\secret`이 `git add --` argv에 실렸다 — **읽기 쪽 쌍둥이만 고쳐 비대칭이 남아 있었다** | 가드 |
+| `session/file_tree.zig`·`file_tree_mutation.zig` `pathWithin` | root 포함 판정이 `root=="/"` 특수 케이스를 둠 | 드라이브 루트(`C:/`)에 대응이 없었다 | 가드 |
+| `file_tree_mutation.validateName`·`file_tree.validBasename` | 이름 한 칸에서 `/`와 NUL만 거부 | `..\..\evil.txt`가 **통째로 한 이름**이라 `..` 비교를 통과, join되면 루트 밖에 파일이 생겼다 | 가드 |
+| `terminal/selection.zig` `filePathSpan` | 링크 감지가 `word[0]=='/'`로 절대경로 판정 | `C:\…`를 절대경로 링크로 못 잡았다(기능 결손) | **감지** |
 
-**`normalizeAssetPath`가 특히 위험하다.** 오늘 Windows 절대경로를 막고 있는 것은 `raw[0]=='/'`가 아니라
-**역슬래시 거부**다. 입구에서 `\`→`/`로 바꾸면 `C:\Windows\x`가 `C:/Windows/x`가 되어 세 검사(절대·역슬래시·
+**`normalizeAssetPath`가 특히 위험했다.** Windows 절대경로를 막고 있던 것은 `raw[0]=='/'`가 아니라
+**역슬래시 거부**였다. 입구에서 `\`→`/`로 바꾸면 `C:\Windows\x`가 `C:/Windows/x`가 되어 세 검사(절대·역슬래시·
 `..`)를 **전부 통과**하고 "상대 경로"로 받아들여진다. 자산 루트에 이어 붙어 존재하지 않는 경로가 되므로
-지금 당장 뚫리지는 않지만, **가드의 의도가 깨진다.**
+당장 뚫리지는 않지만, **가드의 의도가 깨진다.**
 
 **따라서 규칙을 둘로 나눈다.**
 
-1. **구분자 정규화는 입구에서** 한다(`\`→`/`).
+1. **구분자 정규화는 입구에서** 한다(`\`→`/`). L2가 받는 경로는 POSIX다
+   ([layering-and-portability.md](layering-and-portability.md) §4.1).
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 
-이 네 자리를 고치는 것은 W3와 별개 슬라이스(**W1.5**)이며, 순서상 **정규화를 도입하기 전에** 해야 한다 —
-반대로 하면 `normalizeAssetPath`가 잠깐 느슨해진 창이 생긴다.
+이 여섯 자리를 고치는 것은 W3와 별개 슬라이스(**W1.5**, 완료)였고, 순서상 **정규화를 도입하기 전에** 했다 —
+반대로 했으면 `normalizeAssetPath`가 잠깐 느슨해진 창이 생겼다. 이제 W3가 정규화를 도입할 수 있다.
 
 ### 5.1 가드와 감지는 술어가 다르다 (W1.5 결정, 2026-08-15)
 
 네 자리가 같은 증상을 보였지만 **묻는 질문이 다르다.** 그래서 `src/path_shape.zig`가 술어를 **둘** 내놓는다.
 
-| | 가드 (`isAbsolute`) | 감지 (`isDetectableAbsolute`) |
+| | 가드 (`isAbsolute`) | 감지 (`isDetectableAbsoluteFor`) |
 |---|---|---|
-| 질문 | "이 문자열이 **어떤 OS에서든** 위험한가" | "이 문자열이 **이 호스트에서** 실제로 열리는 경로인가" |
-| 문자열을 고르는 쪽 | 공격자(적대적 저장소·이상한 git 출력) | 호스트의 파일시스템 |
-| 틀렸을 때 | 루트 밖 파일이 읽힌다 | 열리지 않는 밑줄이 뜬다 |
-| 그래서 | **OS 무관하게 넓게 거부** | **호스트 OS 기준으로 좁게 감지** |
-| 쓰는 곳 | `repo_path`·`pathWithin`·`normalizeAssetPath` | `terminal/selection.zig` |
+| 질문 | "이 문자열이 **어떤 OS에서든** 위험한가" | "이 문자열이 **그 OS에서** 실제로 열리는 경로인가" |
+| 문자열을 고르는 쪽 | 공격자(적대적 저장소·이상한 git 출력·사용자 입력) | 그 OS의 파일시스템 |
+| 틀렸을 때 | 루트 밖 파일이 읽히거나 쓰인다 | 열리지 않는 밑줄이 뜬다 |
+| 그래서 | **OS 무관하게 넓게 거부** | **주어진 OS 기준으로 좁게 감지** |
+| 쓰는 곳 | `repo_path`·`git_write_command`·`pathWithin`·`validateName`·`normalizeAssetPath` | `terminal/selection.zig` |
 
-**감지가 컴파일 타임 OS 분기인 근거**: 밑줄 span은 **콘텐츠를 가진 쪽**이 만든다. 원격 세션도 host가
-`selection.collectViewportLinks`로 span을 모아 client에 보낸다(로컬 hover와 같은 분류기). 그래서 "이 바이너리가
-도는 OS"가 곧 "그 경로가 실재할 수 있는 OS"다. VS Code도 같은 규칙을 런타임 값으로 구현한다 —
-`terminalLocalLinkDetector.ts`의 `detectLinks(text, this._processManager.os || OS)`는 클라이언트가 아니라
-**백엔드/PTY의 OS**를 쓴다.
+**감지가 OS를 인자로 받는 근거**: 밑줄 span은 **콘텐츠를 가진 쪽**이 만든다. 원격 세션도 host가
+`selection.collectViewportLinks`로 span을 모아 client에 보낸다(로컬 hover와 같은 분류기). 지금 호출자는
+호스트 OS만 넘기지만, 그 값이 **파라미터**라서 두 가지가 따라온다. ⑴ 테스트가 두 OS를 모두 돌 수 있다 —
+CI에 Windows 러너가 없으므로(ubuntu-latest·macos-15), 컴파일 타임 분기였다면 Windows 단언이 통째로
+**공허참**이 된다. ⑵ ssh 원격 OS를 반영할 때 소비자를 다시 배선하지 않아도 된다(아래).
+
+VS Code도 같은 규칙을 런타임 값으로 구현한다 — `terminalLocalLinkDetector.ts`의
+`detectLinks(text, this._processManager.os || OS)`는 클라이언트가 아니라 **백엔드/PTY의 OS**를 쓴다.
+
+**호스트 OS ≠ 콘텐츠 OS인 경우(알려진 한계)**: `maru ssh`는 ssh를 **로컬 pty**에서 돌리므로 화면 내용은
+원격 OS의 것인데 감지는 로컬 OS 기준으로 돈다. `TerminalCore.sshRemoteDest()`(OSC 5379)가 그 사실을 이미
+추적하고 있으니 seam은 있다. 지금 그 값을 쓰지 않는 이유는 **plain ssh에서는 어차피 링크가 열리지 않기**
+때문이다 — 파일이 로컬에 없어 존재 게이트가 막는다. 감지해 봐야 밑줄만 늘어난다. 반대로 host-backed 원격
+세션(`runtime.link_at`)은 host가 자기 core로 resolve하므로 지금 구조가 맞다. 그러므로 이건 **결손이 아니라
+비용-편익 판단**이고, hover 존재검증(§8)이 들어오는 날 함께 재검토한다.
 
 **감지 술어가 `isAbsolute`보다 좁은 이유**(실측). 감지된 토큰은 `TerminalCore.resolveClickedPath`로 가고,
 거기서 `std.fs.path.isAbsolute`가 거짓이면 **cwd에 join**된다. 감지가 그보다 넓으면 "밑줄은 뜨는데 엉뚱한
@@ -494,9 +507,23 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 | `C:relative` | true | **false** | 아니오 — join되면 엉뚱한 경로 |
 | `a:b` | true | **false** | 아니오 — 흔한 토큰이라 오탐 |
 | `\foo\bar` | true | true지만 `resolve`가 **드라이브 없는** `\foo\bar` 산출 | 아니오 |
-| `\\server\share` (UNC) | true | true | **아니오 — 알려진 공백**(이스케이프 출력 오탐 위험, 터미널에서 드묾. VS Code도 `\\?\C:` 확장형만 다룬다) |
+| `\\server\share`·`//server/share` (UNC) | true | true | **아니오 — 알려진 공백**(이스케이프 출력 오탐 위험, 터미널에서 드묾. VS Code도 `\\?\C:` 확장형만 다룬다) |
 
 그래서 감지는 **드라이브 + 구분자**(`C:\`·`C:/`)만 본다. VS Code의 `winDrivePrefix`도 같은 모양이다.
+UNC 배제는 **술어가 직접** 한다 — 한때 호출자의 `!startsWith("//")`가 `//server/share`를 막고 있어서 술어의
+문서와 반환값이 어긋나 있었고, 두 번째 소비자가 문서만 읽고 부르면 규칙이 갈릴 자리였다.
+
+**드라이브 문자를 A–Z로 제한하지 않는다.** Win32는 그런 제한을 두지 않는다 — `RtlDetermineDosPathNameType_U`를
+모사하는 `std.fs.path.getWin32PathType`도 아무 코드포인트나 받아서 `1:/x`·`λ:\x`·`::/x`가 전부 절대다(실측).
+**가드가 OS 파서보다 좁으면 그 차이가 그대로 우회로다** — 처음 구현은 `isAlphabetic`을 요구해서 `1:/Windows/x`가
+`repo_path`를 상대경로로 통과했다. 그래서 문자 종류를 묻지 않고 첫 코드포인트 뒤가 `:`인지만 본다. 감지도 같은
+파서를 쓴다(다른 파서를 쓰면 그 간극이 다시 우회로가 된다).
+
+**남은 비대칭(알려진 것)**: Windows에서 `/foo/bar`는 계속 감지하는데, Win32에서 그것은 `\foo\bar`와 **같은
+종류**(`.rooted`)라 위에서 `\foo\bar`를 뺀 이유가 그대로 적용된다(실측: 둘 다 `isAbsWin=true`, 둘 다
+`resolve`가 드라이브 없는 `\foo\bar`를 낸다). 그럼에도 남긴 것은 Windows 터미널에 git-bash·MSYS·WSL 출력으로
+POSIX 모양이 흔히 뜨기 때문이다. 대가는 그 링크의 `access`가 터미널의 cwd 드라이브가 아니라 **프로세스의 현재
+드라이브**에 묶인다는 것이다. 좁히는 쪽이 나은지는 실기 Windows 세션에서 그 출력이 얼마나 흔한지를 보고 정한다.
 
 **macOS가 왜 불변이어야 하는가**: hover 밑줄(`selection.wordIsUrl`)은 매-mouseMove 비용 때문에 **존재검증을
 하지 않는다**(존재검증은 클릭에서만 — `selection.zig` 주석). VS Code는 반대로 밑줄 전에 stat을 해서 hover와
@@ -518,18 +545,59 @@ Windows 경로가 다른 점은 macOS에서 그것이 *우연*이 아니라 *확
 **부수 실측**: `std.c.access(F_OK)`가 Windows에서 정상 동작한다(존재 `0`, 미존재 `-1`). 존재 게이트는 W7에서
 그대로 산다.
 
-**알려진 오탐 — 의도적으로 남긴다.** 실제 도구 출력 14종을 훑어 3건이 나왔다: `n:\t`(한 글자 라벨 + 이스케이프
-탭), `y:\`·`x:/`(드라이브 루트). 반대로 걸러진 것: `12:30:45`, `a:b`, `ERROR:`, `NOTE:\n`, `C:relative`,
-`\\.\pipe\maru`, `warning:`, `-rw-r--r--` — **드라이브 문자가 한 글자여야 한다는 제약**이 대부분을 막는다.
+**알려진 오탐 — 의도적으로 남긴다.** 실제 도구 출력 21종을 훑어 6건이 나왔다: `n:\t`(한 글자 라벨 +
+이스케이프 탭), `y:\`·`x:/`·`0:/`(드라이브 루트), `::/x`·`-:/x`(비알파벳 드라이브). 반대로 걸러진 것:
+`12:30:45`, `1:30`, `3:15/4`, `a:b`, `ERROR:`, `NOTE:\n`, `C:relative`, `\\.\pipe\maru`, `:\x`, `warning:`,
+`-rw-r--r--`, `http://h:8080/p` — **드라이브가 코드포인트 하나여야 하고 뒤에 구분자가 와야 한다**는 제약이
+대부분을 막는다.
 
-남긴 이유는 **대칭**이다. POSIX 감지도 오늘 같은 등급의 오탐을 낸다 — `/t`나 sed의 `/foo/bar/`가
-`absolute_path`로 잡힌다. Windows 쪽만 좁히면 "왜 `/t`는 밑줄이 뜨는데 `C:\t`는 안 뜨나"가 설명되지 않는다.
-실제 피해(엉뚱한 파일 열기)는 존재 게이트가 막는다 — 밑줄만 뜨고 클릭하면 아무 일도 없다. **근본 해결은
-hover에도 stat을 두는 것**(VS Code 방식)이고, 그건 매-mouseMove 비용 결정이라 별개 안건이다(§8).
+남긴 이유가 셋이다. ⑴ **대칭** — POSIX 감지도 같은 등급의 오탐을 낸다(`/t`, sed의 `/foo/bar/`). Windows
+쪽만 좁히면 "왜 `/t`는 밑줄이 뜨는데 `C:\t`는 안 뜨나"가 설명되지 않는다. ⑵ **이것들은 Win32가 실제로
+절대경로로 보는 문자열이다**(실측: `isAbsoluteWindows("::/x") == true`). 감지가 틀린 게 아니라 그 모양이
+드물 뿐이다. ⑶ 좁히면 감지가 가드와 다른 파서를 쓰게 되고, 그 간극이 위에서 닫은 우회로를 다시 연다.
+
+실제 피해(엉뚱한 파일 열기)는 두 겹이 막는다 — **부분집합 불변식**(감지 ⊆ `std.fs.path.isAbsolute`, 이제
+테스트가 단언한다)이 cwd 오join을 막고, **존재 게이트**가 클릭을 막는다. 밑줄만 뜨고 클릭하면 아무 일도 없다.
+**근본 해결은 hover에도 stat을 두는 것**(VS Code 방식)이고, 그건 매-mouseMove 비용 결정이라 별개 안건이다(§8).
 
 **다른 터미널** (동작만 비교 — clean-room): VS Code는 백엔드 OS로 파싱하고 밑줄 **전에** 존재검증까지 한다.
 WezTerm은 맨 파일 경로 링크를 지원하지 않는다(정규식 `hyperlink_rules`만, [issue #6257](https://github.com/wezterm/wezterm/issues/6257) 열림).
 iTerm2는 Semantic History가 macOS 전용이라 이 문제가 없다.
+
+### 5.2 W1.5가 닫지 않은 것 (실측으로 재현됨)
+
+코드 리뷰에서 나와 **재현까지 확인했지만** 이 슬라이스에서 고치지 않은 것들이다. 성격이 달라 따로 다룬다.
+
+**⒜ 상대 경로 링크는 Windows에서 여전히 안 잡힌다.** `filePathSpan`의 네 갈래 중 절대만 OS-인지로 만들었다.
+나머지 셋은 `/`를 요구한다 — `home_path`는 `~/`, `dot_relative`는 `./`·`../`, `bare_relative`는 토큰에 `/`가
+있을 것. 실측:
+
+| 토큰 | 감지 | (대조) POSIX 형태 | 감지 |
+|---|---|---|---|
+| `.\build.zig` | ✗ | `./build.zig` | ○ |
+| `..\lib\y.rb` | ✗ | `../lib/y.rb` | ○ |
+| `src\main.zig` | ✗ | `src/main.zig` | ○ |
+| `~\notes.md` | ✗ | `~/notes.md` | ○ |
+
+MSBuild·cmd·PowerShell·zig 자신의 에러 출력이 다 이 모양이라 **절대 경로 하나만 밑줄이 뜨고 옆의 상대 경로는
+전부 죽어 있다.** 절대보다 오히려 흔한 형태다.
+
+여기서 멈춘 이유: `bare_relative`의 오탐 억제가 *"슬래시 필수 + 점 필수 + 첫 세그먼트 문자집합"*이라
+역슬래시를 넣으면 **이스케이프 출력(`\n`·`\t`)과 정면충돌**한다. `src\main.zig`는 잡고 `\n\t`는 안 잡는
+규칙이 성립하는지 먼저 재야 한다 — 절대 쪽에서 한 오탐 스윕과 같은 방식으로. **별도 슬라이스(W5.5)**로 둔다.
+
+**⒝ 루트 스트라이핑 두 곳이 구분자를 정확히 한 바이트로 가정한다.**
+`platform/macos/file_tree_mutation_backend.zig:336`의 `parent_path[root.len + 1 ..]`와
+`file_tree_backend.zig:354`의 같은 모양이다. 루트가 `/`일 때 `parent_path[2..]`가 되어 첫 세그먼트가 잘린다
+(`/Users/x` → `sers/x`). **이 커밋 이전부터 있던 버그**이고 macOS 코드라 W1.5 범위 밖이지만, `pathWithin`이
+받아들이는 "구분자로 끝나는 루트"의 집합이 `{/}`에서 `{/, C:/}`로 넓어졌으므로 **백엔드를 이식할 때 반드시
+함께 고쳐야 한다**(W7). `endsWithSep`를 그대로 쓰면 된다.
+
+**⒞ 가드가 합법 POSIX 파일명을 거부한다(의도된 대가).** `Q:answers.md`·`a:b.txt`처럼 `<코드포인트>:`로 시작하는
+이름은 POSIX에서 합법인데 `isAbsolute`가 절대로 판정해 거부한다. Windows 파일명에는 `:`를 쓸 수 없으므로 이
+대가는 POSIX 전용이다. 저장소에 그런 이름이 있으면 그 파일의 diff를 못 연다. 드라이브 상대(`C:x`)를 위험으로
+보는 판단과 같은 뿌리이고, **정상 파일을 잃는 쪽보다 루트 밖을 읽는 쪽이 더 나쁘다**고 보아 이 방향을 택했다.
+`path_shape.isAbsolute`의 doc 주석이 이 대가를 명시한다.
 
 ## 6. 실측 (2026-08-15, Windows 10.0.19045, zig 0.16.0)
 

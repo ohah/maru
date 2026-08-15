@@ -177,9 +177,11 @@ pub fn dispatchNotify9(self: *TerminalCore, body: []const u8) void {
 /// **percent-decode하지 않는다.** OSC 7의 path는 URI라 디코드가 맞지만 9;9은 네이티브 경로라, 디코드하면
 /// `C:\temp\100%done` 같은 정상 경로가 깨진다.
 ///
-/// **구분자를 정규화하지 않는다.** 백슬래시를 `/`로 바꾸는 것은 중립 레이어의 절대경로 판정(`[0]=='/'`)을
-/// 먼저 떼어낸 뒤에 해야 한다(docs/windows-platform.md §5의 순서 제약) — 먼저 바꾸면 `normalizeAssetPath`의
-/// 역슬래시 가드가 무력화된다. 여기서는 받은 그대로 보관한다.
+/// **구분자를 정규화하지 않는다.** 그 선행조건 — 중립 레이어의 절대경로 판정을 `[0]=='/'`에서 떼어내는 것 —
+/// 은 W1.5에서 끝났다(`path_shape.isAbsolute`; docs/windows-platform.md §5·§5.1). 그래도 여기서 바꾸지 않는
+/// 것은 **정규화의 자리가 여기가 아니기 때문**이다: L2가 받는 경로가 POSIX여야 한다는 규칙
+/// (docs/layering-and-portability.md §4.1)은 플랫폼이 코어로 넘기는 **입구**에 적용되고, 이 필드는 그 입구를
+/// 아직 거치지 않은 셸의 원본 바이트다. 받은 그대로 보관한다.
 fn dispatchConEmuCwd(self: *TerminalCore, raw: []const u8) void {
     // ConEmu 원본 스펙은 경로를 따옴표로 감싸고(`9;9;"C:\path"`), Microsoft가 안내하는 `PROMPT`는 감싸지
     // 않는다(`$e]9;9;$P$e\`). 둘 다 실제로 나오는 바이트라 양쪽을 받는다 — Windows 파일명에 `"`가 올 수

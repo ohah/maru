@@ -50,6 +50,7 @@ const host_manifest_mod = @import("host_manifest.zig");
 const client_poison_mod = @import("client_poison.zig");
 const stable_screen_source = @import("stable_screen_source.zig");
 const reconnect_generation_slot = @import("reconnect_generation_slot.zig");
+const reconnect_reducer = @import("reconnect_reducer.zig");
 const process_identity_mod = @import("process_identity.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
@@ -510,6 +511,173 @@ pub const PreparedReconnect = struct {
     candidate: RemoteGenerationSlot.PreparedCandidate = .{},
 };
 
+const ReconnectGenerationEffect = enum(u8) {
+    retain,
+    prepare_candidate,
+    abort_candidate_if_present,
+    publish_candidate,
+    reclaim_retiring_if_present,
+};
+
+/// Reducer의 closed Decision을 실제 generation owner effect와 연결하는 단일 제품 표다.
+/// 상태 전이와 제품 effect가 따로 drift하지 않도록 새 Decision은 이 switch를 반드시 갱신한다.
+fn reconnectGenerationEffect(decision: reconnect_reducer.Decision) ReconnectGenerationEffect {
+    return switch (decision) {
+        .prepare_candidate, .retry_job => .prepare_candidate,
+        .abort_candidate_restore_old,
+        .abort_candidate_restore_old_with_paused_notice,
+        .abort_candidate_freeze_old,
+        .publish_unavailable_with_retry,
+        .publish_ended,
+        .publish_job_unavailable,
+        .close_preserve_old,
+        .close_preserve_old_with_paused_notice,
+        .close_freeze_with_retry,
+        .close_finish_terminal,
+        => .abort_candidate_if_present,
+        .publish_new_and_open, .close_publish_new => .publish_candidate,
+        .finish_job => .reclaim_retiring_if_present,
+        .retain_staged_observer,
+        .seal_mutations,
+        .retain_clean_seal,
+        .retain_ambiguous_seal,
+        .start_authority_commit,
+        .retain_takeover_unknown,
+        .retain_controller_evidence,
+        .retain_authority_conflict,
+        .retain_gone_evidence,
+        .wait_for_direct_release,
+        .resume_with_direct_grant,
+        .publish_retry_conflict,
+        .start_publication,
+        .publish_termination_pending,
+        .publish_termination_unconfirmed,
+        .abandon_shell_to_inventory,
+        => .retain,
+    };
+}
+
+fn reconnectRetiringMatchesLocal(
+    local: reconnect_reducer.LocalState,
+    has_retiring: bool,
+) bool {
+    return has_retiring == (local == .published_new);
+}
+
+/// Stable `RemoteRuntime` 안에 final-address로 고정되는 reconnect executor다. reducer state와
+/// `PreparedReconnect`를 같은 owner가 보유하고 product effect 성공 뒤에만 다음 state를 게시한다.
+const ReconnectProductExecutor = struct {
+    self_addr: usize = 0,
+    owner_pid: u32 = 0,
+    owner_thread: ?std.Thread.Id = null,
+    generation_owner_addr: usize = 0,
+    state: ?reconnect_reducer.State = null,
+    prepared: PreparedReconnect = .{},
+    live: bool = false,
+
+    fn initInPlace(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        job_generation: u64,
+    ) !void {
+        if (!std.meta.eql(self.*, ReconnectProductExecutor{})) return error.InvalidAuthority;
+        try owner.validate();
+        const shell_generation = try owner.currentGeneration();
+        self.* = .{
+            .self_addr = @intFromPtr(self),
+            .owner_pid = process_identity_mod.currentProcessId(),
+            .owner_thread = std.Thread.getCurrentId(),
+            .generation_owner_addr = @intFromPtr(owner),
+            .state = reconnect_reducer.State.initial(job_generation, shell_generation),
+            .prepared = .{},
+            .live = true,
+        };
+    }
+
+    fn apply(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        event: reconnect_reducer.Event,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !reconnect_reducer.Decision {
+        try self.validate(owner);
+        const result = try reconnect_reducer.reduce(self.state.?, event);
+        try self.executeEffect(owner, reconnectGenerationEffect(result.decision), args, initializer);
+        self.state = result.state;
+        return result.decision;
+    }
+
+    fn completeJob(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        summary: reconnect_reducer.TerminalSummary,
+    ) !void {
+        try self.validate(owner);
+        const result = try reconnect_reducer.completeJob(self.state.?, summary);
+        if (reconnectGenerationEffect(result.decision) != .reclaim_retiring_if_present)
+            return error.InvalidAuthority;
+        const has_retiring = try owner.slot.hasRetiring();
+        if (!reconnectRetiringMatchesLocal(self.state.?.local, has_retiring))
+            return error.InvalidAuthority;
+        if (has_retiring) try owner.reclaimRetiring();
+        self.state = result.state;
+    }
+
+    fn deinit(self: *ReconnectProductExecutor, owner: *ReconnectGenerationOwner) !void {
+        // attach/spawn은 wire 응답과 initial snapshot을 모두 검증한 뒤에만 executor를
+        // 게시한다. 그 전 실패를 정산하는 RemoteRuntime errdefer도 같은 teardown
+        // leaf를 사용하므로 pristine destination은 mutation 없는 정상 정산이다.
+        if (std.meta.eql(self.*, ReconnectProductExecutor{})) return;
+        try self.validate(owner);
+        if (!std.meta.eql(self.prepared, PreparedReconnect{}) or
+            self.state.?.phaseTag() != .healthy) return error.Busy;
+        self.* = .{};
+    }
+
+    fn executeEffect(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        effect: ReconnectGenerationEffect,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !void {
+        switch (effect) {
+            .retain => {},
+            .prepare_candidate => {
+                if (!std.meta.eql(self.prepared, PreparedReconnect{}))
+                    return error.InvalidAuthority;
+                try owner.prepare(&self.prepared, args, initializer);
+            },
+            .abort_candidate_if_present => {
+                if (!std.meta.eql(self.prepared, PreparedReconnect{}))
+                    try owner.abort(&self.prepared);
+            },
+            .publish_candidate => {
+                if (std.meta.eql(self.prepared, PreparedReconnect{}))
+                    return error.InvalidAuthority;
+                try owner.publish(&self.prepared);
+            },
+            .reclaim_retiring_if_present => if (try owner.slot.hasRetiring())
+                try owner.reclaimRetiring(),
+        }
+    }
+
+    fn validate(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+    ) !void {
+        if (!self.live or self.self_addr != @intFromPtr(self) or
+            self.owner_pid == 0 or self.owner_pid != process_identity_mod.currentProcessId() or
+            self.owner_thread == null or self.owner_thread.? != std.Thread.getCurrentId() or
+            self.generation_owner_addr != @intFromPtr(owner) or self.state == null or
+            !reconnect_reducer.valid(self.state.?)) return error.InvalidAuthority;
+        try owner.validate();
+        if (self.state.?.shell_generation != try owner.currentGeneration())
+            return error.InvalidAuthority;
+    }
+};
+
 /// CR2e-d의 제품 generation owner. 실제 RemoteGeneration을 candidate node의 final address에서
 /// 완성하고 stable screen writer gate 안에서 slot current와 target을 함께 게시한다.
 pub const ReconnectGenerationOwner = struct {
@@ -789,6 +957,7 @@ fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
     generation_owner: ReconnectGenerationOwner,
+    reconnect_executor: ReconnectProductExecutor,
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
@@ -1181,6 +1350,7 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.generation_owner = .{};
+        self.reconnect_executor = .{};
         self.screen_source = try allocator.create(stable_screen_source.StableScreenSource);
         errdefer allocator.destroy(self.screen_source);
         try self.screen_source.initUnavailableInPlace(allocator, io, size);
@@ -1496,6 +1666,7 @@ pub const RemoteRuntime = struct {
         self.surface = try Surface.init(self.allocator, surface_id, size);
         errdefer self.surface.deinit();
         try self.generation_owner.publishInitial();
+        try self.reconnect_executor.initInPlace(&self.generation_owner, 1);
         self.surface.remote = self.screen_source.screenSource();
     }
 
@@ -1505,6 +1676,8 @@ pub const RemoteRuntime = struct {
     }
 
     fn deinitGenerationOwnerAndScreenSource(self: *RemoteRuntime) void {
+        self.reconnect_executor.deinit(&self.generation_owner) catch
+            @panic("runtime reconnect executor teardown lost final authority");
         self.generation_owner.deinit() catch
             @panic("runtime generation owner teardown lost final authority");
         self.screen_source.deinit();
@@ -6794,6 +6967,27 @@ fn initReconnectTestGeneration(
     try out.attachment.initScreen(screen_stream.codec_version);
 }
 
+fn failReconnectTestGeneration(
+    _: *RemoteGeneration,
+    _: ReconnectGenerationTestArgs,
+) error{InjectedFailure}!void {
+    return error.InjectedFailure;
+}
+
+fn reconnectTestWork(shell_generation: u64) reconnect_reducer.Work {
+    return .{
+        .job_generation = 3,
+        .shell_generation = shell_generation,
+        .attempt = 1,
+        .candidate_connection_generation = 2,
+        .deadline_ns = 100,
+    };
+}
+
+fn reconnectTestRetry(shell_generation: u64) reconnect_reducer.RetryReservation {
+    return .{ .row_id = 7, .generation = 11, .shell_generation = shell_generation };
+}
+
 fn deinitReconnectTestOwner(
     owner: *ReconnectGenerationOwner,
     proxy: *stable_screen_source.StableScreenSource,
@@ -9196,26 +9390,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9408,
-            .ReleaseFast => 9360,
+            .Debug => 9664,
+            .ReleaseFast => 9616,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9392,
-            .ReleaseFast => 9344,
+            .Debug => 9648,
+            .ReleaseFast => 9600,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 6688,
-            .ReleaseFast => 6640,
+            .Debug => 6944,
+            .ReleaseFast => 6896,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 6672,
-            .ReleaseFast => 6624,
+            .Debug => 6928,
+            .ReleaseFast => 6880,
             else => unreachable,
         },
         else => unreachable,
@@ -11850,13 +12044,13 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9408,
-            .ReleaseFast => 9360,
+            .Debug => 9664,
+            .ReleaseFast => 9616,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9392,
-            .ReleaseFast => 9344,
+            .Debug => 9648,
+            .ReleaseFast => 9600,
             else => unreachable,
         },
         else => unreachable,
@@ -11981,6 +12175,375 @@ test "CR2e-e2a 제품 runtime teardown은 slot payload와 stable screen을 exact
     runtime_live = false;
     fixture.adapter.deinit();
     try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR2e-e2b 제품 executor는 reducer 성공 뒤 actual candidate를 게시하고 retiring을 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    ReconnectGenerationTestState.deinit_count = 0;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x11 },
+        initReconnectTestGeneration,
+    );
+    var pristine_executor: ReconnectProductExecutor = .{};
+    const owner_before_pristine_teardown = owner;
+    try pristine_executor.deinit(&owner);
+    try testing.expect(std.meta.eql(owner_before_pristine_teardown, owner));
+    var executor: ReconnectProductExecutor = .{};
+    try executor.initInPlace(&owner, 3);
+    defer {
+        executor.deinit(&owner) catch @panic("test executor deinit failed");
+        deinitReconnectTestOwner(&owner, &proxy);
+    }
+
+    const args = ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x22 };
+    const work = reconnectTestWork(2);
+    try testing.expectEqual(
+        reconnect_reducer.Decision.prepare_candidate,
+        try executor.apply(&owner, .{ .begin_prepare = work }, args, initReconnectTestGeneration),
+    );
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_clean,
+        reconnect_reducer.Event.begin_authority_commit,
+        reconnect_reducer.Event.controller_evidenced,
+        reconnect_reducer.Event.begin_publish,
+    }) |event| _ = try executor.apply(&owner, event, args, initReconnectTestGeneration);
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    const before_failed_publish = executor.state.?;
+    proxy.current.generation = 99;
+    try testing.expectError(
+        error.InvalidAuthority,
+        executor.apply(&owner, .publish_new, args, initReconnectTestGeneration),
+    );
+    try testing.expect(std.meta.eql(before_failed_publish, executor.state.?));
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expect(!std.meta.eql(PreparedReconnect{}, executor.prepared));
+    try testing.expect(!try owner.slot.hasRetiring());
+    proxy.current.generation = 2;
+    try testing.expectEqual(
+        reconnect_reducer.Decision.publish_new_and_open,
+        try executor.apply(&owner, .publish_new, args, initReconnectTestGeneration),
+    );
+    try testing.expectEqual(@as(u64, 3), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 3), proxy.current.generation);
+    try testing.expect(try owner.slot.hasRetiring());
+    try executor.completeJob(&owner, .{
+        .job_generation = 3,
+        .total = 1,
+        .published_new = 1,
+        .frozen_unavailable = 0,
+        .ended = 0,
+        .retry_reserved = 0,
+    });
+    try testing.expect(!try owner.slot.hasRetiring());
+    try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR2e-e2b 제품 executor는 abort와 effect 실패에서 reducer state와 current를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x31 },
+        initReconnectTestGeneration,
+    );
+    var executor: ReconnectProductExecutor = .{};
+    try executor.initInPlace(&owner, 3);
+    defer {
+        executor.deinit(&owner) catch @panic("test executor deinit failed");
+        deinitReconnectTestOwner(&owner, &proxy);
+    }
+    const initial = executor.state.?;
+    const args = ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x32 };
+    try testing.expectError(
+        error.InjectedFailure,
+        executor.apply(
+            &owner,
+            .{ .begin_prepare = reconnectTestWork(2) },
+            args,
+            failReconnectTestGeneration,
+        ),
+    );
+    try testing.expect(std.meta.eql(initial, executor.state.?));
+    try testing.expect(std.meta.eql(PreparedReconnect{}, executor.prepared));
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+
+    _ = try executor.apply(
+        &owner,
+        .{ .begin_prepare = reconnectTestWork(2) },
+        args,
+        initReconnectTestGeneration,
+    );
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_clean,
+    }) |event| _ = try executor.apply(&owner, event, args, initReconnectTestGeneration);
+    try testing.expectEqual(
+        reconnect_reducer.Decision.abort_candidate_restore_old,
+        try executor.apply(&owner, .precommit_failed_clean, args, initReconnectTestGeneration),
+    );
+    try testing.expect(std.meta.eql(PreparedReconnect{}, executor.prepared));
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expect(!try owner.slot.hasRetiring());
+
+    _ = try executor.apply(
+        &owner,
+        .{ .begin_prepare = reconnectTestWork(2) },
+        args,
+        initReconnectTestGeneration,
+    );
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_ambiguous,
+        reconnect_reducer.Event.begin_authority_commit,
+        reconnect_reducer.Event.takeover_sent_unknown,
+        reconnect_reducer.Event.begin_publish,
+    }) |event| _ = try executor.apply(&owner, event, args, initReconnectTestGeneration);
+    _ = try executor.apply(
+        &owner,
+        .{ .freeze_with_reserved_retry = reconnectTestRetry(2) },
+        args,
+        initReconnectTestGeneration,
+    );
+    try executor.completeJob(&owner, .{
+        .job_generation = 3,
+        .total = 1,
+        .published_new = 0,
+        .frozen_unavailable = 1,
+        .ended = 0,
+        .retry_reserved = 1,
+    });
+    try testing.expect(!try owner.slot.hasRetiring());
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+}
+
+test "CR2e-e2b 제품 executor는 copied cross-owner authority를 effect 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x41 },
+        initReconnectTestGeneration,
+    );
+    var executor: ReconnectProductExecutor = .{};
+    try executor.initInPlace(&owner, 3);
+    defer {
+        executor.deinit(&owner) catch @panic("test executor deinit failed");
+        deinitReconnectTestOwner(&owner, &proxy);
+    }
+    var copied = executor;
+    const owner_before = owner;
+    try testing.expectError(error.InvalidAuthority, copied.apply(
+        &owner,
+        .{ .begin_prepare = reconnectTestWork(2) },
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x42 },
+        initReconnectTestGeneration,
+    ));
+    try testing.expect(std.meta.eql(owner_before, owner));
+    try testing.expect(std.meta.eql(PreparedReconnect{}, executor.prepared));
+
+    var foreign_proxy: stable_screen_source.StableScreenSource = undefined;
+    try foreign_proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var foreign_owner: ReconnectGenerationOwner = .{};
+    try foreign_owner.initInPlace(
+        testing.allocator,
+        &foreign_proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x43 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&foreign_owner, &foreign_proxy);
+    try testing.expectError(error.InvalidAuthority, executor.apply(
+        &foreign_owner,
+        .{ .begin_prepare = reconnectTestWork(2) },
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x44 },
+        initReconnectTestGeneration,
+    ));
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 2), try foreign_owner.currentGeneration());
+    try testing.expect(std.meta.eql(PreparedReconnect{}, executor.prepared));
+    try testing.expect(!try owner.slot.hasRetiring());
+    try testing.expect(!try foreign_owner.slot.hasRetiring());
+}
+
+test "CR2e-e2b 제품 executor는 reachable Decision 31개와 effect table을 전수 일치시킨다" {
+    const D = reconnect_reducer.Decision;
+    const E = ReconnectGenerationEffect;
+    const rows = [_]struct { decision: D, effect: E }{
+        .{ .decision = .prepare_candidate, .effect = .prepare_candidate },
+        .{ .decision = .retain_staged_observer, .effect = .retain },
+        .{ .decision = .seal_mutations, .effect = .retain },
+        .{ .decision = .retain_clean_seal, .effect = .retain },
+        .{ .decision = .retain_ambiguous_seal, .effect = .retain },
+        .{ .decision = .abort_candidate_restore_old, .effect = .abort_candidate_if_present },
+        .{ .decision = .abort_candidate_restore_old_with_paused_notice, .effect = .abort_candidate_if_present },
+        .{ .decision = .abort_candidate_freeze_old, .effect = .abort_candidate_if_present },
+        .{ .decision = .start_authority_commit, .effect = .retain },
+        .{ .decision = .retain_takeover_unknown, .effect = .retain },
+        .{ .decision = .retain_controller_evidence, .effect = .retain },
+        .{ .decision = .retain_authority_conflict, .effect = .retain },
+        .{ .decision = .retain_gone_evidence, .effect = .retain },
+        .{ .decision = .wait_for_direct_release, .effect = .retain },
+        .{ .decision = .resume_with_direct_grant, .effect = .retain },
+        .{ .decision = .publish_retry_conflict, .effect = .retain },
+        .{ .decision = .start_publication, .effect = .retain },
+        .{ .decision = .publish_new_and_open, .effect = .publish_candidate },
+        .{ .decision = .publish_unavailable_with_retry, .effect = .abort_candidate_if_present },
+        .{ .decision = .publish_ended, .effect = .abort_candidate_if_present },
+        .{ .decision = .publish_job_unavailable, .effect = .abort_candidate_if_present },
+        .{ .decision = .retry_job, .effect = .prepare_candidate },
+        .{ .decision = .finish_job, .effect = .reclaim_retiring_if_present },
+        .{ .decision = .publish_termination_pending, .effect = .retain },
+        .{ .decision = .close_preserve_old, .effect = .abort_candidate_if_present },
+        .{ .decision = .close_preserve_old_with_paused_notice, .effect = .abort_candidate_if_present },
+        .{ .decision = .close_publish_new, .effect = .publish_candidate },
+        .{ .decision = .close_freeze_with_retry, .effect = .abort_candidate_if_present },
+        .{ .decision = .close_finish_terminal, .effect = .abort_candidate_if_present },
+        .{ .decision = .publish_termination_unconfirmed, .effect = .retain },
+        .{ .decision = .abandon_shell_to_inventory, .effect = .retain },
+    };
+    try testing.expectEqual(@typeInfo(D).@"enum".fields.len, rows.len);
+    var seen: [rows.len]bool = @splat(false);
+    for (rows) |row| {
+        try testing.expectEqual(row.effect, reconnectGenerationEffect(row.decision));
+        const index = @intFromEnum(row.decision);
+        try testing.expect(!seen[index]);
+        seen[index] = true;
+    }
+    for (seen) |value| try testing.expect(value);
+    inline for (.{
+        reconnect_reducer.LocalState.published_old,
+        reconnect_reducer.LocalState.frozen_unavailable,
+        reconnect_reducer.LocalState.ended,
+    }) |local| {
+        try testing.expect(reconnectRetiringMatchesLocal(local, false));
+        try testing.expect(!reconnectRetiringMatchesLocal(local, true));
+    }
+    try testing.expect(reconnectRetiringMatchesLocal(.published_new, true));
+    try testing.expect(!reconnectRetiringMatchesLocal(.published_new, false));
+    try expectEveryReconnectDecisionReachable();
+}
+
+fn expectEveryReconnectDecisionReachable() !void {
+    const work = reconnectTestWork(2);
+    const retry_work: reconnect_reducer.Work = .{
+        .job_generation = 3,
+        .shell_generation = 2,
+        .attempt = 2,
+        .candidate_connection_generation = 3,
+        .deadline_ns = 200,
+    };
+    const retry2 = reconnectTestRetry(2);
+    const retry3 = reconnectTestRetry(3);
+    const events = [_]reconnect_reducer.Event{
+        .{ .begin_prepare = work },
+        .observer_staged,
+        .begin_mutation_seal,
+        .seal_clean,
+        .seal_ambiguous,
+        .precommit_failed_clean,
+        .precommit_failed_ambiguous_usable,
+        .{ .precommit_failed_ambiguous_unusable = retry2 },
+        .begin_authority_commit,
+        .takeover_sent_unknown,
+        .controller_evidenced,
+        .authority_conflict,
+        .gone_positive,
+        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = .{1} ** 16 } },
+        .retry_direct_granted,
+        .{ .retry_expired = .{ .now_ns = 100 } },
+        .begin_publish,
+        .publish_new,
+        .{ .freeze_with_reserved_retry = retry2 },
+        .end_runtime,
+        .{ .prepare_unavailable = .{
+            .job_generation = 3,
+            .shell_generation = 2,
+            .last_attempt = 1,
+            .last_candidate_connection_generation = 2,
+            .retry_at_ns = 50,
+            .deadline_ns = 100,
+        } },
+        .{ .prepare_unavailable = .{
+            .job_generation = 3,
+            .shell_generation = 2,
+            .last_attempt = 2,
+            .last_candidate_connection_generation = 3,
+            .retry_at_ns = 150,
+            .deadline_ns = 200,
+        } },
+        .{ .retry_unavailable = .{ .work = retry_work, .clock = .{ .now_ns = 50 } } },
+        .{ .close_requested = .{ .intent_generation = 1, .shell_generation = 2, .deadline_ns = 300 } },
+        .{ .close_requested = .{ .intent_generation = 1, .shell_generation = 3, .deadline_ns = 300 } },
+        .{ .reconnect_quiesced_for_close = .{ .old_transport_usable = true, .retry = null } },
+        .{ .reconnect_quiesced_for_close = .{ .old_transport_usable = false, .retry = retry2 } },
+        .{ .reconnect_quiesced_for_close = .{ .old_transport_usable = false, .retry = retry3 } },
+        .{ .close_timed_out = .{ .now_ns = 300 } },
+        .abandon_to_inventory,
+    };
+    var states: std.ArrayListUnmanaged(reconnect_reducer.State) = .empty;
+    defer states.deinit(testing.allocator);
+    try states.append(testing.allocator, reconnect_reducer.State.initial(3, 2));
+    var decisions: [@typeInfo(reconnect_reducer.Decision).@"enum".fields.len]bool = @splat(false);
+    var cursor: usize = 0;
+    while (cursor < states.items.len) : (cursor += 1) {
+        const before = states.items[cursor];
+        for (events) |event| {
+            const result = reconnect_reducer.reduce(before, event) catch |err| {
+                try testing.expectEqual(error.IllegalTransition, err);
+                continue;
+            };
+            decisions[@intFromEnum(result.decision)] = true;
+            try appendUniqueReconnectState(&states, result.state);
+        }
+        const summaries = [_]reconnect_reducer.TerminalSummary{
+            .{ .job_generation = 3, .total = 1, .published_new = 1, .frozen_unavailable = 0, .ended = 0, .retry_reserved = 0 },
+            .{ .job_generation = 3, .total = 1, .published_new = 0, .frozen_unavailable = 1, .ended = 0, .retry_reserved = 1 },
+            .{ .job_generation = 3, .total = 1, .published_new = 0, .frozen_unavailable = 0, .ended = 1, .retry_reserved = 0 },
+        };
+        for (summaries) |summary| {
+            const result = reconnect_reducer.completeJob(before, summary) catch |err| {
+                try testing.expectEqual(error.IllegalTransition, err);
+                continue;
+            };
+            decisions[@intFromEnum(result.decision)] = true;
+            try appendUniqueReconnectState(&states, result.state);
+        }
+        try testing.expect(states.items.len <= 2048);
+    }
+    for (decisions, 0..) |reached, index| {
+        if (!reached) {
+            std.debug.print("unreachable reconnect decision: {s}\n", .{
+                @tagName(@as(reconnect_reducer.Decision, @enumFromInt(index))),
+            });
+        }
+        try testing.expect(reached);
+    }
+}
+
+fn appendUniqueReconnectState(
+    states: *std.ArrayListUnmanaged(reconnect_reducer.State),
+    state: reconnect_reducer.State,
+) !void {
+    for (states.items) |existing| if (std.meta.eql(existing, state)) return;
+    try states.append(testing.allocator, state);
 }
 
 fn countField(comptime fields: []const std.builtin.Type.StructField, comptime name: []const u8) usize {

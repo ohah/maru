@@ -1216,7 +1216,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   old destructor exact 1을 4개+boundary 1개로 고정한다. CR2e-e1은 `RemoteRuntime` 내부 generation 접근을 단일 current accessor로
   모으고 backend raw field 접근과 attachment 기반 runtime 역산을 0으로 만드는 runtime 2개+boundary 1개 gate다. e2a는 실제
   slot-backed initial/current 저장소와 inline payload↔stable screen publication·teardown을 runtime 2개+boundary 1개로 고정한다.
-  e2b의 모든 reachable state sequence·executor parity와 e3의 close 경쟁·mixed outcome·app-global
+  e2b는 final-address executor가 reducer state와 inline candidate를 함께 소유하고 actual prepare/abort/publish/reclaim 성공 뒤에만
+  state를 게시하는 runtime 4개+boundary 1개 gate다. 31개 Decision의 closed generation-effect table과 initial state에서 도달 가능한
+  canonical sequence 전수가 같은 inventory를 소비한다. inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이고
+  runtime size golden이 이를 고정한다. generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류하며,
+  mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3의 close 경쟁·mixed outcome·app-global
   count/byte budget·peak RSS까지 green이기 전에는 CR2e 완료가 아니다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

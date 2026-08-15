@@ -67,10 +67,10 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9408,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9360,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9392,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9344,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9664,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9616,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9648,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9600,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -411,7 +411,7 @@ test "CR2d4 경계는 remote Window transfer 제거와 stable runtime parity를 
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 
-test "CR2e-a 경계는 pointer-free reducer와 dormant 제품 caller를 고정한다" {
+test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 고정한다" {
     const allocator = std.testing.allocator;
     const reducer = try readSource(allocator, "src/platform/macos/session_host/reconnect_reducer.zig");
     defer allocator.free(reducer);
@@ -436,7 +436,7 @@ test "CR2e-a 경계는 pointer-free reducer와 dormant 제품 caller를 고정�
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(reducer, declaration));
     try std.testing.expectEqual(@as(usize, 5), count(tests, "test \"CR2e-a reducer는"));
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "@import(\"reconnect_reducer",
@@ -711,10 +711,87 @@ test "CR2e-e2a 경계는 제품 runtime의 actual GenerationSlot current 저장�
     const build_gate = between(
         build,
         "const session_host_cr2e_e2a_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_e2b_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e2a"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-e2b 경계는 reducer Decision과 actual generation effect parity를 고정한다" {
+    const allocator = std.testing.allocator;
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "const ReconnectGenerationEffect = enum(u8) {"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(runtime, "fn reconnectGenerationEffect(decision: reconnect_reducer.Decision) ReconnectGenerationEffect {"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "const ReconnectProductExecutor = struct {"));
+    inline for (.{
+        "pub const ReconnectGenerationEffect",
+        "pub fn reconnectGenerationEffect(",
+        "pub const ReconnectProductExecutor",
+    }) |shipping_surface| try std.testing.expectEqual(@as(usize, 0), count(runtime, shipping_surface));
+    const executor = between(
+        runtime,
+        "const ReconnectProductExecutor = struct {",
+        "/// CR2e-d의 제품 generation owner.",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "fn initInPlace(",
+        "fn apply(",
+        "fn completeJob(",
+        "fn deinit(",
+        "fn executeEffect(",
+        "fn validate(",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(executor, declaration));
+    try std.testing.expectEqual(@as(usize, 1), count(executor, "try self.executeEffect("));
+    try std.testing.expectEqual(@as(usize, 1), count(executor, "reconnectRetiringMatchesLocal("));
+    try std.testing.expectEqual(@as(usize, 2), count(executor, "self.state = result.state;"));
+    const execute_effect = std.mem.indexOf(u8, executor, "try self.executeEffect(") orelse
+        return error.TestUnexpectedResult;
+    const first_state_publish = std.mem.indexOf(u8, executor, "self.state = result.state;") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(execute_effect < first_state_publish);
+    const runtime_owner = between(
+        runtime,
+        "pub const RemoteRuntime = struct {",
+        "fn decodeResizeReply(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "reconnect_executor: ReconnectProductExecutor,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "self.reconnect_executor = .{};"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(runtime_owner, "try self.reconnect_executor.initInPlace(&self.generation_owner, 1);"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(runtime_owner, "self.reconnect_executor.deinit(&self.generation_owner) catch"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "reconnect_reducer.reduce(self.state.?, event)"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "reconnect_reducer.completeJob(self.state.?, summary)"));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "test \"CR2e-e2b"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "reconnect_executor.",
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_e2b_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e2b"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 

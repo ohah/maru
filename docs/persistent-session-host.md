@@ -677,8 +677,12 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `currentGeneration`/`currentGenerationConst`만 세대 저장소를 읽고 `RemoteTermBackend`는 목적별 `backend_api`만 사용한다.
   RPC pre-decode도 attachment의 물리적 부모 필드를 역산하지 않고 exact current attachment를 runtime과 대조한다. CR2e-e2a는
   제품 runtime의 최초/current 저장소를 실제 `GenerationSlot(RemoteGeneration)`으로 전환하고 generation 2 inline payload를
-  attach/snapshot 완료 뒤 stable screen에 게시하며 teardown도 slot owner에서 exact once 정산한다. reducer executor parity,
-  reachable sequence, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
+  attach/snapshot 완료 뒤 stable screen에 게시하며 teardown도 slot owner에서 exact once 정산한다. CR2e-e2b의
+  final-address executor는 reducer state와 inline candidate를 함께 소유하고 actual prepare/abort/publish/reclaim이 성공한
+  뒤에만 state를 게시하며, 31개 Decision의 closed generation-effect table과 reachable canonical sequence를 전수 고정한다.
+  inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
+  generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. mutation seal·authority/retry/close effect의 실제 제품 결속,
+  외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.
 - host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정
   bytes는 enqueue할 때 `{shell_generation,input_epoch,sequence}`를 받아 shell queue로 소유권을 넘기고, Window 이동은 이

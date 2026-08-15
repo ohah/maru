@@ -28,24 +28,6 @@ pub fn main(init: std.process.Init) !void {
             stdout.flush() catch {};
             std.process.exit(1);
         },
-        // PTY 백엔드가 없는 호스트에서 `demo`·`app-pty-*`를 부르면 `UnsupportedPtySession`이 이 오류를 낸다
-        // (`src/pty/session.zig` — 그 타입이 이 오류의 **유일한 출처**다). 위 sentinel과 같은 이유로 여기서
-        // 잡는다: 전파시키면 Zig가 6프레임 스택 트레이스를 덤프해 사용자에겐 crash로 보인다(실측 19줄).
-        //
-        // **OS가 아니라 오류 값으로 판정한다.** 그래야 ⑴ macOS는 이 오류가 아예 안 나므로 동작이 안 바뀌고
-        // ⑵ 백엔드 없는 다른 호스트도 같은 안내를 받으며 ⑶ ConPTY(W4)가 들어오는 날 이 갈래가 **저절로
-        // 죽는다**(오류가 더는 반환되지 않으므로). `builtin.os.tag`로 분기하면 W4 뒤에 누가 지워야 한다.
-        error.UnsupportedPlatform => {
-            stderr.print(
-                "이 명령은 PTY 백엔드가 필요한데 이 플랫폼에는 아직 없습니다 " ++
-                    "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
-                    "PTY 없이 도는 것: maru app-smoke · maru app-loop-smoke · maru terminfo\n",
-                .{},
-            ) catch {};
-            stderr.flush() catch {};
-            stdout.flush() catch {};
-            std.process.exit(1);
-        },
         else => return err,
     };
 }
@@ -68,6 +50,7 @@ fn dispatch(
     };
 
     if (std.mem.eql(u8, command, "demo")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runDemo(io, allocator, stdout);
         return;
     }
@@ -83,16 +66,19 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "app-pty-loop-smoke")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runAppPtyLoopSmoke(io, allocator, stdout);
         return;
     }
 
     if (std.mem.eql(u8, command, "app-pty-interactive-loop-smoke")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runAppPtyInteractiveLoopSmoke(io, allocator, stdout);
         return;
     }
 
     if (std.mem.eql(u8, command, "app-pty-smoke")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runAppPtySmoke(io, allocator, stdout);
         return;
     }
@@ -1289,6 +1275,29 @@ fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) bool {
 /// 살아있는 maru 인스턴스가 없거나 connect가 실패했을 때의 graceful 종료. stderr에 안내를 쓰고 `error.UnknownCommand`
 /// (main이 트레이스 없이 exit 1로 접는 sentinel)를 돌려준다 — 사용자 오타/부재에 crash처럼 보이지 않게. `detail`은
 /// 있으면 괄호로 덧붙인다.
+/// PTY 백엔드가 없는 호스트에서 `demo`·`app-pty-*`를 부른 경우. 안내를 내고 **기존 sentinel**
+/// (`error.UnknownCommand` = "usage 에러를 이미 안내했다")로 돌아간다 — `main`이 그것을 잡아 트레이스 없이
+/// 종료한다. 안 그러면 `UnsupportedPtySession`의 `error.UnsupportedPlatform`이 main 밖으로 흘러 6프레임
+/// 스택 트레이스가 덤프되고 사용자에겐 crash로 보인다(실측 19줄).
+///
+/// **잡지 않고 미리 판정한다.** 처음엔 `main`에서 `error.UnsupportedPlatform`을 잡으려 했는데, 그 오류는
+/// PTY 스텁만 내므로 **macOS에서는 `dispatch`의 추론 error set에 아예 없다** — 없는 오류를 switch하면
+/// 컴파일 오류다(macOS CI가 잡았다: *"'error.UnsupportedPlatform' not a member of destination error set"*).
+/// 판정을 앞으로 옮기면 새 오류가 집합에 들어가지 않아 두 호스트에서 같은 코드가 선다.
+///
+/// 판정은 `printSmoke`의 미리 안내와 **같은 사실**(`pty.backend_available`)을 본다 — 갈리면 "안내는 안 뜨는데
+/// 실행하면 실패"가 된다. 그 상수와 실제 spawn 실패의 일치는 `pty/session.zig` 테스트가 지킨다.
+/// 백엔드가 있는데 spawn이 실패하는 경우는 여기 안 걸리고 그대로 오류로 남는다(진짜 오류는 트레이스가 맞다).
+fn ptyBackendMissing(stderr: *std.Io.Writer) error{UnknownCommand} {
+    stderr.writeAll(
+        "이 명령은 PTY 백엔드가 필요한데 이 플랫폼에는 아직 없습니다 " ++
+            "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
+            "PTY 없이 도는 것: maru app-smoke · maru app-loop-smoke · maru terminfo\n",
+    ) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
+}
+
 fn sessionNoInstance(stderr: *std.Io.Writer, detail: ?[]const u8) error{UnknownCommand} {
     stderr.writeAll("실행 중인 maru 인스턴스를 찾지 못했습니다") catch {};
     if (detail) |d| stderr.print(" ({s})", .{d}) catch {};

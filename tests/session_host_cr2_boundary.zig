@@ -13,7 +13,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
     const generation = between(
         runtime,
         "pub const RemoteGeneration = struct {",
-        "pub const RemoteRuntime = struct {",
+        "const RemoteGenerationSlot =",
     ) orelse return error.TestUnexpectedResult;
     inline for (.{
         "connection: RuntimeConnection,",
@@ -113,7 +113,7 @@ test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
         "pub fn metrics(",
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(proxy, declaration));
     try std.testing.expectEqual(@as(usize, 1), count(proxy, "const marker = \"[session unavailable]\";"));
-    try std.testing.expectEqual(@as(usize, 1), count(proxy, "generation != self.current.generation + 1"));
+    try std.testing.expectEqual(@as(usize, 1), count(proxy, "generation <= self.current.generation"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "screen_source: *stable_screen_source.StableScreenSource,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한다\""));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.screen_source.publishLive("));
@@ -497,7 +497,7 @@ test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 sub
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 
-test "CR2e-c 경계는 heap-pinned generation slot과 dormant 제품 caller를 고정한다" {
+test "CR2e-c 경계는 heap-pinned generation slot과 다음 단일 제품 owner를 고정한다" {
     const allocator = std.testing.allocator;
     const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_generation_slot.zig");
     defer allocator.free(source);
@@ -519,7 +519,7 @@ test "CR2e-c 경계는 heap-pinned generation slot과 dormant 제품 caller를 �
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(source, declaration));
     try std.testing.expectEqual(@as(usize, 4), count(tests, "test \"CR2e-c generation slot은"));
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "@import(\"reconnect_generation_slot",
@@ -528,7 +528,7 @@ test "CR2e-c 경계는 heap-pinned generation slot과 dormant 제품 caller를 �
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "GenerationSlot(",
@@ -539,9 +539,89 @@ test "CR2e-c 경계는 heap-pinned generation slot과 dormant 제품 caller를 �
     const build_gate = between(
         build,
         "const session_host_cr2e_c_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_d_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-c"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-d 경계는 actual RemoteGeneration PreparedReconnect와 in-place destructor를 고정한다" {
+    const allocator = std.testing.allocator;
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const slot = try readSource(allocator, "src/platform/macos/session_host/reconnect_generation_slot.zig");
+    defer allocator.free(slot);
+    const screen = try readSource(allocator, "src/platform/macos/session_host/stable_screen_source.zig");
+    defer allocator.free(screen);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const PreparedReconnect = struct {"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const ReconnectGenerationOwner = struct {"));
+    const owner = between(
+        runtime,
+        "pub const ReconnectGenerationOwner = struct {",
+        "fn generationScreenSource(",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "pub fn prepare(",
+        "pub fn publish(",
+        "pub fn abort(",
+        "pub fn reclaimRetiring(",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(owner, declaration));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "test \"CR2e-d PreparedReconnect"));
+    inline for (.{
+        "pub fn candidatePayload(",
+        "pub fn preflightPublishCandidate(",
+        "pub fn publishCandidateNoFail(",
+        "pub fn abortCandidateInPlace(",
+        "pub fn reclaimRetiringInPlace(",
+        "pub fn deinitInPlace(",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(slot, declaration));
+    try std.testing.expectEqual(@as(usize, 1), count(screen, "pub fn publishLiveWithCommit("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "generation.attachment.deinitWithConnection(generation.connection);"));
+    inline for (.{
+        "candidatePayload(",
+        "preflightPublishCandidate(",
+        "publishCandidateNoFail(",
+        "abortCandidateInPlace(",
+        "reclaimRetiringInPlace(",
+        "deinitInPlace(",
+    }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            callee,
+            "platform/macos/session_host/reconnect_generation_slot.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "publishLiveWithCommit(",
+            "platform/macos/session_host/stable_screen_source.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "ReconnectGenerationOwner",
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        ),
+    );
+
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_d_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-d"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }

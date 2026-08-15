@@ -189,12 +189,27 @@ pub const StableScreenSource = struct {
         source: ScreenSource,
         generation: u64,
     ) PublishError!RetiredTarget {
+        return self.publishLiveWithCommit(source, generation, {}, struct {
+            fn commit(_: void) void {}
+        }.commit);
+    }
+
+    /// target 교체와 generation owner의 current 교체를 같은 writer gate 안에서 게시한다.
+    /// commit callback은 caller가 선행 검증을 끝낸 no-fail mutation만 수행해야 한다.
+    pub fn publishLiveWithCommit(
+        self: *StableScreenSource,
+        source: ScreenSource,
+        generation: u64,
+        context: anytype,
+        comptime commit: anytype,
+    ) PublishError!RetiredTarget {
         if (sourceAliasesOwner(self, source)) return error.InvalidOwner;
         try self.beginWriter();
         defer self.endWriter();
         if (self.lifecycle != .ready) return error.Closed;
         try self.validateNextGeneration(generation);
         const retired = self.current;
+        commit(context);
         self.current = .{ .source = source, .generation = generation, .kind = .live };
         return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
     }
@@ -298,7 +313,7 @@ pub const StableScreenSource = struct {
 
     fn validateNextGeneration(self: *const StableScreenSource, generation: u64) PublishError!void {
         if (self.current.generation == std.math.maxInt(u64)) return error.GenerationExhausted;
-        if (generation == 0 or generation != self.current.generation + 1)
+        if (generation == 0 or generation <= self.current.generation)
             return error.InvalidGeneration;
     }
 
@@ -446,31 +461,31 @@ test "CR2b stable proxy는 nested reader를 lock 전에 거부한다" {
     proxy.deinit();
 }
 
-test "CR2b stable proxy는 generation zero stale skip과 max ABA를 거부한다" {
+test "CR2b stable proxy는 burned generation skip을 허용하고 zero stale max ABA를 거부한다" {
     var first = FakeTarget.init('1');
     var second = FakeTarget.init('2');
     var proxy: StableScreenSource = undefined;
     try proxy.initLiveInPlace(std.testing.allocator, std.testing.io, .{ .cols = 2, .rows = 1 }, first.source());
     try std.testing.expectError(error.InvalidGeneration, proxy.publishLive(second.source(), 0));
     try std.testing.expectError(error.InvalidGeneration, proxy.publishLive(second.source(), 1));
-    try std.testing.expectError(error.InvalidGeneration, proxy.publishLive(second.source(), 3));
-    try std.testing.expectEqual(@as(u64, 1), proxy.current.generation);
+    _ = try proxy.publishLive(second.source(), 3);
+    try std.testing.expectEqual(@as(u64, 3), proxy.current.generation);
     var copied = proxy;
-    try std.testing.expectError(error.InvalidOwner, copied.publishLive(second.source(), 2));
-    try std.testing.expectError(error.InvalidOwner, proxy.publishLive(proxy.screenSource(), 2));
+    try std.testing.expectError(error.InvalidOwner, copied.publishLive(second.source(), 4));
+    try std.testing.expectError(error.InvalidOwner, proxy.publishLive(proxy.screenSource(), 4));
     const Foreign = struct {
         proxy: *StableScreenSource,
         source: ScreenSource,
         rejected: std.atomic.Value(bool) = .init(false),
         fn run(self: *@This()) void {
-            if (self.proxy.publishLive(self.source, 2)) |_| {} else |err| self.rejected.store(err == error.InvalidOwner, .release);
+            if (self.proxy.publishLive(self.source, 4)) |_| {} else |err| self.rejected.store(err == error.InvalidOwner, .release);
         }
     };
     var foreign = Foreign{ .proxy = &proxy, .source = second.source() };
     const thread = try std.Thread.spawn(.{}, Foreign.run, .{&foreign});
     thread.join();
     try std.testing.expect(foreign.rejected.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), proxy.current.generation);
+    try std.testing.expectEqual(@as(u64, 3), proxy.current.generation);
     proxy.current.generation = std.math.maxInt(u64);
     try std.testing.expectError(error.GenerationExhausted, proxy.publishLive(second.source(), 1));
     _ = try proxy.close();

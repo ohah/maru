@@ -37,7 +37,7 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, "return process_seal_service.currentProcessId();"));
     try std.testing.expectEqual(@as(usize, 1), count(service, "return process_identity.currentProcessId();"));
     try std.testing.expectEqual(@as(usize, 1), count(process_identity, ".macos, .linux => @intCast(std.c.getpid()),"));
-    try std.testing.expectEqual(@as(usize, 5), try countSessionHostSources(allocator, "@import(\"process_identity.zig\")"));
+    try std.testing.expectEqual(@as(usize, 7), try countSessionHostSources(allocator, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(service, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(snapshot_owner, "@import(\"process_identity.zig\")"));

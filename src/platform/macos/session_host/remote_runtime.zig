@@ -49,6 +49,8 @@ const connection_incident = @import("maru").observability.connection_incident;
 const host_manifest_mod = @import("host_manifest.zig");
 const client_poison_mod = @import("client_poison.zig");
 const stable_screen_source = @import("stable_screen_source.zig");
+const reconnect_generation_slot = @import("reconnect_generation_slot.zig");
+const process_identity_mod = @import("process_identity.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
@@ -496,6 +498,206 @@ pub const RemoteGeneration = struct {
     frame_summary: runtime_pump_mod.DrainSummary = .{},
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
 };
+
+const RemoteGenerationSlot = reconnect_generation_slot.GenerationSlot(RemoteGeneration);
+
+pub const PreparedReconnect = struct {
+    const Lifecycle = enum(u8) { pristine, candidate };
+
+    self_addr: usize = 0,
+    owner_addr: usize = 0,
+    lifecycle: Lifecycle = .pristine,
+    candidate: RemoteGenerationSlot.PreparedCandidate = .{},
+};
+
+/// CR2e-d의 제품 generation owner. 실제 RemoteGeneration을 candidate node의 final address에서
+/// 완성하고 stable screen writer gate 안에서 slot current와 target을 함께 게시한다.
+pub const ReconnectGenerationOwner = struct {
+    self_addr: usize = 0,
+    owner_pid: u32 = 0,
+    owner_thread: ?std.Thread.Id = null,
+    allocator: ?std.mem.Allocator = null,
+    screen_source: ?*stable_screen_source.StableScreenSource = null,
+    slot: RemoteGenerationSlot = .{},
+
+    const PublishContext = struct {
+        slot: *RemoteGenerationSlot,
+        candidate: *RemoteGenerationSlot.PreparedCandidate,
+
+        fn commit(self: PublishContext) void {
+            self.slot.publishCandidateNoFail(self.candidate);
+        }
+    };
+
+    pub fn initInPlace(
+        self: *ReconnectGenerationOwner,
+        allocator: std.mem.Allocator,
+        screen_source_ptr: *stable_screen_source.StableScreenSource,
+        initial_generation: u64,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !void {
+        if (!std.meta.eql(self.*, ReconnectGenerationOwner{})) return error.InvalidAuthority;
+        self.* = .{
+            .self_addr = @intFromPtr(self),
+            .owner_pid = process_identity_mod.currentProcessId(),
+            .owner_thread = std.Thread.getCurrentId(),
+            .allocator = allocator,
+            .screen_source = screen_source_ptr,
+        };
+        errdefer self.* = .{};
+        try self.slot.initInPlace(allocator, initial_generation, args, initializer);
+        errdefer self.slot.deinitInPlace(allocator, deinitRemoteGeneration) catch
+            @panic("initial reconnect generation cleanup lost final owner");
+        const payload = try self.slot.currentPayload();
+        const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
+        _ = try screen_source_ptr.publishLive(source, initial_generation);
+    }
+
+    pub fn prepare(
+        self: *ReconnectGenerationOwner,
+        out: *PreparedReconnect,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !void {
+        try self.validate();
+        if (rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), out, @sizeOf(PreparedReconnect)) or
+            !std.meta.eql(out.*, PreparedReconnect{})) return error.InvalidAuthority;
+        try self.slot.beginCandidate(&out.candidate);
+        var initialized = false;
+        errdefer if (initialized)
+            self.slot.abortCandidateInPlace(
+                &out.candidate,
+                self.allocator.?,
+                deinitRemoteGeneration,
+            ) catch @panic("reconnect candidate cleanup lost final owner")
+        else
+            self.slot.abortEmptyCandidate(&out.candidate) catch
+                @panic("empty reconnect candidate cleanup lost final owner");
+        try self.slot.initializeCandidate(&out.candidate, args, initializer);
+        initialized = true;
+        const payload = try self.slot.candidatePayload(&out.candidate);
+        const candidate_source = generationScreenSource(payload) orelse return error.InvalidAuthority;
+        const current_payload = try self.slot.currentPayload();
+        const current_source = generationScreenSource(current_payload) orelse return error.InvalidAuthority;
+        if (screenSourcesEqual(candidate_source, current_source)) return error.InvalidAuthority;
+        out.self_addr = @intFromPtr(out);
+        out.owner_addr = self.self_addr;
+        out.lifecycle = .candidate;
+    }
+
+    pub fn publish(
+        self: *ReconnectGenerationOwner,
+        prepared: *PreparedReconnect,
+    ) !void {
+        try self.validatePrepared(prepared);
+        try self.slot.preflightPublishCandidate(&prepared.candidate);
+        const current_generation = try self.slot.currentGeneration();
+        const current_payload = try self.slot.currentPayload();
+        const current_source = generationScreenSource(current_payload) orelse return error.InvalidAuthority;
+        if (self.screen_source.?.current.kind != .live or
+            self.screen_source.?.current.generation != current_generation or
+            !screenSourcesEqual(self.screen_source.?.current.source, current_source))
+            return error.InvalidAuthority;
+        const payload = try self.slot.candidatePayload(&prepared.candidate);
+        const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
+        const generation = prepared.candidate.generation;
+        const retired = try self.screen_source.?.publishLiveWithCommit(
+            source,
+            generation,
+            PublishContext{ .slot = &self.slot, .candidate = &prepared.candidate },
+            PublishContext.commit,
+        );
+        if (retired.kind != .live or retired.generation != current_generation or
+            !screenSourcesEqual(retired.source, current_source))
+            @panic("stable screen retired target diverged after generation commit");
+        prepared.* = .{};
+    }
+
+    pub fn abort(self: *ReconnectGenerationOwner, prepared: *PreparedReconnect) !void {
+        try self.validatePrepared(prepared);
+        try self.slot.abortCandidateInPlace(
+            &prepared.candidate,
+            self.allocator.?,
+            deinitRemoteGeneration,
+        );
+        prepared.* = .{};
+    }
+
+    pub fn reclaimRetiring(self: *ReconnectGenerationOwner) !void {
+        try self.validate();
+        try self.slot.reclaimRetiringInPlace(self.allocator.?, deinitRemoteGeneration);
+    }
+
+    pub fn deinit(self: *ReconnectGenerationOwner) !void {
+        try self.validate();
+        if (try self.slot.hasRetiring() or self.slot.candidate != null) return error.Busy;
+        const current_generation = try self.slot.currentGeneration();
+        const payload = try self.slot.currentPayload();
+        const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
+        if (self.screen_source.?.current.kind != .live or
+            self.screen_source.?.current.generation != current_generation or
+            !screenSourcesEqual(self.screen_source.?.current.source, source))
+            return error.InvalidAuthority;
+        const retired = (try self.screen_source.?.close()) orelse return error.InvalidAuthority;
+        if (retired.kind != .live or retired.generation != current_generation or
+            !screenSourcesEqual(retired.source, source))
+            @panic("reconnect generation and stable screen retirement diverged");
+        self.slot.deinitInPlace(self.allocator.?, deinitRemoteGeneration) catch
+            @panic("reconnect generation deinit proof lost after screen close");
+        self.* = .{};
+    }
+
+    pub fn currentGeneration(self: *ReconnectGenerationOwner) !u64 {
+        try self.validate();
+        return self.slot.currentGeneration();
+    }
+
+    fn validate(self: *ReconnectGenerationOwner) !void {
+        if (self.self_addr != @intFromPtr(self) or self.owner_pid == 0 or
+            self.owner_pid != process_identity_mod.currentProcessId() or self.owner_thread == null or
+            self.owner_thread.? != std.Thread.getCurrentId() or self.allocator == null or
+            self.screen_source == null) return error.InvalidAuthority;
+    }
+
+    fn validatePrepared(
+        self: *ReconnectGenerationOwner,
+        prepared: *PreparedReconnect,
+    ) !void {
+        try self.validate();
+        if (rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), prepared, @sizeOf(PreparedReconnect)) or
+            prepared.self_addr != @intFromPtr(prepared) or prepared.owner_addr != self.self_addr or
+            prepared.lifecycle != .candidate) return error.InvalidAuthority;
+    }
+};
+
+fn generationScreenSource(generation: *const RemoteGeneration) ?maru.session.surface.ScreenSource {
+    const mutable: *RemoteGeneration = @constCast(generation);
+    const screen = mutable.attachment.screenPtr() orelse return null;
+    return screen.screenSource();
+}
+
+fn screenSourcesEqual(
+    a: maru.session.surface.ScreenSource,
+    b: maru.session.surface.ScreenSource,
+) bool {
+    return a.ctx == b.ctx and a.vtable == b.vtable;
+}
+
+fn deinitRemoteGeneration(generation: *RemoteGeneration, allocator: std.mem.Allocator) void {
+    generation.attachment.deinitWithConnection(generation.connection);
+    generation.observation.deinit(allocator);
+    if (builtin.is_test) ReconnectGenerationTestState.deinit_count += 1;
+    generation.* = undefined;
+}
+
+fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
+    const a_start = @intFromPtr(a);
+    const b_start = @intFromPtr(b);
+    const a_end = std.math.add(usize, a_start, a_len) catch return true;
+    const b_end = std.math.add(usize, b_start, b_len) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
 
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
@@ -6321,6 +6523,225 @@ test "remote runtime: observation barrier projects current and fail-closes malfo
 // ─────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+const ReconnectGenerationTestState = if (builtin.is_test) struct {
+    threadlocal var deinit_count: usize = 0;
+} else struct {};
+
+const ReconnectGenerationTestArgs = struct {
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+};
+
+fn initReconnectTestGeneration(
+    out: *RemoteGeneration,
+    args: ReconnectGenerationTestArgs,
+) !void {
+    out.* = .{
+        .connection = .{ .legacy = @ptrFromInt(@alignOf(client_mod.Client)) },
+        .attachment = .init(args.allocator, .{
+            .runtime_id = 0xA001,
+            .stream_id = args.stream_id,
+            .role = .controller,
+            .controller_generation = args.stream_id,
+        }),
+        .event_generation_tracking = .tracked,
+        .resize_seq = args.stream_id,
+        .resize_generation = args.stream_id,
+        .resize_baseline_present = true,
+        .pump_ended = false,
+        .resync_needed = false,
+        .observation = .{},
+    };
+    errdefer out.attachment.deinit();
+    try out.attachment.initScreen(screen_stream.codec_version);
+}
+
+fn deinitReconnectTestOwner(
+    owner: *ReconnectGenerationOwner,
+    proxy: *stable_screen_source.StableScreenSource,
+) void {
+    owner.deinit() catch @panic("test reconnect owner deinit failed");
+    proxy.deinit();
+}
+
+fn readReconnectOwnerFromForeignThread(
+    owner: *ReconnectGenerationOwner,
+    rejected: *std.atomic.Value(bool),
+) void {
+    _ = owner.currentGeneration() catch |err| {
+        rejected.store(err == error.InvalidAuthority, .release);
+        return;
+    };
+}
+
+test "CR2e-d PreparedReconnect는 실제 generation과 screen target을 한 번에 게시하고 old를 exact once retire한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    ReconnectGenerationTestState.deinit_count = 0;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x11 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+
+    var prepared: PreparedReconnect = .{};
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x22 },
+        initReconnectTestGeneration,
+    );
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 2), proxy.current.generation);
+    try owner.publish(&prepared);
+    try testing.expectEqual(@as(u64, 3), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 3), proxy.current.generation);
+    try testing.expect(try owner.slot.hasRetiring());
+    try testing.expectEqual(@as(usize, 0), ReconnectGenerationTestState.deinit_count);
+    try testing.expectError(error.Busy, owner.deinit());
+    try testing.expectEqual(@as(u64, 3), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 3), proxy.current.generation);
+    try owner.reclaimRetiring();
+    try testing.expect(!try owner.slot.hasRetiring());
+    try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR2e-d PreparedReconnect prepare 실패와 abort는 current와 screen을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    ReconnectGenerationTestState.deinit_count = 0;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x31 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+
+    var prepared: PreparedReconnect = .{};
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x32 },
+        initReconnectTestGeneration,
+    );
+    try owner.abort(&prepared);
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 2), proxy.current.generation);
+    try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+    try testing.expect(!try owner.slot.hasRetiring());
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x33 },
+        initReconnectTestGeneration,
+    );
+    try owner.publish(&prepared);
+    try testing.expectEqual(@as(u64, 4), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 4), proxy.current.generation);
+    try owner.reclaimRetiring();
+    try testing.expectEqual(@as(usize, 2), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR2e-d PreparedReconnect는 copied stale cross-owner token을 mutation 없이 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x41 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+    var prepared: PreparedReconnect = .{};
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x42 },
+        initReconnectTestGeneration,
+    );
+    var copied = prepared;
+    try testing.expectError(error.InvalidAuthority, owner.publish(&copied));
+    var copied_owner = owner;
+    try testing.expectError(error.InvalidAuthority, copied_owner.currentGeneration());
+    var foreign_rejected = std.atomic.Value(bool).init(false);
+    const foreign = try std.Thread.spawn(.{}, readReconnectOwnerFromForeignThread, .{ &owner, &foreign_rejected });
+    foreign.join();
+    try testing.expect(foreign_rejected.load(.acquire));
+    var other_proxy: stable_screen_source.StableScreenSource = undefined;
+    try other_proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var other_owner: ReconnectGenerationOwner = .{};
+    try other_owner.initInPlace(
+        testing.allocator,
+        &other_proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x43 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&other_owner, &other_proxy);
+    try testing.expectError(error.InvalidAuthority, other_owner.publish(&prepared));
+    const canonical_target = proxy.current;
+    proxy.current.source = other_proxy.current.source;
+    try testing.expectError(error.InvalidAuthority, owner.publish(&prepared));
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    proxy.current = canonical_target;
+    try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+    try testing.expectEqual(@as(u64, 2), proxy.current.generation);
+    try owner.abort(&prepared);
+}
+
+fn reconnectAllocationFailureCase(allocator: std.mem.Allocator) !void {
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var proxy_live = true;
+    defer if (proxy_live) {
+        _ = proxy.close() catch null;
+        proxy.deinit();
+    };
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = allocator, .stream_id = 0x51 },
+        initReconnectTestGeneration,
+    );
+    var owner_live = true;
+    defer if (owner_live) {
+        deinitReconnectTestOwner(&owner, &proxy);
+        proxy_live = false;
+    };
+    var prepared: PreparedReconnect = .{};
+    owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = allocator, .stream_id = 0x52 },
+        initReconnectTestGeneration,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => {
+            try testing.expectEqual(@as(u64, 2), try owner.currentGeneration());
+            try testing.expectEqual(@as(u64, 2), proxy.current.generation);
+            return error.OutOfMemory;
+        },
+        else => return err,
+    };
+    try owner.abort(&prepared);
+    deinitReconnectTestOwner(&owner, &proxy);
+    owner_live = false;
+    proxy_live = false;
+}
+
+test "CR2e-d PreparedReconnect allocator fail-index는 final-address candidate와 current를 누수 없이 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try testing.checkAllAllocationFailures(testing.allocator, reconnectAllocationFailureCase, .{});
+}
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;

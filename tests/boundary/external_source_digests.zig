@@ -369,7 +369,7 @@ pub const inventory = [_]Proof{
     // 훅을 init에서 한 번 읽어 세션 필드로 든다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client
     // 구성·receiver 집합을 안 건드린다. **main의 CR2d4와 같은 파일에서 만나 또 충돌했다**(이 원장이
     // 예고한 그 충돌이다) — 양쪽 사유를 모두 남기고 값만 재계산했다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6a32d77f771f6827cd73a60275aefc71cc24cf84e3e4ddac618d7cd2fba2bf4e" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0305d3ced8c81f57a29f9e9efda8a379f95e48a9887e8820c476b7f27ffd0dd7" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

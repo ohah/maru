@@ -48,7 +48,13 @@ pub const inventory = [_]Proof{
     // 않는다 — docs/editor-surface-dock.md §3.5.2). count는 2 그대로다: 더한 것은 argv 한 종류와 `Result`
     // 필드 하나, 그리고 기존 루프의 `truncated` 대입뿐이고 `@field` 반사 접근이나 Client 구성·receiver
     // 집합은 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "f6189866a0e07f8d0821172e2546c5a1adb44cb0fd60052c8fd72c8266eb8cce" },
+    // 소스 컨트롤 **쓰기** 실행 경로(P2b)가 붙으면서 바뀐다. fork/exec/파이프 코어를 `spawnCapture`로 뽑아
+    // 읽기·쓰기가 공유하게 하고(정책 차이는 어느 스트림을 파이프로 받을지 하나뿐이다), 그 위에
+    // `runWriteSync`·`WriteOutput`과 쓰기 전용 배수 리더(`readAllFdDraining`)를 더했다. 자식의 stdin도
+    // `/dev/null`로 돌린다(hook이 `read`를 부르면 그 명령이 영영 안 끝난다). count는 2 그대로다:
+    // 더한 것은 프로세스 배관과 argv/env 조립뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은
+    // 건드리지 않는다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "a5b8e3f778924793b292dcf504df3d72d3fc5beb06dee0dfb8de811a85bc2ac2" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.

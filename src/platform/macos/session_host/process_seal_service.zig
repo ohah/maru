@@ -45,6 +45,7 @@ const window_close_ticket_reservation_domain = "maru.window-close-ticket-reserva
 const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
 const session_host_coordinator_domain = "maru.session-host-coordinator.v1";
 const external_reconnect_receipt_domain = "maru.external-reconnect-receipt.v1";
+const reconnect_close_receipt_domain = "maru.reconnect-close-receipt.v1";
 const prepared_host_publication_domain = "maru.prepared-host-publication.v1";
 const incident_binding_domain = "maru.incident-binding.v1";
 const incident_publisher_authority_domain = "maru.incident-publisher-authority.v1";
@@ -99,6 +100,7 @@ pub const WindowCloseTicketReservationSealInput = cleanup_seal.WindowCloseTicket
 pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
 pub const SessionHostCoordinatorSealInput = cleanup_seal.SessionHostCoordinatorSealInput;
 pub const ExternalReconnectReceiptSealInput = cleanup_seal.ExternalReconnectReceiptSealInput;
+pub const ReconnectCloseReceiptSealInput = cleanup_seal.ReconnectCloseReceiptSealInput;
 pub const PreparedHostPublicationSealInput = cleanup_seal.PreparedHostPublicationSealInput;
 pub const IncidentBindingSealInput = cleanup_seal.IncidentBindingSealInput;
 pub const IncidentPublisherAuthoritySealInput = cleanup_seal.IncidentPublisherAuthoritySealInput;
@@ -741,6 +743,10 @@ pub fn sessionHostCoordinatorSeal(pid: u32, process_nonce: u64, input: SessionHo
 
 pub fn externalReconnectReceiptSeal(pid: u32, process_nonce: u64, input: ExternalReconnectReceiptSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, external_reconnect_receipt_domain, input);
+}
+
+pub fn reconnectCloseReceiptSeal(pid: u32, process_nonce: u64, input: ReconnectCloseReceiptSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, reconnect_close_receipt_domain, input);
 }
 
 pub fn preparedHostPublicationSeal(pid: u32, process_nonce: u64, input: PreparedHostPublicationSealInput) ReadyError!CleanupSeal {

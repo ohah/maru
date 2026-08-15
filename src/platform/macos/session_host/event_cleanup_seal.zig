@@ -167,6 +167,19 @@ pub const ExternalReconnectReceiptSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const ReconnectCloseReceiptSealInput = struct {
+    self_addr: u64,
+    coordinator_addr: u64,
+    thread_id: u64,
+    backend_addr: u64,
+    backend_generation: u64,
+    runtime_handle: u64,
+    runtime_generation: u64,
+    runtime_id: [32]u8,
+    transition_digest: Digest,
+    lifecycle_raw: u8,
+};
+
 pub const PreparedHostPublicationSealInput = struct {
     self_addr: u64,
     pool_addr: u64,

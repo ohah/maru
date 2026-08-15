@@ -65,6 +65,13 @@ pub const DirectReleaseTarget = struct {
     projection: remote_runtime.DirectReleaseProjection = .{},
 };
 
+pub const CloseTransitionTarget = struct {
+    runtime_handle: RuntimeHandle = 0,
+    runtime_generation: u64 = 0,
+    runtime_id: [32]u8 = [_]u8{0} ** 32,
+    projection: remote_runtime.CloseTransitionProjection = .{},
+};
+
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
@@ -323,6 +330,35 @@ pub const RemoteTermBackend = struct {
             entry.host_adapter_generation != target.projection.host_adapter_generation)
             return error.StaleExternalEvent;
         try RemoteRuntime.backend_api.applyDirectReleaseProjection(entry.runtime, target.projection);
+    }
+
+    pub fn closeTransitionTarget(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+        event: remote_runtime.CloseEvent,
+    ) !CloseTransitionTarget {
+        try self.validateReconnectCoordinatorTarget();
+        if (runtime_handle == 0) return error.UnknownSurface;
+        const entry = self.runtimes.get(runtime_handle) orelse return error.UnknownSurface;
+        return .{
+            .runtime_handle = runtime_handle,
+            .runtime_generation = entry.runtime_generation,
+            .runtime_id = entry.runtime.appQuitRuntimeId(),
+            .projection = try RemoteRuntime.backend_api.closeTransitionProjection(entry.runtime, event),
+        };
+    }
+
+    pub fn applyCloseTransitionTarget(
+        self: *RemoteTermBackend,
+        target: CloseTransitionTarget,
+    ) !void {
+        try self.validateReconnectCoordinatorTarget();
+        const entry = self.runtimes.get(target.runtime_handle) orelse return error.UnknownSurface;
+        const runtime_id = entry.runtime.appQuitRuntimeId();
+        if (entry.runtime_generation != target.runtime_generation or
+            !std.mem.eql(u8, &runtime_id, &target.runtime_id))
+            return error.StaleExternalEvent;
+        try RemoteRuntime.backend_api.applyCloseTransitionProjection(entry.runtime, target.projection);
     }
 
     fn releaseProductSingleton(self: *RemoteTermBackend) void {

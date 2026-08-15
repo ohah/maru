@@ -3784,6 +3784,41 @@ pub fn build(b: *std.Build) void {
         session_host_cr2e_e3c2_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
         boundary_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
     }
+    const session_host_cr2e_e3c3_step = b.step(
+        "test-session-host-cr2e-e3c3",
+        "CR2e-e3c3 typed close event and mixed reconnect outcome gates",
+    );
+    session_host_cr2e_e3c3_step.dependOn(session_host_cr2e_e3c2_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3c3_optimize| {
+        const cr2e_e3c3_coordinator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/session_host_coordinator.zig"),
+                .target = target,
+                .optimize = cr2e_e3c3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2e-e3c3 typed close event는"},
+        });
+        const run_cr2e_e3c3_coordinator_tests = b.addRunArtifact(cr2e_e3c3_coordinator_tests);
+        run_cr2e_e3c3_coordinator_tests.addArg("--maru-expect-tests=1");
+        run_cr2e_e3c3_coordinator_tests.setCwd(b.path("."));
+        session_host_cr2e_e3c3_step.dependOn(&run_cr2e_e3c3_coordinator_tests.step);
+
+        const cr2e_e3c3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2e_e3c3_optimize,
+            }),
+            .filters = &.{"CR2e-e3c3 경계는"},
+        });
+        const run_cr2e_e3c3_boundary_tests = b.addRunArtifact(cr2e_e3c3_boundary_tests);
+        run_cr2e_e3c3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2e_e3c3_boundary_tests.setCwd(b.path("."));
+        session_host_cr2e_e3c3_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

@@ -1258,6 +1258,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `retry_wait_release`에서만 one-shot 소비한다.
   apply 직전 monotonic clock이 sealed deadline 미만인지 다시 확인한다. copied/self-address rewrite/replay/stale row/expired receipt는
   reducer mutation 0이며, 실제 host wire가 이 receipt를 발급했다는 증거는 CR4에 남긴다.
+  e3c3은 pointer-free close event와 final-address receipt를 coordinator process identity, backend singleton generation,
+  exact runtime handle/row generation/host runtime ID 및 canonical before/event/decision/after digest에 결속한다. coordinator는 caller가 제출한
+  reducer projection을 받지 않고 live runtime에서 직접 계산한다. termination request의 bounded future deadline과 apply-time
+  expiry, coordinator-clock timeout의 sealed deadline 도달, abandon을 재검증하고 preserve-old, paused notice, publish-new,
+  retry freeze, terminal finish 다섯 effect를 actual executor로 실행한다. invalid raw tag, noncanonical payload, copied/self-address
+  rewrite, digest 변조, replay, backend row ABA, premature timeout, expired request는 runtime·resident budget mutation 0이며 각 성공
+  뒤 candidate/current lease와 retiring graph가 해당 decision과 exact 일치한다. 실제 socket이 close event를 발급하는 제품
+  ingress는 CR4 범위이고 이 gate만으로 wire reconnect/termination E2E를 주장하지 않는다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의

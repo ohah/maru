@@ -1648,9 +1648,18 @@ pub fn build(b: *std.Build) void {
         macos_browser_bounded_smoke_step.dependOn(&macos_browser_bounded_smoke.step);
     }
 
+    // L4 어댑터(`src/platform/macos/**`)와 POSIX 전제 CLI(`src/main.zig`)는 **타깃별 재작성 대상**이라 다른 OS에서
+    // 컴파일되지 않는 것이 정상이다([layering-and-portability.md] §2 — L4는 "타깃별 신규"). 그런데 그 테스트가 기본
+    // `test` 그래프에 무조건 걸려 있으면 macOS 밖에서는 **중립 레이어(L1~L3)의 회귀를 볼 방법이 없다** — 빌드가
+    // L4에서 먼저 죽어 중립 테스트까지 못 간다. 그래서 L4 테스트만 macOS에서 걸고, 중립 테스트는 모든 호스트에서
+    // 돌린다. 실측(Windows): 이 게이트로 `zig build test`가 중립 361개를 돌린다(게이트 전에는 0개 — 컴파일 실패).
+    const macos_host_tests = target.result.os.tag == .macos;
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다 —
+    // Windows는 named pipe/ACL 설계가 선행이라 이식 전까지 macOS에서만 건다.
+    if (macos_host_tests) test_step.dependOn(&run_exe_tests.step);
     // ML2a/ML2b/ML3a Chrome tree는 layout·pointer state·semantic paint의 pure seam이다. 제품
     // host에 연결되기 전에도 기본 test에 넣어 Container/clip/capture/token-role contract가 CI 밖으로
     // 새지 않게 한다. `src/ui_test.zig`는 module root를 실제 `src/` 경계에 두면서, 전체 Chrome facade가
@@ -1876,10 +1885,11 @@ pub fn build(b: *std.Build) void {
     // AppHostFrame으로 조립하는 제품 후보 경계다. native bridge는 함수 포인터로 주입하므로
     // 기본 테스트에서는 Objective-C 없이 FrameLoop가 호출할 builder 계약을 고정한다.
     test_step.dependOn(&run_macos_coretext_frame_builder_tests.step);
-    // app_host_abi.zig는 제품 Swift host가 호출할 C ABI의 version/layout/ownership
-    // 신호를 고정한다. Swift 자체는 macOS opt-in type-check로만 검증하지만, ABI layout은
-    // 플랫폼 독립 테스트로 기본 check에 넣어 drift를 빨리 잡는다.
-    test_step.dependOn(&run_macos_app_host_abi_tests.step);
+    // app_host_abi.zig는 제품 Swift host가 호출할 C ABI의 version/layout/ownership 신호를 고정한다.
+    // ABI layout 자체는 플랫폼 독립이지만 이 모듈은 `app_session`을 끌어와 POSIX fd·AT.FDCWD까지 함께
+    // 컴파일된다(실측: Windows에서 209개 에러) — 즉 실제로는 macOS 전용 artifact다. 위 coretext_* 는
+    // 진짜 플랫폼 독립이라(Windows에서 통과 확인) 게이트하지 않고 그대로 기본 test에 남긴다.
+    if (macos_host_tests) test_step.dependOn(&run_macos_app_host_abi_tests.step);
 
     const e2e_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -3657,8 +3667,12 @@ pub fn build(b: *std.Build) void {
             &run_event_c3_3b2b3_dto_drift_child.step,
         );
         run_session_host_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
-        run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
-        run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+        // 중립 test run(core/exe)에 L4 session host artifact를 매달면 그 컴파일 실패가 **중립 테스트까지**
+        // 끌고 내려간다(macOS 밖에서 core 204개가 통째로 안 돌던 경로) — macOS에서만 매단다.
+        if (macos_host_tests) {
+            run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+            run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+        }
 
         // 나머지 allocation/ownership 행은 정상 종료하는 exact-one artifact에서도 반복한다.
         const event_c3_3b2b3_dto_drift_tests = addProjectTest(b, .{
@@ -3673,8 +3687,10 @@ pub fn build(b: *std.Build) void {
             &run_event_c3_3b2b3_dto_drift_tests.step,
         );
         run_session_host_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
-        run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
-        run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
+        if (macos_host_tests) { // 위와 같은 이유 — 중립 run에 L4를 매달지 않는다.
+            run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
+            run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
+        }
 
         const event_c3_3b2b3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -6011,7 +6027,9 @@ pub fn build(b: *std.Build) void {
     // 제품 artifact 환경변수가 필요한 이 전용 경로도 일반 test run과 같은 exit-code 계약으로 둔다.
     run_session_host_tests.expectExitCode(0);
     run_session_host_tests.setCwd(b.path("."));
-    test_step.dependOn(&run_session_host_tests.step);
+    // session host는 unix domain socket·fd 상속·`/usr/bin/env` 래퍼까지 POSIX에 직결된 L4다 — macOS 전용.
+    // 전용 `test-session-host` 스텝은 그대로 남아 있어 macOS에서 따로 돌릴 수 있다.
+    if (macos_host_tests) test_step.dependOn(&run_session_host_tests.step);
 
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);

@@ -220,6 +220,26 @@ pub const testing = if (builtin.is_test) struct {
         };
     }
 
+    pub fn enterExternalMode(slot: *ClientSlot) !void {
+        if (!slot.valid()) return error.InvalidOwner;
+        var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
+        const guard = &slot.current.guarded_allocator;
+        const scope_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{.{
+            .start = @intFromPtr(&allocator_scope),
+            .len = @sizeOf(client_mod.Client.GenerationAllocatorScope),
+        }};
+        if (!guard.beginOperationGuard(&scope_ranges)) return error.Busy;
+        defer guard.endOperationGuard();
+        try slot.current.client.beginGenerationAllocatorScope(
+            guard.allocator(),
+            .attachment_batch,
+            &allocator_scope,
+        );
+        defer slot.current.client.restoreGenerationAllocatorScope(&allocator_scope) catch
+            @panic("CR3b R2b external-mode test allocator scope drifted");
+        try client_mod.retirement_cleanup_testing_api.enterExternalMode(&slot.current.client);
+    }
+
     pub fn rpcDecoderCallbackActive() bool {
         return rpc_decoder_callback_active;
     }
@@ -862,6 +882,32 @@ pub const PreparedAdmissionClose = struct {
     seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
 };
 
+pub const PreparedRetirementCleanup = struct {
+    pub const Lifecycle = enum(u8) { pristine, prepared, committed, cleaning, cancelled, consumed };
+
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+    slot_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    current_node_addr: usize = 0,
+    current_node_incarnation: u64 = 0,
+    expected_connection_generation: u64 = 0,
+    admission_request_generation: u64 = 0,
+    placeholder_generation: u64 = 0,
+    allocator_ptr: usize = 0,
+    allocator_vtable: usize = 0,
+    fd: std.c.fd_t = -1,
+    pending_frame_addr: usize = 0,
+    pending_frame_len: usize = 0,
+    pending_stream_id: u64 = 0,
+    pending_offset: usize = 0,
+    external_deinit_reserved_raw: u8 = 0,
+    lifecycle: PreparedRetirementCleanup.Lifecycle = .pristine,
+    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+};
+
 fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
         @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
@@ -883,6 +929,19 @@ fn preparedAdmissionCloseLifecycleRawValid(value: *const PreparedAdmissionClose.
         @intFromEnum(PreparedAdmissionClose.Lifecycle.committed),
         @intFromEnum(PreparedAdmissionClose.Lifecycle.cancelled),
         @intFromEnum(PreparedAdmissionClose.Lifecycle.consumed),
+        => true,
+        else => false,
+    };
+}
+
+fn preparedRetirementCleanupLifecycleRawValid(value: *const PreparedRetirementCleanup.Lifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.pristine),
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.prepared),
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.committed),
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.cleaning),
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.cancelled),
+        @intFromEnum(PreparedRetirementCleanup.Lifecycle.consumed),
         => true,
         else => false,
     };
@@ -1112,6 +1171,110 @@ test "CR3b R2a Client tombstone은 invalid raw lifecycle을 permit mutation 전�
     try std.testing.expect(std.meta.eql(before, permit));
     slot.current.retirement_lifecycle = .live;
     try slot.cancelAdmissionClose(&permit);
+}
+
+test "CR3b R2b prepared cleanup handle은 invalid raw lifecycle과 copied address를 자원 접근 전에 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B2B9);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer {
+        if (slot.current.admission_lifecycle == .closed)
+            slot.current.admission_lifecycle = .open;
+        if (slot.lifecycle == .live) {
+            const outcome = slot.tryDeinit();
+            if (outcome != .cleaned) @panic("CR3b R2b fixture teardown failed");
+        }
+    }
+    var permit: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &permit);
+    try slot.commitAdmissionClose(&permit);
+    var permit_settled = false;
+    defer if (!permit_settled) {
+        slot.cancelAdmissionClose(&permit) catch @panic("CR3b R2b admission fallback failed");
+    };
+    const aliased_cleanup = try std.testing.allocator.create(PreparedRetirementCleanup);
+    aliased_cleanup.* = .{};
+    slot.current.client.pending_outbound = .{
+        .frame = std.mem.asBytes(aliased_cleanup),
+        .stream_id = 0xB2A1,
+        .offset = 0,
+    };
+    var aliased_cleanup_owned = true;
+    defer if (aliased_cleanup_owned) {
+        if (aliased_cleanup.lifecycle == .prepared)
+            slot.abortRetirementCleanup(aliased_cleanup) catch
+                @panic("CR3b R2b aliased cleanup fallback failed");
+        slot.current.client.pending_outbound = null;
+        std.testing.allocator.destroy(aliased_cleanup);
+    };
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.prepareRetirementCleanup(&permit, 2, aliased_cleanup),
+    );
+    try std.testing.expect(std.meta.eql(aliased_cleanup.*, PreparedRetirementCleanup{}));
+    slot.current.client.pending_outbound = null;
+    std.testing.allocator.destroy(aliased_cleanup);
+    aliased_cleanup_owned = false;
+    var cleanup: PreparedRetirementCleanup = .{};
+    try slot.prepareRetirementCleanup(&permit, 2, &cleanup);
+    const canonical = cleanup;
+    var cleanup_settled = false;
+    defer if (!cleanup_settled) {
+        cleanup = canonical;
+        slot.abortRetirementCleanup(&cleanup) catch @panic("CR3b R2b cleanup fallback failed");
+    };
+    var copied = cleanup;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.preflightRetirementCleanup(&permit, &copied, 2),
+    );
+    const WrongThread = struct {
+        const Context = struct {
+            slot: *ClientSlot,
+            permit: *PreparedAdmissionClose,
+            cleanup: *PreparedRetirementCleanup,
+            rejected: bool = false,
+        };
+
+        fn run(context: *Context) void {
+            context.slot.preflightRetirementCleanup(
+                context.permit,
+                context.cleanup,
+                2,
+            ) catch |err| {
+                context.rejected = err == error.InvalidOwner;
+                return;
+            };
+        }
+    };
+    var wrong_thread_context = WrongThread.Context{
+        .slot = &slot,
+        .permit = &permit,
+        .cleanup = &cleanup,
+    };
+    const wrong_thread = try std.Thread.spawn(.{}, WrongThread.run, .{&wrong_thread_context});
+    wrong_thread.join();
+    try std.testing.expect(wrong_thread_context.rejected);
+    try std.testing.expect(std.meta.eql(canonical, cleanup));
+    @as(*u8, @ptrCast(&cleanup.lifecycle)).* = 0xff;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.preflightRetirementCleanup(&permit, &cleanup, 2),
+    );
+    try std.testing.expectError(error.InvalidOwner, slot.abortRetirementCleanup(&cleanup));
+    cleanup = canonical;
+    cleanup.external_deinit_reserved_raw = 0xff;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.preflightRetirementCleanup(&permit, &cleanup, 2),
+    );
+    try std.testing.expectError(error.InvalidOwner, slot.abortRetirementCleanup(&cleanup));
+    cleanup = canonical;
+    try slot.abortRetirementCleanup(&cleanup);
+    cleanup_settled = true;
+    try slot.cancelAdmissionClose(&permit);
+    permit_settled = true;
 }
 
 test "B3-4/5 RPC free evidence retire permit consumes exact committed record" {
@@ -11763,6 +11926,55 @@ pub const ClientSlot = struct {
         return std.mem.eql(u8, &expected, &permit.seal);
     }
 
+    fn retirementCleanupSeal(
+        self: *const ClientSlot,
+        cleanup: *const PreparedRetirementCleanup,
+    ) process_seal_service.CleanupSeal {
+        return process_seal_service.preparedRetirementCleanupSeal(self.pid, self.process_nonce, .{
+            .self_addr = @intCast(cleanup.self_addr),
+            .thread_id = cleanup.owner_thread_incarnation,
+            .slot_addr = @intCast(cleanup.slot_addr),
+            .slot_incarnation = cleanup.slot_incarnation,
+            .node_addr = @intCast(cleanup.current_node_addr),
+            .node_incarnation = cleanup.current_node_incarnation,
+            .connection_generation = cleanup.expected_connection_generation,
+            .admission_request_generation = cleanup.admission_request_generation,
+            .placeholder_generation = cleanup.placeholder_generation,
+            .allocator_ptr = @intCast(cleanup.allocator_ptr),
+            .allocator_vtable = @intCast(cleanup.allocator_vtable),
+            .fd = cleanup.fd,
+            .pending_frame_addr = @intCast(cleanup.pending_frame_addr),
+            .pending_frame_len = @intCast(cleanup.pending_frame_len),
+            .pending_stream_id = cleanup.pending_stream_id,
+            .pending_offset = @intCast(cleanup.pending_offset),
+            .external_deinit_reserved_raw = cleanup.external_deinit_reserved_raw,
+            .lifecycle_raw = @intFromEnum(cleanup.lifecycle),
+        }) catch @panic("CR3b R2b retirement cleanup seal service unavailable");
+    }
+
+    fn retirementCleanupValid(
+        self: *const ClientSlot,
+        cleanup: *const PreparedRetirementCleanup,
+        lifecycle: PreparedRetirementCleanup.Lifecycle,
+    ) bool {
+        if (!preparedRetirementCleanupLifecycleRawValid(&cleanup.lifecycle) or
+            !self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            cleanup.self_addr != @intFromPtr(cleanup) or cleanup.pid != self.pid or
+            cleanup.process_nonce != self.process_nonce or
+            cleanup.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            cleanup.slot_addr != @intFromPtr(self) or cleanup.slot_incarnation != self.incarnation.tagged or
+            cleanup.current_node_addr != @intFromPtr(self.current) or
+            cleanup.current_node_incarnation != self.current.incarnation.tagged or
+            cleanup.expected_connection_generation != self.current.connection_generation or
+            cleanup.admission_request_generation == 0 or cleanup.placeholder_generation == 0 or
+            cleanup.allocator_ptr == 0 or cleanup.allocator_vtable == 0 or
+            cleanup.external_deinit_reserved_raw > 1 or
+            cleanup.lifecycle != lifecycle)
+            return false;
+        const expected = self.retirementCleanupSeal(cleanup);
+        return std.mem.eql(u8, &expected, &cleanup.seal);
+    }
+
     /// 현재 Client 주소는 이 함수의 stack frame 밖으로 반환하지 않는다. 제품 facade는 닫힌 operation만 callback으로 전달한다.
     fn withCurrent(
         self: *ClientSlot,
@@ -11945,6 +12157,225 @@ pub const ClientSlot = struct {
         permit.seal = self.admissionCloseSeal(permit);
         permit.lifecycle = .consumed;
         permit.seal = self.admissionCloseSeal(permit);
+    }
+
+    pub const RetirementCleanupError = error{ InvalidOwner, Busy, GenerationMismatch };
+
+    pub fn prepareRetirementCleanup(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        placeholder_generation: u64,
+        out: *PreparedRetirementCleanup,
+    ) RetirementCleanupError!void {
+        if (!self.admissionClosePermitValid(permit, .committed) or placeholder_generation == 0 or
+            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
+            rangesOverlapTyped(out, permit) or !std.meta.eql(out.*, PreparedRetirementCleanup{}))
+            return error.InvalidOwner;
+        {
+            const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+                error.MovedOrCopied => error.InvalidOwner,
+                error.AdminBusy => error.Busy,
+            };
+            defer self.endRegisteredClientOperation(operation);
+            if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+                return error.InvalidOwner;
+            if (operation.node.connection_generation != permit.expected_connection_generation)
+                return error.GenerationMismatch;
+            if (operation.node.admission_lifecycle != .closed or
+                operation.node.retirement_lifecycle != .live or
+                operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
+                operation.node.active_operation_generation != 0 or
+                operation.node.pin_owner.active_cleanup != 0)
+                return error.Busy;
+            operation.node.client.preflightExternalAdoptionDestination(
+                out,
+                @sizeOf(PreparedRetirementCleanup),
+            ) catch return error.InvalidOwner;
+            operation.node.client.preflightExternalAdoptionDestination(
+                permit,
+                @sizeOf(PreparedAdmissionClose),
+            ) catch return error.InvalidOwner;
+        }
+        const external = self.current.client.reserveExternalModeDeinit();
+        if (external == .busy) return error.Busy;
+        var reservation_owned = external == .reserved;
+        errdefer if (reservation_owned and !self.current.client.cancelReservedExternalModeDeinit())
+            @panic("CR3b R2b external cleanup reservation rollback failed");
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+            return error.InvalidOwner;
+        if (operation.node.connection_generation != permit.expected_connection_generation)
+            return error.GenerationMismatch;
+        if (operation.node.admission_lifecycle != .closed or
+            operation.node.retirement_lifecycle != .live or
+            operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
+            operation.node.active_operation_generation != 0 or
+            operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        operation.node.client.preflightExternalAdoptionDestination(
+            out,
+            @sizeOf(PreparedRetirementCleanup),
+        ) catch return error.InvalidOwner;
+        operation.node.client.preflightExternalAdoptionDestination(
+            permit,
+            @sizeOf(PreparedAdmissionClose),
+        ) catch return error.InvalidOwner;
+        const pending = operation.node.client.pending_outbound;
+        if (pending) |value| {
+            if (value.frame.len == 0 or value.stream_id == 0 or value.offset > value.frame.len)
+                return error.InvalidOwner;
+        }
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = self.incarnation.tagged,
+            .current_node_addr = @intFromPtr(operation.node),
+            .current_node_incarnation = operation.node.incarnation.tagged,
+            .expected_connection_generation = operation.node.connection_generation,
+            .admission_request_generation = permit.request_generation,
+            .placeholder_generation = placeholder_generation,
+            .allocator_ptr = @intFromPtr(operation.node.client.allocator.ptr),
+            .allocator_vtable = @intFromPtr(operation.node.client.allocator.vtable),
+            .fd = operation.node.client.fd,
+            .pending_frame_addr = if (pending) |value| @intFromPtr(value.frame.ptr) else 0,
+            .pending_frame_len = if (pending) |value| value.frame.len else 0,
+            .pending_stream_id = if (pending) |value| value.stream_id else 0,
+            .pending_offset = if (pending) |value| value.offset else 0,
+            .external_deinit_reserved_raw = @intFromBool(external == .reserved),
+            .lifecycle = .prepared,
+        };
+        out.seal = self.retirementCleanupSeal(out);
+        reservation_owned = false;
+    }
+
+    fn retirementCleanupMatchesClient(
+        cleanup: *const PreparedRetirementCleanup,
+        client: *const client_mod.Client,
+    ) bool {
+        if (cleanup.allocator_ptr != @intFromPtr(client.allocator.ptr) or
+            cleanup.allocator_vtable != @intFromPtr(client.allocator.vtable) or
+            cleanup.fd != client.fd)
+            return false;
+        const pending = client.pending_outbound;
+        return if (pending) |value|
+            cleanup.pending_frame_addr == @intFromPtr(value.frame.ptr) and
+                cleanup.pending_frame_len == value.frame.len and
+                cleanup.pending_stream_id == value.stream_id and
+                cleanup.pending_offset == value.offset
+        else
+            cleanup.pending_frame_addr == 0 and cleanup.pending_frame_len == 0 and
+                cleanup.pending_stream_id == 0 and cleanup.pending_offset == 0;
+    }
+
+    pub fn preflightRetirementCleanup(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        cleanup: *PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) RetirementCleanupError!void {
+        if (!self.admissionClosePermitValid(permit, .committed) or
+            !self.retirementCleanupValid(cleanup, .prepared) or
+            cleanup.admission_request_generation != permit.request_generation or
+            cleanup.placeholder_generation != placeholder_generation)
+            return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .committed) or
+            !self.retirementCleanupValid(cleanup, .prepared) or operation.node != self.current or
+            !retirementCleanupMatchesClient(cleanup, &operation.node.client))
+            return error.InvalidOwner;
+    }
+
+    pub fn abortRetirementCleanup(
+        self: *ClientSlot,
+        cleanup: *PreparedRetirementCleanup,
+    ) RetirementCleanupError!void {
+        if (!self.retirementCleanupValid(cleanup, .prepared)) return error.InvalidOwner;
+        {
+            const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+                error.MovedOrCopied => error.InvalidOwner,
+                error.AdminBusy => error.Busy,
+            };
+            defer self.endRegisteredClientOperation(operation);
+            if (!self.retirementCleanupValid(cleanup, .prepared) or operation.node != self.current or
+                !retirementCleanupMatchesClient(cleanup, &operation.node.client))
+                return error.InvalidOwner;
+        }
+        if (cleanup.external_deinit_reserved_raw == 1 and
+            !self.current.client.cancelReservedExternalModeDeinit())
+            @panic("CR3b R2b reserved external cleanup abort did not converge");
+        cleanup.lifecycle = .cancelled;
+        cleanup.seal = self.retirementCleanupSeal(cleanup);
+    }
+
+    pub fn commitRetirementCleanupNoFail(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        cleanup: *PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) void {
+        self.preflightRetirementCleanup(permit, cleanup, placeholder_generation) catch
+            @panic("CR3b R2b retirement cleanup authority drifted after preflight");
+        const client = &self.current.client;
+        client.fd = -1;
+        client.pending_outbound = null;
+        client.unusable = true;
+        cleanup.lifecycle = .committed;
+        cleanup.seal = self.retirementCleanupSeal(cleanup);
+    }
+
+    pub fn finishRetirementCleanup(
+        self: *ClientSlot,
+        cleanup: *PreparedRetirementCleanup,
+    ) RetirementCleanupError!void {
+        if (!self.retirementCleanupValid(cleanup, .committed)) return error.InvalidOwner;
+        {
+            const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+                error.MovedOrCopied => error.InvalidOwner,
+                error.AdminBusy => error.Busy,
+            };
+            defer self.endRegisteredClientOperation(operation);
+            if (!self.retirementCleanupValid(cleanup, .committed) or operation.node != self.current or
+                operation.node.retirement_lifecycle != .detached or
+                operation.node.placeholder_generation != cleanup.placeholder_generation or
+                operation.node.client.fd != -1 or operation.node.client.pending_outbound != null or
+                !operation.node.client.unusable)
+                return error.InvalidOwner;
+            cleanup.lifecycle = .cleaning;
+            cleanup.seal = self.retirementCleanupSeal(cleanup);
+        }
+        if (cleanup.external_deinit_reserved_raw == 1 and
+            !self.current.client.finishReservedExternalModeDeinit())
+            @panic("CR3b R2b reserved external cleanup did not converge");
+        if (cleanup.fd >= 0) _ = c.close(cleanup.fd);
+        if (cleanup.pending_frame_addr != 0) {
+            const bytes: [*]u8 = @ptrFromInt(cleanup.pending_frame_addr);
+            const allocator = std.mem.Allocator{
+                .ptr = @ptrFromInt(cleanup.allocator_ptr),
+                .vtable = @ptrFromInt(cleanup.allocator_vtable),
+            };
+            allocator.free(bytes[0..cleanup.pending_frame_len]);
+        }
+        cleanup.allocator_ptr = 0;
+        cleanup.allocator_vtable = 0;
+        cleanup.fd = -1;
+        cleanup.pending_frame_addr = 0;
+        cleanup.pending_frame_len = 0;
+        cleanup.pending_stream_id = 0;
+        cleanup.pending_offset = 0;
+        cleanup.external_deinit_reserved_raw = 0;
+        cleanup.lifecycle = .consumed;
+        cleanup.seal = self.retirementCleanupSeal(cleanup);
     }
 
     pub const RetirementDetachError = error{

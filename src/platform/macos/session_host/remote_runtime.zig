@@ -1221,6 +1221,61 @@ pub const ReconnectGenerationOwner = struct {
         );
     }
 
+    /// CR3b R2b product substrate. The final-address cleanup handle is fully prepared before the
+    /// R2a writer gate and receives transport ownership in the same no-fail commit.
+    pub fn publishUnavailableForClientRetirementWithCleanup(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        permit: *r2a_client_slot.PreparedAdmissionClose,
+        cleanup: *r2a_client_slot.PreparedRetirementCleanup,
+        expected_generation: u64,
+        next_generation: u64,
+    ) (r2a_client_slot.ClientSlot.RetirementDetachError || r2a_client_slot.ClientSlot.RetirementCleanupError || stable_screen_source.PublishError || error{InvalidAuthority})!stable_screen_source.RetiredTarget {
+        try self.validate();
+        if (!self.screen_published or try self.currentGeneration() != expected_generation)
+            return error.InvalidAuthority;
+        const current = try self.slot.currentPayload();
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        try adapter.slot.preflightRetirementDetach(permit, expected_generation, next_generation);
+        try adapter.slot.preflightRetirementCleanup(permit, cleanup, next_generation);
+        const Context = struct {
+            slot: *r2a_client_slot.ClientSlot,
+            permit: *r2a_client_slot.PreparedAdmissionClose,
+            cleanup: *r2a_client_slot.PreparedRetirementCleanup,
+            expected: u64,
+            next: u64,
+
+            fn commit(context: @This()) void {
+                context.slot.commitRetirementCleanupNoFail(
+                    context.permit,
+                    context.cleanup,
+                    context.next,
+                );
+                context.slot.commitRetirementDetachNoFail(
+                    context.permit,
+                    context.expected,
+                    context.next,
+                );
+            }
+        };
+        return self.screen_source.?.publishUnavailableFromLiveWithCommit(
+            expected_generation,
+            next_generation,
+            Context{
+                .slot = &adapter.slot,
+                .permit = permit,
+                .cleanup = cleanup,
+                .expected = expected_generation,
+                .next = next_generation,
+            },
+            Context.commit,
+        );
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -8349,6 +8404,250 @@ test "CR3b R2a RemoteGeneration preflight 실패는 proxy와 Client permit을 �
     try testing.expectEqual(r2a_client_slot.RetirementLifecycle.live, foreign_projection.retirement);
     try testing.expectEqual(@as(u64, 0), foreign_projection.placeholder_generation);
     try foreign_adapter.cancelAdmissionClose(&foreign_permit);
+}
+
+test "CR3b R2b cleanup handle은 fd와 pending frame을 gate 밖에서 exact once 정산한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC3B2B3,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &source);
+    defer adapter.deinit();
+    const pending = try testing.allocator.dupe(u8, "r2b-pending-frame");
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound = .{
+        .frame = pending,
+        .stream_id = 0xB201,
+        .offset = 3,
+    };
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    errdefer {
+        _ = proxy.close() catch @panic("R2b proxy failure cleanup lost owner");
+        proxy.deinit();
+    }
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xC3B2B3,
+            .stream_id = 0xC3B2B4,
+        },
+        R2aTestGeneration.init,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+
+    var permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(1, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+    try adapter.prepareRetirementCleanup(&permit, 3, &cleanup);
+    var cleanup_finished = false;
+    defer if (!cleanup_finished) {
+        if (cleanup.lifecycle == .prepared) {
+            adapter.abortRetirementCleanup(&cleanup) catch
+                @panic("R2b prepared cleanup fallback failed");
+        } else if (cleanup.lifecycle == .committed) {
+            adapter.finishRetirementCleanup(&cleanup) catch
+                @panic("R2b committed cleanup fallback failed");
+        }
+    };
+    const retired = try owner.publishUnavailableForClientRetirementWithCleanup(
+        &adapter,
+        &permit,
+        &cleanup,
+        2,
+        3,
+    );
+    try testing.expectEqual(stable_screen_source.TargetKind.live, retired.kind);
+    try testing.expectEqual(r2a_client_slot.PreparedRetirementCleanup.Lifecycle.committed, cleanup.lifecycle);
+    const detached = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    try testing.expect(detached.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), detached.fd);
+    try testing.expect(detached.pending_outbound == null);
+    try testing.expect(detached.first_poison_reason == null);
+    try testing.expect(c.fcntl(fds[0], c.F.GETFD) >= 0);
+    try adapter.finishRetirementCleanup(&cleanup);
+    cleanup_finished = true;
+    try testing.expectEqual(r2a_client_slot.PreparedRetirementCleanup.Lifecycle.consumed, cleanup.lifecycle);
+    try testing.expectEqual(@as(usize, 0), cleanup.allocator_ptr);
+    try testing.expectEqual(@as(usize, 0), cleanup.allocator_vtable);
+    try testing.expectEqual(@as(usize, 0), cleanup.pending_frame_addr);
+    try testing.expectEqual(@as(c.fd_t, -1), cleanup.fd);
+    const closed_rc = c.fcntl(fds[0], c.F.GETFD);
+    try testing.expect(closed_rc < 0);
+    try testing.expectEqual(posix.E.BADF, posix.errno(closed_rc));
+    try testing.expectError(error.InvalidOwner, adapter.finishRetirementCleanup(&cleanup));
+}
+
+test "CR3b R2b cleanup handle은 external pump reservation을 commit 뒤에만 정산한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC3B2B5,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &source);
+    defer adapter.deinit();
+    const client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    errdefer {
+        _ = proxy.close() catch @panic("R2b external proxy failure cleanup lost owner");
+        proxy.deinit();
+    }
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xC3B2B5,
+            .stream_id = 0xC3B2B6,
+        },
+        R2aTestGeneration.init,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+    try r2a_client_slot.testing.enterExternalMode(&adapter.slot);
+    {
+        var aborted_permit: r2a_client_slot.PreparedAdmissionClose = .{};
+        try adapter.prepareAdmissionClose(1, &aborted_permit);
+        try adapter.commitAdmissionClose(&aborted_permit);
+        var permit_cancelled = false;
+        defer if (!permit_cancelled) {
+            adapter.cancelAdmissionClose(&aborted_permit) catch
+                @panic("R2b external abort admission fallback failed");
+        };
+        var aborted_cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+        try adapter.prepareRetirementCleanup(&aborted_permit, 3, &aborted_cleanup);
+        var cleanup_aborted = false;
+        defer if (!cleanup_aborted) {
+            adapter.abortRetirementCleanup(&aborted_cleanup) catch
+                @panic("R2b external abort cleanup fallback failed");
+        };
+        try testing.expectEqual(@as(u8, 1), aborted_cleanup.external_deinit_reserved_raw);
+        try adapter.abortRetirementCleanup(&aborted_cleanup);
+        cleanup_aborted = true;
+        try adapter.cancelAdmissionClose(&aborted_permit);
+        permit_cancelled = true;
+        try testing.expect(client.io_mode == .external);
+    }
+
+    var permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+    try adapter.prepareAdmissionClose(1, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    var permit_settled = false;
+    defer if (!permit_settled and permit.lifecycle != .consumed) {
+        adapter.cancelAdmissionClose(&permit) catch
+            @panic("R2b external admission fallback failed");
+    };
+    try adapter.prepareRetirementCleanup(&permit, 3, &cleanup);
+    var cleanup_settled = false;
+    defer if (!cleanup_settled) {
+        if (cleanup.lifecycle == .prepared) {
+            adapter.abortRetirementCleanup(&cleanup) catch
+                @panic("R2b external prepared cleanup fallback failed");
+        } else if (cleanup.lifecycle == .committed) {
+            adapter.finishRetirementCleanup(&cleanup) catch
+                @panic("R2b external committed cleanup fallback failed");
+        }
+    };
+    try testing.expectEqual(@as(u8, 1), cleanup.external_deinit_reserved_raw);
+    _ = try owner.publishUnavailableForClientRetirementWithCleanup(
+        &adapter,
+        &permit,
+        &cleanup,
+        2,
+        3,
+    );
+    permit_settled = true;
+    try adapter.finishRetirementCleanup(&cleanup);
+    cleanup_settled = true;
+    try testing.expect(client.io_mode == .blocking);
+}
+
+test "CR3b R2b cleanup preflight 실패와 copied handle은 자원과 cancel 권위를 보존한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0xC3B2B7,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &source);
+    defer adapter.deinit();
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xC3B2B7,
+            .stream_id = 0xC3B2B8,
+        },
+        R2aTestGeneration.init,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+    var permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(1, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    var permit_settled = false;
+    defer if (!permit_settled) {
+        adapter.cancelAdmissionClose(&permit) catch
+            @panic("R2b preflight admission fallback failed");
+    };
+    var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+    try adapter.prepareRetirementCleanup(&permit, 3, &cleanup);
+    var cleanup_settled = false;
+    defer if (!cleanup_settled) {
+        adapter.abortRetirementCleanup(&cleanup) catch
+            @panic("R2b preflight cleanup fallback failed");
+    };
+    const before = cleanup;
+    var copied = cleanup;
+    try testing.expectError(
+        error.InvalidOwner,
+        owner.publishUnavailableForClientRetirementWithCleanup(&adapter, &permit, &copied, 2, 3),
+    );
+    try testing.expect(std.meta.eql(before, cleanup));
+    try testing.expectError(
+        error.InvalidAuthority,
+        owner.publishUnavailableForClientRetirementWithCleanup(&adapter, &permit, &cleanup, 3, 4),
+    );
+    try testing.expect(std.meta.eql(before, cleanup));
+    try adapter.abortRetirementCleanup(&cleanup);
+    cleanup_settled = true;
+    try testing.expectEqual(r2a_client_slot.PreparedRetirementCleanup.Lifecycle.cancelled, cleanup.lifecycle);
+    try adapter.cancelAdmissionClose(&permit);
+    permit_settled = true;
+    const projection = r2a_client_slot.testing.retirementProjection(&adapter.slot);
+    try testing.expectEqual(r2a_client_slot.AdmissionLifecycle.open, projection.admission);
+    try testing.expectEqual(r2a_client_slot.RetirementLifecycle.live, projection.retirement);
 }
 
 test "CR2e-d PreparedReconnect prepare 실패와 abort는 current와 screen을 보존한다" {

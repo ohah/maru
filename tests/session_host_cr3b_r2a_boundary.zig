@@ -49,9 +49,9 @@ test "CR3b R2a 경계는 callback 없는 placeholder와 detached tombstone만 �
     try std.testing.expectEqual(@as(usize, 0), count(slot, "pub fn retirementProjection(self: *ClientSlot)"));
     try std.testing.expectEqual(@as(usize, 1), count(proxy, "pub fn publishUnavailableFromLiveWithCommit("));
     try std.testing.expectEqual(@as(usize, 1), count(proxy, "test \"CR3b R2a stable proxy reader는"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "context.slot.commitRetirementDetachNoFail("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "context.slot.commitRetirementDetachNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "adapter.slot.validateRetirementPlaceholder("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExceptTwo(

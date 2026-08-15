@@ -960,7 +960,7 @@ interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 �
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a·R2b 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -1886,6 +1886,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   writer gate 뒤 unavailable generation과 Client detached tombstone generation을 exact `+1`로 결속하고 fd·poison 상태·connection
   generation을 보존한다. 진단 projection은 test-only conditional facade이며 shipping reader authority를 추가하지 않는다.
   R2a 제품 caller는 0이고 R2b가 caller-owned final-address cleanup handle을 별도로 도입하기 전에는 fd/attachment 정산을 주장하지 않는다.
+  R2b focused gate `zig build test-session-host-cr3b-r2b`는 R2a를 상속하고 최적화 모드마다 actual fd+pending frame exact-once
+  cleanup 1행, external-mode reserved cleanup 1행, copied/wrong-generation mutation-0+abort/reopen 1행, ClientSlot invalid-raw/copy/Client-owned-allocation-alias
+  fail-close 1행, source boundary 1행을 exact 실행한다. final-address keyed handle은 fd, pending frame address/length/stream/offset,
+  allocator provenance와 external reservation을 봉인하고 writer gate에서는 Client fd/pending owner만 callback 없이 이동한다.
+  external cleanup과 close/free는 gate 밖에서 수행되며 제품 caller는 0이다. R2c의 새 Client/current publication과 R3의 old destroy는
+  여전히 미완료다.
   CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는

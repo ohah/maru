@@ -120,6 +120,27 @@ pub const PreparedAdmissionCloseSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PreparedRetirementCleanupSealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    slot_addr: u64,
+    slot_incarnation: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    connection_generation: u64,
+    admission_request_generation: u64,
+    placeholder_generation: u64,
+    allocator_ptr: u64,
+    allocator_vtable: u64,
+    fd: i32,
+    pending_frame_addr: u64,
+    pending_frame_len: u64,
+    pending_stream_id: u64,
+    pending_offset: u64,
+    external_deinit_reserved_raw: u8,
+    lifecycle_raw: u8,
+};
+
 pub const WindowCloseTicketReservationSealInput = struct {
     self_addr: u64,
     backend_addr: u64,

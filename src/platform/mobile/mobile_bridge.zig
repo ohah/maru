@@ -1619,6 +1619,10 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
         // 없다. 단일 코드포인트 열로 넘긴다.
         const cell = atlasCell(&.{cp}, 0);
         // **양폭이면 슬롯 전체, 단폭이면 왼쪽 절반.** 폭이 그리는 크기와 kind 를 함께 정한다.
+        // 본문(`pushTerminal`)이 코어 셀의 wide 로 같은 갈래를 이미 쓴다 — chrome 만 안 따라와
+        // 한글·이모지가 반쪽으로 나왔다. **다만 출처가 다르다**: 본문은 코어(=`emoji-width`
+        // config 를 반영)가 정하고 여기는 정적 표를 본다. 지금은 브리지가 `emoji_wide` 를 늘
+        // 켜 두어 둘이 같지만, config 로 열 때(M10) 이 자리도 코어 판정을 따라야 한다.
         const wide = maru.width.cellWidth(cp) == 2;
         const draw_w: i32 = @intFromFloat(if (wide) half_w * 2 else half_w);
         // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).

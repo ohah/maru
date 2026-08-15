@@ -4,7 +4,7 @@
 //! 실제 `RemoteGeneration` prepare/publish/destructor 배선은 CR2e-d가 이 generic owner를 사용해 닫는다.
 
 const std = @import("std");
-const process_identity = @import("process_identity");
+const process_identity = @import("process_identity.zig");
 
 pub const NodeLifecycle = enum(u8) { pristine, building, candidate, current, retiring, tombstone, reclaimed };
 pub const SlotLifecycle = enum(u8) { pristine, live, closed };
@@ -143,18 +143,42 @@ pub fn GenerationSlot(comptime Payload: type) type {
         }
 
         pub fn publishCandidate(self: *Self, prepared: *PreparedCandidate) !void {
+            try self.preflightPublishCandidate(prepared);
+            self.publishCandidateNoFail(prepared);
+        }
+
+        /// Stable screen writer gate처럼 더 큰 publication 임계구역을 소유한 caller가 mutation 전에
+        /// candidate와 retiring capacity를 검증할 때 사용한다. payload의 mutable borrow는 열지 않는다.
+        pub fn preflightPublishCandidate(self: *Self, prepared: *PreparedCandidate) !void {
             try self.validateLive();
             const node = try self.validateCandidate(prepared);
             if (self.retiring != null) return error.RetiringBusy;
             const old = self.current orelse return error.InvalidAuthority;
             if (!validNode(self, old, .current) or old == node) return error.InvalidAuthority;
+        }
 
+        /// `preflightPublishCandidate` 직후 같은 owner thread의 외부 writer gate 안에서만 호출한다.
+        /// checked preflight 뒤에는 실패 분기가 없어 slot current와 외부 target을 한 publication으로 묶을 수 있다.
+        pub fn publishCandidateNoFail(self: *Self, prepared: *PreparedCandidate) void {
+            self.preflightPublishCandidate(prepared) catch
+                @panic("generation slot publish proof lost after preflight");
+            const node = self.candidate.?;
+            const old = self.current.?;
             old.lifecycle = .retiring;
             node.lifecycle = .current;
             self.retiring = old;
             self.current = node;
             self.candidate = null;
             prepared.* = .{};
+        }
+
+        pub fn candidatePayload(
+            self: *Self,
+            prepared: *PreparedCandidate,
+        ) !*const Payload {
+            try self.validateLive();
+            const node = try self.validateCandidate(prepared);
+            return &node.payload;
         }
 
         pub fn abortCandidate(
@@ -195,6 +219,43 @@ pub fn GenerationSlot(comptime Payload: type) type {
             }
         }
 
+        /// final-address payload를 값으로 move하지 않고 canonical node 주소에서 exact once 파괴한다.
+        pub fn reclaimRetiringInPlace(
+            self: *Self,
+            context: anytype,
+            comptime deinitializer: anytype,
+        ) !void {
+            try self.validateLive();
+            const node = self.retiring orelse return error.NoRetiringGeneration;
+            if (!validNode(self, node, .retiring) or !node.payload_present) return error.InvalidAuthority;
+            deinitializer(&node.payload, context);
+            node.payload_present = false;
+            self.retiring = null;
+            if (node.heap_owned) {
+                node.lifecycle = .reclaimed;
+                self.allocator.?.destroy(node);
+            } else {
+                if (node != &self.inline_node) return error.InvalidAuthority;
+                node.lifecycle = .tombstone;
+            }
+        }
+
+        pub fn abortCandidateInPlace(
+            self: *Self,
+            prepared: *PreparedCandidate,
+            context: anytype,
+            comptime deinitializer: anytype,
+        ) !void {
+            try self.validateLive();
+            const node = try self.validateCandidate(prepared);
+            deinitializer(&node.payload, context);
+            node.payload_present = false;
+            node.lifecycle = .reclaimed;
+            self.allocator.?.destroy(node);
+            self.candidate = null;
+            prepared.* = .{};
+        }
+
         pub fn deinit(self: *Self, out: *PayloadSource) !void {
             try self.validateLive();
             if (rangesOverlap(self, @sizeOf(Self), out, @sizeOf(PayloadSource))) return error.InvalidAuthority;
@@ -202,6 +263,27 @@ pub fn GenerationSlot(comptime Payload: type) type {
             const node = self.current orelse return error.InvalidAuthority;
             if (!validNode(self, node, .current) or !node.payload_present) return error.InvalidAuthority;
             out.* = .{ .present = true, .value = node.payload };
+            node.payload_present = false;
+            self.current = null;
+            if (node.heap_owned) {
+                node.lifecycle = .reclaimed;
+                self.allocator.?.destroy(node);
+            } else {
+                node.lifecycle = .tombstone;
+            }
+            self.lifecycle = .closed;
+        }
+
+        pub fn deinitInPlace(
+            self: *Self,
+            context: anytype,
+            comptime deinitializer: anytype,
+        ) !void {
+            try self.validateLive();
+            if (self.retiring != null or self.candidate != null) return error.Busy;
+            const node = self.current orelse return error.InvalidAuthority;
+            if (!validNode(self, node, .current) or !node.payload_present) return error.InvalidAuthority;
+            deinitializer(&node.payload, context);
             node.payload_present = false;
             self.current = null;
             if (node.heap_owned) {

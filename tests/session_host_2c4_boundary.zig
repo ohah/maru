@@ -23,7 +23,7 @@ test "2c4 경계는 RuntimeConnection 하나만 mode 권위로 허용한다" {
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(connection, "legacy: *client_mod.Client,"));
     try std.testing.expectEqual(@as(usize, 1), count(connection, "generation: *host_adapter_mod.HostAdapter,"));
-    const generation_fields = between(runtime, "pub const RemoteGeneration = struct {", "pub const RemoteRuntime = struct {") orelse
+    const generation_fields = between(runtime, "pub const RemoteGeneration = struct {", "const RemoteGenerationSlot =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(generation_fields, "connection: RuntimeConnection,"));
     try std.testing.expectEqual(@as(usize, 0), count(generation_fields, "client: *client_mod.Client,"));

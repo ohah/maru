@@ -675,8 +675,10 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `RemoteGeneration` initializer와 final-address `PreparedReconnect`, `StableScreenSource` writer gate 안의 slot+target 동시
   publish, old/candidate/current의 in-place exact-one destructor와 allocator fail-index를 추가로 닫는다. stable shell 내부는
   `currentGeneration`/`currentGenerationConst`만 세대 저장소를 읽고 `RemoteTermBackend`는 목적별 `backend_api`만 사용한다.
-  RPC pre-decode도 attachment의 물리적 부모 필드를 역산하지 않고 exact current attachment를 runtime과 대조한다. 실제
-  `GenerationSlot` current 저장소 활성화, reducer executor parity, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
+  RPC pre-decode도 attachment의 물리적 부모 필드를 역산하지 않고 exact current attachment를 runtime과 대조한다. CR2e-e2a는
+  제품 runtime의 최초/current 저장소를 실제 `GenerationSlot(RemoteGeneration)`으로 전환하고 generation 2 inline payload를
+  attach/snapshot 완료 뒤 stable screen에 게시하며 teardown도 slot owner에서 exact once 정산한다. reducer executor parity,
+  reachable sequence, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.
 - host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정
   bytes는 enqueue할 때 `{shell_generation,input_epoch,sequence}`를 받아 shell queue로 소유권을 넘기고, Window 이동은 이

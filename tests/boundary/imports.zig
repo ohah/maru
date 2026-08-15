@@ -7684,8 +7684,11 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         @as(usize, 1),
         countOccurrences(backend, "try rr.attachExistingWithAdapter("),
     );
-    try std.testing.expectEqual(@as(usize, 3), countOccurrences(runtime, "connection: RuntimeConnection,"));
-    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, "        self.currentGeneration().connection = connection;"));
+    // CR2e-e2a는 제품 current를 piecewise overwrite하지 않고 InitialRemoteGenerationArgs를
+    // GenerationSlot initializer에 넘긴다. 제품/테스트 선언 7개와 canonical projection 2개만 허용한다.
+    try std.testing.expectEqual(@as(usize, 7), countOccurrences(runtime, "connection: RuntimeConnection,"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(runtime, "        self.currentGeneration().connection = connection;"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, "                .connection = connection,"));
     // CR3a-2c3a moves generation input/revoke/output-progress behind RuntimeAttachment's closed
     // switch. The one raw call per primitive is the explicit legacy arm; product methods must not
     // regain a direct self.client call while RemoteRuntime.client still exists for 2c4.

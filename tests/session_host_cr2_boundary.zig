@@ -52,7 +52,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "pub const RemoteRuntime = struct {",
         "fn generationConnection(",
     ) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), count(shell, "generation_storage: RemoteGeneration,"));
+    try std.testing.expectEqual(@as(usize, 1), count(shell, "generation_owner: ReconnectGenerationOwner,"));
     inline for (.{
         "connection: RuntimeConnection,",
         "attachment: RuntimeAttachment,",
@@ -67,8 +67,10 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9216,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9168,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9408,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9360,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9392,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9344,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -118,9 +120,9 @@ test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
     try std.testing.expectEqual(@as(usize, 1), count(proxy, "generation <= self.current.generation"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "screen_source: *stable_screen_source.StableScreenSource,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한다\""));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.screen_source.publishLive("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.screen_source.?.publishLive("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.surface.remote = self.screen_source.screenSource();"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, "self.deinitScreenSource();"));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "self.deinitGenerationOwnerAndScreenSource();"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "self.surface.remote = self.generation.attachment.screenPtr().?.screenSource();"));
     try std.testing.expectEqual(@as(usize, 1), count(surface, "remote: ?ScreenSource = null,"));
     try std.testing.expectEqual(@as(usize, 1), count(surface, "r.vtable.lock(r.ctx, io);"));
@@ -582,7 +584,8 @@ test "CR2e-d 경계는 actual RemoteGeneration PreparedReconnect와 in-place des
         "pub fn deinitInPlace(",
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(slot, declaration));
     try std.testing.expectEqual(@as(usize, 1), count(screen, "pub fn publishLiveWithCommit("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "generation.attachment.deinitWithConnection(generation.connection);"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "attachment.deinit(adapter),"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "attachment.deinit(),"));
     inline for (.{
         "candidatePayload(",
         "preflightPublishCandidate(",
@@ -642,11 +645,12 @@ test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽�
         "pub const RemoteRuntime = struct {",
         "fn decodeResizeReply(",
     ) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "generation_storage: RemoteGeneration,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "generation_owner: ReconnectGenerationOwner,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "fn currentGeneration("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "fn currentGenerationConst("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "pub const backend_api = struct {"));
-    try std.testing.expectEqual(@as(usize, 3), count(runtime_owner, "generation_storage"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime_owner, "generation_storage"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime_owner, "generation_owner.slot.currentPayload()"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime_owner, "generation: RemoteGeneration,"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\""));
     try std.testing.expectEqual(@as(usize, 0), count(backend, ".generation."));
@@ -677,9 +681,39 @@ test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽�
     const build_gate = between(
         build,
         "const session_host_cr2e_e1_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_e2a_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e1"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-e2a 경계는 제품 runtime의 actual GenerationSlot current 저장소를 고정한다" {
+    const allocator = std.testing.allocator;
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    const runtime_owner = between(
+        runtime,
+        "pub const RemoteRuntime = struct {",
+        "fn decodeResizeReply(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "generation_owner: ReconnectGenerationOwner,"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime_owner, "generation_storage"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime_owner, "generation_owner.slot.currentPayload()"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime_owner, "try self.initializeGenerationOwner("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "try self.generation_owner.publishInitial();"));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime_owner, "self.deinitGenerationOwnerAndScreenSource();"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e2a"));
+
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_e2a_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e2a"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }

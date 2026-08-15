@@ -55,6 +55,7 @@ const reconnect_reducer = @import("reconnect_reducer.zig");
 const process_identity_mod = @import("process_identity.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+var reconnect_generation_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
 const B4SemanticProofLossStage = enum(u8) {
     none = 0,
@@ -70,6 +71,23 @@ fn nextRemoteRuntimeOwnerIncarnation() ?u64 {
     var current = remote_runtime_owner_incarnation_issuer.load(.monotonic);
     while (current != 0 and current != std.math.maxInt(u64)) {
         if (remote_runtime_owner_incarnation_issuer.cmpxchgWeak(
+            current,
+            current + 1,
+            .monotonic,
+            .monotonic,
+        )) |observed| {
+            current = observed;
+            continue;
+        }
+        return current;
+    }
+    return null;
+}
+
+fn nextReconnectGenerationOwnerIncarnation() ?u64 {
+    var current = reconnect_generation_owner_incarnation_issuer.load(.monotonic);
+    while (current != 0 and current != std.math.maxInt(u64)) {
+        if (reconnect_generation_owner_incarnation_issuer.cmpxchgWeak(
             current,
             current + 1,
             .monotonic,
@@ -515,6 +533,42 @@ pub const PreparedReconnect = struct {
     candidate: RemoteGenerationSlot.PreparedCandidate = .{},
 };
 
+/// CR3c2 tick-end authority. retiring RemoteGeneration과 oldest retired Client를
+/// 각각의 final-address receipt로 고정하고 exact 같은 transport generation일 때만 묶는다.
+pub const PreparedOrderedRetiringReclaim = struct {
+    pub const Lifecycle = enum(u8) { pristine, prepared, reclaimed };
+
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    adapter_addr: usize = 0,
+    connection_generation: u64 = 0,
+    remote: RemoteGenerationSlot.PreparedRetiringReclaim = .{},
+    client: client_slot_mod.PreparedRetiredClientReclaim = .{},
+    lifecycle: Lifecycle = .pristine,
+};
+
+fn preparedOrderedRetiringLifecycleRawValid(
+    value: *const PreparedOrderedRetiringReclaim.Lifecycle,
+) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.pristine),
+        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.prepared),
+        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.reclaimed),
+        => true,
+        else => false,
+    };
+}
+
+fn generationAttachmentTerminal(
+    attachment: *const generation_attachment_mod.GenerationAttachment,
+) bool {
+    return @as(*const u8, @ptrCast(&attachment.lifecycle)).* ==
+        @intFromEnum(generation_attachment_mod.Lifecycle.terminal);
+}
+
 const ReconnectGenerationEffect = enum(u8) {
     retain,
     prepare_candidate,
@@ -705,7 +759,7 @@ const ReconnectProductExecutor = struct {
             );
             try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
         }
-        if (has_retiring) try owner.reclaimRetiring();
+        if (has_retiring) try owner.reclaimRetiringAtTickEnd();
         if (self.resident_budget_addr != 0) {
             const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
                 self.resident_budget_addr,
@@ -786,8 +840,9 @@ const ReconnectProductExecutor = struct {
                 if (budget) |value| value.publishSwap(null, &self.resident_lease) catch
                     process_seal_service.fatalIntegrity(.proof_loss);
             },
-            .reclaim_retiring_if_present => if (try owner.slot.hasRetiring())
-                try owner.reclaimRetiring(),
+            // finish_job은 reduce(event)가 아니라 completeJob()에서만 생긴다.
+            // terminal effect를 이 일반 event executor에서 실행하면 dead caller가 생긴다.
+            .reclaim_retiring_if_present => return error.InvalidAuthority,
         }
     }
 
@@ -1110,6 +1165,7 @@ fn closeTransitionProjectionForState(
 pub const ReconnectGenerationOwner = struct {
     self_addr: usize = 0,
     owner_pid: u32 = 0,
+    owner_incarnation: u64 = 0,
     owner_thread: ?std.Thread.Id = null,
     allocator: ?std.mem.Allocator = null,
     screen_source: ?*stable_screen_source.StableScreenSource = null,
@@ -1159,6 +1215,8 @@ pub const ReconnectGenerationOwner = struct {
         self.* = .{
             .self_addr = @intFromPtr(self),
             .owner_pid = process_identity_mod.currentProcessId(),
+            .owner_incarnation = nextReconnectGenerationOwnerIncarnation() orelse
+                return error.InvalidAuthority,
             .owner_thread = std.Thread.getCurrentId(),
             .allocator = allocator,
             .screen_source = screen_source_ptr,
@@ -1583,6 +1641,124 @@ pub const ReconnectGenerationOwner = struct {
         try self.slot.reclaimRetiringInPlace(self.allocator.?, deinitRemoteGeneration);
     }
 
+    /// 두 owner를 읽기만 하는 prepare 단계다. generation mismatch나 어느 한쪽의
+    /// readiness 부족은 destination까지 pristine으로 되돌리고 파괴를 시작하지 않는다.
+    pub fn prepareOrderedRetiringReclaim(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        out: *PreparedOrderedRetiringReclaim,
+    ) !void {
+        try self.validate();
+        if (!std.meta.eql(out.*, PreparedOrderedRetiringReclaim{}) or
+            rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), out, @sizeOf(PreparedOrderedRetiringReclaim)) or
+            rangesOverlap(adapter, @sizeOf(host_adapter_mod.HostAdapter), out, @sizeOf(PreparedOrderedRetiringReclaim)))
+            return error.InvalidAuthority;
+        errdefer out.* = .{};
+        const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+            return error.InvalidAuthority;
+        if (identity.pid != self.owner_pid or identity.process_nonce == 0)
+            return error.InvalidAuthority;
+        try self.slot.prepareRetiringReclaim(&out.remote);
+        const remote = try self.slot.retiringPayload(&out.remote);
+        switch (remote.connection) {
+            .generation => |remote_adapter| if (remote_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (remote.attachment) {
+            .generation => |attachment| if (!generationAttachmentTerminal(&attachment))
+                return error.NotReady,
+            .legacy => return error.InvalidAuthority,
+        }
+        try adapter.prepareRetiredClientReclaim(&out.client);
+        if (remote.connection_generation == 0 or
+            remote.connection_generation != out.client.connection_generation)
+            return error.InvalidAuthority;
+        out.self_addr = @intFromPtr(out);
+        out.pid = identity.pid;
+        out.process_nonce = identity.process_nonce;
+        out.owner_addr = @intFromPtr(self);
+        out.owner_incarnation = self.owner_incarnation;
+        out.adapter_addr = @intFromPtr(adapter);
+        out.connection_generation = remote.connection_generation;
+        out.lifecycle = .prepared;
+    }
+
+    pub fn preflightOrderedRetiringReclaim(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        prepared: *const PreparedOrderedRetiringReclaim,
+    ) !void {
+        try self.validate();
+        const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+            return error.InvalidAuthority;
+        if (!preparedOrderedRetiringLifecycleRawValid(&prepared.lifecycle) or
+            prepared.lifecycle != .prepared or prepared.self_addr != @intFromPtr(prepared) or
+            prepared.pid != identity.pid or prepared.process_nonce != identity.process_nonce or
+            prepared.owner_addr != @intFromPtr(self) or prepared.owner_incarnation != self.owner_incarnation or
+            prepared.adapter_addr != @intFromPtr(adapter) or
+            prepared.connection_generation == 0)
+            return error.InvalidAuthority;
+        try self.slot.preflightRetiringReclaim(&prepared.remote);
+        const remote = try self.slot.retiringPayload(&prepared.remote);
+        switch (remote.connection) {
+            .generation => |remote_adapter| if (remote_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (remote.attachment) {
+            .generation => |attachment| if (!generationAttachmentTerminal(&attachment))
+                return error.NotReady,
+            .legacy => return error.InvalidAuthority,
+        }
+        if (remote.connection_generation != prepared.connection_generation or
+            prepared.client.connection_generation != prepared.connection_generation)
+            return error.InvalidAuthority;
+        try adapter.preflightRetiredClientReclaim(&prepared.client);
+    }
+
+    /// 같은 owner turn에서 모든 preflight를 끝낸 뒤 RemoteGeneration을 먼저 파괴한다.
+    /// 그 attachment가 Client pin을 놓은 뒤에만 matching retired Client node를 회수한다.
+    pub fn commitOrderedRetiringReclaimAtTickEndNoFail(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        prepared: *PreparedOrderedRetiringReclaim,
+    ) void {
+        self.preflightOrderedRetiringReclaim(adapter, prepared) catch
+            @panic("CR3c2 ordered reclaim authority drifted after preflight");
+        self.slot.commitRetiringReclaimInPlaceNoFail(
+            &prepared.remote,
+            self.allocator.?,
+            deinitRemoteGeneration,
+        );
+        if (builtin.is_test) Cr3c2OrderedReclaimTestState.recordRemote(self, adapter);
+        adapter.commitRetiredClientReclaimAtTickEndNoFail(&prepared.client);
+        if (builtin.is_test) Cr3c2OrderedReclaimTestState.recordClient(self, adapter);
+        prepared.lifecycle = .reclaimed;
+    }
+
+    /// Reconnect executor의 tick-end sole leaf. generation-backed retiring owner는 반드시
+    /// matching Client와 ordered reclaim하고 legacy test owner만 독립 정산한다.
+    pub fn reclaimRetiringAtTickEnd(self: *ReconnectGenerationOwner) !void {
+        try self.validate();
+        var remote: RemoteGenerationSlot.PreparedRetiringReclaim = .{};
+        try self.slot.prepareRetiringReclaim(&remote);
+        const payload = try self.slot.retiringPayload(&remote);
+        switch (payload.connection) {
+            .legacy => self.slot.commitRetiringReclaimInPlaceNoFail(
+                &remote,
+                self.allocator.?,
+                deinitRemoteGeneration,
+            ),
+            .generation => |adapter| {
+                remote = .{};
+                var ordered: PreparedOrderedRetiringReclaim = .{};
+                try self.prepareOrderedRetiringReclaim(adapter, &ordered);
+                self.commitOrderedRetiringReclaimAtTickEndNoFail(adapter, &ordered);
+            },
+        }
+    }
+
     pub fn deinit(self: *ReconnectGenerationOwner) !void {
         try self.validate();
         if (try self.slot.hasRetiring() or self.slot.candidate != null) return error.Busy;
@@ -1639,20 +1815,23 @@ pub const ReconnectGenerationOwner = struct {
     }
 
     fn validate(self: *ReconnectGenerationOwner) !void {
-        if (self.self_addr != @intFromPtr(self) or self.owner_pid == 0 or
+        if (self.self_addr != @intFromPtr(self) or self.owner_pid == 0 or self.owner_incarnation == 0 or
             self.owner_pid != process_identity_mod.currentProcessId() or self.owner_thread == null or
             self.owner_thread.? != std.Thread.getCurrentId() or self.allocator == null or
             self.screen_source == null) return error.InvalidAuthority;
     }
 
     fn pristine(self: *const ReconnectGenerationOwner) bool {
-        return self.self_addr == 0 and self.owner_pid == 0 and self.owner_thread == null and
+        return self.self_addr == 0 and self.owner_pid == 0 and self.owner_incarnation == 0 and
+            self.owner_thread == null and
             self.allocator == null and self.screen_source == null and !self.screen_published and
-            self.slot.self_addr == 0 and self.slot.owner_pid == 0 and self.slot.owner_thread == null and
+            self.slot.self_addr == 0 and self.slot.owner_pid == 0 and self.slot.incarnation == 0 and
+            self.slot.owner_thread == null and
             self.slot.allocator == null and self.slot.lifecycle == .pristine and
             self.slot.next_generation == 0 and self.slot.current == null and
             self.slot.retiring == null and self.slot.candidate == null and
             self.slot.inline_node.self_addr == 0 and self.slot.inline_node.slot_addr == 0 and
+            self.slot.inline_node.incarnation == 0 and
             self.slot.inline_node.generation == 0 and !self.slot.inline_node.heap_owned and
             self.slot.inline_node.lifecycle == .pristine and !self.slot.inline_node.payload_present;
     }
@@ -8084,6 +8263,108 @@ const ReconnectGenerationTestState = if (builtin.is_test) struct {
     threadlocal var deinit_count: usize = 0;
 } else struct {};
 
+const Cr3c2OrderedReclaimTestState = if (builtin.is_test) struct {
+    const Stage = enum(u8) { remote, client };
+    threadlocal var armed = false;
+    threadlocal var stages: [2]Stage = undefined;
+    threadlocal var len: usize = 0;
+
+    fn arm() void {
+        armed = true;
+        len = 0;
+    }
+
+    fn disarm() void {
+        armed = false;
+        len = 0;
+    }
+
+    fn recordRemote(
+        owner: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) void {
+        if (!armed) return;
+        if ((owner.slot.hasRetiring() catch true) or adapter.slot.retiredClientCount() != 1 or len != 0)
+            @panic("CR3c2 remote-first reclaim ordering drifted");
+        stages[len] = .remote;
+        len += 1;
+    }
+
+    fn recordClient(
+        owner: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) void {
+        if (!armed) return;
+        if ((owner.slot.hasRetiring() catch true) or adapter.slot.retiredClientCount() != 0 or len != 1)
+            @panic("CR3c2 client-second reclaim ordering drifted");
+        stages[len] = .client;
+        len += 1;
+    }
+} else struct {};
+
+const Cr3c2OwnerProjection = if (builtin.is_test) struct {
+    owner_incarnation: u64,
+    slot_incarnation: u64,
+    shell_generation: u64,
+    screen_kind: stable_screen_source.TargetKind,
+    screen_generation: u64,
+    remote_node_addr: usize,
+    remote_shell_generation: u64,
+    remote_connection_generation: u64,
+    remote_attachment_lifecycle_raw: u8,
+    client_generation: u64,
+    retired_client_addr: usize,
+    retired_client_generation: u64,
+    remote_deinit_count: usize,
+} else struct {};
+
+fn cr3c2OwnerProjection(
+    owner: *ReconnectGenerationOwner,
+    adapter: *host_adapter_mod.HostAdapter,
+    proxy: *stable_screen_source.StableScreenSource,
+) !Cr3c2OwnerProjection {
+    if (!builtin.is_test) unreachable;
+    const remote_node = owner.slot.retiring orelse return error.InvalidAuthority;
+    const client_node = adapter.slot.retired[0] orelse return error.InvalidAuthority;
+    return .{
+        .owner_incarnation = owner.owner_incarnation,
+        .slot_incarnation = owner.slot.incarnation,
+        .shell_generation = try owner.currentGeneration(),
+        .screen_kind = proxy.current.kind,
+        .screen_generation = proxy.current.generation,
+        .remote_node_addr = @intFromPtr(remote_node),
+        .remote_shell_generation = remote_node.generation,
+        .remote_connection_generation = remote_node.payload.connection_generation,
+        .remote_attachment_lifecycle_raw = switch (remote_node.payload.attachment) {
+            .generation => |attachment| @intFromEnum(attachment.lifecycle),
+            .legacy => return error.InvalidAuthority,
+        },
+        .client_generation = adapter.connectionGeneration(),
+        .retired_client_addr = @intFromPtr(client_node),
+        .retired_client_generation = client_node.connection_generation,
+        .remote_deinit_count = ReconnectGenerationTestState.deinit_count,
+    };
+}
+
+fn expectCr3c2OrderedPreflightRejectPreserves(
+    owner: *ReconnectGenerationOwner,
+    adapter: *host_adapter_mod.HostAdapter,
+    proxy: *stable_screen_source.StableScreenSource,
+    prepared: *PreparedOrderedRetiringReclaim,
+) !void {
+    if (!builtin.is_test) unreachable;
+    const owner_before = try cr3c2OwnerProjection(owner, adapter, proxy);
+    const receipt_before = prepared.*;
+    const deinit_before = ReconnectGenerationTestState.deinit_count;
+    try testing.expectError(
+        error.InvalidAuthority,
+        owner.preflightOrderedRetiringReclaim(adapter, prepared),
+    );
+    try testing.expectEqual(owner_before, try cr3c2OwnerProjection(owner, adapter, proxy));
+    try testing.expectEqual(receipt_before, prepared.*);
+    try testing.expectEqual(deinit_before, ReconnectGenerationTestState.deinit_count);
+}
+
 const ReconnectGenerationTestArgs = struct {
     allocator: std.mem.Allocator,
     stream_id: u64,
@@ -8234,8 +8515,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3104,
-        .ReleaseFast => 3088,
+        .Debug => 3120,
+        .ReleaseFast => 3104,
         else => error.SkipZigTest,
     };
 }
@@ -8521,7 +8802,8 @@ test "CR2e-d PreparedReconnect는 실제 generation과 screen target을 한 번�
     try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
 }
 
-fn runCr3cC1PublicationCase(host_id: u128, hostile: bool) !void {
+fn runCr3cC1PublicationCase(host_id: u128, hostile: bool, ordered_reclaim: bool) !void {
+    if (ordered_reclaim) ReconnectGenerationTestState.deinit_count = 0;
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     var old_pair: [2]c.fd_t = undefined;
     try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &old_pair));
@@ -8708,8 +8990,108 @@ fn runCr3cC1PublicationCase(host_id: u128, hostile: bool) !void {
     try testing.expectEqual(@as(u64, 2), adapter.connectionGeneration());
     try testing.expectEqual(@as(usize, 1), adapter.slot.retiredClientCount());
 
-    try owner.reclaimRetiring();
-    try host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter);
+    if (ordered_reclaim) {
+        var ordered: PreparedOrderedRetiringReclaim = .{};
+        if (hostile) {
+            const retiring = &owner.slot.retiring.?.payload;
+            const before = try cr3c2OwnerProjection(&owner, &adapter, &proxy);
+            switch (retiring.attachment) {
+                .generation => |*attachment| {
+                    attachment.lifecycle = .shell;
+                    try testing.expectError(
+                        error.NotReady,
+                        owner.prepareOrderedRetiringReclaim(&adapter, &ordered),
+                    );
+                    attachment.lifecycle = .terminal;
+                },
+                .legacy => unreachable,
+            }
+            try testing.expectEqual(PreparedOrderedRetiringReclaim{}, ordered);
+            try testing.expectEqual(before, try cr3c2OwnerProjection(&owner, &adapter, &proxy));
+            const saved_generation = retiring.connection_generation;
+            retiring.connection_generation = saved_generation + 1;
+            const mismatch_before = try cr3c2OwnerProjection(&owner, &adapter, &proxy);
+            try testing.expectError(
+                error.InvalidAuthority,
+                owner.prepareOrderedRetiringReclaim(&adapter, &ordered),
+            );
+            try testing.expectEqual(PreparedOrderedRetiringReclaim{}, ordered);
+            try testing.expectEqual(mismatch_before, try cr3c2OwnerProjection(&owner, &adapter, &proxy));
+            retiring.connection_generation = saved_generation;
+        }
+        try owner.prepareOrderedRetiringReclaim(&adapter, &ordered);
+        if (hostile) {
+            var copied = ordered;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &copied);
+            const saved_pid = ordered.pid;
+            ordered.pid +%= 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            ordered.pid = saved_pid;
+            const saved_incarnation = owner.owner_incarnation;
+            owner.owner_incarnation += 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            owner.owner_incarnation = saved_incarnation;
+            const saved_nonce = ordered.process_nonce;
+            ordered.process_nonce +%= 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            ordered.process_nonce = saved_nonce;
+            const lifecycle_raw: *u8 = @ptrCast(&ordered.lifecycle);
+            const saved_lifecycle = lifecycle_raw.*;
+            lifecycle_raw.* = 0xff;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            lifecycle_raw.* = saved_lifecycle;
+            const saved_remote_active = ordered.remote.active_raw;
+            ordered.remote.active_raw = 0xff;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            ordered.remote.active_raw = saved_remote_active;
+            const saved_slot_incarnation = ordered.remote.slot_incarnation;
+            ordered.remote.slot_incarnation +%= 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            ordered.remote.slot_incarnation = saved_slot_incarnation;
+            const saved_node_incarnation = ordered.remote.node_incarnation;
+            ordered.remote.node_incarnation +%= 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            ordered.remote.node_incarnation = saved_node_incarnation;
+            const retiring = @constCast(try owner.slot.retiringPayload(&ordered.remote));
+            retiring.connection_generation += 1;
+            try expectCr3c2OrderedPreflightRejectPreserves(&owner, &adapter, &proxy, &ordered);
+            retiring.connection_generation -= 1;
+        }
+        ordered = .{};
+        Cr3c2OrderedReclaimTestState.arm();
+        defer Cr3c2OrderedReclaimTestState.disarm();
+        var executor: ReconnectProductExecutor = .{};
+        try executor.initInPlace(&owner, 3);
+        var executor_live = true;
+        defer if (executor_live)
+            executor.deinit(&owner) catch @panic("CR3c2 executor cleanup failed");
+        executor.state = .{
+            .phase = .{ .publishing = reconnectTestWork(2) },
+            .ledger = .new_controller_evidenced,
+            .local = .published_new,
+            .mutation = .open,
+            .close = .{ .none = {} },
+            .shell_generation = 3,
+            .retry = null,
+        };
+        try executor.completeJob(&owner, .{
+            .job_generation = 3,
+            .total = 1,
+            .published_new = 1,
+            .frozen_unavailable = 0,
+            .ended = 0,
+            .retry_reserved = 0,
+        });
+        try executor.deinit(&owner);
+        executor_live = false;
+        try testing.expectEqual(@as(usize, 2), Cr3c2OrderedReclaimTestState.len);
+        try testing.expectEqual(Cr3c2OrderedReclaimTestState.Stage.remote, Cr3c2OrderedReclaimTestState.stages[0]);
+        try testing.expectEqual(Cr3c2OrderedReclaimTestState.Stage.client, Cr3c2OrderedReclaimTestState.stages[1]);
+        try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+    } else {
+        try owner.reclaimRetiring();
+        try host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter);
+    }
     try testing.expectEqual(@as(usize, 0), adapter.slot.retiredClientCount());
     try owner.deinit();
     owner_live = false;
@@ -8721,12 +9103,22 @@ fn runCr3cC1PublicationCase(host_id: u128, hostile: bool) !void {
 
 test "CR3c C1은 published Client와 RemoteGeneration placeholder를 같은 세대로 승격한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    try runCr3cC1PublicationCase(0xC3C1001, false);
+    try runCr3cC1PublicationCase(0xC3C1001, false, false);
 }
 
 test "CR3c C1은 copied receipt와 connection generation drift를 mutation 없이 거부한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    try runCr3cC1PublicationCase(0xC3C1002, true);
+    try runCr3cC1PublicationCase(0xC3C1002, true, false);
+}
+
+test "CR3c C2는 matching RemoteGeneration 뒤 retired Client를 같은 tick에서 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try runCr3cC1PublicationCase(0xC3C2001, false, true);
+}
+
+test "CR3c C2는 generation mismatch와 copied receipt를 파괴 없이 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try runCr3cC1PublicationCase(0xC3C2002, true, true);
 }
 
 test "CR3b R2a RemoteGeneration owner는 placeholder와 Client tombstone을 원자 게시한다" {
@@ -11454,26 +11846,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9856,
-            .ReleaseFast => 9808,
+            .Debug => 9888,
+            .ReleaseFast => 9840,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9840,
-            .ReleaseFast => 9792,
+            .Debug => 9872,
+            .ReleaseFast => 9824,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 7136,
-            .ReleaseFast => 7088,
+            .Debug => 7168,
+            .ReleaseFast => 7120,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 7120,
-            .ReleaseFast => 7072,
+            .Debug => 7152,
+            .ReleaseFast => 7104,
             else => unreachable,
         },
         else => unreachable,
@@ -14108,13 +14500,13 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9856,
-            .ReleaseFast => 9808,
+            .Debug => 9888,
+            .ReleaseFast => 9840,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9840,
-            .ReleaseFast => 9792,
+            .Debug => 9872,
+            .ReleaseFast => 9824,
             else => unreachable,
         },
         else => unreachable,

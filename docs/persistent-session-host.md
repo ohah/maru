@@ -721,8 +721,8 @@ resync_needed,frame_summary_ready,frame_summary,observation,connection_generatio
 generation의 resize wire sequence·baseline과 pump summary를 뜻한다. payload queue인 `direct_input`, `direct_input_offset`,
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
-정렬 패딩 안에서 `RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,072/9,856`, ReleaseFast `3,056/9,808`을 유지하며 4,096 runtime 상한의 추가분은
-64 KiB다. CR2a는 이 물리적
+CR3c2의 process/slot/node incarnation 결속까지 포함한 현재 `RemoteGeneration`/`RemoteRuntime` 크기는 Debug
+`3,072/9,888`, ReleaseFast `3,056/9,840`이며, CR3c2 직전 대비 4,096 runtime 상한의 추가분은 128 KiB다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -2171,8 +2171,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 Debug 8,736/ReleaseFast 8,672 bytes이며 owner 외 remainder는
-   각각 6,016/5,952 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 9,888/ReleaseFast 9,840 bytes이며 owner 외 remainder는
+   각각 7,168/7,120 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
    budget으로 둔다. 최대 4,096 runtime에서 두 inline owner의 aggregate 상한은 17 MiB다. 이 size나 aggregate 증가는
    별도 문서 변경 없이는 허용하지 않는다.
 
@@ -5212,8 +5212,8 @@ prepared replacement/reclaim의 source·cleanup·destination은 두 retired node
 각 reclaim 뒤 current guarded allocator의 해당 retired backing exclusion도 exact 제거한다.
 focused gate는 Debug·ReleaseFast마다 generation 1→2→3 두 번 게시, cap 2/세 번째 reject, generation 1 첫 tick reclaim 뒤 generation 4 게시와 generation 2→3 tick reclaim/final zero
 성공 행 1개, copied handle·candidate digest/readiness drift destroy-0 행 1개, HostAdapter tick-end facade 1개와 source boundary 1개를
-exact-count한다. 이 dormant R3 facade의 제품 caller는 0이며 CR3c actual `RemoteGeneration` integration과 CR4 socket reconnect는 아직
-완료 증거가 아니다.
+exact-count한다. 이 R3 gate 자체는 제품 caller를 실행하지 않으며 sole 제품 caller와 CR3c actual `RemoteGeneration`
+integration은 CR3c2 gate가, socket reconnect는 CR4가 소유한다.
 
 CR3c1의 focused gate는 `zig build test-session-host-cr3c-c1`이다. production `RemoteGeneration`과 `HostAdapter.ClientSlot`을
 같은 fixture에서 사용해 connection generation 1 current, shell generation 2 current에서 old attachment terminalization→admission close→R2a placeholder shell generation 3→
@@ -5221,7 +5221,14 @@ R2b cleanup→R2c Client connection generation 2 게시→forward-recovery candi
 Client와 candidate payload connection generation은 2이며 양쪽 old owner가 각각 기존 세대로 retiring인지 검증한다. 다른
 adapter, prepared generation drift, copied handle은 screen·RemoteGeneration mutation 0이고 이미 게시된 Client graph를 보존하며 canonical candidate abort/cleanup이 가능해야 한다.
 이 gate는 publication만 소유하므로 retiring RemoteGeneration/Client destroy와 actual `connectExistingHost` wire caller는 0이다.
-CR3c2가 ordered tick-end reclaim과 최종 zero를 닫기 전에는 CR3c 완료를 주장하지 않는다.
+
+CR3c2의 focused gate는 `zig build test-session-host-cr3c-c2`다. retiring RemoteGeneration node와 oldest retired Client node를
+각각 final-address prepared receipt로 고정하고, 두 receipt의 connection generation과 adapter identity가 exact 일치할 때만
+commit을 시작한다. PID/process nonce와 owner·slot·node incarnation을 다시 검증하며 old generation attachment가 이미
+terminalized 된 경우만 no-fail suffix에 들어간다. 모든 preflight는 첫 파괴 전에 끝난다. commit은 RemoteGeneration attachment와 observation을 먼저
+정산하여 Client pin authority를 반납하고 slot의 retiring node를 제거한 뒤, 같은 owner turn에서 ClientSlot의 oldest retired
+node를 정산한다. generation mismatch, copied receipt, payload drift는 두 inventory를 그대로 보존한다. 이 구조적 gate는
+실제 `connectExistingHost` socket 연결이나 snapshot/delta catch-up을 실행하지 않으며 그 E2E는 CR4가 소유한다.
 
 #### CR3a ownership target inventory
 

@@ -1123,7 +1123,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    보존하며 어느 쪽도 파괴하지 않는다. **CR3c2**는 exact 같은 retiring generation을 먼저
    `RemoteGeneration` attachment/observation owner에서 정산하고, 그 정산으로 readiness가 열린 oldest retired Client를 같은
    tick-end owner turn에서 final-address reclaim 권위로 회수한다. 둘 중 한쪽만 다른 generation을 가리키거나 준비된 권위가
-   drift하면 destroy 0이며, 정상 suffix의 순서는 RemoteGeneration teardown 뒤 Client node destroy다.
+   drift하면 destroy 0이며, 정상 suffix의 순서는 RemoteGeneration teardown 뒤 Client node destroy다. focused gate
+   `test-session-host-cr3c-c2`는 이 두 final-address receipt를 PID/process nonce와 owner·slot·node incarnation으로 묶고,
+   terminalized old attachment만 no-fail suffix에 admit한다. 정상·hostile 2행과 source boundary 1행을 Debug·ReleaseFast에서
+   실행한다. 따라서 CR3c의 구조적 integration은 완료됐고, 실제 socket reconnect는 CR4다.
    **R3**는 retired inventory를 exact 2-slot bounded owner로 확장하고, pure `Client.canRetireFromGenerationNode` projection과
    final-address `PreparedRetiredClientReclaim` seal로 oldest generation을 고정한다. tick-end no-fail suffix만 Client graph와
    node-local registries/accounting을 정산하고 allocator destroy한 뒤 inventory를 compact한다. cap 2 상태의 세 번째 prepare,

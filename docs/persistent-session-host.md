@@ -681,7 +681,15 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   final-address executor는 reducer state와 inline candidate를 함께 소유하고 actual prepare/abort/publish/reclaim이 성공한
   뒤에만 state를 게시하며, 31개 Decision의 closed generation-effect table과 reachable canonical sequence를 전수 고정한다.
   inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
-  generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. mutation seal·authority/retry/close effect의 실제 제품 결속,
+  generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
+  candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
+  Debug 3,104바이트/ReleaseFast 3,088바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
+  teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행해 app-global count/byte
+  exact cap을 정하고 cap+1 mutation 0과 final ledger 0을
+  고정한다. 이 측정 없이 근거 없는 상한을 선택하거나 제품
+  reconnect ingress를 먼저 열지 않는다. e3b는 그 budget lease 아래 mutation seal·authority/retry/close effect를
+  actual stable owner에 결속하고, e3c가 sole external ingress와 close 경쟁·mixed outcome을 연다.
+  mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.
 - host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정

@@ -788,11 +788,55 @@ test "CR2e-e2b 경계는 reducer Decision과 actual generation effect parity를 
     const build_gate = between(
         build,
         "const session_host_cr2e_e2b_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_e3a1_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e2b"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정한다" {
+    const allocator = std.testing.allocator;
+    const runtime = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const build_gate = try readSource(allocator, "build.zig");
+    defer allocator.free(build_gate);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(runtime, "const ReconnectResidentLedger = if (builtin.is_test) struct {"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "pub const ReconnectResidentLedger"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn reconnectCandidateResidentBytes() !usize"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3104,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3088,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "else => error.SkipZigTest,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e3a1"));
+    const e3a_tests = between(
+        runtime,
+        "test \"CR2e-e3a1 candidate base resident ledger는",
+        "fn expectEveryReconnectDecisionReachable()",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), count(e3a_tests, "try owner.prepare("));
+    try std.testing.expectEqual(@as(usize, 1), count(e3a_tests, "try owner.abort(&prepared);"));
+    try std.testing.expectEqual(@as(usize, 2), count(e3a_tests, "try owner.publish(&prepared);"));
+    try std.testing.expectEqual(@as(usize, 4), count(e3a_tests, "owner.reclaimRetiring()"));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        build_gate,
+        "const session_host_cr2e_e3a1_step = b.step(",
+    ));
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e3a1\"}"));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        build_gate,
+        "run_cr2e_e3a1_tests.addArg(\"--maru-expect-tests=2\")",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        build_gate,
+        "run_cr2e_e3a1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+    ));
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

@@ -794,8 +794,10 @@ coordinator는 한 번에 완성된 대형 owner로 등장하지 않는다. CR2e
 sole drain만 설치한다. 이 단계에서 incident admission queue/resident budget의 소유자는
 `AppProcessIncidentOwner`, runtime membership의 소유자는 `RemoteTermBackend`으로 계속 남으며 coordinator는 이 주소를
 저장하지 않고 매 owner turn의 sealed projection을 재검증한다. e3c2는 direct-release consumer receipt를 exact backend/runtime
-projection에 one-shot 결속하되 실제 socket issuer는 열지 않는다. e3c3이 termination/abandon typed event와 close/mixed outcome을
-더하고, CR4가 실제 `connectExistingHost`·wire receipt issuer를 연결하며, CR5가 multi-window·multi-runtime authority ledger와
+projection에 one-shot 결속하되 실제 socket issuer는 열지 않는다. e3c3은 termination request/reconnect quiesced/timeout/abandon을
+pointer-free closed event로 받고 current backend/runtime row에서 canonical transition을 다시 계산해 keyed receipt로 봉인한다.
+다섯 close mixed outcome은 actual executor effect와 resident lease까지 정산하고 stale row·deadline·copy·replay는 mutation 0으로
+거부한다. CR4가 실제 `connectExistingHost`·wire receipt issuer를 연결하며, CR5가 multi-window·multi-runtime authority ledger와
 upgrade gate로 확장한다.
 
 #### transaction과 실패 경계

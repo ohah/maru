@@ -178,9 +178,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **e3c2**는 CR4 socket parser가 채울 pointer-free direct-release evidence를 current backend/runtime projection과 exact 비교하고,
    consumer-side closed typed receipt를 coordinator final address, backend singleton generation,
    exact runtime row와 `retry_wait_release` projection에 결속해 copy/replay/stale event를 mutation 0으로 거부한다. 실제 host socket이
-   이 receipt를 발급하는 wire evidence는 CR4 범위다. **e3c3**은 termination/abandon typed event와 close 경쟁·mixed outcome을
-   같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
-   RSS artifact를 제품 gate에 결합한다.
+   이 receipt를 발급하는 wire evidence는 CR4 범위다. **e3c3**은 coordinator가 외부 before/after state를 신뢰하지 않고
+   current backend/runtime row에서 termination request, reconnect quiesced, timeout, abandon event의 canonical projection을
+   직접 계산한 뒤 keyed final-address receipt로 봉인한다. request deadline은 prepare/apply 양쪽에서, timeout은 coordinator
+   monotonic clock과 sealed close deadline으로 재검증한다. 같은 stable executor가 preserve-old, paused notice, publish-new,
+   retry freeze, terminal finish effect와 candidate/current lease 정산을 수행하며 invalid/copy/replay/stale-row/expired event는
+   mutation 0이다. logical charge final-zero와 e3a2 별도 PID RSS artifact를 상속하되 실제 wire issuer는 CR4에 남긴다.
    e3 전체가 mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,
    close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.
    a~e 다섯 gate가 모두 green이기 전에는 CR2e 완료가 아니다.

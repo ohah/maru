@@ -752,7 +752,7 @@ test "CR2e-e2b 경계는 reducer Decision과 actual generation effect parity를 
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(executor, declaration));
     try std.testing.expectEqual(@as(usize, 1), count(executor, "try self.executeEffect("));
     try std.testing.expectEqual(@as(usize, 1), count(executor, "reconnectRetiringMatchesLocal("));
-    try std.testing.expectEqual(@as(usize, 2), count(executor, "self.state = result.state;"));
+    try std.testing.expectEqual(@as(usize, 3), count(executor, "self.state = result.state;"));
     const execute_effect = std.mem.indexOf(u8, executor, "try self.executeEffect(") orelse
         return error.TestUnexpectedResult;
     const first_state_publish = std.mem.indexOf(u8, executor, "self.state = result.state;") orelse
@@ -1196,6 +1196,84 @@ test "CR2e-e3c2 경계는 typed external receipt와 sole runtime consumer를 고
         "session_host_cr2e_e3c2_step.dependOn(session_host_cr2e_e3c1_step)",
         "run_cr2e_e3c2_coordinator_tests.addArg(\"--maru-expect-tests=1\")",
         "run_cr2e_e3c2_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
+}
+
+test "CR2e-e3c3 경계는 typed close receipt와 mixed outcome sole consumer를 고정한다" {
+    const allocator = std.testing.allocator;
+    const coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
+    defer allocator.free(coordinator);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const seal = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
+    defer allocator.free(seal);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "pub const CloseEventEvidence = struct",
+        "pub const CloseEventReceipt = struct",
+        "pub fn prepareCloseEventReceipt(",
+        "pub fn applyCloseEvent(",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(coordinator, phrase));
+    inline for (.{
+        "pub const CloseEventTag = enum(u8)",
+        "pub const CloseEvent = struct",
+        "pub const CloseStateProjection = struct",
+        "pub const CloseTransitionProjection = struct",
+        "pub fn applyCloseTransitionProjection(",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(runtime, phrase));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "pub fn closeTransitionProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub const CloseTransitionTarget = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, ".runtime_id = entry.runtime.appQuitRuntimeId(),"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "!std.mem.eql(u8, &runtime_id, &target.runtime_id)"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn closeTransitionTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn applyCloseTransitionTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "backend.closeTransitionTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "backend.applyCloseTransitionTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.closeTransitionProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.applyCloseTransitionProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(seal, "maru.reconnect-close-receipt.v1"));
+    inline for (.{
+        "closeTransitionProjection(",
+        "applyCloseTransitionProjection(",
+    }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            callee,
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "closeTransitionTarget(",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    inline for (.{
+        "prepareCloseEventReceipt(",
+        "applyCloseEvent(",
+    }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            callee,
+            "platform/macos/session_host/session_host_coordinator.zig",
+            "",
+        ),
+    );
+    inline for (.{
+        "session_host_cr2e_e3c3_step.dependOn(session_host_cr2e_e3c2_step)",
+        "run_cr2e_e3c3_coordinator_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3c3_boundary_tests.addArg(\"--maru-expect-tests=1\")",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 

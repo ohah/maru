@@ -642,6 +642,47 @@ const ReconnectProductExecutor = struct {
         return result.decision;
     }
 
+    fn applyCloseTransition(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        event: CloseEvent,
+    ) !reconnect_reducer.Decision {
+        try self.validate(owner);
+        const result = try reconnect_reducer.reduce(self.state.?, try event.reducerEvent());
+        switch (reconnectGenerationEffect(result.decision)) {
+            .retain => {},
+            .abort_candidate_if_present => {
+                const budget = if (self.resident_budget_addr != 0 and self.resident_lease.role == .candidate)
+                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
+                else
+                    null;
+                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
+                if (!std.meta.eql(self.prepared, PreparedReconnect{})) try owner.abort(&self.prepared);
+                if (budget) |value| {
+                    value.release(&self.resident_lease, .candidate) catch
+                        process_seal_service.fatalIntegrity(.proof_loss);
+                    self.resident_budget_addr = 0;
+                    self.admission = null;
+                    self.admission_seal = [_]u8{0} ** 32;
+                }
+            },
+            .publish_candidate => {
+                if (std.meta.eql(self.prepared, PreparedReconnect{})) return error.InvalidAuthority;
+                const budget = if (self.resident_budget_addr != 0)
+                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
+                else
+                    null;
+                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
+                try owner.publish(&self.prepared);
+                if (budget) |value| value.publishSwap(null, &self.resident_lease) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
+            },
+            else => return error.InvalidAuthority,
+        }
+        self.state = result.state;
+        return result.decision;
+    }
+
     fn completeJob(
         self: *ReconnectProductExecutor,
         owner: *ReconnectGenerationOwner,
@@ -819,6 +860,246 @@ pub const DirectReleaseProjection = struct {
     deadline_ns: u64 = 0,
     runtime_id: [16]u8 = [_]u8{0} ** 16,
 };
+
+pub const CloseEventTag = enum(u8) {
+    termination_requested = 1,
+    reconnect_quiesced = 2,
+    termination_timed_out = 3,
+    abandon_to_inventory = 4,
+};
+
+/// Coordinator 밖으로 pointer나 reducer 내부 union을 노출하지 않는 closed close event다.
+pub const CloseEvent = struct {
+    tag_raw: u8 = 0,
+    intent_generation: u64 = 0,
+    shell_generation: u64 = 0,
+    deadline_ns: u64 = 0,
+    now_ns: u64 = 0,
+    old_transport_usable: u8 = 0,
+    retry_present: u8 = 0,
+    retry_row_id: u64 = 0,
+    retry_generation: u64 = 0,
+    retry_shell_generation: u64 = 0,
+
+    pub fn init(close_tag: CloseEventTag) CloseEvent {
+        return .{ .tag_raw = @intFromEnum(close_tag) };
+    }
+
+    pub fn tag(self: CloseEvent) !CloseEventTag {
+        return switch (self.tag_raw) {
+            1 => .termination_requested,
+            2 => .reconnect_quiesced,
+            3 => .termination_timed_out,
+            4 => .abandon_to_inventory,
+            else => error.InvalidExternalEvent,
+        };
+    }
+
+    fn reducerEvent(self: CloseEvent) !reconnect_reducer.Event {
+        return switch (try self.tag()) {
+            .termination_requested => blk: {
+                if (self.intent_generation == 0 or self.shell_generation == 0 or self.deadline_ns == 0 or
+                    self.now_ns != 0 or self.old_transport_usable != 0 or self.retry_present != 0 or
+                    self.retry_row_id != 0 or self.retry_generation != 0 or self.retry_shell_generation != 0)
+                    return error.InvalidExternalEvent;
+                break :blk .{ .close_requested = .{
+                    .intent_generation = self.intent_generation,
+                    .shell_generation = self.shell_generation,
+                    .deadline_ns = self.deadline_ns,
+                } };
+            },
+            .reconnect_quiesced => blk: {
+                if (self.intent_generation != 0 or self.shell_generation != 0 or self.deadline_ns != 0 or
+                    self.now_ns != 0 or self.old_transport_usable > 1 or self.retry_present > 1)
+                    return error.InvalidExternalEvent;
+                const retry: ?reconnect_reducer.RetryReservation = if (self.retry_present == 1) .{
+                    .row_id = self.retry_row_id,
+                    .generation = self.retry_generation,
+                    .shell_generation = self.retry_shell_generation,
+                } else null;
+                if (retry == null and (self.retry_row_id != 0 or self.retry_generation != 0 or
+                    self.retry_shell_generation != 0)) return error.InvalidExternalEvent;
+                break :blk .{ .reconnect_quiesced_for_close = .{
+                    .old_transport_usable = self.old_transport_usable == 1,
+                    .retry = retry,
+                } };
+            },
+            .termination_timed_out => blk: {
+                if (self.now_ns == 0 or self.intent_generation != 0 or self.shell_generation != 0 or
+                    self.deadline_ns != 0 or self.old_transport_usable != 0 or self.retry_present != 0 or
+                    self.retry_row_id != 0 or self.retry_generation != 0 or self.retry_shell_generation != 0)
+                    return error.InvalidExternalEvent;
+                break :blk .{ .close_timed_out = .{ .now_ns = self.now_ns } };
+            },
+            .abandon_to_inventory => blk: {
+                if (self.intent_generation != 0 or self.shell_generation != 0 or self.deadline_ns != 0 or
+                    self.now_ns != 0 or self.old_transport_usable != 0 or self.retry_present != 0 or
+                    self.retry_row_id != 0 or self.retry_generation != 0 or self.retry_shell_generation != 0)
+                    return error.InvalidExternalEvent;
+                break :blk .abandon_to_inventory;
+            },
+        };
+    }
+};
+
+/// Reducer union을 padding-free scalar로 정규화한 before/after snapshot이다.
+pub const CloseStateProjection = struct {
+    phase_raw: u8 = 0,
+    job_generation: u64 = 0,
+    work_shell_generation: u64 = 0,
+    attempt: u64 = 0,
+    candidate_connection_generation: u64 = 0,
+    phase_deadline_ns: u64 = 0,
+    runtime_id: [16]u8 = [_]u8{0} ** 16,
+    unavailable_retry_at_ns: u64 = 0,
+    unavailable_last_attempt: u64 = 0,
+    unavailable_last_candidate_connection_generation: u64 = 0,
+    ledger_raw: u8 = 0,
+    local_raw: u8 = 0,
+    mutation_raw: u8 = 0,
+    close_raw: u8 = 0,
+    close_intent_generation: u64 = 0,
+    close_shell_generation: u64 = 0,
+    close_deadline_ns: u64 = 0,
+    retry_present: u8 = 0,
+    retry_row_id: u64 = 0,
+    retry_generation: u64 = 0,
+    retry_shell_generation: u64 = 0,
+    shell_generation: u64 = 0,
+};
+
+pub const CloseTransitionProjection = struct {
+    before: CloseStateProjection = .{},
+    event: CloseEvent = .{},
+    decision_raw: u8 = 0,
+    after: CloseStateProjection = .{},
+};
+
+pub fn closeTransitionDigest(projection: CloseTransitionProjection) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.reconnect-close-transition.v1");
+    updateCloseState(&hasher, projection.before);
+    updateCloseEvent(&hasher, projection.event);
+    updateCloseU8(&hasher, projection.decision_raw);
+    updateCloseState(&hasher, projection.after);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn updateCloseU8(hasher: *std.crypto.hash.Blake3, value: u8) void {
+    hasher.update(&.{value});
+}
+
+fn updateCloseU64(hasher: *std.crypto.hash.Blake3, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn updateCloseEvent(hasher: *std.crypto.hash.Blake3, event: CloseEvent) void {
+    updateCloseU8(hasher, event.tag_raw);
+    updateCloseU64(hasher, event.intent_generation);
+    updateCloseU64(hasher, event.shell_generation);
+    updateCloseU64(hasher, event.deadline_ns);
+    updateCloseU64(hasher, event.now_ns);
+    updateCloseU8(hasher, event.old_transport_usable);
+    updateCloseU8(hasher, event.retry_present);
+    updateCloseU64(hasher, event.retry_row_id);
+    updateCloseU64(hasher, event.retry_generation);
+    updateCloseU64(hasher, event.retry_shell_generation);
+}
+
+fn updateCloseState(hasher: *std.crypto.hash.Blake3, state: CloseStateProjection) void {
+    updateCloseU8(hasher, state.phase_raw);
+    updateCloseU64(hasher, state.job_generation);
+    updateCloseU64(hasher, state.work_shell_generation);
+    updateCloseU64(hasher, state.attempt);
+    updateCloseU64(hasher, state.candidate_connection_generation);
+    updateCloseU64(hasher, state.phase_deadline_ns);
+    hasher.update(&state.runtime_id);
+    updateCloseU64(hasher, state.unavailable_retry_at_ns);
+    updateCloseU64(hasher, state.unavailable_last_attempt);
+    updateCloseU64(hasher, state.unavailable_last_candidate_connection_generation);
+    updateCloseU8(hasher, state.ledger_raw);
+    updateCloseU8(hasher, state.local_raw);
+    updateCloseU8(hasher, state.mutation_raw);
+    updateCloseU8(hasher, state.close_raw);
+    updateCloseU64(hasher, state.close_intent_generation);
+    updateCloseU64(hasher, state.close_shell_generation);
+    updateCloseU64(hasher, state.close_deadline_ns);
+    updateCloseU8(hasher, state.retry_present);
+    updateCloseU64(hasher, state.retry_row_id);
+    updateCloseU64(hasher, state.retry_generation);
+    updateCloseU64(hasher, state.retry_shell_generation);
+    updateCloseU64(hasher, state.shell_generation);
+}
+
+fn closeStateProjection(state: reconnect_reducer.State) CloseStateProjection {
+    var out: CloseStateProjection = .{
+        .phase_raw = @intFromEnum(state.phaseTag()),
+        .ledger_raw = @intFromEnum(state.ledger),
+        .local_raw = @intFromEnum(state.local),
+        .mutation_raw = @intFromEnum(state.mutation),
+        .close_raw = @intFromEnum(std.meta.activeTag(state.close)),
+        .shell_generation = state.shell_generation,
+    };
+    switch (state.phase) {
+        .healthy => |generation| out.job_generation = generation,
+        .preparing, .mutation_sealing, .authority_committing, .publishing => |work| {
+            out.job_generation = work.job_generation;
+            out.work_shell_generation = work.shell_generation;
+            out.attempt = work.attempt;
+            out.candidate_connection_generation = work.candidate_connection_generation;
+            out.phase_deadline_ns = work.deadline_ns;
+        },
+        .retry_wait_release => |retry| {
+            out.job_generation = retry.work.job_generation;
+            out.work_shell_generation = retry.work.shell_generation;
+            out.attempt = retry.work.attempt;
+            out.candidate_connection_generation = retry.work.candidate_connection_generation;
+            out.phase_deadline_ns = retry.work.deadline_ns;
+            out.runtime_id = retry.runtime_id;
+        },
+        .unavailable => |value| {
+            out.job_generation = value.job_generation;
+            out.work_shell_generation = value.shell_generation;
+            out.unavailable_retry_at_ns = value.retry_at_ns;
+            out.phase_deadline_ns = value.deadline_ns;
+            out.unavailable_last_attempt = value.last_attempt;
+            out.unavailable_last_candidate_connection_generation = value.last_candidate_connection_generation;
+        },
+    }
+    switch (state.close) {
+        .none => {},
+        .termination_pending, .termination_unconfirmed => |intent| {
+            out.close_intent_generation = intent.intent_generation;
+            out.close_shell_generation = intent.shell_generation;
+            out.close_deadline_ns = intent.deadline_ns;
+        },
+        .abandoned_to_inventory => |generation| out.close_intent_generation = generation,
+    }
+    if (state.retry) |retry| {
+        out.retry_present = 1;
+        out.retry_row_id = retry.row_id;
+        out.retry_generation = retry.generation;
+        out.retry_shell_generation = retry.shell_generation;
+    }
+    return out;
+}
+
+fn closeTransitionProjectionForState(
+    state: reconnect_reducer.State,
+    event: CloseEvent,
+) !CloseTransitionProjection {
+    const result = try reconnect_reducer.reduce(state, try event.reducerEvent());
+    return .{
+        .before = closeStateProjection(state),
+        .event = event,
+        .decision_raw = @intFromEnum(result.decision),
+        .after = closeStateProjection(result.state),
+    };
+}
 
 /// CR2e-d의 제품 generation owner. 실제 RemoteGeneration을 candidate node의 final address에서
 /// 완성하고 stable screen writer gate 안에서 slot current와 target을 함께 게시한다.
@@ -1221,6 +1502,28 @@ pub const RemoteRuntime = struct {
                 reconnectGenerationEffect(result.decision) != .retain)
                 return error.InvalidAuthority;
             runtime.reconnect_executor.state = result.state;
+        }
+
+        pub fn closeTransitionProjection(
+            runtime: *RemoteRuntime,
+            event: CloseEvent,
+        ) !CloseTransitionProjection {
+            try runtime.reconnect_executor.validate(&runtime.generation_owner);
+            return closeTransitionProjectionForState(runtime.reconnect_executor.state.?, event);
+        }
+
+        pub fn applyCloseTransitionProjection(
+            runtime: *RemoteRuntime,
+            expected: CloseTransitionProjection,
+        ) !void {
+            const actual = try closeTransitionProjection(runtime, expected.event);
+            if (!std.meta.eql(actual, expected)) return error.StaleExternalEvent;
+            const decision = try runtime.reconnect_executor.applyCloseTransition(
+                &runtime.generation_owner,
+                expected.event,
+            );
+            if (@intFromEnum(decision) != expected.decision_raw)
+                process_seal_service.fatalIntegrity(.proof_loss);
         }
 
         pub fn frameSummaryReady(runtime: *const RemoteRuntime) bool {
@@ -4285,6 +4588,157 @@ pub const testing_api = if (builtin.is_test) struct {
             .resident_budget_addr = runtime.reconnect_executor.resident_budget_addr,
             .resident_lease = runtime.reconnect_executor.resident_lease,
         };
+    }
+
+    pub const CloseCase = enum {
+        preserve_old,
+        preserve_old_with_paused_notice,
+        publish_new,
+        freeze_with_retry,
+        finish_terminal,
+    };
+
+    pub const CloseSnapshot = struct {
+        state: reconnect_reducer.State,
+        prepared: PreparedReconnect,
+        admission: ?reconnect_admission_owner.Projection,
+        admission_seal: process_seal_service.CleanupSeal,
+        resident_budget_addr: usize,
+        resident_lease: reconnect_resident_budget.Lease,
+        current_generation: u64,
+        has_retiring: bool,
+    };
+
+    pub fn armCloseCase(
+        runtime: *RemoteRuntime,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+        admission: reconnect_admission_owner.Projection,
+        case: CloseCase,
+    ) !void {
+        try runtime.reconnect_executor.bindAdmission(
+            &runtime.generation_owner,
+            budget,
+            admission,
+            reconnect_resident_budget.max_entry_bytes,
+        );
+        const work: reconnect_reducer.Work = .{
+            .job_generation = admission.incident_id.sequence,
+            .shell_generation = try runtime.generation_owner.currentGeneration(),
+            .attempt = 1,
+            .candidate_connection_generation = admission.connection_generation + 1,
+            .deadline_ns = std.math.maxInt(u64),
+        };
+        const args = ReconnectGenerationTestArgs{
+            .allocator = runtime.allocator,
+            .stream_id = 0xE3C3,
+        };
+        _ = try runtime.reconnect_executor.apply(
+            &runtime.generation_owner,
+            .{ .begin_prepare = work },
+            args,
+            initReconnectTestGeneration,
+        );
+        switch (case) {
+            .preserve_old => {},
+            .preserve_old_with_paused_notice => {
+                inline for (.{
+                    reconnect_reducer.Event.observer_staged,
+                    reconnect_reducer.Event.begin_mutation_seal,
+                    reconnect_reducer.Event.seal_ambiguous,
+                }) |event| _ = try runtime.reconnect_executor.apply(
+                    &runtime.generation_owner,
+                    event,
+                    args,
+                    initReconnectTestGeneration,
+                );
+            },
+            .publish_new, .freeze_with_retry, .finish_terminal => {
+                inline for (.{
+                    reconnect_reducer.Event.observer_staged,
+                    reconnect_reducer.Event.begin_mutation_seal,
+                    reconnect_reducer.Event.seal_clean,
+                    reconnect_reducer.Event.begin_authority_commit,
+                }) |event| _ = try runtime.reconnect_executor.apply(
+                    &runtime.generation_owner,
+                    event,
+                    args,
+                    initReconnectTestGeneration,
+                );
+                _ = try runtime.reconnect_executor.apply(
+                    &runtime.generation_owner,
+                    switch (case) {
+                        .publish_new => .controller_evidenced,
+                        .freeze_with_retry => .authority_conflict,
+                        .finish_terminal => .gone_positive,
+                        else => unreachable,
+                    },
+                    args,
+                    initReconnectTestGeneration,
+                );
+            },
+        }
+    }
+
+    pub fn closeTransitionProjection(
+        runtime: *RemoteRuntime,
+        event: CloseEvent,
+    ) !CloseTransitionProjection {
+        return RemoteRuntime.backend_api.closeTransitionProjection(runtime, event);
+    }
+
+    pub fn closeSnapshot(runtime: *RemoteRuntime) !CloseSnapshot {
+        try runtime.reconnect_executor.validate(&runtime.generation_owner);
+        return .{
+            .state = runtime.reconnect_executor.state.?,
+            .prepared = runtime.reconnect_executor.prepared,
+            .admission = runtime.reconnect_executor.admission,
+            .admission_seal = runtime.reconnect_executor.admission_seal,
+            .resident_budget_addr = runtime.reconnect_executor.resident_budget_addr,
+            .resident_lease = runtime.reconnect_executor.resident_lease,
+            .current_generation = try runtime.generation_owner.currentGeneration(),
+            .has_retiring = try runtime.generation_owner.slot.hasRetiring(),
+        };
+    }
+
+    pub fn projectCloseState(state: reconnect_reducer.State) CloseStateProjection {
+        return closeStateProjection(state);
+    }
+
+    pub fn expectedCloseDecision(case: CloseCase) u8 {
+        return @intFromEnum(switch (case) {
+            .preserve_old => reconnect_reducer.Decision.close_preserve_old,
+            .preserve_old_with_paused_notice => .close_preserve_old_with_paused_notice,
+            .publish_new => .close_publish_new,
+            .freeze_with_retry => .close_freeze_with_retry,
+            .finish_terminal => .close_finish_terminal,
+        });
+    }
+
+    pub fn cleanupCloseFixture(
+        runtime: *RemoteRuntime,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) void {
+        if (!std.meta.eql(runtime.reconnect_executor.prepared, PreparedReconnect{}))
+            runtime.generation_owner.abort(&runtime.reconnect_executor.prepared) catch
+                @panic("test reconnect candidate abort failed");
+        if (runtime.generation_owner.slot.hasRetiring() catch
+            @panic("test reconnect retiring query failed"))
+            runtime.generation_owner.reclaimRetiring() catch
+                @panic("test reconnect retiring cleanup failed");
+        if (runtime.reconnect_executor.resident_budget_addr != 0) {
+            budget.release(
+                &runtime.reconnect_executor.resident_lease,
+                runtime.reconnect_executor.resident_lease.role,
+            ) catch @panic("test reconnect budget cleanup failed");
+        }
+        runtime.reconnect_executor.resident_budget_addr = 0;
+        runtime.reconnect_executor.admission = null;
+        runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+        runtime.reconnect_executor.state = reconnect_reducer.State.initial(
+            1,
+            runtime.generation_owner.currentGeneration() catch
+                @panic("test reconnect current generation lost"),
+        );
     }
 
     pub const AppQuitOwnerSnapshot = struct {

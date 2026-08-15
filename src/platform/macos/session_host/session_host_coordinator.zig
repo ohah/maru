@@ -12,6 +12,10 @@ const backend_mod = @import("remote_term_backend.zig");
 
 const Lifecycle = enum(u8) { pristine = 0, ready = 1 };
 const ReceiptLifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
+const max_close_deadline_ns: u64 = 30 * std.time.ns_per_s;
+const CloseClockState = if (@import("builtin").is_test) struct {
+    threadlocal var now_ns: u64 = 0;
+} else struct {};
 
 /// CR4의 verified socket parser가 채울 pointer-free direct-release evidence다. e3c2는
 /// 이 값의 producer를 열지 않고 consumer가 current runtime projection과 exact 비교하는 경계만 제공한다.
@@ -30,6 +34,25 @@ pub const DirectReleaseReceipt = struct {
     backend_addr: u64 = 0,
     backend_generation: u64 = 0,
     target: backend_mod.DirectReleaseTarget = .{},
+    lifecycle_raw: u8 = 0,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
+pub const CloseEventEvidence = struct {
+    runtime_handle: u64 = 0,
+    runtime_generation: u64 = 0,
+    event: @import("remote_runtime.zig").CloseEvent = .{},
+};
+
+pub const CloseEventReceipt = struct {
+    self_addr: u64 = 0,
+    coordinator_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread: u64 = 0,
+    backend_addr: u64 = 0,
+    backend_generation: u64 = 0,
+    target: backend_mod.CloseTransitionTarget = .{},
     lifecycle_raw: u8 = 0,
     seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
 };
@@ -132,6 +155,73 @@ pub const SessionHostCoordinator = struct {
         receipt.seal = consumed_seal;
     }
 
+    pub fn prepareCloseEventReceipt(
+        self: *SessionHostCoordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        evidence: CloseEventEvidence,
+        out: *CloseEventReceipt,
+    ) !void {
+        try self.validate();
+        if (!std.meta.eql(out.*, CloseEventReceipt{})) return error.InvalidAuthority;
+        try backend.validateReconnectCoordinatorTarget();
+        var canonical_event = evidence.event;
+        switch (try canonical_event.tag()) {
+            .termination_requested => {
+                const now_ns = try monotonicNs();
+                if (canonical_event.deadline_ns <= now_ns or
+                    canonical_event.deadline_ns - now_ns > max_close_deadline_ns)
+                    return error.InvalidExternalEvent;
+            },
+            .termination_timed_out => {
+                if (canonical_event.now_ns != 0) return error.InvalidExternalEvent;
+                canonical_event.now_ns = try monotonicNs();
+            },
+            .reconnect_quiesced, .abandon_to_inventory => {},
+        }
+        const target = try backend.closeTransitionTarget(
+            evidence.runtime_handle,
+            canonical_event,
+        );
+        if (target.runtime_generation != evidence.runtime_generation)
+            return error.StaleExternalEvent;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .coordinator_addr = @intFromPtr(self),
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread = self.owner_thread,
+            .backend_addr = @intFromPtr(backend),
+            .backend_generation = try backend.singletonGenerationForCoordinator(),
+            .target = target,
+            .lifecycle_raw = @intFromEnum(ReceiptLifecycle.prepared),
+        };
+        errdefer out.* = .{};
+        out.seal = try self.expectedCloseReceiptSeal(out);
+        try self.validateCloseReceipt(backend, out);
+    }
+
+    pub fn applyCloseEvent(
+        self: *SessionHostCoordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        receipt: *CloseEventReceipt,
+    ) !void {
+        try self.validate();
+        try self.validateCloseReceipt(backend, receipt);
+        switch (try receipt.target.projection.event.tag()) {
+            .termination_requested => if (try monotonicNs() >= receipt.target.projection.event.deadline_ns)
+                return error.ExpiredExternalEvent,
+            .termination_timed_out => if (try monotonicNs() < receipt.target.projection.before.close_deadline_ns)
+                return error.InvalidExternalEvent,
+            .reconnect_quiesced, .abandon_to_inventory => {},
+        }
+        var consumed = receipt.*;
+        consumed.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        const consumed_seal = try self.expectedCloseReceiptSeal(&consumed);
+        try backend.applyCloseTransitionTarget(receipt.target);
+        receipt.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        receipt.seal = consumed_seal;
+    }
+
     fn validate(self: *const SessionHostCoordinator) !void {
         const thread_id: u64 = @intCast(std.Thread.getCurrentId());
         if (self.self_addr != @intFromPtr(self) or self.pid == 0 or self.process_nonce == 0 or
@@ -197,9 +287,46 @@ pub const SessionHostCoordinator = struct {
             .lifecycle_raw = receipt.lifecycle_raw,
         });
     }
+
+    fn validateCloseReceipt(
+        self: *const SessionHostCoordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        receipt: *const CloseEventReceipt,
+    ) !void {
+        if (receipt.self_addr != @intFromPtr(receipt) or
+            receipt.coordinator_addr != @intFromPtr(self) or receipt.pid != self.pid or
+            receipt.process_nonce != self.process_nonce or receipt.owner_thread != self.owner_thread or
+            receipt.backend_addr != @intFromPtr(backend) or
+            receipt.backend_generation != try backend.singletonGenerationForCoordinator() or
+            receipt.lifecycle_raw != @intFromEnum(ReceiptLifecycle.prepared))
+            return error.InvalidAuthority;
+        const expected = try self.expectedCloseReceiptSeal(receipt);
+        if (!std.crypto.timing_safe.eql(process_seal.CleanupSeal, receipt.seal, expected))
+            return error.InvalidAuthority;
+    }
+
+    fn expectedCloseReceiptSeal(
+        self: *const SessionHostCoordinator,
+        receipt: *const CloseEventReceipt,
+    ) !process_seal.CleanupSeal {
+        return process_seal.reconnectCloseReceiptSeal(self.pid, self.process_nonce, .{
+            .self_addr = receipt.self_addr,
+            .coordinator_addr = receipt.coordinator_addr,
+            .thread_id = receipt.owner_thread,
+            .backend_addr = receipt.backend_addr,
+            .backend_generation = receipt.backend_generation,
+            .runtime_handle = receipt.target.runtime_handle,
+            .runtime_generation = receipt.target.runtime_generation,
+            .runtime_id = receipt.target.runtime_id,
+            .transition_digest = @import("remote_runtime.zig").closeTransitionDigest(receipt.target.projection),
+            .lifecycle_raw = receipt.lifecycle_raw,
+        });
+    }
 };
 
 fn monotonicNs() !u64 {
+    if (@import("builtin").is_test and CloseClockState.now_ns != 0)
+        return CloseClockState.now_ns;
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0)
         return error.ClockFailed;
@@ -475,4 +602,240 @@ test "CR2e-e3c2 typed direct release receipt는 exact runtime에 one-shot 적용
     @import("remote_runtime.zig").testing_api.resetDirectReleaseFixture(&fixture.runtime);
     try @import("remote_runtime.zig").testing_api.releaseBoundReconnectAdmission(&fixture.runtime, &budget);
     executor_reset = true;
+}
+
+fn runCloseCompetitionCase(case: @import("remote_runtime.zig").testing_api.CloseCase) !void {
+    CloseClockState.now_ns = 50;
+    defer CloseClockState.now_ns = 0;
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var coordinator: SessionHostCoordinator = .{};
+    try coordinator.initInPlace(identity.process_nonce);
+    var fixture: @import("remote_runtime.zig").testing_api.SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    var budget: budget_mod.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch @panic("test reconnect budget deinit failed");
+    const admission: admission_mod.Projection = .{
+        .slot_index = 0,
+        .slot_generation = 1,
+        .host_id = 1,
+        .host_adapter_generation = 3,
+        .connection_generation = fixture.adapter.connectionGeneration(),
+        .incident_id = .{ .app_instance_nonce = 0xE3C3, .sequence = 8 },
+    };
+    try @import("remote_runtime.zig").testing_api.armCloseCase(
+        &fixture.runtime,
+        &budget,
+        admission,
+        case,
+    );
+    var fixture_cleaned = false;
+    defer if (!fixture_cleaned)
+        @import("remote_runtime.zig").testing_api.cleanupCloseFixture(&fixture.runtime, &budget);
+    var backend = backend_mod.RemoteTermBackend.initAttachOnlyWithPool(
+        testing.allocator,
+        testing.io,
+        @ptrFromInt(0x1000),
+        @ptrFromInt(0x2000),
+    );
+    try backend.claimProductSingleton();
+    defer backend.deinit();
+    try backend_mod.RemoteTermBackend.testing_api.installReconnectRuntime(
+        &backend,
+        10,
+        &fixture.runtime,
+        1,
+        3,
+    );
+    defer testing.expect(backend_mod.RemoteTermBackend.testing_api.removeEventCursorRuntime(&backend, 10)) catch
+        @panic("test runtime row cleanup failed");
+
+    const before_request = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+    const request_event: @import("remote_runtime.zig").CloseEvent = .{
+        .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.termination_requested),
+        .intent_generation = 11,
+        .shell_generation = before_request.state.shell_generation,
+        .deadline_ns = 100,
+    };
+    var runtime_generation: u64 = 1;
+    var request_evidence: CloseEventEvidence = .{
+        .runtime_handle = 10,
+        .runtime_generation = runtime_generation,
+        .event = request_event,
+    };
+    if (case == .preserve_old) {
+        const snapshot = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+        const budget_snapshot = try budget.snapshot();
+        var invalid_tag = request_evidence;
+        invalid_tag.event.tag_raw = 0xFF;
+        var invalid_receipt: CloseEventReceipt = .{};
+        try testing.expectError(
+            error.InvalidExternalEvent,
+            coordinator.prepareCloseEventReceipt(&backend, invalid_tag, &invalid_receipt),
+        );
+        try testing.expect(std.meta.eql(invalid_receipt, CloseEventReceipt{}));
+        var overlong = request_evidence;
+        overlong.event.deadline_ns = 50 + max_close_deadline_ns + 1;
+        try testing.expectError(
+            error.InvalidExternalEvent,
+            coordinator.prepareCloseEventReceipt(&backend, overlong, &invalid_receipt),
+        );
+        var mismatch = request_evidence;
+        mismatch.event.shell_generation +%= 1;
+        var mismatch_receipt: CloseEventReceipt = .{};
+        try testing.expectError(
+            error.IllegalTransition,
+            coordinator.prepareCloseEventReceipt(&backend, mismatch, &mismatch_receipt),
+        );
+        try testing.expect(std.meta.eql(mismatch_receipt, CloseEventReceipt{}));
+        try testing.expectEqualDeep(snapshot, try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime));
+        try testing.expectEqualDeep(budget_snapshot, try budget.snapshot());
+
+        var stale_receipt: CloseEventReceipt = .{};
+        try coordinator.prepareCloseEventReceipt(&backend, request_evidence, &stale_receipt);
+        try testing.expect(backend_mod.RemoteTermBackend.testing_api.removeEventCursorRuntime(&backend, 10));
+        runtime_generation = 2;
+        try backend_mod.RemoteTermBackend.testing_api.installReconnectRuntime(
+            &backend,
+            10,
+            &fixture.runtime,
+            runtime_generation,
+            3,
+        );
+        try testing.expectError(error.StaleExternalEvent, coordinator.applyCloseEvent(&backend, &stale_receipt));
+        try testing.expectEqualDeep(snapshot, try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime));
+        try testing.expectEqualDeep(budget_snapshot, try budget.snapshot());
+        request_evidence.runtime_generation = runtime_generation;
+    }
+    var request_receipt: CloseEventReceipt = .{};
+    try coordinator.prepareCloseEventReceipt(&backend, request_evidence, &request_receipt);
+    if (case == .preserve_old) {
+        var copied = request_receipt;
+        try testing.expectError(
+            error.InvalidAuthority,
+            coordinator.applyCloseEvent(&backend, &copied),
+        );
+        copied.self_addr = @intFromPtr(&copied);
+        try testing.expectError(
+            error.InvalidAuthority,
+            coordinator.applyCloseEvent(&backend, &copied),
+        );
+        var projection_tampered = request_receipt;
+        projection_tampered.target.projection.after.shell_generation +%= 1;
+        try testing.expectError(
+            error.InvalidAuthority,
+            coordinator.applyCloseEvent(&backend, &projection_tampered),
+        );
+        var runtime_tampered = request_receipt;
+        runtime_tampered.target.runtime_id[0] ^= 1;
+        try testing.expectError(
+            error.InvalidAuthority,
+            coordinator.applyCloseEvent(&backend, &runtime_tampered),
+        );
+        const snapshot = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+        const budget_snapshot = try budget.snapshot();
+        CloseClockState.now_ns = 100;
+        try testing.expectError(
+            error.ExpiredExternalEvent,
+            coordinator.applyCloseEvent(&backend, &request_receipt),
+        );
+        try testing.expectEqualDeep(snapshot, try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime));
+        try testing.expectEqualDeep(budget_snapshot, try budget.snapshot());
+        request_receipt = .{};
+        request_evidence.event.deadline_ns = 150;
+        try coordinator.prepareCloseEventReceipt(&backend, request_evidence, &request_receipt);
+    }
+    try coordinator.applyCloseEvent(&backend, &request_receipt);
+    try testing.expectError(error.InvalidAuthority, coordinator.applyCloseEvent(&backend, &request_receipt));
+
+    const retry = case == .freeze_with_retry;
+    const quiesced_event: @import("remote_runtime.zig").CloseEvent = .{
+        .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.reconnect_quiesced),
+        .old_transport_usable = if (case == .preserve_old or case == .preserve_old_with_paused_notice) 1 else 0,
+        .retry_present = if (retry) 1 else 0,
+        .retry_row_id = if (retry) 21 else 0,
+        .retry_generation = if (retry) 22 else 0,
+        .retry_shell_generation = if (retry) before_request.state.shell_generation else 0,
+    };
+    const quiesced_projection = try @import("remote_runtime.zig").testing_api.closeTransitionProjection(
+        &fixture.runtime,
+        quiesced_event,
+    );
+    try testing.expectEqual(
+        @import("remote_runtime.zig").testing_api.expectedCloseDecision(case),
+        quiesced_projection.decision_raw,
+    );
+    var quiesced_receipt: CloseEventReceipt = .{};
+    try coordinator.prepareCloseEventReceipt(&backend, .{
+        .runtime_handle = 10,
+        .runtime_generation = runtime_generation,
+        .event = quiesced_event,
+    }, &quiesced_receipt);
+    try coordinator.applyCloseEvent(&backend, &quiesced_receipt);
+    const after = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+    try testing.expectEqualDeep(
+        quiesced_projection.after,
+        @import("remote_runtime.zig").testing_api.projectCloseState(after.state),
+    );
+    if (case == .publish_new) {
+        try testing.expect(std.meta.eql(after.prepared, @import("remote_runtime.zig").PreparedReconnect{}));
+        try testing.expect(after.has_retiring);
+        try testing.expectEqual(@as(usize, @intFromPtr(&budget)), after.resident_budget_addr);
+        try testing.expectEqual(budget_mod.Role.current, after.resident_lease.role);
+    } else {
+        try testing.expect(std.meta.eql(after.prepared, @import("remote_runtime.zig").PreparedReconnect{}));
+        try testing.expectEqual(@as(usize, 0), after.resident_budget_addr);
+        try testing.expect(std.meta.eql(after.resident_lease, budget_mod.Lease{}));
+        try testing.expect(after.admission == null);
+    }
+
+    if (case == .preserve_old) {
+        const timeout_event: @import("remote_runtime.zig").CloseEvent = .{
+            .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.termination_timed_out),
+        };
+        const pre_timeout_snapshot = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+        const pre_timeout_budget = try budget.snapshot();
+        var early_timeout_receipt: CloseEventReceipt = .{};
+        try testing.expectError(error.IllegalTransition, coordinator.prepareCloseEventReceipt(&backend, .{
+            .runtime_handle = 10,
+            .runtime_generation = runtime_generation,
+            .event = timeout_event,
+        }, &early_timeout_receipt));
+        try testing.expect(std.meta.eql(early_timeout_receipt, CloseEventReceipt{}));
+        try testing.expectEqualDeep(pre_timeout_snapshot, try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime));
+        try testing.expectEqualDeep(pre_timeout_budget, try budget.snapshot());
+        CloseClockState.now_ns = 150;
+        var timeout_receipt: CloseEventReceipt = .{};
+        try coordinator.prepareCloseEventReceipt(&backend, .{
+            .runtime_handle = 10,
+            .runtime_generation = runtime_generation,
+            .event = timeout_event,
+        }, &timeout_receipt);
+        try coordinator.applyCloseEvent(&backend, &timeout_receipt);
+        const abandon_event = @import("remote_runtime.zig").CloseEvent.init(.abandon_to_inventory);
+        var abandon_receipt: CloseEventReceipt = .{};
+        try coordinator.prepareCloseEventReceipt(&backend, .{
+            .runtime_handle = 10,
+            .runtime_generation = runtime_generation,
+            .event = abandon_event,
+        }, &abandon_receipt);
+        try coordinator.applyCloseEvent(&backend, &abandon_receipt);
+        const abandoned = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
+        try testing.expect(abandoned.state.close == .abandoned_to_inventory);
+        try testing.expectEqual(@as(u64, 11), abandoned.state.close.abandoned_to_inventory);
+    }
+
+    @import("remote_runtime.zig").testing_api.cleanupCloseFixture(&fixture.runtime, &budget);
+    fixture_cleaned = true;
+}
+
+test "CR2e-e3c3 typed close event는 reconnect mixed outcome과 abandon을 exact 정산한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try testing.expect(!recursivelyContainsPointer(CloseEventEvidence));
+    try testing.expect(!recursivelyContainsPointer(CloseEventReceipt));
+    inline for (std.meta.tags(@import("remote_runtime.zig").testing_api.CloseCase)) |case|
+        try runCloseCompetitionCase(case);
 }

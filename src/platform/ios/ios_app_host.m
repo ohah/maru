@@ -103,6 +103,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 @interface ChromeView : UIView <UITextInput>
 /// 배경으로 나갈 때 AppDelegate 가 부른다 — 키바가 잡고 있던 터치를 푼다.
 - (void)releaseKeybarGrab;
+/// 같은 자리에서 밀린 화면(설정)이 잡고 있던 터치를 푼다.
+- (void)releaseChromeGrab;
 @end
 
 @implementation ChromeView {
@@ -341,6 +343,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 /// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
 /// 밀린 화면(설정)이 잡고 있는 동안의 나머지 위상. 키바와 같은 모양이다.
+/// 배경 전환처럼 **뗀 적 없이 끝나는** 경우에 뷰 쪽 잡음을 푼다(브리지 쪽은 호출자가 푼다).
+- (void)releaseChromeGrab {
+    _chromeActive = NO;
+}
+
 - (BOOL)routeChrome:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     if (!_chromeActive) return NO;
     UITouch *touch = touches.anyObject;
@@ -1020,7 +1027,12 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // 브리지와 뷰 **양쪽**을 푼다: 브리지만 풀면 뷰가 계속 키바로 라우팅하고, 뷰만 풀면
     // 브리지의 `kb_active` 가 남는다.
     maru_mobile_keybar_pointer(3, 0, 0);
+    // **밀린 화면(설정)이 잡고 있던 것도 같은 이유로 푼다.** 키바만 풀고 여기를 빠뜨렸더니,
+    // 톱니를 누른 채 홈으로 나갔다 오면 `_chromeActive` 가 남아 **복귀 후 첫 손짓이 통째로
+    // 삼켜졌다**(iOS 는 배경 전환에 touchesCancelled 를 안 보낸다 — 위 주석).
+    maru_mobile_chrome_pointer(3, 0, 0);
     [(ChromeView *)self.window.rootViewController.view releaseKeybarGrab];
+    [(ChromeView *)self.window.rootViewController.view releaseChromeGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
     // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.

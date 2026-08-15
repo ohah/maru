@@ -878,6 +878,16 @@ Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
 /// **`adjustResize` 로는 안 된다** — targetSdk 35(Android 15)부터 edge-to-edge 가 강제되어
 /// 그 값이 무시된다. 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라 하단(보조 키바·
 /// 상태바)이 통째로 가려진다. iOS 는 같은 일을 `UIKeyboardWillChangeFrame` 으로 한다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px) {
+    (void)env;
+    (void)cls;
+    if (g.keyboard_px == (int)px) return;
+    g.keyboard_px = (int)px;
+    LOGI("MARU_KEYBOARD height=%d", (int)px);
+}
+
+/// 밀린 화면을 하나 뺀다(하드웨어 뒤로가기). 1=뺐다, 0=뺄 것이 없어 host 가 알아서 한다.
 JNIEXPORT jint JNICALL
 Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
     (void)env;
@@ -886,15 +896,6 @@ Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
     unsigned int popped = maru_mobile_pop_screen();
     pthread_mutex_unlock(&g_bridge_lock);
     return (jint)popped;
-}
-
-JNIEXPORT void JNICALL
-Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px) {
-    (void)env;
-    (void)cls;
-    if (g.keyboard_px == (int)px) return;
-    g.keyboard_px = (int)px;
-    LOGI("MARU_KEYBOARD height=%d", (int)px);
 }
 
 JNIEXPORT void JNICALL

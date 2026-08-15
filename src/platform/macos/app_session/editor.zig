@@ -407,12 +407,23 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     const term = createEditorTerm(self) catch return error.OutOfMemory;
     errdefer term_ops.destroyTerm(self, term);
 
-    term.rt.editor_doc = opened;
-    term.rt.editor_lines = lines;
-    term.rt.editor_path = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
+    // **실패할 수 있는 일을 먼저 끝내고, 넘기는 것은 마지막에 한꺼번에 한다.**
+    //
+    // 예전에는 `term.rt`에 먼저 넘긴 뒤 경로 복사와 pane 등록을 했다. 그 둘이 실패하면 위
+    // `errdefer term_ops.destroyTerm`이 doc·lines를 풀고, 그 아래 `errdefer opened.deinit`과
+    // `errdefer free(lines)`가 **같은 것을 또 푼다** — 이중 해제다. 같은 모양을 `materialize`와
+    // `computeMarks`에서 이미 두 번 잡았고(할당 실패 주입), 이 자리가 세 번째다.
+    //
+    // 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
+    const path_copy = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
+    errdefer self.allocator.free(path_copy);
 
     const pane = pane_ops.activePane(self);
     pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
+
+    term.rt.editor_doc = opened;
+    term.rt.editor_lines = lines;
+    term.rt.editor_path = path_copy;
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;

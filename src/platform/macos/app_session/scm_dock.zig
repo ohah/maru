@@ -149,23 +149,6 @@ pub const Projection = struct {
     file_count: u32,
 };
 
-/// 한 프레임의 draw 버퍼 상한. **방출 지점과 1:1로 센다** — 여기가 실제보다 작으면 view가
-/// `InsufficientRunBuffer`로 실패하고, 그 결과는 "한 줄이 안 그려짐"이 아니라 **도크 전체가 빈 화면**이다
-/// (publish까지 못 가서 hit tree도 이전 프레임에 멈춘다).
-///
-/// 상수로 세면 view가 자라는 변경마다 조용히 모자란다 — 실제로 그랬다: 증감을 `+N`(초록)/`-N`(빨강)
-/// 두 조각으로 가르면서 파일 행이 5 → 6 op이 됐는데 이 예산이 따라오지 않아, **파일이 다섯 개만
-/// 바뀌어도 도크가 통째로 비었다**. 그래서 산술을 함수로 두고 테스트가 최악 구성으로 검증한다.
-fn drawBudget(entry_count: usize, window_len: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 행당 텍스트 상한 6 = 파일 행(아이콘·이름·경로·`+N`·`-N`·상태 문자). 그룹 헤더는 3(아이콘·제목·개수),
-    // 안내·`모두 보기`는 1이라 이 상한 안이다.
-    // 고정 chrome 10 = 탭 3 + 요약 2 + 브랜치 3 + 호버 동작 1 + 빈 안내 1.
-    const text = window_len * 6 + 10;
-    // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나.
-    const quads = entry_count + window_len + 1;
-    return .{ .ops = quads + text, .runs = text, .text_bytes = 256 + window_len * 512 };
-}
-
 /// 모델 → 항목 열 + 스크롤 투영. **렌더와 포인터가 같은 함수를 지난다** — 두 곳이 각자 만들면 스크롤한
 /// 뒤 누른 행과 열리는 행이 어긋난다.
 pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
@@ -276,7 +259,9 @@ pub fn collectScmDock(
     // paint quad는 published entry 하나당 최대 하나다. 상수로 세면 tree가 자라는 변경마다 조용히
     // 모자라는데, 그 결과가 "그 컴포넌트만 안 그려짐"이 아니라 **도크 전체 정지**다(view가 실패하면
     // 아래 publish까지 못 가서 hit tree가 이전 프레임에 멈춘다 — Session Dock에서 실제로 겪었다).
-    const budget = drawBudget(frame.tree.entries.len, window.len);
+    // 예산 산술은 **방출하는 쪽(component)**이 소유한다 — 여기서 세면 view가 op을 하나 더할 때마다
+    // 조용히 낡고, 그 증상은 도크 전체가 빈 화면이다(실제로 두 번 그랬다).
+    const budget = component.view.drawBufferSizes(props, frame.tree.entries.len);
     const ops = arena.alloc(chrome.draw.Op, budget.ops) catch return;
     const runs = arena.alloc(chrome.draw.Run, budget.runs) catch return;
     const text_bytes = arena.alloc(u8, budget.text_bytes) catch return;
@@ -504,29 +489,38 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
     // 그룹 헤더 둘 + 파일 열 — 파일 행이 op을 가장 많이 낸다(아이콘·이름·경로·증감 둘·상태 문자).
     items[0] = .{ .section = .{ .section = .staged, .count = 5, .collapsed = false, .action = .none } };
     items[6] = .{ .section = .{ .section = .changes, .count = 5, .collapsed = false, .action = .none } };
+    // 나머지 항목 종류도 예산에 든다 — 서식 문자열이 component 것이라 platform은 길이를 모른다.
+    items[10] = .{ .more = .{ .section = .changes, .hidden = std.math.maxInt(u32) } };
+    items[11] = .{ .notice = "git 출력이 상한에 걸려 잘렸다 — 뒤쪽 파일은 오지 않았다" };
     for (&items, 0..) |*item, index| {
-        if (index == 0 or index == 6) continue;
-        item.* = .{ .file = .{
-            .name = "some-file-name.zig",
-            .dir = "src/platform/macos/app_session/",
-            .status = .modified,
-            .letter = 'M',
-            .added = 123,
-            .removed = 456,
-            .has_delta = true,
-            .action = .none,
-        } };
+        if (index == 0 or index == 6 or index == 10 or index == 11) continue;
+        item.* = .{
+            .file = .{
+                .name = "some-file-name.zig",
+                // **경로에 상한이 없다** — `name`+`dir`이 곧 git 경로다. 행당 고정 바이트로 예산을 잡으면
+                // 어떤 값을 골라도 그보다 긴 저장소가 있고, 넘치는 순간 도크가 통째로 빈다.
+                .dir = "src/" ++ "very-long-directory-segment/" ** 45,
+                .status = .modified,
+                .letter = 'M',
+                .added = 123,
+                .removed = 456,
+                .has_delta = true,
+                .action = .none,
+            },
+        };
     }
 
     const props: component_types.Props = .{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 480 },
         .items = &items,
-        .branch = "feat/some-branch",
+        // 숫자는 **u32 최댓값**으로 민다 — 자릿수를 10으로 잡아 둔 예산이 실제로 그만큼 버티는지가
+        // 산술이 아니라 테스트로 확인돼야 한다(브랜치 줄은 계산상 여유가 1바이트뿐이었다).
+        .branch = "feat/a-really-long-branch-name-that-someone-will-eventually-create",
         .has_ab = true,
-        .ahead = 3,
-        .behind = 4,
-        .summary = .{ .added = 1234, .removed = 567 },
-        .changed_file_count = 10,
+        .ahead = std.math.maxInt(u32),
+        .behind = std.math.maxInt(u32),
+        .summary = .{ .added = std.math.maxInt(u32), .removed = std.math.maxInt(u32) },
+        .changed_file_count = std.math.maxInt(u32),
     };
 
     const sizes = component.build.bufferSizes(&items);
@@ -553,7 +547,7 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
         .actions = actions,
     });
 
-    const budget = drawBudget(frame.tree.entries.len, items.len);
+    const budget = component.view.drawBufferSizes(props, frame.tree.entries.len);
     const ops = try allocator.alloc(chrome.draw.Op, budget.ops);
     defer allocator.free(ops);
     const runs = try allocator.alloc(chrome.draw.Run, budget.runs);

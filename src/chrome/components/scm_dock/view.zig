@@ -36,6 +36,63 @@ pub const Buffers = struct {
 
 pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, InsufficientTextBuffer, MissingRect };
 
+/// `view`가 이 props로 성공하는 데 필요한 draw 버퍼 상한.
+///
+/// **방출 지점과 같은 파일에 둔다.** platform이 세면 component가 op을 하나 더할 때마다 그 산술이
+/// 조용히 낡고, 증상은 "그 op이 안 보임"이 아니라 **도크 전체가 빈 화면**이다(view가 실패하면 publish
+/// 까지 못 가 프레임이 통째로 버려진다). 실제로 두 번 그랬다: 증감을 두 색으로 가르며 행당 op이 하나
+/// 늘었을 때, 그리고 경로가 긴 저장소에서 바이트 풀이 넘쳤을 때.
+///
+/// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
+/// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
+pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1 + 빈 안내 1.
+    var text_ops: usize = 10;
+    var bytes: usize = 0;
+    for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
+    bytes += count_digits * 2 + 4; // 요약 `+N -N`
+    bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
+    bytes += props.empty_notice.len;
+
+    for (props.items) |item| switch (item) {
+        // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
+        .file => |file| {
+            text_ops += 6;
+            bytes += icon_bytes + file.name.len + file.dir.len + 1 + (count_digits + 1) * 2;
+        },
+        // 아이콘·제목·개수.
+        .section => |section| {
+            text_ops += 3;
+            bytes += icon_bytes + sectionTitle(section.section).len + count_digits;
+        },
+        // `모두 보기 (N개 더)` — 서식 문자열이 component 것이라 여기서만 길이를 안다.
+        .more => {
+            text_ops += 1;
+            bytes += more_label_bytes + count_digits;
+        },
+        .notice => |text| {
+            text_ops += 1;
+            bytes += text.len;
+        },
+    };
+    // 호버 동작 글리프(`+`/`−`)는 한 번에 한 행이다.
+    bytes += 4;
+
+    return .{
+        // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나.
+        .ops = entry_count + props.items.len + 1 + text_ops,
+        .runs = text_ops,
+        .text_bytes = bytes,
+    };
+}
+
+/// u32 십진 최대 자릿수.
+const count_digits: usize = 10;
+/// UTF-8 글리프 하나(등록 아이콘은 PUA 코드포인트라 최대 4바이트).
+const icon_bytes: usize = 4;
+/// `모두 보기 (N개 더)`에서 숫자를 뺀 나머지 바이트(한글 3바이트).
+const more_label_bytes: usize = 32;
+
 pub fn view(
     props: types.Props,
     frame: build.Frame,

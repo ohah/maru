@@ -372,12 +372,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         static unsigned char copy_buf[8192];
         unsigned int cn = maru_mobile_take_copy(copy_buf, sizeof copy_buf);
         if (cn > 0) {
-            NSString *s = [[NSString alloc] initWithBytes:copy_buf length:cn
-                                                 encoding:NSUTF8StringEncoding];
-            if (s) {
-                UIPasteboard.generalPasteboard.string = s;
-                NSLog(@"MARU_COPY len=%u", cn);
-            }
+            // **바이트를 그대로 넣는다 — 변환을 안 거친다.** `initWithBytes:NSUTF8StringEncoding`
+            // 은 잘못된 UTF-8 에 nil 을 돌려주고, 그 nil 을 검사하는 가지를 두면 **실패가 조용히
+            // 지나간다**(붙여넣기가 옛 내용으로 나가도 사용자는 모른다). 검사를 더하는 대신
+            // **실패할 수 있는 변환 자체를 없앤다**: 클립보드는 UTF-8 바이트를 직접 받는다.
+            NSData *d = [NSData dataWithBytes:copy_buf length:cn];
+            [UIPasteboard.generalPasteboard setData:d forPasteboardType:@"public.utf8-plain-text"];
+            NSLog(@"MARU_COPY len=%u", cn);
         }
     }
     return YES;

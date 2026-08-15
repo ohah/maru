@@ -875,6 +875,35 @@ static size_t utf16ToUtf8(const jchar *u, jsize n, char *out, size_t cap) {
     return o;
 }
 
+// **UTF-8 → UTF-16.** 클립보드로 나가는 쪽이다(`utf16ToUtf8` 의 반대). BMP 밖 글자는
+// 서러게이트 쌍으로 되돌린다 — Java 문자열이 그 표현이기 때문이다.
+static jsize utf8ToUtf16(const char *s, size_t n, jchar *out, jsize cap) {
+    jsize o = 0;
+    size_t i = 0;
+    while (i < n && o < cap) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned int cp;
+        size_t take;
+        if (c < 0x80) { cp = c; take = 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; take = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; take = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; take = 4; }
+        else { i++; continue; } // 이어지는 바이트로 시작 — 브리지가 경계에서 자르므로 안 온다
+        if (i + take > n) break;
+        for (size_t k = 1; k < take; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        i += take;
+        if (cp < 0x10000) {
+            out[o++] = (jchar)cp;
+        } else {
+            if (o + 2 > cap) break;
+            cp -= 0x10000;
+            out[o++] = (jchar)(0xD800 + (cp >> 10));
+            out[o++] = (jchar)(0xDC00 + (cp & 0x3FF));
+        }
+    }
+    return o;
+}
+
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeComposing(JNIEnv *env, jclass cls, jstring text) {
     (void)cls;
@@ -1010,7 +1039,16 @@ static void drainClipboard(struct android_app *app) {
         jmethodID mid = (*env)->GetStaticMethodID(env, g_activity_cls, "setClipboard",
                                                   "(Ljava/lang/String;)V");
         if (mid) {
-            jstring s = (*env)->NewStringUTF(env, copy_buf);
+            // **UTF-16 으로 직접 만든다.** `NewStringUTF` 는 modified UTF-8 을 기대하므로
+            // 이모지(4바이트 UTF-8)를 주면 **정의되지 않은 동작**이다 — CheckJNI 를 켠 빌드
+            // (이 하네스가 설치하는 디버그 APK)에서는 abort 한다. 결과를 검사하는 가지를
+            // 두는 대신 **변환을 우리가 해서 실패할 자리를 없앤다**(입력 쪽과 대칭이다).
+            static jchar u16[8192];
+            // **길이는 `cn` 이다 — `strlen` 이 아니다.** 터미널 화면에서 뽑은 바이트에 NUL 이
+            // 섞이면 `strlen` 이 거기서 멈춰 뒤가 조용히 잘린다(경계 절단을 고쳐 놓고 여기서
+            // 다시 자르면 의미가 없다).
+            jsize ulen = utf8ToUtf16(copy_buf, cn, u16, 8192);
+            jstring s = (*env)->NewString(env, u16, ulen);
             (*env)->CallStaticVoidMethod(env, g_activity_cls, mid, s);
             (*env)->DeleteLocalRef(env, s);
         } else {

@@ -1153,7 +1153,10 @@ test "chrome 텍스트의 이모지도 컬러 텍스처를 가리킨다" {
         if (q.kind == 4 or q.kind == 5) std.debug.print("\n  color quad kind={d} cell=({d},{d})\n", .{ q.kind, q.cell_x, q.cell_y });
         if (q.cell_x != 6 or q.cell_y != 4) continue; // 컬러 등록부가 준 슬롯
         found = true;
-        try std.testing.expectEqual(@as(u32, 5), q.kind); // 컬러 텍스처의 왼쪽 절반
+        // **본문과 같은 규칙이다** — 이모지는 양폭이라 슬롯 전체(4)를 쓴다. 전에는 chrome 이
+        // 폭과 무관하게 왼쪽 절반(5)을 썼는데, 그러면 **이모지가 반쪽만 그려진다**(한글 라벨을
+        // 처음 넣고서 같은 결함을 화면으로 잡았다). 본문은 `wide ? 4 : 5` 를 이미 쓰고 있었다.
+        try std.testing.expectEqual(@as(u32, 4), q.kind);
     }
     std.debug.print("  quads={d} preedit rendered={}\n", .{ n, found });
     bridge.maru_mobile_set_preedit("", 0);

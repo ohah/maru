@@ -13406,6 +13406,7 @@ pub const AppSession = struct {
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
+        debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터

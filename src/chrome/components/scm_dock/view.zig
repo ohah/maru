@@ -399,10 +399,16 @@ const Writer = struct {
         var letter_buf: [1]u8 = .{file.letter};
         try self.trailing(rect, letter_buf[0..], statusRole(file.status), .control, m.inset_x);
 
+        // **호버한 행은 증감을 비운다.** 그 자리에 동작 버튼이 앉기 때문이다(VS Code도 호버하면 숫자가
+        // 사라지고 아이콘이 뜬다). 안 비우면 글자가 버튼 quad 위에 겹쳐 그려진다 — 증감은 writer가
+        // 배경 quad보다 나중에 내므로 버튼을 덮는다.
+        const hovered_row = isHovered(self.state, rect.id);
         // **증감도 색을 갖는다**(목업이 그렇다 — `+14` 초록, `−59` 빨강). 한 덩어리로 그리면 둘 다
         // 흐린 회색이 되어 "얼마나 늘고 줄었나"가 한눈에 안 들어온다(사용자 지적 2026-08-14).
         var right_inset = m.inset_x + m.status_extent + m.gap;
-        if (file.binary) {
+        if (hovered_row) {
+            // 아무것도 그리지 않는다(위 주석).
+        } else if (file.binary) {
             try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
         } else if (file.has_delta) {
             var removed_buf: [16]u8 = undefined;

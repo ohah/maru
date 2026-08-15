@@ -1578,13 +1578,17 @@ fn styleBits(s: terminal.types.Style) u32 {
 /// 진행 규칙(0폭 건너뛰기·폰트 advance·폴백)을 `pushText` 와 **그대로 공유**한다.
 fn textWidth(text: []const u8, font_px: i32) i32 {
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
-    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5);
+    const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
     var w: i32 = 0;
     var view = std.unicode.Utf8View.init(text) catch return 0;
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
         if (isZeroWidthFormat(cp)) continue;
         const cell = atlasCell(&.{cp}, 0);
+        // **폴백 폭도 `pushText` 와 같이 폭을 본다.** 여기만 반칸으로 두면 아직 안 구운
+        // 한글이 든 값이 절반 폭으로 재져 **우측 정렬이 여백 밖으로 밀린다**(다음 프레임에
+        // 글리프가 구워지며 제자리로 돌아와 더 눈에 띈다).
+        const draw_w: i32 = @intFromFloat(if (maru.width.cellWidth(cp) == 2) half_w * 2 else half_w);
         w += if (cell) |c|
             @as(i32, @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale))
         else
@@ -1947,7 +1951,11 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         if (i == 1) {
             const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + 9;
             const cy = @as(f32, @floatFromInt(icon_y)) + 9;
-            set_gear_rect = .{ .x = cx - 22, .y = cy - 22, .w = 44, .h = 44 };
+            // **위로는 키바 밴드를 넘지 않는다.** chrome 을 키바보다 먼저 묻기 때문에, 44 를
+            // 그대로 위로 펴면 그 x 에 있는 키의 **밑동 몇 px 이 조용히 안 눌린다**. 가로로는
+            // 이웃이 같은 아이콘뿐이라 "작게 그리고 넓게 받는다" 가 통하지만 세로는 아니다.
+            const gear_top = @max(cy - 22, key_bar_band.bot);
+            set_gear_rect = .{ .x = cx - 22, .y = gear_top, .w = 44, .h = @max(0, cy + 22 - gear_top) };
         }
         quad_buf[quad_count] = .{
             .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),
@@ -2307,8 +2315,11 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
     if (screen == .terminal) {
         // 톱니를 누르면 설정을 민다. down 에서 바로 밀지 않고 up 까지 기다린다 — 밀려던
         // 손짓이 화면 전환이 되면 안 된다(키바와 같은 규율).
-        if (phase == 0 and setHit(set_gear_rect, x, y)) {
-            set_active = true;
+        if (phase == 0) {
+            // **down 은 톱니를 짚었을 때만 먹는다.** 예전에는 남아 있던 `set_active` 때문에
+            // 톱니 근처도 아닌 down 을 chrome 이 가져가, 그 손짓이 통째로 사라졌다.
+            set_active = setHit(set_gear_rect, x, y);
+            if (!set_active) return 0;
             set_down_x = x;
             set_down_y = y;
             set_moved = 0;
@@ -2348,6 +2359,11 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
         },
         1 => {
             if (!set_active) return 1;
+            const dy = y - set_last_y;
+            // **기준점은 임계와 무관하게 매 move 갱신한다**(키바 `kb_last_x` 와 같은 규칙).
+            // 갱신을 임계 뒤로 미뤘더니 문턱을 넘는 첫 프레임이 **down 지점과의 차이**를
+            // 통째로 적용해 목록이 10px 이상 **툭 뛰고**, 그 값이 그대로 관성 씨앗이 됐다.
+            set_last_y = y;
             set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
             // **임계를 넘기 전에는 스크롤도 안 한다** — 살짝 민 손짓이 화면도 움직이고
             // 값도 바꾸면 같은 손짓이 어떨 때는 스크롤, 어떨 때는 입력으로 보인다.
@@ -2355,11 +2371,10 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_pressed = null;
             set_back_pressed = false;
             if (set_open == null) {
-                set_scroll -= y - set_last_y;
+                set_scroll -= dy;
                 clampSetScroll();
-                set_fling = y - set_last_y;
+                set_fling = dy;
             }
-            set_last_y = y;
         },
         else => {
             const was = set_active;
@@ -2405,6 +2420,13 @@ pub export fn maru_mobile_pop_screen() u32 {
     }
     if (screen == .terminal) return 0;
     screen = .terminal;
+    // **진행 중이던 손짓도 함께 거둔다.** 손가락을 댄 채 뒤로가기를 누르면 up 이 안 와서
+    // `set_active`·눌림 표시·관성이 터미널 화면까지 살아남는다 — 남은 관성이 목록을 계속
+    // 밀고, 다시 들어오면 누른 적 없는 행이 눌린 것처럼 보인다.
+    set_active = false;
+    set_pressed = null;
+    set_back_pressed = false;
+    set_fling = 0;
     return 1;
 }
 

@@ -187,6 +187,37 @@ pub const HostAdapter = struct {
         return self.slot.finishRetirementCleanup(cleanup);
     }
 
+    pub fn prepareClientReplacement(
+        self: *HostAdapter,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        source: *client_mod.Client,
+        out: *client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        const profile = compatibility.profileForMajor(source.wire_major) orelse
+            return error.InvalidOwner;
+        const kind: Kind = switch (profile.kind) {
+            .current => .current,
+            .previous => .previous,
+        };
+        if (kind != self.kind or source.screen_codec_version != profile.screen_codec_version)
+            return error.InvalidOwner;
+        return self.slot.prepareClientReplacement(cleanup, source, out);
+    }
+
+    pub fn abortClientReplacement(
+        self: *HostAdapter,
+        prepared: *client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        return self.slot.abortClientReplacement(prepared);
+    }
+
+    pub fn publishClientReplacementNoFail(
+        self: *HostAdapter,
+        prepared: *client_slot_mod.PreparedClientReplacement,
+    ) void {
+        self.slot.publishClientReplacementNoFail(prepared);
+    }
+
     pub fn initInPlace(
         out: *HostAdapter,
         node_allocator: std.mem.Allocator,
@@ -636,6 +667,97 @@ test "host adapter validation failure preserves Client ownership and destination
     try std.testing.expectError(error.UnsupportedProtocol, HostAdapter.initInPlace(out, allocator, &source));
     try std.testing.expectEqualSlices(u8, &before, &out_bytes);
     try std.testing.expect(source.canMoveToGenerationNode());
+}
+
+test "CR3b R2c HostAdapter facade는 incompatible replacement를 mutation 없이 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B2C3,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: HostAdapter = undefined;
+    try HostAdapter.initInPlace(&adapter, allocator, &source);
+    defer adapter.deinit();
+
+    var admission: client_slot_mod.PreparedAdmissionClose = .{};
+    var cleanup: client_slot_mod.PreparedRetirementCleanup = .{};
+    try client_slot_mod.testing.prepareDetachedCleanupForReplacementForTest(
+        &adapter.slot,
+        &admission,
+        &cleanup,
+    );
+
+    var incompatible: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B2C3,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version + 1,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    const incompatible_before = incompatible;
+    const slot_before = adapter.slot;
+    var rejected: client_slot_mod.PreparedClientReplacement = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        adapter.prepareClientReplacement(&cleanup, &incompatible, &rejected),
+    );
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&incompatible_before), std.mem.asBytes(&incompatible)));
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&slot_before), std.mem.asBytes(&adapter.slot)));
+    try std.testing.expectEqual(client_slot_mod.PreparedClientReplacement{}, rejected);
+
+    var missing_fd: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B2C3,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    const missing_fd_before = missing_fd;
+    const slot_before_missing_fd = adapter.slot;
+    var missing_fd_rejected: client_slot_mod.PreparedClientReplacement = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        adapter.prepareClientReplacement(&cleanup, &missing_fd, &missing_fd_rejected),
+    );
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&missing_fd_before), std.mem.asBytes(&missing_fd)));
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&slot_before_missing_fd), std.mem.asBytes(&adapter.slot)));
+    try std.testing.expectEqual(client_slot_mod.PreparedClientReplacement{}, missing_fd_rejected);
+
+    var compatible_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &compatible_pair),
+    );
+    defer _ = std.c.close(compatible_pair[1]);
+    var compatible: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = compatible_pair[0],
+        .host_id = 0xC3B2C3,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var compatible_owns_fd = true;
+    defer if (compatible_owns_fd) {
+        _ = std.c.close(compatible_pair[0]);
+    };
+    var prepared: client_slot_mod.PreparedClientReplacement = .{};
+    try adapter.prepareClientReplacement(&cleanup, &compatible, &prepared);
+    compatible_owns_fd = false;
+    var prepared_live = true;
+    defer if (prepared_live) {
+        adapter.abortClientReplacement(&prepared) catch
+            @panic("CR3b R2c HostAdapter replacement fallback failed");
+    };
+    try adapter.abortClientReplacement(&prepared);
+    prepared_live = false;
 }
 
 test "CR0b ClientSlot binding은 final Client 주소를 map publication보다 먼저 봉인한다" {

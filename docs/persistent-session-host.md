@@ -5176,6 +5176,18 @@ seal·prepare/preflight/commit/abort/finish, HostAdapter facade, sole runtime co
 새 Client allocation/current publication이나 retired Client destroy를 하지 않으므로 R2c·R3 전에는 R2 또는 실제 reconnect 완료로
 세지 않는다.
 
+R2c의 focused gate는 `zig build test-session-host-cr3b-r2c`다. R2b를 상속하고 Debug·ReleaseFast 각각에서 완성된 새 Client를
+final-address heap node로 이동한 뒤 checked-monotonic connection generation과 registry/current pointer를 한 번에 게시하는 행과,
+copied replacement handle과 prepared 뒤 candidate codec drift를 mutation 없이 거부하고 canonical abort가 old registry를 복구하는 행을 실행한다.
+prepare는 usable한 live fd를 가진 candidate만 받아 이후 no-fail publication에 새 fallible 전제를 남기지 않는다.
+같은 hostile 행은 max connection generation에서 replacement 준비가 `GenerationExhausted`로 slot/source/destination mutation 없이
+끝나는지도 검증한다.
+HostAdapter facade는 wire kind/screen codec이 다른 source를 slot mutation 전에 거부한다.
+게시 전 old registry admission은 닫혀 있고, 게시 뒤 old node는 detached retired inventory로 보존되어 R3 전에는 파괴되지 않는다.
+managed incident binding은 새 Client 주소와 generation으로 다시 봉인하고, 새 current에서 처음 발급하는 attachment reservation도
+같은 connection generation을 사용한다. 이 dormant leaf의 제품 caller는 0이며 R3 reclaim과
+CR3c 실제 reconnect integration을 완료했다고 주장하지 않는다.
+
 #### CR3a ownership target inventory
 
 CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.

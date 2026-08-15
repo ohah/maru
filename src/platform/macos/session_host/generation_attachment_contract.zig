@@ -114,7 +114,7 @@ pub const BindingIdentity = struct {
             self.slot_incarnation != 0 and
             self.node_incarnation != 0 and
             self.host_id != 0 and
-            self.connection_generation == 1 and
+            self.connection_generation != 0 and
             self.runtime_id != 0 and
             self.pid != 0 and
             self.process_nonce != 0;
@@ -1209,7 +1209,7 @@ test "CR3a-2a prepared binding reserves before request and rejects copied execut
     try std.testing.expectEqual(BindingLifecycle.executing, binding.lifecycle);
 }
 
-test "CR3a-2a generation one and full-width host runtime identities are exact" {
+test "CR3a-2a nonzero generation and full-width host runtime identities are exact" {
     var binding: PreparedAttachmentBinding = .{};
     const canonical = BindingIdentity.init(.{
         .binding_incarnation = 3,
@@ -1234,7 +1234,11 @@ test "CR3a-2a generation one and full-width host runtime identities are exact" {
 
     var future_generation = canonical;
     future_generation.connection_generation = 2;
-    try std.testing.expect(!future_generation.valid());
+    try std.testing.expect(future_generation.valid());
+    try std.testing.expect(!canonical.matches(future_generation));
+    future_generation.connection_generation = std.math.maxInt(u64);
+    try std.testing.expect(future_generation.valid());
+    try std.testing.expect(!canonical.matches(future_generation));
 }
 
 test "CR3a-2a every scalar binding authority rejects zero and every foreign field mismatches" {

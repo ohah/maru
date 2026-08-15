@@ -1102,8 +1102,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    gate 밖에서 exact once 정산한다. **R2b 완료:** 실제 fd·pending frame allocator와 external-mode deinit reservation을 keyed
    final-address handle에 봉인하고, writer gate에서는 Client owner를 callback 없이 handle로 옮긴 뒤 gate 밖에서 external cleanup,
    close/free를 exact once 수행한다. copied handle·wrong generation·Client-owned allocation alias는 mutation 0이고 abort는 admission cancel 권위를 보존한다.
-   **R2c**는 새 Client node를 완성한 뒤
-   checked-monotonic connection generation과 current pointer를 no-fail suffix로 게시한다. R2a는 cleanup callback, 새 Client
+   **R2c 완료:** final-address `PreparedClientReplacement`가 새 Client node를 완성하고 managed incident binding을 새 주소와
+   generation으로 재봉인한 뒤, registry row와 checked-monotonic connection generation/current pointer를 같은 no-fail suffix로
+   게시한다. prepare는 usable한 live fd를 요구하며, 새 current에서 발급하는 attachment reservation도 그 connection generation에 exact 결속한다.
+   copied/hostile binding은 mutation 전에 거부하고 abort는 old registry admission을 복구하며, published old node는
+   detached retired inventory에 보존한다. R2a는 cleanup callback, 새 Client
    allocation/current 교체, retired Client destroy를 소유하지 않고, R2b는 새 generation publication을 소유하지 않으며,
    R2c는 old node destroy를 소유하지 않는다. CR3c는 R2/R3 결과를 CR2의 실제 `RemoteGeneration` slot에
    연결하며 stable shell 자체를 처음 도입하는 단계가 아니다.

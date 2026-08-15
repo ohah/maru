@@ -182,7 +182,7 @@ pub const GenerationTransport = struct {
         const identity = self.binding_reservation.identity;
         if (!rawLifecycleValid(&self.lifecycle) or self.self_addr != @intFromPtr(self) or
             self.lifecycle != .live or self.slot_addr == 0 or self.owner_seal_addr == 0 or
-            self.transport_incarnation == 0 or self.connection_generation != 1 or self.pid == 0 or
+            self.transport_incarnation == 0 or self.connection_generation == 0 or self.pid == 0 or
             self.pid != currentPid() or self.owner_thread_id != std.Thread.getCurrentId() or
             !bindingRoleRawValid(&identity.role) or
             self.slot_incarnation != identity.slot_incarnation or
@@ -695,7 +695,7 @@ pub const GenerationTransport = struct {
             self.lifecycle != .live or
             self.slot_addr == 0 or self.owner_seal_addr == 0 or self.owner_size == 0 or
             self.transport_incarnation == 0 or self.pid == 0 or
-            self.connection_generation != 1 or self.pid != currentPid() or
+            self.connection_generation == 0 or self.pid != currentPid() or
             self.owner_thread_id != std.Thread.getCurrentId())
             return null;
         const owner_seal: *const contract.TransportOwnerSeal = @ptrFromInt(self.owner_seal_addr);
@@ -703,6 +703,7 @@ pub const GenerationTransport = struct {
         if (!bindingRoleRawValid(&self.binding_reservation.identity.role) or
             !slot.valid() or slot.incarnation.tagged != self.slot_incarnation or
             slot.current.incarnation.tagged != self.node_incarnation or
+            slot.current.connection_generation != self.connection_generation or
             slot.current.client.host_id != self.host_id or
             slot.process_nonce != self.process_nonce)
             return null;
@@ -751,7 +752,7 @@ pub const GenerationTransport = struct {
         return rawLifecycleValid(&self.lifecycle) and self.self_addr == @intFromPtr(self) and
             self.lifecycle == .live and self.slot_addr != 0 and self.owner_seal_addr != 0 and
             self.owner_size != 0 and self.transport_incarnation != 0 and self.pid != 0 and
-            self.connection_generation == 1 and self.pid == currentPid() and
+            self.connection_generation != 0 and self.pid == currentPid() and
             self.owner_thread_id == std.Thread.getCurrentId() and
             bindingRoleRawValid(&identity.role) and
             self.slot_incarnation == identity.slot_incarnation and

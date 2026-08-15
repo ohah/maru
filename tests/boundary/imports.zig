@@ -567,12 +567,15 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "canMoveToGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "moveToGenerationNode" },
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+            .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
         } },
         .{ .receiver = "bindGenerationAccountingLedger", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+            .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
         } },
         .{ .receiver = "moveToGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+            .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
         } },
         .{ .receiver = "clientProjectionAuthorityDigest", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 2 },
@@ -715,6 +718,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         } },
         .{ .receiver = "bindOperationFence", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+            .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
         } },
     };
     var wrong_construction_category = construction;
@@ -2037,6 +2041,22 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementDetach" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitRetirementDetachNoFail" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "validateRetirementPlaceholder" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedClientReplacement" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedClientReplacementLifecycleRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishClientSlotReplacement" },
+                .{ .parent = "ClientSlot", .kind = "field", .visibility = "private", .modifier = "", .name = "retired" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredNodeValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumedRetirementCleanupValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementSeal" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "bindReplacementIncidentIdentityNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "replacementIncidentIdentityPreflight" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedClientReplacementValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementCandidateDigest" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientReplacementError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareClientReplacement" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortClientReplacement" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishClientReplacementNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementSealAfterPublish" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ManagedPoisonError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoison" },
@@ -2194,11 +2214,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     for (fence_bit_contract) |declaration|
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(client, declaration));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countOccurrences(client_slot, "client_mod.ClientOperationFence.initInPlace("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countIdentifierOutsideTopLevelTests(client_slot, "bindOperationFence"),
     );
     try std.testing.expectEqual(
@@ -2219,20 +2239,20 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        // 일반 teardown과 2d2 terminal aggregate teardown이 같은 배타적 fence를 연다.
-        @as(usize, 3),
+        // 일반 teardown, 2d2 terminal aggregate teardown과 R2c replacement prepare가 같은 배타적 fence를 연다.
+        @as(usize, 4),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
-        // 일반 teardown 한 경로와 2d2 terminal aggregate teardown의 실패·성공 해제가
+        // 일반 teardown, 2d2 terminal aggregate teardown과 R2c abort가
         // 모두 같은 exclusive fence 해제 함수로 수렴한다.
-        @as(usize, 4),
+        @as(usize, 6),
         countIdentifierOutsideTopLevelTests(client_slot, "abortRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
-        // 두 번째 참조는 builtin.is_test 활성화 경합 probe다. 이 경로는 AdminBusy만
-        // 관측하며 teardown 권위를 획득하지 않는다.
-        @as(usize, 2),
+        // 두 번째 참조는 builtin.is_test 활성화 경합 probe이고 세 번째는 unpublished
+        // R2c candidate abort다.
+        @as(usize, 3),
         countIdentifierOutsideTopLevelTests(client_slot, "tryAcquireClientSlotTeardownExclusive"),
     );
     try std.testing.expectEqual(
@@ -2240,7 +2260,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "abortClientSlotTeardownExclusive"),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        // ordinary slot deinit, unpublished R2c abort와 test-only retired fixture reclaim.
+        @as(usize, 3),
         countIdentifierOutsideTopLevelTests(client_slot, "tryDeinitClientSlotExclusiveHeld"),
     );
     try expectContainerMethodMarkersInOrder(
@@ -4692,7 +4713,8 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 1), read_references);
     // 일반 release와 2d2 terminal aggregate drain이 같은 canonical accounting permit을 쓴다.
     try std.testing.expectEqual(@as(usize, 2), prepare_references);
-    try std.testing.expectEqual(@as(usize, 1), bind_references);
+    // 최초 node와 R2c replacement node가 같은 canonical accounting ledger binding을 쓴다.
+    try std.testing.expectEqual(@as(usize, 2), bind_references);
     // Batch, one-shot initial snapshot, RPC prepare/execute/publication과 R2b test-only external
     // fixture는 purpose-tagged node-local allocator scope를 공유한다. 그 밖의 파일에는 raw
     // allocator authority가 없다.
@@ -7622,11 +7644,13 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             );
         }
         const move_count = countIdentifierOutsideTopLevelTests(source, "moveToGenerationNode");
-        const expected_move_count: usize = if (std.mem.eql(
+        const expected_move_count: usize = if (is_client_slot)
+            2
+        else if (std.mem.eql(
             u8,
             entry.path,
             "platform/macos/session_host/client.zig",
-        ) or is_client_slot) 1 else 0;
+        )) 1 else 0;
         try std.testing.expectEqual(expected_move_count, move_count);
         if (!is_client_slot)
             try std.testing.expectEqual(

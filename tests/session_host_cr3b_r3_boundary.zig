@@ -79,7 +79,7 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
         u8,
         build,
         build_step_start,
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr3c_c1_step = b.step(",
     ) orelse return error.MissingR3BuildStepEnd;
     const build_step = build[build_step_start..build_step_end];
     const can_retire_start = std.mem.indexOf(
@@ -132,7 +132,7 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
     try std.testing.expectEqual(@as(usize, 2), count(slot, "test \"CR3b R3 reclaim은"));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "test \"CR3b R3 HostAdapter facade는"));
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         count(adapter_product, "prepareRetiredClientReclaim("),
     );
     try std.testing.expectEqual(
@@ -140,13 +140,14 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
         count(adapter_product, "preflightRetiredClientReclaim("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         count(adapter_product, "commitRetiredClientReclaimAtTickEndNoFail("),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
         count(adapter_product, "self.slot.commitRetiredClientReclaimNoFail("),
     );
+    try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn reclaimAllRetiredForCr3c("));
     try std.testing.expectEqual(@as(usize, 1), count(seal_contract, "pub const PreparedRetiredClientReclaimSealInput"));
     try std.testing.expectEqual(@as(usize, 1), count(seal_service, "pub fn preparedRetiredClientReclaimSeal("));
     try std.testing.expectEqual(@as(usize, 1), count(build_step, "\"test-session-host-cr3b-r3\""));

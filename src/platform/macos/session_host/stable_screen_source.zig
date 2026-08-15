@@ -214,6 +214,25 @@ pub const StableScreenSource = struct {
         return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
     }
 
+    /// CR3c1 전용. R2a가 예약한 unavailable placeholder와 exact 같은 shell
+    /// generation을 live target으로 승격한다. generation을 재발급하지 않는다.
+    pub fn promoteUnavailableToLiveWithCommit(
+        self: *StableScreenSource,
+        source: ScreenSource,
+        generation: u64,
+        context: anytype,
+        comptime commit: anytype,
+    ) PublishError!void {
+        if (sourceAliasesOwner(self, source)) return error.InvalidOwner;
+        try self.beginWriter();
+        defer self.endWriter();
+        if (self.lifecycle != .ready) return error.Closed;
+        if (self.current.kind != .unavailable or self.current.generation != generation or generation == 0)
+            return error.InvalidGeneration;
+        commit(context);
+        self.current = .{ .source = source, .generation = generation, .kind = .live };
+    }
+
     /// current target을 stable unavailable placeholder로 바꾼다. generation 증가가 불가능한 max 상태는
     /// authority를 재사용하지 않고 fail-close한다.
     pub fn publishUnavailable(
@@ -250,6 +269,33 @@ pub const StableScreenSource = struct {
         try self.validateNextGeneration(generation);
         const retired = self.current;
         commit(context);
+        self.current = .{
+            .source = self.unavailable.screenSource(),
+            .generation = generation,
+            .kind = .unavailable,
+        };
+        return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
+    }
+
+    /// CR3c integration leaf. The callback may report a pre-mutation Busy/authority failure while
+    /// the writer gate still pins the old live target. Only a successful callback permits the
+    /// unavailable target publication, so a terminal attachment is never exposed as live.
+    pub fn publishUnavailableFromLiveWithFallibleCommit(
+        self: *StableScreenSource,
+        expected_generation: u64,
+        generation: u64,
+        context: anytype,
+        comptime commit: anytype,
+    ) PublishError!RetiredTarget {
+        try self.beginWriter();
+        defer self.endWriter();
+        if (self.lifecycle != .ready) return error.Closed;
+        if (self.current.kind != .live or self.current.generation != expected_generation)
+            return error.InvalidGeneration;
+        try self.validateNextGeneration(generation);
+        const retired = self.current;
+        const committed: PublishError!void = commit(context);
+        try committed;
         self.current = .{
             .source = self.unavailable.screenSource(),
             .generation = generation,

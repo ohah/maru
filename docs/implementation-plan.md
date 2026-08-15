@@ -102,7 +102,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `discarded_stale`는 pool membership/connection generation이 바뀌었다는 owner 증거가 있을 때만 소비한다. 실제
    `connectExistingHost`와 `PreparedReconnect`는 각각 CR4와 CR2e가 소유하므로 CR1이 raw socket, HostPool adapter 교체 또는
    Window tree 순회를 추가하면 선행 gate 우회다.
-4. **CR2 — stable shell 기반:** CR2a는 current `RemoteRuntime`의 generation-owned field 11개
+4. **CR2 — stable shell 기반:** CR2a는 current `RemoteRuntime`의 generation-owned field 12개
    (`connection`, `attachment`, `event_generation_tracking`, resize wire state 3개, pump state 4개, `observation`)와
    stable-shell 잔류 owner를 closed inventory로 고정하고 `RemoteGeneration`만 추출한다. Zig의 nested aggregate 정렬로
    `RemoteRuntime`은 Debug/ReleaseFast 모두 정확히 16바이트만 증가하며 기존 4,096-runtime 상한에서 64 KiB가 추가된다. direct-input/control queue와
@@ -1109,7 +1109,21 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    detached retired inventory에 보존한다. R2a는 cleanup callback, 새 Client
    allocation/current 교체, retired Client destroy를 소유하지 않고, R2b는 새 generation publication을 소유하지 않으며,
    R2c는 old node destroy를 소유하지 않는다. CR3c는 R2/R3 결과를 CR2의 실제 `RemoteGeneration` slot에
-   연결하며 stable shell 자체를 처음 도입하는 단계가 아니다.
+   연결하며 stable shell 자체를 처음 도입하는 단계가 아니다. CR3c는 두 닫힌 gate로 진행한다.
+   **CR3c1**은 prepared admission close를 검증한 상태에서 old `RemoteGeneration` attachment를 먼저 terminalize하고 같은
+   no-fail suffix로 admission close를 게시한다. 그래야 old transport/event 권위를 반납한 뒤 R2a/R2b/R2c와 새 attachment
+   준비가 진행될 수 있다. 이어 같은 `HostAdapter`와 exact old/next connection generation에 결속된 R2c published receipt와
+   fully prepared `PreparedReconnect`를 stable screen writer gate에서 결속한다.
+   shell generation과 connection generation은 별도 축이다. R2a가 `old shell + 1`에 게시한 unavailable placeholder를
+   같은 shell generation의 live candidate로 승격하고, `RemoteGeneration.connection_generation`은 Client의
+   `old connection + 1`과 exact 일치시킨다. candidate `RemoteGeneration.connection`이 다른 adapter이거나 두 connection
+   generation이 어긋나면 screen과 generation slot은 mutation 0이며 이미 게시된 Client current/retired graph도 그대로다.
+   Client publication 뒤 전용 forward-recovery prepare가 실패하면 terminal old attachment, unavailable placeholder와 새 Client를 보존해 같은 generation으로
+   재시도하는 forward-recovery 상태가 된다. 이 단계는 old `RemoteGeneration`과 old Client를 각각 retiring inventory에
+   보존하며 어느 쪽도 파괴하지 않는다. **CR3c2**는 exact 같은 retiring generation을 먼저
+   `RemoteGeneration` attachment/observation owner에서 정산하고, 그 정산으로 readiness가 열린 oldest retired Client를 같은
+   tick-end owner turn에서 final-address reclaim 권위로 회수한다. 둘 중 한쪽만 다른 generation을 가리키거나 준비된 권위가
+   drift하면 destroy 0이며, 정상 suffix의 순서는 RemoteGeneration teardown 뒤 Client node destroy다.
    **R3**는 retired inventory를 exact 2-slot bounded owner로 확장하고, pure `Client.canRetireFromGenerationNode` projection과
    final-address `PreparedRetiredClientReclaim` seal로 oldest generation을 고정한다. tick-end no-fail suffix만 Client graph와
    node-local registries/accounting을 정산하고 allocator destroy한 뒤 inventory를 compact한다. cap 2 상태의 세 번째 prepare,

@@ -2084,6 +2084,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareClientReplacement" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortClientReplacement" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishClientReplacementNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightClientReplacement" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightPublishedClientReplacement" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementCleanupBeforeAdmissionClose" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementDetachBeforeAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementSealAfterPublish" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ManagedPoisonError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
@@ -2258,12 +2262,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        // R1 stack borrow/admission, managed poison, R2a detach와 R2b cleanup prepare/commit/finish가 같은 operation으로 current node를 고정한다.
-        @as(usize, 18),
+        // R1 stack borrow/admission, managed poison, R2a/R2b와 CR3c pre-admission 두 preflight가 같은 operation으로 current node를 고정한다.
+        @as(usize, 20),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 22),
+        @as(usize, 24),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(

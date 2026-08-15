@@ -1163,7 +1163,7 @@ pub fn mintInPlace(
         .slot_incarnation = slot.incarnation.tagged,
         .node_incarnation = slot.current.incarnation.tagged,
         .host_id = slot.current.client.host_id,
-        .connection_generation = 1,
+        .connection_generation = binding_reservation.identity.connection_generation,
         .transport_incarnation = incarnation,
         .pid = slot.pid,
         .process_nonce = slot.process_nonce,

@@ -138,7 +138,7 @@ flowchart TD
 |---|---|
 | `build.zig` configure | 통과. `target.result.os.tag == .macos` 게이트가 macOS 전용 스텝 39개를 자동 제외한다 |
 | L1 `terminal`·`renderer` / L2 `session` / L3 `chrome` 컴파일 | **전부 통과**(중립 3층이 무수정에 가깝게 선다 — §4의 "L1 ~85–95% 재사용" 추정과 부합) |
-| `zig build test` | **2,323 통과 / 12 skip / 21 실패** |
+| `zig build test` | **2,323 통과 / 33 skip / 0 실패** (exit 0 — 다른 호스트에서도 CI 게이트로 쓸 수 있다) |
 | `check-boundaries`·`check-doc-links`·`check-config-docs` | 전부 통과 |
 | `zig build`(CLI exe) | 실패 — `src/main.zig`의 unix domain socket(`AF.UNIX`·`sockaddr.un`)과 POSIX 파일 모드(0600) |
 
@@ -150,9 +150,22 @@ flowchart TD
 > **L2에서 경로 구분자를 만들어 내는 자리는 항상 POSIX 구분자(`/`)를 쓴다.** 구분자를 *읽는* 쪽(`isAbsolute`·`dirname`·
 > `basename`)은 Windows 구현도 `/`를 함께 받아들이므로 그대로 둔다. macOS/Linux에서는 native == posix라 무변화다.
 
-**남은 21개 실패는 하나의 원인**이다: `src/observability/connection_incident.zig`의 `currentProcessId()`가 macOS/Linux 외
-호스트에서 `0`을 반환하는 **의도적 fail-closed** 스위치라, process authority가 서지 않아 incident 서비스 전체가
-`error.InvalidAuthority`로 닫힌다. Windows PID를 이 신뢰 도메인에 넣을지는 보안 결정이라 **여기서 정하지 않는다**.
+**skip 21개는 하나의 원인**이다: `src/observability/connection_incident.zig`의 `currentProcessId()`가 macOS/Linux 외
+호스트에서 `0`을 반환하는 **의도적 fail-closed** 스위치라, process authority가 서지 않아 incident 서비스가
+`error.InvalidAuthority`로 닫힌다. 이 모듈은 중립 레이어에 있지만 **소비자가 전부 macOS 세션 호스트**
+(`platform/macos/session_host/**`)인 — 즉 그 호스트가 이식될 때 함께 재사용될 — 중립 코어다.
+
+그래서 그 호스트가 없는 동안은 **전제가 없다고 skip**하되, 조건을 OS 이름이 아니라 `currentProcessId() == 0`
+(=실패하는 전제 그 자체)으로 잡는다. `builtin.os.tag`로 skip하면 그 호스트를 지원하게 된 날 누군가 skip을
+지워야 하고, 안 지우면 포팅이 끝나도 테스트가 계속 잔다. 지금 형태는 `currentProcessId()`에 분기가 추가되는
+순간 **저절로 깨어난다** — 실측으로 확인했다(임시로 `.windows => GetCurrentProcessId()`를 넣자 통과 수가
+2,323 → 2,344로 정확히 21 늘고 skip은 33 → 12로 줄었다. 즉 그 21개를 막던 것은 PID 하나뿐이고 로직 자체는
+호스트 독립이라, 이 skip이 실패를 감추고 있지 않다).
+
+Windows PID를 이 신뢰 도메인에 넣는 것은 **세션 호스트 이식과 함께** 할 일이지 그보다 먼저 할 일이 아니다:
+`validAuthority`의 `self.pid == currentProcessId()`는 `fork` 후 자식이 메모리를 상속해 *주소는 같고 PID만 다른*
+상황을 잡는 가드인데, `fork`가 없는 호스트에서는 항등식이 된다. 먼저 넣으면 "권한 모델이 검증됐다"가 아니라
+"검증할 대상이 없어 통과했다"가 된다.
 
 **여전히 없는 것**: `src/platform/windows/`는 README 한 장이고 ConPTY 백엔드·Win32 호스트·렌더러는 0줄이다. 즉 이 실측이
 말하는 것은 "L4가 통째로 비어 있다"이지 "이식이 진행 중이다"가 아니다.

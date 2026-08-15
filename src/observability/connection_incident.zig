@@ -574,6 +574,19 @@ pub const ConnectionIncidentService = struct {
     }
 };
 
+/// process-domain identity가 없는 호스트에서는 이 모듈의 권한 게이트가 **정의상** 닫힌다.
+///
+/// `currentProcessId()`가 `0`이면 `initInPlace`가 곧바로 `error.InvalidAuthority`를 내므로, 아래 테스트들은
+/// 로직을 검사하기도 전에 전제에서 막힌다. 그 상태를 실패로 두면 스위트 전체가 영구히 빨개져 CI 게이트로
+/// 쓸 수 없고(= 중립 레이어 회귀를 다시 못 본다), 반대로 `builtin.os.tag`로 skip하면 **그 호스트를 지원하게
+/// 된 날 누군가 skip을 지워야 한다** — 안 지우면 포팅이 끝나도 테스트는 계속 잔다.
+///
+/// 그래서 OS 이름이 아니라 **실패하는 전제 그 자체**를 조건으로 쓴다. `currentProcessId()`에 그 호스트의
+/// 분기가 추가되는 순간 이 skip은 저절로 사라지고 21개가 깨어난다(수동 정리 불필요).
+fn requireProcessDomain() !void {
+    if (currentProcessId() == 0) return error.SkipZigTest;
+}
+
 fn currentProcessId() u64 {
     // 중립 observability 모듈은 session-host platform leaf를 역수입할 수 없다. 동일한 fail-closed
     // process-domain 규칙을 이 경계에서 직접 적용하고 boundary가 두 구현의 closed switch를 함께 고정한다.
@@ -1280,6 +1293,7 @@ test "CR0b core aggregate generation exhaustion은 ring을 변경하지 않는�
 }
 
 test "CR0b core service는 app nonce와 checked sequence를 incident에 exact once 발급한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());
@@ -1290,6 +1304,7 @@ test "CR0b core service는 app nonce와 checked sequence를 incident에 exact on
 }
 
 test "CR0b core service는 copied address와 PID domain mismatch를 ring mutation 전에 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     var copied = service;
@@ -1347,6 +1362,7 @@ test "CR0b core service는 fork child를 상속 mutex 접근 전에 거부한다
 }
 
 test "CR0b core service는 동시 최초 publication에 중복 없는 sequence를 발급한다" {
+    try requireProcessDomain();
     const thread_count = 8;
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
@@ -1377,6 +1393,7 @@ test "CR0b core service는 동시 최초 publication에 중복 없는 sequence�
 }
 
 test "CR0b core service sequence exhaustion은 마지막 발급 뒤 전용 결과로 mutation 없이 닫힌다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     service.last_issued_sequence = std.math.maxInt(u64);
@@ -1386,6 +1403,7 @@ test "CR0b core service sequence exhaustion은 마지막 발급 뒤 전용 결�
 }
 
 test "CR0b core repeat는 incident sequence와 detail slot을 소비하지 않고 aggregate만 갱신한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());
@@ -1405,6 +1423,7 @@ test "CR0b core repeat는 incident sequence와 detail slot을 소비하지 않�
 }
 
 test "CR0b core repeat는 foreign incident ID를 aggregate mutation 전에 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1425,6 +1444,7 @@ test "CR0b core ring은 기존 aggregate digest 손상을 새 fingerprint로 우
 }
 
 test "CR0b service transaction prepare는 ring과 pending을 바꾸지 않고 mutex를 유지한다" {
+    try requireProcessDomain();
     try std.testing.expect(!containsPointer(PreparedServicePublication));
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
@@ -1439,6 +1459,7 @@ test "CR0b service transaction prepare는 ring과 pending을 바꾸지 않고 mu
 }
 
 test "CR0b service transaction evidence 뒤 pending은 Client suffix까지 숨는다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     var prepared: PreparedServicePublication = .{};
@@ -1486,6 +1507,7 @@ test "CR0b service transaction evidence 뒤 pending은 Client suffix까지 숨�
 }
 
 test "CR0b service transaction abort는 pristine publication만 회수하고 다음 prepare를 연다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     var first: PreparedServicePublication = .{};
@@ -1501,6 +1523,7 @@ test "CR0b service transaction abort는 pristine publication만 회수하고 다
 }
 
 test "CR0b service transaction은 service alias와 copied plan drift를 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     const before = service;
@@ -1533,6 +1556,7 @@ test "CR0b service transaction은 service alias와 copied plan drift를 거부�
 }
 
 test "CR0b service transaction은 evidence 이후 abort를 거부하고 pending을 한 번 게시한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     var prepared: PreparedServicePublication = .{};
@@ -1552,6 +1576,7 @@ test "CR0b writer handoff는 재귀 pointer-free 값만 전달한다" {
 }
 
 test "CR0b writer는 가장 낮은 pending record를 값으로 가져간다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1564,6 +1589,7 @@ test "CR0b writer는 가장 낮은 pending record를 값으로 가져간다" {
 }
 
 test "CR0b writer는 pending이 없으면 output을 바꾸지 않는다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
@@ -1573,6 +1599,7 @@ test "CR0b writer는 pending이 없으면 output을 바꾸지 않는다" {
 }
 
 test "CR0b writer는 inflight aggregate를 건너뛰고 다음 pending을 가져간다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     const published = try service.publish(7, 9, unpublishedFixture());
@@ -1588,6 +1615,7 @@ test "CR0b writer는 inflight aggregate를 건너뛰고 다음 pending을 가져
 }
 
 test "CR0b writer는 service와 겹친 output을 source mutation 전에 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1598,6 +1626,7 @@ test "CR0b writer는 service와 겹친 output을 source mutation 전에 거부�
 }
 
 test "CR0b writer 완료는 exact record의 disk 상태만 게시한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1611,6 +1640,7 @@ test "CR0b writer 완료는 exact record의 disk 상태만 게시한다" {
 }
 
 test "CR0b writer 실패도 ring record를 보존한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1623,6 +1653,7 @@ test "CR0b writer 실패도 ring record를 보존한다" {
 }
 
 test "CR0b writer는 stale aggregate 완료 뒤 최신 generation을 다시 pending으로 둔다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());
@@ -1639,6 +1670,7 @@ test "CR0b writer는 stale aggregate 완료 뒤 최신 generation을 다시 pend
 }
 
 test "CR0b writer는 copied foreign receipt 완료를 mutation 없이 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1653,6 +1685,7 @@ test "CR0b writer는 copied foreign receipt 완료를 mutation 없이 거부한�
 }
 
 test "CR0b writer completion은 같은 receipt replay를 거부한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -1663,6 +1696,7 @@ test "CR0b writer completion은 같은 receipt replay를 거부한다" {
 }
 
 test "CR0b writer는 stale receipt replay가 최신 inflight를 소비하지 못하게 한다" {
+    try requireProcessDomain();
     var service: ConnectionIncidentService = .{};
     try service.initInPlace(7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());

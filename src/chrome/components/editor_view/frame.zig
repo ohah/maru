@@ -20,7 +20,7 @@ const geometry = @import("geometry.zig");
 const gutter = @import("gutter.zig");
 const scrollbar = @import("scrollbar.zig");
 const surface = @import("surface.zig");
-const visual_map = @import("visual_map.zig");
+const visual_map = @import("../../ui/visual_map.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 
 /// 내용(gutter·본문·스크롤바)이 뷰 사각에서 안쪽으로 들어가는 여백(px).

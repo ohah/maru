@@ -247,7 +247,7 @@ test "저장소가 겹치지 않는다 — 겹치면 한쪽 글자가 반대쪽 
     var text: [256]u8 = undefined;
     var runs: [64]draw.Run = undefined;
     var content_rows: [16]@import("content.zig").Row = undefined;
-    var visual_rows: [16]@import("visual_map.zig").VisualRow = undefined;
+    var visual_rows: [16]@import("../../ui/visual_map.zig").VisualRow = undefined;
     var gutter_rows: [16]@import("gutter.zig").Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [64]u8 = undefined;
@@ -275,7 +275,7 @@ test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩
     var text: [8]u8 = undefined;
     var runs: [2]draw.Run = undefined;
     var content_rows: [2]@import("content.zig").Row = undefined;
-    var visual_rows: [2]@import("visual_map.zig").VisualRow = undefined;
+    var visual_rows: [2]@import("../../ui/visual_map.zig").VisualRow = undefined;
     var gutter_rows: [2]@import("gutter.zig").Row = undefined;
     var counts: [2]u32 = undefined;
     var count_scratch: [8]u8 = undefined;
@@ -308,7 +308,7 @@ test "op 배열이 비어도 죽지 않는다" {
     var text: [0]u8 = undefined;
     var runs: [0]draw.Run = undefined;
     var content_rows: [0]@import("content.zig").Row = undefined;
-    var visual_rows: [0]@import("visual_map.zig").VisualRow = undefined;
+    var visual_rows: [0]@import("../../ui/visual_map.zig").VisualRow = undefined;
     var gutter_rows: [0]@import("gutter.zig").Row = undefined;
     var counts: [0]u32 = undefined;
     var count_scratch: [0]u8 = undefined;
@@ -340,7 +340,7 @@ test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane�
     var text: [512]u8 = undefined;
     var runs: [128]draw.Run = undefined;
     var content_rows: [16]@import("content.zig").Row = undefined;
-    var visual_rows: [16]@import("visual_map.zig").VisualRow = undefined;
+    var visual_rows: [16]@import("../../ui/visual_map.zig").VisualRow = undefined;
     var gutter_rows: [16]@import("gutter.zig").Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
@@ -385,7 +385,7 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
     var text: [128]u8 = undefined;
     var runs: [32]draw.Run = undefined;
     var content_rows: [8]@import("content.zig").Row = undefined;
-    var visual_rows: [8]@import("visual_map.zig").VisualRow = undefined;
+    var visual_rows: [8]@import("../../ui/visual_map.zig").VisualRow = undefined;
     var gutter_rows: [8]@import("gutter.zig").Row = undefined;
     var counts: [8]u32 = undefined;
     var count_scratch: [64]u8 = undefined;

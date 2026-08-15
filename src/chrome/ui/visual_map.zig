@@ -27,8 +27,8 @@
 //! 모듈은 마지막만 맡는다.
 
 const std = @import("std");
-const display_width = @import("../../../display_width.zig"); // §4.2 표시 폭 — 셀 배치와 같은 규칙
-const text_layout = @import("../../text_layout.zig"); // cluster 분절 단일 출처
+const display_width = @import("../../display_width.zig"); // §4.2 표시 폭 — 셀 배치와 같은 규칙
+const text_layout = @import("../text_layout.zig"); // cluster 분절 단일 출처
 
 /// 시각 행 하나가 덮는 범위. `text`(전개 결과) 안의 byte 구간이다.
 pub const Piece = struct {

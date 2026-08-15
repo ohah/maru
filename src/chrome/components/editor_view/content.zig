@@ -17,7 +17,7 @@ const geometry = @import("geometry.zig");
 const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
 const display_width = @import("../../../display_width.zig"); // §4.2 표시 폭 — 셀 배치(system_text)와 같은 규칙
 const hazard = @import("../../../hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(레이어 무관 중립)
-const visual_map = @import("visual_map.zig"); // §4 세로 축 — 전개된 줄을 시각 행으로 나눈다
+const visual_map = @import("../../ui/visual_map.zig"); // §4 세로 축 — 전개된 줄을 시각 행으로 나눈다
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;

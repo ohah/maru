@@ -1131,3 +1131,62 @@ test "랩된 줄: 첫 조각에만 강조가 서고 이어진 조각에는 안 �
     for (mark_rows[0..n]) |y| try testing.expectEqual(@as(i32, 0), y);
     // 밴드는 조각 전부에 깔린다(그쪽은 이미 고정돼 있다) — 강조만 첫 조각인 것이 이 한계다.
 }
+
+test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱스로 읽는다" {
+    // 밴드에서 같은 종류의 구멍이 있었다(뷰포트 기준으로 읽으면 화면 맨 위가 늘 0번이 된다). 마크는
+    // 거기에 **줄 본문 조회가 하나 더** 붙는다 — `props.lines[idx]`. 둘 중 하나만 어긋나도 강조가
+    // 엉뚱한 줄에, 혹은 맞는 줄의 엉뚱한 열에 선다.
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    // 줄마다 길이가 다르다 — 표를 잘못 읽으면 열이 티 나게 어긋난다.
+    const lines = [_][]const u8{ "a", "bb", "cccc", "ddddddd", "e" };
+    const bands = [_]RowBand{ .none, .none, .none, .added, .none };
+    const marks_3 = [_]Mark{.{ .start = 5, .len = 2 }}; // "ddddddd"의 6~7번째 글자
+    const marks = [_][]const Mark{ &.{}, &.{}, &.{}, &marks_3, &.{} };
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 2, // 화면 맨 위가 문서의 3번째 줄
+        .total_lines = lines.len,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 3,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 48 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    const layout = geometry.compute(40, lines.len, .{});
+    var found: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.alpha != mark_alpha) continue;
+        found += 1;
+        // 문서 4번째 줄 = 화면 두 번째 행(첫 행이 3번째 줄) → y = 16.
+        try testing.expectEqual(@as(i32, 16), op.quad.rect.y);
+        // 그 줄의 byte 5 = 열 5(ASCII) → 본문 시작 열 + 5.
+        try testing.expectEqual(@as(i32, (@as(i32, layout.contentLeft()) + 5) * 8), op.quad.rect.x);
+        try testing.expectEqual(@as(u32, 2 * 8), op.quad.rect.w);
+    }
+    try testing.expectEqual(@as(usize, 1), found);
+}

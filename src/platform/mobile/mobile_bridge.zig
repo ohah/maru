@@ -593,6 +593,9 @@ fn clampKeyBarScroll() void {
 /// **손가락이 닿아 있는 동안에는 안 흘린다.** `move` 가 이미 그만큼 스크롤했는데 여기서 또
 /// 흘리면 **같은 이동량이 두 번** 적용돼 손가락보다 두 배로 미끄러진다. 관성은 손을 뗀 뒤의 것이다.
 fn stepKeyBarFling() void {
+    // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
+    // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
+    if (screen != .terminal) return;
     if (kb_active or key_bar_fling == 0) return;
     key_bar_scroll -= key_bar_fling;
     // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,

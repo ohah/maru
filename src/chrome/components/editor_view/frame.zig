@@ -348,7 +348,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             const end_col = offsets[k * 2 + 1];
             if (end_col <= start_col) continue;
             // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
-            const from = @max(start_col, props.first_col);
+            const from = start_col;
             const to = @min(end_col, @as(u32, props.first_col) + layout.content.width);
             if (to <= from) continue;
             // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
@@ -954,4 +954,115 @@ test "탭이 있어도 강조가 글자 위에 선다 — 열은 전개 뒤 기�
         return;
     }
     return error.NoMark;
+}
+
+test "마크가 저장소보다 많으면 앞에서부터 그리고 죽지 않는다" {
+    // 열 계산용 저장소(`count_scratch`)를 마크 쌍이 나눠 쓴다. 모자랄 때 죽거나 남의 자리를 쓰면
+    // 안 되고, **앞에서부터 담을 수 있는 만큼**만 그린다(잘림은 이 컴포넌트의 기존 규율이다).
+    var ops: [256]draw.Op = undefined;
+    var text: [2048]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [8]content.Row = undefined;
+    var visual_rows: [8]visual_map.VisualRow = undefined;
+    var gutter_rows: [8]gutter.Row = undefined;
+    var counts: [8]u32 = undefined;
+    var count_scratch: [16]u8 = undefined; // u32 넷 = 마크 두 쌍만 들어간다
+
+    const line = "abcdefghijklmnop";
+    const lines = [_][]const u8{line};
+    const bands = [_]RowBand{.added};
+    var marks_row: [8]Mark = undefined;
+    for (&marks_row, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const marks = [_][]const Mark{&marks_row};
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 1,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var painted: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op == .quad and op.quad.alpha == mark_alpha) painted += 1;
+    }
+    // 여덟 개를 요구했지만 저장소가 두 쌍뿐이라 둘만 그린다 — 그리고 죽지 않는다.
+    try testing.expectEqual(@as(usize, 2), painted);
+}
+
+test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
+    // 지금 제품은 `first_col`이 0 고정이지만 컴포넌트는 그 축을 이미 받는다. 여기서 안 막으면
+    // 가로 스크롤이 붙는 순간 강조가 gutter나 옆 열을 침범한다.
+    var ops: [256]draw.Op = undefined;
+    var text: [2048]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [8]content.Row = undefined;
+    var visual_rows: [8]visual_map.VisualRow = undefined;
+    var gutter_rows: [8]gutter.Row = undefined;
+    var counts: [8]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    const line = "0123456789abcdef";
+    const lines = [_][]const u8{line};
+    const bands = [_]RowBand{.added};
+    const marks_row = [_]Mark{ .{ .start = 1, .len = 1 }, .{ .start = 12, .len = 2 } };
+    const marks = [_][]const Mark{&marks_row};
+    const layout = geometry.compute(12, 1, .{});
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .first_col = 10, // 열 10부터 보인다 — 앞의 마크는 화면 밖이다
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 1,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 96, .h = 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 12,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var found: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.alpha != mark_alpha) continue;
+        found += 1;
+        // 화면 밖(열 1)의 마크는 안 그려지고, 열 12~13짜리는 밀린 만큼 앞으로 온다.
+        try testing.expectEqual(@as(i32, (@as(i32, layout.contentLeft()) + 2) * 8), op.quad.rect.x);
+        // 본문 폭 밖으로 넘지 않는다.
+        try testing.expect(op.quad.rect.x + @as(i32, @intCast(op.quad.rect.w)) <= @as(i32, (@as(i32, layout.contentLeft()) + @as(i32, layout.content.width)) * 8));
+    }
+    try testing.expectEqual(@as(usize, 1), found);
 }

@@ -1655,6 +1655,10 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
 }
 
 /// 등록된 SVG 아이콘의 coverage 를 Zig 에서 만든다 — 두 플랫폼이 같은 코드를 쓴다.
+/// 상태바 아이콘 줄. **예약(레이아웃 padding)과 그리기가 같은 수를 봐야 한다** — 따로 적으면
+/// 개수를 늘렸을 때 아이콘만 왼쪽으로 번져 카드 위에 겹친다(그 모양을 화면으로 한 번 잡았다).
+const status_icon_count: usize = 6;
+const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 간격도 44 여야 한다
 const icon_slot_px = 32;
 /// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
 const icon_slots = 10;
@@ -1755,10 +1759,21 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     const middle = tree.container(.{ .id = 20, .direction = .row, .style = .{ .flex = .{ .grow = 1 } } }, &.{ sidebar, body });
 
     // ── 상태바
-    const status = tree.container(.{ .id = 400, .direction = .row, .style = .{ .height = .{ .px = 26.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } }, &.{
-        tree.card(.{ .id = 401, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 16.0 }, .margin = .{ .right = 10.0 } }, .variant = .raised }, &.{}),
-        tree.card(.{ .id = 402, .style = .{ .flex = .{ .grow = 1.4 }, .height = .{ .px = 16.0 } }, .variant = .raised }, &.{}),
-    });
+    // ── 하단 바: **아이콘 줄 하나다.**
+    //
+    // **높이 44 다**(iOS 44 · Android 48 의 아래쪽). 전에는 26 이라 이 줄의 어떤 아이콘도
+    // 손가락 기준을 못 맞췄다 — 설정 입구(톱니)를 44 로 넓히려다 그 사실이 드러났다.
+    // 대가는 본문이 18px 줄어드는 것이고, 실제 하단 바가 iOS 49pt·Android 56dp 인 것을 보면
+    // 44 도 넉넉한 편이 아니다([UX §5.6](../../../docs/mobile-ux.md)).
+    //
+    // **빈 카드 둘을 지웠다.** M0 에서 PoC 목업을 옮겨 오며 따라온 자리 채우개였고, 무엇이
+    // 들어갈지 어느 문서에도 없었다. 26 일 때는 얇은 선이라 안 보였는데 44 로 키우니 **빈
+    // 상자**가 되어 "여기 뭔가 들어간다" 로 읽혔다. 여기에 어울리는 것(연결 상태·세션 이름)은
+    // 전부 M3 가 정해야 나오므로, 그때 넣는다 — 지금 채우면 또 가짜 라벨이다.
+    //
+    // 자식이 없으므로 아이콘 자리를 padding 으로 예약할 필요도 없어졌다(예약이 좁은 창에서
+    // 음수 자리를 만들어 화면을 검게 만들던 위험도 함께 사라진다).
+    const status = tree.container(.{ .id = 400, .direction = .row, .style = .{ .height = .{ .px = 44.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } }, &.{});
 
     // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
     //
@@ -1939,10 +1954,12 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 
     // **SVG 아이콘**: maru 의 등록 아이콘을 그대로 얹는다. coverage 는 Zig 가 만들고
     // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
-    const icon_y: i32 = @intFromFloat(@max(0, height_f - 24));
-    const icon_step: i32 = 26;
-    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * 6 - 12;
-    for (0..6) |i| {
+    // 아이콘 18px 를 44 줄 한가운데. **간격도 44 다** — 히트를 44 로 주면 26 간격에서는
+    // 좌우로 9px 씩 겹쳐 어느 아이콘인지 모호해진다(설정 목록에서 배운 것과 같다).
+    const icon_y: i32 = @intFromFloat(@max(0, height_f - 44 + (44 - 18) / 2));
+    const icon_step: i32 = status_icon_step;
+    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * @as(i32, @intCast(status_icon_count)) - 12;
+    for (0..status_icon_count) |i| {
         if (!reserveQuad()) break;
         const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
         // 톱니(슬롯 1)가 설정 화면 입구다. **그리는 자리를 그대로 히트로 쓰되 44 로 넓힌다** —

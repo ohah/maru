@@ -194,7 +194,12 @@ fn baseButtonStyle(variant: ui_style.ButtonVariant, tk: *const tokens.Tokens) Re
             .foreground = buttonForeground(.ghost),
             .border = null,
             .corner_radii_px = uniform(tk.space.corner_radius_px),
-            .border_widths_px = uniform(tk.space.border_width_px),
+            // **테두리 색이 없으면 폭도 0이다.** lowering은 `border_role`이 null이면 색을 RGBA 0으로
+            // packing하는데 폭은 그대로 넘긴다 — 셰이더가 그 띠를 투명하게 칠해 **뒤가 비친다**.
+            // 배경과 같은 색이면 안 보이지만, 그 위에 호버 밴드처럼 다른 색이 깔리는 순간 행보다 어두운
+            // 2px 링으로 드러난다(소스 컨트롤 도크 호버 캡처로 실측). ghost는 "테두리 없는 버튼"이므로
+            // 폭을 남겨 둘 이유가 없다.
+            .border_widths_px = uniform(0),
             .shadow = null,
         },
         // 파괴적 action. ThemeColors에 semantic error 입력이 없어 token layer가 보수적 fallback을
@@ -236,4 +241,28 @@ fn shadowFromTokens(tk: *const tokens.Tokens) ?ResolvedShadow {
 
 fn uniform(value: u16) [4]u16 {
     return .{ value, value, value, value };
+}
+
+test "ghost 버튼은 테두리 폭이 0이다(색 없는 테두리가 배경을 뚫는다)" {
+    // lowering은 `border_role`이 null이면 색을 RGBA 0으로 packing하면서 **폭은 그대로 넘긴다**. 그러면
+    // 셰이더가 그 띠를 투명하게 칠해 뒤가 비치고, 버튼이 행과 같은 배경일 때는 안 보이다가 **호버 밴드가
+    // 깔리는 순간** 행보다 어두운 링으로 드러난다(소스 컨트롤 도크에서 실측). 폭을 0으로 두는 것이
+    // "테두리 없음"의 유일한 정직한 표현이다.
+    const tk = tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 1, .g = 1, .b = 1 },
+        .diff_removed = .{ .r = 2, .g = 2, .b = 2 },
+        .foreground = .{ .r = 3, .g = 3, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 4, .b = 4 },
+        .sidebar_foreground = .{ .r = 5, .g = 5, .b = 5 },
+        .sidebar_active = .{ .r = 6, .g = 6, .b = 6 },
+        .search_match = .{ .r = 7, .g = 7, .b = 7 },
+        .search_match_current = .{ .r = 8, .g = 8, .b = 8 },
+        .selection = .{ .r = 9, .g = 9, .b = 9 },
+        .cursor = .{ .r = 10, .g = 10, .b = 10 },
+        .terminal_background = .{ .r = 11, .g = 11, .b = 11 },
+        .accent = .{ .r = 12, .g = 12, .b = 12 },
+    });
+    const ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{}, &tk);
+    try @import("std").testing.expectEqual(@as(?tokens.ColorRole, null), ghost.border);
+    try @import("std").testing.expectEqualSlices(u16, &.{ 0, 0, 0, 0 }, &ghost.border_widths_px);
 }

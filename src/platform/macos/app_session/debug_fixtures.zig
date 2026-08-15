@@ -671,6 +671,51 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 ///
 /// 실제 상태는 셸 화면 관측이 정한다 — 그것을 캡처로 만들 방법이 없어서 훅이 필요하다(MARU_FORCE_AGENT와
 /// 같은 성격). env 미설정이면 무동작이라 일반 실행에 영향이 없다.
+/// 강제된 **소스 컨트롤 도크 행 호버**를 다시 세운다(캡처 전용, `MARU_FORCE_SCM_HOVER=<모델 인덱스|last>`).
+///
+/// 행 동작(`+`/`−`)은 **호버할 때만 그려진다**(그것이 계약이다 — 누를 수 없는 컨트롤을 상시 띄우지 않는다).
+/// 그래서 캡처 하니스에 포인터가 없으면 그 버튼이 화면에 나오는지 헤드리스로 확인할 방법이 아예 없다 —
+/// 사이드바 호버 밴드를 같은 이유로 강제하는 것과 같은 자리다.
+///
+/// **매 tick 다시 세운다.** 포인터가 도크 밖에 있으면 다음 pointer 이벤트가 곧바로 호버를 지운다.
+///
+/// env 미설정이면 무동작.
+pub fn reapplyForcedScmHover(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_SCM_HOVER") orelse return;
+    if (self.dock.view != .source_control) return;
+    const entries = self.scm_dock_entries.items;
+    if (entries.len == 0) return;
+
+    const spec = std.mem.span(raw);
+    // 발행된 tree에서 **행 노드만** 고른다. 인덱스는 published 창 기준이라, 스크롤 없이 캡처하는
+    // 하니스에서는 모델 인덱스와 같다.
+    var last_row: ?chrome.ui.tree.UiId = null;
+    var want_id: ?chrome.ui.tree.UiId = null;
+    const want_index: ?usize = if (std.mem.eql(u8, spec, "last")) null else std.fmt.parseInt(usize, spec, 10) catch 0;
+    var index: usize = 0;
+    while (index < entries.len) : (index += 1) {
+        const id = chrome.components.scm_dock.build.NodeIds.item(index);
+        var found = false;
+        for (entries) |entry| {
+            if (entry.id == id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) break;
+        last_row = id;
+        if (want_index) |w| {
+            if (index == w) want_id = id;
+        }
+    }
+    const target = want_id orelse last_row orelse return;
+    if (self.scm_dock_interaction.hovered) |cur| {
+        if (cur == target) return;
+    }
+    self.scm_dock_interaction.hovered = target;
+    self.metal_dirty = true;
+}
+
 /// 강제된 **사이드바 카드 호버**를 다시 세운다(캡처 전용, `MARU_FORCE_SIDEBAR_HOVER=<슬롯|last>`).
 ///
 /// 호버 밴드는 rich 토큰에서 **layer 0 GPU quad**라 사이드바 셀과 다른 경로로 잘린다. 그 클립이 상태바

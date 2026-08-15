@@ -136,7 +136,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 .style = .{
                     .width = .{ .px = @floatFromInt(m.action_extent) },
                     .height = .{ .px = @floatFromInt(m.action_extent) },
-                    .margin = .{ .right = @floatFromInt(m.inset_x) },
+                    // **상태 문자 자리를 비켜 앉는다.** 둘 다 오른쪽 `inset_x`를 쓰면 `+`와 `M`이 같은
+                    // 픽셀에 겹친다(호버 캡처로 실측했다). 상태 문자는 행이 선 그룹을 말하는 값이라
+                    // 호버 중에도 사라지면 안 되므로, 비키는 쪽은 버튼이다.
+                    .margin = .{ .right = @floatFromInt(m.inset_x + m.status_extent + m.gap) },
                 },
                 // 평소에는 배경 없이 글리프만 보인다(호버에서만 `view`가 칠한다).
                 .variant = .ghost,
@@ -494,4 +497,25 @@ test "탭 칸 rect가 tree에 있고 줄을 균등하게 덮는다" {
         // 마지막 칸이 줄 오른쪽 끝에 정확히 닿는다 — 손으로 나눌 때 2px 모자라던 자리다.
         try testing.expectEqual(row.x + row.width, prev_right);
     }
+}
+
+test "행 동작 버튼은 상태 문자 자리를 침범하지 않는다" {
+    // 둘 다 오른쪽 `inset_x`에 앉으면 `+`와 `M`이 **같은 픽셀에 겹친다**(호버 캡처로 실측). 상태 문자는
+    // 그 행이 선 그룹을 말하는 값이라 호버 중에도 사라지면 안 되므로, 비키는 쪽은 버튼이다.
+    var storage: Storage = .{};
+    const items = testItems();
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+
+    const row = frame.tree.entries[frame.tree.find(NodeIds.item(1)) orelse return error.MissingRow].rect;
+    const button = frame.tree.entries[frame.tree.find(NodeIds.itemAction(1)) orelse return error.MissingAction].rect;
+    const m = types.DockMetrics.resolve(1000);
+
+    // 상태 문자가 앉는 자리(행 오른쪽 끝에서 `inset_x` 안쪽, 폭 `status_extent`).
+    const status_left = row.x + row.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
+    const button_right = button.x + button.width;
+    try testing.expect(button_right <= status_left);
 }

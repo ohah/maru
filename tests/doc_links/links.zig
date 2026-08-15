@@ -386,7 +386,7 @@ fn collectDocPaths(arena: std.mem.Allocator) ![][]const u8 {
 
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "docs", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(arena);
+    var walker = try posixWalk(dir, arena);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file) continue;
@@ -399,7 +399,10 @@ fn collectDocPaths(arena: std.mem.Allocator) ![][]const u8 {
 /// `from`(저장소 기준 경로)에서 상대 `target`을 푼 저장소 기준 경로.
 fn resolveRelative(arena: std.mem.Allocator, from: []const u8, target: []const u8) ![]const u8 {
     const dir = std.fs.path.dirname(from) orelse ".";
-    const joined = try std.fs.path.join(arena, &.{ dir, target });
+    // `std.fs.path.join`이 아니라 `/`로 직접 잇는다 — join은 **호스트 native** 구분자를 쓰는데 바로 아래
+    // 정규화가 `/`로 split하므로, Windows에서는 `docs/plans\../native-editor.md`가 한 조각으로 남아 `..`가
+    // 접히지 않는다(실측). 저장소 기준 경로 표기는 문서·링크 양쪽 모두 `/`라 여기서도 `/`가 단일 규칙이다.
+    const joined = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, target });
     // `a/../b` 정규화. std.fs.path.resolve는 절대경로를 만들므로 직접 접는다.
     var parts: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, joined, '/');
@@ -568,7 +571,7 @@ test "계획 문서는 implementation-plan.md 인덱스가 가리킨다" {
 
     var dir = try cwd.openDir(std.testing.io, "docs/plans", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(arena);
+    var walker = try posixWalk(dir, arena);
     defer walker.deinit();
 
     var violations: usize = 0;
@@ -633,7 +636,7 @@ fn collectRefSourcePaths(arena: std.mem.Allocator) ![][]const u8 {
     for ([_][]const u8{ "src", "tests", "tools" }) |root| {
         var dir = std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true }) catch continue;
         defer dir.close(std.testing.io);
-        var walker = try dir.walk(arena);
+        var walker = try posixWalk(dir, arena);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file) continue;
@@ -822,4 +825,35 @@ test "상대 경로 해석: plans/ 하위에서 ../ 가 docs/ 로 올라간다" 
         "docs/file-panel.md",
         try resolveRelative(arena, "AGENTS.md", "docs/file-panel.md"),
     );
+}
+
+// ── 경로 구분자 정규화 (호스트 이식) ─────────────────────────────────────────────────────────────
+// `std.Io.Dir.Walker`의 `entry.path`는 **호스트 native 구분자**를 쓴다 — Windows에서는 `platform\macos\x.zig`.
+// 이 파일의 스캐너들은 그 경로를 `"platform/macos/x.zig"` 같은 **`/` 리터럴과 비교**하므로, 그대로 두면 제외
+// 목록과 매칭이 조용히 전부 빗나간다(실측: 제외됐어야 할 파일이 집계에 섞여 boundary 카운트가 부풀었다 —
+// 컴파일도 통과하고 macOS CI도 초록인 채로 Windows에서만 틀렸다). 그래서 walker를 감싸 경로를 `/`로 정규화한다.
+// POSIX 호스트에서는 native 구분자가 이미 `/`라 `next`가 std walker를 그대로 통과시킨다(무동작·무비용).
+const PosixWalker = struct {
+    inner: std.Io.Dir.Walker,
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    fn next(self: *PosixWalker, io: std.Io) !?std.Io.Dir.Walker.Entry {
+        var entry = (try self.inner.next(io)) orelse return null;
+        if (std.fs.path.sep == '/') return entry;
+        // 잘라내면 "제외 목록에 없는 경로"로 조용히 바뀌어 게이트가 거짓 초록이 된다 — 시끄럽게 실패시킨다.
+        if (entry.path.len >= self.path_buf.len) return error.NameTooLong;
+        for (entry.path, 0..) |byte, i|
+            self.path_buf[i] = if (byte == std.fs.path.sep) '/' else byte;
+        self.path_buf[entry.path.len] = 0;
+        entry.path = self.path_buf[0..entry.path.len :0];
+        return entry;
+    }
+
+    fn deinit(self: *PosixWalker) void {
+        self.inner.deinit();
+    }
+};
+
+fn posixWalk(dir: std.Io.Dir, allocator: std.mem.Allocator) !PosixWalker {
+    return .{ .inner = try dir.walk(allocator) };
 }

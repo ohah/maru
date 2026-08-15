@@ -11,7 +11,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
-const visual_map = @import("visual_map.zig"); // §4 세로 축 — 본문이 정한 시각 배치를 따른다
+const visual_map = @import("../../ui/visual_map.zig"); // §4 세로 축 — 본문이 정한 시각 배치를 따른다
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;

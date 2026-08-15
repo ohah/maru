@@ -12,6 +12,8 @@ pub const tokens = @import("chrome/tokens.zig");
 pub const props = @import("chrome/props.zig");
 pub const input = @import("chrome/input.zig");
 pub const ui = struct {
+    /// 논리 줄 하나를 시각 행으로 나누는 랩 계산(CJK 정확). 편집기와 커밋 메시지 상자가 함께 쓴다.
+    pub const visual_map = @import("chrome/ui/visual_map.zig");
     pub const layout = @import("chrome/ui/layout.zig");
     pub const style = @import("chrome/ui/style.zig");
     pub const typography = @import("chrome/ui/typography.zig");
@@ -64,7 +66,10 @@ pub const components = struct {
         pub const gutter = @import("chrome/components/editor_view/gutter.zig");
         pub const content = @import("chrome/components/editor_view/content.zig");
         pub const viewport = @import("chrome/components/editor_view/viewport.zig");
-        pub const visual_map = @import("chrome/components/editor_view/visual_map.zig");
+        /// **`ui/visual_map`으로 옮겼다**(커밋 메시지 상자가 두 번째 소비자가 되면서 — docs/text-field-editor.md
+        /// §12.4). 랩은 편집기 전용 개념이 아니라 공용 텍스트 레이아웃이고, `components/editor_view/`에 두면
+        /// 그 디렉터리가 "편집기 뷰 것"이라고 하는 선언이 거짓이 된다. 이 별칭은 기존 호출부를 위해 남긴다.
+        pub const visual_map = ui.visual_map;
         pub const scrollbar = @import("chrome/components/editor_view/scrollbar.zig");
         pub const surface = @import("chrome/components/editor_view/surface.zig");
         pub const frame = @import("chrome/components/editor_view/frame.zig"); // 위 넷의 조립 — Lab과 제품이 같은 순서·저장소 규칙을 쓴다

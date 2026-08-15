@@ -61,6 +61,8 @@ pub const Props = struct {
     /// **이 줄이 추가인가 삭제인가**(비교 본문). 논리 줄 인덱스로 읽는다. `null`이면 밴드를 그리지
     /// 않는다 — 문서 편집기는 이 축이 없다.
     row_bands: ?[]const RowBand = null,
+    /// 논리 줄마다 바뀐 글자 범위(없으면 빈 슬라이스). `row_bands`와 같은 인덱스 축이다.
+    row_marks: ?[]const []const Mark = null,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -93,6 +95,10 @@ pub const Props = struct {
     metrics: scroll_area.ScrollbarMetrics,
 };
 
+/// 바뀐 **글자** 범위(그 줄 안 바이트). `session/editor/intraline.zig`가 계산하고, 무엇이 한 글자인지는
+/// 그 호출자가 cluster 경계로 정한다 — 여기서는 이미 정해진 범위를 열로 옮겨 칠하기만 한다.
+pub const Mark = struct { start: u32, len: u32 };
+
 /// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
 /// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
 pub const RowBand = enum { none, added, removed };
@@ -100,6 +106,9 @@ pub const RowBand = enum { none, added, removed };
 /// 줄 배경의 세기. **알파로 얹는다** — 배경색을 가정하면 한쪽 테마에서 글자가 안 읽힌다
 /// (CM6 `diff-theme.ts`가 같은 이유로 16%를 썼다. 여기 값은 그 관측을 옮긴 것이다).
 pub const band_alpha: u8 = 41; // ≈16%
+/// **바뀐 글자**의 세기(§3.5 "줄 전체에 옅은 색을 깔고 바뀐 글자만 진하게"). 줄 배경 위에 한 겹 더
+/// 얹으므로 그 차이가 곧 "이 글자가 달라졌다"는 신호다(CM6 `diff-theme.ts`가 34%를 쓴 그 자리다).
+pub const mark_alpha: u8 = 87; // ≈34%
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
 pub const strip_alpha: u8 = 153; // ≈60%
@@ -253,7 +262,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **quad로 낸다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`) 이 밴드는 gutter와
     // 스크롤바 자리까지 덮어 격자 밖으로 나간다 — 배경(`surface`)이 같은 이유로 quad인 것과 같다.
     // 글자는 셀 파이프라인이라 늘 quad 위에 그려진다.
-    const band_ops = paintBands(props, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..]);
+    const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
 
     const sw = scrollbar.build(.{
         .content = .{
@@ -285,7 +294,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
 /// `chrome_draw_lowering.appendBackgroundQuadsWithTerminalOpacity`). 밴드는 바탕이 아니라 바탕 위에
 /// 얹는 표시라 글자와 같은 취급이 맞다 — 투명한 창에서 바탕이 옅어질수록 밴드도 함께 옅어지면
 /// "어느 줄이 바뀌었나"가 창 설정에 따라 사라진다.
-fn paintBands(props: Props, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
     const bands = props.row_bands orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
@@ -309,6 +318,36 @@ fn paintBands(props: Props, visual: []const visual_map.VisualRow, out: []draw.Op
             .alpha = strip_alpha,
         } };
         n += 2;
+
+        // ── 바뀐 글자 ────────────────────────────────────────────────────────
+        // **접힌 조각에는 아직 칠하지 않는다.** 열 계산이 줄 처음부터이므로 두 번째 조각의 열은
+        // 그 조각이 어디서 시작하는지를 알아야 하는데, 그 값은 `visual_map`이 자를 때만 안다.
+        // 접힘 조각 경계를 프레임까지 들고 오는 것은 별도 작업이라, 그때까지 랩된 줄은 **밴드만**
+        // 남는다(강조가 엉뚱한 자리에 서는 것보다 없는 편이 낫다).
+        if (v.piece != 0) continue;
+        const marks = (props.row_marks orelse continue);
+        if (idx >= marks.len) continue;
+        const line = if (idx < props.lines.len) props.lines[idx] else continue;
+        for (marks[idx]) |m| {
+            if (n >= out.len) break;
+            const start_col = content.columnOfByte(line, props.tab_width, m.start, scratch_cols);
+            const end_col = content.columnOfByte(line, props.tab_width, m.start + m.len, scratch_cols);
+            if (end_col <= start_col) continue;
+            // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
+            const from = @max(start_col, props.first_col);
+            const to = @min(end_col, @as(u32, props.first_col) + layout.content.width);
+            if (to <= from) continue;
+            // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
+            // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
+            const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - props.first_col);
+            const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
+            out[n] = .{ .quad = .{
+                .rect = .{ .x = x, .y = y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
+                .fill_role = role,
+                .alpha = mark_alpha,
+            } };
+            n += 1;
+        }
     }
     return n;
 }
@@ -799,4 +838,106 @@ test "막대 위치는 total_visual_rows를 받은 경로에서도 시각 행 �
     const b = counted.scrollbar orelse return error.NoScrollbar;
     // 하나만 논리 줄로 되돌아가면 여기서 갈린다.
     try testing.expectEqual(b.thumb_y, a.thumb_y);
+}
+
+test "바뀐 글자만 한 겹 더 진하다 — 줄 밴드 위에 그 범위만 얹는다" {
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    const lines = [_][]const u8{"const a = 1;"};
+    const bands = [_]RowBand{.removed};
+    const marks_row = [_]Mark{.{ .start = 6, .len = 1 }}; // "a"
+    const marks = [_][]const Mark{&marks_row};
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 1,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var mark: ?draw.Op.Quad = null;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diff_removed_bg) continue;
+        if (op.quad.alpha == mark_alpha) mark = op.quad;
+    }
+    const m = mark orelse return error.NoMark;
+    // 일곱 번째 글자 하나 = 본문 시작 열 + 6, 한 칸.
+    const layout = geometry.compute(40, 1, .{});
+    try testing.expectEqual(@as(i32, (@as(i32, layout.contentLeft()) + 6) * 8), m.rect.x);
+    try testing.expectEqual(@as(u32, 8), m.rect.w);
+    try testing.expect(mark_alpha > band_alpha); // 줄보다 진하다(그 차이가 신호다)
+}
+
+test "탭이 있어도 강조가 글자 위에 선다 — 열은 전개 뒤 기준이다" {
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    const lines = [_][]const u8{"\tx"}; // 탭(4열) 뒤 x
+    const bands = [_]RowBand{.added};
+    const marks_row = [_]Mark{.{ .start = 1, .len = 1 }}; // "x"
+    const marks = [_][]const Mark{&marks_row};
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 1,
+        .wrap = false,
+        .tab_width = 4,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.alpha != mark_alpha) continue;
+        const layout = geometry.compute(40, 1, .{});
+        try testing.expectEqual(@as(i32, (@as(i32, layout.contentLeft()) + 4) * 8), op.quad.rect.x); // 탭이 편 4열 뒤
+        return;
+    }
+    return error.NoMark;
 }

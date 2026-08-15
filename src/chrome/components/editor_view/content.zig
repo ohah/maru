@@ -251,6 +251,36 @@ pub const RowCount = struct {
     truncated: bool = false,
 };
 
+/// 텍스트가 차지하는 **열 수**. cluster 단위로 세고 폭은 `display_width`가 정한다 — `visual_map`이
+/// 조각을 자를 때 쓰는 것과 **같은 규칙**이라 두 곳이 갈리지 않는다.
+pub fn columnsOf(text: []const u8) u32 {
+    var col: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const base = text_layout.decodeCodepoint(text, i);
+        const end = @min(text_layout.clusterEndAfter(text, i, base.advance), text.len);
+        const n = @max(1, end - i);
+        col += display_width.clusterCols(text, i, i + n);
+        i += n;
+    }
+    return col;
+}
+
+/// 줄 안 **바이트 위치**가 화면의 몇 번째 열에서 시작하는가. 탭 전개를 포함한다.
+///
+/// **앞부분을 실제로 펴서 센다.** 별도의 걷기를 새로 쓰면 탭스톱·cluster·폭 규칙이 두 곳이 되고,
+/// 그 둘은 반드시 갈린다(이 저장소가 이미 그런 사고를 겪었다). 탭스톱은 열 0에서 시작하므로
+/// **앞부분만 펴도 전체를 편 것의 앞부분과 같다** — 그래서 이 방식이 성립한다.
+///
+/// `byte_off`는 cluster 경계여야 한다(호출자가 그렇게 만든다 — intra-line 토큰이 cluster다).
+/// 저장소가 모자라면 편 결과가 잘리고 열도 그만큼 적게 나온다(죽지 않는다).
+pub fn columnOfByte(bytes: []const u8, tab_width: u16, byte_off: usize, scratch: []u8) u32 {
+    const off = @min(byte_off, bytes.len);
+    if (off == 0) return 0;
+    const r = expandTabs(bytes[0..off], tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+    return columnsOf(r.text);
+}
+
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
 ///
 /// **열은 [text_layout](../../text_layout.zig)의 cluster 단위로 센다.** 그 모듈이 chrome 텍스트 셀
@@ -1362,4 +1392,30 @@ test "상한이 UTF-8 중간을 자르지 않는다" {
     // 3의 배수여야 한글 경계에서 잘린 것이다.
     try testing.expectEqual(@as(usize, 0), r.text.len % 3);
     try testing.expect(std.unicode.utf8ValidateSlice(r.text));
+}
+
+test "바이트 → 열: 탭 전개와 2칸 글자를 화면과 같은 규칙으로 센다" {
+    // **이 값이 어긋나면 강조가 엉뚱한 글자 위에 선다.** 그래서 판정을 실제 전개 결과와 대조한다 —
+    // 별도 걷기를 새로 쓰면 탭스톱·폭 규칙이 두 곳이 되고 그 둘은 반드시 갈린다.
+    var scratch: [256]u8 = undefined;
+    const tw: u16 = 4;
+
+    // ASCII: 바이트 = 열.
+    try testing.expectEqual(@as(u32, 0), columnOfByte("const x", tw, 0, &scratch));
+    try testing.expectEqual(@as(u32, 5), columnOfByte("const x", tw, 5, &scratch));
+
+    // 탭: 다음 탭스톱까지 채운다(무조건 tab_width가 아니다).
+    try testing.expectEqual(@as(u32, 4), columnOfByte("a\tb", tw, 2, &scratch)); // "a"+탭 → 열 4
+    try testing.expectEqual(@as(u32, 8), columnOfByte("abcde\tx", tw, 6, &scratch)); // 5열 뒤 탭 → 8
+
+    // 2칸 글자: 한 글자가 두 열이다.
+    try testing.expectEqual(@as(u32, 2), columnOfByte("한a", tw, 3, &scratch)); // '한' = 3byte / 2열
+
+    // **전체를 편 결과와 같은 값이다**(단일 출처 확인).
+    inline for ([_][]const u8{ "const x = 1;", "a\tb\tc", "한글 x", "\t\t", "" }) |line| {
+        const whole = expandTabs(line, tw, &scratch, .{ .count = std.math.maxInt(u32) });
+        const by_sum = columnsOf(whole.text);
+        var tail: [256]u8 = undefined;
+        try testing.expectEqual(by_sum, columnOfByte(line, tw, line.len, &tail));
+    }
 }

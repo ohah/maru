@@ -3664,6 +3664,56 @@ pub fn build(b: *std.Build) void {
         session_host_cr2e_e3b1_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
         boundary_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
     }
+    const session_host_cr2e_e3b2_step = b.step(
+        "test-session-host-cr2e-e3b2",
+        "CR2e-e3b2 sealed admission drain and stable executor budget gates",
+    );
+    session_host_cr2e_e3b2_step.dependOn(session_host_cr2e_e3b1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3b2_optimize| {
+        const cr2e_e3b2_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr2e_e3b2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2e-e3b2 actual stable executor는"},
+        });
+        const run_cr2e_e3b2_runtime_tests = b.addRunArtifact(cr2e_e3b2_runtime_tests);
+        run_cr2e_e3b2_runtime_tests.addArg("--maru-expect-tests=1");
+        run_cr2e_e3b2_runtime_tests.setCwd(b.path("."));
+        session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_runtime_tests.step);
+
+        const cr2e_e3b2_drain_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr2e_e3b2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR2e-e3b2 admission drain은"},
+        });
+        const run_cr2e_e3b2_drain_tests = b.addRunArtifact(cr2e_e3b2_drain_tests);
+        run_cr2e_e3b2_drain_tests.addArg("--maru-expect-tests=1");
+        run_cr2e_e3b2_drain_tests.setCwd(b.path("."));
+        session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_drain_tests.step);
+
+        const cr2e_e3b2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .target = target,
+                .optimize = cr2e_e3b2_optimize,
+            }),
+            .filters = &.{"CR2e-e3b2 경계는"},
+        });
+        const run_cr2e_e3b2_boundary_tests = b.addRunArtifact(cr2e_e3b2_boundary_tests);
+        run_cr2e_e3b2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr2e_e3b2_boundary_tests.setCwd(b.path("."));
+        session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
+        boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

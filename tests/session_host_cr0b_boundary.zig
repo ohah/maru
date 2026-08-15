@@ -383,13 +383,16 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn consume("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn ownedBy("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.ownedBy("));
-    // CR0b publication owner와 CR1 scheduler가 이 bounded row owner를 각각 한 번 import한다.
-    try std.testing.expectEqual(@as(usize, 2), try countProductSourcesExcept(
+    // Publication owner와 CR1 scheduler에 더해 e3b2 stable runtime/drain만 bounded row를 읽는다.
+    // 각 e3b2 import를 별도로 고정해 전역 수치만 느슨하게 늘리는 우회를 막는다.
+    try std.testing.expectEqual(@as(usize, 4), try countProductSourcesExcept(
         allocator,
         "reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_admission_owner.zig",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "@import(\"reconnect_admission_owner.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "@import(\"reconnect_admission_owner.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.preflight("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.admitAfterPreflightNoFail("));
     inline for (.{
@@ -666,17 +669,19 @@ test "CR1 reconnect scheduler 경계는 sealed inline transition만 제품에 �
         "reconnect_scheduler.zig",
         "platform/macos/session_host/reconnect_scheduler.zig",
     ));
-    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptTwo(
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptThree(
         allocator,
         ".prepareDispatch(",
         "platform/macos/session_host/reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_scheduler.zig",
+        "platform/macos/session_host/remote_term_backend.zig",
     ));
-    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptTwo(
+    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptThree(
         allocator,
         ".settleDispatch(",
         "platform/macos/session_host/reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_scheduler.zig",
+        "platform/macos/session_host/remote_term_backend.zig",
     ));
 }
 

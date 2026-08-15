@@ -1243,6 +1243,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   owner에 결속한다. e3c는 sole external ingress와 close
   경쟁·mixed outcome을 열고 모든 logical charge 0과 RSS artifact를 최종 검증한다. e3의 close 경쟁·mixed outcome·app-global
   count/byte budget·peak RSS까지 green이기 전에는 CR2e 완료가 아니다.
+  e3b2 gate는 AppSession frame의 sole drain이 process-global admission queue와 resident budget, actual
+  `RemoteTermBackend` runtime row를 조합함을 검증한다. max charge 7개가 resident한 동안 다음 sealed row는
+  `retry_later`로 동일 projection을 보존하고, 한 lease를 release한 다음 drain에서 actual stable executor로 이전된다.
+  executor의 candidate lease는 reducer retain 구간 뒤 generation publish에서 current로 전환되고 terminal reclaim 뒤 0이 된다.
+  Debug·ReleaseFast drain 1개+executor 1개+boundary 1개를 exact-count한다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의

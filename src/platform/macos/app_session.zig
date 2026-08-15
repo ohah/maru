@@ -52825,6 +52825,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     term.rt.handle = handle;
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
     runtime.event_cursor = .{};
     session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
@@ -52888,6 +52889,7 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     term.rt.handle = handle;
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
     runtime.event_cursor = .{};
     session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
@@ -52944,6 +52946,7 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     term.rt.handle = handle;
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
     runtime.event_cursor = .{};
     session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
@@ -53025,6 +53028,7 @@ test "CR2d4 마지막 workspace 이동과 source close는 stable input과 event 
     defer term.rt.handle = original_handle;
 
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
     runtime.event_cursor = .{
         .observer_generation = 7,
         .bell_count = 3,
@@ -53091,6 +53095,7 @@ test "CR2d4 window merge는 옛 Window transfer 없이 stable runtime 상태만 
     defer term.rt.handle = original_handle;
 
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
     runtime.event_cursor = .{ .observer_generation = 9, .bell_count = 11 };
     session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 9, .bell_count = 11 };
     try seedCr2d4StableState(allocator, &runtime, "STABLE-MERGE");

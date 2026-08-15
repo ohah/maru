@@ -2553,6 +2553,10 @@ const B4PumpFixture = struct {
             undefined,
         );
         for (0..count) |index| {
+            try remote_runtime.testing_api.initializeDetachedGeneration(
+                &self.runtimes[index],
+                testing.allocator,
+            );
             remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary_ready = false;
             remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary = .{};
             try self.backend.runtimes.put(testing.allocator, index + 1, .{

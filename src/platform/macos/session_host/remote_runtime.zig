@@ -518,6 +518,7 @@ pub const ReconnectGenerationOwner = struct {
     owner_thread: ?std.Thread.Id = null,
     allocator: ?std.mem.Allocator = null,
     screen_source: ?*stable_screen_source.StableScreenSource = null,
+    screen_published: bool = false,
     slot: RemoteGenerationSlot = .{},
 
     const PublishContext = struct {
@@ -537,6 +538,28 @@ pub const ReconnectGenerationOwner = struct {
         args: anytype,
         comptime initializer: anytype,
     ) !void {
+        try self.initBuildingInPlace(
+            allocator,
+            screen_source_ptr,
+            initial_generation,
+            args,
+            initializer,
+        );
+        errdefer self.deinit() catch
+            @panic("initial reconnect generation cleanup lost final owner");
+        try self.publishInitial();
+    }
+
+    /// 제품 `RemoteRuntime`은 최초 generation payload를 final inline node에서 먼저 만들고,
+    /// attach/snapshot이 screen을 완성한 뒤에만 stable proxy에 게시한다.
+    pub fn initBuildingInPlace(
+        self: *ReconnectGenerationOwner,
+        allocator: std.mem.Allocator,
+        screen_source_ptr: *stable_screen_source.StableScreenSource,
+        initial_generation: u64,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !void {
         if (!std.meta.eql(self.*, ReconnectGenerationOwner{})) return error.InvalidAuthority;
         self.* = .{
             .self_addr = @intFromPtr(self),
@@ -547,11 +570,17 @@ pub const ReconnectGenerationOwner = struct {
         };
         errdefer self.* = .{};
         try self.slot.initInPlace(allocator, initial_generation, args, initializer);
-        errdefer self.slot.deinitInPlace(allocator, deinitRemoteGeneration) catch
-            @panic("initial reconnect generation cleanup lost final owner");
+    }
+
+    pub fn publishInitial(self: *ReconnectGenerationOwner) !void {
+        try self.validate();
+        if (self.screen_published or self.screen_source.?.current.kind != .unavailable)
+            return error.InvalidAuthority;
+        const generation = try self.slot.currentGeneration();
         const payload = try self.slot.currentPayload();
         const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
-        _ = try screen_source_ptr.publishLive(source, initial_generation);
+        _ = try self.screen_source.?.publishLive(source, generation);
+        self.screen_published = true;
     }
 
     pub fn prepare(
@@ -561,6 +590,7 @@ pub const ReconnectGenerationOwner = struct {
         comptime initializer: anytype,
     ) !void {
         try self.validate();
+        if (!self.screen_published) return error.InvalidAuthority;
         if (rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), out, @sizeOf(PreparedReconnect)) or
             !std.meta.eql(out.*, PreparedReconnect{})) return error.InvalidAuthority;
         try self.slot.beginCandidate(&out.candidate);
@@ -591,6 +621,7 @@ pub const ReconnectGenerationOwner = struct {
         prepared: *PreparedReconnect,
     ) !void {
         try self.validatePrepared(prepared);
+        if (!self.screen_published) return error.InvalidAuthority;
         try self.slot.preflightPublishCandidate(&prepared.candidate);
         const current_generation = try self.slot.currentGeneration();
         const current_payload = try self.slot.currentPayload();
@@ -632,17 +663,23 @@ pub const ReconnectGenerationOwner = struct {
     pub fn deinit(self: *ReconnectGenerationOwner) !void {
         try self.validate();
         if (try self.slot.hasRetiring() or self.slot.candidate != null) return error.Busy;
-        const current_generation = try self.slot.currentGeneration();
-        const payload = try self.slot.currentPayload();
-        const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
-        if (self.screen_source.?.current.kind != .live or
-            self.screen_source.?.current.generation != current_generation or
-            !screenSourcesEqual(self.screen_source.?.current.source, source))
-            return error.InvalidAuthority;
-        const retired = (try self.screen_source.?.close()) orelse return error.InvalidAuthority;
-        if (retired.kind != .live or retired.generation != current_generation or
-            !screenSourcesEqual(retired.source, source))
-            @panic("reconnect generation and stable screen retirement diverged");
+        if (self.screen_published) {
+            const current_generation = try self.slot.currentGeneration();
+            const payload = try self.slot.currentPayload();
+            const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
+            if (self.screen_source.?.current.kind != .live or
+                self.screen_source.?.current.generation != current_generation or
+                !screenSourcesEqual(self.screen_source.?.current.source, source))
+                return error.InvalidAuthority;
+            const retired = (try self.screen_source.?.close()) orelse return error.InvalidAuthority;
+            if (retired.kind != .live or retired.generation != current_generation or
+                !screenSourcesEqual(retired.source, source))
+                @panic("reconnect generation and stable screen retirement diverged");
+        } else {
+            if (self.screen_source.?.current.kind != .unavailable) return error.InvalidAuthority;
+            if ((try self.screen_source.?.close()) != null)
+                @panic("unpublished stable screen retired a live target");
+        }
         self.slot.deinitInPlace(self.allocator.?, deinitRemoteGeneration) catch
             @panic("reconnect generation deinit proof lost after screen close");
         self.* = .{};
@@ -685,10 +722,59 @@ fn screenSourcesEqual(
 }
 
 fn deinitRemoteGeneration(generation: *RemoteGeneration, allocator: std.mem.Allocator) void {
-    generation.attachment.deinitWithConnection(generation.connection);
+    switch (generation.attachment) {
+        .generation => |*attachment| {
+            // `.terminal` is the exact source-zero result produced by the attachment rollback/deinit
+            // leaf and must not be deinitialized a second time (`GenerationAttachment.tryDeinit`
+            // deliberately rejects replay). `.shell` still goes through the canonical deinitializer
+            // so its final-address transport authority is checked before retirement.
+            if (attachment.lifecycle == .terminal) {
+                attachment.* = undefined;
+            } else switch (generation.connection) {
+                .generation => |adapter| attachment.deinit(adapter),
+                .legacy => @panic("runtime connection and attachment mode diverged"),
+            }
+        },
+        .legacy => |*attachment| switch (generation.connection) {
+            .legacy => attachment.deinit(),
+            .generation => @panic("runtime connection and attachment mode diverged"),
+        },
+    }
     generation.observation.deinit(allocator);
     if (builtin.is_test) ReconnectGenerationTestState.deinit_count += 1;
     generation.* = undefined;
+}
+
+const InitialRemoteGenerationArgs = struct {
+    allocator: std.mem.Allocator,
+    connection: RuntimeConnection,
+};
+
+fn initInitialRemoteGeneration(
+    out: *RemoteGeneration,
+    args: InitialRemoteGenerationArgs,
+) !void {
+    out.* = .{
+        .connection = args.connection,
+        .attachment = switch (args.connection) {
+            .legacy => .{ .legacy = remote_attachment.RemoteAttachment.init(args.allocator, .{
+                .runtime_id = 0,
+                .stream_id = 0,
+                .role = .observer,
+                .controller_generation = 0,
+            }) },
+            .generation => .{ .generation = .{} },
+        },
+        .event_generation_tracking = .untracked,
+        .resize_seq = 0,
+        .resize_generation = 0,
+        .resize_baseline_present = false,
+        .pump_ended = false,
+        .resync_needed = false,
+        .observation = .{},
+    };
+    if (args.connection == .generation)
+        try out.attachment.generation.initInPlace(args.connection.generation);
 }
 
 fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
@@ -702,7 +788,7 @@ fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
-    generation_storage: RemoteGeneration,
+    generation_owner: ReconnectGenerationOwner,
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
@@ -725,14 +811,15 @@ pub const RemoteRuntime = struct {
     screen_source: *stable_screen_source.StableScreenSource,
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
-    /// e1 동안 모든 세대 접근을 이 단일 지점으로 모은다. e2가 backing을 `GenerationSlot.currentPayload()`로
-    /// 바꿀 때 호출부와 backend가 저장 형태를 다시 알지 않도록 하는 물리적 이관 경계다.
+    /// Stable shell의 실제 `GenerationSlot.currentPayload()`만 current generation을 결정한다.
     fn currentGeneration(self: *RemoteRuntime) *RemoteGeneration {
-        return &self.generation_storage;
+        return @constCast(self.generation_owner.slot.currentPayload() catch
+            @panic("runtime generation slot lost current payload authority"));
     }
 
     fn currentGenerationConst(self: *const RemoteRuntime) *const RemoteGeneration {
-        return &self.generation_storage;
+        return self.generation_owner.slot.currentPayload() catch
+            @panic("runtime generation slot lost current payload authority");
     }
 
     /// `RemoteTermBackend`는 active generation의 저장 위치를 알지 않고 frame/observation 역할만 요청한다.
@@ -976,28 +1063,20 @@ pub const RemoteRuntime = struct {
             .generation => |adapter| adapter.generationCapabilities().runtime_core_command,
         };
         if (initial_config != null and !runtime_core_command) return error.UnsupportedSpawnContract;
-        self.currentGeneration().connection = connection;
-        self.allocator = allocator;
-        self.io = io;
-        self.currentGeneration().resize_seq = 0;
-        self.currentGeneration().resize_generation = 0;
-        self.currentGeneration().resize_baseline_present = false;
+        try self.initializeGenerationOwner(connection, allocator, io, size);
+        errdefer self.deinitGenerationOwnerAndScreenSource();
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
         self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
-        self.currentGeneration().pump_ended = false;
-        self.currentGeneration().resync_needed = false;
         self.pending_event_owner = .{};
         self.close_authority = .{};
         self.shutdown_attempt_authority = .{};
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner();
-        self.currentGeneration().observation = .{};
-        errdefer self.currentGeneration().observation.deinit(allocator);
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
         const spawn_params = buildSpawnParams(allocator, request, size, initial_config) catch return error.OutOfMemory;
@@ -1073,31 +1152,52 @@ pub const RemoteRuntime = struct {
         runtime_id_hex: [32]u8,
         size: terminal.Size,
     ) anyerror!void {
-        self.currentGeneration().connection = connection;
-        self.allocator = allocator;
-        self.io = io;
-        self.currentGeneration().resize_seq = 0;
-        self.currentGeneration().resize_generation = 0;
-        self.currentGeneration().resize_baseline_present = false;
+        try self.initializeGenerationOwner(connection, allocator, io, size);
+        errdefer self.deinitGenerationOwnerAndScreenSource();
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
         self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
-        self.currentGeneration().pump_ended = false;
-        self.currentGeneration().resync_needed = false;
         self.pending_event_owner = .{};
         self.close_authority = .{};
         self.shutdown_attempt_authority = .{};
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner();
-        self.currentGeneration().observation = .{};
-        errdefer self.currentGeneration().observation.deinit(allocator);
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
         try self.attachAndAssemble(surface_id, size);
+    }
+
+    fn initializeGenerationOwner(
+        self: *RemoteRuntime,
+        connection: RuntimeConnection,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        size: terminal.Size,
+    ) !void {
+        self.allocator = allocator;
+        self.io = io;
+        self.generation_owner = .{};
+        self.screen_source = try allocator.create(stable_screen_source.StableScreenSource);
+        errdefer allocator.destroy(self.screen_source);
+        try self.screen_source.initUnavailableInPlace(allocator, io, size);
+        errdefer {
+            _ = self.screen_source.close() catch null;
+            self.screen_source.deinit();
+        }
+        try self.generation_owner.initBuildingInPlace(
+            allocator,
+            self.screen_source,
+            2,
+            InitialRemoteGenerationArgs{
+                .allocator = allocator,
+                .connection = connection,
+            },
+            initInitialRemoteGeneration,
+        );
     }
 
     fn initializePendingEventOwner(self: *RemoteRuntime) anyerror!void {
@@ -1218,13 +1318,6 @@ pub const RemoteRuntime = struct {
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
-        self.screen_source = try self.allocator.create(stable_screen_source.StableScreenSource);
-        errdefer self.allocator.destroy(self.screen_source);
-        try self.screen_source.initUnavailableInPlace(self.allocator, self.io, size);
-        errdefer {
-            _ = self.screen_source.close() catch null;
-            self.screen_source.deinit();
-        }
         self.currentGeneration().frame_summary_ready = false;
         self.currentGeneration().frame_summary = .{};
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
@@ -1402,10 +1495,7 @@ pub const RemoteRuntime = struct {
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
         self.surface = try Surface.init(self.allocator, surface_id, size);
         errdefer self.surface.deinit();
-        _ = try self.screen_source.publishLive(
-            self.currentGeneration().attachment.screenPtr().?.screenSource(),
-            2,
-        );
+        try self.generation_owner.publishInitial();
         self.surface.remote = self.screen_source.screenSource();
     }
 
@@ -1414,9 +1504,9 @@ pub const RemoteRuntime = struct {
         return self.runtime_id_hex;
     }
 
-    fn deinitScreenSource(self: *RemoteRuntime) void {
-        _ = self.screen_source.close() catch
-            @panic("stable screen proxy close lost final owner");
+    fn deinitGenerationOwnerAndScreenSource(self: *RemoteRuntime) void {
+        self.generation_owner.deinit() catch
+            @panic("runtime generation owner teardown lost final authority");
         self.screen_source.deinit();
         self.allocator.destroy(self.screen_source);
     }
@@ -1427,9 +1517,7 @@ pub const RemoteRuntime = struct {
         self.terminateBestEffort();
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
         self.surface.deinit();
-        self.deinitScreenSource();
-        self.currentGeneration().attachment.deinitWithConnection(self.currentGeneration().connection);
-        self.currentGeneration().observation.deinit(self.allocator);
+        self.deinitGenerationOwnerAndScreenSource();
         self.direct_input.deinit(self.allocator);
         self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -1445,9 +1533,7 @@ pub const RemoteRuntime = struct {
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
         self.detachBestEffort();
         self.surface.deinit();
-        self.deinitScreenSource();
-        self.currentGeneration().attachment.deinitWithConnection(self.currentGeneration().connection); // stream demux queue + attachment-owned screen.
-        self.currentGeneration().observation.deinit(self.allocator);
+        self.deinitGenerationOwnerAndScreenSource();
         self.direct_input.deinit(self.allocator);
         self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -3735,8 +3821,43 @@ pub const testing_api = if (builtin.is_test) struct {
             source.quarantine_occupied == 0 and source.quarantine_retained_bytes == 0;
     }
 
+    var detached_test_client: client_mod.Client = undefined;
+
+    fn initializeTestGeneration(
+        runtime: *RemoteRuntime,
+        allocator: std.mem.Allocator,
+        connection: RuntimeConnection,
+    ) !void {
+        runtime.generation_owner = .{};
+        try runtime.generation_owner.slot.initInPlace(
+            allocator,
+            2,
+            InitialRemoteGenerationArgs{
+                .allocator = allocator,
+                .connection = connection,
+            },
+            initInitialRemoteGeneration,
+        );
+    }
+
+    pub fn initializeDetachedGeneration(runtime: *RemoteRuntime, allocator: std.mem.Allocator) !void {
+        try initializeTestGeneration(runtime, allocator, .{ .legacy = &detached_test_client });
+    }
+
+    pub fn initializeGenerationForConnection(
+        runtime: *RemoteRuntime,
+        connection: RuntimeConnection,
+    ) !void {
+        const allocator = switch (connection) {
+            .legacy => |client| client.allocator,
+            .generation => |adapter| host_adapter_mod.HostAdapter.testing.rawClient(adapter).allocator,
+        };
+        try initializeTestGeneration(runtime, allocator, connection);
+    }
+
     pub fn initializeLegacyConnection(runtime: *RemoteRuntime, client: *client_mod.Client) void {
-        runtime.currentGeneration().connection = .{ .legacy = client };
+        initializeTestGeneration(runtime, client.allocator, .{ .legacy = client }) catch
+            @panic("test runtime generation initialization failed");
     }
 
     pub fn generationAdapter(runtime: *RemoteRuntime) ?*host_adapter_mod.HostAdapter {
@@ -3793,6 +3914,11 @@ test "2c4 RuntimeConnection은 legacy와 generation arm을 정확히 구분한�
     defer adapter.deinit();
 
     var runtime: RemoteRuntime = undefined;
+    try testing_api.initializeTestGeneration(
+        &runtime,
+        testing.allocator,
+        .{ .legacy = &legacy_client },
+    );
     runtime.currentGeneration().connection = .{ .legacy = &legacy_client };
     try testing.expect(runtime.generationConnection() == null);
     try testing.expect(runtime.legacyConnectionOrNull().? == &legacy_client);
@@ -3818,6 +3944,11 @@ test "2c4 generation arm은 pointer-free capability projection만 반환한다" 
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &client);
     defer adapter.deinit();
     var runtime: RemoteRuntime = undefined;
+    try testing_api.initializeTestGeneration(
+        &runtime,
+        testing.allocator,
+        .{ .generation = &adapter },
+    );
     runtime.currentGeneration().connection = .{ .generation = &adapter };
 
     const capabilities = runtime.connectionCapabilities();
@@ -3940,7 +4071,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     client.pending_event_bytes = foreign.payload.len;
 
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -4180,7 +4311,7 @@ test "remote runtime: clipboardWrite는 base64로 임의 바이트를 복원하�
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -4432,7 +4563,7 @@ fn expectGuiMetadataProjectionFailurePreservesCache(
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -4617,6 +4748,11 @@ fn run2eAttachFailureSocket(selected: Attach2eFailureCase) !void {
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
+    try testing_api.initializeTestGeneration(
+        &rr,
+        allocator,
+        .{ .generation = &adapter },
+    );
     rr.currentGeneration().connection = .{ .generation = &adapter };
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
@@ -4723,8 +4859,7 @@ test "CR3a-2e actual socket malformed accepted는 cache를 보존하고 준비 �
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .generation = &adapter });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -4818,8 +4953,7 @@ test "CR3a-2e actual socket accepted 뒤 snapshot EOF는 committed stream 권위
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .generation = &adapter });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -4837,7 +4971,6 @@ test "CR3a-2e actual socket accepted 뒤 snapshot EOF는 committed stream 권위
     rr.currentGeneration().pump_ended = false;
     rr.currentGeneration().resync_needed = false;
     rr.currentGeneration().observation = .{};
-    defer rr.currentGeneration().observation.deinit(allocator);
 
     try std.testing.expectError(
         error.ConnectionClosed,
@@ -5265,8 +5398,13 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     client_fd_owned_by_adapter = true;
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try rr.initializeGenerationOwner(
+        .{ .generation = &adapter },
+        allocator,
+        std.testing.io,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer rr.deinitGenerationOwnerAndScreenSource();
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -5287,7 +5425,6 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     defer rr.direct_input.deinit(allocator);
     defer rr.input_batches.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
-    defer rr.currentGeneration().observation.deinit(allocator);
 
     var free_probe = SnapshotFreeReentryProbe{
         .parent = allocator,
@@ -5302,8 +5439,6 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     defer {
         if (attachment_live) {
             rr.surface.deinit();
-            rr.deinitScreenSource();
-            rr.currentGeneration().attachment.deinitWithConnection(rr.currentGeneration().connection);
         }
     }
     try rr.queueCoreCommand(.{ .report_focus = true });
@@ -5462,8 +5597,6 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expect(rr.usesGenerationAttachment());
     try std.testing.expectEqual(@as(u21, 'x'), rr.currentGeneration().attachment.screenPtr().?.grid.cells[0].codepoint);
     rr.surface.deinit();
-    rr.deinitScreenSource();
-    rr.currentGeneration().attachment.deinitWithConnection(rr.currentGeneration().connection);
     attachment_live = false;
 }
 
@@ -5537,8 +5670,13 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try rr.initializeGenerationOwner(
+        .{ .generation = &adapter },
+        allocator,
+        std.testing.io,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer rr.deinitGenerationOwnerAndScreenSource();
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -5556,7 +5694,6 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     rr.currentGeneration().pump_ended = false;
     rr.currentGeneration().resync_needed = false;
     rr.currentGeneration().observation = .{};
-    defer rr.currentGeneration().observation.deinit(allocator);
     try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
     peer.join();
 
@@ -5586,8 +5723,6 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     try std.testing.expectEqual(remote_attachment.Role.observer, rr.currentGeneration().attachment.statePtr().role);
     try std.testing.expectError(error.Unauthorized, rr.sendInputNonBlocking("late"));
     rr.surface.deinit();
-    rr.deinitScreenSource();
-    rr.currentGeneration().attachment.deinitWithConnection(rr.currentGeneration().connection);
 }
 
 test "CR3a-2c3d C3-2 product drain purges ended generation before screen progress" {
@@ -5660,8 +5795,13 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try rr.initializeGenerationOwner(
+        .{ .generation = &adapter },
+        allocator,
+        std.testing.io,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer rr.deinitGenerationOwnerAndScreenSource();
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -5681,7 +5821,6 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     rr.currentGeneration().observation = .{};
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
-    defer rr.currentGeneration().observation.deinit(allocator);
     try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
     peer.join();
 
@@ -5806,8 +5945,6 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     try std.testing.expectEqual(@as(u21, 'x'), rr.currentGeneration().attachment.screenPtr().?.grid.cells[0].codepoint);
 
     rr.surface.deinit();
-    rr.deinitScreenSource();
-    rr.currentGeneration().attachment.deinitWithConnection(rr.currentGeneration().connection);
 }
 
 const B4SemanticFixture = struct {
@@ -5881,7 +6018,12 @@ const B4SemanticFixture = struct {
             ).?,
         };
         try host_adapter_mod.HostAdapter.initInPlace(&self.adapter, allocator, &self.client);
-        self.runtime.currentGeneration().connection = .{ .generation = &self.adapter };
+        try self.runtime.initializeGenerationOwner(
+            .{ .generation = &self.adapter },
+            allocator,
+            std.testing.io,
+            .{ .cols = 1, .rows = 1 },
+        );
         self.runtime.pending_event_owner = .{};
         self.runtime.runtime_lifetime = .{};
         try self.runtime.initializePendingEventOwner();
@@ -5908,11 +6050,9 @@ const B4SemanticFixture = struct {
 
     pub fn deinit(self: *@This()) void {
         self.runtime.surface.deinit();
-        self.runtime.deinitScreenSource();
+        self.runtime.deinitGenerationOwnerAndScreenSource();
         self.runtime.direct_input.deinit(self.allocator);
         self.runtime.pending_controls.deinit(self.allocator);
-        self.runtime.currentGeneration().observation.deinit(self.allocator);
-        self.runtime.currentGeneration().attachment.deinitWithConnection(self.runtime.currentGeneration().connection);
         self.adapter.deinit();
     }
 
@@ -6301,8 +6441,7 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .generation = &adapter };
-    rr.currentGeneration().connection = .{ .generation = &adapter };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .generation = &adapter });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -6395,7 +6534,7 @@ test "remote runtime: actual GUI metadata event is atomic across every projectio
         };
         defer client.deinit();
         var rr: RemoteRuntime = undefined;
-        rr.currentGeneration().connection = .{ .legacy = &client };
+        try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
         rr.pending_event_owner = .{};
         rr.runtime_lifetime = .{};
         try rr.initializePendingEventOwner();
@@ -6494,7 +6633,7 @@ fn expectObservationBarrierDisposition(
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -6842,16 +6981,38 @@ test "CR2e-d PreparedReconnect allocator fail-index는 final-address candidate�
 }
 
 test "CR2e-e1 current accessor는 inline generation final address를 단일 출처로 반환한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
     var runtime: RemoteRuntime = undefined;
-    try testing.expectEqual(@intFromPtr(&runtime.generation_storage), @intFromPtr(runtime.currentGeneration()));
-    try testing.expectEqual(@intFromPtr(&runtime.generation_storage), @intFromPtr(runtime.currentGenerationConst()));
+    runtime.generation_owner = .{};
+    try runtime.generation_owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x61 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&runtime.generation_owner, &proxy);
+    const slot_payload = try runtime.generation_owner.slot.currentPayload();
+    try testing.expectEqual(@intFromPtr(slot_payload), @intFromPtr(runtime.currentGeneration()));
+    try testing.expectEqual(@intFromPtr(slot_payload), @intFromPtr(runtime.currentGenerationConst()));
 }
 
 test "CR2e-e1 backend facade는 frame state를 raw generation 저장소 없이 투영한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
     var runtime: RemoteRuntime = undefined;
-    runtime.generation_storage.frame_summary_ready = false;
-    runtime.generation_storage.frame_summary = .{};
-    runtime.generation_storage.pump_ended = false;
+    runtime.generation_owner = .{};
+    try runtime.generation_owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0x62 },
+        initReconnectTestGeneration,
+    );
+    defer deinitReconnectTestOwner(&runtime.generation_owner, &proxy);
 
     try testing.expect(!RemoteRuntime.backend_api.frameSummaryReady(&runtime));
     RemoteRuntime.backend_api.prepareFrameSummary(&runtime);
@@ -7436,6 +7597,7 @@ test "remote runtime actual resize response and event reject equal-generation co
 
 test "remote runtime observer locally consumes input and sends no resize mutation" {
     var runtime: RemoteRuntime = undefined;
+    try testing_api.initializeDetachedGeneration(&runtime, testing.allocator);
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -7477,7 +7639,7 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
     client.pending_event_bytes = event.payload.len;
 
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -7532,7 +7694,7 @@ test "remote runtime rejects revoke when attach generation is untracked" {
     client.pending_event_bytes = event.payload.len;
 
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -7567,7 +7729,7 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
     );
 
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -7613,7 +7775,11 @@ fn initGenerationRuntimeForAdapter(
     runtime: *RemoteRuntime,
     adapter: *host_adapter_mod.HostAdapter,
 ) !void {
-    runtime.currentGeneration().connection = .{ .generation = adapter };
+    try testing_api.initializeTestGeneration(
+        runtime,
+        testing.allocator,
+        .{ .generation = adapter },
+    );
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
     runtime.currentGeneration().attachment = undefined;
@@ -8487,7 +8653,7 @@ fn runC3ResponsePredecessor(
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
 
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -8586,7 +8752,7 @@ fn runC3ResponseFollower(
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
 
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -8685,7 +8851,7 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
 
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -8776,7 +8942,7 @@ fn runC3InvalidCadence(
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
 
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -8927,7 +9093,7 @@ fn runC3UnreadRevokeBeforeTx(mode: C3CadenceAttachmentMode) !void {
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
-    runtime.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
 
     runtime.allocator = testing.allocator;
     runtime.io = testing.io;
@@ -8986,6 +9152,7 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
             correlation: anytype,
         ) !void {
             var runtime: RemoteRuntime = undefined;
+            try testing_api.initializeDetachedGeneration(&runtime, testing.allocator);
             runtime.allocator = testing.allocator;
             runtime.direct_input = .empty;
             runtime.input_batches = .{};
@@ -9027,14 +9194,30 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
-    const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9216,
-        .ReleaseFast => 9168,
+    const expected_runtime_size: usize = switch (builtin.os.tag) {
+        .macos => switch (builtin.mode) {
+            .Debug => 9408,
+            .ReleaseFast => 9360,
+            else => unreachable,
+        },
+        .linux => switch (builtin.mode) {
+            .Debug => 9392,
+            .ReleaseFast => 9344,
+            else => unreachable,
+        },
         else => unreachable,
     };
-    const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6496,
-        .ReleaseFast => 6448,
+    const expected_runtime_remainder: usize = switch (builtin.os.tag) {
+        .macos => switch (builtin.mode) {
+            .Debug => 6688,
+            .ReleaseFast => 6640,
+            else => unreachable,
+        },
+        .linux => switch (builtin.mode) {
+            .Debug => 6672,
+            .ReleaseFast => 6624,
+            else => unreachable,
+        },
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -9061,6 +9244,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
                 testing.allocator,
                 .{ .fail_index = fail_index },
             );
+            try testing_api.initializeDetachedGeneration(runtime, failing.allocator());
             runtime.allocator = failing.allocator();
             runtime.direct_input = .empty;
             runtime.input_batches = .{};
@@ -9215,6 +9399,7 @@ test "C3-3b2b3 integration adapter rejects every preflight before source mutatio
             correlation: anytype,
         ) !void {
             var runtime: RemoteRuntime = undefined;
+            try testing_api.initializeDetachedGeneration(&runtime, testing.allocator);
             runtime.allocator = testing.allocator;
             runtime.direct_input = .empty;
             runtime.input_batches = .{};
@@ -9614,7 +9799,7 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
     );
 
     var sibling: RemoteRuntime = undefined;
-    sibling.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&sibling, .{ .legacy = &client });
     sibling.pending_event_owner = .{};
     sibling.runtime_lifetime = .{};
     try sibling.initializePendingEventOwner();
@@ -9747,7 +9932,7 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -9814,7 +9999,7 @@ test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -9912,7 +10097,7 @@ test "CR2d2 remote input owner는 key와 control을 같은 epoch sequence로 ord
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10014,7 +10199,7 @@ test "CR2d2 remote control transcript drift는 wire admission 전에 거부된�
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10044,6 +10229,7 @@ test "CR2d2 remote control transcript drift는 wire admission 전에 거부된�
 
 test "CR2d3 remote stable shell은 BEL과 OSC52 read cursor를 Window 밖에서 소유한다" {
     var runtime: RemoteRuntime = undefined;
+    try testing_api.initializeDetachedGeneration(&runtime, testing.allocator);
     runtime.event_cursor = .{};
     runtime.currentGeneration().observation = .{
         .observer_generation = 4,
@@ -10091,7 +10277,7 @@ test "remote runtime preserves input core-command input order under socket backp
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10153,7 +10339,7 @@ test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of si
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10194,7 +10380,7 @@ test "CR3a-2c3c C2 remote runtime control allocation failure also fail-closes in
     defer client.deinit();
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10231,7 +10417,7 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10308,7 +10494,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10404,7 +10590,7 @@ test "CR3a-2c3c C3 detach OOM sends no RPC and fail-closes for host lease cleanu
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10445,7 +10631,7 @@ test "CR3a-2c3c C3 terminate OOM discards superseded queued mutation before clea
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10508,7 +10694,7 @@ test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wir
     client.pending_outbound = .{ .frame = pending, .stream_id = 17 };
 
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -10852,7 +11038,7 @@ test "remote runtime: decodeLinkAtResponse는 link와 no-link success schema를 
     };
     defer client.deinit();
     var rt: RemoteRuntime = undefined;
-    rt.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
     rt.allocator = allocator;
 
     // url(kind 0) — 두 필드가 함께 와도 파싱된다(이전 디코더는 여기서 실패했다).
@@ -10900,7 +11086,7 @@ test "remote runtime: decodeLinkAtResponse는 link와 no-link success schema를 
         };
         defer bad_client.deinit();
         var bad_rt: RemoteRuntime = undefined;
-        bad_rt.currentGeneration().connection = .{ .legacy = &bad_client };
+        try testing_api.initializeGenerationForConnection(&bad_rt, .{ .legacy = &bad_client });
         bad_rt.allocator = allocator;
         try testing.expectError(error.ProtocolError, bad_rt.decodeLinkAtResponse(response));
         try testing.expect(bad_client.unusable);
@@ -10917,7 +11103,7 @@ test "remote runtime: notification success schema는 title과 body만 정확히 
     };
     defer client.deinit();
     var rt: RemoteRuntime = undefined;
-    rt.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
     rt.allocator = allocator;
 
     {
@@ -10955,7 +11141,7 @@ test "remote runtime: notification success schema는 title과 body만 정확히 
         };
         defer bad_client.deinit();
         var bad_rt: RemoteRuntime = undefined;
-        bad_rt.currentGeneration().connection = .{ .legacy = &bad_client };
+        try testing_api.initializeGenerationForConnection(&bad_rt, .{ .legacy = &bad_client });
         bad_rt.allocator = allocator;
         try testing.expectError(error.ProtocolError, bad_rt.decodeNotificationResponse(response));
         try testing.expect(bad_client.unusable);
@@ -10981,7 +11167,7 @@ test "remote runtime: notification decode는 모든 할당 실패 지점에서 �
             };
             defer client.deinit();
             var rt: RemoteRuntime = undefined;
-            rt.currentGeneration().connection = .{ .legacy = &client };
+            try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
             rt.allocator = allocator;
             const notification = (rt.decodeNotificationResponse(
                 "{\"title\":\"Deploy\",\"body\":\"done in 3s\"}",
@@ -11009,7 +11195,7 @@ test "remote runtime: link decode OOM은 소유 메모리를 회수하고 connec
             };
             defer client.deinit();
             var rt: RemoteRuntime = undefined;
-            rt.currentGeneration().connection = .{ .legacy = &client };
+            try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
             rt.allocator = allocator;
             const link = (rt.decodeLinkAtResponse(
                 "{\"text\":\"https://example.com/x\",\"kind\":0}",
@@ -11113,7 +11299,7 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     try client.pending_events.append(allocator, event);
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -11168,7 +11354,7 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
     try client.bufferGenerationEventForTest(9, "{\"event\":\"snapshot.invalidated\"}");
 
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -11221,7 +11407,7 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     });
     client.pending_batch_bytes = "stale".len + "sibling".len;
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -11276,7 +11462,7 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     try client.pending_events.append(allocator, event);
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;
-    rr.currentGeneration().connection = .{ .legacy = &client };
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
     rr.runtime_lifetime = .{};
     try rr.initializePendingEventOwner();
@@ -11662,9 +11848,17 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
-    const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 9216,
-        .ReleaseFast => 9168,
+    const expected_runtime_size: usize = switch (builtin.os.tag) {
+        .macos => switch (builtin.mode) {
+            .Debug => 9408,
+            .ReleaseFast => 9360,
+            else => unreachable,
+        },
+        .linux => switch (builtin.mode) {
+            .Debug => 9392,
+            .ReleaseFast => 9344,
+            else => unreachable,
+        },
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -11702,7 +11896,7 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
 
 test "CR2a RemoteGeneration 추출은 distinct state와 allocator ownership을 보존한다" {
     const runtime_fields = @typeInfo(RemoteRuntime).@"struct".fields;
-    try testing.expectEqual(@as(usize, 1), comptime countField(runtime_fields, "generation_storage"));
+    try testing.expectEqual(@as(usize, 1), comptime countField(runtime_fields, "generation_owner"));
     inline for (@typeInfo(RemoteGeneration).@"struct".fields) |field|
         try testing.expect(!@hasField(RemoteRuntime, field.name));
 
@@ -11755,6 +11949,38 @@ test "CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한�
     const snapshot = fixture.runtime.surface.renderSnapshot();
     try testing.expectEqual(@as(u21, 'x'), snapshot.cells[0].codepoint);
     fixture.runtime.surface.unlockCore(std.testing.io);
+}
+
+test "CR2e-e2a 제품 runtime은 최초 inline slot payload와 stable screen을 결속한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+
+    const slot = &fixture.runtime.generation_owner.slot;
+    const current = try slot.currentPayload();
+    try testing.expectEqual(@as(u64, 2), try slot.currentGeneration());
+    try testing.expectEqual(@intFromPtr(&slot.inline_node.payload), @intFromPtr(current));
+    try testing.expectEqual(@intFromPtr(current), @intFromPtr(fixture.runtime.currentGeneration()));
+    try testing.expect(fixture.runtime.generation_owner.screen_published);
+    try testing.expectEqual(stable_screen_source.TargetKind.live, fixture.runtime.screen_source.current.kind);
+    try testing.expectEqual(@as(u64, 2), fixture.runtime.screen_source.current.generation);
+    const source = generationScreenSource(current) orelse return error.TestUnexpectedResult;
+    try testing.expect(screenSourcesEqual(source, fixture.runtime.screen_source.current.source));
+}
+
+test "CR2e-e2a 제품 runtime teardown은 slot payload와 stable screen을 exact once 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    ReconnectGenerationTestState.deinit_count = 0;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    var runtime_live = true;
+    defer if (runtime_live) fixture.deinit();
+
+    fixture.runtime.detachClientSide();
+    runtime_live = false;
+    fixture.adapter.deinit();
+    try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
 }
 
 fn countField(comptime fields: []const std.builtin.Type.StructField, comptime name: []const u8) usize {

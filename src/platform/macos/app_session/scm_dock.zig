@@ -169,6 +169,8 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     for (model.rows, items[notice_rows..], 0..) |row, *item, index| {
         item.* = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
     }
+    const item_rows = items[notice_rows..];
+    applyScmPending(self, model.rows, item_rows);
 
     var file_count: u32 = 0;
     for (model.rows) |row| switch (row) {
@@ -472,6 +474,66 @@ fn actionOf(action: scm_view.RowAction) component.types.RowAction {
     };
 }
 
+/// 낙관적으로 옮긴 행을 투영 결과에 얹는다(§7).
+///
+/// **모델을 고치지 않는다.** `session/scm_view`는 git 출력의 순수 함수로 남아야 P4·P5가 그대로 쓴다 —
+/// "아직 확인되지 않은 사용자 의도"는 세션 상태이지 도메인이 아니다. 그래서 옮기기는 **투영 층에서**
+/// 일어나고, 컴포넌트는 받은 것을 그대로 그린다(낙관인지 확정인지 모른다).
+///
+/// **낙관의 경계**(§7): 옮기는 것은 **그 행 하나의 자리**뿐이다.
+///   - 개수·요약 숫자는 건드리지 않는다 — 부분 스테이지·rename에서 틀린 숫자가 나오고, 그건 사용자가
+///     커밋 직전에 보는 값이다.
+///   - **증감을 지운다.** 그 숫자는 행이 선 그룹의 축(index ↔ 작업트리)에서 나오는데 옮긴 뒤의 축을
+///     우리는 아직 모른다. 옛 축의 숫자를 새 자리에 두면 그건 거짓말이다.
+///   - **동작을 끈다.** 쓰기가 도는 동안 두 번째 클릭은 어차피 흘려지고(§6), 누를 수 있어 보이면
+///     "안 눌렸다"로 읽힌다.
+///   - 상태 문자는 **그대로 둔다.** 새 축의 글자를 추측하면(`U` → `A`) 맞을 때가 많지만 그건 추측이고,
+///     ~100 ms 뒤 읽기가 사실을 싣고 온다.
+fn applyScmPending(self: *AppSession, rows: []const scm_view.Row, items: []component.types.Item) void {
+    const pending = self.scm_pending orelse return;
+    const target: scm_view.Section = switch (pending.from) {
+        .staged => .changes,
+        .changes => .staged,
+    };
+
+    // 떠나는 행과 도착 그룹 헤더를 찾는다. **도착 헤더가 없으면 옮기지 않는다** — 그 그룹이 화면에
+    // 없다는 뜻이고(개수 0이면 헤더를 안 낸다), 갈 곳 없는 행을 숨기면 그 파일이 잠깐 사라져 보인다.
+    var from_index: ?usize = null;
+    var target_header: ?usize = null;
+    for (rows, 0..) |row, index| {
+        switch (row) {
+            .file => |file| {
+                if (from_index == null and file.section == pending.from and std.mem.eql(u8, file.path, pending.path)) {
+                    from_index = index;
+                }
+            },
+            .section => |section| {
+                if (section.section == target) target_header = index;
+            },
+            else => {},
+        }
+    }
+    const moving = from_index orelse return;
+    const header = target_header orelse return;
+    if (moving >= items.len or header >= items.len) return;
+
+    var carried = items[moving].file;
+    carried.action = .none;
+    carried.has_delta = false;
+    carried.binary = false;
+
+    // 배열 안에서 한 칸씩 밀어 헤더 **바로 뒤**에 끼운다(그 그룹의 첫 행 자리).
+    if (moving > header) {
+        var i = moving;
+        while (i > header + 1) : (i -= 1) items[i] = items[i - 1];
+        items[header + 1] = .{ .file = carried };
+    } else {
+        var i = moving;
+        while (i < header) : (i += 1) items[i] = items[i + 1];
+        items[header] = .{ .file = carried };
+    }
+}
+
 /// 행 하나의 `+`/`−`. **모델 인덱스는 다시 조회한다** — intent가 든 것은 인덱스뿐이고 그 사이 목록이
 /// 갱신됐을 수 있다(늦은 클릭이 엉뚱한 파일을 스테이지하지 않게. `open_row`와 같은 규율이다).
 fn submitRowWrite(self: *AppSession, index: u32) void {
@@ -490,7 +552,26 @@ fn submitRowWrite(self: *AppSession, index: u32) void {
         .none => return,
     };
     const paths = [_][]const u8{row.path};
-    submitWrite(self, kind, &paths);
+    if (!submitWrite(self, kind, &paths)) return;
+
+    // **낙관적 반영**(§7): 화면은 즉시 바뀐다. 안 그러면 100 ms 남짓 아무 일도 안 일어나 두 번 누르게
+    // 되고, 두 번째 클릭은 in-flight라 흘려져 "안 눌렸다"로 읽힌다. 낙관은 **이 행 하나**에만 건다.
+    setScmPending(self, row.path, row.section);
+}
+
+/// 낙관적으로 옮길 행을 기억한다. 경로는 **복사한다** — 모델 버퍼는 프레임마다 다시 만들어진다.
+fn setScmPending(self: *AppSession, path: []const u8, from: scm_view.Section) void {
+    clearScmPending(self);
+    const copy = self.allocator.dupe(u8, path) catch return;
+    self.scm_pending = .{ .path = copy, .from = from };
+    self.metal_dirty = true;
+}
+
+pub fn clearScmPending(self: *AppSession) void {
+    if (self.scm_pending) |pending| {
+        self.allocator.free(pending.path);
+        self.scm_pending = null;
+    }
 }
 
 /// 섹션 헤더의 일괄 `+`/`−`. **방향은 host가 지금 상태로 다시 정한다**(intent가 방향을 싣지 않는 이유 —
@@ -509,26 +590,26 @@ fn submitSectionWrite(self: *AppSession, section: component.types.Section) void 
     };
     // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
     // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
-    submitWrite(self, kind, &.{});
+    _ = submitWrite(self, kind, &.{});
 }
 
 /// 쓰기 하나를 건다. **in-flight 하나**(§6) — 도는 동안 눌린 것은 흘린다(큐를 쌓으면 오래된 클릭이
 /// 뒤늦게 저장소를 바꾼다).
-fn submitWrite(self: *AppSession, kind: git_write_command.Kind, paths: []const []const u8) void {
-    if (self.scm_write_inflight != 0) return;
+fn submitWrite(self: *AppSession, kind: git_write_command.Kind, paths: []const []const u8) bool {
+    if (self.scm_write_inflight != 0) return false;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return;
+    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return false;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return false;
     }
     self.scm_write_seq += 1;
-    if (self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq)) {
-        self.scm_write_inflight = self.scm_write_seq;
-        clearScmWriteError(self);
-        self.metal_dirty = true;
-    }
+    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq)) return false;
+    self.scm_write_inflight = self.scm_write_seq;
+    clearScmWriteError(self);
+    self.metal_dirty = true;
+    return true;
 }
 
 pub fn clearScmWriteError(self: *AppSession) void {
@@ -547,6 +628,9 @@ pub fn drainScmWrite(self: *AppSession) void {
     if (taken.request_id != self.scm_write_inflight) return; // 낡은 결과는 버린다
     self.scm_write_inflight = 0;
     self.metal_dirty = true;
+    // **성공이든 실패든 낙관을 걷는다.** 뒤이어 거는 읽기가 사실을 싣고 오므로, 낙관을 남겨 두면 그
+    // 사실 위에 옛 추측이 덧그려진다(§7 — 실패하면 되돌린다).
+    clearScmPending(self);
 
     if (!taken.ok()) {
         clearScmWriteError(self);
@@ -716,4 +800,67 @@ test "스크롤한 창에서도 intent는 모델 인덱스를 싣는다" {
     const window = items[2..];
     try testing.expectEqual(@as(u32, 2), window[0].file.model_index);
     try testing.expectEqual(@as(u32, 3), window[1].file.model_index);
+}
+
+test "낙관적 반영: 그 행만 옮기고 개수·증감·동작은 낙관하지 않는다 (§7)" {
+    // `+`를 누르면 화면이 **즉시** 바뀐다(안 그러면 두 번 누르고, 두 번째는 in-flight라 흘려져
+    // "안 눌렸다"로 읽힌다). 다만 낙관은 **그 행 하나의 자리**뿐이다.
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .staged, .count = 1, .action = .unstage } },
+        .{ .file = .{ .section = .staged, .path = "kept.zig", .letter = 'M', .action = .unstage } },
+        .{ .section = .{ .section = .changes, .count = 2, .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "moving.zig", .letter = 'M', .action = .stage, .added = 3, .removed = 1 } },
+        .{ .file = .{ .section = .changes, .path = "other.zig", .letter = 'M', .action = .stage } },
+    };
+    var items: [rows.len]component.types.Item = undefined;
+    for (rows, &items, 0..) |row, *item, index| {
+        item.* = itemFor(row, index, null, @splat(false));
+    }
+    // 낙관 없이는 원래 자리다.
+    try testing.expectEqualStrings("moving.zig", items[3].file.name);
+
+    var session: AppSession = undefined;
+    session.allocator = testing.allocator;
+    session.scm_pending = .{ .path = try testing.allocator.dupe(u8, "moving.zig"), .from = .changes };
+    defer testing.allocator.free(session.scm_pending.?.path);
+
+    applyScmPending(&session, &rows, &items);
+
+    // ① 그 행이 **스테이지된 변경** 헤더 바로 뒤로 옮겨졌다.
+    try testing.expectEqualStrings("moving.zig", items[1].file.name);
+    // ② 나머지 행들은 순서를 지킨다.
+    try testing.expectEqualStrings("kept.zig", items[2].file.name);
+    try testing.expectEqualStrings("other.zig", items[4].file.name);
+    // ③ **개수는 낙관하지 않는다** — 헤더 숫자는 그대로다(실제 결과가 온 뒤에 바뀐다).
+    try testing.expectEqual(@as(u32, 1), items[0].section.count);
+    try testing.expectEqual(@as(u32, 2), items[3].section.count);
+    // ④ **증감을 지운다** — 그 숫자는 옛 축(작업트리)의 것이고 새 자리의 축을 우리는 아직 모른다.
+    try testing.expect(!items[1].file.has_delta);
+    // ⑤ **동작을 끈다** — 쓰기가 도는 동안 두 번째 클릭은 어차피 흘려진다.
+    try testing.expectEqual(component.types.RowAction.none, items[1].file.action);
+    // ⑥ 상태 문자는 그대로다(새 축의 글자를 추측하지 않는다).
+    try testing.expectEqual(@as(u8, 'M'), items[1].file.letter);
+}
+
+test "낙관적 반영: 도착 그룹이 화면에 없으면 옮기지 않는다" {
+    // 개수 0인 섹션은 헤더를 안 낸다. 갈 곳이 없는데 원래 자리에서 지우면 **그 파일이 잠깐 사라져
+    // 보인다** — 사용자가 방금 누른 파일이 목록에서 없어지는 것이 가장 나쁜 실패 모드다.
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .changes, .count = 1, .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "only.zig", .letter = 'M', .action = .stage } },
+    };
+    var items: [rows.len]component.types.Item = undefined;
+    for (rows, &items, 0..) |row, *item, index| {
+        item.* = itemFor(row, index, null, @splat(false));
+    }
+
+    var session: AppSession = undefined;
+    session.allocator = testing.allocator;
+    session.scm_pending = .{ .path = try testing.allocator.dupe(u8, "only.zig"), .from = .changes };
+    defer testing.allocator.free(session.scm_pending.?.path);
+
+    applyScmPending(&session, &rows, &items);
+    // 그대로다 — 파일이 사라지지 않는다.
+    try testing.expectEqualStrings("only.zig", items[1].file.name);
+    try testing.expectEqual(component.types.RowAction.stage, items[1].file.action);
 }

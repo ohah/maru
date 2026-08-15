@@ -381,6 +381,10 @@ pub const inventory = [_]Proof{
     // 훅을 init에서 한 번 읽어 세션 필드로 든다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client
     // 구성·receiver 집합을 안 건드린다. **main의 CR2d4와 같은 파일에서 만나 또 충돌했다**(이 원장이
     // 예고한 그 충돌이다) — 양쪽 사유를 모두 남기고 값만 재계산했다.
+    // §7 낙관적 반영이 붙으면서 또 바뀐다: 낙관으로 옮긴 행(`ScmPending` — 경로와 떠난 그룹)이 세션
+    // 상태에 붙고 정리 경로가 하나 는다. **투영 층에서만** 얹으므로 모델(`session/scm_view`)은 git
+    // 출력의 순수 함수로 남는다. count는 2 그대로다 — 반사 접근은 건드리지 않는다.
+    //
     // CR2e-e3b2가 frame maintenance에서 process-global reconnect admission drain을 호출한다.
     // Client construction/reflection receiver는 건드리지 않아 count는 2 그대로다.
     //
@@ -390,7 +394,7 @@ pub const inventory = [_]Proof{
     // (`MARU_FORCE_SCM_HOVER`)도 같은 루프에 붙는다 — 행 동작(`+`/`−`)은 호버할 때만 그려지는 계약이라
     // 포인터 없는 헤드리스 캡처로는 그 버튼이 화면에 나오는지 확인할 방법이 없었다.
     // count는 내내 2 그대로다 — 반사 접근은 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "aff84eb53910065a1165b7dd72fb59862624350d56ac50776123babc8e134e4a" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "880ab712b78e0279fa7654cd40b2666d5ccbe2c2e497932792f8a52fc38fab15" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

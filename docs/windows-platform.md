@@ -443,14 +443,14 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 그대로 다시 겪는다(그 버그는 이미 한 번 고쳤다).
 
 **그런데 정규화만 하면 안 된다 — 중립 레이어가 "선두가 `/`인가"로 절대경로를 판정한다.** 적대적 검증에서
-다섯 곳이 나왔고, 성격이 갈린다:
+네 자리가 나왔고, 성격이 갈린다:
 
-| 위치 | 지금 | Windows 경로에서 |
-|---|---|---|
-| `session/file_panel_bridge.zig` `normalizeAssetPath` | `raw[0]=='/'`→Absolute, 역슬래시→InvalidCharacter | **가드가 무력화된다** — 아래 |
-| `session/repo_path.zig` | `path[0]=='/'`이면 절대로 보고 거부 | `C:/x`가 **상대 경로로 통과**한다 |
-| `session/file_tree.zig`·`file_tree_mutation.zig` | root 포함 판정이 `root=="/"` 특수 케이스를 둠 | 드라이브 루트(`C:/`)에 대응이 없다 |
-| `terminal/selection.zig` | 링크 감지가 `word[0]=='/'`로 절대경로 판정 | `C:\…`를 절대경로 링크로 못 잡는다(기능 결손) |
+| 위치 | 지금 | Windows 경로에서 | 성격 |
+|---|---|---|---|
+| `session/file_panel_bridge.zig` `normalizeAssetPath` | `raw[0]=='/'`→Absolute, 역슬래시→InvalidCharacter | **가드가 무력화된다** — 아래 | 가드 |
+| `session/repo_path.zig` | `path[0]=='/'`이면 절대로 보고 거부 | `C:/x`가 **상대 경로로 통과**한다 | 가드 |
+| `session/file_tree.zig`·`file_tree_mutation.zig` | root 포함 판정이 `root=="/"` 특수 케이스를 둠 | 드라이브 루트(`C:/`)에 대응이 없다 | 가드 |
+| `terminal/selection.zig` | 링크 감지가 `word[0]=='/'`로 절대경로 판정 | `C:\…`를 절대경로 링크로 못 잡는다(기능 결손) | **감지** |
 
 **`normalizeAssetPath`가 특히 위험하다.** 오늘 Windows 절대경로를 막고 있는 것은 `raw[0]=='/'`가 아니라
 **역슬래시 거부**다. 입구에서 `\`→`/`로 바꾸면 `C:\Windows\x`가 `C:/Windows/x`가 되어 세 검사(절대·역슬래시·
@@ -463,8 +463,73 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 
-이 다섯 곳을 고치는 것은 W3와 별개 슬라이스이며, 순서상 **정규화를 도입하기 전에** 해야 한다 — 반대로 하면
-`normalizeAssetPath`가 잠깐 느슨해진 창이 생긴다.
+이 네 자리를 고치는 것은 W3와 별개 슬라이스(**W1.5**)이며, 순서상 **정규화를 도입하기 전에** 해야 한다 —
+반대로 하면 `normalizeAssetPath`가 잠깐 느슨해진 창이 생긴다.
+
+### 5.1 가드와 감지는 술어가 다르다 (W1.5 결정, 2026-08-15)
+
+네 자리가 같은 증상을 보였지만 **묻는 질문이 다르다.** 그래서 `src/path_shape.zig`가 술어를 **둘** 내놓는다.
+
+| | 가드 (`isAbsolute`) | 감지 (`isDetectableAbsolute`) |
+|---|---|---|
+| 질문 | "이 문자열이 **어떤 OS에서든** 위험한가" | "이 문자열이 **이 호스트에서** 실제로 열리는 경로인가" |
+| 문자열을 고르는 쪽 | 공격자(적대적 저장소·이상한 git 출력) | 호스트의 파일시스템 |
+| 틀렸을 때 | 루트 밖 파일이 읽힌다 | 열리지 않는 밑줄이 뜬다 |
+| 그래서 | **OS 무관하게 넓게 거부** | **호스트 OS 기준으로 좁게 감지** |
+| 쓰는 곳 | `repo_path`·`pathWithin`·`normalizeAssetPath` | `terminal/selection.zig` |
+
+**감지가 컴파일 타임 OS 분기인 근거**: 밑줄 span은 **콘텐츠를 가진 쪽**이 만든다. 원격 세션도 host가
+`selection.collectViewportLinks`로 span을 모아 client에 보낸다(로컬 hover와 같은 분류기). 그래서 "이 바이너리가
+도는 OS"가 곧 "그 경로가 실재할 수 있는 OS"다. VS Code도 같은 규칙을 런타임 값으로 구현한다 —
+`terminalLocalLinkDetector.ts`의 `detectLinks(text, this._processManager.os || OS)`는 클라이언트가 아니라
+**백엔드/PTY의 OS**를 쓴다.
+
+**감지 술어가 `isAbsolute`보다 좁은 이유**(실측). 감지된 토큰은 `TerminalCore.resolveClickedPath`로 가고,
+거기서 `std.fs.path.isAbsolute`가 거짓이면 **cwd에 join**된다. 감지가 그보다 넓으면 "밑줄은 뜨는데 엉뚱한
+파일을 연다"가 된다. Windows에서 잰 불일치:
+
+| 토큰 | `path_shape.isAbsolute` (가드) | `std.fs.path.isAbsolute` | 감지하는가 |
+|---|---|---|---|
+| `C:\x`·`C:/x` | true | true | **예** |
+| `C:relative` | true | **false** | 아니오 — join되면 엉뚱한 경로 |
+| `a:b` | true | **false** | 아니오 — 흔한 토큰이라 오탐 |
+| `\foo\bar` | true | true지만 `resolve`가 **드라이브 없는** `\foo\bar` 산출 | 아니오 |
+| `\\server\share` (UNC) | true | true | **아니오 — 알려진 공백**(이스케이프 출력 오탐 위험, 터미널에서 드묾. VS Code도 `\\?\C:` 확장형만 다룬다) |
+
+그래서 감지는 **드라이브 + 구분자**(`C:\`·`C:/`)만 본다. VS Code의 `winDrivePrefix`도 같은 모양이다.
+
+**macOS가 왜 불변이어야 하는가**: hover 밑줄(`selection.wordIsUrl`)은 매-mouseMove 비용 때문에 **존재검증을
+하지 않는다**(존재검증은 클릭에서만 — `selection.zig` 주석). VS Code는 반대로 밑줄 전에 stat을 해서 hover와
+click이 항상 일치한다. maru는 그 stat을 안 하므로 **감지 단계가 유일한 방어선**이다. macOS에서 `C:\x`를
+감지하면 "밑줄은 뜨는데 클릭하면 아무 일도 없는" 상태가 **100% 확정**된다.
+
+**실측 (2026-08-15, Windows 10.0.19045)** — 같은 PoC를 고치기 전/후로 돌린 결과:
+
+| 화면 문자열 | 전 (hover / click) | 후 (hover / click) |
+|---|---|---|
+| `C:\…\scratchpad\poc_linkdetect.zig` (**실재**) | ✗ / ✗ | **○ / ○** |
+| `C:\…\scratchpad` (**실재 디렉터리**) | ✗ / ✗ | **○ / ○** |
+| `C:\Users\me\proj\main.zig` (없음) | ✗ / ✗ | ○ / ✗ |
+| `/Users/me/proj/main.zig` (없음) | ○ / ✗ | ○ / ✗ (불변) |
+
+마지막 줄이 중요하다 — **"밑줄 O / 열림 X"는 새 상태가 아니다.** 존재하지 않는 POSIX 절대경로가 오늘도 그렇다.
+Windows 경로가 다른 점은 macOS에서 그것이 *우연*이 아니라 *확정*이라는 것뿐이고, 호스트 OS 분기가 그것을 없앤다.
+
+**부수 실측**: `std.c.access(F_OK)`가 Windows에서 정상 동작한다(존재 `0`, 미존재 `-1`). 존재 게이트는 W7에서
+그대로 산다.
+
+**알려진 오탐 — 의도적으로 남긴다.** 실제 도구 출력 14종을 훑어 3건이 나왔다: `n:\t`(한 글자 라벨 + 이스케이프
+탭), `y:\`·`x:/`(드라이브 루트). 반대로 걸러진 것: `12:30:45`, `a:b`, `ERROR:`, `NOTE:\n`, `C:relative`,
+`\\.\pipe\maru`, `warning:`, `-rw-r--r--` — **드라이브 문자가 한 글자여야 한다는 제약**이 대부분을 막는다.
+
+남긴 이유는 **대칭**이다. POSIX 감지도 오늘 같은 등급의 오탐을 낸다 — `/t`나 sed의 `/foo/bar/`가
+`absolute_path`로 잡힌다. Windows 쪽만 좁히면 "왜 `/t`는 밑줄이 뜨는데 `C:\t`는 안 뜨나"가 설명되지 않는다.
+실제 피해(엉뚱한 파일 열기)는 존재 게이트가 막는다 — 밑줄만 뜨고 클릭하면 아무 일도 없다. **근본 해결은
+hover에도 stat을 두는 것**(VS Code 방식)이고, 그건 매-mouseMove 비용 결정이라 별개 안건이다(§8).
+
+**다른 터미널** (동작만 비교 — clean-room): VS Code는 백엔드 OS로 파싱하고 밑줄 **전에** 존재검증까지 한다.
+WezTerm은 맨 파일 경로 링크를 지원하지 않는다(정규식 `hyperlink_rules`만, [issue #6257](https://github.com/wezterm/wezterm/issues/6257) 열림).
+iTerm2는 Semantic History가 macOS 전용이라 이 문제가 없다.
 
 ## 6. 실측 (2026-08-15, Windows 10.0.19045, zig 0.16.0)
 
@@ -520,6 +585,12 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
   오지 않는다. 둘은 같은 결정이므로 4단계에서 함께 정한다.
 - **`main.zig`의 컨트롤 플레인 transport**. unix domain socket을 named pipe로 옮기는 설계. 초기에는
   "인스턴스 없음"으로 graceful하게 빠지는 것으로 충분하다.
+- **hover 밑줄에도 존재검증을 둘 것인가**(§5.1에서 파생). 지금 존재검증(`std.c.access`)은 **클릭에서만** 하고
+  hover는 매-mouseMove 비용 때문에 분류만 한다. 그래서 존재하지 않는 절대경로는 OS를 가리지 않고 "밑줄은 뜨는데
+  클릭하면 아무 일도 없는" 상태가 된다(`/nonexistent/x`도, `n:\t` 같은 Windows 오탐도). VS Code는 반대로 밑줄
+  전에 stat을 해서 둘이 항상 일치한다. **이건 Windows 고유 문제가 아니라 오늘의 macOS에도 있는 것**이라
+  Windows 작업이 이걸 기다리지 않는다. 결정할 때 재야 할 것: hover stat의 실제 비용(캐시 유무), 원격
+  세션에서 host가 span을 모을 때의 stat 비용(`collectViewportLinks`는 뷰포트 전체를 훑는다).
 - **배포**. 코드 서명·인스톨러·업데이트 경로는 [배포·업데이트 전략](distribution.md)이 macOS 기준으로
   쓰여 있다.
 

@@ -3,6 +3,7 @@
 //! 디스크를 읽지 않고 `rows`만 소비한다(docs/file-panel.md §7).
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig");
 const file_panel_bridge = @import("file_panel_bridge.zig");
 
 /// 디렉터리 경로와 자식 이름을 **`/`로** 잇는다.
@@ -1110,7 +1111,9 @@ fn validBasename(name: []const u8) bool {
 fn pathWithin(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
     if (!std.mem.startsWith(u8, path, root) or path.len <= root.len) return false;
-    return root.len == 1 and root[0] == '/' or path[root.len] == '/';
+    // 루트 바로 아래인지 판정할 때 루트가 이미 구분자로 끝나면(`/`·`C:\`) 한 칸을 더 요구하면 안 된다.
+    // 예전엔 그 예외가 POSIX 루트(`/`)만 알아 Windows 드라이브 루트에 대응이 없었다(docs/windows-platform.md §5).
+    return path_shape.isRoot(root) or path_shape.isSep(path[root.len]);
 }
 
 fn deepestExpandedDirectory(node: *Node, path: []const u8) ?*Node {

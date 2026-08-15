@@ -5,6 +5,7 @@
 //! 정상화하지 않고 거부한다. 따라서 호출자가 기준 디렉터리를 임의로 넓힐 수 없다.
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig");
 
 /// Markdown 본문과 상대 asset에 공통으로 적용하는 단일 파일 읽기 상한. base64 응답은 이보다 커질 수 있다.
 pub const max_file_bytes: usize = 8 * 1024 * 1024;
@@ -314,7 +315,11 @@ pub const PathError = error{
 /// - URL percent decoding은 web shell이 먼저 수행하지만, decoded 결과도 이 함수가 다시 검증한다.
 pub fn normalizeAssetPath(raw: []const u8, out: []u8) PathError![]const u8 {
     if (raw.len == 0) return error.Empty;
-    if (raw[0] == '/') return error.Absolute;
+    // **절대 판정을 역슬래시 거부에 기대지 않는다.** 예전에는 `raw[0]=='/'`가 POSIX 절대만 막고 Windows
+    // 절대(`C:\x`)는 아래 역슬래시 검사가 우연히 막고 있었다. 구분자를 정규화하는 날(§5) 그 우연이 사라져
+    // `C:/x`가 **상대 경로로 통과**한다 — 드라이브 절대·UNC를 여기서 명시적으로 막는다
+    // (docs/windows-platform.md §5).
+    if (path_shape.isAbsolute(raw)) return error.Absolute;
     if (!std.unicode.utf8ValidateSlice(raw)) return error.InvalidUtf8;
 
     for (raw) |byte| {
@@ -377,6 +382,23 @@ test "normalizeAssetPath: rejects traversal, absolute, backslash, controls, inva
     try testing.expectError(error.Empty, normalizeAssetPath("", &out));
     try testing.expectError(error.Empty, normalizeAssetPath(".", &out));
     try testing.expectError(error.InvalidUtf8, normalizeAssetPath("bad\xff.png", &out));
+}
+
+// 예전에는 Windows 절대경로를 **역슬래시 거부가 우연히** 막고 있었다(`C:\x`). 구분자를 정규화하는 날
+// (docs/windows-platform.md §5) 그 우연이 사라져 `C:/x`가 상대 경로로 통과하므로, 절대 판정이 드라이브·UNC를
+// 직접 봐야 한다. 이 테스트가 그 우연에 다시 기대지 않게 고정한다.
+test "normalizeAssetPath: rejects Windows-shaped absolutes without relying on the backslash guard" {
+    var out: [256]u8 = undefined;
+    // 역슬래시가 하나도 없는데도 절대여야 한다 — 여기가 옛 가드가 놓치던 자리다.
+    try testing.expectError(error.Absolute, normalizeAssetPath("C:/Windows/System32", &out));
+    try testing.expectError(error.Absolute, normalizeAssetPath("//server/share", &out));
+    try testing.expectError(error.Absolute, normalizeAssetPath("C:relative", &out));
+    // 역슬래시가 있는 형태는 절대 판정이 먼저 잡는다(둘 중 어느 쪽이든 거부이면 된다).
+    try testing.expectError(error.Absolute, normalizeAssetPath("C:\\Windows", &out));
+
+    // 드라이브처럼 생겼을 뿐인 정상 상대경로는 계속 통과한다.
+    const ok = try normalizeAssetPath("C/logo.png", &out);
+    try testing.expectEqualStrings("C/logo.png", ok);
 }
 
 test "normalizeAssetPath: reports too long without partial success" {

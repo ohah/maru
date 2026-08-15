@@ -4,6 +4,7 @@
 //! and context-menu entry points from growing subtly different policies.
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig");
 const file_tree = @import("file_tree.zig");
 
 pub const Operation = enum { create_file, create_directory, rename, delete };
@@ -51,7 +52,9 @@ pub fn validateName(name: []const u8) !void {
 pub fn pathWithin(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
     if (!std.mem.startsWith(u8, path, root) or path.len <= root.len) return false;
-    return root.len == 1 and root[0] == '/' or path[root.len] == '/';
+    // 루트 바로 아래인지 판정할 때 루트가 이미 구분자로 끝나면(`/`·`C:\`) 한 칸을 더 요구하면 안 된다.
+    // 예전엔 그 예외가 POSIX 루트(`/`)만 알아 Windows 드라이브 루트에 대응이 없었다(docs/windows-platform.md §5).
+    return path_shape.isRoot(root) or path_shape.isSep(path[root.len]);
 }
 
 pub fn rootForPath(roots: []const []const u8, path: []const u8) ?[]const u8 {
@@ -134,6 +137,25 @@ pub fn ensureUnprotected(target_path: []const u8, protected: []const Protection)
 pub fn remapPath(allocator: std.mem.Allocator, path: []const u8, old_prefix: []const u8, new_prefix: []const u8) !?[]u8 {
     if (!pathWithin(path, old_prefix)) return null;
     return try std.mem.concat(allocator, u8, &.{ new_prefix, path[old_prefix.len..] });
+}
+
+// 루트 바로 아래인지 판정할 때, 루트가 이미 구분자로 끝나면 한 칸을 더 요구하면 안 된다. 예전 코드는 그
+// 예외를 **POSIX 루트(`/`)만** 알아서 드라이브 루트(`C:\`)에서는 첫 자식이 통째로 밖으로 보였다
+// (docs/windows-platform.md §5).
+test "pathWithin: 드라이브 루트와 POSIX 루트를 모두 루트로 본다" {
+    // POSIX — 기존 동작 그대로.
+    try std.testing.expect(pathWithin("/a", "/"));
+    try std.testing.expect(pathWithin("/a/b", "/a"));
+    try std.testing.expect(!pathWithin("/ab", "/a")); // 형제 접두는 포함이 아니다
+
+    // Windows 드라이브 루트 — 옛 코드가 놓치던 자리.
+    try std.testing.expect(pathWithin("C:\\a", "C:\\"));
+    try std.testing.expect(pathWithin("C:/a", "C:/"));
+    try std.testing.expect(pathWithin("C:\\a\\b", "C:\\a"));
+    try std.testing.expect(!pathWithin("C:\\ab", "C:\\a")); // 형제 접두는 여전히 아니다
+
+    // 자기 자신은 포함이다(기존 계약).
+    try std.testing.expect(pathWithin("C:\\a", "C:\\a"));
 }
 
 test "mutation name validation allows dotfiles but rejects traversal and separators" {

@@ -6230,6 +6230,55 @@ test "ellipsis past the 2048-byte scratch buffer: hover and click agree (both re
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0, selection.link_scopes_full)) == null);
 }
 
+// 절대경로 감지는 오래도록 `word[0] == '/'`였다. Windows에서는 **실재하는** `C:\...`조차 밑줄도 안 뜨고 열리지도
+// 않았다(docs/windows-platform.md §5 실측). 고치되 macOS는 건드리면 안 된다 — hover(wordIsUrl)는 비용 때문에
+// 존재검증을 하지 않으므로, macOS에서 `C:\x`를 감지하면 "밑줄은 뜨는데 클릭하면 아무 일도 없는" 상태가 확정된다.
+// 그래서 술어를 **호스트 OS 기준**으로 둔다(path_shape.isDetectableAbsolute — VS Code가 백엔드 OS를 쓰는 것과 같은 규칙).
+test "absolute-path link detection follows the host OS, and never outruns resolve's notion of absolute" {
+    const on_windows = @import("builtin").os.tag == .windows;
+    const full = selection.link_scopes_full;
+
+    const Case = struct { text: []const u8, want: bool, why: []const u8 };
+    const cases = [_]Case{
+        // 어느 호스트에서나 오늘과 같다.
+        .{ .text = "/Users/me/a.zig", .want = true, .why = "POSIX 절대 — 기존 동작" },
+        .{ .text = "//server/share", .want = false, .why = "`//` 배제는 그대로" },
+        // Windows에서만 새로 잡힌다.
+        .{ .text = "C:\\Users\\me\\a.zig", .want = on_windows, .why = "드라이브 절대(역슬래시)" },
+        .{ .text = "C:/Users/me/a.zig", .want = on_windows, .why = "드라이브 절대(슬래시)" },
+        .{ .text = "d:\\lower\\a.zig", .want = on_windows, .why = "소문자 드라이브" },
+        // 어느 호스트에서도 안 잡혀야 한다 — resolveClickedPath가 절대로 안 보는 모양이라
+        // 잡으면 cwd에 join돼 엉뚱한 파일을 연다.
+        .{ .text = "a:b", .want = false, .why = "드라이브처럼 생겼을 뿐" },
+        .{ .text = "C:relative", .want = false, .why = "드라이브 상대 — isAbsolute=false" },
+        .{ .text = "\\foo\\bar", .want = false, .why = "드라이브 없는 루트 상대 + 이스케이프 출력 오탐" },
+        .{ .text = "\\\\server\\share\\f.txt", .want = false, .why = "UNC — 알려진 공백" },
+        .{ .text = "1:\\not-a-drive", .want = false, .why = "드라이브 문자는 letter여야 한다" },
+        // **알려진 오탐 — 의도적으로 남긴다.** 한 글자 라벨 + 이스케이프(`n:\t`)나 드라이브 루트(`y:\`)도
+        // 드라이브 절대 모양이다. POSIX 쪽도 오늘 같은 등급의 오탐을 낸다 — `/t`나 sed의 `/foo/bar/`가
+        // `absolute_path`로 잡힌다. 여기만 좁히면 "왜 `/t`는 밑줄이 뜨는데 `C:\t`는 안 뜨나"가 설명되지 않는
+        // 비대칭이 생긴다. 실제 피해(엉뚱한 파일 열기)는 존재 게이트가 막는다. 근본 해결은 hover에도 stat을
+        // 두는 것(VS Code 방식)이고 이 슬라이스 범위 밖이다.
+        .{ .text = "n:\\t", .want = on_windows, .why = "알려진 오탐 — POSIX `/t`와 같은 등급" },
+        .{ .text = "y:\\", .want = on_windows, .why = "알려진 오탐 — 드라이브 루트(POSIX `/`와 대칭)" },
+    };
+
+    for (cases) |c| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 2 });
+        defer core.deinit();
+        try core.write(c.text);
+
+        // hover(할당 없는 분류)와 순수 분류기가 같은 답을 내야 한다 — 원격 span(collectViewportLinks)도 후자를 쓴다.
+        const hovered = selection.wordIsUrl(&core, 0, 0, full);
+        const span = selection.linkSpanInWord(c.text, full);
+        const classified = span != null and span.?.kind == .file_path and span.?.scope == .absolute_path;
+        if (hovered != c.want or classified != c.want) {
+            std.debug.print("\"{s}\" ({s}): hover={} classify={} want={}\n", .{ c.text, c.why, hovered, classified, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "urlSpanAtAbs keeps a hovered link's underline within the viewport across scrolling (no OOB)" {
     // hover 밑줄 범위(urlSpanAtAbs)는 선택 하이라이트와 같은 clipAbsSpanToViewport로 클립된다. 링크가
     // 스크롤백으로 밀리거나 화면 경계에 걸쳐도 밑줄 좌표가 화면 범위[0, rows)를 벗어나면 안 된다(OOB/stale 방지).

@@ -44,7 +44,7 @@
 |---|---|---|---|---|
 | 1 | 스킴 URL (web) | `web` | `https://x`, `http://x`, `dot.http://x`(스킴부터) | url |
 | 2 | 추가 스킴 | `extra_schemes` | `file://`, `mailto:`, `ssh://`, `ftp://`, `git://`, `tel:`, `news:`, `magnet:` | url |
-| 3 | 절대 경로 | `absolute_path` | `/Users/me/a.zig`, `/etc/hosts` (`//`로 시작은 제외 — 주석·이중슬래시) | file_path |
+| 3 | 절대 경로 | `absolute_path` | `/Users/me/a.zig`, `/etc/hosts` (`//`로 시작은 제외 — 주석·이중슬래시). **Windows 호스트에서만** 드라이브 절대 `C:\x`·`C:/x`도 (아래) | file_path |
 | 4 | 홈 경로 | `home_path` | `~/.config/maru/config`, `~/notes.md` | file_path |
 | 5 | 명시 상대 | `dot_relative` | `./src/main.zig`, `../lib/y.rb` | file_path |
 | 6 | bare 상대 | `bare_relative` | `src/config/url.zig`, `app/x.rb:1` (슬래시 + 점 필수) | file_path |
@@ -60,6 +60,13 @@
   저장 URI를 먼저 회수하므로 영향을 받지 않는다. hover 판정(`wordIsUrl`, 2048B 스택 버퍼)과 클릭 추출
   (`extractUrlAt`, 전체 토큰)이 같은 결과를 내도록, 버퍼를 넘긴 토큰 뒷부분의 `…`도 hover가 끝까지 살펴 거부한다
   (어긋나면 "밑줄은 떠도 클릭하면 안 열림").
+- **절대 경로 판정은 호스트 OS 기준**(`path_shape.isDetectableAbsolute`): POSIX 절대(`/x`)는 어디서나, 드라이브
+  절대(`C:\x`·`C:/x`)는 **Windows 빌드에서만** 감지한다. 밑줄 span은 콘텐츠를 가진 쪽이 만들고(원격도 host가
+  `collectViewportLinks`로 모은다) hover는 존재검증을 하지 않으므로, macOS에서 `C:\x`를 감지하면 "열리지 않는
+  밑줄"이 확정된다. 드라이브 뒤에 **구분자를 요구**하므로 `a:b`·`C:relative`는 감지하지 않는다 — 그것들은
+  `std.fs.path.isAbsolute`가 거짓이라 resolve 단계에서 cwd에 join돼 엉뚱한 파일을 열게 된다. UNC(`\\server\share`)는
+  현재 감지하지 않는다(알려진 공백). 근거와 실측: [windows-platform.md](windows-platform.md) §5.1.
+  이 술어는 경로 **가드**가 쓰는 `path_shape.isAbsolute`(OS 무관하게 넓게 거부)와 **일부러 다르다**.
 - **`:line:col` 접미**: `file.zig:10:5`·`app/x.rb:1`의 `:<digits>(:<digits>)?`는 경로의 일부로 **보존**한다
   (에디터 줄 점프 관례). 단 1차 구현은 **여는 시점에 잘라 순수 경로만** 연다(`NSWorkspace.open`이 기본 앱으로
   파일을 열 뿐 — 에디터 줄 점프는 후속).

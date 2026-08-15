@@ -17,7 +17,7 @@
 | | 내용 | 상태 |
 |---|---|---|
 | W0 | 계약 문서(`windows-platform.md`) + 이 계획. 코드 0 | 완료 |
-| W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더한다. **9;9은 host를 건드리지 않는다**(계약 §3.2a의 C — 최소 메커니즘은 정해졌다). L1이라 Windows와 독립이고 헤드리스로 검증된다. **막는 것은 메커니즘이 아니라 위험 수용** — 원격 Windows 케이스의 잔여 위험을 받아들일지(§3.2a) | **결정 대기** |
+| W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더한다. **9;9은 host를 건드리지 않는다**(계약 §3.2a의 C — 최소 메커니즘은 정해졌다). L1이라 Windows와 독립이고 헤드리스로 검증된다. 잔여 위험은 §3.2a "받아들인 위험"으로 수용 확정 | 미착수 |
 | W1.5 | **절대경로 판정을 `[0]=='/'`에서 떼어낸다** — 중립 5곳(`normalizeAssetPath`·`repo_path`·`file_tree`·`file_tree_mutation`·`selection`). 계약 §5의 순서 제약상 **경로 정규화 도입보다 먼저** 해야 한다 | 미착수 |
 | W2 | **`main.zig` Windows 컴파일** — unix domain socket과 POSIX 파일 모드 2곳을 graceful 폴백으로. named pipe 이식은 아니다 | 미착수 |
 | W2.5 | **Windows 기본 셸** — `resolveInteractiveShell()`에 OS 갈래를 준다: `MARU_INTERACTIVE_SHELL` → `shell.command` → pwsh 7 → 5.1 → cmd(계약 §3.1a, 사용자 확정). config의 OS 분기 여부만 §8에 남았고 그것 없이도 이 슬라이스는 진행된다 | 미착수 |

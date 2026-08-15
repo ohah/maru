@@ -815,3 +815,35 @@ test "내용이 갈리면 렌더가 센 행 수도 버린다 — 다시 그리�
     _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -10_000);
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line); // 두 행짜리 문서는 다 보인다
 }
+
+test "스크롤해도 컨트롤 플레인은 같은 사실을 말한다 — 위치는 메타가 아니다" {
+    // 세로 위치는 **뷰 상태**이지 문서의 사실이 아니다. 메타(경로·읽기 전용)가 스크롤에 따라
+    // 흔들리면 밖에서 보는 쪽이 "다른 파일이 열렸다"고 오해한다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var long_buf: std.ArrayList(u8) = .empty;
+    defer long_buf.deinit(allocator);
+    for (0..300) |i| {
+        var num: [32]u8 = undefined;
+        try long_buf.appendSlice(allocator, try std.fmt.bufPrint(&num, "line {d}\n", .{i}));
+    }
+    var entry = testEntry(long_buf.items, "line 0\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    const before = editorMeta(fx.term);
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -50);
+    try testing.expect(fx.term.rt.editor_first_line > 0); // 실제로 움직였다
+
+    const after = editorMeta(fx.term);
+    try testing.expectEqualStrings(before.path.?, after.path.?);
+    try testing.expectEqual(before.read_only, after.read_only);
+    try testing.expect(after.read_only); // 비교는 여전히 읽기 전용이다
+}

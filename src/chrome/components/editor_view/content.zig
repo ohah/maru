@@ -294,6 +294,50 @@ pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
     if (bytes[i] == '\t') return .{ .next_byte = i + 1, .next_col = ((col / stop_width) + 1) * stop_width };
     const base = text_layout.decodeCodepoint(bytes, i);
     const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
+
+    // **위험 문자도 같은 규칙을 따라야 한다**(§3.8). `expandTabs`는 그것을 `<U+202E>` 같은 표기로
+    // 바꿔 그리고 **그 글자 수만큼** 열을 민다. 여기서 원본 폭으로 세면 강조가 그만큼 밀린다 —
+    // 실측: `\u{202E}abc`에서 `a`가 8열에 서는데 이 함수는 1열이라고 했다(적대적 검증 2026-08-16).
+    //
+    // **cluster 안을 봐야 한다.** GB9가 ZWJ를 앞 글자에 흡수하므로 cluster 단위로만 보면
+    // `ad<ZWJ>min`의 ZWJ를 놓친다 — `expandTabs`가 같은 이유로 codepoint 단위로 내려간다.
+    var scan = i;
+    var hazard_in_cluster = false;
+    while (scan < end) {
+        if (hazard.classifyInText(bytes, scan) != null) {
+            hazard_in_cluster = true;
+            break;
+        }
+        const seq = std.unicode.utf8ByteSequenceLength(bytes[scan]) catch 1;
+        scan += @max(1, @min(seq, end - scan));
+    }
+    if (hazard_in_cluster) {
+        // **cluster를 통째로 지난다 — 중간에서 끊으면 안 된다.** 전개 루프는 이 cluster 안을
+        // codepoint 단위로 훑되 경계 `[i, end)`는 그대로 두는데, 여기서 한 cp만 지나고 돌아가면
+        // 다음 호출이 **중간부터 다시 분절**해 다른 cluster가 나온다(오라클 대조가 12 vs 15로 잡았다).
+        // 그래서 안쪽 합을 여기서 다 세고 `end`로 넘어간다.
+        // **codepoint 폭을 그냥 더하면 안 된다.** 전개 결과는 다시 분절되어 그려지므로
+        // `😀<ZWJ>😀`는 **한 글자 2칸**이지 2+0+2가 아니다(오라클 대조가 12 vs 15로 잡았다).
+        // 그래서 위험하지 않은 **연속 구간은 통째로** 세고(그 구간이 렌더에서 그대로 남는다),
+        // 위험 cp만 표기 글자 수로 센다.
+        var cp_i = i;
+        var run_start = i;
+        var advanced: u32 = 0;
+        while (cp_i < end) {
+            const cp_len = @max(1, @min(std.unicode.utf8ByteSequenceLength(bytes[cp_i]) catch 1, end - cp_i));
+            if (hazard.classifyInText(bytes, cp_i)) |_| {
+                if (cp_i > run_start) advanced += columnsOf(bytes[run_start..cp_i]);
+                const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
+                var shown_buf: [hazard.max_display_len]u8 = undefined;
+                advanced += @intCast(hazard.displayText(cp, &shown_buf).len);
+                run_start = cp_i + cp_len;
+            }
+            cp_i += cp_len;
+        }
+        if (end > run_start) advanced += columnsOf(bytes[run_start..end]);
+        return .{ .next_byte = end, .next_col = col + advanced };
+    }
+
     const n = @max(1, end - i);
     return .{ .next_byte = i + n, .next_col = col + display_width.clusterCols(bytes, i, i + n) };
 }
@@ -508,6 +552,11 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
             // 이 cluster는 **codepoint 단위로** 처리한다 — 위험한 것만 표기로 바꾸고 나머지는
             // 그대로 옮긴다. cluster를 통째로 표기로 바꾸면 정상 글자까지 사라진다.
             var cp_i = i;
+            // **위험하지 않은 연속 구간은 통째로 세야 한다.** 내보낸 텍스트는 다시 분절되어 그려지므로
+            // `😀<ZWJ>😀`는 **한 글자 2칸**이지 2+0+2가 아니다. codepoint 폭을 그냥 더하면 `col`이
+            // 실제 화면보다 앞서고, **그 뒤 탭이 틀린 탭스톱에 선다**(적대적 검증 2026-08-16이
+            // `columnOfByte` 대조로 잡았다 — 29 vs 32).
+            var run_start = i;
             while (cp_i < end) {
                 const cp_len = @max(1, @min(std.unicode.utf8ByteSequenceLength(bytes[cp_i]) catch 1, end - cp_i));
                 if (hazard.classifyInText(bytes, cp_i)) |_| {
@@ -540,10 +589,14 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                     }
                     // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
                     col += shown.len;
+                    run_start = cp_i + cp_len; // 여기서 정상 구간이 새로 시작한다
                 } else {
                     // 같은 이유로 오른쪽도 여기서 다시 본다 — 이 분기(한 cluster 안의 정상 cp)에는
                     // 경계 판정이 아예 없어서, 창을 넘긴 글자가 그대로 나갔다.
-                    const cw = text_layout.clusterCols(std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD, null);
+                    // 이 cp가 **실제로 미는 칸** = 구간을 여기까지 세었을 때와 직전까지 세었을 때의 차.
+                    // 앞 글자에 흡수되는 cp(ZWJ·결합 문자)는 0이 되어 화면과 같아진다.
+                    const before = if (cp_i > run_start) columnsOf(bytes[run_start..cp_i]) else 0;
+                    const cw = columnsOf(bytes[run_start .. cp_i + cp_len]) -| before;
                     if (col + cw > range.stop()) break;
 
                     // **열 누적은 조건 밖이다.** 밀린 앞부분에서 `col`이 안 늘면 `range.start`에
@@ -1492,13 +1545,18 @@ test "한 번 훑기와 실제 전개가 같은 열을 준다 — 무작위 300�
         const n = rnd.uintLessThan(usize, line_buf.len);
         var len: usize = 0;
         while (len < n) {
-            const pick = rnd.uintLessThan(u8, 6);
+            // **§3.8 문자가 알파벳에 있어야 한다.** 예전 알파벳은 탭·한글·이모지·ASCII뿐이라,
+            // 위험 문자에서 두 구현이 갈린 것을 300줄을 돌고도 못 봤다(적대적 검증 2026-08-16).
+            const pick = rnd.uintLessThan(u8, 9);
             const piece: []const u8 = switch (pick) {
                 0 => "\t",
                 1 => "한",
                 2 => "a",
                 3 => " ",
                 4 => "😀",
+                5 => "\u{202E}", // BiDi override — Trojan Source
+                6 => "\u{200D}", // ZWJ — 앞 글자 cluster에 흡수된다
+                7 => "\u{00AD}", // soft hyphen — 보이지 않는다
                 else => "z",
             };
             if (len + piece.len > line_buf.len) break;
@@ -1526,7 +1584,14 @@ test "한 번 훑기와 실제 전개가 같은 열을 준다 — 무작위 300�
 
         var got: [64]u32 = undefined;
         columnsAtOffsets(line, tw, offsets[0..count], got[0..count], std.math.maxInt(u32));
-        for (0..count) |k| try testing.expectEqual(expected[k], got[k]);
+        for (0..count) |k| {
+            if (expected[k] != got[k]) {
+                std.debug.print("\n[불일치] 줄=", .{});
+                for (line) |b| std.debug.print("{X:0>2} ", .{b});
+                std.debug.print("\n  offset={d} 오라클={d} 빠른쪽={d} tw={d}\n", .{ offsets[k], expected[k], got[k], tw });
+                return error.Mismatch;
+            }
+        }
         _ = &scratch;
     }
 }
@@ -1565,4 +1630,18 @@ test "제자리 채우기가 따로 받은 것과 같은 답을 준다 — 프�
 
         try std.testing.expectEqualSlices(u32, separate[0..cnt], inplace[0..cnt]);
     }
+}
+
+test "위험 문자가 있는 줄도 마크 열이 렌더와 같다 — §3.8" {
+    // 렌더(`expandTabs`)는 위험 문자를 `<U+202E>` 같은 표기로 바꾸고 그 **글자 수만큼** 열을 민다.
+    // 마크 열을 세는 `columnsAtOffsets`는 원본 폭(BiDi 제어 = 0칸)만 본다. 갈리면 강조가 밀린다.
+    const line = "\u{202E}abc";
+    var buf: [64]u8 = undefined;
+    const e = expandTabs(line, 4, &buf, .{ .start = 0, .count = 60 });
+
+    // "abc"는 바이트 3에서 시작한다(U+202E는 3바이트).
+    const offs = [_]u32{3};
+    var got = [_]u32{0};
+    columnsAtOffsets(line, 4, &offs, &got, 1000);
+    try std.testing.expectEqual(@as(u32, @intCast(e.text.len - 3)), got[0]);
 }

@@ -307,9 +307,22 @@ pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
 ///
 /// **탭스톱 규칙은 아래 전개 루프와 같아야 한다** — 두 곳이 갈리면 강조가 글자에서 밀린다. 그래서
 /// 테스트가 이 함수를 `columnOfByte`(실제 전개로 세는 쪽)와 무작위 입력에서 대조한다.
-/// `offsets`·`out`이 **정렬되지 않은** 슬라이스일 수 있다(호출자가 byte 저장소를 빌려 쓴다 — 편집기
-/// 프레임이 그렇게 한다). 그래서 `align(1)`을 받는다.
+/// **`out`이 `offsets`와 같은 메모리여도 된다**(제자리 채우기 — 편집기 프레임이 저장소를 아끼려고
+/// 그렇게 부른다). 각 칸은 **읽어서 소비한 뒤에** 덮이고 `next`는 뒤로 가지 않으므로 안전하다.
+/// 앞칸을 되읽는 수정을 넣으면 이 성질이 깨진다 — 아래 대조 테스트가 그것을 잡는다.
+///
+/// `offsets`·`out`은 **바이트 정렬(alignment)이 어긋난** 슬라이스일 수 있다(호출자가 byte 저장소를
+/// 빌려 쓴다 — 편집기 프레임이 그렇게 한다). 그래서 `align(1)`을 받는다. 위의 "오름차순"은 **값의
+/// 순서**를 말하는 것이고 이것은 **메모리 정렬**이다 — 한국어로 둘 다 "정렬"이라 예전 주석은 뒤
+/// 문장이 앞 계약을 뒤집는 것처럼 읽혔다.
 pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32) void {
+    // **계약을 지키지 않으면 소리 내어 죽는다.** 오름차순이 아니면 이 함수는 틀린 열을 조용히 내고,
+    // 강조가 엉뚱한 글자 위에 선다 — 크래시도 테스트 실패도 없이 화면만 틀린다. 지금 유일한 생산자
+    // (`session/editor/intraline`)는 이 성질을 무작위 테스트로 지키지만, `row_marks`에 다른 생산자가
+    // 붙는 순간(검색 강조·진단 표시) 그 보장은 따라오지 않는다. ReleaseFast에서는 사라진다.
+    if (std.debug.runtime_safety and offsets.len > 1) {
+        for (offsets[1..], 0..) |v, i| std.debug.assert(v >= offsets[i]);
+    }
     // **화면 오른쪽 끝을 넘으면 멈춘다.** `expandTabs`가 훑는 범위에 상한을 둔 것과 같은 이유다 —
     // 없으면 minified JS처럼 한 줄이 수 MB인 파일에서 화면 밖까지 끝까지 지나간다. 위치가 오름차순
     // 이므로 그 뒤는 전부 화면 밖이고, 남은 자리에는 상한 열을 채워 호출자가 잘라 내게 한다.
@@ -1515,5 +1528,41 @@ test "한 번 훑기와 실제 전개가 같은 열을 준다 — 무작위 300�
         columnsAtOffsets(line, tw, offsets[0..count], got[0..count], std.math.maxInt(u32));
         for (0..count) |k| try testing.expectEqual(expected[k], got[k]);
         _ = &scratch;
+    }
+}
+
+test "제자리 채우기가 따로 받은 것과 같은 답을 준다 — 프레임이 그렇게 부른다" {
+    // `frame.paintBands`가 저장소를 아끼려고 `columnsAtOffsets(line, tw, offsets, offsets, …)`로
+    // **같은 메모리**를 넘긴다. 지금은 칸을 소비한 뒤에 덮어서 안전한데, 그 성질은 코드를 읽어야만
+    // 보인다 — 앞칸을 되읽는 수정이 들어오면 조용히 틀린 열이 나온다. 무작위로 대조한다.
+    var prng = std.Random.DefaultPrng.init(0xa11a_5eed);
+    const rnd = prng.random();
+    const vocab = [_][]const u8{ "a", "\t", "가", "😀", "e\u{0301}", "  " };
+    var round: usize = 0;
+    while (round < 500) : (round += 1) {
+        var line: [160]u8 = undefined;
+        var n: usize = 0;
+        var pieces = rnd.uintLessThan(usize, 40);
+        while (pieces > 0 and n + 8 < line.len) : (pieces -= 1) {
+            const w = vocab[rnd.uintLessThan(usize, vocab.len)];
+            @memcpy(line[n..][0..w.len], w);
+            n += w.len;
+        }
+        const bytes = line[0..n];
+
+        var raw: [16]u32 = undefined;
+        const cnt = rnd.uintLessThan(usize, raw.len) + 1;
+        for (raw[0..cnt]) |*o| o.* = rnd.uintAtMost(u32, @intCast(n + 4));
+        std.mem.sort(u32, raw[0..cnt], {}, std.sort.asc(u32)); // 계약: 오름차순
+
+        const stop = rnd.uintAtMost(u32, 200);
+        var separate: [16]u32 = undefined;
+        columnsAtOffsets(bytes, 4, raw[0..cnt], separate[0..cnt], stop);
+
+        var inplace: [16]u32 = undefined;
+        @memcpy(inplace[0..cnt], raw[0..cnt]);
+        columnsAtOffsets(bytes, 4, inplace[0..cnt], inplace[0..cnt], stop);
+
+        try std.testing.expectEqualSlices(u32, separate[0..cnt], inplace[0..cnt]);
     }
 }

@@ -1661,17 +1661,38 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
 /// 등록된 SVG 아이콘의 coverage 를 Zig 에서 만든다 — 두 플랫폼이 같은 코드를 쓴다.
 /// 상태바 아이콘 줄. **예약(레이아웃 padding)과 그리기가 같은 수를 봐야 한다** — 따로 적으면
 /// 개수를 늘렸을 때 아이콘만 왼쪽으로 번져 카드 위에 겹친다(그 모양을 화면으로 한 번 잡았다).
-const status_icon_count: usize = 6;
+const status_icon_count: usize = status_cps.len;
 const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 간격도 44 여야 한다
 /// 그리는 크기. **히트(44)와 다른 값이다** — 44 를 꽉 채우면 아이콘끼리 붙어 보인다.
 /// 18 은 26px 줄에 맞춰 고른 값이라 44 줄에서는 작아 보였다(실제 하단 바는 24~28 을 쓴다).
 const status_icon_px: i32 = 24;
 const icon_slot_px = 32;
 /// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
-/// 방향키 아이콘이 시작하는 슬롯. **상태바 아이콘 뒤에 붙는다** — 슬롯 번호를 손으로 적으면
-/// 상태바에 아이콘을 하나 넣는 순간 키바 화살표와 설정 뒤로가기가 **엉뚱한 그림**이 된다.
-const arrow_slot_base: u32 = @intCast(status_icon_count);
-const icon_slots = status_icon_count + 4; // 상태바 + 방향키 넷
+/// 하단 바 아이콘. **이 배열이 개수의 출처다**(`status_icon_count`).
+const status_cps = [_]u32{
+    maru.icons.codepoint(.git_branch),
+    maru.icons.codepoint(.gear),
+    maru.icons.codepoint(.plus),
+    maru.icons.codepoint(.search),
+    maru.icons.codepoint(.bell),
+    maru.icons.codepoint(.sidebar_collapse),
+};
+
+/// 보조 키바 방향키. **폰트 글리프(`↑↓←→`)로는 안 됐다** — 폰트마다 작게 디자인돼 44px
+/// 키캡 안에서 `esc`·`tab` 보다 훨씬 작아 보였다(화면으로 확인). 합성 아이콘은 슬롯을
+/// 가장자리까지 채우므로 라벨 크기와 무관하게 또렷하다.
+const arrow_cps = [_]u32{
+    maru.icons.codepoint(.arrow_up),
+    maru.icons.codepoint(.arrow_down),
+    maru.icons.codepoint(.arrow_left),
+    maru.icons.codepoint(.arrow_right),
+};
+
+/// 방향키가 시작하는 슬롯. **번호를 손으로 적지 않는다** — 상태바에 아이콘을 하나 넣는 순간
+/// 키바 화살표와 설정 뒤로가기가 엉뚱한 그림이 되는데, 빌드는 통과하고 화면만 틀린다.
+/// 두 배열을 이어 붙이므로 **순서가 구조로 정해진다**(검사할 것이 남지 않는다).
+const arrow_slot_base: u32 = @intCast(status_cps.len);
+const icon_slots = status_cps.len + arrow_cps.len;
 /// **RGBA8** 이어야 한다 — `glyph_pixels.slotFits` 가 `bytes_per_row >= width*4` 를 요구한다
 /// (단일 채널을 주면 조용히 0을 돌려준다. 실측: filled=0/6 으로 헤맸다). 셰이더는 alpha 를
 /// coverage 로 읽는다.
@@ -1692,25 +1713,7 @@ pub export fn maru_mobile_icon_build() u32 {
     @memset(&icon_pixels, 0);
     // **이름으로 부른다.** PUA codepoint 리터럴은 경계 테스트가 막는다
     // (docs/chrome-strategy.md §9.7) — 자산이 옮겨 가면 리터럴만 조용히 어긋난다.
-    // **앞 `status_icon_count` 개가 상태바, 그 뒤 넷이 방향키다.** 이 순서가 곧 슬롯 번호이고
-    // `arrow_slot_base` 가 그것을 가정한다 — 상태바 아이콘을 여기 끼워 넣으면 `status_icon_count`
-    // 도 함께 올려야 화살표가 안 밀린다.
-    const cps = [icon_slots]u32{
-        maru.icons.codepoint(.git_branch),
-        maru.icons.codepoint(.gear),
-        maru.icons.codepoint(.plus),
-        maru.icons.codepoint(.search),
-        maru.icons.codepoint(.bell),
-        maru.icons.codepoint(.sidebar_collapse),
-        // 보조 키바 방향키. **폰트 글리프(`↑↓←→`)로는 안 됐다** — 폰트마다 작게 디자인돼 44px
-        // 키캡 안에서 `esc`·`tab` 보다 훨씬 작아 보였다(화면으로 확인). 합성 아이콘은 슬롯을
-        // 가장자리까지 채우므로 라벨 크기와 무관하게 또렷하다.
-        maru.icons.codepoint(.arrow_up),
-        maru.icons.codepoint(.arrow_down),
-        maru.icons.codepoint(.arrow_left),
-        maru.icons.codepoint(.arrow_right),
-    };
-    comptime std.debug.assert(icon_slots == status_icon_count + 4);
+    const cps = status_cps ++ arrow_cps;
     var filled: u32 = 0;
     for (cps, 0..) |cp, i| {
         const stride = icon_slot_px * 4;

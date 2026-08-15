@@ -48,7 +48,7 @@
 
 | 무엇 | 어디 |
 |---|---|
-| 줄 문법(`key = value`·주석·`=` 없는 줄 진단) | **공유** — `src/config/loader.zig` |
+| 줄 문법(`key = value`·주석·`=` 없는 줄 진단) | **규칙만 같다** — `loader.parse` 는 못 부른다(데스크톱 Config 에 박혀 있고 keybind 4종·env 목록까지 만든다). 모바일이 같은 규칙으로 짧은 루프를 둔다 |
 | 키→필드 파싱·직렬화 | **공유** — `src/config/schema.zig` 의 comptime 스키마 엔진 |
 | 부분 갱신(주석·모르는 키 보존) | **공유** — `loader.updateConfigText` (텍스트 + 키/값 쌍만 받는다) |
 | 어떤 키가 있고 기본값이 무엇인가 | **모바일 것** — 이 문서 §4 |
@@ -72,13 +72,13 @@
 
 | | 빌려 조립 | 새로 쓰기 |
 |---|---|---|
-| 스키마 메타 | 안 쓴다(이미 달려 있다) | 키마다 다시 단다 |
+| 스키마 메타 | **대부분** 안 쓴다 — 다만 `theme.follow-system`·`preset-dark`·`preset-light` 는 색 세트가 아니라 **선택 정책**이라 `Config` 직속이다. 빌려도 안 따라오므로 모바일이 직접 단다 | 키마다 다시 단다 |
 | `theme.preset` | `presetColors()` 가 **바로 그 타입**을 돌려줘 그대로 대입된다 | 반환형이 달라 못 쓴다 |
 | 섹션(GUI) | **안 따라온다** — 아래 |
 | 대가 | **모바일에 뜻 없는 필드가 딸려온다** — `InputConfig` 13개 중 12개, `ThemeConfig` 의 `sidebar_*`·`search_match*`. §4.4 가 "안 가져온다" 고 적은 키를 **파일에서 받아들이게 된다**(해는 없다 — 소비처가 없으니 무동작이다. 다만 문서와 코드가 갈린다) | 키 표면이 문서와 정확히 같다 |
 
 **섹션은 어느 쪽을 택하든 모바일이 소유한다.** 빌려도 공짜로 안 따라온다 — 두 분류가 **부분집합이
-아니라 다른 체계**다. 데스크톱 `Section` 은 config 이름 공간에 가깝고(`bell.*` 이 `.terminal` 을 단다)
+아니라 다른 체계**다. 데스크톱 `Section` 은 config 이름 공간에 가깝고(`bell` 계열 이 `.terminal` 을 단다)
 모바일 화면은 사용자가 찾는 주제로 묶는다([UX §5.6](mobile-ux.md) 확정: 모양·글자·커서·터미널·
 입력·알림·화면·모바일). 여덟 중 **알림·화면·모바일 셋이 데스크톱에 대응이 없고**, 특히 "알림" 은
 모바일 전용 개념이라서가 아니라 **묶는 기준이 달라서** 없다. 그래서 빌리는 것은 **파싱**이지
@@ -105,13 +105,13 @@
 
 | 키 | 소비처 | 비고 |
 |---|---|---|
-| `theme.preset`·`theme.preset-dark`·`theme.preset-light`·`theme.follow-system` | 브리지 `themeColors()` | 파싱은 **스키마 밖**이다(§3) — `loader.applyKey` 의 명시 가지 |
+| `theme.preset` | 브리지 `themeColors()` | 파싱은 **스키마 밖**이다(§3) — `loader.applyKey` 의 명시 가지 |
 | `theme.background`·`theme.foreground`·`theme.cursor`·`theme.selection`·`theme.palette.0`~`.15` | 같음 | 팔레트는 계열 키다 |
 | `theme.bold-is-bright`·`theme.min-contrast` | 같음 | |
 | `cursor.color`·`cursor.text` | 브리지 커서 quad(`tk.get(.cursor)`) | |
 | `cursor.shape` | 코어(`snap.cursor_shape`) | config 는 **기본 모양**을 준다. TUI 가 DECSCUSR 로 바꾸면 그쪽이 이긴다 |
 | `text.ambiguous-width` | 코어 `ambiguous_wide` | 브리지가 코어에 세워 주면 된다 |
-| `text.emoji-width` | 코어 폭 정책(`width`) | |
+| `text.emoji-width` | 코어 `emoji_wide` | `ambiguous_wide` 와 같은 모양 — 앱 계층이 세운다 |
 | `scrollback.lines` | 코어 `setMaxScrollback` | 기본값은 §4.5 |
 | `input.word-separators` | 코어 `selectWordAt(…, separator_bytes)` | **지금 호출부가 빈 목록(`&.{}`)을 넘긴다** — M10b 가 그 자리를 잇는다 |
 | `osc52.read` | 코어 | `deny`(기본)는 지금도 지켜진다. `allow` 는 host 가 클립보드를 **읽는** 경로가 있어야 하는데 지금은 쓰기(`take_copy`)뿐이다 |
@@ -129,6 +129,7 @@
 | `input.paste-protection`·`input.bracketed-paste-is-safe` | **붙여넣기 경로가 없다**. 지금 "paste" 는 설정 화면 라벨뿐이다 |
 | `input.ime-enter`·`input.shift-enter`·`input.selection-clear-on-typing` | 데스크톱 앱 계층(`platform/macos/app_session`)이 소비한다. 모바일의 대응 자리는 브리지이고 아직 그 처리가 없다 |
 | `bell.audible`·`bell.visual` | 벨 처리가 없다. 지금 "bell" 은 chrome 헤더 **아이콘**뿐이다 |
+| `theme.follow-system`·`theme.preset-dark`·`theme.preset-light` | **OS 외관을 받는 경로가 없다** — 브리지·두 host·ABI 어디에도 라이트/다크를 알리는 자리가 없다. 값만 실으면 켜도 아무 일이 안 난다. ABI 를 하나 여는 슬라이스에서 함께 연다(iOS `traitCollection`·Android `uiMode`) |
 | `text.blink` | 깜빡임을 안 그린다(SGR 5 는 정적 — 코어도 "렌더는 정적" 이라고 적어 뒀다) |
 | `input.link-detection`·`input.link-open-target` | 링크를 눌러 여는 경로가 없다 |
 | `input.page-keys` | 키바에 PageUp/Down 키캡은 있지만 이 정책을 보는 자리가 없다 |

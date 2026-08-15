@@ -1963,7 +1963,11 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 아이콘이 줄 위아래로 치우친다.
     const icon_y: i32 = @intFromFloat(@max(0, height_f - 44 + @as(f32, @floatFromInt(44 - status_icon_px)) / 2));
     const icon_step: i32 = status_icon_step;
-    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * @as(i32, @intCast(status_icon_count)) - 12;
+    // **마지막 아이콘의 오른쪽 끝**을 가장자리에서 12 떨어뜨린다. 슬롯 수(6)만큼 통째로 빼면
+    // 마지막 슬롯의 남는 폭(44-24)이 여백에 더해져 줄 전체가 20px 왼쪽으로 치우친다 — 간격과
+    // 그리는 크기가 달라진 뒤로 그 차이가 눈에 보인다(전에는 26 대 18 이라 8px 이었다).
+    const icon_span: i32 = icon_step * @as(i32, @intCast(status_icon_count - 1)) + status_icon_px;
+    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_span - 12;
     for (0..status_icon_count) |i| {
         if (!reserveQuad()) break;
         const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);

@@ -87,6 +87,28 @@ pub const HostAdapter = struct {
         pub fn rawClient(adapter: *HostAdapter) *client_mod.Client {
             return adapter.slot.logicalClient();
         }
+
+        pub fn publishReplacementForCr3c(
+            adapter: *HostAdapter,
+            cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+            source: *client_mod.Client,
+            out: *client_slot_mod.PreparedClientReplacement,
+        ) !void {
+            try adapter.prepareClientReplacement(cleanup, source, out);
+            var prepared = true;
+            defer if (prepared) adapter.abortClientReplacement(out) catch
+                @panic("CR3c test replacement abort failed");
+            adapter.publishClientReplacementNoFail(out);
+            prepared = false;
+        }
+
+        pub fn reclaimAllRetiredForCr3c(adapter: *HostAdapter) !void {
+            while (adapter.slot.retiredClientCount() != 0) {
+                var retired: client_slot_mod.PreparedRetiredClientReclaim = .{};
+                try adapter.prepareRetiredClientReclaim(&retired);
+                adapter.commitRetiredClientReclaimAtTickEndNoFail(&retired);
+            }
+        }
     } else struct {};
 
     pub fn initializeProcessRuntime() client_slot_mod.ClientSlot.ProcessRuntimeInitError!void {
@@ -217,6 +239,20 @@ pub const HostAdapter = struct {
         prepared: *client_slot_mod.PreparedClientReplacement,
     ) void {
         self.slot.publishClientReplacementNoFail(prepared);
+    }
+
+    pub fn preflightClientReplacement(
+        self: *HostAdapter,
+        prepared: *const client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        return self.slot.preflightClientReplacement(prepared);
+    }
+
+    pub fn preflightPublishedClientReplacement(
+        self: *HostAdapter,
+        published: *const client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        return self.slot.preflightPublishedClientReplacement(published);
     }
 
     pub fn prepareRetiredClientReclaim(

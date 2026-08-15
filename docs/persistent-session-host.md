@@ -717,11 +717,11 @@ field ownership은 다음처럼 겹치지 않는다.
 
 CR2a의 extraction inventory는 현재 구현에서 세대와 함께 교체되어야 하는 field만 먼저 묶는다. exact field는
 `{connection,attachment,event_generation_tracking,resize_seq,resize_generation,resize_baseline_present,pump_ended,
-resync_needed,frame_summary_ready,frame_summary,observation}` 11개다. 여기서 direct-input/control **delivery state**는 active
+resync_needed,frame_summary_ready,frame_summary,observation,connection_generation}` 12개다. 여기서 direct-input/control **delivery state**는 active
 generation의 resize wire sequence·baseline과 pump summary를 뜻한다. payload queue인 `direct_input`, `direct_input_offset`,
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
-정렬 패딩은 Debug `9,120 -> 9,136`, ReleaseFast `9,056 -> 9,072`로 exact 16바이트이며 4,096 runtime 상한의 추가분은
+정렬 패딩 안에서 `RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,072/9,856`, ReleaseFast `3,056/9,808`을 유지하며 4,096 runtime 상한의 추가분은
 64 KiB다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
@@ -5150,7 +5150,16 @@ R1은 current pointer, runtime/screen target, connection generation을 바꾸지
 존재할 수 있다. 반대로 R2는 CR0b·CR1·CR2a~e가 모두 완료되어 `RemoteGeneration`, stable `ScreenSource` proxy,
 preallocated `UnavailableCore`, `PreparedReconnect`가 실제 제품 타입으로 준비된 뒤에만 admission한다. R2가 이 기반을
 `ClientSlot` 안에 임시로 복제하거나 stable shell 없이 attachment를 직접 파괴하는 경로는 허용하지 않는다. CR3c는 R2/R3의
-Client 세대 결과를 이미 존재하는 `RemoteGeneration` slot에 연결한다.
+Client 세대 결과를 이미 존재하는 `RemoteGeneration` slot에 연결한다. 이 결속은 publication과 reclaim을 분리한 두 단계다.
+CR3c1은 prepared admission close 아래 old `RemoteGeneration` attachment를 먼저 terminalize하고 같은 no-fail suffix에서 Client admission을 닫는다.
+이 순서가 old transport/event owner를 반납하므로 R2a/R2b/R2c 뒤 새 generation attachment를 만들 수 있다. publication은 R2c가 이미 게시한
+`PreparedClientReplacement` receipt와 같은 adapter의 전용 forward-recovery `PreparedReconnect`가 old/next connection generation을 exact 공유할 때만
+stable screen writer gate 안에서 RemoteGeneration slot/screen target을 바꾼다. Client registry/current는 이 gate 전에 이미 next를
+가리키며, 이후 prepare 실패는 이를 되돌리지 않고 unavailable placeholder에서 같은 connection generation 재시도를 허용한다. shell generation은
+별도 축이며 R2a unavailable placeholder generation과 candidate slot generation이 같은 경우에만 unavailable→live로 승격한다. candidate screen,
+adapter 또는 generation이 다르면 어느 owner도 바꾸지 않는다. CR3c2 reclaim은 같은 retiring generation의 RemoteGeneration을 먼저
+정산해 attachment가 가진 Client registry/pin 권위를 반납한 뒤, oldest retired Client를 같은 tick-end owner turn에서 회수한다.
+Client를 먼저 파괴하거나 서로 다른 generation 두 개를 독립적으로 회수하는 경로는 허용하지 않는다.
 
 R2는 실패 시점과 callback 권위를 섞지 않기 위해 `R2a|R2b|R2c`로 닫는다. R2a의 유일한 durable mutation은 stable proxy
 writer gate 안의 `live -> unavailable`과 exact current Client node의 detached tombstone이다. 둘 중 하나만 보이는 상태는
@@ -5205,6 +5214,14 @@ focused gate는 Debug·ReleaseFast마다 generation 1→2→3 두 번 게시, ca
 성공 행 1개, copied handle·candidate digest/readiness drift destroy-0 행 1개, HostAdapter tick-end facade 1개와 source boundary 1개를
 exact-count한다. 이 dormant R3 facade의 제품 caller는 0이며 CR3c actual `RemoteGeneration` integration과 CR4 socket reconnect는 아직
 완료 증거가 아니다.
+
+CR3c1의 focused gate는 `zig build test-session-host-cr3c-c1`이다. production `RemoteGeneration`과 `HostAdapter.ClientSlot`을
+같은 fixture에서 사용해 connection generation 1 current, shell generation 2 current에서 old attachment terminalization→admission close→R2a placeholder shell generation 3→
+R2b cleanup→R2c Client connection generation 2 게시→forward-recovery candidate prepare 순서를 실행한다. stable screen writer gate commit 뒤 screen/RemoteGeneration shell은 3,
+Client와 candidate payload connection generation은 2이며 양쪽 old owner가 각각 기존 세대로 retiring인지 검증한다. 다른
+adapter, prepared generation drift, copied handle은 screen·RemoteGeneration mutation 0이고 이미 게시된 Client graph를 보존하며 canonical candidate abort/cleanup이 가능해야 한다.
+이 gate는 publication만 소유하므로 retiring RemoteGeneration/Client destroy와 actual `connectExistingHost` wire caller는 0이다.
+CR3c2가 ordered tick-end reclaim과 최종 zero를 닫기 전에는 CR3c 완료를 주장하지 않는다.
 
 #### CR3a ownership target inventory
 

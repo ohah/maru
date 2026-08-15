@@ -487,6 +487,9 @@ fn metadataDtoMatchesObservation(
 /// field를 물리적으로 묶기만 하며 allocator, Surface와 stable input/lifecycle owner를 섞지 않는다.
 pub const RemoteGeneration = struct {
     connection: RuntimeConnection,
+    /// Stable shell generation과 독립된 shared Client transport generation이다.
+    /// generation connection에서는 exact HostAdapter.ClientSlot current와 일치해야 한다.
+    connection_generation: u64 = 0,
     attachment: RuntimeAttachment,
     event_generation_tracking: EventGenerationTracking,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
@@ -1276,6 +1279,85 @@ pub const ReconnectGenerationOwner = struct {
         );
     }
 
+    /// CR3c1 integrated forward-only suffix. The stable-screen writer gate hides the interval in
+    /// which the old attachment is terminalized, then the Client cleanup/detach and unavailable
+    /// target are published. A reader can observe either the old live generation or the complete
+    /// unavailable placeholder, never a live target backed by a terminal attachment.
+    pub fn publishUnavailableAfterAttachmentRetirement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        permit: *r2a_client_slot.PreparedAdmissionClose,
+        cleanup: *r2a_client_slot.PreparedRetirementCleanup,
+        expected_generation: u64,
+        next_generation: u64,
+    ) (r2a_client_slot.ClientSlot.RetirementDetachError || r2a_client_slot.ClientSlot.RetirementCleanupError || stable_screen_source.PublishError || error{InvalidAuthority})!stable_screen_source.RetiredTarget {
+        try self.validate();
+        if (!self.screen_published or try self.currentGeneration() != expected_generation)
+            return error.InvalidAuthority;
+        const current = @constCast(try self.slot.currentPayload());
+        switch (current.connection) {
+            .generation => |current_adapter| {
+                if (current_adapter != adapter) return error.InvalidAuthority;
+            },
+            .legacy => return error.InvalidAuthority,
+        }
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return error.InvalidAuthority,
+        };
+        try adapter.slot.preflightRetirementDetachBeforeAdmissionClose(
+            permit,
+            expected_generation,
+            next_generation,
+        );
+        try adapter.slot.preflightRetirementCleanupBeforeAdmissionClose(
+            permit,
+            cleanup,
+            next_generation,
+        );
+        const Context = struct {
+            adapter: *host_adapter_mod.HostAdapter,
+            attachment: *generation_attachment_mod.GenerationAttachment,
+            permit: *r2a_client_slot.PreparedAdmissionClose,
+            cleanup: *r2a_client_slot.PreparedRetirementCleanup,
+            expected: u64,
+            next: u64,
+
+            fn commit(context: @This()) !void {
+                switch (context.attachment.tryDeinit(context.adapter)) {
+                    .cleaned, .terminal_handoff => {},
+                    .busy => return error.Busy,
+                    .already_terminal, .corrupt => process_seal_service.fatalIntegrity(.proof_loss),
+                }
+                context.adapter.commitAdmissionClose(context.permit) catch
+                    @panic("CR3c1 admission close drifted inside writer gate");
+                context.adapter.slot.commitRetirementCleanupNoFail(
+                    context.permit,
+                    context.cleanup,
+                    context.next,
+                );
+                context.adapter.slot.commitRetirementDetachNoFail(
+                    context.permit,
+                    context.expected,
+                    context.next,
+                );
+            }
+        };
+        return self.screen_source.?.publishUnavailableFromLiveWithFallibleCommit(
+            expected_generation,
+            next_generation,
+            Context{
+                .adapter = adapter,
+                .attachment = attachment,
+                .permit = permit,
+                .cleanup = cleanup,
+                .expected = expected_generation,
+                .next = next_generation,
+            },
+            Context.commit,
+        );
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -1309,6 +1391,64 @@ pub const ReconnectGenerationOwner = struct {
         out.lifecycle = .candidate;
     }
 
+    /// CR3c1 forward-recovery preparation. The old attachment was terminalized before admission
+    /// close, so its screen source is intentionally unavailable; the published Client receipt and
+    /// same-generation placeholder replace the ordinary live-current source comparison.
+    pub fn prepareAfterClientReplacement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        out: *PreparedReconnect,
+        args: anytype,
+        comptime initializer: anytype,
+    ) !void {
+        try self.validate();
+        if (!self.screen_published) return error.InvalidAuthority;
+        try adapter.preflightPublishedClientReplacement(published);
+        if (rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), out, @sizeOf(PreparedReconnect)) or
+            !std.meta.eql(out.*, PreparedReconnect{})) return error.InvalidAuthority;
+        const current_generation = try self.slot.currentGeneration();
+        const placeholder_generation = std.math.add(u64, current_generation, 1) catch
+            return error.InvalidAuthority;
+        const current_payload = try self.slot.currentPayload();
+        if (self.screen_source.?.current.kind != .unavailable or
+            self.screen_source.?.current.generation != placeholder_generation or
+            current_payload.connection_generation != published.expected_connection_generation)
+            return error.InvalidAuthority;
+        switch (current_payload.connection) {
+            .generation => |current_adapter| {
+                if (current_adapter != adapter) return error.InvalidAuthority;
+            },
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (current_payload.attachment) {
+            .generation => |*attachment| if (attachment.lifecycle != .terminal)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+
+        try self.slot.beginCandidate(&out.candidate);
+        var initialized = false;
+        errdefer if (initialized)
+            self.slot.abortCandidateInPlace(
+                &out.candidate,
+                self.allocator.?,
+                deinitRemoteGeneration,
+            ) catch @panic("CR3c1 candidate cleanup lost final owner")
+        else
+            self.slot.abortEmptyCandidate(&out.candidate) catch
+                @panic("CR3c1 empty candidate cleanup lost final owner");
+        try self.slot.initializeCandidate(&out.candidate, args, initializer);
+        initialized = true;
+        const candidate_payload = try self.slot.candidatePayload(&out.candidate);
+        if (generationScreenSource(candidate_payload) == null or
+            candidate_payload.connection_generation != published.next_connection_generation)
+            return error.InvalidAuthority;
+        out.self_addr = @intFromPtr(out);
+        out.owner_addr = self.self_addr;
+        out.lifecycle = .candidate;
+    }
+
     pub fn publish(
         self: *ReconnectGenerationOwner,
         prepared: *PreparedReconnect,
@@ -1336,6 +1476,96 @@ pub const ReconnectGenerationOwner = struct {
             !screenSourcesEqual(retired.source, current_source))
             @panic("stable screen retired target diverged after generation commit");
         prepared.* = .{};
+    }
+
+    /// CR3c1 publication bridge. R2c가 이미 게시한 Client connection generation을
+    /// fully prepared RemoteGeneration candidate와 unavailable placeholder에 결속한다.
+    pub fn publishAfterClientReplacement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+    ) (r2a_client_slot.ClientSlot.ClientReplacementError || stable_screen_source.PublishError || error{ InvalidAuthority, RetiringBusy })!void {
+        try self.validatePrepared(reconnect);
+        if (!self.screen_published) return error.InvalidAuthority;
+        try adapter.preflightPublishedClientReplacement(published);
+        try self.slot.preflightPublishCandidate(&reconnect.candidate);
+        try self.preflightClientGenerationPair(adapter, reconnect, published);
+
+        const current_generation = try self.slot.currentGeneration();
+        const candidate_generation = reconnect.candidate.generation;
+        if (self.screen_source.?.current.kind != .unavailable or
+            self.screen_source.?.current.generation != candidate_generation or
+            candidate_generation <= current_generation)
+            return error.InvalidAuthority;
+        const candidate_payload = try self.slot.candidatePayload(&reconnect.candidate);
+        const candidate_source = generationScreenSource(candidate_payload) orelse return error.InvalidAuthority;
+
+        const Context = struct {
+            owner: *ReconnectGenerationOwner,
+            adapter: *host_adapter_mod.HostAdapter,
+            reconnect: *PreparedReconnect,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+
+            fn commit(context: @This()) void {
+                context.adapter.preflightPublishedClientReplacement(context.published) catch
+                    @panic("CR3c1 published Client authority drifted inside writer gate");
+                context.owner.slot.preflightPublishCandidate(&context.reconnect.candidate) catch
+                    @panic("CR3c1 RemoteGeneration authority drifted inside writer gate");
+                context.owner.preflightClientGenerationPair(
+                    context.adapter,
+                    context.reconnect,
+                    context.published,
+                ) catch @panic("CR3c1 cross-owner generation binding drifted inside writer gate");
+                context.owner.slot.publishCandidateNoFail(&context.reconnect.candidate);
+            }
+        };
+        try self.screen_source.?.promoteUnavailableToLiveWithCommit(
+            candidate_source,
+            candidate_generation,
+            Context{
+                .owner = self,
+                .adapter = adapter,
+                .reconnect = reconnect,
+                .published = published,
+            },
+            Context.commit,
+        );
+        reconnect.* = .{};
+    }
+
+    fn preflightClientGenerationPair(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+    ) error{InvalidAuthority}!void {
+        const current_payload = self.slot.currentPayload() catch return error.InvalidAuthority;
+        const candidate_payload = self.slot.candidatePayload(&reconnect.candidate) catch
+            return error.InvalidAuthority;
+        const next_connection_generation = std.math.add(
+            u64,
+            published.expected_connection_generation,
+            1,
+        ) catch return error.InvalidAuthority;
+        if (current_payload.connection_generation == 0 or
+            current_payload.connection_generation != published.expected_connection_generation or
+            candidate_payload.connection_generation != published.next_connection_generation or
+            published.next_connection_generation != next_connection_generation or
+            adapter.connectionGeneration() != published.next_connection_generation)
+            return error.InvalidAuthority;
+        switch (current_payload.connection) {
+            .generation => |current_adapter| {
+                if (current_adapter != adapter) return error.InvalidAuthority;
+            },
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (candidate_payload.connection) {
+            .generation => |candidate_adapter| {
+                if (candidate_adapter != adapter) return error.InvalidAuthority;
+            },
+            .legacy => return error.InvalidAuthority,
+        }
     }
 
     pub fn abort(self: *ReconnectGenerationOwner, prepared: *PreparedReconnect) !void {
@@ -1377,9 +1607,21 @@ pub const ReconnectGenerationOwner = struct {
                     return error.InvalidAuthority;
                 const current = try self.slot.currentPayload();
                 switch (current.connection) {
-                    .generation => |adapter| adapter.slot.validateRetirementPlaceholder(
-                        self.screen_source.?.current.generation,
-                    ) catch return error.InvalidAuthority,
+                    .generation => |adapter| switch (current.attachment) {
+                        .generation => |*attachment| if (attachment.lifecycle == .terminal) {
+                            const next_connection_generation = std.math.add(
+                                u64,
+                                current.connection_generation,
+                                1,
+                            ) catch return error.InvalidAuthority;
+                            if (adapter.connectionGeneration() != next_connection_generation or
+                                adapter.slot.retiredClientCount() == 0)
+                                return error.InvalidAuthority;
+                        } else adapter.slot.validateRetirementPlaceholder(
+                            self.screen_source.?.current.generation,
+                        ) catch return error.InvalidAuthority,
+                        .legacy => return error.InvalidAuthority,
+                    },
                     .legacy => return error.InvalidAuthority,
                 }
             }
@@ -1474,6 +1716,10 @@ fn initInitialRemoteGeneration(
 ) !void {
     out.* = .{
         .connection = args.connection,
+        .connection_generation = switch (args.connection) {
+            .legacy => 0,
+            .generation => |adapter| adapter.connectionGeneration(),
+        },
         .attachment = switch (args.connection) {
             .legacy => .{ .legacy = remote_attachment.RemoteAttachment.init(args.allocator, .{
                 .runtime_id = 0,
@@ -7850,11 +8096,13 @@ const R2aTestGeneration = if (builtin.is_test) struct {
         adapter: *host_adapter_mod.HostAdapter,
         runtime_id: u128,
         stream_id: u64,
+        connection_generation: ?u64 = null,
     };
 
     fn init(out: *RemoteGeneration, args: Args) !void {
         out.* = .{
             .connection = .{ .generation = args.adapter },
+            .connection_generation = args.connection_generation orelse args.adapter.connectionGeneration(),
             .attachment = .{ .generation = .{} },
             .event_generation_tracking = .tracked,
             .resize_seq = 0,
@@ -8271,6 +8519,214 @@ test "CR2e-d PreparedReconnect는 실제 generation과 screen target을 한 번�
     try owner.reclaimRetiring();
     try testing.expect(!try owner.slot.hasRetiring());
     try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+fn runCr3cC1PublicationCase(host_id: u128, hostile: bool) !void {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var old_pair: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &old_pair));
+    defer _ = c.close(old_pair[1]);
+    var initial: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = old_pair[0],
+        .host_id = host_id,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &initial);
+    var adapter_live = true;
+    defer if (adapter_live) {
+        host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter) catch
+            @panic("CR3c1 fixture retired Client cleanup failed");
+        adapter.deinit();
+    };
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    var proxy_live = true;
+    defer if (proxy_live) {
+        _ = proxy.close() catch null;
+        proxy.deinit();
+    };
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = host_id,
+            .stream_id = 7,
+            .connection_generation = 1,
+        },
+        R2aTestGeneration.init,
+    );
+    var reconnect: PreparedReconnect = .{};
+    var reconnect_prepared = false;
+    var owner_live = true;
+    defer if (owner_live) {
+        if (reconnect_prepared) owner.abort(&reconnect) catch
+            @panic("CR3c1 fixture RemoteGeneration abort failed");
+        if (owner.slot.hasRetiring() catch false) owner.reclaimRetiring() catch
+            @panic("CR3c1 fixture retiring RemoteGeneration cleanup failed");
+        owner.deinit() catch @panic("CR3c1 fixture owner cleanup failed");
+    };
+
+    var admission: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(1, &admission);
+    var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+    try adapter.prepareRetirementCleanup(&admission, 3, &cleanup);
+    if (hostile) {
+        const current_payload = @constCast(try owner.slot.currentPayload());
+        current_payload.attachment.generation.response.lifecycle = .accepted;
+        try testing.expectError(
+            error.Busy,
+            owner.publishUnavailableAfterAttachmentRetirement(
+                &adapter,
+                &admission,
+                &cleanup,
+                2,
+                3,
+            ),
+        );
+        try testing.expectEqual(stable_screen_source.TargetKind.live, proxy.current.kind);
+        current_payload.attachment.generation.response.lifecycle = .terminal;
+        var copied_admission = admission;
+        const screen_before = proxy.current;
+        try testing.expectError(
+            error.InvalidOwner,
+            owner.publishUnavailableAfterAttachmentRetirement(
+                &adapter,
+                &copied_admission,
+                &cleanup,
+                2,
+                3,
+            ),
+        );
+        try testing.expect(std.meta.eql(screen_before, proxy.current));
+        try testing.expectEqual(@as(u64, 1), adapter.connectionGeneration());
+    }
+    _ = try owner.publishUnavailableAfterAttachmentRetirement(
+        &adapter,
+        &admission,
+        &cleanup,
+        2,
+        3,
+    );
+    try adapter.finishRetirementCleanup(&cleanup);
+    try testing.expectEqual(stable_screen_source.TargetKind.unavailable, proxy.current.kind);
+    try testing.expectEqual(@as(u64, 3), proxy.current.generation);
+
+    var new_pair: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &new_pair));
+    defer _ = c.close(new_pair[1]);
+    var replacement_source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = new_pair[0],
+        .host_id = host_id,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var replacement: r2a_client_slot.PreparedClientReplacement = .{};
+    try host_adapter_mod.HostAdapter.testing.publishReplacementForCr3c(
+        &adapter,
+        &cleanup,
+        &replacement_source,
+        &replacement,
+    );
+    try testing.expectEqual(@as(u64, 2), adapter.connectionGeneration());
+    try testing.expectEqual(@as(usize, 1), adapter.slot.retiredClientCount());
+
+    try owner.prepareAfterClientReplacement(
+        &adapter,
+        &replacement,
+        &reconnect,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = host_id,
+            .stream_id = 0xC3C102,
+            .connection_generation = 2,
+        },
+        R2aTestGeneration.init,
+    );
+    reconnect_prepared = true;
+
+    if (hostile) {
+        const shell_before = try owner.currentGeneration();
+        const screen_before = proxy.current;
+        const client_generation_before = adapter.connectionGeneration();
+        const retired_before = adapter.slot.retiredClientCount();
+        var copied = reconnect;
+        try testing.expectError(
+            error.InvalidAuthority,
+            owner.publishAfterClientReplacement(&adapter, &copied, &replacement),
+        );
+        var copied_receipt = replacement;
+        try testing.expectError(
+            error.InvalidOwner,
+            owner.publishAfterClientReplacement(&adapter, &reconnect, &copied_receipt),
+        );
+        var foreign_client: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = -1,
+            .host_id = host_id + 1,
+            .parser = framing.FrameParser.init(testing.allocator),
+        };
+        var foreign_adapter: host_adapter_mod.HostAdapter = undefined;
+        try host_adapter_mod.HostAdapter.initInPlace(
+            &foreign_adapter,
+            testing.allocator,
+            &foreign_client,
+        );
+        defer foreign_adapter.deinit();
+        try testing.expectError(
+            error.InvalidOwner,
+            owner.publishAfterClientReplacement(&foreign_adapter, &reconnect, &replacement),
+        );
+        const candidate = @constCast(try owner.slot.candidatePayload(&reconnect.candidate));
+        candidate.connection_generation = 3;
+        try testing.expectError(
+            error.InvalidAuthority,
+            owner.publishAfterClientReplacement(&adapter, &reconnect, &replacement),
+        );
+        candidate.connection_generation = 2;
+        try testing.expectEqual(shell_before, try owner.currentGeneration());
+        try testing.expect(std.meta.eql(screen_before, proxy.current));
+        try testing.expectEqual(client_generation_before, adapter.connectionGeneration());
+        try testing.expectEqual(retired_before, adapter.slot.retiredClientCount());
+    }
+
+    try owner.publishAfterClientReplacement(&adapter, &reconnect, &replacement);
+    reconnect_prepared = false;
+    try testing.expectEqual(@as(u64, 3), try owner.currentGeneration());
+    try testing.expectEqual(stable_screen_source.TargetKind.live, proxy.current.kind);
+    try testing.expectEqual(@as(u64, 3), proxy.current.generation);
+    try testing.expect(try owner.slot.hasRetiring());
+    const current_payload = try owner.slot.currentPayload();
+    try testing.expectEqual(@as(u64, 2), current_payload.connection_generation);
+    try testing.expectEqual(@as(u64, 2), adapter.connectionGeneration());
+    try testing.expectEqual(@as(usize, 1), adapter.slot.retiredClientCount());
+
+    try owner.reclaimRetiring();
+    try host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter);
+    try testing.expectEqual(@as(usize, 0), adapter.slot.retiredClientCount());
+    try owner.deinit();
+    owner_live = false;
+    proxy.deinit();
+    proxy_live = false;
+    adapter.deinit();
+    adapter_live = false;
+}
+
+test "CR3c C1은 published Client와 RemoteGeneration placeholder를 같은 세대로 승격한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try runCr3cC1PublicationCase(0xC3C1001, false);
+}
+
+test "CR3c C1은 copied receipt와 connection generation drift를 mutation 없이 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try runCr3cC1PublicationCase(0xC3C1002, true);
 }
 
 test "CR3b R2a RemoteGeneration owner는 placeholder와 Client tombstone을 원자 게시한다" {
@@ -13642,7 +14098,7 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
     );
 }
 
-test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 포함한다" {
+test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
         .Debug => 3072,
@@ -13666,6 +14122,7 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
     const expected = [_][]const u8{
         "connection",
+        "connection_generation",
         "attachment",
         "event_generation_tracking",
         "resize_seq",

@@ -4,7 +4,7 @@ const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 고정한다" {
+test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 고정한다" {
     const allocator = std.testing.allocator;
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
@@ -19,6 +19,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
     ) orelse return error.TestUnexpectedResult;
     inline for (.{
         "connection: RuntimeConnection,",
+        "connection_generation: u64 = 0,",
         "attachment: RuntimeAttachment,",
         "event_generation_tracking: EventGenerationTracking,",
         "resize_seq: u64,",
@@ -55,6 +56,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
     try std.testing.expectEqual(@as(usize, 1), count(shell, "generation_owner: ReconnectGenerationOwner,"));
     inline for (.{
         "connection: RuntimeConnection,",
+        "connection_generation: u64 = 0,",
         "attachment: RuntimeAttachment,",
         "event_generation_tracking: EventGenerationTracking,",
         "resize_seq: u64,",

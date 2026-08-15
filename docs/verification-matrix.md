@@ -1165,7 +1165,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   | scheduler 3 | `CR1 artifact degraded는 disk를 기다리지 않고 dispatch를 schedule한다` |
   | scheduler 4 | `CR1 scheduler dispatch는 retry stale copy replay를 closed transition으로 정산한다` |
 - CR2a: `zig build test-session-host-cr2a`가 CR1을 상속하고 Debug·ReleaseFast에서 `RemoteGeneration` production-type test 2개와
-  source boundary 1개를 exact-count한다. field inventory는 generation-owned 11개만 허용하고 allocator/io/runtime ID, Surface,
+  source boundary 1개를 exact-count한다. field inventory는 generation-owned 12개만 허용하고 allocator/io/runtime ID, Surface,
   direct-input/control queue, pending/close/lifetime owner가 bundle로 섞이면 RED다. extraction parity는 distinct nonzero fixture와
   existing runtime tests를 결합해 connection/attachment/screen, event tracking, resize state, pump state, raw observation의 값과
   allocator-backed ownership/deinit 결과가 중첩 전후 동일하고 nested 정렬 증가가 Debug/ReleaseFast exact 16바이트
@@ -1905,6 +1905,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   facade 1개와 source boundary 1개를 `2+1+1`로 exact 실행한다. reclaim suffix만 Client/registry/accounting teardown과 allocator
   destroy를 소유하며 current와 sibling retired는 보존한다. R3 제품 caller는 0이고 CR3c integration과 CR4 actual socket은 미완료다.
   CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
+  CR3c1은 prepared admission close 아래 old attachment를 먼저 terminalize하고 admission close를 no-fail 게시한 뒤 R2a/R2b/R2c를 진행한다.
+  R2c가 게시한 receipt와 같은 adapter/old-next connection generation을 공유하는 forward-recovery `PreparedReconnect`를 stable screen writer
+  gate에서 게시한다. R2a unavailable placeholder와 candidate는 같은 shell generation을 쓰되 connection generation은
+  별도 필드로 결속하고 두 old owner를 각 기존 세대의 retiring으로 보존한다. mismatch/copy/drift는 RemoteGeneration/screen
+  mutation 0이며 이미 게시된 Client graph를 보존한다. CR3c2는 matching retiring RemoteGeneration attachment를 먼저 정산한 뒤 oldest retired Client를 같은 tick-end
+  turn에서 회수하며 generation mismatch의 destroy 0과 final zero를 검증한다. CR3c2 전에는 CR3c 전체가 부분 구현이다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는
   suffix로 결속해 `live`가 된다. Debug·ReleaseFast `test-session-host-2e`는 준비 계약 4개, actual socket parity 6개, rollback 4개,

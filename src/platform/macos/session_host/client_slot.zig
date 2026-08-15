@@ -13070,7 +13070,10 @@ pub const ClientSlot = struct {
         placeholder_generation: u64,
         out: *PreparedRetirementCleanup,
     ) RetirementCleanupError!void {
-        if (!self.admissionClosePermitValid(permit, .committed) or placeholder_generation == 0 or
+        const admission_prepared = self.admissionClosePermitValid(permit, .prepared);
+        const expected_admission_lifecycle: AdmissionLifecycle = if (admission_prepared) .open else .closed;
+        if ((!admission_prepared and !self.admissionClosePermitValid(permit, .committed)) or
+            placeholder_generation == 0 or
             rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
             rangesOverlapTyped(out, permit) or !std.meta.eql(out.*, PreparedRetirementCleanup{}))
             return error.InvalidOwner;
@@ -13080,11 +13083,14 @@ pub const ClientSlot = struct {
                 error.AdminBusy => error.Busy,
             };
             defer self.endRegisteredClientOperation(operation);
-            if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+            if (!(if (admission_prepared)
+                self.admissionClosePermitValid(permit, .prepared)
+            else
+                self.admissionClosePermitValid(permit, .committed)) or operation.node != self.current)
                 return error.InvalidOwner;
             if (operation.node.connection_generation != permit.expected_connection_generation)
                 return error.GenerationMismatch;
-            if (operation.node.admission_lifecycle != .closed or
+            if (operation.node.admission_lifecycle != expected_admission_lifecycle or
                 operation.node.retirement_lifecycle != .live or
                 operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
                 operation.node.active_operation_generation != 0 or
@@ -13109,11 +13115,14 @@ pub const ClientSlot = struct {
             error.AdminBusy => error.Busy,
         };
         defer self.endRegisteredClientOperation(operation);
-        if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+        if (!(if (admission_prepared)
+            self.admissionClosePermitValid(permit, .prepared)
+        else
+            self.admissionClosePermitValid(permit, .committed)) or operation.node != self.current)
             return error.InvalidOwner;
         if (operation.node.connection_generation != permit.expected_connection_generation)
             return error.GenerationMismatch;
-        if (operation.node.admission_lifecycle != .closed or
+        if (operation.node.admission_lifecycle != expected_admission_lifecycle or
             operation.node.retirement_lifecycle != .live or
             operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
             operation.node.active_operation_generation != 0 or
@@ -13175,6 +13184,30 @@ pub const ClientSlot = struct {
         else
             cleanup.pending_frame_addr == 0 and cleanup.pending_frame_len == 0 and
                 cleanup.pending_stream_id == 0 and cleanup.pending_offset == 0;
+    }
+
+    pub fn preflightRetirementCleanupBeforeAdmissionClose(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        cleanup: *PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) RetirementCleanupError!void {
+        if (!self.admissionClosePermitValid(permit, .prepared) or
+            !self.retirementCleanupValid(cleanup, .prepared) or
+            cleanup.admission_request_generation != permit.request_generation or
+            cleanup.placeholder_generation != placeholder_generation)
+            return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .prepared) or
+            !self.retirementCleanupValid(cleanup, .prepared) or operation.node != self.current or
+            operation.node.admission_lifecycle != .open or
+            operation.node.retirement_lifecycle != .live or
+            !retirementCleanupMatchesClient(cleanup, &operation.node.client))
+            return error.InvalidOwner;
     }
 
     pub fn preflightRetirementCleanup(
@@ -13535,17 +13568,9 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         prepared: *PreparedClientReplacement,
     ) void {
-        if (!self.preparedClientReplacementValid(prepared, .prepared))
-            @panic("CR3b R2c replacement authority drifted before publication");
-        const candidate: *ClientNode = @ptrFromInt(prepared.new_node_addr);
-        const candidate_digest = clientReplacementCandidateDigest(candidate);
-        if (!std.crypto.timing_safe.eql(owner_seal.Digest, candidate_digest, prepared.candidate_digest) or
-            candidate.incarnation.tagged != prepared.new_node_incarnation or
-            candidate.connection_generation != prepared.next_connection_generation or
-            candidate.admission_lifecycle != .open or candidate.retirement_lifecycle != .live or
-            candidate.placeholder_generation != 0 or candidate.client.host_id != self.current.client.host_id or
-            candidate.client.fd < 0 or candidate.client.unusable)
+        self.preflightClientReplacement(prepared) catch
             @panic("CR3b R2c replacement candidate drifted before publication");
+        const candidate: *ClientNode = @ptrFromInt(prepared.new_node_addr);
         const expected: ClientSlotRegistryEntry = .{
             .live = true,
             .ready = false,
@@ -13568,6 +13593,61 @@ pub const ClientSlot = struct {
             @panic("CR3b R2c registry/current atomic publication drifted");
         prepared.lifecycle = .published;
         prepared.seal = self.clientReplacementSealAfterPublish(prepared);
+    }
+
+    /// CR3c의 cross-owner publication이 stable screen writer gate에 들어가기 전에
+    /// R2c prepared authority와 candidate 전체를 mutation 없이 재검증한다.
+    pub fn preflightClientReplacement(
+        self: *ClientSlot,
+        prepared: *const PreparedClientReplacement,
+    ) ClientReplacementError!void {
+        if (!self.preparedClientReplacementValid(prepared, .prepared))
+            return error.InvalidOwner;
+        const candidate: *const ClientNode = @ptrFromInt(prepared.new_node_addr);
+        const candidate_digest = clientReplacementCandidateDigest(candidate);
+        if (!std.crypto.timing_safe.eql(owner_seal.Digest, candidate_digest, prepared.candidate_digest) or
+            candidate.incarnation.tagged != prepared.new_node_incarnation or
+            candidate.connection_generation != prepared.next_connection_generation or
+            candidate.admission_lifecycle != .open or candidate.retirement_lifecycle != .live or
+            candidate.placeholder_generation != 0 or candidate.client.host_id != self.current.client.host_id or
+            candidate.client.fd < 0 or candidate.client.unusable)
+            return error.InvalidOwner;
+    }
+
+    /// CR3c1은 R2c publication이 이미 끝난 뒤 이 receipt로 exact old/new
+    /// connection generation과 current/retired node를 다시 결속한다.
+    pub fn preflightPublishedClientReplacement(
+        self: *ClientSlot,
+        published: *const PreparedClientReplacement,
+    ) ClientReplacementError!void {
+        if (!preparedClientReplacementLifecycleRawValid(&published.lifecycle) or
+            !self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            published.lifecycle != .published or published.self_addr != @intFromPtr(published) or
+            published.pid != self.pid or published.process_nonce != self.process_nonce or
+            published.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            published.slot_addr != @intFromPtr(self) or
+            published.slot_incarnation != self.incarnation.tagged or
+            published.new_node_addr != @intFromPtr(self.current) or
+            published.new_node_incarnation != self.current.incarnation.tagged or
+            published.next_connection_generation != self.current.connection_generation or
+            published.expected_connection_generation == 0 or
+            published.next_connection_generation <= published.expected_connection_generation)
+            return error.InvalidOwner;
+        var old_found = false;
+        for (self.retired) |entry| if (entry) |node| {
+            if (@intFromPtr(node) == published.old_node_addr and
+                node.incarnation.tagged == published.old_node_incarnation and
+                node.connection_generation == published.expected_connection_generation)
+            {
+                old_found = true;
+                break;
+            }
+        };
+        if (!old_found or !std.crypto.timing_safe.eql(
+            process_seal_service.CleanupSeal,
+            self.clientReplacementSealAfterPublish(published),
+            published.seal,
+        )) return error.InvalidOwner;
     }
 
     fn clientReplacementSealAfterPublish(
@@ -13766,6 +13846,34 @@ pub const ClientSlot = struct {
         if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
             return error.InvalidOwner;
         if (operation.node.admission_lifecycle != .closed or
+            operation.node.retirement_lifecycle != .live or
+            operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
+            operation.node.active_operation_generation != 0 or
+            operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        if (expected_placeholder_generation == 0 or next_placeholder_generation == 0)
+            return error.InvalidGeneration;
+        if (expected_placeholder_generation == std.math.maxInt(u64))
+            return error.GenerationExhausted;
+        if (next_placeholder_generation != expected_placeholder_generation + 1)
+            return error.InvalidGeneration;
+    }
+
+    pub fn preflightRetirementDetachBeforeAdmissionClose(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        expected_placeholder_generation: u64,
+        next_placeholder_generation: u64,
+    ) RetirementDetachError!void {
+        if (!self.admissionClosePermitValid(permit, .prepared)) return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .prepared) or operation.node != self.current)
+            return error.InvalidOwner;
+        if (operation.node.admission_lifecycle != .open or
             operation.node.retirement_lifecycle != .live or
             operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
             operation.node.active_operation_generation != 0 or

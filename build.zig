@@ -2828,7 +2828,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{
-                "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 포함한다",
+                "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다",
                 "CR2a RemoteGeneration 추출은 distinct state와 allocator ownership을 보존한다",
             },
         });
@@ -2842,7 +2842,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr2a_optimize,
             }),
-            .filters = &.{"CR2a 경계는 generation field 열한 개와 stable shell exclusion을 고정한다"},
+            .filters = &.{"CR2a 경계는 generation field 열두 개와 stable shell exclusion을 고정한다"},
         });
         const run_cr2a_boundary_tests = b.addRunArtifact(cr2a_boundary_tests);
         run_cr2a_boundary_tests.addArg("--maru-expect-tests=1");
@@ -4036,6 +4036,41 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r3_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r3_step.dependOn(&run_cr3b_r3_boundary_tests.step);
         boundary_step.dependOn(&run_cr3b_r3_boundary_tests.step);
+    }
+    const session_host_cr3c_c1_step = b.step(
+        "test-session-host-cr3c-c1",
+        "CR3c C1 Client and RemoteGeneration publication integration gates",
+    );
+    session_host_cr3c_c1_step.dependOn(session_host_cr3b_r3_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3c_c1_optimize| {
+        const cr3c_c1_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr3c_c1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3c C1은"},
+        });
+        const run_cr3c_c1_runtime_tests = b.addRunArtifact(cr3c_c1_runtime_tests);
+        run_cr3c_c1_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr3c_c1_runtime_tests.setCwd(b.path("."));
+        session_host_cr3c_c1_step.dependOn(&run_cr3c_c1_runtime_tests.step);
+
+        const cr3c_c1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr3c_c1_boundary.zig"),
+                .target = target,
+                .optimize = cr3c_c1_optimize,
+            }),
+            .filters = &.{"CR3c C1 경계는"},
+        });
+        const run_cr3c_c1_boundary_tests = b.addRunArtifact(cr3c_c1_boundary_tests);
+        run_cr3c_c1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr3c_c1_boundary_tests.setCwd(b.path("."));
+        session_host_cr3c_c1_step.dependOn(&run_cr3c_c1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr3c_c1_boundary_tests.step);
     }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

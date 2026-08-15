@@ -401,7 +401,9 @@ pub const inventory = [_]Proof{
     // Client 구성·receiver 집합을 안 건드린다.
     // breadcrumb 루트 선택 정책이 `repo_path.breadcrumbRoot`(순수)로 나가며 또 움직인다 —
     // `breadcrumbRootFor`는 상태를 모아 주기만 한다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "537c4c07405cef59e2f534a8a01dbedc89290541f3ad2ae8afef20993fa1adf8" },
+    // 밴드가 그릴 경로를 `bandPathFor` 이음매로 꺼내며 또 움직인다(렌더 블록은 큰 함수 안이라
+    // 테스트가 닿지 않는다). count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c2f106e58729a6c72427ed27d824affe818f23f708ed04cdf264f16ef2677226" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

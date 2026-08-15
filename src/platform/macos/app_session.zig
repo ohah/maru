@@ -1802,6 +1802,13 @@ pub fn agentIconCodepoint(kind: AgentKind) u21 {
 /// 그 사이 다른 곳으로 옮겨 갔어도 그 비교는 자기 저장소 기준이어야 한다.
 ///
 /// 셋 다 없으면 빈 문자열이고, 그때 `displayRelative`가 절대경로를 그대로 돌려준다(지금까지의 동작).
+/// 헤더 밴드가 실제로 그릴 경로. **이 함수가 이음매다** — 렌더 블록은 큰 함수 안이라 테스트가 닿지
+/// 않으므로, "무엇을 그리는가"를 여기로 꺼내 둔다. 그러지 않으면 절대경로로 되돌리는 변경이 아무
+/// 테스트도 깨뜨리지 않는다.
+pub fn bandPathFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
+    return maru.session.repo_path.displayRelative(entry.path, breadcrumbRootFor(self, entry));
+}
+
 pub fn breadcrumbRootFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
     // **정책은 `repo_path.breadcrumbRoot`가 소유한다**(순수·테스트 가능). 여기서는 상태를 모아 준다 —
     // 규칙을 이 안에 두면 탐색기 루트가 여럿인 경우 같은 분기를 실제 트리 없이 검사할 수 없다.
@@ -14339,10 +14346,9 @@ pub const AppSession = struct {
                         // **좁은 밴드를 의미 있는 구간에 쓴다.** 절대경로를 그대로 주면 넘칠 때 앞을
                         // 생략하므로(`.head`) 폭이 `/Users/이름/Documents/...`에 먹히고, 정작 저장소 안
                         // 위치가 밀려 나간다(native-editor-ui.md §7.5 — 경로 축).
-                        const header_root = breadcrumbRootFor(self, band.entry);
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
-                            maru.session.repo_path.displayRelative(band.entry.path, header_root),
+                            bandPathFor(self, band.entry),
                             band.entry.kind,
                             band.entry.mode,
                             band.entry.dirty,

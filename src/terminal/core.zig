@@ -2686,6 +2686,110 @@ test "OSC 7 tolerates unusual authorities without breaking the pair or the local
     try std.testing.expectEqual(@as(usize, 300), core.currentCwdHost().len);
 }
 
+// ── OSC 9;9 (ConEmu "set working directory") ──────────────────────────────────────────────────
+// Windows 네이티브 셸의 cwd 보고는 OSC 7이 아니라 이것이다(docs/windows-platform.md §3.2). OSC 7과 달리
+// **authority가 없어** 경로만 온다. 그래서 이 경로는 host를 만들지도 지우지도 않는다(같은 문서 §3.2a의 C).
+
+test "OSC 9;9 sets cwd from a native path and does not print it" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    // Microsoft가 안내하는 `PROMPT $e]9;9;$P$e\` 형식(따옴표 없음) — 실캡처 바이트와 같은 모양.
+    try core.write("\x1b]9;9;C:\\Users\\me\\proj\x1b\\hi");
+
+    try std.testing.expectEqualStrings("C:\\Users\\me\\proj", core.currentCwd());
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi      ", dump);
+}
+
+// ConEmu 원본 스펙은 경로를 **따옴표로 감싼다**(`ESC ] 9 ; 9 ; "cwd" ST`). Microsoft가 안내하는 `PROMPT`는
+// 감싸지 않는다. 둘 다 실제로 나오는 바이트라(실캡처로 확인) 파서가 양쪽을 받는다. Windows 파일명에 `"`가
+// 올 수 없으므로 양끝 따옴표 제거는 모호하지 않다.
+test "OSC 9;9 accepts both the quoted ConEmu form and the unquoted Microsoft form" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]9;9;\"C:\\quoted path\"\x07");
+    try std.testing.expectEqualStrings("C:\\quoted path", core.currentCwd());
+
+    try core.write("\x1b]9;9;C:\\plain\x07");
+    try std.testing.expectEqualStrings("C:\\plain", core.currentCwd());
+
+    // 여는 따옴표만 있는 비정상 입력은 그대로 둔다(양끝이 짝일 때만 벗긴다).
+    try core.write("\x1b]9;9;\"C:\\half\x07");
+    try std.testing.expectEqualStrings("\"C:\\half", core.currentCwd());
+}
+
+// **핵심 계약**: 9;9은 authority를 나르지 않으므로 host를 건드리지 않는다. 지우면 원격 세션이 로컬로
+// 뒤집히고(원격 경로를 로컬 파일시스템에 대고 해석 → 남의 저장소에 stage/discard), 만들어 내면 없는
+// 근거로 원격을 주장하게 된다. docs/windows-platform.md §3.2a.
+test "OSC 9;9 leaves the cwd host untouched — it carries no authority" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // 원격 host가 선 상태에서 9;9이 오면 **원격을 유지**한다.
+    try core.write("\x1b]7;file://buildbox/srv/app\x07");
+    try std.testing.expectEqualStrings("buildbox", core.currentCwdHost());
+    try core.write("\x1b]9;9;C:\\after\x07");
+    try std.testing.expectEqualStrings("C:\\after", core.currentCwd());
+    try std.testing.expectEqualStrings("buildbox", core.currentCwdHost()); // 지우지 않는다
+
+    // 로컬(빈 host)에서 9;9이 와도 host를 만들지 않는다.
+    try core.write("\x1b]7;file:///local\x07");
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+    try core.write("\x1b]9;9;C:\\local2\x07");
+    try std.testing.expectEqualStrings("C:\\local2", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost()); // 만들지도 않는다
+}
+
+// title_generation은 창 제목 재sync만이 아니라 **runtime observation refresh의 게이트**다. 빠뜨리면 경로가
+// 바뀌어도 관측이 안 돌아 폴더줄·cwd 상속·링크 스코프가 옛 판정에 머문다(같은 결함이 host 축에서 실제로
+// 발생한 적 있다 — osc.zig `dispatchCwd` 주석). 값이 그대로면 올리지 않는다(헛 sync 방지).
+test "OSC 9;9 bumps title generation only when the path actually changes" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]9;9;C:\\a\x07");
+    const after_first = core.title_generation.load(.monotonic);
+
+    try core.write("\x1b]9;9;C:\\a\x07"); // 같은 경로 재보고(매 프롬프트) — 올리지 않는다
+    try std.testing.expectEqual(after_first, core.title_generation.load(.monotonic));
+
+    try core.write("\x1b]9;9;C:\\b\x07"); // 실제로 바뀌면 올린다
+    try std.testing.expect(core.title_generation.load(.monotonic) > after_first);
+}
+
+// 빈 경로·OOM은 **기존 cwd를 유지**한다 — 부분 갱신으로 이전 값을 잃지 않는다(OSC 7과 같은 결).
+test "OSC 9;9 with an empty path keeps the previous cwd" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]9;9;C:\\keep\x07");
+    try core.write("\x1b]9;9;\x07");
+    try std.testing.expectEqualStrings("C:\\keep", core.currentCwd());
+    try core.write("\x1b]9;9;\"\"\x07"); // 따옴표만 있는 빈 경로도 같다
+    try std.testing.expectEqualStrings("C:\\keep", core.currentCwd());
+}
+
+// 회귀: 같은 OSC 9를 쓰는 이웃들이 그대로여야 한다. `9;4`(ConEmu progress)는 agent_progress로,
+// 숫자 서브커맨드가 아닌 본문은 iTerm2 알림으로 계속 간다.
+test "OSC 9;9 does not disturb OSC 9;4 progress or plain OSC 9 notifications" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]9;4;1;40\x07");
+    try std.testing.expectEqualStrings("4;1;40", core.agentProgress());
+
+    try core.write("\x1b]9;빌드 완료\x07");
+    try std.testing.expect(core.pendingNotification() != null);
+    core.clearNotification();
+
+    try core.write("\x1b]9;9;C:\\x\x07"); // cwd는 알림을 만들지 않는다
+    try std.testing.expect(core.pendingNotification() == null);
+    try std.testing.expectEqualStrings("C:\\x", core.currentCwd());
+}
+
 // 로컬 판정은 순수 함수다 — 이 판정 하나가 폴더줄 표시·cwd 상속·경로 resolve를 모두 가른다.
 // 특히 짧은 이름 대 FQDN 비대칭은 실제로 흔해서(셸은 `${HOST}`에 짧은 이름을 싣고 로컬은 `.local`이
 // 붙는다), 그대로 비교하면 **자기 자신을 원격으로 오인**해 로컬 세션의 cwd 상속이 조용히 꺼진다.

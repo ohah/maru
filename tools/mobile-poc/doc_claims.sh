@@ -114,9 +114,10 @@ ck "제목 중복" 0 "$(grep -E '^#{2,4} ' $D | sort | uniq -d | wc -l | tr -d '
 ck "굵은 첫 문장 중복" 0 "$(grep -oE '^\*\*[^*]{10,60}' $D | sort | uniq -d | wc -l | tr -d ' ')"
 
 echo "계획 ↔ 계약 슬라이스 참조"
-for m in M4a2 M4a3 M4a4 M4a5 M10; do
-  ck "$m 이 계획 표에 있다" 1 "$(grep -cE "^\| $m \|" docs/plans/mobile-platform.md)"
-done
+# **이름을 여기 손으로 적지 않는다.** 예전 판은 `for m in M4a2 ... M10` 이라, 계획을 쪼개면
+# 판정자가 없는 슬라이스를 계속 찾고(M10 을 M10a~d 로 가르자 바로 그렇게 됐다) 새 인용은
+# 아예 안 봤다. 인용을 훑어 대조한다(접두어 인정 — `M3` 는 M3a~c 가족을 부르는 이름).
+ck "계획 표에 없는 인용" 0 "$(python3 "$(dirname "$0")/plan_citations.py" | grep -oE '없는 인용 [0-9]+' | grep -oE '[0-9]+')"
 
 # **비-0 으로 끝난다.** 이것이 없으면 어디에 걸어도 게이트가 안 된다.
 if [ "$bad" -gt 0 ]; then printf "\n틀림 %d 건\n" "$bad"; exit 1; fi

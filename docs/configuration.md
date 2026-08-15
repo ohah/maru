@@ -6,6 +6,9 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 
 > 이 문서는 config 토대의 appearance(폰트/테마/커서) + 키바인딩 파싱을 다룬다. 메뉴의 수동 Reload Config·
 > Reset to Defaults는 구현됐고, schema 기반 설정 UI는 진행 중이다([세팅 페이지 전략](settings-page.md)).
+>
+> **여기 있는 키와 파일 위치는 데스크톱 것이다.** 모바일은 파일도 스키마도 따로 두고, 파서·resolve
+> 규율만 공유한다 — 무엇을 싣고 어디에 두는지는 [모바일 config](mobile-config.md)가 소유한다.
 > 파일 변경 자동 감지 reload와 남은 bespoke 위젯은 후속 단계다(아래 "범위와 후속" 참조).
 > 수동 reload의 scrollback·ambiguous/emoji width·ANSI palette·default color·cell metric snapshot은 열린
 > in-process terminal과 `runtime_core_command_v1`을 협상한 현재 host-backed terminal에 적용된다. capability

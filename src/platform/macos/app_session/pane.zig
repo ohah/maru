@@ -520,6 +520,19 @@ pub fn paneBar(self: *const AppSession, rect: maru.session.SplitRect, pane: *Pan
 /// 둘을 함께 주는 이유: 터미널은 격자를, **편집기는 `body`를** 쓰는데(창 padding을 적용하지 않는다 —
 /// 2026-08-13 결정) `body`는 leaf에서만 나온다. 격자를 편집기에 넘기면 보이는 행 수가 실제보다 적게
 /// 나와 스크롤 끝에서 빈 줄이 남는다(리뷰 지적).
+/// 활성 pane의 **leaf 사각**. `self.active_pane_rect`는 터미널 격자(창 padding 안쪽)라 편집기가 쓸 수
+/// 없다 — 편집기는 `body`에 그리고 그것은 leaf에서만 나온다(`paneTargetAt` 주석과 같은 이유).
+pub fn activeLeafRect(self: *AppSession) ?maru.session.SplitRect {
+    if (!self.surface_initialized) return null;
+    self.pane_target_rects_scratch.clearRetainingCapacity();
+    tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &self.pane_target_rects_scratch) catch return null;
+    const active = activePane(self);
+    for (self.pane_target_rects_scratch.items) |lr| {
+        if (lr.leaf == active) return lr.rect;
+    }
+    return null;
+}
+
 pub fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { term: *Term, surface: *maru.session.Surface, rect: maru.session.SplitRect, leaf_rect: maru.session.SplitRect } {
     if (!self.surface_initialized) return null;
     // 입력 hot path라 영속 scratch를 재사용한다(매 mouse-move 할당 회피 — web/dock scratch와 같은 패턴).

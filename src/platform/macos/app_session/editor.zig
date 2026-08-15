@@ -1250,3 +1250,95 @@ test "휠 라우팅: 편집기 pane 위 세로는 문서가 먹고, 가로는 �
     try testing.expect(fx.session.tab_wheel_accum != tab_scroll_before);
     try testing.expectEqual(line_before, fx.term.rt.editor_first_line); // 가로가 세로를 안 건드린다
 }
+
+test "커서가 편집기 밖이면 문서가 안 움직인다 — 휠은 커서 아래 pane의 것이다" {
+    // 편집기 pane이 **활성**이어도, 커서가 사이드바 위면 그쪽이 휠을 통째로 소비한다. 이 계약이
+    // 깨지면 사이드바를 굴릴 때 뒤 문서가 함께 움직인다(터미널에서 이미 정해 둔 규율이다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const long = try allocator.alloc([]const u8, 400);
+    defer allocator.free(long);
+    for (long) |*l| l.* = "line";
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    // 사이드바 위(x가 사이드바 폭 안).
+    try testing.expect(fx.session.sidebar_width_px > 0);
+    const x: f64 = @as(f64, @floatFromInt(fx.session.sidebar_width_px)) / 2.0;
+    const y: f64 = 200;
+    scroll_ops.scrollWheel(fx.session, -5.0 * @as(f64, @floatFromInt(fx.session.cell_height_px)), 0, false, x, y);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}
+
+test "pane 밖(어느 leaf에도 안 맞음)에서도 활성 편집기가 문서를 스크롤한다" {
+    // `paneTargetAt`이 null이면 라우팅은 **활성 surface**로 폴백한다. 활성 Term이 편집기면 그 surface는
+    // 문서가 아니라 sentinel core라(§편집기 Term) 스크롤백 경로가 아무 의미가 없다 — 그 자리에서
+    // 문서를 굴리는 것이 사용자가 기대하는 동작이고, 그래야 "활성 pane이 반응한다"는 규율이 유지된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const long = try allocator.alloc([]const u8, 400);
+    defer allocator.free(long);
+    for (long) |*l| l.* = "line";
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    // 창 오른쪽 바깥(어느 leaf에도 안 맞는 좌표) — 사이드바도 상태바도 아니다.
+    const x: f64 = @floatFromInt(fx.session.backing_width_px + 100);
+    const y: f64 = 200;
+    scroll_ops.scrollWheel(fx.session, -4.0 * @as(f64, @floatFromInt(fx.session.cell_height_px)), 0, false, x, y);
+    try testing.expect(fx.term.rt.editor_first_line > 0);
+}
+
+test "폴백은 편집기일 때만 가져간다 — 활성이 셸이면 지금까지의 경로 그대로다" {
+    // 위 폴백이 **모든** Term을 가져가면 pane 밖 휠이 터미널 스크롤백을 못 굴린다(그 경로가 원래
+    // 폴백의 존재 이유다). 편집기가 아닐 때 `scrollLines`가 false를 돌려주는 것이 그 경계다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const term = pane_ops.activePane(fx.session).terms.items[0];
+    const saved_kind = term.kind;
+    term.kind = .terminal; // 셸인 척한다
+    defer term.kind = saved_kind;
+
+    const leaf = pane_ops.activeLeafRect(fx.session) orelse return error.NoLeafRect;
+    try testing.expect(!scrollLines(fx.session, term, leaf, -3));
+    // 문서 상태도 안 건드린다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+}
+
+test "활성 leaf 사각은 격자가 아니라 leaf다 — 편집기가 body를 구하는 출발점" {
+    // `active_pane_rect`(격자)를 그대로 쓰면 창 padding만큼 작아 보이는 행 수가 줄고, 스크롤 상한이
+    // 그만큼 커진다(리뷰가 잡은 그 실수와 같은 종류다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const leaf = pane_ops.activeLeafRect(fx.session) orelse return error.NoLeafRect;
+    const grid = pane_ops.paneGeometry(fx.session, leaf).grid;
+    // padding이 0이 아니므로 셋이 실제로 다르다 — 같으면 이 테스트가 아무것도 증명하지 못한다.
+    try testing.expect(fx.session.window_padding_px.top > 0);
+    try testing.expect(leaf.h > grid.h);
+}

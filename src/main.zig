@@ -28,6 +28,24 @@ pub fn main(init: std.process.Init) !void {
             stdout.flush() catch {};
             std.process.exit(1);
         },
+        // PTY 백엔드가 없는 호스트에서 `demo`·`app-pty-*`를 부르면 `UnsupportedPtySession`이 이 오류를 낸다
+        // (`src/pty/session.zig` — 그 타입이 이 오류의 **유일한 출처**다). 위 sentinel과 같은 이유로 여기서
+        // 잡는다: 전파시키면 Zig가 6프레임 스택 트레이스를 덤프해 사용자에겐 crash로 보인다(실측 19줄).
+        //
+        // **OS가 아니라 오류 값으로 판정한다.** 그래야 ⑴ macOS는 이 오류가 아예 안 나므로 동작이 안 바뀌고
+        // ⑵ 백엔드 없는 다른 호스트도 같은 안내를 받으며 ⑶ ConPTY(W4)가 들어오는 날 이 갈래가 **저절로
+        // 죽는다**(오류가 더는 반환되지 않으므로). `builtin.os.tag`로 분기하면 W4 뒤에 누가 지워야 한다.
+        error.UnsupportedPlatform => {
+            stderr.print(
+                "이 명령은 PTY 백엔드가 필요한데 이 플랫폼에는 아직 없습니다 " ++
+                    "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
+                    "PTY 없이 도는 것: maru app-smoke · maru app-loop-smoke · maru terminfo\n",
+                .{},
+            ) catch {};
+            stderr.flush() catch {};
+            stdout.flush() catch {};
+            std.process.exit(1);
+        },
         else => return err,
     };
 }
@@ -149,6 +167,16 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
         size.cols,
         size.rows,
     });
+    // PTY 백엔드가 없는 호스트에서 `demo`를 먼저 권하면 사용자를 실패 경로로 보낸다. 아래 목록의 절반이
+    // PTY를 쓰므로 **먼저** 알린다. 판정은 백엔드 선택에서 직접 유도한 값이라(`pty.backend_available`) OS 이름을
+    // 다시 비교하지 않고, ConPTY(W4)가 들어오면 저절로 사라진다.
+    if (!maru.pty.backend_available) {
+        try stdout.writeAll(
+            "note: 이 플랫폼엔 아직 PTY 백엔드가 없어 `demo`·`app-pty-*`는 못 돕니다 " ++
+                "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
+                "      `app-smoke`·`app-loop-smoke`·`terminfo`는 지금도 동작합니다.\n",
+        );
+    }
     try stdout.writeAll("run `maru demo` or `zig build demo` for the first runnable PTY slice\n");
     try stdout.writeAll("run `maru app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
     try stdout.writeAll("run `maru app-loop-smoke` or `zig build app-loop-smoke` for the headless app frame-loop slice\n");
@@ -379,10 +407,7 @@ const HostGatedFeature = enum {
 /// docs/windows-platform.md §8(컨트롤 플레인 transport). 여기서 접는 것은 W2의 목표가 "Windows에서 maru가
 /// 빌드·실행된다"이기 때문이고, 접지 않으면 링크가 깨져 그 목표 자체가 성립하지 않는다.
 ///
-/// **호출부는 반드시 `if (comptime hostGateReason(...)) |reason|` 형태로 쓴다.** `comptime` 없이 부르면 optional
-/// 언랩이 런타임 분기가 되어 아래 POSIX 본문이 **의미 분석되고**, 그 순간 `socket`/`environ`/`symlink`가 다시
-/// undefined symbol이 된다(실측: `comptime`을 빼자 `connectSendControl`의 `close(fd)` 타입 오류가 되살아났다).
-/// 그것이 이 함수가 값을 돌려주는 술어인데도 게이트로 쓰이는 이유다.
+/// **호출부는 아래 `gate_*` 상수를 쓴다.** 이 함수를 직접 부르는 것은 테스트뿐이다 — 이유는 그 상수들 위 주석에.
 fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const u8 {
     if (os_tag != .windows) return null;
     return switch (feature) {
@@ -392,10 +417,22 @@ fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const
     };
 }
 
+// 이 호스트의 게이트 값. **파일 스코프 const라 comptime으로 평가된다** — 그래서 `if (gate_ssh) |reason|`처럼
+// 그냥 쓰면 참인 갈래 뒤의 POSIX 본문이 **의미 분석되지 않고**, `socket`·`environ`·`symlink`가 참조조차 되지
+// 않는다(실측: 바이너리에서 그 심볼과 ws2_32 import가 전부 사라진다).
+//
+// **처음엔 호출부마다 `comptime hostGateReason(...)`을 쓰게 했는데 그건 잊을 수 있는 규칙이었다.** 하나만
+// 빠지면 optional 언랩이 런타임 분기가 되어 본문이 되살아나고 Windows 링크가 깨지는데, 그것을 잡아 줄 Windows
+// CI가 없다(ubuntu·macOS만 돈다). 적대적 검증에서 나온 지적이라 **잊을 수 없는 구조**로 바꿨다 — 상수는
+// 호출부가 실수할 여지가 없다.
+const gate_ssh = hostGateReason(builtin.os.tag, .ssh);
+const gate_install_cli = hostGateReason(builtin.os.tag, .install_cli);
+const gate_control_socket = hostGateReason(builtin.os.tag, .control_socket);
+
 fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     // Windows 미지원(백로그 W9) — 이유는 `HostGatedFeature.ssh`. 여기서 접지 않으면 W2의 목표(Windows에서
     // maru가 빌드된다)가 성립하지 않는다. comptime 참이라 아래 POSIX 본문은 의미 분석되지 않는다(실측 확인).
-    if (comptime hostGateReason(builtin.os.tag, .ssh)) |reason| {
+    if (gate_ssh) |reason| {
         try stderr.print("{s}\n", .{reason});
         try stderr.flush();
         return error.UnknownCommand;
@@ -463,7 +500,7 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
 fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     // Windows 미지원(백로그 W10) — 이유는 `HostGatedFeature.install_cli`. 설치 위치(`%LOCALAPPDATA%\Programs`?)·
     // shim 방식(symlink vs `.cmd`)·PATH 등록이 전부 계약에 없는 결정이라 별도 슬라이스로 나눴다.
-    if (comptime hostGateReason(builtin.os.tag, .install_cli)) |reason| {
+    if (gate_install_cli) |reason| {
         try stderr.print("{s}\n", .{reason});
         try stderr.flush();
         return error.UnknownCommand;
@@ -1132,7 +1169,7 @@ fn connectSendControl(io: std.Io, allocator: std.mem.Allocator, request_bytes: [
     // 접는다**: 그것이 이미 있는 graceful 경로이고(소켓 디렉터리가 없을 때와 같은 결과), CLI가 crash 대신
     // exit 1로 끝난다. 이 early return은 comptime 참이라 아래 POSIX 본문이 **의미 분석조차 되지 않아**
     // `c.socket`이 undefined symbol이 되지 않는다(실측 확인) — 이것이 named pipe 이식 없이 빌드를 뚫는 방법이다.
-    if (comptime hostGateReason(builtin.os.tag, .control_socket)) |reason|
+    if (gate_control_socket) |reason|
         return sessionNoInstance(stderr, reason);
 
     const c = std.c;
@@ -1347,6 +1384,17 @@ test "host gate: POSIX 전제 명령은 Windows에서만 접히고, 이유가 �
     // 백로그 슬라이스 번호를 문구에 담아 둔다 — "안 된다"만 말하고 어디서 하는지 안 알려주면 보고가 아니다.
     try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .ssh).?, "W9") != null);
     try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .install_cli).?, "W10") != null);
+}
+
+// `printSmoke`가 PTY 안내를 띄울지와, `demo`가 오류 대신 실행될지는 **같은 사실** 하나에 달려 있다 —
+// 이 빌드에 진짜 PTY 백엔드가 있는가. 그 사실을 OS 이름으로 다시 비교하지 않고 백엔드 선택에서 유도한다
+// (`pty.backend_available`). 여기서는 **백엔드가 있는 호스트에 안내가 새지 않는 것**을 지킨다 — macOS CI에서
+// 도는 단언이고, 깨지면 기존 사용자에게 없던 줄이 출력된다는 뜻이다.
+test "PTY 안내는 백엔드가 있는 호스트에 새지 않는다" {
+    if (builtin.os.tag == .macos) try std.testing.expect(maru.pty.backend_available);
+    // 반대 방향 — "안내를 띄우는 호스트에서는 실행이 실제로 실패한다" — 은 그 사실이 사는 곳
+    // (`src/pty/session.zig`)에서 spawn을 직접 불러 지킨다. 여기서 타입을 다시 비교하면 정의를 베껴 쓴
+    // 동어반복이라 아무것도 못 잡는다.
 }
 
 // 이 테스트는 **POSIX 파일 모드가 있는 호스트**의 것이다. Windows에는 `0o600`에 해당하는 것이 없고

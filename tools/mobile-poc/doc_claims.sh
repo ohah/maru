@@ -38,7 +38,11 @@ ck "host 에 남은 quad 상한 하드코딩" 0 "$(grep -cE 'quad_cap = [0-9]|_q
 echo "ABI 헤더 ↔ Zig export 타입"
 # 이름 집합만 대조하면 **타입이 어긋나도 C 는 컴파일되고 값만 조용히 깨진다**
 # (u32 자리에 u64, 포인터 자리에 정수 같은 것).
-ck "타입이 어긋난 선언" 0 "$(python3 "$(dirname "$0")/abi_types.py" | grep -oE '^어긋난 선언 [0-9]+' | grep -oE '[0-9]+')"
+# 숫자가 아니라 **종료 코드**를 본다(아래 키 판정과 같은 이유 — 판정 축이 늘면 숫자 하나로는 샌다).
+python3 "$(dirname "$0")/abi_types.py" > /tmp/maru_abi.$$ 2>&1
+ck "ABI 타입" 0 "$?"
+grep -E "^  (없음|다름|모름)" /tmp/maru_abi.$$ || true
+rm -f /tmp/maru_abi.$$
 
 echo "ABI 헤더 ↔ Zig export"
 # **`md5` 는 macOS 전용이다** — Linux 에서는 없어서 양쪽이 **빈 값으로 같아져** 항상 통과했다.
@@ -119,13 +123,21 @@ done
 echo "데스크톱 키 ↔ 모바일 판정"
 # 모바일 문서는 "데스크톱 키를 전부 훑어 갈랐다" 고 주장한다 — 셀 수 있는 주장이라 센다.
 # 적대적 검증에서 14개가 어디에도 없는 채로 통과하고 있었다. 데스크톱에 키가 늘 때도 문다.
-ck "모바일 문서가 판정 안 한 키" 0 "$(python3 "$(dirname "$0")/config_key_coverage.py" | grep -oE '판정 안 된 키 [0-9]+' | grep -oE '[0-9]+')"
+# **숫자를 파싱하지 말고 종료 코드를 본다.** 숫자 하나만 읽으면 스크립트가 판정 축을 늘렸을 때
+# (누락 → 누락+겹침) 새 축이 조용히 샌다 — 실제로 `bell.*` 겹침이 그렇게 통과하고 있었다.
+python3 "$(dirname "$0")/config_key_coverage.py" > /tmp/maru_key_cov.$$ 2>&1
+ck "모바일 문서의 키 판정" 0 "$?"
+grep -E "^  (없음|겹침)" /tmp/maru_key_cov.$$ || true
+rm -f /tmp/maru_key_cov.$$
 
 echo "계획 ↔ 계약 슬라이스 참조"
 # **이름을 여기 손으로 적지 않는다.** 예전 판은 `for m in M4a2 ... M10` 이라, 계획을 쪼개면
 # 판정자가 없는 슬라이스를 계속 찾고(M10 을 M10a~d 로 가르자 바로 그렇게 됐다) 새 인용은
 # 아예 안 봤다. 인용을 훑어 대조한다(접두어 인정 — `M3` 는 M3a~c 가족을 부르는 이름).
-ck "계획 표에 없는 인용" 0 "$(python3 "$(dirname "$0")/plan_citations.py" | grep -oE '없는 인용 [0-9]+' | grep -oE '[0-9]+')"
+python3 "$(dirname "$0")/plan_citations.py" > /tmp/maru_cite.$$ 2>&1
+ck "계획 인용" 0 "$?"
+grep -E "^  없음" /tmp/maru_cite.$$ || true
+rm -f /tmp/maru_cite.$$
 
 # **비-0 으로 끝난다.** 이것이 없으면 어디에 걸어도 게이트가 안 된다.
 if [ "$bad" -gt 0 ]; then printf "\n틀림 %d 건\n" "$bad"; exit 1; fi

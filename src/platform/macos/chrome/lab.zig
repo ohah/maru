@@ -765,6 +765,10 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .behind = 1,
         .summary = .{ .added = 46, .removed = 7 },
         .changed_file_count = 4,
+        // 커밋 상자: 스테이지된 파일이 있으므로 버튼이 **켜진** 상태다(§7 — 실제 index 상태로만 정한다).
+        // 두 상태(꺼짐/켜짐)를 한 캡처에 담을 수 없어, 켜진 쪽을 고른다 — 꺼짐은 단위 테스트가 본다.
+        .commit_rows = 1,
+        .commit_enabled = true,
     };
     const frame = try scm_dock.build.build(props, .{
         .nodes = buffers.scm_nodes,

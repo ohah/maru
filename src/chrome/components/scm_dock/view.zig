@@ -21,6 +21,8 @@ const types = @import("types.zig");
 
 // 그룹 접힘 표시와 브랜치는 **등록된 SVG 아이콘**이다. `▸`·`⑂` 같은 텍스트 글리프는 폴백 폰트마다
 // 모양·크기가 달라 chrome affordance의 광학 크기를 약속할 수 없다(Session Dock과 같은 규율).
+/// 상자 오른쪽 여백(안내 문구가 테두리에 닿지 않게). 행 inset과 같은 값을 쓴다.
+const m_inset_fallback: u32 = 8;
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);
 const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
 const branch_icon = icons.utf8Fit(.git_branch, .standard);
@@ -190,10 +192,31 @@ pub fn view(
         }
     }
 
+    // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 아래).
+    if (frame.tree.find(build.NodeIds.commit_box)) |index| {
+        const rect = frame.tree.entries[index];
+        // 빈 상자에는 **안내 문구**를 흐리게 둔다. 빈 채로 두면 어디를 눌러야 할지 알 수 없고, 그 자리가
+        // 입력란이라는 사실이 화면에 없다.
+        const empty = props.commit_message.len == 0;
+        const text = if (empty) commit_placeholder else props.commit_message;
+        try writer.topLine(rect, @floatFromInt(m.inset_x), text, if (empty) .muted_fg else .surface_fg, .control);
+    }
+    if (frame.tree.find(build.NodeIds.commit_button)) |index| {
+        const rect = frame.tree.entries[index];
+        // **활성 여부는 실제 index 상태가 정한다**(§7 — 낙관하지 않는다). 스테이지된 것이 없으면 커밋할
+        // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
+        try writer.trailing(rect, commit_label, if (props.commit_enabled) .surface_fg else .muted_fg, .control, m.inset_x);
+    }
+
     // `ChromeDraw`는 layer와 op 슬라이스만 든다 — run·text 바이트는 op이 빌려 가리키므로 호출자가
     // 준 버퍼의 수명이 곧 그 슬라이스의 수명이다(Session Dock과 같은 계약).
     return .{ .layer = painted.layer, .ops = writer.ops[0..writer.op_count] };
 }
+
+/// 빈 커밋 상자의 안내 문구. **컴포넌트가 소유한다** — platform이 넘기면 창마다 갈릴 수 있다.
+const commit_placeholder = "커밋 메시지…";
+/// 커밋 버튼 라벨.
+const commit_label = "커밋";
 
 /// 탭 제목. 그룹 제목과 같은 이유로 **컴포넌트가 소유한다**.
 fn tabTitle(tab: types.Tab) []const u8 {
@@ -473,6 +496,26 @@ const Writer = struct {
             text_role,
             bold,
             @intFromFloat(@max(width, 0)),
+            .origin,
+        );
+    }
+
+    /// `line`과 같되 **위에 붙인다.** 여러 줄 상자는 세로 중앙에 두면 글자가 상자 한가운데 떠서 다음
+    /// 줄이 어디 올지 안 보인다 — 입력란은 위에서 아래로 자란다.
+    fn topLine(self: *Writer, rect: tree.RectEntry, x_offset: f32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole) ViewError!void {
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < line_h or rect.rect.width <= x_offset) return;
+        const width = rect.rect.width - x_offset - @as(f32, @floatFromInt(m_inset_fallback));
+        if (width <= 0) return;
+        try self.emit(
+            rect.rect.x + x_offset,
+            rect.rect.y + (line_h / 4), // 위쪽 여백을 조금 둔다(글자가 테두리에 붙지 않게)
+            source,
+            self.colsFor(width),
+            role,
+            text_role,
+            false,
+            @intFromFloat(width),
             .origin,
         );
     }
@@ -1291,4 +1334,43 @@ test "동작이 없는 행은 그 자리를 비워 두지 않는다(충돌 행�
     const wa = (findExactText(acted, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
     const wb = (findExactText(plain, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
     try testing.expect(wb > wa);
+}
+
+test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index 상태로만 켠다" {
+    // 빈 채로 두면 그 자리가 입력란이라는 사실이 화면에 없다. 그리고 커밋 버튼의 활성은 **실제 index
+    // 상태**로만 정한다(§7 — 낙관하지 않는다: 스테이지 여부를 추정하면 커밋할 것이 없는데 켜진다).
+    var storage: TestStorage = .{};
+    const empty = try renderFixture(&storage, .{}, &.{});
+    const hint = findExactText(empty, commit_placeholder) orelse return error.MissingPlaceholder;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
+    const off = findExactText(empty, commit_label) orelse return error.MissingButton;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, off.role); // 스테이지 0건 → 꺼짐
+
+    var storage2: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .commit_message = "fix: 무언가를 고친다",
+        .commit_enabled = true,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage2.nodes,
+        .entries = &storage2.entries,
+        .layout_items = &storage2.layout_items,
+        .flex_scratch = &storage2.flex_scratch,
+        .child_rects = &storage2.child_rects,
+        .actions = &storage2.actions,
+    });
+    const tk = testTokens();
+    const filled = try view(props, frame, .{}, &tk, .{
+        .ops = &storage2.ops,
+        .runs = &storage2.runs,
+        .text_bytes = &storage2.text_bytes,
+    });
+    // 메시지가 있으면 안내 문구 대신 그 글자를 **또렷하게** 그린다.
+    try testing.expect(findExactText(filled, commit_placeholder) == null);
+    const msg = findExactText(filled, "fix: 무언가를 고친다") orelse return error.MissingMessage;
+    try testing.expectEqual(tokens.ColorRole.surface_fg, msg.role);
+    const on = findExactText(filled, commit_label) orelse return error.MissingButton;
+    try testing.expectEqual(tokens.ColorRole.surface_fg, on.role);
 }

@@ -24,6 +24,8 @@ pub const NodeIds = struct {
     pub const scroll_track: u64 = 0x5343_0004;
     pub const scroll_thumb: u64 = 0x5343_0005;
     pub const tabs: u64 = 0x5343_0006;
+    pub const commit_box: u64 = 0x5343_0007;
+    pub const commit_button: u64 = 0x5343_0008;
 
     /// 탭 하나의 칸. **칸을 나누는 결정은 여기(tree) 하나가 소유한다** — `view`가 자기 산수로 다시
     /// 나누면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(옛 셀 그리드 경로가 그렇게 갈렸다).
@@ -110,8 +112,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
-    const node_count = items.len + action_buttons + tab_order.len + 4;
+    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 여섯(탭 줄·요약·스크롤 영역·브랜치 줄·커밋 상자·커밋 버튼).
+    const node_count = items.len + action_buttons + tab_order.len + 6;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -248,7 +250,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         }, &.{});
     }
 
-    const top = buffers.nodes[action_cursor + tab_order.len ..][0..4];
+    const top = buffers.nodes[action_cursor + tab_order.len ..][0..6];
     // 탭 줄은 뷰 스위처와 요약 줄 **사이**다(§3.5.1 목업). **action을 붙이지 않는다** — 히스토리·에이전트
     // 탭은 P4·P5에 생기고, 지금 눌러도 갈 곳이 없다. 그래도 그리는 이유는 P1 계약이 "누를 수 없는
     // 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"이기 때문이다: 탭 줄이 통째로 없으면 사용자는
@@ -296,6 +298,30 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
         .variant = .surface,
         .paint = if (props.branch.len == 0) .{} else .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
+        .overflow = .clip,
+    }, &.{});
+
+    // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 **아래**). 브랜치·`Fetch`는 커밋 직전에 확인하는 값이라
+    // 커밋 버튼 옆이 제자리다.
+    //
+    // **상자 높이는 시각 행 수 × 행 높이**다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다). 랩은 host가
+    // 이미 계산했고(`text_area`) 컴포넌트는 그 결과인 `commit_rows`만 받는다 — 같은 계산이 두 곳이면
+    // 상자 높이와 실제로 그려지는 줄 수가 갈린다.
+    top[4] = tree.card(.{
+        .id = NodeIds.commit_box,
+        .style = .{ .height = .{ .px = @floatFromInt(m.commit_row_h * @max(props.commit_rows, 1)) } },
+        .variant = .surface,
+        .paint = .{ .background = .inset_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
+        .overflow = .clip,
+    }, &.{});
+    // **버튼에 action을 붙이지 않는다**(P3b). 실행은 P3c이고, 지금 눌러도 갈 곳이 없다 — 그래도 그리는
+    // 이유는 "누를 수 없는 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"는 P1 계약이다. 활성 여부
+    // 자체는 이미 사실로 계산한다(`commit_enabled` — index에 무언가 올라가 있나).
+    top[5] = tree.card(.{
+        .id = NodeIds.commit_button,
+        .style = .{ .height = .{ .px = @floatFromInt(m.commit_button_h) } },
+        .variant = .surface,
+        .paint = .{ .background = .surface_bg, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
 
@@ -416,7 +442,7 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     const items = testItems();
     const sizes = bufferSizes(&items);
     // 행 4 + 버튼 3 + 탭 칸 3 + 고정 4(탭 줄·요약·목록·브랜치)
-    try testing.expectEqual(items.len + 3 + tab_order.len + 4, sizes.nodes);
+    try testing.expectEqual(items.len + 3 + tab_order.len + 6, sizes.nodes);
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -490,9 +516,10 @@ test "탭 줄은 요약 줄·목록 위에 있고 목록에서 자기 높이만�
 
     const m = types.DockMetrics.resolve(props.scale_milli);
     try testing.expectEqual(@as(f32, @floatFromInt(m.tab_h)), tabs.height);
-    // 고정 chrome 셋을 뺀 나머지가 목록이다.
+    // 고정 chrome을 전부 뺀 나머지가 목록이다 — 탭 줄·요약 줄·브랜치 줄·커밋 상자·커밋 버튼.
+    const commit_h = m.commit_row_h * @max(props.commit_rows, 1) + m.commit_button_h;
     try testing.expectEqual(
-        props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h)),
+        props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h + commit_h)),
         content.height,
     );
 }
@@ -583,4 +610,47 @@ test "도크의 카드는 전부 각진 모서리다(목록은 표이지 캡슐 
             else => {},
         }
     }
+}
+
+test "커밋 상자는 브랜치 줄 아래이고 내용을 따라 자란다" {
+    // §3.5 목업 순서: 목록 → 브랜치·원격 줄 → 커밋 입력 → 커밋 버튼. 브랜치·`Fetch`는 커밋 직전에
+    // 확인하는 값이라 커밋 버튼 옆이 제자리다.
+    var storage: Storage = .{};
+    const one = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &.{},
+        .branch = "main",
+        .commit_rows = 1,
+    }, &storage);
+    const branch = one.tree.entries[one.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    const box = one.tree.entries[one.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
+    const button = one.tree.entries[one.tree.find(NodeIds.commit_button) orelse return error.MissingButton].rect;
+    try testing.expect(branch.y < box.y);
+    try testing.expect(box.y < button.y);
+
+    // 시각 행이 늘면 상자가 자란다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다).
+    var storage3: Storage = .{};
+    const three = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &.{},
+        .branch = "main",
+        .commit_rows = 3,
+    }, &storage3);
+    const grown = three.tree.entries[three.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_row_h)), box.height);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_row_h * 3)), grown.height);
+}
+
+test "커밋 버튼에는 아직 action이 없다(P3b — 실행은 P3c)" {
+    // 눌러도 갈 곳이 없는 컨트롤에 action을 달면 "눌렀는데 아무 일도 없다"가 된다. 그래도 **그리는**
+    // 이유는 P1 계약이다: 누를 수 없는 컨트롤은 비활성으로 표시하고 감추지 않는다.
+    var storage: Storage = .{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &.{},
+        .branch = "main",
+    }, &storage);
+    const button = frame.tree.entries[frame.tree.find(NodeIds.commit_button) orelse return error.MissingButton];
+    try testing.expectEqual(@as(?tree.UiAction, null), button.action);
 }

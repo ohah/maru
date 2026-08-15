@@ -342,6 +342,19 @@ pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
     return .{ .next_byte = i + n, .next_col = col + display_width.clusterCols(bytes, i, i + n) };
 }
 
+/// 원본 줄 하나가 화면에서 차지하는 **열 수**. 탭 전개도 §3.8 표기도 `stepColumn` 규칙 그대로 센다 —
+/// 가로 스크롤 상한이 이 값에서 나오므로 렌더와 갈리면 줄 끝에 못 닿거나 빈 자리가 남는다.
+pub fn lineColumns(bytes: []const u8, tab_width: u16) u32 {
+    var col: u32 = 0;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const s = stepColumn(bytes, i, col, tab_width); // 규칙은 한 곳에만 있다
+        i = s.next_byte;
+        col = s.next_col;
+    }
+    return col;
+}
+
 /// 정렬된 바이트 위치들의 열을 **한 번 훑어** 채운다. `offsets`는 오름차순이어야 하고, `out`은 같은
 /// 길이다.
 ///
@@ -1644,4 +1657,22 @@ test "위험 문자가 있는 줄도 마크 열이 렌더와 같다 — §3.8" {
     var got = [_]u32{0};
     columnsAtOffsets(line, 4, &offs, &got, 1000);
     try std.testing.expectEqual(@as(u32, @intCast(e.text.len - 3)), got[0]);
+}
+
+test "lineColumns가 실제 전개와 같은 열 수를 준다 — 탭·2칸 글자·§3.8 표기" {
+    var scratch: [512]u8 = undefined;
+    for ([_][]const u8{
+        "",
+        "abc",
+        "\tabc",
+        "a\tb",
+        "한글abc",
+        "😀\t가",
+        "\u{202E}abc",
+        "ad\u{200D}min\tx",
+        "\u{00AD}\u{00AD}z",
+    }) |line| {
+        const e = expandTabs(line, 4, &scratch, .{ .count = std.math.maxInt(u32) });
+        try std.testing.expectEqual(columnsOf(e.text), lineColumns(line, 4));
+    }
 }

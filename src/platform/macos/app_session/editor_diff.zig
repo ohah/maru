@@ -144,6 +144,10 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // **렌더가 센 시각 행 수도 함께 버린다.** 그 값은 옛 내용의 것이고, 스크롤 상한이 그것을 읽는다 —
     // 남겨 두면 다시 그리기 전 한 번의 휠에서 짧아진 문서가 옛 길이만큼 굴러간다.
     term.rt.editor_total_visual_rows = 0;
+    // **가로도 같은 이유로 되돌린다.** 긴 줄을 오른쪽 끝까지 굴려 둔 뒤 짧은 내용으로 바뀌면 화면에
+    // 아무 글자도 안 남는다. 최대 열 캐시는 옛 내용의 것이라 함께 버린다(다음 가로 휠이 다시 센다).
+    term.rt.editor_first_col = 0;
+    term.rt.editor_max_cols = 0;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.

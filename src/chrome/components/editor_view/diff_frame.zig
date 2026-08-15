@@ -30,6 +30,8 @@ pub const Side = struct {
     /// 행마다 추가/삭제/없음. **왼쪽은 삭제만, 오른쪽은 추가만** 담는 것이 §3.5의 배치 계약이다 —
     /// 한쪽에 둘 다 담으면 좌우를 나눈 이유가 사라진다.
     bands: ?[]const frame.RowBand = null,
+    /// 행마다 바뀐 글자 범위(§3.5 "바뀐 글자만 진하게").
+    marks: ?[]const []const frame.Mark = null,
 };
 
 pub const Props = struct {
@@ -137,6 +139,7 @@ pub fn buildSide(
         .total_lines = side.total_lines orelse side.lines.len,
         .line_numbers = side.numbers,
         .row_bands = side.bands,
+        .row_marks = side.marks,
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,
         .tab_width = shared.tab_width,

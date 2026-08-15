@@ -576,6 +576,12 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // (왼쪽은 빈 행이라 색이 없다) — 좌우를 나눈 이유가 이 두 모양에서 보인다.
     const left_bands = [_]editor_view.frame.RowBand{ .none, .removed, .none, .none, .none };
     const right_bands = [_]editor_view.frame.RowBand{ .none, .added, .added, .none, .none };
+    // **바뀐 글자만 진하게**(§3.5 — 슬라이스 e). 2행이 `var a = 1;` → `var b = 2;`라 두 글자가
+    // 떨어져 바뀐다. 줄 전체 밴드 위에 그 두 자리만 한 겹 더 얹히는 것이 이 캡처의 판정 대상이다.
+    const left_marks_row = [_]editor_view.frame.Mark{ .{ .start = 6, .len = 1 }, .{ .start = 10, .len = 1 } };
+    const right_marks_row = [_]editor_view.frame.Mark{ .{ .start = 6, .len = 1 }, .{ .start = 10, .len = 1 } };
+    const left_marks = [_][]const editor_view.frame.Mark{ &.{}, &left_marks_row, &.{}, &.{}, &.{} };
+    const right_marks = [_][]const editor_view.frame.Mark{ &.{}, &right_marks_row, &.{}, &.{}, &.{} };
 
     // **두 열로 갈리므로 열당 절반이다**(`splitScratch`). 64면 열당 32행인데 뷰포트는 45행이라,
     // 캡처에 **제품에는 없을 스크롤바**가 뜬다(막대는 "보이는 높이"를 그린 행 수로 잡는다).
@@ -590,11 +596,11 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .left = if (scrolled)
             .{ .lines = &long_left, .numbers = &long_left_nums, .total_lines = long_rows, .bands = &long_left_bands }
         else
-            .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4, .bands = &left_bands },
+            .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 4, .bands = &left_bands, .marks = &left_marks },
         .right = if (scrolled)
             .{ .lines = &long_right, .numbers = &long_right_nums, .total_lines = long_rows, .bands = &long_right_bands }
         else
-            .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands },
+            .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands, .marks = &right_marks },
         // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
         .first_line = if (scrolled) 40 else 0,
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),

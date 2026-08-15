@@ -13,6 +13,7 @@ const maru = @import("maru");
 
 const diff = maru.session.editor.diff;
 const diff_state = maru.session.editor.diff_state;
+const intraline = maru.session.editor.intraline;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
@@ -44,6 +45,9 @@ pub const State = struct {
     /// 각 행이 달 줄 번호. 짝을 맞추려 넣은 빈 행은 `null`이다(없는 줄에 번호를 붙이면 거짓이다).
     left_numbers: []const ?u32 = &.{},
     right_numbers: []const ?u32 = &.{},
+    /// 행마다 바뀐 글자 범위(없으면 빈 슬라이스). §3.5의 "바뀐 글자만 진하게"가 이것이다.
+    left_marks: []const []const chrome_editor.frame.Mark = &.{},
+    right_marks: []const []const chrome_editor.frame.Mark = &.{},
     /// 각 행의 밴드. **왼쪽은 삭제만, 오른쪽은 추가만** 칠한다 — 좌우를 나눈 이유가 그것이고,
     /// 빈 행은 `none`이다(색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
     left_bands: []const chrome_editor.frame.RowBand = &.{},
@@ -120,6 +124,8 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     if (st.right_numbers.len > 0) self.allocator.free(st.right_numbers);
     if (st.left_bands.len > 0) self.allocator.free(st.left_bands);
     if (st.right_bands.len > 0) self.allocator.free(st.right_bands);
+    freeMarks(self.allocator, st.left_marks);
+    freeMarks(self.allocator, st.right_marks);
     st.left_lines = &.{};
     st.right_lines = &.{};
     st.left_texts = &.{};
@@ -128,6 +134,8 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     st.right_numbers = &.{};
     st.left_bands = &.{};
     st.right_bands = &.{};
+    st.left_marks = &.{};
+    st.right_marks = &.{};
     st.settled = false;
     // **세로 위치도 처음으로 돌린다.** 800행짜리 비교를 끝까지 굴려 둔 뒤 파일이 바뀌어 10행짜리로
     // 다시 계산되면, 옛 위치가 남아 본문이 한 행도 안 나오고 배경만 남는다 — "읽는 중" 문구조차
@@ -241,6 +249,68 @@ fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
     st.right_numbers = rn;
     st.left_bands = lb;
     st.right_bands = rb;
+
+    // 문자 단위 강조는 **줄 대응이 끝난 뒤**에 온다(§7 경계 규칙 — 이 계산이 대응을 바꾸지 않는다).
+    try computeMarks(self, st);
+}
+
+fn freeMarks(allocator: std.mem.Allocator, marks: []const []const chrome_editor.frame.Mark) void {
+    if (marks.len == 0) return;
+    for (marks) |row| if (row.len > 0) allocator.free(row);
+    allocator.free(marks);
+}
+
+/// 짝이 된 줄 쌍마다 **바뀐 글자**를 계산한다(§3.5). 실패는 조용히 넘긴다 — 강조가 없으면 밴드만
+/// 남고, 그것은 정보가 적을 뿐 틀리지 않는다.
+///
+/// **무엇이 한 글자인지 여기서 정한다.** L2(`intraline`)는 chrome을 몰라 토큰 경계를 받는데, 그 규칙
+/// (grapheme cluster)이 chrome의 `text_layout`에 있고 이 층은 chrome을 안다. 코드포인트로 자르면
+/// 이모지 ZWJ 시퀀스가 반으로 갈린다.
+fn computeMarks(self: *AppSession, st: *State) error{OutOfMemory}!void {
+    const rows = st.view.compare;
+    const left = try self.allocator.alloc([]const chrome_editor.frame.Mark, rows.left.len);
+    errdefer self.allocator.free(left);
+    const right = try self.allocator.alloc([]const chrome_editor.frame.Mark, rows.right.len);
+    errdefer self.allocator.free(right);
+    @memset(left, &.{});
+    @memset(right, &.{});
+    st.left_marks = left;
+    st.right_marks = right; // 여기서부터는 `invalidate`가 해제를 책임진다
+
+    for (rows.left, rows.right, 0..) |lrow, rrow, i| {
+        // **짝이 된 쌍에서만 본다**(§7 경계 규칙). 한쪽이 빈 행이면 순수 추가·삭제라 줄 전체가 밴드다.
+        if (lrow.kind != .removed or rrow.kind != .added) continue;
+        const lt = try clusterTokens(self.allocator, st.left_texts[i]);
+        defer self.allocator.free(lt);
+        const rt = try clusterTokens(self.allocator, st.right_texts[i]);
+        defer self.allocator.free(rt);
+        var result = (try intraline.compute(self.allocator, lt, st.left_texts[i], rt, st.right_texts[i], .{})) orelse continue;
+        defer result.deinit(self.allocator);
+        left[i] = try copyMarks(self.allocator, result.left);
+        right[i] = try copyMarks(self.allocator, result.right);
+    }
+}
+
+fn copyMarks(allocator: std.mem.Allocator, spans: []const intraline.Span) error{OutOfMemory}![]const chrome_editor.frame.Mark {
+    if (spans.len == 0) return &.{};
+    const out = try allocator.alloc(chrome_editor.frame.Mark, spans.len);
+    for (spans, 0..) |s, i| out[i] = .{ .start = s.start, .len = s.len };
+    return out;
+}
+
+/// grapheme cluster 경계. **표시가 한 글자로 보는 단위**여야 강조가 글자를 반으로 자르지 않는다.
+fn clusterTokens(allocator: std.mem.Allocator, line: []const u8) error{OutOfMemory}![]intraline.Token {
+    var out: std.ArrayList(intraline.Token) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < line.len) {
+        const base = maru.chrome.text_layout.decodeCodepoint(line, i);
+        const end = @min(maru.chrome.text_layout.clusterEndAfter(line, i, base.advance), line.len);
+        const n = @max(1, end - i);
+        try out.append(allocator, .{ .start = @intCast(i), .len = @intCast(n) });
+        i += n;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// 줄 끝 문자를 뗀 표시용 슬라이스. **입력을 빌린다**(복사하지 않는다).
@@ -846,4 +916,64 @@ test "스크롤해도 컨트롤 플레인은 같은 사실을 말한다 — 위�
     try testing.expectEqualStrings(before.path.?, after.path.?);
     try testing.expectEqual(before.read_only, after.read_only);
     try testing.expect(after.read_only); // 비교는 여전히 읽기 전용이다
+}
+
+test "짝이 된 줄에서 바뀐 글자만 강조한다 — 제품 경로" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("const a = 1;\n", "const b = 1;\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+
+    // 한 행(자리에서 바뀐 줄)이고, 양쪽에 한 글자씩 강조가 선다.
+    try testing.expectEqual(@as(usize, 1), st.left_marks.len);
+    try testing.expectEqual(@as(usize, 1), st.left_marks[0].len);
+    try testing.expectEqual(@as(u32, 6), st.left_marks[0][0].start); // "a"
+    try testing.expectEqual(@as(u32, 1), st.left_marks[0][0].len);
+    try testing.expectEqual(@as(u32, 6), st.right_marks[0][0].start); // "b"
+}
+
+test "순수 추가·삭제 행에는 강조가 없다 — 줄 전체가 이미 밴드다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("keep\n", "keep\nadded\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+    for (st.left_marks) |m| try testing.expectEqual(@as(usize, 0), m.len);
+    for (st.right_marks) |m| try testing.expectEqual(@as(usize, 0), m.len);
+}
+
+test "이모지가 반으로 잘리지 않는다 — cluster 경계로 자른다" {
+    // 코드포인트로 자르면 ZWJ 시퀀스의 일부만 강조돼 **글자 하나가 두 색**이 된다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("x👨‍👩‍👧y\n", "x👍y\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+    // 강조 범위가 cluster 경계에 정확히 맞는다(가족 이모지 전체 / 👍 전체).
+    const left_line = st.left_texts[0];
+    for (st.left_marks[0]) |m| {
+        const s = left_line[m.start .. m.start + m.len];
+        try testing.expect(std.unicode.utf8ValidateSlice(s)); // 반토막이면 여기서 깨진다
+    }
+    const right_line = st.right_texts[0];
+    for (st.right_marks[0]) |m| {
+        const s = right_line[m.start .. m.start + m.len];
+        try testing.expect(std.unicode.utf8ValidateSlice(s));
+    }
 }

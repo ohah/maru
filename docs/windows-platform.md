@@ -459,6 +459,7 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 | PEB cwd(2단) | ✅ 자기 프로세스 대조 일치, 남의 셸 프로세스도 읽힘. **드라이브 루트는 `C:\`로 와서 순진한 트림이 `C:`(드라이브 상대)를 만든다**(§3.5) |
 | 프로세스 열거 | ✅ 5,328개 열거, `ppid` 체인으로 부모-자식 확인 |
 | **`waitIo` 대응**(§4.1) | ✅ overlapped named pipe 비동기 read가 `ERROR_IO_PENDING`으로 등록되고, 상대 write는 read 이벤트로·`SetEvent`는 wake 이벤트로 깨우며, 조용하면 스핀 없이 `WAIT_TIMEOUT`. **`CreatePseudoConsole`이 named pipe 핸들을 받는다**(`hr=S_OK`) |
+| **overlapped write 의미**(§4.1) | ⚠️ 4 KiB 버퍼에 512 KiB write → 즉시 `ERROR_IO_PENDING`에 `written=0`, 완료 전 `GetOverlappedResult`는 `ERROR_IO_INCOMPLETE`에 `bytes=0`이라 **부분 진행을 볼 수 없다**. 상대가 8 KiB를 읽어도 미완료, 전량(524,288 bytes)을 읽어야 완료. `POLLOUT`+부분쓰기와 의미가 달라 **백엔드가 흡수해야 한다** |
 | ConPTY | ⚠️ `CreatePseudoConsole`·`ResizePseudoConsole` S_OK, conhost가 VT init 방출, `UpdateProcThreadAttribute`가 잘못된 attribute를 거부하고 `0x20016`은 수락. **자식이 pty에 붙는 것만 미확인** |
 
 **ConPTY 미확인의 성격**: 같은 로직을 C로 다시 써서 숫자까지 동일하게 실패했다(`attrSize=48`,
@@ -483,8 +484,12 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 - **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
   포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
   생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.
-> **OSC 9;9의 host**(§3.2a)는 여기서 빠졌다 — **결정됐다**(9;9은 host를 건드리지 않는다). 그 결정이 안고 가는
-> 잔여 위험과 재검토 트리거는 §3.2a "받아들인 위험"이 소유한다.
+- **`publishBrowserResult`의 파일 권한**(W2를 막는다). `src/main.zig`가 browser 결과를
+  `Permissions.fromMode(0o600)`으로 **소유자 전용**으로 만든다. Windows에는 POSIX mode가 없고 **ACL**
+  (누구에게 어떤 동작을 허용/거부하는지의 항목 목록)이라 그 값을 그대로 옮길 수 없다. 후보: ① 권한 지정 없이
+  만들고 `%TEMP%`가 상속시키는 사용자 전용 ACL에 맡긴다(간단하지만 **그 상속은 가정**이다), ② 현재 사용자
+  SID만 허용하는 ACL을 명시적으로 만든다(정확하지만 Windows 보안 API가 들어온다). **무엇을 지키려던 값인지**
+  — 다른 사용자가 browser 결과를 읽지 못하게 — 를 기준으로 판단한다.
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.
 - **GPU 백엔드와 웹뷰 합성 모델**. WebView2는 별도 HWND라 macOS의 `CALayer` subview 3겹 합성이 그대로
@@ -493,3 +498,7 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
   "인스턴스 없음"으로 graceful하게 빠지는 것으로 충분하다.
 - **배포**. 코드 서명·인스톨러·업데이트 경로는 [배포·업데이트 전략](distribution.md)이 macOS 기준으로
   쓰여 있다.
+
+> **여기서 빠진 것 = 결정된 것.** `OSC 9;9`의 host는 §3.2a에서 결정됐고(9;9은 host를 건드리지 않는다), 그
+> 결정이 안고 가는 잔여 위험과 재검토 트리거는 §3.2a "받아들인 위험"이 소유한다. Windows 기본 셸은 §3.1a에서
+> PowerShell로 확정됐고, 남은 것은 위 "셸 설정의 OS 분기"뿐이다.

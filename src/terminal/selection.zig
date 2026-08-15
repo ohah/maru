@@ -261,9 +261,10 @@ fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, en
     // 밑줄 X·열림 X). `path_shape.isDetectableAbsolute`는 **호스트 OS 기준**이라 macOS 동작은 그대로고
     // (거기서 `C:\x`는 열 수 없으니 밑줄도 뜨면 안 된다 — hover는 존재검증을 안 하므로 감지 단계가 유일한
     // 방어선이다), Windows에서만 드라이브 절대를 더 본다. 왜 그 술어가 `isAbsolute`보다 좁은지는 거기 주석에.
-    // 앞의 `//` 배제는 그대로 둔다(프로토콜 상대 URL·POSIX 구현정의 경로).
+    // `//` 배제(프로토콜 상대 URL·UNC)도 **술어가 직접** 한다 — 예전엔 여기서만 막아서 술어의 doc과 반환값이
+    // 어긋나 있었고, 두 번째 소비자가 doc만 읽고 부르면 규칙이 갈렸다.
     const scope: LinkScope =
-        if (scopes.absolute_path and path_shape.isDetectableAbsolute(word) and !std.mem.startsWith(u8, word, "//"))
+        if (scopes.absolute_path and path_shape.isDetectableAbsolute(word))
             .absolute_path
         else if (scopes.home_path and std.mem.startsWith(u8, word, "~/"))
             .home_path

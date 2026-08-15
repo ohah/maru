@@ -17,6 +17,7 @@
 //! 따옴표가 있어도 한 인자다.
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig");
 
 /// 쓰기 명령의 종류. **unborn(첫 커밋 전) 변종이 따로 있다** — HEAD가 없으면 `restore`가 실패하므로 §2가
 /// `rm --cached`를 대신 쓰라고 정했다. 어느 쪽인지는 호출자가 head 상태로 고르고, 이 모듈은 고르지 않는다
@@ -56,8 +57,12 @@ pub const Kind = enum {
 pub const PathError = error{
     /// 빈 경로. `git add -- ""`는 저장소 전체를 의미할 수 있다.
     EmptyPath,
-    /// 절대경로. 저장소 루트 밖을 가리킨다.
+    /// 절대경로. 저장소 루트 밖을 가리킨다. POSIX(`/x`)뿐 아니라 드라이브(`C:x`)·UNC도 포함한다
+    /// (`path_shape.isAbsolute` — 가드는 자기 호스트가 모르는 모양도 막아야 한다).
     AbsolutePath,
+    /// 역슬래시. Windows에서 진짜 구분자라 `..\..\x`가 아래 `..` 검사를 통과한 채 루트 밖으로 나간다.
+    /// git 출력은 항상 `/`를 쓰므로 정상 입력을 잃지 않는다.
+    BackslashSeparator,
     /// `..` 세그먼트. 루트 밖으로 나가는 유일한 상대 경로 형태다.
     ParentSegment,
     /// NUL 바이트. argv는 NUL로 끝나므로 실으면 **뒤가 잘려** 다른 경로가 된다.
@@ -77,9 +82,17 @@ pub const BuildError = PathError || error{
 };
 
 /// 경로 하나의 안전 술어. §6의 3겹 경계 중 **조립 층**이다(나머지 둘은 호출자의 저장소 루트 확인과 git 자신).
+///
+/// 읽기 쪽 쌍둥이인 `repo_path.isSafeRelative`와 **같은 정책이어야 한다** — 한쪽만 고치면 "읽기는 엄격한데
+/// 쓰기는 느슨한" 비대칭이 남고, 여기 통과한 경로는 `git add`/`git restore`/`git rm --cached`의 argv에 실린다.
+/// 그래서 절대경로 판정을 `path[0]=='/'`에서 `path_shape.isAbsolute`로 넓히고 역슬래시를 함께 막는다:
+/// 세그먼트를 `/`로만 쪼개므로 `..\..\secret`은 **세그먼트가 하나**여서 아래 `..` 검사를 그대로 통과하고,
+/// Windows에서는 그것이 진짜 상위 이동이다(docs/windows-platform.md §5). git은 출력 경로에 항상 `/`를
+/// 쓰므로 정상 입력을 잃지 않는다.
 pub fn validatePath(path: []const u8) PathError!void {
     if (path.len == 0) return error.EmptyPath;
-    if (path[0] == '/') return error.AbsolutePath;
+    if (path_shape.isAbsolute(path)) return error.AbsolutePath;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.BackslashSeparator;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.EmbeddedNul;
 
     // `..`는 **세그먼트일 때만** 위험하다. `..foo`나 `foo..bar`는 평범한 이름이므로 문자열 포함 검사로 막으면
@@ -356,6 +369,30 @@ test "안전 술어: 절대경로·`..` 세그먼트·빈 경로·NUL을 조립�
     // 조립도 같은 이유로 거부한다 — 술어만 통과시키고 조립이 넘기면 의미가 없다.
     var buf: [64][]const u8 = undefined;
     try testing.expectError(error.ParentSegment, buildFixture(.stage, &.{ "ok.zig", "../escape" }, null, &buf));
+}
+
+// 이 술어는 읽기 쪽 쌍둥이(`repo_path.isSafeRelative`)와 **같은 정책이어야 한다.** 한때 읽기만 Windows 모양을
+// 막고 쓰기는 옛 `path[0]=='/'`에 머물러, `git add --` argv를 지키는 층이 Windows에서 무력화돼 있었다
+// (docs/windows-platform.md §5). 여기 통과한 경로는 곧바로 argv에 실린다.
+test "안전 술어: Windows 경로 모양도 거부한다 — 읽기 쪽 가드와 같은 정책" {
+    // 역슬래시 탈출: `/`로 쪼개면 세그먼트가 하나라 `..` 검사를 통과했다.
+    try testing.expectError(error.BackslashSeparator, validatePath("..\\..\\secret"));
+    try testing.expectError(error.BackslashSeparator, validatePath("a\\..\\..\\b"));
+    try testing.expectError(error.BackslashSeparator, validatePath("a\\b"));
+
+    // 드라이브 절대·드라이브 상대·UNC — 옛 판정은 전부 상대로 통과시켰다.
+    try testing.expectError(error.AbsolutePath, validatePath("C:/Windows/System32"));
+    try testing.expectError(error.AbsolutePath, validatePath("C:relative"));
+    try testing.expectError(error.AbsolutePath, validatePath("//server/share"));
+    try testing.expectError(error.AbsolutePath, validatePath("1:/x")); // 드라이브 문자는 A–Z가 아니어도 된다
+
+    // 조립까지 막힌다.
+    var buf: [64][]const u8 = undefined;
+    try testing.expectError(error.BackslashSeparator, buildFixture(.stage, &.{ "ok.zig", "..\\escape" }, null, &buf));
+
+    // 드라이브 문자처럼 **생겼을 뿐인** 정상 경로는 계속 통과한다.
+    try validatePath("C/main.zig");
+    try validatePath("src/c.zig");
 }
 
 test "안전 술어: `..`를 **세그먼트로만** 본다(멀쩡한 이름을 거부하지 않는다)" {

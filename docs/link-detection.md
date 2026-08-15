@@ -60,13 +60,20 @@
   저장 URI를 먼저 회수하므로 영향을 받지 않는다. hover 판정(`wordIsUrl`, 2048B 스택 버퍼)과 클릭 추출
   (`extractUrlAt`, 전체 토큰)이 같은 결과를 내도록, 버퍼를 넘긴 토큰 뒷부분의 `…`도 hover가 끝까지 살펴 거부한다
   (어긋나면 "밑줄은 떠도 클릭하면 안 열림").
-- **절대 경로 판정은 호스트 OS 기준**(`path_shape.isDetectableAbsolute`): POSIX 절대(`/x`)는 어디서나, 드라이브
-  절대(`C:\x`·`C:/x`)는 **Windows 빌드에서만** 감지한다. 밑줄 span은 콘텐츠를 가진 쪽이 만들고(원격도 host가
-  `collectViewportLinks`로 모은다) hover는 존재검증을 하지 않으므로, macOS에서 `C:\x`를 감지하면 "열리지 않는
-  밑줄"이 확정된다. 드라이브 뒤에 **구분자를 요구**하므로 `a:b`·`C:relative`는 감지하지 않는다 — 그것들은
-  `std.fs.path.isAbsolute`가 거짓이라 resolve 단계에서 cwd에 join돼 엉뚱한 파일을 열게 된다. UNC(`\\server\share`)는
-  현재 감지하지 않는다(알려진 공백). 근거와 실측: [windows-platform.md](windows-platform.md) §5.1.
-  이 술어는 경로 **가드**가 쓰는 `path_shape.isAbsolute`(OS 무관하게 넓게 거부)와 **일부러 다르다**.
+- **절대 경로 판정은 OS를 인자로 받는다**(`path_shape.isDetectableAbsoluteFor(os, path)`; 호출자는 호스트 OS를
+  넘긴다): POSIX 절대(`/x`)는 어디서나, 드라이브 절대(`C:\x`·`C:/x`)는 **Windows에서만** 감지한다. 밑줄 span은
+  콘텐츠를 가진 쪽이 만들고(원격도 host가 `collectViewportLinks`로 모은다) hover는 존재검증을 하지 않으므로,
+  macOS에서 `C:\x`를 감지하면 "열리지 않는 밑줄"이 확정된다.
+  - **부분집합 불변식**: 감지한 것은 반드시 `std.fs.path.isAbsolute`도 절대로 인정해야 한다. 아니면
+    `resolveClickedPath`가 그 토큰을 **cwd에 join**해 엉뚱한 파일을 연다. 그래서 드라이브 뒤에 **구분자를
+    요구**하고(`a:b`·`C:relative`는 감지하지 않는다), UNC(`\\server\share`·`//server/share`)와 드라이브 없는
+    `\foo\bar`도 배제한다. 이 관계는 테스트가 단언한다.
+  - **드라이브 문자를 A–Z로 제한하지 않는다** — Win32가 제한하지 않으므로(`1:/x`·`::/x`도 절대다) 그렇게 하면
+    가드가 OS 파서보다 좁아져 우회로가 생긴다.
+  - 상대 경로 세 갈래(`~/`·`./`·bare)는 아직 `/`만 받는다 — Windows에서 `.\x`·`src\x`는 감지되지 않는다
+    (알려진 공백, [windows-platform.md](windows-platform.md) §5.2 ⒜).
+  - 근거와 실측: [windows-platform.md](windows-platform.md) §5.1. 이 술어는 경로 **가드**가 쓰는
+    `path_shape.isAbsolute`(OS 무관하게 넓게 거부)와 **일부러 다르다**.
 - **`:line:col` 접미**: `file.zig:10:5`·`app/x.rb:1`의 `:<digits>(:<digits>)?`는 경로의 일부로 **보존**한다
   (에디터 줄 점프 관례). 단 1차 구현은 **여는 시점에 잘라 순수 경로만** 연다(`NSWorkspace.open`이 기본 앱으로
   파일을 열 뿐 — 에디터 줄 점프는 후속).

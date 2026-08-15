@@ -18,14 +18,15 @@
 |---|---|---|
 | W0 | 계약 문서(`windows-platform.md`) + 이 계획. 코드 0 | 완료 |
 | W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더한다. **9;9은 host를 건드리지 않는다**(계약 §3.2a의 C — 최소 메커니즘은 정해졌다). L1이라 Windows와 독립이고 헤드리스로 검증된다. 잔여 위험은 §3.2a "받아들인 위험"으로 수용 확정 | 완료 |
-| W1.5 | **절대경로 판정을 `[0]=='/'`에서 떼어낸다** — 새 최상위 유틸 `src/path_shape.zig`가 술어 둘을 낸다. **가드**(`isAbsolute`, OS 무관 거부): `normalizeAssetPath`·`repo_path`·`file_tree`·`file_tree_mutation`. **감지**(`isDetectableAbsolute`, 호스트 OS 기준): `terminal/selection.zig`. 왜 갈리는지와 실측은 계약 §5.1. 계약 §5의 순서 제약상 **경로 정규화 도입보다 먼저** 해야 한다 | 완료 |
+| W1.5 | **절대경로 판정을 `[0]=='/'`에서 떼어낸다** — 새 최상위 유틸 `src/path_shape.zig`가 술어 둘을 낸다. **가드**(`isAbsolute`, OS 무관 거부): `normalizeAssetPath`·`repo_path`·`git_write_command`·`pathWithin`·`validateName`/`validBasename`. **감지**(`isDetectableAbsoluteFor`, OS를 **인자로**): `terminal/selection.zig`. 왜 갈리는지와 실측은 계약 §5.1. 계약 §5의 순서 제약상 **경로 정규화 도입보다 먼저** 해야 한다 | 완료 |
+| W5.5 | **Windows 상대 경로 링크 감지** — `filePathSpan`의 `home_path`·`dot_relative`·`bare_relative` 세 갈래도 `\`를 받게 한다(`.\x`·`..\x`·`src\x`·`~\x`). 절대 갈래만 고친 W1.5의 후속이고 **더 흔한 형태**다. 선행 작업은 오탐 실측 — `bare_relative`의 억제 규칙이 이스케이프 출력(`\n`·`\t`)과 충돌하는지 먼저 잰다(계약 §5.2 ⒜) | 미착수 |
 | W2 | **`main.zig` Windows 컴파일** — unix domain socket(`:1107`)은 "인스턴스 없음"으로 graceful 폴백. named pipe 이식은 아니다. `:978`의 `fromMode(0o600)`은 **컴파일만 되게** 한다 — 그 코드는 컨트롤 소켓 왕복 뒤에만 도달하므로 Windows에서 실행되지 않는다. 권한 정책은 transport 이식 때(계약 §8) | 미착수 |
 | W2.5 | **Windows 기본 셸** — `resolveInteractiveShell()`에 OS 갈래를 준다: `MARU_INTERACTIVE_SHELL` → `shell.command` → pwsh 7 → 5.1 → cmd(계약 §3.1a, 사용자 확정). config의 OS 분기 여부만 §8에 남았고 그것 없이도 이 슬라이스는 진행된다 | 미착수 |
 | W3 | **`SpawnRequest` 중립화** — `login`은 의도로 재문서화, `zdotdir`은 "통합 자산 디렉터리"로 일반화, `term`은 백엔드 위임. `command`+`args`는 **그대로**. **wire tag는 건드리지 않는다**(계약 §4.2). macOS 동작 변화 0 | 미착수 |
 | W4 | **ConPTY 백엔드** — `src/pty/windows.zig`. 필수 13 표면. 파이프는 `CreatePipe`가 아니라 **overlapped named pipe**여야 한다(계약 §4.1). PoC 코드가 있으나 **실기 세션 확인이 선행**(계약 §6) | 미착수 |
 | W5 | **셸 통합 주입** — cmd `PROMPT`, PowerShell `prompt` 오버라이드(계약 §3.3). 사용자 프롬프트 보존 | 미착수 |
 | W6 | **헤드리스 세로 슬라이스** — `zig build demo`가 Windows에서 산출물을 낸다. 여기까지가 아키텍처 증명 | 미착수 |
-| W7 | **Win32 호스트 + 렌더 백엔드** — 창·입력·IME·클립보드. **선행 결정 2건**(GPU 백엔드, 웹뷰 합성 모델)이 계약 §8에 있다 | 미착수 |
+| W7 | **Win32 호스트 + 렌더 백엔드** — 창·입력·IME·클립보드. **선행 결정 2건**(GPU 백엔드, 웹뷰 합성 모델)이 계약 §8에 있다. 파일 트리 백엔드를 이식할 때 **루트 스트라이핑 두 곳**(`parent_path[root.len + 1 ..]`)을 `endsWithSep`로 함께 고친다 — 루트가 `/`나 `C:/`면 첫 세그먼트가 잘린다(계약 §5.2 ⒝, 이 커밋 이전부터 있던 버그) | 미착수 |
 | W8 | **ADE 표면** — 파일 패널·에디터·소스 컨트롤·에이전트 도크. 웹 패널은 WebView2 + DirectComposition | 미착수 |
 | 후속 | **영속 세션 호스트** — named pipe 기반 재설계. 계약 범위 밖 | 미착수 |
 

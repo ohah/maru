@@ -6234,6 +6234,10 @@ test "ellipsis past the 2048-byte scratch buffer: hover and click agree (both re
 // 않았다(docs/windows-platform.md §5 실측). 고치되 macOS는 건드리면 안 된다 — hover(wordIsUrl)는 비용 때문에
 // 존재검증을 하지 않으므로, macOS에서 `C:\x`를 감지하면 "밑줄은 뜨는데 클릭하면 아무 일도 없는" 상태가 확정된다.
 // 그래서 술어를 **호스트 OS 기준**으로 둔다(path_shape.isDetectableAbsolute — VS Code가 백엔드 OS를 쓰는 것과 같은 규칙).
+//
+// **이 테스트가 검증하는 것은 배선이다** — selection.zig가 정말 그 술어를 쓰는가. 술어 자체의 의미(어떤 모양을
+// 어떤 OS 기준으로 잡는가, 그리고 `감지 ⊆ std.fs.path.isAbsolute` 불변식)는 `path_shape.zig`에서 OS를 **인자로**
+// 받아 두 갈래를 모두 실행한다. 그래서 Windows 러너가 없는 CI에서도 Windows 분기가 공허참이 되지 않는다.
 test "absolute-path link detection follows the host OS, and never outruns resolve's notion of absolute" {
     const on_windows = @import("builtin").os.tag == .windows;
     const full = selection.link_scopes_full;
@@ -6252,8 +6256,11 @@ test "absolute-path link detection follows the host OS, and never outruns resolv
         .{ .text = "a:b", .want = false, .why = "드라이브처럼 생겼을 뿐" },
         .{ .text = "C:relative", .want = false, .why = "드라이브 상대 — isAbsolute=false" },
         .{ .text = "\\foo\\bar", .want = false, .why = "드라이브 없는 루트 상대 + 이스케이프 출력 오탐" },
-        .{ .text = "\\\\server\\share\\f.txt", .want = false, .why = "UNC — 알려진 공백" },
-        .{ .text = "1:\\not-a-drive", .want = false, .why = "드라이브 문자는 letter여야 한다" },
+        .{ .text = "\\\\server\\share\\f.txt", .want = false, .why = "UNC — 술어가 직접 배제한다" },
+        // Win32는 드라이브 문자를 A–Z로 제한하지 않는다(`std.fs.path.isAbsoluteWindows("1:/x") == true`).
+        // 가드가 OS 파서보다 좁으면 그 차이가 우회로가 되므로 `path_shape`가 종류를 묻지 않게 바뀌었고,
+        // 감지도 같은 파서를 쓴다 — 그래서 Windows에서는 이것도 진짜 경로다.
+        .{ .text = "1:\\drive-one", .want = on_windows, .why = "비알파벳 드라이브도 Win32에선 절대다" },
         // **알려진 오탐 — 의도적으로 남긴다.** 한 글자 라벨 + 이스케이프(`n:\t`)나 드라이브 루트(`y:\`)도
         // 드라이브 절대 모양이다. POSIX 쪽도 오늘 같은 등급의 오탐을 낸다 — `/t`나 sed의 `/foo/bar/`가
         // `absolute_path`로 잡힌다. 여기만 좁히면 "왜 `/t`는 밑줄이 뜨는데 `C:\t`는 안 뜨나"가 설명되지 않는

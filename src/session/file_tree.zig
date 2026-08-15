@@ -1102,18 +1102,24 @@ fn clonePathList(allocator: std.mem.Allocator, source: []const []u8, out: *std.A
     for (source) |path| out.appendAssumeCapacity(try allocator.dupe(u8, path));
 }
 
+/// 이름 한 칸이 유효한가. **역슬래시도 막는다** — 이 검사는 세그먼트로 쪼개지 않으므로 `..\..\x`가 통째로
+/// 한 이름이 되어 `..` 비교를 통과하고, Windows에서 join되면 진짜 상위 이동이 된다
+/// (`file_tree_mutation.validateName`과 같은 이유·같은 정책).
 fn validBasename(name: []const u8) bool {
     return name.len > 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..") and
-        std.mem.indexOfScalar(u8, name, '/') == null and std.mem.indexOfScalar(u8, name, 0) == null and
+        std.mem.indexOfScalar(u8, name, '/') == null and std.mem.indexOfScalar(u8, name, '\\') == null and
+        std.mem.indexOfScalar(u8, name, 0) == null and
         std.unicode.utf8ValidateSlice(name);
 }
 
 fn pathWithin(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
     if (!std.mem.startsWith(u8, path, root) or path.len <= root.len) return false;
-    // 루트 바로 아래인지 판정할 때 루트가 이미 구분자로 끝나면(`/`·`C:\`) 한 칸을 더 요구하면 안 된다.
-    // 예전엔 그 예외가 POSIX 루트(`/`)만 알아 Windows 드라이브 루트에 대응이 없었다(docs/windows-platform.md §5).
-    return path_shape.isRoot(root) or path_shape.isSep(path[root.len]);
+    // 루트가 이미 구분자로 끝나면(`/`·`C:/`) 한 칸을 더 요구하면 안 된다 — 그러면 첫 자식이 통째로 밖으로
+    // 보인다. 예전엔 그 예외가 POSIX 루트(`/`)만 알아 드라이브 루트에 대응이 없었다(docs/windows-platform.md §5).
+    // **경계는 `/`만 본다**: 이 모듈의 경로 계약이 POSIX라(위 joinPosix, docs/layering-and-portability.md §4.1)
+    // 여기서 `\`까지 구분자로 세면 POSIX에서 `p\q`라는 평범한 파일 이름이 디렉터리 `p`의 자식으로 둔갑한다.
+    return path_shape.endsWithSep(root) or path[root.len] == '/';
 }
 
 fn deepestExpandedDirectory(node: *Node, path: []const u8) ?*Node {

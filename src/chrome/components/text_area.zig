@@ -33,6 +33,8 @@
 const std = @import("std");
 const text_field = @import("text_field.zig");
 const visual_map = @import("../ui/visual_map.zig");
+const text_layout = @import("../text_layout.zig"); // cluster 분절 — 랩과 **같은** 출처
+const display_width = @import("../../display_width.zig"); // 표시 폭 — 랩과 **같은** 출처
 
 /// 커밋 메시지의 단어 구분자. 주소창의 `/ . ? & # =`와 다르다 — 여기서는 **개행이 핵심**이다(제약 ④).
 /// 공백·탭은 `isSeparator`가 항상 구분자로 보므로 여기 없어도 된다.
@@ -139,24 +141,57 @@ pub fn viewForLine(field: text_field.View, w: Wrapped, index: usize) text_field.
 
 // ── 세로 이동(제약 ⑤) ───────────────────────────────────────────────────────────
 
+/// 줄 안 바이트 오프셋 → **표시 열**. 랩과 **같은 규칙**(cluster 분절 + `clusterCols`)을 쓴다 — 두 계산이
+/// 갈리면 caret이 랩 지점과 다른 자리를 가리킨다.
+fn columnAt(text: []const u8, line: VisualLine, offset: usize) u32 {
+    var col: u32 = 0;
+    var i = line.start;
+    while (i < offset and i < line.end) {
+        const base = text_layout.decodeCodepoint(text, i);
+        const end = @min(text_layout.clusterEndAfter(text, i, base.advance), line.end);
+        const n = @max(1, end - i);
+        col += @intCast(display_width.clusterCols(text, i, i + n));
+        i += n;
+    }
+    return col;
+}
+
+/// **표시 열 → 줄 안 바이트 오프셋.** 열 경계에 딱 안 맞으면 그 cluster의 **시작**으로 붙인다 —
+/// cluster 중간 오프셋은 caret 자리가 아니다(글자가 쪼개진다).
+fn offsetAtColumn(text: []const u8, line: VisualLine, want: u32) usize {
+    var col: u32 = 0;
+    var i = line.start;
+    while (i < line.end) {
+        const base = text_layout.decodeCodepoint(text, i);
+        const end = @min(text_layout.clusterEndAfter(text, i, base.advance), line.end);
+        const n = @max(1, end - i);
+        const w = @as(u32, @intCast(display_width.clusterCols(text, i, i + n)));
+        if (col + w > want) return i; // 이 cluster 안이면 그 시작으로
+        col += w;
+        i += n;
+    }
+    return line.end;
+}
+
 /// ↑/↓ — **시각 행 단위**로 움직인다. 논리 줄 단위면 접힌 줄 안에서 caret이 건너뛴다.
 ///
-/// **목표 열을 유지하지 않는다**(v1). 긴 줄에서 짧은 줄로 내려갔다 돌아오면 열이 줄 끝으로 붙는데,
-/// 커밋 메시지는 줄이 짧아 그 차이가 작다. 유지하려면 호출자가 "마지막으로 의도한 열"을 들어야 하고
-/// 그건 상태라 이 순수 층이 아니라 세션이 가질 것이다.
-pub fn moveVertical(w: Wrapped, offset: usize, delta: i32) usize {
+/// **열은 바이트가 아니라 표시 열이다.** 바이트로 세면 한글·이모지 줄에서 caret이 엉뚱한 자리로 가고,
+/// 더 나쁘게는 **cluster 한가운데** 오프셋이 나와 글자가 쪼개진다(ASCII만 넣은 테스트는 이걸 통과시킨다 —
+/// 편집기 세션이 같은 함정을 §3.8 문자 없는 대조 테스트에서 겪었다).
+///
+/// **목표 열을 유지하지 않는다**(v1). 긴 줄 → 짧은 줄 → 긴 줄로 오가면 열이 줄 끝으로 붙는다. 유지하려면
+/// "마지막으로 의도한 열"을 들어야 하고 그건 **상태**라 이 순수 층이 아니라 세션이 가질 것이다.
+pub fn moveVertical(text: []const u8, w: Wrapped, offset: usize, delta: i32) usize {
     if (w.lines.len == 0) return offset;
     const current = lineAt(w, offset);
-    const col = offset - w.lines[current].start;
+    const want = columnAt(text, w.lines[current], offset);
 
     const target_i64 = @as(i64, @intCast(current)) + delta;
     if (target_i64 < 0) return w.lines[0].start; // 맨 위에서 더 올라가면 문서 처음
     const target: usize = @intCast(target_i64);
     if (target >= w.lines.len) return w.lines[w.lines.len - 1].end; // 맨 아래에서 더 내려가면 문서 끝
 
-    const line = w.lines[target];
-    const width = line.end - line.start;
-    return line.start + @min(col, width);
+    return offsetAtColumn(text, w.lines[target], want);
 }
 
 /// Home — 그 **시각 행**의 처음(논리 줄의 처음이 아니다).
@@ -259,10 +294,10 @@ test "제약 ⑤: ↑↓는 시각 행 단위로 움직이고 짧은 줄에서�
     const text = "aaaa\nbb\ncccc";
     const w = wrapFixture(text, 40, true, &buf);
     // 첫 줄 3열 → 아래로: 두 번째 줄은 2글자뿐이라 끝(offset 7)으로 붙는다.
-    try testing.expectEqual(@as(usize, 7), moveVertical(w, 3, 1));
+    try testing.expectEqual(@as(usize, 7), moveVertical(text, w, 3, 1));
     // 맨 위에서 더 올라가면 문서 처음, 맨 아래에서 더 내려가면 문서 끝.
-    try testing.expectEqual(@as(usize, 0), moveVertical(w, 2, -1));
-    try testing.expectEqual(text.len, moveVertical(w, 9, 1));
+    try testing.expectEqual(@as(usize, 0), moveVertical(text, w, 2, -1));
+    try testing.expectEqual(text.len, moveVertical(text, w, 9, 1));
 }
 
 test "caret은 줄 끝 오프셋에서 다음 줄로 튀지 않는다" {
@@ -310,4 +345,60 @@ test "가로 축은 text_field가 소유한다 — 줄 슬라이스와 줄-상�
 test "제약 ④: 개행이 단어 구분자에 들어 있다" {
     // 안 넘기면 ⌥←/→가 줄 끝과 다음 줄 첫 단어를 한 단어로 붙인다.
     try testing.expect(std.mem.indexOfScalar(u8, word_separators, '\n') != null);
+}
+
+test "↑↓는 **표시 열**로 움직인다 — 한글 줄에서 ASCII 줄로 내려가도 자리가 맞는다" {
+    // 바이트로 세면 `한글`(6바이트) 뒤 caret이 아래 줄의 6번째 **글자**로 가서 두 배 오른쪽에 선다.
+    var buf: [16]VisualLine = undefined;
+    const text = "한글\nabcdefgh";
+    const w = wrapFixture(text, 40, true, &buf);
+    // `한글` 끝(바이트 6, 표시 열 4) → 아래 줄의 표시 열 4 = 바이트 4(`e` 앞).
+    try testing.expectEqual(@as(usize, 7 + 4), moveVertical(text, w, 6, 1));
+}
+
+test "↑↓가 cluster 한가운데로 떨어지지 않는다(글자가 쪼개지지 않는다)" {
+    // 이모지 ZWJ 시퀀스는 여러 codepoint가 **한 글자**다. 열이 그 중간을 가리키면 cluster 시작으로 붙어야
+    // 하고, 아니면 caret이 글자 속으로 들어가 다음 입력이 그 글자를 깨뜨린다.
+    var buf: [16]VisualLine = undefined;
+    const family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F466}"; // 👨‍👩‍👦 — 한 cluster
+    const text = "abcd\n" ++ family ++ "x";
+    const w = wrapFixture(text, 40, true, &buf);
+
+    // 이모지는 **0~1열**을 차지한다. 위 줄 1열에서 내려오면 그 열이 cluster 한가운데이므로, cluster
+    // **시작**(바이트 5)이 나와야 한다 — 중간 오프셋이 나오면 다음 입력이 그 글자를 깨뜨린다.
+    const landed = moveVertical(text, w, 1, 1);
+    try testing.expectEqual(@as(usize, 5), landed);
+    // 그 자리에서 시작하는 cluster가 실제로 그 이모지 전체다 — 중간이 아니다.
+    const base = text_layout.decodeCodepoint(text, landed);
+    const end = text_layout.clusterEndAfter(text, landed, base.advance);
+    try testing.expectEqual(@as(usize, 5 + family.len), end);
+}
+
+test "적대적 문자(BiDi override·soft hyphen)가 섞여도 열 계산이 랩과 같은 규칙을 쓴다" {
+    // 편집기 세션이 §3.8 문자를 **한 번도 주지 않는** 대조 테스트로 결함 둘을 놓쳤다. 여기서는 그
+    // 문자들을 넣고, 열 계산이 랩과 같은 출처(`clusterCols`)를 쓰는지 왕복으로 본다.
+    var buf: [32]VisualLine = undefined;
+    const text = "a\u{202E}b\u{00AD}c\nplain";
+    const w = wrapFixture(text, 40, true, &buf);
+    const line = w.lines[0];
+
+    // 줄 안 모든 cluster 경계에서 열 ↔ 오프셋 왕복이 제자리로 돌아온다.
+    var i = line.start;
+    while (i <= line.end) {
+        const col = columnAt(text, line, i);
+        const back = offsetAtColumn(text, line, col);
+        try testing.expect(back <= i); // 폭 0 cluster는 같은 열을 공유하므로 앞으로만 붙는다
+        if (i == line.end) break;
+        const base = text_layout.decodeCodepoint(text, i);
+        i = @min(text_layout.clusterEndAfter(text, i, base.advance), line.end);
+    }
+}
+
+test "열이 줄 끝을 넘으면 줄 끝으로 붙는다(짧은 줄)" {
+    var buf: [16]VisualLine = undefined;
+    const text = "한글한글한글\n짧";
+    const w = wrapFixture(text, 40, true, &buf);
+    // 위 줄 끝(표시 열 12) → 아래 줄은 2열뿐이라 그 끝으로.
+    const down = moveVertical(text, w, 18, 1);
+    try testing.expectEqual(text.len, down);
 }

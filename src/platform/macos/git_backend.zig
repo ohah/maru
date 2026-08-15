@@ -927,7 +927,7 @@ fn runWithEnv(
     // 읽기는 **stdout만** 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로
     // 버린다(docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
     // 쓰기는 정반대라(§5 — 가공해서 보여 준다) `spawnCapture`가 그 축을 인자로 받는다.
-    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .discard);
+    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only);
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
     if (spawned.exit_code != 0) return error.GitFailed;
@@ -935,18 +935,24 @@ fn runWithEnv(
     return .{ .bytes = spawned.stdout_bytes, .truncated = spawned.stdout_bytes.len >= max_output_bytes };
 }
 
-/// 자식의 stderr를 어떻게 할 것인가. **읽기와 쓰기의 유일한 정책 차이**라 인자로 뺐다 — 두 경로가 각자
-/// fork/exec를 복제하면 파이프 누수·CLOEXEC 같은 세부가 한쪽에서만 고쳐진다.
-const StderrPolicy = enum {
-    /// /dev/null로 버린다(읽기 — §6: raw로 흘리지 않는다).
-    discard,
-    /// 파이프로 받는다(쓰기 — §5: 가공해서 보여 준다).
-    capture,
+/// **어느 스트림 하나만** 파이프로 받을지. 읽기와 쓰기가 정확히 반대다.
+///
+/// **파이프는 언제나 하나다.** 둘을 동시에 열고 한쪽을 끝까지 읽으면, 자식이 다른 쪽 파이프 버퍼(64 KiB)를
+/// 채운 채 write에서 블록하고 우리는 첫 쪽 EOF를 기다려 **교착한다**. §5가 "hook 출력은 수천 줄이 될 수
+/// 있다"고 못박았으므로 그 상황은 가정이 아니라 예정된 일이다. 다행히 필요한 것도 언제나 하나다 —
+/// 읽기는 stdout만 쓰고(stderr에는 경로·사용자 정보가 섞여 §6이 금지한다), 쓰기는 stderr만 쓴다
+/// (`add`는 조용하고 `rm --cached`의 stdout은 화면에 안 낸다). 그래서 나머지 하나는 /dev/null로 보낸다.
+const Capture = enum {
+    /// stdout을 받고 stderr를 버린다(읽기 — §6: raw로 흘리지 않는다).
+    stdout_only,
+    /// stderr를 받고 stdout을 버린다(쓰기 — §5: 실패 이유를 가공해서 보여 준다).
+    stderr_only,
 };
 
 const Spawned = struct {
+    /// `stderr_only`면 빈 슬라이스다.
     stdout_bytes: []u8,
-    /// `discard`면 빈 슬라이스다(호출자가 그래도 free한다 — 분기 없는 해제가 누수를 막는다).
+    /// `stdout_only`면 빈 슬라이스다. 빈 슬라이스도 free는 안전하므로 호출자가 분기 없이 해제한다.
     stderr_bytes: []u8,
     /// 정상 종료가 아니면 -1.
     exit_code: c_int,
@@ -960,88 +966,93 @@ fn spawnCapture(
     allocator: std.mem.Allocator,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*]const ?[*:0]const u8,
-    stderr_policy: StderrPolicy,
+    capture: Capture,
 ) !Spawned {
-    var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return error.GitFailed;
+    var pipe_fds: [2]c_int = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return error.GitFailed;
     // 동시에 도는 다른 fork(셸 PTY spawn 등)로 write 끝이 새면 EOF가 안 와 read가 영원히 블록한다.
-    _ = std.c.fcntl(out_pipe[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
-    _ = std.c.fcntl(out_pipe[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    _ = std.c.fcntl(pipe_fds[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    _ = std.c.fcntl(pipe_fds[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
 
-    var err_pipe: [2]c_int = .{ -1, -1 };
-    if (stderr_policy == .capture) {
-        if (std.c.pipe(&err_pipe) != 0) {
-            _ = std.c.close(out_pipe[0]);
-            _ = std.c.close(out_pipe[1]);
-            return error.GitFailed;
-        }
-        _ = std.c.fcntl(err_pipe[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
-        _ = std.c.fcntl(err_pipe[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
-    }
+    // 파이프로 받을 fd와 /dev/null로 보낼 fd.
+    const piped_fd: c_int = switch (capture) {
+        .stdout_only => 1,
+        .stderr_only => 2,
+    };
+    const nulled_fd: c_int = switch (capture) {
+        .stdout_only => 2,
+        .stderr_only => 1,
+    };
 
     const pid = std.c.fork();
     if (pid < 0) {
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        if (err_pipe[0] >= 0) {
-            _ = std.c.close(err_pipe[0]);
-            _ = std.c.close(err_pipe[1]);
-        }
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
         return error.GitFailed;
     }
     if (pid == 0) {
         // child: dup2/open/close/execve만(async-signal-safe).
-        _ = std.c.dup2(out_pipe[1], 1);
-        if (stderr_policy == .capture) {
-            _ = std.c.dup2(err_pipe[1], 2);
-        } else {
-            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-            if (devnull >= 0) {
-                _ = std.c.dup2(devnull, 2);
-                _ = std.c.close(devnull);
-            }
+        _ = std.c.dup2(pipe_fds[1], piped_fd);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, nulled_fd);
+            // **stdin도 /dev/null이다.** 상속하면 stdin을 읽는 자식이 블록한다 —
+            // `GIT_TERMINAL_PROMPT=0`은 git *자신의* 프롬프트만 막고, 저장소가 심어 둔 hook 스크립트가
+            // `read`를 부르는 것은 못 막는다. §1이 "프롬프트가 뜨면 그 명령은 영영 안 끝난다"고 한 그
+            // 상황이 그렇게 생긴다. /dev/null이면 즉시 EOF라 hook은 진행하거나 스스로 실패한다.
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.close(devnull);
         }
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        if (err_pipe[0] >= 0) {
-            _ = std.c.close(err_pipe[0]);
-            _ = std.c.close(err_pipe[1]);
-        }
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
         _ = std.c.execve(argv[0].?, @ptrCast(argv), @ptrCast(envp));
         std.c._exit(127); // execve 실패
     }
 
-    _ = std.c.close(out_pipe[1]);
-    if (err_pipe[1] >= 0) _ = std.c.close(err_pipe[1]);
-
-    // **stdout을 먼저 끝까지 읽는다.** 두 파이프를 번갈아 폴링하지 않는 이유는 쓰기 명령의 stderr가 작기
-    // 때문이다(hook 출력도 상한에서 끊긴다). 순서를 반대로 하면 stdout이 파이프 버퍼를 채운 채 자식이
-    // 블록하고 우리는 stderr EOF를 기다려 교착한다.
-    const out_collected = readAllFd(allocator, out_pipe[0]);
-    _ = std.c.close(out_pipe[0]);
-    const stdout_bytes = out_collected catch {
-        if (err_pipe[0] >= 0) _ = std.c.close(err_pipe[0]);
+    _ = std.c.close(pipe_fds[1]);
+    const collected = switch (capture) {
+        .stdout_only => readAllFd(allocator, pipe_fds[0]),
+        // 쓰기는 끝까지 비운다 — 상한에서 멈추면 사용자의 git을 도중에 죽인다.
+        .stderr_only => readAllFdDraining(allocator, pipe_fds[0], max_output_bytes),
+    };
+    _ = std.c.close(pipe_fds[0]);
+    const bytes = collected catch {
         _ = reapPid(pid);
         return error.GitFailed;
     };
-    errdefer allocator.free(stdout_bytes);
+    errdefer allocator.free(bytes);
 
-    var stderr_bytes: []u8 = &.{};
-    if (err_pipe[0] >= 0) {
-        const err_collected = readAllFd(allocator, err_pipe[0]);
-        _ = std.c.close(err_pipe[0]);
-        stderr_bytes = err_collected catch {
-            _ = reapPid(pid);
-            return error.GitFailed;
-        };
-    }
-    errdefer allocator.free(stderr_bytes);
-
-    return .{ .stdout_bytes = stdout_bytes, .stderr_bytes = stderr_bytes, .exit_code = reapPid(pid) };
+    const exit_code = reapPid(pid);
+    return switch (capture) {
+        .stdout_only => .{ .stdout_bytes = bytes, .stderr_bytes = &.{}, .exit_code = exit_code },
+        .stderr_only => .{ .stdout_bytes = &.{}, .stderr_bytes = bytes, .exit_code = exit_code },
+    };
 }
 
 /// fd에서 EOF까지, 상한까지 읽는다(호출자 소유). 상한을 넘으면 거기서 멈추고 자식은 SIGPIPE/EPIPE로 끝난다 —
 /// 화면에 못 들어갈 분량을 계속 받을 이유가 없다.
+/// 상한까지만 **보관**하되 EOF까지 **계속 읽어 비운다**. 쓰기 전용이다.
+///
+/// 읽기(`readAllFd`)는 상한에서 멈춰 자식을 EPIPE로 끊는 것이 **의도다**(§6 — 화면에 못 들어갈 분량을 계속
+/// 받을 이유가 없다). 쓰기에서 같은 일을 하면 **사용자의 git을 index 쓰는 도중에 죽인다** — 중간에 죽은
+/// git은 `index.lock`을 남기고, 그다음부터 사용자의 터미널 git까지 막힌다. 우리가 시키지도 않은 상태다.
+/// 그래서 쓰기는 메모리만 유계로 두고 파이프는 끝까지 비운다.
+fn readAllFdDraining(allocator: std.mem.Allocator, fd: c_int, keep_max: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [16 * 1024]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(fd, &tmp) catch return error.ReadFailed;
+        if (n == 0) break; // EOF
+        if (buf.items.len < keep_max) {
+            const room = keep_max - buf.items.len;
+            try buf.appendSlice(allocator, tmp[0..@min(n, room)]);
+        }
+        // 상한을 넘은 뒤에도 **읽기는 계속한다** — 여기서 멈추면 자식이 EPIPE로 죽는다.
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 fn readAllFd(allocator: std.mem.Allocator, fd: c_int) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1099,9 +1110,14 @@ pub fn runWriteSync(
     paths: []const []const u8,
     message_file: ?[]const u8,
 ) !WriteOutput {
+    // **조립 오류를 `GitFailed`로 뭉개지 않는다.** 경로 거부(절대경로·`..`)는 *우리가* 손대지 않기로 한
+    // 일이고 git이 실패한 것이 아니다 — §5의 "실패는 사실대로"가 그 둘을 구별하라고 한다. 뭉개면 화면에
+    // "git 실패"라고 뜨고 사용자는 저장소를 의심한다.
     var argv_slices_buf: [git_write_command.fixed_argv_max + git_write_command.max_batch_paths][]const u8 = undefined;
-    const argv_slices = git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf) catch
-        return error.GitFailed;
+    // 배치 나누기는 **호출자 몫이다**(§2 — 중간에 실패할 수 있고, 그때 목록을 다시 읽는 판단은 화면 상태를
+    // 든 쪽이 한다). 여기서 조용히 자르면 일부만 스테이지되고 호출자는 전부 됐다고 믿는다.
+    if (paths.len > git_write_command.max_batch_paths) return error.TooManyPaths;
+    const argv_slices = try git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf);
 
     var argv_store: std.ArrayList([:0]u8) = .empty;
     defer {
@@ -1147,10 +1163,9 @@ pub fn runWriteSync(
     }
     env_ptrs.append(allocator, null) catch return error.GitFailed;
 
-    const spawned = try spawnCapture(allocator, @ptrCast(argv_ptrs.items.ptr), env_ptrs.items.ptr, .capture);
-    // 쓰기의 stdout은 화면에 쓰지 않는다(`add`는 조용하고, `rm --cached`는 지운 목록을 낸다). 실패 이유는
-    // stderr에 있다.
-    allocator.free(spawned.stdout_bytes);
+    const spawned = try spawnCapture(allocator, @ptrCast(argv_ptrs.items.ptr), env_ptrs.items.ptr, .stderr_only);
+    // 쓰기의 stdout은 애초에 /dev/null로 갔다(`add`는 조용하고 `rm --cached`의 목록은 화면에 안 낸다).
+    allocator.free(spawned.stdout_bytes); // 빈 슬라이스 — 분기 없이 해제한다
     return .{
         .exit_code = spawned.exit_code,
         .stderr_bytes = spawned.stderr_bytes,
@@ -1586,10 +1601,17 @@ const WriteFixture = struct {
             try ptrs.append(allocator, c.ptr);
         }
         try ptrs.append(allocator, null);
-        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .capture);
+        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stderr_only);
         allocator.free(spawned.stdout_bytes);
         allocator.free(spawned.stderr_bytes);
         if (spawned.exit_code != 0) return error.PrepareFailed;
+    }
+
+    /// hook 스크립트를 실행 가능하게 만든다(안 하면 git이 조용히 건너뛴다).
+    fn chmodExec(self: *WriteFixture, sub_path: []const u8) !void {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full = try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ self.root, sub_path });
+        if (std.c.chmod(full, 0o755) != 0) return error.ChmodFailed;
     }
 
     fn write(self: *WriteFixture, path: []const u8, bytes: []const u8) !void {
@@ -1741,4 +1763,114 @@ test "쓰기 end-to-end: 모두 스테이지·모두 언스테이지" {
     defer allocator.free(st);
     try testing.expect(std.mem.indexOf(u8, st, "? a.txt") != null);
     try testing.expect(std.mem.indexOf(u8, st, "? b.txt") != null);
+}
+
+test "쓰기 end-to-end: hook이 파이프 버퍼를 넘겨 쏟아도 교착하지 않는다" {
+    // **이 테스트가 없으면 못 잡는 결함이었다.** 초판은 stdout·stderr 파이프를 둘 다 열고 stdout을 끝까지
+    // 읽은 뒤 stderr를 읽었다. 자식이 stderr 버퍼(64 KiB)를 채우면 자식은 write에서, 우리는 stdout EOF에서
+    // 서로를 기다린다 — §5가 "hook 출력은 수천 줄이 될 수 있다"고 못박았으니 가정이 아니라 예정된 일이다.
+    // 지금은 파이프를 **하나만** 열어 그 상황이 구조적으로 불가능하다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.txt", "one\n");
+    var staged = try fx.run(allocator, .stage, &.{"a.txt"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+
+    // 파이프 버퍼(64 KiB)를 확실히 넘기는 양을 stderr로 쏟고 거부하는 pre-commit hook.
+    try fx.write(".git/hooks/pre-commit",
+        \\#!/bin/sh
+        \\i=0
+        \\while [ $i -lt 4000 ]; do
+        \\  echo "hook: this line exists only to fill the stderr pipe buffer $i" >&2
+        \\  i=$((i+1))
+        \\done
+        \\exit 1
+        \\
+    );
+    try fx.chmodExec(".git/hooks/pre-commit");
+
+    // 메시지 파일은 **저장소 밖**이다(§2) — 여기서는 tmp 루트 옆에 둔다.
+    const msg_path = try std.fs.path.join(allocator, &.{ fx.root, "..", "commit-msg.txt" });
+    defer allocator.free(msg_path);
+    try fx.dir.dir.writeFile(fixture_io, .{ .sub_path = "../commit-msg.txt", .data = "subject\n" });
+
+    // hook이 허용되는 유일한 명령이 커밋이다(§3) — 그래서 이 경로로만 이 상황이 생긴다.
+    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path);
+    defer out.deinit(allocator);
+
+    try testing.expect(!out.ok()); // hook이 거부했다
+    // 이유가 실제로 손에 들어온다 — §5가 화면에 내라고 한 그 바이트다.
+    try testing.expect(out.stderr_bytes.len > 64 * 1024);
+    try testing.expect(std.mem.indexOf(u8, out.stderr_bytes, "hook: this line exists") != null);
+}
+
+test "쓰기 stderr는 상한을 넘겨도 파이프를 끝까지 비운다(자식을 EPIPE로 죽이지 않는다)" {
+    // 읽기는 상한에서 멈춰 자식을 끊는 것이 의도지만, 쓰기에서 그러면 **사용자의 git을 index 쓰는 도중에
+    // 죽이고 `index.lock`을 남긴다**. 보관은 유계, 배수는 끝까지임을 파이프로 직접 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fds: [2]c_int = undefined;
+    try testing.expect(std.c.pipe(&fds) == 0);
+    const pid = std.c.fork();
+    try testing.expect(pid >= 0);
+    if (pid == 0) {
+        _ = std.c.dup2(fds[1], 1);
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        // 상한(4 KiB)의 수십 배를 쏟는다. 부모가 도중에 멈추면 SIGPIPE로 죽어 exit code가 0이 아니게 된다.
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "i=0; while [ $i -lt 3000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done", null };
+        _ = std.c.execve("/bin/sh", @ptrCast(&argv), @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(fds[1]);
+    const keep: usize = 4096;
+    const bytes = try readAllFdDraining(allocator, fds[0], keep);
+    defer allocator.free(bytes);
+    _ = std.c.close(fds[0]);
+
+    try testing.expectEqual(keep, bytes.len); // 보관은 상한까지만
+    // **자식이 정상 종료했다** = 우리가 파이프를 끝까지 비웠다는 뜻이다(멈췄으면 SIGPIPE로 죽는다).
+    try testing.expectEqual(@as(c_int, 0), reapPid(pid));
+}
+
+test "자식의 stdin은 /dev/null이다(stdin을 읽는 hook이 멈추지 않는다)" {
+    // `GIT_TERMINAL_PROMPT=0`은 git 자신의 프롬프트만 막는다. 저장소가 심어 둔 hook이 `read`를 부르면
+    // 상속된 stdin에서 블록하고, 그 쓰기는 §1이 경고한 "영영 안 끝나는 명령"이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.txt", "one\n");
+    var staged = try fx.run(allocator, .stage, &.{"a.txt"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+
+    // stdin을 읽고, EOF면 그 사실을 stderr로 알린 뒤 거부하는 hook.
+    try fx.write(".git/hooks/pre-commit",
+        \\#!/bin/sh
+        \\if read line; then
+        \\  echo "hook: read a line" >&2
+        \\else
+        \\  echo "hook: stdin was eof" >&2
+        \\fi
+        \\exit 1
+        \\
+    );
+    try fx.chmodExec(".git/hooks/pre-commit");
+
+    const msg_path = try std.fs.path.join(allocator, &.{ fx.root, "..", "stdin-msg.txt" });
+    defer allocator.free(msg_path);
+    try fx.dir.dir.writeFile(fixture_io, .{ .sub_path = "../stdin-msg.txt", .data = "subject\n" });
+
+    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path);
+    defer out.deinit(allocator);
+    try testing.expect(!out.ok());
+    // **즉시 EOF**여야 한다. 상속된 stdin이면 여기서 블록하거나 남의 입력을 삼킨다.
+    try testing.expect(std.mem.indexOf(u8, out.stderr_bytes, "hook: stdin was eof") != null);
 }

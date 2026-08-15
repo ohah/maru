@@ -452,6 +452,23 @@ test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
 /// 키바를 **끝까지 민다.** 키가 손가락 크기(44)라 폰 폭을 넘치므로 오른쪽 키(`copy` 등)는
 /// 밀어야 창 안에 들어온다 — 실제 사용자가 하는 일과 같다. 먼저 보이는 키에서 시작해야
 /// 밴드 세로 범위 안이다.
+/// 키바를 **맨 앞으로** 되돌린다. 앞선 테스트가 끝까지 밀어 놨으면 앞쪽 키(esc·tab·ctrl)가
+/// 창 밖이라 rect 가 0 이고, 그 상태로 "그 키를 눌러 보는" 테스트는 재현이 아니라 그냥 못
+/// 누른 것이 된다.
+fn keybarScrollToStart() void {
+    const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
+    if (c.x == 0 and c.y == 0) return;
+    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    var x = c.x;
+    var step: u32 = 0;
+    while (step < 60) : (step += 1) {
+        x += 20;
+        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+    }
+    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
 fn keybarScrollToEnd() void {
     const c = keyCenter(0);
     _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
@@ -1300,5 +1317,108 @@ test "설정이 뜨면 화면 전체를 먹고, 뒤로가기로 빠진다" {
 
     _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 200, 300));
+    bridge.maru_mobile_clear_error();
+}
+
+// ── 코드 리뷰가 낸 셋 — **재현 먼저** ────────────────────────────────────────────
+
+// **host 가 준 길이 밖을 읽는다.** `maru_mobile_input` 은 armed 수정자가 있으면 첫 글자를 키
+// 경로로 보내는데, 그 길이를 **lead 바이트에서** 얻어 `ptr[0..seq_len]` 을 자른다. many-item
+// 포인터에는 길이가 없어 Zig 도 경계를 못 잡는다(정작 그 가드는 **읽은 뒤**에 있다).
+//
+// 관측: 버퍼에는 '가'(EA B0 80) 3바이트가 있지만 host 는 **len=1** 만 줬다고 한다. 밖을 읽으면
+// 코어가 '가' 를 받고, 그 글자는 안 구워졌으므로 **미스 목록에 뜬다**. 안 읽으면 안 뜬다.
+test "재현: armed 상태에서 host 가 준 길이 밖을 안 읽는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_missing_clear();
+
+    // **ctrl 을 인덱스로 집지 않는다.** 앞선 테스트가 키바를 밀어 놨으면 그 키가 창 밖이라
+    // rect 가 0 이고, 그러면 이 테스트는 재현이 아니라 그냥 못 누른 것이 된다. 보이는 키를
+    // 훑어 **실제로 ctrl 을 무장시키는 키**를 찾는다.
+    keybarScrollToStart();
+    var armed = false;
+    var ki: u32 = 0;
+    while (ki < bridge.maru_mobile_keybar_count()) : (ki += 1) {
+        if (bridge.maru_mobile_keybar_rect(ki) == 0) continue;
+        const k = keyCenter(ki);
+        if (keybarTap(k.x, k.y) == 0) continue;
+        if (bridge.maru_mobile_armed_mods() == 2) {
+            armed = true;
+            break;
+        }
+    }
+    try std.testing.expect(armed);
+
+    // 뒤 두 바이트는 host 가 "안 줬다" 고 말한 자리다.
+    const buf = [_]u8{ 0xEA, 0xB0, 0x80 };
+    _ = bridge.maru_mobile_input(&buf, 1);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(@as(u32, 0), missCount(0xAC00)); // '가' 가 오면 밖을 읽은 것이다
+    bridge.maru_mobile_clear_error();
+}
+
+// **잘못된 UTF-8 은 커밋 전체를 버린다 — 그 사실이 오류로 남아야 한다.**
+//
+// Android IME 가 실제로 이 상황을 만들었다: JNI `GetStringUTFChars` 는 modified UTF-8(CESU-8)
+// 이라 U+1F600 을 서러게이트 쌍 6바이트로 주고, 코어가 write 를 거부하면 **이모지만이 아니라
+// 같이 친 글자까지** 사라진다(사용자에겐 "이모지를 눌렀는데 아무 일도 안 일어난다").
+// **진짜 수정은 host 쪽**이다 — `android_app_host.c` 가 `GetStringChars` 로 UTF-16 을 받아
+// 직접 UTF-8 을 만든다(Zig 에서 못 재현하는 부분이라 여기서는 안 본다).
+//
+// 브리지가 지켜야 하는 것은 하나다: **조용히 사라지지 않는다**(§5). 잘못된 바이트가 오면
+// 버리되 `last_error` 에 남긴다.
+test "재현: 잘못된 UTF-8 은 버리되 오류로 남긴다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_missing_clear();
+
+    // ED A0 BD ED B8 80 = U+1F600 의 CESU-8. 뒤의 'Z' 가 표식이다.
+    const cesu = [_]u8{ 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, 'Z' };
+    _ = bridge.maru_mobile_input(&cesu, cesu.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 표식('Z')까지 사라지는 것이 지금 동작이다 — 그래서 **오류가 반드시 남아야** 한다.
+    const err = std.mem.span(bridge.maru_mobile_last_error());
+    try std.testing.expect(err.len > 0);
+    bridge.maru_mobile_clear_error();
+}
+
+// **복사가 문자 중간에서 잘린다.** `take_copy` 는 바이트로만 자르고 UTF-8 경계를 안 본다.
+// iOS 는 그 조각으로 NSString 을 못 만들어 **클립보드를 아예 안 쓰고**(else 가 없다) 로그도
+// 안 남긴다 — 사용자는 복사된 줄 알고 옛 내용을 붙여넣는다.
+//
+// 관측: 한글을 채우고 3의 배수가 아닌 cap 으로 받아 **결과가 유효한 UTF-8 인지** 본다.
+test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("가나다라마바사아자차", 30);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(2, q.x, q.y, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // copy 키를 눌러 코어가 추출하게 한다. **눌렸는지 단언한다** — 키가 창 밖이면 탭이
+    // 빗나가고 그러면 아래 검사가 통째로 건너뛰어져 **통과가 보장된 테스트**가 된다
+    // (앞 테스트가 키바를 미는 바람에 실제로 한 번 그렇게 됐다).
+    keybarScrollToEnd();
+    const copy_i = bridge.maru_mobile_keybar_count() - 1;
+    const c = keyCenter(copy_i);
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(c.x, c.y));
+
+    var out: [8]u8 = undefined; // 3의 배수가 아니라 한글이면 반드시 중간에서 잘린다
+    const n = bridge.maru_mobile_take_copy(&out, out.len);
+    try std.testing.expect(n > 0); // 추출 자체가 안 됐으면 아래 검사가 무의미하다
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out[0..n]));
     bridge.maru_mobile_clear_error();
 }

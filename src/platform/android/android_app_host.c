@@ -831,29 +831,82 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
 //
 // 조합 중 문자열은 **셸로 보내지 않는다**. 화면에만 흐리게 그릴 겉치레라서, 코어의 입력
 // 경로가 아니라 별도 상태로 둔다(docs/mobile-platform.md §1).
+// **JNI 는 진짜 UTF-8 을 안 준다.** `GetStringUTFChars` 는 modified UTF-8(CESU-8)이라
+// U+1F600 이 F0 9F 98 80 이 아니라 서러게이트 쌍 6바이트(ED A0 BD ED B8 80)로 온다. 그대로
+// 코어에 넣으면 VT 파서가 write **전체**를 거부해 — 이모지만이 아니라 같이 친 글자까지 —
+// 사라진다(사용자에겐 "이모지를 눌렀는데 아무 일도 안 일어난다"). UTF-16 을 직접 받아
+// 서러게이트 쌍을 합쳐 4바이트로 낸다. 돌려주는 값은 쓴 바이트 수.
+static size_t utf16ToUtf8(const jchar *u, jsize n, char *out, size_t cap) {
+    size_t o = 0;
+    for (jsize i = 0; i < n; i++) {
+        unsigned int cp = u[i];
+        // 상위 서러게이트 + 하위 서러게이트 = BMP 밖 한 글자.
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n && u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (u[i + 1] - 0xDC00);
+            i++;
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            // 짝 없는 서러게이트. **조용히 흘리지 않는다** — 넣으면 코어가 커밋 전체를 버린다.
+            LOGI("MARU_INPUT lone_surrogate=%04X", cp);
+            continue;
+        }
+        size_t need = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+        if (o + need > cap) {
+            // **조용히 자르지 않는다.** 여기서 그냥 멈추면 사용자가 붙여넣은 긴 글이 소리
+            // 없이 짧아진다 — 브리지의 `copy_truncated` 와 같은 규율이다.
+            LOGI("MARU_INPUT truncated_at=%zu utf16_left=%d", o, (int)(n - i));
+            break;
+        }
+        if (need == 1) {
+            out[o++] = (char)cp;
+        } else if (need == 2) {
+            out[o++] = (char)(0xC0 | (cp >> 6));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else if (need == 3) {
+            out[o++] = (char)(0xE0 | (cp >> 12));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            out[o++] = (char)(0xF0 | (cp >> 18));
+            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    return o;
+}
+
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeComposing(JNIEnv *env, jclass cls, jstring text) {
     (void)cls;
-    const char *s = text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL;
-    unsigned int n = s ? (unsigned int)strlen(s) : 0;
+    static char buf[512];
+    size_t n = 0;
+    if (text) {
+        const jchar *u = (*env)->GetStringChars(env, text, NULL);
+        if (u) {
+            n = utf16ToUtf8(u, (*env)->GetStringLength(env, text), buf, sizeof buf);
+            (*env)->ReleaseStringChars(env, text, u);
+        }
+    }
     // **UI 스레드다.** 렌더 스레드가 브리지를 읽는 동안 끼어들면 안 된다(파일 위 주석).
     pthread_mutex_lock(&g_bridge_lock);
-    maru_mobile_set_preedit(s ? s : "", n);
+    maru_mobile_set_preedit(buf, (unsigned int)n);
     pthread_mutex_unlock(&g_bridge_lock);
-    if (s) (*env)->ReleaseStringUTFChars(env, text, s);
 }
 
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
     (void)cls;
     if (!text) return;
-    const char *s = (*env)->GetStringUTFChars(env, text, NULL);
-    if (s) {
+    const jchar *u = (*env)->GetStringChars(env, text, NULL);
+    if (u) {
+        static char buf[4096];
+        jsize ulen = (*env)->GetStringLength(env, text);
+        size_t n = utf16ToUtf8(u, ulen, buf, sizeof buf);
+        (*env)->ReleaseStringChars(env, text, u);
         pthread_mutex_lock(&g_bridge_lock);
-        unsigned int total = maru_mobile_input(s, strlen(s));
+        unsigned int total = maru_mobile_input(buf, n);
         pthread_mutex_unlock(&g_bridge_lock);
-        LOGI("MARU_INPUT commit=\"%s\" total=%u", s, total);
-        (*env)->ReleaseStringUTFChars(env, text, s);
+        LOGI("MARU_INPUT commit_bytes=%zu utf16=%d total=%u", n, (int)ulen, total);
     }
 }
 

@@ -1252,6 +1252,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   singleton projection을 결속하고, AppSession의 기존 direct drain caller를 0으로 내린다. queue/budget/backend owner를
   이동하지 않은 sole coordinator drain과 copied/stale/reinstalled-backend mutation 0을 product-type gate로 검증한다.
   e3c2/e3c3의 typed external event·close/mixed outcome과 CR4 actual socket receipt는 이 gate의 증거가 아니다.
+  e3c2는 pointer-free direct-release evidence를 current runtime projection과 exact 비교한 뒤 coordinator가 준비한 final-address receipt를
+  process identity, backend singleton generation, runtime handle/row
+  generation, live current connection generation, incident/job/shell/attempt/runtime identity에 keyed seal로 결속하고 exact
+  `retry_wait_release`에서만 one-shot 소비한다.
+  apply 직전 monotonic clock이 sealed deadline 미만인지 다시 확인한다. copied/self-address rewrite/replay/stale row/expired receipt는
+  reducer mutation 0이며, 실제 host wire가 이 receipt를 발급했다는 증거는 CR4에 남긴다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의

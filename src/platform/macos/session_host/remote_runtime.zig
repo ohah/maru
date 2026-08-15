@@ -806,6 +806,20 @@ const ReconnectProductExecutor = struct {
     }
 };
 
+pub const DirectReleaseProjection = struct {
+    host_id: u128 = 0,
+    host_adapter_generation: u64 = 0,
+    connection_generation: u64 = 0,
+    incident_app_instance_nonce: u128 = 0,
+    incident_sequence: u64 = 0,
+    job_generation: u64 = 0,
+    shell_generation: u64 = 0,
+    attempt: u64 = 0,
+    candidate_connection_generation: u64 = 0,
+    deadline_ns: u64 = 0,
+    runtime_id: [16]u8 = [_]u8{0} ** 16,
+};
+
 /// CR2e-d의 제품 generation owner. 실제 RemoteGeneration을 candidate node의 final address에서
 /// 완성하고 stable screen writer gate 안에서 slot current와 target을 함께 게시한다.
 pub const ReconnectGenerationOwner = struct {
@@ -1171,6 +1185,42 @@ pub const RemoteRuntime = struct {
                 runtime.reconnect_executor.resident_budget_addr != 0 or
                 !std.meta.eql(runtime.reconnect_executor.resident_lease, reconnect_resident_budget.Lease{}))
                 return error.Busy;
+        }
+
+        pub fn directReleaseProjection(runtime: *RemoteRuntime) !DirectReleaseProjection {
+            try runtime.reconnect_executor.validate(&runtime.generation_owner);
+            const admission = runtime.reconnect_executor.admission orelse return error.InvalidAuthority;
+            if (!matchesReconnectAdmission(runtime, admission)) return error.StaleExternalEvent;
+            const retry = switch (runtime.reconnect_executor.state.?.phase) {
+                .retry_wait_release => |value| value,
+                else => return error.IllegalTransition,
+            };
+            return .{
+                .host_id = admission.host_id,
+                .host_adapter_generation = admission.host_adapter_generation,
+                .connection_generation = admission.connection_generation,
+                .incident_app_instance_nonce = admission.incident_id.app_instance_nonce,
+                .incident_sequence = admission.incident_id.sequence,
+                .job_generation = retry.work.job_generation,
+                .shell_generation = retry.work.shell_generation,
+                .attempt = retry.work.attempt,
+                .candidate_connection_generation = retry.work.candidate_connection_generation,
+                .deadline_ns = retry.work.deadline_ns,
+                .runtime_id = retry.runtime_id,
+            };
+        }
+
+        pub fn applyDirectReleaseProjection(
+            runtime: *RemoteRuntime,
+            expected: DirectReleaseProjection,
+        ) !void {
+            const actual = try directReleaseProjection(runtime);
+            if (!std.meta.eql(actual, expected)) return error.StaleExternalEvent;
+            const result = try reconnect_reducer.reduce(runtime.reconnect_executor.state.?, .retry_direct_granted);
+            if (result.decision != .resume_with_direct_grant or
+                reconnectGenerationEffect(result.decision) != .retain)
+                return error.InvalidAuthority;
+            runtime.reconnect_executor.state = result.state;
         }
 
         pub fn frameSummaryReady(runtime: *const RemoteRuntime) bool {
@@ -4155,6 +4205,86 @@ pub const testing_api = if (builtin.is_test) struct {
         runtime.reconnect_executor.resident_budget_addr = 0;
         runtime.reconnect_executor.admission = null;
         runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+    }
+
+    pub fn armDirectReleaseWait(
+        runtime: *RemoteRuntime,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+        admission: reconnect_admission_owner.Projection,
+        runtime_id: [16]u8,
+        deadline_ns: u64,
+    ) !void {
+        try runtime.reconnect_executor.bindAdmission(
+            &runtime.generation_owner,
+            budget,
+            admission,
+            reconnect_resident_budget.max_entry_bytes,
+        );
+        const work: reconnect_reducer.Work = .{
+            .job_generation = admission.incident_id.sequence,
+            .shell_generation = try runtime.generation_owner.currentGeneration(),
+            .attempt = 1,
+            .candidate_connection_generation = admission.connection_generation + 1,
+            .deadline_ns = deadline_ns,
+        };
+        const args = ReconnectGenerationTestArgs{
+            .allocator = runtime.allocator,
+            .stream_id = 0xE3C2,
+        };
+        _ = try runtime.reconnect_executor.apply(
+            &runtime.generation_owner,
+            .{ .begin_prepare = work },
+            args,
+            initReconnectTestGeneration,
+        );
+        inline for (.{
+            reconnect_reducer.Event.observer_staged,
+            reconnect_reducer.Event.begin_mutation_seal,
+            reconnect_reducer.Event.seal_clean,
+            reconnect_reducer.Event.begin_authority_commit,
+            reconnect_reducer.Event.authority_conflict,
+            reconnect_reducer.Event{ .begin_retry_wait_release = .{ .work = work, .runtime_id = runtime_id } },
+        }) |event| _ = try runtime.reconnect_executor.apply(
+            &runtime.generation_owner,
+            event,
+            args,
+            initReconnectTestGeneration,
+        );
+    }
+
+    pub fn resetDirectReleaseFixture(runtime: *RemoteRuntime) void {
+        if (!std.meta.eql(runtime.reconnect_executor.prepared, PreparedReconnect{}))
+            runtime.generation_owner.abort(&runtime.reconnect_executor.prepared) catch
+                @panic("test reconnect candidate abort failed");
+        runtime.reconnect_executor.state = reconnect_reducer.State.initial(
+            runtime.reconnect_executor.admission.?.incident_id.sequence,
+            runtime.generation_owner.currentGeneration() catch @panic("test generation authority lost"),
+        );
+    }
+
+    pub fn directReleaseProjection(runtime: *RemoteRuntime) !DirectReleaseProjection {
+        return RemoteRuntime.backend_api.directReleaseProjection(runtime);
+    }
+
+    pub const DirectReleaseSnapshot = struct {
+        state: reconnect_reducer.State,
+        prepared: PreparedReconnect,
+        admission: reconnect_admission_owner.Projection,
+        admission_seal: process_seal_service.CleanupSeal,
+        resident_budget_addr: usize,
+        resident_lease: reconnect_resident_budget.Lease,
+    };
+
+    pub fn directReleaseSnapshot(runtime: *RemoteRuntime) !DirectReleaseSnapshot {
+        try runtime.reconnect_executor.validate(&runtime.generation_owner);
+        return .{
+            .state = runtime.reconnect_executor.state.?,
+            .prepared = runtime.reconnect_executor.prepared,
+            .admission = runtime.reconnect_executor.admission orelse return error.InvalidAuthority,
+            .admission_seal = runtime.reconnect_executor.admission_seal,
+            .resident_budget_addr = runtime.reconnect_executor.resident_budget_addr,
+            .resident_lease = runtime.reconnect_executor.resident_lease,
+        };
     }
 
     pub const AppQuitOwnerSnapshot = struct {

@@ -145,6 +145,28 @@ pub const SessionHostCoordinatorSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const ExternalReconnectReceiptSealInput = struct {
+    self_addr: u64,
+    coordinator_addr: u64,
+    thread_id: u64,
+    backend_addr: u64,
+    backend_generation: u64,
+    runtime_handle: u64,
+    runtime_generation: u64,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+    incident_app_instance_nonce: u128,
+    incident_sequence: u64,
+    job_generation: u64,
+    shell_generation: u64,
+    attempt: u64,
+    candidate_connection_generation: u64,
+    deadline_ns: u64,
+    runtime_id: [16]u8,
+    lifecycle_raw: u8,
+};
+
 pub const PreparedHostPublicationSealInput = struct {
     self_addr: u64,
     pool_addr: u64,

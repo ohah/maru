@@ -141,6 +141,22 @@ pub const PreparedRetirementCleanupSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PreparedClientReplacementSealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    slot_addr: u64,
+    slot_incarnation: u64,
+    old_node_addr: u64,
+    old_node_incarnation: u64,
+    new_node_addr: u64,
+    new_node_incarnation: u64,
+    expected_connection_generation: u64,
+    next_connection_generation: u64,
+    cleanup_seal: CleanupSeal,
+    candidate_digest: CleanupSeal,
+    lifecycle_raw: u8,
+};
+
 pub const WindowCloseTicketReservationSealInput = struct {
     self_addr: u64,
     backend_addr: u64,

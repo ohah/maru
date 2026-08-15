@@ -28,11 +28,12 @@ test "CR3b R1 경계는 raw Client escape 없이 admission close만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub const PreparedAdmissionClose = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn withCurrent("));
 
-    // R1은 current를 닫기만 한다. 교체·retire·generation 증가는 R2 전까지 제품 경로에 없어야 한다.
-    // 제품 초기화와 같은 모듈의 기존 fixture 여섯 곳만 generation 1을 만든다. R1은 증가·교체 문법을 추가하지 않는다.
-    try std.testing.expectEqual(@as(usize, 7), count(slot, ".connection_generation = 1"));
+    // R1은 current를 닫기만 한다. 후속 R2c의 retired allocation guard inventory는 별도 R2c boundary가
+    // 소유하며, 이 누적 source gate에서는 exact phrase 수만 고정한다.
+    // 제품 초기화와 같은 모듈의 기존 fixture 여섯 곳만 generation 1을 만든다. R1은 증가 문법을 추가하지 않는다.
+    try std.testing.expectEqual(@as(usize, 6), count(slot, ".connection_generation = 1"));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "connection_generation +="));
-    try std.testing.expectEqual(@as(usize, 0), count(slot, "retired_node"));
+    try std.testing.expectEqual(@as(usize, 7), count(slot, "retired_node"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {

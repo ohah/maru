@@ -1,4 +1,4 @@
-//! Heap-pinned generation-1 Client owner used by CR3a-1 HostAdapter migration.
+//! Heap-pinned per-generation Client owner used by CR3a-1 HostAdapter migration and CR3b replacement.
 //!
 //! This module is the only adapter between the transport-neutral cleanup pin and `Client`.  CR3a-1
 //! does not mint product leases or switch generations; it establishes the final-address owner that
@@ -218,6 +218,44 @@ pub const testing = if (builtin.is_test) struct {
             .retirement = slot.current.retirement_lifecycle,
             .placeholder_generation = slot.current.placeholder_generation,
         };
+    }
+
+    /// R3가 제품 reclaim owner를 제공하기 전 R2c fixture만 published old node를 정산한다.
+    pub fn reclaimPublishedRetiredForTest(slot: *ClientSlot) void {
+        if (!slot.valid()) @panic("invalid R2c fixture slot");
+        const retired = slot.retired orelse @panic("missing R2c retired node");
+        if (!slot.retiredNodeValid() or
+            retired.pin_owner.cleanup_pin_count != 0 or retired.pin_owner.active_cleanup != 0 or
+            retired.active_operation_generation != 0 or
+            retired.cleanup_registry.preflightDeinit() != .cleaned or
+            retired.batch_registry.preflightDeinit() != .cleaned or
+            retired.accounting_ledger.preflightDeinit() != .cleaned)
+            @panic("R2c retired fixture was not reclaimable");
+        if (!retired.client.tryDeinitClientSlotExclusiveHeld())
+            @panic("R2c retired fixture Client teardown failed");
+        if (retired.cleanup_registry.tryDeinit() != .cleaned or
+            retired.batch_registry.tryDeinit() != .cleaned)
+            @panic("R2c retired fixture registry teardown failed");
+        retired.pin_owner.state = .terminal;
+        if (retired.accounting_ledger.tryDeinit() != .cleaned)
+            @panic("R2c retired fixture accounting teardown failed");
+        slot.node_allocator.destroy(retired);
+        slot.retired = null;
+    }
+
+    pub fn prepareDetachedCleanupForReplacementForTest(
+        slot: *ClientSlot,
+        admission: *PreparedAdmissionClose,
+        cleanup: *PreparedRetirementCleanup,
+    ) !void {
+        try slot.prepareAdmissionClose(1, admission);
+        try slot.commitAdmissionClose(admission);
+        try slot.prepareRetirementCleanup(admission, 2, cleanup);
+        try slot.preflightRetirementCleanup(admission, cleanup, 2);
+        try slot.preflightRetirementDetach(admission, 1, 2);
+        slot.commitRetirementCleanupNoFail(admission, cleanup, 2);
+        slot.commitRetirementDetachNoFail(admission, 1, 2);
+        try slot.finishRetirementCleanup(cleanup);
     }
 
     pub fn enterExternalMode(slot: *ClientSlot) !void {
@@ -517,6 +555,8 @@ const GenerationGuardedAllocator = struct {
     slot_end: usize,
     source_start: usize,
     source_end: usize,
+    retired_node_start: usize = 0,
+    retired_node_end: usize = 0,
     snapshot_owner_start: usize = 0,
     snapshot_owner_end: usize = 0,
     snapshot_out_start: usize = 0,
@@ -567,6 +607,8 @@ const GenerationGuardedAllocator = struct {
         if (rawRangesOverlap(start, end, self.node_start, self.node_end) or
             rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
             rawRangesOverlap(start, end, self.source_start, self.source_end) or
+            (self.retired_node_start != 0 and
+                rawRangesOverlap(start, end, self.retired_node_start, self.retired_node_end)) or
             client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len) or
             (self.snapshot_guard_active and
                 (rawRangesOverlap(start, end, self.snapshot_owner_start, self.snapshot_owner_end) or
@@ -908,6 +950,27 @@ pub const PreparedRetirementCleanup = struct {
     seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
 };
 
+pub const PreparedClientReplacement = struct {
+    pub const Lifecycle = enum(u8) { pristine, prepared, published, cancelled };
+
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+    slot_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    old_node_addr: usize = 0,
+    old_node_incarnation: u64 = 0,
+    new_node_addr: usize = 0,
+    new_node_incarnation: u64 = 0,
+    expected_connection_generation: u64 = 0,
+    next_connection_generation: u64 = 0,
+    cleanup_seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    candidate_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PreparedClientReplacement.Lifecycle = .pristine,
+    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+};
+
 fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
         @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
@@ -947,6 +1010,17 @@ fn preparedRetirementCleanupLifecycleRawValid(value: *const PreparedRetirementCl
     };
 }
 
+fn preparedClientReplacementLifecycleRawValid(value: *const PreparedClientReplacement.Lifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(PreparedClientReplacement.Lifecycle.pristine),
+        @intFromEnum(PreparedClientReplacement.Lifecycle.prepared),
+        @intFromEnum(PreparedClientReplacement.Lifecycle.published),
+        @intFromEnum(PreparedClientReplacement.Lifecycle.cancelled),
+        => true,
+        else => false,
+    };
+}
+
 fn rpcFreeEvidenceFixture(seed: u64) owner_seal.Digest {
     var writer = owner_seal.Writer.init("maru.rpc-free-evidence.fixture.v1");
     writer.writeU64(seed);
@@ -969,6 +1043,255 @@ fn cr3bR1Client(host_id: u128) client_mod.Client {
         .host_id = host_id,
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
+}
+
+test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 old node를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    var old_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &old_pair),
+    );
+    defer _ = c.close(old_pair[1]);
+    var old_source = cr3bR1Client(0xC3B2C1);
+    old_source.fd = old_pair[0];
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(
+        &slot,
+        std.testing.allocator,
+        &old_source,
+        old_source.host_id,
+        7,
+        .current,
+        &binding_publication,
+    );
+    var slot_live = true;
+    defer if (slot_live) {
+        if (slot.retired != null) testing.reclaimPublishedRetiredForTest(&slot);
+        if (slot.tryDeinit() != .cleaned) @panic("CR3b R2c fixture teardown failed");
+    };
+
+    var admission: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &admission);
+    try slot.commitAdmissionClose(&admission);
+    var cleanup: PreparedRetirementCleanup = .{};
+    try slot.prepareRetirementCleanup(&admission, 2, &cleanup);
+    try slot.preflightRetirementCleanup(&admission, &cleanup, 2);
+    try slot.preflightRetirementDetach(&admission, 1, 2);
+    slot.commitRetirementCleanupNoFail(&admission, &cleanup, 2);
+    slot.commitRetirementDetachNoFail(&admission, 1, 2);
+    try slot.finishRetirementCleanup(&cleanup);
+    const old_node = slot.current;
+
+    var new_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &new_pair),
+    );
+    defer _ = c.close(new_pair[1]);
+    var new_source = cr3bR1Client(0xC3B2C1);
+    new_source.fd = new_pair[0];
+    var source_moved = false;
+    defer if (!source_moved) {
+        _ = c.close(new_pair[0]);
+    };
+    var replacement: PreparedClientReplacement = .{};
+    try slot.prepareClientReplacement(&cleanup, &new_source, &replacement);
+    var replacement_prepared = true;
+    defer if (replacement_prepared) {
+        slot.abortClientReplacement(&replacement) catch
+            @panic("CR3b R2c prepared replacement fallback failed");
+    };
+    source_moved = true;
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), new_source.fd);
+    try std.testing.expectEqual(@as(u64, 1), slot.connectionGeneration());
+    const ReadHost = struct {
+        fn run(_: void, client: *client_mod.Client) u128 {
+            return client.host_id;
+        }
+    };
+    try std.testing.expectError(error.InvalidOwner, slot.withCurrent(1, {}, ReadHost.run));
+
+    slot.publishClientReplacementNoFail(&replacement);
+    replacement_prepared = false;
+    try std.testing.expectEqual(PreparedClientReplacement.Lifecycle.published, replacement.lifecycle);
+    try std.testing.expect(slot.current != old_node);
+    try std.testing.expectEqual(old_node, slot.retired.?);
+    try std.testing.expectEqual(@as(u64, 2), slot.connectionGeneration());
+    try std.testing.expectEqual(@as(u128, 0xC3B2C1), try slot.withCurrent(2, {}, ReadHost.run));
+    const replacement_binding = slot.current.client.incident_binding;
+    try std.testing.expect(incident_binding_contract.validBindingShape(replacement_binding));
+    try std.testing.expectEqual(@intFromPtr(&slot.current.client), replacement_binding.client_addr);
+    try std.testing.expectEqual(@as(u64, 2), replacement_binding.connection_generation);
+    try std.testing.expectEqual(@as(u64, 7), replacement_binding.host_adapter_generation);
+    try std.testing.expect(!std.mem.eql(u8, &binding_publication.binding_seal, &replacement_binding.seal));
+    try std.testing.expectError(error.GenerationMismatch, slot.withCurrent(1, {}, ReadHost.run));
+
+    var attachment: contract.PreparedAttachmentBinding = .{};
+    var attachment_lease: lease_mod.ConnectionLease = .{};
+    const attachment_reservation = try slot.reserveAttachmentBinding(
+        &attachment,
+        &attachment_lease,
+        0xC3B2C1_02,
+        .controller,
+    );
+    var attachment_live = true;
+    defer if (attachment_live) {
+        slot.abortAttachmentBinding(&attachment, attachment_reservation) catch
+            @panic("CR3b R2c generation-2 attachment fallback failed");
+    };
+    try std.testing.expectEqual(@as(u64, 2), attachment_reservation.identity.connection_generation);
+    try std.testing.expectEqual(@as(u64, 2), attachment.identity.?.connection_generation);
+    try slot.abortAttachmentBinding(&attachment, attachment_reservation);
+    attachment_live = false;
+
+    try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
+    try std.testing.expectEqual(RetirementLifecycle.detached, old_node.retirement_lifecycle);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), old_node.client.fd);
+
+    testing.reclaimPublishedRetiredForTest(&slot);
+    try std.testing.expect(slot.retired == null);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+    slot_live = false;
+}
+
+test "CR3b R2c replacement은 copied handle을 거부하고 abort 뒤 old registry를 복구한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var old_source = cr3bR1Client(0xC3B2C2);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &old_source, old_source.host_id);
+    var slot_live = true;
+    defer if (slot_live) {
+        if (slot.retired != null) testing.reclaimPublishedRetiredForTest(&slot);
+        if (slot.tryDeinit() != .cleaned) @panic("CR3b R2c abort fixture teardown failed");
+    };
+
+    var admission: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &admission);
+    try slot.commitAdmissionClose(&admission);
+    var cleanup: PreparedRetirementCleanup = .{};
+    try slot.prepareRetirementCleanup(&admission, 2, &cleanup);
+    try slot.preflightRetirementCleanup(&admission, &cleanup, 2);
+    try slot.preflightRetirementDetach(&admission, 1, 2);
+    slot.commitRetirementCleanupNoFail(&admission, &cleanup, 2);
+    slot.commitRetirementDetachNoFail(&admission, 1, 2);
+    try slot.finishRetirementCleanup(&cleanup);
+    const old_node = slot.current;
+
+    var hostile_source = cr3bR1Client(0xC3B2C2);
+    hostile_source.incident_binding.client_addr = @intFromPtr(&hostile_source);
+    const hostile_before = hostile_source;
+    const slot_before_hostile = slot;
+    var hostile_replacement: PreparedClientReplacement = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.prepareClientReplacement(&cleanup, &hostile_source, &hostile_replacement),
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&hostile_before),
+        std.mem.asBytes(&hostile_source),
+    ));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&slot_before_hostile),
+        std.mem.asBytes(&slot),
+    ));
+    try std.testing.expectEqual(PreparedClientReplacement{}, hostile_replacement);
+
+    var new_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &new_pair),
+    );
+    defer _ = c.close(new_pair[1]);
+    var new_source = cr3bR1Client(0xC3B2C2);
+    new_source.fd = new_pair[0];
+    var new_source_owns_fd = true;
+    defer if (new_source_owns_fd) {
+        _ = c.close(new_pair[0]);
+    };
+    var replacement: PreparedClientReplacement = .{};
+    try slot.prepareClientReplacement(&cleanup, &new_source, &replacement);
+    new_source_owns_fd = false;
+    var replacement_prepared = true;
+    defer if (replacement_prepared) {
+        slot.abortClientReplacement(&replacement) catch
+            @panic("CR3b R2c abort fallback failed");
+    };
+    const old_before = old_node.*;
+    const candidate: *ClientNode = @ptrFromInt(replacement.new_node_addr);
+    const screen_codec_before = candidate.client.screen_codec_version;
+    candidate.client.screen_codec_version +%= 1;
+    try std.testing.expectError(error.InvalidOwner, slot.abortClientReplacement(&replacement));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&old_before),
+        std.mem.asBytes(old_node),
+    ));
+    candidate.client.screen_codec_version = screen_codec_before;
+
+    var copied = replacement;
+    try std.testing.expectError(error.InvalidOwner, slot.abortClientReplacement(&copied));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&old_before),
+        std.mem.asBytes(old_node),
+    ));
+    try std.testing.expectEqual(PreparedClientReplacement.Lifecycle.prepared, replacement.lifecycle);
+
+    try slot.abortClientReplacement(&replacement);
+    replacement_prepared = false;
+    try std.testing.expectEqual(PreparedClientReplacement.Lifecycle.cancelled, replacement.lifecycle);
+    try std.testing.expectEqual(old_node, slot.current);
+    try std.testing.expect(slot.retired == null);
+    try std.testing.expect(slot.valid());
+    try std.testing.expectEqual(@as(u64, 1), slot.connectionGeneration());
+    const ReadHost = struct {
+        fn run(_: void, client: *client_mod.Client) u128 {
+            return client.host_id;
+        }
+    };
+    try std.testing.expectError(error.Closed, slot.withCurrent(1, {}, ReadHost.run));
+
+    slot.current.connection_generation = std.math.maxInt(u64);
+    slot.current.pin_owner.connection_generation = std.math.maxInt(u64);
+    cleanup.expected_connection_generation = std.math.maxInt(u64);
+    cleanup.seal = slot.retirementCleanupSeal(&cleanup);
+    var overflow_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &overflow_pair),
+    );
+    defer {
+        _ = c.close(overflow_pair[0]);
+        _ = c.close(overflow_pair[1]);
+    }
+    var overflow_source = cr3bR1Client(0xC3B2C2);
+    overflow_source.fd = overflow_pair[0];
+    const overflow_source_before = overflow_source;
+    const slot_before_overflow = slot;
+    var overflow_replacement: PreparedClientReplacement = .{};
+    try std.testing.expectError(
+        error.GenerationExhausted,
+        slot.prepareClientReplacement(&cleanup, &overflow_source, &overflow_replacement),
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&slot_before_overflow),
+        std.mem.asBytes(&slot),
+    ));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&overflow_source_before),
+        std.mem.asBytes(&overflow_source),
+    ));
+    try std.testing.expectEqual(PreparedClientReplacement{}, overflow_replacement);
+
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+    slot_live = false;
 }
 
 test "CR3b R1 current borrow는 generation을 확인하고 stack 밖 raw Client를 남기지 않는다" {
@@ -2078,7 +2401,7 @@ fn eventCorrelationInputValid(input: EventCorrelationInput) bool {
         input.identity.owner.slot_incarnation != 0 and
         input.identity.owner.node_incarnation != 0 and
         input.identity.owner.host_id != 0 and
-        input.identity.owner.reservation.identity.connection_generation == 1 and
+        input.identity.owner.reservation.identity.connection_generation != 0 and
         input.identity.owner.reservation.identity.runtime_id != 0 and
         input.identity.owner.pid != 0 and input.identity.owner.process_nonce != 0 and
         input.expected_major != 0 and input.metadata_support_raw <= metadata_max and
@@ -2506,6 +2829,36 @@ fn unregisterClientSlot(expected: ClientSlotRegistryEntry) bool {
         if (entry.live and entry.slot_addr == expected.slot_addr) {
             if (!std.meta.eql(entry.*, expected)) return false;
             entry.* = .{};
+            return true;
+        }
+    }
+    return false;
+}
+
+fn publishClientSlotReplacement(
+    slot: *ClientSlot,
+    expected: ClientSlotRegistryEntry,
+    replacement: ClientSlotRegistryEntry,
+    new_node: *ClientNode,
+) bool {
+    if (!expected.live or expected.ready or !replacement.live or !replacement.ready or
+        expected.slot_addr != replacement.slot_addr or
+        expected.slot_incarnation != replacement.slot_incarnation or
+        expected.owner_thread_incarnation != replacement.owner_thread_incarnation or
+        expected.node_addr == replacement.node_addr or
+        expected.node_incarnation == replacement.node_incarnation)
+        return false;
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (&client_slot_registry) |*entry| {
+        if (entry.live and entry.slot_addr == expected.slot_addr) {
+            if (!std.meta.eql(entry.*, expected)) return false;
+            if (slot.current != @as(*ClientNode, @ptrFromInt(expected.node_addr)) or
+                slot.retired != null or new_node != @as(*ClientNode, @ptrFromInt(replacement.node_addr)))
+                return false;
+            slot.retired = slot.current;
+            slot.current = new_node;
+            entry.* = replacement;
             return true;
         }
     }
@@ -4092,7 +4445,7 @@ fn beginGenerationRequestOwner(
     const identity = request.reservation.identity;
     if (!identity.valid() or identity.slot_incarnation != request.slot_incarnation or
         identity.node_incarnation != request.node_incarnation or identity.host_id != request.host_id or
-        identity.connection_generation != 1 or identity.pid != request.pid or
+        identity.connection_generation != node.connection_generation or identity.pid != request.pid or
         identity.process_nonce != request.process_nonce or node.client.host_id != request.host_id)
         return error.InvalidOwner;
     const owner = node.cleanup_registry.transportOwnerSeal(
@@ -4141,7 +4494,7 @@ pub fn projectGenerationCapabilities(
     const identity = request.reservation.identity;
     if (identity.slot_incarnation != request.slot_incarnation or
         identity.node_incarnation != request.node_incarnation or
-        identity.host_id != request.host_id or identity.connection_generation != 1 or
+        identity.host_id != request.host_id or identity.connection_generation != node.connection_generation or
         identity.pid != request.pid or identity.process_nonce != request.process_nonce)
         return error.InvalidOwner;
     const binding_owner_seal = node.cleanup_registry.transportOwnerSeal(
@@ -11254,6 +11607,7 @@ pub const ClientSlot = struct {
 
     self_addr: usize,
     current: *ClientNode,
+    retired: ?*ClientNode = null,
     node_allocator: std.mem.Allocator,
     incarnation: lease_mod.Identity,
     pid: u32,
@@ -11483,7 +11837,7 @@ pub const ClientSlot = struct {
         node.active_operation_owner_thread_incarnation = 0;
         node.active_operation_owner_addr = 0;
         node.active_operation_transport_incarnation = 0;
-        node.active_operation_binding = undefined;
+        node.active_operation_binding = std.mem.zeroes(contract.BindingIdentity);
         node.rpc_free_evidence = .{};
         node.connection_generation = 1;
         node.admission_lifecycle = .open;
@@ -11655,14 +12009,32 @@ pub const ClientSlot = struct {
             self.current.pin_owner.slot_incarnation == self.incarnation.tagged and
             self.current.pin_owner.node_incarnation == self.current.incarnation.tagged and
             self.current.pin_owner.host_id == self.current.client.host_id and
-            self.current.pin_owner.connection_generation == 1 and
+            self.current.pin_owner.connection_generation == self.current.connection_generation and
             self.current.pin_owner.pid == self.pid and
             self.current.pin_owner.process_nonce == self.process_nonce and
             self.current.cleanup_registry.self_addr == @intFromPtr(&self.current.cleanup_registry) and
             self.current.cleanup_registry.incarnation == self.current.incarnation.tagged and
             self.current.batch_registry.self_addr == @intFromPtr(&self.current.batch_registry) and
             self.current.batch_registry.incarnation == self.current.incarnation.tagged and
-            self.current.accounting_ledger.matchesClient(@intFromPtr(&self.current.client));
+            self.current.accounting_ledger.matchesClient(@intFromPtr(&self.current.client)) and
+            (self.retired == null or self.retiredNodeValid());
+    }
+
+    fn retiredNodeValid(self: *const ClientSlot) bool {
+        const node = self.retired orelse return false;
+        return node != self.current and node.incarnation.kind() == .node and
+            node.connection_generation != 0 and
+            node.connection_generation < self.current.connection_generation and
+            node.admission_lifecycle == .closed and
+            node.retirement_lifecycle == .detached and node.placeholder_generation != 0 and
+            node.client.fd == -1 and node.client.pending_outbound == null and node.client.unusable and
+            node.pin_owner.self_addr == @intFromPtr(&node.pin_owner) and
+            node.pin_owner.slot_addr == @intFromPtr(self) and
+            node.pin_owner.node_addr == @intFromPtr(node) and
+            node.pin_owner.slot_incarnation == self.incarnation.tagged and
+            node.pin_owner.node_incarnation == node.incarnation.tagged and
+            node.pin_owner.connection_generation == node.connection_generation and
+            node.pin_owner.pid == self.pid and node.pin_owner.process_nonce == self.process_nonce;
     }
 
     pub fn reserveAttachmentBinding(
@@ -11703,7 +12075,7 @@ pub const ClientSlot = struct {
             .slot_incarnation = self.incarnation.tagged,
             .node_incarnation = self.current.incarnation.tagged,
             .host_id = self.current.client.host_id,
-            .connection_generation = 1,
+            .connection_generation = self.current.connection_generation,
             .runtime_id = runtime_id,
             .role = role,
             .pid = self.pid,
@@ -11973,6 +12345,141 @@ pub const ClientSlot = struct {
             return false;
         const expected = self.retirementCleanupSeal(cleanup);
         return std.mem.eql(u8, &expected, &cleanup.seal);
+    }
+
+    fn consumedRetirementCleanupValid(
+        self: *const ClientSlot,
+        cleanup: *const PreparedRetirementCleanup,
+    ) bool {
+        if (!preparedRetirementCleanupLifecycleRawValid(&cleanup.lifecycle) or
+            !self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            cleanup.self_addr != @intFromPtr(cleanup) or cleanup.pid != self.pid or
+            cleanup.process_nonce != self.process_nonce or
+            cleanup.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            cleanup.slot_addr != @intFromPtr(self) or cleanup.slot_incarnation != self.incarnation.tagged or
+            cleanup.current_node_addr != @intFromPtr(self.current) or
+            cleanup.current_node_incarnation != self.current.incarnation.tagged or
+            cleanup.expected_connection_generation != self.current.connection_generation or
+            cleanup.admission_request_generation == 0 or cleanup.placeholder_generation == 0 or
+            cleanup.allocator_ptr != 0 or cleanup.allocator_vtable != 0 or cleanup.fd != -1 or
+            cleanup.pending_frame_addr != 0 or cleanup.pending_frame_len != 0 or
+            cleanup.pending_stream_id != 0 or cleanup.pending_offset != 0 or
+            cleanup.external_deinit_reserved_raw != 0 or cleanup.lifecycle != .consumed)
+            return false;
+        const expected = self.retirementCleanupSeal(cleanup);
+        return std.mem.eql(u8, &expected, &cleanup.seal);
+    }
+
+    fn clientReplacementSeal(
+        self: *const ClientSlot,
+        prepared: *const PreparedClientReplacement,
+    ) process_seal_service.CleanupSeal {
+        return process_seal_service.preparedClientReplacementSeal(self.pid, self.process_nonce, .{
+            .self_addr = @intCast(prepared.self_addr),
+            .thread_id = prepared.owner_thread_incarnation,
+            .slot_addr = @intCast(prepared.slot_addr),
+            .slot_incarnation = prepared.slot_incarnation,
+            .old_node_addr = @intCast(prepared.old_node_addr),
+            .old_node_incarnation = prepared.old_node_incarnation,
+            .new_node_addr = @intCast(prepared.new_node_addr),
+            .new_node_incarnation = prepared.new_node_incarnation,
+            .expected_connection_generation = prepared.expected_connection_generation,
+            .next_connection_generation = prepared.next_connection_generation,
+            .cleanup_seal = prepared.cleanup_seal,
+            .candidate_digest = prepared.candidate_digest,
+            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+        }) catch @panic("CR3b R2c client replacement seal service unavailable");
+    }
+
+    fn bindReplacementIncidentIdentityNoFail(
+        self: *const ClientSlot,
+        old: *const client_mod.Client,
+        replacement: *client_mod.Client,
+        next_connection_generation: u64,
+    ) void {
+        const old_binding = old.incident_binding;
+        if (std.mem.allEqual(u8, std.mem.asBytes(&old_binding), 0)) {
+            if (!std.mem.allEqual(u8, std.mem.asBytes(&replacement.incident_binding), 0))
+                @panic("unmanaged replacement carried incident binding authority");
+            return;
+        }
+        if (!incident_binding_contract.validBindingShape(old_binding) or
+            old_binding.client_addr != @intFromPtr(old) or
+            old_binding.host_id != replacement.host_id or
+            old_binding.connection_generation != self.current.connection_generation or
+            !std.mem.allEqual(u8, std.mem.asBytes(&replacement.incident_binding), 0))
+            @panic("replacement incident binding precondition drifted");
+        var binding = old_binding;
+        binding.client_addr = @intFromPtr(replacement);
+        binding.connection_generation = next_connection_generation;
+        binding.wire_major = replacement.wire_major;
+        binding.seal = process_seal_service.incidentBindingSeal(self.pid, self.process_nonce, .{
+            .client_addr = binding.client_addr,
+            .host_id = binding.host_id,
+            .host_adapter_generation = binding.host_adapter_generation,
+            .connection_generation = binding.connection_generation,
+            .wire_major = binding.wire_major,
+            .host_class_raw = binding.host_class_raw,
+        }) catch @panic("replacement incident binding seal unavailable");
+        replacement.incident_binding = binding;
+    }
+
+    fn replacementIncidentIdentityPreflight(
+        self: *const ClientSlot,
+        source: *const client_mod.Client,
+    ) bool {
+        if (!std.mem.allEqual(u8, std.mem.asBytes(&source.incident_binding), 0)) return false;
+        const old = &self.current.client;
+        const binding = old.incident_binding;
+        if (std.mem.allEqual(u8, std.mem.asBytes(&binding), 0)) return true;
+        if (!incident_binding_contract.validBindingShape(binding) or
+            binding.client_addr != @intFromPtr(old) or binding.host_id != old.host_id or
+            binding.connection_generation != self.current.connection_generation or
+            binding.wire_major != old.wire_major)
+            return false;
+        const expected = process_seal_service.incidentBindingSeal(self.pid, self.process_nonce, .{
+            .client_addr = binding.client_addr,
+            .host_id = binding.host_id,
+            .host_adapter_generation = binding.host_adapter_generation,
+            .connection_generation = binding.connection_generation,
+            .wire_major = binding.wire_major,
+            .host_class_raw = binding.host_class_raw,
+        }) catch return false;
+        return std.crypto.timing_safe.eql(process_seal_service.CleanupSeal, expected, binding.seal);
+    }
+
+    fn preparedClientReplacementValid(
+        self: *const ClientSlot,
+        prepared: *const PreparedClientReplacement,
+        lifecycle: PreparedClientReplacement.Lifecycle,
+    ) bool {
+        if (!preparedClientReplacementLifecycleRawValid(&prepared.lifecycle) or
+            !self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            prepared.self_addr != @intFromPtr(prepared) or prepared.pid != self.pid or
+            prepared.process_nonce != self.process_nonce or
+            prepared.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            prepared.slot_addr != @intFromPtr(self) or
+            prepared.slot_incarnation != self.incarnation.tagged or
+            prepared.old_node_addr != @intFromPtr(self.current) or
+            prepared.old_node_incarnation != self.current.incarnation.tagged or
+            prepared.new_node_addr == 0 or prepared.new_node_incarnation == 0 or
+            prepared.expected_connection_generation != self.current.connection_generation or
+            prepared.next_connection_generation == 0 or
+            prepared.next_connection_generation <= prepared.expected_connection_generation or
+            std.mem.allEqual(u8, &prepared.cleanup_seal, 0) or
+            std.mem.allEqual(u8, &prepared.candidate_digest, 0) or prepared.lifecycle != lifecycle)
+            return false;
+        const expected = self.clientReplacementSeal(prepared);
+        return std.crypto.timing_safe.eql(process_seal_service.CleanupSeal, expected, prepared.seal);
+    }
+
+    fn clientReplacementCandidateDigest(node: *const ClientNode) owner_seal.Digest {
+        // The candidate is unpublished and has no concurrent reader. Hashing its complete
+        // process-local backing closes raw-address mutation of Client semantics, registries,
+        // fence bindings, and generation authority between prepare and publish/abort.
+        var writer = owner_seal.Writer.init("maru.client-replacement-candidate.v1");
+        writer.writeBytes(std.mem.asBytes(node));
+        return writer.finish();
     }
 
     /// 현재 Client 주소는 이 함수의 stack frame 밖으로 반환하지 않는다. 제품 facade는 닫힌 operation만 callback으로 전달한다.
@@ -12378,6 +12885,287 @@ pub const ClientSlot = struct {
         cleanup.seal = self.retirementCleanupSeal(cleanup);
     }
 
+    pub const ClientReplacementError = error{
+        InvalidOwner,
+        Busy,
+        GenerationMismatch,
+        GenerationExhausted,
+        IdentityExhausted,
+        OutOfMemory,
+        AliasedAllocation,
+    };
+
+    pub fn prepareClientReplacement(
+        self: *ClientSlot,
+        cleanup: *const PreparedRetirementCleanup,
+        source: *client_mod.Client,
+        out: *PreparedClientReplacement,
+    ) ClientReplacementError!void {
+        if (!self.consumedRetirementCleanupValid(cleanup) or self.retired != null or
+            !std.meta.eql(out.*, PreparedClientReplacement{}) or
+            source.host_id == 0 or source.host_id != self.current.client.host_id or
+            source.fd < 0 or source.unusable or
+            !source.canMoveToGenerationNode() or !self.replacementIncidentIdentityPreflight(source) or
+            rangesOverlapTyped(source, self) or
+            rangesOverlapTyped(source, self.current) or rangesOverlapTyped(source, cleanup) or
+            rangesOverlapTyped(source, out) or rangesOverlapTyped(out, self) or
+            rangesOverlapTyped(out, self.current) or rangesOverlapTyped(out, cleanup))
+            return error.InvalidOwner;
+        const expected_generation = self.current.connection_generation;
+        const next_generation = std.math.add(u64, expected_generation, 1) catch
+            return error.GenerationExhausted;
+        if (next_generation == 0) return error.GenerationExhausted;
+
+        const issuer = productionIssuer() catch return error.InvalidOwner;
+        const node_identity = issuer.reserve(.node, self.pid) catch |err| return switch (err) {
+            error.IdentityExhausted => error.IdentityExhausted,
+            error.ProcessDomainMismatch => error.InvalidOwner,
+        };
+        const node = self.node_allocator.create(ClientNode) catch return error.OutOfMemory;
+        var node_destroyable = false;
+        errdefer if (node_destroyable) self.node_allocator.destroy(node);
+        const node_start = @intFromPtr(node);
+        const node_end = std.math.add(usize, node_start, @sizeOf(ClientNode)) catch
+            return error.AliasedAllocation;
+        const source_start = @intFromPtr(source);
+        const source_end = std.math.add(usize, source_start, @sizeOf(client_mod.Client)) catch
+            return error.AliasedAllocation;
+        const slot_start = @intFromPtr(self);
+        const slot_end = std.math.add(usize, slot_start, @sizeOf(ClientSlot)) catch
+            return error.AliasedAllocation;
+        const old_start = @intFromPtr(self.current);
+        const old_end = std.math.add(usize, old_start, @sizeOf(ClientNode)) catch
+            return error.AliasedAllocation;
+        const cleanup_start = @intFromPtr(cleanup);
+        const cleanup_end = std.math.add(usize, cleanup_start, @sizeOf(PreparedRetirementCleanup)) catch
+            return error.AliasedAllocation;
+        const out_start = @intFromPtr(out);
+        const out_end = std.math.add(usize, out_start, @sizeOf(PreparedClientReplacement)) catch
+            return error.AliasedAllocation;
+        if (rawRangesOverlap(node_start, node_end, source_start, source_end) or
+            rawRangesOverlap(node_start, node_end, slot_start, slot_end) or
+            rawRangesOverlap(node_start, node_end, old_start, old_end) or
+            rawRangesOverlap(node_start, node_end, cleanup_start, cleanup_end) or
+            rawRangesOverlap(node_start, node_end, out_start, out_end))
+        {
+            if (!recordAliasQuarantine()) @panic("Client replacement alias quarantine exhausted");
+            return error.AliasedAllocation;
+        }
+        node_destroyable = true;
+
+        const reserved = self.beginRegisteredExclusiveTeardown() catch |err| return switch (err) {
+            error.AdminBusy => error.Busy,
+            error.MovedOrCopied => error.InvalidOwner,
+        };
+        var old_reserved = true;
+        errdefer if (old_reserved) self.abortRegisteredExclusiveTeardown(reserved);
+        if (reserved.node != self.current or self.retired != null or
+            reserved.node.retirement_lifecycle != .detached or
+            reserved.node.placeholder_generation != cleanup.placeholder_generation or
+            reserved.node.client.fd != -1 or reserved.node.client.pending_outbound != null or
+            !reserved.node.client.unusable)
+            return error.InvalidOwner;
+
+        // All fallible work is complete. The candidate becomes a fully formed final-address node,
+        // while the old registry row stays closed until publish or abort settles this handle.
+        node.cleanup_registry = .{};
+        cleanup_registry_mod.AttachmentCleanupRegistry.initInPlace(
+            &node.cleanup_registry,
+            node_identity.tagged,
+        ) catch unreachable;
+        node.batch_registry = .{};
+        batch_registry_mod.Registry.initInPlace(&node.batch_registry, node_identity.tagged) catch unreachable;
+        node.accounting_ledger = .{};
+        batch_registry_mod.AccountingLedger.initInPlace(&node.accounting_ledger) catch unreachable;
+        node.next_operation_generation = 1;
+        node.active_operation_generation = 0;
+        node.active_operation_kind = .none;
+        node.active_operation_owner_thread_incarnation = 0;
+        node.active_operation_owner_addr = 0;
+        node.active_operation_transport_incarnation = 0;
+        node.active_operation_binding = std.mem.zeroes(contract.BindingIdentity);
+        node.rpc_free_evidence = .{};
+        node.connection_generation = next_generation;
+        node.admission_lifecycle = .open;
+        node.stack_borrows = 0;
+        node.next_admission_close_request_generation = 1;
+        node.retirement_lifecycle = .live;
+        node.placeholder_generation = 0;
+        node.guarded_allocator = .{
+            .parent = source.allocator,
+            .node_start = node_start,
+            .node_end = node_end,
+            .slot_start = slot_start,
+            .slot_end = slot_end,
+            .source_start = source_start,
+            .source_end = source_end,
+            .retired_node_start = old_start,
+            .retired_node_end = old_end,
+        };
+        source.moveToGenerationNode(&node.client);
+        self.bindReplacementIncidentIdentityNoFail(
+            &self.current.client,
+            &node.client,
+            next_generation,
+        );
+        client_mod.ClientOperationFence.initInPlace(
+            &node.operation_fence,
+            @intFromPtr(&node.client),
+            self.pid,
+            self.process_nonce,
+            self.incarnation.tagged,
+            node_identity.tagged,
+            node_identity.tagged,
+        );
+        if (!node.client.bindOperationFence(&node.operation_fence, node_identity.tagged))
+            @panic("replacement Client operation fence binding failed");
+        node.guarded_allocator.client = &node.client;
+        node.client.bindGenerationAccountingLedger(&node.accounting_ledger) catch unreachable;
+        node.incarnation = node_identity;
+        lease_mod.PinOwner.initInPlaceForGeneration(
+            &node.pin_owner,
+            @intFromPtr(self),
+            node_start,
+            self.incarnation,
+            node_identity,
+            node.client.host_id,
+            next_generation,
+            self.pid,
+            self.process_nonce,
+        );
+        const candidate_digest = clientReplacementCandidateDigest(node);
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = self.incarnation.tagged,
+            .old_node_addr = old_start,
+            .old_node_incarnation = self.current.incarnation.tagged,
+            .new_node_addr = node_start,
+            .new_node_incarnation = node_identity.tagged,
+            .expected_connection_generation = expected_generation,
+            .next_connection_generation = next_generation,
+            .cleanup_seal = cleanup.seal,
+            .candidate_digest = candidate_digest,
+            .lifecycle = .prepared,
+        };
+        out.seal = self.clientReplacementSeal(out);
+        old_reserved = false;
+        node_destroyable = false;
+    }
+
+    pub fn abortClientReplacement(
+        self: *ClientSlot,
+        prepared: *PreparedClientReplacement,
+    ) ClientReplacementError!void {
+        if (!self.preparedClientReplacementValid(prepared, .prepared)) return error.InvalidOwner;
+        const candidate: *ClientNode = @ptrFromInt(prepared.new_node_addr);
+        const candidate_digest = clientReplacementCandidateDigest(candidate);
+        if (!std.crypto.timing_safe.eql(owner_seal.Digest, candidate_digest, prepared.candidate_digest) or
+            candidate.incarnation.tagged != prepared.new_node_incarnation or
+            candidate.connection_generation != prepared.next_connection_generation or
+            candidate.admission_lifecycle != .open or candidate.retirement_lifecycle != .live or
+            candidate.placeholder_generation != 0)
+            return error.InvalidOwner;
+        // The unpublished candidate has no external borrower that could make Busy recoverable.
+        // Once canonical authority reaches this suffix, losing exclusive teardown proof would
+        // strand both the candidate and the old closed registry row, so fail closed.
+        candidate.client.tryAcquireClientSlotTeardownExclusive() catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        if (!candidate.client.tryDeinitClientSlotExclusiveHeld())
+            process_seal_service.fatalIntegrity(.proof_loss);
+        switch (candidate.cleanup_registry.tryDeinit()) {
+            .cleaned => {},
+            else => @panic("replacement cleanup registry abort drifted"),
+        }
+        switch (candidate.batch_registry.tryDeinit()) {
+            .cleaned => {},
+            else => @panic("replacement batch registry abort drifted"),
+        }
+        candidate.pin_owner.state = .terminal;
+        switch (candidate.accounting_ledger.tryDeinit()) {
+            .cleaned => {},
+            else => @panic("replacement accounting abort drifted"),
+        }
+        self.node_allocator.destroy(candidate);
+        self.abortRegisteredExclusiveTeardown(.{
+            .registry_entry = .{
+                .live = true,
+                .ready = false,
+                .slot_addr = @intFromPtr(self),
+                .node_addr = prepared.old_node_addr,
+                .slot_incarnation = self.incarnation.tagged,
+                .node_incarnation = prepared.old_node_incarnation,
+                .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+            },
+            .node = self.current,
+        });
+        prepared.lifecycle = .cancelled;
+        prepared.seal = self.clientReplacementSeal(prepared);
+    }
+
+    pub fn publishClientReplacementNoFail(
+        self: *ClientSlot,
+        prepared: *PreparedClientReplacement,
+    ) void {
+        if (!self.preparedClientReplacementValid(prepared, .prepared))
+            @panic("CR3b R2c replacement authority drifted before publication");
+        const candidate: *ClientNode = @ptrFromInt(prepared.new_node_addr);
+        const candidate_digest = clientReplacementCandidateDigest(candidate);
+        if (!std.crypto.timing_safe.eql(owner_seal.Digest, candidate_digest, prepared.candidate_digest) or
+            candidate.incarnation.tagged != prepared.new_node_incarnation or
+            candidate.connection_generation != prepared.next_connection_generation or
+            candidate.admission_lifecycle != .open or candidate.retirement_lifecycle != .live or
+            candidate.placeholder_generation != 0 or candidate.client.host_id != self.current.client.host_id or
+            candidate.client.fd < 0 or candidate.client.unusable)
+            @panic("CR3b R2c replacement candidate drifted before publication");
+        const expected: ClientSlotRegistryEntry = .{
+            .live = true,
+            .ready = false,
+            .slot_addr = @intFromPtr(self),
+            .node_addr = prepared.old_node_addr,
+            .slot_incarnation = self.incarnation.tagged,
+            .node_incarnation = prepared.old_node_incarnation,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+        };
+        const replacement: ClientSlotRegistryEntry = .{
+            .live = true,
+            .ready = true,
+            .slot_addr = @intFromPtr(self),
+            .node_addr = prepared.new_node_addr,
+            .slot_incarnation = self.incarnation.tagged,
+            .node_incarnation = prepared.new_node_incarnation,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+        };
+        if (!publishClientSlotReplacement(self, expected, replacement, candidate))
+            @panic("CR3b R2c registry/current atomic publication drifted");
+        prepared.lifecycle = .published;
+        prepared.seal = self.clientReplacementSealAfterPublish(prepared);
+    }
+
+    fn clientReplacementSealAfterPublish(
+        self: *const ClientSlot,
+        prepared: *const PreparedClientReplacement,
+    ) process_seal_service.CleanupSeal {
+        return process_seal_service.preparedClientReplacementSeal(self.pid, self.process_nonce, .{
+            .self_addr = @intCast(prepared.self_addr),
+            .thread_id = prepared.owner_thread_incarnation,
+            .slot_addr = @intCast(prepared.slot_addr),
+            .slot_incarnation = prepared.slot_incarnation,
+            .old_node_addr = @intCast(prepared.old_node_addr),
+            .old_node_incarnation = prepared.old_node_incarnation,
+            .new_node_addr = @intCast(prepared.new_node_addr),
+            .new_node_incarnation = prepared.new_node_incarnation,
+            .expected_connection_generation = prepared.expected_connection_generation,
+            .next_connection_generation = prepared.next_connection_generation,
+            .cleanup_seal = prepared.cleanup_seal,
+            .candidate_digest = prepared.candidate_digest,
+            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+        }) catch @panic("CR3b R2c published replacement seal service unavailable");
+    }
+
     pub const RetirementDetachError = error{
         InvalidOwner,
         InvalidGeneration,
@@ -12665,7 +13453,7 @@ pub const ClientSlot = struct {
             binding.slot_incarnation != self.incarnation.tagged or
             binding.node_incarnation != self.current.incarnation.tagged or
             binding.host_id != self.current.client.host_id or
-            binding.connection_generation != 1 or binding.pid != self.pid or
+            binding.connection_generation != self.current.connection_generation or binding.pid != self.pid or
             binding.process_nonce != self.process_nonce)
             return error.InvalidStreamOperationPermit;
         if (batch_release_callback_active or self.current.active_operation_generation != 0 or
@@ -13385,6 +14173,7 @@ pub const ClientSlot = struct {
             self.abortRegisteredExclusiveTeardown(reserved_registry_entry);
         const node = reserved_registry_entry.node;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
+        if (self.retired != null) return .busy;
         if (batch_release_callback_active) return .busy;
         if (self.generationAllocatorCallbackActive()) return .busy;
         if (node.active_operation_generation != 0) return .busy;

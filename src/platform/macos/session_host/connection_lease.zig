@@ -110,6 +110,31 @@ pub const PinOwner = struct {
         pid: u32,
         process_nonce: u64,
     ) void {
+        initInPlaceForGeneration(
+            out,
+            slot_addr,
+            node_addr,
+            slot_incarnation,
+            node_incarnation,
+            host_id,
+            1,
+            pid,
+            process_nonce,
+        );
+    }
+
+    pub fn initInPlaceForGeneration(
+        out: *PinOwner,
+        slot_addr: usize,
+        node_addr: usize,
+        slot_incarnation: Identity,
+        node_incarnation: Identity,
+        host_id: u128,
+        connection_generation: u64,
+        pid: u32,
+        process_nonce: u64,
+    ) void {
+        std.debug.assert(connection_generation != 0);
         out.* = .{
             .self_addr = @intFromPtr(out),
             .slot_addr = slot_addr,
@@ -117,6 +142,7 @@ pub const PinOwner = struct {
             .slot_incarnation = slot_incarnation.tagged,
             .node_incarnation = node_incarnation.tagged,
             .host_id = host_id,
+            .connection_generation = connection_generation,
             .pid = pid,
             .process_nonce = process_nonce,
         };
@@ -131,7 +157,7 @@ pub const PinOwner = struct {
             (Identity{ .tagged = self.slot_incarnation }).kind() == .slot and
             (Identity{ .tagged = self.node_incarnation }).kind() == .node and
             self.host_id != 0 and
-            self.connection_generation == 1 and
+            self.connection_generation != 0 and
             self.pid == current_pid and
             self.process_nonce != 0;
     }

@@ -13,6 +13,7 @@
 //! (control_server), `browser.*`(control_browser). wire 스키마는 소켓과 동일 JSON-RPC 2.0(§8.1 "메시지 스키마 하나").
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cp = @import("control_plane.zig");
 const file_policy = @import("file_panel_bridge.zig");
 const mermaid_protocol = @import("mermaid_protocol.zig");
@@ -1163,11 +1164,20 @@ test "dispatchBridge: 아직 읽는 중이면 pending을 준다(빈 문서가 �
     try testing.expect(result.get("original") == null);
 }
 
+/// 테스트 전용 단조 시계(ms). Zig 0.16 `std.time`은 상수만 주고 `Timer`·`nanoTimestamp`가 없어 OS별로 직접 부른다
+/// (`platform/macos/app_session.monotonicMs`와 같은 관례). POSIX는 `clock_gettime(.MONOTONIC)`, Windows는 kernel32
+/// `GetTickCount64`(부팅 후 ms 단조)다 — 아래 측정 테스트는 **상한만** 보므로 두 시계의 해상도 차이는 무해하다.
+/// 이 분기가 없으면 POSIX 시그니처가 Windows에서 안 맞아 **L2 session 모듈 전체가 컴파일되지 않는다**(실측).
 fn monotonicMs() u64 {
+    if (builtin.os.tag == .windows) return GetTickCount64();
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
+
+// Zig 0.16 std.os.windows엔 GetTickCount64 바인딩이 없어 직접 extern 선언한다(같은 파일의 POSIX extern 관례).
+// windows 분기에서만 참조되므로 다른 타깃에선 분석·링크되지 않는다.
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 
 // [측정] diff 본문은 **양쪽 합 최대 16 MiB**를 브리지로 넘긴다(diff_payload.max_side_bytes × 2). 그 직렬화 비용이
 // 얼마인지 모른 채 상한을 올리면 "열리긴 하는데 앱이 멎는" 상태를 만들 수 있다. 여기서 그 비용을 실제로 재고,

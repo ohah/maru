@@ -211,27 +211,33 @@ fn computeRows(self: *AppSession, entry: *dock_panel.Entry, st: *State) void {
         return;
     };
     if (st.view != .compare) return;
-    materialize(self, st) catch {
+    materialize(self.allocator, st) catch {
         st.view.compare.deinit(self.allocator);
         st.view = .{ .unavailable = .unknown };
     };
 }
 
 /// 행 배열을 **화면이 받는 모양**으로 한 번 옮겨 담는다.
-fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
+fn materialize(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!void {
     const rows = st.view.compare;
-    const lt = try self.allocator.alloc([]const u8, rows.left.len);
-    errdefer self.allocator.free(lt);
-    const rt = try self.allocator.alloc([]const u8, rows.right.len);
-    errdefer self.allocator.free(rt);
-    const ln = try self.allocator.alloc(?u32, rows.left.len);
-    errdefer self.allocator.free(ln);
-    const rn = try self.allocator.alloc(?u32, rows.right.len);
-    errdefer self.allocator.free(rn);
-    const lb = try self.allocator.alloc(chrome_editor.frame.RowBand, rows.left.len);
-    errdefer self.allocator.free(lb);
-    const rb = try self.allocator.alloc(chrome_editor.frame.RowBand, rows.right.len);
-    errdefer self.allocator.free(rb);
+    // **잡자마자 `st`에 넘기고 errdefer를 두지 않는다.** 넘긴 뒤에도 errdefer가 살아 있으면, 뒤에서
+    // 실패했을 때 여기서 한 번 풀고 `invalidate`가 또 푼다 — **이중 해제**다. 아래 `computeMarks`가
+    // 실패하는 경우가 정확히 그것이고, 할당 실패 주입 테스트가 `Double free detected`로 잡았다.
+    // 실패해도 `st`가 들고 있으므로 `invalidate`가 정확히 한 번 푼다.
+    const lt = try allocator.alloc([]const u8, rows.left.len);
+    st.left_texts = lt;
+    const rt = try allocator.alloc([]const u8, rows.right.len);
+    st.right_texts = rt;
+    const ln = try allocator.alloc(?u32, rows.left.len);
+    st.left_numbers = ln;
+    const rn = try allocator.alloc(?u32, rows.right.len);
+    st.right_numbers = rn;
+    const lb = try allocator.alloc(chrome_editor.frame.RowBand, rows.left.len);
+    st.left_bands = lb;
+    const rb = try allocator.alloc(chrome_editor.frame.RowBand, rows.right.len);
+    st.right_bands = rb;
+    // **여기서부터 내용을 채운다.** 위 배열은 아직 쓰레기값이지만 길이가 맞고, 실패 경로에서는
+    // 해제만 하므로(내용을 읽지 않는다) 안전하다.
     for (rows.left, 0..) |r, i| {
         lt[i] = displayText(r.text);
         ln[i] = r.line;
@@ -243,15 +249,8 @@ fn materialize(self: *AppSession, st: *State) error{OutOfMemory}!void {
         rn[i] = r.line;
         rb[i] = if (r.kind == .added) .added else .none;
     }
-    st.left_texts = lt;
-    st.right_texts = rt;
-    st.left_numbers = ln;
-    st.right_numbers = rn;
-    st.left_bands = lb;
-    st.right_bands = rb;
-
     // 문자 단위 강조는 **줄 대응이 끝난 뒤**에 온다(§7 경계 규칙 — 이 계산이 대응을 바꾸지 않는다).
-    try computeMarks(self.allocator, st);
+    try computeMarks(allocator, st);
 }
 
 fn freeMarks(allocator: std.mem.Allocator, marks: []const []const chrome_editor.frame.Mark) void {
@@ -1083,5 +1082,42 @@ test "강조 계산이 어디서 할당에 실패해도 새지 않는다 — 실
     try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{
         "a=1 and b=2\nkeep\nx=3 or y=4\n",
         "a=9 and b=8\nkeep\nx=7 or y=6\n",
+    });
+}
+
+test "표시 배열 만들기가 어디서 할당에 실패해도 새지 않는다" {
+    // **`computeMarks`에서 잡은 것과 같은 모양이 한 층 위에 있는지 본다.** 그쪽은 배열을 `st`에 넘긴
+    // 뒤에도 `errdefer`가 살아 있어 실패 시 두 번 풀렸다. 여기도 여섯 개를 잡아 `st`에 넘기고 **그
+    // 뒤에** `computeMarks`를 부르므로, 그 호출이 실패하면 같은 일이 일어난다.
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, left_src: []const u8, right_src: []const u8) !void {
+            const left_lines = try diff_state.splitLines(allocator, left_src);
+            defer if (left_lines.len > 0) allocator.free(left_lines);
+            const right_lines = try diff_state.splitLines(allocator, right_src);
+            defer if (right_lines.len > 0) allocator.free(right_lines);
+
+            var view = try diff.compute(allocator, left_lines, right_lines, .{});
+            defer if (view == .compare) view.compare.deinit(allocator);
+            if (view != .compare) return;
+
+            var st: State = .{ .view = view };
+            defer {
+                // `invalidate`가 하는 것과 같은 해제다(그것은 세션이 필요해 여기서 직접 한다).
+                if (st.left_texts.len > 0) allocator.free(st.left_texts);
+                if (st.right_texts.len > 0) allocator.free(st.right_texts);
+                if (st.left_numbers.len > 0) allocator.free(st.left_numbers);
+                if (st.right_numbers.len > 0) allocator.free(st.right_numbers);
+                if (st.left_bands.len > 0) allocator.free(st.left_bands);
+                if (st.right_bands.len > 0) allocator.free(st.right_bands);
+                freeMarks(allocator, st.left_marks);
+                freeMarks(allocator, st.right_marks);
+            }
+            try materialize(allocator, &st);
+            st.view = .loading; // rows 소유는 위 defer에 있다
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{
+        "a=1 and b=2\nkeep\nx=3\n",
+        "a=9 and b=8\nkeep\nx=7\n",
     });
 }

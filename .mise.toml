@@ -256,6 +256,13 @@ run = "python3 tools/update_boundary_digest.py"
 description = "Regenerate explorer icon coverage in memory and fail on SVG/hash/C/Zig registry or name-registry(src/icons.zig) drift"
 run = "python3 tools/svg_to_coverage.py --check"
 
+# 모바일 계약은 **문서와 코드의 대조**라 Zig 테스트로는 못 잡는다(계약 문서가 하는 검증 가능한
+# 주장 — "브리지에 OS 호출이 없다", "헤더가 숫자 표의 단일 출처다" 같은 것). 판정자는 grep 뭉치라
+# 1초면 끝나므로 항상 돌린다. `sh` 는 CI(ubuntu)에서 dash 라, 그 위에서 도는 것까지 확인했다.
+[tasks.check-mobile-contract]
+description = "Check the mobile contract claims (bridge/host/header/docs) and ABI types"
+run = "sh tools/mobile-poc/doc_claims.sh"
+
 [tasks.check-config-docs]
 description = "Check config docs against the real loader keys"
 run = "zig build check-config-docs"
@@ -270,7 +277,7 @@ run = "sh tools/ci/changed-areas.test.sh"
 
 [tasks.check]
 description = "Check format, tests, boundaries, config docs, doc links, and build"
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "check-doc-links", "build"]
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "check-doc-links", "check-mobile-contract", "build"]
 
 [tasks."web:build"]
 description = "Build the file-panel web bundle and verify its SRI"

@@ -1100,7 +1100,7 @@ test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or
@@ -3123,7 +3123,7 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
@@ -3407,7 +3407,7 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
     var reset_consumed_calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
@@ -3627,7 +3627,7 @@ test "d2b3b classified intent mechanics stay private and test-only at the pump b
     var pump_seen = false;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
@@ -3723,7 +3723,7 @@ test "session host owner projection capability stays in its reviewed mechanics f
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     const protected = [_][]const u8{
         "BorrowedMetadataView",
@@ -3950,7 +3950,7 @@ test "session host unchecked adoption leaves stay behind the aggregate permit bo
         );
         defer allocator.free(needle);
         var aggregate_calls: usize = 0;
-        var walker = try dir.walk(allocator);
+        var walker = try posixWalk(dir, allocator);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file or
@@ -4007,7 +4007,7 @@ test "session host aggregate screen cleanup has one owner and one caller" {
         var aggregate_calls: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
         defer dir.close(std.testing.io);
-        var walker = try dir.walk(allocator);
+        var walker = try posixWalk(dir, allocator);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file or
@@ -4073,7 +4073,7 @@ test "session host aggregate screen cleanup has one owner and one caller" {
         var aggregate_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
         defer dir.close(std.testing.io);
-        var walker = try dir.walk(allocator);
+        var walker = try posixWalk(dir, allocator);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file or
@@ -4130,7 +4130,7 @@ test "session host screen retirement unchecked commit has one product caller" {
     var product_references: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig"))
@@ -4508,7 +4508,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         .{ .iterate = true },
     );
     defer inventory_dir.close(std.testing.io);
-    var inventory_walker = try inventory_dir.walk(allocator);
+    var inventory_walker = try posixWalk(inventory_dir, allocator);
     defer inventory_walker.deinit();
     while (try inventory_walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
@@ -4545,7 +4545,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
         defer dir.close(std.testing.io);
-        var walker = try dir.walk(allocator);
+        var walker = try posixWalk(dir, allocator);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
@@ -4605,7 +4605,7 @@ test "generation batch Client ownership mutations have one node-bound production
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or
@@ -4735,7 +4735,7 @@ test "session host frozen teardown commits have one aggregate product caller" {
         var aggregate_calls: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
         defer dir.close(std.testing.io);
-        var walker = try dir.walk(allocator);
+        var walker = try posixWalk(dir, allocator);
         defer walker.deinit();
         while (try walker.next(std.testing.io)) |entry| {
             if (entry.kind != .file or
@@ -4777,7 +4777,7 @@ test "session host deferred seed retirement has one ledger owner and one adoptio
     var adoption_calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or
@@ -4824,7 +4824,7 @@ test "session host live batch unchecked mutation stays behind three ledger entry
     var calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or
@@ -4924,7 +4924,7 @@ test "session host live commit permit keeps checked consume ledger-private" {
     var unchecked_pump_calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or
@@ -5003,7 +5003,7 @@ test "session host guarded RX admit has one C4 pump product callsite" {
     var synthetic_fixture_calls_elsewhere: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or
@@ -5385,7 +5385,7 @@ test "validated metadata token construction and materialization stay in classifi
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     var classifier_field_count: usize = 0;
@@ -5605,7 +5605,7 @@ test "d2c pre-entry partial transition has one product decision source" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or
@@ -5844,7 +5844,7 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     var product_imports: usize = 0;
     var product_collector_calls: usize = 0;
@@ -6275,7 +6275,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     var owner_module_count: usize = 0;
@@ -7175,7 +7175,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     var client_source: ?[:0]u8 = null;
     defer if (client_source) |source| allocator.free(source);
@@ -7295,7 +7295,7 @@ test "2c3b executed response owner seal mutation stays in its canonical boundary
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     var init_in_owner: usize = 0;
@@ -7491,7 +7491,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -7873,7 +7873,7 @@ test "session host external pump facade callsites stay in the final owner bounda
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -7938,7 +7938,7 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
         .{ .iterate = true },
     );
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -8059,7 +8059,7 @@ test "session host external adoption import direction and mechanics stay closed"
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -8135,7 +8135,7 @@ test "session host prepared metadata mechanics stay inside their final-address o
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -9436,7 +9436,7 @@ fn expectClientConstructionPolicies(
 
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
@@ -11246,7 +11246,7 @@ fn checkDirectory(
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dir_path, .{ .iterate = true });
     defer dir.close(std.testing.io);
 
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -11573,7 +11573,7 @@ fn checkDirectoryForOsTypes(allocator: std.mem.Allocator, nl: NeutralLayer, viol
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, nl.dir, .{ .iterate = true });
     defer dir.close(std.testing.io);
 
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -11698,7 +11698,7 @@ fn scanTreeForCoreMutexCalls(allocator: std.mem.Allocator, dir_path: []const u8,
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dir_path, .{ .iterate = true });
     defer dir.close(std.testing.io);
 
-    var walker = try dir.walk(allocator);
+    var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
 
     while (try walker.next(std.testing.io)) |entry| {
@@ -11758,4 +11758,35 @@ test "scanCoreMutexDirectCalls flags direct lock but not wrappers/fields/pointer
         scanCoreMutexDirectCalls("self.mutex.lockUncancelable(self.io);", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
+}
+
+// ── 경로 구분자 정규화 (호스트 이식) ─────────────────────────────────────────────────────────────
+// `std.Io.Dir.Walker`의 `entry.path`는 **호스트 native 구분자**를 쓴다 — Windows에서는 `platform\macos\x.zig`.
+// 이 파일의 스캐너들은 그 경로를 `"platform/macos/x.zig"` 같은 **`/` 리터럴과 비교**하므로, 그대로 두면 제외
+// 목록과 매칭이 조용히 전부 빗나간다(실측: 제외됐어야 할 파일이 집계에 섞여 boundary 카운트가 부풀었다 —
+// 컴파일도 통과하고 macOS CI도 초록인 채로 Windows에서만 틀렸다). 그래서 walker를 감싸 경로를 `/`로 정규화한다.
+// POSIX 호스트에서는 native 구분자가 이미 `/`라 `next`가 std walker를 그대로 통과시킨다(무동작·무비용).
+const PosixWalker = struct {
+    inner: std.Io.Dir.Walker,
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    fn next(self: *PosixWalker, io: std.Io) !?std.Io.Dir.Walker.Entry {
+        var entry = (try self.inner.next(io)) orelse return null;
+        if (std.fs.path.sep == '/') return entry;
+        // 잘라내면 "제외 목록에 없는 경로"로 조용히 바뀌어 게이트가 거짓 초록이 된다 — 시끄럽게 실패시킨다.
+        if (entry.path.len >= self.path_buf.len) return error.NameTooLong;
+        for (entry.path, 0..) |byte, i|
+            self.path_buf[i] = if (byte == std.fs.path.sep) '/' else byte;
+        self.path_buf[entry.path.len] = 0;
+        entry.path = self.path_buf[0..entry.path.len :0];
+        return entry;
+    }
+
+    fn deinit(self: *PosixWalker) void {
+        self.inner.deinit();
+    }
+};
+
+fn posixWalk(dir: std.Io.Dir, allocator: std.mem.Allocator) !PosixWalker {
+    return .{ .inner = try dir.walk(allocator) };
 }

@@ -1158,6 +1158,14 @@ fn themeColors() tokens.ThemeColors {
         .search_match = .{ .r = 0x4A, .g = 0x4A, .b = 0x20 },
         .search_match_current = .{ .r = 0x8A, .g = 0x7A, .b = 0x20 },
         .selection = .{ .r = 0x30, .g = 0x40, .b = 0x60 },
+        // **터미널 본문 배경은 사이드바와 별개 입력이다**(tokens.zig §4.1b). 모바일은 본문을
+        // `surface_bg` 로 칠해 왔으므로 같은 값을 준다 — config 를 읽게 되면(M10) 둘 다
+        // 테마에서 온다.
+        .terminal_background = .{ .r = 0x1E, .g = 0x1E, .b = 0x2E },
+        // 비교 본문 색. 모바일은 아직 diff 를 안 그리지만(§2.4 — 도크·편집기 미이식) 토큰이
+        // 필수 입력이라 데스크톱 파생 규칙에 가까운 값을 준다.
+        .diff_added = .{ .r = 0x20, .g = 0x40, .b = 0x28 },
+        .diff_removed = .{ .r = 0x48, .g = 0x24, .b = 0x28 },
         .cursor = .{ .r = 0xE6, .g = 0xE6, .b = 0xEA },
         .accent = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }, // maru 앰버
     };

@@ -442,7 +442,16 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
             else
                 quad.alpha;
             const fill = packRgba(tk.get(quad.fill_role), fill_alpha);
+            // **색 없는 테두리는 폭도 0이다.** 여기서 null 역할을 RGBA 0으로 packing하는데 폭을 그대로
+            // 넘기면, 셰이더가 그 띠를 투명하게 칠해 **그 자리가 뚫려 뒤가 비친다**. 버튼 배경이 아래
+            // 표면과 같은 색이면 안 보이다가, 그 위에 호버 밴드처럼 다른 색이 깔리는 순간 어두운 링으로
+            // 드러난다(소스 컨트롤 도크 호버 캡처로 실측 — 컴포넌트는 `ghost`가 "테두리 없음"이라고
+            // 선언했는데 화면에는 링이 있었다).
+            //
+            // 컴포넌트마다 폭을 0으로 맞추게 하면 한 곳만 빠뜨려도 같은 링이 돌아온다. **모순된 조합을
+            // 여기서 한 번 정규화한다** — 색이 없으면 그릴 테두리가 없다는 뜻이고, 그 해석은 하나뿐이다.
             const border = if (quad.border_role) |role| packRgba(tk.get(role), quad.alpha) else 0;
+            const border_widths: [4]u16 = if (quad.border_role == null) .{ 0, 0, 0, 0 } else quad.border_widths;
             out.append(allocator, .{
                 // Component draw coordinates are local to the dock content. Text receives the
                 // same offset through its PaneFrame destination; quads need it explicitly
@@ -458,10 +467,10 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
                     @floatFromInt(quad.corner_radii[3]),
                 },
                 .border_widths = .{
-                    @floatFromInt(quad.border_widths[0]),
-                    @floatFromInt(quad.border_widths[1]),
-                    @floatFromInt(quad.border_widths[2]),
-                    @floatFromInt(quad.border_widths[3]),
+                    @floatFromInt(border_widths[0]),
+                    @floatFromInt(border_widths[1]),
+                    @floatFromInt(border_widths[2]),
+                    @floatFromInt(border_widths[3]),
                 },
                 .fill_color0 = fill,
                 .fill_color1 = fill,
@@ -946,4 +955,45 @@ test "appendBackgroundQuads drops an empty clip instead of inverting it into no 
     appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &quads, 2);
     try std.testing.expectEqual(@as(usize, 2), quads.items.len);
     for (quads.items) |q| try std.testing.expectEqual(@as(f32, 0), q.y);
+}
+
+test "색 없는 테두리는 폭이 0으로 정규화된다(투명한 띠가 배경을 뚫지 않는다)" {
+    // `border_role = null` + `border_widths > 0`은 **모순된 조합**이다. 그대로 내려보내면 셰이더가 그 띠를
+    // RGBA 0으로 칠해 그 자리가 뚫리고, 아래 표면이 비친다 — 컴포넌트는 "테두리 없음"을 선언했는데
+    // 화면에는 링이 생긴다(소스 컨트롤 도크 호버에서 실측). 여기서 한 번 정규화해 그 종류를 없앤다.
+    const allocator = std.testing.allocator;
+    const tk = chrome.tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    var quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer quads.deinit(allocator);
+
+    const draws = chrome.draw.ChromeDraw{
+        .layer = .sidebar,
+        .ops = &.{
+            .{
+                .quad = .{
+                    .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+                    .fill_role = .surface_bg,
+                    // 색은 없는데 폭은 있다 — `ghost` 버튼이 실제로 이 조합을 냈다.
+                    .border_role = null,
+                    .border_widths = .{ 1, 1, 1, 1 },
+                },
+            },
+        },
+    };
+    appendBackgroundQuads(allocator, &.{draws}, &tk, 0, 0, &quads, 0);
+    try std.testing.expectEqual(@as(usize, 1), quads.items.len);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0 }, &quads.items[0].border_widths);
 }

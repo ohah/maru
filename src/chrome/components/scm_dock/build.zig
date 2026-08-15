@@ -141,7 +141,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     // 호버 중에도 사라지면 안 되므로, 비키는 쪽은 버튼이다.
                     .margin = .{ .right = @floatFromInt(m.inset_x + m.status_extent + m.gap) },
                 },
-                // 평소에는 배경 없이 글리프만 보인다(호버에서만 `view`가 칠한다).
+                // 평소에는 배경 없이 글리프만 보인다(`ghost`는 행과 같은 배경이고 테두리가 없다).
                 .variant = .ghost,
                 .action = action,
                 .overflow = .clip,

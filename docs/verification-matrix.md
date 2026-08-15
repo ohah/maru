@@ -1224,8 +1224,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   empty-screen candidate→publish→retiring→reclaim allocator ledger의 structural base allocation 1개,
   Debug 3,104바이트/ReleaseFast 3,088바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
   final-zero를 runtime 2개+boundary 1개로 고정한다. 가변 screen/metadata를 포함하지 않는 lower bound이므로
-  e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence에서 app-global exact cap을 정해
-  cap/cap+1·rollback/final-zero를 닫는다. e3b는 budget lease와
+  e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence와 기존 host base SSOT를 결합한다. generation
+  1개의 최대 구조적 charge는 `base_update_max_bytes`(16 MiB screen+256 KiB metadata), fixed inventory는 mutation
+  lease와 같은 64개다. 둘의 곱 `max_tracked_bytes`는 표현 가능한 구조적 bound이고 app-global 정책 예산은
+  e3b의 실제 동시 runtime 모델 전에는 확정하지 않는다. final-address fixed entry가 candidate/current/retiring/retry
+  역할을 소유하며 exact bound/bound+1·swap/reclaim/abort·rollback/final-zero를
+  닫는다. budget 5개+validator 2개는 Debug·ReleaseFast, 실제 64→128 generation workload 1개와 exec child artifact 1개,
+  parent/watchdog artifact 2개는 ReleaseFast, boundary 1개는 Debug·ReleaseFast로 실행한다. parent 전용 runner가 canonical
+  child artifact 경로를 주입하므로 ambient environment로 parent 역할을 건너뛸 수 없다. exec child는 parent-minted 128-bit run nonce,
+  `LOCAL_PEERPID`, stream type을 검증하고 stdio/FD 198 외 inherited descriptor를 모두 닫는다. typed artifact validator는 baseline/pressure
+  원시 표본 각 7개의 identity·중앙값, logical/RSS/footprint delta와 64 MiB conservative harness tolerance, child exit 0,
+  실제 cleanup receipt의 generation/bytes/allocation zero를 producer와 독립 재계산한다. e3b는 budget lease와
   mutation seal·authority/retry/close effect를 actual stable owner에 결속한다. e3c는 sole external ingress와 close
   경쟁·mixed outcome을 열고 모든 logical charge 0과 RSS artifact를 최종 검증한다. e3의 close 경쟁·mixed outcome·app-global
   count/byte budget·peak RSS까지 green이기 전에는 CR2e 완료가 아니다.

@@ -484,11 +484,12 @@ test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 sub
     try std.testing.expectEqual(@as(usize, 4), count(tests, "test \"CR2e-b"));
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExceptTwo(
+        try countProductSourcesExceptThree(
             allocator,
             "@import(\"reconnect_mutation_seal",
             "platform/macos/session_host/reconnect_mutation_seal.zig",
             "platform/macos/session_host/reconnect_mutation_seal.zig",
+            "platform/macos/session_host/reconnect_resident_budget.zig",
         ),
     );
     const build_gate = between(
@@ -837,6 +838,96 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
         build_gate,
         "run_cr2e_e3a1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
     ));
+}
+
+test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifact를 고정한다" {
+    const allocator = std.testing.allocator;
+    const budget = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_resident_budget.zig",
+    );
+    defer allocator.free(budget);
+    const runtime = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const rss = try readSource(allocator, "tests/session_host_reconnect_rss.zig");
+    defer allocator.free(rss);
+    const validator = try readSource(
+        allocator,
+        "tools/perf/session_host_reconnect_rss_validator.zig",
+    );
+    defer allocator.free(validator);
+    const rss_runner = try readSource(
+        allocator,
+        "tools/session_host_cr2e_e3a2_rss_test_runner.zig",
+    );
+    defer allocator.free(rss_runner);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    inline for (.{
+        "pub const max_entry_bytes: usize = connection_slot.base_update_max_bytes;",
+        "pub const max_entries: usize = reconnect_mutation.max_mutation_leases;",
+        "pub const max_tracked_bytes: usize = max_entry_bytes * max_entries;",
+        "pub const Role = enum(u8) { candidate, current, retiring, retry };",
+        "pub const Lease = struct {",
+        "pub const Snapshot = struct {",
+        "pub const Budget = struct {",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(budget, phrase));
+    try std.testing.expectEqual(@as(usize, 5), count(budget, "test \"CR2e-e3a2 resident budget은"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const rss_testing_api = if (builtin.is_test) struct {"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "reconnect_resident_budget.zig",
+            "platform/macos/session_host/reconnect_resident_budget.zig",
+            "platform/macos/session_host/reconnect_resident_budget.zig",
+        ),
+    );
+    const rss_testing_slice = between(
+        runtime,
+        "pub const rss_testing_api = if (builtin.is_test) struct {",
+        "} else struct {};",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(rss_testing_slice, "@import(\"reconnect_resident_budget.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const owner_count: usize = resident_budget.max_entries;"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2e-e3a2 RSS workload는"));
+    try std.testing.expectEqual(@as(usize, 3), count(rss, "test \"CR2e-e3a2 RSS"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "proc_pid_rusage(pid, mac.RUSAGE_INFO_V4"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "_ = c.execve(path.ptr, &argv, &env);"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "while (inherited_fd < getdtablesize())"));
+    try std.testing.expectEqual(@as(usize, 2), count(rss, "run_nonce: [16]u8"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "peer_pid != c.getppid()"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "pub export var maru_cr2e_e3a2_rss_child_path:"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss_runner, "extern var maru_cr2e_e3a2_rss_child_path:"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "deinitAndSnapshot()"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "const measurement_tolerance_bytes: u64 = 64 * 1024 * 1024;"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "const deadline_ms: u64 = 10_000;"));
+    try std.testing.expectEqual(@as(usize, 1), count(rss, "c.kill(pid, c.SIG.KILL)"));
+    try std.testing.expectEqual(@as(usize, 2), count(rss, "c.waitpid(pid,"));
+    try std.testing.expectEqual(@as(usize, 2), count(validator, "test \"CR2e-e3a2 RSS validator는"));
+    try std.testing.expectEqual(@as(usize, 1), count(validator, ".duplicate_field_behavior = .@\"error\","));
+    try std.testing.expectEqual(@as(usize, 1), count(validator, ".ignore_unknown_fields = false,"));
+    try std.testing.expectEqual(@as(usize, 1), count(validator, "final_live_allocations: u64"));
+    try std.testing.expectEqual(@as(usize, 2), count(validator, "error.LogicalBoundExceeded"));
+
+    const gate = between(
+        build,
+        "const session_host_cr2e_e3a2_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(b, .{",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "run_cr2e_e3a2_budget_tests.addArg(\"--maru-expect-tests=5\")",
+        "run_cr2e_e3a2_validator_tests.addArg(\"--maru-expect-tests=2\")",
+        "run_cr2e_e3a2_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3a2_workload_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3a2_rss_tests.addArtifactArg(cr2e_e3a2_rss_child_tests)",
+        "run_cr2e_e3a2_rss_tests.addArg(\"--maru-expect-tests=2\")",
+        "tests/artifacts/perf/session-host-reconnect-rss-macos.json",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(gate, phrase));
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

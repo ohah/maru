@@ -684,9 +684,14 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
   candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
   Debug 3,104바이트/ReleaseFast 3,088바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
-  teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행해 app-global count/byte
-  exact cap을 정하고 cap+1 mutation 0과 final ledger 0을
-  고정한다. 이 측정 없이 근거 없는 상한을 선택하거나 제품
+  teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행한다. e3a2는 host base
+  SSOT인 generation당 `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은
+  64개 fixed inventory를 검증한다. 둘의 곱인 `max_tracked_bytes`는 구조적 표현 한계이고 app-global 정책 예산은 아니다.
+  final-address fixed entry가 candidate/current/retiring/retry 역할을 봉인하며 bound+1 mutation 0과
+  swap/reclaim/abort/teardown final ledger 0을 고정한다. 별도 ReleaseFast exec child의 64 current→128 동시 generation
+  workload를 부모가 `proc_pid_rusage:RUSAGE_INFO_V4`로 반복 측정하고, typed artifact validator가 logical delta+64 MiB
+  conservative harness tolerance, RSS/footprint delta와 child exit/actual cleanup receipt를 독립 재계산한다.
+  이 64 MiB tolerance는 gross anomaly detector이며 allocator overhead 근거나 e3b 정책 예산으로 재사용하지 않는다. 이 측정 없이 근거 없는 상한을 선택하거나 제품
   reconnect ingress를 먼저 열지 않는다. e3b는 그 budget lease 아래 mutation seal·authority/retry/close effect를
   actual stable owner에 결속하고, e3c가 sole external ingress와 close 경쟁·mixed outcome을 연다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,

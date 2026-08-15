@@ -347,10 +347,13 @@ const Writer = struct {
 
         // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
         const title_x = rect.rect.x + inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap));
-        const title_end: f32 = if (pill) |p|
+        // 제목은 **오른쪽에 있는 것 전부**를 비켜선다: 배지, 그리고 그 왼쪽의 일괄 동작 버튼.
+        // 배지만 기준으로 삼으면 그 사이에 앉은 버튼 위로 긴 제목이 그려진다(적대적 검증에서 잡혔다).
+        const action_reserve: f32 = if (section.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
+        const title_end: f32 = (if (pill) |p|
             @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
         else
-            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
+            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x))) - action_reserve;
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
         if (rect.rect.height >= line_h and title_end > title_x) {
             const width = title_end - title_x;
@@ -403,27 +406,45 @@ const Writer = struct {
         const hovered_row = isHovered(self.state, rect.id);
         // **증감도 색을 갖는다**(목업이 그렇다 — `+14` 초록, `−59` 빨강). 한 덩어리로 그리면 둘 다
         // 흐린 회색이 되어 "얼마나 늘고 줄었나"가 한눈에 안 들어온다(사용자 지적 2026-08-14).
+        var removed_buf: [16]u8 = undefined;
+        var added_buf: [16]u8 = undefined;
+        const delta_removed: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&removed_buf, "-{d}", .{file.removed}) catch "") else "";
+        const delta_added: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&added_buf, "+{d}", .{file.added}) catch "") else "";
+
         var right_inset = m.inset_x + m.status_extent + m.gap;
         if (hovered_row) {
             // 아무것도 그리지 않는다(위 주석).
         } else if (file.binary) {
             try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
         } else if (file.has_delta) {
-            var removed_buf: [16]u8 = undefined;
-            const removed = std.fmt.bufPrint(&removed_buf, "-{d}", .{file.removed}) catch "";
-            try self.trailing(rect, removed, .git_deleted_fg, .supporting, right_inset);
-            right_inset += @intFromFloat(self.measureBudget(removed));
+            try self.trailing(rect, delta_removed, .git_deleted_fg, .supporting, right_inset);
+            right_inset += @intFromFloat(self.measureBudget(delta_removed));
             right_inset += m.gap;
-            var added_buf: [16]u8 = undefined;
-            const added = std.fmt.bufPrint(&added_buf, "+{d}", .{file.added}) catch "";
-            try self.trailing(rect, added, .git_added_fg, .supporting, right_inset);
+            try self.trailing(rect, delta_added, .git_added_fg, .supporting, right_inset);
         }
 
         // 이름은 굵게, 경로는 흐리게. 이름 뒤에 경로를 이어 그리되 폭 예산은 **이름 우선**이다.
-        try self.line(rect, inset, file.name, if (file.selected) .focus_accent else .surface_fg, .control, true);
+        //
+        // **오른쪽 자리를 비켜선다.** 이름·경로는 `trailing` 항목들보다 **나중에** 그려지므로, 예산이 행
+        // 오른쪽 끝까지 열려 있으면 긴 경로가 증감·상태 문자를 덮는다(적대적 검증에서 잡혔다 —
+        // 그리는 순서가 곧 z축이다).
+        const right_used: f32 = @floatFromInt(m.inset_x + m.status_extent + m.gap);
+        // **호버 여부와 무관하게 같은 폭을 비운다.** 그 자리를 증감이 쓰다가 호버하면 버튼이 쓰는데,
+        // 둘 중 하나로만 예산을 잡으면 포인터를 스칠 때마다 말줄임 지점이 움직여 **이름이 늘었다 줄었다
+        // 한다**(적대적 검증에서 잡혔다). 둘 중 큰 쪽을 항상 비워 두면 화면이 조용하다.
+        const delta_occupied: f32 = if (file.binary)
+            self.measureBudget("bin") + @as(f32, @floatFromInt(m.gap))
+        else if (file.has_delta)
+            self.measureBudget(delta_removed) + self.measureBudget(delta_added) + @as(f32, @floatFromInt(m.gap * 2))
+        else
+            0;
+        const action_occupied: f32 = if (file.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
+        const occupied = @max(delta_occupied, action_occupied);
+        const text_end = rect.rect.x + rect.rect.width - right_used - occupied;
+        try self.lineWithin(rect, inset, text_end, file.name, if (file.selected) .focus_accent else .surface_fg, .control, true);
         if (file.dir.len > 0) {
             const name_px = self.measureBudget(file.name);
-            try self.line(rect, inset + name_px + @as(f32, @floatFromInt(m.gap)), file.dir, .muted_fg, .supporting, false);
+            try self.lineWithin(rect, inset + name_px + @as(f32, @floatFromInt(m.gap)), text_end, file.dir, .muted_fg, .supporting, false);
         }
     }
 
@@ -446,6 +467,28 @@ const Writer = struct {
         try self.emit(
             rect.rect.x + x_offset,
             y,
+            source,
+            self.colsFor(width),
+            role,
+            text_role,
+            bold,
+            @intFromFloat(@max(width, 0)),
+            .origin,
+        );
+    }
+
+    /// `line`과 같되 **오른쪽 끝을 호출자가 준다.** 행 오른쪽에 이미 앉은 것(증감·상태 문자·동작 버튼)을
+    /// 비켜서야 하는 글자가 쓴다 — 그리는 순서가 곧 z축이라, 나중에 그리는 글자가 예산을 넘으면 앞의
+    /// 것을 덮는다.
+    fn lineWithin(self: *Writer, rect: tree.RectEntry, x_offset: f32, end_x: f32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool) ViewError!void {
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < line_h) return;
+        const start = rect.rect.x + x_offset;
+        if (end_x <= start) return;
+        const width = end_x - start;
+        try self.emit(
+            start,
+            rect.rect.y + (rect.rect.height - line_h) / 2,
             source,
             self.colsFor(width),
             role,
@@ -1078,4 +1121,169 @@ test "그룹 헤더의 일괄 동작 버튼은 개수 배지와 겹치지 않는
     const action_right = action.x + action.width;
     // 버튼은 배지 **왼쪽**에서 끝나야 한다.
     try testing.expect(action_right <= @as(f32, @floatFromInt(badge_quad.rect.x)));
+}
+
+test "그룹 제목은 일괄 동작 버튼 밑으로 파고들지 않는다" {
+    // 버튼이 배지 **왼쪽**으로 옮겨 앉으면서, 전에 "배지 왼쪽에서 멈추면 됐던" 제목 예산이 그 사이의
+    // 버튼을 덮게 된다. 좁은 도크에서 긴 제목이 버튼 위에 그려진다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .staged, .count = 128, .collapsed = false, .action = .unstage } },
+    };
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 220, .height = 400 }, // 좁은 도크
+        .items = &items,
+        .branch = "main",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+
+    const action = frame.tree.entries[frame.tree.find(build.NodeIds.itemAction(0)) orelse return error.MissingAction].rect;
+    const title = findExactText(draws, sectionTitle(.staged)) orelse return error.MissingTitle;
+    const budget = title.max_width_px orelse return error.MissingBudget;
+    // 제목의 폭 예산이 버튼 **왼쪽 끝**을 넘지 않아야 한다.
+    try testing.expect(title.origin.x + @as(i32, @intCast(budget)) <= @as(i32, @intFromFloat(action.x)));
+}
+
+test "파일 이름·경로는 증감·상태 문자 자리를 침범하지 않는다" {
+    // 이름·경로는 `trailing` 항목들보다 **나중에** 그려지므로, 예산이 행 오른쪽 끝까지 열려 있으면
+    // 긴 경로가 증감·상태 문자를 덮는다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{
+            .name = "a.zig",
+            .dir = "src/" ++ "very-long-directory-segment/" ** 8,
+            .status = .modified,
+            .letter = 'M',
+            .added = 123,
+            .removed = 456,
+            .has_delta = true,
+            .action = .stage,
+        } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+
+    const removed = findExactText(draws, "-456") orelse return error.MissingDelta;
+    const dir = findText(draws, "very-long-directory-segment") orelse return error.MissingDir;
+    const budget = dir.max_width_px orelse return error.MissingBudget;
+    try testing.expect(dir.origin.x + @as(i32, @intCast(budget)) <= removed.origin.x);
+}
+
+test "좁은 도크에서 오른쪽 자리가 폭을 다 먹으면 이름을 아예 그리지 않는다" {
+    // 예산이 음수가 되면 `colsFor`가 1로 clamp해 **한 글자가 증감 위에 그려질** 수 있다. 그릴 자리가
+    // 없으면 아무것도 안 그리는 것이 맞다(잘린 한 글자는 정보가 아니라 잡음이다).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{
+            .name = "a.zig",
+            .dir = "src/",
+            .status = .modified,
+            .letter = 'M',
+            .added = 999999,
+            .removed = 999999,
+            .has_delta = true,
+            .action = .stage,
+        } },
+    };
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 96, .height = 200 }, // 오른쪽 자리만으로 꽉 차는 폭
+        .items = &items,
+        .branch = "main",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+    // 이름이 나오더라도 증감 왼쪽에서 끝나야 한다(안 나오는 것도 정답이다).
+    if (findExactText(draws, "a.zig")) |name| {
+        const removed = findExactText(draws, "-999999") orelse return error.MissingDelta;
+        const budget = name.max_width_px orelse return error.MissingBudget;
+        try testing.expect(name.origin.x + @as(i32, @intCast(budget)) <= removed.origin.x);
+    }
+}
+
+test "호버해도 이름 예산이 늘거나 줄어 글자가 튀지 않는다" {
+    // 호버하면 증감이 사라지고 그 자리에 버튼이 앉는다. 두 자리가 다르면 **호버할 때마다 이름이
+    // 늘었다 줄었다** 한다 — 포인터를 스치기만 해도 목록이 들썩인다.
+    var storage_a: TestStorage = .{};
+    var storage_b: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{
+            .name = "some-file.zig",
+            .dir = "src/deep/nested/",
+            .status = .modified,
+            .letter = 'M',
+            .added = 12,
+            .removed = 34,
+            .has_delta = true,
+            .action = .stage,
+        } },
+    };
+    const plain = try renderFixture(&storage_a, .{}, &items);
+    const row_id = build.NodeIds.item(0);
+    const hovered = try renderFixture(&storage_b, .{ .hovered = row_id }, &items);
+
+    const a = findExactText(plain, "some-file.zig") orelse return error.MissingName;
+    const b = findExactText(hovered, "some-file.zig") orelse return error.MissingName;
+    try testing.expectEqual(a.origin.x, b.origin.x);
+    // 예산 차이는 **한 글자 폭 이내**여야 한다(증감 폭과 버튼 폭이 정확히 같을 수는 없다).
+    const wa: i64 = @intCast(a.max_width_px orelse 0);
+    const wb: i64 = @intCast(b.max_width_px orelse 0);
+    try testing.expect(@abs(wa - wb) <= 16);
+}
+
+test "그룹 제목도 호버로 예산이 튀지 않는다" {
+    // 파일 행과 같은 함정이 헤더에도 있다: 버튼은 호버해야 보이지만 **자리는 늘 잡혀 있다**.
+    // 제목 예산이 호버를 따라가면 헤더 글자도 들썩인다.
+    var a: TestStorage = .{};
+    var b: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .staged, .count = 7, .collapsed = false, .action = .unstage } },
+    };
+    const plain = try renderFixture(&a, .{}, &items);
+    const hovered = try renderFixture(&b, .{ .hovered = build.NodeIds.item(0) }, &items);
+    const x = findExactText(plain, sectionTitle(.staged)) orelse return error.MissingTitle;
+    const y = findExactText(hovered, sectionTitle(.staged)) orelse return error.MissingTitle;
+    try testing.expectEqual(x.origin.x, y.origin.x);
+    try testing.expectEqual(x.max_width_px, y.max_width_px);
+}
+
+test "동작이 없는 행은 그 자리를 비워 두지 않는다(충돌 행은 이름이 더 길다)" {
+    // 충돌 행은 동작이 없다(`git add`가 "해결됨"으로 표시하므로). 그런데도 버튼 자리를 비우면
+    // **누를 수 없는 것 때문에 이름이 짧아진다** — 화면이 거짓말을 하는 자리다.
+    var a: TestStorage = .{};
+    var b: TestStorage = .{};
+    const with_action = [_]types.Item{
+        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .action = .stage } },
+    };
+    const no_action = [_]types.Item{
+        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = .none } },
+    };
+    const acted = try renderFixture(&a, .{}, &with_action);
+    const plain = try renderFixture(&b, .{}, &no_action);
+    const wa = (findExactText(acted, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
+    const wb = (findExactText(plain, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
+    try testing.expect(wb > wa);
 }

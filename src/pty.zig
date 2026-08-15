@@ -6,6 +6,7 @@ pub const ExitStatus = types.ExitStatus;
 pub const PtyEvent = types.PtyEvent;
 pub const PtyHandle = types.PtyHandle;
 pub const PtySession = session.PtySession;
+pub const backend_available = session.backend_available;
 pub const SpawnRequest = types.SpawnRequest;
 pub const plannedBackendForMacOS = types.plannedBackendForMacOS;
 pub const resolveInteractiveShell = types.resolveInteractiveShell;

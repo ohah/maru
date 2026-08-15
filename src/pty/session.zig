@@ -8,6 +8,14 @@ pub const PtySession = switch (builtin.os.tag) {
     else => UnsupportedPtySession,
 };
 
+/// 이 빌드에 **진짜 PTY 백엔드가 있는가.** 위 switch가 무엇을 골랐는지에서 직접 유도하므로 둘이 갈릴 수 없다
+/// (`builtin.os.tag`를 다시 비교하면 백엔드가 늘 때 한쪽만 고치는 사고가 난다).
+///
+/// 소비자는 **기능을 미리 안내하려는 자리**다 — 예: CLI가 "이 플랫폼에선 `demo`가 아직 안 된다"고 먼저 알려
+/// 사용자를 실패 경로로 보내지 않는 것. 실제 실패 처리는 여전히 `error.UnsupportedPlatform`이 한다(이 상수로
+/// 분기해 오류 경로를 건너뛰면, 백엔드가 있는데 spawn만 실패하는 경우를 놓친다).
+pub const backend_available = PtySession != UnsupportedPtySession;
+
 /// **이 앱 프로세스 자신**의 자원 표본. 터미널과 달리 세션(PTY)에 매이지 않아 `PtySession` 밖에 둔다 —
 /// 상태바가 "모든 창 공유" 행으로 합계에 넣는 값이다(docs/status-bar.md §4.1). 지원 backend가 없으면 null.
 pub fn selfResourceSample() ?types.ProcessResourceSample {
@@ -124,8 +132,14 @@ const UnsupportedPtySession = struct {
     }
 };
 
-test "unsupported PtySession reports unsupported platform outside macOS" {
-    if (builtin.os.tag == .macos) return error.SkipZigTest;
+// skip 조건을 **OS 이름이 아니라 백엔드 유무**로 잡는다. 그래야 ConPTY(W4)가 들어오는 날 이 테스트가 저절로
+// 자고, 그때 누가 `.macos`를 지우는 것을 잊어 "백엔드가 있는데 UnsupportedPlatform을 기대하는" 테스트가 남지
+// 않는다(`connection_incident`의 `currentProcessId() == 0` skip과 같은 규율).
+//
+// 그리고 `backend_available`을 **실제 동작에 묶는다**: CLI가 그 상수로 "이 플랫폼에선 `demo`가 안 된다"고
+// 미리 안내하므로(`main.printSmoke`), 둘이 갈리면 "안내는 안 뜨는데 실행하면 실패"거나 그 반대가 된다.
+test "backend_available이 거짓이면 spawn은 반드시 UnsupportedPlatform이다" {
+    if (backend_available) return error.SkipZigTest;
     try std.testing.expectError(
         error.UnsupportedPlatform,
         PtySession.spawn(std.testing.allocator, .{ .command = "/bin/sh" }),

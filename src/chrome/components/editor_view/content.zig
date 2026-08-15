@@ -281,6 +281,23 @@ pub fn columnOfByte(bytes: []const u8, tab_width: u16, byte_off: usize, scratch:
     return columnsOf(r.text);
 }
 
+/// 한 걸음: 이 위치의 cluster(또는 탭)를 지나면 **다음 byte와 다음 열**이 어디인가.
+///
+/// **탭스톱·cluster 분절·표시 폭이 여기 한 곳에만 있다.** 이 규칙을 두 번 쓰면 두 곳이 갈리고,
+/// 그러면 강조가 글자에서 밀린다 — 실제로 그렇게 갈렸다(전개 루프에는 화면 상한이 있는데 열 계산
+/// 쪽에는 없었다). CodeMirror가 `countColumn`/`findColumn` 하나로 두고 view·commands·language가
+/// 모두 그것을 부르는 것과 같은 구조다(코드 표현이 아니라 **구조**를 참고했다).
+pub const Step = struct { next_byte: usize, next_col: u32 };
+
+pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
+    const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
+    if (bytes[i] == '\t') return .{ .next_byte = i + 1, .next_col = ((col / stop_width) + 1) * stop_width };
+    const base = text_layout.decodeCodepoint(bytes, i);
+    const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
+    const n = @max(1, end - i);
+    return .{ .next_byte = i + n, .next_col = col + display_width.clusterCols(bytes, i, i + n) };
+}
+
 /// 정렬된 바이트 위치들의 열을 **한 번 훑어** 채운다. `offsets`는 오름차순이어야 하고, `out`은 같은
 /// 길이다.
 ///
@@ -296,22 +313,14 @@ pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) c
     // **화면 오른쪽 끝을 넘으면 멈춘다.** `expandTabs`가 훑는 범위에 상한을 둔 것과 같은 이유다 —
     // 없으면 minified JS처럼 한 줄이 수 MB인 파일에서 화면 밖까지 끝까지 지나간다. 위치가 오름차순
     // 이므로 그 뒤는 전부 화면 밖이고, 남은 자리에는 상한 열을 채워 호출자가 잘라 내게 한다.
-    const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
     var col: u32 = 0;
     var i: usize = 0;
     var next: usize = 0;
     while (next < offsets.len and offsets[next] <= 0) : (next += 1) out[next] = 0;
     while (i < bytes.len and next < offsets.len) {
-        if (bytes[i] == '\t') {
-            col += stop_width - (col % stop_width);
-            i += 1;
-        } else {
-            const base = text_layout.decodeCodepoint(bytes, i);
-            const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
-            const n = @max(1, end - i);
-            col += display_width.clusterCols(bytes, i, i + n);
-            i += n;
-        }
+        const s = stepColumn(bytes, i, col, tab_width); // 규칙은 한 곳에만 있다
+        i = s.next_byte;
+        col = s.next_col;
         while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
         if (col >= stop_col) break;
     }

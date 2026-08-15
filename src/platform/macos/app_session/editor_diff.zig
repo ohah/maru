@@ -1007,3 +1007,32 @@ test "비교 Term의 본문이 헤더 밴드와 겹치지 않는다" {
     // 본문은 밴드 **아래**에서 시작해야 한다.
     try testing.expect(drawn.rect.y >= band_bottom);
 }
+
+test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
+    // **활성 저장소가 아니다.** 사용자가 다른 폴더로 옮겨 가도, 열려 있는 비교는 자기 저장소 기준
+    // 위치를 말해야 한다 — 그러지 않으면 같은 화면이 창 상태에 따라 다른 경로를 보인다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("a\n", "b\n");
+    entry.path = @constCast("/repo/one/src/app.zig");
+    entry.diff_repo = @constCast("/repo/one");
+    fx.term.file_entry = &entry;
+
+    const root = app_session_mod.breadcrumbRootFor(fx.session, &entry);
+    try testing.expectEqualStrings("/repo/one", root);
+    try testing.expectEqualStrings(
+        "src/app.zig",
+        maru.session.repo_path.displayRelative(entry.path, root),
+    );
+
+    // 저장소를 모르면 절대경로 그대로다 — 지어내지 않는다.
+    entry.diff_repo = @constCast("");
+    try testing.expectEqualStrings("", app_session_mod.breadcrumbRootFor(fx.session, &entry));
+    try testing.expectEqualStrings(
+        "/repo/one/src/app.zig",
+        maru.session.repo_path.displayRelative(entry.path, app_session_mod.breadcrumbRootFor(fx.session, &entry)),
+    );
+}

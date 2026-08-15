@@ -728,7 +728,7 @@ pub const ReconnectGenerationOwner = struct {
         args: anytype,
         comptime initializer: anytype,
     ) !void {
-        if (!std.meta.eql(self.*, ReconnectGenerationOwner{})) return error.InvalidAuthority;
+        if (!self.pristine()) return error.InvalidAuthority;
         self.* = .{
             .self_addr = @intFromPtr(self),
             .owner_pid = process_identity_mod.currentProcessId(),
@@ -863,6 +863,18 @@ pub const ReconnectGenerationOwner = struct {
             self.owner_pid != process_identity_mod.currentProcessId() or self.owner_thread == null or
             self.owner_thread.? != std.Thread.getCurrentId() or self.allocator == null or
             self.screen_source == null) return error.InvalidAuthority;
+    }
+
+    fn pristine(self: *const ReconnectGenerationOwner) bool {
+        return self.self_addr == 0 and self.owner_pid == 0 and self.owner_thread == null and
+            self.allocator == null and self.screen_source == null and !self.screen_published and
+            self.slot.self_addr == 0 and self.slot.owner_pid == 0 and self.slot.owner_thread == null and
+            self.slot.allocator == null and self.slot.lifecycle == .pristine and
+            self.slot.next_generation == 0 and self.slot.current == null and
+            self.slot.retiring == null and self.slot.candidate == null and
+            self.slot.inline_node.self_addr == 0 and self.slot.inline_node.slot_addr == 0 and
+            self.slot.inline_node.generation == 0 and !self.slot.inline_node.heap_owned and
+            self.slot.inline_node.lifecycle == .pristine and !self.slot.inline_node.payload_present;
     }
 
     fn validatePrepared(
@@ -6941,6 +6953,7 @@ const ReconnectGenerationTestState = if (builtin.is_test) struct {
 const ReconnectGenerationTestArgs = struct {
     allocator: std.mem.Allocator,
     stream_id: u64,
+    metadata: []const u8 = "",
 };
 
 const ReconnectResidentLedger = if (builtin.is_test) struct {
@@ -7081,6 +7094,188 @@ fn initReconnectTestGeneration(
     };
     errdefer out.attachment.deinit();
     try out.attachment.initScreen(screen_stream.codec_version);
+    if (args.metadata.len != 0) {
+        try out.observation.replace(args.allocator, .{
+            .availability = .current,
+            .revision = args.stream_id,
+            .observer_generation = args.stream_id,
+            .title_generation = @intCast(args.stream_id),
+            .size = .{ .cols = 80, .rows = 24 },
+            .cwd = args.metadata,
+        });
+    }
+}
+
+pub const rss_testing_api = if (builtin.is_test) struct {
+    const resident_budget = @import("reconnect_resident_budget.zig");
+    pub const owner_count: usize = resident_budget.max_entries;
+    pub const max_entry_bytes: usize = resident_budget.max_entry_bytes;
+    pub const max_tracked_bytes: usize = resident_budget.max_tracked_bytes;
+    pub const metadata_bytes_per_generation: usize = 128 * 1024;
+
+    const Fixture = struct {
+        proxy: stable_screen_source.StableScreenSource = undefined,
+        owner: ReconnectGenerationOwner = .{},
+        prepared: PreparedReconnect = .{},
+        proxy_initialized: bool = false,
+        initialized: bool = false,
+        pressured: bool = false,
+    };
+
+    pub const Snapshot = extern struct {
+        generation_count: u64,
+        live_bytes: u64,
+        peak_bytes: u64,
+        live_allocations: u64,
+        peak_allocations: u64,
+    };
+
+    pub const Workload = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        ledger: ReconnectResidentLedger,
+        metadata: []u8,
+        fixtures: []Fixture,
+
+        pub fn initInPlace(self: *Workload, allocator: std.mem.Allocator, io: std.Io) !void {
+            const metadata = try allocator.alloc(u8, metadata_bytes_per_generation);
+            errdefer allocator.free(metadata);
+            @memset(metadata, 'r');
+            const fixtures = try allocator.alloc(Fixture, owner_count);
+            errdefer allocator.free(fixtures);
+            for (fixtures) |*fixture| fixture.* = .{};
+            self.* = .{
+                .allocator = allocator,
+                .io = io,
+                .ledger = .{ .parent = allocator },
+                .metadata = metadata,
+                .fixtures = fixtures,
+            };
+            errdefer self.deinit();
+            for (self.fixtures, 0..) |*fixture, index| {
+                try fixture.proxy.initUnavailableInPlace(
+                    allocator,
+                    io,
+                    .{ .cols = 80, .rows = 24 },
+                );
+                fixture.proxy_initialized = true;
+                fixture.owner = .{};
+                fixture.prepared = .{};
+                fixture.initialized = false;
+                fixture.pressured = false;
+                try fixture.owner.initInPlace(
+                    self.ledger.allocator(),
+                    &fixture.proxy,
+                    2,
+                    ReconnectGenerationTestArgs{
+                        .allocator = self.ledger.allocator(),
+                        .stream_id = @as(u64, @intCast(0xE320 + index * 2)),
+                        .metadata = self.metadata,
+                    },
+                    initReconnectTestGeneration,
+                );
+                fixture.initialized = true;
+            }
+        }
+
+        pub fn pressure(self: *Workload) !void {
+            for (self.fixtures, 0..) |*fixture, index| {
+                if (!fixture.initialized or fixture.pressured) return error.InvalidState;
+                try fixture.owner.prepare(
+                    &fixture.prepared,
+                    ReconnectGenerationTestArgs{
+                        .allocator = self.ledger.allocator(),
+                        .stream_id = @as(u64, @intCast(0xE321 + index * 2)),
+                        .metadata = self.metadata,
+                    },
+                    initReconnectTestGeneration,
+                );
+                errdefer fixture.owner.abort(&fixture.prepared) catch
+                    @panic("RSS candidate abort failed");
+                try fixture.owner.publish(&fixture.prepared);
+                fixture.pressured = true;
+            }
+        }
+
+        pub fn snapshot(self: *const Workload) Snapshot {
+            var generation_count: u64 = 0;
+            for (self.fixtures) |fixture| {
+                if (fixture.initialized) generation_count += 1;
+                if (fixture.pressured) generation_count += 1;
+            }
+            return .{
+                .generation_count = generation_count,
+                .live_bytes = @intCast(self.ledger.live_bytes),
+                .peak_bytes = @intCast(self.ledger.peak_bytes),
+                .live_allocations = @intCast(self.ledger.live_allocations),
+                .peak_allocations = @intCast(self.ledger.peak_allocations),
+            };
+        }
+
+        pub fn deinitAndSnapshot(self: *Workload) Snapshot {
+            for (self.fixtures) |*fixture| {
+                if (fixture.initialized) {
+                    if (!std.meta.eql(fixture.prepared, PreparedReconnect{}))
+                        fixture.owner.abort(&fixture.prepared) catch
+                            @panic("RSS candidate cleanup failed");
+                    if (fixture.pressured) {
+                        fixture.owner.reclaimRetiring() catch
+                            @panic("RSS retiring cleanup failed");
+                        fixture.pressured = false;
+                    }
+                    deinitReconnectTestOwner(&fixture.owner, &fixture.proxy);
+                    fixture.initialized = false;
+                    fixture.proxy_initialized = false;
+                } else if (fixture.proxy_initialized) {
+                    _ = fixture.proxy.close() catch
+                        @panic("RSS proxy cleanup failed");
+                    fixture.proxy.deinit();
+                    fixture.proxy_initialized = false;
+                }
+            }
+            const final = self.snapshot();
+            if (final.generation_count != 0 or final.live_bytes != 0 or
+                final.live_allocations != 0)
+                @panic("RSS workload ledger did not reach final zero");
+            self.allocator.free(self.fixtures);
+            self.allocator.free(self.metadata);
+            self.* = undefined;
+            return final;
+        }
+
+        pub fn deinit(self: *Workload) void {
+            _ = self.deinitAndSnapshot();
+        }
+    };
+} else struct {};
+
+test "CR2e-e3a2 RSS workload는 64 current와 candidate retiring 압력을 ledger final zero로 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var workload: rss_testing_api.Workload = undefined;
+    // 대량 실제 세대의 목적은 제품 allocator RSS를 재는 것이므로 DebugAllocator를
+    // 거치지 않는다. 논리 누수는 workload ledger의 final-zero가 별도로 닫는다.
+    try workload.initInPlace(std.heap.c_allocator, testing.io);
+    var workload_live = true;
+    defer if (workload_live) workload.deinit();
+
+    const baseline = workload.snapshot();
+    try testing.expectEqual(@as(u64, rss_testing_api.owner_count), baseline.generation_count);
+    try testing.expect(baseline.live_bytes != 0);
+    try testing.expect(baseline.live_allocations != 0);
+
+    try workload.pressure();
+    const pressure = workload.snapshot();
+    try testing.expectEqual(@as(u64, rss_testing_api.owner_count * 2), pressure.generation_count);
+    try testing.expect(pressure.live_bytes > baseline.live_bytes);
+    try testing.expect(pressure.live_allocations > baseline.live_allocations);
+    try testing.expect(pressure.peak_bytes >= pressure.live_bytes);
+    try testing.expect(pressure.peak_allocations >= pressure.live_allocations);
+
+    const final = workload.deinitAndSnapshot();
+    workload_live = false;
+    try testing.expectEqual(@as(u64, 0), final.generation_count);
+    try testing.expectEqual(@as(u64, 0), final.live_bytes);
+    try testing.expectEqual(@as(u64, 0), final.live_allocations);
 }
 
 fn failReconnectTestGeneration(

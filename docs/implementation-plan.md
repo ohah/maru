@@ -154,8 +154,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
    **e3a1 완료** (candidate allocation 1개, Debug 3,104바이트/ReleaseFast 3,088바이트; abort baseline 복원,
    두 reconnect 뒤 heap current 1개, teardown final 0)와,
-   별도 ReleaseFast process RSS를 측정해 candidate+retiring count/byte의 app-global exact cap과 cap+1 mutation 0을
-   수치로 고정하는 **e3a2**로 나뉜다. 측정 전 임의 상한을
+   별도 ReleaseFast process RSS를 측정하고, generation당 구조적 charge 상한
+   `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은 64개 fixed
+   inventory를 검증하는 **e3a2**로 나뉜다. 이 둘의 곱은 정책 예산이 아니라 inventory가 표현 가능한
+   `max_tracked_bytes`이며 app-global admission 상한은 e3b의 실제 동시 runtime 모델에서 별도로 결정한다.
+   candidate/current/retiring/retry 역할은 final-address fixed entry가 소유하고 구조적 bound+1은
+   allocation·role mutation 0이어야 한다. ReleaseFast exec child는
+   64 current→64 candidate+retiring 압력을 만들고 부모가 PID RSS/footprint를 반복 측정하며, typed artifact validator가
+   logical delta+64 MiB 측정 tolerance와 actual cleanup receipt를 독립 재계산한다. 측정 전 임의 상한을
    제품 정책으로 채택하거나 reconnect ingress를 열지 않는다. **e3b**는 그 budget lease 아래 현재 `retain`인
    mutation seal·authority commit·direct-release retry·termination/abandon effect를 actual stable input/close owner에
    결속하고, product effect 성공 뒤에만 reducer state를 게시한다. **e3c**는 sole external reconnect ingress와

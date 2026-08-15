@@ -206,8 +206,9 @@ Maru 작업에서 사용하는 기본 명령이다.
   256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다. 현재 generation mutation이 없는 decision은
   `retain`으로만 분류한다. mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,
   close 경쟁·mixed outcome·app-global count/byte budget·peak RSS는 e3 범위이므로 e2b만으로 CR2e 완료를 뜻하지 않는다.
-  다음 e3는 e3a1 actual candidate/retiring allocator-ledger logical charge, e3a2 별도 ReleaseFast RSS 측정과
-  근거 기반 app-global cap/cap+1/final-zero, e3b budget lease 아래 mutation·authority·retry·close actual effect, e3c sole external ingress와
+  다음 e3는 e3a1 actual candidate/retiring allocator-ledger logical charge, e3a2 fixed inventory bound와 별도
+  ReleaseFast RSS 측정 prerequisite, e3b 실제 동시 runtime 모델 기반 app-global cap/cap+1 및 budget lease 아래
+  mutation·authority·retry·close actual effect, e3c sole external ingress와
   close 경쟁·mixed outcome 순서로 닫는다. e3a 측정 전 reconnect publish를 제품 entrypoint에서 열거나 임의 상한을
   정책으로 고정하지 않는다.
 - 영속 세션 호스트 CR2e-e3a1 resident ledger gate: `zig build test-session-host-cr2e-e3a1`. CR2e-e2b를 상속하고
@@ -216,7 +217,20 @@ Maru 작업에서 사용하는 기본 명령이다.
   abort의 baseline 복원, publish 동안 current+retiring 동시 resident, reclaim 뒤 heap current 1개만 남는 두 연속
   reconnect, owner teardown final 0을 runtime 2개+boundary 1개로 exact-count한다. 이는 가변 screen/metadata를
   포함하지 않는 allocator logical base lower bound이며 raw process RSS나 app-global cap을 대신하지 않는다.
-  실제 bounded workload를 쓰는 별도 ReleaseFast child RSS와 근거 기반 cap은 e3a2다.
+  실제 bounded workload의 별도 ReleaseFast child RSS와 structural tracked bound는 e3a2, 근거 기반 정책 cap은 e3b다.
+- 영속 세션 호스트 CR2e-e3a2 resident budget/RSS gate: `zig build test-session-host-cr2e-e3a2`. CR2e-e3a1을
+  상속한다. generation당 구조적 charge는 host의 `base_update_max_bytes`이고 fixed inventory는 reconnect mutation
+  lease와 같은 64개다. 둘의 곱은 표현 가능한 tracked bound일 뿐 app-global 정책 예산이 아니며, 실제 정책은 e3b의
+  동시 runtime 모델에서 결정한다. fixed entry
+  budget 5개와 typed JSON validator 2개를 Debug·ReleaseFast로, actual 64 current→64 candidate+retiring workload
+  1개와 별도 exec ReleaseFast child artifact 1개 + parent/watchdog artifact 2개를 ReleaseFast로, source boundary 1개를 Debug·ReleaseFast로
+  exact-count한다. child는 parent-minted 128-bit run nonce, `LOCAL_PEERPID`, stream type을 검증하고 stdio/FD 198 외
+  inherited descriptor를 닫는다. RSS artifact는 `tests/artifacts/perf/session-host-reconnect-rss-macos.json`이며 독립 validator가
+  baseline/pressure 원시 표본 각 7개의 process identity와 중앙값, logical/RSS/footprint delta, 64 MiB allocator
+  측정 tolerance, child exit 0과 actual final generation/bytes/allocation zero receipt를 다시 계산한다. 64 MiB는
+  allocator overhead의 측정 근거나 e3b 정책 예산이 아니라 gross anomaly를 잡는 conservative harness tolerance다. e3b의
+  budget lease 실제 stable-owner 결속과 e3c의 sole ingress·close/mixed outcome은 아직 포함하지 않으므로 이 gate만으로
+  CR2e 또는 CR4 완료를 뜻하지 않는다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

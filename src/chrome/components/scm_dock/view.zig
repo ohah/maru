@@ -342,6 +342,7 @@ const Writer = struct {
             // 행이 24px로 촘촘하다. `roomy`면 상자가 행 높이를 그대로 먹어 지름 24px 원이 되고 행
             // 위아래 경계에 닿는다(사용자 지적 2026-08-15) — 라벨 기준으로 잡아 여백을 남긴다.
             .fit = .snug,
+            .corner = .square,
             .label_role = count_role,
         });
 
@@ -702,19 +703,23 @@ fn renderTabs(storage: *TestStorage, width: f32, count: u32) !draw.ChromeDraw {
     });
 }
 
-/// 활성 탭 밑줄. 개수 배지도 `accent_bar`를 쓰므로 **모서리가 각진 것**으로 가른다(밑줄은 반지름 0).
+/// 활성 탭 밑줄(위 `badge_min_height`가 배지와 가른다).
 fn findTabUnderline(draws: draw.ChromeDraw) ?draw.Op.Quad {
     for (draws.ops) |op| switch (op) {
-        .quad => |quad| if (quad.fill_role == .accent_bar and quad.corner_radii[0] == 0) return quad,
+        .quad => |quad| if (quad.fill_role == .accent_bar and quad.rect.h < badge_min_height) return quad,
         else => {},
     };
     return null;
 }
 
-/// 개수 배지 quad. **모서리가 둥근 것**으로 고른다 — 이 컴포넌트에서 행 배경은 반지름이 0이라 섞이지 않는다.
+/// 배지와 활성 탭 밑줄을 가르는 높이. 둘 다 `accent_bar`이고 **둘 다 각지므로**(목록은 캡슐이 아니다)
+/// 모양으로는 못 가른다 — 밑줄은 얇은 막대이고 배지는 글자가 들어가는 상자다.
+const badge_min_height: u32 = 6;
+
+/// 개수 배지 quad.
 fn findBadgeQuad(draws: draw.ChromeDraw) ?draw.Op.Quad {
     for (draws.ops) |op| switch (op) {
-        .quad => |quad| if (quad.corner_radii[0] > 0) return quad,
+        .quad => |quad| if (quad.fill_role == .accent_bar and quad.rect.h >= badge_min_height) return quad,
         else => {},
     };
     return null;
@@ -979,8 +984,8 @@ test "그룹 개수는 배지 상자 안에 놓인다(숫자만 떠 있지 않�
     try testing.expect(label.origin.x <= box.x + @as(i32, @intCast(box.w)));
     try testing.expect(label.origin.y >= box.y);
     try testing.expect(label.origin.y <= box.y + @as(i32, @intCast(box.h)));
-    // 반지름은 높이의 절반 — 양끝이 반원인 pill이다(모서리만 살짝 둥근 카드가 아니다).
-    try testing.expectEqual(@as(u16, @intCast(box.h / 2)), pill.corner_radii[0]);
+    // **각진 모서리다**(사용자 결정) — 목록 행이 촘촘하고 이웃이 각진 글자라 개수만 둥글면 혼자 튄다.
+    try testing.expectEqual(@as(u16, 0), pill.corner_radii[0]);
     // **채운 칩**이다. 테두리만 있는 상자는 속이 빈 사각형으로 보였다(사용자 지적).
     try testing.expectEqual(tokens.ColorRole.accent_bar, pill.fill_role);
     try testing.expectEqual(@as(?tokens.ColorRole, null), pill.border_role);

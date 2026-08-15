@@ -1798,6 +1798,21 @@ pub fn agentIconCodepoint(kind: AgentKind) u21 {
 /// 아이콘 펄스 off 위상에서 쓰는 어두운 색. 브랜드색을 배경 쪽으로 낮춘다(고정 비율). 깜빡임이 아니라 밝기 변조라
 /// 글자가 사라지지 않고 부드럽게 맥동한다(접근성 — 급격한 on/off 회피). 비율 45%는 full-color와 충분히 구분되되
 /// 너무 어둡지 않은 값으로 택했다.
+/// 헤더 밴드 경로를 어디 기준으로 보일지. **비교는 그 목록을 읽은 저장소를 안다** — 활성 저장소가
+/// 그 사이 다른 곳으로 옮겨 갔어도 그 비교는 자기 저장소 기준이어야 한다.
+///
+/// 셋 다 없으면 빈 문자열이고, 그때 `displayRelative`가 절대경로를 그대로 돌려준다(지금까지의 동작).
+pub fn breadcrumbRootFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
+    if (entry.kind == .diff and entry.diff_repo.len > 0) return entry.diff_repo;
+    if (self.git_repo) |repo| return repo;
+    // 탐색기 루트가 하나면 그것을 쓴다. 여럿이면 어느 것 기준인지 모호하므로 자르지 않는다 —
+    // 잘못 자르면 화면이 **다른 저장소의 위치**를 말하게 된다.
+    if (self.file_tree.rootCount() == 1) {
+        if (self.file_tree.rootAt(0)) |root| return root;
+    }
+    return "";
+}
+
 fn dimRgb(c: maru.color.Rgb) maru.color.Rgb {
     return .{
         .r = @intCast(@as(u16, c.r) * 45 / 100),
@@ -14321,9 +14336,13 @@ pub const AppSession = struct {
                             }
                         }
                         const cols: u16 = @intCast(@min(band.band.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+                        // **좁은 밴드를 의미 있는 구간에 쓴다.** 절대경로를 그대로 주면 넘칠 때 앞을
+                        // 생략하므로(`.head`) 폭이 `/Users/이름/Documents/...`에 먹히고, 정작 저장소 안
+                        // 위치가 밀려 나간다(native-editor-ui.md §7.5 — 경로 축).
+                        const header_root = breadcrumbRootFor(self, band.entry);
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
-                            band.entry.path,
+                            maru.session.repo_path.displayRelative(band.entry.path, header_root),
                             band.entry.kind,
                             band.entry.mode,
                             band.entry.dirty,

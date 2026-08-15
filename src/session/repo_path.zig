@@ -85,3 +85,53 @@ test "`..`를 포함하는 **이름**은 통과한다(세그먼트만 본다)" {
     try testing.expect(isSafeRelative("..hidden"));
     try testing.expect(isSafeRelative("a/..b/c"));
 }
+
+/// 화면에 보일 경로. `root` 아래면 **그 아래만** 남기고, 아니면 받은 것을 그대로 돌려준다.
+///
+/// **왜 필요한가.** 헤더 밴드는 한 줄이라 폭이 좁고, 넘치면 앞을 생략한다(`appendEllipsizedTitle`의
+/// `.head`). 절대경로를 그대로 주면 그 좁은 폭이 `/Users/이름/Documents/...`에 쓰이고, 정작 사용자가
+/// 알고 싶은 저장소 안 위치가 밀려 나간다. 루트 기준으로 자르면 같은 폭에 의미 있는 구간이 들어온다
+/// (VSCode가 workspace 상대로 보이는 것과 같은 이유).
+///
+/// **경계를 문자로 확인한다.** 단순 접두 비교는 `/a/proj`가 `/a/project/x`에 걸린다 — 두 경로는 아무
+/// 관계가 없는데 `/x`만 남아 **엉뚱한 위치를 보여준다.**
+///
+/// 할당하지 않는다(입력의 부분 슬라이스다).
+pub fn displayRelative(path: []const u8, root: []const u8) []const u8 {
+    if (root.len == 0 or path.len == 0) return path;
+    // 루트의 끝 구분자는 무시한다(`/a/b`와 `/a/b/`가 같은 뜻이다).
+    var r = root;
+    while (r.len > 1 and r[r.len - 1] == '/') r = r[0 .. r.len - 1];
+    if (path.len < r.len or !std.mem.eql(u8, path[0..r.len], r)) return path;
+    if (path.len == r.len) return std.fs.path.basename(path); // 루트 자신이면 이름만
+    if (path[r.len] != '/') return path; // 경계가 아니다 — `/a/proj` vs `/a/project`
+    var rest = path[r.len + 1 ..];
+    while (rest.len > 0 and rest[0] == '/') rest = rest[1..]; // `//` 방어
+    return if (rest.len == 0) std.fs.path.basename(path) else rest;
+}
+
+test "루트 아래면 그 아래만 남는다" {
+    try std.testing.expectEqualStrings(
+        "src/session/editor/diff.zig",
+        displayRelative("/Users/u/work/maru/src/session/editor/diff.zig", "/Users/u/work/maru"),
+    );
+    // 끝 구분자가 있어도 같다.
+    try std.testing.expectEqualStrings(
+        "a.zig",
+        displayRelative("/repo/a.zig", "/repo/"),
+    );
+}
+
+test "루트 밖이면 그대로 둔다 — 특히 접두만 같은 경로" {
+    // **이것이 이 함수의 존재 이유 절반이다.** 접두 비교만 하면 `/a/project/x`가 `/a/proj` 아래로
+    // 보여 `ect/x`가 남는다 — 아무 관계 없는 두 경로인데 화면은 그럴듯한 위치를 말한다.
+    try std.testing.expectEqualStrings("/a/project/x", displayRelative("/a/project/x", "/a/proj"));
+    try std.testing.expectEqualStrings("/other/x", displayRelative("/other/x", "/repo"));
+}
+
+test "루트가 없거나 경로가 루트 자신이면" {
+    try std.testing.expectEqualStrings("/a/b", displayRelative("/a/b", ""));
+    try std.testing.expectEqualStrings("repo", displayRelative("/x/repo", "/x/repo"));
+    try std.testing.expectEqualStrings("repo", displayRelative("/x/repo/", "/x/repo"));
+    try std.testing.expectEqualStrings("", displayRelative("", "/x"));
+}

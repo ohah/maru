@@ -394,7 +394,12 @@ pub const inventory = [_]Proof{
     // (`MARU_FORCE_SCM_HOVER`)도 같은 루프에 붙는다 — 행 동작(`+`/`−`)은 호버할 때만 그려지는 계약이라
     // 포인터 없는 헤드리스 캡처로는 그 버튼이 화면에 나오는지 확인할 방법이 없었다.
     // count는 내내 2 그대로다 — 반사 접근은 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "880ab712b78e0279fa7654cd40b2666d5ccbe2c2e497932792f8a52fc38fab15" },
+    //
+    // 편집기 본문 사각이 헤더 밴드를 빼도록 바뀌고(파일 Term은 탭 바 아래 밴드를 하나 더 쓰는데
+    // 편집기가 pane 사각에 직접 그려 겹쳤다), 그 밴드의 breadcrumb가 저장소 루트 기준 상대경로를
+    // 그리게 됐다(`breadcrumbRootFor` 추가 + 그 호출). count는 2 그대로다 — 새 `@field` 반사가 없고
+    // Client 구성·receiver 집합을 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9b93fa33099a022012f93ff9694c74c0d3405ab8f2e06bdf2462d30001b65725" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

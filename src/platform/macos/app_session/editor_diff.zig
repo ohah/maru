@@ -1165,3 +1165,42 @@ test "긴 줄 하나가 바뀌어도 마크 계산이 줄 길이만큼 잡지 �
     // 소비하는 자리로 되돌리면 이 단언이 죽는다.
     try testing.expect(used < 64 * 1024);
 }
+
+test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지 않는다 — poll 전체를 흔든다" {
+    // 지금까지는 `materialize`·`computeMarks`만 따로 주입했다(각각 이중 해제를 잡았다). 그 둘을
+    // 부르는 **경로 전체**(줄 분할·대응·표시 배열·마크)를 한 번에 흔들어, 아직 안 본 자리에 같은
+    // 모양이 남아 있는지 본다. 세션 allocator는 init에 고정이라 `checkAllAllocationFailures`를
+    // 그대로 못 쓴다 — 세션을 실패 allocator로 만들고 **init이 끝난 뒤부터** 실패 지점을 민다
+    // (`editor.zig`의 파일 열기 테스트와 같은 방법).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+
+    var failed_steps: usize = 0;
+    var ok_steps: usize = 0;
+    var step: usize = 0;
+    while (step < 120) : (step += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{});
+        const allocator = fa.allocator();
+        var fx = try Fixture.init(allocator);
+        defer fx.deinit(allocator);
+
+        var entry = testEntry(
+            "fn main() {\n  var a = 1;\n  log(a);\n}\n",
+            "fn main() {\n  var b = 2;\n  var c = 3;\n  log(b);\n}\n",
+        );
+        fx.term.file_entry = &entry;
+
+        fa.fail_index = fa.allocations + step; // 여기서부터 실패한다
+        poll(fx.session, fx.term);
+        if (fx.term.rt.editor_diff) |st| {
+            if (std.meta.activeTag(st.view) == .compare and st.left_texts.len > 0) ok_steps += 1 else failed_steps += 1;
+        } else failed_steps += 1;
+        // 실패했든 아니든 **다시 한 번** 굴린다 — 반쯤 지어진 상태에서 이어 계산하는 자리가 있으면
+        // 여기서 드러난다(정상 경로만 도는 테스트로는 절대 안 보인다).
+        poll(fx.session, fx.term);
+        invalidate(fx.session, fx.term);
+    }
+    // **공허해질 수 없게 센다** — 한 번도 실패하지 않으면 이 테스트는 아무것도 지키지 않는다.
+    try testing.expect(failed_steps >= 5);
+    try testing.expect(ok_steps >= 1);
+}

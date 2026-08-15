@@ -19,8 +19,8 @@
 | W0 | 계약 문서(`windows-platform.md`) + 이 계획. 코드 0 | 완료 |
 | W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더해 기존 cwd 경로로 넘긴다. **L1이라 Windows와 독립**이고 macOS에서 헤드리스로 검증된다 | 미착수 |
 | W2 | **`main.zig` Windows 컴파일** — unix domain socket과 POSIX 파일 모드 2곳을 graceful 폴백으로. named pipe 이식은 아니다 | 미착수 |
-| W3 | **`SpawnRequest` 중립화** — `command`+`args`·`login`·`zdotdir`·`term`의 POSIX 전제를 걷어낸다(계약 §4) | 미착수 |
-| W4 | **ConPTY 백엔드** — `src/pty/windows.zig`. 필수 13 표면(계약 §4). PoC 코드가 있으나 **실기 세션 확인이 선행**(계약 §6) | 미착수 |
+| W3 | **`SpawnRequest` 중립화** — `login`은 의도로 재문서화, `zdotdir`은 "통합 자산 디렉터리"로 일반화, `term`은 백엔드 위임. `command`+`args`는 **그대로**. **wire tag는 건드리지 않는다**(계약 §4.2). macOS 동작 변화 0 | 미착수 |
+| W4 | **ConPTY 백엔드** — `src/pty/windows.zig`. 필수 13 표면. 파이프는 `CreatePipe`가 아니라 **overlapped named pipe**여야 한다(계약 §4.1). PoC 코드가 있으나 **실기 세션 확인이 선행**(계약 §6) | 미착수 |
 | W5 | **셸 통합 주입** — cmd `PROMPT`, PowerShell `prompt` 오버라이드(계약 §3.3). 사용자 프롬프트 보존 | 미착수 |
 | W6 | **헤드리스 세로 슬라이스** — `zig build demo`가 Windows에서 산출물을 낸다. 여기까지가 아키텍처 증명 | 미착수 |
 | W7 | **Win32 호스트 + 렌더 백엔드** — 창·입력·IME·클립보드. **선행 결정 2건**(GPU 백엔드, 웹뷰 합성 모델)이 계약 §8에 있다 | 미착수 |

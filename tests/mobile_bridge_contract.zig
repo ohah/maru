@@ -1204,3 +1204,98 @@ test "조합 중 문자열: 버퍼를 넘치면 잘린 글자를 통째로 버�
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_set_preedit("", 0);
 }
+
+// ── 설정 화면(라우터) — **파일 맨 뒤에 둔다** ─────────────────────────────────
+//
+// 설정을 열면 한글 라벨 55줄이 구워져 **아틀라스를 통째로 흔든다**. 가운데 두면 뒤에 오는
+// 등록부 테스트가 다른 상태를 보고 깨진다(실제로 깨뜨려 보고 옮겼다). 여기 로직은 포인터
+// 라우팅이라 슬롯이 없어도 판정이 그대로 선다.
+
+// **좌표를 여기 다시 적지 않는다.** 톱니 자리를 테스트가 따로 계산하면 레이아웃이 바뀔 때
+// 테스트만 맞고 화면은 틀리게 된다(브리지가 여러 번 겪은 결함이다). 대신 **쓸어 보고 행동을
+// 잰다** — 어디가 먹는지를 브리지에게 물어 그 모양이 계약과 맞는지 본다.
+
+/// 하단 줄을 가로로 쓸어 chrome 이 down 을 먹는 구간을 찾는다. `{시작, 폭}`.
+fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
+    var first: ?f32 = null;
+    var last: f32 = 0;
+    var x: f32 = 0;
+    while (x < @as(f32, @floatFromInt(w))) : (x += 1) {
+        const took = bridge.maru_mobile_chrome_pointer(0, x, y) == 1;
+        if (took) {
+            _ = bridge.maru_mobile_chrome_pointer(3, x, y); // 잡은 것은 바로 취소해 다음 쓸기에 안 남긴다
+            if (first == null) first = x;
+            last = x;
+        }
+    }
+    if (first) |f| return .{ .x0 = f, .width = last - f + 1 };
+    return .{ .x0 = 0, .width = 0 };
+}
+
+// **설정 입구는 손가락 크기여야 한다.** 아이콘은 24 로 그리지만 받는 자리는 44 다(§5.1 —
+// 작게 그리고 넓게 받는다). 이 줄에서 먹는 구간이 정확히 하나이고 그 폭이 44 인지 본다.
+test "톱니 히트는 44 폭 한 구간이다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    try std.testing.expectEqual(@as(f32, 44), span.width);
+    bridge.maru_mobile_clear_error();
+}
+
+// **톱니를 안 짚은 down 은 chrome 이 안 먹는다.** 남아 있던 상태 때문에 아무 데나 먹으면 그
+// 손짓이 통째로 사라진다(코드 리뷰가 잡은 결함). 잡았다 취소한 뒤에도 같아야 한다.
+test "톱니 밖 down 은 chrome 이 안 먹는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    try std.testing.expect(span.width > 0);
+
+    // 톱니를 잡았다 취소해 내부 상태를 남긴다
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22));
+    _ = bridge.maru_mobile_chrome_pointer(3, span.x0 + 1, 874 - 22);
+    // 그 뒤 본문 한가운데 down 은 chrome 이 안 먹어야 한다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 200, 300));
+    bridge.maru_mobile_clear_error();
+}
+
+// **키바 키를 톱니가 훔치지 않는다.** chrome 을 키바보다 먼저 묻기 때문에, 톱니 rect 가 위로
+// 번지면 그 x 에 있는 키의 밑동이 조용히 안 눌린다(코드 리뷰가 잡았다). 키 한가운데를 눌러
+// **키바가 먹고 chrome 은 안 먹는지** 본다.
+test "키바 키 자리는 chrome 이 안 먹는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    var checked: u32 = 0;
+    while (i < bridge.maru_mobile_keybar_count()) : (i += 1) {
+        if (bridge.maru_mobile_keybar_rect(i) == 0) continue; // 창 밖 키
+        const c = keyCenter(i);
+        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, c.x, c.y));
+        try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_pointer(0, c.x, c.y));
+        _ = bridge.maru_mobile_keybar_pointer(3, c.x, c.y);
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
+    bridge.maru_mobile_clear_error();
+}
+
+// **밀린 화면이 있으면 그 아래는 없는 것과 같다.** 설정이 떠 있는 동안에는 본문 한가운데
+// down 도 chrome 이 먹어야 한다 — 안 그러면 설정 위를 눌렀는데 터미널이 스크롤된다.
+test "설정이 뜨면 화면 전체를 먹고, 뒤로가기로 빠진다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    const gx = span.x0 + 1;
+    const gy: f32 = 874 - 22;
+
+    // 톱니를 탭해 민다(down→up, 임계 아래).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, gx, gy));
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(2, gx, gy));
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, 200, 300));
+    _ = bridge.maru_mobile_chrome_pointer(3, 200, 300);
+
+    // **뺄 것이 있으면 1, 없으면 0.** host 는 0 일 때만 자기 관례(앱 내리기)로 간다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_pop_screen());
+
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 200, 300));
+    bridge.maru_mobile_clear_error();
+}

@@ -1566,7 +1566,12 @@ const TermRuntime = struct {
     editor_lines: []const []const u8 = &.{},
     /// 열려 있는 파일의 절대 경로(owned). 탭 라벨과 컨트롤 플레인 `EditorMeta.path`가 읽는다.
     editor_path: ?[]u8 = null,
-    /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 붙으면 여기가 움직인다(지금은 0 고정).
+    /// 마지막으로 그린 프레임이 센 **문서 전체 시각 행 수**(랩 포함). 0이면 아직 안 그렸다.
+    ///
+    /// **렌더만 접힘을 안다.** 스크롤 입력은 논리 줄만 아는데, 랩된 문서에서 "화면에 다 들어가는가"는
+    /// 시각 행으로만 판정된다 — 그 값을 여기 실어 입력이 읽는다.
+    editor_total_visual_rows: u32 = 0,
+    /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 여기를 움직인다.
     editor_first_line: usize = 0,
     /// N1.5 diff Term(`kind == .editor` + entry가 비교)의 상태. **행은 줄 배열을, 줄 배열은 entry의
     /// 두 쪽 버퍼를 빌린다** — 그래서 내용이 갈리기 전에 `editor_diff_ops.invalidate`가 불려야 한다.
@@ -3469,6 +3474,10 @@ pub const AppSession = struct {
     // FP3: 파일 패널은 workspace 탭 트리와 독립적인 창-로컬 도크다. 실패 중 deinit을 위해
     // init 가드를 두고, entry의 surface_id는 이 live 모델에만 발급한다(workspace 저장에서 제외).
     dock: dock_panel.DockPanel = undefined,
+    /// 비교를 네이티브 편집기로 열까(`MARU_NATIVE_DIFF`). **init에서 한 번 읽어 둔다** — 분기가
+    /// 프로세스 전역 환경을 직접 읽으면 그 분기를 확인하려는 테스트가 env를 건드려야 하고, 그것이
+    /// 같은 프로세스의 다른 테스트로 샌다.
+    native_diff: bool = false,
     dock_initialized: bool = false,
     /// 확장 grab band 안에서 divider의 정확한 선이 아닌 곳을 눌러도 첫 drag에서 경계가 포인터로 점프하지 않게,
     /// mouse-down 시 실제 dock 시작점과 포인터 사이 signed backing-px 간격을 drag 세션 동안 보존한다.
@@ -16188,6 +16197,8 @@ pub const AppSession = struct {
     /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
     pub fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
         const t = self.appearance.theme;
+        // 한 번만 부른다 — 이 함수는 프레임 경로에 있고, 파생 계산(휘도·대비 바닥)이 호출마다 돈다.
+        const diff_colors = maru.session.syntax_theme.diffFromTheme(t);
         const tc = chrome.tokens.ThemeColors{
             .foreground = t.foreground,
             .sidebar_background = t.sidebar_background,
@@ -16201,8 +16212,8 @@ pub const AppSession = struct {
             .accent = t.accent, // 테마-구동 accent(탭/포커스 언더바·활성 카드 막대·세팅 강조) — 프리셋별 시그니처 색
             // 비교 밴드 색은 **웹과 같은 함수**에서 온다(`syntax_theme.diffFromTheme`) — CM6 화면이 CSS
             // 변수로 받던 그 값이라, 두 화면이 같은 초록·빨강을 쓴다(§7).
-            .diff_added = maru.session.syntax_theme.diffFromTheme(t).added,
-            .diff_removed = maru.session.syntax_theme.diffFromTheme(t).removed,
+            .diff_added = diff_colors.added,
+            .diff_removed = diff_colors.removed,
         };
         // chrome theme = 토큰셋 교체(컴포넌트 불변). rich는 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로(C4a).
         var tk = switch (self.appearance.chrome_theme) {
@@ -16611,6 +16622,7 @@ pub const AppSession = struct {
         if (self.dock_initialized) {
             self.dock.deinit();
             self.dock_initialized = false;
+            self.native_diff = editor_diff_ops.nativeDiffFromEnv(); // 훅은 프로세스 수명 동안 고정이다
         }
         self.drag_overlay_cells_scratch.deinit(self.allocator);
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합

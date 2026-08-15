@@ -81,11 +81,19 @@ pub fn isDiffTerm(term: *const Term) bool {
     return entry.kind == .diff;
 }
 
-/// 비교를 **네이티브 편집기로** 열까. 지금은 훅으로만 켠다 — 기본 경로는 CM6 그대로다(§7의 이관은
-/// 슬라이스 c에서 화면이 서고 골든이 붙은 뒤에 뒤집는다).
-pub fn nativeDiffEnabled() bool {
+/// 비교를 **네이티브 편집기로** 열까. 지금은 훅으로만 켠다 — 기본 경로는 CM6 그대로다(이관은 화면이
+/// 서고 실제 클릭 경로를 확인한 뒤에 뒤집는다).
+///
+/// **세션이 init에서 한 번 읽어 든다**(`AppSession.native_diff`). 분기가 프로세스 전역 환경을 직접
+/// 읽으면 그 분기를 확인하려는 테스트가 env를 건드려야 하고, 그것이 같은 프로세스의 다른 테스트로
+/// 샌다 — 실제로 이 테스트를 쓰다가 그 문제를 만났다.
+pub fn nativeDiffFromEnv() bool {
     const raw = std.c.getenv("MARU_NATIVE_DIFF") orelse return false;
-    const v = std.mem.span(raw);
+    return valueEnables(std.mem.span(raw));
+}
+
+/// 훅 값 하나를 판정한다(순수). 빈 값과 `"0"`은 끈 것으로 본다 — 다른 훅과 같은 관례다.
+pub fn valueEnables(v: []const u8) bool {
     return v.len > 0 and !std.mem.eql(u8, v, "0");
 }
 
@@ -121,6 +129,10 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     st.left_bands = &.{};
     st.right_bands = &.{};
     st.settled = false;
+    // **세로 위치도 처음으로 돌린다.** 800행짜리 비교를 끝까지 굴려 둔 뒤 파일이 바뀌어 10행짜리로
+    // 다시 계산되면, 옛 위치가 남아 본문이 한 행도 안 나오고 배경만 남는다 — "읽는 중" 문구조차
+    // 못 본다(그 상태의 문서는 한 줄이다). 새 내용은 처음부터 보는 것이 맞다.
+    term.rt.editor_first_line = 0;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.
@@ -648,8 +660,9 @@ test "긴 비교가 스크롤된다 — 좌우가 함께 움직이고 끝에서 
     var fx = try Fixture.init(allocator);
     defer fx.deinit(allocator);
     fx.session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+    // **제품과 같은 것을 넘긴다 — leaf 사각이다**(`paneTargetAt`이 그것을 준다). `body`를 넘기면
+    // 탭 바가 두 번 빠져 보이는 행 수가 실제보다 적게 나오고, 상한이 그만큼 커진다.
     const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
-    const body = pane_ops.paneGeometry(fx.session, leaf).body;
 
     // 왼쪽에만 있는 줄이 잔뜩 — 오른쪽은 그만큼 빈 행이라 **행 수 > 오른쪽 문서 줄 수**다.
     var left_buf: std.ArrayList(u8) = .empty;
@@ -667,10 +680,11 @@ test "긴 비교가 스크롤된다 — 좌우가 함께 움직이고 끝에서 
     const rows = fx.term.rt.editor_diff.?.left_texts.len;
     try testing.expect(rows > 200);
 
-    try testing.expect(editor_ops.scrollLines(fx.session, fx.term, body, -5));
+    try testing.expect(editor_ops.scrollLines(fx.session, fx.term, leaf, -5));
     try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_first_line);
 
-    _ = editor_ops.scrollLines(fx.session, fx.term, body, -10_000);
+    _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -10_000);
+    const body = pane_ops.paneGeometry(fx.session, leaf).body;
     const visible = (body.h -| chrome_editor.frame.content_inset_px * 2) / fx.session.cell_height_px;
     // **행 수** 기준으로 멈춘다(오른쪽 문서 줄 수(1)로 잡으면 곧바로 0이 된다).
     try testing.expectEqual(rows - visible, fx.term.rt.editor_first_line);
@@ -680,4 +694,47 @@ test "긴 비교가 스크롤된다 — 좌우가 함께 움직이고 끝에서 
     try testing.expect(draw_result != null);
     defer draw_result.?.dl.deinit(allocator);
     try testing.expect(draw_result.?.dl.cells.len > 0);
+}
+
+test "훅이 켜지면 비교가 편집기 Term으로 열린다 — 꺼져 있으면 지금까지대로다" {
+    // **이 분기에 테스트가 없었다.** 훅·kind 조합이 어긋나도 단위 테스트는 전부 통과하고, 화면에서만
+    // (그것도 훅을 켠 사람에게만) 드러난다. 기본이 CM6 그대로인 것도 함께 고정한다 — 이 작업이
+    // "기본 경로를 바꾸지 않는다"고 말하는 근거가 이 단언이다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 꺼진 상태(기본) — 웹 Term이다.
+    session.native_diff = false;
+    const off = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-diff-off.txt", .diff);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, off.term.kind);
+
+    // 켜진 상태 — 편집기 Term이다.
+    session.native_diff = true;
+    const on = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-diff-on.txt", .diff);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.editor, on.term.kind);
+    // entry는 두 경우 모두 붙는다 — 결과를 흘리는 배관(`takeDiffResult` → entry)이 같기 때문이다.
+    try testing.expect(on.term.file_entry != null);
+    try testing.expectEqual(on.term.surfaceId(), on.term.file_entry.?.surface_id);
+
+    // **비교가 아닌 종류는 훅과 무관하다** — 훅이 켜져 있어도 마크다운은 웹이다.
+    const md = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-diff.md", .markdown);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, md.term.kind);
+}
+
+test "훅 값 판정: 빈 값과 0은 끈 것이다" {
+    try testing.expect(valueEnables("1"));
+    try testing.expect(valueEnables("true"));
+    try testing.expect(!valueEnables(""));
+    try testing.expect(!valueEnables("0"));
 }

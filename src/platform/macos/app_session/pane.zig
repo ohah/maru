@@ -165,7 +165,7 @@ pub fn openFileTermInActivePane(
     // **비교는 네이티브 편집기로도 열 수 있다**(N1.5 b). 훅이 꺼져 있으면 지금까지대로 CM6 웹 Term이다 —
     // 화면이 서고 골든이 붙는 슬라이스 c 전에는 기본 경로를 바꾸지 않는다. entry 소유·`surface_id` 배선은
     // 아래에서 그대로 이어지므로, 결과를 흘리는 배관(`takeDiffResult` → entry)이 두 경우에 같다.
-    const term = if (kind == .diff and editor_diff_ops.nativeDiffEnabled())
+    const term = if (kind == .diff and self.native_diff)
         try editor_ops.createEditorTerm(self)
     else
         try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
@@ -516,7 +516,11 @@ pub fn paneBar(self: *const AppSession, rect: maru.session.SplitRect, pane: *Pan
 /// `paneCellAtExact`를 써서 탭 바·여백 좌표가 첫 행 셀로 접히지 않게 해야 한다(리뷰 지적 — chrome 클릭이 링크로 오인).
 /// `term`도 함께 준다 — surface만으로는 그 Term의 runtime observation(원격 cwd 판정 등)에 닿을 수 없고, 역조회
 /// 헬퍼가 없어 호출자가 pane 트리를 다시 훑어야 하기 때문이다. surface는 그 Term의 것이라 둘은 항상 정합이다.
-pub fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { term: *Term, surface: *maru.session.Surface, rect: maru.session.SplitRect } {
+/// `rect`는 **터미널 격자**(`grid` — 창 padding 안쪽)이고 `leaf_rect`는 그 pane의 leaf 전체다.
+/// 둘을 함께 주는 이유: 터미널은 격자를, **편집기는 `body`를** 쓰는데(창 padding을 적용하지 않는다 —
+/// 2026-08-13 결정) `body`는 leaf에서만 나온다. 격자를 편집기에 넘기면 보이는 행 수가 실제보다 적게
+/// 나와 스크롤 끝에서 빈 줄이 남는다(리뷰 지적).
+pub fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { term: *Term, surface: *maru.session.Surface, rect: maru.session.SplitRect, leaf_rect: maru.session.SplitRect } {
     if (!self.surface_initialized) return null;
     // 입력 hot path라 영속 scratch를 재사용한다(매 mouse-move 할당 회피 — web/dock scratch와 같은 패턴).
     self.pane_target_rects_scratch.clearRetainingCapacity();
@@ -524,7 +528,7 @@ pub fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { term: *Te
     for (self.pane_target_rects_scratch.items) |lr| {
         if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue; // paneAtPoint와 같은 반열린 hit-test
         const target = lr.leaf.activeTerm();
-        return .{ .term = target, .surface = target.surface, .rect = paneTermRect(self, lr.rect) };
+        return .{ .term = target, .surface = target.surface, .rect = paneTermRect(self, lr.rect), .leaf_rect = lr.rect };
     }
     return null;
 }

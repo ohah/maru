@@ -74,7 +74,8 @@ ADE의 핵심이 에이전트 축이므로 이것은 작은 결함이 아니다.
 ### 3.1a 어떤 셸을 띄우는가 — 선택과 기본값
 
 **사용자가 고르는 수단은 이미 있다.** `shell.command`/`shell.args`([configuration-shell.md](configuration-shell.md))가
-그 자리이고, Windows에서도 같은 키를 쓴다 — 새 키를 만들지 않는다.
+그 자리이고, Windows에서도 같은 키가 그대로 동작한다(아래 "OS 분기" 논의는 그 키를 **대체**하는 것이 아니라
+같은 파일을 두 OS에서 공유할 때의 override를 더할지의 문제다).
 
 ```conf
 shell.command = C:\Program Files\PowerShell\7\pwsh.exe
@@ -86,14 +87,25 @@ shell.args    = -NoLogo
 없다. **이 함수가 OS별 갈래를 가져야 한다** — 중립 파일에 POSIX 기본값이 박혀 있는 것은 방금 고친
 `monotonicMs`(§4.1 계열)와 같은 종류의 누수다.
 
-Windows 갈래 후보(**미결정**, §8):
+**Windows 기본값은 PowerShell이다(사용자 확정).** `%COMSPEC%`(=거의 항상 `cmd.exe`)를 따르지 않는다 —
+cmd는 `OSC 133 D`를 원리적으로 못 내고(§3.4) 통합이 가장 약한 셸이라, 그것이 기본이 되면 ADE 기능이 기본
+상태에서 반쯤 꺼진 채 시작한다. 해석 순서:
 
-| | 뜻 | 문제 |
+```text
+MARU_INTERACTIVE_SHELL  →  shell.command(config)  →  pwsh 7  →  Windows PowerShell 5.1  →  cmd
+```
+
+`MARU_INTERACTIVE_SHELL`은 maru 자체 변수라 OS 무관하게 1순위로 유지한다. 마지막 `cmd` 폴백은 PowerShell이
+없는 기기에서도 터미널이 뜨게 하기 위한 것이다(§3.1의 cmd 티어 그대로 동작한다).
+
+**config로 바꿀 수 있어야 한다(사용자 확정).** 수단은 기존 `shell.command`/`shell.args`다. 다만 **아직 정하지
+않은 것**이 하나 있다(§8): maru의 config는 **OS 분기가 없는 단일 파일**(`~/.config/maru/config`)이라,
+dotfiles를 macOS와 공유하면 `shell.command = /bin/zsh` 한 줄이 Windows에서 깨진다. 둘 중 하나를 골라야 한다.
+
+| | 뜻 | 대가 |
 |---|---|---|
-| `%COMSPEC%` | Windows의 "명령 처리기" 변수. `$SHELL`의 가장 가까운 대응 | 거의 항상 `cmd.exe`라 **기본이 cmd**가 된다 — OSC 133 D를 못 내는 셸이 기본이 된다(§3.4) |
-| pwsh 7 → 5.1 → cmd 탐색 | 통합이 가장 온전한 셸을 우선 | 탐색 정책이 생긴다(경로·버전 판정) |
-
-`MARU_INTERACTIVE_SHELL`은 maru 자체 변수라 OS 무관하게 **1순위로 유지**한다.
+| 크로스플랫폼 키 그대로 | `shell.command` 하나. 공유하는 사용자가 알아서 관리 | 한 파일을 두 OS에서 쓰면 반드시 충돌한다 |
+| **OS별 override 도입** | Windows에서만 이기는 키를 둔다 | config 스키마에 **OS 분기라는 새 축**이 생긴다 — 셸만 일회성으로 둘지, 일반 메커니즘으로 만들지가 따라온다 |
 
 **탭별로 다른 셸을 여는 "프로필"은 이 계약 밖이다.** 지금 maru에는 그 개념이 없고(전역 `shell.command` 하나),
 macOS도 마찬가지다. 즉 **Windows 고유 요구가 아니라 제품 기능**이므로 별도 이니셔티브로 둔다 — 다만 Windows는
@@ -318,9 +330,9 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 
 ## 8. 아직 정하지 않은 것
 
-- **Windows 기본 셸 결정 규칙**(§3.1a). `resolveInteractiveShell()`이 POSIX만 안다. `%COMSPEC%`(=cmd)와
-  "pwsh 7 → 5.1 → cmd 탐색" 중 무엇을 기본으로 둘지. 전자는 통합이 가장 약한 셸이 기본이 되고, 후자는
-  탐색 정책이 생긴다.
+- **셸 설정의 OS 분기**(§3.1a). 기본값이 PowerShell인 것과 `shell.command`로 바꾸는 것은 정해졌다. 남은 것은
+  **config가 OS 분기를 가질 것인가**다 — 지금은 단일 파일이라 dotfiles를 공유하면 한 줄이 두 OS에서 충돌한다.
+  일회성 키로 둘지 일반 메커니즘으로 만들지가 함께 따라온다.
 - **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
   포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
   생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.

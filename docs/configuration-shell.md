@@ -4,6 +4,10 @@
 
 > 키 표와 파일 형식은 [설정(config) 파일](configuration.md)이 소유한다. 키별 배경은 [텍스트·테마](configuration-text.md) · [입력·키바인딩](configuration-input.md) · [셸·환경](configuration-shell.md)로 나뉜다.
 
+> **이 문서의 서술은 POSIX 전제다** — `execve` 직접 실행, `login(1)` 래핑, `ZDOTDIR` zsh 통합, terminfo가 그렇다.
+> Windows의 셸 결정(ConPTY·`PROMPT`/`prompt` 통합 주입·OSC 9;9·`SpawnRequest` 중립화)은
+> [Windows 플랫폼](windows-platform.md)이 단일 출처다.
+
 ### 시작 디렉터리 (`workspace.*`)
 
 새로 여는 셸이 어느 디렉터리에서 시작할지 정한다. **Ghostty의 `working-directory` +

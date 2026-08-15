@@ -51,6 +51,8 @@ pub const Props = struct {
 
 pub const Written = struct {
     ops: usize,
+    /// 두 열 중 **더 긴 쪽**의 문서 시각 행 수. 세로를 공유하므로 스크롤 상한은 긴 쪽이 정한다.
+    total_visual_rows: u32,
     visual_rows: usize,
     truncated: bool,
     /// 오른쪽 열이 시작하는 x. **아직 소비처가 없다** — 히트테스트(어느 열을 눌렀나)가 붙을 때
@@ -213,6 +215,7 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     const moved = @min(rw.ops, scratch.ops.len -| lw.ops);
     std.mem.copyForwards(draw.Op, scratch.ops[lw.ops..][0..moved], half.second.ops[0..moved]);
     return .{
+        .total_visual_rows = @max(lw.total_visual_rows, rw.total_visual_rows),
         .ops = lw.ops + moved,
         .visual_rows = @max(lw.visual_rows, rw.visual_rows),
         .truncated = lw.truncated or rw.truncated or moved < rw.ops,

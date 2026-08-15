@@ -583,7 +583,6 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
             .{ .lines = &long_right, .numbers = &long_right_nums, .total_lines = long_rows, .bands = &long_right_bands }
         else
             .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands },
-        // **문서 중간부터 그린다** — 막대가 트랙 가운데 자리에 서고, 맨 위 줄 번호가 12다.
         // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
         .first_line = if (scrolled) 40 else 0,
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),

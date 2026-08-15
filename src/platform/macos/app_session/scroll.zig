@@ -355,7 +355,11 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     const hit = pane_ops.paneTargetAt(self, x_px, y_px);
     // **편집기 pane은 문서를 스크롤한다.** 셸이 아니므로 아래의 스크롤백·mouse reporting 경로를
     // 타면 안 되고(둘 다 core가 있어야 한다), 안 소유하면 편집기 위 휠이 뒤 터미널을 굴린다.
-    if (hit) |h| if (editor_ops.scrollLines(self, h.term, h.rect, lines)) return;
+    //
+    // **세로만 소유한다 — 여기서 반환하면 안 된다.** 아래 가로(트랙패드 2-finger) 블록은 탭 바를
+    // 굴리는 **직교 축**이고, 그것은 편집기 pane 위에서도 살아 있어야 한다(리뷰 지적 — 처음엔
+    // 곧바로 반환해서 편집기 위 가로 스와이프가 아무 일도 안 했다).
+    const editor_owned = if (hit) |h| editor_ops.scrollLines(self, h.term, h.leaf_rect, lines) else false;
     const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ term_ops.activeSurface(self), self.active_pane_rect };
     // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
     // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
@@ -364,7 +368,11 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // pendingResponse를 PTY로 흘린다.
     // host-backed(원격)면 placeholder core엔 mouse_tracking이 없으므로(진짜 코어는 host) 관측에서 온 실제
     // 모드로 게이트하고, 아래 enqueueCoreCommand(report_mouse)가 host로 라우팅돼 host가 인코딩·PTY 주입한다(§입력 패리티).
-    const tracking = if (target.remote != null)
+    // 편집기가 세로를 가져갔으면 아래 터미널 축은 통째로 건너뛴다(코어가 없어 트래킹 조회 자체가
+    // 의미 없다). 가로 축은 그 아래에서 계속 처리된다.
+    const tracking = if (editor_owned)
+        false
+    else if (target.remote != null)
         self.remoteMouseTracking(target.id) != .none
     else blk: {
         target.lockCore(self.io);
@@ -386,7 +394,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
                 while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(target.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
             }
         }
-    } else {
+    } else if (!editor_owned) {
         scrollSurfaceLines(self, target, lines);
     }
     // 가로(트랙패드 2-finger) 델타 → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널)와 **직교 축**이라 한

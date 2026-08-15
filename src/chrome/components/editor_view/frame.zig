@@ -67,7 +67,13 @@ pub const Props = struct {
     line_numbers: ?[]const ?u32 = null,
     /// 문서 전체의 **시각 행** 수를 이미 알고 있으면 여기 넣는다. `null`이면 `lines`를 훑어 센다 —
     /// 줄당 전개가 들어가므로 큰 문서에서는 호출자가 캐시한 값을 주는 편이 낫다(§2 L2 캐시).
+    ///
+    /// **이것만 주면 막대 위치는 여전히 여기서 센다**(화면 맨 위 줄까지의 접두 합계). 그 계수까지
+    /// 건너뛰려면 `first_visual_row`를 함께 준다 — 하나만 주고 나머지를 논리 줄로 대신하면 랩된
+    /// 문서에서 막대가 틀린 자리에 선다(리뷰가 그 상태를 잡았다).
     total_visual_rows: ?u32 = null,
+    /// 화면 맨 위 줄까지의 **시각 행** 수. `null`이면 여기서 센다.
+    first_visual_row: ?u32 = null,
     /// 그릴 수 있는 시각 행 수(뷰포트 높이 / 셀 높이).
     visible_rows: u16,
     wrap: bool,
@@ -87,8 +93,6 @@ pub const Props = struct {
     metrics: scroll_area.ScrollbarMetrics,
 };
 
-/// 호출자 소유 저장소. **어느 것이든 모자라면 그 부분이 잘릴 뿐 죽지 않는다** — 화면이 조금 빈
-/// 것이 크래시보다 낫고, 그 상태는 골든이 즉시 잡는다.
 /// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
 /// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
 pub const RowBand = enum { none, added, removed };
@@ -99,12 +103,10 @@ pub const band_alpha: u8 = 41; // ≈16%
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
 pub const strip_alpha: u8 = 153; // ≈60%
-///
-/// **창 투명도는 이 밴드에 곱해지지 않는다**(`terminal_bg` 역할만 곱해진다). 밴드는 바탕이 아니라
-/// 바탕 위에 얹는 표시라, 글자와 같은 취급이 맞다 — 투명한 창에서 바탕이 옅어질수록 밴드가 함께
-/// 옅어지면 "어느 줄이 바뀌었나"가 창 설정에 따라 사라진다.
 pub const strip_width_px: u16 = 2;
 
+/// 호출자 소유 저장소. **어느 것이든 모자라면 그 부분이 잘릴 뿐 죽지 않는다** — 화면이 조금 빈
+/// 것이 크래시보다 낫고, 그 상태는 골든이 즉시 잡는다.
 pub const Scratch = struct {
     ops: []draw.Op,
     text_bytes: []u8,
@@ -122,6 +124,9 @@ pub const Scratch = struct {
 
 pub const Written = struct {
     ops: usize,
+    /// **문서 전체**의 시각 행 수(랩 포함). 스크롤 입력이 "이 문서가 화면에 다 들어가는가"를 이 값으로
+    /// 판정한다 — 논리 줄 수로는 랩된 문서에서 그 판정이 틀린다(입력 쪽이 접힘을 모른다).
+    total_visual_rows: u32,
     /// 실제로 그린 시각 행 수. 호출자가 스크롤 clamp에 쓴다.
     visual_rows: usize,
     /// 저장소가 모자라 잘린 몫이 있는가. 캡처에는 빈 자리로 나타난다.
@@ -197,6 +202,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // `first_line`(논리)을 그대로 쓰면 랩된 문서에서 막대가 실제보다 위에 선다 — 세로 스크롤이
     // 붙기 전에는 늘 0이라 아무도 못 봤다(적대적 검증에서 드러났다).
     var first_visual: u32 = @intCast(@min(props.first_line, std.math.maxInt(u32)));
+    var counted_rows: usize = 0; // 아래에서 실제로 센 줄 수(막대 위치 계산이 같은 값을 쓴다)
     const total_visual: u32 = props.total_visual_rows orelse blk: {
         var sum: u32 = 0;
         var counted: usize = 0;
@@ -214,15 +220,40 @@ pub fn build(props: Props, scratch: Scratch) Written {
         // **못 센 줄은 논리 줄 하나로 친다.** `row_counts`가 문서보다 짧으면 나머지를 0으로 두게
         // 되는데, 그러면 막대가 문서 끝에 닿아 있는 것처럼 보인다 — 랩을 모르니 최소값으로 잡는다.
         if (props.lines.len > counted) sum +|= @intCast(props.lines.len - counted);
-        // 화면 맨 위 줄까지의 시각 행 수 = 막대가 서야 할 자리. 못 센 줄은 논리 줄 하나로 친다
-        // (위 합계와 같은 규칙 — 두 값이 다른 가정을 쓰면 막대가 문서 끝에서 안 맞는다).
-        var prefix: u32 = 0;
-        for (0..@min(props.first_line, props.lines.len)) |i| {
-            prefix +|= if (i < counted) scratch.row_counts[i] else 1;
-        }
-        first_visual = prefix;
+        counted_rows = counted;
         break :blk sum;
     };
+    // 화면 맨 위 줄까지의 **시각 행 수** = 막대가 서야 할 자리. 논리 줄로 세면 랩된 문서에서 막대가
+    // 실제보다 위에 선다.
+    //
+    // **호출자가 주지 않았으면 여기서 센다** — `total_visual_rows`만 받고 이 값을 논리 줄로 대신하면
+    // 바로 그 문서(큰 문서·랩)에서 막대가 틀린다(리뷰가 그 상태를 잡았다). 계수는 화면 맨 위 줄까지만
+    // 돌고, 이미 센 구간은 그 결과를 재사용한다.
+    if (props.first_visual_row) |given| {
+        first_visual = given;
+    } else {
+        var prefix: u32 = 0;
+        const upto = @min(props.first_line, props.lines.len);
+        for (0..upto) |i| {
+            prefix +|= if (i < counted_rows)
+                scratch.row_counts[i]
+            else
+                content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
+        }
+        first_visual = prefix;
+    }
+
+    // ── 5) diff 밴드 ──────────────────────────────────────────────────────────
+    // **스크롤바보다 먼저 낸다.** 밴드는 열 폭 전체를 덮으므로(스크롤바 gutter 포함) 나중에 내면
+    // 막대 위에 16% 색이 덧칠돼 thumb이 줄무늬로 보인다(리뷰 지적 — 처음엔 마지막에 냈다).
+    //
+    // **본문이 정한 시각 배치를 그대로 따른다**(gutter와 같은 이유) — 랩된 줄은 이어진 조각에도
+    // 같은 색이 깔려야 한 줄로 읽힌다.
+    //
+    // **quad로 낸다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`) 이 밴드는 gutter와
+    // 스크롤바 자리까지 덮어 격자 밖으로 나간다 — 배경(`surface`)이 같은 이유로 quad인 것과 같다.
+    // 글자는 셀 파이프라인이라 늘 quad 위에 그려진다.
+    const band_ops = paintBands(props, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..]);
 
     const sw = scrollbar.build(.{
         .content = .{
@@ -238,18 +269,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
-    }, scratch.ops[bg.ops + cw.ops + gw.ops ..]);
-
-    // ── 5) diff 밴드 ──────────────────────────────────────────────────────────
-    // **본문이 정한 시각 배치를 그대로 따른다**(gutter와 같은 이유) — 랩된 줄은 이어진 조각에도
-    // 같은 색이 깔려야 한 줄로 읽힌다.
-    //
-    // **quad로 낸다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`) 이 밴드는 gutter와
-    // 스크롤바 자리까지 덮어 격자 밖으로 나간다 — 배경(`surface`)이 같은 이유로 quad인 것과 같다.
-    // op 순서상 배경 뒤이므로 배경 위에 얹히고, 글자는 셀 파이프라인이라 늘 그 위에 그려진다.
-    const band_ops = paintBands(props, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + sw.ops ..]);
+    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..]);
 
     return .{
+        .total_visual_rows = total_visual,
         .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
@@ -258,6 +281,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
 }
 
 /// 시각 행마다 밴드를 깐다. 반환 = 쓴 op 수(저장소가 모자라면 거기서 멈춘다 — 잘릴 뿐 죽지 않는다).
+/// **창 투명도는 이 밴드에 곱해지지 않는다**(`terminal_bg` 역할만 곱해진다 —
+/// `chrome_draw_lowering.appendBackgroundQuadsWithTerminalOpacity`). 밴드는 바탕이 아니라 바탕 위에
+/// 얹는 표시라 글자와 같은 취급이 맞다 — 투명한 창에서 바탕이 옅어질수록 밴드도 함께 옅어지면
+/// "어느 줄이 바뀌었나"가 창 설정에 따라 사라진다.
 fn paintBands(props: Props, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
     const bands = props.row_bands orelse return 0;
     var n: usize = 0;
@@ -666,4 +693,110 @@ test "랩된 문서에서 막대가 시각 행 자리에 선다 — 논리 줄�
     // 시각 행 기준이면 thumb이 트랙의 대략 절반 아래에 있어야 한다.
     const track_mid = a.track_y + (a.track_h - b.thumb_h) / 2;
     try testing.expect(b.thumb_y >= track_mid - 1);
+}
+
+test "밴드는 스크롤바보다 먼저 나온다 — 나중이면 막대 위에 색이 덧칠된다" {
+    // 밴드는 열 폭 **전체**를 덮는다(스크롤바 gutter 포함). 순서가 뒤면 16% 색이 thumb 위에 얹혀
+    // 막대가 줄무늬로 보인다. op 순서는 그대로 painter 순서다.
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [128]u8 = undefined;
+
+    const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
+    const bands = [_]RowBand{ .removed, .none, .none, .none, .none, .none, .none, .none };
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = lines.len,
+        .row_bands = &bands,
+        .visible_rows = 3, // 문서가 화면보다 길다 → 막대가 그려진다
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 48 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+    try testing.expect(w.scrollbar != null); // 막대가 실제로 그려졌다
+
+    var band_at: ?usize = null;
+    var bar_at: ?usize = null;
+    for (ops[0..w.ops], 0..) |op, i| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == .diff_removed_bg) {
+            if (band_at == null) band_at = i;
+        } else if (op.quad.fill_role != .terminal_bg) {
+            if (bar_at == null) bar_at = i; // 막대(트랙·thumb)
+        }
+    }
+    try testing.expect(band_at != null and bar_at != null);
+    try testing.expect(band_at.? < bar_at.?);
+}
+
+test "막대 위치는 total_visual_rows를 받은 경로에서도 시각 행 기준이다" {
+    // 그 인자는 큰 문서에서 계수를 건너뛰라고 열어 둔 것인데, 그때만 논리 줄로 되돌아가면 **바로 그
+    // 문서에서** 막대가 틀린다(리뷰 지적 — 처음엔 계수 블록 안에서만 고쳤다).
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [32]content.Row = undefined;
+    var visual_rows: [32]visual_map.VisualRow = undefined;
+    var gutter_rows: [32]gutter.Row = undefined;
+    var counts: [32]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    var lines_buf: [10][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = "aaaaaaaaaaaaaaaaaaaa"; // 본문 폭의 두 배 → 줄당 2행
+    const scratch: Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+    var props: Props = .{
+        .lines = &lines_buf,
+        .first_line = 5,
+        .total_lines = lines_buf.len,
+        .visible_rows = 4,
+        .wrap = true,
+        .rect = .{ .x = 0, .y = 0, .w = 160, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 10,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    };
+    // 먼저 직접 세게 한 뒤, **그 값을 그대로 먹여** 두 경로가 같은 자리에 막대를 세우는지 본다.
+    // (미리 센 값을 준다는 것은 "같은 문서를 안다"는 뜻이므로, 다른 숫자를 넣고 비교하면 그건
+    // 코드가 아니라 픽스처를 시험하는 것이다 — 처음에 그렇게 써서 틀렸다.)
+    const counted = build(props, scratch);
+    try testing.expect(counted.total_visual_rows > lines_buf.len); // 실제로 접혔다
+    props.total_visual_rows = counted.total_visual_rows;
+    const given = build(props, scratch);
+
+    const a = given.scrollbar orelse return error.NoScrollbar;
+    const b = counted.scrollbar orelse return error.NoScrollbar;
+    // 하나만 논리 줄로 되돌아가면 여기서 갈린다.
+    try testing.expectEqual(b.thumb_y, a.thumb_y);
 }

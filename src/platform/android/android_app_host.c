@@ -106,6 +106,11 @@ static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선�
 static void recreateVulkan(struct android_app *app);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
+// **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
+// 창이 부서지면 텍스처가 사라지는데 브리지의 컬러 등록부는 살아남는다 — 미스로도 안 올라와
+// 다시 굽지 않으므로, 원본이 없으면 재개 뒤 **이모지가 영영 안 보인다**(실측: 홈으로 나갔다
+// 돌아오니 이모지만 사라지고 한글·ASCII 는 멀쩡했다).
+static uint8_t *g_color_px = NULL;
 static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
 
@@ -474,14 +479,14 @@ static int initVulkan(ANativeWindow *win) {
         g.glyph_w = g_gw; g.glyph_h = g_gh;
     }
     // 이모지 전용 RGBA 아틀라스. 글자 아틀라스와 **같은 격자**라 슬롯 좌표 규칙을 공유한다.
-    // 빈 픽셀로 세우고 미스가 생길 때마다 그 칸만 채운다(글자 아틀라스와 같은 성장 경로).
+    // 처음에는 빈 픽셀로 서고 미스가 생길 때마다 그 칸만 채운다(글자 아틀라스와 같은 성장 경로).
+    // 그 원본을 **들고 있는다** — 여기서 free 하면 창이 부서졌다 설 때 성장분이 통째로 사라지고,
+    // 등록부는 그대로라 다시 굽지도 않아 이모지가 영영 빈칸이 된다(`g_color_px` 주석).
     if (g_gw && g_gh) {
-        uint8_t *empty = calloc((size_t)g_gw * g_gh * 4, 1);
-        if (empty) {
-            uploadTexture(empty, g_gw, g_gh, 4, VK_FORMAT_R8G8B8A8_UNORM,
+        if (!g_color_px) g_color_px = calloc((size_t)g_gw * g_gh * 4, 1);
+        if (g_color_px)
+            uploadTexture(g_color_px, g_gw, g_gh, 4, VK_FORMAT_R8G8B8A8_UNORM,
                           &g.color_view, &g.color_image, &g.color_mem);
-            free(empty);
-        }
     }
     uint32_t filled = maru_mobile_icon_build();
     uint32_t slot = maru_mobile_icon_slot_px(), cnt = maru_mobile_icon_count();
@@ -1504,6 +1509,12 @@ static void growAtlas(struct android_app *app) {
             if (!rgba) continue;
             if (bakeColorGlyph(&baker, cps, ncp, style, rgba, CW, CH) &&
                 uploadSlot(g.color_image, ccol, crow, rgba, (uint32_t)(CW * CH * 4), CW, CH)) {
+                // **원본에도 넣는다** — 글자 아틀라스와 같은 이유다(아래 `g_glyph_px` 주석).
+                if (g_color_px && (crow + 1) * CH <= g_gh) {
+                    for (uint32_t y = 0; y < CH; y++)
+                        memcpy(g_color_px + ((size_t)(crow * CH + y) * g_gw + ccol * CW) * 4,
+                               rgba + (size_t)y * CW * 4, (size_t)CW * 4);
+                }
                 maru_mobile_color_atlas_add(cps, ncp, style, ccol, crow, CW); // 이모지는 2셀 = 슬롯 전체
                 added++;
             }

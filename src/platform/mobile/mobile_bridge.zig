@@ -2331,12 +2331,18 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 const pw: f32 = 200;
                 const px = set_list.x + set_list.w - set_pad_x - pw;
                 var py = r.y + set_row_h;
-                const ph = @as(f32, @floatFromInt(c.items.len)) * set_row_h;
+                // **조용히 자르지 않는다.** 상자 높이를 `items.len` 으로 그리면서 항목은 rect
+                // 배열만큼만 그리면, 넘치는 만큼 **빈 띠**가 생기고 그 자리는 눌리지도 않는다.
+                // 지금 가장 긴 목록(테마 프리셋)이 정확히 상한이라 **우연히** 맞고 있다 —
+                // 프리셋을 하나만 늘려도 드러난다(레포에 16개가 있다). 그릴 수 있는 만큼으로
+                // 높이를 맞추고, 잘렸다는 사실은 오류로 남긴다(`take_copy` 와 같은 규율).
+                const shown = @min(c.items.len, set_item_rects.len);
+                if (shown < c.items.len) setLastError("settings_popup_truncated");
+                const ph = @as(f32, @floatFromInt(shown)) * set_row_h;
                 if (py + ph > set_list.y + set_list.h) py = @max(set_list.y, r.y - ph);
                 push(.{ .x = @intFromFloat(px - 1), .y = @intFromFloat(py - 1), .w = @intFromFloat(pw + 2), .h = @intFromFloat(ph + 2) }, tk.get(.muted_fg), 0xFF, 9, 0);
                 push(.{ .x = @intFromFloat(px), .y = @intFromFloat(py), .w = @intFromFloat(pw), .h = @intFromFloat(ph) }, tk.get(.surface_bg), 0xFF, 8, 0);
-                for (c.items, 0..) |it, k| {
-                    if (k >= set_item_rects.len) break;
+                for (c.items[0..shown], 0..) |it, k| {
                     const iy = py + @as(f32, @floatFromInt(k)) * set_row_h;
                     set_item_rects[k] = .{ .x = px, .y = iy, .w = pw, .h = set_row_h };
                     set_item_n = k + 1;

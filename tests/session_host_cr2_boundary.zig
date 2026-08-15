@@ -490,9 +490,58 @@ test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 sub
     const build_gate = between(
         build,
         "const session_host_cr2e_b_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_c_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-b"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-c 경계는 heap-pinned generation slot과 dormant 제품 caller를 고정한다" {
+    const allocator = std.testing.allocator;
+    const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_generation_slot.zig");
+    defer allocator.free(source);
+    const tests = try readSource(allocator, "tests/session_host_cr2e_generation_slot.zig");
+    defer allocator.free(tests);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(source, "pub fn GenerationSlot(comptime Payload: type) type"));
+    inline for (.{
+        "pub fn initInPlace(",
+        "pub fn beginCandidate(",
+        "pub fn initializeCandidate(",
+        "pub fn abortEmptyCandidate(",
+        "pub fn publishCandidate(",
+        "pub fn abortCandidate(",
+        "pub fn reclaimRetiring(",
+        "pub fn deinit(",
+    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(source, declaration));
+    try std.testing.expectEqual(@as(usize, 4), count(tests, "test \"CR2e-c generation slot은"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "@import(\"reconnect_generation_slot",
+            "platform/macos/session_host/reconnect_generation_slot.zig",
+            "platform/macos/session_host/reconnect_generation_slot.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "GenerationSlot(",
+            "platform/macos/session_host/reconnect_generation_slot.zig",
+            "platform/macos/session_host/reconnect_generation_slot.zig",
+        ),
+    );
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_c_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-c"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }

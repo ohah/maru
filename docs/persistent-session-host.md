@@ -668,6 +668,12 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `StableScreenSource`의 writer gate를 잡은 동안 slot current pointer와 screen target을 함께 바꾸므로 reader가 서로 다른
   generation과 target의 중간 조합을 관측하지 않는다. publish 뒤 old node authority는 prepared token이 아니라 slot의 sealed
   retiring row로 원자 이전한다.
+  CR2e-c는 이 저장 규칙의 generic final-address substrate를 먼저 고정한다. inline 최초 node와 heap candidate 모두
+  compile-time으로 고정된 initializer가 payload를 각 final address에서 완성하고, 외부에 mutable payload pointer를
+  반환하지 않는다. inline/heap payload parity, retiring 1개 backoff, inline tombstone 재사용 금지, heap exact-one reclaim,
+  OOM·initializer 실패 abort와 copied/stale/cross-slot/foreign-thread/fork 권위 거부가 현재 증거다. 실제
+  `RemoteGeneration` initializer, `StableScreenSource` writer gate와 동시 publish, old destructor 및 app-global count/byte
+  budget 결합은 CR2e-d/e 전에는 제품 완료로 보지 않는다.
 - host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정
   bytes는 enqueue할 때 `{shell_generation,input_epoch,sequence}`를 받아 shell queue로 소유권을 넘기고, Window 이동은 이
   queue를 옮기지 않는다. preedit 화면 자체는 기존처럼 Surface의 GUI-local 상태다. AppSession은 shell이 dedup해 낸 typed

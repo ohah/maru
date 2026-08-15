@@ -61,6 +61,26 @@
 `schema` 메타를 들고 같은 엔진을 탄다. **데스크톱 동작은 안 바뀐다**(같은 함수에 같은 타입을
 계속 넘긴다).
 
+**엔진 밖에 있는 키가 둘 있다.** `theme.preset`(색 묶음을 통째로 깐다)과 `theme.palette.N`(인덱스
+키)은 스키마가 아니라 `loader.applyKey` 의 **명시 가지**가 처리한다(계약 문서가 "동적·특수" 로
+분류해 둔 것들이다). 그래서 그 둘은 `tryParse` 를 열어도 안 따라온다 — 모바일이 같은 짧은 가지를
+자기 쪽에 두거나, 아래 "빌려 조립" 을 택해야 한다.
+
+**구조체를 새로 쓸지, 빌려 조립할지가 갈림길이다.** sub-struct 가 전부 이름 있는 공개 타입이라
+(`FontConfig`·`ThemeConfig`·`CursorConfig`·`InputConfig`) 모바일 Config 가 그것들을 **필드로 빌려**
+조립할 수 있다.
+
+| | 빌려 조립 | 새로 쓰기 |
+|---|---|---|
+| 스키마 메타 | 안 쓴다(이미 달려 있다) | 키마다 다시 단다 |
+| `theme.preset` | `presetColors()` 가 **바로 그 타입**을 돌려줘 그대로 대입된다 | 반환형이 달라 못 쓴다 |
+| 섹션(GUI) | 메타의 `Section`(font·theme·cursor·input)이 모바일 헤더와 맞는다 | 새로 정한다 |
+| 대가 | **모바일에 뜻 없는 필드가 딸려온다** — `InputConfig` 13개 중 12개, `ThemeConfig` 의 `sidebar_*`·`search_match*`. §4.4 가 "안 가져온다" 고 적은 키를 **파일에서 받아들이게 된다**(해는 없다 — 소비처가 없으니 무동작이다. 다만 문서와 코드가 갈린다) | 키 표면이 문서와 정확히 같다 |
+
+**계열마다 따로 정한다.** 통째로 뜻이 있는 것(`ThemeConfig`·`CursorConfig`)은 빌리고, 한 조각만
+필요한 것(`input` 은 `word-separators` 하나)은 모바일 것으로 둔다 — 그래야 §4.4 의 "안 가져온다"
+가 코드에서도 참이 된다.
+
 **쓰는 쪽은 더 묶여 있다.** `serialize.updateForKeys` → `configKeyValues` → `schema.appendSerialized`
 가 **셋 다** `theme.Config` 를 받는다. 그래서 모바일이 그대로 부를 수 있는 것은 그 아래의
 `loader.updateConfigText`(Config 를 모른다) 이고, 그 위는 **모바일 구조체용으로 같은 모양을
@@ -78,7 +98,7 @@
 
 | 키 | 소비처 | 비고 |
 |---|---|---|
-| `theme.preset`·`theme.preset-dark`·`theme.preset-light`·`theme.follow-system` | 브리지 `themeColors()` | 지금 그 함수가 값을 고정한다 |
+| `theme.preset`·`theme.preset-dark`·`theme.preset-light`·`theme.follow-system` | 브리지 `themeColors()` | 파싱은 **스키마 밖**이다(§3) — `loader.applyKey` 의 명시 가지 |
 | `theme.background`·`theme.foreground`·`theme.cursor`·`theme.selection`·`theme.palette.0`~`.15` | 같음 | 팔레트는 계열 키다 |
 | `theme.bold-is-bright`·`theme.min-contrast` | 같음 | |
 | `cursor.color`·`cursor.text` | 브리지 커서 quad(`tk.get(.cursor)`) | |

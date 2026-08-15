@@ -54211,6 +54211,75 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
     try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
 }
 
+test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클릭을 훔치지 않는다**" {
+    // 한 행에 두 동작이 있다: 행 = 접기/펴기, 그 안의 버튼 = 그 그룹 전체 스테이지. 히트테스트가
+    // 안쪽을 먼저 잡지 않으면 버튼이 영영 안 눌리고(행이 삼킨다), 반대로 행 전체가 버튼이 되면
+    // 접기가 안 된다. **둘 다 각자 자리에서 자기 것만 내는지**를 published tree로 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n"),
+        .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, "/repo");
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame);
+
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const rectOf = struct {
+        fn at(s: *AppSession, id: chrome.ui.tree.UiId) ?chrome.ui.layout.UiRect {
+            for (s.scm_dock_entries.items) |e| if (e.id == id) return e.rect;
+            return null;
+        }
+    }.at;
+
+    const header = rectOf(session, chrome.components.scm_dock.build.NodeIds.item(0)) orelse return error.MissingHeader;
+    const bulk = rectOf(session, chrome.components.scm_dock.build.NodeIds.itemAction(0)) orelse return error.MissingBulk;
+
+    // ① 버튼 한가운데 — **일괄 동작**이어야 한다(행이 삼키면 접힌다).
+    const bx = @as(f64, @floatFromInt(content.x)) + bulk.x + bulk.width / 2;
+    const by = @as(f64, @floatFromInt(content.y)) + bulk.y + bulk.height / 2;
+    _ = scm_dock_ops.scmDockPointer(session, .down, bx, by);
+    switch (scm_dock_ops.scmDockPointer(session, .up, bx, by) orelse return error.NoIntent) {
+        .section_action => {},
+        else => return error.ButtonStolenByRow,
+    }
+
+    // ② 제목 쪽(버튼 왼쪽 바깥) — **접기**여야 한다(버튼이 행을 삼키면 안 된다).
+    const tx = @as(f64, @floatFromInt(content.x)) + header.x + 20;
+    const ty = @as(f64, @floatFromInt(content.y)) + header.y + header.height / 2;
+    _ = scm_dock_ops.scmDockPointer(session, .down, tx, ty);
+    switch (scm_dock_ops.scmDockPointer(session, .up, tx, ty) orelse return error.NoIntent) {
+        .toggle_section => {},
+        else => return error.RowStolenByButton,
+    }
+}
+
 test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 intent가 난다 (P2c)" {
     // 이 뷰가 처음으로 저장소를 바꾸는 경로다. 그래서 "누른 버튼이 **어느 파일을** 대상으로 하는가"를
     // published tree로 그대로 태워 고정한다 — 창 자리와 모델 인덱스가 갈리면 여기서 잡힌다.

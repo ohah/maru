@@ -6,6 +6,7 @@
 //! **상호작용 사각형은 전부 이 tree 하나에 속한다.** platform이 행 높이를 다시 곱해 두 번째 히트 영역을
 //! 만들지 않는다 — 옛 셀 그리드 경로가 그렇게 갈려서 "그린 자리와 눌리는 자리"가 어긋났었다.
 
+const badge = @import("../../ui/badge.zig");
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
@@ -46,6 +47,34 @@ pub const NodeIds = struct {
         return item(index) + 1;
     }
 };
+
+/// 행 오른쪽 끝에 이미 앉아 있는 표식이 차지하는 폭(동작 버튼이 비켜야 하는 만큼).
+///
+/// 파일 행은 상태 문자, 그룹 헤더는 **개수 배지**다. 배지 폭은 자릿수·셀 폭·zoom의 함수라 상수로 어림할
+/// 수 없어 `ui/badge`에게 **같은 함수로** 묻는다 — `view`가 그리는 자리와 `build`가 비키는 자리가 한
+/// 출처에서 나와야 어긋나지 않는다.
+fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics) u32 {
+    const base = m.inset_x + m.gap;
+    return switch (item) {
+        .section => |section| blk: {
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{section.count}) catch "0";
+            const cols = @max(@as(u16, @intCast(text.len)), 1);
+            const scale = if (props.scale_milli == 0) 1000 else props.scale_milli;
+            const pill = badge.countPill(.{ .x = 0, .y = 0, .width = 100000, .height = @floatFromInt(m.section_h) }, .{
+                .inset_x = m.inset_x,
+                .label_cols = cols,
+                .cell_width_px = @max(props.cell_width_px, 1),
+                .scale_milli = scale,
+                .fit = .snug,
+                .label_role = .supporting,
+            }) orelse break :blk base + m.status_extent;
+            break :blk base + pill.box.w;
+        },
+        .file => base + m.status_extent,
+        .more, .notice => base,
+    };
+}
 
 /// 스크롤 drag payload. track과 thumb이 **같은 값**을 선언한다 — 눌러 점프한 뒤 손을 떼지 않고 이어
 /// 끌 수 있어야 한다.
@@ -136,10 +165,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 .style = .{
                     .width = .{ .px = @floatFromInt(m.action_extent) },
                     .height = .{ .px = @floatFromInt(m.action_extent) },
-                    // **상태 문자 자리를 비켜 앉는다.** 둘 다 오른쪽 `inset_x`를 쓰면 `+`와 `M`이 같은
-                    // 픽셀에 겹친다(호버 캡처로 실측했다). 상태 문자는 행이 선 그룹을 말하는 값이라
-                    // 호버 중에도 사라지면 안 되므로, 비키는 쪽은 버튼이다.
-                    .margin = .{ .right = @floatFromInt(m.inset_x + m.status_extent + m.gap) },
+                    // **행의 오른쪽 끝 표식을 비켜 앉는다.** 파일 행은 상태 문자, 그룹 헤더는 개수 배지가
+                    // 그 자리이고 둘 다 사라지면 안 되는 값이라(그 행이 선 그룹을 말한다) 비키는 쪽은
+                    // 버튼이다. 겹치면 `+`가 상태 문자 위에 그려지고(실측), 배지는 **paint 전용이라
+                    // 히트 사각형이 없어** 숫자를 눌렀는데 그룹 전체가 스테이지된다(실측).
+                    //
+                    // 배지 폭은 **`ui/badge`가 정한다** — 여기서 상수로 어림하면 자릿수가 늘 때 갈린다.
+                    .margin = .{ .right = @floatFromInt(rightMarkerExtent(item, props, m)) },
                 },
                 // 평소에는 배경 없이 글리프만 보인다(`ghost`는 행과 같은 배경이고 테두리가 없다).
                 .variant = .ghost,

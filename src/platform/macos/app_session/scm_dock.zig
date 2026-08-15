@@ -210,6 +210,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
             .height = @floatFromInt(content.h),
         },
         .scale_milli = scmDockScaleMilli(self),
+        .cell_width_px = self.cell_width_px,
         .snapshot_generation = self.scm_dock_snapshot_generation,
         .items = window,
         .scroll_offset_px = projection.scroll.offset_y_px,
@@ -275,7 +276,7 @@ pub fn collectScmDock(
     const runs = arena.alloc(chrome.draw.Run, budget.runs) catch return;
     const text_bytes = arena.alloc(u8, budget.text_bytes) catch return;
     const tokens = self.buildChromeTokens();
-    const draws = component.view.view(props, frame, self.scm_dock_interaction, &tokens, self.cell_width_px, .{
+    const draws = component.view.view(props, frame, self.scm_dock_interaction, &tokens, .{
         .ops = ops,
         .runs = runs,
         .text_bytes = text_bytes,
@@ -688,7 +689,7 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
     });
     // 호버가 걸린 행도 동작 글리프를 하나 더 낸다 — 그 최악까지 담아야 한다.
     const hovered: chrome.ui.interaction.InteractionState = .{ .hovered = component.build.NodeIds.item(1) };
-    const draws = try component.view.view(props, frame, hovered, &tokens, 8, .{
+    const draws = try component.view.view(props, frame, hovered, &tokens, .{
         .ops = ops,
         .runs = runs,
         .text_bytes = text_bytes,

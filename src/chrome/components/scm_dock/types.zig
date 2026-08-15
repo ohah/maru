@@ -84,6 +84,10 @@ pub const Props = struct {
     viewport_px: layout.UiRect,
     /// Dock UI zoom. Session Dock과 같은 축이라 두 뷰의 행 높이가 함께 움직인다.
     scale_milli: u32 = 1000,
+    /// 등폭 셀 폭. **`build`와 `view`가 같은 값을 봐야 한다** — 개수 배지의 자리는 이 값에서 나오고,
+    /// 그 배지를 피해 앉아야 하는 일괄 동작 버튼의 자리는 `build`가 정한다. 둘이 갈리면 버튼이 배지 위로
+    /// 올라오고, 배지는 paint 전용이라 **숫자를 눌렀는데 그룹 전체가 스테이지된다**(실측으로 그랬다).
+    cell_width_px: u32 = 8,
     /// 이 tree를 만든 스냅샷 세대. action 표가 이 값으로 stale 클릭을 거부한다.
     snapshot_generation: u64 = 1,
     /// **가상화된 창**이다 — 화면에 보이는 만큼만 platform이 잘라 준다.

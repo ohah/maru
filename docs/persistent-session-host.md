@@ -692,8 +692,12 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   workload를 부모가 `proc_pid_rusage:RUSAGE_INFO_V4`로 반복 측정하고, typed artifact validator가 logical delta+64 MiB
   conservative harness tolerance, RSS/footprint delta와 child exit/actual cleanup receipt를 독립 재계산한다.
   이 64 MiB tolerance는 gross anomaly detector이며 allocator overhead 근거나 e3b 정책 예산으로 재사용하지 않는다. 이 측정 없이 근거 없는 상한을 선택하거나 제품
-  reconnect ingress를 먼저 열지 않는다. e3b는 그 budget lease 아래 mutation seal·authority/retry/close effect를
-  actual stable owner에 결속하고, e3c가 sole external ingress와 close 경쟁·mixed outcome을 연다.
+  reconnect ingress를 먼저 열지 않는다. e3b1의 제품 정책은 process-global queued admission 64개, active reconnect
+  resident entry 8개, GUI reconnect 전용 resident 128 MiB다. 64개는 장애 폭주를 잃지 않는 sealed 대기열 상한이지
+  동시 실행 목표가 아니다. 작은 generation도 active 8개까지만 실행하며 byte cap은 최악 generation 7개를 허용한다.
+  각 cap의 다음 budget reserve는 allocation·lease·role mutation 없이 typed 거부된다. Budget·entry·lease는 final address,
+  PID, canonical process nonce, monotonic owner incarnation과 policy domain을 함께 검증해 fork splice와 same-address ABA를 거부한다. daemon `ConnectionSlot`의 128 MiB와 숫자만 맞추며 process·owner·회계는 공유하지 않는다.
+  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease 아래 mutation seal·authority/retry/close effect를 actual stable owner에 결속한다. e3c가 sole external ingress와 close 경쟁·mixed outcome을 연다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.

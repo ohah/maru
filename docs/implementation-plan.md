@@ -162,9 +162,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    allocation·role mutation 0이어야 한다. ReleaseFast exec child는
    64 current→64 candidate+retiring 압력을 만들고 부모가 PID RSS/footprint를 반복 측정하며, typed artifact validator가
    logical delta+64 MiB 측정 tolerance와 actual cleanup receipt를 독립 재계산한다. 측정 전 임의 상한을
-   제품 정책으로 채택하거나 reconnect ingress를 열지 않는다. **e3b**는 그 budget lease 아래 현재 `retain`인
-   mutation seal·authority commit·direct-release retry·termination/abandon effect를 actual stable input/close owner에
-   결속하고, product effect 성공 뒤에만 reducer state를 게시한다. **e3c**는 sole external reconnect ingress와
+   제품 정책으로 채택하거나 reconnect ingress를 열지 않는다. **e3b**는 두 하위 gate로 닫는다. **e3b1**은
+   process-global admission inventory 64개를 sealed 대기열 상한으로 유지하면서 active reconnect resident entry는 8개,
+   GUI reconnect 전용 resident byte 상한은 128 MiB로 둔다. 이 byte 상한은 daemon `ConnectionSlot`의 128 MiB와 값을
+   맞추지만 서로 다른 process·owner의 독립 정책이며 budget을 공유하지 않는다. 작은 generation도 동시에 최대 8개만
+   실행하고, `base_update_max_bytes`를 모두 쓰는 generation은 byte cap 때문에 7개까지만 admit된다. 각 cap의 다음 budget
+   reserve는 allocation·lease·role mutation 0으로 거부된다. Budget·entry·lease는 final address, OS PID, canonical process
+   nonce, monotonic owner incarnation과 policy domain을 공유해 fork 및 same-address 재사용 권위를 거부한다. **e3b2**는 이 typed 거부를 실제 sealed admission queue와
+   결속해 요청을 잃지 않고 후속 drain에서 다시 시도하며,
+   그 budget lease 아래 현재 `retain`인 mutation seal·authority commit·direct-release retry·termination/abandon effect를
+   actual stable input/close owner에 결속하고, product effect 성공 뒤에만 reducer state를 게시한다. **e3c**는 sole external reconnect ingress와
    close 경쟁·mixed outcome을 같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
    RSS artifact를 제품 gate에 결합한다.
    e3 전체가 mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,

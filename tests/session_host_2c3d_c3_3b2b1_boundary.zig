@@ -48,6 +48,11 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         "src/platform/macos/session_host/shutdown_admin_connector.zig",
     );
     defer allocator.free(shutdown_connector);
+    const reconnect_resident_budget = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_resident_budget.zig",
+    );
+    defer allocator.free(reconnect_resident_budget);
 
     try std.testing.expectEqual(@as(usize, 1), count(
         service,
@@ -119,9 +124,13 @@ test "C3-3b2b1 trusted preparation seal boundary" {
     );
     try std.testing.expectEqual(
         // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner, 2d2 terminal handoff와 CR0b composite/GUI/daemon owner,
-        // CR1 scheduler dispatch까지 검증한다.
-        @as(usize, 28),
+        // CR1 scheduler dispatch와 CR2e-e3b1 resident admission budget까지 검증한다.
+        @as(usize, 29),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(reconnect_resident_budget, "@import(\"process_seal_service.zig\")"),
     );
     const publisher_registry = try readSource(allocator, "src/platform/macos/session_host/incident_publisher_registry.zig");
     defer allocator.free(publisher_registry);

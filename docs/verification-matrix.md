@@ -1234,8 +1234,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   child artifact 경로를 주입하므로 ambient environment로 parent 역할을 건너뛸 수 없다. exec child는 parent-minted 128-bit run nonce,
   `LOCAL_PEERPID`, stream type을 검증하고 stdio/FD 198 외 inherited descriptor를 모두 닫는다. typed artifact validator는 baseline/pressure
   원시 표본 각 7개의 identity·중앙값, logical/RSS/footprint delta와 64 MiB conservative harness tolerance, child exit 0,
-  실제 cleanup receipt의 generation/bytes/allocation zero를 producer와 독립 재계산한다. e3b는 budget lease와
-  mutation seal·authority/retry/close effect를 actual stable owner에 결속한다. e3c는 sole external ingress와 close
+  실제 cleanup receipt의 generation/bytes/allocation zero를 producer와 독립 재계산한다. e3b1은 process-global queued
+  admission 64, active resident entry 8, GUI reconnect 전용 128 MiB byte 정책을 독립 SSOT로 고정한다. 작은 charge는
+  active 8개까지만 허용하고 `base_update_max_bytes` charge는 exact 7개까지만 admit한다. 각 cap의 다음 budget reserve는
+  mutation 0의 typed 거부다. Budget·entry·lease의 final address/PID/process nonce/owner incarnation/domain 결속은 copied,
+  fork splice와 same-address ABA를 mutation 0으로 거부한다. admission queue 보존과 후속 drain 재시도는 e3b2가 실제 owner 결속으로 검증한다. daemon의 같은 128 MiB 값은
+  별도 process budget과 공유하지 않는다. e3b2는 budget lease와 mutation seal·authority/retry/close effect를 actual stable
+  owner에 결속한다. e3c는 sole external ingress와 close
   경쟁·mixed outcome을 열고 모든 logical charge 0과 RSS artifact를 최종 검증한다. e3의 close 경쟁·mixed outcome·app-global
   count/byte budget·peak RSS까지 green이기 전에는 CR2e 완료가 아니다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제

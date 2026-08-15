@@ -4,9 +4,10 @@
 
 const std = @import("std");
 const process_seal = @import("process_seal_service.zig");
+const policy = @import("reconnect_admission_policy.zig");
 const publication = @import("maru").observability.incident_publication_contract;
 
-pub const capacity: usize = 64;
+pub const capacity: usize = policy.max_queued_admissions;
 pub const Error = error{ InvalidOwner, Busy, Full, NotFound, AttemptExhausted };
 const Lifecycle = enum(u8) { pristine = 0, ready = 1, closed = 2 };
 const RowLifecycle = enum(u8) { pristine = 0, admitted = 1, claimed = 2, scheduled = 3 };

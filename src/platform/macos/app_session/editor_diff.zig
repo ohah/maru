@@ -1021,6 +1021,9 @@ test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
     entry.diff_repo = @constCast("/repo/one");
     fx.term.file_entry = &entry;
 
+    // **밴드가 실제로 그리는 문자열**을 본다(이음매 `bandPathFor`) — 루트 선택만 검사하면 제품이
+    // 절대경로로 되돌아가도 아무 테스트가 안 깨진다.
+    try testing.expectEqualStrings("src/app.zig", app_session_mod.bandPathFor(fx.session, &entry));
     const root = app_session_mod.breadcrumbRootFor(fx.session, &entry);
     try testing.expectEqualStrings("/repo/one", root);
     try testing.expectEqualStrings(
@@ -1031,6 +1034,7 @@ test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
     // 저장소를 모르면 절대경로 그대로다 — 지어내지 않는다.
     entry.diff_repo = @constCast("");
     try testing.expectEqualStrings("", app_session_mod.breadcrumbRootFor(fx.session, &entry));
+    try testing.expectEqualStrings("/repo/one/src/app.zig", app_session_mod.bandPathFor(fx.session, &entry));
     try testing.expectEqualStrings(
         "/repo/one/src/app.zig",
         maru.session.repo_path.displayRelative(entry.path, app_session_mod.breadcrumbRootFor(fx.session, &entry)),

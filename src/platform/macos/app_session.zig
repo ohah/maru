@@ -2410,6 +2410,13 @@ pub const WebNavAction = struct { surface_id: u64, code: u8 };
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
+/// 낙관적으로 옮겨 놓은 행(§7 — 쓰기 문서). 세션이 든다.
+pub const ScmPending = struct {
+    path: []u8,
+    /// 떠나는 그룹. 도착지는 그 반대다.
+    from: scm_view.Section,
+};
+
 pub const AppSession = struct {
     /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
     pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
@@ -3648,6 +3655,13 @@ pub const AppSession = struct {
     scm_write_seq: u64 = 0,
     /// 마지막 쓰기가 실패했을 때 화면에 낼 사유(redact·절단 후, 세션 allocator 소유). §5 — 실패는 사실대로.
     scm_write_error: ?[]u8 = null,
+    /// 낙관적으로 옮겨 놓은 행(§7). **경로는 세션 allocator 소유**다 — 모델 버퍼는 프레임마다 다시 만들어져
+    /// 그 슬라이스를 들고 있으면 다음 프레임에 남의 글자를 가리킨다.
+    ///
+    /// **한 행뿐이다.** §7이 낙관을 "그 행 하나"로 못박았고, 일괄 동작(`모두 …`)은 낙관하지 않는다 —
+    /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
+    scm_pending: ?ScmPending = null,
+
     /// 그 섹션을 전부 펼쳤는가("모두 보기"를 눌렀는가). 기본은 섹션당 상한까지만 보여 준다 — 변경이 수백 개면
     /// 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지조차 모르게 된다.
     scm_expanded: [scm_view.section_count]bool = @splat(false),
@@ -16600,6 +16614,7 @@ pub const AppSession = struct {
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
                 self.agent_session_archive_projection.deinit(self.allocator);
                 scm_dock_ops.clearScmWriteError(self); // 실패 사유 문자열은 세션 allocator 소유다
+                scm_dock_ops.clearScmPending(self); // 낙관 경로도 세션 allocator 소유다
                 self.scm_dock_entries.deinit(self.allocator);
                 self.scm_dock_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);

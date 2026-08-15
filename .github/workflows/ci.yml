@@ -105,6 +105,9 @@ jobs:
             echo "문서 전용 변경 — Zig 게이트 대신 문서 드리프트와 문서 간 링크만 검사한다"
             mise run check-config-docs
             mise run check-doc-links
+            # 모바일 계약 판정자도 문서를 읽는다(제목 중복·계획 표 참조·매트릭스의 낡은 숫자).
+            # 여기 안 걸면 문서만 고친 PR이 그 셋을 조용히 깬다 — 위 둘과 같은 이유다.
+            mise run check-mobile-contract
           else
             echo "이 job이 소유한 게이트를 건드리지 않은 변경(web 전용 등) — 실행할 검사가 없다"
           fi

@@ -12,14 +12,22 @@ h = (ROOT / "src/platform/mobile/mobile_host_abi.h").read_text(encoding="utf-8")
 z = (ROOT / "src/platform/mobile/mobile_bridge.zig").read_text(encoding="utf-8")
 
 # C 선언: 반환형 이름(인자...);
+#
+# **포인터를 빼먹으면 안 된다.** 예전 정규식은 반환형을 `[A-Za-z ]` 로 잡아 `*` 가 있는 선언을
+# 통째로 건너뛰었고(`const char *`·`const MaruQuad *`·`const unsigned char *`), Zig 쪽 정규식도
+# 공백이 없어 `[*:0]const u8` 을 못 잡았다. **양쪽에서 같은 셋이 빠져 서로 상쇄돼** 검사기가
+# "어긋난 선언 0개" 라고 답했다 — 하필 그 셋이 포인터 반환이라, 정수와 뒤바뀌면 C 는 그 정수를
+# 주소로 읽는 가장 위험한 자리다.
 c_decls = {}
-for m in re.finditer(r"^([A-Za-z][A-Za-z ]*?)\s+(maru_mobile_[a-z_]+)\s*\(([^;]*)\);", h, re.M):
-    ret, name, args = m.group(1).strip(), m.group(2), m.group(3).strip()
-    c_decls[name] = (ret, args)
+for m in re.finditer(
+    r"^([A-Za-z_][A-Za-z0-9_ ]*?)\s*(\*?)\s*(maru_mobile_[a-z_]+)\s*\(([^;]*)\);", h, re.M
+):
+    base, star, name, args = m.group(1).strip(), m.group(2), m.group(3), m.group(4).strip()
+    c_decls[name] = (f"{base} *" if star else base, args)
 
 z_decls = {}
-for m in re.finditer(r"pub export fn (maru_mobile_[a-z_]+)\(([^)]*)\)\s*([A-Za-z0-9_\[\]\*\.]+)\s*\{", z):
-    z_decls[m.group(1)] = (m.group(3).strip(), m.group(2).strip())
+for m in re.finditer(r"pub export fn (maru_mobile_[a-z_]+)\(([^)]*)\)\s*([^{]+?)\s*\{", z):
+    z_decls[m.group(1)] = (" ".join(m.group(3).split()), m.group(2).strip())
 
 C2Z = {
     "unsigned int": {"u32"},
@@ -29,6 +37,7 @@ C2Z = {
     "float": {"f32"},
     "const char *": {"[*:0]const u8", "[*]const u8"},
     "unsigned char *": {"[*]u8"},
+    "const unsigned char *": {"[*]const u8"},
     "const MaruQuad *": {"[*]const MaruQuad", "[*]const draw"},
 }
 
@@ -39,7 +48,14 @@ for name, (cret, cargs) in sorted(c_decls.items()):
         bad += 1
         continue
     zret, zargs = z_decls[name]
-    ok = zret in C2Z.get(cret, {zret})
+    # **모르는 C 타입은 통과가 아니라 실패다.** 예전에는 표에 없으면 `{zret}` 로 폴백해 **Zig 가
+    # 뭐라고 하든 받아들였다** — 새 타입을 쓴 선언이 들어오면 그때부터 그 함수는 검사에서 조용히
+    # 빠진다(`const unsigned char *` 가 실제로 그렇게 새고 있었다). 표를 늘리라고 말하게 한다.
+    if cret not in C2Z:
+        print(f"  모름   {name}: C 반환형 '{cret}' 가 C2Z 표에 없다 — 표에 더한다")
+        bad += 1
+        continue
+    ok = zret in C2Z[cret]
     # 인자 개수만 센다(이름·순서는 사람이 본다)
     cn = 0 if cargs in ("", "void") else len([a for a in cargs.split(",") if a.strip()])
     zn = 0 if not zargs else len([a for a in zargs.split(",") if a.strip()])

@@ -7683,7 +7683,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         countOccurrences(backend, "try rr.attachExistingWithAdapter("),
     );
     try std.testing.expectEqual(@as(usize, 3), countOccurrences(runtime, "connection: RuntimeConnection,"));
-    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, "        self.generation.connection = connection;"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, "        self.currentGeneration().connection = connection;"));
     // CR3a-2c3a moves generation input/revoke/output-progress behind RuntimeAttachment's closed
     // switch. The one raw call per primitive is the explicit legacy arm; product methods must not
     // regain a direct self.client call while RemoteRuntime.client still exists for 2c4.

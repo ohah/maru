@@ -420,14 +420,13 @@ pub const RemoteTermBackend = struct {
         var pending_iterator = self.runtimes.iterator();
         while (pending_iterator.next()) |row| {
             // 여러 AppSession window가 같은 backend를 순서대로 tick해도 앞 window가 만든 frame을 덮지 않는다.
-            if (row.value_ptr.runtime.generation.frame_summary_ready) return;
+            if (RemoteRuntime.backend_api.frameSummaryReady(row.value_ptr.runtime)) return;
         }
         var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
         var handle_count: usize = 0;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
-            row.value_ptr.runtime.generation.frame_summary = .{};
-            row.value_ptr.runtime.generation.frame_summary_ready = true;
+            RemoteRuntime.backend_api.prepareFrameSummary(row.value_ptr.runtime);
             handles[handle_count] = row.key_ptr.*;
             handle_count += 1;
         }
@@ -446,10 +445,13 @@ pub const RemoteTermBackend = struct {
             const index = (self.event_pump_cursor + offset) % handle_count;
             const entry = self.runtimes.get(handles[index]) orelse
                 process_seal.fatalIntegrity(.proof_loss);
-            entry.runtime.generation.frame_summary = if (builtin.is_test and B5TestState.event_pump_hook != null)
-                B5TestState.event_pump_hook.?(handles[index], entry.runtime)
-            else
-                drainRemoteNow(entry.runtime);
+            RemoteRuntime.backend_api.storeFrameSummary(
+                entry.runtime,
+                if (builtin.is_test and B5TestState.event_pump_hook != null)
+                    B5TestState.event_pump_hook.?(handles[index], entry.runtime)
+                else
+                    drainRemoteNow(entry.runtime),
+            );
         }
         self.event_pump_cursor = event_pump_contract.nextCursor(
             self.event_pump_cursor,
@@ -1119,18 +1121,13 @@ pub const RemoteTermBackend = struct {
     /// frame loop가 surface를 exited로 표시하게 한다(로컬 read_error 계약과 동형 — host 연결 끊김 = 세션 종료).
     fn drainRemote(ctx: *anyopaque) DrainSummary {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
-        if (rr.generation.frame_summary_ready) {
-            const summary = rr.generation.frame_summary;
-            rr.generation.frame_summary = .{};
-            rr.generation.frame_summary_ready = false;
-            return summary;
-        }
+        if (RemoteRuntime.backend_api.takeFrameSummary(rr)) |summary| return summary;
         return drainRemoteNow(rr);
     }
 
     fn drainRemoteNow(rr: *RemoteRuntime) DrainSummary {
         var summary: DrainSummary = .{};
-        if (rr.generation.pump_ended) return summary;
+        if (RemoteRuntime.backend_api.pumpEnded(rr)) return summary;
         while (true) {
             const result = rr.pumpDelta() catch |err| {
                 switch (err) {
@@ -1148,7 +1145,7 @@ pub const RemoteTermBackend = struct {
                         // remote pump는 local RuntimeEventPump.applyQueuedEvent를 거치지 않으므로 여기서 surface를 직접
                         // latch해야 SurfaceRuntime 입력 gate가 죽은 PtyIo로 재전송하지 않는다. runtime별 one-shot으로
                         // 올려 shared connection 실패가 매 frame 같은 read_error를 재발행하는 것도 막는다.
-                        rr.generation.pump_ended = true;
+                        RemoteRuntime.backend_api.markPumpEnded(rr);
                         rr.surface.process_state = .exited;
                         summary.ended = .{ .read_error = @errorName(err) };
                         break;
@@ -1161,7 +1158,7 @@ pub const RemoteTermBackend = struct {
                 .metadata => continue,
                 .screen => summary.output_events += 1,
                 .ended => {
-                    rr.generation.pump_ended = true;
+                    RemoteRuntime.backend_api.markPumpEnded(rr);
                     rr.surface.process_state = .exited;
                     // Registry membership proves lifecycle end but no tombstone carries the child
                     // wait status. Preserve that uncertainty instead of fabricating exit code 0.
@@ -1189,7 +1186,7 @@ pub const RemoteTermBackend = struct {
         remote_runtime.testing_api.initializeLegacyConnection(&rr, &client);
         try remote_runtime.testing_api.initializePendingOwners(&rr);
         rr.allocator = allocator;
-        rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
+        remote_runtime.testing_api.generation(&rr).attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
         rr.input_batches = .{};
@@ -1197,7 +1194,7 @@ pub const RemoteTermBackend = struct {
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
-        rr.generation.pump_ended = false;
+        remote_runtime.testing_api.generation(&rr).pump_ended = false;
         rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
         defer rr.surface.deinit();
         rr.surface.process_state = .running;
@@ -1233,8 +1230,8 @@ pub const RemoteTermBackend = struct {
         rr.allocator = allocator;
         rr.io = std.testing.io;
         rr.runtime_id_hex = "00000000000000000000000000000001".*;
-        rr.generation.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
-        rr.generation.resize_seq = 0;
+        remote_runtime.testing_api.generation(&rr).attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
+        remote_runtime.testing_api.generation(&rr).resize_seq = 0;
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
         rr.input_batches = .{};
@@ -1243,13 +1240,13 @@ pub const RemoteTermBackend = struct {
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
         rr.blocking_flush_active = false;
-        rr.generation.pump_ended = false;
-        rr.generation.resync_needed = false;
-        rr.generation.observation = .{};
-        defer rr.generation.observation.deinit(allocator);
-        rr.generation.event_generation_tracking = .tracked;
-        rr.generation.resize_generation = 0;
-        rr.generation.resize_baseline_present = false;
+        remote_runtime.testing_api.generation(&rr).pump_ended = false;
+        remote_runtime.testing_api.generation(&rr).resync_needed = false;
+        remote_runtime.testing_api.generation(&rr).observation = .{};
+        defer remote_runtime.testing_api.generation(&rr).observation.deinit(allocator);
+        remote_runtime.testing_api.generation(&rr).event_generation_tracking = .tracked;
+        remote_runtime.testing_api.generation(&rr).resize_generation = 0;
+        remote_runtime.testing_api.generation(&rr).resize_baseline_present = false;
         rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
         defer rr.surface.deinit();
         rr.surface.process_state = .running;
@@ -1554,8 +1551,7 @@ pub const RemoteTermBackend = struct {
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = (self.runtimes.get(handle) orelse return null).runtime;
-        if (rr.generation.observation.availability != .current or !rr.generation.observation.foreground_available) return null;
-        return rr.generation.observation.foreground_pgid;
+        return RemoteRuntime.backend_api.foregroundProcessGroup(rr);
     }
 
     /// host-backed 터미널의 자원 표본은 **아직 없다**(docs/status-bar.md §6 "keep-alive를 켜면 터미널이 0이 된다").
@@ -1584,22 +1580,15 @@ pub const RemoteTermBackend = struct {
     fn foregroundProcessNames(ctx: *anyopaque, handle: RuntimeHandle, out: []ForegroundProcessName) usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = (self.runtimes.get(handle) orelse return 0).runtime;
-        if (rr.generation.observation.availability != .current or !rr.generation.observation.foreground_available) return 0;
-        const count = @min(out.len, rr.generation.observation.foreground_processes.items.len);
-        @memcpy(out[0..count], rr.generation.observation.foreground_processes.items[0..count]);
-        return count;
+        return RemoteRuntime.backend_api.copyForegroundProcessNames(rr, out);
     }
 
     fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = include_foreground; // host event가 bounded cadence로 foreground까지 coherent하게 갱신한다.
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
-        if (out.availability == rr.generation.observation.availability and
-            out.revision == rr.generation.observation.revision and
-            out.size.cols == rr.generation.observation.size.cols and
-            out.size.rows == rr.generation.observation.size.rows)
-            return;
-        try out.replace(allocator, rr.generation.observation.view());
+        if (RemoteRuntime.backend_api.observationMatches(rr, out)) return;
+        try RemoteRuntime.backend_api.copyObservation(rr, allocator, out);
     }
 
     fn refreshObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
@@ -1607,13 +1596,13 @@ pub const RemoteTermBackend = struct {
         _ = include_foreground;
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         try rr.refreshObservation();
-        try out.replace(allocator, rr.generation.observation.view());
+        try RemoteRuntime.backend_api.copyObservation(rr, allocator, out);
     }
 
     fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
-        return rr.generation.attachment.screenPtr().?.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
+        return RemoteRuntime.backend_api.dumpRecentText(rr, allocator, self.io, max_rows, max_bytes);
     }
 
     // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────
@@ -2177,8 +2166,8 @@ test "C3-3b4 async close parity는 committed cleanup callback 뒤에만 제거�
     probe.backend = &backend_value;
     probe.runtime = &fixture.runtime;
     probe.handle = 42;
-    probe.target_addr = @intFromPtr(fixture.runtime.generation.observation.cwd.items.ptr);
-    probe.target_len = fixture.runtime.generation.observation.cwd.items.len;
+    probe.target_addr = @intFromPtr(remote_runtime.testing_api.generation(&fixture.runtime).observation.cwd.items.ptr);
+    probe.target_len = remote_runtime.testing_api.generation(&fixture.runtime).observation.cwd.items.len;
     probe.armed = true;
 
     const finish = backend_value.backend().finishAfterTermination(42);
@@ -2564,8 +2553,8 @@ const B4PumpFixture = struct {
             undefined,
         );
         for (0..count) |index| {
-            self.runtimes[index].generation.frame_summary_ready = false;
-            self.runtimes[index].generation.frame_summary = .{};
+            remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary_ready = false;
+            remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary = .{};
             try self.backend.runtimes.put(testing.allocator, index + 1, .{
                 .runtime = &self.runtimes[index],
                 .host_id = 1,
@@ -2581,8 +2570,8 @@ const B4PumpFixture = struct {
 
     fn consumeFrame(self: *@This(), count: usize) void {
         for (0..count) |index| {
-            self.runtimes[index].generation.frame_summary_ready = false;
-            self.runtimes[index].generation.frame_summary = .{};
+            remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary_ready = false;
+            remote_runtime.testing_api.generation(&self.runtimes[index]).frame_summary = .{};
         }
     }
 };

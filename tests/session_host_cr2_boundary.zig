@@ -50,7 +50,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "pub const RemoteRuntime = struct {",
         "fn generationConnection(",
     ) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), count(shell, "generation: RemoteGeneration,"));
+    try std.testing.expectEqual(@as(usize, 1), count(shell, "generation_storage: RemoteGeneration,"));
     inline for (.{
         "connection: RuntimeConnection,",
         "attachment: RuntimeAttachment,",
@@ -64,7 +64,7 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "frame_summary: runtime_pump_mod.DrainSummary = .{},",
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9216,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9168,"));
 }
@@ -619,10 +619,66 @@ test "CR2e-d 경계는 actual RemoteGeneration PreparedReconnect와 in-place des
     const build_gate = between(
         build,
         "const session_host_cr2e_d_step = b.step(",
-        "const b3_1_boundary_tests = addProjectTest(",
+        "const session_host_cr2e_e1_step = b.step(",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-d"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=4"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
+}
+
+test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽게 한다" {
+    const allocator = std.testing.allocator;
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    const runtime_owner = between(
+        runtime,
+        "pub const RemoteRuntime = struct {",
+        "fn decodeResizeReply(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "generation_storage: RemoteGeneration,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "fn currentGeneration("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "fn currentGenerationConst("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_owner, "pub const backend_api = struct {"));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_owner, "generation_storage"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime_owner, "generation: RemoteGeneration,"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\""));
+    try std.testing.expectEqual(@as(usize, 0), count(backend, ".generation."));
+    inline for (.{
+        .{ "RemoteRuntime.backend_api.frameSummaryReady(", 1 },
+        .{ "RemoteRuntime.backend_api.prepareFrameSummary(", 1 },
+        .{ "RemoteRuntime.backend_api.storeFrameSummary(", 1 },
+        .{ "RemoteRuntime.backend_api.takeFrameSummary(", 1 },
+        .{ "RemoteRuntime.backend_api.pumpEnded(", 1 },
+        .{ "RemoteRuntime.backend_api.markPumpEnded(", 2 },
+        .{ "RemoteRuntime.backend_api.foregroundProcessGroup(", 1 },
+        .{ "RemoteRuntime.backend_api.copyForegroundProcessNames(", 1 },
+        .{ "RemoteRuntime.backend_api.observationMatches(", 1 },
+        .{ "RemoteRuntime.backend_api.copyObservation(", 2 },
+        .{ "RemoteRuntime.backend_api.dumpRecentText(", 1 },
+    }) |entry| try std.testing.expectEqual(@as(usize, entry[1]), count(backend, entry[0]));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            ".backend_api.",
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e1"));
+
+    const build_gate = between(
+        build,
+        "const session_host_cr2e_e1_step = b.step(",
+        "const b3_1_boundary_tests = addProjectTest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e1"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 

@@ -52799,7 +52799,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
     runtime.event_cursor = .{};
-    runtime.generation.observation = .{ .observer_generation = 1 };
+    session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
     defer removeCr2d3EventRuntime(handle);
     session.audible_bell = true;
@@ -52810,7 +52810,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // host가 벨을 실어 보내면(1회) 울린다 — 예전에는 placeholder core라 통째로 무동작이었다.
-    runtime.generation.observation.bell_count = 1;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 1;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 
@@ -52819,16 +52819,16 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // 여러 번 울린 뒤 한 번에 관측이 오면 1회로 합친다(로컬 bool 합침과 같은 동작).
-    runtime.generation.observation.bell_count = 5;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 5;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 
     // host live-upgrade(exec)로 카운터가 0에서 다시 시작 → **가짜 벨을 울리지 않고** 조용히 맞춘다.
-    runtime.generation.observation.bell_count = 0;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 0;
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBell(session));
     // 재동기화 후 새 벨은 정상 동작한다.
-    runtime.generation.observation.bell_count = 1;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 1;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
 }
@@ -52862,7 +52862,7 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
     runtime.event_cursor = .{};
-    runtime.generation.observation = .{ .observer_generation = 1 };
+    session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
     defer removeCr2d3EventRuntime(handle);
 
@@ -52871,9 +52871,9 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
 
     // host가 read 요청을 알리고 target을 실어 준다. 기본 정책은 deny라 **클립보드를 읽지 않는다**(탈취 방지).
     session.loaded_config.config.osc52.read = .deny;
-    runtime.generation.observation.clipboard_read_seq = 1;
-    try runtime.generation.observation.clipboard_read_target.appendSlice(allocator, "p");
-    defer runtime.generation.observation.clipboard_read_target.deinit(allocator);
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 1;
+    try session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_target.appendSlice(allocator, "p");
+    defer session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_target.deinit(allocator);
     try std.testing.expect(!session.takeClipboardReadRequest());
 
     // 같은 seq는 재트리거하지 않는다(full-state 관측이 반복 전송돼도 중복 요청 금지).
@@ -52881,12 +52881,12 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     try std.testing.expect(!session.takeClipboardReadRequest());
 
     // 새 요청 + allow → true(Swift가 클립보드를 읽어 provideClipboardRead로 응답), target도 캡처된다.
-    runtime.generation.observation.clipboard_read_seq = 2;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 2;
     try std.testing.expect(session.takeClipboardReadRequest());
     try std.testing.expectEqualStrings("p", session.clipboard_read_target_buf.items);
 
     // host live-upgrade(exec)로 seq가 0에서 재시작 → 요청으로 오인하지 않는다.
-    runtime.generation.observation.clipboard_read_seq = 0;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 0;
     try std.testing.expect(!session.takeClipboardReadRequest());
 }
 
@@ -52918,16 +52918,16 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     defer term.rt.handle = original_handle;
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
     runtime.event_cursor = .{};
-    runtime.generation.observation = .{ .observer_generation = 1 };
+    session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 1 };
     try installCr2d3EventRuntime(&runtime, handle);
     defer removeCr2d3EventRuntime(handle);
     session.audible_bell = true;
     session.loaded_config.config.osc52.read = .allow;
 
     // 재접속 상황: host는 이미 벨 12회·read 5회를 누적한 상태다. 첫 관측이 그대로 들어온다.
-    runtime.generation.observation.bell_count = 12;
-    runtime.generation.observation.clipboard_read_seq = 5;
-    runtime.generation.observation.clipboard_write_seq = 9;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 12;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 5;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_write_seq = 9;
 
     _ = notification_ops.takeBell(session);
     notification_ops.dispatchBell(session);
@@ -52936,10 +52936,10 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     try std.testing.expectEqual(@as(u64, 9), runtime.event_cursor.clipboard_write_seq); // 지난 복사를 재생하지 않는다
 
     // 기준선을 잡은 뒤의 **새** 요청은 정상 동작한다.
-    runtime.generation.observation.bell_count = 13;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 13;
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
-    runtime.generation.observation.clipboard_read_seq = 6;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 6;
     try std.testing.expect(session.takeClipboardReadRequest());
 }
 
@@ -53004,7 +53004,7 @@ test "CR2d4 마지막 workspace 이동과 source close는 stable input과 event 
         .clipboard_write_seq = 4,
         .clipboard_read_seq = 5,
     };
-    runtime.generation.observation = .{
+    session_host.remote_runtime.testing_api.generation(&runtime).observation = .{
         .observer_generation = 7,
         .bell_count = 3,
         .clipboard_write_seq = 4,
@@ -53035,8 +53035,8 @@ test "CR2d4 마지막 workspace 이동과 source close는 stable input과 event 
 
     dst.audible_bell = true;
     dst.loaded_config.config.osc52.read = .allow;
-    runtime.generation.observation.bell_count = 4;
-    runtime.generation.observation.clipboard_read_seq = 6;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 4;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.clipboard_read_seq = 6;
     _ = notification_ops.takeBell(dst);
     notification_ops.dispatchBell(dst);
     try std.testing.expect(notification_ops.takeBell(dst));
@@ -53065,7 +53065,7 @@ test "CR2d4 window merge는 옛 Window transfer 없이 stable runtime 상태만 
 
     var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
     runtime.event_cursor = .{ .observer_generation = 9, .bell_count = 11 };
-    runtime.generation.observation = .{ .observer_generation = 9, .bell_count = 11 };
+    session_host.remote_runtime.testing_api.generation(&runtime).observation = .{ .observer_generation = 9, .bell_count = 11 };
     try seedCr2d4StableState(allocator, &runtime, "STABLE-MERGE");
     defer deinitCr2d4StableState(allocator, &runtime);
     try installCr2d4StableRuntime(&runtime, handle);
@@ -53082,7 +53082,7 @@ test "CR2d4 window merge는 옛 Window transfer 없이 stable runtime 상태만 
 
     src.deinit();
     src_live = false;
-    runtime.generation.observation.bell_count = 12;
+    session_host.remote_runtime.testing_api.generation(&runtime).observation.bell_count = 12;
     dst.audible_bell = true;
     _ = notification_ops.takeBell(dst);
     notification_ops.dispatchBell(dst);

@@ -44,7 +44,7 @@ test "2c3e C2 경계는 열두 제품 RPC family를 typed decoder 경로로만 �
     const dispatch_at = std.mem.indexOf(u8, decoded, "return self.callDecodedAfterFlush(") orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(flush_at < dispatch_at);
-    try std.testing.expectEqual(@as(usize, 1), count(decoded, "self.generation.attachment.callDecoded("));
+    try std.testing.expectEqual(@as(usize, 1), count(decoded, "self.currentGeneration().attachment.callDecoded("));
 
     const owner_seam = between(
         attachment,

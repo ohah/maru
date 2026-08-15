@@ -108,7 +108,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".sendControlNonBlocking("));
     const admission = between(runtime, "    fn admitControl(", "    fn normalizeGenerationControlError(") orelse
         return error.TestExpectedEqual;
-    const generation_arm = between(admission, "if (self.generation.attachment == .generation)", "        return switch (control.control)") orelse
+    const generation_arm = between(admission, "if (self.currentGeneration().attachment == .generation)", "        return switch (control.control)") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(generation_arm, ".sendControlNonBlocking("));
     try std.testing.expectEqual(@as(usize, 0), count(generation_arm, "self.client.send"));
@@ -116,7 +116,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
         return error.TestExpectedEqual;
     const blocking_generation_arm = between(
         blocking_admission,
-        "if (self.generation.attachment == .generation)",
+        "if (self.currentGeneration().attachment == .generation)",
         "        switch (control.control)",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(blocking_generation_arm, ".sendControl("));
@@ -127,7 +127,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendScrollToBottom("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendCoreCommand("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "value.sendResyncNonBlocking("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.generation.attachment.sendResyncNonBlocking(self.legacyConnectionOrNull())"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.currentGeneration().attachment.sendResyncNonBlocking(self.legacyConnectionOrNull())"));
     const response_core = between(
         runtime,
         "    pub fn sendCoreCommandBlocking(",

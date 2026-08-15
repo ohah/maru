@@ -284,11 +284,13 @@ fn computeMarks(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!voi
     for (rows.left, rows.right, 0..) |lrow, rrow, i| {
         // **짝이 된 쌍에서만 본다**(§7 경계 규칙). 한쪽이 빈 행이면 순수 추가·삭제라 줄 전체가 밴드다.
         if (lrow.kind != .removed or rrow.kind != .added) continue;
-        const lt = try clusterTokens(allocator, st.left_texts[i]);
+        // **상한은 한 곳에서 온다** — 토큰을 만드는 쪽과 접는 쪽이 갈리면 다시 잡았다 버린다.
+        const opts: intraline.Options = .{};
+        const lt = (try clusterTokens(allocator, st.left_texts[i], opts.max_tokens)) orelse continue;
         defer allocator.free(lt);
-        const rt = try clusterTokens(allocator, st.right_texts[i]);
+        const rt = (try clusterTokens(allocator, st.right_texts[i], opts.max_tokens)) orelse continue;
         defer allocator.free(rt);
-        var result = (try intraline.compute(allocator, lt, st.left_texts[i], rt, st.right_texts[i], .{})) orelse continue;
+        var result = (try intraline.compute(allocator, lt, st.left_texts[i], rt, st.right_texts[i], opts)) orelse continue;
         defer result.deinit(allocator);
         left[i] = try copyMarks(allocator, result.left);
         right[i] = try copyMarks(allocator, result.right);
@@ -303,18 +305,28 @@ fn copyMarks(allocator: std.mem.Allocator, spans: []const intraline.Span) error{
 }
 
 /// grapheme cluster 경계. **표시가 한 글자로 보는 단위**여야 강조가 글자를 반으로 자르지 않는다.
-fn clusterTokens(allocator: std.mem.Allocator, line: []const u8) error{OutOfMemory}![]intraline.Token {
+/// 줄을 cluster 단위 토큰으로 자른다. **`cap`을 넘으면 `null`** — 그 줄은 `intraline.compute`가
+/// 어차피 접는데(`max_tokens`), 여기서 끝까지 만들면 잡았다 버리는 양이 줄 길이에 비례한다.
+/// 200 KB짜리 한 줄(minified JS — `content.zig`가 실제 사례로 부르는 그 입력)이 바뀌면 그것만으로
+/// 12.3 MB를 잡았다 놓았다(측정, 아래 테스트). 상한을 **만드는 자리**로 옮겨 `cap + 1`에서 멈춘다.
+fn clusterTokens(allocator: std.mem.Allocator, line: []const u8, cap: usize) error{OutOfMemory}!?[]intraline.Token {
     var out: std.ArrayList(intraline.Token) = .empty;
     errdefer out.deinit(allocator);
+    // 넘칠 줄은 `cap + 1`번째에서 접으므로 그 이상 자라지 않는다.
+    try out.ensureTotalCapacity(allocator, @min(cap + 1, line.len + 1));
     var i: usize = 0;
     while (i < line.len) {
+        if (out.items.len > cap) {
+            out.deinit(allocator);
+            return null;
+        }
         const base = maru.chrome.text_layout.decodeCodepoint(line, i);
         const end = @min(maru.chrome.text_layout.clusterEndAfter(line, i, base.advance), line.len);
         const n = @max(1, end - i);
         try out.append(allocator, .{ .start = @intCast(i), .len = @intCast(n) });
         i += n;
     }
-    return out.toOwnedSlice(allocator);
+    return try out.toOwnedSlice(allocator);
 }
 
 /// 줄 끝 문자를 뗀 표시용 슬라이스. **입력을 빌린다**(복사하지 않는다).
@@ -1120,4 +1132,36 @@ test "표시 배열 만들기가 어디서 할당에 실패해도 새지 않는�
         "a=1 and b=2\nkeep\nx=3\n",
         "a=9 and b=8\nkeep\nx=7\n",
     });
+}
+
+test "긴 줄 하나가 바뀌어도 마크 계산이 줄 길이만큼 잡지 않는다 — 상한은 만드는 자리에 있다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const allocator = fa.allocator();
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // minified JS 한 줄 — content.zig가 실제 사례로 이름을 부르는 그 입력이다.
+    const n = 200_000;
+    const a = try testing.allocator.alloc(u8, n + 1);
+    defer testing.allocator.free(a);
+    const b = try testing.allocator.alloc(u8, n + 1);
+    defer testing.allocator.free(b);
+    @memset(a[0..n], 'x');
+    @memset(b[0..n], 'x');
+    b[n / 2] = 'y'; // 딱 한 글자 다르다
+    a[n] = '\n';
+    b[n] = '\n';
+
+    var entry = testEntry(a, b);
+    fx.term.file_entry = &entry;
+    const before = fa.allocated_bytes;
+    poll(fx.session, fx.term);
+    const used = fa.allocated_bytes - before;
+
+    // **측정값이다.** 상한을 `clusterTokens` 안으로 옮기기 전 12,321,655B → 옮긴 뒤 7,279B
+    // (Debug, macOS arm64). 토큰 배열이 줄 길이에 비례해 자랐다가 `intraline`이 `max_tokens`로
+    // 곧바로 버리던 것이다. 여유를 두되 **줄 길이(200 KB)보다 훨씬 작다**를 지킨다 — 상한을 다시
+    // 소비하는 자리로 되돌리면 이 단언이 죽는다.
+    try testing.expect(used < 64 * 1024);
 }

@@ -71,6 +71,34 @@ src/platform/windows/
 
 ADE의 핵심이 에이전트 축이므로 이것은 작은 결함이 아니다. **해법은 아직 정하지 않았다**(§8).
 
+### 3.1a 어떤 셸을 띄우는가 — 선택과 기본값
+
+**사용자가 고르는 수단은 이미 있다.** `shell.command`/`shell.args`([configuration-shell.md](configuration-shell.md))가
+그 자리이고, Windows에서도 같은 키를 쓴다 — 새 키를 만들지 않는다.
+
+```conf
+shell.command = C:\Program Files\PowerShell\7\pwsh.exe
+shell.args    = -NoLogo
+```
+
+**없는 것은 기본값 결정 규칙이다.** `pty.resolveInteractiveShell()`(`src/pty/types.zig`)은 중립 파일에 있으면서
+`MARU_INTERACTIVE_SHELL` → `SHELL` → `/bin/sh` 순으로 **POSIX만** 안다. Windows에는 `$SHELL`이 없고 `/bin/sh`도
+없다. **이 함수가 OS별 갈래를 가져야 한다** — 중립 파일에 POSIX 기본값이 박혀 있는 것은 방금 고친
+`monotonicMs`(§4.1 계열)와 같은 종류의 누수다.
+
+Windows 갈래 후보(**미결정**, §8):
+
+| | 뜻 | 문제 |
+|---|---|---|
+| `%COMSPEC%` | Windows의 "명령 처리기" 변수. `$SHELL`의 가장 가까운 대응 | 거의 항상 `cmd.exe`라 **기본이 cmd**가 된다 — OSC 133 D를 못 내는 셸이 기본이 된다(§3.4) |
+| pwsh 7 → 5.1 → cmd 탐색 | 통합이 가장 온전한 셸을 우선 | 탐색 정책이 생긴다(경로·버전 판정) |
+
+`MARU_INTERACTIVE_SHELL`은 maru 자체 변수라 OS 무관하게 **1순위로 유지**한다.
+
+**탭별로 다른 셸을 여는 "프로필"은 이 계약 밖이다.** 지금 maru에는 그 개념이 없고(전역 `shell.command` 하나),
+macOS도 마찬가지다. 즉 **Windows 고유 요구가 아니라 제품 기능**이므로 별도 이니셔티브로 둔다 — 다만 Windows는
+한 기기에 cmd·PowerShell·WSL이 공존하는 것이 정상이라 **수요가 macOS보다 크다**는 점은 기록해 둔다.
+
 ### 3.2 cwd 보고 — Windows의 사실상 표준은 OSC 9;9다
 
 **네이티브 Windows 셸에는 OSC 7이 아니라 `OSC 9 ; 9 ; <경로> ST`를 쓴다.** ConEmu가 정의하고 Windows
@@ -290,6 +318,9 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 
 ## 8. 아직 정하지 않은 것
 
+- **Windows 기본 셸 결정 규칙**(§3.1a). `resolveInteractiveShell()`이 POSIX만 안다. `%COMSPEC%`(=cmd)와
+  "pwsh 7 → 5.1 → cmd 탐색" 중 무엇을 기본으로 둘지. 전자는 통합이 가장 약한 셸이 기본이 되고, 후자는
+  탐색 정책이 생긴다.
 - **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
   포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
   생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.

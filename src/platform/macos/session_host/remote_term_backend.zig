@@ -274,6 +274,18 @@ pub const RemoteTermBackend = struct {
         remote_backend_singleton_addr = @intFromPtr(self);
     }
 
+    /// Reconnect coordinator가 장기 backend pointer를 저장하지 않고 현재 canonical singleton을
+    /// owner turn마다 다시 확인하는 좁은 projection gate다. runtime map은 읽거나 바꾸지 않는다.
+    pub fn validateReconnectCoordinatorTarget(self: *RemoteTermBackend) !void {
+        if (!validRemoteBackendSingleton(&self.singleton_owner, @intFromPtr(self)))
+            return error.InvalidSingletonOwner;
+        while (!remote_backend_singleton_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer remote_backend_singleton_mutex.unlock();
+        if (remote_backend_singleton_addr != @intFromPtr(self) or
+            remote_backend_singleton_generation != self.singleton_owner.owner_generation)
+            return error.InvalidSingletonOwner;
+    }
+
     fn releaseProductSingleton(self: *RemoteTermBackend) void {
         if (std.meta.eql(self.singleton_owner, RemoteBackendSingletonOwner{})) return;
         if (!validRemoteBackendSingleton(&self.singleton_owner, @intFromPtr(self)))

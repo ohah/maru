@@ -171,7 +171,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    nonce, monotonic owner incarnation과 policy domain을 공유해 fork 및 same-address 재사용 권위를 거부한다. **e3b2**는 이 typed 거부를 actual sealed admission queue와
    결속해 요청을 잃지 않고 후속 drain에서 다시 시도한다. Candidate lease는 final-address stable executor가 mutation seal·authority commit retain 구간부터
    actual generation publish와 terminal reclaim까지 소유하며, product effect 성공 뒤에만 reducer state를 게시한다.
-   direct-release retry·termination/abandon의 외부 제품 event와 close 경쟁은 **e3c**가 sole external reconnect ingress와 함께
+   **e3c1**은 reconnect 정책만 소유하는 final-address `SessionHostCoordinator` shell을 먼저 열고, 기존
+   `AppProcessIncidentOwner` queue/budget과 `RemoteTermBackend` map을 옮기지 않은 채 one-turn sealed borrow로 sole drain을 소유한다.
+   이 shell은 raw backend/pool pointer를 장기 저장하지 않고 backend singleton generation·seal과 process identity를 매 호출 재검증한다.
+   direct-release retry·termination/abandon의 외부 제품 event와 close 경쟁은 후속 **e3c2/e3c3**가 closed typed receipt와 함께
    close 경쟁·mixed outcome을 같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
    RSS artifact를 제품 gate에 결합한다.
    e3 전체가 mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,
@@ -1089,7 +1092,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    연결하며 stable shell 자체를 처음 도입하는 단계가 아니다.
 6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
    status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
-7. **CR5 — 멀티윈도우·다중 runtime:** app-global `SessionHostCoordinator`의 host job, runtime별 authority ledger,
+7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
+   runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.

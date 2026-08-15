@@ -880,7 +880,9 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
     try std.testing.expectEqual(@as(usize, 5), count(budget, "test \"CR2e-e3a2 resident budget은"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const rss_testing_api = if (builtin.is_test) struct {"));
     try std.testing.expectEqual(
-        @as(usize, 4),
+        // e3c1 reconnect-only coordinator가 policy owner를 이동하지 않은 채 one-turn budget
+        // authority를 검사하므로 제품 import owner가 하나 늘어난다.
+        @as(usize, 5),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1003,7 +1005,8 @@ test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한�
         count(budget, "test \"CR2e-e3b1 reconnect admission budget은"),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // app-process owner, backend drain, e3c1 coordinator가 policy budget을 각각 소유/소비한다.
+        @as(usize, 3),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1047,7 +1050,9 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
-    try std.testing.expectEqual(@as(usize, 1), count(app, "backend.drainReconnectAdmission("));
+    // e3c1부터 AppSession은 backend leaf를 직접 호출하지 않고 coordinator sole drain을 탄다.
+    try std.testing.expectEqual(@as(usize, 0), count(app, "backend.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn drainReconnectAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR2e-e3b2 admission drain은"));
     // 실패 복구 defer, runtime Busy, resident cap의 세 경로가 모두 같은 sealed row를 재시도 상태로 돌린다.
@@ -1061,6 +1066,60 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
         "run_cr2e_e3b2_runtime_tests.addArg(\"--maru-expect-tests=1\")",
         "run_cr2e_e3b2_drain_tests.addArg(\"--maru-expect-tests=1\")",
         "run_cr2e_e3b2_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
+}
+
+test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고정한다" {
+    const allocator = std.testing.allocator;
+    const app = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app);
+    const owner = try readSource(allocator, "src/platform/macos/session_host/app_process_incident_owner.zig");
+    defer allocator.free(owner);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
+    defer allocator.free(coordinator);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_admissions: reconnect_owner_mod.Owner = .{},"));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
+    try std.testing.expectEqual(@as(usize, 0), count(app, "backend.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "return backend.drainReconnectAdmission(admissions, budget);"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn validateReconnectCoordinatorTarget("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "validateReconnectCoordinatorTarget(",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            ".drainReconnectAdmission(",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+            "platform/macos/app_session.zig",
+        ),
+    );
+    inline for (.{
+        "sessionHostCoordinatorSeal(",
+        "copied_coordinator.self_addr = @intFromPtr(&copied_coordinator);",
+        "std.Thread.spawn(",
+        "try replacement_backend.claimProductSingleton();",
+        "var stale_backend_copy = stale_backend;",
+    }) |phrase| try std.testing.expect(count(coordinator, phrase) >= 1);
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "test \"CR2e-e3c1 coordinator는"));
+    inline for (.{
+        "const session_host_cr2e_e3c1_step = b.step(",
+        "session_host_cr2e_e3c1_step.dependOn(session_host_cr2e_e3b2_step)",
+        "run_cr2e_e3c1_coordinator_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3c1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 

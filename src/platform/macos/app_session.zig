@@ -2177,6 +2177,7 @@ pub const IncidentOwnerTerminationOutcome = enum(u32) {
 // AppHost termination ABI가 정산한다.
 var app_process_incident_owner: session_host.app_process_incident_owner.AppProcessIncidentOwner = .{};
 const incident_publication_port = session_host.app_process_incident_owner;
+var app_session_host_coordinator: session_host.session_host_coordinator.SessionHostCoordinator = .{};
 var app_process_incident_nonce: u128 = 0;
 // 공개 종료 ABI는 mutable owner graph를 읽기 전에 이 immutable publication token으로 caller thread를 거른다.
 var app_process_incident_owner_thread = std.atomic.Value(u64).init(0);
@@ -5477,7 +5478,8 @@ pub const AppSession = struct {
                 identity.process_nonce,
                 app_process_incident_nonce,
             );
-            return incident_publication_port.installPublicationPort(&app_process_incident_owner);
+            try incident_publication_port.installPublicationPort(&app_process_incident_owner);
+            return app_session_host_coordinator.ensureReady(identity.process_nonce);
         }
         if (app_process_incident_nonce == 0) {
             var bytes: [16]u8 = undefined;
@@ -5498,6 +5500,7 @@ pub const AppSession = struct {
             app_process_incident_nonce,
         );
         try incident_publication_port.installPublicationPort(&app_process_incident_owner);
+        try app_session_host_coordinator.ensureReady(identity.process_nonce);
         app_process_incident_owner_thread.store(@intCast(std.Thread.getCurrentId()), .release);
     }
 
@@ -5520,6 +5523,7 @@ pub const AppSession = struct {
         try RemoteSessionAdapter.initializeProcessRuntime();
         incident_publication_port.publication_port_testing_api.reset();
         app_process_incident_owner = .{};
+        app_session_host_coordinator = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
         app_process_incident_termination_consumed.store(0, .release);
@@ -5535,6 +5539,7 @@ pub const AppSession = struct {
             _ = app_process_incident_owner.shutdown() catch unreachable;
         }
         app_process_incident_owner = .{};
+        app_session_host_coordinator = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
         app_process_incident_termination_consumed.store(0, .release);
@@ -13545,7 +13550,8 @@ pub const AppSession = struct {
         // 전역 remote backend가 frame owner 집합을 한 번만 선택해야 Term별 pump 순서가 Busy owner를 재실행하지 않는다.
         if (is_macos) if (app_remote_backend) |*backend| {
             if (app_process_incident_owner.publisher() != null) {
-                _ = backend.drainReconnectAdmission(
+                _ = app_session_host_coordinator.drainReconnectAdmission(
+                    backend,
                     &app_process_incident_owner.reconnect_admissions,
                     &app_process_incident_owner.reconnect_budget,
                 ) catch @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);

@@ -78,7 +78,8 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // C3-3b6 shutdown owner와 2d2 terminal handoff registry도 같은 process domain을 직접 검증한다.
     // CR0b HostAdapter·publisher registry·runtime·composite coordinator·GUI process owner와 daemon bootstrap이 같은 process domain을 직접 검증한다.
     // CR1 reconnect scheduler와 CR2e-e3b1 resident admission budget이 같은 process seal owner를 사용한다.
-    try std.testing.expectEqual(@as(usize, 29), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // e3c1 app-global reconnect coordinator도 같은 process seal domain을 소비한다.
+    try std.testing.expectEqual(@as(usize, 30), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
         count(reconnect_resident_budget, "@import(\"process_seal_service.zig\")"),

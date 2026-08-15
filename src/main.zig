@@ -355,7 +355,52 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
     }
 }
 
+/// 호스트 OS가 아직 못 하는 CLI 기능. 어느 것이 왜 막혀 있는지를 **한 곳에** 둔다.
+const HostGatedFeature = enum {
+    /// `maru ssh` — `/bin/sh -c <래퍼 스크립트>`를 execve해 원격에 terminfo를 심고 ssh로 프로세스를 교체한다.
+    /// Windows에는 `/bin/sh`가 없고 `environ` 심볼도 msvcrt에 없어 **링크가 깨진다**(실측:
+    /// `lld-link: undefined symbol: environ`).
+    ssh,
+    /// `maru install-cli` — `~/.local/bin/maru`에 symlink를 건다. Windows에는 그 관례가 없고, symlink는 개발자
+    /// 모드나 관리자 권한을 요구하며, `symlink` 심볼 자체가 msvcrt에 없다(실측: `undefined symbol: symlink`).
+    install_cli,
+    /// 컨트롤 소켓 — unix domain socket. Windows는 named pipe 이식이 선행이고 `socket`은 ws2_32라 `-lc`로
+    /// 링크되지 않는다(실측: `undefined symbol: socket`).
+    control_socket,
+};
+
+/// 그 기능이 `os_tag`에서 막혀 있으면 **사용자에게 보일 이유**, 아니면 null.
+///
+/// **OS를 인자로 받는다.** 그래야 테스트가 두 갈래를 모두 돌 수 있다 — 컴파일 타임 분기로 두면 Windows 갈래가
+/// 비-Windows CI에서 **공허참**이 되고(이 저장소 CI는 ubuntu·macOS만 돈다), 그 함정은 W1.5 코드 리뷰에서 이미
+/// 한 번 밟았다(`path_shape.isDetectableAbsoluteFor`와 같은 규율).
+///
+/// 셋 다 **지원해야 하는 기능**이고 백로그에 있다 — docs/plans/windows-platform.md의 W9(ssh)·W10(install-cli)과
+/// docs/windows-platform.md §8(컨트롤 플레인 transport). 여기서 접는 것은 W2의 목표가 "Windows에서 maru가
+/// 빌드·실행된다"이기 때문이고, 접지 않으면 링크가 깨져 그 목표 자체가 성립하지 않는다.
+///
+/// **호출부는 반드시 `if (comptime hostGateReason(...)) |reason|` 형태로 쓴다.** `comptime` 없이 부르면 optional
+/// 언랩이 런타임 분기가 되어 아래 POSIX 본문이 **의미 분석되고**, 그 순간 `socket`/`environ`/`symlink`가 다시
+/// undefined symbol이 된다(실측: `comptime`을 빼자 `connectSendControl`의 `close(fd)` 타입 오류가 되살아났다).
+/// 그것이 이 함수가 값을 돌려주는 술어인데도 게이트로 쓰이는 이유다.
+fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const u8 {
+    if (os_tag != .windows) return null;
+    return switch (feature) {
+        .ssh => "maru ssh는 Windows에서 아직 지원되지 않습니다 (docs/plans/windows-platform.md W9).",
+        .install_cli => "maru install-cli는 Windows에서 아직 지원되지 않습니다 (docs/plans/windows-platform.md W10).",
+        .control_socket => "Windows에서는 컨트롤 소켓이 아직 지원되지 않습니다",
+    };
+}
+
 fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
+    // Windows 미지원(백로그 W9) — 이유는 `HostGatedFeature.ssh`. 여기서 접지 않으면 W2의 목표(Windows에서
+    // maru가 빌드된다)가 성립하지 않는다. comptime 참이라 아래 POSIX 본문은 의미 분석되지 않는다(실측 확인).
+    if (comptime hostGateReason(builtin.os.tag, .ssh)) |reason| {
+        try stderr.print("{s}\n", .{reason});
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
     // `maru ssh [--terminfo-only] <ssh args...>`: 원격에 maru terminfo(xterm-maru)를 먼저 심고 평범한
     // ssh로 exec한다. 순수 로직(파싱·스크립트·argv)은 maru.cli.ssh가 갖고, 여기선 인자 수집과 실제
     // 프로세스 교체(execve)만 한다. "ssh" 뒤 인자를 execve까지 유효하도록 소유 복사해 모은다.
@@ -416,6 +461,14 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
 }
 
 fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // Windows 미지원(백로그 W10) — 이유는 `HostGatedFeature.install_cli`. 설치 위치(`%LOCALAPPDATA%\Programs`?)·
+    // shim 방식(symlink vs `.cmd`)·PATH 등록이 전부 계약에 없는 결정이라 별도 슬라이스로 나눴다.
+    if (comptime hostGateReason(builtin.os.tag, .install_cli)) |reason| {
+        try stderr.print("{s}\n", .{reason});
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
     // `maru install-cli`: 현재 maru 바이너리를 `~/.local/bin/maru`에 symlink해 셸 PATH에서 쓸 수 있게
     // 한다(VS Code `code` 설치식). 순수 경로/PATH 로직은 maru.cli.install, 여기선 자기 경로 resolve와
     // 실제 mkdir/symlink(std.c)만 한다. sudo가 필요 없는 user-level 경로라 권한 상승이 없다.
@@ -974,6 +1027,18 @@ fn validateJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) bool {
 /// 되읽지 않으므로 무방. `.replace=true`+`Atomic.replace`라 기존 target을 **덮어쓴다**(폴링/재실행 정상화 —
 /// 옛 `.link` no-clobber 회귀 수정). caller가 에러를 사용자 메시지로 매핑.
 fn publishBrowserResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const u8) !void {
+    // **Windows에서는 도달할 수 없고, 도달해서도 안 된다.** 도달 불가인 이유: 이 경로는 컨트롤 소켓 왕복 뒤에만
+    // 오는데 `connectSendControl`이 Windows에서 "인스턴스 없음"으로 접는다. 도달하면 안 되는 이유: POSIX의
+    // `0o600`(소유자 전용)에 해당하는 것이 Windows에는 없고 — `Permissions`가 POSIX mode가 아니라 **ACL**을 나르는
+    // `FILE.ATTRIBUTE` enum이라 `fromMode`가 아예 없다 — 무엇으로 대체할지가 아직 미결정이기 때문이다
+    // (docs/windows-platform.md §8 "`publishBrowserResult`의 파일 권한": 부모 디렉터리 ACL 상속 vs 현재 사용자
+    // SID만 허용하는 명시 ACL).
+    //
+    // 그래서 `.default_file`로 조용히 넘기지 않는다. 그것은 부모 폴더의 ACL을 물려받는다는 뜻이고, 이 파일은
+    // 사용자가 `--out`으로 준 임의 경로라 공유 폴더·네트워크 드라이브면 보장이 사라진다. 컨트롤 플레인을
+    // 이식하는 사람이 이 결정을 잊으면 **조용히 넓은 권한으로 쓰이는 대신 여기서 시끄럽게 실패**해야 한다.
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
+
     var af = try dir.createFileAtomic(io, target, .{
         .permissions = std.Io.File.Permissions.fromMode(0o600),
         .replace = true,
@@ -1063,6 +1128,13 @@ fn browserScreenshotError(stderr: *std.Io.Writer, msg: []const u8) error{Unknown
 /// `errdefer`로 닫는다(성공 반환 시엔 caller 소유). 순수 정책(경로·발견 판정)은 `cli.sessions`, 여긴 getenv/readdir/소켓
 /// syscall 접착만(§11 L4).
 fn connectSendControl(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) !std.c.fd_t {
+    // Windows에는 이 transport가 아직 없다(백로그 — 계약 §8 "컨트롤 플레인 transport"). **인스턴스 없음으로
+    // 접는다**: 그것이 이미 있는 graceful 경로이고(소켓 디렉터리가 없을 때와 같은 결과), CLI가 crash 대신
+    // exit 1로 끝난다. 이 early return은 comptime 참이라 아래 POSIX 본문이 **의미 분석조차 되지 않아**
+    // `c.socket`이 undefined symbol이 되지 않는다(실측 확인) — 이것이 named pipe 이식 없이 빌드를 뚫는 방법이다.
+    if (comptime hostGateReason(builtin.os.tag, .control_socket)) |reason|
+        return sessionNoInstance(stderr, reason);
+
     const c = std.c;
     const posix = std.posix;
 
@@ -1253,7 +1325,39 @@ test "development CLI imports maru module" {
     try std.testing.expectEqual(@as(u16, 80), maru.terminal.Size.default.cols);
 }
 
+// W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·
+// 컨트롤 소켓)이 거기서 접혀야 한다 — 안 접으면 `environ`·`symlink`·`socket`이 undefined symbol이라 링크가 깨진다.
+//
+// 술어가 OS를 **인자로** 받으므로 이 테스트는 Windows 러너 없이도 두 갈래를 모두 실행한다. 컴파일 타임 분기로
+// 두면 이 단언들이 비-Windows CI에서 공허참이 되는데, 그 함정은 W1.5 코드 리뷰에서 이미 한 번 밟았다.
+test "host gate: POSIX 전제 명령은 Windows에서만 접히고, 이유가 사용자에게 보인다" {
+    const features = [_]HostGatedFeature{ .ssh, .install_cli, .control_socket };
+
+    // Windows: 셋 다 막히고 이유 문구가 있다(빈 문자열이면 사용자가 무슨 일인지 못 안다).
+    for (features) |f| {
+        const reason = hostGateReason(.windows, f) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(reason.len > 0);
+    }
+
+    // 다른 호스트: 셋 다 열려 있다. macOS/Linux 동작이 이 슬라이스로 바뀌지 않는다는 증거다.
+    for ([_]std.Target.Os.Tag{ .macos, .linux }) |os| {
+        for (features) |f| try std.testing.expect(hostGateReason(os, f) == null);
+    }
+
+    // 백로그 슬라이스 번호를 문구에 담아 둔다 — "안 된다"만 말하고 어디서 하는지 안 알려주면 보고가 아니다.
+    try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .ssh).?, "W9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .install_cli).?, "W10") != null);
+}
+
+// 이 테스트는 **POSIX 파일 모드가 있는 호스트**의 것이다. Windows에는 `0o600`에 해당하는 것이 없고
+// (`Permissions`가 mode가 아니라 ACL을 나르는 `FILE.ATTRIBUTE` enum이라 `toMode`가 없다), 무엇으로 대체할지가
+// 미결정이라 `publishBrowserResult` 자체가 거기서 `error.UnsupportedOnWindows`로 막혀 있다
+// (docs/windows-platform.md §8). **OS 이름이 아니라 없는 전제 그 자체로 skip한다** — `Permissions`에 `toMode`가
+// 생기는 날 저절로 깨어나야 한다(`connection_incident`의 `currentProcessId() == 0` skip과 같은 규율,
+// docs/layering-and-portability.md §4.1).
 test "publishBrowserResult: 0600 원자 공개 + 기존 파일 덮어쓰기(폴링 재실행 정상화)" {
+    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

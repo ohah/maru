@@ -5,6 +5,19 @@
 const std = @import("std");
 const file_panel_bridge = @import("file_panel_bridge.zig");
 
+/// 디렉터리 경로와 자식 이름을 **`/`로** 잇는다.
+///
+/// L2(session)의 경로 계약은 POSIX다 — 절대 경로는 선행 `/`, 구분자는 `/`이고, 다른 L2 코드(`file_panel_bridge`)는
+/// 입력에 역슬래시가 있으면 아예 거부한다. 그런데 `std.fs.path.join`은 **호스트 native** 구분자를 쓴다: Windows
+/// 호스트에서는 같은 트리가 `/repo` + `docs` → `/repo\docs`가 돼, `recordOpened`가 `/`로 쪼개 기억해 둔 확장 자식과
+/// 문자열이 어긋나고 lazy scan 요청이 조용히 사라진다(실측: Windows에서 이 테스트가 null panic).
+/// **규칙: L2에서 구분자를 만들어 내는 자리는 항상 POSIX 구분자를 쓴다.** 구분자를 *읽는* 쪽(`isAbsolute`·`dirname`·
+/// `basename`)은 Windows 구현도 `/`를 함께 받아들이므로 그대로 둔다. macOS/Linux에서는 native == posix라 무변화다.
+fn joinPosix(allocator: std.mem.Allocator, directory_path: []const u8, name: []const u8) ![]u8 {
+    const trimmed = std.mem.trimEnd(u8, directory_path, "/");
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed, name });
+}
+
 pub const max_roots: usize = 256; // DockPanel metadata 상한과 동일 — 열린 파일마다 서로 다른 root여도 bounded.
 pub const max_recent: usize = 32;
 pub const max_children_per_directory: usize = 4096;
@@ -891,7 +904,7 @@ pub const Tree = struct {
             if (node_weight > remaining -| staged_node_count) continue;
             const name = try self.allocator.dupe(u8, input.name);
             errdefer self.allocator.free(name);
-            const path = try std.fs.path.join(self.allocator, &.{ directory_path, input.name });
+            const path = try joinPosix(self.allocator, directory_path, input.name);
             errdefer self.allocator.free(path);
             staged.appendAssumeCapacity(.{ .name = name, .path = path, .kind = input.kind, .identity = input.identity });
             accepted += 1;

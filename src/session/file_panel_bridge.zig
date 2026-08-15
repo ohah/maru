@@ -284,10 +284,13 @@ pub fn resolveMarkdownFileLink(
     if (!std.unicode.utf8ValidateSlice(decoded) or std.mem.startsWith(u8, decoded, "//") or hasUriScheme(decoded))
         return error.InvalidLink;
 
+    // `resolvePosix`(native `resolve` 아님): 이 함수는 위에서 입력의 역슬래시를 이미 거부했고 L2의 경로 계약은
+    // POSIX다. native `resolve`는 Windows 호스트에서 `\`로 이어 붙여 `/workspace/guide/x.md`가 `\workspace\...`로
+    // 나온다(실측) — 구분자를 **만들어 내는** 자리라 명시적으로 POSIX를 쓴다. macOS/Linux에선 native == posix.
     const absolute = if (std.fs.path.isAbsolute(decoded))
-        try std.fs.path.resolve(gpa, &.{decoded})
+        try std.fs.path.resolvePosix(gpa, &.{decoded})
     else
-        try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(source_path) orelse "/", decoded });
+        try std.fs.path.resolvePosix(gpa, &.{ std.fs.path.dirname(source_path) orelse "/", decoded });
     errdefer gpa.free(absolute);
     if (openKindForPath(absolute) == null) {
         return error.InvalidLink;

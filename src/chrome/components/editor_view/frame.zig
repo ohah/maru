@@ -327,11 +327,25 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
         if (v.piece != 0) continue;
         const marks = (props.row_marks orelse continue);
         if (idx >= marks.len) continue;
+        const row_marks = marks[idx];
+        if (row_marks.len == 0) continue;
         const line = if (idx < props.lines.len) props.lines[idx] else continue;
-        for (marks[idx]) |m| {
+
+        // **줄을 한 번만 지난다.** 위치마다 앞부분을 다시 펴면 마크가 많은 줄에서 비용이 곱으로 붙는다
+        // (200자 줄에 마크 100개 = 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만). 물어볼 위치를
+        // 모아 한 번에 채운다 — 저장소가 모자라면 앞에서부터 담을 수 있는 만큼만 그린다.
+        const max_pairs = @min(row_marks.len, scratch_cols.len / (2 * @sizeOf(u32)));
+        if (max_pairs == 0) continue;
+        const offsets = std.mem.bytesAsSlice(u32, scratch_cols[0 .. max_pairs * 2 * @sizeOf(u32)]);
+        for (row_marks[0..max_pairs], 0..) |m, k| {
+            offsets[k * 2] = m.start;
+            offsets[k * 2 + 1] = m.start + m.len;
+        }
+        content.columnsAtOffsets(line, props.tab_width, offsets, offsets); // 제자리 채우기
+        for (row_marks[0..max_pairs], 0..) |_, k| {
             if (n >= out.len) break;
-            const start_col = content.columnOfByte(line, props.tab_width, m.start, scratch_cols);
-            const end_col = content.columnOfByte(line, props.tab_width, m.start + m.len, scratch_cols);
+            const start_col = offsets[k * 2];
+            const end_col = offsets[k * 2 + 1];
             if (end_col <= start_col) continue;
             // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
             const from = @max(start_col, props.first_col);

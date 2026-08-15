@@ -306,3 +306,19 @@ test "무작위 200쌍: 강조 범위가 줄 밖으로 안 나가고 겹치지 �
         }
     }
 }
+
+test "할당이 어디서 실패해도 새지 않는다 — 실패 지점을 전부 주입한다" {
+    // `diff.zig`에서 이 방법이 실제 누수를 잡았다(복사는 성공하고 append가 OOM인 자리). 여기도
+    // 토큰 배열 둘 + 결과 둘을 잡으므로 같은 모양이 생길 수 있다.
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, left: []const u8, right: []const u8) !void {
+            const lt = try codepointTokens(allocator, left);
+            defer allocator.free(lt);
+            const rt = try codepointTokens(allocator, right);
+            defer allocator.free(rt);
+            var r = (try compute(allocator, lt, left, rt, right, .{})) orelse return;
+            r.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{ "a=1 and b=2", "a=9 and b=8" });
+}

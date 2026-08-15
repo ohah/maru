@@ -281,6 +281,40 @@ pub fn columnOfByte(bytes: []const u8, tab_width: u16, byte_off: usize, scratch:
     return columnsOf(r.text);
 }
 
+/// 정렬된 바이트 위치들의 열을 **한 번 훑어** 채운다. `offsets`는 오름차순이어야 하고, `out`은 같은
+/// 길이다.
+///
+/// **왜 `columnOfByte`를 반복하지 않는가.** 그쪽은 위치마다 앞부분을 다시 펴므로 마크가 많은 줄에서
+/// 비용이 곱으로 붙는다(200자 줄에 마크 100개면 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만).
+/// 여기서는 줄을 한 번만 지난다.
+///
+/// **탭스톱 규칙은 아래 전개 루프와 같아야 한다** — 두 곳이 갈리면 강조가 글자에서 밀린다. 그래서
+/// 테스트가 이 함수를 `columnOfByte`(실제 전개로 세는 쪽)와 무작위 입력에서 대조한다.
+/// `offsets`·`out`이 **정렬되지 않은** 슬라이스일 수 있다(호출자가 byte 저장소를 빌려 쓴다 — 편집기
+/// 프레임이 그렇게 한다). 그래서 `align(1)`을 받는다.
+pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32) void {
+    const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
+    var col: u32 = 0;
+    var i: usize = 0;
+    var next: usize = 0;
+    while (next < offsets.len and offsets[next] <= 0) : (next += 1) out[next] = 0;
+    while (i < bytes.len and next < offsets.len) {
+        if (bytes[i] == '\t') {
+            col += stop_width - (col % stop_width);
+            i += 1;
+        } else {
+            const base = text_layout.decodeCodepoint(bytes, i);
+            const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
+            const n = @max(1, end - i);
+            col += display_width.clusterCols(bytes, i, i + n);
+            i += n;
+        }
+        while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
+    }
+    // 줄 끝을 넘는 위치는 줄 끝 열이다.
+    while (next < offsets.len) : (next += 1) out[next] = col;
+}
+
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
 ///
 /// **열은 [text_layout](../../text_layout.zig)의 cluster 단위로 센다.** 그 모듈이 chrome 텍스트 셀
@@ -1417,5 +1451,56 @@ test "바이트 → 열: 탭 전개와 2칸 글자를 화면과 같은 규칙으
         const by_sum = columnsOf(whole.text);
         var tail: [256]u8 = undefined;
         try testing.expectEqual(by_sum, columnOfByte(line, tw, line.len, &tail));
+    }
+}
+
+test "한 번 훑기와 실제 전개가 같은 열을 준다 — 무작위 300줄" {
+    // 두 구현이 갈리면 강조가 글자에서 밀린다. 느린 쪽(`columnOfByte` — 실제로 펴서 센다)을 판정자로
+    // 두고, 빠른 쪽이 그것과 같은지 본다.
+    var scratch: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rnd = prng.random();
+    var case_i: usize = 0;
+    while (case_i < 300) : (case_i += 1) {
+        var line_buf: [64]u8 = undefined;
+        const n = rnd.uintLessThan(usize, line_buf.len);
+        var len: usize = 0;
+        while (len < n) {
+            const pick = rnd.uintLessThan(u8, 6);
+            const piece: []const u8 = switch (pick) {
+                0 => "\t",
+                1 => "한",
+                2 => "a",
+                3 => " ",
+                4 => "😀",
+                else => "z",
+            };
+            if (len + piece.len > line_buf.len) break;
+            @memcpy(line_buf[len .. len + piece.len], piece);
+            len += piece.len;
+        }
+        const line = line_buf[0..len];
+        const tw: u16 = if (rnd.boolean()) 4 else 8;
+
+        // cluster 경계에서만 물어본다(마크가 그렇게 만들어진다).
+        var offsets: [64]u32 = undefined;
+        var expected: [64]u32 = undefined;
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i <= line.len and count < offsets.len) {
+            offsets[count] = @intCast(i);
+            var tail: [4096]u8 = undefined;
+            expected[count] = columnOfByte(line, tw, i, &tail);
+            count += 1;
+            if (i == line.len) break;
+            const base = text_layout.decodeCodepoint(line, i);
+            const end = @min(text_layout.clusterEndAfter(line, i, base.advance), line.len);
+            i += @max(1, end - i);
+        }
+
+        var got: [64]u32 = undefined;
+        columnsAtOffsets(line, tw, offsets[0..count], got[0..count]);
+        for (0..count) |k| try testing.expectEqual(expected[k], got[k]);
+        _ = &scratch;
     }
 }

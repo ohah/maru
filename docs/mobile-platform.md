@@ -37,7 +37,8 @@
   **공유하는 것은 값이 아니라 기계다.** 파서·resolve 규율·"파일이 단일 출처" 원칙은
   `src/config` 를 그대로 쓰고, 스키마와 파일 위치만 모바일 것으로 둔다. 원격 세션에 붙어도
   **PC 의 config 를 끌어오지 않는다** — 화면 크기·입력 방식·전력 사정이 다른 기기의 값을
-  베끼면 대부분 틀린다. 계획은 [M10](plans/mobile-platform.md)이 소유한다.
+  베끼면 대부분 틀린다. 스키마·파일 위치·읽고 쓰는 경로의 단일 출처는 [모바일 config](mobile-config.md)이고,
+  계획은 [M10](plans/mobile-platform.md)이 소유한다.
 - **Android IME 는 자체 Java shim 이 받는다**(`NativeActivity` 유지). `NativeActivity` 만으로는
   소프트 키보드가 ASCII 물리 키 이벤트를 줄 때만 입력이 되고 **IME 를 못 받는다** — 한글
   조합이 필수인 터미널에서는 쓸 수 없다. 구글의 `GameActivity`/`GameTextInput` 이 그 자리를

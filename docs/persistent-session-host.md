@@ -5188,6 +5188,24 @@ managed incident binding은 새 Client 주소와 generation으로 다시 봉인�
 같은 connection generation을 사용한다. 이 dormant leaf의 제품 caller는 0이며 R3 reclaim과
 CR3c 실제 reconnect integration을 완료했다고 주장하지 않는다.
 
+R3의 focused gate는 `zig build test-session-host-cr3b-r3`다. R2c를 상속하고 `ClientSlot`의 retired inventory를 exact 2-slot
+bounded owner로 확장한다. 한 slot이 이미 retired인 동안 두 번째 replacement publication은 허용하지만 두 slot이 모두 찬 상태의
+세 번째 prepare는 allocator/source/destination/current/retired mutation 0의 `RetiredCapacityExhausted`로 backoff한다.
+`Client.canRetireFromGenerationNode()`는 callback·free·poison mutation 없이 blocking ownership, terminal fd/outbound 상태,
+exclusive fence intrusion 0, stream/event/batch/partial/parser 잔여 0, prepared request/allocator scope 0, generation accounting clean을 투영한다. `ClientSlot.prepareRetiredClientReclaim`은 oldest retired
+node의 final address, PID/process nonce/thread, slot/node incarnation, connection generation과 complete node digest를 caller-owned
+`PreparedRetiredClientReclaim`에 봉인한다. node backing은 operation fence 구간을 제외한 고정 bytes로, fence는 모든 atomic을 acquire-load한
+별도 semantic digest로 결속해 stale public-call intrusion과 raw-byte hash가 경쟁하지 않는다. copied/moved/stale handle과 readiness/digest drift는 destroy 0이다.
+prepared replacement/reclaim의 source·cleanup·destination은 두 retired node 본체뿐 아니라 각 Client가 소유한 parser/queue/build/lifecycle backing과도 겹칠 수 없다.
+`commitRetiredClientReclaimNoFail`만 tick-end owner turn에서 oldest node의 Client/cleanup registry/batch registry/accounting ledger를
+재검증·정산하고 allocator destroy한 뒤 inventory를 compact한다. commit은 오류를 반환하거나 allocation·callback을 수행하지 않고
+권위 drift는 proof-loss로 닫는다. current node와 sibling retired node의 backing/content는 보존하되 sibling inventory 위치는 compact하며,
+각 reclaim 뒤 current guarded allocator의 해당 retired backing exclusion도 exact 제거한다.
+focused gate는 Debug·ReleaseFast마다 generation 1→2→3 두 번 게시, cap 2/세 번째 reject, generation 1 첫 tick reclaim 뒤 generation 4 게시와 generation 2→3 tick reclaim/final zero
+성공 행 1개, copied handle·candidate digest/readiness drift destroy-0 행 1개, HostAdapter tick-end facade 1개와 source boundary 1개를
+exact-count한다. 이 dormant R3 facade의 제품 caller는 0이며 CR3c actual `RemoteGeneration` integration과 CR4 socket reconnect는 아직
+완료 증거가 아니다.
+
 #### CR3a ownership target inventory
 
 CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.

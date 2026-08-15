@@ -960,7 +960,7 @@ interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 �
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a·R2b 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a·R2b·R2c·R3 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -1899,6 +1899,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   managed incident binding과 게시 뒤 첫 attachment reservation은 새 Client 주소/generation에 exact 결속하며 제품 caller와
   old destroy는 0이다. R3 reclaim 및 CR3c 실제
   reconnect integration은 여전히 미완료다.
+  R3 focused gate `zig build test-session-host-cr3b-r3`는 R2c를 상속하고 최적화 모드마다 exact 2-slot retired inventory,
+  generation 1→2→3 publication, cap 2의 세 번째 prepare mutation-0 reject, pure Client readiness, final-address reclaim seal,
+  generation 1 첫 tick 뒤 generation 4 게시와 generation 2→3 tick destroy/final zero 성공 행 1개, copied/stale/digest-readiness drift destroy-0 행 1개, HostAdapter tick-end
+  facade 1개와 source boundary 1개를 `2+1+1`로 exact 실행한다. reclaim suffix만 Client/registry/accounting teardown과 allocator
+  destroy를 소유하며 current와 sibling retired는 보존한다. R3 제품 caller는 0이고 CR3c integration과 CR4 actual socket은 미완료다.
   CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는

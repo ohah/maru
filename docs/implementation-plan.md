@@ -72,7 +72,7 @@ macOS 로컬 shell 1개 surface
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2e·CR3a·CR3b R1·R2a·R2b 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2e·CR3a·CR3b R1·R2a·R2b·R2c·R3 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -1110,6 +1110,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    allocation/current 교체, retired Client destroy를 소유하지 않고, R2b는 새 generation publication을 소유하지 않으며,
    R2c는 old node destroy를 소유하지 않는다. CR3c는 R2/R3 결과를 CR2의 실제 `RemoteGeneration` slot에
    연결하며 stable shell 자체를 처음 도입하는 단계가 아니다.
+   **R3**는 retired inventory를 exact 2-slot bounded owner로 확장하고, pure `Client.canRetireFromGenerationNode` projection과
+   final-address `PreparedRetiredClientReclaim` seal로 oldest generation을 고정한다. tick-end no-fail suffix만 Client graph와
+   node-local registries/accounting을 정산하고 allocator destroy한 뒤 inventory를 compact한다. cap 2 상태의 세 번째 prepare,
+   copied/stale handle, readiness 또는 complete-node digest drift는 destroy/current mutation 0이다. R3의 제품 caller는 CR3c 전까지 0이다.
 6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
    status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,

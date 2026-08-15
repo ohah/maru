@@ -5,6 +5,7 @@
 //! normalize한다. capability 없는 과거 v1 artifact나 MRSH/screen version 교차는 지원하지 않는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
 const screen_stream = @import("screen_stream.zig");
@@ -216,6 +217,27 @@ pub const HostAdapter = struct {
         prepared: *client_slot_mod.PreparedClientReplacement,
     ) void {
         self.slot.publishClientReplacementNoFail(prepared);
+    }
+
+    pub fn prepareRetiredClientReclaim(
+        self: *HostAdapter,
+        out: *client_slot_mod.PreparedRetiredClientReclaim,
+    ) client_slot_mod.ClientSlot.RetiredClientReclaimError!void {
+        return self.slot.prepareRetiredClientReclaim(out);
+    }
+
+    pub fn commitRetiredClientReclaimAtTickEndNoFail(
+        self: *HostAdapter,
+        prepared: *client_slot_mod.PreparedRetiredClientReclaim,
+    ) void {
+        self.slot.commitRetiredClientReclaimNoFail(prepared);
+    }
+
+    pub fn preflightRetiredClientReclaim(
+        self: *HostAdapter,
+        prepared: *const client_slot_mod.PreparedRetiredClientReclaim,
+    ) client_slot_mod.ClientSlot.RetiredClientReclaimError!void {
+        return self.slot.preflightRetiredClientReclaim(prepared);
     }
 
     pub fn initInPlace(
@@ -758,6 +780,71 @@ test "CR3b R2c HostAdapter facade는 incompatible replacement를 mutation 없이
     };
     try adapter.abortClientReplacement(&prepared);
     prepared_live = false;
+}
+
+test "CR3b R3 HostAdapter facade는 tick-end에서 oldest retired Client를 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const host_id: u128 = 0xC3B3003;
+    var initial_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &initial_pair),
+    );
+    defer _ = std.c.close(initial_pair[1]);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = initial_pair[0],
+        .host_id = host_id,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: HostAdapter = undefined;
+    try HostAdapter.initInPlace(&adapter, allocator, &source);
+    var adapter_live = true;
+    defer if (adapter_live) {
+        while (adapter.slot.retiredClientCount() != 0) {
+            var cleanup: client_slot_mod.PreparedRetiredClientReclaim = .{};
+            adapter.prepareRetiredClientReclaim(&cleanup) catch
+                @panic("CR3b R3 HostAdapter fixture reclaim failed");
+            adapter.commitRetiredClientReclaimAtTickEndNoFail(&cleanup);
+        }
+        adapter.deinit();
+    };
+
+    var replacement_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &replacement_pair),
+    );
+    defer _ = std.c.close(replacement_pair[1]);
+    var replacement: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = replacement_pair[0],
+        .host_id = host_id,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    try client_slot_mod.testing.publishReplacementForGenerationForTest(
+        &adapter.slot,
+        1,
+        2,
+        &replacement,
+    );
+    try std.testing.expectEqual(@as(usize, 1), adapter.slot.retiredClientCount());
+
+    var reclaim: client_slot_mod.PreparedRetiredClientReclaim = .{};
+    try adapter.prepareRetiredClientReclaim(&reclaim);
+    try adapter.preflightRetiredClientReclaim(&reclaim);
+    adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim);
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.retiredClientCount());
+    try std.testing.expectEqual(@as(u64, 2), adapter.connectionGeneration());
+
+    adapter.deinit();
+    adapter_live = false;
 }
 
 test "CR0b ClientSlot binding은 final Client 주소를 map publication보다 먼저 봉인한다" {

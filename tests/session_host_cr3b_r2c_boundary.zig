@@ -87,7 +87,10 @@ test "CR3b R2c 경계는 final Client node와 current generation 원자 게시�
         @as(usize, 1),
         count(slot, "pub fn prepareDetachedCleanupForReplacementForTest("),
     );
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "slot.retired = null;"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(slot, "retired: [max_retired_clients]?*ClientNode"),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "test \"CR3b R2c HostAdapter facade는"));
 
     for ([_][]const u8{

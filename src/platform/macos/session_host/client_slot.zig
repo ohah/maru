@@ -222,25 +222,10 @@ pub const testing = if (builtin.is_test) struct {
 
     /// R3가 제품 reclaim owner를 제공하기 전 R2c fixture만 published old node를 정산한다.
     pub fn reclaimPublishedRetiredForTest(slot: *ClientSlot) void {
-        if (!slot.valid()) @panic("invalid R2c fixture slot");
-        const retired = slot.retired orelse @panic("missing R2c retired node");
-        if (!slot.retiredNodeValid() or
-            retired.pin_owner.cleanup_pin_count != 0 or retired.pin_owner.active_cleanup != 0 or
-            retired.active_operation_generation != 0 or
-            retired.cleanup_registry.preflightDeinit() != .cleaned or
-            retired.batch_registry.preflightDeinit() != .cleaned or
-            retired.accounting_ledger.preflightDeinit() != .cleaned)
+        var reclaim: PreparedRetiredClientReclaim = .{};
+        slot.prepareRetiredClientReclaim(&reclaim) catch
             @panic("R2c retired fixture was not reclaimable");
-        if (!retired.client.tryDeinitClientSlotExclusiveHeld())
-            @panic("R2c retired fixture Client teardown failed");
-        if (retired.cleanup_registry.tryDeinit() != .cleaned or
-            retired.batch_registry.tryDeinit() != .cleaned)
-            @panic("R2c retired fixture registry teardown failed");
-        retired.pin_owner.state = .terminal;
-        if (retired.accounting_ledger.tryDeinit() != .cleaned)
-            @panic("R2c retired fixture accounting teardown failed");
-        slot.node_allocator.destroy(retired);
-        slot.retired = null;
+        slot.commitRetiredClientReclaimNoFail(&reclaim);
     }
 
     pub fn prepareDetachedCleanupForReplacementForTest(
@@ -248,14 +233,48 @@ pub const testing = if (builtin.is_test) struct {
         admission: *PreparedAdmissionClose,
         cleanup: *PreparedRetirementCleanup,
     ) !void {
-        try slot.prepareAdmissionClose(1, admission);
+        return prepareDetachedCleanupForGenerationForTest(slot, 1, 2, admission, cleanup);
+    }
+
+    pub fn prepareDetachedCleanupForGenerationForTest(
+        slot: *ClientSlot,
+        connection_generation: u64,
+        placeholder_generation: u64,
+        admission: *PreparedAdmissionClose,
+        cleanup: *PreparedRetirementCleanup,
+    ) !void {
+        try slot.prepareAdmissionClose(connection_generation, admission);
         try slot.commitAdmissionClose(admission);
-        try slot.prepareRetirementCleanup(admission, 2, cleanup);
-        try slot.preflightRetirementCleanup(admission, cleanup, 2);
-        try slot.preflightRetirementDetach(admission, 1, 2);
-        slot.commitRetirementCleanupNoFail(admission, cleanup, 2);
-        slot.commitRetirementDetachNoFail(admission, 1, 2);
+        try slot.prepareRetirementCleanup(admission, placeholder_generation, cleanup);
+        try slot.preflightRetirementCleanup(admission, cleanup, placeholder_generation);
+        try slot.preflightRetirementDetach(admission, connection_generation, placeholder_generation);
+        slot.commitRetirementCleanupNoFail(admission, cleanup, placeholder_generation);
+        slot.commitRetirementDetachNoFail(admission, connection_generation, placeholder_generation);
         try slot.finishRetirementCleanup(cleanup);
+    }
+
+    pub fn publishReplacementForGenerationForTest(
+        slot: *ClientSlot,
+        connection_generation: u64,
+        placeholder_generation: u64,
+        source: *client_mod.Client,
+    ) !void {
+        var admission: PreparedAdmissionClose = .{};
+        var cleanup: PreparedRetirementCleanup = .{};
+        try prepareDetachedCleanupForGenerationForTest(
+            slot,
+            connection_generation,
+            placeholder_generation,
+            &admission,
+            &cleanup,
+        );
+        var replacement: PreparedClientReplacement = .{};
+        try slot.prepareClientReplacement(&cleanup, source, &replacement);
+        var prepared = true;
+        defer if (prepared) slot.abortClientReplacement(&replacement) catch
+            @panic("replacement fixture abort failed");
+        slot.publishClientReplacementNoFail(&replacement);
+        prepared = false;
     }
 
     pub fn enterExternalMode(slot: *ClientSlot) !void {
@@ -555,8 +574,8 @@ const GenerationGuardedAllocator = struct {
     slot_end: usize,
     source_start: usize,
     source_end: usize,
-    retired_node_start: usize = 0,
-    retired_node_end: usize = 0,
+    retired_node_starts: [max_retired_clients]usize = .{0} ** max_retired_clients,
+    retired_node_ends: [max_retired_clients]usize = .{0} ** max_retired_clients,
     snapshot_owner_start: usize = 0,
     snapshot_owner_end: usize = 0,
     snapshot_out_start: usize = 0,
@@ -607,13 +626,15 @@ const GenerationGuardedAllocator = struct {
         if (rawRangesOverlap(start, end, self.node_start, self.node_end) or
             rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
             rawRangesOverlap(start, end, self.source_start, self.source_end) or
-            (self.retired_node_start != 0 and
-                rawRangesOverlap(start, end, self.retired_node_start, self.retired_node_end)) or
             client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len) or
             (self.snapshot_guard_active and
                 (rawRangesOverlap(start, end, self.snapshot_owner_start, self.snapshot_owner_end) or
                     rawRangesOverlap(start, end, self.snapshot_out_start, self.snapshot_out_end))))
             return true;
+        for (self.retired_node_starts, self.retired_node_ends) |retired_start, retired_end| {
+            if (retired_start != 0 and rawRangesOverlap(start, end, retired_start, retired_end))
+                return true;
+        }
         if (self.operation_guard_active)
             for (self.operation_ranges[0..self.operation_range_count]) |range|
                 if (rawRangesOverlap(start, end, range.start, range.end)) return true;
@@ -971,6 +992,26 @@ pub const PreparedClientReplacement = struct {
     seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
 };
 
+pub const max_retired_clients: usize = 2;
+
+pub const PreparedRetiredClientReclaim = struct {
+    pub const Lifecycle = enum(u8) { pristine, prepared, reclaimed };
+
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+    slot_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    retired_index: u8 = 0,
+    node_addr: usize = 0,
+    node_incarnation: u64 = 0,
+    connection_generation: u64 = 0,
+    node_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PreparedRetiredClientReclaim.Lifecycle = .pristine,
+    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+};
+
 fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
         @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
@@ -1016,6 +1057,16 @@ fn preparedClientReplacementLifecycleRawValid(value: *const PreparedClientReplac
         @intFromEnum(PreparedClientReplacement.Lifecycle.prepared),
         @intFromEnum(PreparedClientReplacement.Lifecycle.published),
         @intFromEnum(PreparedClientReplacement.Lifecycle.cancelled),
+        => true,
+        else => false,
+    };
+}
+
+fn preparedRetiredClientReclaimLifecycleRawValid(value: *const PreparedRetiredClientReclaim.Lifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.pristine),
+        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.prepared),
+        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.reclaimed),
         => true,
         else => false,
     };
@@ -1069,7 +1120,7 @@ test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 ol
     );
     var slot_live = true;
     defer if (slot_live) {
-        if (slot.retired != null) testing.reclaimPublishedRetiredForTest(&slot);
+        if (slot.retired[0] != null) testing.reclaimPublishedRetiredForTest(&slot);
         if (slot.tryDeinit() != .cleaned) @panic("CR3b R2c fixture teardown failed");
     };
 
@@ -1118,7 +1169,7 @@ test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 ol
     replacement_prepared = false;
     try std.testing.expectEqual(PreparedClientReplacement.Lifecycle.published, replacement.lifecycle);
     try std.testing.expect(slot.current != old_node);
-    try std.testing.expectEqual(old_node, slot.retired.?);
+    try std.testing.expectEqual(old_node, slot.retired[0].?);
     try std.testing.expectEqual(@as(u64, 2), slot.connectionGeneration());
     try std.testing.expectEqual(@as(u128, 0xC3B2C1), try slot.withCurrent(2, {}, ReadHost.run));
     const replacement_binding = slot.current.client.incident_binding;
@@ -1152,7 +1203,7 @@ test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 ol
     try std.testing.expectEqual(@as(std.c.fd_t, -1), old_node.client.fd);
 
     testing.reclaimPublishedRetiredForTest(&slot);
-    try std.testing.expect(slot.retired == null);
+    try std.testing.expect(slot.retired[0] == null);
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
     slot_live = false;
 }
@@ -1164,7 +1215,7 @@ test "CR3b R2c replacement은 copied handle을 거부하고 abort 뒤 old regist
     try ClientSlot.initInPlace(&slot, std.testing.allocator, &old_source, old_source.host_id);
     var slot_live = true;
     defer if (slot_live) {
-        if (slot.retired != null) testing.reclaimPublishedRetiredForTest(&slot);
+        if (slot.retired[0] != null) testing.reclaimPublishedRetiredForTest(&slot);
         if (slot.tryDeinit() != .cleaned) @panic("CR3b R2c abort fixture teardown failed");
     };
 
@@ -1246,7 +1297,7 @@ test "CR3b R2c replacement은 copied handle을 거부하고 abort 뒤 old regist
     replacement_prepared = false;
     try std.testing.expectEqual(PreparedClientReplacement.Lifecycle.cancelled, replacement.lifecycle);
     try std.testing.expectEqual(old_node, slot.current);
-    try std.testing.expect(slot.retired == null);
+    try std.testing.expect(slot.retired[0] == null);
     try std.testing.expect(slot.valid());
     try std.testing.expectEqual(@as(u64, 1), slot.connectionGeneration());
     const ReadHost = struct {
@@ -1290,6 +1341,290 @@ test "CR3b R2c replacement은 copied handle을 거부하고 abort 뒤 old regist
     ));
     try std.testing.expectEqual(PreparedClientReplacement{}, overflow_replacement);
 
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+    slot_live = false;
+}
+
+test "CR3b R3 reclaim은 retired cap 2를 지키고 oldest node를 tick마다 파괴한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const host_id: u128 = 0xC3B3001;
+    var pairs: [4][2]std.c.fd_t = undefined;
+    var pair_count: usize = 0;
+    defer {
+        for (pairs[0..pair_count]) |pair| {
+            if (pair[0] >= 0) _ = c.close(pair[0]);
+            _ = c.close(pair[1]);
+        }
+    }
+    const Fixture = struct {
+        fn source(host: u128, pairs_out: *[4][2]std.c.fd_t, count: *usize) !client_mod.Client {
+            try std.testing.expect(count.* < pairs_out.len);
+            try std.testing.expectEqual(
+                @as(c_int, 0),
+                c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pairs_out[count.*]),
+            );
+            const fd = pairs_out[count.*][0];
+            count.* += 1;
+            var value = cr3bR1Client(host);
+            value.fd = fd;
+            return value;
+        }
+        fn settleAll(slot: *ClientSlot) void {
+            while (slot.retired[0] != null) {
+                var reclaim: PreparedRetiredClientReclaim = .{};
+                slot.prepareRetiredClientReclaim(&reclaim) catch
+                    @panic("R3 fixture reclaim prepare failed");
+                slot.commitRetiredClientReclaimNoFail(&reclaim);
+            }
+        }
+
+        fn guardedAddressCount(slot: *const ClientSlot, address: usize) usize {
+            var total: usize = 0;
+            for (slot.current.guarded_allocator.retired_node_starts) |protected_start|
+                total += @intFromBool(protected_start == address);
+            return total;
+        }
+    };
+
+    var initial = try Fixture.source(host_id, &pairs, &pair_count);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &initial, host_id);
+    pairs[0][0] = -1;
+    var slot_live = true;
+    defer if (slot_live) {
+        Fixture.settleAll(&slot);
+        if (slot.tryDeinit() != .cleaned) @panic("R3 cap fixture teardown failed");
+    };
+    const generation_one = slot.current;
+
+    var second = try Fixture.source(host_id, &pairs, &pair_count);
+    try testing.publishReplacementForGenerationForTest(&slot, 1, 2, &second);
+    pairs[1][0] = -1;
+    const generation_two = slot.current;
+    try std.testing.expectEqual(generation_one, slot.retired[0].?);
+    try std.testing.expectEqual(@as(usize, 1), slot.retiredClientCount());
+
+    var third = try Fixture.source(host_id, &pairs, &pair_count);
+    try testing.publishReplacementForGenerationForTest(&slot, 2, 3, &third);
+    pairs[2][0] = -1;
+    const generation_three = slot.current;
+    try std.testing.expectEqual(generation_one, slot.retired[0].?);
+    try std.testing.expectEqual(generation_two, slot.retired[1].?);
+    try std.testing.expectEqual(@as(usize, 2), slot.retiredClientCount());
+
+    var admission_three: PreparedAdmissionClose = .{};
+    var cleanup_three: PreparedRetirementCleanup = .{};
+    try testing.prepareDetachedCleanupForGenerationForTest(
+        &slot,
+        3,
+        4,
+        &admission_three,
+        &cleanup_three,
+    );
+    var fourth = try Fixture.source(host_id, &pairs, &pair_count);
+    const slot_before_cap = slot;
+    const fourth_before_cap = fourth;
+    var rejected: PreparedClientReplacement = .{};
+    try std.testing.expectError(
+        error.RetiredCapacityExhausted,
+        slot.prepareClientReplacement(&cleanup_three, &fourth, &rejected),
+    );
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&slot_before_cap), std.mem.asBytes(&slot)));
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&fourth_before_cap), std.mem.asBytes(&fourth)));
+    try std.testing.expectEqual(PreparedClientReplacement{}, rejected);
+
+    var first_reclaim: PreparedRetiredClientReclaim = .{};
+    try slot.prepareRetiredClientReclaim(&first_reclaim);
+    try std.testing.expectEqual(@as(u64, 1), first_reclaim.connection_generation);
+    try slot.preflightRetiredClientReclaim(&first_reclaim);
+    const generation_one_addr = @intFromPtr(generation_one);
+    const generation_two_addr = @intFromPtr(generation_two);
+    const generation_three_addr = @intFromPtr(generation_three);
+    slot.commitRetiredClientReclaimNoFail(&first_reclaim);
+    try std.testing.expectEqual(PreparedRetiredClientReclaim.Lifecycle.reclaimed, first_reclaim.lifecycle);
+    try std.testing.expectEqual(generation_two, slot.retired[0].?);
+    try std.testing.expect(slot.retired[1] == null);
+    try std.testing.expectEqual(generation_three, slot.current);
+    for (slot.current.guarded_allocator.retired_node_starts) |protected_start|
+        try std.testing.expect(protected_start != generation_one_addr);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        Fixture.guardedAddressCount(&slot, generation_two_addr),
+    );
+    const slot_after_first_reclaim = slot;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        slot.preflightRetiredClientReclaim(&first_reclaim),
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&slot_after_first_reclaim),
+        std.mem.asBytes(&slot),
+    ));
+
+    var fourth_replacement: PreparedClientReplacement = .{};
+    try slot.prepareClientReplacement(&cleanup_three, &fourth, &fourth_replacement);
+    pairs[3][0] = -1;
+    var fourth_prepared = true;
+    defer if (fourth_prepared) slot.abortClientReplacement(&fourth_replacement) catch
+        @panic("R3 cap fixture fourth replacement abort failed");
+    slot.publishClientReplacementNoFail(&fourth_replacement);
+    fourth_prepared = false;
+    try std.testing.expectEqual(@as(u64, 4), slot.connectionGeneration());
+    try std.testing.expectEqual(generation_two, slot.retired[0].?);
+    try std.testing.expectEqual(generation_three, slot.retired[1].?);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        Fixture.guardedAddressCount(&slot, generation_two_addr),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        Fixture.guardedAddressCount(&slot, generation_three_addr),
+    );
+
+    var second_reclaim: PreparedRetiredClientReclaim = .{};
+    try slot.prepareRetiredClientReclaim(&second_reclaim);
+    try std.testing.expectEqual(@as(u64, 2), second_reclaim.connection_generation);
+    slot.commitRetiredClientReclaimNoFail(&second_reclaim);
+    var third_reclaim: PreparedRetiredClientReclaim = .{};
+    try slot.prepareRetiredClientReclaim(&third_reclaim);
+    try std.testing.expectEqual(@as(u64, 3), third_reclaim.connection_generation);
+    slot.commitRetiredClientReclaimNoFail(&third_reclaim);
+    try std.testing.expectEqual(@as(usize, 0), slot.retiredClientCount());
+    try std.testing.expectEqual(@as(u64, 4), slot.connectionGeneration());
+    for (slot.current.guarded_allocator.retired_node_starts) |protected_start|
+        try std.testing.expectEqual(@as(usize, 0), protected_start);
+
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+    slot_live = false;
+}
+
+test "CR3b R3 reclaim은 copied handle과 readiness digest drift를 destroy 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const host_id: u128 = 0xC3B3002;
+    var old_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &old_pair),
+    );
+    defer _ = c.close(old_pair[1]);
+    var initial = cr3bR1Client(host_id);
+    initial.fd = old_pair[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &initial, host_id);
+    var slot_live = true;
+    defer if (slot_live) {
+        while (slot.retired[0] != null) {
+            var cleanup_reclaim: PreparedRetiredClientReclaim = .{};
+            slot.prepareRetiredClientReclaim(&cleanup_reclaim) catch
+                @panic("R3 hostile fixture reclaim prepare failed");
+            slot.commitRetiredClientReclaimNoFail(&cleanup_reclaim);
+        }
+        if (slot.tryDeinit() != .cleaned) @panic("R3 hostile fixture teardown failed");
+    };
+
+    var new_pair: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &new_pair),
+    );
+    defer _ = c.close(new_pair[1]);
+    var replacement_source = cr3bR1Client(host_id);
+    replacement_source.fd = new_pair[0];
+    try testing.publishReplacementForGenerationForTest(&slot, 1, 2, &replacement_source);
+    const retired = slot.retired[0].?;
+
+    {
+        var alias_storage: [@sizeOf(PreparedRetiredClientReclaim)]u8 align(@alignOf(PreparedRetiredClientReclaim)) =
+            [_]u8{0} ** @sizeOf(PreparedRetiredClientReclaim);
+        retired.client.lifecycle = alias_storage[0..];
+        defer retired.client.lifecycle = &.{};
+        const alias_out: *PreparedRetiredClientReclaim = @ptrCast(&alias_storage);
+        try std.testing.expectError(
+            error.InvalidOwner,
+            slot.prepareRetiredClientReclaim(alias_out),
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &([_]u8{0} ** @sizeOf(PreparedRetiredClientReclaim)),
+            &alias_storage,
+        );
+    }
+
+    {
+        try retired.client.parser.push("retired-parser-view");
+        defer {
+            retired.client.parser.deinit();
+            retired.client.parser = framing.FrameParser.init(retired.client.allocator);
+        }
+        var parser_blocked: PreparedRetiredClientReclaim = .{};
+        try std.testing.expectError(
+            error.NotReady,
+            slot.prepareRetiredClientReclaim(&parser_blocked),
+        );
+        try std.testing.expectEqual(PreparedRetiredClientReclaim{}, parser_blocked);
+    }
+
+    {
+        const exact_fence_state = retired.client.operation_fence.?.state.load(.acquire);
+        defer retired.client.operation_fence.?.state.store(exact_fence_state, .release);
+        try std.testing.expectError(error.AdminBusy, retired.client.call("host.info", null));
+        var intruded_blocked: PreparedRetiredClientReclaim = .{};
+        try std.testing.expectError(
+            error.NotReady,
+            slot.prepareRetiredClientReclaim(&intruded_blocked),
+        );
+        try std.testing.expectEqual(PreparedRetiredClientReclaim{}, intruded_blocked);
+    }
+
+    const slot_before = slot;
+
+    var reclaim: PreparedRetiredClientReclaim = .{};
+    try slot.prepareRetiredClientReclaim(&reclaim);
+    var foreign_rejected: std.atomic.Value(bool) = .init(false);
+    const ForeignPreflight = struct {
+        fn run(
+            target: *ClientSlot,
+            prepared: *const PreparedRetiredClientReclaim,
+            rejected: *std.atomic.Value(bool),
+        ) void {
+            target.preflightRetiredClientReclaim(prepared) catch |err| {
+                if (err == error.InvalidOwner) rejected.store(true, .release);
+            };
+        }
+    };
+    const foreign = try std.Thread.spawn(
+        .{},
+        ForeignPreflight.run,
+        .{ &slot, &reclaim, &foreign_rejected },
+    );
+    foreign.join();
+    try std.testing.expect(foreign_rejected.load(.acquire));
+    try std.testing.expectEqual(retired, slot.retired[0].?);
+    var copied = reclaim;
+    try std.testing.expectError(error.InvalidOwner, slot.preflightRetiredClientReclaim(&copied));
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&slot_before), std.mem.asBytes(&slot)));
+
+    {
+        const codec_before = retired.client.screen_codec_version;
+        retired.client.screen_codec_version +%= 1;
+        defer retired.client.screen_codec_version = codec_before;
+        try std.testing.expectError(error.InvalidOwner, slot.preflightRetiredClientReclaim(&reclaim));
+        try std.testing.expectEqual(retired, slot.retired[0].?);
+    }
+
+    {
+        retired.pin_owner.cleanup_pin_count = 1;
+        defer retired.pin_owner.cleanup_pin_count = 0;
+        try std.testing.expectError(error.NotReady, slot.preflightRetiredClientReclaim(&reclaim));
+        try std.testing.expectEqual(retired, slot.retired[0].?);
+    }
+
+    try slot.preflightRetiredClientReclaim(&reclaim);
+    slot.commitRetiredClientReclaimNoFail(&reclaim);
+    try std.testing.expect(slot.retired[0] == null);
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
     slot_live = false;
 }
@@ -2854,9 +3189,11 @@ fn publishClientSlotReplacement(
         if (entry.live and entry.slot_addr == expected.slot_addr) {
             if (!std.meta.eql(entry.*, expected)) return false;
             if (slot.current != @as(*ClientNode, @ptrFromInt(expected.node_addr)) or
-                slot.retired != null or new_node != @as(*ClientNode, @ptrFromInt(replacement.node_addr)))
+                slot.retiredClientCountUnchecked() >= max_retired_clients or
+                new_node != @as(*ClientNode, @ptrFromInt(replacement.node_addr)))
                 return false;
-            slot.retired = slot.current;
+            const retired_index = slot.firstEmptyRetiredIndex() orelse return false;
+            slot.retired[retired_index] = slot.current;
             slot.current = new_node;
             entry.* = replacement;
             return true;
@@ -11607,7 +11944,7 @@ pub const ClientSlot = struct {
 
     self_addr: usize,
     current: *ClientNode,
-    retired: ?*ClientNode = null,
+    retired: [max_retired_clients]?*ClientNode = .{null} ** max_retired_clients,
     node_allocator: std.mem.Allocator,
     incarnation: lease_mod.Identity,
     pid: u32,
@@ -12017,11 +12354,12 @@ pub const ClientSlot = struct {
             self.current.batch_registry.self_addr == @intFromPtr(&self.current.batch_registry) and
             self.current.batch_registry.incarnation == self.current.incarnation.tagged and
             self.current.accounting_ledger.matchesClient(@intFromPtr(&self.current.client)) and
-            (self.retired == null or self.retiredNodeValid());
+            self.retiredNodesValid();
     }
 
-    fn retiredNodeValid(self: *const ClientSlot) bool {
-        const node = self.retired orelse return false;
+    fn retiredNodeValidAt(self: *const ClientSlot, index: usize) bool {
+        if (index >= max_retired_clients) return false;
+        const node = self.retired[index] orelse return false;
         return node != self.current and node.incarnation.kind() == .node and
             node.connection_generation != 0 and
             node.connection_generation < self.current.connection_generation and
@@ -12035,6 +12373,52 @@ pub const ClientSlot = struct {
             node.pin_owner.node_incarnation == node.incarnation.tagged and
             node.pin_owner.connection_generation == node.connection_generation and
             node.pin_owner.pid == self.pid and node.pin_owner.process_nonce == self.process_nonce;
+    }
+
+    fn retiredNodesValid(self: *const ClientSlot) bool {
+        var saw_empty = false;
+        var previous_generation: u64 = 0;
+        for (self.retired, 0..) |entry, index| {
+            const node = entry orelse {
+                saw_empty = true;
+                continue;
+            };
+            if (saw_empty or !self.retiredNodeValidAt(index) or
+                (previous_generation != 0 and node.connection_generation <= previous_generation))
+                return false;
+            previous_generation = node.connection_generation;
+        }
+        return true;
+    }
+
+    fn retiredClientCountUnchecked(self: *const ClientSlot) usize {
+        var total: usize = 0;
+        for (self.retired) |entry| if (entry != null) {
+            total += 1;
+        };
+        return total;
+    }
+
+    fn firstEmptyRetiredIndex(self: *const ClientSlot) ?usize {
+        for (self.retired, 0..) |entry, index| if (entry == null) return index;
+        return null;
+    }
+
+    fn overlapsRetiredNode(self: *const ClientSlot, value: anytype) bool {
+        for (self.retired) |entry| if (entry) |node| {
+            if (rangesOverlapTyped(value, node) or
+                node.client.retirementRangeAliasesOwnedBacking(
+                    @intFromPtr(value),
+                    @sizeOf(@TypeOf(value.*)),
+                ))
+                return true;
+        };
+        return false;
+    }
+
+    pub fn retiredClientCount(self: *const ClientSlot) usize {
+        if (!self.valid()) return 0;
+        return self.retiredClientCountUnchecked();
     }
 
     pub fn reserveAttachmentBinding(
@@ -12482,6 +12866,18 @@ pub const ClientSlot = struct {
         return writer.finish();
     }
 
+    fn retiredClientNodeDigest(node: *const ClientNode) owner_seal.Digest {
+        const bytes = std.mem.asBytes(node);
+        const fence_start = @offsetOf(ClientNode, "operation_fence");
+        const fence_end = fence_start + @sizeOf(client_mod.ClientOperationFence);
+        var writer = owner_seal.Writer.init("maru.retired-client-node.v1");
+        writer.writeBytes(bytes[0..fence_start]);
+        const fence_digest = node.operation_fence.retirementAuthorityDigest();
+        writer.writeBytes(&fence_digest);
+        writer.writeBytes(bytes[fence_end..]);
+        return writer.finish();
+    }
+
     /// 현재 Client 주소는 이 함수의 stack frame 밖으로 반환하지 않는다. 제품 facade는 닫힌 operation만 callback으로 전달한다.
     fn withCurrent(
         self: *ClientSlot,
@@ -12890,6 +13286,7 @@ pub const ClientSlot = struct {
         Busy,
         GenerationMismatch,
         GenerationExhausted,
+        RetiredCapacityExhausted,
         IdentityExhausted,
         OutOfMemory,
         AliasedAllocation,
@@ -12901,7 +13298,7 @@ pub const ClientSlot = struct {
         source: *client_mod.Client,
         out: *PreparedClientReplacement,
     ) ClientReplacementError!void {
-        if (!self.consumedRetirementCleanupValid(cleanup) or self.retired != null or
+        if (!self.consumedRetirementCleanupValid(cleanup) or
             !std.meta.eql(out.*, PreparedClientReplacement{}) or
             source.host_id == 0 or source.host_id != self.current.client.host_id or
             source.fd < 0 or source.unusable or
@@ -12909,8 +13306,13 @@ pub const ClientSlot = struct {
             rangesOverlapTyped(source, self) or
             rangesOverlapTyped(source, self.current) or rangesOverlapTyped(source, cleanup) or
             rangesOverlapTyped(source, out) or rangesOverlapTyped(out, self) or
-            rangesOverlapTyped(out, self.current) or rangesOverlapTyped(out, cleanup))
+            rangesOverlapTyped(out, self.current) or rangesOverlapTyped(out, cleanup) or
+            self.overlapsRetiredNode(source) or self.overlapsRetiredNode(cleanup) or
+            self.overlapsRetiredNode(out))
             return error.InvalidOwner;
+        if (!self.retiredNodesValid()) return error.InvalidOwner;
+        if (self.retiredClientCountUnchecked() >= max_retired_clients)
+            return error.RetiredCapacityExhausted;
         const expected_generation = self.current.connection_generation;
         const next_generation = std.math.add(u64, expected_generation, 1) catch
             return error.GenerationExhausted;
@@ -12936,6 +13338,20 @@ pub const ClientSlot = struct {
         const old_start = @intFromPtr(self.current);
         const old_end = std.math.add(usize, old_start, @sizeOf(ClientNode)) catch
             return error.AliasedAllocation;
+        var protected_retired_starts: [max_retired_clients]usize = .{0} ** max_retired_clients;
+        var protected_retired_ends: [max_retired_clients]usize = .{0} ** max_retired_clients;
+        var protected_index: usize = 0;
+        for (self.retired) |entry| if (entry) |retired| {
+            protected_retired_starts[protected_index] = @intFromPtr(retired);
+            protected_retired_ends[protected_index] = std.math.add(
+                usize,
+                protected_retired_starts[protected_index],
+                @sizeOf(ClientNode),
+            ) catch return error.AliasedAllocation;
+            protected_index += 1;
+        };
+        protected_retired_starts[protected_index] = old_start;
+        protected_retired_ends[protected_index] = old_end;
         const cleanup_start = @intFromPtr(cleanup);
         const cleanup_end = std.math.add(usize, cleanup_start, @sizeOf(PreparedRetirementCleanup)) catch
             return error.AliasedAllocation;
@@ -12951,6 +13367,15 @@ pub const ClientSlot = struct {
             if (!recordAliasQuarantine()) @panic("Client replacement alias quarantine exhausted");
             return error.AliasedAllocation;
         }
+        for (self.retired) |entry| if (entry) |retired| {
+            const retired_start = @intFromPtr(retired);
+            const retired_end = std.math.add(usize, retired_start, @sizeOf(ClientNode)) catch
+                return error.AliasedAllocation;
+            if (rawRangesOverlap(node_start, node_end, retired_start, retired_end)) {
+                if (!recordAliasQuarantine()) @panic("Client replacement retired alias quarantine exhausted");
+                return error.AliasedAllocation;
+            }
+        };
         node_destroyable = true;
 
         const reserved = self.beginRegisteredExclusiveTeardown() catch |err| return switch (err) {
@@ -12959,7 +13384,7 @@ pub const ClientSlot = struct {
         };
         var old_reserved = true;
         errdefer if (old_reserved) self.abortRegisteredExclusiveTeardown(reserved);
-        if (reserved.node != self.current or self.retired != null or
+        if (reserved.node != self.current or !self.retiredNodesValid() or
             reserved.node.retirement_lifecycle != .detached or
             reserved.node.placeholder_generation != cleanup.placeholder_generation or
             reserved.node.client.fd != -1 or reserved.node.client.pending_outbound != null or
@@ -12999,8 +13424,8 @@ pub const ClientSlot = struct {
             .slot_end = slot_end,
             .source_start = source_start,
             .source_end = source_end,
-            .retired_node_start = old_start,
-            .retired_node_end = old_end,
+            .retired_node_starts = protected_retired_starts,
+            .retired_node_ends = protected_retired_ends,
         };
         source.moveToGenerationNode(&node.client);
         self.bindReplacementIncidentIdentityNoFail(
@@ -13164,6 +13589,158 @@ pub const ClientSlot = struct {
             .candidate_digest = prepared.candidate_digest,
             .lifecycle_raw = @intFromEnum(prepared.lifecycle),
         }) catch @panic("CR3b R2c published replacement seal service unavailable");
+    }
+
+    pub const RetiredClientReclaimError = error{
+        InvalidOwner,
+        NotReady,
+        DestinationOccupied,
+    };
+
+    fn retiredClientReclaimSeal(
+        self: *const ClientSlot,
+        prepared: *const PreparedRetiredClientReclaim,
+    ) process_seal_service.CleanupSeal {
+        return process_seal_service.preparedRetiredClientReclaimSeal(self.pid, self.process_nonce, .{
+            .self_addr = @intCast(prepared.self_addr),
+            .thread_id = prepared.owner_thread_incarnation,
+            .slot_addr = @intCast(prepared.slot_addr),
+            .slot_incarnation = prepared.slot_incarnation,
+            .retired_index = prepared.retired_index,
+            .node_addr = @intCast(prepared.node_addr),
+            .node_incarnation = prepared.node_incarnation,
+            .connection_generation = prepared.connection_generation,
+            .node_digest = prepared.node_digest,
+            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+        }) catch @panic("CR3b R3 retired reclaim seal service unavailable");
+    }
+
+    fn preparedRetiredClientReclaimValid(
+        self: *const ClientSlot,
+        prepared: *const PreparedRetiredClientReclaim,
+        lifecycle: PreparedRetiredClientReclaim.Lifecycle,
+    ) bool {
+        if (!preparedRetiredClientReclaimLifecycleRawValid(&prepared.lifecycle) or
+            prepared.lifecycle != lifecycle or prepared.self_addr != @intFromPtr(prepared) or
+            prepared.pid != self.pid or prepared.process_nonce != self.process_nonce or
+            prepared.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            prepared.slot_addr != @intFromPtr(self) or
+            prepared.slot_incarnation != self.incarnation.tagged or
+            prepared.retired_index >= max_retired_clients or prepared.node_addr == 0 or
+            prepared.node_incarnation == 0 or prepared.connection_generation == 0)
+            return false;
+        return std.crypto.timing_safe.eql(
+            process_seal_service.CleanupSeal,
+            self.retiredClientReclaimSeal(prepared),
+            prepared.seal,
+        );
+    }
+
+    fn retiredNodeReadyForReclaim(self: *const ClientSlot, index: usize) bool {
+        if (!self.retiredNodeValidAt(index)) return false;
+        const node = self.retired[index].?;
+        return node.stack_borrows == 0 and node.active_operation_generation == 0 and
+            node.rpc_free_evidence.emptyExact() and
+            node.pin_owner.cleanup_pin_count == 0 and node.pin_owner.active_cleanup == 0 and
+            node.cleanup_registry.preflightDeinit() == .cleaned and
+            node.batch_registry.preflightDeinit() == .cleaned and
+            node.accounting_ledger.preflightDeinit() == .cleaned and
+            node.client.canRetireFromGenerationNode();
+    }
+
+    pub fn prepareRetiredClientReclaim(
+        self: *ClientSlot,
+        out: *PreparedRetiredClientReclaim,
+    ) RetiredClientReclaimError!void {
+        if (!std.meta.eql(out.*, PreparedRetiredClientReclaim{}))
+            return error.DestinationOccupied;
+        if (!self.valid() or self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
+            self.overlapsRetiredNode(out))
+            return error.InvalidOwner;
+        const node = self.retired[0] orelse return error.NotReady;
+        if (!self.retiredNodeReadyForReclaim(0)) return error.NotReady;
+        const node_digest = retiredClientNodeDigest(node);
+        if (!self.retiredNodeReadyForReclaim(0)) return error.NotReady;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = self.incarnation.tagged,
+            .retired_index = 0,
+            .node_addr = @intFromPtr(node),
+            .node_incarnation = node.incarnation.tagged,
+            .connection_generation = node.connection_generation,
+            .node_digest = node_digest,
+            .lifecycle = .prepared,
+        };
+        out.seal = self.retiredClientReclaimSeal(out);
+    }
+
+    pub fn commitRetiredClientReclaimNoFail(
+        self: *ClientSlot,
+        prepared: *PreparedRetiredClientReclaim,
+    ) void {
+        self.preflightRetiredClientReclaim(prepared) catch
+            @panic("CR3b R3 retired reclaim authority drifted");
+        const node = self.retired[prepared.retired_index] orelse
+            @panic("CR3b R3 retired reclaim node disappeared");
+        if (@intFromPtr(node) != prepared.node_addr or
+            node.incarnation.tagged != prepared.node_incarnation or
+            node.connection_generation != prepared.connection_generation or
+            !std.crypto.timing_safe.eql(
+                owner_seal.Digest,
+                retiredClientNodeDigest(node),
+                prepared.node_digest,
+            ))
+            @panic("CR3b R3 retired reclaim node drifted");
+        if (!node.client.tryDeinitClientSlotExclusiveHeld())
+            @panic("CR3b R3 retired Client teardown proof lost");
+        if (node.cleanup_registry.tryDeinit() != .cleaned or
+            node.batch_registry.tryDeinit() != .cleaned)
+            @panic("CR3b R3 retired registry teardown drifted");
+        node.pin_owner.state = .terminal;
+        if (node.accounting_ledger.tryDeinit() != .cleaned)
+            @panic("CR3b R3 retired accounting teardown drifted");
+        const reclaimed_addr = @intFromPtr(node);
+        self.node_allocator.destroy(node);
+        var index: usize = prepared.retired_index;
+        while (index + 1 < max_retired_clients) : (index += 1)
+            self.retired[index] = self.retired[index + 1];
+        self.retired[max_retired_clients - 1] = null;
+        for (&self.current.guarded_allocator.retired_node_starts, &self.current.guarded_allocator.retired_node_ends) |*start, *end| {
+            if (start.* == reclaimed_addr) {
+                start.* = 0;
+                end.* = 0;
+            }
+        }
+        prepared.lifecycle = .reclaimed;
+        prepared.seal = self.retiredClientReclaimSeal(prepared);
+    }
+
+    pub fn preflightRetiredClientReclaim(
+        self: *ClientSlot,
+        prepared: *const PreparedRetiredClientReclaim,
+    ) RetiredClientReclaimError!void {
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.InvalidOwner;
+        if (!self.preparedRetiredClientReclaimValid(prepared, .prepared) or !self.valid())
+            return error.InvalidOwner;
+        if (!self.retiredNodeReadyForReclaim(prepared.retired_index)) return error.NotReady;
+        const node = self.retired[prepared.retired_index] orelse return error.NotReady;
+        if (@intFromPtr(node) != prepared.node_addr or
+            node.incarnation.tagged != prepared.node_incarnation or
+            node.connection_generation != prepared.connection_generation or
+            !std.crypto.timing_safe.eql(
+                owner_seal.Digest,
+                retiredClientNodeDigest(node),
+                prepared.node_digest,
+            ))
+            return error.InvalidOwner;
     }
 
     pub const RetirementDetachError = error{
@@ -14173,7 +14750,7 @@ pub const ClientSlot = struct {
             self.abortRegisteredExclusiveTeardown(reserved_registry_entry);
         const node = reserved_registry_entry.node;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
-        if (self.retired != null) return .busy;
+        if (self.retired[0] != null) return .busy;
         if (batch_release_callback_active) return .busy;
         if (self.generationAllocatorCallbackActive()) return .busy;
         if (node.active_operation_generation != 0) return .busy;

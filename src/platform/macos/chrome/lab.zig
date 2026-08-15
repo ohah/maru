@@ -9,6 +9,7 @@ const lowering = @import("metal_lowering.zig");
 
 const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
+const scm_dock = chrome.components.scm_dock;
 const archive_detail = chrome.components.archive_detail;
 
 /// A three-card dock specimen emits component text (five runs per card), header/search controls,
@@ -37,6 +38,14 @@ pub const ScenarioId = enum {
     detail_ready,
     detail_stale,
     detail_unavailable,
+    /// 소스 컨트롤 도크의 목록. **이 도크에는 Lab 시나리오가 없었다** — 그래서 시각 회귀가 CI에 안
+    /// 잡혔고, 실제로 도크가 통째로 비는 결함(#2196 draw 예산)이 골든 없이 나갔다가 손 확인으로만
+    /// 드러났다. 그룹 헤더·개수 배지·상태 문자·증감 색이 한 캡처에 든다.
+    scm_rows,
+    /// 같은 목록에서 **행 하나에 호버**한 상태. 행 동작(`+`)은 호버할 때만 그려지는 계약이라 이 시나리오가
+    /// 없으면 그 버튼의 자리를 아무도 못 본다 — 실제로 `+`가 상태 문자와 겹치고(#2209), 색 없는 테두리가
+    /// 배경을 뚫고, 버튼이 개수 배지 위로 올라온 결함 셋이 전부 이 상태에서만 보였다.
+    scm_row_hover,
     /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
     /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
     sidebar_status_strip,
@@ -151,6 +160,8 @@ pub const FrameBuffers = struct {
     dock_actions: []session_dock.ids.Entry,
     detail_nodes: []chrome.ui.tree.UiNode = &.{},
     detail_actions: []archive_detail.ids.Entry = &.{},
+    scm_nodes: []chrome.ui.tree.UiNode = &.{},
+    scm_actions: []scm_dock.ids.Entry = &.{},
     text_runs: []chrome.draw.Run,
     text_bytes: []u8,
 };
@@ -177,6 +188,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover => buildScmFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
@@ -704,7 +716,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
+            .scm_rows, .scm_row_hover, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -717,6 +729,57 @@ fn buildDockFrame(
     });
     const draws = try session_dock.view.view(dock_props, session_frame, .{}, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
     return .{ .tree = session_frame.tree, .draws = draws };
+}
+
+/// 소스 컨트롤 도크 한 프레임. **픽스처는 합성이다** — Lab은 deterministic·effect-free라 저장소를 읽지
+/// 않는다(읽으면 캡처가 디스크 상태에 딸린다).
+///
+/// 행 구성은 이 도크가 실제로 내는 형태를 덮도록 골랐다: 두 그룹 · 스테이지된 파일 · 추적되지 않은 파일 ·
+/// **충돌 파일**(동작이 없는 행) · 증감이 있는 파일. 그래야 상태 문자 색 축과 "동작 없는 행은 자리를
+/// 비우지 않는다"가 한 캡처에 든다.
+fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const items = [_]scm_dock.types.Item{
+        .{ .section = .{ .section = .staged, .count = 1, .collapsed = false, .action = .unstage } },
+        .{ .file = .{ .model_index = 1, .name = "staged.zig", .dir = "src/session/", .status = .added, .letter = 'A', .added = 12, .removed = 0, .has_delta = true, .action = .unstage } },
+        .{ .section = .{ .section = .changes, .count = 3, .collapsed = false, .action = .stage } },
+        .{ .file = .{ .model_index = 3, .name = "changed.zig", .dir = "src/chrome/components/", .status = .modified, .letter = 'M', .added = 34, .removed = 7, .has_delta = true, .action = .stage } },
+        // 충돌 행은 **동작이 없다**(`git add`가 "해결됨"으로 표시하므로). 그 사실이 화면에서 버튼의 부재로 보인다.
+        .{ .file = .{ .model_index = 4, .name = "conflict.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = .none } },
+        .{ .file = .{ .model_index = 5, .name = "untracked.txt", .dir = "", .status = .added, .letter = 'U', .action = .stage } },
+    };
+    const props = scm_dock.types.Props{
+        // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.
+        .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
+        .cell_width_px = scenario.cell_w_px,
+        .snapshot_generation = 1,
+        .items = &items,
+        .branch = "feat/lab-fixture",
+        .has_ab = true,
+        .ahead = 2,
+        .behind = 1,
+        .summary = .{ .added = 46, .removed = 7 },
+        .changed_file_count = 4,
+    };
+    const frame = try scm_dock.build.build(props, .{
+        .nodes = buffers.scm_nodes,
+        .entries = buffers.entries,
+        .layout_items = buffers.items,
+        .flex_scratch = buffers.flex_scratch,
+        .child_rects = buffers.child_rects,
+        .actions = buffers.scm_actions,
+    });
+    // 행 동작은 **호버할 때만** 그려진다. 포인터가 없는 캡처에서 그 자리를 보려면 상태를 직접 세워야 한다
+    // (제품도 같은 이유로 `MARU_FORCE_SCM_HOVER`를 둔다).
+    const state: chrome.ui.interaction.InteractionState = if (scenario.id == .scm_row_hover)
+        .{ .hovered = scm_dock.build.NodeIds.item(3) }
+    else
+        .{};
+    const draws = try scm_dock.view.view(props, frame, state, tokens, .{
+        .ops = buffers.ops,
+        .runs = buffers.text_runs,
+        .text_bytes = buffers.text_bytes,
+    });
+    return .{ .tree = frame.tree, .draws = draws };
 }
 
 fn buildDetailFrame(

@@ -233,6 +233,9 @@ pub fn main(init: std.process.Init) !void {
     // Button이 label을 자식으로 들면서 action마다 node가 둘이다(Button + label).
     var detail_nodes: [20]chrome.ui.tree.UiNode = undefined;
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
+    // 소스 컨트롤 도크: 행 6 + 동작 버튼(충돌 행 제외 5) + 탭 칸 3 + 고정 chrome 4 + 여유.
+    var scm_nodes: [32]chrome.ui.tree.UiNode = undefined;
+    var scm_actions: [24]chrome.components.scm_dock.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.
@@ -303,6 +306,8 @@ pub fn main(init: std.process.Init) !void {
         .dock_actions = &dock_actions,
         .detail_nodes = &detail_nodes,
         .detail_actions = &detail_actions,
+        .scm_nodes = &scm_nodes,
+        .scm_actions = &scm_actions,
         .text_runs = &text_runs,
         .text_bytes = &text_bytes,
     });
@@ -731,11 +736,15 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
     if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
     if (std.mem.eql(u8, raw, "editor-diff-scrolled")) return .editor_diff_scrolled;
+    if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
+    if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
     return null;
 }
 
 fn artifactName(id: lab.ScenarioId) []const u8 {
     return switch (id) {
+        .scm_rows => "scm-rows",
+        .scm_row_hover => "scm-row-hover",
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",

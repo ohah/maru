@@ -329,14 +329,18 @@ fn openPinnedParent(
         return error.InvalidPath;
     const parent_path = std.fs.path.dirname(absolute_path) orelse return error.InvalidPath;
     const leaf = std.fs.path.basename(absolute_path);
-    try policy.validateName(leaf);
+    // **존재하는 이름**이므로 역슬래시를 막지 않는 쪽을 쓴다 — POSIX에서 `a\b`는 평범한 파일 이름이고,
+    // 여기서 거부하면 그 파일을 이름 바꾸거나 지울 수 없다. 새 이름의 역슬래시는 이미 상류
+    // (`planCreate`/`planRename`의 `validateName`)에서 막았다. **Windows 백엔드를 만들 때는 여기서
+    // 역슬래시를 다시 막아야 한다** — 거기서는 `\`가 `openDir`에 대해 진짜 구분자다(W7, 계약 §5.2 ⒝).
+    try policy.validateExistingName(leaf);
     var current = try std.Io.Dir.openDirAbsolute(io, root, .{ .follow_symlinks = false });
     errdefer current.close(io);
     if (root_identity) |expected| if (!identityMatches(try identityOfDir(io, current), expected)) return error.IdentityChanged;
     const rel_parent = if (parent_path.len == root.len) "" else parent_path[root.len + 1 ..];
     var components = std.mem.tokenizeScalar(u8, rel_parent, '/');
     while (components.next()) |component| {
-        try policy.validateName(component);
+        try policy.validateExistingName(component); // 위와 같은 이유(실재하는 경로의 구성요소)
         const next = try current.openDir(io, component, .{ .follow_symlinks = false });
         current.close(io);
         current = next;

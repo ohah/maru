@@ -88,18 +88,32 @@ pub fn isDetectableAbsolute(path: []const u8) bool {
 ///   VS Code도 `\\?\C:` 확장형만 다룬다. **여기서 직접 배제한다** — 예전에는 호출자의 `!startsWith("//")`가
 ///   `//server/share`를 막고 있어서, 이 함수의 doc과 실제 반환값이 어긋나 있었다.
 ///
+/// **마지막에 `std.fs.path.isAbsoluteWindows`로 확인한다.** 위 규칙들은 *정책*("무엇을 링크로 보고 싶은가")이고,
+/// 부분집합 관계는 *사실*("resolve가 이것을 절대로 인정하는가")이다. 둘을 각각 손으로 맞추면 어긋난다 —
+/// `drivePrefixLen`의 UTF-8 근사가 `\x80:/x`·`😀:/x` 등 72가지 바이트열에서 std와 갈렸다(적대적 검증).
+/// 정책은 여기서 좁히고, 사실은 std에게 묻는다.
+///
 /// **남은 비대칭(알려진 것)**: Windows에서 `/foo/bar`는 계속 감지하는데, Win32에서 그것은 `\foo\bar`와 **같은
 /// 종류**(`.rooted`)라 위에서 `\foo\bar`를 뺀 이유가 그대로 적용된다. 그럼에도 남긴 것은 Windows 터미널에
 /// git-bash·MSYS·WSL 출력으로 POSIX 모양이 흔히 뜨기 때문이다. 대가는 그 링크의 `access`가 터미널의 cwd
 /// 드라이브가 아니라 **프로세스의 현재 드라이브**에 묶인다는 것이다(docs/windows-platform.md §5.1).
 pub fn isDetectableAbsoluteFor(os_tag: std.Target.Os.Tag, path: []const u8) bool {
     if (path.len == 0) return false;
-    // UNC와 프로토콜 상대(`//host/x`)는 어느 OS에서도 감지하지 않는다 — doc과 반환값을 여기서 일치시킨다.
-    if (path.len >= 2 and isSep(path[0]) and isSep(path[1])) return false;
+    // UNC와 프로토콜 상대는 어느 OS에서도 감지하지 않는다 — doc과 반환값을 여기서 일치시킨다.
+    // **`//`만 본다**: 옛 호출부 규칙(`!startsWith("//")`)과 정확히 같은 집합이라야 macOS 동작이 불변이다.
+    // `isSep`으로 두 자리를 보면 `/\x`(POSIX에서 `\`라는 이름의 디렉터리 아래)까지 배제해 버린다 —
+    // 적대적 검증에서 나온 차이다.
+    if (std.mem.startsWith(u8, path, "//")) return false;
     if (path[0] == '/') return true; // POSIX 절대 — 모든 호스트에서 예전과 같은 동작
     if (os_tag != .windows) return false;
+    if (std.mem.startsWith(u8, path, "\\\\")) return false; // UNC(역슬래시 철자)
     const n = drivePrefixLen(path) orelse return false;
-    return path.len > n and isSep(path[n]); // 드라이브 뒤 구분자 필수
+    if (path.len <= n or !isSep(path[n])) return false; // 드라이브 뒤 구분자 필수
+    // **부분집합을 정의상 보장한다.** 위 검사들은 "무엇을 링크로 보고 싶은가"(정책)이고, 이 마지막 줄은
+    // "resolve가 이것을 절대로 인정하는가"(사실)다. 둘을 각각 손으로 맞추면 반드시 어긋난다 — 실제로
+    // `drivePrefixLen`의 UTF-8 근사가 `\x80:/x`·`😀:/x` 같은 72가지 바이트열에서 std와 갈렸고, 그 토큰은
+    // 밑줄이 뜬 채 클릭하면 cwd에 join돼 **엉뚱한 파일을 열었다**(적대적 검증). 사실은 std에게 묻는다.
+    return std.fs.path.isAbsoluteWindows(path);
 }
 
 /// 경로가 **이미 구분자로 끝나는가** — 그 아래에 자식을 이어 붙일 때 구분자를 하나 더 넣으면 안 되는 모양.
@@ -199,9 +213,17 @@ test "isDetectableAbsoluteFor: 두 OS 갈래를 모두 실행한다" {
     try testing.expect(isAbsolute("C:relative") and !isDetectableAbsoluteFor(win, "C:relative"));
     try testing.expect(isAbsolute("//server/share") and !isDetectableAbsoluteFor(win, "//server/share"));
 
-    // **비-Windows 기준에서는 옛 판정(`word[0] == '/'`)과 완전히 동일**해야 한다 — macOS 동작 불변의 증거.
-    for ([_][]const u8{ "/a", "/", "C:\\a", "C:/a", "C:", "a:b", "", "rel/a.zig", "\\x", "~/a" }) |t| {
-        try testing.expectEqual(t.len > 0 and t[0] == '/', isDetectableAbsoluteFor(mac, t));
+    // **비-Windows 기준에서는 옛 규칙과 완전히 동일**해야 한다 — macOS 동작 불변의 증거. 옛 규칙은
+    // 술어(`word[0]=='/'`)와 호출부의 `!startsWith("//")`를 **합친 것**이라 여기서도 합쳐서 비교한다.
+    // 한때 UNC 배제를 `isSep`으로 두 자리 봐서 `/\x`(POSIX에서 `\`라는 이름의 디렉터리 아래)까지 배제했고,
+    // 그것이 이 주장을 깼다 — 적대적 검증에서 나온 차이다.
+    for ([_][]const u8{
+        "/a",   "/",         "//a",   "//",   "/\\x", "/\\",
+        "\\/x", "\\\\x",     "C:\\a", "C:/a", "C:",   "a:b",
+        "",     "rel/a.zig", "\\x",   "~/a",  ":/x",  "1:/x",
+    }) |t| {
+        const old = t.len > 0 and t[0] == '/' and !std.mem.startsWith(u8, t, "//");
+        try testing.expectEqual(old, isDetectableAbsoluteFor(mac, t));
     }
 }
 
@@ -217,6 +239,31 @@ test "감지 ⊆ std.fs.path.isAbsolute — 이 관계가 깨지면 클릭이 cw
     }) |t| {
         if (isDetectableAbsoluteFor(win, t)) try testing.expect(std.fs.path.isAbsoluteWindows(t));
         if (isDetectableAbsoluteFor(.macos, t)) try testing.expect(std.fs.path.isAbsolutePosix(t));
+    }
+}
+
+// 위 케이스 목록은 **손으로 고른 것**이라, 관계가 깨져 있는데도 통과했다. 드라이브 자리에 들어올 수 있는
+// **모든 바이트**와 잘린/BMP 밖 UTF-8 선행 바이트까지 훑는다 — 적대적 검증이 여기서 72건을 찾았다:
+// `utf8ByteSequenceLength` 실패를 길이 1로 근사한 탓에 `\x80:/x`·`\xFF:/x`가, 4바이트 이모지는 UTF-16
+// surrogate pair라 `😀:/x`가 우리 쪽에서만 드라이브로 판정됐다. 그 토큰들은 밑줄이 뜬 채 클릭하면
+// resolve가 상대로 보고 **cwd에 join**한다 — 이 술어가 막겠다고 만들어진 바로 그 실패다.
+test "감지 ⊆ std: 드라이브 자리 전 바이트 + 잘린·BMP 밖 UTF-8 선행" {
+    var b: usize = 0;
+    while (b < 256) : (b += 1) {
+        for ([_]u8{ '/', '\\', 'x', ':' }) |sep| {
+            const buf = [_]u8{ @intCast(b), ':', sep, 'y' };
+            const t: []const u8 = &buf;
+            if (isDetectableAbsoluteFor(.windows, t)) try testing.expect(std.fs.path.isAbsoluteWindows(t));
+            if (isDetectableAbsoluteFor(.macos, t)) try testing.expect(std.fs.path.isAbsolutePosix(t));
+        }
+    }
+    for ([_][]const u8{
+        "\xF0:/x", "\xE0:/x", "\xC2:/x",
+        "\x80:/x", "\xFF:/x", "\xF0\x9F:/x",
+        "\xC3\xA9:/x",          "\xF0\x9F\x98\x80:/x", // 😀 — BMP 밖(surrogate pair)
+        "\xF0\x9F\x98\x80:\\x",
+    }) |t| {
+        if (isDetectableAbsoluteFor(.windows, t)) try testing.expect(std.fs.path.isAbsoluteWindows(t));
     }
 }
 

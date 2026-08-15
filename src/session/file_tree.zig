@@ -1102,13 +1102,16 @@ fn clonePathList(allocator: std.mem.Allocator, source: []const []u8, out: *std.A
     for (source) |path| out.appendAssumeCapacity(try allocator.dupe(u8, path));
 }
 
-/// 이름 한 칸이 유효한가. **역슬래시도 막는다** — 이 검사는 세그먼트로 쪼개지 않으므로 `..\..\x`가 통째로
-/// 한 이름이 되어 `..` 비교를 통과하고, Windows에서 join되면 진짜 상위 이동이 된다
-/// (`file_tree_mutation.validateName`과 같은 이유·같은 정책).
+/// 이름 한 칸이 유효한가. 이 술어는 **파일시스템 스캔 결과를 거른다**(`ingest` — 실재하는 디렉터리 엔트리).
+///
+/// **역슬래시는 막지 않는다.** 사용자 입력을 받는 `file_tree_mutation.validateName`은 막지만 여기는 반대다:
+/// Windows에서 `\`는 **파일명에 쓸 수 없는 문자**라 스캔 결과에 들어올 수 없고, POSIX에서는 `a\b`가 평범한
+/// 파일 이름이다. 그러므로 여기서 거부하면 Windows에서 얻는 것은 없고 POSIX에서는 **그 파일이 트리에서
+/// 조용히 사라진다**(오류도 안 뜬다 — 호출부가 `continue`한다). Windows에서 만든 압축을 풀면 실제로 생기는
+/// 이름이다. 적대적 검증에서 잡은 회귀라 여기 못 박는다.
 fn validBasename(name: []const u8) bool {
     return name.len > 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..") and
-        std.mem.indexOfScalar(u8, name, '/') == null and std.mem.indexOfScalar(u8, name, '\\') == null and
-        std.mem.indexOfScalar(u8, name, 0) == null and
+        std.mem.indexOfScalar(u8, name, '/') == null and std.mem.indexOfScalar(u8, name, 0) == null and
         std.unicode.utf8ValidateSlice(name);
 }
 

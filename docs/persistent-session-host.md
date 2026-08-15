@@ -5152,6 +5152,22 @@ preallocated `UnavailableCore`, `PreparedReconnect`가 실제 제품 타입으�
 `ClientSlot` 안에 임시로 복제하거나 stable shell 없이 attachment를 직접 파괴하는 경로는 허용하지 않는다. CR3c는 R2/R3의
 Client 세대 결과를 이미 존재하는 `RemoteGeneration` slot에 연결한다.
 
+R2는 실패 시점과 callback 권위를 섞지 않기 위해 `R2a|R2b|R2c`로 닫는다. R2a의 유일한 durable mutation은 stable proxy
+writer gate 안의 `live -> unavailable`과 exact current Client node의 detached tombstone이다. 둘 중 하나만 보이는 상태는
+허용하지 않으며, 이 suffix에는 allocation·fd close·allocator callback·attachment drop·Client destroy가 없다. R2b는 R2a 호출
+전에 준비되는 caller-provided final-address cleanup handle을 도입하고, R2a commit 뒤 그 handle의 descriptor만 gate 밖에서
+정산한다. R2c는 새 Client node를 final address에서
+완성한 뒤 old node를 retired inventory로 옮기고 checked-monotonic connection generation/current pointer를 함께 게시한다.
+R2a 실패는 admission-close cancel이 가능한 mutation 0이고, R2a commit 뒤 실패는 admission을 다시 열지 않는다. R2b/R2c와
+R3가 green이 되기 전에는 R2 완료 또는 실제 reconnect 가능 상태로 세지 않는다.
+
+R2a의 현재 focused gate는 `zig build test-session-host-cr3b-r2a`다. Debug·ReleaseFast 각각에서 actual socket을 가진
+production `RemoteGeneration` owner가 stable proxy의 exact `live -> unavailable` 전이와 current Client detached tombstone을
+같은 writer gate 안에서 generation `+1`로 게시하는 성공 행, wrong-generation preflight의 proxy·permit·Client mutation 0 행,
+tombstone callback 중 reader exclusion 행, invalid raw lifecycle fail-close 행, source boundary 한 행을 실행한다. 성공 뒤에도 socket fd, poison 상태, connection generation은 그대로이며 진단 projection은
+test-only conditional facade에만 있고 dormant R2a 제품 caller는 0이다. 따라서 이 증거는 R2a의 callback/allocation-free publication만 닫고 cleanup handle,
+replacement Client/current publication, retired destroy 또는 실제 reconnect socket 경로를 완료로 세지 않는다.
+
 #### CR3a ownership target inventory
 
 CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.

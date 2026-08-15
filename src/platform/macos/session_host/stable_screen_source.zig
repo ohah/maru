@@ -233,6 +233,31 @@ pub const StableScreenSource = struct {
         return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
     }
 
+    /// CR3b R2a 전용 publication leaf. 기존 live target과 expected generation을 검증한 뒤
+    /// caller의 선검증된 store-only suffix와 unavailable target을 같은 writer gate에서 게시한다.
+    pub fn publishUnavailableFromLiveWithCommit(
+        self: *StableScreenSource,
+        expected_generation: u64,
+        generation: u64,
+        context: anytype,
+        comptime commit: anytype,
+    ) PublishError!RetiredTarget {
+        try self.beginWriter();
+        defer self.endWriter();
+        if (self.lifecycle != .ready) return error.Closed;
+        if (self.current.kind != .live or self.current.generation != expected_generation)
+            return error.InvalidGeneration;
+        try self.validateNextGeneration(generation);
+        const retired = self.current;
+        commit(context);
+        self.current = .{
+            .source = self.unavailable.screenSource(),
+            .generation = generation,
+            .kind = .unavailable,
+        };
+        return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
+    }
+
     /// shell destroy용. 새 reader를 먼저 막고 기존 borrow가 exact target unlock을 끝낸 뒤 closed를 게시한다.
     /// generation을 새로 발급하지 않으며 반환된 live target은 이 호출 뒤에만 파괴할 수 있다.
     pub fn close(self: *StableScreenSource) PublishError!?RetiredTarget {
@@ -556,6 +581,72 @@ test "CR2b stable proxy는 writer pending 뒤 새 reader를 막고 기존 borrow
     try std.testing.expectEqual(@as(usize, 1), old.unlocks.load(.acquire));
     _ = try proxy.close();
     proxy.deinit();
+}
+
+test "CR3b R2a stable proxy reader는 tombstone callback 중간 상태를 관측하지 않는다" {
+    var old = FakeTarget.init('R');
+    var proxy: StableScreenSource = undefined;
+    try proxy.initLiveInPlace(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .cols = 24, .rows = 1 },
+        old.source(),
+    );
+    var proxy_settled = false;
+    defer if (!proxy_settled) {
+        _ = proxy.close() catch @panic("R2a proxy hostile fixture cleanup lost owner");
+        proxy.deinit();
+    };
+    const State = struct {
+        proxy: *StableScreenSource,
+        callback_started: std.atomic.Value(bool) = .init(false),
+        tombstone_stored: std.atomic.Value(bool) = .init(false),
+        reader_started: std.atomic.Value(bool) = .init(false),
+        reader_acquired: std.atomic.Value(bool) = .init(false),
+        reader_blocked_during_callback: std.atomic.Value(bool) = .init(false),
+        observed: std.atomic.Value(u32) = .init(0),
+
+        fn commit(self: *@This()) void {
+            self.tombstone_stored.store(true, .release);
+            self.callback_started.store(true, .release);
+            while (!self.reader_started.load(.acquire)) std.Thread.yield() catch {};
+            var spins: usize = 0;
+            while (spins < 1024) : (spins += 1) std.Thread.yield() catch {};
+            self.reader_blocked_during_callback.store(
+                !self.reader_acquired.load(.acquire),
+                .release,
+            );
+        }
+
+        fn read(self: *@This()) void {
+            while (!self.callback_started.load(.acquire)) std.Thread.yield() catch {};
+            self.reader_started.store(true, .release);
+            self.proxy.tryLock(std.testing.io) catch return;
+            self.reader_acquired.store(true, .release);
+            const snapshot = self.proxy.screenSource().vtable.render_snapshot(self.proxy);
+            self.observed.store(snapshot.cells[0].codepoint, .release);
+            self.proxy.unlockPinned(std.testing.io);
+        }
+    };
+    var state = State{ .proxy = &proxy };
+    const reader = try std.Thread.spawn(.{}, State.read, .{&state});
+    var reader_joined = false;
+    defer if (!reader_joined) {
+        state.callback_started.store(true, .release);
+        reader.join();
+    };
+    const retired = try proxy.publishUnavailableFromLiveWithCommit(1, 2, &state, State.commit);
+    reader.join();
+    reader_joined = true;
+    try std.testing.expect(state.tombstone_stored.load(.acquire));
+    try std.testing.expect(state.reader_blocked_during_callback.load(.acquire));
+    try std.testing.expect(state.reader_acquired.load(.acquire));
+    try std.testing.expectEqual(@as(u32, '['), state.observed.load(.acquire));
+    try std.testing.expectEqual(TargetKind.live, retired.kind);
+    try std.testing.expectEqual(@as(u64, 1), retired.generation);
+    try std.testing.expect((try proxy.close()) == null);
+    proxy.deinit();
+    proxy_settled = true;
 }
 
 test "CR2b stable proxy는 destroy와 borrow를 직렬화하고 live target을 exact once retire한다" {

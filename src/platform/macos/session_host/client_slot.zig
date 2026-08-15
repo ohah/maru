@@ -203,6 +203,23 @@ threadlocal var preparation_projection_test_hook: if (builtin.is_test) Preparati
     if (builtin.is_test) .{} else {};
 
 pub const testing = if (builtin.is_test) struct {
+    pub const RetirementProjection = struct {
+        connection_generation: u64,
+        admission: AdmissionLifecycle,
+        retirement: RetirementLifecycle,
+        placeholder_generation: u64,
+    };
+
+    pub fn retirementProjection(slot: *ClientSlot) RetirementProjection {
+        if (!slot.valid()) @panic("invalid ClientSlot retirement projection");
+        return .{
+            .connection_generation = slot.current.connection_generation,
+            .admission = slot.current.admission_lifecycle,
+            .retirement = slot.current.retirement_lifecycle,
+            .placeholder_generation = slot.current.placeholder_generation,
+        };
+    }
+
     pub fn rpcDecoderCallbackActive() bool {
         return rpc_decoder_callback_active;
     }
@@ -816,9 +833,12 @@ pub const ClientNode = struct {
     admission_lifecycle: AdmissionLifecycle,
     stack_borrows: u32,
     next_admission_close_request_generation: u64,
+    retirement_lifecycle: RetirementLifecycle,
+    placeholder_generation: u64,
 };
 
 pub const AdmissionLifecycle = enum(u8) { open, closed };
+pub const RetirementLifecycle = enum(u8) { live, detached };
 
 pub const PublicationProcessIdentity = struct {
     pid: u32,
@@ -845,6 +865,13 @@ pub const PreparedAdmissionClose = struct {
 fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
         @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
+        else => false,
+    };
+}
+
+fn retirementLifecycleRawValid(value: *const RetirementLifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(RetirementLifecycle.live), @intFromEnum(RetirementLifecycle.detached) => true,
         else => false,
     };
 }
@@ -1059,6 +1086,32 @@ test "CR3b R1 admission close는 invalid raw lifecycle을 Client 접근 전에 �
     @as(*u8, @ptrCast(&permit.lifecycle)).* = 0xff;
     try std.testing.expectError(error.InvalidOwner, slot.commitAdmissionClose(&permit));
     try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+}
+
+test "CR3b R2a Client tombstone은 invalid raw lifecycle을 permit mutation 전에 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B2A3);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer {
+        slot.current.retirement_lifecycle = .live;
+        slot.current.placeholder_generation = 0;
+        slot.current.admission_lifecycle = .open;
+        if (slot.lifecycle == .live) {
+            const outcome = slot.tryDeinit();
+            if (outcome != .cleaned) @panic("CR3b R2a fixture teardown failed");
+        }
+    }
+    var permit: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &permit);
+    try slot.commitAdmissionClose(&permit);
+    const before = permit;
+    @as(*u8, @ptrCast(&slot.current.retirement_lifecycle)).* = 0xff;
+    try std.testing.expectError(error.InvalidOwner, slot.preflightRetirementDetach(&permit, 2, 3));
+    try std.testing.expectError(error.InvalidOwner, slot.validateRetirementPlaceholder(3));
+    try std.testing.expect(std.meta.eql(before, permit));
+    slot.current.retirement_lifecycle = .live;
+    try slot.cancelAdmissionClose(&permit);
 }
 
 test "B3-4/5 RPC free evidence retire permit consumes exact committed record" {
@@ -11273,6 +11326,8 @@ pub const ClientSlot = struct {
         node.admission_lifecycle = .open;
         node.stack_borrows = 0;
         node.next_admission_close_request_generation = 1;
+        node.retirement_lifecycle = .live;
+        node.placeholder_generation = 0;
         node.guarded_allocator = .{
             .parent = source.allocator,
             .node_start = node_start,
@@ -11428,6 +11483,9 @@ pub const ClientSlot = struct {
         return self.current.incarnation.kind() == .node and
             self.current.connection_generation != 0 and
             self.current.next_admission_close_request_generation != 0 and
+            retirementLifecycleRawValid(&self.current.retirement_lifecycle) and
+            ((self.current.retirement_lifecycle == .live and self.current.placeholder_generation == 0) or
+                (self.current.retirement_lifecycle == .detached and self.current.placeholder_generation != 0)) and
             self.current.pin_owner.self_addr == @intFromPtr(&self.current.pin_owner) and
             self.current.pin_owner.slot_addr == @intFromPtr(self) and
             self.current.pin_owner.node_addr == @intFromPtr(self.current) and
@@ -11887,6 +11945,80 @@ pub const ClientSlot = struct {
         permit.seal = self.admissionCloseSeal(permit);
         permit.lifecycle = .consumed;
         permit.seal = self.admissionCloseSeal(permit);
+    }
+
+    pub const RetirementDetachError = error{
+        InvalidOwner,
+        InvalidGeneration,
+        GenerationExhausted,
+        Busy,
+    };
+
+    /// R2a의 fallible preflight. durable mutation과 proxy writer 진입 전에 모든 Client 권위를 닫는다.
+    pub fn preflightRetirementDetach(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        expected_placeholder_generation: u64,
+        next_placeholder_generation: u64,
+    ) RetirementDetachError!void {
+        if (!self.admissionClosePermitValid(permit, .committed)) return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+            return error.InvalidOwner;
+        if (operation.node.admission_lifecycle != .closed or
+            operation.node.retirement_lifecycle != .live or
+            operation.node.placeholder_generation != 0 or operation.node.stack_borrows != 0 or
+            operation.node.active_operation_generation != 0 or
+            operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        if (expected_placeholder_generation == 0 or next_placeholder_generation == 0)
+            return error.InvalidGeneration;
+        if (expected_placeholder_generation == std.math.maxInt(u64))
+            return error.GenerationExhausted;
+        if (next_placeholder_generation != expected_placeholder_generation + 1)
+            return error.InvalidGeneration;
+    }
+
+    /// stable proxy writer gate 안에서만 호출하는 callback/allocation 없는 suffix다.
+    pub fn commitRetirementDetachNoFail(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+        expected_placeholder_generation: u64,
+        next_placeholder_generation: u64,
+    ) void {
+        self.preflightRetirementDetach(
+            permit,
+            expected_placeholder_generation,
+            next_placeholder_generation,
+        ) catch @panic("CR3b R2a retirement detach authority drifted after preflight");
+        self.current.retirement_lifecycle = .detached;
+        self.current.placeholder_generation = next_placeholder_generation;
+        permit.lifecycle = .consumed;
+        permit.seal = self.admissionCloseSeal(permit);
+    }
+
+    pub fn validateRetirementPlaceholder(
+        self: *ClientSlot,
+        expected_placeholder_generation: u64,
+    ) RetirementDetachError!void {
+        if (expected_placeholder_generation == 0 or !self.valid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (operation.node != self.current or operation.node.admission_lifecycle != .closed or
+            operation.node.retirement_lifecycle != .detached or
+            operation.node.placeholder_generation != expected_placeholder_generation or
+            operation.node.stack_borrows != 0 or operation.node.active_operation_generation != 0 or
+            operation.node.pin_owner.active_cleanup != 0)
+            return error.InvalidOwner;
     }
 
     pub fn logicalClientConst(self: *const ClientSlot) *const client_mod.Client {

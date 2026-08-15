@@ -960,7 +960,7 @@ interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 �
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a·CR3b R1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -1877,6 +1877,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   R1은 current pointer·runtime/screen target·connection generation을 바꾸지 않는 inactive 기반이라 CR2보다 먼저 허용된다.
   R2 admission은 CR0b·CR1·CR2a~e의 focused gate가 모두 green이고 CR2의 production `RemoteGeneration`, stable proxy,
   preallocated `UnavailableCore`, `PreparedReconnect`가 존재해야 한다. R2가 이 네 기반을 대신 구현하는 것은 선행 gate 우회다.
+  R2는 R2a(callback-free proxy unavailable+detached tombstone atomic publication), R2b(final-address cleanup handle exact-once),
+  R2c(새 Client node+checked-monotonic current publication)로 나눈다. R2a는 fd/allocator callback·current 교체·destroy 0,
+  R2b는 새 generation publish 0, R2c는 old destroy 0을 각각 source boundary와 production-type unit으로 고정한다.
+  R2a focused gate `zig build test-session-host-cr3b-r2a`는 CR2e-e3c3을 상속하고 최적화 모드마다 actual socket을 가진
+  `RemoteGeneration` 성공 1행, wrong-generation mutation-0 1행, stable proxy reader exclusion 1행, Client invalid-raw
+  fail-close 1행, source boundary 1행을 exact 실행한다. 성공 행은 stable proxy
+  writer gate 뒤 unavailable generation과 Client detached tombstone generation을 exact `+1`로 결속하고 fd·poison 상태·connection
+  generation을 보존한다. 진단 projection은 test-only conditional facade이며 shipping reader authority를 추가하지 않는다.
+  R2a 제품 caller는 0이고 R2b가 caller-owned final-address cleanup handle을 별도로 도입하기 전에는 fd/attachment 정산을 주장하지 않는다.
   CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는

@@ -2012,6 +2012,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitAdmissionClose" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "cancelAdmissionClose" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetirementLifecycle" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "retirementLifecycleRawValid" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "RetirementDetachError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementDetach" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitRetirementDetachNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "validateRetirementPlaceholder" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ManagedPoisonError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "managedPoisonSeal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareManagedPoison" },
@@ -2185,12 +2191,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        // R1 stack borrow, admission, managed poison snapshot/projection도 같은 registered operation으로 current node를 고정한다.
-        @as(usize, 11),
+        // R1 stack borrow/admission, managed poison과 R2a preflight/teardown validation도 같은 operation으로 current node를 고정한다.
+        @as(usize, 13),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 15),
+        @as(usize, 17),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(

@@ -13543,7 +13543,15 @@ pub const AppSession = struct {
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
         // 전역 remote backend가 frame owner 집합을 한 번만 선택해야 Term별 pump 순서가 Busy owner를 재실행하지 않는다.
-        if (is_macos) if (app_remote_backend) |*backend| backend.maintenanceEventTick();
+        if (is_macos) if (app_remote_backend) |*backend| {
+            if (app_process_incident_owner.publisher() != null) {
+                _ = backend.drainReconnectAdmission(
+                    &app_process_incident_owner.reconnect_admissions,
+                    &app_process_incident_owner.reconnect_budget,
+                ) catch @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+            }
+            backend.maintenanceEventTick();
+        };
         // 활성 surface **자신의** 출력만 따로 센다(커서 blink 리셋 판정용 — 아래 루프 주석). 활성 탭이 없는 빈 창
         // (마지막 워크스페이스를 옮겨 비운 창)은 `active()`가 null이라 id 비교를 건너뛴다(그 창엔 그릴 커서도 없다).
         const active_surface_id: ?u64 = if (self.app_window.active()) |s| s.id else null;

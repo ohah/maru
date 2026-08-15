@@ -201,6 +201,27 @@ fn BudgetType(
             };
         }
 
+        pub fn validateLeaseRole(self: *Self, lease: *Lease, expected_role: Role) !void {
+            try self.validateOwner();
+            _ = try self.validateLease(lease, expected_role);
+        }
+
+        pub fn canReserveBatch(self: *const Self, count: usize, bytes_each: usize) !bool {
+            try self.validateOwner();
+            if (count == 0 or bytes_each == 0 or bytes_each > max_entry_bytes) return false;
+            const next_entries = std.math.add(usize, self.live_entries, count) catch return false;
+            const added_bytes = std.math.mul(usize, count, bytes_each) catch return false;
+            const next_bytes = std.math.add(usize, self.live_bytes, added_bytes) catch return false;
+            _ = std.math.add(u64, self.next_generation, @as(u64, @intCast(count))) catch return false;
+            return next_entries <= entry_limit and next_bytes <= byte_limit;
+        }
+
+        pub fn ownedBy(self: *const Self, pid: u32, process_nonce: u64, owner_thread: u64) bool {
+            self.validateOwner() catch return false;
+            return self.owner_pid == pid and self.process_nonce == process_nonce and
+                self.owner_thread == @as(std.Thread.Id, @intCast(owner_thread));
+        }
+
         pub fn deinit(self: *Self) !void {
             try self.validateOwner();
             if (self.live_entries != 0 or self.live_bytes != 0) return error.Busy;

@@ -55,6 +55,7 @@ const incident_publication_port_domain = "maru.incident-publication-port.v1";
 const incident_publication_timestamp_domain = "maru.incident-publication-timestamp.v1";
 const reconnect_admission_domain = "maru.reconnect-admission.v1";
 const prepared_reconnect_dispatch_domain = "maru.prepared-reconnect-dispatch.v1";
+const reconnect_executor_admission_domain = "maru.reconnect-executor-admission.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
 const shutdown_attempt_authority_domain = "maru.shutdown-attempt-authority.v1";
@@ -106,6 +107,7 @@ pub const IncidentPublicationPortSealInput = cleanup_seal.IncidentPublicationPor
 pub const IncidentPublicationTimestampSealInput = cleanup_seal.IncidentPublicationTimestampSealInput;
 pub const ReconnectAdmissionSealInput = cleanup_seal.ReconnectAdmissionSealInput;
 pub const PreparedReconnectDispatchSealInput = cleanup_seal.PreparedReconnectDispatchSealInput;
+pub const ReconnectExecutorAdmissionSealInput = cleanup_seal.ReconnectExecutorAdmissionSealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
 pub const ShutdownAttemptAuthoritySealInput = cleanup_seal.ShutdownAttemptAuthoritySealInput;
@@ -799,6 +801,14 @@ pub fn preparedReconnectDispatchSeal(
     input: PreparedReconnectDispatchSealInput,
 ) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, prepared_reconnect_dispatch_domain, input);
+}
+
+pub fn reconnectExecutorAdmissionSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: ReconnectExecutorAdmissionSealInput,
+) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, reconnect_executor_admission_domain, input);
 }
 
 pub fn pendingTermCloseSeal(pid: u32, process_nonce: u64, input: PendingTermCloseSealInput) ReadyError!CleanupSeal {

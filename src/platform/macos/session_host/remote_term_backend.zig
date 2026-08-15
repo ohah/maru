@@ -33,6 +33,8 @@ const shutdown_attempt = @import("shutdown_attempt_authority.zig");
 const shutdown_connector = @import("shutdown_admin_connector.zig");
 const shutdown_current_admin = @import("shutdown_current_admin.zig");
 const client_deadline = @import("client_deadline.zig");
+const reconnect_admission_owner = @import("reconnect_admission_owner.zig");
+const reconnect_resident_budget = @import("reconnect_resident_budget.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -54,6 +56,8 @@ const RemoteRuntime = remote_runtime.RemoteRuntime;
 const HostAdapter = host_adapter_mod.HostAdapter;
 const AdapterPool = host_pool_mod.HostPool(HostAdapter);
 pub const max_remote_backend_runtimes: usize = 4096;
+
+pub const ReconnectDrainResult = enum { idle, started, retry_later, discarded_stale };
 
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
@@ -129,6 +133,7 @@ pub const RemoteTermBackend = struct {
     const RuntimeEntry = struct {
         runtime: *RemoteRuntime,
         host_id: u128,
+        host_adapter_generation: u64 = 0,
         runtime_generation: u64,
     };
 
@@ -458,6 +463,89 @@ pub const RemoteTermBackend = struct {
             handle_count,
             selected_count,
         ) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// Process-global admission queue의 첫 sealed row를 actual stable runtime에 넘기는 유일한
+    /// drain leaf다. ResidentLimit은 row를 다시 admitted로 돌려 다음 frame이 같은 요청을 재시도한다.
+    pub fn drainReconnectAdmission(
+        self: *RemoteTermBackend,
+        admissions: *reconnect_admission_owner.Owner,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) !ReconnectDrainResult {
+        var dispatch: reconnect_admission_owner.PreparedReconnectDispatch = .{};
+        admissions.prepareDispatch(&dispatch) catch |err| switch (err) {
+            error.NotFound => return .idle,
+            else => return err,
+        };
+        var dispatch_settled = false;
+        defer if (!dispatch_settled) admissions.settleDispatch(&dispatch, .retry_later) catch
+            process_seal.fatalIntegrity(.incident_authority);
+        const projection: reconnect_admission_owner.Projection = .{
+            .slot_index = dispatch.slot_index,
+            .slot_generation = dispatch.slot_generation,
+            .host_id = dispatch.host_id,
+            .host_adapter_generation = dispatch.host_adapter_generation,
+            .connection_generation = dispatch.connection_generation,
+            .incident_id = dispatch.incident_id,
+        };
+        var selected: [max_remote_backend_runtimes]*RemoteRuntime = undefined;
+        var selected_count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |row| {
+            if (row.value_ptr.host_id != projection.host_id) continue;
+            if (row.value_ptr.host_adapter_generation != projection.host_adapter_generation or
+                !RemoteRuntime.backend_api.matchesReconnectAdmission(row.value_ptr.runtime, projection))
+            {
+                admissions.settleDispatch(&dispatch, .discarded_stale) catch
+                    process_seal.fatalIntegrity(.incident_authority);
+                dispatch_settled = true;
+                return .discarded_stale;
+            }
+            selected[selected_count] = row.value_ptr.runtime;
+            selected_count += 1;
+        }
+        if (selected_count == 0) {
+            admissions.settleDispatch(&dispatch, .discarded_stale) catch
+                process_seal.fatalIntegrity(.incident_authority);
+            dispatch_settled = true;
+            return .discarded_stale;
+        }
+        for (selected[0..selected_count]) |runtime|
+            RemoteRuntime.backend_api.preflightReconnectAdmission(runtime, projection) catch |err| switch (err) {
+                error.Busy => {
+                    admissions.settleDispatch(&dispatch, .retry_later) catch
+                        process_seal.fatalIntegrity(.incident_authority);
+                    dispatch_settled = true;
+                    return .retry_later;
+                },
+                error.StaleAdmission, error.InvalidAuthority => {
+                    admissions.settleDispatch(&dispatch, .discarded_stale) catch
+                        process_seal.fatalIntegrity(.incident_authority);
+                    dispatch_settled = true;
+                    return .discarded_stale;
+                },
+                else => return err,
+            };
+        if (!try budget.canReserveBatch(selected_count, reconnect_resident_budget.max_entry_bytes)) {
+            admissions.settleDispatch(&dispatch, .retry_later) catch
+                process_seal.fatalIntegrity(.incident_authority);
+            dispatch_settled = true;
+            return .retry_later;
+        }
+        for (selected[0..selected_count]) |runtime| {
+            RemoteRuntime.backend_api.bindReconnectAdmission(
+                runtime,
+                budget,
+                projection,
+                reconnect_resident_budget.max_entry_bytes,
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+        }
+        admissions.settleDispatch(&dispatch, .scheduled) catch
+            process_seal.fatalIntegrity(.incident_authority);
+        dispatch_settled = true;
+        admissions.consumeScheduled(projection) catch
+            process_seal.fatalIntegrity(.incident_authority);
+        return .started;
     }
 
     /// app-quit은 Runtime graph를 해제하기 전에 target host별 shared data connection을 한 번만 terminalize한다.
@@ -986,6 +1074,10 @@ pub const RemoteTermBackend = struct {
         try self.runtimes.put(self.allocator, handle, .{
             .runtime = rr,
             .host_id = host_id,
+            .host_adapter_generation = if (self.host_pool) |pool|
+                pool.adapterGeneration(host_id) orelse return error.HostIdentityMismatch
+            else
+                0,
             .runtime_generation = try self.issueRuntimeGeneration(),
         });
         self.consumeRuntimeAdmission(&admission);
@@ -1093,6 +1185,10 @@ pub const RemoteTermBackend = struct {
         try self.runtimes.put(self.allocator, params.handle, .{
             .runtime = rr,
             .host_id = selected_host_id,
+            .host_adapter_generation = if (self.host_pool) |pool|
+                pool.adapterGeneration(selected_host_id) orelse return error.HostIdentityMismatch
+            else
+                0,
             .runtime_generation = try self.issueRuntimeGeneration(),
         });
         self.consumeRuntimeAdmission(&admission);
@@ -1789,6 +1885,89 @@ test "CR2d1 remote InputOwner batch는 unknown handle을 backend ownership으로
         error.UnknownSurface,
         owner.enqueueBatch(.{ .kind = .osc52_response, .first = "late" }),
     );
+}
+
+test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고 release 뒤 actual runtime에 결속한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+    const identity = HostAdapter.publicationProcessIdentity() orelse return error.TestUnexpectedResult;
+    var fixtures: [2]remote_runtime.testing_api.SemanticFixture = undefined;
+    try fixtures[0].initInPlace();
+    defer fixtures[0].deinit();
+    try fixtures[1].initInPlace();
+    defer fixtures[1].deinit();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    for (&fixtures, 1..) |*fixture, handle| {
+        try backend_value.runtimes.put(testing.allocator, handle, .{
+            .runtime = &fixture.runtime,
+            .host_id = 1,
+            .host_adapter_generation = 3,
+            .runtime_generation = 1,
+        });
+    }
+    var admissions: reconnect_admission_owner.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    const publication = @import("maru").observability.incident_publication_contract;
+    const incident = @import("maru").observability.connection_incident;
+    const input: publication.IncidentInput = .{
+        .timestamp_ns = 1,
+        .host_id = 1,
+        .host_adapter_generation = 3,
+        .connection_generation = fixtures[0].adapter.connectionGeneration(),
+        .wire_major = 1,
+        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+        .scope_raw = @intFromEnum(incident.Scope.connection),
+        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .host_class_raw = @intFromEnum(incident.HostClass.current),
+        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
+        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+    };
+    try admissions.admit(.{
+        .publication = .{
+            .incident_id = .{ .app_instance_nonce = 1, .sequence = 1 },
+            .detail_present = true,
+            .detail_slot = 0,
+            .aggregate_slot = 0,
+            .aggregate_generation = 1,
+        },
+        .wake = .queued,
+        .kind_raw = @intFromEnum(publication.PublicationKind.first),
+    }, input);
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    try testing.expectEqual(
+        fixtures[0].adapter.connectionGeneration(),
+        fixtures[1].adapter.connectionGeneration(),
+    );
+    var incumbents: [7]reconnect_resident_budget.Lease = @splat(.{});
+    for (&incumbents) |*lease| try budget.reserve(lease, reconnect_resident_budget.max_entry_bytes, .candidate);
+    const queued = (try admissions.peek()).?;
+    try testing.expectEqual(
+        ReconnectDrainResult.retry_later,
+        try backend_value.drainReconnectAdmission(&admissions, &budget),
+    );
+    try testing.expectEqualDeep(queued, (try admissions.peek()).?);
+    try testing.expectEqual(@as(u8, 1), admissions.count);
+    try testing.expectEqual(@as(usize, 7), (try budget.snapshot()).live_entries);
+    for (&fixtures) |*fixture| {
+        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+    }
+    try budget.release(&incumbents[0], .candidate);
+    try budget.release(&incumbents[1], .candidate);
+    try testing.expectEqual(
+        ReconnectDrainResult.started,
+        try backend_value.drainReconnectAdmission(&admissions, &budget),
+    );
+    try testing.expectEqual(@as(u8, 0), admissions.count);
+    try testing.expectEqual(@as(usize, 7), (try budget.snapshot()).live_entries);
+    for (&fixtures) |*fixture| {
+        try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixture.runtime, &budget);
+    }
+    for (incumbents[2..]) |*lease| try budget.release(lease, .candidate);
+    try budget.deinit();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

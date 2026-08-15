@@ -67,10 +67,10 @@ test "CR2a 경계는 generation field 열한 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9664,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9616,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9648,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9600,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9856,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9808,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 9840,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 9792,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -880,7 +880,7 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
     try std.testing.expectEqual(@as(usize, 5), count(budget, "test \"CR2e-e3a2 resident budget은"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const rss_testing_api = if (builtin.is_test) struct {"));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 4),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1003,7 +1003,7 @@ test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한�
         count(budget, "test \"CR2e-e3b1 reconnect admission budget은"),
     );
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 2),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1022,6 +1022,46 @@ test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한�
         "run_cr2e_e3b1_budget_tests.addArg(\"--maru-expect-tests=1\")",
         "run_cr2e_e3b1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(gate, phrase));
+}
+
+test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole product caller를 고정한다" {
+    const allocator = std.testing.allocator;
+    const app = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app);
+    const owner = try readSource(
+        allocator,
+        "src/platform/macos/session_host/app_process_incident_owner.zig",
+    );
+    defer allocator.free(owner);
+    const backend = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_term_backend.zig",
+    );
+    defer allocator.free(backend);
+    const runtime = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "backend.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR2e-e3b2 admission drain은"));
+    // 실패 복구 defer, runtime Busy, resident cap의 세 경로가 모두 같은 sealed row를 재시도 상태로 돌린다.
+    try std.testing.expectEqual(@as(usize, 3), count(backend, "admissions.settleDispatch(&dispatch, .retry_later)"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "resident_lease: reconnect_resident_budget.Lease = .{},"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2e-e3b2 actual stable executor는"));
+    inline for (.{
+        "const session_host_cr2e_e3b2_step = b.step(",
+        "session_host_cr2e_e3b2_step.dependOn(session_host_cr2e_e3b1_step)",
+        "run_cr2e_e3b2_runtime_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3b2_drain_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3b2_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

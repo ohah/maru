@@ -697,7 +697,7 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   동시 실행 목표가 아니다. 작은 generation도 active 8개까지만 실행하며 byte cap은 최악 generation 7개를 허용한다.
   각 cap의 다음 budget reserve는 allocation·lease·role mutation 없이 typed 거부된다. Budget·entry·lease는 final address,
   PID, canonical process nonce, monotonic owner incarnation과 policy domain을 함께 검증해 fork splice와 same-address ABA를 거부한다. daemon `ConnectionSlot`의 128 MiB와 숫자만 맞추며 process·owner·회계는 공유하지 않는다.
-  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease 아래 mutation seal·authority/retry/close effect를 actual stable owner에 결속한다. e3c가 sole external ingress와 close 경쟁·mixed outcome을 연다.
+  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease를 actual stable executor의 mutation seal·authority commit retain, generation publish, terminal reclaim에 결속한다. e3c가 sole external ingress와 direct-release retry·termination/abandon event, close 경쟁·mixed outcome을 연다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.

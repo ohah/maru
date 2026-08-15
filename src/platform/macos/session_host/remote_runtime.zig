@@ -519,6 +519,9 @@ const ReconnectGenerationEffect = enum(u8) {
     reclaim_retiring_if_present,
 };
 
+const reconnect_resident_budget = @import("reconnect_resident_budget.zig");
+const reconnect_admission_owner = @import("reconnect_admission_owner.zig");
+
 /// Reducer의 closed Decision을 실제 generation owner effect와 연결하는 단일 제품 표다.
 /// 상태 전이와 제품 effect가 따로 drift하지 않도록 새 Decision은 이 switch를 반드시 갱신한다.
 fn reconnectGenerationEffect(decision: reconnect_reducer.Decision) ReconnectGenerationEffect {
@@ -573,6 +576,10 @@ const ReconnectProductExecutor = struct {
     generation_owner_addr: usize = 0,
     state: ?reconnect_reducer.State = null,
     prepared: PreparedReconnect = .{},
+    admission: ?reconnect_admission_owner.Projection = null,
+    admission_seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    resident_budget_addr: usize = 0,
+    resident_lease: reconnect_resident_budget.Lease = .{},
     live: bool = false,
 
     fn initInPlace(
@@ -592,6 +599,33 @@ const ReconnectProductExecutor = struct {
             .prepared = .{},
             .live = true,
         };
+    }
+
+    fn bindAdmission(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+        admission: reconnect_admission_owner.Projection,
+        resident_bytes: usize,
+    ) !void {
+        try self.validate(owner);
+        if (self.admission != null or self.resident_budget_addr != 0 or
+            !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+            return error.Busy;
+        const shell_generation = try owner.currentGeneration();
+        try budget.reserve(&self.resident_lease, resident_bytes, .candidate);
+        const seal = self.sealAdmission(budget, admission) catch |err| {
+            budget.release(&self.resident_lease, .candidate) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            return err;
+        };
+        self.admission = admission;
+        self.admission_seal = seal;
+        self.resident_budget_addr = @intFromPtr(budget);
+        self.state = reconnect_reducer.State.initial(
+            admission.incident_id.sequence,
+            shell_generation,
+        );
     }
 
     fn apply(
@@ -620,7 +654,23 @@ const ReconnectProductExecutor = struct {
         const has_retiring = try owner.slot.hasRetiring();
         if (!reconnectRetiringMatchesLocal(self.state.?.local, has_retiring))
             return error.InvalidAuthority;
+        if (self.resident_budget_addr != 0) {
+            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
+                self.resident_budget_addr,
+            );
+            try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
+        }
         if (has_retiring) try owner.reclaimRetiring();
+        if (self.resident_budget_addr != 0) {
+            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
+                self.resident_budget_addr,
+            );
+            budget.release(&self.resident_lease, self.resident_lease.role) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            self.resident_budget_addr = 0;
+            self.admission = null;
+            self.admission_seal = [_]u8{0} ** 32;
+        }
         self.state = result.state;
     }
 
@@ -630,8 +680,22 @@ const ReconnectProductExecutor = struct {
         // leaf를 사용하므로 pristine destination은 mutation 없는 정상 정산이다.
         if (std.meta.eql(self.*, ReconnectProductExecutor{})) return;
         try self.validate(owner);
-        if (!std.meta.eql(self.prepared, PreparedReconnect{}) or
-            self.state.?.phaseTag() != .healthy) return error.Busy;
+        if (!std.meta.eql(self.prepared, PreparedReconnect{}) or self.state.?.phaseTag() != .healthy)
+            return error.Busy;
+        if (self.resident_budget_addr != 0) {
+            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
+                self.resident_budget_addr,
+            );
+            try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
+            budget.release(&self.resident_lease, self.resident_lease.role) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            self.resident_budget_addr = 0;
+            self.admission = null;
+            self.admission_seal = [_]u8{0} ** 32;
+        }
+        if (self.admission != null or
+            !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+            return error.InvalidAuthority;
         self.* = .{};
     }
 
@@ -650,13 +714,32 @@ const ReconnectProductExecutor = struct {
                 try owner.prepare(&self.prepared, args, initializer);
             },
             .abort_candidate_if_present => {
+                const budget = if (self.resident_budget_addr != 0 and self.resident_lease.role == .candidate)
+                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
+                else
+                    null;
+                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
                 if (!std.meta.eql(self.prepared, PreparedReconnect{}))
                     try owner.abort(&self.prepared);
+                if (budget) |value| {
+                    value.release(&self.resident_lease, .candidate) catch
+                        process_seal_service.fatalIntegrity(.proof_loss);
+                    self.resident_budget_addr = 0;
+                    self.admission = null;
+                    self.admission_seal = [_]u8{0} ** 32;
+                }
             },
             .publish_candidate => {
                 if (std.meta.eql(self.prepared, PreparedReconnect{}))
                     return error.InvalidAuthority;
+                const budget = if (self.resident_budget_addr != 0)
+                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
+                else
+                    null;
+                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
                 try owner.publish(&self.prepared);
+                if (budget) |value| value.publishSwap(null, &self.resident_lease) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
             },
             .reclaim_retiring_if_present => if (try owner.slot.hasRetiring())
                 try owner.reclaimRetiring(),
@@ -673,8 +756,53 @@ const ReconnectProductExecutor = struct {
             self.generation_owner_addr != @intFromPtr(owner) or self.state == null or
             !reconnect_reducer.valid(self.state.?)) return error.InvalidAuthority;
         try owner.validate();
+        if (self.resident_budget_addr == 0) {
+            if (self.admission != null or !std.mem.eql(u8, &self.admission_seal, &([_]u8{0} ** 32)) or
+                !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+                return error.InvalidAuthority;
+        } else {
+            if (self.admission == null or !self.resident_lease.active or
+                self.resident_lease.owner_addr != self.resident_budget_addr)
+                return error.InvalidAuthority;
+            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
+                self.resident_budget_addr,
+            );
+            _ = try budget.snapshot();
+            try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
+            const expected = try self.sealAdmission(budget, self.admission.?);
+            if (!std.crypto.timing_safe.eql(
+                process_seal_service.CleanupSeal,
+                self.admission_seal,
+                expected,
+            )) return error.InvalidAuthority;
+        }
         if (self.state.?.shell_generation != try owner.currentGeneration())
             return error.InvalidAuthority;
+    }
+
+    fn sealAdmission(
+        self: *const ReconnectProductExecutor,
+        budget: *const reconnect_resident_budget.ReconnectAdmissionBudget,
+        admission: reconnect_admission_owner.Projection,
+    ) !process_seal_service.CleanupSeal {
+        return process_seal_service.reconnectExecutorAdmissionSeal(
+            self.owner_pid,
+            self.resident_lease.process_nonce,
+            .{
+                .executor_addr = @intFromPtr(self),
+                .generation_owner_addr = self.generation_owner_addr,
+                .budget_addr = @intFromPtr(budget),
+                .lease_addr = @intFromPtr(&self.resident_lease),
+                .lease_generation = self.resident_lease.generation,
+                .slot_index = admission.slot_index,
+                .slot_generation = admission.slot_generation,
+                .host_id = admission.host_id,
+                .host_adapter_generation = admission.host_adapter_generation,
+                .connection_generation = admission.connection_generation,
+                .incident_app_instance_nonce = admission.incident_id.app_instance_nonce,
+                .incident_sequence = admission.incident_id.sequence,
+            },
+        );
     }
 };
 
@@ -1006,6 +1134,45 @@ pub const RemoteRuntime = struct {
     /// `RemoteTermBackend`는 active generation의 저장 위치를 알지 않고 frame/observation 역할만 요청한다.
     /// e2에서 current가 inline node에서 heap node로 바뀌어도 backend 호출 계약은 그대로 유지된다.
     pub const backend_api = struct {
+        pub fn matchesReconnectAdmission(
+            runtime: *const RemoteRuntime,
+            admission: reconnect_admission_owner.Projection,
+        ) bool {
+            const connection = runtime.currentGenerationConst().connection;
+            return switch (connection) {
+                .legacy => false,
+                .generation => |adapter| adapter.hostId() == admission.host_id and
+                    adapter.connectionGeneration() == admission.connection_generation,
+            };
+        }
+
+        pub fn bindReconnectAdmission(
+            runtime: *RemoteRuntime,
+            budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+            admission: reconnect_admission_owner.Projection,
+            resident_bytes: usize,
+        ) !void {
+            try preflightReconnectAdmission(runtime, admission);
+            try runtime.reconnect_executor.bindAdmission(
+                &runtime.generation_owner,
+                budget,
+                admission,
+                resident_bytes,
+            );
+        }
+
+        pub fn preflightReconnectAdmission(
+            runtime: *RemoteRuntime,
+            admission: reconnect_admission_owner.Projection,
+        ) !void {
+            if (!matchesReconnectAdmission(runtime, admission)) return error.StaleAdmission;
+            try runtime.reconnect_executor.validate(&runtime.generation_owner);
+            if (runtime.reconnect_executor.admission != null or
+                runtime.reconnect_executor.resident_budget_addr != 0 or
+                !std.meta.eql(runtime.reconnect_executor.resident_lease, reconnect_resident_budget.Lease{}))
+                return error.Busy;
+        }
+
         pub fn frameSummaryReady(runtime: *const RemoteRuntime) bool {
             return runtime.currentGenerationConst().frame_summary_ready;
         }
@@ -3967,6 +4134,28 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
 
 pub const testing_api = if (builtin.is_test) struct {
     pub const SemanticFixture = B4SemanticFixture;
+
+    pub fn hasBoundReconnectAdmission(runtime: *RemoteRuntime) bool {
+        return runtime.reconnect_executor.admission != null and
+            runtime.reconnect_executor.resident_budget_addr != 0 and
+            runtime.reconnect_executor.resident_lease.active;
+    }
+
+    pub fn releaseBoundReconnectAdmission(
+        runtime: *RemoteRuntime,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) !void {
+        try runtime.reconnect_executor.validate(&runtime.generation_owner);
+        if (runtime.reconnect_executor.resident_budget_addr != @intFromPtr(budget))
+            return error.InvalidAuthority;
+        try budget.release(
+            &runtime.reconnect_executor.resident_lease,
+            runtime.reconnect_executor.resident_lease.role,
+        );
+        runtime.reconnect_executor.resident_budget_addr = 0;
+        runtime.reconnect_executor.admission = null;
+        runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+    }
 
     pub const AppQuitOwnerSnapshot = struct {
         pending_idle: bool,
@@ -9701,26 +9890,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9664,
-            .ReleaseFast => 9616,
+            .Debug => 9856,
+            .ReleaseFast => 9808,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9648,
-            .ReleaseFast => 9600,
+            .Debug => 9840,
+            .ReleaseFast => 9792,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 6944,
-            .ReleaseFast => 6896,
+            .Debug => 7136,
+            .ReleaseFast => 7088,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 6928,
-            .ReleaseFast => 6880,
+            .Debug => 7120,
+            .ReleaseFast => 7072,
             else => unreachable,
         },
         else => unreachable,
@@ -12355,13 +12544,13 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열한 개만 �
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9664,
-            .ReleaseFast => 9616,
+            .Debug => 9856,
+            .ReleaseFast => 9808,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9648,
-            .ReleaseFast => 9600,
+            .Debug => 9840,
+            .ReleaseFast => 9792,
             else => unreachable,
         },
         else => unreachable,
@@ -12555,6 +12744,82 @@ test "CR2e-e2b 제품 executor는 reducer 성공 뒤 actual candidate를 게시�
     });
     try testing.expect(!try owner.slot.hasRetiring());
     try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR2e-e3b2 actual stable executor는 resident lease 아래 retain publish reclaim을 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0xB201 },
+        initReconnectTestGeneration,
+    );
+    var executor: ReconnectProductExecutor = .{};
+    try executor.initInPlace(&owner, 3);
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    const admission: reconnect_admission_owner.Projection = .{
+        .slot_index = 0,
+        .slot_generation = 1,
+        .host_id = 0xB2,
+        .host_adapter_generation = 1,
+        .connection_generation = 2,
+        .incident_id = .{ .app_instance_nonce = 1, .sequence = 3 },
+    };
+    try executor.bindAdmission(&owner, &budget, admission, reconnect_resident_budget.max_entry_bytes);
+    try testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    const args = ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0xB202 };
+    const state_before_drift = executor.state.?;
+    const budget_before_drift = try budget.snapshot();
+    executor.admission.?.host_id +%= 1;
+    try testing.expectError(
+        error.InvalidAuthority,
+        executor.apply(&owner, .{ .begin_prepare = reconnectTestWork(2) }, args, initReconnectTestGeneration),
+    );
+    executor.admission = admission;
+    try testing.expectEqualDeep(state_before_drift, executor.state.?);
+    try testing.expectEqualDeep(budget_before_drift, try budget.snapshot());
+    executor.resident_lease.role = .current;
+    try testing.expectError(
+        error.InvalidAuthority,
+        executor.apply(&owner, .{ .begin_prepare = reconnectTestWork(2) }, args, initReconnectTestGeneration),
+    );
+    executor.resident_lease.role = .candidate;
+    try testing.expectEqualDeep(state_before_drift, executor.state.?);
+    try testing.expectEqualDeep(budget_before_drift, try budget.snapshot());
+    _ = try executor.apply(&owner, .{ .begin_prepare = reconnectTestWork(2) }, args, initReconnectTestGeneration);
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_clean,
+        reconnect_reducer.Event.begin_authority_commit,
+        reconnect_reducer.Event.controller_evidenced,
+        reconnect_reducer.Event.begin_publish,
+    }) |event| {
+        _ = try executor.apply(&owner, event, args, initReconnectTestGeneration);
+        try testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    }
+    _ = try executor.apply(&owner, .publish_new, args, initReconnectTestGeneration);
+    try testing.expectEqual(reconnect_resident_budget.Role.current, executor.resident_lease.role);
+    try executor.completeJob(&owner, .{
+        .job_generation = 3,
+        .total = 1,
+        .published_new = 1,
+        .frozen_unavailable = 0,
+        .ended = 0,
+        .retry_reserved = 0,
+    });
+    try testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+    try executor.deinit(&owner);
+    try budget.deinit();
+    deinitReconnectTestOwner(&owner, &proxy);
 }
 
 test "CR2e-e2b 제품 executor는 abort와 effect 실패에서 reducer state와 current를 보존한다" {

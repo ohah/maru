@@ -10,12 +10,13 @@ const process_seal = @import("process_seal_service.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 const coordinator = @import("incident_publication_coordinator.zig");
 const reconnect_owner_mod = @import("reconnect_admission_owner.zig");
+const reconnect_budget_mod = @import("reconnect_resident_budget.zig");
 const publication = @import("maru").observability.incident_publication_contract;
 
 const c = std.c;
 extern "c" fn usleep(usec: c_uint) c_int;
 
-pub const Error = runtime_mod.Error || registry_mod.Error || reconnect_owner_mod.Error || error{ InvalidOwner, AlreadyClosed };
+pub const Error = runtime_mod.Error || registry_mod.Error || reconnect_owner_mod.Error || error{ InvalidOwner, AlreadyClosed, IdentityExhausted };
 pub const PublicationError = Error || host_adapter_mod.ManagedPoisonError || coordinator.Error || error{ClockFailed};
 
 pub const TerminationOutcome = enum(u32) {
@@ -274,6 +275,7 @@ pub const AppProcessIncidentOwner = struct {
     runtime: ?*runtime_mod.ConnectionIncidentRuntime = null,
     registry: registry_mod.Registry = .{},
     reconnect_admissions: reconnect_owner_mod.Owner = .{},
+    reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},
 
     pub fn ensureReady(
         self: *AppProcessIncidentOwner,
@@ -313,6 +315,7 @@ pub const AppProcessIncidentOwner = struct {
             process_seal.fatalIntegrity(.incident_authority);
         try self.registry.initInPlace(process_nonce);
         try self.reconnect_admissions.initInPlace(process_nonce);
+        try self.reconnect_budget.initInPlace(process_nonce);
         try runtime.installPublisherRegistry(&self.registry);
         self.runtime = runtime;
         self.lifecycle_raw = @intFromEnum(Lifecycle.ready);
@@ -424,6 +427,7 @@ pub const AppProcessIncidentOwner = struct {
             self.owner_thread == @as(u64, @intCast(std.Thread.getCurrentId())) and
             self.registry.self_addr == @intFromPtr(&self.registry) and
             self.reconnect_admissions.ownedBy(self.pid, self.process_nonce, self.owner_thread) and
+            self.reconnect_budget.ownedBy(self.pid, self.process_nonce, self.owner_thread) and
             runtime.publisher_registry_addr == @intFromPtr(&self.registry);
     }
 };

@@ -42,17 +42,30 @@ pub const Plan = struct {
     root_identity: ?file_tree.Identity = null,
 };
 
-/// 이름 **한 칸**의 안전 술어 — 여기 통과한 문자열은 `join(parent, name)`으로 그대로 이어 붙는다.
+/// **사용자가 새로 입력한** 이름 한 칸의 안전 술어 — 여기 통과한 문자열은 `join(parent, name)`으로 그대로
+/// 이어 붙는다(create·rename의 새 이름).
 ///
 /// **역슬래시를 왜 막는가**: 이 검사는 이름을 세그먼트로 쪼개지 않으므로 `..\..\evil.txt`는 통째로 한 이름이고
 /// `..` 비교를 그대로 통과한다. POSIX에서는 그런 이름의 파일이라 무해하지만 Windows에서는 join된 경로가 진짜
 /// 상위 이동이 되어 **워크스페이스 루트 밖에 파일이 만들어진다**. `repo_path.isSafeRelative`가 git 출력에 대해
-/// 같은 이유로 같은 것을 막는다 — 이쪽 입력은 사용자가 파일 패널에 직접 타이핑한 이름이다.
+/// 같은 이유로 같은 것을 막는다.
+///
+/// **이미 존재하는 이름에는 쓰지 말 것** — `validateExistingName`을 쓴다(아래에 이유).
 pub fn validateName(name: []const u8) !void {
+    try validateExistingName(name);
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return error.InvalidName;
+}
+
+/// **이미 파일시스템에 있는** 이름 한 칸의 안전 술어 — 트리가 스캔해 온 경로를 되짚을 때 쓴다.
+///
+/// `validateName`과 하나뿐인 차이가 **역슬래시**다. Windows에서 `\`는 파일명에 쓸 수 없는 문자라 실재하는
+/// 엔트리 이름에 들어올 수 없고, POSIX에서는 `a\b`가 평범한 파일 이름이다(Windows에서 만든 압축을 풀면
+/// 생긴다). 그러므로 실재하는 이름에 그 검사를 걸면 Windows에서 얻는 것은 없고 POSIX에서는 **멀쩡한 파일을
+/// 이름 바꾸거나 지울 수 없게** 된다. 위험한 것은 "새로 만들어 붙일 이름"이지 "이미 거기 있는 이름"이 아니다.
+pub fn validateExistingName(name: []const u8) !void {
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
         return error.InvalidName;
-    if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.indexOfScalar(u8, name, '\\') != null or
-        std.mem.indexOfScalar(u8, name, 0) != null or
+    if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.indexOfScalar(u8, name, 0) != null or
         !std.unicode.utf8ValidateSlice(name)) return error.InvalidName;
 }
 
@@ -194,6 +207,25 @@ test "mutation name validation allows dotfiles but rejects traversal and separat
     try std.testing.expectError(error.InvalidName, validateName("..\\..\\evil.txt"));
     try std.testing.expectError(error.InvalidName, validateName("a\\b"));
     try std.testing.expectError(error.InvalidName, validateName("..\\"));
+}
+
+// **새 이름과 존재하는 이름은 질문이 다르다.** 역슬래시가 위험한 것은 "새로 만들어 붙일 때"이지 "이미 거기
+// 있을 때"가 아니다 — Windows에서 `\`는 파일명에 못 쓰는 문자라 실재하는 엔트리에 들어올 수 없고, POSIX에서는
+// `a\b`가 평범한 파일 이름이다(Windows 압축을 풀면 생긴다). 한때 둘을 같은 술어로 묶어서 그런 파일을
+// **이름 바꾸거나 지울 수 없게** 만들었다 — 적대적 검증에서 잡은 회귀다.
+test "새 이름과 존재하는 이름은 역슬래시에서만 갈린다" {
+    // 존재하는 이름: 역슬래시를 허용한다.
+    try validateExistingName("a\\b");
+    try validateExistingName("..\\..\\weird.txt"); // POSIX에선 이런 이름의 **파일 하나**다
+    // 새 이름: 거부한다.
+    try std.testing.expectError(error.InvalidName, validateName("a\\b"));
+
+    // 나머지 규칙은 완전히 같아야 한다 — 갈리면 "보이는데 못 만지는" 이름이 생긴다.
+    for ([_][]const u8{ "", ".", "..", "a/b", "a\x00b", ".env", "문서.md", "..hidden" }) |n| {
+        const strict = if (validateName(n)) true else |_| false;
+        const lenient = if (validateExistingName(n)) true else |_| false;
+        try std.testing.expectEqual(strict, lenient);
+    }
 }
 
 test "create target policy uses a file parent and rejects recent and symlink containers" {

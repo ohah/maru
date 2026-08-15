@@ -175,8 +175,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **e3c1**은 reconnect 정책만 소유하는 final-address `SessionHostCoordinator` shell을 먼저 열고, 기존
    `AppProcessIncidentOwner` queue/budget과 `RemoteTermBackend` map을 옮기지 않은 채 one-turn sealed borrow로 sole drain을 소유한다.
    이 shell은 raw backend/pool pointer를 장기 저장하지 않고 backend singleton generation·seal과 process identity를 매 호출 재검증한다.
-   direct-release retry·termination/abandon의 외부 제품 event와 close 경쟁은 후속 **e3c2/e3c3**가 closed typed receipt와 함께
-   close 경쟁·mixed outcome을 같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
+   **e3c2**는 CR4 socket parser가 채울 pointer-free direct-release evidence를 current backend/runtime projection과 exact 비교하고,
+   consumer-side closed typed receipt를 coordinator final address, backend singleton generation,
+   exact runtime row와 `retry_wait_release` projection에 결속해 copy/replay/stale event를 mutation 0으로 거부한다. 실제 host socket이
+   이 receipt를 발급하는 wire evidence는 CR4 범위다. **e3c3**은 termination/abandon typed event와 close 경쟁·mixed outcome을
+   같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
    RSS artifact를 제품 gate에 결합한다.
    e3 전체가 mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,
    close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.

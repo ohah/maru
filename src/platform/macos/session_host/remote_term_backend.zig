@@ -59,6 +59,12 @@ pub const max_remote_backend_runtimes: usize = 4096;
 
 pub const ReconnectDrainResult = enum { idle, started, retry_later, discarded_stale };
 
+pub const DirectReleaseTarget = struct {
+    runtime_handle: RuntimeHandle = 0,
+    runtime_generation: u64 = 0,
+    projection: remote_runtime.DirectReleaseProjection = .{},
+};
+
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
@@ -284,6 +290,39 @@ pub const RemoteTermBackend = struct {
         if (remote_backend_singleton_addr != @intFromPtr(self) or
             remote_backend_singleton_generation != self.singleton_owner.owner_generation)
             return error.InvalidSingletonOwner;
+    }
+
+    pub fn singletonGenerationForCoordinator(self: *RemoteTermBackend) !u64 {
+        try self.validateReconnectCoordinatorTarget();
+        return self.singleton_owner.owner_generation;
+    }
+
+    pub fn directReleaseTarget(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+    ) !DirectReleaseTarget {
+        try self.validateReconnectCoordinatorTarget();
+        if (runtime_handle == 0) return error.UnknownSurface;
+        const entry = self.runtimes.get(runtime_handle) orelse return error.UnknownSurface;
+        const projection = try RemoteRuntime.backend_api.directReleaseProjection(entry.runtime);
+        if (projection.host_id != entry.host_id or
+            projection.host_adapter_generation != entry.host_adapter_generation)
+            return error.StaleExternalEvent;
+        return .{
+            .runtime_handle = runtime_handle,
+            .runtime_generation = entry.runtime_generation,
+            .projection = projection,
+        };
+    }
+
+    pub fn applyDirectReleaseTarget(self: *RemoteTermBackend, target: DirectReleaseTarget) !void {
+        try self.validateReconnectCoordinatorTarget();
+        const entry = self.runtimes.get(target.runtime_handle) orelse return error.UnknownSurface;
+        if (entry.runtime_generation != target.runtime_generation or
+            entry.host_id != target.projection.host_id or
+            entry.host_adapter_generation != target.projection.host_adapter_generation)
+            return error.StaleExternalEvent;
+        try RemoteRuntime.backend_api.applyDirectReleaseProjection(entry.runtime, target.projection);
     }
 
     fn releaseProductSingleton(self: *RemoteTermBackend) void {
@@ -940,6 +979,24 @@ pub const RemoteTermBackend = struct {
                 .runtime = runtime,
                 .host_id = 1,
                 .runtime_generation = 1,
+            });
+        }
+
+        pub fn installReconnectRuntime(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+            runtime: *RemoteRuntime,
+            runtime_generation: u64,
+            host_adapter_generation: u64,
+        ) !void {
+            if (handle == 0 or runtime_generation == 0 or host_adapter_generation == 0 or
+                remote_backend.runtimes.contains(handle))
+                return error.InvalidTestState;
+            try remote_backend.runtimes.put(remote_backend.allocator, handle, .{
+                .runtime = runtime,
+                .host_id = 1,
+                .host_adapter_generation = host_adapter_generation,
+                .runtime_generation = runtime_generation,
             });
         }
 

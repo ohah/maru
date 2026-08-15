@@ -697,7 +697,7 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   동시 실행 목표가 아니다. 작은 generation도 active 8개까지만 실행하며 byte cap은 최악 generation 7개를 허용한다.
   각 cap의 다음 budget reserve는 allocation·lease·role mutation 없이 typed 거부된다. Budget·entry·lease는 final address,
   PID, canonical process nonce, monotonic owner incarnation과 policy domain을 함께 검증해 fork splice와 same-address ABA를 거부한다. daemon `ConnectionSlot`의 128 MiB와 숫자만 맞추며 process·owner·회계는 공유하지 않는다.
-  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease를 actual stable executor의 mutation seal·authority commit retain, generation publish, terminal reclaim에 결속한다. e3c가 sole external ingress와 direct-release retry·termination/abandon event, close 경쟁·mixed outcome을 연다.
+  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease를 actual stable executor의 mutation seal·authority commit retain, generation publish, terminal reclaim에 결속한다. e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.
@@ -793,8 +793,9 @@ Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 r
 coordinator는 한 번에 완성된 대형 owner로 등장하지 않는다. CR2e-e3c1은 reconnect-only final-address shell과
 sole drain만 설치한다. 이 단계에서 incident admission queue/resident budget의 소유자는
 `AppProcessIncidentOwner`, runtime membership의 소유자는 `RemoteTermBackend`으로 계속 남으며 coordinator는 이 주소를
-저장하지 않고 매 owner turn의 sealed projection을 재검증한다. e3c2/e3c3이 typed external event·close/mixed outcome을
-더하고, CR4가 실제 `connectExistingHost`·wire receipt를 연결하며, CR5가 multi-window·multi-runtime authority ledger와
+저장하지 않고 매 owner turn의 sealed projection을 재검증한다. e3c2는 direct-release consumer receipt를 exact backend/runtime
+projection에 one-shot 결속하되 실제 socket issuer는 열지 않는다. e3c3이 termination/abandon typed event와 close/mixed outcome을
+더하고, CR4가 실제 `connectExistingHost`·wire receipt issuer를 연결하며, CR5가 multi-window·multi-runtime authority ledger와
 upgrade gate로 확장한다.
 
 #### transaction과 실패 경계

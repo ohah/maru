@@ -1123,6 +1123,82 @@ test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고�
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 
+test "CR2e-e3c2 경계는 typed external receipt와 sole runtime consumer를 고정한다" {
+    const allocator = std.testing.allocator;
+    const coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
+    defer allocator.free(coordinator);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub const DirectReleaseReceipt = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub const DirectReleaseEvidence = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn prepareDirectReleaseReceipt("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn applyExternalReconnectEvent("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn directReleaseTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn applyDirectReleaseTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn applyDirectReleaseProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "reconnect_reducer.reduce(runtime.reconnect_executor.state.?, .retry_direct_granted)"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "matchesReconnectAdmission(runtime, admission)"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.directReleaseProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.applyDirectReleaseProjection("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "backend.directReleaseTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "backend.applyDirectReleaseTarget("));
+    inline for (.{
+        "directReleaseProjection(",
+        "applyDirectReleaseProjection(",
+    }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptThree(
+            allocator,
+            callee,
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "directReleaseTarget(",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    inline for (.{
+        "prepareDirectReleaseReceipt(",
+        "applyExternalReconnectEvent(",
+    }) |callee| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            callee,
+            "platform/macos/session_host/session_host_coordinator.zig",
+            "",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(
+            allocator,
+            ".applyDirectReleaseTarget(",
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/session_host_coordinator.zig",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "test \"CR2e-e3c2 typed direct release receipt는"));
+    inline for (.{
+        "const session_host_cr2e_e3c2_step = b.step(",
+        "session_host_cr2e_e3c2_step.dependOn(session_host_cr2e_e3c1_step)",
+        "run_cr2e_e3c2_coordinator_tests.addArg(\"--maru-expect-tests=1\")",
+        "run_cr2e_e3c2_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
+}
+
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, source, start_marker) orelse return null;
     const tail = source[start..];

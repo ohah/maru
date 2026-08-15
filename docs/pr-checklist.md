@@ -49,6 +49,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `mobile` | **iOS·Android 공통** — `platform/mobile`(C ABI·Zig 브리지)·모바일 타깃 빌드·계약·기기 하네스. macOS 와 층은 같지만(L4) 타깃이 달라 `platform` 과 가른다 | `mobile` |
 | `ios` | iOS 전용 — UIKit host·Metal 백엔드·CoreText 래스터. **`mobile`과 함께 단다**(공통분모가 같이 움직이는지 보이게) | `ios` |
 | `android` | Android 전용 — NativeActivity host·Vulkan 백엔드·JNI 래스터·IME shim. **`mobile`과 함께 단다** | `android` |
+| `windows` | Windows 전용 — ConPTY·Win32 host·DirectWrite·경로 정규화. macOS 와 층은 같지만(L4) 타깃이 달라 `platform` 과 가른다 | `windows` `conpty` `win32` |
 | `app-runtime` | 앱 런타임·surface 라우팅·세션 조정 | `app` `session` `runtime` |
 
 **모바일 전용 기능에 새 라벨을 만들지 않는다.** 터치·IME·폰트 래스터·아틀라스 성장·드로우

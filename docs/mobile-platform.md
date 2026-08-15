@@ -29,7 +29,7 @@
   넘으면 존재하지 않는다. 원격 축(전송·인증·암호화)은 그 문서가 새로 소유해야 하고,
   정하기 전에는 모바일에서 붙일 수 없다([계획 M3](plans/mobile-platform.md)).
 - **모바일 config 는 데스크톱과 따로다(사용자 확정).** 파일도 스키마도 공유하지 않는다.
-  [설정](configuration.md)의 키 93개를 훑어 보면 이유가 드러난다 — `quick-terminal.*`·
+  [설정](configuration.md)의 키를 전부 훑어 보면 이유가 드러난다 — `quick-terminal.*`·
   `shell.command`·`input.option-as-meta`·`input.right-click` 처럼 **모바일에 뜻이 없는 것**이
   큰 덩어리이고, 반대로 모바일에만 필요한 것(보조 키바 구성·터치 임계값·원격 접속 프로필·
   배경 동작)은 데스크톱 스키마에 아예 없다. 공유하면 양쪽 다 쓰지 않는 키를 이고 간다.

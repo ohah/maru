@@ -135,8 +135,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `Clock.boot` 10분 TTL과 prepared staging deinit/discard/expiry에서 non-elidable wipe 뒤 free한다. allocation 전 실패는
    caller-owned source와 budget을 mutation 없이 보존한다. 제품 caller는 아직 0이며 실제 queue enqueue의 single-use consume은
    CR2e-d/e가 닫는다.
-   **CR2e-c~e 미착수:** c는 heap-pinned
-   generation slot 저장 구조와 parity, d는 제품 타입 `PreparedReconnect` prepare/publish/retire와 allocator
+   **CR2e-c 완료:** generic final-address `GenerationSlot`이 stable shell의 최초 inline node와 reconnect별 heap node를
+   같은 payload 타입으로 소유하고, current/retiring exact pointer, retiring 1개 backoff, inline tombstone 재사용 금지,
+   inline/heap final-address payload 초기화, exact-one reclaim, allocator OOM/empty·owned abort current 보존과
+   copied/stale/cross-slot authority 거부를 닫는다.
+   **CR2e-d~e 미착수:** d는 제품 타입 `PreparedReconnect` prepare/publish/retire와 allocator
    fail-index, e는 reducer Decision과 실제 executor의 전수 parity·모든 reachable state sequence·close 경쟁·mixed
    outcome·메모리 상한을 닫는다.
    a~e 다섯 gate가 모두 green이기 전에는 CR2e 완료가 아니다.

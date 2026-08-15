@@ -45,6 +45,15 @@ pub const Layout = struct {
 /// 모자란데 그리면 이름 라벨을 덮고, 높이가 라벨 줄높이보다 작은데 그리면 숫자가 상자 밖으로 나간다.
 ///
 /// pill 치수를 정하는 규칙. **소비자마다 다르다** — 하나로 합치면 한쪽이 반드시 어색해진다.
+/// 배지 모서리. 소비자마다 다르다 — 한 앱 안에서 갈릴 수 있고, 그것이 잘못은 아니다(도크마다 행
+/// 밀도와 이웃 글자가 다르다).
+pub const Corner = enum {
+    /// 양끝이 반원(높이의 절반).
+    pill,
+    /// 각진 모서리.
+    square,
+};
+
 pub const Fit = enum {
     /// 넉넉한 pill: 한 자리 수여도 최소 폭을 유지하고, 높이는 **부모 행을 채운다**(상한까지).
     /// Session Dock 그룹 개수의 디자인이다 — 행이 높고 개수가 그 행의 주인공이라 어울린다.
@@ -65,6 +74,10 @@ pub const CountPill = struct {
     /// pill 오른쪽에 이미 자리를 잡은 것들(disclosure 아이콘 슬롯 등). 이만큼은 pill이 침범하지 않는다.
     reserved_x: u32 = 0,
     fit: Fit = .roomy,
+    /// 모서리 모양. **기본은 pill**(양끝 반원)이고 Session Dock이 그것을 쓴다. 소스 컨트롤 도크는
+    /// `.square` — 목록 행이 촘촘하고 상태 문자·증감이 각진 글자라, 개수만 둥글면 그 줄에서 혼자 튄다
+    /// (사용자 결정 2026-08-16).
+    corner: Corner = .pill,
     /// 숫자를 그릴 텍스트 역할. **상자 높이가 여기서 나오므로**(snug) 호출자가 실제로 쓰는 역할과
     /// 같아야 한다 — 다르면 숫자가 상자보다 크거나 상자가 헐거워진다.
     label_role: typography.ChromeTextRole = .control,
@@ -112,7 +125,10 @@ pub fn countPill(parent: layout_mod.UiRect, opts: CountPill) ?Layout {
             .w = width,
             .h = height,
         },
-        .radius_px = @intCast(@min(height / 2, @as(u32, std.math.maxInt(u16)))),
+        .radius_px = switch (opts.corner) {
+            .pill => @intCast(@min(height / 2, @as(u32, std.math.maxInt(u16)))),
+            .square => 0,
+        },
         .label_x = x + (@as(f32, @floatFromInt(width)) - label_w) / 2,
         // 행이 아니라 **상자** 안에서 중앙이다. 행 baseline을 쓰면 숫자가 어두운 pill 위로 떠오른다.
         .label_y = y + (@as(f32, @floatFromInt(height)) - line_h) / 2,

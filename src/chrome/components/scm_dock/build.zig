@@ -67,6 +67,7 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
                 .cell_width_px = @max(props.cell_width_px, 1),
                 .scale_milli = scale,
                 .fit = .snug,
+                .corner = .square,
                 .label_role = .supporting,
             }) orelse break :blk base + m.status_extent;
             break :blk base + pill.box.w;
@@ -212,7 +213,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 가로줄이 생겨 목업(VS Code)과 달리 표가 된다(사용자 지적 2026-08-14). 배경은 상태
             // 해석이 얹으므로(hover=`row_hover_bg`, 누름=`tab_active_bg`) 여기서 지우지 않는다.
             .variant = if (isSelected(item)) .selected else .surface,
-            .paint = .{ .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
+            // **모서리도 각지다.** 카드 기본 반지름을 그대로 두면 호버·선택 밴드의 양 끝이 말려, 촘촘한
+            // 목록에서 그 행만 캡슐처럼 떠 보인다(사용자 지적 2026-08-16). 이 목록의 행은 카드가 아니라
+            // 표의 한 줄이다 — 밴드가 줄 폭을 꽉 채워야 위아래 행과 같은 격자로 읽힌다.
+            .paint = .{ .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
             .action = row_action_id,
             .overflow = .clip,
         }, action_nodes);
@@ -255,7 +259,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .height = .{ .px = @floatFromInt(m.tab_h) } },
         .direction = .row,
         .variant = .surface,
-        .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
+        .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, tab_nodes);
     top[1] = tree.card(.{
@@ -263,7 +267,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
         .variant = .surface,
         // 아래 경계선 하나로 고정 chrome과 목록을 가른다(테두리 없는 요약 줄이 목록에 섞이지 않게).
-        .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
+        .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
     top[2] = tree.scrollArea(.{
@@ -292,7 +296,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
         .variant = .surface,
-        .paint = if (props.branch.len == 0) .{} else .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
+        .paint = if (props.branch.len == 0) .{} else .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
 
@@ -558,4 +562,26 @@ test "행 동작 버튼은 상태 문자 자리를 침범하지 않는다" {
     const status_left = row.x + row.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
     const button_right = button.x + button.width;
     try testing.expect(button_right <= status_left);
+}
+
+test "도크의 카드는 전부 각진 모서리다(목록은 표이지 캡슐 묶음이 아니다)" {
+    // 카드 기본 반지름을 그대로 두면 행·탭 줄·요약 줄·브랜치 줄이 각자 둥근 캡슐로 떠 보인다. 이 도크의
+    // 줄들은 **표의 행**이라 폭을 꽉 채워야 위아래가 같은 격자로 읽힌다(사용자 지적 2026-08-16).
+    var storage: Storage = .{};
+    const items = testItems();
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+
+    for (frame.tree.entries) |entry| {
+        switch (entry.visual) {
+            .card => |visual| {
+                const radii = visual.paint.corner_radii_px orelse continue;
+                for (radii) |r| try testing.expectEqual(@as(u16, 0), r);
+            },
+            else => {},
+        }
+    }
 }

@@ -98,14 +98,12 @@ pub fn view(
     frame: build.Frame,
     state: interaction.InteractionState,
     tk: *const tokens.Tokens,
-    /// 등폭 셀 폭(legacy cell 백엔드의 상한 계산에만 쓴다 — measured 경로는 `max_width_px`를 본다).
-    cell_width_px: u32,
     buffers: Buffers,
 ) ViewError!draw.ChromeDraw {
     const painted = try ui_paint.paint(frame.tree, state, tk, .sidebar, .{ .ops = buffers.ops });
     var writer = Writer{
         .props = props,
-        .cell_width_px = @max(cell_width_px, 1),
+        .cell_width_px = @max(props.cell_width_px, 1),
         .ops = buffers.ops,
         .op_count = painted.ops.len,
         .runs = buffers.runs,
@@ -654,7 +652,7 @@ fn renderTabs(storage: *TestStorage, width: f32, count: u32) !draw.ChromeDraw {
         .actions = &storage.actions,
     });
     const tk = testTokens();
-    return view(props, frame, .{}, &tk, 8, .{
+    return view(props, frame, .{}, &tk, .{
         .ops = &storage.ops,
         .runs = &storage.runs,
         .text_bytes = &storage.text_bytes,
@@ -738,7 +736,7 @@ fn renderFixture(storage: *TestStorage, state: interaction.InteractionState, ite
         .actions = &storage.actions,
     });
     const tk = testTokens();
-    return view(props, frame, state, &tk, 8, .{
+    return view(props, frame, state, &tk, .{
         .ops = &storage.ops,
         .runs = &storage.runs,
         .text_bytes = &storage.text_bytes,
@@ -837,7 +835,7 @@ test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
         .actions = &storage.actions,
     });
     const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, 8, .{
+    const draws = try view(props, frame, .{}, &tk, .{
         .ops = &storage.ops,
         .runs = &storage.runs,
         .text_bytes = &storage.text_bytes,
@@ -1008,7 +1006,7 @@ test "활성 탭 이름에만 전체 파일 수가 붙는다" {
         .actions = &storage.actions,
     });
     const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, 8, .{
+    const draws = try view(props, frame, .{}, &tk, .{
         .ops = &storage.ops,
         .runs = &storage.runs,
         .text_bytes = &storage.text_bytes,
@@ -1046,4 +1044,38 @@ test "탭은 줄을 3등분해 나눠 갖고 개수가 커져도 경계가 그�
     try testing.expect(changes.origin.x >= 0 and changes.origin.x < slot);
     try testing.expect(history.origin.x >= slot and history.origin.x < slot * 2);
     try testing.expect(agent.origin.x >= slot * 2);
+}
+
+test "그룹 헤더의 일괄 동작 버튼은 개수 배지와 겹치지 않는다" {
+    // 배지는 **paint 전용**이라 히트 사각형이 없다. 버튼 rect가 배지 위로 올라오면, 사용자가 "숫자"를
+    // 눌렀는데 **그 그룹 전체가 스테이지된다** — 화면이 약속하지 않은 동작이다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .changes, .count = 128, .collapsed = false, .action = .stage } },
+    };
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+
+    const badge_quad = findBadgeQuad(draws) orelse return error.MissingBadge;
+    const action = frame.tree.entries[frame.tree.find(build.NodeIds.itemAction(0)) orelse return error.MissingAction].rect;
+    const action_right = action.x + action.width;
+    // 버튼은 배지 **왼쪽**에서 끝나야 한다.
+    try testing.expect(action_right <= @as(f32, @floatFromInt(badge_quad.rect.x)));
 }

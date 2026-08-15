@@ -556,6 +556,8 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
     defer allocator.free(text_bytes);
 
     const tokens = chrome.tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 200, .g = 200, .b = 200 },
         .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
         .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },

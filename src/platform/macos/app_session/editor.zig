@@ -214,6 +214,23 @@ pub const PaneDraw = struct {
 /// 그 두 뮤턴트(layer 3·leaf 사각)를 잡는다.
 ///
 /// 조립 자체는 `editor_view.frame`이 한다 — Chrome Lab과 **같은 함수**라 캡처가 제품을 예고한다.
+/// 편집기 본문이 설 사각. `paneGeometry(...).body`에서 **헤더 밴드 한 줄을 더 뺀다**.
+///
+/// **왜 여기서 빼는가.** 밴드는 파일 Term이 소유하고 chrome이 pane 탭 바 바로 아래에 그린다
+/// (file-panel-dock-ui.md §3.1 — breadcrumb·모드 선택기). 웹 Term은 `collectWebSurfaces`의
+/// `inset.top = bar_h + addr_h`로 본문이 그 아래로 내려가지만, 편집기는 이 사각에 **직접 그리므로**
+/// 빼지 않으면 본문 첫 행이 밴드와 겹친다(적대적 검증에서 잡았다 — 네이티브 비교 Term은
+/// `file_entry`가 있어 chrome이 그 자리에 밴드를 그린다).
+///
+/// `paneGeometry`에서 빼지 않는 이유: 그 함수는 pane을 모르고 **터미널 격자도 그것을 쓴다** —
+/// 터미널에는 밴드가 없으므로 거기서 빼면 셸 화면이 한 줄 내려간다.
+pub fn editorBodyRect(self: *AppSession, leaf_rect: maru.session.SplitRect, term: *const Term) maru.session.SplitRect {
+    const geo = pane_ops.paneGeometry(self, leaf_rect);
+    if (term.file_entry == null) return geo.body;
+    const band_h = pane_ops.paneBarHeightPx(self); // 밴드는 바와 같은 높이다(`paneBandRect`)
+    return .{ .x = geo.body.x, .y = geo.body.y + band_h, .w = geo.body.w, .h = geo.body.h -| band_h };
+}
+
 pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, term: *Term) ?PaneDraw {
     if (term.kind != .editor) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
@@ -241,7 +258,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **hit-test는 아직 이 사각을 소비하지 않는다.** N1은 읽기 전용이라 편집기 pane에 포인터·IME
     // 경로가 없다. 그것이 붙을 때(N2~) 그쪽도 같은 `body`를 읽어야 "보이는 자리"와 "누르는 자리"가
     // 갈리지 않는다 — 터미널이 `grid`를 쓰는 것과 달라지는 지점이므로 그때 함께 정한다.
-    const rect = pane_ops.paneGeometry(self, leaf_rect).body;
+    const rect = editorBodyRect(self, leaf_rect, term);
     if (rect.w == 0 or rect.h == 0) return null;
 
     // **행마다 op 넷을 쓴다**(본문·gutter·밴드·좌측 띠) — 밴드가 붙기 전의 둘에서 늘었다. 두 열로
@@ -425,7 +442,7 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     // **`body`에서 센다 — 격자가 아니다.** 편집기는 창 padding을 적용하지 않으므로(2026-08-13 결정)
     // `paneTermRect`(격자)로 세면 보이는 행이 실제보다 적어 상한이 그만큼 커지고, 끝까지 굴렸을 때
     // 아래에 빈 줄이 남는다 — 위 문장이 막겠다고 한 바로 그 상태다(리뷰 지적).
-    const body = pane_ops.paneGeometry(self, leaf_rect).body;
+    const body = editorBodyRect(self, leaf_rect, term);
     const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
     const visible: usize = @max(inner_h / @max(self.cell_height_px, 1), 1);
 

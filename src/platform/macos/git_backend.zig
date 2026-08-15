@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const git_command = maru.session.git_command;
+const git_write_command = maru.session.git_write_command;
 const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
@@ -923,45 +924,120 @@ fn runWithEnv(
     }
     env_ptrs.append(allocator, null) catch return error.GitFailed;
 
-    // stdout만 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로 버린다
-    // (docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
+    // 읽기는 **stdout만** 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로
+    // 버린다(docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
+    // 쓰기는 정반대라(§5 — 가공해서 보여 준다) `spawnCapture`가 그 축을 인자로 받는다.
+    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .discard);
+    defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
+    errdefer allocator.free(spawned.stdout_bytes);
+    if (spawned.exit_code != 0) return error.GitFailed;
+    // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
+    return .{ .bytes = spawned.stdout_bytes, .truncated = spawned.stdout_bytes.len >= max_output_bytes };
+}
+
+/// 자식의 stderr를 어떻게 할 것인가. **읽기와 쓰기의 유일한 정책 차이**라 인자로 뺐다 — 두 경로가 각자
+/// fork/exec를 복제하면 파이프 누수·CLOEXEC 같은 세부가 한쪽에서만 고쳐진다.
+const StderrPolicy = enum {
+    /// /dev/null로 버린다(읽기 — §6: raw로 흘리지 않는다).
+    discard,
+    /// 파이프로 받는다(쓰기 — §5: 가공해서 보여 준다).
+    capture,
+};
+
+const Spawned = struct {
+    stdout_bytes: []u8,
+    /// `discard`면 빈 슬라이스다(호출자가 그래도 free한다 — 분기 없는 해제가 누수를 막는다).
+    stderr_bytes: []u8,
+    /// 정상 종료가 아니면 -1.
+    exit_code: c_int,
+};
+
+/// **fork + execve + 파이프 수집의 단일 출처.** 읽기·쓰기가 이 함수를 공유한다.
+///
+/// argv·env는 호출자가 이미 C 배열로 만들어 둔 것을 받는다(그 조립이 읽기/쓰기마다 다르기 때문이고,
+/// 여기서 다시 만들면 어느 쪽 규칙을 쓸지 이 함수가 알아야 한다).
+fn spawnCapture(
+    allocator: std.mem.Allocator,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*]const ?[*:0]const u8,
+    stderr_policy: StderrPolicy,
+) !Spawned {
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return error.GitFailed;
     // 동시에 도는 다른 fork(셸 PTY spawn 등)로 write 끝이 새면 EOF가 안 와 read가 영원히 블록한다.
     _ = std.c.fcntl(out_pipe[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
     _ = std.c.fcntl(out_pipe[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
 
+    var err_pipe: [2]c_int = .{ -1, -1 };
+    if (stderr_policy == .capture) {
+        if (std.c.pipe(&err_pipe) != 0) {
+            _ = std.c.close(out_pipe[0]);
+            _ = std.c.close(out_pipe[1]);
+            return error.GitFailed;
+        }
+        _ = std.c.fcntl(err_pipe[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+        _ = std.c.fcntl(err_pipe[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    }
+
     const pid = std.c.fork();
     if (pid < 0) {
         _ = std.c.close(out_pipe[0]);
         _ = std.c.close(out_pipe[1]);
+        if (err_pipe[0] >= 0) {
+            _ = std.c.close(err_pipe[0]);
+            _ = std.c.close(err_pipe[1]);
+        }
         return error.GitFailed;
     }
     if (pid == 0) {
         // child: dup2/open/close/execve만(async-signal-safe).
         _ = std.c.dup2(out_pipe[1], 1);
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-        if (devnull >= 0) {
-            _ = std.c.dup2(devnull, 2);
-            _ = std.c.close(devnull);
+        if (stderr_policy == .capture) {
+            _ = std.c.dup2(err_pipe[1], 2);
+        } else {
+            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+            if (devnull >= 0) {
+                _ = std.c.dup2(devnull, 2);
+                _ = std.c.close(devnull);
+            }
         }
         _ = std.c.close(out_pipe[0]);
         _ = std.c.close(out_pipe[1]);
-        _ = std.c.execve(argv[0].?, @ptrCast(&argv), @ptrCast(env_ptrs.items.ptr));
+        if (err_pipe[0] >= 0) {
+            _ = std.c.close(err_pipe[0]);
+            _ = std.c.close(err_pipe[1]);
+        }
+        _ = std.c.execve(argv[0].?, @ptrCast(argv), @ptrCast(envp));
         std.c._exit(127); // execve 실패
     }
 
     _ = std.c.close(out_pipe[1]);
-    const collected = readAllFd(allocator, out_pipe[0]);
+    if (err_pipe[1] >= 0) _ = std.c.close(err_pipe[1]);
+
+    // **stdout을 먼저 끝까지 읽는다.** 두 파이프를 번갈아 폴링하지 않는 이유는 쓰기 명령의 stderr가 작기
+    // 때문이다(hook 출력도 상한에서 끊긴다). 순서를 반대로 하면 stdout이 파이프 버퍼를 채운 채 자식이
+    // 블록하고 우리는 stderr EOF를 기다려 교착한다.
+    const out_collected = readAllFd(allocator, out_pipe[0]);
     _ = std.c.close(out_pipe[0]);
-    const bytes = collected catch {
+    const stdout_bytes = out_collected catch {
+        if (err_pipe[0] >= 0) _ = std.c.close(err_pipe[0]);
         _ = reapPid(pid);
         return error.GitFailed;
     };
-    errdefer allocator.free(bytes);
-    if (reapPid(pid) != 0) return error.GitFailed;
-    // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
-    return .{ .bytes = bytes, .truncated = bytes.len >= max_output_bytes };
+    errdefer allocator.free(stdout_bytes);
+
+    var stderr_bytes: []u8 = &.{};
+    if (err_pipe[0] >= 0) {
+        const err_collected = readAllFd(allocator, err_pipe[0]);
+        _ = std.c.close(err_pipe[0]);
+        stderr_bytes = err_collected catch {
+            _ = reapPid(pid);
+            return error.GitFailed;
+        };
+    }
+    errdefer allocator.free(stderr_bytes);
+
+    return .{ .stdout_bytes = stdout_bytes, .stderr_bytes = stderr_bytes, .exit_code = reapPid(pid) };
 }
 
 /// fd에서 EOF까지, 상한까지 읽는다(호출자 소유). 상한을 넘으면 거기서 멈추고 자식은 SIGPIPE/EPIPE로 끝난다 —
@@ -987,6 +1063,99 @@ fn reapPid(pid: std.c.pid_t) c_int {
     const us: u32 = @bitCast(status);
     if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
     return -1;
+}
+
+/// 쓰기 명령 하나의 결과. 읽기의 `Output`과 달리 **종료 코드와 stderr를 싣는다** — §5가 "성공을 추정하지
+/// 않는다"와 "실패 이유를 가공해서 보여 준다"를 요구하기 때문이다.
+pub const WriteOutput = struct {
+    exit_code: c_int,
+    /// git이 낸 stderr **원본**. 화면에 내기 전에 호출자가 redact·길이 절단을 한다(§5) — 이 층은 사실만 옮긴다.
+    stderr_bytes: []u8,
+    /// stderr가 상한에 걸려 잘렸나. hook 출력은 수천 줄이 될 수 있다.
+    stderr_truncated: bool,
+
+    pub fn ok(self: WriteOutput) bool {
+        return self.exit_code == 0;
+    }
+
+    pub fn deinit(self: WriteOutput, allocator: std.mem.Allocator) void {
+        allocator.free(self.stderr_bytes);
+    }
+};
+
+/// 쓰기 명령 하나를 **동기로** 실행한다.
+///
+/// 비동기 제출 표면을 따로 두지 않는 이유: 쓰기는 §6대로 **in-flight 하나**로 직렬화되고, 그 직렬화를
+/// 소유하는 쪽은 화면 상태를 함께 든 호출자(app_session)다. 여기에 큐를 하나 더 만들면 직렬화 규칙이 두
+/// 곳으로 갈린다. 이 함수는 worker 스레드에서 불린다.
+///
+/// **argv·env는 `git_write_command`가 소유한다** — 읽기와 갈린 축(index 잠금·hook·stderr)이 그 모듈의
+/// 테스트로 전수 고정돼 있고, 여기서 다시 정하면 그 고정이 무의미해진다.
+pub fn runWriteSync(
+    allocator: std.mem.Allocator,
+    kind: git_write_command.Kind,
+    git_exe: []const u8,
+    repo: []const u8,
+    paths: []const []const u8,
+    message_file: ?[]const u8,
+) !WriteOutput {
+    var argv_slices_buf: [git_write_command.fixed_argv_max + git_write_command.max_batch_paths][]const u8 = undefined;
+    const argv_slices = git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf) catch
+        return error.GitFailed;
+
+    var argv_store: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (argv_store.items) |a| allocator.free(a);
+        argv_store.deinit(allocator);
+    }
+    var argv_ptrs: std.ArrayList(?[*:0]const u8) = .empty;
+    defer argv_ptrs.deinit(allocator);
+    for (argv_slices) |a| {
+        const copy = allocator.dupeZ(u8, a) catch return error.GitFailed;
+        argv_store.append(allocator, copy) catch return error.GitFailed;
+        argv_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
+    }
+    argv_ptrs.append(allocator, null) catch return error.GitFailed;
+
+    // 환경은 **상속한 뒤 덮어쓴다**(읽기와 같은 규율). 다른 점은 덮어쓰는 목록뿐이고, 그 목록에
+    // `GIT_OPTIONAL_LOCKS`가 없다는 것이 쓰기의 계약이다 — 쓰기는 index를 잠가야 한다(§1).
+    var env_store: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (env_store.items) |e| allocator.free(e);
+        env_store.deinit(allocator);
+    }
+    var env_ptrs: std.ArrayList(?[*:0]const u8) = .empty;
+    defer env_ptrs.deinit(allocator);
+    var i: usize = 0;
+    outer: while (std.c.environ[i]) |entry| : (i += 1) {
+        const pair = std.mem.span(entry);
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        for (git_write_command.env_overrides) |o| {
+            if (std.mem.eql(u8, pair[0..eq], o.name)) continue :outer;
+        }
+        // 사용자 환경의 `GIT_INDEX_FILE`은 항상 버린다 — 남겨 두면 우리 쓰기가 **남의 index**에 간다.
+        // 읽기보다 이쪽이 더 위험하다(읽기는 잘못된 답을 주고, 쓰기는 잘못된 곳을 바꾼다).
+        if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
+        const copy = allocator.dupeZ(u8, pair) catch return error.GitFailed;
+        env_store.append(allocator, copy) catch return error.GitFailed;
+        env_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
+    }
+    for (git_write_command.env_overrides) |o| {
+        const joined = std.fmt.allocPrintSentinel(allocator, "{s}={s}", .{ o.name, o.value }, 0) catch return error.GitFailed;
+        env_store.append(allocator, joined) catch return error.GitFailed;
+        env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
+    }
+    env_ptrs.append(allocator, null) catch return error.GitFailed;
+
+    const spawned = try spawnCapture(allocator, @ptrCast(argv_ptrs.items.ptr), env_ptrs.items.ptr, .capture);
+    // 쓰기의 stdout은 화면에 쓰지 않는다(`add`는 조용하고, `rm --cached`는 지운 목록을 낸다). 실패 이유는
+    // stderr에 있다.
+    allocator.free(spawned.stdout_bytes);
+    return .{
+        .exit_code = spawned.exit_code,
+        .stderr_bytes = spawned.stderr_bytes,
+        .stderr_truncated = spawned.stderr_bytes.len >= max_output_bytes,
+    };
 }
 
 const testing = std.testing;
@@ -1348,4 +1517,228 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
     try testing.expect(std.mem.indexOf(u8, changed, "a.txt") != null);
     try testing.expect(std.mem.indexOf(u8, changed, "c.txt") != null);
     try testing.expect(std.mem.indexOf(u8, changed, "b.txt") == null); // 스냅샷에 이미 있던 파일은 안 나온다
+}
+
+// ── 쓰기 end-to-end (실제 임시 저장소) ─────────────────────────────────────────
+//
+// 계획서 P2가 요구한 검증이다: stage→unstage 왕복, `MM`(부분 스테이지), 경로에 공백·비ASCII·`-` 시작.
+// argv 조립은 `session.git_write_command`가 헤드리스로 전수 고정하므로, **여기서 보는 것은 그 argv가 실제
+// git에 통하는가**뿐이다(플래그를 맞게 조립해도 git 버전이 안 받으면 소용없다).
+
+/// fixture가 파일을 만들 때 쓰는 Io. 실행 경로(`spawnCapture`)는 io를 쓰지 않으므로 여기서만 필요하다.
+const fixture_io = std.Io.Threaded.global_single_threaded.io();
+
+const WriteFixture = struct {
+    dir: std.testing.TmpDir,
+    root: []u8,
+    /// **힙에 든다.** 이 구조체는 값으로 반환되므로 자기 안의 버퍼를 가리키면 반환하는 순간 댕글링이 된다 —
+    /// 실제로 그렇게 두었더니 argv[0]이 쓰레기가 되어 어떤 호출은 되고 어떤 호출은 exit 127로 죽는
+    /// 비결정적 실패가 났다.
+    exe: []u8,
+
+    fn init(allocator: std.mem.Allocator) !?WriteFixture {
+        var self: WriteFixture = .{ .dir = std.testing.tmpDir(.{}), .root = &.{}, .exe = &.{} };
+        errdefer self.dir.cleanup();
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const located = locate(&exe_buf) orelse {
+            self.dir.cleanup();
+            return null; // git 없는 기기에서는 판정할 것이 없다
+        };
+        self.exe = try allocator.dupe(u8, located);
+        errdefer allocator.free(self.exe);
+        // 저장소는 **절대경로**로 넘긴다 — 상대경로를 실행 경로에 쓰지 않는 계약(§6)이 쓰기에도 그대로 간다.
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try self.dir.dir.realPath(fixture_io, &root_buf);
+        self.root = try allocator.dupe(u8, root_buf[0..root_len]);
+        errdefer allocator.free(self.root);
+        // `init` 자체는 우리 쓰기 경로가 아니므로 그냥 돌린다. 사용자 신원이 없는 CI를 위해 로컬 config를 박는다.
+        try self.plainGit(allocator, &.{ "init", "-q" });
+        try self.plainGit(allocator, &.{ "config", "user.email", "t@example.com" });
+        try self.plainGit(allocator, &.{ "config", "user.name", "t" });
+        return self;
+    }
+
+    fn deinit(self: *WriteFixture, allocator: std.mem.Allocator) void {
+        allocator.free(self.root);
+        allocator.free(self.exe);
+        self.dir.cleanup();
+    }
+
+    /// 준비용 git(우리 쓰기 계약 밖). 인자를 그대로 넘긴다.
+    fn plainGit(self: *WriteFixture, allocator: std.mem.Allocator, args: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        try argv.append(allocator, self.exe);
+        try argv.append(allocator, "-C");
+        try argv.append(allocator, self.root);
+        for (args) |a| try argv.append(allocator, a);
+
+        var store: std.ArrayList([:0]u8) = .empty;
+        defer {
+            for (store.items) |a| allocator.free(a);
+            store.deinit(allocator);
+        }
+        var ptrs: std.ArrayList(?[*:0]const u8) = .empty;
+        defer ptrs.deinit(allocator);
+        for (argv.items) |a| {
+            const c = try allocator.dupeZ(u8, a);
+            try store.append(allocator, c);
+            try ptrs.append(allocator, c.ptr);
+        }
+        try ptrs.append(allocator, null);
+        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .capture);
+        allocator.free(spawned.stdout_bytes);
+        allocator.free(spawned.stderr_bytes);
+        if (spawned.exit_code != 0) return error.PrepareFailed;
+    }
+
+    fn write(self: *WriteFixture, path: []const u8, bytes: []const u8) !void {
+        if (std.fs.path.dirname(path)) |sub| {
+            self.dir.dir.createDir(fixture_io, sub, .default_dir) catch {};
+        }
+        try self.dir.dir.writeFile(fixture_io, .{ .sub_path = path, .data = bytes });
+    }
+
+    /// 읽기 경로의 `git status --porcelain=v2` 출력. 스테이지 여부를 사실로 확인하는 유일한 출처다.
+    /// **v1이 아니다** — 행이 `1 <XY> ...`이고 추적되지 않은 파일은 `? <경로>`다.
+    fn status(self: *WriteFixture, allocator: std.mem.Allocator) ![]u8 {
+        const out = try runWithArg(allocator, .status, self.exe, self.root, null);
+        return out.bytes;
+    }
+
+    fn run(self: *WriteFixture, allocator: std.mem.Allocator, kind: git_write_command.Kind, paths: []const []const u8) !WriteOutput {
+        return runWriteSync(allocator, kind, self.exe, self.root, paths, null);
+    }
+};
+
+test "쓰기 end-to-end: stage → unstage 왕복이 index에 실제로 반영된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.zig", "hello\n");
+
+    // 스테이지 — 추적되지 않던 파일이 index에 들어간다.
+    var staged = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+    {
+        const st = try fx.status(allocator);
+        defer allocator.free(st);
+        try testing.expect(std.mem.indexOf(u8, st, "1 A. ") != null); // index에 추가됨(v2)
+    }
+
+    // 언스테이지 — **unborn이다**(첫 커밋 전). `restore --staged`는 여기서 실패하므로 `rm --cached`가 맞다.
+    var unborn = try fx.run(allocator, .unstage_unborn, &.{"a.zig"});
+    defer unborn.deinit(allocator);
+    try testing.expect(unborn.ok());
+    {
+        const st = try fx.status(allocator);
+        defer allocator.free(st);
+        try testing.expect(std.mem.indexOf(u8, st, "? a.zig") != null); // 다시 추적되지 않음(v2)
+    }
+}
+
+test "쓰기 end-to-end: unborn에서 restore --staged는 실제로 실패한다(그래서 rm --cached가 있다)" {
+    // §2가 unborn 변종을 둔 근거를 **추정이 아니라 실행으로** 고정한다. git이 나중에 이걸 허용하게 되면
+    // 이 테스트가 깨지고, 그때 변종을 지울 수 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.zig", "hello\n");
+    var staged = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+
+    var bad = try fx.run(allocator, .unstage, &.{"a.zig"});
+    defer bad.deinit(allocator);
+    try testing.expect(!bad.ok());
+    // 실패 이유가 stderr로 온다 — §5가 "가공해서 보여 준다"고 한 그 바이트다.
+    try testing.expect(bad.stderr_bytes.len > 0);
+}
+
+test "쓰기 end-to-end: MM(부분 스테이지) — 스테이지 뒤 또 고치면 양쪽에 난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.zig", "one\n");
+    var first = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer first.deinit(allocator);
+    try testing.expect(first.ok());
+    try fx.plainGit(allocator, &.{ "commit", "-q", "-m", "init" });
+
+    try fx.write("a.zig", "two\n");
+    var second = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer second.deinit(allocator);
+    try testing.expect(second.ok());
+    try fx.write("a.zig", "three\n");
+
+    const st = try fx.status(allocator);
+    defer allocator.free(st);
+    // index에도 작업트리에도 변경이 있다 = `MM`. 두 섹션에 각각 나야 하는 그 파일이다.
+    try testing.expect(std.mem.indexOf(u8, st, "1 MM ") != null); // index에도 작업트리에도 변경(v2)
+
+    // 커밋이 있으므로 이제 `restore --staged`가 통한다(unborn 변종이 필요 없는 상태).
+    var un = try fx.run(allocator, .unstage, &.{"a.zig"});
+    defer un.deinit(allocator);
+    try testing.expect(un.ok());
+    const after = try fx.status(allocator);
+    defer allocator.free(after);
+    try testing.expect(std.mem.indexOf(u8, after, "1 .M ") != null); // 작업트리에만 변경(v2)
+}
+
+test "쓰기 end-to-end: 공백·비ASCII·`-` 시작 경로가 그대로 통한다(셸을 안 거친다)" {
+    // 이 셋이 P2 검증 목록의 핵심이다. 셸을 거치면 따옴표·글로빙으로 깨지고, `--`가 없으면 `-`가 옵션이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    const paths = [_][]const u8{ "with space.txt", "한글 파일.txt", "-leading-dash.txt", "dir/nested file.txt" };
+    for (paths) |p| try fx.write(p, "x\n");
+
+    var out = try fx.run(allocator, .stage, &paths);
+    defer out.deinit(allocator);
+    try testing.expect(out.ok());
+
+    const st = try fx.status(allocator);
+    defer allocator.free(st);
+    // `core.quotePath=false`라 비ASCII가 C-quote되지 않고 그대로 나온다.
+    for (paths) |p| {
+        try testing.expect(std.mem.indexOf(u8, st, p) != null);
+    }
+}
+
+test "쓰기 end-to-end: 모두 스테이지·모두 언스테이지" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.txt", "a\n");
+    try fx.write("b.txt", "b\n");
+
+    var all = try fx.run(allocator, .stage_all, &.{});
+    defer all.deinit(allocator);
+    try testing.expect(all.ok());
+    {
+        const st = try fx.status(allocator);
+        defer allocator.free(st);
+        try testing.expect(std.mem.indexOf(u8, st, "1 A. ") != null);
+        try testing.expect(std.mem.count(u8, st, "1 A. ") == 2);
+    }
+
+    // unborn이므로 `rm --cached -r -- .`다.
+    var none = try fx.run(allocator, .unstage_all_unborn, &.{});
+    defer none.deinit(allocator);
+    try testing.expect(none.ok());
+    const st = try fx.status(allocator);
+    defer allocator.free(st);
+    try testing.expect(std.mem.indexOf(u8, st, "? a.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, st, "? b.txt") != null);
 }

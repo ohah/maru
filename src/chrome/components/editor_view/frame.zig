@@ -348,7 +348,9 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             const end_col = offsets[k * 2 + 1];
             if (end_col <= start_col) continue;
             // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
-            const from = start_col;
+            // **왼쪽도 자른다.** 화면 밖에서 시작하는 마크를 그대로 쓰면 아래 뺄셈이 음수가 되고
+            // (u32라 오버플로로 죽는다), 가로 스크롤이 붙는 순간 그 자리에서 터진다.
+            const from = @max(start_col, props.first_col);
             const to = @min(end_col, @as(u32, props.first_col) + layout.content.width);
             if (to <= from) continue;
             // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
@@ -1065,4 +1067,66 @@ test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
         try testing.expect(op.quad.rect.x + @as(i32, @intCast(op.quad.rect.w)) <= @as(i32, (@as(i32, layout.contentLeft()) + @as(i32, layout.content.width)) * 8));
     }
     try testing.expectEqual(@as(usize, 1), found);
+}
+
+test "랩된 줄: 첫 조각에만 강조가 서고 이어진 조각에는 안 선다" {
+    // **의도된 한계를 고정한다.** 두 번째 조각의 시작 열은 `visual_map`이 자를 때만 아는 값이라,
+    // 지금은 첫 조각에만 그린다. 이 테스트가 없으면 나중에 조각 경계를 넘길 때 "원래 그려졌는지"를
+    // 아무도 모른다 — 한계인지 회귀인지 구분이 안 된다.
+    var ops: [256]draw.Op = undefined;
+    var text: [2048]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+
+    // 본문이 좁아 한 줄이 여러 조각으로 접힌다. 마크를 **앞뒤 양쪽**에 둔다.
+    const line = "aaaaaaaaaaaaaaaaaaaa";
+    const lines = [_][]const u8{line};
+    const bands = [_]RowBand{.removed};
+    const marks_row = [_]Mark{ .{ .start = 1, .len = 1 }, .{ .start = 15, .len = 1 } };
+    const marks = [_][]const Mark{&marks_row};
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 6,
+        .wrap = true,
+        .rect = .{ .x = 0, .y = 0, .w = 120, .h = 96 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 10,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    try testing.expect(w.visual_rows > 1); // 실제로 접혔다
+    var mark_rows: [8]i32 = undefined;
+    var n: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.alpha != mark_alpha) continue;
+        if (n < mark_rows.len) {
+            mark_rows[n] = op.quad.rect.y;
+            n += 1;
+        }
+    }
+    // 강조는 **첫 조각(y = 0)에만** 선다 — 접힌 뒤쪽 마크는 지금 그리지 않는다.
+    try testing.expect(n > 0);
+    for (mark_rows[0..n]) |y| try testing.expectEqual(@as(i32, 0), y);
+    // 밴드는 조각 전부에 깔린다(그쪽은 이미 고정돼 있다) — 강조만 첫 조각인 것이 이 한계다.
 }

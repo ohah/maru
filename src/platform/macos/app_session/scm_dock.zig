@@ -149,6 +149,23 @@ pub const Projection = struct {
     file_count: u32,
 };
 
+/// 한 프레임의 draw 버퍼 상한. **방출 지점과 1:1로 센다** — 여기가 실제보다 작으면 view가
+/// `InsufficientRunBuffer`로 실패하고, 그 결과는 "한 줄이 안 그려짐"이 아니라 **도크 전체가 빈 화면**이다
+/// (publish까지 못 가서 hit tree도 이전 프레임에 멈춘다).
+///
+/// 상수로 세면 view가 자라는 변경마다 조용히 모자란다 — 실제로 그랬다: 증감을 `+N`(초록)/`-N`(빨강)
+/// 두 조각으로 가르면서 파일 행이 5 → 6 op이 됐는데 이 예산이 따라오지 않아, **파일이 다섯 개만
+/// 바뀌어도 도크가 통째로 비었다**. 그래서 산술을 함수로 두고 테스트가 최악 구성으로 검증한다.
+fn drawBudget(entry_count: usize, window_len: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
+    // 행당 텍스트 상한 6 = 파일 행(아이콘·이름·경로·`+N`·`-N`·상태 문자). 그룹 헤더는 3(아이콘·제목·개수),
+    // 안내·`모두 보기`는 1이라 이 상한 안이다.
+    // 고정 chrome 10 = 탭 3 + 요약 2 + 브랜치 3 + 호버 동작 1 + 빈 안내 1.
+    const text = window_len * 6 + 10;
+    // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나.
+    const quads = entry_count + window_len + 1;
+    return .{ .ops = quads + text, .runs = text, .text_bytes = 256 + window_len * 512 };
+}
+
 /// 모델 → 항목 열 + 스크롤 투영. **렌더와 포인터가 같은 함수를 지난다** — 두 곳이 각자 만들면 스크롤한
 /// 뒤 누른 행과 열리는 행이 어긋난다.
 pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
@@ -259,12 +276,10 @@ pub fn collectScmDock(
     // paint quad는 published entry 하나당 최대 하나다. 상수로 세면 tree가 자라는 변경마다 조용히
     // 모자라는데, 그 결과가 "그 컴포넌트만 안 그려짐"이 아니라 **도크 전체 정지**다(view가 실패하면
     // 아래 publish까지 못 가서 hit tree가 이전 프레임에 멈춘다 — Session Dock에서 실제로 겪었다).
-    const quad_budget = frame.tree.entries.len;
-    // 행마다 최대 5개(아이콘·이름·경로·증감·상태 문자) + 요약 2 + 브랜치 3 + 호버 동작 1.
-    const text_budget = window.len * 5 + 6;
-    const ops = arena.alloc(chrome.draw.Op, quad_budget + text_budget) catch return;
-    const runs = arena.alloc(chrome.draw.Run, text_budget) catch return;
-    const text_bytes = arena.alloc(u8, 256 + window.len * 512) catch return;
+    const budget = drawBudget(frame.tree.entries.len, window.len);
+    const ops = arena.alloc(chrome.draw.Op, budget.ops) catch return;
+    const runs = arena.alloc(chrome.draw.Run, budget.runs) catch return;
+    const text_bytes = arena.alloc(u8, budget.text_bytes) catch return;
     const tokens = self.buildChromeTokens();
     const draws = component.view.view(props, frame, self.scm_dock_interaction, &tokens, self.cell_width_px, .{
         .ops = ops,
@@ -478,4 +493,92 @@ test "섹션 값은 두 모듈 사이에서 1:1이다" {
     try testing.expectEqual(component.types.Section.changes, sectionOf(.changes));
     try testing.expectEqual(@intFromEnum(scm_view.Section.staged), sectionIndex(.staged));
     try testing.expectEqual(@intFromEnum(scm_view.Section.changes), sectionIndex(.changes));
+}
+
+test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통째로 빈다)" {
+    // 이 테스트가 없으면 view에 op을 하나 더하는 변경이 조용히 예산을 넘기고, 증상은 "그 op이 안 보임"이
+    // 아니라 **도크 전체가 빈 화면**이다(실제로 겪었다 — 증감을 두 색으로 가르면서 행당 5 → 6이 됐다).
+    // 그래서 제품 경로와 **같은 `drawBudget`**으로 버퍼를 잡고, 가장 op을 많이 내는 행 구성으로 돌린다.
+    const component_types = component.types;
+    var items: [12]component_types.Item = undefined;
+    // 그룹 헤더 둘 + 파일 열 — 파일 행이 op을 가장 많이 낸다(아이콘·이름·경로·증감 둘·상태 문자).
+    items[0] = .{ .section = .{ .section = .staged, .count = 5, .collapsed = false, .action = .none } };
+    items[6] = .{ .section = .{ .section = .changes, .count = 5, .collapsed = false, .action = .none } };
+    for (&items, 0..) |*item, index| {
+        if (index == 0 or index == 6) continue;
+        item.* = .{ .file = .{
+            .name = "some-file-name.zig",
+            .dir = "src/platform/macos/app_session/",
+            .status = .modified,
+            .letter = 'M',
+            .added = 123,
+            .removed = 456,
+            .has_delta = true,
+            .action = .none,
+        } };
+    }
+
+    const props: component_types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 480 },
+        .items = &items,
+        .branch = "feat/some-branch",
+        .has_ab = true,
+        .ahead = 3,
+        .behind = 4,
+        .summary = .{ .added = 1234, .removed = 567 },
+        .changed_file_count = 10,
+    };
+
+    const sizes = component.build.bufferSizes(&items);
+    const allocator = testing.allocator;
+    const nodes = try allocator.alloc(chrome.ui.tree.UiNode, sizes.nodes);
+    defer allocator.free(nodes);
+    const entries = try allocator.alloc(chrome.ui.tree.RectEntry, sizes.entries);
+    defer allocator.free(entries);
+    const layout_items = try allocator.alloc(chrome.ui.layout.Item, sizes.layout_items);
+    defer allocator.free(layout_items);
+    const flex_scratch = try allocator.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch);
+    defer allocator.free(flex_scratch);
+    const child_rects = try allocator.alloc(chrome.ui.layout.UiRect, sizes.child_rects);
+    defer allocator.free(child_rects);
+    const actions = try allocator.alloc(component.ids.Entry, sizes.actions);
+    defer allocator.free(actions);
+
+    const frame = try component.build.build(props, .{
+        .nodes = nodes,
+        .entries = entries,
+        .layout_items = layout_items,
+        .flex_scratch = flex_scratch,
+        .child_rects = child_rects,
+        .actions = actions,
+    });
+
+    const budget = drawBudget(frame.tree.entries.len, items.len);
+    const ops = try allocator.alloc(chrome.draw.Op, budget.ops);
+    defer allocator.free(ops);
+    const runs = try allocator.alloc(chrome.draw.Run, budget.runs);
+    defer allocator.free(runs);
+    const text_bytes = try allocator.alloc(u8, budget.text_bytes);
+    defer allocator.free(text_bytes);
+
+    const tokens = chrome.tokens.Tokens.tui(.{
+        .foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
+        .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_active = .{ .r = 60, .g = 60, .b = 60 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
+        .accent = .{ .r = 16, .g = 17, .b = 18 },
+    });
+    // 호버가 걸린 행도 동작 글리프를 하나 더 낸다 — 그 최악까지 담아야 한다.
+    const hovered: chrome.ui.interaction.InteractionState = .{ .hovered = component.build.NodeIds.item(1) };
+    const draws = try component.view.view(props, frame, hovered, &tokens, 8, .{
+        .ops = ops,
+        .runs = runs,
+        .text_bytes = text_bytes,
+    });
+    try testing.expect(draws.ops.len > 0);
 }

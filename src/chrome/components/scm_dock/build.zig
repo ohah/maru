@@ -184,15 +184,20 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 어디인가"의 주인이 둘이 된다.
     const tab_nodes = buffers.nodes[action_cursor..][0..tab_order.len];
     for (tab_nodes, 0..) |*node, index| {
-        node.* = tree.card(.{
+        // **카드가 아니라 컨테이너다.** 카드는 언제나 quad를 하나 칠하는데, 자식은 부모보다 나중에
+        // 칠해지므로 그 배경이 탭 줄의 **아래 divider를 덮는다**(실측: 그 선의 배경 대비가 +18에서
+        // +3으로 떨어져 사실상 사라졌다). 칸에 필요한 것은 칠이 아니라 **자리와 rect 신원**뿐이고,
+        // 컨테이너는 `visual = .none`이라 quad를 내지 않으면서 entry로는 남는다.
+        //
+        // 폭은 `width = .fill`이 아니라 `grow`로 나눈다. `fill`은 **그 노드 자신의 방향**을 기준으로
+        // 검증되는데(`tree.containerFor`), 자식 없는 노드의 방향은 column이라 width가 cross축으로 걸린다.
+        //
+        // **P4·P5 주의**: 탭을 누를 수 있게 되면 컨테이너는 action을 못 실으므로 button으로 바꿔야 한다.
+        // 그 순간 위의 덮어쓰기가 되살아난다(button도 quad를 칠한다) — 그때는 배경을 `paint`로 지우거나
+        // divider를 탭 줄이 아닌 곳으로 옮겨야 한다. 칸을 나누는 자리는 그대로 여기다.
+        node.* = tree.container(.{
             .id = NodeIds.tab(index),
-            // `width = .fill`이 아니라 `grow`다. `fill`은 **그 노드 자신의 방향**을 기준으로 검증되는데
-            // (`tree.containerFor`), 자식 없는 카드의 방향은 column이라 width가 cross축으로 걸린다.
-            // grow는 부모(row)가 남는 폭을 가중치대로 나눠 주는 표준 경로다 — 셋이 같은 무게면 3등분.
             .style = .{ .flex = .{ .grow = 1 } },
-            .variant = .surface,
-            // 칸은 자리를 잡을 뿐 스스로 칠하지 않는다 — 배경·경계는 탭 줄이 갖는다.
-            .paint = .{ .background = .surface_bg, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
             .overflow = .clip,
         }, &.{});
     }
@@ -471,7 +476,11 @@ test "탭 칸 rect가 tree에 있고 줄을 균등하게 덮는다" {
         const row = frame.tree.entries[frame.tree.find(NodeIds.tabs) orelse return error.MissingTabs].rect;
         var prev_right = row.x;
         for (tab_order, 0..) |_, index| {
-            const slot = frame.tree.entries[frame.tree.find(NodeIds.tab(index)) orelse return error.MissingTab].rect;
+            const entry = frame.tree.entries[frame.tree.find(NodeIds.tab(index)) orelse return error.MissingTab];
+            // **칸은 칠하지 않는다.** 카드로 두면 자식이 부모보다 나중에 칠해지며 탭 줄의 아래 divider를
+            // 덮는다(실측: 그 선의 배경 대비가 +18 → +3으로 떨어져 사실상 사라졌다).
+            try testing.expect(entry.visual == .none);
+            const slot = entry.rect;
             // 칸끼리 겹치지도 벌어지지도 않는다.
             try testing.expectEqual(prev_right, slot.x);
             // 셋이 같은 폭이다(정수 나머지는 레이아웃 엔진이 float으로 들고 있어 생기지 않는다).

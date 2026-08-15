@@ -757,7 +757,9 @@ test "긴 비교가 스크롤된다 — 좌우가 함께 움직이고 끝에서 
     try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_first_line);
 
     _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -10_000);
-    const body = pane_ops.paneGeometry(fx.session, leaf).body;
+    // **제품과 같은 사각을 쓴다** — 파일 Term은 헤더 밴드 한 줄을 더 뺀다(`editorBodyRect`).
+    // `paneGeometry(...).body`로 재면 밴드만큼 더 보인다고 계산해 상한이 어긋난다.
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
     const visible = (body.h -| chrome_editor.frame.content_inset_px * 2) / fx.session.cell_height_px;
     // **행 수** 기준으로 멈춘다(오른쪽 문서 줄 수(1)로 잡으면 곧바로 0이 된다).
     try testing.expectEqual(rows - visible, fx.term.rt.editor_first_line);
@@ -976,4 +978,32 @@ test "이모지가 반으로 잘리지 않는다 — cluster 경계로 자른다
         const s = right_line[m.start .. m.start + m.len];
         try testing.expect(std.unicode.utf8ValidateSlice(s));
     }
+}
+
+test "비교 Term의 본문이 헤더 밴드와 겹치지 않는다" {
+    // **`file_entry`가 있으면 chrome이 그 pane에 헤더 밴드를 그린다**(§3.1 — breadcrumb·모드 선택기).
+    // 웹 Term은 `inset.top = bar_h + addr_h`로 본문이 밴드 아래로 내려가는데, 편집기에는 그 보정이
+    // 없어 본문 첫 행이 밴드와 같은 자리에 선다. 둘 중 하나가 다른 하나를 덮는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    // **이 Term을 활성으로 만든다** — 밴드는 pane의 **활성** Term이 파일일 때만 나온다.
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, i| {
+        if (t == fx.term) pane.active_term = i;
+    }
+    const band = pane_ops.fileHeaderBandForPane(fx.session, pane, leaf) orelse return error.NoHeaderBand;
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const band_bottom: u32 = band.band.y + band.band.h;
+    // 본문은 밴드 **아래**에서 시작해야 한다.
+    try testing.expect(drawn.rect.y >= band_bottom);
 }

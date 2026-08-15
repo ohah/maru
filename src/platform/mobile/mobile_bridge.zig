@@ -173,12 +173,14 @@ fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
 }
 
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
-    preedit_len = 0; // 확정됐으니 겉치레를 지운다
     // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
     // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
     if (screen != .terminal) return @intCast(delivered_len);
+    // **안 보낼 키는 겉치레도 안 건드린다.** 지우기를 게이트 앞에 두면, 터미널에서 한글을
+    // 조합하다 설정을 열고 아무 키나 친 순간 **그 조합이 조용히 사라진다**(돌아오면 없다).
+    preedit_len = 0; // 확정됐으니 겉치레를 지운다
 
     // **닿은 것만 센다.** 반환값이 "코어에 전달한 누적 바이트" 라고 헤더에 적어 놓고,
     // 코어가 없거나 write 가 실패해도 그냥 더하고 있었다 — 그 값으로 입력이 죽은 것을
@@ -277,12 +279,14 @@ fn writeKey(core: *terminal.core.TerminalCore, key: terminal.input.Key, mods: te
 }
 
 pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
-    preedit_len = 0; // 확정됐으니 겉치레를 지운다
     // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
     // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
     if (screen != .terminal) return @intCast(delivered_len);
+    // **안 보낼 키는 겉치레도 안 건드린다.** 지우기를 게이트 앞에 두면, 터미널에서 한글을
+    // 조합하다 설정을 열고 아무 키나 친 순간 **그 조합이 조용히 사라진다**(돌아오면 없다).
+    preedit_len = 0; // 확정됐으니 겉치레를 지운다
 
     const core = &(term_core orelse {
         setLastError("input_before_core");
@@ -324,6 +328,10 @@ fn snapToBottomOnInput(core: *terminal.core.TerminalCore) void {
 /// 플랫폼이 넘긴 논리 px 를 줄로 바꿔 코어에 태운다. **환산이 여기 있는 이유**는 셀 높이가
 /// 코어 쪽 값이기 때문이다 — 플랫폼은 배치를 모른다(§3).
 pub export fn maru_mobile_scroll(dy_px: f32) void {
+    // **밀린 화면이 있으면 뒤는 안 움직인다.** host 의 관성은 손을 뗀 뒤에도 몇 프레임 더
+    // 도는데, 그 사이 톱니를 눌러 설정을 열면 **안 보이는 터미널이 계속 흘러** 돌아왔을 때
+    // 보던 자리가 아니다(§3 "전환에서 스크롤 위치를 잃지 않는다").
+    if (screen != .terminal) return;
     const core = &(term_core orelse {
         setLastError("scroll_before_core");
         return;

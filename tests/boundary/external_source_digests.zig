@@ -424,7 +424,11 @@ pub const inventory = [_]Proof{
     // 스위치 팔들(조합 확정·터미널 소유 기대표·단독 활성 fixture), 키/붙여넣기/⌘A/⌘C 라우팅,
     // `scmCommitOwnsInput` 게이트, 편집 버퍼 해제, caret 깜빡임 게이트. count는 2 그대로다 — 새 `@field`
     // 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ba1a8965d2b39735555e7d8fd5e3e36f9a1240082a13c127246daaa044d12263" },
+    //
+    // 편집기 가로 스크롤(N1)로 Term rt에 필드 둘이 붙는다(`editor_first_col` — 화면 맨 왼쪽 열,
+    // `editor_max_cols` — 가장 긴 줄의 열 수 캐시). count는 2 그대로다 — 새 `@field` 반사가 없고
+    // Client 구성·receiver 집합을 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4a544ce50f51144de96ed68d11b4b88c2d84206d496e7153f2c99da296b476b3" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

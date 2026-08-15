@@ -41,6 +41,10 @@ pub fn contentRect(rect: draw.Rect) draw.Rect {
     return rect.inset(.{ .left = e, .right = e, .top = e, .bottom = e });
 }
 
+/// 탭 한 칸이 몇 열인가. **여기가 단일 출처다** — 제품은 아직 config로 이 값을 안 받고 이 기본을
+/// 그대로 쓰는데, 가로 스크롤 상한을 세는 쪽이 다른 값을 쓰면 가장 긴 줄의 끝에 못 닿는다.
+pub const default_tab_width: u8 = 4;
+
 pub const Props = struct {
     /// **문서 전체의 논리 줄들.** 화면 몫만 잘라 넘기면 안 된다 — 스크롤바 길이가 문서 전체의
     /// 시각 행 수에서 나오는데(§4.1a), 잘린 배열로는 그것을 셀 수 없어 막대가 실제보다 짧아진다
@@ -79,7 +83,7 @@ pub const Props = struct {
     /// 그릴 수 있는 시각 행 수(뷰포트 높이 / 셀 높이).
     visible_rows: u16,
     wrap: bool,
-    tab_width: u8 = 4,
+    tab_width: u8 = default_tab_width,
 
     /// **내용**(gutter·본문·스크롤바)이 설 사각. 호출자가 `contentRect`로 뽑아 넘긴다.
     rect: draw.Rect,

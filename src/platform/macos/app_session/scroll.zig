@@ -412,7 +412,16 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
         if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
         const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
         if (cols != 0) {
-            tab_ops.scrollTabBarAt(self, x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면) // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
+            // **편집기 본문이 넘칠 때만 이 축을 가져간다.** 랩을 끄면 긴 줄의 오른쪽을 볼 방법이
+            // 지금은 없다. 다만 탭 바 축은 편집기 pane 위에서도 살아 있어야 하므로(위 세로 소유
+            // 주석의 리뷰 지적), **넘칠 때만** 소유하고 아니면 지금까지의 탭 바 경로가 그대로 돈다.
+            const editor_took_x = if (hit) |h|
+                editor_ops.scrollCols(self, h.term, h.leaf_rect, cols)
+            else if (pane_ops.activeLeafRect(self)) |leaf|
+                editor_ops.scrollCols(self, pane_ops.activePane(self).activeTerm(), leaf, cols)
+            else
+                false;
+            if (!editor_took_x) tab_ops.scrollTabBarAt(self, x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면) // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
         }
     }
 }

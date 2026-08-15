@@ -1574,6 +1574,13 @@ const TermRuntime = struct {
     editor_total_visual_rows: u32 = 0,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 여기를 움직인다.
     editor_first_line: usize = 0,
+    /// 화면 맨 왼쪽에 올 **열**. 랩이 켜져 있으면 넘칠 것이 없으므로 늘 0이다.
+    editor_first_col: u16 = 0,
+    /// 문서에서 가장 긴 줄의 **열 수**(0 = 아직 안 셌다). 가로 스크롤 상한이 여기서 나온다.
+    ///
+    /// **캐시다.** 매 휠마다 문서 전체를 세면 큰 파일에서 프레임이 죽는다 — 내용이 갈릴 때
+    /// (`invalidate`·파일 재적재) 0으로 되돌리고 다음 가로 스크롤이 다시 센다.
+    editor_max_cols: u32 = 0,
     /// N1.5 diff Term(`kind == .editor` + entry가 비교)의 상태. **행은 줄 배열을, 줄 배열은 entry의
     /// 두 쪽 버퍼를 빌린다** — 그래서 내용이 갈리기 전에 `editor_diff_ops.invalidate`가 불려야 한다.
     editor_diff: ?editor_diff_ops.State = null,

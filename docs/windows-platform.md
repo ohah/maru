@@ -38,9 +38,14 @@ src/platform/windows/
 `.windows` 갈래를 더한다.
 
 **호스트에 제2 언어를 두지 않는다.** macOS가 Swift를 쓰는 이유는 AppKit이 Objective-C/Swift 전용이기
-때문이고, 그래서 `app_host_abi.zig`(212개 `export fn`)라는 C ABI 경계가 필요했다. **Win32는 C API라 Zig가
-직접 부른다** — 언어 경계도, 그 경계를 넘기는 marshaling 레이어도 필요 없다. 두 L4의 모양이 달라지지만
-L4는 정의상 타깃별 신규다. **ABI는 이식 이음매가 아니다** — 이음매는 renderer 중립 계약이다.
+때문이고, 그래서 `app_host_abi.zig`(212개 `export fn`)라는 C ABI 경계가 필요했다. Windows에는 그 강제가
+없으므로 **Zig 한 언어로 간다** — 언어 경계도, 그 경계를 넘기는 marshaling 레이어도 필요 없다. 두 L4의
+모양이 달라지지만 L4는 정의상 타깃별 신규다. **ABI는 이식 이음매가 아니다** — 이음매는 renderer 중립 계약이다.
+
+> **다만 "Win32는 다 C API"는 아니다.** 창·입력·IME(`user32`·`imm32`)는 평범한 C지만, **DirectWrite·
+> D3D11/DXGI·DirectComposition은 COM**이다. Zig에서 COM은 vtable을 `extern struct`로 직접 놓으면 되지만
+> 편의 계층이 없어 평범한 C 호출보다 손이 더 간다. **제2 언어가 필요하다는 뜻은 아니고**(C++ 불필요),
+> W7의 비용을 "C 함수만 부르면 된다"로 과소평가하지 않기 위한 단서다.
 
 ## 3. 셸과 셸 통합
 
@@ -50,8 +55,21 @@ L4는 정의상 타깃별 신규다. **ABI는 이식 이음매가 아니다** �
 |---|---|---|---|
 | **PowerShell** (pwsh 7 / Windows PowerShell 5.1) | ✅ | ✅ (exit code 포함) | 네이티브 기본 |
 | **cmd** | ✅ | 부분 — **exit code 불가** | §3.4 |
-| **WSL** | ✅ | ✅ | 기존 zsh/bash 통합을 그대로 쓴다. ConPTY 입장에선 `wsl.exe`도 그냥 자식이다 |
-| git-bash · nu 등 | 통합 없으면 2단(§3.3)에 의존 | — | 뜨긴 뜬다 |
+| **WSL** | ✅ (OSC 7) | ✅ | 터미널·통합은 그대로 오지만 **ADE 축 셋이 안 온다** — 아래 |
+| git-bash · nu 등 | 통합 없으면 2단(§3.5)에 의존 | — | 뜨긴 뜬다 |
+
+**WSL은 "공짜로 따라오지" 않는다(적대적 검증에서 드러남).** ConPTY 입장에서 `wsl.exe`는 그냥 자식이라
+**터미널과 셸 통합(OSC 7·133)은 그대로 온다.** 그런데 **WSL2는 경량 VM**이라 그 안의 프로세스가 Windows
+프로세스 목록에 나타나지 않는다(보이는 것은 중계 `wsl.exe` 하나뿐). 그래서 Windows 쪽에서 프로세스를 보는
+축이 전부 무너진다:
+
+| 축 | WSL2에서 |
+|---|---|
+| **에이전트 탐지**(§3.6) | ❌ `claude`·`codex`가 VM 안이라 안 보인다. maru는 이 판정을 **proc_name 폴링**으로 한다(`session_model.AgentKind` — *"pollAgentKinds가 ≈0.5s마다 proc_name으로 갱신"*)이므로, 사이드바 에이전트 목록·세션 도크·에이전트 상태가 **동작하지 않는다** |
+| **cwd 2단**(§3.5) | ❌ PEB로 보이는 것은 `wsl.exe`의 **Windows 쪽 cwd**라 Linux 쪽 실제 cwd와 다르다. 1단(OSC 7)만 유효하다 |
+| **경로 소비** | ⚠️ OSC 7이 주는 `/home/user/x`는 **Linux 경로**라 Windows 파일 API로 못 연다. 파일 탐색기·소스 컨트롤이 쓰려면 `\\wsl$\<distro>\…` 변환이 필요하다 |
+
+ADE의 핵심이 에이전트 축이므로 이것은 작은 결함이 아니다. **해법은 아직 정하지 않았다**(§8).
 
 ### 3.2 cwd 보고 — Windows의 사실상 표준은 OSC 9;9다
 
@@ -89,7 +107,13 @@ macOS가 zsh 통합을 `ZDOTDIR`로 주입하는 것과 같은 결이다. **레�
 전역 훅인 `HKCU\...\Command Processor\AutoRun`은 maru 밖에서 뜨는 모든 cmd에 걸려 침습적이다.
 
 - **cmd**: `PROMPT` 환경변수에 OSC를 심는다. `$E`가 ESC로, `$P`가 현재 경로로 확장된다.
-- **PowerShell**: `prompt` 함수를 오버라이드하는 스크립트를 주입한다.
+- **PowerShell**: `prompt` 함수를 **인라인 `-Command`로** 정의한다. **스크립트 파일(`.ps1`)로 하지 않는다** —
+  `ExecutionPolicy`가 `AllSigned`·`Restricted`면 서명 없는 파일이 막혀 통합이 통째로 죽는다. **인라인
+  `-Command`는 정책 적용 대상이 아니다**(실측으로 확인: 정책과 무관하게 OSC가 나왔다).
+
+> **실측 주의**: §6의 PowerShell 항목을 처음 잴 때 프로세스 스코프 정책이 `Bypass`였다(도구 환경 탓).
+> 즉 그 측정은 **파일 방식이 기본 정책에서 된다는 것을 증명하지 않는다.** 인라인 방식만 정책 무관으로
+> 확인됐고, 그래서 계약이 인라인을 요구한다.
 
 **사용자 프롬프트를 덮지 않는다.** 부모의 `PROMPT`(없으면 `$P$G`)를 읽어 그 **앞에 OSC만 덧붙인다.**
 `SpawnRequest.zdotdir`는 zsh 전용 이름이라, 셸 중립적인 "통합 주입 지점"으로 일반화한다(§4).
@@ -113,7 +137,12 @@ macOS는 OSC 7이 없을 때 `proc_pidinfo(PROC_PIDVNODEPATHINFO)`로 커널에 
 Orca는 4단까지 내려간다.
 
 **둔다면 반드시 fail-soft여야 한다.** 구조체 오프셋이 비문서화라 Windows 버전·WOW64에 따라 달라질 수 있다.
-실패하면 조용히 1단만 쓴다. 비공개 API 사용의 선례는 있다 — macOS의 창 블러가
+실패하면 조용히 1단만 쓴다.
+
+**그리고 후행 구분자를 순진하게 자르면 안 된다.** PEB의 `CurrentDirectory.DosPath`는 **항상 후행 `\`를
+포함**하는데, 드라이브 루트에서는 값 자체가 `C:\`(3바이트)라 그냥 자르면 **`C:`** 가 된다. Windows에서 `C:`는
+"C 드라이브의 **현재** 디렉터리"라는 **다른 뜻의 드라이브 상대 경로**다(실측 확인). 트림은 **결과가 드라이브
+루트가 되는 경우를 예외로** 둬야 한다. 비공개 API 사용의 선례는 있다 — macOS의 창 블러가
 `CGSSetWindowBackgroundBlurRadius`(비공개 CGS)를 쓴다.
 
 ### 3.6 에이전트 탐지
@@ -208,6 +237,30 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 경로는 `/`로 정규화된 상태여야 한다. 안 하면 `file_tree`·`git_ops`·소스 컨트롤이 `/repo\docs` 문제를
 그대로 다시 겪는다(그 버그는 이미 한 번 고쳤다).
 
+**그런데 정규화만 하면 안 된다 — 중립 레이어가 "선두가 `/`인가"로 절대경로를 판정한다.** 적대적 검증에서
+다섯 곳이 나왔고, 성격이 갈린다:
+
+| 위치 | 지금 | Windows 경로에서 |
+|---|---|---|
+| `session/file_panel_bridge.zig` `normalizeAssetPath` | `raw[0]=='/'`→Absolute, 역슬래시→InvalidCharacter | **가드가 무력화된다** — 아래 |
+| `session/repo_path.zig` | `path[0]=='/'`이면 절대로 보고 거부 | `C:/x`가 **상대 경로로 통과**한다 |
+| `session/file_tree.zig`·`file_tree_mutation.zig` | root 포함 판정이 `root=="/"` 특수 케이스를 둠 | 드라이브 루트(`C:/`)에 대응이 없다 |
+| `terminal/selection.zig` | 링크 감지가 `word[0]=='/'`로 절대경로 판정 | `C:\…`를 절대경로 링크로 못 잡는다(기능 결손) |
+
+**`normalizeAssetPath`가 특히 위험하다.** 오늘 Windows 절대경로를 막고 있는 것은 `raw[0]=='/'`가 아니라
+**역슬래시 거부**다. 입구에서 `\`→`/`로 바꾸면 `C:\Windows\x`가 `C:/Windows/x`가 되어 세 검사(절대·역슬래시·
+`..`)를 **전부 통과**하고 "상대 경로"로 받아들여진다. 자산 루트에 이어 붙어 존재하지 않는 경로가 되므로
+지금 당장 뚫리지는 않지만, **가드의 의도가 깨진다.**
+
+**따라서 규칙을 둘로 나눈다.**
+
+1. **구분자 정규화는 입구에서** 한다(`\`→`/`).
+2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
+   판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
+
+이 다섯 곳을 고치는 것은 W3와 별개 슬라이스이며, 순서상 **정규화를 도입하기 전에** 해야 한다 — 반대로 하면
+`normalizeAssetPath`가 잠깐 느슨해진 창이 생긴다.
+
 ## 6. 실측 (2026-08-15, Windows 10.0.19045, zig 0.16.0)
 
 계약을 쓰기 전에 PoC로 확인한 것과 확인하지 못한 것을 정직하게 남긴다.
@@ -215,8 +268,8 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 | 항목 | 결과 |
 |---|---|
 | cmd `PROMPT` 주입 | ✅ `ESC]9;9;C:\...ESC\` + `OSC 133 A/B/D` 캡처 |
-| PowerShell `prompt` 오버라이드 | ✅ OSC 7 + `OSC 133 A/B/D`(exit code 포함) 캡처 |
-| PEB cwd(2단) | ✅ 자기 프로세스 대조 일치(후행 `\` 트림 필요), 남의 셸 프로세스도 읽힘 |
+| PowerShell `prompt` 오버라이드 | ✅ **pwsh 7.6.3**(전체 `OSC 133 D/A/B` + OSC 7)과 **Windows PowerShell 5.1.19041**(OSC 7) 양쪽에서 **인라인 `-Command`로** 캡처. 파일(`.ps1`) 방식의 정책 내성은 **미증명**이다 — 처음 측정이 프로세스 정책 `Bypass` 환경이었다(§3.3) |
+| PEB cwd(2단) | ✅ 자기 프로세스 대조 일치, 남의 셸 프로세스도 읽힘. **드라이브 루트는 `C:\`로 와서 순진한 트림이 `C:`(드라이브 상대)를 만든다**(§3.5) |
 | 프로세스 열거 | ✅ 5,328개 열거, `ppid` 체인으로 부모-자식 확인 |
 | **`waitIo` 대응**(§4.1) | ✅ overlapped named pipe 비동기 read가 `ERROR_IO_PENDING`으로 등록되고, 상대 write는 read 이벤트로·`SetEvent`는 wake 이벤트로 깨우며, 조용하면 스핀 없이 `WAIT_TIMEOUT`. **`CreatePseudoConsole`이 named pipe 핸들을 받는다**(`hr=S_OK`) |
 | ConPTY | ⚠️ `CreatePseudoConsole`·`ResizePseudoConsole` S_OK, conhost가 VT init 방출, `UpdateProcThreadAttribute`가 잘못된 attribute를 거부하고 `0x20016`은 수락. **자식이 pty에 붙는 것만 미확인** |
@@ -237,6 +290,9 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 
 ## 8. 아직 정하지 않은 것
 
+- **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
+  포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
+  생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.
 - **OSC 9;9의 host를 어떻게 볼 것인가**(§3.2). authority 필드가 없어 로컬/원격 판정에 구멍이 난다.
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.

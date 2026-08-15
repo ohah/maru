@@ -4,9 +4,9 @@
 
 ## 배경
 
-중립 레이어(L1~L3)는 이미 Windows 호스트에서 컴파일되고 테스트가 돈다
-([layering-and-portability.md](../layering-and-portability.md) §4.1 — 2,323 통과 / 33 skip / 0 실패).
-빠진 것은 L4 전부다: ConPTY 백엔드 0줄, Win32 호스트 0줄, 렌더러 0줄.
+중립 레이어(L1~L3)는 이미 Windows 호스트에서 컴파일되고 테스트가 **exit 0으로** 돈다(수치는
+[layering-and-portability.md](../layering-and-portability.md) §4.1의 실측 기록이 단일 출처다 — 여기서
+복제하지 않는다). 빠진 것은 L4 전부다: ConPTY 백엔드 0줄, Win32 호스트 0줄, 렌더러 0줄.
 
 순서의 기준은 [초기 세로 슬라이스](../initial-vertical-slice.md)가 macOS에서 쓴 것과 같다 —
 **GUI 전에 헤드리스 경로를 먼저 증명한다.** W1~W5가 전부 헤드리스라 창·GPU 결정과 독립적으로 진행되고,
@@ -17,7 +17,8 @@
 | | 내용 | 상태 |
 |---|---|---|
 | W0 | 계약 문서(`windows-platform.md`) + 이 계획. 코드 0 | 완료 |
-| W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더해 기존 cwd 경로로 넘긴다. **L1이라 Windows와 독립**이고 macOS에서 헤드리스로 검증된다 | 미착수 |
+| W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더해 기존 cwd 경로로 넘긴다. L1이라 Windows와 독립이고 헤드리스로 검증된다. **선행 결정: OSC 9;9엔 authority가 없다**(계약 §3.2·§8) — host를 어떻게 볼지 정하기 전에는 시작할 수 없다 | **결정 대기** |
+| W1.5 | **절대경로 판정을 `[0]=='/'`에서 떼어낸다** — 중립 5곳(`normalizeAssetPath`·`repo_path`·`file_tree`·`file_tree_mutation`·`selection`). 계약 §5의 순서 제약상 **경로 정규화 도입보다 먼저** 해야 한다 | 미착수 |
 | W2 | **`main.zig` Windows 컴파일** — unix domain socket과 POSIX 파일 모드 2곳을 graceful 폴백으로. named pipe 이식은 아니다 | 미착수 |
 | W3 | **`SpawnRequest` 중립화** — `login`은 의도로 재문서화, `zdotdir`은 "통합 자산 디렉터리"로 일반화, `term`은 백엔드 위임. `command`+`args`는 **그대로**. **wire tag는 건드리지 않는다**(계약 §4.2). macOS 동작 변화 0 | 미착수 |
 | W4 | **ConPTY 백엔드** — `src/pty/windows.zig`. 필수 13 표면. 파이프는 `CreatePipe`가 아니라 **overlapped named pipe**여야 한다(계약 §4.1). PoC 코드가 있으나 **실기 세션 확인이 선행**(계약 §6) | 미착수 |

@@ -6,6 +6,21 @@
 const std = @import("std");
 const process_identity = @import("process_identity.zig");
 
+var slot_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+var node_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+
+fn nextIncarnation(issuer: *std.atomic.Value(u64)) ?u64 {
+    var current = issuer.load(.monotonic);
+    while (current != 0 and current != std.math.maxInt(u64)) {
+        if (issuer.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        return current;
+    }
+    return null;
+}
+
 pub const NodeLifecycle = enum(u8) { pristine, building, candidate, current, retiring, tombstone, reclaimed };
 pub const SlotLifecycle = enum(u8) { pristine, live, closed };
 
@@ -25,6 +40,7 @@ pub fn GenerationSlot(comptime Payload: type) type {
         pub const Node = struct {
             self_addr: usize = 0,
             slot_addr: usize = 0,
+            incarnation: u64 = 0,
             generation: u64 = 0,
             heap_owned: bool = false,
             lifecycle: NodeLifecycle = .pristine,
@@ -40,8 +56,22 @@ pub fn GenerationSlot(comptime Payload: type) type {
             active: bool = false,
         };
 
+        /// 서로 다른 owner의 tick-end 정산을 묶을 때 retiring node를 값으로 빌리지 않고
+        /// final address와 generation으로 고정한다. 이 receipt 자체도 final-address authority다.
+        pub const PreparedRetiringReclaim = struct {
+            self_addr: usize = 0,
+            owner_pid: u32 = 0,
+            slot_addr: usize = 0,
+            slot_incarnation: u64 = 0,
+            node_addr: usize = 0,
+            node_incarnation: u64 = 0,
+            generation: u64 = 0,
+            active_raw: u8 = 0,
+        };
+
         self_addr: usize = 0,
         owner_pid: u32 = 0,
+        incarnation: u64 = 0,
         owner_thread: ?std.Thread.Id = null,
         allocator: ?std.mem.Allocator = null,
         lifecycle: SlotLifecycle = .pristine,
@@ -63,10 +93,15 @@ pub fn GenerationSlot(comptime Payload: type) type {
                 return error.InvalidAuthority;
             const owner_pid = process_identity.currentProcessId();
             if (owner_pid == 0) return error.InvalidAuthority;
+            const slot_incarnation = nextIncarnation(&slot_incarnation_issuer) orelse
+                return error.InvalidAuthority;
+            const inline_incarnation = nextIncarnation(&node_incarnation_issuer) orelse
+                return error.InvalidAuthority;
 
             self.* = .{
                 .self_addr = @intFromPtr(self),
                 .owner_pid = owner_pid,
+                .incarnation = slot_incarnation,
                 .owner_thread = std.Thread.getCurrentId(),
                 .allocator = allocator,
                 .lifecycle = .live,
@@ -75,6 +110,7 @@ pub fn GenerationSlot(comptime Payload: type) type {
             self.inline_node = .{
                 .self_addr = @intFromPtr(&self.inline_node),
                 .slot_addr = self.self_addr,
+                .incarnation = inline_incarnation,
                 .generation = initial_generation,
                 .heap_owned = false,
                 .lifecycle = .building,
@@ -104,6 +140,8 @@ pub fn GenerationSlot(comptime Payload: type) type {
             node.* = .{
                 .self_addr = @intFromPtr(node),
                 .slot_addr = self.self_addr,
+                .incarnation = nextIncarnation(&node_incarnation_issuer) orelse
+                    return error.Exhausted,
                 .generation = generation,
                 .heap_owned = true,
                 .lifecycle = .building,
@@ -240,6 +278,78 @@ pub fn GenerationSlot(comptime Payload: type) type {
             }
         }
 
+        pub fn prepareRetiringReclaim(
+            self: *Self,
+            out: *PreparedRetiringReclaim,
+        ) !void {
+            try self.validateLive();
+            if (!std.meta.eql(out.*, PreparedRetiringReclaim{}) or
+                rangesOverlap(self, @sizeOf(Self), out, @sizeOf(PreparedRetiringReclaim)))
+                return error.InvalidAuthority;
+            const node = self.retiring orelse return error.NoRetiringGeneration;
+            if (!validNode(self, node, .retiring) or !node.payload_present)
+                return error.InvalidAuthority;
+            out.* = .{
+                .self_addr = @intFromPtr(out),
+                .owner_pid = self.owner_pid,
+                .slot_addr = self.self_addr,
+                .slot_incarnation = self.incarnation,
+                .node_addr = @intFromPtr(node),
+                .node_incarnation = node.incarnation,
+                .generation = node.generation,
+                .active_raw = 1,
+            };
+        }
+
+        pub fn preflightRetiringReclaim(
+            self: *Self,
+            prepared: *const PreparedRetiringReclaim,
+        ) !void {
+            try self.validateLive();
+            if (prepared.active_raw != 1 or prepared.self_addr != @intFromPtr(prepared) or
+                prepared.owner_pid != self.owner_pid or prepared.slot_addr != self.self_addr or
+                prepared.slot_incarnation != self.incarnation)
+                return error.InvalidAuthority;
+            const node = self.retiring orelse return error.NoRetiringGeneration;
+            if (!validNode(self, node, .retiring) or !node.payload_present or
+                @intFromPtr(node) != prepared.node_addr or node.incarnation != prepared.node_incarnation or
+                node.generation != prepared.generation)
+                return error.InvalidAuthority;
+        }
+
+        pub fn retiringPayload(
+            self: *Self,
+            prepared: *const PreparedRetiringReclaim,
+        ) !*const Payload {
+            try self.preflightRetiringReclaim(prepared);
+            return &self.retiring.?.payload;
+        }
+
+        /// 모든 교차-owner preflight가 끝난 뒤 호출하는 no-fail suffix다. retiring payload를
+        /// 먼저 파괴하고 node publication을 제거한 뒤에만 다음 owner commit으로 진행한다.
+        pub fn commitRetiringReclaimInPlaceNoFail(
+            self: *Self,
+            prepared: *PreparedRetiringReclaim,
+            context: anytype,
+            comptime deinitializer: anytype,
+        ) void {
+            self.preflightRetiringReclaim(prepared) catch
+                @panic("generation slot retiring reclaim proof lost after preflight");
+            const node = self.retiring.?;
+            deinitializer(&node.payload, context);
+            node.payload_present = false;
+            self.retiring = null;
+            if (node.heap_owned) {
+                node.lifecycle = .reclaimed;
+                self.allocator.?.destroy(node);
+            } else {
+                if (node != &self.inline_node)
+                    @panic("generation slot inline retiring node identity drifted");
+                node.lifecycle = .tombstone;
+            }
+            prepared.active_raw = 0;
+        }
+
         pub fn abortCandidateInPlace(
             self: *Self,
             prepared: *PreparedCandidate,
@@ -313,7 +423,7 @@ pub fn GenerationSlot(comptime Payload: type) type {
         }
 
         fn validateLive(self: *const Self) !void {
-            if (self.self_addr != @intFromPtr(self) or self.owner_pid == 0 or
+            if (self.self_addr != @intFromPtr(self) or self.owner_pid == 0 or self.incarnation == 0 or
                 self.owner_pid != process_identity.currentProcessId() or self.owner_thread == null or
                 self.owner_thread.? != std.Thread.getCurrentId() or self.lifecycle != .live or
                 self.allocator == null or self.next_generation == 0 or self.current == null)
@@ -354,16 +464,18 @@ pub fn GenerationSlot(comptime Payload: type) type {
 
         fn validNode(self: *const Self, node: *const Node, expected: NodeLifecycle) bool {
             return node.self_addr == @intFromPtr(node) and node.slot_addr == self.self_addr and
-                node.generation != 0 and node.generation < self.next_generation and
+                node.incarnation != 0 and node.generation != 0 and node.generation < self.next_generation and
                 (node.heap_owned or node == &self.inline_node) and
                 node.lifecycle == expected;
         }
 
         fn pristine(self: *const Self) bool {
-            return self.self_addr == 0 and self.owner_pid == 0 and self.owner_thread == null and self.allocator == null and
+            return self.self_addr == 0 and self.owner_pid == 0 and self.incarnation == 0 and
+                self.owner_thread == null and self.allocator == null and
                 self.lifecycle == .pristine and self.next_generation == 0 and self.current == null and
                 self.retiring == null and self.candidate == null and self.inline_node.self_addr == 0 and
                 self.inline_node.slot_addr == 0 and self.inline_node.generation == 0 and
+                self.inline_node.incarnation == 0 and
                 !self.inline_node.heap_owned and self.inline_node.lifecycle == .pristine and
                 !self.inline_node.payload_present;
         }

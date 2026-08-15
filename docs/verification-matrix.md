@@ -1897,20 +1897,23 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   max-generation checked-add mutation-0 행,
   HostAdapter compatibility facade와 source boundary를 최적화 모드마다 `2+1+1`로 exact 실행한다.
   managed incident binding과 게시 뒤 첫 attachment reservation은 새 Client 주소/generation에 exact 결속하며 제품 caller와
-  old destroy는 0이다. R3 reclaim 및 CR3c 실제
-  reconnect integration은 여전히 미완료다.
+  old destroy는 0이다. R3 reclaim과 CR3c ordered integration은 아래 focused gate가 소유하며 actual socket은 CR4다.
   R3 focused gate `zig build test-session-host-cr3b-r3`는 R2c를 상속하고 최적화 모드마다 exact 2-slot retired inventory,
   generation 1→2→3 publication, cap 2의 세 번째 prepare mutation-0 reject, pure Client readiness, final-address reclaim seal,
   generation 1 첫 tick 뒤 generation 4 게시와 generation 2→3 tick destroy/final zero 성공 행 1개, copied/stale/digest-readiness drift destroy-0 행 1개, HostAdapter tick-end
   facade 1개와 source boundary 1개를 `2+1+1`로 exact 실행한다. reclaim suffix만 Client/registry/accounting teardown과 allocator
-  destroy를 소유하며 current와 sibling retired는 보존한다. R3 제품 caller는 0이고 CR3c integration과 CR4 actual socket은 미완료다.
+  destroy를 소유하며 current와 sibling retired는 보존한다. 이 facade의 sole 제품 caller는 CR3c2 owner이며 CR4 actual socket은 미완료다.
   CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
   CR3c1은 prepared admission close 아래 old attachment를 먼저 terminalize하고 admission close를 no-fail 게시한 뒤 R2a/R2b/R2c를 진행한다.
   R2c가 게시한 receipt와 같은 adapter/old-next connection generation을 공유하는 forward-recovery `PreparedReconnect`를 stable screen writer
   gate에서 게시한다. R2a unavailable placeholder와 candidate는 같은 shell generation을 쓰되 connection generation은
   별도 필드로 결속하고 두 old owner를 각 기존 세대의 retiring으로 보존한다. mismatch/copy/drift는 RemoteGeneration/screen
   mutation 0이며 이미 게시된 Client graph를 보존한다. CR3c2는 matching retiring RemoteGeneration attachment를 먼저 정산한 뒤 oldest retired Client를 같은 tick-end
-  turn에서 회수하며 generation mismatch의 destroy 0과 final zero를 검증한다. CR3c2 전에는 CR3c 전체가 부분 구현이다.
+  turn에서 회수하며 generation mismatch의 destroy 0과 final zero를 검증한다. focused gate
+  `zig build test-session-host-cr3c-c2`는 정상·hostile 2행과 source boundary 1행을 Debug·ReleaseFast에서 exact-count한다.
+  prepared authority는 PID/process nonce와 owner·slot·node incarnation을 검증하고 terminalized old attachment만 admit한다.
+  중간 test-only transcript는 실제 RemoteGeneration inventory가 먼저 0이고 Client retired inventory는 아직 1인 상태를 관측한
+  뒤 둘 다 0이 되는 순서를 고정한다. CR3c production-type 구조 integration은 구현됐으며 actual socket E2E는 CR4다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는
   suffix로 결속해 `live`가 된다. Debug·ReleaseFast `test-session-host-2e`는 준비 계약 4개, actual socket parity 6개, rollback 4개,

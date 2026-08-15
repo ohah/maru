@@ -292,8 +292,8 @@ Maru 작업에서 사용하는 기본 명령이다.
   Debug·ReleaseFast에서 exact 2-slot retired inventory의 generation 1→2→3 publication, cap 2 세 번째 prepare mutation-0 reject,
   pure Client readiness와 final-address `PreparedRetiredClientReclaim`, generation 1 첫 tick 뒤 generation 4 게시와 generation 2→3 tick destroy/final zero 행 1개,
   copied/stale/digest-readiness drift destroy-0 행 1개, HostAdapter tick-end facade 1개와 source boundary 1개를 exact-count한다.
-  reclaim no-fail suffix만 Client graph·node registry·accounting과 allocator destroy를 소유한다. 이 dormant facade의 제품 caller는 0이고
-  CR3c actual `RemoteGeneration` integration과 CR4 socket reconnect 완료 증거가 아니다.
+  reclaim no-fail suffix만 Client graph·node registry·accounting과 allocator destroy를 소유한다. 이 R3 gate 자체는 제품 caller를
+  실행하지 않으며 sole 제품 caller와 CR3c `RemoteGeneration` integration은 CR3c2 gate가, socket reconnect는 CR4가 소유한다.
 - 영속 세션 호스트 CR3c C1 generation publication integration gate: `zig build test-session-host-cr3c-c1`. R3를 상속하고
   Debug·ReleaseFast에서 old attachment terminalization→admission close→R2a/R2b/R2c→forward-recovery candidate prepare를 실제 실행하고,
   R2c가 게시한 `PreparedClientReplacement` receipt와 production `RemoteGeneration` candidate가 같은 HostAdapter 및 exact
@@ -301,6 +301,13 @@ Maru 작업에서 사용하는 기본 명령이다.
   게시하는 성공 행 1개, adapter/generation/copy drift가 screen/RemoteGeneration mutation 0이고 published Client graph를 보존하는 행 1개와 source boundary 1개를
   exact-count한다. 양쪽 generation 1 owner는 retiring으로 보존하고 destroy는 0이다. ordered retiring reclaim/final zero는 CR3c2,
   actual `connectExistingHost` socket issuer는 CR4이므로 이 gate만으로 CR3c 또는 실제 reconnect 완료를 뜻하지 않는다.
+- 영속 세션 호스트 CR3c C2 ordered retiring reclaim gate: `zig build test-session-host-cr3c-c2`. C1을 상속하고
+  Debug·ReleaseFast에서 retiring `RemoteGeneration`과 oldest retired Client의 exact connection generation을 final-address
+  prepared authority로 함께 고정한다. process PID/nonce, owner·slot·node incarnation을 함께 검증하고 old generation attachment가
+  이미 terminalized 된 경우만 no-fail suffix에 admit한다. 성공 행은 RemoteGeneration attachment·observation teardown 뒤 같은 tick-end turn에서
+  Client node를 회수하고 양 inventory final zero를 검증한다. hostile 행은 generation mismatch, copied receipt, prepare 뒤
+  RemoteGeneration drift를 첫 destroy 전에 거부하고 두 owner를 보존한다. 제품 source boundary 1개를 함께 exact-count한다.
+  이 gate로 CR3c의 구조적 publication/reclaim integration은 닫히지만 actual `connectExistingHost` socket reconnect는 CR4다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

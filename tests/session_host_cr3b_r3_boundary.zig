@@ -166,9 +166,11 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
         try countProductSourcesExcept(allocator, needle, &.{
             "platform/macos/session_host/client_slot.zig",
             "platform/macos/session_host/host_adapter.zig",
+            "platform/macos/session_host/remote_runtime.zig",
         }),
     );
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "RetiredClientReclaim"));
+    // CR3c2만 R3 receipt를 actual RemoteGeneration retiring owner와 조합한다.
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "RetiredClientReclaim"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "destroyRetiredClient("));
     try std.testing.expectEqual(
         @as(usize, 0),

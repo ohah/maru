@@ -173,8 +173,16 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     // 배지 폭은 **`ui/badge`가 정한다** — 여기서 상수로 어림하면 자릿수가 늘 때 갈린다.
                     .margin = .{ .right = @floatFromInt(rightMarkerExtent(item, props, m)) },
                 },
-                // 평소에는 배경 없이 글리프만 보인다(`ghost`는 행과 같은 배경이고 테두리가 없다).
+                // **이 버튼은 배경을 칠하지 않는다.** `ghost`의 기본 배경(`surface_bg`)은 비호버 행과 같은
+                // 색이라 안 보이지만, 행 동작이 보이는 순간은 **언제나 그 행이 호버된 때**이고 그때 행
+                // 배경은 `row_hover_bg`로 밝아진다 — 버튼만 원래 색으로 남아 **구멍처럼 어두운 칩**이
+                // 된다(Lab 골든에서 실측: 행 밴드 (80,80,80) 위에 칩 (20,20,20)).
+                //
+                // 앞서 같은 자리에서 **테두리**를 고쳤는데(색 없는 테두리가 배경을 뚫었다) 채움은 남아
+                // 있었다. 이 자리의 affordance는 글리프와 행 호버 밴드이지 칩이 아니므로 quad를 투명하게
+                // 둔다 — `ghost`에 "배경 없음"이 없어서 `opacity`가 그 뜻을 내는 유일한 수단이다.
                 .variant = .ghost,
+                .paint = .{ .opacity = 0 },
                 .action = action,
                 .overflow = .clip,
             });

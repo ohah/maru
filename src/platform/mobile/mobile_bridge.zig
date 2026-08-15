@@ -174,6 +174,12 @@ fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
 
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
+    // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
+    // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
+    // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
+    // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
+    if (screen != .terminal) return @intCast(delivered_len);
+
     // **닿은 것만 센다.** 반환값이 "코어에 전달한 누적 바이트" 라고 헤더에 적어 놓고,
     // 코어가 없거나 write 가 실패해도 그냥 더하고 있었다 — 그 값으로 입력이 죽은 것을
     // 판정하라고 해 놓고 값이 거짓말을 했다.
@@ -272,6 +278,12 @@ fn writeKey(core: *terminal.core.TerminalCore, key: terminal.input.Key, mods: te
 
 pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
+    // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
+    // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
+    // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
+    // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
+    if (screen != .terminal) return @intCast(delivered_len);
+
     const core = &(term_core orelse {
         setLastError("input_before_core");
         return @intCast(delivered_len);
@@ -2395,7 +2407,10 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_last_y = y;
             set_moved = 0;
             set_fling = 0;
-            set_back_pressed = setHit(set_back_rect, x, y);
+            // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
+            // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
+            // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
+            set_back_pressed = set_open == null and setHit(set_back_rect, x, y);
             set_pressed = null;
             if (set_open == null and !set_back_pressed) {
                 for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {

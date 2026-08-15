@@ -1434,3 +1434,57 @@ test "분할된 pane: 휠은 커서 아래 편집기만 굴린다 — 옆 pane �
     try testing.expect(fx.term.rt.editor_first_line > 0);
     try testing.expectEqual(before_right, right_term.rt.editor_first_line);
 }
+
+test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — init 이후만 흔든다" {
+    // **이 자리에 테스트가 없었다.** 같은 이중 해제를 `materialize`·`computeMarks`에서 주입으로 두 번
+    // 잡고, 여기는 그 패턴을 알고 나서 **읽어서** 고쳤다 — 회귀를 자동으로 잡을 것이 없었다.
+    //
+    // `checkAllAllocationFailures`를 그대로 못 쓴다: 세션 allocator는 init에 고정이고, 다른 allocator로
+    // 잡으면 나중에 `releaseEditorTerm`이 세션 allocator로 풀어 **진짜 버그**가 된다. 그래서 세션을
+    // 실패 allocator로 만들되 **init이 끝난 뒤부터** 실패 지점을 옮긴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "doc.zig", .data = "const a = 1;\nconst b = 2;\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(backing, &.{ root, "doc.zig" });
+    defer backing.free(path);
+
+    // 실패 지점을 하나씩 뒤로 밀며 연다. 열기 한 번이 쓰는 할당 수보다 넉넉히 돈다.
+    var failed_steps: usize = 0;
+    var ok_steps: usize = 0;
+    var step: usize = 0;
+    while (step < 24) : (step += 1) {
+        var failing = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = failing.allocator();
+
+        const session = try backing.create(AppSession);
+        defer backing.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), alloc, .{
+            .abi_version = app_session_mod.abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        });
+        defer session.deinit(); // 누수·이중 해제는 backing(=testing.allocator)이 잡는다
+
+        // **여기서부터** 실패시킨다 — init이 쓴 할당은 건드리지 않는다.
+        failing.fail_index = failing.allocations + step;
+        const term = openPathInActivePane(session, path) catch {
+            failed_steps += 1;
+            continue;
+        };
+        // 성공했으면 세션 해체가 그 Term을 정리한다(그 경로도 함께 확인된다).
+        try testing.expect(term.rt.editor_path != null);
+        ok_steps += 1;
+    }
+    // **공허해질 수 없게 세어서 단언한다.** 실패를 한 번도 안 겪으면 이 테스트는 아무것도 지키지
+    // 않는다 — 열기가 쓰는 할당 수가 줄어 창을 벗어나도 여기서 걸린다.
+    try testing.expect(failed_steps >= 5);
+    try testing.expect(ok_steps >= 1);
+}

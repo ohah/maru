@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const input = @import("input.zig");
 const types = @import("types.zig");
 
@@ -5827,9 +5828,15 @@ test "collectViewportLinks: soft-wrap된 링크를 중복 없이 한 번만 방�
     try std.testing.expect(out.items[0].span.end.row > out.items[0].span.start.row); // 실제로 wrap을 태웠다
 }
 
+// [경로 semantics] 아래 링크·클릭 경로 테스트 3개는 **POSIX 경로 전제**다: 절대 경로 = 선행 `/`, 구분자 = `/`,
+// 홈 = `$HOME`, cwd 조회 = libc `getcwd`. Windows는 드라이브 문자(`D:\`)·백슬래시·`%USERPROFILE%`로 이 넷이 전부
+// 다르고, 그건 link-detection.md가 아직 정하지 않은 **설계 결정**이다. 여기서 억지로 통과시키면(경로를 OS별로
+// 조립해 주는 식) 링크 감지가 Windows에서 동작하는 것처럼 보이지만 실제 제품 판정(`isAbsolute`·존재 게이트)은
+// 그대로 POSIX라, 테스트만 초록인 상태가 된다. 그래서 정직하게 POSIX에서만 돌리고 Windows는 skip으로 남긴다.
 test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd-relative)" {
     // file_path 링크는 실제로 존재할 때만 절대 경로로 열린다(오탐·미존재 차단). 절대 경로는 cwd 없이,
     // bare/상대 경로는 OSC 7 cwd 기준으로 resolve. tmpDir에 실파일을 만들어 검증한다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // 아래 [경로 semantics] 참조
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5879,6 +5886,7 @@ test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd
 }
 
 test "resolveClickedPath: cwd-relative resolve, normalization, line:col strip, directory, existence gate" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // 아래 [경로 semantics] 참조
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5932,10 +5940,13 @@ test "resolveClickedPath: cwd-relative resolve, normalization, line:col strip, d
 }
 
 // 테스트 전용 — Zig 0.16 std.c엔 setenv/unsetenv 바인딩이 없어 직접 extern 선언한다(pty/macos.zig 선례).
+// **POSIX 전용**: Windows CRT는 이 둘 대신 `_putenv_s`를 준다. 아래 테스트가 POSIX에서만 도는 덕에 다른
+// 타깃에선 참조되지 않아 분석·링크되지 않는다(참조되면 lld-link undefined symbol로 터진다 — 실측).
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "resolveClickedPath: ~/ expands via $HOME, empty HOME rejected" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // 위 [경로 semantics] 참조
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

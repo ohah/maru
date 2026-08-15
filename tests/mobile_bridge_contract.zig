@@ -27,6 +27,13 @@ fn keybarTap(x: f32, y: f32) u32 {
     return 1;
 }
 
+/// 선택을 치운다. **취소(phase 3)로는 안 지워진다** — host 가 그 phase 를 배경 전환에도 쓰기
+/// 때문이다(선택이 셰이드 한 번에 사라지면 안 된다). 지우는 자리는 제품과 같이 **다음 누름**이다.
+fn clearSelection(x: f32, y: f32) void {
+    bridge.maru_mobile_pointer(0, x, y, now());
+    bridge.maru_mobile_pointer(2, x, y, now());
+}
+
 // 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
 var fake_ms: u64 = 0;
 fn now() u64 {
@@ -104,7 +111,7 @@ test "선택을 복사로 꺼낸다" {
     // 복사해도 선택은 남는다(데스크톱과 같다).
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
-    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    clearSelection(q.x, q.y);
     bridge.maru_mobile_clear_error();
 }
 
@@ -633,7 +640,7 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
     // ④ 다시 누르면 사라진다(데스크톱에서 클릭이 선택을 푸는 것과 같다).
     bridge.maru_mobile_pointer(0, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(3, p.x, p.y, now()); // cancel 로 정리
+    clearSelection(p.x, p.y); // cancel 로 정리
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
@@ -670,7 +677,7 @@ test "선택은 화면에 quad 로 나타난다" {
     bridge.maru_mobile_pointer(1, q.x + 2, q.y, now());
     try std.testing.expectEqual(span, bridge.maru_mobile_selection_span());
 
-    bridge.maru_mobile_pointer(3, q.x + 2, q.y + 1, now());
+    clearSelection(q.x + 2, q.y + 1);
     try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874, now()));
     bridge.maru_mobile_clear_error();
 }
@@ -710,7 +717,7 @@ test "여러 줄에 걸쳐 선택된다" {
     const multi = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(multi >= plain + 3);
 
-    bridge.maru_mobile_pointer(3, to.x, to.y, now());
+    clearSelection(to.x, to.y);
     try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874, now()));
     bridge.maru_mobile_clear_error();
 }
@@ -725,25 +732,41 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
     _ = bridge.maru_mobile_input("target word here", 16);
 
-    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    // **0행에서 잡으면 안 된다.** 밀려 올라간 것을 보려면 줄어들 여지가 있어야 하는데, 0행은
+    // 더 줄 수 없어 "줄었다" 를 뷰포트 span 으로 표현할 수가 없다(예전 판이 그래서 상수 참인
+    // 단언을 들고 있었다 — 아래 참고). 한 줄 띄워 1행에서 잡는다.
+    _ = bridge.maru_mobile_input("\x1b[2;1H", 6); // CUP — Enter 는 CR 이라 행이 안 넘어간다
+    _ = bridge.maru_mobile_input("target word here", 16);
+
+    const q = pointForCell(1, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, q.x, q.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     const before = bridge.maru_mobile_selection_span();
-    try std.testing.expectEqual(@as(u64, 0), (before >> 48) & 0xFFFF); // 지금은 0행
+    const before_row = (before >> 48) & 0xFFFF;
+    try std.testing.expectEqual(@as(u64, 1), before_row); // 지금은 1행
 
-    // 화면을 한 줄 밀어 올린다 — 개행은 CR 이라 안 되므로 폭보다 긴 출력으로 wrap 시킨다.
-    var long_line: [1024]u8 = undefined;
-    @memset(&long_line, 'z');
-    _ = bridge.maru_mobile_input(&long_line, long_line.len);
+    // **정확히 한 줄만 밀어 올린다** — 맨 아래 행으로 가서 IND(`ESC D`) 한 번.
+    //
+    // 예전 판은 1024자를 흘려 wrap 시켰는데, 그러면 선택한 행이 뷰포트 밖으로 통째로 나가
+    // span 이 "안 보임"(maxInt)이 된다 — 선택을 **잃은 것과 구분이 안 돼** 단언을 세울 수가
+    // 없다(그래서 예전 판이 그 경우를 통째로 건너뛰었다).
+    //
+    // **SU(`CSI S`)로는 안 된다.** 코어가 "전체 화면 LF 스크롤만 절대 좌표가 내용을 따라간다,
+    // 그 외 재배치는 해제한다" 고 정해 뒀다(`invalidateSelection` 주석). 선택이 살아남는 유일한
+    // 경우로 밀어야 이 계약을 실제로 재는 것이 된다.
+    _ = bridge.maru_mobile_input("\x1b[999;1H\x1bD", 11);
 
     // **행 번호가 줄었어야 한다** = 하이라이트가 글자를 따라 위로 갔다.
+    //
+    // 예전 판은 `after_row < before_row or before_row == 0` 이었는데, 바로 위에서 before_row 를
+    // 0 으로 못박아 뒀으므로 오른쪽이 **상수 참**이고 왼쪽은 unsigned `< 0` 이라 **상수 거짓**이라
+    // 절대 실패할 수 없었다. 게다가 `if (after != maxInt)` 로 감싸 **선택을 잃는 회귀는 본문을
+    // 통째로 건너뛰었다** — maxInt 가 곧 "선택 없음" sentinel 이다. 둘 다 없앤다.
     const after = bridge.maru_mobile_selection_span();
-    if (after != std.math.maxInt(u64)) {
-        try std.testing.expect((after >> 48) & 0xFFFF < (before >> 48) & 0xFFFF or
-            (before >> 48) & 0xFFFF == 0);
-    }
-    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    try std.testing.expect(after != std.math.maxInt(u64)); // 선택을 잃지 않았나
+    try std.testing.expect((after >> 48) & 0xFFFF < before_row);
+    clearSelection(q.x, q.y);
     bridge.maru_mobile_clear_error();
 }
 
@@ -780,7 +803,7 @@ test "복사 버퍼가 모자라면 알린다" {
     try std.testing.expectEqualStrings("copy_truncated", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
 
-    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    clearSelection(q.x, q.y);
 }
 
 // **선택이 생겨도 줄은 한 픽셀도 안 움직인다.** `copy` 는 늘 줄에 있고 쓸 수 있는지만 바뀐다
@@ -808,7 +831,7 @@ test "선택이 생겨도 키 자리는 그대로다" {
     try std.testing.expectEqual(before_first, bridge.maru_mobile_keybar_rect(0));
     try std.testing.expectEqual(before_last, bridge.maru_mobile_keybar_rect(10));
     try std.testing.expectEqual(before_copy, bridge.maru_mobile_keybar_rect(copy_i));
-    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    clearSelection(q.x, q.y);
     bridge.maru_mobile_clear_error();
 }
 
@@ -1216,13 +1239,38 @@ test "조합 중 문자열: 뒤에 여러 바이트 글자가 와도 앞 글자�
 // 버퍼에 **다 안 들어가는** 마지막 글자는 그대로 버려야 한다(그게 원래 의도였다) — 잘린 바이트가
 // 남으면 다시 깨진 UTF-8 이 된다. 상한은 브리지 내부 버퍼라 여기서는 아주 긴 입력으로 민다.
 test "조합 중 문자열: 버퍼를 넘치면 잘린 글자를 통째로 버린다" {
+    // **판정자를 세운다.** 예전에는 이 테스트에 expect 가 하나도 없어 이름 붙인 계약이 전혀
+    // 안 지켜졌다 — 절삭을 경계에서 안 하도록 되돌려도 초록이었다. 관측 가능한 것은 quad
+    // 수뿐이고, 그리는 쪽이 `Utf8View.init` 에 실패하면 조합 문자열이 **통째로** 안 그려지므로
+    // "base 보다 많다" 가 곧 "남은 바이트가 온전한 UTF-8 이다" 이다.
+    // **'가' 를 등록해 전제를 세운다.** 안 구워진 글자는 quad 가 아예 안 나오므로, 등록 없이는
+    // "안 그려졌다" 가 절삭 탓인지 미등록 탓인지 갈리지 않는다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const ga_slot = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
+    try std.testing.expect(ga_slot != 0xFFFFFFFF);
+    atlasAdd1(0xAC00, 0, ga_slot >> 16, ga_slot & 0xFFFF, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_preedit("", 0);
+    const base = bridge.maru_mobile_build(402, 874, now());
+
     var long_buf: [4096]u8 = undefined;
     var n: usize = 0;
     while (n + 3 <= long_buf.len) : (n += 3) @memcpy(long_buf[n..][0..3], "\xea\xb0\x80"); // '가' 반복
     bridge.maru_mobile_set_preedit(&long_buf, n);
     // 잘렸더라도 남은 바이트는 **온전한 UTF-8** 이어야 한다 — 아니면 그리는 쪽이 통째로 버린다.
-    _ = bridge.maru_mobile_build(402, 874, now());
+    const overflowed = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(overflowed > base);
+
+    // **한 바이트 어긋난 자리도 본다.** 3바이트 글자를 반복하다 버퍼 경계가 글자 가운데에
+    // 떨어지도록 앞에 ASCII 를 하나 끼운다 — 절삭이 경계를 안 보면 여기서 깨진다.
+    long_buf[0] = 'Q';
+    var m: usize = 1;
+    while (m + 3 <= long_buf.len) : (m += 3) @memcpy(long_buf[m..][0..3], "\xea\xb0\x80");
+    bridge.maru_mobile_set_preedit(&long_buf, m);
+    try std.testing.expect(bridge.maru_mobile_build(402, 874, now()) > base);
+
     bridge.maru_mobile_set_preedit("", 0);
+    bridge.maru_mobile_clear_error();
 }
 
 // ── 설정 화면(라우터) — **파일 맨 뒤에 둔다** ─────────────────────────────────
@@ -1420,5 +1468,191 @@ test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
     const n = bridge.maru_mobile_take_copy(&out, out.len);
     try std.testing.expect(n > 0); // 추출 자체가 안 됐으면 아래 검사가 무의미하다
     try std.testing.expect(std.unicode.utf8ValidateSlice(out[0..n]));
+    bridge.maru_mobile_clear_error();
+}
+
+// ── 코드 리뷰가 낸 "조용한 실패" 셋 — **재현 먼저** ──────────────────────────────
+
+// **설정을 열어 둔 채 친 글자가 신호 없이 사라진다.** 설정을 밀어도 소프트 키보드는 일부러
+// 떠 있으므로(계약) 사용자는 계속 칠 수 있다. 그 입력을 버리는 것 자체는 정책이지만, 이
+// 파일에서 **신호 없이** 버리는 유일한 경로다 — 바로 아래 이웃 경로는 `key_unknown_id` 를
+// 남기며 "조용히 흘리면 그 키가 사라진 채 아무 신호가 없다(§5)" 라고 적어 뒀다.
+//
+// 관측: 설정을 민 뒤 글자를 보내면 `last_error` 가 비어 있다.
+test "재현: 설정이 떠 있을 때 버린 입력은 신호를 남긴다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    const gy: f32 = 874 - 22;
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, gy);
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, gy);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    bridge.maru_mobile_clear_error();
+    const before = bridge.maru_mobile_input("", 0);
+    const after = bridge.maru_mobile_input("x", 1);
+    try std.testing.expectEqual(before, after); // 버리는 것은 정책이다 — 누적이 안 는다
+    try std.testing.expect(std.mem.span(bridge.maru_mobile_last_error()).len > 0);
+
+    // **스크롤은 여기서 신호를 안 남긴다** — 잃는 것이 사용자가 친 글자가 아니라 host 의
+    // 관성이고, 프레임마다 오므로 남기면 진짜 오류를 덮는다(본문 주석과 같은 근거).
+    bridge.maru_mobile_clear_error();
+    bridge.maru_mobile_scroll(10);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **미스 목록이 넘쳐도 잃는 것은 없다.** 리뷰가 "영영 안 그려진다" 고 본 자리인데 그렇지
+// 않다 — 목록은 프레임마다 다시 채워지므로 넘친 글자는 **다음 프레임에 다시 올라온다**.
+// 이 성질이 깨지면(예: 등록부에 "봤다" 고 표시하고 목록만 넘기면) 진짜로 영영 빈칸이 되므로
+// 값으로 고정한다.
+test "미스 목록이 넘쳐도 다음 프레임에 다시 올라온다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+
+    // 목록 상한(64)보다 넉넉히 많은 **서로 다른** 글자를 한 화면에 뿌린다.
+    var line: [512]u8 = undefined;
+    var w: usize = 0;
+    var cp: u32 = 0x3041; // 히라가나 — 대본에 없어 전부 미스가 된다
+    while (cp < 0x3041 + 100) : (cp += 1) {
+        if (w + 4 > line.len) break;
+        w += std.unicode.utf8Encode(@intCast(cp), line[w..]) catch break;
+    }
+    _ = bridge.maru_mobile_input(&line, w);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const first = bridge.maru_mobile_missing_count();
+    try std.testing.expectEqual(@as(u32, 64), first); // 넘쳤나 — 재현 조건
+
+    // host 처럼 목록을 비우고 다음 프레임을 돈다. **아무것도 안 구웠으므로** 전부 다시 와야 한다.
+    bridge.maru_mobile_missing_clear();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(first, bridge.maru_mobile_missing_count());
+    bridge.maru_mobile_clear_error();
+}
+
+// **버릴 자리조차 없으면 그 글자는 이번 프레임에 못 그려진다 — 그런데 오류가 없다.** 위
+// 넘침과 달리 이쪽은 평상시에 안 난다(512칸이 전부 이번 프레임 것일 때만). 즉 나면 그것은
+// 진짜로 화면이 아틀라스보다 큰 상황이고, 그때는 알아야 한다.
+test "재현: 슬롯을 못 내주면 신호를 남긴다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 이번 프레임에 그려진 것만 있으면 버릴 자리가 없다. **받은 자리에 실제로 등록해야**
+    // 그 자리가 이번 프레임 것이 된다 — 안 그러면 축출이 계속 자리를 내준다(기존 테스트와
+    // 같은 셋업이다).
+    const cols = bridge.maru_mobile_atlas_cols();
+    const rows = bridge.maru_mobile_atlas_rows();
+    var i: u32 = 0;
+    while (i < cols * rows) : (i += 1) {
+        const s = bridge.maru_mobile_next_slot(cols);
+        if (s == 0xFFFFFFFF) break;
+        atlasAdd1(0x4000 + i, 0, s >> 16, s & 0xFFFF, 1);
+    }
+    bridge.maru_mobile_clear_error();
+    const slot = bridge.maru_mobile_next_slot(cols);
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), slot); // 재현 조건이 성립했나
+    try std.testing.expect(std.mem.span(bridge.maru_mobile_last_error()).len > 0);
+    bridge.maru_mobile_clear_error();
+}
+
+// **caret_rect 가 헤더의 약속을 안 지킨다.** 헤더는 "화면 밖이면 0" 이라 적었는데 본문은
+// 코어 없음·격자 0 일 때만 0 을 준다. 게다가 **실제로 그리는 커서**(`snap.cursor` — 코어가
+// DECTCEM 과 스크롤백을 이미 합성해 준다)가 아니라 원시 `core.screen.cursor` 를 읽는다.
+//
+// 관측: 설정을 밀어 터미널이 통째로 가려졌는데도(키보드는 일부러 떠 있다) 0 이 아닌 자리를
+// 답한다 — iOS 가 그 자리에 **한글 후보창을 설정 UI 위에** 띄운다.
+test "재현: 터미널이 안 보이면 caret_rect 는 0 이다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[Hhi", 9);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(bridge.maru_mobile_caret_rect() != 0); // 보일 때는 자리가 있다
+
+    const span = chromeClaimSpan(402, 874 - 22);
+    const gy: f32 = 874 - 22;
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, gy);
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, gy);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(@as(u64, 0), bridge.maru_mobile_caret_rect());
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **길게 눌러 잡은 뒤 가로로 한 칸 넓히면 되돌아간다.** `checkLongPress` 는 프레임마다 돌면서
+// `ptr_moved` 가 안 서 있으면 누른 단어를 **다시** 선택한다. 그 주석은 "선택을 늘리려면 누른
+// 칸을 벗어나야 하고 그 순간 `ptr_moved` 가 선다" 고 하는데, 이동 임계(10)가 셀 폭(8)보다
+// 커서 **가로에서만 거짓**이다 — 9px 끌면 다른 칸으로 넘어가 `selectionExtend` 가 도는데
+// `ptr_moved` 는 안 서고, 다음 프레임이 그것을 되돌린다. 세로는 줄 높이(22)가 임계보다 커서 참이다.
+test "재현: 길게 누른 뒤 한 칸 넓히면 되돌아가지 않는다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("alpha bravo charlie", 19);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // **단어의 마지막 칸**을 누른다 — 안쪽으로 늘리면 꼬리가 당겨져 끝이 오히려 줄어든다.
+    // "alpha" 는 0~4열이므로 4열을 누르고 5열로 넘기면 끝이 늘어난다.
+    const p = pointForCell(0, 4) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    const word = bridge.maru_mobile_selection_span();
+    const word_end = word & 0xFFFF;
+    try std.testing.expectEqual(@as(u64, 4), word_end); // 전제: "alpha" 끝은 4열
+
+    // 셀 폭(8)보다 넓고 임계(10)보다 좁게 — 다른 칸으로 넘어가되 `ptr_moved` 는 안 서는 구간.
+    bridge.maru_mobile_pointer(1, p.x + 9, p.y, now());
+    const extended = bridge.maru_mobile_selection_span();
+    try std.testing.expect(extended & 0xFFFF > word_end); // 재현 조건: 실제로 늘어났나
+
+    // **다음 프레임이 그것을 되돌리면 안 된다.**
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(extended, bridge.maru_mobile_selection_span());
+
+    clearSelection(p.x + 9, p.y);
+    bridge.maru_mobile_clear_error();
+}
+
+// **배경으로 나갔다 오면 복사 안 한 선택이 사라진다.** 두 host 다 phase 3 을 **수명 정리**로
+// 보내는데(iOS `applicationDidEnterBackground`, Android `APP_CMD_LOST_FOCUS` — 둘 다 주석이
+// "누르고 있던 손가락을 정리한다" 라고 적어 뒀다) 브리지는 그것을 "제스처 취소" 로 읽어 선택까지
+// 지운다. Android 는 알림 셰이드·권한 대화상자·분할 화면 포커스 변화에도 LOST_FOCUS 를 낸다.
+//
+// 선택을 지우는 자리는 **다음 누름**이다("다시 누르면 사라진다" — phase 0 이 이미 그렇게 한다).
+test "재현: 손가락 정리가 선택까지 지우지 않는다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("keep this selection", 19);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    bridge.maru_mobile_pointer(2, p.x, p.y, now()); // 손을 뗀다 — 선택은 남는다(계약)
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // host 가 배경 전환에서 부르는 그대로.
+    bridge.maru_mobile_pointer(3, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // **다시 누르면** 사라진다 — 지우는 자리는 여기다.
+    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+    clearSelection(p.x, p.y);
     bridge.maru_mobile_clear_error();
 }

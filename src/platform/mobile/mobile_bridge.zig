@@ -177,7 +177,13 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
-    if (screen != .terminal) return @intCast(delivered_len);
+    //
+    // **버리되 신호는 남긴다**(§5). 반환값은 누적이라 안 늘어난 것으로만 알 수 있는데 두 host
+    // 다 그 값을 비교하지 않는다 — 그러면 사용자가 친 글자가 **아무 흔적 없이** 사라진다.
+    if (screen != .terminal) {
+        setLastError("input_screen_pushed");
+        return @intCast(delivered_len);
+    }
     // **안 보낼 키는 겉치레도 안 건드린다.** 지우기를 게이트 앞에 두면, 터미널에서 한글을
     // 조합하다 설정을 열고 아무 키나 친 순간 **그 조합이 조용히 사라진다**(돌아오면 없다).
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
@@ -298,8 +304,12 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
     // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
-    // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
-    if (screen != .terminal) return @intCast(delivered_len);
+    // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다. **버리되 신호는 남긴다**(문자 경로와
+    // 같은 이유 — 16줄 아래 `key_unknown_id` 가 같은 규율이다).
+    if (screen != .terminal) {
+        setLastError("key_screen_pushed");
+        return @intCast(delivered_len);
+    }
     // **안 보낼 키는 겉치레도 안 건드린다.** 지우기를 게이트 앞에 두면, 터미널에서 한글을
     // 조합하다 설정을 열고 아무 키나 친 순간 **그 조합이 조용히 사라진다**(돌아오면 없다).
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
@@ -347,6 +357,10 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
     // **밀린 화면이 있으면 뒤는 안 움직인다.** host 의 관성은 손을 뗀 뒤에도 몇 프레임 더
     // 도는데, 그 사이 톱니를 눌러 설정을 열면 **안 보이는 터미널이 계속 흘러** 돌아왔을 때
     // 보던 자리가 아니다(§3 "전환에서 스크롤 위치를 잃지 않는다").
+    //
+    // **여기는 오류를 안 남긴다** — 위 두 경로(문자·키)와 다르다. 잃는 것이 사용자가 친
+    // 글자가 아니라 host 가 스스로 돌리는 관성이고, 그 관성은 프레임마다 오므로 남기면
+    // `last_error` 가 매 프레임 덮여 **진짜 오류를 가린다**.
     if (screen != .terminal) return;
     const core = &(term_core orelse {
         setLastError("scroll_before_core");
@@ -474,7 +488,16 @@ pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void
                 // 끝이 잘린다**(3칸 단어가 2칸이 되는 것을 픽셀로 재서 잡았다).
                 if (bodyCell(x, y)) |c| {
                     if (bodyCell(ptr_down_x, ptr_down_y)) |d| {
-                        if (c.row != d.row or c.col != d.col) core.selectionExtend(c.row, c.col);
+                        if (c.row != d.row or c.col != d.col) {
+                            core.selectionExtend(c.row, c.col);
+                            // **여기가 "누른 칸을 벗어났다" 는 판정 그 자체다.** `ptr_moved` 를
+                            // px 임계로만 세우면 가로에서 거짓이 된다 — 셀 폭(8)이 임계(10)보다
+                            // 좁아, 9px 끌면 다른 칸으로 넘어가 여기까지 오는데도 안 서고
+                            // 다음 프레임 `checkLongPress` 가 늘린 것을 **되돌린다**(한 칸만큼
+                            // 넓히는 것이 아예 불가능했다). 세로는 줄 높이(22)가 임계보다 커서
+                            // 우연히 맞았다 — 우연에 기대지 않는다.
+                            ptr_moved = true;
+                        }
                     }
                 }
                 ptr_last_y = y;
@@ -488,11 +511,19 @@ pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void
         },
         else => { // up · cancel
             ptr_down = false;
-            // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다.
-            if (phase == 3) {
-                core.selectionClear();
-                selecting = false;
-            }
+            // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다. 지우는 자리는
+            // **다음 누름**이다(phase 0 이 이미 그렇게 한다).
+            //
+            // **취소(phase 3)에서도 안 지운다.** 두 host 가 이 phase 를 "제스처 취소" 가 아니라
+            // **수명 정리**로도 쓴다(iOS `applicationDidEnterBackground`, Android
+            // `APP_CMD_LOST_FOCUS` — 둘 다 주석이 "누르고 있던 손가락을 정리한다" 라고 적어
+            // 뒀다). ABI 가 두 뜻에 같은 번호를 줘서 브리지는 구분할 수가 없다. 그런데 Android
+            // 는 **알림 셰이드·권한 대화상자·분할 화면 포커스 변화**에도 LOST_FOCUS 를 내므로,
+            // 여기서 지우면 셰이드 한 번 내렸다 온 사이에 **복사 안 한 선택이 사라진다**.
+            //
+            // 지울 이유도 없다 — 취소든 뗌이든 손가락이 없어진다는 뜻이고, 이미 만들어진 선택은
+            // 진행 중인 제스처가 아니라 **결과**다. 다음 누름이 치운다.
+            selecting = false;
         },
     }
 }
@@ -816,6 +847,15 @@ pub export fn maru_mobile_caret_rect() u64 {
     const core = &(term_core orelse return 0);
     const cur = core.screen.cursor;
     if (body_cols == 0 or body_rows == 0) return 0;
+    // **밀린 화면이 있으면 터미널은 안 보인다** — 그런데 소프트 키보드는 일부러 떠 있다(§5.2).
+    // 자리를 답하면 iOS 가 **설정 UI 위에 한글 후보창**을 띄운다, 보이지도 않는 캐럿에 앵커해서.
+    if (screen != .terminal) return 0;
+    // 헤더가 약속한 "화면 밖이면 0". 그리는 쪽은 격자 범위를 검사하는데(§커서) 여기만 안 해서,
+    // 격자가 줄어든 직후 화면 밖 자리를 답할 수 있었다.
+    if (cur.col >= body_cols or cur.row >= body_rows) return 0;
+    // **스크롤백은 여기서 0 이 아니다.** 커서를 그리지는 않지만 코어가 live 위치를 일부러
+    // 보존한다 — "IME 후보창은 scroll-to-bottom 이 적용되기 전에도 이 anchor 를 즉시 써야
+    // 한다"(`screen.renderSnapshot`). 타이핑하면 어차피 바닥으로 튄다.
     const x = body_rect.x + @as(f32, @floatFromInt(@as(i32, cur.col) * body_cell_w));
     const y = body_rect.y + @as(f32, @floatFromInt(@as(i32, cur.row) * body_line_h));
     return (@as(u64, @intFromFloat(@max(0, x))) << 48) |
@@ -1373,6 +1413,10 @@ var miss_n: usize = 0;
 fn noteMiss(seq: []const u21, style: u32) void {
     const key = atlasKey(seq[0], style);
     for (0..miss_n) |i| if (miss_cp[i] == key and seqEql(miss_seq[i][0..miss_len[i]], seq)) return;
+    // **넘쳐도 잃지 않는다 — 그래서 여기는 오류가 아니다.** 목록은 프레임마다 다시 채워지고
+    // (host 가 구운 뒤 `missing_clear`), 안 구워진 글자는 등록부에 없으니 **다음 프레임에 다시
+    // 올라온다**. 한 프레임(~33ms) 늦을 뿐이라 사용자에게는 안 보인다. 여기서 `last_error` 를
+    // 세우면 글자 많은 화면에서 매 프레임 덮여 **진짜 오류를 가린다**(실제로 그렇게 됐다).
     if (miss_n == miss_cp.len) return;
     miss_cp[miss_n] = key;
     const n = @min(seq.len, max_cluster);
@@ -1424,7 +1468,12 @@ pub export fn maru_mobile_next_slot(cols: u32) u32 {
     // **차면 가장 안 쓰인 자리를 내준다.** 예전에는 여기서 끝이라, 아틀라스가 찬 뒤 나온 글자가
     // 미스로는 올라오는데 구울 자리가 없어 **영영 안 그려졌다**(오류도 로그도 없이). 실제 셸은
     // 512칸을 금방 채운다 — 굵게/기울임이 각각 별도 슬롯이라 더 빠르다.
-    const v = oldestVictim(&atlas_used, atlas_n) orelse return 0xFFFFFFFF;
+    // 버릴 자리도 없으면(등록부가 전부 이번 프레임 것) 이번 프레임은 포기다 — **그 포기를
+    // 남긴다.** 안 남기면 그 글자는 오류도 로그도 없이 빈칸으로 남는다.
+    const v = oldestVictim(&atlas_used, atlas_n) orelse {
+        setLastError("atlas_full");
+        return 0xFFFFFFFF;
+    };
     pending_victim = v;
     return (atlas_col[v] << 16) | atlas_row[v];
 }
@@ -1515,7 +1564,10 @@ pub export fn maru_mobile_next_color_slot(cols: u32) u32 {
         const idx: u32 = @intCast(color_n);
         return ((idx % cols) << 16) | (idx / cols);
     }
-    const v = oldestVictim(&color_used, color_n) orelse return 0xFFFFFFFF;
+    const v = oldestVictim(&color_used, color_n) orelse {
+        setLastError("color_atlas_full");
+        return 0xFFFFFFFF;
+    };
     pending_color_victim = v;
     return (color_col[v] << 16) | color_row[v];
 }
@@ -1632,7 +1684,13 @@ fn textWidth(text: []const u8, font_px: i32) i32 {
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
     const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
     var w: i32 = 0;
-    var view = std.unicode.Utf8View.init(text) catch return 0;
+    // **조용히 0 을 답하지 않는다**(§5). 여기서 실패하면 그 글은 폭이 0 이라 자리를 안 차지하고,
+    // 바로 아래 `pushText` 도 같은 이유로 아무것도 안 그려 **글이 통째로 사라진 것처럼** 보인다.
+    // 평상시에는 안 난다 — 나면 절삭이나 host 인코딩이 깨진 것이라 알아야 한다.
+    var view = std.unicode.Utf8View.init(text) catch {
+        setLastError("text_bad_utf8");
+        return 0;
+    };
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
         if (isZeroWidthFormat(cp)) continue;
@@ -1661,7 +1719,11 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
     // 자리(`maru.width.cellWidth`)를 쓴다 — 여기서 따로 세면 본문과 chrome 이 갈린다.
     const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
     var pen = x0;
-    var view = std.unicode.Utf8View.init(text) catch return;
+    // 폭 계산과 **같은 이유**로 조용하지 않다(위 `textWidth`).
+    var view = std.unicode.Utf8View.init(text) catch {
+        setLastError("text_bad_utf8");
+        return;
+    };
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
         // 0폭 format 문자는 **진행도 안 시킨다** — 폴백 advance(`draw_w/2`)를 태우면 보이지 않는

@@ -317,11 +317,26 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
         checked += 1;
     }
     try std.testing.expect(checked >= 15); // CHAR + 특수키 14개
-    // F1~F12 도 전부
+
+    // **F키 기준값도 헤더에서 읽는다.** 예전 판은 `MARU_KEY_F(` 줄을 건너뛰고 base 99 를 여기
+    // 다시 적었다 — 헤더의 매크로를 바꾸면 브리지와 테스트가 갈리는데 **테스트는 옛 값으로
+    // 초록**이고 제품에서는 F키 12개가 두 플랫폼에서 다 죽는다.
+    var f_base: ?u32 = null;
+    var fit = std.mem.tokenizeScalar(u8, src, '\n');
+    while (fit.next()) |line| {
+        if (std.mem.indexOf(u8, line, "#define MARU_KEY_F(") == null) continue;
+        const open = std.mem.indexOf(u8, line, "(99") orelse std.mem.lastIndexOfScalar(u8, line, '(') orelse continue;
+        var digits = std.mem.tokenizeAny(u8, line[open..], "( +)nN");
+        const num = digits.next() orelse continue;
+        f_base = std.fmt.parseInt(u32, num, 10) catch continue;
+        break;
+    }
+    const base = f_base orelse return error.TestUnexpectedResult;
+
     var n: u32 = 1;
     while (n <= 12) : (n += 1) {
         bridge.maru_mobile_clear_error();
-        _ = bridge.maru_mobile_key(99 + n, 0, 0);
+        _ = bridge.maru_mobile_key(base + n, 0, 0);
         try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
     }
     // 표에 없는 id 는 **조용히 흘리지 않는다**
@@ -1654,5 +1669,134 @@ test "재현: 손가락 정리가 선택까지 지우지 않는다" {
     bridge.maru_mobile_pointer(0, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
     clearSelection(p.x, p.y);
+    bridge.maru_mobile_clear_error();
+}
+
+/// 커서가 있는 칸. `caret_rect` 는 논리 px 라 셀 크기로 나눈다 — **격자 좌표로 비교해야**
+/// 방향이 뒤집힌 것을 잡는다.
+fn caretCell() ?struct { row: u32, col: u32 } {
+    const r = bridge.maru_mobile_caret_rect();
+    if (r == 0) return null;
+    const w: u32 = @intCast((r >> 16) & 0xFFFF);
+    const h: u32 = @intCast(r & 0xFFFF);
+    if (w == 0 or h == 0) return null;
+    return .{ .row = @intCast(((r >> 32) & 0xFFFF) / h), .col = @intCast(((r >> 48) & 0xFFFF) / w) };
+}
+
+// **키 id 미러는 "알아본다" 가 아니라 "어디로 가는가" 를 봐야 한다.** 예전 판은 `last_error` 가
+// 비었는지만 봐서 `5 => .arrow_up` 과 `6 => .arrow_down` 을 **맞바꿔도 초록**이었다 — 바이트 수
+// 기대(+3)가 CSI A/B 둘 다 3바이트라 같기 때문이다. 키바 화살표 키캡이 이 id 라, 그 상태로
+// **위 화살표가 Down 을 보내는 앱**이 나간다.
+//
+// 여기서는 나간 바이트를 코어가 **스스로 파싱한 결과**로 판정한다(브리지의 키 경로는 인코딩한
+// 바이트를 코어에 그대로 쓴다). 방향이 뒤집히면 커서가 반대로 움직여 바로 걸린다.
+test "화살표 id 는 실제로 그 방향으로 간다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[5;5H", 10); // 가운데로 — 사방으로 움직일 여지
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const home = caretCell() orelse return error.TestUnexpectedResult;
+
+    const Case = struct { id: u32, drow: i32, dcol: i32, what: []const u8 };
+    for ([_]Case{
+        .{ .id = 5, .drow = -1, .dcol = 0, .what = "UP" },
+        .{ .id = 6, .drow = 1, .dcol = 0, .what = "DOWN" },
+        .{ .id = 7, .drow = 0, .dcol = -1, .what = "LEFT" },
+        .{ .id = 8, .drow = 0, .dcol = 1, .what = "RIGHT" },
+    }) |c| {
+        _ = bridge.maru_mobile_input("\x1b[5;5H", 6); // 매번 같은 자리에서 출발
+        _ = bridge.maru_mobile_key(c.id, 0, 0);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const got = caretCell() orelse return error.TestUnexpectedResult;
+        const want_row: i32 = @as(i32, @intCast(home.row)) + c.drow;
+        const want_col: i32 = @as(i32, @intCast(home.col)) + c.dcol;
+        std.testing.expectEqual(want_row, @as(i32, @intCast(got.row))) catch |e| {
+            std.debug.print("\n{s} 가 행을 틀렸다\n", .{c.what});
+            return e;
+        };
+        std.testing.expectEqual(want_col, @as(i32, @intCast(got.col))) catch |e| {
+            std.debug.print("\n{s} 가 열을 틀렸다\n", .{c.what});
+            return e;
+        };
+    }
+    bridge.maru_mobile_clear_error();
+}
+
+// **HOME 과 ENTER 는 열을 0 으로 되돌린다** — 서로 다른 바이트인데(CSI H vs CR) 효과가 같아
+// 헷갈리기 쉬우므로 둘 다 값으로 못박는다. TAB·BACKSPACE 는 열이 각각 늘고 준다.
+test "이름 붙은 키들이 각자 자기 일을 한다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+
+    // **기준점을 먼저 잰다.** `caret_rect` 는 화면 좌표라 본문 왼쪽 여백(사이드바)이 섞여 있다 —
+    // 0 열을 상수 0 으로 비교하면 그 여백만큼 항상 틀린다(실제로 17 이 나왔다).
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[5;1H", 10);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const col0 = (caretCell() orelse return error.TestUnexpectedResult).col;
+
+    // HOME(9) — 첫 열로
+    _ = bridge.maru_mobile_input("\x1b[5;9H", 6);
+    _ = bridge.maru_mobile_key(9, 0, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(col0, (caretCell() orelse return error.TestUnexpectedResult).col);
+
+    // ENTER(1) — CR 이라 열이 0 으로(행은 그대로다, LF 가 아니다)
+    _ = bridge.maru_mobile_input("\x1b[5;9H", 6);
+    const before_enter = caretCell() orelse return error.TestUnexpectedResult;
+    _ = bridge.maru_mobile_key(1, 0, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const after_enter = caretCell() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(col0, after_enter.col);
+    try std.testing.expectEqual(before_enter.row, after_enter.row);
+
+    // **BACKSPACE·DELETE·PAGE_* 는 여기서 안 잰다.** 그 키들이 뜻하는 일은 **셸이** 하는 것이라
+    // (지우기·목록 넘기기) 터미널 화면만 보면 효과가 없거나 다른 데서 온다 — 실제로 backspace 를
+    // 넣었더니 열이 하나 **늘었다**(0x7F 이 글리프로 나간다). 그것은 이 테스트가 아니라 코어
+    // 파서의 계약이므로 여기서 값으로 못박지 않는다.
+
+    // TAB(3) — 다음 탭 자리라 열이 **늘어난다**
+    _ = bridge.maru_mobile_input("\x1b[5;9H", 6);
+    const before_tab = caretCell() orelse return error.TestUnexpectedResult;
+    _ = bridge.maru_mobile_key(3, 0, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect((caretCell() orelse return error.TestUnexpectedResult).col > before_tab.col);
+    bridge.maru_mobile_clear_error();
+}
+
+// **수정자 표도 헤더가 단일 출처다.** 예전 판은 `MARU_KEY_` 로 시작하는 줄만 읽어 `MARU_MOD_*`
+// 를 **아예 안 봤다** — `MARU_MOD_CTRL` 을 4 로 바꾸면 브리지가 `.option` 으로 디코드해 Ctrl+C 가
+// Alt+C 가 되는데, 키바의 sticky ctrl 은 리터럴 2 를 그대로 써 **비대칭으로 깨진다**.
+//
+// 헤더에서 값을 읽어 **나간 바이트 수**로 가른다: Ctrl+c 는 0x03 한 바이트, Alt+c 는 ESC c 두
+// 바이트다(수정자를 무시하면 'c' 한 바이트가 된다 — 그것도 Ctrl 과 길이가 같으므로 둘을 **함께**
+// 봐야 판별이 된다).
+test "헤더의 수정자 값이 브리지 해석과 같다" {
+    const src = @embedFile("mobile_host_abi_for_test");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+
+    var ctrl: ?u32 = null;
+    var alt: ?u32 = null;
+    var it = std.mem.tokenizeScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const marker = "#define MARU_MOD_";
+        if (!std.mem.startsWith(u8, line, marker)) continue;
+        var parts = std.mem.tokenizeAny(u8, line[marker.len..], " \t");
+        const name = parts.next() orelse continue;
+        const num = parts.next() orelse continue;
+        const v = std.fmt.parseInt(u32, num, 10) catch continue;
+        if (std.mem.eql(u8, name, "CTRL")) ctrl = v;
+        if (std.mem.eql(u8, name, "ALT")) alt = v;
+    }
+    const c_ctrl = ctrl orelse return error.TestUnexpectedResult;
+    const c_alt = alt orelse return error.TestUnexpectedResult;
+
+    bridge.maru_mobile_clear_error();
+    const base = bridge.maru_mobile_input("", 0);
+    const after_ctrl = bridge.maru_mobile_key(0, 'c', c_ctrl);
+    try std.testing.expectEqual(@as(u32, 1), after_ctrl - base); // 0x03 한 바이트
+    const after_alt = bridge.maru_mobile_key(0, 'c', c_alt);
+    try std.testing.expectEqual(@as(u32, 2), after_alt - after_ctrl); // ESC c 두 바이트
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
 }

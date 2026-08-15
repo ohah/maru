@@ -18,6 +18,7 @@ const runtime_pump_mod = maru.app.runtime_pump;
 const input_owner_mod = maru.app.input_owner;
 const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
+const r2a_client_slot = client_slot_mod;
 const client_poison = @import("client_poison.zig");
 const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
@@ -1174,6 +1175,52 @@ pub const ReconnectGenerationOwner = struct {
         self.screen_published = true;
     }
 
+    /// CR3b R2a cross-owner leaf. Stable proxy는 이 CR2 owner만 쓰고 HostAdapter는
+    /// 자기 ClientSlot store-only suffix만 제공한다.
+    pub fn publishUnavailableForClientRetirement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        permit: *r2a_client_slot.PreparedAdmissionClose,
+        expected_generation: u64,
+        next_generation: u64,
+    ) (r2a_client_slot.ClientSlot.RetirementDetachError || stable_screen_source.PublishError || error{InvalidAuthority})!stable_screen_source.RetiredTarget {
+        try self.validate();
+        if (!self.screen_published or try self.currentGeneration() != expected_generation)
+            return error.InvalidAuthority;
+        const current = try self.slot.currentPayload();
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        try adapter.slot.preflightRetirementDetach(permit, expected_generation, next_generation);
+        const Context = struct {
+            slot: *r2a_client_slot.ClientSlot,
+            permit: *r2a_client_slot.PreparedAdmissionClose,
+            expected: u64,
+            next: u64,
+
+            fn commit(context: @This()) void {
+                context.slot.commitRetirementDetachNoFail(
+                    context.permit,
+                    context.expected,
+                    context.next,
+                );
+            }
+        };
+        return self.screen_source.?.publishUnavailableFromLiveWithCommit(
+            expected_generation,
+            next_generation,
+            Context{
+                .slot = &adapter.slot,
+                .permit = permit,
+                .expected = expected_generation,
+                .next = next_generation,
+            },
+            Context.commit,
+        );
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -1254,7 +1301,7 @@ pub const ReconnectGenerationOwner = struct {
     pub fn deinit(self: *ReconnectGenerationOwner) !void {
         try self.validate();
         if (try self.slot.hasRetiring() or self.slot.candidate != null) return error.Busy;
-        if (self.screen_published) {
+        if (self.screen_published and self.screen_source.?.current.kind == .live) {
             const current_generation = try self.slot.currentGeneration();
             const payload = try self.slot.currentPayload();
             const source = generationScreenSource(payload) orelse return error.InvalidAuthority;
@@ -1268,6 +1315,19 @@ pub const ReconnectGenerationOwner = struct {
                 @panic("reconnect generation and stable screen retirement diverged");
         } else {
             if (self.screen_source.?.current.kind != .unavailable) return error.InvalidAuthority;
+            if (self.screen_published) {
+                const current_generation = try self.slot.currentGeneration();
+                if (current_generation == std.math.maxInt(u64) or
+                    self.screen_source.?.current.generation != current_generation + 1)
+                    return error.InvalidAuthority;
+                const current = try self.slot.currentPayload();
+                switch (current.connection) {
+                    .generation => |adapter| adapter.slot.validateRetirementPlaceholder(
+                        self.screen_source.?.current.generation,
+                    ) catch return error.InvalidAuthority,
+                    .legacy => return error.InvalidAuthority,
+                }
+            }
             if ((try self.screen_source.?.close()) != null)
                 @panic("unpublished stable screen retired a live target");
         }
@@ -7729,6 +7789,38 @@ const ReconnectGenerationTestArgs = struct {
     metadata: []const u8 = "",
 };
 
+const R2aTestGeneration = if (builtin.is_test) struct {
+    const Args = struct {
+        allocator: std.mem.Allocator,
+        adapter: *host_adapter_mod.HostAdapter,
+        runtime_id: u128,
+        stream_id: u64,
+    };
+
+    fn init(out: *RemoteGeneration, args: Args) !void {
+        out.* = .{
+            .connection = .{ .generation = args.adapter },
+            .attachment = .{ .generation = .{} },
+            .event_generation_tracking = .tracked,
+            .resize_seq = 0,
+            .resize_generation = 0,
+            .resize_baseline_present = false,
+            .pump_ended = false,
+            .resync_needed = false,
+            .observation = .{},
+        };
+        try generation_attachment_mod.testing_api.initAttached(
+            &out.attachment.generation,
+            args.adapter,
+            args.allocator,
+            args.runtime_id,
+            args.stream_id,
+        );
+        errdefer out.attachment.generation.deinit(args.adapter);
+        try out.attachment.initScreen(screen_stream.codec_version);
+    }
+} else struct {};
+
 const ReconnectResidentLedger = if (builtin.is_test) struct {
     parent: std.mem.Allocator,
     live_bytes: usize = 0,
@@ -8124,6 +8216,139 @@ test "CR2e-d PreparedReconnect는 실제 generation과 screen target을 한 번�
     try owner.reclaimRetiring();
     try testing.expect(!try owner.slot.hasRetiring());
     try testing.expectEqual(@as(usize, 1), ReconnectGenerationTestState.deinit_count);
+}
+
+test "CR3b R2a RemoteGeneration owner는 placeholder와 Client tombstone을 원자 게시한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC3B2A1,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &source);
+    defer adapter.deinit();
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    errdefer {
+        _ = proxy.close() catch @panic("R2a proxy failure cleanup lost owner");
+        proxy.deinit();
+    }
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xC3B2A1,
+            .stream_id = 0xC3B2A2,
+        },
+        R2aTestGeneration.init,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+
+    var permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(1, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    const client_before = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    try testing.expectEqual(fds[0], client_before.fd);
+    try testing.expect(!client_before.unusable);
+    try testing.expect(client_before.first_poison_reason == null);
+    const retired = try owner.publishUnavailableForClientRetirement(&adapter, &permit, 2, 3);
+    try testing.expectEqual(stable_screen_source.TargetKind.live, retired.kind);
+    try testing.expectEqual(@as(u64, 2), retired.generation);
+    try testing.expectEqual(r2a_client_slot.PreparedAdmissionClose.Lifecycle.consumed, permit.lifecycle);
+    const projection = r2a_client_slot.testing.retirementProjection(&adapter.slot);
+    try testing.expectEqual(r2a_client_slot.AdmissionLifecycle.closed, projection.admission);
+    try testing.expectEqual(r2a_client_slot.RetirementLifecycle.detached, projection.retirement);
+    try testing.expectEqual(@as(u64, 3), projection.placeholder_generation);
+    try testing.expectEqual(@as(u64, 1), projection.connection_generation);
+    const client_after = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    try testing.expectEqual(fds[0], client_after.fd);
+    try testing.expect(!client_after.unusable);
+    try testing.expect(client_after.first_poison_reason == null);
+    try proxy.tryLock(testing.io);
+    defer proxy.unlockPinned(testing.io);
+    try testing.expectEqual(@as(u21, '['), proxy.screenSource().vtable.render_snapshot(
+        proxy.screenSource().ctx,
+    ).cells[0].codepoint);
+}
+
+test "CR3b R2a RemoteGeneration preflight 실패는 proxy와 Client permit을 변경하지 않는다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0xC3B2A2,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &source);
+    defer adapter.deinit();
+    var foreign_source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0xC3B2AF,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var foreign_adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&foreign_adapter, testing.allocator, &foreign_source);
+    defer foreign_adapter.deinit();
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 24, .rows = 2 });
+    errdefer {
+        _ = proxy.close() catch @panic("R2a proxy failure cleanup lost owner");
+        proxy.deinit();
+    }
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        testing.allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = testing.allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xC3B2B1,
+            .stream_id = 0xC3B2B2,
+        },
+        R2aTestGeneration.init,
+    );
+    defer deinitReconnectTestOwner(&owner, &proxy);
+
+    var permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(1, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    const before = permit;
+    try testing.expectError(
+        error.InvalidAuthority,
+        owner.publishUnavailableForClientRetirement(&adapter, &permit, 3, 4),
+    );
+    try testing.expect(std.meta.eql(before, permit));
+    const projection = r2a_client_slot.testing.retirementProjection(&adapter.slot);
+    try testing.expectEqual(r2a_client_slot.RetirementLifecycle.live, projection.retirement);
+    try testing.expectEqual(@as(u64, 0), projection.placeholder_generation);
+    try adapter.cancelAdmissionClose(&permit);
+
+    var foreign_permit: r2a_client_slot.PreparedAdmissionClose = .{};
+    try foreign_adapter.prepareAdmissionClose(1, &foreign_permit);
+    try foreign_adapter.commitAdmissionClose(&foreign_permit);
+    const foreign_before = foreign_permit;
+    try testing.expectError(
+        error.InvalidAuthority,
+        owner.publishUnavailableForClientRetirement(&foreign_adapter, &foreign_permit, 2, 3),
+    );
+    try testing.expect(std.meta.eql(foreign_before, foreign_permit));
+    const foreign_projection = r2a_client_slot.testing.retirementProjection(&foreign_adapter.slot);
+    try testing.expectEqual(r2a_client_slot.RetirementLifecycle.live, foreign_projection.retirement);
+    try testing.expectEqual(@as(u64, 0), foreign_projection.placeholder_generation);
+    try foreign_adapter.cancelAdmissionClose(&foreign_permit);
 }
 
 test "CR2e-d PreparedReconnect prepare 실패와 abort는 current와 screen을 보존한다" {

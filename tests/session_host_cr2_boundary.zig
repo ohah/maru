@@ -111,6 +111,7 @@ test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
     inline for (.{
         "pub fn publishLive(",
         "pub fn publishUnavailable(",
+        "pub fn publishUnavailableFromLiveWithCommit(",
         "pub fn close(",
         "pub fn tryLock(",
         "pub fn unlockPinned(",
@@ -136,6 +137,7 @@ test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
         "initUnavailableInPlace(",
         "publishLive(",
         "publishUnavailable(",
+        "publishUnavailableFromLiveWithCommit(",
         "unlockPinned(",
     }) |symbol| try std.testing.expectEqual(
         @as(usize, 0),

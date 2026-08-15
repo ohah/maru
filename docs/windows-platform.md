@@ -484,12 +484,18 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 - **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
   포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
   생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.
-- **`publishBrowserResult`의 파일 권한**(W2를 막는다). `src/main.zig`가 browser 결과를
-  `Permissions.fromMode(0o600)`으로 **소유자 전용**으로 만든다. Windows에는 POSIX mode가 없고 **ACL**
-  (누구에게 어떤 동작을 허용/거부하는지의 항목 목록)이라 그 값을 그대로 옮길 수 없다. 후보: ① 권한 지정 없이
-  만들고 `%TEMP%`가 상속시키는 사용자 전용 ACL에 맡긴다(간단하지만 **그 상속은 가정**이다), ② 현재 사용자
-  SID만 허용하는 ACL을 명시적으로 만든다(정확하지만 Windows 보안 API가 들어온다). **무엇을 지키려던 값인지**
-  — 다른 사용자가 browser 결과를 읽지 못하게 — 를 기준으로 판단한다.
+- **`publishBrowserResult`의 파일 권한.** `src/main.zig`가 `maru browser executeScript --out <경로>`의 결과를
+  `Permissions.fromMode(0o600)`(소유자 전용)으로 쓴다. Windows에는 POSIX mode가 없고 **ACL**(누구에게 어떤
+  동작을 허용/거부하는지의 항목 목록)이라 그 값을 그대로 옮길 수 없다.
+
+  | | 내용 | 문제 |
+  |---|---|---|
+  | ① | ACL을 지정하지 않고 **부모 디렉터리 상속**에 맡긴다 | 이 파일은 `Dir.cwd()` 기준 **사용자가 `--out`으로 준 경로**라 어디 놓일지 모른다. 홈 아래면 대개 사용자 전용이지만 공유 폴더·네트워크 드라이브면 그 폴더 권한을 물려받는다 — **보장이 아니다** |
+  | ② | 현재 사용자 SID만 허용하는 ACL을 **명시적으로 구성** | POSIX `0600`과 같은 보장(폴더 무관). 대가는 Windows 보안 API(`OpenProcessToken`·`InitializeAcl`·`AddAccessAllowedAce`·`SECURITY_ATTRIBUTES`) 유입 |
+
+  **다만 이 결정은 W2를 막지 않는다.** `publishBrowserResult`는 **컨트롤 소켓 왕복을 마친 뒤에만** 호출되는데,
+  W2는 그 소켓을 "인스턴스 없음"으로 빠지게 하므로 이 코드는 Windows에서 **도달 불가**다. W2는 컴파일만
+  되게 하고, 실제 권한 정책은 아래 **컨트롤 플레인 transport**를 이식할 때 함께 정한다.
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.
 - **GPU 백엔드와 웹뷰 합성 모델**. WebView2는 별도 HWND라 macOS의 `CALayer` subview 3겹 합성이 그대로

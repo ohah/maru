@@ -292,7 +292,10 @@ pub fn columnOfByte(bytes: []const u8, tab_width: u16, byte_off: usize, scratch:
 /// 테스트가 이 함수를 `columnOfByte`(실제 전개로 세는 쪽)와 무작위 입력에서 대조한다.
 /// `offsets`·`out`이 **정렬되지 않은** 슬라이스일 수 있다(호출자가 byte 저장소를 빌려 쓴다 — 편집기
 /// 프레임이 그렇게 한다). 그래서 `align(1)`을 받는다.
-pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32) void {
+pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32) void {
+    // **화면 오른쪽 끝을 넘으면 멈춘다.** `expandTabs`가 훑는 범위에 상한을 둔 것과 같은 이유다 —
+    // 없으면 minified JS처럼 한 줄이 수 MB인 파일에서 화면 밖까지 끝까지 지나간다. 위치가 오름차순
+    // 이므로 그 뒤는 전부 화면 밖이고, 남은 자리에는 상한 열을 채워 호출자가 잘라 내게 한다.
     const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
     var col: u32 = 0;
     var i: usize = 0;
@@ -310,8 +313,9 @@ pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) c
             i += n;
         }
         while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
+        if (col >= stop_col) break;
     }
-    // 줄 끝을 넘는 위치는 줄 끝 열이다.
+    // 줄 끝(또는 화면 끝)을 넘는 위치는 그 열이다.
     while (next < offsets.len) : (next += 1) out[next] = col;
 }
 
@@ -1499,7 +1503,7 @@ test "한 번 훑기와 실제 전개가 같은 열을 준다 — 무작위 300�
         }
 
         var got: [64]u32 = undefined;
-        columnsAtOffsets(line, tw, offsets[0..count], got[0..count]);
+        columnsAtOffsets(line, tw, offsets[0..count], got[0..count], std.math.maxInt(u32));
         for (0..count) |k| try testing.expectEqual(expected[k], got[k]);
         _ = &scratch;
     }

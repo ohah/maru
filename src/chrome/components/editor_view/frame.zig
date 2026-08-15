@@ -341,7 +341,8 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             offsets[k * 2] = m.start;
             offsets[k * 2 + 1] = m.start + m.len;
         }
-        content.columnsAtOffsets(line, props.tab_width, offsets, offsets); // 제자리 채우기
+        // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
+        content.columnsAtOffsets(line, props.tab_width, offsets, offsets, @as(u32, props.first_col) + layout.content.width); // 제자리 채우기
         for (row_marks[0..max_pairs], 0..) |_, k| {
             if (n >= out.len) break;
             const start_col = offsets[k * 2];

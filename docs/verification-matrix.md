@@ -1220,7 +1220,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   state를 게시하는 runtime 4개+boundary 1개 gate다. 31개 Decision의 closed generation-effect table과 initial state에서 도달 가능한
   canonical sequence 전수가 같은 inventory를 소비한다. inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이고
   runtime size golden이 이를 고정한다. generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류하며,
-  mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3의 close 경쟁·mixed outcome·app-global
+  mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3a1은 actual
+  empty-screen candidate→publish→retiring→reclaim allocator ledger의 structural base allocation 1개,
+  Debug 3,104바이트/ReleaseFast 3,088바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
+  final-zero를 runtime 2개+boundary 1개로 고정한다. 가변 screen/metadata를 포함하지 않는 lower bound이므로
+  e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence에서 app-global exact cap을 정해
+  cap/cap+1·rollback/final-zero를 닫는다. e3b는 budget lease와
+  mutation seal·authority/retry/close effect를 actual stable owner에 결속한다. e3c는 sole external ingress와 close
+  경쟁·mixed outcome을 열고 모든 logical charge 0과 RSS artifact를 최종 검증한다. e3의 close 경쟁·mixed outcome·app-global
   count/byte budget·peak RSS까지 green이기 전에는 CR2e 완료가 아니다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해

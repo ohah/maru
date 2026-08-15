@@ -6943,6 +6943,122 @@ const ReconnectGenerationTestArgs = struct {
     stream_id: u64,
 };
 
+const ReconnectResidentLedger = if (builtin.is_test) struct {
+    parent: std.mem.Allocator,
+    live_bytes: usize = 0,
+    peak_bytes: usize = 0,
+    live_allocations: usize = 0,
+    peak_allocations: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const result = self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            return_address,
+        ) orelse return null;
+        self.live_bytes = std.math.add(usize, self.live_bytes, len) catch
+            @panic("reconnect resident byte ledger overflow");
+        self.live_allocations = std.math.add(usize, self.live_allocations, 1) catch
+            @panic("reconnect resident allocation ledger overflow");
+        self.peak_bytes = @max(self.peak_bytes, self.live_bytes);
+        self.peak_allocations = @max(self.peak_allocations, self.live_allocations);
+        return result;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (!self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        )) return false;
+        self.adjustResize(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const result = self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        ) orelse return null;
+        self.adjustResize(memory.len, new_len);
+        return result;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.live_bytes < memory.len or self.live_allocations == 0)
+            @panic("reconnect resident ledger underflow");
+        self.live_bytes -= memory.len;
+        self.live_allocations -= 1;
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            return_address,
+        );
+    }
+
+    fn adjustResize(self: *@This(), old_len: usize, new_len: usize) void {
+        if (new_len >= old_len) {
+            self.live_bytes = std.math.add(usize, self.live_bytes, new_len - old_len) catch
+                @panic("reconnect resident resize ledger overflow");
+        } else {
+            if (self.live_bytes < old_len - new_len)
+                @panic("reconnect resident resize ledger underflow");
+            self.live_bytes -= old_len - new_len;
+        }
+        self.peak_bytes = @max(self.peak_bytes, self.live_bytes);
+    }
+} else struct {};
+
+fn reconnectCandidateResidentBytes() !usize {
+    return switch (builtin.mode) {
+        .Debug => 3104,
+        .ReleaseFast => 3088,
+        else => error.SkipZigTest,
+    };
+}
+
 fn initReconnectTestGeneration(
     out: *RemoteGeneration,
     args: ReconnectGenerationTestArgs,
@@ -12439,6 +12555,127 @@ test "CR2e-e2b 제품 executor는 reachable Decision 31개와 effect table을 �
     try testing.expect(reconnectRetiringMatchesLocal(.published_new, true));
     try testing.expect(!reconnectRetiringMatchesLocal(.published_new, false));
     try expectEveryReconnectDecisionReachable();
+}
+
+test "CR2e-e3a1 candidate base resident ledger는 prepare abort와 final zero를 고정한다" {
+    const candidate_resident_bytes = try reconnectCandidateResidentBytes();
+    ReconnectGenerationTestState.deinit_count = 0;
+    var ledger = ReconnectResidentLedger{ .parent = testing.allocator };
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 80, .rows = 24 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        ledger.allocator(),
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = ledger.allocator(), .stream_id = 0xE301 },
+        initReconnectTestGeneration,
+    );
+    var prepared: PreparedReconnect = .{};
+    var owner_live = true;
+    defer {
+        if (!std.meta.eql(prepared, PreparedReconnect{}))
+            owner.abort(&prepared) catch @panic("candidate cleanup failed");
+        if (owner_live) {
+            if (owner.slot.hasRetiring() catch false)
+                owner.reclaimRetiring() catch @panic("retiring cleanup failed");
+            deinitReconnectTestOwner(&owner, &proxy);
+        }
+    }
+
+    const baseline_bytes = ledger.live_bytes;
+    const baseline_allocations = ledger.live_allocations;
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = ledger.allocator(), .stream_id = 0xE302 },
+        initReconnectTestGeneration,
+    );
+    const candidate_bytes = ledger.live_bytes - baseline_bytes;
+    const candidate_allocations = ledger.live_allocations - baseline_allocations;
+    try testing.expectEqual(candidate_resident_bytes, candidate_bytes);
+    try testing.expectEqual(@as(usize, 1), candidate_allocations);
+    try testing.expectEqual(baseline_bytes + candidate_resident_bytes, ledger.peak_bytes);
+    try testing.expectEqual(baseline_allocations + 1, ledger.peak_allocations);
+    try owner.abort(&prepared);
+    try testing.expectEqual(baseline_bytes, ledger.live_bytes);
+    try testing.expectEqual(baseline_allocations, ledger.live_allocations);
+
+    try owner.deinit();
+    owner_live = false;
+    proxy.deinit();
+    try testing.expectEqual(@as(usize, 0), ledger.live_bytes);
+    try testing.expectEqual(@as(usize, 0), ledger.live_allocations);
+}
+
+test "CR2e-e3a1 candidate base publish retiring reclaim은 logical delta를 exact once 회수한다" {
+    const candidate_resident_bytes = try reconnectCandidateResidentBytes();
+    ReconnectGenerationTestState.deinit_count = 0;
+    var ledger = ReconnectResidentLedger{ .parent = testing.allocator };
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 80, .rows = 24 });
+    var owner: ReconnectGenerationOwner = .{};
+    try owner.initInPlace(
+        ledger.allocator(),
+        &proxy,
+        2,
+        ReconnectGenerationTestArgs{ .allocator = ledger.allocator(), .stream_id = 0xE311 },
+        initReconnectTestGeneration,
+    );
+    var prepared: PreparedReconnect = .{};
+    var owner_live = true;
+    defer {
+        if (!std.meta.eql(prepared, PreparedReconnect{}))
+            owner.abort(&prepared) catch @panic("candidate cleanup failed");
+        if (owner_live) {
+            if (owner.slot.hasRetiring() catch false)
+                owner.reclaimRetiring() catch @panic("retiring cleanup failed");
+            deinitReconnectTestOwner(&owner, &proxy);
+        }
+    }
+
+    const baseline_bytes = ledger.live_bytes;
+    const baseline_allocations = ledger.live_allocations;
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = ledger.allocator(), .stream_id = 0xE312 },
+        initReconnectTestGeneration,
+    );
+    const prepared_bytes = ledger.live_bytes;
+    const prepared_allocations = ledger.live_allocations;
+    try owner.publish(&prepared);
+    try testing.expectEqual(prepared_bytes, ledger.live_bytes);
+    try testing.expectEqual(prepared_allocations, ledger.live_allocations);
+    try testing.expect(try owner.slot.hasRetiring());
+    try owner.reclaimRetiring();
+    try testing.expect(!(try owner.slot.hasRetiring()));
+    try testing.expectEqual(candidate_resident_bytes, ledger.live_bytes - baseline_bytes);
+    try testing.expectEqual(@as(usize, 1), ledger.live_allocations - baseline_allocations);
+
+    try owner.prepare(
+        &prepared,
+        ReconnectGenerationTestArgs{ .allocator = ledger.allocator(), .stream_id = 0xE313 },
+        initReconnectTestGeneration,
+    );
+    try testing.expectEqual(
+        2 * candidate_resident_bytes,
+        ledger.live_bytes - baseline_bytes,
+    );
+    try testing.expectEqual(@as(usize, 2), ledger.live_allocations - baseline_allocations);
+    try testing.expectEqual(
+        baseline_bytes + 2 * candidate_resident_bytes,
+        ledger.peak_bytes,
+    );
+    try testing.expectEqual(baseline_allocations + 2, ledger.peak_allocations);
+    try owner.publish(&prepared);
+    try owner.reclaimRetiring();
+    try testing.expectEqual(candidate_resident_bytes, ledger.live_bytes - baseline_bytes);
+    try testing.expectEqual(@as(usize, 1), ledger.live_allocations - baseline_allocations);
+
+    try owner.deinit();
+    owner_live = false;
+    proxy.deinit();
+    try testing.expectEqual(@as(usize, 0), ledger.live_bytes);
+    try testing.expectEqual(@as(usize, 0), ledger.live_allocations);
 }
 
 fn expectEveryReconnectDecisionReachable() !void {

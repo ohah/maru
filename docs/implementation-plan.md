@@ -150,8 +150,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    inline `PreparedReconnect`를 함께 소유하고, reducer 결과를 actual prepare/abort/publish/reclaim effect가 성공한 뒤에만
    게시한다. 31개 `Decision`의 closed generation-effect table과 initial state에서 도달 가능한 모든 canonical state sequence가 같은
    decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
-   runtime size golden으로 고정한다. e3은 아직 `retain`으로 분류한 mutation seal·authority/retry/close effect의 실제 제품 결속,
-   외부 reconnect ingress, close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.
+   runtime size golden으로 고정한다. e3은 다음 세 하위 gate를 순서대로 닫는다. **e3a**는 실제 제품
+   `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
+   **e3a1 완료** (candidate allocation 1개, Debug 3,104바이트/ReleaseFast 3,088바이트; abort baseline 복원,
+   두 reconnect 뒤 heap current 1개, teardown final 0)와,
+   별도 ReleaseFast process RSS를 측정해 candidate+retiring count/byte의 app-global exact cap과 cap+1 mutation 0을
+   수치로 고정하는 **e3a2**로 나뉜다. 측정 전 임의 상한을
+   제품 정책으로 채택하거나 reconnect ingress를 열지 않는다. **e3b**는 그 budget lease 아래 현재 `retain`인
+   mutation seal·authority commit·direct-release retry·termination/abandon effect를 actual stable input/close owner에
+   결속하고, product effect 성공 뒤에만 reducer state를 게시한다. **e3c**는 sole external reconnect ingress와
+   close 경쟁·mixed outcome을 같은 executor로 통과시키며 candidate/retiring/retry/paused-paste charge의 최종 0과
+   RSS artifact를 제품 gate에 결합한다.
+   e3 전체가 mutation seal·authority/retry/close effect의 실제 제품 결속, 외부 reconnect ingress,
+   close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.
    a~e 다섯 gate가 모두 green이기 전에는 CR2e 완료가 아니다.
 5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현
    Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인

@@ -158,8 +158,47 @@ pub fn dispatchNotify9(self: *TerminalCore, body: []const u8) void {
         self.agent_progress.appendSlice(self.allocator, body) catch self.agent_progress.clearRetainingCapacity();
         return;
     }
+    // ConEmu 공개 OSC 9;9 "set working directory": `9;<경로>`. **Windows 네이티브 셸의 cwd 보고가 이것이다**
+    // (docs/windows-platform.md §3.2) — Microsoft가 cmd·PowerShell 셸 통합으로 안내하고 Windows Terminal이
+    // 채택했다. OSC 7과 달리 `file://` URI가 아니라 **네이티브 경로**를 그대로 나른다.
+    if (std.mem.startsWith(u8, body, "9;")) {
+        dispatchConEmuCwd(self, body[2..]);
+        return;
+    }
     if (looksLikeConemu9(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
     setNotification(self, "", body); // iTerm2: title 없음, body=메시지 전체
+}
+
+/// OSC 9;9의 cwd. **host(authority)를 건드리지 않는다** — 이 시퀀스는 authority를 나르지 않기 때문이다
+/// (docs/windows-platform.md §3.2a). 지우면 원격 세션이 로컬로 뒤집혀 원격 경로를 로컬 파일시스템에 대고
+/// 해석하고(남의 저장소에 stage/discard), 만들어 내면 없는 근거로 원격을 주장하게 된다. 그래서 `dispatchCwd`가
+/// (host, path)를 함께 세우는 것과 달리 여기서는 **path만** 세우고 host는 이전 값 그대로 둔다.
+///
+/// **percent-decode하지 않는다.** OSC 7의 path는 URI라 디코드가 맞지만 9;9은 네이티브 경로라, 디코드하면
+/// `C:\temp\100%done` 같은 정상 경로가 깨진다.
+///
+/// **구분자를 정규화하지 않는다.** 백슬래시를 `/`로 바꾸는 것은 중립 레이어의 절대경로 판정(`[0]=='/'`)을
+/// 먼저 떼어낸 뒤에 해야 한다(docs/windows-platform.md §5의 순서 제약) — 먼저 바꾸면 `normalizeAssetPath`의
+/// 역슬래시 가드가 무력화된다. 여기서는 받은 그대로 보관한다.
+fn dispatchConEmuCwd(self: *TerminalCore, raw: []const u8) void {
+    // ConEmu 원본 스펙은 경로를 따옴표로 감싸고(`9;9;"C:\path"`), Microsoft가 안내하는 `PROMPT`는 감싸지
+    // 않는다(`$e]9;9;$P$e\`). 둘 다 실제로 나오는 바이트라 양쪽을 받는다 — Windows 파일명에 `"`가 올 수
+    // 없으므로 **양끝이 짝일 때만** 벗기는 것은 모호하지 않다(한쪽만 있으면 비정상 입력이라 그대로 둔다).
+    const path = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+        raw[1 .. raw.len - 1]
+    else
+        raw;
+    if (path.len == 0) return; // 빈 경로는 무시 — 기존 cwd를 유지한다(부분 갱신으로 이전 값을 잃지 않는다)
+    const copy = self.allocator.dupe(u8, path) catch return; // OOM이면 기존 cwd 유지(같은 이유)
+
+    // `dispatchCwd`와 같은 규율: **실제로 바뀔 때만** bump한다. 이 generation은 창 제목 재sync만이 아니라
+    // runtime observation refresh의 게이트라, 빠뜨리면 경로가 바뀌어도 관측이 안 돌아 폴더줄·cwd 상속·
+    // 링크 스코프가 옛 판정에 머문다. 반대로 무조건 올리면 매 프롬프트 재보고가 헛 sync를 만든다.
+    const changed = if (self.cwd) |old| !std.mem.eql(u8, old, copy) else true;
+    if (self.cwd) |old| self.allocator.free(old);
+    self.cwd = copy;
+    if (changed) self.bumpTitleGeneration();
+    self.recordShellEvent(.cwd_changed);
 }
 
 /// OSC 9 body가 ConEmu 서브커맨드(`<숫자>;...`)처럼 보이는가. 선두 숫자 뒤에 `;`가 오면 true.

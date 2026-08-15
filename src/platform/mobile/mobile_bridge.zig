@@ -1668,7 +1668,10 @@ const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 �
 const status_icon_px: i32 = 24;
 const icon_slot_px = 32;
 /// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
-const icon_slots = 10;
+/// 방향키 아이콘이 시작하는 슬롯. **상태바 아이콘 뒤에 붙는다** — 슬롯 번호를 손으로 적으면
+/// 상태바에 아이콘을 하나 넣는 순간 키바 화살표와 설정 뒤로가기가 **엉뚱한 그림**이 된다.
+const arrow_slot_base: u32 = @intCast(status_icon_count);
+const icon_slots = status_icon_count + 4; // 상태바 + 방향키 넷
 /// **RGBA8** 이어야 한다 — `glyph_pixels.slotFits` 가 `bytes_per_row >= width*4` 를 요구한다
 /// (단일 채널을 주면 조용히 0을 돌려준다. 실측: filled=0/6 으로 헤맸다). 셰이더는 alpha 를
 /// coverage 로 읽는다.
@@ -1689,6 +1692,9 @@ pub export fn maru_mobile_icon_build() u32 {
     @memset(&icon_pixels, 0);
     // **이름으로 부른다.** PUA codepoint 리터럴은 경계 테스트가 막는다
     // (docs/chrome-strategy.md §9.7) — 자산이 옮겨 가면 리터럴만 조용히 어긋난다.
+    // **앞 `status_icon_count` 개가 상태바, 그 뒤 넷이 방향키다.** 이 순서가 곧 슬롯 번호이고
+    // `arrow_slot_base` 가 그것을 가정한다 — 상태바 아이콘을 여기 끼워 넣으면 `status_icon_count`
+    // 도 함께 올려야 화살표가 안 밀린다.
     const cps = [icon_slots]u32{
         maru.icons.codepoint(.git_branch),
         maru.icons.codepoint(.gear),
@@ -1704,6 +1710,7 @@ pub export fn maru_mobile_icon_build() u32 {
         maru.icons.codepoint(.arrow_left),
         maru.icons.codepoint(.arrow_right),
     };
+    comptime std.debug.assert(icon_slots == status_icon_count + 4);
     var filled: u32 = 0;
     for (cps, 0..) |cp, i| {
         const stride = icon_slot_px * 4;
@@ -2201,7 +2208,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
             .radius = 0,
             .kind = 2,
             .cell_x = 0,
-            .cell_y = 8, // arrow_left
+            .cell_y = arrow_slot_base + 2, // arrow_left
         };
         quad_count += 1;
     }
@@ -2490,10 +2497,10 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "ctrl", .key_id = 0, .sticky_mod = 2 }, // MARU_MOD_CTRL
     // 방향키는 **아이콘**이다(슬롯 6~9 — `maru_mobile_icon_build` 순서). 라벨은 접근성·계측용
     // 이름으로 남긴다.
-    .{ .label = "\u{2191}", .key_id = 5, .icon_slot = 6 },
-    .{ .label = "\u{2193}", .key_id = 6, .icon_slot = 7 },
-    .{ .label = "\u{2190}", .key_id = 7, .icon_slot = 8 },
-    .{ .label = "\u{2192}", .key_id = 8, .icon_slot = 9 },
+    .{ .label = "\u{2191}", .key_id = 5, .icon_slot = arrow_slot_base + 0 },
+    .{ .label = "\u{2193}", .key_id = 6, .icon_slot = arrow_slot_base + 1 },
+    .{ .label = "\u{2190}", .key_id = 7, .icon_slot = arrow_slot_base + 2 },
+    .{ .label = "\u{2192}", .key_id = 8, .icon_slot = arrow_slot_base + 3 },
     .{ .label = "|", .key_id = 0, .codepoint = '|' },
     .{ .label = "~", .key_id = 0, .codepoint = '~' },
     .{ .label = "/", .key_id = 0, .codepoint = '/' },

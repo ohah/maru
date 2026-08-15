@@ -138,6 +138,11 @@ const State = struct {
     snapshot_result: ?SnapshotResult = null,
     branches_inflight: usize = 0,
     branches_result: ?BranchesResult = null,
+    /// 쓰기도 **별도 슬롯**이다. 읽기와 공유하면 스테이지 결과가 목록 갱신에 밀려 사라지고, 호출자의
+    /// in-flight가 안 풀려 `+`가 영영 안 눌린 것처럼 보인다(diff 슬롯을 가른 것과 같은 이유).
+    /// **깊이는 1이다** — §6이 "큐가 아니라 in-flight 하나"라고 못박았다.
+    write_inflight: usize = 0,
+    write_result: ?WriteResult = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -145,6 +150,7 @@ const State = struct {
         if (self.diff_result) |*r| r.deinit(self.allocator);
         if (self.snapshot_result) |*r| r.deinit(self.allocator);
         if (self.branches_result) |*r| r.deinit(self.allocator);
+        if (self.write_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -294,6 +300,95 @@ pub const Backend = struct {
         };
         thread.detach();
         return true;
+    }
+
+    /// 쓰기 하나를 **비동기로** 건다. **깊이 1이다** — 이미 도는 쓰기나 안 가져간 결과가 있으면 거절한다
+    /// (§6: 큐가 아니라 in-flight 하나). 거절되면 호출자가 그 클릭을 낙관 반영하지 않고 흘린다.
+    ///
+    /// 여기서 직렬화를 **판정만** 하고 정책은 호출자가 갖는다 — 그 동안 눌린 `+`/`−`를 어떻게 다룰지는
+    /// 화면 상태를 든 쪽만 안다(§7).
+    pub fn submitWrite(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        kind: git_write_command.Kind,
+        paths: []const []const u8,
+        message_file: ?[]const u8,
+        request_id: u64,
+    ) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.write_inflight != 0 or state.write_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.write_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(WriteJob) catch return self.abandonWrite();
+        job.* = .{
+            .state = state,
+            .git_exe = &.{},
+            .repo = &.{},
+            .paths = &.{},
+            .message_file = null,
+            .kind = kind,
+            .request_id = request_id,
+        };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch {
+            job.deinit();
+            return self.abandonWrite();
+        };
+        job.repo = state.allocator.dupe(u8, repo) catch {
+            job.deinit();
+            return self.abandonWrite();
+        };
+        job.paths = state.allocator.alloc([]u8, paths.len) catch {
+            job.deinit();
+            return self.abandonWrite();
+        };
+        // 부분 실패에서 `deinit`이 미초기화 슬라이스를 free하지 않도록 먼저 비운다.
+        for (job.paths) |*p| p.* = &.{};
+        for (paths, job.paths) |src, *dst| {
+            dst.* = state.allocator.dupe(u8, src) catch {
+                job.deinit();
+                return self.abandonWrite();
+            };
+        }
+        if (message_file) |m| {
+            job.message_file = state.allocator.dupe(u8, m) catch {
+                job.deinit();
+                return self.abandonWrite();
+            };
+        }
+
+        const thread = std.Thread.spawn(.{}, writeWorker, .{job}) catch {
+            job.deinit();
+            return self.abandonWrite();
+        };
+        thread.detach();
+        return true;
+    }
+
+    /// 제출에 실패했을 때 잡아 둔 자리를 되돌린다. **`abandon`과 슬롯이 달라 따로 있다.**
+    fn abandonWrite(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.write_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    /// 끝난 쓰기 결과를 가져간다(호출자 소유 — `deinit`으로 해제한다).
+    pub fn takeWriteResult(self: *Backend) ?WriteResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const taken = state.write_result;
+        state.write_result = null;
+        return taken;
     }
 
     /// diff 본문 두 쪽을 읽는다. 목록 갱신과 **다른 슬롯**을 쓰므로 목록을 새로 고치는 중에도 본문을 열 수 있다.
@@ -1074,6 +1169,85 @@ fn reapPid(pid: std.c.pid_t) c_int {
     const us: u32 = @bitCast(status);
     if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
     return -1;
+}
+
+/// 비동기 쓰기 하나의 결과(호출자가 `takeWriteResult`로 가져간다).
+pub const WriteResult = struct {
+    request_id: u64,
+    /// 프로세스를 띄우지도 못한 경우(조립 거부·spawn 실패)는 `false`이고 `stderr`가 비어 있다.
+    spawned: bool,
+    exit_code: c_int,
+    /// git이 낸 stderr **원본**. 화면에 내기 전에 호출자가 redact·절단한다(§5).
+    stderr: []u8,
+    stderr_truncated: bool,
+
+    pub fn ok(self: WriteResult) bool {
+        return self.spawned and self.exit_code == 0;
+    }
+
+    pub fn deinit(self: *WriteResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.stderr);
+        self.stderr = &.{};
+    }
+};
+
+const WriteJob = struct {
+    state: *State,
+    git_exe: []u8,
+    repo: []u8,
+    /// 경로 문자열과 그 슬라이스 배열 둘 다 job이 소유한다 — 호출자의 프레임 arena는 이 worker보다 먼저 죽는다.
+    paths: [][]u8,
+    message_file: ?[]u8,
+    kind: git_write_command.Kind,
+    request_id: u64,
+
+    fn deinit(self: *WriteJob) void {
+        const allocator = self.state.allocator;
+        allocator.free(self.git_exe);
+        allocator.free(self.repo);
+        for (self.paths) |p| allocator.free(p);
+        allocator.free(self.paths);
+        if (self.message_file) |m| allocator.free(m);
+        allocator.destroy(self);
+    }
+};
+
+fn writeWorker(job: *WriteJob) void {
+    const state = job.state;
+    const allocator = state.allocator;
+
+    // `runWriteSync`는 `[]const []const u8`을 받는다. job이 든 가변 슬라이스를 그대로 넘길 수 없어 얇게 뷰를 만든다.
+    var view_buf: [git_write_command.max_batch_paths][]const u8 = undefined;
+    const n = @min(job.paths.len, view_buf.len);
+    for (job.paths[0..n], view_buf[0..n]) |src, *dst| dst.* = src;
+
+    var result: WriteResult = .{
+        .request_id = job.request_id,
+        .spawned = false,
+        .exit_code = -1,
+        .stderr = &.{},
+        .stderr_truncated = false,
+    };
+    if (runWriteSync(allocator, job.kind, job.git_exe, job.repo, view_buf[0..n], job.message_file)) |out| {
+        result = .{
+            .request_id = job.request_id,
+            .spawned = true,
+            .exit_code = out.exit_code,
+            .stderr = out.stderr_bytes,
+            .stderr_truncated = out.stderr_truncated,
+        };
+    } else |_| {
+        // 조립 거부·spawn 실패. **성공으로 추정하지 않는다**(§5) — 호출자가 목록을 다시 읽어 사실과 맞춘다.
+    }
+
+    state.mutex.lockUncancelable(state.io);
+    if (state.write_result) |*old| old.deinit(allocator); // 못 가져간 결과는 버린다(최신이 사실이다)
+    state.write_result = result;
+    state.write_inflight -= 1;
+    state.mutex.unlock(state.io);
+
+    job.deinit();
+    state.release();
 }
 
 /// 쓰기 명령 하나의 결과. 읽기의 `Output`과 달리 **종료 코드와 stderr를 싣는다** — §5가 "성공을 추정하지

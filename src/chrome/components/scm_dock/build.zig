@@ -127,7 +127,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             action_cursor += 1;
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = section.section },
-                .file => .{ .row_action = @intCast(index) },
+                .file => |file| .{ .row_action = file.model_index },
                 .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
@@ -148,7 +148,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 
         const row_intent: ?ids.Intent = switch (item) {
             .section => |section| .{ .toggle_section = section.section },
-            .file => .{ .open_row = @intCast(index) },
+            .file => |file| .{ .open_row = file.model_index },
             .more => |more| .{ .expand_section = more.section },
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice => null,
@@ -288,7 +288,8 @@ const testing = std.testing;
 fn testItems() [4]types.Item {
     return .{
         .{ .section = .{ .section = .staged, .count = 1, .collapsed = false, .action = .unstage } },
-        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .added = 3, .removed = 1, .has_delta = true, .action = .unstage } },
+        // `model_index`를 **창 자리(1)와 다른 값**으로 둔다 — intent가 어느 축을 싣는지가 이 fixture의 요점이다.
+        .{ .file = .{ .model_index = 42, .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .added = 3, .removed = 1, .has_delta = true, .action = .unstage } },
         .{ .section = .{ .section = .changes, .count = 2, .collapsed = false, .action = .stage } },
         .{ .more = .{ .section = .changes, .hidden = 4 } },
     };
@@ -401,13 +402,15 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_toggle = true;
             try testing.expect(section == .staged or section == .changes);
         },
+        // **모델 인덱스**를 싣는다(창 자리 1이 아니다). 창 자리를 실으면 스크롤한 뒤 누른 행과 열리는
+        // 행이 어긋난다 — host가 그 값으로 모델을 다시 조회하기 때문이다.
         .open_row => |index| {
             saw_open = true;
-            try testing.expectEqual(@as(u32, 1), index); // 파일 행은 하나뿐이다
+            try testing.expectEqual(@as(u32, 42), index);
         },
         .row_action => |index| {
             saw_row_action = true;
-            try testing.expectEqual(@as(u32, 1), index);
+            try testing.expectEqual(@as(u32, 42), index);
         },
         .expand_section => |section| {
             saw_expand = true;

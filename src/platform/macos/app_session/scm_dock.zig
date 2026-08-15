@@ -22,6 +22,9 @@ const git_ops = @import("git.zig");
 const agent_dock = @import("agent_dock.zig");
 const scm_view = app_session_mod.scm_view;
 const scm_row_capacity = app_session_mod.scm_row_capacity;
+const git_backend_mod = app_session_mod.git_backend_mod;
+const git_write_command = app_session_mod.git_write_command;
+const redact = maru.redact;
 
 const component = chrome.components.scm_dock;
 
@@ -65,14 +68,13 @@ fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapse
                 .section = sectionOf(section.section),
                 .count = @intCast(section.count),
                 .collapsed = collapsed[@intFromEnum(section.section)],
-                // **행 동작은 아직 켜지 않는다.** `+`/`−`는 git **쓰기**라 P2의 안전 계약
-                // (docs/editor-surface-dock-write.md)이 먼저 있어야 한다. component는 이미 그릴 수 있지만,
-                // 눌러도 아무 일 없는 컨트롤을 화면에 두지 않는 것이 이 문서의 규칙이다.
-                .action = .none,
+                // 섹션 헤더의 일괄 동작. 모델이 "대상이 하나도 없으면(전부 충돌) `.none`"까지 판정해 둔다.
+                .action = actionOf(section.action),
             },
         },
         .file => |file| .{
             .file = .{
+                .model_index = @intCast(model_index),
                 .name = std.fs.path.basename(file.path),
                 .dir = file.path[0 .. file.path.len - std.fs.path.basename(file.path).len],
                 .status = statusOf(file),
@@ -81,7 +83,9 @@ fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapse
                 .removed = file.removed,
                 .has_delta = !file.unknown_delta and !file.binary,
                 .binary = file.binary,
-                .action = .none, // 위와 같은 이유(P2)
+                // 행 동작(`+`/`−`). **충돌 행은 모델이 `.none`으로 준다** — `git add`는 충돌을 "해결됨"으로
+                // 표시하므로, 그 행에 `+`를 두면 사용자가 의도하지 않은 해결이 일어난다.
+                .action = actionOf(file.action),
                 .selected = selected_row != null and selected_row.? == model_index,
             },
         },
@@ -156,8 +160,13 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
     const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return null;
 
-    const items = arena.alloc(component.types.Item, model.rows.len) catch return null;
-    for (model.rows, items, 0..) |row, *item, index| {
+    // 쓰기가 실패했으면 그 사유를 **목록 맨 위 한 줄**로 낸다(§5 — 실패는 사실대로). 별도 배너를 만들지
+    // 않는 이유는 이 자리가 이미 "목록이 사실과 다르다"를 말하는 자리(`notice`)이고, 사용자가 방금 누른
+    // 동작의 결과를 그 목록 바로 위에서 읽는 것이 자연스럽기 때문이다.
+    const notice_rows: usize = if (self.scm_write_error != null) 1 else 0;
+    const items = arena.alloc(component.types.Item, model.rows.len + notice_rows) catch return null;
+    if (self.scm_write_error) |err| items[0] = .{ .notice = err };
+    for (model.rows, items[notice_rows..], 0..) |row, *item, index| {
         item.* = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
     }
 
@@ -447,11 +456,119 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
                 .section, .more, .notice => {},
             }
         },
-        // 행 동작(`+`/`−`)은 git 쓰기라 P2에서 붙는다. 지금은 host가 `.none`만 투영하므로 이 intent가
-        // 발행되지 않지만, component가 이미 만들 수 있으므로 여기서 조용히 무시한다.
-        .row_action, .section_action => {},
+        .row_action => |index| submitRowWrite(self, index),
+        .section_action => |section| submitSectionWrite(self, section),
         .scroll_thumb, .scroll_track => {},
     }
+}
+
+/// 모델의 행 동작을 component 값으로 옮긴다. 값이 갈리면 이 exhaustive switch가 컴파일로 걸린다.
+fn actionOf(action: scm_view.RowAction) component.types.RowAction {
+    return switch (action) {
+        .stage => .stage,
+        .unstage => .unstage,
+        .none => .none,
+    };
+}
+
+/// 행 하나의 `+`/`−`. **모델 인덱스는 다시 조회한다** — intent가 든 것은 인덱스뿐이고 그 사이 목록이
+/// 갱신됐을 수 있다(늦은 클릭이 엉뚱한 파일을 스테이지하지 않게. `open_row`와 같은 규율이다).
+fn submitRowWrite(self: *AppSession, index: u32) void {
+    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
+    if (index >= model.rows.len) return;
+    const row = switch (model.rows[index]) {
+        .file => |file| file,
+        .section, .more, .notice => return,
+    };
+    // 모델이 이미 판정한 것을 다시 판정하지 않는다 — 충돌 행은 여기서 `.none`이라 아무 일도 일어나지 않는다.
+    const kind: git_write_command.Kind = switch (row.action) {
+        .stage => .stage,
+        .unstage => if (model.head.unborn) .unstage_unborn else .unstage,
+        .none => return,
+    };
+    const paths = [_][]const u8{row.path};
+    submitWrite(self, kind, &paths);
+}
+
+/// 섹션 헤더의 일괄 `+`/`−`. **방향은 host가 지금 상태로 다시 정한다**(intent가 방향을 싣지 않는 이유 —
+/// published tree와 host 상태가 어긋날 수 있다).
+fn submitSectionWrite(self: *AppSession, section: component.types.Section) void {
+    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
+    const target = switch (section) {
+        .staged => scm_view.Section.staged,
+        .changes => scm_view.Section.changes,
+    };
+    const kind: git_write_command.Kind = switch (target) {
+        .staged => if (model.head.unborn) .unstage_all_unborn else .unstage_all,
+        .changes => .stage_all,
+    };
+    // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
+    // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
+    submitWrite(self, kind, &.{});
+}
+
+/// 쓰기 하나를 건다. **in-flight 하나**(§6) — 도는 동안 눌린 것은 흘린다(큐를 쌓으면 오래된 클릭이
+/// 뒤늦게 저장소를 바꾼다).
+fn submitWrite(self: *AppSession, kind: git_write_command.Kind, paths: []const []const u8) void {
+    if (self.scm_write_inflight != 0) return;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_write_seq += 1;
+    if (self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq)) {
+        self.scm_write_inflight = self.scm_write_seq;
+        clearScmWriteError(self);
+        self.metal_dirty = true;
+    }
+}
+
+pub fn clearScmWriteError(self: *AppSession) void {
+    if (self.scm_write_error) |err| {
+        self.allocator.free(err);
+        self.scm_write_error = null;
+    }
+}
+
+/// 끝난 쓰기를 거둔다. **성공이든 실패든 목록을 다시 읽는다** — 성공이면 사실이 바뀌었고, 실패면 우리가
+/// 아는 상태와 저장소가 갈렸다는 뜻이다(§5·§7). 읽기는 여기서 **한 번만** 건다.
+pub fn drainScmWrite(self: *AppSession) void {
+    const backend = &(self.git_backend orelse return);
+    var taken = backend.takeWriteResult() orelse return;
+    defer taken.deinit(git_backend_mod.worker_allocator);
+    if (taken.request_id != self.scm_write_inflight) return; // 낡은 결과는 버린다
+    self.scm_write_inflight = 0;
+    self.metal_dirty = true;
+
+    if (!taken.ok()) {
+        clearScmWriteError(self);
+        self.scm_write_error = writeErrorText(self, taken);
+    }
+    // 쓰기가 끝난 **뒤** 한 번 읽는다(§6-1 — 쓰기마다 읽기를 걸면 `+`를 빠르게 누를 때 프로세스가 줄줄이 뜬다).
+    git_ops.refreshGitStatus(self);
+}
+
+/// 화면에 낼 실패 사유. **redact하고 자른다**(§5) — 홈 경로·IP·`user@host`가 stderr에 섞이고, hook 출력은
+/// 수천 줄이 될 수 있다. trace·로그에는 싣지 않는다(화면은 방금 누른 동작의 결과, 로그는 나중에 공유되는 산출물).
+fn writeErrorText(self: *AppSession, result: git_backend_mod.WriteResult) ?[]u8 {
+    if (!result.spawned) return self.allocator.dupe(u8, "git을 실행하지 못했습니다") catch null;
+    const raw = std.mem.trimEnd(u8, result.stderr, "\n");
+    if (raw.len == 0) return self.allocator.dupe(u8, "git 명령이 실패했습니다") catch null;
+    // **마지막 줄만** 낸다. 목록 안 한 줄짜리 자리라 여러 줄을 담을 수 없고, hook 거부 사유는 보통 끝에 온다.
+    const last_break = std.mem.lastIndexOfScalar(u8, raw, '\n');
+    const last = if (last_break) |at| raw[at + 1 ..] else raw;
+    const anonymized = redact.anonymizeAlloc(self.allocator, last, .{}) catch return null;
+    defer self.allocator.free(anonymized);
+    const max_cols: usize = 160;
+    const clipped = if (anonymized.len > max_cols) anonymized[0..max_cols] else anonymized;
+    return self.allocator.dupe(u8, clipped) catch null;
 }
 
 fn sectionIndex(section: component.types.Section) usize {
@@ -577,4 +694,25 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
         .text_bytes = text_bytes,
     });
     try testing.expect(draws.ops.len > 0);
+}
+
+test "스크롤한 창에서도 intent는 모델 인덱스를 싣는다" {
+    // **P1b가 창 자리를 실어 내보냈다.** 그러면 목록을 스크롤한 뒤 누른 행과 열리는(그리고 스테이지되는)
+    // 행이 어긋난다 — host가 그 값으로 모델을 다시 조회하기 때문이다. 쓰기가 붙은 지금은 그 어긋남이
+    // "엉뚱한 파일이 열린다"가 아니라 **"엉뚱한 파일이 스테이지된다"**가 된다.
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .changes, .count = 3, .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "a.zig", .letter = 'M', .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "b.zig", .letter = 'M', .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "c.zig", .letter = 'M', .action = .stage } },
+    };
+    var items: [rows.len]component.types.Item = undefined;
+    for (rows, &items, 0..) |row, *item, index| {
+        item.* = itemFor(row, index, null, @splat(false));
+    }
+
+    // 창이 2번째 행부터 시작한다고 하자(앞 둘은 스크롤아웃).
+    const window = items[2..];
+    try testing.expectEqual(@as(u32, 2), window[0].file.model_index);
+    try testing.expectEqual(@as(u32, 3), window[1].file.model_index);
 }

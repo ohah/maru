@@ -48,13 +48,19 @@ pub const inventory = [_]Proof{
     // 않는다 — docs/editor-surface-dock.md §3.5.2). count는 2 그대로다: 더한 것은 argv 한 종류와 `Result`
     // 필드 하나, 그리고 기존 루프의 `truncated` 대입뿐이고 `@field` 반사 접근이나 Client 구성·receiver
     // 집합은 건드리지 않는다.
+    // P2c가 **비동기 쓰기 슬롯**을 더하면서 또 바뀐다: `submitWrite`/`takeWriteResult`/`writeWorker`와
+    // 그 job(경로 배열까지 job이 소유한다 — 호출자의 프레임 arena가 worker보다 먼저 죽는다). 읽기·diff·
+    // 스냅샷과 **슬롯을 가른** 이유도 같다(공유하면 스테이지 결과가 목록 갱신에 밀려 사라진다).
+    // count는 2 그대로다: 더한 것은 슬롯·worker·job 수명뿐이고 `@field` 반사 접근이나 Client 구성·
+    // receiver 집합은 건드리지 않는다.
+    //
     // 소스 컨트롤 **쓰기** 실행 경로(P2b)가 붙으면서 바뀐다. fork/exec/파이프 코어를 `spawnCapture`로 뽑아
     // 읽기·쓰기가 공유하게 하고(정책 차이는 어느 스트림을 파이프로 받을지 하나뿐이다), 그 위에
     // `runWriteSync`·`WriteOutput`과 쓰기 전용 배수 리더(`readAllFdDraining`)를 더했다. 자식의 stdin도
     // `/dev/null`로 돌린다(hook이 `read`를 부르면 그 명령이 영영 안 끝난다). count는 2 그대로다:
     // 더한 것은 프로세스 배관과 argv/env 조립뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은
     // 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "a5b8e3f778924793b292dcf504df3d72d3fc5beb06dee0dfb8de811a85bc2ac2" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "eb406385b7b38dc87347f2ebc976d827e07403f4e256d53dd6237b6e9cc754be" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -377,6 +383,13 @@ pub const inventory = [_]Proof{
     // 예고한 그 충돌이다) — 양쪽 사유를 모두 남기고 값만 재계산했다.
     // CR2e-e3b2가 frame maintenance에서 process-global reconnect admission drain을 호출한다.
     // Client construction/reflection receiver는 건드리지 않아 count는 2 그대로다.
+    //
+    // P2c(스테이징 쓰기 배선)로 또 바뀐다: 도는 쓰기의 request id·실패 사유 문자열 필드가 세션 상태에
+    // 붙고, 프레임 루프가 끝난 쓰기를 거두는 호출(`drainScmWrite`)을 읽기 거둠 **바로 뒤**에 한다
+    // (순서가 반대면 그 tick에 후속 읽기가 안 돌아 화면이 한 프레임 늦다). 이어서 캡처 전용 강제 호버
+    // (`MARU_FORCE_SCM_HOVER`)도 같은 루프에 붙는다 — 행 동작(`+`/`−`)은 호버할 때만 그려지는 계약이라
+    // 포인터 없는 헤드리스 캡처로는 그 버튼이 화면에 나오는지 확인할 방법이 없었다.
+    // count는 내내 2 그대로다 — 반사 접근은 건드리지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "da950ef97e5857760336c26cc12b8c557ab99bef7fd63f3e4d48f4000b750c46" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

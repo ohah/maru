@@ -40,6 +40,7 @@ const scm_view = app_session_mod.scm_view;
 pub fn refreshGitStatus(self: *AppSession) void {
     if (self.dock.view != .source_control) return;
     if (self.git_inflight != 0) return;
+    if (self.scm_write_inflight != 0) return; // 위와 같은 이유(§6-1)
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = gitRepoRoot(self, &repo_buf) orelse return;
     submitGitRead(self, repo);
@@ -50,6 +51,10 @@ pub fn refreshGitStatus(self: *AppSession) void {
 fn submitGitRead(self: *AppSession, repo: []const u8) void {
     if (self.dock.view != .source_control) return;
     if (self.git_inflight != 0) return;
+    // **쓰기가 도는 동안 읽기를 걸지 않는다**(쓰기 문서 §6-1). 겹치면 `index.lock`에서 뒤엣것이 즉시
+    // 실패하고, 무엇보다 그 읽기는 쓰기 **이전** 상태를 담아 와 화면을 되돌린다. 쓰기가 끝나면
+    // `drainScmWrite`가 한 번 건다.
+    if (self.scm_write_inflight != 0) return;
     // **기억·감시를 실행 파일 탐색보다 먼저** 한다. git이 없어 아래에서 돌아가더라도 "지금 보는 저장소"는
     // 확정된 사실이고, 여기서 안 남기면 호출자가 매 tick 다시 "저장소가 바뀌었다"로 읽어 무효화가 반복된다.
     rememberGitRepo(self, repo);

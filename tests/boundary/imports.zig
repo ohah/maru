@@ -1,4 +1,6 @@
 const std = @import("std");
+/// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
+const posixWalk = @import("posix_walk.zig").posixWalk;
 
 const ClientReceiverClass = enum { guarded, construction, unchecked, observation };
 const ClientReceiverSpec = struct {
@@ -11260,6 +11262,40 @@ fn checkDirectory(
     }
 }
 
+// 스캐너용 POSIX walker는 정본 1개 + 복제본 3개다. Zig가 모듈 루트 밖 상대 `@import`를 막아서
+// (`import of file outside module path`) 하위 디렉터리 테스트가 `../support/`에 닿지 못하기 때문이다.
+// 복제는 **주석으로 부탁하면 반드시 갈라진다** — 이 코드베이스가 `src/width.zig`↔`coretext_smoke.m`
+// 미러를 테스트로 못박는 것과 같은 이유로, 여기서 본문 동일성을 게이트한다. 정본을 고치면 이 테스트가
+// 복제본을 함께 고치라고 알려 준다.
+test "boundary: posix_walk 복제본 3개가 정본과 같은 본문을 유지한다" {
+    const allocator = std.testing.allocator;
+    const canonical = try readZigFileZ(allocator, "tests/support/posix_walk.zig");
+    defer allocator.free(canonical);
+    // 정본은 파일 문서주석(`//!`)으로 시작하고, 복제본은 "복제본이다" 헤더로 시작한다.
+    // 헤더는 서로 다른 것이 정상이므로 **첫 코드 줄부터** 비교한다.
+    const marker = "const std = @import(\"std\");";
+    const canonical_body = canonical[std.mem.indexOf(u8, canonical, marker) orelse
+        return error.TestUnexpectedResult ..];
+
+    for ([_][]const u8{
+        "tests/boundary/posix_walk.zig",
+        "tests/config_docs/posix_walk.zig",
+        "tests/doc_links/posix_walk.zig",
+    }) |path| {
+        const copy = try readZigFileZ(allocator, path);
+        defer allocator.free(copy);
+        const copy_body = copy[std.mem.indexOf(u8, copy, marker) orelse
+            return error.TestUnexpectedResult ..];
+        if (!std.mem.eql(u8, canonical_body, copy_body)) {
+            std.debug.print(
+                "\n{s}가 정본(tests/support/posix_walk.zig)과 갈라졌다 — 정본 본문을 그대로 복사한다.\n",
+                .{path},
+            );
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
 const max_boundary_source_bytes = 8 * 1024 * 1024;
 
 // .zig 소스를 sentinel 종료 버퍼([:0]u8 — std.zig.Tokenizer가 요구)로 읽는다. 호출자가 free한다.
@@ -11758,35 +11794,4 @@ test "scanCoreMutexDirectCalls flags direct lock but not wrappers/fields/pointer
         scanCoreMutexDirectCalls("self.mutex.lockUncancelable(self.io);", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
-}
-
-// ── 경로 구분자 정규화 (호스트 이식) ─────────────────────────────────────────────────────────────
-// `std.Io.Dir.Walker`의 `entry.path`는 **호스트 native 구분자**를 쓴다 — Windows에서는 `platform\macos\x.zig`.
-// 이 파일의 스캐너들은 그 경로를 `"platform/macos/x.zig"` 같은 **`/` 리터럴과 비교**하므로, 그대로 두면 제외
-// 목록과 매칭이 조용히 전부 빗나간다(실측: 제외됐어야 할 파일이 집계에 섞여 boundary 카운트가 부풀었다 —
-// 컴파일도 통과하고 macOS CI도 초록인 채로 Windows에서만 틀렸다). 그래서 walker를 감싸 경로를 `/`로 정규화한다.
-// POSIX 호스트에서는 native 구분자가 이미 `/`라 `next`가 std walker를 그대로 통과시킨다(무동작·무비용).
-const PosixWalker = struct {
-    inner: std.Io.Dir.Walker,
-    path_buf: [std.fs.max_path_bytes]u8 = undefined,
-
-    fn next(self: *PosixWalker, io: std.Io) !?std.Io.Dir.Walker.Entry {
-        var entry = (try self.inner.next(io)) orelse return null;
-        if (std.fs.path.sep == '/') return entry;
-        // 잘라내면 "제외 목록에 없는 경로"로 조용히 바뀌어 게이트가 거짓 초록이 된다 — 시끄럽게 실패시킨다.
-        if (entry.path.len >= self.path_buf.len) return error.NameTooLong;
-        for (entry.path, 0..) |byte, i|
-            self.path_buf[i] = if (byte == std.fs.path.sep) '/' else byte;
-        self.path_buf[entry.path.len] = 0;
-        entry.path = self.path_buf[0..entry.path.len :0];
-        return entry;
-    }
-
-    fn deinit(self: *PosixWalker) void {
-        self.inner.deinit();
-    }
-};
-
-fn posixWalk(dir: std.Io.Dir, allocator: std.mem.Allocator) !PosixWalker {
-    return .{ .inner = try dir.walk(allocator) };
 }

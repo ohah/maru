@@ -116,6 +116,11 @@ for D in docs/mobile-platform.md docs/mobile-ux.md docs/mobile-config.md; do
   ck "굵은 첫 문장 중복 ${D##*/}" 0 "$(grep -oE '^\*\*[^*]{10,60}' $D | sort | uniq -d | wc -l | tr -d ' ')"
 done
 
+echo "데스크톱 키 ↔ 모바일 판정"
+# 모바일 문서는 "데스크톱 키를 전부 훑어 갈랐다" 고 주장한다 — 셀 수 있는 주장이라 센다.
+# 적대적 검증에서 14개가 어디에도 없는 채로 통과하고 있었다. 데스크톱에 키가 늘 때도 문다.
+ck "모바일 문서가 판정 안 한 키" 0 "$(python3 "$(dirname "$0")/config_key_coverage.py" | grep -oE '판정 안 된 키 [0-9]+' | grep -oE '[0-9]+')"
+
 echo "계획 ↔ 계약 슬라이스 참조"
 # **이름을 여기 손으로 적지 않는다.** 예전 판은 `for m in M4a2 ... M10` 이라, 계획을 쪼개면
 # 판정자가 없는 슬라이스를 계속 찾고(M10 을 M10a~d 로 가르자 바로 그렇게 됐다) 새 인용은

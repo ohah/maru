@@ -20,6 +20,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const types = @import("types.zig");
 const screen = @import("screen.zig"); // 화면/스크롤백 읽기(absRow·ensureScrollbackRewrapped)
+const path_shape = @import("../path_shape.zig"); // 절대경로 **모양** 판정(L1↔L2 공용 최상위 유틸)
 
 const TerminalCore = core.TerminalCore;
 
@@ -255,8 +256,14 @@ fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, en
     // 어느 종류로 매치됐는지도 함께 돌려준다(원격 span 태그용). 판정 순서는 §감지 종류 표의 우선순위와 같다 —
     // `./x.zig`처럼 dot_relative와 bare_relative가 둘 다 참인 토큰은 더 구체적인 dot_relative로 태그한다.
     // 어느 하나라도 켜져 있으면 매치라는 기존 or 의미론은 그대로다(scope는 태그일 뿐 게이트가 아니다).
+    //
+    // 절대 판정은 예전에 `word[0] == '/'`였다 — Windows에서는 실재하는 `C:\...`조차 링크가 안 됐다(실측:
+    // 밑줄 X·열림 X). `path_shape.isDetectableAbsolute`는 **호스트 OS 기준**이라 macOS 동작은 그대로고
+    // (거기서 `C:\x`는 열 수 없으니 밑줄도 뜨면 안 된다 — hover는 존재검증을 안 하므로 감지 단계가 유일한
+    // 방어선이다), Windows에서만 드라이브 절대를 더 본다. 왜 그 술어가 `isAbsolute`보다 좁은지는 거기 주석에.
+    // 앞의 `//` 배제는 그대로 둔다(프로토콜 상대 URL·POSIX 구현정의 경로).
     const scope: LinkScope =
-        if (scopes.absolute_path and word[0] == '/' and !std.mem.startsWith(u8, word, "//"))
+        if (scopes.absolute_path and path_shape.isDetectableAbsolute(word) and !std.mem.startsWith(u8, word, "//"))
             .absolute_path
         else if (scopes.home_path and std.mem.startsWith(u8, word, "~/"))
             .home_path

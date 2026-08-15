@@ -8,15 +8,23 @@
 //! 여기서는 문자열만 본다. 심링크는 문자열로 알 수 없으므로 여는 쪽이 component마다 no-follow로 막는다(L4).
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig");
 
-/// 저장소 루트 기준 상대경로로 **안전한가**. 거부 사유는 넷이다:
-/// ⑴ 빈 경로 ⑵ 절대경로(`/`로 시작) ⑶ `..`/`.` 세그먼트(루트 밖·자기 참조) ⑷ NUL(C 문자열 절단으로 다른 파일 지정).
+/// 저장소 루트 기준 상대경로로 **안전한가**. 거부 사유는 다섯이다:
+/// ⑴ 빈 경로 ⑵ **절대경로**(POSIX `/`·Windows 드라이브 `C:`·UNC — `path_shape.isAbsolute`) ⑶ **역슬래시**
+/// ⑷ `..`/`.` 세그먼트(루트 밖·자기 참조) ⑸ NUL(C 문자열 절단으로 다른 파일 지정).
 ///
 /// 빈 세그먼트(`a//b`)도 거부한다 — 정상 git 출력에 없고, 정규화 없이 그대로 이어 붙이는 우리 쪽 규약을 단순하게
 /// 유지한다(경로를 "고쳐서" 통과시키지 않는다 — 고치면 무엇을 읽는지가 호출자 눈에 안 보인다).
+///
+/// **역슬래시를 왜 따로 막는가**: 세그먼트를 `/`로만 쪼개므로 `..\..\secret`은 **세그먼트가 하나**여서 `..`
+/// 검사를 그대로 통과한다. POSIX에서는 그것이 `..\..\secret`이라는 이름의 파일이라 무해하지만, Windows에서는
+/// 진짜 상위 이동이라 **루트 밖으로 나간다**. git은 출력 경로에 항상 `/`를 쓰므로 정상 입력을 잃지 않는다.
+/// (docs/windows-platform.md §5 — 절대경로 판정을 `[0]=='/'`에서 떼어내는 작업의 일부.)
 pub fn isSafeRelative(path: []const u8) bool {
     if (path.len == 0) return false;
-    if (path[0] == '/') return false;
+    if (path_shape.isAbsolute(path)) return false;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return false;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
 
     var it = std.mem.splitScalar(u8, path, '/');
@@ -46,6 +54,30 @@ test "루트 밖을 가리키거나 모호한 경로는 거부한다" {
     try testing.expect(!isSafeRelative("a//b")); // 빈 세그먼트
     try testing.expect(!isSafeRelative("a/")); // 끝의 슬래시
     try testing.expect(!isSafeRelative("a\x00b")); // NUL — C 문자열이 여기서 잘려 다른 파일을 가리킨다
+}
+
+// 이 가드는 `/`로만 세그먼트를 쪼갠다. 그래서 예전에는 **역슬래시가 통째로 한 세그먼트 안에 숨어** `..` 검사를
+// 그대로 지나갔다 — POSIX에서는 그런 이름의 파일일 뿐이라 무해했지만 Windows에서는 진짜 상위 이동이라
+// **루트 밖으로 나간다.** 절대경로 판정도 `[0]=='/'`라 드라이브 절대·UNC를 상대로 통과시켰다.
+// (docs/windows-platform.md §5)
+test "Windows 경로 모양도 거부한다 — 역슬래시 탈출과 드라이브·UNC 절대" {
+    // 역슬래시 탈출: `/`로 쪼개면 세그먼트가 하나라 옛 `..` 검사를 통과했다.
+    try testing.expect(!isSafeRelative("..\\..\\secret"));
+    try testing.expect(!isSafeRelative("a\\..\\..\\b"));
+    try testing.expect(!isSafeRelative("a\\b")); // 정상 git 출력은 항상 `/`라 잃는 입력이 없다
+
+    // 드라이브 절대(두 구분자 모두)와 드라이브 상대.
+    try testing.expect(!isSafeRelative("C:\\Windows\\System32"));
+    try testing.expect(!isSafeRelative("C:/Windows/System32"));
+    try testing.expect(!isSafeRelative("C:relative"));
+
+    // UNC.
+    try testing.expect(!isSafeRelative("\\\\server\\share"));
+    try testing.expect(!isSafeRelative("//server/share"));
+
+    // 드라이브 문자처럼 **생겼을 뿐인** 이름은 계속 통과한다(정상 파일을 막지 않는다).
+    try testing.expect(isSafeRelative("C/main.zig"));
+    try testing.expect(isSafeRelative("src/c.zig"));
 }
 
 test "`..`를 포함하는 **이름**은 통과한다(세그먼트만 본다)" {

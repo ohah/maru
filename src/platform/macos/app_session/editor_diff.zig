@@ -133,6 +133,9 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // 다시 계산되면, 옛 위치가 남아 본문이 한 행도 안 나오고 배경만 남는다 — "읽는 중" 문구조차
     // 못 본다(그 상태의 문서는 한 줄이다). 새 내용은 처음부터 보는 것이 맞다.
     term.rt.editor_first_line = 0;
+    // **렌더가 센 시각 행 수도 함께 버린다.** 그 값은 옛 내용의 것이고, 스크롤 상한이 그것을 읽는다 —
+    // 남겨 두면 다시 그리기 전 한 번의 휠에서 짧아진 문서가 옛 길이만큼 굴러간다.
+    term.rt.editor_total_visual_rows = 0;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.
@@ -732,9 +735,83 @@ test "훅이 켜지면 비교가 편집기 Term으로 열린다 — 꺼져 있�
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, md.term.kind);
 }
 
+/// 테스트 전용 libc 바인딩. Zig 0.16 std에는 `setenv`가 없고, 이 확인은 **환경을 실제로 켜야만**
+/// 성립한다(끈 상태로 비교하면 양쪽 다 false라 아무것도 증명하지 못한다 — 실제로 그렇게 써서
+/// 뮤턴트가 살아남았다). 켠 값은 곧바로 되돌린다.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "init이 훅을 읽는다 — 안 읽으면 MARU_NATIVE_DIFF가 아무 일도 안 한다" {
+    // **실제로 그 상태로 커밋됐다.** 훅 읽기를 `init`이 아니라 `deinit`에 넣었고, 그래서 `native_diff`가
+    // 영영 false였다 — 기능을 켤 방법이 없는데 단위 테스트는 전부 통과했다(테스트가 필드를 직접
+    // 세우기 때문이다).
+    //
+    // **환경을 실제로 켜고 확인한다.** 끈 상태로 "init 뒤 값 == 환경 값"만 보면 양쪽이 false라 공허하다
+    // (그렇게 썼다가 뮤턴트가 살아남았다). 켠 값은 이 테스트 안에서만 살고 곧바로 되돌린다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const had = std.c.getenv("MARU_NATIVE_DIFF");
+    defer if (had) |old_value| {
+        _ = setenv("MARU_NATIVE_DIFF", old_value, 1);
+    } else {
+        _ = unsetenv("MARU_NATIVE_DIFF");
+    };
+    _ = setenv("MARU_NATIVE_DIFF", "1", 1);
+    try testing.expect(nativeDiffFromEnv()); // 전제: 환경이 켜졌다
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // init이 그것을 읽어 들었는가. 안 읽으면 여기서 false다.
+    try testing.expect(session.native_diff);
+}
+
 test "훅 값 판정: 빈 값과 0은 끈 것이다" {
     try testing.expect(valueEnables("1"));
     try testing.expect(valueEnables("true"));
     try testing.expect(!valueEnables(""));
     try testing.expect(!valueEnables("0"));
+}
+
+test "내용이 갈리면 렌더가 센 행 수도 버린다 — 다시 그리기 전 한 번의 휠이 옛 길이로 굴러가면 안 된다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // 긴 비교를 한 번 그려 시각 행 수를 싣는다.
+    var long_buf: std.ArrayList(u8) = .empty;
+    defer long_buf.deinit(allocator);
+    for (0..300) |i| {
+        var num: [32]u8 = undefined;
+        try long_buf.appendSlice(allocator, try std.fmt.bufPrint(&num, "line {d}\n", .{i}));
+    }
+    var entry = testEntry(long_buf.items, "line 0\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_total_visual_rows > 100);
+
+    // 내용이 갈린다(배수가 하는 순서 그대로).
+    invalidate(fx.session, fx.term);
+    try testing.expectEqual(@as(u32, 0), fx.term.rt.editor_total_visual_rows);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+
+    // 짧은 비교로 다시 계산한 뒤 **그리기 전에** 굴려도 옛 길이만큼 가지 않는다.
+    entry.diff_original = @constCast("a\nb\n");
+    entry.diff_modified = @constCast("a\nB\n");
+    poll(fx.session, fx.term);
+    _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -10_000);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line); // 두 행짜리 문서는 다 보인다
 }

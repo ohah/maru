@@ -4123,6 +4123,10 @@ pub const AppSession = struct {
 
         self.dock = try dock_panel.DockPanel.init(allocator, &app_runtime.entry_ids);
         self.dock_initialized = true;
+        // 비교를 네이티브 편집기로 열지(`MARU_NATIVE_DIFF`)를 **여기서 한 번** 읽는다. 훅은 프로세스
+        // 수명 동안 고정이고, 분기가 매번 `getenv`를 부르면 그 분기를 확인하려는 테스트가 전역 환경을
+        // 건드려야 한다(그것이 같은 프로세스의 다른 테스트로 샌다).
+        self.native_diff = editor_diff_ops.nativeDiffFromEnv();
         // FP8 frame/mouse layout은 append-only scratch를 쓴다. group 상한만큼 init에서 한 번 예약해 frame tick에서
         // allocator를 호출하지 않는다(leaf=N, divider=N-1).
         try self.drag_overlay_cells_scratch.ensureTotalCapacity(allocator, 256);
@@ -16622,7 +16626,6 @@ pub const AppSession = struct {
         if (self.dock_initialized) {
             self.dock.deinit();
             self.dock_initialized = false;
-            self.native_diff = editor_diff_ops.nativeDiffFromEnv(); // 훅은 프로세스 수명 동안 고정이다
         }
         self.drag_overlay_cells_scratch.deinit(self.allocator);
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합

@@ -468,6 +468,9 @@ pub fn toggleWrap(self: *AppSession) bool {
     if (term.kind != .editor) return false;
     const now = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
     term.rt.editor_wrap = !now;
+    // **접힘이 달라지면 시각 행 수도 달라진다.** 렌더가 센 값은 옛 랩의 것이고 스크롤 상한이 그것을
+    // 읽으므로, 다시 그리기 전의 한 번을 위해 버린다(다음 프레임이 곧바로 채운다).
+    term.rt.editor_total_visual_rows = 0;
     self.metal_dirty = true;
     return true;
 }

@@ -17,7 +17,7 @@ test "2c3e C3 경계는 RX-first와 decoder cadence의 유일한 제품 owner를
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".legacy => |client| try client.ingestReadableOutOfBandEvidence(),"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |adapter| try adapter.ingestRuntimeReadableEvidence(),"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn ingestReadableOutOfBandEvidence("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "RuntimeAttachment.preDecodeBufferedEvents(&self.generation.attachment)"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "RuntimeAttachment.preDecodeBufferedEvents(self)"));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "executePreparedRequestWithDecoderOwned("));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.executeGenerationRpcDecoded(.{"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "C3CadenceNotImplemented"));

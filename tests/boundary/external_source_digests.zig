@@ -390,7 +390,7 @@ pub const inventory = [_]Proof{
     // (`MARU_FORCE_SCM_HOVER`)도 같은 루프에 붙는다 — 행 동작(`+`/`−`)은 호버할 때만 그려지는 계약이라
     // 포인터 없는 헤드리스 캡처로는 그 버튼이 화면에 나오는지 확인할 방법이 없었다.
     // count는 내내 2 그대로다 — 반사 접근은 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "da950ef97e5857760336c26cc12b8c557ab99bef7fd63f3e4d48f4000b750c46" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "aff84eb53910065a1165b7dd72fb59862624350d56ac50776123babc8e134e4a" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

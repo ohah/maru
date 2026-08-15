@@ -20,6 +20,7 @@
 | W1 | **OSC 9;9 cwd** — `dispatchNotify9`에 `9;` 갈래를 더해 기존 cwd 경로로 넘긴다. L1이라 Windows와 독립이고 헤드리스로 검증된다. **선행 결정: OSC 9;9엔 authority가 없다**(계약 §3.2·§8) — host를 어떻게 볼지 정하기 전에는 시작할 수 없다 | **결정 대기** |
 | W1.5 | **절대경로 판정을 `[0]=='/'`에서 떼어낸다** — 중립 5곳(`normalizeAssetPath`·`repo_path`·`file_tree`·`file_tree_mutation`·`selection`). 계약 §5의 순서 제약상 **경로 정규화 도입보다 먼저** 해야 한다 | 미착수 |
 | W2 | **`main.zig` Windows 컴파일** — unix domain socket과 POSIX 파일 모드 2곳을 graceful 폴백으로. named pipe 이식은 아니다 | 미착수 |
+| W2.5 | **Windows 기본 셸 결정** — `resolveInteractiveShell()`에 OS 갈래를 준다(계약 §3.1a). 사용자 선택은 기존 `shell.command`/`shell.args`가 이미 담당하므로 새 키는 없다. **선행 결정: 기본값 후보 둘**(계약 §8) | **결정 대기** |
 | W3 | **`SpawnRequest` 중립화** — `login`은 의도로 재문서화, `zdotdir`은 "통합 자산 디렉터리"로 일반화, `term`은 백엔드 위임. `command`+`args`는 **그대로**. **wire tag는 건드리지 않는다**(계약 §4.2). macOS 동작 변화 0 | 미착수 |
 | W4 | **ConPTY 백엔드** — `src/pty/windows.zig`. 필수 13 표면. 파이프는 `CreatePipe`가 아니라 **overlapped named pipe**여야 한다(계약 §4.1). PoC 코드가 있으나 **실기 세션 확인이 선행**(계약 §6) | 미착수 |
 | W5 | **셸 통합 주입** — cmd `PROMPT`, PowerShell `prompt` 오버라이드(계약 §3.3). 사용자 프롬프트 보존 | 미착수 |

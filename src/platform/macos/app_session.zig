@@ -32,6 +32,7 @@ pub const file_tree = maru.session.file_tree;
 pub const file_tree_navigation = maru.session.file_tree_navigation;
 pub const dock_view_bar = chrome.components.dock_view_bar;
 pub const git_backend_mod = @import("git_backend.zig");
+pub const git_write_command = maru.session.git_write_command; // 쓰기 argv·안전 술어(읽기와 환경·플래그가 갈린다)
 pub const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
@@ -3641,6 +3642,12 @@ pub const AppSession = struct {
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
     scm_collapsed: [scm_view.section_count]bool = @splat(false),
+    /// 도는 쓰기의 request id(0 = 없음). **큐가 아니라 하나다**(쓰기 문서 §6) — 이 값이 0이 아닌 동안
+    /// 목록 읽기를 걸지 않고, 새 쓰기도 받지 않는다.
+    scm_write_inflight: u64 = 0,
+    scm_write_seq: u64 = 0,
+    /// 마지막 쓰기가 실패했을 때 화면에 낼 사유(redact·절단 후, 세션 allocator 소유). §5 — 실패는 사실대로.
+    scm_write_error: ?[]u8 = null,
     /// 그 섹션을 전부 펼쳤는가("모두 보기"를 눌렀는가). 기본은 섹션당 상한까지만 보여 준다 — 변경이 수백 개면
     /// 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지조차 모르게 된다.
     scm_expanded: [scm_view.section_count]bool = @splat(false),
@@ -13322,6 +13329,9 @@ pub const AppSession = struct {
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다 + 활성 터미널이 옮겨 갔는지 확인(저주기 cwd 조회)
+        // 끝난 쓰기를 **읽기보다 먼저** 거둔다 — 거두는 순간 목록 읽기를 한 번 걸므로, 순서가 반대면
+        // 그 읽기가 같은 tick에 안 돌고 화면이 한 프레임 늦게 갱신된다(쓰기 문서 §6-1).
+        scm_dock_ops.drainScmWrite(self);
         // N1.5 b: 네이티브 diff Term의 네 상태를 옮긴다. **결과가 안 와도 매 tick 봐야 한다** — 재시도 창
         // (6초)이 지났는지는 결과가 아니라 시간이 말한다. 판정이 선 Term은 곧바로 반환하므로 비용이 없다.
         for (self.tabs.items) |tab| {
@@ -16588,6 +16598,7 @@ pub const AppSession = struct {
                 self.agent_session_archive_records.deinit(self.allocator);
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
                 self.agent_session_archive_projection.deinit(self.allocator);
+                scm_dock_ops.clearScmWriteError(self); // 실패 사유 문자열은 세션 allocator 소유다
                 self.scm_dock_entries.deinit(self.allocator);
                 self.scm_dock_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
@@ -54197,6 +54208,71 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
     session.mouse(1, header.x, header.y, 0, 0);
     session.mouse(3, header.x, header.y, 0, 0);
     try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
+}
+
+test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 intent가 난다 (P2c)" {
+    // 이 뷰가 처음으로 저장소를 바꾸는 경로다. 그래서 "누른 버튼이 **어느 파일을** 대상으로 하는가"를
+    // published tree로 그대로 태워 고정한다 — 창 자리와 모델 인덱스가 갈리면 여기서 잡힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    // **실제 git을 띄우지 않는다.** 여기서 보는 것은 클릭 → intent 배선이고, 실행은 git_backend의
+    // 실제 저장소 fixture가 따로 검증한다.
+    session.git_backend.?.state.?.shutting_down = true;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
+        .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, "/repo");
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame);
+
+    const content = dock_ops.dockGeometry(session).tree_content;
+    // 2번 행(`two.txt`)의 **동작 버튼** rect를 찾는다. 행 rect가 아니라 버튼 rect여야 `+`를 누른 것이다.
+    const button = blk: {
+        for (session.scm_dock_entries.items) |entry| {
+            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(2)) continue;
+            break :blk .{
+                .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + entry.rect.width / 2,
+                .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height / 2,
+            };
+        }
+        return error.MissingActionRect;
+    };
+
+    _ = scm_dock_ops.scmDockPointer(session, .down, button.x, button.y);
+    const intent = scm_dock_ops.scmDockPointer(session, .up, button.x, button.y) orelse return error.NoIntent;
+    switch (intent) {
+        // **모델 인덱스 2 = `two.txt`**다. 창 자리를 실었다면 여기가 다른 값이 된다.
+        .row_action => |index| try std.testing.expectEqual(@as(u32, 2), index),
+        else => return error.WrongIntent,
+    }
+
+    // 충돌이 아닌 변경 사항 행이므로 방향은 스테이지다(모델이 판정한 값을 host가 그대로 옮긴다).
+    try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.stage, props.items[2].file.action);
 }
 
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.

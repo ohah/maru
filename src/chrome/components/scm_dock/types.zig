@@ -41,6 +41,10 @@ pub const SectionItem = struct {
 };
 
 pub const FileItem = struct {
+    /// 이 행의 **모델 인덱스**. 화면 창(virtualized window) 안의 자리가 아니다 — host가 같은 스냅샷의
+    /// 모델에서 이 행을 다시 찾는 열쇠이고, 창은 스크롤에 따라 움직인다. **창 자리를 쓰면 스크롤한 뒤
+    /// 누른 행과 열리는 행이 어긋난다**(P1b가 그렇게 나갔다).
+    model_index: u32 = 0,
     /// 파일 이름(굵게). 폭이 모자라도 **끝까지 남는다**.
     name: []const u8,
     /// 흐린 상대 경로. 폭이 좁아지면 **가장 먼저** 줄어든다.

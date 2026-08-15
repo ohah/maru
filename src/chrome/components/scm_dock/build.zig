@@ -67,7 +67,6 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
                 .cell_width_px = @max(props.cell_width_px, 1),
                 .scale_milli = scale,
                 .fit = .snug,
-                .corner = .square,
                 .label_role = .supporting,
             }) orelse break :blk base + m.status_extent;
             break :blk base + pill.box.w;

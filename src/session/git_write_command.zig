@@ -116,7 +116,9 @@ pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
     .{ .name = "GIT_ASKPASS", .value = "" }, // 자격증명 프롬프트 프로그램 금지
 };
 
-/// 고정 인자 수의 상한(경로 제외): exe + `-C` + repo + config 12 + hook 2 + 하위명령 4 + `--`.
+/// 고정 인자 수의 상한(경로 제외). 가장 긴 형태가 `rm --cached -r -- .`(하위명령 3 + `--` + 대상 1)이라
+/// 그 넷을 잡고 `--` 하나를 더한다. **정확히 이 값으로 조립되는지 테스트가 고정한다** — config를 하나
+/// 늘리면 배열 길이가 따라오지만, 하위명령이 길어지면 여기 숫자를 손으로 고쳐야 한다.
 pub const fixed_argv_max: usize = 3 + shared_config_overrides.len + hooks_off.len + 4 + 1;
 
 /// 한 번에 넘길 경로의 상한. `ARG_MAX`(macOS 기본 1 MiB)에 여유를 크게 두고 **바이트와 개수 둘 다**로 자른다 —
@@ -433,6 +435,16 @@ test "저장소는 -C로 준다(프로세스 cwd를 건드리지 않는다)" {
     try testing.expectEqualStrings("/usr/bin/git", argv[0]);
     try testing.expectEqualStrings("-C", argv[1]);
     try testing.expectEqualStrings("/repo", argv[2]);
+}
+
+test "고정 인자 상한이 가장 긴 형태를 정확히 담는다" {
+    // `fixed_argv_max`가 모자라면 `_all` 변종이 조립 단계에서 죽고, 넉넉하면 그 사실을 아무도 모른 채
+    // 상한이 낡는다. 가장 긴 형태를 **딱 그 크기 버퍼**로 조립해 둘 다 막는다.
+    var exact: [fixed_argv_max][]const u8 = undefined;
+    const argv = try buildFixture(.unstage_all_unborn, &.{}, null, &exact);
+    try testing.expectEqual(fixed_argv_max, argv.len);
+    try testing.expectEqualStrings(".", argv[argv.len - 1]);
+    try testing.expectEqualStrings("--", argv[argv.len - 2]);
 }
 
 test "배치: 개수와 바이트 **둘 다**로 자르고, 큰 경로 하나는 혼자라도 넣는다" {

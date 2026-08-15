@@ -359,7 +359,15 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // **세로만 소유한다 — 여기서 반환하면 안 된다.** 아래 가로(트랙패드 2-finger) 블록은 탭 바를
     // 굴리는 **직교 축**이고, 그것은 편집기 pane 위에서도 살아 있어야 한다(리뷰 지적 — 처음엔
     // 곧바로 반환해서 편집기 위 가로 스와이프가 아무 일도 안 했다).
-    const editor_owned = if (hit) |h| editor_ops.scrollLines(self, h.term, h.leaf_rect, lines) else false;
+    // **폴백에서도 편집기가 소유한다.** 어느 leaf에도 안 맞으면 라우팅은 활성 surface로 가는데,
+    // 편집기 Term의 surface는 sentinel core라 아래 스크롤백 경로가 **아무 일도 하지 않는다** — 활성
+    // pane이 편집기인 채로 pane 밖에서 굴리면 휠이 조용히 사라진다(적대적 검증에서 잡았다).
+    const editor_owned = if (hit) |h|
+        editor_ops.scrollLines(self, h.term, h.leaf_rect, lines)
+    else if (pane_ops.activeLeafRect(self)) |leaf|
+        editor_ops.scrollLines(self, pane_ops.activePane(self).activeTerm(), leaf, lines)
+    else
+        false;
     const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ term_ops.activeSurface(self), self.active_pane_rect };
     // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
     // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).

@@ -589,3 +589,38 @@ test "git 상태 역할: 셋이 서로 다르고, 고친 것은 테마 accent를
     try std.testing.expectEqual(modified, rich_tokens.get(.git_modified_fg));
     try std.testing.expectEqual(added, rich_tokens.get(.git_added_fg));
 }
+
+test "비교 밴드 색은 자기 역할에만 산다 — 다른 역할을 덮지 않는다" {
+    // 새 역할을 더하면서 팔레트 채우기 한 줄을 잘못 쓰면(복사·붙여넣기) 다른 역할이 조용히 같은 색이
+    // 된다 — 화면에서는 "왜 이 칩이 초록이지?"로만 보인다. 두 색을 **명백히 다른 값**으로 넣고,
+    // 나머지 역할이 그 값을 안 받는지 본다.
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    const theme: ThemeColors = .{
+        .foreground = c.rgb(200, 200, 200),
+        .sidebar_background = c.rgb(30, 30, 30),
+        .sidebar_foreground = c.rgb(200, 200, 200),
+        .sidebar_active = c.rgb(60, 60, 60),
+        .search_match = c.rgb(70, 70, 70),
+        .search_match_current = c.rgb(80, 80, 80),
+        .selection = c.rgb(90, 90, 90),
+        .cursor = c.rgb(100, 100, 100),
+        .terminal_background = c.rgb(10, 10, 10),
+        .accent = c.rgb(110, 110, 110),
+        .diff_added = c.rgb(1, 250, 2), // 팔레트 어디에도 없는 값
+        .diff_removed = c.rgb(250, 1, 2),
+    };
+    inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
+        try std.testing.expectEqual(theme.diff_added, tk.get(.diff_added_bg));
+        try std.testing.expectEqual(theme.diff_removed, tk.get(.diff_removed_bg));
+        inline for (@typeInfo(ColorRole).@"enum".fields) |f| {
+            const role: ColorRole = @enumFromInt(f.value);
+            if (role == .diff_added_bg or role == .diff_removed_bg) continue;
+            try std.testing.expect(!std.meta.eql(tk.get(role), theme.diff_added));
+            try std.testing.expect(!std.meta.eql(tk.get(role), theme.diff_removed));
+        }
+    }
+}

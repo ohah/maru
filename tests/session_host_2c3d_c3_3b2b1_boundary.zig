@@ -124,8 +124,8 @@ test "C3-3b2b1 trusted preparation seal boundary" {
     );
     try std.testing.expectEqual(
         // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner, 2d2 terminal handoff와 CR0b composite/GUI/daemon owner,
-        // CR1 scheduler dispatch와 CR2e-e3b1 resident admission budget까지 검증한다.
-        @as(usize, 29),
+        // CR1 scheduler dispatch, CR2e-e3b1 resident admission budget와 e3c1 coordinator까지 검증한다.
+        @as(usize, 30),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
     try std.testing.expectEqual(

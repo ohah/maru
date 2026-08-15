@@ -54,6 +54,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(gui_owner);
     const reconnect_owner = try readSource(allocator, "src/platform/macos/session_host/reconnect_admission_owner.zig");
     defer allocator.free(reconnect_owner);
+    const session_coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
+    defer allocator.free(session_coordinator);
     const remote_runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(remote_runtime);
     const generation_transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
@@ -383,9 +385,9 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn consume("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn ownedBy("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.ownedBy("));
-    // Publication owner와 CR1 scheduler에 더해 e3b2 stable runtime/drain만 bounded row를 읽는다.
-    // 각 e3b2 import를 별도로 고정해 전역 수치만 느슨하게 늘리는 우회를 막는다.
-    try std.testing.expectEqual(@as(usize, 4), try countProductSourcesExcept(
+    // Publication owner와 CR1 scheduler, e3b2 stable runtime/drain, e3c1 sole drain만 bounded row를 읽는다.
+    // 각 소비자 import를 별도로 고정해 전역 수치만 느슨하게 늘리는 우회를 막는다.
+    try std.testing.expectEqual(@as(usize, 5), try countProductSourcesExcept(
         allocator,
         "reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_admission_owner.zig",
@@ -393,6 +395,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "@import(\"reconnect_admission_owner.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(session_coordinator, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.preflight("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.admitAfterPreflightNoFail("));
     inline for (.{

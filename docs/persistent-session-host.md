@@ -790,6 +790,13 @@ Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 r
 `pool_membership_generation`으로 rename하고, heap-pin `HostAdapter.ClientSlot`이 별도 checked-monotonic
 `connection_generation`과 current/retired Client를 소유한다. CR3 전 wire/구현 명칭은 `adapter_generation`을 유지한다.
 
+coordinator는 한 번에 완성된 대형 owner로 등장하지 않는다. CR2e-e3c1은 reconnect-only final-address shell과
+sole drain만 설치한다. 이 단계에서 incident admission queue/resident budget의 소유자는
+`AppProcessIncidentOwner`, runtime membership의 소유자는 `RemoteTermBackend`으로 계속 남으며 coordinator는 이 주소를
+저장하지 않고 매 owner turn의 sealed projection을 재검증한다. e3c2/e3c3이 typed external event·close/mixed outcome을
+더하고, CR4가 실제 `connectExistingHost`·wire receipt를 연결하며, CR5가 multi-window·multi-runtime authority ledger와
+upgrade gate로 확장한다.
+
 #### transaction과 실패 경계
 
 job state는 `healthy(g) -> preparing{attempt,g,new_client,deadline} -> mutation_sealing -> authority_committing ->

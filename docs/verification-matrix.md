@@ -1248,6 +1248,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `retry_later`로 동일 projection을 보존하고, 한 lease를 release한 다음 drain에서 actual stable executor로 이전된다.
   executor의 candidate lease는 reducer retain 구간 뒤 generation publish에서 current로 전환되고 terminal reclaim 뒤 0이 된다.
   Debug·ReleaseFast drain 1개+executor 1개+boundary 1개를 exact-count한다.
+  e3c1은 reconnect-only `SessionHostCoordinator`의 final address·PID·process nonce·owner thread와 one-turn backend
+  singleton projection을 결속하고, AppSession의 기존 direct drain caller를 0으로 내린다. queue/budget/backend owner를
+  이동하지 않은 sole coordinator drain과 copied/stale/reinstalled-backend mutation 0을 product-type gate로 검증한다.
+  e3c2/e3c3의 typed external event·close/mixed outcome과 CR4 actual socket receipt는 이 gate의 증거가 아니다.
 - CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의

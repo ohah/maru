@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[2]
 plan = (ROOT / "docs/plans/mobile-platform.md").read_text(encoding="utf-8")
 rows = set(re.findall(r"^\|\s*\*{0,2}(M[0-9]+[a-z0-9.]*|U[0-9]+)\*{0,2}\s*\|", plan, re.M))
 
+# **여기를 넓히지 말 것.** `verification-matrix.md` 도 `plans/mobile-platform.md` 를 가리키지만
+# 그 문서의 M/U 토큰은 **다른 이니셔티브의 축**이다(M0a·M2a·M3d·U3… 은 모바일 계획에 없다).
+# 넣으면 오탐이 쏟아진다 — 산문까지 훑는 판정이라 "이 문서의 M/U 는 전부 모바일 슬라이스" 가
+# 성립하는 문서만 대상이 된다. 적대적 검증에서 넓히려다 반증됐다.
 CONTRACTS = ["docs/mobile-platform.md", "docs/mobile-ux.md", "docs/mobile-config.md"]
 bad = 0
 cited_n = 0

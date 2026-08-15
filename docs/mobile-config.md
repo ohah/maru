@@ -71,28 +71,46 @@
 키를 고르는 기준은 하나다 — **그 값을 지금 소비하는 자리가 코드에 있는가.** 없는 키를 미리
 실으면 사용자가 바꿔도 아무 일이 안 일어난다(그게 지금 설정 화면의 상태다).
 
-### 4.1 지금 싣는다
+### 4.1 지금 싣는다 — 소비처를 코드에서 확인한 것만
 
-| 키 | 뜻 | 데스크톱과 다른 점 |
+**"소비처가 있다" 를 눈으로 확인하고 넣었다.** 아래 표의 "소비처" 열이 그 근거다 — 없는 키를
+실으면 사용자가 바꿔도 아무 일이 안 일어난다.
+
+| 키 | 소비처 | 비고 |
 |---|---|---|
-| `font.size` | 본문 글자 크기 | **굽는 크기와 함께 움직여야 한다** — 아래 §5 |
-| `font.line-height` | 줄 높이 배수 | 같음 |
-| `theme.preset`·`theme.preset-dark`·`theme.preset-light` | 색 묶음 | 같음 |
-| `theme.follow-system` | 다크/라이트를 OS 에 맞춘다 | 모바일에서 **더 중요하다** — OS 전역 토글이 흔하다 |
-| `theme.background`·`foreground`·`cursor`·`selection`·`palette.N` | 개별 색 | 같음 |
-| `theme.bold-is-bright`·`theme.min-contrast` | 색 규칙 | 같음 |
-| `cursor.shape`·`cursor.color`·`cursor.text`·`cursor.blink`·`cursor.blink-interval-ms`·`cursor.blink-fade-ms` | 커서 | 같음 |
-| `text.ambiguous-width`·`text.emoji-width` | 폭 규칙 | 같음(코어 축) |
-| `scrollback.lines` | 스크롤백 줄 수 | **기본값이 다르다** — §4.4 |
-| `render.frame-rate` | 프레임 주기 | **상한이 기기에 달렸다** — §5 |
-| `input.word-separators` | 단어 경계 | **길게 눌러 단어를 잡는** 그 판정이 이 값을 쓴다 |
-| `input.selection-clear-on-typing` | 타이핑하면 선택 해제 | 같음 |
-| `input.paste-protection`·`input.bracketed-paste-is-safe` | 붙여넣기 보호 | 같음 |
-| `input.ime-enter`·`input.shift-enter` | Enter 처리 | 소프트 키보드 Return 이 같은 경로를 탄다 |
-| `osc52.read` | 클립보드 읽기 정책 | 같음(기본 `deny`) |
-| `bell.audible`·`bell.visual` | 벨 | `bell.dock-badge` 는 안 가져온다(dock 이 없다) |
+| `theme.preset`·`theme.preset-dark`·`theme.preset-light`·`theme.follow-system` | 브리지 `themeColors()` | 지금 그 함수가 값을 고정한다 |
+| `theme.background`·`theme.foreground`·`theme.cursor`·`theme.selection`·`theme.palette.0`~`.15` | 같음 | 팔레트는 계열 키다 |
+| `theme.bold-is-bright`·`theme.min-contrast` | 같음 | |
+| `cursor.color`·`cursor.text` | 브리지 커서 quad(`tk.get(.cursor)`) | |
+| `cursor.shape` | 코어(`snap.cursor_shape`) | config 는 **기본 모양**을 준다. TUI 가 DECSCUSR 로 바꾸면 그쪽이 이긴다 |
+| `text.ambiguous-width` | 코어 `ambiguous_wide` | 브리지가 코어에 세워 주면 된다 |
+| `text.emoji-width` | 코어 폭 정책(`width`) | |
+| `scrollback.lines` | 코어 `setMaxScrollback` | 기본값은 §4.5 |
+| `input.word-separators` | 코어 `selectWordAt(…, separator_bytes)` | **지금 호출부가 빈 목록(`&.{}`)을 넘긴다** — M10b 가 그 자리를 잇는다 |
+| `osc52.read` | 코어 | `deny`(기본)는 지금도 지켜진다. `allow` 는 host 가 클립보드를 **읽는** 경로가 있어야 하는데 지금은 쓰기(`take_copy`)뿐이다 |
 
-### 4.2 모바일에만 있는 키
+### 4.2 스키마에 두되 소비처가 생길 때 연다
+
+**여기 있는 키는 "모바일에 뜻이 없어서" 가 아니라 "아직 그 일을 하는 코드가 없어서" 빠졌다.**
+그 코드가 생기는 슬라이스에서 함께 연다.
+
+| 키 | 지금 없는 것 |
+|---|---|
+| `font.size`·`font.line-height` | 굽는 크기(`MARU_ATLAS_TEXT_PX`)와 그리는 크기가 따로 논다 — §5, [M10d](plans/mobile-platform.md) |
+| `render.frame-rate` | 값은 30 고정이고 **상한은 번들 능력 선언**이 정한다 — §5 |
+| `cursor.blink`·`cursor.blink-interval-ms`·`cursor.blink-fade-ms` | 모바일은 커서를 **깜빡이지 않는다**(정적 quad) |
+| `input.paste-protection`·`input.bracketed-paste-is-safe` | **붙여넣기 경로가 없다**. 지금 "paste" 는 설정 화면 라벨뿐이다 |
+| `input.ime-enter`·`input.shift-enter`·`input.selection-clear-on-typing` | 데스크톱 앱 계층(`platform/macos/app_session`)이 소비한다. 모바일의 대응 자리는 브리지이고 아직 그 처리가 없다 |
+| `bell.audible`·`bell.visual` | 벨 처리가 없다. 지금 "bell" 은 chrome 헤더 **아이콘**뿐이다 |
+| `text.blink` | 깜빡임을 안 그린다(SGR 5 는 정적 — 코어도 "렌더는 정적" 이라고 적어 뒀다) |
+| `input.link-detection`·`input.link-open-target` | 링크를 눌러 여는 경로가 없다 |
+| `input.page-keys` | 키바에 PageUp/Down 키캡은 있지만 이 정책을 보는 자리가 없다 |
+| `notifications.osc`·`notifications.history-limit` | 알림을 받는 자리도 목록도 없다 |
+| `scrollback.sticky-command` | 그 chrome 표시가 모바일에 없다 |
+| `font.letter-spacing` | 자간을 조절하는 자리가 없다(글리프를 칸에 맞춰 그린다) |
+| `term` | `TERM` 문자열은 **세션을 만드는 쪽**이 정한다 — 모바일은 원격에서 받는다([M3a](plans/mobile-platform.md)) |
+
+### 4.3 모바일에만 있는 키
 
 데스크톱에 대응이 없다. 이름은 **모바일 것**이므로 데스크톱 이름을 억지로 빌리지 않는다.
 
@@ -104,7 +122,7 @@
 **길게 누름 지연은 config 에 안 둔다.** OS 접근성 설정이 소유하고 host 가 매번 읽어 넘긴다
 ([플랫폼 §3.1](mobile-platform.md)) — config 로 덮으면 그 설정을 무시하게 된다.
 
-### 4.3 안 가져오는 것과 그 이유
+### 4.4 안 가져오는 것과 그 이유
 
 | 키 | 왜 |
 |---|---|
@@ -115,9 +133,13 @@
 | `font.family`·`font.family-bold`·`font.family-italic`·`font.fallback` | 폰트를 **번들이 정한다**. 시스템 폴백은 host 가 하고 사용자가 파일을 넣을 자리가 없다 |
 | `editor.wrap`·`file-panel.external-link-target` | 그 화면이 모바일에 없다 |
 | `notifications.update-check` | 스토어가 한다 |
-| `theme.palette` 이외의 `chrome.theme` | 색 축은 `theme.*` 하나로 둔다. 두 이름이 같은 것을 정하면 어느 쪽이 이기는지 사용자가 모른다 |
+| `bell.dock-badge` | dock 이 없다. 앱 배지는 OS 알림 권한이 딸린 **다른 축**이라 이 키로 흉내 내지 않는다 |
+| `cursor.unfocused` | 창이 하나라 "포커스 잃은 창" 이 없다 |
+| `font.ligatures` | 글자를 **칸 단위로** 굽고 그린다. 합자는 셰이핑이 필요한데 그 경로가 없고, 있어도 격자와 어긋난다 |
+| `scroll.multiplier` | 마우스 휠 축이다. 터치 스크롤의 느낌은 관성이 정하고 그건 host 몫이다([플랫폼 §3.1](mobile-platform.md)) |
+| `chrome.theme` | 색 축은 `theme` 계열 하나로 둔다. 두 이름이 같은 것을 정하면 어느 쪽이 이기는지 사용자가 모른다 |
 
-### 4.4 기본값이 데스크톱과 다른 것
+### 4.5 기본값이 데스크톱과 다른 것
 
 **같은 키라도 기기가 다르면 기본값이 다르다.** 이것을 안 적으면 "왜 폰에서만 다르지" 가 된다.
 
@@ -126,7 +148,7 @@
 | `scrollback.lines` | 1000 | 더 작게 | 기기 메모리가 다르다. 셀 하나가 몇 바이트인지는 같아도 여유가 다르다 |
 | `render.frame-rate` | 화면 주사율 | 30 | 전력이 예산이다([플랫폼 §3.2](mobile-platform.md)) |
 
-## 5. 지금 열 수 없는 것과 그 이유
+## 5. 왜 못 여는지 — 이유가 긴 셋
 
 - **`font.size` 를 여는 것은 글리프 기하와 한 몸이다.** 굽는 크기(`MARU_ATLAS_TEXT_PX`)와 그리는
   크기가 지금 따로 논다. 크기를 config 로 열면 그 어긋남이 곧 사용자에게 드러나므로, 이 키는

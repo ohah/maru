@@ -56,6 +56,7 @@ pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파
 pub const dock_layout = @import("session/dock_layout.zig"); // FP3: right/bottom 도크·terminal·chrome rect와 resize 순수 기하
 pub const git_status = @import("session/git_status.zig"); // git porcelain v2·numstat 순수 파서(도크 소스 컨트롤 뷰)
 pub const git_command = @import("session/git_command.zig"); // 읽기 전용 git argv·env 조립(외부 프로세스 실행 경로 차단)
+pub const git_write_command = @import("session/git_write_command.zig"); // 쓰기 git argv·안전 술어(읽기와 환경·플래그가 갈린다 — 쓰기 문서 §1)
 pub const git_locate = @import("session/git_locate.zig");
 pub const turn_snapshot = @import("session/turn_snapshot.zig"); // 에이전트 턴 경계 스냅샷 정책(§6.1, 순수)
 pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안쪽 상대경로 판정(심층 방어 — 순수)

@@ -146,8 +146,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **CR2e-e 진행:** e1은 기존 `RemoteRuntime.generation`의 내부 접근을 단일 current accessor로 모으고,
    `RemoteTermBackend`의 raw generation field 접근과 attachment→generation→runtime `@fieldParentPtr` 역산을 제거한다.
    e2a는 stable shell의 실제 `GenerationSlot`을 제품 runtime의 최초/current 저장소로 활성화하고 최초 inline payload와
-   stable screen publication 및 teardown을 결속한다. e2b는 reducer Decision과 executor의 전수 parity·모든 reachable
-   state sequence를, e3은 close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.
+   stable screen publication 및 teardown을 결속한다. e2b는 final-address `ReconnectProductExecutor`가 reducer state와
+   inline `PreparedReconnect`를 함께 소유하고, reducer 결과를 actual prepare/abort/publish/reclaim effect가 성공한 뒤에만
+   게시한다. 31개 `Decision`의 closed generation-effect table과 initial state에서 도달 가능한 모든 canonical state sequence가 같은
+   decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
+   runtime size golden으로 고정한다. e3은 아직 `retain`으로 분류한 mutation seal·authority/retry/close effect의 실제 제품 결속,
+   외부 reconnect ingress, close 경쟁·mixed outcome과 app-global candidate/retiring count·byte 상한·peak RSS를 닫는다.
    a~e 다섯 gate가 모두 green이기 전에는 CR2e 완료가 아니다.
 5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현
    Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인

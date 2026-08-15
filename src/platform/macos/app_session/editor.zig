@@ -16,6 +16,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const pane_ops = @import("pane.zig");
+const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
 const scroll_ops = @import("scroll.zig");
 const editor_diff_ops = @import("editor_diff.zig");
@@ -1341,4 +1342,67 @@ test "활성 leaf 사각은 격자가 아니라 leaf다 — 편집기가 body를
     // padding이 0이 아니므로 셋이 실제로 다르다 — 같으면 이 테스트가 아무것도 증명하지 못한다.
     try testing.expect(fx.session.window_padding_px.top > 0);
     try testing.expect(leaf.h > grid.h);
+}
+
+test "분할된 pane: 휠은 커서 아래 편집기만 굴린다 — 옆 pane 문서는 그대로다" {
+    // **지금까지 라우팅 테스트가 전부 leaf 하나짜리였다.** 두 pane이 나란할 때 "옆 pane 위 휠이 이쪽을
+    // 안 건드린다"가 실제로 성립하는지는 아무도 안 봤다 — 그런데 split은 사용자가 늘 쓰는 배치다.
+    // `splitActivePane`은 진짜 셸을 띄우므로, 여기서는 **트리만** 손으로 세운다(그 함수가 spawn과
+    // 분리해 두었기 때문에 가능하다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    // 두 pane 모두 긴 문서를 든 편집기로 만든다.
+    const long = try allocator.alloc([]const u8, 400);
+    defer allocator.free(long);
+    for (long) |*l| l.* = "line";
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = long;
+    defer fx.term.rt.editor_lines = saved;
+
+    const tab = tab_ops.activeTab(fx.session);
+    const left_pane = tab.panes.items[0];
+
+    const right_pane = try allocator.create(app_session_mod.Pane);
+    right_pane.* = .{};
+    const right_term = try createEditorTerm(fx.session);
+    right_term.rt.editor_lines = long;
+    try right_pane.terms.append(allocator, right_term);
+    try tab.panes.append(allocator, right_pane);
+
+    const split = try allocator.create(app_session_mod.PaneTree.Split);
+    split.* = .{ .direction = .horizontal, .ratio = 0.5, .a = .{ .leaf = left_pane }, .b = .{ .leaf = right_pane } };
+    try testing.expect(app_session_mod.PaneTree.replaceLeaf(&tab.tree, left_pane, .{ .split = split }));
+    // **세운 것은 여기서 되돌린다.** 세션 해체에 맡기면 트리·pane 소유가 픽스처의 가정과 어긋나
+    // 죽는다(실제로 그랬다) — 이 테스트가 보려는 것은 라우팅이지 해체가 아니다.
+    defer {
+        tab.tree = .{ .leaf = left_pane };
+        allocator.destroy(split);
+        _ = tab.panes.pop();
+        right_term.rt.editor_lines = &.{}; // 빌린 배열이라 Term이 해제하면 안 된다
+        term_ops.destroyTerm(fx.session, right_term);
+        right_pane.terms.deinit(allocator);
+        allocator.destroy(right_pane);
+    }
+
+    // 오른쪽 절반 한가운데에서 굴린다.
+    const win = fx.session.termRect();
+    const x: f64 = @as(f64, @floatFromInt(win.x)) + @as(f64, @floatFromInt(win.w)) * 0.75;
+    const y: f64 = @as(f64, @floatFromInt(win.y)) + @as(f64, @floatFromInt(win.h)) / 2.0;
+    scroll_ops.scrollWheel(fx.session, -4.0 * @as(f64, @floatFromInt(fx.session.cell_height_px)), 0, false, x, y);
+
+    try testing.expect(right_term.rt.editor_first_line > 0); // 커서 아래가 움직였다
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line); // 옆 pane은 그대로다
+
+    // 왼쪽 절반에서 굴리면 반대가 된다.
+    const before_right = right_term.rt.editor_first_line;
+    const lx: f64 = @as(f64, @floatFromInt(win.x)) + @as(f64, @floatFromInt(win.w)) * 0.25;
+    scroll_ops.scrollWheel(fx.session, -2.0 * @as(f64, @floatFromInt(fx.session.cell_height_px)), 0, false, lx, y);
+    try testing.expect(fx.term.rt.editor_first_line > 0);
+    try testing.expectEqual(before_right, right_term.rt.editor_first_line);
 }

@@ -135,3 +135,34 @@ test "루트가 없거나 경로가 루트 자신이면" {
     try std.testing.expectEqualStrings("repo", displayRelative("/x/repo/", "/x/repo"));
     try std.testing.expectEqualStrings("", displayRelative("", "/x"));
 }
+
+/// 헤더 breadcrumb를 어느 루트 기준으로 보일지 고른다(순수). 빈 문자열이면 자르지 않는다.
+///
+/// **비교가 먼저다.** 비교는 자기가 읽은 저장소를 아는데, 활성 저장소는 그 사이 다른 곳으로 옮겨 갈 수
+/// 있다 — 그때 활성 기준으로 자르면 **같은 화면이 창 상태에 따라 다른 경로**를 말한다.
+///
+/// **탐색기 루트는 하나일 때만 쓴다.** 여럿이면 어느 기준인지 모호하고, 잘못 고르면 화면이 **다른
+/// 저장소의 위치**를 말한다 — 그것은 자르지 않는 것보다 나쁘다(긴 절대경로는 불편할 뿐 틀리지 않는다).
+pub fn breadcrumbRoot(
+    diff_repo: []const u8,
+    git_repo: []const u8,
+    tree_root_count: usize,
+    tree_root_first: []const u8,
+) []const u8 {
+    if (diff_repo.len > 0) return diff_repo;
+    if (git_repo.len > 0) return git_repo;
+    if (tree_root_count == 1 and tree_root_first.len > 0) return tree_root_first;
+    return "";
+}
+
+test "루트 선택: 비교 > 활성 저장소 > 탐색기 루트 하나" {
+    try std.testing.expectEqualStrings("/diff", breadcrumbRoot("/diff", "/git", 1, "/tree"));
+    try std.testing.expectEqualStrings("/git", breadcrumbRoot("", "/git", 1, "/tree"));
+    try std.testing.expectEqualStrings("/tree", breadcrumbRoot("", "", 1, "/tree"));
+}
+
+test "탐색기 루트가 여럿이면 자르지 않는다 — 다른 저장소의 위치를 말하게 된다" {
+    // 잘못 고르면 화면이 그럴듯하지만 **틀린** 위치를 말한다. 자르지 않으면 길 뿐 틀리지 않는다.
+    try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 2, "/tree-a"));
+    try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 0, ""));
+}

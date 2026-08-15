@@ -1803,14 +1803,14 @@ pub fn agentIconCodepoint(kind: AgentKind) u21 {
 ///
 /// 셋 다 없으면 빈 문자열이고, 그때 `displayRelative`가 절대경로를 그대로 돌려준다(지금까지의 동작).
 pub fn breadcrumbRootFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
-    if (entry.kind == .diff and entry.diff_repo.len > 0) return entry.diff_repo;
-    if (self.git_repo) |repo| return repo;
-    // 탐색기 루트가 하나면 그것을 쓴다. 여럿이면 어느 것 기준인지 모호하므로 자르지 않는다 —
-    // 잘못 자르면 화면이 **다른 저장소의 위치**를 말하게 된다.
-    if (self.file_tree.rootCount() == 1) {
-        if (self.file_tree.rootAt(0)) |root| return root;
-    }
-    return "";
+    // **정책은 `repo_path.breadcrumbRoot`가 소유한다**(순수·테스트 가능). 여기서는 상태를 모아 준다 —
+    // 규칙을 이 안에 두면 탐색기 루트가 여럿인 경우 같은 분기를 실제 트리 없이 검사할 수 없다.
+    return maru.session.repo_path.breadcrumbRoot(
+        if (entry.kind == .diff) entry.diff_repo else "",
+        self.git_repo orelse "",
+        self.file_tree.rootCount(),
+        self.file_tree.rootAt(0) orelse "",
+    );
 }
 
 fn dimRgb(c: maru.color.Rgb) maru.color.Rgb {

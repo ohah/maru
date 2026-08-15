@@ -1,7 +1,9 @@
 #!/bin/sh
 # 계약 문서가 하는 **검증 가능한 주장**을 코드로 대조한다. "문서를 건드렸다" 와
 # "문서가 맞다" 는 다른 얘기라, 주장마다 판정자를 붙인다.
-cd /Users/yoonhb/Documents/workspace/maru/.claude/worktrees/cim4b-tab-drag || exit 1
+# 저장소 루트는 **스크립트 위치에서** 찾는다. 절대경로를 박으면 그 체크아웃이 사라진 순간
+# 판정자가 통째로 안 돈다(실제로 워크트리를 지우자 한 줄도 못 돌았다).
+cd "$(dirname "$0")/../.." || exit 1
 B=src/platform/mobile/mobile_bridge.zig
 H=src/platform/mobile/mobile_host_abi.h
 I=src/platform/ios/ios_app_host.m
@@ -79,6 +81,15 @@ ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2
 # `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"
+
+echo "§아틀라스 — 창이 부서져도 성장분이 남는다"
+# **Android 만 창이 부서진다**(iOS 는 UIKit 이 레이어를 살린다). 그때 텍스처는 사라지는데
+# 브리지의 등록부는 살아남아 미스가 안 나므로, 원본을 안 들고 있으면 **다시 굽지도 않고
+# 영영 빈칸**이 된다. 글자 아틀라스는 `g_glyph_px` 로 그렇게 하고 있었고 컬러만 빠져 있어
+# 이모지가 사라졌다(실측). 둘 다 원본이 있어야 하고, 굽는 자리에서 원본에도 써야 한다.
+ck "두 아틀라스 다 원본을 든다" 2 "$(grep -cE '^static uint8_t \*g_(glyph|color)_px = NULL;' $A)"
+ck "컬러 원본을 세운 뒤 free 하지 않는다" 0 "$(grep -c 'free(g_color_px)' $A)"
+ck "굽는 자리가 두 원본에 다 쓴다" 2 "$(grep -cE 'memcpy\(g_(glyph|color)_px' $A)"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

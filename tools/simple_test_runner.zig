@@ -25,7 +25,10 @@ var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
 fn expectedTestCount(args: std.process.Args) ?usize {
-    comptime if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return null;
+    // windows/wasi는 인자 이터레이션 모델이 달라 이 옵션을 읽지 않는다. `comptime if (...) return null;`로 쓰면
+    // 조건이 참인 타깃(=windows)에서 "comptime에 return 불가"로 **컴파일이 깨진다** — macOS에선 조건이 거짓이라
+    // 본문이 평가되지 않아 드러나지 않던 Windows 전용 결함이었다. 조건이 comptime-known이라 평범한 if로도 폴딩된다.
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return null;
     var iterator = std.process.Args.Iterator.init(args);
     _ = iterator.next();
     const prefix = "--maru-expect-tests=";

@@ -110,6 +110,13 @@ pub const Props = struct {
     /// `변경 사항` 탭 이름 옆에 붙는 **전체** 파일 수. **`items`로 셀 수 없다** — 그쪽은 가상화된 창이라
     /// 보이는 만큼만 오고, 스크롤 위치에 따라 숫자가 흔들린다.
     changed_file_count: u32 = 0,
+    /// 커밋 메시지 상자에 보일 글자. 비면 안내 문구를 대신 그린다.
+    commit_message: []const u8 = "",
+    /// 상자가 보여 줄 **시각 행** 수(랩 결과). host가 `text_area.visibleRows`로 정해 준다 — 컴포넌트는
+    /// 랩을 다시 계산하지 않는다(같은 계산이 두 곳이면 상자 높이와 그려지는 줄 수가 갈린다).
+    commit_rows: u32 = 1,
+    /// 커밋 버튼을 켤 수 있나. **실제 index 상태로만 정한다**(쓰기 문서 §7 — 낙관하지 않는다).
+    commit_enabled: bool = false,
 };
 
 /// 도크 치수. Session Dock과 같은 방식으로 zoom을 곱해 만든다 — 두 뷰가 같은 축으로 커지고 줄어야
@@ -125,6 +132,11 @@ pub const DockMetrics = struct {
     row_h: u32,
     /// 브랜치 줄 높이.
     branch_h: u32,
+    /// 커밋 메시지 상자의 **한 시각 행** 높이. 상자 전체 높이는 이것 × 보이는 행 수다 —
+    /// 내용을 따라 자라고 상한에서 멈춘다(§12.2).
+    commit_row_h: u32,
+    /// 커밋 버튼 줄 높이.
+    commit_button_h: u32,
     /// 목록 좌우 여백.
     inset_x: u32,
     /// 행 안에서 아이콘·글자·동작 사이의 간격.
@@ -154,6 +166,8 @@ pub const DockMetrics = struct {
             .section_h = s.px(24, scale_milli),
             .row_h = s.px(24, scale_milli),
             .branch_h = s.px(26, scale_milli),
+            .commit_row_h = s.px(20, scale_milli),
+            .commit_button_h = s.px(28, scale_milli),
             .inset_x = s.px(8, scale_milli),
             .gap = s.px(6, scale_milli),
             .status_extent = s.px(14, scale_milli),

@@ -51,11 +51,21 @@ pub const ScrollItems = struct {
 };
 
 /// 목록 뷰포트 높이 = 도크 content에서 고정 chrome(요약 줄·브랜치 줄)을 뺀 것.
+/// 커밋 상자가 보여 줄 **시각 행** 수. P3b에서는 입력이 아직 없어 늘 한 줄이고, P3c가 실제 메시지의
+/// 랩 결과(`text_area.visibleRows`)를 준다 — 그 계산의 자리를 지금 만들어 두어 목록 높이와 상자 높이가
+/// **같은 값**을 쓰게 한다(두 곳이 각자 세면 스크롤 범위가 어긋난다).
+fn commitRows(self: *const AppSession) u32 {
+    _ = self;
+    return 1;
+}
+
 fn listViewportHeightPx(self: *const AppSession, has_branch: bool) u32 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    // 탭 줄도 고정 chrome이다 — 빼지 않으면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가 어긋난다.
-    const fixed = m.tab_h + m.summary_h + if (has_branch) m.branch_h else 0;
+    // **고정 chrome을 전부 뺀다.** 하나라도 빠뜨리면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가
+    // 어긋난다(탭 줄에서 실제로 그랬다). 커밋 상자는 내용을 따라 자라므로 그 높이도 여기서 센다.
+    const commit_h = m.commit_row_h * @max(commitRows(self), 1) + m.commit_button_h;
+    const fixed = m.tab_h + m.summary_h + commit_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }
 
@@ -148,6 +158,9 @@ pub const Projection = struct {
     behind: u32,
     has_ab: bool,
     summary: component.types.Summary,
+    /// 커밋 버튼을 켤 수 있나 = index에 무언가 올라가 있나. **모델이 status로 판정한 것만 쓴다**
+    /// (낙관적으로 추정하지 않는다 — 쓰기 문서 §7).
+    has_staged: bool,
     /// 탭 이름 옆의 **전체** 파일 수. 섹션 헤더의 `count`를 더해서 낸다 — 그 값은 접혀 있어도 잘려
     /// 있어도 전체를 말하므로, 화면 행을 세는 것과 달리 10행 상한·접기에 흔들리지 않는다.
     file_count: u32,
@@ -199,6 +212,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .has_ab = model.head.has_ab,
         .summary = .{ .added = model.total_added, .removed = model.total_removed },
         .file_count = file_count,
+        .has_staged = model.has_staged,
     };
 }
 
@@ -224,6 +238,9 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .has_ab = projection.has_ab,
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
+        .commit_rows = commitRows(self),
+        // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
+        .commit_enabled = projection.has_staged,
     };
 }
 

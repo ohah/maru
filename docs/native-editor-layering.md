@@ -201,6 +201,13 @@ N2 이후로 미룬다.** 인레이 힌트·ghost text가 "편집기 폰트 크�
 `editor.openPathInActivePane`(문서·줄 배열·경로). 앞의 둘은 주입 테스트가 잡았고, 셋째는 그 패턴을
 알고 나서 **읽어서** 찾았다.
 
+**세션 allocator를 쓰는 자리는 `checkAllAllocationFailures`를 그대로 못 쓴다.** allocator가 init에
+고정이고, 함수에 다른 allocator를 넘기면 나중에 해제하는 쪽(`releaseEditorTerm`)과 어긋나 **진짜
+버그**가 된다. 대신 **세션을 `FailingAllocator`로 만들고 init이 끝난 뒤부터 `fail_index`를 옮긴다** —
+init은 흔들지 않으므로 남의 코드를 시험하지 않고 빠르다(`editor.zig`의 "파일 열기가 어디서 할당에
+실패해도 새지 않는다"). 그 테스트는 **실패를 몇 번 겪었는지 세어서 단언한다**: 열기가 쓰는 할당 수가
+줄어 창을 벗어나면 한 번도 실패하지 않고 조용히 통과할 수 있기 때문이다.
+
 ### 2.1 스레딩 — 무거운 작업을 렌더 루프에 두지 않는다
 
 레이어(§2)와 **직교하는 축**이다([io-render-threading.md](io-render-threading.md)가 같은 규정을 쓴다).

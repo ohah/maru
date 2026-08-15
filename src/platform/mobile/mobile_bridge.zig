@@ -1659,6 +1659,9 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
 /// 개수를 늘렸을 때 아이콘만 왼쪽으로 번져 카드 위에 겹친다(그 모양을 화면으로 한 번 잡았다).
 const status_icon_count: usize = 6;
 const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 간격도 44 여야 한다
+/// 그리는 크기. **히트(44)와 다른 값이다** — 44 를 꽉 채우면 아이콘끼리 붙어 보인다.
+/// 18 은 26px 줄에 맞춰 고른 값이라 44 줄에서는 작아 보였다(실제 하단 바는 24~28 을 쓴다).
+const status_icon_px: i32 = 24;
 const icon_slot_px = 32;
 /// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
 const icon_slots = 10;
@@ -1956,7 +1959,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
     // 아이콘 18px 를 44 줄 한가운데. **간격도 44 다** — 히트를 44 로 주면 26 간격에서는
     // 좌우로 9px 씩 겹쳐 어느 아이콘인지 모호해진다(설정 목록에서 배운 것과 같다).
-    const icon_y: i32 = @intFromFloat(@max(0, height_f - 44 + (44 - 18) / 2));
+    // 줄 한가운데. **그리는 크기에서 파생시킨다** — 따로 적으면 크기를 바꿀 때 세로가 안 따라와
+    // 아이콘이 줄 위아래로 치우친다.
+    const icon_y: i32 = @intFromFloat(@max(0, height_f - 44 + @as(f32, @floatFromInt(44 - status_icon_px)) / 2));
     const icon_step: i32 = status_icon_step;
     const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * @as(i32, @intCast(status_icon_count)) - 12;
     for (0..status_icon_count) |i| {
@@ -1966,24 +1971,20 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 아이콘은 18px 이라 그대로 받으면 손가락 기준의 절반도 안 된다(§5.1 "작게 그리고
         // 넓게 받는다" — 아이콘은 서로 떨어져 있어 목록과 달리 이 기법이 통한다).
         if (i == 1) {
-            const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + 9;
-            const cy = @as(f32, @floatFromInt(icon_y)) + 9;
-            // **위로는 키바 밴드를 넘지 않는다.** chrome 을 키바보다 먼저 묻기 때문에, 44 를
-            // 그대로 위로 펴면 그 x 에 있는 키의 **밑동 몇 px 이 조용히 안 눌린다**.
-            //
-            // **그래서 남는 세로는 26px 뿐이다 — 기준(44/48) 미달이다.** 상태바 자체가 26px 라
-            // rect 를 어떻게 잡아도 못 채운다. 지금은 이 줄에서 눌리는 것이 톱니 하나뿐이라
-            // 넘어가지만, **줄 높이를 키우지 않는 한 이 줄의 어떤 아이콘도 기준을 못 맞춘다**
-            // (실제 하단 바는 iOS 49pt·Android 56dp 다). 가로도 마찬가지다 — 아이콘 간격이
-            // 26 이라 이웃까지 44 로 넓히면 좌우로 9px 씩 겹친다. [UX §5.6](../../../docs/mobile-ux.md).
+            const half_icon = @as(f32, @floatFromInt(status_icon_px)) / 2;
+            const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + half_icon;
+            const cy = @as(f32, @floatFromInt(icon_y)) + half_icon;
+            // **위로는 키바 밴드를 넘지 않는다.** chrome 을 키바보다 먼저 묻기 때문에 rect 를
+            // 위로 펴면 그 x 에 있는 키의 **밑동이 조용히 안 눌린다**. 줄이 44 라 넘길 필요도
+            // 없다 — 클램프는 줄을 다시 줄일 때를 위한 가드로 남긴다([UX §5.6](../../../docs/mobile-ux.md)).
             const gear_top = @max(cy - 22, key_bar_band.bot);
             set_gear_rect = .{ .x = cx - 22, .y = gear_top, .w = 44, .h = @max(0, cy + 22 - gear_top) };
         }
         quad_buf[quad_count] = .{
             .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),
             .y = @floatFromInt(icon_y),
-            .w = 18,
-            .h = 18,
+            .w = @floatFromInt(status_icon_px),
+            .h = @floatFromInt(status_icon_px),
             .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
             .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
             .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,

@@ -9,21 +9,28 @@ H=src/platform/mobile/mobile_host_abi.h
 I=src/platform/ios/ios_app_host.m
 A=src/platform/android/android_app_host.c
 
+# **틀린 것을 센다.** 예전에는 출력만 하고 항상 0 으로 끝나, 판정자가 전부 틀려도 이 스크립트를
+# 부르는 쪽은 성공으로 봤다 — 게이트가 아니라 구경거리였다.
+bad=0
 ck() { # 이름, 기대, 실제
   if [ "$2" = "$3" ]; then printf "  OK   %-42s %s\n" "$1" "$3"
-  else printf "  틀림 %-42s 기대=%s 실제=%s\n" "$1" "$2" "$3"; fi
+  else printf "  틀림 %-42s 기대=%s 실제=%s\n" "$1" "$2" "$3"; bad=$((bad+1)); fi
 }
 
 echo "§3 브리지에 OS 호출이 없다"
 ck "브리지의 @cImport/OS import" 0 "$(grep -cE '@cImport|std\.os\.|std\.posix\.' $B)"
 
 echo "§5 조용히 실패하지 않는다"
-ck "브리지의 catch {} 개수" 0 "$(grep -c 'catch {}' $B)"
+# `catch {}` 만 세면 `catch return` 이 그대로 빠져나간다 — **연산을 끝내 버리는** 형태를 전부 본다.
+# `catch null` 은 세지 않는다: 그건 끝내는 게 아니라 **호출자가 검사해야 하는 값**을 돌려주는
+# 것이고, 실제로 그 자리(`keyFromId`)의 호출자가 `key_unknown_id` 를 남긴다. 오류를 남기고 도는
+# `catch { setLastError(...) ... }` 는 블록이 비지 않으므로 안 걸린다.
+ck "브리지의 조용한 catch" 0 "$(grep -cE 'catch \{\}|catch return' $B)"
 ck "두 host 가 last_error 를 읽고 비운다" 2 "$(grep -l maru_mobile_clear_error $I $A | wc -l | tr -d ' ')"
 
 echo "§4 셀 기하·글자 크기 단일 출처"
 ck "헤더의 TEXT_PX 정의" 1 "$(grep -c 'define MARU_ATLAS_TEXT_PX' $H)"
-ck "host 에 남은 하드코딩 22" 0 "$(grep -cE '(jfloat)22\.0f|CFSTR\("Menlo"\), 22|, 22, NULL\)' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "host 에 남은 하드코딩 22" 0 "$(grep -cE '\(jfloat\)22\.0f|CFSTR\("Menlo"\), 22|, 22, NULL\)' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 
 echo "§3 상한은 코어가 답한다"
 ck "host 에 남은 quad 상한 하드코딩" 0 "$(grep -cE 'quad_cap = [0-9]|_quadCap = [0-9]' $I $A | awk -F: '{s+=$2} END{print s+0}')"
@@ -34,9 +41,16 @@ echo "ABI 헤더 ↔ Zig export 타입"
 ck "타입이 어긋난 선언" 0 "$(python3 "$(dirname "$0")/abi_types.py" | grep -oE '^어긋난 선언 [0-9]+' | grep -oE '[0-9]+')"
 
 echo "ABI 헤더 ↔ Zig export"
-h=$(grep -oE 'maru_mobile_[a-z_]+' $H | sort -u | md5)
-z=$(grep -oE '^pub export fn maru_mobile_[a-z_]+' $B | grep -oE 'maru_mobile_[a-z_]+' | sort -u | md5)
-ck "선언 집합 해시" "$h" "$z"
+# **`md5` 는 macOS 전용이다** — Linux 에서는 없어서 양쪽이 **빈 값으로 같아져** 항상 통과했다.
+# 해시가 필요한 것도 아니다(집합 비교면 충분하고, 다를 때 무엇이 다른지도 보인다).
+h=$(grep -oE 'maru_mobile_[a-z_]+' $H | sort -u)
+z=$(grep -oE '^pub export fn maru_mobile_[a-z_]+' $B | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
+ck "선언 집합" "$(printf '%s' "$h" | wc -l | tr -d ' ')" "$(printf '%s' "$z" | wc -l | tr -d ' ')"
+if [ "$h" != "$z" ]; then
+  printf "  틀림 %-42s\n" "선언 집합이 다르다 — 한쪽에만 있는 것:"
+  printf '%s\n%s\n' "$h" "$z" | sort | uniq -u | sed 's/^/         /'
+  bad=$((bad+1))
+fi
 
 echo "문서에 낡을 값이 없는가"
 ck "매트릭스에 테스트 개수 하드코딩" 0 "$(grep -c 'mobile_bridge_contract.zig`([0-9]*개)' docs/verification-matrix.md)"
@@ -103,3 +117,7 @@ echo "계획 ↔ 계약 슬라이스 참조"
 for m in M4a2 M4a3 M4a4 M4a5 M10; do
   ck "$m 이 계획 표에 있다" 1 "$(grep -cE "^\| $m \|" docs/plans/mobile-platform.md)"
 done
+
+# **비-0 으로 끝난다.** 이것이 없으면 어디에 걸어도 게이트가 안 된다.
+if [ "$bad" -gt 0 ]; then printf "\n틀림 %d 건\n" "$bad"; exit 1; fi
+printf "\n전부 통과\n"

@@ -39,8 +39,13 @@ public class MaruActivity extends android.app.NativeActivity {
     private static native void nativeCommit(String text);
 
     /// IME 가 문자로 주지 않는 키(백스페이스 등). 코어가 바이트로 받는다.
-    /** 키를 **인코딩 전** 상태로 넘긴다 — 바이트는 코어의 encodeKey 가 만든다(수정자 포함). */
-    private static native void nativeKey(int keyCode, int metaState);
+    /** 키를 **인코딩 전** 상태로 넘긴다 — 바이트는 코어의 encodeKey 가 만든다(수정자 포함).
+     *
+     *  `unicodeChar` 는 **수정자를 뺀** 글자다(`getUnicodeChar(0)`). 이름 붙은 키 표에 없는
+     *  키에 Ctrl·Alt 가 붙었을 때 이것이 없으면 네이티브가 어느 글자인지 알 수 없어 그냥
+     *  버렸다 — 하드웨어 키보드에서 Ctrl+C 가 무동작이었다. iOS 의 `charactersIgnoringModifiers`
+     *  와 같은 자리다. */
+    private static native void nativeKey(int keyCode, int metaState, int unicodeChar);
 
     /** OS 가 정한 **길게 누름 지연**(ms). 사용자가 접근성 설정("길게 누르기 지연")으로 바꿀 수
      *  있어서 코어가 박아 두면 그 설정을 무시하게 된다 — 손이 느린 사용자가 길게 눌러도
@@ -126,14 +131,14 @@ public class MaruActivity extends android.app.NativeActivity {
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             // 조합이 없는 상태의 백스페이스가 이리로 온다. 터미널은 화면 버퍼를 편집하지
             // 않으므로 삭제를 흉내 내지 않고 **키 자체를 코어로** 넘긴다.
-            for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL, 0);
+            for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL, 0, 0);
             return true;
         }
 
         @Override
         public boolean sendKeyEvent(android.view.KeyEvent event) {
             if (event.getAction() == android.view.KeyEvent.ACTION_DOWN)
-                nativeKey(event.getKeyCode(), event.getMetaState());
+                nativeKey(event.getKeyCode(), event.getMetaState(), event.getUnicodeChar(0));
             return true;
         }
     }

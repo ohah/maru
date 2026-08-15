@@ -986,8 +986,16 @@ Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
 }
 
 JNIEXPORT void JNICALL
-Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta) {
+Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta,
+                                     jint unicode) {
     (void)env; (void)cls;
+    // Android meta 비트 → 우리 표. Meta(⌘) 는 안드로이드에서 META_META_ON 이다.
+    // **표를 스위치보다 먼저 만든다** — 이름 붙은 키가 아닐 때 수정자를 봐야 하기 때문이다.
+    unsigned int mods = 0;
+    if (meta & AMETA_SHIFT_ON) mods |= MARU_MOD_SHIFT;
+    if (meta & AMETA_CTRL_ON)  mods |= MARU_MOD_CTRL;
+    if (meta & AMETA_ALT_ON)   mods |= MARU_MOD_ALT;
+    if (meta & AMETA_META_ON)  mods |= MARU_MOD_CMD;
     // **바이트를 손으로 적지 않는다.** 키를 그대로 넘기면 코어의 `encodeKey` 가 DECCKM(커서키
     // 모드)·수정자·kitty 프로토콜을 반영해 만든다 — 예전에는 여기서 `\r`·`0x7F` 를 적어 넣어
     // 화살표도 Ctrl 조합도 아예 없었다.
@@ -1008,16 +1016,23 @@ Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jin
         case AKEYCODE_PAGE_UP:      id = MARU_KEY_PAGE_UP; break;
         case AKEYCODE_PAGE_DOWN:    id = MARU_KEY_PAGE_DOWN; break;
         default:
-            if (key_code >= AKEYCODE_F1 && key_code <= AKEYCODE_F12)
+            if (key_code >= AKEYCODE_F1 && key_code <= AKEYCODE_F12) {
                 id = MARU_KEY_F(key_code - AKEYCODE_F1 + 1);
-            else return;
+                break;
+            }
+            // **수정자가 붙은 문자는 여기서 코어에 태운다.** IME 는 Ctrl+C 를 `commitText` 로
+            // 주지 않으므로(그건 글자가 아니다) 이 자리가 없으면 **조용히 사라진다** — 블루투스
+            // 키보드를 붙인 태블릿·크롬북에서 Ctrl+C 로 프로세스를 못 멈췄다. iOS 는 같은 키를
+            // `charactersIgnoringModifiers` 로 태우고 있었다(대칭이 빠져 있었다).
+            if ((mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD)) && unicode > 0) {
+                pthread_mutex_lock(&g_bridge_lock);
+                unsigned int total = maru_mobile_key(MARU_KEY_CHAR, (unsigned int)unicode, mods);
+                pthread_mutex_unlock(&g_bridge_lock);
+                LOGI("MARU_INPUT key=char mods=%u total=%u", mods, total);
+                return;
+            }
+            return;
     }
-    // Android meta 비트 → 우리 표. Meta(⌘) 는 안드로이드에서 META_META_ON 이다.
-    unsigned int mods = 0;
-    if (meta & AMETA_SHIFT_ON) mods |= MARU_MOD_SHIFT;
-    if (meta & AMETA_CTRL_ON)  mods |= MARU_MOD_CTRL;
-    if (meta & AMETA_ALT_ON)   mods |= MARU_MOD_ALT;
-    if (meta & AMETA_META_ON)  mods |= MARU_MOD_CMD;
 
     pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_key(id, 0, mods);

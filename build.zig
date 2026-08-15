@@ -1726,9 +1726,13 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
-    // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다 —
-    // Windows는 named pipe/ACL 설계가 선행이라 이식 전까지 macOS에서만 건다.
-    if (macos_host_tests) test_step.dependOn(&run_exe_tests.step);
+    // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다. 한때
+    // 그래서 macOS에서만 걸었지만, W2가 그 자리들을 **호스트 OS 게이트**로 접어(컨트롤 소켓 → "인스턴스 없음",
+    // `maru ssh`·`install-cli` → 미지원 안내, `publishBrowserResult` → `error.UnsupportedOnWindows`) 이제 모든
+    // 호스트에서 컴파일된다. 그러니 모든 호스트에서 건다 — 그래야 "main.zig가 Windows에서 빌드된다"는 것이
+    // **테스트로 지켜지는 성질**이 되지, 한 번 확인하고 마는 사실로 남지 않는다.
+    // POSIX 전제가 진짜 필요한 테스트는 그 전제 자체로 skip한다(`@hasDecl(Permissions, "toMode")`).
+    test_step.dependOn(&run_exe_tests.step);
     // ML2a/ML2b/ML3a Chrome tree는 layout·pointer state·semantic paint의 pure seam이다. 제품
     // host에 연결되기 전에도 기본 test에 넣어 Container/clip/capture/token-role contract가 CI 밖으로
     // 새지 않게 한다. `src/ui_test.zig`는 module root를 실제 `src/` 경계에 두면서, 전체 Chrome facade가

@@ -144,6 +144,13 @@ flowchart TD
 | `check-boundaries`·`check-doc-links`·`check-config-docs` | 전부 통과 |
 | `zig build`(CLI exe) | 실패 — `src/main.zig`의 unix domain socket(`AF.UNIX`·`sockaddr.un`)과 POSIX 파일 모드(0600) |
 
+**후속 실측 (2026-08-16, 같은 호스트)**: 그 CLI exe 실패는 [windows-platform.md](windows-platform.md) 계획의 **W2**가
+닫았다. `zig build`가 통과하고 `maru.exe`가 실행된다. 고친 것은 transport가 아니라 **호스트 게이트**다 — 컨트롤
+소켓은 "인스턴스 없음"으로, `maru ssh`·`install-cli`는 미지원 안내로 접는다(셋 다 백로그). 링크 단계에서 실제로
+막고 있던 심볼은 셋이었다: `socket`(ws2_32라 `-lc`로 안 붙는다)·`environ`·`symlink`(msvcrt에 없다). 그래서
+`src/main.zig` 테스트도 이제 **모든 호스트**에서 돈다(`build.zig`의 macOS 게이트 제거) — POSIX 파일 모드가 필요한
+하나만 전제(`@hasDecl(Permissions, "toMode")`)로 skip한다.
+
 **드러난 것 — 중립성은 import 경계로만 지켜지고 있었다.** `check-boundaries`는 중립 레이어에 OS *타입명*이 새는 것을 막지만
 (§8), **std의 호스트 의존 동작**은 못 잡는다. 실제로 L2가 `std.fs.path.join`/`resolve`(호스트 native 구분자)를 써서 같은
 코드가 macOS에서는 `/repo/docs`를, Windows에서는 `/repo\docs`를 만들었다 — 그 자리의 L2 코드는 입력의 역슬래시를 이미

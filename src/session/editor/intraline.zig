@@ -322,3 +322,11 @@ test "할당이 어디서 실패해도 새지 않는다 — 실패 지점을 전
     };
     try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{ "a=1 and b=2", "a=9 and b=8" });
 }
+
+test "표시 글자가 같으면 강조가 없다 — 끝 개행만 사라진 줄" {
+    // §7이 정한 대로 줄 대응은 **줄 끝 문자를 포함해** 계산하므로, `"a"`와 `"a\n"`은 다른 줄이고
+    // 밴드가 선다. 그런데 화면에 그릴 때는 줄 끝 문자를 떼므로 **보이는 글자는 같다** — 그때 강조할
+    // 것은 없다. 여기에 억지로 무언가를 칠하면 "이 글자가 달라졌다"는 신호가 거짓이 된다.
+    const allocator = testing.allocator;
+    try testing.expect((try computeStrings(allocator, "a", "a")) == null);
+}

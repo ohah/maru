@@ -203,6 +203,26 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/catchup_barrier_wire.zig",
     );
     defer allocator.free(catchup_wire);
+    const host_connect = try readSource(
+        allocator,
+        "src/platform/macos/session_host/host_connect.zig",
+    );
+    defer allocator.free(host_connect);
+    const remote_backend = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_term_backend.zig",
+    );
+    defer allocator.free(remote_backend);
+    const process_seal = try readSource(
+        allocator,
+        "src/platform/macos/session_host/process_seal_service.zig",
+    );
+    defer allocator.free(process_seal);
+    const cleanup_seal = try readSource(
+        allocator,
+        "src/platform/macos/session_host/event_cleanup_seal.zig",
+    );
+    defer allocator.free(cleanup_seal);
     const runtime_product = runtime[0..std.mem.indexOf(u8, runtime, "const testing = std.testing;").?];
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
@@ -286,10 +306,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "screen-stream: catchup decoded cell accounting"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a catchup apply leaf는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
-    try std.testing.expectEqual(@as(usize, 3), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 4), count(build_cr4a, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=3"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=6"));
-    try std.testing.expectEqual(@as(usize, 12), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 13), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a barrier"));
@@ -306,6 +326,31 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "maru-cr4a-restore-parent-v1"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a host barrier frame"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a client demux는"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer는 bounded"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer job은"));
+    try std.testing.expectEqual(@as(usize, 1), count(host_connect, "pub fn connectExistingHostUntil("));
+    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "test \"CR4a actual issuer job은"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "const HostReconnectJob = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_job: ?*HostReconnectJob = null"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_preparing: bool = false"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn beginHostReconnectConnect("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn abortHostReconnectConnect("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_connect.connectExistingHostUntil("));
+    try std.testing.expectEqual(@as(usize, 1), count(cleanup_seal, "pub const HostReconnectJobSealInput = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(process_seal, "pub fn hostReconnectJobSeal("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "connectExistingHostUntil", &.{
+            "platform/macos/session_host/host_connect.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "beginHostReconnectConnect", &.{
+            "platform/macos/session_host/remote_term_backend.zig",
+        }),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(client, "const catchup_barrier_contract = @import"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn readCatchupBarrierUntil("));
     try std.testing.expectEqual(@as(usize, 7), count(client, "readCatchupBarrierUntil("));

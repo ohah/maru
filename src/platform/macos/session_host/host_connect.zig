@@ -540,6 +540,55 @@ pub fn connectExistingHost(
     }
 }
 
+/// CR4 reconnect issuer의 bounded exact-host entrypoint다. Catch-up barrier를 지원하는 새 host는
+/// manifest descriptor를 이미 게시하므로 legacy endpoint 추측을 하지 않는다. 같은 absolute deadline을
+/// 이후 observer attach/snapshot/catch-up에도 넘길 수 있도록 이 함수는 caller의 phase를 재생성하지 않는다.
+pub fn connectExistingHostUntil(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+    phase: attach_phase_deadline.PhaseDeadline,
+) Outcome {
+    if (builtin.os.tag != .macos or host_id == 0) return .{ .failed = .invalid_endpoint };
+    if (phase.kind != .resolve and phase.kind != .connect_hello)
+        return .{ .failed = .invalid_endpoint };
+    if (phase.absolute.remainingNs() <= 0)
+        return .{ .failed = .deadline_exceeded };
+    var dir_buf: [512]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
+        return .{ .failed = .invalid_endpoint };
+    var manifest = host_manifest.load(allocator, dir, host_id) catch |err| switch (err) {
+        error.ManifestNotFound => return .{ .failed = .invalid_manifest },
+        error.OutOfMemory => return .{ .failed = .out_of_memory },
+        else => return .{ .failed = .invalid_manifest },
+    };
+    defer manifest.deinit();
+    if (phase.absolute.remainingNs() <= 0)
+        return .{ .failed = .deadline_exceeded };
+    if (manifest.lifecycle == .restoring)
+        return .{ .failed = .startup_timeout };
+    const outcome = connectDiscoveredHostProfileUntil(
+        allocator,
+        base_cache_dir,
+        manifest.descriptor(),
+        .gui,
+        phase,
+    );
+    if (phase.absolute.remainingNs() <= 0) {
+        var expired = outcome;
+        if (expired == .connected) expired.connected.deinit();
+        return .{ .failed = .deadline_exceeded };
+    }
+    switch (outcome) {
+        .connected => return outcome,
+        .failed => |reason| {
+            if (reason == .out_of_memory or reason == .deadline_exceeded) return outcome;
+            if (ownerLeaseState(dir, host_id) == .free) return .{ .failed = .host_gone };
+            return outcome;
+        },
+    }
+}
+
 /// Recovery discovery가 pin한 exact descriptor에만 새 connection을 연다. pathname을 fresh revalidate하고
 /// legacy endpoint 추측이나 spawn으로 우회하지 않는다.
 pub fn connectDiscoveredHost(
@@ -1279,7 +1328,7 @@ fn openLock(dir: [:0]const u8) ?c.fd_t {
 const testing = std.testing;
 const daemon = @import("daemon.zig");
 
-test "host_connect: connect-first attaches to an already-running host (no spawn)" {
+test "CR4a actual issuer는 bounded connectExistingHostUntil로 existing host에 연결한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
@@ -1360,6 +1409,18 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
         };
         defer exact.deinit();
         try testing.expectEqual(host_id, exact.host_id);
+    }
+    // CR4 issuer는 동일 manifest resolver를 쓰되 connect/hello 이후 단계와 공유할 absolute deadline을
+    // 재생성하지 않는다. 이 행은 실제 daemon/manifest/socket을 bounded 제품 entrypoint로 통과한다.
+    {
+        const phase = try attach_phase_deadline.PhaseDeadline.start(io, .connect_hello);
+        var exact = switch (connectExistingHostUntil(allocator, base, host_id, phase)) {
+            .connected => |value| value,
+            .failed => return error.TestUnexpectedResult,
+        };
+        defer exact.deinit();
+        try testing.expectEqual(host_id, exact.host_id);
+        try testing.expect(phase.absolute.remainingNs() > 0);
     }
 
     // 같은 host_id/endpoint라도 disk generation의 build identity가 peer와 다르면 stale entry로 거부한다.

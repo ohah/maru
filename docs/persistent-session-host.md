@@ -784,8 +784,8 @@ Client pending frame이 막힌 동안 세 record와 byte backing이 그대로 �
 정확한 순서로 전달되며 runtime record가 함께 retire됨을 고정한다. CR2d1 record는 physical socket ACK receipt가 아니라
 stable runtime queue에서 기존 Client outbound owner로 넘어가기 전까지의 ownership transcript다.
 
-앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
-`RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
+앱 전역의 얇은 `SessionHostCoordinator { pool, backend, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
+`RemoteTermBackend`는 runtime map, 실행 adapter와 그 canonical membership에 결속된 host별 `HostReconnectJob`을 소유한다. coordinator는 job을 저장하지 않고 backend의 owner-turn API만 호출한다. backend map이 canonical membership이므로 AppSession registry나
 Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을
 소유하지 않는다. job key는 `{host_id,pool_membership_generation,expected_connection_generation}`이다. HostPool의 기존
 `adapter_generation`은 현재 add/remove membership 세대다. CR3에서 코드·DTO·fixture를 함께
@@ -862,6 +862,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    host issuer의 모든 public arm과 owner-turn commit은 subscription/registry/core mutex를 만지기 전에 current OS PID와
    ready process seal을 검증한다. prepared batch에는 `(OS PID, process nonce)`와 final owner address/incarnation/thread를
    봉인하며 fork mismatch는 lock 전 mutation 0으로 거부한다. 이 내부 seal은 client wire의 `host_id`와 역할이 다르다.
+
+   actual issuer의 제품 owner는 `AppSession`이나 개별 `RemoteRuntime`이 아니라 `RemoteTermBackend`의 host별
+   `HostReconnectJob`이다. `AppSession`은 base-cache path와 owner-turn 호출 capability만 빌려 주고 Client나 prepared
+   receipt를 보존하지 않는다. job은 같은 host의 admission runtime을 먼저 닫힌 목록으로 봉인한 뒤 exact manifest descriptor를
+   pin하고, 하나의 non-resettable absolute deadline으로 connect/hello, Client replacement, observer attach, snapshot, delta와
+   barrier를 순서대로 수행한다. host당 active job은 최대 하나이며 actual `connectExistingHostUntil` 호출과 Client replacement
+   publication도 각각 exact 한 번이다. CR4a의 단일-runtime 제품 행은 이 동일 host-job 경계를 통과하며, CR5는 owner를 바꾸지
+   않고 sealed runtime 목록만 여러 runtime으로 확장한다. pre-publication connect/manifest/hello 실패는 HostPool·adapter·old
+   graph mutation 0이고, publication 뒤 local OOM/cap/deadline/peer failure는 소비한 wire cut을 재사용하지 않고 candidate와
+   published Client를 fail-close해 다음 job generation으로 넘긴다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
    observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
 3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership

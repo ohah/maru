@@ -491,6 +491,19 @@ pub export fn maru_macos_app_host_capabilities(out_capabilities: ?*Capabilities)
     return @intFromEnum(Status.ok);
 }
 
+/// OS 로케일 식별자를 중립 층에 넘긴다 — **platform 은 읽어서 전달만 하고 해석하지 않는다**
+/// (i18n 계약 §5.1). `ko-KR` 류의 짧은 ASCII 태그이고, 판정(`ko-KR`·`ko_KR`·`ko` 정규화, 미지원은
+/// `en`)은 `src/i18n.zig` 가 소유한다. 그래야 규칙이 플랫폼 수만큼 복제되지 않고 OS 없이 테스트된다.
+///
+/// 세션마다가 아니라 **프로세스 전역**이다(§5.2 — 현재 언어는 전역 하나, 창마다 다를 이유가 없다).
+/// Swift 가 세션을 만들기 전마다 메인 스레드에서 부른다(같은 값이면 무해). 빈 값·null 은 무동작이라 로케일을 못 읽는
+/// 환경에서도 안전하고, 그때는 `auto` 가 `en` 으로 떨어진다.
+pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize) void {
+    const ptr = tag_ptr orelse return;
+    if (tag_len == 0 or tag_len > 128) return;
+    maru.i18n.setOsLocale(ptr[0..tag_len]);
+}
+
 pub export fn maru_macos_app_instance_lease_acquire(path_ptr: ?[*]const u8, path_len: usize) u32 {
     const ptr = path_ptr orelse return @intFromEnum(AppInstanceLeaseResult.invalid_path);
     if (path_len == 0 or path_len > 4095) return @intFromEnum(AppInstanceLeaseResult.invalid_path);

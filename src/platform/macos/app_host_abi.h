@@ -553,6 +553,11 @@ int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabiliti
    path는 workspace.v1.lock UTF-8 bytes다. Zig는 final leaf를 no-follow/0600/current-UID regular로
    검증하고 CLOEXEC flock fd를 process lifetime 동안 보관한다. */
 uint32_t maru_macos_app_instance_lease_acquire(const uint8_t *path, size_t path_len);
+/* OS 로케일 식별자(`ko-KR` 류 짧은 ASCII)를 프로세스 전역으로 넘긴다 — Swift 는 읽어서 전달만 하고
+   해석하지 않는다(docs/i18n.md §5.1: 판정은 중립 층인 src/i18n.zig 가 소유). 세션을 만들기 전마다 메인
+   스레드에서 호출한다(같은 값이면 무해). NULL·빈 값·128 바이트 초과는 무동작이며, 그때 `ui.language = auto`
+   는 영어로 떨어진다. */
+void maru_macos_app_set_ui_locale(const uint8_t *tag, size_t tag_len);
 /* CR0b bootstrap 5: 모든 AppSession teardown 뒤 app-global remote backend/pool/client를 정산한다.
    0=inactive, 1=settled. incident owner shutdown보다 반드시 먼저 호출한다. */
 uint32_t maru_macos_remote_backend_settle(void);

@@ -131,6 +131,7 @@
 | `bell.audible`·`bell.visual` | 벨 처리가 없다. 지금 "bell" 은 chrome 헤더 **아이콘**뿐이다 |
 | `theme.follow-system`·`theme.preset-dark`·`theme.preset-light` | **OS 외관을 받는 경로가 없다** — 브리지·두 host·ABI 어디에도 라이트/다크를 알리는 자리가 없다. 값만 실으면 켜도 아무 일이 안 난다. ABI 를 하나 여는 슬라이스에서 함께 연다(iOS `traitCollection`·Android `uiMode`) |
 | `text.blink` | 깜빡임을 안 그린다(SGR 5 는 정적 — 코어도 "렌더는 정적" 이라고 적어 뒀다) |
+| `ui.language` | **OS 로케일을 받는 경로가 없다** — 브리지·두 host·ABI 어디에도 로케일을 알리는 자리가 없다(macOS 는 `maru_macos_app_set_ui_locale` 로 Swift 가 넣는다). 기본값이 `auto` 라 그 자리가 없으면 영어로 떨어지고, `ko` 로 명시해도 적용할 호출부(`applyPreference`)가 없다. `theme.follow-system` 과 **같은 모양의 구멍**이라 OS 상태를 알리는 ABI 를 여는 슬라이스에서 함께 연다(iOS `Locale.preferredLanguages`·Android `LocaleList`). 모바일 자체 UI 문자열은 [다국어](i18n.md) I3e 가 키로 옮긴다 |
 | `input.link-detection`·`input.link-open-target` | 링크를 눌러 여는 경로가 없다 |
 | `input.page-keys` | 키바에 PageUp/Down 키캡은 있지만 이 정책을 보는 자리가 없다 |
 | `notifications.osc`·`notifications.history-limit` | 알림을 받는 자리도 목록도 없다 |

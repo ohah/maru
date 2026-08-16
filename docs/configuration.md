@@ -153,6 +153,7 @@ file-panel.external-link-target = in-app
 
 | 키 | 타입 | 기본값 | 비고 |
 |---|---|---|---|
+| `ui.language` | `auto`\|`en`\|`ko` | `auto` | **UI 표시 언어.** `auto`는 OS 로케일을 따르고, 해석 실패·미지원 언어는 `en`으로 떨어진다. **기본값이 `auto`인 이유**: 화면이 이미 한국어라 `en`을 기본으로 두면 이 설정이 생기는 순간 한국어 사용자의 화면이 영어로 바뀐다. 바꾸면 **재시작 없이 다음 프레임에** 반영된다. 번역 범위는 앱 안에서 읽고 판단하는 표면(설정·안내·확인)이고 **메뉴바·CLI·로그는 영어 고정**이다 — 단일 출처: [다국어](i18n.md). 그 외 값은 무시 |
 | `font.family` | 문자열 | `JetBrains Mono` | 내부 공백 보존. 비어 있으면 무시(기본 유지) |
 | `font.fallback` | 문자열(쉼표 구분) | (없음) | **폴백 폰트** 목록(예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `font.family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 기본 폴백을 뒤에 잇는다(`kCTFontCascadeListAttribute`). 각 항목은 앞뒤 공백 trim(내부 공백 보존). 잘못된 폰트명은 무시(best-effort). 비어 있으면 CoreText 기본 폴백만 |
 | `font.family-bold` | 문자열 | (없음) | **bold(SGR 1) 글자용 폰트 패밀리**. 비어 있으면(기본) 주 `font.family`의 bold variant를 쓴다(variant가 없으면 regular 폴백 — 굵기를 합성하지 않음). 설정하면 bold cell을 이 패밀리로 그려 본문과 다른 글꼴로 강조할 수 있다. `font.fallback` cascade를 상속해 bold 한글·이모지도 폴백한다. 패밀리를 못 찾으면 주 폰트 bold로 폴백(best-effort) |

@@ -4292,6 +4292,11 @@ pub const AppSession = struct {
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
+        // 최초 로드도 언어를 세운다 — reload·GUI 변경 경로(settings.reapplyUiLanguage)만 배선하면 앱을
+        // 켜고 아무것도 안 건드린 상태에서 `ui.language` 가 무시된다. 여기서 `self` 는 아직 조립 중이라
+        // 헬퍼(`*AppSession` 을 받는다)를 부르지 않고 전역만 직접 세운다 — 이 호출이 읽는 것은 방금
+        // 대입한 `loaded_config` 뿐이다.
+        maru.i18n.applyPreference(self.loaded_config.config.ui_language);
         if (builtin.is_test and live_app_sessions == 0) {
             // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
             // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.
@@ -57962,5 +57967,94 @@ test "CR0b AppHost incident ABI prerequisite는 active lease timeout을 detached
     try std.testing.expectEqual(
         session_host.app_process_incident_owner.TerminationOutcome.joined,
         app_process_incident_owner.shutdownForTermination(),
+    );
+}
+
+// `ui.language` 가 실제 화면 문자열까지 도달하는지 본다.
+//
+// **이 테스트가 없어서 회귀를 놓쳤다.** I3a 슬라이스 1~5 가 185 건을 키로 옮기는 동안 화면은 이미
+// 영어로 나오고 있었는데(배선이 없어 초기값이 곧 화면 언어였다), 전환 무결성 검증은 "키가 내는 문장 ==
+// 원본 리터럴"만 봤지 **그 키를 어느 언어로 푸는지**는 보지 않았다. 폭을 재는 가드레일 하나가 우연히
+// 잡았을 뿐이다. 여기서는 설정값 → 표시 문자열까지 이어서 본다.
+test "ui.language: 설정값이 확인 모달 문장의 언어를 정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
+    session.loaded_config.config.ui_language = .ko;
+    settings_ops.reapplyUiLanguage(session);
+    session.showConfirm(.app_close_running, .active_term);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .app_close_running),
+        session.chrome_host.confirm.message,
+    );
+
+    session.loaded_config.config.ui_language = .en;
+    settings_ops.reapplyUiLanguage(session);
+    session.showConfirm(.app_close_running, .active_term);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.en, .app_close_running),
+        session.chrome_host.confirm.message,
+    );
+
+    // 두 언어가 실제로 다른 문장이어야 이 테스트가 무언가를 지킨다 — 같으면 위 두 단언이 동시에
+    // 참이라 언어 전환이 죽어 있어도 통과한다.
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        maru.i18n.tIn(.ko, .app_close_running),
+        maru.i18n.tIn(.en, .app_close_running),
+    ));
+}
+
+// `auto` 는 OS 로케일을 따른다 — platform 이 넘긴 문자열을 중립 층이 판정하는 경로 전체를 본다.
+test "ui.language=auto: 주입한 로케일이 화면 언어를 정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    // 로케일도 프로세스 전역이라 되돌린다 — 안 비우면 뒤에 도는 테스트가 여기서 넣은 `ko-KR` 을 물려받아
+    // **순서에 따라 결과가 달라진다**. 테스트 환경에는 원래 값이 없으므로(Swift 가 안 부른다) 비우면 된다.
+    defer maru.i18n.setOsLocale("");
+
+    session.loaded_config.config.ui_language = .auto;
+
+    // Swift 가 `maru_macos_app_set_ui_locale` 로 넣는 것과 같은 값이다(해석은 중립 층이 한다).
+    maru.i18n.setOsLocale("ko-KR");
+    settings_ops.reapplyUiLanguage(session);
+    session.showConfirm(.app_close_running, .active_term);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .app_close_running),
+        session.chrome_host.confirm.message,
+    );
+
+    maru.i18n.setOsLocale("en-US");
+    settings_ops.reapplyUiLanguage(session);
+    session.showConfirm(.app_close_running, .active_term);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.en, .app_close_running),
+        session.chrome_host.confirm.message,
     );
 }

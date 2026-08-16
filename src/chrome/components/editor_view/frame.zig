@@ -57,6 +57,14 @@ pub fn contentRect(rect: draw.Rect) draw.Rect {
 /// 소유하고, 폭 합 캐시와 같은 슬라이스에 있다.
 pub const max_first_col: u16 = 10_000;
 
+/// 가장 긴 줄을 셀 때 **여기까지만 센다**. `max_first_col`을 넘는 부분은 어차피 못 가므로 세는 것이
+/// 낭비다 — 5MB짜리 한 줄(minified)에서 첫 가로 휠이 **149ms**였다(적대적 검증 2026-08-16 실측).
+///
+/// 여유분 4,096은 **화면에 보일 수 있는 최대 열**을 넉넉히 잡은 값이다. 그래야 "상한에 걸렸다"는
+/// 사실만으로 `max_cols - visible >= max_first_col`이 성립해, 창 크기가 나중에 바뀌어도 갈 수 있는
+/// 거리가 줄지 않는다(8K 폭 화면에 4px 셀이어도 3,840열이다).
+pub const max_cols_count_limit: u32 = @as(u32, max_first_col) + 4096;
+
 /// 탭 한 칸이 몇 열인가. **여기가 단일 출처다** — 제품은 아직 config로 이 값을 안 받고 이 기본을
 /// 그대로 쓰는데, 가로 스크롤 상한을 세는 쪽이 다른 값을 쓰면 가장 긴 줄의 끝에 못 닿는다.
 pub const default_tab_width: u8 = 4;

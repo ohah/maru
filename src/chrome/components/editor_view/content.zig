@@ -358,9 +358,15 @@ pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
 /// 원본 줄 하나가 화면에서 차지하는 **열 수**. 탭 전개도 §3.8 표기도 `stepColumn` 규칙 그대로 센다 —
 /// 가로 스크롤 상한이 이 값에서 나오므로 렌더와 갈리면 줄 끝에 못 닿거나 빈 자리가 남는다.
 pub fn lineColumns(bytes: []const u8, tab_width: u16) u32 {
+    return lineColumnsUpTo(bytes, tab_width, std.math.maxInt(u32));
+}
+
+/// 같은 값을 세되 **`limit`에 닿으면 멈춘다**(마지막 cluster만큼 넘길 수 있다). 호출자가 상한 너머를
+/// 쓰지 않는다면 줄 끝까지 셀 이유가 없다 — 5MB짜리 한 줄에서 그 차이가 149ms였다.
+pub fn lineColumnsUpTo(bytes: []const u8, tab_width: u16, limit: u32) u32 {
     var col: u32 = 0;
     var i: usize = 0;
-    while (i < bytes.len) {
+    while (i < bytes.len and col < limit) {
         const s = stepColumn(bytes, i, col, tab_width); // 규칙은 한 곳에만 있다
         i = s.next_byte;
         col = s.next_col;

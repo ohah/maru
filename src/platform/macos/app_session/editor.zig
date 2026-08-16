@@ -579,8 +579,14 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
     // 출렁여, 오른쪽 끝을 보다가 위로 굴리면 본문이 제멋대로 왼쪽으로 튄다.
     const tab_width = chrome_editor.frame.default_tab_width; // 렌더가 쓰는 그 값(단일 출처)
     if (term.rt.editor_max_cols == 0) {
+        // **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 어차피 못 가므로 세면 낭비다.
+        // 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
+        const limit = chrome_editor.frame.max_cols_count_limit;
         var max: u32 = 0;
-        for (lines) |line| max = @max(max, chrome_editor.content.lineColumns(line, tab_width));
+        for (lines) |line| {
+            max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
+            if (max >= limit) break; // 더 세도 답이 같다
+        }
         term.rt.editor_max_cols = max;
     }
 
@@ -1991,7 +1997,9 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
     // **최대 열을 세워 두지 않으면 clamp가 매번 0으로 되돌린다** — 그러면 네 측정이 전부 같은
     // 조건이 되어 "평평하다"는 오판이 나온다(실제로 한 번 그렇게 읽을 뻔했다).
     _ = scrollCols(fx.session, fx.term, leaf, -1);
-    try testing.expect(fx.term.rt.editor_max_cols > 100_000);
+    // 셈이 상한(`max_cols_count_limit`)에서 멈추므로 줄 길이(20만)가 아니라 그 값이 나온다 —
+    // 갈 수 있는 거리는 그것으로 충분하다.
+    try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
 
     for ([_]u16{ 0, 20_000, 60_000 }) |col| {
         fx.term.rt.editor_first_col = col;
@@ -2035,5 +2043,37 @@ test "가로 스크롤에 §3.8 상한이 있다 — 무한히 밀리지 않는�
     // 그리기 직전 되돌림도 같은 상한을 쓴다 — 두 곳이 갈리면 프레임마다 값이 튄다.
     var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
+    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+}
+
+test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const huge = try allocator.alloc(u8, 5 * 1024 * 1024);
+    defer allocator.free(huge);
+    @memset(huge, 'x');
+    const lines = try allocator.alloc([]const u8, 1);
+    defer allocator.free(lines);
+    lines[0] = huge;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0;
+
+    const t0 = monotonicMsForTest();
+    _ = scrollCols(fx.session, fx.term, leaf, -1);
+    const t1 = monotonicMsForTest();
+    std.debug.print("\n[측정] 5MB 한 줄: 첫 가로 휠 {d}ms (max_cols={d}, 셈 상한={d})\n", .{ t1 - t0, fx.term.rt.editor_max_cols, chrome_editor.frame.max_cols_count_limit });
+    // 고치기 전 149ms. 줄 길이와 무관해야 한다 — 셈이 상한에서 멈추므로.
+    try testing.expect(t1 - t0 < 50);
+    try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
+
+    // **상한에 걸려도 갈 수 있는 거리는 그대로다.** 셈을 줄인 것이 도달 범위를 줄이면 안 된다.
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
 }

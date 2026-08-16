@@ -5,9 +5,15 @@
 //! 읽고 파일을 쓰므로 그 계약을 깬다. 그래서 순수 절반은 `browser.zig`에 두고, impure 절반만 이 파일이 가진다
 //! (`session_host.zig` + `session_host/`, `app_session.zig` + `app_session/`와 같은 facade+폴더 관용구).
 //!
-//! **소켓 syscall은 여기도 소유하지 않는다** — 발견·connect·auth·전송은 [`control_client`](../control_client.zig)가
-//! 한 곳에서 한다. 이 파일이 하는 것은 그 위의 **응답 수신 상태 기계**다: 프레임을 validator에 먹이고,
-//! chunk를 재조립하고, 검증이 끝난 뒤에만 stdout이나 `--out` 파일로 공개한다.
+//! **연결 수립은 여기서 하지 않는다** — 소켓 발견·connect·`auth.self`·요청 전송은
+//! [`control_client`](../control_client.zig)가 한 곳에서 하고, 이 파일은 그것이 돌려준 fd를 받아 쓴다.
+//! 다만 **수신 쪽 `read`와 `close`는 이 파일이 직접 한다**(`std.c.read`·`std.c.close`) — 프레임을 얼마나
+//! 더 읽을지는 validator의 상태가 정하므로 그 루프를 연결 계층으로 올리면 수신 상태 기계가 둘로 갈린다.
+//! 즉 이 파일의 책임은 **응답 수신 상태 기계**다: 프레임을 validator에 먹이고, chunk를 재조립하고,
+//! 검증이 끝난 뒤에만 stdout이나 `--out` 파일로 공개한다.
+//!
+//! 그래서 이 파일은 `cli/`의 순수 규칙에서 면제된 두 파일 중 하나다. 그 예외 목록은 산문이 아니라
+//! [`tests/boundary/cli_purity.zig`](../../../tests/boundary/cli_purity.zig)가 기계로 고정한다.
 //!
 //! **grant 대기**: browser 요청은 세션 cap이 없어 needs_grant→서버 held→확인 모달이다. 아래 read들이 사용자가
 //! 모달을 클릭할 때까지 블록한다(§9.2 Model B) — 짧은 타임아웃을 걸면 안 된다.

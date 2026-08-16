@@ -361,14 +361,16 @@ Android 는 `getX(ev, 0)` 이 남은 손가락을 가리키게 되어 **좌표�
 
 **레퍼런스는 전부 같은 답을 낸다** — 이어받되 **기준을 다시 잡고 속도를 버린다**:
 
-| | 어떻게 |
-|---|---|
-| Android `ScrollView`·`RecyclerView`·`ViewPager` | `onSecondaryPointerUp` — 남은 포인터를 새 기준으로 + `VelocityTracker.clear()` |
-| UIKit `UIPanGestureRecognizer` | 활성 터치들의 **무게중심**, 터치 수가 바뀌면 내부에서 재기준 |
-| Flutter `DragGestureRecognizer` | 포인터별 델타 + `MultitouchDragStrategy`(Apple 은 `sumAllPointers`, 그 외 `latestPointer`) |
-| React Native | 자체 구현 없이 위 둘에 위임 |
+| | 어떻게 | 확인 |
+|---|---|---|
+| AOSP `ScrollView` | `onSecondaryPointerUp` — 남은 포인터를 새 기준으로 + `VelocityTracker.clear()` | **원문 확인** |
+| Flutter `DragGestureRecognizer` | `MultitouchDragStrategy` 로 고른다 — **`latestPointer`**(가장 최근 포인터만 추적, 떼면 **다음 포인터가 이어받는다**)가 3.19 부터 기본. 나머지는 `averageBoundaryPointers`(경계 포인터, "iOS 관습")·`sumAllPointers`(합산, 3.19 이전 기본) | **API 문서 확인** |
 
-**"index 0 의 절대 좌표" 를 쓰는 구현은 아무도 없다.** 그 안티패턴이 우리가 지금 하는 것이다.
+
+**"index 0 의 절대 좌표" 를 쓰는 구현은 못 찾았다.** 그 안티패턴이 우리가 지금 하는 것이다.
+**UIKit 이 다중 터치를 어떻게 합성하는지는 Apple 문서에 없어 확인하지 못했다** — 통설(무게중심)을
+근거로 적지 않는다. Flutter 문서가 `averageBoundaryPointers` 를 "iOS 관습" 이라 부르는 것이
+간접 근거의 전부다. React Native 는 확인하지 않았다.
 
 **그래서 소유권 규칙을 코어가 갖고 host 는 id 만 나른다**([계약 §3.1](../mobile-platform.md)).
 host 에 두면 두 벌이 되고 두 벌은 갈린다 — 이 저장소에서 관성 감쇠(세 곳)·터치 슬롭(네 곳)·

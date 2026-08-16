@@ -144,9 +144,12 @@ Java UI 스레드에서 오고 그리는 쪽은 NativeActivity 스레드라(실�
 **이어받기와 재기준이 규칙의 핵심이다.** 안 하면 남은 손가락의 절대 좌표가 그대로 이어져 **화면이
 점프하고**, 그 점프가 속도 계산(px/ms)에 들어가 **상한까지 튄 fling** 이 된다 — 한 번의 손가락
 교체가 1600px 를 흘려보낸다. 레퍼런스도 전부 같은 자리에 같은 처리를 둔다: Android
-`ScrollView`·`RecyclerView`·`ViewPager` 의 `onSecondaryPointerUp`(새 기준 + `VelocityTracker`
-비우기), UIKit `UIPanGestureRecognizer`(무게중심 재기준), Flutter `DragGestureRecognizer`
-(포인터별 델타 + `MultitouchDragStrategy`). **"index 0 의 절대 좌표" 를 쓰는 구현은 아무도 없다.**
+AOSP `ScrollView.onSecondaryPointerUp` 은 남은 포인터를 새 기준으로 잡고 `VelocityTracker` 를
+비운다(원문 확인). Flutter 의 `MultitouchDragStrategy.latestPointer` 는 "가장 최근 포인터만
+추적하고, 떼면 다음 포인터가 이어받는다" 이고 3.19 부터 기본이다(API 문서 확인). **"index 0 의
+절대 좌표" 를 쓰는 구현은 못 찾았다** — UIKit 이 다중 터치를 어떻게 합성하는지는 **Apple 문서에
+안 적혀 있어 확인하지 못했다**(Flutter 문서가 `averageBoundaryPointers` 를 "iOS 관습" 이라고
+부르는 것이 우리가 가진 유일한 간접 근거다).
 
 **왜 host 가 아니라 코어가 이 규칙을 갖나.** "어느 손가락이 소유하나" 는 OS 호출이 아니라
 **판정**이다(§3). host 에 두면 두 벌이 되고, 두 벌은 갈린다 — 이 저장소에서 관성 감쇠(세 곳)·

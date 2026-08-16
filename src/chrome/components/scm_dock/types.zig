@@ -137,6 +137,9 @@ pub const CommitEdit = struct {
     preedit: []const u8 = "",
     /// 세로 스크롤 — 상자가 보여 줄 **첫 시각 행**이다(제약 ⑥: 논리 줄이 아니다).
     first_row: u32 = 0,
+    /// 지금 위상에서 caret을 그릴까(깜빡임). **host가 위상을 소유한다** — 이 층에는 시간이 없다.
+    /// 기본이 `true`라 위상을 안 주는 소비자(테스트·Lab)는 늘 보이는 caret을 얻는다.
+    caret_visible: bool = true,
 };
 
 /// 선택 구간. `text_field.TextField.Selection`과 같은 모양이지만 **이 DTO가 자기 것을 갖는다** —

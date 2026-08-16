@@ -576,7 +576,7 @@ const Writer = struct {
         // 두 사실(여기가 입력란이다 / 지금 여기로 글자가 간다)을 함께 말한다.
         if (props.commit_message.len == 0) {
             try self.topLine(rect, inset, pad_y, commit_placeholder, .muted_fg, .control);
-            if (edit.focused) try self.commitCaret(rect, m, 0, 0, line_h);
+            if (edit.focused and edit.caret_visible) try self.commitCaret(rect, m, 0, 0, line_h);
             return;
         }
 
@@ -633,7 +633,7 @@ const Writer = struct {
                 @intFromFloat(@max(width, 0)),
                 .origin,
             );
-            if (edit.focused and row == caret_row) {
+            if (edit.focused and edit.caret_visible and row == caret_row) {
                 try self.commitCaret(rect, m, lay.caret_col, offset, line_h);
             }
         }
@@ -1712,4 +1712,18 @@ test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
     try testing.expectEqual(tokens.ColorRole.surface_fg, label.role);
     // 글자와 면이 **같은 역할**이면 그게 곧 사라지는 것이다.
     try testing.expect(label.role != resolved.background);
+}
+
+test "caret은 깜빡임 위상을 따른다(위상이 꺼진 반주기에는 안 그린다)" {
+    // 위상은 host가 소유한다. component가 늘 그리면 상자 caret만 안 깜빡이고(도크 검색 caret이 정확히
+    // 그랬다), 반대로 위상을 안 받으면 테스트·Lab에서 caret이 사라진다 — 기본이 `true`인 이유다.
+    var on_storage: TestStorage = .{};
+    const on = try renderCommit(&on_storage, "fix", .{ .focused = true, .caret = 3 }, 1);
+    try testing.expect(firstQuad(on, .cursor) != null);
+
+    var off_storage: TestStorage = .{};
+    const off = try renderCommit(&off_storage, "fix", .{ .focused = true, .caret = 3, .caret_visible = false }, 1);
+    try testing.expect(firstQuad(off, .cursor) == null);
+    // 글자는 그대로다 — 깜빡이는 것은 caret뿐이다.
+    try testing.expect(findExactText(off, "fix") != null);
 }

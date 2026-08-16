@@ -10453,10 +10453,16 @@ pub const AppSession = struct {
         // terminalOwnsInput이 같은 게이트를 쓴다"이고, caret **blink**도 정확히 그 caret의 일부다. 조건을 여기
         // 복제하면(플래그 + dockVisible + view) 셋 중 하나만 바뀌어도 blink만 조용히 어긋난다.
         const dock_search = self.agentSessionSearchOwnsInput();
+        // 커밋 메시지 상자 caret도 같은 부류다. **게이트를 빠뜨리면 위상은 도는데 dirty가 안 서
+        // 재투영이 없어 안 깜빡이고**, 아래 early-return 때문에 `cursor.blink=false`에서는 아예 굳는다
+        // (도크 검색 caret이 정확히 그렇게 새 있었다). 게이트는 `scmCommitOwnsInput` 단일 출처를
+        // 쓴다 — 그 함수의 계약이 "caret rect·inputFocus·terminalOwnsInput이 같은 판정을 쓴다"이고
+        // blink도 그 caret의 일부다.
+        const scm_commit = self.scmCommitOwnsInput();
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // Surface preedit로 이미 막지만, 오버레이/rename/검색도 imeComposingActive 단일 출처로 함께 막는다.
         // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search and !dock_search) or input_ops.imeComposingActive(self)) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search and !dock_search and !scm_commit) or input_ops.imeComposingActive(self)) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -10477,7 +10483,7 @@ pub const AppSession = struct {
             // 텍스트 blink·rename caret·검색 caret은 blink_visible로 **하드 토글**되는 별도 glyph 셀이라 full rebuild가 필요하다
             // (커서 suffix 페이드로 못 숨김). 이들은 페이드 없이 위상 경계에서 즉각 on/off한다. 에이전트 스피너는 자기 위상(약
             // 133ms)에서 따로 dirty하므로 여기엔 안 넣는다(옛 펄스 폐기 후 500ms 재투영은 byte-identical 낭비, #3).
-            if (text_blinks or rename_active or sidebar_search or dock_search) self.metal_dirty = true;
+            if (text_blinks or rename_active or sidebar_search or dock_search or scm_commit) self.metal_dirty = true;
         }
         // 반주기 안 위치(ms) — 아래 페이드 램프의 위상 입력. baseline을 위에서 전진시켰으므로 항상 [0, interval_ms).
         const into_ms: u32 = @intCast(@divFloor(now_ns - self.blink_phase_ns, std.time.ns_per_ms));
@@ -13508,6 +13514,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
+        scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -54525,6 +54532,74 @@ test "소스 컨트롤: 상자 밖을 누르면 편집을 뗀다" {
     const outside = try commitBoxPoint(session, 12, 400);
     session.mouse(1, outside.x, outside.y, 0, 0);
     try std.testing.expect(!session.scm_commit_focused);
+}
+
+test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
+    // 게이트를 빠뜨리면 위상은 도는데 dirty가 안 서 재투영이 없어 **안 깜빡이고**, `cursor.blink=false`
+    // 에서는 early-return 때문에 아예 굳는다 — 도크 검색 caret이 정확히 그렇게 새 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    // 반주기가 **정확히 한 번** 지난 상태를 만든다(경과를 어림하면 소비한 반주기 수의 홀짝이
+    // 달라져 위상 뒤집힘이 그때그때 갈린다 — 첫 판이 그래서 흔들렸다).
+    session.appearance.cursor.blink_interval_ms = 10;
+    const interval_ns: i128 = 10 * std.time.ns_per_ms;
+    const now_ns = std.Io.Clock.awake.now(session.io).nanoseconds;
+
+    // ① 상자가 입력을 가진 동안에는 위상이 돌고 **재투영을 요구한다**.
+    session.blink_phase_ns = now_ns - interval_ns;
+    session.metal_dirty = false;
+    const before = session.blink_visible;
+    // 커서·텍스트 blink가 전부 꺼진 **중립 스냅샷**을 준다 — 그래야 위상이 도는 유일한 근거가
+    // 커밋 상자 게이트임이 분명해진다(터미널 커서가 깜빡여서 통과하는 것이 아니다).
+    session.updateCursorBlink(.{});
+    try std.testing.expect(session.blink_visible != before); // 위상이 뒤집혔다
+    try std.testing.expect(session.metal_dirty); // 그리고 다시 그려야 한다고 말한다
+
+    // ② 상자가 놓으면 그 근거도 사라진다 — 깜빡일 것이 없으면 **보이는 위상으로 고정**하고(그 함수의
+    // 조기 반환이 `resetCursorBlink`를 부른다) 재투영을 요구하지 않는다.
+    scm_dock_ops.blurCommit(session);
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - interval_ns;
+    session.metal_dirty = false;
+    session.updateCursorBlink(.{});
+    try std.testing.expect(session.blink_visible); // 고정된 위상은 "보임"이다
+    try std.testing.expect(!session.metal_dirty); // 깜빡일 것이 없으니 다시 그릴 이유도 없다
+
+    // props가 그 위상을 그대로 싣는다(component가 시간을 모르므로).
+    scm_dock_ops.focusCommit(session);
+    const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
+}
+
+test "소스 컨트롤: 도크를 접으면 남은 조합이 확정된다(지울 수 없는 글자를 남기지 않는다)" {
+    // 뷰 전환은 `setDockView`가 뗀다. 접기·닫기는 그 함수를 지나지 않아 조합이 남는데, 입력기는 이미
+    // 그 조합을 잊었으므로 사용자는 지울 수도 고칠 수도 없는 글자를 보게 된다. 경로를 열거하는 대신
+    // **상태로 판정한다** — 소유가 없는데 조합이 있으면 언제나 잘못된 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.setCommitPreedit(session, "한");
+    try std.testing.expectEqualStrings("한", session.scm_commit_field.preedit.items);
+    try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
+
+    session.dock.collapsed = true; // 접기 — `setDockView`를 안 지난다
+    scm_dock_ops.settleCommitInput(session);
+    try std.testing.expectEqualStrings("", session.scm_commit_field.preedit.items);
+    try std.testing.expectEqualStrings("한", session.scm_commit_field.text.items); // 확정돼 본문에 남는다
 }
 
 test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 왼쪽 절반은 그 앞이다)" {

@@ -200,6 +200,9 @@ pub const Table = struct {
     fp_mutation_denied: [:0]const u8,
     fp_mutation_failed: [:0]const u8,
     fp_manual_recovery: [:0]const u8,
+    /// 위 문장의 **폴백**(계약 §6.3) — 경로가 길어 잘릴 상황에서 쓴다. 잘린 경로는 어느 파일인지 알려
+    /// 주지 못하므로 "로그를 보라"는 **다른 행동**을 안내한다. 그래서 같은 문장의 축약이 아니라 별도 키다.
+    fp_manual_recovery_fallback: [:0]const u8,
     fp_abort_unsaved: [:0]const u8,
     fp_abort_edit_check: [:0]const u8,
     dbg_editor_not_utf8: [:0]const u8,
@@ -361,6 +364,7 @@ pub const en: Table = .{
     .fp_mutation_denied = "No permission to change the file.",
     .fp_mutation_failed = "The file change failed. The tree and open tabs are kept.",
     .fp_manual_recovery = "Manual recovery is needed. Check the file at this path: {0}",
+    .fp_manual_recovery_fallback = "Manual recovery is needed. Check the file at the recovery path in the log.",
     .fp_abort_unsaved = "There are unsaved edits, so the file change was cancelled.",
     .fp_abort_edit_check = "Could not check the edit state, so the file change was cancelled.",
     .dbg_editor_not_utf8 = "Native editor: not UTF-8, so it was not opened.",
@@ -522,6 +526,7 @@ pub const ko: Table = .{
     .fp_mutation_denied = "권한이 없어 파일을 변경할 수 없습니다.",
     .fp_mutation_failed = "파일 변경에 실패했습니다. 트리와 열린 탭은 유지됩니다.",
     .fp_manual_recovery = "자동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {0}",
+    .fp_manual_recovery_fallback = "자동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.",
     .fp_abort_unsaved = "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.",
     .fp_abort_edit_check = "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.",
     .dbg_editor_not_utf8 = "네이티브 편집기: UTF-8이 아니라 열지 않았습니다.",

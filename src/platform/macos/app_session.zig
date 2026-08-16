@@ -2481,6 +2481,10 @@ pub const ScmPending = struct {
     from: scm_view.Section,
 };
 
+/// notice 메시지 버퍼 크기 — 보간 결과가 이보다 길면 `copyOverlayMessage`가 자른다. 폴백을 고르는
+/// 자리(파일 트리 수동 복구 안내, docs/i18n.md §6.3)가 이 값을 본다.
+pub const notice_message_cap: usize = 512;
+
 pub const AppSession = struct {
     /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
     pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
@@ -3059,7 +3063,7 @@ pub const AppSession = struct {
     // Notice 메시지의 세션 소유 백킹. notice.State.message는 slice라, ABI 호출자(Swift)의 transient 버퍼를
     // 그대로 가리키면 dangling이 된다 → showNotice가 여기로 복사하고 State.message가 이걸 가리킨다. 알림 문구라
     // 512B면 충분(초과분은 잘라 표시).
-    notice_message_buf: [512]u8 = undefined,
+    notice_message_buf: [notice_message_cap]u8 = undefined,
     // 닫기 확인 모달(confirm)의 메시지 세션 소유 백킹(notice_message_buf와 같은 이유 — confirm.State.message는 slice).
     // 문구가 짧아 256B면 충분.
     confirm_message_buf: [256]u8 = undefined,

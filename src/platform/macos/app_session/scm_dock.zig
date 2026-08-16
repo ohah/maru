@@ -310,6 +310,9 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
             .selection = if (self.scm_commit_field.preedit.items.len > 0) null else selectionOf(self.scm_commit_field.selection),
             .preedit = self.scm_commit_field.preedit.items,
             .first_row = self.scm_commit_first_row,
+            // **깜빡임 위상은 세션이 소유한다.** 조합 중에는 `updateCursorBlink`가 위상을 고정하므로
+            // 여기서 따로 막지 않아도 caret이 조합 글자를 덮었다 사라졌다 하지 않는다.
+            .caret_visible = self.blink_visible,
         },
         // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
         .commit_enabled = projection.has_staged,
@@ -589,6 +592,20 @@ pub fn focusCommit(self: *AppSession) void {
     if (self.scm_commit_focused) return;
     self.scm_commit_focused = true;
     self.metal_dirty = true;
+}
+
+/// 상자가 입력을 놓았는데 **조합이 남아 있으면** 확정한다. 매 tick 도는 값싼 확인이다.
+///
+/// 뷰 전환은 `setDockView`가 직접 뗀다. 하지만 도크를 접거나 닫는 길은 그 함수를 지나지 않아,
+/// 조합 중이던 글자가 확정되지 않은 채 남는다 — 입력기는 이미 그 조합을 잊었으므로 사용자는
+/// 지울 수도 고칠 수도 없는 글자를 보게 된다. **경로를 열거하는 대신 상태로 판정한다**: 소유가
+/// 없는데 조합이 있으면 그건 언제나 잘못된 상태다.
+///
+/// 포커스 플래그는 그대로 둔다 — 도크를 다시 펴면 쓰던 자리에서 이어 쓰는 것이 맞다.
+pub fn settleCommitInput(self: *AppSession) void {
+    if (self.scm_commit_field.preedit.items.len == 0) return;
+    if (self.scmCommitOwnsInput()) return;
+    if (self.scm_commit_field.commitPreedit(self.allocator)) self.metal_dirty = true;
 }
 
 /// 커밋 상자에서 포커스를 뗀다. **조합 중이면 먼저 확정한다** — 그러지 않으면 조합 글자가 화면에서

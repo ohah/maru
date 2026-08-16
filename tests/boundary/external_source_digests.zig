@@ -33,7 +33,11 @@ pub const inventory = [_]Proof{
     // AppSession close 순서를 실제 제품 래퍼에서 검증하는 test-only progress sequence가 붙었다. 제품 vtable과
     // `@field` 세 곳은 그대로이고, 조건부 testing facade 밖의 Client receiver도 늘지 않는다.
     .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "c878f073ab79366baa0e22af36f9490bf11098773ef48f19032d292c06349239" },
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
+    // `schema.tryParse` 를 Config 타입에서 뗐다(M10b0) — 파라미터를 `anytype` 으로 열고 본문의
+    // `theme.Config` 반영 둘을 그 파라미터의 타입으로 바꿨다. 모바일 config 가 자기 스키마 메타를
+    // 들고 같은 엔진을 타게 하려는 것이고(docs/mobile-config.md §3), 데스크톱은 계속 같은 타입을
+    // 넘기므로 comptime 결과가 같다. `@field` 세는 자리는 안 건드려 count 는 108 그대로다.
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "04c990d3283ec76c0a3ea17e585a4ad39c5c73b50468883f91da527ac790637a" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
     // 더한 것은 그 대기 루프 하나뿐이다. 왜 필요한가: `shutting_down`은 새 결과를 버리게 할 뿐 돌고 있는

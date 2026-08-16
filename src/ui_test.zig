@@ -18,6 +18,10 @@ const paint = @import("chrome/ui/paint.zig");
 const divider = @import("chrome/components/divider.zig");
 const session_dock = @import("chrome/components/session_dock.zig");
 const archive_detail = @import("chrome/components/archive_detail.zig");
+// 소스 컨트롤 도크도 이 seam 위에 있다. 여기에 없으면 `test-chrome-ui`가 초록인 채로 그 컴포넌트의
+// 예산·기하 회귀가 통과한다 — 실제로 그 상태에서 빈 저장소 도크가 통째로 사라졌다(2026-08-16).
+const scm_dock_build = @import("chrome/components/scm_dock/build.zig");
+const scm_dock_view = @import("chrome/components/scm_dock/view.zig");
 
 test {
     // `refAllDecls` is intentionally explicit: imports alone do not make this focused artifact's
@@ -37,4 +41,6 @@ test {
     testing.refAllDecls(paint);
     testing.refAllDecls(session_dock);
     testing.refAllDecls(archive_detail);
+    testing.refAllDecls(scm_dock_build);
+    testing.refAllDecls(scm_dock_view);
 }

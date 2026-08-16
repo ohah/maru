@@ -341,7 +341,7 @@ pub fn updateAgentSessionArchive(self: *AppSession) void {
         },
         .retain_previous => {
             self.agent_session_archive_loading = false;
-            self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
+            self.showNoticeKey(.ad_session_list_apply_failed);
             self.metal_dirty = true;
             return;
         },
@@ -463,11 +463,11 @@ pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?Agent
         clearAgentSessionArchiveProjectRoot(self);
         if (self.agent_session_archive_workspace_scope_requested) {
             self.agent_session_archive_workspace_scope_requested = false;
-            self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
+            self.showNoticeKey(.ad_workspace_path_missing);
         }
         if (self.agent_session_archive_project_scope_requested) {
             self.agent_session_archive_project_scope_requested = false;
-            self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
+            self.showNoticeKey(.ad_terminal_git_project_missing);
         }
         if (self.agent_session_archive_scope != .all) {
             rebuildAgentSessionArchiveFilter(self);
@@ -506,7 +506,7 @@ pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?Agent
         if (self.agent_session_archive_workspace_scope_requested or self.agent_session_archive_project_scope_requested) {
             self.agent_session_archive_workspace_scope_requested = false;
             self.agent_session_archive_project_scope_requested = false;
-            self.showNotice("작업공간 경로 분석을 시작하지 못했습니다.");
+            self.showNoticeKey(.ad_path_scan_start_failed);
         }
         return;
     }
@@ -529,7 +529,7 @@ pub fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
         self.allocator.free(pending_cwd);
         self.agent_session_archive_workspace_scope_requested = false;
         self.agent_session_archive_project_scope_requested = false;
-        self.showNotice("작업공간 경로 분석을 다시 시작하지 못했습니다.");
+        self.showNoticeKey(.ad_path_scan_restart_failed);
         self.metal_dirty = true;
         return;
     }
@@ -547,7 +547,7 @@ pub fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
     if (self.agent_session_archive_workspace_scope_requested) {
         self.agent_session_archive_workspace_scope_requested = false;
         if (self.agent_session_archive_workspace_root == null) {
-            self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
+            self.showNoticeKey(.ad_workspace_path_missing);
         } else {
             self.agent_session_archive_scope = .workspace;
             rebuildAgentSessionArchiveFilter(self);
@@ -558,7 +558,7 @@ pub fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
     if (self.agent_session_archive_project_scope_requested) {
         self.agent_session_archive_project_scope_requested = false;
         if (self.agent_session_archive_project_root == null) {
-            self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
+            self.showNoticeKey(.ad_terminal_git_project_missing);
         } else {
             self.agent_session_archive_scope = .project;
             rebuildAgentSessionArchiveFilter(self);
@@ -2021,13 +2021,13 @@ pub fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.
             self.agent_session_archive_selected = record_index;
             if (record_index < self.agent_session_archive_records.items.len) {
                 openAgentSessionInlineDetail(self, &self.agent_session_archive_records.items[record_index]) catch {
-                    self.showNotice("세션 기록을 열지 못했습니다.");
+                    self.showNoticeKey(.ad_session_archive_open_failed);
                 };
             }
             self.metal_dirty = true;
         },
         .resume_session => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
-            agent_ops.resumeAgentSessionInNewTerm(self, &detail.record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+            agent_ops.resumeAgentSessionInNewTerm(self, &detail.record) catch self.showNoticeKey(.ad_session_resume_failed);
         },
         .reveal_log => if (self.agent_session_inline_detail) |*detail| if (detail.state == .ready) {
             revealAgentSessionArchiveLog(self, &detail.record) catch |err| {
@@ -2042,11 +2042,11 @@ pub fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.
                     if (archiveSmokeScenarioIs("reveal-recheck-pointer"))
                         self.agent_session_archive_smoke_stale_reveal_count +%= 1;
                 }
-                self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
+                self.showNoticeKey(.ad_log_source_changed);
             };
         },
         .focus_live => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
-            if (!focusLiveArchiveSession(self, &detail)) self.showNotice("현재 열린 동일 세션을 찾지 못했습니다.");
+            if (!focusLiveArchiveSession(self, &detail)) self.showNoticeKey(.ad_open_session_not_found);
         },
         // scrollbar는 up의 click이 아니라 down의 위치와 이어지는 drag가 결정한다. 목표 offset은
         // pointer 좌표의 함수라 intent에 실을 수 없으므로 pointer 경로가 이미 처리했다.

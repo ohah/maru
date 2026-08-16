@@ -300,13 +300,13 @@ pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, ou
                 const entry = term.file_entry orelse continue;
                 if (file_panel_ops.fileEntryForPath(dst, entry.path) != null) {
                     // 거부는 조용하면 안 된다 — ABI는 move_failed로만 돌아가고 Swift는 그걸 그냥 흘린다.
-                    src.showNotice("대상 창에 같은 파일이 이미 열려 있어 워크스페이스를 옮기지 못했습니다.");
+                    src.showNoticeKey(.ws_move_target_has_file);
                     return error.UnsupportedMove;
                 }
             }
         }
         if (file_panel_ops.fileEntryCount(dst) + file_panel_ops.countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries) {
-            src.showNotice("대상 창의 파일 탭이 너무 많아 워크스페이스를 옮기지 못했습니다.");
+            src.showNoticeKey(.ws_move_target_tabs_full);
             return error.UnsupportedMove;
         }
         // 옮겨가는 파일을 destination 탐색기·watch 집합에 등록한다 — 안 하면 그 파일의 외부 변경

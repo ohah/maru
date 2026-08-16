@@ -5730,7 +5730,7 @@ pub const AppSession = struct {
     fn showPendingObserverAttachNotice(self: *AppSession) void {
         if (!self.observer_attach_notice_pending or self.anyModalOverlayOpen()) return;
         self.observer_attach_notice_pending = false;
-        self.showNotice("다른 창이 이 세션을 제어 중이라 관찰 모드로 연결했습니다. 화면은 갱신되지만 입력은 전달되지 않습니다.");
+        self.showNoticeKey(.app_attach_observer_mode);
     }
 
     /// 새 셸에 주입할 통합 `ZDOTDIR`. **spawn 직전에 통합 파일이 아직 있는지 확인하고 없으면 다시 쓴다.**
@@ -5991,7 +5991,7 @@ pub const AppSession = struct {
             };
         }
         if (scope != .session and file_panel_ops.closeTargetHasProtectedFilePanel(self, target, scope)) {
-            self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+            self.showNoticeKey(.app_unsaved_tabs_first);
             return;
         }
         // 파괴 전에 편집 중 버퍼의 스냅샷을 먼저 받는다. 요청이 나갔으면 이번 close는 보류하고, 스냅샷이
@@ -6078,7 +6078,7 @@ pub const AppSession = struct {
     fn latchSessionEndOrHold(self: *AppSession, ended: ?app.RuntimePumpTermination, uptime_ms: i64) void {
         if (self.termination_finished or self.startup_held or !self.allTabsTerminated()) return;
         if (self.hasProtectedFilePanelsForExit()) {
-            if (!self.file_panel_exit_held) self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+            if (!self.file_panel_exit_held) self.showNoticeKey(.app_unsaved_tabs_first);
             self.file_panel_exit_held = true;
             return;
         }
@@ -7774,15 +7774,15 @@ pub const AppSession = struct {
         // GUI 바이너리의 형제 `maru`(CLI) — selfExePath는 앱 바이너리라 그대로 link하면 `maru`가 GUI를 띄운다. 경로 도출은
         // siblingMaruPath 단일 출처(§10 launcher exec와 같은 규칙 — 중복 유지 금지, code-review #15).
         const cli = self.siblingMaruPath(a) orelse {
-            self.showNotice("CLI 설치 실패: maru CLI 경로를 찾지 못했습니다");
+            self.showNoticeKey(.app_cli_install_path_missing);
             return;
         };
         if (std.c.access(cli.ptr, 0) != 0) { // F_OK=0(존재 확인). 형제 maru 부재면 명확히 실패(symlink는 dangling을 막음).
-            self.showNotice("CLI 설치 실패: maru CLI 바이너리를 찾지 못했습니다");
+            self.showNoticeKey(.app_cli_install_binary_missing);
             return;
         }
         const home_z = std.c.getenv("HOME") orelse {
-            self.showNotice("CLI 설치 실패: $HOME가 없습니다");
+            self.showNoticeKey(.app_cli_install_no_home);
             return;
         };
         const home = std.mem.span(home_z);
@@ -7794,7 +7794,7 @@ pub const AppSession = struct {
         _ = std.c.mkdir(bindir.ptr, 0o755);
         _ = std.c.unlink(link.ptr);
         if (std.c.symlink(cli.ptr, link.ptr) != 0) {
-            self.showNotice("CLI 설치 실패: symlink를 만들 수 없습니다");
+            self.showNoticeKey(.app_cli_install_symlink_failed);
             return;
         }
         const in_path = if (std.c.getenv("PATH")) |p| maru.cli.install.pathContainsDir(std.mem.span(p), bindir) else false;
@@ -8953,7 +8953,7 @@ pub const AppSession = struct {
             self.chrome_host.notice.dismiss();
             pane_ops.newTermInActivePane(self) catch {
                 // 재시작 실패(spawn 실패·OOM 등)는 조용히 삼키지 않는다 — held 유지된 채 안내를 다시 띄운다.
-                self.showNotice("셸 재시작에 실패했습니다 — 설정(⌘,)을 확인하세요.");
+                self.showNoticeKey(.app_shell_restart_failed);
             };
             self.metal_dirty = true;
             return input_ops.keyConsumedByApp(self);
@@ -8973,7 +8973,7 @@ pub const AppSession = struct {
         {
             self.chrome_host.notice.dismiss();
             self.respawnEndedPlaceholder() catch {
-                self.showNotice("셸을 시작하지 못했습니다 — 설정(⌘,)에서 shell.command·shell.args를 확인하세요.");
+                self.showNoticeKey(.app_shell_start_failed);
             };
             self.metal_dirty = true;
             return input_ops.keyConsumedByApp(self);
@@ -11036,7 +11036,7 @@ pub const AppSession = struct {
                 // 예전/빈 OSC 5379 destination으로 업로드하거나 로컬 경로를 원격 셸에 붙이지 않는다.
                 if (active_term.rt.observation.availability == .current)
                     active_term.rt.observation.availability = .stale;
-                self.showNotice("세션 정보를 동기화하지 못했습니다. 파일 전송을 다시 시도해주세요.");
+                self.showNoticeKey(.app_file_send_sync_failed);
                 return;
             };
         }
@@ -11048,7 +11048,7 @@ pub const AppSession = struct {
         const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
         const rup = self.remoteUploadContext() orelse {
             if (known_remote_ssh) {
-                self.showNotice("원격 파일 전송을 준비하지 못했습니다. 로컬 경로를 붙여넣지 않았습니다.");
+                self.showNoticeKey(.app_file_send_prepare_failed);
                 return;
             }
             self.pasteTextTo(target_id, paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
@@ -11064,7 +11064,7 @@ pub const AppSession = struct {
             started += 1;
         }
         // SSH 원격으로 확정된 뒤 업로드가 실패하면 로컬 경로를 원격 shell에 붙이지 않는다.
-        if (started == 0) self.showNotice("원격 파일 전송을 시작하지 못했습니다. 파일 크기와 접근 권한을 확인해주세요.");
+        if (started == 0) self.showNoticeKey(.app_file_send_start_failed);
     }
 
     /// 클립보드 이미지(Cmd+V)를 처리한다. maru ssh 원격 세션이면 control socket으로 업로드하고 완료 시
@@ -11092,21 +11092,21 @@ pub const AppSession = struct {
             ) catch {
                 if (active_term.rt.observation.availability == .current)
                     active_term.rt.observation.availability = .stale;
-                self.showNotice("세션 정보를 동기화하지 못했습니다. 이미지 전송을 다시 시도해주세요.");
+                self.showNoticeKey(.app_image_send_sync_failed);
                 return true; // stale route에서는 Swift의 local temp-path fallback을 반드시 소비
             };
         }
         const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
         if (bytes.len > maru.cli.ssh.max_upload_bytes) {
             if (known_remote_ssh) {
-                self.showNotice("원격 이미지 전송 한도는 16MB입니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+                self.showNoticeKey(.app_image_send_too_large);
                 return true;
             }
             return false;
         }
         const rup = self.remoteUploadContext() orelse {
             if (known_remote_ssh) {
-                self.showNotice("원격 이미지 전송을 준비하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+                self.showNoticeKey(.app_image_send_prepare_failed);
                 return true;
             }
             return false; // current + dest 없음 = 로컬 세션 — Swift가 기존 처리
@@ -11116,18 +11116,18 @@ pub const AppSession = struct {
         // 클립보드 이미지엔 파일명이 없으므로 카운터로 고유 이름을 만든다(시간 API는 코어 결정성 위해 회피).
         self.upload_counter += 1;
         const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch {
-            self.showNotice("원격 이미지 전송을 준비할 메모리가 부족합니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            self.showNoticeKey(.app_image_send_oom);
             return true;
         };
         const bytes_owned = self.allocator.dupe(u8, bytes) catch {
             self.allocator.free(name);
-            self.showNotice("원격 이미지 전송을 준비할 메모리가 부족합니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            self.showNoticeKey(.app_image_send_oom);
             return true;
         };
         // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임). 대상 surface는 지금 고정한다
         // (업로드 완료까지 비동기 구간 — 그 사이 pane이 바뀌어도 원래 pane에 붙는다).
         self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, term_ops.activeSurface(self).id) catch {
-            self.showNotice("원격 이미지 전송을 시작하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            self.showNoticeKey(.app_image_send_start_failed);
             return true;
         };
         return true;
@@ -12653,7 +12653,7 @@ pub const AppSession = struct {
     /// 누르려던 줄이 손가락 밑에서 다른 탭이 되고, `context_menu.show()`를 다시 부르면 선택도 0으로 튕긴다.
     fn openResourceMenu(self: *AppSession) void {
         if (self.resource_rows_len == 0) {
-            self.showNotice("아직 측정된 터미널이 없습니다");
+            self.showNoticeKey(.app_no_measured_terminal);
             return;
         }
         // **앵커가 있어야 연다** — 브랜치 메뉴와 같은 규율(바가 사라진 뒤 열면 창 바닥에 붙는다).
@@ -16573,6 +16573,21 @@ pub const AppSession = struct {
     /// dangling 방지·UTF-8 경계 절단). 다른 오버레이를 닫아 배타성을 지키되(dismissMessageOverlays), confirm은 닫기
     /// 확인이라 보류한 닫기까지 취소한다(cancelPendingClose — showConfirm이 notice를 닫는 것과 대칭, 단일 오버레이
     /// 불변식). 다음 tick이 오버레이로 그린다.
+    /// 키로 notice 를 띄운다 — 제품 호출부가 쓰는 진입점(docs/i18n.md §7.2 1차).
+    /// 이 자리에 리터럴을 넘기면 컴파일되지 않는다.
+    pub fn showNoticeKey(self: *AppSession, key: maru.i18n.Key) void {
+        self.showNotice(maru.i18n.t(key));
+    }
+
+    /// 값이 끼는 문장용 — `key`를 §6.3 보간으로 채운 뒤 같은 경로로 보낸다.
+    /// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르고, `showNotice`가 다시 복사한다.
+    pub fn showNoticeFmt(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
+        var buf: [256]u8 = undefined;
+        self.showNotice(maru.i18n.format(&buf, maru.i18n.t(key), args));
+    }
+
+    /// 문자열 진입점 — **전환 중에만 남는다**(계약 §7.2). 호출부가 전부 키로 옮겨지고 ABI 경로가
+    /// 정리되면 지운다. 그때까지는 2차 리터럴 검사가 이 자리를 지킨다.
     pub fn showNotice(self: *AppSession, message: []const u8) void {
         self.dismissMessageOverlays();
         self.cancelPendingClose(); // confirm 모달 + 보류 닫기 취소(열려 있을 때만 의미; 닫혀 있으면 무해)

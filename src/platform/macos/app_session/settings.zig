@@ -1324,14 +1324,14 @@ pub fn requestBranchMenu(self: *AppSession) void {
     // `refreshGitStatus`와 같은 규율. 안 그러면 도크를 한 번도 안 연 사용자에겐 브랜치 클릭이 아무 일도 안 한다.
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch {
-            self.showNotice("git 백엔드를 시작하지 못했습니다");
+            self.showNoticeKey(.set_git_backend_start_failed);
             return;
         };
     }
     var backend = &(self.git_backend orelse return);
     var exe_buf: [1024]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse {
-        self.showNotice("git을 찾지 못했습니다");
+        self.showNoticeKey(.set_git_not_found);
         return;
     };
     var repo_buf: [1024]u8 = undefined;
@@ -1357,7 +1357,7 @@ pub fn requestBranchMenu(self: *AppSession) void {
 /// 걷은 목록으로 메뉴를 연다. 앵커는 **상태바 브랜치 항목 위**다 — 메뉴는 위로 펼쳐야 바에 가리지 않는다.
 pub fn openBranchMenu(self: *AppSession) void {
     if (self.branch_menu_len == 0) {
-        self.showNotice("브랜치가 없습니다");
+        self.showNoticeKey(.set_no_branches);
         return;
     }
     // **앵커가 있어야 연다.** 목록 읽기는 비동기라 그 사이 바가 사라질 수 있다(`status-bar.show` 끄기·
@@ -1389,7 +1389,7 @@ pub fn applyBranchMenuSelection(self: *AppSession, index: usize) void {
     const name = self.branch_menu_names[index];
     var buf: [512]u8 = undefined;
     const cmd = git_command.branchSwitchCommand(name, &buf) orelse {
-        self.showNotice("브랜치 이름을 명령으로 만들 수 없습니다");
+        self.showNoticeKey(.set_branch_name_invalid);
         return;
     };
     self.pasteText(cmd, false);
@@ -1487,7 +1487,7 @@ pub fn acceptContextMenu(self: *AppSession) void {
                     defer self.allocator.free(href);
                     closeContextMenu(self);
                     self.openFilePanelDocumentLink(surface_id, editor_epoch, href, false) catch {
-                        self.showNotice("링크를 열지 못했습니다.");
+                        self.showNoticeKey(.set_link_open_failed);
                     };
                 },
                 .copy_link, .copy_path => {
@@ -1554,11 +1554,11 @@ pub fn acceptContextMenu(self: *AppSession) void {
         self.file_tree_context_target = null;
         self.chrome_host.context_menu.hide();
         if (target.root_generation != self.file_tree.rootGeneration()) {
-            self.showNotice("탐색기 루트가 바뀌어 명령을 취소했습니다.");
+            self.showNoticeKey(.set_root_changed_cancel);
             return;
         }
         const current_index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = target.row_kind, .path = target.path() }) orelse {
-            self.showNotice("선택한 항목이 변경되어 명령을 취소했습니다.");
+            self.showNoticeKey(.set_selection_changed_cancel);
             return;
         };
         _ = file_panel_ops.setFileTreeSelection(self, current_index);
@@ -1824,13 +1824,13 @@ pub fn resetAllSettings(self: *AppSession) void {
     self.global_hotkeys_dirty = true;
     self.metal_dirty = true;
     if (!wrote and path.len > 0)
-        self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다")
+        self.showNoticeKey(.set_reset_write_failed)
     else if (keep_alive_preserved)
         // 보존을 조용히 처리하면 사용자는 "모든 설정 초기화"라는 말대로 세션 유지도 꺼졌다고 믿고, 나중에
         // 예상과 다른 Quit 동작을 만난다. 보존 사실과 **수동 변경 경로**를 같이 알려야 결정권이 사용자에게 남는다.
-        self.showNotice("모든 설정을 기본값으로 초기화했습니다 — 세션 유지(keep-alive)는 살아 있는 터미널을 지키려 그대로 뒀습니다. 끄려면 세팅 › workspace에서 직접 변경하세요")
+        self.showNoticeKey(.set_reset_done_keepalive)
     else
-        self.showNotice("모든 설정을 기본값으로 초기화했습니다");
+        self.showNoticeKey(.set_reset_done);
 }
 
 pub fn clearConfigDirty(self: *AppSession) void {

@@ -448,10 +448,10 @@ pub const inventory = [_]Proof{
     // 조각 단위 세로 스크롤(§4.1d)로 Term rt에 필드 셋이 붙는다(`editor_first_piece` — 맨 위 줄에서
     // 건너뛸 조각, `editor_max_top_line`·`editor_max_top_piece` — 렌더가 실어 두는 스크롤 상한).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    //
-    // W5(Windows 셸 통합)에서 **한 줄** 움직인다: `SpawnRequest.shell_integration_dir`이 union
-    // `shell_integration`으로 바뀌어(계약 §4.2a) 이 파일의 설정 자리가 `.{ .assets_dir = dir }`로 감싼다.
-    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    // i18n I3a 슬라이스 3에서 또 움직인다 — `showNoticeKey`/`showNoticeFmt` 진입점이 생기고 이 파일의
+    // notice 리터럴 19건이 키로 옮겨졌다(계약 §7.2). count는 2 그대로다 — `@field` 반사는 건드리지
+    // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
+    // 경로가 정리되면 지운다).
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4b5ce6fef32dbfe8ade291ae89648f4f3aef8ab118b4d3c4eba22590037aae0a" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -486,7 +486,9 @@ pub const inventory = [_]Proof{
     // 바뀌었고(계약 §7.2 1차 방어), 값이 끼는 문장용 `…Fmt` 진입점과 공용 표시 경로 `…Text`가 생겼다.
     // count는 2 그대로다 — `@field` 반사 접근은 건드리지 않았다. 바뀐 것은 파라미터 타입과 호출부 11곳의
     // 리터럴→키 교체, 그리고 함수 셋으로의 분리뿐이라 반사가 늘거나 준 것이 아니다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8e0f116728de3a06c94facbb9185ba686bc10a27dcfc024800b6f5a5a2c2247b" },
+    // i18n I3a 슬라이스 3에서 또 움직인다 — 이 파일의 notice 리터럴 10건이 `showNoticeKey`로 옮겨졌다.
+    // count는 2 그대로다(반사 무변).
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "fb9fd342033f99b7d3ba89b90e495b36107f2b7a876c441f4998efc2c5bc33a5" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -506,5 +508,7 @@ pub const inventory = [_]Proof{
     // **count가 1에서 움직이면 멈추고 본다.** 언어 테이블 조회 외의 반사가 생겼다는 뜻이고, 이 leaf 는
     // 그 하나 말고는 이름으로 무엇도 읽지 않아야 한다. 키가 늘어나는 것은 count 를 바꾸지 않는다
     // (필드가 늘 뿐 `@field` 호출 자리는 그대로다) — 슬라이스마다 digest 만 갱신된다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "34de93a9c0179df77bbff3ff1516ee16832b8379601d212f0e4469f2aab8cbb1" },
+    // 슬라이스 3에서 키가 85개로 늘며 digest 만 움직인다. count는 1 그대로다 — 예고한 대로
+    // 필드가 늘어도 `@field` 호출 자리는 `tIn` 하나뿐이다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "75a16329cca256bf69457a6f130e6cbcb073b41dffea06d275c3aa322c7f70da" },
 };

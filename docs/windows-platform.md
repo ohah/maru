@@ -432,12 +432,23 @@ Windows 백엔드가 `CreateProcessW`의 `lpCommandLine` 문자열로 조립한�
 > `cmd.exe`가 표준 CRT argv 파싱을 쓰지 않는다는 점은 **백엔드가 조립할 때** 지켜야 할 사항이지 계약을
 > 바꿀 이유가 아니다. config는 이미 따옴표를 지원하지 않는다([configuration-shell.md](configuration-shell.md)).
 
-| 필드 | 어떻게 |
-|---|---|
-| `command` + `args` | **그대로.** 조립은 백엔드 |
-| `login: bool` | **중립 유지.** 이름이 메커니즘(`login(1)`)을 가리키므로 **의도**("사용자의 대화형 로그인 세션인가")로 재문서화하고, 메커니즘만 백엔드가 정한다 — macOS는 `login(1)` 래핑, Windows는 무동작 |
-| `zdotdir` | **일반화.** zsh라는 셸 이름까지 새고 있다 → "셸 통합 자산 디렉터리"로. 백엔드가 매핑한다(zsh=`ZDOTDIR`, PowerShell=프로필 스크립트, cmd=`PROMPT`) |
-| `term` | 백엔드가 의미를 정한다. 네이티브 Windows 셸엔 무의미하고 WSL·msys 프로그램에만 쓰인다 |
+| 필드 | 어떻게 | 상태 |
+|---|---|---|
+| `command` + `args` | **그대로.** 조립은 백엔드 | 변경 없음 |
+| `login: bool` | **중립 유지.** 이름이 메커니즘(`login(1)`)을 가리키므로 **의도**("사용자의 대화형 로그인 세션인가")로 재문서화하고, 메커니즘만 백엔드가 정한다 — macOS는 `login(1)` 래핑, Windows는 무동작 | 재문서화 완료 |
+| `zdotdir` → **`shell_integration_dir`** | **일반화.** zsh라는 셸 이름까지 새고 있었다 → "셸 통합 자산 디렉터리"로. 백엔드가 매핑한다(zsh=`ZDOTDIR`, PowerShell=프로필 스크립트, cmd=`PROMPT`) | 이름 변경 완료 — **wire 키는 `"zdotdir"` 그대로** |
+| `term` | 백엔드가 의미를 정한다. 네이티브 Windows 셸엔 무의미하고 WSL·msys 프로그램에만 쓰인다 | 재문서화 완료 |
+
+**wire tag가 필드 이름과 어떻게 갈리는지 실물로 확인해 둔다.** 직렬화는 익명 구조체 리터럴이라 **그 리터럴의
+필드 이름이 곧 JSON 키**다 — 한 줄 안에서 왼쪽은 wire, 오른쪽은 Zig 필드다.
+
+```zig
+js.write(.{ … .zdotdir = request.shell_integration_dir, … });
+//             ^^^^^^^^ wire tag(고정)   ^^^^^^^^^^^^^^^^^^^^ Zig 필드(바뀌었다)
+```
+
+일괄 치환하면 여기서 wire가 조용히 깨진다. 파싱 쪽도 같다 — `spawnOptionalStringField(p, "zdotdir")`가
+문자열을 직접 쓴다.
 
 **`login`을 지우면 안 되는 이유**: 호출자가 정하는 정책이고(`agent.zig`가 비대화형에 `false`, 대화형에 `true`),
 **세션 호스트 RPC를 건너간다**(`server.zig`→`runtime_manager.zig`→`remote_runtime.zig`). 지우면 백엔드가
@@ -479,7 +490,11 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
 **따라서 규칙을 둘로 나눈다.**
 
 1. **구분자 정규화는 입구에서** 한다(`\`→`/`). L2가 받는 경로는 POSIX다
-   ([layering-and-portability.md](layering-and-portability.md) §4.1).
+   ([layering-and-portability.md](layering-and-portability.md) §4.1). 도구는
+   `path_shape.normalizeSeparatorsFor(os_tag, …)`이고 **Windows 기준일 때만 바꾼다** — POSIX에서 `\`는
+   파일 이름 글자라 거기서 바꾸면 다른 파일을 가리킨다(W1.5에서 그 부류의 회귀를 한 번 냈다).
+   실측: `$HOME`이 `C:\Users\me`일 때 terminfo 캐시가 `C:\Users\me/.cache/…`였고 정규화 후
+   `C:/Users/me/.cache/…`가 된다.
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 

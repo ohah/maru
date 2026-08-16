@@ -6073,7 +6073,9 @@ fn buildSpawnParams(
         .parent_env = parent_env,
         .env_overrides = request.env_overrides,
         .term = request.term,
-        .zdotdir = request.zdotdir,
+        // **왼쪽은 wire tag, 오른쪽은 Zig 필드다.** 이 익명 구조체의 필드 이름이 그대로 JSON 키가 되므로
+        // `.zdotdir`은 손대지 않는다(영속 호스트라 새 앱이 옛 호스트와 대화한다 — docs/windows-platform.md §4.2).
+        .zdotdir = request.shell_integration_dir,
         .ssh_integration_bin = request.ssh_integration_bin,
         .pane_id = pane_id,
         .cols = size.cols,
@@ -6133,7 +6135,9 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
         .parent_env = &.{"SHOULD=NOT_BE_SENT"},
         .env_overrides = &.{ "BASE=two", "MARU_FLAG=yes" },
         .term = "xterm-maru",
-        .zdotdir = "/tmp/maru-zdotdir",
+        // 중립 필드는 `shell_integration_dir`로 바뀌었지만 **wire 키는 `"zdotdir"` 그대로**여야 한다 —
+        // 아래 단언이 그 JSON 키를 직접 확인해 그 사실을 못 박는다(docs/windows-platform.md §4.2).
+        .shell_integration_dir = "/tmp/maru-zdotdir",
         .ssh_integration_bin = "/Applications/Maru.app/Contents/MacOS/maru",
         .pane_id = 0x1234,
     };

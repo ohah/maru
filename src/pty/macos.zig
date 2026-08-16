@@ -645,7 +645,9 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin, request.pane_id);
+        // 중립 계약의 `shell_integration_dir`을 이 백엔드의 메커니즘 이름(`zdotdir` = zsh `ZDOTDIR`)으로
+        // 넘긴다 — 매핑이 백엔드 몫이라는 계약 그대로다(docs/windows-platform.md §4.2).
+        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.shell_integration_dir, request.ssh_integration_bin, request.pane_id);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);

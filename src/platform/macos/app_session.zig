@@ -17131,7 +17131,7 @@ pub fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mo
     request.term = term;
     // 사용자 config env.<KEY> 주입(부모 상속 + maru override 위에 upsert). 빈 슬라이스면 EnvStorage가 무동작.
     request.env_overrides = env_overrides;
-    request.zdotdir = zdotdir;
+    request.shell_integration_dir = zdotdir;
     // opt-in ssh 라우팅이 켜졌으면 maru 실행 파일 경로를 실어 EnvStorage가 MARU_BIN/MARU_SSH_INTEGRATION을
     // 주입하게 한다(null이면 주입 안 함 — 평범한 ssh 그대로).
     request.ssh_integration_bin = ssh_bin;

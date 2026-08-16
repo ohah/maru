@@ -116,6 +116,37 @@ pub fn isDetectableAbsoluteFor(os_tag: std.Target.Os.Tag, path: []const u8) bool
     return std.fs.path.isAbsoluteWindows(path);
 }
 
+/// 플랫폼이 중립 레이어로 넘기는 경로의 구분자를 **POSIX(`/`)로 정규화**한다(입구 정규화).
+///
+/// **왜 입구인가**: L2는 경로를 이을 때 항상 `/`를 쓰는데(docs/layering-and-portability.md §4.1) 입력이
+/// native면 결과가 섞인다 — 실측: `$HOME`이 `C:\Users\me`일 때 terminfo 캐시 경로가
+/// `C:\Users\me/.cache/maru/terminfo`가 된다. 그 상태로 `file_tree`·`git_ops`에 들어가면 이미 한 번 고친
+/// `/repo\docs` 문제를 그대로 다시 겪는다(docs/windows-platform.md §5).
+///
+/// **`os_tag`가 인자인 이유는 안전이다.** POSIX에서 `\`는 **파일 이름에 쓸 수 있는 평범한 글자**라, 거기서
+/// 바꾸면 `p\q`라는 파일이 `p/q`라는 다른 경로가 된다 — W1.5에서 `pathWithin`에 `\`를 구분자로 넣었다가
+/// 정확히 그 부류의 회귀를 냈다. 그래서 Windows 기준일 때만 바꾸고, 그 판정을 테스트가 두 갈래 다 돈다.
+///
+/// 반환은 항상 `allocator` 소유다(바꿀 것이 없어도 복사본) — "때로는 owned 때로는 borrowed"는 호출자가
+/// 반드시 틀리는 계약이다(W2.5에서 그 형태로 누수를 하나 냈다).
+pub fn normalizeSeparatorsFor(
+    os_tag: std.Target.Os.Tag,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) ![]u8 {
+    const copy = try allocator.dupe(u8, path);
+    if (os_tag != .windows) return copy;
+    for (copy) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+    return copy;
+}
+
+/// `normalizeSeparatorsFor`를 호스트 OS로 부르는 얇은 래퍼. 플랫폼 진입점(`main.zig` 등)이 쓴다.
+pub fn normalizeSeparators(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return normalizeSeparatorsFor(@import("builtin").os.tag, allocator, path);
+}
+
 /// 경로가 **이미 구분자로 끝나는가** — 그 아래에 자식을 이어 붙일 때 구분자를 하나 더 넣으면 안 되는 모양.
 ///
 /// 포함 판정(`pathWithin`)이 묻는 것이 정확히 이 질문이다: 루트가 `/`나 `C:/`처럼 구분자로 끝나면 루트 바로
@@ -269,6 +300,38 @@ test "감지 ⊆ std: 드라이브 자리 전 바이트 + 잘린·BMP 밖 UTF-8 
 
 // 포함 판정이 실제로 묻는 질문이다. 예전 `isRoot`는 길이 1/2/3만 열거해서 `C:/repo/`처럼 후행 구분자가 붙은
 // 더 긴 루트를 놓쳤고(자식이 하나도 안 보인다), `C:`(드라이브 상대)까지 루트로 쳐서 형제-접두 보호를 없앴다.
+// 입구 정규화. **Windows 기준일 때만** 바꾼다 — POSIX에서 `\`는 파일 이름 글자라 바꾸면 다른 파일을 가리킨다.
+// OS가 인자라 두 갈래를 여기서 모두 돈다(컴파일 타임 분기면 CI에서 한쪽이 공허참이 된다).
+test "normalizeSeparatorsFor: Windows에서만 역슬래시를 바꾼다" {
+    const a = std.testing.allocator;
+
+    // Windows 기준: 섞인 경로가 전부 `/`가 된다(실제로 본 모양이다).
+    {
+        const got = try normalizeSeparatorsFor(.windows, a, "C:\\Users\\me/.cache/maru");
+        defer a.free(got);
+        try testing.expectEqualStrings("C:/Users/me/.cache/maru", got);
+    }
+    // POSIX 기준: **한 글자도 안 바꾼다.** `p\q`는 그런 이름의 파일이다.
+    for ([_]std.Target.Os.Tag{ .macos, .linux }) |os| {
+        const got = try normalizeSeparatorsFor(os, a, "/w/p\\q");
+        defer a.free(got);
+        try testing.expectEqualStrings("/w/p\\q", got);
+    }
+    // 바꿀 것이 없어도 **항상 owned**를 돌려준다(호출자가 분기하지 않게).
+    {
+        const got = try normalizeSeparatorsFor(.windows, a, "");
+        defer a.free(got);
+        try testing.expectEqualStrings("", got);
+    }
+    // 정규화 후에도 절대경로 판정이 유지된다(입구를 지나 가드로 가는 경로).
+    {
+        const got = try normalizeSeparatorsFor(.windows, a, "C:\\Windows");
+        defer a.free(got);
+        try testing.expect(isAbsolute(got));
+        try testing.expect(std.mem.indexOfScalar(u8, got, '\\') == null);
+    }
+}
+
 test "endsWithSep: 구분자로 끝나는 모든 루트를 맞힌다" {
     try testing.expect(endsWithSep("/"));
     try testing.expect(endsWithSep("C:/"));

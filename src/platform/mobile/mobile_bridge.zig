@@ -156,8 +156,23 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     };
     if (cfg_parsed) |*old| old.deinit();
     cfg_parsed = next;
-    // 스크롤백은 코어가 든다 — 값이 바뀌면 그 자리에 세운다.
-    if (term_core) |*core| core.setMaxScrollback(next.config.scrollback.lines);
+    if (term_core) |*core| applyConfigToCore(core);
+}
+
+/// 코어가 드는 값을 config 에서 세운다. **두 곳에서 부른다** — config 를 읽을 때와 **코어가
+/// 설 때**. host 는 화면이 서기 전에 config 를 읽으므로(첫 프레임부터 그 색으로 그리려고)
+/// 그때는 코어가 아직 없다 — 여기 없으면 그 값들이 **조용히 버려진다**(스크롤백 줄 수가
+/// 그렇게 사라졌다).
+fn applyConfigToCore(core: *terminal.core.TerminalCore) void {
+    const c = cfg();
+    core.setMaxScrollback(c.scrollback.lines);
+}
+
+/// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 닿았는지는
+/// **코어에 물어야** 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다.
+pub export fn maru_mobile_scrollback_lines() u32 {
+    const core = &(term_core orelse return 0);
+    return @intCast(core.maxScrollback());
 }
 
 pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
@@ -1058,6 +1073,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         // mode 2027 을 켜서 우회하지 않는다. 그건 **앱이 켜는 opt-in** 이고(DECRQM 으로 먼저 묻는다),
         // 터미널이 일방적으로 켜면 폭 합의가 한쪽만 바뀌어 커서·지우기가 통째로 어긋난다.
         term_core.?.emoji_wide = true;
+        // **config 를 여기서 흘려 넣는다.** host 가 화면보다 먼저 config 를 읽으므로 그때는
+        // 코어가 없었다 — 여기서 안 세우면 그 값들이 조용히 버려진다.
+        applyConfigToCore(&term_core.?);
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
         drainUnconsumed(&term_core.?);
     }

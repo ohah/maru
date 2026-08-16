@@ -321,8 +321,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = if (wrap) 0 else term.rt.editor_first_col_right },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -332,7 +332,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -535,8 +535,11 @@ fn effectiveFirstPiece(wrap: bool, term: *Term) u32 {
     return if (wrap) term.rt.editor_first_piece else 0;
 }
 
-fn effectiveFirstCol(wrap: bool, term: *Term) u16 {
-    return if (wrap) 0 else term.rt.editor_first_col;
+fn effectiveFirstCol(wrap: bool, term: *Term, right: bool) u16 {
+    // **열이 둘이어도 규칙은 하나다.** 오른쪽에 `if (wrap) 0 else …`를 다시 쓰면, 이 함수를 고칠 때
+    // 한쪽만 따라온다 — 이 세션에서 같은 냄새로 세 번 물렸다(적대적 검증 2026-08-16).
+    if (wrap) return 0;
+    return if (right) term.rt.editor_first_col_right else term.rt.editor_first_col;
 }
 
 /// 랩이 켜졌을 때의 세로 스크롤 — **시각 행 단위**로 `(줄, 조각)`을 움직인다(§4.1d).
@@ -1936,7 +1939,7 @@ test "랩 중에는 가로 축이 없고 렌더에도 0이 간다 — 위치는 
     try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20, null)); // 랩 중에는 이 축을 안 가진다
     // **렌더에는 0이 간다** — 컴포넌트의 `!wrap or first_col == 0`을 여기서 세운다. 그리는 것과
     // 저장된 위치는 다른 것이고, 그리기가 죽지 않는 것까지 함께 본다.
-    try testing.expectEqual(@as(u16, 0), effectiveFirstCol(true, fx.term));
+    try testing.expectEqual(@as(u16, 0), effectiveFirstCol(true, fx.term, false));
     var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
 

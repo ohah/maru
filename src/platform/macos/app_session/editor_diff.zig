@@ -1452,3 +1452,38 @@ test "비교의 본문 열 수는 한 열 폭으로 센다 — pane 폭을 쓰�
     try testing.expect(right_col < single);
     try testing.expect(left_col > 0 and right_col > 0);
 }
+
+test "랩이 켜지면 두 열 모두 렌더에 0이 간다 — 오른쪽만 빠지면 안 된다" {
+    // 컴포넌트가 `!wrap or first_col == 0`을 어서션으로 요구한다(§4.1d). 열이 둘이 되면서 그 규칙이
+    // 오른쪽에 **인라인으로 다시 쓰여** 있었다 — 한 곳을 고치면 다른 쪽이 안 따라오는 상태였다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    for (0..400) |_| try rb.append(allocator, 'R');
+    try rb.append(allocator, '\n');
+    var entry = testEntry("a\n", rb.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    // 오른쪽 열을 민 상태를 만든다.
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body.w -| inset * 2, .h = body.h -| inset * 2 }, 8);
+    const rx: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + @as(i32, @intCast(inset)) + cols.right.x + 4);
+    _ = editor_ops.scrollCols(fx.session, fx.term, leaf, -30, rx);
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+
+    // 랩을 켜면 **저장된 값은 두고** 렌더에는 0이 간다 — 그리기가 어서션에 안 걸려야 한다.
+    const stored = fx.term.rt.editor_first_col_right;
+    fx.term.rt.editor_wrap = true;
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(drawn.dl.cells.len > 0);
+    try testing.expectEqual(stored, fx.term.rt.editor_first_col_right); // 랩을 끄면 돌아갈 자리
+}

@@ -2077,3 +2077,78 @@ test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
 }
+
+test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프레임이 죽지 않는다" {
+    // `NotUtf8`은 막지만 **NUL은 유효한 UTF-8**이라 통과한다. §3.8이 NUL마다 `<U+0000>` 8칸 표기를
+    // 그리므로 1MB 한 줄이면 8M 열이다 — 렌더·랩·가로 스크롤이 전부 그 위에서 돈다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const nuls = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(nuls);
+    @memset(nuls, 0);
+    const lines = try allocator.alloc([]const u8, 1);
+    defer allocator.free(lines);
+    lines[0] = nuls;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_max_cols = 0;
+
+    for ([_]bool{ false, true }) |wrap| {
+        fx.term.rt.editor_wrap = wrap;
+        const t0 = monotonicMsForTest();
+        var d = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        const t1 = monotonicMsForTest();
+        std.debug.print("\n[적대] NUL 1MB 한 줄 wrap={}: 프레임 {d}ms\n", .{ wrap, t1 - t0 });
+        try testing.expect(t1 - t0 < 200); // 재앙 감지선(실측 1~4ms)
+    }
+
+    fx.term.rt.editor_wrap = false;
+    const t2 = monotonicMsForTest();
+    _ = scrollCols(fx.session, fx.term, leaf, -1_000_000);
+    const t3 = monotonicMsForTest();
+    std.debug.print("[적대] NUL 1MB: 끝까지 가로 밀기 {d}ms (first_col={d})\n", .{ t3 - t2, fx.term.rt.editor_first_col });
+    const t4 = monotonicMsForTest();
+    var d2 = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    const t5 = monotonicMsForTest();
+    std.debug.print("[적대] NUL 1MB: 밀린 상태 프레임 {d}ms\n", .{t5 - t4});
+    try testing.expect(t5 - t4 < 200); // 실측 1ms
+}
+
+test "알려진 구멍: 랩을 켠 한 줄짜리 문서는 세로로 전혀 못 움직인다(조각 스크롤 대기)" {
+    // `editor_first_line`은 **논리 줄**이다. 문서가 한 줄이면 상한이 0이라 랩으로 9만 행이 되어도
+    // 첫 화면 밖을 볼 방법이 없다 — minified 파일을 랩으로 열면 실제로 이 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const huge = try allocator.alloc(u8, 200_000);
+    defer allocator.free(huge);
+    @memset(huge, 'x');
+    const lines = try allocator.alloc([]const u8, 1);
+    defer allocator.free(lines);
+    lines[0] = huge;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var d = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    d.dl.deinit(allocator);
+    std.debug.print("\n[적대] 한 줄 랩: 시각 행={d}, 논리 줄={d}\n", .{ fx.term.rt.editor_total_visual_rows, lines.len });
+    try testing.expect(fx.term.rt.editor_total_visual_rows > 1000); // 실제로 아주 많이 접혔다
+
+    _ = scrollLines(fx.session, fx.term, leaf, -1_000_000);
+    std.debug.print("[적대] 끝까지 굴린 뒤 first_line={d}\n", .{fx.term.rt.editor_first_line});
+    // **이 단언은 "옳다"가 아니라 "지금 이렇다"이다.** 조각 단위 스크롤(`first_piece`)이 붙으면
+    // 여기가 뒤집혀야 하고, 그때 이 테스트가 그 사실을 알린다(plans/native-editor.md 잔여 표).
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}

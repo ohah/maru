@@ -33,6 +33,7 @@ C2Z = {
     "unsigned int": {"u32"},
     "int": {"c_int", "i32"},
     "void": {"void"},
+    "unsigned long": {"usize"},
     "unsigned long long": {"u64"},
     "float": {"f32"},
     "const char *": {"[*:0]const u8", "[*]const u8"},

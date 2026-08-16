@@ -5,7 +5,7 @@
 //! **무엇을 하나**: read-only 메타데이터 조회 CLI다.
 //!   - `maru sessions list [--window <id>]` → `sessions.list {window?}` 요청.
 //!   - `maru session get <id>` → `session.get {id}` 요청(id=surface_id).
-//! `main.zig`는 얇은 impure 접착(소켓 connect·stdout·argv 수집)만 하고, 파싱·요청 조립·응답 포맷 같은 테스트
+//! 소켓 접착(발견·connect·`auth.self`·왕복)은 `cli/control_client.zig`가 갖고, 파싱·요청 조립·응답 포맷 같은 테스트
 //! 가능한 로직은 여기 둔다(cli/ssh.zig·install.zig와 같은 패턴 — docs/project-structure.md `src/cli/`).
 //!
 //! **재사용(재구현 금지)**: 요청 바이트는 1a `control_plane.serializeMessage`, 응답 파싱은 1a `parseMessage`.
@@ -280,7 +280,7 @@ fn atPromptWire(v: ?std.json.Value) []const u8 {
 
 // ══ 소켓 발견(A2a — §4.2 다중 인스턴스·결정론 경로) ═══════════════════════════════════════════════════════
 // CLI-side 순수 경로/정책(cli/ssh.zig `controlSocketPath`와 같은 결 — I/O(getenv·readdir)는 main이 하고 여긴
-// 계산만). 소켓 syscall(connect/read/write)은 L4다(§11) — main.zig가 그 얇은 접착을 갖는다. 서버측 경로 파생
+// 계산만). 소켓 syscall(connect/read/write)은 L4다(§11) — `cli/control_client.zig`가 그 얇은 접착을 갖는다. 서버측 경로 파생
 // (`control_socket.controlDirPath`/`socketPathIn`, L4·macOS-gated)와 **같은 `<cache>/maru/control/*.sock` 계약**을
 // 공유한다(그 파일은 dev-CLI 모듈 그래프 밖이라 여기서 같은 형식을 CLI-side로 둔다 — cli/ssh.zig 선례).
 

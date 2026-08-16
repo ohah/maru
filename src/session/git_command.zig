@@ -57,10 +57,117 @@ pub const Kind = enum {
     /// 브랜치를 **바꾸는 일은 우리가 하지 않는다** — 고른 이름을 활성 터미널에 `git switch <name>`으로 넣어
     /// 주고 실행은 사용자 셸이 한다(hook·dirty tree·충돌이 평소처럼 사용자에게 보인다).
     branches,
+    /// 이 저장소에 딸린 **워크트리 목록**(`worktree list --porcelain`). 도크가 저장소마다 한 줄이 아니라
+    /// **워크트리마다 한 줄**을 세우기 때문에 필요하다(§3.5.1c — 사용자가 목표 화면을 제시했다).
+    ///
+    /// **`--porcelain`이다.** 사람이 읽는 판(`worktree list`)은 열 폭에 맞춰 공백으로 정렬하므로 경로에
+    /// 공백이 있으면 파싱이 갈린다. porcelain은 `worktree <경로>` / `HEAD <oid>` / `branch <ref>` 또는
+    /// `detached`가 한 줄씩이고 빈 줄로 끊긴다 — 실측 형식(2026-08-16)이 그대로 계약이다.
+    ///
+    /// 읽기 전용이다: 등록된 목록을 읽기만 하고 만들거나 지우지 않는다.
+    worktree_list,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
 };
+
+/// 워크트리 하나. 문자열은 전부 `text`를 빌린다(할당 없음).
+pub const Worktree = struct {
+    /// 절대 경로. 이것이 도크 목록의 **키**다(저장소 루트와 같은 축 — 워크트리는 자기 루트를 갖는다).
+    path: []const u8,
+    /// 체크아웃된 브랜치의 짧은 이름. 분리 HEAD면 빈 문자열이고 `head` 앞자리가 그 자리를 대신한다.
+    branch: []const u8 = "",
+    /// HEAD OID(짧게 자르지 않는다 — 자르는 것은 화면의 몫이다). 아직 커밋이 없으면 빈 문자열.
+    head: []const u8 = "",
+    /// 분리 HEAD인가. **`branch.len == 0`으로 대신 판정하지 않는다** — unborn(커밋 전)도 브랜치가 비는데
+    /// 그건 분리가 아니다(화면 문구가 달라야 한다).
+    detached: bool = false,
+};
+
+/// `worktree list --porcelain` 출력을 쪼갠다. **할당하지 않는다** — `out`을 채우고 개수를 돌려준다.
+///
+/// 형식(실측 2026-08-16): 항목마다 `worktree <경로>` 줄로 시작하고, `HEAD <oid>`·`branch <ref>` 또는
+/// `detached`가 뒤따르며 **빈 줄로 끊긴다**. 마지막 항목 뒤에도 빈 줄이 있을 수 있다.
+///
+/// **모르는 줄은 건너뛴다**(`bare`·`locked`·`prunable` 등 git이 더할 수 있다) — 그것들 때문에 항목 전체를
+/// 버리면 사용자의 워크트리가 목록에서 통째로 사라진다.
+pub fn collectWorktrees(text: []const u8, out: []Worktree) usize {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "worktree ")) {
+            if (n == out.len) break; // 더 담을 자리가 없다 — 호출자가 `count == out.len`으로 안다
+            out[n] = .{ .path = line["worktree ".len..] };
+            n += 1;
+            continue;
+        }
+        if (n == 0) continue; // `worktree` 줄 없이 온 속성은 주인이 없다
+        const item = &out[n - 1];
+        if (std.mem.startsWith(u8, line, "HEAD ")) {
+            item.head = line["HEAD ".len..];
+        } else if (std.mem.startsWith(u8, line, "branch ")) {
+            const ref = line["branch ".len..];
+            // `refs/heads/<이름>` → 짧은 이름. 접두가 없으면 그대로 둔다(추측하지 않는다).
+            item.branch = if (std.mem.startsWith(u8, ref, "refs/heads/")) ref["refs/heads/".len..] else ref;
+        } else if (std.mem.eql(u8, line, "detached")) {
+            item.detached = true;
+        }
+    }
+    return n;
+}
+
+test "worktree list --porcelain을 항목으로 쪼갠다(실측 형식)" {
+    const text =
+        \\worktree /repo
+        \\HEAD 423e22f89fd4c3e0c9e8b96a6134225f4d45cd24
+        \\branch refs/heads/feat/scm-repo-list
+        \\
+        \\worktree /tmp/wt
+        \\HEAD 423e22f89fd4c3e0c9e8b96a6134225f4d45cd24
+        \\detached
+        \\
+    ;
+    var out: [4]Worktree = undefined;
+    const n = collectWorktrees(text, &out);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("/repo", out[0].path);
+    try std.testing.expectEqualStrings("feat/scm-repo-list", out[0].branch); // refs/heads/ 접두를 뗀다
+    try std.testing.expect(!out[0].detached);
+    try std.testing.expectEqualStrings("/tmp/wt", out[1].path);
+    try std.testing.expectEqualStrings("", out[1].branch);
+    try std.testing.expect(out[1].detached);
+    try std.testing.expectEqualStrings("423e22f89fd4c3e0c9e8b96a6134225f4d45cd24", out[1].head);
+}
+
+test "경로에 공백이 있어도 갈리지 않는다(사람이 읽는 판을 안 쓰는 이유)" {
+    const text = "worktree /Users/a b/c d\nHEAD abc\nbranch refs/heads/main\n";
+    var out: [2]Worktree = undefined;
+    try std.testing.expectEqual(@as(usize, 1), collectWorktrees(text, &out));
+    try std.testing.expectEqualStrings("/Users/a b/c d", out[0].path);
+}
+
+test "모르는 줄이 있어도 그 항목을 버리지 않는다" {
+    // git이 `bare`·`locked`·`prunable`을 더할 수 있다. 그것 때문에 사용자의 워크트리가 목록에서
+    // 사라지면 화면이 사실보다 적게 말한다.
+    const text = "worktree /repo\nHEAD abc\nbranch refs/heads/main\nlocked\nprunable gitdir file removed\n";
+    var out: [2]Worktree = undefined;
+    try std.testing.expectEqual(@as(usize, 1), collectWorktrees(text, &out));
+    try std.testing.expectEqualStrings("main", out[0].branch);
+}
+
+test "버퍼가 차면 거기서 멈춘다(조용히 자르지 않는다 — 호출자가 셀 수 있다)" {
+    const text = "worktree /a\nworktree /b\nworktree /c\n";
+    var out: [2]Worktree = undefined;
+    try std.testing.expectEqual(@as(usize, 2), collectWorktrees(text, &out));
+    try std.testing.expectEqualStrings("/b", out[1].path);
+}
+
+test "주인 없는 속성 줄은 무시한다(출력이 잘려서 시작한 경우)" {
+    var out: [2]Worktree = undefined;
+    try std.testing.expectEqual(@as(usize, 0), collectWorktrees("HEAD abc\nbranch refs/heads/x\n", &out));
+}
 
 /// `for-each-ref` 출력을 브랜치 이름 슬라이스로 쪼갠다. **할당하지 않는다** — `out`을 채우고 개수를 돌려주며,
 /// 각 슬라이스는 `text`를 빌린다(호출자가 text를 살려 둬야 한다).
@@ -186,6 +293,14 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
         n += 1;
     }
     switch (kind) {
+        .worktree_list => {
+            buf[n] = "worktree";
+            n += 1;
+            buf[n] = "list";
+            n += 1;
+            buf[n] = "--porcelain";
+            n += 1;
+        },
         .status => {
             buf[n] = "status";
             n += 1;

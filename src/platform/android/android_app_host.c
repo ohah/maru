@@ -83,7 +83,8 @@ static struct {
     float touch_last_y;   // 직전 MOVE 의 논리 y — 이동량을 내는 기준
     float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
     float fling_vy;       // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다)
-    unsigned int ptr_id;  // 이번 제스처의 손가락 id — **down 에서 잡고 끝까지 안 바꾼다**
+    unsigned int ptr_id;  // 본문 제스처를 소유한 손가락 id
+    int has_ptr_id;       // 소유자가 있나(0 이면 본문 제스처가 없다)
     double ptr_last_t;    // 직전 이동 이벤트의 시각(ms)
     double fling_t;       // 직전 관성 프레임의 시각(ms)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
@@ -1183,111 +1184,133 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     // 좌표계 환산도 같다 — 물리 px 를 density 로 나누고 상태바 inset 을 뺀 **논리 좌표**로
     // 되돌려야 셀이 안 어긋난다(그 값은 렌더가 쓴 것과 같은 변수에서 나온다).
     if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_MOTION) {
-        int32_t action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
-        // **아직 index 0 만 쓴다**(T2 가 `ACTION_POINTER_*` 와 `findPointerIndex` 를 연다).
-        // 다만 id 는 지금부터 진짜 값을 넘긴다 — 코어가 소유권을 그 값으로 든다.
-        //
-        // **제스처 도중에 id 를 바꾸지 않는다.** `getPointerId(ev, 0)` 을 매 이벤트마다 다시
-        // 읽으면, 두 손가락일 때 첫 손가락이 떼지는 순간 index 0 이 둘째로 당겨져 **id 가
-        // 바뀐다**. 그러면 코어가 그 move 를 모르는 id 로 버리고, up 도 슬롯을 못 찾아
-        // **소유권이 영영 안 풀린다**(그 표면이 "손가락이 닿아 있는" 상태로 굳는다).
-        // `down` 에서 잡은 id 를 제스처가 끝날 때까지 쓴다 — T1 의 계약은 "host 가 일관된
-        // 한 줄기 스트림을 보낸다" 이고, 진짜 다중 포인터는 T2 가 연다.
-        if (action == AMOTION_EVENT_ACTION_DOWN) g.ptr_id = (unsigned int)AMotionEvent_getPointerId(ev, 0);
-        unsigned int pid = g.ptr_id;
-        float px = AMotionEvent_getX(ev, 0), py = AMotionEvent_getY(ev, 0);
-        float lx = px / g.scale;
-        float ly = (py - (float)g.inset_top) / g.scale;
-        // **스크롤: 관성만 우리 것이고 의미는 코어 것이다**(docs/mobile-platform.md §3.1).
-        // Android 에는 iOS 의 `UIPanGestureRecognizer` 같은 것이 NativeActivity 경로에 없어서
-        // 이동량을 직접 센다. 줄 환산·clamp·alt screen 변환은 전부 코어가 한다.
-        // **원시 이벤트를 넘긴다 — 뜻은 코어가 정한다**(§3.1: 끌면 스크롤, 길게 누르면 선택).
-        // 여기서 스크롤로 단정하면 길게 누름이 영영 안 온다.
+        int32_t raw = AMotionEvent_getAction(ev);
+        int32_t action = raw & AMOTION_EVENT_ACTION_MASK;
+        // **어느 손가락의 사건인가.** `ACTION_POINTER_DOWN`/`_UP` 은 이 인덱스가 가리키는
+        // 손가락 하나의 것이고, `ACTION_MOVE` 는 **닿아 있는 전부**의 것이다.
+        int32_t aidx = (raw & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+        size_t pcount = AMotionEvent_getPointerCount(ev);
         int64_t ev_ms = AMotionEvent_getEventTime(ev) / 1000000;
-        // **키바가 잡고 있으면 그쪽이 먼저다.** 손을 뗄 때까지 본문 경로로 안 간다 —
-        // 키바를 가로로 미는 동작이 본문 스크롤로도 해석되면 둘 다 움직인다.
-        // **밀린 화면이 잡고 있으면 가장 먼저다**(설정 — 그 아래는 없는 것과 같다).
-        if (g.chrome_active) {
-            unsigned int ph = action == AMOTION_EVENT_ACTION_MOVE ? 1
-                            : action == AMOTION_EVENT_ACTION_UP   ? 2
-                            : action == AMOTION_EVENT_ACTION_CANCEL ? 3 : 1;
+
+        // **첫 down 이 목적지를 정하고, 그 제스처의 나머지 손가락은 같은 곳으로 간다.**
+        // 표면마다 한 번에 한 제스처다(계약 §3.1) — 손가락마다 다른 표면으로 보내면 키바를
+        // 밀면서 본문을 스크롤하는 것 같은 상태가 생긴다.
+        if (action == AMOTION_EVENT_ACTION_DOWN) {
+            float dlx = AMotionEvent_getX(ev, 0) / g.scale;
+            float dly = (AMotionEvent_getY(ev, 0) - (float)g.inset_top) / g.scale;
+            unsigned int did = (unsigned int)AMotionEvent_getPointerId(ev, 0);
+            g.touch_last_y = dly;
+            g.touch_total_dy = 0;
+            g.fling_vy = 0;
+            g.ptr_last_t = ev_ms;
+            g.ptr_id = did;
+            g.has_ptr_id = 1;
+            // **밀린 화면(설정)이 먼저다.** 톱니를 누르면 여기서 먹고, 설정이 떠 있으면 전부 먹는다.
             pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_chrome_pointer(ph, pid, lx, ly);
+            unsigned int on_chrome = maru_mobile_chrome_pointer(0, did, dlx, dly);
             pthread_mutex_unlock(&g_bridge_lock);
-            if (ph >= 2) g.chrome_active = 0;
+            if (on_chrome) { g.chrome_active = 1; return 1; }
+            // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+            // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
+            pthread_mutex_lock(&g_bridge_lock);
+            unsigned int on_bar = maru_mobile_keybar_pointer(0, did, dlx, dly);
+            pthread_mutex_unlock(&g_bridge_lock);
+            if (on_bar) { g.keybar_active = 1; return 1; }
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_pointer(0, did, dlx, dly, (unsigned long long)ev_ms);
+            pthread_mutex_unlock(&g_bridge_lock);
+            unsigned int cell = maru_mobile_hit_cell(dlx, dly);
+            LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
+                 AMotionEvent_getX(ev, 0), AMotionEvent_getY(ev, 0), dlx, dly, cell >> 16, cell & 0xFFFF);
             return 1;
         }
-        if (g.keybar_active) {
-            unsigned int ph = action == AMOTION_EVENT_ACTION_MOVE ? 1
-                            : action == AMOTION_EVENT_ACTION_UP   ? 2
-                            : action == AMOTION_EVENT_ACTION_CANCEL ? 3 : 1;
+
+        // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지 하나에 한 번만 보낸다.
+        if (action == AMOTION_EVENT_ACTION_CANCEL) {
             pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_keybar_pointer(ph, pid, lx, ly);
+            if (g.chrome_active) maru_mobile_chrome_pointer(3, 0, 0, 0);
+            else if (g.keybar_active) maru_mobile_keybar_pointer(3, 0, 0, 0);
+            else maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
             pthread_mutex_unlock(&g_bridge_lock);
-            if (ph >= 2) {
-                g.keybar_active = 0;
-                drainClipboard(app);
+            g.chrome_active = 0;
+            g.keybar_active = 0;
+            g.has_ptr_id = 0;
+            g.fling_vy = 0;
+            return 1;
+        }
+
+        if (action == AMOTION_EVENT_ACTION_MOVE) {
+            // **닿아 있는 손가락 전부를 보낸다.** 소유자만 보내면 나머지의 기준이 낡아, 그
+            // 손가락이 이어받는 순간 옛 자리에서 델타가 나와 화면이 점프한다(T1 이 없앤 그 병).
+            for (size_t i = 0; i < pcount; i++) {
+                unsigned int id = (unsigned int)AMotionEvent_getPointerId(ev, i);
+                float lx = AMotionEvent_getX(ev, i) / g.scale;
+                float ly = (AMotionEvent_getY(ev, i) - (float)g.inset_top) / g.scale;
+                pthread_mutex_lock(&g_bridge_lock);
+                if (g.chrome_active) maru_mobile_chrome_pointer(1, id, lx, ly);
+                else if (g.keybar_active) maru_mobile_keybar_pointer(1, id, lx, ly);
+                else maru_mobile_pointer(1, id, lx, ly, (unsigned long long)ev_ms);
+                pthread_mutex_unlock(&g_bridge_lock);
+                // **본문 관성은 host 몫이다**(계약 §3.1 — 코어에 시계가 없다). 소유자의 이동만
+                // 속도로 친다 — 나머지는 코어가 기준만 갱신한다.
+                if (!g.chrome_active && !g.keybar_active && g.has_ptr_id && id == g.ptr_id) {
+                    float dy = ly - g.touch_last_y;
+                    g.touch_last_y = ly;
+                    float pdt = (float)(ev_ms - g.ptr_last_t);
+                    if (pdt < 1.0f) pdt = 1.0f;
+                    if (pdt > 100.0f) pdt = 100.0f;
+                    float v = dy / pdt;
+                    if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
+                    if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
+                    g.fling_vy = v;
+                    g.ptr_last_t = ev_ms;
+                    g.touch_total_dy += dy;
+                }
             }
             return 1;
         }
-        if (action == AMOTION_EVENT_ACTION_MOVE) {
-            float dy = ly - g.touch_last_y;
-            g.touch_last_y = ly;
-            // **속도는 px/ms 다**(iOS 와 같은 식) — 이벤트 시각 간격으로 나눈다. 프레임당
-            // 이동량으로 두면 30Hz 인 이 기기가 60Hz 기기보다 두 배 멀리 미끄러진다.
-            float pdt = (float)(ev_ms - g.ptr_last_t);
-            if (pdt < 1.0f) pdt = 1.0f;
-            if (pdt > 100.0f) pdt = 100.0f;
-            float v = dy / pdt;
-            if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
-            if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
-            g.fling_vy = v;   // 손을 뗀 뒤 흘릴 관성 — 그것만 플랫폼 몫이다
-            g.ptr_last_t = ev_ms;
-            g.touch_total_dy += dy;
+
+        if (action == AMOTION_EVENT_ACTION_POINTER_DOWN || action == AMOTION_EVENT_ACTION_POINTER_UP ||
+            action == AMOTION_EVENT_ACTION_UP) {
+            unsigned int id = (unsigned int)AMotionEvent_getPointerId(ev, aidx);
+            float lx = AMotionEvent_getX(ev, aidx) / g.scale;
+            float ly = (AMotionEvent_getY(ev, aidx) - (float)g.inset_top) / g.scale;
+            unsigned int ph = (action == AMOTION_EVENT_ACTION_POINTER_DOWN) ? 0 : 2;
             pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_pointer(1, pid, lx, ly, (unsigned long long)ev_ms);
+            if (g.chrome_active) maru_mobile_chrome_pointer(ph, id, lx, ly);
+            else if (g.keybar_active) maru_mobile_keybar_pointer(ph, id, lx, ly);
+            else maru_mobile_pointer(ph, id, lx, ly, (unsigned long long)ev_ms);
             pthread_mutex_unlock(&g_bridge_lock);
+
+            // **본문 소유자가 떼지면 남은 손가락이 이어받는다** — 여기서는 기준을 다시 잡고
+            // **속도를 버린다**(AOSP `ScrollView.onSecondaryPointerUp` 이 하는 그것이다).
+            // 코어 쪽 기준은 손가락마다 있어 할 일이 없지만, **본문 관성은 host 가 든다**.
+            if (ph == 2 && !g.chrome_active && !g.keybar_active && g.has_ptr_id && id == g.ptr_id) {
+                g.has_ptr_id = 0;
+                for (size_t i = 0; i < pcount; i++) {
+                    if ((int32_t)i == aidx) continue; // 방금 떼진 손가락
+                    g.ptr_id = (unsigned int)AMotionEvent_getPointerId(ev, i);
+                    g.has_ptr_id = 1;
+                    g.touch_last_y = (AMotionEvent_getY(ev, i) - (float)g.inset_top) / g.scale;
+                    g.ptr_last_t = ev_ms;
+                    g.fling_vy = 0; // 불연속이 fling 이 되지 않게
+                    break;
+                }
+            }
+
+            if (action == AMOTION_EVENT_ACTION_UP) {
+                if (g.chrome_active) g.chrome_active = 0;
+                else if (g.keybar_active) { g.keybar_active = 0; drainClipboard(app); }
+                else {
+                    unsigned int vo = maru_mobile_view_offset();
+                    unsigned int has_sel = maru_mobile_has_selection();
+                    LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
+                }
+                g.has_ptr_id = 0;
+            }
             return 1;
         }
-        if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
-            pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_pointer(action == AMOTION_EVENT_ACTION_UP ? 2 : 3, pid, lx, ly,
-                                (unsigned long long)ev_ms);
-            unsigned int vo = maru_mobile_view_offset();
-            unsigned int has_sel = maru_mobile_has_selection();
-            pthread_mutex_unlock(&g_bridge_lock);
-            LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
-            return 1;
-        }
-        if (action != AMOTION_EVENT_ACTION_DOWN) return 0;
-        g.touch_last_y = ly;
-        g.touch_total_dy = 0;
-        g.fling_vy = 0;
-        g.ptr_last_t = ev_ms;
-        // **밀린 화면(설정)이 먼저다.** 톱니를 누르면 여기서 먹고, 설정이 떠 있으면 전부 먹는다.
-        pthread_mutex_lock(&g_bridge_lock);
-        unsigned int on_chrome = maru_mobile_chrome_pointer(0, pid, lx, ly);
-        pthread_mutex_unlock(&g_bridge_lock);
-        if (on_chrome) {
-            g.chrome_active = 1;
-            return 1;
-        }
-        // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
-        // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
-        pthread_mutex_lock(&g_bridge_lock);
-        unsigned int on_bar = maru_mobile_keybar_pointer(0, pid, lx, ly);
-        pthread_mutex_unlock(&g_bridge_lock);
-        if (on_bar) {
-            g.keybar_active = 1;
-            return 1;
-        }
-        pthread_mutex_lock(&g_bridge_lock);
-        maru_mobile_pointer(0, pid, lx, ly, (unsigned long long)ev_ms);
-        pthread_mutex_unlock(&g_bridge_lock);
-        unsigned int cell = maru_mobile_hit_cell(lx, ly);
-        LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
-             px, py, lx, ly, cell >> 16, cell & 0xFFFF);
-        return 1;
+        return 0;
     }
     // 키는 여기서 안 본다 — 소프트 키보드 문자는 `MaruActivity` 의 InputConnection 이 준다.
     return 0;

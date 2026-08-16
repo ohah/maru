@@ -242,6 +242,23 @@ pub const Table = struct {
     app_close_window_running: [:0]const u8,
     app_close_browser: [:0]const u8,
     app_close_window_browser: [:0]const u8,
+
+    // ── 세팅 섹션 이름 (I4) ──
+    // 스키마의 `Section` 과 1:1 이다. 새 섹션을 넣고 여기 키를 빠뜨리면 `settingsSectionLabel` 의
+    // switch 가 미처리 변형으로 **컴파일에 걸린다** — 이름 없는 섹션이 화면에 생기지 않는다.
+    set_section_app: [:0]const u8,
+    set_section_font: [:0]const u8,
+    set_section_theme: [:0]const u8,
+    set_section_cursor: [:0]const u8,
+    set_section_window: [:0]const u8,
+    set_section_input: [:0]const u8,
+    set_section_terminal: [:0]const u8,
+    set_section_workspace: [:0]const u8,
+    set_section_quick_terminal: [:0]const u8,
+    set_section_sidebar: [:0]const u8,
+    set_section_global_hotkey: [:0]const u8,
+    set_section_editor: [:0]const u8,
+    set_section_other: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -430,6 +447,19 @@ pub const en: Table = .{
     .app_close_window_running = "A command is still running. Close this window?",
     .app_close_browser = "You have open browser tabs. Close anyway?",
     .app_close_window_browser = "You have open browser tabs. Close this window?",
+    .set_section_app = "App",
+    .set_section_font = "Font",
+    .set_section_theme = "Theme",
+    .set_section_cursor = "Cursor",
+    .set_section_window = "Window",
+    .set_section_input = "Input",
+    .set_section_terminal = "Terminal",
+    .set_section_workspace = "Workspace",
+    .set_section_quick_terminal = "Quick Terminal",
+    .set_section_sidebar = "Sidebar",
+    .set_section_global_hotkey = "Global Hotkey",
+    .set_section_editor = "Editor",
+    .set_section_other = "Other",
 };
 
 pub const ko: Table = .{
@@ -618,6 +648,19 @@ pub const ko: Table = .{
     .app_close_window_running = "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
     .app_close_browser = "열린 브라우저 탭이 있습니다. 닫을까요?",
     .app_close_window_browser = "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
+    .set_section_app = "앱",
+    .set_section_font = "폰트",
+    .set_section_theme = "테마",
+    .set_section_cursor = "커서",
+    .set_section_window = "창",
+    .set_section_input = "입력",
+    .set_section_terminal = "터미널",
+    .set_section_workspace = "워크스페이스",
+    .set_section_quick_terminal = "퀵 터미널",
+    .set_section_sidebar = "사이드바",
+    .set_section_global_hotkey = "글로벌 핫키",
+    .set_section_editor = "편집기",
+    .set_section_other = "기타",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.
@@ -628,14 +671,15 @@ pub const Key = std.meta.FieldEnum(Table);
 /// 만지므로(문자열이 static이라 언어가 바뀌어도 그 슬라이스는 유효하다) 언어 전환은 **프레임 경계에서만**
 /// 일어나고 한 프레임 안에 두 언어가 섞이지 않는다.
 ///
-/// **초기값이 `ko`인 것은 한시적이다.** 계약 §5 는 기본값을 `auto`(OS 로케일)로 정했지만 그 배선은
-/// I4 가 든다. 그때까지 `en` 으로 두면 키로 옮긴 문자열이 전부 영어로 나와, 계약이 §5 에서 "기본값을
-/// `en` 으로 두면 한국어 사용자의 화면이 영어로 퇴보한다"고 경고한 바로 그 일이 **전환 도중에** 일어난다.
-/// 옮기는 작업이 표시를 바꾸면 안 되므로 현행(한국어)을 초기값으로 둔다.
+/// **초기값은 `en` 이다 — 이 값은 config 를 읽기 전에만 쓰인다.** 세션 init 이 `ui.language` 를 읽어
+/// `applyPreference` 로 즉시 덮으므로(기본 `auto` → 로케일 판정), 한국어 로케일에서 초기값이 화면에
+/// 남지 않는다. 계약 §5 가 "해석 실패는 `en`"으로 정한 것과 같은 값이라, 배선이 없는 경로(config 를
+/// 만들지 않는 도구·테스트)에서도 계약과 어긋나지 않는다.
 ///
-/// I4 가 `ui.language`(기본 `auto`)와 `fromLocale` 배선을 붙이면 이 초기값은 로드 전 잠깐만 쓰이는 값이
-/// 되고, 그때 `en` 으로 되돌린다 — 그 시점에는 로케일이 곧 언어를 정하므로 초기값이 화면에 남지 않는다.
-var current: Lang = .ko;
+/// 전환 도중(I3-0~I3a 슬라이스 5)에는 이 값이 한시적으로 `ko` 였다 — 배선 전에 `en` 을 두면 키로 옮긴
+/// 문자열이 전부 영어로 나와 **옮기는 작업이 표시를 바꿔** 버렸기 때문이다. I4a 가 배선을 붙이며 계약이
+/// 정한 값으로 되돌렸다.
+var current: Lang = .en;
 
 pub fn setLang(l: Lang) void {
     current = l;
@@ -753,6 +797,43 @@ pub fn fromLocale(tag: []const u8) Lang {
     return .en;
 }
 
+/// 사용자가 고르는 값(`ui.language`). `Lang`과 **일부러 다른 타입**이다 — `auto`는 표시할 수 있는
+/// 언어가 아니라 "OS에게 물어보라"는 지시라서, 같은 enum에 섞으면 `t()`가 `auto`를 받는 상태가
+/// 타입으로 표현 가능해진다. `config/theme.zig`가 이 타입을 그대로 재노출한다(판정은 여기가 소유).
+pub const Preference = enum { auto, en, ko };
+
+/// OS 로케일 식별자. platform이 시작 시 한 번 넣는다(계약 §5.1 — platform은 읽어서 넘기기만 한다).
+///
+/// 힙을 쓰지 않는 이유: 이 leaf는 할당자를 받지 않는다(중립 leaf 관행). 로케일 태그는 `ko-KR` 류의
+/// 짧은 ASCII라 고정 버퍼로 충분하고, 넘치면 잘라도 **언어 부분은 앞에 있어** 판정이 살아남는다.
+var os_locale_buf: [64]u8 = undefined;
+var os_locale_len: usize = 0;
+
+pub fn setOsLocale(tag: []const u8) void {
+    const n = @min(tag.len, os_locale_buf.len);
+    @memcpy(os_locale_buf[0..n], tag[0..n]);
+    os_locale_len = n;
+}
+
+pub fn osLocale() ?[]const u8 {
+    return if (os_locale_len == 0) null else os_locale_buf[0..os_locale_len];
+}
+
+/// 설정값 + 로케일 → 실제 언어. **로케일을 인자로 받는다** — 전역을 읽으면 OS 없이 테스트할 수 없다.
+pub fn resolve(pref: Preference, locale: ?[]const u8) Lang {
+    return switch (pref) {
+        .en => .en,
+        .ko => .ko,
+        // 로케일이 없으면(주입 실패·미지원 platform) `en`. 계약 §5의 "해석 실패는 en" 그대로다.
+        .auto => if (locale) |tag| fromLocale(tag) else .en,
+    };
+}
+
+/// 설정값을 현재 언어로 적용한다 — config 로드·변경 경로(UI 스레드)가 부른다(계약 §5.2).
+pub fn applyPreference(pref: Preference) void {
+    setLang(resolve(pref, osLocale()));
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  테스트 — 이 파일이 증명하는 것
 //
@@ -838,11 +919,14 @@ test "한국어 테이블에는 한글이 있다 — 번역을 빠뜨리고 영�
     }
 }
 
-test "전환 도중의 초기 언어는 ko 다 — 옮기는 작업이 표시를 바꾸면 안 된다" {
-    // I4 가 ui.language 배선을 붙이기 전까지 이 값이 화면 언어를 정한다. en 으로 되돌아가면 키로 옮긴
-    // 문자열이 전부 영어로 나와 사용자 화면이 조용히 바뀐다(계약 §5 의 퇴보). I4 에서 이 테스트를
-    // "로드 전 초기값" 성격으로 다시 쓴다.
-    try testing.expectEqual(Lang.ko, lang());
+test "로드 전 초기 언어는 en 이다 — 계약이 정한 폴백과 같은 값이어야 한다" {
+    // 이 값은 config 를 읽기 전에만 쓰인다(세션 init 이 applyPreference 로 즉시 덮는다). 그래도 배선이
+    // 없는 경로에서는 이 값이 그대로 남으므로, **계약 §5 의 "해석 실패는 en"과 같은 값**이어야 한다.
+    // 다른 값으로 새면 배선 없는 경로만 다른 언어를 쓰게 되어 어디가 정답인지 알 수 없어진다.
+    //
+    // 다른 테스트가 setLang 으로 전역을 바꿔 놓고 복원하지 않으면 여기서 드러난다 — 이 파일의 테스트는
+    // 전부 defer 로 되돌린다.
+    try testing.expectEqual(resolve(.auto, null), lang());
 }
 
 test "tIn: 언어별로 다른 문자열을 준다 — 전역을 건드리지 않는다" {
@@ -958,4 +1042,62 @@ test "fromLocale: 모르는 값은 영어로 떨어진다" {
     try testing.expectEqual(Lang.en, fromLocale(""));
     try testing.expectEqual(Lang.en, fromLocale("k"));
     try testing.expectEqual(Lang.en, fromLocale("kor")); // "ko" 접두지만 구분자가 없다
+}
+
+test "resolve: 명시값은 로케일을 무시하고, auto 만 로케일을 본다" {
+    // 명시값이 로케일에 흔들리면 "영어 고정"이 고정이 아니게 된다.
+    try testing.expectEqual(Lang.en, resolve(.en, "ko-KR"));
+    try testing.expectEqual(Lang.ko, resolve(.ko, "en-US"));
+
+    try testing.expectEqual(Lang.ko, resolve(.auto, "ko-KR"));
+    try testing.expectEqual(Lang.en, resolve(.auto, "en-US"));
+}
+
+test "resolve: auto 인데 로케일이 없으면 en 이다 — 읽을 수 없는 언어보다 영어가 낫다" {
+    // 주입이 실패하거나 로케일 개념이 없는 platform 에서 이 경로를 탄다. 계약 §5 의 "해석 실패는 en".
+    try testing.expectEqual(Lang.en, resolve(.auto, null));
+}
+
+test "setOsLocale: 버퍼보다 긴 태그는 잘려도 언어 판정이 살아남는다" {
+    const before_len = os_locale_len;
+    defer os_locale_len = before_len;
+
+    os_locale_len = 0;
+    try testing.expectEqual(@as(?[]const u8, null), osLocale());
+
+    // 언어 부분(`ko`)은 태그의 **앞**에 있으므로, 뒤가 잘려도 판정은 그대로다.
+    var long: [200]u8 = undefined;
+    @memset(&long, 'x');
+    @memcpy(long[0..6], "ko-KR.");
+    setOsLocale(&long);
+    try testing.expectEqual(@as(usize, os_locale_buf.len), os_locale_len);
+    try testing.expectEqual(Lang.ko, resolve(.auto, osLocale()));
+}
+
+test "Preference 는 Lang 과 다른 타입이다 — auto 를 표시 언어로 쓸 수 없다" {
+    // `auto`가 `Lang`에 섞이면 `t()`가 "OS에게 물어보라"는 지시를 문자열로 그리려는 상태가
+    // 타입으로 표현 가능해진다. 두 enum 의 변형 집합이 갈라져 있는 것이 그 방어다.
+    try testing.expectEqual(@as(usize, 2), @typeInfo(Lang).@"enum".fields.len);
+    try testing.expectEqual(@as(usize, 3), @typeInfo(Preference).@"enum".fields.len);
+
+    // 이름이 겹치는 둘(`en`·`ko`)은 뜻이 같아야 한다 — 갈리면 설정값과 표시 언어가 어긋난다.
+    inline for (@typeInfo(Lang).@"enum".fields) |f| {
+        try testing.expectEqual(@field(Lang, f.name), resolve(@field(Preference, f.name), null));
+    }
+}
+
+test "applyPreference: 전역 로케일을 거쳐 현재 언어를 바꾼다" {
+    const lang_before = current;
+    const locale_before_len = os_locale_len;
+    defer {
+        current = lang_before;
+        os_locale_len = locale_before_len;
+    }
+
+    setOsLocale("ko-KR");
+    applyPreference(.auto);
+    try testing.expectEqual(Lang.ko, lang());
+
+    applyPreference(.en); // 명시값은 로케일을 덮는다
+    try testing.expectEqual(Lang.en, lang());
 }

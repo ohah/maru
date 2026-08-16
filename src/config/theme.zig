@@ -10,7 +10,11 @@ pub const Widget = enum { auto, toggle, number, dropdown, text, color };
 
 /// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1. `.global_hotkey`는 schema 필드가 없는
 /// 특수 섹션(전역 OS 단축키 녹음 행만 — app_session이 강제로 목록에 넣고 라벨을 준다).
-pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey, editor };
+pub const Section = enum { app, font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey, editor };
+
+/// `ui.language`가 갖는 값. **판정은 `src/i18n.zig`가 소유**하므로 여기서 새로 정의하지 않고 재노출한다
+/// (계약 §5.1 — 로케일 문자열을 언어로 옮기는 규칙이 플랫폼·레이어마다 복제되면 조용히 갈린다).
+pub const UiLanguage = @import("../i18n.zig").Preference;
 
 /// 한 필드의 메타. 값은 평범한 Zig 필드로 두고(직접 접근 보존), 메타만 sub-struct `schema` decl에 comptime으로 둔다.
 pub const Meta = struct {
@@ -1036,6 +1040,13 @@ pub const Config = struct {
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,
+    /// UI 표시 언어. `Config`에 `ui` sub-struct가 없어 **직속 스칼라**로 두고 `Meta.key`가 전체 키
+    /// `"ui.language"`를 준다(`blink_text`가 `"text.blink"`를 갖는 것과 같은 패턴, CS-2b).
+    ///
+    /// **기본값이 `auto`인 이유**: 화면이 이미 한국어라(계약 §1.1) `en`을 기본으로 두면 이 기능을 켜는
+    /// 순간 한국어 사용자의 화면이 영어로 바뀐다 — 기능을 더했는데 경험이 퇴보한다. `auto`는 한국어
+    /// 로케일에서 현행을 보존하고 영어권에서만 개선이 된다. loader가 `ui.language` 키로 파싱.
+    ui_language: UiLanguage = .auto,
     /// EAW Ambiguous(동그란 번호 등) 문자의 셀 폭. 기본 narrow(1칸 — 정렬 안전·Ghostty/xterm.js 호환).
     /// loader가 `text.ambiguous-width` 키로 파싱. 자세한 트레이드오프는 AmbiguousWidth 참고.
     ambiguous_width: AmbiguousWidth = .narrow,
@@ -1153,6 +1164,7 @@ pub const Config = struct {
     // 최상위 스칼라(Config 직속 — sub-struct가 아니라 namespace가 없으므로 Meta.key로 전체 키를 명시한다, CS-2b).
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
+        .ui_language = Meta{ .key = "ui.language", .doc = "UI 표시 언어(auto=OS 로케일)", .widget = .dropdown, .section = .app },
         .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
         .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = "활성 탭 룩(connected|underline|pill)", .widget = .dropdown, .section = .theme },
         .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = "시스템 라이트/다크 따라 테마 전환", .widget = .toggle, .section = .theme },

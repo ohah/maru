@@ -313,20 +313,21 @@ pub fn settingsRowMatches(label: []const u8, key: []const u8, query: []const u8)
 
 /// 섹션 표시 라벨(config_mod.Section → 한국어). null=스키마 섹션 미지정 그룹("기타").
 pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
-    const s = sec orelse return "기타";
-    return switch (s) {
-        .font => "폰트",
-        .theme => "테마",
-        .cursor => "커서",
-        .window => "창",
-        .input => "입력",
-        .terminal => "터미널",
-        .workspace => "워크스페이스",
-        .quick_terminal => "퀵 터미널",
-        .sidebar => "사이드바",
-        .global_hotkey => "글로벌 핫키",
-        .editor => "편집기",
-    };
+    const s = sec orelse return maru.i18n.t(.set_section_other);
+    return maru.i18n.t(switch (s) {
+        .app => .set_section_app,
+        .font => .set_section_font,
+        .theme => .set_section_theme,
+        .cursor => .set_section_cursor,
+        .window => .set_section_window,
+        .input => .set_section_input,
+        .terminal => .set_section_terminal,
+        .workspace => .set_section_workspace,
+        .quick_terminal => .set_section_quick_terminal,
+        .sidebar => .set_section_sidebar,
+        .global_hotkey => .set_section_global_hotkey,
+        .editor => .set_section_editor,
+    });
 }
 
 /// UI에 새로 노출해도 되는 config 키인가. `chrome.theme=tui`와 `chrome.preset=cell`은 이미 저장된
@@ -994,6 +995,7 @@ pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
     self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
     self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
     self.option_as_meta = self.loaded_config.config.input.option_as_meta;
+    reapplyUiLanguage(self);
     reapplyScrollback(self);
     reapplyConfigPalette(self);
     reapplyAmbiguousWidth(self);
@@ -1714,6 +1716,7 @@ pub fn reloadConfig(self: *AppSession) void {
     self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
     self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
     self.option_as_meta = self.loaded_config.config.input.option_as_meta;
+    reapplyUiLanguage(self);
     reapplyScrollback(self);
     reapplyConfigPalette(self);
     reapplyAmbiguousWidth(self);
@@ -1938,6 +1941,17 @@ pub fn reapplyScrollback(self: *AppSession) void {
 /// text.ambiguous-width reload를 라이브 코어에 재적용한다(createTerm chokepoint와 같은 값을 이미 떠 있는
 /// surface에도). reader 단일 mutator 계약상 set_max_scrollback과 같이 CoreCommand로 위임한다. 이후 putCell부터
 /// 새 폭이 반영된다(이미 저장된 셀은 옛 폭 유지 — 폭 변경은 본래 redraw 필요; max_scrollback과 같은 best-effort).
+/// `ui.language` 를 현재 UI 언어에 반영한다.
+///
+/// **재시작을 요구하지 않는다**(i18n 계약 §5.1) — 번역 대상이 전부 chrome 이 매 프레임 그리는 표면이라
+/// 전역만 바꾸면 다음 프레임에 반영된다. 그래서 여기서 하는 일은 전역 갱신뿐이고, 다시 그리라는 신호는
+/// 이 함수를 부르는 두 경로(파일 reload · GUI 변경)가 이미 세운다.
+///
+/// 쓰기가 UI 스레드에서만 일어나는 것이 §5.2 의 소유 규칙이다 — 이 두 경로가 그 스레드다.
+pub fn reapplyUiLanguage(self: *AppSession) void {
+    maru.i18n.applyPreference(self.loaded_config.config.ui_language);
+}
+
 pub fn reapplyAmbiguousWidth(self: *AppSession) void {
     const wide = self.loaded_config.config.ambiguous_width == .wide;
     for (self.tabs.items) |tab| {

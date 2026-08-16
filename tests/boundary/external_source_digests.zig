@@ -453,10 +453,6 @@ pub const inventory = [_]Proof{
     // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
     // 경로가 정리되면 지운다). 같은 PR 의 검증 후속으로 한 번 더 움직였다 — 두 파일이 공유하는 키를
     // common_ 접두로 옮기며 이 파일의 호출 둘이 바뀌었다.
-    //
-    // 비교 뷰 가로 스크롤(§4.1e)로 Term rt에 열별 필드 둘이 붙는다(`editor_first_col_right`·
-    // `editor_max_cols_right` — 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구한다).
-    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c77185e4f4d6437bfe0e5b4752e3c3c5da0e6c23d53fc06e8833e36493c8b724" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -493,7 +489,7 @@ pub const inventory = [_]Proof{
     // 리터럴→키 교체, 그리고 함수 셋으로의 분리뿐이라 반사가 늘거나 준 것이 아니다.
     // i18n I3a 슬라이스 3에서 또 움직인다 — 이 파일의 notice 리터럴 10건이 `showNoticeKey`로 옮겨졌다.
     // count는 2 그대로다(반사 무변).
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "fb9fd342033f99b7d3ba89b90e495b36107f2b7a876c441f4998efc2c5bc33a5" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8e1effefb11b038bf6ae2159e1f6eca0e80ce12ae45bdba3d27695ea5da585a6" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -519,5 +515,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "74d30845a5957e88786db54aa6b1f37534d1b9adeacc1577d05072652acd31d9" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "b9a2c9c86787e8a8758e120a67123ebd9d4413d2e76c88e90cf2331c77fad674" },
 };

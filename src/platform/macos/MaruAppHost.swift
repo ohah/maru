@@ -3763,6 +3763,22 @@ private func acquireAppInstanceWriterLeaseBeforeAppKit() -> UInt32 {
     }
 }
 
+/// OS가 고른 언어를 Zig에 넘긴다.
+///
+/// **Swift는 읽어서 전달만 하고 해석하지 않는다**(docs/i18n.md §5.1). `ko-KR`을 한국어로 읽는 규칙은
+/// 중립 층(`src/i18n.zig`)이 소유한다 — 여기서 판정하면 Windows 호스트가 같은 규칙을 다시 쓰게 되고
+/// 둘이 조용히 갈린다. `preferredLanguages`는 사용자가 시스템 설정에서 **정렬한** 목록이라 첫 항목이
+/// 곧 "이 사람이 읽고 싶은 언어"다(`Locale.current`는 지역 서식이라 언어와 다를 수 있다).
+///
+/// 세션을 만들기 전마다 부른다 — 값이 같으면 무해하고, 시스템 언어가 바뀐 뒤 연 창은 새 값을 받는다.
+private func publishUiLocale() {
+    guard let tag = Locale.preferredLanguages.first else { return } // 못 읽으면 무동작 → auto는 영어로 떨어진다
+    let bytes = Array(tag.utf8)
+    bytes.withUnsafeBufferPointer { buffer in
+        maru_macos_app_set_ui_locale(buffer.baseAddress, buffer.count)
+    }
+}
+
 private func appInstanceLeaseFailureReason(_ status: UInt32) -> (code: Int32, reason: String) {
     switch status {
     case UInt32(MARU_APP_INSTANCE_LEASE_HELD):
@@ -5269,6 +5285,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scale_milli: m.scaleMilli,
             defer_initial_surface: deferInitialSurface ? 1 : 0
         )
+        // 세션이 config를 읽으며 UI 언어를 정하므로(`ui.language = auto` → 로케일 판정) **그 전에** 넘긴다.
+        publishUiLocale()
+
         var session: OpaquePointer?
         let status = maru_macos_app_session_create(&config, &session)
         appSessionStatus = status

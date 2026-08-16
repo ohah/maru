@@ -599,7 +599,7 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
             term.rt.editor_first_col = 0;
             self.metal_dirty = true;
         }
-        return false;
+        return true;
     }
 
     // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
@@ -2181,4 +2181,32 @@ test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이�
     try testing.expect(scrollCols(fx.session, fx.term, wide, -1_000_000));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
     try testing.expectEqual(counted, fx.term.rt.editor_max_cols); // 다시 세지 않았다
+}
+
+test "가로로 밀어도 컨트롤 플레인은 같은 사실을 말한다 — 위치는 메타가 아니다" {
+    // 비교 Term에는 세로에 같은 계약의 테스트가 있다(`editor_diff.zig`). **새 축에도 같은 것이
+    // 필요하다** — 메타(경로·읽기 전용)가 가로 위치에 따라 흔들리면 밖에서 보는 쪽이 "다른 파일이
+    // 열렸다"고 오해한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try hscrollFixtureLines(allocator, &fx, 500);
+    const long_buf = lines[1];
+    defer allocator.free(long_buf);
+    defer allocator.free(lines);
+
+    const before = editor_diff_ops.editorMeta(fx.term);
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -50));
+    try testing.expect(fx.term.rt.editor_first_col > 0); // 실제로 밀렸다 — 아니면 공허하다
+    var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const after = editor_diff_ops.editorMeta(fx.term);
+    try testing.expectEqual(before.read_only, after.read_only);
+    try testing.expectEqualStrings(before.path.?, after.path.?);
 }

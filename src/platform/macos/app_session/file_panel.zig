@@ -1276,7 +1276,7 @@ pub fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
         return;
     };
     self.pending_file_tree_delete = copyPendingFileTreeDelete(target, self.file_tree.rootGeneration()) orelse return;
-    self.showConfirmButtons(.file_tree_delete, "선택한 항목을 macOS 휴지통으로 이동할까요?", .{ .confirm = "휴지통으로 이동", .cancel = "취소" });
+    self.showConfirmKeys(.file_tree_delete, .fp_trash_confirm, .{ .confirm = .btn_move_to_trash });
 }
 
 pub fn takePendingTrashStaged(self: *AppSession, id: u64) ?[]u8 {
@@ -1809,12 +1809,12 @@ pub fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome
 pub fn showFilePanelCloseChoices(self: *AppSession, pending: PendingFilePanelClose, entry: *const dock_panel.Entry) void {
     self.pending_file_panel_close = pending;
     if (entry.external_change) {
-        self.showConfirmButtons(.file_panel_close, "디스크에서 변경된 파일입니다. 변경사항을 버리고 닫을까요?", .{ .confirm = "변경사항 버리기", .cancel = "취소" });
+        self.showConfirmKeys(.file_panel_close, .fp_close_external_confirm, .{ .confirm = .btn_discard_changes });
         var next = pending;
         next.phase = .confirm_conflict;
         self.pending_file_panel_close = next;
     } else {
-        self.showConfirmChoices(.file_panel_close, "저장하지 않은 변경사항이 있습니다.", .{ .primary = "저장", .alternate = "변경사항 버리기", .cancel = "취소" });
+        self.showConfirmChoiceKeys(.file_panel_close, .fp_unsaved_confirm, .{ .primary = .btn_save, .alternate = .btn_discard_changes });
         var next = pending;
         next.phase = .confirm_dirty;
         self.pending_file_panel_close = next;

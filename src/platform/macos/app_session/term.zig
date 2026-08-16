@@ -32,7 +32,7 @@ const AppSession = app_session_mod.AppSession;
 const buildPastePreview = AppSession.buildPastePreview;
 const session_host = app_session_mod.session_host;
 const diag_gate = app_session_mod.diag_gate;
-const paste_confirm_message = AppSession.paste_confirm_message;
+const paste_confirm_key = AppSession.paste_confirm_key;
 const markHostConnectFailedError = app_session_mod.markHostConnectFailedError;
 const freeDiffEntryState = app_session_mod.freeDiffEntryState;
 const ensureRestoreHostAdapter = app_session_mod.ensureRestoreHostAdapter;
@@ -1005,7 +1005,7 @@ pub fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, t
     if (needs_confirm) {
         // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
         // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
-        self.showConfirmButtons(.{ .paste = target_id }, paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+        self.showConfirmKeys(.{ .paste = target_id }, paste_confirm_key, .{ .confirm = .btn_paste });
         // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
         self.chrome_host.confirm.body = self.buildPastePreview(payload);
         self.pending_paste_confirm.clearRetainingCapacity();

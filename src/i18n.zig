@@ -209,6 +209,30 @@ pub const Table = struct {
     dbg_editor_too_large: [:0]const u8,
     dbg_editor_unreadable: [:0]const u8,
     dbg_editor_oom: [:0]const u8,
+
+    // ── 확인 대화상자와 버튼 라벨 (I3a 슬라이스 5) ──
+    // `btn_*` 는 여러 대화상자가 공유하는 **행동 이름**이라 대화상자별 접두를 쓰지 않는다.
+    common_confirm: [:0]const u8,
+    common_cancel: [:0]const u8,
+    btn_quit: [:0]const u8,
+    btn_quit_end_session: [:0]const u8,
+    btn_reset: [:0]const u8,
+    btn_reload: [:0]const u8,
+    btn_move_to_trash: [:0]const u8,
+    btn_discard_changes: [:0]const u8,
+    btn_save: [:0]const u8,
+    btn_paste: [:0]const u8,
+    btn_close: [:0]const u8,
+    btn_allow: [:0]const u8,
+    btn_deny: [:0]const u8,
+    app_quit_confirm_keepalive: [:0]const u8,
+    app_quit_confirm: [:0]const u8,
+    app_reset_confirm: [:0]const u8,
+    app_reload_external_confirm: [:0]const u8,
+    fp_trash_confirm: [:0]const u8,
+    fp_close_external_confirm: [:0]const u8,
+    fp_unsaved_confirm: [:0]const u8,
+    term_paste_confirm: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -371,6 +395,28 @@ pub const en: Table = .{
     .dbg_editor_too_large = "Native editor: the file exceeds the read limit.",
     .dbg_editor_unreadable = "Native editor: could not read the file.",
     .dbg_editor_oom = "Native editor: out of memory.",
+
+    .common_confirm = "OK",
+    .common_cancel = "Cancel",
+    .btn_quit = "Quit",
+    .btn_quit_end_session = "Quit and end sessions",
+    .btn_reset = "Reset",
+    .btn_reload = "Reload",
+    .btn_move_to_trash = "Move to Trash",
+    .btn_discard_changes = "Discard changes",
+    .btn_save = "Save",
+    .btn_paste = "Paste",
+    .btn_close = "Close",
+    .btn_allow = "Allow",
+    .btn_deny = "Deny",
+    .app_quit_confirm_keepalive = "Quit maru? Open terminals stay in the background.",
+    .app_quit_confirm = "Quit maru?",
+    .app_reset_confirm = "This resets all settings to defaults and overwrites the config file. Continue?",
+    .app_reload_external_confirm = "The file changed outside. Discard your edits and reload from disk?",
+    .fp_trash_confirm = "Move the selected item to the macOS Trash?",
+    .fp_close_external_confirm = "This file changed on disk. Discard changes and close?",
+    .fp_unsaved_confirm = "There are unsaved changes.",
+    .term_paste_confirm = "The pasted content has newlines or control characters, so a command could run immediately. Paste anyway?",
 };
 
 pub const ko: Table = .{
@@ -533,6 +579,28 @@ pub const ko: Table = .{
     .dbg_editor_too_large = "네이티브 편집기: 파일이 읽기 상한을 넘었습니다.",
     .dbg_editor_unreadable = "네이티브 편집기: 파일을 읽지 못했습니다.",
     .dbg_editor_oom = "네이티브 편집기: 메모리가 모자랍니다.",
+
+    .common_confirm = "확인",
+    .common_cancel = "취소",
+    .btn_quit = "종료",
+    .btn_quit_end_session = "종료 및 세션 끝내기",
+    .btn_reset = "초기화",
+    .btn_reload = "다시 읽기",
+    .btn_move_to_trash = "휴지통으로 이동",
+    .btn_discard_changes = "변경사항 버리기",
+    .btn_save = "저장",
+    .btn_paste = "붙여넣기",
+    .btn_close = "닫기",
+    .btn_allow = "허용",
+    .btn_deny = "거부",
+    .app_quit_confirm_keepalive = "maru를 종료할까요? 열린 터미널은 백그라운드에서 유지됩니다.",
+    .app_quit_confirm = "maru를 종료할까요?",
+    .app_reset_confirm = "모든 설정을 기본값으로 되돌리고 config 파일을 덮어씁니다. 계속할까요?",
+    .app_reload_external_confirm = "외부에서 파일이 변경되었습니다. 편집 중인 내용을 버리고 디스크에서 다시 읽을까요?",
+    .fp_trash_confirm = "선택한 항목을 macOS 휴지통으로 이동할까요?",
+    .fp_close_external_confirm = "디스크에서 변경된 파일입니다. 변경사항을 버리고 닫을까요?",
+    .fp_unsaved_confirm = "저장하지 않은 변경사항이 있습니다.",
+    .term_paste_confirm = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.
@@ -543,9 +611,14 @@ pub const Key = std.meta.FieldEnum(Table);
 /// 만지므로(문자열이 static이라 언어가 바뀌어도 그 슬라이스는 유효하다) 언어 전환은 **프레임 경계에서만**
 /// 일어나고 한 프레임 안에 두 언어가 섞이지 않는다.
 ///
-/// 초기값이 `en`인 이유는 config 로드 **전**에 참조될 수 있기 때문이다. 한국어 사용자가 시작 순간 영어
-/// 화면을 스치지 않으려면 로드 완료 전 렌더를 미뤄야 하며, 그 확인은 `ui.language` 배선(I4)이 든다.
-var current: Lang = .en;
+/// **초기값이 `ko`인 것은 한시적이다.** 계약 §5 는 기본값을 `auto`(OS 로케일)로 정했지만 그 배선은
+/// I4 가 든다. 그때까지 `en` 으로 두면 키로 옮긴 문자열이 전부 영어로 나와, 계약이 §5 에서 "기본값을
+/// `en` 으로 두면 한국어 사용자의 화면이 영어로 퇴보한다"고 경고한 바로 그 일이 **전환 도중에** 일어난다.
+/// 옮기는 작업이 표시를 바꾸면 안 되므로 현행(한국어)을 초기값으로 둔다.
+///
+/// I4 가 `ui.language`(기본 `auto`)와 `fromLocale` 배선을 붙이면 이 초기값은 로드 전 잠깐만 쓰이는 값이
+/// 되고, 그때 `en` 으로 되돌린다 — 그 시점에는 로케일이 곧 언어를 정하므로 초기값이 화면에 남지 않는다.
+var current: Lang = .ko;
 
 pub fn setLang(l: Lang) void {
     current = l;
@@ -746,6 +819,13 @@ test "한국어 테이블에는 한글이 있다 — 번역을 빠뜨리고 영�
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "전환 도중의 초기 언어는 ko 다 — 옮기는 작업이 표시를 바꾸면 안 된다" {
+    // I4 가 ui.language 배선을 붙이기 전까지 이 값이 화면 언어를 정한다. en 으로 되돌아가면 키로 옮긴
+    // 문자열이 전부 영어로 나와 사용자 화면이 조용히 바뀐다(계약 §5 의 퇴보). I4 에서 이 테스트를
+    // "로드 전 초기값" 성격으로 다시 쓴다.
+    try testing.expectEqual(Lang.ko, lang());
 }
 
 test "tIn: 언어별로 다른 문자열을 준다 — 전역을 건드리지 않는다" {

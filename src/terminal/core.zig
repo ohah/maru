@@ -5834,6 +5834,37 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         }
     }
 
+    // **역슬래시 상대 경로**(W5.5) — 이 단언은 **제품 함수를 직접 몬다**. 규칙 자체의 전수 검증은
+    // `path_shape.detectableRelativePrefixFor`가 두 OS 갈래로 하고(거기가 단일 출처), 여기서는 그것이
+    // `linkSpanInWord`의 scope 태그까지 이어지는지를 본다.
+    //
+    // 감지는 **호스트 OS 기준**이라(절대 갈래와 같다) 단언을 호스트로 가른다. macOS에서 `.\x`가 안 잡히는
+    // 것은 버그가 아니라 계약이다 — 거기서 그 토큰은 하위 경로가 아니라 그 이름의 파일 하나다.
+    {
+        const win_rel = [_][]const u8{ ".\\src\\main.zig", "..\\lib\\y.rb", "~\\notes.md", ".\\build" };
+        for (win_rel) |w| {
+            const got = selection.linkSpanInWord(w, full);
+            if (@import("builtin").os.tag == .windows) {
+                if (got == null) {
+                    std.debug.print("Windows에서 역슬래시 상대가 안 잡혔다: {s}\n", .{w});
+                    return error.TestUnexpectedResult;
+                }
+                try std.testing.expectEqual(selection.LinkKind.file_path, got.?.kind);
+                try std.testing.expectEqualStrings(w, w[got.?.start..got.?.end]);
+            } else if (got != null) {
+                std.debug.print("비-Windows에서 역슬래시 상대가 잡혔다: {s}\n", .{w});
+                return error.TestUnexpectedResult;
+            }
+        }
+        // 정규식 조각은 **어느 호스트에서도** 링크가 아니다.
+        for ([_][]const u8{ ".\\d+", ".\\s*", ".\\d{2,4}", ".\\n" }) |w| {
+            if (selection.linkSpanInWord(w, full) != null) {
+                std.debug.print("정규식 조각이 링크로 잡혔다: {s}\n", .{w});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+
     // scope 게이팅: web만이면 경로·추가 스킴은 무시하고 http(s)만 잡는다(이전 동작 회귀 0).
     const web = selection.link_scopes_web;
     try std.testing.expect(selection.linkSpanInWord("/Users/me/a.py", web) == null);

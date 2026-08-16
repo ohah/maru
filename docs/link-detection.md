@@ -45,10 +45,21 @@
 | 1 | 스킴 URL (web) | `web` | `https://x`, `http://x`, `dot.http://x`(스킴부터) | url |
 | 2 | 추가 스킴 | `extra_schemes` | `file://`, `mailto:`, `ssh://`, `ftp://`, `git://`, `tel:`, `news:`, `magnet:` | url |
 | 3 | 절대 경로 | `absolute_path` | `/Users/me/a.zig`, `/etc/hosts` (`//`로 시작은 제외 — 주석·이중슬래시). **Windows 호스트에서만** 드라이브 절대 `C:\x`·`C:/x`도 (아래) | file_path |
-| 4 | 홈 경로 | `home_path` | `~/.config/maru/config`, `~/notes.md` | file_path |
-| 5 | 명시 상대 | `dot_relative` | `./src/main.zig`, `../lib/y.rb` | file_path |
-| 6 | bare 상대 | `bare_relative` | `src/config/url.zig`, `app/x.rb:1` (슬래시 + 점 필수) | file_path |
+| 4 | 홈 경로 | `home_path` | `~/.config/maru/config`, `~/notes.md`. **Windows 호스트에서만** `~\notes.md`도 (아래) | file_path |
+| 5 | 명시 상대 | `dot_relative` | `./src/main.zig`, `../lib/y.rb`. **Windows 호스트에서만** `.\src\main.zig`·`..\lib\y.rb`도 (아래) | file_path |
+| 6 | bare 상대 | `bare_relative` | `src/config/url.zig`, `app/x.rb:1` (슬래시 + 점 필수). **역슬래시는 안 받는다** — 아래 | file_path |
 
+- **역슬래시 철자(Windows 호스트)**: `.\x`·`..\x`·`~\x`는 받고 `src\main.zig`는 **안 받는다.** 앞의 셋은
+  접두가 명확해 규칙이 성립하지만, bare 상대는 이스케이프 출력과 **구조가 같아** 토큰만 봐서는 못 가른다:
+
+  ```text
+  src\main.zig      → [src][main.zig]
+  line1\nline2.log  → [line1][nline2.log]
+  ```
+
+  규칙과 그 오탐 대가는 `path_shape.detectableRelativePrefixFor`의 doc이, 후보를 어떻게 골랐는지는
+  [windows-platform.md](windows-platform.md) §5.2 ⒜의 실측표가 단일 출처다. POSIX 철자는 **모든 호스트에서
+  예전 그대로**다(회귀 0).
 - **스킴이 경로보다 우선**한다(`http://h:8080`은 URL의 포트지 줄번호가 아니다 — 스킴 가지가 먼저 잡아 안전).
 - **bare-relative 오탐 억제**: 슬래시 필수 + 점 필수(콤마 전 head 기준) + `$`로 시작 금지 + `//` 금지.
   `foo/bar`(점 없음)·`input/output`·`$10/bar`는 매치하지 않는다. 남은 오탐은 stat 게이트가 거른다.

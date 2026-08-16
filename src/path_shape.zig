@@ -116,6 +116,69 @@ pub fn isDetectableAbsoluteFor(os_tag: std.Target.Os.Tag, path: []const u8) bool
     return std.fs.path.isAbsoluteWindows(path);
 }
 
+/// 접두가 명확한 상대 경로의 종류. `filePathSpan`의 scope 태그와 1:1이다.
+pub const RelativePrefix = enum { dot, home };
+
+/// 정규식 클래스로 쓰이는 글자들. `\` 뒤에 이것 하나만 오면(또는 뒤에 수량자가 붙으면) 경로가 아니라
+/// 정규식 조각이다 — 오탐 스윕이 찾은 **유일한 공통 모양**이다(docs/windows-platform.md §5.2 ⒜).
+const regex_class_letters = "dDwWsSbBnrtfvaAzZ0pP";
+
+/// `.\x`·`..\x`·`~\x`처럼 **접두가 명확한 상대 경로**인가. 아니면 null.
+///
+/// 본체는 `detectableRelativePrefixFor`이고, 여기는 호스트 OS를 채워 넣는 얇은 래퍼다.
+pub fn detectableRelativePrefix(path: []const u8) ?RelativePrefix {
+    return detectableRelativePrefixFor(@import("builtin").os.tag, path);
+}
+
+/// 본체 — 판정 기준이 되는 OS를 **인자로** 받는다(`isDetectableAbsoluteFor`와 같은 이유·같은 모양).
+///
+/// **POSIX 철자(`./` `../` `~/`)는 모든 호스트에서 예전 그대로다** — 회귀 0이 이 함수의 첫 계약이다.
+/// 역슬래시 철자는 Windows 기준일 때만 본다. macOS에서 `.\x`는 `\x`가 이름의 일부인 **한 개의 파일**이지
+/// 하위 경로가 아니라, 거기서 링크로 보면 클릭이 엉뚱한 것을 연다(절대 갈래와 같은 판단).
+///
+/// **역슬래시 철자에만 세그먼트 검사를 건다.** 이스케이프·정규식 출력과 충돌하기 때문이다. 오탐 스윕에서
+/// 후보 다섯 계열을 누적 35건에 돌린 결과(계약 §5.2 ⒜), 오탐의 공통 모양은 하나였다 — **세그먼트가 정규식
+/// 클래스 글자 하나**(`\d`·`\w`·`\s`·`\n`)이거나 **거기에 수량자가 붙은 것**(`\d+`·`\s*`·`\d{2,4}`·`\p{L}`).
+/// 진짜 경로 세그먼트는 `src`·`build`·`Makefile`처럼 두 글자 이상이거나 클래스 글자가 아니다.
+///
+/// **대가**: 디렉터리 이름이 진짜 한 글자 클래스 글자면(`.\d\x.txt`) 감지하지 않는다. 드물고, 반대 방향의
+/// 오탐(정규식이 밑줄 뜨고 클릭되는 것)보다 낫다고 본다.
+pub fn detectableRelativePrefixFor(os_tag: std.Target.Os.Tag, path: []const u8) ?RelativePrefix {
+    const posix: ?RelativePrefix = if (std.mem.startsWith(u8, path, "../"))
+        .dot
+    else if (std.mem.startsWith(u8, path, "./"))
+        .dot
+    else if (std.mem.startsWith(u8, path, "~/"))
+        .home
+    else
+        null;
+    if (posix) |p| return p;
+
+    if (os_tag != .windows) return null;
+    const win: struct { kind: RelativePrefix, len: usize } = if (std.mem.startsWith(u8, path, "..\\"))
+        .{ .kind = .dot, .len = 3 }
+    else if (std.mem.startsWith(u8, path, ".\\"))
+        .{ .kind = .dot, .len = 2 }
+    else if (std.mem.startsWith(u8, path, "~\\"))
+        .{ .kind = .home, .len = 2 }
+    else
+        return null;
+
+    const rest = path[win.len..];
+    if (rest.len == 0) return null; // `.\` 만으로는 열 것이 없다
+    var it = std.mem.splitAny(u8, rest, "/\\");
+    while (it.next()) |seg| {
+        if (seg.len == 0) continue; // `.\\x` 같은 중복 구분자 — 세그먼트로 치지 않는다
+        if (std.mem.indexOfScalar(u8, regex_class_letters, seg[0]) == null) continue;
+        if (seg.len == 1) return null; // `\d`
+        switch (seg[1]) {
+            '{', '+', '*', '?' => return null, // `\d{2,4}`·`\d+`·`\s*`
+            else => {},
+        }
+    }
+    return win.kind;
+}
+
 /// 플랫폼이 중립 레이어로 넘기는 경로의 구분자를 **POSIX(`/`)로 정규화**한다(입구 정규화).
 ///
 /// **왜 입구인가**: L2는 경로를 이을 때 항상 `/`를 쓰는데(docs/layering-and-portability.md §4.1) 입력이
@@ -222,6 +285,60 @@ test "isAbsolute: 드라이브 문자를 A–Z로 제한하지 않는다(Win32�
         try testing.expect(isAbsolute(t));
         // std가 절대로 보는 것을 우리가 상대로 보면 안 된다 — 그 간극이 우회로가 된다.
         try testing.expect(std.fs.path.isAbsoluteWindows(t));
+    }
+}
+
+// **두 OS 갈래를 모두 돈다** — Windows CI 러너가 없으므로 comptime 분기로 두면 Windows 쪽이 공허참이 된다.
+test "detectableRelativePrefixFor: POSIX 철자는 회귀 0, 역슬래시는 Windows에서만" {
+    const win = std.Target.Os.Tag.windows;
+    const mac = std.Target.Os.Tag.macos;
+
+    // POSIX 철자 — **모든 호스트에서 예전 그대로**여야 한다. 이 줄이 회귀 0의 계약이다.
+    for ([_]std.Target.Os.Tag{ win, mac, .linux }) |os| {
+        try testing.expectEqual(RelativePrefix.dot, detectableRelativePrefixFor(os, "./build.zig").?);
+        try testing.expectEqual(RelativePrefix.dot, detectableRelativePrefixFor(os, "../lib/y.rb").?);
+        try testing.expectEqual(RelativePrefix.home, detectableRelativePrefixFor(os, "~/notes.md").?);
+        // 접두 없는 것은 이 술어의 몫이 아니다(bare_relative가 따로 본다).
+        try testing.expect(detectableRelativePrefixFor(os, "src/main.zig") == null);
+        try testing.expect(detectableRelativePrefixFor(os, "plain.txt") == null);
+    }
+
+    // 역슬래시 철자 — Windows에서만 본다. macOS에서 `.\x`는 그 이름의 **한 파일**이지 하위 경로가 아니다.
+    for ([_][]const u8{ ".\\build.zig", "..\\lib\\y.rb", "~\\notes.md", ".\\src", ".\\Makefile" }) |t| {
+        try testing.expect(detectableRelativePrefixFor(win, t) != null);
+        try testing.expect(detectableRelativePrefixFor(mac, t) == null);
+    }
+    try testing.expectEqual(RelativePrefix.home, detectableRelativePrefixFor(win, "~\\bin").?);
+}
+
+// 오탐 스윕이 찾은 **유일한 공통 모양**(정규식 클래스 세그먼트)을 고정한다. 이 목록이 무너지면 터미널에
+// 찍힌 정규식이 밑줄 뜨고 클릭된다(계약 §5.2 ⒜의 실측표가 근거).
+test "detectableRelativePrefixFor: 정규식·이스케이프 조각은 걸러진다" {
+    const win = std.Target.Os.Tag.windows;
+    const regex_like = [_][]const u8{
+        ".\\d",    ".\\w",    ".\\s",       ".\\S",         ".\\n",         ".\\t",
+        ".\\d+",   ".\\w+",   ".\\s*",      ".\\S+",        ".\\d?",        ".\\d{2,4}",
+        ".\\w{3}", ".\\p{L}", ".\\d\\.\\d", ".\\d+\\.\\d+", ".\\w+\\.\\w+", ".\\",
+    };
+    for (regex_like) |t| {
+        if (detectableRelativePrefixFor(win, t) != null) {
+            std.debug.print("정규식 조각인데 감지됐다: {s}\n", .{t});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // 반대쪽 — 진짜 경로는 살아남아야 한다. 무확장·괄호·비ASCII까지.
+    const real_paths = [_][]const u8{
+        ".\\build.zig", ".\\src",         ".\\node_modules",        ".\\Makefile",
+        ".\\gradlew",   ".\\file(1).txt", ".\\obj\\Debug\\App.dll", ".\\a-b_c.1.txt",
+        ".\\한글\\파일.txt",
+        "..\\vendor",   "~\\bin",
+    };
+    for (real_paths) |t| {
+        if (detectableRelativePrefixFor(win, t) == null) {
+            std.debug.print("진짜 경로인데 안 잡혔다: {s}\n", .{t});
+            return error.TestUnexpectedResult;
+        }
     }
 }
 

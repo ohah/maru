@@ -17,6 +17,7 @@ pub const path_shape = @import("path_shape.zig"); // 경로 모양(절대·루�
 pub const hazard = @import("hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(width.zig와 동격, chrome도 쓴다)
 pub const display_width = @import("display_width.zig"); // §4.2 편집기 표시 폭 — 열 계산(L3)과 셀 배치(L4)의 단일 출처
 pub const icons = @import("icons.zig"); // 등록 chrome 아이콘의 semantic 이름↔PUA codepoint(생성물) — 레이어 무관 중립 leaf(chrome·renderer·platform 공용)
+pub const i18n = @import("i18n.zig"); // UI 표시 문자열의 언어별 테이블·조회·보간 — 레이어 무관 중립 leaf(docs/i18n.md 계약, chrome·session·config·platform 공용)
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -61,6 +61,7 @@ src/
   redact.zig            민감정보 redaction 단일 출처(코드). project-rules.md "민감정보 redaction 기준"의 코드 미러 — app/observability/config/session이 공유
   hazard.zig            문서 내용의 신뢰 판정 — 보이는 것과 실제가 달라지게 만드는 문자를 가려낸다(native-editor-document-model.md §3.8)
   icons.zig             **생성 파일**(tools/svg_to_coverage.py). 아이콘 semantic 이름이 단일 출처이고 소비처는 codepoint 리터럴 대신 이 enum을 쓴다. 직접 수정하지 않는다
+  i18n.zig              UI 표시 문자열의 언어별 테이블·조회·런타임 보간(i18n.md 계약). 문자열이 platform에 갇히지 않게 하는 자리라 chrome·session·config·platform이 모두 import한다
   shutdown_wire_contract.zig  종료 backend와 앱 조합 계층이 함께 쓰는 포인터 없는 wire 권위 값
 
     app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/app-session-decomposition.md §4.1 F 시리즈).

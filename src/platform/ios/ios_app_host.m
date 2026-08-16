@@ -1044,6 +1044,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     NSLog(@"MARU_LIFECYCLE background");
 }
 - (void)applicationWillEnterForeground:(UIApplication *)app {
+    // **복귀할 때 다시 읽는다.** Android 는 창이 부서졌다 서면서 이미 그렇게 하고 있었다 —
+    // 한쪽만 다시 읽으면 "파일을 고치고 돌아왔을 때" 의 동작이 플랫폼마다 갈린다.
+    loadConfigFile();
     [(ChromeView *)self.window.rootViewController.view setRenderingPaused:NO];
     maru_mobile_report_focus(1);
     NSLog(@"MARU_LIFECYCLE foreground");
@@ -1081,6 +1084,12 @@ static void loadConfigFile(void) {
     if (!data) {
         // 없는 것이 정상 상태다 — 설정을 한 번도 안 건드린 기기가 그렇다(계약 §7).
         NSLog(@"MARU_CONFIG absent path=%@", file.path);
+        return;
+    }
+    // **상한을 넘으면 안 읽는다**(헤더가 단일 출처). 자른 앞부분을 쓰면 반만 적용된 설정이 된다.
+    if (data.length > MARU_CONFIG_MAX_BYTES) {
+        NSLog(@"MARU_CONFIG too_large bytes=%lu limit=%u path=%@",
+              (unsigned long)data.length, MARU_CONFIG_MAX_BYTES, file.path);
         return;
     }
     maru_mobile_load_config((const unsigned char *)data.bytes, (unsigned long)data.length);

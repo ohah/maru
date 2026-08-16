@@ -100,6 +100,17 @@ ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"
 
+echo "§config — 상한은 헤더가 소유한다"
+# 페이싱 상수와 같은 규율이다. host 마다 숫자를 적으면 갈린다 — 실제로 갈려 있었다
+# (Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 그리고 넘치면 **안 읽어야** 한다:
+# 자른 앞부분을 쓰면 반만 적용된 설정이 되고 사용자는 무엇이 먹었는지 알 수 없다.
+ck "헤더의 config 상한 정의" 1 "$(grep -c 'define MARU_CONFIG_MAX_BYTES' $H)"
+ck "두 host 가 그 상한을 쓴다" 2 "$(grep -l MARU_CONFIG_MAX_BYTES $I $A | wc -l | tr -d ' ')"
+ck "host 에 남은 config 크기 하드코딩" 0 "$(grep -cE '64 \* 1024|65536' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "두 host 가 초과를 거부한다" 2 "$(grep -l 'MARU_CONFIG too_large' $I $A | wc -l | tr -d ' ')"
+# 읽는 **시점**도 같아야 한다 — 한쪽만 복귀 때 다시 읽으면 같은 손짓의 결과가 갈린다.
+ck "두 host 가 두 번 읽는다(시작·복귀)" 2 "$(grep -cE 'loadConfigFile\(' $I $A | awk -F: '{if ($2>=2) c++} END{print c+0}')"
+
 echo "§아틀라스 — 창이 부서져도 성장분이 남는다"
 # **Android 만 창이 부서진다**(iOS 는 UIKit 이 레이어를 살린다). 그때 텍스처는 사라지는데
 # 브리지의 등록부는 살아남아 미스가 안 나므로, 원본을 안 들고 있으면 **다시 굽지도 않고

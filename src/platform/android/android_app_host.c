@@ -1194,14 +1194,27 @@ static void loadConfigFile(struct android_app *app) {
     snprintf(path, sizeof path, "%s/config", dir);
     FILE *f = fopen(path, "rb");
     if (!f) { LOGI("MARU_CONFIG absent path=%s", path); return; }
-    static char buf[64 * 1024];
-    size_t n = fread(buf, 1, sizeof buf, f);
-    int truncated = !feof(f); // 상한을 넘겼나 — 조용히 자르지 않는다
+    // **크기를 먼저 재고 필요한 만큼만 잡는다.** 상한만 한 정적 버퍼를 두면 설정 파일이 몇 줄
+    // 뿐인 기기에서도 그 크기를 이고 간다 — 폰에서는 그 값이 크다. 넘치면 자른 앞부분을 쓰지
+    // 않고 기본값으로 간다(반만 적용된 설정은 무엇이 먹었는지 알 수 없다).
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size < 0) { fclose(f); LOGI("MARU_CONFIG size_failed path=%s", path); return; }
+    if ((unsigned long)size > MARU_CONFIG_MAX_BYTES) {
+        fclose(f);
+        LOGI("MARU_CONFIG too_large bytes=%ld limit=%u path=%s", size, MARU_CONFIG_MAX_BYTES, path);
+        return;
+    }
+    rewind(f);
+    char *buf = (char *)malloc((size_t)size);
+    if (!buf) { fclose(f); LOGI("MARU_CONFIG alloc_failed bytes=%ld", size); return; }
+    size_t n = fread(buf, 1, (size_t)size, f);
     fclose(f);
     pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_load_config((const unsigned char *)buf, n);
     pthread_mutex_unlock(&g_bridge_lock);
-    LOGI("MARU_CONFIG loaded bytes=%zu truncated=%d path=%s", n, truncated, path);
+    free(buf);
+    LOGI("MARU_CONFIG loaded bytes=%zu path=%s", n, path);
 }
 
 // **생명주기**: 홈으로 나가면 창이 죽는다(APP_CMD_TERM_WINDOW). 그때 스왑체인을 그대로

@@ -868,8 +868,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    receipt를 보존하지 않는다. job은 같은 host의 admission runtime을 먼저 닫힌 목록으로 봉인한 뒤 exact manifest descriptor를
    pin하고, 하나의 non-resettable absolute deadline으로 connect/hello, Client replacement, observer attach, snapshot, delta와
    barrier를 순서대로 수행한다. host당 active job은 최대 하나이며 actual `connectExistingHostUntil` 호출과 Client replacement
-   publication도 각각 exact 한 번이다. CR4a의 단일-runtime 제품 행은 이 동일 host-job 경계를 통과하며, CR5는 owner를 바꾸지
-   않고 sealed runtime 목록만 여러 runtime으로 확장한다. pre-publication connect/manifest/hello 실패는 HostPool·adapter·old
+   publication도 각각 exact 한 번이다. CR4a의 단일-runtime 제품 행은 이 동일 host-job 경계를 통과하며, CR5는 owner를 바꾸지 않고
+   sealed runtime 목록만 여러 runtime으로 확장한다. pre-publication connect/manifest/hello 실패는 HostPool·adapter·old
    graph mutation 0이고, publication 뒤 local OOM/cap/deadline/peer failure는 소비한 wire cut을 재사용하지 않고 candidate와
    published Client를 fail-close해 다음 job generation으로 넘긴다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.

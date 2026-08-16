@@ -102,10 +102,13 @@ test "CR3b R2c 경계는 final Client node와 current generation 원자 게시�
         try countProductSourcesExcept(allocator, needle, &.{
             "platform/macos/session_host/client_slot.zig",
             "platform/macos/session_host/host_adapter.zig",
+            // CR4a's sole RemoteRuntime backend leaf publishes the same-adapter replacement.
+            "platform/macos/session_host/remote_runtime.zig",
         }),
     );
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "prepareClientReplacement("));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "publishClientReplacementNoFail("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "prepareClientReplacement("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "publishClientReplacementNoFail("));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "abortClientReplacement("));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "destroyRetiredClient("));
     try std.testing.expectEqual(
         @as(usize, 0),

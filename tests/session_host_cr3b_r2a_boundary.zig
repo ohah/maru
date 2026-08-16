@@ -51,7 +51,9 @@ test "CR3b R2a 경계는 callback 없는 placeholder와 detached tombstone만 �
     try std.testing.expectEqual(@as(usize, 1), count(proxy, "test \"CR3b R2a stable proxy reader는"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "context.slot.commitRetirementDetachNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "adapter.slot.validateRetirementPlaceholder("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
+    // The third comparison is CR4a's forward-failed replacement projection; it reuses the same
+    // terminal attachment/adapter identity rather than opening a new retirement authority.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExceptTwo(

@@ -29,6 +29,7 @@ const pending_event_owner = @import("pending_event_owner.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const host_pool_mod = @import("host_pool.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+const client_slot_mod = @import("client_slot.zig");
 const shutdown_attempt = @import("shutdown_attempt_authority.zig");
 const shutdown_connector = @import("shutdown_admin_connector.zig");
 const shutdown_current_admin = @import("shutdown_current_admin.zig");
@@ -107,6 +108,8 @@ pub const RemoteBackendSingletonOwner = struct {
 const HostReconnectJobState = enum(u8) {
     idle = 0,
     connected = 1,
+    replacement_published = 2,
+    replacement_failed = 3,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -132,6 +135,10 @@ const HostReconnectJob = struct {
     expected_connection_generation: u64 = 0,
     deadline: ?attach_phase_deadline.PhaseDeadline = null,
     client: ?client_mod.Client = null,
+    runtime_handle: RuntimeHandle = 0,
+    runtime_addr: u64 = 0,
+    runtime_generation: u64 = 0,
+    replacement: client_slot_mod.PreparedClientReplacement = .{},
     state_raw: u8 = @intFromEnum(HostReconnectJobState.idle),
     seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
 
@@ -163,7 +170,11 @@ const HostReconnectJob = struct {
 
     fn stateRawValid(self: *const HostReconnectJob) bool {
         return switch (self.state_raw) {
-            @intFromEnum(HostReconnectJobState.idle), @intFromEnum(HostReconnectJobState.connected) => true,
+            @intFromEnum(HostReconnectJobState.idle),
+            @intFromEnum(HostReconnectJobState.connected),
+            @intFromEnum(HostReconnectJobState.replacement_published),
+            @intFromEnum(HostReconnectJobState.replacement_failed),
+            => true,
             else => false,
         };
     }
@@ -175,12 +186,28 @@ const HostReconnectJob = struct {
             self.job_generation == 0 and self.host_id == 0 and self.adapter_addr == 0 and
             self.adapter_generation == 0 and self.expected_connection_generation == 0 and
             self.deadline == null and self.client == null and
+            self.runtime_handle == 0 and self.runtime_addr == 0 and self.runtime_generation == 0 and
+            std.meta.eql(self.replacement, client_slot_mod.PreparedClientReplacement{}) and
             std.mem.allEqual(u8, &self.seal, 0);
     }
 
+    fn replacementLifecycleRaw(self: *const HostReconnectJob) u8 {
+        return @as(*const u8, @ptrCast(&self.replacement.lifecycle)).*;
+    }
+
     fn sealInput(self: *const HostReconnectJob) ?process_seal.HostReconnectJobSealInput {
-        if (self.deadline == null or self.client == null) return null;
+        if (self.deadline == null) return null;
         const deadline_bits: u128 = @bitCast(self.deadline.?.absolute.expires_at_ns);
+        const client_addr: u64 = if (self.client != null) @intFromPtr(&self.client.?) else 0;
+        const client_fd: i32 = if (self.client) |*client| @intCast(client.fd) else -1;
+        const client_owner_digest: process_seal.CleanupSeal = if (self.client) |*client|
+            client.clientProjectionAuthorityDigest()
+        else
+            [_]u8{0} ** 32;
+        const client_identity_digest: process_seal.CleanupSeal = if (self.client) |*client|
+            clientIdentityDigest(client)
+        else
+            [_]u8{0} ** 32;
         return .{
             .self_addr = self.self_addr,
             .backend_addr = self.backend_addr,
@@ -193,16 +220,27 @@ const HostReconnectJob = struct {
             .expected_connection_generation = self.expected_connection_generation,
             .deadline_ns_low = @truncate(deadline_bits),
             .deadline_ns_high = @truncate(deadline_bits >> 64),
-            .client_addr = @intFromPtr(&self.client.?),
-            .client_fd = @intCast(self.client.?.fd),
-            .client_owner_digest = self.client.?.clientProjectionAuthorityDigest(),
-            .client_identity_digest = clientIdentityDigest(&self.client.?),
+            .client_addr = client_addr,
+            .client_fd = client_fd,
+            .client_owner_digest = client_owner_digest,
+            .client_identity_digest = client_identity_digest,
+            .runtime_handle = self.runtime_handle,
+            .runtime_addr = self.runtime_addr,
+            .runtime_generation = self.runtime_generation,
+            .replacement_addr = @intFromPtr(&self.replacement),
+            .replacement_slot_addr = @intCast(self.replacement.slot_addr),
+            .replacement_old_node_addr = @intCast(self.replacement.old_node_addr),
+            .replacement_new_node_addr = @intCast(self.replacement.new_node_addr),
+            .replacement_expected_connection_generation = self.replacement.expected_connection_generation,
+            .replacement_next_connection_generation = self.replacement.next_connection_generation,
+            .replacement_lifecycle_raw = self.replacementLifecycleRaw(),
+            .replacement_seal = self.replacement.seal,
             .state_raw = self.state_raw,
         };
     }
 
     fn valid(self: *const HostReconnectJob, backend: *const RemoteTermBackend) bool {
-        if (!self.stateRawValid() or self.state_raw != @intFromEnum(HostReconnectJobState.connected) or
+        if (!self.stateRawValid() or self.state_raw == @intFromEnum(HostReconnectJobState.idle) or
             self.self_addr != @intFromPtr(self) or self.backend_addr != @intFromPtr(backend) or
             self.backend_generation == 0 or self.backend_generation != backend.singleton_owner.owner_generation or
             self.job_generation == 0 or self.host_id == 0 or self.adapter_addr == 0 or
@@ -211,13 +249,50 @@ const HostReconnectJob = struct {
         if (backend.host_reconnect_job != self) return false;
         const ready = process_seal.currentReadyIdentity() catch return false;
         if (self.pid != ready.pid or self.process_nonce != ready.process_nonce) return false;
-        if (self.client == null or self.client.?.fd < 0 or self.client.?.host_id != self.host_id or
-            !self.client.?.runtime_catchup_barrier_v1 or self.client.?.connection_profile != .gui) return false;
         const pool = backend.host_pool orelse return false;
         const adapter = pool.get(self.host_id) orelse return false;
         if (@intFromPtr(adapter) != self.adapter_addr or
-            pool.adapterGeneration(self.host_id) != self.adapter_generation or
-            adapter.connectionGeneration() != self.expected_connection_generation) return false;
+            pool.adapterGeneration(self.host_id) != self.adapter_generation) return false;
+        switch (self.state_raw) {
+            @intFromEnum(HostReconnectJobState.connected) => {
+                if (self.client == null or self.client.?.fd < 0 or self.client.?.host_id != self.host_id or
+                    !self.client.?.runtime_catchup_barrier_v1 or self.client.?.connection_profile != .gui or
+                    adapter.connectionGeneration() != self.expected_connection_generation or
+                    self.runtime_handle != 0 or self.runtime_addr != 0 or self.runtime_generation != 0 or
+                    !std.meta.eql(self.replacement, client_slot_mod.PreparedClientReplacement{})) return false;
+            },
+            @intFromEnum(HostReconnectJobState.replacement_published) => {
+                if (self.client != null or self.runtime_handle == 0 or self.runtime_addr == 0 or
+                    self.runtime_generation == 0 or self.replacementLifecycleRaw() !=
+                    @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published)) return false;
+                const entry = backend.runtimes.get(self.runtime_handle) orelse return false;
+                if (@intFromPtr(entry.runtime) != self.runtime_addr or
+                    entry.runtime_generation != self.runtime_generation or entry.host_id != self.host_id or
+                    entry.host_adapter_generation != self.adapter_generation or
+                    adapter.connectionGeneration() != self.replacement.next_connection_generation or
+                    self.replacement.expected_connection_generation != self.expected_connection_generation)
+                    return false;
+                adapter.preflightPublishedClientReplacement(&self.replacement) catch return false;
+            },
+            @intFromEnum(HostReconnectJobState.replacement_failed) => {
+                if (self.client == null or self.client.?.fd < 0 or self.client.?.host_id != self.host_id or
+                    !self.client.?.runtime_catchup_barrier_v1 or self.client.?.connection_profile != .gui or
+                    self.runtime_handle == 0 or self.runtime_addr == 0 or self.runtime_generation == 0 or
+                    !std.meta.eql(self.replacement, client_slot_mod.PreparedClientReplacement{})) return false;
+                const entry = backend.runtimes.get(self.runtime_handle) orelse return false;
+                if (@intFromPtr(entry.runtime) != self.runtime_addr or
+                    entry.runtime_generation != self.runtime_generation or entry.host_id != self.host_id or
+                    entry.host_adapter_generation != self.adapter_generation or
+                    adapter.connectionGeneration() != self.expected_connection_generation)
+                    return false;
+                RemoteRuntime.backend_api.preflightReconnectClientReplacementFailure(
+                    entry.runtime,
+                    adapter,
+                    self.expected_connection_generation,
+                ) catch return false;
+            },
+            else => return false,
+        }
         const input = self.sealInput() orelse return false;
         const expected = process_seal.hostReconnectJobSeal(self.pid, self.process_nonce, input) catch return false;
         return std.crypto.timing_safe.eql(process_seal.CleanupSeal, expected, self.seal);
@@ -283,12 +358,13 @@ const HostReconnectJob = struct {
 
     fn abort(self: *HostReconnectJob, backend: *RemoteTermBackend) !void {
         if (!self.valid(backend)) return error.InvalidHostReconnectJob;
-        var owned = self.client.?;
+        if (self.state_raw != @intFromEnum(HostReconnectJobState.connected)) return error.Busy;
+        var owned = self.client;
         self.client = null;
         self.state_raw = @intFromEnum(HostReconnectJobState.idle);
         self.seal = [_]u8{0} ** 32;
         self.* = .{};
-        owned.deinit();
+        if (owned) |*client| client.deinit();
     }
 };
 
@@ -438,8 +514,26 @@ pub const RemoteTermBackend = struct {
     /// surface_runtime은 borrowed라 안 건드린다(소유는 caller).
     pub fn deinit(self: *RemoteTermBackend) void {
         if (self.host_reconnect_preparing) process_seal.fatalIntegrity(.proof_loss);
+        var published_reclaim_adapter: ?*host_adapter_mod.HostAdapter = null;
         if (self.host_reconnect_job) |job| {
-            job.abort(self) catch process_seal.fatalIntegrity(.proof_loss);
+            if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+            if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_published)) {
+                const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
+                const adapter = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
+                published_reclaim_adapter = adapter;
+                job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+                job.seal = [_]u8{0} ** 32;
+                job.* = .{};
+            } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_failed)) {
+                var owned = job.client;
+                job.client = null;
+                job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+                job.seal = [_]u8{0} ** 32;
+                job.* = .{};
+                if (owned) |*client| client.deinit();
+            } else {
+                job.abort(self) catch process_seal.fatalIntegrity(.proof_loss);
+            }
             self.host_reconnect_job = null;
             self.allocator.destroy(job);
         }
@@ -447,6 +541,12 @@ pub const RemoteTermBackend = struct {
         while (it.next()) |kv| {
             self.destroyRuntimeEntry(kv.key_ptr.*, kv.value_ptr.*, .terminate);
         }
+        if (published_reclaim_adapter) |adapter| while (adapter.slot.retiredClientCount() != 0) {
+            var reclaim: client_slot_mod.PreparedRetiredClientReclaim = .{};
+            adapter.prepareRetiredClientReclaim(&reclaim) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim);
+        };
         self.runtimes.deinit(self.allocator);
         if (self.reserved_runtime_count != 0 or self.close_operation_owner.active)
             process_seal.fatalIntegrity(.proof_loss);
@@ -552,6 +652,58 @@ pub const RemoteTermBackend = struct {
         try job.abort(self);
         self.host_reconnect_job = null;
         self.allocator.destroy(job);
+    }
+
+    /// Connected job의 fresh Client를 같은 HostAdapter의 next connection generation으로 exact once 게시한다.
+    /// runtime의 old attachment/unavailable 전환과 ClientSlot publication은 RemoteRuntime owner leaf가 수행하고,
+    /// published receipt는 후속 observer candidate가 소비할 수 있도록 job의 final address에 남긴다.
+    pub fn publishHostReconnectReplacement(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+    ) anyerror!void {
+        try self.validateReconnectCoordinatorTarget();
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or job.state_raw != @intFromEnum(HostReconnectJobState.connected))
+            return error.InvalidHostReconnectJob;
+        const entry = self.runtimes.get(runtime_handle) orelse return error.UnknownSurface;
+        if (entry.host_id != job.host_id or entry.host_adapter_generation != job.adapter_generation)
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        if (@intFromPtr(adapter) != job.adapter_addr or
+            adapter.connectionGeneration() != job.expected_connection_generation)
+            return error.InvalidHostReconnectJob;
+
+        const result = try RemoteRuntime.backend_api.publishReconnectClientReplacement(
+            entry.runtime,
+            adapter,
+            &job.client.?,
+            &job.replacement,
+        );
+        if (result == .forward_failed) {
+            job.runtime_handle = runtime_handle;
+            job.runtime_addr = @intFromPtr(entry.runtime);
+            job.runtime_generation = entry.runtime_generation;
+            job.state_raw = @intFromEnum(HostReconnectJobState.replacement_failed);
+            job.seal = process_seal.hostReconnectJobSeal(
+                job.pid,
+                job.process_nonce,
+                job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+            if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+            return result.forward_failed;
+        }
+        job.client = null;
+        job.runtime_handle = runtime_handle;
+        job.runtime_addr = @intFromPtr(entry.runtime);
+        job.runtime_generation = entry.runtime_generation;
+        job.state_raw = @intFromEnum(HostReconnectJobState.replacement_published);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
     }
 
     pub fn directReleaseTarget(
@@ -2533,7 +2685,7 @@ test "CR4a actual issuer job은 connected Client를 final address에서 exact on
     try testing.expectError(error.InvalidHostReconnectJob, backend_value.abortHostReconnectConnect());
 }
 
-test "CR4a actual issuer job은 actual manifest socket Client를 backend 밖으로 노출하지 않는다" {
+test "CR4a actual issuer job은 actual manifest socket Client를 same adapter replacement로 게시한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
@@ -2585,15 +2737,27 @@ test "CR4a actual issuer job은 actual manifest socket Client를 backend 밖으�
     var pool = AdapterPool.init(allocator);
     defer pool.deinit();
     try testing.expectEqual(host_id, try addOwnedClient(&pool, allocator, &initial));
+    try pool.setSpawnHost(host_id);
 
-    var backend_value = RemoteTermBackend.initAttachOnlyWithPool(
+    var surface_runtime = SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+    var backend_value = try RemoteTermBackend.initWithPool(
         allocator,
         io,
         &pool,
-        @ptrFromInt(@alignOf(SurfaceRuntime)),
+        &surface_runtime,
     );
     try backend_value.claimProductSingleton();
     defer backend_value.deinit();
+    const size = maru.terminal.Size{ .cols = 1, .rows = 1 };
+    _ = try backend_value.backend().spawn(.{
+        .handle = 1,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    });
+    try testing.expectEqual(@as(usize, 1), backend_value.runtimes.count());
+    const initial_connection_generation = pool.get(host_id).?.connectionGeneration();
     const phase = try attach_phase_deadline.PhaseDeadline.start(io, .connect_hello);
     try testing.expectEqual(
         HostReconnectStart.connected,
@@ -2606,8 +2770,147 @@ test "CR4a actual issuer job은 actual manifest socket Client를 backend 밖으�
     try testing.expectEqual(pool.adapterGeneration(host_id).?, job.adapter_generation);
     try testing.expect(job.client.?.runtime_catchup_barrier_v1);
     try testing.expect(phase.absolute.remainingNs() > 0);
-    try backend_value.abortHostReconnectConnect();
-    try testing.expectEqual(@as(?*HostReconnectJob, null), backend_value.host_reconnect_job);
+    const connected_seal = job.seal;
+    try testing.expectError(error.UnknownSurface, backend_value.publishHostReconnectReplacement(999));
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(connected_seal, job.seal);
+    try testing.expectEqual(initial_connection_generation, pool.get(host_id).?.connectionGeneration());
+    try backend_value.publishHostReconnectReplacement(1);
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(
+        @intFromEnum(HostReconnectJobState.replacement_published),
+        job.state_raw,
+    );
+    try testing.expect(job.client == null);
+    try testing.expectEqual(@as(RuntimeHandle, 1), job.runtime_handle);
+    try testing.expectEqual(
+        initial_connection_generation + 1,
+        pool.get(host_id).?.connectionGeneration(),
+    );
+    try testing.expectEqual(
+        client_slot_mod.PreparedClientReplacement.Lifecycle.published,
+        job.replacement.lifecycle,
+    );
+    try pool.get(host_id).?.preflightPublishedClientReplacement(&job.replacement);
+    var copied = job.*;
+    try testing.expect(!copied.valid(&backend_value));
+    const runtime_generation = job.runtime_generation;
+    job.runtime_generation +%= 1;
+    try testing.expect(!job.valid(&backend_value));
+    job.runtime_generation = runtime_generation;
+    const replacement_generation = job.replacement.next_connection_generation;
+    job.replacement.next_connection_generation +%= 1;
+    try testing.expect(!job.valid(&backend_value));
+    job.replacement.next_connection_generation = replacement_generation;
+    try testing.expect(job.valid(&backend_value));
+    const state_raw = job.state_raw;
+    for (4..256) |raw| {
+        job.state_raw = @intCast(raw);
+        try testing.expect(!job.valid(&backend_value));
+    }
+    job.state_raw = state_raw;
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectError(error.InvalidHostReconnectJob, backend_value.publishHostReconnectReplacement(1));
+    try testing.expectError(error.Busy, backend_value.abortHostReconnectConnect());
+    try testing.expectEqual(job, backend_value.host_reconnect_job.?);
+}
+
+test "CR4a actual issuer job은 replacement OOM을 forward failed로 봉인한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var base_buf: [160]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-cr4-job-oom-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0x4352344F4F4D;
+    try short_endpoint.prepareCurrentUserNamespace();
+    var socket_buf: [128]u8 = undefined;
+    const socket = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        _ = unsetenv("MARU_SESSION_HOST_TEST_ONESHOT");
+        daemon.runSessionHostWithIdentity(std.heap.page_allocator, io, dir, socket, host_id) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket.ptr);
+        var path_buf: [832]u8 = undefined;
+        if (host_manifest.manifestPathIn(&path_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+        if (host_manifest.ownerLockPathIn(&path_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+        var host_dir_buf: [768]u8 = undefined;
+        if (host_manifest.hostDirPathIn(&host_dir_buf, dir, host_id)) |path| _ = c.rmdir(path.ptr) else |_| {}
+        var hosts_buf: [640]u8 = undefined;
+        if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    var initial: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 200) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket, .gui)) |connected| break :blk connected else |_| _ = usleep(20 * 1000);
+        }
+        return error.TestUnexpectedResult;
+    };
+    var pool = AdapterPool.init(allocator);
+    defer pool.deinit();
+    try testing.expectEqual(host_id, try addOwnedClient(&pool, allocator, &initial));
+    try pool.setSpawnHost(host_id);
+    var surface_runtime = SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+    var backend_value = try RemoteTermBackend.initWithPool(allocator, io, &pool, &surface_runtime);
+    try backend_value.claimProductSingleton();
+    defer backend_value.deinit();
+    const size = maru.terminal.Size{ .cols = 1, .rows = 1 };
+    _ = try backend_value.backend().spawn(.{
+        .handle = 1,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    });
+    const adapter = pool.get(host_id).?;
+    const initial_connection_generation = adapter.connectionGeneration();
+    const phase = try attach_phase_deadline.PhaseDeadline.start(io, .connect_hello);
+    try testing.expectEqual(
+        HostReconnectStart.connected,
+        backend_value.beginHostReconnectConnect(base, host_id, phase),
+    );
+    const job = backend_value.host_reconnect_job.?;
+    const original_node_allocator = adapter.slot.node_allocator;
+    var failing = testing.FailingAllocator.init(original_node_allocator, .{ .fail_index = 0 });
+    adapter.slot.node_allocator = failing.allocator();
+    const result = backend_value.publishHostReconnectReplacement(1);
+    adapter.slot.node_allocator = original_node_allocator;
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(
+        @intFromEnum(HostReconnectJobState.replacement_failed),
+        job.state_raw,
+    );
+    try testing.expect(job.client != null);
+    try testing.expect(std.meta.eql(job.replacement, client_slot_mod.PreparedClientReplacement{}));
+    try testing.expectEqual(initial_connection_generation, adapter.connectionGeneration());
+    try RemoteRuntime.backend_api.preflightReconnectClientReplacementFailure(
+        backend_value.runtimes.get(1).?.runtime,
+        adapter,
+        initial_connection_generation,
+    );
+    const failed_seal = job.seal;
+    try testing.expectError(error.InvalidHostReconnectJob, backend_value.publishHostReconnectReplacement(1));
+    try testing.expectEqual(failed_seal, job.seal);
+    try testing.expectError(error.Busy, backend_value.abortHostReconnectConnect());
 }
 
 test "shared connection terminalize는 backend runtime map을 파괴하지 않는다" {

@@ -1454,6 +1454,33 @@ pub const ReconnectGenerationOwner = struct {
     /// CR3c1 forward-recovery preparation. The old attachment was terminalized before admission
     /// close, so its screen source is intentionally unavailable; the published Client receipt and
     /// same-generation placeholder replace the ordinary live-current source comparison.
+    fn preflightUnavailableAfterAttachmentRetirement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        expected_connection_generation: u64,
+    ) !void {
+        try self.validate();
+        if (!self.screen_published or expected_connection_generation == 0) return error.InvalidAuthority;
+        const current_generation = try self.slot.currentGeneration();
+        const placeholder_generation = std.math.add(u64, current_generation, 1) catch
+            return error.InvalidAuthority;
+        const current_payload = try self.slot.currentPayload();
+        if (self.screen_source.?.current.kind != .unavailable or
+            self.screen_source.?.current.generation != placeholder_generation or
+            current_payload.connection_generation != expected_connection_generation)
+            return error.InvalidAuthority;
+        switch (current_payload.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (current_payload.attachment) {
+            .generation => |*attachment| if (!generationAttachmentTerminal(attachment))
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+    }
+
     pub fn prepareAfterClientReplacement(
         self: *ReconnectGenerationOwner,
         adapter: *host_adapter_mod.HostAdapter,
@@ -1467,25 +1494,10 @@ pub const ReconnectGenerationOwner = struct {
         try adapter.preflightPublishedClientReplacement(published);
         if (rangesOverlap(self, @sizeOf(ReconnectGenerationOwner), out, @sizeOf(PreparedReconnect)) or
             !std.meta.eql(out.*, PreparedReconnect{})) return error.InvalidAuthority;
-        const current_generation = try self.slot.currentGeneration();
-        const placeholder_generation = std.math.add(u64, current_generation, 1) catch
-            return error.InvalidAuthority;
-        const current_payload = try self.slot.currentPayload();
-        if (self.screen_source.?.current.kind != .unavailable or
-            self.screen_source.?.current.generation != placeholder_generation or
-            current_payload.connection_generation != published.expected_connection_generation)
-            return error.InvalidAuthority;
-        switch (current_payload.connection) {
-            .generation => |current_adapter| {
-                if (current_adapter != adapter) return error.InvalidAuthority;
-            },
-            .legacy => return error.InvalidAuthority,
-        }
-        switch (current_payload.attachment) {
-            .generation => |*attachment| if (attachment.lifecycle != .terminal)
-                return error.InvalidAuthority,
-            .legacy => return error.InvalidAuthority,
-        }
+        try self.preflightUnavailableAfterAttachmentRetirement(
+            adapter,
+            published.expected_connection_generation,
+        );
 
         try self.slot.beginCandidate(&out.candidate);
         var initialized = false;
@@ -1786,14 +1798,19 @@ pub const ReconnectGenerationOwner = struct {
                 const current = try self.slot.currentPayload();
                 switch (current.connection) {
                     .generation => |adapter| switch (current.attachment) {
-                        .generation => |*attachment| if (attachment.lifecycle == .terminal) {
+                        .generation => |*attachment| if (generationAttachmentTerminal(attachment)) {
                             const next_connection_generation = std.math.add(
                                 u64,
                                 current.connection_generation,
                                 1,
                             ) catch return error.InvalidAuthority;
-                            if (adapter.connectionGeneration() != next_connection_generation or
-                                adapter.slot.retiredClientCount() == 0)
+                            const replacement_failed =
+                                adapter.connectionGeneration() == current.connection_generation and
+                                adapter.slot.retiredClientCount() == 0;
+                            const replacement_published =
+                                adapter.connectionGeneration() == next_connection_generation and
+                                adapter.slot.retiredClientCount() != 0;
+                            if (!replacement_failed and !replacement_published)
                                 return error.InvalidAuthority;
                         } else adapter.slot.validateRetirementPlaceholder(
                             self.screen_source.?.current.generation,
@@ -1869,7 +1886,7 @@ fn deinitRemoteGeneration(generation: *RemoteGeneration, allocator: std.mem.Allo
             // leaf and must not be deinitialized a second time (`GenerationAttachment.tryDeinit`
             // deliberately rejects replay). `.shell` still goes through the canonical deinitializer
             // so its final-address transport authority is checked before retirement.
-            if (attachment.lifecycle == .terminal) {
+            if (generationAttachmentTerminal(attachment)) {
                 attachment.* = undefined;
             } else switch (generation.connection) {
                 .generation => |adapter| attachment.deinit(adapter),
@@ -2088,9 +2105,86 @@ pub const RemoteRuntime = struct {
             @panic("runtime generation slot lost current payload authority");
     }
 
+    fn currentAttachmentTerminal(self: *const RemoteRuntime) bool {
+        return switch (self.currentGenerationConst().attachment) {
+            .generation => |*attachment| generationAttachmentTerminal(attachment),
+            .legacy => false,
+        };
+    }
+
     /// `RemoteTermBackend`는 active generation의 저장 위치를 알지 않고 frame/observation 역할만 요청한다.
     /// e2에서 current가 inline node에서 heap node로 바뀌어도 backend 호출 계약은 그대로 유지된다.
     pub const backend_api = struct {
+        pub const ReconnectClientReplacementResult = union(enum) {
+            published,
+            forward_failed: anyerror,
+        };
+
+        /// CR4a single-runtime forward transaction. Fresh Client ownership stays in the backend job;
+        /// this leaf only performs the canonical old-generation retirement and same-adapter publication.
+        /// Once the unavailable shell is published, failures are forward-only. The caller must seal a
+        /// terminal forward-failed job rather than aborting it or restoring the retired attachment.
+        pub fn publishReconnectClientReplacement(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            source: *client_mod.Client,
+            out: *r2a_client_slot.PreparedClientReplacement,
+        ) anyerror!ReconnectClientReplacementResult {
+            try runtime.admitRuntimeOperation();
+            if (source.host_id == 0 or source.host_id != adapter.hostId() or
+                adapter.connectionGeneration() == 0 or !std.meta.eql(out.*, r2a_client_slot.PreparedClientReplacement{}))
+                return error.InvalidAuthority;
+
+            const expected_generation = try runtime.generation_owner.currentGeneration();
+            const placeholder_generation = std.math.add(u64, expected_generation, 1) catch
+                return error.InvalidAuthority;
+            var admission: r2a_client_slot.PreparedAdmissionClose = .{};
+            try adapter.prepareAdmissionClose(adapter.connectionGeneration(), &admission);
+            var admission_prepared = true;
+            errdefer if (admission_prepared)
+                adapter.cancelAdmissionClose(&admission) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
+
+            var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+            try adapter.prepareRetirementCleanup(&admission, placeholder_generation, &cleanup);
+            var cleanup_prepared = true;
+            errdefer if (cleanup_prepared)
+                adapter.abortRetirementCleanup(&cleanup) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
+
+            _ = try runtime.generation_owner.publishUnavailableAfterAttachmentRetirement(
+                adapter,
+                &admission,
+                &cleanup,
+                expected_generation,
+                placeholder_generation,
+            );
+            admission_prepared = false;
+            cleanup_prepared = false;
+            adapter.finishRetirementCleanup(&cleanup) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+
+            adapter.prepareClientReplacement(&cleanup, source, out) catch |err|
+                return .{ .forward_failed = err };
+            adapter.publishClientReplacementNoFail(out);
+            return .published;
+        }
+
+        pub fn preflightReconnectClientReplacementFailure(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            expected_connection_generation: u64,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            if (expected_connection_generation == 0 or
+                adapter.connectionGeneration() != expected_connection_generation)
+                return error.InvalidAuthority;
+            try runtime.generation_owner.preflightUnavailableAfterAttachmentRetirement(
+                adapter,
+                expected_connection_generation,
+            );
+        }
+
         pub fn matchesReconnectAdmission(
             runtime: *const RemoteRuntime,
             admission: reconnect_admission_owner.Projection,
@@ -5070,6 +5164,11 @@ pub const RemoteRuntime = struct {
     }
 
     fn terminateBestEffort(self: *RemoteRuntime) void {
+        // CR4 forward recovery has already retired the only live attachment before publishing the
+        // unavailable shell. There is no stream/controller authority left from which a terminate
+        // RPC can be issued; local owner teardown must proceed without dereferencing the terminal
+        // attachment or attempting to restore the old graph.
+        if (self.currentAttachmentTerminal()) return;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return;
         // terminate는 runtime 자체를 파괴하므로 input/control blocking flush OOM에서 retained mutation을 의미상 대체하는
@@ -5110,6 +5209,7 @@ pub const RemoteRuntime = struct {
     }
 
     fn detachBestEffort(self: *RemoteRuntime) void {
+        if (self.currentAttachmentTerminal()) return;
         if (self.currentGeneration().attachment.streamId() == 0) return;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.currentGeneration().attachment.streamId()}) catch return;

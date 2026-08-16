@@ -57,6 +57,8 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
     defer allocator.free(slot);
     const adapter = try readSource(allocator, "src/platform/macos/session_host/host_adapter.zig");
     defer allocator.free(adapter);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
     const stable = try readSource(allocator, "src/platform/macos/session_host/stable_screen_source.zig");
@@ -119,6 +121,13 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
             "platform/macos/session_host/client_slot.zig",
             "platform/macos/session_host/host_adapter.zig",
             "platform/macos/session_host/remote_runtime.zig",
+            // CR4a's final-address host job revalidates the published replacement before every
+            // transition; its second occurrence is the actual product regression assertion.
+            "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementDetachBeforeAdmissionClose("));
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementCleanupBeforeAdmissionClose("));
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightClientReplacement("));
+    try std.testing.expectEqual(@as(usize, 2), count(backend, "preflightPublishedClientReplacement("));
 }

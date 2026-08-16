@@ -236,6 +236,10 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     if (term.kind != .editor) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
 
+    // **그리기 전에 지금 기하로 위치를 되돌린다.** 창·분할·사이드바가 바뀌면 상한이 줄어드는데,
+    // 스크롤 입력이 올 때까지 옛 위치가 남으면 화면이 통째로 빈다(그 함수의 doc — 실측값 포함).
+    clampScrollToGeometry(self, term, leaf_rect);
+
     // **비교 Term은 문서 대신 판정을 말한다**(N1.5 b·c). 비교가 서면 좌우 두 열이고(c), 아직이거나
     // 보여 줄 수 없으면 그 사실을 한 줄로 말한다 — 조용한 빈 화면을 남기지 않는 것이 §7의 요구다.
     const diff_state_opt: ?*const editor_diff_ops.State = if (term.rt.editor_diff) |*st| st else null;
@@ -462,8 +466,8 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     // **`visible`은 시각 행, `total`은 논리 줄이다.** 랩이 켜져 줄이 접히면 두 단위가 갈리므로 그대로
     // 빼면 안 된다 — 접힌 만큼 문서 끝이 **영영 닿지 않는다**(줄마다 3행으로 접히는 200줄 문서에서
     // 마지막 26줄이 그렇다). 렌더가 실어 둔 **문서 전체 시각 행 수**로 판정을 가른다.
-    const total_visual: usize = if (term.rt.editor_total_visual_rows > 0) term.rt.editor_total_visual_rows else total;
-    if (total_visual <= visible) {
+    const max_first = maxFirstLine(total, visible, term);
+    if (max_first == 0) {
         // 문서가 화면에 다 들어간다 — 접혀 있든 아니든 움직일 이유가 없다.
         if (term.rt.editor_first_line != 0) {
             term.rt.editor_first_line = 0;
@@ -471,13 +475,6 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
         }
         return true;
     }
-    const max_first: usize = if (total_visual == total)
-        total -| visible // 접힌 줄이 없다 — 정확히 계산된다
-    else
-        // 접혔다. 논리 줄 몇 개가 마지막 화면을 채우는지는 여기서 모르므로 **닿을 수 있음**을 택한다
-        // (마지막 줄이 맨 위에 올 때까지). 그 화면이 덜 차는 것보다 못 보는 것이 나쁘다 —
-        // 조각 단위 스크롤이 붙으면 두 단위가 같아져 이 분기가 사라진다.
-        total -| 1;
 
     const current: i64 = @intCast(term.rt.editor_first_line);
     // `lines > 0` = 휠 위 = 문서의 **앞쪽**으로(터미널 스크롤백과 같은 방향 규약).
@@ -488,6 +485,55 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
         self.metal_dirty = true;
     }
     return true;
+}
+
+/// `editor_first_line`이 가질 수 있는 최대값. 0이면 문서가 화면에 다 들어간다.
+///
+/// **`visible`은 시각 행, `total`은 논리 줄이다.** 랩이 켜져 줄이 접히면 두 단위가 갈리므로 그대로
+/// 빼면 안 된다 — 접힌 만큼 문서 끝이 **영영 닿지 않는다**(줄마다 3행으로 접히는 200줄 문서에서
+/// 마지막 26줄이 그렇다). 렌더가 실어 둔 **문서 전체 시각 행 수**로 판정을 가른다.
+fn maxFirstLine(total: usize, visible: usize, term: *Term) usize {
+    const total_visual: usize = if (term.rt.editor_total_visual_rows > 0) term.rt.editor_total_visual_rows else total;
+    if (total_visual <= visible) return 0;
+    if (total_visual == total) return total -| visible; // 접힌 줄이 없다 — 정확히 계산된다
+    // 접혔다. 논리 줄 몇 개가 마지막 화면을 채우는지는 여기서 모르므로 **닿을 수 있음**을 택한다
+    // (마지막 줄이 맨 위에 올 때까지). 그 화면이 덜 차는 것보다 못 보는 것이 나쁘다 —
+    // 조각 단위 스크롤이 붙으면 두 단위가 같아져 이 분기가 사라진다.
+    return total -| 1;
+}
+
+/// 지금 기하로 두 축의 위치를 상한 안으로 되돌린다. **렌더가 그리기 전에 부른다.**
+///
+/// **상한은 보이는 크기에서 나오는데 그 크기는 창·분할·사이드바로 바뀐다.** 스크롤 입력이 올 때까지
+/// 옛 위치가 남아 있으면 화면이 통째로 빈다 — 200줄 문서를 끝까지 굴려 둔 뒤 창을 높이면 97행이
+/// 보이는데 `first_line`은 191이라 **9줄만 그려졌다**(적대적 검증 2026-08-16이 실측). 가로도 같은
+/// 모양이었다(상한 111인데 위치 261 — 오른쪽 150열이 빔).
+///
+/// 리사이즈 경로에 붙이지 않는 이유: 기하는 창 크기 말고도 바뀐다(분할·사이드바 토글·탭 전환).
+/// **그리기 직전이 그 전부를 지나는 유일한 자리**다.
+pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect) void {
+    if (term.kind != .editor) return;
+    const lines = editorLines(term);
+    if (lines.len == 0) return;
+    const body = editorBodyRect(self, leaf_rect, term);
+    const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible_rows: usize = @max(inner_h / @max(self.cell_height_px, 1), 1);
+
+    const max_first = maxFirstLine(lines.len, visible_rows, term);
+    if (term.rt.editor_first_line > max_first) {
+        term.rt.editor_first_line = max_first;
+        self.metal_dirty = true;
+    }
+
+    if (term.rt.editor_first_col != 0) {
+        // 최대 열은 위치가 0이 아닌 이상 이미 세어져 있다(`scrollCols`가 세운다). 방어적으로만 본다.
+        const visible_cols = visibleCols(self, body, term);
+        const max_col: u32 = term.rt.editor_max_cols -| visible_cols;
+        if (@as(u32, term.rt.editor_first_col) > max_col) {
+            term.rt.editor_first_col = @intCast(@min(max_col, std.math.maxInt(u16)));
+            self.metal_dirty = true;
+        }
+    }
 }
 
 /// 편집기 pane의 **가로** 스크롤. `cols > 0` = 왼쪽으로(문서 앞쪽).
@@ -1707,4 +1753,66 @@ test "가로 위치가 렌더까지 간다 — 상태만 움직이고 화면이 
         if (c.codepoint == 's') short_after += 1;
     }
     try testing.expectEqual(@as(usize, 0), short_after);
+}
+
+test "창이 넓어지면 다음 프레임이 가로 위치를 되돌린다 — 오른쪽에 빈 자리가 남지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try hscrollFixtureLines(allocator, &fx, 300);
+    const long_buf = lines[1];
+    defer allocator.free(long_buf);
+    defer allocator.free(lines);
+
+    // 좁은 pane에서 끝까지 민다.
+    const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 400 };
+    try testing.expect(scrollCols(fx.session, fx.term, narrow, -1_000_000));
+    const at_end = fx.term.rt.editor_first_col;
+    try testing.expect(at_end > 0);
+
+    // **창이 넓어졌다.** 상한은 줄었는데 위치는 그대로다 — 그리면 오른쪽에 빈 자리가 남는다.
+    // **창이 넓어졌다.** 상한이 줄었으니 다음 프레임이 위치를 되돌려야 한다 — 안 그러면 오른쪽에
+    // 빈 자리가 남는다(고치기 전 실측: 상한 111인데 위치 261).
+    const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 1600, .h = 400 };
+    var drawn = appendPaneFrame(fx.session, wide, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const wide_visible = visibleCols(fx.session, editorBodyRect(fx.session, wide, fx.term), fx.term);
+    const wide_max: u32 = fx.term.rt.editor_max_cols -| wide_visible;
+    try testing.expect(at_end > wide_max); // 좁을 때 위치가 넓은 창의 상한을 넘는다 — 아니면 판정이 공허하다
+    try testing.expectEqual(wide_max, @as(u32, fx.term.rt.editor_first_col));
+}
+
+test "창이 높아지면 다음 프레임이 세로 위치를 되돌린다 — 아래가 통째로 비지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const many = try allocator.alloc([]const u8, 200);
+    defer allocator.free(many);
+    for (many) |*l| l.* = "line";
+    fx.term.rt.editor_lines = many;
+    fx.term.rt.editor_wrap = false;
+
+    const short: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 200 };
+    _ = scrollLines(fx.session, fx.term, short, -1_000_000);
+    const at_end = fx.term.rt.editor_first_line;
+    try testing.expect(at_end > 0);
+
+    const tall: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 1600 };
+    var drawn = appendPaneFrame(fx.session, tall, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    const body = editorBodyRect(fx.session, tall, fx.term);
+    const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible: usize = inner_h / fx.session.cell_height_px;
+    try testing.expect(at_end > many.len -| visible); // 판정이 공허하지 않다
+    try testing.expect(fx.term.rt.editor_first_line <= many.len -| visible);
+    try testing.expect(drawn.dl.cells.len > 0);
 }

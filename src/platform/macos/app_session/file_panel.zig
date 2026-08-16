@@ -281,7 +281,7 @@ pub fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) boo
             // 통지하거나 닫으려 들면 안 되고(살아 있는 surface를 닫혔다고 보고하게 된다), 사용자에게
             // 알리고 옛 뷰를 그대로 둔다. 다음 열기/전환이 다시 시도한다(code-review max).
             rebuildFileTermSurface(self, entry) catch {
-                self.showNotice("파일 뷰를 다시 만들 수 없어 이전 보기를 유지했습니다.");
+                self.showNoticeKey(.fp_view_rebuild_failed);
             };
         } else if (old_surface != 0) {
             // 경로만 바뀐 신뢰 kind rename은 **아무 통지도 하지 않는다** — breadcrumb은 `entry.path`에서
@@ -421,7 +421,7 @@ pub fn closeFileTermForEntry(self: *AppSession, entry: *const dock_panel.Entry) 
                     // 아래 게이트를 **먼저** 통과했으므로 latch는 반드시 실효한다 — 그래서 true가
                     // "닫혔다"는 뜻으로 정직하다(유령 성공이 아니다).
                     if (filePanelsBlockCloseExcluding(self, entry)) {
-                        self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+                        self.showNoticeKey(.app_unsaved_tabs_first);
                         return false;
                     }
                     self.ended_seen = true;
@@ -500,23 +500,23 @@ pub fn fileTreeDirectoryAliasRisk(self: *const AppSession, target_path: []const 
 
 pub fn startFileTreeEdit(self: *AppSession, edit_kind: FileTreeEditKind) void {
     if (fileTreeNamespaceMutationBusy(self)) {
-        self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
+        self.showNoticeKey(.fp_mutation_in_progress);
         return;
     }
     const target = selectedFileTreeMutationTarget(self) orelse {
-        self.showNotice("프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
+        self.showNoticeKey(.fp_select_first);
         return;
     };
     if (edit_kind == .rename and target.kind == .root) {
-        self.showNotice("프로젝트 루트 자체는 이름을 바꿀 수 없습니다.");
+        self.showNoticeKey(.fp_root_rename_denied);
         return;
     }
     if (edit_kind != .rename and target.symlink and (target.kind == .root or target.kind == .directory)) {
-        self.showNotice("심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.");
+        self.showNoticeKey(.fp_symlink_dir_create_denied);
         return;
     }
     const copied = copyFileTreeEditTarget(target, edit_kind) orelse {
-        self.showNotice("경로가 너무 길어 변경할 수 없습니다.");
+        self.showNoticeKey(.fp_path_too_long);
         return;
     };
     settings_ops.startRename(self, .{ .file_tree = copied });
@@ -711,7 +711,7 @@ pub fn updateFileTree(self: *AppSession) !void {
             error.NotFound => {}, // watcher refresh 중 부모가 사라졌거나 root가 이관된 정상 race.
             error.IdentityMismatch => {
                 self.file_tree.failSnapshot(result.path);
-                self.showNotice("탐색기 폴더가 다른 디렉터리로 바뀌어 갱신을 중단했습니다. 폴더를 다시 여세요.");
+                self.showNoticeKey(.fp_dir_changed_reopen);
             },
             else => {
                 self.file_tree.failSnapshot(result.path);
@@ -1208,7 +1208,7 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
 
 pub fn blockSessionExitForFilePanels(self: *AppSession) bool {
     if (!hasProtectedFilePanelsForExit(self)) return false;
-    self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+    self.showNoticeKey(.app_unsaved_tabs_first);
     return true;
 }
 
@@ -1248,26 +1248,26 @@ pub fn fileEntryCount(self: *AppSession) usize {
 
 pub fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
     if (fileTreeNamespaceMutationBusy(self)) {
-        self.showNotice("이전 휴지통 이동이 끝날 때까지 기다려 주세요.");
+        self.showNoticeKey(.fp_trash_in_progress);
         return;
     }
     if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
-        self.showNotice("휴지통 요청 큐가 가득 찼습니다. 이전 작업이 끝난 뒤 다시 시도해 주세요.");
+        self.showNoticeKey(.fp_trash_queue_full);
         return;
     }
     const target = selectedFileTreeMutationTarget(self) orelse {
-        self.showNotice("삭제할 프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
+        self.showNoticeKey(.fp_select_to_delete);
         return;
     };
     if (target.kind == .root) {
-        self.showNotice("프로젝트 루트 자체는 삭제할 수 없습니다.");
+        self.showNoticeKey(.fp_root_delete_denied);
         return;
     }
     var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
     const protection_len = fillFileTreeProtections(self, &protections);
     const root = self.file_tree.rootForMutation(target.path) orelse return;
     if (target.kind == .directory and fileTreeDirectoryAliasRisk(self, target.path, root)) {
-        self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 삭제를 차단했습니다.");
+        self.showNoticeKey(.fp_symlink_alias_delete_blocked);
         return;
     }
     const roots = [_][]const u8{root};
@@ -1681,7 +1681,7 @@ pub fn resetFileTreeWatchRootsForEntries(
 
 pub fn abortStaleFilePanelClose(self: *AppSession) void {
     cancelFilePanelClose(self);
-    self.showNotice("파일 탭 상태가 바뀌어 닫기를 취소했습니다.");
+    self.showNoticeKey(.fp_tab_state_changed_close_cancel);
 }
 
 /// root/watch/rows의 모든 allocation이 끝난 뒤 세 authority를 한 번에 무실패 교체한다.
@@ -1985,7 +1985,7 @@ pub fn toggleActiveFilePanelMode(self: *AppSession) void {
     const pane = pane_ops.activePane(self);
     if (pane.terms.items.len == 0) return;
     const entry = pane.activeTerm().file_entry orelse {
-        self.showNotice("파일 탭에서만 쓸 수 있습니다.");
+        self.showNoticeKey(.fp_file_tab_only);
         return;
     };
     const modes = dock_layout.modesForKind(entry.kind);
@@ -2132,11 +2132,11 @@ pub fn queueExternalLink(
 
 pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: []const u8) bool {
     if (fileTreeNamespaceMutationBusy(self)) {
-        self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
+        self.showNoticeKey(.fp_mutation_in_progress);
         return false;
     }
     const root = self.file_tree.rootForMutation(target.path()) orelse {
-        self.showNotice("프로젝트 루트 밖의 항목은 변경할 수 없습니다.");
+        self.showNoticeKey(.fp_outside_root_denied);
         return false;
     };
     const roots = [_][]const u8{root};
@@ -2153,7 +2153,7 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
     if (target.edit_kind == .rename and policy_target.kind == .directory and
         fileTreeDirectoryAliasRisk(self, policy_target.path, root))
     {
-        self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 이름 변경을 차단했습니다.");
+        self.showNoticeKey(.fp_symlink_alias_rename_blocked);
         return false;
     }
     const plan = switch (target.edit_kind) {
@@ -2173,11 +2173,11 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
     if (plan.root_identity == null or plan.parent_identity == null or
         (plan.operation == .rename and plan.identity == null))
     {
-        self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
+        self.showNoticeKey(.fp_identity_not_ready);
         return false;
     }
     if (!self.file_tree_mutation_backend.tryReserve()) {
-        self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
+        self.showNoticeKey(.fp_mutation_queue_full);
         return false;
     }
     self.file_tree_mutation_queue_reserved = true;
@@ -2187,11 +2187,11 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
         self.file_tree_mutation_queue_reserved = false;
     };
     const id = nextFileTreeMutationRequestId(self) orelse {
-        self.showNotice("파일 변경 요청 번호를 더 발급할 수 없습니다.");
+        self.showNoticeKey(.fp_mutation_id_exhausted);
         return false;
     };
     var request = file_tree_mutation_backend.Request.init(self.allocator, id, plan) catch {
-        self.showNotice("파일 변경 요청을 준비할 수 없습니다.");
+        self.showNoticeKey(.fp_mutation_prepare_failed);
         return false;
     };
     request.selection_generation = self.file_tree_selection.generation;
@@ -2199,20 +2199,20 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
     if (reserved) {
         const new_path = std.fs.path.join(self.allocator, &.{ plan.parent, plan.name }) catch {
             request.deinit(self.allocator);
-            self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
+            self.showNoticeKey(.fp_rename_plan_failed);
             return false;
         };
         defer self.allocator.free(new_path);
         prepareFileTreeRenameRemap(self, id, target.path(), new_path) catch {
             request.deinit(self.allocator);
-            self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
+            self.showNoticeKey(.fp_rename_plan_failed);
             return false;
         };
     }
     if (reserved and !reserveFileTreeMutation(self, id, target.path())) {
         request.deinit(self.allocator);
         discardPendingRenameRemap(self, id);
-        self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
+        self.showNoticeKey(.fp_entry_busy);
         return false;
     }
     if (reserved) {
@@ -2220,7 +2220,7 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
             request.deinit(self.allocator);
             clearFileTreeMutationReservation(self, id);
             discardPendingRenameRemap(self, id);
-            self.showNotice("편집기를 잠글 수 없어 이름 변경을 시작하지 않았습니다.");
+            self.showNoticeKey(.fp_editor_lock_rename_failed);
             return false;
         };
         if (waiting) {
@@ -2340,7 +2340,7 @@ pub fn fileEntryForIdConst(self: *const AppSession, entry_id: dock_panel.EntryId
 pub fn retainFileTreeUnknownRecovery(self: *AppSession) void {
     if (!builtin.is_test) std.log.err("file tree Trash mutation requires manual recovery; destination path unavailable", .{});
     self.file_tree_manual_recovery_unknown = true;
-    self.showNotice("휴지통 이동 결과를 검증할 수 없습니다. 휴지통을 확인하세요. 정상 종료와 파일 변경을 차단했습니다.");
+    self.showNoticeKey(.fp_trash_verify_failed);
 }
 
 /// `.pane`/`.tab`처럼 **Term을 통째로 파괴하는** scope가 쓰는 판정. `mode.isEditable()`은 보지 **않는다**
@@ -2631,7 +2631,7 @@ pub fn confirmFileTreeDelete(self: *AppSession) void {
     const pending = self.pending_file_tree_delete orelse return;
     self.pending_file_tree_delete = null;
     if (pending.root_generation != self.file_tree.rootGeneration()) {
-        self.showNotice("탐색기 루트가 바뀌어 삭제를 취소했습니다.");
+        self.showNoticeKey(.fp_root_changed_delete_cancel);
         return;
     }
     const target: file_tree_mutation.Target = .{
@@ -2644,22 +2644,22 @@ pub fn confirmFileTreeDelete(self: *AppSession) void {
     };
     const root = self.file_tree.rootForMutation(target.path) orelse return;
     if (target.kind == .directory and fileTreeDirectoryAliasRisk(self, target.path, root)) {
-        self.showNotice("상태가 바뀌어 폴더 삭제를 취소했습니다.");
+        self.showNoticeKey(.fp_state_changed_dir_delete_cancel);
         return;
     }
     const roots = [_][]const u8{root};
     var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
     const protection_len = fillFileTreeProtections(self, &protections);
     const plan = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch {
-        self.showNotice("상태가 바뀌어 삭제를 취소했습니다.");
+        self.showNoticeKey(.fp_state_changed_delete_cancel);
         return;
     };
     if (plan.identity == null or plan.parent_identity == null or plan.root_identity == null) {
-        self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
+        self.showNoticeKey(.fp_identity_not_ready);
         return;
     }
     if (!self.file_tree_mutation_backend.tryReserve()) {
-        self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
+        self.showNoticeKey(.fp_mutation_queue_full);
         return;
     }
     self.file_tree_mutation_queue_reserved = true;
@@ -2673,7 +2673,7 @@ pub fn confirmFileTreeDelete(self: *AppSession) void {
     request.selection_generation = self.file_tree_selection.generation;
     const owned_root = self.allocator.dupe(u8, root) catch {
         request.deinit(self.allocator);
-        self.showNotice("삭제 복구 경로를 준비할 수 없어 시작하지 않았습니다.");
+        self.showNoticeKey(.fp_delete_recovery_prepare_failed);
         return;
     };
     std.debug.assert(self.pending_delete_root == null);
@@ -2681,14 +2681,14 @@ pub fn confirmFileTreeDelete(self: *AppSession) void {
     if (!reserveFileTreeMutation(self, id, target.path)) {
         request.deinit(self.allocator);
         discardPendingDeleteRoot(self, id);
-        self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
+        self.showNoticeKey(.fp_entry_busy);
         return;
     }
     const waiting = beginFileTreeMutationEditorLocks(self, id, target.path) catch {
         request.deinit(self.allocator);
         clearFileTreeMutationReservation(self, id);
         discardPendingDeleteRoot(self, id);
-        self.showNotice("편집기를 잠글 수 없어 휴지통 이동을 시작하지 않았습니다.");
+        self.showNoticeKey(.fp_editor_lock_trash_failed);
         return;
     };
     if (waiting) {
@@ -2933,7 +2933,7 @@ pub fn updateFileTreeMutations(self: *AppSession) void {
                 releaseFileTreeMutationEditorLocks(self, result.id, true);
                 discardPendingRenameRemap(self, result.id);
                 self.file_tree.invalidatePath(std.fs.path.dirname(result.target) orelse result.target) catch {};
-                self.showNotice("편집 상태가 바뀌어 이름 변경을 취소했습니다.");
+                self.showNoticeKey(.fp_edit_state_changed_rename_cancel);
                 return;
             }
             if (fileTreePathProtectedNow(self, result.source, result.id)) {
@@ -2989,7 +2989,7 @@ pub fn updateFileTreeMutations(self: *AppSession) void {
                 );
                 self.allocator.free(owned_root);
                 if (restoring) {
-                    self.showNotice("편집 상태가 바뀌어 휴지통 이동을 취소했습니다.");
+                    self.showNoticeKey(.fp_edit_state_changed_trash_cancel);
                 } else {
                     clearFileTreeMutationReservation(self, result.id);
                     releaseFileTreeMutationEditorLocks(self, result.id, true);
@@ -3011,7 +3011,7 @@ pub fn updateFileTreeMutations(self: *AppSession) void {
                 );
                 self.allocator.free(owned_root);
                 if (restoring) {
-                    self.showNotice("휴지통 어댑터 큐가 가득 차 원래 위치로 복원합니다.");
+                    self.showNoticeKey(.fp_trash_adapter_queue_full);
                 } else {
                     clearFileTreeMutationReservation(self, result.id);
                     releaseFileTreeMutationEditorLocks(self, result.id, true);
@@ -3039,7 +3039,7 @@ pub fn updateFileTreeMutations(self: *AppSession) void {
             clearFileTreeMutationReservation(self, result.id);
             releaseFileTreeMutationEditorLocks(self, result.id, true);
             finishPendingTrashRecord(self, result.id);
-            self.showNotice("휴지통 이동에 실패해 원래 위치로 복원했습니다.");
+            self.showNoticeKey(.fp_trash_failed_restored);
         },
     }
     self.file_tree_rows_dirty = true;
@@ -3551,20 +3551,20 @@ pub fn requestFilePanelClose(self: *AppSession, surface_id: u64) void {
     if (self.pending_file_panel_close != null) return;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return;
     if (entry.mutation_pending_id != 0) {
-        self.showNotice("파일 변경이 끝난 뒤 탭을 닫을 수 있습니다.");
+        self.showNoticeKey(.fp_close_after_mutation);
         return;
     }
     // HTML과 안정된 native-clean Markdown/text read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는
     // 살아 있으므로 dirty/pending/conflict인 편집 브리지 kind는 mode와 무관하게 revision-pinned coordinator를 거친다.
     if (entry.kind.usesEditorBridge() and filePanelEntryNeedsDirtyProtection(entry.*)) {
         if (self.file_panel_close_request_id >= max_file_panel_close_request_id) {
-            self.showNotice("파일 닫기 요청 번호를 더 발급할 수 없어 탭을 닫지 않았습니다.");
+            self.showNoticeKey(.fp_close_id_exhausted);
             return;
         }
         self.file_panel_close_request_id += 1;
         const request_id = self.file_panel_close_request_id;
         const expected_path = self.allocator.dupe(u8, entry.path) catch {
-            self.showNotice("파일 닫기 상태를 준비할 수 없어 탭을 닫지 않았습니다.");
+            self.showNoticeKey(.fp_close_prepare_failed);
             return;
         };
         self.pending_file_panel_close = .{
@@ -3605,7 +3605,7 @@ pub fn toggleFilePanelFocus(self: *AppSession) void {
     switch (self.focus_owner) {
         .workspace => {
             if (!self.dock_initialized or !dockHasContent(self)) {
-                self.showNotice("파일 패널에 포커스할 내용이 없습니다.");
+                self.showNoticeKey(.fp_nothing_to_focus);
                 return;
             }
             focusFileTree(self);
@@ -3929,7 +3929,7 @@ pub fn completeFileTreeTrash(
             // late editor/external-change signal means closing the buffer could lose data. Reflect
             // the filesystem removal while keeping the protected tab available for recovery/save.
             releaseFileTreeMutationEditorLocks(self, pending.id, true);
-            self.showNotice("휴지통 이동은 완료됐지만 편집 상태가 바뀌어 열린 탭은 유지합니다.");
+            self.showNoticeKey(.fp_trash_done_tab_kept);
         } else {
             _ = removeDeletedDockEntries(self, pending.original);
             releaseFileTreeMutationEditorLocks(self, pending.id, false);
@@ -4031,7 +4031,7 @@ pub fn failFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: 
     removeFilePanelDirtySyncAction(self, surface_id);
     self.file_tree_rows_dirty = true;
     self.metal_dirty = true;
-    self.showNotice("편집 상태를 다시 확인할 수 없어 파일 탭을 보호했습니다.");
+    self.showNoticeKey(.fp_edit_state_recheck_failed);
 }
 
 pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
@@ -4056,7 +4056,7 @@ pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id
     }
     if (!success) {
         cancelFilePanelClose(self);
-        self.showNotice("파일을 저장할 수 없어 탭을 닫지 않았습니다.");
+        self.showNoticeKey(.fp_save_failed_tab_kept);
         return;
     }
     const entry = fileEntryForSurfaceId(self, surface_id) orelse {
@@ -4065,7 +4065,7 @@ pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id
     };
     if (entry.editor_revision != revision or entry.dirty or entry.dirty_sync_pending or entry.external_change) {
         cancelFilePanelClose(self);
-        self.showNotice("저장 후 편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
+        self.showNoticeKey(.fp_post_save_check_failed);
         return;
     }
     _ = closeFilePanelSurfaceNow(self, surface_id);
@@ -4156,7 +4156,7 @@ pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u
         entry.editor_recovery_required = true;
         entry.dirty = true;
         entry.dirty_sync_pending = true;
-        self.showNotice("편집 중 웹 콘텐츠가 다시 시작되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+        self.showNoticeKey(.fp_web_content_restarted);
     }
     return entry.editor_epoch;
 }
@@ -4182,7 +4182,7 @@ pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
     entry.dirty_sync_pending = true;
     if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
         cancelFilePanelClose(self);
-    self.showNotice("편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+    self.showNoticeKey(.fp_web_content_terminated);
     self.metal_dirty = true;
     return 2;
 }
@@ -4282,7 +4282,7 @@ pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u6
     const pending = self.pending_file_panel_close orelse return;
     if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
     cancelFilePanelClose(self);
-    self.showNotice("편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
+    self.showNoticeKey(.fp_edit_state_check_failed);
 }
 
 /// 핀된 Markdown 경로의 lexical parent도 root fd부터 component별 no-follow로 연 뒤, 상대 asset의 모든 하위

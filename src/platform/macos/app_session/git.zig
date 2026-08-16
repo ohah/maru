@@ -253,14 +253,14 @@ pub fn drainGitStatus(self: *AppSession) void {
         self.branch_menu_pending = false;
         defer res.deinit(git_backend_mod.worker_allocator); // backend가 준 버퍼는 backend allocator로만 해제한다
         if (!res.ok or res.text.len == 0) {
-            self.showNotice("브랜치 목록을 읽지 못했습니다"); // 조용히 아무 일도 안 일어나는 것보다 낫다
+            self.showNoticeKey(.git_branch_list_failed); // 조용히 아무 일도 안 일어나는 것보다 낫다
             continue;
         }
         // **소유권을 인수하지 않고 복사한다.** `branch_menu_text`는 세션 소유 필드이고(테스트도 세션 allocator로
         // 채운다) `clearBranchMenuText`가 세션 allocator로 해제한다. backend 버퍼를 그대로 실으면 한 필드에 두
         // allocator의 메모리가 섞여, 어느 쪽으로 해제해도 한쪽이 heap을 깬다. 복사는 `--count=200`으로 유계다.
         const owned = self.allocator.dupe(u8, res.text) catch {
-            self.showNotice("브랜치 목록을 읽지 못했습니다");
+            self.showNoticeKey(.git_branch_list_failed);
             continue;
         };
         settings_ops.clearBranchMenuText(self);
@@ -615,7 +615,7 @@ pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
     // git 출력이 이상하거나 우리 파싱이 어긋나면 루트 밖 경로가 여기까지 올 수 있다. **여는 단계에서** 막는다 —
     // 백엔드도 같은 판정을 하지만, 열지 말아야 할 것으로 Term을 만들면 사용자에게 빈 화면이 남는다(§6 심층 방어).
     if (!maru.session.repo_path.isSafeRelative(row.path)) {
-        self.showNotice("저장소 밖을 가리키는 경로는 열지 않습니다");
+        self.showNoticeKey(.git_path_outside_repo);
         return;
     }
     // **목록을 읽은 그 저장소**를 쓴다. 여기서 다시 구하면 첫 diff가 열린 뒤 활성 Term이 웹 Term이라
@@ -627,7 +627,7 @@ pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
     // 하위 모듈은 텍스트 비교가 없다(커밋 포인터라 blob이 없고 작업트리 쪽은 디렉터리다 — 실측).
     // 빈 화면을 여느니 이유를 말한다.
     if (row.submodule) {
-        self.showNotice("하위 모듈은 비교를 표시하지 않습니다");
+        self.showNoticeKey(.git_submodule_no_diff);
         return;
     }
     // **섹션이 곧 기준이다**(§3.5.2 — 2026-08-14 2차 결정으로 복귀). 행이 선 그룹이 비교 범위를 정하므로

@@ -154,7 +154,7 @@
 
 | 키 | 왜 |
 |---|---|
-| `shell.command`·`shell.args`·`shell-integration.ssh`·`session.keep-alive-after-quit`·`workspace.*` | **로컬 PTY 가 없다**([플랫폼 §1](mobile-platform.md)). 세션은 원격에서 받는다 |
+| `shell.command`·`shell.args`·`shell.windows-shell`·`shell-integration.ssh`·`session.keep-alive-after-quit`·`workspace.*` | **로컬 PTY 가 없다**([플랫폼 §1](mobile-platform.md)). 세션은 원격에서 받는다. `shell.windows-shell`은 그 위에 Windows 전용이기까지 하다 |
 | `quick-terminal.*`·`window.*`·`split.*`·`sidebar.*`·`status-bar.show`·`chrome.preset`·`chrome.tab-style` | 데스크톱 창·크롬 개념이다. 폰에는 창이 하나고 배치가 다르다([UX §3](mobile-ux.md)) |
 | `input.option-as-meta`·`input.right-click`·`input.mouse-hide-while-typing`·`input.url-click-modifier` | 마우스와 맥 키보드 축이다 |
 | `keyhint.*`·`keybind` | 하드웨어 키보드 축이다. 폰의 기본 입력은 소프트 키보드와 보조 키바다 |

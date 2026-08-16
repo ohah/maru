@@ -104,6 +104,8 @@ static int g_chor_started = 0;
 static struct android_app *g_app = NULL;
 static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
 static void recreateVulkan(struct android_app *app);
+// 정의는 아래고 프레임 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다.
+static void drainConfigWrite(struct android_app *app);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -693,6 +695,9 @@ static void drawFrame(void) {
 
     // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
     if (g_app) growAtlas(g_app);
+    // **저장 요청은 프레임마다 본다.** 값이 바뀐 그 프레임에만 실제 쓰기가 난다(가져가면
+    // 요청이 사라진다) — 어느 화면에서 바뀌었든 한 자리에서 처리된다.
+    if (g_app) drainConfigWrite(g_app);
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1187,6 +1192,31 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
 
 /// config 파일을 읽어 브리지에 넘긴다. **자리는 앱 전용 내부 저장소**(`filesDir/config` —
 /// docs/mobile-config.md §2). 없으면 아무것도 안 한다 — 기본값으로 도는 것이 정상 상태다.
+/// 브리지가 세운 저장 요청을 파일에 쓴다. **가져가는 것은 한 번뿐**이라 매 프레임 불러도
+/// 실제 쓰기는 값이 바뀐 그 프레임에만 난다(클립보드와 같은 규율).
+///
+/// **임시 파일에 쓰고 rename 한다.** 그대로 덮어쓰다 죽으면 config 가 반만 남는데, 그러면
+/// 다음 실행에서 설정이 통째로 날아간 것처럼 보인다.
+static void drainConfigWrite(struct android_app *app) {
+    static unsigned char buf[MARU_CONFIG_MAX_BYTES];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long n = maru_mobile_take_config_write(buf, sizeof buf);
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (n == 0) return;
+    const char *dir = app->activity->internalDataPath;
+    if (!dir) { LOGI("MARU_CONFIG write_no_data_path"); return; }
+    char tmp[512], path[512];
+    snprintf(tmp, sizeof tmp, "%s/config.tmp", dir);
+    snprintf(path, sizeof path, "%s/config", dir);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { LOGI("MARU_CONFIG write_open_failed path=%s", tmp); return; }
+    size_t w = fwrite(buf, 1, (size_t)n, f);
+    int closed = fclose(f);
+    if (w != (size_t)n || closed != 0) { LOGI("MARU_CONFIG write_failed bytes=%zu/%lu", w, n); return; }
+    if (rename(tmp, path) != 0) { LOGI("MARU_CONFIG rename_failed path=%s", path); return; }
+    LOGI("MARU_CONFIG wrote bytes=%lu path=%s", n, path);
+}
+
 static void loadConfigFile(struct android_app *app) {
     const char *dir = app->activity->internalDataPath;
     if (!dir) { LOGI("MARU_CONFIG no_data_path"); return; }

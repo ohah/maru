@@ -13,6 +13,7 @@ const std = @import("std");
 const maru = @import("maru");
 
 const theme = maru.config.theme;
+const loader = maru.config.loader;
 const schema = maru.config.schema;
 
 /// 스크롤백 — 데스크톱 `ScrollbackConfig` 를 안 빌린다. 그쪽은 `sticky-command`(chrome 표시)를
@@ -111,4 +112,236 @@ test "없는 키·틀린 값은 기본값을 지킨다" {
     );
     defer p.deinit();
     try std.testing.expectEqual(@as(u32, 1000), p.config.scrollback.lines);
+}
+
+// ── 설정 화면이 쓸 줄 기술자 ──────────────────────────────────────────────────
+//
+// **줄을 손으로 적지 않는다.** PoC 는 라벨 58개를 코드에 박아 뒀는데 그 대부분은 뒤에 키가
+// 없어 눌러도 아무 일이 안 났다(계약 §6). 스키마에서 만들면 **키가 있는 줄만** 생긴다 —
+// 스키마에 키를 더하면 줄이 생기고, 빼면 사라진다.
+//
+// **섹션은 모바일이 소유한다.** 데스크톱 `Section` 은 config 이름 공간에 가깝고(`bell.*` 이
+// `.terminal`) 모바일 화면은 사용자가 찾는 주제로 묶는다 — 부분집합이 아니라 다른 체계다
+// (계약 §3). 그래서 namespace → 헤더를 여기서 정한다.
+
+pub const Kind = enum { toggle, choice, number };
+
+pub const Row = struct {
+    key: []const u8,
+    label: []const u8,
+    kind: Kind,
+    /// choice 일 때만 — enum 태그를 dashed 로(파일에 적히는 그 표기).
+    items: []const []const u8 = &.{},
+    section: []const u8,
+};
+
+fn dashed(comptime name: []const u8) []const u8 {
+    comptime {
+        var buf: [name.len]u8 = undefined;
+        for (name, 0..) |c, i| buf[i] = if (c == '_') '-' else c;
+        const out = buf;
+        return &out;
+    }
+}
+
+/// namespace(Config 필드명) → 화면 헤더. **여기가 모바일 섹션의 단일 출처다.**
+fn sectionOf(comptime ns: []const u8) []const u8 {
+    if (std.mem.eql(u8, ns, "theme")) return "모양";
+    if (std.mem.eql(u8, ns, "cursor")) return "커서";
+    if (std.mem.eql(u8, ns, "scrollback")) return "터미널";
+    return "기타";
+}
+
+/// 스키마에서 줄을 만든다. **색·문자열 필드는 아직 안 낸다** — 16진 편집 UI 가 없어서,
+/// 내면 눌러도 아무 일이 안 나는 줄이 된다(그게 PoC 의 문제였다). 그 줄은 편집 수단이
+/// 생기는 슬라이스에서 함께 낸다.
+pub const rows: []const Row = blk: {
+    // **스키마 밖의 키 하나를 손으로 낸다.** `theme.preset` 은 색 하나가 아니라 세트를 통째로
+    // 까는 명시 가지라(계약 §3) 스키마 반영으로는 안 나온다. 그런데 사용자가 가장 먼저 찾는
+    // 설정이고 파서가 이미 받으므로, 여기 한 줄만 예외로 둔다 — 예외가 늘면 그때 스키마 쪽에
+    // 표현을 만든다.
+    var preset_items: []const []const u8 = &.{};
+    for (@typeInfo(theme.ThemePreset).@"enum".fields) |ef| {
+        preset_items = preset_items ++ [_][]const u8{dashed(ef.name)};
+    }
+    var list: []const Row = &[_]Row{.{
+        .key = "theme.preset",
+        .label = "테마 프리셋",
+        .kind = .choice,
+        .items = preset_items,
+        .section = "모양",
+    }};
+    for (@typeInfo(Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) != .@"struct" or !@hasDecl(Container, "schema")) continue;
+        const sch = Container.schema;
+        for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            const meta: theme.Meta = @field(sch, sf.name);
+            const FieldT = @TypeOf(@field(@as(Container, .{}), sf.name));
+            const seg = meta.key_seg orelse dashed(sf.name);
+            const key = if (meta.key) |k| k else cf.name ++ "." ++ seg;
+            const row: ?Row = switch (@typeInfo(FieldT)) {
+                .bool => Row{ .key = key, .label = meta.doc, .kind = .toggle, .section = sectionOf(cf.name) },
+                .int => Row{ .key = key, .label = meta.doc, .kind = .number, .section = sectionOf(cf.name) },
+                .@"enum" => e: {
+                    var items: []const []const u8 = &.{};
+                    for (@typeInfo(FieldT).@"enum".fields) |ef| items = items ++ [_][]const u8{dashed(ef.name)};
+                    break :e Row{ .key = key, .label = meta.doc, .kind = .choice, .items = items, .section = sectionOf(cf.name) };
+                },
+                else => null, // []const u8(색·문자열) — 편집 수단이 없다
+            };
+            if (row) |r| list = list ++ [_]Row{r};
+        }
+    }
+    break :blk list;
+};
+
+test "줄은 스키마에서 나오고, 편집 수단이 없는 것은 안 나온다" {
+    try std.testing.expect(rows.len >= 6);
+    var saw_toggle = false;
+    var saw_choice = false;
+    var saw_number = false;
+    for (rows) |r| {
+        // 색은 안 나온다 — 눌러도 아무 일이 안 나는 줄을 만들지 않는다.
+        try std.testing.expect(!std.mem.eql(u8, r.key, "theme.background"));
+        try std.testing.expect(r.label.len > 0);
+        switch (r.kind) {
+            .toggle => saw_toggle = true,
+            .choice => {
+                saw_choice = true;
+                try std.testing.expect(r.items.len > 0);
+            },
+            .number => saw_number = true,
+        }
+    }
+    try std.testing.expect(saw_toggle and saw_choice and saw_number);
+}
+
+// ── 값 읽기·쓰기 (화면이 쓴다) ────────────────────────────────────────────────
+//
+// **줄과 값을 같은 키로 잇는다.** 화면이 자기 상태를 따로 들면 파일과 갈린다("파일이 단일
+// 출처", 계약 §1) — 그릴 때마다 config 에서 읽고, 바꿀 때는 config 를 고친다.
+
+/// 그 키의 현재 값을 화면 표기로. choice 는 `Row.items` 의 색인, toggle 은 0/1, number 는 값.
+pub fn valueOf(cfg: Config, key: []const u8) i64 {
+    if (std.mem.eql(u8, key, "theme.preset")) {
+        // 프리셋은 config 에 이름이 안 남는다(파싱 때 색으로 펼쳐진다) — 현재 색과 같은 세트를
+        // 찾아 되짚는다. 없으면 첫 항목(사용자가 개별 색을 손댄 상태다).
+        inline for (@typeInfo(theme.ThemePreset).@"enum".fields, 0..) |ef, i| {
+            const p: theme.ThemePreset = @enumFromInt(ef.value);
+            if (std.mem.eql(u8, theme.presetColors(p).background, cfg.theme.background)) return @intCast(i);
+        }
+        return 0;
+    }
+    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+                const meta: theme.Meta = @field(Container.schema, sf.name);
+                const seg = comptime (meta.key_seg orelse dashed(sf.name));
+                const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));
+                if (std.mem.eql(u8, key, full)) {
+                    const v = @field(@field(cfg, cf.name), sf.name);
+                    return switch (@typeInfo(@TypeOf(v))) {
+                        .bool => @intFromBool(v),
+                        .int => @intCast(v),
+                        .@"enum" => @intFromEnum(v),
+                        else => 0,
+                    };
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/// 값을 config 에 쓴다(화면 표기 → 필드). 파일에 적을 문자열은 `textOf` 가 낸다.
+pub fn setValue(cfg: *Config, key: []const u8, v: i64) void {
+    if (std.mem.eql(u8, key, "theme.preset")) {
+        inline for (@typeInfo(theme.ThemePreset).@"enum".fields, 0..) |ef, i| {
+            if (v == i) cfg.theme = theme.presetColors(@as(theme.ThemePreset, @enumFromInt(ef.value)));
+        }
+        return;
+    }
+    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+                const meta: theme.Meta = @field(Container.schema, sf.name);
+                const seg = comptime (meta.key_seg orelse dashed(sf.name));
+                const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));
+                if (std.mem.eql(u8, key, full)) {
+                    const ptr = &@field(@field(cfg, cf.name), sf.name);
+                    const T = @TypeOf(ptr.*);
+                    switch (@typeInfo(T)) {
+                        .bool => ptr.* = v != 0,
+                        .int => ptr.* = @intCast(@max(0, v)),
+                        .@"enum" => ptr.* = @enumFromInt(v),
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 파일에 적을 값 문자열. **파서가 받아들이는 정확한 표기**여야 한다(dashed enum·숫자·bool).
+pub fn textOf(row: Row, v: i64, buf: []u8) []const u8 {
+    return switch (row.kind) {
+        .toggle => if (v != 0) "true" else "false",
+        .choice => if (v >= 0 and v < row.items.len) row.items[@intCast(v)] else row.items[0],
+        .number => std.fmt.bufPrint(buf, "{d}", .{v}) catch "0",
+    };
+}
+
+test "값을 읽고 쓰는 것이 같은 키로 돈다" {
+    var c: Config = .{};
+    setValue(&c, "scrollback.lines", 321);
+    try std.testing.expectEqual(@as(i64, 321), valueOf(c, "scrollback.lines"));
+    setValue(&c, "cursor.blink", 0);
+    try std.testing.expectEqual(@as(i64, 0), valueOf(c, "cursor.blink"));
+
+    // 프리셋은 색으로 펼쳐지고, 되짚으면 그 프리셋이 나온다.
+    var idx: i64 = 0;
+    for (rows) |r| if (std.mem.eql(u8, r.key, "theme.preset")) {
+        for (r.items, 0..) |it, i| if (std.mem.eql(u8, it, "nord")) {
+            idx = @intCast(i);
+        };
+    };
+    setValue(&c, "theme.preset", idx);
+    try std.testing.expectEqualStrings(theme.presetColors(.nord).background, c.theme.background);
+    try std.testing.expectEqual(idx, valueOf(c, "theme.preset"));
+}
+
+/// 바뀐 키 하나를 원본 본문에 반영한 **새 본문**을 만든다. 통째로 다시 쓰지 않는다 —
+/// `loader.updateConfigText` 가 주석과 **모르는 키**를 보존한다(계약 §7). 데스크톱 config 를
+/// 복사해 넣은 사용자가 그 줄들을 잃으면 안 된다.
+///
+/// `serialize.updateForKeys` 는 못 쓴다 — 그것도 데스크톱 `Config` 를 받는다(계약 §3). 우리는
+/// 키/값 쌍을 직접 만들어 그 아래(Config 를 모르는 층)를 부른다.
+pub fn withKey(allocator: std.mem.Allocator, original: []const u8, key: []const u8, value: []const u8) ![]u8 {
+    const kv = [_]loader.KeyValue{.{ .key = key, .value = value }};
+    return loader.updateConfigText(allocator, original, &kv);
+}
+
+test "저장은 주석과 모르는 키를 지키고 그 줄만 고친다" {
+    const original =
+        \\# 내 설정
+        \\theme.preset = nord
+        \\window.padding-x = 8
+        \\scrollback.lines = 1000
+    ;
+    const out = try withKey(std.testing.allocator, original, "scrollback.lines", "250");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 내 설정") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "window.padding-x = 8") != null); // 모바일이 모르는 키
+    try std.testing.expect(std.mem.indexOf(u8, out, "scrollback.lines = 250") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "scrollback.lines = 1000") == null);
+}
+
+test "없던 키는 새로 붙는다" {
+    const out = try withKey(std.testing.allocator, "# 비어 있다\n", "cursor.blink", "false");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "cursor.blink = false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 비어 있다") != null);
 }

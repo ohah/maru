@@ -37,6 +37,11 @@ pub const inventory = [_]Proof{
     // `theme.Config` 반영 둘을 그 파라미터의 타입으로 바꿨다. 모바일 config 가 자기 스키마 메타를
     // 들고 같은 엔진을 타게 하려는 것이고(docs/mobile-config.md §3), 데스크톱은 계속 같은 타입을
     // 넘기므로 comptime 결과가 같다. `@field` 세는 자리는 안 건드려 count 는 108 그대로다.
+    // 모바일 config(M10c). `@field` 여덟 자리는 **전부 스키마 반영**이다 — 줄 기술자 생성(rows)과
+    // 값 읽기·쓰기(valueOf·setValue)가 `Config` sub-struct 의 `schema` 메타를 comptime 에 훑는다.
+    // 손으로 적은 키 표가 없어야 화면과 파일이 갈리지 않는다는 계약(docs/mobile-config.md §6)의
+    // 구현이고, Client receiver 나 제품 vtable 과는 무관하다.
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8, .digest_hex = "1b8cf27c4ffb9f896d87efbe2e9816ac0c14d9d558b4d957c1e16869fdf8f7cc" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "04c990d3283ec76c0a3ea17e585a4ad39c5c73b50468883f91da527ac790637a" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —

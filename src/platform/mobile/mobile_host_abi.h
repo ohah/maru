@@ -224,6 +224,10 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
 /// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 **닿았는지**는
 /// 코어에 물어야 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다. host 는 안 쓴다.
 unsigned int maru_mobile_scrollback_lines(void);
+/// 저장할 config 본문을 가져간다(한 번 가져가면 요청이 사라진다 — `take_copy` 와 같은 규율).
+/// 0 이면 저장할 것이 없다. **버퍼가 모자라면 0** 이고 `last_error` 에 남는다 — 잘린 config 를
+/// 쓰면 설정이 반만 남는다. host 는 이 바이트를 §2 경로에 **통째로** 쓴다.
+unsigned long maru_mobile_take_config_write(unsigned char *out, unsigned long cap);
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

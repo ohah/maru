@@ -14,6 +14,10 @@
 
 // 둥근 모서리를 프래그먼트에서 자른다 — maru 의 rich quad 가 corner_radii 를 쓰므로
 // 그 모양이 실제로 나오는지 보려면 필요하다.
+// 정의는 파일 뒤에 있고 그리는 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다
+// (Android 에서 같은 순서로 두 번 데였다).
+static void drainConfigWrite(void);
+
 static NSString *const kShader =
     @"#include <metal_stdlib>\n"
      "using namespace metal;\n"
@@ -941,6 +945,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                                 self.bounds.size.height - safe.top - safe.bottom - kb);
     unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height,
                                        (unsigned long long)(CACurrentMediaTime() * 1000.0));
+    // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
+    // 쓰기가 난다 — 가져가면 요청이 사라진다.
+    drainConfigWrite();
     // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어
     // write·아틀라스 만원)는 기록만 되고 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
     const char *err = maru_mobile_last_error();
@@ -1064,6 +1071,31 @@ static void loadConfigFile(void);
 ///
 /// **못 만든 것도 실패로 알린다.** 지금은 읽기뿐이라 티가 안 나지만, 저장(M10c)이 붙으면 그때
 /// 통째로 실패한다 — 계약이 "쓰기가 실패하면 조용하지 않다" 를 요구한다.
+/// 브리지가 세운 저장 요청을 파일에 쓴다(Android 와 같은 규율 — 가져가면 요청이 사라진다).
+/// **임시 파일에 쓰고 바꿔치기한다.** 덮어쓰다 죽으면 config 가 반만 남는다.
+static void drainConfigWrite(void) {
+    static unsigned char buf[MARU_CONFIG_MAX_BYTES];
+    unsigned long n = maru_mobile_take_config_write(buf, sizeof buf);
+    if (n == 0) return;
+    NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+                                                          inDomain:NSUserDomainMask
+                                                 appropriateForURL:nil
+                                                            create:YES
+                                                             error:nil];
+    if (!support) { NSLog(@"MARU_CONFIG write_support_failed"); return; }
+    NSURL *dir = [support URLByAppendingPathComponent:@"maru" isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *file = [dir URLByAppendingPathComponent:@"config" isDirectory:NO];
+    NSData *data = [NSData dataWithBytes:buf length:n];
+    NSError *err = nil;
+    // atomically:YES = 임시 파일에 쓰고 바꿔치기한다.
+    if (![data writeToURL:file options:NSDataWritingAtomic error:&err]) {
+        NSLog(@"MARU_CONFIG write_failed path=%@ err=%@", file.path, err.localizedDescription);
+        return;
+    }
+    NSLog(@"MARU_CONFIG wrote bytes=%lu path=%@", n, file.path);
+}
+
 static void loadConfigFile(void) {
     NSError *err = nil;
     NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory

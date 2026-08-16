@@ -1911,3 +1911,87 @@ test "config 를 여러 번 갈아 끼워도 값이 매번 따라온다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
+
+test "설정 줄은 스키마에서 나온다 — 무엇이 나오는지 값으로 본다" {
+    const rows = bridge.settingsRows();
+    try std.testing.expect(rows.len >= 6);
+    for (rows) |r| {
+        std.debug.print("\n  {s:<26} {s:<7} {s}", .{ r.key, @tagName(r.kind), r.section });
+    }
+    std.debug.print("\n  총 {d}줄\n", .{rows.len});
+}
+
+// ── M10c: 화면이 스키마에서 나오고, 바꾸면 저장 요청이 선다 ────────────────────
+
+/// 설정 화면을 밀고 그 안에서 `key` 행을 찾아 **탭한다**. 좌표를 테스트가 다시 계산하지 않는다 —
+/// 브리지에게 물어 그 자리를 누른다(그리는 자리와 판정하는 자리가 갈리면 안 된다).
+fn openSettingsAndTap(key: []const u8) bool {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 행 자리는 브리지가 그린 rect 로 안다 — 목록을 위에서부터 훑어 그 키의 행을 누른다.
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, key)) continue;
+        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        return true;
+    }
+    return false;
+}
+
+test "설정 화면의 줄이 스키마 줄과 같다" {
+    const rows = bridge.settingsRows();
+    // 화면에 그려진 필드 수 = 스키마 줄 수(헤더는 별도). 손으로 적은 라벨이 남아 있으면 갈린다.
+    try std.testing.expectEqual(rows.len, bridge.settingsFieldCount());
+}
+
+// **탭 = 즉시 적용 + 즉시 저장**(UX §5.6). 값이 config 에 들어가고 host 가 가져갈 본문이 선다.
+test "토글을 누르면 config 가 바뀌고 저장 본문이 나온다" {
+    const src = "cursor.blink = true\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expect(openSettingsAndTap("cursor.blink"));
+
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_take_config_write(&out, out.len);
+    try std.testing.expect(n > 0); // 저장 요청이 섰나
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "cursor.blink = false") != null);
+
+    // **한 번 가져가면 사라진다** — 매 프레임 같은 것을 다시 쓰지 않게(복사와 같은 규율).
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&out, out.len));
+
+    _ = bridge.maru_mobile_pop_screen();
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// 저장은 **그 줄만** 고친다 — 주석과 모바일이 모르는 키(PC config 를 복사해 넣은 사용자의 것)를
+// 지우면 안 된다.
+test "저장이 주석과 모르는 키를 지킨다" {
+    const src = "# 내 설정\nwindow.padding-x = 8\ncursor.blink = true\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(openSettingsAndTap("cursor.blink"));
+
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_take_config_write(&out, out.len);
+    const text = out[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, text, "# 내 설정") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "window.padding-x = 8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "cursor.blink = false") != null);
+
+    _ = bridge.maru_mobile_pop_screen();
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}

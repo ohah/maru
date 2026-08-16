@@ -88,6 +88,13 @@ var term_core: ?terminal.core.TerminalCore = null;
 /// 호출이 없다). 없으면 기본값으로 돈다 — 설정을 한 번도 안 건드린 기기가 정상 상태다.
 var cfg_parsed: ?mobile_config.Parsed = null;
 
+/// **파일 본문을 그대로 들고 있는다.** 저장은 통째로 다시 쓰는 것이 아니라 그 본문의 한 줄만
+/// 고치는 것이라(주석·모르는 키 보존, 계약 §7) 원본이 있어야 한다. host 가 준 바이트를 복사해
+/// 둔다 — host 의 버퍼는 그 호출이 끝나면 우리 것이 아니다.
+var cfg_source: []u8 = &.{};
+/// host 가 가져갈 저장 요청. 복사(`take_copy`)와 같은 모양 — 브리지엔 OS 호출이 없다.
+var cfg_write: []u8 = &.{};
+
 fn cfg() mobile_config.Config {
     return if (cfg_parsed) |p| p.config else .{};
 }
@@ -156,7 +163,57 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     };
     if (cfg_parsed) |*old| old.deinit();
     cfg_parsed = next;
+    if (cfg_source.len > 0) term_allocator.free(cfg_source);
+    cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {
+        setLastError("config_source_alloc");
+        break :blk &.{};
+    };
     if (term_core) |*core| applyConfigToCore(core);
+}
+
+/// 설정 화면이 값을 바꾸면 부른다 — config 를 고치고 **저장 요청을 세운다**. 파일을 쓰는 것은
+/// host 다(§7). 요청은 `maru_mobile_take_config_write` 로 한 번만 나간다.
+fn settingChanged(row: mobile_config.Row, v: i64) void {
+    if (cfg_parsed == null) {
+        // 파일이 없던 기기 — 빈 본문에서 시작한다(그 키만 있는 파일이 생긴다).
+        cfg_parsed = mobile_config.parse(term_allocator, "") catch {
+            setLastError("config_parse");
+            return;
+        };
+    }
+    mobile_config.setValue(&cfg_parsed.?.config, row.key, v);
+    if (term_core) |*core| applyConfigToCore(core);
+
+    var num: [24]u8 = undefined;
+    const text = mobile_config.textOf(row, v, &num);
+    const next = mobile_config.withKey(term_allocator, cfg_source, row.key, text) catch {
+        // **조용히 실패하지 않는다** — 화면은 이미 바뀌었는데 다음에 켜면 돌아가 있으면
+        // 사용자는 이유를 모른다(계약 §7).
+        setLastError("config_write_build");
+        return;
+    };
+    if (cfg_source.len > 0) term_allocator.free(cfg_source);
+    cfg_source = next;
+    if (cfg_write.len > 0) term_allocator.free(cfg_write);
+    cfg_write = term_allocator.dupe(u8, next) catch blk: {
+        setLastError("config_write_alloc");
+        break :blk &.{};
+    };
+}
+
+/// 저장할 본문을 가져간다(한 번 가져가면 요청이 사라진다 — 복사와 같은 규율). 0 이면 없다.
+/// 버퍼가 모자라면 **아무것도 안 준다** — 잘린 config 를 쓰면 설정이 반만 남는다.
+pub export fn maru_mobile_take_config_write(out: [*]u8, cap: usize) usize {
+    if (cfg_write.len == 0) return 0;
+    if (cfg_write.len > cap) {
+        setLastError("config_write_truncated");
+        return 0;
+    }
+    @memcpy(out[0..cfg_write.len], cfg_write);
+    const n = cfg_write.len;
+    term_allocator.free(cfg_write);
+    cfg_write = &.{};
+    return n;
 }
 
 /// 코어가 드는 값을 config 에서 세운다. **두 곳에서 부른다** — config 를 읽을 때와 **코어가
@@ -170,6 +227,34 @@ fn applyConfigToCore(core: *terminal.core.TerminalCore) void {
 
 /// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 닿았는지는
 /// **코어에 물어야** 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다.
+/// 설정 화면이 그릴 줄(테스트·진단용 — 스키마에서 comptime 에 나온다).
+/// 그 점이 어느 설정 행인가(테스트·진단용) — **브리지가 그린 rect 로** 답한다. 테스트가 좌표를
+/// 다시 계산하면 그리는 자리와 판정하는 자리가 갈린다.
+pub fn settingsRowAt(x: f32, y: f32) ?usize {
+    var field_i: usize = 0;
+    for (set_items, 0..) |item, i| switch (item) {
+        .header => {},
+        .field => {
+            if (setHit(set_row_rects[i], x, y)) return field_i;
+            field_i += 1;
+        },
+    };
+    return null;
+}
+
+/// 화면이 실제로 그린 필드 줄 수(헤더 제외).
+pub fn settingsFieldCount() usize {
+    var n: usize = 0;
+    for (set_items) |item| if (item == .field) {
+        n += 1;
+    };
+    return n;
+}
+
+pub fn settingsRows() []const mobile_config.Row {
+    return mobile_config.rows;
+}
+
 pub export fn maru_mobile_scrollback_lines() u32 {
     const core = &(term_core orelse return 0);
     return @intCast(core.maxScrollback());
@@ -2211,98 +2296,29 @@ const set_row_h: f32 = 44.0;
 const set_head_h: f32 = 52.0;
 const set_pad_x: f32 = 16.0;
 
-const SetKind = union(enum) {
-    toggle: bool,
-    choice: struct { idx: usize, items: []const []const u8 },
-    number: i32,
-};
-const SetRow = struct { label: []const u8, kind: SetKind };
-
+/// 줄의 **생김새**는 스키마가 준다(`mobile_config.Row`). 값은 여기 안 든다 — 그릴 때마다
+/// config 에서 읽는다("파일이 단일 출처", 계약 §1). 화면이 자기 값을 들면 파일과 갈린다.
 /// 목록은 **필드와 헤더가 섞인 한 줄기**다. 헤더로 화면을 나누지 않는다 — 하위 화면으로
 /// 밀면 설정 하나 바꾸는 데 탭이 하나 더 붙는데, [UX §3](../../../docs/mobile-ux.md)이
 /// "터미널에서 시간을 가장 많이 쓴다" 고 못박아 뒀다. 헤더는 **순서만** 주고 누를 수 없다.
-const SetItem = union(enum) { header: []const u8, field: SetRow };
+const SetItem = union(enum) { header: []const u8, field: mobile_config.Row };
 
 const set_header_h: f32 = 34.0;
 
-/// **데스크톱 키를 그대로 옮기지 않았다.** 모바일에 뜻이 있는 것만 골랐다 — `shell.*`·
-/// `quick-terminal.*`·`window.blur`·`keyhint.*` 처럼 로컬 셸·여러 창·마우스·물리 수정자를
-/// 전제하는 키는 빠진다(계약 §1 원격 전용, [UX §2.4](../../../docs/mobile-ux.md)).
-/// 값·이름은 **PoC 다** — 확정 스키마는 M10 이 짠다.
-var set_items = [_]SetItem{
-    .{ .header = "모양" },
-    .{ .field = .{ .label = "테마 프리셋", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "maru", "nord", "dracula", "one-dark", "tokyo-night", "gruvbox-dark", "rose-pine", "solarized-dark" } } } } },
-    .{ .field = .{ .label = "라이트 프리셋", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "one-light", "solarized-light", "rose-pine-dawn" } } } } },
-    .{ .field = .{ .label = "다크 프리셋", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "maru", "nord", "dracula" } } } } },
-    .{ .field = .{ .label = "시스템 테마 따르기", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "배경색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "#1E1E2E", "#000000" } } } } },
-    .{ .field = .{ .label = "전경색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "#CDD6F4", "#FFFFFF" } } } } },
-    .{ .field = .{ .label = "커서색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "#DDA15E", "자동" } } } } },
-    .{ .field = .{ .label = "선택색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "#45475A", "자동" } } } } },
-    .{ .field = .{ .label = "팔레트", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "기본 16색", "직접" } } } } },
-    .{ .field = .{ .label = "최소 대비", .kind = .{ .number = 1 } } },
-    .{ .field = .{ .label = "굵게는 밝게", .kind = .{ .toggle = false } } },
-    .{ .field = .{ .label = "chrome 프리셋", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "rich", "tui" } } } } },
-    .{ .field = .{ .label = "chrome 테마", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "따름", "다크", "라이트" } } } } },
-    .{ .field = .{ .label = "탭 스타일", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "카드", "밑줄" } } } } },
-
-    .{ .header = "글자" },
-    .{ .field = .{ .label = "폰트", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "Jetendard", "D2Coding", "번들 기본" } } } } },
-    .{ .field = .{ .label = "굵은 폰트", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "자동", "Jetendard Bold" } } } } },
-    .{ .field = .{ .label = "기울임 폰트", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "자동", "Jetendard Italic" } } } } },
-    .{ .field = .{ .label = "폴백 폰트", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "시스템", "없음" } } } } },
-    .{ .field = .{ .label = "폰트 크기", .kind = .{ .number = 15 } } },
-    .{ .field = .{ .label = "줄 높이", .kind = .{ .number = 22 } } },
-    .{ .field = .{ .label = "자간", .kind = .{ .number = 0 } } },
-    .{ .field = .{ .label = "리거처", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "깜빡이는 글자", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "모호 폭", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "narrow", "wide" } } } } },
-    .{ .field = .{ .label = "이모지 폭", .kind = .{ .choice = .{ .idx = 1, .items = &.{ "narrow", "wide" } } } } },
-
-    .{ .header = "커서" },
-    .{ .field = .{ .label = "모양", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "블록", "밑줄", "막대" } } } } },
-    .{ .field = .{ .label = "색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "테마", "직접" } } } } },
-    .{ .field = .{ .label = "글자색", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "반전", "직접" } } } } },
-    .{ .field = .{ .label = "깜빡임", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "깜빡임 간격(ms)", .kind = .{ .number = 600 } } },
-    .{ .field = .{ .label = "페이드(ms)", .kind = .{ .number = 120 } } },
-    .{ .field = .{ .label = "비활성 커서", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "테두리", "숨김" } } } } },
-
-    .{ .header = "터미널" },
-    .{ .field = .{ .label = "스크롤백 줄 수", .kind = .{ .number = 1000 } } },
-    .{ .field = .{ .label = "명령 줄 고정", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "TERM", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "xterm-256color", "xterm-ghostty" } } } } },
-    .{ .field = .{ .label = "OSC 52 읽기 허용", .kind = .{ .toggle = false } } },
-    .{ .field = .{ .label = "붙여넣기 보호", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "bracketed paste 안전", .kind = .{ .toggle = true } } },
-
-    .{ .header = "입력" },
-    .{ .field = .{ .label = "링크 감지", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "링크 열기", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "브라우저", "인앱" } } } } },
-    .{ .field = .{ .label = "IME Enter", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "확정만", "보냄" } } } } },
-    .{ .field = .{ .label = "Shift+Enter", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "줄바꿈", "보냄" } } } } },
-    .{ .field = .{ .label = "단어 구분자", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "기본", "직접" } } } } },
-    .{ .field = .{ .label = "Page 키", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "스크롤", "보냄" } } } } },
-    .{ .field = .{ .label = "입력 시 선택 해제", .kind = .{ .toggle = true } } },
-
-    .{ .header = "알림" },
-    .{ .field = .{ .label = "벨 소리", .kind = .{ .toggle = false } } },
-    .{ .field = .{ .label = "벨 표시", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "OSC 알림", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "알림 기록 수", .kind = .{ .number = 100 } } },
-
-    .{ .header = "화면" },
-    .{ .field = .{ .label = "표시 주기", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "30Hz", "60Hz" } } } } },
-    .{ .field = .{ .label = "위 여백", .kind = .{ .number = 14 } } },
-    .{ .field = .{ .label = "아래 여백", .kind = .{ .number = 14 } } },
-    .{ .field = .{ .label = "좌 여백", .kind = .{ .number = 16 } } },
-    .{ .field = .{ .label = "우 여백", .kind = .{ .number = 16 } } },
-
-    .{ .header = "모바일" },
-    .{ .field = .{ .label = "보조 키바 표시", .kind = .{ .toggle = true } } },
-    .{ .field = .{ .label = "길게 누름 지연(ms)", .kind = .{ .number = 500 } } },
-    .{ .field = .{ .label = "저전력 모드", .kind = .{ .choice = .{ .idx = 0, .items = &.{ "따름", "항상", "안 함" } } } } },
-    .{ .field = .{ .label = "접근성 글자 크기", .kind = .{ .toggle = false } } },
+/// 목록은 **스키마에서 나온다**(계약 §6). PoC 는 라벨 58개를 손으로 적어 뒀는데 그 대부분은
+/// 뒤에 키가 없어 눌러도 아무 일이 안 났다 — 이제 **키가 있는 줄만** 생기고, 스키마에 키를
+/// 더하면 줄이 늘고 빼면 사라진다. 섹션 헤더도 그 줄들에서 만든다(모바일이 소유하는 분류).
+const set_items: []const SetItem = blk: {
+    var list: []const SetItem = &.{};
+    var last: []const u8 = "";
+    for (mobile_config.rows) |r| {
+        if (!std.mem.eql(u8, r.section, last)) {
+            list = list ++ [_]SetItem{.{ .header = r.section }};
+            last = r.section;
+        }
+        list = list ++ [_]SetItem{.{ .field = r }};
+    }
+    break :blk list;
 };
 
 fn setItemH(i: usize) f32 {
@@ -2418,11 +2434,11 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     }
 
     var oy: f32 = 0;
-    for (&set_items, 0..) |*item, i| {
+    for (set_items, 0..) |item, i| {
         const h = setItemH(i);
         const ry = set_list.y + oy - set_scroll;
         oy += h;
-        switch (item.*) {
+        switch (item) {
             .header => |title| {
                 set_row_rects[i] = .{}; // 헤더는 **누를 수 없다** — 글자일 뿐이다
                 if (ry + h < list_top or ry + h > list_top + list_h + 0.5) continue;
@@ -2447,15 +2463,18 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                     push(.{ .x = @intFromFloat(set_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(set_list.w), .h = @intFromFloat(h) }, tk.get(.row_hover_bg), 0xFF, 0, 0);
                 pushText(row.label, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.surface_fg));
                 const right = set_list.x + set_list.w - set_pad_x;
+                // **값은 config 에서 읽는다** — 화면이 자기 상태를 들면 파일과 갈린다(§1).
+                const val = mobile_config.valueOf(cfg(), row.key);
                 switch (row.kind) {
-                    .toggle => |on| drawSetToggle(on, right, ry + h / 2, tk),
-                    .number => |n| {
+                    .toggle => drawSetToggle(val != 0, right, ry + h / 2, tk),
+                    .number => {
                         var buf: [16]u8 = undefined;
-                        const t = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "?";
+                        const t = std.fmt.bufPrint(&buf, "{d}", .{val}) catch "?";
                         pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
                     },
-                    .choice => |c| {
-                        const v = c.items[c.idx];
+                    .choice => {
+                        const idx: usize = if (val >= 0 and val < row.items.len) @intCast(val) else 0;
+                        const v = row.items[idx];
                         const chev_w: f32 = 14;
                         pushText("\u{25BE}", @intFromFloat(right - chev_w), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
                         pushText(v, @intFromFloat(right - chev_w - 6 - @as(f32, @floatFromInt(textWidth(v, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
@@ -2495,7 +2514,12 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     // 그대로 미리보기가 되기 때문이다 — 하위 화면으로 밀면 바꾼 결과가 가려진다.
     set_item_n = 0;
     if (set_open) |oi| switch (set_items[oi].field.kind) {
-        .choice => |c| {
+        .choice => {
+            const c = set_items[oi].field; // items 는 스키마가, 고른 값은 config 가 든다
+            const sel: usize = s: {
+                const v = mobile_config.valueOf(cfg(), c.key);
+                break :s if (v >= 0 and v < c.items.len) @intCast(v) else 0;
+            };
             const r = set_row_rects[oi];
             if (r.w == 0) {
                 set_open = null;
@@ -2518,9 +2542,9 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                     const iy = py + @as(f32, @floatFromInt(k)) * set_row_h;
                     set_item_rects[k] = .{ .x = px, .y = iy, .w = pw, .h = set_row_h };
                     set_item_n = k + 1;
-                    if (k == c.idx)
+                    if (k == sel)
                         push(.{ .x = @intFromFloat(px + 2), .y = @intFromFloat(iy + 2), .w = @intFromFloat(pw - 4), .h = @intFromFloat(set_row_h - 4) }, tk.get(.tab_active_bg), 0xFF, 6, 0);
-                    pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (k == c.idx) .accent_bar else .surface_fg));
+                    pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (k == sel) .accent_bar else .surface_fg));
                 }
             }
         },
@@ -2613,9 +2637,9 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                     picked = k;
                     break;
                 };
-                if (picked) |k| switch (set_items[oi].field.kind) {
-                    .choice => |*c| c.idx = k, // 탭 = 즉시 적용
-                    else => {},
+                // **탭 = 즉시 적용 + 즉시 저장.** 값은 화면이 아니라 config 가 든다.
+                if (picked) |k| if (set_items[oi].field.kind == .choice) {
+                    settingChanged(set_items[oi].field, @intCast(k));
                 };
                 set_open = null;
                 return 1;
@@ -2625,9 +2649,12 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                 return 1;
             }
             if (pressed) |i| switch (set_items[i].field.kind) {
-                .toggle => |*v| v.* = !v.*,
+                .toggle => {
+                    const row = set_items[i].field;
+                    settingChanged(row, if (mobile_config.valueOf(cfg(), row.key) != 0) 0 else 1);
+                },
                 .choice => set_open = i,
-                .number => {}, // 숫자 편집은 PoC 밖(키보드가 필요하다)
+                .number => {}, // 숫자 편집은 이 슬라이스 밖(키보드가 필요하다)
             };
         },
     }

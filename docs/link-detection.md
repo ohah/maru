@@ -73,8 +73,9 @@
   (어긋나면 "밑줄은 떠도 클릭하면 안 열림").
 - **절대 경로 판정은 OS를 인자로 받는다**(`path_shape.isDetectableAbsoluteFor(os, path)`; 호출자는 호스트 OS를
   넘긴다): POSIX 절대(`/x`)는 어디서나, 드라이브 절대(`C:\x`·`C:/x`)는 **Windows에서만** 감지한다. 밑줄 span은
-  콘텐츠를 가진 쪽이 만들고(원격도 host가 `collectViewportLinks`로 모은다) hover는 존재검증을 하지 않으므로,
-  macOS에서 `C:\x`를 감지하면 "열리지 않는 밑줄"이 확정된다.
+  콘텐츠를 가진 쪽이 만든다(원격도 host가 `collectViewportLinks`로 모은다). 로컬 hover는 이제 존재검증까지
+  하므로 macOS에서 `C:\x`는 감지돼도 밑줄이 뜨지 않고, stat을 하지 않는 원격 host span에서만 "열리지 않는
+  밑줄"이 남는다.
   - **부분집합 불변식**: 감지한 것은 반드시 `std.fs.path.isAbsolute`도 절대로 인정해야 한다. 아니면
     `resolveClickedPath`가 그 토큰을 **cwd에 join**해 엉뚱한 파일을 연다. 그래서 드라이브 뒤에 **구분자를
     요구**하고(`a:b`·`C:relative`는 감지하지 않는다), UNC(`\\server\share`·`//server/share`)와 드라이브 없는
@@ -106,14 +107,27 @@
   read가 난다(`focusedTermCwd`·`copyText`가 같은 위험을 락으로 고친 선례). hover는 매 mouse-move라 클릭보다
   빈번해 노출이 더 크다. 존재검증 `access(F_OK)`는 빠른 syscall이라 락 아래 허용([io-render-threading](plans/io-render-threading.md) §9.1).
 
-## hover(밑줄)와 click(열림)의 의도적 불일치
+## hover(밑줄)와 click(열림)은 같은 답을 낸다 (로컬)
 
-- **hover**(`wordIsUrl`/`urlAnchorAt`)는 매 마우스 이동마다 불려 비용에 민감하므로 **stat을 하지 않는다** —
-  패턴만 맞으면 밑줄·링크 커서를 띄운다.
-- **click**(`extractUrlAt`)만 resolve+stat 게이트를 통과해야 실제로 연다.
-- 결과: 존재하지 않는 경로에도 Cmd+hover 밑줄은 뜰 수 있으나 클릭하면 열리지 않는다. "밑줄=후보, 열림=검증"
-  이라는 약한 불일치를 의도적으로 허용한다(hover에 디스크 I/O를 넣지 않기 위함). 더 엄격히 하려면 hover에도
-  stat을 거는 후속이 가능하다.
+- **hover**(`TerminalCore.openableLinkAnchorAt`)는 분류(`urlAnchorAt`)로 anchor를 잡은 뒤, 그 토큰이
+  `file_path`이면 **클릭과 같은 술어** — 추출(`extractUrlAt`) → `resolveClickedPath` → 존재검증 — 을 통과해야
+  밑줄·링크 커서를 띄운다. URL은 검증 없이 그대로 통과한다.
+- **click**(`urlAt`)은 같은 추출+resolve+stat을 다시 밟아 연다. 즉 두 경로가 같은 함수를 쓴다.
+- 결과: 존재하지 않는 경로에는 **밑줄이 뜨지 않는다**. "밑줄은 뜨는데 클릭하면 아무 일도 없는" 상태가 사라졌다.
+
+**예전에는 달랐다.** hover가 매 마우스 이동마다 불린다는 이유로 stat을 뺐고, 그래서 `/nonexistent/x`나 Windows
+쪽 감지 오탐(`n:\t` 등)에 밑줄만 뜨는 약한 불일치를 의도적으로 허용했다. 그 전제였던 비용을 실측해
+뒤집었다 — 로컬 stat 7.9 µs(실재)/11.4 µs(없음), 링크 후보 50개를 훑어도 0.61 ms로 60fps 예산의 3.6 %다.
+느린 경우(UNC 죽은 호스트 755 ms)는 `path_shape.isDetectableAbsoluteFor`가 `\\` 토큰을 감지에서 이미
+떨어뜨려 stat까지 닿지 않는다. 숫자와 남은 미지수(매핑됐지만 끊긴 네트워크 드라이브)는
+[windows-platform.md §5.1a](windows-platform.md)가 소유한다.
+
+**불변식**: `src/terminal/core.zig`의 *"hover와 클릭이 같은 답을 낸다 — 존재검증까지"* 가 실재 경로와 없는
+경로를 두 OS 형태로 넣고 두 답이 어긋나지 않는지 단언한다.
+
+**원격은 아직 예전 그대로다.** host-backed 세션의 밑줄은 host가 스냅샷에 실어 보낸 span이고 그 계산은 stat을
+하지 않는다(§원격 표). plain ssh 세션은 `linkScopesForTerm`이 네 경로 scope를 모두 꺼서 경로 밑줄 자체가
+없으므로 불일치가 생길 자리가 없다.
 
 ## 어느 pane에서 찾는가 (포인터 아래 pane이 소유)
 
@@ -126,8 +140,8 @@
   좌표와 무관하게 늘 빈 결과였다 — "브라우저 패널을 띄우면 터미널 링크가 먹통"의 루트커즈(사용자 제보).
 - **밑줄도 그 pane에만**: hover 상태는 anchor와 함께 **surface_id**를 싣고, 렌더는 `hoverLinkSpanFor(surface)`가
   id가 일치하는 pane에만 span을 준다. 활성·비활성 pane 렌더 경로가 이 함수를 공유하므로 비활성 pane에도 밑줄이
-  뜬다 — 안 그리면 "밑줄은 없는데 클릭하면 열리는" 불일치가 생긴다(§hover와 click의 의도적 불일치는 stat 유무
-  하나뿐이어야 한다).
+  뜬다 — 안 그리면 "밑줄은 없는데 클릭하면 열리는" 불일치가 생긴다(로컬에서 두 경로는 §hover와 click대로
+  같은 답을 내야 한다).
 - **포커스와의 관계**: 링크가 아닌 일반 클릭은 그대로 `Model.paneAtPoint`로 그 pane에 포커스를 옮긴다(수식키+클릭은
   URL 열기가 먼저 소비하므로 포커스가 안 옮겨간다). 즉 "브라우저를 보다가 옆 터미널 링크를 Cmd+클릭" 흐름에서
   포커스는 브라우저에 남고 링크만 열린다.
@@ -210,7 +224,7 @@
 - **공백 든 경로 미지원**(토큰 모델 — 위 결정 2). 멀티-토큰 흡수는 오탐·복잡도가 커 후속.
 - **`:line:col` 에디터 점프 미지원**(1차는 파일만 연다). `${EDITOR} +line file`은 별도 기능으로 후속.
 - **`$VAR/` 경로 확장 미지원**(Ghostty는 함). `~/`만 확장. 후속 결정.
-- **hover stat 미적용**(위 불일치). 후속 옵션.
+- **원격 hover는 아직 stat을 하지 않는다**(위 §hover와 click). host의 span 계산에 존재검증을 넣을지는 후속.
 - **추가 스킴 일부 미지원**: Ghostty의 `ipfs://`·`ipns://`·`gemini://`·`gopher://`와 colon-form `file:`·`ssh:`는
   데스크톱 사용 빈도가 낮아 뺐다(현재 지원 8종은 §감지 종류 표). 스킴이 더 적은 건 보수적이라 동작상 안전.
 - **스킴 대소문자 구분**: `HTTP://`처럼 대문자 스킴은 감지 안 한다(소문자만). RFC 3986은 case-insensitive지만
@@ -243,8 +257,9 @@
   계산**해 span마다 매치된 scope 비트를 함께 싣고, client가 자기 config로 거른다. host에 config를 미러링하는 대신 이 분리를 택한
   이유는 (1) config 변경 때마다 host 상태를 동기화할 필요가 없고, (2) 여러 client가 서로 다른 `link-detection`으로 같은 host에
   붙어도 각자의 정책이 적용되기 때문이다(§[다중 client](persistent-session-host.md#9-다중-client와-resize)).
-- **hover/click 불일치는 원격에서도 같다**: host의 span 계산은 stat을 하지 않고(hover), `runtime.link_at`만 resolve+stat을 한다
-  (click). 즉 아래 §hover와 click의 의도적 불일치가 로컬·원격에서 동일하게 성립한다.
+- **hover/click 불일치가 원격에만 남았다**: host의 span 계산은 stat을 하지 않고(hover), `runtime.link_at`만 resolve+stat을 한다
+  (click). 로컬은 §hover와 click에서 이 불일치를 닫았으므로 **원격만 예전 규칙**이고, 그래서 원격에서는 존재하지 않는
+  경로에도 밑줄이 뜰 수 있다.
 - **OSC 8 명시 링크도 같은 record로 간다**: screen-stream의 `run`에는 셀의 OSC 8 link id 필드가 **없다**(`grapheme|width|
   count|fg|bg|underline_color|style_flags`가 전부). 즉 원격에서는 자동 감지뿐 아니라 **명시 하이퍼링크도 client 셀에 도달하지
   않는다** — 이 문서 §두 가지 감지 경로가 "OSC 8은 항상 우선"이라고 한 전제가 host-backed에서는 성립하지 않았다. 그래서 host는

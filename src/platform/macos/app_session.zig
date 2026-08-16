@@ -11763,7 +11763,11 @@ pub const AppSession = struct {
                         // 클립(아래 hoverLinkSpanFor)되므로 stale·OOB가 안 생긴다.
                         // 스코프는 **클릭(urlAt)과 같은 단일 출처**를 쓴다 — 원격 세션에서 파일 경로 스코프가 꺼지므로
                         // 밑줄도 함께 사라져야 "밑줄 보이는 곳 = 열리는 곳"이 유지된다(§9.4).
-                        if (s.core.urlAnchorAt(cell.row, cell.col, linkScopesForTerm(self, hit.term))) |a| {
+                        //
+                        // **존재검증까지 같은 것을 쓴다.** 예전에는 hover가 분류만 해서, 없는 경로에 밑줄이 뜨고
+                        // 클릭하면 아무 일도 안 일어났다 — 위 불변식의 나머지 절반이 비어 있었다. 비용은 실측으로
+                        // 무시할 수준이다(`openableLinkAnchorAt`의 doc).
+                        if (s.core.openableLinkAnchorAt(self.allocator, cell.row, cell.col, linkScopesForTerm(self, hit.term)) catch null) |a| {
                             next = a;
                             next_surface_id = s.id;
                         }

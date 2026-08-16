@@ -6247,7 +6247,8 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   config를 모르므로 **항상 최대 집합으로 계산**하고, client가 자기 `input.link-detection`으로 `scope`를 걸러 밑줄을 그린다
   (host 해석 / client 정책 분리 — [링크 감지](link-detection.md#원격host-backed-세션)). 범위 밖 `kind`/`scope`는 현재
   의미로 보정하지 않고 record를 reject한다. host는 이 계산에서 stat을 하지 않는다(hover는 후보, 열기는
-  `runtime.link_at`이 검증 — 로컬 경로와 같은 의도적 불일치).
+  `runtime.link_at`이 검증). **로컬 경로는 이제 hover에서도 존재검증을 하므로**([링크 감지](link-detection.md)
+  §hover와 click) 이 불일치는 원격에만 남아 있다.
 - `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색
   (fg/bg/underline_color)은 resolved RGB가 아니라 **태그드 Color intent**다(상위 바이트=태그 default/indexed/rgb, 하위 24비트=
   payload — `ColorTag`가 SSOT). host는 색을 굽지 않고 의도를 실어 **client가 자기 theme로 in-process와 동일하게 해석**한다(config

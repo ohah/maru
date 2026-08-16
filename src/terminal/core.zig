@@ -987,6 +987,37 @@ pub const TerminalCore = struct {
     pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: selection.LinkScopes) ?types.SelectionPoint {
         return selection.urlAnchorAt(self, viewport_row, col, scopes);
     }
+    /// hover 밑줄용 anchor — **클릭과 같은 검증을 거친다.**
+    ///
+    /// `urlAnchorAt`은 분류만 한다. 그래서 지금까지 hover는 "패턴이 맞으면 밑줄"이었고 클릭만 존재검증을 했다 —
+    /// 존재하지 않는 경로에 밑줄이 뜨고 클릭하면 아무 일도 안 일어나는 상태가 **OS를 가리지 않고** 생겼다
+    /// (`/nonexistent/x`도, 이스케이프 출력이 경로처럼 보이는 것도). 그 불일치는 `linkScopesForTerm`의 doc이
+    /// 이미 *"밑줄 보이는 곳 = 열리는 곳"*을 불변식으로 선언해 둔 것과 어긋난다.
+    ///
+    /// **URL은 stat하지 않는다** — 열 수 있는지는 네트워크가 정하고, 그걸 hover에서 물으면 안 된다.
+    /// 파일 경로만 `extractUrlAt`과 **같은 resolve+존재검증**을 거친다(단일 출처가 하나여야 둘이 안 갈린다).
+    ///
+    /// **비용**(실측, Windows 10.0.19045): `GetFileAttributesW`가 로컬 실재 7.9 µs·미존재 11.4 µs·없는 드라이브
+    /// 0.8 µs다. 마우스가 아무리 빨라도 초당 수백 회이므로 무시할 수준이라 캐시를 두지 않았다. **네트워크 경로만
+    /// 위험한데**(응답 없는 UNC 호스트 755 ms, 라우팅 불가 IP 11 s) UNC는 `isDetectableAbsoluteFor`가 감지
+    /// 단계에서 이미 거부하므로 여기까지 오지 않는다. 남은 미지수는 **매핑된 채 끊긴 네트워크 드라이브**이고,
+    /// 그건 이 기기에 없어 재지 못했다(docs/windows-platform.md §8).
+    pub fn openableLinkAnchorAt(
+        self: *const TerminalCore,
+        allocator: std.mem.Allocator,
+        viewport_row: u16,
+        col: u16,
+        scopes: selection.LinkScopes,
+    ) !?types.SelectionPoint {
+        const anchor = selection.urlAnchorAt(self, viewport_row, col, scopes) orelse return null;
+        const ext = (try selection.extractUrlAt(self, allocator, viewport_row, col, scopes)) orelse return null;
+        defer allocator.free(ext.text);
+        if (ext.kind == .url) return anchor;
+        const abs = (self.resolveClickedPath(allocator, ext.text) catch null) orelse return null;
+        allocator.free(abs);
+        return anchor;
+    }
+
     /// anchor에서 시작하는 링크의 현재 뷰포트 밑줄 범위(종류 무관). 본문: selection.urlSpanAtAbs.
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
         return selection.urlSpanAtAbs(self, anchor);
@@ -5738,6 +5769,52 @@ test "extractUrlAt stops at a background-colored (bce) space — URL not swallow
     try std.testing.expectEqualStrings("https://a.bc/d", url.text); // 공백에서 끊겨 foo가 안 붙는다
     // 색칠된 공백 위 클릭은 선택/URL 없음(배경색 무관 — 일반 공백과 동일).
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 14, selection.link_scopes_full)) == null);
+}
+
+// **밑줄 보이는 곳 = 열리는 곳.** `linkScopesForTerm`의 doc이 선언한 불변식인데, 지금까지 스코프 수준에서만
+// 지켜지고 존재 수준에서는 비어 있었다 — hover는 분류만 하고 클릭만 stat했다. 이 테스트가 그 나머지 절반을
+// 고정한다: **같은 좌표에서 두 함수의 답이 갈리면 실패**다.
+const nl = [_]u8{ 0x0D, 0x0A };
+
+test "hover와 클릭이 같은 답을 낸다 — 존재검증까지" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 80, .rows = 6 });
+    defer core.deinit();
+    const full = selection.link_scopes_full;
+
+    // **절대 경로로 쓴다** — cwd(OSC 7) 없이도 resolve되므로 이 테스트가 셸 상태에 안 매인다.
+    const existing = if (@import("builtin").os.tag == .windows) "C:/Windows" else "/tmp";
+    const missing = if (@import("builtin").os.tag == .windows) "C:/nope-9e1f-maru" else "/nope-9e1f-maru";
+
+    try core.write("a ");
+    try core.write(existing);
+    try core.write(" here" ++ nl);
+    try core.write("b ");
+    try core.write(missing);
+    try core.write(" here" ++ nl);
+    try core.write("c https://example.com here" ++ nl);
+
+    const cases = [_]struct { row: u16, col: u16, want: bool, note: []const u8 }{
+        .{ .row = 0, .col = 2, .want = true, .note = "실재 디렉터리" },
+        .{ .row = 1, .col = 2, .want = false, .note = "없는 경로 — 밑줄도 뜨면 안 된다" },
+        .{ .row = 2, .col = 2, .want = true, .note = "URL — stat 없이 통과" },
+    };
+    for (cases) |c| {
+        const hover = (try core.openableLinkAnchorAt(allocator, c.row, c.col, full)) != null;
+        const click = blk: {
+            const ext = (try core.extractUrlAt(allocator, c.row, c.col, full)) orelse break :blk false;
+            allocator.free(ext.text);
+            break :blk true;
+        };
+        if (hover != click) {
+            std.debug.print("hover({})와 click({})이 갈렸다: {s}", .{ hover, click, c.note });
+            return error.TestUnexpectedResult;
+        }
+        if (hover != c.want) {
+            std.debug.print("기대와 다르다({s}): got={} want={}", .{ c.note, hover, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "urlAnchorAt + urlSpanAtAbs project the hovered URL word, following content and rejecting non-URLs" {

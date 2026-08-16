@@ -137,6 +137,9 @@ pub const DockMetrics = struct {
     commit_row_h: u32,
     /// 커밋 버튼 줄 높이.
     commit_button_h: u32,
+    /// 커밋 상자의 **위아래 여백**. 글자가 테두리와 버튼 줄에 붙지 않게 한다 — 입력란은 글자가 상자
+    /// 안에서 숨 쉬어야 눌러서 쓰는 자리로 읽힌다(사용자 지적 2026-08-16).
+    commit_pad_y: u32,
     /// 목록 좌우 여백.
     inset_x: u32,
     /// 행 안에서 아이콘·글자·동작 사이의 간격.
@@ -168,6 +171,7 @@ pub const DockMetrics = struct {
             .branch_h = s.px(26, scale_milli),
             .commit_row_h = s.px(20, scale_milli),
             .commit_button_h = s.px(28, scale_milli),
+            .commit_pad_y = s.px(8, scale_milli),
             .inset_x = s.px(8, scale_milli),
             .gap = s.px(6, scale_milli),
             .status_extent = s.px(14, scale_milli),
@@ -183,6 +187,12 @@ pub const DockMetrics = struct {
 
     /// 항목 하나의 높이. 스크롤 상한·가상화 계산이 이 함수를 단일 출처로 쓴다 — platform이 자기
     /// 산술로 다시 재면 그린 자리와 스크롤 범위가 갈린다.
+    /// 커밋 상자 전체 높이. **세 곳이 이 함수를 쓴다** — build(노드 높이)·view(글자 자리)·platform(목록
+    /// 높이). 각자 계산하면 상자가 차지한 만큼 목록이 줄지 않아 스크롤 범위가 어긋난다(탭 줄에서 겪었다).
+    pub fn commitBoxHeight(self: DockMetrics, rows: u32) u32 {
+        return self.commit_row_h * @max(rows, 1) + self.commit_pad_y * 2;
+    }
+
     pub fn itemHeight(self: DockMetrics, item: Item) u32 {
         return switch (item) {
             .section => self.section_h,

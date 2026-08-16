@@ -64,7 +64,7 @@ fn listViewportHeightPx(self: *const AppSession, has_branch: bool) u32 {
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     // **고정 chrome을 전부 뺀다.** 하나라도 빠뜨리면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가
     // 어긋난다(탭 줄에서 실제로 그랬다). 커밋 상자는 내용을 따라 자라므로 그 높이도 여기서 센다.
-    const commit_h = m.commit_row_h * @max(commitRows(self), 1) + m.commit_button_h;
+    const commit_h = m.commitBoxHeight(commitRows(self)) + m.commit_button_h + m.commit_pad_y;
     const fixed = m.tab_h + m.summary_h + commit_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }

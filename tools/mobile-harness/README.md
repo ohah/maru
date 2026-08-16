@@ -60,6 +60,28 @@ gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL �
 | `synth-before-crop.png` | 합성 글리프가 없어 TUI 가 깨지는 자리 | `chrome-android-app` 뒤 대본의 TUI 줄을 잘라 확대 |
 
 
+## 에뮬레이터 설정 — 컷아웃은 **기기 기본(홀펀치)** 으로 둔다
+
+`zl_poc` AVD 는 Pixel 6 프로필이라 카메라 홀이 있다. **그대로 둔다** — 실기기 대부분이 그렇고,
+이 설정이 실제 결함을 잡았다(`systemBars()` 만 물어 **본문 첫 줄들이 구멍 뒤에 깔렸다**).
+
+**시계가 잘려 보이는 것은 우리 앱이 아니다.** 이 스킨은 상태바가 **63px** 인데 홀이 **y=64..130**
+이라(`statusBars frame=[0,0][1080,63]` · `cutoutSpec={M 507,64 a 33,33 ...}`) SystemUI 가 시계를
+63 짜리 바 안에서 잘라 그린다. **런처 화면도 똑같이 잘린다** — 대조군으로 확인했다. 컷아웃을
+끄면(`cmd overlay enable ...emulation.waterfall`) 시계가 온전해지는 것으로도 갈렸다.
+**여기서 다시 조사하지 말 것.**
+
+컷아웃을 바꿔 보고 싶으면:
+
+```sh
+adb shell cmd overlay list | grep cutout                                   # 목록
+adb shell cmd overlay enable  com.android.internal.display.cutout.emulation.waterfall   # 좌우 53, 상단 0
+adb shell cmd overlay disable com.android.internal.display.cutout.emulation.waterfall   # 기기 기본으로
+```
+
+**waterfall 은 가끔 한 번씩 볼 값어치가 있다** — 좌우 inset 을 요구하는데 우리는 top/bottom 만
+쓴다(곡면 기기에서 양끝 글자가 모서리에 말릴 수 있다). 그건 아직 안 닫은 축이다.
+
 ## 무엇을 판정하는가
 
 **화면이 뜨는 것으로는 부족하다.** 픽셀을 읽어 "실제로 그려졌다"를 확인한다 — 새

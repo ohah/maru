@@ -154,7 +154,7 @@ const ensureDir = artifact_io.ensureDir;
 // 데모 산출물을 OS별로 다르게 읽지 않으려면 **두 갈래가 같은 세 줄을** 내야 한다. 스크립트 문법은
 // 달라도 그 안의 문구는 같다는 것을 여기서 못박는다(fixture_script는 형태만 검사한다).
 test "데모 fixture: 두 갈래가 같은 세 줄을 낸다" {
-    for ([_]std.Target.Os.Tag{ .windows, .macos, .linux }) |os| {
+    inline for ([_]std.Target.Os.Tag{ .windows, .macos, .linux }) |os| {
         const script = fixture_script.oneShot(
             os,
             "printf 'maru headless demo\\n'; pwd; printf 'demo complete\\n'",

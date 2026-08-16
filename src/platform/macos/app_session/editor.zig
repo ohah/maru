@@ -325,7 +325,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, term.rt.editor_first_line, term.rt.editor_first_col, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstCol(wrap, term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -487,6 +487,19 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     return true;
 }
 
+/// 렌더에 넘길 가로 위치. **랩이면 0이다.**
+///
+/// 컴포넌트는 `!wrap or first_col == 0`을 어서션으로 요구한다. 그 불변식을 "상태를 고쳐서" 지키면
+/// 랩을 켜는 경로가 늘 때마다 하나씩 빠뜨린다 — 실제로 `toggleWrap`은 지켰지만 **config 재적재**는
+/// 안 지켰다(적대적 검증 2026-08-16). 값을 **읽는 자리**가 여기 하나뿐이므로, 여기서 세우면 어떤
+/// 경로로 랩이 켜지든 깨질 수 없다.
+///
+/// **저장된 위치는 안 버린다.** 랩을 껐을 때 보던 자리로 돌아온다 — 켤 때 0으로 지우면 그 자리를
+/// 잃는다.
+fn effectiveFirstCol(wrap: bool, term: *Term) u16 {
+    return if (wrap) 0 else term.rt.editor_first_col;
+}
+
 /// `editor_first_line`이 가질 수 있는 최대값. 0이면 문서가 화면에 다 들어간다.
 ///
 /// **`visible`은 시각 행, `total`은 논리 줄이다.** 랩이 켜져 줄이 접히면 두 단위가 갈리므로 그대로
@@ -525,7 +538,9 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
         self.metal_dirty = true;
     }
 
-    if (term.rt.editor_first_col != 0) {
+    // **랩이면 가로는 손대지 않는다.** 렌더가 `effectiveFirstCol`로 0을 쓰므로 불변식은 이미
+    // 지켜졌고, 저장된 위치는 랩을 껐을 때 돌아갈 자리다 — 여기서 지우면 그것을 잃는다.
+    if (term.rt.editor_first_col != 0 and !(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap)) {
         // 최대 열은 위치가 0이 아닌 이상 이미 세어져 있다(`scrollCols`가 세운다). 방어적으로만 본다.
         const visible_cols = visibleCols(self, body, term);
         const max_col: u32 = term.rt.editor_max_cols -| visible_cols;
@@ -627,8 +642,8 @@ pub fn toggleWrap(self: *AppSession) bool {
     // **접힘이 달라지면 시각 행 수도 달라진다.** 렌더가 센 값은 옛 랩의 것이고 스크롤 상한이 그것을
     // 읽으므로, 다시 그리기 전의 한 번을 위해 버린다(다음 프레임이 곧바로 채운다).
     term.rt.editor_total_visual_rows = 0;
-    // **랩을 켜면 가로로 넘칠 것이 없다.** 옛 가로 위치를 남기면 랩된 본문이 왼쪽으로 밀려 그려진다.
-    if (!now) term.rt.editor_first_col = 0;
+    // **가로 위치는 버리지 않는다.** 랩 중에는 렌더가 안 쓰고(`effectiveFirstCol`), 랩을 끄면 보던
+    // 자리로 돌아온다. 상한을 넘어 있으면 `clampScrollToGeometry`가 그리기 직전에 되돌린다.
     self.metal_dirty = true;
     return true;
 }
@@ -1698,7 +1713,7 @@ test "가로 스크롤은 가장 긴 줄의 끝에서 멈춘다 — 빈 화면�
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 }
 
-test "랩이 켜지면 가로는 없다 — 켜는 순간 위치도 처음으로 돌아온다" {
+test "랩 중에는 가로 축이 없고 렌더에도 0이 간다 — 위치는 버리지 않는다" {
     // 랩은 폭에 맞춰 잘라 두므로 넘칠 것이 없다. 옛 가로 위치를 남기면 랩된 본문이 왼쪽으로 밀려
     // 그려진다 — 화면에 아무 글자도 없는 상태가 된다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -1717,9 +1732,19 @@ test "랩이 켜지면 가로는 없다 — 켜는 순간 위치도 처음으로
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -20));
     try testing.expect(fx.term.rt.editor_first_col > 0);
 
+    const before_wrap = fx.term.rt.editor_first_col;
+
     try testing.expect(toggleWrap(fx.session)); // 랩 켬
-    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
     try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20)); // 랩 중에는 이 축을 안 가진다
+    // **렌더에는 0이 간다** — 컴포넌트의 `!wrap or first_col == 0`을 여기서 세운다. 그리는 것과
+    // 저장된 위치는 다른 것이고, 그리기가 죽지 않는 것까지 함께 본다.
+    try testing.expectEqual(@as(u16, 0), effectiveFirstCol(true, fx.term));
+    var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    // **보던 자리로 돌아온다** — 켤 때 지우면 그것을 잃는다.
+    try testing.expect(toggleWrap(fx.session)); // 랩 끔
+    try testing.expectEqual(before_wrap, fx.term.rt.editor_first_col);
 }
 
 test "가로 위치가 렌더까지 간다 — 상태만 움직이고 화면이 그대로면 아무 일도 안 일어난다" {
@@ -1815,4 +1840,74 @@ test "창이 높아지면 다음 프레임이 세로 위치를 되돌린다 — 
     try testing.expect(at_end > many.len -| visible); // 판정이 공허하지 않다
     try testing.expect(fx.term.rt.editor_first_line <= many.len -| visible);
     try testing.expect(drawn.dl.cells.len > 0);
+}
+
+test "되돌리기는 한 번이면 끝난다 — 매 프레임 dirty를 세우면 화면이 영원히 다시 그려진다" {
+    // `clampScrollToGeometry`가 그리기 직전에 돌면서 `metal_dirty`를 세운다. 값이 안정되지 않으면
+    // 프레임마다 다시 세워져 **아무 입력이 없어도 GPU가 계속 돈다**(배터리).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |wrap| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+        const lines = try hscrollFixtureLines(allocator, &fx, 300);
+        const long_buf = lines[1];
+        defer allocator.free(long_buf);
+        defer allocator.free(lines);
+
+        const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 200 };
+        _ = scrollCols(fx.session, fx.term, narrow, -1_000_000);
+        _ = scrollLines(fx.session, fx.term, narrow, -1_000_000);
+        fx.term.rt.editor_wrap = wrap;
+
+        // 창이 커졌다 — 첫 프레임이 되돌린다.
+        const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 1600, .h = 1200 };
+        var f1 = appendPaneFrame(fx.session, wide, fx.term) orelse return error.EditorPaneDidNotDraw;
+        f1.dl.deinit(allocator);
+
+        // 두 번째 프레임부터는 **아무것도 안 바꿔야** 한다.
+        fx.session.metal_dirty = false;
+        const line_after = fx.term.rt.editor_first_line;
+        const col_after = fx.term.rt.editor_first_col;
+        var f2 = appendPaneFrame(fx.session, wide, fx.term) orelse return error.EditorPaneDidNotDraw;
+        f2.dl.deinit(allocator);
+        try testing.expectEqual(line_after, fx.term.rt.editor_first_line);
+        try testing.expectEqual(col_after, fx.term.rt.editor_first_col);
+        try testing.expect(!fx.session.metal_dirty); // 안정 상태에서 다시 그릴 이유가 없다
+    }
+}
+
+test "config 재적재로 랩이 켜져도 그리기가 죽지 않는다 — 토글만 지키면 부족하다" {
+    // 컴포넌트는 `!wrap or first_col == 0`을 **어서션**으로 요구한다. `toggleWrap`은 그것을 지키지만
+    // 뷰 override가 없는 편집기는 config를 따르므로, **config가 바뀌면 토글을 지나지 않고** 랩이
+    // 켜진다. Debug는 그 자리에서 죽고 ReleaseFast는 조용히 틀린 그림을 그린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try hscrollFixtureLines(allocator, &fx, 300);
+    const long_buf = lines[1];
+    defer allocator.free(long_buf);
+    defer allocator.free(lines);
+
+    // **override를 지운다** — 이 뷰는 config를 따른다(새로 연 편집기의 기본 상태다).
+    fx.term.rt.editor_wrap = null;
+    fx.session.loaded_config.config.editor.wrap = false;
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -20));
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+
+    // config가 바뀐다(재적재). 토글은 부르지 않는다.
+    const stored = fx.term.rt.editor_first_col;
+    fx.session.loaded_config.config.editor.wrap = true;
+    var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(drawn.dl.cells.len > 0); // 어서션에 안 걸리고 그려진다
+    try testing.expectEqual(stored, fx.term.rt.editor_first_col); // 상태는 그대로 — 랩을 끄면 돌아갈 자리
 }

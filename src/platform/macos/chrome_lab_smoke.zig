@@ -738,6 +738,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-diff-scrolled")) return .editor_diff_scrolled;
     if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
     if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
+    if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     return null;
 }
 
@@ -745,6 +746,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
     return switch (id) {
         .scm_rows => "scm-rows",
         .scm_row_hover => "scm-row-hover",
+        .scm_commit_edit => "scm-commit-edit",
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",
@@ -799,8 +801,11 @@ fn labTokens() chrome.Tokens {
         .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
         .search_match = .{ .r = 1, .g = 2, .b = 3 },
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
-        .selection = .{ .r = 7, .g = 8, .b = 9 },
-        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        // **선택·커서는 실제 계열 값을 준다.** 아래 accent와 같은 이유다: 커밋 상자 시나리오가 이 둘을
+        // 실제로 그리는데(선택 밴드·caret), 근사-검정 자리표시자를 그대로 두면 골든이 "그렸다"고
+        // 통과하면서 화면에는 아무것도 안 보인다 — 밴드가 사라지는 회귀와 픽셀이 구별되지 않는다.
+        .selection = .{ .r = 58, .g = 88, .b = 128 },
+        .cursor = .{ .r = 220, .g = 220, .b = 220 },
         // Canonical rich-dark fixture uses the resolved default brand amber. A near-black test
         // accent makes the capture claim a contrast regression in a utility icon that the real
         // default theme never asks users to interpret.

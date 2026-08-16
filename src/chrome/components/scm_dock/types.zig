@@ -117,6 +117,43 @@ pub const Props = struct {
     commit_rows: u32 = 1,
     /// 커밋 버튼을 켤 수 있나. **실제 index 상태로만 정한다**(쓰기 문서 §7 — 낙관하지 않는다).
     commit_enabled: bool = false,
+    /// 커밋 상자의 **편집 상태 스냅샷**. component는 편집하지 않는다 — host가 `TextField`로 편집하고
+    /// 그 결과만 여기 싣는다(props는 immutable이고, 편집 상태가 둘이면 caret이 갈린다).
+    commit_edit: CommitEdit = .{},
+};
+
+/// 커밋 상자의 편집 상태(§12 — 세로 축만 갖는 얇은 층). 가로 축(caret 열·선택 span)은 여전히
+/// `text_field.fieldLayout`이 소유하고, 여기 있는 것은 그 함수에 넘길 **오프셋**뿐이다.
+pub const CommitEdit = struct {
+    /// 키를 받고 있나. 꺼져 있으면 caret도 선택 밴드도 그리지 않는다 — 안 깜빡이는 caret은
+    /// "여기 쓰면 된다"가 아니라 "여기 뭔가 잘못됐다"로 읽힌다.
+    focused: bool = false,
+    /// 삽입점(바이트 오프셋). 개행이 섞여도 그대로 성립한다(§12.1 — `TextField`를 고치지 않는 이유).
+    caret: usize = 0,
+    /// 선택 구간(바이트 오프셋, 정렬되지 않을 수 있어 `lo`/`hi`로 읽는다).
+    selection: ?Selection = null,
+    /// IME 조합 중인 글자. caret 자리에 **끼워서** 그린다.
+    preedit: []const u8 = "",
+    /// 세로 스크롤 — 상자가 보여 줄 **첫 시각 행**이다(제약 ⑥: 논리 줄이 아니다).
+    first_row: u32 = 0,
+};
+
+/// 선택 구간. `text_field.TextField.Selection`과 같은 모양이지만 **이 DTO가 자기 것을 갖는다** —
+/// props는 platform이 채우는 값 묶음이고, 여기서 편집기 타입을 재수출하면 component 소비자가
+/// 편집 API 전체를 딸려 보게 된다.
+pub const Selection = struct {
+    anchor: usize,
+    focus: usize,
+
+    pub fn lo(self: Selection) usize {
+        return @min(self.anchor, self.focus);
+    }
+    pub fn hi(self: Selection) usize {
+        return @max(self.anchor, self.focus);
+    }
+    pub fn empty(self: Selection) bool {
+        return self.anchor == self.focus;
+    }
 };
 
 /// 도크 치수. Session Dock과 같은 방식으로 zoom을 곱해 만든다 — 두 뷰가 같은 축으로 커지고 줄어야
@@ -191,6 +228,20 @@ pub const DockMetrics = struct {
     /// 높이). 각자 계산하면 상자가 차지한 만큼 목록이 줄지 않아 스크롤 범위가 어긋난다(탭 줄에서 겪었다).
     pub fn commitBoxHeight(self: DockMetrics, rows: u32) u32 {
         return self.commit_row_h * @max(rows, 1) + self.commit_pad_y * 2;
+    }
+
+    /// 커밋 상자가 한 줄에 담는 **열 수**. **랩 계산의 단일 출처다** — host는 이 값으로 랩해 상자 높이를
+    /// 정하고(`commit_rows`), view는 같은 값으로 랩해 글자를 놓는다. 둘이 갈리면 상자 높이와 실제 줄
+    /// 수가 어긋나 마지막 줄이 잘리거나 빈 줄이 남는다.
+    ///
+    /// **13pt 역할 기준이다**(text-field-editor.md §12.3 ①) — chrome 글자가 사용자 등폭 폰트라 셀 =
+    /// 실제 advance인 덕분에 셀 단위 랩이 성립한다. 12pt 역할로 낮추면 그 순간 랩이 깨진다.
+    pub fn commitViewCols(self: DockMetrics, box_width_px: f32, cell_width_px: u32) u16 {
+        const cell: f32 = @floatFromInt(@max(cell_width_px, 1));
+        const usable = box_width_px - @as(f32, @floatFromInt(self.inset_x * 2));
+        if (usable < cell) return 1; // 한 열은 늘 있다 — 0열이면 랩이 무한 루프가 될 자리다
+        const cols = @floor(usable / cell);
+        return @intFromFloat(@min(cols, @as(f32, @floatFromInt(std.math.maxInt(u16)))));
     }
 
     pub fn itemHeight(self: DockMetrics, item: Item) u32 {

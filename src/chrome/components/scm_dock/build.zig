@@ -7,6 +7,7 @@
 //! 만들지 않는다 — 옛 셀 그리드 경로가 그렇게 갈려서 "그린 자리와 눌리는 자리"가 어긋났었다.
 
 const badge = @import("../../ui/badge.zig");
+const tokens = @import("../../tokens.zig");
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
@@ -122,8 +123,9 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         .layout_items = node_count + 3,
         .flex_scratch = node_count + 3,
         .child_rects = node_count + 3,
-        // 행 열기 + 행 동작 + 그룹 토글/일괄 동작은 위에서 센 것과 같은 상한 안이고, +2는 스크롤바다.
-        .actions = items.len * 2 + 2,
+        // 행 열기 + 행 동작 + 그룹 토글/일괄 동작은 위에서 센 것과 같은 상한 안이고, +2는 스크롤바,
+        // +2는 커밋 상자(편집 진입)와 커밋 버튼이다.
+        .actions = items.len * 2 + 4,
     };
 }
 
@@ -310,24 +312,38 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // **상자 높이는 시각 행 수 × 행 높이**다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다). 랩은 host가
     // 이미 계산했고(`text_area`) 컴포넌트는 그 결과인 `commit_rows`만 받는다 — 같은 계산이 두 곳이면
     // 상자 높이와 실제로 그려지는 줄 수가 갈린다.
+    // 상자를 누르면 **편집이 시작된다**(P3c). caret 자리는 이 intent에 없다 — 그건 tree hit이 아니라
+    // 글자 hit이라 좌표가 필요하고, host가 같은 published rect로 그 변환을 한다.
+    const commit_focus = table.append(props.snapshot_generation, .commit_focus, true) catch return error.InsufficientActionBuffer;
     top[1] = tree.card(.{
         .id = NodeIds.commit_box,
         .style = .{ .height = .{ .px = @floatFromInt(m.commitBoxHeight(props.commit_rows)) } },
         .variant = .surface,
-        .paint = .{ .background = .inset_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
+        // **포커스는 테두리로 말한다.** 채움을 바꾸면 글자 대비가 함께 흔들리고, 무엇보다 이 상자는
+        // 값이 아니라 **입력란**이라 "지금 여기로 글자가 간다"가 테두리로 보이는 것이 관례다.
+        .paint = .{
+            .background = .inset_bg,
+            .border = if (props.commit_edit.focused) .focus_accent else .divider,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = if (props.commit_edit.focused) .{ 1, 1, 1, 1 } else .{ 1, 0, 0, 0 },
+            .shadow = .none,
+        },
+        .action = commit_focus,
         .overflow = .clip,
     }, &.{});
-    // **버튼에 action을 붙이지 않는다**(P3b). 실행은 P3c이고, 지금 눌러도 갈 곳이 없다 — 그래도 그리는
-    // 이유는 "누를 수 없는 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"는 P1 계약이다. 활성 여부
-    // 자체는 이미 사실로 계산한다(`commit_enabled` — index에 무언가 올라가 있나).
+    // **꺼져 있어도 action을 붙인다.** 히트 사각형을 없애면 tree가 상태에 따라 달라져 히트테스트가
+    // 자기 자신을 쫓게 되고(행 동작 버튼과 같은 이유), 무엇보다 "왜 안 눌리는가"를 말할 기회가
+    // 사라진다 — 켜졌는지는 host가 실제 index 상태로 다시 본다(쓰기 문서 §7).
     // **채운 버튼**이다(목업 `[커밋 ∨]`). 목록 행과 달리 이건 표의 한 줄이 아니라 **누르는 것**이라,
     // 배경이 있어야 누를 수 있는 자리로 읽힌다. 색은 테마 accent이고 글자는 배경색이다 — accent는
     // "사이드바 배경 위 글자로 읽히는 색"으로 고른 값이라 그 둘의 대비를 테마가 보장한다(배지와 같은 근거).
     //
     // 꺼졌을 때는 채우지 않는다(`inset_bg`) — 스테이지가 없으면 커밋할 것이 없고, 그 사실이 색으로 보여야
     // 한다(감추지 않고 비활성으로 **표시**한다).
+    const commit_action = table.append(props.snapshot_generation, .commit, true) catch return error.InsufficientActionBuffer;
     top[2] = tree.card(.{
         .id = NodeIds.commit_button,
+        .action = commit_action,
         .style = .{
             .height = .{ .px = @floatFromInt(m.commit_button_h) },
             // **좌우 여백 없이 폭을 꽉 채운다**(사용자 결정 2026-08-16). 도크가 좁아 안쪽으로 물리면
@@ -507,7 +523,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }
@@ -675,15 +691,51 @@ test "커밋 상자는 탭 줄 아래·요약 위이고 내용을 따라 자란�
     );
 }
 
-test "커밋 버튼에는 아직 action이 없다(P3b — 실행은 P3c)" {
-    // 눌러도 갈 곳이 없는 컨트롤에 action을 달면 "눌렀는데 아무 일도 없다"가 된다. 그래도 **그리는**
-    // 이유는 P1 계약이다: 누를 수 없는 컨트롤은 비활성으로 표시하고 감추지 않는다.
+test "커밋 상자와 버튼은 **꺼져 있어도** 히트 사각형을 갖는다 (P3c)" {
+    // 히트 사각형을 상태에 따라 없애면 tree가 포인터 상태를 따라 달라져 히트테스트가 자기 자신을
+    // 쫓게 되고(행 동작 버튼과 같은 이유), 무엇보다 "왜 안 눌리는가"를 말할 기회가 사라진다.
+    // 켜졌는지는 host가 실제 index 상태로 다시 본다(쓰기 문서 §7).
     var storage: Storage = .{};
     const frame = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
         .items = &.{},
         .branch = "main",
+        .commit_enabled = false, // 스테이지 0건 — 그래도 누를 수는 있어야 한다
     }, &storage);
     const button = frame.tree.entries[frame.tree.find(NodeIds.commit_button) orelse return error.MissingButton];
-    try testing.expectEqual(@as(?tree.UiAction, null), button.action);
+    const box = frame.tree.entries[frame.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
+    const button_action = button.action orelse return error.MissingButtonAction;
+    const box_action = box.action orelse return error.MissingBoxAction;
+    // 두 컨트롤은 **서로 다른 intent**다 — 같은 값이면 상자를 눌렀는데 커밋이 돈다.
+    try testing.expect(button_action.id != box_action.id);
+    var saw_commit = false;
+    var saw_focus = false;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .commit => saw_commit = true,
+        .commit_focus => saw_focus = true,
+        else => {},
+    };
+    try testing.expect(saw_commit and saw_focus);
+}
+
+test "커밋 상자는 편집 중일 때 테두리로 그 사실을 말한다" {
+    // 채움을 바꾸면 글자 대비가 함께 흔들린다. 이 상자는 값이 아니라 **입력란**이라 "지금 여기로
+    // 글자가 간다"가 테두리로 보이는 것이 관례다.
+    var idle_storage: Storage = .{};
+    const idle = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+    }, &idle_storage);
+    var focus_storage: Storage = .{};
+    const focused = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .commit_edit = .{ .focused = true },
+    }, &focus_storage);
+    const idle_box = idle.tree.entries[idle.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
+    const focus_box = focused.tree.entries[focused.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
+    try testing.expectEqual(tokens.ColorRole.divider, idle_box.visual.card.paint.border.?);
+    try testing.expectEqual(tokens.ColorRole.focus_accent, focus_box.visual.card.paint.border.?);
+    // **높이는 안 바뀐다** — 포커스로 상자가 자라면 그 아래 목록이 통째로 밀린다.
+    try testing.expectEqual(idle_box.rect.height, focus_box.rect.height);
 }

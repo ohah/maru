@@ -20,6 +20,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const settings_ops = @import("settings.zig");
 const DropPlan = AppSession.DropPlan;
+const scm_dock_ops = @import("scm_dock.zig");
 const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
@@ -868,4 +869,26 @@ pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
     }
     self.debug_file_panel_opened = true;
     self.metal_dirty = true;
+}
+
+/// 강제된 **커밋 메시지 편집 상태**(캡처 전용, `MARU_FORCE_SCM_COMMIT=<메시지>`).
+///
+/// 편집은 클릭으로만 시작되고 글자는 키보드로만 들어오므로, 포인터·키보드가 없는 캡처 하니스에서는
+/// 상자가 편집 중인 모습(caret·여러 줄·자란 높이)을 얻을 방법이 아예 없다 — 행 호버를 같은 이유로
+/// 강제하는 것과 같은 자리다.
+///
+/// **상태를 심지 않는다.** 사용자와 같은 경로(`focusCommit`·`insertCommitText`)를 태우므로 랩·caret·
+/// 상자 높이·목록 뷰포트는 전부 제품 tick이 정한다.
+///
+/// **한 번만 넣는다.** 매 tick 넣으면 같은 글자가 무한히 쌓인다 — 포커스 플래그가 그 가드다.
+pub fn applyForcedCommitMessage(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_SCM_COMMIT") orelse return;
+    if (self.dock.view != .source_control) return;
+    if (self.scm_commit_focused) return;
+    scm_dock_ops.focusCommit(self);
+    scm_dock_ops.insertCommitText(self, std.mem.span(raw));
+    // 선택 밴드도 캡처로만 확인할 수 있다(`MARU_FORCE_SCM_COMMIT_SELECT=1` — 전체 선택).
+    // 밴드가 글자와 **같은 자를 쓰는지**는 픽셀로만 드러난다: caret·밴드는 셀 열 산술이고 글자는
+    // 측정된 advance로 그려지므로, 둘이 어긋나면 밴드가 글자에서 밀린다.
+    if (std.c.getenv("MARU_FORCE_SCM_COMMIT_SELECT") != null) self.scm_commit_field.selectAll();
 }

@@ -148,6 +148,8 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // 아무 글자도 안 남는다. 최대 열 캐시는 옛 내용의 것이라 함께 버린다(다음 가로 휠이 다시 센다).
     term.rt.editor_first_col = 0;
     term.rt.editor_max_cols = 0;
+    term.rt.editor_first_col_right = 0;
+    term.rt.editor_max_cols_right = 0;
     // 조각 오프셋과 렌더가 실어 둔 상한도 옛 내용의 것이다(§4.1d).
     term.rt.editor_first_piece = 0;
     term.rt.editor_max_top_line = 0;
@@ -1270,4 +1272,50 @@ test "알려진 구멍: 랩을 켠 비교는 좌우가 어긋난다 — 조각 �
     // **실질적인 완화는 `editor.wrap` 기본값 되돌림**이고(비교 뷰 가로 스크롤과 한 슬라이스로 묶는다),
     // 그러면 비교는 기본적으로 랩이 아니게 되어 이 상태 자체가 드물어진다.
     try testing.expect(left_c.? != right_c.?);
+}
+
+test "비교는 열마다 따로 민다 — 포인터가 어느 열인지 정한다(§3.5)" {
+    // 계약: *"각 편집기가 자기 안에서 스크롤한다"*. 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
+    // 다른 쪽이 엉뚱한 곳을 본다. 어느 열인지는 `diff_frame.columns()` 경계와 포인터가 정한다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+
+    // 양쪽 모두 화면보다 긴 줄을 둔다 — 안 넘치면 축을 안 가져가 판정이 공허해진다.
+    var left_buf: std.ArrayList(u8) = .empty;
+    defer left_buf.deinit(allocator);
+    var right_buf: std.ArrayList(u8) = .empty;
+    defer right_buf.deinit(allocator);
+    for (0..400) |_| try left_buf.append(allocator, 'L');
+    for (0..400) |_| try right_buf.append(allocator, 'R');
+    try left_buf.append(allocator, '\n');
+    try right_buf.append(allocator, '\n');
+
+    var entry = testEntry(left_buf.items, right_buf.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body.w -| inset * 2, .h = body.h -| inset * 2 }, 8);
+    const origin: i32 = @as(i32, @intCast(body.x)) + @as(i32, @intCast(inset));
+    const left_x: f64 = @floatFromInt(origin + cols.left.x + @as(i32, @intCast(cols.left.w / 2)));
+    const right_x: f64 = @floatFromInt(origin + cols.right.x + 4);
+
+    // ① 왼쪽 위에서 굴리면 왼쪽만 움직인다.
+    try testing.expect(editor_ops.scrollCols(fx.session, fx.term, leaf, -20, left_x));
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col_right);
+
+    // ② 오른쪽 위에서 굴리면 오른쪽만 움직인다.
+    const left_after = fx.term.rt.editor_first_col;
+    try testing.expect(editor_ops.scrollCols(fx.session, fx.term, leaf, -30, right_x));
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+    try testing.expectEqual(left_after, fx.term.rt.editor_first_col); // 왼쪽은 그대로다
+
+    // ③ 두 값이 실제로 다르다 — 같으면 공유하고 있는 것이다.
+    try testing.expect(fx.term.rt.editor_first_col != fx.term.rt.editor_first_col_right);
 }

@@ -1066,7 +1066,7 @@ test "parse: full config sets every field" {
         \\cursor.text = #101010
         \\chrome.theme = rich
         \\sidebar.show-branch = false
-        \\editor.wrap = false
+        \\editor.wrap = true
         \\sidebar.show-folder = false
         \\sidebar.agent-transcript-hook = false
         \\text.blink = true
@@ -1094,9 +1094,10 @@ test "parse: full config sets every field" {
     try std.testing.expectEqualStrings("#101010", p.config.cursor.text.?);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(false, p.config.sidebar.show_branch); // sidebar.show-branch 파싱(기본 true)
-    // 편집기 랩. **기본이 true라** 이 테스트는 끄는 쪽을 확인한다 — 기본값과 같은 값을 넣으면
-    // 파싱이 통째로 안 돌아도 통과한다.
-    try std.testing.expectEqual(false, p.config.editor.wrap); // editor.wrap 파싱(기본 true)
+    // 편집기 랩. **기본이 `false`라** 이 테스트는 켜는 쪽을 확인한다 — 기본값과 같은 값을 넣으면
+    // 파싱이 통째로 안 돌아도 통과한다. 기본값을 `true`→`false`로 되돌렸을 때(2026-08-16) 이 테스트가
+    // 정확히 그 공허한 상태가 됐고, **아무도 깨지지 않아서** 알아채기 어려웠다.
+    try std.testing.expectEqual(true, p.config.editor.wrap); // editor.wrap 파싱(기본 false)
     try std.testing.expectEqual(false, p.config.sidebar.show_folder); // sidebar.show-folder 파싱(기본 true)
     // 이 키가 파싱돼야 "사용자 파일을 건드리는 기능을 끌 수 있다"는 계약이 성립한다(docs/agent-session.md).
     try std.testing.expectEqual(false, p.config.sidebar.agent_transcript_hook); // sidebar.agent-transcript-hook 파싱(기본 true)

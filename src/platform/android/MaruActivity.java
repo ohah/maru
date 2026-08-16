@@ -62,6 +62,9 @@ public class MaruActivity extends android.app.NativeActivity {
     /** 밀린 화면을 하나 뺀다. 1=뺐다, 0=뺄 것이 없다(그러면 앱을 내린다). */
     private static native int nativePopScreen();
 
+    /** 지금 무엇을 입력받는가 — 0=글자, 1=숫자. 키보드 종류를 이 값으로 고른다. */
+    private static native int nativeInputKind();
+
     /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
      *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
      *  뺄 화면이 없을 때만 기본 동작(앱 내리기)으로 넘긴다. */
@@ -89,7 +92,11 @@ public class MaruActivity extends android.app.NativeActivity {
         public InputConnection onCreateInputConnection(EditorInfo out) {
             // 터미널이라 자동완성·자동대문자를 끈다. 그것들이 켜져 있으면 IME 가
             // 앞 문맥을 조회해 멋대로 고쳐 넣는다.
-            out.inputType = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            // **숫자 칸이면 숫자 패드를 띄운다.** 터미널은 계속 글자다 — 거기서 ASCII 배열을
+            // 요구하면 한글이 불편해진다. 숫자 패드는 조합이 없어 IME 위험도 없다.
+            out.inputType = nativeInputKind() == 1
+                    ? EditorInfo.TYPE_CLASS_NUMBER
+                    : (EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
             out.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
                     | EditorInfo.IME_FLAG_NO_FULLSCREEN
                     | EditorInfo.IME_ACTION_NONE;
@@ -148,6 +155,21 @@ public class MaruActivity extends android.app.NativeActivity {
     /** **클립보드는 OS 것이라 코어가 못 쓴다**(브리지엔 OS 호출이 없다). 네이티브가 코어에서
      *  꺼낸 텍스트를 여기로 넘기면 이 자리가 시스템 클립보드에 넣는다. */
     private static MaruActivity current;
+
+    /** 네이티브가 부른다 — 입력 종류가 바뀌었으니 키보드를 다시 세운다(`onCreateInputConnection`
+     *  이 새 `inputType` 으로 다시 불린다). UI 스레드에서 해야 한다. */
+    public static void restartInput() {
+        final MaruActivity a = current;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+                if (imm != null && a.input != null) imm.restartInput(a.input);
+            }
+        });
+    }
 
     /** 네이티브가 JNI 로 부른다. Context 가 필요해서 액티비티 참조를 통해 간다. */
     public static void setClipboard(String text) {

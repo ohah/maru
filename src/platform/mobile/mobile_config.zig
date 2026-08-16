@@ -359,3 +359,30 @@ test "없던 키는 새로 붙는다" {
     try std.testing.expect(std.mem.indexOf(u8, out, "cursor.blink = false") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "# 비어 있다") != null);
 }
+
+/// 그 키의 스키마 범위 밖인가. **범위는 스키마가 소유한다** — 화면이 숫자를 따로 적으면
+/// 파일 파싱과 GUI 가 다른 값을 받아들인다.
+pub fn outOfRange(key: []const u8, v: i64) bool {
+    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+                const meta: theme.Meta = @field(Container.schema, sf.name);
+                const seg = comptime (meta.key_seg orelse dashed(sf.name));
+                const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));
+                if (std.mem.eql(u8, key, full)) {
+                    const r = meta.parse_range orelse meta.range orelse return false;
+                    return @as(f64, @floatFromInt(v)) < r[0] or @as(f64, @floatFromInt(v)) > r[1];
+                }
+            }
+        }
+    }
+    return false;
+}
+
+test "범위는 스키마가 정한다" {
+    try std.testing.expect(!outOfRange("scrollback.lines", 250));
+    try std.testing.expect(outOfRange("cursor.blink-interval-ms", 50)); // 최소 100
+    try std.testing.expect(outOfRange("cursor.blink-interval-ms", 20000)); // 최대 10000
+    try std.testing.expect(!outOfRange("cursor.blink-interval-ms", 500));
+}

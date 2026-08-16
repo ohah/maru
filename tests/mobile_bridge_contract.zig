@@ -2432,3 +2432,117 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
+
+// **두 손가락 제스처는 기기에서 스크립트로 못 만든다**(`adb shell input`·`idb` 둘 다 다중
+// 터치가 없다). 그래서 브리지 경계에서 값으로 잠근다 — host 가 T2 에서 보내기 시작한
+// `ACTION_POINTER_DOWN`/`_UP` 흐름을 그대로 흉내 낸다.
+test "키바: 둘째 손가락이 첫 손가락의 탭 판정을 오염시키지 않는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+    // **앞 테스트가 남긴 관성을 거둔다** — 남아 있으면 첫 짚음이 "세우려던 것" 으로 판정돼
+    // 키가 안 나가고, 그러면 이 테스트가 재는 것이 달라진다.
+    _ = bridge.maru_mobile_keybar_pointer(3, 0, 0, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // **키바를 처음으로 되돌린다** — 앞 테스트가 밀어 뒀으면 첫 키가 화면 밖이라 rect 가 0 이고,
+    // 그 자리를 누르는 것은 재현이 아니라 그냥 못 누른 것이 된다.
+    keybarScrollToStart();
+    _ = bridge.maru_mobile_keybar_pointer(3, 0, 0, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // **어느 키인지는 안 고른다** — 화면에 실제로 있는 키면 된다(무엇이 보이는지는 앞 테스트가
+    // 민 자리에 달렸다). 재는 것은 "그 탭이 살아남았나" 이지 어떤 키냐가 아니다.
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const esc = keyCenter(vis);
+
+    const before = bridge.maru_mobile_input("", 0);
+    // 첫 손가락이 esc 를 누른다(움직이지 않는다 — 탭이다).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_pointer(0, 11, esc.x, esc.y));
+    // **둘째 손가락은 키가 없는 자리(오른쪽 끝 표시 영역)에 둔다.** 그래야 판별이 된다 —
+    // 다른 키 위에 두면 오염됐을 때도 "아무 키나" 나가서 테스트가 통과해 버린다(실제로 그렇게
+    // 짰다가 변이 검사에서 걸렀다). 이 자리는 눌러도 아무 키도 안 나간다.
+    _ = bridge.maru_mobile_keybar_pointer(0, 22, 400, esc.y);
+    _ = bridge.maru_mobile_keybar_pointer(1, 22, 400, esc.y);
+    _ = bridge.maru_mobile_keybar_pointer(2, 22, 400, esc.y);
+    // 첫 손가락을 그 자리에서 뗀다 → 탭이다.
+    _ = bridge.maru_mobile_keybar_pointer(2, 11, esc.x, esc.y);
+    const after = bridge.maru_mobile_input("", 0);
+    try std.testing.expect(after > before); // 그 키의 바이트가 나갔다 — 둘째 손가락이 안 먹었다
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+test "설정 목록: 둘째 손가락이 값을 바꾸지 않는다" {
+    const small_h: u32 = 300;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, small_h);
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+
+    // 첫 손가락이 목록을 민다(밀기 — 값이 바뀌면 안 된다).
+    _ = bridge.maru_mobile_chrome_pointer(0, 11, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 11, 200, 200);
+    // **둘째 손가락이 토글 줄을 짚었다 뗀다** — 소유자가 아니므로 아무 일도 없어야 한다.
+    var ty: f32 = 0;
+    var found = false;
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind != .toggle) continue;
+        ty = y;
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+    _ = bridge.maru_mobile_chrome_pointer(0, 22, 200, ty);
+    _ = bridge.maru_mobile_chrome_pointer(2, 22, 200, ty);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
+
+    _ = bridge.maru_mobile_chrome_pointer(2, 11, 200, 200);
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
+// **T2 가 host 에서 모든 손가락을 보내기 시작하면서 본문이 열렸다.** 그 전에는 index 0 만
+// 왔으므로 이 자리가 없었다. 둘째 손가락이 닿았다고 **첫 손가락이 만든 선택이 지워지거나**
+// 롱프레스 시계가 새로 도는 것은 사용자가 한 적 없는 일이다.
+test "본문: 둘째 손가락이 선택을 지우지 않는다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(3, 0, 0, 0, 0); // 앞 테스트의 손가락을 거둔다
+    bridge.maru_mobile_clear_error();
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("hello world", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 첫 손가락으로 길게 눌러 단어를 잡는다.
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 11, q.x, q.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    const span0 = bridge.maru_mobile_selection_span();
+
+    // **둘째 손가락이 닿는다** — 선택이 살아 있어야 한다. 오염되면 `down` 이 `selectionClear` 를
+    // 부른다(T2 가 host 에서 모든 손가락을 보내기 시작하며 열린 자리다).
+    bridge.maru_mobile_pointer(0, 22, q.x + 120, q.y + 120, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // **둘째가 움직여도 범위가 안 바뀐다.** 비소유자의 move 가 뜻을 만들면 그 손가락 자리로
+    // 선택이 끌려간다 — 사용자는 그 손가락으로 아무것도 고른 적이 없다.
+    bridge.maru_mobile_pointer(1, 22, q.x + 200, q.y + 160, now());
+    try std.testing.expectEqual(span0, bridge.maru_mobile_selection_span());
+
+    // 둘째가 떼도 이 제스처는 안 끝난다(계약 §3.1).
+    bridge.maru_mobile_pointer(2, 22, q.x + 120, q.y + 120, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // **그 뒤에도 소유자는 계속 범위를 넓힐 수 있다.** 비소유자의 up 이 제스처를 끝냈다면
+    // `selecting` 이 꺼져 이 move 가 **스크롤**로 해석되고 범위가 그대로다.
+    const q2 = pointForCell(0, 7) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(1, 11, q2.x, q2.y, now());
+    try std.testing.expect(bridge.maru_mobile_selection_span() != span0);
+
+    bridge.maru_mobile_pointer(2, 11, q.x, q.y, now());
+    bridge.maru_mobile_pointer(3, 0, 0, 0, 0);
+    bridge.maru_mobile_clear_error();
+}

@@ -706,14 +706,42 @@ fn bodyCell(x: f32, y: f32) ?struct { row: u16, col: u16 } {
     return .{ .row = @intCast(packed_cell & 0xFFFF), .col = @intCast(packed_cell >> 16) };
 }
 
+/// 본문 제스처가 추적하는 손가락. **`Touch` 를 안 거친다** — 여기는 선택·롱프레스가 코어의
+/// 포인터 상태를 직접 쓰는 자리라 스크롤 면과 모델이 다르다. 그래도 규칙은 같다(계약 §3.1):
+/// 소유자만 뜻을 만들고, 소유자가 떼지면 남은 손가락이 **자기 기준으로** 이어받는다.
+const BodySlot = struct { used: bool = false, id: u32 = 0, last_y: f32 = 0 };
+var body_slots: [4]BodySlot = @splat(.{});
+var body_owner: ?u32 = null;
+
+fn bodySlot(id: u32) ?*BodySlot {
+    for (&body_slots) |*s| if (s.used and s.id == id) return s;
+    return null;
+}
+
 pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
-    // **본문은 아직 소유권을 안 쓴다.** 여기는 선택·롱프레스가 코어의 포인터 상태를 직접
-    // 쓰는 자리라 `Touch` 를 안 거친다 — 다중 포인터 규칙을 여기까지 넓히는 것은 T2·T3 이
-    // host 가 진짜 id 를 보내기 시작한 뒤의 일이다. 지금은 받아서 흘린다.
-    _ = pointer_id;
     const core = &(term_core orelse return);
+    // **취소는 손가락을 안 가린다**(계약 §3.1) — 전부 놓는다.
+    if (phase == 3) {
+        body_slots = @splat(.{});
+        body_owner = null;
+    }
     switch (phase) {
         0 => { // down
+            // 자리를 잡는다. **비소유자는 뜻을 안 만든다** — 둘째 손가락이 닿았다고 첫 손가락이
+            // 만든 선택이 지워지거나 롱프레스 시계가 새로 도는 것은 사용자가 한 적 없는 일이다.
+            // (T2 가 host 에서 모든 손가락을 보내기 시작하면서 실제로 그렇게 됐다.)
+            // **같은 id 로 down 이 두 번 오면 자리를 새로 만들지 않는다.** 만들면 `up` 이 그
+            // 중복을 "남은 손가락" 으로 이어받아 **제스처가 영영 안 끝난다**(테스트가 잡았다).
+            if (bodySlot(pointer_id)) |sl| {
+                sl.last_y = y;
+            } else for (&body_slots) |*sl| {
+                if (!sl.used) {
+                    sl.* = .{ .used = true, .id = pointer_id, .last_y = y };
+                    break;
+                }
+            }
+            if (body_owner == null) body_owner = pointer_id;
+            if (body_owner != pointer_id) return;
             ptr_down = true;
             ptr_down_x = x;
             ptr_down_y = y;
@@ -727,6 +755,10 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
             }
         },
         1 => { // move
+            // **비소유자의 기준만 갱신하고 뜻은 안 만든다** — 그 손가락이 이어받는 순간 옛
+            // 자리에서 델타가 나오면 화면이 점프한다(T1 이 스크롤 면에서 없앤 그 병).
+            if (bodySlot(pointer_id)) |sl| sl.last_y = y;
+            if (body_owner != pointer_id) return;
             if (!ptr_down) return;
             const dx = x - ptr_down_x;
             const dy = y - ptr_down_y;
@@ -760,6 +792,26 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
             ptr_last_y = y;
         },
         else => { // up · cancel
+            if (phase == 2) {
+                if (bodySlot(pointer_id)) |sl| sl.* = .{};
+                // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1).
+                //
+                // **이 가드는 오늘 변이로 안 잡힌다** — 아래 인수인계 루프가 남은 손가락 중
+                // 첫 번째를 고르는데, 비소유자가 떠도 소유자가 그대로 남아 있어 결과가 같기
+                // 때문이다. 그래도 남긴다: 계약을 코드에 적어 두는 자리이고, 인수인계 규칙이
+                // 바뀌면(예: 가장 최근 손가락을 고르게) 그 순간 필요해진다.
+                if (body_owner != pointer_id) return;
+                body_owner = null;
+                for (body_slots) |sl| {
+                    if (sl.used) {
+                        body_owner = sl.id;
+                        // **이어받는다.** 그 손가락은 자기 기준을 갖고 있으므로 그것으로 잇는다 —
+                        // 여기서 옛 좌표를 남기면 다음 move 에서 점프한다.
+                        ptr_last_y = sl.last_y;
+                        return; // 제스처는 계속된다 — 선택·롱프레스 상태를 안 거둔다
+                    }
+                }
+            }
             ptr_down = false;
             // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다. 지우는 자리는
             // **다음 누름**이다(phase 0 이 이미 그렇게 한다).
@@ -922,6 +974,13 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
         // 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고, 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
         if (!key_bar_ready) return 0;
         if (y < key_bar_band.top or y >= key_bar_band.bot) return 0;
+        // **둘째 손가락은 누름 판정을 안 건드린다.** 표면마다 한 번에 한 제스처이므로(계약
+        // §3.1) 눌림·이동량·기준은 **소유자의 것**이다. 이 가드가 없으면 둘째 손가락의 down 이
+        // `kb_down_x`·`kb_moved` 를 덮어써 **첫 손가락의 "탭이냐 스크롤이냐" 판정이 오염된다**.
+        if (kb_active) {
+            _ = kb_touch.begin(pointer_id, x); // 코어는 이 손가락도 추적한다(이어받기 대비)
+            return 1;
+        }
         kb_active = true;
         kb_down_x = x;
         kb_down_y = y;
@@ -937,6 +996,12 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
     }
     if (!kb_active) return 0;
     if (phase == 1) {
+        // **비소유자의 move 도 코어에 넘긴다** — 그 손가락의 기준이 낡으면 이어받는 순간
+        // 옛 자리에서 델타가 나와 화면이 점프한다. 다만 **눌림·이동량은 소유자만** 건드린다.
+        if (kb_touch.owner != pointer_id) {
+            kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
+            return 1;
+        }
         const dx = x - kb_last_x;
         kb_last_x = x;
         kb_moved += @abs(dx);
@@ -949,10 +1014,25 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
         kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
     }
+    // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1).
+    if (kb_touch.owner != pointer_id) {
+        kb_touch.end(pointer_id, frame_dt_ms);
+        return 1;
+    }
     kb_active = false;
     kb_pressed = null;
     // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
     kb_touch.end(pointer_id, frame_dt_ms);
+    // **소유자가 떼졌는데 손가락이 남았으면 제스처는 이어진다** — 코어가 새 소유자를 골랐다.
+    // 그 손가락은 자기 기준을 갖고 있으므로 여기서는 **눌림만 거두고** 이동량을 새로 센다.
+    if (kb_touch.owner) |next| {
+        kb_active = true;
+        kb_last_x = x;
+        kb_moved = scroll_area.Touch.slop_px; // 이미 밀기다 — 이어받은 손가락이 키를 내지 않는다
+        kb_stop_tap = false;
+        _ = next;
+        return 1;
+    }
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and !kb_stop_tap and kb_moved < scroll_area.Touch.slop_px) {
         kb_touch.cancel(); // 탭이면 관성이 없다
@@ -2731,6 +2811,8 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
     if (screenTop() == .sessions) {
         switch (phase) {
             0 => {
+                // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
+                if (set_active) return 1;
                 set_active = true;
                 set_down_x = x;
                 set_down_y = y;
@@ -2772,7 +2854,11 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
             set_last_y = y;
             set_moved = 0;
             // 키바와 같은 규칙 — 흐르는 목록을 세우려 짚었는데 그 자리 토글이 뒤집히면 안 된다.
+            const was_owned = set_touch.owner != null;
             set_stop_tap = set_touch.begin(pointer_id, y);
+            // **둘째 손가락은 눌림 판정을 안 건드린다** — 안 가리면 그 down 이 `set_down_y`·
+            // `set_moved` 를 덮어써 첫 손가락의 "탭이냐 스크롤이냐" 가 오염된다.
+            if (was_owned) return 1;
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.

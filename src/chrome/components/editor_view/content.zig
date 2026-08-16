@@ -236,6 +236,21 @@ pub fn build(
 /// 알리지 않으면 문서가 일찍 끝난 것처럼 보인다).
 pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) RowCount {
     if (!wrap or view_cols == 0) return .{ .rows = 1 };
+
+    // **전개가 원본과 같으면 저장소를 쓰지 않는다.** 탭도 §3.8 표기도 없으면 `expandTabs`가 만들
+    // 텍스트가 원본 그대로이므로 그것을 그대로 센다 — `expandTabs`의 원본 대여 길은 `isAsciiOnly`를
+    // 요구하는데(열 상한을 byte로 지키려고), 여기서는 열 상한이 없어 그 조건이 필요 없다.
+    //
+    // **이게 없으면 긴 비ASCII 줄에서 조각 수가 조용히 적게 나온다**: 6만 자 한글 줄이 8KB 저장소로
+    // **60행**, 넉넉한 저장소로 **1,305행**이었다(실측 — 21배). 세로 스크롤이 그 줄의 5%까지만
+    // 닿는다는 뜻이다(적대적 검증 2026-08-16).
+    if (std.mem.indexOfScalar(u8, bytes, '\t') == null and !hazard.containsAny(bytes)) {
+        var plain = visual_map.pieces(bytes, view_cols, wrap);
+        var m: u32 = 0;
+        while (plain.next()) |_| m += 1;
+        return .{ .rows = @max(m, 1) };
+    }
+
     const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
     var it = visual_map.pieces(r.text, view_cols, wrap);
     var n: u32 = 0;
@@ -1760,4 +1775,23 @@ test "가로로 민 전개가 앞을 잘라 편 것과 같다 — 건너뛰기�
 
         try std.testing.expectEqualStrings(ref.text, got.text);
     }
+}
+
+test "긴 비ASCII 줄도 저장소와 무관하게 같은 조각 수를 준다 — 안 그러면 끝에 못 닿는다" {
+    const n = 60_000;
+    const a = try std.testing.allocator.alloc(u8, n * 3);
+    defer std.testing.allocator.free(a);
+    var i: usize = 0;
+    while (i < n) : (i += 1) @memcpy(a[i * 3 ..][0..3], "한");
+
+    var small: [8192]u8 = undefined;
+    const big = try std.testing.allocator.alloc(u8, 4 << 20);
+    defer std.testing.allocator.free(big);
+
+    const r_small = rowCount(a, 4, 92, true, &small);
+    const r_big = rowCount(a, 4, 92, true, big);
+    // 고치기 전: 8KB → 60행, 4MB → 1,305행(21배 차이). 지금은 저장소를 안 쓴다.
+    try std.testing.expectEqual(r_big.rows, r_small.rows);
+    try std.testing.expect(!r_small.truncated);
+    try std.testing.expect(r_small.rows > 1000);
 }

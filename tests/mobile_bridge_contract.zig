@@ -1800,3 +1800,74 @@ test "헤더의 수정자 값이 브리지 해석과 같다" {
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
 }
+
+// ── config (M10b) ─────────────────────────────────────────────────────────────
+//
+// **파일이 단일 출처이고 host 가 바이트만 넘긴다**(계약 §7 — 브리지엔 OS 호출이 없다). 여기서는
+// 그 ABI 를 그대로 불러 **화면에 닿는지**를 본다 — 값을 파싱했는지가 아니라, 그 값으로 그리는지다.
+// 파싱만 맞고 닿는 자리가 틀린 결함을 이 저장소가 여러 번 겪었다(실제로 이번에도 그랬다:
+// 본문이 `terminal_bg` 가 아니라 chrome 표면색으로 칠해져 있어 배경을 바꿔도 화면이 그대로였다).
+
+/// 본문 배경 quad 의 색(0~255). 본문 rect 를 통째로 덮는 단색 quad 라 큰 것 중 마지막이 그것이다.
+const Rgb8 = struct { r: u8, g: u8, b: u8 };
+
+fn bodyBgColor(n: u32) ?Rgb8 {
+    const q = bridge.maru_mobile_quads();
+    var i: u32 = 0;
+    var found: ?Rgb8 = null;
+    while (i < n) : (i += 1) {
+        const it = q[i];
+        if (it.kind != 0) continue; // 글리프·아이콘이 아니라 단색
+        if (it.w < 100 or it.h < 100) continue; // 본문만 한 큰 사각형
+        found = .{
+            .r = @intFromFloat(@round(it.r * 255.0)),
+            .g = @intFromFloat(@round(it.g * 255.0)),
+            .b = @intFromFloat(@round(it.b * 255.0)),
+        };
+    }
+    return found;
+}
+
+test "config 가 본문 배경까지 닿는다" {
+    const before = bodyBgColor(bridge.maru_mobile_build(402, 874, now())) orelse return error.TestUnexpectedResult;
+
+    const src = "theme.background = #2e3440\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    const after = bodyBgColor(bridge.maru_mobile_build(402, 874, now())) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(before.r != after.r or before.g != after.g or before.b != after.b);
+    try std.testing.expectEqual(@as(u8, 0x2E), after.r);
+    try std.testing.expectEqual(@as(u8, 0x34), after.g);
+    try std.testing.expectEqual(@as(u8, 0x40), after.b);
+
+    // 되돌린다 — 뒤 테스트가 다른 색을 보면 안 된다.
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **프리셋은 색 하나가 아니라 세트를 통째로 깐다**(계약 §3 — 스키마 밖의 명시 가지).
+test "theme.preset 이 색 세트를 깐다" {
+    const src = "theme.preset = nord\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    const got = bodyBgColor(bridge.maru_mobile_build(402, 874, now())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0x2E), got.r); // nord 배경 #2E3440
+
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **설정을 한 번도 안 건드린 기기가 정상 상태다**(계약 §7). config 를 읽기 시작했다고 해서
+// 기본 화면이 바뀌면 안 된다 — 빌린 구조체의 기본값을 그대로 쓰면 실제로 그렇게 됐다(픽셀로 확인).
+test "config 가 없으면 기본 화면이 그대로다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    const got = bodyBgColor(bridge.maru_mobile_build(402, 874, now())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0x1E), got.r);
+    try std.testing.expectEqual(@as(u8, 0x1E), got.g);
+    try std.testing.expectEqual(@as(u8, 0x2E), got.b);
+    bridge.maru_mobile_clear_error();
+}

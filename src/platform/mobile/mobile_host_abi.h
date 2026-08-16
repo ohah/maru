@@ -210,6 +210,10 @@ void maru_mobile_report_focus(int focused);
 /// 조합 중 문자열(IME preedit). **코어에 넣지 않는다** — 확정 전에 PTY 로 흘리면 셸이
 /// 자모를 명령어 일부로 받는다. 화면 커서 자리에 흐리게 그릴 겉치레다.
 void maru_mobile_set_preedit(const char *bytes, unsigned long len);
+/// config 파일 바이트. **파일을 여는 것은 host** 다 — 브리지엔 OS 호출이 없다(docs/mobile-config.md §7).
+/// 자리는 iOS `Library/Application Support/maru/config`, Android `filesDir/config`. 파일이 없으면
+/// 안 부르면 된다(기본값으로 돈다). 다시 부르면 통째로 갈아 끼운다.
+void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

@@ -72,6 +72,7 @@ var quad_count: usize = 0;
 // "maru 터미널이 실제로 계산한 격자"다.
 const terminal = maru.terminal;
 const color = maru.color;
+const mobile_config = @import("mobile_config.zig");
 
 // **고정 버퍼로는 resize 를 못 버틴다.** `FixedBufferAllocator` 는 마지막 할당 말고는
 // free 가 no-op 이라, 격자가 바뀔 때마다 옛 격자를 영영 못 돌려받는다 — 512KB 로 **resize
@@ -82,6 +83,20 @@ const color = maru.color;
 // 몇 개뿐이라 작다 — 원격 세션(M3)이 붙어 처리량이 생기면 그때 재보고 정한다.
 const term_allocator = std.heap.page_allocator;
 var term_core: ?terminal.core.TerminalCore = null;
+
+/// 파싱된 모바일 config. **파일이 단일 출처**이고 host 가 바이트를 넘긴다(계약 §7 — 브리지엔 OS
+/// 호출이 없다). 없으면 기본값으로 돈다 — 설정을 한 번도 안 건드린 기기가 정상 상태다.
+var cfg_parsed: ?mobile_config.Parsed = null;
+
+fn cfg() mobile_config.Config {
+    return if (cfg_parsed) |p| p.config else .{};
+}
+
+/// `#RRGGBB` 를 토큰 색으로. 값이 틀리면 fallback — 파싱이 이미 forgiving 이라 여기 오는 값은
+/// 대개 맞지만, 색은 **화면이 통째로 검게 될 수 있는 자리**라 마지막까지 기본값을 지킨다.
+fn hex(text: []const u8, fallback: color.Rgb) color.Rgb {
+    return color.parseHex(text) orelse fallback;
+}
 var term_cols: u16 = 0;
 var term_rows: u16 = 0;
 
@@ -131,6 +146,19 @@ var delivered_len: usize = 0;
 // IME 계약(삽입형 + dim 고스트)과 같은 모양이다.
 var preedit_buf: [128]u8 = undefined;
 var preedit_len: usize = 0;
+
+/// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
+/// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
+pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
+    const next = mobile_config.parse(term_allocator, ptr[0..len]) catch {
+        setLastError("config_parse");
+        return;
+    };
+    if (cfg_parsed) |*old| old.deinit();
+    cfg_parsed = next;
+    // 스크롤백은 코어가 든다 — 값이 바뀌면 그 자리에 세운다.
+    if (term_core) |*core| core.setMaxScrollback(next.config.scrollback.lines);
+}
 
 pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     // **UTF-8 경계에서 자른다.** 바이트 수로만 자르면 조합 중 한글이 반토막 나고, 그리는
@@ -896,7 +924,10 @@ const CellPaint = struct {
 /// blink(5)는 아직 정적이다(코어도 "렌더는 정적" 이라고 적어 둔 자리다).
 fn paintCell(style: terminal.types.Style, tk: anytype) CellPaint {
     const surface_fg = tk.get(.surface_fg);
-    const surface_bg = tk.get(.surface_bg);
+    // **본문 배경은 chrome 표면이 아니라 터미널 배경이다**(tokens.zig §4.1b). 예전에는 둘이
+    // 같은 값이라 `surface_bg` 로 칠해도 티가 안 났는데, config 가 `theme.background` 를
+    // 정하기 시작하면 그 순간 갈린다 — 사용자가 배경을 바꿔도 본문만 안 바뀐다.
+    const surface_bg = tk.get(.terminal_bg);
 
     var fg = resolveColor(style.foreground, surface_fg);
     // 배경이 default 면 "칠하지 않는다" 는 뜻이라 null 로 둔다 — 표면 배경 위에 그대로 얹는다.
@@ -968,6 +999,15 @@ const Run = struct {
 
 /// 본문 사각형을 터미널 격자로 채운다.
 fn pushTerminal(rect: anytype, tk: anytype) void {
+    // **본문 영역을 터미널 배경으로 깐다.** 창 전체는 chrome 표면색으로 칠해져 있는데(위
+    // `push` 한 장), 본문은 그 위에 자기 배경을 가져야 한다 — 안 그러면 `theme.background`
+    // 를 바꿔도 **글자 뒤가 안 바뀐다**(칠하는 셀만 바뀌고 빈 칸은 chrome 색으로 남는다).
+    push(.{
+        .x = @intFromFloat(rect.x),
+        .y = @intFromFloat(rect.y),
+        .w = @intFromFloat(rect.width),
+        .h = @intFromFloat(rect.height),
+    }, tk.get(.terminal_bg), 0xFF, 0, 0);
     // **글자 상자가 곧 칸이다**(계약 §4 — 글리프 기하). 아틀라스 슬롯 하나는 **양폭 상자**라
     // 단폭 글자는 왼쪽 절반만 쓴다. 줄 높이를 정하면 배율이 나오고, 칸 너비는 슬롯 절반이다.
     // 예전에는 상자(11x15)와 칸(5x22)이 달라서, 셀을 가장자리까지 채우는 합성 글리프가
@@ -1211,23 +1251,23 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
 /// 데스크톱 기본 테마에 가까운 값. **아직 config 를 안 읽는다** — 모바일이 config 를
 /// 어디서 받을지가 원격 연결(M3)과 함께 정해진다.
 fn themeColors() tokens.ThemeColors {
+    const t = cfg().theme;
     return .{
-        .foreground = .{ .r = 0xE6, .g = 0xE6, .b = 0xEA },
+        .foreground = hex(t.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA }),
         .sidebar_background = .{ .r = 0x24, .g = 0x24, .b = 0x2E },
         .sidebar_foreground = .{ .r = 0xD0, .g = 0xD0, .b = 0xD8 },
         .sidebar_active = .{ .r = 0x3A, .g = 0x3A, .b = 0x4A },
         .search_match = .{ .r = 0x4A, .g = 0x4A, .b = 0x20 },
         .search_match_current = .{ .r = 0x8A, .g = 0x7A, .b = 0x20 },
-        .selection = .{ .r = 0x30, .g = 0x40, .b = 0x60 },
-        // **터미널 본문 배경은 사이드바와 별개 입력이다**(tokens.zig §4.1b). 모바일은 본문을
-        // `surface_bg` 로 칠해 왔으므로 같은 값을 준다 — config 를 읽게 되면(M10) 둘 다
-        // 테마에서 온다.
-        .terminal_background = .{ .r = 0x1E, .g = 0x1E, .b = 0x2E },
+        .selection = hex(t.selection, .{ .r = 0x30, .g = 0x40, .b = 0x60 }),
+        // **터미널 본문 배경은 사이드바와 별개 입력이다**(tokens.zig §4.1b). `theme.background`
+        // 가 그 자리다 — 사이드바는 chrome 색이라 따로 둔다.
+        .terminal_background = hex(t.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E }),
         // 비교 본문 색. 모바일은 아직 diff 를 안 그리지만(§2.4 — 도크·편집기 미이식) 토큰이
         // 필수 입력이라 데스크톱 파생 규칙에 가까운 값을 준다.
         .diff_added = .{ .r = 0x20, .g = 0x40, .b = 0x28 },
         .diff_removed = .{ .r = 0x48, .g = 0x24, .b = 0x28 },
-        .cursor = .{ .r = 0xE6, .g = 0xE6, .b = 0xEA },
+        .cursor = hex(t.cursor, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA }),
         .accent = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }, // maru 앰버
     };
 }

@@ -2353,6 +2353,10 @@ pub const RemoteTermBackend = struct {
         defer rr.direct_input.deinit(allocator);
         rr.input_batches = .{};
         defer rr.input_batches.deinit(allocator);
+        try rr.mutation_owner.initInPlace(
+            try rr.generation_owner.slot.currentGeneration(),
+            rr.input_batches.epoch,
+        );
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);

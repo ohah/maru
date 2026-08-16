@@ -1885,8 +1885,22 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
     }
     attachment = .{};
     const owner_state_raw: *u8 = @ptrCast(&attachment.catchup_stage_owner.state);
+    const OwnerState = @TypeOf(attachment.catchup_stage_owner.state);
     const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
-    var owner_raw: u16 = 3;
+    for ([_]OwnerState{ .controller_committing, .controller_evidenced }) |active_state| {
+        attachment = .{};
+        attachment.catchup_stage_owner.state = active_state;
+        try std.testing.expectError(
+            error.InvalidAuthority,
+            attachment.prepareCatchupStage(1, 1, deadline, std.testing.io),
+        );
+        var stage: catchup_stage_contract.PreparedStage = .{};
+        try std.testing.expect(!attachment.validateCatchupStage(&stage, deadline));
+        var adapter: host_adapter_mod.HostAdapter = undefined;
+        try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
+    }
+    attachment = .{};
+    var owner_raw: u16 = @intFromEnum(OwnerState.controller_evidenced) + 1;
     while (owner_raw <= std.math.maxInt(u8)) : (owner_raw += 1) {
         owner_state_raw.* = @intCast(owner_raw);
         try std.testing.expectError(

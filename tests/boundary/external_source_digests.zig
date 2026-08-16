@@ -75,7 +75,7 @@ pub const inventory = [_]Proof{
     // P3c-2에서 커밋 end-to-end 둘이 붙으며 움직인다(실제 `git commit`이 만들어지는가 · pre-commit
     // hook이 거부하면 커밋이 안 만들어지고 이유가 stderr로 오는가). fixture에 `commit`·`capture`
     // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "ad7ca83e017d4b983ac235156c230fdf1e8af8de888f948d91ee7776cb2bb2bf" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "823a6f11e6c9cc806e505fd46a855b303249c2c74e301a839d59ed5c6bc8f088" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -431,6 +431,9 @@ pub const inventory = [_]Proof{
     // 편집기 가로 스크롤(N1)로 Term rt에 필드 둘이 붙는다(`editor_first_col` — 화면 맨 왼쪽 열,
     // `editor_max_cols` — 가장 긴 줄의 열 수 캐시). count는 2 그대로다 — 새 `@field` 반사가 없고
     // Client 구성·receiver 집합을 안 건드린다.
+    // P3d-①에서 또 움직인다: 저장소·워크트리 목록을 만드는 자리(터미널 순회 → 루트 수집)와 그 테스트.
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    //
     // P3c-2에서 또 움직인다: 커밋 실행 상태 필드 둘(`scm_commit_inflight`·`scm_commit_started_ns`),
     // **저장소별 초안**(`scm_commit_drafts` + 해제), 그리고 그 셋을 짚는 테스트들. count는 2 그대로다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2ff1c445fee0c2861d584ebe0e5ae31ae51f59465240f4bac8453036db29cd99" },

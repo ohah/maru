@@ -1525,3 +1525,85 @@ pub fn commitRunState(self: *const AppSession) component.types.CommitRun {
 /// 이 시간을 넘으면 "오래 걸리는 중"으로 말한다. hook이 도는 저장소에서 몇 초는 정상이므로 짧게 잡으면
 /// 늘 그 문구가 뜬다.
 const commit_slow_after_ns: i128 = 5 * std.time.ns_per_s;
+
+// ── 저장소·워크트리 목록(P3d-①) ──────────────────────────────────────────────────
+//
+// 목록의 단위는 저장소가 아니라 **워크트리**다(§3.5.1c). 무엇이 뜨는지는 사용자 결정이다:
+// **열린 터미널들이 선 저장소 + 각자의 워크트리**.
+
+/// 목록 항목 하나(경로는 세션 버퍼를 빌린다 — 프레임 안에서만 유효하다).
+pub const RepoEntry = maru.session.scm_repos.Entry;
+
+/// 지금 열린 터미널들이 서 있는 **저장소 루트들**. 순서는 탭·pane·Term 순서(사용자가 연 순서)이고
+/// 중복은 지운다.
+///
+/// **원격·파일 Term은 건너뛴다** — `termCwd`가 null을 주고, 그건 "저장소가 없다"가 아니라 "물어볼 곳이
+/// 없다"이다(§3.5의 3-상태 판정과 같은 규율).
+fn collectRepoRoots(self: *AppSession, store: []u8, out: [][]const u8) usize {
+    var n: usize = 0;
+    var used: usize = 0;
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (n == out.len) return n;
+                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse continue;
+                var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const root = app_session_mod.AppSession.repoRootFor(cwd, &root_buf) orelse continue;
+                var seen = false;
+                for (out[0..n]) |existing| {
+                    if (std.mem.eql(u8, existing, root)) seen = true;
+                }
+                if (seen) continue;
+                if (used + root.len > store.len) return n; // 버퍼가 찼다 — 있는 만큼으로 목록을 만든다
+                @memcpy(store[used..][0..root.len], root);
+                out[n] = store[used..][0..root.len];
+                used += root.len;
+                n += 1;
+            }
+        }
+    }
+    return n;
+}
+
+/// 목록에 세울 항목들. **지금 읽어 둔 워크트리 목록만 편다** — 저장소마다 읽기를 새로 걸지 않는다
+/// (읽기는 순차이고, N개를 동시에 띄우지 않는다는 §6 규율은 저장소가 여럿이어도 같다). 아직 안 읽은
+/// 저장소는 자기 한 줄로만 뜨고, 그 저장소를 보는 순간 읽기가 나머지를 채운다.
+pub fn collectRepoEntries(self: *AppSession, store: *RepoEntryStore) maru.session.scm_repos.Collected {
+    const roots = store.roots[0..collectRepoRoots(self, &store.path_bytes, &store.roots)];
+    var repos: [maru.session.scm_repos.max_entries]maru.session.scm_repos.Repo = undefined;
+    var count: usize = 0;
+    for (roots) |root| {
+        if (count == repos.len) break;
+        repos[count] = .{ .root = root, .worktrees = worktreesFor(self, root, &store.worktrees) };
+        count += 1;
+    }
+    return maru.session.scm_repos.collect(repos[0..count], &store.entries);
+}
+
+/// 그 저장소의 워크트리 경로들. **지금 결과에 실려 온 것만** 편다 — 다른 저장소의 목록을 그 저장소의
+/// 것으로 쓰면 화면이 남의 워크트리를 그 밑에 매단다.
+fn worktreesFor(self: *AppSession, root: []const u8, out: [][]const u8) []const []const u8 {
+    const current = self.git_repo orelse return &.{};
+    if (!std.mem.eql(u8, current, root)) return &.{};
+    const result = self.git_result orelse return &.{};
+    if (result.worktrees.len == 0) return &.{};
+    var items: [maru.session.scm_repos.max_entries]maru.session.git_command.Worktree = undefined;
+    const n = maru.session.git_command.collectWorktrees(result.worktrees, &items);
+    var used: usize = 0;
+    for (items[0..n]) |item| {
+        if (used == out.len) break;
+        out[used] = item.path;
+        used += 1;
+    }
+    return out[0..used];
+}
+
+/// 목록을 만드는 동안 쓰는 버퍼 묶음. **호출자가 든다** — 이 층은 할당하지 않는다(프레임 arena와 같은 규율).
+pub const RepoEntryStore = struct {
+    roots: [maru.session.scm_repos.max_entries][]const u8 = undefined,
+    worktrees: [maru.session.scm_repos.max_entries][]const u8 = undefined,
+    entries: [maru.session.scm_repos.max_entries]maru.session.scm_repos.Entry = undefined,
+    /// 루트 경로 문자열을 담는 자리. `termCwd`가 준 스택 버퍼는 호출이 끝나면 사라지므로 여기 옮겨 담는다.
+    path_bytes: [maru.session.scm_repos.max_entries * std.fs.max_path_bytes]u8 = undefined,
+};

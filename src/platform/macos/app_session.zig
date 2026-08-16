@@ -54616,6 +54616,49 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
 }
 
+test "소스 컨트롤: 목록은 터미널이 선 저장소와 그 워크트리로 만들어진다 (P3d)" {
+    // 무엇이 뜨는지는 사용자 결정이다(§3.5.1c): **열린 터미널들이 선 저장소 + 각자의 워크트리**.
+    // 여기서 고정하는 것은 그 조합이 실제로 목록이 되는가와, 워크트리가 자기 줄을 갖는가다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 실제 저장소를 하나 만든다 — `repoRootFor`가 디스크를 보므로 가짜 경로로는 판정이 안 된다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(session.io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.createDir(session.io, ".git", .default_dir);
+
+    // 활성 Term이 그 폴더에 서 있다고 보고한다(OSC 7이 채우는 그 자리). 스모크 세션은
+    // `live_initialized=false`라 `refreshTermObservation`이 조기 반환해 이 값이 덮이지 않는다.
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.rt.observation.cwd.appendSlice(allocator, root);
+    term.rt.observation.availability = .current;
+
+    // 그 저장소의 읽기 결과에 워크트리 목록이 실려 있다.
+    git_ops.rememberGitRepo(session, root);
+    var wt_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+    const wt_text = try std.fmt.bufPrint(&wt_buf, "worktree {s}\nbranch refs/heads/main\n\nworktree {s}/../wt-x\ndetached\n", .{ root, root });
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .worktrees = try git_backend_mod.worker_allocator.dupe(u8, wt_text),
+        .ok = true,
+    };
+
+    var store: scm_dock_ops.RepoEntryStore = .{};
+    const got = scm_dock_ops.collectRepoEntries(session, &store);
+    try std.testing.expectEqual(@as(usize, 2), got.entries.len);
+    try std.testing.expectEqualStrings(root, got.entries[0].path);
+    try std.testing.expect(got.entries[0].primary); // 저장소 자신
+    try std.testing.expect(!got.entries[1].primary); // 워크트리는 자기 줄을 갖는다
+    try std.testing.expectEqualStrings(root, got.entries[1].origin); // 누구의 워크트리인지 남는다
+    try std.testing.expect(!got.truncated);
+}
+
 test "소스 컨트롤: 워크트리에서는 `.git` 파일이 가리키는 디렉터리를 감시한다" {
     // 워크트리의 `.git`은 디렉터리가 아니라 `gitdir: <경로>` 한 줄이 든 **파일**이고 index·HEAD는 그
     // 경로 아래에 산다. `.git`만 감시하면 아무 일도 일어나지 않는다 — 실측(2026-08-16)으로 워크트리에서

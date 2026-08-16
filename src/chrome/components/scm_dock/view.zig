@@ -199,13 +199,17 @@ pub fn view(
         // 입력란이라는 사실이 화면에 없다.
         const empty = props.commit_message.len == 0;
         const text = if (empty) commit_placeholder else props.commit_message;
-        try writer.topLine(rect, @floatFromInt(m.inset_x), text, if (empty) .muted_fg else .surface_fg, .control);
+        try writer.topLine(rect, @floatFromInt(m.inset_x), @floatFromInt(m.commit_pad_y), text, if (empty) .muted_fg else .surface_fg, .control);
     }
     if (frame.tree.find(build.NodeIds.commit_button)) |index| {
         const rect = frame.tree.entries[index];
         // **활성 여부는 실제 index 상태가 정한다**(§7 — 낙관하지 않는다). 스테이지된 것이 없으면 커밋할
         // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
-        try writer.trailing(rect, commit_label, if (props.commit_enabled) .surface_fg else .muted_fg, .control, m.inset_x);
+        // 라벨은 **가운데**다(채운 버튼의 관례 — 오른쪽 끝에 붙이면 그 넓은 면이 왜 칠해졌는지 안 보인다).
+        // 글자색은 채움과 짝이다: 켜졌으면 배경색(reverse), 꺼졌으면 흐린 글자.
+        try writer.centered(rect, commit_label, if (props.commit_enabled) .surface_bg else .muted_fg, .control);
+        // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다(P3c 이후). 지금은 그 자리를 말만 한다.
+        try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, if (props.commit_enabled) .surface_bg else .muted_fg);
     }
 
     // `ChromeDraw`는 layer와 op 슬라이스만 든다 — run·text 바이트는 op이 빌려 가리키므로 호출자가
@@ -502,14 +506,14 @@ const Writer = struct {
 
     /// `line`과 같되 **위에 붙인다.** 여러 줄 상자는 세로 중앙에 두면 글자가 상자 한가운데 떠서 다음
     /// 줄이 어디 올지 안 보인다 — 입력란은 위에서 아래로 자란다.
-    fn topLine(self: *Writer, rect: tree.RectEntry, x_offset: f32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole) ViewError!void {
+    fn topLine(self: *Writer, rect: tree.RectEntry, x_offset: f32, pad_y: f32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole) ViewError!void {
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
         if (rect.rect.height < line_h or rect.rect.width <= x_offset) return;
         const width = rect.rect.width - x_offset - @as(f32, @floatFromInt(m_inset_fallback));
         if (width <= 0) return;
         try self.emit(
             rect.rect.x + x_offset,
-            rect.rect.y + (line_h / 4), // 위쪽 여백을 조금 둔다(글자가 테두리에 붙지 않게)
+            rect.rect.y + pad_y, // 위 여백은 metrics가 정한다 — 아래도 같은 값만큼 남는다
             source,
             self.colsFor(width),
             role,
@@ -981,8 +985,8 @@ test "파일 행에 종류 아이콘이 붙는다(탐색기와 같은 분류기)
         },
         else => {},
     };
-    // 브랜치 줄 아이콘 + 파일 종류 아이콘 = 둘(그룹 헤더가 없는 fixture다).
-    try testing.expectEqual(@as(usize, 2), icons_seen);
+    // 파일 종류 + 브랜치 줄 + 커밋 버튼의 분할 표시(`∨`) = 셋(그룹 헤더가 없는 fixture다).
+    try testing.expectEqual(@as(usize, 3), icons_seen);
 }
 
 test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
@@ -992,13 +996,36 @@ test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
     const items = [_]types.Item{
         .{ .file = .{ .name = "build.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
     };
-    const draws = try renderFixture(&storage, .{}, &items);
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const tk = testTokens();
+    const draws = try view(props, frame, .{}, &tk, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+    // **그 행의 rect 안에 있는 아이콘만** 본다. y 어림으로 고르면 다른 줄(브랜치·커밋 버튼)의 아이콘이
+    // 그 범위에 들어오는 순간 조용히 엉뚱한 것을 재게 된다 — 커밋 줄을 위로 옮기자 실제로 그랬다.
+    const row_rect = frame.tree.entries[frame.tree.find(build.NodeIds.item(0)) orelse return error.MissingRow].rect;
     var icon_right: i32 = 0;
     for (draws.ops) |op| switch (op) {
         .text => |text| switch (text.placement) {
             .icon_in_rect => |placed| {
-                // 파일 행의 아이콘만 본다(브랜치 줄은 y가 훨씬 아래다).
-                if (placed.content_rect.y < 100) icon_right = placed.content_rect.x + @as(i32, @intCast(placed.content_rect.w));
+                const y: f32 = @floatFromInt(placed.content_rect.y);
+                if (y >= row_rect.y and y < row_rect.y + row_rect.height) {
+                    icon_right = placed.content_rect.x + @as(i32, @intCast(placed.content_rect.w));
+                }
             },
             else => {},
         },
@@ -1344,7 +1371,7 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
     const hint = findExactText(empty, commit_placeholder) orelse return error.MissingPlaceholder;
     try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
     const off = findExactText(empty, commit_label) orelse return error.MissingButton;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, off.role); // 스테이지 0건 → 꺼짐
+    try testing.expectEqual(tokens.ColorRole.muted_fg, off.role); // 스테이지 0건 → 꺼짐(채우지 않는다)
 
     var storage2: TestStorage = .{};
     const props: types.Props = .{
@@ -1372,5 +1399,6 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
     const msg = findExactText(filled, "fix: 무언가를 고친다") orelse return error.MissingMessage;
     try testing.expectEqual(tokens.ColorRole.surface_fg, msg.role);
     const on = findExactText(filled, commit_label) orelse return error.MissingButton;
-    try testing.expectEqual(tokens.ColorRole.surface_fg, on.role);
+    // 켜지면 **채운 버튼**이라 글자가 배경색(reverse)이다.
+    try testing.expectEqual(tokens.ColorRole.surface_bg, on.role);
 }

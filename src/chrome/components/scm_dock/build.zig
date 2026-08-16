@@ -255,6 +255,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 탭은 P4·P5에 생기고, 지금 눌러도 갈 곳이 없다. 그래도 그리는 이유는 P1 계약이 "누를 수 없는
     // 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"이기 때문이다: 탭 줄이 통째로 없으면 사용자는
     // 이 뷰가 목록 하나뿐인 화면이라고 읽는다.
+    // ── 순서(§3.5 3판): 탭 줄 → **커밋 입력 → 커밋 버튼** → 요약 → 목록 → 브랜치 줄.
+    // 커밋 상자가 이 뷰의 주 동작인데 2판은 그것을 가장 먼 곳(맨 아래)에 뒀고, 목록이 길면 스크롤 밖으로
+    // 밀려 보이지 않는 상태까지 생겼다. 브랜치 줄은 아래에 남는다 — 그건 "지금 어디에 있나"라는 **상태**다.
     top[0] = tree.card(.{
         .id = NodeIds.tabs,
         .style = .{ .height = .{ .px = @floatFromInt(m.tab_h) } },
@@ -263,7 +266,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, tab_nodes);
-    top[1] = tree.card(.{
+    top[3] = tree.card(.{
         .id = NodeIds.summary,
         .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
         .variant = .surface,
@@ -271,7 +274,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
-    top[2] = tree.scrollArea(.{
+    top[4] = tree.scrollArea(.{
         .id = NodeIds.content,
         .style = .{ .height = .{ .fill = 1 } },
         .scroll = .{
@@ -293,7 +296,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         },
     }, row_nodes);
     // 브랜치 줄은 **목록 아래**다(2판 — §3.5). 브랜치를 못 잡았으면 높이 0으로 두어 그 줄이 아예 없다.
-    top[3] = tree.card(.{
+    top[5] = tree.card(.{
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
         .variant = .surface,
@@ -307,9 +310,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // **상자 높이는 시각 행 수 × 행 높이**다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다). 랩은 host가
     // 이미 계산했고(`text_area`) 컴포넌트는 그 결과인 `commit_rows`만 받는다 — 같은 계산이 두 곳이면
     // 상자 높이와 실제로 그려지는 줄 수가 갈린다.
-    top[4] = tree.card(.{
+    top[1] = tree.card(.{
         .id = NodeIds.commit_box,
-        .style = .{ .height = .{ .px = @floatFromInt(m.commit_row_h * @max(props.commit_rows, 1)) } },
+        .style = .{ .height = .{ .px = @floatFromInt(m.commitBoxHeight(props.commit_rows)) } },
         .variant = .surface,
         .paint = .{ .background = .inset_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
         .overflow = .clip,
@@ -317,11 +320,25 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // **버튼에 action을 붙이지 않는다**(P3b). 실행은 P3c이고, 지금 눌러도 갈 곳이 없다 — 그래도 그리는
     // 이유는 "누를 수 없는 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"는 P1 계약이다. 활성 여부
     // 자체는 이미 사실로 계산한다(`commit_enabled` — index에 무언가 올라가 있나).
-    top[5] = tree.card(.{
+    // **채운 버튼**이다(목업 `[커밋 ∨]`). 목록 행과 달리 이건 표의 한 줄이 아니라 **누르는 것**이라,
+    // 배경이 있어야 누를 수 있는 자리로 읽힌다. 색은 테마 accent이고 글자는 배경색이다 — accent는
+    // "사이드바 배경 위 글자로 읽히는 색"으로 고른 값이라 그 둘의 대비를 테마가 보장한다(배지와 같은 근거).
+    //
+    // 꺼졌을 때는 채우지 않는다(`inset_bg`) — 스테이지가 없으면 커밋할 것이 없고, 그 사실이 색으로 보여야
+    // 한다(감추지 않고 비활성으로 **표시**한다).
+    top[2] = tree.card(.{
         .id = NodeIds.commit_button,
-        .style = .{ .height = .{ .px = @floatFromInt(m.commit_button_h) } },
+        .style = .{
+            .height = .{ .px = @floatFromInt(m.commit_button_h) },
+            .margin = .{ .left = @floatFromInt(m.inset_x), .right = @floatFromInt(m.inset_x), .bottom = @floatFromInt(m.commit_pad_y) },
+        },
         .variant = .surface,
-        .paint = .{ .background = .surface_bg, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
+        .paint = .{
+            .background = if (props.commit_enabled) .accent_bar else .inset_bg,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = .{ 0, 0, 0, 0 },
+            .shadow = .none,
+        },
         .overflow = .clip,
     }, &.{});
 
@@ -516,8 +533,8 @@ test "탭 줄은 요약 줄·목록 위에 있고 목록에서 자기 높이만�
 
     const m = types.DockMetrics.resolve(props.scale_milli);
     try testing.expectEqual(@as(f32, @floatFromInt(m.tab_h)), tabs.height);
-    // 고정 chrome을 전부 뺀 나머지가 목록이다 — 탭 줄·요약 줄·브랜치 줄·커밋 상자·커밋 버튼.
-    const commit_h = m.commit_row_h * @max(props.commit_rows, 1) + m.commit_button_h;
+    // 고정 chrome을 전부 뺀 나머지가 목록이다 — 탭 줄·커밋 상자·커밋 버튼(아래 여백 포함)·요약·브랜치.
+    const commit_h = m.commitBoxHeight(props.commit_rows) + m.commit_button_h + m.commit_pad_y;
     try testing.expectEqual(
         props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h + commit_h)),
         content.height,
@@ -612,9 +629,10 @@ test "도크의 카드는 전부 각진 모서리다(목록은 표이지 캡슐 
     }
 }
 
-test "커밋 상자는 브랜치 줄 아래이고 내용을 따라 자란다" {
-    // §3.5 목업 순서: 목록 → 브랜치·원격 줄 → 커밋 입력 → 커밋 버튼. 브랜치·`Fetch`는 커밋 직전에
-    // 확인하는 값이라 커밋 버튼 옆이 제자리다.
+test "커밋 상자는 탭 줄 아래·요약 위이고 내용을 따라 자란다" {
+    // §3.5 **3판** 순서: 탭 줄 → 커밋 입력 → 커밋 버튼 → 요약 → 목록 → 브랜치 줄. 커밋 상자가 이 뷰의
+    // 주 동작인데 2판은 그것을 맨 아래에 뒀고, 목록이 길면 스크롤 밖으로 밀려 보이지 않았다.
+    // 브랜치 줄은 아래에 남는다 — 그건 "지금 어디에 있나"라는 **상태**다.
     var storage: Storage = .{};
     const one = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
@@ -622,11 +640,20 @@ test "커밋 상자는 브랜치 줄 아래이고 내용을 따라 자란다" {
         .branch = "main",
         .commit_rows = 1,
     }, &storage);
-    const branch = one.tree.entries[one.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    const tabs = one.tree.entries[one.tree.find(NodeIds.tabs) orelse return error.MissingTabs].rect;
     const box = one.tree.entries[one.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
     const button = one.tree.entries[one.tree.find(NodeIds.commit_button) orelse return error.MissingButton].rect;
-    try testing.expect(branch.y < box.y);
+    const summary = one.tree.entries[one.tree.find(NodeIds.summary) orelse return error.MissingSummary].rect;
+    const branch = one.tree.entries[one.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    try testing.expect(tabs.y < box.y);
     try testing.expect(box.y < button.y);
+    try testing.expect(button.y < summary.y);
+    try testing.expect(summary.y < branch.y); // 브랜치는 여전히 바닥이다
+
+    // **버튼은 좌우 여백을 두고 채운 폭**이다(목록 행과 달리 누르는 것이라 면이 보여야 한다).
+    const m0 = types.DockMetrics.resolve(1000);
+    try testing.expect(button.x >= @as(f32, @floatFromInt(m0.inset_x)));
+    try testing.expect(button.x + button.width <= 320 - @as(f32, @floatFromInt(m0.inset_x)));
 
     // 시각 행이 늘면 상자가 자란다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다).
     var storage3: Storage = .{};
@@ -638,8 +665,13 @@ test "커밋 상자는 브랜치 줄 아래이고 내용을 따라 자란다" {
     }, &storage3);
     const grown = three.tree.entries[three.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
     const m = types.DockMetrics.resolve(1000);
-    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_row_h)), box.height);
-    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_row_h * 3)), grown.height);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(1))), box.height);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(3))), grown.height);
+    // 여백은 행 수와 무관하게 위아래 한 번씩이다 — 행이 늘어도 여백이 같이 불어나지 않는다.
+    try testing.expectEqual(
+        @as(f32, @floatFromInt(m.commit_row_h * 2)),
+        grown.height - box.height,
+    );
 }
 
 test "커밋 버튼에는 아직 action이 없다(P3b — 실행은 P3c)" {

@@ -207,15 +207,38 @@ pub fn view(
         // **활성 여부는 실제 index 상태가 정한다**(§7 — 낙관하지 않는다). 스테이지된 것이 없으면 커밋할
         // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
         // 라벨은 **가운데**다(채운 버튼의 관례 — 오른쪽 끝에 붙이면 그 넓은 면이 왜 칠해졌는지 안 보인다).
-        // 글자색은 채움과 짝이다: 켜졌으면 배경색(reverse), 꺼졌으면 흐린 글자.
-        try writer.centered(rect, commit_label, if (props.commit_enabled) .surface_bg else .muted_fg, .control);
+        const role = commitLabelRole(rect, state, tk, props.commit_enabled);
+        try writer.centered(rect, commit_label, role, .control);
         // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다(P3c 이후). 지금은 그 자리를 말만 한다.
-        try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, if (props.commit_enabled) .surface_bg else .muted_fg);
+        try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
     }
 
     // `ChromeDraw`는 layer와 op 슬라이스만 든다 — run·text 바이트는 op이 빌려 가리키므로 호출자가
     // 준 버퍼의 수명이 곧 그 슬라이스의 수명이다(Session Dock과 같은 계약).
     return .{ .layer = painted.layer, .ops = writer.ops[0..writer.op_count] };
+}
+
+/// 커밋 버튼 글자색. **칠해진 면에서 되짚어 고른다** — 글자색을 `commit_enabled`만 보고 정하면
+/// 호버에서 사라진다: 호버는 카드 배경을 `row_hover_bg`(어두움)로 **덮어쓰는데**(`paint_style`의 상태
+/// 해석은 명시 paint보다 위다) 글자는 채운 면 전제의 `surface_bg`(어두움)로 남아 **어두운 글자가 어두운
+/// 면 위**에 놓인다(적대적 검증 2026-08-16 — 켜진 버튼에 마우스를 올리면 라벨이 통째로 사라졌다).
+///
+/// 그래서 **painter와 같은 함수**(`resolveCard`)에 같은 입력을 물어 실제 배경을 받고, 그 위에서 읽히는
+/// 색을 고른다. 두 번째 상태 표를 만들지 않는다.
+fn commitLabelRole(
+    entry: tree.RectEntry,
+    state: interaction.InteractionState,
+    tk: *const tokens.Tokens,
+    enabled: bool,
+) tokens.ColorRole {
+    const visual = switch (entry.visual) {
+        .card => |card| card,
+        else => return if (enabled) .surface_bg else .muted_fg,
+    };
+    const resolved = paint_style.resolveCard(entry.id, visual, entry.action, state, tk);
+    // 채운 면(accent) 위에서만 reverse다. 호버·눌림·비활성 면은 전부 어두우므로 보통 글자가 읽힌다.
+    if (resolved.background == .accent_bar) return .surface_bg;
+    return if (enabled) .surface_fg else .muted_fg;
 }
 
 /// 빈 커밋 상자의 안내 문구. **컴포넌트가 소유한다** — platform이 넘기면 창마다 갈릴 수 있다.
@@ -1612,4 +1635,81 @@ test "빈 메시지에도 포커스면 caret이 선다" {
     const draws = try renderCommit(&storage, "", .{ .focused = true }, 1);
     try testing.expect(findExactText(draws, commit_placeholder) != null);
     try testing.expect(firstQuad(draws, .cursor) != null);
+}
+
+test "마지막 줄이 상자 안에 있다(상자 높이와 줄 간격의 출처가 하나다)" {
+    // 상자 높이는 `commitBoxHeight`(행 높이 × 행 수)이고 줄은 `.control` 줄 높이 간격으로 놓인다.
+    // 둘이 다른 상수에서 나오면 줄이 늘수록 어긋나 — 크면 마지막 줄이 잘리고, 작으면 아래에 빈 띠가
+    // 남으며 클릭 → 행 변환도 그만큼 밀린다. 실제로 20 vs 17로 갈려 있었다(적대적 검증 2026-08-16).
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .commit_message = "one\ntwo\nthree",
+        .commit_rows = 3,
+        .commit_edit = .{ .focused = true, .caret = 13 },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    const box = frame.tree.entries[frame.tree.find(build.NodeIds.commit_box) orelse return error.MissingBox];
+    const last = findExactText(draws, "three") orelse return error.MissingLastLine;
+    const line_h: i32 = @intCast(typography.lineHeightPx(.control, 1000));
+    const bottom: i32 = @intFromFloat(box.rect.y + box.rect.height);
+    try testing.expect(last.origin.y + line_h <= bottom);
+    // 그리고 **남는 자리가 여백 하나 이내**여야 한다 — 그보다 크면 상자가 글자보다 빠르게 자란 것이다.
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expect(bottom - (last.origin.y + line_h) <= @as(i32, @intCast(m.commit_pad_y)));
+    // caret도 같은 격자에 선다.
+    const caret = firstQuad(draws, .cursor) orelse return error.MissingCaret;
+    try testing.expectEqual(last.origin.y, caret.rect.y);
+}
+
+test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
+    // 호버는 카드 배경을 `row_hover_bg`(어두움)로 **덮어쓴다**(상태 해석이 명시 paint보다 위다).
+    // 글자를 `commit_enabled`만 보고 고르면 그때 어두운 글자가 어두운 면에 놓여 라벨이 사라진다
+    // (적대적 검증 2026-08-16 실측).
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .commit_enabled = true,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const idle = try viewBudgeted(&storage, props, frame, .{});
+    const on = findExactText(idle, commit_label) orelse return error.MissingButton;
+    try testing.expectEqual(tokens.ColorRole.surface_bg, on.role); // 채운 면 위 = reverse
+
+    var hover_storage: TestStorage = .{};
+    const hover_frame = try build.build(props, .{
+        .nodes = &hover_storage.nodes,
+        .entries = &hover_storage.entries,
+        .layout_items = &hover_storage.layout_items,
+        .flex_scratch = &hover_storage.flex_scratch,
+        .child_rects = &hover_storage.child_rects,
+        .actions = &hover_storage.actions,
+    });
+    const hovered = try viewBudgeted(&hover_storage, props, hover_frame, .{ .hovered = build.NodeIds.commit_button });
+    const label = findExactText(hovered, commit_label) orelse return error.MissingButton;
+    // 배경이 accent가 아니게 됐으면 글자는 보통 글자색이어야 한다 — **같은 함수에 물어** 고른다.
+    const button = hover_frame.tree.entries[hover_frame.tree.find(build.NodeIds.commit_button) orelse return error.MissingButton];
+    const tk = testTokens();
+    const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = build.NodeIds.commit_button }, &tk);
+    try testing.expect(resolved.background != .accent_bar); // 호버가 채움을 덮는다(전제 확인)
+    try testing.expectEqual(tokens.ColorRole.surface_fg, label.role);
+    // 글자와 면이 **같은 역할**이면 그게 곧 사라지는 것이다.
+    try testing.expect(label.role != resolved.background);
 }

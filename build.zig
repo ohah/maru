@@ -4183,6 +4183,63 @@ pub fn build(b: *std.Build) void {
         run_cr4a_catchup_host_state_tests.addArg("--maru-expect-tests=1");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_state_tests.step);
 
+        const cr4a_catchup_host_capability_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a host capability는"},
+        });
+        const run_cr4a_catchup_host_capability_tests = b.addRunArtifact(cr4a_catchup_host_capability_tests);
+        run_cr4a_catchup_host_capability_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_capability_tests.step);
+
+        const cr4a_catchup_host_admission_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a host admission은"},
+        });
+        const run_cr4a_catchup_host_admission_tests = b.addRunArtifact(cr4a_catchup_host_admission_tests);
+        run_cr4a_catchup_host_admission_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_admission_tests.step);
+
+        const cr4a_poll_owner_process_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/poll_owner.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a poll owner는"},
+        });
+        const run_cr4a_poll_owner_process_tests = b.addRunArtifact(cr4a_poll_owner_process_tests);
+        run_cr4a_poll_owner_process_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_poll_owner_process_tests.step);
+
+        const cr4a_restore_exec_bootstrap_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/restore_activation.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a restore exec bootstrap은"},
+        });
+        const run_cr4a_restore_exec_bootstrap_tests = b.addRunArtifact(cr4a_restore_exec_bootstrap_tests);
+        run_cr4a_restore_exec_bootstrap_tests.addArg("--maru-expect-tests=1");
+        run_cr4a_restore_exec_bootstrap_tests.setEnvironmentVariable(
+            "MARU_CR4A_RESTORE_EXEC_ROLE",
+            "maru-cr4a-restore-parent-v1",
+        );
+        session_host_cr4a_step.dependOn(&run_cr4a_restore_exec_bootstrap_tests.step);
+
         const cr4a_catchup_protocol_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/protocol.zig"),

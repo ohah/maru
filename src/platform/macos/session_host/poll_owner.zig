@@ -10,8 +10,11 @@ const c = std.c;
 const posix = std.posix;
 const connection_slot = @import("connection_slot.zig");
 const connection_turn = @import("connection_turn.zig");
+const process_seal_service = @import("process_seal_service.zig");
 const server_mod = @import("server.zig");
 const socket_server = @import("socket_server.zig");
+
+extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const max_clients: usize = connection_slot.max_connections;
 pub const cadence_ns: u64 = @as(u64, @intCast(socket_server.SocketServer.delta_tick_ms)) *
@@ -21,6 +24,7 @@ pub const Outcome = enum {
     idle,
     progress,
     listener_broken,
+    authority_lost,
     upgrade_ready,
 };
 
@@ -81,12 +85,17 @@ pub const Owner = struct {
     first_stall_send_buffer_bytes: u64 = 0,
     controller_transition_admission_fail_once: bool = false,
     resize_admission_fail_once: bool = false,
+    process_identity: ?process_seal_service.ReadyIdentity,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         server: *socket_server.SocketServer,
-    ) error{OutOfMemory}!Owner {
+    ) error{ OutOfMemory, ProcessIdentityUnavailable }!Owner {
+        // Shipping owners cannot exist without the daemon-ready process seal. Tests that exercise
+        // unrelated poll mechanics may omit it, but then only the test build accepts that owner.
+        const process_identity = process_seal_service.currentReadyIdentity() catch
+            if (builtin.is_test) null else return error.ProcessIdentityUnavailable;
         const reactor = try connection_slot.ReactorCore.create(allocator);
         const now_ns = monotonicNow(io);
         return .{
@@ -94,6 +103,7 @@ pub const Owner = struct {
             .io = io,
             .server = server,
             .reactor = reactor,
+            .process_identity = process_identity,
             .next_cadence_ns = now_ns +| cadence_ns,
         };
     }
@@ -106,6 +116,13 @@ pub const Owner = struct {
 
     pub fn activeCount(self: *const Owner) usize {
         return self.reactor.activeCount();
+    }
+
+    /// Product owner-turn fence. The fatal leaf is intentionally shared by daemon and restore so
+    /// a fork child cannot unwind inherited socket/path/runtime cleanup.
+    pub fn requireCurrentProcessOrFatal(self: *const Owner) void {
+        if (!self.validateProcessIdentity())
+            process_seal_service.fatalIntegrity(.proof_loss);
     }
 
     /// Private process-fixture telemetry. 제품 wire/CLI를 넓히지 않고도 실제 poll owner가
@@ -157,6 +174,9 @@ pub const Owner = struct {
     /// cadence; pending synthetic work forces a zero-time poll so the cursor sweep finishes without
     /// another 20 ms delay.
     pub fn pollOnce(self: *Owner, outer_timeout_ms: i32) error{OutOfMemory}!Outcome {
+        // This must precede clock, gate, reactor, listener and client access. A fork child inherits
+        // all of them and must not consume a parent connection before its PID mismatch is noticed.
+        if (!self.validateProcessIdentity()) return .authority_lost;
         if (self.armed_upgrade != null) return .upgrade_ready;
         const before_poll_ns = monotonicNow(self.io);
         self.scheduleCadence(before_poll_ns);
@@ -295,6 +315,12 @@ pub const Owner = struct {
         return if (progressed) .progress else .idle;
     }
 
+    fn validateProcessIdentity(self: *const Owner) bool {
+        const expected = self.process_identity orelse return builtin.is_test;
+        const current = process_seal_service.currentReadyIdentity() catch return false;
+        return std.meta.eql(expected, current);
+    }
+
     fn acceptOne(self: *Owner, now_ns: u64) error{OutOfMemory}!void {
         const fd = switch (self.server.acceptOneResult()) {
             .accepted => |fd| fd,
@@ -304,6 +330,14 @@ pub const Owner = struct {
             },
             .would_block, .denied, .failed => return,
         };
+        const process_identity = process_seal_service.currentReadyIdentity() catch {
+            _ = c.close(fd);
+            return;
+        };
+        if (self.process_identity == null or !std.meta.eql(self.process_identity.?, process_identity)) {
+            _ = c.close(fd);
+            return;
+        }
         const client = connection_turn.Client.create(
             self.allocator,
             fd,
@@ -313,6 +347,7 @@ pub const Owner = struct {
             &self.server.subscriptions,
             .{
                 .runtime_ops = self.server.runtime_ops,
+                .process_identity = process_identity,
                 .upgrade_ops = self.server.upgrade_ops,
                 .admission_gate = self.server.admission_gate,
                 .host_status = self.server.host_status,
@@ -918,6 +953,91 @@ fn connectTestClient(path: [:0]const u8) !c.fd_t {
     if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0)
         return error.TestUnexpectedResult;
     return fd;
+}
+
+test "CR4a poll owner는 fork process seal을 listener 접근 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => ready: {
+            const pid = process_seal_service.currentProcessId();
+            const nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(pid, nonce));
+            break :ready try process_seal_service.currentReadyIdentity();
+        },
+        else => return err,
+    };
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/cr4a-process-seal.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB2,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    const peer = try connectTestClient(socket_path);
+    defer _ = c.close(peer);
+    const child = c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        owner.requireCurrentProcessOrFatal();
+        c._exit(87);
+    }
+    var status: c_int = 0;
+    var reaped = false;
+    var attempts: usize = 0;
+    while (attempts < 2000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, posix.W.NOHANG);
+        if (waited == child) {
+            reaped = true;
+            break;
+        }
+        if (waited < 0 and posix.errno(waited) != .INTR) break;
+        _ = usleep(1000);
+    }
+    if (!reaped) {
+        _ = c.kill(child, c.SIG.KILL);
+        while (true) {
+            const waited = c.waitpid(child, &status, 0);
+            if (waited == child) break;
+            if (waited >= 0 or posix.errno(waited) != .INTR) break;
+        }
+        return error.TestUnexpectedResult;
+    }
+    const unsigned_status: u32 = @bitCast(status);
+    try testing.expect(c.W.IFEXITED(unsigned_status));
+    try testing.expectEqual(@as(u32, 86), c.W.EXITSTATUS(unsigned_status));
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    const ready_identity = try process_seal_service.currentReadyIdentity();
+    var injected = false;
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        try testing.expectEqualDeep(ready_identity, client.process_identity.?);
+        injected = true;
+    }
+    try testing.expect(injected);
 }
 
 fn sendTestRequest(fd: c.fd_t, kind: protocol.Kind, request_id: u64, payload: []const u8) !void {

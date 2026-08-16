@@ -116,6 +116,21 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/connection_turn.zig",
     );
     defer allocator.free(connection_turn);
+    const poll_owner = try readSource(
+        allocator,
+        "src/platform/macos/session_host/poll_owner.zig",
+    );
+    defer allocator.free(poll_owner);
+    const daemon = try readSource(
+        allocator,
+        "src/platform/macos/session_host/daemon.zig",
+    );
+    defer allocator.free(daemon);
+    const restore_activation = try readSource(
+        allocator,
+        "src/platform/macos/session_host/restore_activation.zig",
+    );
+    defer allocator.free(restore_activation);
     const catchup_wire = try readSource(
         allocator,
         "src/platform/macos/session_host/catchup_barrier_wire.zig",
@@ -202,11 +217,17 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
-    try std.testing.expectEqual(@as(usize, 6), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 10), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a dormant barrier"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host pending은"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host capability는"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host admission은"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a poll owner는"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a restore exec bootstrap은"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "MARU_CR4A_RESTORE_EXEC_ROLE"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "maru-cr4a-restore-parent-v1"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a host barrier frame"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const ScreenFrontier = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const CatchupIdentity = struct"));
@@ -221,6 +242,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_contract.zig", &.{
             "platform/macos/session_host/catchup_barrier_contract.zig",
+            "platform/macos/session_host/server.zig",
         }),
     );
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const capability ="));
@@ -228,7 +250,48 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(catchup_wire, "version: u16 = 1"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup_wire, "payload_size: usize = 96"));
     try std.testing.expectEqual(@as(usize, 0), count(catchup, "process_nonce"));
-    try std.testing.expectEqual(@as(usize, 0), count(server, "catchup_barrier_contract"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "const catchup_barrier_contract = @import"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "runtime_catchup_barrier_v1: bool = false"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "catchup: catchup_barrier_contract.HostState = .idle"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "test \"CR4a host capability는"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, ".runtime_catchup => self.dispatchCatchup"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, ".catchup_arm_requested =>"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "self.commitCatchupArm(&prepared)"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn commitCatchupArm("));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "sub.catchup = prepared.after"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn validateProcessIdentity("));
+    try std.testing.expectEqual(@as(usize, 2), count(poll_owner, "const process_identity = process_seal_service.currentReadyIdentity() catch"));
+    try std.testing.expectEqual(@as(usize, 2), count(poll_owner, ".process_identity = process_identity"));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "test \"CR4a poll owner는"));
+    try std.testing.expectEqual(@as(usize, 0), count(poll_owner, "pub fn requireCurrentProcess("));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn requireCurrentProcessOrFatal("));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "error.ProcessIdentityUnavailable => error.ProcessIdentityUnavailable"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, ".authority_lost => fd_owner.requireCurrentProcessOrFatal()"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, ".authority_lost => owner.requireCurrentProcessOrFatal()"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "const process_seal_service = @import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "test \"CR4a restore exec bootstrap은"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "fn bootstrapProcessSeal()"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "process_seal_service.commitReady(try process_seal_service.prepare(process_pid, process_nonce))"));
+    const restore_run_start = std.mem.indexOf(u8, restore_activation, "pub fn run(") orelse
+        return error.TestUnexpectedResult;
+    const restore_run_end = std.mem.indexOfPos(u8, restore_activation, restore_run_start, "fn bootstrapProcessSeal()") orelse
+        return error.TestUnexpectedResult;
+    const restore_run = restore_activation[restore_run_start..restore_run_end];
+    const bootstrap_pos = std.mem.indexOf(u8, restore_run, "_ = try bootstrapProcessSeal();") orelse
+        return error.TestUnexpectedResult;
+    const arm_pos = std.mem.indexOf(u8, restore_run, "upgrade_bootstrap.armRestoreInvocation(") orelse
+        return error.TestUnexpectedResult;
+    const activate_pos = std.mem.indexOf(u8, restore_run, "activateValidated(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(bootstrap_pos < arm_pos);
+    try std.testing.expect(arm_pos < activate_pos);
+    const daemon_turn = daemon[std.mem.indexOf(u8, daemon, "while (true) {\n        fd_owner.requireCurrentProcessOrFatal();") orelse
+        return error.TestUnexpectedResult ..];
+    try std.testing.expect(std.mem.indexOf(u8, daemon_turn, "server.tickOwner();") != null);
+    const restore_turn = restore_activation[std.mem.indexOf(u8, restore_activation, "while (true) {\n        owner.requireCurrentProcessOrFatal();") orelse
+        return error.TestUnexpectedResult ..];
+    try std.testing.expect(std.mem.indexOf(u8, restore_turn, "server.tickOwner();") != null);
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "test \"CR4a host admission은"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_wire.zig", &.{

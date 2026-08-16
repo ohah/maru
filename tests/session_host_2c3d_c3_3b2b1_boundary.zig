@@ -33,6 +33,10 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
+    const poll_owner = try readSource(allocator, "src/platform/macos/session_host/poll_owner.zig");
+    defer allocator.free(poll_owner);
+    const connection_turn = try readSource(allocator, "src/platform/macos/session_host/connection_turn.zig");
+    defer allocator.free(connection_turn);
     const shutdown_attempt = try readSource(
         allocator,
         "src/platform/macos/session_host/shutdown_attempt_authority.zig",
@@ -124,10 +128,18 @@ test "C3-3b2b1 trusted preparation seal boundary" {
     );
     try std.testing.expectEqual(
         // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner, 2d2 terminal handoff와 CR0b composite/GUI/daemon owner,
-        // CR1 scheduler dispatch, CR2e-e3b1 resident admission budget와 e3c1 coordinator까지 검증한다.
-        @as(usize, 30),
+        // CR1 scheduler dispatch, CR2e-e3b1 resident admission budget, e3c1 coordinator와
+        // CR4 poll-owner/client-turn process fence와 exec 뒤 restore bootstrap까지 검증한다.
+        @as(usize, 33),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "@import(\"process_seal_service.zig\")"));
+    const restore_activation = try readSource(allocator, "src/platform/macos/session_host/restore_activation.zig");
+    defer allocator.free(restore_activation);
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn requireCurrentProcessOrFatal("));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn commitCatchupArm("));
     try std.testing.expectEqual(
         @as(usize, 1),
         count(reconnect_resident_budget, "@import(\"process_seal_service.zig\")"),

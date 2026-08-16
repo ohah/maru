@@ -16,6 +16,7 @@ const slot_mod = @import("connection_slot.zig");
 const subscription_identity = @import("subscription_identity.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const process_seal_service = @import("process_seal_service.zig");
 
 pub const CloseReason = enum {
     eof,
@@ -68,6 +69,7 @@ pub const Options = struct {
     controller_transition: ?OwnerControllerTransition = null,
     resize: ?OwnerResize = null,
     now_ns: u64 = 0,
+    process_identity: ?process_seal_service.ReadyIdentity = null,
 };
 
 pub const OwnerUpgradePreflight = struct {
@@ -149,6 +151,7 @@ pub const Client = struct {
     producer_sweep_cursor: usize = 0,
     pressure_reclaim_available: bool = false,
     projection_global_unavailable: bool = false,
+    process_identity: ?process_seal_service.ReadyIdentity = null,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -190,6 +193,7 @@ pub const Client = struct {
             .pressure_reclaim = options.pressure_reclaim,
             .controller_transition = options.controller_transition,
             .resize = options.resize,
+            .process_identity = options.process_identity,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -396,6 +400,7 @@ pub const Client = struct {
 
     /// One nonblocking readable turn. At most 1 MiB and 64 complete frames are admitted.
     pub fn readReady(self: *Client, now_ns: u64) void {
+        if (!self.validateProcessIdentity()) return self.beginClose(.protocol_error);
         if (self.isClosing() or self.close_after_flush != null) return;
         var budget: slot_mod.TurnBudget = .{};
         var buf: [64 * 1024]u8 = undefined;
@@ -484,6 +489,7 @@ pub const Client = struct {
     /// One nonblocking writable turn. Queue offsets and global accounting advance only by bytes
     /// accepted by the kernel.
     pub fn writeReady(self: *Client, now_ns: u64) void {
+        if (!self.validateProcessIdentity()) return self.beginClose(.protocol_error);
         if (self.isClosing()) return;
         var budget: slot_mod.TurnBudget = .{};
         var interruptions: u8 = 0;
@@ -531,6 +537,7 @@ pub const Client = struct {
 
     /// Deadline/lifecycle tick; screen updates are queued and therefore cannot block another fd.
     pub fn tick(self: *Client, now_ns: u64) void {
+        if (!self.validateProcessIdentity()) return self.beginClose(.protocol_error);
         if (self.isClosing()) return;
         self.pressure_reclaim_available = true;
         self.projection_global_unavailable = false;
@@ -557,6 +564,7 @@ pub const Client = struct {
         defer if (lease) |*held| held.release();
         slot.beginDispatch() catch return self.beginClose(.resource_exhausted);
         defer slot.endDispatch() catch unreachable;
+        self.connection.expireCatchups(now_ns);
         if (self.producer_streams.len == 0 and self.trackers.count() != 0)
             _ = self.beginProducerSweep(now_ns);
         if (self.producer_streams.len == 0) return;
@@ -811,7 +819,7 @@ pub const Client = struct {
 
         const was_admin = self.connection.isAdmin();
         if (was_admin) self.admin_request_deadline_at_ns = null;
-        const action = try self.connection.handleFrame(frame);
+        const action = try self.connection.handleFrameAt(frame, now_ns);
         if (!was_admin and self.connection.isAdmin())
             self.admin_request_deadline_at_ns = now_ns +| admin_request_deadline_ns;
         switch (action) {
@@ -878,6 +886,16 @@ pub const Client = struct {
                     return error.OutOfMemory;
                 };
                 prepared.output.commit(&self.connection);
+            },
+            .catchup_arm_requested => |prepared_value| {
+                var prepared = prepared_value;
+                const identity = self.process_identity orelse
+                    return self.beginClose(.protocol_error);
+                if (!prepared.bindFinal(identity.pid, identity.process_nonce))
+                    return self.beginClose(.protocol_error);
+                self.adoptControl(prepared.reply) catch return error.OutOfMemory;
+                if (!self.commitCatchupArm(&prepared))
+                    return self.beginClose(.protocol_error);
             },
             .prepared_notification => |prepared| {
                 self.adoptControl(prepared.reply) catch return error.OutOfMemory;
@@ -1122,6 +1140,50 @@ pub const Client = struct {
         const tracker = self.trackers.get(stream) orelse return;
         const slot = self.reactor.get(self.admission) catch unreachable;
         slot.releaseBaseState(tracker) catch unreachable;
+    }
+
+    fn validateProcessIdentity(self: *const Client) bool {
+        const expected = self.process_identity orelse return true;
+        const current = process_seal_service.currentReadyIdentity() catch return false;
+        return std.meta.eql(expected, current);
+    }
+
+    fn commitCatchupArm(
+        self: *Client,
+        prepared: *server.Action.PreparedCatchupArm,
+    ) bool {
+        if (prepared.self_addr != @intFromPtr(prepared) or prepared.active_raw != 1)
+            return false;
+        const expected_process = self.process_identity orelse return false;
+        const current_process = process_seal_service.currentReadyIdentity() catch return false;
+        if (!std.meta.eql(expected_process, current_process) or
+            prepared.pid != current_process.pid or
+            prepared.process_nonce != current_process.process_nonce or
+            !self.connection.runtime_catchup_barrier_v1) return false;
+        const owner = self.connection.subscription_identity orelse return false;
+        const sub = self.connection.attachments.getPtr(prepared.stream) orelse return false;
+        if (!registry.Capability.has(
+            self.connection.registry.capabilitiesOfSubscription(
+                sub.runtime_id,
+                sub.subscription_id,
+            ),
+            registry.Capability.observe,
+        ) or
+            prepared.identity.host_id != self.connection.host_id or
+            prepared.identity.subscription.value != sub.subscription_id.value or
+            prepared.identity.runtime_id != sub.runtime_id or
+            !std.meta.eql(prepared.identity.connection, owner.connection) or
+            !std.meta.eql(sub.catchup, prepared.before)) return false;
+        var recomputed = prepared.before;
+        const result = recomputed.arm(
+            prepared.identity,
+            prepared.now_ns,
+            prepared.expires_at_ns,
+        );
+        if (result != prepared.result or !std.meta.eql(recomputed, prepared.after)) return false;
+        sub.catchup = prepared.after;
+        prepared.active_raw = 0;
+        return true;
     }
 
     fn adoptControl(self: *Client, bytes: []u8) error{OutOfMemory}!void {
@@ -1807,6 +1869,254 @@ test "product attach admission failure and EOF release retained projection autho
         try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
         try testing.expectEqual(@as(usize, 0), subscriptions.count());
         try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+    }
+}
+
+test "CR4a host admission은 control queue 성공 뒤 pending을 게시하고 expiry를 연장하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var registry_value = registry.TerminalRuntimeRegistry.init(allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const process_identity = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => ready: {
+            const process_pid = process_seal_service.currentProcessId();
+            const process_nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(process_pid, process_nonce));
+            break :ready try process_seal_service.currentReadyIdentity();
+        },
+        else => return err,
+    };
+    const nonce = "00112233445566778899aabbccddeeff";
+    const request =
+        "{\"method\":\"runtime.catchup\",\"params\":{\"stream_id\":1,\"request_nonce\":\"" ++
+        nonce ++ "\"}}";
+    const expectReply = struct {
+        fn contains(fd: c.fd_t, needle: []const u8) !void {
+            var parser = framing.FrameParser.init(testing.allocator);
+            defer parser.deinit();
+            _ = try receiveIntoParserNonblocking(fd, &parser);
+            var found = false;
+            while (try parser.next()) |frame| {
+                defer frame.deinit(testing.allocator);
+                if (std.mem.indexOf(u8, frame.payload, needle) != null) found = true;
+            }
+            try testing.expect(found);
+        }
+    }.contains;
+    const prepareDirect = struct {
+        fn one(client: *Client, now_ns: u64, request_id: u64, payload: []const u8) !server.Action.PreparedCatchupArm {
+            const wire = try framing.encodeFrame(
+                testing.allocator,
+                .{ .kind = .request, .request_id = request_id },
+                payload,
+            );
+            defer testing.allocator.free(wire);
+            var parser = framing.FrameParser.init(testing.allocator);
+            defer parser.deinit();
+            try parser.push(wire);
+            const frame = (try parser.next()).?;
+            defer frame.deinit(testing.allocator);
+            const action = try client.connection.handleFrameAt(frame, now_ns);
+            if (action != .catchup_arm_requested) return error.TestUnexpectedResult;
+            return action.catchup_arm_requested;
+        }
+    }.one;
+
+    // Capability absence is a product negative: the request gets a typed denial and cannot arm
+    // the subscription even though the observer attachment itself is otherwise valid.
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            allocator,
+            fds[0],
+            reactor,
+            0x1234,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops(), .process_identity = process_identity },
+        );
+        defer client.destroy();
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[]}",
+        );
+        client.readReady(1);
+        client.writeReady(1);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        client.writeReady(2);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(fds[1], .request, 3, request);
+        client.readReady(3);
+        client.writeReady(3);
+        try expectReply(fds[1], "unauthorized");
+        try testing.expect(client.connection.attachments.get(1).?.catchup == .idle);
+    }
+
+    // A mixed-type capabilities array is malformed, not a permissive negotiation surface.
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            allocator,
+            fds[0],
+            reactor,
+            0x1234,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops(), .process_identity = process_identity },
+        );
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[{},\"runtime_catchup_barrier_v1\"]}",
+        );
+        client.readReady(1);
+        try testing.expect(client.isClosing());
+        try testing.expectEqual(@as(usize, 0), client.connection.attachments.count());
+        client.destroy();
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            allocator,
+            fds[0],
+            reactor,
+            0x1234,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops(), .process_identity = process_identity },
+        );
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_catchup_barrier_v1\"]}",
+        );
+        client.readReady(1);
+        client.writeReady(1);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        client.writeReady(2);
+        _ = drainNonblocking(fds[1]);
+        client.control_admission_fail_once = true;
+        try sendTestFrame(fds[1], .request, 3, request);
+        client.readReady(3);
+        try testing.expect(client.isClosing());
+        try testing.expect(client.connection.attachments.get(1).?.catchup == .idle);
+        client.destroy();
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            allocator,
+            fds[0],
+            reactor,
+            0x1234,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops(), .process_identity = process_identity },
+        );
+        defer client.destroy();
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_catchup_barrier_v1\"]}",
+        );
+        client.readReady(10);
+        client.writeReady(10);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(11);
+        client.writeReady(11);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(fds[1], .request, 3, request);
+        client.readReady(12);
+        const pending = client.connection.attachments.get(1).?.catchup.pending;
+        try testing.expectEqual(@as(u64, 12 + server.catchup_host_expiry_ns), pending.expires_at_ns);
+        client.writeReady(12);
+        _ = drainNonblocking(fds[1]);
+
+        // The response queue owner is the only product caller, but this same-module hostile seam
+        // proves that its final-address receipt cannot be copied, drifted, or replayed.
+        var prepared = try prepareDirect(client, 12, 40, request);
+        defer allocator.free(prepared.reply);
+        try testing.expect(prepared.bindFinal(process_identity.pid, process_identity.process_nonce));
+        const state_before_hostile = client.connection.attachments.get(1).?.catchup;
+        var copied = prepared;
+        try testing.expect(!client.commitCatchupArm(&copied));
+        try testing.expectEqualDeep(state_before_hostile, client.connection.attachments.get(1).?.catchup);
+        prepared.pid +%= 1;
+        try testing.expect(!client.commitCatchupArm(&prepared));
+        try testing.expectEqualDeep(state_before_hostile, client.connection.attachments.get(1).?.catchup);
+        prepared.pid -%= 1;
+        prepared.process_nonce +%= 1;
+        try testing.expect(!client.commitCatchupArm(&prepared));
+        try testing.expectEqualDeep(state_before_hostile, client.connection.attachments.get(1).?.catchup);
+        prepared.process_nonce -%= 1;
+        try testing.expect(client.commitCatchupArm(&prepared));
+        try testing.expectEqual(@as(u8, 0), prepared.active_raw);
+        try testing.expect(!client.commitCatchupArm(&prepared));
+        try testing.expectEqualDeep(state_before_hostile, client.connection.attachments.get(1).?.catchup);
+
+        try sendTestFrame(fds[1], .request, 4, request);
+        client.readReady(13);
+        try testing.expectEqualDeep(pending, client.connection.attachments.get(1).?.catchup.pending);
+        client.writeReady(13);
+        try expectReply(fds[1], "idempotent");
+
+        const foreign_request =
+            "{\"method\":\"runtime.catchup\",\"params\":{\"stream_id\":1,\"request_nonce\":\"ffeeddccbbaa99887766554433221100\"}}";
+        try sendTestFrame(fds[1], .request, 5, foreign_request);
+        client.readReady(14);
+        try testing.expectEqualDeep(pending, client.connection.attachments.get(1).?.catchup.pending);
+        client.writeReady(14);
+        try expectReply(fds[1], "busy");
+
+        client.tick(pending.expires_at_ns - 1);
+        try testing.expect(client.connection.attachments.get(1).?.catchup == .pending);
+        try sendTestFrame(fds[1], .request, 6, request);
+        client.readReady(pending.expires_at_ns);
+        client.writeReady(pending.expires_at_ns);
+        try expectReply(fds[1], "expired");
+        try testing.expect(client.connection.attachments.get(1).?.catchup == .terminal);
     }
 }
 

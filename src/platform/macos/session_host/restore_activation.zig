@@ -26,6 +26,7 @@ const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
 const poll_owner = @import("poll_owner.zig");
+const process_seal_service = @import("process_seal_service.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 const upgrade_target = @import("upgrade_target.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -38,6 +39,8 @@ pub fn run(
     io: std.Io,
     invocation: entrypoint.RestoreInvocation,
 ) !void {
+    _ = try bootstrapProcessSeal();
+
     var armed = try upgrade_bootstrap.armRestoreInvocation(
         allocator,
         invocation,
@@ -82,6 +85,16 @@ pub fn run(
         }
         return err;
     };
+}
+
+fn bootstrapProcessSeal() !process_seal_service.ReadyIdentity {
+    // exec 뒤 process-global seal은 항상 pristine이다. 복원 graph나 inherited fd를
+    // 읽기 전에 새 process-domain을 게시해 이후 owner turn과 Client bootstrap이
+    // 동일한 ready identity만 사용하게 한다.
+    const process_pid = process_seal_service.currentProcessId();
+    const process_nonce = try process_seal_service.generateProcessNonce();
+    process_seal_service.commitReady(try process_seal_service.prepare(process_pid, process_nonce));
+    return process_seal_service.currentReadyIdentity();
 }
 
 fn activateValidated(
@@ -432,6 +445,7 @@ fn serveLoop(
     var owner = try poll_owner.Owner.init(upgrade_context.allocator, upgrade_context.io, server);
     defer owner.deinit();
     while (true) {
+        owner.requireCurrentProcessOrFatal();
         server.tickOwner();
         switch (try owner.pollOnce(poll_timeout_ms)) {
             .upgrade_ready => {
@@ -445,6 +459,7 @@ fn serveLoop(
             },
             .progress => {},
             .listener_broken => return,
+            .authority_lost => owner.requireCurrentProcessOrFatal(),
         }
         if (test_oneshot and owner.total_admitted != 0 and owner.activeCount() == 0) return;
     }
@@ -504,4 +519,103 @@ test "reader preparation keeps target deadline and bounds rollback recovery" {
     try std.testing.expect(
         rollback.remainingNs() <= upgrade_limits.pause_budget_ns,
     );
+}
+
+test "CR4a restore exec bootstrap은 graph 접근 전에 fresh process seal을 게시한다" {
+    const parent_marker = "maru-cr4a-restore-parent-v1";
+    const child_marker = "maru-cr4a-restore-exec-v1";
+    const marker = if (c.getenv("MARU_CR4A_RESTORE_EXEC_ROLE")) |raw_marker|
+        std.mem.span(raw_marker)
+    else
+        null;
+    if (marker != null and std.mem.eql(u8, marker.?, child_marker)) {
+        const raw_expected_pid = c.getenv("MARU_CR4A_RESTORE_EXEC_PID") orelse
+            return error.TestUnexpectedResult;
+        const expected_pid = try std.fmt.parseInt(
+            u32,
+            std.mem.span(raw_expected_pid),
+            10,
+        );
+        try std.testing.expectEqual(
+            expected_pid,
+            process_seal_service.currentProcessId(),
+        );
+        try std.testing.expectError(
+            error.NotReady,
+            process_seal_service.currentReadyIdentity(),
+        );
+        const published = try bootstrapProcessSeal();
+        try std.testing.expectEqual(expected_pid, published.pid);
+        try std.testing.expect(published.process_nonce != 0);
+        try std.testing.expectEqualDeep(
+            published,
+            try process_seal_service.currentReadyIdentity(),
+        );
+        return;
+    }
+    if (marker == null) {
+        if (process_seal_service.currentReadyIdentity()) |_| {
+            return error.SkipZigTest;
+        } else |err| switch (err) {
+            error.NotReady => return error.TestUnexpectedResult,
+            else => return err,
+        }
+    }
+    if (!std.mem.eql(u8, marker.?, parent_marker))
+        return error.TestUnexpectedResult;
+
+    if (process_seal_service.currentReadyIdentity()) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.NotReady => {},
+        else => return err,
+    }
+
+    const self_path = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(self_path);
+    const child = c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        // exec 직전에는 child PID에 결속된 ready seal이 실제로 존재해야 한다.
+        // 같은 PID exec 뒤 위 child branch가 이를 NotReady로 관측해야 증거가 된다.
+        _ = bootstrapProcessSeal() catch c._exit(125);
+        var pid_env_buf: [96]u8 = undefined;
+        const pid_env = std.fmt.bufPrintZ(
+            &pid_env_buf,
+            "MARU_CR4A_RESTORE_EXEC_PID={d}",
+            .{process_seal_service.currentProcessId()},
+        ) catch c._exit(125);
+        const argv = [_:null]?[*:0]const u8{self_path.ptr};
+        const child_env = [_:null]?[*:0]const u8{
+            "MARU_CR4A_RESTORE_EXEC_ROLE=maru-cr4a-restore-exec-v1",
+            pid_env.ptr,
+        };
+        _ = c.execve(self_path.ptr, &argv, &child_env);
+        c._exit(127);
+    }
+
+    var status: c_int = 0;
+    var reaped = false;
+    var attempts: usize = 0;
+    while (attempts < 2000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, std.posix.W.NOHANG);
+        if (waited == child) {
+            reaped = true;
+            break;
+        }
+        if (waited < 0 and std.posix.errno(waited) != .INTR) break;
+        _ = usleep(1000);
+    }
+    if (!reaped) {
+        _ = c.kill(child, c.SIG.KILL);
+        while (true) {
+            const waited = c.waitpid(child, &status, 0);
+            if (waited == child) break;
+            if (waited >= 0 or std.posix.errno(waited) != .INTR) break;
+        }
+        return error.TestUnexpectedResult;
+    }
+    const unsigned_status: u32 = @bitCast(status);
+    try std.testing.expect(c.W.IFEXITED(unsigned_status));
+    try std.testing.expectEqual(@as(u32, 0), c.W.EXITSTATUS(unsigned_status));
 }

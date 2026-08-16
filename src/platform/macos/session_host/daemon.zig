@@ -40,7 +40,12 @@ const incident_publisher_registry = @import("incident_publisher_registry.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const incident_bootstrap_contract = @import("incident_bootstrap_contract.zig");
 
-pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
+pub const RunError = socket_server.BindError || error{
+    OutOfMemory,
+    OwnerLeaseFailed,
+    ManifestFailed,
+    ProcessIdentityUnavailable,
+};
 
 /// ReleaseFast process fixture 전용 private observation seam. 제품 protocol/capability를
 /// 넓히지 않고 actual owner turn 뒤 canonical ledger/stall과 PTY reader bytes를 전달한다.
@@ -582,7 +587,10 @@ fn runSessionHostImpl(
         }
     }.tick;
 
-    var fd_owner = poll_owner.Owner.init(allocator, io, &server) catch return error.OutOfMemory;
+    var fd_owner = poll_owner.Owner.init(allocator, io, &server) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ProcessIdentityUnavailable => error.ProcessIdentityUnavailable,
+    };
     defer fd_owner.deinit();
     // 자연 종료 판정 상태. `served_any_runtime`이 없으면 **방금 뜬 host**(아직 GUI가 첫 runtime을 만들기 전)가
     // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다.
@@ -590,6 +598,7 @@ fn runSessionHostImpl(
     var empty_idle_ticks: usize = 0;
     var last_touch_ms: ?u64 = null;
     while (true) {
+        fd_owner.requireCurrentProcessOrFatal();
         server.tickOwner();
         // `/tmp`는 매일 정리된다. 살아 있는 동안 endpoint·manifest 시각을 갱신하지 않으면 3일 이상 조용한
         // host가 자기 endpoint를 잃고, 프로세스는 살아 있는데 아무도 찾지 못하는 상태가 된다.
@@ -650,6 +659,9 @@ fn runSessionHostImpl(
             },
             .progress => {},
             .listener_broken => break,
+            // A fork child must not run any inherited owner/path cleanup defer. The common fatal
+            // leaf exits immediately with proof-loss provenance instead of unwinding this loop.
+            .authority_lost => fd_owner.requireCurrentProcessOrFatal(),
         }
         if (fixture_probe) |probe| {
             switch (probe.after_turn(

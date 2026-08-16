@@ -8,11 +8,11 @@
 하려던 것이고, 여기 적힌 숫자가 계약의 근거다.
 
 ```sh
-sh tools/mobile-poc/run.sh chrome-ios          # 시뮬레이터에 설치·실행 + 스크린샷
-sh tools/mobile-poc/run.sh chrome-android-app  # 에뮬레이터에 설치·실행 + 스크린샷
-sh tools/mobile-poc/run.sh present-ios         # present 페이싱을 표시 클럭으로 실측
-sh tools/mobile-poc/run.sh features-android    # Vulkan 으로 여섯 기능 판정
-sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다 — 아래)
+sh tools/mobile-harness/run.sh chrome-ios          # 시뮬레이터에 설치·실행 + 스크린샷
+sh tools/mobile-harness/run.sh chrome-android-app  # 에뮬레이터에 설치·실행 + 스크린샷
+sh tools/mobile-harness/run.sh present-ios         # present 페이싱을 표시 클럭으로 실측
+sh tools/mobile-harness/run.sh features-android    # Vulkan 으로 여섯 기능 판정
+sh tools/mobile-harness/run.sh features-ios        # 같은 판정 (지금 멈춘다 — 아래)
 #
 # 아틀라스 덤프(픽셀 대조용) — **요청할 때만** 쓴다. 제품이 매 실행 384KB 를 남길 이유가 없다.
 #   Android: adb shell setprop debug.maru.atlas_dump 1  뒤 앱 재실행 → adb exec-out run-as … cat

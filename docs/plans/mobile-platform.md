@@ -5,7 +5,7 @@
 ## 배경
 
 PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실측했고 답은 예다
-([측정 기록](../../tools/mobile-poc/README.md)). 그 과정에서 **바꿔야 할 것 둘**이 드러났다.
+([측정 기록](../../tools/mobile-harness/README.md)). 그 과정에서 **바꿔야 할 것 둘**이 드러났다.
 
 - quad 하나당 draw call 하나 — 모바일 타일 기반 GPU 에 특히 비싸다. 148 quad 는 괜찮지만
   80×40 터미널은 3200 draw call 이 된다.
@@ -68,8 +68,13 @@ M4a2(키 인코딩)다. M4a2 는 M4b 의 보조 키바보다 **먼저** 와야 �
 ## M0 — 폴더 구조
 
 PoC 는 `tools/mobile-poc/` 에 앱 전체를 담고 있었다. 제품 코드는 `src/platform/` 으로 옮기고,
-`tools/mobile-poc/` 는 **측정 하네스**로 남긴다(빌드 스크립트 + 측정 기록). 코드를 양쪽에 두지
+그 폴더는 **측정 하네스**로 남긴다(빌드 스크립트 + 측정 기록). 코드를 양쪽에 두지
 않는다 — `run.sh` 가 `src/platform/` 을 빌드한다.
+
+폴더는 뒤에 `tools/mobile-harness/` 로 바꿔 부른다. 앱을 들어내고 나서도 이름만 `poc` 로
+남아 있었는데, 그 사이 이 폴더는 습작이 아니게 됐다 — `doc_claims.sh` 는 `mise run check`
+에서 도는 **CI 게이트**이고 `Info.plist.in` 은 **번들에 실려 나간다**. 이름이 "버려도 되는
+것"이라고 말하면 다음 사람이 그렇게 읽는다.
 
 ## M1 — 배칭
 
@@ -92,7 +97,7 @@ push constant 를 못 읽게 되어** 색·radius·kind 를 varying 으로 넘�
 ## M1.5 — build.zig
 
 제품 코드를 셸 스크립트가 빌드하는 것은 정식 도입이 아니다. `build.zig` 가 모바일 타깃을
-소유하고, `tools/mobile-poc/run.sh` 는 **기기 조작**(설치·실행·캡쳐·계측)만 남긴다.
+소유하고, `tools/mobile-harness/run.sh` 는 **기기 조작**(설치·실행·캡쳐·계측)만 남긴다.
 
 ```sh
 zig build mobile-libs -Doptimize=ReleaseSafe   # 세 타깃 전부
@@ -547,7 +552,7 @@ OS 를 안 부르므로 시뮬레이터가 필요 없다). **옛 코드에서 �
 브라유(U+2800~28FF)·파워라인(U+E0B0~)·legacy mosaic 을 **폰트 대신 절차 합성**해 셀에 꽉
 채운다("폰트 글리프는 셀에 안 맞아 gap·흐림·끊김"). 두 모바일 host 는 그냥 폰트로 굽는다.
 
-데모 대본에 TUI 한 줄을 넣어 화면으로 확인했다(`tools/mobile-poc/out/synth-before-android.png`):
+데모 대본에 TUI 한 줄을 넣어 화면으로 확인했다(`tools/mobile-harness/out/synth-before-android.png`):
 박스가 **끊기고**, 블록에 **이음매**가 보이고, 브라유가 어긋난다. 계약 주석이 예고한 그대로다.
 
 **그런데 호출만 추가해서는 못 고친다.** 모바일의 글리프 기하가 격자와 안 맞기 때문이다:
@@ -714,7 +719,7 @@ GPU 로 UI 를 그리는 선택의 대가라 나중에 붙이기 비싸다. 지�
   - 앱 아이콘·런치 스크린이 없다.
   - iOS 는 privacy manifest(`PrivacyInfo.xcprivacy`)와 프로비저닝이 필요하다.
   - **`Info.plist` 를 새로 짜면 `CADisableMinimumFrameDuration` 을 옮겨 실어야 한다.** 지금은
-    하네스 템플릿(`tools/mobile-poc/Info.plist.in`)에만 있고 `doc_claims.sh` 도 거기를 본다 —
+    하네스 템플릿(`tools/mobile-harness/Info.plist.in`)에만 있고 `doc_claims.sh` 도 거기를 본다 —
     제품 번들을 따로 만들면 **판정자는 계속 통과하는데 번들에서만 빠진다**. 없으면 주기를
     config(M10)로 열어도 ProMotion 기기에서 조용히 60 으로 잘린다([계약 §3.2](../mobile-platform.md)).
   - Play 는 targetSdk 하한과 App Bundle 을 요구한다 — Gradle 을 안 쓰기로 한 결정([계약 §1])과

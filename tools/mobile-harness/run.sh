@@ -4,21 +4,21 @@
 # 빌드는 `build.zig` 가 소유한다(`zig build mobile-libs`). 제품 코드는
 # `src/platform/{mobile,ios,android}` 에 있고 이 스크립트는 앱 소스를 갖지 않는다.
 #
-#   sh tools/mobile-poc/run.sh features-ios      Metal 로 여섯 기능 판정
-#   sh tools/mobile-poc/run.sh features-android  Vulkan 으로 같은 여섯 기능 판정
-#   sh tools/mobile-poc/run.sh chrome-ios       실제 chrome 컴포넌트를 시뮬레이터에
+#   sh tools/mobile-harness/run.sh features-ios      Metal 로 여섯 기능 판정
+#   sh tools/mobile-harness/run.sh features-android  Vulkan 으로 같은 여섯 기능 판정
+#   sh tools/mobile-harness/run.sh chrome-ios       실제 chrome 컴포넌트를 시뮬레이터에
 #
 # **판정 기준**: 화면이 뜨는 것으로는 부족하다. 픽셀을 읽거나 디바이스 수를 세어
 # "실제로 그려졌다"를 확인한다.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-POC="$ROOT/tools/mobile-poc"
+HARNESS="$ROOT/tools/mobile-harness"
 # 제품 코드는 `src/platform/` 이 소유한다. 이 스크립트는 그것을 빌드·실행·계측하는
 # 하네스일 뿐이고, 앱 소스를 따로 갖지 않는다(양쪽에 두면 하나가 조용히 낡는다).
 IOS="$ROOT/src/platform/ios"
 ANDROID="$ROOT/src/platform/android"
 MOBILE="$ROOT/src/platform/mobile"
-OUT="$POC/out"
+OUT="$HARNESS/out"
 mkdir -p "$OUT"
 
 # Zig 는 .a 까지만 만든다. iOS 용 libSystem 링크를 Zig 가 못 해서(실측) 링크는
@@ -105,7 +105,7 @@ cursor-android)
     # 이름 · DECSCUSR · 커서 자리(행;열). 1;4 = `$ zig build test` 의 `i`, 6;1 = `한`.
     for pair in "block 2 1;4" "underline 4 1;4" "bar 6 1;4" "wide 2 6;1"; do
         set -- $pair
-        python3 "$POC/demo_probe.py" cursor "$BR" "$2" "$3" || exit 1
+        python3 "$HARNESS/demo_probe.py" cursor "$BR" "$2" "$3" || exit 1
         sh "$0" chrome-android-app >/dev/null 2>&1
         # **앱이 화면에 떠 있을 때만 찍는다.** adb 가 성공해도 앱이 아직 안 떴거나 죽었으면
         # 홈 화면을 `cursor-block.png` 라는 이름으로 남기고 "확인했다" 가 된다 — 이 하네스가
@@ -132,7 +132,7 @@ scroll-android)
     mkdir -p "$OUT"
     cp "$BR" "$BAK"
     trap 'cp "$BAK" "$BR"' EXIT INT TERM
-    python3 "$POC/demo_probe.py" lines "$BR" 120 || exit 1
+    python3 "$HARNESS/demo_probe.py" lines "$BR" 120 || exit 1
     sh "$0" chrome-android-app >/dev/null 2>&1
     cp "$BAK" "$BR"
     n=0
@@ -161,7 +161,7 @@ scroll-video-android)
     mkdir -p "$OUT"
     cp "$BR" "$BAK"
     trap 'cp "$BAK" "$BR"' EXIT INT TERM
-    python3 "$POC/demo_probe.py" lines "$BR" 200 || exit 1
+    python3 "$HARNESS/demo_probe.py" lines "$BR" 200 || exit 1
     sh "$0" chrome-android-app >/dev/null 2>&1
     cp "$BAK" "$BR"
     n=0
@@ -197,7 +197,7 @@ scroll-ios)
     BAK="$OUT/bridge-scroll.bak"
     cp "$BR" "$BAK"
     trap 'cp "$BAK" "$BR"' EXIT INT TERM
-    python3 "$POC/demo_probe.py" lines "$BR" 120 || exit 1
+    python3 "$HARNESS/demo_probe.py" lines "$BR" 120 || exit 1
     sh "$0" chrome-ios >/dev/null 2>&1
     cp "$BAK" "$BR"
     sleep 3
@@ -216,7 +216,7 @@ scroll-ios)
     ;;
 features-ios)
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
-        "$POC/features_ios.m" -framework Foundation -framework Metal -o "$OUT/features-ios"
+        "$HARNESS/features_ios.m" -framework Foundation -framework Metal -o "$OUT/features-ios"
     DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')
     xcrun simctl boot "$DEV" 2>/dev/null || true
     xcrun simctl spawn "$DEV" "$OUT/features-ios"
@@ -230,7 +230,7 @@ features-android)
         "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
         $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
-    "$TC/aarch64-linux-android30-clang" "$POC/features_vk.c" -lvulkan -o "$OUT/features-vk"
+    "$TC/aarch64-linux-android30-clang" "$HARNESS/features_vk.c" -lvulkan -o "$OUT/features-vk"
     $ADB push "$OUT/features-vk" /data/local/tmp/features-vk >/dev/null
     $ADB shell chmod 755 /data/local/tmp/features-vk
     $ADB shell /data/local/tmp/features-vk
@@ -239,7 +239,7 @@ chrome-ios)
     mobile_lib mobile-lib-ios-sim
     APP="$OUT/MaruChrome.app"
     rm -rf "$APP" && mkdir -p "$APP"
-    sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
+    sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$HARNESS/Info.plist.in" > "$APP/Info.plist"
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
     # 굵게·기울임은 **다른 글리프**라 폰트 파일도 따로 필요하다(SGR 1/3).
     for f in Regular Bold Italic BoldItalic; do
@@ -263,9 +263,9 @@ present-ios)
     # 여섯 기능 중 마지막. 오프스크린에는 "표시 시각"이 없어 앱으로만 판정된다.
     APP="$OUT/MaruPace.app"
     rm -rf "$APP" && mkdir -p "$APP"
-    sed 's/@@NAME@@/MaruPace/; s/dev.maru.poc/dev.maru.pace/' "$POC/Info.plist.in" > "$APP/Info.plist"
+    sed 's/@@NAME@@/MaruPace/; s/dev.maru.poc/dev.maru.pace/' "$HARNESS/Info.plist.in" > "$APP/Info.plist"
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
-        "$POC/present_ios.m" \
+        "$HARNESS/present_ios.m" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
         -o "$APP/MaruPace"
     codesign --force --sign - "$APP"

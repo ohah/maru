@@ -15,4 +15,4 @@ macOS와의 차이다. 반대로 GPU 백엔드는 공유하지 않는다(Metal�
 여럿이고 좌표계가 달라, 지금 합치면 한쪽에 맞춘 경계가 된다.
 
 빌드는 `build.zig`(`zig build mobile-lib-ios-sim`·`mobile-lib-ios`)가, 기기 조작은
-[모바일 하네스](../../../tools/mobile-poc/README.md)가 소유한다.
+[모바일 하네스](../../../tools/mobile-harness/README.md)가 소유한다.

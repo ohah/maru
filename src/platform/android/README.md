@@ -18,4 +18,4 @@ Android 전용 bridge를 담는 폴더다. 계약은 [모바일 플랫폼](../..
 드러나므로, 그전에 추상 층을 만들면 사용처가 하나뿐인 잘못된 경계가 된다.
 
 빌드는 `build.zig`(`zig build mobile-lib-android`)가, 기기 조작은
-[모바일 하네스](../../../tools/mobile-poc/README.md)가 소유한다.
+[모바일 하네스](../../../tools/mobile-harness/README.md)가 소유한다.

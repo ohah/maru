@@ -117,7 +117,7 @@ pub fn build(b: *std.Build) void {
     // ── 모바일 어댑터 정적 라이브러리 ────────────────────────────────────────────
     // **Zig 는 `.a` 까지만 만든다.** iOS 용 `libSystem` 을 Zig 가 링크하지 못해(실측)
     // 링크는 플랫폼 툴체인(clang/NDK)이 맡는다 — 실제 앱에서도 이 구조가 된다.
-    // 기기 조작(설치·실행·캡쳐)은 `tools/mobile-poc/run.sh` 가, 빌드는 여기가 소유한다.
+    // 기기 조작(설치·실행·캡쳐)은 `tools/mobile-harness/run.sh` 가, 빌드는 여기가 소유한다.
     //
     // **Debug 는 iOS 에서 링크가 깨진다.** std 의 스택 트레이스 경로가 시뮬레이터 SDK 에 없는
     // `_dyld_get_image_header_containing_address` 를 참조한다. `mobile_bridge.zig` 의

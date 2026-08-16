@@ -1888,3 +1888,26 @@ test "코어보다 먼저 읽은 config 도 코어에 닿는다" {
     try std.testing.expectEqual(@as(u32, 1000), bridge.maru_mobile_scrollback_lines());
     bridge.maru_mobile_clear_error();
 }
+
+// **여러 번 갈아 끼워도 새지 않는다.** 매번 arena 를 새로 잡고 옛 것을 버리는데, 순서가 틀리면
+// (버리고 파싱하거나, 안 버리거나) 새거나 죽는다. 값이 매번 그 config 를 따르는지도 함께 본다.
+test "config 를 여러 번 갈아 끼워도 값이 매번 따라온다" {
+    var i: u32 = 0;
+    while (i < 50) : (i += 1) {
+        const a = "scrollback.lines = 200\ntheme.background = #112233\n";
+        bridge.maru_mobile_load_config(a, a.len);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqual(@as(u32, 200), bridge.maru_mobile_scrollback_lines());
+
+        const b = "scrollback.lines = 400\ntheme.background = #445566\n";
+        bridge.maru_mobile_load_config(b, b.len);
+        const n = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqual(@as(u32, 400), bridge.maru_mobile_scrollback_lines());
+        const c = bodyBgColor(n) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u8, 0x44), c.r);
+    }
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}

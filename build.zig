@@ -2127,12 +2127,26 @@ pub fn build(b: *std.Build) void {
     const run_cli_purity_boundary_tests = b.addRunArtifact(cli_purity_boundary_tests);
     run_cli_purity_boundary_tests.setCwd(b.path("."));
 
+    // i18n: 세션 생성 경로마다 로케일을 넘기는가. 안 넘기면 `ui.language = auto`가 조용히 영어로
+    // 떨어진다 — 크래시도 경고도 없이 화면 언어만 틀리므로 컴파일러도 테스트도 못 잡는다. 실제로 I4a에서
+    // 두 번째 생성 경로(quick 패널)를 빠뜨렸다. 단일 출처: docs/i18n.md §5.1.
+    const i18n_locale_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/i18n_locale_injection.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_i18n_locale_boundary_tests = b.addRunArtifact(i18n_locale_boundary_tests);
+    run_i18n_locale_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
+    boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

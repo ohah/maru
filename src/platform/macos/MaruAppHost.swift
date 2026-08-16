@@ -9699,6 +9699,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scale_milli: 0,
             defer_initial_surface: 0
         )
+        // 메인 창 경로와 **같은 이유**로 여기서도 넘긴다 — quick 패널만 먼저 뜨면 그 창이 로케일 없이
+        // 언어를 정하게 되어 `auto` 가 영어로 떨어진다(세션 생성 경로가 둘이라는 것이 함정이다).
+        publishUiLocale()
+
         var session: OpaquePointer?
         guard maru_macos_app_session_create(&config, &session) == Self.statusOK, let created = session else {
             // 세션 생성 실패 — 렌더러를 정리하고 포기한다(quick = nil 유지, 토글은 무동작).

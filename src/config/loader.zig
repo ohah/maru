@@ -2421,6 +2421,52 @@ test "parse: text.ambiguous-width narrow(default)/wide + invalid is forgiving" {
     }
 }
 
+test "parse: ui.language auto(default)/en/ko + invalid is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.UiLanguage.auto, p.config.ui_language); // 기본 auto(현행 화면 보존)
+    }
+    {
+        var p = try parse(std.testing.allocator, "ui.language = ko\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.UiLanguage.ko, p.config.ui_language);
+    }
+    {
+        var p = try parse(std.testing.allocator, "ui.language = en\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.UiLanguage.en, p.config.ui_language);
+    }
+    {
+        var p = try parse(std.testing.allocator, "ui.language = bogus\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.UiLanguage.auto, p.config.ui_language); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+// GUI 에서 고른 언어가 **파일에 남는지** 본다. 직렬화는 스키마 주도라 Meta 등록만으로 붙지만,
+// 붙었다고 믿는 것과 확인하는 것은 다르다 — 안 붙으면 앱을 다시 켤 때 조용히 되돌아간다.
+test "ui.language: 저장한 값이 다시 읽힌다(round-trip)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var cfg: theme.Config = .{};
+    cfg.ui_language = .ko;
+
+    const pairs = try @import("serialize.zig").configKeyValues(arena, cfg);
+    var found: ?[]const u8 = null;
+    for (pairs) |kv| {
+        if (std.mem.eql(u8, kv.key, "ui.language")) found = kv.value;
+    }
+    try std.testing.expectEqualStrings("ko", found orelse return error.KeyNotSerialized);
+
+    var p = try parse(std.testing.allocator, "ui.language = ko\n");
+    defer p.deinit();
+    try std.testing.expectEqual(theme.UiLanguage.ko, p.config.ui_language);
+}
+
 test "parse: input.shift-enter newline(default)/native + invalid is forgiving" {
     {
         var p = try parse(std.testing.allocator, "");

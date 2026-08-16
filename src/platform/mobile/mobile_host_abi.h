@@ -221,6 +221,15 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
 /// 사용자가 무엇이 먹었는지 알 수 없다. 계약은 "없음·권한·크기 초과는 전부 기본값" 이다
 /// (docs/mobile-config.md §7).
 #define MARU_CONFIG_MAX_BYTES (1u << 20)
+
+/// 관성 감쇠(프레임당)와 멈춤 문턱. **본문 관성은 host 몫이지만**(docs/mobile-platform.md §3.1 —
+/// 코어에 시계가 없다) 그 **숫자는 공유해야** 한다: 같은 손짓이 본문·키바·설정에서 다르게 미끄러지면
+/// 사용자는 이유를 모른다. 예전에는 0.92 가 세 곳(두 host + Zig 컴포넌트)에 따로 있었다.
+///
+/// **Zig 쪽 값은 `chrome.ui.scroll_area.Touch` 가 갖는다**(데스크톱과 공유하는 코드라 이 헤더를
+/// 못 읽는다). 두 값이 같은지는 `doc_claims.sh` 가 본다.
+#define MARU_FLING_DAMPING 0.92f
+#define MARU_FLING_STOP_BELOW 0.5f
 /// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 **닿았는지**는
 /// 코어에 물어야 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다. host 는 안 쓴다.
 unsigned int maru_mobile_scrollback_lines(void);
@@ -237,6 +246,10 @@ unsigned long maru_mobile_take_config_write(unsigned char *out, unsigned long ca
 /// 값이 바뀌면 host 는 **이미 떠 있는 키보드를 갈아 끼워야** 한다(iOS `reloadInputViews`,
 /// Android `restartInput`). 안 그러면 종류만 바뀌고 화면의 키보드는 그대로다.
 unsigned int maru_mobile_input_kind(void);
+/// 키보드를 올려 달라는 요청을 가져간다(1=올려라, 0=없음 — 한 번 가져가면 사라진다).
+/// 앱은 시작할 때 입력 대상을 잡고 그 뒤로 키보드 상태를 안 건드리므로, 사용자가 한 번 내리면
+/// **다시 올릴 길이 없다** — 숫자 칸을 눌렀는데 키보드가 없으면 칠 수가 없다.
+unsigned int maru_mobile_take_keyboard_raise(void);
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

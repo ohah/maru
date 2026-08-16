@@ -158,6 +158,24 @@ public class MaruActivity extends android.app.NativeActivity {
 
     /** 네이티브가 부른다 — 입력 종류가 바뀌었으니 키보드를 다시 세운다(`onCreateInputConnection`
      *  이 새 `inputType` 으로 다시 불린다). UI 스레드에서 해야 한다. */
+    /** 네이티브가 부른다 — 키보드를 **다시** 올린다(사용자가 내렸을 수 있다). 아래 인스턴스
+     *  `showKeyboard` 는 시작 때 한 번 부르는 것이고, 이쪽은 편집이 시작될 때마다다. */
+    public static void raiseKeyboard() {
+        final MaruActivity a = current;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+                if (imm != null && a.input != null) {
+                    a.input.requestFocus();
+                    imm.showSoftInput(a.input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                }
+            }
+        });
+    }
+
     public static void restartInput() {
         final MaruActivity a = current;
         if (a == null) return;

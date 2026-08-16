@@ -1189,16 +1189,40 @@ pub const FilePanelConfig = struct {
 /// SHELL > /bin/sh) + `-i`로 현행과 동일하게 띄운다. `controlled_smoke`(테스트용 `/bin/sh -c`)에는 영향 없다
 /// (interactive_shell에만 적용). login(1) 래퍼는 그대로 — 이 command/args가 래퍼의 `exec -l <command> <args>`로
 /// 들어가 최종 로그인 셸이 된다(Ghostty `command`/`shell` 대응; maru는 execve 직접이라 셸-split 없이 토큰 배열).
+/// Windows에서 기본으로 띄울 셸의 **종류**. 경로가 아니라 종류를 고르는 이유는 실제 경로가 기기마다 다르기
+/// 때문이다 — pwsh 7은 설치 여부가 갈리고 Windows PowerShell 5.1은 `%SystemRoot%`에 매여 있다. 종류만 고르면
+/// 해석은 `pty.resolveInteractiveShellFor`의 티어가 한다(docs/windows-platform.md §3.1a).
+pub const WindowsShell = enum {
+    /// pwsh 7 → Windows PowerShell 5.1 → cmd 순으로 있는 것을 쓴다. **기본값**(계약 §3.1a — cmd는 `OSC 133 D`를
+    /// 원리적으로 못 내 통합이 가장 약하므로 기본이 되면 ADE가 반쯤 꺼진 채 시작한다).
+    powershell,
+    /// `cmd.exe`를 곧장 쓴다. PowerShell 실행 정책·시작 시간을 피하려는 사용자를 위한 선택이며, 셸 통합이
+    /// 제한된다는 것을 받아들이는 뜻이다(§3.4).
+    cmd,
+};
+
 pub const ShellConfig = struct {
     /// 셸 실행 파일 경로(절대경로). 빈 값(기본)이면 `resolveInteractiveShell()` 폴백. loader `shell.command`.
     command: []const u8 = "",
     /// 셸 인자(argv, command 제외). 기본 `-i`(대화형). loader `shell.args`가 공백으로 토큰 분리해 교체한다
     /// (빈 줄이면 인자 없음). 따옴표 미지원 — 셸 플래그는 보통 단순(`-i`·`-l`).
     args: []const []const u8 = &.{"-i"},
+    /// **Windows 전용** — 기본 셸 종류. `command`가 비어 있을 때만 본다(명시 경로가 더 구체적이므로 그쪽이 이긴다).
+    /// 다른 OS에서는 읽히지만 쓰이지 않는다 — 키를 OS별로 숨기면 dotfiles를 공유하는 사용자가 macOS에서
+    /// "알 수 없는 키" diagnostic을 받는다.
+    windows_shell: WindowsShell = .powershell,
 
-    // command(text)만 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
+    // command(text)·windows_shell(enum→dropdown)이 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
     pub const schema = .{
         .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal, .abs_path = true },
+        // **Windows에서만 GUI에 보인다.** 다른 OS에서 이 드롭다운은 아무것도 바꾸지 않으므로 폼에 두면 소음이다.
+        // `hidden`은 GUI 폼 행만 끄고 파일 파싱·저장은 그대로라(schema.zig의 `meta.hidden` 갈래), dotfiles를
+        // 공유하는 macOS 사용자가 이 줄 때문에 "알 수 없는 키" 경고를 받는 일도 없다.
+        .windows_shell = Meta{
+            .doc = "Windows 기본 셸 종류(shell.command가 비었을 때)",
+            .section = .terminal,
+            .hidden = @import("builtin").os.tag != .windows,
+        },
     };
 };
 

@@ -21,3 +21,15 @@ pub const icons = @import("icons.zig"); // 등록 chrome 아이콘의 semantic �
 test {
     @import("std").testing.refAllDecls(@This());
 }
+
+// `config.theme.WindowsShell`(사용자가 고르는 값)과 `pty.types.WindowsShellKind`(티어를 고르는 스위치)는
+// **같은 집합이어야 하는데 일부러 다른 모듈에 있다** — 중립 pty 레이어가 config를 import하지 않게 하려는
+// 것이다(값 전달은 호출자 몫). 대가는 조용히 갈릴 수 있다는 것이라, 둘을 함께 보는 유일한 자리인 여기서
+// 못 박는다. 한쪽에만 변형을 추가하면 이 테스트가 깨진다.
+test "WindowsShell(config)과 WindowsShellKind(pty)는 같은 변형 집합이다" {
+    const std = @import("std");
+    const a = @typeInfo(config.theme.WindowsShell).@"enum".fields;
+    const b = @typeInfo(pty.types.WindowsShellKind).@"enum".fields;
+    try std.testing.expectEqual(a.len, b.len);
+    inline for (a, b) |fa, fb| try std.testing.expectEqualStrings(fa.name, fb.name);
+}

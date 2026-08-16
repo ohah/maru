@@ -173,8 +173,8 @@ env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈
 
 ### 대화형 셸 (`shell.command` / `shell.args`)
 
-기본적으로 maru는 `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 셸을 정하고 `-i`로 띄운다. 이를
-사용자가 바꿀 수 있다.
+기본적으로 maru는 `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 셸을 정하고 `-i`로 띄운다(Windows는
+아래 별도 순서). 이를 사용자가 바꿀 수 있다.
 
 ```conf
 shell.command = /opt/homebrew/bin/fish
@@ -188,6 +188,35 @@ shell.args = -i -l    # 공백으로 토큰 분리(따옴표 미지원). 빈 값
 - **login 래퍼는 유지**: macOS는 셸을 `login(1)`로 감싸 전체 로그인 세션을 셋업하고(Terminal.app·Ghostty 동일),
   이 `command`/`args`가 그 안의 `exec -l <command> <args>`로 들어가 최종 로그인 셸이 된다. 즉 셸을 바꿔도 로그인
   셸 셋업(PATH·`.zprofile` 등)은 그대로 동작한다.
+
+#### Windows에서의 기본 셸 (`shell.windows-shell`)
+
+Windows에는 `$SHELL`이 없고 `/bin/sh`도 없다. 그래서 해석 순서가 다르다.
+
+```text
+POSIX    MARU_INTERACTIVE_SHELL → shell.command → SHELL → /bin/sh
+Windows  MARU_INTERACTIVE_SHELL → shell.command → shell.windows-shell 티어 → cmd.exe
+```
+
+`shell.windows-shell`은 **경로가 아니라 종류**를 고른다(`powershell`|`cmd`, 기본 `powershell`). 실제 경로가
+기기마다 다르기 때문이다 — pwsh 7은 설치 여부가 갈리고 Windows PowerShell 5.1은 `%SystemRoot%`에 매여 있다.
+
+| 값 | 시도 순서 |
+|---|---|
+| `powershell`(기본) | `C:\Program Files\PowerShell\7\pwsh.exe` → `…\WindowsPowerShell\v1.0\powershell.exe` → `%COMSPEC%` → `C:\Windows\System32\cmd.exe` |
+| `cmd` | `%COMSPEC%` → `C:\Windows\System32\cmd.exe` |
+
+각 후보는 **존재하는 것이 나올 때까지** 순서대로 확인한다. `%COMSPEC%`을 정적 cmd 경로보다 먼저 보는 이유는
+비표준 설치에서 정확한 값을 아는 유일한 출처라서다.
+
+- **왜 PowerShell이 기본인가**: cmd는 `OSC 133 D`(명령 종료 + exit code)를 원리적으로 못 낸다. cmd가 기본이면
+  셸 통합이 반쯤 꺼진 채 시작한다([windows-platform.md](windows-platform.md) §3.1a·§3.4).
+- **`$SHELL`을 Windows에서 안 보는 이유**: 그 변수가 있으면 git-bash 같은 POSIX 에뮬레이션이 심어 둔
+  `/usr/bin/bash`다. 네이티브 Windows 세션의 기본으로 삼으면 사용자가 기대한 셸이 아니다.
+- **경로를 못 박고 싶으면** `shell.command`를 쓴다. 그쪽이 더 구체적이라 이긴다. dotfiles를 macOS와 공유한다면
+  `shell.command.windows`로 OS별 값을 준다([configuration.md](configuration.md) "OS별 값").
+- 이 키는 다른 OS에서도 **읽히되 쓰이지 않는다** — OS별로 숨기면 공유 dotfiles가 macOS에서 "알 수 없는 키"
+  경고를 낸다.
 - **적용 시점**: 새로 여는 셸(첫 창·새 탭/Term·분할)에만. 런타임 Reload Config는 이미 떠 있는 셸을 안 바꾼다.
   퀵 터미널·controlled smoke(테스트용 `/bin/sh -c`)에는 영향 없다(대화형 셸에만 적용).
 - **베이스/결정**: Ghostty `command`/`shell`(사용자 지정 셸 프로그램)에 대응한다. Ghostty의 `command`는 `/bin/sh -c`로

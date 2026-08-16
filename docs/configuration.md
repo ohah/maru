@@ -46,6 +46,33 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 `key = value` 한 줄에 하나. `#`로 시작하는 줄과 빈 줄은 무시한다(Ghostty식). 값은 양끝 공백을
 다듬되 **내부 공백은 보존**한다(예: 폰트명 `JetBrains Mono`). 따옴표는 쓰지 않는다.
 
+### OS별 값 — 키에 `.windows`·`.macos`·`.linux`를 붙인다
+
+**아무 키에나** OS 접미를 붙이면 그 OS에서만 적용된다. 한 config 파일을 여러 OS에서 공유(dotfiles)할 때
+`shell.command = /bin/zsh` 한 줄이 Windows에서 깨지는 문제를 푼다. VS Code가 같은 문제를
+`terminal.integrated.defaultProfile.windows`/`.osx`/`.linux`로 푸는 것과 같은 모양이다.
+
+```conf
+shell.command         = /bin/zsh                                   # 기본(접미 없는 줄)
+shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe     # Windows에서만 이긴다
+font.size.macos       = 14
+font.size.linux       = 12
+```
+
+- **OS 접미 키가 기본 키를 이긴다 — 파일에서의 순서와 무관하게.** `shell.command.windows`를 위에 적고
+  `shell.command`를 아래 적어도 Windows에서는 앞의 것이 이긴다. 순서에 기대야 한다면 규칙이 아니다.
+- **다른 OS의 줄은 조용히 무시**한다(그 OS에서는 유효한 줄이므로 경고하지 않는다).
+- **모르는 이름은 접미로 치지 않는다.** `shell.command.freebsd`나 오타 `shell.command.window`는 통째로 키
+  이름이 되어 "알 수 없는 키" 경고가 뜬다 — 조용히 먹히면 사용자가 설정이 반영된 줄 안다.
+- 접미는 **키 이름의 일부일 뿐**이라 값 파싱·검증·GUI 반영은 기본 키와 완전히 같다.
+- **GUI가 값을 되쓸 때**(사이드바 드래그·⚙ 토글) 파일에 `<키>.<이 OS>` 줄이 있으면 **그 줄**을 갱신한다.
+  기본 줄에 쓰면 값이 다른 OS로 새고, 이 OS에는 반영도 안 된다(접미 줄이 계속 이기므로).
+- `theme.preset`은 색 세트를 통째로 깔아 놓는 **base**라 개별 `theme.*`보다 먼저 적용된다 — 접미를 붙여도
+  그 순서는 유지된다(`theme.preset.windows`가 `theme.background`를 덮어쓰지 않는다).
+- **여러 줄이 쌓이는 키**(`env.<KEY>`·`keybind`)는 "덮어쓰기"가 아니라 **나중 것이 이기는 방식**으로 적용된다.
+  접미 줄이 항상 나중에 오므로 결과는 같지만, 파싱 결과 목록에는 두 항목이 남을 수 있다(적용 단계에서 같은
+  이름끼리 합쳐진다).
+
 ```conf
 # ~/.config/maru/config — 예시
 font.family = JetBrains Mono
@@ -188,6 +215,7 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 단 control-plane selector `MARU_PANE_ID`는 spawn 값이 최종 우선한다. 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
 | `shell.args` | 문자열 | `-i` | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. 아래 참조 |
+| `shell.windows-shell` | `powershell`\|`cmd` | `powershell` | **Windows 전용** — 기본으로 띄울 셸 **종류**. `shell.command`가 비어 있을 때만 본다(명시 경로가 더 구체적이라 그쪽이 이긴다). `powershell`은 pwsh 7 → Windows PowerShell 5.1 → cmd 순으로 있는 것을 쓰고, `cmd`는 `cmd.exe`를 곧장 쓴다. 경로가 아니라 종류를 고르는 이유는 실제 경로가 기기마다 다르기 때문이다. 다른 OS에서는 읽히되 쓰이지 않는다(dotfiles 공유 시 diagnostic이 안 뜨게). 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ## 검증 동작 (forgiving)

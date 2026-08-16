@@ -16,7 +16,6 @@ pub const payload_size: usize = wire.payload_size;
 pub const ScreenFrontier = struct {
     generation: u64,
     sequence: u64,
-
 };
 
 pub const CatchupIdentity = struct {

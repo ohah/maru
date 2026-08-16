@@ -312,7 +312,18 @@ pub fn build(props: Props, scratch: Scratch) Written {
         var i: usize = props.lines.len;
         while (i > 0) {
             i -= 1;
-            const rows: u32 = if (i < counted_rows) scratch.row_counts[i] else 1; // 못 센 줄은 1행 근사
+            // **여기서는 근사하면 안 된다.** `row_counts`는 문서 **앞에서부터** 채워지는데 이 훑기는
+            // **뒤에서부터** 간다 — 4096줄을 넘는 문서에서는 뒤쪽이 전부 "1행"으로 잡혀 상한이 너무
+            // 위에 서고, 끝까지 굴려도 **마지막 줄들이 손에 안 닿는다**(실측: 5000줄 랩 문서에서
+            // 마지막 17줄. 적대적 검증 2026-08-16). 필요한 것은 마지막 한 화면분뿐이라 그 줄만
+            // 직접 센다 — 앞에서 이미 센 구간은 그 값을 재사용한다.
+            const rows: u32 = if (i < counted_rows) scratch.row_counts[i] else content.rowCount(
+                props.lines[i],
+                props.tab_width,
+                layout.content.width,
+                props.wrap,
+                scratch.count_scratch,
+            ).rows;
             if (rows >= need) break :blk .{ .line = i, .piece = rows - need };
             need -= rows;
         }

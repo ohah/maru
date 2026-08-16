@@ -2062,7 +2062,7 @@ pub fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
     const a = self.loaded_config.arena.allocator();
     const resolver = self.loaded_config.keyBindingResolver();
     if (command_catalog.chordForAction(resolver, entry.action) == null) {
-        settingsMessageOrNotice(self, "이미 지정된 단축키가 없습니다");
+        settingsMessageOrNotice(self, .set_no_chord_assigned);
         return;
     }
     // ① 사용자 바인딩 제거(사용자 chord는 제거만으로 죽는다 — config 줄 제거 + 라이브 슬라이스에서 드롭).
@@ -2095,7 +2095,7 @@ pub fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
 pub fn unbindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry) void {
     const a = self.loaded_config.arena.allocator();
     if (command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action) == null) {
-        settingsMessageOrNotice(self, "이미 지정된 전역 단축키가 없습니다");
+        settingsMessageOrNotice(self, .set_no_global_chord_assigned);
         return;
     }
     var list: std.ArrayList(config_mod.GlobalBinding) = .empty;
@@ -2270,7 +2270,22 @@ pub fn claudeConfigDir(buf: []u8) ?[]const u8 {
 /// keybind 녹음(세팅 안)의 검증 실패("등록 불가 키")·충돌 경고가 showNotice로 가면 dismissMessageOverlays가 세팅
 /// 모달까지 닫아(단일-오버레이 불변식) 사용자가 녹음하던 화면이 사라지던 문제를 고친다 — 배너는 세팅 자체 그리드
 /// 안 텍스트라 모달을 닫지 않고 위에 얹힌다. 세팅 밖(메뉴 rebind 등)에서 온 같은 메시지는 기존대로 토스트.
-pub fn settingsMessageOrNotice(self: *AppSession, message: []const u8) void {
+pub fn settingsMessageOrNotice(self: *AppSession, message: maru.i18n.Key) void {
+    // 문자열이 아니라 **키**를 받는다(docs/i18n.md §7.2 1차) — 이 자리에 리터럴을 넘기면 컴파일되지 않는다.
+    settingsMessageOrNoticeText(self, maru.i18n.t(message));
+}
+
+/// 값이 끼어드는 문장용 — `key`를 §6.3 보간으로 채운 뒤 같은 경로로 보낸다.
+///
+/// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르므로 별도 폴백 문장을 두지 않는다. 여기 끼는 값은
+/// 명령 이름(영문 카탈로그 title)이라 짧고, 잘린 문장보다 짧은 대체 문장이 더 낫다고 볼 근거가 없다.
+pub fn settingsMessageOrNoticeFmt(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
+    var buf: [192]u8 = undefined;
+    settingsMessageOrNoticeText(self, maru.i18n.format(&buf, maru.i18n.t(key), args));
+}
+
+/// 표시 경로 자체(세팅이 열려 있으면 배너, 아니면 토스트). 위 둘이 해석을 끝낸 뒤 여기로 모인다.
+fn settingsMessageOrNoticeText(self: *AppSession, message: []const u8) void {
     if (self.chrome_host.settings.open) {
         self.chrome_host.settings.setMessage(message);
         self.metal_dirty = true;
@@ -2582,12 +2597,12 @@ pub fn commitPickerColor(self: *AppSession) void {
 /// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
 pub fn addEnvVar(self: *AppSession, text: []const u8) void {
     const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-        settingsMessageOrNotice(self, "환경 변수는 KEY=VALUE 형식이어야 합니다");
+        settingsMessageOrNotice(self, .set_env_format);
         return;
     };
     const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
     if (name.len == 0) {
-        settingsMessageOrNotice(self, "환경 변수 KEY가 비어 있습니다");
+        settingsMessageOrNotice(self, .set_env_key_empty);
         return;
     }
     self.setEnvVar(name, text[eq + 1 ..]);
@@ -2600,11 +2615,11 @@ pub fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []con
     const a = self.loaded_config.arena.allocator();
     const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
     const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
-        settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
+        settingsMessageOrNotice(self, .set_chord_parse_failed);
         return;
     };
     const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
-        settingsMessageOrNotice(self, "매크로는 text:/esc:/ctrl: 형식이어야 합니다");
+        settingsMessageOrNotice(self, .set_macro_format);
         return;
     };
     // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
@@ -2622,14 +2637,14 @@ pub fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []con
     var probe = self.loaded_config.keyBindingResolver();
     probe.terminal_bindings = new_binds;
     probe.validate() catch {
-        settingsMessageOrNotice(self, "다른 단축키와 충돌해 적용하지 못했습니다");
+        settingsMessageOrNotice(self, .set_chord_conflict);
         return;
     };
     // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
     // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
     // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
     if (!resolverUnbinds(self.loaded_config.unbinds, chord) and input_ops.chordShadowsBuiltin(chord))
-        settingsMessageOrNotice(self, "기본 단축키를 매크로가 덮어씁니다");
+        settingsMessageOrNotice(self, .set_macro_overrides_default);
     self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
     // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
     // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
@@ -2647,17 +2662,17 @@ pub fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []con
 /// upsert. `=` 없거나 chord가 비면 notice.
 pub fn addTerminalMacro(self: *AppSession, text: []const u8) void {
     const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-        settingsMessageOrNotice(self, "매크로는 'chord = text:...' 형식이어야 합니다");
+        settingsMessageOrNotice(self, .set_macro_line_format);
         return;
     };
     const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
     if (chord_part.len == 0) {
-        settingsMessageOrNotice(self, "단축키가 비어 있습니다");
+        settingsMessageOrNotice(self, .set_chord_empty);
         return;
     }
     // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
     const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
-        settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
+        settingsMessageOrNotice(self, .set_chord_parse_failed);
         return;
     };
     var chord_buf: [64]u8 = undefined;

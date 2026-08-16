@@ -263,12 +263,17 @@ fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, en
     // 방어선이다), Windows에서만 드라이브 절대를 더 본다. 왜 그 술어가 `isAbsolute`보다 좁은지는 거기 주석에.
     // `//` 배제(프로토콜 상대 URL·UNC)도 **술어가 직접** 한다 — 예전엔 여기서만 막아서 술어의 doc과 반환값이
     // 어긋나 있었고, 두 번째 소비자가 doc만 읽고 부르면 규칙이 갈렸다.
+    // 접두 상대(`./`·`../`·`~/`)도 술어를 밖으로 뺐다 — 절대 갈래와 같은 이유다. Windows에서는 같은 것의
+    // 역슬래시 철자(`.\x`·`..\x`·`~\x`)가 **더 흔한데**(MSBuild·cmd·PowerShell·zig 에러 출력) 여기서
+    // `startsWith("./")`로 못박고 있어서 그 전부가 죽어 있었다(계약 §5.2 ⒜). 규칙과 그 오탐 대가는
+    // `path_shape.detectableRelativePrefixFor`의 doc이 단일 출처다.
+    const rel = path_shape.detectableRelativePrefix(word);
     const scope: LinkScope =
         if (scopes.absolute_path and path_shape.isDetectableAbsolute(word))
             .absolute_path
-        else if (scopes.home_path and std.mem.startsWith(u8, word, "~/"))
+        else if (scopes.home_path and rel == .home)
             .home_path
-        else if (scopes.dot_relative and (std.mem.startsWith(u8, word, "./") or std.mem.startsWith(u8, word, "../")))
+        else if (scopes.dot_relative and rel == .dot)
             .dot_relative
         else if (scopes.bare_relative and looksLikeBareRelative(word))
             .bare_relative

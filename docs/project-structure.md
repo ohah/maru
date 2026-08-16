@@ -48,9 +48,20 @@ src/
   terminal.zig          terminal-core facade
   terminfo_cache.zig    maru 자체 terminfo 로컬 캐시 단일 출처(경로·버전·컴파일 셸 명령). pty 자동 컴파일 + cli/terminfo 서브커맨드가 공유(top-level 중립 — color.zig 결)
   text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v1·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf
-  width.zig             코드포인트 셀 폭·wide 렌더 심볼 판정 단일 출처(중립 leaf). C 게이트(coretext_smoke.m)와 주석-동기 미러
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
+  ui_test.zig           typed Chrome UI namespace만 좁혀 도는 test root(`zig build test-chrome-ui`). 제품 `chrome.zig`가 모든 component를 import하므로 build entrypoint를 따로 둔다
+
+  # 중립 leaf — 어느 facade에도 속하지 않고 여러 층이 함께 import한다(color.zig 결).
+  # 한 파일뿐인 범용 leaf는 억지로 한-file 폴더를 만들지 않는다(아래 네이밍 컨벤션).
+  width.zig             코드포인트 셀 폭·wide 렌더 심볼 판정 단일 출처. C 게이트(coretext_smoke.m)와 주석-동기 미러
+  display_width.zig     편집기 본문의 표시 폭. `width.cellWidth`(터미널 협상용)를 대체하지 않고 그 위에 편집기 규칙을 얹는다(native-editor-visual-mapping.md §4.2)
+  grapheme.zig          한글 grapheme cluster 분절 — NFD conjoining 자모(macOS 파일시스템 기본)를 한 음절로 묶는다
+  path_shape.zig        경로 모양 판정(절대·구분자). L1 링크 감지와 L2 경로 가드 양쪽이 필요한데 L1은 L2를 import할 수 없어 최상위에 둔다
+  redact.zig            민감정보 redaction 단일 출처(코드). project-rules.md "민감정보 redaction 기준"의 코드 미러 — app/observability/config/session이 공유
+  hazard.zig            문서 내용의 신뢰 판정 — 보이는 것과 실제가 달라지게 만드는 문자를 가려낸다(native-editor-document-model.md §3.8)
+  icons.zig             **생성 파일**(tools/svg_to_coverage.py). 아이콘 semantic 이름이 단일 출처이고 소비처는 codepoint 리터럴 대신 이 enum을 쓴다. 직접 수정하지 않는다
+  shutdown_wire_contract.zig  종료 backend와 앱 조합 계층이 함께 쓰는 포인터 없는 wire 권위 값
 
     app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/app-session-decomposition.md §4.1 F 시리즈).
                         find.zig(스크롤백 ⌘F orchestration — E1), agent_dock.zig(에이전트 세션 기록 도크 —
@@ -72,7 +83,11 @@ src/
                         상태·종류·트랜스크립트 폴링, 상태줄, 스피너, 사이드바 행, 세션 재개, F14.
                         세션 기록 도크는 여기가 아니라 agent_dock.zig 소유다), git.zig(git·SCM — 저장소 탐지,
                         브랜치·상태 갱신, SCM 뷰 행, diff term, F15). 각 파일은 `*AppSession`을 받는
-                        free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
+                        free fn 모음이고, `app_session.zig`에는 ABI가 직접 부르는 진입을 얇은 facade로 남긴다.
+                        **다만 허브가 이미 얇아졌다는 뜻은 아니다** — 분해는 진행 중이고(72,317줄에서 출발),
+                        F 시리즈가 옮긴 것은 그룹 본문뿐이다. test 850여 개는 판정자가 그룹 밖 표면에 훨씬 넓게
+                        닿아 동반 이동 시 pub화가 6배로 늘기 때문에 **의도적으로 허브에 남겼다**(아래 항목).
+                        현재 줄 수와 남은 단계는 docs/app-session-decomposition.md가 단일 출처다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).
                         **이 17개는 독립 모듈이 아니라 한 모듈(`AppSession`)의 조각이다** — 필드를
@@ -87,10 +102,16 @@ src/
                         관용구)와 그 in-process 구현 `in_process_term_backend.zig`(기존 LiveSurfaceRegistry+LivePtySession+
                         SurfaceRuntime을 감쌈)를 둔다. GUI layout 정책과 session-host transport(P3 session_host/)를 한
                         파일에 섞지 않는다. P2 배선은 완료되어 app_session이 opaque handle과 backend 계약만 사용한다.
-  chrome/               플랫폼 중립 디자인 시스템 구현 — draw/tokens/props/input/state/host + components/(sidebar·tabbar·settings·palette·find·notice·modal 등)
+  chrome/               플랫폼 중립 디자인 시스템 구현 — draw/tokens/props/input/state/host + text_layout(셀 텍스트 배치 규율 — L3, OS-중립)·file_tree_icon(filesystem 비의존 아이콘 분류)
     ui/                 새 rich/Metal typed component tree. style(닫힌 prop 어휘)·layout(typed flex)·tree(identity/rect snapshot)·interaction(pointer-local state)·paint_style(token/state resolver)·paint(pixel snap→ChromeDraw)를 책임별로 둔다. `chrome.zig`는 `chrome.ui.*` namespace로만 re-export한다.
+    components/         제품 컴포넌트(sidebar·tabbar·settings·palette·find·notice·modal 등). 한 파일로 끝나는 컴포넌트는 flat하게 두고,
+                        **types/build/ids/view 네 책임으로 갈리는 컴포넌트만 같은 이름의 폴더로 승격**한다 — session_dock·archive_detail·scm_dock이
+                        그 형태이고 facade `<name>.zig`가 네 파일을 re-export한다. types(platform 중립 입력 DTO)·build(bounded geometry와
+                        action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
+                        editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다(A2a: `runSessionRequest`가 결정론 경로 발견→`std.c.connect`→왕복→`renderResponse`, 서버 부재면 graceful; 소켓 syscall만 main에)
   session/              L2 세션 코어(OS-중립·app/pty/platform import 0, check-boundaries 강제): 세션 모델(Model·Tab·Pane·surface·split_tree·workspace·dock_panel·core_command)과 **컨트롤 플레인/이동성 골격** — surface_id(M0a), window_membership(M0b), window_graph(M1), live_surface_registry(M2a generic), control_plane(1a JSON-RPC/ndjson), control_surface(1c Surface DTO·scope 응답), control_dispatch(1d read-only 라우터), layout/input math·ime·keyhint. platform이 런타임 타입을 넣어 인스턴스화한다
+    editor/             네이티브 편집기의 L2 코어 — document(버퍼·편집), line_index(줄 색인), selection, diff·diff_state·intraline(줄 안 차이), open(열기 판정). 시각 매핑과 렌더는 chrome/components/editor_view/와 platform이 맡는다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
@@ -155,6 +176,12 @@ src/
                         codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `zig build test-session-host`(기본 `test`에도 편입).
                         `tests/session_host_signed_upgrade_e2e.zig`는 caller-attested signed frozen N-1/current 제품 executable을 입력받아
                         non-empty PTY의 same-PID exec 성공 경로를 검증하는 macOS opt-in release gate다.
+    mobile/             iOS·Android **공통분모**(L4) — mobile_bridge.zig(코어 쪽 절반: 논리 px 크기→quad 목록, 셀 판정),
+                        mobile_host_abi.h(C ABI 단일 출처 — bridge export와 필드 순서·타입을 함께 바꾼다),
+                        mobile_config.zig(모바일 config 스키마·파싱). **OS 호출은 두지 않는다** — 있으면 ios/·android/로 내린다
+    ios/                iOS 전용 — UIKit host·Metal 백엔드·CoreText 래스터(`ios_app_host.m`)
+    android/            Android 전용 — NativeActivity host·Vulkan 백엔드·JNI 래스터(`android_app_host.c`),
+                        IME shim(`MaruActivity.java` — NDK에는 InputConnection 대응물이 없어 Java로 받는다), shaders/(SPIR-V)
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces
@@ -172,7 +199,8 @@ src/
 tests/
   unit/                 facade 밖에 둘 단위 테스트
   boundary/             facade/import 책임 경계를 자동으로 확인하는 테스트
-  oracle/               recorded reference terminal snapshot 비교
+                        (imports·icon_literals·chrome_text_clusters·cwd_axis — 주석에만 있던 규율을 실행 가능한 게이트로 굳힌다)
+  oracle/               recorded reference terminal snapshot 비교 + 외부 오라클(libvterm·Alacritty·Ghostty, opt-in)
   stress/               대량 출력, 반복 resize, hot path 안정성 테스트
   integration/
     pty/                openpty, process, resize propagation
@@ -180,14 +208,27 @@ tests/
   e2e/
     headless.zig        real process -> TerminalCore -> screen snapshot
     app/                macOS app, renderer, input, screenshot smoke
+  doc_links/            docs/**의 상대 링크가 실제 파일을 가리키는지 확인한다
+  config_docs/          config 키가 스키마와 문서 양쪽에 같은 상태로 있는지 확인한다
   fixtures/
     ansi/               ANSI/VT 입력 fixture
     traces/             sanitized replay trace
   golden/
     screen/             screen snapshot expected output
+    dock_visual.zig     Session Dock 시각 골든 게이트
   support/              테스트 공통 helper
   artifacts/            테스트 실행 시 생성되는 로컬 산출물
+  session_host_*.zig    영속 세션 호스트 경계·sentinel·E2E(진행 중 이니셔티브라 루트에 평평하게 쌓여 있다)
 ```
+
+**`tests/` 루트의 flat 파일은 구조가 아니라 현재 상태다.** 위 폴더가 정본이고, 새 테스트는 그 책임
+폴더에 넣는다. 루트에 쌓인 `session_host_*`는 [영속 터미널 세션 호스트](persistent-session-host.md)가
+진행 중이라 아직 옮기지 않은 것이며, 그 단계가 닫힐 때 함께 정리한다 — 이 예외를 다른 도메인이
+선례로 삼지 않는다.
+
+모든 테스트 파일은 **무엇을 증명하는지와 터미널에서 왜 중요한지**를 파일 상단 주석으로 설명한다
+([필수 프로젝트 규칙](project-rules.md) "테스트와 E2E"). `//!` 모듈 주석과 `//` 주석 중 무엇을 쓰는지는
+규칙이 아니며, 설명이 있는지가 규칙이다.
 
 fixture와 golden 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 

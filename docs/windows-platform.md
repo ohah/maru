@@ -102,9 +102,12 @@ MARU_INTERACTIVE_SHELL  →  shell.command(config)  →  pwsh 7  →  Windows Po
 **config로 바꿀 수 있어야 한다(사용자 확정).** 수단이 셋이고, 구체적인 것이 이긴다.
 
 ```conf
-shell.windows-shell   = cmd                                     # ① 종류만 고른다(Windows 전용 키)
-shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe  # ② 경로를 못 박는다(OS별 override)
-shell.command         = /bin/zsh                                # ③ 모든 OS 공통(Windows에선 ②가 이긴다)
+# ① 종류만 고른다(Windows 전용 키)
+shell.windows-shell   = cmd
+# ② 경로를 못 박는다(OS별 override)
+shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe
+# ③ 모든 OS 공통(Windows에선 ②가 이긴다)
+shell.command         = /bin/zsh
 ```
 
 **OS 분기는 일반 메커니즘으로 넣었다(§8에서 결정 완료).** 한때 "셸만 일회성 키로 둘지, 일반 메커니즘으로

@@ -212,7 +212,10 @@ pub const DockMetrics = struct {
             }
         };
         return .{
-            .tab_h = s.px(28, scale_milli),
+            // 28px면 13pt 글자(줄 높이 17) 위아래로 5px씩밖에 안 남아 탭 이름이 줄에 낀 것처럼 보인다
+            // (사용자 지적 2026-08-16). 34px는 위아래 8px 남겨 아래 커밋 줄의 여백(`commit_pad_y`)과
+            // 같은 급이 된다 — 두 줄이 서로 다른 리듬으로 숨 쉬면 그 사이가 어긋나 보인다.
+            .tab_h = s.px(34, scale_milli),
             .summary_h = s.px(24, scale_milli),
             .section_h = s.px(24, scale_milli),
             .row_h = s.px(24, scale_milli),

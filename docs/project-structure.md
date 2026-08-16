@@ -110,8 +110,10 @@ src/
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
-                        **이 폴더의 파일은 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
-                        딱 두 파일이 예외이고, 각자 왜 예외인지를 파일 머리에 적는다:
+                        **이 폴더의 제품 코드는 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
+                        `test` 블록은 이 규칙 밖이다(실제 동작을 실측하느라 fork/pipe를 쓸 수 있다 — `ssh.zig`의 신호 수명 헬퍼가 그 예다).
+                        **이 규칙은 산문이 아니라 `tests/boundary/cli_purity.zig`가 기계로 고정한다** — 재고에 없는 파일은 impure 토큰 0이고,
+                        새 파일은 하위 폴더에 생겨도 자동으로 규칙을 받는다. 예외는 딱 두 파일이며 각자 왜 예외인지를 파일 머리에 적는다:
                         `control_client.zig`(컨트롤 소켓 발견→connect→`auth.self`→요청 전송→응답 수신. sessions·browser CLI가 공유하는
                         유일한 syscall 접착이고, 순수 정책인 경로 규칙·소켓 선택 판정은 여전히 `sessions.zig`가 소유한다.
                         Windows gate 문구의 단일 출처이기도 하다 — `main.zig`의 `HostGatedFeature.control_socket`이 그 값을 되돌려 준다),
@@ -208,7 +210,7 @@ src/
 tests/
   unit/                 facade 밖에 둘 단위 테스트
   boundary/             facade/import 책임 경계를 자동으로 확인하는 테스트
-                        (imports·icon_literals·chrome_text_clusters·cwd_axis — 주석에만 있던 규율을 실행 가능한 게이트로 굳힌다)
+                        (imports·icon_literals·chrome_text_clusters·cwd_axis·cli_purity — 주석에만 있던 규율을 실행 가능한 게이트로 굳힌다)
   oracle/               recorded reference terminal snapshot 비교 + 외부 오라클(libvterm·Alacritty·Ghostty, opt-in)
   stress/               대량 출력, 반복 resize, hot path 안정성 테스트
   integration/

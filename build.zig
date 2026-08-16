@@ -2113,11 +2113,26 @@ pub fn build(b: *std.Build) void {
     const run_cwd_axis_boundary_tests = b.addRunArtifact(cwd_axis_boundary_tests);
     run_cwd_axis_boundary_tests.setCwd(b.path("."));
 
+    // cli/ 순수 경계 — `cli/`의 제품 코드는 파싱·wire·렌더만 갖고 소켓/프로세스/파일 syscall은 명시된
+    // 예외 파일에만 둔다. 그 순수성이 파서·validator를 살아 있는 앱 없이 단위 테스트할 수 있는 근거인데,
+    // 2026-08-16까지 그 규칙은 **파일 주석에만** 있었다(imports.zig의 강제 레이어 목록에 src/cli가 없었다).
+    // facade-contracts.md "import boundary는 테스트로 확인한다"에 맞춰 같은 결의 소스 스캔으로 닫는다.
+    const cli_purity_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/cli_purity.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_cli_purity_boundary_tests = b.addRunArtifact(cli_purity_boundary_tests);
+    run_cli_purity_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

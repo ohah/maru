@@ -126,6 +126,10 @@ test "없는 키·틀린 값은 기본값을 지킨다" {
 
 pub const Kind = enum { toggle, choice, number };
 
+/// "고른 프리셋이 없다" — 색이 어느 프리셋과도 안 맞는 상태(개별 색을 손댔거나 기본값 그대로).
+/// 화면은 이 값을 **빈 자리**로 그린다. 아무 이름이나 적으면 고르지도 않은 것을 고른 것처럼 보인다.
+pub const preset_none: i64 = -1;
+
 pub const Row = struct {
     key: []const u8,
     label: []const u8,
@@ -225,13 +229,23 @@ test "줄은 스키마에서 나오고, 편집 수단이 없는 것은 안 나�
 /// 그 키의 현재 값을 화면 표기로. choice 는 `Row.items` 의 색인, toggle 은 0/1, number 는 값.
 pub fn valueOf(cfg: Config, key: []const u8) i64 {
     if (std.mem.eql(u8, key, "theme.preset")) {
-        // 프리셋은 config 에 이름이 안 남는다(파싱 때 색으로 펼쳐진다) — 현재 색과 같은 세트를
-        // 찾아 되짚는다. 없으면 첫 항목(사용자가 개별 색을 손댄 상태다).
+        // 프리셋은 config 에 이름이 안 남는다(파싱 때 색으로 펼쳐진다) — 색으로 되짚는다.
+        //
+        // **네 색을 다 본다.** 배경 하나만 비교하면 남의 이름을 뒤집어씌운다 — 모바일 기본값이
+        // catppuccin-mocha 와 배경만 같아서(전경·커서는 다르다) 아무것도 안 고른 기기가
+        // "catppuccin-mocha" 로 보였다(화면으로 잡았다).
+        //
+        // 어느 것과도 안 맞으면 **고른 것이 없다**(`preset_none`) — 사용자가 개별 색을 손댔거나
+        // 기본값 그대로인 상태다. 그 자리에 아무 프리셋 이름이나 적으면 화면이 거짓말을 한다.
         inline for (@typeInfo(theme.ThemePreset).@"enum".fields, 0..) |ef, i| {
             const p: theme.ThemePreset = @enumFromInt(ef.value);
-            if (std.mem.eql(u8, theme.presetColors(p).background, cfg.theme.background)) return @intCast(i);
+            const c = theme.presetColors(p);
+            if (std.mem.eql(u8, c.background, cfg.theme.background) and
+                std.mem.eql(u8, c.foreground, cfg.theme.foreground) and
+                std.mem.eql(u8, c.cursor, cfg.theme.cursor) and
+                std.mem.eql(u8, c.selection, cfg.theme.selection)) return @intCast(i);
         }
-        return 0;
+        return preset_none;
     }
     inline for (@typeInfo(Config).@"struct".fields) |cf| {
         const Container = cf.type;

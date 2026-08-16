@@ -1933,6 +1933,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   reply-loss에는 local authority를 발행하지 않고 candidate close 완료를 가정하지 않는다. direct-controller grant만 기다리고
   observer conflict는 자동 탈취하지 않는다. CR4c는 proven candidate를 CR3c publication/reclaim에 연결한 뒤 새 generation의
   input과 forced first resize를 검증한다. CR4a만 green이면 takeover·publication·사용자 가시 reconnect는 미완료다.
+  dormant contract prerequisite는 product caller 0에서 host process/subscription identity와 client request nonce wire DTO만
+  고정하고 MRSH kind/header를 정의하되 generic subscription batch admission은 0으로 유지한다. catch-up barrier host prerequisite는 capability 없는 발행 0, subscription/runtime/ConnectionKey/request nonce가 결속된
+  pending row, core-lock projection receipt, barrier-last single-batch admission을 요구한다. queue cap/OOM/rollback은 queued
+  prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
+  target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.
+  client prerequisite는 raw fd reader 0,
+  기존 generation demux를 통한 sibling stream 보존, target exact equality, duplicate/ABA/gap/partial/EOF/deadline/cap+1/OOM의
+  receipt 0 및 final ledger 0을 요구한다. 두 prerequisite와 actual `connectExistingHost` E2E 전에는 CR4a 완료로 세지 않는다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
   reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자
   close transaction만 pane/binding 제거 checkpoint를 정확히 1회 쓴다. pending/unconfirmed 상태에서 Window close는 binding을

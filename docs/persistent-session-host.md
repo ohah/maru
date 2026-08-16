@@ -816,6 +816,42 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    같은 stream의 현재 coalesced output과 immutable target `{generation, sequence}`를 한 owner turn에 발행한다. client는 하나의
    absolute deadline 아래 그 target까지 exact contiguous로 적용했을 때만 caught-up staged receipt를 봉인한다. takeover 전
    gap/cap 초과나 target 미도달은 전체 prepare abort다.
+
+   catch-up barrier는 별도 poll의 idle 표식이나 일반 JSON event가 아니다. hello에서
+   `runtime_catchup_barrier_v1`을 명시 협상한 connection만 `runtime.catchup`을 사용할 수 있다. host의
+   `Subscription`은 bool 대신 `idle | pending(CatchupIdentity)`를 소유한다. `CatchupIdentity`는 global
+   manifest/hello가 공유하는 host-process-lifetime `host_id`, daemon-global subscription id, runtime id, daemon
+   `ConnectionKey`와 client-minted nonzero request nonce를 봉인한다. request nonce는 한 Client connection 생애에서 재사용하지
+   않는 CSPRNG u128이며 zero/entropy failure는 요청 전 fail-close다. 동일 nonce+동일 bound row 재요청만 idempotent이고,
+   같은 nonce의 다른 host/subscription/runtime/ConnectionKey splice와 pending 중 다른 nonce는 `busy`다. 새 connection은 새
+   nonce를 발급한다. host state는 `idle | pending | admitted | terminal(spent)`의 닫힌 전이며, admission 뒤 동일 nonce retry는
+   새 projection/queue/frontier commit 0이고 기존 immutable barrier receipt만 참조한다. spent nonce는 subscription 생애에서
+   재arm하지 않는다. detach, runtime end, connection EOF와 bounded host expiry가 tombstone과 pending permit을 함께 정산한다.
+
+   화면 projection은 server가 mutable subscription이나 wire bytes를 다시 읽어 frontier를 추측하지 않는다.
+   `RuntimeManager`가 core lock을 보유한 같은 turn에서 screen bytes와 immutable `ScreenFrontier{generation,sequence}`를
+   함께 발급한다. 변화가 없는 projection도 검사 시점의 직전 committed frontier를 명시적으로 반환한다. server의
+   `PreparedCatchupBatch`는 metadata/snapshot/delta chunk와 마지막 fixed binary barrier를 한 subscription batch로 묶고,
+   frame/item/byte/global budget을 전부 선예약한다. 단일 no-fail queue commit이 성공한 뒤에만 base/frontier commit과 exact
+   pending consume를 같은 owner turn에서 수행한다. encode, append, queue reject와 rollback은 frames 0 및
+   base/frontier/pending mutation 0이다. socket partial write 이후에는 semantic rollback이나 재enqueue를 하지 않고 이미
+   admission된 queue offset만 재개한다.
+
+   barrier payload는 protocol version, host id, global subscription id, request nonce, runtime id, daemon
+   `ConnectionKey`와 target screen frontier를 fixed-width network order로 싣는다. attach/catch-up response가 client에게 host
+   subscription/connection handle을 먼저 전달하고, client는 자신이 발급한 request nonce와 현재 manifest/hello의 host id를
+   함께 대조한다. GUI-local Client node/connection generation은 wire identity가 아니라 후속 final-address staged receipt에
+   별도로 봉인한다. capability 없는 peer에게는 발행하지 않는다. client는 raw fd를
+   별도로 읽지 않고 `GenerationAttachment`의 기존 multi-stream demux와 bounded inbox를 통해서만 barrier를 소비한다. 동일
+   absolute deadline과 frame/encoded-byte/decoded-cell/delta-batch cap 아래 선행 same-stream chunk를 전부 적용한 뒤 실제
+   assembler frontier와 target이 exact 같을 때만 final-address staged receipt를 봉인한다. foreign/stale/duplicate barrier,
+   target behind/ahead, generation gap, partial frame, EOF, deadline, cap+1과 seal OOM은 receipt 0이다. Client replacement 게시
+   뒤 bytes를 소비한 실패는 old graph로 rollback하지 않고 candidate와 새 Client를 fail-close해 다음 replacement 시도로
+   넘긴다.
+
+   host issuer의 모든 public arm과 owner-turn commit은 subscription/registry/core mutex를 만지기 전에 current OS PID와
+   ready process seal을 검증한다. prepared batch에는 `(OS PID, process nonce)`와 final owner address/incarnation/thread를
+   봉인하며 fork mismatch는 lock 전 mutation 0으로 거부한다. 이 내부 seal은 client wire의 `host_id`와 역할이 다르다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
    observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
 3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership

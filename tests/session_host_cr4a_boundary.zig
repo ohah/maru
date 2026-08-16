@@ -101,6 +101,26 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/runtime_manager.zig",
     );
     defer allocator.free(runtime_manager);
+    const catchup = try readSource(
+        allocator,
+        "src/platform/macos/session_host/catchup_barrier_contract.zig",
+    );
+    defer allocator.free(catchup);
+    const protocol = try readSource(
+        allocator,
+        "src/platform/macos/session_host/protocol.zig",
+    );
+    defer allocator.free(protocol);
+    const connection_turn = try readSource(
+        allocator,
+        "src/platform/macos/session_host/connection_turn.zig",
+    );
+    defer allocator.free(connection_turn);
+    const catchup_wire = try readSource(
+        allocator,
+        "src/platform/macos/session_host/catchup_barrier_wire.zig",
+    );
+    defer allocator.free(catchup_wire);
     const runtime_product = runtime[0..std.mem.indexOf(u8, runtime, "const testing = std.testing;").?];
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
@@ -179,10 +199,43 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn publishCr4aReplacementPrerequisite("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "candidate_adapter == &adapter"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "\"test-session-host-cr4a\""));
-    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=2"));
-    try std.testing.expectEqual(@as(usize, 3), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
+    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 5), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a dormant barrier"));
+    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a host barrier frame"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const ScreenFrontier = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const CatchupIdentity = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Barrier = struct"));
+    try std.testing.expectEqual(@as(usize, 0), count(catchup, "pub const Pending"));
+    try std.testing.expectEqual(@as(usize, 2), count(catchup, "test \"CR4a dormant barrier"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "catchup_barrier_contract.zig", &.{
+            "platform/macos/session_host/catchup_barrier_contract.zig",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const capability ="));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_wire, "kind_raw: u16 = 14"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_wire, "version: u16 = 1"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_wire, "payload_size: usize = 96"));
+    try std.testing.expectEqual(@as(usize, 0), count(catchup, "process_nonce"));
+    try std.testing.expectEqual(@as(usize, 0), count(server, "catchup_barrier_contract"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "catchup_barrier_wire.zig", &.{
+            "platform/macos/session_host/catchup_barrier_contract.zig",
+            "platform/macos/session_host/protocol.zig",
+            "platform/macos/session_host/catchup_barrier_wire.zig",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(protocol, "screen_frontier_barrier = catchup_barrier_wire.kind_raw"));
+    try std.testing.expectEqual(@as(usize, 1), count(protocol, "test \"CR4a host barrier frame"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "test \"CR4a host barrier frame은"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, ".barrier => return false"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "prepareObserverReconnectCandidate(", &.{

@@ -15,6 +15,8 @@
 
 const std = @import("std");
 const client_queue_limits = @import("client_queue_limits.zig");
+const catchup_barrier_wire = @import("catchup_barrier_wire.zig");
+pub const screen_frontier_barrier_payload_size = catchup_barrier_wire.payload_size;
 
 /// wire 식별 magic. 첫 4바이트가 이것이 아니면 이 connection은 MRSH가 아니다(control-plane socket 혼선 방지).
 pub const magic = [4]u8{ 'M', 'R', 'S', 'H' };
@@ -69,12 +71,15 @@ pub const Kind = enum(u16) {
     /// controller의 bounded host-core 명령. focus/config/prompt hot path가 response RPC를 기다리지 않되,
     /// 같은 connection의 input frame과 wire 순서를 공유하도록 fire-and-forget stream frame으로 둔다.
     core_command = 13,
+    /// Negotiated CR4 reconnect catch-up cut. Fixed binary payload; it is the final frame of the
+    /// same atomically admitted subscription batch as its preceding snapshot/delta chunks.
+    screen_frontier_barrier = catchup_barrier_wire.kind_raw,
     _,
 
     /// v1이 아는 kind인가. open enum이라 unknown 값(미래 wire)은 false다 — 상위가 optional flag로 skip 여부를 정한다.
     pub fn isKnown(self: Kind) bool {
         return switch (self) {
-            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command => true,
+            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command, .screen_frontier_barrier => true,
             _ => false,
         };
     }
@@ -154,6 +159,7 @@ pub const Header = struct {
 /// 거부한다(메모리 폭주 방지). unknown kind는 binary 상한으로 관대하게 두고(optional이면 skip) required면 상위가 닫는다.
 pub fn maxPayloadForKind(kind: Kind) usize {
     return switch (kind) {
+        .screen_frontier_barrier => screen_frontier_barrier_payload_size,
         .snapshot_chunk, .delta_chunk, .input_bytes => max_binary_chunk,
         .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command => max_control_json,
         _ => max_binary_chunk,
@@ -197,6 +203,24 @@ test "MRSH header round-trips with exact 32-byte big-endian layout" {
     try std.testing.expectEqual(h.major, back.major);
 }
 
+test "CR4a host barrier frame kind는 fixed binary 96바이트만 허용한다" {
+    try std.testing.expectEqual(@as(u16, 14), @intFromEnum(Kind.screen_frontier_barrier));
+    try std.testing.expect(Kind.screen_frontier_barrier.isKnown());
+    try std.testing.expect(!Kind.screen_frontier_barrier.isControlJson());
+    try std.testing.expectEqual(@as(usize, 96), maxPayloadForKind(.screen_frontier_barrier));
+    const encoded = (Header{
+        .kind = .screen_frontier_barrier,
+        .request_id = 0,
+        .stream_id = 7,
+        .payload_len = 96,
+    }).encode();
+    const decoded = try Header.decode(&encoded);
+    try std.testing.expectEqual(Kind.screen_frontier_barrier, decoded.kind);
+    try std.testing.expectEqual(@as(u64, 0), decoded.request_id);
+    try std.testing.expectEqual(@as(u64, 7), decoded.stream_id);
+    try std.testing.expectEqual(@as(u32, 96), decoded.payload_len);
+}
+
 test "MRSH header size is exactly 32 bytes" {
     const h = Header{ .kind = .ping };
     try std.testing.expectEqual(@as(usize, 32), h.encode().len);
@@ -222,6 +246,8 @@ test "MRSH known kinds classify control-json vs binary payloads" {
     try std.testing.expect(Kind.request.isControlJson());
     try std.testing.expect(Kind.stream_ack.isControlJson());
     try std.testing.expect(Kind.core_command.isKnown());
+    try std.testing.expect(Kind.screen_frontier_barrier.isKnown());
+    try std.testing.expect(!Kind.screen_frontier_barrier.isControlJson());
     try std.testing.expect(Kind.core_command.isControlJson());
     try std.testing.expect(!Kind.snapshot_chunk.isControlJson());
     try std.testing.expect(!Kind.input_bytes.isControlJson());
@@ -231,6 +257,7 @@ test "MRSH known kinds classify control-json vs binary payloads" {
     try std.testing.expectEqual(max_control_json, maxPayloadForKind(.core_command));
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.snapshot_chunk));
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.input_bytes));
+    try std.testing.expectEqual(@as(usize, 96), maxPayloadForKind(.screen_frontier_barrier));
 }
 
 test "MRSH flags: end_stream/optional/unknown-bit predicates" {

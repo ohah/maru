@@ -387,6 +387,31 @@ test "보간: 버퍼가 모자라면 UTF-8 경계에서 자른다 — 깨진 바
     try testing.expect(std.unicode.utf8ValidateSlice(format(&tiny, "ab{0}", &.{.{ .s = "cd" }})));
 }
 
+test "보간: 자리표시자 문법의 경계 — 닫히지 않음·빈 중괄호·음수·거대 인덱스" {
+    // 이 케이스들은 번역자가 틀을 잘못 옮겼을 때 실제로 나오는 모양이다. 어느 것도 앱을 멈추면 안 되고,
+    // 무엇이 잘못됐는지 화면에 남아야 고칠 수 있다.
+    var buf: [64]u8 = undefined;
+    const one = [_]Arg{.{ .s = "X" }};
+    try testing.expectEqualStrings("a {0", format(&buf, "a {0", &one)); // 닫히지 않음
+    try testing.expectEqualStrings("{}", format(&buf, "{}", &one)); // 빈 중괄호
+    try testing.expectEqualStrings("{-1}", format(&buf, "{-1}", &one)); // 음수(usize 파싱 실패)
+    try testing.expectEqualStrings("{99999999999999999999}", format(&buf, "{99999999999999999999}", &one)); // 오버플로
+    try testing.expectEqualStrings("X}", format(&buf, "{0}}", &one)); // 치환 뒤 남은 닫는 괄호
+    try testing.expectEqualStrings("", format(&buf, "", &one)); // 빈 틀
+    try testing.expectEqualStrings("인자 없음", format(&buf, "인자 없음", &one)); // 자리표시자 없음
+}
+
+test "보간: 같은 인자를 여러 번 쓸 수 있다" {
+    // 한국어는 조사 때문에 같은 값을 두 번 부르는 문장이 나온다("X는 X다" 류).
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("A와 A", format(&buf, "{0}와 {0}", &.{.{ .s = "A" }}));
+}
+
+test "보간: 인자가 하나도 없을 때 자리표시자는 원문으로 남는다" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("{0} 값", format(&buf, "{0} 값", &.{}));
+}
+
 test "fromLocale: 플랫폼별 표기를 하나로 정규화한다" {
     try testing.expectEqual(Lang.ko, fromLocale("ko"));
     try testing.expectEqual(Lang.ko, fromLocale("ko-KR")); // macOS NSLocale

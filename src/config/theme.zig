@@ -1215,13 +1215,14 @@ pub const ShellConfig = struct {
     // command(text)·windows_shell(enum→dropdown)이 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
     pub const schema = .{
         .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal, .abs_path = true },
-        // **Windows에서만 GUI에 보인다.** 다른 OS에서 이 드롭다운은 아무것도 바꾸지 않으므로 폼에 두면 소음이다.
-        // `hidden`은 GUI 폼 행만 끄고 파일 파싱·저장은 그대로라(schema.zig의 `meta.hidden` 갈래), dotfiles를
-        // 공유하는 macOS 사용자가 이 줄 때문에 "알 수 없는 키" 경고를 받는 일도 없다.
+        // **GUI에 노출하지 않는다(파일 전용).** 한때 `os.tag != .windows`로 숨겼는데, 설정 GUI를 그리는 코드가
+        // `platform/macos`에만 있어서 그 식은 **GUI가 있는 유일한 플랫폼에서 숨기고 GUI가 없는 플랫폼에서
+        // 보이게** 하는 정반대 효과였다(코드 리뷰 지적). 게다가 이 값을 실제 spawn에 넘기는 소비자가 아직
+        // 없다(W7) — 동작하지 않는 컨트롤을 폼에 두지 않는다. Windows 호스트가 배선될 때 이 줄을 지운다.
         .windows_shell = Meta{
             .doc = "Windows 기본 셸 종류(shell.command가 비었을 때)",
             .section = .terminal,
-            .hidden = @import("builtin").os.tag != .windows,
+            .hidden = true,
         },
     };
 };

@@ -194,9 +194,13 @@ shell.args = -i -l    # 공백으로 토큰 분리(따옴표 미지원). 빈 값
 Windows에는 `$SHELL`이 없고 `/bin/sh`도 없다. 그래서 해석 순서가 다르다.
 
 ```text
-POSIX    MARU_INTERACTIVE_SHELL → shell.command → SHELL → /bin/sh
-Windows  MARU_INTERACTIVE_SHELL → shell.command → shell.windows-shell 티어 → cmd.exe
+POSIX    shell.command → MARU_INTERACTIVE_SHELL → SHELL → /bin/sh
+Windows  shell.command → MARU_INTERACTIVE_SHELL → shell.windows-shell 티어 → cmd.exe
 ```
+
+**`shell.command`가 먼저다.** 설정된 값이 실행 가능하면 그것을 쓰고, 그때는 `MARU_INTERACTIVE_SHELL`을
+보지 않는다(`resolveConfiguredShell`). 즉 그 환경변수는 **`shell.command`를 비워 둔 사용자를 위한 것**이지
+설정을 한 번만 덮어쓰는 수단이 아니다.
 
 `shell.windows-shell`은 **경로가 아니라 종류**를 고른다(`powershell`|`cmd`, 기본 `powershell`). 실제 경로가
 기기마다 다르기 때문이다 — pwsh 7은 설치 여부가 갈리고 Windows PowerShell 5.1은 `%SystemRoot%`에 매여 있다.

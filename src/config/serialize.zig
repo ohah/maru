@@ -81,10 +81,11 @@ pub fn updateForKeys(allocator: std.mem.Allocator, original: []const u8, config:
     var updates: std.ArrayList(KeyValue) = .empty;
     for (keys) |k| {
         const v = valueForKey(all, k) orelse continue; // 스키마 키만 — 특수 키는 호출처 책임
-        // 파일에 `<key>.<호스트 OS>` 줄이 있으면 **그 줄**이 지금 이기고 있는 값이므로 거기에 쓴다.
-        // 기본 키에 쓰면 값이 다른 OS로 새고, 이 OS에는 반영도 안 된다(접미 줄이 계속 이긴다).
-        const target = try loader.writeBackKey(aa, original, k);
-        try updates.append(aa, .{ .key = target, .value = v });
+        // **기본 키에 쓴다.** 파일에 `<key>.<OS>` 줄이 있으면 그쪽이 계속 이길 수 있다 — GUI write-back
+        // 경로 전체(updateConfigText·removeConfigLines·parseKeybindLine)가 접미를 모르기 때문이다.
+        // 한 곳만 접미를 알게 하면 오히려 값이 사라진다(리뷰 실측: 기본 줄의 값을 접미 줄에 덮어썼다).
+        // 알려진 한계로 문서에 적었다 — docs/configuration.md "OS별 값".
+        try updates.append(aa, .{ .key = k, .value = v });
     }
     return loader.updateConfigText(allocator, original, updates.items);
 }

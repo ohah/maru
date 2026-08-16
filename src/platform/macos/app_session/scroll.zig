@@ -416,9 +416,9 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
             // 지금은 없다. 다만 탭 바 축은 편집기 pane 위에서도 살아 있어야 하므로(위 세로 소유
             // 주석의 리뷰 지적), **넘칠 때만** 소유하고 아니면 지금까지의 탭 바 경로가 그대로 돈다.
             const editor_took_x = if (hit) |h|
-                editor_ops.scrollCols(self, h.term, h.leaf_rect, cols)
+                editor_ops.scrollCols(self, h.term, h.leaf_rect, cols, x_px)
             else if (pane_ops.activeLeafRect(self)) |leaf|
-                editor_ops.scrollCols(self, pane_ops.activePane(self).activeTerm(), leaf, cols)
+                editor_ops.scrollCols(self, pane_ops.activePane(self).activeTerm(), leaf, cols, null)
             else
                 false;
             if (!editor_took_x) tab_ops.scrollTabBarAt(self, x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면) // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치

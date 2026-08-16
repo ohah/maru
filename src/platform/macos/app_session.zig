@@ -1585,7 +1585,14 @@ const TermRuntime = struct {
     /// `line == 0 and piece == 0`이면 아직 안 그렸거나 문서가 화면에 다 들어간다.
     editor_max_top_line: usize = 0,
     editor_max_top_piece: u32 = 0,
+    /// 비교 뷰 **오른쪽 열**의 가로 위치. 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구하므로
+    /// (editor-surface-dock §3.5) 좌우가 각자 든다 — 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
+    /// 다른 쪽이 엉뚱한 곳을 본다. 단일 파일 편집기는 이 값을 쓰지 않는다(§4.1e).
+    editor_first_col_right: u16 = 0,
+    /// 오른쪽 열의 최대 열 수 캐시(`editor_max_cols`의 짝).
+    editor_max_cols_right: u32 = 0,
     /// 화면 맨 왼쪽에 올 **열**. 랩이 켜져 있으면 넘칠 것이 없으므로 늘 0이다.
+    /// 비교 뷰에서는 **왼쪽 열**의 값이다(오른쪽은 `editor_first_col_right`).
     editor_first_col: u16 = 0,
     /// 문서에서 가장 긴 줄의 **열 수**(0 = 아직 안 셌다). 가로 스크롤 상한이 여기서 나온다.
     ///

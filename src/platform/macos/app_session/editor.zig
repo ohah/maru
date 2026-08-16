@@ -321,8 +321,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = if (wrap) 0 else term.rt.editor_first_col_right },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -680,26 +680,26 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
 /// 할 일이 없으므로 **넘길 때만** 가져간다 — 랩이 켜져 있으면 늘 안 넘친다.
 ///
 /// **랩이 켜져 있으면 가로가 없다.** `visual_map`이 폭에 맞춰 잘라 두므로 넘칠 것이 없다.
-pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, cols: i32) bool {
+pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, cols: i32, x_px: ?f64) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) return false;
 
-    // **비교 뷰는 아직 이 축을 안 가진다.** §3.5가 "가로는 각자다"라고 정한 이유가 *"양쪽 줄 길이가
-    // 달라 한쪽을 따라가면 다른 쪽이 엉뚱한 곳을 본다"*이므로, 두 열을 함께 미는 것은 그 결정을
-    // 뒤집는 것이다. 각자 밀려면 **포인터가 어느 열 위인지**를 알아야 하고 그 값(`split_x`)은 이미
-    // 나오지만 소비할 히트테스트가 없다 — 그것이 붙는 슬라이스에서 함께 온다. 그때까지 이 축은
-    // 탭 바가 쓴다(틀린 방향으로 미는 것보다 안 미는 편이 낫다).
-    if (term.rt.editor_diff) |st| {
-        if (st.view == .compare) return false;
-    }
+    const body = editorBodyRect(self, leaf_rect, term);
 
-    const lines = editorLines(term);
+    // **비교는 열마다 따로 민다**(editor-surface-dock §3.5 — *"각 편집기가 자기 안에서 스크롤한다"*).
+    // 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때 다른 쪽이 엉뚱한 곳을 본다. 어느 열인지는
+    // 포인터가 정한다 — `diff_frame.columns()`가 주는 경계와 비교하며, 그 함수를 다시 부르므로
+    // 규칙이 한 곳에만 있다. 포인터가 없으면(pane 밖 폴백) 왼쪽으로 친다.
+    const right = isRightColumn(self, body, term, x_px);
+    const lines = if (right) rightTexts(term) else editorLines(term);
     if (lines.len == 0) return false;
+    const first_col = if (right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
+    const max_cols = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
 
     // **문서 전체에서 가장 긴 줄이 상한을 정한다.** 보이는 줄만 보면 세로로 굴릴 때마다 상한이
     // 출렁여, 오른쪽 끝을 보다가 위로 굴리면 본문이 제멋대로 왼쪽으로 튄다.
     const tab_width = chrome_editor.frame.default_tab_width; // 렌더가 쓰는 그 값(단일 출처)
-    if (term.rt.editor_max_cols == 0) {
+    if (max_cols.* == 0) {
         // **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 어차피 못 가므로 세면 낭비다.
         // 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
         const limit = chrome_editor.frame.max_cols_count_limit;
@@ -708,31 +708,50 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
             max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
             if (max >= limit) break; // 더 세도 답이 같다
         }
-        term.rt.editor_max_cols = max;
+        max_cols.* = max;
     }
 
-    const body = editorBodyRect(self, leaf_rect, term);
     const visible = visibleCols(self, body, term);
     if (visible == 0) return false;
-    if (term.rt.editor_max_cols <= visible) {
+    if (max_cols.* <= visible) {
         // 안 넘친다 — 이 축은 탭 바가 쓴다(위 doc). 남아 있던 위치만 되돌린다.
-        if (term.rt.editor_first_col != 0) {
-            term.rt.editor_first_col = 0;
+        if (first_col.* != 0) {
+            first_col.* = 0;
             self.metal_dirty = true;
         }
         return false;
     }
 
     // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
-    const max_first: u32 = @min(term.rt.editor_max_cols - visible, @as(u32, chrome_editor.frame.max_first_col));
-    const current: i64 = term.rt.editor_first_col;
+    const max_first: u32 = @min(max_cols.* - visible, @as(u32, chrome_editor.frame.max_first_col));
+    const current: i64 = first_col.*;
     const next = std.math.clamp(current - @as(i64, cols), 0, @as(i64, max_first));
     const clamped: u16 = @intCast(@min(next, std.math.maxInt(u16)));
-    if (clamped != term.rt.editor_first_col) {
-        term.rt.editor_first_col = clamped;
+    if (clamped != first_col.*) {
+        first_col.* = clamped;
         self.metal_dirty = true;
     }
     return true;
+}
+
+/// 포인터가 비교의 **오른쪽 열** 위인가. 비교가 아니거나 포인터가 없으면 `false`(왼쪽).
+fn isRightColumn(self: *AppSession, body: maru.session.SplitRect, term: *Term, x_px: ?f64) bool {
+    const st = term.rt.editor_diff orelse return false;
+    if (st.view != .compare) return false;
+    const x = x_px orelse return false;
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner_w = body.w -| inset * 2;
+    const inner_h = body.h -| inset * 2;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = inner_w, .h = inner_h }, @intCast(self.cell_width_px));
+    const rel = x - @as(f64, @floatFromInt(@as(i32, @intCast(body.x)) + @as(i32, @intCast(inset))));
+    return rel >= @as(f64, @floatFromInt(cols.right.x));
+}
+
+/// 비교 오른쪽 열이 그리는 행들.
+fn rightTexts(term: *Term) []const []const u8 {
+    const st = term.rt.editor_diff orelse return &.{};
+    if (st.view != .compare) return &.{};
+    return st.right_texts;
 }
 
 /// 이 편집기가 그리는 줄들(비교면 왼쪽 행, 아니면 문서 줄).
@@ -1859,12 +1878,12 @@ test "가로 스크롤은 가장 긴 줄의 끝에서 멈춘다 — 빈 화면�
     defer allocator.free(long_buf);
     defer allocator.free(lines);
 
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000)); // 끝까지 민다
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null)); // 끝까지 민다
     const visible = visibleCols(fx.session, editorBodyRect(fx.session, leaf, fx.term), fx.term);
     try testing.expect(visible > 0);
     try testing.expectEqual(@as(u32, long_len) - visible, @as(u32, fx.term.rt.editor_first_col));
 
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, 1_000_000)); // 되돌리면 0에서 멈춘다
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, 1_000_000, null)); // 되돌리면 0에서 멈춘다
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 }
 
@@ -1884,13 +1903,13 @@ test "랩 중에는 가로 축이 없고 렌더에도 0이 간다 — 위치는 
     defer allocator.free(long_buf);
     defer allocator.free(lines);
 
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -20));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -20, null));
     try testing.expect(fx.term.rt.editor_first_col > 0);
 
     const before_wrap = fx.term.rt.editor_first_col;
 
     try testing.expect(toggleWrap(fx.session)); // 랩 켬
-    try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20)); // 랩 중에는 이 축을 안 가진다
+    try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20, null)); // 랩 중에는 이 축을 안 가진다
     // **렌더에는 0이 간다** — 컴포넌트의 `!wrap or first_col == 0`을 여기서 세운다. 그리는 것과
     // 저장된 위치는 다른 것이고, 그리기가 죽지 않는 것까지 함께 본다.
     try testing.expectEqual(@as(u16, 0), effectiveFirstCol(true, fx.term));
@@ -1924,7 +1943,7 @@ test "가로 위치가 렌더까지 간다 — 상태만 움직이고 화면이 
     before.dl.deinit(allocator);
     try testing.expect(short_before > 0); // 밀기 전에는 "short"가 보인다 — 없으면 아래 판정이 공허하다
 
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -30));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -30, null));
     var after = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer after.dl.deinit(allocator);
     // 30열을 밀면 "short"(5열)는 화면 밖이다 — 긴 줄만 남는다.
@@ -1950,7 +1969,7 @@ test "창이 넓어지면 다음 프레임이 가로 위치를 되돌린다 — 
 
     // 좁은 pane에서 끝까지 민다.
     const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 400 };
-    try testing.expect(scrollCols(fx.session, fx.term, narrow, -1_000_000));
+    try testing.expect(scrollCols(fx.session, fx.term, narrow, -1_000_000, null));
     const at_end = fx.term.rt.editor_first_col;
     try testing.expect(at_end > 0);
 
@@ -2014,7 +2033,7 @@ test "되돌리기는 한 번이면 끝난다 — 매 프레임 dirty를 세우�
         defer allocator.free(lines);
 
         const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 200 };
-        _ = scrollCols(fx.session, fx.term, narrow, -1_000_000);
+        _ = scrollCols(fx.session, fx.term, narrow, -1_000_000, null);
         _ = scrollLines(fx.session, fx.term, narrow, -1_000_000);
         fx.term.rt.editor_wrap = wrap;
 
@@ -2055,7 +2074,7 @@ test "config 재적재로 랩이 켜져도 그리기가 죽지 않는다 — 토
     // **override를 지운다** — 이 뷰는 config를 따른다(새로 연 편집기의 기본 상태다).
     fx.term.rt.editor_wrap = null;
     fx.session.loaded_config.config.editor.wrap = false;
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -20));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -20, null));
     try testing.expect(fx.term.rt.editor_first_col > 0);
 
     // config가 바뀐다(재적재). 토글은 부르지 않는다.
@@ -2095,7 +2114,7 @@ test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
         fx.term.rt.editor_max_cols = 0;
 
         const t0 = monotonicMsForTest();
-        _ = scrollCols(fx.session, fx.term, leaf, -1);
+        _ = scrollCols(fx.session, fx.term, leaf, -1, null);
         const t1 = monotonicMsForTest();
         std.debug.print("\n[측정] {d}줄 × {d}B: 첫 가로 휠 {d}ms (max_cols={d})\n", .{ n, line.len, t1 - t0, fx.term.rt.editor_max_cols });
 
@@ -2104,7 +2123,7 @@ test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
 
         // 두 번째부터는 캐시라 0에 가까워야 한다.
         const t2 = monotonicMsForTest();
-        _ = scrollCols(fx.session, fx.term, leaf, -1);
+        _ = scrollCols(fx.session, fx.term, leaf, -1, null);
         const t3 = monotonicMsForTest();
         std.debug.print("[측정] {d}줄: 두 번째 휠 {d}ms\n", .{ n, t3 - t2 });
         try testing.expect(t3 - t2 < 50); // 캐시가 안 먹으면 여기서 걸린다
@@ -2144,7 +2163,7 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
 
     // **최대 열을 세워 두지 않으면 clamp가 매번 0으로 되돌린다** — 그러면 네 측정이 전부 같은
     // 조건이 되어 "평평하다"는 오판이 나온다(실제로 한 번 그렇게 읽을 뻔했다).
-    _ = scrollCols(fx.session, fx.term, leaf, -1);
+    _ = scrollCols(fx.session, fx.term, leaf, -1, null);
     // 셈이 상한(`max_cols_count_limit`)에서 멈추므로 줄 길이(20만)가 아니라 그 값이 나온다 —
     // 갈 수 있는 거리는 그것으로 충분하다.
     try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
@@ -2185,7 +2204,7 @@ test "가로 스크롤에 §3.8 상한이 있다 — 무한히 밀리지 않는�
     defer allocator.free(long_buf);
     defer allocator.free(lines);
 
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
 
     // 그리기 직전 되돌림도 같은 상한을 쓴다 — 두 곳이 갈리면 프레임마다 값이 튄다.
@@ -2214,7 +2233,7 @@ test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
     fx.term.rt.editor_max_cols = 0;
 
     const t0 = monotonicMsForTest();
-    _ = scrollCols(fx.session, fx.term, leaf, -1);
+    _ = scrollCols(fx.session, fx.term, leaf, -1, null);
     const t1 = monotonicMsForTest();
     std.debug.print("\n[측정] 5MB 한 줄: 첫 가로 휠 {d}ms (max_cols={d}, 셈 상한={d})\n", .{ t1 - t0, fx.term.rt.editor_max_cols, chrome_editor.frame.max_cols_count_limit });
     // 고치기 전 149ms. 줄 길이와 무관해야 한다 — 셈이 상한에서 멈추므로.
@@ -2222,7 +2241,7 @@ test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
     try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
 
     // **상한에 걸려도 갈 수 있는 거리는 그대로다.** 셈을 줄인 것이 도달 범위를 줄이면 안 된다.
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
 }
 
@@ -2259,7 +2278,7 @@ test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프�
 
     fx.term.rt.editor_wrap = false;
     const t2 = monotonicMsForTest();
-    _ = scrollCols(fx.session, fx.term, leaf, -1_000_000);
+    _ = scrollCols(fx.session, fx.term, leaf, -1_000_000, null);
     const t3 = monotonicMsForTest();
     std.debug.print("[적대] NUL 1MB: 끝까지 가로 밀기 {d}ms (first_col={d})\n", .{ t3 - t2, fx.term.rt.editor_first_col });
     const t4 = monotonicMsForTest();
@@ -2321,13 +2340,13 @@ test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이�
 
     // 좁은 창에서 센다.
     const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 400 };
-    _ = scrollCols(fx.session, fx.term, narrow, -1);
+    _ = scrollCols(fx.session, fx.term, narrow, -1, null);
     const counted = fx.term.rt.editor_max_cols;
     try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, counted);
 
     // **창이 아주 넓어졌다.** 셈은 다시 하지 않는다(캐시) — 그래도 상한까지 갈 수 있어야 한다.
     const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 4000, .h = 400 };
-    try testing.expect(scrollCols(fx.session, fx.term, wide, -1_000_000));
+    try testing.expect(scrollCols(fx.session, fx.term, wide, -1_000_000, null));
     try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
     try testing.expectEqual(counted, fx.term.rt.editor_max_cols); // 다시 세지 않았다
 }
@@ -2350,7 +2369,7 @@ test "가로로 밀어도 컨트롤 플레인은 같은 사실을 말한다 — 
     defer allocator.free(lines);
 
     const before = editor_diff_ops.editorMeta(fx.term);
-    try testing.expect(scrollCols(fx.session, fx.term, leaf, -50));
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -50, null));
     try testing.expect(fx.term.rt.editor_first_col > 0); // 실제로 밀렸다 — 아니면 공허하다
     var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
@@ -2378,7 +2397,7 @@ test "안 넘치면 편집기가 가로 축을 가져가지 않는다 — 탭 �
 
     const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
     // ⑴ 짧은 문서 — 이 축으로 할 일이 없다.
-    try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20));
+    try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20, null));
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 
     // ⑵ 탭 바가 넘치게 탭을 늘린 뒤, 편집기 pane 위에서 가로로 굴린다.
@@ -2617,4 +2636,46 @@ test "적대적: 4096줄을 넘는 랩 문서도 끝에 닿는다" {
     std.debug.print("\n[적대] 5000줄 랩: first_line={d}, 줄당 {d}조각, 화면에 {d}줄 → 마지막 줄 {d}\n", .{ fx.term.rt.editor_first_line, pieces_per_line, lines_on_screen, fx.term.rt.editor_first_line + lines_on_screen });
     try testing.expectEqual(visible, drawn_rows); // 화면은 꽉 찬다
     try testing.expect(fx.term.rt.editor_first_line + lines_on_screen >= lines.len); // **마지막 줄에 닿는다**
+}
+
+test "override 없이 연 편집기는 config 기본을 따른다 — 되돌림이 실제로 관측된다" {
+    // **기본값을 바꿨는데 테스트가 하나도 안 깨졌다.** 대부분이 `editor_wrap` override를 명시하기
+    // 때문인데, 그렇다면 "기본값이 진짜 읽히는가"를 확인한 테스트가 없다는 뜻이기도 하다.
+    // override를 **세우지 않고** 열어 기본 동작을 직접 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    try testing.expect(fx.term.rt.editor_wrap == null); // 새로 연 뷰는 config를 따른다
+    try testing.expectEqual(false, fx.session.loaded_config.config.editor.wrap); // 되돌린 기본값
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long = try allocator.alloc(u8, 2000);
+    defer allocator.free(long);
+    @memset(long, 'x');
+    const lines = try allocator.alloc([]const u8, 3);
+    defer allocator.free(lines);
+    lines[0] = "short";
+    lines[1] = long;
+    lines[2] = "short";
+    fx.term.rt.editor_lines = lines;
+
+    // ① 랩이 아니므로 접히지 않는다 — 시각 행 수가 논리 줄 수와 같다.
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expectEqual(@as(u32, @intCast(lines.len)), fx.term.rt.editor_total_visual_rows);
+
+    // ② 그래서 가로 축을 편집기가 가져간다(랩이면 안 가져간다).
+    try testing.expect(scrollCols(fx.session, fx.term, fx.leaf_rect, -20, null));
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+
+    // ③ config를 도로 켜면 반대가 된다 — 이 테스트가 기본값을 **읽는지**까지 본다.
+    fx.session.loaded_config.config.editor.wrap = true;
+    fx.term.rt.editor_total_visual_rows = 0;
+    var wrapped = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer wrapped.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_total_visual_rows > lines.len); // 접혔다
+    try testing.expect(!scrollCols(fx.session, fx.term, fx.leaf_rect, -20, null)); // 가로 축을 안 가져간다
 }

@@ -1399,5 +1399,8 @@ test "editor.wrap은 설정 UI에 뜬다 — 값이 렌더에 닿는다" {
         if (std.mem.eql(u8, f.key, "editor.wrap")) seen = true;
     }
     try std.testing.expect(seen);
-    try std.testing.expectEqual(true, (theme.EditorConfig{}).wrap);
+    // **기본값은 `false`로 되돌아갔다(2026-08-16).** 한동안 `true`였던 이유는 가로 스크롤이 없어
+    // 랩을 끄면 잘린 뒤를 볼 수단이 없었기 때문이고, 단일 파일·비교 양쪽에 가로가 붙어 해소됐다
+    // (native-editor-visual-mapping.md §4.1e). 이 단언은 그 되돌림이 조용히 뒤집히지 않게 잡는다.
+    try std.testing.expectEqual(false, (theme.EditorConfig{}).wrap);
 }

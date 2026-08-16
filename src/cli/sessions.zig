@@ -21,6 +21,7 @@
 //! `../session/surface.zig`를 쓰는 것과 같은 관례 — check-boundaries는 cli를 제약하지 않는다). std + 1a만 의존.
 
 const std = @import("std");
+const path_shape = @import("../path_shape.zig"); // 후행 구분자 다듬기의 단일 출처(다섯 파일에 복제돼 있었다)
 const cp = @import("../session/control_plane.zig");
 
 // ══ 파싱 결과 타입 ═════════════════════════════════════════════════════════════════════════════════════════
@@ -289,15 +290,9 @@ fn atPromptWire(v: ?std.json.Value) []const u8 {
 /// 것과 같은 경로로 resolve된다(§4.2 단일 계약).
 pub fn controlDir(gpa: std.mem.Allocator, xdg_cache_home: ?[]const u8, home: []const u8) std.mem.Allocator.Error![]u8 {
     if (xdg_cache_home) |x| {
-        if (x.len > 0) return std.fmt.allocPrint(gpa, "{s}/maru/control", .{trimTrailingSlash(x)});
+        if (x.len > 0) return std.fmt.allocPrint(gpa, "{s}/maru/control", .{path_shape.trimTrailingSep(x)});
     }
-    return std.fmt.allocPrint(gpa, "{s}/.cache/maru/control", .{trimTrailingSlash(home)});
-}
-
-/// base 끝의 '/' 하나를 제거(경로 조합 시 이중 슬래시 방지). "/" 단독은 그대로(빈 base 방지) — cli/ssh.zig와 동일.
-fn trimTrailingSlash(base: []const u8) []const u8 {
-    if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
-    return base;
+    return std.fmt.allocPrint(gpa, "{s}/.cache/maru/control", .{path_shape.trimTrailingSep(home)});
 }
 
 /// 컨트롤 디렉터리의 엔트리 이름들에서 살아있는 인스턴스 소켓을 고르는 순수 정책(§4.2). `.sock`으로 끝나는 항목이

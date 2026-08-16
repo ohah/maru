@@ -162,6 +162,25 @@ pub fn endsWithSep(path: []const u8) bool {
     return path.len > 0 and path[path.len - 1] == '/';
 }
 
+/// base 뒤에 `/`로 무언가를 이어 붙이기 전에 **후행 구분자를 하나 뗀다.** 안 떼면 `<home>/` + `/.cache`가
+/// `…me//.cache`가 된다.
+///
+/// **길이 1(`/`)은 떼지 않는다** — 떼면 빈 문자열이라 절대경로가 상대경로로 바뀐다. 드라이브 루트(`C:/`)는
+/// 떼도 안전하다: 호출부가 `/`를 다시 붙여 `C:/…`로 이어지고 절대경로로 남는다(실측 —
+/// `std.fs.path.isAbsoluteWindows`가 참).
+///
+/// **이 함수를 여기 둔 이유**: 같은 본문이 다섯 파일에 바이트 단위로 똑같이 흩어져 있었다. 하나만 고치면
+/// 경로 조립기마다 답이 갈린다 — 실제로 갈려 있었다(W3 적대적 검증: `terminfo_cache`만 안 다듬어 이중
+/// 슬래시를 냈다). `endsWithSep`가 묻는 것의 반대 동작이라 여기가 제자리다.
+///
+/// **아직 다 모으지 않았다.** `session_host/discovery.zig`·`session_host/host_manifest.zig`는 그 영역이
+/// 작업 중이라 손대지 않았다(불필요한 충돌을 만들지 않는다). 그 둘이 자기 사본을 계속 들고 있으므로,
+/// 세션 호스트 작업이 정리되면 여기로 마저 모은다.
+pub fn trimTrailingSep(base: []const u8) []const u8 {
+    if (base.len > 1 and endsWithSep(base)) return base[0 .. base.len - 1];
+    return base;
+}
+
 const testing = std.testing;
 
 test "isSep: 두 구분자를 모두 본다" {

@@ -310,12 +310,20 @@ pub const Touch = struct {
     pub const damping: f32 = 0.92;
     /// 이보다 느려지면 멈춘다 — 안 그러면 영원히 도는 헛계산이 남는다.
     pub const stop_below: f32 = 0.5;
+    /// **손가락이 가만히 있다고 보는 폭.** 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
+    /// 소비처마다 적으면 갈린다 — 실제로 브리지 네 곳에 `10` 이 흩어져 있었다(감쇠와 같은 모양).
+    pub const slop_px: f32 = 10;
 
-    pub fn begin(self: *Touch, y: f32) void {
+    /// 손가락이 닿았다. **관성을 멈춘 것이면 true** — 그 짚음은 "세우려던 것"이지 누른 것이
+    /// 아니다. 호출자가 이것을 모르면 멈추려고 짚은 자리의 버튼이 눌린다(실제로 터미널에
+    /// 화살표 3바이트가 나갔다).
+    pub fn begin(self: *Touch, y: f32) bool {
+        const was_flinging = self.velocity != 0;
         self.active = true;
         self.last_y = y;
         self.velocity = 0;
         self.residue = 0;
+        return was_flinging;
     }
 
     /// 손가락을 옮긴다. **끄는 방향으로 내용이 따라온다**(세로면 위로 끌 때 목록이 위로).
@@ -340,18 +348,22 @@ pub const Touch = struct {
     }
 
     /// 매 프레임 한 번. 손가락이 닿아 있으면 아무 일도 안 한다.
-    pub fn step(self: *Touch, state: *State, max_offset_px: u32) void {
-        if (self.active or self.velocity == 0) return;
+    /// **움직였으면 true** — 매 프레임 다시 그리지 않는 화면(데스크톱)은 이걸로 다시 그릴
+    /// 자리를 안다. 안 돌려주면 소비처마다 offset 을 손으로 비교하게 된다.
+    pub fn step(self: *Touch, state: *State, max_offset_px: u32) bool {
+        if (self.active or self.velocity == 0) return false;
+        const before = state.offset_y_px;
         self.applyDelta(state, -self.velocity, max_offset_px);
         // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,
         // 되돌리려 손을 대면 죽은 속도가 남아 있다가 튄다.
         if (state.offset_y_px == 0 or state.offset_y_px == max_offset_px) {
             self.velocity = 0;
             self.residue = 0;
-            return;
+            return state.offset_y_px != before;
         }
         self.velocity *= damping;
         if (@abs(self.velocity) < stop_below) self.velocity = 0;
+        return state.offset_y_px != before;
     }
 
     fn applyDelta(self: *Touch, state: *State, delta_px: f32, max_offset_px: u32) void {

@@ -233,6 +233,15 @@ pub const Table = struct {
     fp_close_external_confirm: [:0]const u8,
     fp_unsaved_confirm: [:0]const u8,
     term_paste_confirm: [:0]const u8,
+
+    // ── 닫기 확인 (I3a 슬라이스 5 후속) ──
+    // `app_close_window_running` 은 **두 파일이 같은 문장을 리터럴로 중복**하고 있었다
+    // (`app_session.zig` 의 닫기 분기와 `app_session/workspace.zig` 의 창 닫기). 키로 합치면서
+    // 그 이중 출처가 사라진다 — 한쪽만 고쳐지는 드리프트가 원천에서 없어진다.
+    app_close_running: [:0]const u8,
+    app_close_window_running: [:0]const u8,
+    app_close_browser: [:0]const u8,
+    app_close_window_browser: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -417,6 +426,10 @@ pub const en: Table = .{
     .fp_close_external_confirm = "This file changed on disk. Discard changes and close?",
     .fp_unsaved_confirm = "There are unsaved changes.",
     .term_paste_confirm = "The pasted content has newlines or control characters, so a command could run immediately. Paste anyway?",
+    .app_close_running = "A command is still running. Close anyway?",
+    .app_close_window_running = "A command is still running. Close this window?",
+    .app_close_browser = "You have open browser tabs. Close anyway?",
+    .app_close_window_browser = "You have open browser tabs. Close this window?",
 };
 
 pub const ko: Table = .{
@@ -601,6 +614,10 @@ pub const ko: Table = .{
     .fp_close_external_confirm = "디스크에서 변경된 파일입니다. 변경사항을 버리고 닫을까요?",
     .fp_unsaved_confirm = "저장하지 않은 변경사항이 있습니다.",
     .term_paste_confirm = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?",
+    .app_close_running = "실행 중인 명령이 있습니다. 닫을까요?",
+    .app_close_window_running = "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
+    .app_close_browser = "열린 브라우저 탭이 있습니다. 닫을까요?",
+    .app_close_window_browser = "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.

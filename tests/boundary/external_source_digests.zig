@@ -453,7 +453,7 @@ pub const inventory = [_]Proof{
     // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
     // 경로가 정리되면 지운다). 같은 PR 의 검증 후속으로 한 번 더 움직였다 — 두 파일이 공유하는 키를
     // common_ 접두로 옮기며 이 파일의 호출 둘이 바뀌었다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b5881901c9d990782624a691ec207733f386ed700403a74d66599c66c1cb064e" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b04401f70b8fb1f88761f3c1987850d1949c7b56711fca2f7eebe9223db377bb" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -515,5 +515,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "203ee3abdd435ce88a7c7005bc8c7c203340e5b7a286c9af778b4a18ee1c7298" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "74d30845a5957e88786db54aa6b1f37534d1b9adeacc1577d05072652acd31d9" },
 };

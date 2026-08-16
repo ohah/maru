@@ -1,4 +1,4 @@
-//! Platform-neutral, redacted input DTO for an archive session detail panel.
+//! archive 세션 상세 패널의 platform 중립·redaction 완료 입력 DTO다.
 
 const layout = @import("../../ui/layout.zig");
 
@@ -8,7 +8,7 @@ pub const Role = enum { user, assistant };
 
 pub const Turn = struct {
     role: Role,
-    /// The host has applied the repository redaction policy before constructing this DTO.
+    /// 이 DTO를 만들기 전에 host가 저장소 redaction 정책을 이미 적용했다.
     text: []const u8,
 };
 
@@ -27,8 +27,8 @@ pub const Props = struct {
     turns: []const Turn = &.{},
     action_record_count: u32 = 0,
     spinner_phase: u3 = 0,
-    /// These booleans describe host-authorized capabilities, not UI preference. A non-ready
-    /// state must still disable every source-affecting action even if a stale DTO says true.
+    /// 이 bool들은 UI 취향이 아니라 host가 인가한 capability다. ready가 아닌 state는 stale DTO가
+    /// true라고 말해도 source에 영향을 주는 action을 전부 비활성으로 둬야 한다.
     resume_enabled: bool = false,
     reveal_enabled: bool = false,
     focus_live_enabled: bool = false,
@@ -41,9 +41,9 @@ pub const Metrics = struct {
     turn_h: u32,
     actions_h: u32,
     gap: u32,
-    /// Logical text lines in a detail card use this vertical breathing room.  It belongs to the
-    /// component metric rather than a renderer font setting so the card rect, clipping and paint
-    /// baseline remain one layout contract at every backing scale.
+    /// 상세 카드의 논리 텍스트 줄이 쓰는 세로 여백이다. renderer 폰트 설정이 아니라 컴포넌트
+    /// 메트릭에 두어야 카드 rect·clipping·paint baseline이 어느 backing scale에서도 하나의 layout
+    /// 계약으로 남는다.
     line_gap: u32,
     pad: u32,
 

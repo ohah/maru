@@ -1,6 +1,6 @@
-//! Chrome text hierarchy.  This is intentionally separate from terminal `font.*`: Chrome
-//! components name a semantic role, while the platform text adapter later resolves the actual
-//! system face, fallback chain, point size, and line metrics once per snapshot.
+//! Chrome의 텍스트 위계다. terminal `font.*`와 의도적으로 분리한다 — Chrome component는 semantic
+//! role만 이름 짓고, 실제 system face·fallback chain·point size·line 메트릭은 platform text adapter가
+//! snapshot마다 한 번 해석한다.
 
 const std = @import("std");
 
@@ -18,8 +18,8 @@ pub const ChromeTextRole = enum(u4) {
 
 pub const Weight = enum { regular, medium, semibold };
 
-/// Point-equivalent tokens.  The platform adapter converts this once with the backing scale;
-/// components must never recreate a role with a raw size or baseline nudge.
+/// point 환산 token이다. platform adapter가 backing scale로 한 번 변환하며, component가 raw 크기나
+/// baseline 보정으로 role을 다시 만들어서는 안 된다.
 pub const Token = struct {
     point_size: u8,
     line_height: u8,
@@ -48,8 +48,8 @@ pub fn token(role: ChromeTextRole) Token {
     };
 }
 
-/// Line box height in backing pixels.  Scaling is explicit and saturating so a bad caller never
-/// creates an infinite/zero line box that could publish an invalid Chrome tree.
+/// backing 픽셀 단위 line box 높이다. 스케일링은 명시적이고 saturating이라, 잘못된 caller가 무한/0
+/// line box를 만들어 유효하지 않은 Chrome tree를 publish하는 일이 없다.
 pub fn lineHeightPx(role: ChromeTextRole, scale_milli: u32) u32 {
     const scaled = @as(u64, token(role).line_height) * @as(u64, scale_milli);
     return @intCast(@min((scaled + 999) / 1000, std.math.maxInt(u32)));

@@ -1,8 +1,8 @@
-//! Immutable rect-tree pointer interaction seam for the Metal Chrome path.
+//! Metal Chrome 경로가 쓰는 immutable rect-tree pointer interaction seam이다.
 //!
-//! This module owns no platform objects, callbacks, Metal state, or mutable rect cache. The host
-//! publishes only completed `UiRectTree` snapshots and converts its platform pointer event once at
-//! the boundary. Tests can therefore exercise click/capture correctness without a macOS window.
+//! 이 모듈은 platform 객체·callback·Metal state·가변 rect 캐시를 소유하지 않는다. host는 완성된
+//! `UiRectTree` snapshot만 publish하고, 자기 platform pointer event는 경계에서 한 번만 변환한다.
+//! 덕분에 테스트가 macOS 창 없이 click/capture 정확성을 검증할 수 있다.
 
 const std = @import("std");
 const input = @import("../input.zig");
@@ -69,10 +69,9 @@ pub const InteractionState = struct {
     capture: ?Capture = null,
 };
 
-/// Fixed and allocation-free because the ML2b state has three visual identities. A transition can
-/// replace each old identity with one new identity, but valid single-pointer transitions produce at
-/// most four distinct IDs. Keeping a fourth slot makes that invariant explicit rather than silently
-/// losing a repaint request.
+/// ML2b state의 시각 identity가 셋뿐이라 고정 크기이고 할당이 없다. 전이는 옛 identity 각각을 새
+/// identity 하나로 바꿀 수 있지만, 유효한 단일 포인터 전이가 만드는 서로 다른 ID는 최대 4개다. 네
+/// 번째 슬롯을 남겨 두면 repaint 요청을 조용히 잃는 대신 그 불변식이 드러난다.
 pub const DirtySet = struct {
     ids: [4]?UiId = .{ null, null, null, null },
 
@@ -119,9 +118,9 @@ pub const Dispatch = struct {
 
 pub const InteractionError = error{DirtySetOverflow};
 
-/// Dispatches one event against the currently published immutable tree. A caller must call
-/// `reconcile` before replacing that tree; build failures do not call either function and therefore
-/// retain the current interaction state unchanged.
+/// 현재 publish된 불변 tree에 대해 이벤트 하나를 dispatch한다. caller는 그 tree를 교체하기 전에
+/// `reconcile`을 불러야 한다. build 실패는 두 함수 중 어느 쪽도 부르지 않으므로 지금의 interaction
+/// state가 그대로 남는다.
 pub fn dispatch(state: *InteractionState, snapshot: UiRectTree, event: UiPointerEvent) InteractionError!Dispatch {
     const before = state.*;
     var after = before;
@@ -223,8 +222,8 @@ pub fn dispatch(state: *InteractionState, snapshot: UiRectTree, event: UiPointer
     return result;
 }
 
-/// Reconciles stable IDs before a completed candidate replaces the published tree. Capture is never
-/// carried across snapshots: an up after this point must not execute an action from an older tree.
+/// 완성된 후보가 publish된 tree를 대체하기 전에 안정 ID를 맞춘다. capture는 snapshot을 건너 넘어가지
+/// 않는다 — 이 지점 이후의 up이 더 오래된 tree의 action을 실행해서는 안 된다.
 pub fn reconcile(state: *InteractionState, old_tree: UiRectTree, new_tree: UiRectTree) InteractionError!Dispatch {
     _ = old_tree;
     const before = state.*;
@@ -242,7 +241,7 @@ pub fn reconcile(state: *InteractionState, old_tree: UiRectTree, new_tree: UiRec
     return result;
 }
 
-/// Keyboard activation of the focused node — the parity path for a pointer click.
+/// focus된 node의 키보드 활성화 — pointer click과 짝을 이루는 경로다.
 ///
 /// **아직 host 배선이 없다.** Session Dock은 여전히 `agentSessionDockShortcutIntent`(intent 종류를
 /// 목록에서 찾아 실행)로 키보드 action을 처리하므로 focus와 무관하게 같은 동작을 낸다. 그 경로를
@@ -382,8 +381,8 @@ fn countIdentity(snapshot: UiRectTree, id: UiId) usize {
     return count;
 }
 
-/// A surface lifetime boundary. Unlike a tree replacement, deactivation also discards focus and
-/// hover so a numeric ID in a future surface cannot inherit visual state from the retired one.
+/// surface 수명 경계다. tree 교체와 달리 deactivate는 focus와 hover까지 버리므로, 다음 surface의 같은
+/// 숫자 ID가 물러난 surface의 시각 state를 물려받을 수 없다.
 pub fn deactivate(state: *InteractionState) InteractionError!Dispatch {
     const before = state.*;
     const after = InteractionState{};

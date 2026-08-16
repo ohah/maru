@@ -1,4 +1,4 @@
-//! Provisional live reorder — CIM4.
+//! 잠정(provisional) 라이브 재정렬 — CIM4.
 //!
 //! 탭 drag는 인접 탭의 자리를 **즉시 바꿔 보인다**. 그 preview를 model을 직접 회전해 만들면 취소할
 //! 자리가 없다 — 중간에 Escape를 눌러도 되돌릴 시작 순서를 아무도 들고 있지 않다.

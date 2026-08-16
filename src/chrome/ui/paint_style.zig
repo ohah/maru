@@ -1,15 +1,15 @@
-//! Token and interaction-state resolution for semantic UI props.
+//! semantic UI props를 token과 interaction state로 해석하는 모듈이다.
 //!
-//! This module has no draw buffer and no pixel snapping. That separation keeps a future Metal,
-//! software, or inspector consumer from reimplementing Card variant precedence.
+//! 이 모듈에는 draw buffer도 pixel snapping도 없다. 그렇게 갈라 두어야 나중에 올 Metal·software·
+//! inspector consumer가 Card variant 우선순위를 각자 다시 구현하지 않는다.
 
 const interaction = @import("interaction.zig");
 const tokens = @import("../tokens.zig");
 const ui_style = @import("style.zig");
 const ui_tree = @import("tree.zig");
 
-/// Named shadow metrics are resolved here even though ML3a does not lower a shadow to Metal yet.
-/// Keeping this in the resolved style prevents a future backend from inventing a second mapping.
+/// ML3a가 아직 shadow를 Metal로 내리지 않지만 이름 붙은 shadow 메트릭은 여기서 해석한다. 이 값을
+/// resolved style에 두어야 나중에 올 backend가 두 번째 매핑을 만들어 내지 않는다.
 pub const ResolvedShadow = struct {
     blur_px: u16,
     offset_y_px: u16,
@@ -22,8 +22,8 @@ pub const ResolvedCardStyle = struct {
     border: ?tokens.ColorRole,
     corner_radii_px: [4]u16,
     border_widths_px: [4]u16,
-    /// Variant construction is opaque unless a semantic PaintStyle says otherwise. A field
-    /// default makes that invariant independent of which closed variant is selected.
+    /// semantic PaintStyle이 달리 말하지 않는 한 variant는 불투명(opaque)하게 만든다. 필드 기본값으로
+    /// 두면 그 불변식이 어떤 닫힌 variant를 골랐는지와 무관해진다.
     opacity: u8 = 0xFF,
     shadow: ?ResolvedShadow,
 };
@@ -35,9 +35,8 @@ pub const ResolvedTextStyle = struct {
 
 pub const ResolvedButtonStyle = ResolvedCardStyle;
 
-/// Buttons have their own base palette and interaction states.  Sharing only the resolved quad
-/// shape with cards keeps rendering cheap without letting a disclosure/card variant leak into a
-/// command target.
+/// Button은 자기만의 기본 팔레트와 interaction state를 갖는다. card와는 해석된 quad 모양만 공유하므로
+/// 렌더링은 싸게 유지되면서도 disclosure/card variant가 command 대상으로 새지 않는다.
 pub fn resolveButton(
     id: ui_tree.UiId,
     visual: ui_style.ButtonVisual,
@@ -72,9 +71,9 @@ pub fn resolveButton(
     return result;
 }
 
-/// Resolves one card without touching a renderer. Explicit paint props replace only the base
-/// variant; pressed/focus/hover remain visible above them, and disabled is intentionally last so
-/// an inaccessible custom color cannot make an inert action look enabled.
+/// renderer를 건드리지 않고 card 하나를 해석한다. 명시적 paint props는 base variant만 대체하고,
+/// pressed/focus/hover는 그 위에 그대로 보인다. disabled를 의도적으로 마지막에 두어, 접근성이 나쁜
+/// 사용자 지정 색이 비활성 action을 활성처럼 보이게 만들지 못한다.
 pub fn resolveCard(
     id: ui_tree.UiId,
     visual: ui_style.CardVisual,
@@ -105,8 +104,8 @@ pub fn resolveCard(
     return result;
 }
 
-/// Text shaping is ML3b work, but its foreground and opacity already use the same typed style
-/// vocabulary. Keeping this pure resolver now avoids a later text-only color rule in a host.
+/// text shaping은 ML3b의 일이지만, 그 전경색과 불투명도는 이미 같은 typed 스타일 어휘를 쓴다. 지금
+/// 이 순수 resolver를 두면 나중에 host에 텍스트 전용 색 규칙이 따로 생기는 일을 막는다.
 pub fn resolveText(visual: ui_style.TextVisual) ResolvedTextStyle {
     var foreground: tokens.ColorRole = switch (visual.tone) {
         .primary => .surface_fg,

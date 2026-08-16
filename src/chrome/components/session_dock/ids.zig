@@ -1,7 +1,7 @@
-//! Frame-local action table for Session Dock.
+//! Session Dock의 frame-local action table이다.
 //!
-//! Pointer hit testing returns only `UiActionId`; this table is the deliberate second half that
-//! restores domain meaning without teaching the generic UI interaction layer about archive records.
+//! pointer hit test는 `UiActionId`만 돌려준다. 이 표는 그 짝이 되는 나머지 절반으로, 범용 UI
+//! interaction 층에 archive record를 가르치지 않고도 도메인 의미를 되살린다.
 
 const intent_table = @import("../../ui/intent_table.zig");
 const types = @import("types.zig");

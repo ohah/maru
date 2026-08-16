@@ -1,4 +1,4 @@
-//! Opaque action identities for ArchiveSessionDetailPanel.
+//! ArchiveSessionDetailPanel의 opaque action identity다.
 
 const intent_table = @import("../../ui/intent_table.zig");
 

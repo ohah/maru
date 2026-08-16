@@ -1,4 +1,4 @@
-//! Bounded geometry and opaque action projection for ArchiveSessionDetailPanel.
+//! ArchiveSessionDetailPanel의 bounded geometry·opaque action 투영이다.
 
 const icons = @import("../../../icons.zig");
 const tree = @import("../../ui/tree.zig");
@@ -57,12 +57,12 @@ pub const Frame = struct {
 
 pub const BuildError = tree.BuildError || ui_button.ButtonError || error{ InsufficientNodeBuffer, InsufficientActionBuffer, TooManyTurns };
 
-/// Produces exactly one rect tree for text, paint, hover and pointer dispatch. The component has
-/// no fallback row arithmetic: hidden/disabled actions are encoded in this tree and action table.
+/// text·paint·hover·pointer dispatch가 함께 쓰는 rect tree를 정확히 하나만 만든다. 컴포넌트에는
+/// 폴백 행 계산이 없다 — 숨김/비활성 action은 이 tree와 action table에 인코딩된다.
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
-    // A stale/unavailable result may still carry an old DTO while its source identity is being
-    // rejected. Do not materialize any turn or live-session affordance from that old value: the
-    // state boundary is enforced before tree/action publication, not only by dim paint.
+    // stale/unavailable 결과는 source identity가 거부되는 중에도 옛 DTO를 그대로 들고 있을 수 있다.
+    // 그 옛 값에서 turn이나 라이브 세션 affordance를 만들지 않는다 — state 경계는 흐린 paint가 아니라
+    // tree/action publish 전에 강제한다.
     const visible_turns: []const types.Turn = if (types.isActionable(props)) props.turns else &.{};
     if (visible_turns.len > max_turns) return error.TooManyTurns;
     const live_count: usize = if (types.isActionable(props) and props.focus_live_enabled) 1 else 0;

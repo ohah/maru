@@ -62,9 +62,9 @@ pub const TextOptions = struct {
     measure: ?layout.MeasureFn = null,
 };
 
-/// Button is an explicit command target, not an interactive Card alias.  It intentionally
-/// carries no text or provider payload: component views emit the immutable label separately,
-/// while this node is the one published border-box/action capability used by paint and input.
+/// Button은 상호작용 Card의 별칭이 아니라 명시적 command 대상이다. 텍스트나 provider payload를
+/// 의도적으로 싣지 않는다 — 불변 label은 component view가 따로 내고, 이 node는 paint와 input이 함께
+/// 쓰는 단 하나의 published border-box/action capability다.
 /// Button이 선언하는 아이콘 슬롯. 정의는 `ui/style.zig`가 소유한다 — published visual props와
 /// node props가 같은 타입을 써야 둘이 갈리지 않는다. 등록 판정은 `ui/button.zig`가 주입받은
 /// predicate로 후보 단계에서 한다(chrome은 renderer를 import할 수 없다).
@@ -200,8 +200,8 @@ pub const UiNode = struct {
     }
 };
 
-/// Internal layout node. Domain components compose this around semantic children; it is not a
-/// user-facing Chrome design-system component.
+/// 내부 layout node다. 도메인 component가 semantic 자식을 이걸로 감싸며, 사용자에게 보이는 Chrome
+/// 디자인 시스템 컴포넌트가 아니다.
 pub fn container(options: ContainerOptions, children: []const UiNode) UiNode {
     return .{
         .id = options.id,
@@ -314,9 +314,9 @@ pub const RectEntry = struct {
     /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. payload가 무엇을 옮기는지는
     /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
     drag: ?DragDeclaration = null,
-    /// This is an exact projection of immutable semantic props, not a second style source.
-    /// `ui_paint` consumes this flattened snapshot alongside the same rect/action used by
-    /// interaction, so later host/Metal stages cannot rediscover a variant from domain state.
+    /// 이것은 불변 semantic props의 정확한 투영이지 두 번째 스타일 출처가 아니다. `ui_paint`가 이
+    /// 평탄화된 snapshot을 interaction이 쓰는 같은 rect/action과 함께 소비하므로, 뒤따르는 host/Metal
+    /// 단계가 도메인 state에서 variant를 다시 찾아낼 수 없다.
     visual: VisualProps = .none,
 };
 

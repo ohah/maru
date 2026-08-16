@@ -1,4 +1,4 @@
-//! Generic Button builder — B1-generic-component.
+//! 범용 Button builder — B1-generic-component.
 //!
 //! 지금까지 command 표면은 소비자가 각자 만들었다. Session Dock은 `tree.button`(자식 없는 leaf)에
 //! label을 자기 view로 따로 그렸고, 그 label의 전경·크기·아이콘 배치를 컴포넌트가 알고 있었다.

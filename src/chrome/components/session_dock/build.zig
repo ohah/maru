@@ -1,7 +1,7 @@
-//! Bounded Session Dock geometry and action projection.
+//! Session Dock의 bounded geometry·action 투영이다.
 //!
-//! A caller supplies every backing slice. Failed candidates clear through `ui.tree.build`, so a
-//! half-built dock can never replace the previous tree/action snapshot in the platform host.
+//! backing slice는 전부 caller가 준다. 실패한 후보는 `ui.tree.build`를 거치며 지워지므로, 반쯤 만들다
+//! 만 dock이 platform host의 이전 tree/action snapshot을 대체하는 일은 생기지 않는다.
 
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
@@ -67,7 +67,7 @@ pub const NodeIds = struct {
 };
 
 pub const Buffers = struct {
-    /// `items + scopes + top-level children`; root itself remains a stack value.
+    /// `items + scopes + 최상위 자식` 몫이다. root 자신은 스택 값으로 남는다.
     nodes: []tree.UiNode,
     entries: []tree.RectEntry,
     layout_items: []layout.Item,
@@ -153,9 +153,9 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
 
 pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer, TooManyTurns };
 
-/// Builds a column whose text is emitted later from the resulting rect tree. Every interactive
-/// rectangle belongs to this one candidate tree: no platform y-row arithmetic is allowed to make
-/// a second hit region for scopes/groups/cards.
+/// 텍스트를 나중에 결과 rect tree에서 내보낼 column을 만든다. 상호작용하는 사각형은 전부 이 후보
+/// tree 하나에 속한다 — platform이 y-행 계산으로 scope/group/card의 두 번째 hit 영역을 만드는 것은
+/// 허용하지 않는다.
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     for (props.items) |item| switch (item) {
         .group => {},
@@ -434,10 +434,9 @@ fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, variant: t
     });
 }
 
-/// Action cards are leaf nodes, so their own validation cannot use main-axis `fill`: a leaf
-/// defaults to a column container and correctly rejects cross-axis fill. The shared dock content
-/// width is already definite when we build its one published tree, therefore divide that exact
-/// width after the explicit gaps instead of weakening the generic layout invariant.
+/// action 카드는 leaf node라 자기 검증에서 주축 `fill`을 쓸 수 없다 — leaf는 기본이 column container라
+/// 교차축 fill을 정당하게 거부한다. publish할 tree 하나를 만드는 시점에는 공유 dock content 폭이 이미
+/// 확정이므로, 범용 layout 불변식을 느슨하게 만드는 대신 명시적 gap을 뺀 그 정확한 폭을 나눈다.
 fn expansionActionWidth(viewport_width_px: f32, m: types.DockMetrics, action_count: usize) f32 {
     if (action_count == 0) return 0;
     const content_width = @max(viewport_width_px - @as(f32, @floatFromInt(m.root_inset * 2)), 0);

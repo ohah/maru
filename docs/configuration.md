@@ -53,8 +53,10 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 `terminal.integrated.defaultProfile.windows`/`.osx`/`.linux`로 푸는 것과 같은 모양이다.
 
 ```conf
-shell.command         = /bin/zsh                                   # 기본(접미 없는 줄)
-shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe     # Windows에서만 이긴다
+# 기본(접미 없는 줄)
+shell.command         = /bin/zsh
+# Windows에서만 이긴다
+shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe
 font.size.macos       = 14
 font.size.linux       = 12
 ```
@@ -65,7 +67,8 @@ font.size.linux       = 12
 
 ```conf
 shell.command         = /bin/zsh
-shell.command.windows = C:\...\pwsh.exe   # 뒤에 있으므로 Windows에서 이긴다
+# 뒤에 있으므로 Windows에서 이긴다
+shell.command.windows = C:\...\pwsh.exe
 ```
 
 - **덮어쓰려면 뒤에 둔다.** 대부분의 키는 나중 줄이 이기므로 접미 줄을 아래에 적는다. 반대로
@@ -113,9 +116,12 @@ theme.palette.0  = #1c1c1c
 theme.palette.1  = #d35f5f
 # theme.min-contrast = 3.0   # 가독성 하한(WCAG 명암비) — 전경이 안 읽히면 밝은 배경에선 어둡게·어두운 배경에선 밝게. 0=끔
 
-cursor.shape = block              # 기본 모양 — 앱 DECSCUSR가 지정하면 그게 우선(CSI 0 SP q·RIS면 이 값 복귀)
-cursor.blink = true               # true=앱(DECSCUSR)에 위임, false=앱 요청까지 덮어 커서 고정
-cursor.blink-interval-ms = 500   # 깜빡임 반주기(ms) — cursor.blink=true일 때
+# 기본 모양 — 앱 DECSCUSR가 지정하면 그게 우선(CSI 0 SP q·RIS면 이 값 복귀)
+cursor.shape = block
+# true=앱(DECSCUSR)에 위임, false=앱 요청까지 덮어 커서 고정
+cursor.blink = true
+# 깜빡임 반주기(ms) — cursor.blink=true일 때
+cursor.blink-interval-ms = 500
 # cursor.blink-fade-ms = 120      # 깜빡임 전환 페이드(ms) — 기본 0(즉각 on/off), 값을 주면 부드럽게
 # 커서 색 override(선택). 적으면 테마와 무관하게 커서만 그 색으로 칠한다. 안 적으면 테마를 따른다.
 # cursor.color = #ff5555   # 커서 칸 배경(미지정 시 theme.cursor)
@@ -126,13 +132,21 @@ window.padding-right  = 8
 window.padding-bottom = 4
 window.padding-left   = 8
 # 또는 대칭 alias: window.padding-x = 8 (좌우 동시), window.padding-y = 4 (상하 동시)
-window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투명, 1=불투명
-render.frame-rate     = 60    # 앱 frame-loop 주사율(Hz) — 30~120, 기본/권장 60
-window.background-image =      # 배경 이미지 PNG 경로(절대경로) — 비면 없음
-window.blur           = 0     # 창 뒤 데스크톱 블러 반경(px) — 0=끔, opacity<1일 때만
-window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클수록 흐림
-split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 크기와 무관한 고정 pt
-file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app | system
+# 배경 투명도(0~1) — default 배경만 투명, 1=불투명
+window.opacity        = 1.0
+# 앱 frame-loop 주사율(Hz) — 30~120, 기본/권장 60
+render.frame-rate     = 60
+# 배경 이미지 PNG 경로(절대경로). 기본은 없음이라 이 줄은 예시로만 둔다 —
+# 빈 값으로 적으면 "비어 있음" 진단이 뜬다(동작은 기본값 유지).
+# window.background-image = /Users/me/wall.png
+# 창 뒤 데스크톱 블러 반경(px) — 0=끔, opacity<1일 때만
+window.blur           = 0
+# 비활성 split pane 디밍(0~1) — 0=끔, 클수록 흐림
+window.unfocused-dim  = 0.0
+# split 경계선 두께(pt) — 0=숨김, 폰트 크기와 무관한 고정 pt
+split.divider-thickness = 1.0
+# 파일 패널 외부 링크: in-app | system
+file-panel.external-link-target = in-app
 ```
 
 ## 키

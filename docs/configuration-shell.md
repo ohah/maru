@@ -23,8 +23,10 @@
 workspace.root = ~/projects
 
 # 상속 토글(기본 둘 다 true = 포커스 cwd 상속). false면 그 종류는 항상 root에서 연다.
-workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
-workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
+# 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
+workspace.tab-inherit-cwd   = true
+# 새 분할(⌘D, 팬)
+workspace.split-inherit-cwd = true
 
 ```
 
@@ -95,8 +97,10 @@ Maru가 이 terminfo 소스를 바이너리에 내장하고, 자식 셸을 띄�
 드물게 셸 설정/프레임워크가 특정 `$TERM`을 기대하면 바꿀 수 있다:
 
 ```conf
-term = xterm-256color   # 표준값으로 되돌리기
-term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
+# 표준값으로 되돌리기
+term = xterm-256color
+# 다른 값(그 terminfo가 설치돼 있어야 함)
+term = xterm-ghostty
 ```
 
 > 시스템 전역이나 **Maru 밖의 셸**(예: 다른 터미널에서 Maru에 붙는 경우)에서도 `xterm-maru`를 쓰려면
@@ -154,7 +158,8 @@ term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 ```conf
 env.EDITOR = nvim
 env.LANG = en_US.UTF-8
-env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈 값(env.FOO =)도 허용
+# 값 내부 공백은 보존(양끝만 다듬는다), 빈 값(env.FOO =)도 허용
+env.MY_FLAG = a b c
 ```
 
 - **병합 정책**: 부모(maru를 띄운) 환경을 상속한 뒤, maru가 관리하는 변수(`TERM`/`COLORTERM`/`TERM_PROGRAM` 등)를
@@ -178,7 +183,8 @@ env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈
 
 ```conf
 shell.command = /opt/homebrew/bin/fish
-shell.args = -i -l    # 공백으로 토큰 분리(따옴표 미지원). 빈 값이면 인자 없음
+# 공백으로 토큰 분리(따옴표 미지원). 빈 값이면 인자 없음
+shell.args = -i -l
 ```
 
 - **`shell.command`** — 셸 실행 파일 경로. 비어 있으면(기본) 위 자동 결정. maru는 셸을 거치지 않고 `execve`로

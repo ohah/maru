@@ -884,11 +884,30 @@ pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
 pub fn applyForcedCommitMessage(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SCM_COMMIT") orelse return;
     if (self.dock.view != .source_control) return;
-    if (self.scm_commit_focused) return;
+    if (self.scm_commit_focused) {
+        forceCommitRun(self);
+        return;
+    }
     scm_dock_ops.focusCommit(self);
     scm_dock_ops.insertCommitText(self, std.mem.span(raw));
     // 선택 밴드도 캡처로만 확인할 수 있다(`MARU_FORCE_SCM_COMMIT_SELECT=1` — 전체 선택).
     // 밴드가 글자와 **같은 자를 쓰는지**는 픽셀로만 드러난다: caret·밴드는 셀 열 산술이고 글자는
     // 측정된 advance로 그려지므로, 둘이 어긋나면 밴드가 글자에서 밀린다.
     if (std.c.getenv("MARU_FORCE_SCM_COMMIT_SELECT") != null) self.scm_commit_field.selectAll();
+    forceCommitRun(self);
+}
+
+/// 커밋 **실행**까지 헤드리스로 확인한다(`MARU_FORCE_SCM_COMMIT_RUN=1`). 사용자 클릭과 **같은
+/// 진입점**(`submitCommit`)을 태우므로 판정·메시지 파일·hook은 전부 제품이 한다.
+///
+/// **성사될 때까지 다시 건다.** 첫 tick에는 목록 읽기가 아직 없어(`git_result == null`) 스테이지 판정이
+/// 되지 않아 조용히 돌아간다 — 한 번만 걸면 그 tick을 놓치고 영영 안 눌린다(브랜치 메뉴 픽스처가 같은
+/// 이유로 재시도한다). 한 번 떴거나 사유가 적혔으면 멈춘다.
+fn forceCommitRun(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SCM_COMMIT_RUN") == null) return;
+    if (self.scm_commit_inflight or self.scm_write_inflight != 0) return;
+    if (self.scm_write_error != null) return; // 이유가 이미 적혔다 — 재시도가 그걸 덮지 않게
+    if (self.git_result == null) return; // 아직 읽기 전이다
+    if (self.scm_commit_field.text.items.len == 0) return; // 성공 뒤에는 상자가 비어 있다
+    scm_dock_ops.submitCommit(self);
 }

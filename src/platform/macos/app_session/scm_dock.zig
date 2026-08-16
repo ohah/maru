@@ -1379,7 +1379,15 @@ pub fn switchCommitDraft(self: *AppSession, from: ?[]const u8, to: []const u8) v
     if (from) |old| {
         if (std.mem.eql(u8, old, to)) return;
         stashCommitDraft(self, old);
+        restoreCommitDraft(self, to);
+        return;
     }
+    // **저장소를 처음 알게 된 순간에는 상자를 지우지 않는다.** 사용자는 읽기가 끝나기 전에도 타이핑할
+    // 수 있고(도크는 열리자마자 상자를 보여 준다), 그 글은 "지금 보고 있는 저장소"를 향해 쓴 것이다.
+    // 지우면 첫 읽기가 끝나는 순간 쓴 글이 사라진다 — 제품 캡처에서 실제로 그랬다(2026-08-16).
+    //
+    // 쓰던 글이 있으면 그것이 이 저장소의 초안이 된다(떠날 때 그 키로 담긴다). 비어 있을 때만 꺼낸다.
+    if (self.scm_commit_field.text.items.len > 0) return;
     restoreCommitDraft(self, to);
 }
 

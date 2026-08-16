@@ -837,9 +837,15 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
     jmethodID mRoot = (*env)->GetMethodID(env, viewCls, "getRootWindowInsets", "()Landroid/view/WindowInsets;");
     jobject ins = (*env)->CallObjectMethod(env, decor, mRoot);
     if (!ins) { LOGI("insets_unavailable"); (*vm)->DetachCurrentThread(vm); return; }
+    // **컷아웃도 함께 묻는다.** `systemBars()` 만 물으면 카메라 홀이 있는 기기에서 짧게 나온다 —
+    // 이 에뮬레이터는 홀이 **y=64..130**(`cutoutSpec={M 507,64 a 33,33 ...}`)인데 systemBars 는
+    // **63** 을 돌려준다. 그 값만 쓰면 **본문 첫 줄들이 카메라 구멍 뒤에 깔린다** — 화면 가운데
+    // 글자가 이유 없이 안 보이는 자리가 된다.
     jclass typeCls = (*env)->FindClass(env, "android/view/WindowInsets$Type");
     jmethodID mBars = (*env)->GetStaticMethodID(env, typeCls, "systemBars", "()I");
+    jmethodID mCut = (*env)->GetStaticMethodID(env, typeCls, "displayCutout", "()I");
     jint mask = (*env)->CallStaticIntMethod(env, typeCls, mBars);
+    if (mCut) mask |= (*env)->CallStaticIntMethod(env, typeCls, mCut);
     jclass insCls = (*env)->GetObjectClass(env, ins);
     jmethodID mGet = (*env)->GetMethodID(env, insCls, "getInsets", "(I)Landroid/graphics/Insets;");
     jobject box = (*env)->CallObjectMethod(env, ins, mGet, mask);

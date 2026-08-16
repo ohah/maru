@@ -41344,14 +41344,22 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // (2) 좌클릭 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
-    session.showConfirm(.app_close_running, .active_term);
+    // 픽스처 문장은 **짧게 유지한다** — 이 테스트가 쓰는 좌표(패널 밖 원점·터미널 본문 지점)는 모달 폭을
+    // 전제로 잡은 것이라, 실제 안내 문장으로 바꾸면 패널이 넓어져 그 지점이 패널 안으로 들어올 수 있다.
+    // 그러면 호버 게이트가 없어도 .default 가 나와 **게이트를 증명하지 못하는데 통과한다**. 그래서 키
+    // 진입점(showConfirm) 대신 문자열 진입점을 직접 부른다 — 경로는 같다(showConfirm 은 이것의 래퍼).
+    session.showConfirmButtons(.{ .close = .active_term }, "닫을까요?", .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
     session.mouse(1, 1, 1, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
 
     // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default가
     //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
-    session.showConfirm(.app_close_running, .active_term);
+    // 픽스처 문장은 **짧게 유지한다** — 이 테스트가 쓰는 좌표(패널 밖 원점·터미널 본문 지점)는 모달 폭을
+    // 전제로 잡은 것이라, 실제 안내 문장으로 바꾸면 패널이 넓어져 그 지점이 패널 안으로 들어올 수 있다.
+    // 그러면 호버 게이트가 없어도 .default 가 나와 **게이트를 증명하지 못하는데 통과한다**. 그래서 키
+    // 진입점(showConfirm) 대신 문자열 진입점을 직접 부른다 — 경로는 같다(showConfirm 은 이것의 래퍼).
+    session.showConfirmButtons(.{ .close = .active_term }, "닫을까요?", .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
     const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)
     try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, 0));
 }

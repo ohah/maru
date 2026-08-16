@@ -585,6 +585,72 @@ test "언어 테이블은 모든 키를 채운다 — 누락은 컴파일에 잡
     }
 }
 
+/// 테스트 보조 — 문자열에서 `{N}` 자리표시자 인덱스를 오름차순 집합으로 뽑는다.
+fn placeholderSet(s: []const u8, out: *[8]u8) []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != '{') continue;
+        const close = std.mem.indexOfScalarPos(u8, s, i, '}') orelse continue;
+        const idx = std.fmt.parseInt(u8, s[i + 1 .. close], 10) catch continue;
+        var seen = false;
+        for (out[0..n]) |v| {
+            if (v == idx) seen = true;
+        }
+        if (!seen and n < out.len) {
+            out[n] = idx;
+            n += 1;
+        }
+        i = close;
+    }
+    std.mem.sort(u8, out[0..n], {}, std.sort.asc(u8));
+    return out[0..n];
+}
+
+test "언어 테이블은 자리표시자 집합이 같아야 한다 — 번역이 값을 잃거나 더하면 화면이 틀린다" {
+    // 번역자가 `{0}`을 빠뜨리면 값이 사라지고, 없던 `{1}`을 넣으면 원문이 그대로 남는다(§6.3).
+    // 둘 다 그 언어에서만 나타나므로 사람이 두 테이블을 나란히 보지 않으면 못 잡는다.
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        var be: [8]u8 = undefined;
+        var bk: [8]u8 = undefined;
+        const pe = placeholderSet(@field(en, f.name), &be);
+        const pk = placeholderSet(@field(ko, f.name), &bk);
+        testing.expectEqualSlices(u8, pe, pk) catch |err| {
+            std.debug.print("자리표시자 불일치: .{s}\n  en={any}\n  ko={any}\n", .{ f.name, pe, pk });
+            return err;
+        };
+    }
+}
+
+test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항목을 잡는다" {
+    // 리터럴을 키로 옮길 때 `en` 쪽에 원문을 그대로 붙여 두는 실수가 가장 흔하다.
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        const v = @field(en, f.name);
+        var it = std.unicode.Utf8Iterator{ .bytes = v, .i = 0 };
+        while (it.nextCodepoint()) |cp| {
+            if (cp >= 0xAC00 and cp <= 0xD7A3) {
+                std.debug.print("영어 테이블에 한글: .{s} = \"{s}\"\n", .{ f.name, v });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "한국어 테이블에는 한글이 있다 — 번역을 빠뜨리고 영어를 복사한 항목을 잡는다" {
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        const v = @field(ko, f.name);
+        var has = false;
+        var it = std.unicode.Utf8Iterator{ .bytes = v, .i = 0 };
+        while (it.nextCodepoint()) |cp| {
+            if (cp >= 0xAC00 and cp <= 0xD7A3) has = true;
+        }
+        if (!has) {
+            std.debug.print("한국어 테이블에 한글 없음: .{s} = \"{s}\"\n", .{ f.name, v });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "tIn: 언어별로 다른 문자열을 준다 — 전역을 건드리지 않는다" {
     const before = lang();
     try testing.expectEqualStrings("Cannot open the selected folder.", tIn(.en, .fp_root_open_failed));

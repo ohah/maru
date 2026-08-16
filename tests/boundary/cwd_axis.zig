@@ -57,7 +57,7 @@ const Entry = struct {
 const inventory = [_]Entry{
     .{
         .path = "src/platform/macos/app_session.zig",
-        .fns = &.{ "termCwdIsRemote", "respawnEndedPlaceholder", "writeEndedPlaceholderGuidance", "currentCwd" },
+        .fns = &.{ "termCwdIsRemote", "respawnEndedPlaceholder", "writeEndedPlaceholderGuidance", "currentCwd", "pinTermsOutsideRepo", "pinTermsOutsideRepo" },
         .aliases = 2,
         .why =
         \\전부 Q1이다 — 셸이 보고한 값 **그 자체**가 답이라 커널 값으로 대체할 수 없다.
@@ -72,6 +72,11 @@ const inventory = [_]Entry{
         \\`sidebarCwdPath`의 원격 분기는 여기 없다 — 그건 `cwd_host`를 읽지 `cwd`를 읽지 않는다.
         \\(첫 재고에 그것을 6번째로 잘못 적었고, 이 게이트가 스스로 그 오류를 잡았다.)
         \\별칭 둘은 `app_cursor_keys`·`kitty_flags`·`mouse_tracking_mode` 등을 읽는다. cwd는 안 읽는다.
+        \\
+        \\`pinTermsOutsideRepo`(둘)는 **테스트 픽스처**다 — 축을 우회해 읽는 것이 아니라 축의 **입력을
+        \\심는다**(관측값을 비우고 `/tmp`를 넣는다). 저장소 목록이 터미널 cwd에서 나오게 된 뒤(P3d),
+        \\스모크 Term은 OSC 7이 없어 커널 cwd(= 테스트 프로세스의 저장소)로 폴백해 **테스트가 어디서
+        \\도는지에 따라 목록이 갈렸다**. 심는 값이 저장소가 아닌 곳이라 그 새는 길이 닫힌다.
         ,
     },
     .{

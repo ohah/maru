@@ -644,9 +644,8 @@ pub fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord:
         if (std.meta.eql(other.action, entry.action)) continue;
         const oc = command_catalog.chordForAction(resolver_pre, other.action) orelse continue;
         if (oc.eql(chord)) {
-            var msg_buf: [160]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "이 단축키는 '{s}'에 이미 묶여 있습니다 — 덮어씁니다", .{other.title}) catch "이 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다";
-            settings_ops.settingsMessageOrNotice(self, msg); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
+            // 값이 끼는 유일한 자리 — §6.3 보간 진입점을 쓴다(std.fmt은 comptime 틀만 받아 번역 문자열에 못 쓴다).
+            settings_ops.settingsMessageOrNoticeFmt(self, .set_chord_taken_by, &.{.{ .s = other.title }});
             break;
         }
     }
@@ -691,14 +690,14 @@ pub fn rebindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry, 
     const a = self.loaded_config.arena.allocator();
     // 전역 등록 가능한 chord인지 먼저 확인(가상 키코드 매핑) — 안 되면 파일에 못 쓸 chord라 거부.
     if (global_hotkey.descriptorFor(.{ .chord = chord, .action = entry.action }) == null) {
-        settings_ops.settingsMessageOrNotice(self, "이 키는 전역 단축키로 등록할 수 없습니다"); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
+        settings_ops.settingsMessageOrNotice(self, .set_global_key_not_allowed); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
         return;
     }
     // 충돌 경고(선택): 이 chord가 **다른 전역 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — last-wins).
     for (self.loaded_config.global_bindings) |other| {
         if (other.action == entry.action) continue;
         if (other.chord.eql(chord)) {
-            settings_ops.settingsMessageOrNotice(self, "이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
+            settings_ops.settingsMessageOrNotice(self, .set_global_chord_taken);
             break;
         }
     }

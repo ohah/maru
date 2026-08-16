@@ -29,6 +29,7 @@ pub const Lang = enum { en, ko };
 ///
 /// **이름 규칙**: `<영역>_<의미>`. 영역 접두로 그 키가 어디 것인지 코드에서 읽힌다.
 ///   - `fp_root_*` — 파일 탐색기 루트 변경·제거·선택의 결과 안내(`app_session/file_panel.zig`)
+///   - `set_*` — 세팅 페이지의 배너/토스트(`app_session/settings.zig`·`input.zig`)
 pub const Table = struct {
     // ── 파일 탐색기 루트 (I3a 첫 슬라이스) ────────────────────────────────
     // 전부 `reportFileTreeRootOutcome`의 인자로만 쓰인다. 그 함수가 유일한 소비처라
@@ -59,6 +60,24 @@ pub const Table = struct {
     fp_root_request_id_exhausted: [:0]const u8,
     fp_root_picker_alloc_failed: [:0]const u8,
     fp_root_validate_busy: [:0]const u8,
+
+    // ── 세팅 페이지 배너/토스트 (I3a 슬라이스 2) ──────────────────────────
+    // `settingsMessageOrNotice`(세팅이 열려 있으면 배너, 아니면 토스트)의 인자로만 쓰인다.
+    // 그 함수도 단일 sink 라 파라미터를 `Key`로 바꿔 1차 방어를 완성했다.
+    set_global_key_not_allowed: [:0]const u8,
+    set_global_chord_taken: [:0]const u8,
+    set_no_chord_assigned: [:0]const u8,
+    set_no_global_chord_assigned: [:0]const u8,
+    set_env_format: [:0]const u8,
+    set_env_key_empty: [:0]const u8,
+    set_chord_parse_failed: [:0]const u8,
+    set_macro_format: [:0]const u8,
+    set_chord_conflict: [:0]const u8,
+    set_macro_overrides_default: [:0]const u8,
+    set_macro_line_format: [:0]const u8,
+    set_chord_empty: [:0]const u8,
+    /// 값이 끼어드는 유일한 항목 — `{0}`에 이미 그 chord 를 쓰는 명령 이름이 들어간다(§6.3 보간).
+    set_chord_taken_by: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -88,6 +107,20 @@ pub const en: Table = .{
     .fp_root_request_id_exhausted = "Cannot issue more folder selection request numbers.",
     .fp_root_picker_alloc_failed = "Cannot prepare folder selection state.",
     .fp_root_validate_busy = "Folder verification is busy, so the request could not start.",
+
+    .set_global_key_not_allowed = "This key cannot be registered as a global shortcut",
+    .set_global_chord_taken = "This global shortcut is already bound to another action — overwriting",
+    .set_no_chord_assigned = "No shortcut is assigned yet",
+    .set_no_global_chord_assigned = "No global shortcut is assigned yet",
+    .set_env_format = "Environment variables must be in KEY=VALUE form",
+    .set_env_key_empty = "The environment variable KEY is empty",
+    .set_chord_parse_failed = "Could not read the shortcut notation",
+    .set_macro_format = "Macros must be in text:/esc:/ctrl: form",
+    .set_chord_conflict = "Could not apply — it conflicts with another shortcut",
+    .set_macro_overrides_default = "A macro overrides the default shortcut",
+    .set_macro_line_format = "Macros must be in 'chord = text:...' form",
+    .set_chord_empty = "The shortcut is empty",
+    .set_chord_taken_by = "This shortcut is already bound to '{0}' — overwriting",
 };
 
 pub const ko: Table = .{
@@ -117,6 +150,20 @@ pub const ko: Table = .{
     .fp_root_request_id_exhausted = "폴더 선택 요청 번호를 더 발급할 수 없습니다.",
     .fp_root_picker_alloc_failed = "폴더 선택 상태를 준비할 수 없습니다.",
     .fp_root_validate_busy = "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.",
+
+    .set_global_key_not_allowed = "이 키는 전역 단축키로 등록할 수 없습니다",
+    .set_global_chord_taken = "이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다",
+    .set_no_chord_assigned = "이미 지정된 단축키가 없습니다",
+    .set_no_global_chord_assigned = "이미 지정된 전역 단축키가 없습니다",
+    .set_env_format = "환경 변수는 KEY=VALUE 형식이어야 합니다",
+    .set_env_key_empty = "환경 변수 KEY가 비어 있습니다",
+    .set_chord_parse_failed = "단축키 표기를 읽지 못했습니다",
+    .set_macro_format = "매크로는 text:/esc:/ctrl: 형식이어야 합니다",
+    .set_chord_conflict = "다른 단축키와 충돌해 적용하지 못했습니다",
+    .set_macro_overrides_default = "기본 단축키를 매크로가 덮어씁니다",
+    .set_macro_line_format = "매크로는 'chord = text:...' 형식이어야 합니다",
+    .set_chord_empty = "단축키가 비어 있습니다",
+    .set_chord_taken_by = "이 단축키는 '{0}'에 이미 묶여 있습니다 — 덮어씁니다",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.

@@ -74,9 +74,6 @@ const os_suffixes = [_]struct { suffix: []const u8, tag: std.Target.Os.Tag }{
     .{ .suffix = ".linux", .tag = .linux },
 };
 
-/// 파일에 쓰는 **권장 철자**(진단 메시지·문서용). `.osx`는 받아들이되 권하지 않는다.
-pub const canonical_os_suffixes = "`.windows`·`.macos`·`.linux`";
-
 /// 키에서 OS 접미를 떼어 낸다. `os`가 null이면 접미가 없는 **기본 키**다.
 ///
 /// 모르는 이름(`shell.command.freebsd`)은 접미로 보지 않는다 — 그러면 기본 키 이름이 되어 "알 수 없는 키"
@@ -121,8 +118,9 @@ fn validateForeignOsKey(
     }
 }
 
-/// 호스트 OS의 접미(`".windows"` 등). 지원 목록에 없는 OS면 null.
-pub fn hostOsSuffix() ?[]const u8 {
+/// 호스트 OS의 접미(`".windows"` 등). 지원 목록에 없는 OS면 null. **테스트가 호스트에 무관하게
+/// 문자열을 만들려고 쓴다** — 제품 코드 소비자는 없다(있었던 `writeBackKey`는 제거됐다).
+fn hostOsSuffix() ?[]const u8 {
     const host = @import("builtin").os.tag;
     for (os_suffixes) |s| if (s.tag == host) return s.suffix;
     return null;

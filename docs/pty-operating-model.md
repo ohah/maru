@@ -2,6 +2,11 @@
 
 이 문서는 macOS 초기 `PtySession`을 어떻게 운영할지 정한다.
 
+> **Windows 백엔드는 여기가 아니다.** ConPTY는 fd도 `openpty`도 없고, 무엇보다 **자식이 죽어도 파이프가
+> 끊기지 않아** EOF·종료 규율이 다르다. 그 계약은 [windows-platform.md](windows-platform.md) §4가 단일
+> 출처다. 아래의 중립 표면(`waitIo`·`readChunk`·`writeInputNonBlocking`·`reapAfterEof`)은 두 백엔드가
+> **같은 시그니처로** 채운다 — 갈리는 것은 그 밑의 메커니즘뿐이다.
+
 > **현재 계약:** 이 문서의 close는 PTY/process를 실제 종료한다. 향후 앱 전체 quit만 client detach로 바꾸고
 > `TerminalCore + LivePtySession`을 별도 Maru process가 소유하는 계획은
 > [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. 그 P4 전까지 현재 app teardown과

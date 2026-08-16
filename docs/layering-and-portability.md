@@ -151,6 +151,18 @@ flowchart TD
 `src/main.zig` 테스트도 이제 **모든 호스트**에서 돈다(`build.zig`의 macOS 게이트 제거) — POSIX 파일 모드가 필요한
 하나만 전제(`@hasDecl(Permissions, "toMode")`)로 skip한다.
 
+**중립 3층이 실제 L4 위에 섰다 (2026-08-16, 같은 호스트 — W4·W6)**: 위 실측까지는 "중립 레이어가 컴파일되고
+테스트가 돈다"였다. 이제 그 위에 **두 번째 L4 백엔드**(ConPTY, `src/pty/windows.zig`)가 붙어 `maru demo`·
+`app-pty-smoke`·`app-pty-loop-smoke`·`app-pty-interactive-loop-smoke` 넷이 Windows에서 **macOS와 같은
+artifact**를 낸다(마지막 것은 pwsh 7을 띄워 프레임 루프로 친 입력이 표식으로 돌아온다). §4가 "L1 ~85–95%
+재사용"으로 추정한 것이 여기서 실물로 확인된다 — **중립 계약(`SpawnRequest`·`waitIo`·`IoReady`·`readChunk`·
+`writeInputNonBlocking`)은 한 글자도 바뀌지 않았다.** 백엔드가 바꾼 것은 그 아래 메커니즘뿐이다.
+
+그리고 §4.1이 이미 말한 것과 **같은 부류의 함정**이 L4에서 한 번 더 나왔다. std의 호스트 의존 동작이 아니라
+이번에는 **OS 개념의 부재**다: ConPTY에는 "자식이 죽으면 EOF"가 없고(pseudoconsole이 살아 있는 동안 conhost가
+파이프를 붙든다), 프로세스 그룹이 없어 `kill(-pid)`에 대응하는 것이 job object뿐이다. 둘 다 중립 계약을 바꾸지
+않고 백엔드가 흡수했다 — 그 규율과 실측은 [windows-platform.md](windows-platform.md) §4.1b가 단일 출처다.
+
 **드러난 것 — 중립성은 import 경계로만 지켜지고 있었다.** `check-boundaries`는 중립 레이어에 OS *타입명*이 새는 것을 막지만
 (§8), **std의 호스트 의존 동작**은 못 잡는다. 실제로 L2가 `std.fs.path.join`/`resolve`(호스트 native 구분자)를 써서 같은
 코드가 macOS에서는 `/repo/docs`를, Windows에서는 `/repo\docs`를 만들었다 — 그 자리의 L2 코드는 입력의 역슬래시를 이미

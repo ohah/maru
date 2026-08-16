@@ -65,6 +65,7 @@ const std = @import("std");
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 const spawn_util = @import("windows_spawn.zig");
+const integration = @import("windows_integration.zig");
 
 // ── Win32 ─────────────────────────────────────────────────────────────────────────────────────
 // 바인딩을 손으로 둔다. PoC에서 이 정확한 선언들로 실측을 끝냈고(§6), std 바인딩을 섞으면 그 실측과
@@ -158,6 +159,7 @@ extern "kernel32" fn WaitForMultipleObjects(count: u32, handles: [*]const HANDLE
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
 extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 /// `RtlGenRandom`의 실제 export 이름. `advapi32`가 서수 없이 이 이름으로 낸다.
 extern "advapi32" fn SystemFunction036(buf: [*]u8, len: u32) callconv(.winapi) u8;
 extern "kernel32" fn CreateProcessW(app: ?[*:0]const u16, cmd: ?[*:0]u16, pa: ?*SECURITY_ATTRIBUTES, ta: ?*SECURITY_ATTRIBUTES, inherit: i32, flags: u32, env: ?*anyopaque, cwd: ?[*:0]const u16, si: *STARTUPINFOEXW, pi: *PROCESS_INFORMATION) callconv(.winapi) i32;
@@ -1162,11 +1164,42 @@ const SpawnedChild = struct {
 
 /// 계약 §4.1a의 ④~⑥. 자식은 **정지 상태로** 만들어 job에 넣은 뒤 깨운다 — 먼저 달리게 두면 job에
 /// 넣기 전에 손자를 만들 수 있고, 그 손자는 트리 종료에서 빠진다.
+/// 통합을 심을 것인가. `assets_dir` 갈래는 이 백엔드가 아직 다루지 않는다 — WSL·git-bash의 rc 파일 주입은
+/// 그 셸의 환경변수를 게스트로 넘기는 별도 문제라(계약 §3.1의 WSL 절) 이 슬라이스 밖이다.
+fn integrationEnabled(request: types.SpawnRequest) bool {
+    const si = request.shell_integration orelse return false;
+    return si == .inline_injection;
+}
+
+/// 부모 환경의 `PROMPT`. 사용자 프롬프트를 덮지 않기 위해 읽는다(계약 §3.3).
+fn parentPrompt(parent_env: []const []const u8) ?[]const u8 {
+    for (parent_env) |entry| {
+        if (spawn_util.envKeyIs(entry, "PROMPT")) return entry["PROMPT=".len..];
+    }
+    return null;
+}
+
+/// 통합이 켜졌고 PowerShell이면 `-NoLogo -NoExit -Command <스크립트>`를 **뒤에** 붙인 argv를 만든다.
+/// 그 외에는 요청의 인자를 그대로 복사한다(호출자가 소유권을 신경 쓰지 않게 항상 같은 타입을 낸다).
+fn integrationArgv(allocator: std.mem.Allocator, request: types.SpawnRequest) !std.ArrayList([]const u8) {
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer argv.deinit(allocator);
+    try argv.appendSlice(allocator, request.args);
+    if (integrationEnabled(request) and integration.familyOf(request.command) == .powershell) {
+        try argv.appendSlice(allocator, integration.powershellArgs());
+    }
+    return argv;
+}
+
 fn spawnChild(allocator: std.mem.Allocator, request: types.SpawnRequest, hpc: HANDLE) !SpawnedChild {
     var result: SpawnedChild = .{};
     errdefer result.terminate();
 
-    const cmdline_utf8 = try spawn_util.buildCommandLine(allocator, request.command, request.args);
+    // 통합이 켜졌고 PowerShell이면 **뒤에** 인자를 덧붙인다(`-Command`는 나머지를 다 먹으므로 마지막이어야
+    // 하고, 사용자가 준 인자는 앞에 그대로 남는다). 그 외 셸은 인자를 건드리지 않는다.
+    var argv = try integrationArgv(allocator, request);
+    defer argv.deinit(allocator);
+    const cmdline_utf8 = try spawn_util.buildCommandLine(allocator, request.command, argv.items);
     defer allocator.free(cmdline_utf8);
     const cmdline = try wide(allocator, cmdline_utf8);
     defer allocator.free(cmdline);
@@ -1259,10 +1292,24 @@ const EnvBlock = struct {
         defer parent.deinit(allocator);
         if (request.env.len == 0) try parent.capture(allocator, request.parent_env);
 
+        // cmd 통합은 **환경변수 하나**다. 사용자 `env.<KEY>` override와 같은 통로로 얹어, 사용자가 명시한
+        // `PROMPT`가 있으면 그쪽이 이긴다(upsert가 뒤에 오는 것을 쓴다) — 통합보다 사용자 설정이 위다.
+        var overrides: std.ArrayList([]const u8) = .empty;
+        defer overrides.deinit(allocator);
+        var cmd_prompt: ?[]u8 = null;
+        defer if (cmd_prompt) |p| allocator.free(p);
+        if (integrationEnabled(request) and integration.familyOf(request.command) == .cmd) {
+            cmd_prompt = try integration.cmdPromptEntry(allocator, parentPrompt(parent.entries));
+            try overrides.append(allocator, cmd_prompt.?);
+            try overrides.appendSlice(allocator, request.env_overrides);
+        } else {
+            try overrides.appendSlice(allocator, request.env_overrides);
+        }
+
         const entries = try spawn_util.buildEnvEntries(allocator, .{
             .env = request.env,
             .parent_env = parent.entries,
-            .env_overrides = request.env_overrides,
+            .env_overrides = overrides.items,
             .term = request.term,
             .pane_id = request.pane_id,
             .ssh_integration_bin = request.ssh_integration_bin,
@@ -1530,6 +1577,141 @@ test "spawn: 잘못된 요청은 자식을 만들기 전에 걸러진다" {
     try testing.expectError(error.SpawnFailed, PtySession.spawn(a, .{
         .command = "C:\\maru-does-not-exist-9e1f.exe",
     }));
+}
+
+// ── W5 셸 통합 주입 ───────────────────────────────────────────────────────────────────────────
+// 주입은 **실제 셸이 프롬프트를 그릴 때만** 관측된다. 그래서 여기서는 진짜 자식을 띄우고 화면에 나온
+// 바이트를 본다. 순수부(값 조립)는 `windows_integration.zig`가 모든 타깃에서 검증한다.
+
+const TestTicker = struct {
+    s: *PtySession,
+    stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+fn testTicker(t: *TestTicker) void {
+    while (!t.stop.load(.acquire)) {
+        Sleep(40);
+        t.s.signalWrite();
+    }
+}
+
+/// `ms` 동안 모은다. `waitIo`가 조용하면 막히므로 wake로 깨워 데드라인을 지킨다(세션은 닫지 않는다).
+fn collectFor(s: *PtySession, a: std.mem.Allocator, out: *std.ArrayList(u8), ms: u64) !void {
+    var t: TestTicker = .{ .s = s };
+    const th = try std.Thread.spawn(.{}, testTicker, .{&t});
+    defer {
+        t.stop.store(true, .release);
+        th.join();
+    }
+    var buf: [4096]u8 = undefined;
+    const deadline = GetTickCount64() + ms;
+    while (GetTickCount64() < deadline) {
+        const r = s.waitIo(false) catch return;
+        if (!r.readable) continue;
+        switch (s.readChunk(&buf) catch return) {
+            .again => continue,
+            .eof => return,
+            .data => |n| try out.appendSlice(a, buf[0..n]),
+        }
+    }
+}
+
+fn hasOsc(buf: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, buf, needle) != null;
+}
+
+/// `OSC 133;D`에 실린 종료 코드를 확인한다. **값까지 본다** — D가 나오기만 하고 코드가 틀리면 거터 표시가
+/// 거짓말을 한다(실제로 그 버그를 이 단언이 잡았다: `$?`를 함수 안 다른 문장 뒤에 읽고 있었다).
+fn expectExitCode(buf: []const u8, want: []const u8) !void {
+    const i = std.mem.indexOf(u8, buf, "]133;D;") orelse return error.NoExitCode;
+    const tail = buf[i + "]133;D;".len ..];
+    const end = std.mem.indexOfAny(u8, tail, &[_]u8{ 0x1B, 0x07 }) orelse tail.len;
+    try testing.expectEqualStrings(want, tail[0..end]);
+}
+
+const pwsh_test_path = "C:" ++ back_slash ++ "Program Files" ++ back_slash ++ "PowerShell" ++ back_slash ++ "7" ++ back_slash ++ "pwsh.exe";
+const back_slash = [_]u8{0x5C};
+const crlf = [_]u8{ 0x0D, 0x0A };
+
+test "w5-cmd: 통합을 켜면 cmd가 OSC를 낸다" {
+    const a = std.testing.allocator;
+    var s = try PtySession.spawn(a, .{
+        .command = testShell(),
+        .shell_integration = .inline_injection,
+        .size = .{ .cols = 120, .rows = 30 },
+    });
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    std.debug.print("\n", .{});
+    out.clearRetainingCapacity();
+    try s.writeInput("cd /d C:" ++ back_slash ++ "Windows" ++ crlf);
+    try collectFor(&s, a, &out, 2500);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]9;9;C:" ++ back_slash ++ "Windows") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;B") != null);
+}
+
+test "w5-cmd-off: 통합을 안 켜면 OSC가 없다(대조군)" {
+    const a = std.testing.allocator;
+    var s = try PtySession.spawn(a, .{ .command = testShell(), .size = .{ .cols = 120, .rows = 30 } });
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]9;9;") == null);
+}
+
+test "w5-cmd-user: 사용자 PROMPT를 덮지 않는다" {
+    const a = std.testing.allocator;
+    var s = try PtySession.spawn(a, .{
+        .command = testShell(),
+        .shell_integration = .inline_injection,
+        .env_overrides = &.{}, // 부모 PROMPT를 흉내내려면 parent_env를 준다
+        .parent_env = &.{ "PROMPT=MYPROMPT$G", "PATH=C:" ++ back_slash ++ "Windows" ++ back_slash ++ "System32" },
+        .size = .{ .cols = 120, .rows = 30 },
+    });
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    const kept = std.mem.indexOf(u8, out.items, "MYPROMPT") != null;
+    const osc = std.mem.indexOf(u8, out.items, "]9;9;") != null;
+    try testing.expect(kept and osc);
+}
+
+test "w5-pwsh: 통합을 켜면 pwsh가 OSC를 내고 대화형으로 남는다" {
+    const a = std.testing.allocator;
+    var s = PtySession.spawn(a, .{
+        .command = pwsh_test_path,
+        .shell_integration = .inline_injection,
+        .size = .{ .cols = 120, .rows = 30 },
+    }) catch return error.SkipZigTest;
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 4000);
+    out.clearRetainingCapacity();
+
+    try s.writeInput("cd C:" ++ back_slash ++ "Windows" ++ crlf);
+    try collectFor(&s, a, &out, 4000);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]9;9;C:" ++ back_slash ++ "Windows") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;B") != null);
+
+    // 명령을 하나 돌리면 그 다음 프롬프트에 종료 코드가 실린다(cmd는 못 하는 것 — §3.4).
+    out.clearRetainingCapacity();
+    try s.writeInput("cmd /c exit 3" ++ crlf);
+    try collectFor(&s, a, &out, 4000);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;D") != null);
+    // **값까지 본다.** D가 나오기만 하고 코드가 틀리면 거터 표시가 거짓말을 한다.
+    try expectExitCode(out.items, "3");
+
+    // 성공 명령 뒤에는 0이어야 한다.
+    out.clearRetainingCapacity();
+    try s.writeInput("cmd /c exit 0" ++ crlf);
+    try collectFor(&s, a, &out, 4000);
+    try expectExitCode(out.items, "0");
 }
 
 test "exitStatusFromCode: 255를 넘는 코드는 잘리지 않고 보존된다" {

@@ -1476,7 +1476,7 @@ pub const RuntimeManager = struct {
                 .parent_env = params.parent_env,
                 .env_overrides = params.env_overrides,
                 .term = params.term,
-                .shell_integration_dir = params.shell_integration_dir,
+                .shell_integration = if (params.shell_integration_dir) |dir| .{ .assets_dir = dir } else null,
                 .ssh_integration_bin = params.ssh_integration_bin,
                 .pane_id = params.pane_id,
                 .size = size,

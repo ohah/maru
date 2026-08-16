@@ -7,6 +7,7 @@
 const std = @import("std");
 const process_identity = @import("process_identity.zig");
 const client_mod = @import("client.zig");
+const client_deadline = @import("client_deadline.zig");
 const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
@@ -281,6 +282,25 @@ pub const GenerationTransport = struct {
         }) catch |err| return mapGenerationExecuteToLegacyError(err);
     }
 
+    fn executePreparedRequestUntil(
+        self: *GenerationTransport,
+        receipt: contract.PreparedCallReceipt,
+        response_out: *executed_response_mod.ExecutedResponse,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) (Error || error{DeadlineExceeded})!contract.ExecuteResult {
+        if (!self.requestIdentityValid()) return error.MovedOrCopied;
+        return client_slot_mod.executeGenerationRequestUntil(.{
+            .request = self.requestOperation(receipt),
+            .bound_stream_id = self.bound_stream_id,
+            .response_out_addr = @intFromPtr(response_out),
+            .owner_addr = self.owner_addr,
+            .owner_size = self.owner_size,
+        }, deadline) catch |err| switch (err) {
+            error.DeadlineExceeded => error.DeadlineExceeded,
+            else => |typed| mapGenerationExecuteToLegacyError(typed),
+        };
+    }
+
     pub fn abortPreparedRequest(
         self: *GenerationTransport,
         receipt: contract.PreparedCallReceipt,
@@ -466,6 +486,17 @@ pub const GenerationTransport = struct {
         self: *GenerationTransport,
         out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
     ) (client_mod.ClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
+        return self.readInitialSnapshotInternal(out, null) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |typed| typed,
+        };
+    }
+
+    fn readInitialSnapshotInternal(
+        self: *GenerationTransport,
+        out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+        deadline: ?client_deadline.AbsoluteDeadline,
+    ) (client_mod.DeadlineClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
         const client = self.borrowClient() orelse return error.MovedOrCopied;
         if (self.bound_stream_id == 0 or !out.canInitialize() or
             rangesOverlapTyped(out, self) or rangesOverlapTyped(out, &self.prepared_storage) or
@@ -500,13 +531,23 @@ pub const GenerationTransport = struct {
         defer if (receipt_live)
             self.snapshot_authority.abort(receipt) catch
                 @panic("initial snapshot authority rollback drifted");
-        const read = slot.readInitialSnapshotGuarded(
-            self.bound_stream_id,
-            self.owner_addr,
-            self.owner_size,
-            @intFromPtr(out),
-            @sizeOf(initial_snapshot_owner_mod.InitialSnapshotOwner),
-        ) catch |err| switch (err) {
+        const read = (if (deadline) |absolute|
+            slot.readInitialSnapshotGuardedUntil(
+                self.bound_stream_id,
+                self.owner_addr,
+                self.owner_size,
+                @intFromPtr(out),
+                @sizeOf(initial_snapshot_owner_mod.InitialSnapshotOwner),
+                absolute,
+            )
+        else
+            slot.readInitialSnapshotGuarded(
+                self.bound_stream_id,
+                self.owner_addr,
+                self.owner_size,
+                @intFromPtr(out),
+                @sizeOf(initial_snapshot_owner_mod.InitialSnapshotOwner),
+            )) catch |err| switch (err) {
             error.AliasedAllocation,
             error.InvalidDestination,
             error.CapacityExhausted,
@@ -563,6 +604,14 @@ pub const GenerationTransport = struct {
         };
         receipt_live = false;
         canonical_permit_live = false;
+    }
+
+    fn readInitialSnapshotUntil(
+        self: *GenerationTransport,
+        out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) (client_mod.DeadlineClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
+        return self.readInitialSnapshotInternal(out, deadline);
     }
 
     pub fn poison(
@@ -861,6 +910,25 @@ pub fn catchupProjection(
     transport: *const GenerationTransport,
 ) CapabilityError!GenerationTransport.CatchupProjection {
     return transport.catchupProjection();
+}
+
+/// CR4 deadline coordinator bridge. These remain module leaves so the established transport
+/// method facade does not gain a second public bypass surface.
+pub fn executePreparedRequestUntil(
+    transport: *GenerationTransport,
+    receipt: contract.PreparedCallReceipt,
+    response_out: *executed_response_mod.ExecutedResponse,
+    deadline: client_deadline.AbsoluteDeadline,
+) (Error || error{DeadlineExceeded})!contract.ExecuteResult {
+    return transport.executePreparedRequestUntil(receipt, response_out, deadline);
+}
+
+pub fn readInitialSnapshotUntil(
+    transport: *GenerationTransport,
+    out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+    deadline: client_deadline.AbsoluteDeadline,
+) (client_mod.DeadlineClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
+    return transport.readInitialSnapshotUntil(out, deadline);
 }
 
 pub fn sendResyncNonBlockingOwned(

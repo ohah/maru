@@ -2979,6 +2979,7 @@ pub const PreparedExecutionPoisonCaptureRequest = struct {
 
 pub const GenerationExecuteError = GenerationRequestError ||
     client_mod.PreparedBlockingRpcError || error{InvalidResponseDestination};
+pub const DeadlineGenerationExecuteError = GenerationExecuteError || error{DeadlineExceeded};
 
 var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
@@ -8537,6 +8538,23 @@ fn failStopFreedRpcResponse(
 pub fn executeGenerationRequest(
     execution: GenerationRequestExecute,
 ) GenerationExecuteError!contract.ExecuteResult {
+    return executeGenerationRequestInternal(execution, null) catch |err| switch (err) {
+        error.DeadlineExceeded => unreachable,
+        else => |typed| typed,
+    };
+}
+
+pub fn executeGenerationRequestUntil(
+    execution: GenerationRequestExecute,
+    deadline: client_deadline.AbsoluteDeadline,
+) DeadlineGenerationExecuteError!contract.ExecuteResult {
+    return executeGenerationRequestInternal(execution, deadline);
+}
+
+fn executeGenerationRequestInternal(
+    execution: GenerationRequestExecute,
+    deadline: ?client_deadline.AbsoluteDeadline,
+) DeadlineGenerationExecuteError!contract.ExecuteResult {
     const request = execution.request;
     if (!request.receipt.valid() or execution.response_out_addr == 0 or
         execution.owner_addr == 0 or execution.owner_size == 0)
@@ -8899,18 +8917,26 @@ pub fn executeGenerationRequest(
         }
         if (observer.poison_before_execute) node.client.poison(.transport_read_failure);
     }
-    const ExecutionResult = @typeInfo(
-        @TypeOf(client_mod.Client.executePreparedBlockingRpcStorageWithAllocatorObserved),
-    ).@"fn".return_type.?;
+    const ExecutionResult = client_mod.DeadlineObservedPreparedBlockingRpcExecution;
     const execution_result: ExecutionResult =
         if (builtin.is_test and guard.request_free_test_observer.force_not_executed)
             .{ .not_executed = error.ConnectionClosed }
-        else
-            node.client.executePreparedBlockingRpcStorageWithAllocatorObserved(
+        else if (deadline) |absolute|
+            node.client.executePreparedBlockingRpcStorageUntilObserved(
                 storage,
                 response_allocator,
+                absolute,
                 payload_observer.observer(),
-            );
+            )
+        else switch (node.client.executePreparedBlockingRpcStorageWithAllocatorObserved(
+            storage,
+            response_allocator,
+            payload_observer.observer(),
+        )) {
+            .accepted => |value| .{ .accepted = value },
+            .not_executed => |err| .{ .not_executed = err },
+            .uncertain => |err| .{ .uncertain = err },
+        };
     if (guard.operation_alias_rejected) {
         _ = try settleExecutionAfterCleanup(
             &execution_cleanup,
@@ -13087,7 +13113,7 @@ pub const ClientSlot = struct {
         permit.seal = self.admissionCloseSeal(permit);
     }
 
-    pub const RetirementCleanupError = error{ InvalidOwner, Busy, GenerationMismatch };
+    pub const RetirementCleanupError = error{ InvalidOwner, Busy, GenerationMismatch, OutOfMemory };
 
     pub fn prepareRetirementCleanup(
         self: *ClientSlot,
@@ -13124,11 +13150,17 @@ pub const ClientSlot = struct {
             operation.node.client.preflightExternalAdoptionDestination(
                 out,
                 @sizeOf(PreparedRetirementCleanup),
-            ) catch return error.InvalidOwner;
+            ) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidOwner,
+            };
             operation.node.client.preflightExternalAdoptionDestination(
                 permit,
                 @sizeOf(PreparedAdmissionClose),
-            ) catch return error.InvalidOwner;
+            ) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidOwner,
+            };
         }
         const external = self.current.client.reserveExternalModeDeinit();
         if (external == .busy) return error.Busy;
@@ -13156,11 +13188,17 @@ pub const ClientSlot = struct {
         operation.node.client.preflightExternalAdoptionDestination(
             out,
             @sizeOf(PreparedRetirementCleanup),
-        ) catch return error.InvalidOwner;
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidOwner,
+        };
         operation.node.client.preflightExternalAdoptionDestination(
             permit,
             @sizeOf(PreparedAdmissionClose),
-        ) catch return error.InvalidOwner;
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidOwner,
+        };
         const pending = operation.node.client.pending_outbound;
         if (pending) |value| {
             if (value.frame.len == 0 or value.stream_id == 0 or value.offset > value.frame.len)
@@ -14115,6 +14153,41 @@ pub const ClientSlot = struct {
         self.current.client.poison(reason);
     }
 
+    pub fn failCloseAttachmentConnection(
+        self: *ClientSlot,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) error{ MovedOrCopied, InvalidTerminalConnection }!@import("client_poison.zig").ConnectionReason {
+        if (!self.valid()) return error.MovedOrCopied;
+        self.current.client.poison(reason);
+        const canonical = self.current.client.firstPoisonReason() orelse
+            return error.InvalidTerminalConnection;
+        try self.preflightAttachmentConnectionFailedClosed(canonical);
+        return canonical;
+    }
+
+    /// Published replacement 뒤 candidate prepare가 실패한 host job이 같은 current Client의
+    /// exact fail-close provenance를 재검증할 때만 쓰는 닫힌 projection이다.
+    pub fn preflightAttachmentConnectionFailedClosed(
+        self: *const ClientSlot,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) error{ MovedOrCopied, InvalidTerminalConnection }!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        const client = &self.current.client;
+        if (client.fd != -1 or !client.unusable or client.pending_outbound != null or
+            client.firstPoisonReason() != reason)
+            return error.InvalidTerminalConnection;
+    }
+
+    pub fn preflightAttachmentConnectionUsable(
+        self: *const ClientSlot,
+    ) error{ MovedOrCopied, InvalidUsableConnection }!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        const client = &self.current.client;
+        if (client.fd < 0 or client.unusable or client.pending_outbound != null or
+            client.firstPoisonReason() != null)
+            return error.InvalidUsableConnection;
+    }
+
     /// Client의 allocator callback TLS는 node-local mutation 진입점들이 같은 방식으로 읽는다.
     fn generationAllocatorCallbackActive(self: *const ClientSlot) bool {
         self.current.client.rejectGenerationAllocatorCallbackReentry() catch return true;
@@ -14599,6 +14672,53 @@ pub const ClientSlot = struct {
         AliasedAllocation,
         InvalidDestination,
     })!InitialSnapshotRead {
+        return self.readInitialSnapshotGuardedInternal(
+            stream_id,
+            owner_addr,
+            owner_size,
+            out_addr,
+            out_size,
+            null,
+        ) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |typed| typed,
+        };
+    }
+
+    pub fn readInitialSnapshotGuardedUntil(
+        self: *ClientSlot,
+        stream_id: u64,
+        owner_addr: usize,
+        owner_size: usize,
+        out_addr: usize,
+        out_size: usize,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) (client_mod.DeadlineClientError || batch_registry_mod.Error || error{
+        AliasedAllocation,
+        InvalidDestination,
+    })!InitialSnapshotRead {
+        return self.readInitialSnapshotGuardedInternal(
+            stream_id,
+            owner_addr,
+            owner_size,
+            out_addr,
+            out_size,
+            deadline,
+        );
+    }
+
+    fn readInitialSnapshotGuardedInternal(
+        self: *ClientSlot,
+        stream_id: u64,
+        owner_addr: usize,
+        owner_size: usize,
+        out_addr: usize,
+        out_size: usize,
+        deadline: ?client_deadline.AbsoluteDeadline,
+    ) (client_mod.DeadlineClientError || batch_registry_mod.Error || error{
+        AliasedAllocation,
+        InvalidDestination,
+    })!InitialSnapshotRead {
         if (!self.valid()) return error.MovedOrCopied;
         if (stream_id == 0 or owner_addr == 0 or owner_size == 0 or out_addr == 0 or out_size == 0)
             return error.InvalidDestination;
@@ -14638,7 +14758,10 @@ pub const ClientSlot = struct {
         );
         defer self.current.client.restoreGenerationAllocatorScope(&allocator_scope) catch
             @panic("generation allocator scope restore drifted");
-        const bytes = self.current.client.readSnapshot(stream_id) catch |err| {
+        const bytes = (if (deadline) |absolute|
+            self.current.client.readSnapshotUntil(stream_id, absolute)
+        else
+            self.current.client.readSnapshot(stream_id)) catch |err| {
             if (guard.snapshot_alias_rejected or guard.operation_alias_rejected) {
                 self.current.client.poison(.local_invariant_violation);
                 return error.AliasedAllocation;

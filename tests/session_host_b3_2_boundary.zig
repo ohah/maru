@@ -35,13 +35,13 @@ test "B3-2 private destination admission keeps RPC test-only and public execute 
         transport,
         "pub fn executePreparedRequest(\n        self: *GenerationTransport,",
     ) orelse return error.TestExpectedEqual;
-    const abort_start = std.mem.indexOf(
+    const deadline_execute_start = std.mem.indexOf(
         u8,
         transport,
-        "pub fn abortPreparedRequest(\n        self: *GenerationTransport,",
+        "fn executePreparedRequestUntil(\n        self: *GenerationTransport,",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(
-        transport[execute_start..abort_start],
+        transport[execute_start..deadline_execute_start],
         ".bound_stream_id = self.bound_stream_id,",
     ));
     const request_operation_start = std.mem.indexOf(

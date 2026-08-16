@@ -363,6 +363,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageWithAllocatorObserved", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageUntil", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "executePreparedBlockingRpcStorageUntilObserved", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
         .{ .name = "refreshBufferedAuthorityEvidence", .receiver_type = mutable, .class = .guarded },
         .{ .name = "ingestReadableOutOfBandEvidence", .receiver_type = mutable, .class = .guarded },
@@ -520,7 +521,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "preflightPreparedBlockingRpcStorageExecution", .funnel = "preflightPreparedBlockingRpcStorageExecution", .gate = "ensureUsable" },
         .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
         .{ .receiver = "executePreparedBlockingRpcStorageWithAllocatorObserved", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
-        .{ .receiver = "executePreparedBlockingRpcStorageUntil", .funnel = "executePreparedBlockingRpcStorageUntil", .gate = "beginPublicMutation" },
+        .{ .receiver = "executePreparedBlockingRpcStorageUntil", .funnel = "executePreparedBlockingRpcStorageUntilObserved", .gate = "beginPublicMutation" },
+        .{ .receiver = "executePreparedBlockingRpcStorageUntilObserved", .funnel = "executePreparedBlockingRpcStorageUntilObserved", .gate = "beginPublicMutation" },
         .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
         .{ .receiver = "refreshBufferedAuthorityEvidence", .funnel = "refreshBufferedAuthorityEvidence", .gate = "requireBlockingMode" },
         .{ .receiver = "ingestReadableOutOfBandEvidence", .funnel = "ingestReadableOutOfBandEvidence", .gate = "requireBlockingMode" },
@@ -1352,6 +1354,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "connectMajorUntilWithOpsPolicy" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishHelloWithPolicy" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executePreparedBlockingRpcStorageUntil" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineObservedPreparedBlockingRpcExecutionError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineObservedPreparedBlockingRpcExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executePreparedBlockingRpcStorageUntilObserved" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameUntilEstablishedObserved" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "runtimeInventoryUntil" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeCompleteOwnerSeal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeFinalizationSeal" },
@@ -1561,8 +1567,16 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_deadline" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineGenerationExecuteError" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRequestUntil" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executeGenerationRequestInternal" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readAttachmentCatchupBarrierPlanUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "requestAttachmentCatchupUntil" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionFailedClosed" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "failCloseAttachmentConnection" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionUsable" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readInitialSnapshotGuardedUntil" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "readInitialSnapshotGuardedInternal" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "max_retired_clients" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedRetiredClientReclaim" },
@@ -2904,6 +2918,11 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
     );
     try std.testing.expectEqual(
         @as(usize, 1),
+        countOccurrences(slot_product, ".executePreparedBlockingRpcStorageUntilObserved("),
+    );
+    // Blocking and absolute-deadline readers share the same observed payload provenance leaf.
+    try std.testing.expectEqual(
+        @as(usize, 2),
         countOccurrences(client_product, ".nextWithPayloadObserver("),
     );
     try std.testing.expectEqual(

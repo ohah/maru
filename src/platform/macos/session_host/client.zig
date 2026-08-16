@@ -209,6 +209,14 @@ const ObservedPreparedBlockingRpcExecution = union(enum) {
     uncertain: ObservedPreparedBlockingRpcExecutionError,
 };
 
+pub const DeadlineObservedPreparedBlockingRpcExecutionError =
+    ObservedPreparedBlockingRpcExecutionError || error{DeadlineExceeded};
+pub const DeadlineObservedPreparedBlockingRpcExecution = union(enum) {
+    accepted: ExecutedBlockingRpcResponse,
+    not_executed: DeadlineObservedPreparedBlockingRpcExecutionError,
+    uncertain: DeadlineObservedPreparedBlockingRpcExecutionError,
+};
+
 const PreparedBlockingRpcLifecycle = enum {
     pristine,
     prepared,
@@ -9901,6 +9909,34 @@ pub const Client = struct {
         allocator: std.mem.Allocator,
         deadline: client_deadline.AbsoluteDeadline,
     ) DeadlinePreparedBlockingRpcExecution {
+        const result = self.executePreparedBlockingRpcStorageUntilObserved(
+            storage,
+            allocator,
+            deadline,
+            null,
+        );
+        return switch (result) {
+            .accepted => |value| .{ .accepted = value },
+            .not_executed => |err| .{ .not_executed = switch (err) {
+                error.PayloadProvenanceRejected => error.ProtocolError,
+                else => |typed| typed,
+            } },
+            .uncertain => |err| .{ .uncertain = switch (err) {
+                error.PayloadProvenanceRejected => error.ProtocolError,
+                else => |typed| typed,
+            } },
+        };
+    }
+
+    /// GenerationAttachment의 guarded response allocator도 같은 absolute deadline 아래 실행한다.
+    /// observer를 보존해야 provenance 위반을 일반 protocol error로 세탁하지 않고 owner 경계에서 fail-stop할 수 있다.
+    pub fn executePreparedBlockingRpcStorageUntilObserved(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        allocator: std.mem.Allocator,
+        deadline: client_deadline.AbsoluteDeadline,
+        observer: ?framing.PayloadAllocationObserver,
+    ) DeadlineObservedPreparedBlockingRpcExecution {
         // 이미 끝난 종료 deadline은 Client fence나 fd flag를 건드리기 전에 미전송으로 닫는다. caller는 같은
         // prepared backing을 canonical abort할 수 있고, 다음 독립 operation에서 connection을 계속 사용할 수 있다.
         if (deadline.remainingNs() <= 0) return .{ .not_executed = error.DeadlineExceeded };
@@ -9931,13 +9967,10 @@ pub const Client = struct {
             .{ .deadline = .{ .absolute = deadline, .ops = ops } },
             false,
             allocator,
-            null,
+            observer,
             false,
         ) catch |err| {
-            const classified: DeadlinePreparedBlockingRpcError = switch (err) {
-                error.PayloadProvenanceRejected => error.ProtocolError,
-                else => |execution_err| execution_err,
-            };
+            const classified = err;
             const request_not_executed = prepared.lifecycle == .prepared;
             if (self.fd == execution_fd and !ops.set_flags(ops.context, self.fd, saved_flags)) {
                 self.poison(.local_invariant_violation);
@@ -10196,9 +10229,11 @@ pub const Client = struct {
                         &actual_payload_allocator,
                         payload_observer,
                     ),
-                .deadline => |bounded| try self.readFrameUntilEstablished(
+                .deadline => |bounded| try self.readFrameUntilEstablishedObserved(
                     bounded.absolute,
                     bounded.ops,
+                    &actual_payload_allocator,
+                    payload_observer,
                 ),
             };
             if (expected_payload_allocator) |expected| {
@@ -11230,8 +11265,10 @@ pub const Client = struct {
                     self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
-                try self.bufferCatchupBarrierFrame(frame, allocator, false);
+                // `bufferCatchupBarrierFrame` consumes the frame payload on every outcome,
+                // including append OOM and malformed/duplicate rejection.
                 frame_live = false;
+                try self.bufferCatchupBarrierFrame(frame, allocator, false);
                 // A barrier is a terminal marker for a catch-up owner, not an empty screen
                 // batch. Return to the typed consumer so it can validate the exact identity.
                 return null;
@@ -14147,7 +14184,10 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError!framing.Frame {
-        return self.readFrameUntilMode(deadline, ops, false);
+        return self.readFrameUntilMode(deadline, ops, false, null, null) catch |err| switch (err) {
+            error.PayloadProvenanceRejected => unreachable,
+            else => |typed| return typed,
+        };
     }
 
     /// Established RPCs use the handshake reader's one-deadline mechanics, but unlike handshake
@@ -14157,7 +14197,26 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError!framing.Frame {
-        return self.readFrameUntilMode(deadline, ops, true);
+        return self.readFrameUntilMode(deadline, ops, true, null, null) catch |err| switch (err) {
+            error.PayloadProvenanceRejected => unreachable,
+            else => |typed| return typed,
+        };
+    }
+
+    fn readFrameUntilEstablishedObserved(
+        self: *Client,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+    ) (DeadlineClientError || error{PayloadProvenanceRejected})!framing.Frame {
+        return self.readFrameUntilMode(
+            deadline,
+            ops,
+            true,
+            payload_allocator_out,
+            observer,
+        );
     }
 
     fn readFrameUntilMode(
@@ -14165,32 +14224,60 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
         poison_established: bool,
-    ) DeadlineClientError!framing.Frame {
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+    ) (DeadlineClientError || error{PayloadProvenanceRejected})!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
             if (deadline.remainingNs() <= 0) {
                 if (poison_established) self.poisonWithOps(.read_timeout, ops);
                 return error.DeadlineExceeded;
             }
-            if (self.parser.next() catch |err| {
+            const maybe_frame = if (observer) |active|
+                self.parser.nextWithPayloadObserver(payload_allocator_out, active)
+            else if (payload_allocator_out != null)
+                self.parser.nextWithAllocator(payload_allocator_out)
+            else
+                self.parser.next();
+            if (maybe_frame catch |err| {
                 if (poison_established) self.poisonWithOps(
-                    if (err == error.OutOfMemory)
-                        .local_resource_exhausted
-                    else
-                        .frame_malformed,
+                    switch (err) {
+                        error.OutOfMemory => .local_resource_exhausted,
+                        error.PayloadIdentityExhausted, error.PayloadProvenanceRejected => .local_invariant_violation,
+                        else => .frame_malformed,
+                    },
                     ops,
                 );
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
+                    error.PayloadProvenanceRejected => error.PayloadProvenanceRejected,
                     else => error.ProtocolError,
                 };
             }) |frame| {
                 if (deadline.remainingNs() <= 0) {
-                    frame.deinit(self.allocator);
+                    discardFramePayloadObservation(observer, frame);
+                    const actual_allocator = if (payload_allocator_out) |out|
+                        out.*
+                    else
+                        self.allocator;
+                    frame.deinit(actual_allocator);
                     if (poison_established) self.poisonWithOps(.read_timeout, ops);
                     return error.DeadlineExceeded;
                 }
-                return self.requireWireMajor(frame);
+                if (frame.header.major != self.wire_major) {
+                    discardFramePayloadObservation(observer, frame);
+                    const actual_allocator = if (payload_allocator_out) |out|
+                        out.*
+                    else
+                        self.allocator;
+                    frame.deinit(actual_allocator);
+                    if (poison_established)
+                        self.poisonWithOps(.peer_contract_violation, ops)
+                    else
+                        self.poison(.peer_contract_violation);
+                    return error.ProtocolError;
+                }
+                return frame;
             }
             const n = client_deadline.readSomeUntil(
                 ops,

@@ -510,7 +510,10 @@ pub fn encode(allocator: std.mem.Allocator, descriptor: Descriptor) Error![]u8 {
 
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Manifest {
     if (bytes.len == 0 or bytes.len > max_manifest_bytes) return error.InvalidManifest;
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return error.InvalidManifest;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidManifest,
+    };
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |value| value,

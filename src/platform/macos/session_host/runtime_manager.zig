@@ -1117,19 +1117,20 @@ pub const RuntimeManager = struct {
     /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
     /// **core_mutex를 잡은 채** 투영하고(투영이 grapheme·색을 소유 버퍼로 복사), 반환된 소유 바이트만 unlock 뒤 caller가
     /// snapshot_chunk로 나눠 보낸다(io-render-threading.md — snapshot 슬라이스는 core alias라 lock 밖으로 새면 안 됨).
-    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server.ProjectedSnapshot {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
-        return screen_snapshot.projectSnapshotBounded(
+        const bytes = try screen_snapshot.projectSnapshotBounded(
             allocator,
             &surface.core,
             .{ .generation = generation, .sequence = sequence },
             protocol.max_viewport_snapshot,
         );
+        return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };
     }
 
     /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
@@ -1162,11 +1163,24 @@ pub const RuntimeManager = struct {
                 );
                 errdefer allocator.free(snap);
                 const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
-                return .{ .send = send, .is_snapshot = true, .new_base = snap };
+                return .{
+                    .send = send,
+                    .is_snapshot = true,
+                    .new_base = snap,
+                    .frontier = .{ .generation = generation, .sequence = sequence },
+                };
             },
             else => return e,
         };
-        return .{ .send = result.delta, .is_snapshot = false, .new_base = result.snapshot };
+        return .{
+            .send = result.delta,
+            .is_snapshot = false,
+            .new_base = result.snapshot,
+            .frontier = .{
+                .generation = generation,
+                .sequence = if (result.delta.len == 0) sequence - 1 else sequence,
+            },
+        };
     }
 
     /// Core lock 아래 pending bytes+generation을 복제하되 아직 clear하지 않는다. response frame이 owner control
@@ -2412,8 +2426,9 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
 
     // snapshot이 실 core를 lock한 채 투영해 첫 record(screen_meta)에 spawn 크기(24x6)를 담는다.
     const snap = try ops.snapshot(ops.ctx, rid, 0, allocator);
-    defer allocator.free(snap);
-    var rs = screen_stream.RecordStream{ .bytes = snap };
+    defer allocator.free(snap.bytes);
+    try std.testing.expectEqual(@as(u64, 0), snap.frontier.sequence);
+    var rs = screen_stream.RecordStream{ .bytes = snap.bytes };
     const first = (try rs.next()).?;
     const s = try screen_stream.RecordStream.split(first);
     try std.testing.expectEqual(screen_stream.RecordKind.screen_meta, s.header.kind);

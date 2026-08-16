@@ -17,6 +17,7 @@ const subscription_identity = @import("subscription_identity.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const process_seal_service = @import("process_seal_service.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 
 pub const CloseReason = enum {
     eof,
@@ -599,7 +600,7 @@ pub const Client = struct {
             if (!(slot.beginResyncAttempt(tracker, now_ns) catch
                 return self.beginClose(.socket_error))) return;
         }
-        var maybe_output = self.connection.collectOutputForLocalStream(stream) catch |err| {
+        var maybe_output = self.connection.collectOutputForLocalStreamAt(stream, now_ns) catch |err| {
             switch (err) {
                 error.ProjectionBudgetUnavailable => {
                     if (self.projection_global_unavailable) {
@@ -623,7 +624,24 @@ pub const Client = struct {
         if (self.connection.isClosed())
             return self.beginClose(.resource_exhausted);
         if (maybe_output) |*output| {
-            switch (self.tryAdoptSubscriptionTurn(stream, output.takeFrames())) {
+            const prepared_catchup = if (output.prepared_catchup) |*prepared| blk: {
+                const identity = self.process_identity orelse {
+                    output.rollback(&self.connection);
+                    return self.beginClose(.protocol_error);
+                };
+                if (!prepared.bindFinal(
+                    identity.pid,
+                    identity.process_nonce,
+                    @intFromPtr(self),
+                    self.admission.key,
+                    @intCast(std.Thread.getCurrentId()),
+                )) {
+                    output.rollback(&self.connection);
+                    return self.beginClose(.protocol_error);
+                }
+                break :blk prepared;
+            } else null;
+            switch (self.tryAdoptSubscriptionTurn(stream, output.takeFrames(), prepared_catchup)) {
                 .admitted => output.commit(&self.connection),
                 .deferred_global_pressure => {
                     output.rollback(&self.connection);
@@ -683,7 +701,7 @@ pub const Client = struct {
         stream: subscription_identity.LocalStreamId,
         frames: [][]u8,
     ) bool {
-        switch (self.tryAdoptSubscriptionTurn(stream, frames)) {
+        switch (self.tryAdoptSubscriptionTurn(stream, frames, null)) {
             .admitted => return true,
             .deferred_resync => return false,
             .deferred_global_pressure, .rejected => {
@@ -701,9 +719,12 @@ pub const Client = struct {
         self: *Client,
         stream: subscription_identity.LocalStreamId,
         frames: [][]u8,
+        prepared_catchup: ?*server.PreparedCatchupBatch,
     ) SubscriptionAdoption {
         defer self.allocator.free(frames);
-        if (!validateSubscriptionBatch(stream, frames)) {
+        if (!validateSubscriptionBatch(stream, frames, if (prepared_catchup) |prepared| prepared.barrier else null) or
+            !self.validatePreparedCatchup(stream, prepared_catchup))
+        {
             for (frames) |bytes| self.allocator.free(bytes);
             _ = self.closeAndReject(.protocol_error);
             return .rejected;
@@ -757,6 +778,7 @@ pub const Client = struct {
                     return .rejected;
                 },
             };
+            self.consumePreparedCatchup(prepared_catchup);
             return .admitted;
         }
 
@@ -774,6 +796,7 @@ pub const Client = struct {
                             else
                                 .rejected;
                         };
+                        self.consumePreparedCatchup(prepared_catchup);
                         return .admitted;
                     }
                 };
@@ -783,7 +806,58 @@ pub const Client = struct {
             for (frames) |bytes| self.allocator.free(bytes);
             return .rejected;
         };
+        self.consumePreparedCatchup(prepared_catchup);
         return .admitted;
+    }
+
+    fn validatePreparedCatchup(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+        maybe_prepared: ?*server.PreparedCatchupBatch,
+    ) bool {
+        const prepared = maybe_prepared orelse return true;
+        const expected = self.process_identity orelse return false;
+        const current = process_seal_service.currentReadyIdentity() catch return false;
+        if (@intFromPtr(prepared) != prepared.self_addr or prepared.active_raw != 1 or
+            prepared.pid != expected.pid or prepared.process_nonce != expected.process_nonce or
+            prepared.owner_addr != @intFromPtr(self) or
+            !std.meta.eql(prepared.owner_connection, self.admission.key) or
+            prepared.owner_thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+            !std.meta.eql(current, expected) or !self.connection.runtime_catchup_barrier_v1) return false;
+        const sub = self.connection.attachments.get(stream) orelse return false;
+        const owner = self.connection.subscription_identity orelse return false;
+        const pending = switch (prepared.before) {
+            .pending => |pending| pending,
+            else => return false,
+        };
+        if (!std.meta.eql(sub.catchup, prepared.before) or
+            !std.meta.eql(prepared.barrier.identity, pending.identity) or
+            pending.identity.host_id != self.connection.host_id or
+            pending.identity.subscription.value != sub.subscription_id.value or
+            pending.identity.runtime_id != sub.runtime_id or
+            !std.meta.eql(pending.identity.connection, owner.connection) or
+            !registry.Capability.has(
+                self.connection.registry.capabilitiesOfSubscription(
+                    sub.runtime_id,
+                    sub.subscription_id,
+                ),
+                registry.Capability.observe,
+            )) return false;
+        var recomputed = prepared.before;
+        recomputed.admit(prepared.barrier, prepared.now_ns) catch return false;
+        return std.meta.eql(recomputed, prepared.after);
+    }
+
+    fn consumePreparedCatchup(
+        self: *Client,
+        maybe_prepared: ?*server.PreparedCatchupBatch,
+    ) void {
+        _ = self;
+        const prepared = maybe_prepared orelse return;
+        // validatePreparedCatchup is the only fallible boundary and runs before queue ownership
+        // moves.  Once enqueue succeeds, consuming the exact permit is a no-fail suffix.
+        std.debug.assert(prepared.active_raw == 1);
+        prepared.active_raw = 0;
     }
 
     fn closeAndReject(self: *Client, reason: CloseReason) bool {
@@ -954,6 +1028,7 @@ pub const Client = struct {
         const adopted = self.tryAdoptSubscriptionTurn(
             stream,
             prepared.output.takeFrames(),
+            null,
         );
         if (adopted != .admitted) {
             prepared.output.rollback(&self.connection);
@@ -992,7 +1067,7 @@ pub const Client = struct {
                 break :blk output.stream;
             },
         };
-        if (!validateSubscriptionBatch(stream, frames[1..])) {
+        if (!validateSubscriptionBatch(stream, frames[1..], null)) {
             for (frames[1..]) |bytes| self.allocator.free(bytes);
             remaining_start = frames.len;
             return error.OutOfMemory;
@@ -1254,9 +1329,15 @@ fn cancelServerUpgrade(ctx: *anyopaque) void {
 fn validateSubscriptionBatch(
     expected_stream: subscription_identity.LocalStreamId,
     frames: []const []const u8,
+    expected_barrier: ?catchup_barrier_contract.Barrier,
 ) bool {
+    // An ordinary empty delta can advance only the server's diff base and carries no wire frame.
+    // Catch-up is different: idle is never evidence, so a pending request must still carry the
+    // canonical barrier-only frame.
+    if (frames.len == 0) return expected_barrier == null;
     var snapshot_batch: ?bool = null;
     var screen_started = false;
+    var barrier_seen = false;
     for (frames, 0..) |bytes, index| {
         if (bytes.len < protocol.header_size) return false;
         const header_bytes: *const [protocol.header_size]u8 = @ptrCast(bytes.ptr);
@@ -1280,13 +1361,22 @@ fn validateSubscriptionBatch(
                 screen_started = true;
                 if (header.flags & ~protocol.Flags.end_stream != 0) return false;
                 const ends = protocol.Flags.hasEndStream(header.flags);
-                if (ends != (index + 1 == frames.len)) return false;
+                const last_screen_index = frames.len - 1 - @intFromBool(expected_barrier != null);
+                if (ends != (index == last_screen_index)) return false;
             },
-            // Dormant wire vocabulary only. The product path must remain closed until a sealed
-            // PreparedCatchupBatch binds the decoded payload to the projection and pending row.
-            .barrier => return false,
+            .barrier => {
+                const expected = expected_barrier orelse return false;
+                if (index + 1 != frames.len or header.payload_len != catchup_barrier_contract.payload_size)
+                    return false;
+                const payload: *const [catchup_barrier_contract.payload_size]u8 =
+                    @ptrCast(bytes[protocol.header_size..].ptr);
+                const decoded = catchup_barrier_contract.Barrier.decode(payload) catch return false;
+                if (!std.meta.eql(decoded, expected)) return false;
+                barrier_seen = true;
+            },
         }
     }
+    if ((expected_barrier != null) != barrier_seen) return false;
     return true;
 }
 
@@ -2110,7 +2200,9 @@ test "CR4a host admission은 control queue 성공 뒤 pending을 게시하고 ex
         client.writeReady(14);
         try expectReply(fds[1], "busy");
 
-        client.tick(pending.expires_at_ns - 1);
+        // Do not run the subscription output tick here: the host frontier slice intentionally
+        // turns a live pending row into admitted.  This row isolates response admission and
+        // verifies expiry through the request owner itself.
         try testing.expect(client.connection.attachments.get(1).?.catchup == .pending);
         try sendTestFrame(fds[1], .request, 6, request);
         client.readReady(pending.expires_at_ns);
@@ -2118,6 +2210,256 @@ test "CR4a host admission은 control queue 성공 뒤 pending을 게시하고 ex
         try expectReply(fds[1], "expired");
         try testing.expect(client.connection.attachments.get(1).?.catchup == .terminal);
     }
+}
+
+test "CR4a host frontier batch는 screen 뒤 barrier를 admit하고 pending을 exact once 고정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const fresh_role = std.c.getenv("MARU_CR4A_HOST_FRONTIER_ROLE") orelse
+        return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(fresh_role), "maru-cr4a-host-frontier-fresh-v1"))
+        return error.TestUnexpectedResult;
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const process_identity = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => ready: {
+            const pid = process_seal_service.currentProcessId();
+            const nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(pid, nonce));
+            break :ready try process_seal_service.currentReadyIdentity();
+        },
+        else => return err,
+    };
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        0x1234,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops(), .process_identity = process_identity },
+    );
+    defer client.destroy();
+
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_catchup_barrier_v1\"]}",
+    );
+    client.readReady(1);
+    client.writeReady(1);
+    _ = drainNonblocking(fds[1]);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    client.readReady(2);
+    client.writeReady(2);
+    _ = drainNonblocking(fds[1]);
+    const request_nonce: u128 = 0x00112233445566778899aabbccddeeff;
+    try sendTestFrame(
+        fds[1],
+        .request,
+        3,
+        "{\"method\":\"runtime.catchup\",\"params\":{\"stream_id\":1,\"request_nonce\":\"00112233445566778899aabbccddeeff\"}}",
+    );
+    client.readReady(3);
+    client.writeReady(3);
+    _ = drainNonblocking(fds[1]);
+    try testing.expect(client.connection.attachments.get(1).?.catchup == .pending);
+
+    var hostile_output = (try client.connection.collectOutputForLocalStreamAt(1, 4)).?;
+    defer hostile_output.rollback(&client.connection);
+    const hostile_prepared = &hostile_output.prepared_catchup.?;
+    try testing.expect(hostile_prepared.bindFinal(
+        process_identity.pid,
+        process_identity.process_nonce,
+        @intFromPtr(client),
+        client.admission.key,
+        @intCast(std.Thread.getCurrentId()),
+    ));
+    const pending_before_hostile = client.connection.attachments.get(1).?.catchup;
+    var copied_prepared = hostile_prepared.*;
+    try testing.expect(!client.validatePreparedCatchup(1, &copied_prepared));
+    try testing.expectEqualDeep(pending_before_hostile, client.connection.attachments.get(1).?.catchup);
+    hostile_prepared.pid +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.pid -%= 1;
+    hostile_prepared.process_nonce +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.process_nonce -%= 1;
+    hostile_prepared.owner_addr +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.owner_addr -%= 1;
+    hostile_prepared.owner_connection.slot_generation +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.owner_connection.slot_generation -%= 1;
+    hostile_prepared.owner_thread_id +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.owner_thread_id -%= 1;
+    client.connection.runtime_catchup_barrier_v1 = false;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    client.connection.runtime_catchup_barrier_v1 = true;
+    hostile_prepared.barrier.target.sequence +%= 1;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.barrier.target.sequence -%= 1;
+    const canonical_after = hostile_prepared.after;
+    hostile_prepared.after = .idle;
+    try testing.expect(!client.validatePreparedCatchup(1, hostile_prepared));
+    hostile_prepared.after = canonical_after;
+    hostile_output.rollback(&client.connection);
+    try testing.expectEqual(@as(u8, 0), hostile_prepared.active_raw);
+    try testing.expectEqualDeep(pending_before_hostile, client.connection.attachments.get(1).?.catchup);
+
+    // Prepare with real projection authority, then fill the shared queue budget only after the
+    // base reservation exists.  The real queue owner must reject the complete screen+barrier
+    // batch without leaving a prefix or committing either frontier or pending state.
+    var pressure_output = (try client.connection.collectOutputForLocalStreamAt(1, 4)).?;
+    defer pressure_output.rollback(&client.connection);
+    const pressure_prepared = &pressure_output.prepared_catchup.?;
+    try testing.expect(pressure_prepared.bindFinal(
+        process_identity.pid,
+        process_identity.process_nonce,
+        @intFromPtr(client),
+        client.admission.key,
+        @intCast(std.Thread.getCurrentId()),
+    ));
+    const sub_before_pressure = client.connection.attachments.get(1).?;
+    const slot = try reactor.get(client.admission);
+    const chunk_len_before_pressure = slot.chunk_len;
+    const pending_bytes_before_pressure = slot.pending_bytes;
+    const resident_before_pressure = slot.resident_bytes;
+    const injected_pressure = slot_mod.shared_steady_bytes - reactor.budget.shared_bytes;
+    reactor.budget.resident_bytes += injected_pressure;
+    reactor.budget.shared_bytes += injected_pressure;
+    var pressure_injected = true;
+    defer if (pressure_injected) {
+        reactor.budget.resident_bytes -= injected_pressure;
+        reactor.budget.shared_bytes -= injected_pressure;
+    };
+    try testing.expectEqual(
+        SubscriptionAdoption.deferred_global_pressure,
+        client.tryAdoptSubscriptionTurn(1, pressure_output.takeFrames(), pressure_prepared),
+    );
+    pressure_output.rollback(&client.connection);
+    try testing.expectEqual(@as(u8, 0), pressure_prepared.active_raw);
+    reactor.budget.resident_bytes -= injected_pressure;
+    reactor.budget.shared_bytes -= injected_pressure;
+    pressure_injected = false;
+    const sub_after_pressure = client.connection.attachments.get(1).?;
+    try testing.expectEqualDeep(sub_before_pressure.catchup, sub_after_pressure.catchup);
+    try testing.expectEqual(sub_before_pressure.screen_generation, sub_after_pressure.screen_generation);
+    try testing.expectEqual(sub_before_pressure.screen_sequence, sub_after_pressure.screen_sequence);
+    try testing.expectEqualStrings(sub_before_pressure.base.?, sub_after_pressure.base.?);
+    try testing.expectEqual(chunk_len_before_pressure, slot.chunk_len);
+    try testing.expectEqual(pending_bytes_before_pressure, slot.pending_bytes);
+    try testing.expectEqual(resident_before_pressure, slot.resident_bytes);
+
+    const admitted_at: u64 = 4;
+    client.tick(admitted_at);
+    try testing.expect(client.connection.attachments.get(1).?.catchup == .admitted);
+    client.writeReady(admitted_at);
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    _ = try receiveIntoParserNonblocking(fds[1], &parser);
+    var saw_screen = false;
+    var saw_barrier = false;
+    while (try parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        switch (frame.header.kind) {
+            .delta_chunk, .snapshot_chunk => {
+                try testing.expect(!saw_barrier);
+                saw_screen = true;
+            },
+            .screen_frontier_barrier => {
+                try testing.expect(!saw_barrier);
+                saw_barrier = true;
+                try testing.expectEqual(@as(u64, 1), frame.header.stream_id);
+                try testing.expectEqual(@as(usize, catchup_barrier_contract.payload_size), frame.payload.len);
+                const payload: *const [catchup_barrier_contract.payload_size]u8 = @ptrCast(frame.payload.ptr);
+                const barrier = try catchup_barrier_contract.Barrier.decode(payload);
+                try testing.expectEqual(request_nonce, barrier.identity.request_nonce);
+                try testing.expectEqualDeep(
+                    client.connection.attachments.get(1).?.catchup.admitted.barrier,
+                    barrier,
+                );
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_screen);
+    try testing.expect(saw_barrier);
+
+    const admitted_before_retry = client.connection.attachments.get(1).?.catchup;
+    client.tick(admitted_at + 1);
+    try testing.expectEqualDeep(admitted_before_retry, client.connection.attachments.get(1).?.catchup);
+
+    // A second subscription with no semantic screen change still needs a host-issued cut.  Idle
+    // is never the oracle: the product queue must carry one canonical barrier-only batch.
+    runtime_ops.delta_send_len = 0;
+    try sendTestFrame(
+        fds[1],
+        .request,
+        4,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    client.readReady(admitted_at + 2);
+    client.writeReady(admitted_at + 2);
+    _ = drainNonblocking(fds[1]);
+    if (client.connection.attachments.get(2) == null) return error.NoChangeAttachMissing;
+    try sendTestFrame(
+        fds[1],
+        .request,
+        5,
+        "{\"method\":\"runtime.catchup\",\"params\":{\"stream_id\":2,\"request_nonce\":\"102132435465768798a9bacbdcedfe0f\"}}",
+    );
+    client.readReady(admitted_at + 3);
+    client.writeReady(admitted_at + 3);
+    _ = drainNonblocking(fds[1]);
+    if (client.connection.attachments.get(2).?.catchup != .pending)
+        return error.NoChangePendingMissing;
+    var idle_output = (try client.connection.collectOutputForLocalStreamAt(2, admitted_at + 4)).?;
+    defer idle_output.rollback(&client.connection);
+    const idle_prepared = &idle_output.prepared_catchup.?;
+    try testing.expect(idle_prepared.bindFinal(
+        process_identity.pid,
+        process_identity.process_nonce,
+        @intFromPtr(client),
+        client.admission.key,
+        @intCast(std.Thread.getCurrentId()),
+    ));
+    if (client.tryAdoptSubscriptionTurn(2, idle_output.takeFrames(), idle_prepared) != .admitted)
+        return error.NoChangeQueueAdmissionFailed;
+    idle_output.commit(&client.connection);
+    if (client.connection.attachments.get(2).?.catchup != .admitted)
+        return error.NoChangeAdmissionMissing;
+    client.writeReady(admitted_at + 5);
+    var idle_parser = framing.FrameParser.init(testing.allocator);
+    defer idle_parser.deinit();
+    _ = try receiveIntoParserNonblocking(fds[1], &idle_parser);
+    var idle_frame_count: usize = 0;
+    while (try idle_parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        idle_frame_count += 1;
+        if (frame.header.kind != .screen_frontier_barrier) return error.NoChangeUnexpectedFrame;
+        if (frame.header.stream_id != 2) return error.NoChangeWrongStream;
+        const payload: *const [catchup_barrier_contract.payload_size]u8 = @ptrCast(frame.payload.ptr);
+        const barrier = try catchup_barrier_contract.Barrier.decode(payload);
+        if (barrier.target.sequence != 0) return error.NoChangeWrongFrontier;
+    }
+    if (idle_frame_count != 1) return error.NoChangeWrongFrameCount;
 }
 
 test "notification consume commits only after response control admission" {
@@ -2966,7 +3308,7 @@ test "subscription batch preflight rejects cross-stream mixed and unterminated o
         ),
     };
     defer for (valid) |frame| testing.allocator.free(frame);
-    try testing.expect(validateSubscriptionBatch(1, &valid));
+    try testing.expect(validateSubscriptionBatch(1, &valid, null));
 
     const cross = [_][]u8{try framing.encodeFrame(
         testing.allocator,
@@ -2974,7 +3316,7 @@ test "subscription batch preflight rejects cross-stream mixed and unterminated o
         "delta",
     )};
     defer testing.allocator.free(cross[0]);
-    try testing.expect(!validateSubscriptionBatch(1, &cross));
+    try testing.expect(!validateSubscriptionBatch(1, &cross, null));
 
     const unterminated = [_][]u8{try framing.encodeFrame(
         testing.allocator,
@@ -2982,7 +3324,7 @@ test "subscription batch preflight rejects cross-stream mixed and unterminated o
         "snapshot",
     )};
     defer testing.allocator.free(unterminated[0]);
-    try testing.expect(!validateSubscriptionBatch(1, &unterminated));
+    try testing.expect(!validateSubscriptionBatch(1, &unterminated, null));
 
     const mixed = [_][]u8{
         try framing.encodeFrame(
@@ -2997,7 +3339,7 @@ test "subscription batch preflight rejects cross-stream mixed and unterminated o
         ),
     };
     defer for (mixed) |frame| testing.allocator.free(frame);
-    try testing.expect(!validateSubscriptionBatch(1, &mixed));
+    try testing.expect(!validateSubscriptionBatch(1, &mixed, null));
 }
 
 test "reply-and-close waits through EAGAIN and closes only after full typed reply" {

@@ -205,7 +205,7 @@ fn fixtureIdentity() CatchupIdentity {
     };
 }
 
-test "CR4a dormant barrier 계약은 identity와 frontier를 fixed wire에 봉인한다" {
+test "CR4a barrier 계약은 identity와 frontier를 fixed wire에 봉인한다" {
     const expected: Barrier = .{
         .identity = fixtureIdentity(),
         .target = .{ .generation = 0, .sequence = 11 },
@@ -235,7 +235,7 @@ test "CR4a dormant barrier 계약은 identity와 frontier를 fixed wire에 봉�
     try std.testing.expectError(error.InvalidBarrier, Barrier.decode(&hostile));
 }
 
-test "CR4a dormant barrier identity는 host subscription connection nonce drift를 구분한다" {
+test "CR4a barrier identity는 host subscription connection nonce drift를 구분한다" {
     const identity = fixtureIdentity();
     try std.testing.expect(identity.valid());
 

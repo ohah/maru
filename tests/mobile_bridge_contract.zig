@@ -2203,3 +2203,125 @@ test "숫자 칸은 숫자만 받고 그 사실을 남긴다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
+
+// **지우기가 안 되면 오타를 고칠 방법이 없다.** 백스페이스는 통째로 버려지고 있었다 — 설정
+// 화면의 키는 다 버리는 게이트에 걸렸다. 편집 중이면 그 칸의 것이다.
+test "숫자 칸에서 지우기·확정·취소가 그 칸의 것이다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+
+    _ = bridge.maru_mobile_input("259", 3);
+    _ = bridge.maru_mobile_key(4, 0, 0); // BACKSPACE — 9 를 지운다
+    _ = bridge.maru_mobile_input("0", 1); // 250
+    _ = bridge.maru_mobile_key(1, 0, 0); // ENTER = 확정
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 250), bridge.maru_mobile_scrollback_lines());
+
+    // ESC 는 취소 — 값이 안 바뀐다.
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+    _ = bridge.maru_mobile_input("999", 3);
+    _ = bridge.maru_mobile_key(2, 0, 0); // ESCAPE
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 250), bridge.maru_mobile_scrollback_lines());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
+
+    _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **바깥을 누르면 확정한다** — iOS 숫자 패드에는 Return 이 없다. 그 탭은 삼킨다(확정하면서
+// 뒤 행까지 누르면 "닫으려다 값이 바뀐다").
+test "바깥 탭이 확정하고 그 탭은 삼켜진다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+    _ = bridge.maru_mobile_input("300", 3);
+
+    // 다른 줄(커서 깜빡임 토글)을 누른다 — 확정만 되고 그 토글은 안 바뀌어야 한다.
+    const before_blink = bridge.maru_mobile_build(402, 874, now());
+    _ = before_blink;
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "cursor.blink")) continue;
+        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        break;
+    }
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 300), bridge.maru_mobile_scrollback_lines()); // 확정됐다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 편집이 끝났다
+
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_take_config_write(&out, out.len);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "scrollback.lines = 300") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "cursor.blink") == null); // 토글은 안 바뀌었다
+
+    _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// ── 설정 목록 스크롤이 컴포넌트 것이다 ────────────────────────────────────────
+//
+// 예전에는 브리지가 offset·관성·감쇠를 손으로 들었다(`set_fling` + 프레임당 0.92). 같은 규칙이
+// 키바에도 따로 있어 두 벌이었다 — `chrome.ui.scroll_area` 로 옮겼다. 여기서는 **화면이 실제로
+// 움직이는지**로 잰다(내부 변수가 아니라 그린 결과로).
+
+/// 목록의 **고정된 지점**에 지금 몇 번째 줄이 와 있나. 스크롤하면 이 번호가 커진다.
+/// (첫 줄의 y 로 재면 안 된다 — 목록 맨 위는 늘 창 위에 붙어 있어 y 가 안 변한다.)
+fn rowIndexAt(y: f32) ?usize {
+    return bridge.settingsRowAt(200, y);
+}
+/// 목록 안에서 실제로 줄이 잡히는 첫 지점을 찾아 그 번호를 준다.
+fn probeRow() ?usize {
+    var y: f32 = 0;
+    while (y < 900) : (y += 2) {
+        if (rowIndexAt(y)) |i| return i;
+    }
+    return null;
+}
+
+test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" {
+    const small_h: u32 = 300; // 목록(7줄+헤더)이 확실히 넘친다
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_build(402, small_h, now());
+
+    const before = probeRow() orelse return error.TestUnexpectedResult;
+
+    // 위로 끈다(임계 10px 를 넘겨야 스크롤로 친다).
+    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 200);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 150);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const dragged = probeRow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dragged > before); // 위로 밀어 뒤쪽 줄이 올라왔다
+
+    // 떼면 관성이 이어진다 — 프레임을 더 돌리면 더 간다.
+    _ = bridge.maru_mobile_chrome_pointer(2, 200, 150);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const glided = probeRow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(glided >= dragged); // 관성이 더 밀었거나 그대로
+
+    // 취소는 관성을 안 남긴다.
+    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 150);
+    _ = bridge.maru_mobile_chrome_pointer(3, 200, 150);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const at_cancel = probeRow() orelse return error.TestUnexpectedResult;
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expectEqual(at_cancel, probeRow() orelse return error.TestUnexpectedResult);
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}

@@ -100,6 +100,18 @@ ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-poc/Info.plist.in)"
 
+echo "§관성 — 숫자가 갈리지 않는다"
+# 본문 관성은 host 몫이지만(계약 §3.1) **숫자는 공유**해야 한다 — 같은 손짓이 본문·키바·설정에서
+# 다르게 미끄러지면 사용자는 이유를 모른다. 예전에는 0.92 가 세 곳에 따로 있었다.
+ck "헤더가 감쇠를 소유한다" 1 "$(grep -c 'define MARU_FLING_DAMPING' $H)"
+ck "host 에 남은 감쇠 하드코딩" 0 "$(grep -cE '\*= 0\.9[0-9]*f' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+# Zig 컴포넌트는 데스크톱과 공유하는 코드라 이 헤더를 못 읽는다 — **값이 같은지**를 여기서 본다.
+ck "헤더와 컴포넌트의 감쇠가 같다" "$(grep -oE 'define MARU_FLING_DAMPING [0-9.]+' $H | grep -oE '[0-9]+\.[0-9]+')" "$(grep -oE 'damping: f32 = [0-9.]+' src/chrome/ui/scroll_area.zig | grep -oE '[0-9]+\.[0-9]+')"
+# 이관은 **반쯤 하기가 제일 쉽다** — 실제로 목록만 옮기고 키바·팝업에 손수 스크롤이 남아 있었다.
+# 브리지에 f32 스크롤 변수가 다시 생기면 그때부터 규칙이 갈린다.
+# `*_max_scroll` 은 레이아웃이 잰 콘텐츠 길이지 스크롤 위치가 아니다 — 그건 남아도 된다.
+ck "브리지에 남은 손수 스크롤 상태" 0 "$(grep -E '^var .*(_scroll|_fling): f32' $B | grep -vc 'max_scroll' || true)"
+
 echo "§config — 상한은 헤더가 소유한다"
 # 페이싱 상수와 같은 규율이다. host 마다 숫자를 적으면 갈린다 — 실제로 갈려 있었다
 # (Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 그리고 넘치면 **안 읽어야** 한다:

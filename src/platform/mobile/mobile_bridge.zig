@@ -25,6 +25,7 @@ const icon_glyph = maru.renderer.icon_glyph;
 const tree = chrome.ui.tree;
 const layout = chrome.ui.layout;
 const paint_mod = chrome.ui.paint;
+const scroll_area = chrome.ui.scroll_area;
 const draw = chrome.draw;
 const tokens = chrome.tokens;
 
@@ -256,6 +257,18 @@ pub fn settingsFieldCount() usize {
 /// 때문이다 — host 가 화면 상태를 다시 추측하면 갈린다(§3 "판단은 코어가 한다").
 pub export fn maru_mobile_input_kind() u32 {
     return if (set_edit != null) 1 else 0; // 0=글자(터미널) · 1=숫자
+}
+
+/// **키보드를 올려 달라는 요청.** 한 번 가져가면 사라진다(복사와 같은 규율).
+///
+/// 우리는 시작할 때부터 입력 대상을 잡고 있어(iOS first responder · Android showSoftInput) 그
+/// 뒤로는 키보드 상태가 안 바뀐다 — 사용자가 한 번 내리면 **다시 올릴 길이 없었다**. 숫자 칸을
+/// 눌렀는데 키보드가 없으면 칠 수가 없다.
+var kb_raise_req: bool = false;
+pub export fn maru_mobile_take_keyboard_raise() u32 {
+    if (!kb_raise_req) return 0;
+    kb_raise_req = false;
+    return 1;
 }
 
 /// 친 글자를 편집 중인 숫자 칸에 넣는다. **숫자만 받는다** — host 가 숫자 패드를 띄우지만
@@ -514,6 +527,26 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다. **버리되 신호는 남긴다**(문자 경로와
     // 같은 이유 — 16줄 아래 `key_unknown_id` 가 같은 규율이다).
     if (screen != .terminal) {
+        // **편집 중이면 지우기·확정은 그 칸의 것이다.** 그전에는 통째로 버려서 숫자 칸에서
+        // 백스페이스가 아무 일도 안 했다 — 오타를 낸 사용자가 고칠 방법이 없었다.
+        if (set_edit != null) {
+            switch (key_id) {
+                4 => { // BACKSPACE
+                    if (set_edit_len > 0) set_edit_len -= 1;
+                    return @intCast(delivered_len);
+                },
+                1 => { // ENTER
+                    commitNumberEdit();
+                    return @intCast(delivered_len);
+                },
+                2 => { // ESCAPE = 취소
+                    set_edit = null;
+                    set_edit_len = 0;
+                    return @intCast(delivered_len);
+                },
+                else => {},
+            }
+        }
         setLastError("key_screen_pushed");
         return @intCast(delivered_len);
     }
@@ -767,10 +800,11 @@ const edge_w: f32 = 26.0;
 var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
 var key_bar_max_scroll: f32 = 0;
 /// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
-var key_bar_scroll: f32 = 0;
+/// 키바 가로 스크롤도 **컴포넌트가 든다**(설정 목록과 같은 규칙 — 축만 다르다). 예전에는 여기
+/// 감쇠·임계가 손으로 있었고 설정 목록에도 같은 숫자가 또 있었다.
+var kb_sa: scroll_area.State = .{};
+var kb_touch: scroll_area.Touch = .{};
 /// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
-var key_bar_fling: f32 = 0;
-
 /// 손가락이 지금 누르고 있는 키. **hover 가 없는 자리를 메우는 것이 눌림 표시**다(§2.4) —
 /// 없으면 눌렀는지 화면이 답하지 않는다. 밀기로 판정되면 즉시 푼다(누른 것이 아니었으므로).
 var kb_pressed: ?usize = null;
@@ -838,8 +872,7 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
 }
 
 fn clampKeyBarScroll() void {
-    if (key_bar_scroll < 0) key_bar_scroll = 0;
-    if (key_bar_scroll > key_bar_max_scroll) key_bar_scroll = key_bar_max_scroll;
+    kb_sa.clamp(@intFromFloat(@max(0, key_bar_max_scroll)));
 }
 
 /// 남은 가로 관성을 한 프레임 몫만큼 흘린다. 터미널 세로 관성(host `fling_vy`)과 같은 모양이다.
@@ -850,14 +883,12 @@ fn stepKeyBarFling() void {
     // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
     // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
     if (screen != .terminal) return;
-    if (kb_active or key_bar_fling == 0) return;
-    key_bar_scroll -= key_bar_fling;
-    // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,
-    // 되돌리려 손을 대면 죽은 속도가 남아 있다가 튄다.
-    if (key_bar_scroll <= 0 or key_bar_scroll >= key_bar_max_scroll) key_bar_fling = 0;
-    clampKeyBarScroll();
-    key_bar_fling *= 0.92;
-    if (@abs(key_bar_fling) < 0.5) key_bar_fling = 0;
+    kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)));
+}
+
+/// 지금 키바 가로 위치(px).
+fn kbScroll() f32 {
+    return @floatFromInt(kb_sa.offset_y_px);
 }
 
 /// 보조 키바 포인터. **탭과 가로 스크롤을 여기서 가른다** — 키가 화면을 넘치므로 손가락으로
@@ -872,7 +903,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     if (phase == 3) {
         kb_active = false;
         kb_pressed = null;
-        key_bar_fling = 0;
+        kb_touch.cancel();
         return 0;
     }
     if (phase == 0) {
@@ -884,7 +915,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         kb_down_y = y;
         kb_last_x = x;
         kb_moved = 0;
-        key_bar_fling = 0; // 흐르는 중에 짚으면 멈춘다
+        kb_touch.begin(x); // 흐르는 중에 짚으면 멈춘다
         // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
         // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
         kb_pressed = keybarIndexAt(x, y);
@@ -901,16 +932,16 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
         if (kb_moved < 10) return 1;
         kb_pressed = null;
-        key_bar_scroll -= dx;
-        clampKeyBarScroll();
-        key_bar_fling = dx; // 마지막 이동량이 곧 관성(터미널 세로와 같은 규칙)
+        kb_touch.move(&kb_sa, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
     }
     kb_active = false;
     kb_pressed = null;
+    // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
+    kb_touch.end();
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and kb_moved < 10) {
-        key_bar_fling = 0;
+        kb_touch.cancel(); // 탭이면 관성이 없다
         // **`<`/`>` 는 누르는 것이 아니라 신호다.** 한때 데스크톱 탭바의 `‹›` 가 클릭 가능하다는
         // 이유로 한 화면씩 옮기게 했는데, 두 가지가 어긋났다 — ① 데스크톱이 그런 것은 **마우스**
         // 이기 때문이고 터치에서는 **밀면 된다**(§2.4 "입력 방식이 다르면 같은 요소도 다르게
@@ -2247,7 +2278,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 
         // 창 왼쪽에서 스크롤 오프셋만큼 물러난 자리에서 시작한다. 창 밖으로 나간 키는
         // 그리지도 않는다 — 화면 밖 quad 는 낭비이고, 잘린 조각이 옆 UI 위에 얹힌다.
-        var kx = view_x - key_bar_scroll;
+        var kx = view_x - kbScroll();
         const ky = @floor(band.y + 5.0); // 세로도 같은 이유로 정수에 맞춘다(위 `kxi` 주석)
         for (0..key_bar.len) |i| {
             defer kx += key_w + key_gap;
@@ -2283,13 +2314,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 본문보다 또렷해야 한다 — 배경을 완전히 덮고, 안쪽 경계에 선을 그어 잘리는 자리를 못박는다.
         const edge_bg = tk.get(.surface_bg);
         const edge_fg = tk.get(.surface_fg);
-        if (key_bar_scroll > 0.5) {
+        if (kbScroll() > 0.5) {
             const er: draw.Rect = .{ .x = @intFromFloat(band_x), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
             push(er, edge_bg, 0xFF, 0, 0);
             push(.{ .x = er.x + @as(i32, @intFromFloat(edge_w)) - 1, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
             pushText("<", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth("<", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
         }
-        if (key_bar_scroll < key_bar_max_scroll - 0.5) {
+        if (kbScroll() < key_bar_max_scroll - 0.5) {
             const ex = band_x + band_w - edge_w;
             const er: draw.Rect = .{ .x = @intFromFloat(ex), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
             push(er, edge_bg, 0xFF, 0, 0);
@@ -2416,9 +2447,12 @@ var set_row_rects: [set_items.len]SetRect = @splat(.{});
 var set_back_rect: SetRect = .{};
 var set_gear_rect: SetRect = .{};
 var set_list: SetRect = .{}; // 목록이 보이는 창(헤더 아래) — 클리핑·스크롤 한계의 기준
-var set_scroll: f32 = 0;
+/// **스크롤은 컴포넌트가 든다**(`chrome.ui.scroll_area`). 예전에는 브리지가 offset·관성·감쇠를
+/// 손으로 갖고 있었는데(`set_fling` + 프레임당 0.92) 같은 규칙이 키바에도 따로 있었다 — 두 번째
+/// 소비처가 생긴 이상 규칙을 한곳에 둔다(계획 U1).
+var set_sa: scroll_area.State = .{};
+var set_touch: scroll_area.Touch = .{};
 var set_max_scroll: f32 = 0;
-var set_fling: f32 = 0;
 var set_pressed: ?usize = null;
 var set_back_pressed: bool = false;
 var set_open: ?usize = null; // 팝업이 열린 행
@@ -2433,7 +2467,9 @@ const set_item_cap: usize = blk: {
 var set_item_rects: [set_item_cap]SetRect = @splat(.{});
 var set_item_n: usize = 0;
 /// 팝업이 목록 영역보다 길 때의 스크롤(본문 목록과 같은 모양).
-var set_pop_scroll: f32 = 0;
+/// 팝업 스크롤도 컴포넌트가 든다(목록·키바와 같은 규칙). 관성은 안 쓴다 — 항목이 열여섯이라
+/// 끝까지 밀 일이 없고, 고르는 화면에서 미끄러지면 엉뚱한 것이 손가락 밑에 온다.
+var set_pop_sa: scroll_area.State = .{};
 var set_pop_max_scroll: f32 = 0;
 var set_active: bool = false;
 var set_down_x: f32 = 0;
@@ -2441,19 +2477,13 @@ var set_down_y: f32 = 0;
 var set_last_y: f32 = 0;
 var set_moved: f32 = 0;
 
-fn clampSetScroll() void {
-    if (set_scroll < 0) set_scroll = 0;
-    if (set_scroll > set_max_scroll) set_scroll = set_max_scroll;
+/// 지금 스크롤 위치(px). 컴포넌트가 정수로 들고 있으므로 그리는 쪽만 f32 로 받는다.
+fn setScroll() f32 {
+    return @floatFromInt(set_sa.offset_y_px);
 }
 
-/// 키바 가로 관성과 같은 모양이다(프레임당 감쇠 — wall-clock 이관은 U1 잔여).
 fn stepSetFling() void {
-    if (set_active or set_fling == 0) return;
-    set_scroll -= set_fling;
-    if (set_scroll <= 0 or set_scroll >= set_max_scroll) set_fling = 0;
-    clampSetScroll();
-    set_fling *= 0.92;
-    if (@abs(set_fling) < 0.5) set_fling = 0;
+    set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)));
 }
 
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
@@ -2501,7 +2531,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     var content: f32 = 0;
     for (0..set_items.len) |k| content += setItemH(k);
     set_max_scroll = @max(0, content - set_list.h);
-    clampSetScroll();
+    set_sa.clamp(@intFromFloat(@max(0, set_max_scroll)));
 
     // 스크롤 위치에 걸린 섹션을 **먼저** 정한다. 붙임 헤더가 있으면 그만큼 목록 창이 좁아지고,
     // 그 좁아진 창이 **그리기와 히트의 공통 기준**이 되어야 한다 — 안 그러면 헤더 밑에 숨은
@@ -2515,7 +2545,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     {
         var probe: f32 = 0;
         for (set_items, 0..) |item, i| {
-            if (set_list.y + probe - set_scroll <= list_top + 0.5) switch (item) {
+            if (set_list.y + probe - setScroll() <= list_top + 0.5) switch (item) {
                 .header => |t| sticky = t,
                 else => {},
             };
@@ -2526,7 +2556,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     var oy: f32 = 0;
     for (set_items, 0..) |item, i| {
         const h = setItemH(i);
-        const ry = set_list.y + oy - set_scroll;
+        const ry = set_list.y + oy - setScroll();
         oy += h;
         switch (item) {
             .header => |title| {
@@ -2589,7 +2619,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     if (set_max_scroll > 0) {
         const track_h = list_h;
         const thumb_h = @max(28.0, track_h * (track_h / content));
-        const t = set_scroll / set_max_scroll;
+        const t = setScroll() / set_max_scroll;
         const thumb_y = list_top + t * (track_h - thumb_h);
         const bar_w: f32 = 3;
         push(.{
@@ -2641,13 +2671,13 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 // 영영 사라진다. 프리셋 16개 × 44 = 704 라 작은 폰에서 실제로 넘친다.
                 const ph = @min(full_h, set_list.h);
                 set_pop_max_scroll = @max(0, full_h - ph);
-                if (set_pop_scroll > set_pop_max_scroll) set_pop_scroll = set_pop_max_scroll;
+                set_pop_sa.clamp(@intFromFloat(@max(0, set_pop_max_scroll)));
                 if (py + ph > set_list.y + set_list.h) py = @max(set_list.y, r.y - ph);
                 if (py < set_list.y) py = set_list.y;
                 push(.{ .x = @intFromFloat(px - 1), .y = @intFromFloat(py - 1), .w = @intFromFloat(pw + 2), .h = @intFromFloat(ph + 2) }, tk.get(.muted_fg), 0xFF, 9, 0);
                 push(.{ .x = @intFromFloat(px), .y = @intFromFloat(py), .w = @intFromFloat(pw), .h = @intFromFloat(ph) }, tk.get(.surface_bg), 0xFF, 8, 0);
                 for (c.items[0..shown], 0..) |it, k| {
-                    const iy = py + @as(f32, @floatFromInt(k)) * set_row_h - set_pop_scroll;
+                    const iy = py + @as(f32, @floatFromInt(k)) * set_row_h - @as(f32, @floatFromInt(set_pop_sa.offset_y_px));
                     // **보이는 것만 누를 수 있다.** 밖으로 나간 항목의 rect 를 남기면 화면에는
                     // 없는데 눌리는 자리가 생긴다(본문 목록과 같은 규율).
                     set_item_rects[k] = if (iy + set_row_h <= py or iy >= py + ph)
@@ -2690,8 +2720,8 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
         set_active = false;
         if (phase == 2 and set_moved < 10 and setHit(set_gear_rect, x, y)) {
             screen = .settings;
-            set_scroll = 0;
-            set_fling = 0;
+            set_sa.reset();
+            set_touch.cancel();
         }
         return 1;
     }
@@ -2704,7 +2734,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_down_y = y;
             set_last_y = y;
             set_moved = 0;
-            set_fling = 0;
+            set_touch.begin(y);
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
@@ -2733,20 +2763,19 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             if (set_open != null) {
                 // **팝업이 열려 있으면 팝업을 민다.** 안 그러면 목록 16개짜리 팝업에서 아래
                 // 항목에 닿을 방법이 없다 — 화면이 유일한 입력 경로라 그 값이 영영 사라진다.
-                set_pop_scroll -= dy;
-                if (set_pop_scroll < 0) set_pop_scroll = 0;
-                if (set_pop_scroll > set_pop_max_scroll) set_pop_scroll = set_pop_max_scroll;
+                _ = set_pop_sa.scrollByPx(@intFromFloat(-dy), @intFromFloat(@max(0, set_pop_max_scroll)));
                 return 1;
             }
             if (set_open == null) {
-                set_scroll -= dy;
-                clampSetScroll();
-                set_fling = dy;
+                set_touch.move(&set_sa, y, @intFromFloat(@max(0, set_max_scroll)));
             }
         },
         else => {
             const was = set_active;
             set_active = false;
+            // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
+            // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
+            if (phase == 3) set_touch.cancel() else set_touch.end();
             const pressed = set_pressed;
             const back = set_back_pressed;
             set_pressed = null;
@@ -2766,6 +2795,20 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                 set_open = null;
                 return 1;
             }
+            // **편집 중에 바깥을 누르면 확정한다.** iOS 숫자 패드에는 Return 이 없어(Android 만
+            // 있다) 그것 말고는 확정할 길이 없다 — iOS 앱들이 쓰는 그 관례다. 네이티브 툴바
+            // (`inputAccessoryView`)를 얹지 않는 이유는 화면이 전부 우리 draw-list 라 거기만
+            // 네이티브 스타일이 되기 때문이다.
+            //
+            // **그 탭은 삼킨다** — 확정하면서 뒤 행까지 누르면 "닫으려다 값이 바뀐다"(팝업이
+            // 열렸을 때 행을 안 누르는 것과 같은 규율, [UX §5.6](../../../docs/mobile-ux.md)).
+            if (set_edit) |ei| {
+                const on_self = pressed != null and pressed.? == ei;
+                if (!on_self) {
+                    commitNumberEdit();
+                    return 1;
+                }
+            }
             if (back) {
                 screen = .terminal; // pop
                 return 1;
@@ -2777,7 +2820,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                 },
                 .choice => {
                     set_open = i;
-                    set_pop_scroll = 0; // 열 때마다 처음부터 — 지난번 자리가 남으면 엉뚱한 데서 뜬다
+                    set_pop_sa.reset(); // 열 때마다 처음부터 — 지난번 자리가 남으면 엉뚱한 데서 뜬다
                 },
                 .number => {
                     // **그 줄을 입력 대상으로 삼는다.** 소프트 키보드는 이미 떠 있고(설정을
@@ -2785,6 +2828,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                     // "키보드는 있는데 아무것도 안 써지는" 상태였다.
                     set_edit = i;
                     set_edit_len = 0;
+                    kb_raise_req = true; // 내려가 있으면 올린다
                 },
             };
         },
@@ -2812,7 +2856,7 @@ pub export fn maru_mobile_pop_screen() u32 {
     set_active = false;
     set_pressed = null;
     set_back_pressed = false;
-    set_fling = 0;
+    set_touch.cancel();
     return 1;
 }
 

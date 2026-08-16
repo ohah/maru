@@ -107,6 +107,7 @@ static void recreateVulkan(struct android_app *app);
 // 정의는 아래고 프레임 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다.
 static void drainConfigWrite(struct android_app *app);
 static void syncInputKind(void);
+static void raiseKeyboardIfAsked(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -627,8 +628,8 @@ static void drawFrame(void) {
         pthread_mutex_lock(&g_bridge_lock);
         maru_mobile_scroll(g.fling_vy);
         pthread_mutex_unlock(&g_bridge_lock);
-        g.fling_vy *= 0.92f;
-        if (g.fling_vy < 0.5f && g.fling_vy > -0.5f) g.fling_vy = 0.0f;
+        g.fling_vy *= MARU_FLING_DAMPING;
+        if (g.fling_vy < MARU_FLING_STOP_BELOW && g.fling_vy > -MARU_FLING_STOP_BELOW) g.fling_vy = 0.0f;
     }
     // **창 크기를 직접 본다.** 드라이버가 OUT_OF_DATE 를 안 알려 주는 경우가 있다(실측:
     // 이 에뮬레이터는 리사이즈 뒤에도 계속 VK_SUCCESS 를 돌려주고, SurfaceFlinger 가 낡은
@@ -700,6 +701,7 @@ static void drawFrame(void) {
     // 요청이 사라진다) — 어느 화면에서 바뀌었든 한 자리에서 처리된다.
     if (g_app) drainConfigWrite(g_app);
     syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
+    raiseKeyboardIfAsked();
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1003,6 +1005,21 @@ Java_dev_maru_MaruActivity_nativeInputKind(JNIEnv *env, jclass cls) {
 
 /// 입력 종류가 바뀌면 **이미 떠 있는 키보드를 갈아 끼운다**. `inputType` 만 바꾸면 다음에 열 때나
 /// 반영된다 — 사용자는 숫자 칸을 눌렀는데 글자 키보드를 계속 본다.
+/// 키보드를 올려 달라는 요청을 실행한다. Java 쪽 `showKeyboard` 가 `showSoftInput` 을 부른다.
+static void raiseKeyboardIfAsked(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int want = maru_mobile_take_keyboard_raise();
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (!want || !g_activity_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "raiseKeyboard", "()V");
+    if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
+    (*vm)->DetachCurrentThread(vm);
+    LOGI("MARU_INPUT keyboard_raised");
+}
+
 static void syncInputKind(void) {
     pthread_mutex_lock(&g_bridge_lock);
     unsigned int k = maru_mobile_input_kind();

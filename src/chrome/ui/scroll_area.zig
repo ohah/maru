@@ -284,6 +284,85 @@ pub const Drag = struct {
 
 /// scroll-area의 published content rect. scrollbar 기하를 여기서 다시 계산하지 않고 **완성된 tree가
 /// 발행한 값**을 읽는 것이 핵심이다 — 그래야 scroll-area가 움직여도 스크롤바가 따라간다(§4).
+/// **터치는 콘텐츠를 직접 끈다** — 휠·스크롤바와 다른 모델이다. 손가락이 1px 움직이면 목록도
+/// 1px 움직이고, 떼면 그 속도로 미끄러진다(관성). 데스크톱에는 이 모델이 없었고 모바일이
+/// 브리지 안에 손으로 갖고 있었다(`set_fling`·`clampSetScroll`) — 두 번째 소비처가 생기면
+/// 규칙이 갈리므로 여기로 옮긴다(계획 U1 "폼 컴포넌트는 터치에서 쓸 수 있게 하는 일이다").
+///
+/// **분수를 여기서 든다.** 발행되는 offset 은 정수 backing pixel 이라(위 `State`) 손가락의
+/// 소수점 이동을 그대로 쓰면 매 프레임 반올림이 쌓여 **천천히 끌 때 아예 안 움직인다**.
+pub const Touch = struct {
+    /// 손가락이 닿아 있는 동안 true — 관성은 뗀 뒤의 것이다. 닿은 채로 흘리면 같은 이동량이
+    /// 두 번 적용돼 손가락보다 두 배로 미끄러진다.
+    active: bool = false,
+    /// 직전 move 의 좌표(픽셀). 델타는 **직전 대비**다 — down 대비로 재면 임계를 넘는 첫 프레임에
+    /// 그동안의 차이가 통째로 적용돼 목록이 툭 뛴다.
+    ///
+    /// **축은 호출자가 정한다** — 세로 목록이면 y, 가로 키바면 x 를 넘긴다. 규칙(1:1 추적·관성·
+    /// 감쇠·끝에서 멈춤)이 축과 무관하므로 두 벌로 두면 한쪽만 고쳐진다(실제로 그랬다).
+    last_y: f32 = 0,
+    /// 뗀 뒤 남은 속도(px/프레임). 0 이면 멈춤.
+    velocity: f32 = 0,
+    /// 1픽셀을 못 채운 이동분.
+    residue: f32 = 0,
+
+    /// 프레임당 감쇠. 키바·설정이 쓰던 값을 그대로 옮긴다.
+    pub const damping: f32 = 0.92;
+    /// 이보다 느려지면 멈춘다 — 안 그러면 영원히 도는 헛계산이 남는다.
+    pub const stop_below: f32 = 0.5;
+
+    pub fn begin(self: *Touch, y: f32) void {
+        self.active = true;
+        self.last_y = y;
+        self.velocity = 0;
+        self.residue = 0;
+    }
+
+    /// 손가락을 옮긴다. **끄는 방향으로 내용이 따라온다**(세로면 위로 끌 때 목록이 위로).
+    pub fn move(self: *Touch, state: *State, y: f32, max_offset_px: u32) void {
+        if (!self.active) return;
+        const dy = y - self.last_y;
+        self.last_y = y;
+        self.velocity = dy;
+        self.applyDelta(state, -dy, max_offset_px);
+    }
+
+    /// 손을 뗀다 — 남은 속도가 관성이 된다.
+    pub fn end(self: *Touch) void {
+        self.active = false;
+    }
+
+    /// 취소(제스처가 뺏겼다·화면이 바뀐다) — 관성도 남기지 않는다.
+    pub fn cancel(self: *Touch) void {
+        self.active = false;
+        self.velocity = 0;
+        self.residue = 0;
+    }
+
+    /// 매 프레임 한 번. 손가락이 닿아 있으면 아무 일도 안 한다.
+    pub fn step(self: *Touch, state: *State, max_offset_px: u32) void {
+        if (self.active or self.velocity == 0) return;
+        self.applyDelta(state, -self.velocity, max_offset_px);
+        // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,
+        // 되돌리려 손을 대면 죽은 속도가 남아 있다가 튄다.
+        if (state.offset_y_px == 0 or state.offset_y_px == max_offset_px) {
+            self.velocity = 0;
+            self.residue = 0;
+            return;
+        }
+        self.velocity *= damping;
+        if (@abs(self.velocity) < stop_below) self.velocity = 0;
+    }
+
+    fn applyDelta(self: *Touch, state: *State, delta_px: f32, max_offset_px: u32) void {
+        const total = delta_px + self.residue;
+        const whole = @trunc(total);
+        self.residue = total - whole;
+        if (whole == 0) return;
+        _ = state.scrollByPx(@intFromFloat(whole), max_offset_px);
+    }
+};
+
 pub const ContentRect = struct {
     x: f32,
     y: f32,
@@ -670,4 +749,60 @@ test "track click centers the thumb at the pointer" {
     try std.testing.expect(middle > geometry.max_offset_px * 4 / 10);
     try std.testing.expect(middle < geometry.max_offset_px * 6 / 10);
     try std.testing.expectEqual(@as(u32, 0), geometry.offsetForTrackClick(geometry.track_y));
+}
+
+// ── 터치 스크롤 ────────────────────────────────────────────────────────────────
+
+test "터치: 손가락을 따라 1:1 로 움직이고 떼면 미끄러진다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    t.begin(100);
+    t.move(&st, 90, 1000); // 위로 10px → 목록이 10px 내려간다
+    try std.testing.expectEqual(@as(u32, 10), st.offset_y_px);
+    t.end();
+    // 관성: 마지막 속도(-10)가 감쇠하며 계속 민다.
+    t.step(&st, 1000);
+    try std.testing.expect(st.offset_y_px > 10);
+}
+
+test "터치: 손가락이 닿아 있는 동안에는 관성이 안 돈다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    t.begin(100);
+    t.move(&st, 50, 1000);
+    const held = st.offset_y_px;
+    t.step(&st, 1000); // 아직 안 뗐다
+    try std.testing.expectEqual(held, st.offset_y_px);
+}
+
+test "터치: 천천히 끌어도 움직인다(분수 누적)" {
+    var st: State = .{};
+    var t: Touch = .{};
+    t.begin(100);
+    var i: u32 = 0;
+    while (i < 4) : (i += 1) t.move(&st, 100 - @as(f32, @floatFromInt(i + 1)) * 0.3, 1000);
+    // 0.3px 씩 네 번 = 1.2px — 반올림으로 버리면 0 이 된다.
+    try std.testing.expect(st.offset_y_px >= 1);
+}
+
+test "터치: 끝에 닿으면 속도도 죽는다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    t.begin(100);
+    t.move(&st, 0, 50); // 상한(50)을 넘겨 민다
+    t.end();
+    t.step(&st, 50);
+    try std.testing.expectEqual(@as(u32, 50), st.offset_y_px);
+    try std.testing.expectEqual(@as(f32, 0), t.velocity);
+}
+
+test "터치: 취소는 관성을 안 남긴다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    t.begin(100);
+    t.move(&st, 50, 1000);
+    t.cancel();
+    const at = st.offset_y_px;
+    t.step(&st, 1000);
+    try std.testing.expectEqual(at, st.offset_y_px);
 }

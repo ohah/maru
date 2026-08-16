@@ -417,8 +417,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)stepFling {
     if (_flingVy == 0) return;
     maru_mobile_scroll(_flingVy);
-    _flingVy *= 0.92f;                       // 실측 없이 고른 값 — 손 테스트로 맞춘다
-    if (fabsf(_flingVy) < 0.5f) _flingVy = 0; // 영원히 도는 것을 막는다
+    _flingVy *= MARU_FLING_DAMPING;           // 헤더가 단일 출처(키바·설정과 같은 값)
+    if (fabsf(_flingVy) < MARU_FLING_STOP_BELOW) _flingVy = 0; // 영원히 도는 것을 막는다
 }
 
 - (BOOL)canBecomeFirstResponder { return YES; }
@@ -954,6 +954,14 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.
     drainConfigWrite();
+    // **키보드를 다시 올린다.** 우리는 시작부터 first responder 라 그 상태로는 iOS 가 키보드를
+    // 다시 안 띄운다 — 사용자가 한 번 내리면(⌘K·스와이프) 숫자 칸을 눌러도 안 올라온다.
+    // resign 후 become 이 그 자리다.
+    if (maru_mobile_take_keyboard_raise()) {
+        [self resignFirstResponder];
+        [self becomeFirstResponder];
+        NSLog(@"MARU_INPUT keyboard_raised");
+    }
     // 입력 종류가 바뀌면 키보드를 갈아 끼운다(Android `restartInput` 과 같은 자리).
     static unsigned int last_kind = 0xFFFFFFFF;
     unsigned int kind = maru_mobile_input_kind();

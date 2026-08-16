@@ -287,7 +287,11 @@ unsigned int maru_mobile_view_offset(void);
 /// `time_ms`: 단조 증가하는 밀리초. **길게 누름 판정에 쓴다** — 코어에는 시계가 없다.
 ///
 /// 관성만 플랫폼이 갖는다: 손을 뗀 뒤 흘리는 것은 여전히 `maru_mobile_scroll` 로 넣는다.
-void maru_mobile_pointer(unsigned int phase, float x, float y, unsigned long long time_ms);
+/// `pointer_id`: **host 가 주는 불투명한 정수.** 보장은 하나뿐이다 — `down` 부터 그 손가락의
+/// `up`/`cancel` 까지 같다. 값의 범위도 재사용 규칙도 코어가 가정하지 않는다(Android 슬롯 id 는
+/// 재사용되고, iOS `UITouch` 는 숫자 id 가 없어 host 가 매핑을 든다). 소유권·이어받기 규칙은
+/// **코어가 갖는다**(docs/mobile-platform.md §3.1) — host 에 두면 두 벌이 되고 두 벌은 갈린다.
+void maru_mobile_pointer(unsigned int phase, unsigned int pointer_id, float x, float y, unsigned long long time_ms);
 
 /// **길게 누름 지연을 OS 값으로 맞춘다.** 두 플랫폼 다 사용자 접근성 설정으로 바꿀 수 있어
 /// (Android "길게 누르기 지연", iOS "터치 조절 → 유지 시간") 코어가 박아 두면 그 설정을
@@ -325,7 +329,7 @@ unsigned int maru_mobile_has_selection(void);
 ///
 /// **좌표 해석은 코어 쪽이 한다** — 그리는 자리와 판정하는 자리가 갈리면 눌러도 다른 키가
 /// 나간다(docs/mobile-platform.md §3).
-unsigned int maru_mobile_keybar_pointer(unsigned int phase, float x, float y);
+unsigned int maru_mobile_keybar_pointer(unsigned int phase, unsigned int pointer_id, float x, float y);
 
 /// chrome(설정 화면·그 입구인 톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 —
 /// 설정이 밀려 올라와 있으면 그 아래 키바·본문은 없는 것과 같다(스택 — docs/mobile-ux.md §3).
@@ -336,7 +340,7 @@ unsigned int maru_mobile_keybar_pointer(unsigned int phase, float x, float y);
 /// 에서 푼다 — 손짓 도중에 소유가 바뀌면 같은 손짓이 두 곳에서 해석되기 때문이다(키바도 같은
 /// 모양이다). 그래서 `down` 이 아닌 위상의 답은 host 가 무시해도 맞다. 뒤로가기처럼 **손을 뗀
 /// 적 없이** 화면이 바뀌는 경로는 브리지 쪽 상태만 정리되고, host 의 잡음은 up 에서 풀린다.
-unsigned int maru_mobile_chrome_pointer(unsigned int phase, float x, float y);
+unsigned int maru_mobile_chrome_pointer(unsigned int phase, unsigned int pointer_id, float x, float y);
 
 /// 밀린 화면을 하나 뺀다(Android 하드웨어 뒤로가기 · iOS 좌측 가장자리 스와이프).
 /// 1=뺐다, 0=뺄 것이 없다 — 0이면 host 가 자기 관례대로 처리한다(Android 는 앱을 내린다).

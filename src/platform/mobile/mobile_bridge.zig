@@ -706,7 +706,11 @@ fn bodyCell(x: f32, y: f32) ?struct { row: u16, col: u16 } {
     return .{ .row = @intCast(packed_cell & 0xFFFF), .col = @intCast(packed_cell >> 16) };
 }
 
-pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void {
+pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
+    // **본문은 아직 소유권을 안 쓴다.** 여기는 선택·롱프레스가 코어의 포인터 상태를 직접
+    // 쓰는 자리라 `Touch` 를 안 거친다 — 다중 포인터 규칙을 여기까지 넓히는 것은 T2·T3 이
+    // host 가 진짜 id 를 보내기 시작한 뒤의 일이다. 지금은 받아서 흘린다.
+    _ = pointer_id;
     const core = &(term_core orelse return);
     switch (phase) {
         0 => { // down
@@ -904,7 +908,7 @@ fn kbScroll() f32 {
 /// up 까지 기다려 **움직인 거리가 임계 아래일 때만** 키로 친다.
 ///
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
-pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
+pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
     // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 `kb_active` 가 남아 **복귀 후
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
@@ -925,7 +929,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         kb_moved = 0;
         // **흐르는 중에 짚으면 멈추기만 한다.** 그 짚음은 세우려던 것이지 키를 누른 것이
         // 아니다 — 안 가리면 멈추려던 손가락이 그 자리 키를 터미널로 보낸다(재현했다).
-        kb_stop_tap = kb_touch.begin(x);
+        kb_stop_tap = kb_touch.begin(pointer_id, x);
         // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
         // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
         kb_pressed = if (kb_stop_tap) null else keybarIndexAt(x, y);
@@ -942,13 +946,13 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
         if (kb_moved < scroll_area.Touch.slop_px) return 1;
         kb_pressed = null;
-        kb_touch.move(&kb_sa, x, @intFromFloat(@max(0, key_bar_max_scroll)));
+        kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
     }
     kb_active = false;
     kb_pressed = null;
     // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
-    kb_touch.end(frame_dt_ms);
+    kb_touch.end(pointer_id, frame_dt_ms);
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and !kb_stop_tap and kb_moved < scroll_area.Touch.slop_px) {
         kb_touch.cancel(); // 탭이면 관성이 없다
@@ -2715,7 +2719,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 
 /// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
 /// 있으면 그 아래 키바·본문은 없는 것과 같다.
-pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
+pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // **터미널 화면에는 chrome 이 없다.** 하단 44px 바를 걷어내면서 설정 입구가 부모 화면
     // (세션 목록)의 앱 바로 갔다 — 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상
     // 자리다), 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 썼다. 그래서 여기서는
@@ -2768,7 +2772,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_last_y = y;
             set_moved = 0;
             // 키바와 같은 규칙 — 흐르는 목록을 세우려 짚었는데 그 자리 토글이 뒤집히면 안 된다.
-            set_stop_tap = set_touch.begin(y);
+            set_stop_tap = set_touch.begin(pointer_id, y);
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
@@ -2801,7 +2805,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                 return 1;
             }
             if (set_open == null) {
-                set_touch.move(&set_sa, y, @intFromFloat(@max(0, set_max_scroll)));
+                set_touch.move(&set_sa, pointer_id, y, @intFromFloat(@max(0, set_max_scroll)));
             }
         },
         else => {
@@ -2809,7 +2813,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_active = false;
             // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
             // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
-            if (phase == 3) set_touch.cancel() else set_touch.end(frame_dt_ms);
+            if (phase == 3) set_touch.cancel() else set_touch.end(pointer_id, frame_dt_ms);
             const pressed = set_pressed;
             const back = set_back_pressed;
             set_pressed = null;

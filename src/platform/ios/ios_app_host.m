@@ -304,6 +304,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // **터치**: 탭한 지점을 셀 좌표로 바꿔 코어에 알린다. 데스크톱의 포인터 조회와 같은 계약이고,
 // 여기서 확인하려는 것은 "터치가 논리 좌표를 거쳐 셀까지 닿는가"다.
 /// 논리 좌표 + 이벤트 시각. **판단은 코어가 한다** — 여기서는 좌표계만 되돌린다.
+/// **`UITouch` 에는 숫자 id 가 없다.** 계약이 요구하는 것은 "`down` 부터 그 손가락의 `up` 까지
+/// 같은 불투명 정수" 뿐이고, `UITouch` 객체는 그 동안 같은 인스턴스가 유지되므로 **포인터
+/// 주소를 접어** 쓴다. 값의 의미는 코어가 안 가정한다(계약 §3.1).
+static unsigned int maruPointerId(UITouch *t) {
+    return (unsigned int)(((uintptr_t)t >> 4) & 0x7FFFFFFF);
+}
+
 - (void)sendPointer:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     UITouch *touch = touches.anyObject;
     if (!touch) return;
@@ -327,7 +334,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         _ptrLastT = t_ms;
     }
     if (phase == 0) { _flingVy = 0; _ptrLastY = ly; _ptrLastT = t_ms; }
-    maru_mobile_pointer(phase, lx, ly, (unsigned long long)(touch.timestamp * 1000.0));
+    maru_mobile_pointer(phase, maruPointerId(touch), lx, ly, (unsigned long long)(touch.timestamp * 1000.0));
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -338,13 +345,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
     // **밀린 화면이 가장 먼저다.** 설정이 올라와 있으면 그 아래 키바·본문은 없는 것과 같다.
-    if (maru_mobile_chrome_pointer(0, lx, ly)) {
+    if (maru_mobile_chrome_pointer(0, maruPointerId(touch), lx, ly)) {
         _chromeActive = YES;
         return;
     }
     // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
     // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
-    if (maru_mobile_keybar_pointer(0, lx, ly)) {
+    if (maru_mobile_keybar_pointer(0, maruPointerId(touch), lx, ly)) {
         _keybarActive = YES;
         return;
     }
@@ -372,7 +379,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UITouch *touch = touches.anyObject;
     CGPoint p = [touch locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
-    maru_mobile_chrome_pointer(phase, (float)(p.x - safe.left), (float)(p.y - safe.top));
+    maru_mobile_chrome_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
     if (phase >= 2) _chromeActive = NO;
     return YES;
 }
@@ -382,7 +389,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UITouch *touch = touches.anyObject;
     CGPoint p = [touch locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
-    maru_mobile_keybar_pointer(phase, (float)(p.x - safe.left), (float)(p.y - safe.top));
+    maru_mobile_keybar_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
     if (phase >= 2) {
         _keybarActive = NO;
         NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
@@ -1115,15 +1122,15 @@ static void loadConfigFile(void);
     // **누르고 있던 손가락을 정리한다.** iOS 는 배경으로 나갈 때 `touchesCancelled` 를
     // 보내지 않는다(로그로 확인했다) — 안 정리하면 브리지가 "누르고 있다" 를 들고 있다가
     // 돌아온 프레임에서 옛 자리를 길게 누른 것으로 판정할 수 있다.
-    maru_mobile_pointer(3, 0, 0, 0);
+    maru_mobile_pointer(3, 0, 0, 0, 0);
     // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
     // 브리지와 뷰 **양쪽**을 푼다: 브리지만 풀면 뷰가 계속 키바로 라우팅하고, 뷰만 풀면
     // 브리지의 `kb_active` 가 남는다.
-    maru_mobile_keybar_pointer(3, 0, 0);
+    maru_mobile_keybar_pointer(3, 0, 0, 0);
     // **밀린 화면(설정)이 잡고 있던 것도 같은 이유로 푼다.** 키바만 풀고 여기를 빠뜨렸더니,
     // 톱니를 누른 채 홈으로 나갔다 오면 `_chromeActive` 가 남아 **복귀 후 첫 손짓이 통째로
     // 삼켜졌다**(iOS 는 배경 전환에 touchesCancelled 를 안 보낸다 — 위 주석).
-    maru_mobile_chrome_pointer(3, 0, 0);
+    maru_mobile_chrome_pointer(3, 0, 0, 0);
     // **본문 관성도 거둔다.** 이건 브리지가 아니라 우리가 든 값이라 위 취소로 안 지워진다.
     // 감쇠가 시간 기준이 된 뒤로는 남겨 두면 복귀 프레임의 dt 가 "배경에 있던 시간"이 되어
     // (상한 100ms 로 잘려도) 화면이 한 번에 튄다.

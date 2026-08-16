@@ -21,17 +21,17 @@ fn colorAdd1(cp: u32, style: u32, col: u32, row: u32, adv: u32) void {
 /// 키바를 **탭한다**(누르고 그 자리에서 뗀다). 계약은 이제 포인터 단계를 받는다 — 키가 손가락
 /// 크기라 화면을 넘치고, 가로로 밀면 스크롤이라 **손을 뗄 때** 키가 정해지기 때문이다.
 fn keybarTap(x: f32, y: f32) u32 {
-    const took = bridge.maru_mobile_keybar_pointer(0, x, y);
+    const took = bridge.maru_mobile_keybar_pointer(0, 1, x, y);
     if (took == 0) return 0;
-    _ = bridge.maru_mobile_keybar_pointer(2, x, y);
+    _ = bridge.maru_mobile_keybar_pointer(2, 1, x, y);
     return 1;
 }
 
 /// 선택을 치운다. **취소(phase 3)로는 안 지워진다** — host 가 그 phase 를 배경 전환에도 쓰기
 /// 때문이다(선택이 셰이드 한 번에 사라지면 안 된다). 지우는 자리는 제품과 같이 **다음 누름**이다.
 fn clearSelection(x: f32, y: f32) void {
-    bridge.maru_mobile_pointer(0, x, y, now());
-    bridge.maru_mobile_pointer(2, x, y, now());
+    bridge.maru_mobile_pointer(0, 1, x, y, now());
+    bridge.maru_mobile_pointer(2, 1, x, y, now());
 }
 
 // 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
@@ -87,7 +87,7 @@ test "선택을 복사로 꺼낸다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
@@ -480,27 +480,27 @@ test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
 fn keybarScrollToStart() void {
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
     if (c.x == 0 and c.y == 0) return;
-    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    _ = bridge.maru_mobile_keybar_pointer(0, 1, c.x, c.y);
     var x = c.x;
     var step: u32 = 0;
     while (step < 60) : (step += 1) {
         x += 20;
-        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+        _ = bridge.maru_mobile_keybar_pointer(1, 1, x, c.y);
     }
-    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y);
+    _ = bridge.maru_mobile_keybar_pointer(2, 1, x, c.y);
     _ = bridge.maru_mobile_build(402, 874, now());
 }
 
 fn keybarScrollToEnd() void {
     const c = keyCenter(0);
-    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    _ = bridge.maru_mobile_keybar_pointer(0, 1, c.x, c.y);
     var x = c.x;
     var step: u32 = 0;
     while (step < 40) : (step += 1) {
         x -= 20;
-        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+        _ = bridge.maru_mobile_keybar_pointer(1, 1, x, c.y);
     }
-    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y);
+    _ = bridge.maru_mobile_keybar_pointer(2, 1, x, c.y);
     _ = bridge.maru_mobile_build(402, 874, now());
 }
 
@@ -637,20 +637,20 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
     // **글자가 있는 칸에서 시작한다** — 빈 칸에서 끌면 "움직였으면 길게 누름이 아니다" 규칙을
     // 지워도 어차피 잡을 단어가 없어 테스트가 아무것도 못 본다.
     const d = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, d.x, d.y, now());
-    bridge.maru_mobile_pointer(1, d.x, d.y + 100, now()); // 100px 아래로(과거로)
+    bridge.maru_mobile_pointer(0, 1, d.x, d.y, now());
+    bridge.maru_mobile_pointer(1, 1, d.x, d.y + 100, now()); // 100px 아래로(과거로)
     try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
     // **프레임이 한참 지나도** 선택이 생기면 안 된다 — 판정은 build 에서 도므로 여기서
     // 시간을 흘려 보지 않으면 "움직였으면 길게 누름이 아니다" 규칙을 아무도 안 본다.
     holdPast(2000);
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(2, d.x, d.y + 100, now());
+    bridge.maru_mobile_pointer(2, 1, d.x, d.y + 100, now());
     bridge.maru_mobile_scroll_to_bottom();
 
     // ② 거의 안 움직인 채 시간이 지나면 선택이다 — 그리고 그때는 **스크롤이 안 된다**.
     const before_off = bridge.maru_mobile_view_offset();
     const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
-    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    bridge.maru_mobile_pointer(0, 1, p.x, p.y, now());
     // **문턱 전에는 안 잡힌다.** 프레임이 돌아도 시간이 안 됐으면 그대로다.
     holdPast(100);
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
@@ -659,11 +659,11 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
     try std.testing.expectEqual(before_off, bridge.maru_mobile_view_offset());
 
     // ③ 선택은 **손을 떼도 남는다** — 떼자마자 사라지면 복사할 수가 없다.
-    bridge.maru_mobile_pointer(2, p.x, p.y, now());
+    bridge.maru_mobile_pointer(2, 1, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
     // ④ 다시 누르면 사라진다(데스크톱에서 클릭이 선택을 푸는 것과 같다).
-    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    bridge.maru_mobile_pointer(0, 1, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
     clearSelection(p.x, p.y); // cancel 로 정리
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
@@ -679,7 +679,7 @@ test "선택은 화면에 quad 로 나타난다" {
     const plain = bridge.maru_mobile_build(402, 874, now());
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600); // 길게 누름 → 단어 선택
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     const with_sel = bridge.maru_mobile_build(402, 874, now());
@@ -698,8 +698,8 @@ test "선택은 화면에 quad 로 나타난다" {
 
     // **누른 칸 안에서 계속 움직여도 단어가 안 줄어든다.** 길게 누른 뒤에도 move 는 계속
     // 오는데 그때마다 head 를 당기면 3칸 단어가 2칸이 된다(픽셀로 재서 잡은 결함).
-    bridge.maru_mobile_pointer(1, q.x + 1, q.y + 1, now());
-    bridge.maru_mobile_pointer(1, q.x + 2, q.y, now());
+    bridge.maru_mobile_pointer(1, 1, q.x + 1, q.y + 1, now());
+    bridge.maru_mobile_pointer(1, 1, q.x + 2, q.y, now());
     try std.testing.expectEqual(span, bridge.maru_mobile_selection_span());
 
     clearSelection(q.x + 2, q.y + 1);
@@ -722,10 +722,10 @@ test "여러 줄에 걸쳐 선택된다" {
     // 첫 줄에서 잡아 셋째 줄까지 끈다.
     const from = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     const to = pointForCell(2, 6) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, from.x, from.y, now());
+    bridge.maru_mobile_pointer(0, 1, from.x, from.y, now());
     holdPast(600); // 길게 누름 → 단어
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(1, to.x, to.y, now()); // 누른 칸을 벗어나 끈다 → 확장
+    bridge.maru_mobile_pointer(1, 1, to.x, to.y, now()); // 누른 칸을 벗어나 끈다 → 확장
 
     const span = bridge.maru_mobile_selection_span();
     try std.testing.expectEqual(@as(u64, 0), (span >> 48) & 0xFFFF); // start_row
@@ -764,7 +764,7 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     _ = bridge.maru_mobile_input("target word here", 16);
 
     const q = pointForCell(1, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     const before = bridge.maru_mobile_selection_span();
@@ -807,7 +807,7 @@ test "복사 버퍼가 모자라면 알린다" {
     _ = bridge.maru_mobile_build(402, 874, now());
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     keybarScrollToEnd(); // `copy` 는 줄 끝이라 밀어야 창 안에 들어온다
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
@@ -848,7 +848,7 @@ test "선택이 생겨도 키 자리는 그대로다" {
     try std.testing.expect(before_copy != 0);
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -1320,8 +1320,8 @@ fn openSettings(w: u32, h: u32) void {
     }
     _ = bridge.maru_mobile_build(w, h, now());
     const g = bridge.sessionsGearCenter();
-    _ = bridge.maru_mobile_chrome_pointer(0, g.x, g.y);
-    _ = bridge.maru_mobile_chrome_pointer(2, g.x, g.y);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, g.x, g.y);
+    _ = bridge.maru_mobile_chrome_pointer(2, 1, g.x, g.y);
     _ = bridge.maru_mobile_build(w, h, now());
 }
 
@@ -1333,8 +1333,8 @@ fn openTerminal(w: u32, h: u32) void {
     }
     _ = bridge.maru_mobile_build(w, h, now());
     const r = bridge.sessionsRowCenter();
-    _ = bridge.maru_mobile_chrome_pointer(0, r.x, r.y);
-    _ = bridge.maru_mobile_chrome_pointer(2, r.x, r.y);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, r.x, r.y);
+    _ = bridge.maru_mobile_chrome_pointer(2, 1, r.x, r.y);
     _ = bridge.maru_mobile_build(w, h, now());
 }
 
@@ -1343,9 +1343,9 @@ fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
     var last: f32 = 0;
     var x: f32 = 0;
     while (x < @as(f32, @floatFromInt(w))) : (x += 1) {
-        const took = bridge.maru_mobile_chrome_pointer(0, x, y) == 1;
+        const took = bridge.maru_mobile_chrome_pointer(0, 1, x, y) == 1;
         if (took) {
-            _ = bridge.maru_mobile_chrome_pointer(3, x, y); // 잡은 것은 바로 취소해 다음 쓸기에 안 남긴다
+            _ = bridge.maru_mobile_chrome_pointer(3, 1, x, y); // 잡은 것은 바로 취소해 다음 쓸기에 안 남긴다
             if (first == null) first = x;
             last = x;
         }
@@ -1382,7 +1382,7 @@ test "터미널 화면에서는 chrome 이 아무것도 안 먹는다" {
     while (y < 874) : (y += 37) {
         var x: f32 = 0;
         while (x < 402) : (x += 53) {
-            try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, x, y));
+            try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 1, x, y));
         }
     }
     bridge.maru_mobile_clear_error();
@@ -1395,8 +1395,8 @@ test "화면 스택은 목록이 뿌리이고 뒤로가기로 한 장씩 빠진�
     try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
 
     // 설정은 화면 전체를 먹는다 — 그 아래 터미널·키바는 없는 것과 같다.
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, 200, 300));
-    _ = bridge.maru_mobile_chrome_pointer(3, 200, 300);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, 1, 200, 300));
+    _ = bridge.maru_mobile_chrome_pointer(3, 1, 200, 300);
 
     // 설정 → 목록
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
@@ -1496,10 +1496,10 @@ test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
     _ = bridge.maru_mobile_build(402, 874, now());
 
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     _ = bridge.maru_mobile_build(402, 874, now());
-    bridge.maru_mobile_pointer(2, q.x, q.y, now());
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now());
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
     // copy 키를 눌러 코어가 추출하게 한다. **눌렸는지 단언한다** — 키가 창 밖이면 탭이
@@ -1642,7 +1642,7 @@ test "재현: 길게 누른 뒤 한 칸 넓히면 되돌아가지 않는다" {
     // **단어의 마지막 칸**을 누른다 — 안쪽으로 늘리면 꼬리가 당겨져 끝이 오히려 줄어든다.
     // "alpha" 는 0~4열이므로 4열을 누르고 5열로 넘기면 끝이 늘어난다.
     const p = pointForCell(0, 4) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    bridge.maru_mobile_pointer(0, 1, p.x, p.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     const word = bridge.maru_mobile_selection_span();
@@ -1650,7 +1650,7 @@ test "재현: 길게 누른 뒤 한 칸 넓히면 되돌아가지 않는다" {
     try std.testing.expectEqual(@as(u64, 4), word_end); // 전제: "alpha" 끝은 4열
 
     // 셀 폭(8)보다 넓고 임계(10)보다 좁게 — 다른 칸으로 넘어가되 `ptr_moved` 는 안 서는 구간.
-    bridge.maru_mobile_pointer(1, p.x + 9, p.y, now());
+    bridge.maru_mobile_pointer(1, 1, p.x + 9, p.y, now());
     const extended = bridge.maru_mobile_selection_span();
     try std.testing.expect(extended & 0xFFFF > word_end); // 재현 조건: 실제로 늘어났나
 
@@ -1678,18 +1678,18 @@ test "재현: 손가락 정리가 선택까지 지우지 않는다" {
     _ = bridge.maru_mobile_build(402, 874, now());
 
     const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    bridge.maru_mobile_pointer(0, 1, p.x, p.y, now());
     holdPast(600);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(2, p.x, p.y, now()); // 손을 뗀다 — 선택은 남는다(계약)
+    bridge.maru_mobile_pointer(2, 1, p.x, p.y, now()); // 손을 뗀다 — 선택은 남는다(계약)
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
     // host 가 배경 전환에서 부르는 그대로.
-    bridge.maru_mobile_pointer(3, 0, 0, 0);
+    bridge.maru_mobile_pointer(3, 1, 0, 0, 0);
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
 
     // **다시 누르면** 사라진다 — 지우는 자리는 여기다.
-    bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    bridge.maru_mobile_pointer(0, 1, p.x, p.y, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
     clearSelection(p.x, p.y);
     bridge.maru_mobile_clear_error();
@@ -1957,8 +1957,8 @@ fn openSettingsAndTap(key: []const u8) bool {
     while (y < 874) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
         if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, key)) continue;
-        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
-        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, y);
         _ = bridge.maru_mobile_build(402, 874, now());
         return true;
     }
@@ -2063,8 +2063,8 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
         if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "theme.preset")) continue;
-        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
-        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, y);
         _ = bridge.maru_mobile_build(402, small_h, now());
         opened = true;
         break;
@@ -2076,13 +2076,13 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     try std.testing.expect(!bridge.settingsPopupItemVisible(last)); // 밀기 전엔 안 보인다
 
     // 민다(임계 10px 를 넘겨야 스크롤로 친다).
-    _ = bridge.maru_mobile_chrome_pointer(0, 300, 300);
-    _ = bridge.maru_mobile_chrome_pointer(1, 300, 100);
-    _ = bridge.maru_mobile_chrome_pointer(1, 300, 0);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, 300, 300);
+    _ = bridge.maru_mobile_chrome_pointer(1, 1, 300, 100);
+    _ = bridge.maru_mobile_chrome_pointer(1, 1, 300, 0);
     _ = bridge.maru_mobile_build(402, small_h, now());
     try std.testing.expect(bridge.settingsPopupItemVisible(last)); // 민 뒤엔 보인다
 
-    _ = bridge.maru_mobile_chrome_pointer(3, 300, 0);
+    _ = bridge.maru_mobile_chrome_pointer(3, 1, 300, 0);
     openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
@@ -2100,10 +2100,10 @@ test "숫자 줄은 눌리고 편집이 시작된다" {
     while (y < 874) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
         if (bridge.settingsRows()[idx].kind != .number) continue;
-        _ = bridge.maru_mobile_chrome_pointer(0, 200, y); // 누른 채로 둔다
+        _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, y); // 누른 채로 둔다
         const pressed = bridge.maru_mobile_build(402, 874, now());
         try std.testing.expect(pressed > base); // 눌림 배경이 생겼다
-        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, y);
         _ = bridge.maru_mobile_build(402, 874, now());
         try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_input_kind()); // 편집 시작
         tested = true;
@@ -2127,8 +2127,8 @@ fn tapNumberRow(key: []const u8) bool {
     while (y < 874) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
         if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, key)) continue;
-        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
-        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, y);
         _ = bridge.maru_mobile_build(402, 874, now());
         return true;
     }
@@ -2252,8 +2252,8 @@ test "바깥 탭이 확정하고 그 탭은 삼켜진다" {
     while (y < 874) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
         if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "cursor.blink")) continue;
-        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
-        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, y);
         break;
     }
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -2299,23 +2299,23 @@ test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" 
     const before = probeRow() orelse return error.TestUnexpectedResult;
 
     // 위로 끈다(임계 10px 를 넘겨야 스크롤로 친다).
-    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 200);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 150);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 1, 200, 200);
+    _ = bridge.maru_mobile_chrome_pointer(1, 1, 200, 150);
     _ = bridge.maru_mobile_build(402, small_h, now());
     const dragged = probeRow() orelse return error.TestUnexpectedResult;
     try std.testing.expect(dragged > before); // 위로 밀어 뒤쪽 줄이 올라왔다
 
     // 떼면 관성이 이어진다 — 프레임을 더 돌리면 더 간다.
-    _ = bridge.maru_mobile_chrome_pointer(2, 200, 150);
+    _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, 150);
     _ = bridge.maru_mobile_build(402, small_h, now());
     const glided = probeRow() orelse return error.TestUnexpectedResult;
     try std.testing.expect(glided >= dragged); // 관성이 더 밀었거나 그대로
 
     // 취소는 관성을 안 남긴다.
-    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 150);
-    _ = bridge.maru_mobile_chrome_pointer(3, 200, 150);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 1, 200, 150);
+    _ = bridge.maru_mobile_chrome_pointer(3, 1, 200, 150);
     _ = bridge.maru_mobile_build(402, small_h, now());
     const at_cancel = probeRow() orelse return error.TestUnexpectedResult;
     _ = bridge.maru_mobile_build(402, small_h, now());
@@ -2336,17 +2336,17 @@ test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
 
     // **끝까지 밀지 않는다** — 끝에 닿으면 관성이 그 자리에서 죽어 재현이 안 된다.
     const c = keyCenter(0);
-    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    _ = bridge.maru_mobile_keybar_pointer(0, 1, c.x, c.y);
     var x = c.x;
     var step: u32 = 0;
     while (step < 5) : (step += 1) {
         x -= 20;
-        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+        _ = bridge.maru_mobile_keybar_pointer(1, 1, x, c.y);
         // **move 사이에 프레임을 돌린다.** 안 그러면 100px 이 한 프레임에 들어간 것이 되어
         // 6px/ms 짜리 손짓이 된다 — 실기기에서는 프레임마다 몇 표본씩 온다.
         _ = bridge.maru_mobile_build(402, 874, now());
     }
-    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y); // 뗀다 — 여기서 관성이 시작된다
+    _ = bridge.maru_mobile_keybar_pointer(2, 1, x, c.y); // 뗀다 — 여기서 관성이 시작된다
 
     // 정말 흐르고 있는지부터 값으로 본다(안 흐르면 이 테스트는 아무것도 안 재는 것이다).
     // **화면에 남아 있는 키**로 잰다 — 밀려 나간 키는 rect 가 0 이라 늘 같은 값이 나온다.
@@ -2360,8 +2360,8 @@ test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
     // 흐르는 중에 보이는 키 하나를 짚었다 뗀다.
     const t = keyCenter(firstVisibleKey().?);
     const before = bridge.maru_mobile_input("", 0);
-    _ = bridge.maru_mobile_keybar_pointer(0, t.x, t.y);
-    _ = bridge.maru_mobile_keybar_pointer(2, t.x, t.y);
+    _ = bridge.maru_mobile_keybar_pointer(0, 1, t.x, t.y);
+    _ = bridge.maru_mobile_keybar_pointer(2, 1, t.x, t.y);
 
     // ① 멈춘다 — 두 프레임 사이에 자리가 안 바뀐다.
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -2390,15 +2390,15 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     try std.testing.expectEqual(@as(u32, 0), bridge.settingsScrollPx());
 
     // **관성이 남게** 민다 — 끝까지 밀면 그 자리에서 죽어 재현이 안 된다.
-    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, 250);
     var my: f32 = 250;
     var ms: u32 = 0;
     while (ms < 3) : (ms += 1) {
         my -= 20;
-        _ = bridge.maru_mobile_chrome_pointer(1, 200, my);
+        _ = bridge.maru_mobile_chrome_pointer(1, 1, 200, my);
         _ = bridge.maru_mobile_build(402, small_h, now()); // 실기기처럼 move 사이에 프레임
     }
-    _ = bridge.maru_mobile_chrome_pointer(2, 200, my);
+    _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, my);
     _ = bridge.maru_mobile_build(402, small_h, now());
     const a = bridge.settingsScrollPx();
     var f: u32 = 0;
@@ -2419,8 +2419,8 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     // **값이 바뀌었는지는 저장 요청으로 본다** — 토글이 뒤집히면 host 가 가져갈 쓰기가 선다.
     var drain: [1 << 16]u8 = undefined;
     _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
-    _ = bridge.maru_mobile_chrome_pointer(0, 200, ty);
-    _ = bridge.maru_mobile_chrome_pointer(2, 200, ty);
+    _ = bridge.maru_mobile_chrome_pointer(0, 1, 200, ty);
+    _ = bridge.maru_mobile_chrome_pointer(2, 1, 200, ty);
     _ = bridge.maru_mobile_build(402, small_h, now());
 
     // ① 멈춘다  ② 값은 그대로다

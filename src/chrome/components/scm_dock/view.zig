@@ -28,6 +28,13 @@ const m_inset_fallback: u32 = 8;
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);
 const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
 const branch_icon = icons.utf8Fit(.git_branch, .standard);
+/// 저장소 머리 줄의 종류 아이콘. 주 워크트리는 작업 폴더 자체이고, 링크된 워크트리는 그 저장소에
+/// **딸린 다른 체크아웃**이다 — 두 줄이 한 화면에 서므로 그 차이가 글리프로 보여야 한다.
+const repo_icon = icons.utf8Fit(.folder, .standard);
+/// 아직 안 읽은 저장소 줄에 적는 말. **배지의 빈자리와 구별해야 한다** — 배지가 없는 것을 사용자는
+/// "변경 없음"으로 읽는다.
+const repo_pending_label = "읽는 중…";
+const worktree_icon = icons.utf8Fit(.git_branch, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
 const unstage_glyph = "−";
@@ -63,6 +70,11 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         @max(commit_label.len, @max(commit_running_label.len, commit_slow_label.len));
 
     for (props.items) |item| switch (item) {
+        // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
+        .repo => |repo| {
+            text_ops += 5;
+            bytes += icon_bytes * 2 + repo.name.len + @max(repo.branch.len, repo_pending_label.len) + count_digits;
+        },
         // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
         .file => |file| {
             text_ops += 6;
@@ -151,6 +163,7 @@ pub fn view(
         const row = frame.tree.entries[row_index];
         writer.active_clip = clipRectOf(row);
         switch (item) {
+            .repo => |repo| try writer.repoRow(row, repo, m),
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
             .more => |more| {
@@ -177,7 +190,9 @@ pub fn view(
     }
     // 목록이 비었으면 그 자리에 한 줄 안내를 낸다. **빈 화면과 구별돼야 한다** — "변경 사항 없음"과
     // "읽는 중"과 "저장소가 아님"은 사용자에게 서로 다른 사실이다(§3.5 빈 상태 표).
-    if (props.items.len == 0 and props.empty_notice.len > 0) {
+    // **저장소 머리 줄만 있는 것도 "비어 있음"이다**(P3d). `items.len == 0`으로 세면 머리 줄 하나 때문에
+    // 변경이 없는데도 안내가 사라진다 — 그 화면은 "아직 못 읽었다"와 구별되지 않는다.
+    if (!hasContentRows(props.items) and props.empty_notice.len > 0) {
         const content = frame.tree.entries[content_index];
         try writer.line(content, @floatFromInt(m.inset_x + m.disclosure_extent), props.empty_notice, .muted_fg, .supporting, false);
     }
@@ -281,11 +296,20 @@ fn sectionTitle(section: types.Section) []const u8 {
     };
 }
 
+/// 저장소 머리 줄 말고 **내용이 있는 줄**이 있나.
+fn hasContentRows(items: []const types.Item) bool {
+    for (items) |item| switch (item) {
+        .repo => {},
+        else => return true,
+    };
+    return false;
+}
+
 fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
         .section => |section| section.action,
         .file => |file| file.action,
-        .more, .notice => .none,
+        .repo, .more, .notice => .none,
     };
 }
 
@@ -386,6 +410,94 @@ const Writer = struct {
 
     /// 그룹 헤더: `접힘표시 제목 · 개수 배지`. 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 밀려
     /// 사라지지 않는다.
+    /// 저장소·워크트리 머리 줄(§3.5.1c). 목록의 첫 층이라 **한 줄에 넷**이 선다:
+    /// 접힘 표시 · 종류 아이콘 · 이름 · (오른쪽) 브랜치와 개수 배지.
+    ///
+    /// **종류 아이콘과 브랜치 칩이 같은 글리프를 쓰지 않는다.** 워크트리 줄에 `⑂`가 둘이면 둘 중 무엇이
+    /// 종류이고 무엇이 브랜치인지 읽히지 않는다 — 그래서 칩은 **글자만** 그린다.
+    fn repoRow(self: *Writer, rect: tree.RectEntry, repo: types.RepoItem, m: types.DockMetrics) ViewError!void {
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const scale = effectiveScale(self.props.scale_milli);
+        try self.icon(rect, inset, if (repo.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
+        // 주 워크트리는 폴더, 링크된 워크트리는 브랜치 글리프 — 워크트리는 "딸린 것"이라는 사실이
+        // 보여야 같은 이름의 두 줄을 사용자가 구별한다.
+        const kind_x = inset + @as(f32, @floatFromInt(m.disclosure_extent));
+        try self.icon(rect, kind_x, if (repo.primary) repo_icon else worktree_icon, m.icon_extent, .muted_fg);
+
+        // 개수 배지는 **접혀 있어도** 그린다 — "여기 뭔가 있다"를 접힌 채로도 알아야 편다.
+        // 아직 안 읽은 저장소는 배지 대신 문장을 적는다: 배지가 없는 것을 사용자는 "변경 없음"으로
+        // 읽는데, 그건 **아직 모르는 것**과 다른 사실이다.
+        var count_buf: [16]u8 = undefined;
+        const count_text = std.fmt.bufPrint(&count_buf, "{d}", .{repo.count}) catch "";
+        const pill = if (repo.count > 0 and !repo.pending) badge.countPill(rect.rect, .{
+            .inset_x = m.inset_x,
+            .label_cols = @max(@as(u16, @intCast(count_text.len)), 1),
+            .cell_width_px = self.cell_width_px,
+            .scale_milli = scale,
+            .fit = .snug,
+            .label_role = .supporting,
+        }) else null;
+
+        const name_x = kind_x + @as(f32, @floatFromInt(m.icon_extent + m.gap));
+        if (repo.pending) {
+            // 오른쪽 자리를 그대로 쓴다(브랜치가 설 자리) — 읽고 나면 그 자리에 브랜치와 배지가 온다.
+            try self.trailing(rect, repo_pending_label, .muted_fg, .supporting, m.inset_x);
+            const budget = self.measureBudget(repo_pending_label) + @as(f32, @floatFromInt(m.gap + m.inset_x));
+            try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
+            return;
+        }
+        const right_edge: f32 = if (pill) |p|
+            @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
+        else
+            rect.rect.x + rect.rect.width - inset;
+
+        // 브랜치는 오른쪽에 붙는다(이름이 길면 이름이 먼저 잘린다 — 어느 저장소인지가 어느 브랜치인지보다
+        // 앞선다). 자리를 못 잡으면 아예 안 그린다.
+        var branch_width: f32 = 0;
+        if (repo.branch.len > 0) {
+            const w = self.measureBudget(repo.branch);
+            const line_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
+            const x = right_edge - w;
+            if (x > name_x + @as(f32, @floatFromInt(m.gap)) and rect.rect.height >= line_h) {
+                try self.emit(
+                    x,
+                    rect.rect.y + (rect.rect.height - line_h) / 2,
+                    repo.branch,
+                    self.colsFor(w),
+                    .muted_fg,
+                    .supporting,
+                    false,
+                    @intFromFloat(@max(w, 0)),
+                    .origin,
+                );
+                branch_width = w + @as(f32, @floatFromInt(m.gap));
+            }
+        }
+
+        // 이름은 **굵게** — 목록의 첫 층이고, 그 아래 그룹 제목(보통 굵기)과 층이 갈려야 한다.
+        try self.lineWithin(rect, name_x - rect.rect.x, right_edge - branch_width, repo.name, .surface_fg, .control, true);
+
+        if (pill) |placed| {
+            // 그룹 헤더의 개수와 **같은 프리미티브·같은 색**이다 — 같은 뜻이 한 화면에서 다르게 보이면 안 된다.
+            try self.appendQuad(.{
+                .rect = placed.box,
+                .fill_role = .accent_bar,
+                .corner_radii = .{ placed.radius_px, placed.radius_px, placed.radius_px, placed.radius_px },
+            });
+            if (placed.label_fits) try self.emit(
+                placed.label_x,
+                placed.label_y,
+                count_text,
+                @max(@as(u16, @intCast(count_text.len)), 1),
+                .surface_bg,
+                .supporting,
+                false,
+                @intFromFloat(placed.label_w),
+                .origin,
+            );
+        }
+    }
+
     fn sectionRow(self: *Writer, rect: tree.RectEntry, section: types.SectionItem, m: types.DockMetrics) ViewError!void {
         const inset: f32 = @floatFromInt(m.inset_x);
         try self.icon(rect, inset, if (section.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
@@ -1738,4 +1850,71 @@ test "caret은 깜빡임 위상을 따른다(위상이 꺼진 반주기에는 �
     try testing.expect(firstQuad(off, .cursor) == null);
     // 글자는 그대로다 — 깜빡이는 것은 caret뿐이다.
     try testing.expect(findExactText(off, "fix") != null);
+}
+
+test "저장소 머리 줄: 이름·브랜치·개수가 함께 서고 워크트리는 다른 아이콘이다" {
+    // 같은 이름의 두 줄(주 저장소와 그 워크트리)을 사용자가 구별해야 하므로 종류가 글리프로 보여야 한다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .primary = true, .count = 3 } },
+        .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review", .primary = false, .count = 1 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findExactText(draws, "maru3") != null);
+    try testing.expect(findExactText(draws, "main") != null);
+    try testing.expect(findExactText(draws, "wt-review") != null);
+    // 종류 아이콘이 서로 다르다.
+    var saw_repo = false;
+    var saw_worktree = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, repo_icon)) saw_repo = true;
+            if (std.mem.eql(u8, run.text, worktree_icon)) saw_worktree = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_repo and saw_worktree);
+}
+
+test "접힌 저장소도 개수 배지를 그린다(접힌 채로 '여기 뭔가 있다'를 안다)" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .collapsed = true, .count = 7 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findBadgeQuad(draws) != null);
+    try testing.expect(findExactText(draws, "7") != null);
+    // 접힘 표시는 오른쪽 화살표다(펴짐은 아래 화살표).
+    var saw_right = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, chevron_right_icon)) saw_right = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_right);
+}
+
+test "변경이 없는 저장소는 배지를 안 그린다(0은 숫자가 아니라 없음이다)" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "clean", .branch = "main", .count = 0 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findBadgeQuad(draws) == null);
+    try testing.expect(findExactText(draws, "clean") != null);
+}
+
+test "이름이 길면 이름이 먼저 잘린다(어느 저장소인지가 어느 브랜치인지보다 앞선다)" {
+    // 반대로 브랜치를 먼저 자르면 긴 이름 하나가 줄을 다 먹어 브랜치가 사라진다 — 그때 사용자는
+    // 두 워크트리를 구별할 수 없다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .branch = "feature/x", .count = 0 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const branch = findExactText(draws, "feature/x") orelse return error.MissingBranch;
+    const name = findExactText(draws, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") orelse return error.MissingName;
+    // 이름 예산은 브랜치 왼쪽에서 끝난다.
+    try testing.expect(name.origin.x + @as(i32, @intCast(name.max_width_px.?)) <= branch.origin.x);
 }

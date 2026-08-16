@@ -75,7 +75,8 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
             break :blk base + pill.box.w;
         },
         .file => base + m.status_extent,
-        .more, .notice => base,
+        // 저장소 머리 줄에는 아직 행 동작 버튼이 없다(동작 아이콘 줄은 다음 조각) — 비켜설 것이 없다.
+        .repo, .more, .notice => base,
     };
 }
 
@@ -135,7 +136,9 @@ fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
         .section => |section| section.action,
         .file => |file| file.action,
-        .more, .notice => .none,
+        // 저장소 머리 줄의 동작 아이콘 줄(새로고침·스테이지·커밋…)은 다음 조각이다 — 지금은 줄 전체가
+        // 접기 버튼이다.
+        .repo, .more, .notice => .none,
     };
 }
 
@@ -161,7 +164,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = section.section },
                 .file => |file| .{ .row_action = file.model_index },
-                .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
+                .repo, .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
             slot[0] = tree.button(.{
@@ -194,6 +197,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         } else &.{};
 
         const row_intent: ?ids.Intent = switch (item) {
+            .repo => |repo| .{ .toggle_repo = repo.index },
             .section => |section| .{ .toggle_section = section.section },
             .file => |file| .{ .open_row = file.model_index },
             .more => |more| .{ .expand_section = more.section },
@@ -385,7 +389,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 fn isSelected(item: types.Item) bool {
     return switch (item) {
         .file => |file| file.selected,
-        .section, .more, .notice => false,
+        .repo, .section, .more, .notice => false,
     };
 }
 
@@ -523,7 +527,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

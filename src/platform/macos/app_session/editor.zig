@@ -479,7 +479,7 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     // **랩이면 시각 행 단위로 움직인다**(§4.1d — 앵커 + 조각 오프셋). 논리 줄만 움직이면 한 줄짜리
     // 문서에서 아무 데도 못 간다.
     if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) {
-        scrollPieces(self, term, lines, total, visible, visibleCols(self, body, term));
+        scrollPieces(self, term, lines, total, visible, visibleCols(self, body, term, false));
         return true;
     }
 
@@ -513,6 +513,22 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
 ///
 /// **저장된 위치는 안 버린다.** 랩을 껐을 때 보던 자리로 돌아온다 — 켤 때 0으로 지우면 그 자리를
 /// 잃는다.
+/// 테스트가 본문 열 수를 확인하려고 부른다(같은 함수 — 규칙이 갈리지 않게).
+pub fn visibleColsForTest(self: *AppSession, body: maru.session.SplitRect, term: *Term, right: bool) u16 {
+    return visibleCols(self, body, term, right);
+}
+
+/// 한 열의 가로 위치를 상한 안으로 되돌린다. **최대 열은 위치가 0이 아닌 이상 이미 세어져 있다**
+/// (`scrollCols`가 세운다) — 방어적으로만 본다.
+fn clampOneColumn(self: *AppSession, first: *u16, max_cols: u32, visible_cols: u16) void {
+    if (first.* == 0) return;
+    const max_col: u32 = @min(max_cols -| visible_cols, @as(u32, chrome_editor.frame.max_first_col));
+    if (@as(u32, first.*) > max_col) {
+        first.* = @intCast(@min(max_col, std.math.maxInt(u16)));
+        self.metal_dirty = true;
+    }
+}
+
 /// 렌더에 넘길 조각 오프셋. **랩이 꺼져 있으면 0이다** — 줄마다 조각이 하나뿐이라 의미가 없고,
 /// 저장된 값은 랩을 다시 켰을 때 돌아갈 자리다(가로의 `effectiveFirstCol`과 같은 규율).
 fn effectiveFirstPiece(wrap: bool, term: *Term) u32 {
@@ -661,14 +677,11 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
 
     // **랩이면 가로는 손대지 않는다.** 렌더가 `effectiveFirstCol`로 0을 쓰므로 불변식은 이미
     // 지켜졌고, 저장된 위치는 랩을 껐을 때 돌아갈 자리다 — 여기서 지우면 그것을 잃는다.
-    if (term.rt.editor_first_col != 0 and !(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap)) {
-        // 최대 열은 위치가 0이 아닌 이상 이미 세어져 있다(`scrollCols`가 세운다). 방어적으로만 본다.
-        const visible_cols = visibleCols(self, body, term);
-        const max_col: u32 = @min(term.rt.editor_max_cols -| visible_cols, @as(u32, chrome_editor.frame.max_first_col));
-        if (@as(u32, term.rt.editor_first_col) > max_col) {
-            term.rt.editor_first_col = @intCast(@min(max_col, std.math.maxInt(u16)));
-            self.metal_dirty = true;
-        }
+    if (!(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap)) {
+        // **두 열이 같은 규칙을 쓴다.** 왼쪽만 되돌리면 창이 커졌을 때 오른쪽 열만 빈다 — 실제로
+        // 비교 가로 스크롤을 붙이자마자 그 상태가 됐다(적대적 검증 2026-08-16).
+        clampOneColumn(self, &term.rt.editor_first_col, term.rt.editor_max_cols, visibleCols(self, body, term, false));
+        clampOneColumn(self, &term.rt.editor_first_col_right, term.rt.editor_max_cols_right, visibleCols(self, body, term, true));
     }
 }
 
@@ -711,7 +724,7 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
         max_cols.* = max;
     }
 
-    const visible = visibleCols(self, body, term);
+    const visible = visibleCols(self, body, term, right);
     if (visible == 0) return false;
     if (max_cols.* <= visible) {
         // 안 넘친다 — 이 축은 탭 바가 쓴다(위 doc). 남아 있던 위치만 되돌린다.
@@ -767,12 +780,23 @@ fn editorLines(term: *Term) []const []const u8 {
 ///
 /// 컴포넌트가 폭에서 뽑는 것과 **같은 계산**을 부른다(`sideMetrics` → `geometry.compute`). 여기서
 /// 직접 세면 두 곳이 갈려, 가장 긴 줄의 끝에 못 닿거나(상한이 작다) 오른쪽에 빈 자리가 남는다.
-fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term) u16 {
+fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, right: bool) u16 {
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = body.w -| inset * 2;
     const inner_h = body.h -| inset * 2;
     const lines = editorLines(term);
-    const m = chrome_editor.diff_frame.sideMetrics(inner_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    // **비교 뷰는 두 열로 갈린다.** pane 폭을 통째로 쓰면 폭을 두 배로 잡아 조각 수가 절반이 되고
+    // (세로 스크롤이 어긋난다) 가로 상한도 두 배로 커진다 — 실측: 오른쪽 열 본문이 46열인데 102열로
+    // 잡아 끝까지 밀어도 198열에서 멈췄다(실제 상한 254).
+    //
+    // **나머지 픽셀은 오른쪽이 가져간다**(`columns()` — pane 오른쪽 끝에 안 칠한 띠가 남지 않게).
+    // 그래서 열마다 자기 폭으로 센다.
+    const side_w = if (term.rt.editor_diff) |st| blk: {
+        if (st.view != .compare) break :blk inner_w;
+        const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = inner_w, .h = inner_h }, @intCast(self.cell_width_px));
+        break :blk if (right) cols.right.w else cols.left.w;
+    } else inner_w;
+    const m = chrome_editor.diff_frame.sideMetrics(side_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const layout = chrome_editor.geometry.compute(m.total_cols, lines.len, .{});
     return layout.content.width;
 }
@@ -1879,7 +1903,7 @@ test "가로 스크롤은 가장 긴 줄의 끝에서 멈춘다 — 빈 화면�
     defer allocator.free(lines);
 
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null)); // 끝까지 민다
-    const visible = visibleCols(fx.session, editorBodyRect(fx.session, leaf, fx.term), fx.term);
+    const visible = visibleCols(fx.session, editorBodyRect(fx.session, leaf, fx.term), fx.term, false);
     try testing.expect(visible > 0);
     try testing.expectEqual(@as(u32, long_len) - visible, @as(u32, fx.term.rt.editor_first_col));
 
@@ -1980,7 +2004,7 @@ test "창이 넓어지면 다음 프레임이 가로 위치를 되돌린다 — 
     var drawn = appendPaneFrame(fx.session, wide, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
-    const wide_visible = visibleCols(fx.session, editorBodyRect(fx.session, wide, fx.term), fx.term);
+    const wide_visible = visibleCols(fx.session, editorBodyRect(fx.session, wide, fx.term), fx.term, false);
     const wide_max: u32 = fx.term.rt.editor_max_cols -| wide_visible;
     try testing.expect(at_end > wide_max); // 좁을 때 위치가 넓은 창의 상한을 넘는다 — 아니면 판정이 공허하다
     try testing.expectEqual(wide_max, @as(u32, fx.term.rt.editor_first_col));
@@ -2582,7 +2606,7 @@ test "적대적: 조각 스크롤은 한 칸씩 N번과 N칸 한 번이 같다" 
         try testing.expectEqual(by_one_piece, fx.term.rt.editor_first_piece);
 
         // **정말 그만큼 갔는지 직접 센다** — 두 경로가 나란히 틀리면 ①②는 통과한다.
-        const cols = visibleCols(fx.session, editorBodyRect(fx.session, fx.leaf_rect, fx.term), fx.term);
+        const cols = visibleCols(fx.session, editorBodyRect(fx.session, fx.leaf_rect, fx.term), fx.term, false);
         var walked: u32 = 0;
         for (0..by_one_line) |i| walked += piecesOfLine(fx.term, i, cols);
         walked += by_one_piece;
@@ -2624,7 +2648,7 @@ test "적대적: 4096줄을 넘는 랩 문서도 끝에 닿는다" {
     const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
     const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
     const visible: usize = inner_h / fx.session.cell_height_px;
-    const cols = visibleCols(fx.session, body, fx.term);
+    const cols = visibleCols(fx.session, body, fx.term, false);
     const pieces_per_line = piecesOfLine(fx.term, 4999, cols);
     try testing.expect(pieces_per_line > 1); // 실제로 접힌다 — 아니면 판정이 공허하다
 

@@ -1319,3 +1319,136 @@ test "비교는 열마다 따로 민다 — 포인터가 어느 열인지 정한
     // ③ 두 값이 실제로 다르다 — 같으면 공유하고 있는 것이다.
     try testing.expect(fx.term.rt.editor_first_col != fx.term.rt.editor_first_col_right);
 }
+
+test "창이 넓어지면 오른쪽 열의 가로 위치도 되돌린다" {
+    // 왼쪽에는 `clampScrollToGeometry`가 있는데 오른쪽은 이 슬라이스에서 새로 생긴 상태다.
+    // 안 되돌리면 창을 넓혔을 때 **오른쪽 열만** 빈다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var right_buf: std.ArrayList(u8) = .empty;
+    defer right_buf.deinit(allocator);
+    for (0..400) |_| try right_buf.append(allocator, 'R');
+    try right_buf.append(allocator, '\n');
+    var entry = testEntry("a\n", right_buf.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    // 좁은 창에서 오른쪽 열을 끝까지 민다.
+    const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 500, .h = 400 };
+    const body_n = editor_ops.editorBodyRect(fx.session, narrow, fx.term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols_n = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body_n.w -| inset * 2, .h = body_n.h -| inset * 2 }, 8);
+    const rx: f64 = @floatFromInt(@as(i32, @intCast(body_n.x)) + @as(i32, @intCast(inset)) + cols_n.right.x + 4);
+    _ = editor_ops.scrollCols(fx.session, fx.term, narrow, -1_000_000, rx);
+    const at_end = fx.term.rt.editor_first_col_right;
+    try testing.expect(at_end > 0);
+
+    // 창이 아주 넓어졌다 — 다음 프레임이 되돌려야 한다.
+    const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 2400, .h = 400 };
+    var drawn = editor_ops.appendPaneFrame(fx.session, wide, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_first_col_right < at_end); // 되돌아왔다
+}
+
+test "열 경계에서 어느 쪽으로 가는지가 정해져 있다 — 경계 바로 왼쪽·오른쪽" {
+    // 열을 고르는 판정이 한 픽셀 어긋나면 경계 근처에서 **반대 열**이 밀린다. 사람 눈에는 "가끔
+    // 엉뚱한 쪽이 움직인다"로 보인다. 경계 양옆을 콕 집어 본다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+
+    var lb: std.ArrayList(u8) = .empty;
+    defer lb.deinit(allocator);
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    for (0..400) |_| try lb.append(allocator, 'L');
+    for (0..400) |_| try rb.append(allocator, 'R');
+    try lb.append(allocator, '\n');
+    try rb.append(allocator, '\n');
+    var entry = testEntry(lb.items, rb.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body.w -| inset * 2, .h = body.h -| inset * 2 }, 8);
+    const origin: i32 = @as(i32, @intCast(body.x)) + @as(i32, @intCast(inset));
+
+    // 경계 **바로 왼쪽**(1px 앞) → 왼쪽 열
+    _ = editor_ops.scrollCols(fx.session, fx.term, leaf, -10, @floatFromInt(origin + cols.right.x - 1));
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col_right);
+
+    // 경계 **정확히 그 자리** → 오른쪽 열(반열림 구간 `[right.x, …)`)
+    _ = editor_ops.scrollCols(fx.session, fx.term, leaf, -10, @floatFromInt(origin + cols.right.x));
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+}
+
+test "오른쪽 열이 왼쪽보다 넓어도 상한이 자기 폭을 따른다" {
+    // `columns()`는 나머지 픽셀을 **오른쪽에 준다**(pane 오른쪽 끝에 안 칠한 띠가 남지 않게).
+    // 그러면 오른쪽 열이 왼쪽보다 넓을 수 있는데, 상한을 왼쪽 폭으로 세면 오른쪽이 **한 열 덜**
+    // 간다 — 마지막 글자에 못 닿는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 홀수 폭이라 나머지가 생긴다.
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 903, .h = 400 };
+
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    for (0..300) |_| try rb.append(allocator, 'R');
+    try rb.append(allocator, '\n');
+    var entry = testEntry("a\n", rb.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body.w -| inset * 2, .h = body.h -| inset * 2 }, 8);
+    try testing.expect(cols.right.w > cols.left.w); // 나머지가 오른쪽에 붙었다 — 아니면 이 판정이 공허하다
+
+    const rx: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + @as(i32, @intCast(inset)) + cols.right.x + 4);
+    _ = editor_ops.scrollCols(fx.session, fx.term, leaf, -1_000_000, rx);
+    const first = fx.term.rt.editor_first_col_right;
+
+    // 오른쪽 열이 실제로 쓰는 본문 폭으로 상한을 다시 계산해 대조한다.
+    const m = chrome_editor.diff_frame.sideMetrics(cols.right.w, body.h -| inset * 2, 8, 16);
+    const layout = chrome_editor.geometry.compute(m.total_cols, 1, .{});
+    const expect_first: u32 = @min(fx.term.rt.editor_max_cols_right -| layout.content.width, @as(u32, chrome_editor.frame.max_first_col));
+    // 고치기 전: 오른쪽 본문이 46열인데 pane 폭으로 102열을 잡아 198에서 멈췄다(실제 상한 254).
+    try testing.expectEqual(layout.content.width, editor_ops.visibleColsForTest(fx.session, body, fx.term, true));
+    try testing.expectEqual(expect_first, @as(u32, first));
+}
+
+test "비교의 본문 열 수는 한 열 폭으로 센다 — pane 폭을 쓰면 두 배가 된다" {
+    // **이 테스트는 한 번 사라졌다.** 뮤테이션 스윕이 도는 동안 같은 파일을 고쳐, 스윕의 복원이
+    // 수정과 이 테스트를 함께 덮어썼다(2026-08-16). 커밋 메시지는 "고쳤다"고 적혔는데 실제로는
+    // 테스트만 들어갔고, 다음 라운드에서 오른쪽 열 상한이 어긋나며 드러났다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+
+    const single = editor_ops.visibleColsForTest(fx.session, body, fx.term, false); // 편집기 하나
+
+    var entry = testEntry("a\nb\n", "a\nB\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    const left_col = editor_ops.visibleColsForTest(fx.session, body, fx.term, false);
+    const right_col = editor_ops.visibleColsForTest(fx.session, body, fx.term, true);
+    try testing.expect(left_col < single); // 한 열은 pane 하나보다 좁다
+    try testing.expect(right_col < single);
+    try testing.expect(left_col > 0 and right_col > 0);
+}

@@ -330,7 +330,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .id = NodeIds.commit_button,
         .style = .{
             .height = .{ .px = @floatFromInt(m.commit_button_h) },
-            .margin = .{ .left = @floatFromInt(m.inset_x), .right = @floatFromInt(m.inset_x), .bottom = @floatFromInt(m.commit_pad_y) },
+            // **좌우 여백 없이 폭을 꽉 채운다**(사용자 결정 2026-08-16). 도크가 좁아 안쪽으로 물리면
+            // 버튼 면이 그만큼 작아지고, 이 뷰에서 가장 큰 동작이 가장 작은 표적이 된다.
+            .margin = .{ .bottom = @floatFromInt(m.commit_pad_y) },
         },
         .variant = .surface,
         .paint = .{
@@ -650,10 +652,9 @@ test "커밋 상자는 탭 줄 아래·요약 위이고 내용을 따라 자란�
     try testing.expect(button.y < summary.y);
     try testing.expect(summary.y < branch.y); // 브랜치는 여전히 바닥이다
 
-    // **버튼은 좌우 여백을 두고 채운 폭**이다(목록 행과 달리 누르는 것이라 면이 보여야 한다).
-    const m0 = types.DockMetrics.resolve(1000);
-    try testing.expect(button.x >= @as(f32, @floatFromInt(m0.inset_x)));
-    try testing.expect(button.x + button.width <= 320 - @as(f32, @floatFromInt(m0.inset_x)));
+    // **버튼은 도크 폭을 꽉 채운다.** 안쪽으로 물리면 이 뷰에서 가장 큰 동작이 가장 작은 표적이 된다.
+    try testing.expectEqual(@as(f32, 0), button.x);
+    try testing.expectEqual(@as(f32, 320), button.width);
 
     // 시각 행이 늘면 상자가 자란다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다).
     var storage3: Storage = .{};

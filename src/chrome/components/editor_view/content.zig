@@ -292,6 +292,19 @@ pub const Step = struct { next_byte: usize, next_col: u32 };
 pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
     const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
     if (bytes[i] == '\t') return .{ .next_byte = i + 1, .next_col = ((col / stop_width) + 1) * stop_width };
+
+    // **가장 흔한 걸음을 먼저 끝낸다.** 출력 가능한 ASCII 뒤에 또 ASCII(또는 줄 끝)가 오면 cluster는
+    // 한 바이트에서 끝나고 폭은 1이며 §3.8 위험 문자도 아니다 — cluster를 늘리는 것(결합 문자·ZWJ·
+    // 지역표시자)은 **전부 0x80 이상**이고, ASCII 중 유일한 예외인 CR+LF는 0x20 미만이라 이 범위 밖이다.
+    // 그러면 디코드·cluster 경계·hazard 훑기·폭 조회가 전부 불필요하다.
+    //
+    // **이 길이 없으면 §3.8 검사 비용이 모든 줄에 붙는다** — 5만 줄 소스에서 첫 가로 휠이 511ms였다
+    // (Debug, macOS arm64). 적대적 검증 2026-08-16이 재고 넣었다.
+    const b = bytes[i];
+    if (b >= 0x20 and b < 0x7F and (i + 1 >= bytes.len or bytes[i + 1] < 0x80)) {
+        return .{ .next_byte = i + 1, .next_col = col + 1 };
+    }
+
     const base = text_layout.decodeCodepoint(bytes, i);
     const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
 
@@ -1671,6 +1684,10 @@ test "lineColumns가 실제 전개와 같은 열 수를 준다 — 탭·2칸 글
         "\u{202E}abc",
         "ad\u{200D}min\tx",
         "\u{00AD}\u{00AD}z",
+        // 빠른 길(출력 가능한 ASCII만)과 그 경계 — 제어 문자·DEL은 빠른 길을 타면 안 된다.
+        "plain ascii only 12345 !@#~",
+        "ctrl\x01here",
+        "del\x7Fhere",
     }) |line| {
         const e = expandTabs(line, 4, &scratch, .{ .count = std.math.maxInt(u32) });
         try std.testing.expectEqual(columnsOf(e.text), lineColumns(line, 4));

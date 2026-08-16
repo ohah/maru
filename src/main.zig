@@ -240,14 +240,16 @@ fn runAppPtyInteractiveLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdou
     // 이 smoke는 사용자의 실제 interactive shell을 실행하지만, 제품 UI는 아직 아니다.
     // 입력은 FrameLoop.handleKeyEvent를 통과해 PTY로 내려가므로, shell과 app input 경계가
     // 같이 검증된다. dotfile/prompt 영향이 있어 기본 check에는 넣지 않는다.
-    const marker = "MARU_APP_PTY_INTERACTIVE_LOOP_OK";
+    // 각본은 셸마다 달라 `app/fixture_script.zig`가 단일 출처다 — 표식·인자·입력이 한 곳에 있어야
+    // "입력은 POSIX인데 기대값만 고쳤다" 같은 어긋남이 안 생긴다.
+    const script = maru.app.fixture_script.interactiveEcho(builtin.os.tag);
     const config: maru.app.AppPtyLoopSmokeConfig = .{
         .artifact_dir = maru.app.pty_loop_smoke.default_interactive_artifact_dir,
         .command = maru.pty.resolveInteractiveShell(),
-        .args = &.{"-i"},
-        .expected_text = marker,
+        .args = script.args,
+        .expected_text = maru.app.fixture_script.interactive_marker,
         .interactive_shell = true,
-        .scripted_input = "printf 'MARU_APP_PTY_INTERACTIVE_LOOP_OK\\n'; exit\n",
+        .scripted_input = script.input,
         .scripted_key_chord = "Cmd+I",
         .max_event_frames = 64,
     };

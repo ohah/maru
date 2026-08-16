@@ -1,5 +1,9 @@
 pub const types = @import("pty/types.zig");
 pub const session = @import("pty/session.zig");
+/// Windows 백엔드의 순수 조립부(커맨드라인 인용·환경 블록 내용). **모든 타깃에서** 컴파일되므로 여기 배럴에
+/// 걸어 두면 그 테스트가 macOS·Linux CI에서도 돈다 — Windows CI가 없는 이 저장소에서 그 규칙이 공허참이
+/// 되지 않게 하는 유일한 그물이다(`pty/windows.zig`는 Windows에서만 컴파일된다).
+pub const windows_spawn = @import("pty/windows_spawn.zig");
 
 pub const Backend = types.Backend;
 pub const ExitStatus = types.ExitStatus;

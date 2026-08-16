@@ -5,6 +5,7 @@ const types = @import("types.zig");
 
 pub const PtySession = switch (builtin.os.tag) {
     .macos => @import("macos.zig").PtySession,
+    .windows => @import("windows.zig").PtySession,
     else => UnsupportedPtySession,
 };
 
@@ -21,6 +22,7 @@ pub const backend_available = PtySession != UnsupportedPtySession;
 pub fn selfResourceSample() ?types.ProcessResourceSample {
     return switch (builtin.os.tag) {
         .macos => @import("macos.zig").selfResourceSample(),
+        .windows => @import("windows.zig").selfResourceSample(),
         else => null,
     };
 }

@@ -6,18 +6,24 @@ const live_pty_mod = @import("live_pty.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const artifact_io = @import("artifact_io.zig");
+const fixture_script = @import("fixture_script.zig");
 const surface_mod = @import("../session/surface.zig");
 
 pub const default_artifact_dir = "zig-out/maru-demo";
 
+/// 제목·cwd·완료 세 줄을 낸다. cmd의 `&`는 명령 구분자이고 인자 없는 `cd`는 현재 디렉터리를 찍는다
+/// (POSIX `pwd`). 규칙은 [fixture_script.zig](fixture_script.zig)가 단일 출처다.
+const host_demo_command = fixture_script.oneShot(
+    @import("builtin").os.tag,
+    "printf 'maru headless demo\\n'; pwd; printf 'demo complete\\n'",
+    "echo maru headless demo& cd& echo demo complete",
+);
+
 pub const DemoConfig = struct {
     artifact_dir: []const u8 = default_artifact_dir,
     size: terminal.Size = .{ .cols = 80, .rows = 12 },
-    command: []const u8 = "/bin/sh",
-    args: []const []const u8 = &.{
-        "-c",
-        "printf 'maru headless demo\\n'; pwd; printf 'demo complete\\n'",
-    },
+    command: []const u8 = host_demo_command.command,
+    args: []const []const u8 = host_demo_command.args,
 };
 
 pub const DemoResult = struct {
@@ -144,6 +150,20 @@ const writeExitStatus = runtime_pump.writeExitStatus;
 const writeText = artifact_io.writeText;
 const writeTextWithFinalNewline = artifact_io.writeTextWithFinalNewline;
 const ensureDir = artifact_io.ensureDir;
+
+// 데모 산출물을 OS별로 다르게 읽지 않으려면 **두 갈래가 같은 세 줄을** 내야 한다. 스크립트 문법은
+// 달라도 그 안의 문구는 같다는 것을 여기서 못박는다(fixture_script는 형태만 검사한다).
+test "데모 fixture: 두 갈래가 같은 세 줄을 낸다" {
+    for ([_]std.Target.Os.Tag{ .windows, .macos, .linux }) |os| {
+        const script = fixture_script.oneShot(
+            os,
+            "printf 'maru headless demo\\n'; pwd; printf 'demo complete\\n'",
+            "echo maru headless demo& cd& echo demo complete",
+        ).args[1];
+        try std.testing.expect(std.mem.indexOf(u8, script, "maru headless demo") != null);
+        try std.testing.expect(std.mem.indexOf(u8, script, "demo complete") != null);
+    }
+}
 
 test "headless demo summary records the runnable vertical slice" {
     const summary = try renderSummary(

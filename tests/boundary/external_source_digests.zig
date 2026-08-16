@@ -472,7 +472,12 @@ pub const inventory = [_]Proof{
     // 브랜치 메뉴(`requestBranchMenu`)의 저장소 조회가 `gitRepoRoot`(2-상태 null)에서 `gitRepoTarget`
     // (3-상태 switch)으로 바뀌며 움직인다 — `.unknown`을 "저장소가 아니다"로 단정하던 안내를 도크와 같은
     // 구분으로 맞췄다. count는 2 그대로다 — 분기 하나와 안내 상수 참조뿐이고 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "96a49d40f4718ae32afa7b5a14b85ded0cffba6263297d0a62a58ab34ffc694c" },
+    //
+    // i18n I3a 슬라이스 2에서 또 움직인다 — `settingsMessageOrNotice`가 문자열 대신 `i18n.Key`를 받게
+    // 바뀌었고(계약 §7.2 1차 방어), 값이 끼는 문장용 `…Fmt` 진입점과 공용 표시 경로 `…Text`가 생겼다.
+    // count는 2 그대로다 — `@field` 반사 접근은 건드리지 않았다. 바뀐 것은 파라미터 타입과 호출부 11곳의
+    // 리터럴→키 교체, 그리고 함수 셋으로의 분리뿐이라 반사가 늘거나 준 것이 아니다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8e0f116728de3a06c94facbb9185ba686bc10a27dcfc024800b6f5a5a2c2247b" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -483,4 +488,14 @@ pub const inventory = [_]Proof{
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "b86809f9b52d6fc794ef73387b65eac18dc48d179c8ed00ca58f7cc9c3fa33eb" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
+    // i18n 표시 문자열 leaf(i18n.md 계약 §3)를 새로 등재한다. 반사는 `tIn`의
+    // `@field(tbl.*, @tagName(k))` **하나**뿐이고, 그것이 필요한 이유는 키 목록을 두 벌 유지하지 않기
+    // 위해서다 — `Key`를 `Table`에서 `std.meta.FieldEnum`으로 파생하고 런타임 key를 `inline else`로
+    // comptime 에 펼쳐 그 필드에 닿는다. 손으로 쓴 enum↔필드 매핑을 두면 그 둘이 갈리는 순간 조용히
+    // 어긋나므로, 이 반사가 오히려 드리프트를 막는 장치다.
+    //
+    // **count가 1에서 움직이면 멈추고 본다.** 언어 테이블 조회 외의 반사가 생겼다는 뜻이고, 이 leaf 는
+    // 그 하나 말고는 이름으로 무엇도 읽지 않아야 한다. 키가 늘어나는 것은 count 를 바꾸지 않는다
+    // (필드가 늘 뿐 `@field` 호출 자리는 그대로다) — 슬라이스마다 digest 만 갱신된다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "34de93a9c0179df77bbff3ff1516ee16832b8379601d212f0e4469f2aab8cbb1" },
 };

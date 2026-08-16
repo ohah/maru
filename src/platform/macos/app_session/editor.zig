@@ -2513,3 +2513,66 @@ test "랩을 켠 한 줄짜리 문서도 세로로 움직인다 — 조각 단�
     try testing.expectEqual(@as(u32, 0), fx.term.rt.editor_first_piece);
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
 }
+
+test "적대적: 조각 스크롤은 한 칸씩 N번과 N칸 한 번이 같다" {
+    // **Vim `smoothscroll`이 off-by-one을 쏟은 자리다**(9.1.0211·0258·0260·0407). 걸음 계산이
+    // 줄 경계에서 하나 어긋나면 이 두 경로가 갈린다 — 사람 눈으로는 "가끔 한 행씩 튄다"로 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    // 줄 길이를 섞는다 — 한 조각짜리와 여러 조각짜리가 번갈아야 경계가 실제로 걸린다.
+    var prng = std.Random.DefaultPrng.init(0x9105);
+    const rnd = prng.random();
+
+    for ([_]i32{ 1, 2, 3, 7, 13 }) |step| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        var bufs: [40][]u8 = undefined;
+        var n: usize = 0;
+        defer for (bufs[0..n]) |b| allocator.free(b);
+        const lines = try allocator.alloc([]const u8, 40);
+        defer allocator.free(lines);
+        while (n < 40) : (n += 1) {
+            const len = rnd.uintLessThan(usize, 300) + 1;
+            bufs[n] = try allocator.alloc(u8, len);
+            @memset(bufs[n], 'x');
+            lines[n] = bufs[n];
+        }
+        fx.term.rt.editor_lines = lines;
+        fx.term.rt.editor_wrap = true;
+
+        var warm = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        warm.dl.deinit(allocator);
+
+        // ① 한 칸씩 step번
+        fx.term.rt.editor_first_line = 0;
+        fx.term.rt.editor_first_piece = 0;
+        var k: i32 = 0;
+        while (k < step) : (k += 1) _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1);
+        const by_one_line = fx.term.rt.editor_first_line;
+        const by_one_piece = fx.term.rt.editor_first_piece;
+
+        // ② step칸 한 번
+        fx.term.rt.editor_first_line = 0;
+        fx.term.rt.editor_first_piece = 0;
+        _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -step);
+        try testing.expectEqual(by_one_line, fx.term.rt.editor_first_line);
+        try testing.expectEqual(by_one_piece, fx.term.rt.editor_first_piece);
+
+        // **정말 그만큼 갔는지 직접 센다** — 두 경로가 나란히 틀리면 ①②는 통과한다.
+        const cols = visibleCols(fx.session, editorBodyRect(fx.session, fx.leaf_rect, fx.term), fx.term);
+        var walked: u32 = 0;
+        for (0..by_one_line) |i| walked += piecesOfLine(fx.term, i, cols);
+        walked += by_one_piece;
+        try testing.expectEqual(@as(u32, @intCast(step)), walked);
+        try testing.expect(by_one_line > 0 or by_one_piece > 0); // 실제로 움직였다
+
+        // ③ 내려갔다 올라오면 제자리다(상한에 안 닿는 거리에서).
+        _ = scrollLines(fx.session, fx.term, fx.leaf_rect, step);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+        try testing.expectEqual(@as(u32, 0), fx.term.rt.editor_first_piece);
+    }
+}

@@ -349,3 +349,22 @@ git diff --check
 ```
 
 문서만 바꾼 PR은 `git diff --check`를 최소 검증으로 사용한다. 다만 문서가 명령, 구조, 테스트 경로를 바꾸면 관련 명령도 함께 실행한다.
+
+### 다른 OS의 컴파일을 로컬에서 확인한다 (크로스 컴파일)
+
+**호스트가 아닌 OS에서만 깨지는 컴파일 오류가 있다.** 대표적으로 Zig의 **추론 error set**은 OS별로 달라진다 —
+어떤 오류를 내는 코드가 한 OS에서만 살아 있으면 그 오류는 그 OS의 error set에만 들어가고, 다른 OS에서
+`switch`하면 *"not a member of destination error set"*으로 **컴파일이 깨진다**. 실제로 그렇게 한 번 깨졌고
+(W2 적대적 검증), 그때는 CI가 잡았다.
+
+```sh
+zig build -Dtarget=aarch64-macos    # macOS 컴파일 확인
+zig build -Dtarget=x86_64-linux     # Linux 컴파일 확인
+```
+
+**한계 — 컴파일만 확인한다.** `zig build test -Dtarget=aarch64-macos`는 macOS 테스트가 Foundation·CoreText를
+링크하므로 다른 호스트에서 실패한다. 즉 이 명령이 보증하는 것은 **exe와 중립 레이어가 그 OS에서 컴파일된다**는
+것이고, macOS L4 테스트와 실제 실행은 여전히 CI 몫이다.
+
+L4(플랫폼 어댑터)나 OS 갈래(`builtin.os.tag` 분기, 호스트별 스텁)를 건드린 PR은 **CI에 올리기 전에** 위 두
+줄을 돌린다. 중립 레이어(L1~L3)만 바꾼 PR은 `mise run check`로 충분하다.

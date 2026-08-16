@@ -99,14 +99,28 @@ MARU_INTERACTIVE_SHELL  →  shell.command(config)  →  pwsh 7  →  Windows Po
 `MARU_INTERACTIVE_SHELL`은 maru 자체 변수라 OS 무관하게 1순위로 유지한다. 마지막 `cmd` 폴백은 PowerShell이
 없는 기기에서도 터미널이 뜨게 하기 위한 것이다(§3.1의 cmd 티어 그대로 동작한다).
 
-**config로 바꿀 수 있어야 한다(사용자 확정).** 수단은 기존 `shell.command`/`shell.args`다. 다만 **아직 정하지
-않은 것**이 하나 있다(§8): maru의 config는 **OS 분기가 없는 단일 파일**(`~/.config/maru/config`)이라,
-dotfiles를 macOS와 공유하면 `shell.command = /bin/zsh` 한 줄이 Windows에서 깨진다. 둘 중 하나를 골라야 한다.
+**config로 바꿀 수 있어야 한다(사용자 확정).** 수단이 셋이고, 구체적인 것이 이긴다.
 
-| | 뜻 | 대가 |
-|---|---|---|
-| 크로스플랫폼 키 그대로 | `shell.command` 하나. 공유하는 사용자가 알아서 관리 | 한 파일을 두 OS에서 쓰면 반드시 충돌한다 |
-| **OS별 override 도입** | Windows에서만 이기는 키를 둔다 | config 스키마에 **OS 분기라는 새 축**이 생긴다 — 셸만 일회성으로 둘지, 일반 메커니즘으로 만들지가 따라온다 |
+```conf
+shell.windows-shell   = cmd                                     # ① 종류만 고른다(Windows 전용 키)
+shell.command.windows = C:\Program Files\PowerShell\7\pwsh.exe  # ② 경로를 못 박는다(OS별 override)
+shell.command         = /bin/zsh                                # ③ 모든 OS 공통(Windows에선 ②가 이긴다)
+```
+
+**OS 분기는 일반 메커니즘으로 넣었다(§8에서 결정 완료).** 한때 "셸만 일회성 키로 둘지, 일반 메커니즘으로
+만들지"가 미결이었는데, 일반 메커니즘 쪽이 **오히려 코드가 적다** — 로더가 키에서 접미를 떼고 호스트가 아니면
+그 줄을 건너뛰는 것이 전부다(값 파싱·검증·GUI는 기본 키와 완전히 같은 경로를 탄다). 일회성 키였다면 셸에만
+해법이 생기고 `font.size`·`workspace.root` 같은 다음 충돌마다 키를 하나씩 더 파야 했다.
+
+동작 규칙과 예시는 [configuration.md](configuration.md) "OS별 값"이 소유한다. 요점만: **OS 접미 키가 기본 키를
+파일 순서와 무관하게 이기고**, 다른 OS 줄은 조용히 무시되며, 모르는 접미(`.freebsd`·오타 `.window`)는 접미가
+아니라 키 이름의 일부라 "알 수 없는 키"로 잡힌다. VS Code가 같은 문제를
+`terminal.integrated.defaultProfile.windows`/`.osx`/`.linux`로 푸는 것과 같은 모양이다.
+
+**`shell.windows-shell`은 경로가 아니라 종류를 고른다**(`powershell`|`cmd`, 기본 `powershell`). 실제 경로가
+기기마다 다르기 때문이다 — pwsh 7은 설치 여부가 갈리고 5.1은 `%SystemRoot%`에 매여 있다. 종류만 고르면 해석은
+아래 티어가 하고, 경로를 못 박고 싶으면 `shell.command`(+`.windows`)를 쓴다. 다른 OS에서는 읽히되 쓰이지
+않는다 — 키를 OS별로 숨기면 dotfiles를 공유하는 사용자가 macOS에서 "알 수 없는 키" 경고를 받는다.
 
 **탭별로 다른 셸을 여는 "프로필"은 이 계약 밖이다.** 지금 maru에는 그 개념이 없고(전역 `shell.command` 하나),
 macOS도 마찬가지다. 즉 **Windows 고유 요구가 아니라 제품 기능**이므로 별도 이니셔티브로 둔다 — 다만 Windows는
@@ -629,9 +643,6 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
 
 ## 8. 아직 정하지 않은 것
 
-- **셸 설정의 OS 분기**(§3.1a). 기본값이 PowerShell인 것과 `shell.command`로 바꾸는 것은 정해졌다. 남은 것은
-  **config가 OS 분기를 가질 것인가**다 — 지금은 단일 파일이라 dotfiles를 공유하면 한 줄이 두 OS에서 충돌한다.
-  일회성 키로 둘지 일반 메커니즘으로 만들지가 함께 따라온다.
 - **WSL 세션의 ADE 축 셋**(§3.1). 에이전트 탐지·cwd 2단·경로 소비가 VM 경계에서 끊긴다. 후보: ① 셸 통합이
   포그라운드 명령을 OSC로 보고하게 해 proc_name 폴링을 대체, ② `wsl.exe -e`로 주기적 조회(폴링마다 프로세스
   생성이라 비싸다), ③ WSL 세션은 에이전트 축을 끈다(degradation 명시). 경로는 `\\wsl$\` 변환이 별도 결정이다.
@@ -670,5 +681,7 @@ conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 
   쓰여 있다.
 
 > **여기서 빠진 것 = 결정된 것.** `OSC 9;9`의 host는 §3.2a에서 결정됐고(9;9은 host를 건드리지 않는다), 그
-> 결정이 안고 가는 잔여 위험과 재검토 트리거는 §3.2a "받아들인 위험"이 소유한다. Windows 기본 셸은 §3.1a에서
-> PowerShell로 확정됐고, 남은 것은 위 "셸 설정의 OS 분기"뿐이다.
+> 결정이 안고 가는 잔여 위험과 재검토 트리거는 §3.2a "받아들인 위험"이 소유한다. **셸은 이제 전부 결정됐다** —
+> 기본값은 PowerShell(§3.1a), 바꾸는 수단은 `shell.windows-shell`(종류)·`shell.command[.windows]`(경로),
+> config의 OS 분기는 **일반 메커니즘**(키 접미)으로 넣었다. 그 셋의 우선순위와 규칙은 §3.1a와
+> [configuration.md](configuration.md) "OS별 값"이 소유한다.

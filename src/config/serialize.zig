@@ -81,7 +81,10 @@ pub fn updateForKeys(allocator: std.mem.Allocator, original: []const u8, config:
     var updates: std.ArrayList(KeyValue) = .empty;
     for (keys) |k| {
         const v = valueForKey(all, k) orelse continue; // 스키마 키만 — 특수 키는 호출처 책임
-        try updates.append(aa, .{ .key = k, .value = v });
+        // 파일에 `<key>.<호스트 OS>` 줄이 있으면 **그 줄**이 지금 이기고 있는 값이므로 거기에 쓴다.
+        // 기본 키에 쓰면 값이 다른 OS로 새고, 이 OS에는 반영도 안 된다(접미 줄이 계속 이긴다).
+        const target = try loader.writeBackKey(aa, original, k);
+        try updates.append(aa, .{ .key = target, .value = v });
     }
     return loader.updateConfigText(allocator, original, updates.items);
 }

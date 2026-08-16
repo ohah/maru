@@ -14,7 +14,7 @@
 대조 그림도 함께 낸다(`out/atlas-diff.png`) — README 가 보여주는 그림을 **커밋된
 스크립트로 다시 만들 수 있어야** 한다.
 
-사용: python3 tools/mobile-poc/atlas_diff.py out/atlas-ios.gray out/atlas-android.gray 384 128 24 32
+사용: python3 tools/mobile-harness/atlas_diff.py out/atlas-ios.gray out/atlas-android.gray 384 128 24 32
 """
 import pathlib
 import subprocess

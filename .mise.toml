@@ -261,7 +261,7 @@ run = "python3 tools/svg_to_coverage.py --check"
 # 1초면 끝나므로 항상 돌린다. `sh` 는 CI(ubuntu)에서 dash 라, 그 위에서 도는 것까지 확인했다.
 [tasks.check-mobile-contract]
 description = "Check the mobile contract claims (bridge/host/header/docs) and ABI types"
-run = "sh tools/mobile-poc/doc_claims.sh"
+run = "sh tools/mobile-harness/doc_claims.sh"
 
 [tasks.check-config-docs]
 description = "Check config docs against the real loader keys"

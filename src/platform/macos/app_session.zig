@@ -54320,6 +54320,69 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
     }
 }
 
+test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 낸다" {
+    // [GUI 확인 2026-08-16] 깨끗한 저장소에서 목록 자리가 **아무 말도 안 하는 빈 면**이었다. 사용자에게
+    // 그 화면은 "아직 못 읽었다"와 구별되지 않는다. 컴포넌트에는 안내 한 줄 계약이 있었지만 제품이
+    // `empty_notice`를 채우지 않아 그 계약이 **제품 경로에서만** 죽어 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    // 도크를 **연다**. 열지 않으면 content rect가 0이라 글자가 들어갈 자리가 없고, 이 테스트는
+    // "문장이 없다"를 그리기 실패가 아니라 정답으로 읽게 된다.
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    // 읽기는 **성공했고** 바뀐 것이 없다(porcelain v2에 파일 줄이 없다). "못 읽었다"(`git_result == null`)와
+    // 다른 사실이므로 다른 문장이어야 한다.
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, "/repo");
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(usize, 0), projection.items.len);
+    const props = scm_dock_ops.testProps(session, projection);
+    try std.testing.expectEqualStrings(git_ops.notice_no_changes, props.empty_notice);
+
+    // 그리고 그 문장이 실제로 **그려진다** — props에만 있고 화면에 없으면 같은 빈 면이다.
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    // **예산은 제품과 같은 것을 쓴다**(`collectScmDock`과 같은 호출). 넉넉한 버퍼로 그리면 예산이 낡아도
+    // 이 테스트가 통과하는데, 그 조합이 바로 도크가 통째로 사라진 원인이었다.
+    const budget = chrome.components.scm_dock.view.drawBufferSizes(props, frame.tree.entries.len);
+    const tokens_v = session.buildChromeTokens();
+    const draws = try chrome.components.scm_dock.view.view(props, frame, .{}, &tokens_v, .{
+        .ops = try arena.alloc(chrome.draw.Op, budget.ops),
+        .runs = try arena.alloc(chrome.draw.Run, budget.runs),
+        .text_bytes = try arena.alloc(u8, budget.text_bytes),
+    });
+    var saw_notice = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, git_ops.notice_no_changes) != null) saw_notice = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_notice);
+}
+
 test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 intent가 난다 (P2c)" {
     // 이 뷰가 처음으로 저장소를 바꾸는 경로다. 그래서 "누른 버튼이 **어느 파일을** 대상으로 하는가"를
     // published tree로 그대로 태워 고정한다 — 창 자리와 모델 인덱스가 갈리면 여기서 잡힌다.

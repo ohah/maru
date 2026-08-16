@@ -485,6 +485,10 @@ pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
 /// 실제로 옛 단정에 남아 있었다).
 pub const notice_not_a_repo = "git 저장소가 아닙니다";
 pub const notice_repo_unknown = "저장소를 확인할 수 없습니다";
+/// 읽기는 성공했고 바뀐 것이 없다. **위 둘과 같은 표에 둔다** — 사용자에게는 셋 다 "목록이 비었다"로
+/// 보이지만 서로 다른 사실이고, 문구를 흩어 두면 한쪽만 고쳐져 같은 화면이 두 가지를 말한다.
+/// 이 문장만 목록 컴포넌트가 그린다(나머지 둘은 목록을 그리기 전에 나온다).
+pub const notice_no_changes = "변경 사항 없음";
 
 /// 목록이 비었을 때 도크가 낼 **안내 문구**. 우선순위는 실행할 수 없음 → 볼 것이 없음 → 실패 → 진행 중이다.
 ///

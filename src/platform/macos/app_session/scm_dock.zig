@@ -241,6 +241,10 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .commit_rows = commitRows(self),
         // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
         .commit_enabled = projection.has_staged,
+        // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
+        // "아직 못 읽었다"와 똑같아진다(§3.5 빈 상태 표). 다른 두 문장은 목록을 그리기도 전에
+        // 나오므로(`git_result == null` 경로) 여기서 고를 것은 이 하나뿐이다.
+        .empty_notice = if (projection.items.len == 0) git_ops.notice_no_changes else "",
     };
 }
 

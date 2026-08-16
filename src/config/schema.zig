@@ -25,18 +25,23 @@ pub const Diag = struct { line: usize, message: []const u8 };
 /// 값이 잘못되면 forgiving — diagnostic 후 기본값 유지 + true(키는 스키마가 소유하므로 폴백하지 않는다).
 /// comptime으로 Config의 sub-struct 중 `schema` decl을 가진 것을 자동 발견(@hasDecl)하고, 각 메타 항목의 키를
 /// `namespace.segment`로 만들어 비교한다(namespace=Config 필드명, segment=key_seg ?? 필드명).
+/// **Config 타입에 안 묶는다.** 본문이 이미 `@typeInfo`·`@hasDecl` 로 도는 comptime 코드라 받는
+/// 타입만 열면 어떤 config 구조체든 같은 엔진을 탄다 — 모바일 config 가 자기 스키마 메타를 들고
+/// 이 함수를 그대로 쓴다(docs/mobile-config.md §3). 데스크톱은 계속 `*theme.Config` 를 넘기므로
+/// comptime 에 같은 코드가 찍혀 **동작이 그대로**다(round-trip 대칭 테스트가 그것을 못박는다).
 pub fn tryParse(
     a: std.mem.Allocator,
-    config: *theme.Config,
+    config: anytype,
     key: []const u8,
     value: []const u8,
     diags: *std.ArrayList(Diag),
     line_no: usize,
 ) !bool {
-    // 최상위 스칼라(Config.schema — Config 직속 필드, namespace 없음, meta.key로 전체 키).
-    if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
-            const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+    const Cfg = @typeInfo(@TypeOf(config)).pointer.child;
+    // 최상위 스칼라(Cfg.schema — Config 직속 필드, namespace 없음, meta.key로 전체 키).
+    if (@hasDecl(Cfg, "schema")) {
+        inline for (@typeInfo(@TypeOf(Cfg.schema)).@"struct".fields) |sf| {
+            const meta: theme.Meta = @field(Cfg.schema, sf.name);
             const full_key = comptime topKey(sf.name, meta);
             if (std.mem.eql(u8, key, full_key)) {
                 try parseAndSet(a, &@field(config, sf.name), full_key, meta, value, diags, line_no);
@@ -45,7 +50,7 @@ pub fn tryParse(
         }
     }
     // sub-struct 스칼라(@hasDecl로 schema decl을 가진 sub-struct 자동 발견; namespace=Config 필드명).
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@typeInfo(Cfg).@"struct".fields) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;

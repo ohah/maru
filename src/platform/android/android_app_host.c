@@ -1185,6 +1185,25 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     return 0;
 }
 
+/// config 파일을 읽어 브리지에 넘긴다. **자리는 앱 전용 내부 저장소**(`filesDir/config` —
+/// docs/mobile-config.md §2). 없으면 아무것도 안 한다 — 기본값으로 도는 것이 정상 상태다.
+static void loadConfigFile(struct android_app *app) {
+    const char *dir = app->activity->internalDataPath;
+    if (!dir) { LOGI("MARU_CONFIG no_data_path"); return; }
+    char path[512];
+    snprintf(path, sizeof path, "%s/config", dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) { LOGI("MARU_CONFIG absent path=%s", path); return; }
+    static char buf[64 * 1024];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    int truncated = !feof(f); // 상한을 넘겼나 — 조용히 자르지 않는다
+    fclose(f);
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_load_config((const unsigned char *)buf, n);
+    pthread_mutex_unlock(&g_bridge_lock);
+    LOGI("MARU_CONFIG loaded bytes=%zu truncated=%d path=%s", n, truncated, path);
+}
+
 // **생명주기**: 홈으로 나가면 창이 죽는다(APP_CMD_TERM_WINDOW). 그때 스왑체인을 그대로
 // 들고 있으면 죽은 surface 로 present 하게 된다 — 되돌아왔을 때 다시 세워야 한다.
 // iOS 는 UIKit 이 레이어를 살려 두지만 Android 는 창 자체가 사라져서 이 처리가 필수다.
@@ -1595,6 +1614,7 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
     }
     if (cmd == APP_CMD_INIT_WINDOW && app->window && g.ready) return;  // 이미 서 있으면 그대로
     if (cmd == APP_CMD_INIT_WINDOW && app->window) {
+        loadConfigFile(app); // 첫 프레임부터 그 색으로 그린다
         int32_t dpi = AConfiguration_getDensity(app->config);
         g.scale = (dpi > 0 && dpi != ACONFIGURATION_DENSITY_ANY &&
                    dpi != ACONFIGURATION_DENSITY_NONE) ? (float)dpi / 160.0f : 2.0f;

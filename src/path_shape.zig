@@ -119,9 +119,30 @@ pub fn isDetectableAbsoluteFor(os_tag: std.Target.Os.Tag, path: []const u8) bool
 /// 접두가 명확한 상대 경로의 종류. `filePathSpan`의 scope 태그와 1:1이다.
 pub const RelativePrefix = enum { dot, home };
 
-/// 정규식 클래스로 쓰이는 글자들. `\` 뒤에 이것 하나만 오면(또는 뒤에 수량자가 붙으면) 경로가 아니라
-/// 정규식 조각이다 — 오탐 스윕이 찾은 **유일한 공통 모양**이다(docs/windows-platform.md §5.2 ⒜).
-const regex_class_letters = "dDwWsSbBnrtfvaAzZ0pP";
+/// 세그먼트가 **이스케이프 조각**인가 — 경로가 아니라 `\d`·`\n`·`\x`처럼 백슬래시 뒤에 오는 것.
+///
+/// 규칙은 한 문장이다: **알파벳 한 글자이거나, 알파벳 한 글자 뒤에 수량자가 붙은 것**(`d+`·`s*`·`d{2,4}`·
+/// `p{L}`). 정규식·문자열 이스케이프는 예외 없이 그 모양이고, 진짜 경로 세그먼트는 `src`·`build`·`Makefile`
+/// 처럼 두 글자 이상이다.
+///
+/// **한때 "정규식 클래스 글자 목록"이었다**(`dDwWsSbBnrtfvaAzZ0pP`). 적대적 검증이 그 목록의 구멍을 **11개**
+/// 찾았다 — 16진(`x` + 두 자리)·유니코드(`u` + 네 자리)·`e`·`c`+글자·`k`+숫자·`Q`·`h`·`R`·`N`이 전부
+/// 통과했다. 목록을 늘리는 대신 조건을 **"알파벳 한 글자"** 로 바꿨다: 잃는 것이 사실상 같고(한 글자
+/// 디렉터리 이름이 20자에서 26자로) 오탐은 11건에서 4건으로 준다. 무엇보다 임의로 고른 목록이 아니라
+/// **한 문장으로 설명되는 규칙**이다.
+///
+/// **남는 구멍(알고 둔다)**: 한 글자 뒤에 수량자가 **아닌** 것이 붙는 모양은 통과한다 — 16진·유니코드
+/// 이스케이프, `c`+글자(제어문자), `k`+숫자(역참조). 토큰이 `.\`로 **시작**해야 하므로(= 이스케이프 바로
+/// 앞에 리터럴 `.`이 있어야 하므로) 드물다고 보고 규칙을 더 복잡하게 만들지 않았다.
+fn isEscapeLikeSegment(seg: []const u8) bool {
+    if (seg.len == 0) return false;
+    if (!std.ascii.isAlphabetic(seg[0])) return false;
+    if (seg.len == 1) return true;
+    return switch (seg[1]) {
+        '{', '+', '*', '?' => true,
+        else => false,
+    };
+}
 
 /// `.\x`·`..\x`·`~\x`처럼 **접두가 명확한 상대 경로**인가. 아니면 null.
 ///
@@ -136,13 +157,16 @@ pub fn detectableRelativePrefix(path: []const u8) ?RelativePrefix {
 /// 역슬래시 철자는 Windows 기준일 때만 본다. macOS에서 `.\x`는 `\x`가 이름의 일부인 **한 개의 파일**이지
 /// 하위 경로가 아니라, 거기서 링크로 보면 클릭이 엉뚱한 것을 연다(절대 갈래와 같은 판단).
 ///
-/// **역슬래시 철자에만 세그먼트 검사를 건다.** 이스케이프·정규식 출력과 충돌하기 때문이다. 오탐 스윕에서
-/// 후보 다섯 계열을 누적 35건에 돌린 결과(계약 §5.2 ⒜), 오탐의 공통 모양은 하나였다 — **세그먼트가 정규식
-/// 클래스 글자 하나**(`\d`·`\w`·`\s`·`\n`)이거나 **거기에 수량자가 붙은 것**(`\d+`·`\s*`·`\d{2,4}`·`\p{L}`).
-/// 진짜 경로 세그먼트는 `src`·`build`·`Makefile`처럼 두 글자 이상이거나 클래스 글자가 아니다.
+/// **역슬래시 철자에만 세그먼트 검사를 건다.** 이스케이프·정규식 출력과 충돌하기 때문이다(계약 §5.2 ⒜의
+/// 오탐 스윕). 판정은 `isEscapeLikeSegment`가 소유한다 — 규칙과 남은 구멍이 거기 doc에 있다.
 ///
-/// **대가**: 디렉터리 이름이 진짜 한 글자 클래스 글자면(`.\d\x.txt`) 감지하지 않는다. 드물고, 반대 방향의
-/// 오탐(정규식이 밑줄 뜨고 클릭되는 것)보다 낫다고 본다.
+/// **대가**: 디렉터리 이름이 진짜 한 글자면(`.\x\y.txt`) 감지하지 않는다. 드물고, 반대 방향의 오탐
+/// (정규식이 밑줄 뜨고 클릭되는 것)보다 낫다고 본다. 오탐이 실제로 보이는 이유는 **hover가 stat을 하지
+/// 않기 때문**이다 — 패턴만 맞으면 밑줄이 뜬다(docs/link-detection.md의 hover/click 불일치).
+///
+/// **알고 두는 비대칭**: 검사가 역슬래시 접두에만 걸리므로 `./d+`는 감지되고 `.\d+`는 안 된다. `./` 갈래를
+/// 건드리면 macOS 동작이 바뀌므로(회귀 0이 우선) 그대로 둔다 — 그쪽은 **이 슬라이스 이전부터 같았다.**
+/// 같은 이유로 `./` 하나는 감지되고 `.\` 하나는 안 된다(새 갈래가 더 보수적인 쪽).
 pub fn detectableRelativePrefixFor(os_tag: std.Target.Os.Tag, path: []const u8) ?RelativePrefix {
     const posix: ?RelativePrefix = if (std.mem.startsWith(u8, path, "../"))
         .dot
@@ -168,13 +192,8 @@ pub fn detectableRelativePrefixFor(os_tag: std.Target.Os.Tag, path: []const u8) 
     if (rest.len == 0) return null; // `.\` 만으로는 열 것이 없다
     var it = std.mem.splitAny(u8, rest, "/\\");
     while (it.next()) |seg| {
-        if (seg.len == 0) continue; // `.\\x` 같은 중복 구분자 — 세그먼트로 치지 않는다
-        if (std.mem.indexOfScalar(u8, regex_class_letters, seg[0]) == null) continue;
-        if (seg.len == 1) return null; // `\d`
-        switch (seg[1]) {
-            '{', '+', '*', '?' => return null, // `\d{2,4}`·`\d+`·`\s*`
-            else => {},
-        }
+        if (seg.len == 0) continue; // 중복 구분자 — 세그먼트로 치지 않는다
+        if (isEscapeLikeSegment(seg)) return null;
     }
     return win.kind;
 }
@@ -316,9 +335,16 @@ test "detectableRelativePrefixFor: POSIX 철자는 회귀 0, 역슬래시는 Win
 test "detectableRelativePrefixFor: 정규식·이스케이프 조각은 걸러진다" {
     const win = std.Target.Os.Tag.windows;
     const regex_like = [_][]const u8{
-        ".\\d",    ".\\w",    ".\\s",       ".\\S",         ".\\n",         ".\\t",
-        ".\\d+",   ".\\w+",   ".\\s*",      ".\\S+",        ".\\d?",        ".\\d{2,4}",
-        ".\\w{3}", ".\\p{L}", ".\\d\\.\\d", ".\\d+\\.\\d+", ".\\w+\\.\\w+", ".\\",
+        ".\\d",    ".\\w",      ".\\s",       ".\\S",         ".\\n",         ".\\t",
+        ".\\d+",   ".\\w+",     ".\\s*",      ".\\S+",        ".\\d?",        ".\\d{2,4}",
+        ".\\w{3}", ".\\p{L}",   ".\\d\\.\\d", ".\\d+\\.\\d+", ".\\w+\\.\\w+", ".\\",
+        // 적대적 검증이 옛 "정규식 클래스 글자 목록"에서 찾은 구멍 11건. 목록을 늘리는 대신 조건을
+        // **알파벳 한 글자**로 바꿔 닫았다 — 이 줄들이 그 회귀를 막는다.
+        ".\\e",    ".\\Q",      ".\\h",       ".\\R",         ".\\N",         ".\\x",
+        ".\\u",    ".\\E",      ".\\G",       ".\\K",         ".\\c",
+        // 접두 세 종류 모두에 걸린다. 그리고 **중간 세그먼트**도 본다.
+                "..\\d",
+        "~\\d",    ".\\src\\d", ".\\d\\src",
     };
     for (regex_like) |t| {
         if (detectableRelativePrefixFor(win, t) != null) {

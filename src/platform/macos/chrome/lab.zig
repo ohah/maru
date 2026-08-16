@@ -784,10 +784,17 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .{ .hovered = scm_dock.build.NodeIds.item(3) }
     else
         .{};
+    // **host와 같은 예산으로 그린다.** Lab 버퍼는 모든 시나리오를 덮도록 넉넉해서, 그냥 통째로 넘기면
+    // `drawBufferSizes`가 낡아도 이 캡처는 멀쩡하고 제품만 빈 화면이 된다 — 2026-08-16에 실제로 그
+    // 조합이었다(골든은 초록, 깨끗한 저장소의 도크는 통째로 사라짐). 예산을 지나게 하면 그 어긋남이
+    // 스모크에서 먼저 걸린다.
+    const budget = scm_dock.view.drawBufferSizes(props, frame.tree.entries.len);
+    if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
+        return error.LabBufferTooSmall;
     const draws = try scm_dock.view.view(props, frame, state, tokens, .{
-        .ops = buffers.ops,
-        .runs = buffers.text_runs,
-        .text_bytes = buffers.text_bytes,
+        .ops = buffers.ops[0..budget.ops],
+        .runs = buffers.text_runs[0..budget.runs],
+        .text_bytes = buffers.text_bytes[0..budget.text_bytes],
     });
     return .{ .tree = frame.tree, .draws = draws };
 }

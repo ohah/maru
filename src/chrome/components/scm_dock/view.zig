@@ -48,13 +48,16 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1 + 빈 안내 1.
-    var text_ops: usize = 10;
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + **커밋 3**(입력 한 줄·버튼
+    // 라벨·`∨`) + 호버 동작 1 + 빈 안내 1.
+    var text_ops: usize = 13;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
     bytes += props.empty_notice.len;
+    // 커밋 줄. 입력은 안내 문구와 본문 중 **긴 쪽**만 나간다(둘 중 하나만 그린다).
+    bytes += @max(commit_placeholder.len, props.commit_message.len) + commit_label.len + icon_bytes;
 
     for (props.items) |item| switch (item) {
         // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
@@ -741,12 +744,7 @@ fn renderTabs(storage: *TestStorage, width: f32, count: u32) !draw.ChromeDraw {
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    return view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    return viewBudgeted(storage, props, frame, .{});
 }
 
 /// 활성 탭 밑줄(위 `badge_min_height`가 배지와 가른다).
@@ -795,6 +793,29 @@ const TestStorage = struct {
     text_bytes: [2048]u8 = undefined,
 };
 
+/// 테스트도 **host와 같은 예산으로** 그린다. 넉넉한 버퍼를 그냥 넘기면 `drawBufferSizes`가 낡아도
+/// 테스트만 통과하고 제품은 빈 화면이 된다 — 실제로 그랬다(2026-08-16 GUI 확인: 커밋 줄 세 조각이
+/// 예산 밖이라 **깨끗한 저장소**에서 `view`가 실패했고, 목록이 아니라 **도크가 통째로** 사라졌다.
+/// 그때 이 파일의 빈 목록 테스트는 초록이었다 — 예산이 아니라 고정 버퍼로 그렸기 때문이다).
+fn viewBudgeted(
+    storage: *TestStorage,
+    props: types.Props,
+    frame: build.Frame,
+    state: interaction.InteractionState,
+) !draw.ChromeDraw {
+    const budget = drawBufferSizes(props, frame.tree.entries.len);
+    // 픽스처 버퍼가 예산보다 작으면 **예산이 아니라 픽스처가 틀린 것**이다. 조용히 줄여 그리면 이
+    // 테스트가 다시 예산을 안 보게 된다.
+    if (budget.ops > storage.ops.len or budget.runs > storage.runs.len or budget.text_bytes > storage.text_bytes.len)
+        return error.TestStorageTooSmall;
+    const tk = testTokens();
+    return view(props, frame, state, &tk, .{
+        .ops = storage.ops[0..budget.ops],
+        .runs = storage.runs[0..budget.runs],
+        .text_bytes = storage.text_bytes[0..budget.text_bytes],
+    });
+}
+
 fn testTokens() tokens.Tokens {
     return tokens.Tokens.tui(.{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
@@ -829,12 +850,7 @@ fn renderFixture(storage: *TestStorage, state: interaction.InteractionState, ite
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    return view(props, frame, state, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    return viewBudgeted(storage, props, frame, state);
 }
 
 test "행 글자와 요약·브랜치가 한 번에 나온다" {
@@ -928,16 +944,16 @@ test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
     const text = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
     // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
     try testing.expect(findText(draws, "main") != null);
+    // **고정 chrome도 전부 남는다.** 이 세 줄이 예산 밖이면 `view`가 실패하고 도크가 통째로 빈 화면이
+    // 된다 — 목록이 빌 때는 행 예산의 여유가 없어 그 부족이 곧바로 드러난다(2026-08-16 실제 증상).
+    try testing.expect(findText(draws, "히스토리") != null); // 탭 줄
+    try testing.expect(findExactText(draws, commit_placeholder) != null); // 커밋 입력
+    try testing.expect(findExactText(draws, commit_label) != null); // 커밋 버튼
 }
 
 test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 맞는 크기)" {
@@ -1009,12 +1025,7 @@ test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
     // **그 행의 rect 안에 있는 아이콘만** 본다. y 어림으로 고르면 다른 줄(브랜치·커밋 버튼)의 아이콘이
     // 그 범위에 들어오는 순간 조용히 엉뚱한 것을 재게 된다 — 커밋 줄을 위로 옮기자 실제로 그랬다.
     const row_rect = frame.tree.entries[frame.tree.find(build.NodeIds.item(0)) orelse return error.MissingRow].rect;
@@ -1123,12 +1134,7 @@ test "활성 탭 이름에만 전체 파일 수가 붙는다" {
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
 
     try testing.expect(findExactText(draws, "변경 사항 (42)") != null);
     // 나머지 두 탭은 아직 셀 것이 없다(P4·P5) — 개수를 붙이지 않는다.
@@ -1184,12 +1190,7 @@ test "그룹 헤더의 일괄 동작 버튼은 개수 배지와 겹치지 않는
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
 
     const badge_quad = findBadgeQuad(draws) orelse return error.MissingBadge;
     const action = frame.tree.entries[frame.tree.find(build.NodeIds.itemAction(0)) orelse return error.MissingAction].rect;
@@ -1218,12 +1219,7 @@ test "그룹 제목은 일괄 동작 버튼 밑으로 파고들지 않는다" {
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
 
     const action = frame.tree.entries[frame.tree.find(build.NodeIds.itemAction(0)) orelse return error.MissingAction].rect;
     const title = findExactText(draws, sectionTitle(.staged)) orelse return error.MissingTitle;
@@ -1285,12 +1281,7 @@ test "좁은 도크에서 오른쪽 자리가 폭을 다 먹으면 이름을 아
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     });
-    const tk = testTokens();
-    const draws = try view(props, frame, .{}, &tk, .{
-        .ops = &storage.ops,
-        .runs = &storage.runs,
-        .text_bytes = &storage.text_bytes,
-    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
     // 이름이 나오더라도 증감 왼쪽에서 끝나야 한다(안 나오는 것도 정답이다).
     if (findExactText(draws, "a.zig")) |name| {
         const removed = findExactText(draws, "-999999") orelse return error.MissingDelta;
@@ -1388,12 +1379,7 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
         .child_rects = &storage2.child_rects,
         .actions = &storage2.actions,
     });
-    const tk = testTokens();
-    const filled = try view(props, frame, .{}, &tk, .{
-        .ops = &storage2.ops,
-        .runs = &storage2.runs,
-        .text_bytes = &storage2.text_bytes,
-    });
+    const filled = try viewBudgeted(&storage2, props, frame, .{});
     // 메시지가 있으면 안내 문구 대신 그 글자를 **또렷하게** 그린다.
     try testing.expect(findExactText(filled, commit_placeholder) == null);
     const msg = findExactText(filled, "fix: 무언가를 고친다") orelse return error.MissingMessage;

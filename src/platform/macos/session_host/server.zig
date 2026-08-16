@@ -184,10 +184,10 @@ pub const RuntimeOps = struct {
     resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
     /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
     /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
-    snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
+    snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8,
     /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
     /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
-    delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate,
+    delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!StreamUpdate,
     /// Pending notification을 지우지 않고 off-side JSON과 generation token으로 복제한다. server가 response를
     /// canonical control queue에 admission한 뒤에만 `notification_commit`으로 같은 generation을 소비한다.
     notification_peek: *const fn (
@@ -415,6 +415,7 @@ pub const CollectedOutput = struct {
     frames: [][]u8,
     next_base: ?[]u8 = null,
     replace_base: bool = false,
+    next_screen_sequence: ?u64 = null,
     clear_resync: bool = false,
     next_observation_base: ?[]u8 = null,
     next_observation_revision: ?u64 = null,
@@ -459,6 +460,7 @@ pub const CollectedOutput = struct {
             sub.base = self.next_base;
             self.next_base = null;
         }
+        if (self.next_screen_sequence) |sequence| sub.screen_sequence = sequence;
         if (self.clear_resync) {
             sub.resync_pending = false;
             sub.awaiting_resync_ack = false;
@@ -554,6 +556,9 @@ pub const Connection = struct {
         /// Non-null only while a newly acquired controller attach is unpublished. rollbackAttach
         /// may restore this exact epoch; normal detach never decrements generation.
         unpublished_controller_generation: ?u64 = null,
+        /// 마지막으로 queue admission까지 commit된 screen output frontier. initial attach snapshot만
+        /// 0이고, 이후 resync/fallback snapshot과 non-empty delta batch는 exact +1로 전진한다.
+        screen_sequence: u64 = 0,
     };
 
     pub const State = enum { pre_hello, ready, closed };
@@ -1647,7 +1652,7 @@ pub const Connection = struct {
             reply_transferred = true;
             return .{ .reply = reply_frame };
         };
-        const snap_bytes = ops.snapshot(ops.ctx, id.?, self.allocator) catch {
+        const snap_bytes = ops.snapshot(ops.ctx, id.?, 0, self.allocator) catch {
             if (prepared_product) {
                 prepared_output.rollback(self);
                 prepared_transferred = true;
@@ -2454,7 +2459,9 @@ pub const Connection = struct {
                 output.rollback(self);
                 return null;
             }
-            const snap = ops.snapshot(ops.ctx, sub.runtime_id, self.allocator) catch |err| {
+            const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
+                return error.OutOfMemory;
+            const snap = ops.snapshot(ops.ctx, sub.runtime_id, next_sequence, self.allocator) catch |err| {
                 if (err == error.RuntimeNotFound) {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
                     self.discardPreparedOutput(&list, &output);
@@ -2476,12 +2483,15 @@ pub const Connection = struct {
             output.next_base = self.allocator.dupe(u8, snap) catch return error.OutOfMemory;
             output.replace_base = true;
             output.clear_resync = true;
+            output.next_screen_sequence = next_sequence;
             try self.appendChunks(&list, .snapshot_chunk, stream, snap);
         } else if (sub.base) |base| {
             // A valid delta producer failure cannot be treated as "no change": bounded projection
             // overflow would then retry every tick forever while the client silently freezes on an
             // old base. The adapter fail-closes this connection and revokes its leases.
-            const update = ops.delta(ops.ctx, sub.runtime_id, base, self.allocator) catch |err|
+            const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
+                return error.OutOfMemory;
+            const update = ops.delta(ops.ctx, sub.runtime_id, base, next_sequence, self.allocator) catch |err|
                 switch (err) {
                     // Runtime teardown races are stream lifecycle, not transport corruption. The
                     // caller's existing ended/detach path must keep the shared connection usable.
@@ -2508,6 +2518,7 @@ pub const Connection = struct {
             if (update.send.len != 0) {
                 const kind: protocol.Kind = if (update.is_snapshot) .snapshot_chunk else .delta_chunk;
                 try self.appendChunks(&list, kind, stream, update.send);
+                output.next_screen_sequence = next_sequence;
             }
         }
 
@@ -4047,6 +4058,8 @@ pub const FakeRuntimeOps = struct {
     resize_fail_count: usize = 0,
     delta_base_seen: [64]u8 = undefined,
     delta_base_seen_len: usize = 0,
+    delta_sequence_seen: u64 = 0,
+    snapshot_sequence_seen: u64 = 0,
     last_core_command: ?core_command_wire.Command = null,
     core_command_runtime: u128 = 0,
     core_command_failure: bool = false,
@@ -4070,6 +4083,7 @@ pub const FakeRuntimeOps = struct {
     snapshot_len: ?usize = null,
     new_base_len: ?usize = null,
     delta_send_len: ?usize = null,
+    delta_is_snapshot: bool = false,
     delta_calls: usize = 0,
     delta_probe_ctx: ?*anyopaque = null,
     delta_probe: ?*const fn (*anyopaque) void = null,
@@ -4133,9 +4147,10 @@ pub const FakeRuntimeOps = struct {
         self.resized_runtime = runtime_id;
     }
     /// 고정 snapshot 바이트를 caller 소유로 돌려준다(server가 이걸 snapshot_chunk로 나눠 보낸다).
-    fn snapshotFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn snapshotFn(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        self.snapshot_sequence_seen = sequence;
         self.snapshot_calls += 1;
         if (self.runtime_missing or self.snapshot_missing) return error.RuntimeNotFound;
         if (self.snapshot_permanent_failure) return error.OutOfMemory;
@@ -4151,9 +4166,10 @@ pub const FakeRuntimeOps = struct {
         return allocator.dupe(u8, "SNAPSHOT-BYTES");
     }
     /// 받은 base를 기록하고 고정 delta + 새 base를 돌려준다(둘 다 별개 owned 버퍼). delta 라우팅·base 갱신을 검증한다.
-    fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate {
+    fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!StreamUpdate {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        self.delta_sequence_seen = sequence;
         self.delta_calls += 1;
         if (self.delta_probe) |probe| probe(self.delta_probe_ctx.?);
         if (self.runtime_missing or self.delta_missing) return error.RuntimeNotFound;
@@ -4171,7 +4187,7 @@ pub const FakeRuntimeOps = struct {
             @memset(bytes, 'N');
             break :blk bytes;
         } else try allocator.dupe(u8, "NEW-BASE");
-        return .{ .send = send, .is_snapshot = false, .new_base = new_base };
+        return .{ .send = send, .is_snapshot = self.delta_is_snapshot, .new_base = new_base };
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
     fn notificationPeekFn(
@@ -4737,6 +4753,68 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     try testing.expect(protocol.Flags.hasEndStream(frames[1].header.flags));
     try testing.expectEqual(@as(u64, 1), frames[1].header.stream_id);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", frames[1].payload);
+}
+
+test "CR4a frontier는 output admission commit 뒤에만 subscription sequence를 전진한다" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const attach = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+    defer {
+        for (attach) |frame| frame.deinit(allocator);
+        allocator.free(attach);
+    }
+    try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_sequence);
+
+    var rolled_back = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?u64, 1), rolled_back.next_screen_sequence);
+    try testing.expectEqual(@as(u64, 1), fake.delta_sequence_seen);
+    try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_sequence);
+    rolled_back.rollback(&conn);
+    try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_sequence);
+
+    var committed = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?u64, 1), committed.next_screen_sequence);
+    try testing.expectEqual(@as(u64, 1), fake.delta_sequence_seen);
+    committed.commit(&conn);
+    try testing.expectEqual(@as(u64, 1), conn.attachments.get(1).?.screen_sequence);
+
+    const resync = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");
+    defer if (resync.frame) |frame| frame.deinit(allocator);
+    var reset = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?u64, 2), reset.next_screen_sequence);
+    try testing.expectEqual(@as(u64, 2), fake.snapshot_sequence_seen);
+    reset.commit(&conn);
+    try testing.expectEqual(@as(u64, 2), conn.attachments.get(1).?.screen_sequence);
+
+    fake.delta_is_snapshot = true;
+    var fallback_snapshot = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(u64, 3), fake.delta_sequence_seen);
+    try testing.expectEqual(@as(?u64, 3), fallback_snapshot.next_screen_sequence);
+    fallback_snapshot.commit(&conn);
+    try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+    fake.delta_is_snapshot = false;
+
+    fake.delta_send_len = 0;
+    var unchanged = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(u64, 4), fake.delta_sequence_seen);
+    try testing.expectEqual(@as(?u64, null), unchanged.next_screen_sequence);
+    unchanged.commit(&conn);
+    try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+
+    conn.attachments.getPtr(1).?.screen_sequence = std.math.maxInt(u64);
+    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(std.math.maxInt(u64), conn.attachments.get(1).?.screen_sequence);
 }
 
 test "server: every invalid RuntimeOps metadata class closes before attach wire publication" {

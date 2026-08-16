@@ -312,7 +312,10 @@ Maru 작업에서 사용하는 기본 명령이다.
   Debug·ReleaseFast에서 CR3c의 unavailable shell과 이미 게시된 fresh Client replacement를 같은 `HostAdapter`에 결속한 뒤,
   observer attach와 initial snapshot을 final-address RemoteGeneration candidate 안에서 실행한다. typed reject는 candidate와
   attachment 권위만 정산하고 게시된 Client를 usable로 보존한다. EOF는 동일 Client node·generation과 unavailable shell을
-  보존하되 해당 Client transport를 fail-close하므로 다음 replacement 시도가 필요하다. 이 prerequisite는 actual
+  보존하되 해당 Client transport를 fail-close하므로 다음 replacement 시도가 필요하다. 같은 gate의 screen/server prerequisite
+  2개는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1, output admission 전 rollback mutation 0과 commit 뒤 subscription frontier 전진을
+  검증한다(최적화 모드당 observer candidate 2 + frontier 2 + boundary 1). local socket idle은 caught-up 증거가 아니며 host-issued
+  target frontier barrier와 immutable staged receipt는 후속 제품 integration이 소유한다. 이 prerequisite는 actual
   `connectExistingHost` issuer, bounded contiguous delta catch-up, status/takeover, RemoteGeneration publication, input/forced resize를
   완료하지 않으며 CR4a의 후속 제품 integration과 CR4b/CR4c가 각각 소유한다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.

@@ -4128,6 +4128,32 @@ pub fn build(b: *std.Build) void {
         run_cr4a_runtime_tests.setCwd(b.path("."));
         session_host_cr4a_step.dependOn(&run_cr4a_runtime_tests.step);
 
+        const cr4a_frontier_projection_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a frontier는 snapshot zero"},
+        });
+        const run_cr4a_frontier_projection_tests = b.addRunArtifact(cr4a_frontier_projection_tests);
+        run_cr4a_frontier_projection_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_frontier_projection_tests.step);
+
+        const cr4a_frontier_server_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a frontier는 output admission"},
+        });
+        const run_cr4a_frontier_server_tests = b.addRunArtifact(cr4a_frontier_server_tests);
+        run_cr4a_frontier_server_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_frontier_server_tests.step);
+
         const cr4a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_cr4a_boundary.zig"),

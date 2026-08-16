@@ -2018,6 +2018,8 @@ fn initObserverReconnectCandidate(
         @panic("CR4a initial snapshot cleanup lost final candidate");
     const bytes = try snapshot.borrow();
     try out.attachment.generation.initScreen(capabilities.screen_codec_version);
+    // CR4 authority receipt는 legacy sequence-0 delta를 절대 증거로 사용하지 않는다.
+    out.attachment.generation.screenPtr().?.requireSequencedDeltas();
     out.attachment.generation.screenPtr().?.viewport_scrolled_known =
         capabilities.screen_viewport_scrolled;
     out.attachment.generation.screenPtr().?.applySnapshot(bytes, runtime.io) catch |err| {
@@ -9021,8 +9023,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3120,
-        .ReleaseFast => 3104,
+        .Debug => 3136,
+        .ReleaseFast => 3120,
         else => error.SkipZigTest,
     };
 }
@@ -12352,26 +12354,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9888,
-            .ReleaseFast => 9840,
+            .Debug => 9904,
+            .ReleaseFast => 9856,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9872,
-            .ReleaseFast => 9824,
+            .Debug => 9888,
+            .ReleaseFast => 9840,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 7168,
-            .ReleaseFast => 7120,
+            .Debug => 7184,
+            .ReleaseFast => 7136,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 7152,
-            .ReleaseFast => 7104,
+            .Debug => 7168,
+            .ReleaseFast => 7120,
             else => unreachable,
         },
         else => unreachable,
@@ -14999,20 +15001,20 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3072,
-        .ReleaseFast => 3056,
+        .Debug => 3088,
+        .ReleaseFast => 3072,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9888,
-            .ReleaseFast => 9840,
+            .Debug => 9904,
+            .ReleaseFast => 9856,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9872,
-            .ReleaseFast => 9824,
+            .Debug => 9888,
+            .ReleaseFast => 9840,
             else => unreachable,
         },
         else => unreachable,

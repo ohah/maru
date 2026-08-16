@@ -61,6 +61,11 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/generation_attachment.zig",
     );
     defer allocator.free(attachment);
+    const remote_attachment = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_attachment.zig",
+    );
+    defer allocator.free(remote_attachment);
     const client_slot = try readSource(
         allocator,
         "src/platform/macos/session_host/client_slot.zig",
@@ -76,6 +81,26 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
+    const server = try readSource(
+        allocator,
+        "src/platform/macos/session_host/server.zig",
+    );
+    defer allocator.free(server);
+    const snapshot = try readSource(
+        allocator,
+        "src/platform/macos/session_host/screen_snapshot.zig",
+    );
+    defer allocator.free(snapshot);
+    const assembler = try readSource(
+        allocator,
+        "src/platform/macos/session_host/screen_assembler.zig",
+    );
+    defer allocator.free(assembler);
+    const runtime_manager = try readSource(
+        allocator,
+        "src/platform/macos/session_host/runtime_manager.zig",
+    );
+    defer allocator.free(runtime_manager);
     const runtime_product = runtime[0..std.mem.indexOf(u8, runtime, "const testing = std.testing;").?];
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
@@ -138,11 +163,26 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "self.generation_owner.prepareAfterClientReplacement("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "initObserverReconnectCandidate,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR4a "));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "test \"CR4a frontier는"));
+    try std.testing.expectEqual(@as(usize, 1), count(snapshot, "test \"CR4a frontier는"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "next_screen_sequence: ?u64 = null"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "sub.screen_sequence = sequence"));
+    try std.testing.expectEqual(@as(usize, 1), count(assembler, "admitted_sequence != expected_sequence"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_attachment, "prepared_screen.prepareRecoveryFrontierFrom(screen)"));
+    try std.testing.expectEqual(@as(usize, 1), count(assembler, "pub fn prepareRecoveryFrontierFrom("));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "base, next_sequence, self.allocator"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "screenPtr().?.requireSequencedDeltas()"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_manager, ".{ .generation = generation, .sequence = sequence }"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_manager, "base: []const u8, sequence: u64,"));
+    try std.testing.expectEqual(@as(usize, 1), count(snapshot, ".{ .generation = 7, .sequence = 1 }"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "runtime.prepareObserverReconnectCandidate("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn publishCr4aReplacementPrerequisite("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "candidate_adapter == &adapter"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "\"test-session-host-cr4a\""));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 3), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "prepareObserverReconnectCandidate(", &.{

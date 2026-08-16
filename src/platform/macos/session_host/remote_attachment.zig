@@ -441,6 +441,7 @@ pub const RemoteAttachment = struct {
             };
             var prepared_screen_live = true;
             defer if (prepared_screen_live) prepared_screen.deinit();
+            prepared_screen.prepareRecoveryFrontierFrom(screen);
             prepared_screen.applySnapshot(batch.bytes, io) catch |err| {
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
                     .local_resource_exhausted

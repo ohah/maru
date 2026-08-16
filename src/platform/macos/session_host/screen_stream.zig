@@ -14,8 +14,9 @@
 //!   codec_version:u16=2(current; capability-tagged frozen N-1은 1) | record_kind:u16 |
 //!   generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32
 //!   = 2 + 2 + 8 + 8 + 4 + 4 = 28.
-//! snapshot record는 `sequence=0`과 한 generation, delta record는 body에 `base_generation`을 더하고 sequence를 1씩
-//! 올린다(§12). chunk_index는 0부터 연속이고 마지막 chunk의 count가 맞아야 상위가 publish한다.
+//! initial attach snapshot record는 `sequence=0`과 한 generation을 갖는다. 같은 stream의 resync/fallback snapshot과
+//! delta는 직전 committed frontier exact +1이며, delta body는 `base_generation`을 더한다(§12). chunk_index는 0부터
+//! 연속이고 마지막 chunk의 count가 맞아야 상위가 publish한다.
 
 const std = @import("std");
 

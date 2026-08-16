@@ -1151,8 +1151,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    process/subscription identity와 GUI-local staged identity를 섞지 않는다. 먼저 host issuer는 negotiated capability, correlated pending row,
    core-lock projection receipt와 screen frames+barrier의 단일 queue transaction을 닫는다. 현재 host frontier slice는
    projection 발급, barrier-last 실제 queue admission, admission 뒤 base/frontier/pending 원자 commit과 copied/process/Client-address/ConnectionKey/thread drift
-   mutation 0, 실제 global queue-pressure의 prefix/base/frontier/pending mutation 0, no-change barrier-only exact 1과 preparation allocation fail-index를 제품 경로에서 닫았다. 다음 client consumer는
-   `GenerationAttachment` demux 아래 bounded inbox, 하나의 absolute deadline/cap과 final-address staged receipt를 닫는다.
+   mutation 0, 실제 global queue-pressure의 prefix/base/frontier/pending mutation 0, no-change barrier-only exact 1과 preparation allocation fail-index를 제품 경로에서 닫았다. client consumer의 첫 slice는
+   negotiated capability를 `Client` hello provenance에 저장하고, RPC/screen과 섞인 fixed barrier를 기존 multi-stream demux 아래 bounded connection-local inbox에 보존하며 하나의 absolute deadline으로 exact identity를 소비한다. sibling screen/barrier는 canonical inbox에 남고 capability·identity drift는 receipt 전에 connection을 fail-close한다. 이어지는 slice가
+   `GenerationAttachment` 소유의 delta apply cap과 final-address staged receipt를 닫는다.
    host issuer만 green인 상태는 caught-up 또는 CR4a 완료가 아니다. barrier target은 server가 subscription을 재조회하거나
    encoded screen record를 파싱해 만들지 않고 `RuntimeManager`의 immutable projection receipt만 전달한다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,

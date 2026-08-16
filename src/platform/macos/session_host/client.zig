@@ -34,6 +34,7 @@ const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_poison = @import("client_poison.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_source_transcript = @import("client_source_transcript.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
@@ -1029,6 +1030,14 @@ pub const StreamBatch = struct {
     }
 };
 
+/// RPC response와 sibling screen batch 사이에 도착한 CR4 catch-up barrier의 canonical
+/// connection-local inbox row다. Wire payload owner는 decode 직후 회수하고 pointer-free
+/// identity/frontier만 보존한다.
+pub const BufferedCatchupBarrier = struct {
+    stream_id: u64,
+    barrier: catchup_barrier_contract.Barrier,
+};
+
 const GenerationBatchAccounting = struct {
     ledger: ?*generation_batch_registry.AccountingLedger = null,
     last_transfer_id: u64 = 0,
@@ -1838,7 +1847,7 @@ pub const max_ended_purge_scratch_bytes: usize = 512 * 1024;
 pub const ended_purge_scratch_bytes_v1: usize = 462_344;
 const max_external_owner_range_count: usize = 4 + 1 +
     protocol.max_client_screen_items + protocol.max_client_screen_items + max_pending_event_count +
-    client_external_mode.max_tx_frames + 3;
+    client_external_mode.max_tx_frames + 4;
 comptime {
     if (max_external_owner_range_count > std.math.maxInt(u16))
         @compileError("external owner range index exceeds u16");
@@ -1987,6 +1996,7 @@ const ExternalAdoptionSnapshot = struct {
     host_manifest_v1: bool,
     host_exec_upgrade_v1: bool,
     runtime_inventory_v1: bool,
+    runtime_catchup_barrier_v1: bool,
     admin_one_shot_v1: bool,
     admin_runtime_end_v1: bool,
     screen_viewport_scrolled_v1: bool,
@@ -2014,6 +2024,7 @@ const ExternalAdoptionSnapshot = struct {
     pending_event_bytes: usize,
     pending_batches: ExternalArrayDescriptor,
     pending_batch_bytes: usize,
+    pending_catchup_barriers: ExternalArrayDescriptor,
     partial: ?ExternalPartialDescriptor,
     external_saved_flags: c_int,
     external_tx: ExternalArrayDescriptor,
@@ -2313,6 +2324,7 @@ pub const ExternalRecoveryDiscardSeal = struct {
     batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
     stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
     events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
+    catchup_barriers: std.ArrayListUnmanaged(BufferedCatchupBarrier) = .empty,
     partial: ?ExternalAdoptionTakenPartial = null,
     pending_batch_bytes: usize = 0,
     pending_stream_bytes: usize = 0,
@@ -3087,7 +3099,7 @@ fn externalRangeForList(
 }
 
 fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usize {
-    var count: usize = 6;
+    var count: usize = 7;
     const tx_count = switch (self.io_mode) {
         .blocking => 0,
         .external => |state| state.external_tx.items.len,
@@ -3107,7 +3119,7 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
 
 const max_external_owner_range_scratch_bytes =
     max_external_owner_range_count * @sizeOf(ExternalRange);
-const max_external_outer_owner_range_count = 7;
+const max_external_outer_owner_range_count = 8;
 
 pub const ExternalSourceOwnerRangeScratch = struct {
     ranges: [max_external_owner_range_count]ExternalRange = undefined,
@@ -3143,6 +3155,7 @@ fn fillExternalOuterOwnerRanges(
         try externalRangeForList(self.pending_batches, StreamBatch),
         try externalRangeForList(self.pending_stream, framing.Frame),
         try externalRangeForList(self.pending_events, BufferedEvent),
+        try externalRangeForList(self.pending_catchup_barriers, BufferedCatchupBarrier),
         if (self.pending_outbound) |pending|
             try externalRangeForSlice(pending.frame, pending.frame.len)
         else
@@ -3341,11 +3354,12 @@ fn validateExternalRangeSet(
 
 /// Allocation/callback-free c3 source proof. The first sort validates every outer backing before
 /// any list element is read; only then may the second pass enumerate nested payload owners.
-fn validateExternalSourceOwnerRanges(
+fn validateExternalSourceOwnerRangesWithPolicy(
     self: *const Client,
     scratch: *ExternalSourceOwnerRangeScratch,
+    catchup_barrier_policy: ExternalCatchupBarrierPolicy,
 ) ExternalAdoptionInspectError!ExternalSourceOwnerRangeProofStats {
-    try validateExternalAdoptionStructure(self);
+    try validateExternalAdoptionStructure(self, catchup_barrier_policy);
     const client_range = externalRangeOfValue(self);
     const scratch_range = externalRangeOfValue(scratch);
     if (externalRangesOverlap(scratch_range, client_range)) return error.InvalidAlias;
@@ -3379,6 +3393,13 @@ fn validateExternalSourceOwnerRanges(
         .total_ranges = total_count,
         .comparisons = comparisons,
     };
+}
+
+fn validateExternalSourceOwnerRanges(
+    self: *const Client,
+    scratch: *ExternalSourceOwnerRangeScratch,
+) ExternalAdoptionInspectError!ExternalSourceOwnerRangeProofStats {
+    return validateExternalSourceOwnerRangesWithPolicy(self, scratch, .require_empty);
 }
 
 pub const ExternalSourceSealError = client_source_transcript.Error || error{
@@ -3548,6 +3569,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.host_manifest_v1);
         writer.writeBool(client.host_exec_upgrade_v1);
         writer.writeBool(client.runtime_inventory_v1);
+        writer.writeBool(client.runtime_catchup_barrier_v1);
         writer.writeBool(client.attachment_capabilities.peer_attach_generation);
         writer.writeBool(client.attachment_capabilities.negotiated_controller_transfer);
         writer.writeTag(@intFromEnum(client.metadata_support));
@@ -3863,7 +3885,12 @@ fn encodeExternalSourceWithEncodingForTest(
     scratch: *ExternalSourceOwnerRangeScratch,
     encoding: ExternalSourceSealEncoding,
 ) ExternalSourceSealError!ClientSourceSeal {
-    validateExternalAdoptionSourceEligibility(client, target_stream, .allow_zero) catch |err|
+    validateExternalAdoptionSourceEligibility(
+        client,
+        target_stream,
+        .allow_zero,
+        .require_empty,
+    ) catch |err|
         return narrowExternalSourceSealError(err);
     if (client.event_parse_observer != null or client.attach_instance_id == 0)
         return error.InvalidClientState;
@@ -4156,6 +4183,7 @@ fn foldExternalAdoptionSourceWithEncoding(
         client,
         input.identity.stream_id,
         .allow_zero,
+        .require_empty,
     ) catch |err| return narrowExternalSourceSealError(err);
     if (client.event_parse_observer != null or client.attach_instance_id == 0)
         return error.InvalidClientState;
@@ -4625,6 +4653,26 @@ fn writeProjectionEvents(
         writer.writeUsize(event.payload.len);
         writer.writeBool(event.preflight != null);
         writer.writeBool(event.admission_seal != null);
+    }
+}
+
+fn writeProjectionCatchupBarriers(
+    writer: *owner_seal.Writer,
+    barriers: std.ArrayListUnmanaged(BufferedCatchupBarrier),
+) void {
+    writer.writeUsize(if (barriers.capacity == 0) 0 else @intFromPtr(barriers.items.ptr));
+    writer.writeUsize(barriers.items.len);
+    writer.writeUsize(barriers.capacity);
+    for (barriers.items) |buffered| {
+        writer.writeU64(buffered.stream_id);
+        writer.writeU64(buffered.barrier.identity.subscription.value);
+        writer.writeU128(buffered.barrier.identity.runtime_id);
+        writer.writeU64(buffered.barrier.identity.connection.monotonic_id);
+        writer.writeU64(buffered.barrier.identity.connection.slot_generation);
+        writer.writeU128(buffered.barrier.identity.host_id);
+        writer.writeU128(buffered.barrier.identity.request_nonce);
+        writer.writeU64(buffered.barrier.target.generation);
+        writer.writeU64(buffered.barrier.target.sequence);
     }
 }
 
@@ -5120,15 +5168,22 @@ const ExternalRequestIdPolicy = enum {
     allow_zero,
 };
 
+const ExternalCatchupBarrierPolicy = enum {
+    require_empty,
+    allow_bounded,
+};
+
 const ExternalAdoptionValidationOptions = struct {
     owner_aliases: enum { skip, validate } = .skip,
     request_id: ExternalRequestIdPolicy = .require_nonzero,
+    catchup_barriers: ExternalCatchupBarrierPolicy = .require_empty,
 };
 
 fn validateExternalAdoptionSourceEligibility(
     self: *const Client,
     target_stream: u64,
     request_id_policy: ExternalRequestIdPolicy,
+    catchup_barrier_policy: ExternalCatchupBarrierPolicy,
 ) ExternalAdoptionInspectError!void {
     if (target_stream == 0) return error.InvalidStream;
     if (self.ownership != .external_pump or self.unusable or self.fd < 0)
@@ -5142,7 +5197,7 @@ fn validateExternalAdoptionSourceEligibility(
     if (!compatibilityProfilesEqual(selected, expected) or
         self.screen_codec_version != selected.screen_codec_version)
         return error.InvalidCompatibilityProvenance;
-    try validateExternalAdoptionStructure(self);
+    try validateExternalAdoptionStructure(self, catchup_barrier_policy);
     if (!std.meta.eql(self.parser.allocator, self.allocator) or
         self.parser.expected_major != self.wire_major or
         self.parser.head > self.parser.buf.items.len)
@@ -5299,8 +5354,14 @@ fn preflightExternalAdoptionSource(
     self: *const Client,
     target_stream: u64,
     request_id_policy: ExternalRequestIdPolicy,
+    catchup_barrier_policy: ExternalCatchupBarrierPolicy,
 ) ExternalAdoptionInspectError!ExternalValidatedAdoption {
-    try validateExternalAdoptionSourceEligibility(self, target_stream, request_id_policy);
+    try validateExternalAdoptionSourceEligibility(
+        self,
+        target_stream,
+        request_id_policy,
+        catchup_barrier_policy,
+    );
     return validateExternalAdoptionSourceQueues(self, target_stream);
 }
 
@@ -5310,20 +5371,38 @@ fn validateExternalAdoptionClient(
     options: ExternalAdoptionValidationOptions,
 ) ExternalAdoptionInspectError!ExternalValidatedAdoption {
     if (options.owner_aliases == .skip)
-        return preflightExternalAdoptionSource(self, target_stream, options.request_id);
-    try validateExternalAdoptionSourceEligibility(self, target_stream, options.request_id);
+        return preflightExternalAdoptionSource(
+            self,
+            target_stream,
+            options.request_id,
+            options.catchup_barriers,
+        );
+    try validateExternalAdoptionSourceEligibility(
+        self,
+        target_stream,
+        options.request_id,
+        options.catchup_barriers,
+    );
     try validateExternalOwnerRanges(self);
     return validateExternalAdoptionSourceQueues(self, target_stream);
 }
 
-fn validateExternalAdoptionStructure(self: *const Client) ExternalAdoptionInspectError!void {
+fn validateExternalAdoptionStructure(
+    self: *const Client,
+    catchup_barrier_policy: ExternalCatchupBarrierPolicy,
+) ExternalAdoptionInspectError!void {
     if (self.parser.buf.items.len > self.parser.buf.capacity or
         self.pending_batches.items.len > self.pending_batches.capacity or
         self.pending_stream.items.len > self.pending_stream.capacity or
         self.pending_events.items.len > self.pending_events.capacity or
+        self.pending_catchup_barriers.items.len > self.pending_catchup_barriers.capacity or
         self.pending_batches.items.len > protocol.max_client_screen_items or
         self.pending_stream.items.len > protocol.max_client_screen_items or
-        self.pending_events.items.len > max_pending_event_count)
+        self.pending_events.items.len > max_pending_event_count or
+        self.pending_catchup_barriers.items.len > protocol.max_client_screen_items or
+        (catchup_barrier_policy == .require_empty and
+            (self.pending_catchup_barriers.items.len != 0 or
+                self.pending_catchup_barriers.capacity != 0)))
         return error.InvalidClientState;
     if (self.partial_batch) |partial|
         if (partial.bytes.items.len > partial.bytes.capacity)
@@ -5350,6 +5429,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .host_manifest_v1 = self.host_manifest_v1,
         .host_exec_upgrade_v1 = self.host_exec_upgrade_v1,
         .runtime_inventory_v1 = self.runtime_inventory_v1,
+        .runtime_catchup_barrier_v1 = self.runtime_catchup_barrier_v1,
         .admin_one_shot_v1 = self.admin_one_shot_v1,
         .admin_runtime_end_v1 = self.admin_runtime_end_v1,
         .screen_viewport_scrolled_v1 = self.screen_viewport_scrolled_v1,
@@ -5377,6 +5457,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .pending_event_bytes = self.pending_event_bytes,
         .pending_batches = externalArrayDescriptor(self.pending_batches),
         .pending_batch_bytes = self.pending_batch_bytes,
+        .pending_catchup_barriers = externalArrayDescriptor(self.pending_catchup_barriers),
         .partial = if (self.partial_batch) |partial| .{
             .stream_id = partial.stream_id,
             .is_snapshot = partial.is_snapshot,
@@ -6525,6 +6606,9 @@ pub const Client = struct {
     host_manifest_v1: bool = false,
     host_exec_upgrade_v1: bool = false,
     runtime_inventory_v1: bool = false,
+    /// Host와 fixed binary catch-up barrier v1을 명시 협상했는가. 이 bit가 없으면
+    /// barrier frame을 정상 out-of-band traffic으로 받아들이지 않는다.
+    runtime_catchup_barrier_v1: bool = false,
     /// Attached stream의 controller status/takeover/release generation-CAS protocol을 양쪽이 협상했는가.
     /// public attach는 false인 same-major 구 host에서 observer만 허용하고 takeover method를 보내지 않는다.
     /// Peer reply schema and our revoke/fencing promise are different facts. Keep them in one
@@ -6612,6 +6696,9 @@ pub const Client = struct {
     // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
     pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
     pending_batch_bytes: usize = 0,
+    /// Catch-up barrier는 screen batch와 같은 socket을 공유하지만 screen record가 아니다.
+    /// 기존 demux가 sibling barrier를 잃지 않도록 connection-local bounded inbox가 소유한다.
+    pending_catchup_barriers: std.ArrayListUnmanaged(BufferedCatchupBarrier) = .empty,
     // Generation GUI로 넘긴 payload도 실제 free callback이 반환할 때까지 같은 18 MiB/4,096 resident budget에 남는다.
     generation_batch_accounting: GenerationBatchAccounting = .{},
     partial_batch: ?PartialBatch = null,
@@ -6937,6 +7024,8 @@ pub const Client = struct {
         self.host_manifest_v1 = manifest_capable;
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.runtime_inventory_v1 = inventory_capable;
+        self.runtime_catchup_barrier_v1 =
+            payloadHasCapability(ack.payload, catchup_barrier_contract.capability);
         // Capability request is a promise that the selected profile consumes revoke and fences
         // queued mutation; unsolicited host support alone never enables transfer.
         self.attachment_capabilities.peer_attach_generation =
@@ -7079,6 +7168,7 @@ pub const Client = struct {
         self.pending_events.deinit(self.allocator);
         for (self.pending_batches.items) |b| b.deinit(); // 미소비 demux 배치 회수(§9 멀티 runtime).
         self.pending_batches.deinit(self.allocator);
+        self.pending_catchup_barriers.deinit(self.allocator);
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
     }
@@ -7402,6 +7492,7 @@ pub const Client = struct {
         writeProjectionBatches(&writer, self.pending_batches);
         writeProjectionFrames(&writer, self.pending_stream);
         writeProjectionEvents(&writer, self.pending_events);
+        writeProjectionCatchupBarriers(&writer, self.pending_catchup_barriers);
         writer.writeUsize(self.pending_batch_bytes);
         const generation_ledger = self.generation_batch_accounting.ledger;
         writer.writeUsize(if (generation_ledger) |ledger| ledger.item_count else 0);
@@ -7489,15 +7580,17 @@ pub const Client = struct {
                 externalRangeOfValue(cleanup_scratch),
             ))
             return error.InvalidAlias;
-        try self.preflightExternalAdoptionDestinationWithScratch(
+        try self.preflightExternalAdoptionDestinationWithScratchPolicy(
             cleanup_scratch,
             @sizeOf(ExternalAdoptionCleanupScratch),
             source_scratch,
+            .allow_bounded,
         );
-        try self.preflightExternalAdoptionDestinationWithScratch(
+        try self.preflightExternalAdoptionDestinationWithScratchPolicy(
             out,
             @sizeOf(ExternalRecoveryDiscardSeal),
             source_scratch,
+            .allow_bounded,
         );
         _ = validateExternalAdoptionClient(
             self,
@@ -7505,6 +7598,7 @@ pub const Client = struct {
             .{
                 .owner_aliases = .skip,
                 .request_id = .allow_zero,
+                .catchup_barriers = .allow_bounded,
             },
         ) catch |err| return narrowExternalSourceSealError(err);
         if (self.pending_batches.items.len > cleanup_scratch.batches.len or
@@ -7549,6 +7643,7 @@ pub const Client = struct {
             .batches = self.pending_batches,
             .stream = self.pending_stream,
             .events = self.pending_events,
+            .catchup_barriers = self.pending_catchup_barriers,
             .partial = if (self.partial_batch) |partial| .{
                 .stream_id = partial.stream_id,
                 .is_snapshot = partial.is_snapshot,
@@ -7576,6 +7671,7 @@ pub const Client = struct {
             !std.meta.eql(seal.batches, self.pending_batches) or
             !std.meta.eql(seal.stream, self.pending_stream) or
             !std.meta.eql(seal.events, self.pending_events) or
+            !std.meta.eql(seal.catchup_barriers, self.pending_catchup_barriers) or
             seal.pending_batch_bytes != self.pending_batch_bytes or
             seal.pending_stream_bytes != self.pending_stream_bytes or
             seal.pending_event_bytes != self.pending_event_bytes or
@@ -7644,6 +7740,7 @@ pub const Client = struct {
         var batches = seal.batches;
         var stream = seal.stream;
         var events = seal.events;
+        var catchup_barriers = seal.catchup_barriers;
         const partial = frozen.partial;
         const batch_count = batches.items.len;
         const stream_count = stream.items.len;
@@ -7652,6 +7749,7 @@ pub const Client = struct {
         self.pending_batches = .empty;
         self.pending_stream = .empty;
         self.pending_events = .empty;
+        self.pending_catchup_barriers = .empty;
         self.partial_batch = null;
         self.pending_batch_bytes = 0;
         self.pending_stream_bytes = 0;
@@ -7681,6 +7779,7 @@ pub const Client = struct {
         batches.deinit(allocator);
         stream.deinit(allocator);
         events.deinit(allocator);
+        catchup_barriers.deinit(allocator);
         cleanup_scratch.partial = null;
     }
 
@@ -8101,7 +8200,7 @@ pub const Client = struct {
         destination: *const anyopaque,
         destination_len: usize,
     ) ExternalAdoptionInspectError!void {
-        try validateExternalAdoptionStructure(self);
+        try validateExternalAdoptionStructure(self, .require_empty);
         _ = try validateExternalOwnerRangesAgainst(self, .{
             .start = @intFromPtr(destination),
             .len = destination_len,
@@ -8116,11 +8215,30 @@ pub const Client = struct {
         destination_len: usize,
         scratch: *ExternalSourceOwnerRangeScratch,
     ) ExternalSourceSealError!void {
+        return self.preflightExternalAdoptionDestinationWithScratchPolicy(
+            destination,
+            destination_len,
+            scratch,
+            .require_empty,
+        );
+    }
+
+    fn preflightExternalAdoptionDestinationWithScratchPolicy(
+        self: *const Client,
+        destination: *const anyopaque,
+        destination_len: usize,
+        scratch: *ExternalSourceOwnerRangeScratch,
+        catchup_barrier_policy: ExternalCatchupBarrierPolicy,
+    ) ExternalSourceSealError!void {
         const destination_range = (checkedExternalRange(
             @intFromPtr(destination),
             destination_len,
         ) catch |err| return narrowExternalSourceSealError(err)) orelse return;
-        const stats = validateExternalSourceOwnerRanges(self, scratch) catch |err|
+        const stats = validateExternalSourceOwnerRangesWithPolicy(
+            self,
+            scratch,
+            catchup_barrier_policy,
+        ) catch |err|
             return narrowExternalSourceSealError(err);
         if (externalRangesOverlap(externalRangeOfValue(self), destination_range))
             return error.InvalidAlias;
@@ -8204,7 +8322,7 @@ pub const Client = struct {
         // Validate every source descriptor before reading the caller-provided destination.
         // The destination may alias Client-owned bytes, and malformed list lengths must not
         // reach the range walker before the structural guard has proved them safe to iterate.
-        try validateExternalAdoptionStructure(self);
+        try validateExternalAdoptionStructure(self, .require_empty);
         if (externalRangesOverlap(
             externalRangeOfValue(self),
             externalRangeOfValue(out),
@@ -8353,7 +8471,7 @@ pub const Client = struct {
             plan.saved_self_address != @intFromPtr(plan) or
             plan.client_address != @intFromPtr(self))
             return false;
-        validateExternalAdoptionStructure(self) catch return false;
+        validateExternalAdoptionStructure(self, .require_empty) catch return false;
         const inventory = &(plan.inventory orelse return false);
         _ = validateExternalAdoptionClient(
             self,
@@ -10164,6 +10282,11 @@ pub const Client = struct {
             self.parser.restoreAllocatorAfterDrift(allocator);
             self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
         };
+        if (frame.header.kind == .screen_frontier_barrier) {
+            discardFramePayloadObservation(payload_observer, frame);
+            try self.bufferCatchupBarrierFrame(frame, allocator, execution_lease_held);
+            return true;
+        }
         if (frame.header.kind == .delta_chunk or frame.header.kind == .snapshot_chunk) {
             const manual_allocator_guard = expected_allocator != null and
                 self.operation_fence == null;
@@ -10231,6 +10354,47 @@ pub const Client = struct {
             return true;
         }
         return false;
+    }
+
+    fn bufferCatchupBarrierFrame(
+        self: *Client,
+        frame: framing.Frame,
+        allocator: std.mem.Allocator,
+        execution_lease_held: bool,
+    ) ClientError!void {
+        defer frame.deinit(allocator);
+        if (!self.runtime_catchup_barrier_v1 or frame.header.request_id != 0 or
+            frame.header.stream_id == 0 or frame.header.flags != 0 or
+            frame.payload.len != catchup_barrier_contract.payload_size)
+        {
+            self.poisonMutationIo(.peer_contract_violation, execution_lease_held);
+            return error.ProtocolError;
+        }
+        const fixed: *const [catchup_barrier_contract.payload_size]u8 =
+            @ptrCast(frame.payload.ptr);
+        const barrier = catchup_barrier_contract.Barrier.decode(fixed) catch {
+            self.poisonMutationIo(.frame_malformed, execution_lease_held);
+            return error.ProtocolError;
+        };
+        for (self.pending_catchup_barriers.items) |existing| {
+            if (existing.stream_id == frame.header.stream_id or
+                std.meta.eql(existing.barrier.identity, barrier.identity))
+            {
+                self.poisonMutationIo(.peer_contract_violation, execution_lease_held);
+                return error.ProtocolError;
+            }
+        }
+        if (self.pending_catchup_barriers.items.len >= protocol.max_client_screen_items) {
+            self.poisonMutationIo(.event_queue_overflow, execution_lease_held);
+            return error.EventQueueFull;
+        }
+        self.pending_catchup_barriers.append(self.allocator, .{
+            .stream_id = frame.header.stream_id,
+            .barrier = barrier,
+        }) catch {
+            self.poisonMutationIo(.local_resource_exhausted, execution_lease_held);
+            return error.OutOfMemory;
+        };
     }
 
     /// Drain only complete frames already resident in the parser; this never reads the socket.
@@ -11022,6 +11186,17 @@ pub const Client = struct {
             }
             var frame_live = true;
             defer if (frame_live) frame.deinit(allocator);
+            if (frame.header.kind == .screen_frontier_barrier) {
+                if (started) {
+                    self.poison(.peer_contract_violation);
+                    return error.ProtocolError;
+                }
+                try self.bufferCatchupBarrierFrame(frame, allocator, false);
+                frame_live = false;
+                // A barrier is a terminal marker for a catch-up owner, not an empty screen
+                // batch. Return to the typed consumer so it can validate the exact identity.
+                return null;
+            }
             if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) {
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
@@ -11130,6 +11305,114 @@ pub const Client = struct {
         }
     }
 
+    /// CR4 candidate가 요청한 exact barrier를 기존 multi-stream demux 아래에서 기다린다.
+    /// 선행 screen batch는 target/sibling 구분 없이 canonical pending batch inbox에 보존하며,
+    /// socket idle은 성공으로 바꾸지 않고 하나의 absolute deadline을 끝까지 소비한다.
+    pub fn readCatchupBarrierUntil(
+        self: *Client,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError!catchup_barrier_contract.Barrier {
+        return self.readCatchupBarrierUntilWithOps(
+            stream_id,
+            expected,
+            deadline,
+            client_deadline.posix_ops,
+        );
+    }
+
+    fn readCatchupBarrierUntilWithOps(
+        self: *Client,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError!catchup_barrier_contract.Barrier {
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (!self.runtime_catchup_barrier_v1) {
+            self.poison(.peer_contract_violation);
+            return error.ProtocolError;
+        }
+        if (stream_id == 0 or !expected.valid()) return error.ProtocolError;
+        const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
+            self.poisonWithOps(.local_invariant_violation, ops);
+            return error.ConnectionClosed;
+        };
+        const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
+            self.poisonWithOps(.local_invariant_violation, ops);
+            return error.ConnectionClosed;
+        }
+        const barrier = self.readCatchupBarrierWithIo(
+            stream_id,
+            expected,
+            deadline,
+            ops,
+        ) catch |err| {
+            if (self.fd >= 0 and !ops.set_flags(ops.context, self.fd, saved_flags)) {
+                self.poisonWithOps(.local_invariant_violation, ops);
+                return error.ConnectionClosed;
+            }
+            return err;
+        };
+        if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
+            self.poisonWithOps(.local_invariant_violation, ops);
+            return error.ConnectionClosed;
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.poisonWithOps(.read_timeout, ops);
+            return error.DeadlineExceeded;
+        }
+        return barrier;
+    }
+
+    fn readCatchupBarrierWithIo(
+        self: *Client,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError!catchup_barrier_contract.Barrier {
+        const io: StreamIo = .{ .deadline = .{
+            .absolute = deadline,
+            .ops = ops,
+        } };
+        while (true) {
+            for (self.pending_catchup_barriers.items, 0..) |buffered, index| {
+                if (buffered.stream_id != stream_id) continue;
+                if (!std.meta.eql(buffered.barrier.identity, expected)) {
+                    _ = self.pending_catchup_barriers.orderedRemove(index);
+                    self.poison(.peer_contract_violation);
+                    return error.ProtocolError;
+                }
+                if (deadlineExpired(io)) {
+                    self.poisonWithOps(.read_timeout, ops);
+                    return error.DeadlineExceeded;
+                }
+                const owned = self.pending_catchup_barriers.orderedRemove(index);
+                return owned.barrier;
+            }
+            const maybe_batch = self.readOneBatchWithIo(io, null, .public) catch |err| switch (err) {
+                error.CapacityExhausted,
+                error.DestinationOccupied,
+                error.IdentityExhausted,
+                error.InvalidDescriptor,
+                error.InvalidIdentity,
+                error.InvalidReservation,
+                error.InvalidState,
+                error.InvalidStream,
+                error.MovedOrCopied,
+                => unreachable,
+                else => |typed| return typed,
+            };
+            if (maybe_batch) |batch| try self.bufferPendingScreenBatch(batch);
+            // In deadline mode a true socket idle cannot return null: readSomeUntil either
+            // produces bytes or a typed timeout. Null here means a barrier was just buffered.
+        }
+    }
+
     /// `stream_id` 앞으로 버퍼된 demux 배치를 모두 버린다(runtime이 detach/remove될 때 그 runtime의 pump가 다신 안 도므로
     /// 잔여 배치가 영구히 쌓이지 않게 — RemoteRuntime.deinit/detachClientSide가 부른다). 없으면 no-op.
     pub fn dropBufferedStream(self: *Client, stream_id: u64) void {
@@ -11182,6 +11465,12 @@ pub const Client = struct {
                 const frame = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= frame.payload.len;
                 frame.deinit(event_allocator);
+            } else i += 1;
+        }
+        i = 0;
+        while (i < self.pending_catchup_barriers.items.len) {
+            if (self.pending_catchup_barriers.items[i].stream_id == stream_id) {
+                _ = self.pending_catchup_barriers.orderedRemove(i);
             } else i += 1;
         }
     }
@@ -11502,7 +11791,7 @@ pub const Client = struct {
             rawRangesOverlap(scratch_start, scratch_end, out_start, out_end))
             return error.InvalidAlias;
 
-        validateExternalAdoptionStructure(self) catch return error.InvalidSource;
+        validateExternalAdoptionStructure(self, .require_empty) catch return error.InvalidSource;
         if (!std.meta.eql(self.parser.allocator, self.allocator)) return error.InvalidSource;
         const outer_descriptors = [4]ExternalArrayDescriptor{
             externalArrayDescriptor(self.parser.buf),
@@ -11927,7 +12216,7 @@ pub const Client = struct {
             return error.InvalidOwner;
         if (!self.prepareDeinitGraph(true)) return error.InvalidState;
 
-        validateExternalAdoptionStructure(self) catch return error.Corrupt;
+        validateExternalAdoptionStructure(self, .require_empty) catch return error.Corrupt;
         if (!std.meta.eql(self.parser.allocator, self.allocator) or
             self.parser.head > self.parser.buf.items.len)
             return error.Corrupt;
@@ -14313,6 +14602,434 @@ pub const Client = struct {
     }
 };
 
+test "CR4a client demux는 sibling screen과 barrier를 보존하고 exact identity만 소비한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    client.runtime_catchup_barrier_v1 = true;
+    defer client.deinit();
+
+    const sibling_screen = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+        "sibling-screen",
+    );
+    defer allocator.free(sibling_screen);
+    try socket_server.writeAll(fds[1], sibling_screen);
+
+    const target_identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 11 },
+        .runtime_id = 12,
+        .connection = .{ .monotonic_id = 13, .slot_generation = 14 },
+        .host_id = 15,
+        .request_nonce = 16,
+    };
+    var sibling_identity = target_identity;
+    sibling_identity.subscription.value = 21;
+    sibling_identity.runtime_id = 22;
+    sibling_identity.request_nonce = 23;
+    const sibling_barrier: catchup_barrier_contract.Barrier = .{
+        .identity = sibling_identity,
+        .target = .{ .generation = 3, .sequence = 7 },
+    };
+    const target_barrier: catchup_barrier_contract.Barrier = .{
+        .identity = target_identity,
+        .target = .{ .generation = 4, .sequence = 8 },
+    };
+    inline for (.{
+        .{ @as(u64, 8), sibling_barrier },
+        .{ @as(u64, 7), target_barrier },
+    }) |entry| {
+        const payload = try entry[1].encode();
+        const wire_frame = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .screen_frontier_barrier, .stream_id = entry[0] },
+            &payload,
+        );
+        defer allocator.free(wire_frame);
+        try socket_server.writeAll(fds[1], wire_frame);
+    }
+
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    try std.testing.expectEqualDeep(
+        target_barrier,
+        try client.readCatchupBarrierUntil(7, target_identity, deadline),
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 9), client.pending_batches.items[0].stream_id);
+    try std.testing.expectEqualStrings("sibling-screen", client.pending_batches.items[0].bytes);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_catchup_barriers.items.len);
+    try std.testing.expectEqual(@as(u64, 8), client.pending_catchup_barriers.items[0].stream_id);
+    try std.testing.expectEqualDeep(
+        sibling_barrier,
+        try client.readCatchupBarrierUntil(8, sibling_identity, deadline),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
+}
+
+test "CR4a client demux는 capability와 identity drift를 barrier 소비 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 31 },
+        .runtime_id = 32,
+        .connection = .{ .monotonic_id = 33, .slot_generation = 34 },
+        .host_id = 35,
+        .request_nonce = 36,
+    };
+    const barrier: catchup_barrier_contract.Barrier = .{
+        .identity = identity,
+        .target = .{ .generation = 1, .sequence = 2 },
+    };
+    inline for (.{ false, true }) |capable| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var client = makeConnectedTestClient(allocator, fds[0]);
+        client.runtime_catchup_barrier_v1 = capable;
+        defer client.deinit();
+        const payload = try barrier.encode();
+        const wire_frame = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .screen_frontier_barrier, .stream_id = 7 },
+            &payload,
+        );
+        defer allocator.free(wire_frame);
+        try socket_server.writeAll(fds[1], wire_frame);
+        var expected = identity;
+        if (capable) expected.runtime_id += 1;
+        const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+        try std.testing.expectError(
+            error.ProtocolError,
+            client.readCatchupBarrierUntil(7, expected, deadline),
+        );
+        try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
+    }
+}
+
+test "CR4a client demux는 duplicate cap과 append OOM을 fail close한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const base_identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 51 },
+        .runtime_id = 52,
+        .connection = .{ .monotonic_id = 53, .slot_generation = 54 },
+        .host_id = 55,
+        .request_nonce = 56,
+    };
+
+    inline for (.{ false, true }) |same_stream| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        var client = makeConnectedTestClient(allocator, fds[0]);
+        client.runtime_catchup_barrier_v1 = true;
+        defer client.deinit();
+        try client.pending_catchup_barriers.append(allocator, .{
+            .stream_id = 7,
+            .barrier = .{
+                .identity = base_identity,
+                .target = .{ .generation = 1, .sequence = 2 },
+            },
+        });
+        var incoming_identity = base_identity;
+        if (same_stream) incoming_identity.request_nonce += 1;
+        const incoming: catchup_barrier_contract.Barrier = .{
+            .identity = incoming_identity,
+            .target = .{ .generation = 1, .sequence = 3 },
+        };
+        const incoming_payload = try incoming.encode();
+        const owned_payload = try allocator.dupe(u8, &incoming_payload);
+        try std.testing.expectError(
+            error.ProtocolError,
+            client.bufferCatchupBarrierFrame(.{
+                .header = .{
+                    .kind = .screen_frontier_barrier,
+                    .stream_id = if (same_stream) 7 else 8,
+                    .payload_len = catchup_barrier_contract.payload_size,
+                },
+                .payload = owned_payload,
+            }, allocator, false),
+        );
+        try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_catchup_barriers.items.len);
+    }
+
+    var cap_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &cap_fds),
+    );
+    defer _ = c.close(cap_fds[1]);
+    var cap_client = makeConnectedTestClient(allocator, cap_fds[0]);
+    cap_client.runtime_catchup_barrier_v1 = true;
+    defer cap_client.deinit();
+    try cap_client.pending_catchup_barriers.ensureTotalCapacityPrecise(
+        allocator,
+        protocol.max_client_screen_items,
+    );
+    for (0..protocol.max_client_screen_items) |index| {
+        var identity = base_identity;
+        identity.subscription.value += index;
+        identity.request_nonce += index;
+        cap_client.pending_catchup_barriers.appendAssumeCapacity(.{
+            .stream_id = index + 1,
+            .barrier = .{
+                .identity = identity,
+                .target = .{ .generation = 1, .sequence = index },
+            },
+        });
+    }
+    var cap_identity = base_identity;
+    cap_identity.subscription.value += protocol.max_client_screen_items;
+    cap_identity.request_nonce += protocol.max_client_screen_items;
+    const cap_payload = try (catchup_barrier_contract.Barrier{
+        .identity = cap_identity,
+        .target = .{ .generation = 1, .sequence = protocol.max_client_screen_items },
+    }).encode();
+    const cap_owned = try allocator.dupe(u8, &cap_payload);
+    try std.testing.expectError(
+        error.EventQueueFull,
+        cap_client.bufferCatchupBarrierFrame(.{
+            .header = .{
+                .kind = .screen_frontier_barrier,
+                .stream_id = protocol.max_client_screen_items + 1,
+                .payload_len = catchup_barrier_contract.payload_size,
+            },
+            .payload = cap_owned,
+        }, allocator, false),
+    );
+    try std.testing.expect(cap_client.unusable);
+    try std.testing.expectEqual(
+        protocol.max_client_screen_items,
+        cap_client.pending_catchup_barriers.items.len,
+    );
+
+    var oom_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &oom_fds),
+    );
+    defer _ = c.close(oom_fds[1]);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var oom_client = makeConnectedTestClient(failing.allocator(), oom_fds[0]);
+    oom_client.runtime_catchup_barrier_v1 = true;
+    defer oom_client.deinit();
+    const oom_payload = try (catchup_barrier_contract.Barrier{
+        .identity = base_identity,
+        .target = .{ .generation = 1, .sequence = 2 },
+    }).encode();
+    const oom_owned = try allocator.dupe(u8, &oom_payload);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        oom_client.bufferCatchupBarrierFrame(.{
+            .header = .{
+                .kind = .screen_frontier_barrier,
+                .stream_id = 7,
+                .payload_len = catchup_barrier_contract.payload_size,
+            },
+            .payload = oom_owned,
+        }, allocator, false),
+    );
+    try std.testing.expect(oom_client.unusable);
+    try std.testing.expectEqual(@as(usize, 0), oom_client.pending_catchup_barriers.items.len);
+}
+
+test "CR4a client demux는 socket flags를 success와 restore failure에서 exact 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 61 },
+        .runtime_id = 62,
+        .connection = .{ .monotonic_id = 63, .slot_generation = 64 },
+        .host_id = 65,
+        .request_nonce = 66,
+    };
+    const barrier: catchup_barrier_contract.Barrier = .{
+        .identity = identity,
+        .target = .{ .generation = 2, .sequence = 3 },
+    };
+    inline for (.{ false, true }) |fail_restore| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        var client = makeConnectedTestClient(allocator, fds[0]);
+        client.runtime_catchup_barrier_v1 = true;
+        defer client.deinit();
+        try client.pending_catchup_barriers.append(allocator, .{
+            .stream_id = 7,
+            .barrier = barrier,
+        });
+        const flags_before = c.fcntl(fds[0], c.F.GETFL, @as(c_int, 0));
+        try std.testing.expect(flags_before >= 0);
+        var fixture = ConnectedSocketFixture{
+            .fd = fds[0],
+            .clock_now_ns = 1,
+            .fail_restore_flags = fail_restore,
+        };
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+            .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+            100,
+        );
+        if (fail_restore) {
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                client.readCatchupBarrierUntilWithOps(7, identity, deadline, fixture.ops()),
+            );
+            try std.testing.expect(client.unusable);
+            try std.testing.expectEqual(@as(usize, 1), fixture.close_calls);
+        } else {
+            try std.testing.expectEqualDeep(
+                barrier,
+                try client.readCatchupBarrierUntilWithOps(7, identity, deadline, fixture.ops()),
+            );
+            try std.testing.expectEqual(
+                flags_before,
+                c.fcntl(fds[0], c.F.GETFL, @as(c_int, 0)),
+            );
+            try std.testing.expect(!client.unusable);
+        }
+        try std.testing.expectEqual(@as(usize, 1), fixture.get_flags_calls);
+        try std.testing.expectEqual(@as(usize, 2), fixture.set_flags_calls);
+    }
+}
+
+test "CR4a client demux는 blocking RPC 중 barrier를 canonical inbox에 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    client.runtime_catchup_barrier_v1 = true;
+    defer client.deinit();
+    const identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 41 },
+        .runtime_id = 42,
+        .connection = .{ .monotonic_id = 43, .slot_generation = 44 },
+        .host_id = 45,
+        .request_nonce = 46,
+    };
+    const barrier: catchup_barrier_contract.Barrier = .{
+        .identity = identity,
+        .target = .{ .generation = 5, .sequence = 9 },
+    };
+    const payload = try barrier.encode();
+    const barrier_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .screen_frontier_barrier, .stream_id = 7 },
+        &payload,
+    );
+    defer allocator.free(barrier_wire);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response_wire);
+    try socket_server.writeAll(fds[1], barrier_wire);
+    try socket_server.writeAll(fds[1], response_wire);
+    const response = try client.call("host.info", "{}");
+    defer allocator.free(response);
+    try std.testing.expectEqualStrings("{\"result\":{}}", response);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_catchup_barriers.items.len);
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    try std.testing.expectEqualDeep(
+        barrier,
+        try client.readCatchupBarrierUntil(7, identity, deadline),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
+}
+
+test "CR4a client demux는 partial barrier를 단일 absolute deadline에서 fail close한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    client.runtime_catchup_barrier_v1 = true;
+    defer client.deinit();
+    const identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 41 },
+        .runtime_id = 42,
+        .connection = .{ .monotonic_id = 43, .slot_generation = 44 },
+        .host_id = 45,
+        .request_nonce = 46,
+    };
+    const barrier: catchup_barrier_contract.Barrier = .{
+        .identity = identity,
+        .target = .{ .generation = 5, .sequence = 9 },
+    };
+    const payload = try barrier.encode();
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .screen_frontier_barrier, .stream_id = 7 },
+        &payload,
+    );
+    defer allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire[0..1]);
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        std.testing.io,
+        10 * std.time.ns_per_ms,
+    );
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        client.readCatchupBarrierUntil(7, identity, deadline),
+    );
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
+
+    var buffered_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &buffered_fds),
+    );
+    defer _ = c.close(buffered_fds[1]);
+    var buffered_client = makeConnectedTestClient(allocator, buffered_fds[0]);
+    buffered_client.runtime_catchup_barrier_v1 = true;
+    defer buffered_client.deinit();
+    try buffered_client.pending_catchup_barriers.append(allocator, .{
+        .stream_id = 7,
+        .barrier = barrier,
+    });
+    const ClockState = struct {
+        now_ns: i128,
+
+        fn now(context: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.now_ns;
+        }
+    };
+    var clock = ClockState{ .now_ns = 20 };
+    const expired = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &clock, .now_ns = ClockState.now },
+        20,
+    );
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        buffered_client.readCatchupBarrierUntil(7, identity, expired),
+    );
+    try std.testing.expect(buffered_client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), buffered_client.fd);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        buffered_client.readCatchupBarrierUntil(7, identity, expired),
+    );
+}
+
 test "shared connection terminalize는 Client graph를 보존하고 fd와 pending outbound만 정리한다" {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]c_int = undefined;
@@ -14351,6 +15068,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "host_manifest_v1",
     "host_exec_upgrade_v1",
     "runtime_inventory_v1",
+    "runtime_catchup_barrier_v1",
     "attachment_capabilities",
     "metadata_support",
     "event_parse_observer",
@@ -14383,6 +15101,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "pending_event_bytes",
     "pending_batches",
     "pending_batch_bytes",
+    "pending_catchup_barriers",
     "generation_batch_accounting",
     "partial_batch",
     "pending_outbound",
@@ -19434,7 +20153,7 @@ fn buildHelloMajorFeatures(
         "";
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
         .{ wire_major, wire_major, client_kind, transfer_capability },
     );
 }
@@ -21393,11 +22112,33 @@ test "external recovery discard freezes queues and preserves transport owners" {
         .bytes = partial_bytes,
         .chunk_count = 1,
     };
+    try client.pending_catchup_barriers.append(allocator, .{
+        .stream_id = 7,
+        .barrier = .{
+            .identity = .{
+                .subscription = .{ .value = 41 },
+                .runtime_id = 42,
+                .connection = .{ .monotonic_id = 43, .slot_generation = 44 },
+                .host_id = 45,
+                .request_nonce = 46,
+            },
+            .target = .{ .generation = 0, .sequence = 9 },
+        },
+    });
 
     const fd_before = client.fd;
     const parser_before = client.parser.buf.items.ptr;
     var cleanup_scratch: ExternalAdoptionCleanupScratch = undefined;
     var source_scratch: ExternalSourceOwnerRangeScratch = .{};
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.preflightExternalAdoptionDestinationWithScratchPolicy(
+            @ptrCast(client.pending_catchup_barriers.items.ptr),
+            1,
+            &source_scratch,
+            .allow_bounded,
+        ),
+    );
     var seal: ExternalRecoveryDiscardSeal = .{};
     try client.prepareExternalRecoveryDiscard(
         7,
@@ -21427,6 +22168,7 @@ test "external recovery discard freezes queues and preserves transport owners" {
     try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.capacity);
     try std.testing.expect(client.partial_batch == null);
     try std.testing.expectEqual(@as(usize, 0), client.pending_batch_bytes);
     try std.testing.expectEqual(@as(usize, 0), client.pending_stream_bytes);
@@ -21573,16 +22315,21 @@ test "external adoption source preflight is allocation-free and scans past raw r
     try std.testing.expectError(error.InvalidRequestId, client.previewExternalAdoption(7));
     try std.testing.expectError(
         error.InvalidRequestId,
-        preflightExternalAdoptionSource(&client, 7, .require_nonzero),
+        preflightExternalAdoptionSource(&client, 7, .require_nonzero, .require_empty),
     );
-    const validated = try preflightExternalAdoptionSource(&client, 7, .allow_zero);
+    const validated = try preflightExternalAdoptionSource(
+        &client,
+        7,
+        .allow_zero,
+        .require_empty,
+    );
     try std.testing.expectEqual(@as(usize, 0), validated.screen_source_count);
     try std.testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&client)));
 
     client.pending_event_bytes = 1;
     try std.testing.expectError(
         error.InvalidCounter,
-        preflightExternalAdoptionSource(&client, 7, .allow_zero),
+        preflightExternalAdoptionSource(&client, 7, .allow_zero, .require_empty),
     );
     client.pending_event_bytes = 0;
 
@@ -21598,7 +22345,7 @@ test "external adoption source preflight is allocation-free and scans past raw r
     client.pending_event_bytes = malformed_payload.len;
     try std.testing.expectError(
         error.InvalidHeader,
-        preflightExternalAdoptionSource(&client, 7, .allow_zero),
+        preflightExternalAdoptionSource(&client, 7, .allow_zero, .require_empty),
     );
     client.pending_events.items[0].header.kind = .event;
 
@@ -21612,7 +22359,7 @@ test "external adoption source preflight is allocation-free and scans past raw r
         client.allocator = original_allocator;
         client.parser.allocator = original_parser_allocator;
     }
-    _ = try preflightExternalAdoptionSource(&client, 7, .allow_zero);
+    _ = try preflightExternalAdoptionSource(&client, 7, .allow_zero, .require_empty);
     var source_scratch: ExternalSourceOwnerRangeScratch = .{};
     _ = try validateExternalSourceOwnerRanges(&client, &source_scratch);
     try std.testing.expect(!failing.has_induced_failure);
@@ -21894,6 +22641,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
             .payload = payload,
         });
     }
+    try client.pending_catchup_barriers.ensureTotalCapacityPrecise(allocator, 1);
 
     switch (client.io_mode) {
         .blocking => return error.TestUnexpectedResult,
@@ -21918,7 +22666,11 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     const comparisons = try validateExternalOwnerRangesAgainst(&client, null);
     try std.testing.expect(comparisons <= range_count * 64);
     var source_scratch: ExternalSourceOwnerRangeScratch = .{};
-    const source_stats = try validateExternalSourceOwnerRanges(&client, &source_scratch);
+    const source_stats = try validateExternalSourceOwnerRangesWithPolicy(
+        &client,
+        &source_scratch,
+        .allow_bounded,
+    );
     try std.testing.expectEqual(range_count, source_stats.total_ranges);
     try std.testing.expectEqual(
         max_external_owner_range_count,
@@ -21929,7 +22681,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
             (source_stats.outer_ranges + source_stats.total_ranges) * 64,
     );
     try std.testing.expectEqual(
-        @as(usize, 148_608),
+        @as(usize, 148_624),
         max_external_owner_range_scratch_bytes,
     );
     var ended_scratch: EndedPurgeScratch = .{};
@@ -22059,8 +22811,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\xa1\x73\xbb\x77\xf8\xda\x6a\x77\x21\xc8\x4b\xa0\x0b\xb9\x36\x47" ++
-        "\xc0\xf1\x78\xe8\xc2\x94\x37\x07\xdd\x99\xd9\xe7\x2b\xd8\x28\x6c";
+        "\x9d\xaa\x91\x07\x0b\x03\x84\xf2\x98\x7f\x24\x8c\x6f\x70\xb2\x9f" ++
+        "\x57\xdc\xce\x78\x73\xb5\x60\x6b\xbb\xec\x79\x19\x08\x73\x43\x4b";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,

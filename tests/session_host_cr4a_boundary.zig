@@ -11,6 +11,26 @@ fn count(haystack: []const u8, needle: []const u8) usize {
     return total;
 }
 
+fn identifierByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+fn countIdentifier(haystack: []const u8, identifier: []const u8) usize {
+    var total: usize = 0;
+    var rest = haystack;
+    var consumed: usize = 0;
+    while (std.mem.indexOf(u8, rest, identifier)) |relative| {
+        const at = consumed + relative;
+        const end = at + identifier.len;
+        const left_ok = at == 0 or !identifierByte(haystack[at - 1]);
+        const right_ok = end == haystack.len or !identifierByte(haystack[end]);
+        if (left_ok and right_ok) total += 1;
+        consumed = end;
+        rest = haystack[consumed..];
+    }
+    return total;
+}
+
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     return std.Io.Dir.cwd().readFileAllocOptions(
         std.testing.io,
@@ -49,6 +69,33 @@ fn countProductSourcesExcept(
     return total;
 }
 
+fn countProductIdentifiersExcept(
+    allocator: std.mem.Allocator,
+    identifier: []const u8,
+    excluded: []const []const u8,
+) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        var skip = false;
+        for (excluded) |path| if (std.mem.eql(u8, entry.path, path)) {
+            skip = true;
+            break;
+        };
+        if (skip) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += countIdentifier(source, identifier);
+    }
+    return total;
+}
+
 test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     const allocator = std.testing.allocator;
     const contract = try readSource(
@@ -71,6 +118,11 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/client_slot.zig",
     );
     defer allocator.free(client_slot);
+    const client = try readSource(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(client);
     const cleanup_registry = try readSource(
         allocator,
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
@@ -217,6 +269,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=6"));
     try std.testing.expectEqual(@as(usize, 11), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
@@ -232,6 +285,21 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "MARU_CR4A_RESTORE_EXEC_ROLE"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "maru-cr4a-restore-parent-v1"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a host barrier frame"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a client demux는"));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "const catchup_barrier_contract = @import"));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn readCatchupBarrierUntil("));
+    try std.testing.expectEqual(@as(usize, 8), count(client, "readCatchupBarrierUntil("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "readCatchupBarrierUntil", &.{
+            "platform/macos/session_host/client.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(client, "pending_catchup_barriers: std.ArrayListUnmanaged(BufferedCatchupBarrier) = .empty"),
+    );
+    try std.testing.expectEqual(@as(usize, 6), count(client, "test \"CR4a client demux는"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const ScreenFrontier = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const CatchupIdentity = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Barrier = struct"));
@@ -247,6 +315,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
             "platform/macos/session_host/catchup_barrier_contract.zig",
             "platform/macos/session_host/server.zig",
             "platform/macos/session_host/connection_turn.zig",
+            "platform/macos/session_host/client.zig",
         }),
     );
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const capability ="));

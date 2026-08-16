@@ -1938,8 +1938,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   pending row, core-lock projection receipt, barrier-last single-batch admission을 요구한다. queue cap/OOM/rollback은 queued
   prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
   target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.
-  client prerequisite는 raw fd reader 0,
-  기존 generation demux를 통한 sibling stream 보존, target exact equality, duplicate/ABA/gap/partial/EOF/deadline/cap+1/OOM의
+  client prerequisite의 첫 slice는 raw fd reader 0과 negotiated capability, 기존 Client demux를 통한 sibling screen/barrier 보존, absolute deadline과 exact identity 소비를 제품 테스트로 고정한다. 이어지는 `GenerationAttachment` slice는
+  target exact equality, duplicate/ABA/gap/partial/EOF/deadline/cap+1/OOM의
   receipt 0 및 final ledger 0을 요구한다. 두 prerequisite와 actual `connectExistingHost` E2E 전에는 CR4a 완료로 세지 않는다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
   reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자

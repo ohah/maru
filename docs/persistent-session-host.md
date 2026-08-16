@@ -850,6 +850,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    뒤 bytes를 소비한 실패는 old graph로 rollback하지 않고 candidate와 새 Client를 fail-close해 다음 replacement 시도로
    넘긴다.
 
+   client consumer의 첫 제품 slice는 이 규칙 중 wire ownership을 먼저 닫는다. hello에서 협상한 capability를 immutable
+   `Client` provenance에 저장하고, blocking RPC나 sibling screen batch 사이에 도착한 fixed barrier를 raw fd 재독자 없이
+   기존 demux가 connection-local bounded inbox로 옮긴다. exact stream/identity를 기다리는 API는 하나의 absolute deadline을
+   재설정하지 않으며, target을 기다리는 동안 읽힌 sibling screen/barrier를 canonical inbox에 보존한다. capability 없는 frame,
+   duplicate 또는 same-stream identity drift는 staged receipt를 만들기 전에 connection을 fail-close한다. 이 단계는 barrier target과
+   assembler frontier의 일치나 delta cap을 아직 증명하지 않으며, 그 검증과 final-address staged receipt는
+   `GenerationAttachment` consumer가 이어서 소유한다.
+
    host issuer의 모든 public arm과 owner-turn commit은 subscription/registry/core mutex를 만지기 전에 current OS PID와
    ready process seal을 검증한다. prepared batch에는 `(OS PID, process nonce)`와 final owner address/incarnation/thread를
    봉인하며 fork mismatch는 lock 전 mutation 0으로 거부한다. 이 내부 seal은 client wire의 `host_id`와 역할이 다르다.

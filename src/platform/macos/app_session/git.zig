@@ -40,6 +40,11 @@ const scm_view = app_session_mod.scm_view;
 /// 띄우지 않는다. 이미 in-flight면 건너뛴다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다 — §3.5).
 pub fn refreshGitStatus(self: *AppSession) void {
     if (self.dock.view != .source_control) return;
+    // 목록을 다시 읽는 시점은 **비활성 저장소들의 머리 줄도** 다시 읽을 시점이다(P3d-③) — 그쪽은
+    // 감시 대상이 아니라 이 시점 말고는 갱신될 길이 없다. 지우지 않고 낡음 표시만 한다: 지우면 다시
+    // 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡인다.
+    scm_dock_ops.markRepoStatusStale(self);
+    if (self.git_inflight != 0) return;
     if (self.git_inflight != 0) return;
     if (self.scm_write_inflight != 0) return; // 위와 같은 이유(§6-1)
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;

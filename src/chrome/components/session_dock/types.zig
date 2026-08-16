@@ -46,8 +46,8 @@ pub const Provider = enum {
     }
 };
 
-/// Detail data is already redacted by the host worker.  The dock compares neither its text nor
-/// its provider identity; it only projects the immutable value for one selected card.
+/// 상세 데이터는 host worker가 이미 redaction을 끝냈다. dock은 그 텍스트도 provider identity도
+/// 비교하지 않고, 선택된 카드 하나의 불변 값을 투영하기만 한다.
 pub const DetailState = enum { loading, ready, stale, unavailable };
 pub const TurnRole = enum { user, assistant };
 
@@ -56,8 +56,8 @@ pub const Turn = struct {
     text: []const u8,
 };
 
-/// Only the card whose stable archive identity equals `Props.expanded_identity` may carry this
-/// value.  `Card.selected` remains keyboard/hover selection, not a proxy for expansion.
+/// 안정 archive identity가 `Props.expanded_identity`와 같은 카드만 이 값을 실을 수 있다.
+/// `Card.selected`는 여전히 키보드/hover 선택이며 펼침 상태의 대역이 아니다.
 pub const Expanded = struct {
     state: DetailState,
     turns: []const Turn = &.{},
@@ -110,9 +110,9 @@ pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
     cell_height_px: u32,
-    /// Resolved backing pixels per logical Dock point: device backing scale composed with the
-    /// host-owned bounded SessionDockUiZoom. Semantic components use this only to reserve role
-    /// line boxes; platform adapters still own actual glyph ink/baseline measurement.
+    /// 논리 Dock point당 backing 픽셀을 해석한 값 — device backing scale에 host가 소유한 bounded
+    /// SessionDockUiZoom을 합성한 것이다. semantic 컴포넌트는 이 값을 role line box를 잡는 데만 쓰고,
+    /// 실제 glyph ink/baseline 측정은 여전히 platform adapter가 소유한다.
     scale_milli: u32 = 1000,
     snapshot_generation: u64,
     displayed_count: u16,
@@ -122,9 +122,9 @@ pub const Props = struct {
     workspace_scope_enabled: bool = true,
     project_scope_enabled: bool = true,
     search: []const u8 = "",
-    /// IME marked text is display-only until the platform commits it into `search`.  Keeping it
-    /// in the immutable DTO lets the field paint exactly what the active input owner sees
-    /// without allowing an uncommitted composition to change the archive projection.
+    /// IME marked text는 platform이 `search`로 확정하기 전까지 표시 전용이다. 이 값을 불변 DTO에 두면
+    /// 필드가 활성 입력 소유자가 보는 것을 그대로 그리면서도, 확정되지 않은 조합이 archive 투영을
+    /// 바꾸는 일은 막는다.
     search_preedit: []const u8 = "",
     search_focused: bool = false,
     search_cursor_visible: bool = false,
@@ -136,11 +136,11 @@ pub const Props = struct {
     /// (docs/agent-session-list.md §4).
     partial: bool = false,
     spinner_phase: u3 = 0,
-    /// The host owns this stable identity and clears it atomically with detail/action capture
-    /// when a snapshot replacement changes `(provider, session_id, device, inode)`.
+    /// 이 안정 identity는 host가 소유한다. snapshot 교체로 `(provider, session_id, device, inode)`가
+    /// 바뀌면 detail/action capture와 함께 atomic하게 지운다.
     expanded_identity: ?u64 = null,
-    /// The first virtualized item origin relative to the content clip. It is normally zero or
-    /// negative, but can be positive when an offset lands in an inter-item gap.
+    /// content clip 기준으로 본 첫 가상화 아이템의 origin이다. 보통 0이거나 음수지만, offset이 아이템
+    /// 사이 간격에 떨어지면 양수가 될 수 있다.
     content_first_item_origin_y_px: i32 = 0,
     /// 스크롤 목록 **전체**의 content 높이와 현재 offset(backing px). 가상화 때문에 component는 보이는
     /// 아이템만 받으므로, scrollbar가 얼마나 긴 목록의 어디를 보고 있는지는 이 두 값으로만 알 수 있다.
@@ -152,11 +152,10 @@ pub const Props = struct {
     sticky_group: ?StickyGroup = null,
 };
 
-/// One immutable geometry snapshot for all Session Dock consumers. The host gets this same
-/// value for virtualization and wheel motion; build gets it for the published UiRectTree; view
-/// gets it for component-owned text offsets. Keeping terminal-cell metrics out of this type
-/// prevents terminal family/line-spacing from moving a visible Chrome hit target; the host may
-/// deliberately compose an explicit bounded UI zoom into `scale_milli`.
+/// Session Dock의 모든 소비자가 공유하는 불변 geometry snapshot 하나다. host는 가상화와 휠 이동에,
+/// build는 publish할 UiRectTree에, view는 컴포넌트가 소유한 텍스트 offset에 같은 값을 쓴다. terminal
+/// 셀 메트릭을 이 타입에서 빼 두어야 terminal family/line-spacing이 보이는 Chrome hit target을 움직이지
+/// 못한다. host는 명시적으로 bounded UI zoom을 `scale_milli`에 합성할 수 있다.
 pub const DockMetrics = struct {
     // 상단 view switcher의 높이는 더 이상 여기 없다. 그 바는 terminal tab bar와 **아래 경계선을 맞춰야**
     // 하는 유일한 도크 chrome이라, 두 소비자가 공유하는 logical token(`chrome.tokens` `space.bar_height_pt`)
@@ -345,8 +344,8 @@ pub const DockMetrics = struct {
     }
 };
 
-/// Metrics of one measured action-content group. These values use Chrome logical points and the
-/// resolved Dock scale only; terminal cell width and SVG viewBox whitespace are not padding inputs.
+/// 측정된 action-content 묶음 하나의 메트릭이다. 이 값들은 Chrome 논리 point와 해석된 Dock scale만
+/// 쓴다 — terminal 셀 폭이나 SVG viewBox 여백은 padding 입력이 아니다.
 pub const ButtonMetrics = struct {
     content_inset_x_px: u32,
     content_inset_y_px: u32,

@@ -1,4 +1,4 @@
-//! Generic action/drag intent table — CIM1.
+//! 범용 action/drag intent 표 — CIM1.
 //!
 //! Pointer hit testing과 drag 수명은 `UiActionId`와 opaque drag payload만 낸다. 그 두 값을 domain
 //! intent로 되돌리는 자리가 이 표다. 지금까지는 소비자마다 같은 구조를 다시 만들었고

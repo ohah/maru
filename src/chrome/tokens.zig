@@ -71,8 +71,8 @@ pub const ColorRole = enum {
     surface_bg,
     surface_fg,
     muted_fg,
-    /// Panel-local recessed surface. Count pills and inset detail can use this without
-    /// depending on a dark-theme literal or misusing an interactive tab color.
+    /// 패널 안쪽으로 한 단계 들어간 면. 개수 pill이나 inset 상세가 dark 테마 literal에 기대거나
+    /// 상호작용용 탭 색을 잘못 끌어 쓰지 않고 이 역할을 쓴다.
     inset_bg,
     tab_active_bg,
     tab_hover_bg,
@@ -89,8 +89,8 @@ pub const ColorRole = enum {
     cursor,
     accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
     keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·light·dark 모두 또렷(keycapBg).
-    /// Destructive-action surface. ThemeColors has no semantic error input yet, so this token
-    /// layer owns the conservative fallback instead of leaking literal RGB into a component.
+    /// 파괴적 action의 면. `ThemeColors`에 아직 semantic 오류 입력이 없어서, 컴포넌트로 literal RGB를
+    /// 흘리는 대신 이 토큰 층이 보수적 폴백을 소유한다.
     danger_bg,
     danger_fg,
     /// git 상태 색(소스 컨트롤 목록의 상태 문자·아이콘). **`danger_*`와 같은 규율**로 이 층이 보수적

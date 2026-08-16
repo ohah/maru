@@ -1,8 +1,8 @@
-//! Chrome-native logical spacing scale.
+//! Chrome 고유의 논리 spacing scale이다.
 //!
-//! Components resolve this closed scale once at a backing scale and pass resulting pixels through
-//! a completed `UiRectTree`. They do not accept CSS utility strings or re-derive padding from
-//! terminal cell metrics.
+//! component는 이 닫힌 scale을 backing scale에서 한 번만 해석하고, 그 결과 픽셀을 완성된
+//! `UiRectTree`로 넘긴다. CSS utility 문자열을 받거나 terminal cell 메트릭에서 padding을 다시
+//! 유도하지 않는다.
 
 const std = @import("std");
 

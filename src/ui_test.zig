@@ -1,8 +1,8 @@
-//! Focused test root for the typed Chrome UI namespace.
+//! typed Chrome UI namespace만 좁혀서 도는 test root다.
 //!
-//! The production `chrome.zig` facade deliberately imports every Chrome component. Keeping this
-//! build entrypoint separate makes `zig build test-chrome-ui` prove only the build → layout →
-//! interaction → paint seam while resolving child-module imports from the real `src/` boundary.
+//! 제품 `chrome.zig` facade는 의도적으로 모든 Chrome component를 import한다. 이 build entrypoint를
+//! 따로 두면 `zig build test-chrome-ui`가 자식 모듈 import를 실제 `src/` 경계에서 풀면서도 build →
+//! layout → interaction → paint seam만 증명한다.
 
 const layout = @import("chrome/ui/layout.zig");
 const style = @import("chrome/ui/style.zig");

@@ -1,7 +1,7 @@
-//! Semantic paint and text projection for a completed Session Dock rect tree.
+//! 완성된 Session Dock rect tree의 semantic paint·text 투영이다.
 //!
-//! The generic UI painter owns card backgrounds; this file adds only component-owned text runs.
-//! It never asks a platform for glyph positions, so the backend remains a one-way ChromeDraw lowerer.
+//! card 배경은 범용 UI painter가 소유하고, 이 파일은 component가 가진 text run만 얹는다. platform에
+//! glyph 위치를 묻지 않으므로 backend는 단방향 ChromeDraw lowerer로 남는다.
 
 const std = @import("std");
 const icons = @import("../../../icons.zig");
@@ -190,15 +190,15 @@ const Writer = struct {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
     }
 
-    /// Weight is semantic hierarchy, not a per-font coordinate tweak. The backend already owns
-    /// the selected face and its measured advance, so title/group emphasis remains font-safe.
+    /// weight는 폰트별 좌표 보정이 아니라 semantic 위계다. 선택된 face와 그 측정 advance는 이미
+    /// backend가 소유하므로 제목/그룹 강조는 폰트가 바뀌어도 안전하다.
     fn textStrong(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, true);
     }
 
-    /// The dock header is a real two-role typographic stack, not two terminal cells.  Centre
-    /// its heading/supporting line boxes together so point-size changes or a 2x backing scale
-    /// cannot make the count cling to the heading as in the legacy cell path.
+    /// dock 헤더는 terminal 셀 두 칸이 아니라 두 role로 이뤄진 진짜 타이포그래피 스택이다.
+    /// heading/supporting line box를 함께 가운데 정렬해야, point size가 바뀌거나 2배 backing scale에서
+    /// legacy 셀 경로처럼 개수가 heading에 달라붙지 않는다.
     fn headerStack(self: *Writer, rect: tree.RectEntry, heading: []const u8, supporting: []const u8, has_sort: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
@@ -268,8 +268,8 @@ const Writer = struct {
         return self.textInsetStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, 1, bold);
     }
 
-    /// Places an entire line stack inside the completed rect before selecting the requested line.
-    /// This keeps scope/search/group labels optically centred without font-specific pixel nudges.
+    /// 요청된 줄을 고르기 전에 줄 스택 전체를 완성된 rect 안에 배치한다. 그래야 scope/search/group
+    /// label이 폰트별 픽셀 보정 없이도 시각적으로 가운데 정렬된다.
     fn textInset(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16) ViewError!void {
         return self.textInsetStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, left_inset_cols, false);
     }
@@ -324,9 +324,9 @@ const Writer = struct {
         try self.iconInRect(slot, chevron_down_icon, std.unicode.utf8Decode(chevron_down_icon) catch return, @intCast(metrics.header_host_icon_extent), .surface_fg);
     }
 
-    /// Provenance is a measured host-SVG + label group. Its content rect, the refresh sibling,
-    /// and header title reserve use one `DockMetrics` snapshot; terminal cells only cap text
-    /// truncation after the real worker has measured the Korean label.
+    /// provenance는 측정된 host-SVG + label 묶음이다. 그 content rect, 형제인 refresh, 헤더 제목
+    /// 예약은 모두 하나의 `DockMetrics` snapshot을 쓴다. terminal 셀은 실제 worker가 한글 label을
+    /// 측정한 뒤 텍스트 잘라내기 상한으로만 쓰인다.
     fn headerProvenance(self: *Writer, rect: tree.RectEntry, source: []const u8, has_sort: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
@@ -362,8 +362,8 @@ const Writer = struct {
         } });
     }
 
-    /// Idle and busy refresh use one logical trailing SVG slot. Terminal glyph width therefore
-    /// cannot pull this header control away from the provenance group or shrink it in-flight.
+    /// idle과 busy refresh는 논리적으로 같은 후행 SVG 슬롯 하나를 쓴다. 그래서 terminal glyph 폭이 이
+    /// 헤더 컨트롤을 provenance 묶음에서 떼어 내거나 도중에 줄이지 못한다.
     fn headerRefresh(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + metrics.headerUtilityWidth(false)))) return;
@@ -383,9 +383,9 @@ const Writer = struct {
         try self.iconInRect(slot, source, icon, @intCast(metrics.header_host_icon_extent), role);
     }
 
-    /// The search field is a real Chrome input: its SVG owns a fixed optical box and the text
-    /// begins after the same 16/18/8pt content group used by buttons.  It must not use the
-    /// terminal-cell icon path, which had a different baseline from the measured input label.
+    /// 검색 필드는 진짜 Chrome input이다 — SVG가 고정 광학 박스를 소유하고, 텍스트는 button이 쓰는
+    /// 것과 같은 16/18/8pt content 묶음 뒤에서 시작한다. terminal 셀 아이콘 경로를 쓰면 안 된다. 그
+    /// 경로는 측정된 input label과 baseline이 달랐다.
     fn searchField(self: *Writer, rect: tree.RectEntry) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
@@ -416,9 +416,9 @@ const Writer = struct {
         return self.emitJoined(x, y, self.props.search, self.props.search_preedit, if (show_caret) "|" else "", max_cols, if (empty) .muted_fg else .surface_fg);
     }
 
-    /// A fixed Chrome component can use terminal columns only as a conservative horizontal
-    /// truncation budget. Its vertical hierarchy must come from the published DockMetrics
-    /// snapshot, otherwise terminal zoom moves text inside a stable card/hit rect.
+    /// 고정 Chrome 컴포넌트는 terminal 열을 보수적인 가로 잘라내기 예산으로만 쓸 수 있다. 세로
+    /// 위계는 publish된 DockMetrics snapshot에서 와야 한다 — 아니면 terminal 확대가 안정된 카드/hit
+    /// rect 안에서 텍스트를 움직인다.
     ///
     /// `trailing_reserve_px`는 이 줄이 절대 침범하면 안 되는 우측 영역(카드의 disclosure slot 등)이다.
     /// 최종 ellipsis는 worker가 measured advance로 정하지만, 그 예산에서 이 폭을 미리 빼 두지 않으면
@@ -459,11 +459,10 @@ const Writer = struct {
         try self.emit(x, y, metadata, max_cols, .head, .muted_fg, .metadata, false, false);
     }
 
-    /// A workspace group has three independent slots: disclosure affordance, name, and count.
-    /// Packing them into one terminal-style string made the count drift next to a long workspace
-    /// name, which is visibly unlike the reference and leaves no stable place for its count pill.
-    /// The group row itself remains the sole hit target from the completed tree; the pill is paint
-    /// only and cannot introduce a competing pointer region.
+    /// workspace 그룹에는 독립된 슬롯이 셋 있다 — disclosure affordance, 이름, 개수. 이를 terminal식
+    /// 문자열 하나로 뭉치면 workspace 이름이 길 때 개수가 옆으로 밀려, 레퍼런스와 눈에 띄게 다르고
+    /// 개수 pill이 놓일 안정된 자리도 없어진다. 완성된 tree에서 hit target은 여전히 그룹 행 하나뿐이며,
+    /// pill은 paint 전용이라 경쟁하는 pointer 영역을 만들지 않는다.
     fn groupHeader(self: *Writer, rect: tree.RectEntry, group: types.Group) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
@@ -567,9 +566,9 @@ const Writer = struct {
             try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, "열린 세션으로 이동");
     }
 
-    /// Button text is one semantic content group, not an icon op whose cell estimate happens to
-    /// precede a measured label.  The detached worker receives the unrounded content rect and
-    /// publishes both the actual label advance and registered-SVG placement in one artifact.
+    /// button 텍스트는 하나의 semantic content 묶음이지, 셀 추정값이 우연히 측정 label 앞에 오는 아이콘
+    /// op이 아니다. 분리된 worker가 반올림하지 않은 content rect를 받아, 실제 label advance와 등록 SVG
+    /// 배치를 한 산출물에 함께 publish한다.
     fn action(self: *Writer, rect: tree.RectEntry, icon: ?[]const u8, label: []const u8) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
@@ -622,8 +621,8 @@ const Writer = struct {
         try self.emitPlaced(@floatFromInt(content.x), @floatFromInt(content.y), label, label_max_cols, .head, foreground, .button_label, false, true, max_width_px, placement);
     }
 
-    /// Fixed-width header utility slots still use this conservative display-column estimate;
-    /// Button content deliberately does not, because its worker policy receives pixels above.
+    /// 고정 폭 헤더 유틸리티 슬롯은 여전히 이 보수적인 표시-열 추정값을 쓴다. button content는
+    /// 의도적으로 쓰지 않는다 — 그쪽 worker 정책은 위에서 픽셀을 받기 때문이다.
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
         var plan = text_layout.plan(source, 0, max_cols, .head, isSessionDockIcon);
         while (plan.next()) |_| {}
@@ -634,9 +633,9 @@ const Writer = struct {
         return self.emitPlaced(x, y, source, cols, anchor, role, text_role, wide_icons, bold, null, .origin);
     }
 
-    /// A single measured input run preserves the actual system-font advance across committed
-    /// query, IME preedit, and caret.  Three separately lowered text ops would re-start at the
-    /// same origin or reintroduce terminal-cell advance guesses between them.
+    /// 측정된 input run 하나로 두면 확정 질의·IME preedit·caret에 걸쳐 실제 system-font advance가
+    /// 보존된다. 텍스트 op 셋으로 따로 내리면 같은 origin에서 다시 시작하거나, 그 사이에 terminal 셀
+    /// advance 추정이 되살아난다.
     fn emitJoined(self: *Writer, x: f32, y: f32, first: []const u8, second: []const u8, third: []const u8, cols: u16, role: tokens.ColorRole) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
@@ -704,10 +703,9 @@ const Writer = struct {
         self.text_count += bytes.len;
     }
 
-    /// There is no completed snapshot to preserve during the first scan. Paint three inert card
-    /// placeholders instead of pretending an empty archive is a completed result. These quads
-    /// deliberately do not enter the rect tree or action table, so an impatient click cannot
-    /// resolve to a stale/fictional session action.
+    /// 첫 스캔 동안에는 보존할 완성 snapshot이 없다. 빈 archive를 완성된 결과인 척하는 대신 비활성
+    /// 카드 자리표시자 셋을 그린다. 이 quad들은 의도적으로 rect tree나 action table에 들어가지 않으므로,
+    /// 성급한 클릭이 stale하거나 존재하지 않는 세션 action으로 해석될 수 없다.
     /// `content`는 스크롤 영역일 수도, 펼친 카드의 detail surface일 수도 있다. 어느 쪽이든 그 rect가
     /// 스켈레톤의 경계이므로 emit 동안 그 clip을 연다 — 바깥 clip(스크롤 영역)만 쓰면 detail 안의 막대가
     /// 이웃 카드 위로 넘칠 수 있다(막대 배치는 카드 높이 배수라 detail 바닥을 실제로 넘긴다).

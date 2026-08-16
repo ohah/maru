@@ -1,5 +1,5 @@
-//! Filesystem-free semantic icon classifier for the file explorer. The caller stores the result
-//! beside the projected row; render and pointer paths only lower `IconKind` to a registered PUA.
+//! 파일 탐색기가 쓰는 filesystem 비의존 semantic 아이콘 분류기다. caller가 그 결과를 투영된 행 옆에
+//! 보관하고, render·pointer 경로는 `IconKind`를 등록된 PUA codepoint로 내리기만 한다.
 
 const std = @import("std");
 const icons = @import("../icons.zig");

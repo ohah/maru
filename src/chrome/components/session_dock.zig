@@ -1,7 +1,7 @@
-//! Session Dock Chrome component facade.
+//! Session Dock Chrome component의 facade다.
 //!
-//! Domain data enters as `types.Props`; geometry/action projection lives in `build`, and semantic
-//! paint/text emission lives in `view`. This facade intentionally has no AppSession/provider/Metal import.
+//! 도메인 데이터는 `types.Props`로 들어오고, geometry/action 투영은 `build`가, semantic paint/text
+//! emission은 `view`가 소유한다. 이 facade에는 AppSession/provider/Metal import를 의도적으로 두지 않는다.
 
 pub const types = @import("session_dock/types.zig");
 pub const ids = @import("session_dock/ids.zig");

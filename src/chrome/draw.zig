@@ -58,9 +58,9 @@ pub const Layer = enum { sidebar, pane_overlay, modal };
 /// 텍스트 한 조각(스타일 변화 단위). 멀티-run은 한 줄 안의 스타일 구간들.
 pub const Run = struct { text: []const u8, bold: bool = false };
 
-/// The component may declare a text-content group without taking ownership of native font
-/// metrics. Ordinary text keeps `.origin`; the platform text worker resolves measured label
-/// groups and registered SVG-only controls from the final logical rect.
+/// 컴포넌트는 native 폰트 메트릭을 소유하지 않은 채로 텍스트 내용 묶음을 선언할 수 있다. 평범한
+/// 텍스트는 `.origin`을 유지하고, 측정된 label 묶음과 등록 SVG 전용 컨트롤은 platform text worker가
+/// 최종 논리 rect에서 해석한다.
 pub const TextPlacement = union(enum) {
     origin,
     center_in_rect: Rect,
@@ -108,14 +108,12 @@ pub const Op = union(enum) {
         origin: Px,
         runs: []const Run,
         role: tokens.ColorRole,
-        /// Semantic typography is carried to the renderer artifact.  The current cell lowerer
-        /// keeps its legacy default; the measured Chrome path consumes this instead of guessing
-        /// from color/bold/source text.
+        /// semantic typography를 renderer 산출물까지 실어 보낸다. 지금의 셀 lowerer는 legacy 기본값을
+        /// 유지하고, 측정 기반 Chrome 경로가 색/bold/원본 텍스트에서 추측하는 대신 이 값을 쓴다.
         text_role: typography.ChromeTextRole = .body,
-        /// The component-owned available width and overflow anchor.  Legacy cell lowering still
-        /// derives its grid plan here, while measured rich text receives the untouched source and
-        /// uses the same constraint in device pixels.  Keeping this on the semantic op prevents
-        /// either path from inventing a second title/search truncation policy.
+        /// 컴포넌트가 소유하는 가용 폭과 넘침 기준점이다. legacy 셀 lowering은 여전히 여기서 격자
+        /// 계획을 유도하고, 측정 기반 rich 텍스트는 손대지 않은 원본을 받아 같은 제약을 device 픽셀로
+        /// 쓴다. 이 값을 semantic op에 두어야 두 경로가 제목/검색 잘라내기 정책을 각자 또 만들지 않는다.
         max_cols: u16 = std.math.maxInt(u16),
         anchor: text_layout.Anchor = .head,
         /// **이 폰트 크기로 그린다**(편집기 전용 — docs/native-editor-layering.md §2.0).
@@ -141,9 +139,9 @@ pub const Op = union(enum) {
         /// 벗어난다. `font_px`·`line_height_px`와 함께 온다.
         cell_w_px: ?u16 = null,
         wide_icons: bool = false,
-        /// Pixel constraint is needed when the worker centres an icon+label group.  `max_cols`
-        /// remains the legacy grid fallback; a rich-only action can preserve the final content
-        /// rect instead of rounding its available width down to terminal cells.
+        /// worker가 아이콘+label 묶음을 가운데 정렬할 때는 픽셀 제약이 필요하다. `max_cols`는 legacy
+        /// 격자 폴백으로 남고, rich 전용 action은 가용 폭을 terminal 셀 단위로 내림하지 않고 최종
+        /// content rect를 그대로 보존할 수 있다.
         max_width_px: ?u32 = null,
         placement: TextPlacement = .origin,
         /// 이 op이 컴포넌트의 **스크롤 영역**에 속하는지. 스크롤 뷰포트 사각형 자체는 backend가 프레임마다

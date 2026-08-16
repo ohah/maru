@@ -1,8 +1,8 @@
-//! Semantic paint and redacted text projection for ArchiveSessionDetailPanel.
+//! ArchiveSessionDetailPanel의 semantic paint·redaction 완료 text 투영이다.
 //!
-//! This is deliberately a view of host-sanitized DTO values. It has no archive-path, worker,
-//! provider, PTY, or AppKit import, so displaying a detail can never itself inspect or execute a
-//! session. The later host slice is solely responsible for resolving the opaque actions.
+//! 이 파일은 의도적으로 host가 sanitize를 끝낸 DTO 값만 보는 view다. archive 경로·worker·provider·
+//! PTY·AppKit import가 없으므로, 상세를 표시하는 행위 자체가 세션을 들여다보거나 실행하는 일로
+//! 이어질 수 없다. opaque action 해석은 후속 host 슬라이스가 단독으로 책임진다.
 
 const std = @import("std");
 const icons = @import("../../../icons.zig");
@@ -40,9 +40,8 @@ pub const Buffers = struct {
 
 pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, InsufficientTextBuffer, MissingRect };
 
-/// Emits the completed rect tree on the pane-overlay layer. `state` is supplied by the host, but
-/// it only changes semantic hover/focus paint; capability gating has already been fixed into the
-/// tree by `build`.
+/// 완성된 rect tree를 pane-overlay 레이어에 낸다. `state`는 host가 주지만 semantic hover/focus paint만
+/// 바꾼다 — capability 차단은 이미 `build`가 tree에 고정해 두었다.
 pub fn view(props: types.Props, frame: build.Frame, state: interaction.InteractionState, tk: *const tokens.Tokens, buffers: Buffers) ViewError!draw.ChromeDraw {
     const painted = try ui_paint.paint(frame.tree, state, tk, .pane_overlay, .{ .ops = buffers.ops });
     var writer = Writer{
@@ -163,10 +162,9 @@ const Writer = struct {
         try self.emit(x, y, source, max_cols, foreground, true);
     }
 
-    /// Mirrors `emit`'s plan exactly, but only returns the rendered cell width so action labels
-    /// can be centred before the draw op is materialized.  Keeping this on `text_layout.plan`
-    /// avoids byte-length centering and makes an ellipsized label occupy the same space in both
-    /// the measurement and paint paths.
+    /// `emit`의 계획을 그대로 따라가되 렌더링된 셀 폭만 돌려준다. draw op을 만들기 전에 action label을
+    /// 가운데 정렬하기 위해서다. 이 계산을 `text_layout.plan` 위에 두면 byte 길이로 가운데를 잡는 일을
+    /// 피하고, 말줄임된 label이 측정 경로와 paint 경로에서 같은 자리를 차지한다.
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
         var plan = text_layout.plan(source, 0, max_cols, .head, isDetailIcon);
         while (plan.next()) |_| {}
@@ -198,8 +196,8 @@ const Writer = struct {
         self.text_count += bytes.len;
     }
 
-    /// Placeholder lines are visual-only: they do not receive node IDs, action IDs, or pointer
-    /// bounds, so loading cannot fabricate a resume/log action.
+    /// 자리표시자 줄은 시각 전용이다 — node ID·action ID·pointer 경계를 받지 않으므로 loading 상태가
+    /// resume/로그 action을 만들어 낼 수 없다.
     fn skeletons(self: *Writer, content: tree.RectEntry) ViewError!void {
         const ch = self.props.cell_height_px;
         if (ch == 0) return;
@@ -229,10 +227,9 @@ const Writer = struct {
     }
 };
 
-/// `chrome` remains renderer-independent, so it does not import the renderer's global registry.
-/// This component publishes only the two codepoints it owns and uses the same predicate for
-/// truncation, centering and lowering. The platform renderer independently rejects unregistered
-/// PUA codepoints before rasterization.
+/// `chrome`은 renderer와 독립이라 renderer의 전역 registry를 import하지 않는다. 이 컴포넌트는 자기가
+/// 소유한 codepoint 둘만 publish하고, 잘라내기·가운데 정렬·lowering에 같은 predicate를 쓴다. 등록되지
+/// 않은 PUA codepoint는 platform renderer가 rasterize 전에 독립적으로 거부한다.
 fn isDetailIcon(codepoint: u21) bool {
     return codepoint == icons.codepoint(.recent) or codepoint == icons.codepoint(.document);
 }

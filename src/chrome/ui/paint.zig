@@ -1,9 +1,9 @@
-//! Fixed-buffer draw emission for the new rich/Metal UiNode tree.
+//! 새 rich/Metal UiNode tree의 고정 버퍼 draw emission이다.
 //!
-//! Layout owns every floating-point rect, ui_interaction owns pointer-local state, and
-//! `paint_style` resolves semantic variants through tokens. This file only snaps the resulting
-//! rect once and emits backend-neutral ChromeDraw. Metal lowering, text shaping, clip scissor,
-//! and GPU shadow emission remain the ML3b boundary.
+//! 모든 부동소수 rect는 layout이, pointer-local state는 ui_interaction이, semantic variant의 token
+//! 해석은 `paint_style`이 소유한다. 이 파일은 그 결과 rect를 한 번만 snap해서 backend 중립
+//! ChromeDraw를 낸다. Metal lowering, text shaping, clip scissor, GPU shadow emission은 ML3b
+//! 경계에 남는다.
 
 const std = @import("std");
 const icons = @import("../../icons.zig"); // 등록 아이콘 이름↔codepoint(테스트가 실제 등록 cp를 쓰게)
@@ -21,8 +21,8 @@ pub const PaintError = error{
     InvalidRect,
 };
 
-/// Caller-owned fixed frame storage. Paint never allocates or retains an old frame's ops: a
-/// failed candidate is cleared so a host cannot publish a partly restyled tree.
+/// caller가 소유하는 고정 frame 저장소다. paint는 할당하지 않고 이전 frame의 op을 남기지도 않는다 —
+/// 실패한 후보는 지워지므로 host가 반쯤 다시 칠해진 tree를 publish할 수 없다.
 pub const PaintBuffers = struct {
     ops: []draw.Op,
 };
@@ -34,9 +34,9 @@ pub const resolveCard = paint_style.resolveCard;
 pub const resolveButton = paint_style.resolveButton;
 pub const resolveText = paint_style.resolveText;
 
-/// Emits one Quad per semantic Card/Button in preorder. Text is intentionally not emitted until
-/// the actual CoreText layout artifact is wired; callers can still resolve its typed visual style
-/// via `resolveText`. The result is safe to snapshot in a unit test but is not a production frame.
+/// semantic Card/Button마다 Quad 하나를 preorder로 낸다. 실제 CoreText layout 산출물이 배선되기
+/// 전까지 텍스트는 의도적으로 내지 않으며, caller는 그래도 `resolveText`로 typed 시각 스타일을 얻을
+/// 수 있다. 결과는 단위 테스트에서 snapshot하기에는 안전하지만 제품 frame은 아니다.
 pub fn paint(
     tree: ui_tree.UiRectTree,
     state: interaction.InteractionState,
@@ -125,8 +125,8 @@ fn clipRectOf(entry: ui_tree.RectEntry) ?draw.Rect {
     };
 }
 
-/// Layout may produce fractional rects for percent/fill. Painting snaps once at the last neutral
-/// boundary: floor the origin and ceil the far edge, so adjacent rects cannot reveal a gap.
+/// layout은 percent/fill에서 소수 rect를 낼 수 있다. paint는 마지막 중립 경계에서 한 번만 snap한다 —
+/// origin은 내리고 먼 변은 올리므로 인접한 rect 사이에 틈이 드러나지 않는다.
 fn snapRect(rect: layout.UiRect) PaintError!draw.Rect {
     if (!std.math.isFinite(rect.x) or !std.math.isFinite(rect.y) or
         !std.math.isFinite(rect.width) or !std.math.isFinite(rect.height) or

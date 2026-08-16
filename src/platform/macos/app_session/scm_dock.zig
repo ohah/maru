@@ -214,6 +214,9 @@ pub const Projection = struct {
     /// 커밋 버튼을 켤 수 있나 = index에 무언가 올라가 있나. **모델이 status로 판정한 것만 쓴다**
     /// (낙관적으로 추정하지 않는다 — 쓰기 문서 §7).
     has_staged: bool,
+    /// 지금 읽은 저장소에 **줄이 하나라도 있나**. 빈 안내는 이 값으로 정한다 — `items`는 이제 저장소
+    /// 머리 줄을 포함하므로 그것으로 세면 변경이 없어도 "비어 있지 않다"가 된다(P3d에서 실제로 그랬다).
+    has_rows: bool,
     /// 탭 이름 옆의 **전체** 파일 수. 섹션 헤더의 `count`를 더해서 낸다 — 그 값은 접혀 있어도 잘려
     /// 있어도 전체를 말하므로, 화면 행을 세는 것과 달리 10행 상한·접기에 흔들리지 않는다.
     file_count: u32,
@@ -230,26 +233,58 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 않는 이유는 이 자리가 이미 "목록이 사실과 다르다"를 말하는 자리(`notice`)이고, 사용자가 방금 누른
     // 동작의 결과를 그 목록 바로 위에서 읽는 것이 자연스럽기 때문이다.
     const notice_rows: usize = if (self.scm_write_error != null) 1 else 0;
-    const items = arena.alloc(component.types.Item, model.rows.len + notice_rows) catch return null;
-    if (self.scm_write_error) |err| items[0] = .{ .notice = err };
-    for (model.rows, items[notice_rows..], 0..) |row, *item, index| {
-        item.* = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
-    }
-    const item_rows = items[notice_rows..];
-    applyScmPending(self, model.rows, item_rows);
 
-    var file_count: u32 = 0;
-    for (model.rows) |row| switch (row) {
-        .section => |section| file_count += @intCast(section.count),
-        else => {},
-    };
+    // **저장소 머리 줄이 목록의 첫 층이다**(§3.5.1c). 지금 읽어 둔 저장소의 줄들은 자기 머리 줄 아래에
+    // 오고, 아직 안 읽은 저장소는 머리 줄만 선다("읽는 중…" — 배지의 빈자리와 구별한다).
+    const store = arena.create(RepoEntryStore) catch return null;
+    store.* = .{};
+    const repos = collectRepoEntries(self, store);
+    const current_repo = self.git_repo orelse "";
+
+    var repo_rows: usize = repos.entries.len;
+    if (repo_rows == 0) repo_rows = 0; // 저장소를 못 잡았으면 머리 줄도 없다(안내가 그 자리를 쓴다)
+    const current_collapsed = repoCollapsed(self, current_repo);
+    const model_rows: usize = if (current_collapsed) 0 else model.rows.len;
+
+    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows) catch return null;
+    var n: usize = 0;
+    if (self.scm_write_error) |err| {
+        items[n] = .{ .notice = err };
+        n += 1;
+    }
+    var model_start: usize = 0;
+    for (repos.entries, 0..) |entry, repo_index| {
+        const is_current = std.mem.eql(u8, entry.path, current_repo);
+        const collapsed = repoCollapsed(self, entry.path);
+        items[n] = .{
+            .repo = .{
+                .index = @intCast(repo_index),
+                .name = repoDisplayName(entry, repos.entries),
+                .branch = if (is_current) headLabel(model.head) else "",
+                .collapsed = collapsed,
+                .primary = entry.primary,
+                .count = if (is_current) countFiles(model.rows) else 0,
+                // 읽은 저장소는 하나뿐이다 — 나머지는 아직 모른다(0건이 아니다).
+                .pending = !is_current,
+            },
+        };
+        n += 1;
+        if (!is_current or collapsed) continue;
+        model_start = n;
+        for (model.rows, 0..) |row, index| {
+            items[n] = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
+            n += 1;
+        }
+    }
+    const item_rows = if (model_start > 0) items[model_start..n] else items[n..n];
+    applyScmPending(self, model.rows, item_rows);
 
     const branch: []const u8 = if (model.head.detached)
         "(detached)"
     else
         model.head.branch orelse "";
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    const list_items = ScrollItems{ .items = items, .metrics = m };
+    const list_items = ScrollItems{ .items = items[0..n], .metrics = m };
     const scroll = chrome.ui.scroll_area.project(
         list_items,
         ScrollItems.heightPx,
@@ -257,14 +292,15 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         self.scm_scroll.offset_y_px,
     );
     return .{
-        .items = items,
+        .items = items[0..n],
         .scroll = scroll,
         .branch = branch,
         .ahead = model.head.ahead,
         .behind = model.head.behind,
         .has_ab = model.head.has_ab,
         .summary = .{ .added = model.total_added, .removed = model.total_removed },
-        .file_count = file_count,
+        .has_rows = model.rows.len > 0,
+        .file_count = countFiles(model.rows),
         .has_staged = model.has_staged,
     };
 }
@@ -320,7 +356,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
         // "아직 못 읽었다"와 똑같아진다(§3.5 빈 상태 표). 다른 두 문장은 목록을 그리기도 전에
         // 나오므로(`git_result == null` 경로) 여기서 고를 것은 이 하나뿐이다.
-        .empty_notice = if (projection.items.len == 0) git_ops.notice_no_changes else "",
+        .empty_notice = if (!projection.has_rows) git_ops.notice_no_changes else "",
     };
 }
 
@@ -583,6 +619,14 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 끝에 붙인다.
         .commit_focus => focusCommit(self),
         .commit => submitCommit(self),
+        .toggle_repo => |index| {
+            // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
+            // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
+            var store: RepoEntryStore = .{};
+            const repos = collectRepoEntries(self, &store);
+            if (index >= repos.entries.len) return;
+            toggleRepoCollapsed(self, repos.entries[index].path);
+        },
         .scroll_thumb, .scroll_track => {},
     }
 }
@@ -1570,7 +1614,24 @@ fn collectRepoRoots(self: *AppSession, store: []u8, out: [][]const u8) usize {
 /// (읽기는 순차이고, N개를 동시에 띄우지 않는다는 §6 규율은 저장소가 여럿이어도 같다). 아직 안 읽은
 /// 저장소는 자기 한 줄로만 뜨고, 그 저장소를 보는 순간 읽기가 나머지를 채운다.
 pub fn collectRepoEntries(self: *AppSession, store: *RepoEntryStore) maru.session.scm_repos.Collected {
-    const roots = store.roots[0..collectRepoRoots(self, &store.path_bytes, &store.roots)];
+    var root_count = collectRepoRoots(self, &store.path_bytes, &store.roots);
+    // **우리가 읽은 저장소는 언제나 목록에 있다.** 보통은 터미널에서 나오지만, 그 터미널이 닫혔거나
+    // 활성 Term이 파일 Term·원격이면 목록에서 빠질 수 있다 — 그때 목록을 그대로 두면 방금 읽어 화면에
+    // 그리고 있는 저장소가 목록에 없는 모순이 된다(그 줄들이 붙을 머리 줄이 사라진다).
+    if (self.git_repo) |repo| {
+        var present = false;
+        for (store.roots[0..root_count]) |root| {
+            if (std.mem.eql(u8, root, repo)) present = true;
+        }
+        if (!present and root_count < store.roots.len) {
+            // 맨 앞에 넣는다 — "지금 보고 있는 것"이 목록 첫 줄이어야 눈이 거기서 시작한다.
+            var i = root_count;
+            while (i > 0) : (i -= 1) store.roots[i] = store.roots[i - 1];
+            store.roots[0] = repo;
+            root_count += 1;
+        }
+    }
+    const roots = store.roots[0..root_count];
     var repos: [maru.session.scm_repos.max_entries]maru.session.scm_repos.Repo = undefined;
     var count: usize = 0;
     for (roots) |root| {
@@ -1607,3 +1668,60 @@ pub const RepoEntryStore = struct {
     /// 루트 경로 문자열을 담는 자리. `termCwd`가 준 스택 버퍼는 호출이 끝나면 사라지므로 여기 옮겨 담는다.
     path_bytes: [maru.session.scm_repos.max_entries * std.fs.max_path_bytes]u8 = undefined,
 };
+
+/// 그 저장소가 접혀 있나. **경로가 키다** — 목록 자리는 터미널이 열리고 닫히며 움직인다.
+pub fn repoCollapsed(self: *const AppSession, path: []const u8) bool {
+    for (self.scm_repo_collapsed.items) |item| {
+        if (std.mem.eql(u8, item, path)) return true;
+    }
+    return false;
+}
+
+/// 접기/펴기. **세션 한정**이다(§3.5.1c) — 목록 자체가 매번 새로 계산되는 값이라 접힘만 저장해도
+/// 다음 실행의 목록과 대응이 보장되지 않는다(섹션 접힘과 같은 규율).
+pub fn toggleRepoCollapsed(self: *AppSession, path: []const u8) void {
+    for (self.scm_repo_collapsed.items, 0..) |item, index| {
+        if (!std.mem.eql(u8, item, path)) continue;
+        self.allocator.free(item);
+        _ = self.scm_repo_collapsed.orderedRemove(index);
+        self.metal_dirty = true;
+        return;
+    }
+    const copy = self.allocator.dupe(u8, path) catch return;
+    self.scm_repo_collapsed.append(self.allocator, copy) catch {
+        self.allocator.free(copy);
+        return;
+    };
+    self.metal_dirty = true;
+}
+
+/// 목록에 그릴 이름. 보통 마지막 경로 조각이고, **같은 이름이 둘이면 한 조각 더** 붙인다 —
+/// 워크트리를 브랜치 이름으로 만들면 이름이 겹치는 일이 흔하다.
+fn repoDisplayName(entry: RepoEntry, all: []const RepoEntry) []const u8 {
+    const base = std.fs.path.basename(entry.path);
+    var duplicate = false;
+    for (all) |other| {
+        if (std.mem.eql(u8, other.path, entry.path)) continue;
+        if (std.mem.eql(u8, std.fs.path.basename(other.path), base)) duplicate = true;
+    }
+    if (!duplicate) return base;
+    // 부모 조각까지 붙인다(`…/parent/base`가 아니라 경로 뒤 두 조각) — 그래도 겹치면 그대로 둔다.
+    const parent = std.fs.path.dirname(entry.path) orelse return base;
+    const start = if (std.fs.path.dirname(parent)) |grand| grand.len + 1 else 0;
+    return entry.path[@min(start, entry.path.len)..];
+}
+
+/// 머리 줄에 적을 HEAD 표시. 분리 HEAD면 브랜치가 없으므로 그 사실을 말한다.
+fn headLabel(head: maru.session.git_status.Head) []const u8 {
+    if (head.detached) return "(detached)";
+    return head.branch orelse "";
+}
+
+fn countFiles(rows: []const scm_view.Row) u32 {
+    var count: u32 = 0;
+    for (rows) |row| switch (row) {
+        .section => |section| count += @intCast(section.count),
+        else => {},
+    };
+    return count;
+}

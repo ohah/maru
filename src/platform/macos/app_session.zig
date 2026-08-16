@@ -3712,6 +3712,9 @@ pub const AppSession = struct {
     /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
     scm_pending: ?ScmPending = null,
 
+    /// 접어 둔 저장소들의 경로(세션 한정 — §3.5.1c). 목록 자리가 아니라 **경로가 키다**: 터미널이
+    /// 열리고 닫히며 자리는 움직인다.
+    scm_repo_collapsed: std.ArrayList([]u8) = .empty,
     /// **저장소별 커밋 메시지 초안**(사용자 결정 2026-08-16). 저장소를 오갈 때 쓰던 글이 사라지지도,
     /// 남의 저장소 메시지가 딸려 오지도 않는다.
     ///
@@ -16822,6 +16825,8 @@ pub const AppSession = struct {
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
+        for (self.scm_repo_collapsed.items) |path| self.allocator.free(path); // 접힘 상태
+        self.scm_repo_collapsed.deinit(self.allocator);
         for (self.scm_commit_drafts.items) |draft| { // 저장소별 초안
             self.allocator.free(draft.repo);
             self.allocator.free(draft.text);
@@ -54305,6 +54310,7 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
 
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
+    try pinTermsOutsideRepo(session, allocator); // 목록은 터미널 cwd에서 나온다 — 환경이 새지 않게 고정
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     dock_ops.setDockView(session, .source_control);
@@ -54348,9 +54354,9 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
         }
     }.at;
 
-    // 0=그룹 헤더, 1=one.txt, 2=two.txt
-    const first = rowCenter(session, 1, content.x, content.y);
-    const second = rowCenter(session, 2, content.x, content.y);
+    // 0=저장소 머리 줄(P3d), 1=그룹 헤더, 2=one.txt, 3=two.txt
+    const first = rowCenter(session, 2, content.x, content.y);
+    const second = rowCenter(session, 3, content.x, content.y);
     try std.testing.expect(first.y > 0 and second.y > first.y);
 
     // **down은 무장, up이 적용**이다 — 실제 클릭과 같은 순서로 보낸다.
@@ -54367,7 +54373,7 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
     try std.testing.expectEqual(@as(usize, 2), diffs);
 
     // 그룹 헤더를 누르면 접힌다(열기가 아니다).
-    const header = rowCenter(session, 0, content.x, content.y);
+    const header = rowCenter(session, 1, content.x, content.y);
     session.mouse(1, header.x, header.y, 0, 0);
     session.mouse(3, header.x, header.y, 0, 0);
     try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
@@ -54385,6 +54391,7 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
 
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
+    try pinTermsOutsideRepo(session, allocator); // 목록은 터미널 cwd에서 나온다 — 환경이 새지 않게 고정
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     dock_ops.setDockView(session, .source_control);
@@ -54420,8 +54427,9 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
         }
     }.at;
 
-    const header = rectOf(session, chrome.components.scm_dock.build.NodeIds.item(0)) orelse return error.MissingHeader;
-    const bulk = rectOf(session, chrome.components.scm_dock.build.NodeIds.itemAction(0)) orelse return error.MissingBulk;
+    // 0=저장소 머리 줄(P3d), 1=그룹 헤더. 동작 버튼은 그 행의 차선에 있으므로 같은 인덱스를 쓴다.
+    const header = rectOf(session, chrome.components.scm_dock.build.NodeIds.item(1)) orelse return error.MissingHeader;
+    const bulk = rectOf(session, chrome.components.scm_dock.build.NodeIds.itemAction(1)) orelse return error.MissingBulk;
 
     // ① 버튼 한가운데 — **일괄 동작**이어야 한다(행이 삼키면 접힌다).
     const bx = @as(f64, @floatFromInt(content.x)) + bulk.x + bulk.width / 2;
@@ -54444,9 +54452,27 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
 
 /// 커밋 상자까지 그려진 소스 컨트롤 도크를 세운다(P3c 입력 테스트 공용). published tree가 있어야
 /// 상자 rect를 찾을 수 있고, 그래야 클릭 좌표 → caret 변환이 **그린 것과 같은 기하**를 지난다.
+/// 스모크 세션의 모든 Term을 **저장소 아닌 폴더**에 세운다.
+///
+/// 저장소 목록은 이제 터미널들의 cwd에서 나오는데(P3d §3.5.1c), 스모크 Term은 OSC 7이 없어 커널 cwd로
+/// 폴백한다 — 그건 **테스트 프로세스의 cwd**, 즉 이 저장소다. 그대로 두면 테스트가 "어디서 돌았는가"에
+/// 따라 목록이 하나 더 생겨 결과가 갈린다(사이드바 테스트가 같은 이유로 `/tmp`를 심는다).
+fn pinTermsOutsideRepo(session: *AppSession, allocator: std.mem.Allocator) !void {
+    for (session.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                term.rt.observation.cwd.clearRetainingCapacity();
+                try term.rt.observation.cwd.appendSlice(allocator, "/tmp");
+                term.rt.observation.availability = .current;
+            }
+        }
+    }
+}
+
 fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, arena: std.mem.Allocator) !void {
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
+    try pinTermsOutsideRepo(session, allocator);
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     dock_ops.setDockView(session, .source_control);
@@ -54456,7 +54482,6 @@ fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, 
         .ok = true,
     };
     git_ops.rememberGitRepo(session, "/repo");
-    _ = allocator;
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     const props = scm_dock_ops.testProps(session, projection);
     const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
@@ -55013,6 +55038,8 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    // 저장소 목록은 터미널 cwd에서 나온다(P3d) — 테스트 프로세스의 저장소가 새 들어오지 않게 고정한다.
+    try pinTermsOutsideRepo(session, allocator);
 
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
@@ -55034,7 +55061,9 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-    try std.testing.expectEqual(@as(usize, 0), projection.items.len);
+    // 저장소 머리 줄 하나만 있고 **파일 줄은 없다**(P3d — 목록의 첫 층이 저장소다).
+    try std.testing.expectEqual(@as(usize, 1), projection.items.len);
+    try std.testing.expect(projection.items[0] == .repo);
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqualStrings(git_ops.notice_no_changes, props.empty_notice);
 
@@ -55075,6 +55104,8 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    // 저장소 목록은 터미널 cwd에서 나온다(P3d) — 테스트 프로세스의 저장소가 새 들어오지 않게 고정한다.
+    try pinTermsOutsideRepo(session, allocator);
 
     session.git_backend = try git_backend_mod.Backend.init(session.io);
     // **실제 git을 띄우지 않는다.** 여기서 보는 것은 클릭 → intent 배선이고, 실행은 git_backend의
@@ -55111,7 +55142,8 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
     // 2번 행(`two.txt`)의 **동작 버튼** rect를 찾는다. 행 rect가 아니라 버튼 rect여야 `+`를 누른 것이다.
     const button = blk: {
         for (session.scm_dock_entries.items) |entry| {
-            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(2)) continue;
+            // 0=저장소 머리 줄(P3d) · 1=그룹 헤더 · 2=one.txt · **3=two.txt**.
+            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(3)) continue;
             break :blk .{
                 .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + entry.rect.width / 2,
                 .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height / 2,

@@ -755,6 +755,9 @@ const commit_fixture_caret: usize = 40;
 
 fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const items = [_]scm_dock.types.Item{
+        // 저장소·워크트리 머리 줄(P3d-②). 같은 이름의 두 줄을 사용자가 구별해야 하므로 **종류가
+        // 글리프로** 보여야 하고, 접힌 줄도 개수를 갖는다 — 그 셋이 한 캡처에 든다.
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/lab-fixture", .primary = true, .count = 4 } },
         .{ .section = .{ .section = .staged, .count = 1, .collapsed = false, .action = .unstage } },
         .{ .file = .{ .model_index = 1, .name = "staged.zig", .dir = "src/session/", .status = .added, .letter = 'A', .added = 12, .removed = 0, .has_delta = true, .action = .unstage } },
         .{ .section = .{ .section = .changes, .count = 3, .collapsed = false, .action = .stage } },
@@ -762,6 +765,8 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 충돌 행은 **동작이 없다**(`git add`가 "해결됨"으로 표시하므로). 그 사실이 화면에서 버튼의 부재로 보인다.
         .{ .file = .{ .model_index = 4, .name = "conflict.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = .none } },
         .{ .file = .{ .model_index = 5, .name = "untracked.txt", .dir = "", .status = .added, .letter = 'U', .action = .stage } },
+        // 접힌 워크트리 — 자기 줄과 개수만 있고 그 아래 행이 없다(host가 안 넣는다).
+        .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
     };
     const props = scm_dock.types.Props{
         // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.

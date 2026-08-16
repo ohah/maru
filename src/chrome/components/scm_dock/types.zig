@@ -66,7 +66,38 @@ pub const FileItem = struct {
 
 pub const MoreItem = struct { section: Section, hidden: u32 };
 
+/// 저장소·워크트리 하나의 **머리 줄**(§3.5.1c). 목록의 단위가 저장소가 아니라 워크트리이므로 이 행
+/// 하나가 곧 한 워크트리다.
+///
+/// 화면에 세 가지가 함께 선다: 접힘 표시 · 이름 · 브랜치 칩. 동작 아이콘 줄(새로고침·스테이지·커밋…)은
+/// 다음 조각이다 — **자리를 먼저 잡되 없는 버튼을 그리지 않는다**(P1 계약은 "누를 수 없는 컨트롤은
+/// 비활성으로 표시한다"이지 "아직 없는 컨트롤을 그린다"가 아니다).
+pub const RepoItem = struct {
+    /// 목록 안에서 이 저장소의 자리. host가 같은 스냅샷에서 이 저장소를 다시 찾는 열쇠다 —
+    /// **경로 문자열로 되찾지 않는다**(창이 스크롤되면 화면 자리와 어긋난다는 이유는 파일 행과 같다).
+    index: u32,
+    /// 화면에 그릴 이름. 보통 마지막 경로 조각이고, 같은 이름이 둘이면 host가 구별되는 데까지 늘린다.
+    name: []const u8,
+    /// 체크아웃된 브랜치. 분리 HEAD면 짧은 해시가 대신 온다(host가 정한다 — 컴포넌트는 문자열만 그린다).
+    branch: []const u8 = "",
+    /// 접혀 있나. 접히면 그 저장소의 커밋 상자·요약·파일 행이 목록에 아예 없다(host가 안 넣는다).
+    collapsed: bool = false,
+    /// 주 워크트리(저장소 루트 자신)인가. 아이콘이 갈린다 — 워크트리는 "딸린 것"이라는 사실이 보여야
+    /// 사용자가 같은 이름의 두 줄을 구별한다.
+    primary: bool = true,
+    /// 그 저장소의 변경 파일 수. 접혀 있어도 보여야 "여기 뭔가 있다"를 안다(VS Code도 그렇다).
+    count: u32 = 0,
+    /// 아직 그 저장소를 **읽지 않았다**. 읽기는 하나씩 순차로 도므로(§3.5.1c) 목록에 있는데 아직
+    /// 차례가 안 온 저장소가 생긴다.
+    ///
+    /// **0건과 구별해야 한다** — 배지가 없는 것을 사용자는 "변경 없음"으로 읽는다. 이 값이 참이면
+    /// 배지 대신 `읽는 중…`을 적어 "아직 모른다"를 말한다.
+    pending: bool = false,
+};
+
 pub const Item = union(enum) {
+    /// 저장소·워크트리 머리 줄. **목록의 첫 층**이고, 그 아래에 그 저장소의 줄들이 온다.
+    repo: RepoItem,
     section: SectionItem,
     file: FileItem,
     more: MoreItem,
@@ -180,6 +211,8 @@ pub const DockMetrics = struct {
     row_h: u32,
     /// 브랜치 줄 높이.
     branch_h: u32,
+    /// 저장소·워크트리 머리 줄 높이.
+    repo_h: u32,
     /// 커밋 메시지 상자의 **한 시각 행** 높이. 상자 전체 높이는 이것 × 보이는 행 수다 —
     /// 내용을 따라 자라고 상한에서 멈춘다(§12.2).
     commit_row_h: u32,
@@ -220,6 +253,9 @@ pub const DockMetrics = struct {
             .section_h = s.px(24, scale_milli),
             .row_h = s.px(24, scale_milli),
             .branch_h = s.px(26, scale_milli),
+            // 그룹 헤더(24)보다 크고 탭 줄(34)보다 작다 — 목록 안에서 가장 굵은 층이되 고정 chrome보다는
+            // 가볍다.
+            .repo_h = s.px(30, scale_milli),
             // **글자 줄 높이 그대로다.** 여기서 따로 20px를 고르면 상자 높이는 20씩 세는데 `view`는
             // 17(=`.control` 줄 높이)씩 줄을 놓아, 줄이 늘수록 아래에 빈 띠가 남고 클릭 → 행 변환도
             // 그만큼 어긋난다(같은 값의 출처가 둘이면 늘 이렇게 갈린다).
@@ -263,6 +299,9 @@ pub const DockMetrics = struct {
 
     pub fn itemHeight(self: DockMetrics, item: Item) u32 {
         return switch (item) {
+            // 머리 줄은 그룹 헤더보다 한 급 크다 — 이름·브랜치 칩이 함께 서고, 목록의 첫 층이라
+            // 눈이 여기서 끊겨야 저장소 경계가 보인다.
+            .repo => self.repo_h,
             .section => self.section_h,
             .file => self.row_h,
             // "모두 보기"와 안내는 파일 행과 같은 높이를 쓴다(줄이 하나이므로).

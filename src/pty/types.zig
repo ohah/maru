@@ -197,6 +197,23 @@ pub const ForegroundProcessName = struct {
 /// **필드 이름이 wire tag가 아니다.** 이 구조체는 `RuntimeSpawnParams`를 거쳐 세션 호스트 RPC를 건너가는데,
 /// 그 JSON 키는 손으로 적은 문자열이라 Zig 필드 이름과 독립이다(docs/session-host-upgrade.md — 영속 호스트라
 /// 새 앱이 **옛 호스트**와 대화한다). 그래서 여기 이름을 바꿔도 wire는 그대로다.
+/// 셸 통합을 심는 **메커니즘의 축**. 자세한 근거는 `SpawnRequest.shell_integration`과 계약 §4.2a.
+pub const ShellIntegration = union(enum) {
+    /// 통합 자산 파일이 놓인 디렉터리. 셸이 시작하며 그 파일을 읽는다(zsh `ZDOTDIR`, bash rc).
+    /// **WSL·git-bash도 여기다** — Windows 호스트이지만 경로는 게스트 네임스페이스다.
+    assets_dir: []const u8,
+    /// 파일 없이 심는다 — 메커니즘은 백엔드가 고른다(PowerShell 인라인 `-Command`, cmd `PROMPT`).
+    inline_injection,
+
+    /// 파일 갈래일 때의 디렉터리, 아니면 null. 파일 기반 백엔드가 이 한 줄로 예전과 같은 값을 얻는다.
+    pub fn assetsDir(self: ShellIntegration) ?[]const u8 {
+        return switch (self) {
+            .assets_dir => |dir| dir,
+            .inline_injection => null,
+        };
+    }
+};
+
 pub const SpawnRequest = struct {
     // command는 shell을 거치지 않고 execve에 직접 넘길 실행 파일 경로다.
     // 이렇게 두면 테스트에서 shell quoting과 process spawning 책임을 분리할 수 있다.
@@ -230,28 +247,23 @@ pub const SpawnRequest = struct {
     /// **의미는 백엔드가 정한다.** POSIX 셸에는 terminfo 항목 이름이지만 네이티브 Windows 셸(cmd·PowerShell)은
     /// terminfo를 안 쓴다 — 거기서는 WSL·msys로 들어가는 프로그램에만 뜻이 있다(계약 §4.2).
     term: []const u8 = "xterm-256color",
-    /// **셸 통합 자산 디렉터리** — maru가 셸에 심을 통합 스크립트가 있는 곳. null이면 통합 없이 띄운다.
+    /// **셸 통합을 어떻게 심을 것인가.** null이면 통합 없이 띄운다.
     ///
-    /// **어떻게 심을지는 백엔드가 정한다**(계약 §4.2). 한때 이 필드 이름이 `zdotdir`이라 zsh라는 셸 이름까지
-    /// 중립 계약에 새고 있었다 — 그 이름은 macOS 백엔드가 쓰는 **메커니즘**이지 계약이 아니다.
+    /// **갈리는 축은 OS가 아니라 메커니즘이다**(계약 §4.2a). 한때 이 필드는 `?[]const u8`(자산 디렉터리)
+    /// 였는데, Windows 네이티브 두 셸은 **파일을 만들지 않아** 가리킬 디렉터리가 없다. 그렇다고 "Windows는
+    /// 이 필드를 안 쓴다"로 가를 수도 없다 — **WSL·git-bash의 bash/zsh는 Windows 호스트인데 파일 기반**이다.
     ///
-    /// | 백엔드 | 매핑 |
-    /// |---|---|
-    /// | macOS(zsh) | `ZDOTDIR=<이 값>`을 주입하고 기존 값은 `MARU_ZDOTDIR_PREV`로 보존한다. zsh가 그 디렉터리의 Maru `.zshenv`를 로드해 편집키를 바인딩한다 |
-    /// | Windows(PowerShell) | 인라인 `-Command`로 `prompt` 함수 정의(+`-NoExit`). **프로필 스크립트가 아니다** — `ExecutionPolicy`가 막는다(계약 §3.3) |
-    /// | Windows(cmd) | `PROMPT` |
+    /// | 갈래 | 쓰는 셸 | 백엔드가 고르는 메커니즘 |
+    /// |---|---|---|
+    /// | `assets_dir` | zsh·bash (macOS, 그리고 Windows의 WSL·git-bash) | `ZDOTDIR=<값>` 주입, 기존 값은 `MARU_ZDOTDIR_PREV`로 보존 |
+    /// | `inline_injection` | PowerShell·cmd | pwsh는 인라인 `-Command`(+`-NoExit`), cmd는 `PROMPT` 환경변수. **스크립트 파일이 아니다** — `ExecutionPolicy`가 막는다(계약 §3.3) |
     ///
-    /// **wire tag는 여전히 `"zdotdir"`다** — 필드 이름과 독립이다(위 struct doc). 바꾸려면 명시적 converter와
-    /// version bump가 따로 필요하다.
-    ///
-    /// **W5에서 union으로 바뀐다**(계약 §4.2a). 이 필드는 "자산 파일이 놓인 디렉터리"인데 Windows 네이티브
-    /// 두 셸은 파일을 안 만든다(PowerShell 인라인 `-Command`, cmd `PROMPT`). 그렇다고 "Windows는 안 쓴다"로
-    /// 가를 수도 없다 — **WSL·git-bash의 bash/zsh는 Windows 호스트인데 파일 기반**이다. 그래서 갈리는 축은
-    /// OS가 아니라 메커니즘이고, `assets_dir` / `inline_injection` 두 갈래가 된다. 파일 갈래는 지금 wire 키를
-    /// 그대로 쓰므로 그 전환이 wire를 깨지 않는다.
+    /// **wire tag는 여전히 `"zdotdir"`이고 파일 갈래만 그것을 쓴다** — 필드 이름과 독립이다(위 struct doc).
+    /// `inline_injection`은 아직 wire를 건너가지 않는다: 그 값을 생산하는 것은 Windows 호스트(W7)뿐이고,
+    /// 세션 호스트는 오늘 macOS 전용이라 `assets_dir`만 낸다. 그래서 이 전환이 wire를 깨지 않는다.
     ///
     /// env를 명시로 넘기면(테스트) 무시된다.
-    shell_integration_dir: ?[]const u8 = null,
+    shell_integration: ?ShellIntegration = null,
     // 셸 통합 ssh 라우팅(opt-in)이 켜졌을 때 현재 maru 실행 파일 경로. 설정되면 셸에 MARU_BIN=<이 값>과
     // MARU_SSH_INTEGRATION=1을 주입한다 — 통합 .zshenv가 이 둘을 보고 `ssh`를 `maru ssh`로 라우팅하는
     // 함수를 정의한다(없으면 평범한 ssh 그대로). 이 단일 optional이 "기능 on + 바이너리 경로"를 함께

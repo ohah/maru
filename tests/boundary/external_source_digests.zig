@@ -448,7 +448,11 @@ pub const inventory = [_]Proof{
     // 조각 단위 세로 스크롤(§4.1d)로 Term rt에 필드 셋이 붙는다(`editor_first_piece` — 맨 위 줄에서
     // 건너뛸 조각, `editor_max_top_line`·`editor_max_top_piece` — 렌더가 실어 두는 스크롤 상한).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f2b2ad5aaee0665e648265603877cbf843292b87c0af8e1427541a21c6921805" },
+    //
+    // W5(Windows 셸 통합)에서 **한 줄** 움직인다: `SpawnRequest.shell_integration_dir`이 union
+    // `shell_integration`으로 바뀌어(계약 §4.2a) 이 파일의 설정 자리가 `.{ .assets_dir = dir }`로 감싼다.
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4b5ce6fef32dbfe8ade291ae89648f4f3aef8ab118b4d3c4eba22590037aae0a" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

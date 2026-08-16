@@ -1272,10 +1272,7 @@ pub fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
     }
     const roots = [_][]const u8{root};
     _ = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch |err| {
-        self.showNotice(if (err == error.ProtectedEntry)
-            "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 삭제할 수 없습니다."
-        else
-            "이 항목은 삭제할 수 없습니다.");
+        self.showNoticeKey(if (err == error.ProtectedEntry) .fp_delete_protected else .fp_delete_denied);
         return;
     };
     self.pending_file_tree_delete = copyPendingFileTreeDelete(target, self.file_tree.rootGeneration()) orelse return;
@@ -2161,12 +2158,12 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
         .create_directory => file_tree_mutation.planCreate(&roots, policy_target, name, true),
         .rename => file_tree_mutation.planRename(&roots, policy_target, name, protections[0..protection_len]),
     } catch |err| {
-        self.showNotice(switch (err) {
-            error.InvalidName => "이름은 비어 있거나 '.', '..'일 수 없고 '/'를 포함할 수 없습니다.",
-            error.ProtectedEntry => "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 변경할 수 없습니다.",
-            error.SymlinkContainer => "심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.",
-            error.Unchanged => "같은 이름입니다.",
-            else => "이 항목은 변경할 수 없습니다.",
+        self.showNoticeKey(switch (err) {
+            error.InvalidName => .fp_name_invalid,
+            error.ProtectedEntry => .fp_change_protected,
+            error.SymlinkContainer => .fp_symlink_dir_create_denied,
+            error.Unchanged => .fp_name_unchanged,
+            else => .fp_change_denied,
         });
         return false;
     };
@@ -2906,11 +2903,11 @@ pub fn updateFileTreeMutations(self: *AppSession) void {
             result.source_transferred = true;
             return;
         }
-        self.showNotice(switch (result.failure) {
-            .collision => "같은 이름의 항목이 이미 있습니다.",
-            .not_found => "대상이 사라져 파일 변경을 완료하지 못했습니다.",
-            .denied => "권한이 없어 파일을 변경할 수 없습니다.",
-            else => "파일 변경에 실패했습니다. 트리와 열린 탭은 유지됩니다.",
+        self.showNoticeKey(switch (result.failure) {
+            .collision => .fp_mutation_collision,
+            .not_found => .fp_mutation_not_found,
+            .denied => .fp_mutation_denied,
+            else => .fp_mutation_failed,
         });
         return;
     }
@@ -3588,10 +3585,9 @@ pub fn retainFileTreeRecoveryPath(self: *AppSession, recovery_path: []u8) void {
     std.debug.assert(self.file_tree_manual_recovery_paths_len < self.file_tree_manual_recovery_paths.len);
     self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = recovery_path;
     self.file_tree_manual_recovery_paths_len += 1;
-    var message_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
-    const message = std.fmt.bufPrint(&message_buf, "자동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {s}", .{recovery_path}) catch
-        "자동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.";
-    self.showNotice(message);
+    // 경로가 끼는 유일한 notice — 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르므로 옛 폴백 문장은
+    // 필요 없다(잘려도 경로 앞부분이 남아 어느 파일인지 좁힐 수 있다).
+    self.showNoticeFmt(.fp_manual_recovery, &.{.{ .s = recovery_path }});
 }
 
 pub fn selectFirstFileTreeRow(self: *AppSession) void {
@@ -3651,7 +3647,7 @@ pub fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry
     return true;
 }
 
-pub fn abortWaitingFileTreeMutation(self: *AppSession, mutation_id: u64, message: []const u8) void {
+pub fn abortWaitingFileTreeMutation(self: *AppSession, mutation_id: u64, message: maru.i18n.Key) void {
     if (self.file_tree_mutation_waiting_request) |*request| {
         if (request.id == mutation_id) {
             request.deinit(self.allocator);
@@ -3669,7 +3665,7 @@ pub fn abortWaitingFileTreeMutation(self: *AppSession, mutation_id: u64, message
     self.file_tree_delete_inflight = false;
     self.file_tree_rows_dirty = true;
     self.metal_dirty = true;
-    self.showNotice(message);
+    self.showNoticeKey(message);
 }
 
 pub fn fileTreeFileMutationBusy(self: *const AppSession) bool {
@@ -4255,7 +4251,7 @@ pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.ses
     if (mutation_lock) |lock| {
         if (entry.external_change or report.dirty) {
             const mutation_id = lock.mutation_id;
-            abortWaitingFileTreeMutation(self, mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
+            abortWaitingFileTreeMutation(self, mutation_id, .fp_abort_unsaved);
             return;
         }
         lock.acknowledged = true;
@@ -4276,7 +4272,7 @@ pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.ses
 pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
     if (fileTreeMutationEditorLock(self, surface_id, request_id)) |lock| {
         const mutation_id = lock.mutation_id;
-        abortWaitingFileTreeMutation(self, mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
+        abortWaitingFileTreeMutation(self, mutation_id, .fp_abort_edit_check);
         return;
     }
     const pending = self.pending_file_panel_close orelse return;

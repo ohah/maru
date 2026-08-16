@@ -5788,13 +5788,7 @@ pub const AppSession = struct {
             host_connect_failure_reason,
             host_connect_failure_error,
         );
-        var buf: [220]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "영속 세션 host에 연결하지 못했습니다({s}). 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).",
-            .{detail},
-        ) catch "영속 세션 host에 연결하지 못했습니다. 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).";
-        self.showNotice(msg);
+        self.showNoticeFmt(.app_host_connect_failed, &.{.{ .s = detail }});
     }
 
     /// §7 종료 placeholder가 하나 이상 복원됐음을 첫 tick에 알린다(host connect notice와 같은 self-gate 패턴 — 복원은
@@ -5804,13 +5798,7 @@ pub const AppSession = struct {
         if (self.ended_placeholder_notice_pending == 0) return;
         const count = self.ended_placeholder_notice_pending;
         self.ended_placeholder_notice_pending = 0;
-        var buf: [160]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "이전 세션 {d}개가 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.",
-            .{count},
-        ) catch "이전 세션이 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.";
-        self.showNotice(msg);
+        self.showNoticeFmt(.app_ended_placeholder, &.{.{ .d = @intCast(count) }});
     }
 
     pub const RestoreAccountingSnapshot = struct {
@@ -6113,9 +6101,7 @@ pub const AppSession = struct {
             var detail_buf: [48]u8 = undefined;
             const detail = startupExitDetail(&detail_buf, ended);
             // 초기 알림(토스트) + 죽은 surface 터미널 화면에 지속 안내(notice를 닫아도 남는다 — #5 지속성).
-            var notice_buf: [320]u8 = undefined;
-            const msg = std.fmt.bufPrint(&notice_buf, "셸이 시작 직후 비정상 종료됐습니다 ({s}). ⏎ 다시 시도 · ⌘, 설정에서 shell.command·shell.args 확인.", .{detail}) catch "셸이 시작 직후 종료됐습니다 — ⏎ 다시 시도 · ⌘, 설정.";
-            self.showNotice(msg);
+            self.showNoticeFmt(.app_shell_died_startup, &.{.{ .s = detail }});
             self.writeHeldGuidance(detail);
         } else {
             self.ended_seen = true;
@@ -7486,10 +7472,10 @@ pub const AppSession = struct {
         if (self.pending_file_panel_close) |pending| {
             if (pending.surface_id == surface_id and pending.phase == .saving) return;
         }
-        self.showNotice(switch (err) {
-            error.ExternalConflict => "파일이 외부에서 바뀌어 저장할 수 없습니다. 파일을 다시 불러온 뒤 저장하세요.",
-            error.TooLarge => "파일이 너무 커서 저장할 수 없습니다.",
-            else => "파일을 저장할 수 없습니다.",
+        self.showNoticeKey(switch (err) {
+            error.ExternalConflict => .app_save_external_conflict,
+            error.TooLarge => .app_save_too_large,
+            else => .app_save_failed,
         });
     }
 
@@ -7820,11 +7806,10 @@ pub const AppSession = struct {
             return;
         }
         const in_path = if (std.c.getenv("PATH")) |p| maru.cli.install.pathContainsDir(std.mem.span(p), bindir) else false;
-        const msg = if (in_path)
-            std.fmt.allocPrint(a, "maru CLI 설치됨: {s}", .{link}) catch "maru CLI 설치됨"
+        if (in_path)
+            self.showNoticeFmt(.app_cli_installed, &.{.{ .s = link }})
         else
-            std.fmt.allocPrint(a, "maru CLI 설치됨: {s} — PATH에 {s} 추가 필요(예: ~/.zshrc)", .{ link, bindir }) catch "maru CLI 설치됨";
-        self.showNotice(msg); // showNotice가 notice_message_buf로 복사하므로 arena deinit 후에도 유효
+            self.showNoticeFmt(.app_cli_installed_path_hint, &.{ .{ .s = link }, .{ .s = bindir } });
     }
 
     /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
@@ -11282,9 +11267,7 @@ pub const AppSession = struct {
             // 트리만 본다). **다른 pane에 붙이지 않는다** — 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가
             // 꽂히는 것이 이 PR이 없애려는 오삽입 그 자체다(code-review). 그렇다고 조용히 버리면 파일은 원격에
             // 올라갔는데 경로를 참조할 방법이 없으니, **notice 토스트로 경로를 보여준다**(붙이지 않고 알린다).
-            const msg = std.fmt.allocPrint(self.allocator, "업로드 완료(드롭한 pane이 닫힘): {s}", .{r.path}) catch continue;
-            defer self.allocator.free(msg);
-            self.showNotice(msg);
+            self.showNoticeFmt(.app_upload_done_pane_closed, &.{.{ .s = r.path }});
         }
     }
 
@@ -16608,7 +16591,9 @@ pub const AppSession = struct {
     /// 값이 끼는 문장용 — `key`를 §6.3 보간으로 채운 뒤 같은 경로로 보낸다.
     /// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르고, `showNotice`가 다시 복사한다.
     pub fn showNoticeFmt(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
-        var buf: [256]u8 = undefined;
+        // notice 버퍼와 같은 크기 — 여기서 더 크게 만들어 봐야 `copyOverlayMessage`가 다시 자른다.
+        // 경로처럼 긴 값이 끼는 자리(파일 트리 수동 복구 안내)가 있어 256 으로는 모자랐다.
+        var buf: [512]u8 = undefined;
         self.showNotice(maru.i18n.format(&buf, maru.i18n.t(key), args));
     }
 

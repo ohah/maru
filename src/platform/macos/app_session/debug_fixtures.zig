@@ -847,11 +847,11 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
     _ = editor_ops.openPathInActivePane(self, path) catch |e| {
         // **왜 못 열었는지 구분해서 알린다.** §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고
         // 정했으므로, 나머지 이유가 같은 메시지로 뭉개지면 그 계약을 확인할 수 없다.
-        self.showNotice(switch (e) {
-            error.NotUtf8 => "네이티브 편집기: UTF-8이 아니라 열지 않았습니다.",
-            error.TooLarge => "네이티브 편집기: 파일이 읽기 상한을 넘었습니다.",
-            error.Unreadable => "네이티브 편집기: 파일을 읽지 못했습니다.",
-            error.OutOfMemory => "네이티브 편집기: 메모리가 모자랍니다.",
+        self.showNoticeKey(switch (e) {
+            error.NotUtf8 => .dbg_editor_not_utf8,
+            error.TooLarge => .dbg_editor_too_large,
+            error.Unreadable => .dbg_editor_unreadable,
+            error.OutOfMemory => .dbg_editor_oom,
         });
         return;
     };

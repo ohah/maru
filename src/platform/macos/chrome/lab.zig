@@ -46,6 +46,10 @@ pub const ScenarioId = enum {
     /// 없으면 그 버튼의 자리를 아무도 못 본다 — 실제로 `+`가 상태 문자와 겹치고(#2209), 색 없는 테두리가
     /// 배경을 뚫고, 버튼이 개수 배지 위로 올라온 결함 셋이 전부 이 상태에서만 보였다.
     scm_row_hover,
+    /// 커밋 메시지 상자가 **편집 중**인 상태(P3c). caret·선택 밴드·여러 줄·랩은 전부 이 상태에서만
+    /// 그려지고, 그 중 무엇도 단위 테스트가 "자리"까지 보지는 못한다 — 열을 셀 폭으로 환산해 놓는
+    /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다.
+    scm_commit_edit,
     /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
     /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
     sidebar_status_strip,
@@ -188,7 +192,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
@@ -722,7 +726,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .scm_rows, .scm_row_hover, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
+            .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -743,6 +747,12 @@ fn buildDockFrame(
 /// 행 구성은 이 도크가 실제로 내는 형태를 덮도록 골랐다: 두 그룹 · 스테이지된 파일 · 추적되지 않은 파일 ·
 /// **충돌 파일**(동작이 없는 행) · 증감이 있는 파일. 그래야 상태 문자 색 축과 "동작 없는 행은 자리를
 /// 비우지 않는다"가 한 캡처에 든다.
+/// 커밋 상자 fixture. 제목 줄 + 빈 줄 + **도크 폭에서 접히는 긴 본문**을 함께 담는다 — 셋이 아니면
+/// 랩·빈 줄·caret 중 하나가 무판정으로 남는다.
+const commit_fixture_message = "fix: 커밋 상자를 그린다\n\n랩이 켜져 있어 이 줄은 도크 폭에서 접힌다.";
+/// caret 오프셋 — 둘째(빈) 줄 다음 본문 안이다.
+const commit_fixture_caret: usize = 40;
+
 fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const items = [_]scm_dock.types.Item{
         .{ .section = .{ .section = .staged, .count = 1, .collapsed = false, .action = .unstage } },
@@ -767,8 +777,18 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .changed_file_count = 4,
         // 커밋 상자: 스테이지된 파일이 있으므로 버튼이 **켜진** 상태다(§7 — 실제 index 상태로만 정한다).
         // 두 상태(꺼짐/켜짐)를 한 캡처에 담을 수 없어, 켜진 쪽을 고른다 — 꺼짐은 단위 테스트가 본다.
-        .commit_rows = 1,
+        .commit_rows = if (scenario.id == .scm_commit_edit) 3 else 1,
         .commit_enabled = true,
+        // 편집 상태는 **한 시나리오만** 싣는다. 목록 시나리오까지 caret을 켜면 그 두 골든이 caret
+        // 깜빡임 축까지 떠안게 되고, 목록이 바뀔 때마다 상자 픽셀이 함께 흔들린다.
+        .commit_message = if (scenario.id == .scm_commit_edit) commit_fixture_message else "",
+        .commit_edit = if (scenario.id == .scm_commit_edit) .{
+            .focused = true,
+            // caret은 둘째 줄 안이다 — 첫 줄 끝에 두면 "줄을 따라 내려갔나"가 안 보인다.
+            .caret = commit_fixture_caret,
+            // 선택은 **줄을 넘는다**. 한 줄 안 선택은 밴드가 잘리는지를 증언하지 못한다.
+            .selection = .{ .anchor = 3, .focus = commit_fixture_caret },
+        } else .{},
     };
     const frame = try scm_dock.build.build(props, .{
         .nodes = buffers.scm_nodes,

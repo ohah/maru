@@ -419,6 +419,11 @@ pub const inventory = [_]Proof{
     // 있었다 — docs/windows-platform.md §4.2) 여기서 그 필드를 세우는 한 줄이 따라 바뀐다. **count는 2 그대로다**
     // — 필드 이름만 달라졌고 `@field` 반사 접근도 Client 구성·receiver 집합도 건드리지 않았다. wire 키는
     // `"zdotdir"`로 남아 있어 세션 호스트 RPC도 그대로다.
+    //
+    // 커밋 메시지 상자가 키를 받게 되며 또 움직인다(P3c): `InputFocus.scm_commit` 추가와 그에 딸린
+    // 스위치 팔들(조합 확정·터미널 소유 기대표·단독 활성 fixture), 키/붙여넣기/⌘A/⌘C 라우팅,
+    // `scmCommitOwnsInput` 게이트, 편집 버퍼 해제, caret 깜빡임 게이트. count는 2 그대로다 — 새 `@field`
+    // 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3a03544fa99dabf1b9aa0aa0116d00b94058d80e356b766af8a115048fbc8019" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

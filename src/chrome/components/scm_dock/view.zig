@@ -16,6 +16,8 @@ const text_layout = @import("../../text_layout.zig");
 const file_tree_icon = @import("../../file_tree_icon.zig");
 const tree = @import("../../ui/tree.zig");
 const typography = @import("../../ui/typography.zig");
+const text_area = @import("../text_area.zig");
+const text_field = @import("../text_field.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
 
@@ -48,9 +50,9 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + **커밋 3**(입력 한 줄·버튼
-    // 라벨·`∨`) + 호버 동작 1 + 빈 안내 1.
-    var text_ops: usize = 13;
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 커밋 버튼 2(라벨·`∨`) +
+    // 호버 동작 1 + 빈 안내 1. **커밋 입력은 시각 행마다 한 조각**이라 아래에서 따로 더한다.
+    var text_ops: usize = 11 + @max(props.commit_rows, 1);
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
@@ -84,8 +86,9 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     bytes += 4;
 
     return .{
-        // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나.
-        .ops = entry_count + props.items.len + 1 + text_ops,
+        // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나 +
+        // **커밋 상자의 선택 밴드(시각 행당 최대 하나) + caret 하나**.
+        .ops = entry_count + props.items.len + 1 + @max(props.commit_rows, 1) + 1 + text_ops,
         .runs = text_ops,
         .text_bytes = bytes,
     };
@@ -197,12 +200,7 @@ pub fn view(
 
     // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 아래).
     if (frame.tree.find(build.NodeIds.commit_box)) |index| {
-        const rect = frame.tree.entries[index];
-        // 빈 상자에는 **안내 문구**를 흐리게 둔다. 빈 채로 두면 어디를 눌러야 할지 알 수 없고, 그 자리가
-        // 입력란이라는 사실이 화면에 없다.
-        const empty = props.commit_message.len == 0;
-        const text = if (empty) commit_placeholder else props.commit_message;
-        try writer.topLine(rect, @floatFromInt(m.inset_x), @floatFromInt(m.commit_pad_y), text, if (empty) .muted_fg else .surface_fg, .control);
+        try writer.commitBox(frame.tree.entries[index], m);
     }
     if (frame.tree.find(build.NodeIds.commit_button)) |index| {
         const rect = frame.tree.entries[index];
@@ -224,6 +222,12 @@ pub fn view(
 const commit_placeholder = "커밋 메시지…";
 /// 커밋 버튼 라벨.
 const commit_label = "커밋";
+/// 랩 결과를 담을 시각 행 상한. **상자가 보여 줄 행 수가 아니라** 메시지 전체의 행 수다 — caret이
+/// 몇 번째 줄에 있는지 알려면 보이지 않는 줄까지 세야 한다. 넘치면 `wrap`이 `truncated`로 말하고,
+/// 그때 caret은 마지막 행으로 붙는다(그 사실을 감추는 것보다 낫다).
+const commit_wrap_max_rows: usize = 256;
+/// caret 두께. 1px은 Retina에서 사라지다시피 하고 3px은 글자 사이를 벌려 보이게 한다.
+const caret_width_px: u32 = 2;
 
 /// 탭 제목. 그룹 제목과 같은 이유로 **컴포넌트가 소유한다**.
 fn tabTitle(tab: types.Tab) []const u8 {
@@ -525,6 +529,114 @@ const Writer = struct {
             @intFromFloat(width),
             .origin,
         );
+    }
+
+    /// 커밋 메시지 상자 한 장 — 여러 줄 글자·선택 밴드·caret.
+    ///
+    /// **랩은 여기서 다시 돈다.** host가 준 `commit_rows`는 상자 *높이*이고, 어느 글자가 몇 번째 줄에
+    /// 오는지는 그리는 쪽이 알아야 한다. 두 계산이 갈리지 않는 이유는 입력이 하나이기 때문이다 —
+    /// 열 수는 `DockMetrics.commitViewCols`가 단일 출처이고 양쪽이 그것을 부른다.
+    ///
+    /// **가로 축은 `text_field.fieldLayout`이 소유한다**(§12.1). caret 열과 선택 span을 여기서 다시
+    /// 풀면 "그려진 caret == 클릭 caret" 불변식이 두 벌이 되고, 그 둘은 주소창이 이미 지키고 있다.
+    fn commitBox(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
+        const props = self.props;
+        const edit = props.commit_edit;
+        const scale = effectiveScale(props.scale_milli);
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        const pad_y: f32 = @floatFromInt(m.commit_pad_y);
+        const inset: f32 = @floatFromInt(m.inset_x);
+        if (rect.rect.height < line_h + pad_y or rect.rect.width <= inset * 2) return;
+
+        // 빈 상자에는 **안내 문구**를 흐리게 둔다. 빈 채로 두면 어디를 눌러야 할지 알 수 없고, 그 자리가
+        // 입력란이라는 사실이 화면에 없다. 편집 중이어도 비어 있으면 그대로 둔다 — caret이 그 위에 서서
+        // 두 사실(여기가 입력란이다 / 지금 여기로 글자가 간다)을 함께 말한다.
+        if (props.commit_message.len == 0) {
+            try self.topLine(rect, inset, pad_y, commit_placeholder, .muted_fg, .control);
+            if (edit.focused) try self.commitCaret(rect, m, 0, 0, line_h);
+            return;
+        }
+
+        var lines_buf: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+        const cols = m.commitViewCols(rect.rect.width, self.cell_width_px);
+        const wrapped = text_area.wrap(props.commit_message, cols, true, &lines_buf);
+        if (wrapped.lines.len == 0) return;
+
+        const field: text_field.View = .{ .text = props.commit_message, .caret = edit.caret };
+        const caret_row = text_area.lineAt(wrapped, edit.caret);
+        // 첫 행이 내용을 넘어서면(메시지가 줄어든 뒤 스크롤이 남았다) 마지막 행에 붙인다 — 빈 상자를
+        // 보여 주는 것보다 낫다. 스크롤을 실제로 되돌리는 것은 host의 일이다(상태는 그쪽에 있다).
+        const first: usize = @min(@as(usize, edit.first_row), wrapped.lines.len - 1);
+        const visible = @min(@as(usize, @max(props.commit_rows, 1)), wrapped.lines.len - first);
+        const width = rect.rect.width - inset * 2;
+
+        for (0..visible) |offset| {
+            const row = first + offset;
+            const span_line = wrapped.lines[row];
+            const y = rect.rect.y + pad_y + line_h * @as(f32, @floatFromInt(offset));
+            var line_view = text_area.viewForLine(field, wrapped, row);
+
+            // 선택은 **줄마다 잘라서** 넘긴다. 통째로 넘기면 `fieldLayout`이 한 줄 전제로 열을 재서
+            // 두 번째 줄부터 밴드가 엉뚱한 자리에 선다.
+            if (edit.selection) |sel| {
+                const lo = std.math.clamp(sel.lo(), span_line.start, span_line.end);
+                const hi = std.math.clamp(sel.hi(), span_line.start, span_line.end);
+                if (hi > lo) line_view.selection = .{ .anchor = lo - span_line.start, .focus = hi - span_line.start };
+            }
+            const lay = text_field.fieldLayout(line_view, .{ .cols = cols });
+
+            // 밴드를 글자보다 **먼저** 그린다 — 그리는 순서가 곧 z축이다.
+            if (edit.focused) {
+                if (lay.selection) |span| {
+                    if (span.end_col > span.start_col) try self.appendQuad(.{
+                        .rect = .{
+                            .x = @intFromFloat(@floor(rect.rect.x + inset + self.colWidth(span.start_col))),
+                            .y = @intFromFloat(@floor(y)),
+                            .w = @intFromFloat(@max(self.colWidth(span.end_col - span.start_col), 1)),
+                            .h = @intFromFloat(line_h),
+                        },
+                        .fill_role = .selection,
+                    });
+                }
+            }
+            if (line_view.text.len > 0) try self.emit(
+                rect.rect.x + inset,
+                y,
+                line_view.text,
+                cols,
+                .surface_fg,
+                .control,
+                false,
+                @intFromFloat(@max(width, 0)),
+                .origin,
+            );
+            if (edit.focused and row == caret_row) {
+                try self.commitCaret(rect, m, lay.caret_col, offset, line_h);
+            }
+        }
+    }
+
+    /// caret 하나. **글자 위가 아니라 글자 사이**에 서는 얇은 막대다 — 블록 caret은 터미널의 것이고,
+    /// 여기서는 아래 글자가 가려지면 무엇을 고치는 중인지 안 보인다.
+    fn commitCaret(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics, col: u32, row_offset: usize, line_h: f32) ViewError!void {
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const x = rect.rect.x + inset + self.colWidth(col);
+        // 상자 오른쪽 끝을 넘어가면 그리지 않는다 — 넘긴 caret은 테두리 위에 서서 다른 컨트롤처럼 보인다.
+        if (x > rect.rect.x + rect.rect.width - inset) return;
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(x)),
+                .y = @intFromFloat(@floor(rect.rect.y + @as(f32, @floatFromInt(m.commit_pad_y)) + line_h * @as(f32, @floatFromInt(row_offset)))),
+                .w = caret_width_px,
+                .h = @intFromFloat(line_h),
+            },
+            .fill_role = .cursor,
+        });
+    }
+
+    /// 열 수 → 픽셀. 셀 폭은 `props`가 준 값 하나뿐이라 랩·caret·선택이 같은 자를 쓴다.
+    fn colWidth(self: *Writer, cols: u32) f32 {
+        return @floatFromInt(cols * self.cell_width_px);
     }
 
     /// `line`과 같되 **오른쪽 끝을 호출자가 준다.** 행 오른쪽에 이미 앉은 것(증감·상태 문자·동작 버튼)을
@@ -1387,4 +1499,117 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
     const on = findExactText(filled, commit_label) orelse return error.MissingButton;
     // 켜지면 **채운 버튼**이라 글자가 배경색(reverse)이다.
     try testing.expectEqual(tokens.ColorRole.surface_bg, on.role);
+}
+
+/// 커밋 상자 fixture — 상자만 보는 테스트는 목록이 필요 없다. **예산은 제품과 같은 것을 쓴다**.
+fn renderCommit(storage: *TestStorage, message: []const u8, edit: types.CommitEdit, rows: u32) !draw.ChromeDraw {
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .commit_message = message,
+        .commit_rows = rows,
+        .commit_edit = edit,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    return viewBudgeted(storage, props, frame, .{});
+}
+
+fn countQuads(draws: draw.ChromeDraw, role: tokens.ColorRole) usize {
+    var n: usize = 0;
+    for (draws.ops) |op| switch (op) {
+        .quad => |quad| if (quad.fill_role == role) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+fn firstQuad(draws: draw.ChromeDraw, role: tokens.ColorRole) ?draw.Op.Quad {
+    for (draws.ops) |op| switch (op) {
+        .quad => |quad| if (quad.fill_role == role) return quad,
+        else => {},
+    };
+    return null;
+}
+
+test "여러 줄 메시지는 줄마다 한 조각으로 나온다(한 덩어리로 그리면 개행이 사라진다)" {
+    // 한 op에 통째로 실으면 backend는 개행을 모르는 채 한 줄로 그린다 — 사용자가 Enter를 눌렀는데
+    // 화면이 안 바뀐다.
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "제목 줄\n\n본문 줄", .{}, 3);
+    try testing.expect(findExactText(draws, "제목 줄") != null);
+    try testing.expect(findExactText(draws, "본문 줄") != null);
+    // 빈 줄은 그릴 글자가 없다 — 그래도 **자리는 차지한다**(그래서 본문이 셋째 줄에 온다).
+    const title = findExactText(draws, "제목 줄") orelse return error.MissingTitle;
+    const body = findExactText(draws, "본문 줄") orelse return error.MissingBody;
+    const line_h = typography.lineHeightPx(.control, 1000);
+    try testing.expectEqual(@as(i32, @intCast(line_h * 2)), body.origin.y - title.origin.y);
+}
+
+test "caret은 포커스가 있을 때만 선다" {
+    // 안 깜빡이는 caret은 "여기 쓰면 된다"가 아니라 "여기 뭔가 잘못됐다"로 읽힌다.
+    var idle_storage: TestStorage = .{};
+    const idle = try renderCommit(&idle_storage, "fix", .{ .caret = 3 }, 1);
+    try testing.expectEqual(@as(usize, 0), countQuads(idle, .cursor));
+
+    var focus_storage: TestStorage = .{};
+    const focused = try renderCommit(&focus_storage, "fix", .{ .focused = true, .caret = 3 }, 1);
+    const caret = firstQuad(focused, .cursor) orelse return error.MissingCaret;
+    // 글자 셋 뒤에 선다 — 셀 폭 단위로(등폭 chrome 폰트, §12.3 ①).
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(i32, @intCast(m.inset_x + 3 * 8)), caret.rect.x); // 셀 폭 8은 props 기본값
+}
+
+test "caret은 줄을 따라 내려간다(둘째 줄 caret이 첫 줄에 서지 않는다)" {
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "ab\ncd", .{ .focused = true, .caret = 4 }, 2);
+    const caret = firstQuad(draws, .cursor) orelse return error.MissingCaret;
+    const line_h = typography.lineHeightPx(.control, 1000);
+    const title = findExactText(draws, "ab") orelse return error.MissingFirst;
+    try testing.expectEqual(@as(i32, @intCast(title.origin.y + @as(i32, @intCast(line_h)))), caret.rect.y);
+    // 열은 그 **줄 안에서** 센다 — 문서 전체 오프셋으로 세면 둘째 줄 caret이 오른쪽으로 밀린다.
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(i32, @intCast(m.inset_x + 1 * 8)), caret.rect.x);
+}
+
+test "선택은 줄마다 잘려 밴드가 된다(줄을 넘어 한 덩어리로 칠하지 않는다)" {
+    // 통째로 넘기면 `fieldLayout`이 한 줄 전제로 열을 재서 둘째 줄부터 밴드가 엉뚱한 자리에 선다.
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "ab\ncd", .{
+        .focused = true,
+        .caret = 4,
+        .selection = .{ .anchor = 1, .focus = 4 },
+    }, 2);
+    try testing.expectEqual(@as(usize, 2), countQuads(draws, .selection));
+}
+
+test "포커스가 없으면 선택 밴드도 없다(꺼진 상자가 무언가 골라 둔 것처럼 보이지 않게)" {
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "ab\ncd", .{ .selection = .{ .anchor = 0, .focus = 5 } }, 2);
+    try testing.expectEqual(@as(usize, 0), countQuads(draws, .selection));
+}
+
+test "상자가 보여 줄 수 있는 것보다 메시지가 길면 first_row부터 그린다" {
+    // 스크롤이 없으면 긴 메시지의 끝에서 타이핑할 때 caret이 상자 밖에 선다.
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "one\ntwo\nthree", .{ .focused = true, .caret = 12, .first_row = 1 }, 2);
+    try testing.expect(findExactText(draws, "one") == null); // 위로 밀려 나갔다
+    try testing.expect(findExactText(draws, "two") != null);
+    try testing.expect(findExactText(draws, "three") != null);
+}
+
+test "빈 메시지에도 포커스면 caret이 선다" {
+    // 안내 문구만 있고 caret이 없으면 "여기 못 쓴다"로 읽힌다.
+    var storage: TestStorage = .{};
+    const draws = try renderCommit(&storage, "", .{ .focused = true }, 1);
+    try testing.expect(findExactText(draws, commit_placeholder) != null);
+    try testing.expect(firstQuad(draws, .cursor) != null);
 }

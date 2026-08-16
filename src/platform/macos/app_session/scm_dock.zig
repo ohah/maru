@@ -24,6 +24,8 @@ const scm_view = app_session_mod.scm_view;
 const scm_row_capacity = app_session_mod.scm_row_capacity;
 const git_backend_mod = app_session_mod.git_backend_mod;
 const git_write_command = app_session_mod.git_write_command;
+const text_area = chrome.components.text_area;
+const text_field = chrome.components.text_field;
 const redact = maru.redact;
 
 const component = chrome.components.scm_dock;
@@ -50,16 +52,53 @@ pub const ScrollItems = struct {
     }
 };
 
-/// 목록 뷰포트 높이 = 도크 content에서 고정 chrome(요약 줄·브랜치 줄)을 뺀 것.
-/// 커밋 상자가 보여 줄 **시각 행** 수. P3b에서는 입력이 아직 없어 늘 한 줄이고, P3c가 실제 메시지의
-/// 랩 결과(`text_area.visibleRows`)를 준다 — 그 계산의 자리를 지금 만들어 두어 목록 높이와 상자 높이가
-/// **같은 값**을 쓰게 한다(두 곳이 각자 세면 스크롤 범위가 어긋난다).
-fn commitRows(self: *const AppSession) u32 {
-    _ = self;
-    return 1;
+/// 목록 뷰포트 높이 = 도크 content에서 고정 chrome(탭 줄·커밋 줄·요약 줄·브랜치 줄)을 뺀 것.
+/// 커밋 상자가 **한 줄에 담는 열 수**. 랩 계산의 단일 출처는 `DockMetrics.commitViewCols`이고,
+/// host와 view가 **같은 상자 폭**으로 그것을 부른다 — 폭이 갈리면 상자 높이와 실제 줄 수가 어긋난다.
+///
+/// 상자 폭은 도크 content 폭 그대로다(커밋 줄에는 좌우 여백이 없다 — 사용자 결정 2026-08-16).
+fn commitViewCols(self: *const AppSession) u16 {
+    const content = dock_ops.dockGeometry(self).tree_content;
+    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+    return m.commitViewCols(@floatFromInt(content.w), self.cell_width_px);
 }
 
-fn listViewportHeightPx(self: *const AppSession, has_branch: bool) u32 {
+/// 지금 화면에 그릴 **표시 텍스트**. 조합 중이면 본문의 caret 자리에 preedit을 끼운 합성 결과다.
+///
+/// **component가 합성하지 않는 이유**: props는 빌린 슬라이스이고 component는 할당하지 않는다. 조합
+/// 글자를 따로 넘기면 랩·caret 계산이 "본문 기준"과 "합성 기준" 둘로 갈린다 — 조합 중 줄이 넘칠 때
+/// 그 차이가 그대로 어긋난 caret이 된다.
+fn commitDisplayText(self: *AppSession) []const u8 {
+    const field = &self.scm_commit_field;
+    if (field.preedit.items.len == 0) return field.text.items;
+    self.scm_commit_display.clearRetainingCapacity();
+    const caret = @min(field.caret, field.text.items.len);
+    self.scm_commit_display.appendSlice(self.allocator, field.text.items[0..caret]) catch return field.text.items;
+    self.scm_commit_display.appendSlice(self.allocator, field.preedit.items) catch return field.text.items;
+    self.scm_commit_display.appendSlice(self.allocator, field.text.items[caret..]) catch return field.text.items;
+    return self.scm_commit_display.items;
+}
+
+/// 표시 텍스트 기준 caret 오프셋 — 조합 중이면 **조합 글자 뒤**다(입력기가 그 자리에 다음 글자를 넣는다).
+fn commitDisplayCaret(self: *const AppSession) usize {
+    const field = &self.scm_commit_field;
+    return @min(field.caret, field.text.items.len) + field.preedit.items.len;
+}
+
+/// 커밋 상자가 보여 줄 **시각 행** 수. 내용을 따라 자라고 상한에서 멈춘다(§12.2).
+fn commitRows(self: *AppSession) u32 {
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    return @intCast(text_area.visibleRows(wrapped, commit_max_rows));
+}
+
+/// 상자가 자랄 수 있는 상한. 넘으면 세로 스크롤이다 — 상한이 없으면 긴 메시지가 목록을 통째로 밀어낸다.
+const commit_max_rows: usize = 8;
+/// 랩 결과 버퍼. 상자가 보여 줄 행 수가 아니라 **메시지 전체**의 시각 행 수다(caret이 몇 번째 줄인지
+/// 알려면 안 보이는 줄까지 세야 한다).
+const commit_wrap_max_rows: usize = 256;
+
+fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     // **고정 chrome을 전부 뺀다.** 하나라도 빠뜨리면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가
@@ -216,6 +255,13 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     };
 }
 
+/// 편집기의 선택을 DTO 값으로 옮긴다. 값 집합이 갈리면 여기서 컴파일로 걸린다.
+fn selectionOf(sel: ?text_field.TextField.Selection) ?component.types.Selection {
+    const s = sel orelse return null;
+    if (s.anchor == s.focus) return null; // 빈 선택은 caret이지 밴드가 아니다
+    return .{ .anchor = s.anchor, .focus = s.focus };
+}
+
 fn propsFor(self: *AppSession, projection: Projection, window: []const component.types.Item) component.types.Props {
     const content = dock_ops.dockGeometry(self).tree_content;
     return .{
@@ -238,7 +284,16 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .has_ab = projection.has_ab,
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
+        .commit_message = commitDisplayText(self),
         .commit_rows = commitRows(self),
+        .commit_edit = .{
+            .focused = self.scm_commit_focused,
+            .caret = commitDisplayCaret(self),
+            // 조합 중에는 선택이 없다(입력기가 그 구간을 소유한다) — 남겨 두면 밴드가 조합 글자 위에 겹친다.
+            .selection = if (self.scm_commit_field.preedit.items.len > 0) null else selectionOf(self.scm_commit_field.selection),
+            .preedit = self.scm_commit_field.preedit.items,
+            .first_row = self.scm_commit_first_row,
+        },
         // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
         .commit_enabled = projection.has_staged,
         // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
@@ -453,6 +508,27 @@ pub fn scmDockPointer(
 
 /// intent를 실제 동작으로 옮긴다. **모델 인덱스는 다시 조회한다** — intent가 든 것은 인덱스뿐이고,
 /// 그 사이 목록이 갱신됐을 수 있다(늦은 클릭이 엉뚱한 파일을 열지 않게).
+/// 좌표를 아는 자리에서 부르는 판. **커밋 상자만 좌표가 필요하다** — caret은 tree hit이 아니라 글자
+/// hit이라 어디를 눌렀는지 알아야 한다. 나머지는 그대로 `applyScmDockIntent`로 간다.
+pub fn applyScmDockIntentAt(self: *AppSession, intent: component.ids.Intent, x_px: f64, y_px: f64) void {
+    switch (intent) {
+        .commit_focus => focusCommitAt(self, x_px, y_px),
+        else => applyScmDockIntent(self, intent),
+    }
+}
+
+/// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).
+pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
+    if (!self.scm_commit_focused) return;
+    const rect = commitBoxRect(self) orelse return blurCommit(self);
+    const content = dock_ops.dockGeometry(self).tree_content;
+    const local_x = x_px - @as(f64, @floatFromInt(content.x));
+    const local_y = y_px - @as(f64, @floatFromInt(content.y));
+    const inside = local_x >= rect.x and local_x < rect.x + rect.width and
+        local_y >= rect.y and local_y < rect.y + rect.height;
+    if (!inside) blurCommit(self);
+}
+
 pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void {
     switch (intent) {
         .toggle_section => |section| {
@@ -482,7 +558,89 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         },
         .row_action => |index| submitRowWrite(self, index),
         .section_action => |section| submitSectionWrite(self, section),
+        // 좌표가 필요한 intent다 — 여기서는 포커스만 세우고 caret은 `focusCommitAt`이 놓는다
+        // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 끝에 붙인다.
+        .commit_focus => focusCommit(self),
+        .commit => {},
         .scroll_thumb, .scroll_track => {},
+    }
+}
+
+/// 커밋 상자로 포커스를 옮긴다(caret은 그대로). **목록 선택은 내린다** — 두 곳이 동시에 포커스된 것처럼
+/// 보이면 화살표가 어디로 갈지 사용자가 알 수 없다.
+pub fn focusCommit(self: *AppSession) void {
+    if (self.scm_commit_focused) return;
+    self.scm_commit_focused = true;
+    self.metal_dirty = true;
+}
+
+/// 커밋 상자에서 포커스를 뗀다. **조합 중이면 먼저 확정한다** — 그러지 않으면 조합 글자가 화면에서
+/// 사라진 채 편집기 안에만 남는다.
+pub fn blurCommit(self: *AppSession) void {
+    if (!self.scm_commit_focused) return;
+    _ = self.scm_commit_field.commitPreedit(self.allocator);
+    self.scm_commit_focused = false;
+    self.metal_dirty = true;
+}
+
+/// 클릭 지점에 caret을 놓는다. **글자 hit이라 좌표가 필요하다** — tree hit은 "상자를 눌렀다"까지만 안다.
+///
+/// 세로는 시각 행, 가로는 `text_field.caretAtColumn`이 푼다(§12.1 — 가로 축의 주인은 하나다).
+pub fn focusCommitAt(self: *AppSession, x_px: f64, y_px: f64) void {
+    focusCommit(self);
+    const rect = commitBoxRect(self) orelse return;
+    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+    const content = dock_ops.dockGeometry(self).tree_content;
+    const local_x = x_px - @as(f64, @floatFromInt(content.x)) - rect.x;
+    const local_y = y_px - @as(f64, @floatFromInt(content.y)) - rect.y;
+
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const cols = commitViewCols(self);
+    const text = self.scm_commit_field.text.items;
+    const wrapped = text_area.wrap(text, cols, true, &lines);
+    if (wrapped.lines.len == 0) return;
+
+    const line_h: f32 = @floatFromInt(chrome.ui.typography.lineHeightPx(.control, @max(scmDockScaleMilli(self), 1)));
+    const rel_y = local_y - @as(f64, @floatFromInt(m.commit_pad_y));
+    const row_f = @floor(rel_y / @as(f64, line_h));
+    const row_index: usize = if (row_f < 0)
+        self.scm_commit_first_row
+    else
+        @min(self.scm_commit_first_row + @as(usize, @intFromFloat(row_f)), wrapped.lines.len - 1);
+
+    const line = wrapped.lines[row_index];
+    const band_col: i32 = blk: {
+        const cell: f64 = @floatFromInt(@max(self.cell_width_px, 1));
+        const rel_x = local_x - @as(f64, @floatFromInt(m.inset_x));
+        if (rel_x <= 0) break :blk 0;
+        break :blk @intFromFloat(@round(rel_x / cell));
+    };
+    const line_view: text_field.View = .{ .text = text[line.start..line.end], .caret = 0 };
+    const within = text_field.caretAtColumn(line_view, .{ .cols = cols }, band_col);
+    self.scm_commit_field.caret = line.start + within;
+    self.scm_commit_field.clearSelection();
+    scrollCommitToCaret(self);
+    self.metal_dirty = true;
+}
+
+/// published tree에서 커밋 상자 rect를 찾는다. **그린 것과 같은 기하**를 쓴다 — 여기서 다시 계산하면
+/// 클릭 자리와 글자 자리가 갈린다.
+fn commitBoxRect(self: *AppSession) ?chrome.ui.layout.UiRect {
+    for (self.scm_dock_entries.items) |entry| {
+        if (entry.id == component.build.NodeIds.commit_box) return entry.rect;
+    }
+    return null;
+}
+
+/// caret이 상자 밖으로 나갔으면 첫 행을 옮긴다(제약 ⑥ — 시각 행으로 센다).
+pub fn scrollCommitToCaret(self: *AppSession) void {
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    const visible = text_area.visibleRows(wrapped, commit_max_rows);
+    const first = text_area.scrollToCaret(wrapped, self.scm_commit_first_row, visible, commitDisplayCaret(self));
+    if (first != self.scm_commit_first_row) {
+        self.scm_commit_first_row = @intCast(first);
+        self.metal_dirty = true;
     }
 }
 
@@ -884,4 +1042,196 @@ test "낙관적 반영: 도착 그룹이 화면에 없으면 옮기지 않는다
     // 그대로다 — 파일이 사라지지 않는다.
     try testing.expectEqualStrings("only.zig", items[1].file.name);
     try testing.expectEqual(component.types.RowAction.stage, items[1].file.action);
+}
+
+// ── 키 입력(P3c) ────────────────────────────────────────────────────────────────
+//
+// 주소창(`web.zig handleAddrEditKey`)과 **같은 배치**를 따른다 — macOS 줄 편집 관례가 한 벌이어야
+// 사용자가 두 입력란에서 다른 규칙을 배우지 않는다. 다른 것은 세로 축뿐이다(↑↓·Home/End·Enter).
+
+/// 커밋 메시지의 단어 구분자. **개행이 핵심이다**(§12.3 ④) — 안 넘기면 ⌥←/→가 줄 끝과 다음 줄
+/// 첫 단어를 한 단어로 붙인다.
+const commit_word_separators = text_area.word_separators;
+
+/// 커밋 상자가 활성일 때의 키 처리. 반환값은 "이 키를 먹었나"이고, 먹지 않은 키는 호출자가 원래
+/// 경로로 보낸다.
+pub fn handleCommitKey(self: *AppSession, ev: chrome.input.InputEvent) bool {
+    if (!self.scm_commit_focused) return false;
+    const field = &self.scm_commit_field;
+    switch (ev) {
+        .key => |k| switch (k.key) {
+            // Esc는 **편집을 끝내되 글자는 남긴다.** 지우면 사용자가 쓴 것이 예고 없이 사라진다 —
+            // 취소의 뜻이 "내가 쓴 것을 버린다"인지 "커밋을 그만둔다"인지 알 수 없으므로 덜 파괴적인
+            // 쪽을 고른다.
+            .escape => blurCommit(self),
+            .enter => {
+                // ⌘Enter = 커밋(§12.2). 실행 배선은 P3c-2이고, 지금은 그 자리만 지킨다.
+                if (k.mods.command) return true;
+                field.insertText(self.allocator, "\n") catch {};
+                afterEdit(self);
+            },
+            .left => {
+                if (k.mods.command) commitHome(self, k.mods.shift) // ⌘← = **시각 행** 처음(§12.3 ⑤)
+                else if (k.mods.option) field.moveWordLeft(commit_word_separators, k.mods.shift) else field.moveLeft(k.mods.shift);
+                afterMove(self);
+            },
+            .right => {
+                if (k.mods.command) commitEnd(self, k.mods.shift) else if (k.mods.option) field.moveWordRight(commit_word_separators, k.mods.shift) else field.moveRight(k.mods.shift);
+                afterMove(self);
+            },
+            .up => {
+                commitVertical(self, -1, k.mods.shift);
+                afterMove(self);
+            },
+            .down => {
+                commitVertical(self, 1, k.mods.shift);
+                afterMove(self);
+            },
+            .backspace => {
+                if (k.mods.command) field.deleteToLineStart() else if (k.mods.option) field.deleteWordBackward(commit_word_separators) else field.deleteBackward();
+                afterEdit(self);
+            },
+            .char => {
+                if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) {
+                    field.selectAll();
+                    self.metal_dirty = true;
+                    return true;
+                }
+                if (k.mods.control and (k.codepoint == 'a' or k.codepoint == 'A')) {
+                    commitHome(self, k.mods.shift); // ⌃A 줄 시작(emacs)
+                    afterMove(self);
+                    return true;
+                }
+                if (k.mods.command and (k.codepoint == 'x' or k.codepoint == 'X')) {
+                    cutCommitSelection(self);
+                    return true;
+                }
+                if (k.mods.control and (k.codepoint == 'e' or k.codepoint == 'E')) {
+                    commitEnd(self, k.mods.shift);
+                    afterMove(self);
+                    return true;
+                }
+                // 그 외 수정자 조합은 **먹지 않는다** — ⌘S·⌘W 같은 앱 단축키가 상자 안에서 죽으면
+                // 사용자는 입력란을 벗어나야만 앱을 쓸 수 있게 된다.
+                if (k.mods.command or k.mods.control or k.mods.option) return false;
+                field.insertCp(self.allocator, k.codepoint) catch {};
+                afterEdit(self);
+            },
+            .tab, .other => return false,
+        },
+        .pointer => return false, // 진입은 포인터 경로(`focusCommitAt`)가 이미 처리했다
+    }
+    return true;
+}
+
+/// 글자가 바뀐 뒤 — 스크롤을 caret에 맞추고 다시 그린다. **상자 높이가 함께 바뀐다**(랩 결과가 달라지므로).
+fn afterEdit(self: *AppSession) void {
+    scrollCommitToCaret(self);
+    self.metal_dirty = true;
+}
+
+/// caret만 움직인 뒤. 글자는 그대로라 상자 높이는 안 바뀌지만 스크롤은 따라가야 한다.
+fn afterMove(self: *AppSession) void {
+    scrollCommitToCaret(self);
+    self.metal_dirty = true;
+}
+
+/// ↑/↓ — **시각 행** 단위(§12.2). 논리 줄 단위면 접힌 줄 안에서 caret이 건너뛴다.
+fn commitVertical(self: *AppSession, delta: i32, extend: bool) void {
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const field = &self.scm_commit_field;
+    const wrapped = text_area.wrap(field.text.items, commitViewCols(self), true, &lines);
+    const next = text_area.moveVertical(field.text.items, wrapped, field.caret, delta);
+    applyCaret(self, next, extend);
+}
+
+fn commitHome(self: *AppSession, extend: bool) void {
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const field = &self.scm_commit_field;
+    const wrapped = text_area.wrap(field.text.items, commitViewCols(self), true, &lines);
+    applyCaret(self, text_area.lineStart(wrapped, field.caret), extend);
+}
+
+fn commitEnd(self: *AppSession, extend: bool) void {
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const field = &self.scm_commit_field;
+    const wrapped = text_area.wrap(field.text.items, commitViewCols(self), true, &lines);
+    applyCaret(self, text_area.lineEnd(wrapped, field.caret), extend);
+}
+
+/// caret을 옮기며 선택을 유지/해제한다. **`TextField`의 규칙과 같아야 한다** — ⇧면 anchor를 두고
+/// 늘리고, 아니면 선택을 버린다(주소창의 `moveLeft(extend)`가 하는 것과 같은 일).
+fn applyCaret(self: *AppSession, offset: usize, extend: bool) void {
+    const field = &self.scm_commit_field;
+    if (extend) {
+        field.selectTo(offset);
+    } else {
+        field.caret = offset;
+        field.clearSelection();
+    }
+}
+
+/// IME 조합 글자를 세운다(입력기가 준 그대로). 확정은 `commitCommitPreedit`이 한다.
+pub fn setCommitPreedit(self: *AppSession, bytes: []const u8) void {
+    self.scm_commit_field.setPreedit(self.allocator, bytes) catch return;
+    scrollCommitToCaret(self);
+    self.metal_dirty = true;
+}
+
+/// 조합을 확정한다 — `commitPreedit`이 조합 글자를 본문에 넣고 조합 상태를 비운다.
+pub fn commitCommitPreedit(self: *AppSession) void {
+    if (self.scm_commit_field.commitPreedit(self.allocator)) afterEdit(self);
+}
+
+/// 입력기가 확정한 글자를 넣는다(한글 등 — 평문 타이핑도 macOS에서는 이 경로다).
+pub fn insertCommitText(self: *AppSession, bytes: []const u8) void {
+    if (!self.scm_commit_focused) return;
+    self.scm_commit_field.insertText(self.allocator, bytes) catch return;
+    afterEdit(self);
+}
+
+/// 커밋 상자의 caret rect(창 좌표) — IME 후보창을 그 자리에 띄운다. **그린 것과 같은 기하**를 쓴다:
+/// published 상자 rect + 같은 랩 결과. 상자가 아직 안 그려졌으면 null이고 호출자가 폴백한다.
+pub fn commitCaretRect(self: *AppSession) ?chrome.draw.Rect {
+    if (!self.scm_commit_focused) return null;
+    const rect = commitBoxRect(self) orelse return null;
+    const content = dock_ops.dockGeometry(self).tree_content;
+    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const text = commitDisplayText(self);
+    const cols = commitViewCols(self);
+    const wrapped = text_area.wrap(text, cols, true, &lines);
+    const caret = commitDisplayCaret(self);
+    const row = text_area.lineAt(wrapped, caret);
+    const line_h = chrome.ui.typography.lineHeightPx(.control, @max(scmDockScaleMilli(self), 1));
+
+    const col: u32 = if (wrapped.lines.len == 0) 0 else blk: {
+        const line = wrapped.lines[row];
+        const line_view: text_field.View = .{
+            .text = text[line.start..line.end],
+            .caret = @min(caret -| line.start, line.end - line.start),
+        };
+        break :blk text_field.fieldLayout(line_view, .{ .cols = cols }).caret_col;
+    };
+    const visible_row = row -| self.scm_commit_first_row;
+    return .{
+        .x = @intFromFloat(@as(f32, @floatFromInt(content.x)) + rect.x + @as(f32, @floatFromInt(m.inset_x + col * self.cell_width_px))),
+        .y = @intFromFloat(@as(f32, @floatFromInt(content.y)) + rect.y + @as(f32, @floatFromInt(m.commit_pad_y + @as(u32, @intCast(visible_row)) * line_h))),
+        .w = @max(self.cell_width_px, 1),
+        .h = line_h,
+    };
+}
+
+/// ⌘X — 선택을 **먼저 클립보드-쓰기 큐에 캡처**한 뒤 지운다(주소창과 같은 경로·같은 순서). 바이트를
+/// 넘기지 "지금 선택을 복사해"가 아니므로 비동기 순서 문제가 없다. 선택 없음·OOM이면 무동작(글자 보존).
+fn cutCommitSelection(self: *AppSession) void {
+    const sel = self.scm_commit_field.selection orelse return;
+    const slice = self.scm_commit_field.text.items[sel.lo()..sel.hi()];
+    if (slice.len == 0) return;
+    const captured = self.allocator.dupe(u8, slice) catch return;
+    if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+    self.chrome_clipboard_write = captured;
+    _ = self.scm_commit_field.deleteSelection();
+    afterEdit(self);
 }

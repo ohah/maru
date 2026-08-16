@@ -3684,6 +3684,17 @@ pub const AppSession = struct {
     /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
     scm_pending: ?ScmPending = null,
 
+    /// 커밋 메시지 편집 상태(P3c). **`TextField`를 그대로 쓴다** — caret·선택이 바이트 오프셋이라
+    /// 개행이 섞여도 성립하고, 세로 축만 `text_area`가 얹는다(text-field-editor.md §12.1).
+    scm_commit_field: chrome.components.text_field.TextField = .{},
+    /// 커밋 상자가 키를 받고 있나. `InputFocus.scm_commit`의 유일한 근거다.
+    scm_commit_focused: bool = false,
+    /// 상자가 보여 줄 **첫 시각 행**(세로 스크롤). 논리 줄이 아니다(§12.3 ⑥).
+    scm_commit_first_row: u32 = 0,
+    /// 표시 텍스트 합성 버퍼 — 본문에 IME 조합 글자를 caret 자리에 **끼워** 만든 결과다. component는
+    /// 할당을 안 하므로(props는 빌린 슬라이스) 이 합성은 host가 소유한다. 조합이 없으면 안 쓴다.
+    scm_commit_display: std.ArrayList(u8) = .empty,
+
     /// 그 섹션을 전부 펼쳤는가("모두 보기"를 눌렀는가). 기본은 섹션당 상한까지만 보여 준다 — 변경이 수백 개면
     /// 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지조차 모르게 된다.
     scm_expanded: [scm_view.section_count]bool = @splat(false),
@@ -6881,6 +6892,13 @@ pub const AppSession = struct {
                     self.metal_dirty = true; // 선택 하이라이트 재빌드(주소 필드는 chrome 오버레이)
                     return;
                 }
+                // 커밋 상자도 같은 이유로 여기 있어야 한다 — ⌘A는 메뉴 keyEquivalent라 keyDown이 아니라
+                // 이 경로로 오고, 상자의 `handleCommitKey`는 그 키를 아예 못 본다.
+                if (self.scmCommitOwnsInput()) {
+                    self.scm_commit_field.selectAll();
+                    self.metal_dirty = true;
+                    return;
+                }
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
                 self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .select_all, self.io) catch {};
             },
@@ -8858,6 +8876,17 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return input_ops.keyConsumedByApp(self); // 검색(앱)이 소비
         }
+        // 커밋 메시지 상자(P3c). **모든 키를 삼키지 않는다** — 편집이 쓰지 않는 조합(⌘S·⌘T…)은
+        // `handleCommitKey`가 false를 주고 아래 keybinding 경로가 그대로 실행한다. 주소창처럼 편집을
+        // **취소하지는 않는다**: 여기서 잃을 것은 URL 한 줄이 아니라 사용자가 쓴 커밋 메시지이고,
+        // 단축키가 도크를 닫거나 뷰를 바꾸면 `scmCommitOwnsInput`이 스스로 거짓이 된다.
+        if (self.scmCommitOwnsInput() and !self.anyModalOverlayOpen()) {
+            if (scm_dock_ops.handleCommitKey(self, input_ops.chromeInputFromKeyEvent(event))) {
+                self.resetCursorBlink();
+                self.metal_dirty = true;
+                return input_ops.keyConsumedByApp(self); // 커밋 상자(앱)가 소비
+            }
+        }
         // keybind recorder 녹음 중이면 raw 키를 chord로 **가로챈다**(chrome 변환 전 — chromeInputFromKeyEvent가 키를
         // 축약 enum으로 줄여 Tab/Home/F-키 등을 잃으므로, 전체 키 정보가 있는 terminal.KeyEvent를 직접 캡처). 한 키로
         // 끝나고(취소든 rebind든) 모든 키를 소비한다(모달 중이라 터미널·단축키로 안 흘린다).
@@ -9159,6 +9188,13 @@ pub const AppSession = struct {
         return self.agent_session_archive_search_active and dock_ops.dockVisible(self) and self.dock.view == .agent_sessions;
     }
 
+    /// 커밋 메시지 상자가 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은
+    /// 게이트**를 쓰게 하는 단일 출처다(Session Dock 검색과 같은 규율) — 플래그만 보면 도크를 닫거나
+    /// 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이 first responder를 요구한다.
+    pub fn scmCommitOwnsInput(self: *const AppSession) bool {
+        return self.scm_commit_focused and dock_ops.dockVisible(self) and self.dock.view == .source_control;
+    }
+
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
     /// anyModalOverlayOpen) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색·Session Dock 검색) 중 하나라도
     /// 활성. focus-sync 불변식(reconcileWebFocus)의 **override 단일 출처**로 쓴다: 이 값이면 웹뷰가 아니라 터미널 뷰가
@@ -9173,7 +9209,7 @@ pub const AppSession = struct {
         // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
         if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
-            self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
+            self.sidebar_search_active or self.agentSessionSearchOwnsInput() or self.scmCommitOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
@@ -9716,7 +9752,8 @@ pub const AppSession = struct {
             const captured = self.scm_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
                 const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
-                if (scm_dock_ops.scmDockPointer(self, phase, x_px, y_px)) |intent| scm_dock_ops.applyScmDockIntent(self, intent);
+                if (scm_dock_ops.scmDockPointer(self, phase, x_px, y_px)) |intent|
+                    scm_dock_ops.applyScmDockIntentAt(self, intent, x_px, y_px);
                 return;
             }
         }
@@ -9869,6 +9906,9 @@ pub const AppSession = struct {
                     // 것이 어긋났다.
                     // down은 **무장만** 한다. 실제 적용은 아래 up 경로 한 곳이다 — 그래야 드래그나
                     // 스냅샷 교체가 "누른 적 없는 행 열기"가 되지 않는다(Session Dock과 같은 규율).
+                    // 다만 **편집을 떼는 것은 down에서** 한다: 상자 밖을 누른 순간 caret이 사라져야
+                    // 사용자가 자기 키가 어디로 가는지 안다(up까지 기다리면 드래그 중에도 caret이 남는다).
+                    scm_dock_ops.blurCommitIfOutside(self, x_px, y_px);
                     _ = scm_dock_ops.scmDockPointer(self, .down, x_px, y_px);
                     return;
                 }
@@ -10466,7 +10506,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -10484,6 +10524,10 @@ pub const AppSession = struct {
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
         // 비-terminal이면 sendTextAsKeys→handleKeyEvent→addr_edit 인터셉트로 글자를 append한다.
         if (self.addr_edit != null) return .addr_edit;
+        // 커밋 메시지 상자(P3c). 모달·rename·검색·주소창보다 **뒤**다 — 그것들이 열리면 도크는 뒤에
+        // 남고, 상자에 키가 계속 가면 사용자는 자기가 무엇을 타이핑하는지 알 수 없다. 반대로 파일
+        // 트리·터미널보다는 **앞**이다: 상자는 사용자가 방금 누른 자리이고, 그 둘은 배경이다.
+        if (self.scmCommitOwnsInput()) return .scm_commit;
         if (file_panel_ops.fileTreeFocused(self)) return .file_tree;
         if (dock_ops.pendingDockEntryOwnsInput(self)) return .dock_pending;
         return .terminal;
@@ -10539,6 +10583,7 @@ pub const AppSession = struct {
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
+            .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
                 _ = self.commitTerminalComposition();
             },
@@ -10717,6 +10762,12 @@ pub const AppSession = struct {
         if (self.addr_edit != null) {
             web_ops.addrEditPaste(self, bytes);
             self.metal_dirty = true;
+            return;
+        }
+        // 커밋 메시지 상자도 같은 규율이다(P3c). **개행을 지우지 않는다** — 주소창이 그것을 지우는
+        // 이유는 URL이 한 줄이기 때문이고, 커밋 메시지는 여러 줄이 정상이다(제목 + 빈 줄 + 본문).
+        if (self.scmCommitOwnsInput()) {
+            scm_dock_ops.insertCommitText(self, bytes);
             return;
         }
         // tree/dock-group/overlay input owner에서는 TerminalView가 native responder일 수 있어도 PTY가 대상이 아니다.
@@ -11818,6 +11869,15 @@ pub const AppSession = struct {
         if (self.addr_edit != null) {
             const sel = self.addr_field.selection orelse return &.{};
             const slice = self.addr_field.text.items[sel.lo()..sel.hi()];
+            if (slice.len == 0) return &.{};
+            self.copy_buffer = self.allocator.dupe(u8, slice) catch return &.{};
+            return self.copy_buffer;
+        }
+        // 커밋 상자 편집 중이면 그 선택이 클립보드 주체다(주소창과 동형). 선택이 없으면 **빈 값**이다 —
+        // 터미널 선택으로 흘리면 상자에서 ⌘C를 눌렀는데 화면 뒤의 셸 출력이 복사된다.
+        if (self.scmCommitOwnsInput()) {
+            const sel = self.scm_commit_field.selection orelse return &.{};
+            const slice = self.scm_commit_field.text.items[sel.lo()..sel.hi()];
             if (slice.len == 0) return &.{};
             self.copy_buffer = self.allocator.dupe(u8, slice) catch return &.{};
             return self.copy_buffer;
@@ -13443,6 +13503,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
+        debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -16705,6 +16766,8 @@ pub const AppSession = struct {
         while (nav_it.next()) |v| self.allocator.free(v.url);
         self.web_nav_states.deinit(self.allocator);
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
+        self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
+        self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
         self.metal_buffer.deinit(self.allocator);
         self.clearMeasuredTextCaches();
         self.sidebar_cells.deinit(self.allocator);
@@ -54320,6 +54383,154 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
     }
 }
 
+/// 커밋 상자까지 그려진 소스 컨트롤 도크를 세운다(P3c 입력 테스트 공용). published tree가 있어야
+/// 상자 rect를 찾을 수 있고, 그래야 클릭 좌표 → caret 변환이 **그린 것과 같은 기하**를 지난다.
+fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, arena: std.mem.Allocator) !void {
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n"),
+        .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, "/repo");
+    _ = allocator;
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame);
+}
+
+/// 커밋 상자 rect의 한 점(도크 content 원점을 더한 창 좌표).
+fn commitBoxPoint(session: *AppSession, dx: f64, dy: f64) !struct { x: f64, y: f64 } {
+    const content = dock_ops.dockGeometry(session).tree_content;
+    for (session.scm_dock_entries.items) |entry| {
+        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
+        return .{
+            .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + dx,
+            .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + dy,
+        };
+    }
+    return error.MissingCommitBox;
+}
+
+test "소스 컨트롤: 커밋 상자를 누르면 키가 그리로 간다 (P3c)" {
+    // 상자를 눌렀는데 키가 터미널로 가면 사용자가 친 커밋 메시지가 셸 명령이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+    const p = try commitBoxPoint(session, 12, 6);
+    session.mouse(1, p.x, p.y, 0, 0); // down = 무장
+    session.mouse(3, p.x, p.y, 0, 0); // up = 적용(같은 규율: 실제 동작은 up 한 곳)
+    try std.testing.expectEqual(AppSession.InputFocus.scm_commit, session.inputFocus());
+    // **터미널이 first responder를 도로 가져가면 안 된다** — `InputFocus`에만 넣고 이 축을 빼면
+    // Zig는 키를 상자로 보내는데 focus-sync가 매 tick 웹뷰/터미널로 되돌린다(Session Dock의 교훈).
+    try std.testing.expect(session.terminalOwnsInput());
+}
+
+test "소스 컨트롤: 글자는 상자에 쌓이고 Enter는 줄을 바꾼다(⌘Enter는 아니다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    for ("fix") |c| _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = c, .mods = .{} } });
+    try std.testing.expectEqualStrings("fix", session.scm_commit_field.text.items);
+
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .enter, .mods = .{} } });
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{} } });
+    try std.testing.expectEqualStrings("fix\na", session.scm_commit_field.text.items);
+
+    // ⌘Enter는 **커밋**이라 줄을 바꾸지 않는다(§12.2). 실행 배선은 P3c-2이고, 여기서는 글자가 안
+    // 늘어난다는 사실만 고정한다 — 그게 깨지면 커밋하려던 사용자가 빈 줄을 하나 얻는다.
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .enter, .mods = .{ .command = true } } });
+    try std.testing.expectEqualStrings("fix\na", session.scm_commit_field.text.items);
+}
+
+test "소스 컨트롤: 앱 단축키는 상자가 삼키지 않는다(편집도 취소하지 않는다)" {
+    // 편집기가 모든 조합을 먹으면 사용자는 상자를 벗어나야만 앱을 쓸 수 있다. 반대로 주소창처럼
+    // 편집을 **취소**하면 여기서는 URL 한 줄이 아니라 쓴 커밋 메시지가 사라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+    for ("wip") |c| _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = c, .mods = .{} } });
+
+    const consumed = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 's', .mods = .{ .command = true } } });
+    try std.testing.expect(!consumed); // ⌘S는 아래 keybinding 경로로 흘러야 한다
+    try std.testing.expectEqualStrings("wip", session.scm_commit_field.text.items); // 글자는 그대로다
+}
+
+test "소스 컨트롤: 상자 밖을 누르면 편집을 뗀다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const inside = try commitBoxPoint(session, 12, 6);
+    session.mouse(1, inside.x, inside.y, 0, 0);
+    session.mouse(3, inside.x, inside.y, 0, 0);
+    try std.testing.expect(session.scm_commit_focused);
+
+    // 목록 쪽(상자 아래) 클릭 — 상자는 편집을 놓는다.
+    const outside = try commitBoxPoint(session, 12, 400);
+    session.mouse(1, outside.x, outside.y, 0, 0);
+    try std.testing.expect(!session.scm_commit_focused);
+}
+
+test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다" {
+    // 고정 chrome이 커졌는데 목록이 그대로면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가 어긋난다
+    // (탭 줄에서 겪은 것과 같은 함정).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const before = scm_dock_ops.scrollExtent(session).viewport_h_px;
+    scm_dock_ops.focusCommit(session);
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{} } });
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .enter, .mods = .{} } });
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'b', .mods = .{} } });
+    const after = scm_dock_ops.scrollExtent(session).viewport_h_px;
+    try std.testing.expect(after < before);
+}
+
 test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 낸다" {
     // [GUI 확인 2026-08-16] 깨끗한 저장소에서 목록 자리가 **아무 말도 안 하는 빈 면**이었다. 사용자에게
     // 그 화면은 "아직 못 읽었다"와 구별되지 않는다. 컴포넌트에는 안내 한 줄 계약이 있었지만 제품이
@@ -56100,6 +56311,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .find,
         .palette,
         .addr_edit,
+        .scm_commit,
         .file_tree,
         .dock_pending,
         => true,
@@ -56118,6 +56330,12 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,
+        .scm_commit => {
+            session.dock.presented = true;
+            session.dock.collapsed = false;
+            dock_ops.setDockView(session, .source_control);
+            scm_dock_ops.focusCommit(session);
+        },
         .file_tree => session.focus_owner = .{ .file_tree = .{ .restore_surface = null } },
         .agent_session_search => {
             session.dock.presented = true;

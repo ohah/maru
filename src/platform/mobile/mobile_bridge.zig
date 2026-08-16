@@ -402,7 +402,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // **밀린 화면에서도 받는 자리가 생겼다.** 설정의 숫자 줄을 누르면 그 줄이 입력 대상이 되고
     // 친 숫자가 거기로 간다 — 그전에는 키보드가 떠 있는데 글자를 버리고 있었다("키보드는 있는데
     // 아무것도 안 써지는" 상태). 받을 곳이 없을 때만 버리고, 그때는 **신호를 남긴다**(§5).
-    if (screen != .terminal) {
+    if (screenTop() != .terminal) {
         if (set_edit != null) {
             editNumberInput(ptr[0..len]);
             return @intCast(delivered_len);
@@ -532,7 +532,7 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다. **버리되 신호는 남긴다**(문자 경로와
     // 같은 이유 — 16줄 아래 `key_unknown_id` 가 같은 규율이다).
-    if (screen != .terminal) {
+    if (screenTop() != .terminal) {
         // **편집 중이면 지우기·확정은 그 칸의 것이다.** 그전에는 통째로 버려서 숫자 칸에서
         // 백스페이스가 아무 일도 안 했다 — 오타를 낸 사용자가 고칠 방법이 없었다.
         if (set_edit != null) {
@@ -607,7 +607,7 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
     // **여기는 오류를 안 남긴다** — 위 두 경로(문자·키)와 다르다. 잃는 것이 사용자가 친
     // 글자가 아니라 host 가 스스로 돌리는 관성이고, 그 관성은 프레임마다 오므로 남기면
     // `last_error` 가 매 프레임 덮여 **진짜 오류를 가린다**.
-    if (screen != .terminal) return;
+    if (screenTop() != .terminal) return;
     const core = &(term_core orelse {
         setLastError("scroll_before_core");
         return;
@@ -890,7 +890,7 @@ fn clampKeyBarScroll() void {
 fn stepKeyBarFling() void {
     // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
     // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
-    if (screen != .terminal) return;
+    if (screenTop() != .terminal) return;
     _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)), frame_dt_ms);
 }
 
@@ -1097,7 +1097,7 @@ pub export fn maru_mobile_caret_rect() u64 {
     if (body_cols == 0 or body_rows == 0) return 0;
     // **밀린 화면이 있으면 터미널은 안 보인다** — 그런데 소프트 키보드는 일부러 떠 있다(§5.2).
     // 자리를 답하면 iOS 가 **설정 UI 위에 한글 후보창**을 띄운다, 보이지도 않는 캐럿에 앵커해서.
-    if (screen != .terminal) return 0;
+    if (screenTop() != .terminal) return 0;
     // 헤더가 약속한 "화면 밖이면 0". 그리는 쪽은 격자 범위를 검사하는데(§커서) 여기만 안 해서,
     // 격자가 줄어든 직후 화면 밖 자리를 답할 수 있었다.
     if (cur.col >= body_cols or cur.row >= body_rows) return 0;
@@ -2112,9 +2112,8 @@ pub export fn maru_mobile_icon_build() u32 {
     return filled;
 }
 
-/// 터미널 창 chrome 을 실제 컴포넌트로 조립한다 — 탭 바, 사이드바 카드 목록, 본문, 상태바.
+/// 터미널 화면을 조립한다 — **본문과 보조 키바뿐이다**(U3: 탭·사이드바·하단 바를 걷어냈다).
 fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
-    const height_f: f32 = @floatFromInt(height);
     var entries: [256]tree.RectEntry = undefined;
     var items: [256]layout.Item = undefined;
     var flex_scratch: [256]layout.FlexScratch = undefined;
@@ -2132,22 +2131,10 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 문자열과 달리 VT 파서를 실제로 태우므로 SGR 색·한글 2셀 폭이 코어에서 나온다.
     const body = tree.container(.{ .id = 300, .direction = .column, .style = .{ .flex = .{ .grow = 1 }, .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } }, &.{});
 
-    // ── 상태바
-    // ── 하단 바: **아이콘 줄 하나다.**
-    //
-    // **높이 44 다**(iOS 44 · Android 48 의 아래쪽). 전에는 26 이라 이 줄의 어떤 아이콘도
-    // 손가락 기준을 못 맞췄다 — 설정 입구(톱니)를 44 로 넓히려다 그 사실이 드러났다.
-    // 대가는 본문이 18px 줄어드는 것이고, 실제 하단 바가 iOS 49pt·Android 56dp 인 것을 보면
-    // 44 도 넉넉한 편이 아니다([UX §5.6](../../../docs/mobile-ux.md)).
-    //
-    // **빈 카드 둘을 지웠다.** M0 에서 PoC 목업을 옮겨 오며 따라온 자리 채우개였고, 무엇이
-    // 들어갈지 어느 문서에도 없었다. 26 일 때는 얇은 선이라 안 보였는데 44 로 키우니 **빈
-    // 상자**가 되어 "여기 뭔가 들어간다" 로 읽혔다. 여기에 어울리는 것(연결 상태·세션 이름)은
-    // 전부 M3 가 정해야 나오므로, 그때 넣는다 — 지금 채우면 또 가짜 라벨이다.
-    //
-    // 자식이 없으므로 아이콘 자리를 padding 으로 예약할 필요도 없어졌다(예약이 좁은 창에서
-    // 음수 자리를 만들어 화면을 검게 만들던 위험도 함께 사라진다).
-    const status = tree.container(.{ .id = 400, .direction = .row, .style = .{ .height = .{ .px = 44.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } }, &.{});
+    // ── 하단 바는 **없다.** 아이콘 다섯은 배선이 없었고(U3a), 남은 톱니 하나를 위해 44px 를
+    // 영구히 쓰는 것은 두 플랫폼 관례도 아니다 — 하단은 이동 대상(destination) 자리이고
+    // 동작은 앱 바 오른쪽·오버플로가 관례다. 설정 입구는 부모 화면(세션 목록)으로 갔고,
+    // 그만큼이 본문으로 돌아왔다.
 
     // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
     //
@@ -2166,7 +2153,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = key_h + 10.0 } },
     }, &.{});
 
-    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ body, bar, status });
+    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ body, bar });
 
     const built = try tree.build(root, .{
         .root_size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
@@ -2326,51 +2313,8 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         break;
     }
 
-    // **SVG 아이콘**: maru 의 등록 아이콘을 그대로 얹는다. coverage 는 Zig 가 만들고
-    // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
-    // 아이콘 18px 를 44 줄 한가운데. **간격도 44 다** — 히트를 44 로 주면 26 간격에서는
-    // 좌우로 9px 씩 겹쳐 어느 아이콘인지 모호해진다(설정 목록에서 배운 것과 같다).
-    // 줄 한가운데. **그리는 크기에서 파생시킨다** — 따로 적으면 크기를 바꿀 때 세로가 안 따라와
-    // 아이콘이 줄 위아래로 치우친다.
-    const icon_y: i32 = @intFromFloat(@max(0, height_f - 44 + @as(f32, @floatFromInt(44 - status_icon_px)) / 2));
-    const icon_step: i32 = status_icon_step;
-    // **마지막 아이콘의 오른쪽 끝**을 가장자리에서 12 떨어뜨린다. 슬롯 수(6)만큼 통째로 빼면
-    // 마지막 슬롯의 남는 폭(44-24)이 여백에 더해져 줄 전체가 20px 왼쪽으로 치우친다 — 간격과
-    // 그리는 크기가 달라진 뒤로 그 차이가 눈에 보인다(전에는 26 대 18 이라 8px 이었다).
-    const icon_span: i32 = icon_step * @as(i32, @intCast(status_icon_count - 1)) + status_icon_px;
-    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_span - 12;
-    for (0..status_icon_count) |i| {
-        if (!reserveQuad()) break;
-        const rgb = tk.get(.surface_fg);
-        // 톱니가 설정 화면 입구다. **그리는 자리를 그대로 히트로 쓰되 44 로 넓힌다** —
-        // 아이콘은 18px 이라 그대로 받으면 손가락 기준의 절반도 안 된다(§5.1 "작게 그리고
-        // 넓게 받는다" — 아이콘은 서로 떨어져 있어 목록과 달리 이 기법이 통한다).
-        if (i == gear_slot) {
-            const half_icon = @as(f32, @floatFromInt(status_icon_px)) / 2;
-            const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + half_icon;
-            const cy = @as(f32, @floatFromInt(icon_y)) + half_icon;
-            // **위로는 키바 밴드를 넘지 않는다.** chrome 을 키바보다 먼저 묻기 때문에 rect 를
-            // 위로 펴면 그 x 에 있는 키의 **밑동이 조용히 안 눌린다**. 줄이 44 라 넘길 필요도
-            // 없다 — 클램프는 줄을 다시 줄일 때를 위한 가드로 남긴다([UX §5.6](../../../docs/mobile-ux.md)).
-            const gear_top = @max(cy - 22, key_bar_band.bot);
-            set_gear_rect = .{ .x = cx - 22, .y = gear_top, .w = 44, .h = @max(0, cy + 22 - gear_top) };
-        }
-        quad_buf[quad_count] = .{
-            .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),
-            .y = @floatFromInt(icon_y),
-            .w = @floatFromInt(status_icon_px),
-            .h = @floatFromInt(status_icon_px),
-            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
-            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
-            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
-            .a = 1.0,
-            .radius = 0,
-            .kind = 2,
-            .cell_x = 0,
-            .cell_y = @intCast(i),
-        };
-        quad_count += 1;
-    }
+    // 하단 아이콘 줄은 **없다**(위 "하단 바는 없다"). `status_cps` 는 남는다 — 그 배열이
+    // 아이콘 아틀라스의 출처이고, 톱니 글리프는 세션 목록 화면이 쓴다.
 }
 
 /// UiId → 문자열. `RectEntry` 는 문자열을 들고 있지 않으므로(레이아웃만 담는다) 조립할 때
@@ -2386,8 +2330,32 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { terminal, settings };
-var screen: Screen = .terminal;
+const Screen = enum { sessions, terminal, settings };
+
+/// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
+/// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
+/// 잃는다. 깊이는 셋이면 충분하다(목록 → 터미널, 목록 → 설정).
+var nav: [4]Screen = .{ .sessions, .terminal, .terminal, .terminal };
+/// 스택에 실제로 쌓인 수. **앱은 터미널에서 시작한다** — 세션 목록은 그 아래에 있고 뒤로
+/// 가면 나온다. 매번 목록을 거치게 하면 이 앱의 주 용도에 탭이 하나 더 붙는다.
+var nav_len: usize = 2;
+
+/// 지금 보이는 화면 — 스택의 꼭대기다.
+fn screenTop() Screen {
+    return nav[nav_len - 1];
+}
+
+/// 화면을 민다. 스택이 꽉 차면 안 민다(그럴 일은 없지만 조용히 덮어쓰는 것보다 낫다).
+fn navPush(s: Screen) void {
+    if (nav_len >= nav.len) return;
+    nav[nav_len] = s;
+    nav_len += 1;
+}
+
+/// 한 장 뺀다. **뿌리는 안 뺀다** — 스택이 비면 그릴 화면이 없다.
+fn navPop() void {
+    if (nav_len > 1) nav_len -= 1;
+}
 
 /// 행 높이. **한 셀(22)이 아니라 손가락(44)이다** — 목록에서는 "작게 그리고 넓게 받는다"
 /// 가 안 통한다(22 간격에 44 히트를 주면 위아래 행이 11px 씩 겹쳐 어느 행인지 모호해진다).
@@ -2491,6 +2459,76 @@ fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
 
 /// 설정 화면을 창 전체에 그린다. **그리는 자리를 그대로 히트 사각형에 기록한다** — 따로
 /// 계산하면 갈린다(키바에서 1px 어긋나 옆 키가 나갔던 그 결함).
+/// 지금 화면 이름(테스트용). **좌표를 테스트가 다시 계산하지 않게** 하는 것과 같은 이유다 —
+/// 화면 전환 규칙이 바뀌면 테스트가 제품에게 물어야 한다.
+pub fn currentScreenName() []const u8 {
+    return @tagName(screenTop());
+}
+
+/// 세션 목록의 톱니 한가운데. 테스트가 좌표를 손으로 적으면 헤더 높이를 바꿀 때 조용히 빗나간다.
+pub fn sessionsGearCenter() struct { x: f32, y: f32 } {
+    return .{ .x = sess_gear_rect.x + sess_gear_rect.w / 2, .y = sess_gear_rect.y + sess_gear_rect.h / 2 };
+}
+
+/// 세션 줄 한가운데.
+pub fn sessionsRowCenter() struct { x: f32, y: f32 } {
+    return .{ .x = sess_row_rect.x + sess_row_rect.w / 2, .y = sess_row_rect.y + sess_row_rect.h / 2 };
+}
+
+/// 톱니 히트 자리(폭·높이). 손가락 기준 44 를 재는 테스트가 쓴다.
+pub fn sessionsGearSize() struct { w: f32, h: f32 } {
+    return .{ .w = sess_gear_rect.w, .h = sess_gear_rect.h };
+}
+
+/// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
+var sess_gear_rect: SetRect = .{};
+var sess_row_rect: SetRect = .{};
+var sess_pressed: enum { none, gear, row } = .none;
+
+/// 세션 목록. **이 앱의 뿌리 화면이다**(UX §2.2). 지금 실을 수 있는 것은 **진짜 세션 하나**뿐이라
+/// 한 줄이다 — 목록을 채워 보이려고 없는 세션을 그리지 않는다(계약 §2.4 가 경고한 자리이고,
+/// 실제로 그렇게 그린 탭 셋을 U3a 에서 걷어냈다). 서버 목록·연결 진단은 **서버가 0개**이므로
+/// 만들지 않는다 — M3 가 "서버를 등록한다" 를 정하면 그때 선다.
+///
+/// **설정 입구가 여기다.** 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상 자리다),
+/// 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 쓴다. 관례대로 **부모 화면의 앱 바
+/// 오른쪽**에 둔다.
+fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    // ── 헤더: 제목 + 오른쪽 톱니
+    pushText("세션", @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
+    if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = sess_gear_rect.x + (set_head_h - 24) / 2,
+            .y = sess_gear_rect.y + (set_head_h - 24) / 2,
+            .w = 24,
+            .h = 24,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = @intCast(gear_slot), // 아이콘 아틀라스의 줄 = `status_cps` 안의 자리
+        };
+        quad_count += 1;
+    }
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    // ── 줄 하나: 지금 있는 세션. **48 이 아니라 56 이다** — 나중에 `cwd`·상태가 두 번째 줄로
+    // 붙을 자리이고(M3), 그때 높이가 바뀌면 손가락이 겨눈 자리가 움직인다.
+    const row_h: f32 = 56;
+    sess_row_rect = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = row_h };
+    if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText("터미널", @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y + row_h), .w = @intFromFloat(sess_row_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+}
+
 fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
@@ -2691,34 +2729,47 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 /// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
 /// 있으면 그 아래 키바·본문은 없는 것과 같다.
 pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
-    if (screen == .terminal) {
-        // 톱니를 누르면 설정을 민다. down 에서 바로 밀지 않고 up 까지 기다린다 — 밀려던
-        // 손짓이 화면 전환이 되면 안 된다(키바와 같은 규율).
-        if (phase == 0) {
-            // **down 은 톱니를 짚었을 때만 먹는다.** 예전에는 남아 있던 `set_active` 때문에
-            // 톱니 근처도 아닌 down 을 chrome 이 가져가, 그 손짓이 통째로 사라졌다.
-            set_active = setHit(set_gear_rect, x, y);
-            if (!set_active) return 0;
-            // **여기는 터미널 화면이라 설정 목록이 흐를 리가 없다.** 그런데 설정에서 나올 때
-            // 남은 값이 그대로면 톱니가 영영 안 눌린다 — 실제로 그렇게 막혔다(테스트가 잡았다).
-            set_stop_tap = false;
-            set_down_x = x;
-            set_down_y = y;
-            set_moved = 0;
-            return 1;
+    // **터미널 화면에는 chrome 이 없다.** 하단 44px 바를 걷어내면서 설정 입구가 부모 화면
+    // (세션 목록)의 앱 바로 갔다 — 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상
+    // 자리다), 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 썼다. 그래서 여기서는
+    // 아무것도 안 먹고 키바·본문이 받는다.
+    if (screenTop() == .terminal) return 0;
+
+    // **세션 목록**: 톱니는 설정을, 줄은 그 세션을 민다. down 에서 바로 밀지 않고 up 까지
+    // 기다린다 — 밀려던 손짓이 화면 전환이 되면 안 된다(키바와 같은 규율).
+    if (screenTop() == .sessions) {
+        switch (phase) {
+            0 => {
+                set_active = true;
+                set_down_x = x;
+                set_down_y = y;
+                set_moved = 0;
+                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else .none;
+                return 1;
+            },
+            1 => {
+                set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
+                // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
+                if (set_moved >= scroll_area.Touch.slop_px) sess_pressed = .none;
+                return 1;
+            },
+            else => {
+                const was = sess_pressed;
+                sess_pressed = .none;
+                set_active = false;
+                if (phase != 2 or set_moved >= scroll_area.Touch.slop_px) return 1;
+                switch (was) {
+                    .gear => {
+                        navPush(.settings);
+                        set_sa.reset();
+                        set_touch.cancel();
+                    },
+                    .row => navPush(.terminal),
+                    .none => {},
+                }
+                return 1;
+            },
         }
-        if (!set_active) return 0;
-        if (phase == 1) {
-            set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
-            return 1;
-        }
-        set_active = false;
-        if (phase == 2 and set_moved < scroll_area.Touch.slop_px and setHit(set_gear_rect, x, y)) {
-            screen = .settings;
-            set_sa.reset();
-            set_touch.cancel();
-        }
-        return 1;
     }
 
     // 설정 화면이 떠 있으면 **전부 먹는다**.
@@ -2806,7 +2857,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                 }
             }
             if (back) {
-                screen = .terminal; // pop
+                navPop(); // pop
                 return 1;
             }
             if (pressed) |i| switch (set_items[i].field.kind) {
@@ -2844,8 +2895,8 @@ pub export fn maru_mobile_pop_screen() u32 {
         set_open = null;
         return 1;
     }
-    if (screen == .terminal) return 0;
-    screen = .terminal;
+    if (nav_len <= 1) return 0; // 목록이 뿌리다 — 더 뺄 것이 없으면 앱을 내린다(UX §3)
+    navPop();
     // **진행 중이던 손짓도 함께 거둔다.** 손가락을 댄 채 뒤로가기를 누르면 up 이 안 와서
     // `set_active`·눌림 표시·관성이 터미널 화면까지 살아남는다 — 남은 관성이 목록을 계속
     // 밀고, 다시 들어오면 누른 적 없는 행이 눌린 것처럼 보인다.
@@ -2985,8 +3036,10 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // **밀린 화면은 아래를 덮는다**(스택 — UX §3). 터미널을 먼저 세우는 이유는 두 가지다:
     // 코어 격자·아틀라스가 계속 살아 있어야 돌아왔을 때 화면이 그대로이고, 키바 사각형이
     // 서 있어야 `key_bar_ready` 가 거짓말을 안 한다.
-    if (screen == .settings) {
-        drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk);
+    switch (screenTop()) {
+        .terminal => {},
+        .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .settings => drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

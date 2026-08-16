@@ -450,6 +450,14 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (fabsf(_flingVy) < MARU_FLING_STOP_BELOW) _flingVy = 0; // 영원히 도는 것을 막는다
 }
 
+/// 좌측 가장자리에서 밀면 화면 한 장을 뺀다. **끝났을 때 한 번만** 민다 — 진행 중에 밀면
+/// 손가락을 되돌려도 이미 넘어가 있다.
+- (void)maruEdgeBack:(UIScreenEdgePanGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateEnded) return;
+    unsigned int popped = maru_mobile_pop_screen();
+    NSLog(@"MARU_NAV edge_back popped=%u", popped);
+}
+
 - (BOOL)canBecomeFirstResponder { return YES; }
 // **소프트 키보드를 막지 않는다.** 한때 빈 `inputView` 를 돌려줘 키보드를 감췄는데,
 // 그러면 하드웨어 키보드가 없는 사용자는 **아무것도 입력할 수 없다** — 스크린샷을 깨끗하게
@@ -883,6 +891,28 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // Android 는 `g.ready` 를 안 세워 draw 가 통째로 no-op 이 된다. 같은 모양으로 맞춘다:
     // 검은 화면 + 로그 한 줄이지, 죽는 것이 아니다.
     if (!_pipe) { NSLog(@"MARU_CHROME pipeline_fail=%@", err); return self; }
+
+    // **뒤로가기는 좌측 가장자리 스와이프다**([UX §3](../../../docs/mobile-ux.md) — Android 는
+    // 하드웨어 뒤로가기, iOS 는 이것). 이 앱에는 화면이 셋이 됐는데(세션 목록 → 터미널 →
+    // 설정) iOS 에는 그 스택을 되감을 수단이 아예 없었다 — **설정에 영영 못 들어가는** 상태로
+    // 나갈 뻔했다.
+    //
+    // **`UIScreenEdgePanGestureRecognizer` 를 쓴다.** 터치를 직접 판정하지 않는 이유는 그
+    // 자리가 본문 선택·스크롤과 겹치기 때문이다 — 가장자리 인식기는 OS 가 그 구분을 이미
+    // 갖고 있고, 우리 `touchesBegan` 은 인식되는 순간 취소(cancel)를 받아 **선택이 남지 않는다**.
+    //
+    // **이 경로는 스크립트로 검증이 안 된다.** `idb ui swipe` 의 합성 터치는 `touchesBegan`
+    // 에는 닿는데(로그로 확인) **제스처 인식기에는 안 닿는다** — 가장자리 조건을 뺀 평범한
+    // `UIPanGestureRecognizer` 를 임시로 붙여도 한 번도 안 불렸다. 그래서 이 자리는 사람이
+    // 시뮬레이터에서 밀어 보는 것이 유일한 판정이다([검증 행렬](../../../docs/verification-matrix.md)
+    // 의 "iOS 여러 줄 선택 드래그" 와 같은 부류다).
+    UIScreenEdgePanGestureRecognizer *edge =
+        [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(maruEdgeBack:)];
+    edge.edges = UIRectEdgeLeft;
+    [self addGestureRecognizer:edge];
+    // **붙었다는 사실을 로그로 남긴다.** 이 경로는 스크립트로 못 밟는다(아래 주석) — 그러면
+    // "안 붙어서 안 되는 것" 과 "붙었는데 손짓이 안 온 것" 을 나중에 못 가른다.
+    NSLog(@"MARU_NAV edge_recognizer_attached n=%lu", (unsigned long)self.gestureRecognizers.count);
     _queue = [_dev newCommandQueue];
     [self loadAtlas];
 

@@ -1311,6 +1311,33 @@ test "조합 중 문자열: 버퍼를 넘치면 잘린 글자를 통째로 버�
 // 잰다** — 어디가 먹는지를 브리지에게 물어 그 모양이 계약과 맞는지 본다.
 
 /// 하단 줄을 가로로 쓸어 chrome 이 down 을 먹는 구간을 찾는다. `{시작, 폭}`.
+/// 설정 화면을 연다. **진입점이 세션 목록의 앱 바로 옮겨졌다**(U3b) — 터미널 화면에는 chrome 이
+/// 없다. 뒤로 빠져 목록으로 간 뒤 톱니를 누른다. 좌표는 **제품에게 묻는다**.
+fn openSettings(w: u32, h: u32) void {
+    var guard: u32 = 0;
+    while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
+        if (bridge.maru_mobile_pop_screen() == 0) break;
+    }
+    _ = bridge.maru_mobile_build(w, h, now());
+    const g = bridge.sessionsGearCenter();
+    _ = bridge.maru_mobile_chrome_pointer(0, g.x, g.y);
+    _ = bridge.maru_mobile_chrome_pointer(2, g.x, g.y);
+    _ = bridge.maru_mobile_build(w, h, now());
+}
+
+/// 터미널 화면으로 돌아간다 — 목록에서 그 줄을 누른다.
+fn openTerminal(w: u32, h: u32) void {
+    var guard: u32 = 0;
+    while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
+        if (bridge.maru_mobile_pop_screen() == 0) break;
+    }
+    _ = bridge.maru_mobile_build(w, h, now());
+    const r = bridge.sessionsRowCenter();
+    _ = bridge.maru_mobile_chrome_pointer(0, r.x, r.y);
+    _ = bridge.maru_mobile_chrome_pointer(2, r.x, r.y);
+    _ = bridge.maru_mobile_build(w, h, now());
+}
+
 fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
     var first: ?f32 = null;
     var last: f32 = 0;
@@ -1329,69 +1356,61 @@ fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
 
 // **설정 입구는 손가락 크기여야 한다.** 아이콘은 24 로 그리지만 받는 자리는 44 다(§5.1 —
 // 작게 그리고 넓게 받는다). 이 줄에서 먹는 구간이 정확히 하나이고 그 폭이 44 인지 본다.
-test "톱니 히트는 44 폭 한 구간이다" {
+test "톱니 히트는 손가락 기준을 넘는다" {
+    // **진입점이 세션 목록의 앱 바로 옮겨졌다**(U3b). 재는 것은 그대로다 — 아이콘은 24 로
+    // 그리지만 받는 자리는 44 이상이어야 한다(UX §5.1 "작게 그리고 넓게 받는다").
+    var guard: u32 = 0;
+    while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
+        if (bridge.maru_mobile_pop_screen() == 0) break;
+    }
     _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    try std.testing.expectEqual(@as(f32, 44), span.width);
+    const g = bridge.sessionsGearSize();
+    try std.testing.expect(g.w >= 44);
+    try std.testing.expect(g.h >= 44);
     bridge.maru_mobile_clear_error();
 }
 
 // **톱니를 안 짚은 down 은 chrome 이 안 먹는다.** 남아 있던 상태 때문에 아무 데나 먹으면 그
 // 손짓이 통째로 사라진다(코드 리뷰가 잡은 결함). 잡았다 취소한 뒤에도 같아야 한다.
-test "톱니 밖 down 은 chrome 이 안 먹는다" {
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    try std.testing.expect(span.width > 0);
-
-    // 톱니를 잡았다 취소해 내부 상태를 남긴다
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22));
-    _ = bridge.maru_mobile_chrome_pointer(3, span.x0 + 1, 874 - 22);
-    // 그 뒤 본문 한가운데 down 은 chrome 이 안 먹어야 한다
-    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 200, 300));
-    bridge.maru_mobile_clear_error();
-}
-
-// **키바 키를 톱니가 훔치지 않는다.** chrome 을 키바보다 먼저 묻기 때문에, 톱니 rect 가 위로
-// 번지면 그 x 에 있는 키의 밑동이 조용히 안 눌린다(코드 리뷰가 잡았다). 키 한가운데를 눌러
-// **키바가 먹고 chrome 은 안 먹는지** 본다.
-test "키바 키 자리는 chrome 이 안 먹는다" {
-    _ = bridge.maru_mobile_build(402, 874, now());
-    var i: u32 = 0;
-    var checked: u32 = 0;
-    while (i < bridge.maru_mobile_keybar_count()) : (i += 1) {
-        if (bridge.maru_mobile_keybar_rect(i) == 0) continue; // 창 밖 키
-        const c = keyCenter(i);
-        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, c.x, c.y));
-        try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_pointer(0, c.x, c.y));
-        _ = bridge.maru_mobile_keybar_pointer(3, c.x, c.y);
-        checked += 1;
+test "터미널 화면에서는 chrome 이 아무것도 안 먹는다" {
+    // **계약이 바뀌었다**(U3b): 터미널 화면에는 chrome 이 없다. 하단 44px 바를 걷어내면서
+    // 설정 입구가 부모 화면으로 갔고, 그래서 본문·키바가 모든 터치를 받는다. 전에는 "톱니
+    // 밖 down 은 안 먹는다" 가 계약이었고 그 자리를 이것이 대신한다.
+    openTerminal(402, 874);
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    var y: f32 = 0;
+    while (y < 874) : (y += 37) {
+        var x: f32 = 0;
+        while (x < 402) : (x += 53) {
+            try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, x, y));
+        }
     }
-    try std.testing.expect(checked > 0);
     bridge.maru_mobile_clear_error();
 }
 
-// **밀린 화면이 있으면 그 아래는 없는 것과 같다.** 설정이 떠 있는 동안에는 본문 한가운데
-// down 도 chrome 이 먹어야 한다 — 안 그러면 설정 위를 눌렀는데 터미널이 스크롤된다.
-test "설정이 뜨면 화면 전체를 먹고, 뒤로가기로 빠진다" {
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    const gx = span.x0 + 1;
-    const gy: f32 = 874 - 22;
+// **스택이 셋이 됐다**(U3b): 세션 목록이 뿌리, 그 위에 터미널, 설정은 목록에서 민다.
+// 뒤로가기 한 번마다 한 장씩 빠지고, **뿌리에서만 0** 이다(host 는 그때만 앱을 내린다).
+test "화면 스택은 목록이 뿌리이고 뒤로가기로 한 장씩 빠진다" {
+    openSettings(402, 874);
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
 
-    // 톱니를 탭해 민다(down→up, 임계 아래).
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, gx, gy));
-    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(2, gx, gy));
-    _ = bridge.maru_mobile_build(402, 874, now());
-
+    // 설정은 화면 전체를 먹는다 — 그 아래 터미널·키바는 없는 것과 같다.
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_chrome_pointer(0, 200, 300));
     _ = bridge.maru_mobile_chrome_pointer(3, 200, 300);
 
-    // **뺄 것이 있으면 1, 없으면 0.** host 는 0 일 때만 자기 관례(앱 내리기)로 간다.
+    // 설정 → 목록
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+    // **뿌리에서는 0** — 더 뺄 것이 없다.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_pop_screen());
 
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_chrome_pointer(0, 200, 300));
+    // 목록에서 줄을 누르면 터미널이 밀리고, 뒤로가면 다시 목록이다.
+    openTerminal(402, 874);
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+
+    openTerminal(402, 874);
     bridge.maru_mobile_clear_error();
 }
 
@@ -1508,10 +1527,7 @@ test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
 // 관측: 설정을 민 뒤 글자를 보내면 `last_error` 가 비어 있다.
 test "재현: 설정이 떠 있을 때 버린 입력은 신호를 남긴다" {
     _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    const gy: f32 = 874 - 22;
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, gy);
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, gy);
+    openSettings(402, 874);
     _ = bridge.maru_mobile_build(402, 874, now());
 
     bridge.maru_mobile_clear_error();
@@ -1526,8 +1542,7 @@ test "재현: 설정이 떠 있을 때 버린 입력은 신호를 남긴다" {
     bridge.maru_mobile_scroll(10);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -1601,16 +1616,12 @@ test "재현: 터미널이 안 보이면 caret_rect 는 0 이다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(bridge.maru_mobile_caret_rect() != 0); // 보일 때는 자리가 있다
 
-    const span = chromeClaimSpan(402, 874 - 22);
-    const gy: f32 = 874 - 22;
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, gy);
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, gy);
+    openSettings(402, 874);
     _ = bridge.maru_mobile_build(402, 874, now());
 
     try std.testing.expectEqual(@as(u64, 0), bridge.maru_mobile_caret_rect());
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -1939,10 +1950,7 @@ test "설정 줄은 스키마에서 나온다 — 무엇이 나오는지 값으�
 /// 브리지에게 물어 그 자리를 누른다(그리는 자리와 판정하는 자리가 갈리면 안 된다).
 fn openSettingsAndTap(key: []const u8) bool {
     _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openSettings(402, 874);
 
     // 행 자리는 브리지가 그린 rect 로 안다 — 목록을 위에서부터 훑어 그 키의 행을 누른다.
     var y: f32 = 0;
@@ -2047,10 +2055,7 @@ test "프리셋은 네 색이 다 맞을 때만 그 이름이다" {
 test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     const small_h: u32 = 500; // 16×44=704 보다 작다
     _ = bridge.maru_mobile_build(402, small_h, now());
-    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
 
     // 프리셋 행을 찾아 연다.
     var opened = false;
@@ -2078,9 +2083,7 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     try std.testing.expect(bridge.settingsPopupItemVisible(last)); // 민 뒤엔 보인다
 
     _ = bridge.maru_mobile_chrome_pointer(3, 300, 0);
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -2089,9 +2092,7 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
 // 뒤집어 잰다: **누르면 반응이 있고, 실제로 편집이 시작된다.**
 test "숫자 줄은 눌리고 편집이 시작된다" {
     _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
+    openSettings(402, 874);
     const base = bridge.maru_mobile_build(402, 874, now());
 
     var y: f32 = 0;
@@ -2110,9 +2111,7 @@ test "숫자 줄은 눌리고 편집이 시작된다" {
     }
     try std.testing.expect(tested);
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -2123,10 +2122,7 @@ test "숫자 줄은 눌리고 편집이 시작된다" {
 
 fn tapNumberRow(key: []const u8) bool {
     _ = bridge.maru_mobile_build(402, 874, now());
-    const span = chromeClaimSpan(402, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openSettings(402, 874);
     var y: f32 = 0;
     while (y < 874) : (y += 4) {
         const idx = bridge.settingsRowAt(200, y) orelse continue;
@@ -2149,8 +2145,7 @@ test "숫자 줄을 누르면 입력 대상이 되고 host 가 숫자 키보드�
 
     _ = bridge.maru_mobile_pop_screen(); // 편집 취소
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -2192,9 +2187,7 @@ test "범위 밖 숫자는 안 들어가고 조용하지 않다" {
     try std.testing.expectEqualStrings("settings_number_range", std.mem.span(bridge.maru_mobile_last_error()));
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&out_buf, out_buf.len));
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 var out_buf: [4096]u8 = undefined;
@@ -2210,9 +2203,7 @@ test "숫자 칸은 숫자만 받고 그 사실을 남긴다" {
     _ = bridge.maru_mobile_input("a", 1);
     try std.testing.expectEqualStrings("settings_number_only", std.mem.span(bridge.maru_mobile_last_error()));
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -2303,10 +2294,7 @@ fn probeRow() ?usize {
 test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" {
     const small_h: u32 = 300; // 목록(7줄+헤더)이 확실히 넘친다
     _ = bridge.maru_mobile_build(402, small_h, now());
-    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
 
     const before = probeRow() orelse return error.TestUnexpectedResult;
 
@@ -2333,8 +2321,7 @@ test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" 
     _ = bridge.maru_mobile_build(402, small_h, now());
     try std.testing.expectEqual(at_cancel, probeRow() orelse return error.TestUnexpectedResult);
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }
 
@@ -2398,10 +2385,7 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     var pops: u32 = 0;
     while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
     _ = bridge.maru_mobile_build(402, small_h, now());
-    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
-    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
 
     try std.testing.expectEqual(@as(u32, 0), bridge.settingsScrollPx());
 
@@ -2445,7 +2429,6 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     try std.testing.expectEqual(c1, bridge.settingsScrollPx());
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
 
-    _ = bridge.maru_mobile_pop_screen();
-    _ = bridge.maru_mobile_build(402, 874, now());
+    openTerminal(402, 874); // **터미널 화면으로 되돌린다** — 전역 상태라 다음 테스트가 그것을 전제한다
     bridge.maru_mobile_clear_error();
 }

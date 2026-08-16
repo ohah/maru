@@ -214,6 +214,13 @@ void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 /// 자리는 iOS `Library/Application Support/maru/config`, Android `filesDir/config`. 파일이 없으면
 /// 안 부르면 된다(기본값으로 돈다). 다시 부르면 통째로 갈아 끼운다.
 void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
+/// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
+/// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.
+///
+/// **넘치면 안 읽는다 — 자른 앞부분을 쓰지 않는다.** 잘린 config 는 "절반만 적용된 설정" 이라
+/// 사용자가 무엇이 먹었는지 알 수 없다. 계약은 "없음·권한·크기 초과는 전부 기본값" 이다
+/// (docs/mobile-config.md §7).
+#define MARU_CONFIG_MAX_BYTES (1u << 20)
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

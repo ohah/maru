@@ -351,6 +351,7 @@ static unsigned int maruPointerId(UITouch *t) {
     _hasBodyPtr = NO;
     UIEdgeInsets safe = self.safeAreaInsets;
     for (UITouch *t in event.allTouches) {
+        if (t.view != self) continue; // 남의 손가락을 이어받지 않는다(위 주석)
         if (t.phase == UITouchPhaseEnded || t.phase == UITouchPhaseCancelled) continue;
         _bodyPtrId = maruPointerId(t);
         _hasBodyPtr = YES;
@@ -465,6 +466,10 @@ static unsigned int maruPointerId(UITouch *t) {
 /// 때다 — 손가락마다 끝내면 둘째가 떼는 순간 첫 손가락이 잡고 있던 것이 풀린다.
 - (BOOL)anyTouchRemains:(UIEvent *)event {
     for (UITouch *t in event.allTouches) {
+        // **우리 뷰의 손가락만 센다.** `allTouches` 는 이벤트에 딸린 전부라 다른 뷰의 터치가
+        // 섞일 수 있고, 그러면 "마지막 손가락" 이 영영 거짓이 되어 **그 표면이 잡힌 채 굳는다**
+        // (관성도 새 터치도 안 먹는다). 같은 이유로 이어받기도 우리 것만 본다.
+        if (t.view != self) continue;
         if (t.phase != UITouchPhaseEnded && t.phase != UITouchPhaseCancelled) return YES;
     }
     return NO;

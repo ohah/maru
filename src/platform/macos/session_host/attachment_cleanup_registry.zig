@@ -2100,8 +2100,9 @@ fn classifyEntryPolicy(
 
     return switch (family) {
         .connection_only_denied => .unauthorized,
-        .attach_only => if (tag == .attach_controller and entry.lifecycle == .reserved and
-            entry.stream_id == 0 and bound_stream_id == 0 and identity.role == .controller and
+        .attach_only => if (((tag == .attach_controller and identity.role == .controller) or
+            (tag == .attach_observer and identity.role == .observer)) and
+            entry.lifecycle == .reserved and entry.stream_id == 0 and bound_stream_id == 0 and
             entry.controller_authority == .unavailable)
             .allowed
         else
@@ -2879,7 +2880,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
     }
 
     var invalid_tag: contract.RuntimeRequestTag = .attach_controller;
-    raw = @intFromEnum(contract.RuntimeRequestTag.detach) + 1;
+    raw = @intFromEnum(contract.RuntimeRequestTag.attach_observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_tag)).* = @intCast(raw);
         try std.testing.expectEqual(PolicyResult.invalid_receipt, classifyEntryPolicy(
@@ -3069,6 +3070,7 @@ const PolicyExpectation = struct {
 // make the Cartesian test pass by construction.
 const policy_expectations = [_]PolicyExpectation{
     .{ .family = .attach_only, .tag = .attach_controller, .lifecycle = .reserved, .role = .controller, .authority = .unavailable, .stream = .zero },
+    .{ .family = .attach_only, .tag = .attach_observer, .lifecycle = .reserved, .role = .observer, .authority = .unavailable, .stream = .zero },
     .{ .family = .bound_observation, .lifecycle = .bound, .role = .observer, .authority = .unavailable, .stream = .exact_nonzero },
     .{ .family = .bound_observation, .lifecycle = .bound, .role = .controller, .authority = .live, .stream = .exact_nonzero },
     .{ .family = .bound_observation, .lifecycle = .bound, .role = .controller, .authority = .revoke_pending, .stream = .exact_nonzero },

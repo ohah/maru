@@ -1131,8 +1131,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    final-address `PreparedRetiredClientReclaim` seal로 oldest generation을 고정한다. tick-end no-fail suffix만 Client graph와
    node-local registries/accounting을 정산하고 allocator destroy한 뒤 inventory를 compact한다. cap 2 상태의 세 번째 prepare,
    copied/stale handle, readiness 또는 complete-node digest drift는 destroy/current mutation 0이다. R3의 제품 caller는 CR3c 전까지 0이다.
-6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
-   status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
+6. **CR4 — 단일 host 실제 reconnect:** 세 닫힌 gate로 진행한다. **CR4a**는 먼저 CR3c의 forward-recovery 경계
+   (old attachment terminal, unavailable shell, fresh Client replacement 게시) 뒤 같은 `HostAdapter`에서 observer attach와
+   final-address candidate initial snapshot을 검증하는 prerequisite를 닫는다. 이어 실제 `connectExistingHost` issuer가 fresh Client를
+   그 replacement 경계로 넘기고, snapshot을 base로 하는 bounded contiguous delta까지 조립한 뒤 immutable staged receipt를
+   게시한다. replacement 게시 전 실패는 old graph mutation 0이다. 게시 뒤 typed reject는 unavailable shell과 usable Client
+   generation을 보존한 채 candidate 권위만 정산하고, EOF/불확실 transport 실패는 동일 node·generation을 보존하되 Client를
+   fail-close하여 다음 replacement 시도로 넘긴다. **CR4b**는 그 receipt 아래
+   mutation lease/seal을 닫고 fresh `controller.status`와 generation-CAS `controller.takeover`를 exact once 실행한다. observer
+   conflict를 자동 takeover하지 않으며 takeover write가 시작된 뒤 reply를 잃으면 local authority를 발행하거나 old writable을
+   복원하지 않는다. **CR4c**는 proven controller candidate를 CR3c의 Client/RemoteGeneration publication에 연결하고 forced first
+   resize와 input을 새 generation에서만 연 뒤 retiring owner를 ordered reclaim한다. 세 gate 모두 실제 socket fixture를 사용하며
+   CR4a만으로 takeover나 사용자 가시 reconnect 완료를 주장하지 않는다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

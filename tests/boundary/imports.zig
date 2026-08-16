@@ -2783,9 +2783,9 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
     const runtime_product = runtime_source[0..runtime_first_test];
     const raw_baseline = [_]struct { name: []const u8, count: usize }{
         .{ .name = "wire_major", .count = 5 },
-        .{ .name = "screen_codec_version", .count = 4 },
-        .{ .name = "metadata_support", .count = 6 },
-        .{ .name = "peer_attach_generation", .count = 3 },
+        .{ .name = "screen_codec_version", .count = 5 },
+        .{ .name = "metadata_support", .count = 8 },
+        .{ .name = "peer_attach_generation", .count = 4 },
         .{ .name = "screen_viewport_scrolled_v1", .count = 1 },
         .{ .name = "async_scroll_to_bottom_v1", .count = 2 },
         .{ .name = "notification_stream_auth_v1", .count = 1 },
@@ -7550,7 +7550,8 @@ test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bou
         @as(usize, 1),
         countIdentifierOutsideTopLevelTests(slot, "readSnapshot"),
     );
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, ".readInitialSnapshot("));
+    // Existing-generation attach와 CR4a final candidate가 각각 같은 guarded snapshot leaf를 쓴다.
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, ".readInitialSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "self_addr: usize = 0"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "actual_allocator:"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "transport_incarnation: u64 = 0"));

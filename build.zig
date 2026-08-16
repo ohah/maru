@@ -4107,6 +4107,41 @@ pub fn build(b: *std.Build) void {
         session_host_cr3c_c2_step.dependOn(&run_cr3c_c2_boundary_tests.step);
         boundary_step.dependOn(&run_cr3c_c2_boundary_tests.step);
     }
+    const session_host_cr4a_step = b.step(
+        "test-session-host-cr4a",
+        "CR4a same-adapter observer candidate prerequisite gates",
+    );
+    session_host_cr4a_step.dependOn(session_host_cr3c_c2_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4a_optimize| {
+        const cr4a_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a "},
+        });
+        const run_cr4a_runtime_tests = b.addRunArtifact(cr4a_runtime_tests);
+        run_cr4a_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_runtime_tests.setCwd(b.path("."));
+        session_host_cr4a_step.dependOn(&run_cr4a_runtime_tests.step);
+
+        const cr4a_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr4a_boundary.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+            }),
+            .filters = &.{"CR4a 경계는"},
+        });
+        const run_cr4a_boundary_tests = b.addRunArtifact(cr4a_boundary_tests);
+        run_cr4a_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr4a_boundary_tests.setCwd(b.path("."));
+        session_host_cr4a_step.dependOn(&run_cr4a_boundary_tests.step);
+        boundary_step.dependOn(&run_cr4a_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

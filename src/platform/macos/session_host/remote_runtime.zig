@@ -320,7 +320,6 @@ const RuntimeAttachment = union(enum) {
                 preDecodeBufferedEvents,
                 poison_capture,
             ) catch |err| {
-                if (self.statePtr().role == .observer) return error.Unauthorized;
                 return mapGenerationDecodedError(err);
             },
         };
@@ -1920,6 +1919,124 @@ fn initInitialRemoteGeneration(
         try out.attachment.generation.initInPlace(args.connection.generation);
 }
 
+const ObserverReconnectCandidateArgs = struct {
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+    runtime_id: u128,
+};
+
+/// CR4a candidate initializer. 모든 socket/화면 mutation은 heap candidate의 final address에서
+/// 끝나며 실패 시 caller가 current generation을 건드리지 않고 이 payload만 정산할 수 있다.
+fn initObserverReconnectCandidate(
+    out: *RemoteGeneration,
+    args: ObserverReconnectCandidateArgs,
+) !void {
+    const runtime = args.runtime;
+    const capabilities = runtime.connectionCapabilities();
+    out.* = .{
+        .connection = .{ .generation = args.adapter },
+        .connection_generation = args.adapter.connectionGeneration(),
+        .attachment = .{ .generation = .{} },
+        .event_generation_tracking = .untracked,
+        .resize_seq = 0,
+        .resize_generation = 0,
+        .resize_baseline_present = false,
+        .pump_ended = false,
+        .resync_needed = false,
+        .observation = .{},
+    };
+    var live = true;
+    errdefer if (live) deinitRemoteGeneration(out, runtime.allocator);
+
+    try out.attachment.generation.initInPlace(args.adapter);
+    const prepared = try out.attachment.generation.prepareObserverAttach(args.adapter, args.runtime_id);
+    const result = try out.attachment.generation.executePreparedAttach(args.adapter, prepared);
+    const correlated = switch (result) {
+        .accepted => |value| value,
+        .typed_reject, .uncertain_or_connection_failure => return error.AttachFailed,
+    };
+    var response_open = true;
+    defer if (response_open) {
+        _ = out.attachment.generation.finishResponse(args.adapter);
+        out.attachment.generation.abortExecutedAttach(
+            args.adapter,
+            correlated.executed_call,
+        ) catch @panic("CR4a observer response rollback lost final candidate");
+    };
+    const response = try out.attachment.generation.responseBytes(args.adapter);
+    const generation_schema: runtime_metadata_wire.AttachGenerationSchema = switch (capabilities.attach_schema) {
+        .frozen_controller_only => .frozen_controller_only,
+        .granted_roles => if (capabilities.peer_attach_generation)
+            .granted_with_generation
+        else
+            .granted_without_generation,
+    };
+    var decoded = try remote_attachment.decodeAttachResponse(
+        runtime.allocator,
+        response,
+        args.runtime_id,
+        .observer,
+        .{
+            .generation_schema = generation_schema,
+            .metadata_support = switch (capabilities.metadata_support) {
+                .unsupported => .unsupported,
+                .supported => .supported,
+            },
+        },
+    );
+    defer decoded.deinit();
+    const accepted = switch (decoded) {
+        .wire_error => return error.AttachFailed,
+        .accepted => |*value| value,
+    };
+    switch (accepted.initial_metadata) {
+        .current => |*dto| _ = try RemoteRuntime.applyMetadataDtoToObservation(
+            runtime.allocator,
+            &out.observation,
+            dto,
+        ),
+        .unsupported, .unavailable => {},
+    }
+    out.event_generation_tracking = switch (generation_schema) {
+        .frozen_controller_only, .granted_without_generation => .untracked,
+        .granted_with_generation => .tracked,
+    };
+    if (out.attachment.generation.finishResponse(args.adapter) != .cleaned)
+        @panic("CR4a observer response cleanup lost final candidate");
+    try out.attachment.generation.commitAccepted(
+        args.adapter,
+        correlated,
+        accepted.state,
+        runtime.allocator,
+    );
+    response_open = false;
+
+    var snapshot: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
+    try out.attachment.generation.readInitialSnapshot(&snapshot);
+    var snapshot_live = true;
+    defer if (snapshot_live) snapshot.deinit() catch
+        @panic("CR4a initial snapshot cleanup lost final candidate");
+    const bytes = try snapshot.borrow();
+    try out.attachment.generation.initScreen(capabilities.screen_codec_version);
+    out.attachment.generation.screenPtr().?.viewport_scrolled_known =
+        capabilities.screen_viewport_scrolled;
+    out.attachment.generation.screenPtr().?.applySnapshot(bytes, runtime.io) catch |err| {
+        snapshot.deinit() catch
+            @panic("CR4a initial snapshot cleanup lost final candidate");
+        snapshot_live = false;
+        out.attachment.generation.poisonInitialSnapshotApply(
+            err == error.OutOfMemory,
+        ) catch @panic("CR4a snapshot failure lost sealed candidate transport");
+        return err;
+    };
+    try snapshot.deinit();
+    snapshot_live = false;
+
+    // CR4a prerequisite는 snapshot owner까지만 닫는다. delta frontier를 여기서 임의로 idle로
+    // 간주하면 아직 없는 product job/deadline receipt를 우회하므로 actual connect gate가 소유한다.
+    live = false;
+}
+
 fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
     const a_start = @intFromPtr(a);
     const b_start = @intFromPtr(b);
@@ -2740,6 +2857,32 @@ pub const RemoteRuntime = struct {
         try self.generation_owner.publishInitial();
         try self.reconnect_executor.initInPlace(&self.generation_owner, 1);
         self.surface.remote = self.screen_source.screenSource();
+    }
+
+    /// CR4a product leaf. 기존 stable shell은 읽기만 하고 fresh generation Client에 observer로
+    /// attach한 완성 candidate를 준비한다. takeover/publication/input은 후속 gate의 별도 권위다.
+    pub fn prepareObserverReconnectCandidate(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        out: *PreparedReconnect,
+    ) anyerror!void {
+        try self.admitRuntimeOperation();
+        const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
+            return error.AttachFailed;
+        if (runtime_id == 0 or adapter.connectionGeneration() == 0)
+            return error.InvalidAuthority;
+        try self.generation_owner.prepareAfterClientReplacement(
+            adapter,
+            published,
+            out,
+            ObserverReconnectCandidateArgs{
+                .runtime = self,
+                .adapter = adapter,
+                .runtime_id = runtime_id,
+            },
+            initObserverReconnectCandidate,
+        );
     }
 
     /// host가 발급한 runtime_id(hex)를 돌려준다 — workspace가 저장해 재실행 시 `attachExisting`으로 재접속한다(§7, e3-5).
@@ -4054,12 +4197,24 @@ pub const RemoteRuntime = struct {
         self: *RemoteRuntime,
         dto: *const runtime_metadata_wire.OwnedMetadataDto,
     ) error{ OutOfMemory, ProtocolError }!bool {
-        if (dto.revision < self.currentGeneration().observation.revision) return false;
-        if (dto.revision == self.currentGeneration().observation.revision) {
+        return applyMetadataDtoToObservation(
+            self.allocator,
+            &self.currentGeneration().observation,
+            dto,
+        );
+    }
+
+    fn applyMetadataDtoToObservation(
+        allocator: std.mem.Allocator,
+        observation: *term_backend.RuntimeObservation,
+        dto: *const runtime_metadata_wire.OwnedMetadataDto,
+    ) error{ OutOfMemory, ProtocolError }!bool {
+        if (dto.revision < observation.revision) return false;
+        if (dto.revision == observation.revision) {
             // A revision is a semantic version, not merely an ordering hint. Accepting different
             // cwd/SSH data under the same revision would let the synchronous SSH barrier return
             // success while retaining a stale destination.
-            if (!metadataDtoMatchesObservation(dto, self.currentGeneration().observation.view()))
+            if (!metadataDtoMatchesObservation(dto, observation.view()))
                 return error.ProtocolError;
             return false;
         }
@@ -4072,7 +4227,7 @@ pub const RemoteRuntime = struct {
                 .bytes = process.bytes,
             };
         }
-        try self.currentGeneration().observation.replace(self.allocator, .{
+        try observation.replace(allocator, .{
             .availability = .current,
             .revision = dto.revision,
             .observer_generation = dto.observer_generation,
@@ -8346,6 +8501,41 @@ fn cr3c2OwnerProjection(
     };
 }
 
+/// CR4a starts after CR3c's irreversible forward-recovery boundary: the old attachment is
+/// terminal, the stable shell is unavailable, and the fresh Client is already the adapter's
+/// current generation. Observer preparation may still fail, but it must not publish a
+/// RemoteGeneration or mutate the unavailable shell.
+fn publishCr4aReplacementPrerequisite(
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+    source: *client_mod.Client,
+    out: *r2a_client_slot.PreparedClientReplacement,
+) !void {
+    var admission: r2a_client_slot.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(adapter.connectionGeneration(), &admission);
+    const placeholder_generation = std.math.add(
+        u64,
+        try runtime.generation_owner.currentGeneration(),
+        1,
+    ) catch return error.InvalidAuthority;
+    var cleanup: r2a_client_slot.PreparedRetirementCleanup = .{};
+    try adapter.prepareRetirementCleanup(&admission, placeholder_generation, &cleanup);
+    _ = try runtime.generation_owner.publishUnavailableAfterAttachmentRetirement(
+        adapter,
+        &admission,
+        &cleanup,
+        placeholder_generation - 1,
+        placeholder_generation,
+    );
+    try adapter.finishRetirementCleanup(&cleanup);
+    try host_adapter_mod.HostAdapter.testing.publishReplacementForCr3c(
+        adapter,
+        &cleanup,
+        source,
+        out,
+    );
+}
+
 fn expectCr3c2OrderedPreflightRejectPreserves(
     owner: *ReconnectGenerationOwner,
     adapter: *host_adapter_mod.HostAdapter,
@@ -8404,6 +8594,322 @@ const R2aTestGeneration = if (builtin.is_test) struct {
         try out.attachment.initScreen(screen_stream.codec_version);
     }
 } else struct {};
+
+test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapshot을 조립한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"stream_id\":9,\"controller_generation\":3," ++
+            "\"granted\":{\"observe\":true,\"input\":false,\"resize\":false}," ++
+            "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+    );
+    defer allocator.free(response);
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&records, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "n", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&records, allocator, row);
+    const snapshot = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 9,
+            .flags = protocol.Flags.end_stream,
+        },
+        records.items,
+    );
+    defer allocator.free(snapshot);
+
+    const Peer = struct {
+        fn run(
+            fd: c.fd_t,
+            response_wire: []const u8,
+            snapshot_wire: []const u8,
+            release: *std.atomic.Value(u8),
+            observer_seen: *std.atomic.Value(u8),
+        ) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            const observed = request.header.kind == .request and
+                std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.attach\"") != null and
+                std.mem.indexOf(u8, request.payload, "\"mode\":\"observer\"") != null;
+            observer_seen.store(@intFromBool(observed), .release);
+            if (!observed) return;
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+            const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+            while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var raw_client_fd_owned = true;
+    var peer_fd_owned = true;
+    errdefer {
+        if (raw_client_fd_owned) _ = c.close(fds[0]);
+        if (peer_fd_owned) _ = c.close(fds[1]);
+    }
+    var release = std.atomic.Value(u8).init(0);
+    var observer_seen = std.atomic.Value(u8).init(0);
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{
+        fds[1], response, snapshot, &release, &observer_seen,
+    });
+    peer_fd_owned = false;
+    defer {
+        if (raw_client_fd_owned) {
+            _ = c.close(fds[0]);
+            raw_client_fd_owned = false;
+        }
+        release.store(1, .release);
+        peer.join();
+    }
+
+    var old_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x44,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &old_client);
+    defer {
+        host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter) catch
+            @panic("CR4a retired Client cleanup failed");
+        adapter.deinit();
+    }
+    var new_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x44,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    raw_client_fd_owned = false;
+    defer new_client.deinit();
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(allocator, std.testing.io, .{ .cols = 1, .rows = 1 });
+    defer proxy.deinit();
+    var runtime: RemoteRuntime = undefined;
+    runtime.generation_owner = .{};
+    try runtime.generation_owner.initInPlace(
+        allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xaa,
+            .stream_id = 7,
+        },
+        R2aTestGeneration.init,
+    );
+    defer runtime.generation_owner.deinit() catch
+        @panic("CR4a old generation cleanup lost final owner");
+    runtime.allocator = allocator;
+    runtime.io = std.testing.io;
+    runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner();
+    var replacement: r2a_client_slot.PreparedClientReplacement = .{};
+    try publishCr4aReplacementPrerequisite(&runtime, &adapter, &new_client, &replacement);
+    const unavailable_generation = try runtime.generation_owner.currentGeneration();
+    const unavailable_source = proxy.current;
+
+    var prepared: PreparedReconnect = .{};
+    try runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared);
+    defer if (prepared.lifecycle == .candidate)
+        runtime.generation_owner.abort(&prepared) catch
+            @panic("CR4a candidate cleanup lost final owner");
+    const candidate = @constCast(try runtime.generation_owner.slot.candidatePayload(&prepared.candidate));
+    try std.testing.expectEqual(@as(u8, 1), observer_seen.load(.acquire));
+    try std.testing.expectEqual(r2a_client_slot.PreparedClientReplacement.Lifecycle.published, replacement.lifecycle);
+    try std.testing.expectEqual(@as(u64, 2), adapter.connectionGeneration());
+    switch (candidate.connection) {
+        .generation => |candidate_adapter| try std.testing.expect(candidate_adapter == &adapter),
+        .legacy => return error.InvalidAuthority,
+    }
+    try std.testing.expectEqual(remote_attachment.Role.observer, candidate.attachment.statePtr().role);
+    try std.testing.expectEqual(@as(u21, 'n'), candidate.attachment.screenPtr().?.grid.cells[0].codepoint);
+    try std.testing.expectEqual(unavailable_generation, try runtime.generation_owner.currentGeneration());
+    try std.testing.expectEqual(unavailable_source, proxy.current);
+    try runtime.generation_owner.abort(&prepared);
+    try std.testing.expect(runtime.generation_owner.slot.candidate == null);
+}
+
+const Cr4aObserverFailure = enum { typed_reject, response_eof };
+
+fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure) !void {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const Peer = struct {
+        fn run(
+            fd: c.fd_t,
+            mode: Cr4aObserverFailure,
+            observer_seen: *std.atomic.Value(u8),
+            release: *std.atomic.Value(u8),
+        ) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            const observed = request.header.kind == .request and
+                std.mem.indexOf(u8, request.payload, "\"mode\":\"observer\"") != null;
+            observer_seen.store(@intFromBool(observed), .release);
+            if (!observed or mode == .response_eof) return;
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                "{\"error\":\"runtime_not_found\"}",
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            socket_server.writeAll(fd, response) catch return;
+            const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+            while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var raw_client_fd_owned = true;
+    var peer_fd_owned = true;
+    errdefer {
+        if (raw_client_fd_owned) _ = c.close(fds[0]);
+        if (peer_fd_owned) _ = c.close(fds[1]);
+    }
+    var observer_seen = std.atomic.Value(u8).init(0);
+    var release = std.atomic.Value(u8).init(0);
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], selected, &observer_seen, &release });
+    peer_fd_owned = false;
+    defer {
+        if (raw_client_fd_owned) {
+            _ = c.close(fds[0]);
+            raw_client_fd_owned = false;
+        }
+        release.store(1, .release);
+        peer.join();
+    }
+
+    var old_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x45,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &old_client);
+    defer {
+        host_adapter_mod.HostAdapter.testing.reclaimAllRetiredForCr3c(&adapter) catch
+            @panic("CR4a retired Client cleanup failed");
+        adapter.deinit();
+    }
+    var new_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x45,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    raw_client_fd_owned = false;
+    defer new_client.deinit();
+
+    var proxy: stable_screen_source.StableScreenSource = undefined;
+    try proxy.initUnavailableInPlace(allocator, std.testing.io, .{ .cols = 1, .rows = 1 });
+    defer proxy.deinit();
+    var runtime: RemoteRuntime = undefined;
+    runtime.generation_owner = .{};
+    try runtime.generation_owner.initInPlace(
+        allocator,
+        &proxy,
+        2,
+        R2aTestGeneration.Args{
+            .allocator = allocator,
+            .adapter = &adapter,
+            .runtime_id = 0xaa,
+            .stream_id = 7,
+        },
+        R2aTestGeneration.init,
+    );
+    defer runtime.generation_owner.deinit() catch
+        @panic("CR4a old generation cleanup lost final owner");
+    runtime.allocator = allocator;
+    runtime.io = std.testing.io;
+    runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner();
+    var replacement: r2a_client_slot.PreparedClientReplacement = .{};
+    try publishCr4aReplacementPrerequisite(&runtime, &adapter, &new_client, &replacement);
+    const unavailable_generation = try runtime.generation_owner.currentGeneration();
+    const unavailable_source = proxy.current;
+    const published_node_addr = @intFromPtr(adapter.slot.current);
+    const published_generation = adapter.connectionGeneration();
+    const retired_count = adapter.slot.retiredClientCount();
+    var prepared: PreparedReconnect = .{};
+    try std.testing.expectError(
+        error.AttachFailed,
+        runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared),
+    );
+    try std.testing.expectEqual(@as(u8, 1), observer_seen.load(.acquire));
+    try std.testing.expectEqual(PreparedReconnect{}, prepared);
+    try std.testing.expect(runtime.generation_owner.slot.candidate == null);
+    try std.testing.expectEqual(unavailable_generation, try runtime.generation_owner.currentGeneration());
+    try std.testing.expectEqual(unavailable_source, proxy.current);
+    try std.testing.expectEqual(published_node_addr, @intFromPtr(adapter.slot.current));
+    try std.testing.expectEqual(r2a_client_slot.PreparedClientReplacement.Lifecycle.published, replacement.lifecycle);
+    try std.testing.expectEqual(published_generation, adapter.connectionGeneration());
+    try std.testing.expectEqual(retired_count, adapter.slot.retiredClientCount());
+    switch (selected) {
+        .typed_reject => {
+            try std.testing.expect(adapter.slot.current.client.fd >= 0);
+            try std.testing.expect(!adapter.slot.current.client.unusable);
+        },
+        .response_eof => {
+            try std.testing.expectEqual(@as(c.fd_t, -1), adapter.slot.current.client.fd);
+            try std.testing.expect(adapter.slot.current.client.unusable);
+        },
+    }
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+}
+
+test "CR4a observer 실패는 typed reject와 EOF에서 unavailable shell과 새 Client를 보존한다" {
+    try runCr4aObserverFailurePreservesPublishedClient(.typed_reject);
+    try runCr4aObserverFailurePreservesPublishedClient(.response_eof);
+}
 
 const ReconnectResidentLedger = if (builtin.is_test) struct {
     parent: std.mem.Allocator,
@@ -11145,7 +11651,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .select_op => "{\"sel\":false}",
         .notification => "{\"title\":\"\",\"body\":\"\"}",
         .core_command, .report_mouse, .terminate, .detach => "{}",
-        .spawn_full, .attach_controller => unreachable,
+        .spawn_full, .attach_controller, .attach_observer => unreachable,
     };
     var peer = try std.Thread.spawn(.{}, Peer.run, .{
         fds[1],
@@ -11207,7 +11713,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
             runtime.admitDestructiveRuntimeOperation();
             runtime.detachBestEffort();
         },
-        .spawn_full, .attach_controller => unreachable,
+        .spawn_full, .attach_controller, .attach_observer => unreachable,
     }
     peer.join();
     try testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);

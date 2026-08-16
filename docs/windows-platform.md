@@ -392,6 +392,24 @@ ADE의 핵심인 "이 pane에서 claude/codex가 도는가" 판정이다. macOS�
 없다. 되물을 이유도 없다 — pseudoconsole 크기를 바꾸는 주체는 우리뿐이고(자식은 `mode con`으로 읽기만 한다),
 우리가 넘긴 COORD가 자식에게 그대로 간다는 것은 §6에서 확인했다. 그래서 마지막으로 세운 값을 돌려준다.
 
+**W7이 먼저 풀어야 할 표면 두 가지가 남아 있다.** `UnsupportedPtySession`이 "표면 명세"이지만, app 레이어는
+그보다 **넓은 집합**을 부른다 — 그 차이가 지금은 Windows에서 컴파일되지 않아 조용히 잠복해 있다.
+
+| 무엇 | 지금 상태 | W7이 정할 것 |
+|---|---|---|
+| `live_pty.childPid()`가 `std.c.pid_t`를 낸다 | Windows에서 그 타입은 **`*anyopaque`**(HANDLE)인데 백엔드는 `u32`(DWORD pid)를 낸다 | 중립 레이어가 POSIX 타입을 노출하는 것 자체가 누수다. 백엔드 중립 pid 타입을 정한다 |
+| `PreparedAdoption`·`upgradeEligible`·`revalidatePreparedOwnership`·`commitPreparedOwnership` | Windows 백엔드에 **없다**. exec-restore(영속 세션 호스트) 표면이라 macOS 전용 호출자만 있다 | 세션 호스트를 Windows로 옮길 때(계획 "후속") 함께 정한다 |
+
+둘 다 **`UnsupportedPtySession`과의 대조로는 잡히지 않는다** — 그 스텁에도 같은 멤버가 없기 때문이다.
+표면 대조는 "스텁"이 아니라 **app 레이어가 실제로 부르는 것의 합집합**을 기준으로 해야 한다.
+
+**`writeInputNonBlocking`의 반환값 의미가 fence 계약과 어긋난다.** `pty_reader`의 `drainedAtFence()`는
+`enqueued_total == consumed_total`을 "admitted outbound가 **실제로 PTY에 써졌다**"는 경계로 쓰는데, 이
+백엔드에서 그 경계는 최대 한 청크가 미결 write로 남아 있는 상태에서도 성립한다(§4.1의 "인수한 양"). 지금은
+그 경계를 쓰는 것이 exec-upgrade 안전점뿐이고 그것은 macOS 전용이라 도달하지 않는다. `deinit`은 취소 전에
+미결 write의 완료를 짧게 기다려 **조용한 입력 유실**만은 막는다. 세션 호스트가 Windows로 올 때 이 경계의
+뜻을 다시 정해야 한다.
+
 **`.signaled`는 이 백엔드에서 나오지 않는다.** Windows에 시그널이 없다. 255를 넘는 종료 코드(예: Ctrl+C의
 `0xC000013A`)는 `.exited: u8`에 담기지 않으므로 `.unknown`으로 원값을 보존한다 — `u8`로 자르면 `0x3A`(58)라는
 엉뚱한 "정상 종료"가 된다.
@@ -470,6 +488,18 @@ POSIX에서는 자식이 죽으면 슬레이브가 닫혀 master가 EOF를 본�
 2. **`ClosePseudoConsole`을 인라인으로 부르지 않는다.** 최악이 분 단위라 UI 스레드에서든 리더 스레드에서든
    부르면 그만큼 멈춘다. 항상 **분리된 짧은 스레드**에 넘기고, 그 스레드는 `hpc` 하나만 소유해 세션 수명과
    얽히지 않는다.
+
+**"배수한 뒤에 닫는다"는 뒷정리에도 적용된다.** `deinit`은 파이프 두 끝을 직접 닫지 않고 **배수 스레드에
+넘긴다** — 그 스레드가 남은 출력을 버리며 읽어 conhost를 풀어 준 뒤에 닫는다. 그냥 닫으면 위 표의 379 s
+경로를 그대로 만든다(`close`가 이미 시작한 닫기가 아직 도는 중이기 때문이다). 실측으로 확인했다:
+
+| 상황 | `close()` | `deinit()` |
+|---|---|---|
+| 대화형 셸, 출력을 배수함 | 0 ms | 0 ms |
+| 대화형 셸, 배수 안 함 | 0 ms | 0 ms |
+| **3,000줄 덤프를 하나도 안 읽음** | **250 ms**(유예 창) | **0 ms** |
+
+즉 최악이 앱 스레드에서 사라지고 분리 스레드로만 남는다.
 
 **`close()`는 pty를 직접 닫지 않는다.** POSIX의 `SIGHUP → SIGKILL(-pid)`에 대응하는 것은 ⑴ 위 규율대로 pty
 닫기를 넘기고 ⑵ 유예 뒤 **job을 닫는 것**이다. Windows에는 프로세스 그룹이 없어 `kill(-pid)`에 대응하는
@@ -739,6 +769,8 @@ MSBuild·cmd·PowerShell·zig 자신의 에러 출력이 다 이 모양이라 **
 | **ConPTY 자식 attach**(§4.1) | ✅ **닫혔다**(2026-08-16). 자식 안에서 `cmd /c mode con`이 `줄: 37 / 열: 123` — `CreatePseudoConsole`에 넘긴 COORD 그대로다. 대화형 왕복 2회, `ResizePseudoConsole`은 **자식이 살아 있는 동안** S_OK, pwsh도 동일, 부모가 콘솔을 가진 경우도 동일 |
 | **ConPTY EOF**(§4.1b) | ⚠️ 자식이 죽어도 파이프가 **안 끊긴다**. EOF를 내는 것은 `ClosePseudoConsole`이고, 그것은 밀린 출력을 안 읽었으면 **106,891 ms**(읽기 끝을 먼저 닫으면 **379,922 ms**) 막힌다. **다 배수한 뒤** 닫으면 **15 ms**에 유실 0. 동시에 하면 142,949 중 65,573만 도착 |
 | **W4 백엔드 end-to-end** | ✅ `maru demo`·`app-pty-smoke`·`app-pty-loop-smoke`가 Windows에서 산출물을 낸다. `app-pty-interactive-loop-smoke`는 **pwsh 7**을 띄워 프레임 루프로 친 입력이 표식으로 돌아오고 셸이 `exited(code=0)`으로 끝난다 |
+| **ConPTY의 핸들 누수** | ⚠️ **세션마다 커널 핸들 1개가 영구히 남는다**(30초를 기다려도 회수되지 않고 선형으로 누적). 원인을 순수 Win32로 층별 분리해 확인했다 — 파이프 4개 생성·해제만: **0**, job 생성·해제만: **0**, `CreatePseudoConsole`+`ClosePseudoConsole`을 더하면: **20회에 20개**. 즉 우리 코드가 아니라 **ConPTY API 자체**다. 팬을 여닫을 때마다 1개씩 늘어나므로 장시간 세션에서 서서히 쌓인다 |
+| **cmd의 한 줄 입력 상한** | ⚠️ 한 줄이 6,000바이트면 실행되고 **9,000바이트면 통째로 무시된다**(콘솔 줄 입력 상한). 백엔드는 20 KiB를 여러 줄로 나눠 주면 전량 전달한다 — 즉 **우리 쪽 한계가 아니라 cmd의 한계**다 |
 
 **ConPTY를 "환경 탓"으로 적었던 것은 오판이었다 — 기록으로 남긴다.** 위 항목은 한때 "자식이 pty에 붙는 것만
 미확인, 에이전트 샌드박스가 conhost 세션을 못 띄우기 때문"으로 적혀 있었다. 실제 원인은 **우리 코드 두 곳**이다.

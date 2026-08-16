@@ -157,6 +157,9 @@ extern "kernel32" fn WaitForSingleObject(h: HANDLE, ms: u32) callconv(.winapi) u
 extern "kernel32" fn WaitForMultipleObjects(count: u32, handles: [*]const HANDLE, wait_all: i32, ms: u32) callconv(.winapi) u32;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+/// `RtlGenRandom`의 실제 export 이름. `advapi32`가 서수 없이 이 이름으로 낸다.
+extern "advapi32" fn SystemFunction036(buf: [*]u8, len: u32) callconv(.winapi) u8;
 extern "kernel32" fn CreateProcessW(app: ?[*:0]const u16, cmd: ?[*:0]u16, pa: ?*SECURITY_ATTRIBUTES, ta: ?*SECURITY_ATTRIBUTES, inherit: i32, flags: u32, env: ?*anyopaque, cwd: ?[*:0]const u16, si: *STARTUPINFOEXW, pi: *PROCESS_INFORMATION) callconv(.winapi) i32;
 extern "kernel32" fn InitializeProcThreadAttributeList(list: ?*anyopaque, count: u32, flags: u32, size: *usize) callconv(.winapi) i32;
 extern "kernel32" fn UpdateProcThreadAttribute(list: ?*anyopaque, flags: u32, attr: usize, value: ?*anyopaque, size: usize, prev: ?*anyopaque, ret: ?*usize) callconv(.winapi) i32;
@@ -189,6 +192,8 @@ const error_pipe_not_connected: u32 = 233;
 const error_operation_aborted: u32 = 995;
 const error_io_incomplete: u32 = 996;
 const error_io_pending: u32 = 997;
+/// `OVERLAPPED.Internal`이 이 값이면 아직 진행 중이다(`HasOverlappedIoCompleted`가 보는 것).
+const status_pending: usize = 0x0000_0103;
 
 const wait_object_0: u32 = 0;
 const wait_timeout: u32 = 258;
@@ -226,6 +231,15 @@ const shutdown_grace_ms: u32 = 250;
 /// 142,949 바이트가 610 ms에 다 나왔고 그 뒤 조용했다 — 그 여유의 몇 배를 둔다. **자식이 죽은 뒤에만**
 /// 쓰이므로 평소 대기에는 타임아웃이 없다(출력 없는 pane의 주기적 wakeup 0).
 const drain_quiet_ms: u32 = 250;
+/// 뒷정리 스레드가 남은 출력을 버리며 읽는 데 쓸 수 있는 전체 예산. 자식은 이미 죽었으므로 보통 한두
+/// 라운드에 끝난다 — 이 값은 어떤 OS 이상에서도 그 스레드가 영영 남지 않게 하는 상한이다.
+const teardown_drain_budget_ms: u64 = 10_000;
+/// `deinit`이 미결 write의 완료를 기다려 주는 상한. `writeInputNonBlocking`이 이미 "인수했다"고 센 바이트라
+/// 그냥 걷어내면 조용한 입력 유실이 된다 — 자식이 끝내 안 읽으면 포기한다(그때는 세션이 이미 끝났다).
+const write_flush_budget_ms: u32 = 200;
+/// 취소된 read를 연속으로 몇 번까지 다시 걸어 볼 것인가. 취소는 원래 일회성이라 1~2회면 충분하고,
+/// 이 상한이 "발행→취소"가 쉬지 않고 도는 핫 루프를 막는다.
+const max_consecutive_read_aborts: u8 = 4;
 /// job을 닫고(트리 종료) `TerminateProcess`까지 한 뒤의 유계 대기. 여기서도 안 끝나면 포기한다 —
 /// close는 절대 무한정 막히지 않는다(macOS 백엔드의 `reapBoundedAfterKill`과 같은 규율).
 const shutdown_kill_wait_ms: u32 = 2000;
@@ -247,10 +261,20 @@ pub fn selfResourceSample() ?types.ProcessResourceSample {
 /// 문제가 없었다 — Windows에서 새로 생기는 제약이라 여기 못박는다.
 const IoState = struct {
     /// 읽기 상태 기계. `pending`은 커널이 `read_buf`에 쓰고 있는 중이라는 뜻이다.
-    const ReadState = enum { idle, pending, ready, eof };
+    ///
+    /// **`failed`가 `eof`와 갈리는 것이 중요하다.** 한때 모든 read 실패를 `eof`로 접었는데, 그러면 살아 있는
+    /// 셸에서 난 일시적 오류가 "자식이 끝났다"로 둔갑한다. 그 뒤 리더는 `reapAfterEof`로 들어가고 — 그
+    /// 경로에는 생존 검사가 없어 — 아무것도 큐에 넣지 못한 채 자식 종료를 무한정 기다린다. macOS 백엔드는
+    /// `error.InputOutput`만 EOF로 보고 나머지는 오류로 올려 `pushProcessingTerminationForIoError`가
+    /// **생존을 검증**하게 한다. 그 갈래를 여기서도 지킨다.
+    const ReadState = enum { idle, pending, ready, eof, failed };
 
     read_ov: OVERLAPPED = .{},
     read_state: ReadState = .idle,
+    /// `failed` 상태일 때의 Win32 오류 코드(진단용).
+    read_error: u32 = 0,
+    /// 연속으로 취소된 read 횟수. 데이터를 한 번이라도 받으면 0으로 되돌린다.
+    read_aborts: u8 = 0,
     read_len: usize = 0,
     read_pos: usize = 0,
     read_buf: [16 * 1024]u8 = undefined,
@@ -283,9 +307,17 @@ pub const PtySession = struct {
     /// 우리가 쓰는 쪽(자식 stdin)과 읽는 쪽(자식 stdout). 둘 다 overlapped named pipe의 **서버** 끝이다.
     in_write: HANDLE,
     out_read: HANDLE,
-    /// pseudoconsole. `resize`(메인 스레드)와 `close`(메인 스레드)가 함께 만지므로 원자적으로 교체한다 —
-    /// 닫힌 뒤 resize하면 `0x80070006`이 난다(실측 §6).
-    hpc: std.atomic.Value(?*anyopaque),
+    /// pseudoconsole.
+    ///
+    /// **원자 변수만으로는 부족하다.** 만지는 쪽이 셋이다 — `resize`(메인 스레드), `close`(메인 스레드),
+    /// 그리고 **리더 스레드**의 EOF 경로(`waitIo`가 조용해지면 닫기를 넘긴다). 원자적 교체는 값을 안전하게
+    /// 읽게 해 주지만 **읽은 뒤 쓰는 동안 살아 있게** 해 주지는 않는다: `resize`가 값을 읽고 선점된 사이
+    /// 리더가 그것을 닫기 스레드에 넘기면, `ResizePseudoConsole`이 이미 해제된 것을 만진다.
+    ///
+    /// 그래서 값 자체는 `hpc_lock` 아래에서만 쓰고 교체한다. `resize`는 짧고(실측 즉시 S_OK), 닫기 넘기기는
+    /// 값을 꺼내는 것까지만 잠금 안에서 한다(`ClosePseudoConsole`은 분 단위라 잠금 밖·스레드 밖이다).
+    hpc: ?*anyopaque,
+    hpc_lock: SRWLOCK = .{},
     /// 자식 트리를 한 번에 끝내기 위한 job. Windows에는 프로세스 그룹이 없어 `kill(-pid)`에 대응하는 것이
     /// 이것뿐이다 — 이게 없으면 close가 셸만 죽이고 그 손자들은 남는다.
     job: std.atomic.Value(?*anyopaque),
@@ -299,6 +331,10 @@ pub const PtySession = struct {
     exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     reaping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// 종료 절차(pty 넘기기 + 트리 kill)를 이미 시작했다. **`reaping`과 별개다** — 그것은 자식 수거의
+    /// 배타권이고 이것은 종료 절차의 배타권이라, 하나로 묶으면 수거 중에 들어온 `close`가 종료를 통째로
+    /// 건너뛴다(`close`의 주석).
+    shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// `close`·`signalWrite`가 기다리는 쪽을 즉시 깨우는 이벤트(macOS의 wake self-pipe에 대응). **수동
     /// 리셋**이라 여러 대기 지점이 같은 신호를 본다 — close 신호는 리셋하지 않고 `closing` 플래그로
@@ -350,7 +386,7 @@ pub const PtySession = struct {
             .io = io,
             .in_write = pipes.in_write,
             .out_read = pipes.out_read,
-            .hpc = std.atomic.Value(?*anyopaque).init(hpc),
+            .hpc = hpc,
             .job = std.atomic.Value(?*anyopaque).init(proc.job),
             .child_process = proc.process,
             .child_pid = proc.pid,
@@ -373,12 +409,20 @@ pub const PtySession = struct {
         self.closing.store(true, .release);
         _ = SetEvent(self.wake_event);
 
-        if (self.owns_child_lifecycle.load(.acquire) and
-            !self.exited.load(.acquire) and !self.reaping.swap(true, .acq_rel))
-        {
-            self.shutdownChild();
-            self.exited.store(true, .release);
+        if (!self.owns_child_lifecycle.load(.acquire)) return;
+        // **`reaping`에 걸지 않는다.** macOS는 `reaping`이 `waitpid`의 exact-once 권위라 여기에 얹어도
+        // 지는 쪽이 잃는 것이 SIGHUP뿐이고, 그것은 master fd를 닫으면 어차피 전달된다. Windows에는 그
+        // 안전망이 없다 — 지면 pty 넘기기도 job 닫기도 통째로 건너뛰어 **자식 트리가 그대로 살아남는다.**
+        // 리더가 `reapIfExited` 안(두 syscall 사이)에 있는 순간 탭을 닫으면 실제로 그렇게 된다.
+        if (self.shutting_down.swap(true, .acq_rel)) return;
+
+        if (self.exited.load(.acquire)) {
+            // 이미 죽었다 — 죽일 것은 없지만 pty는 놓아 줘야 한다(EOF 경로가 이미 했으면 무동작).
+            self.handOffPtyClose();
+            return;
         }
+        self.shutdownChild();
+        self.exited.store(true, .release);
     }
 
     /// `close -> reader.join -> deinit` 순서의 마지막 단계. 여기서 비로소 핸들을 닫는다.
@@ -389,11 +433,11 @@ pub const PtySession = struct {
         // 핸들에 매여 있어, 취소·수거 없이 `io`를 해제하면 커널이 죽은 메모리에 쓴다.
         self.drainPendingIo();
 
-        // 보통 여기서는 이미 넘어간 뒤다(EOF 경로 또는 위 `close`). 남아 있는 경우를 위한 백스톱이고,
-        // 여기서도 **인라인으로 부르지 않는다**.
-        self.handOffPtyClose();
-        closeHandle(&self.in_write);
-        closeHandle(&self.out_read);
+        // **파이프를 여기서 닫지 않는다.** `close`가 시작한 `ClosePseudoConsole`이 아직 돌고 있을 수 있는데,
+        // 그때 우리 읽기 끝을 닫으면 그 호출이 실측 최악 **379,922 ms**로 늘어난다(파일 앞머리 표 — 안 읽고
+        // 닫는 106s보다도 나쁘다). 대신 파이프와 남은 pseudoconsole 소유권을 배수 스레드에 넘긴다: 그
+        // 스레드가 남은 출력을 버리며 읽어 conhost를 풀어 주고, 다 비운 뒤에 닫는다(배수 후 닫기 = 15 ms).
+        self.handOffTeardown();
         closeHandle(&self.read_event);
         closeHandle(&self.write_event);
         closeHandle(&self.wake_event);
@@ -409,8 +453,21 @@ pub const PtySession = struct {
     fn drainPendingIo(self: *PtySession) void {
         const io = self.io;
         if (io.read_state != .pending and !io.write_pending) return;
+
+        // **쓰기는 취소하기 전에 잠깐 기다려 준다.** `writeInputNonBlocking`이 이미 "인수했다"고 세어 준
+        // 바이트라, 여기서 바로 걷어내면 호출자가 보낸 것으로 아는 입력이 조용히 사라진다. 자식이
+        // 안 읽으면 완료되지 않으므로 상한을 둔다(그때는 어차피 세션이 끝난 뒤다).
+        if (io.write_pending) {
+            var written: u32 = 0;
+            if (WaitForSingleObject(self.write_event, write_flush_budget_ms) == wait_object_0 and
+                GetOverlappedResult(self.in_write, &io.write_ov, &written, 0) != 0)
+            {
+                io.write_pending = false;
+            }
+        }
+
         _ = CancelIoEx(self.out_read, null);
-        _ = CancelIoEx(self.in_write, null);
+        if (io.write_pending) _ = CancelIoEx(self.in_write, null);
         var n: u32 = 0;
         // wait=TRUE — 취소는 비동기다. 여기서 기다려야 커널이 버퍼를 놓았다는 것이 보장된다.
         if (io.read_state == .pending) {
@@ -459,8 +516,15 @@ pub const PtySession = struct {
         while (true) {
             if (self.closing.load(.acquire)) return error.SessionClosed;
 
+            // **완료된 read를 먼저 수거한다.** 이걸 빼면 `want_write`가 켜진 동안(붙여넣기·응답 배출)
+            // `writable=true`로 즉시 반환하는 길만 타서, 이미 끝난 read가 영영 `.pending`에 머문다 —
+            // 화면이 멈춘 채 루프가 헛도는 실제 경로였다. `readCompleted`가 syscall 없는 문지기다.
+            if (io.read_state == .pending and readCompleted(io)) self.harvestRead();
             self.ensureRead();
-            const readable = io.read_state == .ready or io.read_state == .eof;
+            const readable = switch (io.read_state) {
+                .ready, .eof, .failed => true,
+                .idle, .pending => false,
+            };
             const write_pending = self.writePending();
             const writable = want_write and !write_pending;
             if (readable or writable) return .{ .readable = readable, .writable = writable };
@@ -529,15 +593,46 @@ pub const PtySession = struct {
     /// (실측 106s·379s) UI 스레드에서도 리더 스레드에서도 직접 부르면 안 된다. 스레드는 `hpc` 하나만
     /// 소유하므로 세션이 먼저 사라져도 안전하다.
     ///
-    /// 원자적 교체가 "정확히 한 번"을 보장한다 — 리더(EOF 경로)와 `close`(팬 닫기)가 동시에 와도 하나만
-    /// 이긴다. 스레드를 못 만들면 인라인으로 부른다(멈추는 것보다 낫다 — 그 경로는 배수 뒤라 보통 빠르다).
+    /// `hpc_lock` 아래에서 값을 꺼내 비우는 것이 "정확히 한 번"을 보장한다 — 리더(EOF 경로)와 `close`
+    /// (팬 닫기)가 동시에 와도 하나만 이기고, 동시에 `resize`가 이미 해제된 것을 만지지 못한다. 실제 닫기는
+    /// 잠금 **밖**에서 한다(분 단위라 잠금 안에 두면 `resize`가 그만큼 멈춘다).
     fn handOffPtyClose(self: *PtySession) void {
-        const hpc = self.hpc.swap(null, .acq_rel) orelse return;
+        const hpc = self.takeHpc() orelse return;
         const thread = std.Thread.spawn(.{}, ptyCloser, .{hpc}) catch {
             ClosePseudoConsole(hpc);
             return;
         };
         thread.detach();
+    }
+
+    /// `deinit` 전용 — 파이프 두 끝과 (남아 있다면) pseudoconsole을 배수 스레드에 넘긴다.
+    ///
+    /// 스레드를 못 만들면 인라인으로 정리한다. 그 경우 `ClosePseudoConsole`이 오래 걸릴 수 있지만,
+    /// 핸들을 영영 안 닫는 것보다는 낫다(스레드 생성 실패는 프로세스가 이미 한계에 닿은 상황이다).
+    fn handOffTeardown(self: *PtySession) void {
+        const t = std.heap.page_allocator.create(Teardown) catch {
+            self.handOffPtyClose();
+            closeHandle(&self.in_write);
+            closeHandle(&self.out_read);
+            return;
+        };
+        t.* = .{ .hpc = self.takeHpc(), .out_read = self.out_read, .in_write = self.in_write };
+        self.out_read = null;
+        self.in_write = null;
+        const thread = std.Thread.spawn(.{}, teardownThread, .{t}) catch {
+            teardownThread(t);
+            return;
+        };
+        thread.detach();
+    }
+
+    /// pseudoconsole 소유권을 가져온다(한 번만 성공한다).
+    fn takeHpc(self: *PtySession) ?*anyopaque {
+        AcquireSRWLockExclusive(&self.hpc_lock);
+        defer ReleaseSRWLockExclusive(&self.hpc_lock);
+        const hpc = self.hpc;
+        self.hpc = null;
+        return hpc;
     }
 
     /// 미결 read가 없으면 건다. 동기 완료·즉시 EOF도 여기서 상태로 흡수해, 호출자는 상태만 보면 된다.
@@ -554,14 +649,49 @@ pub const PtySession = struct {
                 io.read_len = got;
                 io.read_pos = 0;
                 io.read_state = .ready;
+                io.read_aborts = 0;
             }
             return;
         }
-        switch (GetLastError()) {
-            error_io_pending => io.read_state = .pending,
-            // 자식이 끝나 conhost가 파이프를 놓았다 — POSIX의 read()==0/EIO와 같은 자리다.
-            else => io.read_state = .eof,
+        const err = GetLastError();
+        if (err == error_io_pending) {
+            io.read_state = .pending;
+            return;
         }
+        self.applyReadError(err);
+    }
+
+    /// read 실패를 **분류**한다. 전부 EOF로 접으면 살아 있는 셸이 조용히 죽는다(`ReadState`의 doc).
+    fn applyReadError(self: *PtySession, err: u32) void {
+        const io = self.io;
+        switch (err) {
+            // 진짜 끝 — conhost가 pseudoconsole을 놓았다. POSIX의 read()==0/EIO와 같은 자리다.
+            error_broken_pipe, error_pipe_not_connected, error_handle_eof => io.read_state = .eof,
+            // 이 작업만 취소됐다("파이프가 죽었다"가 아니다). 우리 `CancelIoEx`이거나, 미결 read를 남긴 채
+            // 스레드가 끝나 커널이 그 스레드의 IRP를 거둔 경우다(pause/resume). 다시 걸면 된다.
+            //
+            // **다만 무한정 다시 걸지는 않는다.** 재발행이 곧바로 또 취소되는 상태가 되면 `waitIo`가
+            // 발행→취소를 쉬지 않고 도는 핫 루프가 된다(스스로 적대적 검증 중에 찾은 위험이다 —
+            // 취소는 원래 일회성이라 실제로 밟기는 어렵지만, 밟으면 CPU를 통째로 먹는다).
+            error_operation_aborted => {
+                io.read_aborts += 1;
+                if (io.read_aborts > max_consecutive_read_aborts) {
+                    io.read_error = err;
+                    io.read_state = .failed;
+                } else {
+                    io.read_state = .idle;
+                }
+            },
+            else => {
+                io.read_error = err;
+                io.read_state = .failed;
+            },
+        }
+    }
+
+    /// `HasOverlappedIoCompleted` — 커널이 완료 시 `Internal`에 상태를 써 두므로 syscall 없이 본다.
+    fn readCompleted(io: *const IoState) bool {
+        return io.read_ov.Internal != status_pending;
     }
 
     /// 미결 read를 **비차단으로** 수거한다. 아직이면 상태를 그대로 둔다(다시 기다린다).
@@ -570,8 +700,9 @@ pub const PtySession = struct {
         if (io.read_state != .pending) return;
         var got: u32 = 0;
         if (GetOverlappedResult(self.out_read, &io.read_ov, &got, 0) == 0) {
-            if (GetLastError() == error_io_incomplete) return;
-            io.read_state = .eof;
+            const err = GetLastError();
+            if (err == error_io_incomplete) return;
+            self.applyReadError(err);
             return;
         }
         if (got == 0) {
@@ -581,6 +712,7 @@ pub const PtySession = struct {
         io.read_len = got;
         io.read_pos = 0;
         io.read_state = .ready;
+        io.read_aborts = 0;
     }
 
     /// 미결 write가 있는가. 짧게 잠그고 읽는다(`write_mutex`의 doc 참고).
@@ -624,6 +756,14 @@ pub const PtySession = struct {
         if (io.read_state == .pending) self.harvestRead();
         switch (io.read_state) {
             .eof => return .eof,
+            .failed => {
+                if (self.closing.load(.acquire)) return error.SessionClosed;
+                // **EOF로 접지 않는다.** 호출자(`pty_reader`)가 이 오류를 받아 `reapIfExited`로 자식의
+                // 생존을 검증하고, 살아 있으면 `.read_error`(surface만 unusable)로, 죽었으면 `.exited`로
+                // 방출한다 — 미검증 종료가 산 셸을 죽이던 루트커즈를 막는 자리다.
+                std.log.scoped(.pty).warn("ConPTY read 실패 err={d}", .{io.read_error});
+                return error.ReadFailed;
+            },
             .ready => {
                 const n = @min(buf.len, io.read_len - io.read_pos);
                 @memcpy(buf[0..n], io.read_buf[io.read_pos..][0..n]);
@@ -766,7 +906,10 @@ pub const PtySession = struct {
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
         if (size.cols == 0 or size.rows == 0) return error.InvalidSize;
-        const hpc = self.hpc.load(.acquire) orelse return error.SessionClosed;
+        // **잠금 안에서 읽고 쓴다.** 읽은 뒤 놓으면 그 사이에 리더가 닫기 스레드에 넘겨 해제된 것을 만진다.
+        AcquireSRWLockExclusive(&self.hpc_lock);
+        defer ReleaseSRWLockExclusive(&self.hpc_lock);
+        const hpc = self.hpc orelse return error.SessionClosed;
         if (ResizePseudoConsole(hpc, coordFromSize(size)) != 0) return error.ResizeFailed;
         self.size = size;
     }
@@ -776,7 +919,9 @@ pub const PtySession = struct {
     /// 우리뿐이고(자식은 `mode con`으로 **읽기만** 한다), 그 값이 자식에게 그대로 간다는 것은 실측으로
     /// 확인했다(§6 — 자식 안의 `mode con`이 우리가 넘긴 COORD를 그대로 보고했다).
     pub fn currentSize(self: *PtySession) !terminal.Size {
-        if (self.hpc.load(.acquire) == null) return error.SessionClosed;
+        AcquireSRWLockExclusive(&self.hpc_lock);
+        defer ReleaseSRWLockExclusive(&self.hpc_lock);
+        if (self.hpc == null) return error.SessionClosed;
         return self.size;
     }
 
@@ -844,6 +989,57 @@ fn ptyCloser(hpc: HANDLE) void {
     ClosePseudoConsole(hpc);
 }
 
+/// 세션이 사라진 뒤의 뒷정리 몫. 세션 수명과 얽히지 않게 **자기 버퍼와 이벤트**를 따로 가진다
+/// (`io`는 `deinit`이 이미 해제했다). `page_allocator`를 쓰는 것도 같은 이유다 — 세션의 allocator가
+/// 먼저 사라질 수 있다.
+const Teardown = struct {
+    /// 아직 우리가 들고 있는 pseudoconsole. null이면 `close`가 이미 다른 스레드에 넘겼다.
+    hpc: HANDLE,
+    out_read: HANDLE,
+    in_write: HANDLE,
+    ov: OVERLAPPED = .{},
+    buf: [16 * 1024]u8 = undefined,
+};
+
+/// 배수가 끝난 뒤에야 닫는다.
+///
+/// 순서가 전부다(파일 앞머리 실측표): 안 읽고 닫으면 106,891 ms, 읽기 끝을 먼저 닫으면 379,922 ms,
+/// **다 배수한 뒤 닫으면 15 ms**다. 여기서 버리며 읽는 것은 두 몫을 한다 — 우리가 들고 있는 pseudoconsole을
+/// 빨리 닫게 하고, `close`가 이미 시작한 다른 스레드의 `ClosePseudoConsole`도 함께 풀어 준다.
+///
+/// 자식은 이 시점에 이미 죽었으므로(`close`의 트리 kill) 배수는 반드시 끝난다. 그래도 전체 상한을 둔다 —
+/// 어떤 OS 이상에서도 이 스레드가 영영 남지 않게.
+fn teardownThread(t: *Teardown) void {
+    const event = CreateEventW(null, 1, 0, null);
+    if (event) |ev| {
+        const deadline = GetTickCount64() + teardown_drain_budget_ms;
+        while (GetTickCount64() < deadline) {
+            t.ov = .{ .hEvent = ev };
+            var got: u32 = 0;
+            if (ReadFile(t.out_read, &t.buf, t.buf.len, &got, &t.ov) != 0) {
+                if (got == 0) break; // EOF
+                continue;
+            }
+            if (GetLastError() != error_io_pending) break; // 파이프가 끊겼다 = 다 나왔다
+            const left = deadline -| GetTickCount64();
+            const wait_ms: u32 = @intCast(@min(left, drain_quiet_ms));
+            if (WaitForSingleObject(ev, wait_ms) != wait_object_0) {
+                // 조용해졌다(또는 예산 소진) — 미결 read를 걷어내고 끝낸다.
+                _ = CancelIoEx(t.out_read, &t.ov);
+                _ = GetOverlappedResult(t.out_read, &t.ov, &got, 1);
+                break;
+            }
+            if (GetOverlappedResult(t.out_read, &t.ov, &got, 0) == 0 or got == 0) break;
+        }
+        _ = CloseHandle(ev);
+    }
+
+    if (t.hpc) |h| ClosePseudoConsole(h);
+    _ = CloseHandle(t.out_read);
+    _ = CloseHandle(t.in_write);
+    std.heap.page_allocator.destroy(t);
+}
+
 fn closeHandle(slot: *HANDLE) void {
     if (slot.*) |h| {
         if (h != invalid_handle_value) _ = CloseHandle(h);
@@ -873,10 +1069,22 @@ const Pipes = struct {
         errdefer p.deinitAll();
         const serial = pipe_serial.fetchAdd(1, .monotonic);
         const pid = GetCurrentProcessId();
+        // **이름을 추측 불가능하게 만든다.** `\\.\pipe`는 사용자·세션이 아니라 **기계 전체**가 공유하는
+        // 이름 공간이고(`PIPE_REJECT_REMOTE_CLIENTS`는 SMB 경유만 막는다), 인스턴스를 1로 잡았기 때문에
+        // 이름을 맞힌 로컬 프로세스가 우리보다 **먼저 붙으면** 우리 `CreateFileW`가 `ERROR_PIPE_BUSY`로
+        // 실패해 모든 팬 spawn이 죽는다. pid와 순번만으로는 완전히 예측 가능하다.
+        // (`FILE_FLAG_FIRST_PIPE_INSTANCE`는 우리가 남의 파이프에 **합류**하는 것을 막을 뿐, 남이 우리
+        // 파이프에 붙는 것은 못 막는다.)
+        var nonce: u64 = undefined;
+        if (SystemFunction036(@ptrCast(&nonce), @sizeOf(@TypeOf(nonce))) == 0) {
+            // CSPRNG가 없으면(사실상 없는 일) 예측하기 어려운 값으로라도 채운다. 완전한 방어가 아니라
+            // "완전히 예측 가능한 이름"을 피하는 것이 목적이다.
+            nonce = GetTickCount64() *% 0x9E37_79B9_7F4A_7C15 ^ @as(u64, pid);
+        }
 
         // 자식 stdin: 서버(우리 write) ← 클라이언트(pseudoconsole read)
         {
-            const name = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\maru-pty-{d}-{d}-in", .{ pid, serial });
+            const name = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\maru-pty-{d}-{d}-{x}-in", .{ pid, serial, nonce });
             defer allocator.free(name);
             const w = try wide(allocator, name);
             defer allocator.free(w);
@@ -885,7 +1093,7 @@ const Pipes = struct {
         }
         // 자식 stdout: 서버(우리 read) ← 클라이언트(pseudoconsole write)
         {
-            const name = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\maru-pty-{d}-{d}-out", .{ pid, serial });
+            const name = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\maru-pty-{d}-{d}-{x}-out", .{ pid, serial, nonce });
             defer allocator.free(name);
             const w = try wide(allocator, name);
             defer allocator.free(w);
@@ -1012,9 +1220,12 @@ fn spawnChild(allocator: std.mem.Allocator, request: types.SpawnRequest, hpc: HA
     if (result.job) |j| {
         // 실패해도 치명적이지 않다(중첩 job 제약 등) — 그때는 close가 셸만 끝낸다.
         if (AssignProcessToJobObject(j, pi.hProcess) == 0) {
+            // **실패 직후에 읽는다.** 뒤에 오는 `CloseHandle`이 성공하면서 last-error를 0으로 덮어써,
+            // 그 뒤에 읽으면 진단이 통째로 무의미해진다.
+            const err = GetLastError();
             _ = CloseHandle(j);
             result.job = null;
-            std.log.scoped(.pty).warn("job 배정 실패(err={d}) — close가 자식 트리를 못 끝낼 수 있다", .{GetLastError()});
+            std.log.scoped(.pty).warn("job 배정 실패(err={d}) — close가 자식 트리를 못 끝낼 수 있다", .{err});
         }
     }
 
@@ -1054,6 +1265,7 @@ const EnvBlock = struct {
             .env_overrides = request.env_overrides,
             .term = request.term,
             .pane_id = request.pane_id,
+            .ssh_integration_bin = request.ssh_integration_bin,
         });
         defer spawn_util.freeEnvEntries(allocator, entries);
 
@@ -1089,7 +1301,11 @@ const ParentEnv = struct {
             self.entries = s;
             return;
         }
-        const block = GetEnvironmentStringsW() orelse return; // 없으면 빈 부모(치명적이지 않다)
+        // **빈 부모로 넘어가지 않는다.** 여기서 조용히 포기하면 자식은 `TERM`·`COLORTERM`·`TERM_PROGRAM`
+        // 셋만 든 환경으로 뜬다 — `%PATH%`도 `%SystemRoot%`도 `%TEMP%`도 없다. `lpApplicationName`이
+        // 절대경로라 spawn은 **성공하고**, 사용자는 아무것도 못 하는 셸을 받는다(cmd는 내장 명령만 풀리고
+        // pwsh는 모듈 경로를 못 세운다). 그런 셸을 쥐여 주느니 진짜 이유를 말하며 실패하는 편이 낫다.
+        const block = GetEnvironmentStringsW() orelse return error.EnvironmentUnavailable;
         defer _ = FreeEnvironmentStringsW(block);
 
         var list: std.ArrayList([]u8) = .empty;
@@ -1138,22 +1354,52 @@ fn testShell() []const u8 {
 }
 
 /// 자식이 마커를 낼 때까지(또는 EOF/데드라인) 읽어 모은다.
-fn drainUntil(session: *PtySession, allocator: std.mem.Allocator, marker: []const u8, out: *std.ArrayList(u8)) !bool {
+/// 테스트가 한 번의 배수에 쓸 수 있는 벽시계 상한.
+const test_drain_budget_ms: u32 = 20_000;
+
+/// **시간 상한을 실제로 강제하는 유일한 방법.** 반복 횟수로는 안 된다 — `waitIo`는 자식이 살아 있고
+/// 조용하면 `INFINITE`로 막히므로, 마커가 영영 안 오면 반복이 한 번도 더 돌지 않은 채 `zig build test`가
+/// 통째로 멈춘다(출력도 없다). `close()`가 wake 이벤트를 세워 그 대기를 `SessionClosed`로 풀어 준다.
+fn drainWatchdog(session: *PtySession, done: HANDLE) void {
+    if (WaitForSingleObject(done, test_drain_budget_ms) == wait_object_0) return; // 정상 종료
+    session.close();
+}
+
+/// 예산 안에서 배수한다. `marker`가 null이면 EOF(또는 예산)까지 전부 모은다.
+fn drainBounded(
+    session: *PtySession,
+    allocator: std.mem.Allocator,
+    marker: ?[]const u8,
+    out: *std.ArrayList(u8),
+) !bool {
+    const done = CreateEventW(null, 1, 0, null) orelse return error.CreateEventFailed;
+    defer _ = CloseHandle(done);
+    const guard = try std.Thread.spawn(.{}, drainWatchdog, .{ session, done });
+    defer {
+        _ = SetEvent(done);
+        guard.join();
+    }
+
     var buf: [4096]u8 = undefined;
-    var spins: usize = 0;
-    while (spins < 4000) : (spins += 1) {
-        const ready = session.waitIo(false) catch return false;
+    while (true) {
+        // 예산을 넘기면 워치독이 세션을 닫아 이 대기가 `SessionClosed`로 풀린다.
+        const ready = session.waitIo(false) catch break;
         if (!ready.readable) continue;
-        switch (session.readChunk(&buf) catch return false) {
+        switch (session.readChunk(&buf) catch break) {
             .again => continue,
-            .eof => return std.mem.indexOf(u8, out.items, marker) != null,
+            .eof => break,
             .data => |n| {
                 try out.appendSlice(allocator, buf[0..n]);
-                if (std.mem.indexOf(u8, out.items, marker) != null) return true;
+                if (marker) |m| if (std.mem.indexOf(u8, out.items, m) != null) return true;
             },
         }
     }
-    return false;
+    if (marker) |m| return std.mem.indexOf(u8, out.items, m) != null;
+    return true;
+}
+
+fn drainUntil(session: *PtySession, allocator: std.mem.Allocator, marker: []const u8, out: *std.ArrayList(u8)) !bool {
+    return drainBounded(session, allocator, marker, out);
 }
 
 test "spawn: 자식이 pseudoconsole에 붙는다 — 자식이 본 크기가 우리가 준 크기다" {
@@ -1169,17 +1415,7 @@ test "spawn: 자식이 pseudoconsole에 붙는다 — 자식이 본 크기가 �
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
-    var buf: [4096]u8 = undefined;
-    var spins: usize = 0;
-    while (spins < 4000) : (spins += 1) {
-        const ready = session.waitIo(false) catch break;
-        if (!ready.readable) continue;
-        switch (session.readChunk(&buf) catch break) {
-            .again => continue,
-            .eof => break,
-            .data => |n| try out.appendSlice(a, buf[0..n]),
-        }
-    }
+    _ = try drainBounded(&session, a, null, &out);
     // `mode con`의 출력은 로캘을 타므로 숫자만 본다(한국어는 "줄: 37 / 열: 123", 영어는 "Lines:"/"Columns:").
     try testing.expect(std.mem.indexOf(u8, out.items, "123") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "37") != null);
@@ -1215,9 +1451,22 @@ test "동시 writer: 블로킹·비블로킹 쓰기가 겹쳐도 세션이 성�
 
     const rounds = 64;
     const writer = try std.Thread.spawn(.{}, stressBlockingWriter, .{ &session, rounds });
+    // **`try`를 쓰지 않는다.** 여기서 오류로 빠져나가면 `writer`가 join도 detach도 안 된 채 남고,
+    // `defer session.deinit()`이 그 스레드가 아직 쓰고 있는 `io`를 해제한다(use-after-free).
+    // 실패는 모아 두었다가 join 뒤에 판정한다.
+    var staged: usize = 0;
+    var write_err: ?anyerror = null;
     var i: usize = 0;
-    while (i < rounds) : (i += 1) _ = try session.writeInputNonBlocking(" ");
+    while (i < rounds) : (i += 1) {
+        staged += session.writeInputNonBlocking(" ") catch |err| {
+            write_err = err;
+            break;
+        };
+    }
     writer.join();
+    if (write_err) |err| return err;
+    // 인수한 바이트를 실제로 세어 둔다 — 반환값을 버리면 "0을 계속 돌려줘도" 통과한다.
+    try testing.expect(staged > 0);
 
     // 겹친 뒤에도 세션이 멀쩡해야 한다 — 앞선 공백들은 cmd에서 무해하다.
     var out: std.ArrayList(u8) = .empty;
@@ -1247,20 +1496,10 @@ test "reapAfterEof: 곧바로 끝나는 자식의 종료 코드를 거둔다" {
     });
     defer session.deinit();
 
-    var buf: [4096]u8 = undefined;
-    var status: ?types.ExitStatus = null;
-    var spins: usize = 0;
-    while (spins < 4000) : (spins += 1) {
-        const ready = session.waitIo(false) catch break;
-        if (!ready.readable) continue;
-        switch (session.readChunk(&buf) catch break) {
-            .again, .data => continue,
-            .eof => {
-                status = try session.reapAfterEof();
-                break;
-            },
-        }
-    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    _ = try drainBounded(&session, a, null, &out); // EOF까지(예산 안에서)
+    const status = try session.reapAfterEof();
     try testing.expectEqual(types.ExitStatus{ .exited = 3 }, status.?);
 }
 

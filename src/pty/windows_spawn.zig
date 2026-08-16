@@ -107,6 +107,18 @@ pub fn envKeyIs(entry: []const u8, key: []const u8) bool {
     return std.ascii.eqlIgnoreCase(k, key);
 }
 
+/// 환경 블록에 실을 수 있는 모양인가 — `=`가 하나라도 있어야 한다.
+///
+/// 실제 프로세스 환경에는 이런 항목이 없지만 `parent_env`·`env`는 호출자가 넘기는 슬라이스이기도 하다.
+/// `=` 없는 문자열을 그대로 실으면 `CreateProcessW`가 받는 블록이 형식을 잃는다 — 자식의 환경이 그
+/// 지점부터 어떻게 파싱될지는 문서화돼 있지 않다. 조용히 떨구는 편이 안전하다(적대적 검증 fuzz가 찾았다).
+///
+/// `=C:=C:\work`처럼 **이름이 `=`로 시작하는** Windows 고유 항목은 통과한다 — 그것도 `=`를 갖고 있고,
+/// 드라이브별 현재 디렉터리를 나르는 정상 항목이다.
+fn isWellFormedEntry(entry: []const u8) bool {
+    return std.mem.indexOfScalar(u8, entry, '=') != null;
+}
+
 /// 부모 환경에서 **자식에게 물려주면 거짓이 되는** 항목인가.
 ///
 /// macOS 백엔드(`EnvStorage.appendParentEnv`)와 **같은 정책**이다. 두 백엔드가 각자 구현하는 이유는 주입
@@ -140,6 +152,11 @@ pub const EnvOptions = struct {
     env_overrides: []const []const u8 = &.{},
     term: []const u8 = "xterm-256color",
     pane_id: ?u64 = null,
+    /// opt-in ssh 라우팅이 켜졌을 때의 maru 실행 파일 경로. macOS와 **같은 정책**을 쓴다(`MARU_BIN` +
+    /// `MARU_SSH_INTEGRATION=1` 주입, 부모의 동명 키는 그때 떨군다). Windows에서 이 값을 읽을 통합
+    /// 스크립트는 W5, `maru ssh` 자체는 W9라 지금은 무동작이지만, 정책을 한쪽에만 두면 그 슬라이스가
+    /// 올 때 조용히 갈린다 — `isDroppedParentEntry`의 doc이 경고하는 바로 그 자리다.
+    ssh_integration_bin: ?[]const u8 = null,
 };
 
 /// 환경 블록에 들어갈 "KEY=VALUE" 목록을 만든다. 각 원소와 바깥 슬라이스 모두 호출자 소유다
@@ -162,12 +179,25 @@ pub fn buildEnvEntries(allocator: std.mem.Allocator, opts: EnvOptions) ![][]u8 {
         // 명시 env: 부모 상속도 maru override도 없이 그대로 쓰되, 내부 selector는 예약 키라 뺀다
         // (아래 tail에서 현재 값만 다시 들어간다).
         for (opts.env) |entry| {
+            if (!isWellFormedEntry(entry)) continue;
             if (envKeyIs(entry, "MARU_PANE_ID")) continue;
+            if (findEntryIndex(entries.items, entry) != null) continue; // 첫 것이 이긴다(부모 갈래와 같은 규칙)
             try appendOwned(allocator, &entries, try allocator.dupe(u8, entry));
         }
     } else {
         for (opts.parent_env) |entry| {
+            if (!isWellFormedEntry(entry)) continue;
             if (isDroppedParentEntry(entry)) continue;
+            // 주입할 때만 부모의 동명 키를 떨군다(macOS와 같은 조건). 안 켰으면 부모 값이 그대로 간다 —
+            // 그쪽도 같으므로 두 백엔드가 어긋나지 않는다.
+            if (opts.ssh_integration_bin != null and
+                (envKeyIs(entry, "MARU_BIN") or envKeyIs(entry, "MARU_SSH_INTEGRATION"))) continue;
+            // **부모가 같은 키를 두 번 담고 있으면 첫 것만 쓴다.** 실제 프로세스 환경에는 그런 일이 없지만
+            // (OS가 사전으로 관리한다) `parent_env`는 호출자가 넘기는 스냅샷이기도 하다. 여기서 걸러야
+            // "이 함수가 낸 블록에는 같은 키가 두 번 없다"가 **입력과 무관하게** 성립한다 — Windows는
+            // 중복 키가 있을 때 어느 쪽이 이기는지를 문서화하지 않는다. 첫 것이 이기는 규칙은 POSIX
+            // 관례이자 macOS 백엔드가 전제하는 것과 같다(적대적 검증 fuzz가 찾았다).
+            if (findEntryIndex(entries.items, entry) != null) continue;
             try appendOwned(allocator, &entries, try allocator.dupe(u8, entry));
         }
         try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "TERM={s}", .{opts.term}));
@@ -175,6 +205,10 @@ pub fn buildEnvEntries(allocator: std.mem.Allocator, opts: EnvOptions) ![][]u8 {
         // macOS 백엔드와 같은 값이다 — TUI들이 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트로
         // 고르는데 maru는 그 명단에 없어서다. 근거는 `EnvStorage.appendParentEnv`의 주석이 단일 출처다.
         try appendOwned(allocator, &entries, try allocator.dupe(u8, "TERM_PROGRAM=ghostty"));
+        if (opts.ssh_integration_bin) |bin| {
+            try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "MARU_BIN={s}", .{bin}));
+            try appendOwned(allocator, &entries, try allocator.dupe(u8, "MARU_SSH_INTEGRATION=1"));
+        }
     }
 
     for (opts.env_overrides) |ov| {
@@ -206,6 +240,16 @@ fn appendOwned(allocator: std.mem.Allocator, entries: *std.ArrayList([]u8), owne
 
 /// 같은 키가 있으면 **그 자리에서** 교체하고 없으면 끝에 붙인다. 자리를 지키는 이유는 순서가 뜻을 갖는
 /// 항목(`PATH`)의 위치를 흔들지 않기 위해서다. 키가 없는 항목(`=C:=…`, `=` 없는 쓰레기)은 무시한다.
+/// `candidate`와 **같은 키**를 가진 항목의 자리. 키가 없는 항목(`=C:=…`)은 늘 null이라 그런 특수 항목은
+/// 서로 겹치지 않고 그대로 통과한다.
+fn findEntryIndex(entries: []const []u8, candidate: []const u8) ?usize {
+    const key = envKey(candidate) orelse return null;
+    for (entries, 0..) |entry, i| {
+        if (envKeyIs(entry, key)) return i;
+    }
+    return null;
+}
+
 fn upsert(allocator: std.mem.Allocator, entries: *std.ArrayList([]u8), override: []const u8) !void {
     const key = envKey(override) orelse return;
     const owned = try allocator.dupe(u8, override);
@@ -356,6 +400,46 @@ test "buildEnvEntries: 부모를 물려받되 오염 항목은 떨구고 우리 
     for ([_][]const u8{ "TERMINFO", "FORCE_COLOR", "MARU_PANE_ID", "TMUX", "TMUX_PANE" }) |key|
         try std.testing.expect(findEnv(entries, key) == null);
     try std.testing.expect(hasExact(entries, "=C:=C:\\work"));
+}
+
+// macOS 백엔드(`EnvStorage`)와 **같은 정책**임을 못박는다. 한쪽에만 두면 그 기능이 오는 슬라이스에서
+// 조용히 갈린다 — 켜면 주입하고 부모의 stale 값을 떨구고, 안 켜면 둘 다 안 한다.
+// 적대적 검증 fuzz가 찾았다. 실제 프로세스 환경에는 대소문자만 다른 중복 키가 없지만 `parent_env`는
+// 호출자가 넘기는 스냅샷이기도 하고, Windows는 중복 키의 승자를 문서화하지 않는다 — **입력과 무관하게**
+// 같은 키가 한 번만 나가야 한다.
+test "buildEnvEntries: 부모에 중복 키가 있어도 하나만 나간다(첫 것이 이긴다)" {
+    const a = std.testing.allocator;
+    const parent = [_][]const u8{ "A=1", "a=2", "PATH=p", "Path=q", "=C:=C:\\w", "=D:=D:\\x" };
+    const entries = try buildEnvEntries(a, .{ .parent_env = &parent });
+    defer freeEnvEntries(a, entries);
+
+    try std.testing.expectEqual(@as(usize, 1), countEnv(entries, "A"));
+    try expectEnv(entries, "A", "1"); // 첫 것이 이긴다(POSIX 관례·macOS 전제와 같다)
+    try std.testing.expectEqual(@as(usize, 1), countEnv(entries, "PATH"));
+    try expectEnv(entries, "PATH", "p");
+    // 키가 없는 특수 항목(`=C:=…`)은 서로 겹치지 않으므로 **둘 다** 남아야 한다.
+    try std.testing.expect(hasExact(entries, "=C:=C:\\w"));
+    try std.testing.expect(hasExact(entries, "=D:=D:\\x"));
+}
+
+test "buildEnvEntries: ssh 라우팅은 켰을 때만 주입하고 그때만 부모 값을 떨군다" {
+    const a = std.testing.allocator;
+    const parent = [_][]const u8{ "PATH=C:\\Windows", "MARU_BIN=C:\\old\\maru.exe", "MARU_SSH_INTEGRATION=1" };
+
+    {
+        const entries = try buildEnvEntries(a, .{ .parent_env = &parent, .ssh_integration_bin = "C:\\new\\maru.exe" });
+        defer freeEnvEntries(a, entries);
+        try expectEnv(entries, "MARU_BIN", "C:\\new\\maru.exe"); // 낡은 경로가 이기면 옛 바이너리로 라우팅된다
+        try expectEnv(entries, "MARU_SSH_INTEGRATION", "1");
+        try std.testing.expectEqual(@as(usize, 1), countEnv(entries, "MARU_BIN"));
+    }
+    // 안 켰으면 주입하지 않는다. 부모 값은 그대로 간다 — macOS도 같아서 두 백엔드가 어긋나지 않는다.
+    {
+        const entries = try buildEnvEntries(a, .{ .parent_env = &parent });
+        defer freeEnvEntries(a, entries);
+        try expectEnv(entries, "MARU_BIN", "C:\\old\\maru.exe");
+        try std.testing.expectEqual(@as(usize, 1), countEnv(entries, "MARU_BIN"));
+    }
 }
 
 test "buildEnvEntries: 사용자 override는 대소문자를 넘어 upsert하고 중복 키를 남기지 않는다" {

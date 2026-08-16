@@ -2742,3 +2742,75 @@ pub fn providePickedFile(self: *AppSession, path: []const u8) void {
         markConfigKeyDirty(self, "window.background-image");
     }
 }
+
+// 새 섹션이 **좌측 네비에 실제로 뜨는지** 본다.
+//
+// 스키마에 키를 등록하고 `Section` 에 변형을 더하는 것만으로 GUI 에 나오리라 **믿을 근거가 없다** —
+// 섹션은 "필드가 있는 섹션만" 모으고(`settingsSectionHasField`), 그 판정은 스키마가 이 필드를
+// `EnumField` 로 펼쳤을 때만 참이다. 하나라도 어긋나면 설정을 만들었는데 **아무 데서도 못 고른다**.
+// 그 상태는 컴파일도 되고 파싱도 되므로 다른 어떤 테스트도 잡지 않는다.
+test "ui.language 는 세팅 좌측 네비의 app 섹션에 뜬다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const sections = try buildSectionList(session, arena);
+    var has_app = false;
+    for (sections) |entry| {
+        if (entry.section == .app) has_app = true;
+    }
+    try std.testing.expect(has_app);
+
+    // 그 섹션 안에 실제로 이 키가 있어야 한다 — 섹션만 뜨고 행이 비면 빈 화면이다.
+    var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+    try config_mod.schema.appendEnumFields(arena, session.loaded_config.config, &enums);
+    var found = false;
+    for (enums.items) |e| {
+        if (std.mem.eql(u8, e.key, "ui.language")) {
+            try std.testing.expectEqual(config_mod.Section.app, e.section.?);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+// 네비 **순서**를 못 박는다.
+//
+// `buildSectionList` 가 `Section` 선언 순으로 모으므로, enum 을 재정렬하면 사용자가 보는 순서가 바뀐다 —
+// 알파벳 정렬 같은 무해해 보이는 이유로 충분히 일어난다. 언어가 첫 자리여야 하는 이유는 읽을 수 없는
+// 언어로 뜬 화면에서는 **다른 섹션을 고르는 것부터** 어렵기 때문이다. 그 의도를 주석이 아니라 여기서 든다.
+test "세팅 네비의 첫 섹션은 app 이다 — 읽을 수 없는 화면에서 언어부터 찾을 수 있어야 한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const sections = try buildSectionList(session, arena);
+    try std.testing.expect(sections.len > 0);
+    try std.testing.expectEqual(config_mod.Section.app, sections[0].section.?);
+}

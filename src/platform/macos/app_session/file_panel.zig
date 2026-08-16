@@ -543,23 +543,23 @@ pub fn updateFileTree(self: *AppSession) !void {
                     pending.round != result.root_validation_round) break :root_result;
                 if (self.file_tree.rootGeneration() != pending.expected_root_generation) {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .stale_generation, "탐색기 루트가 바뀌어 폴더 선택 결과를 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .stale_generation, .fp_root_stale_generation);
                     break :root_result;
                 }
                 if (!result.ok) {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .validation_failed, "선택한 폴더를 열 수 없습니다.");
+                    reportFileTreeRootOutcome(self, .validation_failed, .fp_root_open_failed);
                     break :root_result;
                 }
                 if (pending.round == 0) {
                     const identity = result.identity orelse {
                         self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .identity_missing, "선택한 폴더 identity를 확인할 수 없습니다.");
+                        reportFileTreeRootOutcome(self, .identity_missing, .fp_root_identity_unknown);
                         break :root_result;
                     };
                     const canonical = self.allocator.dupe(u8, result.path) catch {
                         self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .allocation_failed, "폴더 재검증 상태를 준비할 수 없습니다.");
+                        reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_revalidate_alloc_failed);
                         break :root_result;
                     };
                     if (!self.file_tree_backend.submitRootValidation(
@@ -571,7 +571,7 @@ pub fn updateFileTree(self: *AppSession) !void {
                     )) {
                         self.allocator.free(canonical);
                         self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .backend_busy, "폴더 재검증 작업을 시작하지 못했습니다.");
+                        reportFileTreeRootOutcome(self, .backend_busy, .fp_root_revalidate_start_failed);
                         break :root_result;
                     }
                     self.file_tree_root_validation.?.round = 1;
@@ -580,56 +580,56 @@ pub fn updateFileTree(self: *AppSession) !void {
                 }
                 const expected_identity = pending.identity orelse {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, "폴더 재검증 상태가 유효하지 않습니다.");
+                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_revalidate_invalid);
                     break :root_result;
                 };
                 const actual_identity = result.identity orelse {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, "폴더 identity가 사라져 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_identity_gone);
                     break :root_result;
                 };
                 const validated_dir = result.validated_dir orelse {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, "폴더 검증 capability가 사라져 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_capability_gone);
                     break :root_result;
                 };
                 if (!expected_identity.eql(actual_identity)) {
                     self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_changed, "선택한 폴더가 검증 중 교체되어 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .identity_changed, .fp_root_identity_changed);
                     break :root_result;
                 }
                 self.file_tree_root_validation = null;
                 var candidate = self.file_tree.cloneForRootTransaction() catch {
-                    reportFileTreeRootOutcome(self, .allocation_failed, "탐색기 루트 변경 상태를 준비할 수 없습니다.");
+                    reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_change_alloc_failed);
                     break :root_result;
                 };
                 defer candidate.deinit();
                 const roots = [_][]const u8{result.path};
                 switch (pending.operation) {
                     .replace => candidate.replaceExplicitRoots(&roots) catch {
-                        reportFileTreeRootOutcome(self, .model_stage_failed, "탐색기 루트를 교체할 수 없습니다.");
+                        reportFileTreeRootOutcome(self, .model_stage_failed, .fp_root_replace_failed);
                         break :root_result;
                     },
                     .add => candidate.addExplicitRoot(result.path) catch {
-                        reportFileTreeRootOutcome(self, .model_stage_failed, "작업공간에 폴더를 추가할 수 없습니다.");
+                        reportFileTreeRootOutcome(self, .model_stage_failed, .fp_root_add_failed);
                         break :root_result;
                     },
                     .none => break :root_result,
                 }
                 if (result.identity) |identity| _ = candidate.pinRootIdentity(result.path, identity);
                 resetFileTreeWatchRootsFor(self, &candidate, null) catch {
-                    reportFileTreeRootOutcome(self, .watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .watcher_stage_failed, .fp_root_watch_change_failed);
                     break :root_result;
                 };
                 var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
                 defer candidate_rows.deinit(self.allocator);
                 prepareFileTreeRowStaging(self, &candidate_rows, 0) catch {
-                    reportFileTreeRootOutcome(self, .row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .row_stage_failed, .fp_root_rows_change_failed);
                     break :root_result;
                 };
                 buildPreparedFileTreeRows(self, &candidate, &candidate_rows);
                 const validated_scan_path = candidate.takeScanRequestForPath(result.path) orelse {
-                    reportFileTreeRootOutcome(self, .model_stage_failed, "검증된 탐색기 루트의 첫 scan을 준비할 수 없습니다.");
+                    reportFileTreeRootOutcome(self, .model_stage_failed, .fp_root_first_scan_alloc_failed);
                     break :root_result;
                 };
                 if (!self.file_tree_backend.submitValidatedRootScan(
@@ -639,7 +639,7 @@ pub fn updateFileTree(self: *AppSession) !void {
                 )) {
                     candidate.requeueScan(validated_scan_path) catch {};
                     self.allocator.free(validated_scan_path);
-                    reportFileTreeRootOutcome(self, .backend_busy, "검증된 폴더 scan을 시작하지 못해 변경을 취소했습니다.");
+                    reportFileTreeRootOutcome(self, .backend_busy, .fp_root_scan_start_failed);
                     break :root_result;
                 }
                 result.validated_dir = null; // first scan worker now owns the descriptor capability.
@@ -1799,12 +1799,14 @@ pub fn activateFilePanelDockControl(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-pub fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?[]const u8) void {
+pub fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?maru.i18n.Key) void {
     self.file_tree_root_outcome = outcome;
     // **자동 따라가기의 실패는 조용하다.** 사용자가 시킨 적 없는 동작인데 "선택한 폴더를 열 수 없습니다"가 뜨면
     // 무엇을 잘못했는지 알 수 없는 알림이 된다. outcome은 남기므로 진단·테스트는 그대로 볼 수 있다.
     if (self.file_tree_root_auto_follow) return;
-    if (message) |text| self.showNotice(text);
+    // 문자열이 아니라 **키**를 받는다(docs/i18n.md §7.2 1차) — 이 자리에 리터럴을 넘기면 컴파일되지 않는다.
+    // 표시 문자열로의 해석은 여기 한 곳에서만 한다.
+    if (message) |key| self.showNotice(maru.i18n.t(key));
 }
 
 pub fn showFilePanelCloseChoices(self: *AppSession, pending: PendingFilePanelClose, entry: *const dock_panel.Entry) void {
@@ -3346,30 +3348,30 @@ pub fn setFileTreeScrollOffsetPx(self: *AppSession, offset_px: i64) void {
 
 pub fn removeFileTreeRoot(self: *AppSession, path: []const u8) void {
     if (fileTreeNamespaceMutationBusy(self)) {
-        reportFileTreeRootOutcome(self, .busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
+        reportFileTreeRootOutcome(self, .busy, .fp_root_busy_retry);
         return;
     }
     var candidate = self.file_tree.cloneForRootTransaction() catch {
-        reportFileTreeRootOutcome(self, .allocation_failed, "탐색기 루트 제거 상태를 준비할 수 없습니다.");
+        reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_remove_alloc_failed);
         return;
     };
     defer candidate.deinit();
     const removed = candidate.removeExplicitRoot(path) catch {
-        reportFileTreeRootOutcome(self, .model_stage_failed, "탐색기 루트를 제거할 수 없습니다.");
+        reportFileTreeRootOutcome(self, .model_stage_failed, .fp_root_remove_failed);
         return;
     };
     if (!removed) {
-        reportFileTreeRootOutcome(self, .root_missing, "선택한 탐색기 루트가 더 이상 존재하지 않습니다.");
+        reportFileTreeRootOutcome(self, .root_missing, .fp_root_missing);
         return;
     }
     resetFileTreeWatchRootsFor(self, &candidate, null) catch {
-        reportFileTreeRootOutcome(self, .watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 제거를 취소했습니다.");
+        reportFileTreeRootOutcome(self, .watcher_stage_failed, .fp_root_watch_remove_failed);
         return;
     };
     var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
     defer candidate_rows.deinit(self.allocator);
     prepareFileTreeRowStaging(self, &candidate_rows, 0) catch {
-        reportFileTreeRootOutcome(self, .row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 제거를 취소했습니다.");
+        reportFileTreeRootOutcome(self, .row_stage_failed, .fp_root_rows_remove_failed);
         return;
     };
     buildPreparedFileTreeRows(self, &candidate, &candidate_rows);
@@ -3621,7 +3623,7 @@ pub fn requestFileTreeRootPick(self: *AppSession, operation: FileTreeRootOperati
         self.file_tree_root_validation = null;
     };
     if (operation == .none or fileTreeNamespaceMutationBusy(self)) {
-        reportFileTreeRootOutcome(self, .busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
+        reportFileTreeRootOutcome(self, .busy, .fp_root_busy_retry);
         return;
     }
     self.file_tree_root_pick_pending = operation;
@@ -3828,15 +3830,15 @@ pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
         return;
     }
     if (path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) {
-        reportFileTreeRootOutcome(self, .invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
+        reportFileTreeRootOutcome(self, .invalid_path, .fp_root_invalid_path);
         return;
     }
     if (self.file_tree_root_request_id == std.math.maxInt(u64)) {
-        reportFileTreeRootOutcome(self, .request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
+        reportFileTreeRootOutcome(self, .request_id_exhausted, .fp_root_request_id_exhausted);
         return;
     }
     const owned = self.allocator.dupe(u8, path) catch {
-        reportFileTreeRootOutcome(self, .allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
+        reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_picker_alloc_failed);
         return;
     };
     self.file_tree_root_request_id += 1;
@@ -3854,7 +3856,7 @@ pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
         0,
     )) {
         self.allocator.free(owned);
-        reportFileTreeRootOutcome(self, .backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
+        reportFileTreeRootOutcome(self, .backend_busy, .fp_root_validate_busy);
         return;
     }
     self.file_tree_root_validation = pending;

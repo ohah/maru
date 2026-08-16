@@ -872,6 +872,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    sealed runtime 목록만 여러 runtime으로 확장한다. pre-publication connect/manifest/hello 실패는 HostPool·adapter·old
    graph mutation 0이고, publication 뒤 local OOM/cap/deadline/peer failure는 소비한 wire cut을 재사용하지 않고 candidate와
    published Client를 fail-close해 다음 job generation으로 넘긴다.
+
+   현재 CR4a 제품 행은 실제 manifest/socket connect와 same-adapter replacement 뒤, 동일 job final address에서 observer
+   candidate와 staged receipt까지 게시한다. connect에서 발급한 absolute deadline을 attach/snapshot/delta/barrier에 그대로
+   전달하며, candidate 전 만료는 sealed failed job과 published Client fail-close로 닫는다. staged receipt가 뒤늦게 만료되면
+   typed reject job은 request nonce와 usable Client projection을, failed job은 exact connection poison reason과
+   current Client의 terminal projection을 함께 seal·재검증하고,
+   controller/takeover 소비는 0이지만 canonical abort·teardown은 가능하다. manifest/connect부터 staged seal까지의 allocator
+   fail-index는 첫 성공+1까지 순회하며 pre-publication old graph mutation 0, unavailable 게시 뒤 forward-only 결과와 각 반복의
+   candidate/receipt/retired Client/registry/pin/batch/barrier inbox/allocator bytes final 0을 고정한다. 이 행으로 CR4a는 완료되지만
+   controller 권위 획득과 generation publication은 아래 CR4b·CR4c가 소유한다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
    observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
 3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership

@@ -1164,11 +1164,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `connectExistingHostUntil` exact 1, same-adapter Client replacement exact 1을 소유하며 하나의 absolute deadline을
    connect/hello부터 staged receipt까지 연장 없이 공유한다. 단일-runtime actual socket 제품 행도 이 job을 우회하지 않는다.
    현재 제품 행은 actual manifest/socket Client를 job final address에 보존하고 unavailable shell 전환과 same-adapter replacement
-   publication exact 1까지 연결했다. replacement node OOM은 rollback하지 않고 sealed forward-failed state로 남긴다. observer
-   candidate와 staged receipt 및 전체 deadline 공유는 다음 행으로 남는다.
-   allocator fail-index는 manifest/connect, replacement node, observer attach/snapshot, delta apply와 staged seal의 첫 성공+1까지
+   publication exact 1 뒤 observer candidate와 staged receipt까지 연결했다. connect에서 발급한 같은 absolute deadline은
+   attach/snapshot/delta/barrier까지 재생성하지 않으며, 만료는 candidate 전 sealed failure와 새 Client fail-close로 닫는다.
+   typed reject job은 exact request nonce와 usable Client projection을 seal하고, connection failure job은 exact poison reason과
+   현재 published Client의 fd/unusable/first-reason terminal projection을 다시 대조하므로 두 결과나 실패 provenance를 서로 세탁할 수 없다.
+   replacement node OOM은 rollback하지 않고 sealed forward-failed state로 남긴다. allocator fail-index는 manifest/connect,
+   replacement preflight/node, observer attach/snapshot, delta apply와 staged seal의 첫 성공+1까지
    순회하고 pre-publication은 old graph mutation 0, post-publication은 unavailable shell과 node/generation 보존 및 Client
-   fail-close, candidate/receipt/ledger final zero를 고정한다.
+   fail-close, candidate/receipt/ledger final zero를 고정한다. 이 행까지 green이면 CR4a를 완료로 세지만 controller status/takeover,
+   RemoteGeneration publication, forced first resize와 input은 CR4b·CR4c 전까지 0이다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

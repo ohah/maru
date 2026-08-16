@@ -1640,6 +1640,70 @@ pub const ReconnectGenerationOwner = struct {
         }
     }
 
+    fn prepareCandidateCatchupStage(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        runtime_id: u128,
+        request_nonce: u128,
+        deadline: client_deadline.AbsoluteDeadline,
+        io: std.Io,
+    ) anyerror!*const catchup_stage_contract.PreparedStage {
+        try self.validatePrepared(reconnect);
+        try self.preflightClientGenerationPair(adapter, reconnect, published);
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        return switch (candidate.attachment) {
+            .generation => |*attachment| attachment.prepareCatchupStage(
+                runtime_id,
+                request_nonce,
+                deadline,
+                io,
+            ),
+            .legacy => error.InvalidAuthority,
+        };
+    }
+
+    fn validateCandidateCatchupStage(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+        require_fresh: bool,
+    ) bool {
+        self.validatePrepared(reconnect) catch return false;
+        self.preflightClientGenerationPair(adapter, reconnect, published) catch return false;
+        const candidate = @constCast(self.slot.candidatePayload(&reconnect.candidate) catch return false);
+        return switch (candidate.attachment) {
+            .generation => |*attachment| if (require_fresh)
+                attachment.validateCatchupStage(stage, deadline)
+            else
+                deadline.expires_at_ns == stage.deadline_expires_at_ns and
+                    attachment.catchupStageAuthorityMatches(stage),
+            .legacy => false,
+        };
+    }
+
+    fn abortCandidateCatchupStage(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!void {
+        if (!self.validateCandidateCatchupStage(adapter, reconnect, published, stage, deadline, false))
+            return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.abortCatchupStage(stage),
+            .legacy => return error.InvalidAuthority,
+        }
+        try self.abort(reconnect);
+    }
+
     pub fn abort(self: *ReconnectGenerationOwner, prepared: *PreparedReconnect) !void {
         try self.validatePrepared(prepared);
         try self.slot.abortCandidateInPlace(
@@ -1943,6 +2007,7 @@ const ObserverReconnectCandidateArgs = struct {
     runtime: *RemoteRuntime,
     adapter: *host_adapter_mod.HostAdapter,
     runtime_id: u128,
+    deadline: ?client_deadline.AbsoluteDeadline = null,
 };
 
 /// CR4a candidate initializer. 모든 socket/화면 mutation은 heap candidate의 final address에서
@@ -1970,10 +2035,14 @@ fn initObserverReconnectCandidate(
 
     try out.attachment.generation.initInPlace(args.adapter);
     const prepared = try out.attachment.generation.prepareObserverAttach(args.adapter, args.runtime_id);
-    const result = try out.attachment.generation.executePreparedAttach(args.adapter, prepared);
+    const result = if (args.deadline) |deadline|
+        try out.attachment.generation.executePreparedAttachUntil(args.adapter, prepared, deadline)
+    else
+        try out.attachment.generation.executePreparedAttach(args.adapter, prepared);
     const correlated = switch (result) {
         .accepted => |value| value,
-        .typed_reject, .uncertain_or_connection_failure => return error.AttachFailed,
+        .typed_reject => return error.ObserverAttachRejected,
+        .uncertain_or_connection_failure => return error.ObserverAttachConnectionFailed,
     };
     var response_open = true;
     defer if (response_open) {
@@ -1991,7 +2060,7 @@ fn initObserverReconnectCandidate(
         else
             .granted_without_generation,
     };
-    var decoded = try remote_attachment.decodeAttachResponse(
+    var decoded = remote_attachment.decodeAttachResponse(
         runtime.allocator,
         response,
         args.runtime_id,
@@ -2003,10 +2072,16 @@ fn initObserverReconnectCandidate(
                 .supported => .supported,
             },
         },
-    );
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Malformed,
+        error.ResourceExhausted,
+        error.CapabilityViolation,
+        => error.ObserverAttachProtocolFailed,
+    };
     defer decoded.deinit();
     const accepted = switch (decoded) {
-        .wire_error => return error.AttachFailed,
+        .wire_error => return error.ObserverAttachRejected,
         .accepted => |*value| value,
     };
     switch (accepted.initial_metadata) {
@@ -2032,7 +2107,10 @@ fn initObserverReconnectCandidate(
     response_open = false;
 
     var snapshot: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
-    try out.attachment.generation.readInitialSnapshot(&snapshot);
+    if (args.deadline) |deadline|
+        try out.attachment.generation.readInitialSnapshotUntil(&snapshot, deadline)
+    else
+        try out.attachment.generation.readInitialSnapshot(&snapshot);
     var snapshot_live = true;
     defer if (snapshot_live) snapshot.deinit() catch
         @panic("CR4a initial snapshot cleanup lost final candidate");
@@ -2182,6 +2260,90 @@ pub const RemoteRuntime = struct {
             try runtime.generation_owner.preflightUnavailableAfterAttachmentRetirement(
                 adapter,
                 expected_connection_generation,
+            );
+        }
+
+        /// Backend host job의 published replacement를 observer candidate와 caught-up receipt로
+        /// 한 번에 확장한다. attach, initial snapshot, delta와 barrier는 caller가 준 동일 deadline을 공유한다.
+        pub fn prepareReconnectObserverStage(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            request_nonce: u128,
+            deadline: client_deadline.AbsoluteDeadline,
+            out: *PreparedReconnect,
+        ) anyerror!*const catchup_stage_contract.PreparedStage {
+            if (request_nonce == 0) return error.InvalidAuthority;
+            if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
+            try runtime.prepareObserverReconnectCandidateUntil(adapter, published, deadline, out);
+            errdefer runtime.generation_owner.abort(out) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            const runtime_id = std.fmt.parseInt(u128, &runtime.runtime_id_hex, 16) catch
+                return error.InvalidAuthority;
+            return runtime.generation_owner.prepareCandidateCatchupStage(
+                adapter,
+                out,
+                published,
+                runtime_id,
+                request_nonce,
+                deadline,
+                runtime.io,
+            );
+        }
+
+        pub fn validateReconnectObserverStage(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.validateCandidateCatchupStage(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                deadline,
+                true,
+            );
+        }
+
+        pub fn validateReconnectObserverStageForCleanup(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.validateCandidateCatchupStage(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                deadline,
+                false,
+            );
+        }
+
+        pub fn abortReconnectObserverStage(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.abortCandidateCatchupStage(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                deadline,
             );
         }
 
@@ -2979,6 +3141,33 @@ pub const RemoteRuntime = struct {
                 .runtime = self,
                 .adapter = adapter,
                 .runtime_id = runtime_id,
+            },
+            initObserverReconnectCandidate,
+        );
+    }
+
+    pub fn prepareObserverReconnectCandidateUntil(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        deadline: client_deadline.AbsoluteDeadline,
+        out: *PreparedReconnect,
+    ) anyerror!void {
+        try self.admitRuntimeOperation();
+        if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
+        const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
+            return error.AttachFailed;
+        if (runtime_id == 0 or adapter.connectionGeneration() == 0)
+            return error.InvalidAuthority;
+        try self.generation_owner.prepareAfterClientReplacement(
+            adapter,
+            published,
+            out,
+            ObserverReconnectCandidateArgs{
+                .runtime = self,
+                .adapter = adapter,
+                .runtime_id = runtime_id,
+                .deadline = deadline,
             },
             initObserverReconnectCandidate,
         );
@@ -9260,10 +9449,10 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     const published_generation = adapter.connectionGeneration();
     const retired_count = adapter.slot.retiredClientCount();
     var prepared: PreparedReconnect = .{};
-    try std.testing.expectError(
-        error.AttachFailed,
-        runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared),
-    );
+    try std.testing.expectError(switch (selected) {
+        .typed_reject => error.ObserverAttachRejected,
+        .response_eof => error.ObserverAttachConnectionFailed,
+    }, runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared));
     try std.testing.expectEqual(@as(u8, 1), observer_seen.load(.acquire));
     try std.testing.expectEqual(PreparedReconnect{}, prepared);
     try std.testing.expect(runtime.generation_owner.slot.candidate == null);

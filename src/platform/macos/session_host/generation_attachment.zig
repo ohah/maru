@@ -264,6 +264,24 @@ pub const GenerationAttachment = struct {
         adapter: *host_adapter_mod.HostAdapter,
         receipt: contract.PreparedCallReceipt,
     ) anyerror!contract.ExecuteResult {
+        return self.executePreparedAttachInternal(adapter, receipt, null);
+    }
+
+    pub fn executePreparedAttachUntil(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        receipt: contract.PreparedCallReceipt,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!contract.ExecuteResult {
+        return self.executePreparedAttachInternal(adapter, receipt, deadline);
+    }
+
+    fn executePreparedAttachInternal(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        receipt: contract.PreparedCallReceipt,
+        deadline: ?client_deadline.AbsoluteDeadline,
+    ) anyerror!contract.ExecuteResult {
         if (!self.valid() or self.lifecycle != .binding_prepared)
             return error.InvalidState;
         self.binding.beginExecute(receipt) catch |err| {
@@ -275,10 +293,10 @@ pub const GenerationAttachment = struct {
             return err;
         };
         self.lifecycle = .executing;
-        const result = self.transport.executePreparedRequest(
-            receipt,
-            &self.response,
-        ) catch |err| {
+        const result = (if (deadline) |absolute|
+            generation_transport_mod.executePreparedRequestUntil(&self.transport, receipt, &self.response, absolute)
+        else
+            self.transport.executePreparedRequest(receipt, &self.response)) catch |err| {
             self.transport.abortPreparedRequest(receipt) catch {};
             self.batch_adapter.abortPrepared();
             self.terminalizeTransport();
@@ -402,6 +420,15 @@ pub const GenerationAttachment = struct {
     ) anyerror!void {
         if (!self.valid() or self.lifecycle != .attached) return error.InvalidState;
         return self.transport.readInitialSnapshot(out);
+    }
+
+    pub fn readInitialSnapshotUntil(
+        self: *GenerationAttachment,
+        out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidState;
+        return generation_transport_mod.readInitialSnapshotUntil(&self.transport, out, deadline);
     }
 
     /// Initial snapshot bytes are already generation-owned, so semantic apply failures must
@@ -1062,6 +1089,15 @@ pub const GenerationAttachment = struct {
     ) bool {
         return deadline.expires_at_ns == stage.deadline_expires_at_ns and
             deadline.remainingNs() > 0 and self.validateCatchupStageAuthority(stage);
+    }
+
+    /// Cleanup owners must still be able to authenticate and abort an exact staged receipt after
+    /// its product deadline expires. Expiry prevents consumption, not canonical owner teardown.
+    pub fn catchupStageAuthorityMatches(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+    ) bool {
+        return self.validateCatchupStageAuthority(stage);
     }
 
     fn validateCatchupStageAuthority(

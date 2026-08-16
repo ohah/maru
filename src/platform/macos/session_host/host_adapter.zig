@@ -255,6 +255,26 @@ pub const HostAdapter = struct {
         return self.slot.preflightPublishedClientReplacement(published);
     }
 
+    pub fn preflightAttachmentConnectionFailedClosed(
+        self: *const HostAdapter,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) error{ MovedOrCopied, InvalidTerminalConnection }!void {
+        return self.slot.preflightAttachmentConnectionFailedClosed(reason);
+    }
+
+    pub fn failCloseAttachmentConnection(
+        self: *HostAdapter,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) error{ MovedOrCopied, InvalidTerminalConnection }!@import("client_poison.zig").ConnectionReason {
+        return self.slot.failCloseAttachmentConnection(reason);
+    }
+
+    pub fn preflightAttachmentConnectionUsable(
+        self: *const HostAdapter,
+    ) error{ MovedOrCopied, InvalidUsableConnection }!void {
+        return self.slot.preflightAttachmentConnectionUsable();
+    }
+
     pub fn prepareRetiredClientReclaim(
         self: *HostAdapter,
         out: *client_slot_mod.PreparedRetiredClientReclaim,

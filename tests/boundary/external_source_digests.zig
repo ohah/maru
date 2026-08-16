@@ -453,7 +453,7 @@ pub const inventory = [_]Proof{
     // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
     // 경로가 정리되면 지운다). 같은 PR 의 검증 후속으로 한 번 더 움직였다 — 두 파일이 공유하는 키를
     // common_ 접두로 옮기며 이 파일의 호출 둘이 바뀌었다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ec7a866134fd1ee2d8bbb32132b9029da960740b002dcef8a5b2741ceedf4a35" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b5881901c9d990782624a691ec207733f386ed700403a74d66599c66c1cb064e" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

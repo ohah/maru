@@ -2089,6 +2089,7 @@ test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프�
 
     const saved = fx.term.rt.editor_lines;
     defer fx.term.rt.editor_lines = saved;
+    // 8 MiB로도 재 봤다: 랩 프레임이 4ms → 5ms로 **선형이 아니다**(§3.8 축소가 잡는다).
     const nuls = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(nuls);
     @memset(nuls, 0);
@@ -2151,4 +2152,33 @@ test "알려진 구멍: 랩을 켠 한 줄짜리 문서는 세로로 전혀 못 
     // **이 단언은 "옳다"가 아니라 "지금 이렇다"이다.** 조각 단위 스크롤(`first_piece`)이 붙으면
     // 여기가 뒤집혀야 하고, 그때 이 테스트가 그 사실을 알린다(plans/native-editor.md 잔여 표).
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}
+
+test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이지 않는다" {
+    // 최대 열 셈은 `max_cols_count_limit`에서 멈춘다. 그 값이 `max_first_col`과 같으면(여유분이
+    // 없으면) 좁은 창에서 센 뒤 창을 넓혔을 때 `max_cols - visible`이 상한보다 작아져 **갈 수 있는
+    // 거리가 줄어든다**. 여유분 4,096이 그것을 막는다 — 그 이유를 지키는 테스트가 없었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try hscrollFixtureLines(allocator, &fx, @as(usize, chrome_editor.frame.max_first_col) * 10);
+    const long_buf = lines[1];
+    defer allocator.free(long_buf);
+    defer allocator.free(lines);
+
+    // 좁은 창에서 센다.
+    const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 400 };
+    _ = scrollCols(fx.session, fx.term, narrow, -1);
+    const counted = fx.term.rt.editor_max_cols;
+    try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, counted);
+
+    // **창이 아주 넓어졌다.** 셈은 다시 하지 않는다(캐시) — 그래도 상한까지 갈 수 있어야 한다.
+    const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 4000, .h = 400 };
+    try testing.expect(scrollCols(fx.session, fx.term, wide, -1_000_000));
+    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+    try testing.expectEqual(counted, fx.term.rt.editor_max_cols); // 다시 세지 않았다
 }

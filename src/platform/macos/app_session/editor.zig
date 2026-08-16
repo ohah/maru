@@ -114,6 +114,9 @@ pub const PaneFrame = struct {
     visual_rows: usize,
     /// **문서 전체**의 시각 행 수(랩 포함). 렌더만 접힘을 아므로, 스크롤 입력이 쓰도록 함께 낸다.
     total_visual_rows: u32,
+    /// 스크롤 **상한** `(줄, 조각)` — 같은 이유로 함께 낸다(§4.1d).
+    max_top_line: usize,
+    max_top_piece: u32,
 };
 
 /// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
@@ -130,6 +133,7 @@ const diff_frame = chrome_editor.diff_frame;
 pub fn buildPaneOps(
     lines: []const []const u8,
     first_line: usize,
+    first_piece: u32,
     first_col: u16,
     wrap: bool,
     rect: chrome_draw.Rect,
@@ -145,7 +149,7 @@ pub fn buildPaneOps(
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
         .{ .lines = lines, .first_col = first_col },
-        .{ .first_line = first_line, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -153,7 +157,7 @@ pub fn buildPaneOps(
         .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
         scratch,
     );
-    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows };
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece };
 }
 
 /// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
@@ -162,6 +166,7 @@ pub fn buildDiffPaneOps(
     left: chrome_editor.diff_frame.Side,
     right: chrome_editor.diff_frame.Side,
     first_line: usize,
+    first_piece: u32,
     wrap: bool,
     rect: chrome_draw.Rect,
     cell_w_px: u16,
@@ -180,6 +185,7 @@ pub fn buildDiffPaneOps(
         .left = left,
         .right = right,
         .first_line = first_line,
+        .first_piece = first_piece,
         .wrap = wrap,
         .rect = inner,
         .background_rect = .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
@@ -187,7 +193,7 @@ pub fn buildDiffPaneOps(
         .cell_h_px = cell_h_px,
         .font_px = font_px,
     }, scratch);
-    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows };
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece };
 }
 
 /// 편집기 배경·스크롤바 quad가 실리는 합성 층. **제품과 Chrome Lab이 함께 읽는 단일 출처다.**
@@ -310,7 +316,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, term.rt.editor_first_line, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -318,6 +324,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks },
             .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks },
             term.rt.editor_first_line,
+            effectiveFirstPiece(wrap, term),
             wrap,
             pane_rect,
             @intCast(self.cell_width_px),
@@ -325,10 +332,13 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstCol(wrap, term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
+    // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
+    term.rt.editor_max_top_line = pf.max_top_line;
+    term.rt.editor_max_top_piece = pf.max_top_piece;
 
     const tokens = self.buildChromeTokens();
     const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
@@ -466,6 +476,13 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     // **`visible`은 시각 행, `total`은 논리 줄이다.** 랩이 켜져 줄이 접히면 두 단위가 갈리므로 그대로
     // 빼면 안 된다 — 접힌 만큼 문서 끝이 **영영 닿지 않는다**(줄마다 3행으로 접히는 200줄 문서에서
     // 마지막 26줄이 그렇다). 렌더가 실어 둔 **문서 전체 시각 행 수**로 판정을 가른다.
+    // **랩이면 시각 행 단위로 움직인다**(§4.1d — 앵커 + 조각 오프셋). 논리 줄만 움직이면 한 줄짜리
+    // 문서에서 아무 데도 못 간다.
+    if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) {
+        scrollPieces(self, term, lines, total, visible, visibleCols(self, body, term));
+        return true;
+    }
+
     const max_first = maxFirstLine(total, visible, term);
     if (max_first == 0) {
         // 문서가 화면에 다 들어간다 — 접혀 있든 아니든 움직일 이유가 없다.
@@ -496,8 +513,112 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
 ///
 /// **저장된 위치는 안 버린다.** 랩을 껐을 때 보던 자리로 돌아온다 — 켤 때 0으로 지우면 그 자리를
 /// 잃는다.
+/// 렌더에 넘길 조각 오프셋. **랩이 꺼져 있으면 0이다** — 줄마다 조각이 하나뿐이라 의미가 없고,
+/// 저장된 값은 랩을 다시 켰을 때 돌아갈 자리다(가로의 `effectiveFirstCol`과 같은 규율).
+fn effectiveFirstPiece(wrap: bool, term: *Term) u32 {
+    return if (wrap) term.rt.editor_first_piece else 0;
+}
+
 fn effectiveFirstCol(wrap: bool, term: *Term) u16 {
     return if (wrap) 0 else term.rt.editor_first_col;
+}
+
+/// 랩이 켜졌을 때의 세로 스크롤 — **시각 행 단위**로 `(줄, 조각)`을 움직인다(§4.1d).
+///
+/// **Vim `smoothscroll`이 버그를 쏟은 자리다**(9.1.0211·0258·0260·0407 — off-by-one, 새 topline,
+/// half-page 하위호환). 그래서 위치 정규화를 흩지 않고 여기와 `clampScrollToGeometry` 둘로만 둔다.
+///
+/// **상한은 렌더가 실어 둔 `(줄, 조각)`을 쓴다** — 여기서 문서 끝부터 조각을 누적하면 매 틱마다
+/// 수십~수백 줄을 다시 조각내게 된다.
+fn scrollPieces(self: *AppSession, term: *Term, delta_rows: i32, total_lines: usize, visible_rows: usize, content_cols: u16) void {
+    // `delta_rows > 0` = 휠 위 = 문서 앞쪽으로(세로 규약 그대로).
+    var line: i64 = @intCast(term.rt.editor_first_line);
+    var piece: i64 = term.rt.editor_first_piece;
+    var remaining: i64 = -@as(i64, delta_rows); // 아래로 갈 때 양수
+
+    // **한 줄이 몇 조각인지는 그 줄만 세면 된다.** 지나는 줄마다 한 번씩이라 틱당 몇 줄이다.
+    while (remaining != 0) {
+        const rows = piecesOfLine(term, @intCast(line), content_cols);
+        if (remaining > 0) {
+            const room = @as(i64, rows) - 1 - piece; // 이 줄 안에서 더 내려갈 수 있는 행
+            if (remaining <= room) {
+                piece += remaining;
+                break;
+            }
+            if (line + 1 >= @as(i64, @intCast(total_lines))) {
+                piece = @max(0, @as(i64, rows) - 1);
+                break;
+            }
+            remaining -= room + 1;
+            line += 1;
+            piece = 0;
+        } else {
+            if (-remaining <= piece) {
+                piece += remaining;
+                break;
+            }
+            if (line == 0) {
+                piece = 0;
+                break;
+            }
+            remaining += piece + 1;
+            line -= 1;
+            piece = @as(i64, piecesOfLine(term, @intCast(line), content_cols)) - 1;
+        }
+    }
+
+    const next_line: usize = @intCast(@max(0, line));
+    const next_piece: u32 = @intCast(@max(0, piece));
+    if (next_line != term.rt.editor_first_line or next_piece != term.rt.editor_first_piece) {
+        term.rt.editor_first_line = next_line;
+        term.rt.editor_first_piece = next_piece;
+        self.metal_dirty = true;
+    }
+    clampTopToMax(self, term, total_lines, visible_rows);
+}
+
+/// 그 논리 줄이 지금 폭에서 몇 조각인가(최소 1). 렌더와 **같은 함수**를 부른다 — 여기서 따로 세면
+/// 화면과 스크롤이 갈린다.
+fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
+    const lines = editorLines(term);
+    if (line >= lines.len or content_cols == 0) return 1;
+    var scratch: [8192]u8 = undefined;
+    const c = chrome_editor.content.rowCount(
+        lines[line],
+        chrome_editor.frame.default_tab_width,
+        content_cols,
+        true,
+        &scratch,
+    );
+    return @max(c.rows, 1);
+}
+
+/// 위치를 렌더가 실어 둔 상한 `(줄, 조각)` 안으로 되돌린다.
+fn clampTopToMax(self: *AppSession, term: *Term, total_lines: usize, visible_rows: usize) void {
+    // **"아직 안 그렸다"와 "문서가 다 들어간다"를 구분해야 한다.** 상한 `(0,0)`은 둘 다를 뜻할 수
+    // 있어 그것만으로 가르면 짧은 문서가 clamp를 못 받는다(실제로 테스트 넷이 그렇게 깨졌다).
+    // 렌더가 그렸는지는 `editor_total_visual_rows`가 이미 말한다.
+    //
+    // **첫 프레임 전에도 상한이 있어야 한다.** 렌더가 아직 안 실어 줬다고 무한정 가게 두면, 문서를
+    // 열자마자 굴렸을 때 화면이 통째로 빈다 — 옛 논리 줄 경로는 상한을 그 자리에서 계산해 이 구멍이
+    // 없었다. 그때는 **접힘을 모르므로 줄마다 1행으로 근사**한다(다음 프레임이 정확한 값으로 고친다).
+    if (term.rt.editor_total_visual_rows == 0) {
+        const fallback = total_lines -| visible_rows;
+        if (term.rt.editor_first_line > fallback or (term.rt.editor_first_line == fallback and term.rt.editor_first_piece > 0)) {
+            term.rt.editor_first_line = fallback;
+            term.rt.editor_first_piece = 0;
+            self.metal_dirty = true;
+        }
+        return;
+    }
+    const max_line = term.rt.editor_max_top_line;
+    const max_piece = term.rt.editor_max_top_piece;
+    const over = term.rt.editor_first_line > max_line or
+        (term.rt.editor_first_line == max_line and term.rt.editor_first_piece > max_piece);
+    if (!over) return;
+    term.rt.editor_first_line = max_line;
+    term.rt.editor_first_piece = max_piece;
+    self.metal_dirty = true;
 }
 
 /// `editor_first_line`이 가질 수 있는 최대값. 0이면 문서가 화면에 다 들어간다.
@@ -649,6 +770,7 @@ pub fn toggleWrap(self: *AppSession) bool {
     // **접힘이 달라지면 시각 행 수도 달라진다.** 렌더가 센 값은 옛 랩의 것이고 스크롤 상한이 그것을
     // 읽으므로, 다시 그리기 전의 한 번을 위해 버린다(다음 프레임이 곧바로 채운다).
     term.rt.editor_total_visual_rows = 0;
+    // **조각도 버리지 않는다** — 랩을 다시 켜면 돌아갈 자리다(`effectiveFirstPiece`가 렌더에 0을 넘긴다).
     // **가로 위치는 버리지 않는다.** 랩 중에는 렌더가 안 쓰고(`effectiveFirstCol`), 랩을 끄면 보던
     // 자리로 돌아온다. 상한을 넘어 있으면 `clampScrollToGeometry`가 그리기 직전에 되돌린다.
     self.metal_dirty = true;
@@ -1178,6 +1300,7 @@ test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하
         .{ .lines = &left_texts, .numbers = &left_numbers, .total_lines = 3 },
         .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 2 },
         0,
+        0,
         false,
         .{ .x = 0, .y = 0, .w = 800, .h = 300 },
         8,
@@ -1372,8 +1495,30 @@ test "랩으로 접힌 문서는 마지막 줄까지 닿는다 — 접힌 만큼
     try testing.expect(fx.term.rt.editor_total_visual_rows > long.len); // 실제로 접혔다
 
     _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -10_000);
-    // **마지막 논리 줄이 맨 위에 올 때까지** 갈 수 있다 — 접힘을 모르는 채로 빼면 여기 못 온다.
-    try testing.expectEqual(long.len - 1, fx.term.rt.editor_first_line);
+
+    // **옛 단언은 `first_line == long.len - 1`이었다** — "마지막 논리 줄이 맨 위"라는 거친 근사이고,
+    // 그 화면은 마지막 줄의 조각 몇 개만 남아 거의 비어 있다. 조각 단위 스크롤(§4.1d)이 붙으면서
+    // **끝에 닿으면서 화면도 꽉 차는** 위치에 선다(실측: 99 → 83). 그래서 기계(=어느 줄인가)가 아니라
+    // **의도**를 단언한다.
+    var at_end = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer at_end.dl.deinit(allocator);
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible: usize = inner_h / fx.session.cell_height_px;
+
+    // 그린 행 수는 셀의 최대 row로 센다(`PaneDraw`는 행 수를 따로 내지 않는다).
+    var drawn_rows: usize = 0;
+    for (at_end.dl.cells) |c| drawn_rows = @max(drawn_rows, @as(usize, c.row) + 1);
+
+    try testing.expect(fx.term.rt.editor_first_line > 0); // 실제로 끝까지 갔다
+    try testing.expectEqual(visible, drawn_rows); // **화면이 꽉 찬다** — 옛 규칙은 여기서 빈다
+
+    // 더 굴려도 안 움직인다 = 끝이다.
+    const line_at_end = fx.term.rt.editor_first_line;
+    const piece_at_end = fx.term.rt.editor_first_piece;
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -10_000);
+    try testing.expectEqual(line_at_end, fx.term.rt.editor_first_line);
+    try testing.expectEqual(piece_at_end, fx.term.rt.editor_first_piece);
 }
 
 test "접혀도 화면에 다 들어가면 안 움직인다" {
@@ -2125,9 +2270,9 @@ test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프�
     try testing.expect(t5 - t4 < 200); // 실측 1ms
 }
 
-test "알려진 구멍: 랩을 켠 한 줄짜리 문서는 세로로 전혀 못 움직인다(조각 스크롤 대기)" {
-    // `editor_first_line`은 **논리 줄**이다. 문서가 한 줄이면 상한이 0이라 랩으로 9만 행이 되어도
-    // 첫 화면 밖을 볼 방법이 없다 — minified 파일을 랩으로 열면 실제로 이 상태다.
+test "한 줄짜리 문서도 조각으로 움직인다 — 예전엔 전혀 못 움직였다" {
+    // `editor_first_line`은 **논리 줄**이라 문서가 한 줄이면 값이 0 하나뿐이다. 예전에는 그래서 랩으로
+    // 시각 행이 2,248개가 되어도 첫 화면 밖을 볼 방법이 없었다 — §4.1d의 조각 오프셋이 그것을 닫았다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -2150,11 +2295,12 @@ test "알려진 구멍: 랩을 켠 한 줄짜리 문서는 세로로 전혀 못 
     std.debug.print("\n[적대] 한 줄 랩: 시각 행={d}, 논리 줄={d}\n", .{ fx.term.rt.editor_total_visual_rows, lines.len });
     try testing.expect(fx.term.rt.editor_total_visual_rows > 1000); // 실제로 아주 많이 접혔다
 
+    // **그 구멍은 닫혔다(§4.1d).** 이 테스트는 "지금 이렇다"를 고정하고 있었고, 조각 단위 스크롤이
+    // 붙으면 뒤집혀야 한다고 적어 뒀다 — 그대로 뒤집는다. 논리 줄은 하나뿐이라 0에 머물지만
+    // **조각이 움직여** 첫 화면 밖을 볼 수 있다.
     _ = scrollLines(fx.session, fx.term, leaf, -1_000_000);
-    std.debug.print("[적대] 끝까지 굴린 뒤 first_line={d}\n", .{fx.term.rt.editor_first_line});
-    // **이 단언은 "옳다"가 아니라 "지금 이렇다"이다.** 조각 단위 스크롤(`first_piece`)이 붙으면
-    // 여기가 뒤집혀야 하고, 그때 이 테스트가 그 사실을 알린다(plans/native-editor.md 잔여 표).
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    try testing.expect(fx.term.rt.editor_first_piece > 0);
 }
 
 test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이지 않는다" {
@@ -2250,4 +2396,120 @@ test "안 넘치면 편집기가 가로 축을 가져가지 않는다 — 탭 �
     const before = pane.tab_scroll_cols;
     scroll_ops.scrollWheel(fx.session, 0, -4.0 * @as(f64, @floatFromInt(fx.session.cell_width_px)), true, x, y);
     try testing.expect(pane.tab_scroll_cols != before); // 탭 바가 실제로 굴렀다
+}
+
+test "분할된 pane: 가로 휠도 커서 아래 편집기만 민다 — 옆 pane은 그대로다" {
+    // **세로에는 같은 격리 테스트가 있는데 가로에는 없었다.** 라우팅 코드는 공유하지만, 가로는
+    // "넘칠 때만 소유한다"는 판정이 하나 더 붙어 경로가 갈린다 — 옆 pane 위에서 굴렸는데 이쪽이
+    // 밀리면 사용자는 이유를 알 수 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    // 두 pane 모두 **긴 줄**을 들어야 한다 — 안 넘치면 편집기가 축을 안 가져가 판정이 공허해진다.
+    const long_line = try allocator.alloc(u8, 4000);
+    defer allocator.free(long_line);
+    @memset(long_line, 'x');
+    const lines = try allocator.alloc([]const u8, 3);
+    defer allocator.free(lines);
+    lines[0] = "short";
+    lines[1] = long_line;
+    lines[2] = "short";
+
+    const saved = fx.term.rt.editor_lines;
+    fx.term.rt.editor_lines = lines;
+    defer fx.term.rt.editor_lines = saved;
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0;
+
+    const tab = tab_ops.activeTab(fx.session);
+    const left_pane = tab.panes.items[0];
+    const right_pane = try allocator.create(app_session_mod.Pane);
+    right_pane.* = .{};
+    const right_term = try createEditorTerm(fx.session);
+    right_term.rt.editor_lines = lines;
+    right_term.rt.editor_wrap = false;
+    try right_pane.terms.append(allocator, right_term);
+    try tab.panes.append(allocator, right_pane);
+
+    const split = try allocator.create(app_session_mod.PaneTree.Split);
+    split.* = .{ .direction = .horizontal, .ratio = 0.5, .a = .{ .leaf = left_pane }, .b = .{ .leaf = right_pane } };
+    try testing.expect(app_session_mod.PaneTree.replaceLeaf(&tab.tree, left_pane, .{ .split = split }));
+    // 세운 것은 여기서 되돌린다(세로 격리 테스트와 같은 규율 — 세션 해체에 맡기면 소유가 어긋난다).
+    defer {
+        tab.tree = .{ .leaf = left_pane };
+        allocator.destroy(split);
+        _ = tab.panes.pop();
+        right_term.rt.editor_lines = &.{}; // 빌린 배열이라 Term이 해제하면 안 된다
+        term_ops.destroyTerm(fx.session, right_term);
+        right_pane.terms.deinit(allocator);
+        allocator.destroy(right_pane);
+    }
+
+    const win = fx.session.termRect();
+    const y: f64 = @as(f64, @floatFromInt(win.y)) + @as(f64, @floatFromInt(win.h)) / 2.0;
+    const dx: f64 = -3.5 * @as(f64, @floatFromInt(fx.session.cell_width_px));
+
+    // 오른쪽 절반에서 가로로 굴린다.
+    const rx: f64 = @as(f64, @floatFromInt(win.x)) + @as(f64, @floatFromInt(win.w)) * 0.75;
+    scroll_ops.scrollWheel(fx.session, 0, dx, true, rx, y);
+    try testing.expect(right_term.rt.editor_first_col > 0); // 커서 아래가 밀렸다
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col); // 옆 pane은 그대로다
+
+    // 왼쪽 절반이면 반대가 된다.
+    const before_right = right_term.rt.editor_first_col;
+    const lx: f64 = @as(f64, @floatFromInt(win.x)) + @as(f64, @floatFromInt(win.w)) * 0.25;
+    scroll_ops.scrollWheel(fx.session, 0, dx, true, lx, y);
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+    try testing.expectEqual(before_right, right_term.rt.editor_first_col);
+}
+
+test "랩을 켠 한 줄짜리 문서도 세로로 움직인다 — 조각 단위 스크롤(§4.1d)" {
+    // **이 슬라이스가 닫은 구멍이다.** 예전에는 `editor_first_line`이 논리 줄이라 값이 0 하나뿐이었고,
+    // 시각 행이 2,000개가 넘어도 첫 화면 밖을 볼 방법이 없었다(minified 파일을 랩으로 연 상태).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const huge = try allocator.alloc(u8, 200_000);
+    defer allocator.free(huge);
+    @memset(huge, 'x');
+    const lines = try allocator.alloc([]const u8, 1);
+    defer allocator.free(lines);
+    lines[0] = huge;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var first = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    first.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_total_visual_rows > 1000); // 실제로 아주 많이 접혔다
+
+    // ① 내려간다 — 논리 줄은 하나뿐이므로 **조각만** 움직인다.
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -5);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 5), fx.term.rt.editor_first_piece);
+
+    // ② 화면이 실제로 바뀐다 — 상태만 움직이고 렌더가 안 따라오면 아무 일도 안 일어난다.
+    var moved = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer moved.dl.deinit(allocator);
+    try testing.expect(moved.dl.cells.len > 0);
+
+    // ③ 끝까지 가면 멈추고, 그 화면은 비지 않는다.
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1_000_000);
+    const end_piece = fx.term.rt.editor_first_piece;
+    try testing.expect(end_piece > 5);
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1_000_000);
+    try testing.expectEqual(end_piece, fx.term.rt.editor_first_piece);
+
+    // ④ 되돌아온다.
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, 1_000_000);
+    try testing.expectEqual(@as(u32, 0), fx.term.rt.editor_first_piece);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
 }

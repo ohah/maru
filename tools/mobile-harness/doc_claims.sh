@@ -127,6 +127,18 @@ ck "터미널 트리에 글자 노드가 없다" 0 "$(grep -c 'tree\.text(' $B)"
 # 하드코딩 라벨 배열이 다시 생기면 잡는다(`zsh`/`vim`/`logs`·`maru`/`web`/... 이 그 모양이었다).
 ck "브리지에 하드코딩 라벨 배열이 없다" 0 "$(grep -cE 'const [a-z_]+ = \[_\]\[\]const u8\{ *"' $B || true)"
 
+echo "§멀티터치 — 손가락을 아무거나 집지 않는다"
+# iOS 는 `multipleTouchEnabled` 를 켠 순간부터 `touches` 에 여럿이 들어온다. 그때 `anyObject` 가
+# 남아 있으면 **진짜로 임의 선택**이 된다 — 프레임마다 다른 손가락이 잡혀 좌표가 튄다.
+# 남겨도 되는 자리는 **제스처가 없을 때 첫 손가락을 고르는 한 곳**뿐이다.
+ck "iOS 가 멀티터치를 켠다" 1 "$(grep -c 'multipleTouchEnabled = YES' $I)"
+ck "iOS 에 남은 anyObject" 1 "$(grep -c 'touches.anyObject' $I)"
+# Android 도 index 0 만 보던 자리가 없어야 한다 — 사건이 가리키는 손가락을 쓴다.
+ck "Android 가 사건의 손가락을 쓴다" 1 "$(grep -c 'ACTION_POINTER_INDEX_SHIFT' $A)"
+# **배경 전환에 잡음을 다 풀어야 한다.** 뗀 적 없이 끝나는 경우가 그것이고, 하나라도 남으면
+# 복귀 후 그 표면이 굳는다(실제로 `_hasBodyPtr` 를 빠뜨려 키바·설정이 안 눌릴 뻔했다).
+ck "iOS 가 배경에서 잡음 셋을 다 푼다" 3 "$(grep -cE 'release(Keybar|Chrome|Body)Grab\]' $I)"
+
 echo "§inset — 컷아웃을 빠뜨리지 않는다"
 # `systemBars()` 만 물으면 카메라 홀이 있는 기기에서 짧게 나온다(실측: 홀이 y=64..130 인데 63 을
 # 받아 본문 첫 줄들이 구멍 뒤에 깔렸다). 두 값을 함께 물어야 한다.

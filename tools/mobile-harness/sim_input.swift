@@ -35,7 +35,10 @@ func post(_ t: CGEventType, _ p: CGPoint) {
 }
 
 guard let win = simulatorFrame() else { print("시뮬레이터 창을 못 찾았다"); exit(3) }
-let padX = (win.width - devW) / 2, padY = (win.height - devH) / 2
+// **세로 오프셋은 가운데가 아니다** — 창 제목줄이 있어 위가 더 두껍다. 탭 왕복으로 쟀다:
+// device y=300 을 보내면 앱이 263 으로 받았다 → 실제 오프셋 70(계산상 33 이 아니다).
+// 다시 재려면 `tap 200 300` 을 보내고 `MARU_TOUCH pt=(...)` 로그의 y 를 본다.
+let padX = (win.width - devW) / 2, padY: CGFloat = 70
 func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: win.minX + padX + x, y: win.minY + padY + y) }
 
 let mode = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""

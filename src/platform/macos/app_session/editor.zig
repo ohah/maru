@@ -599,7 +599,7 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
             term.rt.editor_first_col = 0;
             self.metal_dirty = true;
         }
-        return true;
+        return false;
     }
 
     // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
@@ -1684,6 +1684,9 @@ test "가로 휠은 긴 줄이 있을 때만 문서를 민다 — 아니면 탭 
     try testing.expect(fx.session.tab_wheel_accum != accum_before);
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 
+    // **`tab_wheel_accum`으로는 축 소유를 판정할 수 없다** — 그 값은 라우팅 **이전에**
+    // `wheelDeltaToLines`가 건드리므로 편집기가 축을 삼켜도 움직인다. 실제 판정은
+    // "안 넘치면 편집기가 가로 축을 가져가지 않는다"가 한다(탭 바의 `tab_scroll_cols`를 본다).
     // ② 넘치는 문서: 이제 편집기가 가져간다.
     const saved = fx.term.rt.editor_lines;
     defer fx.term.rt.editor_lines = saved; // 소유를 되돌린다 — Term이 원래 것을 푼다
@@ -2209,4 +2212,42 @@ test "가로로 밀어도 컨트롤 플레인은 같은 사실을 말한다 — 
     const after = editor_diff_ops.editorMeta(fx.term);
     try testing.expectEqual(before.read_only, after.read_only);
     try testing.expectEqualStrings(before.path.?, after.path.?);
+}
+
+test "안 넘치면 편집기가 가로 축을 가져가지 않는다 — 탭 바가 실제로 굴러야 한다" {
+    // **이 테스트가 없어서 뮤턴트가 전체 테스트를 통과했다**(2026-08-16). 기존 라우팅 테스트는
+    // `tab_wheel_accum`으로 판정했는데, 그 값은 라우팅 **이전에** `wheelDeltaToLines`가 건드리므로
+    // 편집기가 축을 통째로 삼켜도 움직인다 — 아무것도 증명하지 못했다.
+    //
+    // 그래서 두 가지로 본다: ⑴ `scrollCols`가 **false**를 돌려주는가, ⑵ 탭 바가 **실제로 굴렀는가**
+    // (`tab_scroll_cols`). ⑵는 탭이 넘쳐야 관측되므로 탭을 여러 개 만든다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    fx.term.rt.editor_wrap = false;
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    // ⑴ 짧은 문서 — 이 축으로 할 일이 없다.
+    try testing.expect(!scrollCols(fx.session, fx.term, leaf, -20));
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
+
+    // ⑵ 탭 바가 넘치게 탭을 늘린 뒤, 편집기 pane 위에서 가로로 굴린다.
+    const pane = pane_ops.activePane(fx.session);
+    var i: usize = 0;
+    while (i < 24) : (i += 1) {
+        const t = try createEditorTerm(fx.session);
+        try pane.terms.append(allocator, t);
+    }
+    fx.session.focusTerm(0); // 편집기 Term을 다시 활성으로
+
+    const win = fx.session.termRect();
+    const x: f64 = @as(f64, @floatFromInt(win.x)) + @as(f64, @floatFromInt(win.w)) / 2.0;
+    const y: f64 = @as(f64, @floatFromInt(win.y)) + @as(f64, @floatFromInt(win.h)) / 2.0;
+    const before = pane.tab_scroll_cols;
+    scroll_ops.scrollWheel(fx.session, 0, -4.0 * @as(f64, @floatFromInt(fx.session.cell_width_px)), true, x, y);
+    try testing.expect(pane.tab_scroll_cols != before); // 탭 바가 실제로 굴렀다
 }

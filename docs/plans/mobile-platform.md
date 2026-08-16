@@ -359,18 +359,30 @@ Android 는 `getX(ev, 0)` 이 남은 손가락을 가리키게 되어 **좌표�
 그대로 들어가 상한(`MARU_FLING_MAX_VELOCITY`)까지 튀고, 손을 떼면 **한 번의 손가락 교체가
 1600px 를 흘려보낸다**.
 
-**레퍼런스는 전부 같은 답을 낸다** — 이어받되 **기준을 다시 잡고 속도를 버린다**:
+**레퍼런스를 소스로 읽었더니 길이 둘이다.** 문제의 뿌리가 "`index 0` 을 쓴다" 가 아니라
+**"절대 기준값 하나를 둔다"** 였다:
 
-| | 어떻게 | 확인 |
-|---|---|---|
-| AOSP `ScrollView` | `onSecondaryPointerUp` — 남은 포인터를 새 기준으로 + `VelocityTracker.clear()` | **원문 확인** |
-| Flutter `DragGestureRecognizer` | `MultitouchDragStrategy` 로 고른다 — **`latestPointer`**(가장 최근 포인터만 추적, 떼면 **다음 포인터가 이어받는다**)가 3.19 부터 기본. 나머지는 `averageBoundaryPointers`(경계 포인터, "iOS 관습")·`sumAllPointers`(합산, 3.19 이전 기본) | **API 문서 확인** |
+| | 어떻게 | 소유자가 떼질 때 | 확인 |
+|---|---|---|---|
+| AOSP `ScrollView` | 절대 기준(`mLastMotionY`) | `onSecondaryPointerUp` — 남은 포인터를 **새 기준으로 잡고** `mVelocityTracker.clear()` | **원문** |
+| Flutter `monodrag.dart` | **포인터별 델타**(`PointerMoveEvent.delta`) + 포인터별 `VelocityTracker` | `_giveUpPointer` 가 `_activePointer` 를 남은 것 중 첫 번째로 넘길 뿐 — **재기준도 속도 처리도 없다**(할 게 없다) | **원문** |
+| React Native (Android) | 없음 — `ReactScrollView : ScrollView` 이고 `onTouchEvent` 가 `super` 로 넘긴다 | AOSP 것을 그대로 물려받는다 | **원문** |
 
+Flutter 의 `MultitouchDragStrategy.latestPointer`("가장 최근 포인터만 추적, 떼면 다음 포인터가
+이어받는다")가 3.19 부터 기본이고, 나머지는 `averageBoundaryPointers`("iOS 관습")·
+`sumAllPointers`(3.19 이전 기본)다.
 
-**"index 0 의 절대 좌표" 를 쓰는 구현은 못 찾았다.** 그 안티패턴이 우리가 지금 하는 것이다.
-**UIKit 이 다중 터치를 어떻게 합성하는지는 Apple 문서에 없어 확인하지 못했다** — 통설(무게중심)을
-근거로 적지 않는다. Flutter 문서가 `averageBoundaryPointers` 를 "iOS 관습" 이라 부르는 것이
-간접 근거의 전부다. React Native 는 확인하지 않았다.
+**진짜 병은 "절대 기준" 이 아니라 "기준 하나를 손가락들이 공유하는 것" 이다.** Flutter 도 엔진이
+포인터마다 직전 위치를 들고 델타를 만든다 — 기준이 없는 게 아니라 **공유되지 않을 뿐**이다.
+
+**그래서 Flutter 쪽을 고른다.** ABI 는 그대로 절대 좌표를 나르고(hit-test·선택·롱프레스가 이미
+쓴다), 코어가 **id 별로** 직전 좌표·속도를 들고 소유자의 것만 화면에 적용한다. 이어받을 때 할
+일이 없다 — 새 소유자는 자기 `down` 이후로 이미 자기 기준을 갱신해 왔다. 재기준·속도 버리기는
+**빠뜨릴 수 있는 명시적 처리**이고, 이 저장소에서 그 부류가 반복해서 새어 나왔다(감쇠 세 곳·
+슬롭 네 곳·반쪽 이관). 빠뜨릴 게 없는 구조가 낫다.
+
+**UIKit 이 다중 터치를 어떻게 합성하는지는 확인하지 못했다** — Apple 문서에 없고 소스도 없다.
+통설(무게중심)을 근거로 적지 않는다.
 
 **그래서 소유권 규칙을 코어가 갖고 host 는 id 만 나른다**([계약 §3.1](../mobile-platform.md)).
 host 에 두면 두 벌이 되고 두 벌은 갈린다 — 이 저장소에서 관성 감쇠(세 곳)·터치 슬롭(네 곳)·
@@ -379,13 +391,22 @@ host 에 두면 두 벌이 되고 두 벌은 갈린다 — 이 저장소에서 �
 | | 내용 |
 |---|---|
 | T0 | **계약** — id 의 의미(불투명 정수, `down`~`up` 동안 불변)·소유권·이어받기·재기준·속도 버리기 |
-| T1 | **ABI + 코어 소유권** — 세 포인터 함수에 `pointer_id` 를 싣고 규칙을 계약 테스트로 잠근다. 두 host 는 이 슬라이스에서는 **지금 쓰는 한 손가락의 id** 를 그대로 넘긴다(동작 무변화) |
+| T1 | **ABI + 코어 소유권** — 세 포인터 함수에 `pointer_id` 를 싣고, `Touch` 가 **손가락별 기준·속도**와 `owner_id` 를 든다. 규칙을 계약 테스트로 잠근다. 두 host 는 이 슬라이스에서는 **지금 쓰는 한 손가락의 id** 를 그대로 넘긴다(동작 무변화) |
 | T2 | **Android** — `getPointerId`/`findPointerIndex`, `ACTION_POINTER_DOWN`/`_UP` 을 받는다. 이어받기가 코어에서 돈다 |
-| T3 | **iOS** — `multipleTouchEnabled = YES`, `UITouch*` → id 매핑, `touches.anyObject` 를 걷어내고 전부 순회 |
+| T3 | **iOS** — `multipleTouchEnabled = YES`, `UITouch*` → id 매핑, `touches.anyObject` 를 걷어내고 전부 순회. **네 자리를 한 커밋에서 다 바꾼다** — 반쯤 하면 그 순간 `anyObject` 가 진짜로 임의 선택이 되어, 지금은 없는 결함을 새로 만든다. 판정자로 `anyObject` 사용 0 을 잠근다 |
 | T4 | **판정자·문서·두 host 캡처** |
 
 **핀치는 이 축이 아니다**(M13 폰트 줌). 다만 T1 의 "비소유자는 무시하되 **개수는 센다**" 가 그
 자리를 열어 둔다.
+
+**두 모델을 적대적으로 비교한 결과가 이 선택의 근거다.** A(기준 하나 + 명시적 이어받기)의 실패는
+**누락**이다 — 조용하고, 표면이 늘수록 확률이 커지고, 이 저장소에서 세 번 났다. 게다가 AOSP 가
+이어받을 때 부르는 `VelocityTracker.clear()` 는 **두 손가락으로 세게 밀다 하나를 떼며 놓는
+손짓의 관성을 죽인다**. B(손가락별 기준)의 실패는 국소적이고 열거된다 — 슬롯 초과·모르는 id·
+샌 슬롯, 셋 다 규칙 한 줄과 테스트 하나로 닫힌다. 그리고 이어받기 코드가 **없으므로** 다음
+표면(M12 세션 전환)이 붙을 때 추가로 기억할 것이 없다.
+
+**B 의 진짜 위험은 상태 크기가 아니라 T3 다** — 위 표에 적은 대로 원자적으로 바꾼다.
 
 #### 남은 것 — 이 축과 분리한다
 

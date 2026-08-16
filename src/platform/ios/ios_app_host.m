@@ -109,6 +109,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)releaseKeybarGrab;
 /// 같은 자리에서 밀린 화면(설정)이 잡고 있던 터치를 푼다.
 - (void)releaseChromeGrab;
+- (void)releaseBodyGrab;
 @end
 
 @implementation ChromeView {
@@ -140,6 +141,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     float _flingVy;   // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다, 헤더 주석 참조)
     double _ptrLastT; // 직전 이동 이벤트의 시각(ms). 속도를 시간으로 재려면 필요하다.
     double _flingT;   // 직전 관성 프레임의 시각(ms).
+    unsigned int _bodyPtrId; // 본문 제스처를 소유한 손가락(관성 계산용 — 판정은 코어가 한다)
+    BOOL _hasBodyPtr;
     float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
@@ -311,47 +314,76 @@ static unsigned int maruPointerId(UITouch *t) {
     return (unsigned int)(((uintptr_t)t >> 4) & 0x7FFFFFFF);
 }
 
+/// **손가락 전부를 보낸다.** 비소유자의 기준이 낡으면 그 손가락이 이어받는 순간 옛 자리에서
+/// 델타가 나와 화면이 점프한다(T1 이 없앤 병) — 소유권 판정은 코어가 한다.
 - (void)sendPointer:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
-    UITouch *touch = touches.anyObject;
-    if (!touch) return;
-    CGPoint p = [touch locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
-    float lx = (float)(p.x - safe.left);
-    float ly = (float)(p.y - safe.top);
-    // 손을 뗀 뒤 흘릴 관성만 우리 몫이다 — Android 와 같은 식.
-    // **속도는 px/ms 다.** 이벤트 사이 간격으로 나눈다(UIKit 이 `timestamp` 를 준다) — 프레임당
-    // 이동량으로 두면 주사율이 다른 기기에서 같은 손짓이 다르게 미끄러진다.
-    double t_ms = touch.timestamp * 1000.0;
-    if (phase == 1) {
-        float dt = (float)(t_ms - _ptrLastT);
-        if (dt < 1.0f) dt = 1.0f;
-        if (dt > 100.0f) dt = 100.0f;
-        float v = (ly - _ptrLastY) / dt;
-        if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
-        if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
-        _flingVy = v;
-        _ptrLastY = ly;
-        _ptrLastT = t_ms;
+    for (UITouch *touch in touches) {
+        CGPoint p = [touch locationInView:self];
+        float lx = (float)(p.x - safe.left);
+        float ly = (float)(p.y - safe.top);
+        unsigned int pid = maruPointerId(touch);
+        double t_ms = touch.timestamp * 1000.0;
+        // **본문 관성만 우리 몫이다**(§3.1 — 코어에 시계가 없다). 소유자의 이동만 속도로 친다.
+        if (phase == 0 && !_hasBodyPtr) { _bodyPtrId = pid; _hasBodyPtr = YES; _flingVy = 0; _ptrLastY = ly; _ptrLastT = t_ms; }
+        if (phase == 1 && _hasBodyPtr && pid == _bodyPtrId) {
+            float dt = (float)(t_ms - _ptrLastT);
+            if (dt < 1.0f) dt = 1.0f;
+            if (dt > 100.0f) dt = 100.0f;
+            float v = (ly - _ptrLastY) / dt;
+            if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
+            if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
+            _flingVy = v;
+            _ptrLastY = ly;
+            _ptrLastT = t_ms;
+        }
+        maru_mobile_pointer(phase, pid, lx, ly, (unsigned long long)t_ms);
     }
-    if (phase == 0) { _flingVy = 0; _ptrLastY = ly; _ptrLastT = t_ms; }
-    maru_mobile_pointer(phase, maruPointerId(touch), lx, ly, (unsigned long long)(touch.timestamp * 1000.0));
+}
+
+/// 소유 손가락이 떼졌을 때 **남은 손가락으로 기준을 다시 잡고 속도를 버린다** — 본문 관성이
+/// host 몫이라 여기서 한다(AOSP `ScrollView.onSecondaryPointerUp` 과 같은 자리).
+- (void)rebaseBodyAfterEnded:(NSSet<UITouch *> *)ended event:(UIEvent *)event {
+    if (!_hasBodyPtr) return;
+    BOOL ownerEnded = NO;
+    for (UITouch *t in ended) if (maruPointerId(t) == _bodyPtrId) ownerEnded = YES;
+    if (!ownerEnded) return;
+    _hasBodyPtr = NO;
+    UIEdgeInsets safe = self.safeAreaInsets;
+    for (UITouch *t in event.allTouches) {
+        if (t.phase == UITouchPhaseEnded || t.phase == UITouchPhaseCancelled) continue;
+        _bodyPtrId = maruPointerId(t);
+        _hasBodyPtr = YES;
+        _ptrLastY = (float)([t locationInView:self].y - safe.top);
+        _ptrLastT = t.timestamp * 1000.0;
+        _flingVy = 0; // 불연속이 fling 이 되지 않게
+        break;
+    }
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    UITouch *touch = touches.anyObject;
-    CGPoint p = [touch locationInView:self];
+    // **제스처가 이미 잡혀 있으면 목적지를 다시 정하지 않는다.** 그 제스처의 나머지 손가락은
+    // 같은 곳으로 간다(Android 와 같은 규칙) — 손가락마다 다른 표면으로 보내면 키바를 밀면서
+    // 본문을 스크롤하는 상태가 생긴다.
+    if (_chromeActive) { [self routeChrome:0 touches:touches]; return; }
+    if (_keybarActive) { [self routeKeybar:0 touches:touches]; return; }
+    if (_hasBodyPtr) { [self sendPointer:0 touches:touches]; return; }
+
+    UITouch *first = touches.anyObject; // 아직 제스처가 없다 — 이 이벤트의 아무 손가락이 첫 손가락이다
+    if (!first) return;
+    CGPoint p = [first locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
     // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
     // **밀린 화면이 가장 먼저다.** 설정이 올라와 있으면 그 아래 키바·본문은 없는 것과 같다.
-    if (maru_mobile_chrome_pointer(0, maruPointerId(touch), lx, ly)) {
+    if (maru_mobile_chrome_pointer(0, maruPointerId(first), lx, ly)) {
         _chromeActive = YES;
         return;
     }
     // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
     // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
-    if (maru_mobile_keybar_pointer(0, maruPointerId(touch), lx, ly)) {
+    if (maru_mobile_keybar_pointer(0, maruPointerId(first), lx, ly)) {
         _keybarActive = YES;
         return;
     }
@@ -367,6 +399,14 @@ static unsigned int maruPointerId(UITouch *t) {
     _keybarActive = NO;
 }
 
+/// **본문 제스처 잡음도 푼다.** T3 가 `_hasBodyPtr` 을 들이면서 정리할 자리가 하나 늘었다 —
+/// 안 풀면 복귀 후 `touchesBegan` 이 "이미 본문 제스처가 있다" 로 보고 목적지를 다시 안 정해
+/// **키바·설정이 영영 안 눌린다**(뗀 적 없이 끝나는 경우가 배경 전환이다).
+- (void)releaseBodyGrab {
+    _hasBodyPtr = NO;
+    _flingVy = 0;
+}
+
 /// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
 /// 밀린 화면(설정)이 잡고 있는 동안의 나머지 위상. 키바와 같은 모양이다.
 /// 배경 전환처럼 **뗀 적 없이 끝나는** 경우에 뷰 쪽 잡음을 푼다(브리지 쪽은 호출자가 푼다).
@@ -376,22 +416,28 @@ static unsigned int maruPointerId(UITouch *t) {
 
 - (BOOL)routeChrome:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     if (!_chromeActive) return NO;
-    UITouch *touch = touches.anyObject;
-    CGPoint p = [touch locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
-    maru_mobile_chrome_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
-    if (phase >= 2) _chromeActive = NO;
+    for (UITouch *touch in touches) {
+        CGPoint p = [touch locationInView:self];
+        maru_mobile_chrome_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
+    }
     return YES;
 }
 
 - (BOOL)routeKeybar:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     if (!_keybarActive) return NO;
-    UITouch *touch = touches.anyObject;
-    CGPoint p = [touch locationInView:self];
     UIEdgeInsets safe = self.safeAreaInsets;
-    maru_mobile_keybar_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
-    if (phase >= 2) {
-        _keybarActive = NO;
+    for (UITouch *touch in touches) {
+        CGPoint p = [touch locationInView:self];
+        maru_mobile_keybar_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
+    }
+    return YES;
+}
+
+/// 키바 제스처가 **끝났을 때** 한 번. 손가락마다 부르면 복사가 여러 번 나간다.
+- (void)finishKeybarGesture {
+    _keybarActive = NO;
+    {
         NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
         // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
         // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3: 브리지엔 OS 호출이 없다).
@@ -407,7 +453,6 @@ static unsigned int maruPointerId(UITouch *t) {
             NSLog(@"MARU_COPY len=%u", cn);
         }
     }
-    return YES;
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -416,18 +461,48 @@ static unsigned int maruPointerId(UITouch *t) {
     [self sendPointer:1 touches:touches];
 }
 
+/// 이 이벤트 뒤에도 **닿아 있는 손가락이 남아 있나.** 제스처의 끝은 마지막 손가락이 떼질
+/// 때다 — 손가락마다 끝내면 둘째가 떼는 순간 첫 손가락이 잡고 있던 것이 풀린다.
+- (BOOL)anyTouchRemains:(UIEvent *)event {
+    for (UITouch *t in event.allTouches) {
+        if (t.phase != UITouchPhaseEnded && t.phase != UITouchPhaseCancelled) return YES;
+    }
+    return NO;
+}
+
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if ([self routeChrome:2 touches:touches]) return;
-    if ([self routeKeybar:2 touches:touches]) return;
+    BOOL last = ![self anyTouchRemains:event];
+    if (_chromeActive) {
+        [self routeChrome:2 touches:touches];
+        if (last) _chromeActive = NO;
+        return;
+    }
+    if (_keybarActive) {
+        [self routeKeybar:2 touches:touches];
+        if (last) [self finishKeybarGesture];
+        return;
+    }
     [self sendPointer:2 touches:touches];
+    [self rebaseBodyAfterEnded:touches event:event];
+    if (last) _hasBodyPtr = NO;
     NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
           maru_mobile_view_offset(), maru_mobile_has_selection());
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if ([self routeChrome:3 touches:touches]) return;
-    if ([self routeKeybar:3 touches:touches]) return;
-    [self sendPointer:3 touches:touches];
+    // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지에 한 번 보내고 제스처를 통째로 끝낸다.
+    if (_chromeActive) {
+        maru_mobile_chrome_pointer(3, 0, 0, 0);
+        _chromeActive = NO;
+        return;
+    }
+    if (_keybarActive) {
+        maru_mobile_keybar_pointer(3, 0, 0, 0);
+        _keybarActive = NO;
+        return;
+    }
+    maru_mobile_pointer(3, 0, 0, 0, 0);
+    _hasBodyPtr = NO;
     _flingVy = 0;
     // **취소도 남긴다.** 로그가 없어서 "배경으로 나갈 때 iOS 가 취소를 보내는가" 를 두 번
     // 헛짚었다 — 보내고 있었는데 그 사실이 안 보였다.
@@ -913,6 +988,11 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // `UIPanGestureRecognizer` 를 임시로 붙여도 한 번도 안 불렸다. 그래서 이 자리는 사람이
     // 시뮬레이터에서 밀어 보는 것이 유일한 판정이다([검증 행렬](../../../docs/verification-matrix.md)
     // 의 "iOS 여러 줄 선택 드래그" 와 같은 부류다).
+    // **멀티터치를 켠다**(T3). 기본값이 `NO` 라 이 뷰는 손가락 하나만 받고 있었다 — 둘째
+    // 손가락은 `touchesBegan:` 조차 안 왔다. 켜는 순간 `touches` 에 여럿이 들어오므로
+    // **`anyObject` 를 쓰는 자리를 한 곳도 남기면 안 된다**(그 순간 진짜로 임의 선택이 된다).
+    self.multipleTouchEnabled = YES;
+
     UIScreenEdgePanGestureRecognizer *edge =
         [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(maruEdgeBack:)];
     edge.edges = UIRectEdgeLeft;
@@ -1137,6 +1217,7 @@ static void loadConfigFile(void);
     [(ChromeView *)self.window.rootViewController.view stopFlingForBackground];
     [(ChromeView *)self.window.rootViewController.view releaseKeybarGrab];
     [(ChromeView *)self.window.rootViewController.view releaseChromeGrab];
+    [(ChromeView *)self.window.rootViewController.view releaseBodyGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
     // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.

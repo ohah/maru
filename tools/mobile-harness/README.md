@@ -66,8 +66,15 @@ gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL �
 닿는데(로그로 확인) 인식기는 한 번도 안 불렸다 — 가장자리 조건을 뺀 평범한
 `UIPanGestureRecognizer` 를 임시로 붙여 갈랐다. `--delta` 를 줘도 같았다.
 
-**CGEvent 로 보낸 진짜 마우스 드래그는 된다.** Simulator 가 그것을 정상 터치로 바꿔 주므로
-인식기가 걸린다:
+**CGEvent 로 보낸 진짜 마우스 드래그는 터치로는 닿는다** — 탭·스크롤은 확실히 동작한다
+(`MARU_TOUCH`·`MARU_SCROLL` 로 확인). **다만 제스처 인식기는 한 번 걸린 뒤로 재현이 안 됐다**:
+좌측 가장자리 뒤로가기가 `MARU_NAV edge_back popped=1` 로 한 번 찍혔고, 그 뒤 같은 명령을
+여러 좌표(x=1~15, y=300~443)로 반복해도 인식기가 어떤 상태에도 안 들어갔다. **T3 를 빼고
+빌드해도 같았다** — 코드 변경 탓이 아니라 **이 방법 자체가 불안정하다**. 인식기 경로는 여전히
+사람이 미는 것이 유일하게 믿을 수 있는 판정이다.
+
+또 하나: **화면 가장자리(앱 좌표 x ≲ 4)의 터치는 시스템이 통째로 먹는다** — 앱에 아무 로그도
+안 남는다. 가장자리를 겨눌 때 이걸 모르면 "코드가 죽었다" 로 오해한다.
 
 ```sh
 swift tools/mobile-harness/sim_input.swift drag 3 480 240 480   # 좌측 가장자리 뒤로가기

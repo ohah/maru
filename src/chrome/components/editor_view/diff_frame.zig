@@ -39,6 +39,8 @@ pub const Props = struct {
     right: Side,
     /// 두 열이 **공유하는** 세로 위치(행 인덱스).
     first_line: usize = 0,
+    /// 첫 행에서 건너뛸 **조각 수**(§4.1d). 세로를 공유하므로 좌우 공통이다.
+    first_piece: u32 = 0,
     wrap: bool = false,
     tab_width: u8 = 4,
     /// 내용이 설 사각(호출자가 여백을 이미 반영해 넘긴다).
@@ -55,6 +57,9 @@ pub const Written = struct {
     ops: usize,
     /// 두 열 중 **더 긴 쪽**의 문서 시각 행 수. 세로를 공유하므로 스크롤 상한은 긴 쪽이 정한다.
     total_visual_rows: u32,
+    /// 스크롤 상한 `(줄, 조각)` — 세로를 공유하므로 **더 긴 쪽**이 정한다(§4.1d).
+    max_top_line: usize = 0,
+    max_top_piece: u32 = 0,
     visual_rows: usize,
     truncated: bool,
     /// 오른쪽 열이 시작하는 x. **아직 소비처가 없다** — 히트테스트(어느 열을 눌렀나)가 붙을 때
@@ -116,6 +121,9 @@ pub fn sideMetrics(inner_w: u32, inner_h: u32, cell_w_px: u16, cell_h_px: u16) S
 /// 두 열이 함께 쓰는 값. 열 하나만 그리는 호출자(단일 편집기)도 이것을 쓴다.
 pub const Shared = struct {
     first_line: usize = 0,
+    /// 첫 논리 줄에서 건너뛸 **조각 수**(§4.1d). 세로를 공유하므로 이것도 좌우 공통이다 —
+    /// 같은 시각 행에서 시작해야 같은 줄이 같은 높이에 선다.
+    first_piece: u32 = 0,
     wrap: bool = false,
     tab_width: u8 = 4,
     cell_w_px: u16,
@@ -135,6 +143,7 @@ pub fn buildSide(
     return frame.build(.{
         .lines = side.lines,
         .first_line = shared.first_line,
+        .first_piece = shared.first_piece,
         .first_col = side.first_col,
         .total_lines = side.total_lines orelse side.lines.len,
         .line_numbers = side.numbers,
@@ -193,6 +202,7 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
 
     const shared: Shared = .{
         .first_line = props.first_line,
+        .first_piece = props.first_piece,
         .wrap = props.wrap,
         .tab_width = props.tab_width,
         .cell_w_px = props.cell_w_px,
@@ -217,8 +227,13 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     // 전진 복사가 안전하다(왼쪽이 저장소 절반을 다 쓰지 않는 한 겹치지도 않는다).
     const moved = @min(rw.ops, scratch.ops.len -| lw.ops);
     std.mem.copyForwards(draw.Op, scratch.ops[lw.ops..][0..moved], half.second.ops[0..moved]);
+    // **상한은 더 긴 쪽이 정한다.** 세로를 공유하므로 짧은 쪽 기준으로 멈추면 긴 쪽의 끝을 못 본다
+    // (`total_visual_rows`를 `@max`로 잡는 것과 같은 이유).
+    const longer = if (rw.total_visual_rows > lw.total_visual_rows) rw else lw;
     return .{
         .total_visual_rows = @max(lw.total_visual_rows, rw.total_visual_rows),
+        .max_top_line = longer.max_top_line,
+        .max_top_piece = longer.max_top_piece,
         .ops = lw.ops + moved,
         .visual_rows = @max(lw.visual_rows, rw.visual_rows),
         .truncated = lw.truncated or rw.truncated or moved < rw.ops,

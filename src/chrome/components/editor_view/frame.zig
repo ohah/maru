@@ -159,11 +159,25 @@ pub const Scratch = struct {
     count_scratch: []u8,
 };
 
+/// 스크롤 상한 한 쌍. 익명 struct로 두면 분기마다 타입이 갈린다.
+pub const MaxTop = struct { line: usize, piece: u32 };
+
 pub const Written = struct {
     ops: usize,
     /// **문서 전체**의 시각 행 수(랩 포함). 스크롤 입력이 "이 문서가 화면에 다 들어가는가"를 이 값으로
     /// 판정한다 — 논리 줄 수로는 랩된 문서에서 그 판정이 틀린다(입력 쪽이 접힘을 모른다).
     total_visual_rows: u32,
+    /// 스크롤 **상한** `(줄, 조각)` — 맨 아래에서 한 화면을 채우는 위치(§4.1d).
+    ///
+    /// **입력이 이것을 읽는다.** 입력 쪽에서 구하려면 문서 끝에서 거꾸로 조각을 누적해야 하는데
+    /// clamp는 매 프레임 돌아 그때마다 수십~수백 줄을 다시 조각내게 된다. 여기서는 이미 센
+    /// `row_counts`를 뒤에서부터 훑기만 하면 된다. `total_visual_rows`를 싣는 것과 같은 관례다.
+    ///
+    /// 문서가 화면에 다 들어가면 `(0, 0)`이다. 호출자가 `total_visual_rows`를 미리 줘 계수를
+    /// 건너뛰었으면 줄별 조각 수를 모르므로 **논리 줄 하나 = 한 행**으로 근사한다(그 경우 랩이
+    /// 없다는 뜻이거나, 근사가 허용되는 자리다 — 같은 근사를 `total_visual`도 쓴다).
+    max_top_line: usize,
+    max_top_piece: u32,
     /// 실제로 그린 시각 행 수. 호출자가 스크롤 clamp에 쓴다.
     visual_rows: usize,
     /// 저장소가 모자라 잘린 몫이 있는가. 캡처에는 빈 자리로 나타난다.
@@ -290,6 +304,21 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **quad로 낸다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`) 이 밴드는 gutter와
     // 스크롤바 자리까지 덮어 격자 밖으로 나간다 — 배경(`surface`)이 같은 이유로 quad인 것과 같다.
     // 글자는 셀 파이프라인이라 늘 quad 위에 그려진다.
+    // **스크롤 상한을 여기서 센다**(§4.1d) — 문서 끝에서 거꾸로 한 화면을 채운다.
+    const max_top: MaxTop = blk: {
+        const visible: u32 = @max(visual_budget, 1);
+        if (total_visual <= visible) break :blk .{ .line = 0, .piece = 0 };
+        var need: u32 = visible;
+        var i: usize = props.lines.len;
+        while (i > 0) {
+            i -= 1;
+            const rows: u32 = if (i < counted_rows) scratch.row_counts[i] else 1; // 못 센 줄은 1행 근사
+            if (rows >= need) break :blk .{ .line = i, .piece = rows - need };
+            need -= rows;
+        }
+        break :blk .{ .line = 0, .piece = 0 };
+    };
+
     const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
 
     const sw = scrollbar.build(.{
@@ -310,6 +339,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
 
     return .{
         .total_visual_rows = total_visual,
+        .max_top_line = max_top.line,
+        .max_top_piece = max_top.piece,
         .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,

@@ -141,9 +141,10 @@
 구조적 해결(Zed·xi 계열 열↔byte 인덱스)은
 [native-editor-visual-mapping.md](native-editor-visual-mapping.md) §4.1c가 소유한다.
 
-**남는 것은 세로 축이다.** 랩된 긴 줄을 조각 단위로 스크롤하지 못해(`first_piece` 미구현) **한 줄짜리
-문서는 세로로 전혀 못 움직인다**(20만 자 한 줄 = 시각 행 2,248개, 실측). 그 임계는 그 슬라이스가
-정한다 — [plans/native-editor.md](plans/native-editor.md) 잔여 표.
+**세로 축도 닫혔다(2026-08-16).** 조각 단위 스크롤(`first_piece`)이 붙어 한 줄짜리 문서도 움직인다 —
+근거와 설계는 [native-editor-visual-mapping.md](native-editor-visual-mapping.md) §4.1d가 소유한다.
+**남는 것은 그 상태에서 이어진 조각의 글자 강조가 비는 것**이고(조각의 시작 열이 필요하다) 그것은
+§4.1c의 열↔byte 인덱스와 같은 자리다.
 
 ### 10.1 관측 가능성과 민감정보
 

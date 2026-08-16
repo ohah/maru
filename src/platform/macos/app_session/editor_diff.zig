@@ -148,6 +148,10 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // 아무 글자도 안 남는다. 최대 열 캐시는 옛 내용의 것이라 함께 버린다(다음 가로 휠이 다시 센다).
     term.rt.editor_first_col = 0;
     term.rt.editor_max_cols = 0;
+    // 조각 오프셋과 렌더가 실어 둔 상한도 옛 내용의 것이다(§4.1d).
+    term.rt.editor_first_piece = 0;
+    term.rt.editor_max_top_line = 0;
+    term.rt.editor_max_top_piece = 0;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.

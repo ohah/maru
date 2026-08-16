@@ -543,7 +543,7 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
     if (term.rt.editor_first_col != 0 and !(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap)) {
         // 최대 열은 위치가 0이 아닌 이상 이미 세어져 있다(`scrollCols`가 세운다). 방어적으로만 본다.
         const visible_cols = visibleCols(self, body, term);
-        const max_col: u32 = term.rt.editor_max_cols -| visible_cols;
+        const max_col: u32 = @min(term.rt.editor_max_cols -| visible_cols, @as(u32, chrome_editor.frame.max_first_col));
         if (@as(u32, term.rt.editor_first_col) > max_col) {
             term.rt.editor_first_col = @intCast(@min(max_col, std.math.maxInt(u16)));
             self.metal_dirty = true;
@@ -596,7 +596,8 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
         return false;
     }
 
-    const max_first: u32 = term.rt.editor_max_cols - visible;
+    // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
+    const max_first: u32 = @min(term.rt.editor_max_cols - visible, @as(u32, chrome_editor.frame.max_first_col));
     const current: i64 = term.rt.editor_first_col;
     const next = std.math.clamp(current - @as(i64, cols), 0, @as(i64, max_first));
     const clamped: u16 = @intCast(@min(next, std.math.maxInt(u16)));
@@ -1960,4 +1961,79 @@ fn monotonicMsForTest() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
+    // `expandTabs`는 화면 시작 열(`first_col`)까지 **훑고 버린다**. 그러면 오른쪽으로 갈수록 매
+    // 프레임 비용이 커진다 — 긴 줄에서 계속 밀면 점점 뻑뻑해지는 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+
+    // **ASCII만이면 `expandTabs`가 원본을 그대로 빌려줘 O(1)이다** — 그 길을 타면 이 측정이 아무것도
+    // 말하지 않는다(처음에 그렇게 재고 "평평하다"고 오판할 뻔했다). 앞에 2칸 글자를 하나 둔다.
+    const long = try allocator.alloc(u8, 200_000);
+    defer allocator.free(long);
+    @memset(long, 'x');
+    @memcpy(long[0..3], "한");
+    const many = try allocator.alloc([]const u8, 60);
+    defer allocator.free(many);
+    for (many) |*l| l.* = long;
+    fx.term.rt.editor_lines = many;
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0;
+
+    // **최대 열을 세워 두지 않으면 clamp가 매번 0으로 되돌린다** — 그러면 네 측정이 전부 같은
+    // 조건이 되어 "평평하다"는 오판이 나온다(실제로 한 번 그렇게 읽을 뻔했다).
+    _ = scrollCols(fx.session, fx.term, leaf, -1);
+    try testing.expect(fx.term.rt.editor_max_cols > 100_000);
+
+    for ([_]u16{ 0, 20_000, 60_000 }) |col| {
+        fx.term.rt.editor_first_col = col;
+        // 한 번 그려 캐시·경로를 덥힌 뒤 잰다.
+        var warm = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+        warm.dl.deinit(allocator);
+
+        const t0 = monotonicMsForTest();
+        var n: usize = 0;
+        while (n < 4) : (n += 1) {
+            var d = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+            d.dl.deinit(allocator);
+        }
+        const t1 = monotonicMsForTest();
+        std.debug.print("\n[측정] first_col={d}(그린 값 {d}): 4프레임 {d}ms\n", .{ col, fx.term.rt.editor_first_col, t1 - t0 });
+        // 고치기 전 60,000열은 4프레임에 **약 2초**였다. 재앙 감지선이지 예산이 아니다.
+        try testing.expect(t1 - t0 < 500);
+    }
+}
+
+test "가로 스크롤에 §3.8 상한이 있다 — 무한히 밀리지 않는다" {
+    // 렌더 비용이 **밀린 거리**에 비례하므로(그 상수의 doc) 상한 없이는 초장문 줄에서 프레임이
+    // 죽는다. 구조적 해결(열↔byte 인덱스)이 오면 이 상한은 없어진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // 상한보다 **훨씬** 긴 줄 — 아니면 상한이 걸리는지 알 수 없다.
+    const lines = try hscrollFixtureLines(allocator, &fx, @as(usize, chrome_editor.frame.max_first_col) * 5);
+    const long_buf = lines[1];
+    defer allocator.free(long_buf);
+    defer allocator.free(lines);
+
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000));
+    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+
+    // 그리기 직전 되돌림도 같은 상한을 쓴다 — 두 곳이 갈리면 프레임마다 값이 튄다.
+    var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
 }

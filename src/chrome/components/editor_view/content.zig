@@ -517,8 +517,8 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
     const stop_width = if (tab_width == 0) 1 else tab_width;
     var used: usize = 0;
     var col: usize = 0;
-
     var i: usize = 0;
+
     while (i < bytes.len) {
         // **보이지 않을 부분은 만들지 않는다.** 렌더러가 `max_cols`로 자르므로 그 너머는 화면에
         // 닿지 않는다 — 여기서 멈추면 비용이 **줄 길이가 아니라 화면 폭에 비례**한다.
@@ -532,6 +532,24 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
         // **scratch 사용량에 상한이 생겨 OutOfSpace가 구조적으로 사라진다.** §3.8의 "초장문 줄 축소"가
         // 요구하는 기능 축소는 별개이며(임계는 §10에서 잰다), 이 상한은 임계 없이도 서는 장치다.
         if (col >= range.stop()) break;
+
+        // **화면 시작 열 앞의 출력 가능한 ASCII는 지나가기만 한다.** 그 구간은 어차피 아무것도
+        // 내보내지 않는데, 아래 경로는 글자마다 cluster 분절과 §3.8 훑기를 돈다 — 비용이 화면 폭이
+        // 아니라 **밀린 거리**에 비례한다. 20만 자 한 줄에서 `first_col`이 60,000이면 **프레임당
+        // 498ms**였다(Debug, macOS arm64. 적대적 검증 2026-08-16이 재고 고쳤다. 이 파일 위 주석이
+        // 예언해 둔 그 비용이고, 가로 스크롤 입력이 붙으면서 실제가 됐다).
+        //
+        // cluster를 늘리는 것은 전부 0x80 이상이라 다음 바이트만 보면 한 글자임이 **증명된다**
+        // (`stepColumn`의 같은 판정). 탭·§3.8 문자는 이 범위 밖이라 아래 경로가 그대로 맡는다.
+        if (col < range.start) {
+            const b = bytes[i];
+            if (b >= 0x20 and b < 0x7F and (i + 1 >= bytes.len or bytes[i + 1] < 0x80)) {
+                i += 1;
+                col += 1;
+                continue;
+            }
+        }
+
         if (bytes[i] == '\t') {
             const stop = ((col / stop_width) + 1) * stop_width;
             // **가로로 밀린 만큼은 만들지 않는다.** 탭은 공백이라 걸쳐도 잘라 낼 수 있다 —
@@ -1691,5 +1709,49 @@ test "lineColumns가 실제 전개와 같은 열 수를 준다 — 탭·2칸 글
     }) |line| {
         const e = expandTabs(line, 4, &scratch, .{ .count = std.math.maxInt(u32) });
         try std.testing.expectEqual(columnsOf(e.text), lineColumns(line, 4));
+    }
+}
+
+test "가로로 민 전개가 앞을 잘라 편 것과 같다 — 건너뛰기가 결과를 바꾸면 안 된다" {
+    // `expandTabs`는 화면 시작 열 앞을 **지나가기만** 한다. 그 구간에서 출력 가능한 ASCII를
+    // 한 바이트씩 건너뛰는 지름길을 넣었는데(가로로 멀리 밀면 프레임당 498ms였다), 빠르면서 틀리면
+    // 최악이다. **앞을 실제로 잘라 편 것**과 대조한다.
+    //
+    // 탭이 없는 줄만 본다 — 탭스톱은 절대 열에 걸리므로 앞을 자르면 정의상 달라진다.
+    var prng = std.Random.DefaultPrng.init(0x5c0117);
+    const rnd = prng.random();
+    const vocab = [_][]const u8{ "a", "z", " ", "한", "😀", "\u{202E}", "\u{200D}", "e\u{0301}" };
+    var round: usize = 0;
+    while (round < 400) : (round += 1) {
+        var line: [256]u8 = undefined;
+        var n: usize = 0;
+        var pieces = rnd.uintLessThan(usize, 40);
+        while (pieces > 0 and n + 8 < line.len) : (pieces -= 1) {
+            const w = vocab[rnd.uintLessThan(usize, vocab.len)];
+            @memcpy(line[n..][0..w.len], w);
+            n += w.len;
+        }
+        const bytes = line[0..n];
+        const start: u16 = @intCast(rnd.uintAtMost(usize, 40));
+        const count: u32 = rnd.uintAtMost(u32, 30) + 1;
+
+        var a_buf: [1024]u8 = undefined;
+        const got = expandTabs(bytes, 4, &a_buf, .{ .start = start, .count = count });
+
+        // 참조: `start` 열까지 한 걸음씩 지나 그 byte에서 자른 뒤, 처음부터 편다.
+        var ref_i: usize = 0;
+        var ref_col: u32 = 0;
+        while (ref_i < bytes.len and ref_col < start) {
+            const s = stepColumn(bytes, ref_i, ref_col, 4);
+            ref_i = s.next_byte;
+            ref_col = s.next_col;
+        }
+        // 걸쳐서 `start`를 넘어섰으면 잘라 낸 쪽과 남긴 쪽이 다를 수 있다 — 그건 계약이 정한
+        // 경계 처리라 이 대조의 대상이 아니다.
+        if (ref_col != start) continue;
+        var b_buf: [1024]u8 = undefined;
+        const ref = expandTabs(bytes[ref_i..], 4, &b_buf, .{ .start = 0, .count = count });
+
+        try std.testing.expectEqualStrings(ref.text, got.text);
     }
 }

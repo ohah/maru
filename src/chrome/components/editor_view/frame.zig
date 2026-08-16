@@ -41,6 +41,22 @@ pub fn contentRect(rect: draw.Rect) draw.Rect {
     return rect.inset(.{ .left = e, .right = e, .top = e, .bottom = e });
 }
 
+/// 가로로 밀 수 있는 **최대 열**. §3.8의 "초장문·극단 입력에서 기능을 줄인다"를 이 축에 적용한 값이다.
+///
+/// **왜 상한이 필요한가**: 렌더는 화면 시작 열까지 줄을 지나며 버리는데(`content.expandTabs`), 그
+/// 비용이 화면 폭이 아니라 **밀린 거리**에 비례한다. 20만 자 한 줄에서 60,000열까지 밀면 고치기 전
+/// 프레임당 498ms였다(적대적 검증 2026-08-16 실측, Debug/arm64). 출력 가능한 ASCII를 싸게 건너뛰어
+/// 13.6ms까지 줄였지만 **여전히 거리에 비례한다** — 상수 배 개선이지 구조가 바뀐 것이 아니다.
+///
+/// **업계도 대체로 상한을 둔다**: Monaco는 `stopRenderingLineAfter`(기본 10,000자)를 넘으면 렌더를
+/// 멈추고, Emacs는 `so-long` 모드로 기능을 끄며, Vim은 `synmaxcol`을 둔다. "긴 줄을 제대로 처리한다"가
+/// 아니라 "긴 줄에서는 줄인다"가 흔한 답이다.
+///
+/// **구조적 해결은 열↔byte 인덱스다**(Zed·xi 계열의 rope + 노드별 집계). 그것이 들어오면 이 상한은
+/// 없어진다 — 그 자리는 [visual-mapping §4.1c](../../../../docs/native-editor-visual-mapping.md)가
+/// 소유하고, 폭 합 캐시와 같은 슬라이스에 있다.
+pub const max_first_col: u16 = 10_000;
+
 /// 탭 한 칸이 몇 열인가. **여기가 단일 출처다** — 제품은 아직 config로 이 값을 안 받고 이 기본을
 /// 그대로 쓰는데, 가로 스크롤 상한을 세는 쪽이 다른 값을 쓰면 가장 긴 줄의 끝에 못 닿는다.
 pub const default_tab_width: u8 = 4;

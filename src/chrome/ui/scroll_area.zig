@@ -355,11 +355,17 @@ pub const Touch = struct {
     /// **여기서도 속도를 잰다.** 프레임 경계에서만 재면, 손짓이 통째로 한 프레임 안에서
     /// 끝나는 **빠른 flick 이 속도 0 이 된다** — 정확히 가장 세게 민 손짓이 아무 일도 안 하는
     /// 것이다(30Hz 기기에서는 흔하다).
+    ///
+    /// **다만 덮어쓰지는 않는다.** 프레임 경계에서 이미 잰 값이 있는데 떼기 직전 1px 짜리
+    /// 조각이 하나 더 오면, 그 조각으로 갈아치울 때 속도가 서른 배 준다(실측 -1.875 → -0.0625).
+    /// 세게 민 손짓일수록 이 모양이 나온다. 그래서 **더 빠른 쪽만 취한다** — 반대쪽(가만히
+    /// 들고 있다 떼기)은 `step` 이 매 프레임 속도를 0 으로 만들어 두므로 안 흘러간다.
     pub fn end(self: *Touch, dt_ms: f32) void {
         self.active = false;
         if (self.frame_travel != 0) {
             const dt = std.math.clamp(dt_ms, 1, 100);
-            self.velocity = std.math.clamp(self.frame_travel / dt, -max_velocity, max_velocity);
+            const tail = std.math.clamp(self.frame_travel / dt, -max_velocity, max_velocity);
+            if (@abs(tail) > @abs(self.velocity)) self.velocity = tail;
             self.frame_travel = 0;
         }
     }
@@ -895,4 +901,37 @@ test "Touch: 속도에 상한이 있다" {
     t.move(&st, -100_000, 1_000_000); // 한 이벤트에 10만 px
     t.end(16);
     try std.testing.expect(@abs(t.velocity) <= Touch.max_velocity);
+}
+
+// **떼기 직전의 작은 표본 하나가 flick 을 죽이면 안 된다.** 프레임 경계에서 잰 속도가 있는데
+// 그 뒤에 1~2px 짜리 move 하나가 더 오고 손을 떼면, 그 조각으로 덮어쓰면 속도가 열 배 넘게
+// 준다(꼬리가 충분히 작으면 `stop_below` 아래로 떨어져 관성이 아예 안 붙는다). 세게 민 손짓일수록
+// 이 모양이 나온다. Flutter·RN 이 창(window) 위에서 재는 이유가 이것이다.
+test "Touch: 떼기 직전 작은 표본이 flick 을 죽이지 않는다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(1000);
+    t.move(&st, 985, 100_000); // 한 프레임에 30px
+    t.move(&st, 970, 100_000);
+    _ = t.step(&st, 100_000, 16); // 프레임 경계 — 여기서 1.875px/ms 로 잰다
+    const sampled = t.velocity;
+    try std.testing.expect(@abs(sampled) > 1.5);
+
+    t.move(&st, 969, 100_000); // 떼기 직전 1px 짜리 꼬리
+    t.end(16);
+    try std.testing.expectEqual(sampled, t.velocity);
+}
+
+// 반대쪽도 지킨다: **가만히 들고 있다 떼면 안 미끄러진다.** 위 규칙을 "큰 쪽을 남긴다" 로
+// 잘못 만들면 옛 속도가 살아남아 손을 멈췄는데도 흘러간다.
+test "Touch: 멈춘 채로 떼면 관성이 없다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(1000);
+    t.move(&st, 950, 100_000);
+    _ = t.step(&st, 100_000, 16);
+    var f: u32 = 0;
+    while (f < 10) : (f += 1) _ = t.step(&st, 100_000, 16); // 손가락은 가만히
+    t.end(16);
+    try std.testing.expectEqual(@as(f32, 0), t.velocity);
 }

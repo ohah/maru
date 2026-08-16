@@ -1732,6 +1732,10 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
             maru_mobile_chrome_pointer(3, 0, 0);
             g.chrome_active = 0;
             g.keybar_active = 0;
+            // **본문 관성도 거둔다**(iOS 와 같은 자리). 브리지가 아니라 우리가 든 값이라 위
+            // 취소로 안 지워지고, 감쇠가 시간 기준이라 남겨 두면 복귀 프레임이 튄다.
+            g.fling_vy = 0.0f;
+            g.fling_t = 0.0;
         }
         pthread_mutex_unlock(&g_bridge_lock);
         return;

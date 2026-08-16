@@ -429,6 +429,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 /// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
+/// 배경으로 나갈 때 관성을 거둔다 — 시각도 함께 지워 복귀 프레임이 "멈춰 있던 시간"을
+/// dt 로 쓰지 않게 한다.
+- (void)stopFlingForBackground {
+    _flingVy = 0;
+    _flingT = 0;
+}
+
 - (void)stepFling {
     // **간격은 안 흐를 때도 재 둔다** — 안 그러면 관성이 시작된 첫 프레임의 dt 가 "멈춰 있던
     // 시간" 이 되어 한 번에 튄다.
@@ -1087,6 +1094,10 @@ static void loadConfigFile(void);
     // 톱니를 누른 채 홈으로 나갔다 오면 `_chromeActive` 가 남아 **복귀 후 첫 손짓이 통째로
     // 삼켜졌다**(iOS 는 배경 전환에 touchesCancelled 를 안 보낸다 — 위 주석).
     maru_mobile_chrome_pointer(3, 0, 0);
+    // **본문 관성도 거둔다.** 이건 브리지가 아니라 우리가 든 값이라 위 취소로 안 지워진다.
+    // 감쇠가 시간 기준이 된 뒤로는 남겨 두면 복귀 프레임의 dt 가 "배경에 있던 시간"이 되어
+    // (상한 100ms 로 잘려도) 화면이 한 번에 튄다.
+    [(ChromeView *)self.window.rootViewController.view stopFlingForBackground];
     [(ChromeView *)self.window.rootViewController.view releaseKeybarGrab];
     [(ChromeView *)self.window.rootViewController.view releaseChromeGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드

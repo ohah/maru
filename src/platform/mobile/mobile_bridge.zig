@@ -2044,15 +2044,25 @@ const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 �
 /// 18 은 26px 줄에 맞춰 고른 값이라 44 줄에서는 작아 보였다(실제 하단 바는 24~28 을 쓴다).
 const status_icon_px: i32 = 24;
 const icon_slot_px = 32;
-/// 6 = chrome 헤더(git·gear·plus·search·bell·collapse), +4 = 보조 키바 방향키.
+/// 1 = 하단 바(톱니), +4 = 보조 키바 방향키.
 /// 하단 바 아이콘. **이 배열이 개수의 출처다**(`status_icon_count`).
-const status_cps = [_]u32{
-    maru.icons.codepoint(.git_branch),
-    maru.icons.codepoint(.gear),
-    maru.icons.codepoint(.plus),
-    maru.icons.codepoint(.search),
-    maru.icons.codepoint(.bell),
-    maru.icons.codepoint(.sidebar_collapse),
+///
+/// **톱니 하나뿐이다.** 나머지 다섯(git·plus·search·bell·collapse)은 데스크톱 chrome 헤더에서
+/// 따라온 것이고 **배선이 없었다** — 히트 rect 를 세우는 코드가 톱니에만 있어서, 다섯 개는
+/// 그려지기만 하고 눌러도 아무 일이 안 났다. [UX 계약 §2](../../../docs/mobile-ux.md) 에도 자리가
+/// 없다: `plus` 는 **서버 목록** 것이고, `git_branch` 는 버튼이 아니라 **세션 목록의 필드**이며,
+/// `search`·`sidebar_collapse` 는 계약에 아예 없다(계약 §2.4 가 "데스크톱 도크의 전면 이식" 을
+/// 버리기로 이미 적어 뒀다). `bell` 은 화면은 있으나 진입점을 여기로 두기로 한 적이 없다.
+/// **각자의 화면이 생기면 그 화면에서 꺼낸다**(계획 U3).
+const status_cps = [_]u32{maru.icons.codepoint(.gear)};
+
+/// 톱니가 몇 번째 슬롯인가. **배열에서 찾는다** — 손으로 적으면 아이콘을 늘릴 때 조용히
+/// 어긋나고, 그러면 설정 입구가 엉뚱한 자리에 선다.
+const gear_slot: usize = blk: {
+    for (status_cps, 0..) |cp, i| {
+        if (cp == maru.icons.codepoint(.gear)) break :blk i;
+    }
+    break :blk 0;
 };
 
 /// 보조 키바 방향키. **폰트 글리프(`↑↓←→`)로는 안 됐다** — 폰트마다 작게 디자인돼 44px
@@ -2110,47 +2120,17 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     var flex_scratch: [256]layout.FlexScratch = undefined;
     var child_rects: [256]layout.UiRect = undefined;
 
-    // ── 탭 바: 탭 세 개를 가로로
-    const tab_label_style: layout.UiStyle = .{ .width = .{ .px = 34.0 }, .height = .{ .px = 13.0 }, .margin = .{ .left = 12.0, .top = 11.0 } };
-    // 자식 슬라이스는 **함수 스코프 변수**를 가리켜야 한다. `&.{...}` 는 임시 배열이라
-    // statement 를 벗어나면 dangling 이고, build 가 그 쓰레기를 읽는다(실측).
-    var tab_kids: [3][1]tree.UiNode = .{
-        .{tree.text(.{ .id = 111, .style = tab_label_style, .value = "zsh", .tone = .primary })},
-        .{tree.text(.{ .id = 112, .style = tab_label_style, .value = "vim", .tone = .muted })},
-        .{tree.text(.{ .id = 113, .style = tab_label_style, .value = "logs", .tone = .muted })},
-    };
-    const tabs = [_]tree.UiNode{
-        tree.card(.{ .id = 101, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 }, .margin = .{ .right = 6.0 } }, .variant = .selected }, &tab_kids[0]),
-        tree.card(.{ .id = 102, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 }, .margin = .{ .right = 6.0 } }, .variant = .surface }, &tab_kids[1]),
-        tree.card(.{ .id = 103, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 } }, .variant = .surface }, &tab_kids[2]),
-    };
-    const tab_bar = tree.container(.{ .id = 100, .direction = .row, .style = .{ .height = .{ .px = 46.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 6.0, .bottom = 6.0 } } }, &tabs);
-
-    // ── 사이드바: 워크스페이스 카드 다섯 개(세로)
-    const names = [_][]const u8{ "maru", "web", "docs", "infra", "scratch" };
-    var side_kids: [5][1]tree.UiNode = undefined;
-    var side_children: [5]tree.UiNode = undefined;
-    for (&side_children, 0..) |*c, i| {
-        side_kids[i] = .{tree.text(.{
-            .id = @intCast(230 + i),
-            .style = .{ .width = .{ .px = 58.0 }, .height = .{ .px = 13.0 }, .margin = .{ .left = 12.0, .top = 19.0 } },
-            .value = names[i],
-            .tone = if (i == 1) .accent else .primary,
-        })};
-        c.* = tree.card(.{
-            .id = @intCast(210 + i),
-            .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = 52.0 }, .margin = .{ .bottom = 8.0 } },
-            .variant = if (i == 1) .selected else .surface,
-        }, &side_kids[i]);
-    }
-    const sidebar = tree.container(.{ .id = 200, .direction = .column, .style = .{ .width = .{ .percent = 0.34 }, .padding = .{ .left = 10.0, .right = 10.0, .top = 10.0, .bottom = 10.0 } } }, &side_children);
+    // ── 상단 탭·좌측 사이드바는 **없다.** 데스크톱 chrome 을 옮겨 놓고 배선을 안 해서,
+    // 탭 셋과 카드 다섯이 **눌러도 아무 일이 안 났다**(핸들러가 아예 없었다). 계획 U0 이 같은
+    // 진단을 적어 뒀다 — "지금 구현은 탭 줄인데 그건 결정이 아니라 데스크톱을 옮긴 결과다".
+    // 세션이 하나뿐이라(브리지가 `term_core` 단일 변수) 탭에 실을 것도 없고, 사이드바는 폰
+    // 세로에서 **폭의 1/3 을 상시 점유**했다. 세션 전환 손짓과 화면들은 U2 가 M3 결정 뒤에
+    // 세운다 — 그때까지 가짜를 그리지 않는다([UX §2.4](../../../docs/mobile-ux.md)).
 
     // ── 본문: **진짜 터미널 화면**이다. 자식 없이 자리만 잡고, 그 사각형을
     // `TerminalCore` 의 셀 격자로 채운다(아래 `pushTerminal`). 앞 단계의 하드코딩
     // 문자열과 달리 VT 파서를 실제로 태우므로 SGR 색·한글 2셀 폭이 코어에서 나온다.
     const body = tree.container(.{ .id = 300, .direction = .column, .style = .{ .flex = .{ .grow = 1 }, .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } }, &.{});
-
-    const middle = tree.container(.{ .id = 20, .direction = .row, .style = .{ .flex = .{ .grow = 1 } } }, &.{ sidebar, body });
 
     // ── 상태바
     // ── 하단 바: **아이콘 줄 하나다.**
@@ -2186,7 +2166,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = key_h + 10.0 } },
     }, &.{});
 
-    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, bar, status });
+    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ body, bar, status });
 
     const built = try tree.build(root, .{
         .root_size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
@@ -2361,11 +2341,11 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     const icon_x0: i32 = @as(i32, @intCast(width)) - icon_span - 12;
     for (0..status_icon_count) |i| {
         if (!reserveQuad()) break;
-        const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
-        // 톱니(슬롯 1)가 설정 화면 입구다. **그리는 자리를 그대로 히트로 쓰되 44 로 넓힌다** —
+        const rgb = tk.get(.surface_fg);
+        // 톱니가 설정 화면 입구다. **그리는 자리를 그대로 히트로 쓰되 44 로 넓힌다** —
         // 아이콘은 18px 이라 그대로 받으면 손가락 기준의 절반도 안 된다(§5.1 "작게 그리고
         // 넓게 받는다" — 아이콘은 서로 떨어져 있어 목록과 달리 이 기법이 통한다).
-        if (i == 1) {
+        if (i == gear_slot) {
             const half_icon = @as(f32, @floatFromInt(status_icon_px)) / 2;
             const cx = @as(f32, @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i)))) + half_icon;
             const cy = @as(f32, @floatFromInt(icon_y)) + half_icon;
@@ -2942,18 +2922,9 @@ fn labelFor(id: u64) ?[]const u8 {
     if (id >= key_bar_id_base + 100 and id < key_bar_id_base + 100 + key_bar.len) {
         return key_bar[id - key_bar_id_base - 100].label;
     }
-    return switch (id) {
-        111 => "zsh",
-        112 => "vim",
-        113 => "logs",
-        230 => "maru",
-        231 => "web",
-        232 => "docs",
-        233 => "infra",
-        234 => "scratch",
-        // 본문 줄은 여기 없다 — TerminalCore 격자가 소유한다(pushTerminal).
-        else => null,
-    };
+    // 본문 줄은 여기 없다 — TerminalCore 격자가 소유한다(pushTerminal). 탭·사이드바 라벨도
+    // 없다: 그 chrome 을 걷어냈다(U3).
+    return null;
 }
 
 /// 플랫폼이 부른다: UI 를 조립하고 quad 개수를 돌려준다.

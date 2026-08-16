@@ -205,6 +205,17 @@ pub const HostReconnectJobSealInput = struct {
     client_fd: i32,
     client_owner_digest: Digest,
     client_identity_digest: Digest,
+    runtime_handle: u64,
+    runtime_addr: u64,
+    runtime_generation: u64,
+    replacement_addr: u64,
+    replacement_slot_addr: u64,
+    replacement_old_node_addr: u64,
+    replacement_new_node_addr: u64,
+    replacement_expected_connection_generation: u64,
+    replacement_next_connection_generation: u64,
+    replacement_lifecycle_raw: u8,
+    replacement_seal: Digest,
     state_raw: u8,
 };
 

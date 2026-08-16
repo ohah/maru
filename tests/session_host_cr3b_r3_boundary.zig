@@ -167,6 +167,9 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
             "platform/macos/session_host/client_slot.zig",
             "platform/macos/session_host/host_adapter.zig",
             "platform/macos/session_host/remote_runtime.zig",
+            // CR4a backend teardown destroys every terminal RemoteGeneration first, then drains
+            // the adapter's complete retired Client inventory through this same R3 facade.
+            "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
     // CR3c2만 R3 receipt를 actual RemoteGeneration retiring owner와 조합한다.

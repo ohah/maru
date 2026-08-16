@@ -4260,7 +4260,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4a actual issuer job은"},
         });
         const run_cr4a_actual_issuer_job_tests = b.addRunArtifact(cr4a_actual_issuer_job_tests);
-        run_cr4a_actual_issuer_job_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_actual_issuer_job_tests.addArg("--maru-expect-tests=3");
         run_cr4a_actual_issuer_job_tests.setCwd(b.path("."));
         if (previous_cr4a_issuer_actual) |previous|
             run_cr4a_actual_issuer_job_tests.step.dependOn(previous);

@@ -306,8 +306,8 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "screen-stream: catchup decoded cell accounting"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a catchup apply leaf는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
-    try std.testing.expectEqual(@as(usize, 4), count(build_cr4a, "--maru-expect-tests=2"));
-    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=3"));
+    try std.testing.expectEqual(@as(usize, 3), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=3"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=6"));
     try std.testing.expectEqual(@as(usize, 13), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
@@ -329,12 +329,21 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer는 bounded"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer job은"));
     try std.testing.expectEqual(@as(usize, 1), count(host_connect, "pub fn connectExistingHostUntil("));
-    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "test \"CR4a actual issuer job은"));
+    try std.testing.expectEqual(@as(usize, 3), count(remote_backend, "test \"CR4a actual issuer job은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "const HostReconnectJob = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_job: ?*HostReconnectJob = null"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_preparing: bool = false"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn beginHostReconnectConnect("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn abortHostReconnectConnect("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn publishHostReconnectReplacement("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn publishReconnectClientReplacement("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "RemoteRuntime.backend_api.publishReconnectClientReplacement("));
+    try std.testing.expectEqual(@as(usize, 5), count(remote_backend, "HostReconnectJobState.replacement_published"));
+    try std.testing.expectEqual(@as(usize, 5), count(remote_backend, "HostReconnectJobState.replacement_failed"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn preflightReconnectClientReplacementFailure("));
+    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "preflightReconnectClientReplacementFailure("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.prepareRetiredClientReclaim(&reclaim)"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim)"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_connect.connectExistingHostUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(cleanup_seal, "pub const HostReconnectJobSealInput = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(process_seal, "pub fn hostReconnectJobSeal("));
@@ -347,7 +356,27 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     );
     try std.testing.expectEqual(
         @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "preflightReconnectClientReplacementFailure", &.{
+            "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
         try countProductIdentifiersExcept(allocator, "beginHostReconnectConnect", &.{
+            "platform/macos/session_host/remote_term_backend.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "publishHostReconnectReplacement", &.{
+            "platform/macos/session_host/remote_term_backend.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "publishReconnectClientReplacement", &.{
+            "platform/macos/session_host/remote_runtime.zig",
             "platform/macos/session_host/remote_term_backend.zig",
         }),
     );

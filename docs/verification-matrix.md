@@ -1928,18 +1928,18 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   같은 `HostAdapter`에 결속한 observer attach+initial snapshot을 검증한다. typed reject는 candidate authority만 정산하고
   published Client를 usable로 보존하며, EOF는 같은 node·generation을 보존하되 transport를 fail-close한다. CR4a
   screen wire prerequisite는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1 및 queue-admission 뒤 host commit을 제품 projection/server 행으로
-  검증한다. host frontier 제품 행은 core-lock projection receipt와 fixed barrier-last batch를 실제 subscription queue에 admit한 뒤에만 base/frontier와 pending→admitted를 함께 commit하고 copied/PID/process-nonce/Client-address/ConnectionKey/thread drift, prepare rollback과 global queue-pressure 거부의 prefix/base/frontier/pending mutation 0을 검증한다. 화면 변화가 없는 turn도 idle 성공이 아니라 barrier-only batch exact 1을 admit하며 preparation allocation fail-index는 성공점까지 pending/frontier mutation 0을 유지한다. client staged receipt는 부분 구현이다. actual socket fixture가 snapshot 0→delta 1→exact barrier에서 final-address receipt를 만들고 gap·malformed delta·batch/cell cap+1·missing barrier는 receipt 0과 새 Client fail-close로 닫는다. byte cap은 product apply leaf에서 마지막 초과 batch 적용 전 회수와 accounting mutation 0을 고정한다. bounded actual issuer caller는 실제 manifest/socket Client를 backend job까지 이동한다. allocator fail-index 제품 행과 same-adapter replacement→candidate 연결은 아직 남아 있다. 이는 local idle을 caught-up으로 승인하지 않는다. CR4a
-  완료에는 이어서 replacement/staged receipt integration과 남은 cap/OOM 단계별 mutation 경계를
+  검증한다. host frontier 제품 행은 core-lock projection receipt와 fixed barrier-last batch를 실제 subscription queue에 admit한 뒤에만 base/frontier와 pending→admitted를 함께 commit하고 copied/PID/process-nonce/Client-address/ConnectionKey/thread drift, prepare rollback과 global queue-pressure 거부의 prefix/base/frontier/pending mutation 0을 검증한다. 화면 변화가 없는 turn도 idle 성공이 아니라 barrier-only batch exact 1을 admit하며 preparation allocation fail-index는 성공점까지 pending/frontier mutation 0을 유지한다. client staged receipt는 부분 구현이다. actual socket fixture가 snapshot 0→delta 1→exact barrier에서 final-address receipt를 만들고 gap·malformed delta·batch/cell cap+1·missing barrier는 receipt 0과 새 Client fail-close로 닫는다. byte cap은 product apply leaf에서 마지막 초과 batch 적용 전 회수와 accounting mutation 0을 고정한다. bounded actual issuer caller는 실제 manifest/socket Client를 backend job으로 이동하고 같은 adapter replacement까지 exact once 게시한다. allocator fail-index 제품 행과 replacement→candidate 연결은 아직 남아 있다. 이는 local idle을 caught-up으로 승인하지 않는다. CR4a
+  완료에는 이어서 candidate/staged receipt integration과 남은 cap/OOM 단계별 mutation 경계를
   검증해야 한다. bounded actual issuer는 실제 daemon manifest/socket에서 `connectExistingHostUntil`을 호출하고 fresh Client를
-  final-address `RemoteTermBackend` job에 exact once 보존·abort하는 단계까지 구현됐다. 아직 same-adapter replacement와 staged
+  final-address `RemoteTermBackend` job에 exact once 보존한 뒤 same-adapter replacement를 게시하는 단계까지 구현됐다. replacement node OOM은 unavailable shell과 owned Client를 sealed forward-failed state로 보존하고 rollback·재시도를 거부한다. 아직 observer candidate와 staged
   receipt를 같은 job/deadline으로 연결하지 않았으므로 CR4a 완료가 아니다. replacement 게시 전 실패는 old graph mutation 0이고 게시 뒤 실패는 unavailable shell과 새 Client generation을
   보존한다. CR4b는 mutation seal 아래 status/takeover를 exact once 실행하며 takeover
   reply-loss에는 local authority를 발행하지 않고 candidate close 완료를 가정하지 않는다. direct-controller grant만 기다리고
   observer conflict는 자동 탈취하지 않는다. CR4c는 proven candidate를 CR3c publication/reclaim에 연결한 뒤 새 generation의
   input과 forced first resize를 검증한다. CR4a만 green이면 takeover·publication·사용자 가시 reconnect는 미완료다.
   actual-issuer 제품 행은 `RemoteTermBackend.HostReconnectJob`을 유일 owner로 사용하고 AppSession/RemoteRuntime의 direct
-  connect caller를 0으로 유지한다. 현재 실제 manifest/socket host당 connect 1회와 job-owned Client exact once는 검증한다.
-  이어 same adapter replacement 1회와 staged receipt 1회를 연결하고 connect/hello/snapshot/delta/barrier가 같은 absolute deadline을 공유하는지 확인한다. connect 전 실패는 pool과
+  connect caller를 0으로 유지한다. 현재 실제 manifest/socket host당 connect 1회, job-owned Client와 same-adapter replacement exact once를 검증한다.
+  이어 observer candidate와 staged receipt 1회를 연결하고 connect/hello/snapshot/delta/barrier가 같은 absolute deadline을 공유하는지 확인한다. connect 전 실패는 pool과
   old graph mutation 0, publication 뒤 allocator fail-index·deadline·wire failure는 candidate/receipt 0, exact current
   node/generation 보존, Client fail-close와 registry/pin/batch/resident ledger final zero를 증명한다.
   dependency-neutral contract prerequisite는 host process/subscription identity와 client request nonce wire DTO 및 MRSH kind/header를
@@ -1947,7 +1947,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   pending row, core-lock projection receipt, barrier-last single-batch admission을 요구한다. queue cap/OOM/rollback은 queued
   prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
   target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.
-  client prerequisite의 첫 slice는 raw fd reader 0과 negotiated capability, 기존 Client demux를 통한 sibling screen/barrier 보존, absolute deadline과 exact identity 소비를 제품 테스트로 고정한다. 이어지는 `GenerationAttachment` slice는 catch-up 전용 batch 64개/encoded 16 MiB/decoded cell 1,048,576개 상한을 일반 inbox cap과 분리한다. 현재 target exact equality와 gap/malformed/batch·cell cap+1/missing barrier의 receipt 0을 제품 socket에서 검증하고 byte cap leaf도 apply 전 mutation 0으로 닫는다. actual `connectExistingHostUntil` E2E와 backend-owned Client job은 구현됐고, replacement/candidate integration 및 OOM fail-index/final ledger 0은 남은 행이다. 이 둘 전에는 CR4a 완료로 세지 않는다.
+  client prerequisite의 첫 slice는 raw fd reader 0과 negotiated capability, 기존 Client demux를 통한 sibling screen/barrier 보존, absolute deadline과 exact identity 소비를 제품 테스트로 고정한다. 이어지는 `GenerationAttachment` slice는 catch-up 전용 batch 64개/encoded 16 MiB/decoded cell 1,048,576개 상한을 일반 inbox cap과 분리한다. 현재 target exact equality와 gap/malformed/batch·cell cap+1/missing barrier의 receipt 0을 제품 socket에서 검증하고 byte cap leaf도 apply 전 mutation 0으로 닫는다. actual `connectExistingHostUntil` E2E, backend-owned Client job과 same-adapter replacement는 구현됐고, observer candidate/staged receipt integration 및 OOM fail-index/final ledger 0은 남은 행이다. 이 둘 전에는 CR4a 완료로 세지 않는다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
   reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자
   close transaction만 pane/binding 제거 checkpoint를 정확히 1회 쓴다. pending/unconfirmed 상태에서 Window close는 binding을

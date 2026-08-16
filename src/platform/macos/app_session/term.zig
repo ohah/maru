@@ -931,9 +931,10 @@ pub fn surfaceClipboardWriteRejected(self: *AppSession) void {
     const rejected = s.core.takeClipboardWriteRejected();
     s.unlockCore(self.io);
     if (!rejected) return;
-    var nbuf: [128]u8 = undefined;
+    // 값이 끼는 문장 — §6.3 보간 진입점. 버퍼 부족은 `i18n.format`이 UTF-8 경계 절단으로 흡수하므로
+    // 옛 `catch <짧은 폴백>` 은 필요 없다(끼는 값이 숫자라 길이가 사실상 고정이다).
     const mb = terminal.clipboard_max_bytes / 1_000_000;
-    self.showNotice(std.fmt.bufPrint(&nbuf, "클립보드 복사가 너무 커서 취소되었습니다(최대 약 {d}MB).", .{mb}) catch "클립보드 복사가 너무 커서 취소되었습니다.");
+    self.showNoticeFmt(.term_clipboard_too_large, &.{.{ .d = @intCast(mb) }});
 }
 
 // --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
@@ -1047,9 +1048,8 @@ pub fn pendingClipboard(self: *AppSession) []const u8 {
         const fetched = rb.clipboardWriteFor(term.rt.handle) orelse return &.{};
         if (fetched.too_large) {
             // 로컬의 오버사이즈 안내와 같은 자리(조용한 유실 금지). 텍스트는 없다.
-            var nbuf: [128]u8 = undefined;
             const kb = session_host.runtime_manager.max_clipboard_wire_bytes / 1024;
-            self.showNotice(std.fmt.bufPrint(&nbuf, "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {d}KB).", .{kb}) catch "원격 클립보드 복사가 너무 커서 전달되지 않았습니다.");
+            self.showNoticeFmt(.term_remote_clipboard_too_large, &.{.{ .d = @intCast(kb) }});
             return &.{};
         }
         const text = fetched.text orelse return &.{};

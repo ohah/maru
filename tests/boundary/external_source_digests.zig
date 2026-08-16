@@ -513,6 +513,7 @@ pub const inventory = [_]Proof{
     // 필드가 늘어도 `@field` 호출 자리는 `tIn` 하나뿐이다. 검증 후속으로 두 번 더 움직였다 —
     // common_ 접두 정리와, 두 언어 테이블의 정합(자리표시자 집합·영어에 한글 없음·한국어에 한글 있음)을
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
-    // 토큰이라 값이 바뀐다. count 는 여전히 1 이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "01b6ff14b4c228cfa687a6b0c7b6f9200ee5e25f9e91a2b629e702cb2ae28c84" },
+    // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
+    // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "6750c193b66be6ad67d34c3a143f1118b43c2d4621b97ece1b588cba91981973" },
 };

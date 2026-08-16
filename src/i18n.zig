@@ -174,6 +174,10 @@ pub const Table = struct {
     fp_web_content_restarted: [:0]const u8,
     fp_web_content_terminated: [:0]const u8,
     fp_edit_state_check_failed: [:0]const u8,
+
+    // ── 터미널 클립보드 (I3a 슬라이스 3) — 값이 끼므로 `showNoticeFmt` 가 받는다 ──
+    term_clipboard_too_large: [:0]const u8,
+    term_remote_clipboard_too_large: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -305,6 +309,9 @@ pub const en: Table = .{
     .fp_web_content_restarted = "The web content being edited restarted, so file work is blocked until automatic recovery.",
     .fp_web_content_terminated = "The web content being edited terminated, so file work is blocked until automatic recovery.",
     .fp_edit_state_check_failed = "Could not check the edit state, so the tab was not closed.",
+
+    .term_clipboard_too_large = "The clipboard copy was too large and was cancelled (about {0}MB max).",
+    .term_remote_clipboard_too_large = "The remote session's clipboard copy was too large to deliver (about {0}KB max).",
 };
 
 pub const ko: Table = .{
@@ -436,6 +443,9 @@ pub const ko: Table = .{
     .fp_web_content_restarted = "편집 중 웹 콘텐츠가 다시 시작되어 자동 복구 전까지 파일 작업을 차단했습니다.",
     .fp_web_content_terminated = "편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.",
     .fp_edit_state_check_failed = "편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.",
+
+    .term_clipboard_too_large = "클립보드 복사가 너무 커서 취소되었습니다(최대 약 {0}MB).",
+    .term_remote_clipboard_too_large = "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {0}KB).",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.

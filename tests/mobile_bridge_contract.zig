@@ -504,6 +504,16 @@ fn keybarScrollToEnd() void {
     _ = bridge.maru_mobile_build(402, 874, now());
 }
 
+/// 화면에 실제로 있는 첫 키. 밀려 나간 키는 rect 가 0 이라 자리 비교의 기준이 못 된다.
+fn firstVisibleKey() ?u32 {
+    var k: u32 = 0;
+    while (k < bridge.maru_mobile_keybar_count()) : (k += 1) {
+        const c = keyCenter(k);
+        if (c.x > 0 and c.y > 0) return k;
+    }
+    return null;
+}
+
 fn keyCenter(index: u32) struct { x: f32, y: f32 } {
     const packed_rect = bridge.maru_mobile_keybar_rect(index);
     const x: f32 = @floatFromInt((packed_rect >> 48) & 0xFFFF);
@@ -2320,6 +2330,112 @@ test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" 
     const at_cancel = probeRow() orelse return error.TestUnexpectedResult;
     _ = bridge.maru_mobile_build(402, small_h, now());
     try std.testing.expectEqual(at_cancel, probeRow() orelse return error.TestUnexpectedResult);
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **흐르는 것을 멈추려고 짚은 손가락은 누른 것이 아니다.** 관성 중에 화면을 짚으면 사람은
+// "세우려던 것"이고, 그 자리에 있던 키가 나가면 **누른 적 없는 입력이 터미널에 간다**. 스크롤
+// 컴포넌트로 옮기면서 `begin()` 이 관성을 죽이지만 그 사실을 호출자에게 안 알려 줘서, 브리지는
+// 여전히 눌림을 잡고 뗄 때 키를 보내고 있었다.
+test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+    keybarScrollToStart();
+
+    // **끝까지 밀지 않는다** — 끝에 닿으면 관성이 그 자리에서 죽어 재현이 안 된다.
+    const c = keyCenter(0);
+    _ = bridge.maru_mobile_keybar_pointer(0, c.x, c.y);
+    var x = c.x;
+    var step: u32 = 0;
+    while (step < 5) : (step += 1) {
+        x -= 20;
+        _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+    }
+    _ = bridge.maru_mobile_keybar_pointer(2, x, c.y); // 뗀다 — 여기서 관성이 시작된다
+
+    // 정말 흐르고 있는지부터 값으로 본다(안 흐르면 이 테스트는 아무것도 안 재는 것이다).
+    // **화면에 남아 있는 키**로 잰다 — 밀려 나간 키는 rect 가 0 이라 늘 같은 값이 나온다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const vis = firstVisibleKey().?;
+    const a = keyCenter(vis).x;
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const b = keyCenter(vis).x;
+    try std.testing.expect(a != b);
+
+    // 흐르는 중에 보이는 키 하나를 짚었다 뗀다.
+    const t = keyCenter(firstVisibleKey().?);
+    const before = bridge.maru_mobile_input("", 0);
+    _ = bridge.maru_mobile_keybar_pointer(0, t.x, t.y);
+    _ = bridge.maru_mobile_keybar_pointer(2, t.x, t.y);
+
+    // ① 멈춘다 — 두 프레임 사이에 자리가 안 바뀐다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const stop_key = firstVisibleKey().?;
+    const c1 = keyCenter(stop_key).x;
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(c1, keyCenter(stop_key).x);
+
+    // ② 그 짚음으로는 **한 바이트도 안 나간다**.
+    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0));
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+// 같은 규칙이 설정 목록에도 있어야 한다 — 여기서는 **누른 적 없는 설정이 바뀐다**. 키바보다
+// 나쁘다: 터미널로 간 화살표는 대개 지나가지만, 뒤집힌 토글은 파일에 남는다.
+test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐다" {
+    const small_h: u32 = 300; // 목록이 확실히 넘친다
+    // **앞 테스트가 설정 화면을 열어 둔 채 끝났을 수 있다**(편집 중이면 pop 한 번은 편집만
+    // 거둔다). 열린 채로 톱니를 누르면 여는 것이 아니라 설정 안을 누른 것이 되고, 그러면
+    // 스크롤이 앞 테스트 자리에 남아 이 테스트가 아무것도 안 재게 된다.
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_build(402, small_h, now());
+
+    std.debug.print("\nDBG afterpops_open={any} span_x0={d} scroll={d}\n", .{ bridge.settingsRowAt(200, 150) != null, span.x0, bridge.settingsScrollPx() });
+    try std.testing.expectEqual(@as(u32, 0), bridge.settingsScrollPx());
+
+    // **관성이 남게** 민다 — 끝까지 밀면 그 자리에서 죽어 재현이 안 된다.
+    _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 230);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 210);
+    _ = bridge.maru_mobile_chrome_pointer(1, 200, 190);
+    _ = bridge.maru_mobile_chrome_pointer(2, 200, 190);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const a = bridge.settingsScrollPx();
+    var f: u32 = 0;
+    while (f < 3) : (f += 1) _ = bridge.maru_mobile_build(402, small_h, now());
+    const b = bridge.settingsScrollPx();
+    try std.testing.expect(a != b); // 정말 흐르고 있다
+
+    // 흐르는 중에 토글 줄을 짚었다 뗀다.
+    var toggle_y: ?f32 = null;
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind != .toggle) continue;
+        toggle_y = y;
+        break;
+    }
+    const ty = toggle_y orelse return error.TestUnexpectedResult;
+    // **값이 바뀌었는지는 저장 요청으로 본다** — 토글이 뒤집히면 host 가 가져갈 쓰기가 선다.
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    _ = bridge.maru_mobile_chrome_pointer(0, 200, ty);
+    _ = bridge.maru_mobile_chrome_pointer(2, 200, ty);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+
+    // ① 멈춘다  ② 값은 그대로다
+    const c1 = bridge.settingsScrollPx();
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expectEqual(c1, bridge.settingsScrollPx());
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
 
     _ = bridge.maru_mobile_pop_screen();
     _ = bridge.maru_mobile_build(402, 874, now());

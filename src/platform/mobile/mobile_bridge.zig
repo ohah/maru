@@ -338,6 +338,12 @@ pub fn settingsPopupCap() usize {
     return set_item_rects.len;
 }
 
+/// 설정 목록이 지금 얼마나 밀려 있나(px). **관성은 줄 높이보다 작게 움직이는 프레임이 있어**
+/// 줄 색인으로는 "흐르고 있다" 를 못 잰다.
+pub fn settingsScrollPx() u32 {
+    return set_sa.offset_y_px;
+}
+
 pub fn settingsRows() []const mobile_config.Row {
     return mobile_config.rows;
 }
@@ -803,6 +809,8 @@ var key_bar_max_scroll: f32 = 0;
 /// 키바 가로 스크롤도 **컴포넌트가 든다**(설정 목록과 같은 규칙 — 축만 다르다). 예전에는 여기
 /// 감쇠·임계가 손으로 있었고 설정 목록에도 같은 숫자가 또 있었다.
 var kb_sa: scroll_area.State = .{};
+/// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 키를 안 보낸다.
+var kb_stop_tap: bool = false;
 var kb_touch: scroll_area.Touch = .{};
 /// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
 /// 손가락이 지금 누르고 있는 키. **hover 가 없는 자리를 메우는 것이 눌림 표시**다(§2.4) —
@@ -883,7 +891,7 @@ fn stepKeyBarFling() void {
     // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
     // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
     if (screen != .terminal) return;
-    kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)));
+    _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)));
 }
 
 /// 지금 키바 가로 위치(px).
@@ -915,10 +923,12 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         kb_down_y = y;
         kb_last_x = x;
         kb_moved = 0;
-        kb_touch.begin(x); // 흐르는 중에 짚으면 멈춘다
+        // **흐르는 중에 짚으면 멈추기만 한다.** 그 짚음은 세우려던 것이지 키를 누른 것이
+        // 아니다 — 안 가리면 멈추려던 손가락이 그 자리 키를 터미널로 보낸다(재현했다).
+        kb_stop_tap = kb_touch.begin(x);
         // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
         // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
-        kb_pressed = keybarIndexAt(x, y);
+        kb_pressed = if (kb_stop_tap) null else keybarIndexAt(x, y);
         return 1;
     }
     if (!kb_active) return 0;
@@ -930,7 +940,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
         // **화면도 조금 움직이고 키도 나가는** 두 일을 한꺼번에 했다 — 같은 손짓이 어떨 때는
         // 스크롤로, 어떨 때는 입력으로 보이는 원인이었다(사용자가 화면에서 짚었다).
         // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
-        if (kb_moved < 10) return 1;
+        if (kb_moved < scroll_area.Touch.slop_px) return 1;
         kb_pressed = null;
         kb_touch.move(&kb_sa, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
@@ -940,7 +950,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
     kb_touch.end();
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
-    if (phase == 2 and kb_moved < 10) {
+    if (phase == 2 and !kb_stop_tap and kb_moved < scroll_area.Touch.slop_px) {
         kb_touch.cancel(); // 탭이면 관성이 없다
         // **`<`/`>` 는 누르는 것이 아니라 신호다.** 한때 데스크톱 탭바의 `‹›` 가 클릭 가능하다는
         // 이유로 한 화면씩 옮기게 했는데, 두 가지가 어긋났다 — ① 데스크톱이 그런 것은 **마우스**
@@ -2451,6 +2461,8 @@ var set_list: SetRect = .{}; // 목록이 보이는 창(헤더 아래) — 클�
 /// 손으로 갖고 있었는데(`set_fling` + 프레임당 0.92) 같은 규칙이 키바에도 따로 있었다 — 두 번째
 /// 소비처가 생긴 이상 규칙을 한곳에 둔다(계획 U1).
 var set_sa: scroll_area.State = .{};
+/// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 행을 안 누른다.
+var set_stop_tap: bool = false;
 var set_touch: scroll_area.Touch = .{};
 var set_max_scroll: f32 = 0;
 var set_pressed: ?usize = null;
@@ -2483,7 +2495,7 @@ fn setScroll() f32 {
 }
 
 fn stepSetFling() void {
-    set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)));
+    _ = set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)));
 }
 
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
@@ -2707,6 +2719,9 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             // 톱니 근처도 아닌 down 을 chrome 이 가져가, 그 손짓이 통째로 사라졌다.
             set_active = setHit(set_gear_rect, x, y);
             if (!set_active) return 0;
+            // **여기는 터미널 화면이라 설정 목록이 흐를 리가 없다.** 그런데 설정에서 나올 때
+            // 남은 값이 그대로면 톱니가 영영 안 눌린다 — 실제로 그렇게 막혔다(테스트가 잡았다).
+            set_stop_tap = false;
             set_down_x = x;
             set_down_y = y;
             set_moved = 0;
@@ -2718,7 +2733,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             return 1;
         }
         set_active = false;
-        if (phase == 2 and set_moved < 10 and setHit(set_gear_rect, x, y)) {
+        if (phase == 2 and set_moved < scroll_area.Touch.slop_px and setHit(set_gear_rect, x, y)) {
             screen = .settings;
             set_sa.reset();
             set_touch.cancel();
@@ -2734,13 +2749,14 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_down_y = y;
             set_last_y = y;
             set_moved = 0;
-            set_touch.begin(y);
+            // 키바와 같은 규칙 — 흐르는 목록을 세우려 짚었는데 그 자리 토글이 뒤집히면 안 된다.
+            set_stop_tap = set_touch.begin(y);
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
-            set_back_pressed = set_open == null and setHit(set_back_rect, x, y);
+            set_back_pressed = !set_stop_tap and set_open == null and setHit(set_back_rect, x, y);
             set_pressed = null;
-            if (set_open == null and !set_back_pressed) {
+            if (!set_stop_tap and set_open == null and !set_back_pressed) {
                 for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
                     set_pressed = i;
                     break;
@@ -2757,7 +2773,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
             // **임계를 넘기 전에는 스크롤도 안 한다** — 살짝 민 손짓이 화면도 움직이고
             // 값도 바꾸면 같은 손짓이 어떨 때는 스크롤, 어떨 때는 입력으로 보인다.
-            if (set_moved < 10) return 1;
+            if (set_moved < scroll_area.Touch.slop_px) return 1;
             set_pressed = null;
             set_back_pressed = false;
             if (set_open != null) {

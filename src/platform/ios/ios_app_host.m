@@ -1048,9 +1048,49 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     maru_mobile_report_focus(1);
     NSLog(@"MARU_LIFECYCLE foreground");
 }
+/// config 파일을 읽어 브리지에 넘긴다. **자리는 `Library/Application Support/maru/config`**
+/// (docs/mobile-config.md §2). 파일을 여는 것은 host 다 — 브리지엔 OS 호출이 없다.
+///
+/// **그 디렉터리는 새 컨테이너에 없다.** iOS 는 `Library` 밑에 `Caches` 와 `Preferences` 만 두고
+/// 시작한다(시뮬레이터 컨테이너로 확인) — `create:YES` 로 만든다. `Caches` 에 두지 않는 이유는
+/// OS 가 저장 공간이 모자라면 지우기 때문이다(설정이 말없이 초기화된다).
+///
+/// **못 만든 것도 실패로 알린다.** 지금은 읽기뿐이라 티가 안 나지만, 저장(M10c)이 붙으면 그때
+/// 통째로 실패한다 — 계약이 "쓰기가 실패하면 조용하지 않다" 를 요구한다.
+static void loadConfigFile(void) {
+    NSError *err = nil;
+    NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+                                                          inDomain:NSUserDomainMask
+                                                 appropriateForURL:nil
+                                                            create:YES
+                                                             error:&err];
+    if (!support) {
+        NSLog(@"MARU_CONFIG support_dir_failed err=%@", err.localizedDescription);
+        return;
+    }
+    NSURL *dir = [support URLByAppendingPathComponent:@"maru" isDirectory:YES];
+    if (![NSFileManager.defaultManager createDirectoryAtURL:dir
+                               withIntermediateDirectories:YES
+                                                attributes:nil
+                                                     error:&err]) {
+        NSLog(@"MARU_CONFIG mkdir_failed path=%@ err=%@", dir.path, err.localizedDescription);
+        return;
+    }
+    NSURL *file = [dir URLByAppendingPathComponent:@"config" isDirectory:NO];
+    NSData *data = [NSData dataWithContentsOfURL:file options:0 error:&err];
+    if (!data) {
+        // 없는 것이 정상 상태다 — 설정을 한 번도 안 건드린 기기가 그렇다(계약 §7).
+        NSLog(@"MARU_CONFIG absent path=%@", file.path);
+        return;
+    }
+    maru_mobile_load_config((const unsigned char *)data.bytes, (unsigned long)data.length);
+    NSLog(@"MARU_CONFIG loaded bytes=%lu path=%@", (unsigned long)data.length, file.path);
+}
+
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
     // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
     // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
+    loadConfigFile(); // 뷰가 서기 전에 — 첫 프레임부터 그 색으로 그린다
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];
     vc.view = [[ChromeView alloc] initWithFrame:UIScreen.mainScreen.bounds];

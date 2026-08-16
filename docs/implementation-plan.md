@@ -154,7 +154,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
    runtime size golden으로 고정한다. e3은 다음 세 하위 gate를 순서대로 닫는다. **e3a**는 실제 제품
    `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
-   **e3a1 완료** (candidate allocation 1개, Debug 3,104바이트/ReleaseFast 3,088바이트; abort baseline 복원,
+   **e3a1 완료** (candidate allocation 1개, CR4 staged receipt owner 반영 뒤 Debug 3,424바이트/ReleaseFast 3,408바이트; abort baseline 복원,
    두 reconnect 뒤 heap current 1개, teardown final 0)와,
    별도 ReleaseFast process RSS를 측정하고, generation당 구조적 charge 상한
    `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은 64개 fixed
@@ -1154,7 +1154,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    projection 발급, barrier-last 실제 queue admission, admission 뒤 base/frontier/pending 원자 commit과 copied/process/Client-address/ConnectionKey/thread drift
    mutation 0, 실제 global queue-pressure의 prefix/base/frontier/pending mutation 0, no-change barrier-only exact 1과 preparation allocation fail-index를 제품 경로에서 닫았다. client consumer의 첫 slice는
    negotiated capability를 `Client` hello provenance에 저장하고, RPC/screen과 섞인 fixed barrier를 기존 multi-stream demux 아래 bounded connection-local inbox에 보존하며 하나의 absolute deadline으로 exact identity를 소비한다. sibling screen/barrier는 canonical inbox에 남고 capability·identity drift는 receipt 전에 connection을 fail-close한다. 이어지는 slice가
-   `GenerationAttachment` 소유의 delta apply cap과 final-address staged receipt를 닫는다.
+   일반 multi-runtime inbox와 구분되는 catch-up 전용 상한을 batch 64개, encoded 16 MiB,
+   decoded cell 1,048,576개로 고정하고 마지막 초과 batch를 apply 전에 거부한다.
+   `GenerationAttachment`가 이 accounting과 실제 assembler frontier를 소유하며 final-address staged receipt를 닫는다.
    host issuer만 green인 상태는 caught-up 또는 CR4a 완료가 아니다. barrier target은 server가 subscription을 재조회하거나
    encoded screen record를 파싱해 만들지 않고 `RuntimeManager`의 immutable projection receipt만 전달한다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,

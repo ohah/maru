@@ -37,7 +37,8 @@ test "CR3a-2c3d C3-3a1 event authority boundary" {
         "    fn finishEventOrderingNoFail(",
     ) orelse return error.TestExpectedEqual;
 
-    // C3-3b3 product settlement 5개와 test-only facade 16개를 반영한 net +13 source inventory다.
+    // C3-3b3 product settlement을 반영한 source inventory다. CR4 projection은 module-level
+    // owner bridge라 이 facade public method inventory를 넓히지 않는다.
     // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
     try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub const EventOrderingClass = enum(u8)"));

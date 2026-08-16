@@ -108,6 +108,11 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/generation_attachment.zig",
     );
     defer allocator.free(attachment);
+    const transport = try readSource(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(transport);
     const remote_attachment = try readSource(
         allocator,
         "src/platform/macos/session_host/remote_attachment.zig",
@@ -118,6 +123,11 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/client_slot.zig",
     );
     defer allocator.free(client_slot);
+    const batch_adapter = try readSource(
+        allocator,
+        "src/platform/macos/session_host/generation_batch_adapter.zig",
+    );
+    defer allocator.free(batch_adapter);
     const client = try readSource(
         allocator,
         "src/platform/macos/session_host/client.zig",
@@ -158,6 +168,11 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         "src/platform/macos/session_host/catchup_barrier_contract.zig",
     );
     defer allocator.free(catchup);
+    const catchup_stage = try readSource(
+        allocator,
+        "src/platform/macos/session_host/catchup_stage_contract.zig",
+    );
+    defer allocator.free(catchup_stage);
     const protocol = try readSource(
         allocator,
         "src/platform/macos/session_host/protocol.zig",
@@ -249,7 +264,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn prepareObserverReconnectCandidate("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "self.generation_owner.prepareAfterClientReplacement("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "initObserverReconnectCandidate,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR4a "));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"CR4a "));
     try std.testing.expectEqual(@as(usize, 1), count(server, "test \"CR4a frontier는"));
     try std.testing.expectEqual(@as(usize, 1), count(snapshot, "test \"CR4a frontier는"));
     try std.testing.expectEqual(@as(usize, 1), count(server, "next_screen_sequence: ?u64 = null"));
@@ -267,13 +282,18 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "candidate_adapter == &adapter"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "\"test-session-host-cr4a\""));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket catchup hostile은"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "screen-stream: catchup decoded cell accounting"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a catchup apply leaf는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
-    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 3), count(build_cr4a, "--maru-expect-tests=2"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=3"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=6"));
-    try std.testing.expectEqual(@as(usize, 11), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 12), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a barrier"));
+    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a catchup"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host pending은"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host capability는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host admission은"));
@@ -288,7 +308,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a client demux는"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "const catchup_barrier_contract = @import"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn readCatchupBarrierUntil("));
-    try std.testing.expectEqual(@as(usize, 8), count(client, "readCatchupBarrierUntil("));
+    try std.testing.expectEqual(@as(usize, 7), count(client, "readCatchupBarrierUntil("));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductIdentifiersExcept(allocator, "readCatchupBarrierUntil", &.{
@@ -309,6 +329,94 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Terminal = struct"));
     try std.testing.expectEqual(@as(usize, 2), count(catchup, "test \"CR4a barrier"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "test \"CR4a host pending은"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_stage, "pub const max_batches: u32 = 64"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_stage, "pub const max_encoded_bytes: u64 = 16 * 1024 * 1024"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_stage, "pub const max_decoded_cells: u64 = 1024 * 1024"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup_stage, "pub const PreparedStage = struct"));
+    try std.testing.expectEqual(@as(usize, 2), count(catchup_stage, "test \"CR4a catchup"));
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn prepareCatchupStage("));
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn validateCatchupStage("));
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn abortCatchupStage("));
+    try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn catchupProjection("));
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "catchupProjection"));
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "catchupProjection"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "catchupProjection", &.{
+            "platform/macos/session_host/generation_transport.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(runtime_product, ".prepareCatchupStage("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".prepareCatchupStage("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "prepareCatchupStage", &.{
+            "platform/macos/session_host/generation_attachment.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn readCatchupBarrierPlanUntil("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "readCatchupBarrierPlanUntil", &.{
+            "platform/macos/session_host/client.zig",
+            "platform/macos/session_host/client_slot.zig",
+            "platform/macos/session_host/generation_batch_adapter.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "requestAttachmentCatchupUntil", &.{
+            "platform/macos/session_host/client_slot.zig",
+            "platform/macos/session_host/generation_batch_adapter.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "requestCatchupUntil", &.{
+            "platform/macos/session_host/generation_batch_adapter.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductIdentifiersExcept(allocator, "pumpCatchupScreen", &.{
+            "platform/macos/session_host/remote_attachment.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+        }),
+    );
+    inline for (.{ "validateCatchupStage", "abortCatchupStage" }) |identifier| {
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try countProductIdentifiersExcept(allocator, identifier, &.{
+                "platform/macos/session_host/generation_attachment.zig",
+                "platform/macos/session_host/remote_runtime.zig",
+            }),
+        );
+    }
+    // The external zero boundary above is paired with this per-owner inventory so adding an
+    // alias or a second caller inside an already allowed file cannot launder the closed chain.
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(client, "readCatchupBarrierPlanUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(client_slot, "readCatchupBarrierPlanUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(batch_adapter, "readCatchupBarrierPlanUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "readCatchupBarrierPlanUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(client_slot, "requestAttachmentCatchupUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(batch_adapter, "requestAttachmentCatchupUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(batch_adapter, "requestCatchupUntil"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "requestCatchupUntil"));
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(remote_attachment, "pumpCatchupScreen"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "pumpCatchupScreen"));
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "prepareCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "validateCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 9), countIdentifier(runtime, "validateCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "abortCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(runtime, "abortCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, ".subscription_id = subscription_text"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, ".connection_id = connection_id_text"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, ".connection_generation = connection_generation_text"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_contract.zig", &.{
@@ -316,6 +424,21 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
             "platform/macos/session_host/server.zig",
             "platform/macos/session_host/connection_turn.zig",
             "platform/macos/session_host/client.zig",
+            "platform/macos/session_host/catchup_stage_contract.zig",
+            "platform/macos/session_host/client_slot.zig",
+            "platform/macos/session_host/generation_batch_adapter.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+            "platform/macos/session_host/remote_screen.zig",
+            "platform/macos/session_host/remote_runtime.zig",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "catchup_stage_contract.zig", &.{
+            "platform/macos/session_host/catchup_stage_contract.zig",
+            "platform/macos/session_host/remote_attachment.zig",
+            "platform/macos/session_host/generation_attachment.zig",
+            "platform/macos/session_host/remote_runtime.zig",
         }),
     );
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const capability ="));

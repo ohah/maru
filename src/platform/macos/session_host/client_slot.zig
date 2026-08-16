@@ -5,6 +5,8 @@
 //! CR3a-2/CR3b can safely target later.
 
 const std = @import("std");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const client_deadline = @import("client_deadline.zig");
 const builtin = @import("builtin");
 const TerminalDrainRunnerChannel = if (builtin.is_test) struct {
     extern var maru_c3b3_death_child_path: [1024]u8;
@@ -14656,6 +14658,122 @@ pub const ClientSlot = struct {
         stream_id: u64,
     ) BatchError!AttachmentBatchRead {
         return self.readAttachmentBatchInternal(stream_id);
+    }
+
+    pub fn readAttachmentCatchupBarrierPlanUntil(
+        self: *ClientSlot,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError!client_mod.Client.CatchupBarrierPlan {
+        if (!self.valid()) return error.ProtocolError;
+        if (self.current.active_operation_generation != 0 or
+            terminal_drain_callback_binding.continuation_addr != 0)
+            return error.AdminBusy;
+        return self.current.client.readCatchupBarrierPlanUntil(stream_id, expected, deadline);
+    }
+
+    pub fn requestAttachmentCatchupUntil(
+        self: *ClientSlot,
+        stream_id: u64,
+        runtime_id: u128,
+        request_nonce: u128,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError!catchup_barrier_contract.CatchupIdentity {
+        if (!self.valid() or stream_id == 0 or runtime_id == 0 or request_nonce == 0)
+            return error.ProtocolError;
+        if (self.current.active_operation_generation != 0 or
+            terminal_drain_callback_binding.continuation_addr != 0)
+            return error.AdminBusy;
+        var nonce_buf: [32]u8 = undefined;
+        const nonce_text = std.fmt.bufPrint(&nonce_buf, "{x:0>32}", .{request_nonce}) catch
+            return error.OutOfMemory;
+        var params_buf: [112]u8 = undefined;
+        const params = std.fmt.bufPrint(
+            &params_buf,
+            "{{\"stream_id\":{d},\"request_nonce\":\"{s}\"}}",
+            .{ stream_id, nonce_text },
+        ) catch return error.OutOfMemory;
+        const response = self.current.client.callUntil("runtime.catchup", params, deadline) catch |err| {
+            if (err == error.OutOfMemory)
+                self.current.client.poison(.local_resource_exhausted);
+            return err;
+        };
+        defer self.current.client.allocator.free(response);
+        var parsed = std.json.parseFromSlice(
+            std.json.Value,
+            self.current.client.allocator,
+            response,
+            .{},
+        ) catch |err| {
+            self.current.client.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation);
+            return if (err == error.OutOfMemory) error.OutOfMemory else error.ProtocolError;
+        };
+        defer parsed.deinit();
+        var semantic_valid = false;
+        defer if (!semantic_valid) self.current.client.poison(.peer_contract_violation);
+        const root = switch (parsed.value) {
+            .object => |object| object,
+            else => return error.ProtocolError,
+        };
+        if (root.count() != 1) return error.ProtocolError;
+        const result_value = root.get("result") orelse return error.ProtocolError;
+        const result = switch (result_value) {
+            .object => |object| object,
+            else => return error.ProtocolError,
+        };
+        if (result.count() != 8) return error.ProtocolError;
+        const catchup = result.get("catchup") orelse return error.ProtocolError;
+        const status = switch (catchup) {
+            .string => |text| text,
+            else => return error.ProtocolError,
+        };
+        if (!std.mem.eql(u8, status, "armed") and !std.mem.eql(u8, status, "idempotent"))
+            return error.ProtocolError;
+        const response_stream = switch (result.get("stream_id") orelse return error.ProtocolError) {
+            .integer => |value| std.math.cast(u64, value) orelse return error.ProtocolError,
+            else => return error.ProtocolError,
+        };
+        const parseHex = struct {
+            fn value(comptime T: type, field: std.json.Value) ?T {
+                const text = switch (field) {
+                    .string => |value_text| value_text,
+                    else => return null,
+                };
+                return std.fmt.parseInt(T, text, 16) catch null;
+            }
+        }.value;
+        const response_nonce = parseHex(u128, result.get("request_nonce") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const response_host = parseHex(u128, result.get("host_id") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const response_runtime = parseHex(u128, result.get("runtime_id") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const subscription = parseHex(u64, result.get("subscription_id") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const connection_id = parseHex(u64, result.get("connection_id") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const connection_generation = parseHex(u64, result.get("connection_generation") orelse return error.ProtocolError) orelse
+            return error.ProtocolError;
+        const identity: catchup_barrier_contract.CatchupIdentity = .{
+            .subscription = .{ .value = subscription },
+            .runtime_id = response_runtime,
+            .connection = .{
+                .monotonic_id = connection_id,
+                .slot_generation = connection_generation,
+            },
+            .host_id = response_host,
+            .request_nonce = response_nonce,
+        };
+        if (response_stream != stream_id or response_nonce != request_nonce or
+            response_host != self.current.client.host_id or response_runtime != runtime_id or
+            !identity.valid())
+            return error.ProtocolError;
+        semantic_valid = true;
+        return identity;
     }
 
     pub fn beginReadPumpPoisonCapture(

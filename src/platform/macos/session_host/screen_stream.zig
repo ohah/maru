@@ -575,6 +575,41 @@ pub fn rowWidthMatches(row: Row, cols: u16) bool {
     return total == cols;
 }
 
+/// Catch-up accounting용 allocation-free text-cell projection이다. 화면 mutation 전에 전체
+/// record를 decode해 `row`/`set_runs`가 기술하는 cell 수만 checked 누적한다. 이미지·cursor·
+/// metadata는 encoded-byte cap으로 별도 제한되며 text cell budget을 소비하지 않는다.
+pub fn decodedCellCount(bytes: []const u8, expected_codec_version: u16) DecodeError!u64 {
+    var total: u64 = 0;
+    var records = RecordStream{ .bytes = bytes };
+    while (try records.next()) |record| {
+        const split = try RecordStream.splitExact(record, expected_codec_version);
+        var reader = BodyReader{ .bytes = split.body };
+        const run_count = switch (split.header.kind) {
+            .row => blk: {
+                _ = try reader.u16v();
+                break :blk try reader.u32v();
+            },
+            .set_runs => blk: {
+                _ = try reader.u64v();
+                _ = try reader.u16v();
+                _ = try reader.u16v();
+                break :blk try reader.u32v();
+            },
+            else => continue,
+        };
+        if (run_count > max_runs_per_row) return error.TooManyItems;
+        var index: u32 = 0;
+        while (index < run_count) : (index += 1) {
+            const run = try reader.run();
+            const cells = std.math.mul(u64, run.width, run.count) catch
+                return error.LengthOverflow;
+            total = std.math.add(u64, total, cells) catch return error.LengthOverflow;
+        }
+        if (reader.pos != reader.bytes.len) return error.MalformedRecord;
+    }
+    return total;
+}
+
 pub fn encodeImagePlacement(allocator: std.mem.Allocator, header: RecordHeader, p: ImagePlacement) DecodeError![]u8 {
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(allocator);
@@ -1036,6 +1071,35 @@ test "screen-stream: delta ops round-trip (set_runs, scroll_rect, clear_rect, cu
     const ir = try encodeImageRemove(allocator, .{ .kind = .image_remove }, .{ .base_generation = 10, .blob_id = 5 });
     defer allocator.free(ir);
     try testing.expectEqual(@as(u64, 5), (try decodeImageRemove(ir[record_header_size..])).blob_id);
+}
+
+test "screen-stream: catchup decoded cell accounting counts row and set-runs before apply" {
+    const allocator = std.testing.allocator;
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    var row_runs = [_]Run{
+        .{ .grapheme = "a", .width = 1, .count = 2 },
+        .{ .grapheme = "界", .width = 2, .count = 1 },
+    };
+    const row = try encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &row_runs },
+    );
+    defer allocator.free(row);
+    try appendRecord(&records, allocator, row);
+    var delta_runs = [_]Run{.{ .grapheme = "b", .width = 1, .count = 3 }};
+    const delta = try encodeSetRuns(
+        allocator,
+        .{ .kind = .set_runs, .generation = 1, .sequence = 1 },
+        .{ .base_generation = 1, .row_index = 0, .start_col = 0, .runs = &delta_runs },
+    );
+    defer allocator.free(delta);
+    try appendRecord(&records, allocator, delta);
+    try std.testing.expectEqual(@as(u64, 7), try decodedCellCount(records.items, codec_version));
+
+    try records.append(allocator, 0xff);
+    try std.testing.expectError(error.Truncated, decodedCellCount(records.items, codec_version));
 }
 
 test "screen-stream: image_blob round-trips decoded pixels + chunk header, rejects oversized chunk" {

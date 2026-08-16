@@ -166,6 +166,40 @@ pub const GenerationTransport = struct {
     rpc_response: rpc_executed_response.RpcExecutedResponse = .{},
     event_correlation: EventCorrelation = .{},
 
+    pub const CatchupProjection = struct {
+        slot_addr: usize,
+        host_id: u128,
+        runtime_id: u128,
+        role: contract.AttachmentRole,
+        slot_incarnation: u64,
+        node_incarnation: u64,
+        connection_generation: u64,
+        transport_incarnation: u64,
+        pid: u32,
+        process_nonce: u64,
+        owner_thread_id: std.Thread.Id,
+        bound_stream_id: u64,
+    };
+
+    fn catchupProjection(self: *const GenerationTransport) CapabilityError!CatchupProjection {
+        _ = try self.capabilities();
+        if (self.bound_stream_id == 0) return error.InvalidOwner;
+        return .{
+            .slot_addr = self.slot_addr,
+            .host_id = self.host_id,
+            .runtime_id = self.binding_reservation.identity.runtime_id,
+            .role = self.binding_reservation.identity.role,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .connection_generation = self.connection_generation,
+            .transport_incarnation = self.transport_incarnation,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_id = self.owner_thread_id,
+            .bound_stream_id = self.bound_stream_id,
+        };
+    }
+
     fn preparationEventView(
         self: *const GenerationTransport,
         owner: *const EventOwner,
@@ -820,6 +854,14 @@ pub const GenerationTransport = struct {
         };
     }
 };
+
+/// CR4 GenerationAttachment owner만 사용하는 closed projection bridge. GenerationTransport의
+/// 기존 public method facade inventory를 넓히지 않는다.
+pub fn catchupProjection(
+    transport: *const GenerationTransport,
+) CapabilityError!GenerationTransport.CatchupProjection {
+    return transport.catchupProjection();
+}
 
 pub fn sendResyncNonBlockingOwned(
     transport: *GenerationTransport,

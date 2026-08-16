@@ -27,6 +27,9 @@ const runtime_lifetime = @import("runtime_lifetime_owner.zig");
 const pending_event_owner_mod = @import("pending_event_owner.zig");
 const pending_event_preparation = @import("pending_event_preparation.zig");
 const runtime_pending_control = @import("runtime_pending_control.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const catchup_stage_contract = @import("catchup_stage_contract.zig");
+const client_deadline = @import("client_deadline.zig");
 const SettlementDeathCheckpoint = struct { attachment_addr: usize, marker_fd: std.c.fd_t, stage_raw: u8 };
 threadlocal var settlement_death_checkpoint: if (builtin.is_test) ?SettlementDeathCheckpoint else void =
     if (builtin.is_test) null else {};
@@ -82,6 +85,17 @@ pub const DeinitOutcome = enum {
     corrupt,
 };
 
+fn catchupStageLifecycleRawValid(value: *const catchup_stage_contract.Lifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(catchup_stage_contract.Lifecycle.pristine),
+        @intFromEnum(catchup_stage_contract.Lifecycle.staged),
+        @intFromEnum(catchup_stage_contract.Lifecycle.consumed),
+        @intFromEnum(catchup_stage_contract.Lifecycle.aborted),
+        => true,
+        else => false,
+    };
+}
+
 pub const GenerationAttachment = struct {
     pub fn pendingEventReleaseCallbackActive(self: *const GenerationAttachment) bool {
         return self.transport.pendingEventReleaseCallbackActive();
@@ -97,6 +111,72 @@ pub const GenerationAttachment = struct {
     payload: ?remote_attachment.RemoteAttachment = null,
     event_owner: generation_transport_mod.EventOwner = .{},
     event_generation_mirror: u64 = 0,
+    catchup_stage_owner: CatchupStageOwner = .{},
+
+    const CatchupStageOwner = struct {
+        const State = enum(u8) { idle, building, staged };
+
+        state: State = .idle,
+        next_generation: u64 = 1,
+        active_generation: u64 = 0,
+        seal: u64 = 0,
+        canonical: catchup_stage_contract.PreparedStage = .{},
+
+        fn stateRawValid(self: *const CatchupStageOwner) bool {
+            const raw = @as(*const u8, @ptrCast(&self.state)).*;
+            return switch (raw) {
+                @intFromEnum(State.idle), @intFromEnum(State.building), @intFromEnum(State.staged) => true,
+                else => false,
+            };
+        }
+
+        fn pristine(self: *const CatchupStageOwner) bool {
+            return self.stateRawValid() and self.state == .idle and
+                self.next_generation == 1 and self.active_generation == 0 and
+                self.seal == 0 and self.canonical.pristine();
+        }
+
+        fn resetActive(self: *CatchupStageOwner) void {
+            self.state = .idle;
+            self.active_generation = 0;
+            self.seal = 0;
+            self.canonical = .{};
+        }
+
+        fn stageSeal(stage: *const catchup_stage_contract.PreparedStage) u64 {
+            var seal: u64 = 0x4352344153544147;
+            inline for (.{
+                stage.self_addr,
+                stage.attachment_addr,
+                stage.client_slot_addr,
+                stage.slot_incarnation,
+                stage.node_incarnation,
+                stage.connection_generation,
+                stage.transport_incarnation,
+                stage.pid,
+                stage.process_nonce,
+                stage.owner_thread_id,
+                stage.stream_id,
+                stage.owner_generation,
+                stage.identity.subscription.value,
+                stage.identity.runtime_id,
+                stage.identity.connection.monotonic_id,
+                stage.identity.connection.slot_generation,
+                stage.identity.host_id,
+                stage.identity.request_nonce,
+                stage.snapshot.generation,
+                stage.snapshot.sequence,
+                stage.target.generation,
+                stage.target.sequence,
+                stage.accounting.batches,
+                stage.accounting.encoded_bytes,
+                stage.accounting.decoded_cells,
+                stage.deadline_expires_at_ns,
+                @intFromEnum(stage.lifecycle),
+            }) |value| seal = std.hash.Wyhash.hash(seal, std.mem.asBytes(&value));
+            return seal;
+        }
+    };
 
     pub fn initInPlace(
         out: *GenerationAttachment,
@@ -105,7 +185,7 @@ pub const GenerationAttachment = struct {
         if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or
             out.lifecycle != .pristine or out.payload != null or
             !@import("generation_event_contract.zig").pristineExact(&out.event_owner) or
-            out.event_generation_mirror != 0)
+            out.event_generation_mirror != 0 or !out.catchup_stage_owner.pristine())
             return error.DestinationOccupied;
         _ = adapter;
         out.self_addr = @intFromPtr(out);
@@ -585,7 +665,9 @@ pub const GenerationAttachment = struct {
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
     ) DeinitOutcome {
-        if (!rawLifecycleValid(&self.lifecycle)) return .corrupt;
+        if (!rawLifecycleValid(&self.lifecycle) or
+            !self.catchup_stage_owner.stateRawValid()) return .corrupt;
+        if (self.catchup_stage_owner.state != .idle) return .busy;
         if (self.lifecycle == .terminal) return .corrupt;
         if (!self.valid()) return .corrupt;
         switch (self.lifecycle) {
@@ -874,6 +956,164 @@ pub const GenerationAttachment = struct {
         io: std.Io,
     ) (@import("client.zig").ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!remote_attachment.PumpScreenResult {
         return self.payloadMut().pumpScreen(io);
+    }
+
+    /// Host barrier보다 앞선 exact same-stream batch만 적용하고 실제 assembler frontier가
+    /// target과 같을 때 final-address staged receipt를 게시한다. barrier 이후 batch는 읽지 않는다.
+    pub fn prepareCatchupStage(
+        self: *GenerationAttachment,
+        runtime_id: u128,
+        request_nonce: u128,
+        deadline: client_deadline.AbsoluteDeadline,
+        io: std.Io,
+    ) (@import("client.zig").DeadlineClientError ||
+        screen_assembler.ApplyError ||
+        remote_attachment.LeaseError ||
+        catchup_stage_contract.Error)!*const catchup_stage_contract.PreparedStage {
+        if (!self.catchup_stage_owner.stateRawValid() or
+            !self.valid() or self.lifecycle != .attached)
+            return error.InvalidAuthority;
+        if (self.catchup_stage_owner.state != .idle) return error.Busy;
+        const owner_generation = self.catchup_stage_owner.next_generation;
+        if (owner_generation == 0 or owner_generation == std.math.maxInt(u64))
+            return error.InvalidAuthority;
+        self.catchup_stage_owner.state = .building;
+        self.catchup_stage_owner.active_generation = owner_generation;
+        var owner_reserved = true;
+        defer if (owner_reserved) self.catchup_stage_owner.resetActive();
+        const projection = generation_transport_mod.catchupProjection(&self.transport) catch
+            return error.InvalidAuthority;
+        if (runtime_id == 0 or request_nonce == 0 or projection.bound_stream_id == 0 or
+            runtime_id != projection.runtime_id or projection.role != .observer)
+            return error.InvalidAuthority;
+        const screen = self.screenPtr() orelse return error.InvalidAuthority;
+        const snapshot = screen.catchupFrontier();
+        const expected = try self.batch_adapter.requestCatchupUntil(
+            runtime_id,
+            request_nonce,
+            deadline,
+        );
+        if (expected.host_id != projection.host_id or expected.runtime_id != runtime_id or
+            expected.request_nonce != request_nonce)
+            return error.InvalidAuthority;
+        const plan = try self.batch_adapter.readCatchupBarrierPlanUntil(expected, deadline);
+        if (plan.preceding_screen_batches > catchup_stage_contract.max_batches) {
+            self.poison(.event_queue_overflow) catch return error.InvalidAuthority;
+            return error.BatchLimitExceeded;
+        }
+
+        var accounting: catchup_stage_contract.Accounting = .{};
+        var remaining = plan.preceding_screen_batches;
+        while (remaining != 0) : (remaining -= 1) {
+            if (deadline.remainingNs() <= 0) {
+                self.poison(.read_timeout) catch return error.InvalidAuthority;
+                return error.DeadlineExceeded;
+            }
+            switch (try self.payloadMut().pumpCatchupScreen(io, &accounting)) {
+                .applied, .recovery_commit_pending => {},
+                .idle => {
+                    self.poison(.local_invariant_violation) catch return error.InvalidAuthority;
+                    return error.InvalidAuthority;
+                },
+                .terminal => return error.ConnectionClosed,
+            }
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch return error.InvalidAuthority;
+            return error.DeadlineExceeded;
+        }
+        const target = screen.catchupFrontier();
+        if (!std.meta.eql(target, plan.barrier.target)) {
+            self.poison(.peer_contract_violation) catch return error.InvalidAuthority;
+            return error.InvalidAuthority;
+        }
+        const canonical = &self.catchup_stage_owner.canonical;
+        canonical.* = .{
+            .self_addr = @intFromPtr(canonical),
+            .attachment_addr = @intFromPtr(self),
+            .client_slot_addr = projection.slot_addr,
+            .slot_incarnation = projection.slot_incarnation,
+            .node_incarnation = projection.node_incarnation,
+            .connection_generation = projection.connection_generation,
+            .transport_incarnation = projection.transport_incarnation,
+            .pid = projection.pid,
+            .process_nonce = projection.process_nonce,
+            .owner_thread_id = projection.owner_thread_id,
+            .stream_id = projection.bound_stream_id,
+            .owner_generation = owner_generation,
+            .identity = expected,
+            .snapshot = snapshot,
+            .target = target,
+            .accounting = accounting,
+            .deadline_expires_at_ns = deadline.expires_at_ns,
+            .lifecycle = .staged,
+        };
+        self.catchup_stage_owner.seal = CatchupStageOwner.stageSeal(canonical);
+        self.catchup_stage_owner.state = .staged;
+        self.catchup_stage_owner.next_generation = owner_generation + 1;
+        owner_reserved = false;
+        return canonical;
+    }
+
+    pub fn validateCatchupStage(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) bool {
+        return deadline.expires_at_ns == stage.deadline_expires_at_ns and
+            deadline.remainingNs() > 0 and self.validateCatchupStageAuthority(stage);
+    }
+
+    fn validateCatchupStageAuthority(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+    ) bool {
+        if (!self.catchup_stage_owner.stateRawValid() or
+            !self.valid() or self.lifecycle != .attached or
+            self.catchup_stage_owner.state != .staged or
+            stage != &self.catchup_stage_owner.canonical or
+            self.catchup_stage_owner.active_generation != stage.owner_generation or
+            !catchupStageLifecycleRawValid(&stage.lifecycle) or
+            self.catchup_stage_owner.seal != CatchupStageOwner.stageSeal(stage) or
+            stage.lifecycle != .staged or stage.self_addr != @intFromPtr(stage) or
+            stage.attachment_addr != @intFromPtr(self) or !stage.identity.valid() or
+            stage.deadline_expires_at_ns <= 0)
+            return false;
+        const projection = generation_transport_mod.catchupProjection(&self.transport) catch return false;
+        if (stage.client_slot_addr != projection.slot_addr or
+            stage.slot_incarnation != projection.slot_incarnation or
+            stage.node_incarnation != projection.node_incarnation or
+            stage.connection_generation != projection.connection_generation or
+            stage.transport_incarnation != projection.transport_incarnation or
+            stage.pid != projection.pid or stage.process_nonce != projection.process_nonce or
+            stage.owner_thread_id != projection.owner_thread_id or
+            stage.stream_id != projection.bound_stream_id or
+            stage.identity.host_id != projection.host_id or
+            stage.identity.runtime_id != projection.runtime_id or projection.role != .observer or
+            stage.accounting.batches > catchup_stage_contract.max_batches or
+            stage.accounting.encoded_bytes > catchup_stage_contract.max_encoded_bytes or
+            stage.accounting.decoded_cells > catchup_stage_contract.max_decoded_cells)
+            return false;
+        const screen = self.screenPtr() orelse return false;
+        const zero_accounting = stage.accounting.batches == 0 and
+            stage.accounting.encoded_bytes == 0 and stage.accounting.decoded_cells == 0;
+        const active_accounting = stage.accounting.batches != 0 and
+            stage.accounting.encoded_bytes != 0;
+        if ((!zero_accounting and !active_accounting) or
+            (zero_accounting != std.meta.eql(stage.snapshot, stage.target)))
+            return false;
+        return std.meta.eql(screen.catchupFrontier(), stage.target);
+    }
+
+    pub fn abortCatchupStage(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+    ) catchup_stage_contract.Error!void {
+        if (!self.validateCatchupStageAuthority(stage)) return error.InvalidAuthority;
+        self.catchup_stage_owner.state = .idle;
+        self.catchup_stage_owner.active_generation = 0;
+        self.catchup_stage_owner.seal = 0;
+        self.catchup_stage_owner.canonical.lifecycle = .aborted;
     }
 
     pub fn armReadPumpPoisonCapture(
@@ -1284,6 +1524,21 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
         try std.testing.expectError(error.InvalidOwner, attachment.sendInputNonBlocking("x"));
         try std.testing.expectError(error.InvalidOwner, attachment.pumpPendingOutput());
         try std.testing.expectError(error.InvalidOwner, attachment.fenceRevoke());
+    }
+    attachment = .{};
+    const owner_state_raw: *u8 = @ptrCast(&attachment.catchup_stage_owner.state);
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    var owner_raw: u16 = 3;
+    while (owner_raw <= std.math.maxInt(u8)) : (owner_raw += 1) {
+        owner_state_raw.* = @intCast(owner_raw);
+        try std.testing.expectError(
+            error.InvalidAuthority,
+            attachment.prepareCatchupStage(1, 1, deadline, std.testing.io),
+        );
+        var stage: catchup_stage_contract.PreparedStage = .{};
+        try std.testing.expect(!attachment.validateCatchupStage(&stage, deadline));
+        var adapter: host_adapter_mod.HostAdapter = undefined;
+        try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
     }
     attachment = .{};
 }

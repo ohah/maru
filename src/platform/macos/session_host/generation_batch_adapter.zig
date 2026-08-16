@@ -11,6 +11,8 @@ const incident_publication_contract = @import("maru").observability.incident_pub
 const generation_batch_registry = @import("generation_batch_registry.zig");
 const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const client_deadline = @import("client_deadline.zig");
 
 const Lifecycle = enum(u8) { pristine, prepared, live, draining, terminal };
 
@@ -191,6 +193,30 @@ pub const GenerationBatchAdapter = struct {
         if (self.borrowSlot(.draining) == null)
             @panic("invalid generation batch adapter drain completion");
         self.terminalizeUnchecked();
+    }
+
+    pub fn readCatchupBarrierPlanUntil(
+        self: *GenerationBatchAdapter,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError!client_mod.Client.CatchupBarrierPlan {
+        const slot = self.borrowSlot(.live) orelse return error.ProtocolError;
+        return slot.readAttachmentCatchupBarrierPlanUntil(self.stream_id, expected, deadline);
+    }
+
+    pub fn requestCatchupUntil(
+        self: *GenerationBatchAdapter,
+        runtime_id: u128,
+        request_nonce: u128,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError!catchup_barrier_contract.CatchupIdentity {
+        const slot = self.borrowSlot(.live) orelse return error.ProtocolError;
+        return slot.requestAttachmentCatchupUntil(
+            self.stream_id,
+            runtime_id,
+            request_nonce,
+            deadline,
+        );
     }
 
     /// 이동 가능한 payload의 ordered view를 pointer-free scratch로 바꾼 뒤 canonical registry가

@@ -1036,6 +1036,7 @@ pub const StreamBatch = struct {
 pub const BufferedCatchupBarrier = struct {
     stream_id: u64,
     barrier: catchup_barrier_contract.Barrier,
+    preceding_screen_batches: u32 = 0,
 };
 
 const GenerationBatchAccounting = struct {
@@ -10384,13 +10385,51 @@ pub const Client = struct {
                 return error.ProtocolError;
             }
         }
+        if (self.partial_batch) |partial| if (partial.stream_id == frame.header.stream_id) {
+            self.poisonMutationIo(.peer_contract_violation, execution_lease_held);
+            return error.ProtocolError;
+        };
         if (self.pending_catchup_barriers.items.len >= protocol.max_client_screen_items) {
             self.poisonMutationIo(.event_queue_overflow, execution_lease_held);
             return error.EventQueueFull;
         }
+        var preceding: u32 = 0;
+        for (self.pending_batches.items) |batch| if (batch.stream_id == frame.header.stream_id) {
+            preceding = std.math.add(u32, preceding, 1) catch {
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+        };
+        // A blocking RPC owns the socket reader. Screen frames that preceded this barrier on
+        // the wire can therefore still be in the raw pending-stream inbox rather than in
+        // `pending_batches`. Freeze the cut at barrier admission, before later same-stream
+        // frames can arrive while the RPC waits for its correlated response.
+        var target_batch_open = false;
+        for (self.pending_stream.items) |pending| {
+            if (pending.header.stream_id != frame.header.stream_id) continue;
+            if (pending.header.kind != .snapshot_chunk and pending.header.kind != .delta_chunk) {
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            }
+            if (!target_batch_open) {
+                target_batch_open = true;
+            }
+            if (protocol.Flags.hasEndStream(pending.header.flags)) {
+                preceding = std.math.add(u32, preceding, 1) catch {
+                    self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                    return error.ProtocolError;
+                };
+                target_batch_open = false;
+            }
+        }
+        if (target_batch_open) {
+            self.poisonMutationIo(.peer_contract_violation, execution_lease_held);
+            return error.ProtocolError;
+        }
         self.pending_catchup_barriers.append(self.allocator, .{
             .stream_id = frame.header.stream_id,
             .barrier = barrier,
+            .preceding_screen_batches = preceding,
         }) catch {
             self.poisonMutationIo(.local_resource_exhausted, execution_lease_held);
             return error.OutOfMemory;
@@ -11314,7 +11353,26 @@ pub const Client = struct {
         expected: catchup_barrier_contract.CatchupIdentity,
         deadline: client_deadline.AbsoluteDeadline,
     ) DeadlineClientError!catchup_barrier_contract.Barrier {
-        return self.readCatchupBarrierUntilWithOps(
+        return (try self.readCatchupBarrierPlanUntilWithOps(
+            stream_id,
+            expected,
+            deadline,
+            client_deadline.posix_ops,
+        )).barrier;
+    }
+
+    pub const CatchupBarrierPlan = struct {
+        barrier: catchup_barrier_contract.Barrier,
+        preceding_screen_batches: u32,
+    };
+
+    pub fn readCatchupBarrierPlanUntil(
+        self: *Client,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError!CatchupBarrierPlan {
+        return self.readCatchupBarrierPlanUntilWithOps(
             stream_id,
             expected,
             deadline,
@@ -11329,6 +11387,21 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError!catchup_barrier_contract.Barrier {
+        return (try self.readCatchupBarrierPlanUntilWithOps(
+            stream_id,
+            expected,
+            deadline,
+            ops,
+        )).barrier;
+    }
+
+    fn readCatchupBarrierPlanUntilWithOps(
+        self: *Client,
+        stream_id: u64,
+        expected: catchup_barrier_contract.CatchupIdentity,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError!CatchupBarrierPlan {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
         if (!self.runtime_catchup_barrier_v1) {
@@ -11345,7 +11418,7 @@ pub const Client = struct {
             self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
         }
-        const barrier = self.readCatchupBarrierWithIo(
+        const plan = self.readCatchupBarrierWithIo(
             stream_id,
             expected,
             deadline,
@@ -11365,7 +11438,7 @@ pub const Client = struct {
             self.poisonWithOps(.read_timeout, ops);
             return error.DeadlineExceeded;
         }
-        return barrier;
+        return plan;
     }
 
     fn readCatchupBarrierWithIo(
@@ -11374,7 +11447,7 @@ pub const Client = struct {
         expected: catchup_barrier_contract.CatchupIdentity,
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
-    ) DeadlineClientError!catchup_barrier_contract.Barrier {
+    ) DeadlineClientError!CatchupBarrierPlan {
         const io: StreamIo = .{ .deadline = .{
             .absolute = deadline,
             .ops = ops,
@@ -11392,7 +11465,10 @@ pub const Client = struct {
                     return error.DeadlineExceeded;
                 }
                 const owned = self.pending_catchup_barriers.orderedRemove(index);
-                return owned.barrier;
+                return .{
+                    .barrier = owned.barrier,
+                    .preceding_screen_batches = owned.preceding_screen_batches,
+                };
             }
             const maybe_batch = self.readOneBatchWithIo(io, null, .public) catch |err| switch (err) {
                 error.CapacityExhausted,
@@ -14684,13 +14760,24 @@ test "CR4a client demux는 capability와 identity drift를 barrier 소비 전에
         .identity = identity,
         .target = .{ .generation = 1, .sequence = 2 },
     };
-    inline for (.{ false, true }) |capable| {
+    inline for (.{ @as(u8, 0), 1, 2, 3 }) |hostile| {
         var fds: [2]c.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
         defer _ = c.close(fds[1]);
         var client = makeConnectedTestClient(allocator, fds[0]);
-        client.runtime_catchup_barrier_v1 = capable;
+        client.runtime_catchup_barrier_v1 = hostile != 0;
         defer client.deinit();
+        if (hostile == 2) {
+            client.partial_batch = .{ .stream_id = 7, .is_snapshot = false };
+            try client.partial_batch.?.bytes.appendSlice(allocator, "unfinished-target");
+        } else if (hostile == 3) {
+            const unfinished = try allocator.dupe(u8, "unfinished-raw-target");
+            try client.pending_stream.append(allocator, .{
+                .header = .{ .kind = .delta_chunk, .stream_id = 7 },
+                .payload = unfinished,
+            });
+            client.pending_stream_bytes = unfinished.len;
+        }
         const payload = try barrier.encode();
         const wire_frame = try framing.encodeFrame(
             allocator,
@@ -14700,13 +14787,17 @@ test "CR4a client demux는 capability와 identity drift를 barrier 소비 전에
         defer allocator.free(wire_frame);
         try socket_server.writeAll(fds[1], wire_frame);
         var expected = identity;
-        if (capable) expected.runtime_id += 1;
+        if (hostile == 1) expected.runtime_id += 1;
         const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
         try std.testing.expectError(
             error.ProtocolError,
             client.readCatchupBarrierUntil(7, expected, deadline),
         );
         try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(
+            client_poison.ConnectionReason.peer_contract_violation,
+            client.firstPoisonReason().?,
+        );
         try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
     }
 }
@@ -14932,23 +15023,43 @@ test "CR4a client demux는 blocking RPC 중 barrier를 canonical inbox에 보존
         &payload,
     );
     defer allocator.free(barrier_wire);
+    const screen_before_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "screen-before-barrier",
+    );
+    defer allocator.free(screen_before_wire);
+    const screen_after_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "screen-after-barrier",
+    );
+    defer allocator.free(screen_after_wire);
     const response_wire = try framing.encodeFrame(
         allocator,
         .{ .kind = .response, .request_id = 1 },
         "{\"result\":{}}",
     );
     defer allocator.free(response_wire);
+    try socket_server.writeAll(fds[1], screen_before_wire);
     try socket_server.writeAll(fds[1], barrier_wire);
+    try socket_server.writeAll(fds[1], screen_after_wire);
     try socket_server.writeAll(fds[1], response_wire);
     const response = try client.call("host.info", "{}");
     defer allocator.free(response);
     try std.testing.expectEqualStrings("{\"result\":{}}", response);
     try std.testing.expectEqual(@as(usize, 1), client.pending_catchup_barriers.items.len);
     const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
-    try std.testing.expectEqualDeep(
-        barrier,
-        try client.readCatchupBarrierUntil(7, identity, deadline),
-    );
+    const plan = try client.readCatchupBarrierPlanUntil(7, identity, deadline);
+    try std.testing.expectEqualDeep(barrier, plan.barrier);
+    try std.testing.expectEqual(@as(u32, 1), plan.preceding_screen_batches);
+    try std.testing.expectEqual(@as(usize, 2), client.pending_stream.items.len);
+    const before = (try client.readStreamBatch(7)).?;
+    defer before.deinit();
+    try std.testing.expectEqualStrings("screen-before-barrier", before.bytes);
+    const after = (try client.readStreamBatch(7)).?;
+    defer after.deinit();
+    try std.testing.expectEqualStrings("screen-after-barrier", after.bytes);
     try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.items.len);
 }
 

@@ -166,3 +166,62 @@ test "탐색기 루트가 여럿이면 자르지 않는다 — 다른 저장소�
     try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 2, "/tree-a"));
     try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 0, ""));
 }
+
+/// 링크된 워크트리의 `.git` **파일** 내용에서 실제 git 디렉터리를 푼다.
+///
+/// **왜 필요한가.** 워크트리에서는 `.git`이 디렉터리가 아니라 `gitdir: <경로>` 한 줄이 든 파일이고,
+/// index·HEAD는 그 경로(`<주 저장소>/.git/worktrees/<이름>/`) 아래에 산다. 그래서 `.git`을 감시하면
+/// **아무 일도 안 일어난다** — `git add`는 그 파일을 건드리지 않는다(실측: mtime 불변).
+///
+/// 형식은 git이 문서화한 대로다: `gitdir: ` 접두 + 경로 + 개행. 경로는 절대일 수도 상대(워크트리
+/// 디렉터리 기준)일 수도 있어 호출자가 `worktree_dir`을 준다.
+///
+/// 반환은 `buf`의 앞부분이다. 형식이 아니면 null — **추측하지 않는다**(엉뚱한 디렉터리를 감시하면
+/// 갱신이 안 되는 것을 넘어 남의 저장소 변화에 반응한다).
+pub fn gitDirFromDotGitFile(content: []const u8, worktree_dir: []const u8, buf: []u8) ?[]const u8 {
+    const prefix = "gitdir:";
+    if (!std.mem.startsWith(u8, content, prefix)) return null;
+    var value = content[prefix.len..];
+    // 첫 줄만 쓴다(뒤에 무엇이 오든 경로는 한 줄이다).
+    if (std.mem.indexOfAny(u8, value, "\r\n")) |end| value = value[0..end];
+    value = std.mem.trim(u8, value, " \t");
+    if (value.len == 0) return null;
+
+    if (std.fs.path.isAbsolute(value)) {
+        if (value.len > buf.len) return null;
+        @memcpy(buf[0..value.len], value);
+        return buf[0..value.len];
+    }
+    // 상대 경로는 **워크트리 디렉터리 기준**이다. 합쳐서 돌려주되 정규화(`..` 접기)는 하지 않는다 —
+    // 감시 대상은 커널이 여는 경로이고, 커널이 그 해석을 한다.
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ worktree_dir, value }) catch null;
+}
+
+test "워크트리 `.git` 파일에서 실제 git 디렉터리를 푼다" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 실측 형식(2026-08-16, git worktree add): 접두 + 절대경로 + 개행.
+    try std.testing.expectEqualStrings(
+        "/repo/.git/worktrees/wt",
+        gitDirFromDotGitFile("gitdir: /repo/.git/worktrees/wt\n", "/wt", &buf).?,
+    );
+    // 공백이 없는 판·CRLF·뒤에 다른 줄이 붙은 판도 같은 답이어야 한다.
+    try std.testing.expectEqualStrings("/a/b", gitDirFromDotGitFile("gitdir:/a/b", "/wt", &buf).?);
+    try std.testing.expectEqualStrings("/a/b", gitDirFromDotGitFile("gitdir: /a/b\r\n", "/wt", &buf).?);
+    try std.testing.expectEqualStrings("/a/b", gitDirFromDotGitFile("gitdir: /a/b\nextra\n", "/wt", &buf).?);
+}
+
+test "상대 경로는 워크트리 디렉터리 기준이다" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/wt/../.git/worktrees/wt",
+        gitDirFromDotGitFile("gitdir: ../.git/worktrees/wt\n", "/wt", &buf).?,
+    );
+}
+
+test "형식이 아니면 추측하지 않는다(엉뚱한 디렉터리를 감시하지 않는다)" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(gitDirFromDotGitFile("", "/wt", &buf) == null);
+    try std.testing.expect(gitDirFromDotGitFile("ref: refs/heads/main\n", "/wt", &buf) == null); // HEAD 파일을 잘못 읽은 경우
+    try std.testing.expect(gitDirFromDotGitFile("gitdir:\n", "/wt", &buf) == null); // 값이 비었다
+    try std.testing.expect(gitDirFromDotGitFile("gitdir:   \n", "/wt", &buf) == null);
+}

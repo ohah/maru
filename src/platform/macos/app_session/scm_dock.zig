@@ -314,6 +314,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
             // 여기서 따로 막지 않아도 caret이 조합 글자를 덮었다 사라졌다 하지 않는다.
             .caret_visible = self.blink_visible,
         },
+        .commit_run = commitRunState(self),
         // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
         .commit_enabled = projection.has_staged,
         // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
@@ -581,7 +582,7 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         // 좌표가 필요한 intent다 — 여기서는 포커스만 세우고 caret은 `focusCommitAt`이 놓는다
         // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 끝에 붙인다.
         .commit_focus => focusCommit(self),
-        .commit => {},
+        .commit => submitCommit(self),
         .scroll_thumb, .scroll_track => {},
     }
 }
@@ -857,6 +858,8 @@ pub fn drainScmWrite(self: *AppSession) void {
     // 사실 위에 옛 추측이 덧그려진다(§7 — 실패하면 되돌린다).
     clearScmPending(self);
 
+    // 커밋이었으면 **성공이든 실패든** 메시지 파일을 지우고, 성공했으면 상자를 비운다.
+    if (self.scm_commit_inflight) finishCommit(self, taken.ok());
     if (!taken.ok()) {
         clearScmWriteError(self);
         self.scm_write_error = writeErrorText(self, taken);
@@ -1313,3 +1316,204 @@ fn cutCommitSelection(self: *AppSession) void {
     _ = self.scm_commit_field.deleteSelection();
     afterEdit(self);
 }
+
+// ── 저장소별 초안(사용자 결정 2026-08-16) ─────────────────────────────────────────
+//
+// 목록·스크롤·선택은 저장소가 갈릴 때 **버린다**(`clearScmResult` — "다른 목록이므로 의미가 없다").
+// 메시지는 다르다: 사용자가 쓴 글이라 버리면 예고 없이 사라지고, 그대로 두면 **다른 저장소를 향해
+// 쓴 글로 커밋**하게 된다. 그래서 버리지도 두지도 않고 **저장소마다 따로 든다**.
+//
+// 워크트리도 자연히 갈린다 — 링크된 워크트리는 루트 경로가 다르므로 키가 다르다.
+
+/// 지금 편집 중인 글을 그 저장소의 초안으로 담는다. 빈 글은 담지 않고, 있던 초안은 지운다 —
+/// 비운 것도 사용자의 뜻이다.
+pub fn stashCommitDraft(self: *AppSession, repo: []const u8) void {
+    const text = self.scm_commit_field.text.items;
+    for (self.scm_commit_drafts.items, 0..) |*draft, index| {
+        if (!std.mem.eql(u8, draft.repo, repo)) continue;
+        if (text.len == 0) { // 비웠으면 초안도 없앤다
+            self.allocator.free(draft.repo);
+            self.allocator.free(draft.text);
+            _ = self.scm_commit_drafts.orderedRemove(index);
+            return;
+        }
+        const copy = self.allocator.dupe(u8, text) catch return;
+        self.allocator.free(draft.text);
+        draft.text = copy;
+        return;
+    }
+    if (text.len == 0) return;
+    // **가장 오래된 것부터** 버린다(가장 앞이 가장 오래됐다 — 새 초안은 뒤에 붙는다).
+    while (self.scm_commit_drafts.items.len >= app_session_mod.scm_commit_draft_max) {
+        const oldest = self.scm_commit_drafts.orderedRemove(0);
+        self.allocator.free(oldest.repo);
+        self.allocator.free(oldest.text);
+    }
+    const repo_copy = self.allocator.dupe(u8, repo) catch return;
+    const text_copy = self.allocator.dupe(u8, text) catch {
+        self.allocator.free(repo_copy);
+        return;
+    };
+    self.scm_commit_drafts.append(self.allocator, .{ .repo = repo_copy, .text = text_copy }) catch {
+        self.allocator.free(repo_copy);
+        self.allocator.free(text_copy);
+    };
+}
+
+/// 그 저장소의 초안을 편집기로 꺼낸다(없으면 빈 상자). **caret·스크롤도 함께 초기화한다** — 옛
+/// 저장소의 caret 오프셋은 새 글에서 다른 자리를 가리킨다.
+pub fn restoreCommitDraft(self: *AppSession, repo: []const u8) void {
+    self.scm_commit_field.clear();
+    self.scm_commit_first_row = 0;
+    for (self.scm_commit_drafts.items) |draft| {
+        if (!std.mem.eql(u8, draft.repo, repo)) continue;
+        self.scm_commit_field.setText(self.allocator, draft.text) catch self.scm_commit_field.clear();
+        break;
+    }
+    self.metal_dirty = true;
+}
+
+/// 저장소가 갈릴 때 초안을 옮겨 담는다. **`rememberGitRepo`가 부른다** — 그 함수가 옛 저장소와 새
+/// 저장소를 동시에 아는 유일한 자리다.
+pub fn switchCommitDraft(self: *AppSession, from: ?[]const u8, to: []const u8) void {
+    if (from) |old| {
+        if (std.mem.eql(u8, old, to)) return;
+        stashCommitDraft(self, old);
+    }
+    restoreCommitDraft(self, to);
+}
+
+// ── 커밋 실행(P3c-2) ───────────────────────────────────────────────────────────
+
+/// 커밋 메시지를 담을 임시 파일 경로. **저장소 밖**이다(캐시 디렉터리) — 저장소 안에 두면 그 파일이
+/// 작업트리에 나타나 목록에 뜨고, 최악에는 `add -A`가 자기를 담는다(턴 스냅샷 index가 같은 이유로
+/// 캐시에 산다). 창마다 다른 이름을 써서 두 창이 동시에 커밋해도 서로의 메시지를 덮지 않는다.
+pub fn testCommitMessagePath(self: *AppSession, buf: []u8) ?[]const u8 {
+    return commitMessagePath(self, buf);
+}
+
+fn commitMessagePath(self: *AppSession, buf: []u8) ?[]const u8 {
+    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+    if (home.len == 0) return null;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.fmt.bufPrintZ(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
+        _ = std.c.mkdir(dir.ptr, 0o700);
+    } else |_| {}
+    return std.fmt.bufPrint(buf, "{s}/.cache/maru/commit-msg-{d}", .{ home, @intFromPtr(self) }) catch null;
+}
+
+/// 커밋을 건다. **메시지는 argv가 아니라 파일로 간다**(쓰기 문서 §2 — 여러 줄·따옴표·비ASCII를 argv에
+/// 싣지 않는다).
+///
+/// 켤 수 있는지는 **여기서 다시 본다** — published tree의 버튼은 언제나 눌리고, 그 프레임의 상태가
+/// 지금과 다를 수 있다(§7 — 낙관하지 않는다).
+pub fn submitCommit(self: *AppSession) void {
+    if (self.scm_write_inflight != 0) return; // 쓰기는 하나씩(§6-2)
+    // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
+    _ = self.scm_commit_field.commitPreedit(self.allocator);
+    const message = std.mem.trim(u8, self.scm_commit_field.text.items, " \t\r\n");
+    if (message.len == 0) {
+        setScmWriteNotice(self, "커밋 메시지를 입력하세요");
+        return;
+    }
+    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
+    if (!model.has_staged) {
+        // **감추지 않고 이유를 말한다.** 버튼은 꺼진 색이지만 눌리기는 하므로, 눌렀는데 아무 일도
+        // 없으면 사용자는 앱이 멈춘 줄 안다.
+        setScmWriteNotice(self, "스테이지된 변경이 없습니다");
+        return;
+    }
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = commitMessagePath(self, &path_buf) orelse return;
+    // 메시지는 **원문 그대로** 쓴다(끝에 개행 하나만 보장 — git이 마지막 줄을 삼키지 않게).
+    writeCommitMessageFile(self, path, self.scm_commit_field.text.items) catch {
+        setScmWriteNotice(self, "커밋 메시지를 임시 파일에 쓰지 못했습니다");
+        return;
+    };
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_write_seq += 1;
+    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq)) {
+        deleteCommitMessageFile(path);
+        return;
+    }
+    self.scm_write_inflight = self.scm_write_seq;
+    self.scm_commit_inflight = true;
+    self.scm_commit_started_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+    clearScmWriteError(self);
+    self.metal_dirty = true;
+}
+
+/// 메시지 파일을 쓴다(0600 — 커밋 메시지도 사용자의 글이다).
+fn writeCommitMessageFile(self: *AppSession, path: []const u8, text: []const u8) !void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_z = try std.fmt.bufPrintZ(&buf, "{s}", .{path});
+    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    var written: usize = 0;
+    while (written < text.len) {
+        const n = std.c.write(fd, text.ptr + written, text.len - written);
+        if (n <= 0) return error.WriteFailed;
+        written += @intCast(n);
+    }
+    // **끝에 개행 하나**를 보장한다 — 없으면 git이 마지막 줄을 그대로 쓰긴 하지만 로그 도구마다
+    // 표시가 갈린다. 이미 개행으로 끝나면 더하지 않는다.
+    if (text.len == 0 or text[text.len - 1] != '\n') {
+        if (std.c.write(fd, "\n", 1) != 1) return error.WriteFailed;
+    }
+    _ = self;
+}
+
+fn deleteCommitMessageFile(path: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+    _ = std.c.unlink(path_z.ptr);
+}
+
+/// 커밋이 끝난 뒤 정리. **성공이든 실패든 메시지 파일을 지운다** — 남기면 다음 커밋이 남의 글을 쓸 수
+/// 있고(같은 이름을 재사용한다), 무엇보다 사용자의 글이 캐시에 굴러다닌다.
+fn finishCommit(self: *AppSession, ok: bool) void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (commitMessagePath(self, &path_buf)) |path| deleteCommitMessageFile(path);
+    self.scm_commit_inflight = false;
+    self.scm_commit_started_ns = 0;
+    if (!ok) return;
+    // 성공했으면 상자를 비운다 — 그 글은 이제 커밋에 들어갔고, 남겨 두면 다음 커밋에 다시 들어간다.
+    self.scm_commit_field.clear();
+    self.scm_commit_first_row = 0;
+    // 그 저장소의 초안도 함께 지운다(빈 글을 담으면 `stashCommitDraft`가 항목을 없앤다).
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_ops.gitRepoRoot(self, &repo_buf)) |repo| stashCommitDraft(self, repo);
+}
+
+/// 실패가 아니라 **안내**를 목록 위 한 줄로 낸다(빈 메시지·스테이지 0건처럼 git을 부르기도 전에 끝난
+/// 경우). `scm_write_error`와 같은 자리를 쓰는 이유는 사용자가 방금 누른 동작의 결과를 같은 곳에서
+/// 읽기 때문이다.
+fn setScmWriteNotice(self: *AppSession, text: []const u8) void {
+    clearScmWriteError(self);
+    self.scm_write_error = self.allocator.dupe(u8, text) catch null;
+    self.metal_dirty = true;
+}
+
+/// 커밋이 오래 걸리는가. **프로세스를 죽이지 않는다**(쓰기 문서 §3) — hook은 테스트 전체를 돌 수도
+/// 있고, 중간에 죽이면 index·`.git`이 어중간해진다. 상한은 **화면 문구**일 뿐이다.
+pub fn commitRunState(self: *const AppSession) component.types.CommitRun {
+    if (!self.scm_commit_inflight) return .idle;
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    const elapsed = now -| self.scm_commit_started_ns;
+    return if (elapsed >= commit_slow_after_ns) .slow else .running;
+}
+
+/// 이 시간을 넘으면 "오래 걸리는 중"으로 말한다. hook이 도는 저장소에서 몇 초는 정상이므로 짧게 잡으면
+/// 늘 그 문구가 뜬다.
+const commit_slow_after_ns: i128 = 5 * std.time.ns_per_s;

@@ -22,6 +22,7 @@ const scroll_ops = @import("scroll.zig");
 const diag_gate = app_session_mod.diag_gate;
 const git_command = app_session_mod.git_command;
 const layout_math = app_session_mod.layout_math;
+const scm_dock_ops = @import("scm_dock.zig");
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const editor_diff_ops = @import("editor_diff.zig");
@@ -90,22 +91,51 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
 pub fn rememberGitRepo(self: *AppSession, repo: []const u8) void {
     if (self.git_repo) |current| {
         if (std.mem.eql(u8, current, repo)) return;
+        // **초안을 옮겨 담는 유일한 자리**다 — 여기가 옛 저장소와 새 저장소를 동시에 아는 곳이다.
+        scm_dock_ops.switchCommitDraft(self, current, repo);
         self.allocator.free(current);
         self.git_repo = null;
+    } else {
+        scm_dock_ops.switchCommitDraft(self, null, repo);
     }
     self.git_repo = self.allocator.dupe(u8, repo) catch null;
 }
 
-/// 그 저장소의 `.git`을 감시 목록에 올린다. 같은 경로면 아무것도 하지 않는다(중복 요청 금지).
+/// 감시할 **실제 git 디렉터리**. 보통은 `<repo>/.git`이지만, 링크된 워크트리에서는 그것이 디렉터리가
+/// 아니라 `gitdir: <경로>` 한 줄이 든 **파일**이고 index·HEAD는 그 경로 아래에 산다.
+///
+/// **그래서 `.git`만 감시하면 워크트리에서는 아무 일도 안 일어난다** — `git add`가 그 파일을 건드리지
+/// 않기 때문이다(실측 2026-08-16: stage 전후 mtime 불변, 바뀐 것은
+/// `<주 저장소>/.git/worktrees/<이름>/index`였다). 목록이 터미널에서 친 git 명령에 반응하지 않는다.
+///
+/// 읽기에 실패하거나 형식이 아니면 `<repo>/.git`으로 되돌린다 — 일반 저장소가 그 답이고, 워크트리에서
+/// 실패하면 예전과 같은(갱신 없는) 상태일 뿐 **틀린 디렉터리를 감시하지는 않는다**.
+fn gitWatchTarget(self: *AppSession, repo: []const u8, buf: []u8) []const u8 {
+    var dot_git_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dot_git = std.fmt.bufPrint(&dot_git_buf, "{s}/.git", .{repo}) catch return repo;
+    // 디렉터리면 읽기가 실패한다 — 그게 일반 저장소이고, 폴백이 곧 정답이다.
+    const data = std.Io.Dir.cwd().readFileAlloc(self.io, dot_git, self.allocator, .limited(4096)) catch
+        return copyInto(dot_git, buf);
+    defer self.allocator.free(data);
+    return maru.session.repo_path.gitDirFromDotGitFile(data, repo, buf) orelse copyInto(dot_git, buf);
+}
+
+fn copyInto(source: []const u8, buf: []u8) []const u8 {
+    if (source.len > buf.len) return source;
+    @memcpy(buf[0..source.len], source);
+    return buf[0..source.len];
+}
+
+/// 그 저장소의 git 디렉터리를 감시 목록에 올린다. 같은 경로면 아무것도 하지 않는다(중복 요청 금지).
 pub fn ensureGitWatch(self: *AppSession, repo: []const u8) void {
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = gitWatchTarget(self, repo, &target_buf);
     if (self.git_watch_path) |current| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const want = std.fmt.bufPrint(&buf, "{s}/.git", .{repo}) catch return;
-        if (std.mem.eql(u8, current, want)) return;
+        if (std.mem.eql(u8, current, target)) return;
         self.allocator.free(current);
         self.git_watch_path = null;
     }
-    const path = std.fmt.allocPrint(self.allocator, "{s}/.git", .{repo}) catch return;
+    const path = self.allocator.dupe(u8, target) catch return;
     const request = self.allocator.dupe(u8, path) catch {
         self.allocator.free(path);
         return;

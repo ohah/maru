@@ -251,6 +251,62 @@ pub fn settingsFieldCount() usize {
     return n;
 }
 
+/// **지금 무엇을 입력받고 있나.** host 는 이 값으로 키보드 종류를 고른다(터미널이면 글자,
+/// 숫자 칸이면 숫자 패드). 브리지가 정하는 이유는 "무엇을 누르고 있나" 를 아는 쪽이 여기이기
+/// 때문이다 — host 가 화면 상태를 다시 추측하면 갈린다(§3 "판단은 코어가 한다").
+pub export fn maru_mobile_input_kind() u32 {
+    return if (set_edit != null) 1 else 0; // 0=글자(터미널) · 1=숫자
+}
+
+/// 친 글자를 편집 중인 숫자 칸에 넣는다. **숫자만 받는다** — host 가 숫자 패드를 띄우지만
+/// 하드웨어 키보드나 다른 IME 는 무엇이든 보낼 수 있다. 자릿수 상한을 넘으면 무시한다(조용히
+/// 자르지 않는다 — 넘친 것은 오류로 남긴다).
+fn editNumberInput(bytes: []const u8) void {
+    for (bytes) |c| {
+        if (c == '\n' or c == '\r') { // 확정
+            commitNumberEdit();
+            return;
+        }
+        if (c < '0' or c > '9') {
+            setLastError("settings_number_only");
+            continue;
+        }
+        if (set_edit_len == set_edit_buf.len) {
+            setLastError("settings_number_overflow");
+            return;
+        }
+        set_edit_buf[set_edit_len] = c;
+        set_edit_len += 1;
+    }
+}
+
+/// 편집을 확정한다 — **범위 밖이면 안 넣는다**(스키마의 range 가 그 판정의 단일 출처다).
+fn commitNumberEdit() void {
+    const i = set_edit orelse return;
+    defer {
+        set_edit = null;
+        set_edit_len = 0;
+    }
+    if (set_edit_len == 0) return; // 아무것도 안 치고 확정 — 값을 안 바꾼다
+    const row = set_items[i].field;
+    const v = std.fmt.parseInt(i64, set_edit_buf[0..set_edit_len], 10) catch {
+        setLastError("settings_number_parse");
+        return;
+    };
+    if (mobile_config.outOfRange(row.key, v)) {
+        setLastError("settings_number_range");
+        return;
+    }
+    settingChanged(row, v);
+}
+
+/// 지금 편집 중인 설정 줄(그 줄에 숫자를 친다). null 이면 편집 중이 아니다.
+var set_edit: ?usize = null;
+/// 편집 중인 값의 자릿수 버퍼. **확정 전에는 config 를 안 건드린다** — 중간 값(예: "5")이
+/// 그대로 적용되면 스크롤백이 5줄로 줄었다가 돌아오는 것이 화면에 보인다.
+var set_edit_buf: [12]u8 = undefined;
+var set_edit_len: usize = 0;
+
 /// 팝업이 한 번에 그릴 수 있는 항목 수(테스트·진단용).
 /// 지금 고른 프리셋의 색인(테스트·진단용). 어느 것과도 안 맞으면 `presetNone()`.
 pub fn presetIndexNow() i64 {
@@ -324,9 +380,14 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
     // 라우팅한다 — 지금은 받을 곳이 없으니 안 보낸다.
     //
-    // **버리되 신호는 남긴다**(§5). 반환값은 누적이라 안 늘어난 것으로만 알 수 있는데 두 host
-    // 다 그 값을 비교하지 않는다 — 그러면 사용자가 친 글자가 **아무 흔적 없이** 사라진다.
+    // **밀린 화면에서도 받는 자리가 생겼다.** 설정의 숫자 줄을 누르면 그 줄이 입력 대상이 되고
+    // 친 숫자가 거기로 간다 — 그전에는 키보드가 떠 있는데 글자를 버리고 있었다("키보드는 있는데
+    // 아무것도 안 써지는" 상태). 받을 곳이 없을 때만 버리고, 그때는 **신호를 남긴다**(§5).
     if (screen != .terminal) {
+        if (set_edit != null) {
+            editNumberInput(ptr[0..len]);
+            return @intCast(delivered_len);
+        }
         setLastError("input_screen_pushed");
         return @intCast(delivered_len);
     }
@@ -2497,9 +2558,17 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 switch (row.kind) {
                     .toggle => drawSetToggle(val != 0, right, ry + h / 2, tk),
                     .number => {
-                        var buf: [16]u8 = undefined;
-                        const t = std.fmt.bufPrint(&buf, "{d}", .{val}) catch "?";
-                        pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
+                        // **편집 중이면 치는 값을 보인다.** 어디로 가는지 안 보이면 "키보드가
+                        // 어디에 쓰이는지 모르는" 그 혼란이 그대로 남는다. 캐럿(▏)으로 그 줄이
+                        // 입력 대상임을 알린다.
+                        const editing = set_edit != null and set_edit.? == i;
+                        var buf: [20]u8 = undefined;
+                        const t = if (editing)
+                            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+                        else
+                            (std.fmt.bufPrint(&buf, "{d}", .{val}) catch "?");
+                        const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
+                        pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(role));
                     },
                     .choice => {
                         // **고른 것이 없으면 이름을 안 적는다**(§프리셋 되짚기). 아무거나 적으면
@@ -2643,10 +2712,6 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_pressed = null;
             if (set_open == null and !set_back_pressed) {
                 for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
-                    // **안 되는 줄은 눌린 티도 안 낸다.** 숫자 줄은 아직 편집 수단이 없는데
-                    // (키보드가 필요하다 — 별도 슬라이스) 눌림 배경까지 켜지면 **반응은 주고
-                    // 아무 일도 안 하는** 가장 헷갈리는 모양이 된다.
-                    if (set_items[i] == .field and set_items[i].field.kind == .number) break;
                     set_pressed = i;
                     break;
                 };
@@ -2714,7 +2779,13 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                     set_open = i;
                     set_pop_scroll = 0; // 열 때마다 처음부터 — 지난번 자리가 남으면 엉뚱한 데서 뜬다
                 },
-                .number => {}, // 숫자 편집은 이 슬라이스 밖(키보드가 필요하다)
+                .number => {
+                    // **그 줄을 입력 대상으로 삼는다.** 소프트 키보드는 이미 떠 있고(설정을
+                    // 열어도 안 내린다, §5.2) 지금까지 그 글자를 버리고 있었다 — 사용자에게는
+                    // "키보드는 있는데 아무것도 안 써지는" 상태였다.
+                    set_edit = i;
+                    set_edit_len = 0;
+                },
             };
         },
     }
@@ -2723,6 +2794,12 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
 
 /// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
 pub export fn maru_mobile_pop_screen() u32 {
+    if (set_edit != null) {
+        // 편집 중이면 **먼저 그것을 거둔다**(확정 없이 취소 — 값은 그대로).
+        set_edit = null;
+        set_edit_len = 0;
+        return 1;
+    }
     if (set_open != null) {
         set_open = null;
         return 1;

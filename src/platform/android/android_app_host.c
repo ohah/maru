@@ -106,6 +106,7 @@ static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선�
 static void recreateVulkan(struct android_app *app);
 // 정의는 아래고 프레임 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다.
 static void drainConfigWrite(struct android_app *app);
+static void syncInputKind(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -698,6 +699,7 @@ static void drawFrame(void) {
     // **저장 요청은 프레임마다 본다.** 값이 바뀐 그 프레임에만 실제 쓰기가 난다(가져가면
     // 요청이 사라진다) — 어느 화면에서 바뀌었든 한 자리에서 처리된다.
     if (g_app) drainConfigWrite(g_app);
+    syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -990,6 +992,34 @@ Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
     return (jint)popped;
 }
 
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeInputKind(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int k = maru_mobile_input_kind();
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)k;
+}
+
+/// 입력 종류가 바뀌면 **이미 떠 있는 키보드를 갈아 끼운다**. `inputType` 만 바꾸면 다음에 열 때나
+/// 반영된다 — 사용자는 숫자 칸을 눌렀는데 글자 키보드를 계속 본다.
+static void syncInputKind(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int k = maru_mobile_input_kind();
+    pthread_mutex_unlock(&g_bridge_lock);
+    static unsigned int last = 0xFFFFFFFF;
+    if (k == last) return;
+    last = k;
+    if (!g_activity_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "restartInput", "()V");
+    if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
+    (*vm)->DetachCurrentThread(vm);
+    LOGI("MARU_INPUT kind=%u keyboard_restarted", k);
+}
+
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta,
                                      jint unicode) {
@@ -1029,6 +1059,21 @@ Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jin
             // 주지 않으므로(그건 글자가 아니다) 이 자리가 없으면 **조용히 사라진다** — 블루투스
             // 키보드를 붙인 태블릿·크롬북에서 Ctrl+C 로 프로세스를 못 멈췄다. iOS 는 같은 키를
             // `charactersIgnoringModifiers` 로 태우고 있었다(대칭이 빠져 있었다).
+            // **숫자 칸을 편집 중이면 맨 글자도 받는다.** 소프트 키보드는 숫자를 `commitText`
+            // 로 주지만 하드웨어 키보드는 키 이벤트로 준다 — 그 자리에서 버리면 블루투스
+            // 키보드로는 설정값을 못 친다(에뮬레이터의 `input text` 도 같은 경로다).
+            if (unicode > 0 && !(mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD))) {
+                pthread_mutex_lock(&g_bridge_lock);
+                unsigned int kind = maru_mobile_input_kind();
+                if (kind == 1) {
+                    char one[4];
+                    int n = 0;
+                    if (unicode < 0x80) { one[n++] = (char)unicode; }
+                    if (n) maru_mobile_input((const unsigned char *)one, (unsigned long)n);
+                }
+                pthread_mutex_unlock(&g_bridge_lock);
+                if (kind == 1) return;
+            }
             if ((mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD)) && unicode > 0) {
                 pthread_mutex_lock(&g_bridge_lock);
                 unsigned int total = maru_mobile_key(MARU_KEY_CHAR, (unsigned int)unicode, mods);

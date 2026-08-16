@@ -480,7 +480,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 /// `--` 플래그도 못 치는 상태였다. Android 는 이미 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 로 같은
 /// 것을 끄고 있었고, 이쪽만 비어 있었다.
 ///
-/// `keyboardType` 은 **안 건드린다** — ASCII 배열을 요구하면 한글 입력이 불편해진다.
+/// `keyboardType` 은 **터미널에서는 안 건드린다** — ASCII 배열을 요구하면 한글 입력이 불편해진다.
+/// 다만 **설정의 숫자 칸**에서는 숫자 패드를 요구한다(`maru_mobile_input_kind() == 1`): 그 자리는
+/// 숫자만 받고, 숫자 패드에는 조합이 없어 IME 위험도 없다. 종류가 바뀌면 `reloadInputViews` 로
+/// **이미 떠 있는 키보드를 갈아 끼워야** 한다 — 안 그러면 다음에 열 때나 반영된다.
+- (UIKeyboardType)keyboardType {
+    return maru_mobile_input_kind() == 1 ? UIKeyboardTypeNumberPad : UIKeyboardTypeDefault;
+}
 - (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
 - (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
 - (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
@@ -948,6 +954,14 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.
     drainConfigWrite();
+    // 입력 종류가 바뀌면 키보드를 갈아 끼운다(Android `restartInput` 과 같은 자리).
+    static unsigned int last_kind = 0xFFFFFFFF;
+    unsigned int kind = maru_mobile_input_kind();
+    if (kind != last_kind) {
+        last_kind = kind;
+        [self reloadInputViews];
+        NSLog(@"MARU_INPUT kind=%u keyboard_reloaded", kind);
+    }
     // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어
     // write·아틀라스 만원)는 기록만 되고 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
     const char *err = maru_mobile_last_error();

@@ -228,6 +228,15 @@ unsigned int maru_mobile_scrollback_lines(void);
 /// 0 이면 저장할 것이 없다. **버퍼가 모자라면 0** 이고 `last_error` 에 남는다 — 잘린 config 를
 /// 쓰면 설정이 반만 남는다. host 는 이 바이트를 §2 경로에 **통째로** 쓴다.
 unsigned long maru_mobile_take_config_write(unsigned char *out, unsigned long cap);
+/// 지금 무엇을 입력받고 있나 — **키보드 종류를 host 가 이 값으로 고른다**. 0=글자(터미널),
+/// 1=숫자(설정의 숫자 칸). 브리지가 정하는 이유는 "무엇을 누르고 있나" 를 아는 쪽이 거기라서다.
+///
+/// **터미널은 계속 글자다** — 거기서 ASCII 배열을 요구하면 한글 입력이 불편해진다
+/// (docs/mobile-platform.md §IME). 숫자 칸만 숫자 패드로 바꾼다: 조합이 없어 IME 위험도 없다.
+///
+/// 값이 바뀌면 host 는 **이미 떠 있는 키보드를 갈아 끼워야** 한다(iOS `reloadInputViews`,
+/// Android `restartInput`). 안 그러면 종류만 바뀌고 화면의 키보드는 그대로다.
+unsigned int maru_mobile_input_kind(void);
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

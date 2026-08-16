@@ -2072,9 +2072,10 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     bridge.maru_mobile_clear_error();
 }
 
-// **아직 안 되는 줄은 눌린 티도 내면 안 된다.** 반응을 주고 아무 일도 안 하는 것이 가장
-// 헷갈린다 — 숫자 편집은 키보드가 필요해 별도 슬라이스다.
-test "숫자 줄은 눌림 표시를 안 낸다" {
+// **이제 숫자 줄도 눌린다** — 편집 대상이 되기 때문이다(M10e). 그전에는 편집 수단이 없어
+// 눌린 티만 내고 아무 일도 안 했고, 그래서 눌림 표시를 껐었다. 계약이 바뀌었으니 그 자리를
+// 뒤집어 잰다: **누르면 반응이 있고, 실제로 편집이 시작된다.**
+test "숫자 줄은 눌리고 편집이 시작된다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     const span = chromeClaimSpan(402, 874 - 22);
     _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
@@ -2088,44 +2089,117 @@ test "숫자 줄은 눌림 표시를 안 낸다" {
         if (bridge.settingsRows()[idx].kind != .number) continue;
         _ = bridge.maru_mobile_chrome_pointer(0, 200, y); // 누른 채로 둔다
         const pressed = bridge.maru_mobile_build(402, 874, now());
-        try std.testing.expectEqual(base, pressed); // 배경 quad 가 안 늘었다 = 눌린 티가 없다
-        _ = bridge.maru_mobile_chrome_pointer(3, 200, y);
+        try std.testing.expect(pressed > base); // 눌림 배경이 생겼다
+        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_input_kind()); // 편집 시작
         tested = true;
         break;
     }
     try std.testing.expect(tested);
 
     _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
 
-// **여러 번 바꿔도 본문이 안 부푼다.** 매번 원본에 얹는 것이라 같은 키를 반복해 바꾸면 줄이
-// 쌓일 수 있다 — 그러면 파일이 무한히 자란다.
-test "같은 키를 여러 번 바꿔도 줄이 안 쌓인다" {
-    const src = "cursor.blink = true\n";
-    bridge.maru_mobile_load_config(src, src.len);
-    _ = bridge.maru_mobile_build(402, 874, now());
+// ── 숫자 입력 (M10e) ──────────────────────────────────────────────────────────
+//
+// **설정 화면에는 이미 키보드가 떠 있다**(앱이 안 내린다, UX §5.2). 지금까지 그 글자를 버려서
+// 사용자에게는 "키보드는 있는데 아무것도 안 써지는" 상태였다 — 숫자 칸을 입력 대상으로 만든다.
 
-    var out: [4096]u8 = undefined;
-    var last: usize = 0;
-    var i: u32 = 0;
-    while (i < 6) : (i += 1) {
-        try std.testing.expect(openSettingsAndTap("cursor.blink"));
-        const n = bridge.maru_mobile_take_config_write(&out, out.len);
-        try std.testing.expect(n > 0);
-        // 줄 수가 그대로여야 한다(값만 바뀐다).
-        var lines: usize = 0;
-        for (out[0..n]) |c| if (c == '\n') {
-            lines += 1;
-        };
-        try std.testing.expectEqual(@as(usize, 1), lines);
-        if (last != 0) try std.testing.expect(n <= last + 1);
-        last = n;
-        _ = bridge.maru_mobile_pop_screen();
+fn tapNumberRow(key: []const u8) bool {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, key)) continue;
+        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        return true;
     }
+    return false;
+}
+
+test "숫자 줄을 누르면 입력 대상이 되고 host 가 숫자 키보드를 띄운다" {
     const empty = "";
     bridge.maru_mobile_load_config(empty, 0);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 터미널은 글자
+
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_input_kind()); // 숫자 패드
+
+    _ = bridge.maru_mobile_pop_screen(); // 편집 취소
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+test "친 숫자가 확정되면 config 와 파일에 간다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+
+    _ = bridge.maru_mobile_input("250", 3);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 1000), bridge.maru_mobile_scrollback_lines()); // 확정 전엔 안 바뀐다
+
+    _ = bridge.maru_mobile_input("\n", 1); // 확정
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 250), bridge.maru_mobile_scrollback_lines());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 편집이 끝났다
+
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_take_config_write(&out, out.len);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "scrollback.lines = 250") != null);
+
+    _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **범위는 스키마가 정한다.** 화면이 숫자를 따로 적으면 파일 파싱과 GUI 가 다른 값을 받아들인다.
+test "범위 밖 숫자는 안 들어가고 조용하지 않다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(tapNumberRow("cursor.blink-interval-ms"));
+
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("50\n", 3); // 최소가 100 이다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("settings_number_range", std.mem.span(bridge.maru_mobile_last_error()));
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&out_buf, out_buf.len));
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+var out_buf: [4096]u8 = undefined;
+
+// 숫자 칸에 글자가 오면(하드웨어 키보드·다른 IME) **버리되 신호를 남긴다**.
+test "숫자 칸은 숫자만 받고 그 사실을 남긴다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(tapNumberRow("scrollback.lines"));
+
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("a", 1);
+    try std.testing.expectEqualStrings("settings_number_only", std.mem.span(bridge.maru_mobile_last_error()));
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }

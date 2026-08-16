@@ -98,6 +98,9 @@ pub const Result = struct {
     branch_numstat: []u8 = &.{},
     /// 그 갈린 지점의 커밋 해시. 브랜치 섹션 행의 diff 왼쪽이 이 커밋이다.
     merge_base: []u8 = &.{},
+    /// `git worktree list --porcelain` 출력. 도크가 워크트리마다 한 줄을 세우기 때문에 읽는다(§3.5.1c).
+    /// **선택이다** — 실패해도 목록은 성립한다(그 저장소는 자기 한 줄로만 뜬다).
+    worktrees: []u8 = &.{},
     /// 마지막 턴 스냅샷 이후 바뀐 것(§6.1). 스냅샷이 없으면 빈 문자열이고 그 섹션은 안 나온다.
     turn_name_status: []u8 = &.{},
     turn_numstat: []u8 = &.{},
@@ -116,6 +119,7 @@ pub const Result = struct {
         allocator.free(self.branch_name_status);
         allocator.free(self.branch_numstat);
         allocator.free(self.merge_base);
+        allocator.free(self.worktrees);
         allocator.free(self.turn_name_status);
         allocator.free(self.turn_numstat);
         self.* = .{};
@@ -887,6 +891,9 @@ fn worker(job: *Job) void {
         // 그때는 목록이 `numstat_staged`로 증감을 붙인다. 여기서 ok를 내리면 첫 커밋 전 저장소가 통째로
         // "git 읽기에 실패했습니다"가 된다.
         .{ git_command.Kind.numstat_head, "numstat_head" },
+        // **워크트리 목록도 선택이다.** 아주 오래된 git에는 `worktree list`가 없고, 그때는 그 저장소가
+        // 목록에 자기 한 줄로만 뜬다 — 워크트리를 못 찾는 것이지 저장소를 못 읽는 것이 아니다.
+        .{ git_command.Kind.worktree_list, "worktrees" },
     }) |pair| {
         if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
             @field(result, pair[1]) = out.bytes;

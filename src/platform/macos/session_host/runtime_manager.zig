@@ -2411,7 +2411,7 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
 
     // snapshot이 실 core를 lock한 채 투영해 첫 record(screen_meta)에 spawn 크기(24x6)를 담는다.
-    const snap = try ops.snapshot(ops.ctx, rid, allocator);
+    const snap = try ops.snapshot(ops.ctx, rid, 0, allocator);
     defer allocator.free(snap);
     var rs = screen_stream.RecordStream{ .bytes = snap };
     const first = (try rs.next()).?;
@@ -2422,7 +2422,7 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     try std.testing.expectEqual(@as(u16, 6), meta.rows);
 
     // 없는 runtime_id는 RuntimeNotFound(다른 runtime으로 새지 않는다).
-    try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, allocator));
+    try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, 0, allocator));
 
     ops.terminate(ops.ctx, rid);
 }

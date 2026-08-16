@@ -4138,11 +4138,12 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = &.{
                 "CR4a actual socket observer",
+                "CR4a actual socket catchup hostile은",
                 "CR4a observer 실패",
             },
         });
         const run_cr4a_runtime_tests = b.addRunArtifact(cr4a_runtime_tests);
-        run_cr4a_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_runtime_tests.addArg("--maru-expect-tests=3");
         run_cr4a_runtime_tests.setCwd(b.path("."));
         session_host_cr4a_step.dependOn(&run_cr4a_runtime_tests.step);
 
@@ -4184,6 +4185,44 @@ pub fn build(b: *std.Build) void {
         const run_cr4a_catchup_contract_tests = b.addRunArtifact(cr4a_catchup_contract_tests);
         run_cr4a_catchup_contract_tests.addArg("--maru-expect-tests=2");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_contract_tests.step);
+
+        const cr4a_catchup_stage_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/catchup_stage_contract.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a catchup"},
+        });
+        const run_cr4a_catchup_stage_contract_tests = b.addRunArtifact(cr4a_catchup_stage_contract_tests);
+        run_cr4a_catchup_stage_contract_tests.addArg("--maru-expect-tests=2");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_stage_contract_tests.step);
+
+        const cr4a_catchup_cell_accounting_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/screen_stream.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+            }),
+            .filters = &.{"screen-stream: catchup decoded cell accounting"},
+        });
+        const run_cr4a_catchup_cell_accounting_tests = b.addRunArtifact(cr4a_catchup_cell_accounting_tests);
+        run_cr4a_catchup_cell_accounting_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_cell_accounting_tests.step);
+
+        const cr4a_catchup_byte_cap_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_attachment.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a catchup apply leaf는"},
+        });
+        const run_cr4a_catchup_byte_cap_tests = b.addRunArtifact(cr4a_catchup_byte_cap_tests);
+        run_cr4a_catchup_byte_cap_tests.addArg("--maru-expect-tests=2");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_byte_cap_tests.step);
 
         const cr4a_catchup_host_state_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

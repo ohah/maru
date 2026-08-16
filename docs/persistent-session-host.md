@@ -683,7 +683,7 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
   generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
   candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
-  Debug 3,104바이트/ReleaseFast 3,088바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
+  CR4 staged receipt owner 반영 뒤 Debug 3,424바이트/ReleaseFast 3,408바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
   teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행한다. e3a2는 host base
   SSOT인 generation당 `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은
   64개 fixed inventory를 검증한다. 둘의 곱인 `max_tracked_bytes`는 구조적 표현 한계이고 app-global 정책 예산은 아니다.
@@ -721,9 +721,10 @@ resync_needed,frame_summary_ready,frame_summary,observation,connection_generatio
 generation의 resize wire sequence·baseline과 pump summary를 뜻한다. payload queue인 `direct_input`, `direct_input_offset`,
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
-CR3c2의 process/slot/node incarnation 결속까지 포함한 현재 `RemoteGeneration`/`RemoteRuntime` 크기는 Debug
-CR4a screen frontier 반영 뒤 Debug `3,088/9,904`, ReleaseFast `3,072/9,856`이며, CR3c2의 authority seal 128 KiB에
-screen sequence 64 KiB가 추가된다(4,096 runtime 상한). CR2a는 이 물리적
+CR3c2의 process/slot/node incarnation 결속과 CR4a staged receipt owner까지 포함한 현재
+`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,376/10,192`, ReleaseFast `3,360/10,144`다.
+CR3c2의 authority seal 128 KiB와 screen sequence 64 KiB에 더해 staged receipt owner는
+runtime당 288바이트, 4,096 runtime 상한에서 1,152 KiB를 추가한다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -844,7 +845,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    함께 대조한다. GUI-local Client node/connection generation은 wire identity가 아니라 후속 final-address staged receipt에
    별도로 봉인한다. capability 없는 peer에게는 발행하지 않는다. client는 raw fd를
    별도로 읽지 않고 `GenerationAttachment`의 기존 multi-stream demux와 bounded inbox를 통해서만 barrier를 소비한다. 동일
-   absolute deadline과 frame/encoded-byte/decoded-cell/delta-batch cap 아래 선행 same-stream chunk를 전부 적용한 뒤 실제
+   absolute deadline과 batch 64개, encoded 16 MiB, decoded cell 1,048,576개의 catch-up 전용 cap 아래 선행 same-stream chunk를 전부 적용한 뒤 실제
    assembler frontier와 target이 exact 같을 때만 final-address staged receipt를 봉인한다. foreign/stale/duplicate barrier,
    target behind/ahead, generation gap, partial frame, EOF, deadline, cap+1과 seal OOM은 receipt 0이다. Client replacement 게시
    뒤 bytes를 소비한 실패는 old graph로 rollback하지 않고 candidate와 새 Client를 fail-close해 다음 replacement 시도로
@@ -2220,8 +2221,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 9,904/ReleaseFast 9,856 bytes이며 owner 외 remainder는
-   각각 7,184/7,136 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 10,192/ReleaseFast 10,144 bytes이며 owner 외 remainder는
+   각각 7,472/7,424 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
    budget으로 둔다. 최대 4,096 runtime에서 두 inline owner의 aggregate 상한은 17 MiB다. 이 size나 aggregate 증가는
    별도 문서 변경 없이는 허용하지 않는다.
 

@@ -10,6 +10,9 @@
 //! 위에 얹는다 — 여기 `pumpDelta`는 그 배선이 부를 수 있는 최소 단위(한 delta batch 소비)다. macOS 전용(client·Surface·terminal).
 
 const std = @import("std");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const catchup_stage_contract = @import("catchup_stage_contract.zig");
+const client_deadline = @import("client_deadline.zig");
 const maru = @import("maru");
 const terminal = maru.terminal;
 const Surface = maru.session.Surface;
@@ -8601,7 +8604,18 @@ const R2aTestGeneration = if (builtin.is_test) struct {
     }
 } else struct {};
 
-test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapshot을 조립한다" {
+const Cr4aCatchupStageCase = enum {
+    success,
+    barrier_only_success,
+    generation_gap,
+    malformed_delta,
+    batch_cap_plus_one,
+    cell_cap_plus_one,
+    request_oom,
+    missing_barrier,
+};
+
+fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -8641,14 +8655,85 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
         records.items,
     );
     defer allocator.free(snapshot);
+    var delta_wire: std.ArrayListUnmanaged(u8) = .empty;
+    defer delta_wire.deinit(allocator);
+    const delta_count: u64 = if (selected == .barrier_only_success)
+        0
+    else if (selected == .batch_cap_plus_one)
+        catchup_stage_contract.max_batches + 1
+    else
+        1;
+    var delta_index: u64 = 0;
+    while (delta_index < delta_count) : (delta_index += 1) {
+        var delta_records: std.ArrayListUnmanaged(u8) = .empty;
+        defer delta_records.deinit(allocator);
+        if (selected == .malformed_delta) {
+            try delta_records.appendSlice(allocator, "not-a-screen-record");
+        } else {
+            var delta_runs = [_]screen_stream.Run{.{
+                .grapheme = "m",
+                .width = 1,
+                .count = if (selected == .cell_cap_plus_one)
+                    @intCast(catchup_stage_contract.max_decoded_cells + 1)
+                else
+                    1,
+            }};
+            const sequence = if (selected == .generation_gap) 2 else delta_index + 1;
+            const delta_record = try screen_stream.encodeSetRuns(
+                allocator,
+                .{ .kind = .set_runs, .generation = 1, .sequence = sequence },
+                .{ .base_generation = 1, .row_index = 0, .start_col = 0, .runs = &delta_runs },
+            );
+            defer allocator.free(delta_record);
+            try screen_stream.appendRecord(&delta_records, allocator, delta_record);
+        }
+        const delta = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .delta_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+            delta_records.items,
+        );
+        defer allocator.free(delta);
+        try delta_wire.appendSlice(allocator, delta);
+    }
+    const request_nonce: u128 = 0x00112233445566778899aabbccddeeff;
+    const catchup_identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 1 },
+        .runtime_id = 0xaa,
+        .connection = .{ .monotonic_id = 1, .slot_generation = 1 },
+        .host_id = 0x44,
+        .request_nonce = request_nonce,
+    };
+    const barrier_payload = try (catchup_barrier_contract.Barrier{
+        .identity = catchup_identity,
+        .target = .{
+            .generation = 1,
+            .sequence = if (selected == .barrier_only_success)
+                0
+            else if (selected == .generation_gap)
+                2
+            else if (selected == .batch_cap_plus_one)
+                delta_count
+            else
+                1,
+        },
+    }).encode();
+    const barrier = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .screen_frontier_barrier, .stream_id = 9 },
+        &barrier_payload,
+    );
+    defer allocator.free(barrier);
 
     const Peer = struct {
         fn run(
             fd: c.fd_t,
             response_wire: []const u8,
             snapshot_wire: []const u8,
+            delta_frames_wire: []const u8,
+            barrier_wire: []const u8,
             release: *std.atomic.Value(u8),
             observer_seen: *std.atomic.Value(u8),
+            peer_stage: *std.atomic.Value(u8),
         ) void {
             defer _ = c.close(fd);
             const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
@@ -8658,8 +8743,36 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
                 std.mem.indexOf(u8, request.payload, "\"mode\":\"observer\"") != null;
             observer_seen.store(@intFromBool(observed), .release);
             if (!observed) return;
+            peer_stage.store(1, .release);
             socket_server.writeAll(fd, response_wire) catch return;
             socket_server.writeAll(fd, snapshot_wire) catch return;
+            const catchup_request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(catchup_request.payload);
+            if (catchup_request.header.kind != .request or
+                std.mem.indexOf(u8, catchup_request.payload, "\"method\":\"runtime.catchup\"") == null or
+                std.mem.indexOf(u8, catchup_request.payload, "00112233445566778899aabbccddeeff") == null)
+                return;
+            peer_stage.store(2, .release);
+            const catchup_response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = catchup_request.header.request_id },
+                "{\"result\":{\"catchup\":\"armed\",\"stream_id\":9," ++
+                    "\"request_nonce\":\"00112233445566778899aabbccddeeff\"," ++
+                    "\"host_id\":\"00000000000000000000000000000044\"," ++
+                    "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+                    "\"subscription_id\":\"0000000000000001\"," ++
+                    "\"connection_id\":\"0000000000000001\"," ++
+                    "\"connection_generation\":\"0000000000000001\"}}",
+            ) catch return;
+            defer std.heap.page_allocator.free(catchup_response);
+            socket_server.writeAll(fd, catchup_response) catch return;
+            peer_stage.store(3, .release);
+            socket_server.writeAll(fd, delta_frames_wire) catch return;
+            peer_stage.store(4, .release);
+            if (barrier_wire.len != 0) {
+                socket_server.writeAll(fd, barrier_wire) catch return;
+                peer_stage.store(5, .release);
+            }
             const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
             while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
         }
@@ -8677,8 +8790,10 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
     }
     var release = std.atomic.Value(u8).init(0);
     var observer_seen = std.atomic.Value(u8).init(0);
+    var peer_stage = std.atomic.Value(u8).init(0);
     var peer = try std.Thread.spawn(.{}, Peer.run, .{
-        fds[1], response, snapshot, &release, &observer_seen,
+        fds[1],                                            response, snapshot,       delta_wire.items,
+        if (selected == .missing_barrier) "" else barrier, &release, &observer_seen, &peer_stage,
     });
     peer_fd_owned = false;
     defer {
@@ -8696,6 +8811,7 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
         .host_id = 0x44,
         .parser = framing.FrameParser.init(allocator),
         .attachment_capabilities = .{ .peer_attach_generation = true },
+        .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
         .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
     };
@@ -8712,6 +8828,7 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
         .host_id = 0x44,
         .parser = framing.FrameParser.init(allocator),
         .attachment_capabilities = .{ .peer_attach_generation = true },
+        .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
         .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
     };
@@ -8763,10 +8880,168 @@ test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapsh
     }
     try std.testing.expectEqual(remote_attachment.Role.observer, candidate.attachment.statePtr().role);
     try std.testing.expectEqual(@as(u21, 'n'), candidate.attachment.screenPtr().?.grid.cells[0].codepoint);
+    var catchup_failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const current_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    const original_client_allocator = current_client.allocator;
+    if (selected == .request_oom) current_client.allocator = catchup_failing.allocator();
+    defer current_client.allocator = original_client_allocator;
+    var staged: ?*const catchup_stage_contract.PreparedStage = null;
+    const catchup_deadline = try client_deadline.AbsoluteDeadline.after(
+        std.testing.io,
+        if (selected == .missing_barrier) 100 * std.time.ns_per_ms else std.time.ns_per_s,
+    );
+    var prepare_error: ?anyerror = null;
+    switch (candidate.attachment) {
+        .generation => |*generation| {
+            staged = generation.prepareCatchupStage(
+                0xaa,
+                request_nonce,
+                catchup_deadline,
+                std.testing.io,
+            ) catch |err| blk: {
+                prepare_error = err;
+                break :blk null;
+            };
+        },
+        .legacy => return error.InvalidAuthority,
+    }
+    const success_case = selected == .success or selected == .barrier_only_success;
+    if (!success_case) {
+        const expected_error: anyerror = switch (selected) {
+            .generation_gap => error.GenerationGap,
+            .malformed_delta => error.Truncated,
+            .batch_cap_plus_one => error.BatchLimitExceeded,
+            .cell_cap_plus_one => error.CellLimitExceeded,
+            .request_oom => error.OutOfMemory,
+            .missing_barrier => error.DeadlineExceeded,
+            else => unreachable,
+        };
+        const expected_poison: client_poison.ConnectionReason = switch (selected) {
+            .generation_gap, .malformed_delta => .frame_malformed,
+            .batch_cap_plus_one, .cell_cap_plus_one => .event_queue_overflow,
+            .request_oom => .local_resource_exhausted,
+            .missing_barrier => .read_timeout,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(expected_error, prepare_error.?);
+        try std.testing.expectEqual(expected_poison, current_client.firstPoisonReason().?);
+        const expected_peer_stage: u8 = switch (selected) {
+            .request_oom => 1,
+            .missing_barrier => 4,
+            else => 5,
+        };
+        var peer_stage_wait: usize = 0;
+        while (peer_stage.load(.acquire) != expected_peer_stage and peer_stage_wait < 2000) : (peer_stage_wait += 1) {
+            const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+            _ = c.nanosleep(&delay, null);
+        }
+        try std.testing.expectEqual(
+            expected_peer_stage,
+            peer_stage.load(.acquire),
+        );
+        try std.testing.expect(staged == null);
+        try std.testing.expectEqual(
+            @as(u21, 'n'),
+            candidate.attachment.screenPtr().?.grid.cells[0].codepoint,
+        );
+        try std.testing.expectEqual(@as(c.fd_t, -1), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
+        try std.testing.expectEqual(unavailable_generation, try runtime.generation_owner.currentGeneration());
+        try std.testing.expectEqual(unavailable_source, proxy.current);
+        try runtime.generation_owner.abort(&prepared);
+        try std.testing.expect(runtime.generation_owner.slot.candidate == null);
+        return;
+    }
+    try std.testing.expect(prepare_error == null);
+    const staged_receipt = staged.?;
+    try std.testing.expectEqual(catchup_stage_contract.Lifecycle.staged, staged_receipt.lifecycle);
+    const expected_batches: u32 = if (selected == .barrier_only_success) 0 else 1;
+    const expected_cells: u64 = if (selected == .barrier_only_success) 0 else 1;
+    const expected_sequence: u64 = if (selected == .barrier_only_success) 0 else 1;
+    const expected_codepoint: u21 = if (selected == .barrier_only_success) 'n' else 'm';
+    try std.testing.expectEqual(expected_batches, staged_receipt.accounting.batches);
+    try std.testing.expectEqual(expected_cells, staged_receipt.accounting.decoded_cells);
+    try std.testing.expectEqual(expected_sequence, staged_receipt.target.sequence);
+    try std.testing.expectEqual(expected_codepoint, candidate.attachment.screenPtr().?.grid.cells[0].codepoint);
+    switch (candidate.attachment) {
+        .generation => |*generation| {
+            try std.testing.expect(generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            try std.testing.expectError(
+                error.Busy,
+                generation.prepareCatchupStage(
+                    0xaa,
+                    request_nonce + 1,
+                    catchup_deadline,
+                    std.testing.io,
+                ),
+            );
+            var copied = staged_receipt.*;
+            try std.testing.expect(!generation.validateCatchupStage(&copied, catchup_deadline));
+            const mutable_stage = @constCast(staged_receipt);
+            mutable_stage.node_incarnation +%= 1;
+            try std.testing.expect(!generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            mutable_stage.node_incarnation -%= 1;
+            mutable_stage.identity.request_nonce +%= 1;
+            try std.testing.expect(!generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            mutable_stage.identity.request_nonce -%= 1;
+            mutable_stage.snapshot.sequence +%= 1;
+            try std.testing.expect(!generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            mutable_stage.snapshot.sequence -%= 1;
+            mutable_stage.accounting.batches +%= 1;
+            try std.testing.expect(!generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            mutable_stage.accounting.batches -%= 1;
+            const lifecycle_raw: *u8 = @ptrCast(&mutable_stage.lifecycle);
+            const saved_lifecycle_raw = lifecycle_raw.*;
+            var invalid_lifecycle: u16 = 4;
+            while (invalid_lifecycle <= std.math.maxInt(u8)) : (invalid_lifecycle += 1) {
+                lifecycle_raw.* = @intCast(invalid_lifecycle);
+                try std.testing.expect(!generation.validateCatchupStage(staged_receipt, catchup_deadline));
+                try std.testing.expectError(
+                    error.InvalidAuthority,
+                    generation.abortCatchupStage(staged_receipt),
+                );
+                lifecycle_raw.* = saved_lifecycle_raw;
+                try std.testing.expect(generation.validateCatchupStage(staged_receipt, catchup_deadline));
+            }
+            var expired_now = staged_receipt.deadline_expires_at_ns;
+            const ExpiredClock = struct {
+                fn now(context: *anyopaque) i128 {
+                    return @as(*i128, @ptrCast(@alignCast(context))).*;
+                }
+            };
+            const expired_deadline = client_deadline.AbsoluteDeadline.fromInjected(
+                .{ .context = &expired_now, .now_ns = ExpiredClock.now },
+                staged_receipt.deadline_expires_at_ns,
+            );
+            try std.testing.expect(!generation.validateCatchupStage(staged_receipt, expired_deadline));
+            try generation.abortCatchupStage(staged_receipt);
+            try std.testing.expectEqual(catchup_stage_contract.Lifecycle.aborted, staged_receipt.lifecycle);
+            try std.testing.expectError(error.InvalidAuthority, generation.abortCatchupStage(staged_receipt));
+        },
+        .legacy => return error.InvalidAuthority,
+    }
     try std.testing.expectEqual(unavailable_generation, try runtime.generation_owner.currentGeneration());
     try std.testing.expectEqual(unavailable_source, proxy.current);
     try runtime.generation_owner.abort(&prepared);
     try std.testing.expect(runtime.generation_owner.slot.candidate == null);
+}
+
+test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapshot delta receipt를 조립한다" {
+    try runCr4aCatchupStageCase(.success);
+    try runCr4aCatchupStageCase(.barrier_only_success);
+}
+
+test "CR4a actual socket catchup hostile은 gap malformed cap plus one missing barrier를 fail close한다" {
+    inline for (.{
+        Cr4aCatchupStageCase.generation_gap,
+        Cr4aCatchupStageCase.malformed_delta,
+        Cr4aCatchupStageCase.batch_cap_plus_one,
+        Cr4aCatchupStageCase.cell_cap_plus_one,
+        Cr4aCatchupStageCase.request_oom,
+        Cr4aCatchupStageCase.missing_barrier,
+    }) |selected| try runCr4aCatchupStageCase(selected);
 }
 
 const Cr4aObserverFailure = enum { typed_reject, response_eof };
@@ -9027,8 +9302,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3136,
-        .ReleaseFast => 3120,
+        .Debug => 3424,
+        .ReleaseFast => 3408,
         else => error.SkipZigTest,
     };
 }
@@ -12358,21 +12633,21 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9904,
-            .ReleaseFast => 9856,
+            .Debug => 10192,
+            .ReleaseFast => 10144,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9888,
-            .ReleaseFast => 9840,
+            .Debug => 10176,
+            .ReleaseFast => 10128,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 7184,
-            .ReleaseFast => 7136,
+            .Debug => 7472,
+            .ReleaseFast => 7424,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
@@ -15005,20 +15280,20 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3088,
-        .ReleaseFast => 3072,
+        .Debug => 3376,
+        .ReleaseFast => 3360,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9904,
-            .ReleaseFast => 9856,
+            .Debug => 10192,
+            .ReleaseFast => 10144,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 9888,
-            .ReleaseFast => 9840,
+            .Debug => 10176,
+            .ReleaseFast => 10128,
             else => unreachable,
         },
         else => unreachable,

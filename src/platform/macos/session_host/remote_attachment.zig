@@ -12,6 +12,8 @@ const generation_batch_registry = @import("generation_batch_registry.zig");
 const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
+const screen_stream = @import("screen_stream.zig");
+const catchup_stage_contract = @import("catchup_stage_contract.zig");
 
 pub const AttachmentBatchLease = union(enum) {
     untracked: client_mod.StreamBatch,
@@ -346,6 +348,31 @@ pub const RemoteAttachment = struct {
         self: *RemoteAttachment,
         io: std.Io,
     ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError)!PumpScreenResult {
+        return self.pumpScreenInternal(io, null) catch |err| switch (err) {
+            error.BatchLimitExceeded,
+            error.ByteLimitExceeded,
+            error.Busy,
+            error.CellLimitExceeded,
+            error.InvalidAuthority,
+            error.DestinationOccupied,
+            => unreachable,
+            else => |typed| typed,
+        };
+    }
+
+    pub fn pumpCatchupScreen(
+        self: *RemoteAttachment,
+        io: std.Io,
+        accounting: *catchup_stage_contract.Accounting,
+    ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError || catchup_stage_contract.Error)!PumpScreenResult {
+        return self.pumpScreenInternal(io, accounting);
+    }
+
+    fn pumpScreenInternal(
+        self: *RemoteAttachment,
+        io: std.Io,
+        catchup_accounting: ?*catchup_stage_contract.Accounting,
+    ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError || catchup_stage_contract.Error)!PumpScreenResult {
         const transport = self.transport orelse return error.ConnectionClosed;
         // A failed release is already a terminal ownership invariant. Never consume another
         // transport batch and risk needing a second allocation-free recovery slot.
@@ -419,6 +446,29 @@ pub const RemoteAttachment = struct {
             if (released != .completed) return error.LedgerInvariant;
             return error.ProtocolError;
         });
+        const next_catchup_accounting = if (catchup_accounting) |accounting| blk: {
+            const decoded_cells = screen_stream.decodedCellCount(
+                batch.bytes,
+                screen.assembler.expected_codec_version,
+            ) catch |err| {
+                transport.fail_closed(transport.context, .frame_malformed);
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
+                if (released != .completed)
+                    transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                if (released != .completed) return error.LedgerInvariant;
+                return err;
+            };
+            break :blk accounting.admit(batch.bytes.len, decoded_cells) catch |err| {
+                transport.fail_closed(transport.context, .event_queue_overflow);
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
+                if (released != .completed)
+                    transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                if (released != .completed) return error.LedgerInvariant;
+                return err;
+            };
+        } else null;
         if (batch_authority == .recovery_exact) {
             const key = recovery_key orelse unreachable;
             // Recovery snapshots are assembled off-screen. A callback may invalidate transport
@@ -470,6 +520,8 @@ pub const RemoteAttachment = struct {
                     // `prepared_screen` now owns the replaced screen image.
                     prepared_screen.deinit();
                     prepared_screen_live = false;
+                    if (catchup_accounting) |accounting|
+                        accounting.* = next_catchup_accounting.?;
                     return .recovery_commit_pending;
                 },
                 .stale_invariant => {
@@ -513,6 +565,7 @@ pub const RemoteAttachment = struct {
             return error.LedgerInvariant;
         }
         self.compactConsumedBatches();
+        if (catchup_accounting) |accounting| accounting.* = next_catchup_accounting.?;
         return .applied;
     }
 
@@ -1437,7 +1490,6 @@ fn reserveChargedBatch(
 }
 
 fn testSnapshot(allocator: std.mem.Allocator) ![]u8 {
-    const screen_stream = @import("screen_stream.zig");
     var bytes: std.ArrayListUnmanaged(u8) = .empty;
     errdefer bytes.deinit(allocator);
     const meta = try screen_stream.encodeScreenMeta(
@@ -1456,6 +1508,79 @@ fn testSnapshot(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(row);
     try screen_stream.appendRecord(&bytes, allocator, row);
     return bytes.toOwnedSlice(allocator);
+}
+
+test "CR4a catchup apply leaf는 byte cap 마지막 batch를 화면 apply 전에 회수한다" {
+    const allocator = std.testing.allocator;
+    const bytes = try testSnapshot(allocator);
+    var transport = TestTransport{
+        .batch = .{ .untracked = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .bytes = bytes,
+            .allocator = allocator,
+        } },
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+    var accounting: catchup_stage_contract.Accounting = .{
+        .encoded_bytes = catchup_stage_contract.max_encoded_bytes,
+    };
+    const before = accounting;
+    try std.testing.expectError(
+        error.ByteLimitExceeded,
+        attachment.pumpCatchupScreen(std.testing.io, &accounting),
+    );
+    try std.testing.expectEqualDeep(before, accounting);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.event_queue_overflow,
+        transport.first_fail_reason.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+}
+
+test "CR4a catchup apply leaf는 queue append OOM에서 accounting과 batch를 회수한다" {
+    var transport = TestTransport{
+        .batch = .{ .untracked = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .bytes = @constCast(&[_]u8{}),
+            .allocator = std.testing.allocator,
+        } },
+    };
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var attachment = RemoteAttachment.init(failing.allocator(), .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    var accounting: catchup_stage_contract.Accounting = .{};
+    const before = accounting;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        attachment.pumpCatchupScreen(std.testing.io, &accounting),
+    );
+    try std.testing.expectEqualDeep(before, accounting);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_resource_exhausted,
+        transport.first_fail_reason.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
 }
 
 test "remote attachment fail-closes when a consumed batch has no screen owner" {

@@ -2146,10 +2146,30 @@ pub const Connection = struct {
         var after = before;
         const result = after.arm(identity, now_ns, expires_at_ns);
         if (result == .invalid) return self.replyError(request_id, .invalid_request);
+        var host_id_buf: [32]u8 = undefined;
+        const host_id_text = std.fmt.bufPrint(&host_id_buf, "{x:0>32}", .{identity.host_id}) catch
+            return error.OutOfMemory;
+        var runtime_id_buf: [32]u8 = undefined;
+        const runtime_id_text = std.fmt.bufPrint(&runtime_id_buf, "{x:0>32}", .{identity.runtime_id}) catch
+            return error.OutOfMemory;
+        var subscription_buf: [16]u8 = undefined;
+        const subscription_text = std.fmt.bufPrint(&subscription_buf, "{x:0>16}", .{identity.subscription.value}) catch
+            return error.OutOfMemory;
+        var connection_id_buf: [16]u8 = undefined;
+        const connection_id_text = std.fmt.bufPrint(&connection_id_buf, "{x:0>16}", .{identity.connection.monotonic_id}) catch
+            return error.OutOfMemory;
+        var connection_generation_buf: [16]u8 = undefined;
+        const connection_generation_text = std.fmt.bufPrint(&connection_generation_buf, "{x:0>16}", .{identity.connection.slot_generation}) catch
+            return error.OutOfMemory;
         const body = try self.stringify(.{ .result = .{
             .catchup = @tagName(result),
             .stream_id = stream,
             .request_nonce = nonce_text,
+            .host_id = host_id_text,
+            .runtime_id = runtime_id_text,
+            .subscription_id = subscription_text,
+            .connection_id = connection_id_text,
+            .connection_generation = connection_generation_text,
         } });
         defer self.allocator.free(body);
         const reply = switch (try self.replyResult(request_id, body)) {

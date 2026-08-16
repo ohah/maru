@@ -14,6 +14,7 @@ const maru = @import("maru");
 const terminal = maru.terminal;
 const screen_stream = @import("screen_stream.zig");
 const screen_assembler = @import("screen_assembler.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 
 const Run = screen_stream.Run;
 const ScreenSource = maru.session.surface.ScreenSource;
@@ -333,6 +334,13 @@ pub const RemoteScreen = struct {
 
     pub fn requireSequencedDeltas(self: *RemoteScreen) void {
         self.assembler.requireSequencedDeltas();
+    }
+
+    pub fn catchupFrontier(self: *const RemoteScreen) catchup_barrier_contract.ScreenFrontier {
+        return .{
+            .generation = self.assembler.generation,
+            .sequence = self.assembler.sequence,
+        };
     }
 
     pub fn prepareRecoveryFrontierFrom(self: *RemoteScreen, current: *const RemoteScreen) void {

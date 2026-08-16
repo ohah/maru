@@ -63,6 +63,13 @@ fn commitViewCols(self: *const AppSession) u16 {
     return m.commitViewCols(@floatFromInt(content.w), self.cell_width_px);
 }
 
+/// 커밋 상자 한 줄의 높이. **`view`와 같은 폴백을 쓴다**(0 → 1000) — `@max(scale, 1)`로 두면 scale이
+/// 0인 순간 줄 높이가 1px이 되어 caret rect가 접히는데, 그리는 쪽은 멀쩡히 17px 간격으로 놓는다.
+fn commitLineHeightPx(self: *const AppSession) u32 {
+    const scale = scmDockScaleMilli(self);
+    return chrome.ui.typography.lineHeightPx(.control, if (scale == 0) 1000 else scale);
+}
+
 /// 지금 화면에 그릴 **표시 텍스트**. 조합 중이면 본문의 caret 자리에 preedit을 끼운 합성 결과다.
 ///
 /// **component가 합성하지 않는 이유**: props는 빌린 슬라이스이고 component는 할당하지 않는다. 조합
@@ -87,8 +94,15 @@ fn commitDisplayCaret(self: *const AppSession) usize {
 
 /// 커밋 상자가 보여 줄 **시각 행** 수. 내용을 따라 자라고 상한에서 멈춘다(§12.2).
 fn commitRows(self: *AppSession) u32 {
+    return commitRowsOf(self, commitDisplayText(self));
+}
+
+/// 이미 얻어 둔 표시 텍스트로 세는 판. **`propsFor`가 이것을 쓴다** — 거기서 `commitRows`를 부르면
+/// 합성 버퍼를 다시 채우게 되고, 그 프레임의 props가 이미 그 버퍼를 가리키고 있다(같은 내용이라
+/// 지금은 무해하지만, 슬라이스를 든 채 그 버퍼를 다시 쓰는 모양 자체가 함정이다).
+fn commitRowsOf(self: *AppSession, text: []const u8) u32 {
     var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
-    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    const wrapped = text_area.wrap(text, commitViewCols(self), true, &lines);
     return @intCast(text_area.visibleRows(wrapped, commit_max_rows));
 }
 
@@ -264,6 +278,9 @@ fn selectionOf(sel: ?text_field.TextField.Selection) ?component.types.Selection 
 
 fn propsFor(self: *AppSession, projection: Projection, window: []const component.types.Item) component.types.Props {
     const content = dock_ops.dockGeometry(self).tree_content;
+    // **한 번만 만든다.** 아래 두 자리(글자·행 수)가 각자 부르면 합성 버퍼를 다시 채우면서 이미 넘긴
+    // 슬라이스를 뒤에서 건드리게 된다.
+    const display = commitDisplayText(self);
     return .{
         .viewport_px = .{
             .x = 0,
@@ -284,8 +301,8 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .has_ab = projection.has_ab,
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
-        .commit_message = commitDisplayText(self),
-        .commit_rows = commitRows(self),
+        .commit_message = display,
+        .commit_rows = commitRowsOf(self, display),
         .commit_edit = .{
             .focused = self.scm_commit_focused,
             .caret = commitDisplayCaret(self),
@@ -588,6 +605,9 @@ pub fn blurCommit(self: *AppSession) void {
 /// 세로는 시각 행, 가로는 `text_field.caretAtColumn`이 푼다(§12.1 — 가로 축의 주인은 하나다).
 pub fn focusCommitAt(self: *AppSession, x_px: f64, y_px: f64) void {
     focusCommit(self);
+    // **조합 중이면 먼저 확정한다**(macOS 관례 — 다른 곳을 누르면 조합이 끝난다). 그러지 않으면 아래
+    // 계산이 조합 글자가 끼워진 화면과 조합 없는 본문 사이에서 갈려, 누른 자리와 caret이 어긋난다.
+    _ = self.scm_commit_field.commitPreedit(self.allocator);
     const rect = commitBoxRect(self) orelse return;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     const content = dock_ops.dockGeometry(self).tree_content;
@@ -600,20 +620,29 @@ pub fn focusCommitAt(self: *AppSession, x_px: f64, y_px: f64) void {
     const wrapped = text_area.wrap(text, cols, true, &lines);
     if (wrapped.lines.len == 0) return;
 
-    const line_h: f32 = @floatFromInt(chrome.ui.typography.lineHeightPx(.control, @max(scmDockScaleMilli(self), 1)));
+    const line_h: f32 = @floatFromInt(commitLineHeightPx(self));
     const rel_y = local_y - @as(f64, @floatFromInt(m.commit_pad_y));
     const row_f = @floor(rel_y / @as(f64, line_h));
+    // **보이는 창 안으로 가둔다.** 상자 아래 여백(`commit_pad_y`)을 누르면 나눗셈이 창 밖 행을 주는데,
+    // 그 행은 화면에 없다 — caret이 안 보이는 줄로 가고 스크롤이 한 줄 따라 움직인다. 눌린 자리에서
+    // 가장 가까운 **보이는** 줄이 답이다.
+    const visible = text_area.visibleRows(wrapped, commit_max_rows);
+    const first: usize = @min(self.scm_commit_first_row, wrapped.lines.len - 1);
+    const last_visible = @min(first + visible - 1, wrapped.lines.len - 1);
     const row_index: usize = if (row_f < 0)
-        self.scm_commit_first_row
+        first
     else
-        @min(self.scm_commit_first_row + @as(usize, @intFromFloat(row_f)), wrapped.lines.len - 1);
+        @min(first + @as(usize, @intFromFloat(row_f)), last_visible);
 
     const line = wrapped.lines[row_index];
     const band_col: i32 = blk: {
         const cell: f64 = @floatFromInt(@max(self.cell_width_px, 1));
         const rel_x = local_x - @as(f64, @floatFromInt(m.inset_x));
         if (rel_x <= 0) break :blk 0;
-        break :blk @intFromFloat(@round(rel_x / cell));
+        // **내림이다.** 반올림하면 두 칸 글자(한글·이모지)의 **왼쪽 절반**을 눌러도 열이 1로 올라가고,
+        // `caretAtColumn`의 동점 규칙(뒤 경계)과 겹쳐 caret이 그 글자 **뒤**로 간다. 내림이면 왼쪽 칸은
+        // 앞, 오른쪽 칸은 뒤가 되어 두 칸 글자의 절반이 각각 앞뒤를 가리킨다.
+        break :blk @intFromFloat(rel_x / cell);
     };
     const line_view: text_field.View = .{ .text = text[line.start..line.end], .caret = 0 };
     const within = text_field.caretAtColumn(line_view, .{ .cols = cols }, band_col);
@@ -1114,6 +1143,10 @@ pub fn handleCommitKey(self: *AppSession, ev: chrome.input.InputEvent) bool {
                 // 그 외 수정자 조합은 **먹지 않는다** — ⌘S·⌘W 같은 앱 단축키가 상자 안에서 죽으면
                 // 사용자는 입력란을 벗어나야만 앱을 쓸 수 있게 된다.
                 if (k.mods.command or k.mods.control or k.mods.option) return false;
+                // **제어 codepoint는 넣지 않는다.** Enter·Tab·Backspace는 각자 다른 key로 오므로 여기
+                // `.char`로 오는 C0/DEL은 우리가 글자로 셀 수 없는 것이고, 들어가면 화면에서는 폭 0이라
+                // 안 보이는 채 커밋 메시지에만 남는다(붙여넣기 위생과 같은 규칙).
+                if (k.codepoint < 0x20 or k.codepoint == 0x7F) return true;
                 field.insertCp(self.allocator, k.codepoint) catch {};
                 afterEdit(self);
             },
@@ -1183,10 +1216,38 @@ pub fn commitCommitPreedit(self: *AppSession) void {
     if (self.scm_commit_field.commitPreedit(self.allocator)) afterEdit(self);
 }
 
-/// 입력기가 확정한 글자를 넣는다(한글 등 — 평문 타이핑도 macOS에서는 이 경로다).
+/// 입력기가 확정한 글자를 넣는다(한글 등 — 평문 타이핑도 macOS에서는 이 경로다). 붙여넣기도 같은
+/// 문으로 들어온다.
+///
+/// **위생 처리를 한다**(주소창과 같은 규율, 다만 허용 집합이 다르다):
+///  - **개행과 탭은 남긴다** — 커밋 메시지는 여러 줄이 정상이고(제목·빈 줄·본문), 탭은 §12.3 ③대로
+///    전개하지 않고 한 칸으로 센다. 주소창이 개행을 지우는 이유는 URL이 한 줄이기 때문이다.
+///  - `\r`은 **버린다**(CRLF 클립보드). 남기면 커밋 메시지에 CR이 섞여 들어가고, 화면에서는 폭 0
+///    글자라 아무 표시도 없이 사라진다 — 저장되는 것과 보이는 것이 달라진다.
+///  - 나머지 C0 제어문자·DEL도 버린다(ESC·FF·VT…). 위와 같은 이유다.
+///  - **유효 UTF-8만** 넣는다. 손상 바이트가 들어가면 폭 계산(`clusterCols`)과 랩이 어긋나 caret이 민다.
 pub fn insertCommitText(self: *AppSession, bytes: []const u8) void {
     if (!self.scm_commit_focused) return;
-    self.scm_commit_field.insertText(self.allocator, bytes) catch return;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(self.allocator);
+    buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
+            i += 1; // 손상 lead 바이트 skip
+            continue;
+        };
+        if (i + n > bytes.len) break; // 잘린 꼬리
+        const cp = std.unicode.utf8Decode(bytes[i .. i + n]) catch {
+            i += n;
+            continue;
+        };
+        const keep = cp == '\n' or cp == '\t' or (cp >= 0x20 and cp != 0x7F);
+        if (keep) buf.appendSlice(self.allocator, bytes[i .. i + n]) catch return;
+        i += n;
+    }
+    if (buf.items.len == 0) return;
+    self.scm_commit_field.insertText(self.allocator, buf.items) catch return;
     afterEdit(self);
 }
 
@@ -1204,7 +1265,7 @@ pub fn commitCaretRect(self: *AppSession) ?chrome.draw.Rect {
     const wrapped = text_area.wrap(text, cols, true, &lines);
     const caret = commitDisplayCaret(self);
     const row = text_area.lineAt(wrapped, caret);
-    const line_h = chrome.ui.typography.lineHeightPx(.control, @max(scmDockScaleMilli(self), 1));
+    const line_h = commitLineHeightPx(self);
 
     const col: u32 = if (wrapped.lines.len == 0) 0 else blk: {
         const line = wrapped.lines[row];

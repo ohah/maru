@@ -32,6 +32,7 @@ const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payl
 const dock_list_scrollbar_inset_px = app_session_mod.dock_list_scrollbar_inset_px;
 const dock_view_bar = app_session_mod.dock_view_bar;
 const AgentSessionArchiveSmokeProbe = app_session_mod.AgentSessionArchiveSmokeProbe;
+const scm_dock_ops = @import("scm_dock.zig");
 const agent_dock = app_session_mod.agent_dock;
 const dock_list_scroll_ids = app_session_mod.dock_list_scroll_ids;
 const dock_list_scroll_max_entries = app_session_mod.dock_list_scroll_max_entries;
@@ -375,6 +376,10 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     const auto_right_width_changed = dockVisible(self) and self.dock.side == .right and self.dock.size == 0 and
         dock_layout.defaultRightPtForView(self.dock.view) != dock_layout.defaultRightPtForView(view);
     if (self.dock.view == .agent_sessions and view != .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
+    // 소스 컨트롤을 떠나면 커밋 상자 편집을 뗀다. 남겨 두면 조합 중이던 글자가 확정되지 않은 채
+    // 남아 다음에 돌아왔을 때 그대로 떠 있고(입력기는 이미 그 조합을 잊었다), 포커스 플래그도
+    // 클릭 없이 살아난다 — Session Dock 키 포커스를 같은 이유로 놓는 자리다.
+    if (self.dock.view == .source_control and view != .source_control) scm_dock_ops.blurCommit(self);
     self.dock.view = view;
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
     // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.

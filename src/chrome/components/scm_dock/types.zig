@@ -8,6 +8,7 @@ const std = @import("std");
 const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const ui_icon = @import("../../ui/icon.zig");
+const typography = @import("../../ui/typography.zig");
 
 /// 목록 그룹. `scm_view.Section`과 **같은 값 집합**이지만 component는 그쪽을 import하지 않는다 —
 /// platform이 값을 옮기고, 값이 갈리면 그 변환 함수가 exhaustive switch에서 컴파일로 걸린다.
@@ -206,7 +207,10 @@ pub const DockMetrics = struct {
             .section_h = s.px(24, scale_milli),
             .row_h = s.px(24, scale_milli),
             .branch_h = s.px(26, scale_milli),
-            .commit_row_h = s.px(20, scale_milli),
+            // **글자 줄 높이 그대로다.** 여기서 따로 20px를 고르면 상자 높이는 20씩 세는데 `view`는
+            // 17(=`.control` 줄 높이)씩 줄을 놓아, 줄이 늘수록 아래에 빈 띠가 남고 클릭 → 행 변환도
+            // 그만큼 어긋난다(같은 값의 출처가 둘이면 늘 이렇게 갈린다).
+            .commit_row_h = typography.lineHeightPx(.control, scale_milli),
             .commit_button_h = s.px(28, scale_milli),
             .commit_pad_y = s.px(8, scale_milli),
             .inset_x = s.px(8, scale_milli),

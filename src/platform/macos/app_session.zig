@@ -9642,6 +9642,11 @@ pub const AppSession = struct {
             web_ops.cancelAddrEdit(self, false); // 클릭-어웨이 = focus-restore 안 함(클릭한 target이 포커스 소유 — 터미널 클릭인데 webView로 튀는 것 방지, 제보)
             self.metal_dirty = true;
         }
+        // 커밋 메시지 상자도 같은 자리에서 클릭-어웨이한다(P3c). **도크 안에서만 보면 안 된다** — 도크
+        // 바깥(터미널·사이드바·탭)을 눌러도 상자가 포커스를 쥔 채 남아, 사용자는 터미널을 눌러 놓고
+        // 친 글자가 커밋 메시지로 들어간다. 상자 안 재클릭은 caret 재배치라 그대로 둔다(`…IfOutside`).
+        // rename처럼 **확정하지 않고** 글자를 남긴다 — 커밋 메시지는 이어서 쓰는 것이다.
+        if (kind == 1) scm_dock_ops.blurCommitIfOutside(self, x_px, y_px);
         // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
         // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
         if (self.chrome_host.context_menu.open) {
@@ -9906,9 +9911,8 @@ pub const AppSession = struct {
                     // 것이 어긋났다.
                     // down은 **무장만** 한다. 실제 적용은 아래 up 경로 한 곳이다 — 그래야 드래그나
                     // 스냅샷 교체가 "누른 적 없는 행 열기"가 되지 않는다(Session Dock과 같은 규율).
-                    // 다만 **편집을 떼는 것은 down에서** 한다: 상자 밖을 누른 순간 caret이 사라져야
-                    // 사용자가 자기 키가 어디로 가는지 안다(up까지 기다리면 드래그 중에도 caret이 남는다).
-                    scm_dock_ops.blurCommitIfOutside(self, x_px, y_px);
+                    // 편집을 떼는 것은 **위 클릭-어웨이 한 곳**이 한다(도크 밖 클릭까지 같은 규칙이어야
+                    // 한다 — 여기서만 보면 터미널을 눌러도 상자가 키를 계속 받는다).
                     _ = scm_dock_ops.scmDockPointer(self, .down, x_px, y_px);
                     return;
                 }
@@ -54412,6 +54416,19 @@ fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, 
     scm_dock_ops.publishScmDockFrame(session, frame);
 }
 
+/// 커밋 상자 **바닥 여백** 안의 한 점.
+fn commitBoxPointBottom(session: *AppSession) !struct { x: f64, y: f64 } {
+    const content = dock_ops.dockGeometry(session).tree_content;
+    for (session.scm_dock_entries.items) |entry| {
+        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
+        return .{
+            .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + 12,
+            .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height - 1,
+        };
+    }
+    return error.MissingCommitBox;
+}
+
 /// 커밋 상자 rect의 한 점(도크 content 원점을 더한 창 좌표).
 fn commitBoxPoint(session: *AppSession, dx: f64, dy: f64) !struct { x: f64, y: f64 } {
     const content = dock_ops.dockGeometry(session).tree_content;
@@ -54508,6 +54525,143 @@ test "소스 컨트롤: 상자 밖을 누르면 편집을 뗀다" {
     const outside = try commitBoxPoint(session, 12, 400);
     session.mouse(1, outside.x, outside.y, 0, 0);
     try std.testing.expect(!session.scm_commit_focused);
+}
+
+test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 왼쪽 절반은 그 앞이다)" {
+    // 열을 반올림하면 한글의 **왼쪽 절반**을 눌러도 열이 올라가고, `caretAtColumn`의 동점 규칙(뒤
+    // 경계)과 겹쳐 caret이 그 글자 뒤로 간다 — 사용자는 글자 앞을 눌렀는데 뒤에 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.insertCommitText(session, "가나다");
+
+    const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    const cell: f64 = @floatFromInt(session.cell_width_px);
+    // `가`(0~1열)의 **왼쪽 칸** 가운데를 누른다 → caret은 그 앞(0).
+    const left = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 0.5, @floatFromInt(m.commit_pad_y + 2));
+    scm_dock_ops.focusCommitAt(session, left.x, left.y);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_commit_field.caret);
+    // **오른쪽 칸**을 누르면 그 글자 뒤(3바이트).
+    const right = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 1.5, @floatFromInt(m.commit_pad_y + 2));
+    scm_dock_ops.focusCommitAt(session, right.x, right.y);
+    try std.testing.expectEqual(@as(usize, 3), session.scm_commit_field.caret);
+}
+
+test "소스 컨트롤: 상자 아래 여백을 눌러도 보이는 줄 안에 caret이 선다" {
+    // 나눗셈이 창 밖 행을 주면 caret이 안 보이는 줄로 가고 스크롤이 한 줄 따라 움직인다 —
+    // 누른 자리에서 가장 가까운 **보이는** 줄이 답이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.insertCommitText(session, "one\ntwo");
+    const before = session.scm_commit_first_row;
+
+    // 상자 맨 아래(여백 안)를 누른다.
+    const box = try commitBoxPointBottom(session);
+    scm_dock_ops.focusCommitAt(session, box.x, box.y);
+    try std.testing.expectEqual(before, session.scm_commit_first_row); // 스크롤이 안 움직인다
+    try std.testing.expect(session.scm_commit_field.caret <= "one\ntwo".len);
+}
+
+test "소스 컨트롤: 실제 입력 경로로 글자가 상자에 들어간다(라우팅까지)" {
+    // 앞의 편집 테스트들은 `handleCommitKey`를 직접 부른다 — 그것만으로는 **키가 거기까지 오는지**를
+    // 증명하지 못한다. macOS에서 평범한 타이핑은 IME 확정 텍스트로 들어와
+    // `routeCommittedText → sendTextAsKeys → handleKeyEvent`를 지나므로, 그 경로를 그대로 태운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const p = try commitBoxPoint(session, 12, 6);
+    session.mouse(1, p.x, p.y, 0, 0);
+    session.mouse(3, p.x, p.y, 0, 0);
+    input_ops.routeCommittedText(session, "가");
+    input_ops.routeCommittedText(session, "b");
+    try std.testing.expectEqualStrings("가b", session.scm_commit_field.text.items);
+
+    // 그리고 **터미널로는 한 글자도 안 간다** — 상자가 소유했으면 뒤 PTY는 아무것도 못 받는다.
+    try std.testing.expect(session.scmCommitOwnsInput());
+}
+
+test "소스 컨트롤: 커밋 상자 폭은 도크 content 폭과 같다(랩 입력이 갈리지 않게)" {
+    // 상자 높이는 host가, 글자 자리는 view가 랩해서 정한다. 두 랩이 같은 답을 내는 근거는 **입력이
+    // 하나**라는 것뿐이다 — 열 수는 `commitViewCols`가 단일 출처이고, 그 입력인 폭이 갈리면 host가
+    // 2줄이라 믿는 상자에 view가 5줄을 그리고 caret이 안 보이는 줄에 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const content = dock_ops.dockGeometry(session).tree_content;
+    for (session.scm_dock_entries.items) |entry| {
+        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
+        try std.testing.expectEqual(@as(f32, 0), entry.rect.x);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(content.w)), entry.rect.width);
+        return;
+    }
+    return error.MissingCommitBox;
+}
+
+test "소스 컨트롤: 붙여넣기는 개행·탭을 남기고 CR·제어문자·손상 바이트를 버린다" {
+    // 커밋 메시지는 여러 줄이 정상이라 개행을 지우면 안 되고(주소창과 다른 점), 반대로 CR이 섞이면
+    // **저장되는 것과 보이는 것이 달라진다** — 화면에서는 폭 0이라 아무 표시가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    // CRLF 클립보드 + ESC + DEL + 손상 UTF-8 lead 바이트.
+    scm_dock_ops.insertCommitText(session, "fix: 제목\r\n\n\tbody\x1b\x7f\xff!");
+    try std.testing.expectEqualStrings("fix: 제목\n\n\tbody!", session.scm_commit_field.text.items);
+}
+
+test "소스 컨트롤: 도크 **밖**을 눌러도 편집이 풀린다" {
+    // 도크 안에서만 클릭-어웨이를 보면, 터미널을 눌러 놓고 친 글자가 커밋 메시지로 들어간다 —
+    // 사용자에게는 셸이 먹통이 된 것으로 보인다(적대적 검증 2026-08-16).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const inside = try commitBoxPoint(session, 12, 6);
+    session.mouse(1, inside.x, inside.y, 0, 0);
+    session.mouse(3, inside.x, inside.y, 0, 0);
+    try std.testing.expect(session.scm_commit_focused);
+
+    // 터미널 본문(도크 왼쪽)을 누른다.
+    const term_rect = dock_ops.dockGeometry(session).terminal;
+    session.mouse(1, @as(f64, @floatFromInt(term_rect.x + term_rect.w / 2)), @as(f64, @floatFromInt(term_rect.y + term_rect.h / 2)), 0, 0);
+    try std.testing.expect(!session.scm_commit_focused);
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
 
 test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다" {

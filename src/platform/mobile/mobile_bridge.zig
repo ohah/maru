@@ -891,7 +891,7 @@ fn stepKeyBarFling() void {
     // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
     // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
     if (screen != .terminal) return;
-    _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)));
+    _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)), frame_dt_ms);
 }
 
 /// 지금 키바 가로 위치(px).
@@ -948,7 +948,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, x: f32, y: f32) u32 {
     kb_active = false;
     kb_pressed = null;
     // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
-    kb_touch.end();
+    kb_touch.end(frame_dt_ms);
     // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     if (phase == 2 and !kb_stop_tap and kb_moved < scroll_area.Touch.slop_px) {
         kb_touch.cancel(); // 탭이면 관성이 없다
@@ -2495,7 +2495,7 @@ fn setScroll() f32 {
 }
 
 fn stepSetFling() void {
-    _ = set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)));
+    _ = set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)), frame_dt_ms);
 }
 
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
@@ -2791,7 +2791,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_active = false;
             // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
             // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
-            if (phase == 3) set_touch.cancel() else set_touch.end();
+            if (phase == 3) set_touch.cancel() else set_touch.end(frame_dt_ms);
             const pressed = set_pressed;
             const back = set_back_pressed;
             set_pressed = null;
@@ -2972,6 +2972,9 @@ fn setLastError(name: []const u8) void {
 /// 프레임 시각(ms). **길게 누름은 시계가 있어야 판정된다** — move 핸들러에서만 보면 손가락이
 /// 가만히 있을 때 이벤트가 안 와서 영영 안 잡힌다(2초를 눌러도 아무 일도 안 났다, 실측).
 var frame_ms: u64 = 0;
+/// 직전 프레임과의 간격(ms). **관성이 이걸로 돈다** — 프레임당으로 감쇠하면 같은 손짓이
+/// 30Hz 기기에서 두 배 멀리 간다.
+var frame_dt_ms: f32 = 0;
 
 /// 누르고 있는 채로 시간이 지났는지 매 프레임 본다. **여기가 유일한 판정 자리다** —
 /// 두 곳에 두면 한쪽만 고쳐져 갈린다.
@@ -2987,6 +2990,10 @@ fn checkLongPress(core: *terminal.core.TerminalCore) void {
 }
 
 pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
+    // **관성의 시간축.** 프레임 간격이 없으면 감쇠가 프레임률을 타서, 같은 손짓이 30Hz
+    // 기기에서 두 배 멀리 간다(실측 610px 대 402px). 첫 프레임은 간격이 없으므로 0 이다 —
+    // `Touch.step` 이 하한으로 자른다.
+    frame_dt_ms = if (frame_ms == 0 or time_ms < frame_ms) 0 else @floatFromInt(time_ms - frame_ms);
     frame_ms = time_ms;
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.

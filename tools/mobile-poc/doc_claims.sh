@@ -103,10 +103,13 @@ ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableM
 echo "§관성 — 숫자가 갈리지 않는다"
 # 본문 관성은 host 몫이지만(계약 §3.1) **숫자는 공유**해야 한다 — 같은 손짓이 본문·키바·설정에서
 # 다르게 미끄러지면 사용자는 이유를 모른다. 예전에는 0.92 가 세 곳에 따로 있었다.
-ck "헤더가 감쇠를 소유한다" 1 "$(grep -c 'define MARU_FLING_DAMPING' $H)"
+ck "헤더가 감쇠를 소유한다" 1 "$(grep -c 'define MARU_FLING_DECAY_PER_MS' $H)"
 ck "host 에 남은 감쇠 하드코딩" 0 "$(grep -cE '\*= 0\.9[0-9]*f' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 # Zig 컴포넌트는 데스크톱과 공유하는 코드라 이 헤더를 못 읽는다 — **값이 같은지**를 여기서 본다.
-ck "헤더와 컴포넌트의 감쇠가 같다" "$(grep -oE 'define MARU_FLING_DAMPING [0-9.]+' $H | grep -oE '[0-9]+\.[0-9]+')" "$(grep -oE 'damping: f32 = [0-9.]+' src/chrome/ui/scroll_area.zig | grep -oE '[0-9]+\.[0-9]+')"
+ck "헤더와 컴포넌트의 감쇠가 같다" "$(grep -oE 'define MARU_FLING_DECAY_PER_MS [0-9.]+' $H | grep -oE '[0-9]+\.[0-9]+')" "$(grep -oE 'decay_per_ms: f32 = [0-9.]+' src/chrome/ui/scroll_area.zig | grep -oE '[0-9]+\.[0-9]+')"
+# **프레임당 감쇠가 다시 생기면 잡는다.** 그것이 30Hz 기기를 두 배 멀리 미끄러뜨렸다.
+ck "프레임당 감쇠가 남았나" 0 "$(grep -cE '\*= *(MARU_FLING_DECAY_PER_MS|0\.9[0-9]*f?) *;' $I $A src/chrome/ui/scroll_area.zig | awk -F: '{s+=$2} END{print s+0}')"
+ck "두 host 가 시간으로 감쇠한다" 2 "$(grep -c 'powf(MARU_FLING_DECAY_PER_MS' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 # 이관은 **반쯤 하기가 제일 쉽다** — 실제로 목록만 옮기고 키바·팝업에 손수 스크롤이 남아 있었다.
 # 브리지에 f32 스크롤 변수가 다시 생기면 그때부터 규칙이 갈린다.
 # `*_max_scroll` 은 레이아웃이 잰 콘텐츠 길이지 스크롤 위치가 아니다 — 그건 남아도 된다.

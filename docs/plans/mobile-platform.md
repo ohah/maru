@@ -257,7 +257,7 @@ grapheme cluster mode(DECSET 2027) 합의가 없으면 코어는 ZWJ 시퀀스�
 | 무엇 | 실측 |
 |---|---|
 | `chrome/ui/scroll_area` | **마우스 휠 모델** — `wheel_residue_px`, `Drag`는 스크롤바용. 관성·bounce·콘텐츠 직접 드래그 전무 |
-| 터미널 스크롤 | 관성 있음(host `fling_vy`, 감쇠 0.92) — **컴포넌트 계층에는 없다** |
+| 터미널 스크롤 | 관성 있음(host `fling_vy`, 감쇠 `MARU_FLING_DECAY_PER_MS`/ms) — **컴포넌트 계층에는 없다** |
 | 히트 영역 | **보조 키바는 44 로 섰다**(아래 U1 절). 사이드바 카드 52는 통과, **탭 34는 여전히 미달** |
 | ~~소프트 키보드 다시 올리기~~ | **없는 문제였다.** 앱이 `resignFirstResponder`를 안 부르고 내리는 UI 도 없으며 백그라운드 왕복 뒤에도 입력이 들어간다(실측) |
 | ~~키보드 높이~~ | **닫았다**(아래 U1 절) |
@@ -335,8 +335,13 @@ I/O ▸ Keyboard 메뉴가 지배한다(같은 상태에서 Safari 조차 키보
 | **다중 세션**(U2 ①) | **모바일은 세션을 스스로 못 만든다** — [§1](../mobile-platform.md)이 로컬 PTY 를 금지했고 생성 경로가 코드에 없다. 세션은 원격에서 받아야 존재하고, **식별자 축(runtime handle)도 M3 가 정한다** |
 | 화면들(U2 ②) | 서버 목록·세션 목록에 채울 데이터가 M3 결정에 달렸다 |
 
-**남은 하나는 관성을 wall-clock 으로 바꾸는 것**이다(`fling` 이 프레임당이라 실효 tick rate 에 따라
-빨라지고 느려진다). 키바와 터미널 세로가 같은 모양이라 셋을 함께 고쳐야 한다.
+**관성을 wall-clock 으로 바꾸는 것은 끝났다.** 프레임당 감쇠라 실효 tick rate 를 타서, 같은 손짓이
+30Hz Android 에서 60Hz iOS 의 **정확히 두 배** 멀리 미끄러졌다(200ms 에 200px 을 민 손짓이 610px
+대 402px — 컴포넌트 단위 테스트로 재현했다). 예상대로 셋을 함께 고쳤다: 속도는 **px/ms** 가 되고
+(이벤트 시각 간격으로 나눈다 — iOS `UITouch.timestamp`·Android `AMotionEvent` 시각), 감쇠는
+`decay_per_ms^dt` 다. 값은 `MARU_FLING_DECAY_PER_MS`(0.995012 = 60Hz 프레임당 0.92) 로 헤더가
+소유하고, 튄 이벤트 하나가 화면을 날리지 않게 `MARU_FLING_MAX_VELOCITY` 도 둔다 —
+Flutter `FrictionSimulation`·RN `OverScroller`/`decelerationRate` 가 쓰는 모델과 같다.
 
 ## M6 — 아틀라스 축출 (완료)
 

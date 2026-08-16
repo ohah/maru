@@ -2353,6 +2353,9 @@ test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
     while (step < 5) : (step += 1) {
         x -= 20;
         _ = bridge.maru_mobile_keybar_pointer(1, x, c.y);
+        // **move 사이에 프레임을 돌린다.** 안 그러면 100px 이 한 프레임에 들어간 것이 되어
+        // 6px/ms 짜리 손짓이 된다 — 실기기에서는 프레임마다 몇 표본씩 온다.
+        _ = bridge.maru_mobile_build(402, 874, now());
     }
     _ = bridge.maru_mobile_keybar_pointer(2, x, c.y); // 뗀다 — 여기서 관성이 시작된다
 
@@ -2398,15 +2401,18 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
     _ = bridge.maru_mobile_build(402, small_h, now());
 
-    std.debug.print("\nDBG afterpops_open={any} span_x0={d} scroll={d}\n", .{ bridge.settingsRowAt(200, 150) != null, span.x0, bridge.settingsScrollPx() });
     try std.testing.expectEqual(@as(u32, 0), bridge.settingsScrollPx());
 
     // **관성이 남게** 민다 — 끝까지 밀면 그 자리에서 죽어 재현이 안 된다.
     _ = bridge.maru_mobile_chrome_pointer(0, 200, 250);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 230);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 210);
-    _ = bridge.maru_mobile_chrome_pointer(1, 200, 190);
-    _ = bridge.maru_mobile_chrome_pointer(2, 200, 190);
+    var my: f32 = 250;
+    var ms: u32 = 0;
+    while (ms < 3) : (ms += 1) {
+        my -= 20;
+        _ = bridge.maru_mobile_chrome_pointer(1, 200, my);
+        _ = bridge.maru_mobile_build(402, small_h, now()); // 실기기처럼 move 사이에 프레임
+    }
+    _ = bridge.maru_mobile_chrome_pointer(2, 200, my);
     _ = bridge.maru_mobile_build(402, small_h, now());
     const a = bridge.settingsScrollPx();
     var f: u32 = 0;

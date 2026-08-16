@@ -1995,3 +1995,79 @@ test "저장이 주석과 모르는 키를 지킨다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
+
+// **목록이 잘리면 그 값을 영영 못 고른다.** 모바일은 파일을 손으로 못 고치므로(계약 §2 —
+// 설정 화면이 유일한 입력 경로) 팝업이 자르면 그 프리셋은 **선택 수단이 사라진다**.
+// 예전에는 rect 배열이 8칸이고 프리셋도 손으로 적은 8개라 우연히 맞았다.
+test "가장 긴 선택 목록이 통째로 뜬다" {
+    var longest: usize = 0;
+    for (bridge.settingsRows()) |r| longest = @max(longest, r.items.len);
+    try std.testing.expect(longest >= 16); // 프리셋이 그만큼 있다(전제)
+    try std.testing.expect(bridge.settingsPopupCap() >= longest);
+}
+
+// **고르지도 않은 프리셋 이름을 보여주면 안 된다.** 색으로 되짚는데 배경 하나만 비교하면 남의
+// 이름을 뒤집어씌운다 — 모바일 기본값이 catppuccin-mocha 와 배경만 같아서 아무것도 안 고른
+// 기기가 그 이름으로 보였다(화면으로 잡았다).
+test "프리셋은 네 색이 다 맞을 때만 그 이름이다" {
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0); // 기본값 — 어떤 프리셋도 고르지 않았다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(bridge.presetNone(), bridge.presetIndexNow());
+
+    const nord = "theme.preset = nord\n";
+    bridge.maru_mobile_load_config(nord, nord.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const idx = bridge.presetIndexNow();
+    try std.testing.expect(idx != bridge.presetNone());
+    for (bridge.settingsRows()) |r| if (std.mem.eql(u8, r.key, "theme.preset")) {
+        try std.testing.expectEqualStrings("nord", r.items[@intCast(idx)]);
+    };
+
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **작은 화면에서 긴 팝업이 넘치면 그 값을 영영 못 고른다**(화면이 유일한 입력 경로).
+// 목록 영역 안으로 가두고 밀 수 있어야 한다 — 밀기 전에는 아래 항목이 안 보이고(rect 없음),
+// 민 뒤에는 보인다.
+test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
+    const small_h: u32 = 500; // 16×44=704 보다 작다
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    const span = chromeClaimSpan(402, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, @floatFromInt(small_h - 22));
+    _ = bridge.maru_mobile_build(402, small_h, now());
+
+    // 프리셋 행을 찾아 연다.
+    var opened = false;
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "theme.preset")) continue;
+        _ = bridge.maru_mobile_chrome_pointer(0, 200, y);
+        _ = bridge.maru_mobile_chrome_pointer(2, 200, y);
+        _ = bridge.maru_mobile_build(402, small_h, now());
+        opened = true;
+        break;
+    }
+    try std.testing.expect(opened);
+
+    const last = bridge.settingsRows()[0].items.len - 1;
+    try std.testing.expect(last >= 15);
+    try std.testing.expect(!bridge.settingsPopupItemVisible(last)); // 밀기 전엔 안 보인다
+
+    // 민다(임계 10px 를 넘겨야 스크롤로 친다).
+    _ = bridge.maru_mobile_chrome_pointer(0, 300, 300);
+    _ = bridge.maru_mobile_chrome_pointer(1, 300, 100);
+    _ = bridge.maru_mobile_chrome_pointer(1, 300, 0);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expect(bridge.settingsPopupItemVisible(last)); // 민 뒤엔 보인다
+
+    _ = bridge.maru_mobile_chrome_pointer(3, 300, 0);
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}

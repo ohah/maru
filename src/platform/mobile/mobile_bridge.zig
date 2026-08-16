@@ -251,6 +251,24 @@ pub fn settingsFieldCount() usize {
     return n;
 }
 
+/// 팝업이 한 번에 그릴 수 있는 항목 수(테스트·진단용).
+/// 지금 고른 프리셋의 색인(테스트·진단용). 어느 것과도 안 맞으면 `presetNone()`.
+pub fn presetIndexNow() i64 {
+    return mobile_config.valueOf(cfg(), "theme.preset");
+}
+pub fn presetNone() i64 {
+    return mobile_config.preset_none;
+}
+
+/// 팝업의 그 항목이 **눌릴 수 있게** 그려졌나(테스트·진단용) — rect 가 비면 화면 밖이다.
+pub fn settingsPopupItemVisible(i: usize) bool {
+    return i < set_item_rects.len and set_item_rects[i].w > 0;
+}
+
+pub fn settingsPopupCap() usize {
+    return set_item_rects.len;
+}
+
 pub fn settingsRows() []const mobile_config.Row {
     return mobile_config.rows;
 }
@@ -2343,8 +2361,19 @@ var set_fling: f32 = 0;
 var set_pressed: ?usize = null;
 var set_back_pressed: bool = false;
 var set_open: ?usize = null; // 팝업이 열린 행
-var set_item_rects: [8]SetRect = @splat(.{});
+/// **가장 긴 목록에 맞춘다 — 숫자를 손으로 적지 않는다.** 예전에는 8이었고 프리셋 목록도 손으로
+/// 적은 8개라 **우연히** 맞았다(그 자리 주석이 예고해 뒀다). 목록을 스키마·enum 에서 만들자
+/// 프리셋이 16개가 되어 **절반을 고를 수 없게** 됐다 — `nord` 가 14번째다.
+const set_item_cap: usize = blk: {
+    var m: usize = 1;
+    for (mobile_config.rows) |r| m = @max(m, r.items.len);
+    break :blk m;
+};
+var set_item_rects: [set_item_cap]SetRect = @splat(.{});
 var set_item_n: usize = 0;
+/// 팝업이 목록 영역보다 길 때의 스크롤(본문 목록과 같은 모양).
+var set_pop_scroll: f32 = 0;
+var set_pop_max_scroll: f32 = 0;
 var set_active: bool = false;
 var set_down_x: f32 = 0;
 var set_down_y: f32 = 0;
@@ -2473,8 +2502,9 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                         pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
                     },
                     .choice => {
-                        const idx: usize = if (val >= 0 and val < row.items.len) @intCast(val) else 0;
-                        const v = row.items[idx];
+                        // **고른 것이 없으면 이름을 안 적는다**(§프리셋 되짚기). 아무거나 적으면
+                        // 고르지도 않은 값을 고른 것처럼 보인다.
+                        const v = if (val >= 0 and val < row.items.len) row.items[@intCast(val)] else "—";
                         const chev_w: f32 = 14;
                         pushText("\u{25BE}", @intFromFloat(right - chev_w), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
                         pushText(v, @intFromFloat(right - chev_w - 6 - @as(f32, @floatFromInt(textWidth(v, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
@@ -2516,9 +2546,11 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     if (set_open) |oi| switch (set_items[oi].field.kind) {
         .choice => {
             const c = set_items[oi].field; // items 는 스키마가, 고른 값은 config 가 든다
-            const sel: usize = s: {
+            // **고른 것이 없으면 아무것도 강조 안 한다.** 범위 밖을 0 으로 떨어뜨리면 첫 항목이
+            // 선택된 것처럼 보인다 — 행에는 "—" 인데 팝업에는 `maru` 가 켜져 있었다(화면으로 잡았다).
+            const sel: ?usize = s: {
                 const v = mobile_config.valueOf(cfg(), c.key);
-                break :s if (v >= 0 and v < c.items.len) @intCast(v) else 0;
+                break :s if (v >= 0 and v < c.items.len) @as(usize, @intCast(v)) else null;
             };
             const r = set_row_rects[oi];
             if (r.w == 0) {
@@ -2534,17 +2566,30 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 // 높이를 맞추고, 잘렸다는 사실은 오류로 남긴다(`take_copy` 와 같은 규율).
                 const shown = @min(c.items.len, set_item_rects.len);
                 if (shown < c.items.len) setLastError("settings_popup_truncated");
-                const ph = @as(f32, @floatFromInt(shown)) * set_row_h;
+                const full_h = @as(f32, @floatFromInt(shown)) * set_row_h;
+                // **목록 영역을 넘지 않는다.** 넘치면 그 항목들은 화면 밖이라 **고를 수가 없고**,
+                // 모바일은 파일을 손으로 못 고치므로(계약 §2 — 화면이 유일한 입력 경로) 그 값이
+                // 영영 사라진다. 프리셋 16개 × 44 = 704 라 작은 폰에서 실제로 넘친다.
+                const ph = @min(full_h, set_list.h);
+                set_pop_max_scroll = @max(0, full_h - ph);
+                if (set_pop_scroll > set_pop_max_scroll) set_pop_scroll = set_pop_max_scroll;
                 if (py + ph > set_list.y + set_list.h) py = @max(set_list.y, r.y - ph);
+                if (py < set_list.y) py = set_list.y;
                 push(.{ .x = @intFromFloat(px - 1), .y = @intFromFloat(py - 1), .w = @intFromFloat(pw + 2), .h = @intFromFloat(ph + 2) }, tk.get(.muted_fg), 0xFF, 9, 0);
                 push(.{ .x = @intFromFloat(px), .y = @intFromFloat(py), .w = @intFromFloat(pw), .h = @intFromFloat(ph) }, tk.get(.surface_bg), 0xFF, 8, 0);
                 for (c.items[0..shown], 0..) |it, k| {
-                    const iy = py + @as(f32, @floatFromInt(k)) * set_row_h;
-                    set_item_rects[k] = .{ .x = px, .y = iy, .w = pw, .h = set_row_h };
+                    const iy = py + @as(f32, @floatFromInt(k)) * set_row_h - set_pop_scroll;
+                    // **보이는 것만 누를 수 있다.** 밖으로 나간 항목의 rect 를 남기면 화면에는
+                    // 없는데 눌리는 자리가 생긴다(본문 목록과 같은 규율).
+                    set_item_rects[k] = if (iy + set_row_h <= py or iy >= py + ph)
+                        .{}
+                    else
+                        .{ .x = px, .y = iy, .w = pw, .h = set_row_h };
                     set_item_n = k + 1;
-                    if (k == sel)
+                    if (set_item_rects[k].w == 0) continue;
+                    if (sel != null and k == sel.?)
                         push(.{ .x = @intFromFloat(px + 2), .y = @intFromFloat(iy + 2), .w = @intFromFloat(pw - 4), .h = @intFromFloat(set_row_h - 4) }, tk.get(.tab_active_bg), 0xFF, 6, 0);
-                    pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (k == sel) .accent_bar else .surface_fg));
+                    pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (sel != null and k == sel.?) .accent_bar else .surface_fg));
                 }
             }
         },
@@ -2616,6 +2661,14 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             if (set_moved < 10) return 1;
             set_pressed = null;
             set_back_pressed = false;
+            if (set_open != null) {
+                // **팝업이 열려 있으면 팝업을 민다.** 안 그러면 목록 16개짜리 팝업에서 아래
+                // 항목에 닿을 방법이 없다 — 화면이 유일한 입력 경로라 그 값이 영영 사라진다.
+                set_pop_scroll -= dy;
+                if (set_pop_scroll < 0) set_pop_scroll = 0;
+                if (set_pop_scroll > set_pop_max_scroll) set_pop_scroll = set_pop_max_scroll;
+                return 1;
+            }
             if (set_open == null) {
                 set_scroll -= dy;
                 clampSetScroll();
@@ -2653,7 +2706,10 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
                     const row = set_items[i].field;
                     settingChanged(row, if (mobile_config.valueOf(cfg(), row.key) != 0) 0 else 1);
                 },
-                .choice => set_open = i,
+                .choice => {
+                    set_open = i;
+                    set_pop_scroll = 0; // 열 때마다 처음부터 — 지난번 자리가 남으면 엉뚱한 데서 뜬다
+                },
                 .number => {}, // 숫자 편집은 이 슬라이스 밖(키보드가 필요하다)
             };
         },

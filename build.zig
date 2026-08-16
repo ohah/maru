@@ -4285,6 +4285,20 @@ pub fn build(b: *std.Build) void {
         run_cr4a_catchup_protocol_tests.addArg("--maru-expect-tests=1");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_protocol_tests.step);
 
+        const cr4a_client_demux_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a client demux는"},
+        });
+        const run_cr4a_client_demux_tests = b.addRunArtifact(cr4a_client_demux_tests);
+        run_cr4a_client_demux_tests.addArg("--maru-expect-tests=6");
+        session_host_cr4a_step.dependOn(&run_cr4a_client_demux_tests.step);
+
         const cr4a_catchup_server_frame_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/server.zig"),

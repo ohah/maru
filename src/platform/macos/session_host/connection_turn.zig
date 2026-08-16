@@ -1220,6 +1220,9 @@ fn validateSubscriptionBatch(
                 const ends = protocol.Flags.hasEndStream(header.flags);
                 if (ends != (index + 1 == frames.len)) return false;
             },
+            // Dormant wire vocabulary only. The product path must remain closed until a sealed
+            // PreparedCatchupBatch binds the decoded payload to the projection and pending row.
+            .barrier => return false,
         }
     }
     return true;

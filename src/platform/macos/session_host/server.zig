@@ -352,7 +352,7 @@ pub const OutboundClass = union(enum) {
     control,
     subscription: struct {
         stream: subscription_identity.LocalStreamId,
-        kind: enum { snapshot, delta, event },
+        kind: enum { snapshot, delta, event, barrier },
     },
 };
 
@@ -373,6 +373,11 @@ pub fn classifyOutbound(bytes: []const u8) error{InvalidFrame}!OutboundClass {
             .stream = header.stream_id,
             .kind = .delta,
         } },
+        .screen_frontier_barrier => if (header.request_id == 0 and header.stream_id != 0 and
+            header.flags == 0 and header.payload_len == protocol.screen_frontier_barrier_payload_size) .{ .subscription = .{
+            .stream = header.stream_id,
+            .kind = .barrier,
+        } } else error.InvalidFrame,
         // Stream-scoped events (currently runtime.metadata) belong to the subscription budget.
         // Connection-wide notices are encoded by the adapter and admitted explicitly as control.
         .event => if (header.stream_id != 0) .{ .subscription = .{
@@ -381,6 +386,39 @@ pub fn classifyOutbound(bytes: []const u8) error{InvalidFrame}!OutboundClass {
         } } else .control,
         else => .control,
     };
+}
+
+test "CR4a host barrier frame은 exact subscription header만 admit한다" {
+    var bytes: [protocol.header_size + 97]u8 = @splat(0);
+    const valid = (protocol.Header{
+        .kind = .screen_frontier_barrier,
+        .request_id = 0,
+        .stream_id = 7,
+        .payload_len = 96,
+    }).encode();
+    @memcpy(bytes[0..protocol.header_size], &valid);
+    const classified = try classifyOutbound(bytes[0 .. protocol.header_size + 96]);
+    switch (classified) {
+        .subscription => |output| {
+            try std.testing.expectEqual(@as(u64, 7), output.stream);
+            try std.testing.expectEqual(.barrier, output.kind);
+        },
+        .control => return error.TestUnexpectedResult,
+    }
+
+    const hostile = [_]protocol.Header{
+        .{ .kind = .screen_frontier_barrier, .request_id = 1, .stream_id = 7, .payload_len = 96 },
+        .{ .kind = .screen_frontier_barrier, .request_id = 0, .stream_id = 0, .payload_len = 96 },
+        .{ .kind = .screen_frontier_barrier, .flags = protocol.Flags.end_stream, .stream_id = 7, .payload_len = 96 },
+        .{ .kind = .screen_frontier_barrier, .request_id = 0, .stream_id = 7, .payload_len = 95 },
+        .{ .kind = .screen_frontier_barrier, .request_id = 0, .stream_id = 7, .payload_len = 97 },
+    };
+    for (hostile) |header| {
+        const encoded = header.encode();
+        @memcpy(bytes[0..protocol.header_size], &encoded);
+        const len = protocol.header_size + @as(usize, header.payload_len);
+        try std.testing.expectError(error.InvalidFrame, classifyOutbound(bytes[0..len]));
+    }
 }
 
 pub const HandleError = error{OutOfMemory};

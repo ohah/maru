@@ -1147,6 +1147,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    복원하지 않는다. **CR4c**는 proven controller candidate를 CR3c의 Client/RemoteGeneration publication에 연결하고 forced first
    resize와 input을 새 generation에서만 연 뒤 retiring owner를 ordered reclaim한다. 세 gate 모두 실제 socket fixture를 사용하며
    CR4a만으로 takeover나 사용자 가시 reconnect 완료를 주장하지 않는다.
+   barrier 구현은 dormant pointer-free contract와 두 제품 prerequisite로 나눈다. dormant 계약은 product caller 0이며 host
+   process/subscription identity와 GUI-local staged identity를 섞지 않는다. 먼저 host issuer는 negotiated capability, correlated pending row,
+   core-lock projection receipt와 screen frames+barrier의 단일 queue transaction을 닫는다. 다음 client consumer는
+   `GenerationAttachment` demux 아래 bounded inbox, 하나의 absolute deadline/cap과 final-address staged receipt를 닫는다.
+   host issuer만 green인 상태는 caught-up 또는 CR4a 완료가 아니다. barrier target은 server가 subscription을 재조회하거나
+   encoded screen record를 파싱해 만들지 않고 `RuntimeManager`의 immutable projection receipt만 전달한다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

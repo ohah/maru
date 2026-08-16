@@ -1212,3 +1212,57 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
     try testing.expect(failed_steps >= 5);
     try testing.expect(ok_steps >= 1);
 }
+
+test "알려진 구멍: 랩을 켠 비교는 좌우가 어긋난다 — 조각 단위 정렬 대기" {
+    // §3.5는 **세로를 공유**한다 — 같은 행이 같은 높이에 서야 비교가 성립한다. 그런데 랩이 켜지면
+    // 좌우가 **각자** 접히므로, 한쪽 줄이 3조각이고 반대쪽이 1조각이면 그 아래 행부터 어긋난다.
+    // 조각 오프셋도 좌우가 공유하므로(§4.1d) 이 상태에서 스크롤하면 무엇이 보이는지가 갈린다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // 왼쪽은 짧고 오른쪽은 아주 긴 줄 — 접힘 수가 확실히 갈린다.
+    var long_buf: std.ArrayList(u8) = .empty;
+    defer long_buf.deinit(allocator);
+    try long_buf.appendSlice(allocator, "b");
+    for (0..400) |_| try long_buf.appendSlice(allocator, "x");
+    try long_buf.append(allocator, '\n');
+
+    var entry = testEntry("a\nb\nc\n", try std.fmt.allocPrint(allocator, "a\n{s}c\n", .{long_buf.items}));
+    defer allocator.free(entry.diff_modified);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = true;
+    poll(fx.session, fx.term);
+
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 좌우 열을 가르는 x를 구해 각 열의 마지막 행을 센다.
+    const inner_w: u32 = @intCast(leaf.w -| chrome_editor.frame.content_inset_px * 2);
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = inner_w, .h = 100 }, 8);
+    var left_rows: usize = 0;
+    var right_rows: usize = 0;
+    for (drawn.dl.cells) |c| {
+        const x = @as(i32, c.col) * 8;
+        if (x < cols.right.x) left_rows = @max(left_rows, @as(usize, c.row) + 1) else right_rows = @max(right_rows, @as(usize, c.row) + 1);
+    }
+    // **같은 내용이 같은 높이에 있는가** — 셋째 행의 'c'를 좌우에서 찾는다.
+    var left_c: ?u16 = null;
+    var right_c: ?u16 = null;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint != 'c') continue;
+        const x = @as(i32, c.col) * 8;
+        if (x < cols.right.x) left_c = c.row else right_c = c.row;
+    }
+    try testing.expect(left_c != null and right_c != null);
+
+    // **이 단언은 "옳다"가 아니라 "지금 이렇다"이다.** §3.5는 같은 행이 같은 높이에 서기를 요구하는데
+    // (그래야 비교가 성립한다), 랩이 켜지면 좌우가 **각자** 접혀 그 전제가 깨진다 — 실측: 왼쪽 3행 /
+    // 오른쪽 13행, 같은 `c`가 2행 대 12행. `editor.wrap` 기본값이 `true`라 **이것이 기본 상태**다.
+    //
+    // 조각 단위 정렬(행마다 `max(left_pieces, right_pieces)`만큼 filler를 넣는다)이 붙으면 여기가
+    // 뒤집혀야 하고, 그때 이 테스트가 그 사실을 알린다.
+    try testing.expect(left_c.? != right_c.?);
+}

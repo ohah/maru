@@ -6168,9 +6168,9 @@ pub const AppSession = struct {
         // "종료"는 detach(runtime 생존, e3-6), alternate는 terminate(다 끝냄). host-backed가 없으면(in-process뿐) alternate가
         // 무의미하니 기존 2버튼(종료/취소)을 쓴다.
         if (is_macos and app_keep_alive_after_quit and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
-            self.showConfirmChoices(.quit, "maru를 종료할까요? 열린 터미널은 백그라운드에서 유지됩니다.", .{ .primary = "종료", .alternate = "종료 및 세션 끝내기", .cancel = "취소" });
+            self.showConfirmChoiceKeys(.quit, .app_quit_confirm_keepalive, .{ .primary = .btn_quit, .alternate = .btn_quit_end_session });
         } else {
-            self.showConfirmButtons(.quit, "maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
+            self.showConfirmKeys(.quit, .app_quit_confirm, .{ .confirm = .btn_quit });
         }
         self.quit_decision = .none;
     }
@@ -6231,6 +6231,38 @@ pub const AppSession = struct {
         self.pending_confirm = .none;
     }
 
+    /// 확인 대화상자의 버튼 라벨을 **키로** 든다. 기본값이 공용 확인/취소라 대부분의 호출부는 메시지 키만
+    /// 넘긴다. chrome 의 `Buttons`(문자열)는 아직 그대로라 여기서 풀어 넘긴다 — 그쪽은 I3c 범위다.
+    pub const ConfirmKeys = struct {
+        confirm: maru.i18n.Key = .common_confirm,
+        cancel: maru.i18n.Key = .common_cancel,
+    };
+
+    /// 세 갈래 버전. `alternate` 는 기본값이 없다 — 세 번째 선택지는 대화상자마다 다른 행동이라
+    /// 기본값을 두면 뜻이 흐려진다.
+    pub const ConfirmChoiceKeys = struct {
+        primary: maru.i18n.Key,
+        alternate: maru.i18n.Key,
+        cancel: maru.i18n.Key = .common_cancel,
+    };
+
+    /// 키로 확인 대화상자를 연다(docs/i18n.md §7.2 1차) — 리터럴을 넘기면 컴파일되지 않는다.
+    pub fn showConfirmKeys(self: *AppSession, owner: PendingConfirm, message: maru.i18n.Key, buttons: ConfirmKeys) void {
+        self.showConfirmButtons(owner, maru.i18n.t(message), .{
+            .confirm = maru.i18n.t(buttons.confirm),
+            .cancel = maru.i18n.t(buttons.cancel),
+        });
+    }
+
+    /// 세 갈래 버전.
+    pub fn showConfirmChoiceKeys(self: *AppSession, owner: PendingConfirm, message: maru.i18n.Key, choices: ConfirmChoiceKeys) void {
+        self.showConfirmChoices(owner, maru.i18n.t(message), .{
+            .primary = maru.i18n.t(choices.primary),
+            .alternate = maru.i18n.t(choices.alternate),
+            .cancel = maru.i18n.t(choices.cancel),
+        });
+    }
+
     pub fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
         self.cancelPendingConfirm();
         if (owner != .file_panel_close and self.pending_file_panel_close != null) {
@@ -6251,7 +6283,7 @@ pub const AppSession = struct {
 
     /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
     pub fn showConfirm(self: *AppSession, message: []const u8, target: PendingClose) void {
-        self.showConfirmButtons(.{ .close = target }, message, .{ .confirm = "닫기", .cancel = "취소" });
+        self.showConfirmButtons(.{ .close = target }, message, .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
     }
 
     /// 1e-confirm-2b: browser grant 확인 모달을 연다(§9.2 Model B, 라벨 "허용"/"거부"). **비파괴**: 이미 다른 오버레이/확인
@@ -6262,7 +6294,7 @@ pub const AppSession = struct {
         if (self.pending_confirm == .grant) return self.pending_confirm.grant == async_id;
         // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
         if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
-        self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = "허용", .cancel = "거부" });
+        self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
         return true;
     }
 
@@ -6277,7 +6309,7 @@ pub const AppSession = struct {
     /// 상태로 덮어쓰는 파괴적 동작이라 즉시 실행하지 않고 확인을 받는다(닫기 확인과 같은 메커니즘 — 더 파괴적인데
     /// 무확인이던 비대칭 제거, code-review #835). pending_reset=true로 두면 confirm_accept가 resetAllSettings를 실행한다(pending_close와 배타).
     pub fn requestResetAll(self: *AppSession) void {
-        self.showConfirmButtons(.reset, "모든 설정을 기본값으로 되돌리고 config 파일을 덮어씁니다. 계속할까요?", .{ .confirm = "초기화", .cancel = "취소" });
+        self.showConfirmKeys(.reset, .app_reset_confirm, .{ .confirm = .btn_reset });
     }
 
     /// 보류한 닫기를 취소하고 확인 모달을 닫는다 — 표적이 더 이상 유효하지 않거나(트리 변경) 다른 오버레이가
@@ -7126,10 +7158,10 @@ pub const AppSession = struct {
     fn requestFileConflictReload(self: *AppSession, surface_id: u64) void {
         const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
         if (!entry.external_change) return;
-        self.showConfirmButtons(
+        self.showConfirmKeys(
             .{ .file_conflict_reload = surface_id },
-            "외부에서 파일이 변경되었습니다. 편집 중인 내용을 버리고 디스크에서 다시 읽을까요?",
-            .{ .confirm = "다시 읽기", .cancel = "취소" },
+            .app_reload_external_confirm,
+            .{ .confirm = .btn_reload },
         );
     }
 
@@ -10865,7 +10897,8 @@ pub const AppSession = struct {
     }
 
     /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
-    pub const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
+    /// 붙여넣기 확인 문구 — 표시 문자열은 `i18n` 이 소유하고 여기는 그 키를 가리킨다(docs/i18n.md §3).
+    pub const paste_confirm_key: maru.i18n.Key = .term_paste_confirm;
     const paste_preview_max_lines = 6; // 미리보기에 보여줄 앞 줄 수(넘으면 "…N줄 더"로 요약 — Ghostty 스크롤 뷰의 근사)
     const paste_preview_max_cols = 56; // 한 줄 표시폭 상한(넘으면 … 절단) — 모달이 너무 넓어지지 않게
 
@@ -21898,7 +21931,7 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
     session.chrome_host.settings.open = false;
 
     // 확인 모달도 같은 판정(anyOverlayOpen에 포함).
-    session.showConfirmButtons(.{ .paste = term_ops.activeSurface(session).id }, AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+    session.showConfirmButtons(.{ .paste = term_ops.activeSurface(session).id }, maru.i18n.t(AppSession.paste_confirm_key), .{ .confirm = "붙여넣기", .cancel = "취소" });
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
     try std.testing.expectEqual(active_pane, pane_ops.activePane(session));
     session.chrome_host.confirm.dismiss();

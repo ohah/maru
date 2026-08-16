@@ -35,6 +35,10 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
         "src/platform/macos/session_host/reconnect_resident_budget.zig",
     );
     defer allocator.free(reconnect_resident_budget);
+    const poll_owner = try readSource(allocator, "src/platform/macos/session_host/poll_owner.zig");
+    defer allocator.free(poll_owner);
+    const connection_turn = try readSource(allocator, "src/platform/macos/session_host/connection_turn.zig");
+    defer allocator.free(connection_turn);
 
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret"));
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret_initialized"));
@@ -79,7 +83,18 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // CR0b HostAdapter·publisher registry·runtime·composite coordinator·GUI process owner와 daemon bootstrap이 같은 process domain을 직접 검증한다.
     // CR1 reconnect scheduler와 CR2e-e3b1 resident admission budget이 같은 process seal owner를 사용한다.
     // e3c1 app-global reconnect coordinator도 같은 process seal domain을 소비한다.
-    try std.testing.expectEqual(@as(usize, 30), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // CR4 catch-up adds the poll owner as the sole ready-identity injector and the connection
+    // turn as the pre-lock/private-commit verifier. Restore activation separately mints the
+    // fresh process domain immediately after exec. All remain one import per owner module.
+    try std.testing.expectEqual(@as(usize, 33), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "@import(\"process_seal_service.zig\")"));
+    const restore_activation = try readSource(allocator, "src/platform/macos/session_host/restore_activation.zig");
+    defer allocator.free(restore_activation);
+    try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 2), count(poll_owner, ".process_identity = process_identity"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn validateProcessIdentity("));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn commitCatchupArm("));
     try std.testing.expectEqual(
         @as(usize, 1),
         count(reconnect_resident_budget, "@import(\"process_seal_service.zig\")"),

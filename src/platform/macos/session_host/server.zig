@@ -22,6 +22,7 @@ const host_identity = @import("host_identity.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const connection_slot = @import("connection_slot.zig");
 const subscription_identity = @import("subscription_identity.zig");
+const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const HostStatus = struct {
@@ -273,9 +274,35 @@ pub const StreamUpdate = struct {
     new_base: []u8,
 };
 
+pub const catchup_host_expiry_ns: u64 = 2 * std.time.ns_per_s;
+
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
 /// (socket에 write한 뒤 free). `close`는 응답 없이 connection을 닫으라는 뜻이다(runtime에는 손대지 않는다).
 pub const Action = union(enum) {
+    pub const PreparedCatchupArm = struct {
+        self_addr: usize = 0,
+        active_raw: u8 = 0,
+        pid: u32 = 0,
+        process_nonce: u64 = 0,
+        reply: []u8,
+        stream: subscription_identity.LocalStreamId,
+        identity: catchup_barrier_contract.CatchupIdentity,
+        now_ns: u64,
+        expires_at_ns: u64,
+        before: catchup_barrier_contract.HostState,
+        after: catchup_barrier_contract.HostState,
+        result: catchup_barrier_contract.HostState.ArmResult,
+
+        pub fn bindFinal(self: *PreparedCatchupArm, pid: u32, process_nonce: u64) bool {
+            if (self.self_addr != 0 or self.active_raw != 0 or pid == 0 or process_nonce == 0)
+                return false;
+            self.self_addr = @intFromPtr(self);
+            self.pid = pid;
+            self.process_nonce = process_nonce;
+            self.active_raw = 1;
+            return true;
+        }
+    };
     pub const UpgradeAccepted = struct {
         bytes: []u8,
         attempt_id: u128,
@@ -340,6 +367,7 @@ pub const Action = union(enum) {
     prepared_attach: PreparedAttach,
     /// A response that advances retained metadata only after control-queue admission.
     prepared_reply: PreparedReply,
+    catchup_arm_requested: PreparedCatchupArm,
     prepared_notification: PreparedNotification,
     /// Cross-connection authority mutation is deliberately not executed in `Connection`. The
     /// daemon poll owner resolves the global subscription, atomically admits every control frame,
@@ -564,6 +592,7 @@ pub const Connection = struct {
     runtime_metadata_v1: bool = false,
     runtime_ended_v1: bool = false,
     controller_transfer_v1: bool = false,
+    runtime_catchup_barrier_v1: bool = false,
     /// Deterministic fault injection: real builds leave false; tests force the snapshot-build failure boundary without
     /// also starving the tiny typed error response allocation.
     inventory_fail_snapshot_once: bool = false,
@@ -599,6 +628,7 @@ pub const Connection = struct {
         /// 마지막으로 queue admission까지 commit된 screen output frontier. initial attach snapshot만
         /// 0이고, 이후 resync/fallback snapshot과 non-empty delta batch는 exact +1로 전진한다.
         screen_sequence: u64 = 0,
+        catchup: catchup_barrier_contract.HostState = .idle,
     };
 
     pub const State = enum { pre_hello, ready, closed };
@@ -756,13 +786,17 @@ pub const Connection = struct {
     /// MRSH frame 하나를 처리한다. connection state에 따라 hello 협상 또는 command dispatch를 하고, 응답 frame을
     /// 만들어 `Action`으로 돌려준다. 응답이 없거나 protocol을 어긴 경우 `.close`다(runtime은 유지).
     pub fn handleFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
+        return self.handleFrameAt(frame, 0);
+    }
+
+    pub fn handleFrameAt(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         if (frame.header.major != protocol.version_major) {
             self.state = .closed;
             return .close;
         }
         return switch (self.state) {
             .pre_hello => self.handleHello(frame),
-            .ready => self.handleReady(frame),
+            .ready => self.handleReady(frame, now_ns),
             .closed => .close,
         };
     }
@@ -789,6 +823,12 @@ pub const Connection = struct {
 
         const pmin = intField(obj, "protocol_min") orelse 0;
         const pmax = intField(obj, "protocol_max") orelse 0;
+        // Capability negotiation is an authority boundary. Silently skipping a malformed
+        // element would let a syntactically invalid hello enable a later capability.
+        if (!stringArrayFieldValid(obj, "capabilities")) {
+            self.state = .closed;
+            return .close;
+        }
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
         self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
@@ -797,6 +837,8 @@ pub const Connection = struct {
             "capabilities",
             "controller_transfer_v1",
         );
+        self.runtime_catchup_barrier_v1 = self.subscription_identity != null and
+            stringArrayContains(obj, "capabilities", catchup_barrier_contract.capability);
 
         // 겹치는 major가 없으면 incompatible_version으로 끝낸다(§10). 이때는 응답을 준 뒤 닫는다.
         if (!(pmin <= protocol.version_major and protocol.version_major <= pmax)) {
@@ -833,19 +875,19 @@ pub const Connection = struct {
         return .{ .reply = wire };
     }
 
-    fn handleReady(self: *Connection, frame: framing.Frame) HandleError!Action {
+    fn handleReady(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         if (frame.header.kind == .request and frame.header.request_id == 0) {
             self.state = .closed;
             return .close;
         }
-        if (self.client_kind == .admin) return self.handleAdminReady(frame);
+        if (self.client_kind == .admin) return self.handleAdminReady(frame, now_ns);
         switch (frame.header.kind) {
             .ping => {
                 // diagnostic nonce를 그대로 되돌린다(payload passthrough). ping·pong cap이 같아 재초과 없음.
                 const wire = try self.encodeSmall(.pong, frame.header.request_id, frame.header.stream_id, frame.payload);
                 return .{ .reply = wire };
             },
-            .request => return self.dispatchRequest(frame),
+            .request => return self.dispatchRequest(frame, now_ns),
             .input_bytes => return self.routeInput(frame),
             .stream_ack => return self.routeStreamAck(frame),
             .scroll_to_bottom => return self.routeScrollToBottom(frame),
@@ -863,7 +905,7 @@ pub const Connection = struct {
         }
     }
 
-    fn handleAdminReady(self: *Connection, frame: framing.Frame) HandleError!Action {
+    fn handleAdminReady(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         if (frame.header.kind != .request)
             return self.adminErrorAndClose(frame.header.request_id, .unauthorized);
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch
@@ -883,14 +925,14 @@ pub const Connection = struct {
         };
         return switch (requestPolicy(method)) {
             .admin_read => blk: {
-                const action = try self.dispatchParsedRequest(frame, method, params);
+                const action = try self.dispatchParsedRequest(frame, method, params, now_ns);
                 self.state = .closed;
                 break :blk .{ .reply_and_close = action.reply };
             },
             .admin_mutation => blk: {
                 if (self.runtime_ops == null)
                     return self.adminErrorAndClose(frame.header.request_id, .unauthorized);
-                const action = try self.dispatchParsedRequest(frame, method, params);
+                const action = try self.dispatchParsedRequest(frame, method, params, now_ns);
                 self.state = .closed;
                 break :blk switch (action) {
                     .reply => |bytes| .{ .reply_and_close = bytes },
@@ -912,7 +954,7 @@ pub const Connection = struct {
         return .{ .reply_and_close = action.reply };
     }
 
-    fn dispatchRequest(self: *Connection, frame: framing.Frame) HandleError!Action {
+    fn dispatchRequest(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
             return self.replyError(frame.header.request_id, .invalid_request);
         };
@@ -929,7 +971,7 @@ pub const Connection = struct {
             else => null,
         };
 
-        return self.dispatchParsedRequest(frame, method, params);
+        return self.dispatchParsedRequest(frame, method, params, now_ns);
     }
 
     fn dispatchParsedRequest(
@@ -937,6 +979,7 @@ pub const Connection = struct {
         frame: framing.Frame,
         method: RequestMethod,
         params: ?std.json.ObjectMap,
+        now_ns: u64,
     ) HandleError!Action {
         return switch (method) {
             .host_info => blk: {
@@ -982,6 +1025,7 @@ pub const Connection = struct {
                 .release,
             ),
             .runtime_resync => self.dispatchResync(frame.header.request_id, params),
+            .runtime_catchup => self.dispatchCatchup(frame.header.request_id, params, now_ns),
             .runtime_observation => self.dispatchObservation(frame.header.request_id, params),
             .runtime_core_command => self.dispatchCoreCommand(frame.header.request_id, params),
             .runtime_report_mouse => self.dispatchReportMouse(frame.header.request_id, params),
@@ -1993,6 +2037,65 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
+    fn dispatchCatchup(
+        self: *Connection,
+        request_id: u64,
+        params: ?std.json.ObjectMap,
+        now_ns: u64,
+    ) HandleError!Action {
+        if (!self.runtime_catchup_barrier_v1)
+            return self.replyError(request_id, .unauthorized);
+        const owner = self.subscription_identity orelse
+            return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        if (p.count() != 2) return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse
+            return self.replyError(request_id, .invalid_request);
+        const nonce_text = strField(p, "request_nonce") orelse
+            return self.replyError(request_id, .invalid_request);
+        const request_nonce = parseHex128(nonce_text) orelse
+            return self.replyError(request_id, .invalid_request);
+        const sub = self.attachments.get(stream) orelse
+            return self.replyError(request_id, .runtime_not_found);
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(sub.runtime_id, sub.subscription_id),
+            reg.Capability.observe,
+        )) return self.replyError(request_id, .unauthorized);
+
+        const identity: catchup_barrier_contract.CatchupIdentity = .{
+            .host_id = self.host_id,
+            .subscription = sub.subscription_id,
+            .runtime_id = sub.runtime_id,
+            .connection = owner.connection,
+            .request_nonce = request_nonce,
+        };
+        const expires_at_ns = now_ns +| catchup_host_expiry_ns;
+        const before = sub.catchup;
+        var after = before;
+        const result = after.arm(identity, now_ns, expires_at_ns);
+        if (result == .invalid) return self.replyError(request_id, .invalid_request);
+        const body = try self.stringify(.{ .result = .{
+            .catchup = @tagName(result),
+            .stream_id = stream,
+            .request_nonce = nonce_text,
+        } });
+        defer self.allocator.free(body);
+        const reply = switch (try self.replyResult(request_id, body)) {
+            .reply => |bytes| bytes,
+            else => unreachable,
+        };
+        return .{ .catchup_arm_requested = .{
+            .reply = reply,
+            .stream = stream,
+            .identity = identity,
+            .now_ns = now_ns,
+            .expires_at_ns = expires_at_ns,
+            .before = before,
+            .after = after,
+            .result = result,
+        } };
+    }
+
     /// `runtime.core_command`: strict bounded wire command를 이 stream의 host core reader queue로 라우팅한다.
     /// observer가 focus/config/viewport를 바꾸지 못하도록 controller input capability를 같은 경계에서 검사한다.
     fn dispatchCoreCommand(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
@@ -2619,6 +2722,11 @@ pub const Connection = struct {
         return if (self.attachments.get(stream)) |sub| sub.resync_pending else false;
     }
 
+    pub fn expireCatchups(self: *Connection, now_ns: u64) void {
+        var iterator = self.attachments.valueIterator();
+        while (iterator.next()) |sub| _ = sub.catchup.expire(now_ns);
+    }
+
     pub fn streamHasInputCapability(
         self: *const Connection,
         stream: subscription_identity.LocalStreamId,
@@ -2717,6 +2825,8 @@ pub const Connection = struct {
             append(buf, &count, "controller_transfer_v1");
             append(buf, &count, "notification_stream_auth_v1");
         }
+        if (self.subscription_identity != null)
+            append(buf, &count, catchup_barrier_contract.capability);
         return buf[0..count];
     }
 
@@ -2900,6 +3010,18 @@ fn stringArrayContains(obj: std.json.ObjectMap, key: []const u8, needle: []const
     return false;
 }
 
+fn stringArrayFieldValid(obj: std.json.ObjectMap, key: []const u8) bool {
+    const array = switch (obj.get(key) orelse return true) {
+        .array => |items| items,
+        else => return false,
+    };
+    for (array.items) |value| switch (value) {
+        .string => {},
+        else => return false,
+    };
+    return true;
+}
+
 const SpawnFieldError = error{InvalidSpawnField};
 
 fn spawnOptionalStringField(obj: std.json.ObjectMap, key: []const u8) SpawnFieldError!?[]const u8 {
@@ -2994,6 +3116,7 @@ const RequestMethod = enum {
     controller_takeover,
     controller_release,
     runtime_resync,
+    runtime_catchup,
     runtime_observation,
     runtime_core_command,
     runtime_report_mouse,
@@ -3022,6 +3145,7 @@ const RequestMethod = enum {
             .controller_takeover => "controller.takeover",
             .controller_release => "controller.release",
             .runtime_resync => "runtime.resync",
+            .runtime_catchup => "runtime.catchup",
             .runtime_observation => "runtime.observation",
             .runtime_core_command => "runtime.core_command",
             .runtime_report_mouse => "runtime.report_mouse",
@@ -3058,6 +3182,7 @@ fn requestPolicy(method: RequestMethod) RequestPolicy {
         .controller_takeover,
         .controller_release,
         .runtime_resync,
+        .runtime_catchup,
         .runtime_observation,
         .runtime_core_command,
         .runtime_report_mouse,
@@ -3224,6 +3349,14 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             const out = (try rp.next()).?;
             return .{ .action = "prepared_notification", .frame = out };
         },
+        .catchup_arm_requested => |prepared| {
+            defer allocator.free(prepared.reply);
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(prepared.reply);
+            const out = (try rp.next()).?;
+            return .{ .action = "catchup_arm_requested", .frame = out };
+        },
         .prepared_attach, .prepared_reply => unreachable,
     }
 }
@@ -3303,6 +3436,111 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_core_command_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selected_text_v1\"") != null);
+}
+
+test "CR4a host capability는 typed hello와 pending prepare만 허용한다" {
+    const allocator = testing.allocator;
+    const prepare = struct {
+        fn one(
+            conn: *Connection,
+            now_ns: u64,
+            request_id: u64,
+            nonce: []const u8,
+        ) !Action.PreparedCatchupArm {
+            const test_allocator = testing.allocator;
+            const body = try std.fmt.allocPrint(
+                test_allocator,
+                "{{\"method\":\"runtime.catchup\",\"params\":{{\"stream_id\":1,\"request_nonce\":\"{s}\"}}}}",
+                .{nonce},
+            );
+            defer test_allocator.free(body);
+            const wire = try framing.encodeFrame(
+                test_allocator,
+                .{ .kind = .request, .request_id = request_id },
+                body,
+            );
+            defer test_allocator.free(wire);
+            var parser = framing.FrameParser.init(test_allocator);
+            defer parser.deinit();
+            try parser.push(wire);
+            const frame = (try parser.next()).?;
+            defer frame.deinit(test_allocator);
+            const action = try conn.handleFrameAt(frame, now_ns);
+            if (action != .catchup_arm_requested) return error.TestUnexpectedResult;
+            return action.catchup_arm_requested;
+        }
+    }.one;
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.initProduct(
+        testing.allocator,
+        0x1234,
+        &registry,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+        &subscriptions,
+    );
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+
+    const hello = try feedJson(
+        &conn,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_catchup_barrier_v1\"]}",
+    );
+    defer if (hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(conn.runtime_catchup_barrier_v1);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        hello.frame.?.payload,
+        catchup_barrier_contract.capability,
+    ) != null);
+    const attach = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (attach) |frame| frame.deinit(allocator);
+        allocator.free(attach);
+    }
+    try testing.expect(conn.attachments.get(1).?.catchup == .idle);
+
+    const nonce = "00112233445566778899aabbccddeeff";
+    const rejected = try prepare(&conn, 100, 3, nonce);
+    defer allocator.free(rejected.reply);
+    try testing.expectEqual(catchup_barrier_contract.HostState.ArmResult.armed, rejected.result);
+    try testing.expect(conn.attachments.get(1).?.catchup == .idle);
+
+    const second = try prepare(&conn, 100, 4, nonce);
+    defer allocator.free(second.reply);
+    try testing.expectEqual(catchup_barrier_contract.HostState.ArmResult.armed, second.result);
+    try testing.expect(conn.attachments.get(1).?.catchup == .idle);
+
+    var malformed = Connection.initProduct(
+        testing.allocator,
+        0x1234,
+        &registry,
+        .{ .monotonic_id = 2, .slot_generation = 1 },
+        &subscriptions,
+    );
+    defer malformed.deinit();
+    const malformed_hello = try feedJson(
+        &malformed,
+        .hello,
+        8,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[{},\"runtime_catchup_barrier_v1\"]}",
+    );
+    defer if (malformed_hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("close", malformed_hello.action);
+    try testing.expect(!malformed.runtime_catchup_barrier_v1);
+    try testing.expectEqual(@as(usize, 0), malformed.attachments.count());
 }
 
 // code-review(max) 회귀: preflight(전체 정지 판정)가 **완료된 attempt의 멱등 replay**까지 가로막아, 결과를

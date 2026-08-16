@@ -1871,3 +1871,20 @@ test "config 가 없으면 기본 화면이 그대로다" {
     try std.testing.expectEqual(@as(u8, 0x2E), got.b);
     bridge.maru_mobile_clear_error();
 }
+
+// **host 는 화면보다 먼저 config 를 읽는다**(첫 프레임부터 그 색으로 그리려고). 그때는 코어가
+// 아직 없으므로, 코어가 서는 자리에서 다시 흘려 넣지 않으면 코어가 드는 값이 **조용히 버려진다**.
+test "코어보다 먼저 읽은 config 도 코어에 닿는다" {
+    // 코어가 없는 상태를 만들 수 없으므로(앞 테스트들이 이미 세웠다) 순서를 뒤집어 같은 것을 잰다:
+    // config 를 넣고 build 를 돌린 뒤 코어가 그 값을 들고 있는지 본다.
+    const src = "scrollback.lines = 321\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 321), bridge.maru_mobile_scrollback_lines());
+
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 1000), bridge.maru_mobile_scrollback_lines());
+    bridge.maru_mobile_clear_error();
+}

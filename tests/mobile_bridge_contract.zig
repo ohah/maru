@@ -2071,3 +2071,61 @@ test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
+
+// **아직 안 되는 줄은 눌린 티도 내면 안 된다.** 반응을 주고 아무 일도 안 하는 것이 가장
+// 헷갈린다 — 숫자 편집은 키보드가 필요해 별도 슬라이스다.
+test "숫자 줄은 눌림 표시를 안 낸다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const span = chromeClaimSpan(402, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(0, span.x0 + 1, 874 - 22);
+    _ = bridge.maru_mobile_chrome_pointer(2, span.x0 + 1, 874 - 22);
+    const base = bridge.maru_mobile_build(402, 874, now());
+
+    var y: f32 = 0;
+    var tested = false;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind != .number) continue;
+        _ = bridge.maru_mobile_chrome_pointer(0, 200, y); // 누른 채로 둔다
+        const pressed = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqual(base, pressed); // 배경 quad 가 안 늘었다 = 눌린 티가 없다
+        _ = bridge.maru_mobile_chrome_pointer(3, 200, y);
+        tested = true;
+        break;
+    }
+    try std.testing.expect(tested);
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **여러 번 바꿔도 본문이 안 부푼다.** 매번 원본에 얹는 것이라 같은 키를 반복해 바꾸면 줄이
+// 쌓일 수 있다 — 그러면 파일이 무한히 자란다.
+test "같은 키를 여러 번 바꿔도 줄이 안 쌓인다" {
+    const src = "cursor.blink = true\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var out: [4096]u8 = undefined;
+    var last: usize = 0;
+    var i: u32 = 0;
+    while (i < 6) : (i += 1) {
+        try std.testing.expect(openSettingsAndTap("cursor.blink"));
+        const n = bridge.maru_mobile_take_config_write(&out, out.len);
+        try std.testing.expect(n > 0);
+        // 줄 수가 그대로여야 한다(값만 바뀐다).
+        var lines: usize = 0;
+        for (out[0..n]) |c| if (c == '\n') {
+            lines += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), lines);
+        if (last != 0) try std.testing.expect(n <= last + 1);
+        last = n;
+        _ = bridge.maru_mobile_pop_screen();
+    }
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}

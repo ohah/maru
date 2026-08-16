@@ -2643,6 +2643,10 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, x: f32, y: f32) u32 {
             set_pressed = null;
             if (set_open == null and !set_back_pressed) {
                 for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
+                    // **안 되는 줄은 눌린 티도 안 낸다.** 숫자 줄은 아직 편집 수단이 없는데
+                    // (키보드가 필요하다 — 별도 슬라이스) 눌림 배경까지 켜지면 **반응은 주고
+                    // 아무 일도 안 하는** 가장 헷갈리는 모양이 된다.
+                    if (set_items[i] == .field and set_items[i].field.kind == .number) break;
                     set_pressed = i;
                     break;
                 };

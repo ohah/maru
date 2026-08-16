@@ -358,13 +358,27 @@ git diff --check
 (W2 적대적 검증), 그때는 CI가 잡았다.
 
 ```sh
-zig build -Dtarget=aarch64-macos    # macOS 컴파일 확인
-zig build -Dtarget=x86_64-linux     # Linux 컴파일 확인
+zig build -Dtarget=aarch64-macos        # exe + 중립 레이어의 macOS 컴파일
+zig build -Dtarget=x86_64-linux         # 같은 것을 Linux로
+zig build test -Dtarget=aarch64-macos   # **macOS 플랫폼 코드(L4)까지** 컴파일 — 아래
 ```
 
-**한계 — 컴파일만 확인한다.** `zig build test -Dtarget=aarch64-macos`는 macOS 테스트가 Foundation·CoreText를
-링크하므로 다른 호스트에서 실패한다. 즉 이 명령이 보증하는 것은 **exe와 중립 레이어가 그 OS에서 컴파일된다**는
-것이고, macOS L4 테스트와 실제 실행은 여전히 CI 몫이다.
+**셋째 줄이 중요하다.** `-Dtarget=aarch64-macos`는 build.zig의 macOS 전용 테스트 스텝을 **켜므로**
+`src/platform/macos/**`가 컴파일 대상에 들어온다. 앞의 두 줄은 그러지 않는다 — exe 그래프에 macOS 소스가
+아예 없어서, L4만 건드린 변경은 **통과해도 아무것도 검증하지 않는다**.
 
-L4(플랫폼 어댑터)나 OS 갈래(`builtin.os.tag` 분기, 호스트별 스텁)를 건드린 PR은 **CI에 올리기 전에** 위 두
-줄을 돌린다. 중립 레이어(L1~L3)만 바꾼 PR은 `mise run check`로 충분하다.
+끝에 가면 `error: unable to find framework 'Foundation'`으로 **링크가 실패한다**. 그건 정상이고 무시한다 —
+**컴파일 오류는 링크보다 먼저 나오므로 그 위에 다 찍힌다.** 그래서 이렇게 걸러 본다:
+
+```sh
+zig build test -Dtarget=aarch64-macos 2>&1 | grep -E '\.zig:[0-9]+:[0-9]+: error'
+```
+
+이 검사가 실제로 그 부류를 잡는지 확인했다 — 구조체 필드 이름을 일부러 옛것으로 되돌리자
+`no field named 'zdotdir' in struct 'server.RuntimeSpawnParams'`가 그대로 나왔고, 그 자리는 CI가 아니면
+못 봤을 자리였다(실제로 그렇게 놓친 자리를 하나 잡았다).
+
+**한계 — 실행이 아니라 컴파일이다.** macOS 테스트의 실제 실행과 링크는 여전히 CI 몫이다.
+
+L4(플랫폼 어댑터)나 OS 갈래(`builtin.os.tag` 분기, 호스트별 스텁, 중립 계약 필드 rename)를 건드린 PR은
+**CI에 올리기 전에** 위 세 줄을 돌린다. 중립 레이어(L1~L3)만 바꾼 PR은 `mise run check`로 충분하다.

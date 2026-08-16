@@ -189,17 +189,31 @@ pub const ForegroundProcessName = struct {
     }
 };
 
+/// 셸(또는 통제된 자식)을 띄우라는 **의도**다. 이 구조체는 OS 형식을 모른다 — 그것을 실제 호출로 바꾸는 것은
+/// 백엔드의 일이다(macOS는 `execve`의 `argv[]`, Windows는 `CreateProcessW`의 `lpCommandLine` 문자열).
+/// 그래서 `command`+`args`가 **토큰 배열로 남는다**: 문자열로 바꾸면 Windows의 인코딩 디테일(argv quoting의
+/// 백슬래시-따옴표 규칙)이 중립 레이어로 샌다(docs/windows-platform.md §4.2).
+///
+/// **필드 이름이 wire tag가 아니다.** 이 구조체는 `RuntimeSpawnParams`를 거쳐 세션 호스트 RPC를 건너가는데,
+/// 그 JSON 키는 손으로 적은 문자열이라 Zig 필드 이름과 독립이다(docs/session-host-upgrade.md — 영속 호스트라
+/// 새 앱이 **옛 호스트**와 대화한다). 그래서 여기 이름을 바꿔도 wire는 그대로다.
 pub const SpawnRequest = struct {
     // command는 shell을 거치지 않고 execve에 직접 넘길 실행 파일 경로다.
     // 이렇게 두면 테스트에서 shell quoting과 process spawning 책임을 분리할 수 있다.
     command: []const u8,
     args: []const []const u8 = &.{},
     cwd: ?[]const u8 = null,
-    // login shell로 띄울지. macOS backend는 true면 `login(1)`으로 감싸 전체 로그인 세션(getlogin·
-    // SHELL·utmp·hushlogin)을 셋업한 뒤 셸을 login shell로 exec한다(Terminal.app·Ghostty와 동일).
-    // 그래야 PATH·EDITOR·키바인딩(예: `bindkey -e`)과 $TERM_PROGRAM 의존 셸 설정까지 완전히 잡힌다.
-    // non-login이면 .zshrc만 읽어 키맵이 달라질 수 있다(예: $EDITOR=nvim → vi-keymap → Ctrl+A·E
-    // self-insert → Cmd+←/→가 줄 시작/끝으로 안 감).
+    /// **의도**: 사용자의 대화형 로그인 세션인가(vs 통제된 자식 프로세스). 이름이 `login(1)`을 가리키지만
+    /// 그 메커니즘은 **백엔드가 정한다** — macOS는 `login(1)`으로 감싸 전체 로그인 세션(getlogin·SHELL·utmp·
+    /// hushlogin)을 셋업한 뒤 셸을 login shell로 exec하고(Terminal.app·Ghostty와 동일), Windows에는 대응
+    /// 메커니즘이 없어 무동작이다(docs/windows-platform.md §4.2).
+    ///
+    /// macOS에서 이것이 왜 중요한가: PATH·EDITOR·키바인딩(예: `bindkey -e`)과 $TERM_PROGRAM 의존 셸 설정까지
+    /// 잡힌다. non-login이면 .zshrc만 읽어 키맵이 달라질 수 있다(예: $EDITOR=nvim → vi-keymap → Ctrl+A·E
+    /// self-insert → Cmd+←/→가 줄 시작/끝으로 안 감).
+    ///
+    /// **지우면 안 된다**: 호출자가 정하는 정책이고(`agent.zig`가 비대화형에 false, 대화형에 true) 세션 호스트
+    /// RPC를 건너간다. 지우면 백엔드가 "사용자의 대화형 셸"과 "통제된 자식"을 구별할 수 없다.
     login: bool = false,
     env: []const []const u8 = &.{},
     // env가 비었을 때 상속할 부모 환경 snapshot. null이면 현재 프로세스 environ(일반 in-process spawn), non-null이면
@@ -209,14 +223,29 @@ pub const SpawnRequest = struct {
     // maru override(TERM 등) **위에** upsert한다 — 같은 KEY가 있으면 덮어쓰고, 없으면 추가한다("부모 + 사용자"
     // 정책). env(전체 명시)와 달리 부모 상속을 끊지 않는다. 비어 있으면(기본) 무동작. EnvStorage.init이 적용.
     env_overrides: []const []const u8 = &.{},
-    // env가 빈(부모 상속) 경로에서 셸에 줄 TERM 값. 사용자 config(`term =`)로 바꿀 수 있다 —
-    // 일부 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게 잡기 때문이다(예: Ctrl+A 줄-시작).
-    // env를 명시로 넘기면(테스트) 이 값은 무시된다.
+    /// env가 빈(부모 상속) 경로에서 셸에 줄 TERM 값. 사용자 config(`term =`)로 바꿀 수 있다 —
+    /// 일부 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게 잡기 때문이다(예: Ctrl+A 줄-시작).
+    /// env를 명시로 넘기면(테스트) 이 값은 무시된다.
+    ///
+    /// **의미는 백엔드가 정한다.** POSIX 셸에는 terminfo 항목 이름이지만 네이티브 Windows 셸(cmd·PowerShell)은
+    /// terminfo를 안 쓴다 — 거기서는 WSL·msys로 들어가는 프로그램에만 뜻이 있다(계약 §4.2).
     term: []const u8 = "xterm-256color",
-    // 셸 통합 디렉터리(zsh). 설정되면 셸에 ZDOTDIR=<이 값>을 주입하고(기존 ZDOTDIR은 MARU_ZDOTDIR_
-    // PREV로 보존) zsh가 그 디렉터리의 Maru .zshenv를 로드해 macOS 편집키를 바인딩한다. null이면
-    // 통합 없이 띄운다. env를 명시로 넘기면(테스트) 무시된다.
-    zdotdir: ?[]const u8 = null,
+    /// **셸 통합 자산 디렉터리** — maru가 셸에 심을 통합 스크립트가 있는 곳. null이면 통합 없이 띄운다.
+    ///
+    /// **어떻게 심을지는 백엔드가 정한다**(계약 §4.2). 한때 이 필드 이름이 `zdotdir`이라 zsh라는 셸 이름까지
+    /// 중립 계약에 새고 있었다 — 그 이름은 macOS 백엔드가 쓰는 **메커니즘**이지 계약이 아니다.
+    ///
+    /// | 백엔드 | 매핑 |
+    /// |---|---|
+    /// | macOS(zsh) | `ZDOTDIR=<이 값>`을 주입하고 기존 값은 `MARU_ZDOTDIR_PREV`로 보존한다. zsh가 그 디렉터리의 Maru `.zshenv`를 로드해 편집키를 바인딩한다 |
+    /// | Windows(PowerShell) | 프로필 스크립트 |
+    /// | Windows(cmd) | `PROMPT` |
+    ///
+    /// **wire tag는 여전히 `"zdotdir"`다** — 필드 이름과 독립이다(위 struct doc). 바꾸려면 명시적 converter와
+    /// version bump가 따로 필요하다.
+    ///
+    /// env를 명시로 넘기면(테스트) 무시된다.
+    shell_integration_dir: ?[]const u8 = null,
     // 셸 통합 ssh 라우팅(opt-in)이 켜졌을 때 현재 maru 실행 파일 경로. 설정되면 셸에 MARU_BIN=<이 값>과
     // MARU_SSH_INTEGRATION=1을 주입한다 — 통합 .zshenv가 이 둘을 보고 `ssh`를 `maru ssh`로 라우팅하는
     // 함수를 정의한다(없으면 평범한 ssh 그대로). 이 단일 optional이 "기능 on + 바이너리 경로"를 함께

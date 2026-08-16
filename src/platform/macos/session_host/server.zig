@@ -76,7 +76,9 @@ pub const RuntimeSpawnParams = struct {
     parent_env: ?[]const []const u8 = null,
     env_overrides: []const []const u8 = &.{},
     term: []const u8 = "xterm-256color",
-    zdotdir: ?[]const u8 = null,
+    /// `SpawnRequest.shell_integration_dir`의 RPC 짝. **wire 키는 여전히 `"zdotdir"`다** — 아래 파싱이 그
+    /// 문자열을 직접 쓴다(필드 이름과 독립, docs/windows-platform.md §4.2).
+    shell_integration_dir: ?[]const u8 = null,
     ssh_integration_bin: ?[]const u8 = null,
     pane_id: ?u64 = null,
     cols: u16,
@@ -1403,7 +1405,7 @@ pub const Connection = struct {
             .parent_env = parent_env,
             .env_overrides = env_overrides,
             .term = term,
-            .zdotdir = zdotdir,
+            .shell_integration_dir = zdotdir,
             .ssh_integration_bin = ssh_integration_bin,
             .pane_id = pane_id,
             .cols = cols,
@@ -4119,7 +4121,7 @@ pub const FakeRuntimeOps = struct {
         const term_len = @min(params.term.len, self.spawn_term.len);
         @memcpy(self.spawn_term[0..term_len], params.term[0..term_len]);
         self.spawn_term_len = term_len;
-        self.spawn_zdotdir_seen = params.zdotdir != null;
+        self.spawn_zdotdir_seen = params.shell_integration_dir != null;
         self.spawn_ssh_bin_seen = params.ssh_integration_bin != null;
         self.spawn_pane_id = params.pane_id;
         self.spawn_initial_config = params.initial_config;

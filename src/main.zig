@@ -564,8 +564,17 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         return error.UnknownCommand;
     };
     // 셸 명령과 같은 XDG 규칙으로 캐시 경로를 보여준다(둘이 같은 위치로 resolve).
-    const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const dir = try maru.terminfo_cache.cacheDirZ(allocator, xdg, std.mem.span(home_z));
+    //
+    // **입구 정규화**(docs/windows-platform.md §5): 환경변수에서 온 경로는 native 구분자다. 중립 레이어는
+    // 이을 때 항상 `/`를 쓰므로(layering §4.1) 그대로 넘기면 결과가 섞인다 — 실측으로 확인한 모양이
+    // `C:\Users\me/.cache/maru/terminfo`였다. POSIX에서는 무동작이라 macOS 동작이 바뀌지 않는다.
+    const xdg_raw = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
+    const xdg: ?[]const u8 = if (xdg_raw) |x| try maru.path_shape.normalizeSeparators(allocator, x) else null;
+    defer if (xdg) |x| allocator.free(x);
+    const home = try maru.path_shape.normalizeSeparators(allocator, std.mem.span(home_z));
+    defer allocator.free(home);
+
+    const dir = try maru.terminfo_cache.cacheDirZ(allocator, xdg, home);
     defer allocator.free(dir);
 
     switch (action) {

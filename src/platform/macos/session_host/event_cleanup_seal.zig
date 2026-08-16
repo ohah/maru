@@ -228,6 +228,8 @@ pub const HostReconnectJobSealInput = struct {
     candidate_active: u8,
     stage_addr: u64,
     stage_digest: Digest,
+    mutation_digest: Digest,
+    controller_generation: u64,
     state_raw: u8,
 };
 

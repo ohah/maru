@@ -122,12 +122,13 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
             "platform/macos/session_host/host_adapter.zig",
             "platform/macos/session_host/remote_runtime.zig",
             // CR4a's final-address host job revalidates the published replacement in each live
-            // published/candidate state; the fifth occurrence is the product regression oracle.
+            // published/candidate/controller-ledger state; CR4b adds the two closed outcome
+            // validation branches without opening another publication caller.
             "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementDetachBeforeAdmissionClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementCleanupBeforeAdmissionClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightClientReplacement("));
-    try std.testing.expectEqual(@as(usize, 5), count(backend, "preflightPublishedClientReplacement("));
+    try std.testing.expectEqual(@as(usize, 7), count(backend, "preflightPublishedClientReplacement("));
 }

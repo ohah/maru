@@ -219,6 +219,35 @@ pub const GenerationBatchAdapter = struct {
         );
     }
 
+    pub fn callControllerUntil(
+        self: *GenerationBatchAdapter,
+        method: []const u8,
+        params_json: []const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError![]u8 {
+        const slot = self.borrowSlot(.live) orelse return error.ProtocolError;
+        const connection_generation = slot.connectionGeneration();
+        return slot.callCurrentUntil(
+            connection_generation,
+            method,
+            params_json,
+            deadline,
+        );
+    }
+
+    pub fn refreshControllerEvidence(self: *GenerationBatchAdapter) client_mod.ClientError!void {
+        const slot = self.borrowSlot(.live) orelse return error.ProtocolError;
+        const connection_generation = slot.connectionGeneration();
+        return slot.ingestCurrentReadableEvidence(connection_generation);
+    }
+
+    pub fn terminalConnectionReason(
+        self: *GenerationBatchAdapter,
+    ) ?client_poison.ConnectionReason {
+        const slot = self.borrowSlot(.live) orelse return null;
+        return slot.attachmentConnectionFailureReason();
+    }
+
     /// 이동 가능한 payload의 ordered view를 pointer-free scratch로 바꾼 뒤 canonical registry가
     /// 모든 row를 다시 검증하게 한다. 실패 전에는 adapter와 attachment source를 바꾸지 않는다.
     pub fn preflightTerminalCleanup(

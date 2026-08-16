@@ -69,10 +69,10 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
         "observation: term_backend.RuntimeObservation,",
     }) |field| try std.testing.expectEqual(@as(usize, 0), count(shell, field));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 10192,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 10144,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 10176,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 10128,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11248,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11200,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11232,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11184,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -458,7 +458,7 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
     try std.testing.expectEqual(@as(usize, 1), count(build_gate, "--maru-expect-tests=1"));
 }
 
-test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 substrate로 고정한다" {
+test "CR2e-b 경계는 mutation seal substrate와 CR4b stable runtime owner만 연다" {
     const allocator = std.testing.allocator;
     const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_mutation_seal.zig");
     defer allocator.free(source);
@@ -466,6 +466,8 @@ test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 sub
     defer allocator.free(tests);
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
+    const remote_runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(remote_runtime);
 
     inline for (.{
         "pub const MutationLifecycle = enum(u8)",
@@ -485,15 +487,24 @@ test "CR2e-b 경계는 mutation seal과 secure PausedPaste를 dormant 제품 sub
         "pub const ttl_ns: i96 = 10 * 60 * std.time.ns_per_s;",
     }) |constant| try std.testing.expectEqual(@as(usize, 1), count(source, constant));
     try std.testing.expectEqual(@as(usize, 1), count(source, "std.crypto.secureZero(u8, bytes);"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(remote_runtime, "const reconnect_mutation_seal = @import(\"reconnect_mutation_seal.zig\");"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(remote_runtime, "mutation_owner: reconnect_mutation_seal.MutationOwner = .{},"),
+    );
     try std.testing.expectEqual(@as(usize, 4), count(tests, "test \"CR2e-b"));
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExceptThree(
+        try countProductSourcesExceptFour(
             allocator,
             "@import(\"reconnect_mutation_seal",
             "platform/macos/session_host/reconnect_mutation_seal.zig",
-            "platform/macos/session_host/reconnect_mutation_seal.zig",
+            "platform/macos/session_host/remote_runtime.zig",
             "platform/macos/session_host/reconnect_resident_budget.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
         ),
     );
     const build_gate = between(
@@ -816,8 +827,8 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
     );
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "pub const ReconnectResidentLedger"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn reconnectCandidateResidentBytes() !usize"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3424,"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3408,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3440,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3424,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "else => error.SkipZigTest,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e3a1"));
     const e3a_tests = between(
@@ -1339,6 +1350,34 @@ fn countProductSourcesExceptThree(
         if (std.mem.eql(u8, entry.path, first_excluded_path) or
             std.mem.eql(u8, entry.path, second_excluded_path) or
             std.mem.eql(u8, entry.path, third_excluded_path)) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += count(source, needle);
+    }
+    return total;
+}
+
+fn countProductSourcesExceptFour(
+    allocator: std.mem.Allocator,
+    needle: []const u8,
+    first_excluded_path: []const u8,
+    second_excluded_path: []const u8,
+    third_excluded_path: []const u8,
+    fourth_excluded_path: []const u8,
+) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, first_excluded_path) or
+            std.mem.eql(u8, entry.path, second_excluded_path) or
+            std.mem.eql(u8, entry.path, third_excluded_path) or
+            std.mem.eql(u8, entry.path, fourth_excluded_path)) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         defer allocator.free(path);
         const source = try readSource(allocator, path);

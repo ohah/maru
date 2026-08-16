@@ -36,6 +36,7 @@ const remote_close_authority = @import("remote_close_authority.zig");
 const shutdown_attempt_authority_mod = @import("shutdown_attempt_authority.zig");
 const shutdown_current_admin_mod = @import("shutdown_current_admin.zig");
 const runtime_lifetime_owner_mod = @import("runtime_lifetime_owner.zig");
+const reconnect_mutation_seal = @import("reconnect_mutation_seal.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
@@ -1686,6 +1687,75 @@ pub const ReconnectGenerationOwner = struct {
         };
     }
 
+    fn executeCandidateControllerTakeoverUntil(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!generation_attachment_mod.GenerationAttachment.ControllerTransferOutcome {
+        if (!self.validateCandidateCatchupStage(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            deadline,
+            true,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        return switch (candidate.attachment) {
+            .generation => |*attachment| attachment.executeControllerTakeoverUntil(stage, deadline),
+            .legacy => error.InvalidAuthority,
+        };
+    }
+
+    fn validateCandidateControllerEvidence(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) bool {
+        self.validatePrepared(reconnect) catch return false;
+        self.preflightClientGenerationPair(adapter, reconnect, published) catch return false;
+        const candidate = @constCast(self.slot.candidatePayload(&reconnect.candidate) catch return false);
+        return switch (candidate.attachment) {
+            .generation => |*attachment| attachment.validateControllerEvidence(
+                stage,
+                controller_generation,
+            ),
+            .legacy => false,
+        };
+    }
+
+    fn abortCandidateControllerEvidence(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) anyerror!void {
+        if (!self.validateCandidateControllerEvidence(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            controller_generation,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.releaseControllerEvidence(
+                stage,
+                controller_generation,
+            ),
+            .legacy => return error.InvalidAuthority,
+        }
+        try self.abort(reconnect);
+    }
+
     fn abortCandidateCatchupStage(
         self: *ReconnectGenerationOwner,
         adapter: *host_adapter_mod.HostAdapter,
@@ -1699,6 +1769,32 @@ pub const ReconnectGenerationOwner = struct {
         const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
         switch (candidate.attachment) {
             .generation => |*attachment| try attachment.abortCatchupStage(stage),
+            .legacy => return error.InvalidAuthority,
+        }
+        try self.abort(reconnect);
+    }
+
+    fn abortCandidateCatchupStageForClosedOutcome(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!void {
+        try self.validatePrepared(reconnect);
+        try self.preflightClientGenerationPair(adapter, reconnect, published);
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| {
+                if (deadline.expires_at_ns == stage.deadline_expires_at_ns and
+                    attachment.catchupStageAuthorityMatches(stage))
+                {
+                    try attachment.abortCatchupStage(stage);
+                } else {
+                    try attachment.abortCatchupStageAfterTerminalTransport(stage);
+                }
+            },
             .legacy => return error.InvalidAuthority,
         }
         try self.abort(reconnect);
@@ -2158,6 +2254,9 @@ pub const RemoteRuntime = struct {
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
     input_batches: input_owner_mod.StableQueueState,
+    mutation_owner: reconnect_mutation_seal.MutationOwner = .{},
+    paused_input_metadata: ?reconnect_mutation_seal.PausedInputMetadata = null,
+    paused_paste_store: reconnect_mutation_seal.PausedPasteStore = .{},
     event_cursor: maru.app.EventCursor = .{},
     pending_controls: std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),
     // A blocking drain owns both mutation queues until it either commits or returns an error.
@@ -2329,6 +2428,74 @@ pub const RemoteRuntime = struct {
             );
         }
 
+        pub fn sealReconnectMutations(
+            runtime: *RemoteRuntime,
+            budget: *reconnect_mutation_seal.GlobalPasteBudget,
+        ) anyerror!reconnect_mutation_seal.SealResult {
+            try runtime.admitRuntimeOperation();
+            return runtime.sealReconnectMutationQueue(budget);
+        }
+
+        pub fn executeReconnectControllerTakeoverUntil(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) anyerror!generation_attachment_mod.GenerationAttachment.ControllerTransferOutcome {
+            try runtime.admitRuntimeOperation();
+            return runtime.generation_owner.executeCandidateControllerTakeoverUntil(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                deadline,
+            );
+        }
+
+        pub fn validateReconnectControllerEvidence(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.validateCandidateControllerEvidence(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn abortReconnectControllerEvidence(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.abortCandidateControllerEvidence(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn reconnectMutationSealDigest(
+            runtime: *const RemoteRuntime,
+        ) ?process_seal_service.CleanupSeal {
+            return runtime.reconnectMutationSealDigest();
+        }
+
         pub fn abortReconnectObserverStage(
             runtime: *RemoteRuntime,
             adapter: *host_adapter_mod.HostAdapter,
@@ -2339,6 +2506,24 @@ pub const RemoteRuntime = struct {
         ) anyerror!void {
             try runtime.admitRuntimeOperation();
             try runtime.generation_owner.abortCandidateCatchupStage(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                deadline,
+            );
+        }
+
+        pub fn abortReconnectObserverStageForClosedOutcome(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.abortCandidateCatchupStageForClosedOutcome(
                 adapter,
                 reconnect,
                 published,
@@ -2582,6 +2767,7 @@ pub const RemoteRuntime = struct {
                         .supported => .supported,
                     },
                     .peer_attach_generation = client.attachment_capabilities.peer_attach_generation,
+                    .controller_transfer = client.attachment_capabilities.negotiated_controller_transfer,
                     .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
                     .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
                     .notification_stream_auth = client.notification_stream_auth_v1,
@@ -2687,6 +2873,13 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
+        self.mutation_owner = .{};
+        try self.mutation_owner.initInPlace(
+            try self.generation_owner.currentGeneration(),
+            self.input_batches.epoch,
+        );
+        self.paused_input_metadata = null;
+        self.paused_paste_store = .{};
         self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
@@ -2776,6 +2969,13 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.input_batches = .{};
+        self.mutation_owner = .{};
+        try self.mutation_owner.initInPlace(
+            try self.generation_owner.currentGeneration(),
+            self.input_batches.epoch,
+        );
+        self.paused_input_metadata = null;
+        self.paused_paste_store = .{};
         self.event_cursor = .{};
         self.pending_controls = .empty;
         self.blocking_flush_active = false;
@@ -3194,6 +3394,7 @@ pub const RemoteRuntime = struct {
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
         self.surface.deinit();
         self.deinitGenerationOwnerAndScreenSource();
+        if (self.paused_paste_store.initialized()) self.paused_paste_store.deinit();
         self.direct_input.deinit(self.allocator);
         self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -3210,6 +3411,7 @@ pub const RemoteRuntime = struct {
         self.detachBestEffort();
         self.surface.deinit();
         self.deinitGenerationOwnerAndScreenSource();
+        if (self.paused_paste_store.initialized()) self.paused_paste_store.deinit();
         self.direct_input.deinit(self.allocator);
         self.input_batches.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -3247,6 +3449,208 @@ pub const RemoteRuntime = struct {
         };
     }
 
+    fn beginStableMutation(
+        self: *RemoteRuntime,
+        out: *reconnect_mutation_seal.MutationLease,
+    ) client_mod.ClientError!void {
+        const shell_generation = self.generation_owner.currentGeneration() catch blk: {
+            if (!builtin.is_test) return error.ProtocolError;
+            break :blk self.generation_owner.slot.currentGeneration() catch @as(u64, 1);
+        };
+        if (builtin.is_test and self.mutation_owner.lifecycle == .pristine) {
+            self.mutation_owner.initInPlace(
+                shell_generation,
+                self.input_batches.epoch,
+            ) catch return error.ProtocolError;
+        }
+        self.mutation_owner.beginMutation(
+            shell_generation,
+            self.input_batches.epoch,
+            out,
+        ) catch |err| return switch (err) {
+            error.ReconnectBusy, error.Busy => error.AdminBusy,
+            else => error.ProtocolError,
+        };
+    }
+
+    fn finishStableMutation(
+        self: *RemoteRuntime,
+        lease: *reconnect_mutation_seal.MutationLease,
+    ) void {
+        self.mutation_owner.finishMutation(lease) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+    }
+
+    fn reconnectSealKind(kind: input_owner_mod.QueueRecordKind) reconnect_mutation_seal.SealKind {
+        return switch (kind) {
+            .key_bytes => .key_bytes,
+            .paste => .paste,
+            .ime_commit => .ime_commit,
+            .osc52_response => .osc52_response,
+            .scroll_to_bottom => .scroll_to_bottom,
+            .core_command => .core_command,
+        };
+    }
+
+    /// CR4a가 unavailable placeholder를 게시한 뒤에도 old-generation mutation owner를 일부러
+    /// 전진시키지 않으므로 새 input과 queue pump는 닫히고 기존 bytes는 보존된다. CR4b는 caught-up
+    /// staged receipt 아래에서 이 leaf를 호출해 metadata와 허용된 완전 paste 하나만 stable owner로 옮긴다.
+    fn sealReconnectMutationQueue(
+        self: *RemoteRuntime,
+        budget: *reconnect_mutation_seal.GlobalPasteBudget,
+    ) anyerror!reconnect_mutation_seal.SealResult {
+        const shell_generation = self.mutation_owner.shell_generation;
+        const input_epoch = self.input_batches.epoch;
+        const initial_direct_input_offset = self.direct_input_offset;
+        const progress = try self.mutation_owner.beginSeal(shell_generation, input_epoch);
+        if (progress == .waiting_for_leases) return error.Busy;
+        var seal_committed = false;
+        errdefer if (!seal_committed)
+            self.mutation_owner.abortSeal(shell_generation, input_epoch) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+
+        const runtime_value = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
+            return error.InvalidAuthority;
+        if (runtime_value == 0 or !budget.initialized()) return error.InvalidAuthority;
+        var runtime_id: [16]u8 = undefined;
+        std.mem.writeInt(u128, &runtime_id, runtime_value, .big);
+        if (!self.paused_paste_store.initialized()) {
+            try self.paused_paste_store.initInPlace(
+                self.allocator,
+                budget,
+                runtime_id,
+                shell_generation,
+                input_epoch,
+            );
+        } else if (self.paused_input_metadata != null or
+            (try self.paused_paste_store.projection()) != null)
+        {
+            return error.Busy;
+        }
+
+        const records = self.input_batches.records.items;
+        if (records.len == 0) {
+            if (self.direct_input_offset != self.direct_input.items.len or
+                self.pending_controls.items.len != 0) return error.InvalidAuthority;
+            const result = try self.mutation_owner.finishSeal(.clean);
+            seal_committed = true;
+            return result;
+        }
+
+        const entries = try self.allocator.alloc(reconnect_mutation_seal.SealEntry, records.len);
+        defer self.allocator.free(entries);
+        var byte_cursor = self.direct_input_offset;
+        var control_cursor: usize = 0;
+        var paste_selected = false;
+        var paste_id: u64 = 0;
+        var expected_sequence = records[0].sequence;
+        if (expected_sequence == 0) return error.InvalidAuthority;
+        for (records, 0..) |record, index| {
+            if (record.epoch != input_epoch or record.sequence != expected_sequence)
+                return error.InvalidAuthority;
+            expected_sequence = std.math.add(u64, expected_sequence, 1) catch
+                return error.InvalidAuthority;
+            if (record.kind.isControl()) {
+                if (control_cursor >= self.pending_controls.items.len or record.end_offset != byte_cursor)
+                    return error.InvalidAuthority;
+                const payload = std.mem.asBytes(&self.pending_controls.items[control_cursor]);
+                entries[index] = .{
+                    .kind = reconnectSealKind(record.kind),
+                    .sequence = record.sequence,
+                    .queued_payload = payload,
+                };
+                control_cursor += 1;
+                continue;
+            }
+            if (record.end_offset <= byte_cursor or record.end_offset > self.direct_input.items.len)
+                return error.InvalidAuthority;
+            const payload = self.direct_input.items[byte_cursor..record.end_offset];
+            const preserve_paste = record.kind == .paste and !paste_selected and
+                (index != 0 or self.direct_input_offset == 0);
+            entries[index] = .{
+                .kind = reconnectSealKind(record.kind),
+                .sequence = record.sequence,
+                .queued_payload = payload,
+                .complete_original = if (preserve_paste) payload else null,
+            };
+            if (preserve_paste) {
+                paste_selected = true;
+                paste_id = record.sequence;
+            }
+            byte_cursor = record.end_offset;
+        }
+        if (byte_cursor != self.direct_input.items.len or
+            control_cursor != self.pending_controls.items.len) return error.InvalidAuthority;
+
+        const metadata = try self.paused_paste_store.sealEntries(entries, paste_id, self.io);
+        // sealEntries는 각 live payload를 secure wipe한다. consumed prefix와 spare semantic bytes도
+        // 별도 owner가 없으므로 전체 logical backing을 한 번 더 지운 뒤 descriptor만 비운다.
+        std.crypto.secureZero(u8, self.direct_input.items);
+        self.direct_input.clearRetainingCapacity();
+        self.direct_input_offset = 0;
+        self.pending_controls.clearRetainingCapacity();
+        self.input_batches.records.clearRetainingCapacity();
+        self.paused_input_metadata = metadata;
+        const classification: reconnect_mutation_seal.SealClassification =
+            if (self.blocking_flush_active or initial_direct_input_offset != 0)
+                .ambiguous
+            else
+                .clean;
+        const result = self.mutation_owner.finishSeal(classification) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        seal_committed = true;
+        return result;
+    }
+
+    fn reconnectMutationSealDigest(self: *const RemoteRuntime) ?process_seal_service.CleanupSeal {
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.mutation_owner.lifecycle)).*;
+        if (lifecycle_raw != @intFromEnum(reconnect_mutation_seal.MutationLifecycle.sealed_clean) and
+            lifecycle_raw != @intFromEnum(reconnect_mutation_seal.MutationLifecycle.sealed_ambiguous))
+            return null;
+        if (self.mutation_owner.active_leases != 0 or !self.paused_paste_store.initialized()) return null;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        const hashInt = struct {
+            fn add(target: *std.crypto.hash.sha2.Sha256, comptime T: type, value: T) void {
+                var bytes: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+                std.mem.writeInt(T, &bytes, value, .little);
+                target.update(&bytes);
+            }
+        }.add;
+        hashInt(&hasher, u8, lifecycle_raw);
+        hashInt(&hasher, u64, self.mutation_owner.shell_generation);
+        hashInt(&hasher, u64, self.mutation_owner.input_epoch);
+        if (self.paused_input_metadata) |metadata| {
+            hashInt(&hasher, u8, 1);
+            hasher.update(&metadata.runtime_id);
+            hashInt(&hasher, u64, metadata.shell_generation);
+            hashInt(&hasher, u64, metadata.input_epoch);
+            hashInt(&hasher, u64, metadata.first_sequence);
+            hashInt(&hasher, u64, metadata.last_sequence);
+            hashInt(&hasher, u32, metadata.total_count);
+            hashInt(&hasher, u64, metadata.total_bytes);
+            for (metadata.kinds) |kind| {
+                hashInt(&hasher, u32, kind.count);
+                hashInt(&hasher, u64, kind.bytes);
+                hashInt(&hasher, u64, kind.first_sequence);
+                hashInt(&hasher, u64, kind.last_sequence);
+            }
+        } else hashInt(&hasher, u8, 0);
+        const paste = self.paused_paste_store.projection() catch return null;
+        if (paste) |projection| {
+            hashInt(&hasher, u8, 1);
+            hashInt(&hasher, u64, projection.id);
+            hasher.update(&projection.runtime_id);
+            hashInt(&hasher, u64, projection.shell_generation);
+            hashInt(&hasher, u64, projection.input_epoch);
+            hashInt(&hasher, u64, projection.full_length);
+            hasher.update(&projection.hash);
+            hashInt(&hasher, u96, @bitCast(projection.expires_at_ns));
+        } else hashInt(&hasher, u8, 0);
+        var result: process_seal_service.CleanupSeal = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
     /// terminal input을 host runtime으로 보낸다(controller). 응답 없는 fire-and-forget.
     pub fn sendInput(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
@@ -3254,6 +3658,9 @@ pub const RemoteRuntime = struct {
         // SurfaceRuntime가 이 권위 거부를 InputSuppressed로 바꿔 trace 0과 paste 영구 폐기를
         // 함께 보장한다. 성공으로 숨기면 실제 PTY에 안 간 입력이 trace에 기록된다.
         if (!self.mutationAllowed()) return error.Unauthorized;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         const pending = self.direct_input.items.len - self.direct_input_offset;
         if (bytes.len > max_direct_input_bytes -| pending) return error.OutOfMemory;
         const sequence = try self.nextInputSequence();
@@ -3279,6 +3686,9 @@ pub const RemoteRuntime = struct {
     pub fn sendInputNonBlocking(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!usize {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         if (!(try self.pumpQueuedInput())) return 0;
         return switch (self.currentGeneration().connection) {
             .legacy => |client| self.currentGeneration().attachment.sendInputNonBlocking(client, bytes),
@@ -3294,6 +3704,9 @@ pub const RemoteRuntime = struct {
         if (!self.mutationAllowed()) return error.Unauthorized;
         const total = std.math.add(usize, batch.first.len, batch.second.len) catch return error.OutOfMemory;
         if (total == 0) return;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         const pending = self.direct_input.items.len - self.direct_input_offset;
         if (total > max_direct_input_bytes -| pending) return error.OutOfMemory;
         const sequence = try self.nextInputSequence();
@@ -3333,6 +3746,9 @@ pub const RemoteRuntime = struct {
             .legacy => if (!self.legacyConnection().async_scroll_to_bottom_v1) return,
             .generation => {},
         }
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         const barrier = self.direct_input.items.len;
         if (self.pending_controls.items.len > 0) {
             const last = self.pending_controls.items[self.pending_controls.items.len - 1];
@@ -3371,6 +3787,9 @@ pub const RemoteRuntime = struct {
             },
             .generation => {},
         }
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
         const sequence = try self.nextInputSequence();
         const barrier = self.direct_input.items.len;
@@ -3530,6 +3949,13 @@ pub const RemoteRuntime = struct {
         // Blocking drain이 front item의 copied value를 들고 있는 동안 callback이 public queue API를
         // 재진입해 같은 item을 소비하지 못하게 한다. false는 기존 backpressure와 같은 retained-owner 결과다.
         if (self.blocking_flush_active) return false;
+        if (!self.mutation_owner.admits(
+            self.generation_owner.currentGeneration() catch blk: {
+                if (!builtin.is_test) return error.ProtocolError;
+                break :blk self.generation_owner.slot.currentGeneration() catch @as(u64, 1);
+            },
+            self.input_batches.epoch,
+        )) return false;
         if (!self.currentGeneration().attachment.allowsMutation()) {
             self.discardQueuedMutations();
             return true;
@@ -3868,6 +4294,9 @@ pub const RemoteRuntime = struct {
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
         if (!self.mutationAllowed()) return;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         if (self.currentGeneration().resize_seq == resize_wire.max_counter)
             return error.SequenceExhausted;
         self.currentGeneration().resize_seq += 1;
@@ -4809,6 +5238,9 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.connectionCapabilities().runtime_clipboard) return null;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         const prepared = self.event_cursor.prepare(.clipboard_write, self.eventCursorSnapshot()) orelse return null;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.currentGeneration().attachment.streamId()}) catch return error.OutOfMemory;
@@ -4902,6 +5334,13 @@ pub const RemoteRuntime = struct {
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         try self.admitRuntimeOperation();
         if (scroll and !self.mutationAllowed()) return error.Unauthorized;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        var mutation_active = false;
+        if (scroll) {
+            try self.beginStableMutation(&mutation_lease);
+            mutation_active = true;
+        }
+        defer if (mutation_active) self.finishStableMutation(&mutation_lease);
         out_spans.clearRetainingCapacity();
         var hexbuf: [512]u8 = undefined;
         const qn = @min(query.len, hexbuf.len / 2);
@@ -4942,6 +5381,9 @@ pub const RemoteRuntime = struct {
     pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16) client_mod.ClientError!?terminal.SelectionSpan {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.currentGeneration().attachment.streamId(), op, row, col }) catch return error.OutOfMemory;
         const kind: generation_contract.SelectKind = if (std.mem.eql(u8, op, "word"))
@@ -4981,6 +5423,9 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!shouldSendCoreCommand(self.connectionCapabilities().runtime_core_command, command)) return;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         const params = core_command_wire.encodeParams(self.allocator, self.currentGeneration().attachment.streamId(), command) catch return error.OutOfMemory;
         defer self.allocator.free(params);
         var output: u8 = 0;
@@ -4998,6 +5443,9 @@ pub const RemoteRuntime = struct {
     pub fn sendMouseReport(self: *RemoteRuntime, m: maru.session.core_command.MouseReport) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         var buf: [192]u8 = undefined;
         const params = std.fmt.bufPrint(
             &buf,
@@ -5028,9 +5476,13 @@ pub const RemoteRuntime = struct {
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
     pub fn takeNotification(self: *RemoteRuntime) client_mod.ClientError!?Notification {
         try self.admitRuntimeOperation();
+        if (!self.mutationAllowed()) return error.Unauthorized;
         // Capability 없는 same-major 구 host는 runtime_id-only RPC를 exact subscription으로
         // authorize하지 못한다. Observer가 shared pending event를 소비하지 않도록 fail-closed한다.
         if (!self.connectionCapabilities().notification_stream_auth) return null;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
         var buf: [96]u8 = undefined;
         const params = notificationParams(
             &buf,
@@ -5775,6 +6227,10 @@ pub const testing_api = if (builtin.is_test) struct {
         allocator: std.mem.Allocator,
         connection: RuntimeConnection,
     ) !void {
+        // 대부분의 legacy fixture는 `RemoteRuntime = undefined`에서 필요한 owner만 순서대로
+        // 조립한다. 제품 constructor와 마찬가지로 mutation owner도 먼저 pristine으로 만들어
+        // 이후 input epoch가 정해진 첫 mutation에서 final-address 초기화할 수 있게 한다.
+        runtime.mutation_owner = .{};
         runtime.generation_owner = .{};
         try runtime.generation_owner.slot.initInPlace(
             allocator,
@@ -6716,6 +7172,9 @@ fn run2eAttachFailureSocket(selected: Attach2eFailureCase) !void {
     rr.currentGeneration().resize_baseline_present = false;
     rr.direct_input = .empty;
     rr.input_batches = .{};
+    rr.mutation_owner = .{};
+    rr.paused_input_metadata = null;
+    rr.paused_paste_store = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -6822,6 +7281,9 @@ test "CR3a-2e actual socket malformed accepted는 cache를 보존하고 준비 �
     rr.currentGeneration().resize_baseline_present = false;
     rr.direct_input = .empty;
     rr.input_batches = .{};
+    rr.mutation_owner = .{};
+    rr.paused_input_metadata = null;
+    rr.paused_paste_store = .{};
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
     rr.blocking_flush_active = false;
@@ -7373,6 +7835,9 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     rr.currentGeneration().pump_ended = false;
     rr.currentGeneration().resync_needed = false;
     rr.currentGeneration().observation = .{};
+    rr.mutation_owner = .{};
+    rr.paused_input_metadata = null;
+    rr.paused_paste_store = .{};
     defer rr.direct_input.deinit(allocator);
     defer rr.input_batches.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
@@ -8896,6 +9361,19 @@ const R2aTestGeneration = if (builtin.is_test) struct {
 const Cr4aCatchupStageCase = enum {
     success,
     barrier_only_success,
+    controller_success,
+    controller_allocator_reentry,
+    controller_conflict,
+    controller_status_buffered_revoke,
+    controller_foreign,
+    controller_cas_conflict,
+    controller_cas_conflict_buffered_revoke,
+    controller_buffered_revoke,
+    controller_sent_unknown,
+    controller_pre_failed,
+    controller_status_resource_failed,
+    controller_takeover_resource_failed,
+    controller_deadline_pre,
     generation_gap,
     malformed_delta,
     batch_cap_plus_one,
@@ -8903,6 +9381,56 @@ const Cr4aCatchupStageCase = enum {
     request_oom,
     missing_barrier,
 };
+
+const ControllerTakeoverReentryAllocator = if (builtin.is_test) struct {
+    parent: std.mem.Allocator,
+    attachment: ?*generation_attachment_mod.GenerationAttachment = null,
+    stage: ?*const catchup_stage_contract.PreparedStage = null,
+    deadline: ?client_deadline.AbsoluteDeadline = null,
+    armed: bool = false,
+    fired: bool = false,
+    rejected: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed and !self.fired) {
+            self.fired = true;
+            if (self.attachment.?.executeControllerTakeoverUntil(
+                self.stage.?,
+                self.deadline.?,
+            )) |_| {
+                self.rejected = false;
+            } else |err| {
+                self.rejected = err == error.InvalidAuthority;
+            }
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ra);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ra);
+    }
+} else struct {};
 
 fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
@@ -9023,6 +9551,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
             release: *std.atomic.Value(u8),
             observer_seen: *std.atomic.Value(u8),
             peer_stage: *std.atomic.Value(u8),
+            peer_case: Cr4aCatchupStageCase,
         ) void {
             defer _ = c.close(fd);
             const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
@@ -9062,6 +9591,135 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                 socket_server.writeAll(fd, barrier_wire) catch return;
                 peer_stage.store(5, .release);
             }
+            const controller_transfer = peer_case == .controller_success or
+                peer_case == .controller_allocator_reentry or
+                peer_case == .controller_conflict or peer_case == .controller_status_buffered_revoke or
+                peer_case == .controller_foreign or peer_case == .controller_cas_conflict or
+                peer_case == .controller_cas_conflict_buffered_revoke or peer_case == .controller_buffered_revoke or
+                peer_case == .controller_sent_unknown or peer_case == .controller_pre_failed or
+                peer_case == .controller_status_resource_failed or
+                peer_case == .controller_takeover_resource_failed or
+                peer_case == .controller_deadline_pre;
+            if (controller_transfer) {
+                if (peer_case == .controller_deadline_pre) {
+                    const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                    while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
+                    return;
+                }
+                const status_request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+                defer std.heap.page_allocator.free(status_request.payload);
+                if (status_request.header.kind != .request or
+                    std.mem.indexOf(u8, status_request.payload, "\"method\":\"controller.status\"") == null)
+                    return;
+                const status_response = framing.encodeFrame(
+                    std.heap.page_allocator,
+                    .{ .kind = .response, .request_id = status_request.header.request_id },
+                    if (peer_case == .controller_conflict)
+                        "{\"error\":\"unauthorized\"}"
+                    else if (peer_case == .controller_pre_failed)
+                        "{\"result\":{}}"
+                    else if (peer_case == .controller_status_resource_failed)
+                        "{\"error\":\"resource_exhausted\"}"
+                    else if (peer_case == .controller_foreign)
+                        "{\"result\":{\"stream_id\":9,\"controller_generation\":3,\"controller\":true}}"
+                    else
+                        "{\"result\":{\"stream_id\":9,\"controller_generation\":3,\"controller\":false}}",
+                ) catch return;
+                defer std.heap.page_allocator.free(status_response);
+                if (peer_case == .controller_status_buffered_revoke) {
+                    const revoke_wire = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .event, .stream_id = 9 },
+                        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":9,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(revoke_wire);
+                    socket_server.writeAll(fd, revoke_wire) catch return;
+                }
+                socket_server.writeAll(fd, status_response) catch return;
+                peer_stage.store(if (peer_case == .controller_status_buffered_revoke) 8 else 6, .release);
+                if (peer_case == .controller_conflict or
+                    peer_case == .controller_status_buffered_revoke or peer_case == .controller_foreign)
+                {
+                    const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                    while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
+                    return;
+                }
+                if (peer_case == .controller_pre_failed or
+                    peer_case == .controller_status_resource_failed) return;
+                const takeover_request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+                defer std.heap.page_allocator.free(takeover_request.payload);
+                if (takeover_request.header.kind != .request or
+                    std.mem.indexOf(u8, takeover_request.payload, "\"method\":\"controller.takeover\"") == null or
+                    std.mem.indexOf(u8, takeover_request.payload, "\"expected_controller_generation\":3") == null)
+                    return;
+                const takeover_response = framing.encodeFrame(
+                    std.heap.page_allocator,
+                    .{ .kind = .response, .request_id = takeover_request.header.request_id },
+                    "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+                        "\"stream_id\":9,\"controller_generation\":4,\"reason\":\"takeover\"," ++
+                        "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}}}",
+                ) catch return;
+                defer std.heap.page_allocator.free(takeover_response);
+                if (peer_case == .controller_sent_unknown) {
+                    socket_server.writeAll(fd, takeover_response[0..5]) catch return;
+                    peer_stage.store(7, .release);
+                    return;
+                }
+                if (peer_case == .controller_cas_conflict) {
+                    const conflict_response = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .response, .request_id = takeover_request.header.request_id },
+                        "{\"error\":\"invalid_generation\"}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(conflict_response);
+                    socket_server.writeAll(fd, conflict_response) catch return;
+                    peer_stage.store(7, .release);
+                    const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                    while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
+                    return;
+                }
+                if (peer_case == .controller_cas_conflict_buffered_revoke) {
+                    const revoke_wire = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .event, .stream_id = 9 },
+                        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":9,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(revoke_wire);
+                    const conflict_response = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .response, .request_id = takeover_request.header.request_id },
+                        "{\"error\":\"invalid_generation\"}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(conflict_response);
+                    socket_server.writeAll(fd, revoke_wire) catch return;
+                    socket_server.writeAll(fd, conflict_response) catch return;
+                    peer_stage.store(8, .release);
+                    return;
+                }
+                if (peer_case == .controller_takeover_resource_failed) {
+                    const resource_response = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .response, .request_id = takeover_request.header.request_id },
+                        "{\"error\":\"resource_exhausted\"}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(resource_response);
+                    socket_server.writeAll(fd, resource_response) catch return;
+                    peer_stage.store(7, .release);
+                    return;
+                }
+                socket_server.writeAll(fd, takeover_response) catch return;
+                peer_stage.store(7, .release);
+                if (peer_case == .controller_buffered_revoke) {
+                    const revoke_wire = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .event, .stream_id = 9 },
+                        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":9,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(revoke_wire);
+                    socket_server.writeAll(fd, revoke_wire) catch return;
+                    peer_stage.store(8, .release);
+                }
+            }
             const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
             while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
         }
@@ -9083,6 +9741,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     var peer = try std.Thread.spawn(.{}, Peer.run, .{
         fds[1],                                            response, snapshot,       delta_wire.items,
         if (selected == .missing_barrier) "" else barrier, &release, &observer_seen, &peer_stage,
+        selected,
     });
     peer_fd_owned = false;
     defer {
@@ -9099,7 +9758,18 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         .fd = -1,
         .host_id = 0x44,
         .parser = framing.FrameParser.init(allocator),
-        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .attachment_capabilities = .{
+            .peer_attach_generation = true,
+            .negotiated_controller_transfer = selected == .controller_success or
+                selected == .controller_allocator_reentry or
+                selected == .controller_conflict or selected == .controller_status_buffered_revoke or
+                selected == .controller_foreign or selected == .controller_cas_conflict or
+                selected == .controller_cas_conflict_buffered_revoke or selected == .controller_buffered_revoke or
+                selected == .controller_sent_unknown or selected == .controller_pre_failed or
+                selected == .controller_status_resource_failed or
+                selected == .controller_takeover_resource_failed or
+                selected == .controller_deadline_pre,
+        },
         .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
         .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
@@ -9116,7 +9786,18 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         .fd = fds[0],
         .host_id = 0x44,
         .parser = framing.FrameParser.init(allocator),
-        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .attachment_capabilities = .{
+            .peer_attach_generation = true,
+            .negotiated_controller_transfer = selected == .controller_success or
+                selected == .controller_allocator_reentry or
+                selected == .controller_conflict or selected == .controller_status_buffered_revoke or
+                selected == .controller_foreign or selected == .controller_cas_conflict or
+                selected == .controller_cas_conflict_buffered_revoke or selected == .controller_buffered_revoke or
+                selected == .controller_sent_unknown or selected == .controller_pre_failed or
+                selected == .controller_status_resource_failed or
+                selected == .controller_takeover_resource_failed or
+                selected == .controller_deadline_pre,
+        },
         .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
         .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
@@ -9127,6 +9808,11 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     var proxy: stable_screen_source.StableScreenSource = undefined;
     try proxy.initUnavailableInPlace(allocator, std.testing.io, .{ .cols = 1, .rows = 1 });
     defer proxy.deinit();
+    var reentry_allocator = ControllerTakeoverReentryAllocator{ .parent = allocator };
+    const generation_allocator = if (selected == .controller_allocator_reentry)
+        reentry_allocator.allocator()
+    else
+        allocator;
     var runtime: RemoteRuntime = undefined;
     runtime.generation_owner = .{};
     try runtime.generation_owner.initInPlace(
@@ -9134,7 +9820,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         &proxy,
         2,
         R2aTestGeneration.Args{
-            .allocator = allocator,
+            .allocator = generation_allocator,
             .adapter = &adapter,
             .runtime_id = 0xaa,
             .stream_id = 7,
@@ -9143,7 +9829,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     );
     defer runtime.generation_owner.deinit() catch
         @panic("CR4a old generation cleanup lost final owner");
-    runtime.allocator = allocator;
+    runtime.allocator = generation_allocator;
     runtime.io = std.testing.io;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.pending_event_owner = .{};
@@ -9178,10 +9864,22 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     if (selected == .request_oom) current_client.allocator = catchup_failing.allocator();
     defer current_client.allocator = original_client_allocator;
     var staged: ?*const catchup_stage_contract.PreparedStage = null;
-    const catchup_deadline = try client_deadline.AbsoluteDeadline.after(
-        std.testing.io,
-        if (selected == .missing_barrier) 100 * std.time.ns_per_ms else std.time.ns_per_s,
-    );
+    const DeadlineClock = struct {
+        fn now(context: *anyopaque) i128 {
+            return @as(*i128, @ptrCast(@alignCast(context))).*;
+        }
+    };
+    var deadline_now_ns: i128 = 0;
+    const catchup_deadline = if (selected == .controller_deadline_pre)
+        client_deadline.AbsoluteDeadline.fromInjected(
+            .{ .context = &deadline_now_ns, .now_ns = DeadlineClock.now },
+            100,
+        )
+    else
+        try client_deadline.AbsoluteDeadline.after(
+            std.testing.io,
+            if (selected == .missing_barrier) 100 * std.time.ns_per_ms else std.time.ns_per_s,
+        );
     var prepare_error: ?anyerror = null;
     switch (candidate.attachment) {
         .generation => |*generation| {
@@ -9197,7 +9895,14 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         },
         .legacy => return error.InvalidAuthority,
     }
-    const success_case = selected == .success or selected == .barrier_only_success;
+    const success_case = selected == .success or selected == .barrier_only_success or
+        selected == .controller_success or selected == .controller_allocator_reentry or
+        selected == .controller_conflict or selected == .controller_status_buffered_revoke or
+        selected == .controller_foreign or selected == .controller_cas_conflict or
+        selected == .controller_cas_conflict_buffered_revoke or
+        selected == .controller_buffered_revoke or selected == .controller_sent_unknown or
+        selected == .controller_pre_failed or selected == .controller_status_resource_failed or
+        selected == .controller_takeover_resource_failed or selected == .controller_deadline_pre;
     if (!success_case) {
         const expected_error: anyerror = switch (selected) {
             .generation_gap => error.GenerationGap,
@@ -9254,6 +9959,154 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     try std.testing.expectEqual(expected_cells, staged_receipt.accounting.decoded_cells);
     try std.testing.expectEqual(expected_sequence, staged_receipt.target.sequence);
     try std.testing.expectEqual(expected_codepoint, candidate.attachment.screenPtr().?.grid.cells[0].codepoint);
+    const controller_case = selected == .controller_success or
+        selected == .controller_allocator_reentry or selected == .controller_conflict or
+        selected == .controller_status_buffered_revoke or selected == .controller_foreign or
+        selected == .controller_cas_conflict or selected == .controller_cas_conflict_buffered_revoke or
+        selected == .controller_buffered_revoke or selected == .controller_sent_unknown or
+        selected == .controller_pre_failed or selected == .controller_status_resource_failed or
+        selected == .controller_takeover_resource_failed or selected == .controller_deadline_pre;
+    if (controller_case) {
+        if (selected == .controller_deadline_pre)
+            deadline_now_ns = catchup_deadline.expires_at_ns;
+        switch (candidate.attachment) {
+            .generation => |*generation| {
+                if (selected == .controller_allocator_reentry) {
+                    reentry_allocator.attachment = generation;
+                    reentry_allocator.stage = staged_receipt;
+                    reentry_allocator.deadline = catchup_deadline;
+                    reentry_allocator.armed = true;
+                }
+                const outcome = try generation.executeControllerTakeoverUntil(
+                    staged_receipt,
+                    catchup_deadline,
+                );
+                switch (selected) {
+                    .controller_success, .controller_allocator_reentry => switch (outcome) {
+                        .new_controller_evidenced => |generation_value| {
+                            if (selected == .controller_allocator_reentry) {
+                                try std.testing.expect(reentry_allocator.fired);
+                                try std.testing.expect(reentry_allocator.rejected);
+                            }
+                            try std.testing.expectEqual(@as(u64, 4), generation_value);
+                            try std.testing.expectEqual(remote_attachment.Role.observer, generation.statePtr().role);
+                            try std.testing.expect(generation.validateControllerEvidence(staged_receipt, 4));
+                            try std.testing.expectEqual(catchup_stage_contract.Lifecycle.consumed, staged_receipt.lifecycle);
+                            try std.testing.expectEqual(@as(u8, 7), peer_stage.load(.acquire));
+                            try generation.releaseControllerEvidence(staged_receipt, 4);
+                            try std.testing.expect(!generation.validateControllerEvidence(staged_receipt, 4));
+                            try std.testing.expectEqual(
+                                generation_attachment_mod.testing_api.DeinitReadiness{
+                                    .stage_idle = true,
+                                    .response_terminal = true,
+                                    .event_ready = true,
+                                    .transport_ready = true,
+                                    .batch_ready = true,
+                                    .operation_idle = true,
+                                    .rpc_free = true,
+                                    .prepared_settled = true,
+                                    .response_settled = true,
+                                    .bound_drop_ready = true,
+                                },
+                                generation_attachment_mod.testing_api.deinitReadiness(generation, &adapter),
+                            );
+                        },
+                        else => return error.TestUnexpectedResult,
+                    },
+                    .controller_conflict,
+                    .controller_foreign,
+                    .controller_cas_conflict,
+                    => {
+                        try std.testing.expect(outcome == .authority_conflict);
+                        try std.testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
+                        const expected_stage: u8 = switch (selected) {
+                            .controller_conflict, .controller_foreign => 6,
+                            .controller_cas_conflict => 7,
+                            else => unreachable,
+                        };
+                        try std.testing.expectEqual(expected_stage, peer_stage.load(.acquire));
+                        try generation.abortCatchupStage(staged_receipt);
+                        try std.testing.expectEqual(
+                            generation_attachment_mod.testing_api.DeinitReadiness{
+                                .stage_idle = true,
+                                .response_terminal = true,
+                                .event_ready = true,
+                                .transport_ready = true,
+                                .batch_ready = true,
+                                .operation_idle = true,
+                                .rpc_free = true,
+                                .prepared_settled = true,
+                                .response_settled = true,
+                                .bound_drop_ready = true,
+                            },
+                            generation_attachment_mod.testing_api.deinitReadiness(generation, &adapter),
+                        );
+                    },
+                    .controller_sent_unknown => {
+                        try std.testing.expect(outcome == .takeover_sent_unknown);
+                        const terminal_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+                        try std.testing.expect(terminal_client.unusable);
+                        try std.testing.expectEqual(
+                            client_poison.ConnectionReason.frame_malformed,
+                            terminal_client.firstPoisonReason().?,
+                        );
+                        try std.testing.expectEqual(@as(u8, 7), peer_stage.load(.acquire));
+                        try generation.abortCatchupStageAfterTerminalTransport(staged_receipt);
+                    },
+                    .controller_buffered_revoke, .controller_cas_conflict_buffered_revoke => {
+                        try std.testing.expect(outcome == .takeover_sent_unknown);
+                        const terminal_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+                        try std.testing.expect(terminal_client.unusable);
+                        try std.testing.expectEqual(
+                            client_poison.ConnectionReason.response_correlation_lost,
+                            terminal_client.firstPoisonReason().?,
+                        );
+                        try std.testing.expectEqual(@as(u8, 8), peer_stage.load(.acquire));
+                        try generation.abortCatchupStageAfterTerminalTransport(staged_receipt);
+                    },
+                    .controller_pre_failed,
+                    .controller_status_buffered_revoke,
+                    .controller_status_resource_failed,
+                    .controller_takeover_resource_failed,
+                    .controller_deadline_pre,
+                    => {
+                        try std.testing.expect(outcome == .pre_takeover_failed);
+                        const terminal_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+                        try std.testing.expect(terminal_client.unusable);
+                        try std.testing.expectEqual(
+                            if (selected == .controller_deadline_pre)
+                                client_poison.ConnectionReason.read_timeout
+                            else if (selected == .controller_status_buffered_revoke)
+                                client_poison.ConnectionReason.response_correlation_lost
+                            else if (selected == .controller_status_resource_failed or
+                                selected == .controller_takeover_resource_failed)
+                                client_poison.ConnectionReason.local_invariant_violation
+                            else
+                                client_poison.ConnectionReason.peer_contract_violation,
+                            terminal_client.firstPoisonReason().?,
+                        );
+                        try std.testing.expectEqual(
+                            if (selected == .controller_deadline_pre)
+                                @as(u8, 5)
+                            else if (selected == .controller_status_buffered_revoke)
+                                @as(u8, 8)
+                            else if (selected == .controller_takeover_resource_failed)
+                                @as(u8, 7)
+                            else
+                                @as(u8, 6),
+                            peer_stage.load(.acquire),
+                        );
+                        try generation.abortCatchupStageAfterTerminalTransport(staged_receipt);
+                    },
+                    else => unreachable,
+                }
+            },
+            .legacy => return error.InvalidAuthority,
+        }
+        try runtime.generation_owner.abort(&prepared);
+        try std.testing.expect(runtime.generation_owner.slot.candidate == null);
+        return;
+    }
     switch (candidate.attachment) {
         .generation => |*generation| {
             try std.testing.expect(generation.validateCatchupStage(staged_receipt, catchup_deadline));
@@ -9320,6 +10173,25 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
 test "CR4a actual socket observer는 같은 adapter의 final candidate에 snapshot delta receipt를 조립한다" {
     try runCr4aCatchupStageCase(.success);
     try runCr4aCatchupStageCase(.barrier_only_success);
+}
+
+test "CR4b actual socket controller takeover는 staged observer를 controller evidence로 exact once 전환한다" {
+    try runCr4aCatchupStageCase(.controller_success);
+    try runCr4aCatchupStageCase(.controller_allocator_reentry);
+}
+
+test "CR4b actual socket controller takeover는 conflict unknown pre failure를 closed ledger로 봉인한다" {
+    try runCr4aCatchupStageCase(.controller_conflict);
+    try runCr4aCatchupStageCase(.controller_status_buffered_revoke);
+    try runCr4aCatchupStageCase(.controller_foreign);
+    try runCr4aCatchupStageCase(.controller_cas_conflict);
+    try runCr4aCatchupStageCase(.controller_cas_conflict_buffered_revoke);
+    try runCr4aCatchupStageCase(.controller_buffered_revoke);
+    try runCr4aCatchupStageCase(.controller_sent_unknown);
+    try runCr4aCatchupStageCase(.controller_pre_failed);
+    try runCr4aCatchupStageCase(.controller_status_resource_failed);
+    try runCr4aCatchupStageCase(.controller_takeover_resource_failed);
+    try runCr4aCatchupStageCase(.controller_deadline_pre);
 }
 
 test "CR4a actual socket catchup hostile은 gap malformed cap plus one missing barrier를 fail close한다" {
@@ -9591,8 +10463,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3424,
-        .ReleaseFast => 3408,
+        .Debug => 3440,
+        .ReleaseFast => 3424,
         else => error.SkipZigTest,
     };
 }
@@ -11519,6 +12391,13 @@ fn initGenerationRuntimeForAdapter(
     );
     runtime.direct_input = .empty;
     runtime.input_batches = .{};
+    runtime.mutation_owner = .{};
+    try runtime.mutation_owner.initInPlace(
+        try runtime.generation_owner.slot.currentGeneration(),
+        runtime.input_batches.epoch,
+    );
+    runtime.paused_input_metadata = null;
+    runtime.paused_paste_store = .{};
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
@@ -12922,26 +13801,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 10192,
-            .ReleaseFast => 10144,
+            .Debug => 11248,
+            .ReleaseFast => 11200,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 10176,
-            .ReleaseFast => 10128,
+            .Debug => 11232,
+            .ReleaseFast => 11184,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 7472,
-            .ReleaseFast => 7424,
+            .Debug => 8528,
+            .ReleaseFast => 8480,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 7168,
-            .ReleaseFast => 7120,
+            .Debug => 8512,
+            .ReleaseFast => 8464,
             else => unreachable,
         },
         else => unreachable,
@@ -13803,6 +14682,189 @@ test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden
     try testing.expectEqualSlices(u8, paste_frame, received[x_frame.len..]);
     try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
     try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+}
+
+test "CR4b stable queue seal은 lease drain 뒤 metadata와 완전 paste만 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "0000000000000000000000000000002a".*;
+    rr.direct_input = .empty;
+    defer rr.direct_input.deinit(allocator);
+    rr.direct_input_offset = 0;
+    rr.input_batches = .{};
+    defer rr.input_batches.deinit(allocator);
+    rr.pending_controls = .empty;
+    defer rr.pending_controls.deinit(allocator);
+    rr.blocking_flush_active = false;
+    try rr.direct_input.appendSlice(allocator, "keypaste");
+    try rr.input_batches.records.append(allocator, .{
+        .kind = .key_bytes,
+        .epoch = 1,
+        .sequence = 1,
+        .end_offset = 3,
+    });
+    try rr.input_batches.records.append(allocator, .{
+        .kind = .paste,
+        .epoch = 1,
+        .sequence = 2,
+        .end_offset = 8,
+    });
+    rr.input_batches.next_sequence = 2;
+    try rr.mutation_owner.initInPlace(2, 1);
+    rr.paused_input_metadata = null;
+    rr.paused_paste_store = .{};
+    var budget: reconnect_mutation_seal.GlobalPasteBudget = .{};
+    try budget.initInPlace();
+    defer {
+        if (rr.paused_paste_store.initialized()) rr.paused_paste_store.deinit();
+        budget.deinit();
+    }
+
+    var lease: reconnect_mutation_seal.MutationLease = .{};
+    try rr.mutation_owner.beginMutation(2, 1, &lease);
+    try testing.expectError(error.Busy, rr.sealReconnectMutationQueue(&budget));
+    try testing.expectEqual(reconnect_mutation_seal.MutationLifecycle.sealing, rr.mutation_owner.lifecycle);
+    try rr.mutation_owner.finishMutation(&lease);
+
+    try testing.expectEqual(
+        reconnect_mutation_seal.SealResult.sealed_clean,
+        try rr.sealReconnectMutationQueue(&budget),
+    );
+    const metadata = rr.paused_input_metadata.?;
+    try testing.expectEqual(@as(u32, 2), metadata.total_count);
+    try testing.expectEqual(@as(u64, 8), metadata.total_bytes);
+    try testing.expectEqual(@as(u32, 1), metadata.kinds[@intFromEnum(reconnect_mutation_seal.SealKind.key_bytes)].count);
+    try testing.expectEqual(@as(u32, 1), metadata.kinds[@intFromEnum(reconnect_mutation_seal.SealKind.paste)].count);
+    const paste = (try rr.paused_paste_store.projection()).?;
+    try testing.expectEqual(@as(u64, 2), paste.id);
+    try testing.expectEqual(@as(u64, 5), paste.full_length);
+    try testing.expectEqual(@as(usize, 5), budget.reservedBytes());
+    try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+    try testing.expect(rr.reconnectMutationSealDigest() != null);
+    var rejected: reconnect_mutation_seal.MutationLease = .{};
+    try testing.expectError(error.ReconnectBusy, rr.mutation_owner.beginMutation(2, 1, &rejected));
+}
+
+test "CR4b stable queue seal은 partial prefix를 ambiguous로 봉인하고 OOM은 queue mutation 0이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    {
+        var client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
+        rr.allocator = allocator;
+        rr.io = std.testing.io;
+        rr.runtime_id_hex = "0000000000000000000000000000002b".*;
+        rr.direct_input = .empty;
+        defer rr.direct_input.deinit(allocator);
+        try rr.direct_input.appendSlice(allocator, "abcdef");
+        rr.direct_input_offset = 2;
+        rr.input_batches = .{};
+        defer rr.input_batches.deinit(allocator);
+        try rr.input_batches.records.append(allocator, .{
+            .kind = .key_bytes,
+            .epoch = 1,
+            .sequence = 1,
+            .end_offset = 6,
+        });
+        rr.input_batches.next_sequence = 1;
+        rr.pending_controls = .empty;
+        defer rr.pending_controls.deinit(allocator);
+        rr.blocking_flush_active = false;
+        try rr.mutation_owner.initInPlace(2, 1);
+        rr.paused_input_metadata = null;
+        rr.paused_paste_store = .{};
+        var budget: reconnect_mutation_seal.GlobalPasteBudget = .{};
+        try budget.initInPlace();
+        defer {
+            rr.paused_paste_store.deinit();
+            budget.deinit();
+        }
+
+        try testing.expectEqual(
+            reconnect_mutation_seal.SealResult.sealed_ambiguous,
+            try rr.sealReconnectMutationQueue(&budget),
+        );
+        try testing.expectEqual(
+            reconnect_mutation_seal.MutationLifecycle.sealed_ambiguous,
+            rr.mutation_owner.lifecycle,
+        );
+        const metadata = rr.paused_input_metadata.?;
+        try testing.expectEqual(@as(u64, 4), metadata.total_bytes);
+        try testing.expectEqual(@as(u32, 1), metadata.total_count);
+        try testing.expect((try rr.paused_paste_store.projection()) == null);
+        try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+        try testing.expectEqual(@as(usize, 0), rr.input_batches.records.items.len);
+        try testing.expectEqual(@as(usize, 0), budget.reservedBytes());
+    }
+
+    {
+        var client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
+        rr.io = std.testing.io;
+        rr.runtime_id_hex = "0000000000000000000000000000002c".*;
+        rr.direct_input = .empty;
+        defer rr.direct_input.deinit(allocator);
+        try rr.direct_input.appendSlice(allocator, "retained");
+        rr.direct_input_offset = 0;
+        rr.input_batches = .{};
+        defer rr.input_batches.deinit(allocator);
+        try rr.input_batches.records.append(allocator, .{
+            .kind = .key_bytes,
+            .epoch = 1,
+            .sequence = 1,
+            .end_offset = 8,
+        });
+        rr.input_batches.next_sequence = 1;
+        rr.pending_controls = .empty;
+        defer rr.pending_controls.deinit(allocator);
+        rr.blocking_flush_active = false;
+        try rr.mutation_owner.initInPlace(2, 1);
+        rr.paused_input_metadata = null;
+        rr.paused_paste_store = .{};
+        var budget: reconnect_mutation_seal.GlobalPasteBudget = .{};
+        try budget.initInPlace();
+        defer {
+            rr.paused_paste_store.deinit();
+            budget.deinit();
+        }
+        var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        rr.allocator = failing.allocator();
+
+        try testing.expectError(error.OutOfMemory, rr.sealReconnectMutationQueue(&budget));
+        try testing.expectEqual(reconnect_mutation_seal.MutationLifecycle.open, rr.mutation_owner.lifecycle);
+        try testing.expectEqualStrings("retained", rr.direct_input.items);
+        try testing.expectEqual(@as(usize, 1), rr.input_batches.records.items.len);
+        try testing.expect(rr.paused_input_metadata == null);
+        try testing.expect((try rr.paused_paste_store.projection()) == null);
+        try testing.expectEqual(@as(usize, 0), budget.reservedBytes());
+    }
 }
 
 test "CR2d2 remote input owner는 key와 control을 같은 epoch sequence로 ordered merge한다" {
@@ -15569,20 +16631,20 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3376,
-        .ReleaseFast => 3360,
+        .Debug => 3392,
+        .ReleaseFast => 3376,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 10192,
-            .ReleaseFast => 10144,
+            .Debug => 11248,
+            .ReleaseFast => 11200,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 10176,
-            .ReleaseFast => 10128,
+            .Debug => 11232,
+            .ReleaseFast => 11184,
             else => unreachable,
         },
         else => unreachable,

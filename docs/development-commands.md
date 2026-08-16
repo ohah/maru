@@ -325,6 +325,17 @@ Maru 작업에서 사용하는 기본 명령이다.
   `RemoteTermBackend` host job의 allocator fail-index는 host당 same-adapter replacement·staged receipt exact 1, 단일 absolute deadline,
   pre-publication graph mutation 0, post-publication Client fail-close와 candidate/receipt/ledger final zero를 첫 성공+1까지 검증한다.
   이 focused gate와 전체 CR4a/boundary gate가 green이면 CR4a를 완료로 세며 CR4b takeover와 CR4c publication은 여전히 미완료다.
+- 영속 세션 호스트 CR4b controller takeover gate: `zig build test-session-host-cr4b`. CR4a를 상속하고 현재 제품
+  slice는 Debug·ReleaseFast마다 mutation owner 1개, paused paste policy 2개, stable queue seal 2개, actual socket takeover 2개,
+  actual backend job 3개와 boundary 1개를
+  exact-count한다. CR4a placeholder publication은 mutation owner를 old generation에 남겨 새 input과 queue pump를 막으면서
+  기존 queue를 보존한다. staged receipt 뒤 active lease drain을 기다린 다음 key/control/IME 원문은 secure-zero하고 metadata만,
+  완전한 paste 하나만 runtime 1 MiB/app-global 8 MiB/10분 TTL owner로 이동한다. backend job은 canonical mutation digest를
+  final-address seal에 넣고 `candidate_staged -> mutation_sealed`를 exact once 게시한다. 같은 absolute deadline 아래
+  `controller.status`와 generation-CAS `controller.takeover`를 각각 최대 한 번 실행하며, 성공은 staged observer를
+  local mutation 권위가 없는 quarantined `controller_evidenced` receipt로 바꾼다. conflict는 usable Client를 보존하고,
+  response-loss/pre-takeover failure는 Client를 fail-close한 뒤 candidate를 정산한다. CR4c RemoteGeneration publication,
+  cleanup-binding/controller role promotion, forced resize와 input은 아직 완료하지 않는다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

@@ -1572,6 +1572,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executeGenerationRequestInternal" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readAttachmentCatchupBarrierPlanUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "requestAttachmentCatchupUntil" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callCurrentUntil" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentConnectionFailureReason" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionFailedClosed" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "failCloseAttachmentConnection" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionUsable" },
@@ -7762,8 +7764,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            // 기존 두 경로와 C1 decoder callback의 mutation-0 teardown probe만 preflight한다.
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 2 },
+            // 기존 두 제품 경로와 CR4b의 test-only deinit readiness projection만 preflight한다.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 3 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)

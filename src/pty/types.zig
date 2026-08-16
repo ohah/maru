@@ -238,7 +238,7 @@ pub const SpawnRequest = struct {
     /// | 백엔드 | 매핑 |
     /// |---|---|
     /// | macOS(zsh) | `ZDOTDIR=<이 값>`을 주입하고 기존 값은 `MARU_ZDOTDIR_PREV`로 보존한다. zsh가 그 디렉터리의 Maru `.zshenv`를 로드해 편집키를 바인딩한다 |
-    /// | Windows(PowerShell) | 프로필 스크립트 |
+    /// | Windows(PowerShell) | 인라인 `-Command`로 `prompt` 함수 정의(+`-NoExit`). **프로필 스크립트가 아니다** — `ExecutionPolicy`가 막는다(계약 §3.3) |
     /// | Windows(cmd) | `PROMPT` |
     ///
     /// **wire tag는 여전히 `"zdotdir"`다** — 필드 이름과 독립이다(위 struct doc). 바꾸려면 명시적 converter와

@@ -122,7 +122,7 @@ fn isWellFormedEntry(entry: []const u8) bool {
 /// 부모 환경에서 **자식에게 물려주면 거짓이 되는** 항목인가.
 ///
 /// macOS 백엔드(`EnvStorage.appendParentEnv`)와 **같은 정책**이다. 두 백엔드가 각자 구현하는 이유는 주입
-/// 메커니즘이 다르기 때문이지(zsh `ZDOTDIR` vs 프로필 스크립트) 정책이 달라서가 아니다 — 목록이 갈리면
+/// 메커니즘이 다르기 때문이지(zsh `ZDOTDIR` vs 인라인 `-Command`) 정책이 달라서가 아니다 — 목록이 갈리면
 /// 같은 오염이 한쪽에서만 막힌다. 바꿀 때 반드시 양쪽을 함께 본다.
 fn isDroppedParentEntry(entry: []const u8) bool {
     const drop = [_][]const u8{
@@ -166,8 +166,10 @@ pub const EnvOptions = struct {
 /// 네이티브 Windows 셸(cmd·PowerShell)은 terminfo를 읽지 않는다(계약 §4.2 — `term`은 WSL·msys로 들어가는
 /// 프로그램에만 뜻이 있다). 없는 DB를 가리키느니 안 주는 편이 낫다.
 ///
-/// **`shell_integration_dir`도 여기서 다루지 않는다.** Windows의 주입 메커니즘(PowerShell 프로필 스크립트·
-/// cmd `PROMPT`)은 환경변수 하나로 끝나지 않아 별도 슬라이스(W5)가 소유한다.
+/// **`shell_integration_dir`도 여기서 다루지 않는다.** Windows의 주입 메커니즘은 PowerShell이 인라인
+/// `-Command`(계약 §3.3 — 프로필 스크립트가 아니다), cmd가 `PROMPT` 환경변수다. 둘 다 **디렉터리를 가리키지
+/// 않으므로** 이 필드가 Windows에서 무엇을 뜻할지가 아직 미결이고(계약 §4.2의 미결 상자), 그 결정과 주입
+/// 자체를 별도 슬라이스(W5)가 소유한다.
 pub fn buildEnvEntries(allocator: std.mem.Allocator, opts: EnvOptions) ![][]u8 {
     var entries: std.ArrayList([]u8) = .empty;
     errdefer {

@@ -1922,8 +1922,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   결속되는지를 증명한다. rollback 행은 준비 fail-index, typed reject, uncertain response, accepted 뒤 snapshot 실패가 pin/row/batch를
   exact zero 또는 단일 committed cleanup으로 수렴시키는지 검증한다. `ExternalInboxLedger` import/caller, reconnect/current 교체,
   retired node publication, incident/artifact mutation은 0이다.
-- CR4: 실제 socket poison→observer attach→takeover→input/resize. takeover reply-loss는 local authority 미발행,
-  candidate close 완료를 가정하지 않고 direct-controller grant만 기다리며 observer conflict는 자동 탈취하지 않는다.
+- CR4는 실제 socket gate 세 개다. CR4a prerequisite는 CR3c의 unavailable shell과 이미 게시된 fresh Client replacement를
+  같은 `HostAdapter`에 결속한 observer attach+initial snapshot을 검증한다. typed reject는 candidate authority만 정산하고
+  published Client를 usable로 보존하며, EOF는 같은 node·generation을 보존하되 transport를 fail-close한다. CR4a
+  완료에는 이어서 actual `connectExistingHost` issuer와 bounded contiguous delta, gap/cap/malformed/OOM의 단계별 mutation 경계를
+  검증해야 한다. replacement 게시 전 실패는 old graph mutation 0이고 게시 뒤 실패는 unavailable shell과 새 Client generation을
+  보존한다. CR4b는 mutation seal 아래 status/takeover를 exact once 실행하며 takeover
+  reply-loss에는 local authority를 발행하지 않고 candidate close 완료를 가정하지 않는다. direct-controller grant만 기다리고
+  observer conflict는 자동 탈취하지 않는다. CR4c는 proven candidate를 CR3c publication/reclaim에 연결한 뒤 새 generation의
+  input과 forced first resize를 검증한다. CR4a만 green이면 takeover·publication·사용자 가시 reconnect는 미완료다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
   reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자
   close transaction만 pane/binding 제거 checkpoint를 정확히 1회 쓴다. pending/unconfirmed 상태에서 Window close는 binding을

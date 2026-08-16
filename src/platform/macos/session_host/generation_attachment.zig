@@ -117,12 +117,31 @@ pub const GenerationAttachment = struct {
         adapter: *host_adapter_mod.HostAdapter,
         runtime_id: u128,
     ) anyerror!contract.PreparedCallReceipt {
+        return self.prepareAttach(adapter, runtime_id, .controller);
+    }
+
+    /// Reconnect candidate는 기존 controller가 살아 있는 동안 화면을 catch-up해야 하므로
+    /// final-address binding을 observer로만 준비한다. takeover 권위는 CR4b 전까지 열지 않는다.
+    pub fn prepareObserverAttach(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        runtime_id: u128,
+    ) anyerror!contract.PreparedCallReceipt {
+        return self.prepareAttach(adapter, runtime_id, .observer);
+    }
+
+    fn prepareAttach(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        runtime_id: u128,
+        role: contract.AttachmentRole,
+    ) anyerror!contract.PreparedCallReceipt {
         if (!self.valid() or self.lifecycle != .shell) return error.InvalidState;
         const reservation = try adapter.reserveAttachmentBinding(
             &self.binding,
             &self.lease,
             runtime_id,
-            .controller,
+            role,
         );
         errdefer {
             self.lifecycle = .terminal;
@@ -147,7 +166,10 @@ pub const GenerationAttachment = struct {
             &self.event_owner,
         );
         const receipt = try self.transport.prepareRequest(
-            contract.RuntimeRequest.attachController(),
+            switch (role) {
+                .controller => contract.RuntimeRequest.attachController(),
+                .observer => contract.RuntimeRequest.attachObserver(),
+            },
         );
         errdefer self.transport.abortPreparedRequest(receipt) catch
             @panic("generation attachment request rollback failed");

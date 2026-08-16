@@ -449,11 +449,12 @@ pub const RuntimeRequestTag = enum(u8) {
     notification,
     terminate,
     detach,
+    attach_observer,
 };
 
 pub fn runtimeRequestTagRawValid(value: *const RuntimeRequestTag) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(RuntimeRequestTag.detach);
+    return raw <= @intFromEnum(RuntimeRequestTag.attach_observer);
 }
 
 /// Decoder는 응답 bytes를 빌린 호출 안에서 이 두 종료 의미 중 하나만 선택한다. bytes나
@@ -548,7 +549,7 @@ pub fn requestFamilyRawValid(value: *const RequestFamily) bool {
 pub fn requestFamilyForTag(tag: RuntimeRequestTag) RequestFamily {
     return switch (tag) {
         .spawn_full => .connection_only_denied,
-        .attach_controller => .attach_only,
+        .attach_controller, .attach_observer => .attach_only,
         .observation, .selected_text, .link_at, .find, .select_op => .bound_observation,
         .resize, .clipboard_write, .core_command, .report_mouse, .notification => .bound_controller_mutation,
         .terminate, .detach => .bound_terminal,
@@ -572,6 +573,7 @@ pub fn requestMethod(tag: RuntimeRequestTag) []const u8 {
     return switch (tag) {
         .spawn_full => "runtime.spawn_full",
         .attach_controller => "runtime.attach",
+        .attach_observer => "runtime.attach",
         .resize => "runtime.resize",
         .observation => "runtime.observation",
         .selected_text => "runtime.selected_text",
@@ -696,6 +698,9 @@ pub const RuntimeRequest = extern struct {
     pub fn attachController() RuntimeRequest {
         return empty(.attach_controller);
     }
+    pub fn attachObserver() RuntimeRequest {
+        return empty(.attach_observer);
+    }
     pub fn resize(value: ResizeRequest) RuntimeRequest {
         return .{ .tag = @intFromEnum(RuntimeRequestTag.resize), .payload = .{ .resize = value } };
     }
@@ -763,6 +768,7 @@ pub const RuntimeRequest = extern struct {
         return switch (self.tag) {
             @intFromEnum(RuntimeRequestTag.spawn_full) => .spawn_full,
             @intFromEnum(RuntimeRequestTag.attach_controller) => .attach_controller,
+            @intFromEnum(RuntimeRequestTag.attach_observer) => .attach_observer,
             @intFromEnum(RuntimeRequestTag.resize) => blk: {
                 const value = self.payload.resize;
                 if (value.cols == 0 or value.rows == 0 or value.client_sequence == 0)
@@ -842,6 +848,7 @@ pub const ValidatedRuntimeRequest = union(RuntimeRequestTag) {
     notification,
     terminate,
     detach,
+    attach_observer,
 
     pub fn family(self: @This()) RequestFamily {
         return switch (self) {
@@ -1015,9 +1022,11 @@ test "CR3a-2c3a binding identity rejects every invalid raw attachment role" {
 test "CR3a-2a neutral lifecycle and request vocabularies are closed" {
     try std.testing.expectEqual(@as(usize, 6), std.enums.values(BindingLifecycle).len);
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(ExecutedResponseLifecycle).len);
-    // The SSOT list contains fourteen variants; an earlier RED inventory
-    // accidentally omitted detach while the written list still included it.
-    try std.testing.expectEqual(@as(usize, 14), std.meta.fields(RuntimeRequestTag).len);
+    // The SSOT list contains fifteen variants; CR4a splits observer attach from controller attach
+    // so the transport encoder cannot infer or accept a caller-supplied role string.
+    try std.testing.expectEqual(@as(usize, 15), std.meta.fields(RuntimeRequestTag).len);
+    try std.testing.expectEqual(@as(u8, 13), @intFromEnum(RuntimeRequestTag.detach));
+    try std.testing.expectEqual(@as(u8, 14), @intFromEnum(RuntimeRequestTag.attach_observer));
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(RequestFamily).len);
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(ExecuteOutcome).len);
 }
@@ -1038,6 +1047,7 @@ test "CR3a-2c3b every request tag has one closed request family" {
         .bound_controller_mutation,
         .bound_terminal,
         .bound_terminal,
+        .attach_only,
     };
     inline for (std.enums.values(RuntimeRequestTag), expected) |tag, family|
         try std.testing.expectEqual(family, requestFamilyForTag(tag));
@@ -1076,7 +1086,7 @@ test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
     request.payload.select_op.kind = 0xff;
     try std.testing.expect(request.decode() == null);
 
-    var raw: u16 = @intFromEnum(RuntimeRequestTag.detach) + 1;
+    var raw: u16 = @intFromEnum(RuntimeRequestTag.attach_observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         request.tag = @intCast(raw);
         try std.testing.expect(request.decode() == null);
@@ -1096,6 +1106,12 @@ test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
     @memset(std.mem.asBytes(&request.payload), 0xa5);
     try std.testing.expectEqual(
         RuntimeRequestTag.attach_controller,
+        std.meta.activeTag(request.decode().?),
+    );
+    request = RuntimeRequest.attachObserver();
+    @memset(std.mem.asBytes(&request.payload), 0xa5);
+    try std.testing.expectEqual(
+        RuntimeRequestTag.attach_observer,
         std.meta.activeTag(request.decode().?),
     );
 }

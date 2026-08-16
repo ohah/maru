@@ -4888,9 +4888,14 @@ fn encodeGenerationRequestParams(
 ) ?[]const u8 {
     return switch (request) {
         .spawn_full => null,
-        .attach_controller => std.fmt.bufPrint(
+        .attach_controller => if (identity.role != .controller) null else std.fmt.bufPrint(
             out,
             "{{\"runtime_id\":\"{x:0>32}\",\"mode\":\"controller\"}}",
+            .{identity.runtime_id},
+        ) catch null,
+        .attach_observer => if (identity.role != .observer) null else std.fmt.bufPrint(
+            out,
+            "{{\"runtime_id\":\"{x:0>32}\",\"mode\":\"observer\"}}",
             .{identity.runtime_id},
         ) catch null,
         .resize => |v| stringifyGenerationParams(out, .{
@@ -5161,7 +5166,7 @@ fn mapGenerationControlClientError(err: client_mod.ClientError) GenerationContro
 }
 
 test "CR3a-2c3b typed request encoder injects only canonical binding identities" {
-    const identity: contract.BindingIdentity = .{
+    var identity: contract.BindingIdentity = .{
         .binding_incarnation = 1,
         .binding_storage_addr = 2,
         .destination_addr = 3,
@@ -5180,6 +5185,24 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
         "{\"runtime_id\":\"000000000000000000000000000000aa\",\"mode\":\"controller\"}",
         encodeGenerationRequestParams(&buffer, identity, 77, .attach_controller).?,
     );
+    try std.testing.expect(encodeGenerationRequestParams(
+        &buffer,
+        identity,
+        77,
+        .attach_observer,
+    ) == null);
+    identity.role = .observer;
+    try std.testing.expectEqualStrings(
+        "{\"runtime_id\":\"000000000000000000000000000000aa\",\"mode\":\"observer\"}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .attach_observer).?,
+    );
+    try std.testing.expect(encodeGenerationRequestParams(
+        &buffer,
+        identity,
+        77,
+        .attach_controller,
+    ) == null);
+    identity.role = .controller;
     try std.testing.expectEqualStrings(
         "{\"stream_id\":77,\"q\":\"61ed959c\",\"cur\":2,\"scroll\":true}",
         encodeGenerationRequestParams(&buffer, identity, 77, .{

@@ -9,20 +9,26 @@ const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const artifact_io = @import("artifact_io.zig");
+const fixture_script = @import("fixture_script.zig");
 const smoke_drain = @import("smoke_drain.zig");
 const surface_mod = @import("../session/surface.zig");
 const window_mod = @import("../session/window.zig");
 
 pub const default_artifact_dir = "zig-out/maru-app-pty-smoke";
 
+/// fixture 규칙은 [fixture_script.zig](fixture_script.zig)가 단일 출처다 — OS별 셸과 "스크립트는 인자
+/// 하나" 제약이 거기 있다.
+const host_command = fixture_script.oneShot(
+    @import("builtin").os.tag,
+    "printf 'maru app pty\\n'; printf 'renderer frame\\n'",
+    "echo maru app pty& echo renderer frame",
+);
+
 pub const AppPtySmokeConfig = struct {
     artifact_dir: []const u8 = default_artifact_dir,
     size: terminal.Size = .{ .cols = 40, .rows = 6 },
-    command: []const u8 = "/bin/sh",
-    args: []const []const u8 = &.{
-        "-c",
-        "printf 'maru app pty\\n'; printf 'renderer frame\\n'",
-    },
+    command: []const u8 = host_command.command,
+    args: []const []const u8 = host_command.args,
     expected_text: []const u8 = "maru app pty",
     drain_timeout_ms: i64 = smoke_drain.default_timeout_ms,
 };

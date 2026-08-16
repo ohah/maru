@@ -10,6 +10,7 @@ const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const artifact_io = @import("artifact_io.zig");
+const fixture_script = @import("fixture_script.zig");
 const smoke_drain = @import("smoke_drain.zig");
 const surface_mod = @import("../session/surface.zig");
 const window_mod = @import("../session/window.zig");
@@ -17,14 +18,19 @@ const window_mod = @import("../session/window.zig");
 pub const default_artifact_dir = "zig-out/maru-app-pty-loop-smoke";
 pub const default_interactive_artifact_dir = "zig-out/maru-app-pty-interactive-loop-smoke";
 
+/// 두 줄 사이에 **짧은 지연**을 둔다 — 출력이 한 이벤트로 뭉치면 이 스모크가 재려는 "프레임이 이벤트를
+/// 따라간다"가 검증되지 않는다. 지연 수단은 OS로 갈리고 그 규칙은 [fixture_script.zig](fixture_script.zig)에 있다.
+const host_command = fixture_script.oneShot(
+    @import("builtin").os.tag,
+    "printf 'Maru PTY loop first\\r\\n'; " ++ fixture_script.posix_short_sleep ++ "; printf 'Maru PTY loop second\\r\\n'",
+    "echo Maru PTY loop first& " ++ fixture_script.windows_short_sleep ++ "& echo Maru PTY loop second",
+);
+
 pub const AppPtyLoopSmokeConfig = struct {
     artifact_dir: []const u8 = default_artifact_dir,
     size: terminal.Size = .{ .cols = 40, .rows = 6 },
-    command: []const u8 = "/bin/sh",
-    args: []const []const u8 = &.{
-        "-c",
-        "printf 'Maru PTY loop first\\r\\n'; sleep 0.05; printf 'Maru PTY loop second\\r\\n'",
-    },
+    command: []const u8 = host_command.command,
+    args: []const []const u8 = host_command.args,
     expected_text: []const u8 = "Maru PTY loop second",
     max_event_frames: usize = 16,
     drain_timeout_ms: i64 = smoke_drain.default_timeout_ms,

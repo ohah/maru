@@ -383,6 +383,19 @@ ADE의 핵심인 "이 pane에서 claude/codex가 도는가" 판정이다. macOS�
 | **보류 가능** | `resourceSamples` `foregroundProcessGroup` — Windows에 프로세스 그룹 개념이 없다 |
 | **§3.5·§3.6이 결정** | `processCwd` `foregroundProcessNames` |
 
+구현은 `src/pty/windows.zig`이고, **OS 무관한 조립 규칙**(커맨드라인 인용·환경 블록 내용)은
+`src/pty/windows_spawn.zig`가 따로 가진다. 가른 이유는 후자가 모든 타깃에서 컴파일되어 **macOS·Linux CI에서도
+그 테스트가 돌기** 때문이다 — Windows 러너가 없는 이 저장소에서 그 규칙이 공허참이 되지 않게 하는 유일한
+그물이다.
+
+**`currentSize`는 커널에 되묻지 않는다.** macOS는 `TIOCGWINSZ`를 쓰지만 ConPTY에는 크기를 되묻는 공개 API가
+없다. 되물을 이유도 없다 — pseudoconsole 크기를 바꾸는 주체는 우리뿐이고(자식은 `mode con`으로 읽기만 한다),
+우리가 넘긴 COORD가 자식에게 그대로 간다는 것은 §6에서 확인했다. 그래서 마지막으로 세운 값을 돌려준다.
+
+**`.signaled`는 이 백엔드에서 나오지 않는다.** Windows에 시그널이 없다. 255를 넘는 종료 코드(예: Ctrl+C의
+`0xC000013A`)는 `.exited: u8`에 담기지 않으므로 `.unknown`으로 원값을 보존한다 — `u8`로 자르면 `0x3A`(58)라는
+엉뚱한 "정상 종료"가 된다.
+
 ### 4.1 `waitIo`는 계약을 바꾸지 않는다 — 파이프를 바꾼다
 
 `waitIo(want_write) !IoReady`는 macOS에서 `std.posix.poll(master_fd, wake_read_fd)`다. 파일 디스크립터를
@@ -417,9 +430,51 @@ Windows  WaitForMultipleObjects(read_overlapped_event, wake_event)
 읽어도 미완료이고, 전량을 읽어야 완료된다.
 
 reader 루프는 `out_head += writeInputNonBlocking(...)`으로 **부분 진행을 기록**하므로, Windows 백엔드는 셋 중
-하나를 골라 그 차이를 메워야 한다 — ① 미결 write를 한 건만 두고 완료 전까지 `writable`을 보고하지 않기,
-② 파이프 버퍼 이하로 잘라 쓰기, ③ writer 스레드 + 큐. **어느 쪽이든 계약 밖의 구현 규약이므로 W4에서
-정하고 여기에 기록한다.**
+하나를 골라 그 차이를 메워야 했다 — ① 미결 write를 한 건만 두고 완료 전까지 `writable`을 보고하지 않기,
+② 파이프 버퍼 이하로 잘라 쓰기, ③ writer 스레드 + 큐.
+
+**W4의 결정: ① + 백엔드 스테이징 버퍼.** `writeInputNonBlocking`은 받은 바이트를 **자기 버퍼로 복사**한 뒤
+그만큼을 반환하고, `waitIo`는 미결 write가 없을 때만 `writable`을 보고한다. 그래서 미결 write는 언제나
+최대 한 건이고, 반환값의 뜻은 *"파이프로 나간 양"*이 아니라 **"백엔드가 책임을 넘겨받은 양"**이다.
+
+**복사가 선택이 아닌 이유**: 호출자는 반환값만큼 head를 전진시킨 뒤 자기 버퍼를 압축(`copyForwards`)하거나
+비운다. 미결 overlapped write가 그 버퍼를 가리키고 있으면 커널이 이미 재사용된 메모리를 읽는다. ②를 버린
+것도 같은 이유다 — 크기를 줄여도 "완료 전"이라는 창은 남는다. ③은 스레드와 큐를 더할 뿐 이 복사를 없애
+주지 않는다. **대가**는 미결 write의 실패를 다음 호출에서 본다는 것이고, 그 상황은 파이프가 끊긴 때라
+어차피 세션이 끝난다.
+
+**그 복사가 새 위험을 만든다 — writer가 둘이다.** 리더 루프의 `writeInputNonBlocking`과 **메인 스레드**의
+`writeInput`(예: `app_session.zig`가 프롬프트에 form feed를 보내는 자리)이 함께 있다. macOS는 둘 다 같은 fd에
+써서 커널이 직렬화하지만, Windows 백엔드는 스테이징 버퍼와 `OVERLAPPED`를 **하나** 공유하므로 겹치면 커널
+자료구조가 깨진다. 그래서 쓰기 쪽만 `SRWLOCK`으로 잠그고 **대기하는 동안에는 잠금을 잡지 않는다**(수거와
+발행만 한 임계 구역). 읽기 쪽은 리더 전용이라 잠글 것이 없다.
+
+### 4.1b EOF와 `ClosePseudoConsole` — POSIX와 가장 크게 갈리는 자리 (실측, 2026-08-16)
+
+POSIX에서는 자식이 죽으면 슬레이브가 닫혀 master가 EOF를 본다. **ConPTY는 그렇지 않다.**
+
+| 잰 것 | 결과 |
+|---|---|
+| 자식 종료 후 파이프가 끊기는가 | **아니다.** 3초를 더 기다려도 EOF가 없다 — conhost가 pseudoconsole이 살아 있는 동안 쓰기 끝을 붙든다 |
+| 그러면 EOF를 내는 것은 | `ClosePseudoConsole`. 닫은 직후 읽으면 곧바로 EOF다 |
+| 밀린 출력을 **안 읽은 채** 닫으면 | `ClosePseudoConsole`이 **106,891 ms** 막힌다 |
+| 우리 읽기 끝을 **먼저 닫고** 나서 닫으면 | 더 나쁘다 — **379,922 ms** |
+| **다 배수한 뒤** 닫으면 | **15 ms**, 유실 0 |
+| 배수와 닫기를 **동시에** 하면 | 출력을 잃는다 — 142,949 바이트 중 65,573만 도착 |
+
+여기서 두 규율이 나온다.
+
+1. **배수한 뒤에 닫는다.** `waitIo`가 자식 프로세스 핸들도 함께 기다린다. 자식이 죽으면 계속 배수하다가
+   무입력 창(`drain_quiet_ms`)만큼 조용해지면 그때 pty를 닫고, 그 결과로 오는 **진짜 파이프 끊김**을 EOF로
+   낸다. 조용해질 때까지 기다리므로 출력을 잃지 않고, 다 배수한 뒤라 닫기가 15 ms다.
+2. **`ClosePseudoConsole`을 인라인으로 부르지 않는다.** 최악이 분 단위라 UI 스레드에서든 리더 스레드에서든
+   부르면 그만큼 멈춘다. 항상 **분리된 짧은 스레드**에 넘기고, 그 스레드는 `hpc` 하나만 소유해 세션 수명과
+   얽히지 않는다.
+
+**`close()`는 pty를 직접 닫지 않는다.** POSIX의 `SIGHUP → SIGKILL(-pid)`에 대응하는 것은 ⑴ 위 규율대로 pty
+닫기를 넘기고 ⑵ 유예 뒤 **job을 닫는 것**이다. Windows에는 프로세스 그룹이 없어 `kill(-pid)`에 대응하는
+것이 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`뿐이다 — 이게 없으면 팬을 닫아도 셸의 손자들이 남는다. 그래서
+자식은 `CREATE_SUSPENDED`로 만들어 job에 넣은 뒤 깨운다(먼저 달리게 두면 job에 들어가기 전에 손자를 만든다).
 
 ### 4.1a spawn 절차 — 순서가 계약이다 (실측, 2026-08-16)
 
@@ -682,6 +737,8 @@ MSBuild·cmd·PowerShell·zig 자신의 에러 출력이 다 이 모양이라 **
 | **`waitIo` 대응**(§4.1) | ✅ overlapped named pipe 비동기 read가 `ERROR_IO_PENDING`으로 등록되고, 상대 write는 read 이벤트로·`SetEvent`는 wake 이벤트로 깨우며, 조용하면 스핀 없이 `WAIT_TIMEOUT`. **`CreatePseudoConsole`이 named pipe 핸들을 받는다**(`hr=S_OK`) |
 | **overlapped write 의미**(§4.1) | ⚠️ 4 KiB 버퍼에 512 KiB write → 즉시 `ERROR_IO_PENDING`에 `written=0`, 완료 전 `GetOverlappedResult`는 `ERROR_IO_INCOMPLETE`에 `bytes=0`이라 **부분 진행을 볼 수 없다**. 상대가 8 KiB를 읽어도 미완료, 전량(524,288 bytes)을 읽어야 완료. `POLLOUT`+부분쓰기와 의미가 달라 **백엔드가 흡수해야 한다** |
 | **ConPTY 자식 attach**(§4.1) | ✅ **닫혔다**(2026-08-16). 자식 안에서 `cmd /c mode con`이 `줄: 37 / 열: 123` — `CreatePseudoConsole`에 넘긴 COORD 그대로다. 대화형 왕복 2회, `ResizePseudoConsole`은 **자식이 살아 있는 동안** S_OK, pwsh도 동일, 부모가 콘솔을 가진 경우도 동일 |
+| **ConPTY EOF**(§4.1b) | ⚠️ 자식이 죽어도 파이프가 **안 끊긴다**. EOF를 내는 것은 `ClosePseudoConsole`이고, 그것은 밀린 출력을 안 읽었으면 **106,891 ms**(읽기 끝을 먼저 닫으면 **379,922 ms**) 막힌다. **다 배수한 뒤** 닫으면 **15 ms**에 유실 0. 동시에 하면 142,949 중 65,573만 도착 |
+| **W4 백엔드 end-to-end** | ✅ `maru demo`·`app-pty-smoke`·`app-pty-loop-smoke`가 Windows에서 산출물을 낸다. `app-pty-interactive-loop-smoke`는 **pwsh 7**을 띄워 프레임 루프로 친 입력이 표식으로 돌아오고 셸이 `exited(code=0)`으로 끝난다 |
 
 **ConPTY를 "환경 탓"으로 적었던 것은 오판이었다 — 기록으로 남긴다.** 위 항목은 한때 "자식이 pty에 붙는 것만
 미확인, 에이전트 샌드박스가 conhost 세션을 못 띄우기 때문"으로 적혀 있었다. 실제 원인은 **우리 코드 두 곳**이다.

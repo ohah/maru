@@ -2038,14 +2038,12 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
 /// 등록된 SVG 아이콘의 coverage 를 Zig 에서 만든다 — 두 플랫폼이 같은 코드를 쓴다.
 /// 상태바 아이콘 줄. **예약(레이아웃 padding)과 그리기가 같은 수를 봐야 한다** — 따로 적으면
 /// 개수를 늘렸을 때 아이콘만 왼쪽으로 번져 카드 위에 겹친다(그 모양을 화면으로 한 번 잡았다).
-const status_icon_count: usize = status_cps.len;
-const status_icon_step: i32 = 44; // 히트 44 가 이웃과 안 겹치려면 간격도 44 여야 한다
 /// 그리는 크기. **히트(44)와 다른 값이다** — 44 를 꽉 채우면 아이콘끼리 붙어 보인다.
 /// 18 은 26px 줄에 맞춰 고른 값이라 44 줄에서는 작아 보였다(실제 하단 바는 24~28 을 쓴다).
 const status_icon_px: i32 = 24;
 const icon_slot_px = 32;
 /// 1 = 하단 바(톱니), +4 = 보조 키바 방향키.
-/// 하단 바 아이콘. **이 배열이 개수의 출처다**(`status_icon_count`).
+/// 아이콘 아틀라스에 굽는 것들. **이 배열이 개수의 출처다.**
 ///
 /// **톱니 하나뿐이다.** 나머지 다섯(git·plus·search·bell·collapse)은 데스크톱 chrome 헤더에서
 /// 따라온 것이고 **배선이 없었다** — 히트 rect 를 세우는 코드가 톱니에만 있어서, 다섯 개는
@@ -2197,21 +2195,10 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         else => {},
     };
 
-    // `ui.paint` 는 텍스트 op 을 내지 않는다(resolveText 결과를 버린다 — 실측). 텍스트 렌더는
-    // typography/lowering 이 따로 맡는 구조라, 레이아웃이 잡은 자리에 **실제 글자**를 그린다.
-    for (built.entries) |entry| {
-        if (entry.kind != .text) continue;
-        const label = labelFor(entry.id) orelse continue;
-        const tone_role: tokens.ColorRole = switch (entry.visual) {
-            .text => |tv| switch (tv.tone) {
-                .accent => .accent_bar,
-                .muted => .muted_fg,
-                else => .surface_fg,
-            },
-            else => .surface_fg,
-        };
-        pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 15, tk.get(tone_role));
-    }
+    // **터미널 화면의 트리에는 글자 노드가 없다.** 여기 있던 루프는 탭 라벨·사이드바 이름을
+    // 그리던 것이고, 그 chrome 을 걷어내면서(U3a) 한 번도 안 도는 코드가 됐다 — `labelFor` 도
+    // 함께 지웠다. 본문 글자는 `pushTerminal` 이 코어 격자에서 직접 내고, 키바 라벨은 키바가,
+    // 설정·세션 목록 글자는 각 화면이 `pushText` 로 직접 낸다.
 
     // 키바의 각 사각형을 기록한다 — **그리는 자리와 판정하는 자리가 같아야** 눌러도
     // 다른 키가 나가지 않는다(따로 계산하면 갈린다).
@@ -2503,10 +2490,10 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
-            .x = sess_gear_rect.x + (set_head_h - 24) / 2,
-            .y = sess_gear_rect.y + (set_head_h - 24) / 2,
-            .w = 24,
-            .h = 24,
+            .x = sess_gear_rect.x + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
+            .y = sess_gear_rect.y + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
+            .w = @floatFromInt(status_icon_px),
+            .h = @floatFromInt(status_icon_px),
             .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
             .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
             .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
@@ -2968,15 +2955,6 @@ var key_bar_ready = false;
 /// 눌러 둔 수정자(sticky). **다음 한 글자**에만 실린다 — 계속 걸려 있으면 그 다음 타이핑이
 /// 전부 제어문자가 된다.
 var armed_mods: u32 = 0;
-
-fn labelFor(id: u64) ?[]const u8 {
-    if (id >= key_bar_id_base + 100 and id < key_bar_id_base + 100 + key_bar.len) {
-        return key_bar[id - key_bar_id_base - 100].label;
-    }
-    // 본문 줄은 여기 없다 — TerminalCore 격자가 소유한다(pushTerminal). 탭·사이드바 라벨도
-    // 없다: 그 chrome 을 걷어냈다(U3).
-    return null;
-}
 
 /// 플랫폼이 부른다: UI 를 조립하고 quad 개수를 돌려준다.
 /// 마지막 오류 이름. 0 quads 가 나왔을 때 **무엇이 실패했는지** 플랫폼이 볼 수 있어야 한다 —

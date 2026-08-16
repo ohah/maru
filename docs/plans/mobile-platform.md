@@ -348,15 +348,49 @@ I/O ▸ Keyboard 메뉴가 지배한다(같은 상태에서 Safari 조차 키보
 소유하고, 튄 이벤트 하나가 화면을 날리지 않게 `MARU_FLING_MAX_VELOCITY` 도 둔다 —
 Flutter `FrictionSimulation`·RN `OverScroller`/`decelerationRate` 가 쓰는 모델과 같다.
 
-### 남은 터치 구멍 (미착수)
+### T — 손가락 id 와 소유권 (진행)
 
-RN·Flutter 와 대조해 남은 것을 적어 둔다. **하나로 묶지 않는다** — 셋의 방아쇠가 다르다.
+**두 host 가 지금 서로 다르게 동작한다.** 두 손가락으로 밀다가 **첫 손가락을 떼면** iOS 는
+제스처가 끝나고(두 번째 손가락은 애초에 안 온다 — `multipleTouchEnabled` 기본값 `NO`),
+Android 는 `getX(ev, 0)` 이 남은 손가락을 가리키게 되어 **좌표가 점프한 채 계속 끌린다**.
+계약에 어느 쪽이 맞는지 적혀 있지도 않았다.
 
-| | 판단 | 근거 |
+**그리고 관성을 시간 기준으로 바꾸면서 이 자리가 나빠졌다.** 점프한 `dy` 가 px/ms 속도 계산에
+그대로 들어가 상한(`MARU_FLING_MAX_VELOCITY`)까지 튀고, 손을 떼면 **한 번의 손가락 교체가
+1600px 를 흘려보낸다**.
+
+**레퍼런스는 전부 같은 답을 낸다** — 이어받되 **기준을 다시 잡고 속도를 버린다**:
+
+| | 어떻게 |
+|---|---|
+| Android `ScrollView`·`RecyclerView`·`ViewPager` | `onSecondaryPointerUp` — 남은 포인터를 새 기준으로 + `VelocityTracker.clear()` |
+| UIKit `UIPanGestureRecognizer` | 활성 터치들의 **무게중심**, 터치 수가 바뀌면 내부에서 재기준 |
+| Flutter `DragGestureRecognizer` | 포인터별 델타 + `MultitouchDragStrategy`(Apple 은 `sumAllPointers`, 그 외 `latestPointer`) |
+| React Native | 자체 구현 없이 위 둘에 위임 |
+
+**"index 0 의 절대 좌표" 를 쓰는 구현은 아무도 없다.** 그 안티패턴이 우리가 지금 하는 것이다.
+
+**그래서 소유권 규칙을 코어가 갖고 host 는 id 만 나른다**([계약 §3.1](../mobile-platform.md)).
+host 에 두면 두 벌이 되고 두 벌은 갈린다 — 이 저장소에서 관성 감쇠(세 곳)·터치 슬롭(네 곳)·
+스크롤 상태(세 곳)가 실제로 갈렸다.
+
+| | 내용 |
+|---|---|
+| T0 | **계약** — id 의 의미(불투명 정수, `down`~`up` 동안 불변)·소유권·이어받기·재기준·속도 버리기 |
+| T1 | **ABI + 코어 소유권** — 세 포인터 함수에 `pointer_id` 를 싣고 규칙을 계약 테스트로 잠근다. 두 host 는 이 슬라이스에서는 **지금 쓰는 한 손가락의 id** 를 그대로 넘긴다(동작 무변화) |
+| T2 | **Android** — `getPointerId`/`findPointerIndex`, `ACTION_POINTER_DOWN`/`_UP` 을 받는다. 이어받기가 코어에서 돈다 |
+| T3 | **iOS** — `multipleTouchEnabled = YES`, `UITouch*` → id 매핑, `touches.anyObject` 를 걷어내고 전부 순회 |
+| T4 | **판정자·문서·두 host 캡처** |
+
+**핀치는 이 축이 아니다**(M13 폰트 줌). 다만 T1 의 "비소유자는 무시하되 **개수는 센다**" 가 그
+자리를 열어 둔다.
+
+#### 남은 것 — 이 축과 분리한다
+
+| | 판단 | 왜 분리하나 |
 |---|---|---|
-| **손가락 id** | 한다 | ABI 가 `(phase, x, y)` 뿐이다. iOS 는 `touches.anyObject` 라 두 손가락이면 **아무 손가락이나** 집고, Android 는 늘 `getX(ev, 0)` 에 `ACTION_POINTER_UP` 을 안 받아 **첫 손가락을 떼면 좌표가 점프**한다 |
-| **제스처 상태기계** | 손가락 id 와 **같이** 한다 | 지금은 `kb_active`·`set_active`·`set_stop_tap`·`set_moved` 가 흩어져 있고, 실제로 `set_stop_tap` 이 톱니 판정으로 새어 설정이 안 열렸다. id 가 들어오면 모든 핸들러가 "이 제스처를 어느 손가락이 소유하나" 를 묻게 되는데 그게 곧 이 상태다 — 따로 하면 같은 코드를 두 번 헤집는다. **셋(키바·설정·본문)을 한 번에** 옮길 때만 손댄다(반쪽 이관이 이번에 두 번 나왔다) |
-| **제스처 조합(arena)** | **안 한다** | RNGH 가 그것을 갖는 이유는 RN 에서 **사용자가 임의로 중첩한 뷰**들이 경쟁하기 때문이다. 우리 표면은 `chrome → 키바 → 본문` 셋이고 우선순위를 우리가 정한다 — 답이 하나로 정해진 협상에 협상 기계를 들이는 꼴이다. 중첩 스크롤이 생기면 재검토 |
+| **제스처 상태기계** | 한다 | 근거가 다르다 — `kb_active`·`set_active`·`set_stop_tap`·`set_moved` 가 흩어져 있고 실제로 그중 하나가 톱니 판정으로 새어 **설정이 안 열렸다**. 손가락 id 와 묶을 이유는 없다 |
+| **제스처 조합(arena)** | **안 한다** | RNGH 가 그것을 갖는 이유는 사용자가 임의로 중첩한 뷰들이 경쟁하기 때문이다. 우리 표면은 `chrome → 키바 → 본문` 셋이고 우선순위를 우리가 정한다 — 답이 하나로 정해진 협상에 협상 기계를 들이는 꼴이다. 중첩 스크롤이 생기면 재검토 |
 | **마우스·트랙패드 스크롤** | 한다(독립) | `ACTION_SCROLL`·`AINPUT_SOURCE_MOUSE` 미처리, iOS 는 제스처 인식기를 안 써서 트랙패드 스크롤이 안 온다 |
 
 **Reanimated 는 해당 없다.** 그것이 푸는 문제는 JS 브리지 왕복을 피해 UI 스레드에서 도는 것인데,

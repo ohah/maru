@@ -142,6 +142,10 @@ const State = struct {
     snapshot_result: ?SnapshotResult = null,
     branches_inflight: usize = 0,
     branches_result: ?BranchesResult = null,
+    /// 머리 줄용 가벼운 읽기(P3d-③). **자기 슬롯을 쓴다** — 목록 읽기와 섞이면 둘 중 하나가 다른 쪽을
+    /// 기다리게 되고, 사용자가 보고 있는 저장소의 갱신이 배경 읽기에 밀린다.
+    repo_status_inflight: usize = 0,
+    repo_status_result: ?RepoStatusResult = null,
     /// 쓰기도 **별도 슬롯**이다. 읽기와 공유하면 스테이지 결과가 목록 갱신에 밀려 사라지고, 호출자의
     /// in-flight가 안 풀려 `+`가 영영 안 눌린 것처럼 보인다(diff 슬롯을 가른 것과 같은 이유).
     /// **깊이는 1이다** — §6이 "큐가 아니라 in-flight 하나"라고 못박았다.
@@ -154,6 +158,7 @@ const State = struct {
         if (self.diff_result) |*r| r.deinit(self.allocator);
         if (self.snapshot_result) |*r| r.deinit(self.allocator);
         if (self.branches_result) |*r| r.deinit(self.allocator);
+        if (self.repo_status_result) |*r| r.deinit(self.allocator);
         if (self.write_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -192,6 +197,29 @@ pub const BranchesResult = struct {
 
     pub fn deinit(self: *BranchesResult, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
+        self.text = &.{};
+    }
+};
+
+/// **머리 줄 하나를 채우는 가벼운 읽기**의 결과(P3d-③). 목록에 뜬 저장소 중 지금 보고 있지 않은 것들을
+/// 하나씩 이 경로로 읽는다.
+///
+/// **`status` 하나만 돈다.** 머리 줄에 필요한 것(브랜치·분리 HEAD·ahead/behind·파일 개수)이 전부 그
+/// 출력에 있고, `numstat` 셋·merge-base·branch 범위는 **펼쳐서 파일 줄을 그릴 때만** 쓰인다. 저장소
+/// 여덟이면 프로세스가 48개가 아니라 13개가 되는 차이가 여기서 나온다(§3.5.1c).
+pub const RepoStatusResult = struct {
+    request_id: u64,
+    ok: bool = false,
+    /// 어느 저장소의 답인지. **경로를 함께 싣는다** — 목록은 그 사이에 바뀔 수 있고, 순서로 맞추면
+    /// 늦게 온 답이 남의 줄을 채운다.
+    repo: []u8 = &.{},
+    /// `git status --porcelain=v2 --branch` 출력(owned).
+    text: []u8 = &.{},
+
+    pub fn deinit(self: *RepoStatusResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.repo);
+        allocator.free(self.text);
+        self.repo = &.{};
         self.text = &.{};
     }
 };
@@ -496,6 +524,54 @@ pub const Backend = struct {
         return false;
     }
 
+    /// 머리 줄 하나를 채우는 읽기를 건다. 이미 하나가 돌고 있거나 결과가 안 걷혔으면 **거절한다** —
+    /// 목록이 여덟이어도 프로세스는 언제나 하나다.
+    pub fn submitRepoStatus(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.repo_status_inflight > 0 or state.repo_status_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.repo_status_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonRepoStatus();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseRepoStatusJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseRepoStatusJob(job);
+        const thread = std.Thread.spawn(.{}, repoStatusWorker, .{job}) catch return self.releaseRepoStatusJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseRepoStatusJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        state.allocator.free(job.git_exe);
+        state.allocator.free(job.repo);
+        state.allocator.destroy(job);
+        return self.abandonRepoStatus();
+    }
+
+    fn abandonRepoStatus(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.repo_status_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    pub fn takeRepoStatusResult(self: *Backend) ?RepoStatusResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.repo_status_result orelse return null;
+        state.repo_status_result = null;
+        return result;
+    }
+
     pub fn takeBranchesResult(self: *Backend) ?BranchesResult {
         const state = self.state orelse return null;
         state.mutex.lockUncancelable(state.io);
@@ -620,6 +696,31 @@ fn snapshotWorker(job: *SnapshotJob) void {
         result.deinit(state.allocator);
     }
     state.snapshot_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn repoStatusWorker(job: *Job) void {
+    const state = job.state;
+    var result: RepoStatusResult = .{ .request_id = job.request_id };
+    result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
+    if (run(state.allocator, .status, job.git_exe, job.repo)) |out| {
+        result.text = out.bytes;
+        result.ok = true;
+    } else |_| {}
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    // **실패해도 결과를 남긴다** — 안 남기면 호출자의 in-flight가 안 풀려 그 줄이 영영 "읽는 중"이다
+    // (목록 읽기가 같은 이유로 실패 결과를 남긴다).
+    if (!state.shutting_down and state.repo_status_result == null) {
+        state.repo_status_result = result;
+    } else {
+        result.deinit(state.allocator);
+    }
+    state.repo_status_inflight -= 1;
     state.mutex.unlock(state.io);
     state.release();
 }

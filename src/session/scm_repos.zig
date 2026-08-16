@@ -8,6 +8,7 @@
 //! 단위 테스트가 닿는 자리에 둔다.
 
 const std = @import("std");
+const git_status = @import("git_status.zig");
 
 /// 목록에 세울 항목 하나. 문자열은 호출자 것을 빌린다(할당 없음).
 pub const Entry = struct {
@@ -81,7 +82,71 @@ fn append(out: []Entry, n: *usize, entry: Entry) bool {
     return true;
 }
 
+/// 머리 줄 하나가 쓰는 요약. `git status --porcelain=v2 --branch` **하나**에서 전부 나온다 —
+/// 그것이 비활성 저장소를 가볍게 읽을 수 있는 근거다(§3.5.1c).
+pub const Summary = struct {
+    /// 체크아웃된 브랜치의 짧은 이름. 분리 HEAD면 빈 문자열이다.
+    branch: []const u8 = "",
+    detached: bool = false,
+    /// 변경된 파일 수(추적되지 않은 것 포함 — 목록이 세는 것과 같은 집합).
+    count: u32 = 0,
+    ahead: u32 = 0,
+    behind: u32 = 0,
+    has_ab: bool = false,
+};
+
+/// status 출력을 머리 줄 요약으로 줄인다. **문자열은 입력을 빌린다**(할당 없음).
+pub fn summarize(status_text: []const u8) Summary {
+    const head = git_status.parseHead(status_text);
+    var count: u32 = 0;
+    var it = git_status.iterate(status_text);
+    while (it.next()) |_| count += 1;
+    return .{
+        .branch = if (head.detached) "" else (head.branch orelse ""),
+        .detached = head.detached,
+        .count = count,
+        .ahead = head.ahead,
+        .behind = head.behind,
+        .has_ab = head.has_ab,
+    };
+}
+
 const testing = std.testing;
+
+test "status 하나로 머리 줄이 필요한 것을 다 얻는다" {
+    // 이것이 비활성 저장소를 가볍게 읽는 근거다 — numstat 셋·merge-base·branch 범위는 펼쳤을 때만 쓴다.
+    const text =
+        \\# branch.oid abc123
+        \\# branch.head feature/x
+        \\# branch.upstream origin/feature/x
+        \\# branch.ab +2 -1
+        \\1 .M N... 100644 100644 100644 aaa bbb one.txt
+        \\1 A. N... 000000 100644 100644 000000 ccc two.txt
+        \\? three.txt
+        \\
+    ;
+    const got = summarize(text);
+    try testing.expectEqualStrings("feature/x", got.branch);
+    try testing.expect(!got.detached);
+    try testing.expectEqual(@as(u32, 3), got.count); // 추적되지 않은 것도 목록이 세는 집합에 든다
+    try testing.expectEqual(@as(u32, 2), got.ahead);
+    try testing.expectEqual(@as(u32, 1), got.behind);
+    try testing.expect(got.has_ab);
+}
+
+test "분리 HEAD는 브랜치가 아니라 그 사실로 말한다" {
+    // 브랜치 이름 자리에 `(detached)`가 오므로 그것을 이름으로 그리면 화면이 거짓말을 한다.
+    const got = summarize("# branch.oid abc\n# branch.head (detached)\n");
+    try testing.expectEqualStrings("", got.branch);
+    try testing.expect(got.detached);
+    try testing.expectEqual(@as(u32, 0), got.count);
+}
+
+test "변경이 없으면 0이다(못 읽은 것과는 호출자가 구별한다)" {
+    const got = summarize("# branch.head main\n");
+    try testing.expectEqual(@as(u32, 0), got.count);
+    try testing.expectEqualStrings("main", got.branch);
+}
 
 test "저장소 다음에 그 워크트리들이 온다(주 워크트리는 한 번만)" {
     const repos = [_]Repo{.{

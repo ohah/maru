@@ -2450,6 +2450,20 @@ pub const WebNavAction = struct { surface_id: u64, code: u8 };
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
+/// 비활성 저장소 하나의 머리 줄 요약(P3d-③). `git status` **하나**에서 나온 값이다.
+pub const RepoStatusEntry = struct {
+    path: []u8,
+    branch: []u8,
+    detached: bool,
+    count: u32,
+    ahead: u32,
+    behind: u32,
+    has_ab: bool,
+    /// 목록이 다시 읽혀야 하나. 뷰 진입·창 포커스·`.git` 이벤트가 이것을 세우고, 그때 이 저장소도
+    /// 다시 읽힌다 — **비활성 저장소는 감시 대상이 아니다**(감시는 활성 저장소 하나에만 건다).
+    stale: bool = false,
+};
+
 /// 저장소 하나의 커밋 메시지 초안. 저장소를 떠날 때 담고 돌아올 때 꺼낸다.
 pub const CommitDraft = struct {
     repo: []u8,
@@ -3712,6 +3726,14 @@ pub const AppSession = struct {
     /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
     scm_pending: ?ScmPending = null,
 
+    /// 목록에 뜬 **비활성 저장소들의 머리 줄 요약**(P3d-③). 활성 저장소는 목록 읽기가 채우므로 여기
+    /// 없다 — 두 곳이 같은 값을 들면 어느 쪽이 최신인지 판정이 생긴다.
+    ///
+    /// 경로·브랜치 문자열은 세션 소유다(읽기 결과 버퍼는 프레임마다 사라진다).
+    scm_repo_status: std.ArrayList(RepoStatusEntry) = .empty,
+    /// 도는 머리 줄 읽기의 request id(0 = 없음). **하나씩 돈다** — 목록이 여덟이어도 프로세스는 하나다.
+    scm_repo_status_inflight: u64 = 0,
+    scm_repo_status_seq: u64 = 0,
     /// 접어 둔 저장소들의 경로(세션 한정 — §3.5.1c). 목록 자리가 아니라 **경로가 키다**: 터미널이
     /// 열리고 닫히며 자리는 움직인다.
     scm_repo_collapsed: std.ArrayList([]u8) = .empty,
@@ -13561,6 +13583,10 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
+        scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
+        scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
+        scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
+        scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -16840,6 +16866,11 @@ pub const AppSession = struct {
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
+        for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
+            self.allocator.free(entry.path);
+            self.allocator.free(entry.branch);
+        }
+        self.scm_repo_status.deinit(self.allocator);
         for (self.scm_repo_collapsed.items) |path| self.allocator.free(path); // 접힘 상태
         self.scm_repo_collapsed.deinit(self.allocator);
         for (self.scm_commit_drafts.items) |draft| { // 저장소별 초안
@@ -54665,6 +54696,89 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
+}
+
+test "소스 컨트롤: 비활성 저장소는 머리 줄 요약이 오면 `읽는 중…`을 벗는다 (P3d-③)" {
+    // 읽기는 하나씩 돈다 — 그래서 "아직 안 읽은 저장소"가 실제로 생긴다. 그 줄은 0건이 아니라
+    // **모르는 것**이고, 답이 오면 브랜치와 개수를 얻는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    // 목록에 저장소 둘: 읽은 것(/repo)과 아직 안 읽은 것(/other).
+    session.git_result.?.worktrees = try git_backend_mod.worker_allocator.dupe(
+        u8,
+        "worktree /repo\nbranch refs/heads/main\n\nworktree /other\nbranch refs/heads/side\n",
+    );
+
+    {
+        const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+        try std.testing.expect(projection.items[0] == .repo);
+        // 두 번째 머리 줄은 아직 답이 없다 — **읽는 중**이지 0건이 아니다.
+        var pending_seen = false;
+        for (projection.items) |item| switch (item) {
+            .repo => |repo| if (repo.index == 1) {
+                try std.testing.expect(repo.pending);
+                pending_seen = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(pending_seen);
+    }
+
+    // 그 저장소의 요약이 도착했다(백엔드가 주는 것과 같은 모양 — `status` 하나).
+    session.scm_repo_status_inflight = 7;
+    session.git_backend.?.state.?.repo_status_result = .{
+        .request_id = 7,
+        .ok = true,
+        .repo = try git_backend_mod.worker_allocator.dupe(u8, "/other"),
+        .text = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head side\n1 .M N... 1 2 3 a b x.txt\n? y.txt\n"),
+    };
+    scm_dock_ops.drainRepoStatus(session);
+    // 캐시에 실렸는가부터 본다 — 아니면 화면 판정을 볼 이유가 없다.
+    try std.testing.expectEqual(@as(usize, 1), session.scm_repo_status.items.len);
+    try std.testing.expectEqualStrings("/other", session.scm_repo_status.items[0].path);
+
+    const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+    var checked = false;
+    for (projection.items) |item| switch (item) {
+        .repo => |repo| if (repo.index == 1) {
+            try std.testing.expect(!repo.pending);
+            try std.testing.expectEqualStrings("side", repo.branch);
+            try std.testing.expectEqual(@as(u32, 2), repo.count); // 추적되지 않은 것도 센다
+            checked = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(checked);
+}
+
+test "소스 컨트롤: 늦게 온 머리 줄 요약은 남의 줄을 채우지 않는다" {
+    // 목록은 그 사이에 바뀔 수 있다 — 순서로 맞추면 늦게 온 답이 엉뚱한 저장소의 브랜치가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.scm_repo_status_inflight = 5; // 지금 기다리는 것은 5번
+    session.git_backend.?.state.?.repo_status_result = .{
+        .request_id = 4, // **4번이 늦게 왔다**
+        .ok = true,
+        .repo = try git_backend_mod.worker_allocator.dupe(u8, "/other"),
+        .text = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head old\n"),
+    };
+    scm_dock_ops.drainRepoStatus(session);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_repo_status.items.len); // 버려진다
+    try std.testing.expectEqual(@as(u64, 5), session.scm_repo_status_inflight); // 기다리던 것은 그대로
 }
 
 test "소스 컨트롤: 목록은 터미널이 선 저장소와 그 워크트리로 만들어진다 (P3d)" {

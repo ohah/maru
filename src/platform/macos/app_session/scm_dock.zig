@@ -256,16 +256,24 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     for (repos.entries, 0..) |entry, repo_index| {
         const is_current = std.mem.eql(u8, entry.path, current_repo);
         const collapsed = repoCollapsed(self, entry.path);
+        // 활성 저장소는 목록 읽기가, 나머지는 **머리 줄 읽기**(P3d-③)가 채운다. 둘이 같은 값을 들지
+        // 않는다 — 두 곳이 같은 사실을 가지면 어느 쪽이 최신인지 판정이 하나 더 생긴다.
+        const summary = if (is_current) null else repoStatusFor(self, entry.path);
         items[n] = .{
             .repo = .{
                 .index = @intCast(repo_index),
                 .name = repoDisplayName(entry, repos.entries),
-                .branch = if (is_current) headLabel(model.head) else "",
+                .branch = if (is_current)
+                    headLabel(model.head)
+                else if (summary) |sum|
+                    (if (sum.detached) "(detached)" else sum.branch)
+                else
+                    "",
                 .collapsed = collapsed,
                 .primary = entry.primary,
-                .count = if (is_current) countFiles(model.rows) else 0,
-                // 읽은 저장소는 하나뿐이다 — 나머지는 아직 모른다(0건이 아니다).
-                .pending = !is_current,
+                .count = if (is_current) countFiles(model.rows) else (if (summary) |sum| sum.count else 0),
+                // 아직 답이 안 온 저장소만 "읽는 중…"이다 — **0건과 구별해야 한다**.
+                .pending = !is_current and summary == null,
             },
         };
         n += 1;
@@ -1724,4 +1732,110 @@ fn countFiles(rows: []const scm_view.Row) u32 {
         else => {},
     };
     return count;
+}
+
+// ── 비활성 저장소 머리 줄 읽기(P3d-③) ────────────────────────────────────────────
+//
+// 목록에 뜬 저장소 중 **지금 보고 있지 않은 것**을 하나씩 읽어 머리 줄을 채운다. 읽는 것은
+// `status` 하나뿐이다 — 머리 줄에 필요한 것이 전부 거기 있고, numstat 셋·merge-base·branch 범위는
+// 펼쳐서 파일 줄을 그릴 때만 쓰인다(§3.5.1c). 저장소 여덟이면 프로세스가 48개가 아니라 13개다.
+//
+// **동시성이 아니라 배치 크기가 답이다.** 다른 저장소끼리는 `index.lock`이 겹치지 않으므로 병렬도
+// 가능하지만, backend가 결과 슬롯 하나·in-flight 하나라 구조를 바꿔야 하고 위 감축을 하면 남는 이득이
+// 작다. 필요해지면 측정하고 연다.
+
+/// 그 저장소의 요약을 찾는다(없으면 아직 안 읽었다는 뜻).
+pub fn repoStatusFor(self: *const AppSession, path: []const u8) ?app_session_mod.RepoStatusEntry {
+    for (self.scm_repo_status.items) |entry| {
+        if (std.mem.eql(u8, entry.path, path)) return entry;
+    }
+    return null;
+}
+
+/// 목록 갱신 시점(뷰 진입·창 포커스·`.git` 이벤트)에 **전부 낡았다고 표시**한다. 지우지 않는 이유는
+/// 지운 값을 다시 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
+/// 보여 주다 조용히 바뀌는 편이 낫다(그 값은 방금 전 사실이다).
+pub fn markRepoStatusStale(self: *AppSession) void {
+    for (self.scm_repo_status.items) |*entry| entry.stale = true;
+}
+
+/// 아직 안 읽었거나 낡은 저장소 **하나**에 읽기를 건다. 매 tick 부르되 대부분은 그냥 돌아간다.
+pub fn pumpRepoStatus(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    if (self.scm_repo_status_inflight != 0) return; // 하나씩
+    if (self.scm_write_inflight != 0) return; // 쓰기 중에는 읽지 않는다(§6)
+
+    var store: RepoEntryStore = .{};
+    const repos = collectRepoEntries(self, &store);
+    const current = self.git_repo orelse "";
+    for (repos.entries) |entry| {
+        if (std.mem.eql(u8, entry.path, current)) continue; // 활성은 목록 읽기가 채운다
+        const known = repoStatusFor(self, entry.path);
+        if (known != null and !known.?.stale) continue;
+        submitRepoStatus(self, entry.path);
+        return; // **하나만** 건다 — 나머지는 다음 tick에
+    }
+}
+
+fn submitRepoStatus(self: *AppSession, repo: []const u8) void {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_repo_status_seq += 1;
+    if (!self.git_backend.?.submitRepoStatus(git_exe, repo, self.scm_repo_status_seq)) return;
+    self.scm_repo_status_inflight = self.scm_repo_status_seq;
+}
+
+/// 도착한 요약을 캐시에 싣는다. **경로로 맞춘다** — 목록은 그 사이에 바뀔 수 있고, 순서로 맞추면 늦게
+/// 온 답이 남의 줄을 채운다.
+pub fn drainRepoStatus(self: *AppSession) void {
+    const backend = &(self.git_backend orelse return);
+    var taken = backend.takeRepoStatusResult() orelse return;
+    defer taken.deinit(git_backend_mod.worker_allocator);
+    if (taken.request_id != self.scm_repo_status_inflight) return; // 낡은 답은 버린다
+    self.scm_repo_status_inflight = 0;
+    if (!taken.ok or taken.repo.len == 0) return; // 실패는 조용히 둔다 — 다음 갱신에 다시 읽는다
+
+    const summary = maru.session.scm_repos.summarize(taken.text);
+    const branch_copy = self.allocator.dupe(u8, summary.branch) catch return;
+    for (self.scm_repo_status.items) |*entry| {
+        if (!std.mem.eql(u8, entry.path, taken.repo)) continue;
+        self.allocator.free(entry.branch);
+        entry.* = .{
+            .path = entry.path,
+            .branch = branch_copy,
+            .detached = summary.detached,
+            .count = summary.count,
+            .ahead = summary.ahead,
+            .behind = summary.behind,
+            .has_ab = summary.has_ab,
+        };
+        self.metal_dirty = true;
+        return;
+    }
+    // 새 항목. 상한은 목록 상한과 같다 — 목록에 없는 저장소를 기억할 이유가 없다.
+    if (self.scm_repo_status.items.len >= maru.session.scm_repos.max_entries) {
+        self.allocator.free(branch_copy);
+        return;
+    }
+    const path_copy = self.allocator.dupe(u8, taken.repo) catch {
+        self.allocator.free(branch_copy);
+        return;
+    };
+    self.scm_repo_status.append(self.allocator, .{
+        .path = path_copy,
+        .branch = branch_copy,
+        .detached = summary.detached,
+        .count = summary.count,
+        .ahead = summary.ahead,
+        .behind = summary.behind,
+        .has_ab = summary.has_ab,
+    }) catch {
+        self.allocator.free(path_copy);
+        self.allocator.free(branch_copy);
+        return;
+    };
+    self.metal_dirty = true;
 }

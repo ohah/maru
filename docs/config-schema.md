@@ -67,7 +67,7 @@ pub const Meta = struct {
 맞고 `ime_enter`→`ime-enter`는 맞으나, 일반화하면 깨지는 키가 생긴다).
 
 - 부모 struct 이름에서 네임스페이스를 얻는다: `FontConfig` → `font`, `ThemeConfig` → `theme`, top-level Config의
-  직속 필드(`term`·`blink_text`)는 명시 `key`(`term`·`text.blink`)로 둔다.
+  직속 필드(`term`·`blink_text`·`ui_language`)는 명시 `key`(`term`·`text.blink`·`ui.language`)로 둔다.
 - leaf segment는 필드명 그대로 쓰되, 필드명≠segment면 `key_seg`로 명시(`height_fraction` → `key_seg="height"`).
 - 전체 키 = `namespace + "." + segment`. 예: `font` + `line-height` = `font.line-height`.
 

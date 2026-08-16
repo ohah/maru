@@ -60,6 +60,23 @@ gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL �
 | `synth-before-crop.png` | 합성 글리프가 없어 TUI 가 깨지는 자리 | `chrome-android-app` 뒤 대본의 TUI 줄을 잘라 확대 |
 
 
+## iOS 상호작용 — `idb` 로 안 되는 것이 있다
+
+**`idb ui swipe`/`tap` 의 합성 터치는 제스처 인식기에 안 닿는다.** `touchesBegan:` 에는
+닿는데(로그로 확인) 인식기는 한 번도 안 불렸다 — 가장자리 조건을 뺀 평범한
+`UIPanGestureRecognizer` 를 임시로 붙여 갈랐다. `--delta` 를 줘도 같았다.
+
+**CGEvent 로 보낸 진짜 마우스 드래그는 된다.** Simulator 가 그것을 정상 터치로 바꿔 주므로
+인식기가 걸린다:
+
+```sh
+swift tools/mobile-harness/sim_input.swift drag 3 480 240 480   # 좌측 가장자리 뒤로가기
+swift tools/mobile-harness/sim_input.swift tap  200 300
+```
+
+좌표는 **기기 논리 pt** 다(창 안에서 기기 화면이 가운데 놓인다고 보고 베젤을 뺀다).
+**창을 건드리지 말 것** — 제목줄을 클릭하면 창이 움직여 좌표가 통째로 어긋난다.
+
 ## 에뮬레이터 설정 — 컷아웃은 **기기 기본(홀펀치)** 으로 둔다
 
 `zl_poc` AVD 는 Pixel 6 프로필이라 카메라 홀이 있다. **그대로 둔다** — 실기기 대부분이 그렇고,

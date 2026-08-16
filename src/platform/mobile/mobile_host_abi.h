@@ -221,6 +221,9 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
 /// 사용자가 무엇이 먹었는지 알 수 없다. 계약은 "없음·권한·크기 초과는 전부 기본값" 이다
 /// (docs/mobile-config.md §7).
 #define MARU_CONFIG_MAX_BYTES (1u << 20)
+/// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 **닿았는지**는
+/// 코어에 물어야 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다. host 는 안 쓴다.
+unsigned int maru_mobile_scrollback_lines(void);
 
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).

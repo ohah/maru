@@ -453,10 +453,6 @@ pub const inventory = [_]Proof{
     // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
     // 경로가 정리되면 지운다). 같은 PR 의 검증 후속으로 한 번 더 움직였다 — 두 파일이 공유하는 키를
     // common_ 접두로 옮기며 이 파일의 호출 둘이 바뀌었다.
-    //
-    // W5(Windows 셸 통합)에서 **한 줄** 움직인다: `SpawnRequest.shell_integration_dir`이 union
-    // `shell_integration`으로 바뀌어(계약 §4.2a) 이 파일의 설정 자리가 `.{ .assets_dir = dir }`로 감싼다.
-    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5fde6fc1c97cf46bd575fd7ca6e6ef6a7bba704fa2ec1e616fd982c761604ddb" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -515,9 +511,9 @@ pub const inventory = [_]Proof{
     // (필드가 늘 뿐 `@field` 호출 자리는 그대로다) — 슬라이스마다 digest 만 갱신된다.
     // 슬라이스 3에서 키가 85개로 늘며 digest 만 움직인다. count는 1 그대로다 — 예고한 대로
     // 필드가 늘어도 `@field` 호출 자리는 `tIn` 하나뿐이다. 검증 후속으로 두 번 더 움직였다 —
-    // common_ 접두 정리와, 두 언어 테이블의 정합(자리표시자 집합·영어에 한글 없음·한국어에 한글 있음)을
+    // 슬라이스 4(분기·보간형 13건)로 또 움직였다. 앞서는 common_ 접두 정리와, 두 언어 테이블의 정합(자리표시자 집합·영어에 한글 없음·한국어에 한글 있음)을
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "6750c193b66be6ad67d34c3a143f1118b43c2d4621b97ece1b588cba91981973" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8a763275ee3715915e9671053e9f43ac574bd0a8c89be085d020561dbd6d2f49" },
 };

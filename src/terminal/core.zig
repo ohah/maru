@@ -19,6 +19,11 @@ const KittyImageStorage = kitty.KittyImageStorage;
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
+// 파일 존재검증의 Windows 갈래(`TerminalCore.pathExists`). CRT `_access`가 바이트를 ANSI 코드페이지로 읽어
+// 비-ASCII 경로를 놓치므로 Win32의 UTF-16 API를 직접 부른다 — 이유와 실측은 그 함수의 doc에.
+const invalid_file_attributes: u32 = 0xFFFF_FFFF;
+extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) u32;
+
 /// 단말 자기식별의 단일 신원 출처. XTVERSION(CSI > q) 응답이 지금 이걸 쓰고, 이후 추가할 자체
 /// terminfo 생성과 XTGETTCAP(DCS + q) 응답도 같은 값을 재사용한다 — 이름/버전이 채널마다 어긋나지
 /// 않도록 한곳에서만 정의한다. 버전의 정식 단일 출처는 build.zig.zon의 `.version`이며, 지금은 둘 다
@@ -997,11 +1002,27 @@ pub const TerminalCore = struct {
     /// **URL은 stat하지 않는다** — 열 수 있는지는 네트워크가 정하고, 그걸 hover에서 물으면 안 된다.
     /// 파일 경로만 `extractUrlAt`과 **같은 resolve+존재검증**을 거친다(단일 출처가 하나여야 둘이 안 갈린다).
     ///
-    /// **비용**(실측, Windows 10.0.19045): `GetFileAttributesW`가 로컬 실재 7.9 µs·미존재 11.4 µs·없는 드라이브
-    /// 0.8 µs다. 마우스가 아무리 빨라도 초당 수백 회이므로 무시할 수준이라 캐시를 두지 않았다. **네트워크 경로만
-    /// 위험한데**(응답 없는 UNC 호스트 755 ms, 라우팅 불가 IP 11 s) UNC는 `isDetectableAbsoluteFor`가 감지
-    /// 단계에서 이미 거부하므로 여기까지 오지 않는다. 남은 미지수는 **매핑된 채 끊긴 네트워크 드라이브**이고,
-    /// 그건 이 기기에 없어 재지 못했다(docs/windows-platform.md §8).
+    /// **비용**(실측, Windows 10.0.19045, 이 함수 **호출 전체**를 400회 평균). 처음에는 stat 한 겹만 재서 숫자를
+    /// 6배 낮게 적었다 — 적대적 검증에서 잡아 다시 쟀다:
+    ///
+    /// | hover 1회 | 변경 전(`urlAnchorAt`) | 지금 | 120Hz 이동 간격(8333 µs) 대비 |
+    /// |---|---|---|---|
+    /// | 링크 아님 — 대부분의 마우스 이동 | 2.0 µs | 2.0 µs | 0.02 % |
+    /// | URL | 3.8 µs | 38.0 µs | 0.46 % |
+    /// | 실재 경로 | 11.6 µs | 114.7 µs | 1.38 % |
+    /// | 없는 경로 | 14.0 µs | 118.1 µs | 1.42 % |
+    ///
+    /// stat 자체는 그중 3 %뿐이고(`GetFileAttributesW` 3.5 µs) 나머지는 토큰 수집과 `std.fs.path.resolve`다.
+    /// 즉 비용은 "디스크를 만져서"가 아니라 "분류만 하던 것을 추출까지 해서" 는다. 완화가 둘 있다 — 링크가 아닌
+    /// 단어에서는 **할당도 비용도 0**이고(위 표 첫 줄), 호출부가 **수식키를 누른 동안에만** 부른다.
+    ///
+    /// **네트워크 경로만 위험한데**(응답 없는 UNC 호스트 755 ms, 라우팅 불가 IP 11 s) UNC는
+    /// `isDetectableAbsoluteFor`가 감지 단계에서 이미 거부하므로 여기까지 오지 않는다. 남은 미지수는 **매핑된 채
+    /// 끊긴 네트워크 드라이브**이고, 그건 이 기기에 없어 재지 못했다.
+    ///
+    /// **캐시를 두지 않았다.** 같은 anchor 위에서 마우스가 흔들리면 매번 다시 계산하고, 실측상 그 반복의 89 %가
+    /// 1-entry 캐시로 사라진다. 절대값이 이동 간격의 1.4 %라 지금은 복잡도를 사지 않는다(docs/windows-platform.md
+    /// §5.1a "두지 않은 완화").
     pub fn openableLinkAnchorAt(
         self: *const TerminalCore,
         allocator: std.mem.Allocator,
@@ -1040,10 +1061,10 @@ pub const TerminalCore = struct {
 
     /// file_path 링크 raw 텍스트(`:line:col` 포함 가능)를 절대 경로로 resolve하고, 존재하면 그 경로(호출자 소유)를,
     /// 아니면 null을 돌려준다. `:line[:col]` 분리 → `~/`를 $HOME 확장 → 상대면 currentCwd()(OSC 7)와 join →
-    /// 정규화 → access(F_OK) 존재 검증. cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
+    /// 정규화 → `pathExists` 존재 검증(OS별 API — 그 함수 doc). cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
     /// 파일 I/O는 코어 책임(순수 분류 레이어 selection.zig엔 stat을 두지 않는다). cwd(currentCwd)와 스크롤백을 읽으므로
     /// 호출자(app_session.urlAt)가 lockCore 아래에서 부른다 — reader 스레드가 OSC 7로 cwd를 free+realloc하는 race를
-    /// 막는다(focusedTermCwd 선례). access(F_OK)는 빠른 syscall이라 락 아래 허용(docs/plans/io-render-threading.md §9.1).
+    /// 막는다(focusedTermCwd 선례). 존재검증은 빠른 syscall이라 락 아래 허용(docs/plans/io-render-threading.md §9.1).
     fn resolveClickedPath(self: *const TerminalCore, allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
         // 끝의 ":<digits>(:<digits>)?"(에디터 줄/열 점프 관례)를 떼고 순수 경로만 — 1차는 파일만 연다(줄 점프는 후속).
         var path_end = raw.len;
@@ -1079,15 +1100,37 @@ pub const TerminalCore = struct {
         };
         errdefer allocator.free(abs);
 
-        // 존재 검증 — 없으면 무시(오탐·미존재 경로 차단). 디렉토리도 허용(NSWorkspace가 Finder로 연다). null-terminated
-        // 경로로 C access(F_OK) — std.Io 우회(코어는 io 인터페이스를 안 든다; std.c.access 선례 pty/macos.zig).
-        const abs_z = try allocator.dupeZ(u8, abs);
-        defer allocator.free(abs_z);
-        if (std.c.access(abs_z.ptr, std.posix.F_OK) != 0) {
+        // 존재 검증 — 없으면 무시(오탐·미존재 경로 차단). 디렉토리도 허용(NSWorkspace가 Finder로 연다).
+        if (!try pathExists(allocator, abs)) {
             allocator.free(abs);
             return null;
         }
         return abs;
+    }
+
+    /// 경로가 실재하는가. **OS마다 다른 API를 쓴다** — 같은 syscall의 이름 차이가 아니라 인코딩 계약이 다르다.
+    ///
+    /// POSIX는 `std.c.access(F_OK)`다(std.Io 우회 — 코어는 io 인터페이스를 안 든다; `pty/macos.zig` 선례).
+    /// 바이트 경로가 곧 커널이 보는 경로라 UTF-8이 그대로 통한다.
+    ///
+    /// **Windows는 `GetFileAttributesW`(UTF-16)를 쓴다.** CRT의 `_access`는 바이트 문자열을 UTF-8이 아니라
+    /// **ANSI 코드페이지**로 읽기 때문이다. 실측(이 기계 ACP=949): `한글`·`日本`·`café`·이모지 이름의 디렉터리를
+    /// 만들어 놓고 물으면 Win32(UTF-16)는 전부 `true`인데 CRT는 전부 `false`를 냈다. 그래서 비-ASCII 이름이 든
+    /// 경로는 **클릭해도 안 열리고 밑줄도 안 떴다**. ASCII 대조군은 두 API가 같은 답을 낸다.
+    /// 비용은 같은 자릿수다(실측 3.5 µs 대 3.6 µs) — 정확도를 위해 속도를 내주는 거래가 아니다.
+    fn pathExists(allocator: std.mem.Allocator, abs: []const u8) !bool {
+        if (builtin.os.tag == .windows) {
+            // 손상 UTF-8은 경로가 될 수 없다 — "없음"으로 접는다(할당 실패와 구분해 올린다).
+            const w = std.unicode.utf8ToUtf16LeAllocZ(allocator, abs) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return false,
+            };
+            defer allocator.free(w);
+            return GetFileAttributesW(w.ptr) != invalid_file_attributes;
+        }
+        const abs_z = try allocator.dupeZ(u8, abs);
+        defer allocator.free(abs_z);
+        return std.c.access(abs_z.ptr, std.posix.F_OK) == 0;
     }
 
     /// 트리플클릭 줄 선택. 본문: selection.selectLineAt.
@@ -5812,6 +5855,47 @@ test "hover와 클릭이 같은 답을 낸다 — 존재검증까지" {
         }
         if (hover != c.want) {
             std.debug.print("기대와 다르다({s}): got={} want={}", .{ c.note, hover, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// **비-ASCII 이름이 든 경로도 열린다.** Windows CRT의 `_access`는 바이트 경로를 UTF-8이 아니라 ANSI
+// 코드페이지로 읽어, ACP=949인 기계에서 `한글`·`日本`·`café`·이모지 디렉터리를 전부 "없음"으로 냈다
+// (Win32 UTF-16으로는 전부 실재). 그래서 그 경로는 클릭해도 안 열리고 밑줄도 안 떴다. `pathExists`가
+// OS별로 갈라 그것을 닫았고, 이 테스트가 되돌아오는 것을 막는다. POSIX에서는 늘 성립하던 것이라
+// **두 OS 모두에서 도는 것**이 요점이다 — Windows 러너가 없으므로 macOS/Linux CI가 이 계약의 절반을 지킨다.
+test "존재검증은 비-ASCII 이름이 든 경로를 놓치지 않는다" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const names = [_][]const u8{ "maru-ascii-9e1f", "maru-한글-9e1f", "maru-日本-9e1f", "maru-café-9e1f" };
+    for (names) |name| {
+        try tmp.dir.createDir(io, name, .default_dir);
+        var sub = try tmp.dir.openDir(io, name, .{});
+        defer sub.close(io);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const raw = path_buf[0..try sub.realPath(io, &path_buf)];
+        // Windows realpath는 `\\?\C:\…` 확장 접두를 줄 수 있는데, 그 모양은 감지가 UNC로 보고 거부한다
+        // (`isDetectableAbsoluteFor`). 화면에 뜨는 형태는 접두 없는 경로이므로 그것으로 맞춘다.
+        const abs = if (std.mem.startsWith(u8, raw, "\\\\?\\")) raw[4..] else raw;
+
+        var core = try TerminalCore.init(allocator, .{ .cols = 240, .rows = 4 });
+        defer core.deinit();
+        try core.write("go ");
+        try core.write(abs);
+        try core.write(" ok");
+
+        const hover = (try core.openableLinkAnchorAt(allocator, 0, 4, selection.link_scopes_full)) != null;
+        const click = blk: {
+            const ext = (try core.extractUrlAt(allocator, 0, 4, selection.link_scopes_full)) orelse break :blk false;
+            allocator.free(ext.text);
+            break :blk true;
+        };
+        if (!hover or !click) {
+            std.debug.print("실재하는데 열리지 않는다: {s} (hover={} click={})\n", .{ abs, hover, click });
             return error.TestUnexpectedResult;
         }
     }

@@ -10,6 +10,11 @@ pub const Widget = enum { auto, toggle, number, dropdown, text, color };
 
 /// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1. `.global_hotkey`는 schema 필드가 없는
 /// 특수 섹션(전역 OS 단축키 녹음 행만 — app_session이 강제로 목록에 넣고 라벨을 준다).
+/// 세팅 페이지 좌측 네비의 섹션. **선언 순서가 곧 네비 순서다** — `buildSectionList`가 선언 순으로
+/// 모으므로 여기를 재정렬하면 사용자가 보는 순서가 바뀐다(알파벳 정렬 같은 이유로 건드리지 말 것).
+///
+/// `app`이 첫 변형인 것은 의도다 — 읽을 수 없는 언어로 뜬 화면에서는 다른 섹션을 고르는 것부터
+/// 어려우므로 언어 선택이 최상단에 있어야 한다. 단일 출처: docs/settings-page.md.
 pub const Section = enum { app, font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey, editor };
 
 /// `ui.language`가 갖는 값. **판정은 `src/i18n.zig`가 소유**하므로 여기서 새로 정의하지 않고 재노출한다

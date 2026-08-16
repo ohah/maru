@@ -292,120 +292,173 @@ pub const Drag = struct {
 /// **분수를 여기서 든다.** 발행되는 offset 은 정수 backing pixel 이라(위 `State`) 손가락의
 /// 소수점 이동을 그대로 쓰면 매 프레임 반올림이 쌓여 **천천히 끌 때 아예 안 움직인다**.
 pub const Touch = struct {
-    /// 손가락이 닿아 있는 동안 true — 관성은 뗀 뒤의 것이다. 닿은 채로 흘리면 같은 이동량이
-    /// 두 번 적용돼 손가락보다 두 배로 미끄러진다.
-    active: bool = false,
-    /// 직전 move 의 좌표(픽셀). 델타는 **직전 대비**다 — down 대비로 재면 임계를 넘는 첫 프레임에
-    /// 그동안의 차이가 통째로 적용돼 목록이 툭 뛴다.
-    ///
-    /// **축은 호출자가 정한다** — 세로 목록이면 y, 가로 키바면 x 를 넘긴다. 규칙(1:1 추적·관성·
-    /// 감쇠·끝에서 멈춤)이 축과 무관하므로 두 벌로 두면 한쪽만 고쳐진다(실제로 그랬다).
-    last_y: f32 = 0,
-    /// 뗀 뒤 남은 속도(**px/ms**). 0 이면 멈춤.
+    /// 동시에 추적하는 손가락 수. iOS 11 · Android ~10 이 상한이라 여덟이면 넉넉하다.
+    /// **넘치면 새 손가락을 무시한다** — 조용히 덮어쓰면 그 자리의 기준이 남의 것이 된다.
+    pub const max_pointers = 8;
+
+    /// 손가락 하나의 상태. **기준과 속도를 손가락마다 둔다** — 하나를 공유하면 소유자가
+    /// 바뀔 때 남의 좌표가 그대로 이어져 화면이 점프하고, 그 점프가 속도 계산에 들어가
+    /// 상한까지 튄 fling 이 된다(손가락 교체 한 번이 1600px 를 흘려보냈다). AOSP `ScrollView`
+    /// 는 기준이 하나라 `onSecondaryPointerUp` 에서 새 기준을 잡고 `VelocityTracker` 를
+    /// 비우는데, 그건 **빠뜨릴 수 있는 명시적 처리**다. 손가락마다 두면 그 처리가 없어진다
+    /// (Flutter `monodrag.dart` 가 그 모양이다 — `_giveUpPointer` 는 소유자만 넘긴다).
+    const Slot = struct {
+        used: bool = false,
+        id: u32 = 0,
+        /// 직전 좌표. 델타는 **직전 대비**다 — down 대비로 재면 임계를 넘는 첫 프레임에
+        /// 그동안의 차이가 통째로 적용돼 목록이 툭 뛴다.
+        ///
+        /// **축은 호출자가 정한다** — 세로 목록이면 y, 가로 키바면 x 를 넘긴다. 규칙이 축과
+        /// 무관하므로 두 벌로 두면 한쪽만 고쳐진다(실제로 그랬다).
+        last: f32 = 0,
+        /// 이번 프레임에 옮긴 거리. **속도는 프레임 경계에서 잰다** — move 하나의 델타로
+        /// 잡으면 떼기 직전 한 표본이 느렸다는 이유로 flick 이 죽는다.
+        travel: f32 = 0,
+        /// px/ms.
+        velocity: f32 = 0,
+    };
+
+    slots: [max_pointers]Slot = @splat(.{}),
+    /// **이 표면의 제스처를 소유한 손가락.** null 이면 닿아 있는 손가락이 없다. 첫 `begin` 이
+    /// 잡고, 소유자가 떼면 남은 손가락 중 하나가 이어받는다(계약 §3.1).
+    owner: ?u32 = null,
+    /// 손을 뗀 뒤 남은 관성(**px/ms**). 손가락이 하나라도 닿아 있으면 0 이다.
     ///
     /// **프레임당이 아니라 밀리초당이다.** 프레임당으로 두면 같은 손짓이 기기마다 다르게
     /// 미끄러진다 — 30Hz Android 와 60Hz iOS 에서 정확히 두 배 차이가 났다(200ms 에 200px 을
-    /// 민 손짓이 610px 대 402px). Flutter 의 `FrictionSimulation`·RN 이 쓰는 `OverScroller`·
-    /// `decelerationRate` 도 전부 시간 기준이다.
-    velocity: f32 = 0,
-    /// 이번 프레임에 손가락이 옮긴 거리. **속도는 프레임 경계에서 잰다** — move 하나의 델타로
-    /// 잡으면 떼기 직전 한 표본이 느렸다는 이유로 flick 이 죽는다(그래서 두 프레임워크 다
-    /// 창 위에서 잰다). 우리는 표본에 시각이 없어 프레임을 그 창으로 쓴다.
-    frame_travel: f32 = 0,
-    /// 1픽셀을 못 채운 이동분.
+    /// 민 손짓이 610px 대 402px).
+    fling: f32 = 0,
+    /// 1픽셀을 못 채운 이동분. **이것만 면의 것이다** — 손가락이 아니라 offset 에 딸린 값이라
+    /// 소유자가 바뀌어도 이어진다.
     residue: f32 = 0,
 
-    /// **밀리초당 감쇠.** 60Hz 에서 프레임당 0.92 이던 것과 같다(`0.92^(1/16.667)`) — 그때의
-    /// 손맛을 유지하면서 프레임률 의존만 뗀다.
+    /// **밀리초당 감쇠.** 60Hz 에서 프레임당 0.92 이던 것과 같다(`0.92^(1/16.667)`).
     pub const decay_per_ms: f32 = 0.995012;
     /// 이보다 느려지면 멈춘다(px/ms) — 안 그러면 영원히 도는 헛계산이 남는다.
-    /// 60Hz 프레임당 0.5px 과 같은 자리다.
     pub const stop_below: f32 = 0.03;
-    /// **속도 상한(px/ms).** 튄 이벤트 하나가 목록을 날리지 않게 한다 — 두 프레임워크 다
-    /// `maxFlingVelocity` 를 둔다. 8000dp/s ≈ 8px/ms.
+    /// **속도 상한(px/ms).** 튄 이벤트 하나가 목록을 날리지 않게 한다(≈8000dp/s).
     pub const max_velocity: f32 = 8;
     /// **손가락이 가만히 있다고 보는 폭.** 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
-    /// 소비처마다 적으면 갈린다 — 실제로 브리지 네 곳에 `10` 이 흩어져 있었다(감쇠와 같은 모양).
     pub const slop_px: f32 = 10;
+
+    fn find(self: *Touch, id: u32) ?*Slot {
+        for (&self.slots) |*s| if (s.used and s.id == id) return s;
+        return null;
+    }
+
+    fn freeSlot(self: *Touch) ?*Slot {
+        for (&self.slots) |*s| if (!s.used) return s;
+        return null;
+    }
+
+    /// 닿아 있는 손가락 수. **비소유자도 센다** — 핀치(M13)가 이 값을 읽을 자리다.
+    pub fn pointerCount(self: *const Touch) usize {
+        var n: usize = 0;
+        for (self.slots) |s| {
+            if (s.used) n += 1;
+        }
+        return n;
+    }
 
     /// 손가락이 닿았다. **관성을 멈춘 것이면 true** — 그 짚음은 "세우려던 것"이지 누른 것이
     /// 아니다. 호출자가 이것을 모르면 멈추려고 짚은 자리의 버튼이 눌린다(실제로 터미널에
     /// 화살표 3바이트가 나갔다).
-    pub fn begin(self: *Touch, y: f32) bool {
-        const was_flinging = self.velocity != 0;
-        self.active = true;
-        self.last_y = y;
-        self.velocity = 0;
-        self.frame_travel = 0;
-        self.residue = 0;
+    pub fn begin(self: *Touch, id: u32, pos: f32) bool {
+        const was_flinging = self.fling != 0;
+        self.fling = 0;
+        if (self.find(id)) |s| {
+            // 같은 id 로 down 이 두 번 왔다 — 앞의 것을 못 받은 셈이니 기준만 새로 잡는다.
+            s.last = pos;
+            s.travel = 0;
+            s.velocity = 0;
+            if (self.owner == null) self.owner = id;
+        } else if (self.freeSlot()) |s| {
+            s.* = .{ .used = true, .id = id, .last = pos };
+            // **자리를 잡은 손가락만 소유자가 된다.** 밖에서 세우면 슬롯 없는 id 가 소유자가
+            // 될 수 있고, 그러면 그 손가락의 `up` 이 슬롯을 못 찾아 **소유권이 영영 안 풀린다**
+            // — 그 표면이 "손가락이 닿아 있는" 상태로 굳어 관성도 새 터치도 안 먹는다.
+            if (self.owner == null) self.owner = id;
+        }
         return was_flinging;
     }
 
     /// 손가락을 옮긴다. **끄는 방향으로 내용이 따라온다**(세로면 위로 끌 때 목록이 위로).
-    pub fn move(self: *Touch, state: *State, y: f32, max_offset_px: u32) void {
-        if (!self.active) return;
-        const dy = y - self.last_y;
-        self.last_y = y;
-        self.frame_travel += dy;
-        self.applyDelta(state, -dy, max_offset_px);
-    }
-
-    /// 손을 뗀다 — 남은 속도가 관성이 된다. `dt_ms` 는 프레임 간격(`step` 과 같은 값).
-    ///
-    /// **여기서도 속도를 잰다.** 프레임 경계에서만 재면, 손짓이 통째로 한 프레임 안에서
-    /// 끝나는 **빠른 flick 이 속도 0 이 된다** — 정확히 가장 세게 민 손짓이 아무 일도 안 하는
-    /// 것이다(30Hz 기기에서는 흔하다).
-    ///
-    /// **다만 덮어쓰지는 않는다.** 프레임 경계에서 이미 잰 값이 있는데 떼기 직전 1px 짜리
-    /// 조각이 하나 더 오면, 그 조각으로 갈아치울 때 속도가 서른 배 준다(실측 -1.875 → -0.0625).
-    /// 세게 민 손짓일수록 이 모양이 나온다. 그래서 **더 빠른 쪽만 취한다** — 반대쪽(가만히
-    /// 들고 있다 떼기)은 `step` 이 매 프레임 속도를 0 으로 만들어 두므로 안 흘러간다.
-    pub fn end(self: *Touch, dt_ms: f32) void {
-        self.active = false;
-        if (self.frame_travel != 0) {
-            const dt = std.math.clamp(dt_ms, 1, 100);
-            const tail = std.math.clamp(self.frame_travel / dt, -max_velocity, max_velocity);
-            if (@abs(tail) > @abs(self.velocity)) self.velocity = tail;
-            self.frame_travel = 0;
+    /// **소유자가 아닌 손가락은 화면을 안 움직인다** — 기준만 갱신해 둔다(이어받을 때 쓴다).
+    pub fn move(self: *Touch, state: *State, id: u32, pos: f32, max_offset_px: u32) void {
+        const s = self.find(id) orelse return; // down 을 못 받은 id — 무시한다(계약 §3.1)
+        const d = pos - s.last;
+        s.last = pos;
+        s.travel += d;
+        if (self.owner) |o| {
+            if (o == id) self.applyDelta(state, -d, max_offset_px);
         }
     }
 
-    /// 취소(제스처가 뺏겼다·화면이 바뀐다) — 관성도 남기지 않는다.
+    /// 손가락 하나를 뗀다. `dt_ms` 는 프레임 간격(`step` 과 같은 값).
+    ///
+    /// **소유자가 떼져도 남은 손가락이 있으면 관성이 안 붙는다** — 제스처가 이어지는 중이다.
+    /// 그 손가락은 자기 `down` 이후로 자기 기준을 갱신해 왔으므로 **재기준할 것이 없다.**
+    ///
+    /// 속도는 여기서도 잰다 — 손짓이 통째로 한 프레임 안에서 끝나면 프레임 경계 표본이
+    /// 0 이 된다(30Hz 에서는 흔하다). **다만 덮어쓰지 않는다**: 떼기 직전 1px 짜리 조각으로
+    /// 갈아치우면 속도가 서른 배 준다(실측 -1.875 → -0.0625). 더 빠른 쪽만 취한다.
+    pub fn end(self: *Touch, id: u32, dt_ms: f32) void {
+        const s = self.find(id) orelse return;
+        const dt = std.math.clamp(dt_ms, 1, 100);
+        if (s.travel != 0) {
+            const tail = std.math.clamp(s.travel / dt, -max_velocity, max_velocity);
+            if (@abs(tail) > @abs(s.velocity)) s.velocity = tail;
+        }
+        const was_owner = if (self.owner) |o| o == id else false;
+        const v = s.velocity;
+        s.* = .{}; // **슬롯을 비운다** — host 의 id 는 재사용된다(계약 §3.1: down~up 동안만 같다)
+        if (!was_owner) return;
+        self.owner = null;
+        for (self.slots) |o| {
+            if (o.used) {
+                self.owner = o.id;
+                break;
+            }
+        }
+        if (self.owner == null) self.fling = v; // 아무도 안 남았을 때만 관성이 시작된다
+    }
+
+    /// 취소(제스처가 뺏겼다·화면이 바뀐다) — **id 와 무관하게 전부 끝난다**(계약 §3.1).
     pub fn cancel(self: *Touch) void {
-        self.active = false;
-        self.velocity = 0;
-        self.frame_travel = 0;
+        self.slots = @splat(.{});
+        self.owner = null;
+        self.fling = 0;
         self.residue = 0;
     }
 
-    /// 매 프레임 한 번. 손가락이 닿아 있으면 아무 일도 안 한다.
-    /// **움직였으면 true** — 매 프레임 다시 그리지 않는 화면(데스크톱)은 이걸로 다시 그릴
-    /// 자리를 안다. 안 돌려주면 소비처마다 offset 을 손으로 비교하게 된다.
     /// 매 프레임 한 번. `dt_ms` 는 **직전 프레임과의 간격**이다(host 가 주는 프레임 시각의 차).
     ///
     /// 손가락이 닿아 있으면 미끄러뜨리지 않고 **이번 프레임의 속도만 잰다** — 떼는 순간 그
-    /// 값이 관성이 된다.
+    /// 값이 관성이 된다. **비소유자도 잰다**: 그 손가락이 이어받은 뒤 떼면 자기 속도로 흘러야 한다.
     /// **움직였으면 true** — 매 프레임 다시 그리지 않는 화면(데스크톱)은 이걸로 다시 그릴
-    /// 자리를 안다. 안 돌려주면 소비처마다 offset 을 손으로 비교하게 된다.
+    /// 자리를 안다.
     pub fn step(self: *Touch, state: *State, max_offset_px: u32, dt_ms: f32) bool {
         const dt = std.math.clamp(dt_ms, 1, 100); // 멈췄다 재개한 프레임이 관성을 날리지 않게
-        if (self.active) {
-            self.velocity = std.math.clamp(self.frame_travel / dt, -max_velocity, max_velocity);
-            self.frame_travel = 0;
+        if (self.owner != null) {
+            for (&self.slots) |*s| {
+                if (!s.used) continue;
+                s.velocity = std.math.clamp(s.travel / dt, -max_velocity, max_velocity);
+                s.travel = 0;
+            }
             return false;
         }
-        if (self.velocity == 0) return false;
+        if (self.fling == 0) return false;
         const before = state.offset_y_px;
-        self.applyDelta(state, -self.velocity * dt, max_offset_px);
+        self.applyDelta(state, -self.fling * dt, max_offset_px);
         // **끝에 닿으면 속도도 죽인다.** 값만 자르면 관성이 계속 돌아 매 프레임 헛계산을 하고,
         // 되돌리려 손을 대면 죽은 속도가 남아 있다가 튄다.
         if (state.offset_y_px == 0 or state.offset_y_px == max_offset_px) {
-            self.velocity = 0;
+            self.fling = 0;
             self.residue = 0;
             return state.offset_y_px != before;
         }
-        self.velocity *= std.math.pow(f32, decay_per_ms, dt);
-        if (@abs(self.velocity) < stop_below) self.velocity = 0;
+        self.fling *= std.math.pow(f32, decay_per_ms, dt);
+        if (@abs(self.fling) < stop_below) self.fling = 0;
         return state.offset_y_px != before;
     }
 
@@ -811,10 +864,10 @@ test "track click centers the thumb at the pointer" {
 test "터치: 손가락을 따라 1:1 로 움직이고 떼면 미끄러진다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(100);
-    t.move(&st, 90, 1000); // 위로 10px → 목록이 10px 내려간다
+    _ = t.begin(1, 100);
+    t.move(&st, 1, 90, 1000); // 위로 10px → 목록이 10px 내려간다
     try std.testing.expectEqual(@as(u32, 10), st.offset_y_px);
-    t.end(16);
+    t.end(1, 16);
     // 관성: 마지막 속도(-10)가 감쇠하며 계속 민다.
     _ = t.step(&st, 1000, 16);
     try std.testing.expect(st.offset_y_px > 10);
@@ -823,8 +876,8 @@ test "터치: 손가락을 따라 1:1 로 움직이고 떼면 미끄러진다" {
 test "터치: 손가락이 닿아 있는 동안에는 관성이 안 돈다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(100);
-    t.move(&st, 50, 1000);
+    _ = t.begin(1, 100);
+    t.move(&st, 1, 50, 1000);
     const held = st.offset_y_px;
     _ = t.step(&st, 1000, 16); // 아직 안 뗐다
     try std.testing.expectEqual(held, st.offset_y_px);
@@ -833,9 +886,9 @@ test "터치: 손가락이 닿아 있는 동안에는 관성이 안 돈다" {
 test "터치: 천천히 끌어도 움직인다(분수 누적)" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(100);
+    _ = t.begin(1, 100);
     var i: u32 = 0;
-    while (i < 4) : (i += 1) t.move(&st, 100 - @as(f32, @floatFromInt(i + 1)) * 0.3, 1000);
+    while (i < 4) : (i += 1) t.move(&st, 1, 100 - @as(f32, @floatFromInt(i + 1)) * 0.3, 1000);
     // 0.3px 씩 네 번 = 1.2px — 반올림으로 버리면 0 이 된다.
     try std.testing.expect(st.offset_y_px >= 1);
 }
@@ -843,19 +896,19 @@ test "터치: 천천히 끌어도 움직인다(분수 누적)" {
 test "터치: 끝에 닿으면 속도도 죽는다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(100);
-    t.move(&st, 0, 50); // 상한(50)을 넘겨 민다
-    t.end(16);
+    _ = t.begin(1, 100);
+    t.move(&st, 1, 0, 50); // 상한(50)을 넘겨 민다
+    t.end(1, 16);
     _ = t.step(&st, 50, 16);
     try std.testing.expectEqual(@as(u32, 50), st.offset_y_px);
-    try std.testing.expectEqual(@as(f32, 0), t.velocity);
+    try std.testing.expectEqual(@as(f32, 0), t.fling);
 }
 
 test "터치: 취소는 관성을 안 남긴다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(100);
-    t.move(&st, 50, 1000);
+    _ = t.begin(1, 100);
+    t.move(&st, 1, 50, 1000);
     t.cancel();
     const at = st.offset_y_px;
     _ = t.step(&st, 1000, 16);
@@ -871,15 +924,15 @@ test "Touch: 같은 손짓은 주사율이 달라도 같은 거리를 간다" {
         fn flick(frames: u32, dt: f32) u32 {
             var st: State = .{};
             var t: Touch = .{};
-            _ = t.begin(1000);
+            _ = t.begin(1, 1000);
             var y: f32 = 1000;
             var i: u32 = 0;
             while (i < frames) : (i += 1) {
                 y -= 200.0 / @as(f32, @floatFromInt(frames)); // 200ms 동안 200px — 같은 속도
-                t.move(&st, y, max);
+                t.move(&st, 1, y, max);
                 _ = t.step(&st, max, dt); // 닿아 있는 동안은 속도만 잰다
             }
-            t.end(dt);
+            t.end(1, dt);
             var f: u32 = 0;
             while (f < 1000) : (f += 1) _ = t.step(&st, max, dt);
             return st.offset_y_px;
@@ -897,10 +950,10 @@ test "Touch: 같은 손짓은 주사율이 달라도 같은 거리를 간다" {
 test "Touch: 속도에 상한이 있다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(0);
-    t.move(&st, -100_000, 1_000_000); // 한 이벤트에 10만 px
-    t.end(16);
-    try std.testing.expect(@abs(t.velocity) <= Touch.max_velocity);
+    _ = t.begin(1, 0);
+    t.move(&st, 1, -100_000, 1_000_000); // 한 이벤트에 10만 px
+    t.end(1, 16);
+    try std.testing.expect(@abs(t.fling) <= Touch.max_velocity);
 }
 
 // **떼기 직전의 작은 표본 하나가 flick 을 죽이면 안 된다.** 프레임 경계에서 잰 속도가 있는데
@@ -908,18 +961,25 @@ test "Touch: 속도에 상한이 있다" {
 // 준다(꼬리가 충분히 작으면 `stop_below` 아래로 떨어져 관성이 아예 안 붙는다). 세게 민 손짓일수록
 // 이 모양이 나온다. Flutter·RN 이 창(window) 위에서 재는 이유가 이것이다.
 test "Touch: 떼기 직전 작은 표본이 flick 을 죽이지 않는다" {
-    var st: State = .{};
-    var t: Touch = .{};
-    _ = t.begin(1000);
-    t.move(&st, 985, 100_000); // 한 프레임에 30px
-    t.move(&st, 970, 100_000);
-    _ = t.step(&st, 100_000, 16); // 프레임 경계 — 여기서 1.875px/ms 로 잰다
-    const sampled = t.velocity;
-    try std.testing.expect(@abs(sampled) > 1.5);
-
-    t.move(&st, 969, 100_000); // 떼기 직전 1px 짜리 꼬리
-    t.end(16);
-    try std.testing.expectEqual(sampled, t.velocity);
+    // **꼬리 표본이 있고 없고가 결과를 바꾸면 안 된다.** 프레임 경계에서 이미 잰 속도가 있는데
+    // 떼기 직전 1px 짜리 move 가 하나 더 오면, 그 조각으로 갈아치울 때 속도가 열 배 넘게 준다
+    // (꼬리가 충분히 작으면 `stop_below` 아래로 떨어져 관성이 아예 안 붙는다). 세게 민 손짓일수록
+    // 이 모양이 나온다. **내부를 읽지 않고 결과로 잰다.**
+    const S = struct {
+        fn flingAfter(tail: bool) f32 {
+            var st: State = .{};
+            var t: Touch = .{};
+            _ = t.begin(1, 1000);
+            t.move(&st, 1, 985, 100_000); // 한 프레임에 30px
+            t.move(&st, 1, 970, 100_000);
+            _ = t.step(&st, 100_000, 16); // 프레임 경계 — 여기서 1.875px/ms 로 잰다
+            if (tail) t.move(&st, 1, 969, 100_000); // 떼기 직전 1px 짜리 꼬리
+            t.end(1, 16);
+            return t.fling;
+        }
+    };
+    try std.testing.expect(@abs(S.flingAfter(false)) > 1.5);
+    try std.testing.expectEqual(S.flingAfter(false), S.flingAfter(true));
 }
 
 // 반대쪽도 지킨다: **가만히 들고 있다 떼면 안 미끄러진다.** 위 규칙을 "큰 쪽을 남긴다" 로
@@ -927,11 +987,122 @@ test "Touch: 떼기 직전 작은 표본이 flick 을 죽이지 않는다" {
 test "Touch: 멈춘 채로 떼면 관성이 없다" {
     var st: State = .{};
     var t: Touch = .{};
-    _ = t.begin(1000);
-    t.move(&st, 950, 100_000);
+    _ = t.begin(1, 1000);
+    t.move(&st, 1, 950, 100_000);
     _ = t.step(&st, 100_000, 16);
     var f: u32 = 0;
     while (f < 10) : (f += 1) _ = t.step(&st, 100_000, 16); // 손가락은 가만히
-    t.end(16);
-    try std.testing.expectEqual(@as(f32, 0), t.velocity);
+    t.end(1, 16);
+    try std.testing.expectEqual(@as(f32, 0), t.fling);
+}
+
+// ── 손가락 소유권 (계약 §3.1) ──────────────────────────────────────────────────
+
+test "Touch: 첫 손가락이 소유하고 둘째는 화면을 안 움직인다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    _ = t.begin(9, 500); // 둘째 손가락
+    try std.testing.expectEqual(@as(usize, 2), t.pointerCount());
+    try std.testing.expectEqual(@as(?u32, 7), t.owner);
+
+    t.move(&st, 9, 400, 100_000); // 비소유자가 100px 움직여도
+    try std.testing.expectEqual(@as(u32, 0), st.offset_y_px); // 화면은 그대로다
+    t.move(&st, 7, 950, 100_000); // 소유자는 움직인다
+    try std.testing.expectEqual(@as(u32, 50), st.offset_y_px);
+}
+
+test "Touch: 비소유자가 떼도 제스처는 이어진다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    _ = t.begin(9, 500);
+    t.end(9, 16); // 비소유자가 뗀다
+    try std.testing.expectEqual(@as(?u32, 7), t.owner); // 소유자 그대로
+    try std.testing.expectEqual(@as(f32, 0), t.fling); // 관성도 안 붙는다
+    t.move(&st, 7, 950, 100_000);
+    try std.testing.expectEqual(@as(u32, 50), st.offset_y_px); // 계속 끌린다
+}
+
+// **이것이 이 슬라이스의 핵심이다.** 소유자가 떼질 때 남은 손가락의 좌표가 그대로 이어지면
+// 화면이 점프하고, 그 점프가 px/ms 속도에 들어가 **상한까지 튄 fling** 이 된다(교체 한 번이
+// 1600px). 손가락마다 기준을 두면 새 소유자는 자기 기준을 이미 갖고 있어 **할 일이 없다.**
+test "Touch: 소유자가 떼지면 남은 손가락이 점프 없이 이어받는다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    _ = t.begin(9, 300); // 700px 떨어진 자리에 둘째
+    t.move(&st, 7, 990, 100_000); // 소유자가 10px
+    try std.testing.expectEqual(@as(u32, 10), st.offset_y_px);
+
+    t.end(7, 16); // 소유자가 뗀다 — 9 가 이어받는다
+    try std.testing.expectEqual(@as(?u32, 9), t.owner);
+    try std.testing.expectEqual(@as(f32, 0), t.fling); // 손가락이 남았으니 관성은 없다
+    try std.testing.expectEqual(@as(u32, 10), st.offset_y_px); // **점프가 없다**
+
+    t.move(&st, 9, 290, 100_000); // 새 소유자가 자기 기준(300)에서 10px
+    try std.testing.expectEqual(@as(u32, 20), st.offset_y_px); // 딱 10px 만 더 간다
+}
+
+test "Touch: 마지막 손가락이 떼질 때만 관성이 붙는다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    t.move(&st, 7, 970, 100_000);
+    _ = t.step(&st, 100_000, 16);
+    t.end(7, 16);
+    try std.testing.expect(t.fling != 0);
+    try std.testing.expectEqual(@as(?u32, null), t.owner);
+}
+
+test "Touch: 모르는 id 의 move 는 무시한다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    t.move(&st, 99, 0, 100_000); // down 을 못 받은 id
+    try std.testing.expectEqual(@as(u32, 0), st.offset_y_px);
+    try std.testing.expectEqual(@as(usize, 1), t.pointerCount());
+}
+
+test "Touch: 취소는 id 와 무관하게 전부 끝낸다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(7, 1000);
+    _ = t.begin(9, 500);
+    t.move(&st, 7, 900, 100_000);
+    t.cancel();
+    try std.testing.expectEqual(@as(usize, 0), t.pointerCount());
+    try std.testing.expectEqual(@as(?u32, null), t.owner);
+    try std.testing.expectEqual(@as(f32, 0), t.fling);
+}
+
+// **슬롯을 안 비우면 재사용된 id 가 옛 손가락의 기준을 물려받는다.** host 의 id 는 `down` 부터
+// 그 손가락의 `up` 까지만 같다는 것이 계약이고(Android 슬롯 id 는 실제로 재사용된다),
+// Flutter 처럼 "재사용 안 하는 id" 를 우리가 만들지는 않는다.
+test "Touch: 떼면 슬롯이 비어 같은 id 가 새로 시작한다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    _ = t.begin(3, 1000);
+    t.move(&st, 3, 900, 100_000); // 100px
+    t.end(3, 16);
+    const after_first = st.offset_y_px;
+
+    _ = t.begin(3, 200); // 같은 id 가 전혀 다른 자리에서 다시 닿는다
+    t.move(&st, 3, 190, 100_000); // 10px 만 움직였다
+    try std.testing.expectEqual(after_first + 10, st.offset_y_px); // 옛 기준(900)을 안 물려받는다
+}
+
+// **상한을 두면 늘 그 언저리가 샌다.** 자리가 없어 등록 못 한 손가락이 소유자가 되면, 그
+// 손가락의 `up` 이 슬롯을 못 찾아 **소유권이 영영 안 풀린다** — 그 표면이 굳는다.
+test "Touch: 슬롯이 꽉 차도 소유권이 굳지 않는다" {
+    var t: Touch = .{};
+    var i: u32 = 0;
+    while (i < Touch.max_pointers + 2) : (i += 1) _ = t.begin(i, 1000);
+    try std.testing.expectEqual(Touch.max_pointers, t.pointerCount()); // 넘치는 것은 무시
+    try std.testing.expectEqual(@as(?u32, 0), t.owner); // 첫 손가락이 소유자다
+
+    i = 0;
+    while (i < Touch.max_pointers + 2) : (i += 1) t.end(i, 16);
+    try std.testing.expectEqual(@as(usize, 0), t.pointerCount());
+    try std.testing.expectEqual(@as(?u32, null), t.owner); // **풀린다**
 }

@@ -137,7 +137,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSMutableString *_composing;
     id<UITextInputDelegate> _inputDelegate;
     UITextInputStringTokenizer *_tokenizer;
-    float _flingVy;   // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
+    float _flingVy;   // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다, 헤더 주석 참조)
+    double _ptrLastT; // 직전 이동 이벤트의 시각(ms). 속도를 시간으로 재려면 필요하다.
+    double _flingT;   // 직전 관성 프레임의 시각(ms).
     float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
@@ -309,9 +311,22 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UIEdgeInsets safe = self.safeAreaInsets;
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
-    // 손을 뗀 뒤 흘릴 관성만 우리 몫이다 — Android 와 같은 식(마지막 이동량).
-    if (phase == 1) { _flingVy = ly - _ptrLastY; _ptrLastY = ly; }
-    if (phase == 0) { _flingVy = 0; _ptrLastY = ly; }
+    // 손을 뗀 뒤 흘릴 관성만 우리 몫이다 — Android 와 같은 식.
+    // **속도는 px/ms 다.** 이벤트 사이 간격으로 나눈다(UIKit 이 `timestamp` 를 준다) — 프레임당
+    // 이동량으로 두면 주사율이 다른 기기에서 같은 손짓이 다르게 미끄러진다.
+    double t_ms = touch.timestamp * 1000.0;
+    if (phase == 1) {
+        float dt = (float)(t_ms - _ptrLastT);
+        if (dt < 1.0f) dt = 1.0f;
+        if (dt > 100.0f) dt = 100.0f;
+        float v = (ly - _ptrLastY) / dt;
+        if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
+        if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
+        _flingVy = v;
+        _ptrLastY = ly;
+        _ptrLastT = t_ms;
+    }
+    if (phase == 0) { _flingVy = 0; _ptrLastY = ly; _ptrLastT = t_ms; }
     maru_mobile_pointer(phase, lx, ly, (unsigned long long)(touch.timestamp * 1000.0));
 }
 
@@ -415,9 +430,16 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 /// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
 - (void)stepFling {
+    // **간격은 안 흐를 때도 재 둔다** — 안 그러면 관성이 시작된 첫 프레임의 dt 가 "멈춰 있던
+    // 시간" 이 되어 한 번에 튄다.
+    double now_ms = CACurrentMediaTime() * 1000.0;
+    float dt = (_flingT == 0.0) ? 16.0f : (float)(now_ms - _flingT);
+    _flingT = now_ms;
     if (_flingVy == 0) return;
-    maru_mobile_scroll(_flingVy);
-    _flingVy *= MARU_FLING_DAMPING;           // 헤더가 단일 출처(키바·설정과 같은 값)
+    if (dt < 1.0f) dt = 1.0f;
+    if (dt > 100.0f) dt = 100.0f;
+    maru_mobile_scroll(_flingVy * dt);
+    _flingVy *= powf(MARU_FLING_DECAY_PER_MS, dt); // 헤더가 단일 출처(키바·설정과 같은 값)
     if (fabsf(_flingVy) < MARU_FLING_STOP_BELOW) _flingVy = 0; // 영원히 도는 것을 막는다
 }
 

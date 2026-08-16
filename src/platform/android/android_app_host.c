@@ -7,6 +7,7 @@
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
 #define VK_USE_PLATFORM_ANDROID_KHR
+#include <math.h> // powf — 관성 감쇠가 시간 기준이라 필요하다
 #include <android_native_app_glue.h>
 #include <android/log.h>
 #include <android/bitmap.h>
@@ -81,7 +82,9 @@ static struct {
     int inset_top, inset_bottom;
     float touch_last_y;   // 직전 MOVE 의 논리 y — 이동량을 내는 기준
     float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
-    float fling_vy;       // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
+    float fling_vy;       // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다)
+    double ptr_last_t;    // 직전 이동 이벤트의 시각(ms)
+    double fling_t;       // 직전 관성 프레임의 시각(ms)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
     int keybar_active;    // 이번 터치를 보조 키바가 잡고 있나(down 에서 서고 up/cancel 에서 풀린다)
     int chrome_active;    // 이번 터치를 밀린 화면(설정)이 잡고 있나 — 키바보다 먼저 본다
@@ -623,13 +626,23 @@ static int initVulkan(ANativeWindow *win) {
 
 static void drawFrame(void) {
     if (!g.ready) return;
-    // 손을 뗀 뒤 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다(iOS `stepFling` 과 같은 값).
-    if (g.fling_vy != 0.0f) {
-        pthread_mutex_lock(&g_bridge_lock);
-        maru_mobile_scroll(g.fling_vy);
-        pthread_mutex_unlock(&g_bridge_lock);
-        g.fling_vy *= MARU_FLING_DAMPING;
-        if (g.fling_vy < MARU_FLING_STOP_BELOW && g.fling_vy > -MARU_FLING_STOP_BELOW) g.fling_vy = 0.0f;
+    // 손을 뗀 뒤 남은 관성을 **경과한 시간만큼** 흘리고 감쇠시킨다(iOS `stepFling` 과 같은 값).
+    // 간격은 안 흐를 때도 재 둔다 — 안 그러면 첫 프레임의 dt 가 "멈춰 있던 시간" 이 되어 튄다.
+    {
+        struct timespec fnow;
+        clock_gettime(CLOCK_MONOTONIC, &fnow);
+        double now_ms = (double)fnow.tv_sec * 1000.0 + (double)fnow.tv_nsec / 1.0e6;
+        float dt = (g.fling_t == 0.0) ? 16.0f : (float)(now_ms - g.fling_t);
+        g.fling_t = now_ms;
+        if (g.fling_vy != 0.0f) {
+            if (dt < 1.0f) dt = 1.0f;
+            if (dt > 100.0f) dt = 100.0f;
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_scroll(g.fling_vy * dt);
+            pthread_mutex_unlock(&g_bridge_lock);
+            g.fling_vy *= powf(MARU_FLING_DECAY_PER_MS, dt);
+            if (g.fling_vy < MARU_FLING_STOP_BELOW && g.fling_vy > -MARU_FLING_STOP_BELOW) g.fling_vy = 0.0f;
+        }
     }
     // **창 크기를 직접 본다.** 드라이버가 OUT_OF_DATE 를 안 알려 주는 경우가 있다(실측:
     // 이 에뮬레이터는 리사이즈 뒤에도 계속 VK_SUCCESS 를 돌려주고, SurfaceFlinger 가 낡은
@@ -1202,7 +1215,16 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         if (action == AMOTION_EVENT_ACTION_MOVE) {
             float dy = ly - g.touch_last_y;
             g.touch_last_y = ly;
-            g.fling_vy = dy;  // 손을 뗀 뒤 흘릴 관성 — 그것만 플랫폼 몫이다
+            // **속도는 px/ms 다**(iOS 와 같은 식) — 이벤트 시각 간격으로 나눈다. 프레임당
+            // 이동량으로 두면 30Hz 인 이 기기가 60Hz 기기보다 두 배 멀리 미끄러진다.
+            float pdt = (float)(ev_ms - g.ptr_last_t);
+            if (pdt < 1.0f) pdt = 1.0f;
+            if (pdt > 100.0f) pdt = 100.0f;
+            float v = dy / pdt;
+            if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
+            if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
+            g.fling_vy = v;   // 손을 뗀 뒤 흘릴 관성 — 그것만 플랫폼 몫이다
+            g.ptr_last_t = ev_ms;
             g.touch_total_dy += dy;
             pthread_mutex_lock(&g_bridge_lock);
             maru_mobile_pointer(1, lx, ly, (unsigned long long)ev_ms);
@@ -1223,6 +1245,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         g.touch_last_y = ly;
         g.touch_total_dy = 0;
         g.fling_vy = 0;
+        g.ptr_last_t = ev_ms;
         // **밀린 화면(설정)이 먼저다.** 톱니를 누르면 여기서 먹고, 설정이 떠 있으면 전부 먹는다.
         pthread_mutex_lock(&g_bridge_lock);
         unsigned int on_chrome = maru_mobile_chrome_pointer(0, lx, ly);

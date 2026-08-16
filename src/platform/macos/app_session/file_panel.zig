@@ -421,7 +421,7 @@ pub fn closeFileTermForEntry(self: *AppSession, entry: *const dock_panel.Entry) 
                     // 아래 게이트를 **먼저** 통과했으므로 latch는 반드시 실효한다 — 그래서 true가
                     // "닫혔다"는 뜻으로 정직하다(유령 성공이 아니다).
                     if (filePanelsBlockCloseExcluding(self, entry)) {
-                        self.showNoticeKey(.app_unsaved_tabs_first);
+                        self.showNoticeKey(.common_unsaved_tabs_first);
                         return false;
                     }
                     self.ended_seen = true;
@@ -1208,7 +1208,7 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
 
 pub fn blockSessionExitForFilePanels(self: *AppSession) bool {
     if (!hasProtectedFilePanelsForExit(self)) return false;
-    self.showNoticeKey(.app_unsaved_tabs_first);
+    self.showNoticeKey(.common_unsaved_tabs_first);
     return true;
 }
 

@@ -400,8 +400,7 @@ Windows  WaitForMultipleObjects(read_overlapped_event, wake_event)
 `SetEvent`로는 wake 이벤트로 깨어나며, 조용하면 스핀 없이 timeout한다. **`CreatePseudoConsole`이 named pipe
 핸들을 그대로 받는다**(`hr=S_OK`)는 것도 함께 확인했다.
 
-> **범위 주의**: 위 실측은 **대기 메커니즘과 핸들 수용**까지다. 자식의 출력이 실제로 그 파이프로 흐르는
-> end-to-end는 §6의 ConPTY 항목대로 **아직 미확인**이다.
+자식의 출력이 실제로 그 파이프로 흐르는 end-to-end도 실측으로 닫혔다(§6).
 
 따라서 `waitIo`·`IoReady`·`readChunk`·`writeInputNonBlocking`의 **시그니처는 바뀌지 않는다.** 호출자도
 하나뿐이다(`src/app/pty_reader.zig`의 reader 루프).
@@ -421,6 +420,30 @@ reader 루프는 `out_head += writeInputNonBlocking(...)`으로 **부분 진행�
 하나를 골라 그 차이를 메워야 한다 — ① 미결 write를 한 건만 두고 완료 전까지 `writable`을 보고하지 않기,
 ② 파이프 버퍼 이하로 잘라 쓰기, ③ writer 스레드 + 큐. **어느 쪽이든 계약 밖의 구현 규약이므로 W4에서
 정하고 여기에 기록한다.**
+
+### 4.1a spawn 절차 — 순서가 계약이다 (실측, 2026-08-16)
+
+ConPTY spawn은 API 호출 목록이 아니라 **순서**가 본질이다. 두 자리를 틀리면 자식이 pty에 붙지 않고 조용히
+부모의 콘솔로 출력한다 — 실패가 에러 코드로 오지 않고 **잘못된 성공**으로 오므로 여기에 못박는다.
+
+```text
+1  CreatePipe(in_read, in_write) ; CreatePipe(out_read, out_write)
+2  CreatePseudoConsole(size, in_read, out_write, 0, &hpc)      → hr must be S_OK
+3  CloseHandle(in_read) ; CloseHandle(out_write)               ← ★ 반드시 4보다 먼저
+4  InitializeProcThreadAttributeList(1) → UpdateProcThreadAttribute(0x20016, hpc)
+5  si.StartupInfo.dwFlags   = STARTF_USESTDHANDLES             ← ★ 세 핸들 전부 NULL
+   si.StartupInfo.hStdInput = hStdOutput = hStdError = NULL
+6  CreateProcessW(…, bInheritHandles=FALSE, EXTENDED_STARTUPINFO_PRESENT, &si, &pi)
+7  자식이 사는 동안: out_read를 읽고, in_write에 쓰고, ResizePseudoConsole(hpc, …)
+8  ClosePseudoConsole(hpc) → 자식에게 EOF가 간다
+```
+
+- **★ 3번(닫기를 spawn 앞에)**: pseudoconsole이 이미 자기 사본을 갖고 있다. 우리 사본을 남긴 채 spawn하면
+  자식이 붙지 않는다.
+- **★ 5번(표준 핸들 비우기)**: `bInheritHandles=FALSE`만으로는 부족하다. 명시하지 않으면 자식이 부모의 표준
+  핸들을 물려받아 pty를 무시한다(실측 — §6).
+- **8번(닫는 순서)**: `ClosePseudoConsole`을 먼저 하면 밀린 출력이 버려질 수 있고, `ResizePseudoConsole`은
+  그 뒤로 `0x80070006`이 된다. 배수 → 종료 확인 → 닫기 순으로 간다.
 
 ### 4.2 `SpawnRequest`에서 실제로 바꿀 것
 
@@ -658,12 +681,26 @@ MSBuild·cmd·PowerShell·zig 자신의 에러 출력이 다 이 모양이라 **
 | 프로세스 열거 | ✅ 5,328개 열거, `ppid` 체인으로 부모-자식 확인 |
 | **`waitIo` 대응**(§4.1) | ✅ overlapped named pipe 비동기 read가 `ERROR_IO_PENDING`으로 등록되고, 상대 write는 read 이벤트로·`SetEvent`는 wake 이벤트로 깨우며, 조용하면 스핀 없이 `WAIT_TIMEOUT`. **`CreatePseudoConsole`이 named pipe 핸들을 받는다**(`hr=S_OK`) |
 | **overlapped write 의미**(§4.1) | ⚠️ 4 KiB 버퍼에 512 KiB write → 즉시 `ERROR_IO_PENDING`에 `written=0`, 완료 전 `GetOverlappedResult`는 `ERROR_IO_INCOMPLETE`에 `bytes=0`이라 **부분 진행을 볼 수 없다**. 상대가 8 KiB를 읽어도 미완료, 전량(524,288 bytes)을 읽어야 완료. `POLLOUT`+부분쓰기와 의미가 달라 **백엔드가 흡수해야 한다** |
-| ConPTY | ⚠️ `CreatePseudoConsole`·`ResizePseudoConsole` S_OK, conhost가 VT init 방출, `UpdateProcThreadAttribute`가 잘못된 attribute를 거부하고 `0x20016`은 수락. **자식이 pty에 붙는 것만 미확인** |
+| **ConPTY 자식 attach**(§4.1) | ✅ **닫혔다**(2026-08-16). 자식 안에서 `cmd /c mode con`이 `줄: 37 / 열: 123` — `CreatePseudoConsole`에 넘긴 COORD 그대로다. 대화형 왕복 2회, `ResizePseudoConsole`은 **자식이 살아 있는 동안** S_OK, pwsh도 동일, 부모가 콘솔을 가진 경우도 동일 |
 
-**ConPTY 미확인의 성격**: 같은 로직을 C로 다시 써서 숫자까지 동일하게 실패했다(`attrSize=48`,
-`sizeof(STARTUPINFOEXW)=112`, `flags=0x80000`). 즉 바인딩 문제가 아니라 **실행 환경**(에이전트 샌드박스가
-conhost 세션을 못 띄움)이다. 부모 프로세스에 콘솔이 없음도 확인했다. **실제 대화형 Windows 세션에서 한 번
-돌려 닫아야 한다** — 그전까지 ConPTY 동작을 완료로 계상하지 않는다.
+**ConPTY를 "환경 탓"으로 적었던 것은 오판이었다 — 기록으로 남긴다.** 위 항목은 한때 "자식이 pty에 붙는 것만
+미확인, 에이전트 샌드박스가 conhost 세션을 못 띄우기 때문"으로 적혀 있었다. 실제 원인은 **우리 코드 두 곳**이다.
+
+| 무엇이 틀렸나 | 진짜 원인 | 어떻게 고치나 |
+|---|---|---|
+| 자식 출력이 pty가 아니라 **우리 stdout**으로 나갔다 | `bInheritHandles=FALSE`인데도 자식이 부모의 표준 핸들을 물려받았다. stdout을 파일로 돌리니 마커가 그 파일에 떨어져(16 bytes) 인과가 증명됐다 | `dwFlags`에 `STARTF_USESTDHANDLES`를 세우고 `hStdInput`/`hStdOutput`/`hStdError`를 **전부 NULL**로 둔다 = "물려받을 것이 없다" |
+| 읽은 것이 conhost VT init 48바이트뿐이라 "안 붙었다"고 읽었다 | 한 번만 `ReadFile`하고 멈췄다 | `PeekNamedPipe`로 데드라인까지 폴링해 모은다 |
+| `ResizePseudoConsole`이 `0x80070006`(잘못된 핸들) | `ClosePseudoConsole` **뒤에** 불렀다 | 자식이 살아 있는 동안 부른다 |
+
+원인을 C로 다시 써서 같은 숫자가 나온 것(`attrSize=48`, `sizeof(STARTUPINFOEXW)=112`, `flags=0x80000`)을
+"바인딩이 아니라 환경"의 근거로 삼았는데, **두 구현이 같은 실수를 공유했으므로 그 대조는 아무것도 가르지
+못했다.** 교훈: 재현 대상이 같은 저자의 같은 가정을 담고 있으면 대조군이 아니다. 실제 대조군은 나중에 세운
+"표준 핸들을 비우지 않은 판"이었고, 그것은 기대대로 실패하며 마커를 우리 stdout으로 흘렸다.
+
+**부모에 콘솔이 있을 때**(=사용자가 터미널에서 `maru`를 띄우는 조건)도 이 환경에서 닫았다. `AllocConsole`과
+`AttachConsole(ATTACH_PARENT_PROCESS)`은 둘 다 `err=5`로 막히지만, `CREATE_NEW_CONSOLE`로 자기 자신을 다시
+띄우면 그 프로세스는 진짜 콘솔 소유자(`GetConsoleWindow() != null`, 버퍼 120x9001)이고 거기서 attach가
+그대로 됐다.
 
 ## 7. 베이스
 

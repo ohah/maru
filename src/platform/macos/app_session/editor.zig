@@ -1911,3 +1911,53 @@ test "config 재적재로 랩이 켜져도 그리기가 죽지 않는다 — 토
     try testing.expect(drawn.dl.cells.len > 0); // 어서션에 안 걸리고 그려진다
     try testing.expectEqual(stored, fx.term.rt.editor_first_col); // 상태는 그대로 — 랩을 끄면 돌아갈 자리
 }
+
+test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
+    // PR #2239의 한계 절에 **"재지 않았다"**고 적었던 값이다. 재 보니 5만 줄에서 **501ms**였다 —
+    // 반 초짜리 멈춤이라 한계로 남길 값이 아니었다. 원인은 `stepColumn`이 cluster마다 §3.8 위험 문자
+    // 검사로 codepoint를 디코드하던 것이고, 가장 흔한 걸음(출력 가능한 ASCII)을 먼저 끝내 **28ms**가
+    // 됐다(Debug, macOS arm64, 66바이트짜리 탭 들여쓰기 줄).
+    //
+    // 아래 상한은 **재앙 감지선**이지 예산이 아니다 — CI 기계 편차로 흔들리지 않게 넉넉히 잡았다.
+    // 값이 궁금하면 출력이 그대로 찍힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    for ([_]usize{ 10_000, 50_000 }) |n| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        // 실제 소스 코드에 가까운 줄(들여쓰기 탭 + ASCII 80자).
+        const line = "\t\tconst result = try computeSomething(argument_one, argument_two);";
+        const many = try allocator.alloc([]const u8, n);
+        defer allocator.free(many);
+        for (many) |*l| l.* = line;
+        fx.term.rt.editor_lines = many;
+        fx.term.rt.editor_wrap = false;
+        fx.term.rt.editor_max_cols = 0;
+
+        const t0 = monotonicMsForTest();
+        _ = scrollCols(fx.session, fx.term, leaf, -1);
+        const t1 = monotonicMsForTest();
+        std.debug.print("\n[측정] {d}줄 × {d}B: 첫 가로 휠 {d}ms (max_cols={d})\n", .{ n, line.len, t1 - t0, fx.term.rt.editor_max_cols });
+
+        // 두 번째부터는 캐시라 0에 가까워야 한다.
+        try testing.expect(t1 - t0 < 1000); // 고치기 전 값(501ms)의 두 배 — 이 아래로 돌아오면 재앙이다
+
+        // 두 번째부터는 캐시라 0에 가까워야 한다.
+        const t2 = monotonicMsForTest();
+        _ = scrollCols(fx.session, fx.term, leaf, -1);
+        const t3 = monotonicMsForTest();
+        std.debug.print("[측정] {d}줄: 두 번째 휠 {d}ms\n", .{ n, t3 - t2 });
+        try testing.expect(t3 - t2 < 50); // 캐시가 안 먹으면 여기서 걸린다
+    }
+}
+
+fn monotonicMsForTest() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}

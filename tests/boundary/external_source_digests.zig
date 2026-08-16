@@ -457,7 +457,7 @@ pub const inventory = [_]Proof{
     // W5(Windows 셸 통합)에서 **한 줄** 움직인다: `SpawnRequest.shell_integration_dir`이 union
     // `shell_integration`으로 바뀌어(계약 §4.2a) 이 파일의 설정 자리가 `.{ .assets_dir = dir }`로 감싼다.
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "18548406f3243bd931b0d48a277e29bb3297fbd4e36702019db8e9300b5b79d2" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5fde6fc1c97cf46bd575fd7ca6e6ef6a7bba704fa2ec1e616fd982c761604ddb" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

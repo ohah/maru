@@ -54677,6 +54677,36 @@ test "소스 컨트롤: 커밋 메시지 초안은 저장소마다 따로 든다
     try std.testing.expectEqualStrings("b의 메시지", session.scm_commit_field.text.items);
 }
 
+test "소스 컨트롤: 첫 읽기가 늦게 와도 쓰던 글이 사라지지 않는다" {
+    // 도크는 열리자마자 상자를 보여 주므로 사용자는 저장소 판정이 끝나기 전에도 타이핑한다. 그때
+    // 초안 복원이 상자를 지우면 **첫 읽기가 끝나는 순간 쓴 글이 사라진다** — 제품 캡처에서 실제로
+    // 그랬다(2026-08-16: 상자가 안내 문구로 되돌아가 커밋이 아예 안 걸렸다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    // 저장소를 알기 **전에** 쓴다. 픽스처가 이미 하나를 기억해 뒀으므로 **놓아 준 뒤** 비운다
+    // (그냥 null로 덮으면 그 문자열이 샌다 — 누수 검사가 잡았다).
+    if (session.git_repo) |old| session.allocator.free(old);
+    session.git_repo = null;
+    scm_dock_ops.insertCommitText(session, "읽기 전에 쓴 글");
+    // 첫 읽기가 도착해 저장소가 정해진다.
+    git_ops.rememberGitRepo(session, "/repo-late");
+    try std.testing.expectEqualStrings("읽기 전에 쓴 글", session.scm_commit_field.text.items);
+
+    // 그 글은 이제 그 저장소의 것이다 — 다른 저장소에 갔다 오면 그대로 돌아온다.
+    git_ops.rememberGitRepo(session, "/repo-other");
+    try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
+    git_ops.rememberGitRepo(session, "/repo-late");
+    try std.testing.expectEqualStrings("읽기 전에 쓴 글", session.scm_commit_field.text.items);
+}
+
 test "소스 컨트롤: 비운 초안은 남지 않는다(비운 것도 뜻이다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

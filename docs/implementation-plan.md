@@ -1159,6 +1159,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `GenerationAttachment`가 이 accounting과 실제 assembler frontier를 소유하며 final-address staged receipt를 닫는다.
    host issuer만 green인 상태는 caught-up 또는 CR4a 완료가 아니다. barrier target은 server가 subscription을 재조회하거나
    encoded screen record를 파싱해 만들지 않고 `RuntimeManager`의 immutable projection receipt만 전달한다.
+   actual issuer는 `RemoteTermBackend`가 소유하는 host별 `HostReconnectJob`으로 연결한다. AppSession은 base-cache path와
+   owner-turn capability만 전달하고 raw Client/receipt를 보존하지 않는다. job은 host당 max 1, actual
+   `connectExistingHostUntil` exact 1, same-adapter Client replacement exact 1을 소유하며 하나의 absolute deadline을
+   connect/hello부터 staged receipt까지 연장 없이 공유한다. 단일-runtime actual socket 제품 행도 이 job을 우회하지 않는다.
+   allocator fail-index는 manifest/connect, replacement node, observer attach/snapshot, delta apply와 staged seal의 첫 성공+1까지
+   순회하고 pre-publication은 old graph mutation 0, post-publication은 unavailable shell과 node/generation 보존 및 Client
+   fail-close, candidate/receipt/ledger final zero를 고정한다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

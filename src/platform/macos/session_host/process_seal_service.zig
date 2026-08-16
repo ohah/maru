@@ -46,6 +46,7 @@ const prepared_client_replacement_domain = "maru.prepared-client-replacement.v1"
 const prepared_retired_client_reclaim_domain = "maru.prepared-retired-client-reclaim.v1";
 const window_close_ticket_reservation_domain = "maru.window-close-ticket-reservation.v1";
 const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
+const host_reconnect_job_domain = "maru.host-reconnect-job.v1";
 const session_host_coordinator_domain = "maru.session-host-coordinator.v1";
 const external_reconnect_receipt_domain = "maru.external-reconnect-receipt.v1";
 const reconnect_close_receipt_domain = "maru.reconnect-close-receipt.v1";
@@ -104,6 +105,7 @@ pub const PreparedClientReplacementSealInput = cleanup_seal.PreparedClientReplac
 pub const PreparedRetiredClientReclaimSealInput = cleanup_seal.PreparedRetiredClientReclaimSealInput;
 pub const WindowCloseTicketReservationSealInput = cleanup_seal.WindowCloseTicketReservationSealInput;
 pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
+pub const HostReconnectJobSealInput = cleanup_seal.HostReconnectJobSealInput;
 pub const SessionHostCoordinatorSealInput = cleanup_seal.SessionHostCoordinatorSealInput;
 pub const ExternalReconnectReceiptSealInput = cleanup_seal.ExternalReconnectReceiptSealInput;
 pub const ReconnectCloseReceiptSealInput = cleanup_seal.ReconnectCloseReceiptSealInput;
@@ -765,6 +767,10 @@ pub fn windowCloseTicketReservationSeal(pid: u32, process_nonce: u64, input: Win
 
 pub fn remoteBackendSingletonSeal(pid: u32, process_nonce: u64, input: RemoteBackendSingletonSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, remote_backend_singleton_domain, input);
+}
+
+pub fn hostReconnectJobSeal(pid: u32, process_nonce: u64, input: HostReconnectJobSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, host_reconnect_job_domain, input);
 }
 
 pub fn sessionHostCoordinatorSeal(pid: u32, process_nonce: u64, input: SessionHostCoordinatorSealInput) ReadyError!CleanupSeal {

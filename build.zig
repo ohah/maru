@@ -4127,6 +4127,12 @@ pub fn build(b: *std.Build) void {
         "CR4a same-adapter observer candidate prerequisite gates",
     );
     session_host_cr4a_step.dependOn(session_host_cr3c_c2_step);
+    const session_host_cr4a_issuer_step = b.step(
+        "test-session-host-cr4a-issuer",
+        "CR4a bounded actual issuer and backend-owned Client job gates",
+    );
+    session_host_cr4a_step.dependOn(session_host_cr4a_issuer_step);
+    var previous_cr4a_issuer_actual: ?*std.Build.Step = null;
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4a_optimize| {
         const cr4a_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -4223,6 +4229,44 @@ pub fn build(b: *std.Build) void {
         const run_cr4a_catchup_byte_cap_tests = b.addRunArtifact(cr4a_catchup_byte_cap_tests);
         run_cr4a_catchup_byte_cap_tests.addArg("--maru-expect-tests=2");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_byte_cap_tests.step);
+
+        const cr4a_actual_issuer_connect_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_connect.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a actual issuer는 bounded"},
+        });
+        const run_cr4a_actual_issuer_connect_tests = b.addRunArtifact(cr4a_actual_issuer_connect_tests);
+        run_cr4a_actual_issuer_connect_tests.addArg("--maru-expect-tests=1");
+        run_cr4a_actual_issuer_connect_tests.setCwd(b.path("."));
+        if (previous_cr4a_issuer_actual) |previous|
+            run_cr4a_actual_issuer_connect_tests.step.dependOn(previous);
+        previous_cr4a_issuer_actual = &run_cr4a_actual_issuer_connect_tests.step;
+        session_host_cr4a_step.dependOn(&run_cr4a_actual_issuer_connect_tests.step);
+        session_host_cr4a_issuer_step.dependOn(&run_cr4a_actual_issuer_connect_tests.step);
+
+        const cr4a_actual_issuer_job_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a actual issuer job은"},
+        });
+        const run_cr4a_actual_issuer_job_tests = b.addRunArtifact(cr4a_actual_issuer_job_tests);
+        run_cr4a_actual_issuer_job_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_actual_issuer_job_tests.setCwd(b.path("."));
+        if (previous_cr4a_issuer_actual) |previous|
+            run_cr4a_actual_issuer_job_tests.step.dependOn(previous);
+        previous_cr4a_issuer_actual = &run_cr4a_actual_issuer_job_tests.step;
+        session_host_cr4a_step.dependOn(&run_cr4a_actual_issuer_job_tests.step);
+        session_host_cr4a_issuer_step.dependOn(&run_cr4a_actual_issuer_job_tests.step);
 
         const cr4a_catchup_host_state_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

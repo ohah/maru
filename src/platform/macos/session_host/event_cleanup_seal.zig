@@ -189,6 +189,25 @@ pub const RemoteBackendSingletonSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const HostReconnectJobSealInput = struct {
+    self_addr: u64,
+    backend_addr: u64,
+    backend_generation: u64,
+    thread_id: u64,
+    job_generation: u64,
+    host_id: u128,
+    adapter_addr: u64,
+    adapter_generation: u64,
+    expected_connection_generation: u64,
+    deadline_ns_low: u64,
+    deadline_ns_high: u64,
+    client_addr: u64,
+    client_fd: i32,
+    client_owner_digest: Digest,
+    client_identity_digest: Digest,
+    state_raw: u8,
+};
+
 pub const SessionHostCoordinatorSealInput = struct {
     self_addr: u64,
     thread_id: u64,

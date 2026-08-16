@@ -140,7 +140,8 @@ fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cell
 // 링크로 보는가: 스킴 URL / 절대·dot-relative / bare-relative, 끝 문장부호·`:`·`.` 제외, 괄호 균형). maru는
 // 런타임 의존성 0 정책으로 oniguruma 정규식을 안 쓰고(코드 표현도 복사 안 함 — clean-room), 공백-경계 토큰
 // (wordBoundsAt) + 아래 순수 Zig 문자열 분류로 재구현한다. 공백 든 경로는 토큰 모델상 1차 미지원이고, bare
-// 경로 오탐은 클릭 시 core.zig의 존재(stat) 게이트가 거른다(hover 밑줄은 stat 없이 휴리스틱만).
+// 경로 오탐은 core.zig의 존재(stat) 게이트가 거른다 — 클릭(urlAt)과 hover(openableLinkAnchorAt) 둘 다.
+// 이 파일은 순수 분류라 파일 I/O를 하지 않는다.
 
 // 링크 도메인 타입(LinkKind/LinkScopes/LinkScope/ViewportLink)은 types.zig가 소유한다 — RenderSnapshot이
 // ViewportLink를 실어야 하는데(원격 host가 해석한 링크) types→selection import는 순환이기 때문이다. 여기선
@@ -259,8 +260,8 @@ fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, en
     //
     // 절대 판정은 예전에 `word[0] == '/'`였다 — Windows에서는 실재하는 `C:\...`조차 링크가 안 됐다(실측:
     // 밑줄 X·열림 X). `path_shape.isDetectableAbsolute`는 **호스트 OS 기준**이라 macOS 동작은 그대로고
-    // (거기서 `C:\x`는 열 수 없으니 밑줄도 뜨면 안 된다 — hover는 존재검증을 안 하므로 감지 단계가 유일한
-    // 방어선이다), Windows에서만 드라이브 절대를 더 본다. 왜 그 술어가 `isAbsolute`보다 좁은지는 거기 주석에.
+    // (거기서 `C:\x`는 열 수 없으니 밑줄도 뜨면 안 된다 — 지금은 hover도 존재검증을 하지만, 그 모양이 우연히
+    // 실재하면 열려 버리므로 감지 단계가 여전히 첫 방어선이다), Windows에서만 드라이브 절대를 더 본다. 왜 그 술어가 `isAbsolute`보다 좁은지는 거기 주석에.
     // `//` 배제(프로토콜 상대 URL·UNC)도 **술어가 직접** 한다 — 예전엔 여기서만 막아서 술어의 doc과 반환값이
     // 어긋나 있었고, 두 번째 소비자가 doc만 읽고 부르면 규칙이 갈렸다.
     // 접두 상대(`./`·`../`·`~/`)도 술어를 밖으로 뺐다 — 절대 갈래와 같은 이유다. Windows에서는 같은 것의
@@ -627,7 +628,7 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
 }
 
 /// 클릭 셀이 속한 단어가 링크인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려 extractUrlAt의
-/// alloc 없이 같은 분류만 한다(존재검증 stat은 안 함 — 클릭에서만). app 호출은 없어 core facade가 없지만,
+/// alloc 없이 같은 분류만 한다(존재검증 stat은 core.zig 몫이다 — 여긴 파일 I/O가 없다). app 호출은 없어 core facade가 없지만,
 /// core.zig 테스트가 `selection.wordIsUrl(&core, ...)`로 cross-file 호출하므로 pub(linkSpanInWord와 같은 이유).
 pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) bool {
     return wordLinkAt(self, viewport_row, col, scopes) != null;

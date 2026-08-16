@@ -159,7 +159,9 @@ const zsh_zshenv =
 ;
 
 /// zsh 통합을 준비한다 — .zshenv를 캐시 디렉터리에 쓰고 그 디렉터리 경로를 돌려준다(호출자 소유).
-/// 이 경로를 ZDOTDIR로 셸에 주면(SpawnRequest.zdotdir → EnvStorage) zsh가 위 스크립트를 로드한다.
+/// 이 경로를 `SpawnRequest.shell_integration_dir`에 실으면 macOS 백엔드가 `ZDOTDIR`로 매핑해(EnvStorage)
+/// zsh가 위 스크립트를 로드한다. 중립 계약은 "통합 자산 디렉터리"까지만 말하고 `ZDOTDIR`이라는 메커니즘은
+/// 이 백엔드가 고른다(docs/windows-platform.md §4.2).
 /// 어떤 단계든 실패하면 null을 돌려준다(통합 없이 셸은 정상 동작 — graceful).
 pub fn setupZsh(io: std.Io, allocator: std.mem.Allocator) ?[]const u8 {
     const dir = cacheDirZsh(allocator) catch return null;

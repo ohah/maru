@@ -495,6 +495,21 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
    파일 이름 글자라 거기서 바꾸면 다른 파일을 가리킨다(W1.5에서 그 부류의 회귀를 한 번 냈다).
    실측: `$HOME`이 `C:\Users\me`일 때 terminfo 캐시가 `C:\Users\me/.cache/…`였고 정규화 후
    `C:/Users/me/.cache/…`가 된다.
+
+   **입구는 셋이고 지금 걸린 것은 하나다.** ⓐ **환경변수**(`$HOME`·`$XDG_CACHE_HOME`) — W3에서 걸었다.
+   ⓑ **OS API**(OSC 9;9 cwd·PEB `CurrentDirectory`·프로세스 열거) — 그 소비자가 W4·W7에서 생기므로 그때
+   건다. ⓒ **config 파일** — **아직 안 걸렸다**(아래).
+
+   > **알려진 공백 — config에서 온 경로는 정규화되지 않는다.** Windows 사용자는 `workspace.root = C:\proj`나
+   > `shell.command = C:\…\pwsh.exe`처럼 자연스럽게 native로 적고, 로더는 그것을 **경고 없이 받아들인다**
+   > (실측: `isValidWorkspaceRoot("C:\proj")`가 참, 값에 역슬래시가 그대로 남는다). 지금 문제가 안 되는 것은
+   > 그 값을 소비하는 자리(`app_session`의 spawn·workspace)가 Windows에 아직 없기 때문이라, **W7에서 그
+   > 소비자가 생기는 순간 살아난다.**
+   >
+   > 어디서 정규화할지가 결정 사항이다 — ⑴ 로더가 파싱하며(모든 소비자가 한 번에 덮이지만 중립 L2가
+   > 자기 입력을 고치는 모양) ⑵ 플랫폼이 config를 소비할 때(계약의 "입구" 정의에 맞지만 소비처마다 걸어야
+   > 한다). 어느 쪽이든 **경로 값 키만** 골라야 한다(`workspace.root`·`shell.command`·`window.background-image`
+   > — 스키마에 `abs_path` 표식이 이미 있다).
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 

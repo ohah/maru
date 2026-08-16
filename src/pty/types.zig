@@ -244,6 +244,12 @@ pub const SpawnRequest = struct {
     /// **wire tag는 여전히 `"zdotdir"`다** — 필드 이름과 독립이다(위 struct doc). 바꾸려면 명시적 converter와
     /// version bump가 따로 필요하다.
     ///
+    /// **W5에서 union으로 바뀐다**(계약 §4.2a). 이 필드는 "자산 파일이 놓인 디렉터리"인데 Windows 네이티브
+    /// 두 셸은 파일을 안 만든다(PowerShell 인라인 `-Command`, cmd `PROMPT`). 그렇다고 "Windows는 안 쓴다"로
+    /// 가를 수도 없다 — **WSL·git-bash의 bash/zsh는 Windows 호스트인데 파일 기반**이다. 그래서 갈리는 축은
+    /// OS가 아니라 메커니즘이고, `assets_dir` / `inline_injection` 두 갈래가 된다. 파일 갈래는 지금 wire 키를
+    /// 그대로 쓰므로 그 전환이 wire를 깨지 않는다.
+    ///
     /// env를 명시로 넘기면(테스트) 무시된다.
     shell_integration_dir: ?[]const u8 = null,
     // 셸 통합 ssh 라우팅(opt-in)이 켜졌을 때 현재 maru 실행 파일 경로. 설정되면 셸에 MARU_BIN=<이 값>과

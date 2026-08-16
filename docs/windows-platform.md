@@ -550,15 +550,61 @@ Windows 백엔드가 `CreateProcessW`의 `lpCommandLine` 문자열로 조립한�
 |---|---|---|
 | `command` + `args` | **그대로.** 조립은 백엔드 | 변경 없음 |
 | `login: bool` | **중립 유지.** 이름이 메커니즘(`login(1)`)을 가리키므로 **의도**("사용자의 대화형 로그인 세션인가")로 재문서화하고, 메커니즘만 백엔드가 정한다 — macOS는 `login(1)` 래핑, Windows는 무동작 | 재문서화 완료 |
-| `zdotdir` → **`shell_integration_dir`** | **일반화.** zsh라는 셸 이름까지 새고 있었다 → "셸 통합 자산 디렉터리"로. 백엔드가 매핑한다(zsh=`ZDOTDIR`, PowerShell=**인라인 `-Command`**, cmd=`PROMPT` 환경변수) | 이름 변경 완료 — **wire 키는 `"zdotdir"` 그대로**. 단 아래 미결 참고 |
+| `zdotdir` → **`shell_integration_dir`** → **`shell_integration`** | **일반화.** zsh라는 셸 이름이 새고 있었다 → "통합 자산 디렉터리"로, 다시 **메커니즘 축의 union**으로(§4.2a). 백엔드가 매핑한다(zsh·bash·WSL=`ZDOTDIR` 등 파일, PowerShell=인라인 `-Command`, cmd=`PROMPT`) | 이름 변경 완료. union 전환은 **W5** — **wire 키 `"zdotdir"`는 파일 갈래에 그대로 남는다**(§4.2a) |
 | `term` | 백엔드가 의미를 정한다. 네이티브 Windows 셸엔 무의미하고 WSL·msys 프로그램에만 쓰인다 | 재문서화 완료 |
 
-> **미결 — `shell_integration_dir`은 Windows에서 디렉터리가 아니다.** §3.3이 정한 두 메커니즘은 인라인
-> 인자(PowerShell)와 환경변수 값(cmd)이라 **가리킬 디렉터리가 없다.** 그래서 이 필드는 Windows에서
-> "자산이 있는 곳"이 아니라 기껏해야 "통합이 켜졌다"는 신호로만 쓸 수 있다. 세 갈래가 있다 — ⑴ non-null을
-> 켜짐 신호로 재해석하고 doc을 고친다, ⑵ 중립 계약에 별도 스위치를 넣는다, ⑶ Windows는 이 필드를 안 쓰고
-> 호스트가 다른 경로로 알린다. **W5가 시작하기 전에 정해야 한다**(계약 변경이므로 사용자 확인 사항).
-> 앞의 표에 적은 매핑은 §3.3의 메커니즘을 반영한 것이고, 그 메커니즘에 이 필드가 실릴 자리는 아직 없다.
+### 4.2a 통합 주입 seam — 갈리는 축은 OS가 아니라 **메커니즘**이다 (2026-08-16 결정)
+
+`shell_integration_dir`은 *"통합 자산 파일이 놓인 디렉터리"*다. macOS에서 그것이 `ZDOTDIR`이 되고, zsh가
+거기서 `.zshenv`(8,385바이트)를 읽어 OSC 133·OSC 7·편집키·`ssh` 래핑을 켠다. **파일이 있어야 성립하는
+모양**이다.
+
+그런데 §3.3이 정한 Windows 두 메커니즘은 파일을 만들지 않는다 — PowerShell은 인라인 `-Command`(파일을
+쓰면 `ExecutionPolicy`가 막는다), cmd는 `PROMPT` 환경변수 값이다. **가리킬 디렉터리가 없다.**
+
+**그래서 "Windows는 이 필드를 안 쓴다"로 가르면 틀린다.** Windows 호스트가 띄우는 셸에는 세 부류가 있다:
+
+| 셸 | 메커니즘 | 자산 디렉터리 |
+|---|---|---|
+| PowerShell | 인라인 `-Command` | 없음 |
+| cmd | `PROMPT` 환경변수 | 없음 |
+| **WSL·git-bash·msys의 bash/zsh** | **rc 파일**(`ZDOTDIR` 등) | **있다** — 게스트 네임스페이스 경로 |
+
+WSL은 ConPTY 입장에서 그냥 자식이라 **셸 통합이 그대로 온다**(§3.1). 즉 같은 Windows 백엔드가 파일 기반과
+비-파일 기반을 **둘 다** 다룬다. 갈리는 축은 OS가 아니라 메커니즘이다.
+
+**결정: 중립 계약이 그 축을 그대로 표현한다.**
+
+```zig
+pub const ShellIntegration = union(enum) {
+    /// 파일 기반 — 이 디렉터리에 통합 자산이 있다(zsh `ZDOTDIR`, bash rc). WSL·git-bash도 여기다.
+    assets_dir: []const u8,
+    /// 파일 없는 주입 — 메커니즘은 백엔드가 고른다(PowerShell 인라인 `-Command`, cmd `PROMPT`).
+    inline_injection,
+};
+```
+
+**wire는 깨지지 않는다.** `assets_dir`은 기존 `"zdotdir"` 키를 **그대로** 쓰고, `inline_injection`만 새 키를
+더한다. 그리고 세션 호스트 파서는 **모르는 키를 거부하지 않는다** — `spawnOptionalStringField`/`spawnBoolField`가
+`obj.get(key) orelse <기본값>` 모양이라 없는 키는 기본값이 된다(코드로 확인). 그래서:
+
+| 방향 | 결과 |
+|---|---|
+| 새 앱 → **옛 호스트** | 새 키를 못 보고 무시한다. Windows 네이티브 통합만 조용히 꺼지고 셸은 정상 기동(graceful) |
+| 옛 앱 → 새 호스트 | 새 키가 없으니 기본값. macOS·WSL 경로는 **한 글자도 안 바뀐다** |
+
+**버린 두 갈래와 이유**:
+
+- **"non-null을 켜짐 신호로 재해석"** — 값의 **뜻을 바꾸는** 것이라, 위 표에서 유일하게 옛 호스트가 오해할
+  수 있는 갈래다([session-host-upgrade.md](session-host-upgrade.md)가 tag를 자동 생성하지 않기로 한 이유와
+  같은 자리). 게다가 "경로가 의미 없다"는 전제가 WSL에서 거짓이다.
+- **"Windows는 이 필드를 안 쓴다"** — 같은 이유로 불가. WSL·git-bash가 Windows 호스트인데 파일 기반이다.
+
+**나중에 PowerShell이 파일로 옮겨 가도** `assets_dir` 갈래로 바꾸기만 하면 된다 — 재해석을 택했다면 그때 필드
+의미를 **또** 바꿔야 했다. macOS 스크립트가 8 KB인 것을 보면 그 날이 올 수 있다.
+
+> **구현 시점**: 이 결정을 코드로 옮기려면 `SpawnRequest`와 그 RPC 짝(`server.zig`·`remote_runtime.zig`·
+> `runtime_manager.zig`)을 함께 바꿔야 한다. **W5가 그 일을 한다.**
 
 **wire tag가 필드 이름과 어떻게 갈리는지 실물로 확인해 둔다.** 직렬화는 익명 구조체 리터럴이라 **그 리터럴의
 필드 이름이 곧 JSON 키**다 — 한 줄 안에서 왼쪽은 wire, 오른쪽은 Zig 필드다.

@@ -2576,3 +2576,45 @@ test "적대적: 조각 스크롤은 한 칸씩 N번과 N칸 한 번이 같다" 
         try testing.expectEqual(@as(u32, 0), fx.term.rt.editor_first_piece);
     }
 }
+
+test "적대적: 4096줄을 넘는 랩 문서도 끝에 닿는다" {
+    // 상한(`max_top`)은 렌더가 센 `row_counts`를 **뒤에서부터** 훑어 구하는데, 그 배열은 문서
+    // **앞에서부터** 4096줄만 채워진다. 뒤쪽 줄은 "1행"으로 근사되므로, 실제로는 여러 조각인 줄들이
+    // 한 행으로 계산돼 **끝이 손에 안 닿는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long_line = "이 줄은 좁은 pane에서 여러 조각으로 접힐 만큼 길다 — 그래야 시각 행이 논리 줄보다 많아진다";
+    const lines = try allocator.alloc([]const u8, 5000);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = long_line;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var warm = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    warm.dl.deinit(allocator);
+
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1_000_000);
+    var at_end = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer at_end.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible: usize = inner_h / fx.session.cell_height_px;
+    const cols = visibleCols(fx.session, body, fx.term);
+    const pieces_per_line = piecesOfLine(fx.term, 4999, cols);
+    try testing.expect(pieces_per_line > 1); // 실제로 접힌다 — 아니면 판정이 공허하다
+
+    // **"화면이 꽉 찬다"로는 이 결함을 못 잡는다** — 일찍 멈춰도 뒤에 줄이 많으면 꽉 찬다.
+    // 진짜 판정은 **마지막 줄이 화면에 들어오는가**다.
+    var drawn_rows: usize = 0;
+    for (at_end.dl.cells) |c| drawn_rows = @max(drawn_rows, @as(usize, c.row) + 1);
+    const lines_on_screen = visible / pieces_per_line;
+    std.debug.print("\n[적대] 5000줄 랩: first_line={d}, 줄당 {d}조각, 화면에 {d}줄 → 마지막 줄 {d}\n", .{ fx.term.rt.editor_first_line, pieces_per_line, lines_on_screen, fx.term.rt.editor_first_line + lines_on_screen });
+    try testing.expectEqual(visible, drawn_rows); // 화면은 꽉 찬다
+    try testing.expect(fx.term.rt.editor_first_line + lines_on_screen >= lines.len); // **마지막 줄에 닿는다**
+}

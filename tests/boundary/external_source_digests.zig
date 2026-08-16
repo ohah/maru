@@ -515,5 +515,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8a763275ee3715915e9671053e9f43ac574bd0a8c89be085d020561dbd6d2f49" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "dfc31a11bb38c745e0105b583844203e24469ab1cbb76bec0cf3577253dc6095" },
 };

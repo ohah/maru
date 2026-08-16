@@ -587,10 +587,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "requestCatchupUntil"));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(remote_attachment, "pumpCatchupScreen"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "pumpCatchupScreen"));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "prepareCatchupStage"));
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "prepareCatchupStage"));
     // CR4a public validator와 CR4b takeover preflight가 같은 canonical validator를 공유한다.
-    // CR4a public validation remains declaration+test; CR4b uses the raw-safe authority matcher.
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "validateCatchupStage"));
+    // CR4a public validation remains declaration+hostile tests; CR4b uses the raw-safe authority matcher.
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "validateCatchupStage"));
     try std.testing.expectEqual(@as(usize, 10), countIdentifier(runtime, "validateCatchupStage"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "abortCatchupStage"));
     // CR4a coordinator consumers exact2 + CR4a/CR4b hostile fixture consumers exact4.

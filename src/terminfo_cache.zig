@@ -14,6 +14,7 @@
 //! 컴파일한 위치).
 
 const std = @import("std");
+const path_shape = @import("path_shape.zig"); // 후행 구분자 다듬기의 단일 출처(다섯 파일에 복제돼 있었다)
 
 /// 자식 셸에 줄 TERM 이름(= XTVERSION 자기식별 이름과 일치). terminfo primary 이름이기도 하다.
 pub const term_name = "xterm-maru";
@@ -48,21 +49,9 @@ pub fn version() u64 {
 /// caller가 free한다.
 pub fn cacheDirZ(allocator: std.mem.Allocator, xdg_cache_home: ?[]const u8, home: []const u8) ![:0]u8 {
     if (xdg_cache_home) |x| {
-        if (x.len > 0) return std.fmt.allocPrintSentinel(allocator, "{s}/maru/terminfo", .{trimTrailingSlash(x)}, 0);
+        if (x.len > 0) return std.fmt.allocPrintSentinel(allocator, "{s}/maru/terminfo", .{path_shape.trimTrailingSep(x)}, 0);
     }
-    return std.fmt.allocPrintSentinel(allocator, "{s}/.cache/maru/terminfo", .{trimTrailingSlash(home)}, 0);
-}
-
-/// base가 이미 `/`로 끝나면 하나를 뗀다 — 아래에서 `/`를 다시 붙이므로 안 그러면 `C:/Users/me//.cache/…`가
-/// 된다. `cli/sessions.zig`의 컨트롤 디렉터리 조립이 같은 것을 하고 있었는데 여기만 빠져 **두 조립기가
-/// 달랐다**(적대적 검증에서 실측).
-///
-/// 길이 1(`/`)은 그대로 둔다 — 떼면 빈 문자열이 되어 상대 경로가 된다. 드라이브 루트(`C:/`)는 떼도 안전하다:
-/// `C:` + `/` + 나머지로 다시 이어져 `C:/.cache/…`가 되고 절대경로로 남는다(실측 확인 —
-/// `std.fs.path.isAbsoluteWindows`가 참).
-fn trimTrailingSlash(base: []const u8) []const u8 {
-    if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
-    return base;
+    return std.fmt.allocPrintSentinel(allocator, "{s}/.cache/maru/terminfo", .{path_shape.trimTrailingSep(home)}, 0);
 }
 
 // 셸에서 캐시 디렉터리를 정하는 파라미터 확장 — cacheDirZ(Zig)와 같은 규칙의 단일 출처. 다른 maru 캐시와

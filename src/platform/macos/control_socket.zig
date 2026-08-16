@@ -77,26 +77,20 @@ pub fn formatInstanceKey(buf: []u8, pid: i32, nonce: u64) error{NoSpaceLeft}![]u
     return std.fmt.bufPrint(buf, "{d}-{x}", .{ pid, nonce });
 }
 
-/// base 뒤 trailing '/' 하나를 제거(경로 조합 시 이중 슬래시 방지). "/" 단독은 그대로 둔다(빈 base 방지).
-fn trimTrailingSlash(base: []const u8) []const u8 {
-    if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
-    return base;
-}
-
 /// 컨트롤 디렉터리 경로 `<base>/control`(§4.2 "~/.cache/maru/control/"). base는 caller가 정한다(테스트=격리 tmp,
 /// 제품=~/.cache/maru). 이 순수 함수는 base를 모르는 채 조합만 한다(OS 상태 없음). NUL 종단(mkdir/chmod/fstatat용).
 pub fn controlDirPath(buf: []u8, base: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control", .{trimTrailingSlash(base)});
+    return std.fmt.bufPrintZ(buf, "{s}/control", .{maru.path_shape.trimTrailingSep(base)});
 }
 
 /// 소켓 경로 `<dir>/<key>.sock`(NUL 종단 — bind가 C 문자열을 요구).
 pub fn socketPathIn(buf: []u8, dir: []const u8, key: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}.sock", .{ trimTrailingSlash(dir), key });
+    return std.fmt.bufPrintZ(buf, "{s}/{s}.sock", .{ maru.path_shape.trimTrailingSep(dir), key });
 }
 
 /// 라이브니스 lock 경로 `<dir>/<key>.lock`(소켓과 별도 regular 파일 — flock 대상).
 pub fn lockPathIn(buf: []u8, dir: []const u8, key: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}.lock", .{ trimTrailingSlash(dir), key });
+    return std.fmt.bufPrintZ(buf, "{s}/{s}.lock", .{ maru.path_shape.trimTrailingSep(dir), key });
 }
 
 // ══ L4 소켓 서버 ═══════════════════════════════════════════════════════════════════════════════════════════

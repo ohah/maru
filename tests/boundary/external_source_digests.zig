@@ -451,7 +451,8 @@ pub const inventory = [_]Proof{
     // i18n I3a 슬라이스 3에서 또 움직인다 — `showNoticeKey`/`showNoticeFmt` 진입점이 생기고 이 파일의
     // notice 리터럴 19건이 키로 옮겨졌다(계약 §7.2). count는 2 그대로다 — `@field` 반사는 건드리지
     // 않았고, 문자열 진입점 `showNotice`는 전환 중이라 아직 남겨 뒀다(호출부가 전부 키로 가고 ABI
-    // 경로가 정리되면 지운다).
+    // 경로가 정리되면 지운다). 같은 PR 의 검증 후속으로 한 번 더 움직였다 — 두 파일이 공유하는 키를
+    // common_ 접두로 옮기며 이 파일의 호출 둘이 바뀌었다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4b5ce6fef32dbfe8ade291ae89648f4f3aef8ab118b4d3c4eba22590037aae0a" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -509,6 +510,9 @@ pub const inventory = [_]Proof{
     // 그 하나 말고는 이름으로 무엇도 읽지 않아야 한다. 키가 늘어나는 것은 count 를 바꾸지 않는다
     // (필드가 늘 뿐 `@field` 호출 자리는 그대로다) — 슬라이스마다 digest 만 갱신된다.
     // 슬라이스 3에서 키가 85개로 늘며 digest 만 움직인다. count는 1 그대로다 — 예고한 대로
-    // 필드가 늘어도 `@field` 호출 자리는 `tIn` 하나뿐이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "75a16329cca256bf69457a6f130e6cbcb073b41dffea06d275c3aa322c7f70da" },
+    // 필드가 늘어도 `@field` 호출 자리는 `tIn` 하나뿐이다. 검증 후속으로 두 번 더 움직였다 —
+    // common_ 접두 정리와, 두 언어 테이블의 정합(자리표시자 집합·영어에 한글 없음·한국어에 한글 있음)을
+    // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
+    // 토큰이라 값이 바뀐다. count 는 여전히 1 이다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "01b6ff14b4c228cfa687a6b0c7b6f9200ee5e25f9e91a2b629e702cb2ae28c84" },
 };

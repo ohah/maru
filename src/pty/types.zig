@@ -17,6 +17,19 @@ const win_cmd = "C:\\Windows\\System32\\cmd.exe";
 /// 경계 검사에 걸린다 — 크기를 상수로 묶어 둔 이유다(호출부가 제각기 `[4]`를 적으면 한 곳만 늘리게 된다).
 pub const max_shell_candidates = 4;
 
+/// `%COMSPEC%` 값을 셸 후보로 **믿을 수 있는가**. 순수 — 문자열만 본다.
+///
+/// - **절대경로가 아니면 버린다.** 상대 COMSPEC(`cmd.exe`)을 그대로 두면 존재 검사가 maru의 **작업 디렉터리**
+///   기준으로 풀려, 사용자가 방금 연 워크스페이스에 놓인 `cmd.exe`가 System32보다 먼저 선택된다.
+/// - **앞뒤 공백이 섞였으면 버린다.** trailing newline이 경로에 섞여 spawn이 실패하는 것을 막는 것이 이
+///   파일의 trim 규약인데, 여기서는 다듬으면 sentinel(`[:0]`)을 잃는다. 정적 cmd 폴백이 받아 주므로 버리는
+///   편이 낫다.
+fn isUsableComspec(value: [:0]const u8) bool {
+    if (value.len == 0) return false;
+    if (value.len != std.mem.trim(u8, value, " \t\r\n").len) return false;
+    return std.fs.path.isAbsoluteWindows(value);
+}
+
 /// `os_tag`와 사용자 선택으로 **후보를 우선순위 순으로** 낸다. 순수 함수다 — 파일시스템도 환경도 보지 않고
 /// (`comspec`은 인자로 받는다), 그래서 테스트가 **두 OS 갈래를 모두** 돈다. OS를 컴파일 타임 분기로 두면
 /// Windows 갈래가 ubuntu·macOS만 도는 CI에서 공허참이 된다(W1.5·W2에서 두 번 밟은 함정).
@@ -41,7 +54,9 @@ pub fn interactiveShellCandidates(
         n += 1;
     }
     // `%COMSPEC%`을 정적 cmd 경로보다 **먼저** 본다 — 비표준 설치에서 정확한 값을 아는 유일한 출처다.
-    if (comspec) |c| if (c.len > 0) {
+    // 자격 검사는 **여기 순수 함수 안에서** 한다. 한때 호출자에서만 걸렀더니 순수 함수는 상대 경로를 그대로
+    // 후보에 넣어, 이 함수만 보는 테스트가 "걸러진다"고 착각하게 만들었다(적대적 검증에서 실측).
+    if (comspec) |c| if (isUsableComspec(c)) {
         buf[n] = c;
         n += 1;
     };
@@ -50,9 +65,33 @@ pub fn interactiveShellCandidates(
     return buf[0..n];
 }
 
-/// 경로가 실재하는가. `std.c.access(F_OK)`는 Windows에서도 동작한다(W1.5에서 실측: 존재 0, 미존재 -1).
+extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) u32;
+const invalid_file_attributes: u32 = 0xFFFF_FFFF;
+const file_attribute_directory: u32 = 0x10;
+
+/// 셸로 쓸 수 있는 **파일**이 그 경로에 있는가.
+///
+/// Windows에서 `std.c.access`를 쓰지 않는다. 그것은 narrow CRT(ANSI 코드페이지) 함수라 **UTF-8 경로의
+/// 비-ASCII 문자를 못 읽는다** — 이 머신에서 실측했다(시스템 ACP 949): 실재하는 `…\테스트폴더\셸.exe`를
+/// `access`는 없다고 하고 `GetFileAttributesW`는 있다고 한다. 사용자 프로필 이름에 한글이 들어간 기기가
+/// 드물지 않고, 하필 `%COMSPEC%` 폴백이 노리는 "비표준 설치"가 그런 경로일 가능성이 높다.
+///
+/// **디렉터리도 거른다.** `access(F_OK)`는 디렉터리를 통과시키는데 셸 후보로는 무의미하다 — 저장소의 다른 두
+/// 술어(`app_session.isExecutablePath`·`git_backend.isExecutableFile`)도 같은 이유로 디렉터리를 걸러 낸다.
 fn shellPathExists(path: [:0]const u8) bool {
-    return std.c.access(path.ptr, std.posix.F_OK) == 0;
+    if (@import("builtin").os.tag != .windows)
+        return std.c.access(path.ptr, std.posix.F_OK) == 0;
+
+    // 셸 실행 파일 경로에 넉넉하고 **스택에 둘 수 있는** 크기다. `std.fs.max_path_bytes`는 Windows에서
+    // 98,302이라 u16 배열로 만들면 ~196KB — 스택에 올릴 값이 아니다(같은 실수를 이 저장소에서 한 번 했다).
+    // 이보다 긴 경로는 후보에서 빠지고 다음 티어가 받는다.
+    var wide: [1024]u16 = undefined;
+    if (path.len == 0 or path.len >= wide.len) return false;
+    const n = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], path) catch return false;
+    wide[n] = 0;
+    const attrs = GetFileAttributesW(@ptrCast(&wide));
+    if (attrs == invalid_file_attributes) return false;
+    return attrs & file_attribute_directory == 0;
 }
 
 /// 대화형 shell 경로를 한 곳에서 결정한다. 진입점(main, app session, metal smoke)마다
@@ -67,6 +106,9 @@ fn shellPathExists(path: [:0]const u8) bool {
 /// POSIX    MARU_INTERACTIVE_SHELL -> SHELL -> /bin/sh
 /// Windows  MARU_INTERACTIVE_SHELL -> pwsh 7 -> PowerShell 5.1 -> %COMSPEC% -> cmd.exe
 /// ```
+///
+/// **config `shell.command`는 이 함수보다 앞이다** — 호출자(`resolveConfiguredShell`)가 그 값이 실행 가능하면
+/// 여기 오지 않는다. 즉 아래 목록은 "config가 비었을 때의 기본값" 규칙이다.
 ///
 /// `MARU_INTERACTIVE_SHELL`은 maru 자체 변수라 OS 무관하게 1순위다. `SHELL`은 **POSIX에서만** 본다 —
 /// Windows에 그 변수가 있으면 git-bash 같은 POSIX 에뮬레이션이 심어 둔 `/usr/bin/bash`라, 네이티브
@@ -87,6 +129,7 @@ pub fn resolveInteractiveShellFor(kind: WindowsShellKind) []const u8 {
         return "/bin/sh";
     }
 
+    // 자격 검사(절대경로·공백)는 `interactiveShellCandidates`가 한다 — 규칙을 한 곳에 둔다.
     const comspec: ?[:0]const u8 = if (std.c.getenv("COMSPEC")) |raw| std.mem.span(raw) else null;
     var buf: [max_shell_candidates][:0]const u8 = undefined;
     const candidates = interactiveShellCandidates(.windows, kind, comspec, &buf);
@@ -251,8 +294,11 @@ test "interactiveShellCandidates: POSIX는 /bin/sh 하나, Windows는 티어 순
         try t.expectEqualStrings(win_cmd, c[1]);
     }
 
-    // %COMSPEC%이 없거나 비었으면 그 칸만 빠지고 나머지는 그대로 — 후보가 0이 되는 일은 없다.
-    for ([_]?[:0]const u8{ null, "" }) |comspec| {
+    // 믿을 수 없는 %COMSPEC%은 그 칸만 빠지고 나머지는 그대로 — 후보가 0이 되는 일은 없다.
+    // **상대 경로**(`cmd.exe`)는 존재 검사가 작업 디렉터리 기준으로 풀려 워크스페이스에 놓인 파일이
+    // System32보다 먼저 뽑히므로 반드시 빠져야 한다. 공백이 섞인 값도 마찬가지다(sentinel을 잃지 않고
+    // 다듬을 수 없어 버린다).
+    for ([_]?[:0]const u8{ null, "", "cmd.exe", "..\\cmd.exe", "C:\\x\\cmd.exe \n", " C:\\x\\cmd.exe", "C:" }) |comspec| {
         const ps = interactiveShellCandidates(.windows, .powershell, comspec, &buf);
         try t.expectEqual(@as(usize, 3), ps.len);
         try t.expectEqualStrings(win_cmd, ps[ps.len - 1]);

@@ -68,8 +68,14 @@ pub const Parsed = struct {
 const os_suffixes = [_]struct { suffix: []const u8, tag: std.Target.Os.Tag }{
     .{ .suffix = ".windows", .tag = .windows },
     .{ .suffix = ".macos", .tag = .macos },
+    // VS Code가 macOS를 `.osx`로 쓰고 우리 문서가 그것을 선례로 인용한다 — 그 철자를 그대로 적는 사용자가
+    // 나온다. 안 받아들이면 `env.EDITOR.osx` 같은 줄이 **경고 없이** 이름의 일부로 먹힌다(코드 리뷰 지적).
+    .{ .suffix = ".osx", .tag = .macos },
     .{ .suffix = ".linux", .tag = .linux },
 };
+
+/// 파일에 쓰는 **권장 철자**(진단 메시지·문서용). `.osx`는 받아들이되 권하지 않는다.
+pub const canonical_os_suffixes = "`.windows`·`.macos`·`.linux`";
 
 /// 키에서 OS 접미를 떼어 낸다. `os`가 null이면 접미가 없는 **기본 키**다.
 ///
@@ -84,57 +90,42 @@ fn splitOsSuffix(key: []const u8) struct { base: []const u8, os: ?std.Target.Os.
     return .{ .base = key, .os = null };
 }
 
-/// **base 레이어 키** — 한 줄이 다른 여러 키의 값을 통째로 깔아 놓는 키. `theme.preset`이 유일하다(색 16개 +
-/// 배경/전경/커서/선택을 한 번에 쓴다). 그래서 개별 `theme.*` 색보다 **먼저** 적용돼야 한다는 순서 규약이
-/// 있다(docs/configuration.md — "프리셋은 base다").
-///
-/// `theme.preset-light`/`-dark`는 여기 해당하지 않는다 — 이름만 저장하고 색을 쓰지 않는다.
-fn isBaseLayerKey(base_key: []const u8) bool {
-    return std.mem.eql(u8, base_key, "theme.preset");
-}
+const unknown_key_message = "알 수 없는 key — 무시";
 
-/// 줄을 적용하는 단계. **순서가 곧 우선순위 규칙이다.**
+/// **다른 OS 줄의 키 이름만** 검증한다(값은 적용도, 검증도 하지 않는다).
 ///
-/// base 레이어를 먼저 깔고 개별 키를 나중에 얹는다(프리셋 순서 규약). 각 짝 안에서는 OS 접미 줄이 나중에
-/// 와서 기본 줄을 이긴다. 단계를 나누지 않고 파일 순서대로 한 번만 훑으면 `shell.command.windows`를 위에 적고
-/// `shell.command`를 아래 적었을 때 후자가 이겨 버린다 — 사용자가 예상할 수 없는 순서 의존이다.
+/// 값을 검증하면 안 되는 이유: `shell.command.windows = C:\pwsh.exe`는 Windows에서 완벽히 유효한데
+/// macOS에서 절대경로 검사에 걸려 **가짜 경고**가 뜬다. 반대로 키 이름은 OS와 무관하므로 검증해야 한다 —
+/// 안 하면 `bogus.setting.macos`가 아무 경고 없이 지나가고, doc-vs-key 게이트(`tests/config_docs/keys.zig`)가
+/// "알 수 없는 key" diagnostic 유무로 실재를 판정하므로 **없는 키를 실재로 보고**한다(코드 리뷰 지적).
 ///
-/// 반대로 base 레이어를 단계에서 빼면(2단계만 두면) `theme.preset.windows`가 개별 `theme.background`보다
-/// **나중에** 적용돼 사용자가 명시한 색을 조용히 덮어쓴다 — 적대적 검증에서 실측으로 잡은 결함이다.
-const ParsePhase = enum { base_layer, base_layer_os, normal, normal_os };
+/// 키 인식 규칙을 복제하지 않으려고 버리는 config에 실제로 적용해 보고 그 진단만 골라 온다 — 규칙이 한 곳
+/// (`applyKey`)에 남는다.
+fn validateForeignOsKey(
+    a: std.mem.Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    line_no: usize,
+    base_key: []const u8,
+) !void {
+    var scratch_config: theme.Config = .{};
+    var scratch_diags: std.ArrayList(Diagnostic) = .empty;
+    var scratch_binds: std.ArrayList(keybinding.AppBinding) = .empty;
+    var scratch_unbinds: std.ArrayList(keybinding.KeyChord) = .empty;
+    var scratch_term: std.ArrayList(keybinding.TerminalBinding) = .empty;
+    var scratch_global: std.ArrayList(keybinding.GlobalBinding) = .empty;
+    var scratch_env: std.ArrayList([]const u8) = .empty;
+    // 값은 형식 진단을 피하려고 빈 문자열을 준다 — 우리가 볼 것은 키 인식 결과뿐이다.
+    try applyKey(a, &scratch_config, &scratch_binds, &scratch_unbinds, &scratch_term, &scratch_global, &scratch_env, &scratch_diags, line_no, base_key, "");
+    for (scratch_diags.items) |d| {
+        if (std.mem.eql(u8, d.message, unknown_key_message)) try diags.append(a, d);
+    }
+}
 
 /// 호스트 OS의 접미(`".windows"` 등). 지원 목록에 없는 OS면 null.
 pub fn hostOsSuffix() ?[]const u8 {
     const host = @import("builtin").os.tag;
     for (os_suffixes) |s| if (s.tag == host) return s.suffix;
     return null;
-}
-
-/// **write-back이 갱신해야 할 키**를 고른다: `original` 텍스트에 `<key><호스트 접미>` 줄이 있으면 그 키를,
-/// 없으면 `key` 그대로.
-///
-/// **왜 필요한가**: `parse`가 OS 접미 줄을 우선하므로, 파일에 `sidebar.width.windows`가 있으면 Windows에서
-/// **그 줄이 실제로 이기고 있는 값**이다. 그런데 GUI write-back이 기본 키(`sidebar.width`)에 쓰면 두 가지가
-/// 동시에 잘못된다 — ⑴ 그 값이 다른 OS로 새고 ⑵ 이 OS에는 반영조차 안 된다(접미 줄이 계속 이기므로 사용자
-/// 눈에는 "설정이 안 먹는다"로 보인다). 적대적 검증에서 나온 결함이다.
-///
-/// 반환 문자열은 **항상 `allocator` 소유**다. 찾았든 못 찾았든 같은 수명이라 호출자가 분기하지 않는다 —
-/// 처음엔 못 찾을 때 `key`를 빌려줬는데, "때로는 owned 때로는 borrowed"는 호출자가 반드시 틀리는 계약이다
-/// (실제로 그 형태에서 누수를 하나 냈고 testing allocator가 잡았다).
-pub fn writeBackKey(allocator: std.mem.Allocator, original: []const u8, key: []const u8) ![]const u8 {
-    const suffix = hostOsSuffix() orelse return allocator.dupe(u8, key);
-    const suffixed = try std.fmt.allocPrint(allocator, "{s}{s}", .{ key, suffix });
-    errdefer allocator.free(suffixed);
-    var it = std.mem.splitScalar(u8, original, '\n');
-    while (it.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
-        if (line.len == 0 or line[0] == '#') continue; // 주석 처리된 줄은 유효한 설정이 아니다
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const line_key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
-        if (std.mem.eql(u8, line_key, suffixed)) return suffixed;
-    }
-    allocator.free(suffixed);
-    return allocator.dupe(u8, key);
 }
 
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
@@ -162,35 +153,30 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     var env_overrides: std.ArrayList([]const u8) = .empty; // env.<KEY> 줄 누적(각 "KEY=VALUE", arena 소유)
 
     const host_os = @import("builtin").os.tag;
-    for (std.enums.values(ParsePhase)) |phase| {
-        var line_no: usize = 0;
-        var it = std.mem.splitScalar(u8, source, '\n');
-        while (it.next()) |raw_line| {
-            line_no += 1;
-            const line = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
-            if (line.len == 0 or line[0] == '#') continue; // 빈 줄 / 주석
+    var line_no: usize = 0;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |raw_line| {
+        line_no += 1;
+        const line = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        if (line.len == 0 or line[0] == '#') continue; // 빈 줄 / 주석
 
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
-                // 형식 오류는 **첫 단계에서만** 보고한다 — 모든 단계가 같은 줄을 보므로 안 그러면 여러 번 뜬다.
-                if (phase == .base_layer)
-                    try diags.append(a, .{ .line = line_no, .message = "'=' 없음 — `key = value` 형식이어야 한다" });
-                continue;
-            };
-            const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
-            const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+            try diags.append(a, .{ .line = line_no, .message = "'=' 없음 — `key = value` 형식이어야 한다" });
+            continue;
+        };
+        const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
+        const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-            const split = splitOsSuffix(key);
-            const is_os = split.os != null;
-            if (is_os and split.os.? != host_os) continue; // 다른 OS 줄 — 어느 단계에서도 적용하지 않는다
-            const is_base_layer = isBaseLayerKey(split.base);
-            const want: ParsePhase = if (is_base_layer)
-                (if (is_os) .base_layer_os else .base_layer)
-            else
-                (if (is_os) .normal_os else .normal);
-            if (phase != want) continue;
+        // OS 접미를 떼고 **그 자리에서** 적용한다. 다른 OS 줄은 값을 적용하지 않지만 **키 이름은 검증한다** —
+        // 안 그러면 `bogus.setting.macos`가 아무 경고 없이 지나가 doc-vs-key 게이트(tests/config_docs)가
+        // "없는 키를 실재"로 보고한다(코드 리뷰에서 실측).
+        const split = splitOsSuffix(key);
+        if (split.os) |os| if (os != host_os) {
+            try validateForeignOsKey(a, &diags, line_no, split.base);
+            continue;
+        };
 
-            try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
-        }
+        try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
     }
 
     config.env = try env_overrides.toOwnedSlice(a); // 누적한 env.<KEY>를 Config로(arena 소유)
@@ -348,7 +334,7 @@ fn applyKey(
             }
         }
     } else {
-        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
+        try diags.append(a, .{ .line = line_no, .message = unknown_key_message });
     }
 }
 
@@ -1276,25 +1262,34 @@ test "removeKeybindUnbindLines: chord 기준으로 unbind 지시어만 제거(�
 }
 
 // OS 접미(`shell.command.windows`)는 한 config 파일을 여러 OS에서 공유할 때 필요한 축이다
-// (docs/configuration.md "OS별 값", docs/windows-platform.md §3.1a). 여기서 지키는 성질 셋:
-// ⑴ 호스트 OS 줄이 **순서와 무관하게** 기본 줄을 이긴다 ⑵ 다른 OS 줄은 조용히 무시된다
-// ⑶ 모르는 접미는 접미가 아니라 **키 이름의 일부**라 "알 수 없는 키"로 잡힌다.
-test "parse: OS 접미 키가 순서와 무관하게 기본 키를 이긴다" {
+// (docs/configuration.md "OS별 값"). 여기서 지키는 성질 셋: 접미 줄은 **그 자리에서** 적용되고,
+// 다른 OS 줄은 값이 적용되지 않으며, 모르는 접미는 접미가 아니라 키 이름의 일부다.
+test "parse: OS 접미 줄은 그 자리에서 적용된다(파일 순서가 결정한다)" {
     const host = @import("builtin").os.tag;
     const win = host == .windows;
     const mac = host == .macos;
+    const a = std.testing.allocator;
 
-    // OS 줄을 **먼저** 두고 기본 줄을 나중에 둔다 — 한 패스로 "나중이 이긴다"면 여기서 기본 줄이 이겨 버린다.
-    var p = try parse(std.testing.allocator,
+    // 접미 줄을 **나중에** 두면 이긴다 — 다른 모든 키와 같은 규칙이다.
+    var later = try parse(a,
+        \\shell.command = /bin/sh
         \\shell.command.windows = C:\pwsh.exe
         \\shell.command.macos = /bin/zsh
+    );
+    defer later.deinit();
+    const expected: []const u8 = if (win) "C:\\pwsh.exe" else if (mac) "/bin/zsh" else "/bin/sh";
+    try std.testing.expectEqualStrings(expected, later.config.shell.command);
+    try std.testing.expectEqual(@as(usize, 0), later.diagnostics.len);
+
+    // 접미 줄을 **먼저** 두면 뒤의 기본 줄이 이긴다. 한때 "순서와 무관하게 접미가 이긴다"로 만들었다가
+    // 접미가 하나도 없는 기존 config의 동작까지 바꿔 버렸다(theme.preset 순서 역전) — 이 형식은 원래
+    // 순서 의존이고, 그것과 싸우면 더 큰 것이 깨진다.
+    var earlier = try parse(a,
+        \\shell.command.windows = C:\pwsh.exe
         \\shell.command = /bin/sh
     );
-    defer p.deinit();
-    const expected: []const u8 = if (win) "C:\\pwsh.exe" else if (mac) "/bin/zsh" else "/bin/sh";
-    try std.testing.expectEqualStrings(expected, p.config.shell.command);
-    // 다른 OS 줄은 경고 없이 무시된다 — 그 OS에서는 유효한 줄이다.
-    try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    defer earlier.deinit();
+    try std.testing.expectEqualStrings("/bin/sh", earlier.config.shell.command);
 }
 
 test "parse: 기본 키만 있으면 그대로, 다른 OS 키만 있으면 기본값 유지" {
@@ -1312,6 +1307,37 @@ test "parse: 기본 키만 있으면 그대로, 다른 OS 키만 있으면 기�
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
+// 다른 OS 줄은 **값은 적용하지 않지만 키 이름은 검증한다.** 안 하면 doc-vs-key 게이트
+// (`tests/config_docs/keys.zig`)가 "알 수 없는 key" 유무로 실재를 판정하므로 **없는 키를 실재로 보고**한다.
+// 반대로 값까지 검증하면 `shell.command.windows = C:\x`가 macOS에서 "절대경로 아님"으로 가짜 경고를 낸다.
+test "parse: 다른 OS 줄은 키 이름만 검증한다" {
+    const a = std.testing.allocator;
+    const foreign = if (@import("builtin").os.tag == .windows) ".macos" else ".windows";
+
+    // 없는 키 → 경고가 떠야 한다(게이트가 이걸로 실재를 판정한다).
+    const bogus = try std.fmt.allocPrint(a, "bogus.setting{s} = 1", .{foreign});
+    defer a.free(bogus);
+    var p1 = try parse(a, bogus);
+    defer p1.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p1.diagnostics.len);
+
+    // 실재하는 키 + **그 OS에서만 유효한 값** → 경고가 없어야 한다.
+    const ok = try std.fmt.allocPrint(a, "shell.command{s} = C:\\pwsh.exe", .{foreign});
+    defer a.free(ok);
+    var p2 = try parse(a, ok);
+    defer p2.deinit();
+    try std.testing.expectEqual(@as(usize, 0), p2.diagnostics.len);
+    try std.testing.expectEqualStrings("", p2.config.shell.command); // 값은 적용되지 않는다
+}
+
+// `.osx`는 VS Code 철자이고 우리 문서가 그것을 선례로 인용한다 — 받아들이지 않으면 `env.EDITOR.osx`가
+// 경고 없이 변수 이름의 일부로 먹힌다(코드 리뷰가 실측으로 잡았다).
+test "parse: .osx도 macOS 접미로 받는다" {
+    try std.testing.expectEqual(std.Target.Os.Tag.macos, splitOsSuffix("shell.command.osx").os.?);
+    try std.testing.expectEqualStrings("shell.command", splitOsSuffix("shell.command.osx").base);
+    try std.testing.expectEqual(std.Target.Os.Tag.macos, splitOsSuffix("env.EDITOR.osx").os.?);
+}
+
 test "parse: 모르는 OS 접미와 오타는 키 이름의 일부라 경고로 잡힌다" {
     // `.freebsd`는 지원 목록에 없고 `.window`는 오타다. 조용히 무시하면 사용자는 설정이 반영된 줄 안다.
     var p = try parse(std.testing.allocator,
@@ -1326,43 +1352,37 @@ test "parse: 모르는 OS 접미와 오타는 키 이름의 일부라 경고로 
 // `theme.preset`은 색 세트를 통째로 깔아 놓는 **base 레이어**라 개별 `theme.*`보다 먼저 적용돼야 한다
 // (docs/configuration.md). 단계를 "기본/OS" 둘로만 나눴을 때 `theme.preset.windows`가 개별 색보다 나중에
 // 적용돼 사용자가 명시한 배경색을 조용히 덮어썼다 — 적대적 검증에서 실측으로 잡았다.
-test "parse: OS 접미가 붙은 theme.preset도 개별 색보다 먼저 적용된다" {
+// `theme.preset`은 색 세트를 통째로 까는 base라 개별 `theme.*`보다 **먼저 와야 한다**는 순서 규약이 있다
+// (docs/configuration-text.md). 접미가 붙어도 그 규약은 그대로다 — 줄을 제자리에서 적용하므로.
+// 한때 접미 줄을 뒤로 몰았다가 `theme.preset.windows`가 개별 색을 덮어썼고, 그 수정이 다시 **접미 없는**
+// config의 순서까지 뒤집었다(코드 리뷰가 실측으로 잡았다). 두 방향을 모두 고정한다.
+test "parse: theme.preset 순서 규약은 접미 유무와 무관하다" {
     const suffix = hostOsSuffix() orelse return error.SkipZigTest;
     const a = std.testing.allocator;
 
-    const src = try std.fmt.allocPrint(a, "theme.preset{s} = nord\ntheme.background = #101010", .{suffix});
-    defer a.free(src);
-    var p = try parse(a, src);
-    defer p.deinit();
-    // 개별 색이 이겨야 한다 — 접미가 없을 때와 같은 결과.
-    try std.testing.expectEqualStrings("#101010", p.config.theme.background);
-    // 그러면서 프리셋은 실제로 적용됐다(개별로 안 덮은 색이 nord 값이어야 한다).
-    try std.testing.expect(!std.mem.eql(u8, "", p.config.theme.foreground));
+    // 프리셋을 먼저 → 개별 색이 이긴다.
+    const first = try std.fmt.allocPrint(a, "theme.preset{s} = nord\ntheme.background = #101010", .{suffix});
+    defer a.free(first);
+    var p1 = try parse(a, first);
+    defer p1.deinit();
+    try std.testing.expectEqualStrings("#101010", p1.config.theme.background);
 
-    // 대조: 접미 없는 규약대로도 같은 결과.
-    var base = try parse(a, "theme.preset = nord\ntheme.background = #101010");
-    defer base.deinit();
-    try std.testing.expectEqualStrings(base.config.theme.background, p.config.theme.background);
-    try std.testing.expectEqualStrings(base.config.theme.foreground, p.config.theme.foreground);
-}
-
-// OS 접미가 붙은 프리셋은 **기본 프리셋을 이겨야** 한다(base 레이어 안에서도 OS가 우선).
-test "parse: OS 접미 theme.preset이 기본 theme.preset을 이긴다" {
-    const suffix = hostOsSuffix() orelse return error.SkipZigTest;
-    const a = std.testing.allocator;
-
-    // OS 줄을 **먼저** 둔다 — 파일 순서에 의존하면 여기서 기본 줄이 이겨 버린다.
-    const src = try std.fmt.allocPrint(a, "theme.preset{s} = nord\ntheme.preset = dracula", .{suffix});
-    defer a.free(src);
-    var p = try parse(a, src);
-    defer p.deinit();
-
+    // 프리셋을 나중에 → 프리셋이 이긴다(기존 규약 — 접미 없는 config에서도 이 방향이 유지돼야 한다).
+    const last = try std.fmt.allocPrint(a, "theme.background = #101010\ntheme.preset{s} = nord", .{suffix});
+    defer a.free(last);
+    var p2 = try parse(a, last);
+    defer p2.deinit();
     var nord = try parse(a, "theme.preset = nord");
     defer nord.deinit();
-    try std.testing.expectEqualStrings(nord.config.theme.background, p.config.theme.background);
+    try std.testing.expectEqualStrings(nord.config.theme.background, p2.config.theme.background);
+
+    // **접미가 하나도 없는 config**도 같은 방향이어야 한다(회귀 가드 — 여기가 깨진 적이 있다).
+    var plain = try parse(a, "theme.background = #101010\ntheme.preset = nord");
+    defer plain.deinit();
+    try std.testing.expectEqualStrings(nord.config.theme.background, plain.config.theme.background);
 }
 
-test "parse: 형식 오류 diagnostic이 두 패스에서 중복되지 않는다" {
+test "parse: 형식 오류 diagnostic은 한 번만 뜬다" {
     // 줄을 두 번 훑으므로 `=` 없는 줄이 두 번 보고될 수 있다. 1차에서만 낸다.
     var p = try parse(std.testing.allocator,
         \\this line has no equals
@@ -1374,45 +1394,6 @@ test "parse: 형식 오류 diagnostic이 두 패스에서 중복되지 않는다
 
 // GUI write-back(사이드바 드래그·⚙ 토글)이 **지금 이기고 있는 줄**을 갱신해야 한다. 기본 키에 쓰면 값이
 // 다른 OS로 새고, 이 OS에는 반영조차 안 된다(접미 줄이 계속 이기므로 "설정이 안 먹는다"로 보인다).
-test "writeBackKey: 접미 줄이 있으면 그쪽을, 없으면 기본 키를 고른다" {
-    const a = std.testing.allocator;
-    const suffix = hostOsSuffix() orelse return error.SkipZigTest; // 지원 목록 밖 호스트
-
-    const with_suffixed = try std.fmt.allocPrint(a, "sidebar.width = 180\nsidebar.width{s} = 300\n", .{suffix});
-    defer a.free(with_suffixed);
-    const expected = try std.fmt.allocPrint(a, "sidebar.width{s}", .{suffix});
-    defer a.free(expected);
-
-    const hit = try writeBackKey(a, with_suffixed, "sidebar.width");
-    defer a.free(hit);
-    try std.testing.expectEqualStrings(expected, hit);
-
-    // **반환은 언제나 owned다** — 찾든 못 찾든 같은 수명이라 호출자가 분기하지 않는다.
-    const miss = try writeBackKey(a, "sidebar.width = 180\n", "sidebar.width");
-    defer a.free(miss);
-    try std.testing.expectEqualStrings("sidebar.width", miss);
-
-    // 다른 키의 접미 줄에 낚이지 않는다.
-    const other = try std.fmt.allocPrint(a, "sidebar.show-branch{s} = false\n", .{suffix});
-    defer a.free(other);
-    const miss2 = try writeBackKey(a, other, "sidebar.width");
-    defer a.free(miss2);
-    try std.testing.expectEqualStrings("sidebar.width", miss2);
-
-    // 주석 처리된 접미 줄은 유효한 설정이 아니다.
-    const commented = try std.fmt.allocPrint(a, "# sidebar.width{s} = 300\n", .{suffix});
-    defer a.free(commented);
-    const miss3 = try writeBackKey(a, commented, "sidebar.width");
-    defer a.free(miss3);
-    try std.testing.expectEqualStrings("sidebar.width", miss3);
-
-    // 접두가 같은 더 긴 키에 낚이지 않는다(`sidebar.width-extra.windows` ≠ `sidebar.width.windows`).
-    const longer = try std.fmt.allocPrint(a, "sidebar.width-extra{s} = 1\n", .{suffix});
-    defer a.free(longer);
-    const miss4 = try writeBackKey(a, longer, "sidebar.width");
-    defer a.free(miss4);
-    try std.testing.expectEqualStrings("sidebar.width", miss4);
-}
 
 test "parse: splitOsSuffix — 접미만 있는 키는 접미로 보지 않는다" {
     // `.windows`만 있는 줄은 기본 키가 비어 버리므로 접미가 아니다(빈 키 → 알 수 없는 키).

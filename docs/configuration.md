@@ -59,19 +59,35 @@ font.size.macos       = 14
 font.size.linux       = 12
 ```
 
-- **OS 접미 키가 기본 키를 이긴다 — 파일에서의 순서와 무관하게.** `shell.command.windows`를 위에 적고
-  `shell.command`를 아래 적어도 Windows에서는 앞의 것이 이긴다. 순서에 기대야 한다면 규칙이 아니다.
-- **다른 OS의 줄은 조용히 무시**한다(그 OS에서는 유효한 줄이므로 경고하지 않는다).
+**접미 줄은 `그 자리에서` 적용된다 — 우선순위는 파일 순서가 정한다.** 이 파일 형식은 원래 순서 의존이므로
+(아래 `theme.preset`·`keybind`) 접미만 예외로 두면 그 규약들이 깨진다. 그래서 접미는 "그 줄을 이 OS에서만
+읽는다"는 뜻일 뿐이고, 나머지 규칙은 전부 그대로다.
+
+```conf
+shell.command         = /bin/zsh
+shell.command.windows = C:\...\pwsh.exe   # 뒤에 있으므로 Windows에서 이긴다
+```
+
+- **덮어쓰려면 뒤에 둔다.** 대부분의 키는 나중 줄이 이기므로 접미 줄을 아래에 적는다. 반대로
+  **`keybind`는 첫 줄이 이기므로** OS별 바인딩은 기본 줄보다 **위에** 적어야 한다(같은 chord일 때).
+- **다른 OS의 줄은 값이 적용되지 않는다.** 다만 **키 이름은 검증**하므로 `bogus.setting.macos`는 어느 OS에서든
+  "알 수 없는 키" 경고가 뜬다(값은 그 OS 것일 수 있으므로 값 검증은 하지 않는다).
 - **모르는 이름은 접미로 치지 않는다.** `shell.command.freebsd`나 오타 `shell.command.window`는 통째로 키
-  이름이 되어 "알 수 없는 키" 경고가 뜬다 — 조용히 먹히면 사용자가 설정이 반영된 줄 안다.
-- 접미는 **키 이름의 일부일 뿐**이라 값 파싱·검증·GUI 반영은 기본 키와 완전히 같다.
-- **GUI가 값을 되쓸 때**(사이드바 드래그·⚙ 토글) 파일에 `<키>.<이 OS>` 줄이 있으면 **그 줄**을 갱신한다.
-  기본 줄에 쓰면 값이 다른 OS로 새고, 이 OS에는 반영도 안 된다(접미 줄이 계속 이기므로).
-- `theme.preset`은 색 세트를 통째로 깔아 놓는 **base**라 개별 `theme.*`보다 먼저 적용된다 — 접미를 붙여도
-  그 순서는 유지된다(`theme.preset.windows`가 `theme.background`를 덮어쓰지 않는다).
-- **여러 줄이 쌓이는 키**(`env.<KEY>`·`keybind`)는 "덮어쓰기"가 아니라 **나중 것이 이기는 방식**으로 적용된다.
-  접미 줄이 항상 나중에 오므로 결과는 같지만, 파싱 결과 목록에는 두 항목이 남을 수 있다(적용 단계에서 같은
-  이름끼리 합쳐진다).
+  이름이 되어 경고가 뜬다 — 조용히 먹히면 사용자가 설정이 반영된 줄 안다. (`.osx`는 VS Code 철자라 받아들이되
+  `.macos`를 권한다.)
+- 접미는 **키 이름의 일부일 뿐**이라 값 파싱·검증은 기본 키와 완전히 같다.
+
+**알려진 한계 — 설정 GUI는 접미를 모른다.** 사이드바 드래그·⚙ 토글·세팅 화면이 값을 파일에 되쓸 때는 항상
+**기본 키**에 쓴다. 그래서 GUI로도 바꾸는 키에 접미를 쓰면 이렇게 된다.
+
+| | 결과 |
+|---|---|
+| 접미 줄이 기본 줄보다 **뒤** | GUI 변경이 파일에 남지만 **화면에 반영되지 않는다**(접미 줄이 계속 이긴다) |
+| 접미 줄이 **앞** | GUI 변경이 정상 반영된다 |
+| GUI에서 기본값으로 되돌리기 | 기본 줄만 지워지고 접미 줄은 남는다 |
+
+즉 **GUI로 만지는 키는 접미를 쓰지 않는 편이 낫다.** 접미는 `shell.command`·`font.size`처럼 파일로 관리하는
+키에 쓰는 것을 전제로 한다. (`keybind`도 GUI 쓰기 경로가 접미를 모른다 — 파일로만 관리한다.)
 
 ```conf
 # ~/.config/maru/config — 예시
@@ -215,7 +231,7 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 단 control-plane selector `MARU_PANE_ID`는 spawn 값이 최종 우선한다. 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
 | `shell.args` | 문자열 | `-i` | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. 아래 참조 |
-| `shell.windows-shell` | `powershell`\|`cmd` | `powershell` | **Windows 전용** — 기본으로 띄울 셸 **종류**. `shell.command`가 비어 있을 때만 본다(명시 경로가 더 구체적이라 그쪽이 이긴다). `powershell`은 pwsh 7 → Windows PowerShell 5.1 → cmd 순으로 있는 것을 쓰고, `cmd`는 `cmd.exe`를 곧장 쓴다. 경로가 아니라 종류를 고르는 이유는 실제 경로가 기기마다 다르기 때문이다. 다른 OS에서는 읽히되 쓰이지 않는다(dotfiles 공유 시 diagnostic이 안 뜨게). 아래 참조 |
+| `shell.windows-shell` | `powershell`\|`cmd` | `powershell` | **Windows 전용 · 아직 배선 전**(값은 파싱·검증되지만 실제 셸 선택에 넘기는 호스트가 없다 — Windows 호스트 슬라이스에서 연결된다). 설정 GUI에는 노출하지 않는다(파일 전용). 기본으로 띄울 셸 **종류**. `shell.command`가 비어 있을 때만 본다(명시 경로가 더 구체적이라 그쪽이 이긴다). `powershell`은 pwsh 7 → Windows PowerShell 5.1 → cmd 순으로 있는 것을 쓰고, `cmd`는 `cmd.exe`를 곧장 쓴다. 경로가 아니라 종류를 고르는 이유는 실제 경로가 기기마다 다르기 때문이다. 다른 OS에서는 읽히되 쓰이지 않는다(dotfiles 공유 시 diagnostic이 안 뜨게). 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ## 검증 동작 (forgiving)

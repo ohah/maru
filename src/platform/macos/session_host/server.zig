@@ -187,7 +187,7 @@ pub const RuntimeOps = struct {
     resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
     /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
     /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
-    snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8,
+    snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!ProjectedSnapshot,
     /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
     /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
     delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!StreamUpdate,
@@ -272,6 +272,52 @@ pub const StreamUpdate = struct {
     send: []u8,
     is_snapshot: bool,
     new_base: []u8,
+    /// RuntimeManager가 화면 core lock을 보유한 projection turn에서 발급한다. server는 encoded
+    /// record를 다시 읽거나 mutable Subscription을 재조회해 barrier target을 만들지 않는다.
+    frontier: catchup_barrier_contract.ScreenFrontier,
+};
+
+pub const ProjectedSnapshot = struct {
+    bytes: []u8,
+    frontier: catchup_barrier_contract.ScreenFrontier,
+};
+
+/// Host issuer가 projection과 fixed wire barrier를 같은 owner turn에 묶는 final-address 준비물이다.
+/// Reactor queue admission 전에는 `HostState`를 바꾸지 않으며, product socket owner가 PID/process
+/// seal을 결속한 뒤 exact 한 번만 commit할 수 있다.
+pub const PreparedCatchupBatch = struct {
+    self_addr: usize = 0,
+    active_raw: u8 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_addr: usize = 0,
+    owner_connection: connection_slot.ConnectionKey = .{ .monotonic_id = 0, .slot_generation = 0 },
+    owner_thread_id: u64 = 0,
+    before: catchup_barrier_contract.HostState,
+    after: catchup_barrier_contract.HostState,
+    barrier: catchup_barrier_contract.Barrier,
+    now_ns: u64,
+
+    pub fn bindFinal(
+        self: *PreparedCatchupBatch,
+        pid: u32,
+        process_nonce: u64,
+        owner_addr: usize,
+        owner_connection: connection_slot.ConnectionKey,
+        owner_thread_id: u64,
+    ) bool {
+        if (self.self_addr != 0 or self.active_raw != 0 or pid == 0 or process_nonce == 0 or
+            owner_addr == 0 or !owner_connection.valid() or owner_thread_id == 0)
+            return false;
+        self.self_addr = @intFromPtr(self);
+        self.pid = pid;
+        self.process_nonce = process_nonce;
+        self.owner_addr = owner_addr;
+        self.owner_connection = owner_connection;
+        self.owner_thread_id = owner_thread_id;
+        self.active_raw = 1;
+        return true;
+    }
 };
 
 pub const catchup_host_expiry_ns: u64 = 2 * std.time.ns_per_s;
@@ -484,6 +530,8 @@ pub const CollectedOutput = struct {
     next_base: ?[]u8 = null,
     replace_base: bool = false,
     next_screen_sequence: ?u64 = null,
+    next_screen_generation: ?u64 = null,
+    prepared_catchup: ?PreparedCatchupBatch = null,
     clear_resync: bool = false,
     next_observation_base: ?[]u8 = null,
     next_observation_revision: ?u64 = null,
@@ -504,6 +552,14 @@ pub const CollectedOutput = struct {
             self.rollback(connection);
             return;
         };
+        if (self.prepared_catchup) |*prepared| {
+            // The queue owner consumes the final-address permit only after the complete
+            // screen+barrier batch is admitted.  Catch-up state and the projected frontier are
+            // one semantic commit: never advance either side when the permit is stale or copied.
+            std.debug.assert(prepared.self_addr == @intFromPtr(prepared));
+            std.debug.assert(prepared.active_raw == 0);
+            std.debug.assert(std.meta.eql(sub.catchup, prepared.before));
+        }
         const next_screen_len = if (self.replace_base)
             if (self.next_base) |base| base.len else 0
         else if (sub.base) |base| base.len else 0;
@@ -529,6 +585,10 @@ pub const CollectedOutput = struct {
             self.next_base = null;
         }
         if (self.next_screen_sequence) |sequence| sub.screen_sequence = sequence;
+        if (self.next_screen_generation) |generation| sub.screen_generation = generation;
+        if (self.prepared_catchup) |*prepared| {
+            sub.catchup = prepared.after;
+        }
         if (self.clear_resync) {
             sub.resync_pending = false;
             sub.awaiting_resync_ack = false;
@@ -546,6 +606,11 @@ pub const CollectedOutput = struct {
 
     pub fn rollback(self: *CollectedOutput, connection: *Connection) void {
         if (self.finished) return;
+        if (self.prepared_catchup) |*prepared| {
+            // A bound permit that did not reach queue admission is terminally aborted.  Leaving
+            // it active until stack destruction would make a rejected batch look replayable.
+            prepared.active_raw = 0;
+        }
         if (connection.attachments.getPtr(self.stream)) |sub|
             sub.observation_ticks = self.previous_observation_ticks;
         if (self.base_reservation) |reservation| {
@@ -628,6 +693,7 @@ pub const Connection = struct {
         /// 마지막으로 queue admission까지 commit된 screen output frontier. initial attach snapshot만
         /// 0이고, 이후 resync/fallback snapshot과 non-empty delta batch는 exact +1로 전진한다.
         screen_sequence: u64 = 0,
+        screen_generation: u64 = 0,
         catchup: catchup_barrier_contract.HostState = .idle,
     };
 
@@ -1736,7 +1802,7 @@ pub const Connection = struct {
             reply_transferred = true;
             return .{ .reply = reply_frame };
         };
-        const snap_bytes = ops.snapshot(ops.ctx, id.?, 0, self.allocator) catch {
+        const projected_snapshot = ops.snapshot(ops.ctx, id.?, 0, self.allocator) catch {
             if (prepared_product) {
                 prepared_output.rollback(self);
                 prepared_transferred = true;
@@ -1745,7 +1811,10 @@ pub const Connection = struct {
             self.state = .closed;
             return .close;
         };
-        if (snap_bytes.len > protocol.max_viewport_snapshot) {
+        const snap_bytes = projected_snapshot.bytes;
+        if (snap_bytes.len > protocol.max_viewport_snapshot or
+            projected_snapshot.frontier.sequence != 0)
+        {
             self.allocator.free(snap_bytes);
             if (prepared_product) {
                 prepared_output.rollback(self);
@@ -1759,10 +1828,13 @@ pub const Connection = struct {
         if (prepared_product) {
             prepared_output.next_base = snap_bytes;
             prepared_output.replace_base = true;
-        } else if (self.attachments.getPtr(stream)) |sub|
-            sub.base = snap_bytes
-        else
-            self.allocator.free(snap_bytes);
+            prepared_output.next_screen_sequence = projected_snapshot.frontier.sequence;
+            prepared_output.next_screen_generation = projected_snapshot.frontier.generation;
+        } else if (self.attachments.getPtr(stream)) |sub| {
+            sub.base = snap_bytes;
+            sub.screen_sequence = projected_snapshot.frontier.sequence;
+            sub.screen_generation = projected_snapshot.frontier.generation;
+        } else self.allocator.free(snap_bytes);
 
         // snapshot_chunk*를 조립한다. Product path는 response와 이 batch를 owner가 각각 admission한 뒤
         // transaction을 commit하고, pure legacy seam만 기존 frames 배열로 합친다.
@@ -2486,6 +2558,14 @@ pub const Connection = struct {
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
     ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+        return self.collectOutputForLocalStreamAt(stream, 0);
+    }
+
+    pub fn collectOutputForLocalStreamAt(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+        now_ns: u64,
+    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -2604,7 +2684,7 @@ pub const Connection = struct {
             }
             const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
                 return error.OutOfMemory;
-            const snap = ops.snapshot(ops.ctx, sub.runtime_id, next_sequence, self.allocator) catch |err| {
+            const projected = ops.snapshot(ops.ctx, sub.runtime_id, next_sequence, self.allocator) catch |err| {
                 if (err == error.RuntimeNotFound) {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
                     self.discardPreparedOutput(&list, &output);
@@ -2621,13 +2701,16 @@ pub const Connection = struct {
                 output.rollback(self);
                 return null;
             };
-            defer self.allocator.free(snap);
-            if (snap.len > protocol.max_viewport_snapshot) return error.OutOfMemory;
-            output.next_base = self.allocator.dupe(u8, snap) catch return error.OutOfMemory;
+            defer self.allocator.free(projected.bytes);
+            if (projected.bytes.len > protocol.max_viewport_snapshot or
+                projected.frontier.sequence != next_sequence)
+                return error.OutOfMemory;
+            output.next_base = self.allocator.dupe(u8, projected.bytes) catch return error.OutOfMemory;
             output.replace_base = true;
             output.clear_resync = true;
-            output.next_screen_sequence = next_sequence;
-            try self.appendChunks(&list, .snapshot_chunk, stream, snap);
+            output.next_screen_sequence = projected.frontier.sequence;
+            output.next_screen_generation = projected.frontier.generation;
+            try self.appendChunks(&list, .snapshot_chunk, stream, projected.bytes);
         } else if (sub.base) |base| {
             // A valid delta producer failure cannot be treated as "no change": bounded projection
             // overflow would then retry every tick forever while the client silently freezes on an
@@ -2661,8 +2744,48 @@ pub const Connection = struct {
             if (update.send.len != 0) {
                 const kind: protocol.Kind = if (update.is_snapshot) .snapshot_chunk else .delta_chunk;
                 try self.appendChunks(&list, kind, stream, update.send);
-                output.next_screen_sequence = next_sequence;
+                if (update.frontier.sequence != next_sequence or
+                    (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
+                    return error.OutOfMemory;
+                output.next_screen_sequence = update.frontier.sequence;
+                output.next_screen_generation = update.frontier.generation;
+            } else if (update.frontier.sequence != sub.screen_sequence or
+                update.frontier.generation != sub.screen_generation)
+            {
+                return error.OutOfMemory;
             }
+        }
+
+        if (sub.catchup == .pending) {
+            const pending = sub.catchup.pending;
+            const target: catchup_barrier_contract.ScreenFrontier = .{
+                .generation = output.next_screen_generation orelse sub.screen_generation,
+                .sequence = output.next_screen_sequence orelse sub.screen_sequence,
+            };
+            const barrier: catchup_barrier_contract.Barrier = .{
+                .identity = pending.identity,
+                .target = target,
+            };
+            const payload = barrier.encode() catch return error.OutOfMemory;
+            const barrier_frame = self.encodeWithFlags(
+                .screen_frontier_barrier,
+                0,
+                stream,
+                0,
+                &payload,
+            ) catch return error.OutOfMemory;
+            list.append(self.allocator, barrier_frame) catch {
+                self.allocator.free(barrier_frame);
+                return error.OutOfMemory;
+            };
+            var after = sub.catchup;
+            after.admit(barrier, now_ns) catch return error.OutOfMemory;
+            output.prepared_catchup = .{
+                .before = sub.catchup,
+                .after = after,
+                .barrier = barrier,
+                .now_ns = now_ns,
+            };
         }
 
         if (list.items.len == 0 and !output.replace_base and
@@ -4362,6 +4485,7 @@ pub const FakeRuntimeOps = struct {
     new_base_len: ?usize = null,
     delta_send_len: ?usize = null,
     delta_is_snapshot: bool = false,
+    frontier_generation: u64 = 0,
     delta_calls: usize = 0,
     delta_probe_ctx: ?*anyopaque = null,
     delta_probe: ?*const fn (*anyopaque) void = null,
@@ -4425,7 +4549,7 @@ pub const FakeRuntimeOps = struct {
         self.resized_runtime = runtime_id;
     }
     /// 고정 snapshot 바이트를 caller 소유로 돌려준다(server가 이걸 snapshot_chunk로 나눠 보낸다).
-    fn snapshotFn(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn snapshotFn(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!ProjectedSnapshot {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         self.snapshot_sequence_seen = sequence;
@@ -4439,9 +4563,12 @@ pub const FakeRuntimeOps = struct {
         if (self.snapshot_len) |len| {
             const bytes = try allocator.alloc(u8, len);
             @memset(bytes, 'S');
-            return bytes;
+            return .{ .bytes = bytes, .frontier = .{ .generation = self.frontier_generation, .sequence = sequence } };
         }
-        return allocator.dupe(u8, "SNAPSHOT-BYTES");
+        return .{
+            .bytes = try allocator.dupe(u8, "SNAPSHOT-BYTES"),
+            .frontier = .{ .generation = self.frontier_generation, .sequence = sequence },
+        };
     }
     /// 받은 base를 기록하고 고정 delta + 새 base를 돌려준다(둘 다 별개 owned 버퍼). delta 라우팅·base 갱신을 검증한다.
     fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!StreamUpdate {
@@ -4465,7 +4592,15 @@ pub const FakeRuntimeOps = struct {
             @memset(bytes, 'N');
             break :blk bytes;
         } else try allocator.dupe(u8, "NEW-BASE");
-        return .{ .send = send, .is_snapshot = self.delta_is_snapshot, .new_base = new_base };
+        return .{
+            .send = send,
+            .is_snapshot = self.delta_is_snapshot,
+            .new_base = new_base,
+            .frontier = .{
+                .generation = self.frontier_generation,
+                .sequence = if (send.len == 0) sequence - 1 else sequence,
+            },
+        };
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
     fn notificationPeekFn(
@@ -5089,6 +5224,69 @@ test "CR4a frontier는 output admission commit 뒤에만 subscription sequence�
     try testing.expectEqual(@as(?u64, null), unchanged.next_screen_sequence);
     unchanged.commit(&conn);
     try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+
+    const unchanged_identity: catchup_barrier_contract.CatchupIdentity = .{
+        .subscription = .{ .value = 9 },
+        .runtime_id = 0xAA,
+        .connection = .{ .monotonic_id = 3, .slot_generation = 4 },
+        .host_id = 1,
+        .request_nonce = 5,
+    };
+    try testing.expectEqual(
+        catchup_barrier_contract.HostState.ArmResult.armed,
+        conn.attachments.getPtr(1).?.catchup.arm(unchanged_identity, 10, 20),
+    );
+    const pending_before_barrier = conn.attachments.get(1).?.catchup;
+    var barrier_only = (try conn.collectOutputForLocalStreamAt(1, 11)).?;
+    try testing.expectEqual(@as(usize, 1), barrier_only.frames.len);
+    try testing.expectEqual(
+        OutboundClass{ .subscription = .{ .stream = 1, .kind = .barrier } },
+        try classifyOutbound(barrier_only.frames[0]),
+    );
+    try testing.expectEqual(@as(?u64, null), barrier_only.next_screen_sequence);
+    try testing.expectEqual(@as(u64, 3), barrier_only.prepared_catchup.?.barrier.target.sequence);
+    barrier_only.rollback(&conn);
+    try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
+    try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+
+    fake.frontier_generation = 1;
+    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStreamAt(1, 12));
+    try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
+    try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_generation);
+    fake.delta_send_len = null;
+    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStreamAt(1, 12));
+    try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
+    try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+    fake.frontier_generation = 0;
+    fake.delta_send_len = 0;
+
+    // Sweep every allocation before the immutable barrier batch becomes prepared.  A local OOM
+    // cannot consume the pending row or advance the committed projection frontier.
+    var saw_barrier_oom = false;
+    var saw_barrier_success = false;
+    for (0..16) |fail_index| {
+        var failing = testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        conn.allocator = failing.allocator();
+        const attempt = conn.collectOutputForLocalStreamAt(1, 12);
+        conn.allocator = allocator;
+        if (attempt) |maybe_output| {
+            var prepared = maybe_output orelse return error.TestUnexpectedResult;
+            prepared.rollback(&conn);
+            saw_barrier_success = true;
+            break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_barrier_oom = true,
+            error.ProjectionBudgetUnavailable => return error.TestUnexpectedResult,
+        }
+        try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
+        try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
+        try testing.expectEqualStrings("NEW-BASE", conn.attachments.get(1).?.base.?);
+    }
+    try testing.expect(saw_barrier_oom);
+    try testing.expect(saw_barrier_success);
 
     conn.attachments.getPtr(1).?.screen_sequence = std.math.maxInt(u64);
     try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));

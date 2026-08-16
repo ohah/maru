@@ -1926,15 +1926,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   같은 `HostAdapter`에 결속한 observer attach+initial snapshot을 검증한다. typed reject는 candidate authority만 정산하고
   published Client를 usable로 보존하며, EOF는 같은 node·generation을 보존하되 transport를 fail-close한다. CR4a
   screen wire prerequisite는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1 및 queue-admission 뒤 host commit을 제품 projection/server 행으로
-  검증한다. 이는 local idle을 caught-up으로 승인하지 않으며 host-issued catch-up barrier와 staged receipt는 아직 구현 전이다. CR4a
+  검증한다. host frontier 제품 행은 core-lock projection receipt와 fixed barrier-last batch를 실제 subscription queue에 admit한 뒤에만 base/frontier와 pending→admitted를 함께 commit하고 copied/PID/process-nonce/Client-address/ConnectionKey/thread drift, prepare rollback과 global queue-pressure 거부의 prefix/base/frontier/pending mutation 0을 검증한다. 화면 변화가 없는 turn도 idle 성공이 아니라 barrier-only batch exact 1을 admit하며 preparation allocation fail-index는 성공점까지 pending/frontier mutation 0을 유지한다. client staged receipt는 아직 구현 전이다. 이는 local idle을 caught-up으로 승인하지 않는다. CR4a
   완료에는 이어서 actual `connectExistingHost` issuer와 bounded contiguous delta, gap/cap/malformed/OOM의 단계별 mutation 경계를
   검증해야 한다. replacement 게시 전 실패는 old graph mutation 0이고 게시 뒤 실패는 unavailable shell과 새 Client generation을
   보존한다. CR4b는 mutation seal 아래 status/takeover를 exact once 실행하며 takeover
   reply-loss에는 local authority를 발행하지 않고 candidate close 완료를 가정하지 않는다. direct-controller grant만 기다리고
   observer conflict는 자동 탈취하지 않는다. CR4c는 proven candidate를 CR3c publication/reclaim에 연결한 뒤 새 generation의
   input과 forced first resize를 검증한다. CR4a만 green이면 takeover·publication·사용자 가시 reconnect는 미완료다.
-  dormant contract prerequisite는 product caller 0에서 host process/subscription identity와 client request nonce wire DTO만
-  고정하고 MRSH kind/header를 정의하되 generic subscription batch admission은 0으로 유지한다. catch-up barrier host prerequisite는 capability 없는 발행 0, subscription/runtime/ConnectionKey/request nonce가 결속된
+  dependency-neutral contract prerequisite는 host process/subscription identity와 client request nonce wire DTO 및 MRSH kind/header를
+  고정하고, host issuer가 이를 소비하되 generic unsealed subscription batch admission은 0으로 유지한다. catch-up barrier host prerequisite는 capability 없는 발행 0, subscription/runtime/ConnectionKey/request nonce가 결속된
   pending row, core-lock projection receipt, barrier-last single-batch admission을 요구한다. queue cap/OOM/rollback은 queued
   prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
   target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.

@@ -314,14 +314,12 @@ Maru 작업에서 사용하는 기본 명령이다.
   attachment 권위만 정산하고 게시된 Client를 usable로 보존한다. EOF는 동일 Client node·generation과 unavailable shell을
   보존하되 해당 Client transport를 fail-close하므로 다음 replacement 시도가 필요하다. 같은 gate의 screen/server prerequisite
   2개는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1, output admission 전 rollback mutation 0과 commit 뒤 subscription frontier 전진을
-  검증한다(최적화 모드당 observer candidate 2 + frontier 2 + dormant barrier contract 2 + host pending state 1 + host capability/subscription owner 1 + actual catchup response control-queue admission 1(barrier/screen batch admission 0) + poll-owner process-seal 1 + restore fresh-exec process-seal bootstrap 1 + MRSH kind/header 2 + boundary 1). local socket idle은 caught-up 증거가 아니며 host-issued
-  target frontier barrier와 immutable staged receipt는 후속 제품 integration이 소유한다. 이 prerequisite는 actual
+  검증한다(최적화 모드당 observer candidate 2 + frontier 2 + barrier contract 2 + host pending state 1 + host capability/subscription owner 1 + actual catchup response control-queue admission 1 + host frontier/screen+barrier queue admission 1 + poll-owner process-seal 1 + restore fresh-exec process-seal bootstrap 1 + MRSH kind/header 2 + boundary 1). host frontier 행은 `RuntimeManager`가 core-lock projection과 immutable frontier를 함께 발급하고, pending identity의 screen frame 뒤 fixed barrier를 같은 subscription batch 마지막에 실제 queue admission한 뒤에만 base/frontier와 admitted row를 함께 commit하며 copy/PID/process-nonce/Client-address/ConnectionKey/thread drift와 prepare rollback을 mutation 0으로 거부한다. local socket idle은 caught-up 증거가 아니며 immutable staged receipt는 후속 제품 integration이 소유한다. 이 prerequisite는 actual
   `connectExistingHost` issuer, bounded contiguous delta catch-up, status/takeover, RemoteGeneration publication, input/forced resize를
   완료하지 않으며 CR4a의 후속 제품 integration과 CR4b/CR4c가 각각 소유한다.
-  다음 dormant contract prerequisite(product caller 0)는 host/client identity 분리와 fixed barrier DTO를 먼저 고정한다.
-  MRSH kind/header도 이 단계에서는 subscription batch admission 0이며,
-  이어지는 host-issuer prerequisite는 `runtime_catchup_barrier_v1` 협상, correlated pending identity, core-lock frontier receipt와
-  화면 프레임+barrier 단일 queue admission/commit/rollback을 검증한다. 이 gate만으로 client가 caught-up receipt를 만들었다고
+  중립 contract prerequisite로 시작한 host/client identity 분리와 fixed barrier DTO는 이제 host issuer가 소비한다.
+  MRSH kind/header의 generic admission은 닫힌 채 host 전용 sealed batch만 subscription queue에 들어간다.
+  실제 global queue-pressure 거부도 queued prefix·base/frontier/pending mutation 0으로 닫고, 화면 변화가 없는 제품 turn은 idle 성공 대신 barrier-only batch exact 1을 admit한다. projection/new-base/barrier/frame/list preparation의 allocation fail-index도 성공점까지 pending/frontier mutation 0으로 검증한다. 이 gate만으로 client가 caught-up receipt를 만들었다고
   주장하지 않는다. client consumer prerequisite가 기존 `GenerationAttachment` demux, deadline/cap과 staged receipt를 별도로
   검증한 뒤에만 actual issuer/delta E2E로 진행한다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.

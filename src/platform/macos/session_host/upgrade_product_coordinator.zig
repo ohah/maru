@@ -1063,8 +1063,8 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     var attempts: usize = 0;
     while (attempts < 200 and !saw_output) : (attempts += 1) {
         const snapshot = try runtime_ops.snapshot(runtime_ops.ctx, runtime_id, 0, allocator);
-        defer allocator.free(snapshot);
-        saw_output = try snapshotContainsText(allocator, snapshot, "still-alive");
+        defer allocator.free(snapshot.bytes);
+        saw_output = try snapshotContainsText(allocator, snapshot.bytes, "still-alive");
         if (!saw_output) _ = usleep(10 * 1000);
     }
     try std.testing.expect(saw_output);

@@ -4164,7 +4164,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = cr4a_optimize,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"CR4a dormant barrier"},
+            .filters = &.{"CR4a barrier"},
         });
         const run_cr4a_catchup_contract_tests = b.addRunArtifact(cr4a_catchup_contract_tests);
         run_cr4a_catchup_contract_tests.addArg("--maru-expect-tests=2");
@@ -4208,6 +4208,23 @@ pub fn build(b: *std.Build) void {
         const run_cr4a_catchup_host_admission_tests = b.addRunArtifact(cr4a_catchup_host_admission_tests);
         run_cr4a_catchup_host_admission_tests.addArg("--maru-expect-tests=1");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_admission_tests.step);
+
+        const cr4a_catchup_host_frontier_batch_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a host frontier batch는"},
+        });
+        const run_cr4a_catchup_host_frontier_batch_tests = b.addRunArtifact(cr4a_catchup_host_frontier_batch_tests);
+        run_cr4a_catchup_host_frontier_batch_tests.addArg("--maru-expect-tests=1");
+        run_cr4a_catchup_host_frontier_batch_tests.setEnvironmentVariable(
+            "MARU_CR4A_HOST_FRONTIER_ROLE",
+            "maru-cr4a-host-frontier-fresh-v1",
+        );
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_frontier_batch_tests.step);
 
         const cr4a_poll_owner_process_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

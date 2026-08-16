@@ -207,7 +207,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(assembler, "pub fn prepareRecoveryFrontierFrom("));
     try std.testing.expectEqual(@as(usize, 1), count(server, "base, next_sequence, self.allocator"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "screenPtr().?.requireSequencedDeltas()"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime_manager, ".{ .generation = generation, .sequence = sequence }"));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_manager, ".{ .generation = generation, .sequence = sequence }"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_manager, "base: []const u8, sequence: u64,"));
     try std.testing.expectEqual(@as(usize, 1), count(snapshot, ".{ .generation = 7, .sequence = 1 }"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "runtime.prepareObserverReconnectCandidate("));
@@ -217,13 +217,16 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
-    try std.testing.expectEqual(@as(usize, 10), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 11), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
-    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a dormant barrier"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a barrier"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host pending은"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host capability는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host admission은"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host frontier batch는"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "MARU_CR4A_HOST_FRONTIER_ROLE"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "maru-cr4a-host-frontier-fresh-v1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a poll owner는"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a restore exec bootstrap은"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "MARU_CR4A_RESTORE_EXEC_ROLE"));
@@ -236,13 +239,14 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Pending = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Admitted = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Terminal = struct"));
-    try std.testing.expectEqual(@as(usize, 2), count(catchup, "test \"CR4a dormant barrier"));
+    try std.testing.expectEqual(@as(usize, 2), count(catchup, "test \"CR4a barrier"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "test \"CR4a host pending은"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_contract.zig", &.{
             "platform/macos/session_host/catchup_barrier_contract.zig",
             "platform/macos/session_host/server.zig",
+            "platform/macos/session_host/connection_turn.zig",
         }),
     );
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const capability ="));
@@ -292,6 +296,16 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         return error.TestUnexpectedResult ..];
     try std.testing.expect(std.mem.indexOf(u8, restore_turn, "server.tickOwner();") != null);
     try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "test \"CR4a host admission은"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "test \"CR4a host frontier batch는"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "MARU_CR4A_HOST_FRONTIER_ROLE"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "maru-cr4a-host-frontier-fresh-v1"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "pub const PreparedCatchupBatch = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "owner_addr: usize = 0"));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "owner_thread_id: u64 = 0"));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn validatePreparedCatchup("));
+    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "fn consumePreparedCatchup("));
+    try std.testing.expectEqual(@as(usize, 1), count(server, "prepared.active_raw = 0;"));
+    try std.testing.expectEqual(@as(usize, 2), count(connection_turn, "prepared.active_raw = 0;"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_wire.zig", &.{
@@ -303,7 +317,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(protocol, "screen_frontier_barrier = catchup_barrier_wire.kind_raw"));
     try std.testing.expectEqual(@as(usize, 1), count(protocol, "test \"CR4a host barrier frame"));
     try std.testing.expectEqual(@as(usize, 1), count(server, "test \"CR4a host barrier frame은"));
-    try std.testing.expectEqual(@as(usize, 1), count(connection_turn, ".barrier => return false"));
+    try std.testing.expectEqual(@as(usize, 0), count(connection_turn, ".barrier => return false"));
+    // One product validator plus changed-screen and no-change socket transcript oracles. All
+    // decode the canonical fixed payload instead of trusting the MRSH header alone.
+    try std.testing.expectEqual(@as(usize, 3), count(connection_turn, "catchup_barrier_contract.Barrier.decode(payload)"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "prepareObserverReconnectCandidate(", &.{

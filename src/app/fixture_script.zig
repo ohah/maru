@@ -32,6 +32,11 @@ const windows_shell = "C:\\Windows\\System32\\cmd.exe";
 /// **Windows 스크립트는 반드시 인자 하나로 넘어간다.** cmd는 CRT argv 파싱을 쓰지 않아(계약 §4.2) 토큰을
 /// 나눠 주면 `echo`가 첫 단어만 받는다(실측: `maru headless demo`가 아니라 `maru`만 나왔다).
 ///
+/// **그리고 그 스크립트 안에 큰따옴표를 넣으면 안 된다.** 같은 이유의 반대편이다 — 우리 인용기는 CRT 규칙대로
+/// `"`를 `\"`로 이스케이프하는데(실행 파일을 직접 띄우는 자리에서는 그것이 맞다), cmd는 그 규칙을 몰라
+/// 백슬래시를 글자 그대로 받는다. 실측: `cmd /c "type \"파일.txt\""`는 "지정된 경로를 찾을 수 없습니다"로
+/// 끝나고, 따옴표를 뺀 `type 파일.txt`는 정상이다. 아래 테스트가 이 조건을 강제한다.
+///
 /// **인자가 왜 전부 `comptime`인가.** 반환하는 `args`가 `&.{ … }` — 익명 배열의 주소 — 이기 때문이다.
 /// 원소가 하나라도 런타임 값이면 그 배열은 **이 함수의 스택 프레임**에 서고, 반환하는 순간 댕글링이 된다.
 /// 실측: 런타임 인자로 부른 뒤 다른 함수를 한 번 끼우면 Debug에서 `args[0].len`이 쓰레기가 되고
@@ -111,6 +116,24 @@ test "oneShot: 두 갈래 모두 절대경로 셸에 스크립트를 인자 하�
     try std.testing.expectEqualStrings("w", oneShot(.windows, "p", "w").args[1]);
     try std.testing.expectEqualStrings("-c", oneShot(.macos, "p", "w").args[0]);
     try std.testing.expectEqualStrings("p", oneShot(.macos, "p", "w").args[1]);
+}
+
+// 잠복 함정을 컴파일 가능한 조건으로 바꾼다. Windows fixture 스크립트에 큰따옴표가 들어가면 우리 인용기가
+// CRT 규칙대로 `\"`로 이스케이프하고 cmd는 그 백슬래시를 글자로 받아 **조용히** 엉뚱한 명령을 실행한다.
+// 실패가 에러가 아니라 "다른 결과"로 오므로 여기서 막는다.
+test "Windows fixture 스크립트에는 큰따옴표가 없다" {
+    const scripts = [_][]const u8{
+        oneShot(.windows, "p", "echo maru headless demo& cd& echo demo complete").args[1],
+        oneShot(.windows, "p", "echo maru app pty& echo renderer frame").args[1],
+        oneShot(.windows, "p", "echo first& " ++ windows_short_sleep ++ "& echo second").args[1],
+        interactiveEcho(.windows).input,
+    };
+    for (scripts) |s| {
+        if (std.mem.indexOfScalar(u8, s, '"')) |i| {
+            std.debug.print("큰따옴표가 {d}번째에 있다: {s}\n", .{ i, s });
+            return error.QuoteInWindowsFixture;
+        }
+    }
 }
 
 test "interactiveEcho: 두 갈래가 같은 표식을 내고 스스로 끝낸다" {

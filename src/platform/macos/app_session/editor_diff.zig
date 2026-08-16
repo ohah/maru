@@ -1487,3 +1487,41 @@ test "랩이 켜지면 두 열 모두 렌더에 0이 간다 — 오른쪽만 빠
     try testing.expect(drawn.dl.cells.len > 0);
     try testing.expectEqual(stored, fx.term.rt.editor_first_col_right); // 랩을 끄면 돌아갈 자리
 }
+
+test "gutter 자릿수는 렌더와 같은 출처로 센다 — 최소 자릿수가 가려도 같은 것은 아니다" {
+    // 렌더는 `total_lines`에 **문서 줄 수**를 넘기는데(`st.left_lines.len`), 상한을 세는 쪽이
+    // **행 수**(filler 포함)를 쓰면 갈린다. `min_line_number_cells`(Monaco `lineNumbersMinChars` = 5)가
+    // 10만 줄까지 가려 주므로 **작은 문서로 쓴 테스트는 공허하다** — 실제로 9줄/12행으로 먼저 써 보고
+    // 통과해서 알았다. 그래서 **가림막을 넘는 크기**로 본다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 600 };
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+
+    // 문서 99,999줄(5자리) 대 행 100,001개(6자리) — 내용은 안 보므로 길이만 맞춘다.
+    const doc = try allocator.alloc([]const u8, 99_999);
+    defer allocator.free(doc);
+    @memset(doc, "");
+    const rows = try allocator.alloc([]const u8, 100_001);
+    defer allocator.free(rows);
+    @memset(rows, "");
+
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    fx.term.rt.editor_diff.?.left_texts = rows;
+    fx.term.rt.editor_diff.?.right_texts = rows;
+    fx.term.rt.editor_diff.?.left_lines = doc;
+    fx.term.rt.editor_diff.?.right_lines = doc;
+    defer fx.term.rt.editor_diff = null;
+
+    try testing.expect(chrome_editor.geometry.digitCount(rows.len) > chrome_editor.geometry.digitCount(doc.len));
+    try testing.expect(chrome_editor.geometry.digitCount(doc.len) >= chrome_editor.geometry.min_line_number_cells); // 가림막 밖이다
+
+    const inset = chrome_editor.frame.content_inset_px;
+    const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = body.w -| inset * 2, .h = body.h -| inset * 2 }, 8);
+    const m = chrome_editor.diff_frame.sideMetrics(cols.left.w, body.h -| inset * 2, 8, 16);
+    const want = chrome_editor.geometry.compute(m.total_cols, doc.len, .{}).content.width; // 렌더가 쓰는 출처
+    try testing.expectEqual(want, editor_ops.visibleColsForTest(fx.session, body, fx.term, false));
+}

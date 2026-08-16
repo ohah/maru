@@ -3585,9 +3585,15 @@ pub fn retainFileTreeRecoveryPath(self: *AppSession, recovery_path: []u8) void {
     std.debug.assert(self.file_tree_manual_recovery_paths_len < self.file_tree_manual_recovery_paths.len);
     self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = recovery_path;
     self.file_tree_manual_recovery_paths_len += 1;
-    // 경로가 끼는 유일한 notice — 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르므로 옛 폴백 문장은
-    // 필요 없다(잘려도 경로 앞부분이 남아 어느 파일인지 좁힐 수 있다).
-    self.showNoticeFmt(.fp_manual_recovery, &.{.{ .s = recovery_path }});
+    // 경로가 끼는 유일한 notice. **여기는 폴백 키를 둔다**(계약 §6.3) — 경로가 잘리면 어느 파일인지
+    // 알려 주지 못하므로, 잘릴 상황에서는 "로그의 recovery 경로를 보라"는 **다른 행동**을 안내한다.
+    // 다른 보간 자리들이 폴백 없이 절단에 맡기는 것과 갈리는 지점이다(그쪽은 축약해도 뜻이 같다).
+    const tmpl = maru.i18n.t(.fp_manual_recovery);
+    if (tmpl.len + recovery_path.len > app_session_mod.notice_message_cap) {
+        self.showNoticeKey(.fp_manual_recovery_fallback);
+    } else {
+        self.showNoticeFmt(.fp_manual_recovery, &.{.{ .s = recovery_path }});
+    }
 }
 
 pub fn selectFirstFileTreeRow(self: *AppSession) void {

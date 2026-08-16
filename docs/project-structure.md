@@ -109,7 +109,16 @@ src/
                         그 형태이고 facade `<name>.zig`가 네 파일을 re-export한다. types(platform 중립 입력 DTO)·build(bounded geometry와
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
-  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다(A2a: `runSessionRequest`가 결정론 경로 발견→`std.c.connect`→왕복→`renderResponse`, 서버 부재면 graceful; 소켓 syscall만 main에)
+  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
+                        **이 폴더의 파일은 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
+                        딱 두 파일이 예외이고, 각자 왜 예외인지를 파일 머리에 적는다:
+                        `control_client.zig`(컨트롤 소켓 발견→connect→`auth.self`→요청 전송→응답 수신. sessions·browser CLI가 공유하는
+                        유일한 syscall 접착이고, 순수 정책인 경로 규칙·소켓 선택 판정은 여전히 `sessions.zig`가 소유한다.
+                        Windows gate 문구의 단일 출처이기도 하다 — `main.zig`의 `HostGatedFeature.control_socket`이 그 값을 되돌려 준다),
+                        `browser/run.zig`(`browser.zig`의 impure 짝 — 응답 수신 상태 기계·chunk 재조립·`--out` 원자 공개.
+                        facade+같은 이름 폴더는 `session_host.zig`+`session_host/`와 같은 관용구다).
+                        예전에는 이 둘이 `main.zig`에 있었고 그래서 허브가 1,442줄이었다 — 접착을 여기로 모으면 "cli/는 순수"와
+                        "main은 얇은 디스패처"가 **동시에** 성립한다
   session/              L2 세션 코어(OS-중립·app/pty/platform import 0, check-boundaries 강제): 세션 모델(Model·Tab·Pane·surface·split_tree·workspace·dock_panel·core_command)과 **컨트롤 플레인/이동성 골격** — surface_id(M0a), window_membership(M0b), window_graph(M1), live_surface_registry(M2a generic), control_plane(1a JSON-RPC/ndjson), control_surface(1c Surface DTO·scope 응답), control_dispatch(1d read-only 라우터), layout/input math·ime·keyhint. platform이 런타임 타입을 넣어 인스턴스화한다
     editor/             네이티브 편집기의 L2 코어 — document(버퍼·편집), line_index(줄 색인), selection, diff·diff_state·intraline(줄 안 차이), open(열기 판정). 시각 매핑과 렌더는 chrome/components/editor_view/와 platform이 맡는다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config

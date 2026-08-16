@@ -1,14 +1,15 @@
 //! browser — `maru browser` CLI 클라이언트(L2 순수, §9.6). `browser.*`(navigate/getUrl/executeScript/getCookies)를
 //! 에이전트가 쓸 CLI로 노출한다. 1d `sessions` CLI(cli/sessions.zig)와 **동형**: 여기는 인자 파싱 + 요청 바이트
 //! 조립(`buildRequestBytes`, 1a `serializeMessage` 재사용) + 응답 렌더(`renderResponse`, 1a `parseMessage` 재사용)만
-//! 하고, 소켓 발견·connect·`auth.self`·프레임 왕복은 main.zig(`runSessionCli` 미러)가 한다.
+//! 하고, 소켓 발견·connect·`auth.self`·프레임 왕복은 [`cli/control_client.zig`](control_client.zig)가,
+//! 그 위의 응답 수신 상태 기계(chunk 재조립·`--out` 원자 공개)는 [`cli/browser/run.zig`](browser/run.zig)가 한다.
 //!
 //! **auth·grant(§9.2 Model B)**: CLI는 `auth.self`(selector=`MARU_PANE_ID`·cap_nonce=null)만 보낸다 — browser 요청은
-//! 세션 cap이 없어 needs_grant→서버 held→**확인 모달**. main의 read는 사용자가 모달을 클릭할 때까지 블록(승인=응답
+//! 세션 cap이 없어 needs_grant→서버 held→**확인 모달**. 러너의 read는 사용자가 모달을 클릭할 때까지 블록(승인=응답
 //! 렌더·거부=`Unauthorized`·무응답 timeout=EOF). 대상 `--surface N`은 필수(에이전트는 `maru sessions list`로 web
 //! surface_id 발견). 확장(screenshot·act·set/delete)은 서브커맨드 dispatch에 한 줄씩.
 //!
-//! **L2 순수**: std + control_plane(1a)만. 소켓/OS 0(파싱·wire만 — I/O는 main).
+//! **L2 순수**: std + control_plane(1a)만. 소켓/OS 0(파싱·wire만 — I/O는 `cli/control_client.zig`·`cli/browser/run.zig`).
 
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
@@ -126,7 +127,7 @@ pub const wait_max_timeout_ms: u32 = 25_000;
 
 /// screenshot(5f-1)은 단일 응답이 아니라 **chunk 스트림**(§9.5.7)이라 단일-응답 `Request`와 분리한다 — main이
 /// `ScreenshotStreamValidator`로 chunk를 검증·decode해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
-/// main.zig 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
+/// 러너(`cli/browser/run.zig`) 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
 pub const ScreenshotCmd = struct {
     surface_id: u64,
     out: ?[]const u8,

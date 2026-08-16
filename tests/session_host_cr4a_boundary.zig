@@ -202,16 +202,21 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual socket observer"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a observer 실패"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=2"));
-    try std.testing.expectEqual(@as(usize, 5), count(build_cr4a, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 6), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a dormant barrier"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a host pending은"));
     try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "CR4a host barrier frame"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const ScreenFrontier = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const CatchupIdentity = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Barrier = struct"));
-    try std.testing.expectEqual(@as(usize, 0), count(catchup, "pub const Pending"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const HostState = union(enum)"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Pending = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Admitted = struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "pub const Terminal = struct"));
     try std.testing.expectEqual(@as(usize, 2), count(catchup, "test \"CR4a dormant barrier"));
+    try std.testing.expectEqual(@as(usize, 1), count(catchup, "test \"CR4a host pending은"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExcept(allocator, "catchup_barrier_contract.zig", &.{

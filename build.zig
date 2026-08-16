@@ -4170,6 +4170,19 @@ pub fn build(b: *std.Build) void {
         run_cr4a_catchup_contract_tests.addArg("--maru-expect-tests=2");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_contract_tests.step);
 
+        const cr4a_catchup_host_state_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/catchup_barrier_contract.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4a host pending은"},
+        });
+        const run_cr4a_catchup_host_state_tests = b.addRunArtifact(cr4a_catchup_host_state_tests);
+        run_cr4a_catchup_host_state_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4a_step.dependOn(&run_cr4a_catchup_host_state_tests.step);
+
         const cr4a_catchup_protocol_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/protocol.zig"),

@@ -82,6 +82,119 @@ pub const Barrier = struct {
     }
 };
 
+/// Host subscription이 소유하는 one-active catch-up 상태다. `admitted`는 queue admission을 끝낸
+/// immutable barrier만 보존하고, `terminal`은 subscription 생애 동안 spent nonce 재사용을 막는다.
+/// 이 값 계약은 allocator와 socket을 모르며 실제 projection/queue commit은 host owner가 수행한다.
+pub const HostState = union(enum) {
+    idle,
+    pending: Pending,
+    admitted: Admitted,
+    terminal: Terminal,
+
+    pub const Pending = struct {
+        identity: CatchupIdentity,
+        expires_at_ns: u64,
+    };
+
+    pub const Admitted = struct {
+        barrier: Barrier,
+        expires_at_ns: u64,
+    };
+
+    pub const Terminal = struct {
+        identity: CatchupIdentity,
+    };
+
+    pub const ArmResult = enum { armed, idempotent, busy, spent, expired, invalid };
+
+    pub fn arm(
+        self: *HostState,
+        identity: CatchupIdentity,
+        now_ns: u64,
+        expires_at_ns: u64,
+    ) ArmResult {
+        if (!identity.valid()) return .invalid;
+        return switch (self.*) {
+            .idle => blk: {
+                if (expires_at_ns <= now_ns) break :blk .invalid;
+                self.* = .{ .pending = .{
+                    .identity = identity,
+                    .expires_at_ns = expires_at_ns,
+                } };
+                break :blk .armed;
+            },
+            .pending => |pending| blk: {
+                if (now_ns >= pending.expires_at_ns) {
+                    self.* = .{ .terminal = .{ .identity = pending.identity } };
+                    break :blk if (std.meta.eql(pending.identity, identity)) .expired else .busy;
+                }
+                break :blk if (std.meta.eql(pending.identity, identity)) .idempotent else .busy;
+            },
+            .admitted => |admitted| blk: {
+                if (now_ns >= admitted.expires_at_ns) {
+                    self.* = .{ .terminal = .{ .identity = admitted.barrier.identity } };
+                    break :blk if (std.meta.eql(admitted.barrier.identity, identity)) .expired else .busy;
+                }
+                break :blk if (std.meta.eql(admitted.barrier.identity, identity)) .idempotent else .busy;
+            },
+            .terminal => |terminal| if (std.meta.eql(terminal.identity, identity))
+                .spent
+            else
+                .busy,
+        };
+    }
+
+    pub fn admit(
+        self: *HostState,
+        barrier: Barrier,
+        now_ns: u64,
+    ) error{ InvalidState, InvalidIdentity, Expired }!void {
+        if (!barrier.valid()) return error.InvalidIdentity;
+        const pending = switch (self.*) {
+            .pending => |pending| pending,
+            else => return error.InvalidState,
+        };
+        if (now_ns >= pending.expires_at_ns) {
+            self.* = .{ .terminal = .{ .identity = pending.identity } };
+            return error.Expired;
+        }
+        if (!std.meta.eql(pending.identity, barrier.identity)) return error.InvalidIdentity;
+        self.* = .{ .admitted = .{
+            .barrier = barrier,
+            .expires_at_ns = pending.expires_at_ns,
+        } };
+    }
+
+    pub fn spend(self: *HostState, identity: CatchupIdentity, now_ns: u64) error{ InvalidState, Expired }!void {
+        const admitted = switch (self.*) {
+            .admitted => |admitted| admitted,
+            else => return error.InvalidState,
+        };
+        if (now_ns >= admitted.expires_at_ns) {
+            self.* = .{ .terminal = .{ .identity = admitted.barrier.identity } };
+            return error.Expired;
+        }
+        if (!std.meta.eql(admitted.barrier.identity, identity)) return error.InvalidState;
+        self.* = .{ .terminal = .{ .identity = identity } };
+    }
+
+    pub fn expire(self: *HostState, now_ns: u64) bool {
+        const identity = switch (self.*) {
+            .pending => |pending| if (now_ns >= pending.expires_at_ns)
+                pending.identity
+            else
+                return false,
+            .admitted => |admitted| if (now_ns >= admitted.expires_at_ns)
+                admitted.barrier.identity
+            else
+                return false,
+            else => return false,
+        };
+        self.* = .{ .terminal = .{ .identity = identity } };
+        return true;
+    }
+};
+
 fn fixtureIdentity() CatchupIdentity {
     return .{
         .subscription = .{ .value = 9 },
@@ -146,4 +259,115 @@ test "CR4a dormant barrier identity는 host subscription connection nonce drift�
     invalid_rows[4].host_id = 0;
     invalid_rows[5].request_nonce = 0;
     for (invalid_rows) |invalid| try std.testing.expect(!invalid.valid());
+}
+
+test "CR4a host pending은 retry admission spent expiry를 닫힌 전이로 고정한다" {
+    const identity = fixtureIdentity();
+    const barrier: Barrier = .{
+        .identity = identity,
+        .target = .{ .generation = 0, .sequence = 7 },
+    };
+    var state: HostState = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    try std.testing.expectEqual(HostState.ArmResult.idempotent, state.arm(identity, 11, 99));
+    try std.testing.expectEqual(@as(u64, 20), state.pending.expires_at_ns);
+
+    var foreign = identity;
+    foreign.request_nonce += 1;
+    const pending_before_busy = state;
+    try std.testing.expectEqual(HostState.ArmResult.busy, state.arm(foreign, 11, 20));
+    try std.testing.expectEqualDeep(pending_before_busy, state);
+    try state.admit(barrier, 12);
+    const admitted_before_retry = state;
+    try std.testing.expectEqual(HostState.ArmResult.idempotent, state.arm(identity, 12, 99));
+    try std.testing.expectEqualDeep(admitted_before_retry, state);
+    try state.spend(identity, 13);
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 13, 30));
+    try std.testing.expectEqual(HostState.ArmResult.busy, state.arm(foreign, 13, 30));
+
+    var binding_drifts = [_]CatchupIdentity{identity} ** 5;
+    binding_drifts[0].host_id += 1;
+    binding_drifts[1].subscription.value += 1;
+    binding_drifts[2].runtime_id += 1;
+    binding_drifts[3].connection.monotonic_id += 1;
+    binding_drifts[4].connection.slot_generation += 1;
+    const terminal_before = state;
+    for (binding_drifts) |drift|
+        try std.testing.expectEqual(HostState.ArmResult.busy, state.arm(drift, 13, 0));
+    try std.testing.expectEqualDeep(terminal_before, state);
+
+    state = .idle;
+    const idle_before_invalid = state;
+    try std.testing.expectEqual(HostState.ArmResult.invalid, state.arm(identity, 10, 10));
+    try std.testing.expectEqualDeep(idle_before_invalid, state);
+    var invalid_identity = identity;
+    invalid_identity.host_id = 0;
+    try std.testing.expectEqual(HostState.ArmResult.invalid, state.arm(invalid_identity, 10, 20));
+    try std.testing.expectEqualDeep(idle_before_invalid, state);
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    try std.testing.expect(!state.expire(19));
+    try std.testing.expect(state.expire(20));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 21, 30));
+
+    state = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    const pending_before = state;
+    try std.testing.expectError(error.InvalidIdentity, state.admit(.{
+        .identity = foreign,
+        .target = barrier.target,
+    }, 19));
+    try std.testing.expectEqualDeep(pending_before, state);
+    try std.testing.expectError(error.Expired, state.admit(barrier, 20));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 20, 0));
+    try std.testing.expectEqual(HostState.ArmResult.busy, state.arm(foreign, 20, 0));
+
+    state = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    try state.admit(barrier, 19);
+    const admitted_before_foreign_spend = state;
+    try std.testing.expectError(error.InvalidState, state.spend(foreign, 19));
+    try std.testing.expectEqualDeep(admitted_before_foreign_spend, state);
+    try std.testing.expectError(error.Expired, state.spend(identity, 20));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 20, 0));
+
+    for ([_]u64{ 20, 21 }) |now_ns| {
+        state = .idle;
+        try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+        try std.testing.expectError(error.Expired, state.admit(barrier, now_ns));
+        try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, now_ns, 0));
+    }
+
+    for ([_]u64{ 20, 21 }) |now_ns| {
+        state = .idle;
+        try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+        try state.admit(barrier, 19);
+        try std.testing.expectError(error.Expired, state.spend(identity, now_ns));
+        try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, now_ns, 0));
+    }
+
+    state = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    const pending_before_at_minus_one = state;
+    try std.testing.expectEqual(HostState.ArmResult.idempotent, state.arm(identity, 19, 0));
+    try std.testing.expectEqualDeep(pending_before_at_minus_one, state);
+    try std.testing.expectEqual(HostState.ArmResult.expired, state.arm(identity, 20, 0));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 20, 0));
+
+    state = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    try state.admit(barrier, 19);
+    const admitted_before_at_minus_one = state;
+    try std.testing.expectEqual(HostState.ArmResult.idempotent, state.arm(identity, 19, 0));
+    try std.testing.expectEqualDeep(admitted_before_at_minus_one, state);
+    try std.testing.expectEqual(HostState.ArmResult.expired, state.arm(identity, 20, 0));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 20, 0));
+
+    state = .idle;
+    try std.testing.expectEqual(HostState.ArmResult.armed, state.arm(identity, 10, 20));
+    try state.admit(barrier, 19);
+    const admitted_before_expire = state;
+    try std.testing.expect(!state.expire(19));
+    try std.testing.expectEqualDeep(admitted_before_expire, state);
+    try std.testing.expect(state.expire(20));
+    try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 20, 0));
 }

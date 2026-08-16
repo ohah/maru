@@ -5991,7 +5991,7 @@ pub const AppSession = struct {
             };
         }
         if (scope != .session and file_panel_ops.closeTargetHasProtectedFilePanel(self, target, scope)) {
-            self.showNoticeKey(.app_unsaved_tabs_first);
+            self.showNoticeKey(.common_unsaved_tabs_first);
             return;
         }
         // 파괴 전에 편집 중 버퍼의 스냅샷을 먼저 받는다. 요청이 나갔으면 이번 close는 보류하고, 스냅샷이
@@ -6078,7 +6078,7 @@ pub const AppSession = struct {
     fn latchSessionEndOrHold(self: *AppSession, ended: ?app.RuntimePumpTermination, uptime_ms: i64) void {
         if (self.termination_finished or self.startup_held or !self.allTabsTerminated()) return;
         if (self.hasProtectedFilePanelsForExit()) {
-            if (!self.file_panel_exit_held) self.showNoticeKey(.app_unsaved_tabs_first);
+            if (!self.file_panel_exit_held) self.showNoticeKey(.common_unsaved_tabs_first);
             self.file_panel_exit_held = true;
             return;
         }

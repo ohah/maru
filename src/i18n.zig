@@ -31,6 +31,9 @@ pub const Lang = enum { en, ko };
 ///   - `fp_root_*` — 파일 탐색기 루트 변경·제거·선택의 결과 안내(`app_session/file_panel.zig`)
 ///   - `set_*` — 세팅 페이지의 배너/토스트(`app_session/settings.zig`·`input.zig`)
 ///   - `git_*`·`ws_*`·`ad_*` — git 도크·워크스페이스 이동·에이전트 도크의 notice 토스트
+///   - `common_*` — **두 파일 이상이 같은 의미로 쓰는 문장**. 파일 접두를 쓰면 그 키가 한 곳 것처럼
+///     읽혀 다른 소비처가 안 보이므로, 공유가 확인되면 이 접두로 옮긴다(같은 문장에 키를 둘 두면
+///     이중 출처가 되어 한쪽만 고쳐지는 드리프트가 생긴다).
 pub const Table = struct {
     // ── 파일 탐색기 루트 (I3a 첫 슬라이스) ────────────────────────────────
     // 전부 `reportFileTreeRootOutcome`의 인자로만 쓰인다. 그 함수가 유일한 소비처라
@@ -99,7 +102,7 @@ pub const Table = struct {
 
     // ── notice 토스트 계속 (I3a 슬라이스 3) — app_session·settings 본체 ──
     app_attach_observer_mode: [:0]const u8,
-    app_unsaved_tabs_first: [:0]const u8,
+    common_unsaved_tabs_first: [:0]const u8,
     app_cli_install_path_missing: [:0]const u8,
     app_cli_install_binary_missing: [:0]const u8,
     app_cli_install_no_home: [:0]const u8,
@@ -231,7 +234,7 @@ pub const en: Table = .{
     .ad_open_session_not_found = "Could not find the same session already open.",
 
     .app_attach_observer_mode = "Another window controls this session, so it was attached in observer mode. The screen updates but input is not delivered.",
-    .app_unsaved_tabs_first = "Save or close the unsaved file tabs first.",
+    .common_unsaved_tabs_first = "Save or close the unsaved file tabs first.",
     .app_cli_install_path_missing = "CLI install failed: could not find the maru CLI path",
     .app_cli_install_binary_missing = "CLI install failed: could not find the maru CLI binary",
     .app_cli_install_no_home = "CLI install failed: $HOME is not set",
@@ -362,7 +365,7 @@ pub const ko: Table = .{
     .ad_open_session_not_found = "현재 열린 동일 세션을 찾지 못했습니다.",
 
     .app_attach_observer_mode = "다른 창이 이 세션을 제어 중이라 관찰 모드로 연결했습니다. 화면은 갱신되지만 입력은 전달되지 않습니다.",
-    .app_unsaved_tabs_first = "저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.",
+    .common_unsaved_tabs_first = "저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.",
     .app_cli_install_path_missing = "CLI 설치 실패: maru CLI 경로를 찾지 못했습니다",
     .app_cli_install_binary_missing = "CLI 설치 실패: maru CLI 바이너리를 찾지 못했습니다",
     .app_cli_install_no_home = "CLI 설치 실패: $HOME가 없습니다",

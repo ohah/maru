@@ -72,7 +72,10 @@ pub const inventory = [_]Proof{
     // `/dev/null`로 돌린다(hook이 `read`를 부르면 그 명령이 영영 안 끝난다). count는 2 그대로다:
     // 더한 것은 프로세스 배관과 argv/env 조립뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은
     // 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "eb406385b7b38dc87347f2ebc976d827e07403f4e256d53dd6237b6e9cc754be" },
+    // P3c-2에서 커밋 end-to-end 둘이 붙으며 움직인다(실제 `git commit`이 만들어지는가 · pre-commit
+    // hook이 거부하면 커밋이 안 만들어지고 이유가 stderr로 오는가). fixture에 `commit`·`capture`
+    // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "ad7ca83e017d4b983ac235156c230fdf1e8af8de888f948d91ee7776cb2bb2bf" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -428,6 +431,8 @@ pub const inventory = [_]Proof{
     // 편집기 가로 스크롤(N1)로 Term rt에 필드 둘이 붙는다(`editor_first_col` — 화면 맨 왼쪽 열,
     // `editor_max_cols` — 가장 긴 줄의 열 수 캐시). count는 2 그대로다 — 새 `@field` 반사가 없고
     // Client 구성·receiver 집합을 안 건드린다.
+    // P3c-2에서 또 움직인다: 커밋 실행 상태 필드 둘(`scm_commit_inflight`·`scm_commit_started_ns`),
+    // **저장소별 초안**(`scm_commit_drafts` + 해제), 그리고 그 셋을 짚는 테스트들. count는 2 그대로다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4a544ce50f51144de96ed68d11b4b88c2d84206d496e7153f2c99da296b476b3" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

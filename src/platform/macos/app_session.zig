@@ -2439,6 +2439,16 @@ pub const WebNavAction = struct { surface_id: u64, code: u8 };
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
+/// 저장소 하나의 커밋 메시지 초안. 저장소를 떠날 때 담고 돌아올 때 꺼낸다.
+pub const CommitDraft = struct {
+    repo: []u8,
+    text: []u8,
+};
+
+/// 들고 있을 초안 수 상한. 넘으면 **가장 오래된 것부터** 버린다 — 무한히 쌓으면 세션이 오래 살수록
+/// 메모리가 늘고, 사용자는 몇 달 전 저장소의 초안을 기억하지 못한다.
+pub const scm_commit_draft_max: usize = 32;
+
 /// 낙관적으로 옮겨 놓은 행(§7 — 쓰기 문서). 세션이 든다.
 pub const ScmPending = struct {
     path: []u8,
@@ -3691,11 +3701,26 @@ pub const AppSession = struct {
     /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
     scm_pending: ?ScmPending = null,
 
+    /// **저장소별 커밋 메시지 초안**(사용자 결정 2026-08-16). 저장소를 오갈 때 쓰던 글이 사라지지도,
+    /// 남의 저장소 메시지가 딸려 오지도 않는다.
+    ///
+    /// **워크트리도 자연히 갈린다** — 링크된 워크트리는 루트 경로가 다르므로 키가 다르다(`repoRootFor`가
+    /// `.git`이 파일이어도 그 디렉터리를 루트로 준다). VS Code가 워크트리를 별도 저장소 행으로 세우는
+    /// 것과 같은 단위다.
+    ///
+    /// 키는 저장소 루트 절대경로, 값은 그때까지 쓴 글이다. 둘 다 세션 allocator 소유.
+    scm_commit_drafts: std.ArrayList(CommitDraft) = .empty,
     /// 커밋 메시지 편집 상태(P3c). **`TextField`를 그대로 쓴다** — caret·선택이 바이트 오프셋이라
     /// 개행이 섞여도 성립하고, 세로 축만 `text_area`가 얹는다(text-field-editor.md §12.1).
     scm_commit_field: chrome.components.text_field.TextField = .{},
     /// 커밋 상자가 키를 받고 있나. `InputFocus.scm_commit`의 유일한 근거다.
     scm_commit_focused: bool = false,
+    /// 지금 도는 쓰기가 **커밋**인가. `scm_write_inflight`만으로는 스테이지와 커밋을 못 가른다 —
+    /// 화면 문구("커밋 중"·"오래 걸리는 중")와 메시지 파일 정리가 이 구분을 쓴다.
+    scm_commit_inflight: bool = false,
+    /// 그 커밋을 건 시각(awake 단조 시계). "오래 걸리는 중"은 이 값으로만 판정한다 — **프로세스는
+    /// 죽이지 않는다**(쓰기 문서 §3: 죽이면 index·`.git`이 어중간해진다).
+    scm_commit_started_ns: i128 = 0,
     /// 상자가 보여 줄 **첫 시각 행**(세로 스크롤). 논리 줄이 아니다(§12.3 ⑥).
     scm_commit_first_row: u32 = 0,
     /// 표시 텍스트 합성 버퍼 — 본문에 IME 조합 글자를 caret 자리에 **끼워** 만든 결과다. component는
@@ -16786,6 +16811,11 @@ pub const AppSession = struct {
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
+        for (self.scm_commit_drafts.items) |draft| { // 저장소별 초안
+            self.allocator.free(draft.repo);
+            self.allocator.free(draft.text);
+        }
+        self.scm_commit_drafts.deinit(self.allocator);
         self.metal_buffer.deinit(self.allocator);
         self.clearMeasuredTextCaches();
         self.sidebar_cells.deinit(self.allocator);
@@ -54584,6 +54614,129 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
+}
+
+test "소스 컨트롤: 워크트리에서는 `.git` 파일이 가리키는 디렉터리를 감시한다" {
+    // 워크트리의 `.git`은 디렉터리가 아니라 `gitdir: <경로>` 한 줄이 든 **파일**이고 index·HEAD는 그
+    // 경로 아래에 산다. `.git`만 감시하면 아무 일도 일어나지 않는다 — 실측(2026-08-16)으로 워크트리에서
+    // `git add` 전후 `.git` 파일의 mtime이 그대로였다. 증상은 "터미널에서 stage 했는데 목록이 그대로".
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(session.io, &root_buf);
+    const root = root_buf[0..root_len];
+
+    // ① 링크된 워크트리 — `.git`이 파일이다.
+    try tmp.dir.writeFile(session.io, .{ .sub_path = ".git", .data = "gitdir: /main/.git/worktrees/wt\n" });
+    git_ops.ensureGitWatch(session, root);
+    try std.testing.expectEqualStrings("/main/.git/worktrees/wt", session.git_watch_path.?);
+
+    // ② 형식이 아니면 **추측하지 않는다** — `<repo>/.git`으로 되돌린다(일반 저장소의 답이다).
+    try tmp.dir.writeFile(session.io, .{ .sub_path = ".git", .data = "그냥 파일\n" });
+    var expect_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expect = try std.fmt.bufPrint(&expect_buf, "{s}/.git", .{root});
+    git_ops.ensureGitWatch(session, root);
+    try std.testing.expectEqualStrings(expect, session.git_watch_path.?);
+}
+
+test "소스 컨트롤: 커밋 메시지 초안은 저장소마다 따로 든다(워크트리도 다른 저장소다)" {
+    // 목록·스크롤·선택은 저장소가 갈릴 때 버리지만 메시지는 **사용자가 쓴 글**이다. 버리면 예고 없이
+    // 사라지고, 그대로 두면 다른 저장소를 향해 쓴 글로 커밋하게 된다(§3.5.1b).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.insertCommitText(session, "a의 메시지");
+
+    // 다른 저장소로 — 상자가 비고, a의 글은 보관된다.
+    git_ops.rememberGitRepo(session, "/repo-b");
+    try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
+    scm_dock_ops.insertCommitText(session, "b의 메시지");
+
+    // 워크트리는 루트 경로가 다르므로 **다른 저장소**다 — 주 저장소의 글이 딸려 오지 않는다.
+    git_ops.rememberGitRepo(session, "/repo-a/../wt-a");
+    try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
+
+    // 돌아오면 각자 자기 글을 되찾는다.
+    git_ops.rememberGitRepo(session, "/repo-a");
+    try std.testing.expectEqualStrings("a의 메시지", session.scm_commit_field.text.items);
+    git_ops.rememberGitRepo(session, "/repo-b");
+    try std.testing.expectEqualStrings("b의 메시지", session.scm_commit_field.text.items);
+}
+
+test "소스 컨트롤: 비운 초안은 남지 않는다(비운 것도 뜻이다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommit(session);
+
+    git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.insertCommitText(session, "지울 글");
+    git_ops.rememberGitRepo(session, "/repo-b");
+    git_ops.rememberGitRepo(session, "/repo-a");
+    try std.testing.expectEqualStrings("지울 글", session.scm_commit_field.text.items);
+
+    session.scm_commit_field.clear(); // 사용자가 다 지웠다
+    git_ops.rememberGitRepo(session, "/repo-b");
+    git_ops.rememberGitRepo(session, "/repo-a");
+    try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_commit_drafts.items.len);
+}
+
+test "소스 컨트롤: 커밋할 수 없으면 그 이유를 말한다(빈 메시지·스테이지 0건)" {
+    // 버튼은 꺼진 색이어도 **눌린다**(히트 사각형은 상태와 무관하다). 눌렀는데 아무 일도 없으면
+    // 사용자는 앱이 멈춘 줄 안다 — 감추지 않고 이유를 적는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    scm_dock_ops.submitCommit(session); // 메시지가 없다
+    try std.testing.expectEqualStrings("커밋 메시지를 입력하세요", session.scm_write_error.?);
+
+    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.insertCommitText(session, "fix: 무언가");
+    scm_dock_ops.submitCommit(session); // 스테이지된 것이 없다(fixture 목록은 `.M` 하나뿐)
+    try std.testing.expectEqualStrings("스테이지된 변경이 없습니다", session.scm_write_error.?);
+    // **글자는 그대로다** — 거절이 사용자의 글을 지우면 안 된다.
+    try std.testing.expectEqualStrings("fix: 무언가", session.scm_commit_field.text.items);
+}
+
+test "소스 컨트롤: 커밋 메시지 임시 파일은 저장소 밖이다" {
+    // 저장소 안에 두면 그 파일이 목록에 뜨고, 최악에는 `add -A`가 자기를 담는다(턴 스냅샷 index가
+    // 같은 이유로 캐시에 산다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = scm_dock_ops.testCommitMessagePath(session, &buf) orelse return error.SkipZigTest;
+    try std.testing.expect(std.mem.indexOf(u8, path, "/.cache/maru/") != null);
+    git_ops.rememberGitRepo(session, "/repo");
+    try std.testing.expect(!std.mem.startsWith(u8, path, "/repo"));
 }
 
 test "소스 컨트롤: 도크를 접으면 남은 조합이 확정된다(지울 수 없는 글자를 남기지 않는다)" {

@@ -118,10 +118,17 @@ pub const Props = struct {
     commit_rows: u32 = 1,
     /// 커밋 버튼을 켤 수 있나. **실제 index 상태로만 정한다**(쓰기 문서 §7 — 낙관하지 않는다).
     commit_enabled: bool = false,
+    /// 커밋이 도는 중인가. **버튼이 그 사실을 말한다** — 눌렀는데 아무 표시가 없으면 사용자는 다시
+    /// 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
+    commit_run: CommitRun = .idle,
     /// 커밋 상자의 **편집 상태 스냅샷**. component는 편집하지 않는다 — host가 `TextField`로 편집하고
     /// 그 결과만 여기 싣는다(props는 immutable이고, 편집 상태가 둘이면 caret이 갈린다).
     commit_edit: CommitEdit = .{},
 };
+
+/// 커밋 실행 상태. `slow`는 **문구일 뿐**이다 — 상한을 넘겨도 프로세스를 죽이지 않는다(쓰기 문서 §3:
+/// hook은 테스트 전체를 돌 수도 있고, 중간에 죽이면 index·`.git`이 어중간해진다).
+pub const CommitRun = enum { idle, running, slow };
 
 /// 커밋 상자의 편집 상태(§12 — 세로 축만 갖는 얇은 층). 가로 축(caret 열·선택 span)은 여전히
 /// `text_field.fieldLayout`이 소유하고, 여기 있는 것은 그 함수에 넘길 **오프셋**뿐이다.

@@ -1805,7 +1805,112 @@ const WriteFixture = struct {
     fn run(self: *WriteFixture, allocator: std.mem.Allocator, kind: git_write_command.Kind, paths: []const []const u8) !WriteOutput {
         return runWriteSync(allocator, kind, self.exe, self.root, paths, null);
     }
+
+    /// 커밋 — 메시지 파일을 함께 넘긴다(§2: `-m`이 아니다).
+    fn commit(self: *WriteFixture, allocator: std.mem.Allocator, message_file: []const u8) !WriteOutput {
+        return runWriteSync(allocator, .commit, self.exe, self.root, &.{}, message_file);
+    }
+
+    /// 준비용 git의 **출력**을 받는다(로그 확인용). `plainGit`과 같은 조립을 쓰되 stdout을 돌려준다.
+    fn capture(self: *WriteFixture, allocator: std.mem.Allocator, args: []const []const u8) ![]u8 {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        try argv.append(allocator, self.exe);
+        try argv.append(allocator, "-C");
+        try argv.append(allocator, self.root);
+        for (args) |a| try argv.append(allocator, a);
+        var store: std.ArrayList([:0]u8) = .empty;
+        defer {
+            for (store.items) |a| allocator.free(a);
+            store.deinit(allocator);
+        }
+        var ptrs: std.ArrayList(?[*:0]const u8) = .empty;
+        defer ptrs.deinit(allocator);
+        for (argv.items) |a| {
+            const c = try allocator.dupeZ(u8, a);
+            try store.append(allocator, c);
+            try ptrs.append(allocator, c.ptr);
+        }
+        try ptrs.append(allocator, null);
+        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stdout_only);
+        allocator.free(spawned.stderr_bytes);
+        return spawned.stdout_bytes;
+    }
 };
+
+test "쓰기 end-to-end: 커밋이 실제로 만들어지고 메시지가 파일에서 온다" {
+    // §2가 `-m`을 금지한 근거를 **실행으로** 고정한다: 여러 줄·따옴표·비ASCII가 든 메시지가 argv를
+    // 거치지 않고 그대로 커밋에 들어간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.zig", "hello\n");
+    var staged = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+
+    // 메시지 파일은 **저장소 밖**이다(제품도 캐시 디렉터리에 둔다) — 안에 두면 그 파일이 목록에 뜬다.
+    var msg_dir = std.testing.tmpDir(.{});
+    defer msg_dir.cleanup();
+    var msg_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_root_len = try msg_dir.dir.realPath(fixture_io, &msg_root_buf);
+    var msg_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_path = try std.fmt.bufPrint(&msg_path_buf, "{s}/msg", .{msg_root_buf[0..msg_root_len]});
+    const message = "fix: 따옴표 \"와\" 여러 줄\n\n본문 — 비ASCII·`백틱`·$변수\n";
+    try msg_dir.dir.writeFile(fixture_io, .{ .sub_path = "msg", .data = message });
+
+    var committed = try fx.commit(allocator, msg_path);
+    defer committed.deinit(allocator);
+    try testing.expect(committed.ok());
+
+    // 커밋 메시지가 **원문 그대로**인가.
+    const log = try fx.capture(allocator, &.{ "log", "-1", "--pretty=%B" });
+    defer allocator.free(log);
+    try testing.expect(std.mem.indexOf(u8, log, "fix: 따옴표 \"와\" 여러 줄") != null);
+    try testing.expect(std.mem.indexOf(u8, log, "본문 — 비ASCII·`백틱`·$변수") != null);
+
+    // 그리고 작업트리가 깨끗해졌다(스테이지된 것이 커밋으로 넘어갔다).
+    const st = try fx.status(allocator);
+    defer allocator.free(st);
+    try testing.expect(std.mem.indexOf(u8, st, "a.zig") == null);
+}
+
+test "쓰기 end-to-end: pre-commit hook이 거부하면 커밋이 안 만들어지고 그 이유가 stderr로 온다" {
+    // §3이 hook을 막지 않기로 한 근거다 — 사용자가 설치한 검사는 우리 커밋에도 걸려야 하고,
+    // 거부 사유가 안 보이면 무엇을 고쳐야 할지 모른다(§5).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = worker_allocator;
+    var fx = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fx.deinit(allocator);
+
+    try fx.write("a.zig", "hello\n");
+    var staged = try fx.run(allocator, .stage, &.{"a.zig"});
+    defer staged.deinit(allocator);
+    try testing.expect(staged.ok());
+
+    try fx.write(".git/hooks/pre-commit", "#!/bin/sh\necho '린트 실패: a.zig' 1>&2\nexit 1\n");
+    try fx.chmodExec(".git/hooks/pre-commit"); // 안 하면 git이 hook을 조용히 건너뛴다
+
+    var msg_dir = std.testing.tmpDir(.{});
+    defer msg_dir.cleanup();
+    var msg_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_root_len = try msg_dir.dir.realPath(fixture_io, &msg_root_buf);
+    var msg_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_path = try std.fmt.bufPrint(&msg_path_buf, "{s}/msg", .{msg_root_buf[0..msg_root_len]});
+    try msg_dir.dir.writeFile(fixture_io, .{ .sub_path = "msg", .data = "wip\n" });
+
+    var rejected = try fx.commit(allocator, msg_path);
+    defer rejected.deinit(allocator);
+    try testing.expect(!rejected.ok()); // hook이 막았다
+    try testing.expect(std.mem.indexOf(u8, rejected.stderr_bytes, "린트 실패") != null); // 이유가 온다
+
+    // 커밋이 **안 만들어졌다** — 실패를 성공으로 추정하지 않는 근거다(§5).
+    const log = try fx.capture(allocator, &.{ "log", "--oneline" });
+    defer allocator.free(log);
+    try testing.expectEqual(@as(usize, 0), log.len);
+}
 
 test "쓰기 end-to-end: stage → unstage 왕복이 index에 실제로 반영된다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

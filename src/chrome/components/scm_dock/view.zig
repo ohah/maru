@@ -59,7 +59,8 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
     bytes += props.empty_notice.len;
     // 커밋 줄. 입력은 안내 문구와 본문 중 **긴 쪽**만 나간다(둘 중 하나만 그린다).
-    bytes += @max(commit_placeholder.len, props.commit_message.len) + commit_label.len + icon_bytes;
+    bytes += @max(commit_placeholder.len, props.commit_message.len) + icon_bytes +
+        @max(commit_label.len, @max(commit_running_label.len, commit_slow_label.len));
 
     for (props.items) |item| switch (item) {
         // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
@@ -208,7 +209,14 @@ pub fn view(
         // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
         // 라벨은 **가운데**다(채운 버튼의 관례 — 오른쪽 끝에 붙이면 그 넓은 면이 왜 칠해졌는지 안 보인다).
         const role = commitLabelRole(rect, state, tk, props.commit_enabled);
-        try writer.centered(rect, commit_label, role, .control);
+        // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
+        // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
+        const label = switch (props.commit_run) {
+            .idle => commit_label,
+            .running => commit_running_label,
+            .slow => commit_slow_label,
+        };
+        try writer.centered(rect, label, role, .control);
         // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다(P3c 이후). 지금은 그 자리를 말만 한다.
         try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
     }
@@ -245,6 +253,10 @@ fn commitLabelRole(
 const commit_placeholder = "커밋 메시지…";
 /// 커밋 버튼 라벨.
 const commit_label = "커밋";
+/// 커밋이 도는 동안의 라벨.
+const commit_running_label = "커밋 중…";
+/// 상한을 넘겨도 **죽이지 않는다**(쓰기 문서 §3) — 그래서 "실패"가 아니라 사실을 적는다.
+const commit_slow_label = "커밋이 오래 걸리는 중";
 /// 랩 결과를 담을 시각 행 상한. **상자가 보여 줄 행 수가 아니라** 메시지 전체의 행 수다 — caret이
 /// 몇 번째 줄에 있는지 알려면 보이지 않는 줄까지 세야 한다. 넘치면 `wrap`이 `truncated`로 말하고,
 /// 그때 caret은 마지막 행으로 붙는다(그 사실을 감추는 것보다 낫다).

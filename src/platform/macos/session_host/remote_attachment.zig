@@ -832,6 +832,27 @@ pub fn decodeStatus(
     bytes: []const u8,
     state: *State,
 ) DecodeError!Status {
+    const status = try decodeStatusProjection(allocator, bytes, state);
+    if (status.controller != (state.role == .controller)) return error.Malformed;
+    return status;
+}
+
+/// Reconnect transfer owns the role mismatch as an authority-conflict outcome rather than
+/// laundering a valid foreign-controller observation into a malformed transport failure.
+pub fn decodeStatusForTransfer(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    state: *State,
+) DecodeError!Status {
+    if (state.role != .observer) return error.Malformed;
+    return decodeStatusProjection(allocator, bytes, state);
+}
+
+fn decodeStatusProjection(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    state: *State,
+) DecodeError!Status {
     var parsed = try parseObject(allocator, bytes);
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -845,8 +866,7 @@ pub fn decodeStatus(
         .controller = boolField(result, "controller") orelse return error.Malformed,
     };
     if (status.stream_id != state.stream_id or
-        status.controller_generation < state.controller_generation or
-        status.controller != (state.role == .controller))
+        status.controller_generation < state.controller_generation)
         return error.Malformed;
     state.controller_generation = status.controller_generation;
     return status;

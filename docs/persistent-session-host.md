@@ -721,10 +721,10 @@ resync_needed,frame_summary_ready,frame_summary,observation,connection_generatio
 generation의 resize wire sequence·baseline과 pump summary를 뜻한다. payload queue인 `direct_input`, `direct_input_offset`,
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
-CR3c2의 process/slot/node incarnation 결속과 CR4a staged receipt owner까지 포함한 현재
-`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,376/10,192`, ReleaseFast `3,360/10,144`다.
+CR3c2의 process/slot/node incarnation 결속, CR4a staged receipt owner와 CR4b stable mutation owner까지 포함한 현재
+`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,392/11,248`, ReleaseFast `3,376/11,200`다.
 CR3c2의 authority seal 128 KiB와 screen sequence 64 KiB에 더해 staged receipt owner는
-runtime당 288바이트, 4,096 runtime 상한에서 1,152 KiB를 추가한다. CR2a는 이 물리적
+runtime당 304바이트, 4,096 runtime 상한에서 1,216 KiB를 추가한다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -908,6 +908,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    read-only 화면과 notice로 남긴다. `old_valid`의 `published_old` 복귀는 takeover 송신 0과 old controller generation 및
    old transport usability가 모두 증명된 경우만 허용한다. unavailable 종료는 job/reconnect pin만 풀며 mutation gate를
    writable로 푼다는 뜻이 아니다.
+   exact status/takeover 오류 중 `invalid_generation | unauthorized | runtime_not_found`만 authority conflict 증거로
+   분류한다. `resource_exhausted | invalid_request | internal`은 다른 controller의 증거로 세탁하지 않고 typed
+   pre-takeover failure로 fail-close한다. controller transfer owner는 첫 allocation 전에 one-shot committing 상태를
+   게시해 allocator callback 재진입도 두 번째 status/takeover를 발행하지 못한다.
 6. runtime generation은 attachment/screen/observation/wire queue를 `drop stream/buffer -> attachment/screen ->
    observation/queue` 순으로 retire한다. GUI Client operation은 coordinator owner turn 하나로 직렬화하고 reconnect가 old
    Client의 새 RPC/frame admission을 먼저 닫는다. `ClientSlot`은 macOS main-thread confined이며
@@ -2241,8 +2245,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 10,192/ReleaseFast 10,144 bytes이며 owner 외 remainder는
-   각각 7,472/7,424 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,248/ReleaseFast 11,200 bytes이며
+   `PendingEventOwner` 외 remainder는 각각 8,528/8,480 bytes다. CR4b가 stable shell에 inline으로 둔
+   `MutationOwner` 576/560 bytes는 reconnect freeze 중 active lease와 generation을 보존하는 제품 권위이고,
+   paused input metadata와 final-address paste store는 추가 464/480 bytes(runtime 상한에서 1,856/1,920 KiB)로
+   원문 key/IME/control을 남기지 않고 완전한 paste 하나의 bounded owner만 결속한다.
+   `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
    budget으로 둔다. 최대 4,096 runtime에서 두 inline owner의 aggregate 상한은 17 MiB다. 이 size나 aggregate 증가는
    별도 문서 변경 없이는 허용하지 않는다.
 

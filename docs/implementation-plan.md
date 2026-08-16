@@ -1173,6 +1173,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    순회하고 pre-publication은 old graph mutation 0, post-publication은 unavailable shell과 node/generation 보존 및 Client
    fail-close, candidate/receipt/ledger final zero를 고정한다. 이 행까지 green이면 CR4a를 완료로 세지만 controller status/takeover,
    RemoteGeneration publication, forced first resize와 input은 CR4b·CR4c 전까지 0이다.
+   **CR4b는 CR4a가 이미 넘은 Client publication 경계를 되돌리지 않는다.** 같은 adapter의 replacement를 게시하면서 old
+   attachment를 retirement하고 stable shell을 unavailable generation으로 전진시켰으므로, CR4b의 pre-takeover 실패도
+   이 제품 경로에서는 old writable을 복원하지 않는다. CR4a publication은 mutation owner를 old generation에 그대로
+   두어 placeholder generation의 새 input과 queue pump를 모두 거부하고 기존 queue를 보존한다. exact staged receipt 뒤
+   runtime queue를 mutation seal로 닫은 다음 같은 CR4a absolute
+   deadline 아래 `controller.status`와 generation-CAS `controller.takeover`를 각각 최대 한 번 실행한다. exact takeover
+   response와 buffered revoke 부재가 함께 증명된 경우만 `new_controller_evidenced`로 봉인하되 local attachment와 cleanup
+   binding은 CR4c publication 전까지 observer quarantine을 유지한다. request byte가 일부라도 송신된 뒤
+   response를 잃으면 `takeover_sent_unknown`, status가 다른 controller를 증명하거나 CAS가 거부되면
+   `authority_conflict`로 봉인한다. 뒤의 두 결과는 자동 takeover 재시도·old input 재개·candidate publication이 모두 0이고
+   CR4c가 소비할 frozen-unavailable ledger만 남긴다. observer conflict는 새 연결 여부를 식별할 transfer receipt가 없으므로
+   status를 다시 읽어 자기 요청 성공으로 추정하지 않는다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

@@ -4409,6 +4409,95 @@ pub fn build(b: *std.Build) void {
         session_host_cr4a_step.dependOn(&run_cr4a_boundary_tests.step);
         boundary_step.dependOn(&run_cr4a_boundary_tests.step);
     }
+    const session_host_cr4b_step = b.step(
+        "test-session-host-cr4b",
+        "CR4b stable mutation seal and controller takeover gates",
+    );
+    session_host_cr4b_step.dependOn(session_host_cr4a_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4b_optimize| {
+        const cr4b_mutation_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_mutation_seal.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+            }),
+            .filters = &.{"CR4b mutation owner는"},
+        });
+        const run_cr4b_mutation_contract_tests = b.addRunArtifact(cr4b_mutation_contract_tests);
+        run_cr4b_mutation_contract_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4b_step.dependOn(&run_cr4b_mutation_contract_tests.step);
+
+        const cr4b_paused_paste_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_mutation_seal.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+            }),
+            .filters = &.{"CR4b paused paste는"},
+        });
+        const run_cr4b_paused_paste_tests = b.addRunArtifact(cr4b_paused_paste_tests);
+        run_cr4b_paused_paste_tests.addArg("--maru-expect-tests=2");
+        session_host_cr4b_step.dependOn(&run_cr4b_paused_paste_tests.step);
+
+        const cr4b_runtime_mutation_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4b stable queue seal은"},
+        });
+        const run_cr4b_runtime_mutation_tests = b.addRunArtifact(cr4b_runtime_mutation_tests);
+        run_cr4b_runtime_mutation_tests.addArg("--maru-expect-tests=2");
+        run_cr4b_runtime_mutation_tests.setCwd(b.path("."));
+        session_host_cr4b_step.dependOn(&run_cr4b_runtime_mutation_tests.step);
+
+        const cr4b_runtime_controller_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4b actual socket controller takeover는"},
+        });
+        const run_cr4b_runtime_controller_tests = b.addRunArtifact(cr4b_runtime_controller_tests);
+        run_cr4b_runtime_controller_tests.addArg("--maru-expect-tests=2");
+        run_cr4b_runtime_controller_tests.setCwd(b.path("."));
+        session_host_cr4b_step.dependOn(&run_cr4b_runtime_controller_tests.step);
+
+        const cr4b_backend_mutation_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4b actual host job은"},
+        });
+        const run_cr4b_backend_mutation_tests = b.addRunArtifact(cr4b_backend_mutation_tests);
+        run_cr4b_backend_mutation_tests.addArg("--maru-expect-tests=3");
+        run_cr4b_backend_mutation_tests.setCwd(b.path("."));
+        session_host_cr4b_step.dependOn(&run_cr4b_backend_mutation_tests.step);
+
+        const cr4b_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr4b_boundary.zig"),
+                .target = target,
+                .optimize = cr4b_optimize,
+            }),
+            .filters = &.{"CR4b 경계는"},
+        });
+        const run_cr4b_boundary_tests = b.addRunArtifact(cr4b_boundary_tests);
+        run_cr4b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr4b_boundary_tests.setCwd(b.path("."));
+        session_host_cr4b_step.dependOn(&run_cr4b_boundary_tests.step);
+        boundary_step.dependOn(&run_cr4b_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

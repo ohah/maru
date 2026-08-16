@@ -232,7 +232,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
     const build_cr4a_start = std.mem.indexOf(u8, build, "const session_host_cr4a_step =").?;
-    const build_cr4a_end = std.mem.indexOfPos(u8, build, build_cr4a_start, "const b3_1_boundary_tests =").?;
+    const build_cr4a_end = std.mem.indexOfPos(u8, build, build_cr4a_start, "const session_host_cr4b_step =").?;
     const build_cr4a = build[build_cr4a_start..build_cr4a_end];
 
     try std.testing.expectEqual(@as(usize, 4), count(contract, "attach_observer,"));
@@ -363,7 +363,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(host_adapter, "pub fn preflightAttachmentConnectionUsable("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn preflightAttachmentConnectionUsable("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.failCloseAttachmentConnection(reason)"));
-    try std.testing.expectEqual(@as(usize, 4), count(remote_backend, "adapter.preflightAttachmentConnectionUsable()"));
+    try std.testing.expectEqual(@as(usize, 5), count(remote_backend, "adapter.preflightAttachmentConnectionUsable()"));
     try std.testing.expectEqual(@as(usize, 1), count(process_seal, "pub fn hostReconnectJobSeal("));
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -502,19 +502,22 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "readInitialSnapshotUntil"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "readInitialSnapshotUntil"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "readInitialSnapshotUntil"));
-    try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "catchupStageAuthorityMatches"));
-    try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "catchupStageAuthorityMatches"));
+    // CR4a cleanup validation + CR4b deadline-first controller transfer validation.
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "catchupStageAuthorityMatches"));
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "catchupStageAuthorityMatches"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "prepareReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(remote_backend, "prepareReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "validateReconnectObserverStageForCleanup"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(remote_backend, "validateReconnectObserverStageForCleanup"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "abortReconnectObserverStage"));
-    try std.testing.expectEqual(@as(usize, 1), countIdentifier(remote_backend, "abortReconnectObserverStage"));
+    // CR4a issuer teardown + CR4b usable authority-conflict teardown.
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(remote_backend, "abortReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "prepareObserverReconnectCandidateUntil"));
     try std.testing.expectEqual(@as(usize, 7), countIdentifier(remote_backend, "prepareHostReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn catchupProjection("));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "catchupProjection"));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "catchupProjection"));
+    // CR4a prepare/validate 두 경로와 CR4b controller-evidence 재검증 한 경로.
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "catchupProjection"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductIdentifiersExcept(allocator, "catchupProjection", &.{
@@ -585,10 +588,13 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(remote_attachment, "pumpCatchupScreen"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "pumpCatchupScreen"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "prepareCatchupStage"));
+    // CR4a public validator와 CR4b takeover preflight가 같은 canonical validator를 공유한다.
+    // CR4a public validation remains declaration+test; CR4b uses the raw-safe authority matcher.
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "validateCatchupStage"));
     try std.testing.expectEqual(@as(usize, 10), countIdentifier(runtime, "validateCatchupStage"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "abortCatchupStage"));
-    try std.testing.expectEqual(@as(usize, 4), countIdentifier(runtime, "abortCatchupStage"));
+    // CR4a coordinator consumers exact2 + CR4a/CR4b hostile fixture consumers exact4.
+    try std.testing.expectEqual(@as(usize, 6), countIdentifier(runtime, "abortCatchupStage"));
     try std.testing.expectEqual(@as(usize, 1), count(server, ".subscription_id = subscription_text"));
     try std.testing.expectEqual(@as(usize, 1), count(server, ".connection_id = connection_id_text"));
     try std.testing.expectEqual(@as(usize, 1), count(server, ".connection_generation = connection_generation_text"));

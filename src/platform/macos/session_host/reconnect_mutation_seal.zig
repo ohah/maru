@@ -96,10 +96,21 @@ pub const MutationOwner = struct {
 
     pub fn beginSeal(self: *MutationOwner, shell_generation: u64, input_epoch: u64) !SealProgress {
         try self.validateOwner();
-        if (self.lifecycle != .open or shell_generation != self.shell_generation or
+        if ((self.lifecycle != .open and self.lifecycle != .sealing) or
+            shell_generation != self.shell_generation or
             input_epoch != self.input_epoch) return error.InvalidAuthority;
         self.lifecycle = .sealing;
         return if (self.active_leases == 0) .ready else .waiting_for_leases;
+    }
+
+    /// Seal 준비가 allocation/preflight 단계에서 실패했을 때만 old generation mutation을 다시 연다.
+    /// 이미 payload를 wipe했거나 forward publication을 시작한 caller는 이 rollback leaf를 호출할 수 없다.
+    pub fn abortSeal(self: *MutationOwner, shell_generation: u64, input_epoch: u64) !void {
+        try self.validateOwner();
+        if (self.lifecycle != .sealing or self.active_leases != 0 or
+            shell_generation != self.shell_generation or input_epoch != self.input_epoch)
+            return error.InvalidAuthority;
+        self.lifecycle = .open;
     }
 
     pub fn finishSeal(self: *MutationOwner, classification: SealClassification) !SealResult {
@@ -118,8 +129,20 @@ pub const MutationOwner = struct {
         };
     }
 
+    pub fn admits(
+        self: *const MutationOwner,
+        shell_generation: u64,
+        input_epoch: u64,
+    ) bool {
+        self.validateOwner() catch return false;
+        return self.lifecycle == .open and self.shell_generation == shell_generation and
+            self.input_epoch == input_epoch;
+    }
+
     fn validateOwner(self: *const MutationOwner) !void {
-        if (self.self_addr != @intFromPtr(self) or self.owner_thread == null or
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        if (lifecycle_raw > @intFromEnum(MutationLifecycle.sealed_ambiguous) or
+            self.self_addr != @intFromPtr(self) or self.owner_thread == null or
             self.owner_thread.? != std.Thread.getCurrentId() or
             self.shell_generation == 0 or self.input_epoch == 0 or self.next_ordinal == 0 or
             self.lifecycle == .pristine or !self.ordinalsValid()) return error.InvalidAuthority;
@@ -138,6 +161,22 @@ pub const MutationOwner = struct {
         return count == self.active_leases;
     }
 };
+
+test "CR4b mutation owner는 seal 동안 새 mutation을 막고 기존 lease drain만 허용한다" {
+    var owner: MutationOwner = .{};
+    try owner.initInPlace(2, 7);
+
+    var lease: MutationLease = .{};
+    try owner.beginMutation(2, 7, &lease);
+    try std.testing.expectEqual(SealProgress.waiting_for_leases, try owner.beginSeal(2, 7));
+    var blocked: MutationLease = .{};
+    try std.testing.expectError(error.ReconnectBusy, owner.beginMutation(2, 7, &blocked));
+
+    try owner.finishMutation(&lease);
+    try std.testing.expectEqual(SealProgress.ready, try owner.beginSeal(2, 7));
+    try std.testing.expectEqual(SealResult.sealed_clean, try owner.finishSeal(.clean));
+    try std.testing.expect(!owner.admits(2, 7));
+}
 
 pub const GlobalPasteBudget = struct {
     self_addr: usize = 0,
@@ -172,6 +211,16 @@ pub const GlobalPasteBudget = struct {
     pub fn reservedBytes(self: *const GlobalPasteBudget) usize {
         if (!self.valid()) return 0;
         return self.live_bytes.load(.acquire);
+    }
+
+    pub fn initialized(self: *const GlobalPasteBudget) bool {
+        return self.valid();
+    }
+
+    pub fn deinit(self: *GlobalPasteBudget) void {
+        if (!self.valid() or self.live_bytes.load(.acquire) != 0)
+            @panic("paused paste global budget deinit with live ownership");
+        self.* = .{};
     }
 
     fn valid(self: *const GlobalPasteBudget) bool {
@@ -309,6 +358,10 @@ pub const PausedPasteStore = struct {
         self.destroyStaging();
         self.destroyPaste();
         self.* = .{};
+    }
+
+    pub fn initialized(self: *const PausedPasteStore) bool {
+        return self.self_addr == @intFromPtr(self);
     }
 
     pub fn hasPausedPaste(self: *const PausedPasteStore) bool {
@@ -590,3 +643,88 @@ pub const testing_api = if (@import("builtin").is_test) struct {
         }
     }
 } else struct {};
+
+test "CR4b paused paste는 runtime global cap TTL과 secure wipe를 exact 정산한다" {
+    const allocator = std.testing.allocator;
+    var budget: GlobalPasteBudget = .{};
+    try budget.initInPlace();
+    defer budget.deinit();
+    var store: PausedPasteStore = .{};
+    try store.initInPlace(
+        allocator,
+        &budget,
+        [_]u8{0x2a} ++ [_]u8{0} ** 15,
+        2,
+        7,
+    );
+    defer store.deinit();
+
+    var trace: testing_api.WipeTrace = .{};
+    testing_api.armWipeTrace(&trace);
+    defer testing_api.disarmWipeTrace();
+    const source = try allocator.dupe(u8, "secret");
+    defer allocator.free(source);
+    try store.capturePasteAt(source, 9, 100);
+    try std.testing.expect(std.mem.allEqual(u8, source, 0));
+    try std.testing.expectEqual(@as(usize, 6), budget.reservedBytes());
+    const projection = (try store.projection()).?;
+    try std.testing.expectEqual(@as(u64, 9), projection.id);
+    try std.testing.expectEqual(@as(u64, 6), projection.full_length);
+    try std.testing.expectEqual(@as(i96, 100 + ttl_ns), projection.expires_at_ns);
+    try std.testing.expect(!(try store.expireAt(projection.expires_at_ns - 1)));
+    try std.testing.expect(try store.expireAt(projection.expires_at_ns));
+    try std.testing.expectEqual(@as(usize, 0), budget.reservedBytes());
+    try std.testing.expectEqual(@as(usize, 2), trace.calls);
+    try std.testing.expectEqual(@as(usize, 12), trace.bytes);
+
+    const over_cap = try allocator.alloc(u8, max_paste_bytes + 1);
+    defer allocator.free(over_cap);
+    @memset(over_cap, 'x');
+    const over_cap_before = over_cap[0];
+    try std.testing.expectError(error.PasteTooLarge, store.capturePasteAt(over_cap, 10, 200));
+    try std.testing.expectEqual(over_cap_before, over_cap[0]);
+    try std.testing.expectEqual(@as(usize, 0), budget.reservedBytes());
+
+    try budget.reserve(max_global_bytes);
+    defer budget.release(max_global_bytes);
+    var one = [_]u8{'x'};
+    try std.testing.expectError(error.GlobalPasteLimit, store.capturePasteAt(&one, 11, 200));
+    try std.testing.expectEqual(@as(u8, 'x'), one[0]);
+    try std.testing.expectEqual(max_global_bytes, budget.reservedBytes());
+}
+
+test "CR4b paused paste는 full resend를 single use로 이동하고 변조를 거부한다" {
+    const allocator = std.testing.allocator;
+    var budget: GlobalPasteBudget = .{};
+    try budget.initInPlace();
+    defer budget.deinit();
+    var store: PausedPasteStore = .{};
+    try store.initInPlace(
+        allocator,
+        &budget,
+        [_]u8{0x2b} ++ [_]u8{0} ** 15,
+        3,
+        8,
+    );
+    defer store.deinit();
+    const source = try allocator.dupe(u8, "paste-body");
+    defer allocator.free(source);
+    try store.capturePaste(source, 12, std.testing.io);
+    try store.prepareResend(3, 9, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 20), budget.reservedBytes());
+    try std.testing.expectError(error.InvalidAuthority, store.prepareResend(3, 10, std.testing.io));
+
+    var prepared: PreparedResend = .{};
+    try store.consumeResend(&prepared);
+    try std.testing.expectEqualStrings("paste-body", try prepared.bytesView());
+    try std.testing.expectEqual(@as(usize, 10), budget.reservedBytes());
+    try std.testing.expect((try store.projection()) == null);
+    var copied = prepared;
+    try std.testing.expectError(error.InvalidAuthority, copied.bytesView());
+    testing_api.corruptResendByte(&prepared, 0);
+    try std.testing.expectError(error.InvalidAuthority, prepared.bytesView());
+    testing_api.corruptResendByte(&prepared, 0);
+    prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), budget.reservedBytes());
+    try std.testing.expectError(error.InvalidAuthority, store.consumeResend(&prepared));
+}

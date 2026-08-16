@@ -114,18 +114,24 @@ pub const GenerationAttachment = struct {
     catchup_stage_owner: CatchupStageOwner = .{},
 
     const CatchupStageOwner = struct {
-        const State = enum(u8) { idle, building, staged };
+        const State = enum(u8) { idle, building, staged, controller_committing, controller_evidenced };
 
         state: State = .idle,
         next_generation: u64 = 1,
         active_generation: u64 = 0,
+        controller_generation: u64 = 0,
         seal: u64 = 0,
         canonical: catchup_stage_contract.PreparedStage = .{},
 
         fn stateRawValid(self: *const CatchupStageOwner) bool {
             const raw = @as(*const u8, @ptrCast(&self.state)).*;
             return switch (raw) {
-                @intFromEnum(State.idle), @intFromEnum(State.building), @intFromEnum(State.staged) => true,
+                @intFromEnum(State.idle),
+                @intFromEnum(State.building),
+                @intFromEnum(State.staged),
+                @intFromEnum(State.controller_committing),
+                @intFromEnum(State.controller_evidenced),
+                => true,
                 else => false,
             };
         }
@@ -133,12 +139,14 @@ pub const GenerationAttachment = struct {
         fn pristine(self: *const CatchupStageOwner) bool {
             return self.stateRawValid() and self.state == .idle and
                 self.next_generation == 1 and self.active_generation == 0 and
+                self.controller_generation == 0 and
                 self.seal == 0 and self.canonical.pristine();
         }
 
         fn resetActive(self: *CatchupStageOwner) void {
             self.state = .idle;
             self.active_generation = 0;
+            self.controller_generation = 0;
             self.seal = 0;
             self.canonical = .{};
         }
@@ -925,6 +933,231 @@ pub const GenerationAttachment = struct {
         );
     }
 
+    pub const ControllerTransferOutcome = union(enum) {
+        new_controller_evidenced: u64,
+        authority_conflict,
+        takeover_sent_unknown,
+        pre_takeover_failed,
+    };
+
+    /// CR4b controller promotion은 caught-up observer의 same connection/stream에서만 수행한다.
+    /// status와 generation-CAS takeover는 같은 absolute deadline을 공유하며 takeover call이
+    /// 시작된 뒤의 불확실성은 재시도하지 않고 closed outcome으로 남긴다.
+    pub fn executeControllerTakeoverUntil(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!ControllerTransferOutcome {
+        if (deadline.expires_at_ns != stage.deadline_expires_at_ns or
+            !self.catchupStageAuthorityMatches(stage))
+            return error.InvalidAuthority;
+        // Reserve the one-shot transfer before the first allocator or transport callback. A
+        // callback that reenters this API must not issue a second status/takeover transaction.
+        self.catchup_stage_owner.state = .controller_committing;
+        defer {
+            if (self.catchup_stage_owner.stateRawValid() and
+                self.catchup_stage_owner.state == .controller_committing)
+                self.catchup_stage_owner.state = .staged;
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch {};
+            return .pre_takeover_failed;
+        }
+        const capabilities = self.transport.capabilities() catch return error.InvalidAuthority;
+        if (!capabilities.controller_transfer or self.payloadConst().state.role != .observer) {
+            self.poison(.local_invariant_violation) catch {};
+            return .pre_takeover_failed;
+        }
+        const allocator = self.payloadConst().allocator;
+        const stream_id = self.payloadConst().state.stream_id;
+        const status_params = remote_attachment.statusParams(allocator, stream_id) catch {
+            self.poison(.local_resource_exhausted) catch {};
+            return .pre_takeover_failed;
+        };
+        defer allocator.free(status_params);
+        const status_response = self.batch_adapter.callControllerUntil(
+            "controller.status",
+            status_params,
+            deadline,
+        ) catch |err| {
+            self.poison(switch (err) {
+                error.OutOfMemory => .local_resource_exhausted,
+                error.DeadlineExceeded => .read_timeout,
+                else => .transport_read_failure,
+            }) catch {};
+            return .pre_takeover_failed;
+        };
+        defer allocator.free(status_response);
+        const status_wire_error = remote_attachment.decodeWireError(allocator, status_response) catch |err| {
+            self.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation) catch {};
+            return .pre_takeover_failed;
+        };
+        if (status_wire_error) |wire_error| return switch (wire_error) {
+            .invalid_generation, .unauthorized, .runtime_not_found => blk: {
+                if (self.hasBufferedControllerRevoke()) {
+                    self.poison(.response_correlation_lost) catch {};
+                    break :blk .pre_takeover_failed;
+                }
+                break :blk .authority_conflict;
+            },
+            .resource_exhausted, .invalid_request, .internal => blk: {
+                self.poison(.local_invariant_violation) catch {};
+                break :blk .pre_takeover_failed;
+            },
+            else => unreachable,
+        };
+        var scratch = self.payloadConst().state;
+        const status = remote_attachment.decodeStatusForTransfer(
+            allocator,
+            status_response,
+            &scratch,
+        ) catch |err| {
+            self.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation) catch {};
+            return .pre_takeover_failed;
+        };
+        if (self.hasBufferedControllerRevoke()) {
+            self.poison(.response_correlation_lost) catch {};
+            return .pre_takeover_failed;
+        }
+        if (status.controller) return .authority_conflict;
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch {};
+            return .pre_takeover_failed;
+        }
+        const takeover_params = remote_attachment.takeoverParams(
+            allocator,
+            scratch.stream_id,
+            scratch.controller_generation,
+        ) catch {
+            self.poison(.local_resource_exhausted) catch {};
+            return .pre_takeover_failed;
+        };
+        defer allocator.free(takeover_params);
+        const expected_generation = scratch.controller_generation;
+        const takeover_response = self.batch_adapter.callControllerUntil(
+            "controller.takeover",
+            takeover_params,
+            deadline,
+        ) catch {
+            self.poison(.response_correlation_lost) catch {};
+            return .takeover_sent_unknown;
+        };
+        defer allocator.free(takeover_response);
+        const takeover_wire_error = remote_attachment.decodeWireError(allocator, takeover_response) catch |err| {
+            self.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation) catch {};
+            return .takeover_sent_unknown;
+        };
+        // A correlated CAS rejection is already a complete authoritative response. A follow-up
+        // nonblocking read would misclassify an idle, still-usable connection as an unknown send.
+        if (takeover_wire_error) |wire_error| return switch (wire_error) {
+            .invalid_generation, .unauthorized, .runtime_not_found => blk: {
+                if (self.hasBufferedControllerRevoke()) {
+                    self.poison(.response_correlation_lost) catch {};
+                    break :blk .takeover_sent_unknown;
+                }
+                break :blk .authority_conflict;
+            },
+            .resource_exhausted, .invalid_request, .internal => blk: {
+                self.poison(.local_invariant_violation) catch {};
+                break :blk .pre_takeover_failed;
+            },
+            else => unreachable,
+        };
+        remote_attachment.decodeTakeover(
+            allocator,
+            takeover_response,
+            &scratch,
+            expected_generation,
+        ) catch |err| {
+            self.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation) catch {};
+            return .takeover_sent_unknown;
+        };
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch {};
+            return .takeover_sent_unknown;
+        }
+        self.batch_adapter.refreshControllerEvidence() catch {
+            self.poison(.response_correlation_lost) catch {};
+            return .takeover_sent_unknown;
+        };
+        if (self.hasBufferedControllerRevoke()) {
+            self.poison(.response_correlation_lost) catch {};
+            return .takeover_sent_unknown;
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch {};
+            return .takeover_sent_unknown;
+        }
+        // Wire authority is evidenced now, but the unpublished candidate stays locally quarantined
+        // as observer until CR4c can promote cleanup binding, attachment role and RemoteGeneration
+        // publication in one suffix. Keeping the live role observer also keeps mutation authority 0.
+        self.catchup_stage_owner.controller_generation = scratch.controller_generation;
+        self.catchup_stage_owner.canonical.lifecycle = .consumed;
+        self.catchup_stage_owner.seal = CatchupStageOwner.stageSeal(
+            &self.catchup_stage_owner.canonical,
+        );
+        self.catchup_stage_owner.state = .controller_evidenced;
+        return .{ .new_controller_evidenced = scratch.controller_generation };
+    }
+
+    pub fn validateControllerEvidence(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) bool {
+        if (!self.catchup_stage_owner.stateRawValid() or
+            !self.valid() or self.lifecycle != .attached or
+            self.catchup_stage_owner.state != .controller_evidenced or
+            stage != &self.catchup_stage_owner.canonical or
+            self.catchup_stage_owner.active_generation != stage.owner_generation or
+            self.catchup_stage_owner.controller_generation != controller_generation or
+            !catchupStageLifecycleRawValid(&stage.lifecycle) or
+            stage.lifecycle != .consumed or
+            self.catchup_stage_owner.seal != CatchupStageOwner.stageSeal(stage) or
+            stage.self_addr != @intFromPtr(stage) or stage.attachment_addr != @intFromPtr(self) or
+            controller_generation == 0)
+            return false;
+        const projection = generation_transport_mod.catchupProjection(&self.transport) catch return false;
+        if (stage.client_slot_addr != projection.slot_addr or
+            stage.slot_incarnation != projection.slot_incarnation or
+            stage.node_incarnation != projection.node_incarnation or
+            stage.connection_generation != projection.connection_generation or
+            stage.transport_incarnation != projection.transport_incarnation or
+            stage.pid != projection.pid or stage.process_nonce != projection.process_nonce or
+            stage.owner_thread_id != projection.owner_thread_id or
+            stage.stream_id != projection.bound_stream_id or
+            stage.identity.host_id != projection.host_id or
+            stage.identity.runtime_id != projection.runtime_id or projection.role != .observer)
+            return false;
+        const state = self.payloadConst().state;
+        const screen = self.screenPtr() orelse return false;
+        return state.role == .observer and
+            state.controller_generation < controller_generation and
+            std.meta.eql(screen.catchupFrontier(), stage.target);
+    }
+
+    pub fn releaseControllerEvidence(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) catchup_stage_contract.Error!void {
+        if (!self.validateControllerEvidence(stage, controller_generation))
+            return error.InvalidAuthority;
+        self.catchup_stage_owner.resetActive();
+    }
+
     pub fn statePtr(self: *GenerationAttachment) *remote_attachment.State {
         return &self.payloadMut().state;
     }
@@ -1141,11 +1374,38 @@ pub const GenerationAttachment = struct {
         return std.meta.eql(screen.catchupFrontier(), stage.target);
     }
 
+    fn catchupStageStaticAuthorityMatches(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+    ) bool {
+        return self.catchup_stage_owner.stateRawValid() and self.valid() and
+            self.lifecycle == .attached and self.catchup_stage_owner.state == .staged and
+            stage == &self.catchup_stage_owner.canonical and
+            self.catchup_stage_owner.active_generation == stage.owner_generation and
+            catchupStageLifecycleRawValid(&stage.lifecycle) and stage.lifecycle == .staged and
+            self.catchup_stage_owner.seal == CatchupStageOwner.stageSeal(stage) and
+            stage.self_addr == @intFromPtr(stage) and stage.attachment_addr == @intFromPtr(self) and
+            stage.identity.valid() and stage.deadline_expires_at_ns > 0;
+    }
+
     pub fn abortCatchupStage(
         self: *GenerationAttachment,
         stage: *const catchup_stage_contract.PreparedStage,
     ) catchup_stage_contract.Error!void {
         if (!self.validateCatchupStageAuthority(stage)) return error.InvalidAuthority;
+        self.catchup_stage_owner.state = .idle;
+        self.catchup_stage_owner.active_generation = 0;
+        self.catchup_stage_owner.seal = 0;
+        self.catchup_stage_owner.canonical.lifecycle = .aborted;
+    }
+
+    pub fn abortCatchupStageAfterTerminalTransport(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+    ) catchup_stage_contract.Error!void {
+        if (!self.catchupStageStaticAuthorityMatches(stage) or
+            self.batch_adapter.terminalConnectionReason() == null)
+            return error.InvalidAuthority;
         self.catchup_stage_owner.state = .idle;
         self.catchup_stage_owner.active_generation = 0;
         self.catchup_stage_owner.seal = 0;
@@ -1318,6 +1578,68 @@ pub const testing_api = if (builtin.is_test) struct {
 
     pub fn pendingEventPayloadCallbackCount() usize {
         return client_slot_mod.testing.pendingEventPayloadCallbackCount();
+    }
+
+    pub const DeinitReadiness = struct {
+        stage_idle: bool,
+        response_terminal: bool,
+        event_ready: bool,
+        transport_ready: bool,
+        batch_ready: bool,
+        operation_idle: bool,
+        rpc_free: bool,
+        prepared_settled: bool,
+        response_settled: bool,
+        bound_drop_ready: bool,
+    };
+
+    pub fn deinitReadiness(
+        attachment: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) DeinitReadiness {
+        const canonical = attachment.binding.identity;
+        const reservation = attachment.reservation;
+        return .{
+            .stage_idle = attachment.catchup_stage_owner.stateRawValid() and
+                attachment.catchup_stage_owner.state == .idle,
+            .response_terminal = attachment.response.lifecycleRawValid() and
+                attachment.response.lifecycle == .terminal,
+            .event_ready = generation_transport_mod.eventReadinessOwned(
+                &attachment.transport,
+                @intFromPtr(attachment),
+                &attachment.event_owner,
+                attachment.event_generation_mirror,
+            ) == .ready,
+            .transport_ready = generation_transport_mod.preflightTerminalizeOwned(
+                &attachment.transport,
+                @intFromPtr(attachment),
+            ) == .ready,
+            .batch_ready = if (attachment.batch_adapter.preflightDraining()) |_| true else |_| false,
+            .operation_idle = adapter.slot.current.active_operation_generation == 0,
+            .rpc_free = adapter.slot.current.rpc_free_evidence.emptyExact(),
+            .prepared_settled = if (canonical != null and reservation != null)
+                (adapter.slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+                    reservation.?.cleanup,
+                    canonical.?,
+                ) catch .invalid) == .settled
+            else
+                false,
+            .response_settled = if (canonical != null and reservation != null)
+                (adapter.slot.current.cleanup_registry.rpcResponseSettlementReadiness(
+                    reservation.?.cleanup,
+                    canonical.?,
+                ) catch .invalid) == .settled
+            else
+                false,
+            .bound_drop_ready = if (canonical != null and reservation != null)
+                if (adapter.slot.current.cleanup_registry.preflightBoundDrop(
+                    reservation.?.cleanup,
+                    canonical.?,
+                    attachment.lease.stream_id,
+                )) |_| true else |_| false
+            else
+                false,
+        };
     }
 
     pub fn armSettlementProofLossMarker(fd: std.c.fd_t, stage_raw: u8) void {

@@ -528,6 +528,7 @@ pub const HostAdapter = struct {
                 .supported => .supported,
             },
             .peer_attach_generation = client.attachment_capabilities.peer_attach_generation,
+            .controller_transfer = client.attachment_capabilities.negotiated_controller_transfer,
             .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
             .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
             .notification_stream_auth = client.notification_stream_auth_v1,

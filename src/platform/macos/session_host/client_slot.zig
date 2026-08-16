@@ -4864,6 +4864,7 @@ pub fn projectGenerationCapabilities(
             .supported => .supported,
         },
         .peer_attach_generation = node.client.attachment_capabilities.peer_attach_generation,
+        .controller_transfer = node.client.attachment_capabilities.negotiated_controller_transfer,
         .screen_viewport_scrolled = node.client.screen_viewport_scrolled_v1,
         .async_scroll_to_bottom = node.client.async_scroll_to_bottom_v1,
         .notification_stream_auth = node.client.notification_stream_auth_v1,
@@ -12986,6 +12987,33 @@ pub const ClientSlot = struct {
         ) catch |err| return mapCurrentBorrowError(err);
     }
 
+    pub fn callCurrentUntil(
+        self: *ClientSlot,
+        expected_generation: u64,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError![]u8 {
+        const Context = struct {
+            method: []const u8,
+            params_json: ?[]const u8,
+            deadline: client_deadline.AbsoluteDeadline,
+        };
+        const Operation = struct {
+            fn run(context: Context, client: *client_mod.Client) client_mod.DeadlineClientError![]u8 {
+                return client.callUntil(context.method, context.params_json, context.deadline);
+            }
+        };
+        return self.withCurrent(
+            expected_generation,
+            Context{ .method = method, .params_json = params_json, .deadline = deadline },
+            Operation.run,
+        ) catch |err| return switch (err) {
+            error.Closed, error.Busy => error.AdminBusy,
+            error.InvalidOwner, error.GenerationMismatch, error.CounterExhausted => error.ProtocolError,
+        };
+    }
+
     pub fn ingestCurrentReadableEvidence(
         self: *ClientSlot,
         expected_generation: u64,
@@ -14186,6 +14214,15 @@ pub const ClientSlot = struct {
         if (client.fd < 0 or client.unusable or client.pending_outbound != null or
             client.firstPoisonReason() != null)
             return error.InvalidUsableConnection;
+    }
+
+    pub fn attachmentConnectionFailureReason(
+        self: *const ClientSlot,
+    ) ?@import("client_poison.zig").ConnectionReason {
+        if (!self.valid()) return null;
+        const reason = self.current.client.firstPoisonReason() orelse return null;
+        self.preflightAttachmentConnectionFailedClosed(reason) catch return null;
+        return reason;
     }
 
     /// Client의 allocator callback TLS는 node-local mutation 진입점들이 같은 방식으로 읽는다.

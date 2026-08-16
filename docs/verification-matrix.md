@@ -1971,6 +1971,20 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   reconnect 전 historical replay와 실제 AppKit clipboard 호출 0을 검증한다. X ambiguous frame 뒤 Y/control suffix 전부 폐기,
   mutation freeze 중 old/new wire mutation 0, snapshot+delta contiguous catch-up도 자동 gate다. 실제 AppKit render/IME와
   장시간 poison/backoff는 CR6 제품 gate다.
+- CR4b 단일-runtime 제품 gate는 CR4a `HostReconnectJob`의 exact staged receipt에서만 시작한다. CR4a placeholder
+  publication은 mutation owner의 old generation을 전진시키지 않아 새 input과 queue pump를 모두 거부하되 기존 queue는
+  mutation 0으로 보존한다. stable queue seal 전
+  `controller.status`/`controller.takeover` wire는 0이고, active mutation lease가 있으면 owner turn은 waiting만 남긴다.
+  clean seal은 key/control/IME 원문을 zeroize하고 metadata만 보존하며, 완전한 원문을 별도 소유한 paste만 bounded
+  quarantine한다. 실제 socket 성공은 status 1·takeover 1, 동일 absolute deadline과
+  `new_controller_evidenced`를 증명한다. wire authority를 얻어도 candidate의 local attachment/cleanup binding은 CR4c
+  publication 전까지 observer로 격리되어 mutation 권위가 0이며, RemoteGeneration publication·forced resize·input도 0이다. stale generation,
+  foreign controller, reply-loss-after-prefix는 각각 `authority_conflict | takeover_sent_unknown`으로 exact 한 번 봉인하고
+  status 재조회로 성공을 추정하거나 old writable을 복원하지 않는다. pre-send OOM/deadline도 CR4a가 이미 게시한
+  unavailable node/generation을 유지하며 candidate/receipt/queue/paste/registry/pin ledger가 유한하게 정산되는지 확인한다.
+  allocator callback 재진입은 첫 wire/할당 전 one-shot committing owner에서 거부되어 status/takeover가 exact 1이고,
+  exact `resource_exhausted | invalid_request | internal` 응답은 authority conflict로 세탁하지 않고 pre-takeover failure와
+  Client fail-close로 수렴한다.
 
 ## PR마다 확인할 질문
 

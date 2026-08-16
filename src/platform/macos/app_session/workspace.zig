@@ -235,7 +235,7 @@ pub fn requestWindowClose(self: *AppSession) bool {
         self.window_close_pending = true;
         return true;
     }
-    self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
+    self.showConfirm(.app_close_window_running, .window);
     return true;
 }
 

@@ -6021,16 +6021,16 @@ pub const AppSession = struct {
         }
         if (self.scopeHasRunningJob(scope)) {
             self.showConfirm(switch (target) {
-                .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
-                else => "실행 중인 명령이 있습니다. 닫을까요?",
+                .window => .app_close_window_running,
+                else => .app_close_running,
             }, target);
         } else if (web_ops.scopeHasWebBrowser(self, scope)) {
             // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를
             // 안 타 조용히 닫혔다. 열린 웹 페이지 = 잃을 수 있는 상태라 running job과 병렬로 "닫을까요?"를 띄운다. accept는
             // 같은 pending_close→executeClose 경로.
             self.showConfirm(switch (target) {
-                .window => "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
-                else => "열린 브라우저 탭이 있습니다. 닫을까요?",
+                .window => .app_close_window_browser,
+                else => .app_close_browser,
             }, target);
         } else {
             self.executeClose(target);
@@ -6282,8 +6282,11 @@ pub const AppSession = struct {
     }
 
     /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
-    pub fn showConfirm(self: *AppSession, message: []const u8, target: PendingClose) void {
-        self.showConfirmButtons(.{ .close = target }, message, .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
+    ///
+    /// 메시지는 **키만 받는다**(계약 §7.2 1차 방어) — 리터럴을 넘기면 컴파일이 막힌다. 이 진입점은 닫기
+    /// 확인 전용이라 호출자가 문장을 지어낼 이유가 없다.
+    pub fn showConfirm(self: *AppSession, message: maru.i18n.Key, target: PendingClose) void {
+        self.showConfirmButtons(.{ .close = target }, maru.i18n.t(message), .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
     }
 
     /// 1e-confirm-2b: browser grant 확인 모달을 연다(§9.2 Model B, 라벨 "허용"/"거부"). **비파괴**: 이미 다른 오버레이/확인
@@ -40778,7 +40781,7 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     defer session.deinit();
 
     // 모달이 뜨고 active_term 닫기가 보류된 상태를 직접 구성(requestClose의 모달-오픈 분기와 같은 상태).
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // Esc → 취소: 모달 닫힘, 보류 버림, 아무것도 안 닫힘(2개 유지).
@@ -40788,7 +40791,7 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
     // 다시 보류하고 Enter → 확정: active_term 닫힘(1개), 보류 비워짐, 모달 닫힘.
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
@@ -41307,7 +41310,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개(확정 닫기 검증용)
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // 확인 버튼(기본 포커스=confirm → focus_accent fill) 중심 좌표를 view가 그린 op에서 얻는다(buttonAtPoint과 동일 출처).
@@ -41341,14 +41344,14 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // (2) 좌클릭 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
-    session.showConfirm("닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     session.mouse(1, 1, 1, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
 
     // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default가
     //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
-    session.showConfirm("닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)
     try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, 0));
 }
@@ -43402,7 +43405,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
+    session.showConfirm(.app_close_running, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     pane.terms.items[0].rt.terminated = true; // 배경 Term이 셸 종료
@@ -43415,7 +43418,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 다시 Term 2개
     const pane2 = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
-    session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
+    session.showConfirm(.app_close_window_running, .window);
     pane2.terms.items[0].rt.terminated = true;
     term_ops.reapTerminatedTerms(session);
     try std.testing.expect(session.pending_confirm == .close); // .window 유지
@@ -43445,8 +43448,16 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 실제 닫기 확인 경로의 메시지(한글)로 모달을 연다 — showConfirm이 copyOverlayMessage로 세션 버퍼에 복사.
-    const msg = "실행 중인 명령이 있습니다. 닫을까요?";
-    session.showConfirm(msg, .active_term);
+    //
+    // 언어를 **명시적으로 ko 로 고정**한다. 이 테스트가 재는 것은 EAW Wide(한 글자 2셀)가 폭 계산에서
+    // 새지 않는가이고, 그것은 한글 문장일 때만 성립한다. 현재 언어에 맡기면 I4 가 기본값을 로케일로
+    // 바꾸는 순간 영어 문장을 재게 되어 **테스트가 조용히 무력해진다**(통과하지만 아무것도 안 지킨다).
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+
+    const msg = maru.i18n.tIn(.ko, .app_close_running);
+    session.showConfirm(.app_close_running, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // buildChromeOverlayFrame과 같은 경로로 ChromeDraw 수집 → 셀 rasterize(여기까진 CoreText 무관 순수 단계).

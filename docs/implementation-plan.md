@@ -1133,8 +1133,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    copied/stale handle, readiness 또는 complete-node digest drift는 destroy/current mutation 0이다. R3의 제품 caller는 CR3c 전까지 0이다.
 6. **CR4 — 단일 host 실제 reconnect:** 세 닫힌 gate로 진행한다. **CR4a**는 먼저 CR3c의 forward-recovery 경계
    (old attachment terminal, unavailable shell, fresh Client replacement 게시) 뒤 같은 `HostAdapter`에서 observer attach와
-   final-address candidate initial snapshot을 검증하는 prerequisite를 닫는다. 이어 실제 `connectExistingHost` issuer가 fresh Client를
-   그 replacement 경계로 넘기고, snapshot을 base로 하는 bounded contiguous delta까지 조립한 뒤 immutable staged receipt를
+   final-address candidate initial snapshot을 검증하는 prerequisite를 닫는다. 이어 screen wire prerequisite가 initial attach snapshot
+   sequence 0, 같은 stream의 resync/fallback snapshot과 delta는 직전 committed frontier exact +1이며 queue-admission 뒤에만
+   commit됨을 고정한다. 이 sequence만으로 local socket idle을 caught-up으로
+   판정하지 않는다. host가 같은 stream의 coalesced output과 immutable target frontier를 한 owner turn에 발행하는 catch-up barrier를
+   통과한 뒤에만 staged receipt를 만들 수 있다. 그 위에서 실제 `connectExistingHost` issuer가 fresh Client를
+   replacement 경계로 넘기고, snapshot을 base로 하는 bounded contiguous delta까지 조립한 뒤 immutable staged receipt를
    게시한다. replacement 게시 전 실패는 old graph mutation 0이다. 게시 뒤 typed reject는 unavailable shell과 usable Client
    generation을 보존한 채 candidate 권위만 정산하고, EOF/불확실 transport 실패는 동일 node·generation을 보존하되 Client를
    fail-close하여 다음 replacement 시도로 넘긴다. **CR4b**는 그 receipt 아래

@@ -722,7 +722,8 @@ generation의 resize wire sequence·baseline과 pump summary를 뜻한다. paylo
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
 CR3c2의 process/slot/node incarnation 결속까지 포함한 현재 `RemoteGeneration`/`RemoteRuntime` 크기는 Debug
-`3,072/9,888`, ReleaseFast `3,056/9,840`이며, CR3c2 직전 대비 4,096 runtime 상한의 추가분은 128 KiB다. CR2a는 이 물리적
+CR4a screen frontier 반영 뒤 Debug `3,088/9,904`, ReleaseFast `3,072/9,856`이며, CR3c2의 authority seal 128 KiB에
+screen sequence 64 KiB가 추가된다(4,096 runtime 상한). CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -810,8 +811,11 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 기록하고 local terminal state는 `published_old | published_new | frozen_unavailable | ended` 중 하나다.
 
 1. `connectExistingHost`로 exact host에 새 Client를 만들고 모든 canonical runtime의 observer attachment, full snapshot,
-   metadata, local capacity와 generation bundle을 stage한다. snapshot base 이후 delta를 bounded하게 계속 drain해 publish
-   직전 generation/sequence가 contiguous하고 caught-up임을 증명한다. takeover 전 gap/cap 초과는 전체 prepare abort다.
+   metadata, local capacity와 generation bundle을 stage한다. initial attach snapshot은 screen sequence 0을 세우고, 같은 stream의
+   resync/fallback snapshot과 delta는 subscription queue admission이 성공한 batch만 직전 frontier exact +1로 전진한다. client가 socket의 일시적 idle을 완료 증거로 삼지 않도록 host는
+   같은 stream의 현재 coalesced output과 immutable target `{generation, sequence}`를 한 owner turn에 발행한다. client는 하나의
+   absolute deadline 아래 그 target까지 exact contiguous로 적용했을 때만 caught-up staged receipt를 봉인한다. takeover 전
+   gap/cap 초과나 target 미도달은 전체 prepare abort다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
    observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
 3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership
@@ -2171,8 +2175,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 9,888/ReleaseFast 9,840 bytes이며 owner 외 remainder는
-   각각 7,168/7,120 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 9,904/ReleaseFast 9,856 bytes이며 owner 외 remainder는
+   각각 7,184/7,136 bytes다. `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
    budget으로 둔다. 최대 4,096 runtime에서 두 inline owner의 aggregate 상한은 17 MiB다. 이 size나 aggregate 증가는
    별도 문서 변경 없이는 허용하지 않는다.
 
@@ -6161,7 +6165,8 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   fail-closed해 재attach initial metadata로 복구한다. OSC notification pull은 기존 별도 `runtime.notification` RPC 경로를
   유지하며, success는 정확히 문자열 `{title,body}` 두 필드다. 대기 알림이 없으면 둘 다 빈 문자열이고, 필드 누락·타입 오류·
   선언 밖 필드는 "알림 없음"으로 접지 않고 같은-major schema drift로 connection을 fail-close한다.
-- snapshot은 하나의 generation과 `sequence=0`, delta는 `base_generation`을 record body에 추가하고 sequence를 1씩 올린다.
+- initial attach snapshot은 하나의 generation과 `sequence=0`을 갖는다. 같은 stream의 resync/fallback snapshot과 delta는
+  직전 committed frontier의 exact +1이며, delta는 `base_generation`을 record body에 추가한다.
   chunk index는 0부터 연속이고 마지막 MRSH frame의 `end_stream`과 declared count가 함께 맞아야 publish한다.
 - scrollback page는 같은 row record를 쓰되 scrollback generation과 half-open line range를 meta에 둔다. eviction 뒤 generation이
   달라지면 torn page를 반환하지 않고 `invalid_generation`으로 다시 요청하게 한다.

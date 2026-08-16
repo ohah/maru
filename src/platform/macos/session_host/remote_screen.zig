@@ -331,6 +331,14 @@ pub const RemoteScreen = struct {
         try self.rebuildGrid();
     }
 
+    pub fn requireSequencedDeltas(self: *RemoteScreen) void {
+        self.assembler.requireSequencedDeltas();
+    }
+
+    pub fn prepareRecoveryFrontierFrom(self: *RemoteScreen, current: *const RemoteScreen) void {
+        self.assembler.prepareRecoveryFrontierFrom(&current.assembler);
+    }
+
     /// host의 delta record를 적용한다(화면 증분). base_generation gap이면 `GenerationGap`(caller가 fresh snapshot 재요청).
     pub fn applyDelta(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
         self.mutex.lockUncancelable(io);

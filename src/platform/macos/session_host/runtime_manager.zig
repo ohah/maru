@@ -1117,7 +1117,7 @@ pub const RuntimeManager = struct {
     /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
     /// **core_mutex를 잡은 채** 투영하고(투영이 grapheme·색을 소유 버퍼로 복사), 반환된 소유 바이트만 unlock 뒤 caller가
     /// snapshot_chunk로 나눠 보낸다(io-render-threading.md — snapshot 슬라이스는 core alias라 lock 밖으로 새면 안 됨).
-    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -1127,7 +1127,7 @@ pub const RuntimeManager = struct {
         return screen_snapshot.projectSnapshotBounded(
             allocator,
             &surface.core,
-            .{ .generation = generation },
+            .{ .generation = generation, .sequence = sequence },
             protocol.max_viewport_snapshot,
         );
     }
@@ -1135,12 +1135,12 @@ pub const RuntimeManager = struct {
     /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
     /// full snapshot(다음 base)과 delta를 함께 만든다. grid/alt-screen 변화면 delta 대신 fresh snapshot을 보낸다(client가
     /// 화면 교체). `send`와 `new_base`는 항상 별개 버퍼다(caller가 둘 다 free해도 안전).
-    fn deltaOp(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!server.StreamUpdate {
+    fn deltaOp(ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!server.StreamUpdate {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
-        const opts = screen_snapshot.ProjectOptions{ .generation = generation };
+        const opts = screen_snapshot.ProjectOptions{ .generation = generation, .sequence = sequence };
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
 

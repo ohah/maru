@@ -62,6 +62,9 @@ pub const ModeBit = screen_stream.ModeBit;
 /// intent를 실어(§packColorIntent) client가 자기 theme 기본 fg/bg로 풀기 때문이다. 필드는 wire/caller 호환을 위해 남긴다.
 pub const ProjectOptions = struct {
     generation: u64 = 0,
+    /// 한 projection batch의 host-issued frontier다. snapshot은 0에서 시작하고 delta는
+    /// subscription owner가 commit한 직전 값의 exact +1만 발행한다.
+    sequence: u64 = 0,
     default_fg: u32 = 0xFFFFFF,
     default_bg: u32 = 0x000000,
 };
@@ -195,7 +198,28 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     defer links.deinit(allocator);
     core.collectViewportLinks(allocator, terminal.link_scopes_full, &links) catch return error.OutOfMemory;
     try appendLinkSpans(allocator, &stream, opts.generation, links.items, true);
-    return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    const owned = stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    stampRecordSequence(owned, opts.sequence) catch {
+        allocator.free(owned);
+        return error.Truncated;
+    };
+    return owned;
+}
+
+/// Projection helpers intentionally keep generation-focused signatures. The batch owner stamps the
+/// bounded stream once so one atomic output batch cannot contain multiple frontier values.
+fn stampRecordSequence(bytes: []u8, sequence: u64) screen_stream.DecodeError!void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        if (bytes.len - offset < 4) return error.Truncated;
+        const record_len: usize = std.mem.readInt(u32, bytes[offset..][0..4], .big);
+        if (record_len < screen_stream.record_header_size) return error.Truncated;
+        const record_start = offset + 4;
+        const record_end = std.math.add(usize, record_start, record_len) catch return error.LengthOverflow;
+        if (record_end > bytes.len) return error.Truncated;
+        std.mem.writeInt(u64, bytes[record_start + 12 ..][0..8], sequence, .big);
+        offset = record_end;
+    }
 }
 
 /// 한 이미지의 디코드 픽셀을 per-record cap(≤max_image_blob) 청크로 나눠 image_blob 레코드로 방출한다. 빈 픽셀도 메타
@@ -711,6 +735,9 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     const delta_owned = delta.toOwnedSlice(allocator) catch return error.OutOfMemory;
     errdefer allocator.free(delta_owned);
     const snapshot_owned = snapshot.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    errdefer allocator.free(snapshot_owned);
+    try stampRecordSequence(delta_owned, opts.sequence);
+    try stampRecordSequence(snapshot_owned, opts.sequence);
     return .{ .delta = delta_owned, .snapshot = snapshot_owned };
 }
 
@@ -1060,6 +1087,85 @@ test "screen snapshot: projection and assembler are inverses on a real screen (s
     defer allocator.free(re2);
     try testing.expectEqualSlices(u8, p2, re2); // delta 적용 후 조립기 == 새 화면 projection.
     try testing.expectEqualSlices(u8, p2, result.snapshot); // computeDelta의 snapshot == 별도 projection(#6: 한 번 build 재사용).
+}
+
+test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적용한다" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("A");
+
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 7, .sequence = 0 });
+    defer allocator.free(base);
+    var assembler = screen_assembler.ScreenAssembler.init(allocator);
+    defer assembler.deinit();
+    assembler.requireSequencedDeltas();
+    try assembler.applySnapshot(base);
+    try testing.expectEqual(@as(u64, 0), assembler.sequence);
+
+    try core.write("B");
+    const legacy_zero = try computeDelta(allocator, base, &core, .{ .generation = 7, .sequence = 0 });
+    defer legacy_zero.deinit(allocator);
+    try testing.expect(legacy_zero.delta.len != 0);
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(legacy_zero.delta));
+
+    const next = try computeDelta(allocator, base, &core, .{ .generation = 7, .sequence = 1 });
+    defer next.deinit(allocator);
+    var records = screen_stream.RecordStream{ .bytes = next.delta };
+    while (try records.next()) |record| {
+        const split = try screen_stream.RecordStream.split(record);
+        try testing.expectEqual(@as(u64, 1), split.header.sequence);
+    }
+    var snapshot_records = screen_stream.RecordStream{ .bytes = next.snapshot };
+    while (try snapshot_records.next()) |record| {
+        const split = try screen_stream.RecordStream.split(record);
+        try testing.expectEqual(@as(u64, 1), split.header.sequence);
+    }
+    try assembler.applyDelta(next.delta);
+    try testing.expectEqual(@as(u64, 1), assembler.sequence);
+
+    const before_replay = try assembler.toSnapshot(allocator);
+    defer allocator.free(before_replay);
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(next.delta));
+    const after_replay = try assembler.toSnapshot(allocator);
+    defer allocator.free(after_replay);
+    try testing.expectEqualSlices(u8, before_replay, after_replay);
+    try testing.expectError(error.GenerationGap, assembler.applySnapshot(base));
+    const after_stale_snapshot = try assembler.toSnapshot(allocator);
+    defer allocator.free(after_stale_snapshot);
+    try testing.expectEqualSlices(u8, before_replay, after_stale_snapshot);
+
+    const mixed = try allocator.dupe(u8, base);
+    defer allocator.free(mixed);
+    const first_len: usize = std.mem.readInt(u32, mixed[0..4], .big);
+    const second_record = 4 + first_len + 4;
+    try testing.expect(second_record + screen_stream.record_header_size <= mixed.len);
+    std.mem.writeInt(u64, mixed[second_record + 12 ..][0..8], 9, .big);
+    try testing.expectError(error.GenerationGap, assembler.applySnapshot(mixed));
+    const after_mixed_snapshot = try assembler.toSnapshot(allocator);
+    defer allocator.free(after_mixed_snapshot);
+    try testing.expectEqualSlices(u8, before_replay, after_mixed_snapshot);
+
+    var prepared_recovery = screen_assembler.ScreenAssembler.init(allocator);
+    defer prepared_recovery.deinit();
+    prepared_recovery.prepareRecoveryFrontierFrom(&assembler);
+    const recovery = try projectSnapshot(allocator, &core, .{ .generation = 7, .sequence = 2 });
+    defer allocator.free(recovery);
+    try prepared_recovery.applySnapshot(recovery);
+    std.mem.swap(screen_assembler.ScreenAssembler, &assembler, &prepared_recovery);
+    try testing.expectEqual(@as(u64, 2), assembler.sequence);
+
+    try core.write("C");
+    const downgrade_after_recovery = try computeDelta(
+        allocator,
+        recovery,
+        &core,
+        .{ .generation = 7, .sequence = 0 },
+    );
+    defer downgrade_after_recovery.deinit(allocator);
+    try testing.expect(downgrade_after_recovery.delta.len != 0);
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(downgrade_after_recovery.delta));
+    try testing.expectEqual(@as(u64, 2), assembler.sequence);
 }
 
 test "screen snapshot: computeDelta emits image_blob + image_place when an image is transmitted (I4b)" {

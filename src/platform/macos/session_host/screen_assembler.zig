@@ -74,6 +74,10 @@ pub const ScreenAssembler = struct {
     cursor: screen_stream.Cursor = .{},
     modes: u32 = 0,
     generation: u64 = 0,
+    /// 마지막으로 완전히 적용한 host-issued screen frontier.
+    sequence: u64 = 0,
+    sequenced_deltas_required: bool = false,
+    frontier_initialized: bool = false,
     rows: []OwnedRow = &.{}, // len == rows_count
     // kitty 이미지 상태(#1 원격 이미지 전송, I3). image_store=완성된 이미지(id→픽셀), placement_list=표시 목록,
     // pending_images=재조립 중인 청크. snapshot은 이 셋을 리셋하고 record로 다시 채운다(host가 full snapshot에 전량 재송).
@@ -95,6 +99,18 @@ pub const ScreenAssembler = struct {
 
     pub fn initForCodec(allocator: std.mem.Allocator, expected_codec_version: u16) ScreenAssembler {
         return .{ .allocator = allocator, .expected_codec_version = expected_codec_version };
+    }
+
+    /// CR4 staged reconnect만 호출한다. 일반 old-host rendering은 sequence=0 compatibility를
+    /// 유지하지만, 권위 receipt를 만드는 candidate는 snapshot 뒤 exact +1을 강제한다.
+    pub fn requireSequencedDeltas(self: *ScreenAssembler) void {
+        self.sequenced_deltas_required = true;
+    }
+
+    pub fn prepareRecoveryFrontierFrom(self: *ScreenAssembler, current: *const ScreenAssembler) void {
+        self.sequenced_deltas_required = current.sequenced_deltas_required;
+        self.frontier_initialized = current.frontier_initialized;
+        self.sequence = current.sequence;
     }
 
     pub fn deinit(self: *ScreenAssembler) void {
@@ -253,6 +269,22 @@ pub const ScreenAssembler = struct {
         if (fs.header.kind != .screen_meta) return error.Truncated; // snapshot의 첫 record는 반드시 screen_meta.
         const meta = try screen_stream.decodeScreenMeta(fs.body);
 
+        // Snapshot도 한 batch 안의 frontier를 mutation 전에 전수 확인한다. 첫 record만 신뢰하고
+        // 뒤의 mixed sequence에서 실패하면 이미 기존 화면을 지운 뒤라 복구 권위를 잃는다.
+        var preflight = screen_stream.RecordStream{ .bytes = bytes };
+        while (try preflight.next()) |rec| {
+            const split = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
+            if (split.header.sequence != fs.header.sequence) return error.GenerationGap;
+        }
+        if (self.sequenced_deltas_required) {
+            if (!self.frontier_initialized) {
+                if (fs.header.sequence != 0) return error.GenerationGap;
+            } else {
+                const expected = std.math.add(u64, self.sequence, 1) catch return error.GenerationGap;
+                if (fs.header.sequence != expected) return error.GenerationGap;
+            }
+        }
+
         self.clearRows();
         self.clearImages(); // snapshot은 이미지도 리셋 — host가 full snapshot에 현재 이미지/placement를 전량 재송한다.
         if (self.prompt_marks.len != 0) { // prompt 마크도 리셋(record 없으면 = 마크 없음).
@@ -274,6 +306,7 @@ pub const ScreenAssembler = struct {
         self.view_offset = meta.view_offset;
         self.modes = meta.modes;
         self.generation = fs.header.generation;
+        self.sequence = fs.header.sequence;
 
         while (try rs.next()) |rec| {
             const s = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
@@ -298,11 +331,32 @@ pub const ScreenAssembler = struct {
                 else => {}, // 미래 record는 건너뛴다.
             }
         }
+        self.frontier_initialized = true;
     }
 
     /// delta record 스트림을 현재 화면에 적용한다: set_runs(전체 행 교체), cursor, modes. base_generation이 어긋나면
     /// `GenerationGap`(caller가 fresh snapshot 재요청). scroll_rect/clear_rect/image는 현재 producer 미방출이라 건너뛴다.
     pub fn applyDelta(self: *ScreenAssembler, bytes: []const u8) ApplyError!void {
+        const expected_sequence = std.math.add(u64, self.sequence, 1) catch return error.GenerationGap;
+        // Frontier 전체를 먼저 검사해 stale/mixed batch가 화면 일부를 바꾼 뒤 실패하지 못하게 한다.
+        var preflight = screen_stream.RecordStream{ .bytes = bytes };
+        var batch_sequence: ?u64 = null;
+        while (try preflight.next()) |rec| {
+            const split = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
+            if (batch_sequence) |seen| {
+                if (split.header.sequence != seen) return error.GenerationGap;
+            } else {
+                batch_sequence = split.header.sequence;
+            }
+        }
+        const admitted_sequence = batch_sequence orelse return error.GenerationGap;
+        // sequence=0은 이전 host wire의 compatibility mode다. 새 host가 1을 발행한 뒤에는
+        // exact contiguous만 허용하므로 reconnect catch-up이 legacy idle과 섞이지 않는다.
+        if (!self.sequenced_deltas_required and self.sequence == 0 and admitted_sequence == 0) {
+            // 구 host 화면 표시 전용. 이 assembler에서는 CR4 staged receipt를 발행하지 않는다.
+        } else if (admitted_sequence != expected_sequence)
+            return error.GenerationGap;
+
         var rs = screen_stream.RecordStream{ .bytes = bytes };
         while (try rs.next()) |rec| {
             const s = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
@@ -373,6 +427,7 @@ pub const ScreenAssembler = struct {
         // (host는 blob을 placement보다 먼저 보냄) 불일치 상태다 — MalformedRow로 알려 caller가 fresh snapshot을 재요청하게 한다
         // (base는 현재 이미지 전량을 담으므로 복원됨). 이 덕에 dedup으로 재전송 안 되던 blob 유실이 영구 blank로 남지 않는다.
         try self.checkPlacementsResolved();
+        self.sequence = admitted_sequence;
     }
 
     /// 모든 placement가 참조하는 이미지가 image_store에 있는지 검사한다(리뷰 #7). 없으면 배송 손실/불일치 → `MalformedRow`로
@@ -388,7 +443,7 @@ pub const ScreenAssembler = struct {
     pub fn toSnapshot(self: *const ScreenAssembler, allocator: std.mem.Allocator) screen_stream.DecodeError![]u8 {
         var stream: std.ArrayListUnmanaged(u8) = .empty;
         errdefer stream.deinit(allocator);
-        const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = self.generation }, .{
+        const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = self.generation, .sequence = self.sequence }, .{
             .cols = self.cols,
             .rows = self.rows_count,
             .active_screen = self.active_screen,
@@ -398,7 +453,7 @@ pub const ScreenAssembler = struct {
         defer allocator.free(meta_rec);
         try screen_stream.appendRecord(&stream, allocator, meta_rec);
         for (self.rows, 0..) |row, i| {
-            const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = self.generation }, .{ .row_index = @intCast(i), .runs = row.runs });
+            const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = self.generation, .sequence = self.sequence }, .{ .row_index = @intCast(i), .runs = row.runs });
             defer allocator.free(rec);
             try screen_stream.appendRecord(&stream, allocator, rec);
         }

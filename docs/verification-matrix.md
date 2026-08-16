@@ -1925,6 +1925,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - CR4는 실제 socket gate 세 개다. CR4a prerequisite는 CR3c의 unavailable shell과 이미 게시된 fresh Client replacement를
   같은 `HostAdapter`에 결속한 observer attach+initial snapshot을 검증한다. typed reject는 candidate authority만 정산하고
   published Client를 usable로 보존하며, EOF는 같은 node·generation을 보존하되 transport를 fail-close한다. CR4a
+  screen wire prerequisite는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1 및 queue-admission 뒤 host commit을 제품 projection/server 행으로
+  검증한다. 이는 local idle을 caught-up으로 승인하지 않으며 host-issued catch-up barrier와 staged receipt는 아직 구현 전이다. CR4a
   완료에는 이어서 actual `connectExistingHost` issuer와 bounded contiguous delta, gap/cap/malformed/OOM의 단계별 mutation 경계를
   검증해야 한다. replacement 게시 전 실패는 old graph mutation 0이고 게시 뒤 실패는 unavailable shell과 새 Client generation을
   보존한다. CR4b는 mutation seal 아래 status/takeover를 exact once 실행하며 takeover

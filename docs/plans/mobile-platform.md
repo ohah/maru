@@ -84,8 +84,10 @@ PoC 는 `tools/mobile-poc/` 에 앱 전체를 담고 있었다. 제품 코드는
 버퍼에 한 번 올리고 인스턴스 드로우 한 번**으로 바꾼다. 셰이더는 push constant 대신 버퍼를
 읽는다(Metal `[[instance_id]]`, Vulkan `gl_InstanceIndex`).
 
-판정: 프레임당 draw call 수를 로그로 낸다. 148 quad 에서 **1** 이어야 한다.
-실측: 두 플랫폼 모두 `MARU_DRAW calls=1 instances=148`, 화면은 이전과 동일.
+판정: 프레임당 draw call 수를 로그로 낸다. **`calls == 1` 이 판정이지 `instances` 수가 아니다** —
+quad 수는 화면 구성이 바뀔 때마다 달라진다(U3 에서 148 → 174 → 173 으로 움직였다). 그 수를
+기대치로 적으면 화면을 고칠 때마다 판정을 고치게 되고, 그러면 판정이 아니다.
+실측: 두 플랫폼 모두 `MARU_DRAW calls=1`, 화면은 이전과 동일.
 
 Metal 은 `setVertexBytes:` 가 4KB 한계라 148 quad(9.5KB)도 못 실어 `MTLBuffer` 가 필요했다.
 Vulkan 은 push constant 를 통째로 버리고 storage buffer + `gl_InstanceIndex` 로 갔다 —

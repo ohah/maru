@@ -819,7 +819,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    catch-up barrier는 별도 poll의 idle 표식이나 일반 JSON event가 아니다. hello에서
    `runtime_catchup_barrier_v1`을 명시 협상한 connection만 `runtime.catchup`을 사용할 수 있다. host의
-   `Subscription`은 bool 대신 `idle | pending(CatchupIdentity)`를 소유한다. `CatchupIdentity`는 global
+   `Subscription`은 bool 대신 `idle | pending{identity, expiry} | admitted{immutable barrier, expiry} |
+   terminal{spent identity}`를 소유한다. `CatchupIdentity`는 global
    manifest/hello가 공유하는 host-process-lifetime `host_id`, daemon-global subscription id, runtime id, daemon
    `ConnectionKey`와 client-minted nonzero request nonce를 봉인한다. request nonce는 한 Client connection 생애에서 재사용하지
    않는 CSPRNG u128이며 zero/entropy failure는 요청 전 fail-close다. 동일 nonce+동일 bound row 재요청만 idempotent이고,

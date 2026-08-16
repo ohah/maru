@@ -314,7 +314,7 @@ Maru 작업에서 사용하는 기본 명령이다.
   attachment 권위만 정산하고 게시된 Client를 usable로 보존한다. EOF는 동일 Client node·generation과 unavailable shell을
   보존하되 해당 Client transport를 fail-close하므로 다음 replacement 시도가 필요하다. 같은 gate의 screen/server prerequisite
   2개는 initial snapshot sequence 0, 이후 resync/fallback snapshot과 delta exact +1, output admission 전 rollback mutation 0과 commit 뒤 subscription frontier 전진을
-  검증한다(최적화 모드당 observer candidate 2 + frontier 2 + dormant barrier contract 2 + MRSH kind/header 2 + boundary 1). local socket idle은 caught-up 증거가 아니며 host-issued
+  검증한다(최적화 모드당 observer candidate 2 + frontier 2 + dormant barrier contract 2 + host pending state 1 + MRSH kind/header 2 + boundary 1). local socket idle은 caught-up 증거가 아니며 host-issued
   target frontier barrier와 immutable staged receipt는 후속 제품 integration이 소유한다. 이 prerequisite는 actual
   `connectExistingHost` issuer, bounded contiguous delta catch-up, status/takeover, RemoteGeneration publication, input/forced resize를
   완료하지 않으며 CR4a의 후속 제품 integration과 CR4b/CR4c가 각각 소유한다.

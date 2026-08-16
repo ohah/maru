@@ -1015,6 +1015,10 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 @property (strong, nonatomic) UIWindow *window;
 @end
 
+// 정의는 아래에 있고 `applicationWillEnterForeground` 가 먼저 부른다 — Android 에서 같은 순서로
+// 한 번 데였다(정의를 함수 안에 두어 implicit declaration 이 났다). 전방 선언으로 못박는다.
+static void loadConfigFile(void);
+
 @implementation AppDelegate
 // **생명주기**: 백그라운드에서는 그리지 않는다. iOS 는 창을 없애지 않아 Android 처럼
 // 스왑체인을 부술 필요는 없지만, CADisplayLink 를 멈추지 않으면 복귀 시 밀린 프레임이

@@ -48,9 +48,21 @@ pub fn version() u64 {
 /// caller가 free한다.
 pub fn cacheDirZ(allocator: std.mem.Allocator, xdg_cache_home: ?[]const u8, home: []const u8) ![:0]u8 {
     if (xdg_cache_home) |x| {
-        if (x.len > 0) return std.fmt.allocPrintSentinel(allocator, "{s}/maru/terminfo", .{x}, 0);
+        if (x.len > 0) return std.fmt.allocPrintSentinel(allocator, "{s}/maru/terminfo", .{trimTrailingSlash(x)}, 0);
     }
-    return std.fmt.allocPrintSentinel(allocator, "{s}/.cache/maru/terminfo", .{home}, 0);
+    return std.fmt.allocPrintSentinel(allocator, "{s}/.cache/maru/terminfo", .{trimTrailingSlash(home)}, 0);
+}
+
+/// base가 이미 `/`로 끝나면 하나를 뗀다 — 아래에서 `/`를 다시 붙이므로 안 그러면 `C:/Users/me//.cache/…`가
+/// 된다. `cli/sessions.zig`의 컨트롤 디렉터리 조립이 같은 것을 하고 있었는데 여기만 빠져 **두 조립기가
+/// 달랐다**(적대적 검증에서 실측).
+///
+/// 길이 1(`/`)은 그대로 둔다 — 떼면 빈 문자열이 되어 상대 경로가 된다. 드라이브 루트(`C:/`)는 떼도 안전하다:
+/// `C:` + `/` + 나머지로 다시 이어져 `C:/.cache/…`가 되고 절대경로로 남는다(실측 확인 —
+/// `std.fs.path.isAbsoluteWindows`가 참).
+fn trimTrailingSlash(base: []const u8) []const u8 {
+    if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
+    return base;
 }
 
 // 셸에서 캐시 디렉터리를 정하는 파라미터 확장 — cacheDirZ(Zig)와 같은 규칙의 단일 출처. 다른 maru 캐시와
@@ -104,6 +116,29 @@ pub fn statusCommand(allocator: std.mem.Allocator) ![:0]u8 {
 test "version is deterministic and nonzero" {
     try std.testing.expect(version() != 0);
     try std.testing.expectEqual(version(), version()); // 같은 입력 → 같은 지문
+}
+
+// 입구 정규화(W3) 뒤에도 base가 `/`로 끝날 수 있고, 그때 이 함수만 이중 슬래시를 냈다 —
+// `cli/sessions.zig`의 컨트롤 디렉터리 조립은 다듬고 있었다. 두 조립기가 같은 답을 내야 한다.
+test "cacheDirZ: 후행 슬래시가 이중이 되지 않는다(컨트롤 디렉터리 조립과 같은 규칙)" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { home: []const u8, want: []const u8 }{
+        .{ .home = "C:/Users/me/", .want = "C:/Users/me/.cache/maru/terminfo" },
+        .{ .home = "/Users/me/", .want = "/Users/me/.cache/maru/terminfo" },
+        // 드라이브 루트: 떼도 `C:` + `/`로 다시 이어져 **절대경로로 남는다**.
+        .{ .home = "C:/", .want = "C:/.cache/maru/terminfo" },
+        // 길이 1(`/`)은 떼지 않는다 — 떼면 빈 문자열이라 상대 경로가 된다.
+        .{ .home = "/", .want = "//.cache/maru/terminfo" },
+    };
+    for (cases) |c| {
+        const d = try cacheDirZ(a, null, c.home);
+        defer a.free(d);
+        try std.testing.expectEqualStrings(c.want, d);
+    }
+    // XDG 쪽도 같은 규칙이다.
+    const x = try cacheDirZ(a, "D:/cache/", "C:/Users/me");
+    defer a.free(x);
+    try std.testing.expectEqualStrings("D:/cache/maru/terminfo", x);
 }
 
 test "cacheDirZ honors XDG_CACHE_HOME else $HOME/.cache (matches shell ${XDG_CACHE_HOME:-$HOME/.cache})" {

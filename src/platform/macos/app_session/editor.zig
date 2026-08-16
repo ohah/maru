@@ -787,7 +787,14 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = body.w -| inset * 2;
     const inner_h = body.h -| inset * 2;
-    const lines = editorLines(term);
+    // **자릿수는 렌더와 같은 출처로 센다.** 렌더는 `total_lines`에 **문서 줄 수**를 넘기는데
+    // (`st.left_lines.len`), 여기서 **행 수**(filler 포함)를 쓰면 둘이 갈린다. `min_line_number_cells`
+    // (Monaco `lineNumbersMinChars` = 5)가 10만 줄까지 가려 주지만, 가려진다고 같은 것은 아니다.
+    const line_count = if (term.rt.editor_diff) |st| blk: {
+        if (st.view != .compare) break :blk editorLines(term).len;
+        break :blk if (right) st.right_lines.len else st.left_lines.len;
+    } else editorLines(term).len;
+
     // **비교 뷰는 두 열로 갈린다.** pane 폭을 통째로 쓰면 폭을 두 배로 잡아 조각 수가 절반이 되고
     // (세로 스크롤이 어긋난다) 가로 상한도 두 배로 커진다 — 실측: 오른쪽 열 본문이 46열인데 102열로
     // 잡아 끝까지 밀어도 198열에서 멈췄다(실제 상한 254).
@@ -800,7 +807,7 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
         break :blk if (right) cols.right.w else cols.left.w;
     } else inner_w;
     const m = chrome_editor.diff_frame.sideMetrics(side_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
-    const layout = chrome_editor.geometry.compute(m.total_cols, lines.len, .{});
+    const layout = chrome_editor.geometry.compute(m.total_cols, line_count, .{});
     return layout.content.width;
 }
 

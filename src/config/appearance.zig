@@ -307,6 +307,12 @@ test "default appearance resolves to renderer-friendly values" {
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.sidebar_foreground);
     // accent는 명시 안 하면 maru 브랜드 앰버(accent_default = #dda15e)로 폴백(프리셋 없는/사용자 지정 테마는 기존 앰버 유지).
     try std.testing.expectEqual(color.Rgb{ .r = 0xdd, .g = 0xa1, .b = 0x5e }, resolved.theme.accent);
+    // **합자는 기본 끔이다**(2026-08-17 정정 — theme.FontConfig.ligatures 주석이 실측 표를 소유한다).
+    // 켠 상태의 렌더가 깨져 있어서다: JetBrains Mono 는 `//`·`::`·`~~` 를 "첫 칸에 빈 글리프 + 둘째 칸에
+    // 왼쪽으로 넘치는 전체 합자"로 만들고, 셀 단위 래스터가 그 오버항을 잘라 첫 글자가 사라진 것처럼 보인다
+    // (사용자 제보: "`//` 를 입력하면 하나만 보인다"). 오버행 렌더가 생기면 이 값을 되돌리고 이 단언도 뒤집는다 —
+    // 그때 이 줄이 "왜 껐었는지"를 가리키는 자리다.
+    try std.testing.expect(!resolved.font.ligatures);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
     // 커서 색 override는 기본 미지정 — 렌더가 theme.cursor/배경색으로 폴백(기존 동작 보존).

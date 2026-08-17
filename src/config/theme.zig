@@ -121,13 +121,31 @@ pub const FontConfig = struct {
     ///
     /// **베이스/결정(사실상 표준)**: 단일 표준이 없어 터미널마다 갈린다 — Ghostty(`font-feature`에 `-calt`를 넣어야
     /// 꺼짐)·kitty(`disable_ligatures none`)·WezTerm은 **기본 켬**이고, iTerm2만 "Use ligatures" 기본 해제다.
-    /// maru는 다수 관례를 따라 **기본 켬**을 택한다(사용자 결정 2026-08). 합자를 쓰려고 코딩 폰트를 고른 사용자가
-    /// 별도 설정 없이 기대한 모양을 보는 쪽이 놀람이 적다는 판단이다.
     ///
-    /// 등폭 격자는 깨지지 않는다: 코딩 폰트의 합자는 대개 `calt`(문맥 대체)로 구현돼 **글자 수를 유지**하고 칸마다
-    /// 조각을 하나씩 놓는다. 셀 수를 줄이는 `liga`는 셀이 비는 문제([#2123](https://github.com/ohah/maru/issues/2123))가
-    /// 있었으나, 셰이핑이 run 단위로 바뀌며 CoreText가 각 칸에 glyph를 배정해 해소됐다. loader가 `font.ligatures` 키로 파싱.
-    ligatures: bool = true,
+    /// **maru는 기본 끔이다(2026-08-17 정정).** 다수 관례를 따라 기본 켬으로 뒀었지만, 켠 상태의 렌더가 실제로
+    /// 깨져 있다 — 사용자 제보: "`//` 를 입력하면 하나만 보인다(`::`·`~~` 도 같다)".
+    ///
+    /// 실측(JetBrains Mono, `macos-coretext-smoke` 경로에 프로브를 넣어 확인):
+    ///
+    /// | 입력 | 합자 끔 | 합자 켬 |
+    /// | --- | --- | --- |
+    /// | `//` | col0 glyph 829, col1 glyph 829 | col0 glyph **1742**, col1 glyph 939 |
+    /// | `::` | col0 glyph 811, col1 glyph 811 | col0 glyph **1742**, col1 glyph 900 |
+    /// | `~~` | col0 glyph 1058, col1 glyph 1058 | col0 glyph **1742**, col1 glyph 1627 |
+    ///
+    /// 세 쌍 모두 켠 상태에서 **첫 칸이 같은 글리프 1742**를 받는다 — 폰트가 합자를 "칸마다 조각"으로 나누지 않고
+    /// **첫 칸에 빈 글리프 + 둘째 칸에 왼쪽으로 넘치는 전체 합자**로 구현했기 때문이다. maru 의 래스터/업로드는
+    /// 셀 단위라 그 왼쪽 오버행이 잘리고, 결과적으로 첫 글자가 사라진 것처럼 보인다.
+    ///
+    /// 그래서 위 문단의 옛 주장("셀 수를 줄이는 `liga` 는 셀이 비는 문제
+    /// [#2123](https://github.com/ohah/maru/issues/2123)이 있었으나 셰이핑이 run 단위로 바뀌며 CoreText 가 각 칸에
+    /// glyph 를 배정해 해소됐다")은 **틀렸다**. 각 칸에 배정되기는 하지만 첫 칸이 빈 글리프라 같은 증상이 남았고,
+    /// run 단위 셰이핑(2026-08-13)이 도입되며 그 증상이 처음 실제로 나타났다(그 전에는 칸마다 CTLine 을 만들어
+    /// 합자가 애초에 만들어지지 않았다).
+    ///
+    /// **다시 켜려면** 글리프 오버행을 렌더가 지원해야 한다 — 셀보다 큰 비트맵을 atlas 에 담고 quad 를 셀 밖으로
+    /// 확장하는 일이고, 그때 이 기본값을 되돌린다. loader 가 `font.ligatures` 키로 파싱한다.
+    ligatures: bool = false,
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
     // size만 예외 구조: **GUI 입력 박스·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위

@@ -134,6 +134,10 @@ const diff_frame = chrome_editor.diff_frame;
 pub fn buildPaneOps(
     lines: []const []const u8,
     numbers: ?[]const ?u32,
+    /// gutter 자릿수를 정하는 **문서** 줄 수. 접히면 `lines`는 보이는 줄만이지만 번호는 원래 값이라,
+    /// 보이는 수로 폭을 잡으면 렌더가 그리는 번호와 갈린다(`min_line_number_cells`가 10만 줄까지
+    /// 가리지만 가려진다고 같은 것은 아니다 — 같은 부류를 §4.1e에서 이미 잡았다).
+    total_lines: usize,
     first_line: usize,
     first_piece: u32,
     first_col: u16,
@@ -150,7 +154,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -322,7 +326,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, lines.len, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -338,7 +342,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -807,10 +811,13 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
     // **자릿수는 렌더와 같은 출처로 센다.** 렌더는 `total_lines`에 **문서 줄 수**를 넘기는데
     // (`st.left_lines.len`), 여기서 **행 수**(filler 포함)를 쓰면 둘이 갈린다. `min_line_number_cells`
     // (Monaco `lineNumbersMinChars` = 5)가 10만 줄까지 가려 주지만, 가려진다고 같은 것은 아니다.
+    // **렌더와 같은 출처여야 한다.** 렌더는 gutter 폭을 `total_lines`(문서 줄 수)로 잡는데 여기서
+    // 보이는 줄 수를 쓰면 갈린다 — 접으면 그 둘이 실제로 달라진다(12만 줄 문서를 접어 4만 줄이
+    // 보이면 6자리 대 5자리. 실측 88 대 89열. 적대적 검증 2026-08-17).
     const line_count = if (term.rt.editor_diff) |st| blk: {
         if (st.view != .compare) break :blk editorLines(term).len;
         break :blk if (right) st.right_lines.len else st.left_lines.len;
-    } else editorLines(term).len;
+    } else term.rt.editor_lines.len;
 
     // **비교 뷰는 두 열로 갈린다.** pane 폭을 통째로 쓰면 폭을 두 배로 잡아 조각 수가 절반이 되고
     // (세로 스크롤이 어긋난다) 가로 상한도 두 배로 커진다 — 실측: 오른쪽 열 본문이 46열인데 102열로
@@ -904,8 +911,12 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
         return;
     }
 
-    var span_buf: [max_fold_spans]editor_fold.Span = undefined;
-    const spans = editor_fold.hiddenSpans(term.rt.editor_fold_ranges, heads, &span_buf);
+    // **구간 저장소를 잡는다 — 고정 배열이면 큰 파일에서 조용히 덜 접힌다.** 초판은 스택에 4,096개를
+    // 두었는데, 12만 줄(4만 블록) 문서에서 **앞 4,096블록만 접혔다**(전체의 3%. 실측 111,808줄이 남았고
+    // 4만 줄이어야 했다 — 적대적 검증 2026-08-17). 구간 수는 범위 수를 넘지 않는다.
+    const span_buf = try self.allocator.alloc(editor_fold.Span, term.rt.editor_fold_ranges.len);
+    defer self.allocator.free(span_buf);
+    const spans = editor_fold.hiddenSpans(term.rt.editor_fold_ranges, heads, span_buf);
 
     // **줄마다 구간을 훑지 않는다.** 둘 다 문서 순서이므로 커서 하나로 나란히 간다 — 초판은
     // `isHidden`을 줄마다 불러 O(줄 × 구간)이었고, 실측 1,000블록 5ms · 2,000 15ms · **4,000 57ms**
@@ -960,10 +971,6 @@ fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
     term.rt.editor_first_piece = 0;
     self.metal_dirty = true;
 }
-
-/// 한 번에 들 수 있는 숨는 구간 수. 접힘 자체가 `fold.max_depth`로 제한되고 구간은 그보다 적으므로
-/// 넉넉하다 — 넘으면 그 뒤가 안 접힐 뿐 죽지 않는다(§3.8).
-const max_fold_spans: usize = 4096;
 
 /// 비교(좌우 두 열) 상태인가. **접힘은 여기서 거절한다.**
 ///
@@ -3149,4 +3156,58 @@ test "가장 긴 줄이 접혀 숨으면 가로 상한도 다시 센다" {
 
     // **긴 줄이 숨었으니 가로로 밀 것이 없다.**
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
+}
+
+test "접혀도 gutter 폭은 문서 줄 수로 잡는다 — 번호는 원래 값이다" {
+    // 접히면 `lines`는 보이는 줄만이지만 gutter는 **원래 번호**를 그린다. 폭을 보이는 수로 잡으면
+    // 그리는 번호와 갈린다. `min_line_number_cells`(= 5)가 10만 줄까지 가리므로 **작은 문서로 쓴
+    // 테스트는 공허하다** — 이 세션에서 같은 함정을 이미 밟았다(§4.1e). 가림막을 넘겨 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // 문서 120,000줄(6자리) → 접으면 40,000줄(5자리)만 보인다. 자릿수가 갈린다.
+    const n = 120_000;
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
+    for (0..n / 3) |b| {
+        lines[b * 3] = "h:";
+        lines[b * 3 + 1] = "  a";
+        lines[b * 3 + 2] = "  b";
+    }
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    try testing.expect(foldAll(fx.session));
+    const visible = fx.term.rt.editor_visible_lines.len;
+    try testing.expectEqual(@as(usize, n / 3), visible);
+    // 가림막 밖에서 자릿수가 실제로 갈린다 — 아니면 판정이 공허하다.
+    try testing.expect(chrome_editor.geometry.digitCount(n) > chrome_editor.geometry.digitCount(visible));
+    try testing.expect(chrome_editor.geometry.digitCount(visible) >= chrome_editor.geometry.min_line_number_cells);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 본문이 gutter 뒤에서 시작한다 — 폭이 **문서 줄 수**(6자리)로 잡혔는지 그 자리로 확인한다.
+    const m = chrome_editor.diff_frame.sideMetrics(
+        editorBodyRect(fx.session, fx.leaf_rect, fx.term).w -| chrome_editor.frame.content_inset_px * 2,
+        editorBodyRect(fx.session, fx.leaf_rect, fx.term).h -| chrome_editor.frame.content_inset_px * 2,
+        @intCast(fx.session.cell_width_px),
+        @intCast(fx.session.cell_height_px),
+    );
+    const want = chrome_editor.geometry.compute(m.total_cols, n, .{}).content.width; // 문서 줄 수 기준
+    try testing.expectEqual(want, visibleCols(fx.session, editorBodyRect(fx.session, fx.leaf_rect, fx.term), fx.term, false));
+
+    // **렌더가 실제로 받는 값도 봐야 한다.** 위 단언은 제품 쪽 함수만 본다 — 렌더에 보이는 줄 수를
+    // 넘기는 뮤턴트가 그것만으로는 **살아남았다**. 본문이 시작하는 열로 화면에서 판정한다.
+    const want_left = chrome_editor.geometry.compute(m.total_cols, n, .{}).contentLeft();
+    var content_left: u16 = std.math.maxInt(u16);
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint == 'h' or c.codepoint == ':') content_left = @min(content_left, c.col);
+    }
+    try testing.expect(content_left != std.math.maxInt(u16)); // 머리 줄이 실제로 그려졌다
+    try testing.expectEqual(want_left, content_left);
 }

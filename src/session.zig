@@ -78,6 +78,7 @@ pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안�
 pub const diff_payload = @import("session/diff_payload.zig"); // E1: diff 본문 페이로드 상한·binary 정책(순수) // git 실행 파일 후보 열거(설치 여부 판정 — shim 회피)
 pub const scm_view = @import("session/scm_view.zig"); // 도크 소스 컨트롤 뷰 행 모델(섹션·개수·증감)
 pub const scm_repos = @import("session/scm_repos.zig"); // 도크가 세울 저장소·워크트리 목록(순서·중복·상한)
+pub const git_log = @import("session/git_log.zig"); // 히스토리 탭 커밋 목록 파서(--format 단일 출처, 순수)
 pub const content_menu = @import("session/content_menu.zig"); // 파일 본문 우클릭 메뉴 항목 정책(file-panel-kinds.md §2.6)
 pub const file_panel_bridge = @import("session/file_panel_bridge.zig"); // FP4: readAsset 상대 경로·읽기 상한·MIME 순수 정책
 pub const syntax_theme = @import("session/syntax_theme.zig"); // FP12b: 터미널 색상 테마 → text 소스 편집기 syntax 색 파생(순수)

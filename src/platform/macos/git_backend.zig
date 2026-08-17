@@ -146,6 +146,8 @@ const State = struct {
     /// 기다리게 되고, 사용자가 보고 있는 저장소의 갱신이 배경 읽기에 밀린다.
     repo_status_inflight: usize = 0,
     repo_status_result: ?RepoStatusResult = null,
+    log_inflight: usize = 0,
+    log_result: ?LogResult = null,
     /// 쓰기도 **별도 슬롯**이다. 읽기와 공유하면 스테이지 결과가 목록 갱신에 밀려 사라지고, 호출자의
     /// in-flight가 안 풀려 `+`가 영영 안 눌린 것처럼 보인다(diff 슬롯을 가른 것과 같은 이유).
     /// **깊이는 1이다** — §6이 "큐가 아니라 in-flight 하나"라고 못박았다.
@@ -159,6 +161,7 @@ const State = struct {
         if (self.snapshot_result) |*r| r.deinit(self.allocator);
         if (self.branches_result) |*r| r.deinit(self.allocator);
         if (self.repo_status_result) |*r| r.deinit(self.allocator);
+        if (self.log_result) |*r| r.deinit(self.allocator);
         if (self.write_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -176,6 +179,8 @@ const Job = struct {
     index_file: []u8 = &.{},
     /// diff 작업이면 읽을 대상(저장소 루트 기준 상대경로 + 비교 기준). 목록 갱신 작업이면 null이다.
     diff: ?DiffTarget = null,
+    /// 히스토리 읽기가 요청한 커밋 수(P4). 다른 작업은 쓰지 않는다.
+    limit: u32 = 0,
 
     const DiffTarget = struct {
         rel_path: []u8,
@@ -207,6 +212,26 @@ pub const BranchesResult = struct {
 /// **`status` 하나만 돈다.** 머리 줄에 필요한 것(브랜치·분리 HEAD·ahead/behind·파일 개수)이 전부 그
 /// 출력에 있고, `numstat` 셋·merge-base·branch 범위는 **펼쳐서 파일 줄을 그릴 때만** 쓰인다. 저장소
 /// 여덟이면 프로세스가 48개가 아니라 13개가 되는 차이가 여기서 나온다(§3.5.1c).
+/// 히스토리 탭의 커밋 목록 읽기 결과(P4). **자기 슬롯**을 쓴다 — 그 탭을 볼 때만 읽고, 목록 읽기가
+/// 도는 동안에도 따로 돌 수 있어야 한다(둘은 같은 저장소를 읽지만 `index.lock`을 잡지 않는 읽기다).
+pub const LogResult = struct {
+    request_id: u64,
+    ok: bool = false,
+    /// 어느 저장소의 답인지. 목록이 그 사이에 바뀔 수 있으므로 **경로로 맞춘다**.
+    repo: []u8 = &.{},
+    /// 몇 개를 요청했는지. "더 보기"로 상한을 올린 뒤 늦게 온 옛 답을 구별한다.
+    limit: u32 = 0,
+    /// `git log --format=…` 출력(owned).
+    text: []u8 = &.{},
+
+    pub fn deinit(self: *LogResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.repo);
+        allocator.free(self.text);
+        self.repo = &.{};
+        self.text = &.{};
+    }
+};
+
 pub const RepoStatusResult = struct {
     request_id: u64,
     ok: bool = false,
@@ -546,6 +571,54 @@ pub const Backend = struct {
         return true;
     }
 
+    /// 히스토리 목록을 건다(P4). 하나가 돌고 있거나 결과가 안 걷혔으면 거절한다 — 탭을 빠르게
+    /// 오가도 프로세스는 하나다.
+    pub fn submitLog(self: *Backend, git_exe: []const u8, repo: []const u8, limit: u32, request_id: u64) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.log_inflight > 0 or state.log_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.log_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonLog();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .limit = limit };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseLogJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseLogJob(job);
+        const thread = std.Thread.spawn(.{}, logWorker, .{job}) catch return self.releaseLogJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseLogJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        state.allocator.free(job.git_exe);
+        state.allocator.free(job.repo);
+        state.allocator.destroy(job);
+        return self.abandonLog();
+    }
+
+    fn abandonLog(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.log_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    pub fn takeLogResult(self: *Backend) ?LogResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.log_result orelse return null;
+        state.log_result = null;
+        return result;
+    }
+
     fn releaseRepoStatusJob(self: *Backend, job: *Job) bool {
         const state = job.state;
         state.allocator.free(job.git_exe);
@@ -721,6 +794,33 @@ fn repoStatusWorker(job: *Job) void {
         result.deinit(state.allocator);
     }
     state.repo_status_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn logWorker(job: *Job) void {
+    const state = job.state;
+    var result: LogResult = .{ .request_id = job.request_id, .limit = job.limit };
+    result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
+    var limit_buf: [16]u8 = undefined;
+    const limit_arg = std.fmt.bufPrint(&limit_buf, "{d}", .{job.limit}) catch "200";
+    if (runWithArg(state.allocator, .log, job.git_exe, job.repo, limit_arg)) |out| {
+        result.text = out.bytes;
+        result.ok = true;
+    } else |_| {}
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    // **실패해도 결과를 남긴다** — 안 남기면 in-flight가 안 풀려 탭이 영영 "읽는 중"이다.
+    // 첫 커밋 전 저장소는 `git log`가 실패하는데, 그건 오류가 아니라 "커밋이 없다"이고 호출자가 그렇게 읽는다.
+    if (!state.shutting_down and state.log_result == null) {
+        state.log_result = result;
+    } else {
+        result.deinit(state.allocator);
+    }
+    state.log_inflight -= 1;
     state.mutex.unlock(state.io);
     state.release();
 }

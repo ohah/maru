@@ -927,6 +927,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        // **커서를 켠다.** 기본값 `null`은 "커서를 투영하지 않는다"이고(그 doc: 아틀라스 픽셀을 그대로
+        // 검증하는 골든 스모크가 커서 블록에 흔들리지 않게 하려는 것), 터미널 화면에는 커서가 있어야 한다.
+        // 켜지 않으면 화면이 그럴듯해 보여도 커서 오버레이 투영 경로가 한 번도 안 돈다.
+        .cursor = .{
+            .block = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+            .text = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        },
     };
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
 

@@ -388,12 +388,18 @@ doc은 이 자리를 "growable atlas를 지원하려면 producer가 전체 업�
 
 ![W7.2c-2 실제 터미널 화면과 잘림 전/후](images/w7-2c-terminal.png)
 
-실제 PowerShell 7.6.3 세션이 창에 그려진다 — 프롬프트·경로·SGR 색(`echo` 노랑, `exit` 초록)·출력·계속 프롬프트.
+실제 PowerShell 7.6.3 세션이 창에 그려진다 — 프롬프트·경로·SGR 색(`echo` 노랑, `exit` 초록)·출력·계속
+프롬프트·블록 커서.
+
+**커서를 켜야 커서 경로가 돈다.** `CellColors.cursor`의 기본값은 `null`이고 그 뜻은 "커서를 투영하지
+않는다"다(아틀라스 픽셀을 그대로 검증하는 골든 스모크가 커서 블록에 흔들리지 않게 하려는 기본값이다).
+터미널 화면에는 커서가 있어야 하므로 켠다 — 안 켜면 화면이 그럴듯해 보여도 **커서 오버레이 투영 경로가
+한 번도 안 돈다.** 켠 순간 `cells_drawn`이 2485에서 2486으로, 정확히 셀 하나 늘었다.
 
 ```text
 maru.win32-terminal-smoke.v1
 font_family=Cascadia Mono   cell_px=11x21   terminal_size=89x28
-frames_presented=220        cells_drawn_last=2485
+frames_presented=220        cells_drawn_last=2486
 atlas_px=1024x1024 resizes=0   atlas_region_uploads=39
 upload_non_clear_pixels=2643
 fallback_glyphs=0 replacement_glyphs=0 raster_skipped=0

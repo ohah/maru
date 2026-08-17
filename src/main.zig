@@ -1124,11 +1124,15 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                     if (win32_clipboard.read(allocator, window.hwnd)) |maybe| {
                         if (maybe) |text| {
                             defer allocator.free(text);
-                            maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = text }) catch {
+                            // 셸에 실제로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
+                            // 올라가면 화면에 아무것도 안 붙었는데 성공으로 읽힌다.
+                            if (maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = text })) |_| {
+                                pastes += 1;
+                                paste_bytes += text.len;
+                            } else |err| {
+                                try stderr.print("  경고: 붙여넣기 전송 실패({s})\n", .{@errorName(err)});
                                 clipboard_errors += 1;
-                            };
-                            pastes += 1;
-                            paste_bytes += text.len;
+                            }
                         }
                     } else |err| {
                         try stderr.print("  경고: 클립보드 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
@@ -1180,17 +1184,22 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             // 지연 렌더링하면 블록된다) 그 사이 PTY 리더가 코어 락에 막힌다. 복사해 두고 락 밖에서 쓴다.
             var write_copy: ?[]u8 = null;
             if (pending.len > 0) write_copy = allocator.dupe(u8, pending) catch null;
+            // 복사에 실패했는데도 pending 을 비우면 요청이 **아무 흔적 없이** 사라진다. 세어서 알린다.
+            if (pending.len > 0 and write_copy == null) clipboard_errors += 1;
             if (pending.len > 0) active.core.clearClipboardWrite();
             if (want_read) active.core.clearClipboardRead();
             active.unlockCore(io);
 
             if (write_copy) |bytes| {
                 defer allocator.free(bytes);
-                win32_clipboard.write(allocator, window.hwnd, bytes) catch |err| {
+                // **성공했을 때만 센다.** `catch` 밖에서 올리면 실패한 쓰기가 `osc52_writes=1` 로 보고돼
+                // 성공처럼 읽힌다 — 이 이식에서 계속 경계해 온 "성공처럼 보이는 실패"다.
+                if (win32_clipboard.write(allocator, window.hwnd, bytes)) |_| {
+                    osc52_writes += 1;
+                } else |err| {
                     try stderr.print("  경고: 클립보드 쓰기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
                     clipboard_errors += 1;
-                };
-                osc52_writes += 1;
+                }
             }
             if (want_read) {
                 // OSC 52 읽기 응답은 셸에 되돌려 줘야 한다. 그 인코딩(base64 + OSC 52 프레이밍)은 중립

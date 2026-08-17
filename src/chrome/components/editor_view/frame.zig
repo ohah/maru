@@ -215,7 +215,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
     const gutter_reserve = @min(
         scratch.text_bytes.len / 2,
-        gutter.scratchNeeded(@intCast(visual_budget), props.total_lines),
+        // 표식 몫은 **표식을 실제로 그릴 때만** 뗀다 — 접힘 칸이 없는 레이아웃(`features.folding = false`)
+        // 에서 예약만 늘리면 그만큼 본문이 근거 없이 줄어든다.
+        gutter.scratchNeeded(@intCast(visual_budget), props.total_lines, props.folds != null and !layout.folding.isEmpty()),
     );
     const content_scratch = scratch.text_bytes[0 .. scratch.text_bytes.len - gutter_reserve];
 
@@ -591,7 +593,12 @@ test "저장소가 좁아도 죽지 않는다 — 잘린 사실을 알린다" {
     var bufs: TestBuffers = .{};
     var s = bufs.scratch();
     s.text_bytes = s.text_bytes[0..16]; // 한 줄도 못 담는 크기
-    const long = "z" ** 500;
+    // **탭을 넣어야 본문이 실제로 잘린다.** `content`에는 *"전개가 원본과 같으면 저장소를 안 쓴다"*는
+    // 빠른 길이 있어 `z`만 있는 줄은 저장소가 0이어도 온전히 그려진다 — 그래서 이 테스트가 보던
+    // 절단은 사실 **gutter 쪽**이었고, 그것은 `build`가 줄마다 20바이트 여유를 요구하던 결함이었다
+    // (적대적 검증 2026-08-17에 고쳤다). 그 결함을 고치자 이 케이스가 통과할 수 없게 됐다 —
+    // 이름이 말하는 계약을 실제로 재현하도록 입력을 고친다.
+    const long = "\t" ++ ("z" ** 500);
     const w = build(testProps(&.{ long, long }, true), s);
     try testing.expect(w.ops >= 1); // 배경은 나온다
     try testing.expect(w.truncated);

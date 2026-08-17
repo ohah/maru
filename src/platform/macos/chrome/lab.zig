@@ -328,18 +328,24 @@ const editor_hazard_lines = [_][]const u8{
 /// 줄 2는 ASCII라 근사와 실제가 일치하고, 줄 3은 한글이라 **행마다 한 칸이 남아 근사가 틀리는**
 /// 경우다. 둘을 나란히 두면 어느 쪽이 깨졌는지 캡처에서 갈린다. 줄 4의 빈 줄은 **빈 줄이 행 하나를
 /// 지키는지**(caret 자리) 보고, 줄 5는 그 뒤 번호가 밀리지 않았는지 보여준다.
-/// 접힌 화면이 그리는 줄들 — 몸통이 숨어 **머리 줄만** 남았다.
+/// 접힌 화면이 그리는 줄들 — 접은 블록은 몸통이 숨어 **머리 줄만** 남았다.
 const editor_folded_lines = [_][]const u8{
     "pub fn main() !void {",
     "fn helper(a: u32) u32 {",
     "const config = .{",
-    "// 접히지 않는 평범한 줄",
+    "    .verbose = true,",
 };
 
 /// 위 줄들의 **원래 문서 번호**. 접힌 만큼 건너뛴다 — 이것이 접힘의 눈에 보이는 증거다.
-const editor_folded_numbers = [_]?u32{ 1, 8, 15, 24 };
+///
+/// **표식과 앞뒤가 맞아야 한다.** 초판은 `{ 1, 8, 15, 24 }`에 마지막 표식을 `.open`으로 두었는데,
+/// 그러면 *"15는 펼쳐져 있는데 다음 보이는 줄이 24"*가 되어 **제품에서 나올 수 없는 화면**을 골든이
+/// 굳힌다(펼쳐졌으면 16이 와야 한다). 캡처는 리뷰어가 눈으로 읽는 계약이므로, 손으로 적는 픽스처도
+/// 제품이 만들 수 있는 조합이어야 한다(적대적 검증 2026-08-17).
+const editor_folded_numbers = [_]?u32{ 1, 8, 15, 16 };
 
-/// 줄마다의 접힘 표식. 셋은 접혀 있고(▸) 마지막 줄은 접을 자리가 아니다.
+/// 줄마다의 접힘 표식. 앞의 둘은 접혀 있고(▸ — 번호가 1→8→15로 건너뛴다), 셋째는 **펼쳐진 머리**
+/// (▾ — 그래서 바로 다음 줄 16이 이어진다), 넷째는 접을 자리가 아니다.
 const editor_folded_marks = [_]chrome.components.editor_view.gutter.Fold{ .collapsed, .collapsed, .open, .none };
 
 const editor_wrap_lines = [_][]const u8{
@@ -523,7 +529,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var visual_rows: [row_capacity]editor_view.visual_map.VisualRow = undefined;
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
     var row_counts: [row_capacity]u32 = undefined;
-    var count_scratch: [4096]u8 = undefined;
+    // **크기를 손으로 적지 않는다.** 세는 쪽과 그리는 쪽이 갈리면 같은 줄의 행 수가 달라지고
+    // (visual-mapping §4.1 "행 수를 세는 저장소는 한 곳에서 정한다"), Lab이 제품과 다른 화면을
+    // 골든으로 굳힌다 — 캡처가 지켜야 할 것이 바로 제품 화면이다(적대적 검증 2026-08-17).
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
 
     const fw = editor_view.frame.build(.{
         .lines = lines,
@@ -631,7 +640,8 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var visual_rows: [128]editor_view.visual_map.VisualRow = undefined;
     var gutter_rows: [128]editor_view.gutter.Row = undefined;
     var row_counts: [128]u32 = undefined;
-    var count_scratch: [1024]u8 = undefined;
+    // 위와 같은 단일 출처. **비교는 좌우가 이것을 반씩 나눠 쓴다**(`diff_frame.splitScratch`).
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
 
     const w = editor_view.diff_frame.build(.{
         .left = if (scrolled)

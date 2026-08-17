@@ -520,7 +520,7 @@ pub const inventory = [_]Proof{
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
     // editor-surface-structure.md, §9 → plans/editor-surface.md). count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "0f097f6549b745484f6decde55037ab082b1b8e2b7e12dbb34c5fd5d52a2139c" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "a80ce26e2306ab9cb9dbe16429907c0e1a7f4e5aa99749663de6fb5b32ef232f" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
@@ -541,5 +541,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "910ba2e21054ad8863d485952bf6cfb0c7f363a422d418bea8ec994ff6a69ef8" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "e5feeae2c229b3ce6afbf51afccc0adf5924de63b76d940abc0ddc429e61e6d1" },
 };

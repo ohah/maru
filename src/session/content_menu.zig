@@ -7,6 +7,7 @@
 //! 있으므로 web에서 받지 않는다 — 두 곳에서 판단하면 갈린다.
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const dock_panel = @import("dock_panel.zig");
 
 /// 우클릭 지점이 무엇 위였나. 렌더 iframe·shell 어느 쪽이든 이 넷 중 하나로 접어서 올린다.
@@ -43,15 +44,15 @@ pub const Item = enum {
     /// 화면에 그릴 라벨. 정적 리터럴이라 소유권이 없다(호출자가 버퍼에 담기만 한다).
     pub fn label(self: Item) []const u8 {
         return switch (self) {
-            .copy => "복사",
-            .cut => "잘라내기",
-            .paste => "붙여넣기",
-            .select_all => "전체 선택",
-            .open_link => "링크 열기",
-            .copy_link => "주소 복사",
-            .save_image => "이미지 저장",
-            .copy_path => "경로 복사",
-            .open_source => "소스 모드로 열기",
+            .copy => i18n.t(.ctx_copy),
+            .cut => i18n.t(.ctx_cut),
+            .paste => i18n.t(.ctx_paste),
+            .select_all => i18n.t(.ctx_select_all),
+            .open_link => i18n.t(.ctx_open_link),
+            .copy_link => i18n.t(.ctx_copy_link),
+            .save_image => i18n.t(.ctx_save_image),
+            .copy_path => i18n.t(.ctx_copy_path),
+            .open_source => i18n.t(.ctx_open_source_mode),
         };
     }
 

@@ -876,7 +876,7 @@ pub fn buildFilePanelHeaderDrawList(
             for (dock_layout.modesForKind(kind)) |descriptor| {
                 const range = dock_layout.headerModeCellRange(header, kind, descriptor.mode) orelse continue;
                 if (range.end > range.start + 1)
-                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, descriptor.label, 0, range.start + 1, range.end, .{
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, descriptor.label(), 0, range.start + 1, range.end, .{
                         .foreground = active_fg,
                         .bold = descriptor.mode == mode,
                     }, false, .head);
@@ -2639,6 +2639,12 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
 }
 
 test "file panel header draws source mode and dirty marker in the reserved control band" {
+    // 이 테스트는 모드 라벨을 **코드포인트로** 찾는다(`'\u{c18c}'` = "소"). 그 글자는 한국어 라벨일
+    // 때만 나오므로 언어를 고정한다 — 재는 것은 "예약 밴드에 모드 텍스트가 그려지는가"이지 문구가 아니다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
@@ -2651,7 +2657,7 @@ test "file panel header draws source mode and dirty marker in the reserved contr
     for (dl.cells) |cell| {
         try std.testing.expectEqual(@as(u16, 0), cell.row); // 밴드는 한 줄이다
         if (cell.codepoint == 0x25CF and cell.col == 46) saw_dirty = true;
-        if (cell.codepoint == '\u{c18c}') saw_mode_text = true; // "소스"의 첫 글자
+        if (cell.codepoint == '\u{c18c}') saw_mode_text = true; // "소스"의 첫 글자 — 아래 setLang(.ko) 가 이 글자를 보장한다
         if (cell.codepoint == 'd' or cell.codepoint == 'o') saw_path = true; // breadcrumb 텍스트
     }
     try std.testing.expect(saw_dirty);

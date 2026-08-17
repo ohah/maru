@@ -12,6 +12,7 @@
 //! rename 경로 복원만 scratch 버퍼를 쓴다(numstat이 `A => B` 한 필드로 적어 status 경로와 다르기 때문 — git_status 참고).
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const git_status = @import("git_status.zig");
 
 /// 섹션 개수 — 접힘·펼침 상태 배열의 길이 계약이다(세션이 같은 크기로 들고 있는다).
@@ -30,8 +31,8 @@ pub const Section = enum {
 
     pub fn title(self: Section) []const u8 {
         return switch (self) {
-            .staged => "스테이지된 변경",
-            .changes => "변경 사항",
+            .staged => i18n.t(.scm_staged),
+            .changes => i18n.t(.scm_changes),
         };
     }
 };
@@ -87,7 +88,7 @@ pub const Notice = enum {
 
     pub fn text(self: Notice) []const u8 {
         return switch (self) {
-            .output_truncated => "git 출력이 너무 커서 목록이 잘렸습니다",
+            .output_truncated => i18n.t(.scm_output_truncated),
         };
     }
 };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const split_tree = @import("split_tree.zig");
 
 /// 파일 패널 도크의 창-로컬 배치. 실제 rect 계산과 config 기본 크기는 FP3가 소유하며, `size == 0`은 그
@@ -85,12 +86,12 @@ pub const DiffBase = enum {
     /// 구분할 수 없다 — 무엇을 보고 있는지 탭에서 바로 알 수 있어야 한다.
     pub fn label(self: DiffBase) []const u8 {
         return switch (self) {
-            .staged => "스테이지됨",
-            .unstaged => "작업트리",
-            .untracked => "새 파일",
-            .branch => "브랜치",
-            .conflict => "충돌",
-            .turn => "마지막 턴",
+            .staged => i18n.t(.dock_staged),
+            .unstaged => i18n.t(.dock_worktree),
+            .untracked => i18n.t(.dock_new_file),
+            .branch => i18n.t(.dock_branch),
+            .conflict => i18n.t(.dock_conflict),
+            .turn => i18n.t(.dock_last_turn),
         };
     }
 };

@@ -2,6 +2,7 @@
 //! 파생해 렌더·hit-test·WKWebView 전이가 같은 좌표를 소비하게 한다. AppKit/renderer/PTY 의존은 없다.
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const dock_panel = @import("dock_panel.zig");
 const layout_math = @import("layout_math.zig");
 const Rect = @import("split_tree.zig").Rect;
@@ -75,21 +76,29 @@ pub const HeaderCellLayout = struct {
 
 pub const HeaderModeDescriptor = struct {
     mode: dock_panel.Mode,
-    label: []const u8,
+    /// 표시 문자열이 아니라 **키**를 든다 — 이 목록이 컨테이너 레벨 배열이라 comptime 이고,
+    /// 런타임 조회(`i18n.t`)는 거기서 쓸 수 없다(`unable to resolve comptime value`).
+    /// 해석은 그리는 쪽이 한다(`label()` 헬퍼). 소비처가 둘뿐이라 전파 비용도 작다.
+    label_key: i18n.Key,
+
+    /// 현재 언어로 푼 표시 문자열.
+    pub fn label(self: HeaderModeDescriptor) []const u8 {
+        return i18n.t(self.label_key);
+    }
 };
 
 /// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown은 `읽기|리치|소스`, svg는 `읽기|소스`다.
 /// kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
 pub const markdown_header_modes = [_]HeaderModeDescriptor{
-    .{ .mode = .read, .label = "읽기" },
-    .{ .mode = .rich, .label = "리치" },
-    .{ .mode = .source_edit, .label = "소스" },
+    .{ .mode = .read, .label_key = .dock_read },
+    .{ .mode = .rich, .label_key = .dock_rich },
+    .{ .mode = .source_edit, .label_key = .dock_source },
 };
 
 /// svg는 문서모델로 다룰 대상이 아니라 리치가 없다(§2.5) — 프리뷰와 XML 소스 둘뿐이다.
 pub const header_modes = [_]HeaderModeDescriptor{
-    .{ .mode = .read, .label = "읽기" },
-    .{ .mode = .source_edit, .label = "소스" },
+    .{ .mode = .read, .label_key = .dock_read },
+    .{ .mode = .source_edit, .label_key = .dock_source },
 };
 
 /// 이 kind가 헤더에 노출하는 mode 선택지(순서=시각 순서). 빈 슬라이스면 mode 선택기가 없다(html·text·image·pdf).
@@ -609,7 +618,7 @@ test "헤더 mode 슬롯은 kind별로 나뉜다 (markdown thirds, svg halves) b
         const range = headerModeCellRange(both, .markdown, d.mode).?;
         if (md_prev) |p| try std.testing.expectEqual(p, range.start);
         md_prev = range.end;
-        try std.testing.expect(d.label.len > 0);
+        try std.testing.expect(d.label().len > 0);
     }
     try std.testing.expectEqual(@as(?u16, both.mode_end), md_prev);
     // svg: 2개 슬롯(읽기·소스).

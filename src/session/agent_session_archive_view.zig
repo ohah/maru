@@ -5,6 +5,7 @@
 //! 따라서 scroll/hit-test가 도크의 고정 chrome이나 선택 detail에 의존하지 않는다.
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 
 pub const card_rows: usize = 3;
 
@@ -118,7 +119,7 @@ pub fn build(
 }
 
 pub fn groupLabel(key: []const u8) []const u8 {
-    return if (key.len == 0) "알 수 없는 위치" else std.fs.path.basename(key);
+    return if (key.len == 0) i18n.t(.arch_unknown_location) else std.fs.path.basename(key);
 }
 
 fn contains(keys: []const []const u8, needle: []const u8) bool {
@@ -139,7 +140,7 @@ test "projection groups noncontiguous cwd records and retains newest order withi
     try std.testing.expectEqual(@as(usize, 3), projection.groups.items.len);
     try std.testing.expectEqualStrings("a", projection.groups.items[0].label);
     try std.testing.expectEqualStrings("b", projection.groups.items[1].label);
-    try std.testing.expectEqualStrings("알 수 없는 위치", projection.groups.items[2].label);
+    try std.testing.expectEqualStrings(i18n.t(.arch_unknown_location), projection.groups.items[2].label);
     try std.testing.expectEqual(@as(usize, 15), projection.visual_rows);
     try std.testing.expectEqual(@as(usize, 4), projection.entries.items[1].card);
     try std.testing.expectEqual(@as(usize, 2), projection.entries.items[2].card);

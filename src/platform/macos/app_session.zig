@@ -47688,7 +47688,7 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
     try std.testing.expectEqual(resource_header_rows, session.chrome_host.context_menu.header_count);
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "리소스") != null);
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[1], "메모리") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[1], maru.i18n.t(.res_memory)) != null);
     // 무거운 순 — 900이 먼저다.
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
     try std.testing.expectEqual(@as(u64, 111), session.resource_menu_keys[1]);
@@ -55758,14 +55758,14 @@ test "diff 탭 라벨: 같은 파일의 두 비교가 탭에서 갈린다" {
     const plain = git_ops.diffTermFor(session, "/repo/a.txt", .unstaged) orelse return error.MissingDiffTerm;
     const plain_label = try session.diffAwareLabel(allocator, plain);
     defer allocator.free(plain_label);
-    try std.testing.expect(std.mem.indexOf(u8, plain_label, "작업트리") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_label, maru.i18n.t(.dock_worktree)) != null);
 
     // 같은 파일의 다른 비교는 무엇을 보고 있는지 탭에서 갈려야 한다(양쪽 그룹에 동시에 있을 수 있으므로).
     git_ops.openDiffTerm(session, "/repo", "/repo/a.txt", "a.txt", null, .staged);
     const staged = git_ops.diffTermFor(session, "/repo/a.txt", .staged) orelse return error.MissingDiffTerm;
     const staged_label = try session.diffAwareLabel(allocator, staged);
     defer allocator.free(staged_label);
-    try std.testing.expect(std.mem.indexOf(u8, staged_label, "스테이지됨") != null);
+    try std.testing.expect(std.mem.indexOf(u8, staged_label, maru.i18n.t(.dock_staged)) != null);
 
     // 두 Term은 서로 다른 Term이다 — 유일성 키에 base가 들어 있다는 계약의 반대쪽 확인.
     try std.testing.expect(plain != staged);
@@ -56028,8 +56028,8 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     });
     try std.testing.expect(session.file_content_menu != null);
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
-    try std.testing.expectEqualStrings("링크 열기", session.context_menu_items_buf[0]);
-    try std.testing.expectEqualStrings("주소 복사", session.context_menu_items_buf[1]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_open_link), session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_copy_link), session.context_menu_items_buf[1]);
     const scale = @max(@as(u32, 1), session.scale_milli);
     try std.testing.expectEqual(@as(i32, @intCast(100 + 20 * scale / 1000)), session.chrome_host.context_menu.anchor_x);
     try std.testing.expectEqual(@as(i32, @intCast(50 + 30 * scale / 1000)), session.chrome_host.context_menu.anchor_y);
@@ -56051,7 +56051,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .href = "",
     });
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
-    try std.testing.expectEqualStrings("복사", session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_copy), session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
     session.chrome_host.context_menu.selected = 0;
     settings_ops.acceptContextMenu(session);
     const action = settings_ops.takeFileMenuAction(session).?;
@@ -56070,7 +56070,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .has_selection = false,
         .href = "",
     });
-    try std.testing.expectEqualStrings("소스 모드로 열기", session.context_menu_items_buf[1]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_open_source_mode), session.context_menu_items_buf[1]);
     session.chrome_host.context_menu.selected = 1;
     settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, session.filePanelMode(surface_id).?);
@@ -56085,8 +56085,8 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .href = "",
     });
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
-    try std.testing.expectEqualStrings("붙여넣기", session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
-    try std.testing.expectEqualStrings("전체 선택", session.context_menu_items_buf[1]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_paste), session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_select_all), session.context_menu_items_buf[1]);
     settings_ops.closeContextMenu(session);
 
     // 파일 본문이 아닌 surface는 메뉴도 클립보드 쓰기도 못 연다.

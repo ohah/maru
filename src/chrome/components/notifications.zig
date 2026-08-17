@@ -14,7 +14,8 @@ const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW)·truncateToCols 단일 출처 — 카드 폭 측정·말줄임에 재사용
-const scroll_area = @import("../ui/scroll_area.zig"); // SV5a: 스크롤 좌표·창 계산 단일 출처(도크·탐색기와 같은 타입)
+const scroll_area = @import("../ui/scroll_area.zig");
+const i18n = @import("../../i18n.zig"); // 표시 문자열 단일 출처 — 이 파일의 라벨이 패널 폭을 정한다(계약 §6.1) // SV5a: 스크롤 좌표·창 계산 단일 출처(도크·탐색기와 같은 타입)
 
 /// 최상위 모달 레이어(열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
@@ -30,9 +31,11 @@ const header_rows: u32 = 1;
 /// 점은 안읽음일 때만 col 1에 그린다(읽음이면 빈 칸). 본문줄도 같은 들여쓰기로 제목과 좌측을 맞춘다.
 const text_indent_cols: u32 = 3;
 
-/// 패널 **최소** 폭(칸). 헤더의 "알림" 제목 + "모두 읽음"·"모두 지우기" **버튼**(라벨+좌우 패딩)이 겹치지 않게, 또
-/// 카드가 답답하지 않게 둘 넉넉한 하한. 버튼은 plain 텍스트보다 패딩만큼 넓어 30→34로 키운다. content가 이보다 작아도 보장.
-const min_panel_cols: u32 = 34;
+/// 패널 **최소** 폭(칸)의 **하한**. "카드가 답답하지 않게"라는 이유만 든다 — 헤더가 겹치지 않는 폭은
+/// 라벨에서 계산한다(`minPanelCols`). 예전에는 이 34 하나가 둘을 겸했는데, 그 값은 **한국어 라벨을 재고
+/// 정한 것**이라 영어에서 헤더가 겹친다("Notifications" + "Mark all read" + "Clear all" ≈ 43칸).
+/// 계약 §6.1 "표시 폭을 상수로 박지 않는다"가 바로 이 경우다.
+const min_panel_cols_floor: u32 = 34;
 
 /// 패널 **최대** 폭(칸). 내용(긴 본문 등)이 길어도 패널이 화면을 가로지를 만큼 넓어지지 않게 cap한다(사용자 피드백
 /// "maxwidth가 있어서 적당한 크기"). 넘치는 제목/본문은 view가 `truncateToCols`로 …말줄임한다. ~520px at 12px cell.
@@ -46,21 +49,44 @@ const empty_body_rows: u32 = 6;
 const min_panel_rows: u32 = 8;
 
 /// 헤더 제목.
-const panel_heading = "알림";
+fn panelHeading() []const u8 {
+    return i18n.t(.notif_heading);
+}
 
 /// 빈 상태 일러스트 — 아이콘(종-슬래시) + 굵은 제목 + 부제. 아이콘은 이모지(🔕, CoreText fallback) — 렌더 안 되면
 /// BMP 기호로 교체(docs/notifications.md §5 "종 글리프 실제 렌더 확인" 규율과 동일).
 const empty_icon = "\u{1F515}"; // 🔕 U+1F515 BELL WITH CANCELLATION STROKE
-const empty_heading = "아직 알림이 없습니다";
-const empty_subtext = "데스크톱 알림이 여기에 표시됩니다.";
+fn emptyHeading() []const u8 {
+    return i18n.t(.notif_empty_heading);
+}
+fn emptySubtext() []const u8 {
+    return i18n.t(.notif_empty_subtext);
+}
 
 /// 제목이 빈 문자열(OSC 9는 title 없음)일 때 표시 폴백.
-const empty_title = "(제목 없음)";
+fn emptyTitle() []const u8 {
+    return i18n.t(.notif_empty_title);
+}
 
 /// 카드 우측 ✕(개별 삭제) 글리프 — sidebar 닫기와 같은 BMP(이모지 fallback 없음).
 const close_glyph = "\u{2715}"; // ✕ U+2715
-const mark_all_label = "모두 읽음";
-const clear_all_label = "모두 지우기";
+fn markAllLabel() []const u8 {
+    return i18n.t(.notif_mark_all);
+}
+fn clearAllLabel() []const u8 {
+    return i18n.t(.notif_clear_all);
+}
+
+/// 헤더가 겹치지 않는 **최소 폭**. 제목 + 두 버튼(라벨+패딩) + 사이 간격 + 좌우 여백을 실제 라벨에서
+/// 잰다. 상수로 두면 언어가 바뀔 때 조용히 겹친다 — 그것이 이 함수의 존재 이유다(계약 §6.1).
+fn minPanelCols() u32 {
+    const heading = overlay_input.displayCols(panelHeading());
+    const mark_w = overlay_input.displayCols(markAllLabel()) + 2 * btn_pad;
+    const clear_w = overlay_input.displayCols(clearAllLabel()) + 2 * btn_pad;
+    // 좌 1 + 제목 + 사이 1 + [모두읽음] + gap + [모두지우기] + 우 1
+    const needed = 1 + heading + 1 + mark_w + btn_gap + clear_w + 1;
+    return @max(needed, min_panel_cols_floor);
+}
 
 /// 헤더 액션 버튼(모두 읽음/지우기) 치수 — confirm 다이얼로그 버튼과 같은 관용구(셀 fill 배경 + 라벨 패딩, 토큰 색).
 /// 라벨 좌우 btn_pad칸으로 배경이 라벨을 감싸 버튼처럼, 두 버튼 사이 btn_gap칸. 항목이 있을 때만 활성(tab_hover_bg 배경
@@ -205,7 +231,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
 
 /// 제목 표시 문자열(빈 제목 → 폴백). view·폭 측정 단일 출처.
 fn titleText(it: Item) []const u8 {
-    return if (it.title.len > 0) it.title else empty_title;
+    return if (it.title.len > 0) it.title else emptyTitle();
 }
 
 /// 한 카드의 **자연**(말줄임 전) 가로 칸 수(EAW). 제목줄 = 들여쓰기 + 제목 + 갭 + 시간, 본문줄 = 들여쓰기 + 본문 중
@@ -218,7 +244,7 @@ fn cardCols(it: Item) u32 {
 
 /// 헤더 우측 액션 버튼의 panel-local 기하(view·hitTest 단일 출처 — confirm.buttonGeom 선례). "모두 지우기"가 우측 끝
 /// (1칸 여백), "모두 읽음"이 그 왼쪽 btn_gap칸. 각 버튼 [x0, x1) 칸 범위(배경 fill·클릭 zone)와 라벨 시작 col(x0+btn_pad).
-/// 좁은 폭이면 saturating으로 0까지(제목과 겹칠 수 있으나 min_panel_cols가 방어).
+/// 좁은 폭이면 saturating으로 0까지(제목과 겹칠 수 있으나 minPanelCols()가 방어).
 const HeaderActions = struct {
     mark_x0: u32,
     mark_x1: u32,
@@ -228,8 +254,8 @@ const HeaderActions = struct {
     clear_label_x: u32,
 };
 fn headerActions(panel_cols: u32) HeaderActions {
-    const clear_w = overlay_input.displayCols(clear_all_label) + 2 * btn_pad;
-    const mark_w = overlay_input.displayCols(mark_all_label) + 2 * btn_pad;
+    const clear_w = overlay_input.displayCols(clearAllLabel()) + 2 * btn_pad;
+    const mark_w = overlay_input.displayCols(markAllLabel()) + 2 * btn_pad;
     const clear_x0 = panel_cols -| 1 -| clear_w; // 우측 1칸 여백
     const mark_x0 = clear_x0 -| btn_gap -| mark_w;
     return .{
@@ -312,16 +338,19 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     const header_h = ch * header_rows;
 
     // 폭 — 빈 목록은 일러스트(제목/부제) 폭, 아니면 최대 카드 폭. [min,max] cap + 좌우 1칸 패딩. 헤더 액션은
-    // min_panel_cols가 들어가게 보장한다(headerActions 참조). cap을 넘는 카드는 view가 말줄임.
+    // minPanelCols()가 들어가게 보장한다(headerActions 참조). cap을 넘는 카드는 view가 말줄임.
     var content_cols: u32 = if (items.len == 0)
-        @max(overlay_input.displayCols(empty_heading), overlay_input.displayCols(empty_subtext))
+        @max(overlay_input.displayCols(emptyHeading()), overlay_input.displayCols(emptySubtext()))
     else
         0;
     for (items) |it| {
         const c = cardCols(it);
         if (c > content_cols) content_cols = c;
     }
-    content_cols = std.math.clamp(content_cols, min_panel_cols, max_panel_cols);
+    // 하한이 상한을 넘을 수 있다(아주 긴 라벨의 언어) — 그때는 겹치지 않는 쪽을 이긴 값으로 둔다.
+    // `clamp` 는 min > max 를 허용하지 않으므로 상한을 하한까지 밀어 올린다.
+    const min_cols = minPanelCols();
+    content_cols = std.math.clamp(content_cols, min_cols, @max(max_panel_cols, min_cols));
     const box_w = (content_cols + 2) * cw;
 
     const total = items.len;
@@ -469,10 +498,10 @@ fn appendHeaderActions(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = l.rect.x + @as(i32, @intCast(ha.clear_x0 * cw)), .y = btn_y, .w = (ha.clear_x1 - ha.clear_x0) * cw, .h = btn_h }, .role = .tab_hover_bg } });
     }
     const mark_runs = try arena.alloc(draw.Run, 1);
-    mark_runs[0] = .{ .text = mark_all_label };
+    mark_runs[0] = .{ .text = markAllLabel() };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.mark_label_x * cw)), .y = l.rect.y }, .runs = mark_runs, .role = label_role } });
     const clear_runs = try arena.alloc(draw.Run, 1);
-    clear_runs[0] = .{ .text = clear_all_label };
+    clear_runs[0] = .{ .text = clearAllLabel() };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.clear_label_x * cw)), .y = l.rect.y }, .runs = clear_runs, .role = label_role } });
 }
 
@@ -518,7 +547,7 @@ pub fn view(
 
     // 헤더 밴드: "알림" 제목(좌, surface_fg) + 우측 액션(muted_fg). 아래 1px 구분선으로 본문과 분리.
     const heading_runs = try arena.alloc(draw.Run, 1);
-    heading_runs[0] = .{ .text = panel_heading };
+    heading_runs[0] = .{ .text = panelHeading() };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = rect.y }, .runs = heading_runs, .role = .surface_fg } });
     try appendHeaderActions(l, arena, out, items.len > 0); // 항목 있으면 활성 버튼, 빈 상태면 비활성(dim)
     // 구분선 폭은 **카드 폭**이다(패널 전폭이 아니다) — 전폭이면 gutter를 가로질러 스크롤바 뒤로
@@ -529,8 +558,8 @@ pub fn view(
         // 빈 상태 일러스트: 종-슬래시 아이콘 + 굵은 제목 + 부제(헤더 아래 본문 영역에 세로로 배치, 가로 가운데).
         const body_top = rect.y + header_h_i;
         try appendCentered(l, arena, out, empty_icon, body_top + ch, .muted_fg); // 본문 r1: 아이콘
-        try appendCentered(l, arena, out, empty_heading, body_top + 3 * ch, .surface_fg); // 본문 r3: 제목
-        try appendCentered(l, arena, out, empty_subtext, body_top + 4 * ch, .muted_fg); // 본문 r4: 부제
+        try appendCentered(l, arena, out, emptyHeading(), body_top + 3 * ch, .surface_fg); // 본문 r3: 제목
+        try appendCentered(l, arena, out, emptySubtext(), body_top + 4 * ch, .muted_fg); // 본문 r4: 부제
         return;
     }
 
@@ -687,14 +716,27 @@ test "notifications hitTest: 헤더 액션 버튼(모두읽음/지우기)·제�
     // box_w=(max(content,34)+2)*8=288, x=100, panel_cols=36. 헤더 h=16([50,66)). 카드 first 시작=rect.y+16=66.
     // 항목 2 → content_h=16+2*32=80인데 최소 높이 min_panel_rows(8)×16=128이 더 커 box_h=128(=[50,178)).
     // 카드0=[66,98)(제목 66~82·본문 82~98), 카드1=[98,130). 카드영역 아래 gap=[130,178)=background.
-    // headerActions(36): clear_w=13,mark_w=11. clear=[22,35), mark=[10,21). 사이 col 21=gap.
+    // **버튼 열을 하드코딩하지 않는다.** 예전에는 col 12·25 를 박아 두었는데 그 값은 한국어 라벨 폭을
+    // 잰 것이라, 라벨이 바뀌면(언어 전환) 테스트가 엉뚱한 칸을 눌러 놓고 실패한다. 좌표는 view·hitTest 가
+    // 공유하는 단일 출처(`headerActions`)에서 얻는다 — 그래야 어느 언어에서든 "보이는 곳 == 눌리는 곳"을
+    // 재게 된다(계약 §6.1).
+    const rect = panelRect(&s, &items, p) orelse return error.NoPanelRect;
+    const rect_cols = rect.w / 8;
+    const acts = headerActions(rect_cols);
+    const mark_mid = acts.mark_x0 + 1;
+    const clear_mid = acts.clear_x0 + 1;
+    const gap_col = acts.clear_x0 -| 1; // 두 버튼 사이
+
     try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 108, 55).?); // 헤더 좌측 제목(col 1) → background
-    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 100 + 12 * 8, 55).?); // "모두 읽음" 버튼(col 12 ∈ [10,21))
-    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 100 + 21 * 8, 55).?); // 두 버튼 사이 gap(col 21) → background
-    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 100 + 25 * 8, 55).?); // "모두 지우기" 버튼(col 25 ∈ [22,35))
+    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 100 + mark_mid * 8, 55).?);
+    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 100 + gap_col * 8, 55).?);
+    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 100 + clear_mid * 8, 55).?);
     try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 110, 70).?); // 카드0 제목 좌측
-    try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, 375, 85).?); // 카드0 본문줄 우측 ✕(col≥34)
-    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 375, 70).?); // 제목줄 우측은 ✕ 아님(시간 영역)
+    // ✕ 도 같은 이유로 패널에서 유도한다 — 폭이 라벨을 따라 움직이므로 px 를 박으면 언어가 바뀔 때
+    // 엉뚱한 칸을 누른다. 우측에서 두 칸 안쪽이 ✕ 자리다.
+    const close_x = rect.x + @as(i32, @intCast((rect_cols -| 2) * 8));
+    try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, close_x, 85).?); // 카드0 본문줄 우측 ✕
+    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, close_x, 70).?); // 제목줄 우측은 ✕ 아님(시간 영역)
     try std.testing.expectEqual(Hit{ .card = 1 }, hitTest(&s, &items, p, 110, 110).?); // 카드1
     try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 150, 150).?); // 카드 아래 gap → 무시(닫지 않음)
     try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, 110, 400)); // 박스 아래 밖 → null(닫기)
@@ -744,11 +786,11 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
     var saw_mark = false;
     var saw_clear = false;
     for (out.items) |op| {
-        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, panel_heading)) saw_heading = true;
-        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, empty_heading)) saw_empty_heading = true;
-        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, empty_subtext)) saw_empty_subtext = true;
-        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, mark_all_label)) saw_mark = true;
-        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, clear_all_label)) saw_clear = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, panelHeading())) saw_heading = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, emptyHeading())) saw_empty_heading = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, emptySubtext())) saw_empty_subtext = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, markAllLabel())) saw_mark = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, clearAllLabel())) saw_clear = true;
     }
     try std.testing.expect(saw_heading and saw_empty_heading and saw_empty_subtext and saw_mark and saw_clear);
 
@@ -767,7 +809,7 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
     try std.testing.expect(out.items[0] == .quad);
     // 헤더 제목은 surface_fg, 첫 text op.
     try std.testing.expect(out.items[1] == .text and out.items[1].text.role == .surface_fg);
-    try std.testing.expectEqualStrings(panel_heading, out.items[1].text.runs[0].text);
+    try std.testing.expectEqualStrings(panelHeading(), out.items[1].text.runs[0].text);
     // 구분선(divider) + 액션 버튼 배경(tab_hover_bg 2개) + 안읽음 점(focus_accent) + 닫힌 surface 제목(muted_fg) + 카드 ✕ 확인.
     var divider_count: usize = 0;
     var action_bg: usize = 0;
@@ -781,7 +823,7 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
         if (op == .text and op.text.role == .focus_accent and std.mem.eql(u8, op.text.runs[0].text, "\u{25CF}")) saw_dot = true;
         if (op == .text and op.text.role == .muted_fg and std.mem.eql(u8, op.text.runs[0].text, "web")) saw_closed_title = true;
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, close_glyph)) close_count += 1;
-        if (op == .text and op.text.role == .surface_fg and (std.mem.eql(u8, op.text.runs[0].text, mark_all_label) or std.mem.eql(u8, op.text.runs[0].text, clear_all_label))) active_action_labels += 1;
+        if (op == .text and op.text.role == .surface_fg and (std.mem.eql(u8, op.text.runs[0].text, markAllLabel()) or std.mem.eql(u8, op.text.runs[0].text, clearAllLabel()))) active_action_labels += 1;
     }
     try std.testing.expectEqual(@as(usize, 3), divider_count); // 헤더 구분선 + 카드0·카드1 각 아래 구분선(마지막 포함)
     try std.testing.expectEqual(@as(usize, 2), action_bg); // 활성 액션 버튼 배경 2개(모두읽음·지우기)
@@ -892,7 +934,7 @@ test "notifications view 스크롤: 프레임 clip은 패널 전체(헤더 포�
 
     // 헤더 제목이 그 clip 안에 있다 — 이것이 "라벨이 사라지지 않는다"의 직접 판정이다.
     var heading_y: ?i32 = null;
-    for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, panel_heading)) {
+    for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, panelHeading())) {
         heading_y = op.text.origin.y;
     };
     const hy = heading_y orelse return error.HeadingMissing;
@@ -925,7 +967,7 @@ test "notifications panelRect: 빈 제목 폴백 + [min,max] 폭 cap + 종 밑(�
     s.show(20, 50, items.len);
     const r = panelRect(&s, &items, p).?;
     try std.testing.expectEqual(@as(i32, 20), r.x); // 사이드바(200) 안이어도 종 위치 유지
-    try std.testing.expect(r.w >= min_panel_cols * 8); // 최소 폭 보장
+    try std.testing.expect(r.w >= minPanelCols() * 8); // 최소 폭 보장
     // 아주 긴 본문 → 최대 폭 cap(과도하게 넓어지지 않음).
     const long = [_]Item{
         .{ .title = "t", .body = "아주 긴 본문 텍스트를 반복해서 채워 넣어 패널이 화면을 가로지를 만큼 넓어지는지 검증한다 한참 더 길게", .relative_time = "방금", .is_read = false, .is_alive = true },
@@ -1061,4 +1103,43 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우(헤더 예약) 
         if (op == .clip) saw_clip = true;
     }
     try std.testing.expect(saw_clip);
+}
+
+// 헤더가 **어느 언어에서도 겹치지 않는지** 본다.
+//
+// 예전 `min_panel_cols = 34`는 한국어 라벨("알림"·"모두 읽음"·"모두 지우기")을 재고 정한 값이라,
+// 영어("Notifications"·"Mark all read"·"Clear all")로 바뀌면 제목과 버튼이 겹친다. 크래시도 경고도
+// 없이 **글자가 서로 위에 그려진다.** 계약 §6.1 "표시 폭을 상수로 박지 않는다"가 이 경우다.
+test "알림 헤더는 어느 언어에서도 제목과 버튼이 겹치지 않는다 (계약 §6.1)" {
+    const before = i18n.lang();
+    defer i18n.setLang(before);
+
+    for ([_]i18n.Lang{ .ko, .en }) |lang| {
+        i18n.setLang(lang);
+        const cols = minPanelCols();
+        const acts = headerActions(cols);
+
+        // 제목은 col 1 부터 — 그 끝이 왼쪽 버튼 시작보다 앞이어야 한다.
+        const heading_end = 1 + overlay_input.displayCols(panelHeading());
+        try std.testing.expect(heading_end <= acts.mark_x0);
+
+        // 두 버튼도 서로 겹치지 않고, 오른쪽 버튼이 패널을 벗어나지 않는다.
+        try std.testing.expect(acts.mark_x1 <= acts.clear_x0);
+        try std.testing.expect(acts.clear_x1 <= cols);
+    }
+}
+
+// 폭이 **실제로 언어를 따라 움직이는지** 본다. 위 테스트만 있으면 하한을 아주 크게 박아도 통과하는데,
+// 그것은 "겹치지 않는다"를 지킬 뿐 "상수로 박지 않는다"는 아니다.
+test "알림 패널 최소 폭은 라벨에서 나온다 — 상수가 아니다" {
+    const before = i18n.lang();
+    defer i18n.setLang(before);
+
+    i18n.setLang(.ko);
+    const ko_cols = minPanelCols();
+    i18n.setLang(.en);
+    const en_cols = minPanelCols();
+
+    // 영어 라벨이 한국어보다 넓으므로(EAW 를 세어도) 최소 폭이 더 커야 한다.
+    try std.testing.expect(en_cols > ko_cols);
 }

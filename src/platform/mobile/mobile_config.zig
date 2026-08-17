@@ -176,11 +176,11 @@ fn dashed(comptime name: []const u8) []const u8 {
 
 /// namespace(Config 필드명) → 화면 헤더. **여기가 모바일 섹션의 단일 출처다.**
 fn sectionOf(comptime ns: []const u8) []const u8 {
-    if (std.mem.eql(u8, ns, "theme")) return "모양";
-    if (std.mem.eql(u8, ns, "cursor")) return "커서";
-    if (std.mem.eql(u8, ns, "font")) return "모양";
-    if (std.mem.eql(u8, ns, "scrollback")) return "터미널";
-    return "기타";
+    if (std.mem.eql(u8, ns, "theme")) return maru.i18n.tIn(.ko, .mob_appearance);
+    if (std.mem.eql(u8, ns, "cursor")) return maru.i18n.tIn(.ko, .set_section_cursor);
+    if (std.mem.eql(u8, ns, "font")) return maru.i18n.tIn(.ko, .mob_appearance);
+    if (std.mem.eql(u8, ns, "scrollback")) return maru.i18n.tIn(.ko, .set_section_terminal);
+    return maru.i18n.tIn(.ko, .set_section_other);
 }
 
 /// 스키마에서 줄을 만든다. **색·문자열 필드는 아직 안 낸다** — 16진 편집 UI 가 없어서,
@@ -197,10 +197,10 @@ pub const rows: []const Row = blk: {
     }
     var list: []const Row = &[_]Row{.{
         .key = "theme.preset",
-        .label = "테마 프리셋",
+        .label = maru.i18n.tIn(.ko, .set_theme_preset),
         .kind = .choice,
         .items = preset_items,
-        .section = "모양",
+        .section = maru.i18n.tIn(.ko, .mob_appearance),
     }};
     for (@typeInfo(Config).@"struct".fields) |cf| {
         const Container = cf.type;

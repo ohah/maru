@@ -48,7 +48,7 @@ pub const inventory = [_]Proof{
     // 손으로 적은 키 표가 없어야 화면과 파일이 갈리지 않는다는 계약(docs/mobile-config.md §6)의
     // 구현이고, Client receiver 나 제품 vtable 과는 무관하다.
     // `font.size`(M10d)가 붙어 바뀐다 — 모바일 config 에 `FontConfig` 가 생겼다. count 는 9 그대로다.
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "a036be4220efe60b4264d4c66dfb91b0cb8e86a3e866f8a11831ba9dff6edc95" },
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "6de766b9b79dbd851aa14a31f9a7b1aa63d9a4f351ae28e5a40d402c74ce3dd5" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "e276e8e954a47819f79ae54a0937d9bb76134deda6876f143baf9da9f0a363a1" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
@@ -553,8 +553,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    // P4 적대적 검증: 커밋 상자 소유권 판정이 **탭까지** 보고(`scmCommitOwnsInput`), 저장소가 갈리면
-    // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
-    // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
     .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "7da6291ccd457b77476ea1e71748d893c71af9be20a01c32453ca7a93c513048" },
 };

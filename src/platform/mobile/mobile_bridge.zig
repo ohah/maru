@@ -1013,7 +1013,9 @@ const edge_w: f32 = 26.0;
 /// 누름 판정도 서지 않는다 — 옛 자리를 답하면 없는 버튼이 눌린다(키바가 같은 규율을 갖는다).
 /// 그 세션의 이름. **목록과 앱 바가 같은 말을 써야** 어디에 있는지 안다 — 두 곳에 따로 적으면
 /// 갈린다(세션이 여럿이 되면 M3/U2 가 이 값을 세션에서 가져온다).
-const session_title = "터미널";
+/// 세션 화면 제목. 모바일 화면은 **언어를 런타임에 못 바꾼다**(설정 행 목록이 comptime — I3b 참고)
+/// 므로 `tIn(.ko, …)` 로 현행을 고정한다. 모바일이 OS 로케일을 받는 슬라이스가 이 고정을 푼다.
+const session_title = maru.i18n.tIn(.ko, .set_section_terminal);
 
 var term_bar_rect: SetRect = .{};
 /// 터미널 앱 바의 뒤로가기 자리.
@@ -2914,7 +2916,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
     // ── 헤더: 제목 + 오른쪽 톱니
-    pushText("세션", @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
     if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
@@ -2970,7 +2972,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
         };
         quad_count += 1;
     }
-    pushText("설정", @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    pushText(maru.i18n.tIn(.ko, .mob_settings), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 
     // ── 목록

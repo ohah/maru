@@ -692,7 +692,12 @@ pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
 /// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: rich 고정 or tui 균등. tab_w=0=분할 불가.
 pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) struct { tab_cols: u16, tab_w: u16, has_scroll: bool, eff_scroll: u32 } {
     const base = paneTabAreaCols(bar_cols);
-    const tab_w = if (tab_width_fixed > 0) tab_width_fixed else paneTabWidth(base, term_count);
+    // **고정 폭은 하한이다(2026-08-18 사용자 요청).** 탭이 적으면 남는 폭을 나눠 **바를 꽉 채운다** —
+    // 소스 컨트롤·히스토리·에이전트 도크의 탭이 그렇게 보이는데 터미널 탭 바만 오른쪽이 비어 톤이
+    // 갈렸다. 탭이 많아 균등 폭이 고정 폭보다 좁아지면 고정 폭이 이기고(그때 넘치면 아래 ‹› 스크롤),
+    // tui(fixed 0)는 예전처럼 항상 균등이다.
+    const even = paneTabWidth(base, term_count);
+    const tab_w = if (tab_width_fixed > 0) @max(tab_width_fixed, even) else even;
     if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false, .eff_scroll = 0 };
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
     // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
@@ -2569,11 +2574,19 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘�
     try std.testing.expectEqual(@as(u32, 0), ovf.eff_scroll); // scroll 0
     // #1: 큰 scroll(stale 등)은 max(=total 48-tab_cols 34=14)로 clamp.
     try std.testing.expectEqual(@as(u32, 14), tabLayout(40, 3, 16, 100).eff_scroll);
-    // 2탭 → total=32 <= 37 → no scroll, tab_cols=37(그대로), eff 0(stale 무시).
+    // 2탭 → 균등 폭 18(=37/2)이 고정 16보다 넓어 **바를 꽉 채운다**(고정 폭은 하한). total=36 <= 37 →
+    // no scroll, tab_cols=37(그대로), eff 0(stale 무시).
     const fit = tabLayout(40, 2, 16, 50);
     try std.testing.expect(!fit.has_scroll);
+    try std.testing.expectEqual(@as(u16, 18), fit.tab_w);
     try std.testing.expectEqual(@as(u16, 37), fit.tab_cols);
     try std.testing.expectEqual(@as(u32, 0), fit.eff_scroll);
+    // 탭 1개면 바 전체가 그 탭이다 — 도크 탭과 같은 모양(사용자가 요청한 그림).
+    try std.testing.expectEqual(@as(u16, 37), tabLayout(40, 1, 16, 0).tab_w);
+    // 탭이 많아 균등이 고정보다 좁아지면 **고정 폭이 이긴다**(그리고 넘쳐서 ‹› 스크롤이 뜬다).
+    const many = tabLayout(40, 5, 16, 0);
+    try std.testing.expectEqual(@as(u16, 16), many.tab_w);
+    try std.testing.expect(many.has_scroll);
     // #4: tui(fixed 0)는 탭 많아 tab_w=1 collapse여도 has_scroll=false(균등, 스크롤 안 함 — tui 무변화).
     try std.testing.expect(!tabLayout(40, 12, 0, 0).has_scroll);
 }

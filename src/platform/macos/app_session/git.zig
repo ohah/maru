@@ -620,7 +620,7 @@ pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm
 /// 인덱스로 바꾸는 일은 이제 published component tree 하나가 하고(`scm_dock.zig`), 그 tree가 렌더와
 /// 같은 기하를 쓴다 — 두 곳이 각자 행 높이를 곱하던 것이 "그린 자리와 눌리는 자리"가 어긋난 원인이었다.
 /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
-pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
+pub fn openDiffForScmRow(self: *AppSession, repo_override: ?[]const u8, row: scm_view.FileRow) void {
     // git 출력이 이상하거나 우리 파싱이 어긋나면 루트 밖 경로가 여기까지 올 수 있다. **여는 단계에서** 막는다 —
     // 백엔드도 같은 판정을 하지만, 열지 말아야 할 것으로 Term을 만들면 사용자에게 빈 화면이 남는다(§6 심층 방어).
     if (!maru.session.repo_path.isSafeRelative(row.path)) {
@@ -630,7 +630,10 @@ pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
     // **목록을 읽은 그 저장소**를 쓴다. 여기서 다시 구하면 첫 diff가 열린 뒤 활성 Term이 웹 Term이라
     // cwd 폴백이 빈 값을 보고 null이 되어 두 번째 행부터 조용히 무시된다(손 확인에서 그랬다).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = self.git_repo orelse (gitRepoRoot(self, &repo_buf) orelse return);
+    // **그 행이 선 저장소**를 쓴다(②d — 목록에 저장소가 여럿이고 비활성 저장소도 파일 줄을 낸다).
+    // 없으면 목록을 읽은 그 저장소로 떨어진다: 여기서 다시 구하면 첫 diff가 열린 뒤 활성 Term이 웹
+    // Term이라 cwd 폴백이 빈 값을 보고 null이 되어 두 번째 행부터 조용히 무시된다(손 확인에서 그랬다).
+    const repo = repo_override orelse self.git_repo orelse (gitRepoRoot(self, &repo_buf) orelse return);
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, row.path }) catch return;
     // 하위 모듈은 텍스트 비교가 없다(커밋 포인터라 blob이 없고 작업트리 쪽은 디렉터리다 — 실측).

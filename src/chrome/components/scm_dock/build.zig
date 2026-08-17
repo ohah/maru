@@ -218,8 +218,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const slot = buffers.nodes[action_cursor .. action_cursor + 1];
             action_cursor += 1;
             const intent: ids.Intent = switch (item) {
-                .section => |section| .{ .section_action = section.section },
-                .file => |file| .{ .row_action = file.model_index },
+                .section => |section| .{ .section_action = .{ .repo_index = section.repo_index, .section = section.section } },
+                .file => |file| .{ .row_action = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
                 .repo, .commit_box, .commit_button, .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
@@ -298,7 +298,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 버튼은 위에서 **면 노드**가 가져갔다(칠·action 둘 다).
             .commit_button => unreachable,
             .section => |section| .{ .toggle_section = section.section },
-            .file => |file| .{ .open_row = file.model_index },
+            .file => |file| .{ .open_row = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
             .more => |more| .{ .expand_section = more.section },
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice => null,
@@ -572,13 +572,13 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
         },
         // **모델 인덱스**를 싣는다(창 자리 1이 아니다). 창 자리를 실으면 스크롤한 뒤 누른 행과 열리는
         // 행이 어긋난다 — host가 그 값으로 모델을 다시 조회하기 때문이다.
-        .open_row => |index| {
+        .open_row => |ref| {
             saw_open = true;
-            try testing.expectEqual(@as(u32, 42), index);
+            try testing.expectEqual(@as(u32, 42), ref.model_index);
         },
-        .row_action => |index| {
+        .row_action => |ref| {
             saw_row_action = true;
-            try testing.expectEqual(@as(u32, 42), index);
+            try testing.expectEqual(@as(u32, 42), ref.model_index);
         },
         .expand_section => |section| {
             saw_expand = true;

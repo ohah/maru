@@ -33,6 +33,9 @@ pub const StatusKind = enum {
 };
 
 pub const SectionItem = struct {
+    /// 어느 저장소의 그룹인가(목록 기준 — 머리 줄과 같은 축). 목록에 저장소가 여럿이면 **같은 이름의
+    /// 그룹이 여럿**이라, 이것이 없으면 일괄 스테이지가 남의 저장소로 간다(②d).
+    repo_index: u32 = 0,
     section: Section,
     /// 그 그룹의 **전체** 파일 수(접혀 있어도 전체를 말한다).
     count: u32,
@@ -42,6 +45,9 @@ pub const SectionItem = struct {
 };
 
 pub const FileItem = struct {
+    /// 어느 저장소의 행인가(목록 기준). 모델 인덱스는 **저장소마다 따로** 세므로, 이것 없이 인덱스만
+    /// 실으면 아래 그룹의 파일을 눌렀는데 위 저장소의 같은 번호 파일이 열린다(②d).
+    repo_index: u32 = 0,
     /// 이 행의 **모델 인덱스**. 화면 창(virtualized window) 안의 자리가 아니다 — host가 같은 스냅샷의
     /// 모델에서 이 행을 다시 찾는 열쇠이고, 창은 스크롤에 따라 움직인다. **창 자리를 쓰면 스크롤한 뒤
     /// 누른 행과 열리는 행이 어긋난다**(P1b가 그렇게 나갔다).
@@ -64,7 +70,7 @@ pub const FileItem = struct {
     selected: bool = false,
 };
 
-pub const MoreItem = struct { section: Section, hidden: u32 };
+pub const MoreItem = struct { repo_index: u32 = 0, section: Section, hidden: u32 };
 
 /// 저장소 하나의 **커밋 입력 상자**. 목록 안에 산다(§3.5.1c) — 그룹마다 자기 상자를 갖는다.
 ///

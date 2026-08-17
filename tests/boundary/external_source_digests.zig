@@ -461,6 +461,8 @@ pub const inventory = [_]Proof{
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     // ②b 적대적 5회차: 저장소 요약 캐시에 **실패**(`failed`·`read_ns`)를 기록하면서 이 파일의 구조체와
     // 새 판정 테스트가 움직인다. count는 2 그대로다.
+    // P3d-②d: 행·그룹 intent가 저장소를 싣게 되면서(`RowRef`) 이 파일의 테스트와 강조 상태
+    // (`scm_selected_repo`)가 함께 움직인다. count는 2 그대로다.
     // 커서·호버 계약(2026-08-17 사용자 지적): 커서를 component가 선언하게 하고(`cursor`) host는 옮기기만
     // 하도록 `hoverCursor`의 소스 컨트롤 분기와 그 테스트가 붙어 digest가 움직인다. count는 2 그대로다.
     // ②b 적대적 4회차: 목록 창 계산에서 커밋 줄을 빼고(그것은 이제 목록 항목이다), 편집 중인 상자를
@@ -468,7 +470,7 @@ pub const inventory = [_]Proof{
     // ②b 적대적 3회차: "변경 사항 없음"을 스크롤 영역 위 겹쳐 그리던 것을 **목록 항목**으로 내리면서
     // 이 파일의 해당 테스트가 새 계약(항목 4개·`.notice`)을 본다. count는 2 그대로다 — 테스트 본문만
     // 바뀌고 반사 접근·Client 구성은 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2876201e0b7362644392b2515a4364beb7c0cd2709b8e62edd61dcbbc7efafc6" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "abce788ad7e26aa706e1d1f5e8d9bb1d5d5d661ed601a44354545f3da02fd56f" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

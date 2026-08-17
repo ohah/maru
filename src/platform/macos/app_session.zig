@@ -2485,7 +2485,17 @@ pub const RepoStatusEntry = struct {
     failed: bool = false,
     /// 마지막 시도 시각. 실패한 저장소를 다시 읽기까지의 간격을 여기서 잰다.
     read_ns: i128 = 0,
+    /// 그 저장소의 마지막 `status --porcelain=v2 --branch` 출력. **파일 줄이 여기서 나온다**(②d) —
+    /// 줄의 실체(경로·그룹·상태 문자·스테이지 동작)는 status 하나로 정해지고 `numstat`은 증감 숫자만
+    /// 채우므로, 펼친 비활성 저장소는 **추가 프로세스 없이** 목록을 세운다.
+    ///
+    /// 상한을 넘으면 비워 둔다(`scm_repo_status_text_max`) — 요약은 이미 뽑아 뒀고, 그 저장소를 열면
+    /// 목록 읽기가 같은 상한 규율로 다시 읽는다.
+    status_text: []u8 = &.{},
 };
+
+/// 저장소 하나의 status 출력을 들고 있을 상한. 목록 상한(8)만큼 곱해지는 값이라 무제한으로 둘 수 없다.
+pub const scm_repo_status_text_max: usize = 512 * 1024;
 
 /// 저장소 하나의 커밋 메시지 초안. 저장소를 떠날 때 담고 돌아올 때 꺼낸다.
 pub const CommitDraft = struct {
@@ -3737,6 +3747,11 @@ pub const AppSession = struct {
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
     scm_scroll: chrome.ui.scroll_area.State = .{},
     scm_selected_row: ?usize = null,
+    /// 강조된 행이 **어느 저장소의 것인가**(②d). 인덱스만 들면 저장소마다 따로 서는 모델에서 같은
+    /// 번호의 남의 행이 함께 강조된다.
+    scm_selected_repo: ?[]u8 = null,
+    /// 방금 건 쓰기가 향한 저장소. 끝난 뒤 **그 저장소를** 다시 읽어야 화면이 사실을 따라간다.
+    scm_write_repo: ?[]u8 = null,
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
     scm_collapsed: [scm_view.section_count]bool = @splat(false),
@@ -16978,9 +16993,12 @@ pub const AppSession = struct {
         }
         self.scm_repo_list.deinit(self.allocator);
         if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
+        if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
+        if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);
+            if (entry.status_text.len > 0) self.allocator.free(entry.status_text);
         }
         self.scm_repo_status.deinit(self.allocator);
         for (self.scm_repo_collapsed.items) |path| self.allocator.free(path); // 접힘 상태
@@ -54937,6 +54955,95 @@ test "소스 컨트롤: 목록에서 사라진 저장소의 요약은 버린다(
     try std.testing.expectEqual(@as(usize, 0), session.scm_repo_status.items.len);
 }
 
+test "소스 컨트롤: 비활성 저장소를 펼치면 파일 줄이 서고 **숫자는 빈다** (P3d-②d)" {
+    // 파일 줄의 실체(경로·그룹·상태 문자·동작)는 `status` 하나에서 나온다 — 그래서 머리 줄 읽기에
+    // 실려 온 그 출력으로 **추가 프로세스 없이** 목록을 세운다. `numstat`이 없으니 증감 숫자만 빈다
+    // (0으로 그리면 "안 바뀐 파일"이라고 거짓말을 한다 — 추적되지 않은 파일이 쓰는 길과 같다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    session.git_result.?.worktrees = try git_backend_mod.worker_allocator.dupe(
+        u8,
+        "worktree /repo\nbranch refs/heads/main\n\nworktree /other\nbranch refs/heads/side\n",
+    );
+    scm_dock_ops.invalidateRepoList(session);
+    // 그 저장소의 머리 줄 읽기 결과(= status 출력)를 심는다.
+    try session.scm_repo_status.append(allocator, .{
+        .path = try allocator.dupe(u8, "/other"),
+        .branch = try allocator.dupe(u8, "side"),
+        .detached = false,
+        .count = 1,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .status_text = try allocator.dupe(u8, "# branch.head side\n1 M. N... 100644 100644 100644 aaa bbb other.zig\n"),
+    });
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    var file_row: ?chrome.components.scm_dock.types.FileItem = null;
+    for (projection.items) |item| switch (item) {
+        .file => |file| if (file.repo_index == 1) {
+            file_row = file;
+        },
+        else => {},
+    };
+    const row = file_row orelse return error.MissingInactiveFileRow;
+    try std.testing.expectEqualStrings("other.zig", row.name);
+    // **증감 자리는 비어 있다** — 모르는 것을 0으로 적지 않는다.
+    try std.testing.expect(!row.has_delta);
+    // 그리고 그 줄은 **자기 저장소를 싣는다**(같은 번호의 남의 파일이 열리지 않게).
+    try std.testing.expectEqual(@as(u32, 1), row.repo_index);
+}
+
+test "소스 컨트롤: 강조는 (저장소, 행) 쌍이다 (P3d-②d)" {
+    // 인덱스만 들면 저장소마다 따로 서는 모델에서 **같은 번호의 남의 행**이 함께 강조된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    session.git_result.?.worktrees = try git_backend_mod.worker_allocator.dupe(
+        u8,
+        "worktree /repo\nbranch refs/heads/main\n\nworktree /other\nbranch refs/heads/side\n",
+    );
+    scm_dock_ops.invalidateRepoList(session);
+    try session.scm_repo_status.append(allocator, .{
+        .path = try allocator.dupe(u8, "/other"),
+        .branch = try allocator.dupe(u8, "side"),
+        .detached = false,
+        .count = 1,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .status_text = try allocator.dupe(u8, "# branch.head side\n1 .M N... 100644 100644 100644 aaa bbb one.txt\n"),
+    });
+
+    // `/other`의 파일 행을 강조로 세운다(그 저장소의 모델 인덱스 1 = 헤더 다음 줄).
+    session.scm_selected_repo = try allocator.dupe(u8, "/other");
+    session.scm_selected_row = 1;
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    for (projection.items) |item| switch (item) {
+        .file => |file| {
+            const mine = file.repo_index == 1 and file.model_index == 1;
+            try std.testing.expectEqual(mine, file.selected);
+        },
+        else => {},
+    };
+}
+
 test "소스 컨트롤: 편집 중인 상자의 저장소가 목록에서 사라지면 포커스를 뗀다" {
     // 그 저장소의 터미널이 닫히면 목록에서 빠지는데, 포커스를 그대로 두면 키는 계속 그 상자로 가고
     // **화면에는 그 상자가 없다** — 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다.
@@ -55598,7 +55705,8 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
     const intent = scm_dock_ops.scmDockPointer(session, .up, button.x, button.y) orelse return error.NoIntent;
     switch (intent) {
         // **모델 인덱스 2 = `two.txt`**다. 창 자리를 실었다면 여기가 다른 값이 된다.
-        .row_action => |index| try std.testing.expectEqual(@as(u32, 2), index),
+        // **어느 저장소의 몇 번째 행인가**(②d).
+        .row_action => |ref| try std.testing.expectEqual(@as(u32, 2), ref.model_index),
         else => return error.WrongIntent,
     }
 

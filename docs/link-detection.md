@@ -47,19 +47,28 @@
 | 3 | 절대 경로 | `absolute_path` | `/Users/me/a.zig`, `/etc/hosts` (`//`로 시작은 제외 — 주석·이중슬래시). **Windows 호스트에서만** 드라이브 절대 `C:\x`·`C:/x`도 (아래) | file_path |
 | 4 | 홈 경로 | `home_path` | `~/.config/maru/config`, `~/notes.md`. **Windows 호스트에서만** `~\notes.md`도 (아래) | file_path |
 | 5 | 명시 상대 | `dot_relative` | `./src/main.zig`, `../lib/y.rb`. **Windows 호스트에서만** `.\src\main.zig`·`..\lib\y.rb`도 (아래) | file_path |
-| 6 | bare 상대 | `bare_relative` | `src/config/url.zig`, `app/x.rb:1` (슬래시 + 점 필수). **역슬래시는 안 받는다** — 아래 | file_path |
+| 6 | bare 상대 | `bare_relative` | `src/config/url.zig`, `app/x.rb:1` (구분자 + 점 필수). **Windows 호스트에서만** `src\main.zig`도 (아래) | file_path |
 
-- **역슬래시 철자(Windows 호스트)**: `.\x`·`..\x`·`~\x`는 받고 `src\main.zig`는 **안 받는다.** 앞의 셋은
-  접두가 명확해 규칙이 성립하지만, bare 상대는 이스케이프 출력과 **구조가 같아** 토큰만 봐서는 못 가른다:
+- **역슬래시 철자(Windows 호스트)**: 네 갈래 전부 받는다 — `.\x`·`..\x`·`~\x`·`src\main.zig`. 앞의 셋은
+  접두가 명확해 감지 단계에서 규칙이 성립하고, **bare 상대는 감지로는 못 가른다** — 이스케이프 출력과 구조가
+  같기 때문이다:
 
   ```text
   src\main.zig      → [src][main.zig]
   line1\nline2.log  → [line1][nline2.log]
   ```
 
-  규칙과 그 오탐 대가는 `path_shape.detectableRelativePrefixFor`의 doc이, 후보를 어떻게 골랐는지는
-  [windows-platform.md](windows-platform.md) §5.2 ⒜의 실측표가 단일 출처다. POSIX 철자는 **모든 호스트에서
-  예전 그대로**다(회귀 0).
+  그래도 받는 이유는 **뒤에 존재 게이트가 있기 때문**이다(§hover와 click). `line1\nline2.log`라는 파일은
+  실재하지 않으므로 밑줄이 뜨지 않는다 — 규칙이 가르지 못하는 것을 존재가 가른다. 실제 도구 출력 코퍼스
+  369 토큰 측정에서 이 갈래로 **새로 밑줄이 뜬 것은 3개, 셋 다 진짜 경로, 오탐 0**이다.
+
+  **접두 형태는 접두 갈래가 판정을 소유한다** — `.\`·`..\`·`~\`로 시작하면 bare가 재판정하지 않는다. 안
+  그러면 접두 갈래가 이스케이프로 보고 거부한 `.\d+`가 bare로 흘러들어 분류를 통과한다. 우선순위표가 이미
+  `dot_relative`를 `bare_relative`보다 구체적이라고 정해 둔 것과 같은 규율이다.
+
+  규칙과 그 오탐 대가는 `path_shape.detectableRelativePrefixFor`·`looksLikeBareRelativeFor`의 doc이, 후보를
+  어떻게 골랐는지는 [windows-platform.md](windows-platform.md) §5.2 ⒜의 실측표가 단일 출처다. POSIX 철자는
+  **모든 호스트에서 예전 그대로**다(회귀 0).
 - **스킴이 경로보다 우선**한다(`http://h:8080`은 URL의 포트지 줄번호가 아니다 — 스킴 가지가 먼저 잡아 안전).
 - **bare-relative 오탐 억제**: 슬래시 필수 + 점 필수(콤마 전 head 기준) + `$`로 시작 금지 + `//` 금지.
   `foo/bar`(점 없음)·`input/output`·`$10/bar`는 매치하지 않는다. 남은 오탐은 stat 게이트가 거른다.
@@ -82,8 +91,8 @@
     `\foo\bar`도 배제한다. 이 관계는 테스트가 단언한다.
   - **드라이브 문자를 A–Z로 제한하지 않는다** — Win32가 제한하지 않으므로(`1:/x`·`::/x`도 절대다) 그렇게 하면
     가드가 OS 파서보다 좁아져 우회로가 생긴다.
-  - 상대 경로 세 갈래(`~/`·`./`·bare)는 아직 `/`만 받는다 — Windows에서 `.\x`·`src\x`는 감지되지 않는다
-    (알려진 공백, [windows-platform.md](windows-platform.md) §5.2 ⒜).
+  - 상대 경로 세 갈래(`~/`·`./`·bare)도 **Windows에서는 역슬래시 철자를 받는다**(위 항목). 접두 둘은 세그먼트
+    규칙으로, bare는 존재 게이트로 오탐을 막는다([windows-platform.md](windows-platform.md) §5.2 ⒜).
   - 근거와 실측: [windows-platform.md](windows-platform.md) §5.1. 이 술어는 경로 **가드**가 쓰는
     `path_shape.isAbsolute`(OS 무관하게 넓게 거부)와 **일부러 다르다**.
 - **`:line:col` 접미**: `file.zig:10:5`·`app/x.rb:1`의 `:<digits>(:<digits>)?`는 경로의 일부로 **보존**한다
@@ -97,7 +106,10 @@
 
 ```
 :line:col 분리 → ~/ 를 $HOME 으로 확장 → 상대면 currentCwd()(OSC 7)와 join → 정규화(.. . 정리)
-              → std.c.access(F_OK)로 존재 확인 → 있으면 절대 경로, 없으면 무시(null)
+              → pathExists 로 존재 확인 → 있으면 절대 경로, 없으면 무시(null)
+
+              pathExists: POSIX = std.c.access(F_OK) / Windows = GetFileAttributesW(UTF-16)
+              (CRT `_access`는 바이트를 ANSI 코드페이지로 읽어 비-ASCII 경로를 놓친다 — 위 §hover와 click)
 ```
 
 - **cwd가 비면**(OSC 7 미수신 셸·원격) 상대·bare 경로는 resolve 불가 → 안 연다. 절대 경로·`~/`는 cwd 없이 가능.

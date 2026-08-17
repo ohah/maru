@@ -65,6 +65,13 @@ pub extern fn maru_macos_coretext_shape_draw_list(
     glyph_record_capacity: usize,
 ) void;
 
+/// 이 프로세스의 physical footprint(바이트).
+///
+/// 셰이핑 결과 계약(glyph id·fallback·raster byte)은 메모리를 새는지 알려 주지 않는다. 2026-08-18 사건의
+/// 원인은 face 를 정확히 한 번씩 만들면서도 그 한 번을 매번 놓치는 결함이었고(`maru_create_shape_attributes`
+/// 의 빠진 `CFRelease`), 그런 결함은 footprint 로만 드러난다.
+pub extern fn maru_macos_coretext_phys_footprint_bytes() u64;
+
 /// Rich Chrome 한 줄의 system UI CoreText shape 결과. 이 ABI는 CTLine/CTRun을 platform
 /// 경계 안에 가두고, Zig에는 glyph id·selected face·final advance만 전달한다.
 pub const NativeChromeTextShapeResult = extern struct {

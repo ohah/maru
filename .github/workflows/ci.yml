@@ -207,6 +207,25 @@ jobs:
           path: zig-out/maru-macos-chrome-lab
           if-no-files-found: warn
           retention-days: 14
+      # 셰이핑 경로가 메모리를 새는지 실제 CoreText 로 잰다(4,000회 반복, 상한 4MB). 2026-08-18 에 4시간
+      # 46분 실행으로 physical footprint 가 140GB 까지 부푼 사건의 원인이 이 층이었고, **화면에는 아무
+      # 증상이 없어서** 눈으로도 다른 계약 테스트로도 잡히지 않는다. 누수 지점은 합자 OFF 분기에만 있어
+      # config 기본값(ligatures=true)으로는 안 밟히므로, 프로브가 두 분기를 번갈아 태운다.
+      # 여기 두는 이유: `mise run check` 는 ubuntu 라 `.m` 을 컴파일조차 하지 않는다.
+      - name: Gate CoreText shaping against memory leaks
+        run: mise run macos-coretext-smoke
+      # 위 스모크의 판정은 summary 필드가 존재할 때만 의미가 있다. 그 필드들을 고정하는 계약 테스트가
+      # CI 어디에서도 안 돌면, 필드를 지우는 변경이 스모크를 **통과시키면서** 게이트만 조용히 없앤다.
+      - name: Pin the CoreText smoke summary contract
+        run: mise run test-macos-coretext-smoke
+      - name: Upload CoreText smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-coretext-smoke-artifacts
+          path: zig-out/maru-macos-coretext-smoke
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify provider continuity removal
         run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf

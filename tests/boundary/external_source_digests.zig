@@ -468,7 +468,7 @@ pub const inventory = [_]Proof{
     // ②b 적대적 3회차: "변경 사항 없음"을 스크롤 영역 위 겹쳐 그리던 것을 **목록 항목**으로 내리면서
     // 이 파일의 해당 테스트가 새 계약(항목 4개·`.notice`)을 본다. count는 2 그대로다 — 테스트 본문만
     // 바뀌고 반사 접근·Client 구성은 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3a16cb72283d0b2000900b67b990e452c944884ad6e425549b42581e8d01cce3" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2876201e0b7362644392b2515a4364beb7c0cd2709b8e62edd61dcbbc7efafc6" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

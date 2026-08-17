@@ -103,6 +103,19 @@ pub const ColorRole = enum {
     git_modified_fg,
     git_added_fg,
     git_deleted_fg,
+    /// 에이전트 provider 색(세션 기록 카드의 `Claude`·`Codex` 표기). `git_*`와 **같은 규율**이다 —
+    /// `ThemeColors`에 provider semantic 입력이 없으므로 이 층이 보수적 폴백을 소유하고, 생기면 이
+    /// 매핑만 바뀐다.
+    ///
+    /// **왜 색을 주는가**: 목록이 수백 줄이면(사용자 화면 513개) 어느 카드가 어느 에이전트인지 훑어서
+    /// 가르는 일이 반복된다. provider 이름은 메타 줄의 첫 토큰이라 위치는 일정한데, 나머지 메타(메시지
+    /// 개수·시각·모델)와 같은 색이라 덩어리로 읽혔다(사용자 제보).
+    ///
+    /// **색만으로 구분하지 않는다** — provider 이름 문자열이 그대로 있고, 색은 그 토큰을 빨리 찾게 돕는
+    /// 보조다(`git_*` 주석과 같은 판단). 그래서 명도는 메타 줄 본문과 비슷한 대역에 두고 채도만 달리해,
+    /// 카드 제목보다 시선을 먼저 끌지 않게 한다.
+    agent_claude_fg,
+    agent_codex_fg,
     /// **터미널 본문 배경.** chrome 표면(`surface_bg` — 사이드바·도크)과 **다른 색**이고, 그 차이가
     /// 의미다: 이 색이 칠해진 자리는 "셸/문서 내용이 사는 곳"이다.
     ///
@@ -266,6 +279,12 @@ pub const Tokens = struct {
         // 어두운 배경·밝은 배경 양쪽에서 읽히도록 중간 명도를 고른다.
         palette.set(.git_added_fg, .{ .r = 87, .g = 166, .b = 74 });
         palette.set(.git_deleted_fg, .{ .r = 199, .g = 84, .b = 80 });
+        // provider 색도 테마에 대응 입력이 없어 같은 자리의 보수적 폴백이다. 두 색은 **색상환에서 서로
+        // 멀고**(따뜻한 코럴 ↔ 차가운 민트) 어두운 배경·밝은 배경 양쪽에서 읽히는 중간 명도다. git 셋과도
+        // 겹치지 않게 골랐다 — 같은 사이드바 안에서 소스 컨트롤 상태색과 provider 색이 헷갈리면 둘 다
+        // 신호를 잃는다.
+        palette.set(.agent_claude_fg, .{ .r = 217, .g = 119, .b = 87 });
+        palette.set(.agent_codex_fg, .{ .r = 90, .g = 179, .b = 214 });
         palette.set(.terminal_bg, theme.terminal_background);
         palette.set(.diff_added_bg, theme.diff_added);
         palette.set(.diff_removed_bg, theme.diff_removed);

@@ -76,7 +76,7 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
         },
         .file => base + m.status_extent,
         // 저장소 머리 줄에는 아직 행 동작 버튼이 없다(동작 아이콘 줄은 다음 조각) — 비켜설 것이 없다.
-        .repo, .more, .notice => base,
+        .repo, .commit_box, .commit_button, .more, .notice => base,
     };
 }
 
@@ -114,8 +114,9 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 여섯(탭 줄·요약·스크롤 영역·브랜치 줄·커밋 상자·커밋 버튼).
-    const node_count = items.len + action_buttons + tab_order.len + 6;
+    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
+    // **커밋 상자·버튼은 고정이 아니다**(②b) — 저장소마다 하나씩이라 `items`에 들어 있다.
+    const node_count = items.len + action_buttons + tab_order.len + 4;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -124,13 +125,34 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         .layout_items = node_count + 3,
         .flex_scratch = node_count + 3,
         .child_rects = node_count + 3,
-        // 행 열기 + 행 동작 + 그룹 토글/일괄 동작은 위에서 센 것과 같은 상한 안이고, +2는 스크롤바,
-        // +2는 커밋 상자(편집 진입)와 커밋 버튼이다.
-        .actions = items.len * 2 + 4,
+        // 행 열기 + 행 동작 + 그룹 토글/일괄 동작 + 커밋 상자·버튼은 전부 **행당 둘** 상한 안이고,
+        // +2는 스크롤바다.
+        .actions = items.len * 2 + 2,
     };
 }
 
 pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer };
+
+/// 행 하나의 칠. 목록 줄은 전부 각지고 테두리가 없지만, **커밋 줄 둘만 다르다**.
+fn rowPaint(item: types.Item) tree.PaintStyle {
+    const flat: tree.PaintStyle = .{ .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none };
+    return switch (item) {
+        .commit_box => |box| .{
+            .background = .inset_bg,
+            .border = if (box.edit.focused) .focus_accent else .divider,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = if (box.edit.focused) .{ 1, 1, 1, 1 } else .{ 1, 0, 1, 0 },
+            .shadow = .none,
+        },
+        .commit_button => |button| .{
+            .background = if (button.enabled) .accent_bar else .inset_bg,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = .{ 0, 0, 0, 0 },
+            .shadow = .none,
+        },
+        else => flat,
+    };
+}
 
 fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
@@ -138,7 +160,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .file => |file| file.action,
         // 저장소 머리 줄의 동작 아이콘 줄(새로고침·스테이지·커밋…)은 다음 조각이다 — 지금은 줄 전체가
         // 접기 버튼이다.
-        .repo, .more, .notice => .none,
+        .repo, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
 
@@ -164,7 +186,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = section.section },
                 .file => |file| .{ .row_action = file.model_index },
-                .repo, .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
+                .repo, .commit_box, .commit_button, .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
             slot[0] = tree.button(.{
@@ -198,6 +220,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 
         const row_intent: ?ids.Intent = switch (item) {
             .repo => |repo| .{ .toggle_repo = repo.index },
+            // 상자와 버튼은 **어느 저장소인지 싣는다**(②b) — 안 실으면 아래 그룹의 상자를 눌렀는데
+            // 위 그룹이 편집되거나, 더 나쁘게는 다른 저장소로 커밋된다.
+            .commit_box => |box| .{ .commit_focus = box.repo_index },
+            .commit_button => |button| .{ .commit = button.repo_index },
             .section => |section| .{ .toggle_section = section.section },
             .file => |file| .{ .open_row = file.model_index },
             .more => |more| .{ .expand_section = more.section },
@@ -220,10 +246,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 가로줄이 생겨 목업(VS Code)과 달리 표가 된다(사용자 지적 2026-08-14). 배경은 상태
             // 해석이 얹으므로(hover=`row_hover_bg`, 누름=`tab_active_bg`) 여기서 지우지 않는다.
             .variant = if (isSelected(item)) .selected else .surface,
+            // 커밋 상자는 **입력란**이라 다른 줄과 다른 면을 갖는다: 눌러 쓰는 자리라는 사실이 보여야
+            // 하고(움푹한 배경), 편집 중임은 **테두리**로 말한다 — 채움을 바꾸면 글자 대비가 함께 흔들린다.
+            // 버튼은 채운 면이다(누르는 것이라 면이 보여야 한다). 꺼졌으면 채우지 않는다.
+            .paint = rowPaint(item),
             // **모서리도 각지다.** 카드 기본 반지름을 그대로 두면 호버·선택 밴드의 양 끝이 말려, 촘촘한
             // 목록에서 그 행만 캡슐처럼 떠 보인다(사용자 지적 2026-08-16). 이 목록의 행은 카드가 아니라
             // 표의 한 줄이다 — 밴드가 줄 폭을 꽉 채워야 위아래 행과 같은 격자로 읽힌다.
-            .paint = .{ .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none },
             .action = row_action_id,
             .overflow = .clip,
         }, action_nodes);
@@ -256,7 +285,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         }, &.{});
     }
 
-    const top = buffers.nodes[action_cursor + tab_order.len ..][0..6];
+    const top = buffers.nodes[action_cursor + tab_order.len ..][0..4];
     // 탭 줄은 뷰 스위처와 요약 줄 **사이**다(§3.5.1 목업). **action을 붙이지 않는다** — 히스토리·에이전트
     // 탭은 P4·P5에 생기고, 지금 눌러도 갈 곳이 없다. 그래도 그리는 이유는 P1 계약이 "누를 수 없는
     // 컨트롤은 비활성으로 **표시**한다(감추지 않는다)"이기 때문이다: 탭 줄이 통째로 없으면 사용자는
@@ -272,7 +301,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, tab_nodes);
-    top[3] = tree.card(.{
+    top[1] = tree.card(.{
         .id = NodeIds.summary,
         .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
         .variant = .surface,
@@ -280,7 +309,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .overflow = .clip,
     }, &.{});
-    top[4] = tree.scrollArea(.{
+    top[2] = tree.scrollArea(.{
         .id = NodeIds.content,
         .style = .{ .height = .{ .fill = 1 } },
         .scroll = .{
@@ -302,7 +331,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         },
     }, row_nodes);
     // 브랜치 줄은 **목록 아래**다(2판 — §3.5). 브랜치를 못 잡았으면 높이 0으로 두어 그 줄이 아예 없다.
-    top[5] = tree.card(.{
+    top[3] = tree.card(.{
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
         .variant = .surface,
@@ -310,59 +339,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .overflow = .clip,
     }, &.{});
 
-    // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 **아래**). 브랜치·`Fetch`는 커밋 직전에 확인하는 값이라
-    // 커밋 버튼 옆이 제자리다.
-    //
-    // **상자 높이는 시각 행 수 × 행 높이**다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다). 랩은 host가
-    // 이미 계산했고(`text_area`) 컴포넌트는 그 결과인 `commit_rows`만 받는다 — 같은 계산이 두 곳이면
-    // 상자 높이와 실제로 그려지는 줄 수가 갈린다.
-    // 상자를 누르면 **편집이 시작된다**(P3c). caret 자리는 이 intent에 없다 — 그건 tree hit이 아니라
-    // 글자 hit이라 좌표가 필요하고, host가 같은 published rect로 그 변환을 한다.
-    const commit_focus = table.append(props.snapshot_generation, .commit_focus, true) catch return error.InsufficientActionBuffer;
-    top[1] = tree.card(.{
-        .id = NodeIds.commit_box,
-        .style = .{ .height = .{ .px = @floatFromInt(m.commitBoxHeight(props.commit_rows)) } },
-        .variant = .surface,
-        // **포커스는 테두리로 말한다.** 채움을 바꾸면 글자 대비가 함께 흔들리고, 무엇보다 이 상자는
-        // 값이 아니라 **입력란**이라 "지금 여기로 글자가 간다"가 테두리로 보이는 것이 관례다.
-        .paint = .{
-            .background = .inset_bg,
-            .border = if (props.commit_edit.focused) .focus_accent else .divider,
-            .corner_radii_px = .{ 0, 0, 0, 0 },
-            .border_widths_px = if (props.commit_edit.focused) .{ 1, 1, 1, 1 } else .{ 1, 0, 0, 0 },
-            .shadow = .none,
-        },
-        .action = commit_focus,
-        .overflow = .clip,
-    }, &.{});
-    // **꺼져 있어도 action을 붙인다.** 히트 사각형을 없애면 tree가 상태에 따라 달라져 히트테스트가
-    // 자기 자신을 쫓게 되고(행 동작 버튼과 같은 이유), 무엇보다 "왜 안 눌리는가"를 말할 기회가
-    // 사라진다 — 켜졌는지는 host가 실제 index 상태로 다시 본다(쓰기 문서 §7).
-    // **채운 버튼**이다(목업 `[커밋 ∨]`). 목록 행과 달리 이건 표의 한 줄이 아니라 **누르는 것**이라,
-    // 배경이 있어야 누를 수 있는 자리로 읽힌다. 색은 테마 accent이고 글자는 배경색이다 — accent는
-    // "사이드바 배경 위 글자로 읽히는 색"으로 고른 값이라 그 둘의 대비를 테마가 보장한다(배지와 같은 근거).
-    //
-    // 꺼졌을 때는 채우지 않는다(`inset_bg`) — 스테이지가 없으면 커밋할 것이 없고, 그 사실이 색으로 보여야
-    // 한다(감추지 않고 비활성으로 **표시**한다).
-    const commit_action = table.append(props.snapshot_generation, .commit, true) catch return error.InsufficientActionBuffer;
-    top[2] = tree.card(.{
-        .id = NodeIds.commit_button,
-        .action = commit_action,
-        .style = .{
-            .height = .{ .px = @floatFromInt(m.commit_button_h) },
-            // **좌우 여백 없이 폭을 꽉 채운다**(사용자 결정 2026-08-16). 도크가 좁아 안쪽으로 물리면
-            // 버튼 면이 그만큼 작아지고, 이 뷰에서 가장 큰 동작이 가장 작은 표적이 된다.
-            .margin = .{ .bottom = @floatFromInt(m.commit_pad_y) },
-        },
-        .variant = .surface,
-        .paint = .{
-            .background = if (props.commit_enabled) .accent_bar else .inset_bg,
-            .corner_radii_px = .{ 0, 0, 0, 0 },
-            .border_widths_px = .{ 0, 0, 0, 0 },
-            .shadow = .none,
-        },
-        .overflow = .clip,
-    }, &.{});
+    // **커밋 상자·버튼은 여기 없다**(②b). 저장소마다 하나씩이므로 목록 항목으로 내려갔다 —
+    // 고정 chrome에 하나만 두면 "지금 어느 저장소로 커밋하는가"가 화면에 없고, 그 어긋남은 잘못된
+    // 저장소에 커밋으로 끝난다.
 
     // **root에는 outer style을 걸지 않는다**(`tree.build`가 `RootOuterStyle`로 거절한다). 크기는
     // `root_size`가 주고, 여기서 다시 선언하면 뷰포트의 출처가 둘이 된다.
@@ -389,7 +368,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 fn isSelected(item: types.Item) bool {
     return switch (item) {
         .file => |file| file.selected,
-        .repo, .section, .more, .notice => false,
+        .repo, .commit_box, .commit_button, .section, .more, .notice => false,
     };
 }
 
@@ -480,8 +459,9 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     // 호출처가 이 실패를 삼키면 도크가 통째로 멈추므로, 상한 산술은 `bufferSizes` 하나가 소유한다.
     const items = testItems();
     const sizes = bufferSizes(&items);
-    // 행 4 + 버튼 3 + 탭 칸 3 + 고정 4(탭 줄·요약·목록·브랜치)
-    try testing.expectEqual(items.len + 3 + tab_order.len + 6, sizes.nodes);
+    // 행 4 + 버튼 3 + 탭 칸 3 + **고정 4**(탭 줄·요약·목록·브랜치). 커밋 상자·버튼은 ②b에서 목록
+    // 항목으로 내려갔으므로 고정에 없다 — 이 숫자가 그 사실을 잠근다.
+    try testing.expectEqual(items.len + 3 + tab_order.len + 4, sizes.nodes);
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -555,10 +535,10 @@ test "탭 줄은 요약 줄·목록 위에 있고 목록에서 자기 높이만�
 
     const m = types.DockMetrics.resolve(props.scale_milli);
     try testing.expectEqual(@as(f32, @floatFromInt(m.tab_h)), tabs.height);
-    // 고정 chrome을 전부 뺀 나머지가 목록이다 — 탭 줄·커밋 상자·커밋 버튼(아래 여백 포함)·요약·브랜치.
-    const commit_h = m.commitBoxHeight(props.commit_rows) + m.commit_button_h + m.commit_pad_y;
+    // 고정 chrome을 전부 뺀 나머지가 목록이다 — **탭 줄·요약·브랜치 셋뿐이다**(②b). 커밋 상자·버튼은
+    // 저장소마다 하나씩이라 목록 **안**에 살고, 그래서 고정에서 빠진 만큼 목록이 커진다.
     try testing.expectEqual(
-        props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h + commit_h)),
+        props.viewport_px.height - @as(f32, @floatFromInt(m.tab_h + m.summary_h + m.branch_h)),
         content.height,
     );
 }
@@ -651,95 +631,106 @@ test "도크의 카드는 전부 각진 모서리다(목록은 표이지 캡슐 
     }
 }
 
-test "커밋 상자는 탭 줄 아래·요약 위이고 내용을 따라 자란다" {
-    // §3.5 **3판** 순서: 탭 줄 → 커밋 입력 → 커밋 버튼 → 요약 → 목록 → 브랜치 줄. 커밋 상자가 이 뷰의
-    // 주 동작인데 2판은 그것을 맨 아래에 뒀고, 목록이 길면 스크롤 밖으로 밀려 보이지 않았다.
-    // 브랜치 줄은 아래에 남는다 — 그건 "지금 어디에 있나"라는 **상태**다.
+test "커밋 줄은 그 저장소 머리 줄 **바로 아래**에 오고 내용을 따라 자란다 (②b)" {
+    // 상자가 고정 chrome에 하나만 있으면 "지금 어느 저장소로 커밋하는가"가 화면에 없다 — 아래 그룹의
+    // 파일을 보면서 위 상자에 쓰면 **다른 저장소로 커밋**된다. 그래서 상자는 그 그룹 안에 산다.
     var storage: Storage = .{};
-    const one = try buildTest(.{
-        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
-        .items = &.{},
-        .branch = "main",
-        .commit_rows = 1,
-    }, &storage);
-    const tabs = one.tree.entries[one.tree.find(NodeIds.tabs) orelse return error.MissingTabs].rect;
-    const box = one.tree.entries[one.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
-    const button = one.tree.entries[one.tree.find(NodeIds.commit_button) orelse return error.MissingButton].rect;
-    const summary = one.tree.entries[one.tree.find(NodeIds.summary) orelse return error.MissingSummary].rect;
-    const branch = one.tree.entries[one.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
-    try testing.expect(tabs.y < box.y);
-    try testing.expect(box.y < button.y);
-    try testing.expect(button.y < summary.y);
-    try testing.expect(summary.y < branch.y); // 브랜치는 여전히 바닥이다
-
-    // **버튼은 도크 폭을 꽉 채운다.** 안쪽으로 물리면 이 뷰에서 가장 큰 동작이 가장 작은 표적이 된다.
-    try testing.expectEqual(@as(f32, 0), button.x);
-    try testing.expectEqual(@as(f32, 320), button.width);
-
-    // 시각 행이 늘면 상자가 자란다(§12.2 — 내용을 따라 자라고 상한에서 멈춘다).
-    var storage3: Storage = .{};
-    const three = try buildTest(.{
-        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
-        .items = &.{},
-        .branch = "main",
-        .commit_rows = 3,
-    }, &storage3);
-    const grown = three.tree.entries[three.tree.find(NodeIds.commit_box) orelse return error.MissingBox].rect;
-    const m = types.DockMetrics.resolve(1000);
-    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(1))), box.height);
-    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(3))), grown.height);
-    // 여백은 행 수와 무관하게 위아래 한 번씩이다 — 행이 늘어도 여백이 같이 불어나지 않는다.
-    try testing.expectEqual(
-        @as(f32, @floatFromInt(m.commit_row_h * 2)),
-        grown.height - box.height,
-    );
-}
-
-test "커밋 상자와 버튼은 **꺼져 있어도** 히트 사각형을 갖는다 (P3c)" {
-    // 히트 사각형을 상태에 따라 없애면 tree가 포인터 상태를 따라 달라져 히트테스트가 자기 자신을
-    // 쫓게 되고(행 동작 버튼과 같은 이유), 무엇보다 "왜 안 눌리는가"를 말할 기회가 사라진다.
-    // 켜졌는지는 host가 실제 index 상태로 다시 본다(쓰기 문서 §7).
-    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "a", .branch = "main" } },
+        .{ .commit_box = .{ .repo_index = 0, .rows = 1 } },
+        .{ .commit_button = .{ .repo_index = 0 } },
+        .{ .section = .{ .section = .changes, .count = 1, .collapsed = false, .action = .stage } },
+    };
     const frame = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
-        .items = &.{},
+        .items = &items,
         .branch = "main",
-        .commit_enabled = false, // 스테이지 0건 — 그래도 누를 수는 있어야 한다
     }, &storage);
-    const button = frame.tree.entries[frame.tree.find(NodeIds.commit_button) orelse return error.MissingButton];
-    const box = frame.tree.entries[frame.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
-    const button_action = button.action orelse return error.MissingButtonAction;
-    const box_action = box.action orelse return error.MissingBoxAction;
-    // 두 컨트롤은 **서로 다른 intent**다 — 같은 값이면 상자를 눌렀는데 커밋이 돈다.
-    try testing.expect(button_action.id != box_action.id);
-    var saw_commit = false;
-    var saw_focus = false;
-    for (frame.actions) |entry| switch (entry.intent) {
-        .commit => saw_commit = true,
-        .commit_focus => saw_focus = true,
-        else => {},
+    const head = frame.tree.entries[frame.tree.find(NodeIds.item(0)) orelse return error.MissingRepo].rect;
+    const box = frame.tree.entries[frame.tree.find(NodeIds.item(1)) orelse return error.MissingBox].rect;
+    const button = frame.tree.entries[frame.tree.find(NodeIds.item(2)) orelse return error.MissingButton].rect;
+    const section = frame.tree.entries[frame.tree.find(NodeIds.item(3)) orelse return error.MissingSection].rect;
+    try testing.expect(head.y < box.y);
+    try testing.expect(box.y < button.y);
+    try testing.expect(button.y < section.y); // 파일 줄은 커밋 줄 **뒤**다
+
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(1))), box.height);
+    // 버튼 줄은 아래 여백까지 갖는다 — 다음 줄과 붙지 않게.
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_button_h + m.commit_pad_y)), button.height);
+
+    // 시각 행이 늘면 상자가 자란다(§12.2). 여백은 행 수와 무관하게 위아래 한 번씩이다.
+    var storage3: Storage = .{};
+    const grown_items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "a", .branch = "main" } },
+        .{ .commit_box = .{ .repo_index = 0, .rows = 3 } },
     };
-    try testing.expect(saw_commit and saw_focus);
+    const three = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &grown_items,
+        .branch = "main",
+    }, &storage3);
+    const grown = three.tree.entries[three.tree.find(NodeIds.item(1)) orelse return error.MissingBox].rect;
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commitBoxHeight(3))), grown.height);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_row_h * 2)), grown.height - box.height);
 }
 
-test "커밋 상자는 편집 중일 때 테두리로 그 사실을 말한다" {
-    // 채움을 바꾸면 글자 대비가 함께 흔들린다. 이 상자는 값이 아니라 **입력란**이라 "지금 여기로
-    // 글자가 간다"가 테두리로 보이는 것이 관례다.
-    var idle_storage: Storage = .{};
-    const idle = try buildTest(.{
+test "커밋 줄의 intent는 **어느 저장소인지**를 싣는다 (②b)" {
+    // 안 실으면 아래 그룹의 상자를 눌렀는데 위 그룹이 편집되거나, 더 나쁘게는 다른 저장소로 커밋된다.
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "a" } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = false } }, // 꺼져 있어도 히트 사각형은 있다
+        .{ .repo = .{ .index = 1, .name = "b" } },
+        .{ .commit_box = .{ .repo_index = 1 } },
+        .{ .commit_button = .{ .repo_index = 1, .enabled = true } },
+    };
+    const frame = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &items,
         .branch = "main",
-    }, &idle_storage);
-    var focus_storage: Storage = .{};
-    const focused = try buildTest(.{
+    }, &storage);
+    var focus_repos: [4]u32 = undefined;
+    var commit_repos: [4]u32 = undefined;
+    var focus_n: usize = 0;
+    var commit_n: usize = 0;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .commit_focus => |index| {
+            focus_repos[focus_n] = index;
+            focus_n += 1;
+        },
+        .commit => |index| {
+            commit_repos[commit_n] = index;
+            commit_n += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), focus_n);
+    try testing.expectEqual(@as(usize, 2), commit_n);
+    try testing.expectEqual(@as(u32, 0), focus_repos[0]);
+    try testing.expectEqual(@as(u32, 1), focus_repos[1]);
+    try testing.expectEqual(@as(u32, 1), commit_repos[1]);
+    // **꺼진 버튼도 히트 사각형을 갖는다** — 없애면 "왜 안 눌리는가"를 말할 기회가 사라진다.
+    const off = frame.tree.entries[frame.tree.find(NodeIds.item(2)) orelse return error.MissingButton];
+    try testing.expect(off.action != null);
+}
+
+test "커밋 상자는 편집 중일 때 테두리로 그 사실을 말한다 (②b — 포커스는 상자마다 다르다)" {
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .commit_box = .{ .repo_index = 0, .edit = .{ .focused = false } } },
+        .{ .commit_box = .{ .repo_index = 1, .edit = .{ .focused = true } } },
+    };
+    const frame = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &items,
         .branch = "main",
-        .commit_edit = .{ .focused = true },
-    }, &focus_storage);
-    const idle_box = idle.tree.entries[idle.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
-    const focus_box = focused.tree.entries[focused.tree.find(NodeIds.commit_box) orelse return error.MissingBox];
-    try testing.expectEqual(tokens.ColorRole.divider, idle_box.visual.card.paint.border.?);
-    try testing.expectEqual(tokens.ColorRole.focus_accent, focus_box.visual.card.paint.border.?);
+    }, &storage);
+    const idle = frame.tree.entries[frame.tree.find(NodeIds.item(0)) orelse return error.MissingBox];
+    const focused = frame.tree.entries[frame.tree.find(NodeIds.item(1)) orelse return error.MissingBox];
+    try testing.expectEqual(tokens.ColorRole.divider, idle.visual.card.paint.border.?);
+    try testing.expectEqual(tokens.ColorRole.focus_accent, focused.visual.card.paint.border.?);
     // **높이는 안 바뀐다** — 포커스로 상자가 자라면 그 아래 목록이 통째로 밀린다.
-    try testing.expectEqual(idle_box.rect.height, focus_box.rect.height);
+    try testing.expectEqual(idle.rect.height, focused.rect.height);
 }

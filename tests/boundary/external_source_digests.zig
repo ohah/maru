@@ -456,7 +456,10 @@ pub const inventory = [_]Proof{
     //
     // 공백 든 경로(계약 §5.2 ⒝)에서 또 움직인다: hover 상태에 `hover_url_end`가 붙고, 밑줄이 그 끝을
     // 쓰도록 `hoverLinkSpanFor`가 한 줄 갈린다. count는 2 그대로다 — 새 `@field` 반사가 없다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "65bcb65fa61b038a3aceaa3f9c3324be227c481e567181582927f894f9a660df" },
+    // W5(Windows 셸 통합)에서 **한 줄** 움직인다: `SpawnRequest.shell_integration_dir`이 union
+    // `shell_integration`으로 바뀌어(계약 §4.2a) 이 파일의 설정 자리가 `.{ .assets_dir = dir }`로 감싼다.
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "81552ce0a81455aa078d9ea40c6ada9f2b96f35906856da4ce0f47a1a369d5a9" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

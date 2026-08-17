@@ -60,7 +60,11 @@ pub const ScrollItems = struct {
 fn commitViewCols(self: *const AppSession) u16 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    return m.commitViewCols(@floatFromInt(content.w), self.cell_width_px);
+    // **상자는 이제 목록 줄이다**(②b) — 스크롤 영역이 오른쪽에 스크롤바 자리를 늘 비워 두므로(gutter)
+    // 줄 폭은 content 폭이 아니다. 여기서 그걸 빼지 않으면 host가 세는 열 수가 view보다 많아져,
+    // 상자 높이가 실제 줄 수보다 적게 나오고 마지막 줄이 잘린다.
+    const gutter = m.scrollbar_width + m.scrollbar_inset_x * 2;
+    return m.commitViewCols(@floatFromInt(content.w -| gutter), self.cell_width_px);
 }
 
 /// 커밋 상자 한 줄의 높이. **`view`와 같은 폴백을 쓴다**(0 → 1000) — `@max(scale, 1)`로 두면 scale이
@@ -246,7 +250,8 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const current_collapsed = repoCollapsed(self, current_repo);
     const model_rows: usize = if (current_collapsed) 0 else model.rows.len;
 
-    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows) catch return null;
+    // 저장소마다 **커밋 줄 둘**(입력·버튼)이 더 붙는다 — 접힌 저장소는 그것도 없다(②b).
+    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows * 3) catch return null;
     var n: usize = 0;
     if (self.scm_write_error) |err| {
         items[n] = .{ .notice = err };
@@ -277,7 +282,42 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             },
         };
         n += 1;
-        if (!is_current or collapsed) continue;
+        if (collapsed) continue; // 접힌 그룹은 상자도 파일 줄도 없다
+
+        // **커밋 줄은 그 그룹 안에 산다**(②b). 지금 편집 중인 상자만 편집 상태를 갖고, 나머지는 그
+        // 저장소의 **초안 글**을 보여 준다 — 화면에 있는 글이 곧 그 저장소로 커밋될 글이다.
+        const focused = if (focusedCommitRepo(self)) |focus| std.mem.eql(u8, focus, entry.path) else false;
+        const text = if (focused) commitDisplayText(self) else draftTextFor(self, entry.path);
+        items[n] = .{
+            .commit_box = .{
+                .repo_index = @intCast(repo_index),
+                .rows = commitRowsOf(self, text),
+                .text = text,
+                .edit = if (focused) .{
+                    .focused = true,
+                    .caret = commitDisplayCaret(self),
+                    // 조합 중에는 선택이 없다(입력기가 그 구간을 소유한다) — 남기면 밴드가 조합 글자에 겹친다.
+                    .selection = if (self.scm_commit_field.preedit.items.len > 0) null else selectionOf(self.scm_commit_field.selection),
+                    .preedit = self.scm_commit_field.preedit.items,
+                    .first_row = self.scm_commit_first_row,
+                    // **깜빡임 위상은 세션이 소유한다**(component에는 시간이 없다).
+                    .caret_visible = self.blink_visible,
+                } else .{},
+            },
+        };
+        n += 1;
+        items[n] = .{
+            .commit_button = .{
+                .repo_index = @intCast(repo_index),
+                // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다). 비활성 저장소는 스테이지 여부를 아직
+                // 모르므로(머리 줄 읽기는 개수만 준다) 끈 채로 둔다 — 그 저장소를 보면 켜진다.
+                .enabled = if (is_current) model.has_staged else false,
+                .run = if (is_current) commitRunState(self) else .idle,
+            },
+        };
+        n += 1;
+
+        if (!is_current) continue;
         model_start = n;
         for (model.rows, 0..) |row, index| {
             items[n] = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
@@ -324,7 +364,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
     const content = dock_ops.dockGeometry(self).tree_content;
     // **한 번만 만든다.** 아래 두 자리(글자·행 수)가 각자 부르면 합성 버퍼를 다시 채우면서 이미 넘긴
     // 슬라이스를 뒤에서 건드리게 된다.
-    const display = commitDisplayText(self);
+    _ = commitDisplayText(self); // 합성 버퍼를 이 프레임 값으로 채워 둔다(항목이 그 슬라이스를 쓴다)
     return .{
         .viewport_px = .{
             .x = 0,
@@ -345,22 +385,8 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .has_ab = projection.has_ab,
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
-        .commit_message = display,
-        .commit_rows = commitRowsOf(self, display),
-        .commit_edit = .{
-            .focused = self.scm_commit_focused,
-            .caret = commitDisplayCaret(self),
-            // 조합 중에는 선택이 없다(입력기가 그 구간을 소유한다) — 남겨 두면 밴드가 조합 글자 위에 겹친다.
-            .selection = if (self.scm_commit_field.preedit.items.len > 0) null else selectionOf(self.scm_commit_field.selection),
-            .preedit = self.scm_commit_field.preedit.items,
-            .first_row = self.scm_commit_first_row,
-            // **깜빡임 위상은 세션이 소유한다.** 조합 중에는 `updateCursorBlink`가 위상을 고정하므로
-            // 여기서 따로 막지 않아도 caret이 조합 글자를 덮었다 사라졌다 하지 않는다.
-            .caret_visible = self.blink_visible,
-        },
-        .commit_run = commitRunState(self),
-        // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다).
-        .commit_enabled = projection.has_staged,
+        // **커밋 줄은 props가 아니라 목록 항목이다**(②b) — 저장소마다 하나씩이라 여기 하나만 실으면
+        // "어느 저장소로 커밋하는가"가 화면에서 사라진다. 아래 `display`는 그 항목을 만들 때 쓴다.
         // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
         // "아직 못 읽었다"와 똑같아진다(§3.5 빈 상태 표). 다른 두 문장은 목록을 그리기도 전에
         // 나오므로(`git_result == null` 경로) 여기서 고를 것은 이 하나뿐이다.
@@ -425,7 +451,7 @@ pub fn collectScmDock(
         .text_bytes = text_bytes,
     }) catch return;
 
-    publishScmDockFrame(self, frame);
+    publishScmDockFrame(self, frame, window);
 
     chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads, 2);
     const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
@@ -506,7 +532,11 @@ fn shapeScmDockText(
 
 /// 히트 tree 발행. 같은 스냅샷에서 같은 tree가 다시 나오는 것은 **교체가 아니다** — 그걸 교체로 치면
 /// 방금 누른 행이 AppKit의 mouse-up 전에 취소된다(Session Dock과 같은 판단).
-pub fn publishScmDockFrame(self: *AppSession, frame: component.build.Frame) void {
+pub fn publishScmDockFrame(self: *AppSession, frame: component.build.Frame, window: []const component.types.Item) void {
+    // **그 창의 커밋 상자 자리를 함께 기억한다.** 클릭 → caret 변환이 아직 포커스가 없는 상자의 rect를
+    // 알아야 하는데, 상자가 저장소마다 하나씩이라 고정 id가 없다(②b). 발행과 같은 자리에서 적어야
+    // 테스트가 제품과 다른 경로로 발행해도 둘이 어긋나지 않는다.
+    rememberCommitBoxNode(self, window);
     if (frameEql(self.scm_dock_entries.items, self.scm_dock_actions.items, frame.tree.entries, frame.actions)) return;
     // 두 저장소를 **먼저** 확보한다. 할당이 실패해도 마지막으로 온전히 그린 hit tree가 남아야 한다.
     self.scm_dock_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
@@ -577,14 +607,31 @@ pub fn scmDockPointer(
 /// hit이라 어디를 눌렀는지 알아야 한다. 나머지는 그대로 `applyScmDockIntent`로 간다.
 pub fn applyScmDockIntentAt(self: *AppSession, intent: component.ids.Intent, x_px: f64, y_px: f64) void {
     switch (intent) {
-        .commit_focus => focusCommitAt(self, x_px, y_px),
+        .commit_focus => |index| if (repoPathAt(self, index)) |repo| focusCommitAt(self, index, repo, x_px, y_px),
         else => applyScmDockIntent(self, intent),
     }
 }
 
+/// 목록 자리 → 저장소 경로. **지금 목록에서 다시 찾는다** — intent가 든 것은 자리뿐이고, 그 사이
+/// 터미널이 열리고 닫히며 목록이 바뀔 수 있다(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
+///
+/// 반환 슬라이스는 **이 프레임 동안만** 유효하다(호출자가 곧바로 쓴다).
+fn repoPathAt(self: *AppSession, index: u32) ?[]const u8 {
+    const store = self.allocator.create(RepoEntryStore) catch return null;
+    defer self.allocator.destroy(store);
+    store.* = .{};
+    const repos = collectRepoEntries(self, store);
+    if (index >= repos.entries.len) return null;
+    // `store`가 곧 사라지므로 경로를 세션 버퍼로 옮긴다 — 호출자가 그대로 쓰면 댕글링이다.
+    const path = repos.entries[index].path;
+    if (path.len > self.scm_repo_path_scratch.len) return null;
+    @memcpy(self.scm_repo_path_scratch[0..path.len], path);
+    return self.scm_repo_path_scratch[0..path.len];
+}
+
 /// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).
 pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
-    if (!self.scm_commit_focused) return;
+    if (self.scm_commit_focus_repo == null) return;
     const rect = commitBoxRect(self) orelse return blurCommit(self);
     const content = dock_ops.dockGeometry(self).tree_content;
     const local_x = x_px - @as(f64, @floatFromInt(content.x));
@@ -623,10 +670,11 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         },
         .row_action => |index| submitRowWrite(self, index),
         .section_action => |section| submitSectionWrite(self, section),
-        // 좌표가 필요한 intent다 — 여기서는 포커스만 세우고 caret은 `focusCommitAt`이 놓는다
-        // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 끝에 붙인다.
-        .commit_focus => focusCommit(self),
-        .commit => submitCommit(self),
+        // 좌표가 필요한 intent다 — 여기서는 **어느 저장소인지**만 세우고 caret은 `focusCommitAt`이 놓는다
+        // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 글 끝에 붙는다.
+        .commit_focus => |index| if (repoPathAt(self, index)) |repo| focusCommitRepo(self, repo),
+        // **어느 저장소로 커밋하는가**를 intent가 실어 온다(②b). 인덱스는 지금 목록에서 다시 찾는다.
+        .commit => |index| if (repoPathAt(self, index)) |repo| submitCommitFor(self, repo),
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
@@ -639,12 +687,27 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
     }
 }
 
-/// 커밋 상자로 포커스를 옮긴다(caret은 그대로). **목록 선택은 내린다** — 두 곳이 동시에 포커스된 것처럼
-/// 보이면 화살표가 어디로 갈지 사용자가 알 수 없다.
-pub fn focusCommit(self: *AppSession) void {
-    if (self.scm_commit_focused) return;
-    self.scm_commit_focused = true;
+/// 그 저장소의 커밋 상자로 포커스를 옮긴다(caret은 그대로).
+///
+/// **어느 저장소인지가 포커스의 일부다**(②b) — 상자가 여럿이므로 "편집 중"만으로는 글자가 어디로 갈지
+/// 정해지지 않는다. 저장소가 바뀌면 그 전 상자의 글은 초안으로 담고 새 상자의 초안을 꺼낸다.
+pub fn focusCommitRepo(self: *AppSession, repo: []const u8) void {
+    if (self.scm_commit_focus_repo) |current| {
+        if (std.mem.eql(u8, current, repo)) return;
+        // 상자를 옮기는 것은 저장소를 옮기는 것과 같다 — 쓰던 글을 그 저장소에 남긴다.
+        _ = self.scm_commit_field.commitPreedit(self.allocator);
+        stashCommitDraft(self, current);
+        self.allocator.free(current);
+        self.scm_commit_focus_repo = null;
+    }
+    self.scm_commit_focus_repo = self.allocator.dupe(u8, repo) catch null;
+    restoreCommitDraft(self, repo);
     self.metal_dirty = true;
+}
+
+/// 지금 편집 중인 상자의 저장소(없으면 null).
+pub fn focusedCommitRepo(self: *const AppSession) ?[]const u8 {
+    return self.scm_commit_focus_repo;
 }
 
 /// 상자가 입력을 놓았는데 **조합이 남아 있으면** 확정한다. 매 tick 도는 값싼 확인이다.
@@ -661,24 +724,26 @@ pub fn settleCommitInput(self: *AppSession) void {
     if (self.scm_commit_field.commitPreedit(self.allocator)) self.metal_dirty = true;
 }
 
-/// 커밋 상자에서 포커스를 뗀다. **조합 중이면 먼저 확정한다** — 그러지 않으면 조합 글자가 화면에서
-/// 사라진 채 편집기 안에만 남는다.
+/// 커밋 상자에서 포커스를 뗀다. **조합 중이면 먼저 확정하고**(그러지 않으면 조합 글자가 화면에서
+/// 사라진 채 편집기 안에만 남는다) 쓰던 글을 그 저장소의 초안으로 담는다.
 pub fn blurCommit(self: *AppSession) void {
-    if (!self.scm_commit_focused) return;
+    const repo = self.scm_commit_focus_repo orelse return;
     _ = self.scm_commit_field.commitPreedit(self.allocator);
-    self.scm_commit_focused = false;
+    stashCommitDraft(self, repo);
+    self.allocator.free(repo);
+    self.scm_commit_focus_repo = null;
     self.metal_dirty = true;
 }
 
 /// 클릭 지점에 caret을 놓는다. **글자 hit이라 좌표가 필요하다** — tree hit은 "상자를 눌렀다"까지만 안다.
 ///
 /// 세로는 시각 행, 가로는 `text_field.caretAtColumn`이 푼다(§12.1 — 가로 축의 주인은 하나다).
-pub fn focusCommitAt(self: *AppSession, x_px: f64, y_px: f64) void {
-    focusCommit(self);
+pub fn focusCommitAt(self: *AppSession, repo_index: usize, repo: []const u8, x_px: f64, y_px: f64) void {
+    focusCommitRepo(self, repo);
     // **조합 중이면 먼저 확정한다**(macOS 관례 — 다른 곳을 누르면 조합이 끝난다). 그러지 않으면 아래
     // 계산이 조합 글자가 끼워진 화면과 조합 없는 본문 사이에서 갈려, 누른 자리와 caret이 어긋난다.
     _ = self.scm_commit_field.commitPreedit(self.allocator);
-    const rect = commitBoxRect(self) orelse return;
+    const rect = commitBoxRectAt(self, repo_index) orelse return;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     const content = dock_ops.dockGeometry(self).tree_content;
     const local_x = x_px - @as(f64, @floatFromInt(content.x)) - rect.x;
@@ -722,13 +787,44 @@ pub fn focusCommitAt(self: *AppSession, x_px: f64, y_px: f64) void {
     self.metal_dirty = true;
 }
 
-/// published tree에서 커밋 상자 rect를 찾는다. **그린 것과 같은 기하**를 쓴다 — 여기서 다시 계산하면
-/// 클릭 자리와 글자 자리가 갈린다.
-fn commitBoxRect(self: *AppSession) ?chrome.ui.layout.UiRect {
-    for (self.scm_dock_entries.items) |entry| {
-        if (entry.id == component.build.NodeIds.commit_box) return entry.rect;
+/// published tree에서 **지금 편집 중인** 커밋 상자 rect를 찾는다. **그린 것과 같은 기하**를 쓴다 —
+/// 여기서 다시 계산하면 클릭 자리와 글자 자리가 갈린다.
+///
+/// 상자가 여럿이므로(②b) 고정 id로는 못 찾는다. 그리는 쪽이 그 프레임의 노드 id를 남기고
+/// (`publishScmDockFrame` 직전), 여기서는 그것을 쓴다.
+pub fn commitBoxRect(self: *AppSession) ?chrome.ui.layout.UiRect {
+    const repo = focusedCommitRepo(self) orelse return commitBoxRectAt(self, 0);
+    var store: RepoEntryStore = .{};
+    const repos = collectRepoEntries(self, &store);
+    for (repos.entries, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.path, repo)) return commitBoxRectAt(self, index);
     }
     return null;
+}
+
+/// 그 자리 저장소의 커밋 상자 rect. **첫 클릭에도 쓴다** — 아직 포커스가 없는 상자의 caret을 놓으려면
+/// 그 rect가 필요하다.
+pub fn commitBoxRectAt(self: *AppSession, repo_index: usize) ?chrome.ui.layout.UiRect {
+    if (repo_index >= self.scm_commit_box_nodes.len) return null;
+    const id = self.scm_commit_box_nodes[repo_index] orelse return null;
+    for (self.scm_dock_entries.items) |entry| {
+        if (entry.id == id) return entry.rect;
+    }
+    return null;
+}
+
+/// 그 창에서 **편집 중인 상자**의 노드 id를 기억한다. 창이 스크롤되면 같은 상자의 id가 달라지므로
+/// 매 프레임 다시 정한다.
+fn rememberCommitBoxNode(self: *AppSession, window: []const component.types.Item) void {
+    self.scm_commit_box_nodes = @splat(null);
+    for (window, 0..) |item, index| switch (item) {
+        .commit_box => |box| {
+            if (box.repo_index < self.scm_commit_box_nodes.len) {
+                self.scm_commit_box_nodes[box.repo_index] = component.build.NodeIds.item(index);
+            }
+        },
+        else => {},
+    };
 }
 
 /// caret이 상자 밖으로 나갔으면 첫 행을 옮긴다(제약 ⑥ — 시각 행으로 센다).
@@ -1157,7 +1253,7 @@ const commit_word_separators = text_area.word_separators;
 /// 커밋 상자가 활성일 때의 키 처리. 반환값은 "이 키를 먹었나"이고, 먹지 않은 키는 호출자가 원래
 /// 경로로 보낸다.
 pub fn handleCommitKey(self: *AppSession, ev: chrome.input.InputEvent) bool {
-    if (!self.scm_commit_focused) return false;
+    if (self.scm_commit_focus_repo == null) return false;
     const field = &self.scm_commit_field;
     switch (ev) {
         .key => |k| switch (k.key) {
@@ -1299,7 +1395,7 @@ pub fn commitCommitPreedit(self: *AppSession) void {
 ///  - 나머지 C0 제어문자·DEL도 버린다(ESC·FF·VT…). 위와 같은 이유다.
 ///  - **유효 UTF-8만** 넣는다. 손상 바이트가 들어가면 폭 계산(`clusterCols`)과 랩이 어긋나 caret이 민다.
 pub fn insertCommitText(self: *AppSession, bytes: []const u8) void {
-    if (!self.scm_commit_focused) return;
+    if (self.scm_commit_focus_repo == null) return;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(self.allocator);
     buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
@@ -1326,7 +1422,7 @@ pub fn insertCommitText(self: *AppSession, bytes: []const u8) void {
 /// 커밋 상자의 caret rect(창 좌표) — IME 후보창을 그 자리에 띄운다. **그린 것과 같은 기하**를 쓴다:
 /// published 상자 rect + 같은 랩 결과. 상자가 아직 안 그려졌으면 null이고 호출자가 폴백한다.
 pub fn commitCaretRect(self: *AppSession) ?chrome.draw.Rect {
-    if (!self.scm_commit_focused) return null;
+    if (self.scm_commit_focus_repo == null) return null;
     const rect = commitBoxRect(self) orelse return null;
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
@@ -1467,8 +1563,23 @@ fn commitMessagePath(self: *AppSession, buf: []u8) ?[]const u8 {
 ///
 /// 켤 수 있는지는 **여기서 다시 본다** — published tree의 버튼은 언제나 눌리고, 그 프레임의 상태가
 /// 지금과 다를 수 있다(§7 — 낙관하지 않는다).
+/// 지금 편집 중인 상자의 저장소로 커밋한다(⌘Enter·기본 진입점).
 pub fn submitCommit(self: *AppSession) void {
+    const repo = focusedCommitRepo(self) orelse return;
+    submitCommitFor(self, repo);
+}
+
+/// **그 저장소로** 커밋한다(②b — 버튼이 어느 저장소인지 실어 온다).
+pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     if (self.scm_write_inflight != 0) return; // 쓰기는 하나씩(§6-2)
+    // **활성 저장소가 아니면 지금은 커밋하지 않는다.** 스테이지 여부·메시지 판정이 그 저장소의 목록
+    // 읽기에서 나오는데, 비활성 저장소는 머리 줄 요약(개수)만 있다 — 그 상태로 커밋을 걸면 "무엇을
+    // 커밋하는지" 모르는 채 실행하는 것이다. 그 저장소를 보면(터미널이 그리로 가면) 켜진다.
+    const current = self.git_repo orelse return;
+    if (!std.mem.eql(u8, current, repo_path)) {
+        setScmWriteNotice(self, "그 저장소를 먼저 여세요");
+        return;
+    }
     // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
     _ = self.scm_commit_field.commitPreedit(self.allocator);
     const message = std.mem.trim(u8, self.scm_commit_field.text.items, " \t\r\n");
@@ -1838,4 +1949,13 @@ pub fn drainRepoStatus(self: *AppSession) void {
         return;
     };
     self.metal_dirty = true;
+}
+
+/// 그 저장소의 초안 글(없으면 빈 문자열). **편집 중이 아닌 상자가 보여 주는 것**이다 — 화면에 있는
+/// 글이 곧 그 저장소로 커밋될 글이어야 한다.
+fn draftTextFor(self: *const AppSession, repo: []const u8) []const u8 {
+    for (self.scm_commit_drafts.items) |draft| {
+        if (std.mem.eql(u8, draft.repo, repo)) return draft.text;
+    }
+    return "";
 }

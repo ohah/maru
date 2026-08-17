@@ -884,11 +884,13 @@ pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
 pub fn applyForcedCommitMessage(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SCM_COMMIT") orelse return;
     if (self.dock.view != .source_control) return;
-    if (self.scm_commit_focused) {
+    if (self.scm_commit_focus_repo != null) {
         forceCommitRun(self);
         return;
     }
-    scm_dock_ops.focusCommit(self);
+    // 캡처는 **활성 저장소**의 상자를 연다 — 그 저장소가 지금 화면이 말하고 있는 곳이다.
+    const repo = self.git_repo orelse return;
+    scm_dock_ops.focusCommitRepo(self, repo);
     scm_dock_ops.insertCommitText(self, std.mem.span(raw));
     // 선택 밴드도 캡처로만 확인할 수 있다(`MARU_FORCE_SCM_COMMIT_SELECT=1` — 전체 선택).
     // 밴드가 글자와 **같은 자를 쓰는지**는 픽셀로만 드러난다: caret·밴드는 셀 열 산술이고 글자는

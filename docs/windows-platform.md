@@ -1005,47 +1005,96 @@ line1\nline2.log  → [line1][nline2.log]  ← 막아야 하는 것
 보는 판단과 같은 뿌리이고, **정상 파일을 잃는 쪽보다 루트 밖을 읽는 쪽이 더 나쁘다**고 보아 이 방향을 택했다.
 `path_shape.isAbsolute`의 doc 주석이 이 대가를 명시한다.
 
-### 5.3 홈·캐시 위치 — `%USERPROFILE%`로 폴백한다 (W8.5 결정)
+### 5.3 Windows 경로 레이아웃 — `%LOCALAPPDATA%\maru\` (W8.5 결정)
 
-`src/main.zig`는 네 자리에서 홈 디렉터리를 요구한다 — terminfo 캐시, 컨트롤 소켓 디렉터리, `maru ssh`의
-control path, `install-cli` 설치 위치. 그리고 다섯 번째로 `trace anonymize`가 홈 경로를 **매칭 키**로 쓴다.
-전부 `getenv("HOME")`을 각자 불렀고, Windows는 `HOME`을 주지 않는다.
+`src/main.zig`와 config 로더가 **여섯 자리**에서 사용자별 경로를 요구한다 — terminfo 캐시, 컨트롤 소켓
+디렉터리, `maru ssh` control path, `install-cli` 위치, `trace anonymize`의 매칭 키, 그리고 config 파일.
+전부 각자 `getenv("HOME")`을 불렀고, Windows는 `HOME`을 주지 않는다.
 
-**실측 (Windows 10.0.19045)** — 고치기 전 `maru terminfo --path`:
+#### 무엇이 깨져 있었나 (실측, Windows 10.0.19045)
+
+`maru terminfo --path`:
 
 | 환경 | `HOME` | 결과 | 판정 |
 |---|---|---|---|
 | git-bash | MSYS가 넣고 Win32 형태로 변환해 전달 | `C:/Users/<user>/.cache/maru/terminfo` | 정상 — **그래서 이 결함이 가려져 있었다** |
 | cmd.exe · PowerShell | 없음 | 안내 후 exit 1 | 기능이 죽는다 |
-| `HOME=""` (빈 문자열) | `""` | **`/.cache/maru/terminfo`, exit 0** | **조용히 틀린다** — 안내보다 나쁘다 |
+| `HOME=""` (빈 문자열) | `""` | **`/.cache/maru/terminfo`, exit 0** | **조용히 틀린다** |
 
 세 번째 줄이 계획에 없던 것이다. `getenv`는 빈 값에도 non-null을 주므로 `orelse` 가드가 발화하지 않고,
 드라이브 루트의 엉뚱한 경로가 **성공으로** 나간다. `resolveClickedPath`가 `~/` 확장에서 같은 함정을 절대
 경로 검사로 이미 막고 있었는데 여기는 아니었다.
 
-**결정: `%USERPROFILE%` 폴백.** 판정은 `cli/home.zig`의 `homeDirFor(os_tag, home, userprofile)` 하나가
-하고(순수·OS 인자), `main.zig`의 `hostHomeDir()`이 환경변수 읽기만 한다. 규칙은 셋이다 — ⑴ 값이 있고
-비어 있지 않고 **그 OS 기준 절대 경로**여야 홈으로 친다, ⑵ Windows면 `HOME`이 못 쓰는 값일 때
-`%USERPROFILE%`로 폴백한다, ⑶ POSIX에서는 폴백하지 않는다(`USERPROFILE`은 maru가 정의한 적 없는 이름이라,
-우연히 설정돼 있으면 의도치 않은 위치에 캐시를 만든다).
+#### 결정 — 어느 진영인가
 
-고친 뒤 셋 다 **git-bash와 같은 경로로 수렴한다** — `C:/Users/<user>/.cache/maru/terminfo`. 수렴이 요점이다:
-셸에서 만든 캐시와 Zig가 보는 캐시가 같은 곳이어야 한다.
+처음에는 "단일 레이아웃 유지(`$HOME/.cache`) + `%USERPROFILE%` 폴백"으로 갔다가, 선례를 조사하고 뒤집었다.
 
-**`%LOCALAPPDATA%`를 쓰지 않은 이유.** Windows 관례로는 캐시가 거기 가는 것이 맞다. 그런데
-`terminfo_cache.cacheDirZ`의 계약이 *"셸 `${XDG_CACHE_HOME:-$HOME/.cache}`와 반드시 같은 경로로 resolve"*
-이고, 그 셸 명령이 실제로 `tic`을 돌려 캐시를 만든다. Zig가 `%LOCALAPPDATA%`를 쓰고 셸이 `$HOME/.cache`를
-쓰면 **둘이 갈려 계약이 깨진다.** 같은 규칙을 `cli.sessions.controlDir`와 서버측
-`control_socket.controlDirPath`도 공유하므로 셋 + 셸 명령을 한꺼번에 옮겨야 하고, 그러면 git-bash 사용자의
-경로가 이사한다. 관례를 따르려면 **별도 슬라이스**가 맞다 — 그때 옮길 것 넷을 여기 적어 둔다.
+| 터미널 | Windows config | 근거 |
+|---|---|---|
+| **Warp** | `%LOCALAPPDATA%\warp\Warp\config\` (테마·탭 config만 `%APPDATA%`) | `directories` 크레이트 관례 — *"portable"은 Roaming, "machine-specific"은 Local*. macOS는 `~/.warp/`, Linux는 XDG — **OS마다 그 OS 관례**. `~/.warp/`는 Windows에서 **안 읽는다**고 명시 |
+| **Alacritty** | `%APPDATA%lacritty\` **만** | Unix에서는 XDG 5단계를 보지만 Windows에서는 `$HOME/.config`를 아예 안 본다 |
+| Windows Terminal | `%LOCALAPPDATA%\…\LocalState` | MSIX 샌드박스가 **강제**한다. Windows 전용 앱이라 이식성 고민이 없어 **선례로 치지 않는다** |
+| **WezTerm** | `$HOME/.config/wezterm`·`~/.local/share/wezterm` | appdata를 **의도적으로 거부** — *"it works against the idea that the same configuration layout can be used on multiple operating systems"*, *"bootstrap my dotfiles from git on any OS"* |
 
-**이 슬라이스가 닫지 않은 것 — `--refresh`·`--clear`는 POSIX 셸을 요구한다.** `system()`은 Windows에서
-`/bin/sh`가 아니라 **cmd.exe**로 간다(msvcrt). 재컴파일·삭제 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는
-POSIX 스크립트다. 실측: cmd/PowerShell PATH에는 그 넷도 `tic`도 **없고**, 둘 다 git-bash의 `/usr/bin`에만
-있다. 그래서 이 슬라이스는 두 가지만 한다 — ⒜ 안내가 `tic`만 가리키던 것을 **셸과 tic 둘 다** 가리키게
-고쳤다(그 전에는 tic을 깔아도 계속 실패한다), ⒝ `--clear`가 `system()` 반환값을 **버리고** "삭제됨"을
-exit 0으로 찍던 것을 고쳤다 — 지우지 못했는데 지웠다고 말하고 있었다. `--refresh`를 Windows에서 실제로
-돌리는 것은 `maru ssh`의 `/bin/sh` 문제와 **같은 결정**이라 W9에서 함께 정한다(계약 §8).
+**2:1로 플랫폼 네이티브**이고 WezTerm은 소수 입장임을 본인이 밝힌다.
+
+**결정적인 것은 웹뷰다.** WebView2에는 WKWebView의 `nonPersistent()` 같은 인메모리 모드가 **없다** — user
+data folder(쿠키·localStorage·IndexedDb·디스크 캐시)를 항상 디스크에 만든다. Microsoft의 Win32 지침은
+*"You should specify the same folder where all other app data is stored"* 이고, 기본 위치(`<exe>.WebView2\`)는
+설치 디렉터리가 보호돼 **쓰지 말라**고 한다. 즉 **maru의 데이터 base가 곧 수백 MB짜리 Chromium 프로필
+위치**가 된다 — 숨은 `~/.cache`가 아니라 사용자가 찾을 수 있는 곳이어야 한다.
+
+**그래서 Windows에서는 `%LOCALAPPDATA%\maru\` 아래로 모은다:**
+
+| | 경로 |
+|---|---|
+| config | `%LOCALAPPDATA%\maru\config` |
+| terminfo 캐시 | `%LOCALAPPDATA%\maru	erminfo` |
+| 컨트롤 소켓 디렉터리 | `%LOCALAPPDATA%\maru\control` |
+| (W8) WebView2 UDF | 같은 뿌리 아래 — W8이 이름을 정한다 |
+
+Roaming(`%APPDATA%`)은 쓰지 않는다 — Warp도 `settings.toml`을 Local에 둔다(창 크기·경로 등 기계별 값이
+섞인다). **탈출구는 남긴다**: `$MARU_CONFIG`와 `$XDG_CACHE_HOME`이 **모든 OS에서 최우선**이라, dotfiles로
+설정을 옮기는 사용자는 예전 자리를 그대로 쓸 수 있다.
+
+**지금이 옮기기 유일하게 싼 순간이다** — W7 전이라 Windows 사용자가 0명이다. 나중에 옮기면 실제 사용자
+디렉터리를 마이그레이션해야 한다. 그래서 캐시만 먼저 옮기고 config를 미루는 대신 **레이아웃 전체를 한
+슬라이스에서** 정했다.
+
+**POSIX 회귀 0**: `os_tag`가 Windows가 아니면 `cacheBaseFor`가 null을 내고 호출자가 예전대로
+`<home>/.cache`로 가며, `defaultConfigPathFor`도 `<home>/.config/maru/config`를 그대로 낸다.
+
+#### 구현
+
+판정은 **`src/user_paths.zig`** 하나가 소유한다(순수·`os_tag` 인자 — Windows 러너가 없어도 두 갈래가 모든
+타깃에서 테스트된다). 환경변수 읽기는 호출자(`main.zig`·`config/loader.zig`·`cli/control_client.zig`·
+`pty/macos.zig`)가 한다.
+
+- `homeDirFor(os_tag, home, userprofile)` — 값이 **절대 경로**여야 홈으로 치고(빈 문자열·상대 경로 차단),
+  Windows면 `%USERPROFILE%`로 폴백한다. POSIX에서는 폴백하지 않는다(거기서 `USERPROFILE`은 maru가 정의한
+  적 없는 이름이라, 우연히 설정돼 있으면 의도치 않은 위치를 쓴다).
+- `cacheBaseFor(os_tag, xdg_cache_home, localappdata)` — `cacheDirZ`·`controlDir`가 받는 base.
+- `defaultConfigPathFor(...)` — config 파일 자리.
+
+**해석기를 하나로 만들었다.** `terminfo_cache`의 셸 명령 넷이 예전에는 `${XDG_CACHE_HOME:-$HOME/.cache}`로
+경로를 **다시 확장**했다. 규칙이 둘(Zig·셸)이라 base를 OS별로 바꾸는 순간 조용히 갈린다 — 실제로
+`pty/macos.zig`가 `cacheDirZ`로 dir을 구해 놓고 셸에는 다시 확장시키는 중복이 있었다. 이제 Zig가 정한 값을
+`shSingleQuote`로 인용해 **리터럴로** 넘긴다(경로에 공백·`$`·백틱이 있어도 안전하다).
+
+#### 이 슬라이스가 닫지 않은 것
+
+**`--refresh`·`--clear`는 POSIX 셸을 요구한다.** `system()`은 Windows에서 `/bin/sh`가 아니라 **cmd.exe**로
+간다(msvcrt). 두 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는 POSIX 스크립트다. 실측: cmd/PowerShell PATH에는
+그 넷도 `tic`도 **없고**(둘 다 git-bash의 `/usr/bin`에만 있다), 그래서 두 명령은 git-bash에서만 돈다.
+이 슬라이스는 두 가지만 했다 — ⒜ 안내가 `tic`만 가리키던 것을 **셸과 tic 둘 다** 가리키게 고쳤고(그 전에는
+tic을 깔아도 계속 실패한다), ⒝ `--clear`가 `system()` 반환값을 **버리고** "삭제됨"을 exit 0으로 찍던 것을
+고쳤다 — 지우지 못했는데 지웠다고 말하고 있었다. `--refresh`를 Windows에서 실제로 돌리는 것은 `maru ssh`의
+`/bin/sh` 문제와 **같은 결정**이라 W9에서 함께 정한다.
+
+**§7 격리 결정이 그대로 오지 않는다(W8 항목).** macOS는 비신뢰 브라우저 패널에
+`WKWebsiteDataStore.nonPersistent()`를 써서 "쿠키·localStorage·캐시가 디스크에 안 남는다"를 보장하는데,
+WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 뿐이다(`ClearBrowsingData` 또는 종료 시 UDF
+삭제). W8이 그 자리를 정해야 한다.
 
 ## 6. 실측 (2026-08-15, Windows 10.0.19045, zig 0.16.0)
 

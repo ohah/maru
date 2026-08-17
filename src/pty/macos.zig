@@ -5,6 +5,7 @@ const types = @import("types.zig");
 // maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
 // 서브커맨드로 재컴파일한 캐시를 여기 spawn 자동 컴파일이 그대로 재사용한다(top-level 중립 모듈 — color.zig 결).
 const terminfo_cache = @import("../terminfo_cache.zig");
+const user_paths = @import("../user_paths.zig"); // 캐시 base 판정(OS 인자 순수 정책 — 계약 §5.3)
 
 // macOS의 첫 backend는 openpty로 master/slave fd만 만들고 fork/exec는 직접 한다.
 // 이 경계가 있어야 cwd/env/stdio/controlling-terminal 실패를 단계별 artifact로 남길 수 있다.
@@ -1397,13 +1398,16 @@ fn computeMaruTerminfo() ResolvedTerm {
     const page = std.heap.page_allocator;
     const home_z = std.c.getenv("HOME") orelse return fallback;
     const home = std.mem.span(home_z);
-    // 다른 maru 캐시와 같은 XDG 규칙으로 base를 정한다(셸 명령도 동일 규칙 — 같은 경로로 resolve).
+    // base 판정은 `user_paths.cacheBaseFor`가 소유한다(XDG 최우선, Windows는 %LOCALAPPDATA% — 계약 §5.3).
     const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const dir = terminfo_cache.cacheDirZ(page, xdg, home) catch return fallback;
+    const local = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
+    const base = user_paths.cacheBaseFor(@import("builtin").os.tag, xdg, local);
+    const dir = terminfo_cache.cacheDirZ(page, base, home) catch return fallback;
     // 버전 마커가 현재 embed 내용과 일치하고 xterm-maru가 해석되면 재컴파일 skip, 아니면(업데이트로 캡이
     // 바뀜·마커 없음) 캐시를 자동 재컴파일한다 — terminfo를 늘려도 기존 캐시에 자동 반영된다(stale 방지).
     // 같은 캐시·마커를 `maru terminfo` 서브커맨드(cli/terminfo.zig)가 공유한다.
-    const cmd = terminfo_cache.autoCompileCommand(page, terminfo_cache.version()) catch {
+    // **경로는 여기서 한 번만 정한다** — 셸에 리터럴로 넘긴다(예전엔 셸이 다시 확장해 규칙이 둘이었다).
+    const cmd = terminfo_cache.autoCompileCommand(page, dir, terminfo_cache.version()) catch {
         page.free(dir);
         return fallback;
     };

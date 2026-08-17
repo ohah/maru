@@ -13,9 +13,10 @@
 //! 순수 정책(경로 규칙·소켓 선택 판정)은 여전히 [`sessions.zig`](sessions.zig)가 소유한다. 여기는
 //! getenv·readdir·socket·connect·read·write **syscall만** 한다(§11 L4).
 const std = @import("std");
-const builtin = @import("builtin");
 const cp = @import("../session/control_plane.zig");
 const sessions = @import("sessions.zig");
+const builtin = @import("builtin");
+const user_paths = @import("../user_paths.zig"); // 캐시 base·홈 판정(OS 인자 순수 정책 — 계약 §5.3)
 
 /// 컨트롤 소켓이 막힌 호스트에서 **사용자에게 보일 이유**. OS와 무관한 문구 그 자체이며, 단일 출처는 여기다 —
 /// `main.zig`의 `HostGatedFeature.control_socket`이 이 값을 되돌려 준다(그 함수는 OS를 인자로 받아 Windows가
@@ -76,10 +77,15 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     const posix = std.posix;
 
     // ── 소켓 발견: 결정론 경로 <cache>/maru/control에서 살아있는 인스턴스 소켓 하나를 찾는다(§4.2) ──
-    const home_z = c.getenv("HOME") orelse
-        return noInstance(stderr, "HOME 환경변수가 없어 컨트롤 소켓 위치를 정할 수 없습니다");
+    // base 판정은 `user_paths`가 소유한다 — terminfo 캐시와 **같은 규칙**이라야 두 캐시가 같은 뿌리에
+    // 산다(계약 §5.3: Windows는 `%LOCALAPPDATA%`, 그 위로 `$XDG_CACHE_HOME`이 최우선).
+    const home_env: ?[]const u8 = if (c.getenv("HOME")) |h| std.mem.span(h) else null;
+    const local: ?[]const u8 = if (c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
     const xdg: ?[]const u8 = if (c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const control_dir = try sessions.controlDir(allocator, xdg, std.mem.span(home_z));
+    const base = user_paths.cacheBaseFor(builtin.os.tag, xdg, local);
+    const home = user_paths.homeDirFor(builtin.os.tag, home_env, local) orelse
+        return noInstance(stderr, "홈 디렉터리를 찾지 못해 컨트롤 소켓 위치를 정할 수 없습니다");
+    const control_dir = try sessions.controlDir(allocator, base, home);
     defer allocator.free(control_dir);
 
     // control dir을 열어 `.sock` 엔트리 이름을 모은다(못 열면 = 인스턴스 없음). readdir는 L4 I/O라 여기서 한다.

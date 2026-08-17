@@ -54,6 +54,7 @@ dl "https://www.rfc-editor.org/rfc/rfc8032.txt" "rfc8032-eddsa.txt"
 dl_draft "draft-ietf-sshm-chacha20-poly1305" "draft-sshm-chacha20-poly1305.txt"
 dl_draft "draft-ietf-sshm-strict-kex" "draft-strict-kex.txt"
 dl "https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL" "openssh-protocol.txt"
+dl "https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL.key" "openssh-protocol-key.txt"
 
 echo
 echo "선택: 동작 비교 오라클 구현(베끼는 대상 아님)"

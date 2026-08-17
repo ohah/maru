@@ -6,19 +6,25 @@
 const intent_table = @import("../../ui/intent_table.zig");
 const types = @import("types.zig");
 
+/// 저장소 안의 한 행. **인덱스만으로는 부족하다**(②d) — 모델은 저장소마다 따로 서므로 같은 번호가
+/// 저장소마다 다른 파일을 가리킨다.
+pub const RowRef = struct { repo_index: u32, model_index: u32 };
+/// 저장소 안의 한 그룹.
+pub const SectionRef = struct { repo_index: u32, section: types.Section };
+
 pub const Intent = union(enum) {
     /// 그룹 헤더 클릭 = 접기/펴기.
     toggle_section: types.Section,
     /// 그 그룹의 일괄 동작(`모두 스테이지`/`모두 언스테이지`). **무엇을 할지는 host가 현재 상태로
     /// 다시 정한다** — intent가 방향까지 실으면 published tree와 host 상태가 어긋날 수 있다.
-    section_action: types.Section,
+    section_action: SectionRef,
     /// "모두 보기" — 그 그룹만 전부 편다.
     expand_section: types.Section,
     /// 행 클릭 = 그 비교 열기. **인덱스는 화면 창(virtualized window) 기준이 아니라 모델 인덱스**다 —
     /// host가 같은 스냅샷 세대의 모델에서 그 행을 다시 찾는다.
-    open_row: u32,
+    open_row: RowRef,
     /// 행 호버의 `+`/`−`. 어느 방향인지는 그 행이 선 그룹이 정하므로 여기서는 행만 가리킨다.
-    row_action: u32,
+    row_action: RowRef,
     /// 저장소 머리 줄 클릭 = 접기/펴기. **인덱스는 목록 기준**이고 host가 같은 스냅샷에서 다시 찾는다
     /// (파일 행이 모델 인덱스를 싣는 것과 같은 이유 — 경로 문자열로 되찾으면 스크롤 뒤 어긋난다).
     toggle_repo: u32,

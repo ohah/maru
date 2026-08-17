@@ -126,10 +126,11 @@ fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
 
 /// 모델 행 하나를 component 항목으로 옮긴다. **문자열은 복사하지 않는다** — `git_result`가 이 프레임
 /// 동안 살아 있고, component는 immutable snapshot만 읽는다.
-fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapsed: [scm_view.section_count]bool) component.types.Item {
+fn itemFor(row: scm_view.Row, repo_index: u32, model_index: usize, selected_row: ?usize, collapsed: [scm_view.section_count]bool) component.types.Item {
     return switch (row) {
         .section => |section| .{
             .section = .{
+                .repo_index = repo_index,
                 .section = sectionOf(section.section),
                 .count = @intCast(section.count),
                 .collapsed = collapsed[@intFromEnum(section.section)],
@@ -139,6 +140,7 @@ fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapse
         },
         .file => |file| .{
             .file = .{
+                .repo_index = repo_index,
                 .model_index = @intCast(model_index),
                 .name = std.fs.path.basename(file.path),
                 .dir = file.path[0 .. file.path.len - std.fs.path.basename(file.path).len],
@@ -154,9 +156,41 @@ fn itemFor(row: scm_view.Row, model_index: usize, selected_row: ?usize, collapse
                 .selected = selected_row != null and selected_row.? == model_index,
             },
         },
-        .more => |more| .{ .more = .{ .section = sectionOf(more.section), .hidden = @intCast(more.hidden) } },
+        .more => |more| .{ .more = .{ .repo_index = repo_index, .section = sectionOf(more.section), .hidden = @intCast(more.hidden) } },
         .notice => |notice| .{ .notice = notice.text() },
     };
+}
+
+/// 그 저장소의 행 모델. **활성이면 목록 읽기**(증감까지), 아니면 머리 줄 읽기의 `status` 하나로 만든다
+/// (②d — 파일 줄의 실체는 status에서 나오고 numstat은 숫자만 채운다).
+fn modelForRepo(self: *AppSession, repo: []const u8, out: []scm_view.Row, scratch: []u8) ?scm_view.Model {
+    const current = self.git_repo orelse "";
+    if (std.mem.eql(u8, repo, current)) return git_ops.buildScmModel(self, out, scratch);
+    const status = repoStatusTextFor(self, repo) orelse return null;
+    return scm_view.build(status, "", "", "", self.scm_collapsed, self.scm_expanded, false, out, scratch);
+}
+
+/// 지금 목록 읽기가 보고 있는 저장소인가.
+fn isCurrentRepo(self: *const AppSession, repo: []const u8) bool {
+    const current = self.git_repo orelse return false;
+    return std.mem.eql(u8, current, repo);
+}
+
+/// 그 저장소의 마지막 `status` 출력(없으면 null). 머리 줄 읽기가 실어 온 그 텍스트다.
+fn repoStatusTextFor(self: *const AppSession, repo: []const u8) ?[]const u8 {
+    for (self.scm_repo_status.items) |entry| {
+        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        return if (entry.status_text.len > 0) entry.status_text else null;
+    }
+    return null;
+}
+
+/// 그 저장소에서 지금 강조할 행. **선택은 (저장소, 인덱스) 쌍이다**(②d) — 인덱스만 들면 다른
+/// 저장소의 같은 번호 행이 함께 강조된다(모델이 저장소마다 따로 서기 때문).
+fn selectedRowIn(self: *const AppSession, repo: []const u8) ?usize {
+    const index = self.scm_selected_row orelse return null;
+    const selected_repo = self.scm_selected_repo orelse return null;
+    return if (std.mem.eql(u8, selected_repo, repo)) index else null;
 }
 
 fn sectionOf(section: scm_view.Section) component.types.Section {
@@ -241,26 +275,55 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const repos = repoEntries(self);
     const current_repo = self.git_repo orelse "";
 
-    var repo_rows: usize = repos.entries.len;
-    if (repo_rows == 0) repo_rows = 0; // 저장소를 못 잡았으면 머리 줄도 없다(안내가 그 자리를 쓴다)
-    const current_collapsed = repoCollapsed(self, current_repo);
-    const model_rows: usize = if (current_collapsed) 0 else model.rows.len;
+    // **저장소마다 자기 모델을 만든다**(②d). 파일 줄의 실체(경로·그룹·상태 문자·스테이지 동작)는
+    // `status` 하나에서 나오므로, 비활성 저장소도 머리 줄 읽기에 실려 온 그 출력으로 줄을 세울 수 있다 —
+    // **추가 프로세스가 없다**. `numstat`이 없으니 증감 숫자만 비고, 그 자리를 비우는 길은 이미 있다
+    // (`unknown_delta` — 추적되지 않은 파일·충돌이 같은 길을 쓴다).
+    const models = arena.alloc(?scm_view.Model, repos.entries.len) catch return null;
+    var total_rows: usize = 0;
+    for (repos.entries, 0..) |entry, index| {
+        models[index] = null;
+        if (repoCollapsed(self, entry.path)) continue; // 접힌 그룹은 줄을 만들지 않는다
+        if (std.mem.eql(u8, entry.path, current_repo)) {
+            models[index] = model;
+            total_rows += model.rows.len;
+            continue;
+        }
+        const status = repoStatusTextFor(self, entry.path) orelse continue;
+        const rows = arena.alloc(scm_view.Row, scm_row_capacity) catch continue;
+        const path_scratch = arena.alloc(u8, std.fs.max_path_bytes) catch continue;
+        const built = scm_view.build(
+            status,
+            "", // numstat 셋은 없다 — 증감은 그 저장소를 열 때 채워진다
+            "",
+            "",
+            self.scm_collapsed,
+            self.scm_expanded,
+            false,
+            rows,
+            path_scratch,
+        );
+        models[index] = built;
+        total_rows += built.rows.len;
+    }
 
     // 저장소마다 **커밋 줄 둘**(입력·버튼)과 **빈 안내 한 줄**이 더 붙을 수 있다 — 접힌 저장소는
     // 그것도 없다(②b).
-    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows * 4) catch return null;
+    const items = arena.alloc(component.types.Item, total_rows + notice_rows + repos.entries.len * 4) catch return null;
     var n: usize = 0;
     if (self.scm_write_error) |err| {
         items[n] = .{ .notice = err };
         n += 1;
     }
     var model_start: usize = 0;
+    var model_end: usize = 0;
     for (repos.entries, 0..) |entry, repo_index| {
         const is_current = std.mem.eql(u8, entry.path, current_repo);
         const collapsed = repoCollapsed(self, entry.path);
         // 활성 저장소는 목록 읽기가, 나머지는 **머리 줄 읽기**(P3d-③)가 채운다. 둘이 같은 값을 들지
         // 않는다 — 두 곳이 같은 사실을 가지면 어느 쪽이 최신인지 판정이 하나 더 생긴다.
         const summary = if (is_current) null else repoStatusFor(self, entry.path);
+        const repo_model = models[repo_index];
         items[n] = .{
             .repo = .{
                 .index = @intCast(repo_index),
@@ -308,30 +371,34 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         items[n] = .{
             .commit_button = .{
                 .repo_index = @intCast(repo_index),
-                // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다). 비활성 저장소는 스테이지 여부를 아직
-                // 모르므로(머리 줄 읽기는 개수만 준다) 끈 채로 둔다 — 그 저장소를 보면 켜진다.
-                .enabled = if (is_current) model.has_staged else false,
+                // **실제 index 상태로만** 켠다(§7 — 낙관하지 않는다). 파일 줄이 화면에 있으면 그 판정도
+                // 그 저장소의 status에서 나온다(②d) — 무엇을 커밋하는지 화면에 있으므로 막을 이유가 없다.
+                .enabled = if (repo_model) |rm| rm.has_staged else false,
                 .run = if (is_current) commitRunState(self) else .idle,
             },
         };
         n += 1;
 
-        if (!is_current) continue;
-        // **변경이 없다는 말은 그 그룹의 줄이다**(②b). 스크롤 영역 위쪽에 그리면 이제 그 자리에 머리
-        // 줄이 있어 **글자가 겹친다**(제품 캡처에서 실제로 그랬다 — 둘 다 못 읽는 화면이 됐다).
-        // 그리고 저장소가 여럿이면 "어느 저장소가 비었나"도 그 자리라야 말이 된다.
-        if (model.rows.len == 0) {
+        const rows = if (repo_model) |rm| rm.rows else &[_]scm_view.Row{};
+        // **변경이 없다는 말은 그 그룹의 줄이다**(②b). 스크롤 영역 위쪽에 그리면 그 자리에 머리 줄이
+        // 있어 **글자가 겹친다**(제품 캡처 2026-08-17). 저장소가 여럿이면 "어느 저장소가 비었나"도
+        // 그 자리라야 말이 된다.
+        if (repo_model != null and rows.len == 0) {
             items[n] = .{ .notice = git_ops.notice_no_changes };
             n += 1;
             continue;
         }
-        model_start = n;
-        for (model.rows, 0..) |row, index| {
-            items[n] = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
+        if (is_current and rows.len > 0) {
+            model_start = n;
+            model_end = n + rows.len;
+        }
+        const selected = selectedRowIn(self, entry.path);
+        for (rows, 0..) |row, index| {
+            items[n] = itemFor(row, @intCast(repo_index), index, selected, self.scm_collapsed);
             n += 1;
         }
     }
-    const item_rows = if (model_start > 0) items[model_start..n] else items[n..n];
+    const item_rows = if (model_start > 0) items[model_start..model_end] else items[n..n];
     applyScmPending(self, model.rows, item_rows);
 
     const branch: []const u8 = if (model.head.detached)
@@ -708,22 +775,24 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
             self.scm_selected_row = null;
             self.metal_dirty = true;
         },
-        .open_row => |index| {
+        .open_row => |ref| {
+            // **어느 저장소의 몇 번째 행인가**(②d). 저장소마다 모델이 따로 서므로 인덱스만으로는
+            // 남의 파일을 연다.
+            const repo = repoPathAt(self, ref.repo_index) orelse return;
             var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
             var scratch: [std.fs.max_path_bytes]u8 = undefined;
-            const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
-            if (index >= model.rows.len) return;
-            switch (model.rows[index]) {
+            const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse return;
+            if (ref.model_index >= model.rows.len) return;
+            switch (model.rows[ref.model_index]) {
                 .file => |file| {
-                    self.scm_selected_row = index;
-                    self.metal_dirty = true;
-                    git_ops.openDiffForScmRow(self, file);
+                    selectRow(self, repo, ref.model_index);
+                    git_ops.openDiffForScmRow(self, repo, file);
                 },
                 .section, .more, .notice => {},
             }
         },
-        .row_action => |index| submitRowWrite(self, index),
-        .section_action => |section| submitSectionWrite(self, section),
+        .row_action => |ref| submitRowWrite(self, ref),
+        .section_action => |ref| submitSectionWrite(self, ref),
         // 좌표가 필요한 intent다 — 여기서는 **어느 저장소인지**만 세우고 caret은 `focusCommitAt`이 놓는다
         // (그쪽만 클릭 지점을 안다). 좌표 없이 온 경우(테스트·키보드)는 글 끝에 붙는다.
         .commit_focus => |index| if (repoPathAt(self, index)) |repo| focusCommitRepo(self, repo),
@@ -975,12 +1044,13 @@ fn applyScmPending(self: *AppSession, rows: []const scm_view.Row, items: []compo
 
 /// 행 하나의 `+`/`−`. **모델 인덱스는 다시 조회한다** — intent가 든 것은 인덱스뿐이고 그 사이 목록이
 /// 갱신됐을 수 있다(늦은 클릭이 엉뚱한 파일을 스테이지하지 않게. `open_row`와 같은 규율이다).
-fn submitRowWrite(self: *AppSession, index: u32) void {
+fn submitRowWrite(self: *AppSession, ref: component.ids.RowRef) void {
+    const repo = repoPathAt(self, ref.repo_index) orelse return;
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
-    if (index >= model.rows.len) return;
-    const row = switch (model.rows[index]) {
+    const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse return;
+    if (ref.model_index >= model.rows.len) return;
+    const row = switch (model.rows[ref.model_index]) {
         .file => |file| file,
         .section, .more, .notice => return,
     };
@@ -991,11 +1061,27 @@ fn submitRowWrite(self: *AppSession, index: u32) void {
         .none => return,
     };
     const paths = [_][]const u8{row.path};
-    if (!submitWrite(self, kind, &paths)) return;
+    if (!submitWrite(self, repo, kind, &paths)) return;
 
     // **낙관적 반영**(§7): 화면은 즉시 바뀐다. 안 그러면 100 ms 남짓 아무 일도 안 일어나 두 번 누르게
     // 되고, 두 번째 클릭은 in-flight라 흘려져 "안 눌렸다"로 읽힌다. 낙관은 **이 행 하나**에만 건다.
     setScmPending(self, row.path, row.section);
+}
+
+/// 강조할 행을 세운다. **저장소와 함께** 든다(②d) — 인덱스만 들면 다른 저장소의 같은 번호 행이
+/// 함께 강조된다.
+fn selectRow(self: *AppSession, repo: []const u8, index: u32) void {
+    if (self.scm_selected_repo) |old| self.allocator.free(old);
+    self.scm_selected_repo = self.allocator.dupe(u8, repo) catch null;
+    self.scm_selected_row = index;
+    self.metal_dirty = true;
+}
+
+/// 방금 건 쓰기가 **어느 저장소로 갔는가**. 끝난 뒤 그 저장소를 다시 읽어야 화면이 사실을 따라간다 —
+/// 활성 저장소면 목록 읽기가, 아니면 그 머리 줄 읽기가 그 일을 한다.
+fn rememberWriteRepo(self: *AppSession, repo: []const u8) void {
+    if (self.scm_write_repo) |old| self.allocator.free(old);
+    self.scm_write_repo = self.allocator.dupe(u8, repo) catch null;
 }
 
 /// 낙관적으로 옮길 행을 기억한다. 경로는 **복사한다** — 모델 버퍼는 프레임마다 다시 만들어진다.
@@ -1015,11 +1101,12 @@ pub fn clearScmPending(self: *AppSession) void {
 
 /// 섹션 헤더의 일괄 `+`/`−`. **방향은 host가 지금 상태로 다시 정한다**(intent가 방향을 싣지 않는 이유 —
 /// published tree와 host 상태가 어긋날 수 있다).
-fn submitSectionWrite(self: *AppSession, section: component.types.Section) void {
+fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
+    const repo = repoPathAt(self, ref.repo_index) orelse return;
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
-    const target = switch (section) {
+    const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse return;
+    const target = switch (ref.section) {
         .staged => scm_view.Section.staged,
         .changes => scm_view.Section.changes,
     };
@@ -1029,15 +1116,13 @@ fn submitSectionWrite(self: *AppSession, section: component.types.Section) void 
     };
     // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
     // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
-    _ = submitWrite(self, kind, &.{});
+    _ = submitWrite(self, repo, kind, &.{});
 }
 
 /// 쓰기 하나를 건다. **in-flight 하나**(§6) — 도는 동안 눌린 것은 흘린다(큐를 쌓으면 오래된 클릭이
 /// 뒤늦게 저장소를 바꾼다).
-fn submitWrite(self: *AppSession, kind: git_write_command.Kind, paths: []const []const u8) bool {
+fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8) bool {
     if (self.scm_write_inflight != 0) return false;
-    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return false;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
@@ -1046,6 +1131,7 @@ fn submitWrite(self: *AppSession, kind: git_write_command.Kind, paths: []const [
     self.scm_write_seq += 1;
     if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq)) return false;
     self.scm_write_inflight = self.scm_write_seq;
+    rememberWriteRepo(self, repo);
     clearScmWriteError(self);
     self.metal_dirty = true;
     return true;
@@ -1078,6 +1164,15 @@ pub fn drainScmWrite(self: *AppSession) void {
         self.scm_write_error = writeErrorText(self, taken);
     }
     // 쓰기가 끝난 **뒤** 한 번 읽는다(§6-1 — 쓰기마다 읽기를 걸면 `+`를 빠르게 누를 때 프로세스가 줄줄이 뜬다).
+    // **어느 저장소를 읽느냐**가 ②d에서 갈린다: 비활성 저장소에 쓴 것이면 목록 읽기(활성 저장소)는
+    // 그 사실을 모르므로 그 저장소의 머리 줄 읽기를 낡았다고 표시한다.
+    if (self.scm_write_repo) |repo| {
+        const current = self.git_repo orelse "";
+        if (!std.mem.eql(u8, repo, current)) {
+            markRepoStatusStaleFor(self, repo);
+            return;
+        }
+    }
     git_ops.refreshGitStatus(self);
 }
 
@@ -1234,7 +1329,7 @@ test "스크롤한 창에서도 intent는 모델 인덱스를 싣는다" {
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, index, null, @splat(false));
+        item.* = itemFor(row, 0, index, null, @splat(false));
     }
 
     // 창이 2번째 행부터 시작한다고 하자(앞 둘은 스크롤아웃).
@@ -1255,7 +1350,7 @@ test "낙관적 반영: 그 행만 옮기고 개수·증감·동작은 낙관하
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, index, null, @splat(false));
+        item.* = itemFor(row, 0, index, null, @splat(false));
     }
     // 낙관 없이는 원래 자리다.
     try testing.expectEqualStrings("moving.zig", items[3].file.name);
@@ -1292,7 +1387,7 @@ test "낙관적 반영: 도착 그룹이 화면에 없으면 옮기지 않는다
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, index, null, @splat(false));
+        item.* = itemFor(row, 0, index, null, @splat(false));
     }
 
     var session: AppSession = undefined;
@@ -1639,12 +1734,11 @@ pub fn submitCommit(self: *AppSession) void {
 /// **그 저장소로** 커밋한다(②b — 버튼이 어느 저장소인지 실어 온다).
 pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     if (self.scm_write_inflight != 0) return; // 쓰기는 하나씩(§6-2)
-    // **활성 저장소가 아니면 지금은 커밋하지 않는다.** 스테이지 여부·메시지 판정이 그 저장소의 목록
-    // 읽기에서 나오는데, 비활성 저장소는 머리 줄 요약(개수)만 있다 — 그 상태로 커밋을 걸면 "무엇을
-    // 커밋하는지" 모르는 채 실행하는 것이다. 그 저장소를 보면(터미널이 그리로 가면) 켜진다.
-    const current = self.git_repo orelse return;
-    if (!std.mem.eql(u8, current, repo_path)) {
-        setScmWriteNotice(self, "그 저장소를 먼저 여세요");
+    // **무엇을 커밋하는지 화면에 있으면 실행한다**(②d — 사용자 결정 2026-08-17). 판정의 출처는 그
+    // 저장소의 `status`이고, 파일 줄도 그 출력에서 나온다. 아직 그 저장소를 못 읽었을 때만 막는다:
+    // 그때는 스테이지 여부도 목록도 모르므로 "무엇을 커밋하는지" 모르는 채 실행하는 것이 된다.
+    if (repoStatusTextFor(self, repo_path) == null and !isCurrentRepo(self, repo_path)) {
+        setScmWriteNotice(self, "그 저장소를 아직 읽지 못했습니다");
         return;
     }
     // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
@@ -1656,7 +1750,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     }
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return;
+    const model = modelForRepo(self, repo_path, &rows_buf, &scratch) orelse return;
     if (!model.has_staged) {
         // **감추지 않고 이유를 말한다.** 버튼은 꺼진 색이지만 눌리기는 하므로, 눌렀는데 아무 일도
         // 없으면 사용자는 앱이 멈춘 줄 안다.
@@ -1674,8 +1768,9 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
-    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse return;
+    // **그 상자의 저장소로 간다**(②b·②d) — 활성 저장소를 다시 구하면 화면에 보이는 상자와 커밋되는
+    // 곳이 갈린다.
+    const repo = repo_path;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
@@ -1685,6 +1780,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         return;
     }
     self.scm_write_inflight = self.scm_write_seq;
+    rememberWriteRepo(self, repo);
     self.scm_commit_inflight = true;
     self.scm_commit_started_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
     clearScmWriteError(self);
@@ -1885,6 +1981,7 @@ fn dropStaleRepoStatus(self: *AppSession) void {
         }
         self.allocator.free(entry.path);
         self.allocator.free(entry.branch);
+        if (entry.status_text.len > 0) self.allocator.free(entry.status_text);
         _ = self.scm_repo_status.orderedRemove(index);
     }
 }
@@ -2029,6 +2126,17 @@ pub fn repoStatusFor(self: *const AppSession, path: []const u8) ?app_session_mod
 /// 목록 갱신 시점(뷰 진입·창 포커스·`.git` 이벤트)에 **전부 낡았다고 표시**한다. 지우지 않는 이유는
 /// 지운 값을 다시 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
 /// 보여 주다 조용히 바뀌는 편이 낫다(그 값은 방금 전 사실이다).
+/// 그 저장소 **하나만** 낡았다고 표시한다(쓰기가 끝난 뒤 — 그 줄만 사실이 바뀌었다).
+pub fn markRepoStatusStaleFor(self: *AppSession, repo: []const u8) void {
+    for (self.scm_repo_status.items) |*entry| {
+        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        entry.stale = true;
+        // 실패 backoff는 성공한 읽기에는 걸리지 않는다 — 여기서 되돌릴 것도 없다.
+        self.metal_dirty = true;
+        return;
+    }
+}
+
 pub fn markRepoStatusStale(self: *AppSession) void {
     for (self.scm_repo_status.items) |*entry| entry.stale = true;
 }
@@ -2094,12 +2202,20 @@ pub fn drainRepoStatus(self: *AppSession) void {
 
     const summary = maru.session.scm_repos.summarize(taken.text);
     const branch_copy = self.allocator.dupe(u8, summary.branch) catch return;
+    // **status 텍스트도 든다**(②d) — 그 저장소를 펼치면 이 출력으로 파일 줄을 세운다(추가 프로세스 없이).
+    // 상한을 넘으면 비워 둔다: 요약은 이미 뽑았고, 그 저장소를 열면 목록 읽기가 다시 읽는다.
+    const status_copy: []u8 = if (taken.text.len <= app_session_mod.scm_repo_status_text_max)
+        (self.allocator.dupe(u8, taken.text) catch &.{})
+    else
+        &.{};
     for (self.scm_repo_status.items) |*entry| {
         if (!std.mem.eql(u8, entry.path, taken.repo)) continue;
         self.allocator.free(entry.branch);
+        if (entry.status_text.len > 0) self.allocator.free(entry.status_text);
         entry.* = .{
             .path = entry.path,
             .branch = branch_copy,
+            .status_text = status_copy,
             .detached = summary.detached,
             .count = summary.count,
             .ahead = summary.ahead,
@@ -2113,10 +2229,12 @@ pub fn drainRepoStatus(self: *AppSession) void {
     // 새 항목. 상한은 목록 상한과 같다 — 목록에 없는 저장소를 기억할 이유가 없다.
     if (self.scm_repo_status.items.len >= maru.session.scm_repos.max_entries) {
         self.allocator.free(branch_copy);
+        if (status_copy.len > 0) self.allocator.free(status_copy);
         return;
     }
     const path_copy = self.allocator.dupe(u8, taken.repo) catch {
         self.allocator.free(branch_copy);
+        if (status_copy.len > 0) self.allocator.free(status_copy);
         return;
     };
     self.scm_repo_status.append(self.allocator, .{
@@ -2128,9 +2246,11 @@ pub fn drainRepoStatus(self: *AppSession) void {
         .behind = summary.behind,
         .has_ab = summary.has_ab,
         .read_ns = now,
+        .status_text = status_copy,
     }) catch {
         self.allocator.free(path_copy);
         self.allocator.free(branch_copy);
+        if (status_copy.len > 0) self.allocator.free(status_copy);
         return;
     };
     self.metal_dirty = true;
@@ -2144,6 +2264,11 @@ fn recordRepoStatusFailure(self: *AppSession, repo: []const u8, now: i128) void 
         entry.failed = true;
         entry.stale = false;
         entry.read_ns = now;
+        // **옛 목록은 버린다.** 못 읽은 저장소의 지난 파일 줄을 계속 그리면 화면이 지금 사실을 말하지 않는다.
+        if (entry.status_text.len > 0) {
+            self.allocator.free(entry.status_text);
+            entry.status_text = &.{};
+        }
         self.metal_dirty = true;
         return;
     }

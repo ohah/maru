@@ -16,6 +16,8 @@ pub const ssh = struct {
     pub const kexinit = @import("session/ssh/kexinit.zig");
     /// curve25519 키 교환(RFC 8731 + RFC 5656 §4) — 공유 비밀·교환 해시 H·키 유도.
     pub const kex = @import("session/ssh/kex.zig");
+    /// `chacha20-poly1305@openssh.com` — 패킷 암호화·인증(명세 워크드 예제로 못박았다).
+    pub const cipher = @import("session/ssh/cipher.zig");
     // **sans-io 경계는 `tests/boundary/ssh_sans_io.zig` 가 강제한다** — 이 디렉터리를 직접 훑어
     // `std.<X>` 를 허용 목록으로 건다. 여기 안에 두면 스캐너가 자기 자신을 스캔하게 되고,
     // 등록 목록으로 세던 앞선 판정자가 그래서 무력했다(그 파일 머리 주석에 실측을 적어 뒀다).

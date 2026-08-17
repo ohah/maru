@@ -483,7 +483,7 @@ pub const inventory = [_]Proof{
     // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
     // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
     // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4681e40a7ed8276779c13c4a060be9423f0497dc00eaaaaaacbae3df45c0b8f2" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f9cbf35b8c4ce0ee7d730ebb1cb74da91c3603f50aee9265159b8f7d25737d5c" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -553,6 +553,8 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
+    // P4 적대적 검증: 커밋 상자 소유권 판정이 **탭까지** 보고(`scmCommitOwnsInput`), 저장소가 갈리면
+    // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
     // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8322776b5b1e1bbc2691844386da20262492b52b79c7975cf45206e6dff7e651" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "5e134e48ea0c610971481701751d34832a8351bf093e20cbf5d5c460b9d2643a" },
 };

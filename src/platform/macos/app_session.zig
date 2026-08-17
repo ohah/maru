@@ -10084,7 +10084,10 @@ pub const AppSession = struct {
                 // 아래 트리 조작은 **탐색기 전용**이다. 다른 뷰에서 좌표만 같다고 타면 소스 컨트롤 행을 누른 것이
                 // 폴더 선택 다이얼로그가 되고(실측), 트리 포커스도 뺏는다 — setDockView가 뷰를 바꿀 때 그 포커스를
                 // 놓는 것과 모순된다. 도크 안이라는 사실만으로 클릭을 소비하는 건 아래 dock rect 분기가 한다.
-                if (self.dock.view == .source_control) {
+                // **도크 안일 때만 소비한다.** 좌표를 안 보면 도크가 열려 있는 동안 창의 **모든** primary
+                // down이 여기서 끝나, 탭 바를 눌러도 탭이 안 바뀌고 터미널 선택도 시작되지 않는다
+                // (사용자 보고 2026-08-17 — 에이전트 뷰는 처음부터 `dg.dock`으로 감싸 있었다).
+                if (self.dock.view == .source_control and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // **published tree 하나가 히트테스트를 소유한다**(P1b). 예전에는 여기서 행 높이를
                     // 다시 곱해 좌표를 인덱스로 바꿨는데, 그 산술이 렌더와 갈리는 순간 누른 것과 열리는
                     // 것이 어긋났다.
@@ -54831,6 +54834,36 @@ test "소스 컨트롤: 커서가 자리를 말한다(상자=I-beam·저장소 �
     const box = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
     const header_y = @as(f64, @floatFromInt(content.y)) + box.y - 4;
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(inside.x, header_y, 0));
+}
+
+test "소스 컨트롤 도크가 열려 있어도 탭 바 클릭은 탭을 바꾼다" {
+    // **도크 밖 클릭까지 소비하던 자리다**(사용자 보고 2026-08-17: "오른쪽 워크트리 나왔을 땐 탭 전환이
+    // 안 된다"). 다운 경로의 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서, 도크가 열려 있는 동안
+    // 창의 **모든** primary down이 거기서 끝났다 — 에이전트 뷰는 처음부터 `dg.dock`으로 감싸 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // Term 둘(활성 = 1).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
+
+    // 소스 컨트롤 도크를 연다.
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    // 도크 **밖**(탭 바)을 누르면 그 클릭은 탭이 받는다.
+    const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1;
+    const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30);
+    session.mouse(1, left_tab_x, bar_y, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term);
 }
 
 test "소스 컨트롤: 커밋 상자를 누르면 키가 그리로 간다 (P3c)" {

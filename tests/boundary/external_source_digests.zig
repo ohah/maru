@@ -462,6 +462,8 @@ pub const inventory = [_]Proof{
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     // ②b 적대적 5회차: 저장소 요약 캐시에 **실패**(`failed`·`read_ns`)를 기록하면서 이 파일의 구조체와
     // 새 판정 테스트가 움직인다. count는 2 그대로다.
+    // 클릭 범위 수정(사용자 보고 2026-08-17): 소스 컨트롤 도크의 다운 처리가 `dg.dock` 안일 때만
+    // 소비하도록 좌표 가드를 더하고 그 회귀 테스트가 붙어 digest가 움직인다. count는 2 그대로다.
     // P3d-②d: 행·그룹 intent가 저장소를 싣게 되면서(`RowRef`) 이 파일의 테스트와 강조 상태
     // (`scm_selected_repo`)가 함께 움직인다. count는 2 그대로다.
     // 커서·호버 계약(2026-08-17 사용자 지적): 커서를 component가 선언하게 하고(`cursor`) host는 옮기기만
@@ -475,7 +477,11 @@ pub const inventory = [_]Proof{
     // 테스트가 붙어 digest가 움직인다(2026-08-17 사용자 제보 — "도크의 클릭 이벤트가 안 되는 영역을 누르면
     // 터미널 블록 이벤트가 잡힌다"). up·move 의 도크 판정 rect 를 down 과 맞춘 것(`tree_content` → `dock`)도
     // 같은 커밋이다. count는 2 그대로다 — 반사 접근이나 Client 구성은 건드리지 않고 포인터 라우팅만 바꿨다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b1d2e018a5187b80d37e3fd9957897f47f4ddc080d79f43ac444819d91c25db9" },
+    //
+    // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
+    // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
+    // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f38192ecf29b268c2111932f27028f5f49384617cf681da511effc0d45a8f42d" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

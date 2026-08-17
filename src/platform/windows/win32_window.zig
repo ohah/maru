@@ -78,6 +78,20 @@ const ATOM = u16;
 
 const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
 
+comptime {
+    // **Win32 구조체는 크기가 계약이다.** `RegisterClassExW`는 `cbSize`로 버전을 판별하고, `WM_NCCREATE`의
+    // `lParam`은 우리 선언에 맞춰 읽는다. 필드를 하나 빠뜨리거나 순서를 바꿔도 **컴파일은 되고** 런타임에
+    // 조용히 어긋난다 — 특히 `CREATESTRUCTW`는 첫 필드만 읽으므로 뒤쪽이 틀려도 안 드러난다.
+    // 공개 헤더가 정한 x64 크기를 여기 못 박는다. comptime이라 **Windows 러너 없이** 모든 타깃에서 돈다.
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(WNDCLASSEXW) == 80);
+        std.debug.assert(@sizeOf(CREATESTRUCTW) == 80);
+        std.debug.assert(@sizeOf(MSG) == 48);
+        std.debug.assert(@sizeOf(RECT) == 16);
+        std.debug.assert(@sizeOf(POINT) == 8);
+    }
+}
+
 const WNDCLASSEXW = extern struct {
     cbSize: UINT,
     style: UINT,

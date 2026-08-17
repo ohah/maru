@@ -11,6 +11,10 @@
 //! (`pendingClipboardWrite`·`clipboardReadPending`), 플랫폼이 정책을 확인한 뒤 배수한다. 코어가 OS를
 //! 직접 만지지 않는 것이 그 설계이고, 이 파일이 Windows 쪽 배수구다.
 //!
+//! 읽기 정책은 `osc52.read`이고 **기본값이 `deny`**다(`config/theme.zig` — 원격 프로그램의 로컬 클립보드
+//! 탈취를 막는 사용자 결정). 쓰기는 하드코딩 allow다. 정책 판정은 호출자(플랫폼 호스트)가 하고 이 파일은
+//! OS 호출만 안다.
+//!
 //! ## 형식은 `CF_UNICODETEXT` 하나만 쓴다
 //!
 //! `CF_TEXT`(ANSI 코드페이지)는 비영문을 잃는다 — 이 기계의 ACP가 949(한국어)라 UTF-8 바이트를 그대로

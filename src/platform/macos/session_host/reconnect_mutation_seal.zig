@@ -129,6 +129,33 @@ pub const MutationOwner = struct {
         };
     }
 
+    /// CR4c publication suffix만 사용하는 allocation/callback-free 전환이다. 새 shell이
+    /// stable screen에 게시되기 전에는 preflight만 수행하고, 게시 뒤에는 같은 값으로
+    /// no-fail commit하여 old generation의 sealed lease가 다시 열리지 않게 한다.
+    pub fn preflightReopen(
+        self: *const MutationOwner,
+        shell_generation: u64,
+        input_epoch: u64,
+    ) !void {
+        try self.validateOwner();
+        if ((self.lifecycle != .sealed_clean and self.lifecycle != .sealed_ambiguous) or
+            self.active_leases != 0 or shell_generation <= self.shell_generation or
+            input_epoch <= self.input_epoch)
+            return error.InvalidAuthority;
+    }
+
+    pub fn reopenNoFail(
+        self: *MutationOwner,
+        shell_generation: u64,
+        input_epoch: u64,
+    ) void {
+        self.preflightReopen(shell_generation, input_epoch) catch
+            @panic("CR4c mutation reopen authority drifted after preflight");
+        self.shell_generation = shell_generation;
+        self.input_epoch = input_epoch;
+        self.lifecycle = .open;
+    }
+
     pub fn admits(
         self: *const MutationOwner,
         shell_generation: u64,
@@ -175,6 +202,19 @@ test "CR4b mutation owner는 seal 동안 새 mutation을 막고 기존 lease dra
     try owner.finishMutation(&lease);
     try std.testing.expectEqual(SealProgress.ready, try owner.beginSeal(2, 7));
     try std.testing.expectEqual(SealResult.sealed_clean, try owner.finishSeal(.clean));
+    try std.testing.expect(!owner.admits(2, 7));
+}
+
+test "CR4c mutation owner는 sealed generation을 더 큰 shell과 epoch로만 다시 연다" {
+    var owner: MutationOwner = .{};
+    try owner.initInPlace(2, 7);
+    try std.testing.expectEqual(SealProgress.ready, try owner.beginSeal(2, 7));
+    try std.testing.expectEqual(SealResult.sealed_clean, try owner.finishSeal(.clean));
+    try std.testing.expectError(error.InvalidAuthority, owner.preflightReopen(2, 8));
+    try std.testing.expectError(error.InvalidAuthority, owner.preflightReopen(3, 7));
+    try owner.preflightReopen(3, 8);
+    owner.reopenNoFail(3, 8);
+    try std.testing.expect(owner.admits(3, 8));
     try std.testing.expect(!owner.admits(2, 7));
 }
 

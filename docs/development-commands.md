@@ -336,6 +336,24 @@ Maru 작업에서 사용하는 기본 명령이다.
   local mutation 권위가 없는 quarantined `controller_evidenced` receipt로 바꾼다. conflict는 usable Client를 보존하고,
   response-loss/pre-takeover failure는 Client를 fail-close한 뒤 candidate를 정산한다. CR4c RemoteGeneration publication,
   cleanup-binding/controller role promotion, forced resize와 input은 아직 완료하지 않는다.
+- 영속 세션 호스트 CR4c C1 controller-binding promotion gate: `zig build test-session-host-cr4c-c1`. CR4b를 상속하고
+  Debug·ReleaseFast actual backend job에서 `controller_evidenced` observer의 cleanup registry RPC identity, transport binding,
+  attachment-local role을 같은 controller generation으로 final-address 승격한다. success 뒤에도 stable shell은 unavailable이고
+  mutation seal과 candidate ownership은 유지되며 public input은 Unauthorized, generation publication·forced resize·reclaim은 0이다.
+  C2의 candidate 전용 forced-first-resize, CR3c stable screen+RemoteGeneration publication, 새 generation input과 ordered reclaim은
+  이 C1 gate의 완료 증거가 아니다.
+- 영속 세션 호스트 CR4c C2 publication gate: `zig build test-session-host-cr4c-c2`. C1을 상속하고 Debug·ReleaseFast마다
+  actual manifest/socket backend 행 2개, publication proof-loss subprocess 1개, actual socket forced-resize matrix 1개,
+  mutation reopen 행 1개와 source boundary 1개를
+  exact-count한다. success는 현재 local
+  viewport forced resize 뒤 RemoteGeneration+stable screen을 게시하고 reconnect executor와 mutation owner를 같은 새 shell
+  generation으로 전진시킨 다음 controller evidence, retiring RemoteGeneration, retired Client 순서로 정산하며 public input을
+  새 generation에서 실제 전송한다. expired resize는 candidate/controller stage를 소비하고 새 Client를 fail-close하되 이미
+  봉인된 mutation digest와 unavailable shell을 보존한다. umbrella `zig build test-session-host-cr4c`는 이 gate를 상속한다.
+  actual socket matrix는 success/stale/wrong-size/EOF/OOM과 exact poison provenance를 구분한다. publication suffix의
+  controller-generation drift는 실제 host job subprocess에서 common proof-loss exit 86으로 끝나고, 자식 process group과
+  manifest/socket artifact를 부모가 유계 정산한다. 이 gate가 green이어도 실제 AppKit 수동 사용과 다중 runtime/Window는
+  각각 CR6/CR5 전까지 완료로 세지 않는다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

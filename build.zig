@@ -4512,6 +4512,123 @@ pub fn build(b: *std.Build) void {
         session_host_cr4b_step.dependOn(&run_cr4b_boundary_tests.step);
         boundary_step.dependOn(&run_cr4b_boundary_tests.step);
     }
+    const session_host_cr4c_c1_step = b.step(
+        "test-session-host-cr4c-c1",
+        "CR4c C1 unpublished controller binding promotion gates",
+    );
+    session_host_cr4c_c1_step.dependOn(session_host_cr4b_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4c_c1_optimize| {
+        const cr4c_c1_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr4c_c1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4c C1 actual host job은"},
+        });
+        const run_cr4c_c1_backend_tests = b.addRunArtifact(cr4c_c1_backend_tests);
+        run_cr4c_c1_backend_tests.addArg("--maru-expect-tests=1");
+        run_cr4c_c1_backend_tests.setCwd(b.path("."));
+        session_host_cr4c_c1_step.dependOn(&run_cr4c_c1_backend_tests.step);
+
+        const cr4c_c1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr4c_c1_boundary.zig"),
+                .target = target,
+                .optimize = cr4c_c1_optimize,
+            }),
+            .filters = &.{"CR4c C1 경계는"},
+        });
+        const run_cr4c_c1_boundary_tests = b.addRunArtifact(cr4c_c1_boundary_tests);
+        run_cr4c_c1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr4c_c1_boundary_tests.setCwd(b.path("."));
+        session_host_cr4c_c1_step.dependOn(&run_cr4c_c1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr4c_c1_boundary_tests.step);
+    }
+    const session_host_cr4c_c2_step = b.step(
+        "test-session-host-cr4c-c2",
+        "CR4c C2 forced resize, generation publication, input and ordered reclaim gates",
+    );
+    session_host_cr4c_c2_step.dependOn(session_host_cr4c_c1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4c_c2_optimize| {
+        const cr4c_c2_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr4c_c2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4c C2 actual host job은"},
+        });
+        const run_cr4c_c2_backend_tests = b.addRunArtifact(cr4c_c2_backend_tests);
+        run_cr4c_c2_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr4c_c2_backend_tests.setCwd(b.path("."));
+        session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_backend_tests.step);
+
+        const cr4c_c2_proof_loss_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr4c_c2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4c C2 publication suffix authority drift는"},
+        });
+        const run_cr4c_c2_proof_loss_tests = b.addRunArtifact(cr4c_c2_proof_loss_tests);
+        run_cr4c_c2_proof_loss_tests.addArg("--maru-expect-tests=1");
+        run_cr4c_c2_proof_loss_tests.setCwd(b.path("."));
+        session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_proof_loss_tests.step);
+
+        const cr4c_c2_socket_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr4c_c2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR4c C2 actual socket forced resize는"},
+        });
+        const run_cr4c_c2_socket_tests = b.addRunArtifact(cr4c_c2_socket_tests);
+        run_cr4c_c2_socket_tests.addArg("--maru-expect-tests=1");
+        run_cr4c_c2_socket_tests.setCwd(b.path("."));
+        session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_socket_tests.step);
+
+        const cr4c_c2_mutation_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_mutation_seal.zig"),
+                .target = target,
+                .optimize = cr4c_c2_optimize,
+            }),
+            .filters = &.{"CR4c mutation owner는"},
+        });
+        const run_cr4c_c2_mutation_tests = b.addRunArtifact(cr4c_c2_mutation_tests);
+        run_cr4c_c2_mutation_tests.addArg("--maru-expect-tests=1");
+        session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_mutation_tests.step);
+
+        const cr4c_c2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr4c_c2_boundary.zig"),
+                .target = target,
+                .optimize = cr4c_c2_optimize,
+            }),
+            .filters = &.{"CR4c C2 경계는"},
+        });
+        const run_cr4c_c2_boundary_tests = b.addRunArtifact(cr4c_c2_boundary_tests);
+        run_cr4c_c2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr4c_c2_boundary_tests.setCwd(b.path("."));
+        session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_boundary_tests.step);
+        boundary_step.dependOn(&run_cr4c_c2_boundary_tests.step);
+    }
+    const session_host_cr4c_step = b.step(
+        "test-session-host-cr4c",
+        "CR4c controller promotion, forced resize, generation publication and reclaim gates",
+    );
+    session_host_cr4c_step.dependOn(session_host_cr4c_c2_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -4946,6 +5063,11 @@ pub fn build(b: *std.Build) void {
                 });
                 const run = bld.addRunArtifact(artifact);
                 run.addArg(bld.fmt("--maru-expect-tests={d}", .{expected}));
+                if (std.mem.eql(u8, filter, "C3-3b5 remote backend"))
+                    run.setEnvironmentVariable(
+                        "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
+                        "skip-in-aggregate-v1",
+                    );
                 if (std.mem.eql(u8, filter, "C3-3b6 proof-loss subprocess"))
                     run.setEnvironmentVariable("MARU_C3B6_PROOF_LOSS", "fresh-artifact-v1");
                 run.setCwd(bld.path("."));
@@ -5078,7 +5200,15 @@ pub fn build(b: *std.Build) void {
         // 실제 daemon을 띄우는 행은 같은 머신의 socket/process 자원을 다투지 않게 최적화 모드까지 직렬화한다.
         if (previous_actual_host_run) |previous|
             run_event_c3_3b5_remote_backend_tests.dependOn(previous);
-        previous_actual_host_run = run_event_c3_3b5_remote_backend_tests;
+        const run_event_c3_3b5_multihost_tests = B3SettlementTest.addRun(
+            b,
+            session_host_2c3d_c3_3b5_step,
+            event_c3_3b5_remote_backend_module,
+            "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending target까지 routing을 일괄 게시한다",
+            1,
+        );
+        run_event_c3_3b5_multihost_tests.dependOn(run_event_c3_3b5_remote_backend_tests);
+        previous_actual_host_run = run_event_c3_3b5_multihost_tests;
         const event_c3_3b5_close_graph_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/pending_term_close_graph.zig"),
             .target = target,

@@ -90,6 +90,7 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var app_quit_runtime_count_at_owner_settlement: usize = 0;
     threadlocal var app_quit_pending_idle_count: usize = 0;
     threadlocal var app_quit_source_zero_count: usize = 0;
+    threadlocal var cr4c_publication_drift: bool = false;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -121,6 +122,7 @@ const HostReconnectJobState = enum(u8) {
     authority_conflict = 9,
     takeover_sent_unknown = 10,
     pre_takeover_failed = 11,
+    controller_promoted = 12,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -252,6 +254,7 @@ const HostReconnectJob = struct {
             @intFromEnum(HostReconnectJobState.authority_conflict),
             @intFromEnum(HostReconnectJobState.takeover_sent_unknown),
             @intFromEnum(HostReconnectJobState.pre_takeover_failed),
+            @intFromEnum(HostReconnectJobState.controller_promoted),
             => true,
             else => false,
         };
@@ -449,7 +452,9 @@ const HostReconnectJob = struct {
                     ) or self.controller_generation != 0) return false;
                 }
             },
-            @intFromEnum(HostReconnectJobState.controller_evidenced) => {
+            @intFromEnum(HostReconnectJobState.controller_evidenced),
+            @intFromEnum(HostReconnectJobState.controller_promoted),
+            => {
                 if (self.client != null or self.runtime_handle == 0 or self.runtime_addr == 0 or
                     self.runtime_generation == 0 or self.replacementLifecycleRaw() !=
                     @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published) or
@@ -471,7 +476,16 @@ const HostReconnectJob = struct {
                     actual_mutation,
                     self.mutation_digest,
                 )) return false;
-                if (!RemoteRuntime.backend_api.validateReconnectControllerEvidence(
+                if (self.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced)) {
+                    if (!RemoteRuntime.backend_api.validateReconnectControllerEvidence(
+                        entry.runtime,
+                        adapter,
+                        &self.replacement,
+                        @constCast(&self.reconnect),
+                        self.stage.?,
+                        self.controller_generation,
+                    )) return false;
+                } else if (!RemoteRuntime.backend_api.validateReconnectPromotedController(
                     entry.runtime,
                     adapter,
                     &self.replacement,
@@ -520,7 +534,7 @@ const HostReconnectJob = struct {
                     self.runtime_generation == 0 or self.replacementLifecycleRaw() !=
                     @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published) or
                     !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
-                    self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0))
+                    self.stage != null or self.controller_generation != 0)
                     return false;
                 const failure_reason = self.candidateFailureReason() orelse return false;
                 const entry = backend.runtimes.get(self.runtime_handle) orelse return false;
@@ -532,6 +546,15 @@ const HostReconnectJob = struct {
                     return false;
                 adapter.preflightPublishedClientReplacement(&self.replacement) catch return false;
                 adapter.preflightAttachmentConnectionFailedClosed(failure_reason) catch return false;
+                if (!std.mem.allEqual(u8, &self.mutation_digest, 0)) {
+                    const actual_mutation = RemoteRuntime.backend_api.reconnectMutationSealDigest(entry.runtime) orelse
+                        return false;
+                    if (!std.crypto.timing_safe.eql(
+                        process_seal.CleanupSeal,
+                        actual_mutation,
+                        self.mutation_digest,
+                    )) return false;
+                }
             },
             @intFromEnum(HostReconnectJobState.candidate_rejected) => {
                 if (self.client != null or self.runtime_handle == 0 or self.runtime_addr == 0 or
@@ -780,7 +803,8 @@ pub const RemoteTermBackend = struct {
             if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
             if (job.state_raw == @intFromEnum(HostReconnectJobState.candidate_staged) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.mutation_sealed) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced))
+                job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced) or
+                job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted))
             {
                 const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
                 const adapter = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
@@ -788,6 +812,15 @@ pub const RemoteTermBackend = struct {
                     process_seal.fatalIntegrity(.proof_loss);
                 if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced)) {
                     RemoteRuntime.backend_api.abortReconnectControllerEvidence(
+                        entry.runtime,
+                        adapter,
+                        &job.replacement,
+                        &job.reconnect,
+                        job.stage.?,
+                        job.controller_generation,
+                    ) catch process_seal.fatalIntegrity(.proof_loss);
+                } else if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted)) {
+                    RemoteRuntime.backend_api.abortReconnectPromotedController(
                         entry.runtime,
                         adapter,
                         &job.replacement,
@@ -1149,6 +1182,146 @@ pub const RemoteTermBackend = struct {
         );
         self.finishHostReconnectTakeoverOutcome(job, entry, adapter, outcome);
         return outcome;
+    }
+
+    /// CR4c C1 re-keys the already-evidenced observer candidate in place. It deliberately does
+    /// not publish the RemoteGeneration, open the stable mutation owner, resize, or send input.
+    pub fn promoteHostReconnectControllerBinding(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+    ) anyerror!void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.controller_evidenced) or
+            runtime_handle != job.runtime_handle)
+            return error.InvalidHostReconnectJob;
+        const entry = self.runtimes.get(runtime_handle) orelse return error.UnknownSurface;
+        if (@intFromPtr(entry.runtime) != job.runtime_addr or
+            entry.runtime_generation != job.runtime_generation or entry.host_id != job.host_id or
+            entry.host_adapter_generation != job.adapter_generation)
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        self.host_reconnect_preparing = true;
+        defer self.host_reconnect_preparing = false;
+        try RemoteRuntime.backend_api.promoteReconnectControllerEvidence(
+            entry.runtime,
+            adapter,
+            &job.replacement,
+            &job.reconnect,
+            job.stage.?,
+            job.controller_generation,
+        );
+        job.state_raw = @intFromEnum(HostReconnectJobState.controller_promoted);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// CR4c C2: apply the local viewport to the unpublished controller candidate, then publish
+    /// generation/screen, reopen only the new mutation epoch, and reclaim old generation/client
+    /// in remote-first order. A successful return leaves no reconnect job behind.
+    pub fn publishHostReconnectGeneration(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+    ) anyerror!void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.controller_promoted) or
+            runtime_handle != job.runtime_handle)
+            return error.InvalidHostReconnectJob;
+        const entry = self.runtimes.get(runtime_handle) orelse return error.UnknownSurface;
+        if (@intFromPtr(entry.runtime) != job.runtime_addr or
+            entry.runtime_generation != job.runtime_generation or entry.host_id != job.host_id or
+            entry.host_adapter_generation != job.adapter_generation)
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        self.host_reconnect_preparing = true;
+        defer self.host_reconnect_preparing = false;
+
+        const size = RemoteRuntime.backend_api.forceReconnectCandidateResizeUntil(
+            entry.runtime,
+            adapter,
+            &job.replacement,
+            &job.reconnect,
+            job.stage.?,
+            job.controller_generation,
+            job.deadline.?.absolute,
+        ) catch |err| {
+            const reason: @import("client_poison.zig").ConnectionReason = switch (err) {
+                error.OutOfMemory, error.ResourceExhausted => .local_resource_exhausted,
+                error.DeadlineExceeded => .read_timeout,
+                else => .peer_contract_violation,
+            };
+            if (RemoteRuntime.backend_api.validateReconnectPromotedController(
+                entry.runtime,
+                adapter,
+                &job.replacement,
+                &job.reconnect,
+                job.stage.?,
+                job.controller_generation,
+            )) {
+                RemoteRuntime.backend_api.abortReconnectPromotedController(
+                    entry.runtime,
+                    adapter,
+                    &job.replacement,
+                    &job.reconnect,
+                    job.stage.?,
+                    job.controller_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            } else {
+                RemoteRuntime.backend_api.abortReconnectPromotedControllerAfterTerminal(
+                    entry.runtime,
+                    adapter,
+                    &job.replacement,
+                    &job.reconnect,
+                    job.stage.?,
+                    job.controller_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            }
+            const canonical_reason = adapter.failCloseAttachmentConnection(reason) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            job.stage = null;
+            job.controller_generation = 0;
+            job.candidate_failure_reason_raw = @intFromEnum(canonical_reason) + 1;
+            job.state_raw = @intFromEnum(HostReconnectJobState.candidate_failed);
+            job.seal = process_seal.hostReconnectJobSeal(
+                job.pid,
+                job.process_nonce,
+                job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+            if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+            return err;
+        };
+
+        if (builtin.is_test and B5TestState.cr4c_publication_drift) {
+            B5TestState.cr4c_publication_drift = false;
+            job.controller_generation +%= 1;
+        }
+
+        RemoteRuntime.backend_api.publishReconnectPromotedCandidate(
+            entry.runtime,
+            adapter,
+            &job.replacement,
+            &job.reconnect,
+            job.stage.?,
+            job.controller_generation,
+            size,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        job.stage = null;
+        job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+        job.seal = [_]u8{0} ** 32;
+        job.* = .{};
+        self.host_reconnect_job = null;
+        self.allocator.destroy(job);
     }
 
     fn finishHostReconnectTakeoverOutcome(
@@ -3253,6 +3426,10 @@ const Cr4aActualIssuerCandidateCase = enum {
     rejected,
     mutation_sealed,
     controller_evidenced,
+    controller_promoted,
+    controller_published,
+    controller_publish_expired,
+    controller_publication_proof_loss,
     controller_conflict_ledger,
     controller_unknown_ledger,
     controller_pre_failed_ledger,
@@ -3289,7 +3466,7 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
-        _ = c.setsid();
+        if (selected != .controller_publication_proof_loss) _ = c.setsid();
         _ = unsetenv("MARU_SESSION_HOST_TEST_ONESHOT");
         daemon.runSessionHostWithIdentity(std.heap.page_allocator, io, dir, socket, host_id) catch {};
         c._exit(0);
@@ -3332,7 +3509,7 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     );
     try backend_value.claimProductSingleton();
     defer backend_value.deinit();
-    const size = maru.terminal.Size{ .cols = 1, .rows = 1 };
+    const size = maru.terminal.Size{ .cols = 80, .rows = 24 };
     _ = try backend_value.backend().spawn(.{
         .handle = 1,
         .request = .{ .command = "/bin/cat", .size = size },
@@ -3485,6 +3662,8 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     try testing.expectError(error.Busy, backend_value.abortHostReconnectConnect());
     try testing.expectEqual(job, backend_value.host_reconnect_job.?);
     if (selected == .mutation_sealed or selected == .controller_evidenced or
+        selected == .controller_promoted or selected == .controller_published or
+        selected == .controller_publish_expired or selected == .controller_publication_proof_loss or
         selected == .controller_conflict_ledger or selected == .controller_unknown_ledger or
         selected == .controller_pre_failed_ledger)
     {
@@ -3502,7 +3681,10 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
             error.InvalidHostReconnectJob,
             backend_value.sealHostReconnectMutations(1),
         );
-        if (selected == .controller_evidenced) {
+        if (selected == .controller_evidenced or selected == .controller_promoted or
+            selected == .controller_published or selected == .controller_publish_expired or
+            selected == .controller_publication_proof_loss)
+        {
             const outcome = try backend_value.executeHostReconnectTakeover(1);
             switch (outcome) {
                 .new_controller_evidenced => |generation| {
@@ -3520,6 +3702,95 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                 error.InvalidHostReconnectJob,
                 backend_value.executeHostReconnectTakeover(1),
             );
+            if (selected == .controller_promoted or selected == .controller_published or
+                selected == .controller_publish_expired or selected == .controller_publication_proof_loss)
+            {
+                const mutation_before = job.mutation_digest;
+                try backend_value.promoteHostReconnectControllerBinding(1);
+                try testing.expect(job.valid(&backend_value));
+                try testing.expectEqual(
+                    @intFromEnum(HostReconnectJobState.controller_promoted),
+                    job.state_raw,
+                );
+                try testing.expect(std.crypto.timing_safe.eql(
+                    process_seal.CleanupSeal,
+                    mutation_before,
+                    job.mutation_digest,
+                ));
+                try testing.expect(job.reconnect.candidate.active);
+                try testing.expectError(
+                    error.Unauthorized,
+                    backend_value.runtimes.get(1).?.runtime.sendInput("CR4c C1 must stay sealed"),
+                );
+                try testing.expectError(
+                    error.InvalidHostReconnectJob,
+                    backend_value.promoteHostReconnectControllerBinding(1),
+                );
+                if (selected == .controller_published or selected == .controller_publication_proof_loss) {
+                    const runtime = backend_value.runtimes.get(1).?.runtime;
+                    const old_generation = runtime.mutation_owner.shell_generation;
+                    const old_epoch = runtime.input_batches.epoch;
+                    if (selected == .controller_publication_proof_loss)
+                        B5TestState.cr4c_publication_drift = true;
+                    remote_runtime.testing_api.armOrderedReconnectReclaimTrace();
+                    defer remote_runtime.testing_api.disarmOrderedReconnectReclaimTrace();
+                    try backend_value.publishHostReconnectGeneration(1);
+                    try testing.expectEqual(
+                        [_]u8{ 1, 2 },
+                        remote_runtime.testing_api.orderedReconnectReclaimTrace(),
+                    );
+                    try testing.expectEqual(@as(?*HostReconnectJob, null), backend_value.host_reconnect_job);
+                    try testing.expect(runtime.mutation_owner.shell_generation > old_generation);
+                    try testing.expectEqual(old_epoch + 1, runtime.input_batches.epoch);
+                    try testing.expectEqual(
+                        reconnect_mutation_seal.MutationLifecycle.open,
+                        runtime.mutation_owner.lifecycle,
+                    );
+                    try testing.expectEqual(@as(usize, 0), pool.get(host_id).?.slot.retiredClientCount());
+                    try testing.expect(!(try runtime.generation_owner.slot.hasRetiring()));
+                    try runtime.sendInput("CR4c C2 input\n");
+                    return;
+                }
+                if (selected == .controller_publish_expired) {
+                    deadline_clock.now_ns = deadline_expires_at_ns;
+                    try testing.expectError(
+                        error.DeadlineExceeded,
+                        backend_value.publishHostReconnectGeneration(1),
+                    );
+                    try testing.expect(job.valid(&backend_value));
+                    try testing.expectEqual(
+                        @intFromEnum(HostReconnectJobState.candidate_failed),
+                        job.state_raw,
+                    );
+                    try testing.expect(job.stage == null);
+                    try testing.expectEqual(@as(u64, 0), job.controller_generation);
+                    try testing.expect(!std.mem.allEqual(u8, &job.mutation_digest, 0));
+                    try testing.expectEqual(
+                        @intFromEnum(@import("client_poison.zig").ConnectionReason.read_timeout) + 1,
+                        job.candidate_failure_reason_raw,
+                    );
+                    try testing.expectEqual(@as(i32, -1), host_adapter_mod.HostAdapter.testing.rawClient(
+                        pool.get(host_id).?,
+                    ).fd);
+                    const canonical_digest = job.mutation_digest;
+                    const canonical_seal = job.seal;
+                    job.mutation_digest[0] ^= 1;
+                    job.seal = process_seal.hostReconnectJobSeal(
+                        job.pid,
+                        job.process_nonce,
+                        job.sealInput() orelse return error.TestUnexpectedResult,
+                    ) catch return error.TestUnexpectedResult;
+                    try testing.expect(!job.valid(&backend_value));
+                    job.mutation_digest = canonical_digest;
+                    job.seal = canonical_seal;
+                    try testing.expect(job.valid(&backend_value));
+                    try testing.expectError(
+                        error.InvalidHostReconnectJob,
+                        backend_value.publishHostReconnectGeneration(1),
+                    );
+                    return;
+                }
+            }
         } else if (selected == .controller_conflict_ledger or
             selected == .controller_unknown_ledger or selected == .controller_pre_failed_ledger)
         {
@@ -3625,6 +3896,79 @@ test "CR4b actual host job은 staged receipt 뒤 stable mutation을 exact once �
 
 test "CR4b actual host job은 status CAS takeover를 controller evidence로 exact once 봉인한다" {
     try runCr4aActualIssuerReplacementStage(.controller_evidenced);
+}
+
+test "CR4c C1 actual host job은 controller evidence binding을 unpublished candidate에서 승격한다" {
+    try runCr4aActualIssuerReplacementStage(.controller_promoted);
+}
+
+test "CR4c C2 actual host job은 forced resize 뒤 generation을 게시하고 input과 ordered reclaim을 연다" {
+    try runCr4aActualIssuerReplacementStage(.controller_published);
+}
+
+test "CR4c C2 actual host job은 expired forced resize를 fail close하고 sealed mutation을 보존한다" {
+    try runCr4aActualIssuerReplacementStage(.controller_publish_expired);
+}
+
+fn cleanupCr4cPublicationProofLossArtifacts(child_pid: c.pid_t) void {
+    var base_buf: [160]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-cr4-job-{d}", .{child_pid}) catch return;
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return;
+    const host_id: u128 = (@as(u128, @intCast(child_pid)) << 64) | 0x4352344A4F42;
+    var socket_buf: [128]u8 = undefined;
+    if (short_endpoint.currentSocketPathIn(&socket_buf, host_id)) |socket| _ = c.unlink(socket.ptr) else |_| {}
+    var path_buf: [832]u8 = undefined;
+    if (host_manifest.manifestPathIn(&path_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+    if (host_manifest.ownerLockPathIn(&path_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+    var host_dir_buf: [768]u8 = undefined;
+    if (host_manifest.hostDirPathIn(&host_dir_buf, dir, host_id)) |path| _ = c.rmdir(path.ptr) else |_| {}
+    var hosts_buf: [640]u8 = undefined;
+    if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
+    _ = c.rmdir(dir.ptr);
+    _ = c.rmdir(base.ptr);
+}
+
+test "CR4c C2 publication suffix authority drift는 actual host job에서 proof loss로 종료한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (process_seal.currentReadyIdentity()) |_| return error.SkipZigTest else |err| switch (err) {
+        error.NotReady => {},
+        else => return err,
+    }
+    try short_endpoint.prepareCurrentUserNamespace();
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        if (c.setsid() < 0) c._exit(124);
+        runCr4aActualIssuerReplacementStage(.controller_publication_proof_loss) catch c._exit(125);
+        c._exit(87);
+    }
+    var status: c_int = 0;
+    var reaped = false;
+    var attempts: usize = 0;
+    while (attempts < 20_000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, posix.W.NOHANG);
+        if (waited == child) {
+            reaped = true;
+            break;
+        }
+        if (waited < 0 and std.posix.errno(waited) != .INTR) break;
+        _ = usleep(1_000);
+    }
+    _ = c.kill(-child, posix.SIG.TERM);
+    _ = usleep(20_000);
+    if (!reaped) {
+        _ = c.kill(-child, posix.SIG.KILL);
+        _ = c.kill(child, posix.SIG.KILL);
+        while (true) {
+            const waited = c.waitpid(child, &status, 0);
+            if (waited >= 0 or std.posix.errno(waited) != .INTR) break;
+        }
+    }
+    cleanupCr4cPublicationProofLossArtifacts(child);
+    try testing.expect(reaped);
+    try testing.expectEqual(@as(c_int, 0), status & 0x7f);
+    try testing.expectEqual(@as(c_int, 86), (status >> 8) & 0xff);
 }
 
 test "CR4b actual host job은 conflict unknown pre failure를 frozen ledger로 봉인한다" {
@@ -4419,7 +4763,6 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     if (std.c.getenv("MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST")) |raw| {
         if (std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")) return error.SkipZigTest;
     }
-    try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;
     // 이 행은 daemon 두 개를 띄우므로 다른 actual-host artifact와 동시에 실행하지 않는다. lock은
@@ -4478,6 +4821,10 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
         _ = c.rmdir(dir_a.ptr);
         _ = c.rmdir(dir_b.ptr);
     }
+
+    // daemon 자식은 pristine process-seal 상태에서 fork되어 각자 자기 PID 권위를 게시해야 한다.
+    // 부모가 먼저 seal을 게시하면 fork child가 그 seal을 상속해 proof-loss로 정확히 fail-stop한다.
+    try HostAdapter.initializeProcessRuntime();
 
     var connect_a: client_mod.Client = blk: {
         var attempts: usize = 0;

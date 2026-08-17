@@ -77,9 +77,10 @@ test "CR3c C2 경계는 matching RemoteGeneration 뒤 retired Client 회수만 �
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn prepareOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn preflightOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn commitOrderedRetiringReclaimAtTickEndNoFail("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "prepareOrderedRetiringReclaim("));
+    // CR4c C2 reuses the same ordered prepare/commit after generation publication.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "prepareOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "preflightOrderedRetiringReclaim("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "commitOrderedRetiringReclaimAtTickEndNoFail("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "commitOrderedRetiringReclaimAtTickEndNoFail("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "prepareRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "preflightRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "retiringPayload("));

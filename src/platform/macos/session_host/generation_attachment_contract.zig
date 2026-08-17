@@ -123,6 +123,24 @@ pub const BindingIdentity = struct {
     pub fn matches(self: @This(), other: @This()) bool {
         return self.valid() and other.valid() and std.meta.eql(self, other);
     }
+
+    /// Controller promotion keeps the final-address reservation and every host/client authority
+    /// scalar stable. Only the attachment role may change after the host takeover evidence has
+    /// already been sealed.
+    pub fn sameExceptRole(self: @This(), other: @This()) bool {
+        return self.valid() and other.valid() and
+            self.binding_incarnation == other.binding_incarnation and
+            self.binding_storage_addr == other.binding_storage_addr and
+            self.destination_addr == other.destination_addr and
+            self.binding_reservation_id == other.binding_reservation_id and
+            self.slot_incarnation == other.slot_incarnation and
+            self.node_incarnation == other.node_incarnation and
+            self.host_id == other.host_id and
+            self.connection_generation == other.connection_generation and
+            self.runtime_id == other.runtime_id and
+            self.pid == other.pid and
+            self.process_nonce == other.process_nonce;
+    }
 };
 
 /// Closed state vocabulary; the stateful final-address owner lives outside

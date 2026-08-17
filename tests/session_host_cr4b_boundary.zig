@@ -58,7 +58,7 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn callCurrentUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn validateControllerEvidence("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn releaseControllerEvidence("));
-    try std.testing.expectEqual(@as(usize, 6), count(backend, "HostReconnectJobState.controller_evidenced"));
+    try std.testing.expectEqual(@as(usize, 8), count(backend, "HostReconnectJobState.controller_evidenced"));
 
     // Controller promotion is one closed owner chain. Raw identifier inventories catch both
     // qualified calls and function aliases, while the per-file totals prevent caller laundering
@@ -109,11 +109,12 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     );
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "executeControllerTakeoverUntil"));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(runtime, "executeControllerTakeoverUntil"));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "validateControllerEvidence"));
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "validateControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(runtime, "validateControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "releaseControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "releaseControllerEvidence"));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(attachment, "callControllerUntil"));
+    // CR4b owns status+takeover exact2; CR4c C2 adds the sole forced-resize consumer.
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "callControllerUntil"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(batch_adapter, "callControllerUntil"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(attachment, "refreshControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(batch_adapter, "refreshControllerEvidence"));
@@ -128,7 +129,7 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     try std.testing.expectEqual(@as(usize, 4), countIdentifier(backend, "executeHostReconnectTakeover"));
 
     const start = std.mem.indexOf(u8, build, "const session_host_cr4b_step =").?;
-    const end = std.mem.indexOfPos(u8, build, start, "const b3_1_boundary_tests =").?;
+    const end = std.mem.indexOfPos(u8, build, start, "const session_host_cr4c_c1_step =").?;
     const gate = build[start..end];
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr4b\""));
     try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests=1"));
@@ -141,8 +142,8 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "CR4b actual host job은"));
 
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn executeHostReconnectTakeover("));
-    // RemoteGeneration publication은 CR4c slice가 별도 RED와 함께 연다.
-    try std.testing.expectEqual(@as(usize, 0), count(backend, "pub fn publishHostReconnectGeneration("));
+    // RemoteGeneration publication은 CR4c C2의 sole product entry 하나만 연다.
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn publishHostReconnectGeneration("));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

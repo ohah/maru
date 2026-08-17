@@ -1278,6 +1278,56 @@ pub const AttachmentCleanupRegistry = struct {
         return entry.controller_authority == .live;
     }
 
+    /// Re-key the canonical bound observer entry only after all request/event authorities are
+    /// settled. The live transport and response storage stay at their final addresses; only the
+    /// binding role and the matching controller admission bit change in the no-fail suffix.
+    pub fn preflightControllerPromotion(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        observer_identity: contract.BindingIdentity,
+        stream_id: u64,
+    ) Error!contract.BindingIdentity {
+        if (stream_id == 0) return error.InvalidStream;
+        const entry = try self.exactEntry(reservation, observer_identity);
+        if (!controllerAuthorityRawValid(&entry.controller_authority) or
+            entry.lifecycle != .bound or entry.stream_id != stream_id or
+            observer_identity.role != .observer or
+            entry.controller_authority != .unavailable or
+            !entry.prepared_request.settledExact() or
+            !entry.rpc_execution_recovery.emptyExact() or
+            !entry.event_authority.settledExact())
+            return error.InvalidState;
+        var controller_identity = observer_identity;
+        controller_identity.role = .controller;
+        entry.rpc_response_authority.preflightSettledBindingReplacement(
+            self.incarnation,
+            observer_identity,
+            controller_identity,
+        ) catch return error.InvalidState;
+        return controller_identity;
+    }
+
+    pub fn promoteControllerNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        observer_identity: contract.BindingIdentity,
+        stream_id: u64,
+    ) contract.BindingIdentity {
+        const controller_identity = self.preflightControllerPromotion(
+            reservation,
+            observer_identity,
+            stream_id,
+        ) catch @panic("cleanup binding changed after controller-promotion preflight");
+        const entry = self.exactEntry(reservation, observer_identity) catch unreachable;
+        entry.rpc_response_authority.replaceSettledBindingNoFail(
+            self.incarnation,
+            observer_identity,
+            controller_identity,
+        );
+        entry.controller_authority = .live;
+        return controller_identity;
+    }
+
     pub fn reserveEventGeneration(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,

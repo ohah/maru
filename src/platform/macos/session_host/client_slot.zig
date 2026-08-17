@@ -14064,6 +14064,54 @@ pub const ClientSlot = struct {
         );
     }
 
+    pub fn preflightAttachmentControllerPromotion(
+        self: *ClientSlot,
+        binding: *contract.PreparedAttachmentBinding,
+        reservation: AttachmentBindingReservation,
+        stream_id: u64,
+    ) BindingError!contract.BindingIdentity {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current or
+            operation.node.active_operation_generation != 0 or
+            !binding.validAtFinalAddress() or binding.lifecycle != .committed)
+            return error.MovedOrCopied;
+        const observer_identity = binding.identity orelse return error.InvalidIdentity;
+        if (!observer_identity.matches(reservation.identity) or
+            observer_identity.binding_storage_addr != @intFromPtr(binding))
+            return error.InvalidIdentity;
+        return operation.node.cleanup_registry.preflightControllerPromotion(
+            reservation.cleanup,
+            observer_identity,
+            stream_id,
+        );
+    }
+
+    pub fn promoteAttachmentControllerNoFail(
+        self: *ClientSlot,
+        binding: *contract.PreparedAttachmentBinding,
+        reservation: *AttachmentBindingReservation,
+        stream_id: u64,
+    ) void {
+        const controller_identity = self.preflightAttachmentControllerPromotion(
+            binding,
+            reservation.*,
+            stream_id,
+        ) catch @panic("ClientSlot authority changed after controller-promotion preflight");
+        const operation = self.beginCanonicalAuthorityAccess() catch
+            @panic("ClientSlot owner changed after controller-promotion preflight");
+        defer self.endRegisteredClientOperation(operation);
+        const promoted = operation.node.cleanup_registry.promoteControllerNoFail(
+            reservation.cleanup,
+            reservation.identity,
+            stream_id,
+        );
+        if (!promoted.matches(controller_identity))
+            @panic("cleanup registry promoted a different controller identity");
+        binding.identity = promoted;
+        reservation.identity = promoted;
+    }
+
     pub fn controllerRevokePending(
         self: *ClientSlot,
         reservation: AttachmentBindingReservation,

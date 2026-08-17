@@ -475,6 +475,14 @@ pub const Table = struct {
     ad_time_years: [:0]const u8,
     scm_log_read_failed: [:0]const u8,
     scm_no_commits: [:0]const u8,
+    /// 목록이 상한에서 잘렸다 — "더 없다"와 "더 못 읽었다"는 다른 사실이다(P4b).
+    scm_list_truncated: [:0]const u8,
+    /// 펼친 커밋의 파일 목록을 읽지 못했다.
+    scm_commit_files_failed: [:0]const u8,
+    /// 펼친 커밋의 파일 목록이 상한에서 잘렸다.
+    scm_commit_files_truncated: [:0]const u8,
+    /// 그 커밋이 바꾼 파일이 없다(빈 커밋 — `--allow-empty`가 실제로 있다).
+    scm_commit_no_files: [:0]const u8,
     ad_no_model: [:0]const u8,
     ad_meta_messages: [:0]const u8,
     ad_meta_subagents: [:0]const u8,
@@ -844,6 +852,10 @@ pub const en: Table = .{
     .ad_time_years = "{0}y ago",
     .scm_log_read_failed = "Could not read commits",
     .scm_no_commits = "No commits",
+    .scm_list_truncated = "Output too large — the list was truncated",
+    .scm_commit_files_failed = "Could not read this commit's files",
+    .scm_commit_files_truncated = "This commit's file list was truncated",
+    .scm_commit_no_files = "This commit changed no files",
     .ad_no_model = "No model info",
     .ad_meta_messages = "{0} messages",
     .ad_meta_subagents = "{0} subagents",
@@ -1313,6 +1325,10 @@ pub const ko: Table = .{
     .ad_time_years = "{0}년 전",
     .scm_log_read_failed = "커밋을 읽지 못했습니다",
     .scm_no_commits = "커밋이 없습니다",
+    .scm_list_truncated = "출력이 너무 커서 목록이 잘렸습니다",
+    .scm_commit_files_failed = "이 커밋의 파일을 읽지 못했습니다",
+    .scm_commit_files_truncated = "이 커밋의 파일 목록이 잘렸습니다",
+    .scm_commit_no_files = "이 커밋이 바꾼 파일이 없습니다",
     .ad_no_model = "모델 정보 없음",
     .ad_meta_messages = "메시지 {0}개",
     .ad_meta_subagents = "서브에이전트 {0}",

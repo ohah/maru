@@ -500,7 +500,7 @@ pub const inventory = [_]Proof{
     // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
     // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d8d3bd0338134b41e36a41298db5a51d5bc8adf1c871cb88ed6ef5131af88966" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e610b1325c43fcdccd9346bd1a67fa6da7d0c87cea966170587bb08c39eb6dff" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -577,5 +577,5 @@ pub const inventory = [_]Proof{
     // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
     // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
     // P4b: diff 탭 라벨 `커밋`이 키로 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "af07b6ee577651f7eae051f1a7e99f74bfc272fe468222369e955e17cf97799f" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "cd11ae2d76c5d2cbab201b0161b465a10523669e08992514cb23a9c069105922" },
 };

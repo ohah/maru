@@ -5,6 +5,7 @@
 //! 이어질 수 없다. opaque action 해석은 후속 host 슬라이스가 단독으로 책임진다.
 
 const std = @import("std");
+const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const icons = @import("../../../icons.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
@@ -68,24 +69,24 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     try writer.text(metadata, 0, props.metadata, .muted_fg);
     if (props.state == .ready and props.action_record_count > 0) {
         var count: [80]u8 = undefined;
-        const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{props.action_record_count}) catch "도구/권한 관련 기록";
+        const label = i18n.format(&count, i18n.t(.common_action_records), &.{.{ .d = props.action_record_count }});
         try writer.text(metadata, 1, label, .muted_fg);
     }
 
     const section = find(frame.tree, build.NodeIds.section) orelse return error.MissingRect;
     try writer.text(section, 0, switch (props.state) {
-        .ready => "최근 대화",
-        .loading => "세션 분석 중",
-        .stale => "세션 분석을 중단했습니다",
-        .unavailable => "세션을 열 수 없습니다",
+        .ready => i18n.t(.common_recent_conversation),
+        .loading => i18n.t(.common_session_analyzing),
+        .stale => i18n.t(.ad_detail_aborted),
+        .unavailable => i18n.t(.common_session_unavailable),
     }, .surface_fg);
 
     if (props.state == .ready) {
         for (props.turns, 0..) |turn, index| {
             const card = find(frame.tree, build.NodeIds.turn(index)) orelse return error.MissingRect;
             try writer.text(card, 0, switch (turn.role) {
-                .user => "사용자",
-                .assistant => "에이전트",
+                .user => i18n.t(.common_role_user),
+                .assistant => i18n.t(.common_role_assistant),
             }, .muted_fg);
             try writer.text(card, 1, turn.text, .surface_fg);
         }
@@ -247,16 +248,16 @@ fn stateLabel(props: types.Props) []const u8 {
             2 => "◶ 분석 중",
             else => "◵ 분석 중",
         },
-        .ready => "최근 대화와 동작 요약",
-        .stale => "원본 변경 감지",
-        .unavailable => "원본을 읽을 수 없음",
+        .ready => i18n.t(.ad_summary_subtitle),
+        .stale => i18n.t(.ad_stale_badge),
+        .unavailable => i18n.t(.ad_unavailable_badge),
     };
 }
 
 fn unavailableMessage(state: types.State) []const u8 {
     return switch (state) {
-        .stale => "원본 세션이 변경되어 안전하게 표시하지 않습니다.",
-        .unavailable => "세션 원본을 읽을 수 없습니다.",
+        .stale => i18n.t(.ad_stale_body),
+        .unavailable => i18n.t(.ad_unavailable_body),
         else => "",
     };
 }
@@ -279,6 +280,12 @@ fn testTokens() tokens.Tokens {
 }
 
 test "archive detail view renders only redacted turn DTOs and exact action labels" {
+    // needle 이 한국어 문장 조각("터미널에서 이어하기"·"도구/권한 관련 기록 2건")이라 언어에 묶인다.
+    // 이 테스트가 재는 것은 **어떤 run 이 발행되는가**이므로 언어를 고정한다.
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko);
+
     const props = types.Props{
         .viewport_px = .{ .width = 960, .height = 560 },
         .cell_width_px = 8,
@@ -321,7 +328,7 @@ test "archive detail view renders only redacted turn DTOs and exact action label
                 saw_resume_icon = std.mem.startsWith(u8, run.text, resume_icon);
                 resume_origin_x = text.origin.x;
             }
-            if (std.mem.eql(u8, run.text, "사용자")) user_role_origin_y = text.origin.y;
+            if (std.mem.eql(u8, run.text, i18n.t(.common_role_user))) user_role_origin_y = text.origin.y;
             if (std.mem.indexOf(u8, run.text, "문서에 남은 작업") != null) {
                 user_turn_origin_y = text.origin.y;
                 user_turn_wide_icons = text.wide_icons;

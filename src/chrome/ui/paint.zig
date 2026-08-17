@@ -248,9 +248,23 @@ test "every Button variant resolves a distinct command surface and one foregroun
         try std.testing.expect(style.background != .danger_bg);
     }
 
-    // 상태 해석은 variant와 독립이다 — ghost도 hover에서 같은 공유 token을 받는다.
+    // ghost hover는 **한 단계 약한** 면과 테두리다. 목록 행용 `row_hover_bg`는 활성보다 밝게 잡은 색이라
+    // 평소 배경이 없는 경량 컨트롤에 깔리면 그 하나만 튄다(사용자 제보). 면은 `tab_hover_bg`로 낮추고
+    // 형태는 테두리가 말한다. 다른 variant는 공유 token을 그대로 받는다.
     const hovered_ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{ .hovered = 1 }, &tk);
-    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_ghost.background);
+    try std.testing.expectEqual(tokens.ColorRole.tab_hover_bg, hovered_ghost.background);
+    try std.testing.expectEqual(tokens.ColorRole.divider, hovered_ghost.border.?);
+    const hovered_secondary = resolveButton(1, .{ .variant = .secondary, .paint = .{} }, .{ .id = 2 }, .{ .hovered = 1 }, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_secondary.background);
+    // pressed도 한 단계 낮추지만 **hover보다는 진하다** — 그 순서가 뒤집히면 누르는 중이 더 흐려진다.
+    const pressed_ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{ .capture = .{ .id = 1, .action_id = 2 } }, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, pressed_ghost.background);
+    try std.testing.expectEqual(tokens.ColorRole.focus_accent, pressed_ghost.border.?);
+    const pressed_secondary = resolveButton(1, .{ .variant = .secondary, .paint = .{} }, .{ .id = 2 }, .{ .capture = .{ .id = 1, .action_id = 2 } }, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.tab_active_bg, pressed_secondary.background);
+    // ghost의 계단이 실제로 한 칸씩 내려갔는지: hover(약) → pressed(중) → 다른 variant의 pressed(강).
+    try std.testing.expect(hovered_ghost.background != pressed_ghost.background);
+    try std.testing.expectEqual(pressed_ghost.background, hovered_secondary.background);
     // disabled는 언제나 마지막이라 danger의 강한 색도 비활성으로 가라앉는다.
     const disabled_danger = resolveButton(1, .{ .variant = .danger, .paint = .{} }, .{ .id = 2, .enabled = false }, .{}, &tk);
     try std.testing.expect(disabled_danger.background != .danger_bg);

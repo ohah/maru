@@ -47,14 +47,26 @@ pub fn resolveButton(
     var result = baseButtonStyle(visual.variant, tk);
     applyPaintOverride(&result, visual.paint, tk);
     const enabled = action != null and action.?.enabled;
+    // **`.ghost`는 상태 표현을 한 단계씩 낮춘다.** ghost 는 평소 면이 panel 과 같은 경량 컨트롤(헤더의
+    // 정렬 토글·도크 유틸리티)이라, 목록 행·주요 버튼과 같은 세기로 칠하면 그 작은 상자 하나만 튀고
+    // 옆의 배경 없는 utility 들과 톤이 갈린다(사용자 제보 2026-08-17 — "최신순 누를 때" 밝은 pill).
+    //
+    // 세기 계단은 토큰이 이미 갖고 있다: `tab_hover_bg`(배경↔활성 중간) < `row_hover_bg`(활성보다
+    // 밝게 — 목록 행용) < `tab_active_bg`(활성). 다른 variant 는 hover=row_hover, pressed=tab_active 를
+    // 쓰고, ghost 는 그 계단을 하나씩 내려 hover=tab_hover, pressed=row_hover 를 쓴다. 그러면 **hover <
+    // pressed** 관계는 그대로 남아 "누르는 중"이 여전히 더 진하다.
+    const ghost = visual.variant == .ghost;
     if (enabled and state.capture != null and state.capture.?.id == id) {
-        result.background = .tab_active_bg;
+        result.background = if (ghost) .row_hover_bg else .tab_active_bg;
         result.foreground = .surface_fg;
         result.border = .focus_accent;
     } else if (enabled and state.focused != null and state.focused.? == id) {
         result.border = .focus_accent;
     } else if (enabled and state.hovered != null and state.hovered.? == id) {
-        result.background = .row_hover_bg;
+        result.background = if (ghost) .tab_hover_bg else .row_hover_bg;
+        // ghost 는 평소 테두리가 없어 면만 살짝 바뀌면 "여기 눌린다"가 약하다. 형태는 테두리가 말하고
+        // 면은 거들게 한다.
+        if (ghost) result.border = .divider;
         // Primary begins with a light foreground-colored fill. Hover deliberately moves it to
         // the dark shared hover token, so retaining its normal dark label would erase contrast.
         // Resolve both from the same semantic Button variant instead of asking the view to

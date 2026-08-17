@@ -166,6 +166,25 @@ const cases = [_]Case{
         .rect = .{ .x = 240, .y = 20, .w = 240, .h = 60 },
     },
     .{
+        // 정렬 토글은 `.ghost`라 **호버·pressed 때만** 면과 테두리가 존재한다. 그 그림을 보는 골든이 없어서,
+        // 목록 행용 hover 토큰(활성보다 밝은 색)이 헤더의 작은 pill에 그대로 깔린 상태가 자동 검사에는
+        // 안 잡히고 사용자 제보로만 드러났다(2026-08-17). crop은 `로컬`·토글·refresh를 함께 잡아,
+        // 호버한 토글이 **옆의 배경 없는 두 utility와 톤이 갈리지 않는지**까지 한 사각형에서 판정한다.
+        .name = "sort-toggle-hover",
+        .capture = "sort-toggle-hover.ppm",
+        .contract = "호버한 정렬 토글은 한 단계 약한 면과 테두리만 얻고 옆 utility보다 튀지 않는다",
+        .rect = .{ .x = 240, .y = 20, .w = 240, .h = 60 },
+    },
+    .{
+        // 사용자가 실제로 지적한 그림("최신순 누를 때"). pressed는 hover보다 진해야 하지만 활성 밴드와
+        // 같은 세기면 헤더에서 그 상자만 튄다. 두 캡처를 나란히 두면 **세기 순서**(hover < pressed)가
+        // 그림으로 증명된다 — 단위 테스트는 role 이름만 보고 그 순서의 시각적 결과는 보지 못한다.
+        .name = "sort-toggle-pressed",
+        .capture = "sort-toggle-pressed.ppm",
+        .contract = "누르는 중인 정렬 토글은 hover보다 진하되 활성 밴드 세기까지는 가지 않는다",
+        .rect = .{ .x = 240, .y = 20, .w = 240, .h = 60 },
+    },
+    .{
         .name = "partial-scroll-cards",
         .capture = "partial-scroll.ppm",
         .contract = "부분 스크롤된 카드 3행의 높이·간격이 DockMetrics대로다(축소되지 않는다)",

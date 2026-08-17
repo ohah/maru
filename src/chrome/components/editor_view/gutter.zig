@@ -25,6 +25,31 @@ pub const Row = struct {
     number: ?usize,
     /// 이 행이 그려질 시각 행 인덱스(뷰포트 기준 0부터).
     visual_row: u16,
+    /// 이 줄이 접을 수 있는 머리인가, 접혀 있는가. `none`이면 접힘 칸이 빈다.
+    fold: Fold = .none,
+};
+
+/// gutter 접힘 칸에 그릴 표식. **늘 그린다 — hover가 아니다.**
+///
+/// VSCode는 화살표를 hover에서만 보이지만 **N1에는 편집기 pane에 포인터 경로가 없다**(§4.1f) —
+/// hover 규칙을 흉내 내면 표식이 영영 안 보인다. Vim `foldcolumn`이 같은 조건에서 `-`(열림)·
+/// `+`(닫힘)을 **늘 그린다**. 그 선례를 따른다.
+pub const Fold = enum {
+    /// 접을 수 있는 자리가 아니다.
+    none,
+    /// 접을 수 있는 머리인데 지금은 펼쳐져 있다.
+    open,
+    /// 접혀 있다 — **아래에 숨은 줄이 있다는 유일한 표시**다.
+    collapsed,
+
+    /// 그릴 글자. 삼각형은 방향이 곧 뜻이라(아래=펼침, 오른쪽=접힘) 기호를 외울 필요가 없다.
+    pub fn glyph(self: Fold) ?[]const u8 {
+        return switch (self) {
+            .none => null,
+            .open => "\u{25BE}", // ▾
+            .collapsed => "\u{25B8}", // ▸
+        };
+    }
 };
 
 /// gutter가 그려질 자리와 무엇을 켤지.
@@ -83,6 +108,34 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
     var dropped: usize = 0;
     for (props.rows) |row| {
+        // **접힘 표식을 번호보다 먼저 낸다.** 번호가 없는 행(랩 이어짐)에서 `continue`가 걸리기
+        // 때문이다 — 뒤에 두면 접힌 줄이 랩된 경우에 표식이 사라진다.
+        if (!props.layout.folding.isEmpty()) {
+            if (row.fold.glyph()) |g| {
+                if (scratch_used + g.len <= text_scratch.len and run_used < runs.len and op_count < out.len) {
+                    const mark = text_scratch[scratch_used..][0..g.len];
+                    @memcpy(mark, g);
+                    scratch_used += g.len;
+                    runs[run_used] = .{ .text = mark };
+                    const mark_slice = runs[run_used .. run_used + 1];
+                    run_used += 1;
+                    out[op_count] = .{ .text = .{
+                        .origin = .{
+                            .x = props.origin_px.x + @as(i32, props.layout.folding.start) * @as(i32, props.cell_w_px),
+                            .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+                        },
+                        .runs = mark_slice,
+                        .role = line_number_role,
+                        .max_cols = props.layout.folding.width,
+                        .font_px = props.font_px,
+                        .line_height_px = props.cell_h_px,
+                        .cell_w_px = props.cell_w_px,
+                    } };
+                    op_count += 1;
+                }
+            }
+        }
+
         const number = row.number orelse continue; // 랩 이어짐 행은 번호가 없다
 
         if (scratch_used + max_digits > text_scratch.len or
@@ -161,6 +214,8 @@ pub fn rowsForVisual(
     /// 짝을 맞추려고 넣은 빈 행에는 번호가 없다(없는 줄에 번호를 붙이면 거짓이다).
     /// `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
     numbers: ?[]const ?u32,
+    /// 논리 줄마다의 접힘 표식(줄 인덱스로 읽는다). `null`이면 표식을 안 그린다.
+    folds: ?[]const Fold,
     out: []Row,
 ) []Row {
     const n = @min(visual.len, out.len);
@@ -175,6 +230,11 @@ pub fn rowsForVisual(
                 break :blk if (idx < table.len) (if (table[idx]) |num| @as(usize, num) else null) else null;
             } else first_line + v.line + 1,
             .visual_row = i,
+            // **이어진 조각에는 안 붙인다** — 한 줄에 표식이 여러 개 서면 접힌 줄 수를 오해한다.
+            .fold = if (!v.showsLineNumber()) .none else if (folds) |table| blk: {
+                const idx = first_line + v.line;
+                break :blk if (idx < table.len) table[idx] else .none;
+            } else .none,
         };
     }
     return out[0..n];
@@ -195,7 +255,7 @@ test "랩 + 세로 스크롤: 뷰포트가 문서 중간부터여도 번호가 �
         .{ .line = 2, .piece = 0 }, // 번호 4
     };
     var buf: [8]Row = undefined;
-    const rows = rowsForVisual(&visual, 1, null, &buf); // first_line = 1
+    const rows = rowsForVisual(&visual, 1, null, null, &buf); // first_line = 1
 
     try testing.expectEqual(@as(usize, 5), rows.len);
     try testing.expectEqual(@as(usize, 2), rows[0].number.?);

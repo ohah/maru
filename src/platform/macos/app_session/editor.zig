@@ -134,6 +134,8 @@ const diff_frame = chrome_editor.diff_frame;
 pub fn buildPaneOps(
     lines: []const []const u8,
     numbers: ?[]const ?u32,
+    /// 줄마다의 gutter 접힘 표식(§4.1f). `null`이면 접힘 칸이 빈다.
+    folds: ?[]const chrome_editor.gutter.Fold,
     /// gutter 자릿수를 정하는 **문서** 줄 수. 접히면 `lines`는 보이는 줄만이지만 번호는 원래 값이라,
     /// 보이는 수로 폭을 잡으면 렌더가 그리는 번호와 갈린다(`min_line_number_cells`가 10만 줄까지
     /// 가리지만 가려진다고 같은 것은 아니다 — 같은 부류를 §4.1e에서 이미 잡았다).
@@ -154,7 +156,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -328,7 +330,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, lines.len, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -344,7 +346,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -452,6 +454,13 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     term.rt.editor_doc = opened;
     term.rt.editor_lines = lines;
     term.rt.editor_path = path_copy;
+
+    // **접을 범위를 여기서 센다** — §4.1f가 정한 갱신 시점이 "문서를 열 때"다. 첫 접기 명령까지
+    // 미루면 **펼쳐진 화살표(▾)가 그때까지 안 보여** 접을 수 있는 자리를 알 수 없다.
+    //
+    // **실패해도 파일은 연다.** 접힘은 부가 기능이고, 여는 것을 막는 이유는 UTF-8 아님 하나다(§3.5).
+    ensureFoldRanges(self, term) catch {};
+    rebuildVisible(self, term) catch {};
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;
@@ -857,12 +866,17 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const ranges = try self.allocator.alloc(editor_fold.Range, n);
     errdefer self.allocator.free(ranges);
     const folded = try self.allocator.alloc(u32, n); // 접기/펼치기가 다시 할당하지 않게 미리 잡는다
+    errdefer self.allocator.free(folded);
+    // 표식도 여기서 잡는다 — 보이는 줄은 문서 줄보다 많을 수 없으므로 이 크기로 늘 충분하다.
+    const marks = try self.allocator.alloc(chrome_editor.gutter.Fold, lines.len);
 
     // 여기서부터 실패 지점이 없다 — 넘긴다.
     _ = editor_fold.compute(lines, tab_width, ranges);
     term.rt.editor_fold_ranges = ranges;
     term.rt.editor_folded_buf = folded;
     term.rt.editor_folded_len = 0;
+    term.rt.editor_fold_marks = marks;
+    term.rt.editor_fold_marks_len = 0;
 }
 
 /// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
@@ -920,7 +934,13 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const lines = foldSourceLines(term);
     const heads = foldedHeads(term);
     if (heads.len == 0) {
-        // 접힌 것이 없다 — 원본을 그대로 그린다(배열을 만들 이유가 없다).
+        // 접힌 것이 없다 — 줄 배열은 원본을 그대로 그린다(만들 이유가 없다). **표식은 만든다** —
+        // 펼쳐진 머리에도 화살표가 서야 접을 수 있는 자리가 보인다(Vim `foldcolumn`이 여는 fold에
+        // `-`를 그리는 것과 같다).
+        const marks = term.rt.editor_fold_marks[0..@min(term.rt.editor_fold_marks.len, lines.len)];
+        for (marks, 0..) |*m, i| m.* = markFor(term, @intCast(i));
+        term.rt.editor_fold_marks_len = marks.len;
+
         if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
         if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
         term.rt.editor_visible_lines = &.{};
@@ -946,6 +966,7 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const out_lines = try self.allocator.alloc([]const u8, visible);
     errdefer self.allocator.free(out_lines);
     const out_numbers = try self.allocator.alloc(?u32, visible);
+    const out_marks = term.rt.editor_fold_marks[0..@min(term.rt.editor_fold_marks.len, visible)];
 
     var k: usize = 0;
     var si: usize = 0;
@@ -955,6 +976,7 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
         if (k >= out_lines.len) break; // 방어 — 구간 합과 어긋나도 넘치지 않는다(아래에서 꼬리를 채운다)
         out_lines[k] = line;
         out_numbers[k] = @intCast(i + 1); // gutter는 1-based다
+        if (k < out_marks.len) out_marks[k] = markFor(term, @intCast(i));
         k += 1;
     }
 
@@ -967,7 +989,9 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     while (k < out_lines.len) : (k += 1) {
         out_lines[k] = "";
         out_numbers[k] = null;
+        if (k < out_marks.len) out_marks[k] = .none;
     }
+    term.rt.editor_fold_marks_len = out_marks.len;
     term.rt.editor_visible_lines = out_lines;
     term.rt.editor_visible_numbers = out_numbers;
     invalidateFoldDerived(self, term);
@@ -1045,6 +1069,37 @@ fn restoreTop(term: *Term, doc_line: usize) void {
     term.rt.editor_first_line = best;
 }
 
+/// 그 **문서 줄**의 gutter 표식. 접을 수 있는 머리면 화살표가 서고, 지금 접혀 있으면 오른쪽을 본다.
+///
+/// **범위와 접힘 상태 둘 다 이진 탐색으로 본다** — 줄마다 목록을 훑으면 문서 × 범위가 되고, 12만 줄
+/// 문서에서 그 모양이 이미 한 번 성능 결함으로 나왔다(`rebuildVisible`의 구간 커서 주석).
+fn markFor(term: *Term, line: u32) chrome_editor.gutter.Fold {
+    if (!containsSorted(term.rt.editor_fold_ranges, line)) return .none;
+    return if (std.sort.binarySearch(u32, foldedHeads(term), line, orderU32) != null) .collapsed else .open;
+}
+
+fn orderU32(a: u32, b: u32) std.math.Order {
+    return std.math.order(a, b);
+}
+
+/// 범위 목록(머리 줄 오름차순)에 그 머리가 있는가.
+fn containsSorted(ranges: []const maru.session.editor.fold.Range, line: u32) bool {
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (ranges[mid].head == line) return true;
+        if (ranges[mid].head < line) lo = mid + 1 else hi = mid;
+    }
+    return false;
+}
+
+/// 그리는 줄들과 **같은 축**의 접힘 표식. 비어 있으면 `null`(접힘 칸이 빈다).
+fn foldMarks(term: *Term) ?[]const chrome_editor.gutter.Fold {
+    const len = term.rt.editor_fold_marks_len;
+    return if (len > 0) term.rt.editor_fold_marks[0..len] else null;
+}
+
 /// 접혀 있으면 **원래 줄 번호** 배열을, 아니면 `null`(프레임이 `first_line + n + 1`로 센다).
 fn foldNumbers(term: *Term) ?[]const ?u32 {
     return if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers else null;
@@ -1086,6 +1141,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+    if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
     term.rt.editor_path = null;
 }
 
@@ -3471,4 +3527,97 @@ test "탭이 든 긴 줄이 랩에서 끝까지 그려지고 닿는다" {
     }
     try testing.expectEqual(fx.term.rt.editor_max_top_piece, fx.term.rt.editor_first_piece);
     try testing.expect(fx.term.rt.editor_first_piece > 100); // 8 KiB 시절엔 여기까지 못 갔다
+}
+
+test "접기 명령이 액션에서 끝까지 이어진다" {
+    // 배선이 없으면 기능이 있어도 **사용자가 못 쓴다**(접기는 포인터 경로가 없어 명령이 유일한 길이다).
+    // 카탈로그·파싱은 round-trip 테스트가 덮지만 **디스패치 팔은 안 덮는다** — 둘을 뒤바꿔도 컴파일된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 4);
+    defer allocator.free(lines);
+    lines[0] = "a:";
+    lines[1] = "  1";
+    lines[2] = "b:";
+    lines[3] = "  2";
+    fx.term.rt.editor_lines = lines;
+
+    fx.session.dispatchAppAction(.fold_all);
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_visible_lines.len); // 몸통 둘이 숨었다
+
+    fx.session.dispatchAppAction(.unfold_all);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len); // 원본을 그대로 그린다
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_folded_len);
+}
+
+test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {
+    // **hover가 아니라 늘 그린다**(§4.1f) — N1에는 편집기 pane에 포인터 경로가 없어 VSCode식
+    // hover 규칙을 흉내 내면 표식이 영영 안 보인다. Vim `foldcolumn` 선례를 따른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 4);
+    defer allocator.free(lines);
+    lines[0] = "a:";
+    lines[1] = "  1";
+    lines[2] = "b:";
+    lines[3] = "  2";
+    fx.term.rt.editor_lines = lines;
+    // 파일을 열면 범위가 서는 자리를 테스트에서는 직접 세운다(픽스처는 줄 배열을 갈아 끼운다).
+    try ensureFoldRanges(fx.session, fx.term);
+    try rebuildVisible(fx.session, fx.term);
+
+    const open_mark: u21 = 0x25BE; // ▾
+    const collapsed_mark: u21 = 0x25B8; // ▸
+
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    var opens: usize = 0;
+    var collapsed: usize = 0;
+    for (d0.dl.cells) |c| {
+        if (c.codepoint == open_mark) opens += 1;
+        if (c.codepoint == collapsed_mark) collapsed += 1;
+    }
+    d0.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), opens); // 머리 두 줄에 펼침 화살표
+    try testing.expectEqual(@as(usize, 0), collapsed);
+
+    try testing.expect(foldAll(fx.session));
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    opens = 0;
+    collapsed = 0;
+    var mark_col: u16 = std.math.maxInt(u16);
+    var number_col: u16 = std.math.maxInt(u16);
+    for (d1.dl.cells) |c| {
+        if (c.codepoint == open_mark) opens += 1;
+        if (c.codepoint == collapsed_mark) {
+            collapsed += 1;
+            mark_col = @min(mark_col, c.col);
+        }
+        if (c.codepoint >= '0' and c.codepoint <= '9') number_col = @min(number_col, c.col);
+    }
+    d1.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), collapsed); // 접힌 머리 두 줄
+    try testing.expectEqual(@as(usize, 0), opens);
+    // **번호 오른쪽·본문 왼쪽의 접힘 칸에 선다** — 자리가 틀리면 번호나 본문을 덮는다.
+    const layout = chrome_editor.geometry.compute(
+        chrome_editor.diff_frame.sideMetrics(
+            editorBodyRect(fx.session, fx.leaf_rect, fx.term).w -| chrome_editor.frame.content_inset_px * 2,
+            editorBodyRect(fx.session, fx.leaf_rect, fx.term).h -| chrome_editor.frame.content_inset_px * 2,
+            @intCast(fx.session.cell_width_px),
+            @intCast(fx.session.cell_height_px),
+        ).total_cols,
+        lines.len,
+        .{},
+    );
+    try testing.expectEqual(layout.folding.start, mark_col);
+    try testing.expect(number_col < mark_col);
 }

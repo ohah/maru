@@ -16,6 +16,7 @@ const std = @import("std");
 const draw = @import("../../draw.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const frame = @import("frame.zig");
+const gutter = @import("gutter.zig");
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
@@ -32,6 +33,9 @@ pub const Side = struct {
     bands: ?[]const frame.RowBand = null,
     /// 행마다 바뀐 글자 범위(§3.5 "바뀐 글자만 진하게").
     marks: ?[]const []const frame.Mark = null,
+    /// 행마다의 접힘 표식. **비교 뷰는 접지 않으므로**(§4.1f) 그쪽은 `null`이고, 단일 파일
+    /// 편집기가 이 경로를 함께 지나므로 여기에 자리가 있다.
+    folds: ?[]const gutter.Fold = null,
 };
 
 pub const Props = struct {
@@ -147,6 +151,7 @@ pub fn buildSide(
         .first_col = side.first_col,
         .total_lines = side.total_lines orelse side.lines.len,
         .line_numbers = side.numbers,
+        .folds = side.folds,
         .row_bands = side.bands,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,

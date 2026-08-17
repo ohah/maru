@@ -49,7 +49,11 @@ pub const inventory = [_]Proof{
     // 구현이고, Client receiver 나 제품 vtable 과는 무관하다.
     // `font.size`(M10d)가 붙어 바뀐다 — 모바일 config 에 `FontConfig` 가 생겼다. count 는 9 그대로다.
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "6de766b9b79dbd851aa14a31f9a7b1aa63d9a4f351ae28e5a40d402c74ce3dd5" },
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "e276e8e954a47819f79ae54a0937d9bb76134deda6876f143baf9da9f0a363a1" },
+    // 경로 값 입구 정규화(W7.5)가 붙어 바뀐다 — `Meta.isPath()` 인 필드는 파싱에서 구분자를 POSIX 로
+    // 정규화한다(docs/windows-platform.md §5 규칙 1: Windows 사용자가 `workspace.root = C:\proj` 로 적으면
+    // L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다). count 는 108 그대로다 — 늘어난 것은
+    // comptime 분기 하나와 `path_shape` 호출뿐이고 `@field` 로 도는 자리는 건드리지 않았다.
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "d4c1fc8207dce1d90ce06f085978ecbb29cb0098bb3295e03813ec6fce79f6f2" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

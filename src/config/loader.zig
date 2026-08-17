@@ -319,7 +319,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "workspace.root는 절대경로 또는 ~/… — 무시(기본값 유지)" });
             return;
         }
-        config.workspace.root = try a.dupe(u8, trimmed);
+        // **경로 값은 입구에서 구분자를 정규화한다**(docs/windows-platform.md §5 규칙 1). Windows 사용자는
+        // `workspace.root = C:\proj` 처럼 native 로 적는 것이 자연스러운데, 그대로 두면 L2 가 `/` 로 이어
+        // 붙인 결과와 섞여 `C:\proj/docs` 가 된다. 스키마-주도 경로 필드(`Meta.isPath`)와 **같은 규칙**을
+        // 쓴다 — 이 키만 명시 핸들러라 빠지면 그 자리만 다르게 동작한다. POSIX 호스트에서는 무동작이다.
+        config.workspace.root = try path_shape.normalizeSeparators(a, trimmed);
         // workspace.{tab,split}-inherit-cwd는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "cursor.color") or std.mem.eql(u8, key, "cursor.text")) {
         // 커서 색 override(opt-in). nullable이라 스키마-주도에서 빠져 여기서 다룬다(palette와 동형). 색 검증·
@@ -1286,7 +1290,10 @@ test "parse: OS 접미 줄은 그 자리에서 적용된다(파일 순서가 결
         \\shell.command.macos = /bin/zsh
     );
     defer later.deinit();
-    const expected: []const u8 = if (win) "C:\\pwsh.exe" else if (mac) "/bin/zsh" else "/bin/sh";
+    // **Windows 기대값이 `C:/pwsh.exe` 다** — 경로 값은 입구에서 구분자를 정규화하기 때문이다(§5 규칙 1,
+    // W7.5). 이 테스트는 그 전에 쓰여 native 구분자를 단언했었다. 여기서 보는 것은 "어느 줄이 이기는가"
+    // 이지 구분자가 아니므로, 기대값만 새 계약에 맞춘다.
+    const expected: []const u8 = if (win) "C:/pwsh.exe" else if (mac) "/bin/zsh" else "/bin/sh";
     try std.testing.expectEqualStrings(expected, later.config.shell.command);
     try std.testing.expectEqual(@as(usize, 0), later.diagnostics.len);
 
@@ -1432,6 +1439,35 @@ test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보�
     try std.testing.expectEqualStrings("GREETING=hello world", p.config.env[1]); // 내부 공백 보존(양끝만 trim)
     try std.testing.expectEqualStrings("EMPTY=", p.config.env[2]); // 빈 값도 유효
     try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len); // env. (빈 KEY) 한 건
+}
+
+test "parse: 경로 값은 입구에서 구분자를 정규화한다 (스키마-주도 필드)" {
+    // `Meta.isPath()` 가 붙은 필드는 파일 파싱에서 `\` → `/` 로 정규화된다(§5 규칙 1). `workspace.root`
+    // (명시 핸들러)와 **같은 규칙**이어야 한다 — 한쪽만 걸리면 그 키만 다르게 동작한다.
+    const windows = @import("builtin").os.tag == .windows;
+
+    // `shell.command` — `abs_path` 가 `path_value` 를 함의한다. Windows 에서만 `C:\…` 가 절대경로로
+    // 인정되므로(그 검사는 호스트 규칙을 쓴다) 거기서만 값이 남는다.
+    if (windows) {
+        var p = try parse(std.testing.allocator, "shell.command = C:\\Program Files\\PowerShell\\7\\pwsh.exe\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("C:/Program Files/PowerShell/7/pwsh.exe", p.config.shell.command);
+    }
+
+    // `window.background-image` — 절대경로를 요구하지 않는 순수 `path_value` 필드.
+    {
+        var p = try parse(std.testing.allocator, "window.background-image = C:\\pics\\bg.png\n");
+        defer p.deinit();
+        const expected = if (windows) "C:/pics/bg.png" else "C:\\pics\\bg.png";
+        try std.testing.expectEqualStrings(expected, p.config.window_background_image);
+    }
+
+    // **경로가 아닌 text 필드는 건드리지 않는다** — `\` 를 값으로 쓰는 설정이 깨지면 안 된다.
+    {
+        var p = try parse(std.testing.allocator, "input.word-separators = a\\b\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("a\\b", p.config.input.word_separators);
+    }
 }
 
 test "parse: shell.command/shell.args — 경로 + 공백 분리 argv, 빈 값 처리" {
@@ -2679,6 +2715,18 @@ test "parse: workspace.root default empty, override, empty is forgiving" {
         var p = try parse(std.testing.allocator, "workspace.root = ~\n"); // `~` 단독 허용
         defer p.deinit();
         try std.testing.expectEqualStrings("~", p.config.workspace.root);
+    }
+    {
+        // **구분자를 입구에서 정규화한다**(§5 규칙 1). Windows 사용자는 native 로 적는 것이 자연스러운데,
+        // 그대로 두면 L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다.
+        //
+        // **호스트에 따라 답이 다르다** — POSIX 에서 `\` 는 파일 이름 글자라 바꾸면 다른 파일을 가리킨다.
+        // 그래서 두 갈래를 각각 단언한다(규칙 자체는 `path_shape` 가 OS 를 인자로 받아 모든 타깃에서
+        // 테스트된다 — 여기서는 로더가 그것을 **실제로 부르는지**를 본다).
+        var p = try parse(std.testing.allocator, "workspace.root = C:\\proj\\sub\n");
+        defer p.deinit();
+        const expected = if (@import("builtin").os.tag == .windows) "C:/proj/sub" else "C:\\proj\\sub";
+        try std.testing.expectEqualStrings(expected, p.config.workspace.root);
     }
     {
         var p = try parse(std.testing.allocator, "workspace.root =   \n");

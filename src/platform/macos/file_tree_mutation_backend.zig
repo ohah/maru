@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const path_shape = maru.path_shape;
 const policy = maru.session.file_tree_mutation;
 const file_tree = maru.session.file_tree;
 
@@ -337,7 +338,9 @@ fn openPinnedParent(
     var current = try std.Io.Dir.openDirAbsolute(io, root, .{ .follow_symlinks = false });
     errdefer current.close(io);
     if (root_identity) |expected| if (!identityMatches(try identityOfDir(io, current), expected)) return error.IdentityChanged;
-    const rel_parent = if (parent_path.len == root.len) "" else parent_path[root.len + 1 ..];
+    // **구분자를 한 바이트로 가정하지 않는다** — 루트가 구분자로 끝나면 첫 세그먼트를 먹어 엉뚱한
+    // 디렉터리에서 작업한다. 규칙은 `path_shape.relativeUnderRoot` 가 단일 출처다(계약 §5.2 ⒝).
+    const rel_parent = path_shape.relativeUnderRoot(parent_path, root) orelse return error.InvalidPath;
     var components = std.mem.tokenizeScalar(u8, rel_parent, '/');
     while (components.next()) |component| {
         try policy.validateExistingName(component); // 위와 같은 이유(실재하는 경로의 구성요소)

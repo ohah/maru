@@ -258,13 +258,23 @@ test "every Button variant resolves a distinct command surface and one foregroun
     try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_secondary.background);
     // pressed도 한 단계 낮추지만 **hover보다는 진하다** — 그 순서가 뒤집히면 누르는 중이 더 흐려진다.
     const pressed_ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{ .capture = .{ .id = 1, .action_id = 2 } }, &tk);
-    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, pressed_ghost.background);
+    try std.testing.expectEqual(tokens.ColorRole.control_press_bg, pressed_ghost.background);
     try std.testing.expectEqual(tokens.ColorRole.focus_accent, pressed_ghost.border.?);
     const pressed_secondary = resolveButton(1, .{ .variant = .secondary, .paint = .{} }, .{ .id = 2 }, .{ .capture = .{ .id = 1, .action_id = 2 } }, &tk);
     try std.testing.expectEqual(tokens.ColorRole.tab_active_bg, pressed_secondary.background);
-    // ghost의 계단이 실제로 한 칸씩 내려갔는지: hover(약) → pressed(중) → 다른 variant의 pressed(강).
-    try std.testing.expect(hovered_ghost.background != pressed_ghost.background);
-    try std.testing.expectEqual(pressed_ghost.background, hovered_secondary.background);
+    // role 이 다른 것만으로는 아무것도 증명되지 않는다 — **실제 RGB**가 갈려야 화면이 달라진다.
+    // 2026-08-17 에 role 만 바꾼 수정(`tab_active_bg` → `row_hover_bg`)이 두 role 이 같은 색이라 시각
+    // 효과가 0 이었고, 적대적 검증에서 그것이 드러났다. 그 실패를 이 단언이 못 박는다: ghost 의
+    // hover < pressed < 활성 세기 계단이 rich 토큰셋에서 **색으로** 갈린다.
+    const rich = testTokens(); // rich 토큰셋 픽스처(sidebar_active = 80,80,80)
+    const ghost_hover_rgb = rich.get(hovered_ghost.background);
+    const ghost_press_rgb = rich.get(pressed_ghost.background);
+    const active_rgb = rich.get(pressed_secondary.background);
+    try std.testing.expect(!std.meta.eql(ghost_hover_rgb, ghost_press_rgb));
+    try std.testing.expect(!std.meta.eql(ghost_press_rgb, active_rgb));
+    // 그리고 방향까지: hover 가 가장 어둡고 활성이 가장 밝다(dark 테마 기준 fixture).
+    try std.testing.expect(ghost_hover_rgb.r < ghost_press_rgb.r);
+    try std.testing.expect(ghost_press_rgb.r < active_rgb.r);
     // disabled는 언제나 마지막이라 danger의 강한 색도 비활성으로 가라앉는다.
     const disabled_danger = resolveButton(1, .{ .variant = .danger, .paint = .{} }, .{ .id = 2, .enabled = false }, .{}, &tk);
     try std.testing.expect(disabled_danger.background != .danger_bg);

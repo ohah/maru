@@ -80,6 +80,16 @@ pub const ColorRole = enum {
     /// `tab_hover_bg`(배경↔활성 중간)를 쓰면 활성 카드의 목록에서 활성색보다 어두워 호버가 사라지고,
     /// `tab_active_bg`를 쓰면 활성색과 **완전히 같아** 역시 구분이 0이다(사용자 제보).
     row_hover_bg,
+    /// 경량 컨트롤(`.ghost` 버튼 — 헤더 정렬 토글·도크 유틸리티)을 **누르고 있는** 동안의 면.
+    ///
+    /// **왜 별도 role 인가**: `row_hover_bg`와 `tab_active_bg`는 이 파일에서 **같은 색**(`sidebar_active`)이다.
+    /// 그래서 "ghost pressed 를 활성 밴드보다 약하게" 하려고 그 둘 사이를 골라도 RGB 가 하나도 안 바뀐다 —
+    /// 실제로 2026-08-17 에 role 만 바꾼 수정이 시각적으로 아무 효과가 없었고, 적대적 검증에서 그 사실이
+    /// 드러났다. 세기 계단을 **색으로** 만들려면 그 사이에 값이 있는 role 이 필요하다.
+    ///
+    /// rich 는 hover(-12)와 활성(0) 사이인 -6 을 쓴다: hover < pressed < 활성. tui 는 파생색을 쓰지 않는
+    /// 관례라 활성과 같은 값으로 남고, 그 대신 pressed 는 `focus_accent` 테두리로 구분된다.
+    control_press_bg,
     divider,
     focus_accent,
     drop_zone,
@@ -259,6 +269,8 @@ pub const Tokens = struct {
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
         palette.set(.row_hover_bg, theme.sidebar_active);
+        // tui 는 파생색을 쓰지 않는다(위 role 주석) — 활성과 같은 값이고 pressed 구분은 테두리가 한다.
+        palette.set(.control_press_bg, theme.sidebar_active);
         palette.set(.divider, dividerBg(theme.sidebar_background));
         palette.set(.focus_accent, theme.sidebar_active);
         palette.set(.drop_zone, theme.sidebar_active);
@@ -301,6 +313,9 @@ pub const Tokens = struct {
         tk.palette.set(.focus_accent, lightenRgb(theme.sidebar_active, 40));
         tk.palette.set(.drop_zone, lightenRgb(theme.sidebar_active, 16));
         tk.palette.set(.tab_hover_bg, darkenRgb(theme.sidebar_active, 12));
+        // 경량 컨트롤 pressed: hover(-12)와 활성(0) **사이**. 이 값이 있어야 ghost 의 hover→pressed→활성
+        // 계단이 role 이름뿐 아니라 실제 색으로도 갈린다.
+        tk.palette.set(.control_press_bg, darkenRgb(theme.sidebar_active, 6));
         tk.palette.set(.muted_fg, darkenRgb(theme.sidebar_foreground, 48));
         // C4b: rich 박스 모양 — 둥근 모서리 + 얇은 테두리(tui는 0=직각·셀 fill 유지). 컴포넌트 view가
         // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).

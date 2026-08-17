@@ -57,7 +57,7 @@ pub fn resolveButton(
     // pressed** 관계는 그대로 남아 "누르는 중"이 여전히 더 진하다.
     const ghost = visual.variant == .ghost;
     if (enabled and state.capture != null and state.capture.?.id == id) {
-        result.background = if (ghost) .row_hover_bg else .tab_active_bg;
+        result.background = if (ghost) .control_press_bg else .tab_active_bg;
         result.foreground = .surface_fg;
         result.border = .focus_accent;
     } else if (enabled and state.focused != null and state.focused.? == id) {

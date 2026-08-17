@@ -63,6 +63,10 @@ typedef struct {
 enum {
     MaruDrawCellBoldBit = 1u << 0,
     MaruDrawCellItalicBit = 1u << 1, // italic(SGR 3) — italic face로 셰이핑(F2-3). bold와 같이 켜지면 bold-italic.
+    /// **커서가 앉은 칸.** 이 비트가 켜진 셀은 face 가 같아도 별도 run 으로 갈라져(아래 run 연속 조건)
+    /// **합자 없이** 셰이핑된다. 편집 중에는 `===` 가 이어진 한 덩어리보다 개별 글자로 보여야 커서가
+    /// 어느 글자에 있는지 알 수 있다(Ghostty 와 같은 동작 — 사용자 요청 2026-08-17).
+    MaruDrawCellCursorBit = 1u << 2,
 };
 
 typedef struct {
@@ -627,10 +631,18 @@ static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFInde
 
 /// 셀이 쓸 face 인덱스 — (bold?1:0)|(italic?2:0). styled 캐시 인덱스이자 **run 경계 판정의 단일 출처**다.
 /// 같은 face끼리만 한 CTLine으로 묶어야 셰이핑 결과가 셀별로 face를 따로 고르던 때와 같다.
+/// run 을 가르는 키. face(bold/italic)와 **커서 여부**를 함께 담는다 — 커서 칸을 별도 run 으로 떼어야
+/// 그 칸만 합자 없이 셰이핑할 수 있다(`MaruDrawCellCursorBit` 주석). 0~7.
 static int maru_style_index_for_cell(MaruCoreTextDrawCell cell) {
     const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
     const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
-    return (want_bold ? 1 : 0) | (want_italic ? 2 : 0);
+    const bool at_cursor = (cell.style_flags & MaruDrawCellCursorBit) != 0;
+    return (want_bold ? 1 : 0) | (want_italic ? 2 : 0) | (at_cursor ? 4 : 0);
+}
+
+/// style index 에서 face 부분만(0~3). 커서 슬롯도 폰트는 같은 face 를 쓴다.
+static int maru_face_index_from_style(int style_index) {
+    return style_index & 3;
 }
 
 /// glyph record를 만들지 않는 셀(공백·zero-width). run **문자열에는 넣어** 호출이 잘게 쪼개지지 않게 하되,
@@ -1321,10 +1333,12 @@ void maru_macos_coretext_shape_draw_list(
         // 스타일 face 캐시(F2-3): index = (bold?1:0)|(italic?2:0). 0=regular(primary), 1=bold, 2=italic, 3=bold-italic.
         // 각 조합을 처음 만나는 cell에서 lazy 생성(없는 조합은 매번 재시도 안 하게 attempted). regular(0)은 위에서 이미
         // primary_font/primary_name/attributes로 준비됨. 생성 실패(없는 face)면 그 cell은 regular(0)로 폴백한다.
-        CTFontRef styled_fonts[4] = { primary_font, NULL, NULL, NULL };
-        CFStringRef styled_names[4] = { primary_name, NULL, NULL, NULL };
-        CFDictionaryRef styled_attrs[4] = { attributes, NULL, NULL, NULL };
-        bool styled_attempted[4] = { true, false, false, false };
+        // 슬롯이 8 개다: face 4 개 × (커서 아님 / 커서). **커서 슬롯(4~7)은 같은 face 폰트에 합자를 끈
+        // 속성**을 쓴다 — 편집 중 커서가 앉은 칸은 합자를 풀어 개별 글자로 보여야 한다.
+        CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, primary_font, NULL, NULL, NULL };
+        CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, primary_name, NULL, NULL, NULL };
+        CFDictionaryRef styled_attrs[8] = { attributes, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+        bool styled_attempted[8] = { true, false, false, false, false, false, false, false };
 
         // [run 셰이핑] 예전에는 **셀 하나마다** CTLine을 만들었다. CTLine 생성은 호출당 고정비(속성 조회·
         // typesetter 생성·폰트 캐스케이드 준비)가 커서, 글리프 수가 같아도 호출 수가 시간을 지배한다 —
@@ -1339,18 +1353,37 @@ void maru_macos_coretext_shape_draw_list(
             // run의 face는 시작 셀이 정한다. run 안의 셀은 아래 연속 조건에서 같은 face만 받아들인다.
             const MaruCoreTextDrawCell first_cell = cells[cell_index];
             const int style_index = maru_style_index_for_cell(first_cell);
+            const int face_index = maru_face_index_from_style(style_index);
+            const bool run_at_cursor = style_index >= 4;
             if (style_index != 0 && !styled_attempted[style_index]) {
                 styled_attempted[style_index] = true;
-                CTFontRef styled = maru_create_styled_font(
-                    primary_font, requested_font_size,
-                    fallback_families, fallback_families_len,
-                    bold_family, bold_family_len,
-                    italic_family, italic_family_len,
-                    (style_index & 1) != 0, (style_index & 2) != 0);
+                // face 는 face_index 가 정한다. 커서 슬롯은 이미 만든 face 폰트를 재사용하고 속성만
+                // 다시 만든다(합자 끔) — 같은 face 를 두 번 만들 이유가 없다.
+                CTFontRef styled = styled_fonts[face_index];
+                bool created_here = false;
+                if (styled == NULL) {
+                    styled = maru_create_styled_font(
+                        primary_font, requested_font_size,
+                        fallback_families, fallback_families_len,
+                        bold_family, bold_family_len,
+                        italic_family, italic_family_len,
+                        (face_index & 1) != 0, (face_index & 2) != 0);
+                    created_here = styled != NULL;
+                }
                 if (styled != NULL) {
-                    styled_fonts[style_index] = styled;
-                    styled_names[style_index] = CTFontCopyPostScriptName(styled);
-                    styled_attrs[style_index] = maru_create_shape_attributes(styled, ligatures_enabled != 0);
+                    if (created_here) {
+                        styled_fonts[face_index] = styled;
+                        styled_names[face_index] = CTFontCopyPostScriptName(styled);
+                    }
+                    if (run_at_cursor) {
+                        styled_fonts[style_index] = styled;
+                        styled_names[style_index] = styled_names[face_index] != NULL
+                            ? (CFStringRef)CFRetain(styled_names[face_index])
+                            : NULL;
+                    }
+                    // **커서 run 은 합자를 끈다.** 그 외에는 전역 설정을 따른다.
+                    const bool run_ligatures = (ligatures_enabled != 0) && !run_at_cursor;
+                    styled_attrs[style_index] = maru_create_shape_attributes(styled, run_ligatures);
                 }
             }
             // styled face가 만들어졌으면 그걸로, 실패했으면(없는 face) regular(0)로 폴백.
@@ -1559,10 +1592,14 @@ void maru_macos_coretext_shape_draw_list(
 
         CFRelease(attributes);
         // styled face 캐시(1~3) 정리 — index 0(regular)은 primary_font/primary_name/attributes라 아래에서 따로 푼다(F2-3).
-        for (int si = 1; si < 4; si++) {
+        // 슬롯 8 개를 정리한다. **커서 슬롯(4~7)은 face 폰트를 face 슬롯과 공유**하므로 폰트는 face
+        // 슬롯에서만 놓는다(4번은 primary 를 그대로 담아 두므로 그것도 놓지 않는다) — 이름은 retain 해
+        // 따로 갖고 있으니 각자 놓는다. 안 그러면 같은 CTFontRef 를 두 번 release 한다.
+        for (int si = 1; si < 8; si++) {
             if (styled_attrs[si] != NULL) CFRelease(styled_attrs[si]);
             if (styled_names[si] != NULL) CFRelease(styled_names[si]);
-            if (styled_fonts[si] != NULL) CFRelease(styled_fonts[si]);
+            const bool owns_font = si < 4;
+            if (owns_font && styled_fonts[si] != NULL) CFRelease(styled_fonts[si]);
         }
         if (primary_name != NULL) {
             CFRelease(primary_name);

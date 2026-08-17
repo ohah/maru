@@ -151,6 +151,19 @@ pub const Backend = enum {
     remote_websocket,
 };
 
+/// 자식 프로세스 식별자 — **중립 레이어가 쓰는 이름**이다.
+///
+/// **왜 `std.c.pid_t`가 아닌가**(계약 §4의 선행 정리): 그 별칭은 Windows에서 `HANDLE`(`*anyopaque`)로
+/// 풀리는데 ConPTY 백엔드가 내는 것은 `DWORD`(프로세스 id, `u32`)다. 그래서 `app/live_pty.zig`처럼 중립
+/// 레이어에 있는 코드가 `std.c.pid_t`를 쓰면 Windows에서 **컴파일이 깨진다**(실측:
+/// `expected '*anyopaque', found 'u32'`). POSIX 타입 이름이 중립 레이어로 샌 자리였다.
+///
+/// **POSIX에서는 글자 그대로 `std.c.pid_t`다** — 그래서 macOS 소비자(`session_host/**`의 `child_pid`
+/// 필드 등)는 타입이 하나도 안 바뀐다. 회귀 0이 이 별칭의 첫 계약이다.
+///
+/// 소비자는 이 값을 **비교와 저장에만** 쓴다(같은 자식인가). 그러므로 두 OS에서 폭이 달라도 무방하다.
+pub const ChildPid = if (@import("builtin").os.tag == .windows) u32 else std.c.pid_t;
+
 pub const ExitStatus = union(enum) {
     exited: u8,
     signaled: u8,

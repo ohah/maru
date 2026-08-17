@@ -418,16 +418,30 @@ ADE의 핵심인 "이 pane에서 claude/codex가 도는가" 판정이다. macOS�
 없다. 되물을 이유도 없다 — pseudoconsole 크기를 바꾸는 주체는 우리뿐이고(자식은 `mode con`으로 읽기만 한다),
 우리가 넘긴 COORD가 자식에게 그대로 간다는 것은 §6에서 확인했다. 그래서 마지막으로 세운 값을 돌려준다.
 
-**W7이 먼저 풀어야 할 표면 두 가지가 남아 있다.** `UnsupportedPtySession`이 "표면 명세"이지만, app 레이어는
-그보다 **넓은 집합**을 부른다 — 그 차이가 지금은 Windows에서 컴파일되지 않아 조용히 잠복해 있다.
+**W7이 먼저 풀어야 했던 표면 두 가지 — 닫았다(W7.0).** `UnsupportedPtySession`이 "표면 명세"이지만, app
+레이어는 그보다 **넓은 집합**을 부른다. 그 차이가 Windows에서 컴파일되지 않아 조용히 잠복해 있었다.
 
-| 무엇 | 지금 상태 | W7이 정할 것 |
+| 무엇 | 무엇이 깨졌나(실측) | 어떻게 닫았나 |
 |---|---|---|
-| `live_pty.childPid()`가 `std.c.pid_t`를 낸다 | Windows에서 그 타입은 **`*anyopaque`**(HANDLE)인데 백엔드는 `u32`(DWORD pid)를 낸다 | 중립 레이어가 POSIX 타입을 노출하는 것 자체가 누수다. 백엔드 중립 pid 타입을 정한다 |
-| `PreparedAdoption`·`upgradeEligible`·`revalidatePreparedOwnership`·`commitPreparedOwnership` | Windows 백엔드에 **없다**. exec-restore(영속 세션 호스트) 표면이라 macOS 전용 호출자만 있다 | 세션 호스트를 Windows로 옮길 때(계획 "후속") 함께 정한다 |
+| `live_pty.childPid()`가 `std.c.pid_t`를 냈다 | 그 별칭이 Windows에서 `HANDLE`(`*anyopaque`)로 풀려 백엔드의 `u32`(DWORD pid)와 안 맞았다 — `expected type '*anyopaque', found 'u32'` | 중립 별칭 **`pty.ChildPid`** 를 뒀다. POSIX에서는 `std.c.pid_t`와 **글자 그대로 같아** macOS 소비자(`session_host/**`의 `child_pid` 등)가 무변이고, Windows에서만 `u32`다 |
+| `PreparedAdoption`·`upgradeEligible`·`revalidatePreparedOwnership`·`commitPreparedOwnership` | Windows 백엔드에 **없었다** — `struct 'pty.windows.PtySession' has no member named 'PreparedAdoption'` | **막되 시끄럽게 막는다**(W2의 `publishBrowserResult` 선례). `upgradeEligible`은 **항상 false**라 업그레이드 경로가 열리지 않고, `prepare`/`revalidate`는 `error.UnsupportedOnWindows`, 도달하면 안 되는 `commitPreparedOwnership`·`materialize`는 `@panic`이다 |
 
-둘 다 **`UnsupportedPtySession`과의 대조로는 잡히지 않는다** — 그 스텁에도 같은 멤버가 없기 때문이다.
-표면 대조는 "스텁"이 아니라 **app 레이어가 실제로 부르는 것의 합집합**을 기준으로 해야 한다.
+**exec-restore를 왜 이식하지 않았나.** macOS는 host가 자기 자신을 `execve`로 갈아끼우며 상속된 PTY master
+**fd**를 새 이미지가 주워 계속 쓴다. Windows에는 `execve`가 없고(자기 교체가 아니라 새 프로세스 생성),
+핸들 상속(`bInheritHandles`)은 되지만 ConPTY의 `HPCON` 소유 관계가 다르다. **별도 설계**이고 세션 호스트를
+Windows로 옮길 때 함께 정한다. 지금 조용히 되는 척하면 이식하는 사람이 그 결정을 잊은 채 반쪽 동작을 얻는다.
+
+**표면 대조는 스텁이 아니라 "app 레이어가 실제로 부르는 것의 합집합"을 기준으로 해야 한다** — 둘 다
+`UnsupportedPtySession`과의 대조로는 안 잡혔다(그 스텁에도 같은 멤버가 없다). 그래서 그 합집합을
+`app/live_pty.zig`의 테스트 *"중립 레이어가 요구하는 PTY 표면이 두 백엔드에 다 있다"* 가 **컴파일 시점에**
+고정한다 — 참조만 해도 의미 분석이 도므로, CI에 Windows 러너가 없어도 `zig build test -Dtarget=…`가
+계약을 지킨다. 대조군으로 별칭을 되돌리면 정확히 그 자리에서 깨진다 — POSIX 갈래를 깨 보면 `live_pty.zig`뿐 아니라
+`session_host/runtime_manager.zig:362`까지 컴파일 오류가 난다. **"회귀 0"이 말뿐이 아니라 강제된다**는 뜻이다.
+
+합집합이 실제로 완전한지는 기계로 확인했다 — 중립 레이어가 `self.session.<name>`으로 부르는 이름 14개
+(`childPid`·`close`·`commitPreparedOwnership`·`deinit`·`readChunk`·`readEvent`·`reapAfterEof`·`reapIfExited`·
+`resize`·`revalidatePreparedOwnership`·`signalWrite`·`upgradeEligible`·`waitIo`·`writeInputNonBlocking`)가
+Windows 백엔드에 **전부 있다**(빠진 것 0).
 
 **`writeInputNonBlocking`의 반환값 의미가 fence 계약과 어긋난다.** `pty_reader`의 `drainedAtFence()`는
 `enqueued_total == consumed_total`을 "admitted outbound가 **실제로 PTY에 써졌다**"는 경계로 쓰는데, 이

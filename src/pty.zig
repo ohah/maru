@@ -8,6 +8,7 @@ pub const windows_spawn = @import("pty/windows_spawn.zig");
 /// Win32 심볼이 없어 모든 타깃에서 컴파일되고, 그래야 그 규칙이 macOS·Linux CI에서도 검증된다.
 pub const windows_integration = @import("pty/windows_integration.zig");
 
+pub const ChildPid = types.ChildPid; // 자식 pid의 중립 이름 — POSIX는 std.c.pid_t 그대로, Windows는 u32(계약 §4)
 pub const Backend = types.Backend;
 pub const ExitStatus = types.ExitStatus;
 pub const PtyEvent = types.PtyEvent;

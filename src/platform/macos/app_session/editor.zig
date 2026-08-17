@@ -470,7 +470,11 @@ pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
     const total: usize = if (term.rt.editor_diff) |st|
         (if (st.view == .compare) st.left_texts.len else 0)
     else
-        term.rt.editor_lines.len;
+        // **`first_line`은 보이는 배열의 첨자다**(렌더가 그 배열과 이 값을 함께 받는다). 문서 줄
+        // 수로 상한을 잡으면 접혔을 때 배열 밖으로 나간다 — 12만 줄을 접고 튕기면 **50,000**까지
+        // 갔다(보이는 줄은 40,000). 그리기 직전 clamp가 화면은 가려 주지만, 그 사이에 이 값을 읽는
+        // 쪽이 생기면 범위 밖이다. `clampScrollToGeometry`와 **같은 출처**를 쓴다.
+        editorLines(term).len;
     if (total == 0) return true;
 
     // **마지막 화면이 비지 않게 멈춘다.** 끝을 넘겨 스크롤하게 두면 배경만 남은 화면이 나오고,
@@ -3210,4 +3214,36 @@ test "접혀도 gutter 폭은 문서 줄 수로 잡는다 — 번호는 원래 �
     }
     try testing.expect(content_left != std.math.maxInt(u16)); // 머리 줄이 실제로 그려졌다
     try testing.expectEqual(want_left, content_left);
+}
+
+test "접고 튕겨도 first_line은 보이는 배열 안에 있다" {
+    // `first_line`은 렌더가 함께 받는 **보이는 배열의 첨자**다. 상한을 문서 줄 수로 잡으면 접혔을 때
+    // 배열 밖으로 나간다. 그리기 직전 clamp가 화면은 가려 주므로 **화면으로는 안 드러난다** — 값
+    // 자체를 본다. 고치기 전: 40,000줄만 보이는데 `first_line`이 50,000이었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const n = 120_000;
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
+    for (0..n / 3) |b| {
+        lines[b * 3] = "h:";
+        lines[b * 3 + 1] = "  a";
+        lines[b * 3 + 2] = "  b";
+    }
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+    try testing.expect(foldAll(fx.session));
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+
+    // 한 프레임 안에 휠이 여러 번 온다(빠른 튕김) — 렌더는 사이에 안 돈다.
+    for (0..50) |_| _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1000);
+    const visible = fx.term.rt.editor_visible_lines.len;
+    try testing.expectEqual(@as(usize, n / 3), visible); // 접힘이 실제로 갈렸다 — 아니면 공허하다
+    try testing.expect(fx.term.rt.editor_first_line < visible);
 }

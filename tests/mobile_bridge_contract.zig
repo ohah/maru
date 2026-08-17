@@ -1716,26 +1716,83 @@ test "톱니 히트는 손가락 기준을 넘는다" {
     bridge.maru_mobile_clear_error();
 }
 
-// **톱니를 안 짚은 down 은 chrome 이 안 먹는다.** 남아 있던 상태 때문에 아무 데나 먹으면 그
-// 손짓이 통째로 사라진다(코드 리뷰가 잡은 결함). 잡았다 취소한 뒤에도 같아야 한다.
-test "터미널 화면에서는 chrome 이 아무것도 안 먹는다" {
-    // **계약이 바뀌었다**(U3b): 터미널 화면에는 chrome 이 없다. 하단 44px 바를 걷어내면서
-    // 설정 입구가 부모 화면으로 갔고, 그래서 본문·키바가 모든 터치를 받는다. 전에는 "톱니
-    // 밖 down 은 안 먹는다" 가 계약이었고 그 자리를 이것이 대신한다.
+// **터미널 화면의 chrome 은 상단 앱 바 하나뿐이다.** 그 띠 밖은 chrome 이 안 먹는다 —
+// 남아 있던 상태 때문에 아무 데나 먹으면 그 손짓이 통째로 사라진다(코드 리뷰가 잡은 결함).
+// 계약이 두 번 바뀐 자리다: "톱니 밖은 안 먹는다"(U3a) → "아무것도 안 먹는다"(U3b) →
+// **"뒤로가기만 먹는다"**(A — 돌아갈 길이 보여야 한다).
+test "터미널 화면에서 chrome 은 뒤로가기만 먹는다" {
     openTerminal(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+
+    const back = bridge.terminalBackCenter();
+    try std.testing.expect(back.x > 0 and back.y > 0);
+
     var y: f32 = 0;
     while (y < 874) : (y += 37) {
         var x: f32 = 0;
         while (x < 402) : (x += 53) {
-            // **재려는 것은 "chrome 이 안 먹는다" 다.** 진입점이 하나가 되면서 반환값이
-            // 사라졌으므로 목적지를 직접 묻는다. `body` 를 기대하면 안 된다 — **키바 밴드도 이
-            // 화면에 있어서** 그 자리는 `keybar` 가 맞다(그렇게 적었다가 걸렀다).
             bridge.maru_mobile_pointer(0, 1, x, y, now());
-            try std.testing.expect(!std.mem.eql(u8, "chrome", bridge.currentRouteName()));
+            const on_back = bridge.terminalBackHitAt(x, y);
+            const is_chrome = std.mem.eql(u8, "chrome", bridge.currentRouteName());
+            // 뒤로가기 자리면 chrome 이, 아니면 키바·본문이 받는다.
+            try std.testing.expectEqual(on_back, is_chrome);
             bridge.maru_mobile_pointer(3, 1, x, y, now());
         }
     }
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
+// **눌러서 돌아간다.** 가장자리 스와이프는 그대로 두되(보이지 않는 길이다) 보이는 길을 만든 것이
+// 이 버튼이다 — 누르면 눌린 티가 나고, 떼면 화면이 한 장 빠진다.
+test "터미널 앱 바의 뒤로가기로 목록에 돌아간다" {
+    openTerminal(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const back = bridge.terminalBackCenter();
+
+    bridge.maru_mobile_pointer(0, 91, back.x, back.y, now());
+    try std.testing.expect(bridge.terminalBackPressed()); // 누르는 즉시 보여 준다(§2.4)
+    bridge.maru_mobile_pointer(2, 91, back.x, back.y, now());
+    try std.testing.expect(!bridge.terminalBackPressed());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+
+    endAnyGesture();
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
+// **밀면 안 돌아간다.** 버튼 위에서 시작했어도 밀기로 바뀌면 그 손짓은 누른 것이 아니다
+// (다른 화면과 같은 규칙 — 이 표면도 `Press` 를 쓴다).
+test "터미널 뒤로가기에서 밀면 화면이 안 바뀐다" {
+    openTerminal(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const back = bridge.terminalBackCenter();
+
+    bridge.maru_mobile_pointer(0, 92, back.x, back.y, now());
+    try std.testing.expect(bridge.terminalBackPressed());
+    bridge.maru_mobile_pointer(1, 92, back.x + 40, back.y + 40, now());
+    try std.testing.expect(!bridge.terminalBackPressed()); // 밀기 시작하면 표시를 거둔다
+    bridge.maru_mobile_pointer(2, 92, back.x + 40, back.y + 40, now());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
+// **앱 바가 자리를 먹으면 본문이 그만큼 줄어든다.** 격자 재계산이 안 따라오면 화면 밖에 줄이
+// 그려지거나(잘림) 마지막 줄이 바 밑에 깔린다.
+test "앱 바가 생긴 만큼 본문 줄이 줄어든다" {
+    openTerminal(402, 874);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_now = bridge.bodyRowCount();
+    // 바 높이(52)를 줄 높이(22)로 나눈 만큼은 줄었어야 한다 — 정확히 두 줄 이상.
+    const rows_taller = blk: {
+        _ = bridge.maru_mobile_build(402, 874 + 52, now());
+        break :blk bridge.bodyRowCount();
+    };
+    try std.testing.expect(rows_taller > rows_now);
+    _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 }
 

@@ -133,6 +133,10 @@ pub const Cipher = struct {
     /// 태그를 검사하고 몸통을 푼다. `buf` 는 **길이 4 + 몸통 + 태그 16** 전부다.
     ///
     /// 돌려주는 것은 `out` 안의 payload(메시지 번호부터)다. **태그가 안 맞으면 아무것도 안 푼다.**
+    ///
+    /// **`out` 과 `buf` 는 겹치면 안 된다.** 수신 버퍼 안에서 제자리로 풀고 싶어지는데, 두 슬라이스가
+    /// 4바이트 어긋난 채 겹치므로 스트림 암호가 아직 안 읽은 바이트를 덮어 쓴다 — 제자리 복호는
+    /// **같은 오프셋**일 때만 안전하고 여기는 그 경우가 아니다(`packet.write` 주석과 같은 결).
     pub fn open(self: Cipher, out: []u8, seq: u32, buf: []const u8) Error![]const u8 {
         if (buf.len < length_len + 1 + min_padding + tag_len) return Error.MalformedPacket;
         const body_len = buf.len - length_len - tag_len;
@@ -371,6 +375,50 @@ test "인증됐어도 패딩 규칙을 어긴 패킷은 거절한다" {
         var plain: [64]u8 = undefined;
         try std.testing.expectError(Error.MalformedPacket, cipher.open(&plain, 31, &buf));
     }
+}
+
+test "seal 은 버퍼와 상한을 먼저 본다" {
+    // **둘 다 아무 테스트도 안 잡던 자리다**(변이로 확인했다). 버퍼 검사를 지우면 `seal` 이
+    // **버퍼 밖에 쓴다** — 조용한 메모리 손상이고, 정상 경로만 시험하면 영원히 안 보인다.
+    var prng = std.Random.DefaultPrng.init(22);
+    var cipher = Cipher.init(vector.key);
+
+    // 딱 한 바이트 모자란 버퍼.
+    const need = Cipher.sealedLen(5);
+    var tight: [128]u8 = undefined;
+    try std.testing.expectError(Error.ShortBuffer, cipher.seal(tight[0 .. need - 1], 0, "hello", prng.random()));
+    // 딱 맞으면 된다 — 위가 "무조건 실패" 가 아님을 못박는다.
+    try std.testing.expectEqual(need, try cipher.seal(tight[0..need], 0, "hello", prng.random()));
+
+    // 상한을 넘는 payload 는 **버퍼를 잡기 전에** 거절한다. 채널 데이터는 커질 수 있으므로
+    // 실제로 닿는 경로다(상위가 쪼개야 한다는 뜻이기도 하다).
+    const huge = try std.testing.allocator.alloc(u8, packet.max_packet);
+    defer std.testing.allocator.free(huge);
+    @memset(huge, 0x41);
+    const out = try std.testing.allocator.alloc(u8, packet.max_packet + 64);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectError(Error.PacketTooLarge, cipher.seal(out, 0, huge, prng.random()));
+
+    // 상한 바로 아래는 통과한다 — 경계를 양쪽에서 잰다.
+    const fits = packet.max_packet - length_len - 1 - min_padding - block_size;
+    _ = try cipher.seal(out, 0, huge[0..fits], prng.random());
+}
+
+test "버퍼 길이가 길이 필드와 안 맞으면 태그가 잡는다" {
+    // 호출자가 `decryptLength` 로 잰 만큼 읽어 넘겨야 하는데, 어긋난 길이를 넘기면 어떻게 되나.
+    // 태그는 **암호화된 길이 필드까지** 덮으므로 그 불일치가 곧 태그 불일치로 나타난다 —
+    // 즉 따로 검사를 넣을 필요가 없고, 그 사실을 여기서 못박는다(넣었다면 헛방어였다).
+    var prng = std.Random.DefaultPrng.init(23);
+    var cipher = Cipher.init(vector.key);
+    var out: [256]u8 = undefined;
+    var plain: [256]u8 = undefined;
+    const n = try cipher.seal(&out, 4, "length must match", prng.random());
+
+    // 몸통을 8바이트 더 있다고 속인다(배수는 유지해 프레이밍 검사를 통과시킨다).
+    @memset(out[n..][0..block_size], 0);
+    try std.testing.expectError(Error.BadTag, cipher.open(&plain, 4, out[0 .. n + block_size]));
+    // 8바이트 덜 있다고 속인다.
+    try std.testing.expectError(Error.BadTag, cipher.open(&plain, 4, out[0 .. n - block_size]));
 }
 
 test "키가 다르면 안 풀린다" {

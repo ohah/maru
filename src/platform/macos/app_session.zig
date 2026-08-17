@@ -3742,6 +3742,15 @@ pub const AppSession = struct {
     ///
     /// 경로·브랜치 문자열은 세션 소유다(읽기 결과 버퍼는 프레임마다 사라진다).
     scm_repo_status: std.ArrayList(RepoStatusEntry) = .empty,
+    /// 이 프레임에 그린 **커밋 상자들의 published 노드 id**(목록 자리 = 저장소 자리로 색인). 상자가
+    /// 저장소마다 하나씩이라 고정 id가 없고(②b), 창이 스크롤되면 같은 상자의 id가 달라진다 —
+    /// 그리는 쪽이 매 프레임 다시 적는다.
+    ///
+    /// **첫 클릭에도 필요하다**: 그 클릭이 caret을 놓으려면 아직 포커스가 없는 상자의 rect를 알아야 한다.
+    scm_commit_box_nodes: [maru.session.scm_repos.max_entries]?u64 = @splat(null),
+    /// intent가 든 목록 자리를 경로로 되찾을 때 쓰는 자리(프레임 안에서만 유효). 목록 버퍼는 arena
+    /// 것이라 호출이 끝나면 사라진다 — 그 슬라이스를 그대로 들면 댕글링이다.
+    scm_repo_path_scratch: [std.fs.max_path_bytes]u8 = undefined,
     /// 도는 머리 줄 읽기의 request id(0 = 없음). **하나씩 돈다** — 목록이 여덟이어도 프로세스는 하나다.
     scm_repo_status_inflight: u64 = 0,
     scm_repo_status_seq: u64 = 0,
@@ -3760,8 +3769,12 @@ pub const AppSession = struct {
     /// 커밋 메시지 편집 상태(P3c). **`TextField`를 그대로 쓴다** — caret·선택이 바이트 오프셋이라
     /// 개행이 섞여도 성립하고, 세로 축만 `text_area`가 얹는다(text-field-editor.md §12.1).
     scm_commit_field: chrome.components.text_field.TextField = .{},
-    /// 커밋 상자가 키를 받고 있나. `InputFocus.scm_commit`의 유일한 근거다.
-    scm_commit_focused: bool = false,
+    /// **어느 저장소의 커밋 상자**가 키를 받고 있나(경로, 세션 소유). null이면 아무 상자도 편집 중이
+    /// 아니다. `InputFocus.scm_commit`의 유일한 근거다.
+    ///
+    /// 상자가 저장소마다 하나씩이므로(②b) 플래그로는 부족하다 — "편집 중"만 알면 **어느 상자에 글자가
+    /// 가는지**를 두 번째 개념이 정하게 되고, 그러면 사용자가 보는 곳과 글자가 가는 곳이 갈린다.
+    scm_commit_focus_repo: ?[]u8 = null,
     /// 지금 도는 쓰기가 **커밋**인가. `scm_write_inflight`만으로는 스테이지와 커밋을 못 가른다 —
     /// 화면 문구("커밋 중"·"오래 걸리는 중")와 메시지 파일 정리가 이 구분을 쓴다.
     scm_commit_inflight: bool = false,
@@ -9300,7 +9313,7 @@ pub const AppSession = struct {
     /// 게이트**를 쓰게 하는 단일 출처다(Session Dock 검색과 같은 규율) — 플래그만 보면 도크를 닫거나
     /// 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이 first responder를 요구한다.
     pub fn scmCommitOwnsInput(self: *const AppSession) bool {
-        return self.scm_commit_focused and dock_ops.dockVisible(self) and self.dock.view == .source_control;
+        return self.scm_commit_focus_repo != null and dock_ops.dockVisible(self) and self.dock.view == .source_control;
     }
 
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
@@ -16916,6 +16929,7 @@ pub const AppSession = struct {
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
+        if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);
@@ -54449,7 +54463,7 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
         .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
         .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
     });
-    scm_dock_ops.publishScmDockFrame(session, frame);
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
 
     const content = dock_ops.dockGeometry(session).tree_content;
     const rowCenter = struct {
@@ -54466,9 +54480,9 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
         }
     }.at;
 
-    // 0=저장소 머리 줄(P3d), 1=그룹 헤더, 2=one.txt, 3=two.txt
-    const first = rowCenter(session, 2, content.x, content.y);
-    const second = rowCenter(session, 3, content.x, content.y);
+    // 0=머리 줄 · 1=커밋 입력 · 2=커밋 버튼(②b) · 3=그룹 헤더 · **4=one.txt · 5=two.txt**
+    const first = rowCenter(session, 4, content.x, content.y);
+    const second = rowCenter(session, 5, content.x, content.y);
     try std.testing.expect(first.y > 0 and second.y > first.y);
 
     // **down은 무장, up이 적용**이다 — 실제 클릭과 같은 순서로 보낸다.
@@ -54485,7 +54499,7 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
     try std.testing.expectEqual(@as(usize, 2), diffs);
 
     // 그룹 헤더를 누르면 접힌다(열기가 아니다).
-    const header = rowCenter(session, 1, content.x, content.y);
+    const header = rowCenter(session, 3, content.x, content.y);
     session.mouse(1, header.x, header.y, 0, 0);
     session.mouse(3, header.x, header.y, 0, 0);
     try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
@@ -54529,7 +54543,7 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
         .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
         .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
     });
-    scm_dock_ops.publishScmDockFrame(session, frame);
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
 
     const content = dock_ops.dockGeometry(session).tree_content;
     const rectOf = struct {
@@ -54539,9 +54553,9 @@ test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클
         }
     }.at;
 
-    // 0=저장소 머리 줄(P3d), 1=그룹 헤더. 동작 버튼은 그 행의 차선에 있으므로 같은 인덱스를 쓴다.
-    const header = rectOf(session, chrome.components.scm_dock.build.NodeIds.item(1)) orelse return error.MissingHeader;
-    const bulk = rectOf(session, chrome.components.scm_dock.build.NodeIds.itemAction(1)) orelse return error.MissingBulk;
+    // 0=저장소 머리 줄 · 1=커밋 입력 · 2=커밋 버튼(②b) · **3=그룹 헤더**. 동작 버튼은 그 행의 차선이다.
+    const header = rectOf(session, chrome.components.scm_dock.build.NodeIds.item(3)) orelse return error.MissingHeader;
+    const bulk = rectOf(session, chrome.components.scm_dock.build.NodeIds.itemAction(3)) orelse return error.MissingBulk;
 
     // ① 버튼 한가운데 — **일괄 동작**이어야 한다(행이 삼키면 접힌다).
     const bx = @as(f64, @floatFromInt(content.x)) + bulk.x + bulk.width / 2;
@@ -54605,33 +54619,28 @@ fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, 
         .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
         .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
     });
-    scm_dock_ops.publishScmDockFrame(session, frame);
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
 }
 
 /// 커밋 상자 **바닥 여백** 안의 한 점.
 fn commitBoxPointBottom(session: *AppSession) !struct { x: f64, y: f64 } {
     const content = dock_ops.dockGeometry(session).tree_content;
-    for (session.scm_dock_entries.items) |entry| {
-        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
-        return .{
-            .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + 12,
-            .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height - 1,
-        };
-    }
-    return error.MissingCommitBox;
+    const rect = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
+    return .{
+        .x = @as(f64, @floatFromInt(content.x)) + rect.x + 12,
+        .y = @as(f64, @floatFromInt(content.y)) + rect.y + rect.height - 1,
+    };
 }
 
 /// 커밋 상자 rect의 한 점(도크 content 원점을 더한 창 좌표).
 fn commitBoxPoint(session: *AppSession, dx: f64, dy: f64) !struct { x: f64, y: f64 } {
     const content = dock_ops.dockGeometry(session).tree_content;
-    for (session.scm_dock_entries.items) |entry| {
-        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
-        return .{
-            .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + dx,
-            .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + dy,
-        };
-    }
-    return error.MissingCommitBox;
+    // **편집 중인 상자**를 쓴다 — 상자가 저장소마다 하나씩이라 고정 id가 없다(②b).
+    const rect = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
+    return .{
+        .x = @as(f64, @floatFromInt(content.x)) + rect.x + dx,
+        .y = @as(f64, @floatFromInt(content.y)) + rect.y + dy,
+    };
 }
 
 test "소스 컨트롤: 커밋 상자를 누르면 키가 그리로 간다 (P3c)" {
@@ -54664,7 +54673,7 @@ test "소스 컨트롤: 글자는 상자에 쌓이고 Enter는 줄을 바꾼다(
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     for ("fix") |c| _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = c, .mods = .{} } });
     try std.testing.expectEqualStrings("fix", session.scm_commit_field.text.items);
@@ -54690,7 +54699,7 @@ test "소스 컨트롤: 앱 단축키는 상자가 삼키지 않는다(편집도
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     for ("wip") |c| _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = c, .mods = .{} } });
 
     const consumed = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 's', .mods = .{ .command = true } } });
@@ -54711,12 +54720,12 @@ test "소스 컨트롤: 상자 밖을 누르면 편집을 뗀다" {
     const inside = try commitBoxPoint(session, 12, 6);
     session.mouse(1, inside.x, inside.y, 0, 0);
     session.mouse(3, inside.x, inside.y, 0, 0);
-    try std.testing.expect(session.scm_commit_focused);
+    try std.testing.expect(session.scm_commit_focus_repo != null);
 
     // 목록 쪽(상자 아래) 클릭 — 상자는 편집을 놓는다.
     const outside = try commitBoxPoint(session, 12, 400);
     session.mouse(1, outside.x, outside.y, 0, 0);
-    try std.testing.expect(!session.scm_commit_focused);
+    try std.testing.expect(session.scm_commit_focus_repo == null);
 }
 
 test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
@@ -54730,7 +54739,7 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     // 반주기가 **정확히 한 번** 지난 상태를 만든다(경과를 어림하면 소비한 반주기 수의 홀짝이
     // 달라져 위상 뒤집힘이 그때그때 갈린다 — 첫 판이 그래서 흔들렸다).
@@ -54758,7 +54767,7 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     try std.testing.expect(!session.metal_dirty); // 깜빡일 것이 없으니 다시 그릴 이유도 없다
 
     // props가 그 위상을 그대로 싣는다(component가 시간을 모르므로).
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
@@ -54930,7 +54939,7 @@ test "소스 컨트롤: 커밋 메시지 초안은 저장소마다 따로 든다
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     git_ops.rememberGitRepo(session, "/repo-a");
     scm_dock_ops.insertCommitText(session, "a의 메시지");
@@ -54963,7 +54972,7 @@ test "소스 컨트롤: 첫 읽기가 늦게 와도 쓰던 글이 사라지지 �
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     // 저장소를 알기 **전에** 쓴다. 픽스처가 이미 하나를 기억해 뒀으므로 **놓아 준 뒤** 비운다
     // (그냥 null로 덮으면 그 문자열이 샌다 — 누수 검사가 잡았다).
@@ -54990,7 +54999,7 @@ test "소스 컨트롤: 비운 초안은 남지 않는다(비운 것도 뜻이�
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     git_ops.rememberGitRepo(session, "/repo-a");
     scm_dock_ops.insertCommitText(session, "지울 글");
@@ -55017,10 +55026,14 @@ test "소스 컨트롤: 커밋할 수 없으면 그 이유를 말한다(빈 메�
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
+    // **어느 상자로 커밋하는가**가 먼저다(②b) — 포커스가 없으면 커밋 자체가 걸리지 않는다.
+    scm_dock_ops.submitCommit(session);
+    try std.testing.expect(session.scm_write_error == null); // 대상이 없으면 아무 일도 안 한다
+
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.submitCommit(session); // 메시지가 없다
     try std.testing.expectEqualStrings("커밋 메시지를 입력하세요", session.scm_write_error.?);
 
-    scm_dock_ops.focusCommit(session);
     scm_dock_ops.insertCommitText(session, "fix: 무언가");
     scm_dock_ops.submitCommit(session); // 스테이지된 것이 없다(fixture 목록은 `.M` 하나뿐)
     try std.testing.expectEqualStrings("스테이지된 변경이 없습니다", session.scm_write_error.?);
@@ -55055,7 +55068,7 @@ test "소스 컨트롤: 도크를 접으면 남은 조합이 확정된다(지울
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.setCommitPreedit(session, "한");
     try std.testing.expectEqualStrings("한", session.scm_commit_field.preedit.items);
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
@@ -55077,18 +55090,18 @@ test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 �
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.insertCommitText(session, "가나다");
 
     const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
     const cell: f64 = @floatFromInt(session.cell_width_px);
     // `가`(0~1열)의 **왼쪽 칸** 가운데를 누른다 → caret은 그 앞(0).
     const left = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 0.5, @floatFromInt(m.commit_pad_y + 2));
-    scm_dock_ops.focusCommitAt(session, left.x, left.y);
+    scm_dock_ops.focusCommitAt(session, 0, "/repo", left.x, left.y);
     try std.testing.expectEqual(@as(usize, 0), session.scm_commit_field.caret);
     // **오른쪽 칸**을 누르면 그 글자 뒤(3바이트).
     const right = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 1.5, @floatFromInt(m.commit_pad_y + 2));
-    scm_dock_ops.focusCommitAt(session, right.x, right.y);
+    scm_dock_ops.focusCommitAt(session, 0, "/repo", right.x, right.y);
     try std.testing.expectEqual(@as(usize, 3), session.scm_commit_field.caret);
 }
 
@@ -55103,13 +55116,13 @@ test "소스 컨트롤: 상자 아래 여백을 눌러도 보이는 줄 안에 c
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.insertCommitText(session, "one\ntwo");
     const before = session.scm_commit_first_row;
 
     // 상자 맨 아래(여백 안)를 누른다.
     const box = try commitBoxPointBottom(session);
-    scm_dock_ops.focusCommitAt(session, box.x, box.y);
+    scm_dock_ops.focusCommitAt(session, 0, "/repo", box.x, box.y);
     try std.testing.expectEqual(before, session.scm_commit_first_row); // 스크롤이 안 움직인다
     try std.testing.expect(session.scm_commit_field.caret <= "one\ntwo".len);
 }
@@ -55152,13 +55165,13 @@ test "소스 컨트롤: 커밋 상자 폭은 도크 content 폭과 같다(랩 �
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
     const content = dock_ops.dockGeometry(session).tree_content;
-    for (session.scm_dock_entries.items) |entry| {
-        if (entry.id != chrome.components.scm_dock.build.NodeIds.commit_box) continue;
-        try std.testing.expectEqual(@as(f32, 0), entry.rect.x);
-        try std.testing.expectEqual(@as(f32, @floatFromInt(content.w)), entry.rect.width);
-        return;
-    }
-    return error.MissingCommitBox;
+    const rect = scm_dock_ops.commitBoxRectAt(session, 0) orelse return error.MissingCommitBox;
+    try std.testing.expectEqual(@as(f32, 0), rect.x);
+    // **상자는 목록 줄이다**(②b) — 스크롤 영역이 오른쪽에 스크롤바 자리를 늘 비워 두므로 그만큼 좁다.
+    // 그 폭이 곧 랩의 입력이고, host가 같은 값을 써야 상자 높이와 실제 줄 수가 갈리지 않는다.
+    const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    const gutter = m.scrollbar_width + m.scrollbar_inset_x * 2;
+    try std.testing.expectEqual(@as(f32, @floatFromInt(content.w - gutter)), rect.width);
 }
 
 test "소스 컨트롤: 붙여넣기는 개행·탭을 남기고 CR·제어문자·손상 바이트를 버린다" {
@@ -55172,7 +55185,7 @@ test "소스 컨트롤: 붙여넣기는 개행·탭을 남기고 CR·제어문�
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
 
     // CRLF 클립보드 + ESC + DEL + 손상 UTF-8 lead 바이트.
     scm_dock_ops.insertCommitText(session, "fix: 제목\r\n\n\tbody\x1b\x7f\xff!");
@@ -55194,12 +55207,12 @@ test "소스 컨트롤: 도크 **밖**을 눌러도 편집이 풀린다" {
     const inside = try commitBoxPoint(session, 12, 6);
     session.mouse(1, inside.x, inside.y, 0, 0);
     session.mouse(3, inside.x, inside.y, 0, 0);
-    try std.testing.expect(session.scm_commit_focused);
+    try std.testing.expect(session.scm_commit_focus_repo != null);
 
     // 터미널 본문(도크 왼쪽)을 누른다.
     const term_rect = dock_ops.dockGeometry(session).terminal;
     session.mouse(1, @as(f64, @floatFromInt(term_rect.x + term_rect.w / 2)), @as(f64, @floatFromInt(term_rect.y + term_rect.h / 2)), 0, 0);
-    try std.testing.expect(!session.scm_commit_focused);
+    try std.testing.expect(session.scm_commit_focus_repo == null);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
 
@@ -55216,7 +55229,7 @@ test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
     const before = scm_dock_ops.scrollExtent(session).viewport_h_px;
-    scm_dock_ops.focusCommit(session);
+    scm_dock_ops.focusCommitRepo(session, "/repo");
     _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{} } });
     _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .enter, .mods = .{} } });
     _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'b', .mods = .{} } });
@@ -55256,9 +55269,12 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-    // 저장소 머리 줄 하나만 있고 **파일 줄은 없다**(P3d — 목록의 첫 층이 저장소다).
-    try std.testing.expectEqual(@as(usize, 1), projection.items.len);
+    // 머리 줄 + 커밋 줄 둘뿐이고 **파일 줄은 없다**(P3d·②b — 목록의 첫 층이 저장소이고 상자는 그
+    // 그룹 안에 산다). 변경이 없어도 상자는 선다 — 커밋할 것이 없다는 사실은 버튼 색이 말한다.
+    try std.testing.expectEqual(@as(usize, 3), projection.items.len);
     try std.testing.expect(projection.items[0] == .repo);
+    try std.testing.expect(projection.items[1] == .commit_box);
+    try std.testing.expect(projection.items[2] == .commit_button);
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqualStrings(git_ops.notice_no_changes, props.empty_notice);
 
@@ -55331,14 +55347,14 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
         .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
         .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
     });
-    scm_dock_ops.publishScmDockFrame(session, frame);
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
 
     const content = dock_ops.dockGeometry(session).tree_content;
     // 2번 행(`two.txt`)의 **동작 버튼** rect를 찾는다. 행 rect가 아니라 버튼 rect여야 `+`를 누른 것이다.
     const button = blk: {
         for (session.scm_dock_entries.items) |entry| {
-            // 0=저장소 머리 줄(P3d) · 1=그룹 헤더 · 2=one.txt · **3=two.txt**.
-            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(3)) continue;
+            // 0=머리 줄 · 1=커밋 입력 · 2=커밋 버튼 · 3=그룹 헤더 · 4=one.txt · **5=two.txt**.
+            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(5)) continue;
             break :blk .{
                 .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + entry.rect.width / 2,
                 .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height / 2,
@@ -55356,7 +55372,8 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
     }
 
     // 충돌이 아닌 변경 사항 행이므로 방향은 스테이지다(모델이 판정한 값을 host가 그대로 옮긴다).
-    try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.stage, props.items[2].file.action);
+    // 0=머리 줄 · 1=커밋 입력 · 2=커밋 버튼(②b) · 3=그룹 헤더 · 4=one.txt · **5=two.txt**
+    try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.stage, props.items[5].file.action);
 }
 
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.
@@ -57034,7 +57051,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
             session.dock.presented = true;
             session.dock.collapsed = false;
             dock_ops.setDockView(session, .source_control);
-            scm_dock_ops.focusCommit(session);
+            scm_dock_ops.focusCommitRepo(session, "/repo");
         },
         .file_tree => session.focus_owner = .{ .file_tree = .{ .restore_surface = null } },
         .agent_session_search => {

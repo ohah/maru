@@ -66,6 +66,30 @@ pub const FileItem = struct {
 
 pub const MoreItem = struct { section: Section, hidden: u32 };
 
+/// 저장소 하나의 **커밋 입력 상자**. 목록 안에 산다(§3.5.1c) — 그룹마다 자기 상자를 갖는다.
+///
+/// **고정 chrome에서 목록으로 내려온 이유**: 상자가 하나면 "지금 어느 저장소로 커밋하는가"가 화면에
+/// 없다. 사용자가 두 저장소를 열어 둔 채 아래 그룹의 파일을 보고 있어도, 위에 떠 있는 상자는 다른
+/// 저장소의 것일 수 있다 — 그 어긋남은 **잘못된 저장소에 커밋**으로 끝난다.
+pub const CommitBoxItem = struct {
+    /// 어느 저장소의 상자인가(목록 기준 — 머리 줄과 같은 축).
+    repo_index: u32,
+    /// 보여 줄 **시각 행** 수(host가 랩해서 정한다).
+    rows: u32 = 1,
+    /// 상자에 그릴 글자(조합 중이면 그것이 끼워진 표시 텍스트).
+    text: []const u8 = "",
+    /// 편집 상태. **포커스는 상자마다 다르다** — 여럿이 동시에 caret을 갖지 않는다.
+    edit: CommitEdit = .{},
+};
+
+/// 저장소 하나의 **커밋 버튼**. 상자 바로 아래 줄이다.
+pub const CommitButtonItem = struct {
+    repo_index: u32,
+    /// 실제 index 상태로만 켠다(쓰기 문서 §7 — 낙관하지 않는다).
+    enabled: bool = false,
+    run: CommitRun = .idle,
+};
+
 /// 저장소·워크트리 하나의 **머리 줄**(§3.5.1c). 목록의 단위가 저장소가 아니라 워크트리이므로 이 행
 /// 하나가 곧 한 워크트리다.
 ///
@@ -98,6 +122,10 @@ pub const RepoItem = struct {
 pub const Item = union(enum) {
     /// 저장소·워크트리 머리 줄. **목록의 첫 층**이고, 그 아래에 그 저장소의 줄들이 온다.
     repo: RepoItem,
+    /// 그 저장소의 커밋 입력 상자(머리 줄 바로 아래).
+    commit_box: CommitBoxItem,
+    /// 그 저장소의 커밋 버튼(상자 바로 아래).
+    commit_button: CommitButtonItem,
     section: SectionItem,
     file: FileItem,
     more: MoreItem,
@@ -302,6 +330,9 @@ pub const DockMetrics = struct {
             // 머리 줄은 그룹 헤더보다 한 급 크다 — 이름·브랜치 칩이 함께 서고, 목록의 첫 층이라
             // 눈이 여기서 끊겨야 저장소 경계가 보인다.
             .repo => self.repo_h,
+            .commit_box => |box| self.commitBoxHeight(box.rows),
+            // 버튼 아래 여백까지 이 행이 갖는다 — 다음 줄(요약·그룹 헤더)과 붙지 않게.
+            .commit_button => self.commit_button_h + self.commit_pad_y,
             .section => self.section_h,
             .file => self.row_h,
             // "모두 보기"와 안내는 파일 행과 같은 높이를 쓴다(줄이 하나이므로).

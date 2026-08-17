@@ -57,23 +57,30 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 커밋 버튼 2(라벨·`∨`) +
-    // 호버 동작 1 + 빈 안내 1. **커밋 입력은 시각 행마다 한 조각**이라 아래에서 따로 더한다.
-    var text_ops: usize = 11 + @max(props.commit_rows, 1);
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1 + 빈 안내 1.
+    // **커밋 줄은 고정이 아니다**(②b) — 저장소마다 하나씩이라 아래 항목 루프가 센다.
+    var text_ops: usize = 10;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
     bytes += props.empty_notice.len;
-    // 커밋 줄. 입력은 안내 문구와 본문 중 **긴 쪽**만 나간다(둘 중 하나만 그린다).
-    bytes += @max(commit_placeholder.len, props.commit_message.len) + icon_bytes +
-        @max(commit_label.len, @max(commit_running_label.len, commit_slow_label.len));
 
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
         .repo => |repo| {
             text_ops += 5;
             bytes += icon_bytes * 2 + repo.name.len + @max(repo.branch.len, repo_pending_label.len) + count_digits;
+        },
+        // 입력은 **시각 행마다 한 조각**이고, 글자는 안내 문구와 본문 중 긴 쪽만 나간다.
+        .commit_box => |box| {
+            text_ops += @max(box.rows, 1);
+            bytes += @max(commit_placeholder.len, box.text.len);
+        },
+        // 라벨 + `∨`.
+        .commit_button => {
+            text_ops += 2;
+            bytes += icon_bytes + @max(commit_label.len, @max(commit_running_label.len, commit_slow_label.len));
         },
         // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
         .file => |file| {
@@ -101,10 +108,24 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     return .{
         // quad = entry당 배경(ui_paint) + 그룹 개수 배지(행당 최대 하나) + 활성 탭 밑줄 하나 +
         // **커밋 상자의 선택 밴드(시각 행당 최대 하나) + caret 하나**.
-        .ops = entry_count + props.items.len + 1 + @max(props.commit_rows, 1) + 1 + text_ops,
+        // quad = entry당 배경 + 배지(행당 최대 하나) + 활성 탭 밑줄 + **커밋 상자의 선택 밴드와 caret**
+        // (상자는 여럿일 수 있지만 **포커스는 하나**라 밴드는 그 상자의 시각 행 수, caret은 하나다).
+        .ops = entry_count + props.items.len + 1 + commitBandBudget(props.items) + 1 + text_ops,
         .runs = text_ops,
         .text_bytes = bytes,
     };
+}
+
+/// 선택 밴드 예산. **포커스된 상자 하나**만 밴드를 그리므로 그 상자의 시각 행 수면 충분하다.
+fn commitBandBudget(items: []const types.Item) usize {
+    var max: usize = 1;
+    for (items) |item| switch (item) {
+        .commit_box => |box| {
+            if (box.edit.focused) max = @max(max, @as(usize, @max(box.rows, 1)));
+        },
+        else => {},
+    };
+    return max;
 }
 
 /// u32 십진 최대 자릿수.
@@ -164,6 +185,8 @@ pub fn view(
         writer.active_clip = clipRectOf(row);
         switch (item) {
             .repo => |repo| try writer.repoRow(row, repo, m),
+            .commit_box => |box| try writer.commitBox(row, box, m),
+            .commit_button => |button| try writer.commitButton(row, button, state, tk, m),
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
             .more => |more| {
@@ -214,27 +237,7 @@ pub fn view(
         }
     }
 
-    // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 아래).
-    if (frame.tree.find(build.NodeIds.commit_box)) |index| {
-        try writer.commitBox(frame.tree.entries[index], m);
-    }
-    if (frame.tree.find(build.NodeIds.commit_button)) |index| {
-        const rect = frame.tree.entries[index];
-        // **활성 여부는 실제 index 상태가 정한다**(§7 — 낙관하지 않는다). 스테이지된 것이 없으면 커밋할
-        // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
-        // 라벨은 **가운데**다(채운 버튼의 관례 — 오른쪽 끝에 붙이면 그 넓은 면이 왜 칠해졌는지 안 보인다).
-        const role = commitLabelRole(rect, state, tk, props.commit_enabled);
-        // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
-        // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
-        const label = switch (props.commit_run) {
-            .idle => commit_label,
-            .running => commit_running_label,
-            .slow => commit_slow_label,
-        };
-        try writer.centered(rect, label, role, .control);
-        // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다(P3c 이후). 지금은 그 자리를 말만 한다.
-        try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
-    }
+    // **커밋 입력·버튼은 여기 없다**(②b) — 저장소마다 하나씩이라 목록 줄로 내려갔다(위 루프).
 
     // `ChromeDraw`는 layer와 op 슬라이스만 든다 — run·text 바이트는 op이 빌려 가리키므로 호출자가
     // 준 버퍼의 수명이 곧 그 슬라이스의 수명이다(Session Dock과 같은 계약).
@@ -299,7 +302,8 @@ fn sectionTitle(section: types.Section) []const u8 {
 /// 저장소 머리 줄 말고 **내용이 있는 줄**이 있나.
 fn hasContentRows(items: []const types.Item) bool {
     for (items) |item| switch (item) {
-        .repo => {},
+        // 머리 줄·커밋 줄은 "그 저장소에 변경이 있다"는 뜻이 아니다 — 빈 저장소에도 상자는 선다.
+        .repo, .commit_box, .commit_button => {},
         else => return true,
     };
     return false;
@@ -309,7 +313,7 @@ fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
         .section => |section| section.action,
         .file => |file| file.action,
-        .repo, .more, .notice => .none,
+        .repo, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
 
@@ -686,10 +690,9 @@ const Writer = struct {
     ///
     /// **가로 축은 `text_field.fieldLayout`이 소유한다**(§12.1). caret 열과 선택 span을 여기서 다시
     /// 풀면 "그려진 caret == 클릭 caret" 불변식이 두 벌이 되고, 그 둘은 주소창이 이미 지키고 있다.
-    fn commitBox(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
-        const props = self.props;
-        const edit = props.commit_edit;
-        const scale = effectiveScale(props.scale_milli);
+    fn commitBox(self: *Writer, rect: tree.RectEntry, item: types.CommitBoxItem, m: types.DockMetrics) ViewError!void {
+        const edit = item.edit;
+        const scale = effectiveScale(self.props.scale_milli);
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
         const pad_y: f32 = @floatFromInt(m.commit_pad_y);
         const inset: f32 = @floatFromInt(m.inset_x);
@@ -698,7 +701,7 @@ const Writer = struct {
         // 빈 상자에는 **안내 문구**를 흐리게 둔다. 빈 채로 두면 어디를 눌러야 할지 알 수 없고, 그 자리가
         // 입력란이라는 사실이 화면에 없다. 편집 중이어도 비어 있으면 그대로 둔다 — caret이 그 위에 서서
         // 두 사실(여기가 입력란이다 / 지금 여기로 글자가 간다)을 함께 말한다.
-        if (props.commit_message.len == 0) {
+        if (item.text.len == 0) {
             try self.topLine(rect, inset, pad_y, commit_placeholder, .muted_fg, .control);
             if (edit.focused and edit.caret_visible) try self.commitCaret(rect, m, 0, 0, line_h);
             return;
@@ -706,15 +709,15 @@ const Writer = struct {
 
         var lines_buf: [commit_wrap_max_rows]text_area.VisualLine = undefined;
         const cols = m.commitViewCols(rect.rect.width, self.cell_width_px);
-        const wrapped = text_area.wrap(props.commit_message, cols, true, &lines_buf);
+        const wrapped = text_area.wrap(item.text, cols, true, &lines_buf);
         if (wrapped.lines.len == 0) return;
 
-        const field: text_field.View = .{ .text = props.commit_message, .caret = edit.caret };
+        const field: text_field.View = .{ .text = item.text, .caret = edit.caret };
         const caret_row = text_area.lineAt(wrapped, edit.caret);
         // 첫 행이 내용을 넘어서면(메시지가 줄어든 뒤 스크롤이 남았다) 마지막 행에 붙인다 — 빈 상자를
         // 보여 주는 것보다 낫다. 스크롤을 실제로 되돌리는 것은 host의 일이다(상태는 그쪽에 있다).
         const first: usize = @min(@as(usize, edit.first_row), wrapped.lines.len - 1);
-        const visible = @min(@as(usize, @max(props.commit_rows, 1)), wrapped.lines.len - first);
+        const visible = @min(@as(usize, @max(item.rows, 1)), wrapped.lines.len - first);
         const width = rect.rect.width - inset * 2;
 
         for (0..visible) |offset| {
@@ -761,6 +764,32 @@ const Writer = struct {
                 try self.commitCaret(rect, m, lay.caret_col, offset, line_h);
             }
         }
+    }
+
+    /// 커밋 버튼 한 줄. **채운 면 위에서 읽히는 색**을 painter와 같은 함수에 물어 고른다.
+    fn commitButton(
+        self: *Writer,
+        rect: tree.RectEntry,
+        item: types.CommitButtonItem,
+        state: interaction.InteractionState,
+        tk: *const tokens.Tokens,
+        m: types.DockMetrics,
+    ) ViewError!void {
+        // 아래 여백은 이 행이 갖는다(`itemHeight`) — 글자는 버튼 면의 세로 중앙이어야 하므로 그 여백을
+        // 뺀 사각형을 만들어 넘긴다. 안 그러면 라벨이 여백까지 포함한 중앙, 즉 면의 아래쪽에 앉는다.
+        var face = rect;
+        face.rect.height = @floatFromInt(m.commit_button_h);
+        const role = commitLabelRole(rect, state, tk, item.enabled);
+        // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
+        // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
+        const label = switch (item.run) {
+            .idle => commit_label,
+            .running => commit_running_label,
+            .slow => commit_slow_label,
+        };
+        try self.centered(face, label, role, .control);
+        // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다. 지금은 그 자리를 말만 한다.
+        try self.icon(face, face.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
     }
 
     /// caret 하나. **글자 위가 아니라 글자 사이**에 서는 얇은 막대다 — 블록 caret은 터미널의 것이고,
@@ -1041,6 +1070,8 @@ fn findText(draws: draw.ChromeDraw, needle: []const u8) ?draw.Op.Text {
 }
 
 const TestStorage = struct {
+    /// 커밋 줄 fixture가 쓰는 항목 둘(상자·버튼). props는 슬라이스를 빌리므로 저장소가 들고 있어야 한다.
+    commit_items: [2]types.Item = undefined,
     nodes: [32]tree.UiNode = undefined,
     entries: [40]tree.RectEntry = undefined,
     layout_items: [40]@import("../../ui/layout.zig").Item = undefined,
@@ -1208,11 +1239,11 @@ test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
     // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
     try testing.expect(findText(draws, "main") != null);
-    // **고정 chrome도 전부 남는다.** 이 세 줄이 예산 밖이면 `view`가 실패하고 도크가 통째로 빈 화면이
-    // 된다 — 목록이 빌 때는 행 예산의 여유가 없어 그 부족이 곧바로 드러난다(2026-08-16 실제 증상).
+    // **고정 chrome도 남는다.** 예산 밖이면 `view`가 실패하고 도크가 통째로 빈 화면이 된다 — 목록이
+    // 빌 때는 행 예산의 여유가 없어 그 부족이 곧바로 드러난다(2026-08-16 실제 증상).
     try testing.expect(findText(draws, "히스토리") != null); // 탭 줄
-    try testing.expect(findExactText(draws, commit_placeholder) != null); // 커밋 입력
-    try testing.expect(findExactText(draws, commit_label) != null); // 커밋 버튼
+    // 커밋 줄은 **여기 없다**(②b) — 저장소마다 하나씩이라 목록 항목이고, 목록이 비면 그것도 없다.
+    try testing.expect(findExactText(draws, commit_placeholder) == null);
 }
 
 test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 맞는 크기)" {
@@ -1260,8 +1291,9 @@ test "파일 행에 종류 아이콘이 붙는다(탐색기와 같은 분류기)
         },
         else => {},
     };
-    // 파일 종류 + 브랜치 줄 + 커밋 버튼의 분할 표시(`∨`) = 셋(그룹 헤더가 없는 fixture다).
-    try testing.expectEqual(@as(usize, 3), icons_seen);
+    // 파일 종류 + 브랜치 줄 = 둘(그룹 헤더가 없는 fixture이고, **커밋 버튼의 `∨`는 이제 목록 항목**이라
+    // 이 fixture에는 없다 — ②b에서 커밋 줄이 저장소 그룹 안으로 내려갔다).
+    try testing.expectEqual(@as(usize, 2), icons_seen);
 }
 
 test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {
@@ -1613,49 +1645,69 @@ test "동작이 없는 행은 그 자리를 비워 두지 않는다(충돌 행�
     try testing.expect(wb > wa);
 }
 
-test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index 상태로만 켠다" {
-    // 빈 채로 두면 그 자리가 입력란이라는 사실이 화면에 없다. 그리고 커밋 버튼의 활성은 **실제 index
-    // 상태**로만 정한다(§7 — 낙관하지 않는다: 스테이지 여부를 추정하면 커밋할 것이 없는데 켜진다).
-    var storage: TestStorage = .{};
-    const empty = try renderFixture(&storage, .{}, &.{});
-    const hint = findExactText(empty, commit_placeholder) orelse return error.MissingPlaceholder;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
-    const off = findExactText(empty, commit_label) orelse return error.MissingButton;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, off.role); // 스테이지 0건 → 꺼짐(채우지 않는다)
-
-    var storage2: TestStorage = .{};
-    const props: types.Props = .{
+test "빈 커밋 상자는 안내 문구를, 버튼은 index 상태로만 켠다 (②b)" {
+    // 빈 채로 두면 그 자리가 입력란이라는 사실이 화면에 없다. 커밋 버튼의 활성은 **실제 index 상태**로만
+    // 정한다(§7 — 스테이지 여부를 추정하면 커밋할 것이 없는데 켜진다).
+    var off_storage: TestStorage = .{};
+    off_storage.commit_items = .{
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = false } },
+    };
+    const off_props: types.Props = .{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
         .branch = "main",
-        .commit_message = "fix: 무언가를 고친다",
-        .commit_enabled = true,
+        .items = &off_storage.commit_items,
     };
-    const frame = try build.build(props, .{
-        .nodes = &storage2.nodes,
-        .entries = &storage2.entries,
-        .layout_items = &storage2.layout_items,
-        .flex_scratch = &storage2.flex_scratch,
-        .child_rects = &storage2.child_rects,
-        .actions = &storage2.actions,
+    const off_frame = try build.build(off_props, .{
+        .nodes = &off_storage.nodes,
+        .entries = &off_storage.entries,
+        .layout_items = &off_storage.layout_items,
+        .flex_scratch = &off_storage.flex_scratch,
+        .child_rects = &off_storage.child_rects,
+        .actions = &off_storage.actions,
     });
-    const filled = try viewBudgeted(&storage2, props, frame, .{});
-    // 메시지가 있으면 안내 문구 대신 그 글자를 **또렷하게** 그린다.
-    try testing.expect(findExactText(filled, commit_placeholder) == null);
-    const msg = findExactText(filled, "fix: 무언가를 고친다") orelse return error.MissingMessage;
+    const off = try viewBudgeted(&off_storage, off_props, off_frame, .{});
+    const hint = findExactText(off, commit_placeholder) orelse return error.MissingPlaceholder;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
+    const off_label = findExactText(off, commit_label) orelse return error.MissingButton;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, off_label.role); // 꺼짐 — 채우지 않는다
+
+    var on_storage: TestStorage = .{};
+    on_storage.commit_items = .{
+        .{ .commit_box = .{ .repo_index = 0, .text = "fix: 무언가를 고친다" } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
+    };
+    const on_props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .items = &on_storage.commit_items,
+    };
+    const on_frame = try build.build(on_props, .{
+        .nodes = &on_storage.nodes,
+        .entries = &on_storage.entries,
+        .layout_items = &on_storage.layout_items,
+        .flex_scratch = &on_storage.flex_scratch,
+        .child_rects = &on_storage.child_rects,
+        .actions = &on_storage.actions,
+    });
+    const on = try viewBudgeted(&on_storage, on_props, on_frame, .{});
+    try testing.expect(findExactText(on, commit_placeholder) == null); // 글자가 있으면 안내는 없다
+    const msg = findExactText(on, "fix: 무언가를 고친다") orelse return error.MissingMessage;
     try testing.expectEqual(tokens.ColorRole.surface_fg, msg.role);
-    const on = findExactText(filled, commit_label) orelse return error.MissingButton;
-    // 켜지면 **채운 버튼**이라 글자가 배경색(reverse)이다.
-    try testing.expectEqual(tokens.ColorRole.surface_bg, on.role);
+    const on_label = findExactText(on, commit_label) orelse return error.MissingButton;
+    try testing.expectEqual(tokens.ColorRole.surface_bg, on_label.role); // 켜지면 채운 면 위 reverse
 }
 
-/// 커밋 상자 fixture — 상자만 보는 테스트는 목록이 필요 없다. **예산은 제품과 같은 것을 쓴다**.
+/// 커밋 줄 fixture. **상자는 목록 항목이다**(②b) — 그 그룹 안에 살기 때문이다.
 fn renderCommit(storage: *TestStorage, message: []const u8, edit: types.CommitEdit, rows: u32) !draw.ChromeDraw {
+    storage.commit_items = .{
+        .{ .commit_box = .{ .repo_index = 0, .rows = rows, .text = message, .edit = edit } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = false } },
+    };
     const props: types.Props = .{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
         .branch = "main",
-        .commit_message = message,
-        .commit_rows = rows,
-        .commit_edit = edit,
+        .items = &storage.commit_items,
     };
     const frame = try build.build(props, .{
         .nodes = &storage.nodes,
@@ -1766,44 +1818,39 @@ test "마지막 줄이 상자 안에 있다(상자 높이와 줄 간격의 출�
     // 둘이 다른 상수에서 나오면 줄이 늘수록 어긋나 — 크면 마지막 줄이 잘리고, 작으면 아래에 빈 띠가
     // 남으며 클릭 → 행 변환도 그만큼 밀린다. 실제로 20 vs 17로 갈려 있었다(적대적 검증 2026-08-16).
     var storage: TestStorage = .{};
-    const props: types.Props = .{
-        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
-        .branch = "main",
-        .commit_message = "one\ntwo\nthree",
-        .commit_rows = 3,
-        .commit_edit = .{ .focused = true, .caret = 13 },
-    };
-    const frame = try build.build(props, .{
-        .nodes = &storage.nodes,
-        .entries = &storage.entries,
-        .layout_items = &storage.layout_items,
-        .flex_scratch = &storage.flex_scratch,
-        .child_rects = &storage.child_rects,
-        .actions = &storage.actions,
-    });
-    const draws = try viewBudgeted(&storage, props, frame, .{});
-    const box = frame.tree.entries[frame.tree.find(build.NodeIds.commit_box) orelse return error.MissingBox];
+    const draws = try renderCommit(&storage, "one\ntwo\nthree", .{ .focused = true, .caret = 13 }, 3);
     const last = findExactText(draws, "three") orelse return error.MissingLastLine;
     const line_h: i32 = @intCast(typography.lineHeightPx(.control, 1000));
-    const bottom: i32 = @intFromFloat(box.rect.y + box.rect.height);
-    try testing.expect(last.origin.y + line_h <= bottom);
-    // 그리고 **남는 자리가 여백 하나 이내**여야 한다 — 그보다 크면 상자가 글자보다 빠르게 자란 것이다.
     const m = types.DockMetrics.resolve(1000);
+    // 상자 줄의 rect는 목록 항목 0이다(fixture가 상자·버튼 순으로 넣는다).
+    const box = storage.entries[boxEntryIndex(&storage)].rect;
+    const bottom: i32 = @intFromEnum(@as(enum(i32) { _ }, @enumFromInt(@as(i32, @intFromFloat(box.y + box.height)))));
+    try testing.expect(last.origin.y + line_h <= bottom);
     try testing.expect(bottom - (last.origin.y + line_h) <= @as(i32, @intCast(m.commit_pad_y)));
-    // caret도 같은 격자에 선다.
     const caret = firstQuad(draws, .cursor) orelse return error.MissingCaret;
     try testing.expectEqual(last.origin.y, caret.rect.y);
 }
 
+/// fixture가 넣은 커밋 상자 행의 entry 자리.
+fn boxEntryIndex(storage: *TestStorage) usize {
+    for (storage.entries, 0..) |entry, index| {
+        if (entry.id == build.NodeIds.item(0)) return index;
+    }
+    return 0;
+}
+
 test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
     // 호버는 카드 배경을 `row_hover_bg`(어두움)로 **덮어쓴다**(상태 해석이 명시 paint보다 위다).
-    // 글자를 `commit_enabled`만 보고 고르면 그때 어두운 글자가 어두운 면에 놓여 라벨이 사라진다
-    // (적대적 검증 2026-08-16 실측).
+    // 글자를 `enabled`만 보고 고르면 그때 어두운 글자가 어두운 면에 놓여 라벨이 사라진다.
     var storage: TestStorage = .{};
+    storage.commit_items = .{
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+    };
     const props: types.Props = .{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
         .branch = "main",
-        .commit_enabled = true,
+        .items = &storage.commit_items,
     };
     const frame = try build.build(props, .{
         .nodes = &storage.nodes,
@@ -1818,7 +1865,13 @@ test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
     try testing.expectEqual(tokens.ColorRole.surface_bg, on.role); // 채운 면 위 = reverse
 
     var hover_storage: TestStorage = .{};
-    const hover_frame = try build.build(props, .{
+    hover_storage.commit_items = storage.commit_items;
+    const hover_props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .branch = "main",
+        .items = &hover_storage.commit_items,
+    };
+    const hover_frame = try build.build(hover_props, .{
         .nodes = &hover_storage.nodes,
         .entries = &hover_storage.entries,
         .layout_items = &hover_storage.layout_items,
@@ -1826,16 +1879,14 @@ test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
         .child_rects = &hover_storage.child_rects,
         .actions = &hover_storage.actions,
     });
-    const hovered = try viewBudgeted(&hover_storage, props, hover_frame, .{ .hovered = build.NodeIds.commit_button });
+    const hovered = try viewBudgeted(&hover_storage, hover_props, hover_frame, .{ .hovered = build.NodeIds.item(0) });
     const label = findExactText(hovered, commit_label) orelse return error.MissingButton;
-    // 배경이 accent가 아니게 됐으면 글자는 보통 글자색이어야 한다 — **같은 함수에 물어** 고른다.
-    const button = hover_frame.tree.entries[hover_frame.tree.find(build.NodeIds.commit_button) orelse return error.MissingButton];
+    const button = hover_frame.tree.entries[hover_frame.tree.find(build.NodeIds.item(0)) orelse return error.MissingButton];
     const tk = testTokens();
-    const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = build.NodeIds.commit_button }, &tk);
+    const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = build.NodeIds.item(0) }, &tk);
     try testing.expect(resolved.background != .accent_bar); // 호버가 채움을 덮는다(전제 확인)
     try testing.expectEqual(tokens.ColorRole.surface_fg, label.role);
-    // 글자와 면이 **같은 역할**이면 그게 곧 사라지는 것이다.
-    try testing.expect(label.role != resolved.background);
+    try testing.expect(label.role != resolved.background); // 글자와 면이 같은 역할이면 그게 사라지는 것이다
 }
 
 test "caret은 깜빡임 위상을 따른다(위상이 꺼진 반주기에는 안 그린다)" {

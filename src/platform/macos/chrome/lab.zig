@@ -758,6 +758,18 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 저장소·워크트리 머리 줄(P3d-②). 같은 이름의 두 줄을 사용자가 구별해야 하므로 **종류가
         // 글리프로** 보여야 하고, 접힌 줄도 개수를 갖는다 — 그 셋이 한 캡처에 든다.
         .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/lab-fixture", .primary = true, .count = 4 } },
+        // **커밋 줄은 그 그룹 안에 산다**(②b) — 저장소마다 하나씩이라 고정 chrome이 아니다.
+        .{ .commit_box = .{
+            .repo_index = 0,
+            .rows = if (scenario.id == .scm_commit_edit) 3 else 1,
+            .text = if (scenario.id == .scm_commit_edit) commit_fixture_message else "",
+            .edit = if (scenario.id == .scm_commit_edit) .{
+                .focused = true,
+                .caret = commit_fixture_caret,
+                .selection = .{ .anchor = 3, .focus = commit_fixture_caret },
+            } else .{},
+        } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
         .{ .section = .{ .section = .staged, .count = 1, .collapsed = false, .action = .unstage } },
         .{ .file = .{ .model_index = 1, .name = "staged.zig", .dir = "src/session/", .status = .added, .letter = 'A', .added = 12, .removed = 0, .has_delta = true, .action = .unstage } },
         .{ .section = .{ .section = .changes, .count = 3, .collapsed = false, .action = .stage } },
@@ -782,18 +794,8 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .changed_file_count = 4,
         // 커밋 상자: 스테이지된 파일이 있으므로 버튼이 **켜진** 상태다(§7 — 실제 index 상태로만 정한다).
         // 두 상태(꺼짐/켜짐)를 한 캡처에 담을 수 없어, 켜진 쪽을 고른다 — 꺼짐은 단위 테스트가 본다.
-        .commit_rows = if (scenario.id == .scm_commit_edit) 3 else 1,
-        .commit_enabled = true,
-        // 편집 상태는 **한 시나리오만** 싣는다. 목록 시나리오까지 caret을 켜면 그 두 골든이 caret
-        // 깜빡임 축까지 떠안게 되고, 목록이 바뀔 때마다 상자 픽셀이 함께 흔들린다.
-        .commit_message = if (scenario.id == .scm_commit_edit) commit_fixture_message else "",
-        .commit_edit = if (scenario.id == .scm_commit_edit) .{
-            .focused = true,
-            // caret은 둘째 줄 안이다 — 첫 줄 끝에 두면 "줄을 따라 내려갔나"가 안 보인다.
-            .caret = commit_fixture_caret,
-            // 선택은 **줄을 넘는다**. 한 줄 안 선택은 밴드가 잘리는지를 증언하지 못한다.
-            .selection = .{ .anchor = 3, .focus = commit_fixture_caret },
-        } else .{},
+        // 커밋 줄은 위 `items`에 있다(②b). 편집 상태는 **한 시나리오만** 싣는다 — 목록 시나리오까지
+        // caret을 켜면 그 골든들이 깜빡임 축까지 떠안는다.
     };
     const frame = try scm_dock.build.build(props, .{
         .nodes = buffers.scm_nodes,
@@ -805,8 +807,10 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
     });
     // 행 동작은 **호버할 때만** 그려진다. 포인터가 없는 캡처에서 그 자리를 보려면 상태를 직접 세워야 한다
     // (제품도 같은 이유로 `MARU_FORCE_SCM_HOVER`를 둔다).
+    // **파일 행**을 호버한다(그룹 헤더가 아니다) — 이 시나리오가 증언하는 것은 "행 동작 `+`가 상태
+    // 문자를 비켜 앉는가"이고 그건 파일 행에서만 보인다. ②b에서 커밋 줄 둘이 앞에 들어와 자리가 밀렸다.
     const state: chrome.ui.interaction.InteractionState = if (scenario.id == .scm_row_hover)
-        .{ .hovered = scm_dock.build.NodeIds.item(3) }
+        .{ .hovered = scm_dock.build.NodeIds.item(6) }
     else
         .{};
     // **host와 같은 예산으로 그린다.** Lab 버퍼는 모든 시나리오를 덮도록 넉넉해서, 그냥 통째로 넘기면

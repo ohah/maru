@@ -12,6 +12,7 @@
 //!  - 첫 표본과 **긴 공백 뒤**에는 값을 내지 않는다(0%는 거짓말이고, 분 단위 평균은 "지금"이 아니다).
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const width = @import("../width.zig"); // EAW 셀 폭 — 한글 열 이름을 값과 같은 칸에 맞추려면 필요하다
 
 /// 한 프로세스의 한 시점 표본. 어댑터가 채운다(footprint = macOS `ri_phys_footprint`, cpu_ns = user+system).
@@ -298,6 +299,10 @@ test "Meter: 메모리는 트리 전체의 합이다" {
 /// 안 읽힌다 — 그래서 폭 규약(`text_cols`)을 여기서도 같이 쓴다.
 /// 열 이름 줄의 **바이트** 상한. 값 줄(`text_max_bytes`)보다 크다 — 한글 한 자가 3바이트라
 /// "메모리"만 9바이트다. 이 둘을 같은 값으로 두면 헤더가 조용히 잘린다(실측: 16칸이 14칸으로).
+///
+/// **이 여유 16 은 한국어 라벨을 재고 정한 값이다.** 영어("Memory", 6바이트)는 더 짧아 넘치지
+/// 않지만, 라틴보다 바이트가 큰 문자를 쓰는 언어가 붙으면 다시 재야 한다 — 정렬은 `padRightAligned`
+/// 가 **칸**으로 하고 복사는 **바이트**로 하므로, 칸이 같아도 바이트가 넘칠 수 있다(계약 §6.1).
 pub const header_max_bytes: usize = text_max_bytes + 16;
 
 pub fn formatHeader(out: []u8) []const u8 {
@@ -305,7 +310,7 @@ pub fn formatHeader(out: []u8) []const u8 {
     // ⚠️ `{s:>8}` 같은 std 패딩은 **칸이 아니라 코드포인트**를 센다 — "메모리"는 3코드포인트지만 6칸이라
     // 그대로 쓰면 값 줄과 어긋난다(실측으로 13칸이 나왔다, 목표 16). 그래서 칸으로 직접 채운다.
     var used: usize = 0;
-    used += padRightAligned(out[used..], "메모리", 8); // 메모리 열(값 줄의 "NNN.N GB"와 같은 8칸)
+    used += padRightAligned(out[used..], i18n.t(.res_memory), 8); // 메모리 열(값 줄의 "NNN.N GB"와 같은 8칸)
     used += copyInto(out[used..], "   "); // " · " 자리(3칸)
     used += padRightAligned(out[used..], "CPU", 5); // CPU 열(값 줄의 "NNNN%"와 같은 5칸)
     return out[0..used];

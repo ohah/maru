@@ -4,6 +4,7 @@
 //! 추출하는 L2 경계라, 개인 transcript를 UI/worker/테스트가 각자 다르게 해석하지 않게 한다.
 
 const std = @import("std");
+const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 
 pub const Provider = enum {
     claude,
@@ -213,7 +214,7 @@ pub const Parser = struct {
 
     fn finishClaude(self: *Parser) !?Parsed {
         if (self.session_id.len == 0) return null;
-        const display_title = if (self.title.len > 0) self.title else if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
+        const display_title = if (self.title.len > 0) self.title else if (self.first_user.len > 0) self.first_user else i18n.t(.arch_untitled);
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
         parsed.last_activity_ns = self.last_activity_ns;
@@ -222,7 +223,7 @@ pub const Parser = struct {
 
     fn finishCodex(self: *Parser) !?Parsed {
         if (!self.saw_meta or !self.is_user or self.session_id.len == 0) return null;
-        const title = if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
+        const title = if (self.first_user.len > 0) self.first_user else i18n.t(.arch_untitled);
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
         parsed.last_activity_ns = self.last_activity_ns;

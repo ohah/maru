@@ -3791,6 +3791,9 @@ pub const AppSession = struct {
     /// 상자가 저장소마다 하나씩이므로(②b) 플래그로는 부족하다 — "편집 중"만 알면 **어느 상자에 글자가
     /// 가는지**를 두 번째 개념이 정하게 되고, 그러면 사용자가 보는 곳과 글자가 가는 곳이 갈린다.
     scm_commit_focus_repo: ?[]u8 = null,
+    /// 다음 투영에서 **편집 중인 상자를 목록 창 안으로 끌어온다**. 키 처리에서는 항목 목록도 창 높이도
+    /// 없으므로(그 둘은 투영이 만든다) 신호만 남긴다.
+    scm_commit_reveal: bool = false,
     /// 지금 도는 쓰기가 **커밋**인가. `scm_write_inflight`만으로는 스테이지와 커밋을 못 가른다 —
     /// 화면 문구("커밋 중"·"오래 걸리는 중")와 메시지 파일 정리가 이 구분을 쓴다.
     scm_commit_inflight: bool = false,
@@ -55300,9 +55303,9 @@ test "소스 컨트롤: 도크 **밖**을 눌러도 편집이 풀린다" {
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
 
-test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다" {
-    // 고정 chrome이 커졌는데 목록이 그대로면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가 어긋난다
-    // (탭 줄에서 겪은 것과 같은 함정).
+test "소스 컨트롤: 그룹을 접으면 그 상자의 편집이 풀린다(글은 초안으로 남는다)" {
+    // 접힌 그룹에는 상자가 없다. 포커스를 그대로 두면 키가 **화면에 없는 상자**로 들어가 사용자는
+    // 자기가 친 글자를 볼 수 없다(적대적 4회차).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -55310,7 +55313,57 @@ test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다
     defer session.deinit();
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
-    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'z', .mods = .{} } });
+    scm_dock_ops.toggleRepoCollapsed(session, "/repo");
+    try std.testing.expect(session.scm_commit_focus_repo == null);
+
+    // 다시 펴고 상자를 잡으면 쓰던 글이 그대로 있다 — 접기는 글을 버리는 동작이 아니다.
+    scm_dock_ops.toggleRepoCollapsed(session, "/repo");
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    try std.testing.expectEqualStrings("z", session.scm_commit_field.text.items);
+}
+
+test "소스 컨트롤: 창 밖으로 스크롤된 상자는 타이핑하면 창 안으로 돌아온다" {
+    // 상자가 목록 줄이 되면서(②b) 스크롤로 창 밖에 놓일 수 있다. 그 상태로 키를 치면 글자는 들어가는데
+    // **화면에는 아무 일도 안 일어난다** — 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    // 목록을 아래로 밀어 상자를 창 밖으로 보낸다(상자는 머리 줄 바로 다음 줄이다).
+    session.scm_scroll.offset_y_px = 400;
+    _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{} } });
+    _ = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    // 상자가 목록 위쪽에 있으므로 창은 그 자리까지 되돌아온다.
+    try std.testing.expect(session.scm_scroll.offset_y_px < 400);
+    const m = chrome.components.scm_dock.types.DockMetrics.resolve(1000);
+    try std.testing.expect(session.scm_scroll.offset_y_px <= m.repo_h);
+}
+
+test "소스 컨트롤: 목록 뷰포트는 **컴포넌트가 세우는 창**과 같다(상자는 그 안에 산다)" {
+    // 호스트가 세는 창과 `build`가 세우는 창이 갈리면 목록 아래쪽이 **항목이 있는데도 안 그려지고**
+    // 스크롤은 끝을 지나 빈 자리로 간다. ②b 전에는 커밋 줄이 고정 chrome이라 상자가 자란 만큼 창이
+    // 줄어드는 것이 맞았지만, 지금 상자는 목록 항목이다(적대적 4회차).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
 
     const before = scm_dock_ops.scrollExtent(session).viewport_h_px;
     scm_dock_ops.focusCommitRepo(session, "/repo");
@@ -55318,7 +55371,25 @@ test "소스 컨트롤: 상자가 자란 만큼 목록 뷰포트가 줄어든다
     _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .enter, .mods = .{} } });
     _ = scm_dock_ops.handleCommitKey(session, .{ .key = .{ .key = .char, .codepoint = 'b', .mods = .{} } });
     const after = scm_dock_ops.scrollExtent(session).viewport_h_px;
-    try std.testing.expect(after < before);
+    // 상자가 두 줄로 자라도 창은 그대로다 — 자란 만큼은 **목록 내용**이 길어진 것이다.
+    try std.testing.expectEqual(before, after);
+
+    // 그리고 그 창은 컴포넌트가 세우는 스크롤 영역 높이와 **같은 수**다.
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    const content_index = frame.tree.find(chrome.components.scm_dock.build.NodeIds.content) orelse
+        return error.MissingContentRect;
+    const content = frame.tree.entries[content_index];
+    try std.testing.expectEqual(@as(u32, @intFromFloat(content.rect.height)), after);
 }
 
 test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 낸다" {

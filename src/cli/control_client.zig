@@ -17,6 +17,7 @@ const cp = @import("../session/control_plane.zig");
 const sessions = @import("sessions.zig");
 const builtin = @import("builtin");
 const user_paths = @import("../user_paths.zig"); // 캐시 base·홈 판정(OS 인자 순수 정책 — 계약 §5.3)
+const path_shape = @import("../path_shape.zig"); // 입구 구분자 정규화(계약 §5)
 
 /// 컨트롤 소켓이 막힌 호스트에서 **사용자에게 보일 이유**. OS와 무관한 문구 그 자체이며, 단일 출처는 여기다 —
 /// `main.zig`의 `HostGatedFeature.control_socket`이 이 값을 되돌려 준다(그 함수는 OS를 인자로 받아 Windows가
@@ -82,9 +83,16 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     const home_env: ?[]const u8 = if (c.getenv("HOME")) |h| std.mem.span(h) else null;
     const local: ?[]const u8 = if (c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
     const xdg: ?[]const u8 = if (c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const base = user_paths.cacheBaseFor(builtin.os.tag, xdg, local);
-    const home = user_paths.homeDirFor(builtin.os.tag, home_env, local) orelse
+    const base_raw = user_paths.cacheBaseFor(builtin.os.tag, xdg, local);
+    const home_raw = user_paths.homeDirFor(builtin.os.tag, home_env, local) orelse
         return noInstance(stderr, "홈 디렉터리를 찾지 못해 컨트롤 소켓 위치를 정할 수 없습니다");
+    // **입구 정규화**(계약 §5). 환경변수 값은 native 구분자다 — `%LOCALAPPDATA%`는 역슬래시라 안 하면
+    // 같은 뿌리가 두 철자로 갈린다(`…\Local/maru/control`). `main.zig`의 terminfo 경로는 하고 있었고
+    // 여기만 빠져 있었다 — 적대적 검증에서 잡았다.
+    const base: ?[]const u8 = if (base_raw) |b| try path_shape.normalizeSeparators(allocator, b) else null;
+    defer if (base) |b| allocator.free(b);
+    const home = try path_shape.normalizeSeparators(allocator, home_raw);
+    defer allocator.free(home);
     const control_dir = try sessions.controlDir(allocator, base, home);
     defer allocator.free(control_dir);
 

@@ -50,6 +50,8 @@ pub const inventory = [_]Proof{
     // `font.size`(M10d)가 붙어 바뀐다 — 모바일 config 에 `FontConfig` 가 생겼다. count 는 9 그대로다.
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "a036be4220efe60b4264d4c66dfb91b0cb8e86a3e866f8a11831ba9dff6edc95" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "e276e8e954a47819f79ae54a0937d9bb76134deda6876f143baf9da9f0a363a1" },
+    // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
+    // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
     // 더한 것은 그 대기 루프 하나뿐이다. 왜 필요한가: `shutting_down`은 새 결과를 버리게 할 뿐 돌고 있는
@@ -79,7 +81,7 @@ pub const inventory = [_]Proof{
     // P3c-2에서 커밋 end-to-end 둘이 붙으며 움직인다(실제 `git commit`이 만들어지는가 · pre-commit
     // hook이 거부하면 커밋이 안 만들어지고 이유가 stderr로 오는가). fixture에 `commit`·`capture`
     // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "8bd204aa01f33e8f52a1c235b989549fc3d53cc7a3c3d6f535b0e84b7833cf21" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "0608f4a8a9a02dd3b9d3be09094f3b7c52ad83325772e3127c5e8ae15d86fad1" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.

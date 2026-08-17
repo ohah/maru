@@ -149,7 +149,7 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         // 행 열기 + 행 동작 + 그룹 토글/일괄 동작 + 커밋 상자·버튼은 전부 **행당 둘** 상한 안이고,
         // +2는 스크롤바다.
         // 행당 둘이 상한인데 **머리 줄만 셋**이다(접기 + 동작 둘 — ②c). +2는 스크롤바다.
-        .actions = items.len * 2 + faces + 2,
+        .actions = items.len * 2 + faces + tab_order.len + 2,
     };
 }
 
@@ -423,11 +423,23 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         // **P4·P5 주의**: 탭을 누를 수 있게 되면 컨테이너는 action을 못 실으므로 button으로 바꿔야 한다.
         // 그 순간 위의 덮어쓰기가 되살아난다(button도 quad를 칠한다) — 그때는 배경을 `paint`로 지우거나
         // divider를 탭 줄이 아닌 곳으로 옮겨야 한다. 칸을 나누는 자리는 그대로 여기다.
-        node.* = tree.container(.{
+        // **P4에서 버튼이 됐다.** 위 주석이 예고한 자리다: 컨테이너는 action을 실을 수 없어 탭이
+        // 눌리지 않았다. 버튼은 quad를 칠하므로 **투명하게** 둔다 — 안 그러면 그 배경이 탭 줄 아래
+        // divider를 덮는다(컨테이너를 쓰던 이유가 그것이었다).
+        const tab_action = table.append(
+            props.snapshot_generation,
+            .{ .select_tab = tab_order[index] },
+            true,
+        ) catch return error.InsufficientActionBuffer;
+        node.* = tree.button(.{
             .id = NodeIds.tab(index),
             .style = .{ .flex = .{ .grow = 1 } },
+            .variant = .ghost,
+            .paint = .{ .opacity = 0 },
+            .action = tab_action,
+            .cursor = .press,
             .overflow = .clip,
-        }, &.{});
+        });
     }
 
     const top = buffers.nodes[action_cursor + tab_order.len ..][0..4];
@@ -653,7 +665,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }
@@ -720,7 +732,9 @@ test "탭 칸 rect가 tree에 있고 줄을 균등하게 덮는다" {
             const entry = frame.tree.entries[frame.tree.find(NodeIds.tab(index)) orelse return error.MissingTab];
             // **칸은 칠하지 않는다.** 카드로 두면 자식이 부모보다 나중에 칠해지며 탭 줄의 아래 divider를
             // 덮는다(실측: 그 선의 배경 대비가 +18 → +3으로 떨어져 사실상 사라졌다).
-            try testing.expect(entry.visual == .none);
+            // P4에서 컨테이너 → 버튼이 됐다(누를 수 있어야 한다) — 버튼은 quad를 내므로 **투명**으로
+            // 같은 사실을 지킨다.
+            try testing.expectEqual(@as(u8, 0), entry.visual.button.paint.opacity);
             const slot = entry.rect;
             // 칸끼리 겹치지도 벌어지지도 않는다.
             try testing.expectEqual(prev_right, slot.x);
@@ -985,4 +999,27 @@ test "저장소 머리 줄은 동작 버튼 둘을 갖는다(꺼져도 히트 �
         try testing.expect(frame.tree.entries[index].rect.width > 0);
         try testing.expectEqual(tree.CursorHint.press, frame.tree.entries[index].cursor);
     }
+}
+
+test "탭 줄의 칸은 누를 수 있다(P4 — 그전에는 컨테이너라 action이 없었다)" {
+    // 탭 셋이 그려져 있는데 눌러도 아무 일이 없으면, 사용자는 그 화면이 목록 하나뿐인 줄로 읽는다.
+    var storage: Storage = .{};
+    const items = [_]types.Item{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+    var tabs_seen: usize = 0;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .select_tab => |tab| {
+            tabs_seen += 1;
+            try testing.expect(tab == .changes or tab == .history or tab == .agent);
+        },
+        else => {},
+    };
+    try testing.expectEqual(tab_order.len, tabs_seen);
+    // 그리고 칸에는 **칠이 없다** — 있으면 탭 줄 아래 divider를 덮는다(컨테이너를 쓰던 이유).
+    const slot = frame.tree.entries[frame.tree.find(NodeIds.tab(0)) orelse return error.MissingTab];
+    try testing.expectEqual(@as(u8, 0), slot.visual.button.paint.opacity);
 }

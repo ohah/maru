@@ -14,6 +14,7 @@
 //!   설정으로 원격을 건드리게 만드는 경로를 명시적으로 닫는다.
 
 const std = @import("std");
+const git_log = @import("git_log.zig"); // 커밋 목록 `--format`의 단일 출처(파싱과 같은 상수)
 
 /// 뷰가 필요로 하는 읽기 명령. 셋을 합쳐 네 섹션과 행의 증감을 채운다(§3.5).
 pub const Kind = enum {
@@ -66,6 +67,14 @@ pub const Kind = enum {
     ///
     /// 읽기 전용이다: 등록된 목록을 읽기만 하고 만들거나 지우지 않는다.
     worktree_list,
+    /// 히스토리 탭의 **커밋 목록**(`git log --format=…`). 형식의 단일 출처는 `session/git_log.zig`이고
+    /// 여기서는 그 상수를 그대로 인자로 싣는다 — 두 곳에 적으면 한쪽만 고쳐져 파싱이 조용히 어긋난다.
+    ///
+    /// **`--no-decorate`가 아니라 `%D`다**: decoration을 형식 안에서 받으면 `log.decorate` 설정과 무관하게
+    /// 우리가 정한 자리에 오고, 괄호·색이 붙지 않는다.
+    ///
+    /// 상한(`-n`)은 호출자가 인자로 준다 — 화면이 "더 보기"로 늘릴 수 있어야 하므로 명령이 그 수를 고정하면 안 된다.
+    log,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -417,6 +426,22 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "refs/heads/";
             n += 1;
         },
+        .log => {
+            buf[n] = "log";
+            n += 1;
+            // **형식은 `git_log`가 소유한다**(파싱과 같은 상수). 여기서 문자열을 다시 적으면 한쪽만
+            // 고쳐져 필드가 밀린다.
+            buf[n] = "--format=" ++ git_log.format_spec;
+            n += 1;
+            // 병합 커밋도 **한 줄**이다(`--no-merges`를 쓰지 않는다) — 히스토리에서 병합을 지우면
+            // "이 브랜치가 언제 합쳐졌나"가 사라진다. 부모가 여럿이어도 우리가 그리는 것은 그 커밋 자신이다.
+            //
+            // `-n <상한>`은 호출자가 준다: 화면이 "더 보기"로 늘릴 수 있어야 하므로 명령이 고정하지 않는다.
+            buf[n] = "-n";
+            n += 1;
+            buf[n] = arg orelse "200";
+            n += 1;
+        },
         .show_blob => {
             buf[n] = "show";
             n += 1;
@@ -688,4 +713,37 @@ test "디렉터리가 사라진 워크트리는 prunable로 표시된다" {
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expect(!out[0].prunable);
     try std.testing.expect(out[1].prunable);
+}
+
+test "log: 형식은 git_log가 소유하고 상한은 호출자가 준다" {
+    // 형식 문자열을 여기 다시 적으면 파싱과 한쪽만 고쳐져 필드가 밀린다 — 그래서 **상수를 그대로** 싣는다.
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.log, "/usr/bin/git", "/repo", "50", &buf);
+    var saw_log = false;
+    var saw_format = false;
+    var limit: ?[]const u8 = null;
+    for (argv, 0..) |a, index| {
+        if (std.mem.eql(u8, a, "log")) saw_log = true;
+        if (std.mem.startsWith(u8, a, "--format=")) {
+            saw_format = true;
+            try std.testing.expectEqualStrings(git_log.format_spec, a["--format=".len..]);
+        }
+        if (std.mem.eql(u8, a, "-n") and index + 1 < argv.len) limit = argv[index + 1];
+    }
+    try std.testing.expect(saw_log and saw_format);
+    try std.testing.expectEqualStrings("50", limit orelse "");
+    // **병합을 지우지 않는다** — `--no-merges`가 있으면 "언제 합쳐졌나"가 목록에서 사라진다.
+    for (argv) |a| try std.testing.expect(!std.mem.eql(u8, a, "--no-merges"));
+    // 읽기 전용 계약: 셸을 거치지 않고 첫 인자는 우리가 해석한 실행 파일이다.
+    try std.testing.expectEqualStrings("/usr/bin/git", argv[0]);
+}
+
+test "log: 상한을 안 주면 기본값이 붙는다(무제한으로 새지 않게)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.log, "/usr/bin/git", "/repo", null, &buf);
+    var limit: ?[]const u8 = null;
+    for (argv, 0..) |a, index| {
+        if (std.mem.eql(u8, a, "-n") and index + 1 < argv.len) limit = argv[index + 1];
+    }
+    try std.testing.expectEqualStrings("200", limit orelse "");
 }

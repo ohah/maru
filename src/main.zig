@@ -989,6 +989,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-loop-smoke
         \\  maru app-pty-interactive-loop-smoke
         \\  maru app-pty-smoke
+        \\  maru win32-window-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1007,6 +1008,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-loop-smoke run the live PTY -> repeated app frame-loop smoke
         \\  app-pty-interactive-loop-smoke run the interactive shell -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
+        \\  win32-window-smoke open a real Win32 window and report the neutral events it delivers (Windows only; needs an interactive desktop)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)

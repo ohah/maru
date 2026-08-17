@@ -477,10 +477,6 @@ pub const inventory = [_]Proof{
     // 테스트가 붙어 digest가 움직인다(2026-08-17 사용자 제보 — "도크의 클릭 이벤트가 안 되는 영역을 누르면
     // 터미널 블록 이벤트가 잡힌다"). up·move 의 도크 판정 rect 를 down 과 맞춘 것(`tree_content` → `dock`)도
     // 같은 커밋이다. count는 2 그대로다 — 반사 접근이나 Client 구성은 건드리지 않고 포인터 라우팅만 바꿨다.
-    //
-    // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
-    // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
-    // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9c73bff9afe6f1bef22da94a55e43f8c61568dce4308f80cfda02c8955144738" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -525,7 +521,7 @@ pub const inventory = [_]Proof{
     // 스키마 변형 순서와 어긋나면 "한국어"를 골랐는데 `en` 이 저장된다. enum 을 도는 것이 그 어긋남을
     // 정의상 불가능하게 만들고, 그 대가로 반사 하나가 는다. 이 하나 말고 다른 자리가 늘었다면
     // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "460adc4089ba8342967504c34a646bce2a04e1a1cbd1ef5ff35e3bbe183feb89" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "f3208be6e1c5ec367fb2c0e2dd24bc83b0397b77859019e95d6be35c4fff29ec" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -551,5 +547,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "66d906c3ea4ddf6024740d2d60774fee70a88b2b374d042620a584f38d4a8685" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "5fa66fdb687f67c375d217f5aa595a7265416196dc4904b80c48e61a32832700" },
 };

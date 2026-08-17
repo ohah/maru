@@ -861,16 +861,24 @@ const max_agent_rows: usize = 12;
 pub const agent_header_rows: usize = 2;
 /// 에이전트 행에서 **이름이 쓸 수 있는 표시 칸**. "마지막 활동" 열이 고정 폭이라 이름만 예산을 먹는다.
 const agent_row_name_cols: u32 = 24;
-/// "마지막 활동" 열의 머리글 문자열. 폭의 **단일 출처**다 — 아래 `agent_age_cols`가 이걸로부터 나온다.
-const agent_age_header = "마지막 활동";
+/// "마지막 활동" 열의 머리글 문자열. 폭의 **단일 출처**다 — 아래 `agentAgeCols()`가 이걸로부터 나온다.
+fn agentAgeHeader() []const u8 {
+    return maru.i18n.t(.app_last_activity);
+}
 /// 값 열 폭(표시 칸) = **머리글 폭**. 값을 이 폭 안에서 오른쪽 정렬하면 값과 열 이름과 제목의 개수가
 /// 모두 **같은 칸에서 끝난다**. 상수를 따로 박으면(예전 8) 머리글(11칸)보다 좁아 열이 어긋난다 —
 /// 리소스 팝오버가 `formatHeader`로 푼 것과 같은 문제이고, 여기서는 폭을 머리글에서 파생시켜 푼다.
-const agent_age_cols: u32 = chrome.components.overlay_input.displayCols(agent_age_header);
+/// **상수가 아니라 함수다.** 폭이 머리글에서 나오는데 그 머리글이 이제 언어를 따르므로, 값을 한 번
+/// 계산해 박으면 언어가 바뀔 때 열이 어긋난다(계약 §6.1 — 폭을 상수로 박지 않는다).
+fn agentAgeCols() u32 {
+    return chrome.components.overlay_input.displayCols(agentAgeHeader());
+}
 
 /// 앱 자신 행 라벨. **"모든 창 공유"를 이름에 박는다** — 창이 여럿이면 각 창이 같은 값을 보여주므로,
 /// 두 창의 숫자를 더하면 이중으로 잡힌다는 사실이 화면에서 드러나야 한다(§4.1의 남는 결함).
-const resource_app_label = "Maru(앱 · 모든 창 공유)";
+fn resourceAppLabel() []const u8 {
+    return maru.i18n.t(.app_shared_all_windows);
+}
 
 /// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
 /// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
@@ -1289,7 +1297,7 @@ pub fn termLabel(term: *const Term) []const u8 {
         const auto_name: []const u8 = if (term.rt.editor_path) |p|
             std.fs.path.basename(p)
         else
-            "편집기";
+            maru.i18n.t(.app_editor);
         return app.pickLabel(term.surface.custom_name, auto_name);
     }
     const auto = if (term.auto_title.items.len > 0) term.auto_title.items else term.surface.title;
@@ -2103,6 +2111,11 @@ pub const ClipboardAction = enum(u8) {
 /// 프리셋으로 쓴다(직교한 별도 설정, 색만 공유). 적용 알파는 용도별로 다르다 — 배경=반투명 tint(sidebar_ops.tab_bg_tint_alpha), 막대=불투명.
 pub const tab_color_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
 /// 프리셋 색 이름(배경 "배경: …"·막대 "바: …" 라벨이 공유). tab_color_presets와 index-align — 개수가 어긋나면 comptime 실패.
+///
+/// **이 이름들은 아직 키로 못 옮긴다.** 라벨을 `prefix ++ name` 으로 **comptime 결합**해 만드는데
+/// (`tabColorLabels`), 런타임 조회(`i18n.t`)는 comptime 값이 아니라 `++` 를 못 쓴다. 옮기려면 결합을
+/// 런타임으로 내리고 조립 버퍼를 세션에 두어야 한다 — 계약 §6.2 가 다루는 "접두 + 이름" 구조 변경과
+/// 같은 작업이라 그쪽(I2)과 함께 든다.
 const tab_color_names = [_][]const u8{ "없음", "앰버", "파랑", "초록", "빨강", "보라" };
 comptime {
     if (tab_color_names.len != tab_color_presets.len) @compileError("tab_color_names must index-align with tab_color_presets");
@@ -8010,7 +8023,9 @@ pub const AppSession = struct {
     /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
     /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
     /// font.family 드롭다운의 마지막 슬롯 라벨 — 목록 밖 임의 설치 폰트를 인라인 편집으로 넣는 진입점(선택 시 편집 열림).
-    pub const font_direct_input_label = "직접 입력…";
+    pub fn fontDirectInputLabel() []const u8 {
+        return maru.i18n.t(.set_direct_input);
+    }
 
     /// 드롭다운 ↑↓ — highlighted 변형을 **라이브 적용(인메모리만, 영속 안 함)**한다(팝업 유지, 바로 반영). 영속을 안 하는 게
     /// 핵심 — 미리보기가 영속하면 취소해도 파일에 미리본 값이 남아 커스텀이 사라진다(code-review high 데이터 손실 수정).
@@ -11058,7 +11073,7 @@ pub const AppSession = struct {
         if (total_lines > paste_preview_max_lines) {
             const more = total_lines - paste_preview_max_lines;
             const start = used;
-            const s = std.fmt.bufPrint(self.paste_preview_buf[used..], "… {d}줄 더", .{more}) catch "";
+            const s = maru.i18n.format(self.paste_preview_buf[used..], maru.i18n.t(.app_more_lines), &.{.{ .d = @intCast(more) }});
             used += s.len;
             self.paste_preview_lines[count] = self.paste_preview_buf[start .. start + s.len];
             count += 1;
@@ -11456,7 +11471,7 @@ pub const AppSession = struct {
             return;
         }
         var title_buf: [160]u8 = undefined;
-        const title = std.fmt.bufPrint(&title_buf, "새 버전 {s} 사용 가능", .{self.update_tag_buf[0..len]}) catch "새 버전 사용 가능";
+        const title = maru.i18n.format(&title_buf, maru.i18n.t(.upd_available_ver), &.{.{ .s = self.update_tag_buf[0..len] }});
         // push가 성공했을 때만 처리 완료로 표시한다 — 일시적 할당 실패면 update_notified를 남겨 다음 tick에
         // 재시도(알림 유실 방지). 안내 문구는 설치 출처에 맞춘다(아래 updateUpgradeHint).
         if (notification_ops.pushNotificationHistory(self, title, self.updateUpgradeHint(), 0)) self.update_notified = true;
@@ -11466,11 +11481,11 @@ pub const AppSession = struct {
     /// 명령을, 그 외(소스 빌드·~/.local/bin·직접 다운로드)면 일반 안내를 준다 — 비-brew 설치에 brew 명령을
     /// 보이지 않는다(distribution.md "brew가 아닌데 brew 명령을 채워주면 안 된다"). 경로 해석 실패면 일반 안내.
     fn updateUpgradeHint(self: *AppSession) []const u8 {
-        const path = std.process.executablePathAlloc(self.io, self.allocator) catch return "GitHub 릴리스에서 최신 버전을 받으세요";
+        const path = std.process.executablePathAlloc(self.io, self.allocator) catch return maru.i18n.t(.upd_github);
         defer self.allocator.free(path);
         if (std.mem.indexOf(u8, path, "/Cellar/") != null or std.mem.indexOf(u8, path, "/homebrew/") != null)
-            return "brew upgrade maru 로 업데이트하세요";
-        return "GitHub 릴리스에서 최신 버전을 받으세요";
+            return maru.i18n.t(.upd_brew);
+        return maru.i18n.t(.upd_github);
     }
 
     /// surface 하나의 미전송 입력 잔여(paste·IME 확정·OSC 52 응답 공유 — 전송 순서를 지킨다).
@@ -12982,7 +12997,7 @@ pub const AppSession = struct {
     /// 앞머리 두 줄 — ⓪ `실행 중 | 막힘  <개수>개` ① `이름 … 마지막 활동`.
     fn buildAgentHeaderRows(self: *AppSession) void {
         const cols = chrome.components.overlay_input.displayCols;
-        const title_text = if (self.agent_menu_blocked) "막힘" else "실행 중";
+        const title_text = if (self.agent_menu_blocked) maru.i18n.t(.st_blocked) else maru.i18n.t(.st_running);
 
         const title = &self.agent_menu_text[max_agent_rows];
         var used: usize = copyClamped(title[0..], title_text);
@@ -12993,10 +13008,10 @@ pub const AppSession = struct {
         }
         used += copyClamped(title[used..], "  ");
         var count_buf: [16]u8 = undefined;
-        const count = std.fmt.bufPrint(&count_buf, "{d}개", .{self.agent_menu_len}) catch "";
+        const count = maru.i18n.format(&count_buf, maru.i18n.t(.app_count_items), &.{.{ .d = @intCast(self.agent_menu_len) }});
         // 제목의 개수도 값 열과 **같은 오른쪽 끝**에 맞춘다 — 세 줄(제목·열 이름·값)의 끝이 어긋나면
         // 목록이 정렬돼 보이지 않는다(사용자 지적).
-        var cpad = agent_age_cols -| cols(count);
+        var cpad = agentAgeCols() -| cols(count);
         while (cpad > 0 and used < title.len) : (cpad -= 1) {
             title[used] = ' ';
             used += 1;
@@ -13005,14 +13020,14 @@ pub const AppSession = struct {
         self.context_menu_items_buf[0] = title[0..used];
 
         const head = &self.agent_menu_text[max_agent_rows + 1];
-        var m: usize = copyClamped(head[0..], "이름");
-        var pad2 = agent_row_name_cols -| cols("이름");
+        var m: usize = copyClamped(head[0..], maru.i18n.t(.col_name));
+        var pad2 = agent_row_name_cols -| cols(maru.i18n.t(.col_name));
         while (pad2 > 0 and m < head.len) : (pad2 -= 1) {
             head[m] = ' ';
             m += 1;
         }
         m += copyClamped(head[m..], "  ");
-        m += copyClamped(head[m..], agent_age_header);
+        m += copyClamped(head[m..], agentAgeHeader());
         self.context_menu_items_buf[1] = head[0..m];
     }
 
@@ -13021,7 +13036,7 @@ pub const AppSession = struct {
     fn formatAgentRow(self: *AppSession, slot: usize, key: u64, now_ms: u64) []const u8 {
         var loc_buf: [notification_location_buf_len]u8 = undefined;
         var age_buf: [32]u8 = undefined;
-        var label: []const u8 = "(닫힌 탭)";
+        var label: []const u8 = maru.i18n.t(.app_closed_tab);
         var age: []const u8 = "—";
         outer: for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
@@ -13054,7 +13069,7 @@ pub const AppSession = struct {
         }
         used += copyClamped(out[used..], "  ");
         // 값 열은 오른쪽 정렬 — 숫자 자릿수가 달라도 끝이 맞아야 훑기 쉽다.
-        var vpad = agent_age_cols -| chrome.components.overlay_input.displayCols(age);
+        var vpad = agentAgeCols() -| chrome.components.overlay_input.displayCols(age);
         while (vpad > 0 and used < out.len) : (vpad -= 1) {
             out[used] = ' ';
             used += 1;
@@ -13092,9 +13107,9 @@ pub const AppSession = struct {
         // 쓰므로, 예전처럼 `[max_resource_rows]`를 제목으로 쓰면 **12번째 탭 행과 제목이 같은 버퍼**를
         // 나눠 쓴다(행이 꽉 찬 창에서만 드러나는 종류의 손상).
         const title = &self.resource_menu_text[max_resource_rows + resource_footer_rows];
-        var used: usize = copyClamped(title[0..], "리소스");
+        var used: usize = copyClamped(title[0..], maru.i18n.t(.col_resource));
         if (self.resource_text_len > 0) {
-            var pad = resource_row_name_cols -| cols("리소스");
+            var pad = resource_row_name_cols -| cols(maru.i18n.t(.col_resource));
             while (pad > 0 and used < title.len) : (pad -= 1) {
                 title[used] = ' ';
                 used += 1;
@@ -13105,8 +13120,8 @@ pub const AppSession = struct {
         self.context_menu_items_buf[0] = title[0..used];
 
         const head = &self.resource_menu_text[max_resource_rows + resource_footer_rows + 1];
-        var n: usize = copyClamped(head[0..], "이름");
-        var pad2 = resource_row_name_cols -| cols("이름");
+        var n: usize = copyClamped(head[0..], maru.i18n.t(.col_name));
+        var pad2 = resource_row_name_cols -| cols(maru.i18n.t(.col_name));
         while (pad2 > 0 and n < head.len) : (pad2 -= 1) {
             head[n] = ' ';
             n += 1;
@@ -13150,7 +13165,7 @@ pub const AppSession = struct {
     /// 이 행이 가리키는 Term의 `탭 › 팬` 라벨. 못 찾으면(그 사이 닫힘) 마지막으로 알던 이름이 없으므로 물음표.
     fn resourceRowLabel(self: *AppSession, buf: []u8, key: u64) []const u8 {
         // 앱 자신 행은 Term이 아니다 — 탭 목록에서 못 찾는 게 정상이라 먼저 가른다(§4.1).
-        if (key == resource_app_key) return resource_app_label;
+        if (key == resource_app_key) return resourceAppLabel();
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -13159,7 +13174,7 @@ pub const AppSession = struct {
                 }
             }
         }
-        return "(닫힌 탭)";
+        return maru.i18n.t(.app_closed_tab);
     }
 
     fn clearResourceReading(self: *AppSession) void {
@@ -17424,14 +17439,14 @@ fn holdOnStartupExit(uptime_ms: i64, total_output_events: u64, exit_abnormal: bo
 
 /// 종료 원인을 notice용 짧은 문구로. exit code/시그널은 `buf`에 포맷하고, 정보가 없거나 실패하면 정적 문구.
 fn startupExitDetail(buf: []u8, ended: ?app.RuntimePumpTermination) []const u8 {
-    const t = ended orelse return "즉시 종료";
+    const t = ended orelse return maru.i18n.t(.exit_immediate);
     return switch (t) {
         .exited => |es| switch (es) {
-            .exited => |code| std.fmt.bufPrint(buf, "종료 코드 {d}", .{code}) catch "종료",
-            .signaled => |sig| std.fmt.bufPrint(buf, "시그널 {d}", .{sig}) catch "종료",
-            .unknown => "비정상 종료",
+            .exited => |code| maru.i18n.format(buf, maru.i18n.t(.exit_code), &.{.{ .d = @intCast(code) }}),
+            .signaled => |sig| maru.i18n.format(buf, maru.i18n.t(.exit_signal), &.{.{ .d = @intCast(sig) }}),
+            .unknown => maru.i18n.t(.exit_abnormal),
         },
-        .read_error => "읽기 오류",
+        .read_error => maru.i18n.t(.exit_read_error),
     };
 }
 
@@ -36832,6 +36847,12 @@ test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸�
 }
 
 test "holdOnStartupExit/exitAbnormal/startupExitDetail: 비정상+미도달만 유지, exit0은 정상 종료(순수)" {
+    // 기대값이 한국어 문장이다(종료 상태 문구) — 재는 것은 **어느 상태로 분류하는가**이고 그 판정은
+    // 문장으로 봐야 드러난다. 이 테스트는 세션을 만들지 않으므로 여기서 고정해도 지워지지 않는다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+
     // exitAbnormal: exit 0만 정상, 나머지는 비정상(정보 없음 포함).
     try std.testing.expect(!exitAbnormal(app.RuntimePumpTermination{ .exited = .{ .exited = 0 } }));
     try std.testing.expect(exitAbnormal(app.RuntimePumpTermination{ .exited = .{ .exited = 1 } }));
@@ -36851,9 +36872,9 @@ test "holdOnStartupExit/exitAbnormal/startupExitDetail: 비정상+미도달만 �
     var buf: [48]u8 = undefined;
     try std.testing.expectEqualStrings("종료 코드 127", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .exited = 127 } }));
     try std.testing.expectEqualStrings("시그널 9", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .signaled = 9 } }));
-    try std.testing.expectEqualStrings("비정상 종료", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .unknown = -1 } }));
-    try std.testing.expectEqualStrings("읽기 오류", startupExitDetail(&buf, app.RuntimePumpTermination{ .read_error = "boom" }));
-    try std.testing.expectEqualStrings("즉시 종료", startupExitDetail(&buf, null));
+    try std.testing.expectEqualStrings(maru.i18n.t(.exit_abnormal), startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .unknown = -1 } }));
+    try std.testing.expectEqualStrings(maru.i18n.t(.exit_read_error), startupExitDetail(&buf, app.RuntimePumpTermination{ .read_error = "boom" }));
+    try std.testing.expectEqualStrings(maru.i18n.t(.exit_immediate), startupExitDetail(&buf, null));
 }
 
 // 이 테스트가 증명하는 것: 워크스페이스 자동 닫기 게이트 terminationClosesWorkspace가 **검증된 자식 종료(.exited)**
@@ -47653,6 +47674,12 @@ test "SB-A: 앱 행은 무거운 순 정렬 밖에서 맨 아래 고정이고 �
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+
+    // 기대값이 한국어 문장이라 언어를 고정한다. **`init` 뒤**여야 한다 — init 이 `ui.language` 를 읽어
+    // 언어를 세우므로 앞에 걸면 조용히 지워진다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 앱 행을 **가장 무겁게** 심는다. 정렬에 섞였다면 맨 위로 올라올 값이다 — 그런데 맨 아래여야 한다.
@@ -47688,7 +47715,7 @@ test "SB-A: 앱 행은 무거운 순 정렬 밖에서 맨 아래 고정이고 �
     // 행 문자열에 "모든 창 공유"가 박혀 있다 — 창이 여럿일 때 더하면 안 된다는 사실이 화면에 있어야 한다.
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[last], "모든 창 공유") != null);
     // 그리고 그 행은 제목 버퍼를 침범하지 않는다(행 슬롯과 머리글 슬롯이 갈려 있다).
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "리소스") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], maru.i18n.t(.col_resource)) != null);
 }
 
 // SB-P: 팝오버는 **열 때 순서·개수를 얼리고 값만 갱신한다.** 무거운 순 정렬이라 갱신마다 다시 정렬하면
@@ -47726,7 +47753,7 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     // 머리글 2줄(제목·열 이름)이 앞에 붙는다 — 행 인덱스는 그만큼 밀린다.
     try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
     try std.testing.expectEqual(resource_header_rows, session.chrome_host.context_menu.header_count);
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "리소스") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], maru.i18n.t(.col_resource)) != null);
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[1], maru.i18n.t(.res_memory)) != null);
     // 무거운 순 — 900이 먼저다.
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
@@ -48424,7 +48451,7 @@ test "SB-AG: 제목·열 이름·값이 같은 칸에서 끝난다" {
         try std.testing.expectEqual(want, cols(line));
     }
     // 값 열 폭이 머리글에서 나왔다 — 상수를 박으면 이 단언이 깨진다.
-    try std.testing.expectEqual(cols(agent_age_header), agent_age_cols);
+    try std.testing.expectEqual(cols(agentAgeHeader()), agentAgeCols());
 }
 
 // SB-AG: 정렬 규칙이 두 항목에서 **다르다**(§4). 막힌 것은 처리 대기열이라 오래 기다린 순, 실행 중은 훑는
@@ -49832,6 +49859,10 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
                 .queue_capacity = 16,
                 .command_kind = @intFromEnum(CommandKind.controlled_smoke),
             });
+            // 아래 단언들이 미리보기 요약("…N줄 더")을 **한국어 조각**으로 찾으므로 언어를 고정한다.
+            // 반드시 `init` 뒤여야 한다 — init 이 `ui.language` 를 읽어 언어를 세우므로 앞에 걸면 지워진다.
+            // 이 헬퍼가 모든 시나리오(accept/cancel/off)의 세션을 만들므로 한 자리로 충분하다.
+            maru.i18n.setLang(.ko);
             return s;
         }
         /// bound tick 안에 활성 surface 화면이 needle을 담는지(자식 에코 관측). deinit reap도 여기 tick으로 자식을 진행시킨다.

@@ -1034,6 +1034,7 @@ static void maru_append_draw_glyph_record(
     CFStringRef font_name,
     CTFontRef run_font,
     CGGlyph glyph,
+    bool prev_glyph_zero_ink,
     uint32_t fallback,
     bool is_color_font
 ) {
@@ -1072,7 +1073,9 @@ static void maru_append_draw_glyph_record(
     record->cell_width = cell.width;
     // `reserved` 는 왼쪽 오버항 칸 수를 싣는다(ABI 크기 불변 — Zig 쪽 필드 이름도 함께 바꿨다).
     // 합성 글리프는 코드포인트로 직접 그리므로 폰트 ink 와 무관하다.
-    record->reserved = synth ? 0 : maru_left_overhang_cells(run_font, glyph);
+    // 앞 칸이 비어 있지 않으면 오버항을 주장하지 않는다(위 `prev_glyph_zero_ink` 근거) — 합자만
+    // 통과하고, bearing 이 큰 일반 글리프가 앞 글자를 덮는 일은 생기지 않는다.
+    record->reserved = (synth || !prev_glyph_zero_ink) ? 0 : maru_left_overhang_cells(run_font, glyph);
     record->codepoint = cell.codepoint;
     // synth는 codepoint로 합성하므로 폰트 glyph_id는 무의미하다. 0으로 정규화해 downstream(cache_key)이
     // codepoint로 키잉하게 한다(glyph_id!=0이면 폰트 glyph_id로 키잉되어 중복/aliasing). 비-synth는 그대로.
@@ -1512,6 +1515,12 @@ void maru_macos_coretext_shape_draw_list(
 
                 const CFIndex glyph_count = CTRunGetGlyphCount(run);
                 CFIndex processed = 0;
+                // **오버항은 앞 칸이 비어 있을 때만 안전하다.** 합자는 폰트가 첫 칸을 빈 글리프로 치환하기
+                // 때문에 그 칸을 뺏어도 덮을 것이 없다. 그런데 "ink 가 왼쪽으로 넘친다"는 조건만 보면,
+                // 합자가 아닌데 좌측 bearing 이 큰 글리프(폰트에 따라 있다)가 **앞 글자를 덮어쓴다** —
+                // 사용자가 폰트를 바꾸면 실제로 생길 수 있는 겹침이라 조건을 하나 더 요구한다
+                // (적대적 검증 2026-08-18). run 안에서 직전 글리프의 잉크 여부를 그대로 들고 간다.
+                bool prev_glyph_zero_ink = false;
                 while (processed < glyph_count && result->status == -1) {
                     const CFIndex remaining = glyph_count - processed;
                     const CFIndex chunk = remaining > MARU_SHAPE_RUN_GLYPH_CHUNK
@@ -1537,6 +1546,7 @@ void maru_macos_coretext_shape_draw_list(
                             continue;
                         }
                         const uint32_t records_before = result->glyph_record_count;
+                        const bool this_zero_ink = maru_glyph_ink_is_empty(run_font, glyphs[g]);
                         maru_append_draw_glyph_record(
                             result,
                             glyph_records,
@@ -1546,9 +1556,11 @@ void maru_macos_coretext_shape_draw_list(
                             record_font_name,
                             run_font,
                             glyphs[g],
+                            prev_glyph_zero_ink,
                             run_fallback,
                             run_is_color
                         );
+                        prev_glyph_zero_ink = this_zero_ink;
                         if (result->glyph_record_overflow != 0) {
                             result->status = 7;
                             break;

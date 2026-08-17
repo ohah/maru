@@ -496,6 +496,195 @@ test "관성은 본문 제스처의 것이다 — 키바로 간 손짓은 본문
     bridge.maru_mobile_clear_error();
 }
 
+// **관성은 유한한 거리에서 멈춘다.** 감쇠가 빠지면 화면이 **영영 흐른다** — 그런데도 "떼고
+// 나서 움직였나" 만 재는 테스트는 전부 통과한다(움직이기는 하니까). 멈추는 것까지 재야 한다.
+// 정지 임계(`stop_below`)는 **눈에 보이는 성질이 아니다** — 그 아래로 남는 거리가 다 합쳐도
+// 6px(한 줄 미만)이라 지워도 화면은 같다. 계산을 끝내는 값이고, 무엇보다 본문·키바·설정이
+// 같은 곡선이어야 해서 `scroll_area.Touch` 의 것을 그대로 쓴다. 그래서 여기서 안 잰다.
+test "관성은 유한한 거리에서 멈춘다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 600) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll_to_bottom();
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 81, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 81, q.x, q.y + 60, now());
+    bridge.maru_mobile_pointer(2, 81, q.x, q.y + 60, now());
+
+    // 2초(120프레임)면 이 속도의 관성은 이미 끝나 있어야 한다.
+    var f: u32 = 0;
+    while (f < 120) : (f += 1) advanceFrame(402, 874, 16);
+    const settled = bridge.maru_mobile_view_offset();
+    f = 0;
+    while (f < 60) : (f += 1) advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(settled, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **튄 이벤트 하나가 화면을 날리지 않는다.** 좌표가 한 번 크게 건너뛰면(손가락 순간이동·
+// 이어받기의 불연속) 그 델타를 간격으로 나눈 값이 그대로 속도가 된다 — 상한이 없으면
+// 한 프레임에 수천 줄이 지나간다. 상한도 `scroll_area.Touch` 의 값을 쓴다(8px/ms ≈ 8000dp/s).
+test "튄 좌표가 관성 상한을 넘지 않는다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 600) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    // **바닥에서 과거 쪽으로 튕긴다** — 그래야 갈 자리가 남는다. 반대로 하면 최대 이동이
+    // 지금 offset(수십 줄)으로 막혀 **상한이 있든 없든 같은 값**이 나온다(그렇게 짰다가 걸렀다).
+    bridge.maru_mobile_scroll_to_bottom();
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 82, q.x, q.y, now());
+    // **한 이벤트에 10000px** — 있을 수 없는 이동이지만 좌표는 host 가 주는 값이다.
+    bridge.maru_mobile_pointer(1, 82, q.x, q.y + 10000, now());
+    bridge.maru_mobile_pointer(2, 82, q.x, q.y + 10000, now());
+    // **기준은 뗀 뒤다.** 끌기 자체가 그 10000px 를 이미 흘렸으므로(그건 손가락이 시킨 것이다),
+    // 여기서 재려는 것은 **그 뒤로 관성이 더 가는 거리**다(그렇게 안 잡아 처음엔 둘이 섞였다).
+    const before = bridge.maru_mobile_view_offset();
+    var f: u32 = 0;
+    while (f < 200) : (f += 1) advanceFrame(402, 874, 16);
+
+    // 상한이 있으면 관성 거리는 8px/ms ÷ 감쇠 ≈ 1600px ≈ 73줄이다. 상한이 없으면 첫 프레임에만
+    // 수천 줄이 지나간다. 넉넉히 200줄로 가른다.
+    const moved = @as(i64, bridge.maru_mobile_view_offset()) - @as(i64, before);
+    try std.testing.expect(@abs(moved) < 200);
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **화면을 밀면 관성은 거기서 끝난다.** `maru_mobile_scroll` 이 밀린 화면에서 무시하므로
+// "안 보이는 데서 흐르는" 일은 없지만, **속도를 안 거두면 그 값이 얼어붙어 있다가** 돌아오는
+// 순간 되살아난다(감쇠도 프레임에서 도는데 그 프레임이 안 돌기 때문이다) — 목록에 몇 분
+// 있다 와도 화면이 저 혼자 흐른다. 그래서 거기서 0 으로 만든다.
+test "화면을 밀면 관성은 돌아와도 되살아나지 않는다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(600);
+
+    // 본문을 튕긴다(관성이 살아 있는 상태로 둔다).
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 71, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 71, q.x, q.y + 60, now());
+    bridge.maru_mobile_pointer(2, 71, q.x, q.y + 60, now());
+
+    // **취소를 거치지 않고** 화면을 뺀다 — 취소는 관성을 거두므로 그 경로로는 이 결함이 가려진다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+    const parked = bridge.maru_mobile_view_offset();
+    var f: u32 = 0;
+    while (f < 5) : (f += 1) advanceFrame(402, 874, 16);
+
+    // 목록에서 그 줄을 눌러 다시 들어간다(chrome 목적지 — 본문은 안 건드린다).
+    const r = bridge.sessionsRowCenter();
+    bridge.maru_mobile_pointer(0, 72, r.x, r.y, now());
+    bridge.maru_mobile_pointer(2, 72, r.x, r.y, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+
+    f = 0;
+    while (f < 20) : (f += 1) advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(parked, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **재현: 선택은 스크롤이 아니므로 떼도 미끄러지면 안 된다.** 길게 누르기 전에는 손이 떨려
+// `move` 가 몇 번 오고, 그 작은 이동이 속도로 남는다(2px/16ms = 0.125px/ms — 정지 임계 0.03 의
+// 네 배다). 선택 중 `move` 는 속도 코드를 건너뛰므로 그 값이 **그대로 살아남아**, 손을 떼는
+// 순간 관성이 돌아 방금 고른 글자가 화면 밖으로 흘러간다.
+test "길게 눌러 선택하고 떼면 화면이 안 미끄러진다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(600);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 61, q.x, q.y, now());
+    // **손 떨림** — 길게 누름 임계(10px) 안이라 선택은 그대로 성립한다.
+    bridge.maru_mobile_pointer(1, 61, q.x, q.y + 2, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    const at_release = bridge.maru_mobile_view_offset();
+    bridge.maru_mobile_pointer(2, 61, q.x, q.y + 2, now());
+    var f: u32 = 0;
+    while (f < 20) : (f += 1) advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(at_release, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **손가락이 닿아 있는 동안에는 관성이 안 돈다.** `move` 가 이미 그 이동량만큼 흘렸는데
+// 프레임에서 또 흘리면 **같은 이동이 두 번** 적용돼 화면이 손가락보다 두 배로 미끄러진다
+// (키바가 같은 이유로 같은 가드를 갖는다). 손가락을 대고 가만히 있으면 화면도 서 있어야 한다.
+test "끌고 있는 동안에는 관성이 안 겹친다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(600);
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 41, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 41, q.x, q.y + 40, now()); // 여기서 40px 만큼 흘렀다
+    const after_move = bridge.maru_mobile_view_offset();
+
+    // **손가락은 그대로 두고** 프레임만 돌린다. 관성이 겹치면 여기서 더 흐른다.
+    var f: u32 = 0;
+    while (f < 10) : (f += 1) advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(after_move, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **이어받은 손가락은 앞 손가락의 속도를 안 물려받는다**(AOSP `ScrollView` 가
+// `VelocityTracker.clear()` 로 하는 그것이다). 안 그러면 **움직인 적 없는 손가락**이 떼지는
+// 순간 앞 사람의 속도로 화면이 날아간다.
+test "소유권을 이어받아도 앞 손가락의 속도는 안 따라온다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(600);
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    // 첫 손가락이 빠르게 끈다.
+    bridge.maru_mobile_pointer(0, 51, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 51, q.x, q.y + 60, now());
+    // 둘째 손가락이 붙는다(비소유자 — 뜻은 안 만든다).
+    bridge.maru_mobile_pointer(0, 52, q.x + 100, q.y, now());
+    // **소유자가 뗀다** → 둘째가 이어받는다. 둘째는 자기 자리에서 한 번도 안 움직였다.
+    bridge.maru_mobile_pointer(2, 51, q.x, q.y + 60, now());
+    // 둘째도 그 자리에서 곧바로 뗀다.
+    bridge.maru_mobile_pointer(2, 52, q.x + 100, q.y, now());
+
+    const at_release = bridge.maru_mobile_view_offset();
+    var f: u32 = 0;
+    while (f < 10) : (f += 1) advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(at_release, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
 // **짚어서 세우는 것은 그 면을 짚었을 때다.** 관성이 host 에 있던 시절에는 host 가 목적지를
 // 몰라 **첫 손가락이 어디에 닿든** 본문 관성을 껐다(두 host 다 `down` 에서 무조건 0 으로 만들었다).
 // 코어로 옮기면서 규칙이 "본문을 짚으면 본문이 선다" 로 좁혀졌다 — 흐르는 화면을 세우려고

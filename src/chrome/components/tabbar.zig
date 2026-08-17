@@ -96,14 +96,25 @@ pub const Metrics = struct {
         // 이런 탭을 클릭/드래그 타겟으로 잡지 않도록 순회를 멈추고, x가 모든 보이는 탭 우경계 이상이면 마지막
         // 보이는 탭으로 clamp한다(안 보이는 term_count-1을 반환하지 않게 — 리뷰 #1: dragTabTo 가드 부재 회귀 방지).
         var last_visible: usize = 0;
+        var seen_visible = false;
         var i: usize = 0;
         while (i < term_count) : (i += 1) {
+            const abs_start = i * self.tab_w;
+            // **폭 0 인 탭은 두 종류다.** 왼쪽으로 스크롤아웃된 탭과, 탭 영역을 넘어선 오른쪽 탭. `segOf`는
+            // 둘 다 0 폭으로 뭉개므로 여기서 갈라야 한다 — 옛 코드는 첫 번째 0 폭에서 순회를 끊었고, 그래서
+            // **한 탭이라도 왼쪽으로 밀리면 어떤 x 를 눌러도 탭 0 이 나왔다**(스크롤 전 첫 탭으로 이동하는
+            // 사용자 보고, 2026-08-18). 왼쪽은 건너뛰고, 오른쪽에서만 멈춘다.
+            if (abs_start + self.tab_w <= self.scroll_cols) continue; // 왼쪽으로 완전히 밀려남
+            if (abs_start -| self.scroll_cols >= self.tab_cols) break; // 탭 영역 오른쪽 밖 — 더 볼 것 없음
             const seg = self.segOf(i);
-            if (seg.end_px <= seg.start_px) break; // overflow(안 보이는) 탭 — 탭 영역 초과, 더 볼 것 없음
-            if (x_px < seg.end_px) return i; // 이 탭 우경계 안(좌측 clamp는 탭0.end가 흡수)
+            if (seg.end_px <= seg.start_px) break; // 보이는 폭이 없다(우단에서 완전히 잘림)
+            if (x_px < seg.end_px) return i; // 이 탭 우경계 안(좌측 clamp는 첫 보이는 탭이 흡수)
             last_visible = i;
+            seen_visible = true;
         }
-        return last_visible; // 모든 보이는 탭 우경계 이상 → 마지막 보이는 탭으로 clamp
+        // 모든 보이는 탭 우경계 이상 → 마지막 보이는 탭으로 clamp. 보이는 탭이 하나도 없으면(레이아웃이
+        // 무너진 경우) 0 을 준다 — 옛 반환값과 같다.
+        return if (seen_visible) last_visible else 0;
     }
 
     /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — **segOf의 close zone**([close_start_px, end_px), 우측 2칸). 제목
@@ -129,11 +140,19 @@ pub const Metrics = struct {
     /// "+"(새 Term) 버튼 시작 컬럼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면(has_scroll)
     /// 옛대로 far-right(tab_cols + ‹·gap·› 3칸 뒤). "+" glyph는 plusZoneStart+1에 그린다(렌더 plus_start와 단일 정합).
     pub fn plusZoneStart(self: Metrics) u32 {
-        return if (self.has_scroll) self.tab_cols + 3 else self.tabsEndCol(); // 오버플로우=far-right, 아니면 인라인
+        // 오버플로우면 ‹(2칸)·›(2칸) 뒤, 아니면 인라인.
+        return if (self.has_scroll) self.tab_cols + scroll_button_cols * 2 else self.tabsEndCol();
     }
 
-    /// "+" 버튼 클릭 폭(컬럼) — 빈 영역이 통째로 +가 되지 않도록 버튼만(2칸: gap+glyph). 인라인 + 오른쪽 빈 바는 무동작(사용자 결정 ①).
-    const plus_button_cols: u32 = 2;
+    /// "+" 버튼 클릭 폭(컬럼) — 빈 영역이 통째로 +가 되지 않도록 버튼만. **3칸: 좌여백·glyph·우여백**이라
+    /// glyph 가 버튼 한가운데에 놓이고(사용자 요청 2026-08-18 "+ 버튼도 가운데로"), 누를 자리가 한 칸이
+    /// 아니라 세 칸이다. 인라인 + 오른쪽 빈 바는 여전히 무동작(사용자 결정 ①).
+    pub const plus_button_cols: u32 = 3;
+
+    /// ‹ / › 스크롤 버튼 하나의 클릭 폭(컬럼). 옛값은 1칸(≈cell 폭)이라 실제로 누르기 어려웠다
+    /// (사용자 보고 2026-08-18 "누르는 위치 너무 협소하고 작음"). 2칸이면 glyph 를 바깥쪽 칸에 두어
+    /// 두 버튼 사이에 자연스러운 여백이 생기고, 클릭 영역은 두 배가 된다.
+    pub const scroll_button_cols: u32 = 2;
 
     /// x_px가 "+" 버튼([plusZoneStart, +plus_button_cols)) 안인가. **인라인이라 cols까지가 아니라 버튼 폭으로 한정** —
     /// 마지막 탭 오른쪽 빈 영역을 클릭해도 새 Term이 안 생긴다(①). "+" glyph(plusZoneStart+1)를 포함하는 영역.
@@ -144,16 +163,33 @@ pub const Metrics = struct {
         return x_px >= self.colPx(ps) and x_px < self.colPx(end);
     }
 
-    /// x_px가 ‹(왼쪽 스크롤) 버튼([tab_cols, tab_cols+1)) 안인가 — has_scroll일 때만. ‹ glyph(col=tab_cols)와 같은 영역.
-    pub fn inScrollLeftZone(self: Metrics, x_px: f64) bool {
-        if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
-        return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.tab_cols + 1);
+    /// ‹ glyph 가 놓이는 컬럼 — 자기 zone 의 **바깥쪽**(왼쪽) 칸. 렌더가 이 값을 그대로 쓴다(§5.4 단일 소스).
+    pub fn scrollLeftGlyphCol(self: Metrics) u32 {
+        return self.tab_cols;
     }
 
-    /// x_px가 ›(오른쪽 스크롤) 버튼([tab_cols+1, tab_cols+2)) 안인가 — has_scroll일 때만. › glyph(col=tab_cols+1)와 같은 영역.
+    /// › glyph 가 놓이는 컬럼 — 자기 zone 의 **바깥쪽**(오른쪽) 칸. 두 glyph 를 바깥으로 붙이면 버튼은 각각
+    /// 2칸이면서 사이에는 2칸 여백이 생겨, 옛 `‹·gap·›`(1칸씩) 보다 누르기 쉽고 덜 붐빈다.
+    pub fn scrollRightGlyphCol(self: Metrics) u32 {
+        return self.tab_cols + scroll_button_cols * 2 - 1;
+    }
+
+    /// "+" glyph 가 놓이는 컬럼 — 3칸 버튼의 **가운데** 칸.
+    pub fn plusGlyphCol(self: Metrics) u32 {
+        return self.plusZoneStart() + plus_button_cols / 2;
+    }
+
+    /// x_px가 ‹(왼쪽 스크롤) 버튼([tab_cols, +scroll_button_cols)) 안인가 — has_scroll일 때만.
+    pub fn inScrollLeftZone(self: Metrics, x_px: f64) bool {
+        if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
+        return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.tab_cols + scroll_button_cols);
+    }
+
+    /// x_px가 ›(오른쪽 스크롤) 버튼([tab_cols+scroll_button_cols, +scroll_button_cols)) 안인가 — has_scroll일 때만.
     pub fn inScrollRightZone(self: Metrics, x_px: f64) bool {
         if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
-        return x_px >= self.colPx(self.tab_cols + 2) and x_px < self.colPx(self.tab_cols + 3); // › at tab_cols+2(gap tab_cols+1 건너뜀)
+        const start = self.tab_cols + scroll_button_cols;
+        return x_px >= self.colPx(start) and x_px < self.colPx(start + scroll_button_cols);
     }
 };
 
@@ -216,21 +252,20 @@ test "tabbar 인라인 +: 탭이 영역을 안 채우면 마지막 탭 바로 �
     m.tab_count = 2;
     try std.testing.expectEqual(@as(u32, 4), m.tabsEndCol()); // 마지막 탭(탭1) 끝 = 2*2
     try std.testing.expectEqual(@as(u32, 4), m.plusZoneStart()); // 인라인(far-right tab_cols=8 아님)
-    // + 버튼 = [4,6)칸 = colPx [132,148). glyph는 plusZoneStart+1=5(=140px)에 그려져 이 안.
+    // + 버튼 = 3칸 [4,7) = colPx [132,156). glyph 는 **가운데 칸**(5 = 140px)이라 좌우 여백이 같다.
     try std.testing.expect(m.inPlusZone(132)); // + 좌단
+    try std.testing.expectEqual(@as(u32, 5), m.plusGlyphCol()); // 가운데 칸
     try std.testing.expect(m.inPlusZone(140)); // glyph
-    try std.testing.expect(m.inPlusZone(147)); // + 우단 직전
-    try std.testing.expect(!m.inPlusZone(148)); // + 버튼 밖(빈 영역 시작) — 새 Term 안 만듦(①)
-    try std.testing.expect(!m.inPlusZone(160)); // 마지막 탭 오른쪽 빈 바 — 무동작
+    try std.testing.expect(m.inPlusZone(155)); // + 우단 직전
+    try std.testing.expect(!m.inPlusZone(156)); // + 버튼 밖(빈 영역 시작) — 새 Term 안 만듦(①)
     try std.testing.expect(!m.inPlusZone(170)); // 옛 far-right 자리도 이제 +가 아니다
-    // 넘쳐서 has_scroll이면 far-right 유지(인라인 아님): plusZoneStart = tab_cols(6) + 3 = 9.
+    // 넘쳐서 has_scroll이면 far-right 유지(인라인 아님): plusZoneStart = tab_cols(6) + ‹›(2+2) = 10.
     var ov = testMetrics();
     ov.has_scroll = true;
     ov.tab_cols = 6;
     ov.tab_count = 8; // 넘침
-    try std.testing.expectEqual(@as(u32, 9), ov.plusZoneStart()); // ‹·gap·› 뒤 far-right
-    try std.testing.expect(ov.inPlusZone(172)); // colPx(9)=172 — + 버튼
-    try std.testing.expect(!ov.inPlusZone(160)); // ‹›/gap 영역은 + 아님
+    try std.testing.expectEqual(@as(u32, 10), ov.plusZoneStart()); // ‹(2칸)·›(2칸) 뒤 far-right
+    try std.testing.expect(!ov.inPlusZone(160)); // ‹› 영역은 + 아님
 }
 
 test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-열 정렬, 패딩 0)" {
@@ -281,18 +316,50 @@ test "tabbar tabIndex: overflow(term>탭칸) — 안 보이는 탭을 hit하지 
     try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 999));
 }
 
-test "tabbar Step 2a-2: has_scroll ‹·gap·› zone(3칸)·plus 위치·스크롤 hit-test" {
+// 스크롤된 탭 바에서 **보이는 탭을 눌렀는데 다른 Term 이 열리던 버그**(2026-08-18 사용자 보고: "스크롤
+// 마지막 꺼 눌렀을 때 스크롤되기 전 서페이스로 이동"). 원인은 `tabIndex` 가 폭 0 인 첫 탭에서 순회를
+// 끊은 것이고, 왼쪽으로 스크롤아웃된 탭이 정확히 폭 0 이라 **한 탭만 밀려도 항상 탭 0** 이 나왔다.
+test "tabbar: 왼쪽으로 스크롤아웃된 탭이 있어도 보이는 탭을 정확히 집는다" {
+    var m = testMetrics();
+    m.tab_w = 2; // 탭 하나가 2칸(16px), 바는 [100, 180), tab_cols=8
+    m.tab_cols = 8;
+    m.scroll_cols = 4; // 탭 0·1 이 왼쪽으로 완전히 밀려났다
+
+    // 화면 첫 자리(=절대 탭2)를 누르면 2 여야 한다. 옛 코드는 탭0 에서 break 해 0 을 돌려줬다.
+    try std.testing.expectEqual(@as(usize, 2), m.tabIndex(8, 100));
+    try std.testing.expectEqual(@as(usize, 2), m.tabIndex(8, 115));
+    // 그 다음 자리는 탭3.
+    try std.testing.expectEqual(@as(usize, 3), m.tabIndex(8, 120));
+    // 오른쪽 끝을 넘겨 누르면 마지막 **보이는** 탭으로 clamp 된다(탭 영역 8칸 = 절대 [4,12) → 탭 2..5).
+    try std.testing.expectEqual(@as(usize, 5), m.tabIndex(8, 999));
+    // ✕ zone 도 같은 세그먼트를 쓰므로 함께 따라온다.
+    try std.testing.expect(!m.inCloseZone(0, 100)); // 밀려난 탭은 닫기 영역이 없다
+}
+
+// ‹ / › 버튼은 **각 2칸**이다(옛 1칸은 누르기 어려웠다 — 사용자 보고 2026-08-18). glyph 는 자기 버튼의
+// 바깥쪽 칸에 놓여 둘 사이에 여백이 생기고, "+" 는 3칸 버튼의 가운데 칸이다.
+test "tabbar: ‹›는 각 2칸 버튼이고 glyph는 바깥쪽, +는 3칸 버튼의 가운데" {
     var m = testMetrics();
     m.has_scroll = true;
-    m.tab_cols = 6; // ‹[6,7) gap[7,8) ›[8,9) plus_start=9 →[9,10)=+. colPx: 6=148,7=156,8=164,9=172,10=180.
-    try std.testing.expect(m.inScrollLeftZone(150)); // ‹ [148,156)
-    try std.testing.expect(!m.inScrollLeftZone(160)); // gap [156,164)
-    try std.testing.expect(m.inScrollRightZone(168)); // › [164,172)
-    try std.testing.expect(!m.inScrollRightZone(160)); // gap — 버튼 아님
-    try std.testing.expect(m.inPlusZone(175)); // + [172,180) — ‹·gap·› 오른쪽
-    try std.testing.expect(!m.inPlusZone(150)); // ‹ 위치는 plus 아님
-    // has_scroll=false면 ‹› 없음(scroll zone false), plus는 tab_cols(8)부터.
+    m.tab_cols = 4; // ‹[4,6) ›[6,8) plus[8,11). colPx: 4=132,5=140,6=148,7=156,8=164,9=172,10=180.
+    // ‹ 버튼은 두 칸을 모두 받는다 — 옛 계약이면 148 은 이미 버튼 밖이었다.
+    try std.testing.expect(m.inScrollLeftZone(132));
+    try std.testing.expect(m.inScrollLeftZone(147));
+    try std.testing.expect(!m.inScrollLeftZone(148)); // 여기부터 ›
+    try std.testing.expect(m.inScrollRightZone(148));
+    try std.testing.expect(m.inScrollRightZone(163));
+    try std.testing.expect(!m.inScrollRightZone(164)); // 여기부터 +
+    // glyph 는 바깥쪽 칸: ‹ 는 왼쪽 끝(4), › 는 오른쪽 끝(7) — 사이 두 칸이 여백이다.
+    try std.testing.expectEqual(@as(u32, 4), m.scrollLeftGlyphCol());
+    try std.testing.expectEqual(@as(u32, 7), m.scrollRightGlyphCol());
+    // + 는 ‹› 뒤 3칸이고 glyph 는 가운데(9).
+    try std.testing.expectEqual(@as(u32, 8), m.plusZoneStart());
+    try std.testing.expectEqual(@as(u32, 9), m.plusGlyphCol());
+    try std.testing.expect(m.inPlusZone(164));
+    try std.testing.expect(m.inPlusZone(179));
+    try std.testing.expect(!m.inPlusZone(140)); // ‹ 위치는 plus 아님
+    // has_scroll=false면 ‹› 없음(scroll zone false), plus는 tab_cols(8)부터 3칸.
     const no = testMetrics();
     try std.testing.expect(!no.inScrollLeftZone(150));
-    try std.testing.expect(no.inPlusZone(165)); // plus_start=8 → [colPx(8),colPx(10))=[164,180)
+    try std.testing.expect(no.inPlusZone(165)); // plus_start=8 → [colPx(8), colPx(10)=cols clamp)
 }

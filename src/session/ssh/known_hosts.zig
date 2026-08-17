@@ -80,6 +80,11 @@ pub fn parseLine(line: []const u8) ?Line {
 /// `hostnames` 필드가 이 호스트에 맞나.
 ///
 /// **부정(`!`)이 이긴다** — 한 패턴이라도 부정으로 맞으면 그 줄은 이 호스트의 것이 아니다.
+///
+/// **대소문자를 안 가린다.** DNS 가 그렇고 OpenSSH 도 그렇다(실측: `ssh-keygen -F EXAMPLE.COM`
+/// 이 `example.com` 줄을 찾는다). 가리면 사용자가 대문자로 적은 순간 아는 호스트가 "모르는
+/// 호스트" 가 되고, 그러면 **`mismatch`(하드 실패)가 `unknown`(프롬프트)으로 강등된다** —
+/// 중간자 앞에서 정확히 그 차이가 위험하다. 해시 쪽은 아래 `matchesHashed` 를 본다.
 pub fn matchesHost(hosts: []const u8, host: []const u8) bool {
     if (std.mem.startsWith(u8, hosts, hash_magic)) return matchesHashed(hosts, host);
     var it = std.mem.splitScalar(u8, hosts, ',');
@@ -96,6 +101,16 @@ pub fn matchesHost(hosts: []const u8, host: []const u8) bool {
 }
 
 /// `|1|<base64 salt>|<base64 HMAC-SHA1(salt, host)>`. 소금이 키이고 호스트명이 메시지다.
+///
+/// **호스트명을 소문자로 바꾼 뒤 해싱한다.** `ssh-keygen -H` 가 그렇게 만들기 때문이다(실측:
+/// `EXAMPLE.COM` 으로 해시한 줄을 `example.com` 으로 찾으면 나오고 `EXAMPLE.COM` 으로 찾으면
+/// 안 나온다). 원문 그대로 해싱하면 해시된 `known_hosts` 를 쓰는 사용자가 대문자를 적는 순간
+/// 아는 호스트를 못 찾는다.
+///
+/// 소문자 변환은 **버퍼 없이 조각으로 먹인다** — 호스트명 길이에 상한을 두지 않으려는 것이다
+/// (상한을 두면 그 길이를 넘는 이름이 조용히 "안 맞음" 이 되고, 그것도 같은 강등이다).
+/// 조각 크기는 임의다(HMAC 은 스트리밍이라 결과가 같다) — 그 숫자를 바꾸는 변이가 살아남는 것은
+/// 정상이고 테스트 구멍이 아니다.
 fn matchesHashed(hosts: []const u8, host: []const u8) bool {
     const rest = hosts[hash_magic.len..];
     const bar = std.mem.indexOfScalar(u8, rest, '|') orelse return false;
@@ -105,12 +120,22 @@ fn matchesHashed(hosts: []const u8, host: []const u8) bool {
     const want_bytes = decodeBase64(&want, rest[bar + 1 ..]) orelse return false;
     if (want_bytes.len != HmacSha1.mac_length) return false;
     var got: [HmacSha1.mac_length]u8 = undefined;
-    HmacSha1.create(&got, host, salt_bytes);
+    var mac = HmacSha1.init(salt_bytes);
+    var i: usize = 0;
+    while (i < host.len) {
+        var chunk: [64]u8 = undefined;
+        const n = @min(chunk.len, host.len - i);
+        for (chunk[0..n], host[i..][0..n]) |*dst, c| dst.* = std.ascii.toLower(c);
+        mac.update(chunk[0..n]);
+        i += n;
+    }
+    mac.final(&got);
     // 상수 시간 비교 — 이 값은 상대가 고른 호스트명으로도 흔들 수 있는 자리다.
     return std.crypto.timing_safe.eql([HmacSha1.mac_length]u8, got, want_bytes[0..HmacSha1.mac_length].*);
 }
 
 /// `*`·`?` 와일드카드. **`*` 는 `.` 도 넘는다**(OpenSSH 와 같다 — 도메인 경계를 안 본다).
+/// 글자 비교는 **대소문자를 안 가린다**(위 `matchesHost` 주석의 실측).
 fn matchPattern(pattern: []const u8, host: []const u8) bool {
     if (pattern.len == 0) return host.len == 0;
     switch (pattern[0]) {
@@ -124,7 +149,9 @@ fn matchPattern(pattern: []const u8, host: []const u8) bool {
             return false;
         },
         '?' => return host.len > 0 and matchPattern(pattern[1..], host[1..]),
-        else => return host.len > 0 and host[0] == pattern[0] and matchPattern(pattern[1..], host[1..]),
+        else => return host.len > 0 and
+            std.ascii.toLower(host[0]) == std.ascii.toLower(pattern[0]) and
+            matchPattern(pattern[1..], host[1..]),
     }
 }
 
@@ -207,6 +234,59 @@ test "줄을 판다 — marker·주석·모자란 줄" {
     try std.testing.expectEqual(@as(?Line, null), parseLine("@future-marker h ssh-ed25519 AAAA"));
     // 탭 구분도 받는다.
     try std.testing.expectEqualStrings("h", parseLine("h\tssh-ed25519\tAAAA").?.hosts);
+}
+
+test "호스트명은 대소문자를 안 가린다 (OpenSSH 실측)" {
+    // **`ssh-keygen -F` 로 확인한 동작이다**: `EXAMPLE.COM` 이 `example.com` 줄을 찾고,
+    // `git.WILD.com` 이 `*.wild.com` 을 찾고, `[JUMP.org]:2222` 가 `[jump.org]:2222` 를 찾는다.
+    //
+    // **가리면 위험하다.** 사용자가 대문자로 적는 순간 아는 호스트가 "모르는 호스트" 가 되고,
+    // 그러면 중간자 앞에서 `mismatch`(하드 실패)가 `unknown`(프롬프트)으로 **강등된다**.
+    for ([_][]const u8{ "EXAMPLE.COM", "Example.Com", "example.com" }) |h| {
+        try std.testing.expect(matchesHost("example.com", h));
+    }
+    try std.testing.expect(matchesHost("*.wild.com", "git.WILD.com"));
+    try std.testing.expect(matchesHost("[jump.org]:2222", "[JUMP.org]:2222"));
+    // 패턴 쪽이 대문자여도 같다.
+    try std.testing.expect(matchesHost("EXAMPLE.COM", "example.com"));
+    // 부정도 대소문자를 안 가려야 한다 — 가리면 대문자로 적어 제외를 우회할 수 있다.
+    try std.testing.expect(!matchesHost("*.example.com,!SECRET.example.com", "secret.example.com"));
+
+    // 판정까지 이어진다 — **강등이 실제로 안 일어나는지**를 잰다.
+    const file = "example.com " ++ ed ++ " " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.trusted, verify(file, "EXAMPLE.COM", ed, &vector_blob));
+    const other = otherBlob();
+    try std.testing.expectEqual(Verdict.mismatch, verify(file, "EXAMPLE.COM", ed, &other));
+}
+
+test "해시 호스트명도 소문자로 바꿔 해싱한다 (OpenSSH 실측)" {
+    // `ssh-keygen -H` 가 **소문자로 바꾼 뒤** 해싱한다: `EXAMPLE.COM` 으로 해시한 줄을
+    // `example.com` 으로 찾으면 나오고 `EXAMPLE.COM` 으로 찾으면 안 나온다(실측).
+    // 원문 그대로 해싱하면 해시된 파일을 쓰는 사용자가 대문자를 적는 순간 못 찾는다.
+    const hashed = "|1|9GynkVIVFafP+0NWUHjrabu0z5o=|jE4vNVarJ+VnEWapE1NLmaws8mU=";
+    for ([_][]const u8{ "example.com", "EXAMPLE.COM", "Example.Com" }) |h| {
+        try std.testing.expect(matchesHost(hashed, h));
+    }
+    try std.testing.expect(!matchesHost(hashed, "example.org"));
+
+    // 청크 경계(64바이트)를 넘는 긴 이름도 같은 값을 내야 한다 — 조각으로 먹이는 구현이라
+    // 경계에서 갈리면 여기서 걸린다.
+    var long: [200]u8 = undefined;
+    @memset(&long, 'a');
+    long[199] = 'b';
+    var upper: [200]u8 = undefined;
+    for (&upper, long) |*dst, c| dst.* = std.ascii.toUpper(c);
+    const salt = "9GynkVIVFafP+0NWUHjrabu0z5o=";
+    var salt_bytes: [64]u8 = undefined;
+    const s = decodeBase64(&salt_bytes, salt).?;
+    var want: [HmacSha1.mac_length]u8 = undefined;
+    HmacSha1.create(&want, &long, s); // 소문자 원문으로 계산한 정답
+    var b64: [64]u8 = undefined;
+    const want_b64 = std.base64.standard.Encoder.encode(&b64, &want);
+    var line_buf: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "|1|{s}|{s}", .{ salt, want_b64 }) catch unreachable;
+    try std.testing.expect(matchesHost(line, &long));
+    try std.testing.expect(matchesHost(line, &upper)); // 대문자로 물어도 같은 값이어야 한다
 }
 
 test "주석 처리한 줄은 되살아나지 않는다" {
@@ -320,6 +400,28 @@ test "cert-authority 줄은 호스트키로 읽지 않는다" {
     // 키가 달라도 mismatch 가 아니다(그 줄을 아예 안 본다).
     const other = otherBlob();
     try std.testing.expectEqual(Verdict.unknown, verify(file, "git.example.com", ed, &other));
+}
+
+test "한 호스트에 키가 여럿이면 하나만 맞아도 trusted 다" {
+    // `sshd(8)` 은 "같은 이름에 여러 줄이 있을 수 있다" 고 하고, 서버가 키를 교체하는 동안
+    // 실제로 그런 파일이 된다. **하나라도 맞으면 신뢰**이고 순서를 안 타야 한다 — 안 그러면
+    // 옛 줄이 앞에 있다는 이유로 정상 접속이 `mismatch` 로 끊긴다.
+    var other = otherBlob();
+    var other_b64: [128]u8 = undefined;
+    const other_text = std.base64.standard.Encoder.encode(&other_b64, &other);
+    var buf: [512]u8 = undefined;
+
+    const old_first = std.fmt.bufPrint(&buf, "example.com {s} {s}\nexample.com {s} {s}\n", .{ ed, other_text, ed, vector_b64 }) catch unreachable;
+    try std.testing.expectEqual(Verdict.trusted, verify(old_first, "example.com", ed, &vector_blob));
+
+    var buf2: [512]u8 = undefined;
+    const new_first = std.fmt.bufPrint(&buf2, "example.com {s} {s}\nexample.com {s} {s}\n", .{ ed, vector_b64, ed, other_text }) catch unreachable;
+    try std.testing.expectEqual(Verdict.trusted, verify(new_first, "example.com", ed, &vector_blob));
+
+    // 둘 다 우리 키가 아니면 `mismatch` 다(호스트는 아니까).
+    var third = vector_blob;
+    third[31] ^= 1;
+    try std.testing.expectEqual(Verdict.mismatch, verify(old_first, "example.com", ed, &third));
 }
 
 test "키 종류가 다른 줄은 판정에서 뺀다" {

@@ -1,5 +1,6 @@
 pub const app = @import("app.zig");
 pub const chrome = @import("chrome.zig");
+pub const user_paths = @import("user_paths.zig"); // 사용자별 경로 정책(홈·config·캐시 base) — OS를 인자로 받는 순수 판정
 pub const cli = @import("cli.zig");
 pub const color = @import("color.zig");
 pub const config = @import("config.zig");

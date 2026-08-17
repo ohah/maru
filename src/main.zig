@@ -146,7 +146,7 @@ fn dispatch(
 }
 
 /// 이 호스트의 홈 디렉터리(없으면 null). 환경변수를 읽는 **I/O만** 여기서 하고 판정은
-/// `maru.cli.home.homeDirFor`(순수·OS 인자)가 한다 — 규칙이 갈리지 않게 네 소비자가 이 함수 하나를 쓴다
+/// `maru.user_paths.homeDirFor`(순수·OS 인자)가 한다 — 규칙이 갈리지 않게 네 소비자가 이 함수 하나를 쓴다
 /// (terminfo 캐시 · `install-cli` 위치 · ssh control path · `trace anonymize`의 매칭 키).
 ///
 /// 반환 슬라이스는 **환경 블록을 borrow**한다(`std.mem.span` — free하지 않는다). 프로세스 수명 동안
@@ -154,7 +154,7 @@ fn dispatch(
 fn hostHomeDir() ?[]const u8 {
     const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
     const userprofile: ?[]const u8 = if (std.c.getenv("USERPROFILE")) |u| std.mem.span(u) else null;
-    return maru.cli.home.homeDirFor(@import("builtin").os.tag, home, userprofile);
+    return maru.user_paths.homeDirFor(@import("builtin").os.tag, home, userprofile);
 }
 
 fn printSmoke(stdout: *std.Io.Writer) !void {
@@ -585,8 +585,12 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     // **입구 정규화**(docs/windows-platform.md §5): 환경변수에서 온 경로는 native 구분자다. 중립 레이어는
     // 이을 때 항상 `/`를 쓰므로(layering §4.1) 그대로 넘기면 결과가 섞인다 — 실측으로 확인한 모양이
     // `C:\Users\me/.cache/maru/terminfo`였다. POSIX에서는 무동작이라 macOS 동작이 바뀌지 않는다.
+    // base 판정은 `user_paths.cacheBaseFor`가 소유한다 — `$XDG_CACHE_HOME`이 모든 OS에서 최우선이고,
+    // Windows에서는 그 다음이 `%LOCALAPPDATA%`다(계약 §5.3). 여기서는 환경변수 읽기와 입구 정규화만 한다.
     const xdg_raw = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const xdg: ?[]const u8 = if (xdg_raw) |x| try maru.path_shape.normalizeSeparators(allocator, x) else null;
+    const local_raw = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
+    const base_raw = maru.user_paths.cacheBaseFor(@import("builtin").os.tag, xdg_raw, local_raw);
+    const xdg: ?[]const u8 = if (base_raw) |b| try maru.path_shape.normalizeSeparators(allocator, b) else null;
     defer if (xdg) |x| allocator.free(x);
     const home = try maru.path_shape.normalizeSeparators(allocator, home_raw);
     defer allocator.free(home);
@@ -599,7 +603,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         .path => try stdout.print("{s}\n", .{dir}),
         // 캐시가 컴파일돼 xterm-maru가 해석되는지 보고한다(아무것도 바꾸지 않는 안전 기본).
         .status => {
-            const cmd = try maru.terminfo_cache.statusCommand(allocator);
+            const cmd = try maru.terminfo_cache.statusCommand(allocator, dir);
             defer allocator.free(cmd);
             try stdout.print("maru terminfo 캐시: {s}\n", .{dir});
             try stdout.flush(); // system()이 fd로 직접 쓰므로 버퍼를 먼저 비운다.
@@ -612,7 +616,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         // 업데이트로 terminfo 캡이 바뀐 뒤 등, 캐시를 강제로 비우고 다시 컴파일한다(보통은 자동 stale 감지로
         // 불필요하지만 강제·복구용). tic 경고/오류는 사용자에게 그대로 보인다.
         .refresh => {
-            const cmd = try maru.terminfo_cache.refreshCommand(allocator, maru.terminfo_cache.version());
+            const cmd = try maru.terminfo_cache.refreshCommand(allocator, dir, maru.terminfo_cache.version());
             defer allocator.free(cmd);
             try stdout.print("maru terminfo 캐시 재컴파일: {s}\n", .{dir});
             try stdout.flush();
@@ -635,7 +639,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         },
         // 캐시 디렉터리를 통째로 지운다(다음 maru 실행이 자동 재컴파일).
         .clear => {
-            const cmd = try maru.terminfo_cache.clearCommand(allocator);
+            const cmd = try maru.terminfo_cache.clearCommand(allocator, dir);
             defer allocator.free(cmd);
             // **반환값을 봐야 한다.** 예전에는 버렸는데, Windows에서 `system()`이 cmd.exe로 가 `rm`이 없어
             // 실패하는데도 "삭제: <경로>"를 exit 0으로 찍었다(실측) — 지우지 않고 지웠다고 말하는 셈이다.

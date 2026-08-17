@@ -18,6 +18,9 @@ const keybinding = @import("keybinding.zig");
 const action_mod = @import("action.zig");
 const terminal = @import("../terminal.zig");
 const schema = @import("schema.zig");
+const builtin = @import("builtin");
+const path_shape = @import("../path_shape.zig"); // 입구 구분자 정규화(계약 §5)
+const user_paths = @import("../user_paths.zig"); // config 자리 판정(OS 인자 순수 정책)
 
 pub const LoadError = std.mem.Allocator.Error;
 
@@ -995,17 +998,24 @@ pub fn loadFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Load
     return parse(allocator, source);
 }
 
-/// 기본 config 경로(owned). `$MARU_CONFIG`가 있으면 그것을, 없으면 `$HOME/.config/maru/config`.
-/// HOME이 없으면 null(설정 없이 기본값). Ghostty와 같은 위치/형식 관례.
+/// 기본 config 경로(owned). `$MARU_CONFIG`가 있으면 그것을, 없으면 OS별 기본 자리다 —
+/// POSIX `$HOME/.config/maru/config`(Ghostty와 같은 관례), **Windows `%LOCALAPPDATA%\maru\config`**.
+/// 정할 수 없으면 null(설정 없이 기본값).
+///
+/// 자리 판정은 `user_paths.defaultConfigPathFor`(순수·OS 인자)가 소유하고 여기서는 환경변수 읽기만 한다 —
+/// Windows 레이아웃을 왜 `%LOCALAPPDATA%`로 정했는지는 그 모듈의 doc과 계약 §5.3에.
 pub fn defaultConfigPath(allocator: std.mem.Allocator) LoadError!?[]const u8 {
     if (std.c.getenv("MARU_CONFIG")) |override_z| {
         const override = std.mem.span(override_z);
         if (override.len > 0) return try allocator.dupe(u8, override);
     }
-    const home_z = std.c.getenv("HOME") orelse return null;
-    const home = std.mem.span(home_z);
-    if (home.len == 0) return null;
-    return try std.fmt.allocPrint(allocator, "{s}/.config/maru/config", .{home});
+    const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
+    const local: ?[]const u8 = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
+    const raw = (try user_paths.defaultConfigPathFor(allocator, builtin.os.tag, home, local)) orelse return null;
+    defer allocator.free(raw);
+    // 입구 정규화(계약 §5) — 환경변수에서 온 값은 native 구분자다. 중립 레이어가 `/`로 이으므로
+    // 그대로 두면 `C:\Users\me/maru/config`처럼 섞인다.
+    return try path_shape.normalizeSeparators(allocator, raw);
 }
 
 /// 기본 경로에서 config를 로드한다(경로 해석 + 파일 읽기 + 파싱). app session이 시작 시 호출하는

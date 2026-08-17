@@ -55,6 +55,18 @@ pub fn contentRect(rect: draw.Rect) draw.Rect {
 /// **구조적 해결은 열↔byte 인덱스다**(Zed·xi 계열의 rope + 노드별 집계). 그것이 들어오면 이 상한은
 /// 없어진다 — 그 자리는 [visual-mapping §4.1c](../../../../docs/native-editor-visual-mapping.md)가
 /// 소유하고, 폭 합 캐시와 같은 슬라이스에 있다.
+/// 가로 스크롤바가 서는가. **본문 높이를 정하기 전에** 물어야 한다 — 막대가 자리를 먹기 때문이다
+/// (§4.1a: *"랩이 켜지면 가로 범위가 0이 되어 사라지고, 그때 본문 높이가 그만큼 늘어난다"*).
+///
+/// 규칙을 여기 한 곳에 둔다. 호출자가 높이를 줄일 때와 `build`가 막대를 그릴 때 **같은 답**이어야
+/// 하는데, 두 곳에 각자 적으면 한쪽만 고쳐져 막대가 자리 없이 그려지거나(마지막 줄을 덮는다) 자리만
+/// 비고 막대가 없다.
+pub fn showsHorizontalBar(wrap: bool, content_max_cols: ?u32, view_cols: u16) bool {
+    if (wrap) return false; // 랩은 넘칠 것을 없앤다 — 축 자체가 없다
+    const max_cols = content_max_cols orelse return false; // 아직 안 셌다
+    return max_cols > view_cols;
+}
+
 pub const max_first_col: u16 = 10_000;
 
 /// 가장 긴 줄을 셀 때 **여기까지만 센다**. `max_first_col`을 넘는 부분은 어차피 못 가므로 세는 것이
@@ -83,6 +95,12 @@ pub const Props = struct {
     first_piece: u32 = 0,
     /// 가로 스크롤 오프셋(열). 랩이 켜져 있으면 의미가 없다.
     first_col: u16 = 0,
+    /// 문서에서 **가장 긴 줄**의 표시 폭(열). 가로 스크롤바가 이 값으로 막대 길이를 정한다.
+    ///
+    /// **보이는 줄이 아니라 문서 전체다** — 보이는 줄만 보면 세로로 굴릴 때마다 막대 길이가
+    /// 출렁인다(가로 스크롤 상한이 같은 이유로 문서 전체를 본다). `null`이면 **가로 막대를 그리지
+    /// 않는다**: 아직 세지 않았거나, 이 축을 안 쓰는 호출자(비교 뷰)다.
+    content_max_cols: ?u32 = null,
     /// 문서 전체의 논리 줄 수. 보통 `lines.len`이지만, 줄 번호 자릿수(gutter 폭)를 문서 전체
     /// 기준으로 잡아야 하므로 따로 받는다.
     total_lines: usize,
@@ -354,11 +372,31 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .metrics = props.metrics,
     }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..]);
 
+    // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
+    // **본문 아래 거터에 선다.** 호출자가 그 자리를 이미 비워 두었다(`showsHorizontalBar`로 물어
+    // `visible_rows`를 줄인다) — 여기서 자리를 만들 수는 없다. 랩이면 축 자체가 없다.
+    const hw = if (showsHorizontalBar(props.wrap, props.content_max_cols, layout.content.width))
+        scrollbar.buildHorizontal(.{
+            .content = .{
+                .x = @floatFromInt(props.rect.x + @as(i32, layout.contentLeft()) * @as(i32, props.cell_w_px)),
+                .y = @floatFromInt(props.rect.y),
+                .w = @floatFromInt(@as(u32, layout.content.width) * props.cell_w_px),
+                .h = @floatFromInt(@as(u32, visual_budget) * props.cell_h_px),
+                .gutter_w = @floatFromInt(props.scrollbar_gutter_px),
+            },
+            .total_cols = props.content_max_cols.?,
+            .first_col = props.first_col,
+            .cell_w_px = props.cell_w_px,
+            .metrics = props.metrics,
+        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sw.ops ..])
+    else
+        scrollbar.HorizontalWritten{ .ops = 0 };
+
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -1270,4 +1308,74 @@ test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱
         try testing.expectEqual(@as(u32, 2 * 8), op.quad.rect.w);
     }
     try testing.expectEqual(@as(usize, 1), found);
+}
+
+test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려진다" {
+    // **컴포넌트가 통과해도 배선이 빠지면 화면에는 안 나온다** — 접힘에서 같은 자리를 겪었다.
+    // 여기서는 `build`가 실제로 op을 내는지, 그리고 그 op이 본문 **아래**에 있는지 본다.
+    var ops: [64]draw.Op = undefined;
+    var text: [512]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [128]u8 = undefined;
+
+    const lines = [_][]const u8{ "aaa", "bbb" };
+    const scratch: Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+    const base: Props = .{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = lines.len,
+        .visible_rows = 2,
+        .wrap = false,
+        .rect = .{ .x = 0, .y = 0, .w = 400, .h = 48 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    };
+
+    // ① 가장 긴 줄을 아직 안 셌다(`null`) — 그리지 않는다. 길이를 모르는데 막대를 두면 거짓말이다.
+    const w_unknown = build(base, scratch);
+
+    // ② 넘친다 — 막대가 하나 더 나온다.
+    var p_wide = base;
+    p_wide.content_max_cols = 500; // 본문은 40열 남짓이다
+    const w_wide = build(p_wide, scratch);
+    try testing.expect(w_wide.ops > w_unknown.ops);
+
+    // 그 막대는 **본문 아래**에 있다 — 마지막 줄을 덮으면 §3.8이 막으려는 "화면과 내용이 다른" 상태다.
+    const body_bottom: i32 = @as(i32, base.rect.y) + @as(i32, base.visible_rows) * @as(i32, base.cell_h_px);
+    var found_below = false;
+    for (ops[0..w_wide.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == .terminal_bg) continue;
+        if (op.quad.rect.y >= body_bottom) found_below = true;
+    }
+    try testing.expect(found_below);
+
+    // ③ 랩이 켜지면 넘칠 것이 없다 — 축 자체가 사라진다(§4).
+    var p_wrap = p_wide;
+    p_wrap.wrap = true;
+    const w_wrap = build(p_wrap, scratch);
+    try testing.expect(w_wrap.ops <= w_unknown.ops + 1); // 가로 막대 몫이 없다
+
+    // ④ 판정 규칙은 한 곳이다 — 호출자가 높이를 줄일 때 쓰는 답과 같아야 한다.
+    try testing.expect(showsHorizontalBar(false, 500, 40));
+    try testing.expect(!showsHorizontalBar(true, 500, 40)); // 랩
+    try testing.expect(!showsHorizontalBar(false, null, 40)); // 안 셌다
+    try testing.expect(!showsHorizontalBar(false, 40, 40)); // 딱 들어간다
 }

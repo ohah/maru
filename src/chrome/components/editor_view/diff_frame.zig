@@ -17,6 +17,7 @@ const draw = @import("../../draw.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const frame = @import("frame.zig");
 const gutter = @import("gutter.zig");
+const geometry = @import("geometry.zig"); // 본문 열 수 — 가로 막대가 서는지 판정할 때 쓴다
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
@@ -36,6 +37,12 @@ pub const Side = struct {
     /// 행마다의 접힘 표식. **비교 뷰는 접지 않으므로**(§4.1f) 그쪽은 `null`이고, 단일 파일
     /// 편집기가 이 경로를 함께 지나므로 여기에 자리가 있다.
     folds: ?[]const gutter.Fold = null,
+    /// 문서에서 **가장 긴 줄**의 표시 폭(열) — 가로 스크롤바가 이 값으로 막대 길이를 정한다.
+    /// `null`이면 막대를 그리지 않는다(아직 안 셌거나 이 축을 안 쓰는 호출자).
+    ///
+    /// **비교 뷰는 `null`로 둔다** — §3.5의 "가로는 각자다"를 지키려면 좌우 열이 각자 막대를 가져야
+    /// 하는데, 그 히트테스트가 아직 없다(계획 표의 "비교 뷰의 가로 스크롤"과 같은 슬라이스다).
+    content_max_cols: ?u32 = null,
 };
 
 pub const Props = struct {
@@ -98,10 +105,30 @@ pub const SideMetrics = struct {
     total_cols: u16,
     scrollbar_gutter_px: u32,
     visible_rows: u16,
+    /// **가로 막대가 아래에서 먹는 자리**(px). 0이면 막대가 서지 않는다.
+    ///
+    /// 세로 막대가 폭을 먹는 것과 대칭이다(§4.1a "가로 스크롤바는 세로와 짝이다") — 본문 위에
+    /// 겹쳐 그리면 마지막 줄이 막대에 가리고, 그것은 §3.8이 막으려는 "화면과 파일 내용이 다른"
+    /// 상태다. 그래서 `visible_rows`가 이미 이만큼 줄어 있다.
+    horizontal_gutter_px: u32 = 0,
 };
 
 /// 스크롤바 기하. 제품과 Lab이 같은 값을 써야 캡처가 제품을 예고한다.
 pub const scrollbar_metrics: scroll_area.ScrollbarMetrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
+
+/// 가로 막대가 서는지를 호출자가 알려 준다. **본문 높이를 정하는 자리가 여기 하나뿐**이라
+/// (`visible_rows`) 그 판정도 여기로 들어와야 자리와 막대가 갈리지 않는다. 판정 규칙 자체는
+/// `frame.showsHorizontalBar`가 소유한다 — 여기서 다시 세지 않는다.
+pub fn sideMetricsWith(inner_w: u32, inner_h: u32, cell_w_px: u16, cell_h_px: u16, shows_horizontal_bar: bool) SideMetrics {
+    var m = sideMetrics(inner_w, inner_h, cell_w_px, cell_h_px);
+    if (!shows_horizontal_bar) return m;
+
+    const ch: u32 = @max(cell_h_px, 1);
+    const bar_px = scrollbar_metrics.gutterPx();
+    m.horizontal_gutter_px = bar_px;
+    m.visible_rows = @intCast(@min((inner_h -| bar_px) / ch, @as(u32, std.math.maxInt(u16))));
+    return m;
+}
 
 pub fn sideMetrics(inner_w: u32, inner_h: u32, cell_w_px: u16, cell_h_px: u16) SideMetrics {
     // **스크롤바가 자리를 먹는다**(§4.1a) — 본문 위에 겹치면 오른쪽 끝 글자가 막대에 가려지고,
@@ -143,7 +170,12 @@ pub fn buildSide(
     background: ?draw.Rect,
     scratch: frame.Scratch,
 ) frame.Written {
-    const m = sideMetrics(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px);
+    // **가로 막대가 자리를 먹으므로 높이를 먼저 줄인다**(§4.1a) — 판정 규칙은 `frame`이 소유한다.
+    // 열 수(`total_cols`)를 알아야 판정할 수 있는데 그 값이 이 계산에서 나오므로, 한 번 재고 나서
+    // 막대가 서면 다시 잰다. 두 번째 계산은 폭을 안 바꾸므로(막대는 아래에만 붙는다) 열 수는 같다.
+    const probe = sideMetrics(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px);
+    const shows_h_bar = frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
+    const m = sideMetricsWith(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
     return frame.build(.{
         .lines = side.lines,
         .first_line = shared.first_line,
@@ -152,6 +184,7 @@ pub fn buildSide(
         .total_lines = side.total_lines orelse side.lines.len,
         .line_numbers = side.numbers,
         .folds = side.folds,
+        .content_max_cols = side.content_max_cols,
         .row_bands = side.bands,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,

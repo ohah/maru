@@ -378,6 +378,16 @@ pub const Table = struct {
     cfg_bell_visual: [:0]const u8,
     cfg_bell_dock_badge: [:0]const u8,
 
+    // ── 알림 패널 (I3c) ──
+    // 이 여섯은 **패널 최소 폭을 정한다** — 헤더가 제목 + 두 버튼이라, 라벨이 길어지면 겹친다.
+    // 그래서 폭을 상수로 두지 않고 이 값들에서 계산한다(계약 §6.1).
+    notif_heading: [:0]const u8,
+    notif_empty_heading: [:0]const u8,
+    notif_empty_subtext: [:0]const u8,
+    notif_empty_title: [:0]const u8,
+    notif_mark_all: [:0]const u8,
+    notif_clear_all: [:0]const u8,
+
     // ── 언어 선택 (I4b) ──
     // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
     set_language_auto: [:0]const u8,
@@ -583,6 +593,12 @@ pub const en: Table = .{
     .set_section_editor = "Editor",
     .set_section_other = "Other",
     .set_language_auto = "Automatic (OS language)",
+    .notif_heading = "Notifications",
+    .notif_empty_heading = "No notifications yet",
+    .notif_empty_subtext = "Desktop notifications will appear here.",
+    .notif_empty_title = "(No title)",
+    .notif_mark_all = "Mark all read",
+    .notif_clear_all = "Clear all",
     .cfg_font_size = "Font size (pt)",
     .cfg_font_line_height = "Line height multiplier",
     .cfg_font_letter_spacing = "Letter spacing (logical pt, negative allowed)",
@@ -892,6 +908,12 @@ pub const ko: Table = .{
     .set_section_editor = "편집기",
     .set_section_other = "기타",
     .set_language_auto = "자동 (OS 언어)",
+    .notif_heading = "알림",
+    .notif_empty_heading = "아직 알림이 없습니다",
+    .notif_empty_subtext = "데스크톱 알림이 여기에 표시됩니다.",
+    .notif_empty_title = "(제목 없음)",
+    .notif_mark_all = "모두 읽음",
+    .notif_clear_all = "모두 지우기",
     .cfg_font_size = "폰트 크기(pt)",
     .cfg_font_line_height = "행간 배수",
     .cfg_font_letter_spacing = "자간(논리 pt, 음수 허용)",

@@ -157,11 +157,9 @@ fn GetLastError() u32 {
     return @intFromEnum(std.os.windows.GetLastError());
 }
 
-/// 마지막 Win32 오류 코드. 실패를 **왜** 했는지 사람이 볼 수 있어야 한다 — 안 그러면 `CreateWindowFailed`
-/// 하나로 원인이 뭉개진다(실측으로 겪었다).
-pub fn lastError() u32 {
-    return GetLastError();
-}
+// 스레드 오류 코드를 **그대로 노출하지 않는다.** 호출 시점의 값이라 중간에 다른 Win32 호출이 하나만 끼어도
+// 창 생성과 무관한 값이 나온다 — 진단하려다 오진하게 만드는 API다. 실패 원인은 실패한 그 자리에서 잡아
+// `last_create_error`에 남긴다.
 
 /// 클라이언트 픽셀 크기를 셀 크기로 바꾸는 **순수** 변환. 창이 셀 메트릭을 소유하지 않으므로 인자로 받는다.
 ///
@@ -322,14 +320,16 @@ pub const Window = struct {
         _ = DestroyWindow(self.hwnd);
     }
 
-    /// 현재 클라이언트 영역(픽셀). 실패하면 null.
+    /// 현재 클라이언트 영역(픽셀). **`null`은 "물어보지 못했다"만 뜻한다** — 최소화된 창의 0×0은 0×0으로
+    /// 돌려준다. 둘을 `null` 하나로 뭉치면 호출자가 "최소화됐다"와 "질의가 실패했다"를 구분할 수 없는데,
+    /// W7.2는 그 둘에 다르게 굴어야 한다(전자는 present를 거르고, 후자는 이전 크기를 유지한다).
     pub fn clientSize(self: *const Window) ?struct { width_px: u32, height_px: u32 } {
         var r: RECT = undefined;
         if (GetClientRect(self.hwnd, &r) == 0) return null;
-        const w = r.right - r.left;
-        const h = r.bottom - r.top;
-        if (w <= 0 or h <= 0) return null;
-        return .{ .width_px = @intCast(w), .height_px = @intCast(h) };
+        return .{
+            .width_px = @intCast(@max(0, r.right - r.left)),
+            .height_px = @intCast(@max(0, r.bottom - r.top)),
+        };
     }
 
     /// 밀린 메시지를 전부 처리하고 그동안 쌓인 중립 이벤트를 돌려준다(호출자 소유가 아니라 borrow —

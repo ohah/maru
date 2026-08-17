@@ -12,9 +12,9 @@
 |---|---|---|
 | S0 | **계약**([ssh-client.md](../ssh-client.md)) — 지원 집합·안 하는 것·보안 규칙·계층 | 문서 |
 | S1 | **바이너리 패킷** — 인코딩/디코딩, 패딩, 길이 상한. 압축 없음. **시퀀스 번호는 여기 없다** — AEAD 논스·MAC 이 쓰는 값이라 암호 계층(S4)이 든다 | 바이트 열 단위 테스트 |
-| S2 | **버전 교환 + KEXINIT** — 알고리즘 협상, `kex-strict-c-v00@openssh.com` | 협상 결과를 값으로 |
-| S3 | **KEX(curve25519)** — 공유 비밀·교환 해시 `H`·세션 id·키 유도 | 알려진 벡터로 `H`·키 |
-| S4 | **암호(chacha20-poly1305@openssh.com)** — 길이 필드 별도 키, AEAD, 재키잉 | 왕복 + 변조 거부 |
+| S2 | **버전 교환 + KEXINIT** — 알고리즘 협상, strict 표시자(**초기 KEXINIT 에서만** 읽는다), 서버 추측 패킷을 버릴지 판정 | 협상 결과를 값으로 |
+| S3 | **KEX(curve25519)** — 공유 비밀·교환 해시 `H`·세션 id·키 유도. S2 가 "버려라" 를 주면 그 패킷 하나를 먹고 **시퀀스 번호는 올린다**([계약 §4](../ssh-client.md)) | 알려진 벡터로 `H`·키 |
+| S4 | **암호(chacha20-poly1305@openssh.com)** — 길이 필드 별도 키(**K_2** — 구형 OpenSSH 문서와 이름이 반대다, [계약 §3](../ssh-client.md)), AEAD, 재키잉 | 왕복 + 변조 거부 |
 | S5 | **호스트키 검증** — `ssh-ed25519` 서명 검증, `known_hosts` 대조, TOFU, 지문 변경 거부 | 서명 위조·지문 변경 거부 |
 | S6 | **인증** — `publickey`(ed25519 서명)·`password`, `openssh-key-v1` 파싱(bcrypt_pbkdf) | 서명 바이트·키 파싱 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` | 상태 전이 |

@@ -45,6 +45,12 @@ pub const Error = error{
 ///
 /// `rand` 는 패딩을 채운다. **패딩은 임의값이어야 한다**(RFC 4253 §6) — 0 으로 채우면 그
 /// 자체로 평문 정보가 되고, 오래된 암호 조합에서는 공격 자료가 된다.
+///
+/// **`payload` 와 `out` 은 겹치면 안 된다.** `writtenLen` 으로 크기를 물어 한 버퍼를 잡고 그
+/// 안에서 제자리로 감싸고 싶어지는데, 그러면 Debug·ReleaseSafe 에서는 `@memcpy arguments alias`
+/// 로 죽고 **ReleaseFast 에서는 조용히 패킷이 망가진다**(배포 `.dmg` 가 그 모드다 — 실측했다).
+/// 겹치는 검사를 런타임에 넣지 않는 이유는 그것이 정상 경로에 없는 비용이기 때문이다. 대신
+/// 여기에 적어 둔다: **payload 는 별도 버퍼에서 온다.**
 pub fn write(out: []u8, payload: []const u8, rand: std.Random) Error!usize {
     const pad = paddingFor(payload.len);
     const total = 4 + 1 + payload.len + pad;
@@ -90,8 +96,12 @@ pub fn read(buf: []const u8) Error!Decoded {
     if (buf.len < total) return Error.Incomplete;
     const pad: usize = buf[4];
     if (pad < min_padding) return Error.MalformedPacket;
-    // **패딩이 내용보다 길 수 없다.** 이 검사가 없으면 아래 뺄셈이 음수로 감싸 돈다.
-    if (1 + pad > len) return Error.MalformedPacket;
+    // **payload 는 최소 1바이트다** — SSH 메시지는 전부 메시지 번호 바이트로 시작한다(RFC 4253 §6
+    // 의 payload 는 그 번호를 포함한다). 그래서 `>` 가 아니라 `>=` 다: `>` 로 두면 길이 0 payload 가
+    // 모든 가드를 통과하고, 번호를 `payload[0]` 로 읽는 **첫 소비자가 죽는다**(ReleaseFast 에서는
+    // 슬라이스 밖을 읽어 **공격자가 고른 패딩 바이트를 메시지 번호로** 삼는다). 실측으로 확인했다.
+    // 이 검사는 아래 슬라이스의 뺄셈이 음수로 감싸 도는 것도 같이 막는다(`len - pad > 1` 이 된다).
+    if (1 + pad >= len) return Error.MalformedPacket;
     if (total % plain_block != 0) return Error.MalformedPacket;
     return .{ .payload = buf[5 .. 4 + len - pad], .consumed = total };
 }
@@ -158,6 +168,24 @@ test "깨진 프레이밍은 거절한다" {
     var bad3: [16]u8 = undefined;
     std.mem.writeInt(u32, bad3[0..4], 2, .big);
     try std.testing.expectError(Error.MalformedPacket, read(&bad3));
+
+    // **payload 가 0바이트인 패킷.** 다른 가드(길이 하한·패딩 하한·블록 배수)를 전부 통과하는데
+    // 메시지 번호가 없다 — 받아 주면 그것을 읽는 쪽이 죽는다. 길이 12, 패딩 11 이면 정확히 그 모양이다.
+    var bad5: [16]u8 = undefined;
+    @memset(&bad5, 0xAA);
+    std.mem.writeInt(u32, bad5[0..4], 12, .big);
+    bad5[4] = 11;
+    try std.testing.expectError(Error.MalformedPacket, read(&bad5));
+
+    // **payload 가 1바이트인 패킷은 정당하다** — 경계 바로 옆이라 같이 못박는다(예: NEWKEYS).
+    var ok1: [16]u8 = undefined;
+    @memset(&ok1, 0xAA);
+    std.mem.writeInt(u32, ok1[0..4], 12, .big);
+    ok1[4] = 10;
+    ok1[5] = 21; // SSH_MSG_NEWKEYS
+    const one = try read(&ok1);
+    try std.testing.expectEqual(@as(usize, 1), one.payload.len);
+    try std.testing.expectEqual(@as(u8, 21), one.payload[0]);
 
     // **전체가 블록 배수가 아닌 패킷.** 다른 검사(패딩 하한·패딩>내용)는 다 통과하지만
     // 프레이밍이 어긋난 것이라 거절해야 한다 — 이 검사를 지우는 변이가 통과하는 것을 보고 넣었다.

@@ -18,11 +18,37 @@ dl() {
   fi
 }
 
+# IETF 인터넷 초안은 **리비전이 붙은 URL 로만** 받을 수 있다(`-04.txt`). 리비전을 박아 두면
+# 초안이 올라갈 때마다 이 스크립트가 조용히 404 를 내므로, datatracker 에서 현재 리비전을 먼저 묻는다.
+dl_draft() {
+  name="$1"
+  out="$2"
+  rev="$(curl -fsSL --max-time 60 "https://datatracker.ietf.org/doc/$name/doc.json" 2>/dev/null |
+    sed -n 's/.*"rev"[ ]*:[ ]*"\([0-9]*\)".*/\1/p' | head -1)"
+  if [ -z "$rev" ]; then
+    echo "FAIL $out (리비전을 못 물었다 — https://datatracker.ietf.org/doc/$name/ 에서 직접 받는다)" >&2
+    return 0
+  fi
+  dl "https://www.ietf.org/archive/id/$name-$rev.txt" "$out"
+}
+
 echo "공개 터미널 명세를 references/specs/ 로 받는다..."
 dl "https://ecma-international.org/wp-content/uploads/ECMA-48_5th_edition_june_1991.pdf" "ECMA-48_5th_edition_june_1991.pdf"
 dl "https://invisible-island.net/xterm/ctlseqs/ctlseqs.txt" "xterm-ctlseqs.txt"
 dl "https://vt100.net/emu/dec_ansi_parser" "vt100net-dec-ansi-parser.html"
 dl "https://www.vt100.net/docs/vt100-ug/contents.html" "vt100-user-guide-contents.html"
+
+# SSH(docs/ssh-client.md 가 이 문서들에서 유도된다). **문서가 로컬 경로를 걸어 두고 스크립트가
+# 안 받으면 그 인용은 확인할 수 없는 인용이 된다** — 실제로 chacha20 초안이 그랬고, 그래서
+# K_1/K_2 명명을 두고 잘못된 지적이 나왔다(구형 OpenSSH PROTOCOL 은 이름이 반대다).
+echo "SSH 명세를 받는다..."
+dl "https://www.rfc-editor.org/rfc/rfc4251.txt" "rfc4251-ssh.txt"
+dl "https://www.rfc-editor.org/rfc/rfc4252.txt" "rfc4252-ssh.txt"
+dl "https://www.rfc-editor.org/rfc/rfc4253.txt" "rfc4253-ssh.txt"
+dl "https://www.rfc-editor.org/rfc/rfc4254.txt" "rfc4254-ssh.txt"
+dl_draft "draft-ietf-sshm-chacha20-poly1305" "draft-sshm-chacha20-poly1305.txt"
+dl_draft "draft-ietf-sshm-strict-kex" "draft-strict-kex.txt"
+dl "https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL" "openssh-protocol.txt"
 
 echo
 echo "선택: 동작 비교 오라클 구현(베끼는 대상 아님)"

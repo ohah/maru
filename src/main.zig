@@ -1,6 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+// W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
+// 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
+const win32_window = @import("platform/windows/win32_window.zig");
+// 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
+extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
 const session_host_build_options = @import("session_host_build_options");
 const session_host_admin_cli = if (builtin.os.tag == .macos)
@@ -52,6 +57,11 @@ fn dispatch(
     if (std.mem.eql(u8, command, "demo")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runDemo(io, allocator, stdout);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "win32-window-smoke")) {
+        try runWin32WindowSmoke(allocator, stdout, stderr);
         return;
     }
 
@@ -155,6 +165,66 @@ fn hostHomeDir() ?[]const u8 {
     const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
     const userprofile: ?[]const u8 = if (std.c.getenv("USERPROFILE")) |u| std.mem.span(u) else null;
     return maru.user_paths.homeDirFor(@import("builtin").os.tag, home, userprofile);
+}
+
+/// `maru win32-window-smoke` — W7.1이 실제로 무엇을 하는지 사람이 눈으로 확인하는 자리.
+///
+/// 창을 만들고 잠깐 펌프하며 **중립 이벤트**를 세어 보고한다. 아직 아무것도 그리지 않는다 — 그리는 것은
+/// W7.2(D3D11+DXGI)다. 그래서 보이는 것은 빈 창이고, 이 스모크가 증명하는 것은 "창이 뜨고 OS 이벤트가
+/// 앱 어휘로 도착한다"까지다.
+///
+/// **창을 못 만드는 환경이 있다.** 대화형 데스크톱이 없으면(서비스·일부 CI) `CreateWindowExW`가 실패한다.
+/// 다만 실패를 곧바로 "데스크톱이 없다"로 읽지 마라 — 우리가 그렇게 오진했다. 이 개발기는 `WinSta0\Default`
+/// 의 활성 콘솔 세션이었는데도 오류 8로 실패했고, 원인은 **데스크톱 힙 고갈**이었다(고아 프로세스 8,606개;
+/// 그 상태에선 notepad도 안 떴다). 그래서 실패 안내가 오류 코드를 그대로 보여 주고 8을 따로 짚는다.
+fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-window-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.1 window smoke)");
+    var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
+        try stderr.print("maru win32-window-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.writeAll("  대화형 데스크톱이 없는 환경(CI·서비스·원격 자동화)에서는 정상입니다 — 평범한 세션에서 실행하세요.\n");
+        // 오류 8을 따로 말한다. 이름은 메모리지만 실제로는 **데스크톱 힙** 고갈이고, 그때는 세션 전체가
+        // 창을 못 만든다(실측: 고아 프로세스 8,606개가 쌓여 notepad조차 뜨지 않았다). 이 구분이 없으면
+        // 앱 버그로 오진한다 — 우리가 그렇게 한 번 헤맸다.
+        if (win32_window.last_create_error == 8)
+            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    var resized: usize = 0;
+    var painted: usize = 0;
+    var close_requested = false;
+    var spins: usize = 0;
+    // 짧게 돈다 — 이것은 앱 루프가 아니라 계약 스모크다. 사용자가 창을 닫으면 즉시 끝난다.
+    while (spins < 240 and !window.quit_requested and !close_requested) : (spins += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .resized => resized += 1,
+            .paint => painted += 1,
+            .close_requested => close_requested = true,
+        };
+        _ = usleep(8_000); // 8ms — 스모크가 CPU를 태우지 않게. 프레임 페이싱은 W7.2 몫이다.
+    }
+    if (close_requested) window.requestClose();
+
+    try stdout.writeAll("maru.win32-window-smoke.v1\n");
+    try stdout.print("resized_events={d}\n", .{resized});
+    try stdout.print("paint_events={d}\n", .{painted});
+    try stdout.print("close_requested={}\n", .{close_requested});
+    try stdout.print("dropped_events={d}\n", .{window.events.dropped});
+    if (window.clientSize()) |c| {
+        try stdout.print("client_px={d}x{d}\n", .{ c.width_px, c.height_px });
+        if (win32_window.cellsForClient(c.width_px, c.height_px, 8, 16)) |size|
+            try stdout.print("cells_at_8x16={d}x{d}\n", .{ size.cols, size.rows });
+    }
+    try stdout.writeAll("visible UI: 창만 뜬다. 그리기는 W7.2(D3D11+DXGI), 입력은 W7.4다.\n");
+    try stdout.flush();
 }
 
 fn printSmoke(stdout: *std.Io.Writer) !void {
@@ -953,6 +1023,14 @@ fn printUsage(writer: *std.Io.Writer) !void {
 
 test "development CLI imports maru module" {
     try std.testing.expectEqual(@as(u16, 80), maru.terminal.Size.default.cols);
+}
+
+// **테스트가 이 파일까지 닿게 한다.** Zig는 선언을 게으르게 분석한다. 테스트 빌드에는 `main()`이 없으니
+// 위의 `win32_window` import를 아무도 참조하지 않고, 그러면 그 파일 안의 테스트가 **수집조차 되지 않는다**.
+// 실측으로 겪었다: 2,614개가 통과하는 동안 `win32_window` 테스트는 0개 돌았다. `check-targets`가 `main.zig`를
+// 놓쳤던 것과 같은 부류이며, 여기 한 줄이 그 구멍을 막는다.
+test {
+    _ = win32_window;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

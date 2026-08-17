@@ -14,9 +14,10 @@ const git_status = @import("git_status.zig");
 pub const Entry = struct {
     /// 절대 경로. **키다** — 초안·감시·쓰기가 전부 이 값을 쓴다.
     path: []const u8,
-    /// 이 항목을 낳은 저장소의 주 루트. 워크트리면 자기 경로와 다르다.
+    /// 이 항목이 딸린 **주 워크트리 경로**. 워크트리면 자기 경로와 다르다.
     ///
-    /// 화면이 "누구의 워크트리인가"를 말할 수 있어야 같은 이름의 워크트리 둘을 구별한다.
+    /// 화면이 "누구의 워크트리인가"를 말할 수 있어야 같은 이름의 워크트리 둘을 구별한다. **우리가 선
+    /// 자리가 아니라 git이 말한 주 워크트리**다 — 그러지 않으면 워크트리에 선 터미널에서 신원이 뒤집힌다.
     origin: []const u8,
     /// 주 워크트리(= 저장소 루트 자신)인가. 화면이 아이콘을 가른다.
     primary: bool,
@@ -40,6 +41,13 @@ pub const Repo = struct {
     root: []const u8,
     /// `git worktree list`가 준 경로들. 주 워크트리(루트 자신)도 보통 여기 들어 있다 — 중복은 아래가 지운다.
     worktrees: []const []const u8 = &.{},
+    /// **주 워크트리 경로**(`git worktree list --porcelain`의 첫 줄 — git이 그렇게 낸다). 비어 있으면
+    /// 아직 못 읽은 것이라 `root`를 주 워크트리로 친다.
+    ///
+    /// 이것이 없으면 판정이 **우리가 어디에 서 있는가**로 흘러간다: 링크된 워크트리에 선 터미널에서는
+    /// 그 워크트리가 `root`가 되어 주 워크트리로 그려지고, 진짜 주 워크트리가 딸린 것으로 뒤집힌다
+    /// (제품 캡처 2026-08-17).
+    main: []const u8 = "",
 };
 
 /// 저장소들을 목록 항목으로 편다.
@@ -54,14 +62,23 @@ pub fn collect(repos: []const Repo, out: []Entry) Collected {
     var truncated = false;
     for (repos) |repo| {
         // 루트 자신이 먼저다 — 워크트리 목록의 순서는 git이 정하고, 화면에서는 "이 저장소" 다음에
-        // "그 워크트리들"이 오는 것이 읽기 쉽다.
-        if (!append(out, &n, .{ .path = repo.root, .origin = repo.root, .primary = true })) {
+        // "그 워크트리들"이 오는 것이 읽기 쉽다. **주/부 판정은 git이 준 주 워크트리 경로로 한다.**
+        const main = if (repo.main.len > 0) repo.main else repo.root;
+        if (!append(out, &n, .{
+            .path = repo.root,
+            .origin = main,
+            .primary = std.mem.eql(u8, repo.root, main),
+        })) {
             truncated = true;
             break;
         }
         for (repo.worktrees) |wt| {
-            if (std.mem.eql(u8, wt, repo.root)) continue; // 주 워크트리는 위에서 이미 넣었다
-            if (!append(out, &n, .{ .path = wt, .origin = repo.root, .primary = false })) {
+            if (std.mem.eql(u8, wt, repo.root)) continue; // 위에서 이미 넣었다
+            if (!append(out, &n, .{
+                .path = wt,
+                .origin = main,
+                .primary = std.mem.eql(u8, wt, main),
+            })) {
                 truncated = true;
                 break;
             }
@@ -254,4 +271,22 @@ test "자리가 차 있어도 활성 저장소는 들어간다(맨 뒤를 밀어
     try testing.expectEqualStrings("/z", roots[0]);
     try testing.expectEqualStrings("/a", roots[1]);
     try testing.expectEqualStrings("/b", roots[2]); // "/c"가 밀려났다(상한은 지킨다)
+}
+
+test "링크된 워크트리에 서 있어도 주 워크트리는 git이 말한 그것이다" {
+    // 우리가 어디에 서 있는가로 판정하면 **아이콘과 신원이 뒤집힌다**: 워크트리에 선 터미널에서는
+    // 그 워크트리가 루트가 되기 때문이다(제품 캡처 2026-08-17에서 실제로 그랬다).
+    const repos = [_]Repo{.{
+        .root = "/wt-a", // 우리가 선 자리
+        .worktrees = &.{ "/repo", "/wt-a" },
+        .main = "/repo", // git이 첫 줄로 말한 주 워크트리
+    }};
+    var buf: [8]Entry = undefined;
+    const got = collect(&repos, &buf);
+    try testing.expectEqual(@as(usize, 2), got.entries.len);
+    try testing.expectEqualStrings("/wt-a", got.entries[0].path);
+    try testing.expect(!got.entries[0].primary); // 우리가 선 자리라고 주 워크트리가 되지 않는다
+    try testing.expectEqualStrings("/repo", got.entries[1].path);
+    try testing.expect(got.entries[1].primary);
+    try testing.expectEqualStrings("/repo", got.entries[0].origin); // 누구의 워크트리인가도 그 값이다
 }

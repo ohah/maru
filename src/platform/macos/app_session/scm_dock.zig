@@ -1890,7 +1890,14 @@ fn collectRepoEntriesUncached(self: *AppSession, store: *RepoEntryStore) maru.se
     var count: usize = 0;
     for (roots) |root| {
         if (count == repos.len) break;
-        repos[count] = .{ .root = root, .worktrees = worktreesFor(self, root, &store.worktrees) };
+        const worktrees = worktreesFor(self, root, &store.worktrees);
+        repos[count] = .{
+            .root = root,
+            .worktrees = worktrees,
+            // **주 워크트리는 git이 첫 줄로 말한다**(`worktree list --porcelain`). 우리가 선 자리로
+            // 판정하면 워크트리에 선 터미널에서 신원이 뒤집힌다.
+            .main = if (worktrees.len > 0) worktrees[0] else "",
+        };
         count += 1;
     }
     return maru.session.scm_repos.collect(repos[0..count], &store.entries);

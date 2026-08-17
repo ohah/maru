@@ -13,6 +13,8 @@ const dwrite_font = @import("platform/windows/dwrite_font.zig");
 // W7.2c 중립 텍스트 계약 어댑터와 프레임 빌더.
 const win32_text = @import("platform/windows/win32_text.zig");
 const win32_terminal = @import("platform/windows/win32_terminal.zig");
+// W7.4a Win32 키 입력 → 중립 KeyEvent.
+const win32_keys = @import("platform/windows/win32_keys.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -244,6 +246,8 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
             .resized => resized += 1,
             .paint => painted += 1,
             .close_requested => close_requested = true,
+            // 이 스모크는 창 계약만 본다 — 입력은 W7.4a 의 터미널 스모크가 검증한다.
+            .key => {},
         };
         _ = usleep(8_000); // 8ms — 스모크가 CPU를 태우지 않게. 프레임 페이싱은 W7.2 몫이다.
     }
@@ -317,6 +321,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
             },
             .paint => {},
             .close_requested => close_requested = true,
+            .key => {},
         };
         present.clearAndPresent(clear, false) catch |err| {
             try stderr.print("present 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
@@ -443,6 +448,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .resized => |r| try present.resize(r.width_px, r.height_px),
             .paint => {},
             .close_requested => close_requested = true,
+            .key => {},
         };
 
         const size = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h) orelse continue;
@@ -658,6 +664,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .resized => |r| try present.resize(r.width_px, r.height_px),
             .paint => {},
             .close_requested => close_requested = true,
+            .key => {},
         };
 
         cells.clearRetainingCapacity();
@@ -937,6 +944,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     };
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
 
+    // 빌트인 바인딩만 보는 리졸버. 사용자 config 배선은 W7.5 의 config 경로 정규화와 함께 온다.
+    const resolver = maru.config.KeyBindingResolver{};
+    var keys_to_shell: usize = 0;
+    var bytes_to_shell: usize = 0;
+    var app_actions: usize = 0;
+    var keys_ignored: usize = 0;
+
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
     var region_uploads: usize = 0;
@@ -944,12 +958,11 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var last_cells: usize = 0;
     var close_requested = false;
     var ended = false;
-    // 셸이 프롬프트를 낼 시간을 준 뒤 표식을 출력시킨다.
-    _ = usleep(400_000);
-    try maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = script.input });
-
+    // **각본을 보내지 않는다.** 이 스모크는 사람이 타이핑하는 자리다 — fixture 각본은 `exit`으로 끝나서
+    // 셸이 죽고, 그 뒤 키는 죽은 PTY 에 쓰인다(실측: keys_to_shell=16 인데 화면에 안 나왔다).
+    // 각본으로 끝내는 검증은 `win32-frame-smoke`(W7.2c-1)가 한다.
     var spins: usize = 0;
-    while (spins < 220 and !window.quit_requested and !close_requested) : (spins += 1) {
+    while (spins < 600 and !window.quit_requested and !close_requested) : (spins += 1) {
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
@@ -959,6 +972,23 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             },
             .paint => {},
             .close_requested => close_requested = true,
+            // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
+            // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
+            .key => |key_ev| {
+                const outcome = loop.handleKeyEvent(resolver, key_ev, false, null) catch |err| {
+                    try stderr.print("  경고: 키 처리 실패({s})\n", .{@errorName(err)});
+                    continue;
+                };
+                switch (outcome) {
+                    .terminal_input => |ti| {
+                        keys_to_shell += 1;
+                        bytes_to_shell += ti.bytes_len;
+                    },
+                    // 앱 동작은 아직 할 일이 없다(Windows 엔 탭·pane 이 없다 — W8). 센다.
+                    .app_action => app_actions += 1,
+                    .ignored => keys_ignored += 1,
+                }
+            },
         };
 
         var tick = try loop.tickWithFrameBuilder(builder);
@@ -1020,6 +1050,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // **이 줄이 판정이다** — 올린 슬롯이 실제로 덮은 픽셀. 0이면 글자가 하나도 안 그려졌다.
     try stdout.print("upload_non_clear_pixels={d}\n", .{counts.non_clear_pixels});
     try stdout.print("fallback_glyphs={d} replacement_glyphs={d} raster_skipped={d}\n", .{ counts.fallback, counts.replacement, counts.skipped });
+    try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
+    try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     try stdout.writeAll("visible UI: 실제 셸 출력이 창에 그려진다.\n");
@@ -1848,6 +1880,7 @@ test {
     _ = dwrite_font;
     _ = win32_text;
     _ = win32_terminal;
+    _ = win32_keys;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

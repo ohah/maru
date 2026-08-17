@@ -556,5 +556,5 @@ pub const inventory = [_]Proof{
     // P4 적대적 검증: 커밋 상자 소유권 판정이 **탭까지** 보고(`scmCommitOwnsInput`), 저장소가 갈리면
     // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
     // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "5e134e48ea0c610971481701751d34832a8351bf093e20cbf5d5c460b9d2643a" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "7da6291ccd457b77476ea1e71748d893c71af9be20a01c32453ca7a93c513048" },
 };

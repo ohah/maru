@@ -99,9 +99,28 @@ const notify_lifecycle =
 /// 부적격("$1"=0: 원격 command가 붙었거나 파싱 불확실)이면 bootstrap을 건너뛰고 `xterm-256color`로
 /// 그냥 exec한다 — 사용자 command가 두 번 실행되는 위험(리뷰 #2)을 피한다.
 ///
-/// TERM은 `env`로 실어 보낸다 — `-o SetEnv`는 OpenSSH 7.8+ 전용 회귀(리뷰 #4)라 안 쓴다.
+/// TERM은 `env`로 실어 보낸다 — `-o SetEnv`는 OpenSSH 7.8+ 전용이라 **TERM 전달 수단으로는** 쓰지
+/// 않는다(리뷰 #4).
+///
+/// **그런데 `COLORTERM` 은 `env` 로 보낼 수 없다.** `env` 가 바꾸는 것은 **로컬 ssh 프로세스**의 환경이고
+/// ssh 가 원격에 전달하는 환경변수는 `TERM` 뿐이라, 원격 세션에는 COLORTERM 이 없다. 그래서 terminfo 를
+/// 읽지 않고 `TERM` 문자열 패턴과 `COLORTERM` 만 보는 앱(Node 계열 다수)이 `xterm-maru` 를 모르는 이름
+/// 으로 취급해 **16색으로 떨어진다**. tmux 안에서는 tmux 가 자기 TERM(`screen-256color`)을 세우므로
+/// 256색으로 승격되어, "tmux 밖에서만 색이 죽는" 차이가 났다(사용자 보고 2026-08-18).
+///
+/// 그 갭을 `-o SetEnv=COLORTERM=truecolor` 로 메우되, 7.8+ 전용이라는 제약 때문에 **옵션을 아는 ssh
+/// 에서만** 붙인다 — `ssh -o <opt> -V` 는 옵션을 먼저 검증하고 지원하면 0, 모르면 255 로 끝나며 네트워크에
+/// 나가지 않는다(실측 OpenSSH 10.2). 구버전에서는 argv 가 옛 그대로라 리뷰 #4 의 회귀가 되살아나지 않는다.
+///
+/// **서버 협조에 달린 보조 수단이다.** sshd 가 `AcceptEnv` 로 허용하지 않으면 조용히 버려진다(배포판
+/// 기본값은 대개 `LANG LC_*` 뿐). 허용하는 호스트에서는 원격 셸 실행 방식을 건드리지 않고 색이 돌아오고,
+/// 아닌 호스트에서는 지금과 같다.
 pub const wrapper_script =
     "elig=\"$1\"; dest=\"$2\"; ctl=\"$3\"; shift 3; cache=\"" ++ cache_path ++ "\"; " ++
+    // COLORTERM 은 ssh 가 전달하지 않으므로 SetEnv 로 요청한다. 옵션을 모르는 ssh(7.8 미만)에서
+    // 그대로 쓰면 연결 자체가 실패하므로(리뷰 #4) `-V` 로 먼저 검증한다 — 네트워크에 나가지 않고
+    // 지원하면 0, 모르면 255 다. 값에 공백이 없어 따옴표 없이 word split 으로 넘긴다.
+    "senv=\"\"; if ssh -o SetEnv=COLORTERM=truecolor -V >/dev/null 2>&1; then senv=\"-o SetEnv=COLORTERM=truecolor\"; fi; " ++
     "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\" 2>/dev/null; " ++
     // notify: maru exec 직전 OSC 5379(ssh;<dest>)로 원격 세션을 Maru에 알린다. tmux 안($TMUX)이면 DCS
     // passthrough(ESC P tmux; <inner의 ESC를 doubled> ESC \\)로 감싸 tmux를 통과시킨다. raw inner는
@@ -110,15 +129,15 @@ pub const wrapper_script =
     "clear_notify() { if [ -n \"$TMUX\" ]; then printf '\\033Ptmux;\\033\\033]5379;ssh-end\\007\\033\\\\'; else printf '\\033]5379;ssh-end\\007'; fi; }; " ++
     notify_lifecycle ++
     "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then " ++
-    "if [ -n \"$ctl\" ]; then begin_notify; env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?; fi; " ++
-    "exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
+    "if [ -n \"$ctl\" ]; then begin_notify; env TERM=xterm-maru ssh $senv -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?; fi; " ++
+    "exec env TERM=xterm-maru ssh $senv \"$@\"; fi; " ++
     "if [ \"$elig\" = 1 ] && [ -n \"$ctl\" ]; then " ++
     "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
     "[ -n \"$dest\" ] && { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; " ++
-    "begin_notify; env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; exit $?; " ++
-    "else exec env TERM=xterm-256color ssh -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
+    "begin_notify; env TERM=xterm-maru ssh $senv -o ControlPath=\"$ctl\" \"$@\"; exit $?; " ++
+    "else exec env TERM=xterm-256color ssh $senv -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "fi; " ++
-    "exec env TERM=xterm-256color ssh \"$@\"";
+    "exec env TERM=xterm-256color ssh $senv \"$@\"";
 
 /// 설치만 하고 세션은 띄우지 않는 안전 primitive(= 문서의 수동 한 줄을 자동화). `ssh localhost` smoke의
 /// 대상이자, ssh 가로채기 싫은 사용자의 강제 설치 경로다 — wrapper와 달리 **캐시를 읽지 않고 항상
@@ -312,14 +331,21 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
     // 부트스트랩=master, 세션=슬레이브(같은 $ctl 재사용 → 인증 1회).
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null); // 원격 설치
-    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 설치 성공 시 master 재사용 + trap 종료 clear
-    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패/ctl 없음 폴백
+    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh $senv -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 설치 성공 시 master 재사용 + trap 종료 clear
+    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh $senv \"$@\"") != null); // 부적격/실패/ctl 없음 폴백
     try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ] && [ -n \"$ctl\" ]") != null); // 적격 게이트(부트스트랩은 ctl이 있어야)
+    // COLORTERM: ssh 는 TERM 만 전달하므로 SetEnv 로 요청한다. **옵션을 아는 ssh 에서만** 붙어야 한다 —
+    // 7.8 미만에서 무조건 붙이면 연결 자체가 실패한다(리뷰 #4). 그 판정은 `-V` 프리플라이트가 한다.
+    try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o SetEnv=COLORTERM=truecolor -V >/dev/null 2>&1") != null); // 지원 여부 선검사(네트워크 없음)
+    try std.testing.expect(std.mem.indexOf(u8, s, "senv=\"-o SetEnv=COLORTERM=truecolor\"") != null); // 지원하면 그때만 argv 에 든다
+    try std.testing.expect(std.mem.indexOf(u8, s, "senv=\"\";") != null); // 기본은 빈 값 = 옛 argv 그대로
+    // 부트스트랩(원격 tic 실행)에는 붙이지 않는다 — 색과 무관하고, 그 연결은 명령 실행 전용이다.
+    try std.testing.expect(std.mem.indexOf(u8, s, "$senv -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10") == null);
     // 캐시: hit이면 bootstrap 건너뛰되 ctl 있으면 control socket을 유지하며 maru로 exec, 설치 성공 시 목적지 기록.
     try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 캐시 read
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh-terminfo-hosts") != null); // 캐시 파일
     try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 캐시 write
-    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 캐시 hit + ctl → socket 유지, trap 종료 clear
+    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh $senv -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 캐시 hit + ctl → socket 유지, trap 종료 clear
     // embed 회귀 가드: 로컬 infocmp 의존 없이(printf로 embed 소스 emit) 자기완결적이다.
     try std.testing.expect(std.mem.indexOf(u8, s, "printf '%s' '") != null); // embed 소스 emit
     try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다

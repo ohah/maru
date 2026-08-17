@@ -84,7 +84,9 @@ pub const Cipher = struct {
     ) Error!usize {
         const pad = paddingFor(payload.len);
         const body_len = 1 + payload.len + pad;
-        if (length_len + body_len > packet.max_packet) return Error.PacketTooLarge;
+        // 상한은 **길이 필드에 적히는 값**을 잰다 — `decryptLength` 와 같은 기준이다
+        // (`packet.max_packet` 주석: 길이 필드 자신과 MAC 은 안 센다).
+        if (body_len > packet.max_packet) return Error.PacketTooLarge;
         const total = sealedLen(payload.len);
         if (out.len < total) return Error.ShortBuffer;
 
@@ -392,16 +394,25 @@ test "seal 은 버퍼와 상한을 먼저 본다" {
 
     // 상한을 넘는 payload 는 **버퍼를 잡기 전에** 거절한다. 채널 데이터는 커질 수 있으므로
     // 실제로 닿는 경로다(상위가 쪼개야 한다는 뜻이기도 하다).
-    const huge = try std.testing.allocator.alloc(u8, packet.max_packet);
+    const huge = try std.testing.allocator.alloc(u8, packet.max_packet + 64);
     defer std.testing.allocator.free(huge);
     @memset(huge, 0x41);
     const out = try std.testing.allocator.alloc(u8, packet.max_packet + 64);
     defer std.testing.allocator.free(out);
     try std.testing.expectError(Error.PacketTooLarge, cipher.seal(out, 0, huge, prng.random()));
 
-    // 상한 바로 아래는 통과한다 — 경계를 양쪽에서 잰다.
-    const fits = packet.max_packet - length_len - 1 - min_padding - block_size;
-    _ = try cipher.seal(out, 0, huge[0..fits], prng.random());
+    // **경계를 정확히 짚는다.** 상한은 `packet.max_packet` 과 같은 기준(길이 필드에 적히는 값)이라,
+    // 길이 필드가 딱 `max_packet` 인 payload 는 통과해야 한다. 이 한 칸이 곧 "길이 필드를 포함해
+    // 재는" 옛 표현과의 차이이고, 그것을 안 짚으면 두 표현을 맞바꾸는 변이가 살아남는다.
+    var biggest: usize = packet.max_packet - 1;
+    while (1 + biggest + paddingFor(biggest) > packet.max_packet) biggest -= 1;
+    try std.testing.expectEqual(@as(usize, packet.max_packet), 1 + biggest + paddingFor(biggest));
+    _ = try cipher.seal(out, 0, huge[0..biggest], prng.random());
+    // 한 블록 더 크면 거절한다.
+    try std.testing.expectError(
+        Error.PacketTooLarge,
+        cipher.seal(out, 0, huge[0 .. biggest + block_size], prng.random()),
+    );
 }
 
 test "버퍼 길이가 길이 필드와 안 맞으면 태그가 잡는다" {

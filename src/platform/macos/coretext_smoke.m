@@ -1008,11 +1008,14 @@ static uint16_t maru_left_overhang_cells(CTFontRef font, CGGlyph glyph) {
     // 일반 글자는 0.1 수준이므로 반올림이 그 둘을 가른다.
     const double cells = round((double)(-bounds.origin.x) / (double)advance.width);
     if (!(cells >= 1.0)) return 0;
-    // **상한 3칸(= 최대 4칸 합자).** 실측: `//`·`::`·`~~` 는 1칸, `===`·`!==` 는 2칸이 필요했고
-    // JetBrains Mono 에는 `<!--` 처럼 4글자 합자도 있다. 상한이 없으면 이상한 폰트 하나가 슬롯을
-    // 무한히 키워 atlas 를 먹으므로, downstream 의 슬롯 span 계약(`cell_width` 만큼 넓힘)과 맞춘 값에서
-    // 끊는다.
-    return (uint16_t)fmin(cells, 3.0);
+    // **상한 2칸.** downstream 의 `cell_width` 가 `u2`(0~3)라 한 글리프가 덮을 수 있는 칸이 최대 3이다
+    // (`renderer/glyph_layout.zig`·`shaped_records.zig`·`coretext_font.zig`). 그래서 일반 글자(1칸)에
+    // 오버항 2칸까지가 한계다 — `===`·`!==` 같은 3글자 합자는 온전히 그려지고, `<!--` 처럼 4글자 합자는
+    // 3칸만 덮어 첫 글자가 여전히 잘린다(한계로 기록).
+    //
+    // 4로 허용했다가 실제로 크래시를 봤다: `@intCast(4)` 가 u2 를 넘겨 headless tick 테스트가 signal
+    // TRAP 으로 죽었다(로컬 CI 게이트가 잡았다). 상한은 그 타입과 함께 움직여야 한다.
+    return (uint16_t)fmin(cells, 2.0);
 }
 
 /// 글리프가 잉크를 하나도 갖지 않는가(합자의 첫 칸처럼 폰트가 의도적으로 비운 글리프).
@@ -1335,8 +1338,12 @@ void maru_macos_coretext_shape_draw_list(
         // primary_font/primary_name/attributes로 준비됨. 생성 실패(없는 face)면 그 cell은 regular(0)로 폴백한다.
         // 슬롯이 8 개다: face 4 개 × (커서 아님 / 커서). **커서 슬롯(4~7)은 같은 face 폰트에 합자를 끈
         // 속성**을 쓴다 — 편집 중 커서가 앉은 칸은 합자를 풀어 개별 글자로 보여야 한다.
-        CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, primary_font, NULL, NULL, NULL };
-        CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, primary_name, NULL, NULL, NULL };
+        // **커서 슬롯(4~7)은 NULL 로 시작한다.** 여기에 `primary_font`/`primary_name` 을 미리 담아 두면
+        // 아래 해제 루프(si=1..7)가 **소유하지 않은** primary 를 release 해 over-release 로 죽는다
+        // (실측: headless tick 테스트가 signal TRAP — 로컬 CI 게이트가 잡았다). 커서 run 을 처음 만날 때
+        // face 슬롯의 폰트를 빌리고 이름만 retain 해 채운다.
+        CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+        CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFDictionaryRef styled_attrs[8] = { attributes, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         bool styled_attempted[8] = { true, false, false, false, false, false, false, false };
 
@@ -1359,7 +1366,7 @@ void maru_macos_coretext_shape_draw_list(
                 styled_attempted[style_index] = true;
                 // face 는 face_index 가 정한다. 커서 슬롯은 이미 만든 face 폰트를 재사용하고 속성만
                 // 다시 만든다(합자 끔) — 같은 face 를 두 번 만들 이유가 없다.
-                CTFontRef styled = styled_fonts[face_index];
+                CTFontRef styled = styled_fonts[face_index]; // regular(0)은 primary_font 가 이미 있다
                 bool created_here = false;
                 if (styled == NULL) {
                     styled = maru_create_styled_font(

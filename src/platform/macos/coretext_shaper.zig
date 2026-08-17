@@ -242,9 +242,10 @@ fn coreTextGlyphRecordFromDrawRecord(
     cells: []const renderer.DrawCell,
 ) !coretext_font.CoreTextGlyphRecord {
     if (record.cell_index >= cells.len) return error.CoreTextDrawListRecordOutsideInput;
-    // 폭 상한 4 = wide 문자(2) + 합자 오버항(최대 3칸까지 당김). `glyph_atlas` 가 슬롯을
-    // `cell_width` 만큼 넓히므로(span) 이 값이 곧 한 글리프가 먹는 최대 칸 수다.
-    if (record.cell_width > 4) return error.CoreTextDrawListInvalidCellWidth;
+    // **폭 상한 3.** downstream 의 `cell_width` 가 `u2`(0~3)다(`renderer/glyph_layout.zig` 등) — 4 를
+    // 허용했다가 `@intCast` 가 u2 를 넘겨 headless tick 테스트가 signal TRAP 으로 죽었다(로컬 CI 게이트가
+    // 잡았다). `glyph_atlas` 는 슬롯을 `cell_width` 만큼 넓히므로 이 값이 한 글리프가 먹는 최대 칸 수다.
+    if (record.cell_width > 3) return error.CoreTextDrawListInvalidCellWidth;
     if (record.codepoint > std.math.maxInt(u21)) return error.CoreTextDrawListInvalidCodepoint;
 
     const source_cell = cells[@intCast(record.cell_index)];
@@ -258,7 +259,7 @@ fn coreTextGlyphRecordFromDrawRecord(
     //
     // 화면 왼쪽 경계는 넘지 않는다(`@min(.., col)`) — col 0 의 글리프가 오버항을 주장하면 그만큼만 당긴다.
     const overhang: u16 = @min(record.left_overhang_cells, record.col);
-    if (record.cell_width + overhang > 4) return error.CoreTextDrawListInvalidCellWidth;
+    if (record.cell_width + overhang > 3) return error.CoreTextDrawListInvalidCellWidth;
     return .{
         .row = record.row,
         .col = record.col - overhang,

@@ -9,6 +9,7 @@
 //! 준다(`countRanges`로 개수를 먼저 물어보고 그만큼 잡는다).
 
 const std = @import("std");
+const builtin = @import("builtin"); // 타깃 분기 — 아래 `monotonicUs`가 Windows에서 POSIX를 안 부른다
 
 /// 접을 수 있는 한 범위. **줄 단위 반열림이 아니다** — `head`는 보이고 `[first_hidden, last_hidden]`이
 /// 접었을 때 숨는 구간이다. 화면에 남는 줄과 숨는 줄을 호출자가 헷갈리지 않게 이름으로 가른다.
@@ -395,10 +396,22 @@ test "[측정] 계단식 깊은 중첩 — 한 번 훑기와 §3.8 상한" {
 
 /// 테스트 전용 단조 시계(µs). Zig 0.16 `std.time`에 `Timer`·`nanoTimestamp`가 없어 직접 부른다
 /// (이 저장소의 `control_bridge.monotonicMs`와 같은 관례).
+///
+/// **Windows 타깃에서는 0을 낸다 — 분기가 comptime이라 POSIX 경로가 아예 컴파일되지 않는다.**
+/// 이 모듈은 **L2 중립층**이라 `check-targets`가 `x86_64-windows`로도 컴파일하는데, 그 타깃에는
+/// `std.c.timespec`이 없어(zero-bit `void`) 함수가 통째로 깨진다 — CI가 실제로 그렇게 막았다
+/// (2026-08-18). 로컬 `mise run check`에는 `check-targets`가 없어 여기서 못 걸렀다.
+///
+/// **0을 내도 판정이 뒤집히지 않는다**: 아래 측정 테스트들이 시간으로 하는 일은 재앙 감지선
+/// (`expect(t1 - t0 < …)`)뿐이고, 그 선은 0에서 늘 통과한다. 측정 자체는 개발 머신(POSIX)에서 한다.
 fn monotonicUs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000 + @as(u64, @intCast(ts.nsec)) / 1000;
+    if (builtin.os.tag == .windows) {
+        return 0;
+    } else {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1_000_000 + @as(u64, @intCast(ts.nsec)) / 1000;
+    }
 }
 
 test "중첩 상한을 넘으면 그 아래를 안 접을 뿐 나머지는 그대로다 (§3.8)" {

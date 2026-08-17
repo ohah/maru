@@ -778,35 +778,12 @@ static CFDictionaryRef maru_create_shape_attributes(CTFontRef font, bool ligatur
     // `maru_font_without_contextual_alternates`는 **항상 +1 소유권**을 돌려준다(사본을 못 만들면
     // `CFRetain(font)`로도 +1이다). dictionary가 값을 따로 retain하므로 이 +1은 여기서 풀어야 한다.
     // 빠뜨리면 이 함수를 부를 때마다 CTFont가 하나씩 영구히 남고, 남은 폰트가 자기 cascade 배열과
-    // feature 테이블까지 붙들어 둔다.
-    //
-    // 실측(2026-08-18): 이 한 줄이 없어서 연속 4시간 46분 실행에 physical footprint 가 140GB 까지
-    // 부풀었다(MALLOC_SMALL 137GB, 살아 있는 할당 5억 개, 그중 125GB 가 스왑으로 나가 머신 전체가
-    // 스래싱했고 앱이 jetsam 에 죽었다). shape 호출(=출력이 있는 dirty 프레임)마다 한 번씩 샜고,
-    // 새는 폰트가 cascade 폰트일 때 회당 약 36KB 다. `font.ligatures = false` 일 때만 타는 분기라
-    // 합자를 켠(기본값) 설치는 겪지 않는다.
+    // feature 테이블까지 붙들어 둔다 — `font.ligatures = false`에서 shape 호출(=dirty 프레임)마다
+    // 새던 실제 누수였다(2026-08-18: 4시간 46분에 physical footprint 140GB). 캐시가 호출 횟수를
+    // 줄여도 이 release가 없으면 항목 수만큼은 계속 샌다.
     CFRelease(shaping_font);
     CFRelease(no_ligature);
     return attrs;
-}
-
-/// 이 프로세스의 physical footprint(바이트). 셰이핑 경로가 메모리를 새는지 테스트가 **직접** 재기 위한
-/// 진단 seam이다. 누수는 화면에 아무 증상이 없어서 눈으로도, 셰이핑 결과 계약으로도 잡히지 않는다.
-uint64_t maru_macos_coretext_phys_footprint_bytes(void) {
-    // **0으로 채우고 `count`까지 확인한다.** `task_info`는 성공하면서도 요청보다 **적은** 필드만 쓰고
-    // `count`를 그만큼 줄여 돌려줄 수 있다(구조체가 개정될 때마다 뒤에 필드가 붙기 때문이다).
-    // `phys_footprint`는 뒤쪽 개정에 있는 필드라, 확인 없이 읽으면 스택 쓰레기를 읽는다. 그 값이 그대로
-    // CI 게이트로 들어가면 멀쩡한 코드가 누수로 떨어진다.
-    task_vm_info_data_t info;
-    memset(&info, 0, sizeof(info));
-    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
-        return 0;
-    }
-    if (count < TASK_VM_INFO_REV1_COUNT) {
-        return 0; // phys_footprint 가 채워지지 않았다 — 0은 호출자가 "못 쟀다"로 읽는다.
-    }
-    return (uint64_t)info.phys_footprint;
 }
 
 static CFStringRef maru_create_string_for_draw_cell(
@@ -1233,6 +1210,347 @@ static CTFontRef maru_create_styled_font(
     return CTFontCreateCopyWithSymbolicTraits(primary_font, 0.0, NULL, traits, traits);
 }
 
+// 폰트 캐시 키는 요청 **바이트**를 그대로 비교한다. 조회는 프레임마다 일어나므로 매 조회에서 CFString으로
+// 바꿔 비교하면 캐시가 막으려던 비용이 조회 쪽으로 옮겨갈 뿐이다. 터미널 face 캐시와 chrome face 캐시가
+// 이 규칙을 공유한다.
+static bool maru_font_key_bytes_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
+    if (a_len != b_len) return false;
+    if (a_len == 0) return true;
+    if (a == NULL || b == NULL) return false;
+    return memcmp(a, b, a_len) == 0;
+}
+
+// 키 바이트의 복사본을 만든다. 빈 키는 NULL로 두고 성공으로 본다(길이 0끼리는 위 비교에서 같다). 길이
+// 제한을 두지 않으려고 복사본을 든다 — 고정 버퍼로 자르면 긴 fallback CSV 둘이 같은 접두사에서 잘못
+// hit한다. 실패(OOM)는 false로 알려 **캐시 항목을 아예 만들지 않게** 한다. 길이만 0으로 떨어뜨리면 그
+// 항목이 "빈 family 요청"과 잘못 매치해 엉뚱한 face가 캐시에 눌러앉는다.
+//
+// `strndup`이 아니라 malloc+memcpy를 쓴다. 키는 Zig 쪽 config 슬라이스에서 온 **길이 있는 바이트**라
+// NUL이 박혀 있어도 정상 입력이다. `strndup`은 첫 NUL에서 멈춰 len보다 짧은 버퍼를 주는데, 비교는
+// 저장된 len으로 `memcmp`하므로 그 버퍼 밖을 읽게 된다(heap overread).
+static bool maru_font_key_dup(const char *bytes, size_t len, char **out) {
+    *out = NULL;
+    if (bytes == NULL || len == 0) return true;
+    char *copy = malloc(len);
+    if (copy == NULL) return false;
+    memcpy(copy, bytes, len);
+    *out = copy;
+    return true;
+}
+
+// 터미널 draw list가 쓰는 face 집합(regular/bold/italic/bold-italic) 캐시.
+//
+// **이 캐시는 성능 대책이다. 메모리 누수의 수정이 아니다.** 2026-08-18에 실행 4시간 46분 만에
+// physical footprint가 140GB까지 부푼 사건의 원인은 `maru_create_shape_attributes`가
+// `maru_font_without_contextual_alternates`의 +1을 release하지 않은 것이었고, 그 한 줄은 그 함수에서
+// 고쳤다. 이 캐시는 그 호출 빈도를 줄이지만, 누수를 막는 것은 저 `CFRelease`다. 둘을 헷갈리면 안 된다.
+//
+// 격리 하네스로 두 가설을 갈랐다(20,000회 반복, phys_footprint 증가):
+//
+//   누수 경로(cascade 폰트 + shaping_font 미해제) ... +624.70MB (32,752 B/iter)  <- 원인
+//   같은 경로에 CFRelease 한 줄 추가 ................ +  0.48MB (    25 B/iter)
+//   프레임마다 새 cascade 폰트, 참조는 정상 ......... +  0.28MB (  14.7 B/iter)  <- 무해
+//
+// 즉 **"프레임마다 새 CTFont를 만들면 CoreText 전역 캐시가 무한히 자란다"는 것은 사실이 아니다.**
+// 참조만 맞으면 인스턴스 churn 자체는 거의 공짜다. 32,752 B/iter × 초당 약 250회 shape 호출(패널·스타일
+// face 다수) ≈ 29GB/h로 관측치(140GB / 4.77h)와 맞는다.
+//
+// **그러면 이 캐시는 왜 있나.** CPU다. 같은 사건에서 메인 스레드 샘플의 **46%**가
+// `CTFontCopyDefaultCascadeListForLanguages` 아래 malloc 락 경합에 묶여 있었다. face 해석은 같은 설정이면
+// 결과가 같은데도 shape 호출(=dirty 프레임)마다 반복됐다. chrome 경로(`maru_chrome_font_for`)는 이미 같은
+// 이유로 face를 캐시하고 "run마다 만들면 프레임 비용이 1.4ms → 6.3ms"라고 실측을 남겨 뒀다 — 터미널
+// 경로에만 그 규율이 빠져 있었다. 덤으로, 이 캐시는 face 생성 경로의 소유권 실수가 다시 생기더라도
+// 그 대가를 프레임당이 아니라 **항목당**으로 묶어 준다.
+//
+// **왜 face 집합이 캐시 단위인가.** 넷은 같은 (family, fallback, bold/italic family, size, ligatures)
+// 설정에서 함께 결정되고 함께 쓰인다. `attrs`까지 함께 캐시해야 `calt`를 끈 사본 생성도 같이 준다
+// (`font.ligatures = false`에서 그 자리가 두 번째 CTFont 생성 지점이다). style 1~3을 "그 조합을 처음
+// 만나는 셀에서 lazy로 채운다"는 기존 규칙은 그대로 두고, 채운 결과의 수명만 한 호출에서 캐시 항목으로
+// 늘린다.
+//
+// **왜 lock이 없나.** shape/atlas/GPU는 메인(렌더) 스레드 tick에서만 돈다(docs/io-render-threading.md §3
+// — 코어 락 **밖**이지만 여전히 메인 스레드). chrome face 캐시(`maru_chrome_font_for`)도 같은 전제다.
+// 다른 스레드에서 부르면 이 전제가 깨진다.
+//
+// **왜 축출이 있나.** 폰트 크기가 바뀌면(`Cmd`+`+`/`-`, 설정 변경) 새 항목이 된다. 상한만 두고 축출을 안
+// 하면 캐시가 곧 막히고, 그 뒤로는 프레임마다 face를 다시 만드는 옛 경로로 조용히 되돌아가 이 수정이
+// 무효가 된다. 어느 순간 살아 있는 조합은 보통 한 크기의 한 벌이라 chrome 캐시와 같은 라운드로빈으로
+// 충분하다.
+#define MARU_TERM_FACE_CACHE_CAPACITY 8
+
+// style face 해석이 NULL 로 실패했을 때 다시 시도하기까지 건너뛸 shape 호출 수. 60fps 기준 약 10초다.
+// 없는 face 를 프레임마다 다시 찾는 비용(짧은 주기)과 일시적 실패가 영구 열화로 굳는 위험(긴 주기)
+// 사이의 값이다.
+#define MARU_TERM_FACE_RETRY_COOLDOWN_CALLS 600
+
+typedef struct {
+    // --- 키 ---
+    double size;
+    uint32_t ligatures_enabled;
+    char *family;
+    size_t family_len;
+    char *fallback;
+    size_t fallback_len;
+    char *bold_family;
+    size_t bold_family_len;
+    char *italic_family;
+    size_t italic_family_len;
+    // --- 값 --- index = (bold?1:0)|(italic?2:0). 0(regular)은 생성 때 채우고 1~3은 lazy.
+    uint32_t requested_matched;
+    CTFontRef fonts[4];
+    CFStringRef names[4];
+    CFDictionaryRef attrs[4];
+    /// 이 style 조합의 해석이 **성공했다**. 다시 시도하지 않는다.
+    bool attempted[4];
+    /// 이 style 조합을 다시 시도해도 되는 가장 이른 epoch. 실패마다 여기에 쿨다운을 실어 둔다:
+    ///  - 같은 호출 안의 뒤 run 들이 같은 생성을 반복하지 않게(옛 per-call 배열의 '프레임당 1회' 상한),
+    ///  - 그러면서도 **영구히 포기하지는 않게**.
+    uint64_t retry_epoch[4];
+} MaruTermFaceCacheEntry;
+
+static MaruTermFaceCacheEntry maru_term_face_cache[MARU_TERM_FACE_CACHE_CAPACITY];
+static size_t maru_term_face_cache_count = 0;
+static size_t maru_term_face_cache_cursor = 0;
+// 캐시가 실제로 재사용되는지 보는 진단 카운터. "프레임마다 face를 다시 만든다"는 회귀가 성능 저하로만
+// 드러나면 늦다 — 두 번째 호출이 hit인지 테스트가 직접 보게 한다(관측 가능성 원칙).
+static uint64_t maru_term_face_cache_hits = 0;
+static uint64_t maru_term_face_cache_misses = 0;
+// **face를 새로 해석한 횟수**(regular 집합 1회 + style face 1회씩). hit/miss만으로는 부족하다 — 조회가
+// hit여도 그 뒤 style face를 프레임마다 다시 만들면 hit/miss는 그대로고 회귀는 살아난다. 이 카운터는
+// "이 shape 호출이 face를 새로 만들었는가"를 그 두 자리에서 직접 센다(한 번의 regular 해석이 내부적으로
+// 만드는 CTFont **인스턴스** 수를 세는 것은 아니다 — 게이트가 필요한 것은 "0인가 아닌가"다).
+static uint64_t maru_term_face_builds = 0;
+// shape 호출마다 1 증가. 0은 "아직 한 번도 시도 안 함"이라 1부터 시작한다.
+static uint64_t maru_term_shape_epoch = 1;
+
+static void maru_term_face_cache_entry_release(MaruTermFaceCacheEntry *entry) {
+    for (int i = 0; i < 4; i++) {
+        if (entry->attrs[i] != NULL) CFRelease(entry->attrs[i]);
+        if (entry->names[i] != NULL) CFRelease(entry->names[i]);
+        if (entry->fonts[i] != NULL) CFRelease(entry->fonts[i]);
+    }
+    free(entry->family);
+    free(entry->fallback);
+    free(entry->bold_family);
+    free(entry->italic_family);
+    memset(entry, 0, sizeof(*entry));
+}
+
+/// (family, fallback, bold/italic family, size, ligatures)에 해당하는 face 집합을 돌려준다. 반환값은
+/// **항상 캐시 소유**라 호출자가 release하지 않는다. NULL이면 regular face를 준비하지 못한 것이고,
+/// `out_primary_found`가 "primary는 만들었으나 attributes에서 실패"(1)와 "primary부터 실패"(0)를 가른다 —
+/// 호출자의 status 3/2 구분을 그대로 지키기 위한 것이다.
+///
+/// **한계**: `requested_matched`(요청 family를 실제로 얻었는지)는 항목을 만들 때 한 번 판정하고 그대로
+/// 든다. 앱이 도는 중에 폰트를 새로 설치해도 그 항목이 축출되기 전까지는 옛 판정이 남는다. 판정 자체가
+/// CTFont 생성이라 매 조회에서 다시 하면 캐시의 목적이 무너진다(chrome 캐시도 같은 이유로 hit에서 다시
+/// 판정하지 않는다). config로 family를 바꾸면 키가 달라져 새 항목이 되므로 설정 경로는 영향받지 않는다.
+static MaruTermFaceCacheEntry *maru_term_face_cache_for(
+    const char *family,
+    size_t family_len,
+    double size,
+    const char *fallback,
+    size_t fallback_len,
+    const char *bold_family,
+    size_t bold_family_len,
+    const char *italic_family,
+    size_t italic_family_len,
+    uint32_t ligatures_enabled,
+    uint32_t *out_primary_found,
+    uint32_t *out_key_alloc_failed,
+    // 요청 family 를 실제로 얻었는지. **실패 경로에서도** 채운다 — 이 진단은 "왜 실패했나"를 가르는 데
+    // 쓰이므로, 실패했다고 비워 두면 폰트 해석이 멀쩡한데도 "설정한 폰트를 못 찾았다"로 읽힌다.
+    uint32_t *out_requested_matched
+) {
+    if (out_primary_found != NULL) *out_primary_found = 0;
+    if (out_key_alloc_failed != NULL) *out_key_alloc_failed = 0;
+    if (out_requested_matched != NULL) *out_requested_matched = 0;
+
+    for (size_t i = 0; i < maru_term_face_cache_count; i++) {
+        MaruTermFaceCacheEntry *entry = &maru_term_face_cache[i];
+        if (entry->fonts[0] == NULL) continue;
+        if (entry->size != size) continue;
+        if (entry->ligatures_enabled != ligatures_enabled) continue;
+        if (!maru_font_key_bytes_equal(entry->family, entry->family_len, family, family_len)) continue;
+        if (!maru_font_key_bytes_equal(entry->fallback, entry->fallback_len, fallback, fallback_len)) continue;
+        if (!maru_font_key_bytes_equal(entry->bold_family, entry->bold_family_len, bold_family, bold_family_len)) continue;
+        if (!maru_font_key_bytes_equal(entry->italic_family, entry->italic_family_len, italic_family, italic_family_len)) continue;
+        maru_term_face_cache_hits += 1;
+        if (out_primary_found != NULL) *out_primary_found = 1;
+        if (out_requested_matched != NULL) *out_requested_matched = entry->requested_matched;
+        return entry;
+    }
+
+    maru_term_face_cache_misses += 1;
+
+    // 키 복사를 폰트 생성보다 **먼저** 한다 — 실패해도 되돌릴 CF 객체가 없다.
+    char *family_key = NULL;
+    char *fallback_key = NULL;
+    char *bold_key = NULL;
+    char *italic_key = NULL;
+    if (!maru_font_key_dup(family, family_len, &family_key) ||
+        !maru_font_key_dup(fallback, fallback_len, &fallback_key) ||
+        !maru_font_key_dup(bold_family, bold_family_len, &bold_key) ||
+        !maru_font_key_dup(italic_family, italic_family_len, &italic_key)) {
+        free(family_key);
+        free(fallback_key);
+        free(bold_key);
+        free(italic_key);
+        // 폰트 해석 실패가 아니라 키 복사(할당) 실패다. 둘을 같은 status로 보고하면 OOM 을 "설정한 폰트를
+        // 못 찾았다"로 진단하게 되어 조사 층이 어긋난다.
+        if (out_key_alloc_failed != NULL) *out_key_alloc_failed = 1;
+        return NULL;
+    }
+
+    uint32_t matched = 0;
+    CTFontRef primary = maru_create_primary_font(family, family_len, size, &matched);
+    if (primary == NULL) {
+        free(family_key);
+        free(fallback_key);
+        free(bold_key);
+        free(italic_key);
+        return NULL;
+    }
+    if (out_primary_found != NULL) *out_primary_found = 1;
+    if (out_requested_matched != NULL) *out_requested_matched = matched;
+    maru_term_face_builds += 1;
+
+    // 사용자 폴백 폰트(font.fallback)가 있으면 주 폰트에 cascade list로 박는다 — 이후 모든 CTLine(attributes의
+    // kCTFontAttributeName이 이 폰트)이 주 폰트에 없는 글리프를 사용자 폴백→시스템 폴백 순으로 그린다
+    // (매 cell 변경 불요). 이 재구성이 캐시 miss에서만 일어난다는 것이 이 캐시의 핵심이다.
+    if (fallback != NULL && fallback_len > 0) {
+        CTFontRef with_cascade = maru_apply_cascade_list(primary, fallback, fallback_len, size);
+        if (with_cascade != NULL) {
+            CFRelease(primary);
+            primary = with_cascade;
+        }
+    }
+
+    CFDictionaryRef primary_attrs = maru_create_shape_attributes(primary, ligatures_enabled != 0);
+    if (primary_attrs == NULL) {
+        CFRelease(primary);
+        free(family_key);
+        free(fallback_key);
+        free(bold_key);
+        free(italic_key);
+        return NULL;
+    }
+
+    if (maru_term_face_cache_count < MARU_TERM_FACE_CACHE_CAPACITY) {
+        maru_term_face_cache_count += 1;
+    } else {
+        maru_term_face_cache_entry_release(&maru_term_face_cache[maru_term_face_cache_cursor]);
+    }
+    MaruTermFaceCacheEntry *entry = &maru_term_face_cache[maru_term_face_cache_cursor];
+    *entry = (MaruTermFaceCacheEntry){
+        .size = size,
+        .ligatures_enabled = ligatures_enabled,
+        .family = family_key,
+        .family_len = family_key != NULL ? family_len : 0,
+        .fallback = fallback_key,
+        .fallback_len = fallback_key != NULL ? fallback_len : 0,
+        .bold_family = bold_key,
+        .bold_family_len = bold_key != NULL ? bold_family_len : 0,
+        .italic_family = italic_key,
+        .italic_family_len = italic_key != NULL ? italic_family_len : 0,
+        .requested_matched = matched,
+    };
+    entry->fonts[0] = primary;
+    entry->names[0] = CTFontCopyPostScriptName(primary);
+    entry->attrs[0] = primary_attrs;
+    entry->attempted[0] = true;
+    maru_term_face_cache_cursor = (maru_term_face_cache_cursor + 1) % MARU_TERM_FACE_CACHE_CAPACITY;
+    return entry;
+}
+
+/// style 조합(1~3)의 face를 캐시 항목에 lazy로 채운다.
+///
+/// `attempted`는 **결정적 실패**(그 조합의 face가 아예 없다)에만 세운다. 없는 face를 프레임마다 다시
+/// 찾으면 캐시를 둔 의미가 없기 때문이다. 반대로 **일시적 실패**(attributes 할당 실패)에는 세우지
+/// 않는다 — 캐시 항목의 수명이 한 호출보다 길어졌으므로, 여기서 세워 버리면 하필 그 한 프레임의 할당
+/// 실패가 "이 세션 내내 bold가 regular로 그려진다"로 굳는다(항목이 축출되기 전까지 회복 불가).
+/// 옛 per-call 배열은 다음 프레임에 저절로 회복됐고, 그 성질을 잃지 않아야 한다.
+static void maru_term_face_cache_ensure_style(MaruTermFaceCacheEntry *entry, int style_index) {
+    if (style_index <= 0 || style_index >= 4) return;
+    if (entry->attempted[style_index]) return;
+    // 쿨다운 중이면 건너뛴다. 같은 shape 호출의 뒤 run 들이 같은 생성을 반복하는 것을 막고(그 반복은 하필
+    // 할당이 실패하는 상황에서 폰트 생성을 run 수만큼 늘린다), 그러면서도 언젠가는 다시 시도하게 한다.
+    if (maru_term_shape_epoch < entry->retry_epoch[style_index]) return;
+
+    CTFontRef styled = maru_create_styled_font(
+        entry->fonts[0],
+        entry->size,
+        entry->fallback,
+        entry->fallback_len,
+        entry->bold_family,
+        entry->bold_family_len,
+        entry->italic_family,
+        entry->italic_family_len,
+        (style_index & 1) != 0,
+        (style_index & 2) != 0
+    );
+    if (styled == NULL) {
+        // `CTFontCreateCopyWithSymbolicTraits`는 "그 face 가 없다"(영구)와 "지금 메모리가 없다"(일시)를
+        // 구분해 주지 않는다. 그래서 **영구로 포기하지도, 매 프레임 재시도하지도 않는다** — 긴 쿨다운을
+        // 건다. italic 이 없는 등폭 폰트(드물지 않다)에서는 실패하는 조회가 쿨다운마다 한 번뿐이라 사실상
+        // 공짜고, 일시적 OOM 이었다면 그 쿨다운 뒤에 저절로 회복한다. 영구로 두면 한 번의 할당 실패가
+        // "이 세션 내내 bold 가 regular 로 그려진다"로 굳는다.
+        entry->retry_epoch[style_index] = maru_term_shape_epoch + MARU_TERM_FACE_RETRY_COOLDOWN_CALLS;
+        return;
+    }
+    maru_term_face_builds += 1;
+
+    CFDictionaryRef attrs = maru_create_shape_attributes(styled, entry->ligatures_enabled != 0);
+    if (attrs == NULL) {
+        // 할당 실패다(원인이 분명한 일시적 실패). 다음 호출에서 바로 다시 시도한다.
+        entry->retry_epoch[style_index] = maru_term_shape_epoch + 1;
+        CFRelease(styled);
+        return;
+    }
+    entry->attempted[style_index] = true;
+    entry->fonts[style_index] = styled;
+    entry->names[style_index] = CTFontCopyPostScriptName(styled);
+    entry->attrs[style_index] = attrs;
+}
+
+/// 이 프로세스의 physical footprint(바이트). 셰이핑 경로가 메모리를 새는지 테스트가 **직접** 재기 위한
+/// 진단 seam이다.
+///
+/// 아래 face 캐시 카운터로는 누수를 못 잡는다 — 캐시는 "몇 번 만들었나"만 알지 "만든 것을 놓아줬나"는
+/// 모른다. 실제로 2026-08-18 사건의 원인(`maru_create_shape_attributes`의 빠진 `CFRelease`)은 face를 정확히
+/// 한 번씩 만들면서도 그 한 번을 매번 놓치는 결함이었다. 그런 결함은 footprint로만 드러난다.
+uint64_t maru_macos_coretext_phys_footprint_bytes(void) {
+    // **0으로 채우고 `count`까지 확인한다.** `task_info`는 성공하면서도 요청보다 **적은** 필드만 쓰고
+    // `count`를 그만큼 줄여 돌려줄 수 있다(구조체가 개정될 때마다 뒤에 필드가 붙기 때문이다).
+    // `phys_footprint`는 뒤쪽 개정에 있는 필드라, 확인 없이 읽으면 스택 쓰레기를 읽는다. 그 값이 그대로
+    // CI 게이트로 들어가면 멀쩡한 코드가 `MacosCoreTextShapeLeaked`로 떨어진다.
+    task_vm_info_data_t info;
+    memset(&info, 0, sizeof(info));
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    if (count < TASK_VM_INFO_REV1_COUNT) {
+        return 0; // phys_footprint 가 채워지지 않았다 — 0은 호출자가 "못 쟀다"로 읽는다.
+    }
+    return (uint64_t)info.phys_footprint;
+}
+
+/// face 캐시 진단 seam(테스트 전용 관측 경로). 같은 설정의 두 번째 shape 호출이 hit인지, 그리고 **face를
+/// 새로 해석하지 않았는지**를 테스트가 수치로 본다. `out_face_builds`가 핵심 신호다 — 조회가 hit라도 그
+/// 뒤에서 style face를 다시 만들면 hit/miss는 안 변하고 회귀만 살아나기 때문이다.
+void maru_macos_coretext_face_cache_stats(
+    uint64_t *out_hits,
+    uint64_t *out_misses,
+    uint64_t *out_face_builds,
+    uint32_t *out_entries
+) {
+    if (out_hits != NULL) *out_hits = maru_term_face_cache_hits;
+    if (out_misses != NULL) *out_misses = maru_term_face_cache_misses;
+    if (out_face_builds != NULL) *out_face_builds = maru_term_face_builds;
+    if (out_entries != NULL) *out_entries = (uint32_t)maru_term_face_cache_count;
+}
+
 void maru_macos_coretext_shape_draw_list(
     const char *requested_font_family,
     size_t requested_font_family_len,
@@ -1272,49 +1590,44 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
 
-        CTFontRef primary_font = maru_create_primary_font(
+        // face 집합(F2-3: index = (bold?1:0)|(italic?2:0) — 0=regular, 1=bold, 2=italic, 3=bold-italic)은
+        // **캐시 소유**다. 이 함수는 release하지 않는다 — 프레임마다 재생성하지 않는 것이 그 캐시의 목적이다
+        // (`maru_term_face_cache_for` 주석의 실측 근거).
+        uint32_t primary_found = 0;
+        uint32_t key_alloc_failed = 0;
+        uint32_t requested_matched = 0;
+        // style face의 '이 호출 안에서 한 번만 시도한다' 상한(`attempt_epoch`)의 기준. 오버플로는 실질적으로
+        // 불가능하고(60fps로 100억 년), 설령 감기더라도 최악이 "그 한 호출에서 한 번 더 시도"다.
+        maru_term_shape_epoch += 1;
+
+        // `faces`는 정적 캐시 배열을 가리킨다. 이 호출이 끝날 때까지 유효한 근거는 "이 함수 안에서
+        // `maru_term_face_cache_for`를 다시 부르지 않는다"는 것뿐이다 — 아래 셀 루프 안에서 캐시를 다시
+        // 조회하면 그 조회가 miss일 때 축출이 일어나 지금 들고 있는 항목을 해제할 수 있다.
+        MaruTermFaceCacheEntry *faces = maru_term_face_cache_for(
             requested_font_family,
             requested_font_family_len,
             requested_font_size,
-            &result->requested_font_matched
+            fallback_families,
+            fallback_families_len,
+            bold_family,
+            bold_family_len,
+            italic_family,
+            italic_family_len,
+            ligatures_enabled,
+            &primary_found,
+            &key_alloc_failed,
+            &requested_matched
         );
-        if (primary_font == NULL) {
-            result->status = 2;
+        // 성공/실패와 무관하게 진단을 채운다(위 out 파라미터 주석).
+        result->requested_font_matched = requested_matched;
+        if (faces == NULL) {
+            // 8=키 할당 실패(OOM), 3=primary는 얻었으나 attributes 실패, 2=primary부터 실패.
+            // 2/3 은 기존 status 계약 그대로이고 8 만 새로 늘렸다.
+            result->primary_font_found = primary_found;
+            result->status = key_alloc_failed != 0 ? 8 : (primary_found != 0 ? 3 : 2);
             return;
         }
         result->primary_font_found = 1;
-
-        // 사용자 폴백 폰트(font.fallback)가 있으면 주 폰트에 cascade list로 박는다 — 이후 모든 CTLine(attributes의
-        // kCTFontAttributeName이 이 폰트)이 주 폰트에 없는 글리프를 사용자 폴백→시스템 폴백 순으로 그린다(매 cell 변경 불요).
-        // 비용: cascade 폰트를 **shape 호출(출력/dirty 프레임)마다** 재구성한다 — 같은 family+fallback+size면 결과가
-        // 동일하므로 후속에서 (primary_font 생성과 함께) family+fallback+size 키로 캐시할 여지가 있다(code-review max F1-2 #1).
-        if (fallback_families != NULL && fallback_families_len > 0) {
-            CTFontRef with_cascade = maru_apply_cascade_list(
-                primary_font, fallback_families, fallback_families_len, requested_font_size);
-            if (with_cascade != NULL) {
-                CFRelease(primary_font);
-                primary_font = with_cascade;
-            }
-        }
-
-        CFStringRef primary_name = CTFontCopyPostScriptName(primary_font);
-        CFDictionaryRef attributes = maru_create_shape_attributes(primary_font, ligatures_enabled != 0);
-        if (attributes == NULL) {
-            if (primary_name != NULL) {
-                CFRelease(primary_name);
-            }
-            CFRelease(primary_font);
-            result->status = 3;
-            return;
-        }
-
-        // 스타일 face 캐시(F2-3): index = (bold?1:0)|(italic?2:0). 0=regular(primary), 1=bold, 2=italic, 3=bold-italic.
-        // 각 조합을 처음 만나는 cell에서 lazy 생성(없는 조합은 매번 재시도 안 하게 attempted). regular(0)은 위에서 이미
-        // primary_font/primary_name/attributes로 준비됨. 생성 실패(없는 face)면 그 cell은 regular(0)로 폴백한다.
-        CTFontRef styled_fonts[4] = { primary_font, NULL, NULL, NULL };
-        CFStringRef styled_names[4] = { primary_name, NULL, NULL, NULL };
-        CFDictionaryRef styled_attrs[4] = { attributes, NULL, NULL, NULL };
-        bool styled_attempted[4] = { true, false, false, false };
 
         // [run 셰이핑] 예전에는 **셀 하나마다** CTLine을 만들었다. CTLine 생성은 호출당 고정비(속성 조회·
         // typesetter 생성·폰트 캐스케이드 준비)가 커서, 글리프 수가 같아도 호출 수가 시간을 지배한다 —
@@ -1329,26 +1642,15 @@ void maru_macos_coretext_shape_draw_list(
             // run의 face는 시작 셀이 정한다. run 안의 셀은 아래 연속 조건에서 같은 face만 받아들인다.
             const MaruCoreTextDrawCell first_cell = cells[cell_index];
             const int style_index = maru_style_index_for_cell(first_cell);
-            if (style_index != 0 && !styled_attempted[style_index]) {
-                styled_attempted[style_index] = true;
-                CTFontRef styled = maru_create_styled_font(
-                    primary_font, requested_font_size,
-                    fallback_families, fallback_families_len,
-                    bold_family, bold_family_len,
-                    italic_family, italic_family_len,
-                    (style_index & 1) != 0, (style_index & 2) != 0);
-                if (styled != NULL) {
-                    styled_fonts[style_index] = styled;
-                    styled_names[style_index] = CTFontCopyPostScriptName(styled);
-                    styled_attrs[style_index] = maru_create_shape_attributes(styled, ligatures_enabled != 0);
-                }
-            }
+            // 이 조합을 처음 만나는 셀에서 lazy 생성한다(없는 조합은 attempted가 재시도를 막는다). 캐시
+            // 항목에 채우므로 다음 프레임에는 이 생성조차 일어나지 않는다.
+            maru_term_face_cache_ensure_style(faces, style_index);
             // styled face가 만들어졌으면 그걸로, 실패했으면(없는 face) regular(0)로 폴백.
-            const int use_index = (styled_attrs[style_index] != NULL) ? style_index : 0;
-            CFDictionaryRef run_attributes = styled_attrs[use_index];
+            const int use_index = (faces->attrs[style_index] != NULL) ? style_index : 0;
+            CFDictionaryRef run_attributes = faces->attrs[use_index];
             // run의 폰트가 이 run이 의도한 face와 다르면(진짜 fallback) 표시한다. styled run은 그 face name과
             // 비교해야 bold/italic variant를 fallback으로 오탐하지 않는다.
-            CFStringRef expected_name = styled_names[use_index];
+            CFStringRef expected_name = faces->names[use_index];
 
             UniChar units[MARU_SHAPE_RUN_MAX_UNITS];
             uint32_t unit_cell[MARU_SHAPE_RUN_MAX_UNITS];
@@ -1546,17 +1848,8 @@ void maru_macos_coretext_shape_draw_list(
                 : 6;
         }
 
-        CFRelease(attributes);
-        // styled face 캐시(1~3) 정리 — index 0(regular)은 primary_font/primary_name/attributes라 아래에서 따로 푼다(F2-3).
-        for (int si = 1; si < 4; si++) {
-            if (styled_attrs[si] != NULL) CFRelease(styled_attrs[si]);
-            if (styled_names[si] != NULL) CFRelease(styled_names[si]);
-            if (styled_fonts[si] != NULL) CFRelease(styled_fonts[si]);
-        }
-        if (primary_name != NULL) {
-            CFRelease(primary_name);
-        }
-        CFRelease(primary_font);
+        // face 집합(폰트·이름·attributes ×4)은 캐시가 소유한다 — 여기서 풀지 않는다. 해제는 캐시 축출
+        // (`maru_term_face_cache_entry_release`)이 맡는다.
     }
 }
 
@@ -1589,7 +1882,7 @@ static bool maru_font_is_color(CTFontRef font) {
 // 그런데 run마다 UI 폰트를 새로 만들면 그 생성 비용이 셰이핑 자체를 압도한다 — 55 run 한 프레임에서
 // role이 전부 같으면 3.0ms, run마다 다르면 9.4ms였다(같은 문자열, ReleaseFast). 같은 폰트가 9종을
 // 여섯 바퀴 반복하는데도 안 싸지므로 CoreText의 내부 캐시에 기댈 수 없다. 터미널 draw list 경로가
-// `styled_fonts[]`로 style별 face를 재사용하는 것과 같은 규율을 chrome 경로에도 준다.
+// `maru_term_face_cache_for`로 style별 face를 재사용하는 것과 같은 규율을 chrome 경로에도 준다.
 //
 // Chrome text 셰이핑은 main actor 전용이므로 lock을 두지 않는다 — 다른 스레드에서 부르면 이 전제가 깨진다.
 //
@@ -1618,13 +1911,6 @@ typedef struct {
 static MaruChromeFontCacheEntry maru_chrome_font_cache[MARU_CHROME_FONT_CACHE_CAPACITY];
 static size_t maru_chrome_font_cache_count = 0;
 static size_t maru_chrome_font_cache_cursor = 0;
-
-static bool maru_chrome_font_key_bytes_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
-    if (a_len != b_len) return false;
-    if (a_len == 0) return true;
-    if (a == NULL || b == NULL) return false;
-    return memcmp(a, b, a_len) == 0;
-}
 
 /// 요청 family(+fallback cascade)로 face를 만든다. family가 비었거나 실제로 그 폰트가 아니면 system UI
 /// face로 물러난다 — CoreText는 없는 폰트에 Helvetica 같은 대체 face를 조용히 돌려주므로, 대조 없이 쓰면
@@ -1691,8 +1977,8 @@ static CTFontRef maru_chrome_font_for(
 ) {
     for (size_t i = 0; i < maru_chrome_font_cache_count; i++) {
         if (maru_chrome_font_cache[i].size != size || maru_chrome_font_cache[i].weight != weight) continue;
-        if (!maru_chrome_font_key_bytes_equal(maru_chrome_font_cache[i].family, maru_chrome_font_cache[i].family_len, family, family_len)) continue;
-        if (!maru_chrome_font_key_bytes_equal(maru_chrome_font_cache[i].fallback, maru_chrome_font_cache[i].fallback_len, fallback, fallback_len)) continue;
+        if (!maru_font_key_bytes_equal(maru_chrome_font_cache[i].family, maru_chrome_font_cache[i].family_len, family, family_len)) continue;
+        if (!maru_font_key_bytes_equal(maru_chrome_font_cache[i].fallback, maru_chrome_font_cache[i].fallback_len, fallback, fallback_len)) continue;
         *out_name = maru_chrome_font_cache[i].postscript_name;
         // hit에서는 요청 face를 실제로 얻었는지 다시 판정하지 않는다(그 판정이 CTFont 생성이라 캐시의
         // 목적을 무너뜨린다). 캐시에 있다는 것은 이미 한 번 해석에 성공했다는 뜻이므로 매치로 본다.
@@ -1702,8 +1988,28 @@ static CTFontRef maru_chrome_font_for(
     CTFontRef font = maru_chrome_font_create(size, weight, family, family_len, fallback, fallback_len, out_requested_matched);
     if (font == NULL) { *out_name = NULL; return NULL; }
     CFStringRef name = CTFontCopyPostScriptName(font);
-    char *family_key = (family != NULL && family_len > 0) ? strndup(family, family_len) : NULL;
-    char *fallback_key = (fallback != NULL && fallback_len > 0) ? strndup(fallback, fallback_len) : NULL;
+    // 터미널 face 캐시와 **같은** 키 복사 헬퍼를 쓴다. 옛 `strndup`은 첫 NUL에서 멈춰 len보다 짧은 버퍼를
+    // 주는데, 이 캐시의 비교는 저장된 len으로 `memcmp`하므로(위 `maru_font_key_bytes_equal` — 두 캐시가
+    // 공유한다) NUL이 박힌 config 값에서 버퍼 밖을 읽는다. 두 캐시가 비교를 공유하는 이상 복사도 공유해야
+    // 한다.
+    //
+    // 반환값(성공 여부)을 **버리면 안 된다**. 복사가 실패하면 키가 NULL이 되고 아래에서 길이도 0으로
+    // 떨어지는데, 그 항목은 "빈 family 요청"과 같은 키가 된다 — 빈 family는 이 캐시가 실제로 지원하는
+    // 입력이므로(`maru_chrome_font_create`가 시스템 UI face로 물러난다), 다음의 정당한 빈-family 조회가
+    // 그 항목에 hit해 **엉뚱한 face를 `requested_matched=1`로** 받는다. 터미널 캐시가 같은 자리에서
+    // NULL을 돌려주는 이유와 같다.
+    char *family_key = NULL;
+    char *fallback_key = NULL;
+    if (!maru_font_key_dup(family, family_len, &family_key) ||
+        !maru_font_key_dup(fallback, fallback_len, &fallback_key)) {
+        free(family_key);
+        free(fallback_key);
+        if (name != NULL) CFRelease(name);
+        CFRelease(font);
+        *out_name = NULL;
+        if (out_requested_matched != NULL) *out_requested_matched = 0;
+        return NULL;
+    }
     if (maru_chrome_font_cache_count < MARU_CHROME_FONT_CACHE_CAPACITY) {
         maru_chrome_font_cache_count += 1;
     } else {

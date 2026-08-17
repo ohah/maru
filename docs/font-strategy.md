@@ -247,6 +247,84 @@ attributes dictionary 에 담는다. 그 사본을 만드는 `maru_font_without_
 이 스모크는 `.github/workflows/ci.yml` 의 macOS job 에서 계약 테스트와 함께 돈다. `mise run check` 는
 ubuntu 라 `.m` 을 컴파일조차 하지 않으므로, `check` 에만 기대면 이 게이트는 CI 에서 한 번도 실행되지 않는다.
 
+## 터미널 face 캐시 (shape 호출마다 face를 다시 만들지 않는다)
+
+터미널 셰이핑이 쓰는 face 집합(regular/bold/italic/bold-italic)은 `maru_term_face_cache_for`
+(`coretext_smoke.m`)가 `(family, fallback, family-bold, family-italic, size, ligatures)` 키로 캐시한다.
+반환값은 **캐시 소유**라 `maru_macos_coretext_shape_draw_list`는 release하지 않는다. style 1~3은 그 조합을
+처음 만나는 셀에서 lazy로 채우고, 채운 결과는 항목이 축출될 때까지 남는다.
+
+**이 캐시는 성능 대책이다. 메모리 누수의 수정이 아니다.** 둘을 헷갈리면 안 된다.
+
+2026-08-18에 연속 실행 4시간 46분 만에 physical footprint가 140GB까지 부푼 사건이 있었다(MALLOC_SMALL
+137GB, 살아 있는 할당 5억 개, 그중 125GB가 스왑으로 나가 머신 전체가 스래싱했고 앱이 jetsam에 죽었다).
+그 **원인은 `maru_create_shape_attributes`가 `maru_font_without_contextual_alternates`의 +1 소유권을
+release하지 않은 것**이고, 수정은 그 함수의 `CFRelease` 한 줄이다. `font.ligatures = false`일 때만 타는
+경로라 합자를 켠(기본값) 설치는 이 누수를 겪지 않는다.
+
+격리 하네스로 두 가설을 갈랐다(20,000회 반복, phys_footprint 증가):
+
+| 경로 | 증가 | iter당 |
+|---|---|---|
+| cascade 폰트 + `shaping_font` 미해제 (수정 전 실제 경로) | +624.70 MB | **32,752 B** |
+| 같은 경로에 `CFRelease` 한 줄 추가 | +0.48 MB | 25 B |
+| 프레임마다 새 cascade 폰트, 참조는 정상 | +0.28 MB | **14.7 B** |
+
+셋째 줄이 중요하다 — **"프레임마다 새 CTFont를 만들면 CoreText 전역 캐시가 무한히 자란다"는 것은 사실이
+아니다.** 참조만 맞으면 인스턴스 churn 자체는 거의 공짜다. 32,752 B/iter × 초당 약 250회 shape 호출
+(패널·스타일 face 다수) ≈ 29GB/h로 관측치(140GB / 4.77h)와 맞는다.
+
+**그러면 이 캐시는 왜 있나 — CPU다.** 같은 사건에서 메인 스레드 샘플의 **46%**가
+`CTFontCopyDefaultCascadeListForLanguages` 아래 malloc 락 경합에 묶여 있었다. face 해석은 같은 설정이면
+결과가 같은데도 shape 호출(=dirty 프레임)마다 반복됐다. 아래 "Chrome 텍스트 face"가 같은 이유로 이미
+face를 캐시하고 "run마다 만들면 프레임 비용이 1.4ms → 6.3ms"라는 실측을 남겨 뒀다 — 터미널 경로에만 그
+규율이 빠져 있었다. 덤으로, 이 캐시는 face 생성 경로에 소유권 실수가 다시 생기더라도 그 대가를
+프레임당이 아니라 **항목당**으로 묶는다.
+
+face를 새로 만드는 자리는 둘이다(둘 다 `CTFontCreateCopyWithAttributes`). 그래서 `attrs`까지 함께
+캐시해야 두 자리가 같이 준다.
+
+1. `maru_apply_cascade_list` — `font.fallback` cascade를 박는다. **기본값이 `Jetendard`라 비어 있지
+   않으므로**(위 FontConfig) 설정을 건드리지 않은 설치에서도 항상 탄다.
+2. `maru_font_without_contextual_alternates`(`maru_create_shape_attributes` 안) — `font.ligatures = false`일 때
+   `calt`를 끈 사본을 뜬다.
+
+**화면에는 아무 증상이 없다** — 그래서 이 회귀는 눈이 아니라 게이트가 잡아야 한다.
+
+**축출**: 폰트 크기가 바뀌면(`Cmd`+`+`/`-`, 설정 변경) 새 항목이 된다. 상한만 두고 축출을 안 하면 캐시가
+곧 막히고, 그 뒤로는 프레임마다 face를 다시 만드는 옛 경로로 조용히 되돌아가 이 계약이 무효가 된다.
+어느 순간 살아 있는 조합은 보통 한 크기의 한 벌이라 chrome face 캐시와 같은 라운드로빈으로 충분하다.
+
+**스레드 전제**: shape/atlas/GPU는 메인(렌더) 스레드 tick에서만 돈다([io-render-threading.md](io-render-threading.md) §3
+— 코어 락 **밖**이지만 여전히 메인 스레드). 그래서 이 캐시에는 lock이 없다. chrome face 캐시
+(`maru_chrome_font_for`)도 같은 전제이며, 두 캐시는 키 비교 헬퍼(`maru_font_key_bytes_equal`)를 공유한다.
+
+**한계**: `requested_font_matched`(요청 family를 실제로 얻었는지)는 항목을 만들 때 한 번 판정하고 그대로
+든다. 앱이 도는 중에 폰트를 새로 설치해도 그 항목이 축출되기 전까지는 옛 판정이 남는다. 판정 자체가
+CTFont 생성이라 매 조회에서 다시 하면 캐시의 목적이 무너진다(chrome 캐시도 같은 이유로 hit에서 다시
+판정하지 않는다). config로 family를 바꾸면 키가 달라져 새 항목이 되므로 설정 경로는 영향받지 않는다.
+
+**검증**: 이 캐시의 게이트는 `face_cache_*`다. 위 "셰이핑 경로의 메모리 소유권"의 `shape_leak_*`와 **서로
+다른 것을 지키며 어느 쪽도 상대를 대신하지 못한다** — 실측으로 확인했다(누수를 되돌린 실행에서
+`face_cache_reused=true`였고, 캐시를 파손한 실행에서 `shape_leak_within_limit=true`였다).
+
+| 게이트 | 지키는 것 | 실패 시 |
+|---|---|---|
+| `face_cache_*` | 같은 설정의 두 번째 셰이핑이 face를 **하나도 새로 만들지 않는다**(CPU) | `MacosCoreTextFaceCacheNotReused` |
+| `shape_leak_*` | 셰이핑 반복이 순 footprint를 상한 넘게 늘리지 않는다(메모리) | `MacosCoreTextShapeLeaked` |
+
+- 캐시 게이트의 판정은 `face_builds_delta == 0`이 소유한다. hit/miss만 보면 조회가 hit여도 그 뒤 style face를
+  다시 만드는 회귀를 놓친다(실측: 캐시를 고의로 파손해도 hit/miss는 정상이었다). 첫 호출이 face를 최소 2개
+  (regular + style 최소 1) 만들었는지도 함께 요구한다 — 정확히 4를 요구하면 italic이 없는 폰트를 쓰는
+  러너에서 캐시가 멀쩡한데 거짓 실패한다 — 프로브가 face 경로를 못 태우면 `delta == 0`은 아무것도
+  증명하지 않는다. 프로브는 전용 폰트 크기를 써서 앞선 probe의 캐시 상태에 의존하지 않는다.
+- 누수 게이트의 반복 수·상한·실측 근거는 위 "셰이핑 경로의 메모리 소유권"이 단일 출처다. 이 캐시가 그
+  게이트를 바꾸는 부분은 하나뿐이다 — **프로브가 크기를 매번 바꿔 캐시 miss를 강제한다.** 그러지 않으면
+  첫 호출 한 번만 face 생성 자리를 타고 나머지는 캐시 hit라 누수가 드러나지 않는다.
+
+이 스모크는 `.github/workflows/ci.yml`의 macOS job에서 돈다. `mise run check`는 ubuntu라 `.m`을 컴파일조차
+하지 않으므로, `check`에만 기대면 두 게이트 모두 CI에서 한 번도 실행되지 않는다.
+
 ## Chrome 텍스트 face (measured chrome이 어떤 폰트로 그려지는가)
 
 Chrome에는 텍스트를 그리는 경로가 **둘**이고, 이 절은 그중 measured 경로의 face 단일 출처다.
@@ -280,7 +358,7 @@ measured 경로도 `font.family`(+`font.fallback` cascade)를 쓴다. 근거는 
 3. `font.fallback` CSV가 있으면 터미널과 **같은** `maru_apply_cascade_list`로 cascade를 박는다.
    같은 헬퍼를 쓰는 이유는 한글·이모지가 두 경로에서 다른 폰트로 떨어지면 face를 맞춘 의미가
    없어지기 때문이다. cascade는 face 캐시 **안에서** 한 번만 만든다(run마다 만들면 아래 성능
-   계약이 깨진다).
+   계약이 깨지고, 터미널 경로에서는 메모리까지 무너진다 — 위 "터미널 face 캐시").
 4. weight는 지금처럼 symbolic bold trait로 얻는다.
 
 **한계 (v1 범위 밖, 의도적)**

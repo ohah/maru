@@ -67,10 +67,25 @@ pub extern fn maru_macos_coretext_shape_draw_list(
 
 /// 이 프로세스의 physical footprint(바이트).
 ///
-/// 셰이핑 결과 계약(glyph id·fallback·raster byte)은 메모리를 새는지 알려 주지 않는다. 2026-08-18 사건의
-/// 원인은 face 를 정확히 한 번씩 만들면서도 그 한 번을 매번 놓치는 결함이었고(`maru_create_shape_attributes`
-/// 의 빠진 `CFRelease`), 그런 결함은 footprint 로만 드러난다.
+/// 아래 face 캐시 카운터는 "몇 번 만들었나"만 안다 — "만든 것을 놓아줬나"는 모른다. 2026-08-18 사건의
+/// 원인은 face를 정확히 한 번씩 만들면서도 그 한 번을 매번 놓치는 결함이었고
+/// (`maru_create_shape_attributes`의 빠진 `CFRelease`), 그런 결함은 footprint로만 드러난다.
 pub extern fn maru_macos_coretext_phys_footprint_bytes() u64;
+
+/// 터미널 face 캐시(regular/bold/italic/bold-italic)의 진단 카운터를 읽는다.
+///
+/// 같은 설정이면 face 해석 결과가 같은데도 shape 호출(=dirty 프레임)마다 반복하면 메인 스레드 시간이
+/// CoreText face 생성에 잠긴다(2026-08-18 실측: 메인 스레드 샘플의 46%). 그 회귀는 화면에 증상이 없어
+/// 눈으로 잡히지 않으므로 smoke가 수치로 본다.
+///
+/// `out_face_builds`가 핵심 신호다 — 조회가 hit여도 그 뒤에서 style face를 다시 만들면 hits/misses는
+/// 그대로고 회귀만 살아난다.
+pub extern fn maru_macos_coretext_face_cache_stats(
+    out_hits: *u64,
+    out_misses: *u64,
+    out_face_builds: *u64,
+    out_entries: *u32,
+) void;
 
 /// Rich Chrome 한 줄의 system UI CoreText shape 결과. 이 ABI는 CTLine/CTRun을 platform
 /// 경계 안에 가두고, Zig에는 glyph id·selected face·final advance만 전달한다.

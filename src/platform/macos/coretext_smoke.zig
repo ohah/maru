@@ -76,6 +76,7 @@ pub fn main(init: std.process.Init) !void {
         break :blk empty;
     };
 
+    const face_cache_probe = probeFaceCacheReuse(appearance);
     const shape_leak_probe = probeShapeLeak(appearance);
 
     const summary = try renderSummary(
@@ -85,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        face_cache_probe,
         shape_leak_probe,
         fixed_probe_error,
         draw_list_probe_error,
@@ -104,104 +106,127 @@ pub fn main(init: std.process.Init) !void {
     // 게이팅하지 않으면, DrawList 프레임이 조용히 unprepared여도 smoke가 통과한다.
     if (!draw_list_probe.renderer_frame_prepared or
         !draw_list_probe.renderer_glyph_raster_ready) return error.MacosCoreTextSmokeFailed;
-    // 누수 게이트. 셰이핑 결과 계약과 **다른 것**을 지킨다 — 저쪽은 "무엇을 그렸나", 이쪽은 "만든 것을
-    // 놓아줬나"다. 요약에만 남기고 게이팅하지 않으면 이 회귀는 화면에 아무 증상이 없어 그대로 통과하고,
-    // 대가는 몇 시간 뒤의 수십 GB 로만 나타난다.
-    //
-    // **못 쟀으면 실패다.** 못 재는 것은 통과가 아니라 고쳐야 할 상태다 — 여기서 통과시키면 게이트가
-    // 조용히 죽는다.
+    // face 재사용도 exit gate다. 요약에만 남기고 게이팅하지 않으면 "프레임마다 face를 다시 만든다"는
+    // 회귀가 화면상 아무 증상 없이 통과하고, 그 대가는 몇 시간 뒤의 수십 GB로만 나타난다.
+    // 셰이핑 실패를 캐시 회귀로 이름 붙이지 않는다 — 원인을 잘못 가리키는 실패가 가장 나쁘다.
+    if (!face_cache_probe.shaped) return error.MacosCoreTextFaceCacheProbeFailed;
+    if (!face_cache_probe.covered) return error.MacosCoreTextFaceCacheProbeNotCovering;
+    if (!face_cache_probe.reused) return error.MacosCoreTextFaceCacheNotReused;
+    // 누수 게이트. face 캐시 게이트와 **다른 것**을 지킨다 — 저쪽은 "몇 번 만들었나", 이쪽은 "만든 것을
+    // 놓아줬나"다. 2026-08-18 사건의 실제 원인은 후자였고, 그 분기(합자 OFF)는 다른 probe가 타지 않는다.
+    // status 도 함께 본다. 셰이핑이 실패하면 아무것도 할당되지 않아 grew 가 0 이 되고, 그러면 게이트가
+    // **아무것도 태우지 않은 채 green** 이 된다 — 이 PR 이 막으려는 "게이트가 조용히 죽는" 그 실패다.
+    // **못 쟀으면 실패다.** `measured`로 두 검사를 다 감싸 놓고 `measured` 자체를 안 보면, footprint 를
+    // 못 읽는 러너에서 스모크가 메모리에 대해 아무것도 확인하지 않은 채 green 이 된다 — 이 PR 이 막으려는
+    // "게이트가 조용히 죽는" 바로 그 실패다. 못 재는 것은 통과가 아니라 고쳐야 할 상태다.
     if (!shape_leak_probe.measured) return error.MacosCoreTextShapeLeakNotMeasured;
-    // **status 를 먼저 본다.** 셰이핑이 실패하면 할당이 거의 없어 델타가 0 근처로 떨어지는데, 그때 누수
-    // 이름으로 실패하면 원인이 셰이핑 실패라는 사실이 가려진다.
-    if (shape_leak_probe.status != 0) return error.MacosCoreTextShapeLeakProbeFailed;
-    if (!shape_leak_probe.within_limit) return error.MacosCoreTextShapeLeaked;
+    // **status 를 먼저 본다.** 셰이핑이 실패하면 할당이 거의 없어 델타가 0 근처로 떨어지는데, 그때
+    // 누수 이름으로 실패하면 원인이 셰이핑 실패라는 사실이 가려진다(옆 face 캐시 게이트도 `shaped` 를
+    // 먼저 본다).
+    if (shape_leak_probe.status != 0) {
+        return error.MacosCoreTextShapeLeakProbeFailed;
+    }
+    if (!shape_leak_probe.within_limit) {
+        return error.MacosCoreTextShapeLeaked;
+    }
 }
 
-/// 셰이핑 경로가 메모리를 새는지 **직접** 재는 게이트.
+/// face 캐시 재사용 계약을 **실제 CoreText**로 확인한다.
 ///
-/// **왜 셰이핑 결과 계약으로는 부족한가.** 그 계약은 "무엇을 그렸나"만 본다. 2026-08-18 사건의 원인
-/// (`maru_create_shape_attributes`가 `maru_font_without_contextual_alternates`의 +1을 놓친 것)은 그리는
-/// 결과가 완벽하면서 메모리만 새는 결함이었다.
+/// 같은 (family, fallback, bold/italic family, size, ligatures)로 두 번 셰이핑하면 두 번째는 **face를 하나도
+/// 새로 만들지 않아야** 한다. face 해석은 같은 설정이면 결과가 같은데, 그것을 shape 호출(=dirty 프레임)마다
+/// 반복하면 메인 스레드가 CoreText face 생성에 잠긴다(2026-08-18 실측: 메인 스레드 샘플의 46%가
+/// `CTFontCopyDefaultCascadeListForLanguages` 아래 malloc 락 경합). 화면에는 아무 증상이 없어서, 이 회귀는
+/// 눈이 아니라 여기서 잡혀야 한다.
 ///
-/// **왜 합자 두 설정을 번갈아 태우는가.** 이번 누수 지점은 `ligatures = false` 분기에만 있는데, config
-/// 기본값이 `true`라 다른 probe 들은 그 분기를 **한 번도 타지 않는다** — 한쪽만 재면 다른 쪽에 눈이 먼다.
-/// ON 분기도 dictionary 에 폰트를 담으므로 거기 소유권 실수가 새로 생기면 **기본 설정을 쓰는 모든**
-/// 사용자에게 프레임마다 샌다.
-const ShapeLeakProbe = struct {
-    iterations: u32 = 0,
-    /// **부호 있는** 순증가. 0으로 clamp 하지 않는다 — 정보를 지우면 상한 근처 결과를 진단할 수 없다.
-    /// 음수(순 감소)는 통과다(근거는 `within_limit`).
-    delta_bytes: i64 = 0,
-    limit_bytes: u64 = 0,
-    within_limit: bool = false,
-    /// footprint 를 못 읽었으면(task_info 실패) 판정하지 않는다 — 못 잰 것을 통과로 치지 않는다.
-    measured: bool = false,
-    /// 마지막 shape 호출의 native status. 0이 아니면 위 수치는 회귀가 아니라 셰이핑 실패의 결과다.
-    status: c_int = -1,
+/// 판정은 `face_builds_delta == 0`이 소유한다. hit/miss만 보면 부족하다 — 조회가 hit여도 그 뒤에서 face를
+/// 다시 만들면 hits/misses는 그대로고 회귀만 살아나기 때문이다.
+const FaceCacheProbe = struct {
+    /// 두 번째 호출이 face를 하나도 새로 만들지 않았는가(이 smoke의 exit gate).
+    reused: bool = false,
+    hits_delta: u64 = 0,
+    misses_delta: u64 = 0,
+    /// 첫 호출이 face를 새로 해석한 횟수. `min_first_call_face_builds` 이상이어야 한다 — 그보다 적으면
+    /// 프로브가 style face 경로를 못 태운 것이라 아래 delta 0이 아무것도 증명하지 못한다.
+    first_call_face_builds: u64 = 0,
+    min_first_call_face_builds: u64 = 0,
+    /// 첫 호출이 style face 경로를 실제로 태웠는가. **`reused`와 따로 둔다** — 못 태웠다면 캐시가 회귀한
+    /// 것이 아니라 이 프로브가 아무것도 증명하지 못하는 상태다. 둘을 한 불리언에 접으면 러너의 face
+    /// 구성 때문에 **캐시가 멀쩡한데** 캐시 회귀라는 이름으로 실패한다.
+    /// 기본값은 **false**다. 게이트를 소유한 필드는 fail-closed 여야 한다 — 언젠가 이른 return 이
+    /// `.{}` 를 돌려주면 기본값이 true 인 필드는 아무것도 확인하지 않은 채 게이트를 통과시킨다.
+    covered: bool = false,
+    /// 두 shape 호출이 모두 성공했는가. **`reused`와 따로 둔다** — 셰이핑이 실패하면 face를 만들 일이
+    /// 없어 지표가 전부 0이 되는데, 그것을 캐시 회귀로 보고하면 진단이 엉뚱한 층으로 간다. 옆의 누수
+    /// 프로브가 같은 조건에 전용 에러를 쓰는 것과 같은 이유다.
+    shaped: bool = false,
+    /// 두 shape 호출의 native status. 0이 아니면 위 수치는 회귀가 아니라 셰이핑 실패의 결과다.
+    first_status: c_int = 0,
+    second_status: c_int = 0,
+    /// 두 번째 호출이 face를 새로 해석한 횟수(regular 집합 + style face). 0이어야 한다.
+    face_builds_delta: u64 = 0,
+    entries: u32 = 0,
 };
 
-/// 반복 횟수와 상한. **둘 다 실측으로 정했다**(추정이 아니다).
+/// 이 프로브만 쓰는 폰트 크기 오프셋.
 ///
-/// 반복을 늘려도 정상 경로의 증가는 거의 늘지 않는다 — 대부분 1회성(CoreText 초기화)이고 회당 몫은 수십
-/// 바이트다. 반면 누수는 회당 약 36KB 로 반복에 **선형**이다. 그래서 반복을 키울수록 신호 대 잡음이
-/// 좋아진다. 4,000회는 1초 미만이라 CI 에서 사실상 공짜다.
+/// face 캐시 키에는 size가 들어간다. 프로브가 앱과 **같은** 크기를 쓰면 앞선 probe들이 이미 만들어 둔
+/// 항목을 물려받아 프로브의 첫 호출조차 hit가 되고, 그러면 "첫 호출이 face를 만들었는가"라는 판정 근거가
+/// 사라진다(실측: 그 상태에서 `first_call_face_builds=0`). 지금은 앞선 probe들이 bold/italic을 쓰지 않아
+/// 우연히 성립하지만, draw list probe에 bold 글자가 하나 추가되는 순간 게이트가 **코드는 멀쩡한데** 거짓
+/// 실패한다. 전용 크기를 써서 그 순서 의존성을 없앤다.
+const face_cache_probe_size_offset: f64 = 0.5;
+
+/// 첫 프로브 호출이 만들어야 하는 **최소** face 수.
 ///
-/// | | 값 |
-/// |---|---|
-/// | 정상 | 272~384 KB (16회 측정, 중앙값 304 KB) |
-/// | 누수 되돌린 red 실측 | 72,351,792 B |
-/// | 상한 | 4 MB — 정상 최대치의 **10.7배**, 누수 신호의 **1/17** |
+/// 지키려는 성질은 "프로브가 style face 경로를 실제로 태웠다"이다. regular 1 + style 최소 1 = 2 면 그것이
+/// 증명된다 — 프로브 셀에서 style 셋을 지우면 1 이 되어 걸린다(그 구멍이 이 조건을 넣은 이유였다).
 ///
-/// **이 표를 고칠 때 docs/font-strategy.md 의 같은 수치도 함께 고친다** — 둘이 어긋나면 나중에 상한을
-/// 조정하는 사람이 틀린 여유를 근거로 삼는다.
-const shape_leak_probe_iterations: u32 = 4000;
-const shape_leak_probe_limit_bytes: u64 = 4 * 1024 * 1024;
+/// **정확히 4 를 요구하지 않는다.** `maru_create_styled_font` 는 그 조합의 face 가 없으면 NULL 을 돌려주고
+/// 그때는 build 로 세지 않는다. 즉 italic 이 없는 등폭 폰트(드물지 않다)를 쓰는 러너에서 3 이나 2 가 나오고,
+/// 정확 비교는 **캐시가 멀쩡한데** `MacosCoreTextFaceCacheNotReused` 로 거짓 실패한다 — 이름이 원인을
+/// 잘못 가리키는 실패가 가장 나쁘다.
+///
+/// **남는 구멍**: 프로브의 style 셀 셋 중 둘만 지워도 2 라 통과한다. 즉 이 게이트는 "style 경로를 아예
+/// 잃었다"만 잡고 "일부만 잃었다"는 못 잡는다. 실제 값(`face_cache_first_call_face_builds`)이 요약에
+/// 남으므로 커버리지 변화는 그 수치로 추적한다. 러너별 face 구성이 달라 자동 판정할 수 없는 부분이다.
+const face_cache_probe_min_builds: u64 = 2;
 
-fn probeShapeLeak(appearance: config.ResolvedAppearance) ShapeLeakProbe {
-    // 워밍업: 첫 진입의 1회성 비용(폰트 로드·CoreText 내부 초기화)을 기준선에서 뺀다.
-    var warm: u32 = 0;
-    while (warm < 20) : (warm += 1) {
-        _ = shapeOnceForProbe(appearance, warm % 2 == 1);
-    }
-
-    const before = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
-    var status: c_int = -1;
-    var i: u32 = 0;
-    while (i < shape_leak_probe_iterations) : (i += 1) {
-        status = shapeOnceForProbe(appearance, i % 2 == 1);
-    }
-    const after = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
-
-    const measured = before != 0 and after != 0;
-    const delta: i64 = if (measured)
-        @as(i64, @intCast(after)) - @as(i64, @intCast(before))
-    else
-        0;
-    return .{
-        .iterations = shape_leak_probe_iterations,
-        .delta_bytes = delta,
-        .limit_bytes = shape_leak_probe_limit_bytes,
-        // 음수(순 감소)는 **통과**다. 이 게이트의 계약은 "순 footprint 가 상한을 넘게 늘지 않는다"이고
-        // 감소는 그 계약을 문자 그대로 만족한다 — 계약을 지킨 빌드를 빨갛게 만들면 안 된다.
-        //
-        // **남는 사각**: `phys_footprint` 는 순값이라, 상한 근처의 작은 누수가 같은 창 안의 OS 회수에
-        // 정확히 상쇄되면 통과한다. 이 게이트는 할당 원장이 아니라 **순증가 임계값**이다. 실제로 막으려는
-        // 크기(회당 수십 KB → 창당 수십 MB)는 회수로 가려질 수 없다(red 실측 72.4MB vs 상한 4MB).
-        .within_limit = measured and delta <= @as(i64, @intCast(shape_leak_probe_limit_bytes)),
-        .measured = measured,
-        .status = status,
-    };
+/// draw list shape 경로를 한 번 태운다. 셰이핑 결과의 정확성은 위 draw list probe가 이미 보므로, 여기서는
+/// face를 다시 만드는지만 보면 된다.
+///
+/// **네 style 조합을 모두 넣는다**(regular / bold / italic / bold-italic). regular 한 글자만 넣으면
+/// `style_index`가 늘 0이라 `maru_term_face_cache_ensure_style`가 아예 호출되지 않고, 그러면 "bold face를
+/// 프레임마다 다시 만든다"는 회귀가 이 게이트를 그대로 통과한다(실측 확인 — 캐시를 고의로 파손해도
+/// `face_builds_delta=0`이었다). lazy 생성은 **첫 호출에서** 끝나야 하고 두 번째 호출은 넷 다 재사용해야 한다.
+fn shapeOnceForFaceCache(appearance: config.ResolvedAppearance) c_int {
+    return shapeOnceForProbe(
+        appearance,
+        @as(f64, @floatCast(appearance.font.size)) + face_cache_probe_size_offset,
+        appearance.font.ligatures,
+    );
 }
 
-/// 프로브용 shape 호출 1회. 반환값은 native status(0=성공)로, 호출자가 "셰이핑이 실패해서 지표가 0"인
-/// 경우와 진짜 회귀를 가를 수 있게 한다.
-///
-/// 네 style 조합을 모두 넣는다 — bold/italic face 도 각자 attributes 를 만들므로 같은 누수 자리를 탄다.
-fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_int {
+/// 프로브용 shape 호출 1회. `size`와 `ligatures`를 **명시로 받는다** — 누수 프로브가 캐시 miss를 강제하고
+/// (매번 다른 size) 합자 OFF 분기를 태워야 하기 때문이다. 반환값은 native status(0=성공)로, 호출자가
+/// "셰이핑이 실패해서 지표가 0"인 경우와 진짜 회귀를 가를 수 있게 한다.
+fn shapeOnceForProbe(appearance: config.ResolvedAppearance, size: f64, ligatures: bool) c_int {
     var cells = [_]coretext_shaper.NativeDrawCell{
         .{ .row = 0, .col = 0, .width = 1, .codepoint = 'M' },
-        .{ .row = 0, .col = 1, .width = 1, .style_flags = coretext_shaper.draw_cell_bold_bit, .codepoint = 'B' },
-        .{ .row = 0, .col = 2, .width = 1, .style_flags = coretext_shaper.draw_cell_italic_bit, .codepoint = 'I' },
+        .{
+            .row = 0,
+            .col = 1,
+            .width = 1,
+            .style_flags = coretext_shaper.draw_cell_bold_bit,
+            .codepoint = 'B',
+        },
+        .{
+            .row = 0,
+            .col = 2,
+            .width = 1,
+            .style_flags = coretext_shaper.draw_cell_italic_bit,
+            .codepoint = 'I',
+        },
         .{
             .row = 0,
             .col = 3,
@@ -211,8 +236,10 @@ fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_i
         },
     };
     const grapheme_pool: []const u32 = &.{};
-    // 셀 수보다 넉넉히 잡는다. record 가 넘치면 native 가 status 7 로 셀 루프를 중단해 뒤쪽 style 조합이
-    // 아예 셰이핑되지 않는다.
+    // 셀 수보다 넉넉히 잡는다. 지금 셀 구성(4개)에서는 용량 4로도 넘치지 않지만(실측
+    // `glyph_record_overflow=0`), 여유가 정확히 0이라 셀을 하나 늘리거나 한 셀이 글리프 둘을 내는
+    // 순간 넘친다. 넘치면 native가 status 7로 **셀 루프를 중단**해 뒤쪽 style 조합이 첫 호출에서
+    // 생성되지 않고 두 번째 호출로 밀리고, 그러면 게이트가 코드는 멀쩡한데 거짓 실패한다.
     var records = [_]coretext_shaper.NativeDrawGlyphRecord{
         std.mem.zeroes(coretext_shaper.NativeDrawGlyphRecord),
     } ** 32;
@@ -221,7 +248,7 @@ fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_i
     maru_macos_coretext_shape_draw_list(
         appearance.font.family.ptr,
         appearance.font.family.len,
-        @floatCast(appearance.font.size),
+        size,
         appearance.font.fallback.ptr,
         appearance.font.fallback.len,
         appearance.font.family_bold.ptr,
@@ -238,6 +265,149 @@ fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_i
         records.len,
     );
     return native.status;
+}
+
+/// 셰이핑 경로가 메모리를 새는지 **직접** 재는 게이트.
+///
+/// **왜 face 캐시 카운터로는 부족한가.** 그 카운터는 "몇 번 만들었나"만 안다. 2026-08-18 사건의 원인
+/// (`maru_create_shape_attributes`가 `maru_font_without_contextual_alternates`의 +1을 놓친 것)은 face를
+/// 정확히 한 번씩 만들면서 그 한 번을 매번 흘리는 결함이었다 — 카운터로는 완벽해 보인다.
+///
+/// **왜 합자를 끄는가.** 그 누수 지점은 `maru_create_shape_attributes`의 `ligatures_enabled == false` 분기에만
+/// 있다. config 기본값이 `ligatures = true`라 다른 probe들은 그 분기를 **한 번도 타지 않는다** — 이 프로브가
+/// 없으면 누수 수정을 되돌려도 모든 게이트가 green이다.
+///
+/// **왜 매번 다른 size인가.** face 캐시가 miss일 때만 attributes를 만든다. 같은 키로 반복하면 첫 호출 한
+/// 번만 타고 누수가 드러나지 않는다. size를 매번 바꿔 miss를 강제한다.
+const ShapeLeakProbe = struct {
+    iterations: u32 = 0,
+    /// **부호 있는** 순증가. 0으로 clamp 하지 않는다 — 정보를 지우면 상한 근처 결과를 진단할 수 없다.
+    /// 음수(순 감소)는 통과다(판정 근거는 `within_limit` 주석).
+    delta_bytes: i64 = 0,
+    limit_bytes: u64 = 0,
+    within_limit: bool = false,
+    /// footprint 를 못 읽었으면(task_info 실패) 판정하지 않는다 — 못 잰 것을 통과로도 실패로도 치지 않는다.
+    measured: bool = false,
+    /// 마지막 shape 호출의 native status. 0이 아니면 아래 수치는 회귀가 아니라 셰이핑 실패의 결과다.
+    status: c_int = -1,
+};
+
+/// 반복 횟수와 상한. **둘 다 실측으로 정했다**(추정이 아니다).
+///
+/// 반복을 늘려도 정상 경로의 증가는 거의 늘지 않는다 — 대부분 1회성(CoreText 초기화·캐시 채움)이고
+/// 회당 몫은 수십 바이트다. 반면 누수는 회당 약 36KB로 반복에 **선형**이다. 그래서 반복을 키울수록
+/// 신호 대 잡음이 좋아진다. 4,000회는 0.73초라 CI에서 사실상 공짜다.
+///
+/// 4,000회 기준(합자 두 설정을 번갈아 태운 현재 구성, 16회 측정):
+///
+/// | | 값 |
+/// |---|---|
+/// | 정상 | 272~384 KB (중앙값 304 KB) |
+/// | 누수 되돌린 red 실측 | 72,351,792 B |
+/// | 상한 | 4 MB — 정상 최대치의 **10.7배**, 누수 신호의 **1/17** |
+///
+/// 회당 1KB 이상 새는 결함이면 잡힌다. **이 표를 고칠 때 docs/font-strategy.md "터미널 face 캐시"의 같은
+/// 수치도 함께 고친다** — 둘이 어긋나면 나중에 상한을 조정하는 사람이 틀린 여유를 근거로 삼는다.
+const shape_leak_probe_iterations: u32 = 4000;
+const shape_leak_probe_limit_bytes: u64 = 4 * 1024 * 1024;
+
+fn probeShapeLeak(appearance: config.ResolvedAppearance) ShapeLeakProbe {
+    const base = @as(f64, @floatCast(appearance.font.size)) + 100.0;
+    // 워밍업: 첫 진입의 1회성 비용(폰트 로드·CoreText 내부 초기화)을 기준선에서 뺀다.
+    var warm: u32 = 0;
+    while (warm < 20) : (warm += 1) {
+        _ = shapeOnceForProbe(appearance, base + @as(f64, @floatFromInt(warm)) * 0.01, warm % 2 == 1);
+    }
+
+    const before = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
+    const status = runShapeLeakWindow(appearance, base);
+    const after = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
+
+    const measured = before != 0 and after != 0;
+    // **부호 있는 순증가.** 0으로 clamp 하지 않는다 — 정보를 지우면 near-limit 결과를 진단할 수 없다.
+    const delta: i64 = if (measured)
+        @as(i64, @intCast(after)) - @as(i64, @intCast(before))
+    else
+        0;
+    return .{
+        .iterations = shape_leak_probe_iterations,
+        .delta_bytes = delta,
+        .limit_bytes = shape_leak_probe_limit_bytes,
+        // 음수(순 감소)는 **통과**다. 이 게이트의 계약은 "순 footprint 가 상한을 넘게 늘지 않는다"이고
+        // 감소는 그 계약을 문자 그대로 만족한다 — 계약을 지킨 빌드를 빨갛게 만들면 안 된다.
+        //
+        // **남는 사각**: `phys_febug`가 아니라 순값이라, 상한 근처의 작은 누수가 같은 창 안의 OS 회수에
+        // 정확히 상쇄되면 통과한다. 이 게이트는 할당 원장이 아니라 **순증가 임계값**이다. 실제로 막으려는
+        // 크기(회당 수십 KB → 창당 수십 MB)는 회수로 가려질 수 없다(red 실측 72.4MB vs 상한 4MB).
+        .within_limit = measured and delta <= @as(i64, @intCast(shape_leak_probe_limit_bytes)),
+        .measured = measured,
+        .status = status,
+    };
+}
+
+/// 측정 창 하나. 마지막 shape 호출의 native status 를 돌려준다.
+fn runShapeLeakWindow(appearance: config.ResolvedAppearance, base: f64) c_int {
+    var status: c_int = -1;
+    var i: u32 = 0;
+    while (i < shape_leak_probe_iterations) : (i += 1) {
+        // 20.00 부터 이어 붙여 워밍업 구간과 겹치지 않게 한다.
+        //
+        // **합자 두 설정을 번갈아 태운다.** 누수를 낸 자리(`calt` 사본)는 OFF 분기에만 있지만, ON 분기도
+        // dictionary 를 만들어 폰트를 담는다 — 거기 소유권 실수가 새로 생기면 **기본 설정을 쓰는 모든**
+        // 사용자에게 프레임마다 샌다. OFF 만 재면 그 회귀에 눈이 먼다(라운드 3에서 잡힌 "게이트가 정작
+        // 그 분기를 안 탄다"의 거울상). 캐시 키에 ligatures 가 들어가므로 두 설정 모두 miss 가 강제된다.
+        const ligatures_on = i % 2 == 1;
+        status = shapeOnceForProbe(appearance, base + 20.0 + @as(f64, @floatFromInt(i)) * 0.01, ligatures_on);
+    }
+    return status;
+}
+
+fn probeFaceCacheReuse(appearance: config.ResolvedAppearance) FaceCacheProbe {
+    // 앞선 probe들이 이미 이 설정의 항목을 만들어 뒀을 수도, 아닐 수도 있다. 계약은 "**두 번째** 호출이
+    // hit"이므로 기준선은 첫 호출 뒤에 잡는다.
+    // 첫 호출 **전** 상태. 이 기준선이 있어야 "첫 호출이 face를 몇 개 만들었나"를 알 수 있고, 그래야
+    // 두 번째 호출의 delta 0이 "재사용했다"인지 "애초에 아무것도 안 만들었다"인지 갈린다. 후자면 게이트에
+    // 이빨이 없다.
+    var hits_start: u64 = 0;
+    var misses_start: u64 = 0;
+    var builds_start: u64 = 0;
+    var entries_start: u32 = 0;
+    coretext_bridge.maru_macos_coretext_face_cache_stats(&hits_start, &misses_start, &builds_start, &entries_start);
+
+    const first_status = shapeOnceForFaceCache(appearance);
+    var hits_before: u64 = 0;
+    var misses_before: u64 = 0;
+    var builds_before: u64 = 0;
+    var entries_before: u32 = 0;
+    coretext_bridge.maru_macos_coretext_face_cache_stats(&hits_before, &misses_before, &builds_before, &entries_before);
+
+    const second_status = shapeOnceForFaceCache(appearance);
+    var hits_after: u64 = 0;
+    var misses_after: u64 = 0;
+    var builds_after: u64 = 0;
+    var entries_after: u32 = 0;
+    coretext_bridge.maru_macos_coretext_face_cache_stats(&hits_after, &misses_after, &builds_after, &entries_after);
+
+    return .{
+        // 판정의 소유자는 face_builds다. hit/miss는 진단용 보조 신호로만 남긴다.
+        //
+        // `first_call_face_builds >= min`도 함께 요구한다 — 첫 호출이 style face 경로를 못 태웠다면
+        // delta 0은 재사용의 증거가 아니라 게이트가 죽었다는 뜻이다. 왜 정확 비교가 아닌지와 그때 남는
+        // 구멍은 `face_cache_probe_min_builds` 주석이 단일 출처다.
+        //
+        // 셰이핑 성공 여부(status)는 **여기 섞지 않고** `shaped`로 따로 낸다 — 아래 주석 참고.
+        .reused = builds_after == builds_before and hits_after > hits_before,
+        .covered = builds_before - builds_start >= face_cache_probe_min_builds,
+        .shaped = first_status == 0 and second_status == 0,
+        .first_call_face_builds = builds_before - builds_start,
+        .min_first_call_face_builds = face_cache_probe_min_builds,
+        .first_status = first_status,
+        .second_status = second_status,
+        .hits_delta = hits_after - hits_before,
+        .misses_delta = misses_after - misses_before,
+        .face_builds_delta = builds_after - builds_before,
+        .entries = entries_after,
+    };
 }
 
 const SmokeStatus = struct {
@@ -286,6 +456,7 @@ fn renderSummary(
     native: NativeCoreTextSmokeResult,
     glyph_frame_probe: GlyphFrameProbe,
     draw_list_probe: GlyphFrameProbe,
+    face_cache_probe: FaceCacheProbe,
     shape_leak_probe: ShapeLeakProbe,
     fixed_probe_error: ?anyerror,
     draw_list_probe_error: ?anyerror,
@@ -370,7 +541,17 @@ fn renderSummary(
     try writer.print("drawlist_glyph_raster_error_skip_count={d}\n", .{draw_list_probe.renderer_glyph_raster_error_skip_count});
     try writer.print("drawlist_renderer_shaper={s}\n", .{draw_list_probe.renderer_shaper});
     try writer.print("drawlist_renderer_rasterizer={s}\n", .{draw_list_probe.renderer_rasterizer});
-    // 셰이핑 경로가 메모리를 새는지 직접 잰 결과. 셰이핑 결과 계약은 이걸 알려 주지 않는다.
+    // 같은 설정의 반복 shape가 face를 하나도 다시 만들지 않는지. 판정은 face_builds_delta가 소유한다.
+    try writer.print("face_cache_reused={}\n", .{face_cache_probe.reused});
+    try writer.print("face_cache_first_call_face_builds={d}\n", .{face_cache_probe.first_call_face_builds});
+    try writer.print("face_cache_face_builds_delta={d}\n", .{face_cache_probe.face_builds_delta});
+    try writer.print("face_cache_hits_delta={d}\n", .{face_cache_probe.hits_delta});
+    try writer.print("face_cache_misses_delta={d}\n", .{face_cache_probe.misses_delta});
+    try writer.print("face_cache_min_first_call_face_builds={d}\n", .{face_cache_probe.min_first_call_face_builds});
+    try writer.print("face_cache_first_status={d}\n", .{face_cache_probe.first_status});
+    try writer.print("face_cache_second_status={d}\n", .{face_cache_probe.second_status});
+    try writer.print("face_cache_entries={d}\n", .{face_cache_probe.entries});
+    // 셰이핑 경로가 메모리를 새는지 직접 잰다. face 캐시 카운터는 "만든 것을 놓아줬나"를 모른다.
     try writer.print("shape_leak_measured={}\n", .{shape_leak_probe.measured});
     try writer.print("shape_leak_within_limit={}\n", .{shape_leak_probe.within_limit});
     try writer.print("shape_leak_iterations={d}\n", .{shape_leak_probe.iterations});
@@ -769,6 +950,17 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        .{
+            .reused = true,
+            .covered = true,
+            .shaped = true,
+            .first_call_face_builds = 4,
+            .min_first_call_face_builds = 2,
+            .hits_delta = 1,
+            .misses_delta = 0,
+            .face_builds_delta = 0,
+            .entries = 2,
+        },
         .{ .measured = true, .within_limit = true, .iterations = 4000, .delta_bytes = 1024, .limit_bytes = 4 * 1024 * 1024, .status = 0 },
         null,
         null,
@@ -776,9 +968,16 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
-    // 누수 게이트 신호는 summary 계약의 일부다 — 필드가 사라지면 게이트도 조용히 사라진다.
+    // face 재사용 신호는 summary 계약의 일부다 — 필드가 사라지면 회귀 게이트도 조용히 사라진다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "face_cache_reused=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "face_cache_face_builds_delta=0\n") != null);
+    // 첫 호출이 face를 실제로 만들었다는 증거도 계약이다 — 없으면 위 delta 0이 게이트가 죽은 것과 구분되지 않는다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "face_cache_first_call_face_builds=4\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "face_cache_min_first_call_face_builds=2\n") != null);
+    // 누수 게이트 신호도 summary 계약이다 — 필드가 사라지면 게이트가 조용히 사라진다.
     try std.testing.expect(std.mem.indexOf(u8, summary, "shape_leak_within_limit=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "shape_leak_iterations=4000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "face_cache_misses_delta=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "fixed_probe_error=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_probe_error=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "resolved_appearance=true\n") != null);

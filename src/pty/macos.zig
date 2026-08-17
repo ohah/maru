@@ -449,9 +449,7 @@ pub const PtySession = struct {
         return if (fd >= 0) fd else null;
     }
 
-    /// 중립 별칭으로 낸다 — POSIX에서 `types.ChildPid`는 `std.c.pid_t`와 **같은 타입**이라 소비자는 무변이다.
-    /// 이름을 맞춰 두는 이유는 백엔드 셋이 같은 계약을 말하게 하기 위해서다(계약 §4).
-    pub fn childPid(self: *const PtySession) types.ChildPid {
+    pub fn childPid(self: *const PtySession) std.c.pid_t {
         return self.child_pid;
     }
 

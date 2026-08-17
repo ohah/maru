@@ -151,6 +151,20 @@ pub const CommitItem = struct {
     ref_is_head: bool = false,
     /// 지금 고른 커밋인가(강조).
     selected: bool = false,
+    /// 펼쳐져 있나(P4b). 펼치면 그 커밋이 바꾼 파일 줄이 **바로 아래**에 온다.
+    expanded: bool = false,
+};
+
+/// 펼친 커밋 아래의 파일 한 줄(P4b). 변경 사항 탭의 `FileItem`과 **다른 항목**이다 — 그쪽은 작업트리
+/// 상태이고 이쪽은 그 커밋이 바꾼 것이라, 클릭이 여는 비교 기준도 동작(스테이지)도 다르다.
+pub const CommitFileItem = struct {
+    /// 그 커밋 안에서 몇 번째 파일인가. 클릭 intent가 이것을 싣고 host가 같은 목록에서 다시 찾는다.
+    index: u32 = 0,
+    name: []const u8,
+    dir: []const u8 = "",
+    status: StatusKind,
+    /// 화면에 그대로 그릴 한 글자(`M`·`A`·`D`·`R`).
+    letter: u8,
 };
 
 pub const Item = union(enum) {
@@ -166,6 +180,8 @@ pub const Item = union(enum) {
     /// 목록이 불완전하다는 진술(누를 수 없다).
     /// 히스토리 탭의 커밋 줄(P4).
     commit: CommitItem,
+    /// 펼친 커밋 아래의 파일 줄(P4b).
+    commit_file: CommitFileItem,
     /// 히스토리 목록 끝의 **더 보기**(P4). 상한만큼 읽었을 때만 선다 — 끝까지 읽었으면 없다(있으면
     /// 눌러도 아무 일이 없어 "고장"으로 읽힌다).
     load_more,
@@ -387,6 +403,8 @@ pub const DockMetrics = struct {
             // **두 줄이다**(§3.5.3): 제목 / 작성자·시각·해시. 한 줄에 몰면 좁은 도크에서 제목이 거의
             // 남지 않는다 — 목록에서 가장 중요한 것이 "무엇을 한 커밋인가"다.
             .commit => self.commit_row_two_line_h,
+            // 커밋 안의 파일 줄은 **파일 행과 같은 높이**다 — 두 탭이 같은 격자를 쓴다.
+            .commit_file => self.row_h,
             .load_more => self.row_h,
             .commit_box => |box| self.commitBoxHeight(box.rows),
             // 버튼 아래 여백까지 이 행이 갖는다 — 다음 줄(요약·그룹 헤더)과 붙지 않게.

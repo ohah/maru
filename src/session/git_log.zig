@@ -19,17 +19,21 @@ pub const record_sep: u8 = 0x1E;
 /// `git log --format=<이것>`. 순서가 곧 아래 파싱 순서다.
 ///
 /// - `%H` 전체 OID(자르는 것은 화면의 몫이다 — 짧은 해시는 저장소마다 길이가 다르다)
+/// - `%P` 부모 OID들(공백 구분). **비교 기준이 여기서 나온다**(P4b): 부모가 없으면 루트 커밋이라
+///   `커밋^`이 존재하지 않고, 둘 이상이면 병합 커밋이라 첫 부모 기준으로 본다.
 /// - `%an` 작성자 이름(committer가 아니라 author — 사용자가 "누가 썼나"로 읽는다)
 /// - `%at` author 시각(UNIX 초). **상대 시각은 우리가 계산한다** — `%ar`는 git의 로케일·문구를 타고,
 ///   같은 화면에서 다른 상대시각 표기(파일 목록 등)와 규칙이 갈린다.
 /// - `%D` ref 이름들(`HEAD -> main, origin/main, tag: v1`). `%d`와 달리 괄호·색이 없다.
 /// - `%s` 제목 한 줄.
-pub const format_spec = "%H\x1f%an\x1f%at\x1f%D\x1f%s\x1e";
+pub const format_spec = "%H\x1f%P\x1f%an\x1f%at\x1f%D\x1f%s\x1e";
 
 /// 커밋 한 줄. **문자열은 입력 버퍼를 빌린다**(할당 없음) — 호출자가 그 바이트를 들고 있는 동안 유효하다.
 pub const Commit = struct {
     /// 전체 OID. 화면은 앞 7자를 쓴다(`shortOid`).
     oid: []const u8,
+    /// `%P` 원문(공백으로 구분된 부모 OID들). 빈 문자열이면 **루트 커밋**이다.
+    parents: []const u8 = "",
     author: []const u8,
     /// author 시각(UNIX 초). 파싱 실패면 0이고, 그때 화면은 상대시각 자리를 비운다 —
     /// **0을 "1970년"으로 그리지 않는다**(모르는 것을 아는 척하지 않는다).
@@ -42,6 +46,27 @@ pub const Commit = struct {
     /// 같은 목록 안에서도 행마다 길이가 달라질 수 있고, 열 맞춤이 흔들린다.
     pub fn shortOid(self: Commit) []const u8 {
         return if (self.oid.len >= short_oid_len) self.oid[0..short_oid_len] else self.oid;
+    }
+
+    /// 비교할 **왼쪽이 있나**. 루트 커밋은 부모가 없어 `커밋^`이 존재하지 않는다 — 그때 diff는
+    /// "새로 생긴 파일"과 같은 모양이어야 한다(왼쪽 없음).
+    pub fn hasParent(self: Commit) bool {
+        return std.mem.trim(u8, self.parents, " ").len > 0;
+    }
+
+    /// 부모가 둘 이상인 병합 커밋인가. 파일 목록을 **첫 부모 기준**으로 읽는 근거다 — combined diff는
+    /// 파일마다 상태가 여럿이라 한 줄에 한 상태를 그리는 이 목록과 모양이 맞지 않는다.
+    pub fn isMerge(self: Commit) bool {
+        var it = std.mem.tokenizeScalar(u8, self.parents, ' ');
+        var n: usize = 0;
+        while (it.next()) |_| n += 1;
+        return n > 1;
+    }
+
+    /// 첫 부모 OID(없으면 빈 문자열).
+    pub fn firstParent(self: Commit) []const u8 {
+        var it = std.mem.tokenizeScalar(u8, self.parents, ' ');
+        return it.next() orelse "";
     }
 };
 
@@ -75,6 +100,7 @@ pub fn iterate(text: []const u8) Iterator {
 fn parse(record: []const u8) ?Commit {
     var it = std.mem.splitScalar(u8, record, field_sep);
     const oid = it.next() orelse return null;
+    const parents = it.next() orelse return null;
     const author = it.next() orelse return null;
     const at = it.next() orelse return null;
     const decoration = it.next() orelse return null;
@@ -83,6 +109,7 @@ fn parse(record: []const u8) ?Commit {
     if (oid.len == 0) return null; // OID 없는 줄은 커밋이 아니다
     return .{
         .oid = oid,
+        .parents = parents,
         .author = author,
         .timestamp = std.fmt.parseInt(i64, at, 10) catch 0,
         .refs = decoration,
@@ -142,8 +169,8 @@ pub fn refs(decoration: []const u8) RefIterator {
 const testing = std.testing;
 
 test "형식 그대로의 출력을 커밋 행으로 쪼갠다(실측 형식)" {
-    const text = "abc123def456\x1f홍길동\x1f1755400000\x1fHEAD -> main, origin/main\x1f첫 커밋\x1e" ++
-        "0102030405\x1fJane\x1f1755300000\x1f\x1ffix: 두 번째\x1e";
+    const text = "abc123def456\x1fparent1\x1f홍길동\x1f1755400000\x1fHEAD -> main, origin/main\x1f첫 커밋\x1e" ++
+        "0102030405\x1fp1 p2\x1fJane\x1f1755300000\x1f\x1ffix: 두 번째\x1e";
     var it = iterate(text);
     const first = it.next() orelse return error.MissingCommit;
     try testing.expectEqualStrings("abc123def456", first.oid);
@@ -161,7 +188,7 @@ test "형식 그대로의 출력을 커밋 행으로 쪼갠다(실측 형식)" {
 
 test "제목에 구분자가 들어와도 앞 필드는 안 갈린다" {
     // 제목은 **남은 전부**라 그 안에 무엇이 있든 앞 네 필드의 경계는 이미 정해졌다.
-    const text = "aaa\x1fBob\x1f1\x1f\x1f제목에 \x1f 가 있다\x1e";
+    const text = "aaa\x1f\x1fBob\x1f1\x1f\x1f제목에 \x1f 가 있다\x1e";
     var it = iterate(text);
     const commit = it.next() orelse return error.MissingCommit;
     try testing.expectEqualStrings("Bob", commit.author);
@@ -170,7 +197,7 @@ test "제목에 구분자가 들어와도 앞 필드는 안 갈린다" {
 
 test "필드가 모자란 줄은 **그 줄만** 버린다" {
     // 통째로 멈추면 뒤에 있는 멀쩡한 커밋까지 사라진다 — 목록이 조용히 짧아지는 쪽이 더 나쁘다.
-    const text = "깨진 줄\x1e" ++ "bbb\x1fAmy\x1f7\x1f\x1f정상\x1e";
+    const text = "깨진 줄\x1e" ++ "bbb\x1fp\x1fAmy\x1f7\x1f\x1f정상\x1e";
     var it = iterate(text);
     const commit = it.next() orelse return error.MissingCommit;
     try testing.expectEqualStrings("bbb", commit.oid);
@@ -179,7 +206,7 @@ test "필드가 모자란 줄은 **그 줄만** 버린다" {
 }
 
 test "시각을 못 읽으면 0이다(1970년으로 그리지 않게 호출자가 구별한다)" {
-    const text = "ccc\x1fAmy\x1f(없음)\x1f\x1f제목\x1e";
+    const text = "ccc\x1fp\x1fAmy\x1f(없음)\x1f\x1f제목\x1e";
     var it = iterate(text);
     const commit = it.next() orelse return error.MissingCommit;
     try testing.expectEqual(@as(i64, 0), commit.timestamp);
@@ -221,4 +248,27 @@ test "unborn 저장소는 빈 출력이다(오류가 아니다)" {
     // 대해 조용히 빈 목록을 준다.
     var it = iterate("");
     try testing.expect(it.next() == null);
+}
+
+test "부모로 비교 기준을 가른다(루트·일반·병합)" {
+    // 루트 커밋은 `커밋^`이 없어 왼쪽이 없는 비교다("새로 생긴 파일"과 같은 모양). 병합은 부모가
+    // 여럿이라 **첫 부모 기준**으로 본다 — combined diff는 파일마다 상태가 여럿이라 한 줄에 한 상태를
+    // 그리는 목록과 모양이 맞지 않는다.
+    var root = iterate("aaa\x1f\x1fA\x1f1\x1f\x1f첫 커밋\x1e");
+    const first = root.next() orelse return error.MissingCommit;
+    try testing.expect(!first.hasParent());
+    try testing.expect(!first.isMerge());
+    try testing.expectEqualStrings("", first.firstParent());
+
+    var normal = iterate("bbb\x1fp1\x1fA\x1f1\x1f\x1f보통\x1e");
+    const second = normal.next() orelse return error.MissingCommit;
+    try testing.expect(second.hasParent());
+    try testing.expect(!second.isMerge());
+    try testing.expectEqualStrings("p1", second.firstParent());
+
+    var merge = iterate("ccc\x1fp1 p2\x1fA\x1f1\x1f\x1f병합\x1e");
+    const third = merge.next() orelse return error.MissingCommit;
+    try testing.expect(third.hasParent());
+    try testing.expect(third.isMerge());
+    try testing.expectEqualStrings("p1", third.firstParent());
 }

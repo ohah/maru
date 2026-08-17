@@ -483,6 +483,28 @@ pub fn buildSmokeFixtureFromRenderFrame(
     };
 }
 
+/// 기본 픽스처 문자열. `MARU_METAL_SMOKE_TEXT` 로 바꿀 수 있다(아래 `readFixtureText`).
+const default_fixture_text = "Maru 한";
+/// 픽스처 텍스트 상한. 환경변수는 사람이 손으로 주는 값이라 격자(cols×rows)에 안 들어가면
+/// 잘릴 뿐이고, 여기서는 터미널 write 한 번이 감당할 크기만 넘긴다.
+const max_fixture_text_bytes: usize = 512;
+
+/// **렌더 회귀를 눈으로 확인하는 유일한 경로다.** 이 스모크는 TerminalCore → DrawList → 실제
+/// CoreText 셰이핑/래스터 → Metal 오프스크린 → PPM 을 통째로 지나면서 native keyDown 같은 다른
+/// 검증과 얽히지 않는다. 그래서 "이 문자열이 화면에 어떻게 그려지는가"를 물을 때 쓰는 도구다.
+///
+/// 예: `MARU_METAL_SMOKE_TEXT='// :: ~~ ===' zig build macos-metal-smoke` 로 합자 렌더를 캡처한다
+/// (2026-08-17 합자 오버행 조사에서 이 경로가 없어 픽셀 확인을 못 했다 — 그래서 열었다).
+/// **격자는 열지 않는다.** 이 스모크의 창 크기·atlas 샘플 검증이 12×2 픽스처에 묶여 있어서, 열 수를
+/// 바꾸면 `atlas_sample_missing_cells` 가 올라 스모크가 실패한다(실측: cols=24 로 주면 13칸 miss).
+/// 그래서 문자열만 받고, 12칸을 넘는 입력은 그냥 잘린다 — 짧은 조합을 여러 번 찍는 쪽이 맞다.
+fn readFixtureText() []const u8 {
+    const raw_ptr = std.c.getenv("MARU_METAL_SMOKE_TEXT") orelse return default_fixture_text;
+    const raw = std.mem.span(raw_ptr);
+    if (raw.len == 0) return default_fixture_text;
+    return raw[0..@min(raw.len, max_fixture_text_bytes)];
+}
+
 fn buildTerminalDrawListFixture(allocator: std.mem.Allocator) !renderer.DrawList {
     // 실제 shell/PTY는 아직 없지만, TerminalCore가 만드는 snapshot과 dirty/cursor/overlay
     // 계약을 그대로 거치는 fixture다. 다음 실제 입력 PR 전까지 Metal smoke가 볼 수 있는
@@ -490,7 +512,7 @@ fn buildTerminalDrawListFixture(allocator: std.mem.Allocator) !renderer.DrawList
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
     core.clearDirty();
-    try core.write("Maru 한");
+    try core.write(readFixtureText());
     return renderer.buildDrawList(allocator, core.snapshot());
 }
 

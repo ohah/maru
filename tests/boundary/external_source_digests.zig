@@ -496,7 +496,11 @@ pub const inventory = [_]Proof{
     // 레벨 접기(§4.1f)로 또 바뀐다: Term rt에 되돌리기 백업 `editor_folded_prev`가 붙고(같은 길이라도
     // 다른 머리들이라 길이만으로는 못 되돌린다), 레벨 액션 셋이 dispatch에 붙는다
     // (`fold_level_1`~`fold_level_3`). count는 2 그대로다 — 같은 이유다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f9cbf35b8c4ce0ee7d730ebb1cb74da91c3603f50aee9265159b8f7d25737d5c" },
+    // 접힘(§4.1f)이 main 위로 리베이스되며 다시 계산된다: Term rt에 접힘 필드 다섯이 붙고
+    // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
+    // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "41f9c60ac33fdf976db788bee5b186bae87834318dc642dde835c7aecc6b0886" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

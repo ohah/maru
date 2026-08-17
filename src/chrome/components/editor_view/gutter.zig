@@ -43,12 +43,24 @@ pub const Fold = enum {
     collapsed,
 
     /// 그릴 글자. 삼각형은 방향이 곧 뜻이라(아래=펼침, 오른쪽=접힘) 기호를 외울 필요가 없다.
+    ///
+    /// **작은 삼각형(▾ U+25BE·▸ U+25B8)이 아니라 보통 크기(▼ U+25BC·▶ U+25B6)다.** 처음엔 작은
+    /// 쪽을 썼는데 실제 앱에서 *"너무 작아서 잘 안 보인다"*는 사용자 지적을 받았다(2026-08-18).
+    /// 글자 크기는 이미 편집기 폰트를 따르지만(`props.font_px`) **글리프 자체가 작은 문자**라
+    /// 폰트를 키워도 비율이 그대로였다 — 크기 문제는 여기서 푼다.
     pub fn glyph(self: Fold) ?[]const u8 {
         return switch (self) {
             .none => null,
-            .open => "\u{25BE}", // ▾
-            .collapsed => "\u{25B8}", // ▸
+            .open => "\u{25BC}", // ▼
+            .collapsed => "\u{25B6}", // ▶
         };
+    }
+
+    /// 위 글자의 코드포인트. **셀을 세는 쪽(테스트·소비처)이 숫자를 따로 적지 않게** 여기서 유도한다
+    /// — 글리프를 바꿀 때 두 곳이 갈리면 "화살표가 섰는지" 보는 판정이 조용히 옛 문자를 찾는다.
+    pub fn codepoint(self: Fold) ?u21 {
+        const g = self.glyph() orelse return null;
+        return std.unicode.utf8Decode(g) catch unreachable; // 위 리터럴은 늘 유효한 UTF-8이다
     }
 };
 

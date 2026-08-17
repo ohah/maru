@@ -479,7 +479,11 @@ pub const inventory = [_]Proof{
     // 테스트가 붙어 digest가 움직인다(2026-08-17 사용자 제보 — "도크의 클릭 이벤트가 안 되는 영역을 누르면
     // 터미널 블록 이벤트가 잡힌다"). up·move 의 도크 판정 rect 를 down 과 맞춘 것(`tree_content` → `dock`)도
     // 같은 커밋이다. count는 2 그대로다 — 반사 접근이나 Client 구성은 건드리지 않고 포인터 라우팅만 바꿨다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a91c426ae159ba00783d14a4e52402b67d182741da3590dfa93b16feebb7d88f" },
+    //
+    // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
+    // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
+    // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4681e40a7ed8276779c13c4a060be9423f0497dc00eaaaaaacbae3df45c0b8f2" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -549,5 +553,6 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "3bf34d74d4e6aa0e13d4060d69a1bda51d1fbe4e4fcaf4b0c2b78b216231ed91" },
+    // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8322776b5b1e1bbc2691844386da20262492b52b79c7975cf45206e6dff7e651" },
 };

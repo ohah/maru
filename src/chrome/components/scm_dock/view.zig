@@ -110,6 +110,15 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 1;
             bytes += more_label_bytes + count_digits;
         },
+        // 제목·작성자·시각·해시·ref 칩 — 다섯.
+        .commit => |commit| {
+            text_ops += 5;
+            bytes += commit.subject.len + commit.author.len + commit.when.len + commit.short_oid.len + commit.ref.len;
+        },
+        .load_more => {
+            text_ops += 1;
+            bytes += i18n.t(.scm_load_more).len;
+        },
         .notice => |text| {
             text_ops += 1;
             bytes += text.len;
@@ -177,7 +186,8 @@ pub fn view(
     }
 
     // ── 요약 줄: `+N -N`. 커밋 직전에 보는 숫자라 목록보다 위에 고정한다.
-    if (frame.tree.find(build.NodeIds.summary)) |index| {
+    if (props.show_summary) blk: {
+        const index = frame.tree.find(build.NodeIds.summary) orelse break :blk;
         const rect = frame.tree.entries[index];
         var added_buf: [24]u8 = undefined;
         const added = std.fmt.bufPrint(&added_buf, "+{d}", .{props.summary.added}) catch "";
@@ -205,6 +215,9 @@ pub fn view(
                 const face_index = frame.tree.find(build.NodeIds.itemFace(index)) orelse continue;
                 try writer.commitButton(frame.tree.entries[face_index], button, state, tk, m);
             },
+            .commit => |commit| try writer.commitRow(row, commit, m),
+            // 목록 끝의 "더 보기". `모두 보기`와 같은 자리·같은 색이다(둘 다 목록을 늘리는 컨트롤이다).
+            .load_more => try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), i18n.t(.scm_load_more), .focus_accent, .control, false),
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
             .more => |more| {
@@ -346,7 +359,8 @@ fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
         .section => |section| section.action,
         .file => |file| file.action,
-        .repo, .commit_box, .commit_button, .more, .notice => .none,
+        // 히스토리 줄에는 행 동작이 없다(고르기뿐이다 — P4).
+        .repo, .commit, .load_more, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
 
@@ -846,6 +860,89 @@ const Writer = struct {
         try self.icon(face, face.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
     }
 
+    /// 히스토리 목록의 커밋 **두 줄**(§3.5.3).
+    ///
+    /// 위: (있으면) ref 칩 + 제목. 아래: 작성자 · 상대시각 · 짧은 해시(흐리게).
+    /// **제목이 마지막까지 남는다** — 좁은 도크에서 잘려야 하는 것은 부가 정보다.
+    fn commitRow(self: *Writer, rect: tree.RectEntry, commit: types.CommitItem, m: types.DockMetrics) ViewError!void {
+        const scale = effectiveScale(self.props.scale_milli);
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const gap: f32 = @floatFromInt(m.gap);
+        const title_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        const sub_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
+        if (rect.rect.height < title_h + sub_h) return;
+        const pad_y = (rect.rect.height - title_h - sub_h) / 2;
+
+        // ── 첫 줄: ref 칩 + 제목.
+        var left = rect.rect.x + inset;
+        if (commit.ref.len > 0) {
+            const w = self.measureBudget(commit.ref);
+            if (left + w < rect.rect.x + rect.rect.width - inset) {
+                // 지금 체크아웃된 브랜치만 강조색이다 — 나머지 ref는 상태 진술이라 흐리다.
+                try self.emit(
+                    left,
+                    rect.rect.y + pad_y + (title_h - sub_h) / 2,
+                    commit.ref,
+                    self.colsFor(w),
+                    if (commit.ref_is_head) .focus_accent else .muted_fg,
+                    .supporting,
+                    false,
+                    @intFromFloat(@max(w, 0)),
+                    .origin,
+                );
+                left += w + gap;
+            }
+        }
+        const title_right = rect.rect.x + rect.rect.width - inset;
+        if (title_right > left) {
+            try self.emit(
+                left,
+                rect.rect.y + pad_y,
+                commit.subject,
+                self.colsFor(title_right - left),
+                .surface_fg,
+                .control,
+                true,
+                @intFromFloat(@max(title_right - left, 0)),
+                .origin,
+            );
+        }
+
+        // ── 둘째 줄: 작성자 · 상대시각 · 짧은 해시. **오른쪽부터** 자리를 잡는다(해시가 열 맞춤의 기준).
+        const sub_y = rect.rect.y + pad_y + title_h;
+        var right = rect.rect.x + rect.rect.width - inset;
+        if (commit.short_oid.len > 0) {
+            const w = self.measureBudget(commit.short_oid);
+            try self.emitAt(right - w, sub_y, commit.short_oid, .muted_fg, .supporting);
+            right -= w + gap;
+        }
+        if (commit.when.len > 0) {
+            const w = self.measureBudget(commit.when);
+            if (right - w > rect.rect.x + inset) {
+                try self.emitAt(right - w, sub_y, commit.when, .muted_fg, .supporting);
+                right -= w + gap;
+            }
+        }
+        if (commit.author.len > 0) {
+            const w = self.measureBudget(commit.author);
+            const x = rect.rect.x + inset;
+            if (x + w < right) try self.emitAt(x, sub_y, commit.author, .muted_fg, .supporting);
+        }
+    }
+
+    /// 글자 하나를 (x, y)에 그대로 놓는다(세로 가운데 계산 없이 — 두 줄 행이 자기 y를 안다).
+    fn emitAt(
+        self: *Writer,
+        x: f32,
+        y: f32,
+        text: []const u8,
+        role: tokens.ColorRole,
+        text_role: typography.ChromeTextRole,
+    ) ViewError!void {
+        const w = self.measureBudget(text);
+        try self.emit(x, y, text, self.colsFor(w), role, text_role, false, @intFromFloat(@max(w, 0)), .origin);
+    }
+
     /// 커밋 상자의 세로 스크롤바. **목록 스크롤바와 같은 기하 함수를 쓴다**(`scroll_area`) — 두 곳이
     /// 각자 비율을 계산하면 같은 화면에서 막대 길이 규칙이 갈린다.
     ///
@@ -1334,6 +1431,34 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "히스토리 커밋 줄은 두 줄이다(제목이 마지막까지 남는다) (P4)" {
+    // 한 줄에 몰면 좁은 도크에서 제목이 거의 안 남는다 — 목록에서 가장 중요한 것이 "무엇을 한 커밋인가"다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{
+            .index = 0,
+            .subject = "feat(dock): 히스토리 탭",
+            .author = "ohah",
+            .when = "2시간 전",
+            .short_oid = "abcdef1",
+            .ref = "main",
+            .ref_is_head = true,
+        } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const title = findText(draws, "히스토리 탭") orelse return error.MissingSubject;
+    const author = findText(draws, "ohah") orelse return error.MissingAuthor;
+    const oid = findText(draws, "abcdef1") orelse return error.MissingOid;
+    // 보조 정보는 **제목 아래**에 온다.
+    try testing.expect(author.origin.y > title.origin.y);
+    try testing.expectEqual(author.origin.y, oid.origin.y);
+    // 해시는 오른쪽 끝, 작성자는 왼쪽 끝이다.
+    try testing.expect(oid.origin.x > author.origin.x);
+    // 체크아웃된 브랜치 칩만 강조색이다.
+    const ref = findText(draws, "main") orelse return error.MissingRef;
+    try testing.expectEqual(tokens.ColorRole.focus_accent, ref.role);
 }
 
 test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다" {

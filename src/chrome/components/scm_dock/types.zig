@@ -134,6 +134,25 @@ pub const RepoItem = struct {
     can_stage_all: bool = false,
 };
 
+/// 히스토리 탭의 커밋 한 줄(P4). 문자열은 전부 host가 든 원문을 빌린다(할당 없음).
+pub const CommitItem = struct {
+    /// 목록 안 자리. 클릭 intent가 이것을 싣고 host가 같은 스냅샷에서 다시 찾는다(파일 행과 같은 규율).
+    index: u32 = 0,
+    /// 제목 한 줄. 폭이 모자라면 **여기가 마지막으로** 줄어든다(무엇을 한 커밋인지가 가장 중요하다).
+    subject: []const u8,
+    author: []const u8 = "",
+    /// 이미 사람이 읽을 꼴로 만든 상대 시각(`3시간 전`). **host가 만든다** — component에는 시간이 없다.
+    when: []const u8 = "",
+    /// 짧은 해시(7자).
+    short_oid: []const u8 = "",
+    /// 첫 ref 칩 하나만 그린다. 여럿이면 좁은 도크에서 제목을 다 밀어낸다.
+    ref: []const u8 = "",
+    /// 그 칩이 **지금 체크아웃된 브랜치**인가(색이 갈린다).
+    ref_is_head: bool = false,
+    /// 지금 고른 커밋인가(강조).
+    selected: bool = false,
+};
+
 pub const Item = union(enum) {
     /// 저장소·워크트리 머리 줄. **목록의 첫 층**이고, 그 아래에 그 저장소의 줄들이 온다.
     repo: RepoItem,
@@ -145,6 +164,11 @@ pub const Item = union(enum) {
     file: FileItem,
     more: MoreItem,
     /// 목록이 불완전하다는 진술(누를 수 없다).
+    /// 히스토리 탭의 커밋 줄(P4).
+    commit: CommitItem,
+    /// 히스토리 목록 끝의 **더 보기**(P4). 상한만큼 읽었을 때만 선다 — 끝까지 읽었으면 없다(있으면
+    /// 눌러도 아무 일이 없어 "고장"으로 읽힌다).
+    load_more,
     notice: []const u8,
 };
 
@@ -180,6 +204,9 @@ pub const Props = struct {
     /// 지금 열려 있는 탭. 모르는 값은 platform이 `.changes`로 clamp한다(§3.5.1) — component는 받은 값을
     /// 그대로 그린다.
     active_tab: Tab = .changes,
+    /// 요약 줄(`+N -N`)을 그리나. **히스토리 탭에서는 끈다**(P4) — 그 숫자는 작업트리의 것이고 커밋
+    /// 목록과 아무 관계가 없다. 0으로 두면 "바뀐 것이 없다"는 **틀린 진술**이 된다.
+    show_summary: bool = true,
     /// `변경 사항` 탭 이름 옆에 붙는 **전체** 파일 수. **`items`로 셀 수 없다** — 그쪽은 가상화된 창이라
     /// 보이는 만큼만 오고, 스크롤 위치에 따라 숫자가 흔들린다.
     changed_file_count: u32 = 0,
@@ -262,6 +289,8 @@ pub const DockMetrics = struct {
     /// 커밋 상자의 **위아래 여백**. 글자가 테두리와 버튼 줄에 붙지 않게 한다 — 입력란은 글자가 상자
     /// 안에서 숨 쉬어야 눌러서 쓰는 자리로 읽힌다(사용자 지적 2026-08-16).
     commit_pad_y: u32,
+    /// 히스토리 커밋 줄 높이(두 줄 + 위아래 여백 — §3.5.3).
+    commit_row_two_line_h: u32,
     /// 목록 좌우 여백.
     inset_x: u32,
     /// 행 안에서 아이콘·글자·동작 사이의 간격.
@@ -303,6 +332,10 @@ pub const DockMetrics = struct {
             .commit_row_h = typography.lineHeightPx(.control, scale_milli),
             .commit_button_h = s.px(28, scale_milli),
             .commit_pad_y = s.px(8, scale_milli),
+            // 제목(control 17px) + 보조 줄(supporting) + 위아래 여백. 파일 행보다 높지만 그만큼
+            // 정보가 둘이다.
+            .commit_row_two_line_h = typography.lineHeightPx(.control, scale_milli) +
+                typography.lineHeightPx(.supporting, scale_milli) + s.px(8, scale_milli),
             .inset_x = s.px(8, scale_milli),
             .gap = s.px(6, scale_milli),
             .status_extent = s.px(14, scale_milli),
@@ -350,6 +383,11 @@ pub const DockMetrics = struct {
             // 머리 줄은 그룹 헤더보다 한 급 크다 — 이름·브랜치 칩이 함께 서고, 목록의 첫 층이라
             // 눈이 여기서 끊겨야 저장소 경계가 보인다.
             .repo => self.repo_h,
+            // 커밋 줄은 파일 행과 같은 높이다 — 목록 두 탭이 같은 격자를 쓰면 탭을 오가도 눈이 안 튄다.
+            // **두 줄이다**(§3.5.3): 제목 / 작성자·시각·해시. 한 줄에 몰면 좁은 도크에서 제목이 거의
+            // 남지 않는다 — 목록에서 가장 중요한 것이 "무엇을 한 커밋인가"다.
+            .commit => self.commit_row_two_line_h,
+            .load_more => self.row_h,
             .commit_box => |box| self.commitBoxHeight(box.rows),
             // 버튼 아래 여백까지 이 행이 갖는다 — 다음 줄(요약·그룹 헤더)과 붙지 않게.
             .commit_button => self.commit_button_h + self.commit_pad_y,

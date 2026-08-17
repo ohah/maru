@@ -427,6 +427,9 @@ pub const Table = struct {
     scm_load_failed: [:0]const u8,
     scm_show_all_more: [:0]const u8,
     scm_show_all: [:0]const u8,
+    /// 히스토리 목록 끝에서 커밋을 **더 읽는다**(P4). `모두 보기`와 다른 말이다 — 그쪽은 이미 읽은 것을
+    /// 다 펴는 것이고, 이쪽은 git을 다시 부른다.
+    scm_load_more: [:0]const u8,
     scm_commit_placeholder: [:0]const u8,
     scm_commit: [:0]const u8,
     scm_committing: [:0]const u8,
@@ -906,6 +909,7 @@ pub const en: Table = .{
     .pick_workspace_folder = "Choose a folder to add to the workspace",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_show_all = "Show all",
+    .scm_load_more = "Load more commits",
     .scm_commit_placeholder = "Commit message…",
     .scm_commit = "Commit",
     .scm_committing = "Committing…",
@@ -1366,6 +1370,7 @@ pub const ko: Table = .{
     .pick_workspace_folder = "작업공간에 추가할 폴더를 고르세요",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_show_all = "모두 보기",
+    .scm_load_more = "커밋 더 보기",
     .scm_commit_placeholder = "커밋 메시지…",
     .scm_commit = "커밋",
     .scm_committing = "커밋 중…",

@@ -797,6 +797,12 @@ const titlebar_strip_min_pt: u32 = 28;
 /// 소스 컨트롤 목록이 한 프레임에 다룰 수 있는 행 수. **스크롤 상한·렌더·hit-test가 같은 값을 써야**
 /// 그리지 못하는 행이 스크롤 범위에 들어가지 않는다(SV3a 적대적 검증).
 pub const scm_row_capacity: usize = 128;
+
+/// 히스토리 첫 화면이 읽는 커밋 수. `더 보기`가 이만큼씩 늘린다.
+///
+/// 200인 이유: 한 화면이 20행 남짓이라 열 번을 스크롤해도 남고, `git log`가 그 정도는 밀리초 단위로
+/// 낸다. 무제한으로 두면 오래된 저장소에서 수십 MB가 한 번에 온다.
+pub const scm_log_limit_initial: u32 = 200;
 const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
@@ -3765,6 +3771,22 @@ pub const AppSession = struct {
     /// 스크롤 단위는 **backing pixel**이다(SV3a — 탐색기와 같은 좌표계). 브랜치 헤더 한 줄은 이
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
     scm_scroll: chrome.ui.scroll_area.State = .{},
+    /// 소스 컨트롤 도크가 지금 보고 있는 **탭**(P4). 창 상태이며 workspace에 저장하지 않는다 —
+    /// 목록·히스토리는 매번 새로 읽는 값이라 탭만 남겨 봐야 다음 실행의 내용과 대응이 보장되지 않는다.
+    scm_tab: chrome.components.scm_dock.types.Tab = .changes,
+    /// 히스토리 탭이 그릴 커밋 목록 원문(`git log --format`). **그 탭을 볼 때만** 읽는다.
+    scm_log_text: []u8 = &.{},
+    /// 그 원문이 어느 저장소의 것인가. 저장소가 바뀌면 버린다 — 남의 커밋을 그리면 안 된다.
+    scm_log_repo: ?[]u8 = null,
+    /// 지금 실은 커밋 수 상한. `더 보기`가 이 값을 올린다.
+    scm_log_limit: u32 = scm_log_limit_initial,
+    scm_log_inflight: u64 = 0,
+    scm_log_seq: u64 = 0,
+    /// 읽기가 실패했나. **커밋이 없는 것과 다른 사실**이라 화면 문구가 갈린다.
+    scm_log_failed: bool = false,
+    /// 히스토리에서 고른 커밋의 자리(P4). 파일 행 강조와 **다른 축**이라 값을 따로 든다 — 탭이
+    /// 다르면 같은 번호가 다른 것을 가리킨다.
+    scm_selected_commit: ?u32 = null,
     scm_selected_row: ?usize = null,
     /// 강조된 행이 **어느 저장소의 것인가**(②d). 인덱스만 들면 저장소마다 따로 서는 모델에서 같은
     /// 번호의 남의 행이 함께 강조된다.
@@ -13738,6 +13760,18 @@ pub const AppSession = struct {
         // 진입점이 스위처 아이콘 **클릭**이라 스크린샷 하니스로는 도달할 수 없다(입력 자동화는 겹친 남의 창을
         // 누를 위험이 있어 검증 수단으로 쓰지 않는다). 상태를 심지 않고 사용자 클릭과 **같은 경로**
         // (`openDockTo`)를 태우므로, 저장소 판정·목록 읽기·안내 문구는 전부 제품 tick이 그대로 정한다.
+        // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
+        // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).
+        if (std.c.getenv("MARU_FORCE_SCM_TAB")) |raw| {
+            const spec = std.mem.span(raw);
+            const tab: chrome.components.scm_dock.types.Tab = if (std.mem.eql(u8, spec, "history"))
+                .history
+            else if (std.mem.eql(u8, spec, "agent"))
+                .agent
+            else
+                .changes;
+            scm_dock_ops.selectScmTab(self, tab);
+        }
         if (std.c.getenv("MARU_FORCE_SCM") != null and self.dock.view != .source_control) {
             dock_ops.openDockTo(self, .source_control);
         }
@@ -13751,6 +13785,9 @@ pub const AppSession = struct {
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
+        scm_dock_ops.dropScmLogIfRepoChanged(self); // 저장소가 갈렸으면 옛 커밋 목록을 버린다(P4)
+        scm_dock_ops.drainScmLog(self); // 도착한 커밋 목록을 싣는다(P4)
+        scm_dock_ops.pumpScmLog(self); // 히스토리 탭을 보고 있고 아직 못 읽었으면 읽기를 건다(P4)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -17039,6 +17076,8 @@ pub const AppSession = struct {
         self.scm_repo_list.deinit(self.allocator);
         if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
         if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
+        if (self.scm_log_repo) |path| self.allocator.free(path); // 히스토리 원문의 저장소(P4)
+        if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
@@ -55050,6 +55089,71 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
     const props = scm_dock_ops.testProps(session, projection);
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
+}
+
+test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리가** 만든다 (P4)" {
+    // `%ar`를 쓰지 않는 이유가 여기 있다 — git의 로케일·문구를 타면 같은 화면의 다른 상대시각 표기와
+    // 규칙이 갈린다. 시각이 0이면 자리를 비운다(1970년으로 그리지 않는다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
+    var text_buf: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&text_buf, "abcdef1234567\x1f홍길동\x1f{d}\x1fHEAD -> main\x1f첫 커밋\x1e" ++
+        "9876543210abc\x1fJane\x1f0\x1f\x1f시각 없는 커밋\x1e", .{now_s - 7200});
+    session.scm_log_text = try allocator.dupe(u8, text);
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    scm_dock_ops.selectScmTab(session, .history);
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(usize, 2), projection.items.len);
+    const first = projection.items[0].commit;
+    try std.testing.expectEqualStrings("첫 커밋", first.subject);
+    try std.testing.expectEqualStrings("홍길동", first.author);
+    try std.testing.expectEqualStrings("abcdef1", first.short_oid); // 7자 고정
+    try std.testing.expectEqualStrings("2시간 전", first.when);
+    try std.testing.expectEqualStrings("main", first.ref);
+    try std.testing.expect(first.ref_is_head); // `HEAD -> main`은 칩 하나다
+    // 시각을 못 읽은 커밋은 **자리를 비운다**.
+    try std.testing.expectEqualStrings("", projection.items[1].commit.when);
+}
+
+test "히스토리 탭: 커밋이 없는 것과 못 읽은 것을 구별한다 (P4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .history);
+
+    // ① 아직 못 읽었다.
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("읽는 중…", projection.items[0].notice);
+    }
+    // ② 읽었는데 커밋이 없다(첫 커밋 전 저장소).
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("커밋이 없습니다", projection.items[0].notice);
+    }
+    // ③ 읽기가 실패했다 — 위 둘과 **다른 사실**이다.
+    session.scm_log_failed = true;
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("커밋을 읽지 못했습니다", projection.items[0].notice);
+    }
 }
 
 test "소스 컨트롤: 목록의 뿌리는 **활성 터미널 하나**다 (사용자 결정 2026-08-17)" {

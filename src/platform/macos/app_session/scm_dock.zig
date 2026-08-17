@@ -261,6 +261,10 @@ pub const Projection = struct {
 /// 모델 → 항목 열 + 스크롤 투영. **렌더와 포인터가 같은 함수를 지난다** — 두 곳이 각자 만들면 스크롤한
 /// 뒤 누른 행과 열리는 행이 어긋난다.
 pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
+    // **히스토리 탭은 다른 목록이다**(P4). 같은 스크롤·같은 격자를 쓰지만 행의 출처가 `git log`라
+    // 여기서 갈린다 — 두 목록을 한 함수에 섞으면 "이 행이 어느 탭 것인가" 판정이 행마다 생긴다.
+    if (self.scm_tab == .history) return projectHistory(self, arena);
+
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
     const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return null;
@@ -470,6 +474,101 @@ fn revealCommitBox(self: *AppSession, items: []const component.types.Item, m: co
     }
 }
 
+/// 히스토리 탭의 투영(P4). 커밋 원문 한 덩어리를 행으로 편다.
+///
+/// **상대 시각은 여기서 만든다** — component에는 시간이 없고, `%ar`는 git의 로케일·문구를 탄다.
+fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
+    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+    // **벽시계다**(`awake`는 부팅 이후 경과라 커밋 시각과 뺄 수 없다 — 그러면 전부 "방금"이 된다).
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+    // 커밋 수를 먼저 센다(할당을 한 번만 하려고). 원문은 세션이 들고 있어 이 프레임 동안 안 바뀐다.
+    var count: usize = 0;
+    var counting = maru.session.git_log.iterate(self.scm_log_text);
+    while (counting.next()) |_| count += 1;
+
+    const notice_rows: usize = if (count == 0) 1 else 0;
+    // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
+    // 눌러도 아무 일이 없어 고장으로 읽힌다.
+    const more_rows: usize = if (count >= self.scm_log_limit) 1 else 0;
+    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows) catch return null;
+    var n: usize = 0;
+    if (count == 0) {
+        // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
+        items[0] = .{ .notice = if (self.scm_log_failed)
+            "커밋을 읽지 못했습니다"
+        else if (self.scm_log_repo == null)
+            "읽는 중…"
+        else
+            "커밋이 없습니다" };
+        n = 1;
+    }
+    var it = maru.session.git_log.iterate(self.scm_log_text);
+    var index: u32 = 0;
+    while (it.next()) |commit| : (index += 1) {
+        if (n >= items.len) break;
+        var refs = maru.session.git_log.refs(commit.refs);
+        const first_ref = refs.next();
+        items[n] = .{
+            .commit = .{
+                .index = index,
+                .subject = commit.subject,
+                .author = commit.author,
+                // 시각이 0이면 **자리를 비운다**(1970년으로 그리지 않는다).
+                .when = if (commit.timestamp == 0) "" else relativeTime(self, arena, now_s - commit.timestamp),
+                .short_oid = commit.shortOid(),
+                .ref = if (first_ref) |ref| ref.name else "",
+                .ref_is_head = if (first_ref) |ref| ref.kind == .head else false,
+                .selected = self.scm_selected_commit != null and self.scm_selected_commit.? == index,
+            },
+        };
+        n += 1;
+    }
+
+    if (more_rows == 1 and n < items.len) {
+        items[n] = .load_more;
+        n += 1;
+    }
+
+    const list_items = ScrollItems{ .items = items[0..n], .metrics = m };
+    const viewport_h = listViewportHeightPx(self, false);
+    const scroll = chrome.ui.scroll_area.project(
+        list_items,
+        ScrollItems.heightPx,
+        list_items.extent(viewport_h),
+        self.scm_scroll.offset_y_px,
+    );
+    return .{
+        .items = items[0..n],
+        .scroll = scroll,
+        .branch = "",
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .summary = .{ .added = 0, .removed = 0 },
+        .has_rows = count > 0,
+        .file_count = 0,
+        .has_staged = false,
+    };
+}
+
+/// `3시간 전`처럼 사람이 읽는 상대 시각. **arena에 만든다**(프레임 안에서만 쓴다).
+///
+/// git의 `%ar`를 쓰지 않는 이유: 그 문구는 git의 로케일을 타서 같은 화면 안에서 다른 상대시각 표기와
+/// 규칙이 갈린다. 미래 시각(시계가 어긋난 커밋)은 `방금`으로 접는다 — "-3시간 전"은 읽을 수 없다.
+fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []const u8 {
+    _ = self;
+    if (delta_s < 60) return "방금";
+    const minutes = @divFloor(delta_s, 60);
+    if (minutes < 60) return std.fmt.allocPrint(arena, "{d}분 전", .{minutes}) catch "";
+    const hours = @divFloor(minutes, 60);
+    if (hours < 24) return std.fmt.allocPrint(arena, "{d}시간 전", .{hours}) catch "";
+    const days = @divFloor(hours, 24);
+    if (days < 30) return std.fmt.allocPrint(arena, "{d}일 전", .{days}) catch "";
+    const months = @divFloor(days, 30);
+    if (months < 12) return std.fmt.allocPrint(arena, "{d}개월 전", .{months}) catch "";
+    return std.fmt.allocPrint(arena, "{d}년 전", .{@divFloor(months, 12)}) catch "";
+}
+
 /// 편집기의 선택을 DTO 값으로 옮긴다. 값 집합이 갈리면 여기서 컴파일로 걸린다.
 fn selectionOf(sel: ?text_field.TextField.Selection) ?component.types.Selection {
     const s = sel orelse return null;
@@ -492,6 +591,9 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .scale_milli = scmDockScaleMilli(self),
         .cell_width_px = self.cell_width_px,
         .snapshot_generation = self.scm_dock_snapshot_generation,
+        .active_tab = self.scm_tab, // 어느 탭이 활성인지는 세션이 든다(P4)
+        // 히스토리에서 `+N -N`은 작업트리의 숫자라 커밋 목록과 관계가 없다 — 0으로 두면 틀린 진술이다.
+        .show_summary = self.scm_tab != .history,
         .items = window,
         .scroll_offset_px = projection.scroll.offset_y_px,
         .content_h_px = projection.scroll.content_height_px,
@@ -815,6 +917,22 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
             const repo = repoPathAt(self, index) orelse return;
             submitStageAllFor(self, repo);
         },
+        // 탭 전환(P4). **읽기는 여기서 걸지 않는다** — 그 탭이 무엇을 필요로 하는지는 `pumpScmLog`가
+        // 매 tick 보고 정한다(뷰 진입·저장소 변경·상한 증가가 전부 같은 판정을 지난다).
+        .select_tab => |tab| selectScmTab(self, tab),
+        // 고르기까지가 이 조각이다(P4) — 그 커밋의 diff를 여는 것은 P4b.
+        // **더 읽는다**(P4). 상한을 올리고 원문을 버리면 다음 tick의 `pumpScmLog`가 다시 읽는다 —
+        // 여기서 직접 읽기를 걸면 "언제 읽는가" 판정이 두 곳이 된다.
+        .load_more_commits => {
+            self.scm_log_limit +|= app_session_mod.scm_log_limit_initial;
+            if (self.scm_log_repo) |old| self.allocator.free(old);
+            self.scm_log_repo = null; // 이 값이 "이미 읽어 뒀다"의 표식이다
+            self.metal_dirty = true;
+        },
+        .select_commit => |index| {
+            self.scm_selected_commit = index;
+            self.metal_dirty = true;
+        },
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
@@ -824,6 +942,72 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         },
         .scroll_thumb, .scroll_track => {},
     }
+}
+
+/// 도크의 탭을 바꾼다(P4). **편집은 그대로 둔다** — 탭을 옮긴다고 사용자가 쓰던 커밋 메시지를
+/// 버릴 이유가 없고, 상자는 변경 사항 탭으로 돌아오면 그 자리에 있다.
+pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
+    if (self.scm_tab == tab) return;
+    self.scm_tab = tab;
+    // 목록·히스토리는 서로 다른 스크롤 축이다 — 남겨 두면 히스토리 첫 화면이 엉뚱한 자리에서 시작한다.
+    self.scm_scroll = .{};
+    self.metal_dirty = true;
+}
+
+/// 히스토리 탭이 지금 필요한 읽기를 건다. **그 탭을 볼 때만** 돈다 — 안 보는 목록을 읽는 것은
+/// 프로세스를 공짜로 띄우는 일이다(§6 비용 규율).
+pub fn pumpScmLog(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    if (self.scm_tab != .history) return;
+    if (self.scm_log_inflight != 0) return;
+    const repo = self.git_repo orelse return; // 저장소를 못 잡았으면 읽을 것도 없다
+    // 이미 **그 저장소를 그 상한으로** 읽어 뒀으면 다시 읽지 않는다.
+    if (self.scm_log_repo) |current| {
+        if (std.mem.eql(u8, current, repo) and !self.scm_log_failed and self.scm_log_text.len > 0) return;
+    }
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_log_seq += 1;
+    if (!self.git_backend.?.submitLog(git_exe, repo, self.scm_log_limit, self.scm_log_seq)) return;
+    self.scm_log_inflight = self.scm_log_seq;
+}
+
+/// 도착한 커밋 목록을 싣는다. **경로로 맞춘다** — 저장소가 그 사이에 바뀌면 남의 커밋이 된다.
+pub fn drainScmLog(self: *AppSession) void {
+    const backend = &(self.git_backend orelse return);
+    var taken = backend.takeLogResult() orelse return;
+    defer taken.deinit(git_backend_mod.worker_allocator);
+    if (taken.request_id != self.scm_log_inflight) return; // 낡은 답은 버린다
+    self.scm_log_inflight = 0;
+    self.metal_dirty = true;
+    // **실패도 기록한다**(그 탭이 영영 "읽는 중"으로 남지 않게). 첫 커밋 전 저장소는 `git log`가
+    // 실패하는데, 그건 오류가 아니라 "커밋이 없다"이고 화면 문구가 그렇게 갈린다.
+    self.scm_log_failed = !taken.ok;
+    const text_copy = self.allocator.dupe(u8, taken.text) catch return;
+    const repo_copy = self.allocator.dupe(u8, taken.repo) catch {
+        self.allocator.free(text_copy);
+        return;
+    };
+    if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
+    if (self.scm_log_repo) |old| self.allocator.free(old);
+    self.scm_log_text = text_copy;
+    self.scm_log_repo = repo_copy;
+}
+
+/// 저장소가 바뀌었으면 히스토리 원문을 버린다. **남의 커밋을 그리는 것보다 빈 화면이 낫다.**
+pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
+    const repo = self.git_repo orelse "";
+    const current = self.scm_log_repo orelse return;
+    if (std.mem.eql(u8, current, repo)) return;
+    self.allocator.free(current);
+    self.scm_log_repo = null;
+    if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
+    self.scm_log_text = &.{};
+    self.scm_log_limit = app_session_mod.scm_log_limit_initial;
+    self.scm_log_failed = false;
 }
 
 /// 그 저장소의 커밋 상자로 포커스를 옮긴다(caret은 그대로).

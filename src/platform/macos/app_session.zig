@@ -55102,6 +55102,9 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
 }
 
 test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리가** 만든다 (P4)" {
+    // 기대값이 보간 결과(상대 시각)라 키 비교가 동어반복이 된다 — 언어를 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
     // `%ar`를 쓰지 않는 이유가 여기 있다 — git의 로케일·문구를 타면 같은 화면의 다른 상대시각 표기와
     // 규칙이 갈린다. 시각이 0이면 자리를 비운다(1970년으로 그리지 않는다).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -55109,6 +55112,7 @@ test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    maru.i18n.setLang(.ko);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -55197,11 +55201,15 @@ test "히스토리 탭: 쓰기가 끝나면 커밋 목록도 다시 읽는다 (P
 }
 
 test "히스토리 탭: 커밋이 없는 것과 못 읽은 것을 구별한다 (P4)" {
+    // 기대값이 보간 결과(상대 시각)라 키 비교가 동어반복이 된다 — 언어를 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    maru.i18n.setLang(.ko);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

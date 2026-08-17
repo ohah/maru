@@ -269,6 +269,12 @@ pub fn build(b: *std.Build) void {
         win32_terminal_smoke_cmd.step.dependOn(b.getInstallStep());
         win32_terminal_smoke_cmd.addArg("win32-terminal-smoke");
         win32_terminal_smoke_step.dependOn(&win32_terminal_smoke_cmd.step);
+
+        const win32_clipboard_smoke_step = b.step("win32-clipboard-smoke", "Round-trip text through the OS clipboard");
+        const win32_clipboard_smoke_cmd = b.addRunArtifact(exe);
+        win32_clipboard_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_clipboard_smoke_cmd.addArg("win32-clipboard-smoke");
+        win32_clipboard_smoke_step.dependOn(&win32_clipboard_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

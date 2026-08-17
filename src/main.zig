@@ -15,6 +15,8 @@ const win32_text = @import("platform/windows/win32_text.zig");
 const win32_terminal = @import("platform/windows/win32_terminal.zig");
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = @import("platform/windows/win32_keys.zig");
+// W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
+const win32_clipboard = @import("platform/windows/win32_clipboard.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -100,6 +102,11 @@ fn dispatch(
     if (std.mem.eql(u8, command, "win32-terminal-smoke")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runWin32TerminalSmoke(io, allocator, stdout, stderr);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "win32-clipboard-smoke")) {
+        try runWin32ClipboardSmoke(allocator, stdout, stderr, args.next());
         return;
     }
 
@@ -827,6 +834,128 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
     try stderr.flush();
 }
 
+/// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 실제로 왕복시킨다.**
+///
+/// 순수 변환(`utf16ForClipboard`·`utf8ForTerminal`)은 모든 타깃에서 테스트가 돌지만, `GlobalAlloc`
+/// 소유권과 NUL 종단 규약은 **실제 Win32 만이 판정한다** — 그 둘이 이 파일에서 제일 틀리기 쉬운 자리다
+/// (성공한 `SetClipboardData` 뒤에 `GlobalFree` 를 부르면 다른 앱이 해제된 메모리를 읽고, `GlobalSize` 로
+/// 길이를 재면 뒤쪽 쓰레기가 붙는다). 그래서 키보드를 끼지 않고 쓰기→읽기만 재는 스모크를 따로 둔다:
+/// 붙여넣기 화음은 합성 메시지로 모디파이어를 실을 수 없어(`GetKeyState` 가 큐 상태를 안 본다) 창을
+/// 띄우는 스모크로는 이 경로가 영원히 미측정으로 남는다.
+fn runWin32ClipboardSmoke(
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    expect_foreign: ?[]const u8,
+) !void {
+    if (builtin.os.tag != .windows) {
+        try stderr.writeAll("maru win32-clipboard-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnsupportedPlatform;
+    }
+
+    try stdout.writeAll("maru.win32-clipboard-smoke.v1\n");
+
+    // **다른 앱이 넣은 것을 읽는 모드.** 우리가 쓰고 우리가 읽으면 `GlobalAlloc` 이 요청한 크기를 정확히
+    // 돌려주므로 NUL 종단 규약이 지켜지는지 판정되지 않는다 — 길이를 `GlobalSize` 로 재도 같은 답이 나온다
+    // (대조군으로 확인했다). 붙여넣기는 **남이 쓴 것을 읽는 일**이고, 그 할당은 패딩될 수 있다.
+    // 그래서 외부 작성자가 넣은 값을 기대값과 맞춰 보는 모드를 따로 둔다.
+    if (expect_foreign) |want| {
+        const got = win32_clipboard.read(allocator, null) catch |err| {
+            try stderr.print("foreign: 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+            try stderr.flush();
+            return error.ClipboardRoundtripFailed;
+        };
+        if (got) |text| {
+            defer allocator.free(text);
+            const ok = std.mem.eql(u8, text, want);
+            try stdout.print("foreign_read_bytes={d} expect_bytes={d} match={}\n", .{ text.len, want.len, ok });
+            if (!ok) {
+                try stderr.print("foreign: 기대 \"{f}\" 실제 \"{f}\"\n", .{
+                    std.zig.fmtString(want),
+                    std.zig.fmtString(text),
+                });
+            }
+            try stdout.flush();
+            try stderr.flush();
+            if (!ok) return error.ClipboardRoundtripFailed;
+            return;
+        }
+        try stdout.writeAll("foreign_read_bytes=0 match=false\n");
+        try stdout.flush();
+        try stderr.flush();
+        return error.ClipboardRoundtripFailed;
+    }
+
+    // 한글·이모지·CRLF·CR단독을 한 번에 태운다 — `CF_TEXT`(ANSI 949)로 샜다면 한글에서 깨지고,
+    // 줄바꿈 규칙이 틀렸다면 왕복 결과가 원본과 달라진다.
+    const cases = [_]struct { name: []const u8, input: []const u8, want_back: []const u8 }{
+        .{ .name = "ascii", .input = "hello", .want_back = "hello" },
+        .{ .name = "hangul", .input = "한글 클립보드", .want_back = "한글 클립보드" },
+        .{ .name = "emoji", .input = "tab \u{1F389} ok", .want_back = "tab \u{1F389} ok" },
+        // 쓸 때 LF→CRLF, 읽을 때 CRLF→CR. **왕복이 항등이 아니다** — 그게 맞는 동작이다:
+        // Windows 앱에는 CRLF 를 주고, 셸에는 CR 하나를 준다(CRLF 를 주면 두 줄이 실행된다).
+        .{ .name = "newline", .input = "echo a\necho b", .want_back = "echo a\recho b" },
+        .{ .name = "already-crlf", .input = "a\r\nb", .want_back = "a\rb" },
+    };
+
+    var passed: usize = 0;
+    var failed: usize = 0;
+    var errors: usize = 0;
+
+    for (cases) |case| {
+        win32_clipboard.write(allocator, null, case.input) catch |err| {
+            try stderr.print("  {s}: 쓰기 실패({s}, Win32 오류 {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
+            errors += 1;
+            continue;
+        };
+        const got = win32_clipboard.read(allocator, null) catch |err| {
+            try stderr.print("  {s}: 읽기 실패({s}, Win32 오류 {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
+            errors += 1;
+            continue;
+        };
+        if (got) |text| {
+            defer allocator.free(text);
+            if (std.mem.eql(u8, text, case.want_back)) {
+                passed += 1;
+            } else {
+                failed += 1;
+                try stderr.print("  {s}: 기대 \"{f}\" 실제 \"{f}\"\n", .{
+                    case.name,
+                    std.zig.fmtString(case.want_back),
+                    std.zig.fmtString(text),
+                });
+            }
+        } else {
+            // 방금 썼는데 텍스트가 없다 = `SetClipboardData` 가 성공했다고 거짓말했거나 소유권 규칙이 깨졌다.
+            failed += 1;
+            try stderr.print("  {s}: 방금 썼는데 읽으니 null 이다\n", .{case.name});
+        }
+    }
+
+    // 큰 입력 — NUL 상한과 부분 복사 경계를 밟는다.
+    const big = try allocator.alloc(u8, 300 * 1024);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    var big_roundtrip: usize = 0;
+    if (win32_clipboard.write(allocator, null, big)) |_| {
+        if (win32_clipboard.read(allocator, null) catch null) |text| {
+            defer allocator.free(text);
+            big_roundtrip = text.len;
+        }
+    } else |err| {
+        try stderr.print("  big: 쓰기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+        errors += 1;
+    }
+
+    try stdout.print("cases={d} passed={d} failed={d} errors={d}\n", .{ cases.len, passed, failed, errors });
+    // **이 줄이 판정이다.** 300 KiB 를 넣고 그대로 돌아오지 않으면 길이 계산이 틀렸다.
+    try stdout.print("big_input={d} big_roundtrip={d}\n", .{ big.len, big_roundtrip });
+    try stdout.flush();
+    try stderr.flush();
+    if (failed > 0 or errors > 0) return error.ClipboardRoundtripFailed;
+}
+
 /// `maru win32-terminal-smoke` — W7.2c-2. **실제 터미널 화면이 Windows에 뜬다.**
 ///
 /// W7.2c-1이 세운 프레임(실제 PTY → Windows 셰이퍼 → DirectWrite)을 W7.2b가 세운 표시 경로에 흘려 넣는다.
@@ -957,6 +1086,11 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var preedit_updates: usize = 0;
     var preedit_failures: usize = 0;
     var preedit_max_bytes: usize = 0;
+    var pastes: usize = 0;
+    var paste_bytes: usize = 0;
+    var osc52_writes: usize = 0;
+    var osc52_reads: usize = 0;
+    var clipboard_errors: usize = 0;
 
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
@@ -982,6 +1116,26 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                // **붙여넣기는 플랫폼이 가로챈다.** 클립보드는 OS 소유이고 중립 레이어에 `Action`이 없다
+                // (`config/action.zig` 경계: Zig 는 selection, 플랫폼은 clipboard) — macOS 가 Swift 쪽에서
+                // 하는 것과 같은 자리다. `Ctrl+Shift+V`(Windows Terminal 관례)와 `Shift+Insert`(고전 관례)
+                // 둘 다 받는다.
+                if (win32_keys.isPasteChord(key_ev)) {
+                    if (win32_clipboard.read(allocator, window.hwnd)) |maybe| {
+                        if (maybe) |text| {
+                            defer allocator.free(text);
+                            maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = text }) catch {
+                                clipboard_errors += 1;
+                            };
+                            pastes += 1;
+                            paste_bytes += text.len;
+                        }
+                    } else |err| {
+                        try stderr.print("  경고: 클립보드 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+                        clipboard_errors += 1;
+                    }
+                    continue;
+                }
                 const outcome = loop.handleKeyEvent(resolver, key_ev, false, null) catch |err| {
                     try stderr.print("  경고: 키 처리 실패({s})\n", .{@errorName(err)});
                     continue;
@@ -1015,6 +1169,35 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         defer tick.deinit(allocator);
         counts.add(tick.frame.render_frame);
         if (tick.ended()) ended = true;
+
+        // **OSC 52 를 배수한다.** 셸이 클립보드 읽기·쓰기를 요청하면 코어가 pending 으로 들고 있고
+        // 플랫폼이 정책을 확인한 뒤 OS 를 만진다 — 코어가 OS 를 직접 만지지 않는 것이 그 설계다.
+        if (app_window.active()) |active| {
+            active.lockCore(io);
+            const pending = active.core.pendingClipboardWrite();
+            const want_read = active.core.clipboardReadPending();
+            // **락 안에서 OS 를 부르지 않는다** — 클립보드 호출은 다른 프로세스를 기다릴 수 있어(소유자가
+            // 지연 렌더링하면 블록된다) 그 사이 PTY 리더가 코어 락에 막힌다. 복사해 두고 락 밖에서 쓴다.
+            var write_copy: ?[]u8 = null;
+            if (pending.len > 0) write_copy = allocator.dupe(u8, pending) catch null;
+            if (pending.len > 0) active.core.clearClipboardWrite();
+            if (want_read) active.core.clearClipboardRead();
+            active.unlockCore(io);
+
+            if (write_copy) |bytes| {
+                defer allocator.free(bytes);
+                win32_clipboard.write(allocator, window.hwnd, bytes) catch |err| {
+                    try stderr.print("  경고: 클립보드 쓰기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+                    clipboard_errors += 1;
+                };
+                osc52_writes += 1;
+            }
+            if (want_read) {
+                // OSC 52 읽기 응답은 셸에 되돌려 줘야 한다. 그 인코딩(base64 + OSC 52 프레이밍)은 중립
+                // 계층 몫이라 여기서 만들지 않는다 — W7.5 에서 그 자리를 찾아 붙인다.
+                osc52_reads += 1;
+            }
+        }
 
         // ⑴ 아틀라스가 커졌으면 텍스처를 다시 만든다(중립 쪽이 전체를 무효화하고 재배치했으므로 안전하다).
         const now_w = renderer_state.atlas.config.atlas_width_px;
@@ -1073,6 +1256,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes });
+    try stdout.print("pastes={d} paste_bytes={d}\n", .{ pastes, paste_bytes });
+    try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     try stdout.writeAll("visible UI: 실제 셸 출력이 창에 그려진다.\n");
@@ -1848,6 +2033,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
         \\  maru win32-terminal-smoke
+        \\  maru win32-clipboard-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1872,6 +2058,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  dwrite-text-smoke render real text with DirectWrite glyphs plus synthesized box drawing (Windows only; needs a D3D11 device)
         \\  win32-frame-smoke run a live PTY through the Windows shaper and DirectWrite rasterizer into a neutral RenderFrame (Windows only; no window)
         \\  win32-terminal-smoke draw a live shell session on screen with D3D11 + DirectWrite (Windows only; needs an interactive desktop)
+        \\  win32-clipboard-smoke round-trip text through the OS clipboard (Windows only; no window needed)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
@@ -1902,6 +2089,7 @@ test {
     _ = win32_text;
     _ = win32_terminal;
     _ = win32_keys;
+    _ = win32_clipboard;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

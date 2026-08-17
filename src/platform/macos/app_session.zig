@@ -9904,7 +9904,15 @@ pub const AppSession = struct {
         if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
-            const content = dock_ops.dockGeometry(self).tree_content;
+            // **down과 같은 rect를 본다(`dg.dock`).** 예전에는 여기만 `tree_content`(도크에서 view_bar를
+            // 뺀 본문)를 봐서, down은 도크 전체가 먹고 up은 view_bar 위에서 새는 **비대칭**이 있었다.
+            // 그 결과 도크 상단 아이콘 줄의 빈 자리를 클릭하면 up이 터미널에 도달해 텍스트 선택·PTY
+            // 마우스 이벤트가 시작됐다(사용자 제보 2026-08-17 — "도크의 클릭 이벤트가 안 되는 영역을
+            // 누르면 터미널 블록 이벤트가 잡힌다"). 도크 안에서 시작한 클릭은 **끝까지 도크 것**이다.
+            //
+            // view_bar 좌표가 컴포넌트로 들어가도 안전하다 — published tree의 어느 rect에도 걸리지 않아
+            // intent가 null 이고, 이 분기는 "소비했다"만 남긴다. 바 자체의 동작은 down 경로가 소유한다.
+            const content = dock_ops.dockGeometry(self).dock;
             const captured = self.agent_session_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
                 const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
@@ -9916,7 +9924,9 @@ pub const AppSession = struct {
         if (dock_ops.dockVisible(self) and self.dock.view == .source_control and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
-            const content = dock_ops.dockGeometry(self).tree_content;
+            // 위 agent 분기와 같은 이유로 `dg.dock`을 본다 — 도크 뷰가 달라도 포인터 수명은 하나여야 하고,
+            // view_bar 위의 up이 터미널로 새는 것은 뷰와 무관한 같은 결함이다.
+            const content = dock_ops.dockGeometry(self).dock;
             const captured = self.scm_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
                 const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
@@ -10409,6 +10419,17 @@ pub const AppSession = struct {
                 return;
             }
         }
+        // **도크 위의 더블·트리플 클릭은 터미널 선택으로 새지 않는다.** 도크 라우팅 블록은
+        // `if (kind == 1 and button == 0)` 안에 있어 kind 4/5는 그 블록을 통째로 건너뛴다. 그리고
+        // `pxToCell`은 영역 밖 좌표를 **grid 안으로 clamp**하므로(위 주석) 도크 좌표도 유효한 (row,col)이
+        // 되어, 아래 switch의 `select_word`/`select_line`이 그대로 실행됐다 — 도크 빈 자리를 두 번 누르면
+        // 터미널에 단어/줄 선택 블록이 생기는 것으로 보인다(사용자 제보 2026-08-17). kind 3은
+        // `!mouse_drag_selecting` 가드가 우연히 막아 주지만 4/5에는 그 가드가 없다.
+        //
+        // 도크 블록을 4/5까지 열지 않는 이유: 그 블록은 행 활성화·뷰 전환 같은 **동작**을 수행하므로
+        // 더블클릭이 같은 동작을 두 번 일으킨다. 여기서는 "터미널 것이 아니다"만 말하고 소비한다.
+        if ((kind == 4 or kind == 5) and dock_ops.dockVisible(self) and
+            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) return;
         const cell = self.pxToCell(x_px, y_px) orelse {
             // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
             // 멈춘다(안 그러면 mouseUp이 좌표 손상으로 와도 autoscroll이 frame-loop로 영원히 돈다).
@@ -53864,6 +53885,71 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     dock_ops.setDockView(session, .explorer);
     session.mouse(1, x, y, 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
+}
+
+// 도크 안에서 시작한 클릭은 **끝까지 도크 것**이다. 그런데 down은 `dg.dock`(도크 전체)을 보고 up·move는
+// `dg.tree_content`(도크에서 view_bar를 뺀 본문)만 봐서, 도크 상단 아이콘 줄의 빈 자리를 클릭하면 down은
+// 도크가 먹고 **up만 터미널에 도달**했다. 그 up은 `select_extend_or_collapse`를 코어에 넣어 살아 있던
+// 선택을 움직인다(사용자 제보 2026-08-17 — "도크의 클릭 이벤트가 안 되는 영역을 누르면 터미널 블록
+// 이벤트가 잡힌다").
+//
+// 계약을 좌표가 아니라 **결과**로 고정한다: 도크 안 어디서 up이 나도 터미널 선택은 손대지 않는다.
+test "도크 포인터: 도크 위의 더블·트리플 클릭은 터미널 선택을 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 900, 600, session.scale_milli);
+    const surface = term_ops.activeSurface(session);
+    // 화면을 **꽉 채운다** — 중앙이 빈 줄이면 마지막 단언(터미널 본문 더블클릭은 정상)이 "단어가 없어서"
+    // 실패해 게이트를 잘못 의심하게 된다.
+    try surface.core.write("hello world\r\n" ** 80);
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    try std.testing.expect(dock_ops.dockVisible(session));
+    _ = session.takeFilePanelPickRequest();
+    dock_ops.setDockView(session, .agent_sessions);
+
+    const dg = dock_ops.dockGeometry(session);
+    if (dg.view_bar.h == 0) return error.SkipZigTest; // 도크가 낮아 바가 접힌 형상은 이 계약의 대상이 아니다
+    // 아이콘 슬롯이 **없는** 자리를 고른다 — 슬롯 위라면 클릭이 뷰를 바꾸는 정상 동작이라 이 결함이 안 보인다.
+    const bar_x: f64 = @floatFromInt(dg.view_bar.x + dg.view_bar.w - 3);
+    const bar_y: f64 = @floatFromInt(dg.view_bar.y + dg.view_bar.h / 2);
+    try std.testing.expect(dock_ops.dockViewSlotAt(session, bar_x, bar_y) == null);
+    try std.testing.expect(layout_math.pointInRect(bar_x, bar_y, dg.dock)); // 도크 안이다
+    try std.testing.expect(!layout_math.pointInRect(bar_x, bar_y, dg.tree_content)); // 그러나 본문 밖이다
+
+    // 도크 **본문** 좌표도 함께 본다 — 결함은 view_bar 여백에 한정되지 않는다.
+    const content_x: f64 = @floatFromInt(dg.tree_content.x + dg.tree_content.w / 2);
+    const content_y: f64 = @floatFromInt(dg.tree_content.y + dg.tree_content.h / 2);
+
+    // 단일 클릭은 예전에도 도크가 먹었다. 새던 것은 **더블·트리플 클릭**이다: 도크 라우팅 블록이
+    // `kind == 1`에만 걸려 있고 `pxToCell`이 도크 좌표를 grid 안으로 clamp해, 터미널 `select_word`/
+    // `select_line`이 그대로 실행됐다.
+    for ([_]i32{ 4, 5 }) |kind| {
+        for ([_][2]f64{ .{ bar_x, bar_y }, .{ content_x, content_y } }) |pt| {
+            try std.testing.expect(surface.core.selection_anchor == null);
+            session.mouse(kind, pt[0], pt[1], 0, 0);
+            // 터미널에 단어/줄 선택이 생기면 실패다 — 그 선택이 사용자가 본 "블록"이다.
+            try std.testing.expect(surface.core.selection_anchor == null);
+            try std.testing.expect(surface.core.selection_head == null);
+        }
+    }
+
+    // 같은 좌표라도 **터미널 본문**에서는 더블클릭이 정상 동작한다(게이트가 기능을 죽인 게 아니라 영역으로 가른다).
+    const body = pane_ops.paneTermRect(session, session.active_pane_rect);
+    session.mouse(4, @floatFromInt(body.x + body.w / 4), @floatFromInt(body.y + body.h / 2), 0, 0);
+    try std.testing.expect(surface.core.selection_anchor != null);
 }
 
 // [code-review max] diff Term은 persisted 시퀀스에 **자리를 만들지 않는다**. writer에서만 빼면 이미 부여된 index가

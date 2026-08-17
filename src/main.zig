@@ -1222,6 +1222,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var copy_bytes: usize = 0;
     var right_click_pastes: usize = 0;
     var right_click_menus_unimplemented: usize = 0;
+    var capture_losses: usize = 0;
     // 우클릭 동작. `config/theme.zig`의 `input.right_click` **기본값이 `paste`** 다(PuTTY/X11 식 —
     // 사용자 결정). 이 스모크는 config 를 안 읽으므로 그 기본값을 그대로 쓴다(W7.5 에서 진짜 설정에서 온다).
     const right_click_action: maru.config.theme.RightClick = .paste;
@@ -1229,6 +1230,12 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
     var last_ime_caret: ?win32_mouse.Cell = null;
+    // 마지막으로 계산한 마우스 셀. **휠 좌표가 화면 기준으로 오는 것을 놓치면 창 위치만큼 어긋나는데**,
+    // 카운터만으로는 그것이 안 보인다 — 이 줄이 그 자리를 지킨다.
+    var last_mouse_cell: ?win32_mouse.Cell = null;
+    // **휠 셀은 따로 센다.** 호버 리포트(트래킹 any)가 매 픽셀 들어와 마지막 값을 덮으므로,
+    // 공용 칸으로는 "휠 좌표가 화면 기준이라 어긋났는지" 를 볼 수 없다.
+    var last_wheel_cell: ?win32_mouse.Cell = null;
     var ime_caret_updates: usize = 0;
     var click_tracker: win32_mouse.ClickTracker = .{};
     // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
@@ -1336,32 +1343,55 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
-                const grid = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h);
-                const cols: u16 = if (grid) |g| g.cols else 0;
-                const rows: u16 = if (grid) |g| g.rows else 0;
+                // **캡처를 뺏겼으면 드래그만 끝낸다.** 버튼을 뗀 자리를 모르므로 선택을 건드리면
+                // 안 된다 — 좌표 없이 확장하면 선택이 좌상단까지 끌려간다.
+                if (m.kind == .capture_lost) {
+                    dragging = false;
+                    click_tracker.reset();
+                    wheel_acc.reset();
+                    // 호버 중복 억제도 푼다 — 창을 벗어났다 돌아왔을 때 **첫 이동이 stale 로 막히면**
+                    // 그 셀에서 리포트가 한 번 빠진다.
+                    last_motion_cell = null;
+                    capture_losses += 1;
+                    continue;
+                }
 
-                // 셸이 마우스를 잡고 있는지는 코어가 안다. **enum 하나만 락 아래서 읽는다.**
-                const tracking: maru.terminal.MouseTracking = blk: {
+                // **격자는 코어에게 묻는다.** 스왑체인 픽셀에서 유도하면 리사이즈 중에 코어가 아직 옛
+                // 크기일 때 **없는 셀로 clamp** 된다 — 그 좌표로 선택을 확장하면 코어가 거절하거나
+                // 엉뚱한 줄을 잡는다. 트래킹 모드와 함께 **한 번의 락에서** 읽는다.
+                const snap: struct { tracking: maru.terminal.MouseTracking, cols: u16, rows: u16 } = blk: {
                     active.lockCore(io);
                     defer active.unlockCore(io);
-                    break :blk active.core.mouse_tracking;
+                    break :blk .{
+                        .tracking = active.core.mouse_tracking,
+                        .cols = active.core.size.cols,
+                        .rows = active.core.size.rows,
+                    };
                 };
+                const tracking = snap.tracking;
+                const cols = snap.cols;
+                const rows = snap.rows;
                 const to_shell = win32_mouse.reportsToShell(tracking != .none, m.mods);
 
                 if (m.kind == .wheel) {
-                    // 휠 좌표는 화면 기준이라 셀로 안 쓴다(§2k) — 스크롤은 활성 표면에 걸린다.
                     const lines = wheel_acc.feed(m.wheel_delta, wheel_lines_per_notch);
                     if (lines == 0) continue;
                     if (to_shell) {
+                        // **휠 리포트에도 셀 좌표를 싣는다.** 앱이 그것으로 어느 pane 을 굴릴지 정한다
+                        // (less·vim 분할) — (0,0)을 실으면 늘 좌상단이라고 말하는 셈이다. 창이 화면
+                        // 기준 좌표를 주는 것은 창 쪽에서 이미 클라이언트 기준으로 바꿔 올린다.
+                        const wcell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                        last_mouse_cell = wcell;
+                        last_wheel_cell = wcell;
                         const button: u8 = if (lines > 0) win32_mouse.button_wheel_up else win32_mouse.button_wheel_down;
                         var n: i32 = @intCast(@abs(lines));
                         while (n > 0) : (n -= 1) {
                             runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{
                                 .button = button,
-                                .col = 0,
-                                .row = 0,
-                                .x_px = 0,
-                                .y_px = 0,
+                                .col = wcell.col,
+                                .row = wcell.row,
+                                .x_px = @intCast(@max(m.x_px, 0)),
+                                .y_px = @intCast(@max(m.y_px, 0)),
                                 .pressed = true,
                                 .motion = false,
                                 .mods = win32_mouse.reportModifiers(m.mods),
@@ -1408,13 +1438,19 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 }
 
                 const cell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                last_mouse_cell = cell;
 
                 if (to_shell) {
                     const is_motion = m.kind == .moved;
-                    // 버튼 없는 이동은 any(1003)일 때만, 그리고 **셀이 바뀔 때만** 보낸다 —
-                    // `WM_MOUSEMOVE` 는 픽셀마다 오는데 셀은 안 바뀐다.
-                    if (is_motion and !dragging) {
-                        if (tracking != .any) continue;
+                    if (is_motion) {
+                        // 버튼 없는 이동(hover)은 any(1003)일 때만 리포트한다.
+                        if (!dragging and tracking != .any) continue;
+                        // 드래그 중 이동은 button(1002)·any(1003)만 받는다 — 코어도 같은 가드를 갖지만
+                        // 여기서 걸러야 **큐에 넣지도 않는다**.
+                        if (dragging and tracking != .button and tracking != .any) continue;
+                        // **셀이 바뀔 때만 보낸다 — 드래그도 마찬가지다.** `WM_MOUSEMOVE` 는 픽셀마다
+                        // 오는데 셀은 안 바뀐다. 드래그를 예외로 두면 창을 가로질러 끄는 동안 같은
+                        // 리포트가 PTY 에 수백 개 쏟아진다(xterm 도 셀 단위로 낸다).
                         if (last_motion_cell) |last| {
                             if (last.row == cell.row and last.col == cell.col) continue;
                         }
@@ -1425,7 +1461,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         .middle_down, .middle_up => win32_mouse.button_middle,
                         .right_down, .right_up => win32_mouse.button_right,
                         .moved => if (dragging) win32_mouse.button_left else win32_mouse.button_none,
-                        .wheel => unreachable,
+                        // 둘 다 위에서 이미 `continue` 했다.
+                        .wheel, .capture_lost => unreachable,
                     };
                     const pressed = switch (m.kind) {
                         .left_up, .right_up, .middle_up => false,
@@ -1670,6 +1707,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         }
     }
     try stdout.print("scrolls={d} alt_scrolls={d} wheel_lines_per_notch={d} double_click_ms={d}\n", .{ scrolls, alt_scrolls, wheel_lines_per_notch, double_click_ms });
+    if (last_mouse_cell) |c| {
+        try stdout.print("last_mouse_cell={d},{d}\n", .{ c.row, c.col });
+    } else try stdout.writeAll("last_mouse_cell=none\n");
+    if (last_wheel_cell) |c| {
+        try stdout.print("last_wheel_cell={d},{d}\n", .{ c.row, c.col });
+    } else try stdout.writeAll("last_wheel_cell=none\n");
+    try stdout.print("capture_losses={d}\n", .{capture_losses});
     // **코어가 실제로 무엇을 보고 있는지 찍는다.** 라우팅이 예상과 다를 때 "우리 판정이 틀렸나, 코어가
     // 모드를 못 받았나"를 가르는 유일한 줄이다 — 없으면 둘을 구분 못 해 엉뚱한 곳을 고친다.
     if (app_window.active()) |active| {

@@ -223,6 +223,20 @@ var conpty_init_done: bool = false;
 extern "kernel32" fn LoadLibraryExW(?[*:0]const u16, ?*anyopaque, u32) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetProcAddress(*anyopaque, [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetModuleFileNameW(?*anyopaque, [*]u16, u32) callconv(.winapi) u32;
+extern "kernel32" fn GetFileAttributesW(?[*:0]const u16) callconv(.winapi) u32;
+
+/// `INVALID_FILE_ATTRIBUTES`. 파일이 없으면 이 값이다.
+const invalid_file_attributes: u32 = 0xFFFF_FFFF;
+
+/// `conpty.dll` 이 찾는 pty 호스트의 상대 경로. NuGet 패키지의 `build/native/*.targets` 가 아키텍처
+/// 하위 폴더를 쓰라고 정했다. **arch 를 손으로 박지 않는다** — arm64 를 번들할 때 이 문자열만 안 고치면
+/// 존재 확인이 엉뚱한 자리를 보고 조용히 `system` 으로 접는다.
+const host_relative_path = std.unicode.utf8ToUtf16LeStringLiteral(switch (builtin.cpu.arch) {
+    .x86_64 => "x64\\OpenConsole.exe",
+    .aarch64 => "arm64\\OpenConsole.exe",
+    .x86 => "x86\\OpenConsole.exe",
+    else => "OpenConsole.exe",
+});
 
 /// `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`. 전체 경로로 부르지만 **의존 DLL 탐색도 좁힌다**.
 const load_library_search_default_dirs: u32 = 0x1000;
@@ -235,36 +249,65 @@ const load_library_search_default_dirs: u32 = 0x1000;
 ///
 /// **셋을 한 모듈에서 다 얻지 못하면 하나도 쓰지 않는다.** kernel32 의 `Close` 로 번들이 만든 HPCON 을
 /// 닫는 것 같은 섞임은 그 자리에서 안 터지고 나중에 이상하게 터진다.
+/// **락으로 감싼다.** 표면 둘이 동시에 spawn 하면 그냥 `bool` 로는 경합이 난다 — A 가 플래그만 먼저
+/// 세우고 `LoadLibrary` 중일 때 B 가 "이미 끝났다"고 보고 **kernel32 로** HPCON 을 만든 뒤, A 가 끝나
+/// 포인터를 채우면 B 의 HPCON 을 **번들 `Close`가 닫는다**. 위 doc 이 "섞이면 안 된다"고 적은 바로 그
+/// 사고가 그렇게 난다. 초기화가 끝나기 전에는 아무도 지나가지 못하게 한다.
+var conpty_init_lock: SRWLOCK = .{};
+
 fn ensureConptyLoaded() void {
-    if (conpty_init_done) return;
-    conpty_init_done = true;
+    if (@atomicLoad(bool, &conpty_init_done, .acquire)) return;
+    AcquireSRWLockExclusive(&conpty_init_lock);
+    defer ReleaseSRWLockExclusive(&conpty_init_lock);
+    if (conpty_init_done) return; // 기다리는 동안 다른 스레드가 끝냈다
+    // 어떤 갈래로 나가든 **끝났다는 사실을 마지막에** 공개한다(락 해제보다 먼저 — defer 는 LIFO).
+    defer @atomicStore(bool, &conpty_init_done, true, .release);
     if (builtin.os.tag != .windows) return;
 
-    var buf: [max_path_utf16]u16 = undefined;
+    var buf: [exe_path_utf16]u16 = undefined;
     const len = GetModuleFileNameW(null, &buf, buf.len);
-    if (len == 0 or len >= buf.len) {
+    if (len == 0) {
         conpty_reject_reason = "실행 파일 경로를 못 읽었다";
+        return;
+    }
+    // 버퍼가 모자라면 `GetModuleFileNameW` 는 **잘라서** 버퍼 크기를 돌려준다. 그 경우는 경로가
+    // MAX_PATH 를 한참 넘는 것이라 어차피 아래에서 거른다 — 여기서 같은 이유로 접는다.
+    if (len >= buf.len) {
+        conpty_reject_reason = "설치 경로가 너무 길다(#16860)";
         return;
     }
     // 파일 이름을 떼고 `conpty.dll` 을 붙인다.
     var dir_len: usize = len;
     while (dir_len > 0 and buf[dir_len - 1] != '\\' and buf[dir_len - 1] != '/') dir_len -= 1;
-    const name = std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll");
-    if (dir_len + name.len + 1 > buf.len) {
-        conpty_reject_reason = "경로가 너무 길다";
+    // **구분자가 없으면 포기한다.** 그대로 이으면 `conpty.dll` 이라는 **상대 경로**가 되어
+    // `LoadLibraryEx` 가 CWD 를 뒤진다 — 위 doc 이 막았다고 한 하이재킹이 바로 여기로 들어온다.
+    if (dir_len == 0) {
+        conpty_reject_reason = "실행 파일 경로에 디렉터리가 없다";
         return;
     }
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll");
     // **경로가 길면 `CreatePseudoConsole` 이 죽는다**(microsoft/terminal#16860). MAX_PATH 를 넘으면
-    // 번들을 쓰지 않고 인박스로 접는다 — 기능 하나를 잃는 편이 죽는 것보다 낫다.
-    if (dir_len + name.len >= 260) {
+    // 번들을 쓰지 않고 인박스로 접는다 — 기능 하나를 잃는 편이 죽는 것보다 낫다. 둘 중 긴 쪽으로 잰다.
+    const longest = @max(name.len, host_relative_path.len);
+    if (dir_len + longest >= 260 or dir_len + longest + 1 > buf.len) {
         conpty_reject_reason = "설치 경로가 MAX_PATH 를 넘는다(#16860)";
         return;
     }
+
+    // **`OpenConsole.exe` 를 먼저 본다.** 없으면 `conpty.dll` 은 시스템 conhost 로 **조용히
+    // 되돌아가므로**, dll 만 있는 상태에서 `conpty=bundled` 라고 보고하면 거짓말이 된다 — 이 이식이
+    // 계속 경계해 온 "성공처럼 보이는 실패" 다. 먼저 확인하고 나중에 dll 경로를 만든다(버퍼를 덮었다
+    // 되돌리는 순서보다 이쪽이 안전하다 — 그 사이에 `return` 이 끼면 되돌리기를 잊는다).
+    @memcpy(buf[dir_len..][0..host_relative_path.len], host_relative_path);
+    buf[dir_len + host_relative_path.len] = 0;
+    if (GetFileAttributesW(@ptrCast(&buf)) == invalid_file_attributes) {
+        conpty_reject_reason = "OpenConsole.exe 가 없다(conpty.dll 만으로는 옛 conhost 로 되돌아간다)";
+        return;
+    }
+
     @memcpy(buf[dir_len..][0..name.len], name);
     buf[dir_len + name.len] = 0;
-    const full: [*:0]const u16 = @ptrCast(&buf);
-
-    const lib = LoadLibraryExW(full, null, load_library_search_default_dirs) orelse {
+    const lib = LoadLibraryExW(@ptrCast(&buf), null, load_library_search_default_dirs) orelse {
         conpty_reject_reason = "conpty.dll 이 실행 파일 옆에 없다";
         return;
     };
@@ -299,9 +342,10 @@ fn conptyResize(hpc: HANDLE, size: COORD) i32 {
     return ResizePseudoConsole(hpc, size);
 }
 
-/// `GetModuleFileNameW` 버퍼. `\\?\` 접두 긴 경로까지 받도록 넉넉히 둔다(그래도 위에서 MAX_PATH 로
-/// 거른다 — 버퍼가 넉넉한 것과 conpty 가 그 길이를 견디는 것은 다른 문제다).
-const max_path_utf16: usize = 32768;
+/// `GetModuleFileNameW` 버퍼(UTF-16 단위). **스택에 32 KiB 를 잡지 않는다** — 긴 경로 상한(32768)까지
+/// 받으려면 64 KiB 스택 프레임이 되는데, 어차피 MAX_PATH(260)를 넘으면 번들을 안 쓴다. 그 두 배면
+/// 넉넉하고, 넘치면 `GetModuleFileNameW` 가 잘라서 알려 주므로 그때 접는다.
+const exe_path_utf16: usize = 520;
 
 const invalid_handle_value: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 

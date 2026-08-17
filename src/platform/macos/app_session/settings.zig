@@ -66,7 +66,7 @@ const tab_accent_labels = app_session_mod.tab_accent_labels;
 const content_menu = app_session_mod.content_menu;
 const detectThemePreset = AppSession.detectThemePreset;
 const dock_ops = @import("dock.zig");
-const font_direct_input_label = AppSession.font_direct_input_label;
+const fontDirectInputLabel = AppSession.fontDirectInputLabel;
 const font_size_min = app_session_mod.font_size_min;
 const setAppKeepAlivePolicy = app_session_mod.setAppKeepAlivePolicy;
 const sidebar_ops = @import("sidebar.zig");
@@ -551,7 +551,7 @@ pub fn buildSettingsDropdownItems(self: *AppSession, arena: std.mem.Allocator) !
             const fonts = config_mod.theme.bundled_font_families;
             const out = try arena.alloc([]const u8, fonts.len + 1);
             for (fonts, 0..) |fam, i| out[i] = fam;
-            out[fonts.len] = font_direct_input_label;
+            out[fonts.len] = fontDirectInputLabel();
             return out;
         }
     }

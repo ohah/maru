@@ -73,6 +73,7 @@ test "코어가 없을 때는 세지 않고 알린다" {
 // **복사는 잡은 것을 꺼내는 일이다.** 추출은 코어가 하고(soft-wrap 잇기·2셀 뒷칸 제외가
 // 거기 있다) 플랫폼은 클립보드에 쓰기만 한다 — 브리지엔 OS 호출이 없다(§3).
 test "선택을 복사로 꺼낸다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -89,7 +90,12 @@ test "선택을 복사로 꺼낸다" {
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    // **손을 뗀다.** 선택은 떼도 남는다(계약 §3.1) — 그 뒤에 copy 를 누르는 것이 실제 순서다.
+    // 손가락을 든 채 키바를 누르면 그건 **둘째 손가락**이고, 제스처 목적지는 안 바뀌므로
+    // 키가 안 나간다(R1 이 그 자리를 드러냈다 — 전에는 라우팅이 없어 우연히 통과했다).
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now());
 
     // **누르기 전에는 아무것도 안 나온다** — 선택이 있다고 저절로 복사되면 안 된다.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
@@ -349,6 +355,7 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
 // 커서는 **모양도 표시 여부도 코어가 정한다**(DECSCUSR·DECTCEM). 데스크톱과 같은 세 모양을
 // 다 그리는지, 그리고 TUI 가 숨기면(`CSI ?25 l`) 실제로 사라지는지 본다.
 test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -381,6 +388,7 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
 // 그때 이 테스트는 "스크롤백에서는 안 그린다" 라는 이름을 달고 있었지만 `viewOffset() == 0`
 // 을 지워도 그대로 통과했다(변이로 확인). 이제 만들 수 있으므로 양쪽을 다 본다.
 test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안에는 안 그린다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -413,6 +421,7 @@ test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안�
 // 누적해야 한다 — 그리고 그 누적은 바닥으로 스냅할 때 함께 비워져야 한다(안 그러면 다음
 // 스크롤이 옛 나머지만큼 튄다).
 test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
@@ -431,6 +440,7 @@ test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
 // **입력하면 바닥으로 스냅한다.** 과거를 보는 중에 친 글자가 화면 밖에 찍히면 친 것이
 // 사라진 것처럼 보인다(데스크톱의 "입력하면 live 복귀" 와 같은 규칙).
 test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
@@ -450,6 +460,7 @@ test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
 // **alt screen 의 스크롤은 프로그램의 것이다**(DECSET 1007). less·vim 이 자기 스크롤을 갖고
 // 있으므로 뷰포트를 움직이는 대신 화살표를 보낸다 — 데스크톱이 정한 것과 같은 규칙이다.
 test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
@@ -529,6 +540,7 @@ fn keyCenter(index: u32) struct { x: f32, y: f32 } {
 // 좌표는 **build 가 잡아 준 것**을 쓴다 — 테스트가 자리를 손으로 적으면 레이아웃이 바뀔 때
 // 테스트만 맞고 제품이 틀리게 된다.
 test "키바 탭이 키를 내고, 밖은 안 먹는다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
 
@@ -548,6 +560,7 @@ test "키바 탭이 키를 내고, 밖은 안 먹는다" {
 // 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가
 // 되고, 소프트 키보드로 친 글자에 안 실리면 키바를 만든 이유가 없다(그게 실제 쓰임이다).
 test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
@@ -577,6 +590,7 @@ test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
 // 깨진다 — 사용자가 누른 Ctrl 이 엉뚱한 데 쓰이고, ESC 는 문자 키 표에 없어서 **그 바이트가
 // 조용히 사라진다**(구현 중 실제로 그렇게 났다).
 test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const ctrl = keyCenter(2);
@@ -597,6 +611,7 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
 // 같은 키를 또 누르면 꺼져야 한다 — 잘못 눌렀을 때 되돌릴 방법이 없으면 다음 글자가
 // 제어문자가 되는 것을 보고만 있어야 한다.
 test "Ctrl 을 다시 누르면 꺼진다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     const ctrl = keyCenter(2);
     _ = keybarTap(ctrl.x, ctrl.y);
@@ -624,6 +639,7 @@ fn pointForCell(row: u16, col: u16) ?struct { x: f32, y: f32 } {
 // 손가락 하나가 **끌면 스크롤, 길게 누르면 선택**이다. 그 판단이 플랫폼마다 갈리면 같은
 // 동작이 기기에 따라 다른 뜻이 되므로 코어가 정한다(§3.1). 여기서 그 갈림을 고정한다.
 test "끌면 스크롤이고 길게 누르면 선택이다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     // **개행으로 줄을 못 늘린다.** `maru_mobile_input` 의 개행은 Enter 키(CR)라 열만 0 으로
     // 가고 행은 그대로다 — 줄을 넘겨 주는 셸 에코가 아직 없기 때문이다(원격 세션 M3 전까지).
@@ -711,6 +727,7 @@ test "선택은 화면에 quad 로 나타난다" {
 // 단어만 확인하면 그 분기가 한 번도 안 돈다. 값으로 먼저 고정한다 — 화면은 한 칸 차이를
 // 눈으로 못 세고, 실제로 그래서 결함을 놓친 적이 있다.
 test "여러 줄에 걸쳐 선택된다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -751,6 +768,7 @@ test "여러 줄에 걸쳐 선택된다" {
 // 올라가야 하고, 자리에 붙어 있으면 엉뚱한 글자가 잡힌 것처럼 보인다. 코어가 절대 행으로
 // 들고 있으므로 뷰포트 span 은 저절로 따라와야 한다 — 그것을 값으로 고정한다.
 test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -766,6 +784,7 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     const q = pointForCell(1, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     const before = bridge.maru_mobile_selection_span();
     const before_row = (before >> 48) & 0xFFFF;
@@ -798,6 +817,7 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
 // 버퍼가 모자라면 **자르되 조용히 자르지 않는다**. 자른 것을 모르면 잘린 명령을 붙여넣고
 // 왜 안 되는지 모른다 — 경계(딱 맞음)와 한 칸 모자람을 함께 본다.
 test "복사 버퍼가 모자라면 알린다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     // **스크롤백까지 지운다**(`ED 3`). 스크롤백이 쌓인 상태에서는 선택 범위와 추출이 서로
@@ -809,6 +829,7 @@ test "복사 버퍼가 모자라면 알린다" {
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
     keybarScrollToEnd(); // `copy` 는 줄 끝이라 밀어야 창 안에 들어온다
     const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
 
@@ -835,6 +856,7 @@ test "복사 버퍼가 모자라면 알린다" {
 // (흐리게 그린다) — 나타났다 사라지던 시절에는 나머지 키가 밀려, 선택을 잡은 직후 겨눈 자리를
 // 누르면 옆 키가 나갔다. `copy` 자신의 자리도 함께 본다.
 test "선택이 생겨도 키 자리는 그대로다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -850,6 +872,7 @@ test "선택이 생겨도 키 자리는 그대로다" {
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     _ = bridge.maru_mobile_build(402, 874, now());
 
@@ -1338,6 +1361,15 @@ fn openTerminal(w: u32, h: u32) void {
     _ = bridge.maru_mobile_build(w, h, now());
 }
 
+/// 진행 중인 제스처를 전부 끝낸다. **기기에서는 OS 가 늘 up/cancel 을 보내지만**, 테스트는
+/// 손가락을 든 채 끝나는 일이 있다 — 그러면 그 목적지가 다음 테스트의 터치를 계속 먹는다
+/// (계약 §3.1: `down` 이 목적지를 정하고 그 제스처가 끝나야 놓는다).
+fn endAnyGesture() void {
+    bridge.maru_mobile_pointer(3, 0, 0, 0, 0);
+    _ = bridge.maru_mobile_keybar_pointer(3, 0, 0, 0);
+    _ = bridge.maru_mobile_chrome_pointer(3, 0, 0, 0);
+}
+
 fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
     var first: ?f32 = null;
     var last: f32 = 0;
@@ -1423,6 +1455,7 @@ test "화면 스택은 목록이 뿌리이고 뒤로가기로 한 장씩 빠진�
 // 관측: 버퍼에는 '가'(EA B0 80) 3바이트가 있지만 host 는 **len=1** 만 줬다고 한다. 밖을 읽으면
 // 코어가 '가' 를 받고, 그 글자는 안 구워졌으므로 **미스 목록에 뜬다**. 안 읽으면 안 뜬다.
 test "재현: armed 상태에서 host 가 준 길이 밖을 안 읽는다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -1466,6 +1499,7 @@ test "재현: armed 상태에서 host 가 준 길이 밖을 안 읽는다" {
 // 브리지가 지켜야 하는 것은 하나다: **조용히 사라지지 않는다**(§5). 잘못된 바이트가 오면
 // 버리되 `last_error` 에 남긴다.
 test "재현: 잘못된 UTF-8 은 버리되 오류로 남긴다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -1489,6 +1523,7 @@ test "재현: 잘못된 UTF-8 은 버리되 오류로 남긴다" {
 //
 // 관측: 한글을 채우고 3의 배수가 아닌 cap 으로 받아 **결과가 유효한 UTF-8 인지** 본다.
 test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
@@ -1498,6 +1533,7 @@ test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
     const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_pointer(2, 1, q.x, q.y, now());
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());

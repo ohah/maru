@@ -724,6 +724,7 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
     if (phase == 3) {
         body_slots = @splat(.{});
         body_owner = null;
+        if (routeIs(.body)) routeClear();
     }
     switch (phase) {
         0 => { // down
@@ -732,6 +733,9 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
             // (T2 가 host 에서 모든 손가락을 보내기 시작하면서 실제로 그렇게 됐다.)
             // **같은 id 로 down 이 두 번 오면 자리를 새로 만들지 않는다.** 만들면 `up` 이 그
             // 중복을 "남은 손가락" 으로 이어받아 **제스처가 영영 안 끝난다**(테스트가 잡았다).
+            // **본문은 마지막 순서다** — chrome·키바가 안 먹었을 때만 잡는다(계약 §3.1).
+            // host 가 그 순서로 물어보므로 여기 오면 앞의 둘이 사양한 것이다.
+            if (!routeIs(.body) and !routeClaim(.body, pointer_id)) return;
             if (bodySlot(pointer_id)) |sl| {
                 sl.last_y = y;
             } else for (&body_slots) |*sl| {
@@ -755,6 +759,7 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
             }
         },
         1 => { // move
+            if (!routeIs(.body)) return;
             // **비소유자의 기준만 갱신하고 뜻은 안 만든다** — 그 손가락이 이어받는 순간 옛
             // 자리에서 델타가 나오면 화면이 점프한다(T1 이 스크롤 면에서 없앤 그 병).
             if (bodySlot(pointer_id)) |sl| sl.last_y = y;
@@ -793,6 +798,7 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
         },
         else => { // up · cancel
             if (phase == 2) {
+                if (!routeIs(.body)) return;
                 if (bodySlot(pointer_id)) |sl| sl.* = .{};
                 // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1).
                 //
@@ -811,6 +817,7 @@ pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, t
                         return; // 제스처는 계속된다 — 선택·롱프레스 상태를 안 거둔다
                     }
                 }
+                routeClear(); // 마지막 손가락이었다 — 목적지를 놓는다(계약 §3.1)
             }
             ptr_down = false;
             // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다. 지우는 자리는
@@ -873,7 +880,51 @@ var kb_touch: scroll_area.Touch = .{};
 /// 없으면 눌렀는지 화면이 답하지 않는다. 밀기로 판정되면 즉시 푼다(누른 것이 아니었으므로).
 var kb_pressed: ?usize = null;
 
-var kb_active = false;
+/// **이 터치가 어디로 가는가.** `down` 이 정하고 그 제스처는 끝까지 거기로 간다(계약 §3.1 —
+/// chrome → 키바 → 본문 순). **판정을 코어가 든다** — 전에는 host 가 `chrome_active`·
+/// `keybar_active` 로 같은 것을 들었고, 같은 상태가 두 층에 있으니 정리도 두 곳에서 해야 했다
+/// (한쪽을 빠뜨려 "복귀 후 첫 손짓이 통째로 삼켜지는" 결함이 났다).
+const Route = enum { chrome, keybar, body };
+var route: ?Route = null;
+
+/// 그 목적지를 잡은 손가락. **목적지는 소유 손가락에 딸린다** — 둘째 손가락이 다른 표면 위에
+/// 닿아도 제스처의 목적지는 안 바뀐다(키바를 밀면서 본문이 같이 스크롤되는 것을 막는다).
+var route_owner: ?u32 = null;
+
+/// 지금 목적지에 **닿아 있는 손가락이 하나도 없나.** `up` 이 안 온 채 끝난 제스처가 목적지를
+/// 붙잡고 있으면 그 표면이 다음 터치를 계속 먹어 **다른 자리를 눌러도 아무 일이 안 난다** —
+/// 이 저장소에서 그 "굳음" 을 두 번 겪었다(키바 잡음·iOS `_hasBodyPtr`). 상태가 사실과
+/// 어긋났으면 **다음 `down` 이 고친다**.
+fn routeStale() bool {
+    return switch (route orelse return false) {
+        .keybar => kb_touch.owner == null,
+        .chrome => set_touch.owner == null and !set_active,
+        .body => body_owner == null,
+    };
+}
+
+/// 목적지를 잡는다. 주인이 있으면 실패하되, **그 주인이 손가락을 다 뗐으면 빼앗는다**(위).
+fn routeClaim(r: Route, id: u32) bool {
+    if (route != null) {
+        if (!routeStale()) return false;
+        routeClear();
+    }
+    route = r;
+    route_owner = id;
+    return true;
+}
+
+/// 이 표면이 지금 제스처의 주인인가.
+fn routeIs(r: Route) bool {
+    return route == r;
+}
+
+/// 제스처가 끝났다 — 목적지를 놓는다.
+fn routeClear() void {
+    route = null;
+    route_owner = null;
+}
+
 var kb_down_x: f32 = 0;
 var kb_down_y: f32 = 0;
 var kb_last_x: f32 = 0;
@@ -962,10 +1013,10 @@ fn kbScroll() f32 {
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
 pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
-    // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 `kb_active` 가 남아 **복귀 후
+    // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 목적지가 남아 **복귀 후
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
     if (phase == 3) {
-        kb_active = false;
+        if (routeIs(.keybar)) routeClear();
         kb_pressed = null;
         kb_touch.cancel();
         return 0;
@@ -977,11 +1028,11 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
         // **둘째 손가락은 누름 판정을 안 건드린다.** 표면마다 한 번에 한 제스처이므로(계약
         // §3.1) 눌림·이동량·기준은 **소유자의 것**이다. 이 가드가 없으면 둘째 손가락의 down 이
         // `kb_down_x`·`kb_moved` 를 덮어써 **첫 손가락의 "탭이냐 스크롤이냐" 판정이 오염된다**.
-        if (kb_active) {
+        if (routeIs(.keybar)) {
             _ = kb_touch.begin(pointer_id, x); // 코어는 이 손가락도 추적한다(이어받기 대비)
             return 1;
         }
-        kb_active = true;
+        if (!routeClaim(.keybar, pointer_id)) return 0; // 이미 다른 표면의 제스처다
         kb_down_x = x;
         kb_down_y = y;
         kb_last_x = x;
@@ -994,7 +1045,7 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
         kb_pressed = if (kb_stop_tap) null else keybarIndexAt(x, y);
         return 1;
     }
-    if (!kb_active) return 0;
+    if (!routeIs(.keybar)) return 0;
     if (phase == 1) {
         // **비소유자의 move 도 코어에 넘긴다** — 그 손가락의 기준이 낡으면 이어받는 순간
         // 옛 자리에서 델타가 나와 화면이 점프한다. 다만 **눌림·이동량은 소유자만** 건드린다.
@@ -1019,14 +1070,15 @@ pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y:
         kb_touch.end(pointer_id, frame_dt_ms);
         return 1;
     }
-    kb_active = false;
     kb_pressed = null;
     // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
     kb_touch.end(pointer_id, frame_dt_ms);
+    // **마지막 손가락이면 목적지를 놓는다**(계약 §3.1). 안 놓으면 그 표면이 다음 터치까지
+    // 계속 먹어 **다른 자리를 눌러도 아무 일이 안 난다**.
+    if (kb_touch.owner == null) routeClear();
     // **소유자가 떼졌는데 손가락이 남았으면 제스처는 이어진다** — 코어가 새 소유자를 골랐다.
     // 그 손가락은 자기 기준을 갖고 있으므로 여기서는 **눌림만 거두고** 이동량을 새로 센다.
     if (kb_touch.owner) |next| {
-        kb_active = true;
         kb_last_x = x;
         kb_moved = scroll_area.Touch.slop_px; // 이미 밀기다 — 이어받은 손가락이 키를 내지 않는다
         kb_stop_tap = false;
@@ -2812,7 +2864,8 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
         switch (phase) {
             0 => {
                 // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
-                if (set_active) return 1;
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome, pointer_id)) return 0;
                 set_active = true;
                 set_down_x = x;
                 set_down_y = y;
@@ -2821,15 +2874,18 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
                 return 1;
             },
             1 => {
+                if (!routeIs(.chrome)) return 0;
                 set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
                 if (set_moved >= scroll_area.Touch.slop_px) sess_pressed = .none;
                 return 1;
             },
             else => {
+                if (!routeIs(.chrome)) return 0;
                 const was = sess_pressed;
                 sess_pressed = .none;
                 set_active = false;
+                routeClear(); // 세션 목록은 한 손가락 화면이다 — 뗀 순간 끝이다
                 if (phase != 2 or set_moved >= scroll_area.Touch.slop_px) return 1;
                 switch (was) {
                     .gear => {
@@ -2848,6 +2904,7 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
     // 설정 화면이 떠 있으면 **전부 먹는다**.
     switch (phase) {
         0 => {
+            if (!routeIs(.chrome) and !routeClaim(.chrome, pointer_id)) return 0;
             set_active = true;
             set_down_x = x;
             set_down_y = y;
@@ -2900,6 +2957,8 @@ pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y:
             // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
             // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
             if (phase == 3) set_touch.cancel() else set_touch.end(pointer_id, frame_dt_ms);
+            // 마지막 손가락이면 목적지를 놓는다(계약 §3.1).
+            if (phase == 3 or set_touch.owner == null) routeClear();
             const pressed = set_pressed;
             const back = set_back_pressed;
             set_pressed = null;

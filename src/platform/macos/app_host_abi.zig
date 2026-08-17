@@ -501,6 +501,41 @@ pub export fn maru_macos_app_host_capabilities(out_capabilities: ?*Capabilities)
 /// **ABI 버전을 올리지 않는다.** 이 저장소의 관행은 기존 시그니처·struct layout 이 바뀔 때만 올리는
 /// 것이고(v169 = draw 계약 변경), export **추가**는 하위호환이라 올리지 않는다(`take_web_find_query`·
 /// `remote_backend_settle` 선례). 옛 Swift 가 이 함수를 안 불러도 `auto` 가 영어로 떨어질 뿐이다.
+/// 작업공간 복원이 불완전했음을 사용자에게 알린다.
+///
+/// **Swift 가 문장을 만들지 않는다**(i18n 계약 §7.2). 예전에는 Swift 가 한국어 문장을 조립해
+/// `show_notice` 로 넘겼는데, 그것이 계약 §7.3 이 남겨 둔 "ABI 가 Swift 저작 UI 문자열을 받는" 마지막
+/// 구멍이었다. Swift 는 **상태만** 알리고 문장은 여기서 고른다 — 그래서 이 안내가 `ui.language` 를
+/// 따르고, 번역 대상이 두 언어에 흩어지지 않는다.
+pub export fn maru_macos_app_session_notice_workspace_restore_incomplete(session: ?*AppSession) void {
+    const s = session orelse return;
+    s.showNoticeKey(.ws_restore_incomplete);
+}
+
+/// 파일 선택 패널의 안내 문구를 **현재 UI 언어로** 돌려준다.
+///
+/// **Swift 는 UI 문자열을 만들지 않는다**(i18n 계약 §7.2). 예전에는 이 네 문장이 Swift 에 한국어로
+/// 박혀 있어 `ui.language` 를 따르지 않았고, 번역 대상이 두 언어(Zig·Swift)에 흩어졌다.
+///
+/// 반환은 **정적 문자열**이라 host 가 해제하지 않는다(테이블이 소유한다 — 널 종단이므로 Swift 가
+/// `String(cString:)` 으로 그대로 읽는다). 알 수 없는 종류는 빈 문자열이고, 그때 패널은 안내 없이 뜬다
+/// — 크래시보다 낫고, 종류가 늘면 여기와 아래 enum 을 함께 고치라는 신호가 된다.
+pub export fn maru_macos_file_pick_message(kind: u32) [*:0]const u8 {
+    const key: maru.i18n.Key = switch (kind) {
+        MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG => .pick_background_png,
+        MARU_FILE_PICK_MESSAGE_DOCK_FILE => .pick_dock_file,
+        MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER => .pick_explorer_folder,
+        MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER => .pick_workspace_folder,
+        else => return "",
+    };
+    return maru.i18n.t(key).ptr;
+}
+
+const MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG: u32 = 0;
+const MARU_FILE_PICK_MESSAGE_DOCK_FILE: u32 = 1;
+const MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER: u32 = 2;
+const MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER: u32 = 3;
+
 pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize) void {
     const ptr = tag_ptr orelse return;
     if (tag_len == 0 or tag_len > 128) return;
@@ -1039,9 +1074,16 @@ pub export fn maru_macos_app_session_drop_image(
     return if (app_session.handleDroppedImage(ptr[0..len])) 1 else 0;
 }
 
-// chrome Notice 모달(부분 복원 실패 등)을 연다. workspace 전체 parse 실패(count<0)는 Swift가 의도적으로 조용히
-// 기본 창으로 시작하고, 적용 실패처럼 사용자 조치가 가능한 경우에 UTF-8 메시지로 부른다. 세션이 복사 소유하므로
-// 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
+// chrome Notice 모달(부분 복원 실패 등)을 연다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다.
+// len==0이면 무동작. (v40)
+//
+// **Swift 소비처가 0이다(i18n I3f).** 유일한 호출자였던 workspace 부분 복원 안내는 문장을 Swift 가
+// 조립했는데, 그것이 계약 §7.3 이 남겨 둔 "ABI 가 Swift 저작 UI 문자열을 받는" 구멍이었다. 지금은
+// `…notice_workspace_restore_incomplete` 처럼 **상태만 받는 진입점**이 그 자리를 대신한다.
+//
+// **새 호출을 여기로 붙이지 않는다.** 표시 문장이 필요한 host 경로가 생기면 그 상태를 받는 export 를
+// 따로 열고 문장은 Zig 가 고른다 — 이 함수를 쓰면 그 문장이 `ui.language` 를 안 따르고 번역 대상이
+// 다시 두 언어로 흩어진다. 지우지 않고 남긴 것은 ABI 호환(v40 이후 host 가 부를 수 있다) 때문이다.
 pub export fn maru_macos_app_session_show_notice(
     session: ?*AppSession,
     bytes: ?[*]const u8,
@@ -7139,4 +7181,46 @@ test "per-grant revoke export: count/grant_at 스냅샷 + 값기반 revoke_brows
     // 이미 없는 grant revoke = 0(멱등). 잘못된 scope wire도 0.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 0));
     try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 2));
+}
+
+// 파일 선택 안내가 **현재 UI 언어를 따르는지** 본다.
+//
+// 이 네 문장은 예전에 Swift 에 한국어로 박혀 있었다 — `ui.language` 를 바꿔도 그대로였고, 번역 대상이
+// 두 언어(Zig·Swift)에 흩어져 한쪽만 고쳐질 수 있었다. 그 구멍을 ABI 로 옮겼으므로, 옮긴 것이 실제로
+// 동작하는지(그리고 종류→키 대응이 어긋나지 않았는지) 여기서 확인한다.
+test "파일 선택 안내는 UI 언어를 따르고 종류마다 다른 문장을 낸다" {
+    const before = maru.i18n.lang();
+    defer maru.i18n.setLang(before);
+
+    const kinds = [_]u32{
+        MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG,
+        MARU_FILE_PICK_MESSAGE_DOCK_FILE,
+        MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER,
+        MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER,
+    };
+    const keys = [_]maru.i18n.Key{ .pick_background_png, .pick_dock_file, .pick_explorer_folder, .pick_workspace_folder };
+
+    for ([_]maru.i18n.Lang{ .ko, .en }) |lang| {
+        maru.i18n.setLang(lang);
+        for (kinds, keys) |kind, key| {
+            const got = std.mem.span(maru_macos_file_pick_message(kind));
+            try std.testing.expectEqualStrings(maru.i18n.tIn(lang, key), got);
+        }
+    }
+
+    // 네 종류가 **서로 다른 문장**이어야 한다 — 같은 키를 두 종류에 잘못 이으면 위 단언은 통과하지만
+    // 사용자는 엉뚱한 안내를 본다.
+    maru.i18n.setLang(.ko);
+    for (kinds, 0..) |a, i| {
+        for (kinds[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(
+                u8,
+                std.mem.span(maru_macos_file_pick_message(a)),
+                std.mem.span(maru_macos_file_pick_message(b)),
+            ));
+        }
+    }
+
+    // 알 수 없는 종류는 빈 문자열 — 크래시하지 않는다(패널이 안내 없이 뜬다).
+    try std.testing.expectEqualStrings("", std.mem.span(maru_macos_file_pick_message(9999)));
 }

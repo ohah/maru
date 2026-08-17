@@ -548,6 +548,16 @@ pub const Table = struct {
     ws_cwd_must_be_absolute: [:0]const u8,
     arch_redacted: [:0]const u8,
 
+    // ── 작업공간 복원 (I3f) ──
+    ws_restore_incomplete: [:0]const u8,
+
+    // ── 파일 선택 패널 (I3f) ──
+    // **Swift 는 이 문장을 만들지 않는다**(계약 §7.2) — ABI 로 키를 받아 표시만 한다.
+    pick_background_png: [:0]const u8,
+    pick_dock_file: [:0]const u8,
+    pick_explorer_folder: [:0]const u8,
+    pick_workspace_folder: [:0]const u8,
+
     // ── 언어 선택 (I4b) ──
     // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
     set_language_auto: [:0]const u8,
@@ -889,6 +899,11 @@ pub const en: Table = .{
     .tab_group_n = "Group {0}",
     .ws_cwd_must_be_absolute = "The start directory must be an absolute path or ~/… (relative paths and ~user are ignored)",
     .arch_redacted = "[sensitive content hidden]",
+    .ws_restore_incomplete = "The saved workspace was only partially restored — on quit the previous checkpoint is kept as workspace.v1.bak before saving.",
+    .pick_background_png = "Choose a PNG to use as the background",
+    .pick_dock_file = "Choose a file to open in the dock (Markdown, HTML, SVG, text/code, images, media, PDF)",
+    .pick_explorer_folder = "Choose a folder to open in the explorer",
+    .pick_workspace_folder = "Choose a folder to add to the workspace",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_show_all = "Show all",
     .scm_commit_placeholder = "Commit message…",
@@ -1344,6 +1359,11 @@ pub const ko: Table = .{
     .tab_group_n = "그룹 {0}",
     .ws_cwd_must_be_absolute = "시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)",
     .arch_redacted = "[민감한 내용은 표시하지 않음]",
+    .ws_restore_incomplete = "저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.",
+    .pick_background_png = "배경 이미지로 쓸 PNG를 고르세요",
+    .pick_dock_file = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·미디어·PDF)",
+    .pick_explorer_folder = "탐색기에서 열 폴더를 고르세요",
+    .pick_workspace_folder = "작업공간에 추가할 폴더를 고르세요",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_show_all = "모두 보기",
     .scm_commit_placeholder = "커밋 메시지…",

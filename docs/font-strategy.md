@@ -215,6 +215,38 @@ locale hint later
 
 fallback cache가 필요한 이유는 대량 로그와 emoji가 섞일 때 CoreText 조회 비용이 hot path로 들어오는 것을 막기 위해서다.
 
+## 셰이핑 경로의 메모리 소유권 (누수 게이트)
+
+`maru_create_shape_attributes`(`coretext_smoke.m`)는 합자를 끌 때 `calt`를 끈 폰트 사본을 만들어 shaping
+attributes dictionary 에 담는다. 그 사본을 만드는 `maru_font_without_contextual_alternates` 는 **항상 +1
+소유권**을 돌려준다(사본을 못 만들면 `CFRetain(font)` 로도 +1이다). dictionary 가 값을 따로 retain 하므로
+그 +1 은 만든 쪽이 풀어야 한다.
+
+**이 `CFRelease` 를 빠뜨리면 shape 호출(=출력이 있는 dirty 프레임)마다 CTFont 가 하나씩 영구히 남는다.**
+남은 폰트가 자기 cascade 배열과 feature 테이블까지 붙들고 있어 회당 약 36KB 다. 실측(2026-08-18): 연속
+4시간 46분 실행에 physical footprint 140GB(MALLOC_SMALL 137GB, 살아 있는 할당 5억 개), 그중 125GB 가
+스왑으로 나가 머신 전체가 스래싱했고 앱이 jetsam 에 죽었다. RSS 는 418MB 뿐이라 활동 모니터로는 정상으로
+보이고, **화면에도 아무 증상이 없다**.
+
+`font.ligatures = false` 일 때만 타는 분기라 합자를 켠(기본값) 설치는 이 누수를 겪지 않는다.
+
+**검증**: `mise run macos-coretext-smoke` 가 셰이핑을 4,000회 반복해 순 footprint 증가가 상한(4MB) 안인지
+본다. 실패는 `MacosCoreTextShapeLeaked`, footprint 를 못 읽으면 `MacosCoreTextShapeLeakNotMeasured`,
+셰이핑 자체가 실패했으면 `MacosCoreTextShapeLeakProbeFailed` 로 갈린다 — 원인을 잘못 가리키는 실패가 가장
+나쁘다.
+
+- **합자 두 설정을 번갈아 태운다.** 이번 누수는 OFF 분기에 있었지만 ON 분기도 dictionary 에 폰트를 담으므로,
+  거기 소유권 실수가 새로 생기면 **기본 설정을 쓰는 모든 사용자**에게 프레임마다 샌다. 한쪽만 재면 다른 쪽에
+  눈이 먼다.
+- **음수 델타(순 감소)는 통과다.** 게이트의 계약은 "순 footprint 가 상한을 넘게 늘지 않는다"이고 감소는 그
+  계약을 문자 그대로 만족한다. 남는 사각은 상한 근처의 작은 누수가 같은 창의 OS 회수에 상쇄되는 경우인데,
+  실제로 막으려는 크기는 회수로 가려지지 않는다.
+- **실측(red→green)**: 정상은 4,000회에 **272~384 KB**(16회 측정, 중앙값 304 KB, 1초 미만). `CFRelease` 를
+  되돌리면 **72,024,112 B** — 상한 4MB 가 정상 최대치의 **10.7배**·누수 신호의 **1/17** 지점에 있다.
+
+이 스모크는 `.github/workflows/ci.yml` 의 macOS job 에서 계약 테스트와 함께 돈다. `mise run check` 는
+ubuntu 라 `.m` 을 컴파일조차 하지 않으므로, `check` 에만 기대면 이 게이트는 CI 에서 한 번도 실행되지 않는다.
+
 ## Chrome 텍스트 face (measured chrome이 어떤 폰트로 그려지는가)
 
 Chrome에는 텍스트를 그리는 경로가 **둘**이고, 이 절은 그중 measured 경로의 face 단일 출처다.

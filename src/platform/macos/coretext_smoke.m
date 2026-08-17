@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+// phys_footprint 를 읽는 진단 seam 전용(아래 maru_macos_coretext_phys_footprint_bytes). 셰이핑 경로가
+// 메모리를 새는지를 테스트가 직접 재려면 프로세스 자신의 footprint 를 봐야 한다.
+#include <mach/mach.h>
 
 // 등록된 maru 아이콘 codepoint 집합(생성 — tools/svg_to_coverage.py). maru_is_synthesized_glyph가
 // 아이콘 분기에서 이걸 써 **등록 아이콘만** 합성으로 본다(미등록 in-range는 폰트 폴백 — Nerd Fonts v3 MDI 겹침).
@@ -772,8 +775,38 @@ static CFDictionaryRef maru_create_shape_attributes(CTFontRef font, bool ligatur
         &kCFTypeDictionaryKeyCallBacks,
         &kCFTypeDictionaryValueCallBacks
     );
+    // `maru_font_without_contextual_alternates`는 **항상 +1 소유권**을 돌려준다(사본을 못 만들면
+    // `CFRetain(font)`로도 +1이다). dictionary가 값을 따로 retain하므로 이 +1은 여기서 풀어야 한다.
+    // 빠뜨리면 이 함수를 부를 때마다 CTFont가 하나씩 영구히 남고, 남은 폰트가 자기 cascade 배열과
+    // feature 테이블까지 붙들어 둔다.
+    //
+    // 실측(2026-08-18): 이 한 줄이 없어서 연속 4시간 46분 실행에 physical footprint 가 140GB 까지
+    // 부풀었다(MALLOC_SMALL 137GB, 살아 있는 할당 5억 개, 그중 125GB 가 스왑으로 나가 머신 전체가
+    // 스래싱했고 앱이 jetsam 에 죽었다). shape 호출(=출력이 있는 dirty 프레임)마다 한 번씩 샜고,
+    // 새는 폰트가 cascade 폰트일 때 회당 약 36KB 다. `font.ligatures = false` 일 때만 타는 분기라
+    // 합자를 켠(기본값) 설치는 겪지 않는다.
+    CFRelease(shaping_font);
     CFRelease(no_ligature);
     return attrs;
+}
+
+/// 이 프로세스의 physical footprint(바이트). 셰이핑 경로가 메모리를 새는지 테스트가 **직접** 재기 위한
+/// 진단 seam이다. 누수는 화면에 아무 증상이 없어서 눈으로도, 셰이핑 결과 계약으로도 잡히지 않는다.
+uint64_t maru_macos_coretext_phys_footprint_bytes(void) {
+    // **0으로 채우고 `count`까지 확인한다.** `task_info`는 성공하면서도 요청보다 **적은** 필드만 쓰고
+    // `count`를 그만큼 줄여 돌려줄 수 있다(구조체가 개정될 때마다 뒤에 필드가 붙기 때문이다).
+    // `phys_footprint`는 뒤쪽 개정에 있는 필드라, 확인 없이 읽으면 스택 쓰레기를 읽는다. 그 값이 그대로
+    // CI 게이트로 들어가면 멀쩡한 코드가 누수로 떨어진다.
+    task_vm_info_data_t info;
+    memset(&info, 0, sizeof(info));
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    if (count < TASK_VM_INFO_REV1_COUNT) {
+        return 0; // phys_footprint 가 채워지지 않았다 — 0은 호출자가 "못 쟀다"로 읽는다.
+    }
+    return (uint64_t)info.phys_footprint;
 }
 
 static CFStringRef maru_create_string_for_draw_cell(

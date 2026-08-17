@@ -76,6 +76,8 @@ pub fn main(init: std.process.Init) !void {
         break :blk empty;
     };
 
+    const shape_leak_probe = probeShapeLeak(appearance);
+
     const summary = try renderSummary(
         allocator,
         appearance,
@@ -83,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        shape_leak_probe,
         fixed_probe_error,
         draw_list_probe_error,
     );
@@ -101,6 +104,140 @@ pub fn main(init: std.process.Init) !void {
     // 게이팅하지 않으면, DrawList 프레임이 조용히 unprepared여도 smoke가 통과한다.
     if (!draw_list_probe.renderer_frame_prepared or
         !draw_list_probe.renderer_glyph_raster_ready) return error.MacosCoreTextSmokeFailed;
+    // 누수 게이트. 셰이핑 결과 계약과 **다른 것**을 지킨다 — 저쪽은 "무엇을 그렸나", 이쪽은 "만든 것을
+    // 놓아줬나"다. 요약에만 남기고 게이팅하지 않으면 이 회귀는 화면에 아무 증상이 없어 그대로 통과하고,
+    // 대가는 몇 시간 뒤의 수십 GB 로만 나타난다.
+    //
+    // **못 쟀으면 실패다.** 못 재는 것은 통과가 아니라 고쳐야 할 상태다 — 여기서 통과시키면 게이트가
+    // 조용히 죽는다.
+    if (!shape_leak_probe.measured) return error.MacosCoreTextShapeLeakNotMeasured;
+    // **status 를 먼저 본다.** 셰이핑이 실패하면 할당이 거의 없어 델타가 0 근처로 떨어지는데, 그때 누수
+    // 이름으로 실패하면 원인이 셰이핑 실패라는 사실이 가려진다.
+    if (shape_leak_probe.status != 0) return error.MacosCoreTextShapeLeakProbeFailed;
+    if (!shape_leak_probe.within_limit) return error.MacosCoreTextShapeLeaked;
+}
+
+/// 셰이핑 경로가 메모리를 새는지 **직접** 재는 게이트.
+///
+/// **왜 셰이핑 결과 계약으로는 부족한가.** 그 계약은 "무엇을 그렸나"만 본다. 2026-08-18 사건의 원인
+/// (`maru_create_shape_attributes`가 `maru_font_without_contextual_alternates`의 +1을 놓친 것)은 그리는
+/// 결과가 완벽하면서 메모리만 새는 결함이었다.
+///
+/// **왜 합자 두 설정을 번갈아 태우는가.** 이번 누수 지점은 `ligatures = false` 분기에만 있는데, config
+/// 기본값이 `true`라 다른 probe 들은 그 분기를 **한 번도 타지 않는다** — 한쪽만 재면 다른 쪽에 눈이 먼다.
+/// ON 분기도 dictionary 에 폰트를 담으므로 거기 소유권 실수가 새로 생기면 **기본 설정을 쓰는 모든**
+/// 사용자에게 프레임마다 샌다.
+const ShapeLeakProbe = struct {
+    iterations: u32 = 0,
+    /// **부호 있는** 순증가. 0으로 clamp 하지 않는다 — 정보를 지우면 상한 근처 결과를 진단할 수 없다.
+    /// 음수(순 감소)는 통과다(근거는 `within_limit`).
+    delta_bytes: i64 = 0,
+    limit_bytes: u64 = 0,
+    within_limit: bool = false,
+    /// footprint 를 못 읽었으면(task_info 실패) 판정하지 않는다 — 못 잰 것을 통과로 치지 않는다.
+    measured: bool = false,
+    /// 마지막 shape 호출의 native status. 0이 아니면 위 수치는 회귀가 아니라 셰이핑 실패의 결과다.
+    status: c_int = -1,
+};
+
+/// 반복 횟수와 상한. **둘 다 실측으로 정했다**(추정이 아니다).
+///
+/// 반복을 늘려도 정상 경로의 증가는 거의 늘지 않는다 — 대부분 1회성(CoreText 초기화)이고 회당 몫은 수십
+/// 바이트다. 반면 누수는 회당 약 36KB 로 반복에 **선형**이다. 그래서 반복을 키울수록 신호 대 잡음이
+/// 좋아진다. 4,000회는 1초 미만이라 CI 에서 사실상 공짜다.
+///
+/// | | 값 |
+/// |---|---|
+/// | 정상 | 272~384 KB (16회 측정, 중앙값 304 KB) |
+/// | 누수 되돌린 red 실측 | 72,351,792 B |
+/// | 상한 | 4 MB — 정상 최대치의 **10.7배**, 누수 신호의 **1/17** |
+///
+/// **이 표를 고칠 때 docs/font-strategy.md 의 같은 수치도 함께 고친다** — 둘이 어긋나면 나중에 상한을
+/// 조정하는 사람이 틀린 여유를 근거로 삼는다.
+const shape_leak_probe_iterations: u32 = 4000;
+const shape_leak_probe_limit_bytes: u64 = 4 * 1024 * 1024;
+
+fn probeShapeLeak(appearance: config.ResolvedAppearance) ShapeLeakProbe {
+    // 워밍업: 첫 진입의 1회성 비용(폰트 로드·CoreText 내부 초기화)을 기준선에서 뺀다.
+    var warm: u32 = 0;
+    while (warm < 20) : (warm += 1) {
+        _ = shapeOnceForProbe(appearance, warm % 2 == 1);
+    }
+
+    const before = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
+    var status: c_int = -1;
+    var i: u32 = 0;
+    while (i < shape_leak_probe_iterations) : (i += 1) {
+        status = shapeOnceForProbe(appearance, i % 2 == 1);
+    }
+    const after = coretext_bridge.maru_macos_coretext_phys_footprint_bytes();
+
+    const measured = before != 0 and after != 0;
+    const delta: i64 = if (measured)
+        @as(i64, @intCast(after)) - @as(i64, @intCast(before))
+    else
+        0;
+    return .{
+        .iterations = shape_leak_probe_iterations,
+        .delta_bytes = delta,
+        .limit_bytes = shape_leak_probe_limit_bytes,
+        // 음수(순 감소)는 **통과**다. 이 게이트의 계약은 "순 footprint 가 상한을 넘게 늘지 않는다"이고
+        // 감소는 그 계약을 문자 그대로 만족한다 — 계약을 지킨 빌드를 빨갛게 만들면 안 된다.
+        //
+        // **남는 사각**: `phys_footprint` 는 순값이라, 상한 근처의 작은 누수가 같은 창 안의 OS 회수에
+        // 정확히 상쇄되면 통과한다. 이 게이트는 할당 원장이 아니라 **순증가 임계값**이다. 실제로 막으려는
+        // 크기(회당 수십 KB → 창당 수십 MB)는 회수로 가려질 수 없다(red 실측 72.4MB vs 상한 4MB).
+        .within_limit = measured and delta <= @as(i64, @intCast(shape_leak_probe_limit_bytes)),
+        .measured = measured,
+        .status = status,
+    };
+}
+
+/// 프로브용 shape 호출 1회. 반환값은 native status(0=성공)로, 호출자가 "셰이핑이 실패해서 지표가 0"인
+/// 경우와 진짜 회귀를 가를 수 있게 한다.
+///
+/// 네 style 조합을 모두 넣는다 — bold/italic face 도 각자 attributes 를 만들므로 같은 누수 자리를 탄다.
+fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_int {
+    var cells = [_]coretext_shaper.NativeDrawCell{
+        .{ .row = 0, .col = 0, .width = 1, .codepoint = 'M' },
+        .{ .row = 0, .col = 1, .width = 1, .style_flags = coretext_shaper.draw_cell_bold_bit, .codepoint = 'B' },
+        .{ .row = 0, .col = 2, .width = 1, .style_flags = coretext_shaper.draw_cell_italic_bit, .codepoint = 'I' },
+        .{
+            .row = 0,
+            .col = 3,
+            .width = 1,
+            .style_flags = coretext_shaper.draw_cell_bold_bit | coretext_shaper.draw_cell_italic_bit,
+            .codepoint = 'X',
+        },
+    };
+    const grapheme_pool: []const u32 = &.{};
+    // 셀 수보다 넉넉히 잡는다. record 가 넘치면 native 가 status 7 로 셀 루프를 중단해 뒤쪽 style 조합이
+    // 아예 셰이핑되지 않는다.
+    var records = [_]coretext_shaper.NativeDrawGlyphRecord{
+        std.mem.zeroes(coretext_shaper.NativeDrawGlyphRecord),
+    } ** 32;
+    var native = std.mem.zeroes(coretext_shaper.NativeDrawListShapeResult);
+    native.status = -1;
+    maru_macos_coretext_shape_draw_list(
+        appearance.font.family.ptr,
+        appearance.font.family.len,
+        @floatCast(appearance.font.size),
+        appearance.font.fallback.ptr,
+        appearance.font.fallback.len,
+        appearance.font.family_bold.ptr,
+        appearance.font.family_bold.len,
+        appearance.font.family_italic.ptr,
+        appearance.font.family_italic.len,
+        if (ligatures) 1 else 0,
+        &cells,
+        cells.len,
+        grapheme_pool.ptr,
+        grapheme_pool.len,
+        &native,
+        &records,
+        records.len,
+    );
+    return native.status;
 }
 
 const SmokeStatus = struct {
@@ -149,6 +286,7 @@ fn renderSummary(
     native: NativeCoreTextSmokeResult,
     glyph_frame_probe: GlyphFrameProbe,
     draw_list_probe: GlyphFrameProbe,
+    shape_leak_probe: ShapeLeakProbe,
     fixed_probe_error: ?anyerror,
     draw_list_probe_error: ?anyerror,
 ) ![]u8 {
@@ -232,6 +370,13 @@ fn renderSummary(
     try writer.print("drawlist_glyph_raster_error_skip_count={d}\n", .{draw_list_probe.renderer_glyph_raster_error_skip_count});
     try writer.print("drawlist_renderer_shaper={s}\n", .{draw_list_probe.renderer_shaper});
     try writer.print("drawlist_renderer_rasterizer={s}\n", .{draw_list_probe.renderer_rasterizer});
+    // 셰이핑 경로가 메모리를 새는지 직접 잰 결과. 셰이핑 결과 계약은 이걸 알려 주지 않는다.
+    try writer.print("shape_leak_measured={}\n", .{shape_leak_probe.measured});
+    try writer.print("shape_leak_within_limit={}\n", .{shape_leak_probe.within_limit});
+    try writer.print("shape_leak_iterations={d}\n", .{shape_leak_probe.iterations});
+    try writer.print("shape_leak_delta_bytes={d}\n", .{shape_leak_probe.delta_bytes});
+    try writer.print("shape_leak_limit_bytes={d}\n", .{shape_leak_probe.limit_bytes});
+    try writer.print("shape_leak_status={d}\n", .{shape_leak_probe.status});
     // probe build가 던진 Zig error를 summary로 남겨, native 신호가 정상이어도 제품 후보 경계
     // (shaper/raster/frame 조립)에서 실패한 경우를 artifact만 보고 분리할 수 있게 한다.
     try writer.print("fixed_probe_error={s}\n", .{if (fixed_probe_error) |err| @errorName(err) else "none"});
@@ -624,12 +769,16 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        .{ .measured = true, .within_limit = true, .iterations = 4000, .delta_bytes = 1024, .limit_bytes = 4 * 1024 * 1024, .status = 0 },
         null,
         null,
     );
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
+    // 누수 게이트 신호는 summary 계약의 일부다 — 필드가 사라지면 게이트도 조용히 사라진다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "shape_leak_within_limit=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "shape_leak_iterations=4000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "fixed_probe_error=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_probe_error=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "resolved_appearance=true\n") != null);

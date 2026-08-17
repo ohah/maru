@@ -1347,8 +1347,24 @@ void maru_macos_coretext_shape_draw_list(
 
         // 사용자 폴백 폰트(font.fallback)가 있으면 주 폰트에 cascade list로 박는다 — 이후 모든 CTLine(attributes의
         // kCTFontAttributeName이 이 폰트)이 주 폰트에 없는 글리프를 사용자 폴백→시스템 폴백 순으로 그린다(매 cell 변경 불요).
-        // 비용: cascade 폰트를 **shape 호출(출력/dirty 프레임)마다** 재구성한다 — 같은 family+fallback+size면 결과가
-        // 동일하므로 후속에서 (primary_font 생성과 함께) family+fallback+size 키로 캐시할 여지가 있다(code-review max F1-2 #1).
+        //
+        // **비용: cascade 폰트를 shape 호출(출력/dirty 프레임)마다 재구성한다.** 같은 설정이면 결과가 같으니
+        // 캐시할 여지가 있다 — 아래는 그 여지를 2026-08-18에 실제로 만들어 보고 **접은** 기록이다. 다시
+        // 착수할 사람이 같은 길을 처음부터 되짚지 않게 남긴다(당시 구현: 닫힌 PR #2363).
+        //
+        // 1. **이건 메모리 문제가 아니다.** 한때 "프레임마다 새 CTFont를 만들면 CoreText 전역 캐시가 상한
+        //    없이 자란다"고 진단했으나, 격리 하네스로 기각됐다 — 참조만 맞으면 인스턴스 churn 자체는
+        //    **14.7 B/iter**로 사실상 공짜다. 그때 실제로 메모리를 태운 원인은 `maru_create_shape_attributes`가
+        //    `maru_font_without_contextual_alternates`의 +1을 놓친 것이었고(회당 약 36KB, 4시간 46분에 140GB),
+        //    그건 그 함수에서 `CFRelease` 한 줄로 고쳤다. 회귀는 `shape_leak_*` 게이트가 지킨다.
+        // 2. **남는 이득은 CPU뿐이고, 그 수치는 낡았다.** 재해석 95µs vs 재사용 25µs(호출당 약 70µs, 3.8배)로
+        //    쟀지만 그건 style 슬롯이 **4개**이던 시절의 구조다. 지금은 8개다(face 4종 × 커서/비커서). 새
+        //    구조에서의 이득은 측정된 적이 없으니, 착수한다면 **재측정이 첫 단계**다.
+        // 3. **착수 시 가장 먼저 풀 것은 소유권이다.** 커서 슬롯(4~7)은 face 슬롯의 폰트를 **빌려 쓴다**.
+        //    캐시가 소유권을 가지면 슬롯마다 "소유 vs 대여"를 다시 모델링해야 하는데, 그 자리는 이미 한 번
+        //    over-release로 죽은 이력이 있다(headless tick 테스트 signal TRAP).
+        //
+        // 판단 근거의 단일 출처는 docs/font-strategy.md "셰이핑 경로의 메모리 소유권"이다.
         if (fallback_families != NULL && fallback_families_len > 0) {
             CTFontRef with_cascade = maru_apply_cascade_list(
                 primary_font, fallback_families, fallback_families_len, requested_font_size);

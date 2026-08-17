@@ -702,8 +702,11 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
     // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
     // ‹›(2칸) 둘 여유(base>2)도 필요.
-    const has_scroll = tab_width_fixed > 0 and total > base and base > 3; // #5a: ‹(tab_cols)·gap(tab_cols+1)·›(tab_cols+2) 3칸(버튼 사이 공백) 여유
-    const tab_cols: u16 = if (has_scroll) base - 3 else base;
+    // ‹·› 는 각 `scroll_button_cols`(2칸) 이라 넷을 예약한다 — 옛 3칸(‹1·gap1·›1)은 클릭 폭이 한 칸이라
+    // 실제로 누르기 어려웠다(사용자 보고 2026-08-18). 폭은 hit-test 와 **같은 상수**에서 나온다(§5.4).
+    const scroll_zone_cols: u16 = @intCast(tabbar.Metrics.scroll_button_cols * 2);
+    const has_scroll = tab_width_fixed > 0 and total > base and base > scroll_zone_cols; // 버튼 넷을 뗄 여유
+    const tab_cols: u16 = if (has_scroll) base - scroll_zone_cols else base;
     // #1(리뷰): scroll를 [0, total-tab_cols]로 clamp + has_scroll 아니면 0 → 탭 닫기/리사이즈로 넘침이 사라지면 stale scroll가
     // 자동으로 0이 돼 빈 탭 바에 갇히지 않는다. 렌더·hit-test·클릭이 이 eff_scroll을 공유(§6).
     const eff_scroll: u32 = if (has_scroll) @min(scroll_cols, total - tab_cols) else 0;
@@ -1416,16 +1419,25 @@ pub fn buildPaneTabBarDrawList(
         const max_scroll: u32 = total - tab_cols; // has_scroll이면 total > tab_cols 보장(total > base ≥ tab_cols+3)
         const left_style: terminal.Style = if (layout.eff_scroll > 0) .{ .foreground = active_fg } else style; // 왼쪽 더 있으면 강조, scroll=0이면 흐림
         const right_style: terminal.Style = if (layout.eff_scroll < max_scroll) .{ .foreground = active_fg } else style; // 오른쪽 더 있으면 강조, 끝이면 흐림
+        // glyph 는 각자 자기 2칸 버튼의 **바깥쪽** 칸에 둔다(hit-test 의 `scrollLeftGlyphCol`/`scrollRightGlyphCol`
+        // 과 같은 규칙 — §5.4 단일 소스). 그래서 두 버튼 사이에 2칸 여백이 생기고 덜 붐빈다.
+        const scroll_w: u16 = @intCast(tabbar.Metrics.scroll_button_cols);
         try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = left_style });
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 2), .codepoint = '>', .width = 1, .style = right_style }); // gap tab_cols+1 건너뜀
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + scroll_w * 2 - 1), .codepoint = '>', .width = 1, .style = right_style });
     }
     // "+"(새 Term) 버튼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면 옛대로 far-right
     // (tab_cols+2 뒤, ‹·gap·› 다음). plus_start+1 col에 '+'. hit-test(tabbar.Metrics.plusZoneStart)와 단일 정합 —
     // 인라인 plus_start = min(titles.len*tab_w, tab_cols) = plusZoneStart의 tabsEndCol과 같다(barMetrics가 tab_count로 채움).
     const tabs_end: u16 = @min(@as(u16, @intCast(titles.len)) * tab_w, tab_cols);
-    const plus_start: u16 = if (layout.has_scroll) tab_cols + 2 else tabs_end;
-    if (plus_start < cols and plus_start + 1 < cols) {
-        try cells.append(allocator, .{ .row = 0, .col = plus_start + 1, .codepoint = '+', .width = 1, .style = style });
+    const plus_zone_start: u16 = if (layout.has_scroll)
+        tab_cols + @as(u16, @intCast(tabbar.Metrics.scroll_button_cols * 2))
+    else
+        tabs_end;
+    // "+" 는 3칸 버튼의 **가운데** 칸에 그린다(hit-test 의 `plusGlyphCol` 과 같은 규칙) — 옛 코드는 2칸
+    // 버튼의 둘째 칸이라 › 에 붙어 보였다(사용자 요청 2026-08-18 "+ 버튼도 가운데로").
+    const plus_glyph_col: u16 = plus_zone_start + @as(u16, @intCast(tabbar.Metrics.plus_button_cols / 2));
+    if (plus_glyph_col < cols) {
+        try cells.append(allocator, .{ .row = 0, .col = plus_glyph_col, .codepoint = '+', .width = 1, .style = style });
     }
 
     // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
@@ -2578,14 +2590,15 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
 }
 
 test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘침 무스크롤" {
-    // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll, tab_cols=35.
+    // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll.
+    // ‹·› 는 **각 2칸**이라 넷을 뗀다(옛 3칸: ‹·gap·›). tab_cols = 37 - 4 = 33.
     const ovf = tabLayout(40, 3, 16, 0);
     try std.testing.expect(ovf.has_scroll);
-    try std.testing.expectEqual(@as(u16, 34), ovf.tab_cols); // 37 - 3(‹·gap·›)
+    try std.testing.expectEqual(@as(u16, 33), ovf.tab_cols); // 37 - 4(‹2칸·›2칸)
     try std.testing.expectEqual(@as(u16, 16), ovf.tab_w);
     try std.testing.expectEqual(@as(u32, 0), ovf.eff_scroll); // scroll 0
-    // #1: 큰 scroll(stale 등)은 max(=total 48-tab_cols 34=14)로 clamp.
-    try std.testing.expectEqual(@as(u32, 14), tabLayout(40, 3, 16, 100).eff_scroll);
+    // #1: 큰 scroll(stale 등)은 max(=total 48 - tab_cols 33 = 15)로 clamp.
+    try std.testing.expectEqual(@as(u32, 15), tabLayout(40, 3, 16, 100).eff_scroll);
     // 2탭 → 균등 폭 18(=37/2)이 고정 16보다 넓어 **바를 꽉 채운다**(고정 폭은 하한). total=36 <= 37 →
     // no scroll, tab_cols=37(그대로), eff 0(stale 무시).
     const fit = tabLayout(40, 2, 16, 50);
@@ -3041,7 +3054,8 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
 }
 
 // #3: 넘침 스크롤 시 ‹/›를 스크롤 여지 있는 방향만 active_fg(강조)·없는 방향(경계)은 fg(muted)로 그린다 —
-// ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48, tab_cols=34, max_scroll=14.
+// ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48,
+// ‹·›가 각 2칸이라 tab_cols=33, max_scroll=15.
 test "scroll ‹/› highlight only the scrollable direction (boundary uses muted fg)" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } }; // fg(muted)
@@ -3065,9 +3079,9 @@ test "scroll ‹/› highlight only the scrollable direction (boundary uses mute
         }
         try std.testing.expect(saw_l and saw_r);
     }
-    // scroll=14(맨 오른쪽=max_scroll): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
+    // scroll=15(맨 오른쪽=max_scroll): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
     {
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, false, null, bright, 16, 14, null);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, false, null, bright, 16, 15, null);
         defer dl.deinit(allocator);
         var saw_l = false;
         var saw_r = false;

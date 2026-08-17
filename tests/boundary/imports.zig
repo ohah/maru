@@ -1572,6 +1572,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executeGenerationRequestInternal" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readAttachmentCatchupBarrierPlanUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "requestAttachmentCatchupUntil" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentControllerPromotion" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "promoteAttachmentControllerNoFail" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callCurrentUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentConnectionFailureReason" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionFailedClosed" },
@@ -2306,7 +2308,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 24),
+        // 위 operation들과 CR4c controller 승격 preflight/no-fail commit이 같은 등록 operation을 닫는다.
+        @as(usize, 26),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(

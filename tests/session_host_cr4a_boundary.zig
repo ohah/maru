@@ -362,7 +362,8 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn failCloseAttachmentConnection("));
     try std.testing.expectEqual(@as(usize, 1), count(host_adapter, "pub fn preflightAttachmentConnectionUsable("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn preflightAttachmentConnectionUsable("));
-    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.failCloseAttachmentConnection(reason)"));
+    // CR4a candidate prepare and CR4c forced-resize failure share the same forward-only close leaf.
+    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "adapter.failCloseAttachmentConnection(reason)"));
     try std.testing.expectEqual(@as(usize, 5), count(remote_backend, "adapter.preflightAttachmentConnectionUsable()"));
     try std.testing.expectEqual(@as(usize, 1), count(process_seal, "pub fn hostReconnectJobSeal("));
     try std.testing.expectEqual(
@@ -517,7 +518,8 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn catchupProjection("));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "catchupProjection"));
     // CR4a prepare/validate 두 경로와 CR4b controller-evidence 재검증 한 경로.
-    try std.testing.expectEqual(@as(usize, 3), countIdentifier(attachment, "catchupProjection"));
+    // prepare/validate plus CR4c promoted-resize revalidation share the same closed projection.
+    try std.testing.expectEqual(@as(usize, 4), countIdentifier(attachment, "catchupProjection"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductIdentifiersExcept(allocator, "catchupProjection", &.{

@@ -30,6 +30,7 @@ const runtime_pending_control = @import("runtime_pending_control.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
 const client_deadline = @import("client_deadline.zig");
+const control_response_wire = @import("control_response_wire.zig");
 const SettlementDeathCheckpoint = struct { attachment_addr: usize, marker_fd: std.c.fd_t, stage_raw: u8 };
 threadlocal var settlement_death_checkpoint: if (builtin.is_test) ?SettlementDeathCheckpoint else void =
     if (builtin.is_test) null else {};
@@ -114,7 +115,14 @@ pub const GenerationAttachment = struct {
     catchup_stage_owner: CatchupStageOwner = .{},
 
     const CatchupStageOwner = struct {
-        const State = enum(u8) { idle, building, staged, controller_committing, controller_evidenced };
+        const State = enum(u8) {
+            idle,
+            building,
+            staged,
+            controller_committing,
+            controller_evidenced,
+            controller_promoted,
+        };
 
         state: State = .idle,
         next_generation: u64 = 1,
@@ -131,6 +139,7 @@ pub const GenerationAttachment = struct {
                 @intFromEnum(State.staged),
                 @intFromEnum(State.controller_committing),
                 @intFromEnum(State.controller_evidenced),
+                @intFromEnum(State.controller_promoted),
                 => true,
                 else => false,
             };
@@ -1158,6 +1167,199 @@ pub const GenerationAttachment = struct {
         self.catchup_stage_owner.resetActive();
     }
 
+    pub fn promoteControllerEvidence(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) catchup_stage_contract.Error!void {
+        if (!self.validateControllerEvidence(stage, controller_generation))
+            return error.InvalidAuthority;
+        var reservation = self.reservation orelse return error.InvalidAuthority;
+        _ = generation_transport_mod.preflightControllerPromotionOwned(
+            &self.transport,
+            @intFromPtr(self),
+            &self.binding,
+            reservation,
+        ) catch return error.InvalidAuthority;
+
+        generation_transport_mod.promoteControllerNoFailOwned(
+            &self.transport,
+            @intFromPtr(self),
+            &self.binding,
+            &reservation,
+        );
+        self.reservation = reservation;
+        self.payloadMut().state.role = .controller;
+        self.payloadMut().state.controller_generation = controller_generation;
+        self.catchup_stage_owner.state = .controller_promoted;
+    }
+
+    pub fn validatePromotedController(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) bool {
+        if (!self.catchup_stage_owner.stateRawValid() or
+            !self.valid() or self.lifecycle != .attached or
+            self.catchup_stage_owner.state != .controller_promoted or
+            stage != &self.catchup_stage_owner.canonical or
+            self.catchup_stage_owner.active_generation != stage.owner_generation or
+            self.catchup_stage_owner.controller_generation != controller_generation or
+            !catchupStageLifecycleRawValid(&stage.lifecycle) or
+            stage.lifecycle != .consumed or
+            self.catchup_stage_owner.seal != CatchupStageOwner.stageSeal(stage) or
+            stage.self_addr != @intFromPtr(stage) or stage.attachment_addr != @intFromPtr(self) or
+            controller_generation == 0)
+            return false;
+        const projection = generation_transport_mod.catchupProjection(&self.transport) catch return false;
+        if (stage.client_slot_addr != projection.slot_addr or
+            stage.slot_incarnation != projection.slot_incarnation or
+            stage.node_incarnation != projection.node_incarnation or
+            stage.connection_generation != projection.connection_generation or
+            stage.transport_incarnation != projection.transport_incarnation or
+            stage.pid != projection.pid or stage.process_nonce != projection.process_nonce or
+            stage.owner_thread_id != projection.owner_thread_id or
+            stage.stream_id != projection.bound_stream_id or
+            stage.identity.host_id != projection.host_id or
+            stage.identity.runtime_id != projection.runtime_id or projection.role != .controller)
+            return false;
+        const state = self.payloadConst().state;
+        const screen = self.screenPtr() orelse return false;
+        return state.role == .controller and
+            state.controller_generation == controller_generation and
+            self.allowsMutation() and
+            std.meta.eql(screen.catchupFrontier(), stage.target);
+    }
+
+    pub fn releasePromotedController(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) catchup_stage_contract.Error!void {
+        try self.preflightReleasePromotedController(stage, controller_generation);
+        self.releasePromotedControllerNoFail(stage, controller_generation);
+    }
+
+    pub fn preflightReleasePromotedController(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) catchup_stage_contract.Error!void {
+        if (!self.validatePromotedController(stage, controller_generation))
+            return error.InvalidAuthority;
+    }
+
+    pub fn releasePromotedControllerNoFail(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) void {
+        self.preflightReleasePromotedController(stage, controller_generation) catch
+            @panic("CR4c promoted controller evidence drifted after preflight");
+        self.catchup_stage_owner.resetActive();
+    }
+
+    pub fn releasePromotedControllerAfterTerminalTransport(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) catchup_stage_contract.Error!void {
+        if (!self.catchup_stage_owner.stateRawValid() or !self.valid() or
+            self.lifecycle != .attached or
+            self.catchup_stage_owner.state != .controller_promoted or
+            stage != &self.catchup_stage_owner.canonical or
+            self.catchup_stage_owner.active_generation != stage.owner_generation or
+            self.catchup_stage_owner.controller_generation != controller_generation or
+            !catchupStageLifecycleRawValid(&stage.lifecycle) or stage.lifecycle != .consumed or
+            self.catchup_stage_owner.seal != CatchupStageOwner.stageSeal(stage) or
+            stage.self_addr != @intFromPtr(stage) or stage.attachment_addr != @intFromPtr(self) or
+            self.batch_adapter.terminalConnectionReason() == null)
+            return error.InvalidAuthority;
+        self.catchup_stage_owner.resetActive();
+    }
+
+    pub const ForcedResizeResult = struct {
+        resize_generation: u64,
+        changed: bool,
+    };
+
+    /// CR4c candidate-only resize. The candidate is still unpublished, so this leaf uses the
+    /// promoted attachment's bound controller stream directly and shares the host job deadline.
+    pub fn forcePromotedControllerResizeUntil(
+        self: *GenerationAttachment,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+        cols: u16,
+        rows: u16,
+        client_sequence: u64,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!ForcedResizeResult {
+        if (deadline.expires_at_ns != stage.deadline_expires_at_ns or
+            !self.validatePromotedController(stage, controller_generation) or
+            cols < 2 or rows == 0 or client_sequence == 0)
+            return error.InvalidAuthority;
+        if (deadline.remainingNs() <= 0) {
+            self.poison(.read_timeout) catch {};
+            return error.DeadlineExceeded;
+        }
+        var buffer: [96]u8 = undefined;
+        const encoded = control_response_wire.encodeParams(&buffer, .{ .resize = .{
+            .stream_id = stage.stream_id,
+            .cols = cols,
+            .rows = rows,
+            .client_sequence = client_sequence,
+        } }) catch |err| {
+            self.poison(if (err == error.BufferTooSmall)
+                .local_resource_exhausted
+            else
+                .local_invariant_violation) catch {};
+            return err;
+        };
+        const allocator = self.payloadConst().allocator;
+        const response = self.batch_adapter.callControllerUntil(
+            encoded.method,
+            encoded.params,
+            deadline,
+        ) catch |err| {
+            self.poison(switch (err) {
+                error.OutOfMemory => .local_resource_exhausted,
+                error.DeadlineExceeded => .read_timeout,
+                else => .transport_read_failure,
+            }) catch {};
+            return err;
+        };
+        defer allocator.free(response);
+        const reply = control_response_wire.decodeResizeResponse(
+            allocator,
+            response,
+            .{ .resize = .{ .client_sequence = client_sequence } },
+        ) catch |err| {
+            self.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation) catch {};
+            return err;
+        };
+        return switch (reply) {
+            .stale => blk: {
+                self.poison(.peer_contract_violation) catch {};
+                break :blk error.StaleResize;
+            },
+            .applied => |applied| blk: {
+                if (applied.cols != cols or applied.rows != rows) {
+                    self.poison(.peer_contract_violation) catch {};
+                    break :blk error.InvalidResizeResponse;
+                }
+                if (!self.validatePromotedController(stage, controller_generation))
+                    break :blk error.InvalidAuthority;
+                break :blk .{
+                    .resize_generation = applied.resize_generation,
+                    .changed = applied.changed,
+                };
+            },
+        };
+    }
+
     pub fn statePtr(self: *GenerationAttachment) *remote_attachment.State {
         return &self.payloadMut().state;
     }
@@ -1887,7 +2089,13 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
     const owner_state_raw: *u8 = @ptrCast(&attachment.catchup_stage_owner.state);
     const OwnerState = @TypeOf(attachment.catchup_stage_owner.state);
     const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
-    for ([_]OwnerState{ .controller_committing, .controller_evidenced }) |active_state| {
+    for ([_]OwnerState{
+        .building,
+        .staged,
+        .controller_committing,
+        .controller_evidenced,
+        .controller_promoted,
+    }) |active_state| {
         attachment = .{};
         attachment.catchup_stage_owner.state = active_state;
         try std.testing.expectError(
@@ -1900,7 +2108,7 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
         try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
     }
     attachment = .{};
-    var owner_raw: u16 = @intFromEnum(OwnerState.controller_evidenced) + 1;
+    var owner_raw: u16 = @intFromEnum(OwnerState.controller_promoted) + 1;
     while (owner_raw <= std.math.maxInt(u8)) : (owner_raw += 1) {
         owner_state_raw.* = @intCast(owner_raw);
         try std.testing.expectError(

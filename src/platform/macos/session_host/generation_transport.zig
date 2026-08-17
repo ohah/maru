@@ -1428,6 +1428,52 @@ pub fn bindCommittedStreamOwned(
     transport.bound_stream_id = stream_id;
 }
 
+pub fn preflightControllerPromotionOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+    binding: *contract.PreparedAttachmentBinding,
+    attachment_reservation: client_slot_mod.AttachmentBindingReservation,
+) Error!contract.BindingIdentity {
+    if (owner_addr == 0 or transport.owner_addr != owner_addr or
+        !transport.requestIdentityValid() or transport.bound_stream_id == 0 or
+        transport.binding_reservation.identity.role != .observer or
+        !transport.binding_reservation.identity.matches(attachment_reservation.identity) or
+        !binding.validAtFinalAddress())
+        return error.InvalidTransport;
+    const canonical = binding.identity orelse return error.InvalidTransport;
+    if (!canonical.matches(transport.binding_reservation.identity))
+        return error.InvalidTransport;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    return slot.preflightAttachmentControllerPromotion(
+        binding,
+        transport.binding_reservation,
+        transport.bound_stream_id,
+    ) catch return error.InvalidTransport;
+}
+
+pub fn promoteControllerNoFailOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+    binding: *contract.PreparedAttachmentBinding,
+    attachment_reservation: *client_slot_mod.AttachmentBindingReservation,
+) void {
+    const expected = preflightControllerPromotionOwned(
+        transport,
+        owner_addr,
+        binding,
+        attachment_reservation.*,
+    ) catch @panic("transport authority changed after controller-promotion preflight");
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    slot.promoteAttachmentControllerNoFail(
+        binding,
+        &transport.binding_reservation,
+        transport.bound_stream_id,
+    );
+    if (!transport.binding_reservation.identity.matches(expected))
+        @panic("ClientSlot promoted a different transport binding");
+    attachment_reservation.identity = expected;
+}
+
 pub fn beginControllerRevokeOwned(
     transport: *GenerationTransport,
     owner_addr: usize,

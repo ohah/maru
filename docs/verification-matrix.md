@@ -1946,6 +1946,19 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
   target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.
   client prerequisite의 첫 slice는 raw fd reader 0과 negotiated capability, 기존 Client demux를 통한 sibling screen/barrier 보존, absolute deadline과 exact identity 소비를 제품 테스트로 고정한다. 이어지는 `GenerationAttachment` slice는 catch-up 전용 batch 64개/encoded 16 MiB/decoded cell 1,048,576개 상한을 일반 inbox cap과 분리한다. target exact equality와 gap/malformed/batch·cell cap+1/missing barrier의 receipt 0을 제품 socket에서 검증하고 byte cap leaf도 apply 전 mutation 0으로 닫는다. actual `connectExistingHostUntil` E2E, backend-owned Client job, same-adapter replacement, observer candidate/staged receipt와 allocator fail-index/final ledger 0까지 구현돼 CR4a를 완료로 센다.
+- CR4c C1+C2는 부분 구현이다. C1 Debug·ReleaseFast actual backend job이 CR4b의 `controller_evidenced` receipt만 소비해 observer
+  cleanup registry RPC identity, transport binding과 attachment-local role을 동일 controller generation으로 승격한다.
+  final-address preflight/no-fail owner chain과 외부 product caller 0을 boundary로 고정하고, success 뒤 stable shell unavailable,
+  mutation seal 불변, candidate active, public input Unauthorized와 generation publication·forced resize·reclaim 0을 확인한다.
+  C2 actual backend success는 candidate 전용 forced-first-resize exact 1, CR3c stable screen+RemoteGeneration publication exact 1,
+  reconnect executor+mutation owner generation 전진, 새 generation input exact 1, RemoteGeneration-first/retired-Client-second
+  reclaim과 job/candidate/stage final zero를 실행한다. expired resize 행은 publication/input 0, new Client fail-close와 sealed
+  mutation digest 보존을 실행한다. 별도 actual socket 행은 forced resize success/stale/wrong-size/EOF/OOM과
+  peer-contract/transport/local-resource first poison provenance를 구분한다. copied/moved
+  job·stage, adapter/runtime/generation/controller drift, cleanup binding splice, resize reject/EOF/OOM/deadline을 닫는다.
+  publication suffix controller-generation drift는 actual host job subprocess의 common proof-loss exit 86과 유계 process-group/
+  artifact 정산으로 검증한다. 이 행까지 green이면 CR4c 단일 Window real-socket reconnect를 완료로 센다. 실제 AppKit 수동 사용과
+  멀티윈도우·다중 runtime은 각각 CR5/CR6 전까지 완료로 세지 않는다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
   reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자
   close transaction만 pane/binding 제거 checkpoint를 정확히 1회 쓴다. pending/unconfirmed 상태에서 Window close는 binding을

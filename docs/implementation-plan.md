@@ -1185,6 +1185,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `authority_conflict`로 봉인한다. 뒤의 두 결과는 자동 takeover 재시도·old input 재개·candidate publication이 모두 0이고
    CR4c가 소비할 frozen-unavailable ledger만 남긴다. observer conflict는 새 연결 여부를 식별할 transfer receipt가 없으므로
    status를 다시 읽어 자기 요청 성공으로 추정하지 않는다.
+   **CR4c는 `controller_evidenced` job만 소비한다.** 먼저 attachment-owned final-address publication
+   authority가 cleanup binding, transport binding과 candidate `RemoteAttachment.State`를 같은
+   observer identity에서 같은 controller generation으로 승격할 수 있는지 allocation 없이 preflight한다.
+   이 승격 뒤에도 stable shell과 mutation owner는 unavailable/sealed 상태를 유지한다. candidate 전용
+   forced-first-resize가 현재 local `Surface` viewport를 같은 stream/controller generation으로 host에 적용하고
+   strict response를 확인한 뒤에만 CR3c `publishAfterClientReplacement`를 호출한다. 마지막 suffix는
+   RemoteGeneration+stable screen publication, mutation owner의 새 shell generation/open 전환, staged/controller
+   evidence consume, retiring RemoteGeneration-first/Client-second ordered reclaim과 host job 정산을 한 owner turn에서
+   수행한다. 따라서 공개 input/resize는 publication 전 0이고, publication 뒤에는 새 generation에서만 열린다.
+   role 승격 또는 forced resize가 실패하면 candidate와 새 Client를 fail-close하고 unavailable shell을 유지하며,
+   old writable 복원·candidate publication·input 재생은 0이다. resize 성공 뒤 publication suffix의 authority drift는
+   복구 가능한 오류가 아니라 common proof-loss fail-stop이다. 현재 C2 actual manifest/socket success는 forced resize,
+   RemoteGeneration+screen publication, reconnect executor와 mutation epoch의 동일 shell generation 전진, 새 input,
+   remote-first/client-second reclaim을 실행하고, expired resize는 sealed mutation을 보존한 forward-failed job으로 닫는다.
+   actual socket leaf는 stale/wrong-size/EOF/OOM provenance를 분리한다. publication suffix의 controller-generation drift는
+   actual host job subprocess에서 recoverable return 없이 common proof-loss exit 86으로 끝나며, parent가 child process group과
+   manifest/socket artifact를 유계 정산한다. 이 증거로 단일-runtime real-socket CR4c를 닫되 실제 AppKit 수동 경로는 CR6,
+   다중 runtime/Window owner 확장은 CR5가 소유한다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.

@@ -882,6 +882,17 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    fail-index는 첫 성공+1까지 순회하며 pre-publication old graph mutation 0, unavailable 게시 뒤 forward-only 결과와 각 반복의
    candidate/receipt/retired Client/registry/pin/batch/barrier inbox/allocator bytes final 0을 고정한다. 이 행으로 CR4a는 완료되지만
    controller 권위 획득과 generation publication은 아래 CR4b·CR4c가 소유한다.
+   CR4c publication은 `controller_evidenced` candidate의 cleanup registry identity, generation transport binding과
+   local attachment state를 동일 controller generation으로 승격하는 final-address prepared authority에서 시작한다.
+   승격만으로는 shell이나 mutation generation을 열지 않는다. candidate 전용 forced-first-resize가 현재 local
+   `Surface` viewport를 host에 strict 적용한 뒤에만 stable screen writer gate 안에서 CR3c
+   `publishAfterClientReplacement`가 RemoteGeneration을 게시한다. 그 no-allocation suffix가 mutation owner를 새 shell
+   generation으로 전진시켜 input을 열고 controller evidence를 consume한 다음, retiring RemoteGeneration을 먼저,
+   matching retired Client를 두 번째로 회수한다. publication 전 public input/resize/pump는 계속 0이다.
+   forced resize 전후 실패는 unavailable shell을 old writable로 되돌리지 않는다. candidate/Client를 fail-close하고
+   다음 host-job generation으로 넘기며, 이미 host controller CAS가 성공했다는 이유로 local publication을 추정하거나
+   입력을 재생하지 않는다. executor와 mutation owner는 publication suffix에서 같은 새 shell generation으로 전진하며,
+   reclaim은 retiring RemoteGeneration을 먼저, matching retired Client를 두 번째로 정산한다.
 2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
    observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
 3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership

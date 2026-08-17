@@ -203,6 +203,32 @@ pub const Authority = struct {
             binding.valid() and self.binding.matches(binding) and self.settledExact();
     }
 
+    /// CR4c controller promotion may change only the role of a fully settled binding. Active
+    /// response ownership must never be re-keyed underneath a decoder or cleanup callback.
+    pub fn preflightSettledBindingReplacement(
+        self: *const Authority,
+        registry_incarnation: u64,
+        before: contract.BindingIdentity,
+        after: contract.BindingIdentity,
+    ) Error!void {
+        if (!self.settledExactFor(registry_incarnation, before) or
+            !after.valid() or !before.sameExceptRole(after) or
+            before.role != .observer or after.role != .controller)
+            return error.InvalidCanonical;
+    }
+
+    pub fn replaceSettledBindingNoFail(
+        self: *Authority,
+        registry_incarnation: u64,
+        before: contract.BindingIdentity,
+        after: contract.BindingIdentity,
+    ) void {
+        self.preflightSettledBindingReplacement(registry_incarnation, before, after) catch
+            @panic("settled RPC binding changed after controller-promotion preflight");
+        self.binding = after;
+        self.seal = sealFor(self);
+    }
+
     pub fn bindingExactForRegistry(
         self: *const Authority,
         registry_incarnation: u64,

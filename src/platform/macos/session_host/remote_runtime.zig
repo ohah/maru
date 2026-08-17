@@ -151,7 +151,7 @@ const RuntimeAttachment = union(enum) {
     fn allowsMutation(self: *const RuntimeAttachment) bool {
         return switch (self.*) {
             .legacy => |*value| value.allowsMutation(),
-            .generation => |*value| value.allowsMutation(),
+            .generation => |*value| generationAttachmentAttached(value) and value.allowsMutation(),
         };
     }
 
@@ -162,7 +162,7 @@ const RuntimeAttachment = union(enum) {
         return switch (self.*) {
             .legacy => |*value| value.allowsMutation() and
                 !client.hasBufferedControllerRevokeForStream(value.streamId()),
-            .generation => |*value| value.allowsMutation(),
+            .generation => |*value| generationAttachmentAttached(value) and value.allowsMutation(),
         };
     }
 
@@ -572,6 +572,13 @@ fn generationAttachmentTerminal(
         @intFromEnum(generation_attachment_mod.Lifecycle.terminal);
 }
 
+fn generationAttachmentAttached(
+    attachment: *const generation_attachment_mod.GenerationAttachment,
+) bool {
+    return @as(*const u8, @ptrCast(&attachment.lifecycle)).* ==
+        @intFromEnum(generation_attachment_mod.Lifecycle.attached);
+}
+
 const ReconnectGenerationEffect = enum(u8) {
     retain,
     prepare_candidate,
@@ -799,6 +806,37 @@ const ReconnectProductExecutor = struct {
             !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
             return error.InvalidAuthority;
         self.* = .{};
+    }
+
+    fn preflightExternalPublication(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        next_shell_generation: u64,
+    ) !u64 {
+        try self.validate(owner);
+        if (!std.meta.eql(self.prepared, PreparedReconnect{}) or self.admission != null or
+            self.resident_budget_addr != 0 or
+            !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+            return error.InvalidAuthority;
+        const job_generation = switch (self.state.?.phase) {
+            .healthy => |value| value,
+            else => return error.InvalidAuthority,
+        };
+        const expected_shell_generation = std.math.add(
+            u64,
+            self.state.?.shell_generation,
+            1,
+        ) catch return error.InvalidAuthority;
+        if (expected_shell_generation != next_shell_generation) return error.InvalidAuthority;
+        return std.math.add(u64, job_generation, 1) catch error.InvalidAuthority;
+    }
+
+    fn publishExternalNoFail(
+        self: *ReconnectProductExecutor,
+        next_job_generation: u64,
+        next_shell_generation: u64,
+    ) void {
+        self.state = reconnect_reducer.State.initial(next_job_generation, next_shell_generation);
     }
 
     fn executeEffect(
@@ -1756,6 +1794,164 @@ pub const ReconnectGenerationOwner = struct {
         try self.abort(reconnect);
     }
 
+    fn promoteCandidateControllerEvidence(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) anyerror!void {
+        if (!self.validateCandidateControllerEvidence(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            controller_generation,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.promoteControllerEvidence(
+                stage,
+                controller_generation,
+            ),
+            .legacy => return error.InvalidAuthority,
+        }
+    }
+
+    fn validateCandidatePromotedController(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) bool {
+        self.validatePrepared(reconnect) catch return false;
+        self.preflightClientGenerationPair(adapter, reconnect, published) catch return false;
+        const candidate = @constCast(self.slot.candidatePayload(&reconnect.candidate) catch return false);
+        return switch (candidate.attachment) {
+            .generation => |*attachment| attachment.validatePromotedController(
+                stage,
+                controller_generation,
+            ),
+            .legacy => false,
+        };
+    }
+
+    fn abortCandidatePromotedController(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) anyerror!void {
+        if (!self.validateCandidatePromotedController(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            controller_generation,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.releasePromotedController(
+                stage,
+                controller_generation,
+            ),
+            .legacy => return error.InvalidAuthority,
+        }
+        try self.abort(reconnect);
+    }
+
+    fn forceCandidatePromotedResizeUntil(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+        size: terminal.Size,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) anyerror!void {
+        if (!self.validateCandidatePromotedController(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            controller_generation,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        if (candidate.resize_seq == resize_wire.max_counter) return error.SequenceExhausted;
+        const next_sequence = candidate.resize_seq + 1;
+        const result = switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.forcePromotedControllerResizeUntil(
+                stage,
+                controller_generation,
+                size.cols,
+                size.rows,
+                next_sequence,
+                deadline,
+            ),
+            .legacy => return error.InvalidAuthority,
+        };
+        candidate.resize_seq = next_sequence;
+        candidate.resize_generation = result.resize_generation;
+        candidate.resize_baseline_present = true;
+        candidate.observation.size = size;
+    }
+
+    fn abortCandidatePromotedControllerAfterTerminal(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+    ) anyerror!void {
+        try self.validatePrepared(reconnect);
+        try self.preflightClientGenerationPair(adapter, reconnect, published);
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.releasePromotedControllerAfterTerminalTransport(
+                stage,
+                controller_generation,
+            ),
+            .legacy => return error.InvalidAuthority,
+        }
+        try self.abort(reconnect);
+    }
+
+    fn preflightCandidatePromotedPublication(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        reconnect: *PreparedReconnect,
+        published: *const r2a_client_slot.PreparedClientReplacement,
+        stage: *const catchup_stage_contract.PreparedStage,
+        controller_generation: u64,
+        expected_size: terminal.Size,
+    ) !void {
+        if (!self.validateCandidatePromotedController(
+            adapter,
+            reconnect,
+            published,
+            stage,
+            controller_generation,
+        )) return error.InvalidAuthority;
+        const candidate = @constCast(try self.slot.candidatePayload(&reconnect.candidate));
+        if (candidate.resize_seq == 0 or !candidate.resize_baseline_present or
+            !std.meta.eql(candidate.observation.size, expected_size))
+            return error.InvalidAuthority;
+        switch (candidate.attachment) {
+            .generation => |*attachment| try attachment.preflightReleasePromotedController(
+                stage,
+                controller_generation,
+            ),
+            .legacy => return error.InvalidAuthority,
+        }
+    }
+
     fn abortCandidateCatchupStage(
         self: *ReconnectGenerationOwner,
         adapter: *host_adapter_mod.HostAdapter,
@@ -2488,6 +2684,162 @@ pub const RemoteRuntime = struct {
                 stage,
                 controller_generation,
             );
+        }
+
+        pub fn promoteReconnectControllerEvidence(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.promoteCandidateControllerEvidence(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn validateReconnectPromotedController(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.validateCandidatePromotedController(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn abortReconnectPromotedController(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.abortCandidatePromotedController(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn forceReconnectCandidateResizeUntil(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) anyerror!terminal.Size {
+            try runtime.admitRuntimeOperation();
+            runtime.surface.lockCore(runtime.io);
+            defer runtime.surface.unlockCore(runtime.io);
+            const size = runtime.surface.renderSnapshot().size;
+            try runtime.generation_owner.forceCandidatePromotedResizeUntil(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+                size,
+                deadline,
+            );
+            return size;
+        }
+
+        pub fn abortReconnectPromotedControllerAfterTerminal(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.abortCandidatePromotedControllerAfterTerminal(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+            );
+        }
+
+        pub fn publishReconnectPromotedCandidate(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+            expected_size: terminal.Size,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.preflightCandidatePromotedPublication(
+                adapter,
+                reconnect,
+                published,
+                stage,
+                controller_generation,
+                expected_size,
+            );
+            if (runtime.direct_input.items.len != 0 or runtime.direct_input_offset != 0 or
+                runtime.input_batches.records.items.len != 0 or
+                runtime.pending_controls.items.len != 0)
+                return error.InvalidAuthority;
+            const next_shell_generation = reconnect.candidate.generation;
+            const next_input_epoch = std.math.add(u64, runtime.input_batches.epoch, 1) catch
+                return error.InvalidAuthority;
+            try runtime.mutation_owner.preflightReopen(next_shell_generation, next_input_epoch);
+            const next_executor_job_generation = try runtime.reconnect_executor.preflightExternalPublication(
+                &runtime.generation_owner,
+                next_shell_generation,
+            );
+
+            // publishAfterClientReplacement performs every fallible stable-screen/generation
+            // preflight before its writer commit. From its successful return onward this suffix
+            // contains no recoverable branch: drift is proof loss.
+            try runtime.generation_owner.publishAfterClientReplacement(
+                adapter,
+                reconnect,
+                published,
+            );
+            runtime.input_batches.epoch = next_input_epoch;
+            runtime.input_batches.next_sequence = 0;
+            runtime.mutation_owner.reopenNoFail(next_shell_generation, next_input_epoch);
+            runtime.reconnect_executor.publishExternalNoFail(
+                next_executor_job_generation,
+                next_shell_generation,
+            );
+            switch (runtime.currentGeneration().attachment) {
+                .generation => |*attachment| attachment.releasePromotedControllerNoFail(
+                    stage,
+                    controller_generation,
+                ),
+                .legacy => process_seal_service.fatalIntegrity(.proof_loss),
+            }
+            var reclaim: PreparedOrderedRetiringReclaim = .{};
+            runtime.generation_owner.prepareOrderedRetiringReclaim(adapter, &reclaim) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            runtime.generation_owner.commitOrderedRetiringReclaimAtTickEndNoFail(adapter, &reclaim);
         }
 
         pub fn reconnectMutationSealDigest(
@@ -5928,6 +6280,23 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
 
 pub const testing_api = if (builtin.is_test) struct {
     pub const SemanticFixture = B4SemanticFixture;
+
+    pub fn armOrderedReconnectReclaimTrace() void {
+        Cr3c2OrderedReclaimTestState.arm();
+    }
+
+    pub fn disarmOrderedReconnectReclaimTrace() void {
+        Cr3c2OrderedReclaimTestState.disarm();
+    }
+
+    pub fn orderedReconnectReclaimTrace() [2]u8 {
+        if (Cr3c2OrderedReclaimTestState.len != 2)
+            @panic("ordered reconnect reclaim trace is incomplete");
+        return .{
+            @intFromEnum(Cr3c2OrderedReclaimTestState.stages[0]) + 1,
+            @intFromEnum(Cr3c2OrderedReclaimTestState.stages[1]) + 1,
+        };
+    }
 
     pub fn hasBoundReconnectAdmission(runtime: *RemoteRuntime) bool {
         return runtime.reconnect_executor.admission != null and
@@ -9374,6 +9743,11 @@ const Cr4aCatchupStageCase = enum {
     controller_status_resource_failed,
     controller_takeover_resource_failed,
     controller_deadline_pre,
+    controller_resize_success,
+    controller_resize_stale,
+    controller_resize_wrong_size,
+    controller_resize_eof,
+    controller_resize_oom,
     generation_gap,
     malformed_delta,
     batch_cap_plus_one,
@@ -9381,6 +9755,43 @@ const Cr4aCatchupStageCase = enum {
     request_oom,
     missing_barrier,
 };
+
+fn cr4cResizeCase(selected: Cr4aCatchupStageCase) bool {
+    return switch (selected) {
+        .controller_resize_success,
+        .controller_resize_stale,
+        .controller_resize_wrong_size,
+        .controller_resize_eof,
+        .controller_resize_oom,
+        => true,
+        else => false,
+    };
+}
+
+fn controllerTransferCase(selected: Cr4aCatchupStageCase) bool {
+    return switch (selected) {
+        .controller_success,
+        .controller_allocator_reentry,
+        .controller_conflict,
+        .controller_status_buffered_revoke,
+        .controller_foreign,
+        .controller_cas_conflict,
+        .controller_cas_conflict_buffered_revoke,
+        .controller_buffered_revoke,
+        .controller_sent_unknown,
+        .controller_pre_failed,
+        .controller_status_resource_failed,
+        .controller_takeover_resource_failed,
+        .controller_deadline_pre,
+        .controller_resize_success,
+        .controller_resize_stale,
+        .controller_resize_wrong_size,
+        .controller_resize_eof,
+        .controller_resize_oom,
+        => true,
+        else => false,
+    };
+}
 
 const ControllerTakeoverReentryAllocator = if (builtin.is_test) struct {
     parent: std.mem.Allocator,
@@ -9591,15 +10002,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                 socket_server.writeAll(fd, barrier_wire) catch return;
                 peer_stage.store(5, .release);
             }
-            const controller_transfer = peer_case == .controller_success or
-                peer_case == .controller_allocator_reentry or
-                peer_case == .controller_conflict or peer_case == .controller_status_buffered_revoke or
-                peer_case == .controller_foreign or peer_case == .controller_cas_conflict or
-                peer_case == .controller_cas_conflict_buffered_revoke or peer_case == .controller_buffered_revoke or
-                peer_case == .controller_sent_unknown or peer_case == .controller_pre_failed or
-                peer_case == .controller_status_resource_failed or
-                peer_case == .controller_takeover_resource_failed or
-                peer_case == .controller_deadline_pre;
+            const controller_transfer = controllerTransferCase(peer_case);
             if (controller_transfer) {
                 if (peer_case == .controller_deadline_pre) {
                     const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
@@ -9709,6 +10112,30 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                 }
                 socket_server.writeAll(fd, takeover_response) catch return;
                 peer_stage.store(7, .release);
+                if (cr4cResizeCase(peer_case)) {
+                    const resize_request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+                    defer std.heap.page_allocator.free(resize_request.payload);
+                    if (resize_request.header.kind != .request or
+                        std.mem.indexOf(u8, resize_request.payload, "\"method\":\"runtime.resize\"") == null or
+                        std.mem.indexOf(u8, resize_request.payload, "\"cols\":80") == null or
+                        std.mem.indexOf(u8, resize_request.payload, "\"rows\":24") == null)
+                        return;
+                    peer_stage.store(9, .release);
+                    if (peer_case == .controller_resize_eof) return;
+                    const resize_response = framing.encodeFrame(
+                        std.heap.page_allocator,
+                        .{ .kind = .response, .request_id = resize_request.header.request_id },
+                        if (peer_case == .controller_resize_stale)
+                            "{\"result\":{\"stale\":true}}"
+                        else if (peer_case == .controller_resize_wrong_size)
+                            "{\"result\":{\"cols\":81,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}"
+                        else
+                            "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+                    ) catch return;
+                    defer std.heap.page_allocator.free(resize_response);
+                    socket_server.writeAll(fd, resize_response) catch return;
+                    peer_stage.store(10, .release);
+                }
                 if (peer_case == .controller_buffered_revoke) {
                     const revoke_wire = framing.encodeFrame(
                         std.heap.page_allocator,
@@ -9760,15 +10187,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         .parser = framing.FrameParser.init(allocator),
         .attachment_capabilities = .{
             .peer_attach_generation = true,
-            .negotiated_controller_transfer = selected == .controller_success or
-                selected == .controller_allocator_reentry or
-                selected == .controller_conflict or selected == .controller_status_buffered_revoke or
-                selected == .controller_foreign or selected == .controller_cas_conflict or
-                selected == .controller_cas_conflict_buffered_revoke or selected == .controller_buffered_revoke or
-                selected == .controller_sent_unknown or selected == .controller_pre_failed or
-                selected == .controller_status_resource_failed or
-                selected == .controller_takeover_resource_failed or
-                selected == .controller_deadline_pre,
+            .negotiated_controller_transfer = controllerTransferCase(selected),
         },
         .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
@@ -9788,15 +10207,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         .parser = framing.FrameParser.init(allocator),
         .attachment_capabilities = .{
             .peer_attach_generation = true,
-            .negotiated_controller_transfer = selected == .controller_success or
-                selected == .controller_allocator_reentry or
-                selected == .controller_conflict or selected == .controller_status_buffered_revoke or
-                selected == .controller_foreign or selected == .controller_cas_conflict or
-                selected == .controller_cas_conflict_buffered_revoke or selected == .controller_buffered_revoke or
-                selected == .controller_sent_unknown or selected == .controller_pre_failed or
-                selected == .controller_status_resource_failed or
-                selected == .controller_takeover_resource_failed or
-                selected == .controller_deadline_pre,
+            .negotiated_controller_transfer = controllerTransferCase(selected),
         },
         .runtime_catchup_barrier_v1 = true,
         .metadata_support = .supported,
@@ -9896,13 +10307,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         .legacy => return error.InvalidAuthority,
     }
     const success_case = selected == .success or selected == .barrier_only_success or
-        selected == .controller_success or selected == .controller_allocator_reentry or
-        selected == .controller_conflict or selected == .controller_status_buffered_revoke or
-        selected == .controller_foreign or selected == .controller_cas_conflict or
-        selected == .controller_cas_conflict_buffered_revoke or
-        selected == .controller_buffered_revoke or selected == .controller_sent_unknown or
-        selected == .controller_pre_failed or selected == .controller_status_resource_failed or
-        selected == .controller_takeover_resource_failed or selected == .controller_deadline_pre;
+        controllerTransferCase(selected);
     if (!success_case) {
         const expected_error: anyerror = switch (selected) {
             .generation_gap => error.GenerationGap,
@@ -9959,13 +10364,7 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     try std.testing.expectEqual(expected_cells, staged_receipt.accounting.decoded_cells);
     try std.testing.expectEqual(expected_sequence, staged_receipt.target.sequence);
     try std.testing.expectEqual(expected_codepoint, candidate.attachment.screenPtr().?.grid.cells[0].codepoint);
-    const controller_case = selected == .controller_success or
-        selected == .controller_allocator_reentry or selected == .controller_conflict or
-        selected == .controller_status_buffered_revoke or selected == .controller_foreign or
-        selected == .controller_cas_conflict or selected == .controller_cas_conflict_buffered_revoke or
-        selected == .controller_buffered_revoke or selected == .controller_sent_unknown or
-        selected == .controller_pre_failed or selected == .controller_status_resource_failed or
-        selected == .controller_takeover_resource_failed or selected == .controller_deadline_pre;
+    const controller_case = controllerTransferCase(selected);
     if (controller_case) {
         if (selected == .controller_deadline_pre)
             deadline_now_ns = catchup_deadline.expires_at_ns;
@@ -9982,7 +10381,14 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                     catchup_deadline,
                 );
                 switch (selected) {
-                    .controller_success, .controller_allocator_reentry => switch (outcome) {
+                    .controller_success,
+                    .controller_allocator_reentry,
+                    .controller_resize_success,
+                    .controller_resize_stale,
+                    .controller_resize_wrong_size,
+                    .controller_resize_eof,
+                    .controller_resize_oom,
+                    => switch (outcome) {
                         .new_controller_evidenced => |generation_value| {
                             if (selected == .controller_allocator_reentry) {
                                 try std.testing.expect(reentry_allocator.fired);
@@ -9993,7 +10399,73 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                             try std.testing.expect(generation.validateControllerEvidence(staged_receipt, 4));
                             try std.testing.expectEqual(catchup_stage_contract.Lifecycle.consumed, staged_receipt.lifecycle);
                             try std.testing.expectEqual(@as(u8, 7), peer_stage.load(.acquire));
-                            try generation.releaseControllerEvidence(staged_receipt, 4);
+                            if (cr4cResizeCase(selected)) {
+                                try generation.promoteControllerEvidence(staged_receipt, 4);
+                                try std.testing.expect(generation.validatePromotedController(staged_receipt, 4));
+                                var resize_failing = std.testing.FailingAllocator.init(
+                                    allocator,
+                                    .{ .fail_index = 0 },
+                                );
+                                if (selected == .controller_resize_oom)
+                                    current_client.allocator = resize_failing.allocator();
+                                const resize_result = generation.forcePromotedControllerResizeUntil(
+                                    staged_receipt,
+                                    4,
+                                    80,
+                                    24,
+                                    1,
+                                    catchup_deadline,
+                                );
+                                current_client.allocator = original_client_allocator;
+                                switch (selected) {
+                                    .controller_resize_success => {
+                                        const applied = try resize_result;
+                                        try std.testing.expectEqual(@as(u64, 2), applied.resize_generation);
+                                        try std.testing.expect(applied.changed);
+                                        try std.testing.expectEqual(@as(u8, 10), peer_stage.load(.acquire));
+                                        try generation.releasePromotedController(staged_receipt, 4);
+                                    },
+                                    .controller_resize_stale => {
+                                        try std.testing.expectError(error.StaleResize, resize_result);
+                                        try std.testing.expectEqual(@as(u8, 10), peer_stage.load(.acquire));
+                                        try std.testing.expectEqual(
+                                            client_poison.ConnectionReason.peer_contract_violation,
+                                            current_client.firstPoisonReason().?,
+                                        );
+                                        try generation.releasePromotedControllerAfterTerminalTransport(staged_receipt, 4);
+                                    },
+                                    .controller_resize_wrong_size => {
+                                        try std.testing.expectError(error.InvalidResizeResponse, resize_result);
+                                        try std.testing.expectEqual(@as(u8, 10), peer_stage.load(.acquire));
+                                        try std.testing.expectEqual(
+                                            client_poison.ConnectionReason.peer_contract_violation,
+                                            current_client.firstPoisonReason().?,
+                                        );
+                                        try generation.releasePromotedControllerAfterTerminalTransport(staged_receipt, 4);
+                                    },
+                                    .controller_resize_eof => {
+                                        try std.testing.expectError(error.ConnectionClosed, resize_result);
+                                        try std.testing.expectEqual(@as(u8, 9), peer_stage.load(.acquire));
+                                        try std.testing.expectEqual(
+                                            client_poison.ConnectionReason.connection_eof,
+                                            current_client.firstPoisonReason().?,
+                                        );
+                                        try generation.releasePromotedControllerAfterTerminalTransport(staged_receipt, 4);
+                                    },
+                                    .controller_resize_oom => {
+                                        try std.testing.expectError(error.OutOfMemory, resize_result);
+                                        try std.testing.expectEqual(@as(u8, 7), peer_stage.load(.acquire));
+                                        try std.testing.expectEqual(
+                                            client_poison.ConnectionReason.local_resource_exhausted,
+                                            current_client.firstPoisonReason().?,
+                                        );
+                                        try generation.releasePromotedControllerAfterTerminalTransport(staged_receipt, 4);
+                                    },
+                                    else => unreachable,
+                                }
+                            } else {
+                                try generation.releaseControllerEvidence(staged_receipt, 4);
+                            }
                             try std.testing.expect(!generation.validateControllerEvidence(staged_receipt, 4));
                             try std.testing.expectEqual(
                                 generation_attachment_mod.testing_api.DeinitReadiness{
@@ -10192,6 +10664,14 @@ test "CR4b actual socket controller takeover는 conflict unknown pre failure를 
     try runCr4aCatchupStageCase(.controller_status_resource_failed);
     try runCr4aCatchupStageCase(.controller_takeover_resource_failed);
     try runCr4aCatchupStageCase(.controller_deadline_pre);
+}
+
+test "CR4c C2 actual socket forced resize는 success stale wrong size EOF OOM을 구분한다" {
+    try runCr4aCatchupStageCase(.controller_resize_success);
+    try runCr4aCatchupStageCase(.controller_resize_stale);
+    try runCr4aCatchupStageCase(.controller_resize_wrong_size);
+    try runCr4aCatchupStageCase(.controller_resize_eof);
+    try runCr4aCatchupStageCase(.controller_resize_oom);
 }
 
 test "CR4a actual socket catchup hostile은 gap malformed cap plus one missing barrier를 fail close한다" {

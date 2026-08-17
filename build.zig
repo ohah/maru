@@ -2291,6 +2291,19 @@ pub fn build(b: *std.Build) void {
     // 개별 집중 gate(`test-session-host-*`)는 **바꾸지 않는다.** 그쪽은 "Debug·ReleaseFast runtime
     // N+boundary 1 exact-count" 계약을 문서가 소유하므로 두 모드를 그대로 돌린다. 그 gate 를 직접
     // 부를 때만 ReleaseFast boundary 가 빌드되고, CI 의 집계 경로에서는 빠진다.
+    // i18n 2차 방어: 번역 대상 레이어에 새 한국어 리터럴이 들어오지 않는가. 1차(파라미터 타입)를
+    // 세울 수 없는 sink가 남으므로(정적·동적이 섞이는 컬렉션 — 계약 §7.2) 거기서는 이 검사가 유일한
+    // 방어다. 개수 원장이라 늘어도 줄어도 실패한다(줄면 원장을 함께 줄이라는 뜻).
+    const i18n_literal_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/i18n_literals.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_i18n_literal_boundary_tests = b.addRunArtifact(i18n_literal_boundary_tests);
+    run_i18n_literal_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
@@ -2298,6 +2311,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
+    boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);
     boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 

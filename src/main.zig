@@ -248,6 +248,7 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
             .close_requested => close_requested = true,
             // 이 스모크는 창 계약만 본다 — 입력은 W7.4a 의 터미널 스모크가 검증한다.
             .key => {},
+            .preedit_changed => {},
         };
         _ = usleep(8_000); // 8ms — 스모크가 CPU를 태우지 않게. 프레임 페이싱은 W7.2 몫이다.
     }
@@ -322,6 +323,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
             .paint => {},
             .close_requested => close_requested = true,
             .key => {},
+            .preedit_changed => {},
         };
         present.clearAndPresent(clear, false) catch |err| {
             try stderr.print("present 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
@@ -449,6 +451,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .paint => {},
             .close_requested => close_requested = true,
             .key => {},
+            .preedit_changed => {},
         };
 
         const size = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h) orelse continue;
@@ -665,6 +668,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .paint => {},
             .close_requested => close_requested = true,
             .key => {},
+            .preedit_changed => {},
         };
 
         cells.clearRetainingCapacity();
@@ -950,6 +954,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var bytes_to_shell: usize = 0;
     var app_actions: usize = 0;
     var keys_ignored: usize = 0;
+    var preedit_updates: usize = 0;
+    var preedit_failures: usize = 0;
+    var preedit_max_bytes: usize = 0;
 
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
@@ -988,6 +995,19 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                     .app_action => app_actions += 1,
                     .ignored => keys_ignored += 1,
                 }
+            },
+            // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
+            // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
+            .preedit_changed => {
+                const text = window.preeditText();
+                if (app_window.active()) |active| {
+                    active.lockCore(io);
+                    // 실패하면(OOM) fail-closed 로 비운다 — 그것이 중립 계약의 규약이다.
+                    if (!active.setPreeditLocked(text)) preedit_failures += 1;
+                    active.unlockCore(io);
+                }
+                preedit_updates += 1;
+                if (text.len > preedit_max_bytes) preedit_max_bytes = text.len;
             },
         };
 
@@ -1052,6 +1072,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("fallback_glyphs={d} replacement_glyphs={d} raster_skipped={d}\n", .{ counts.fallback, counts.replacement, counts.skipped });
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
+    try stdout.print("preedit_updates={d} failures={d} max_bytes={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     try stdout.writeAll("visible UI: 실제 셸 출력이 창에 그려진다.\n");

@@ -175,7 +175,107 @@ pub fn translateModifiers(
     return .{ .option = alt, .shift = shift };
 }
 
+// ── IME 조합 문자열 변환 ─────────────────────────────────────────────────────────────────────
+
+/// IME 조합 문자열(UTF-16LE)을 UTF-8로 옮긴다. 담을 수 있는 만큼만 쓰고 **쓴 바이트 수**를 돌려준다.
+///
+/// **왜 `std.unicode.utf16LeToUtf8`을 그대로 쓰지 않는가**: 그것은 버퍼가 모자라면 오류를 내는데, 조합
+/// 문자열은 사용자가 계속 늘릴 수 있어 **잘라서라도 보여 주는** 편이 맞다(미리보기가 짧아질 뿐 확정 문자는
+/// `WM_CHAR` 경로로 온전히 온다). 오류로 접으면 긴 조합에서 미리보기가 통째로 사라진다.
+///
+/// 서로게이트 쌍은 합친다. 짝 없는 서로게이트는 **버린다** — 중립 계약이 lone surrogate를 거부하므로
+/// 여기서 흘려보내면 뒤에서 조용히 사라진다.
+///
+/// 순수라서 **모든 타깃에서** 테스트가 돈다 — `ImmGetCompositionStringW` 없이 이 규칙이 지켜진다.
+pub fn compositionTextFromUtf16(units: []const u16, out: []u8) usize {
+    var written: usize = 0;
+    var i: usize = 0;
+    while (i < units.len) {
+        const unit = units[i];
+        var cp: u21 = undefined;
+        if (unit >= 0xD800 and unit <= 0xDBFF) {
+            // 상위 서로게이트 — 짝이 있어야 문자가 된다.
+            if (i + 1 >= units.len) break; // 꼬리가 잘렸다.
+            const low = units[i + 1];
+            if (low < 0xDC00 or low > 0xDFFF) {
+                i += 1; // 짝이 아니다 — 상위를 버리고 계속한다.
+                continue;
+            }
+            cp = @intCast(0x10000 + ((@as(u32, unit) - 0xD800) << 10) + (@as(u32, low) - 0xDC00));
+            i += 2;
+        } else if (unit >= 0xDC00 and unit <= 0xDFFF) {
+            i += 1; // 짝 없는 하위 — 버린다.
+            continue;
+        } else {
+            cp = @intCast(unit);
+            i += 1;
+        }
+
+        // **한 글자를 다 쓸 수 없으면 그 글자를 안 쓴다.** 반만 쓰면 UTF-8이 깨져 아래 계층이 거부한다.
+        const need = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
+        if (written + need > out.len) break;
+        written += std.unicode.utf8Encode(cp, out[written..]) catch break;
+    }
+    return written;
+}
+
 const testing = std.testing;
+
+test "compositionTextFromUtf16: 한글 조합이 UTF-8 3바이트로 온다" {
+    var out: [64]u8 = undefined;
+
+    // `한` = U+D55C → UTF-8 3바이트. 조합 미리보기가 이 경로로 화면에 간다.
+    const han = [_]u16{0xD55C};
+    const n = compositionTextFromUtf16(&han, &out);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("한", out[0..n]);
+
+    // 조합이 자라는 중간 단계들(`ㅎ` → `하` → `한`)도 각각 3바이트다.
+    for ([_]u16{ 0x314E, 0xD558, 0xD55C }) |u| {
+        const one = [_]u16{u};
+        try testing.expectEqual(@as(usize, 3), compositionTextFromUtf16(&one, &out));
+    }
+
+    // 빈 조합은 0 — 사용자가 조합을 지운 상태다(미리보기가 사라져야 한다).
+    try testing.expectEqual(@as(usize, 0), compositionTextFromUtf16(&[_]u16{}, &out));
+}
+
+test "compositionTextFromUtf16: 서로게이트 쌍을 합치고 짝 없는 것은 버린다" {
+    var out: [64]u8 = undefined;
+
+    // U+1F600 = 상위 D83D + 하위 DE00 → UTF-8 4바이트.
+    const emoji = [_]u16{ 0xD83D, 0xDE00 };
+    const n = compositionTextFromUtf16(&emoji, &out);
+    try testing.expectEqual(@as(usize, 4), n);
+
+    // **짝 없는 서로게이트를 흘려보내면 안 된다** — 중립 계약이 거부해 글자가 조용히 사라진다.
+    try testing.expectEqual(@as(usize, 0), compositionTextFromUtf16(&[_]u16{0xD83D}, &out)); // 상위만
+    try testing.expectEqual(@as(usize, 0), compositionTextFromUtf16(&[_]u16{0xDE00}, &out)); // 하위만
+
+    // 짝 없는 것을 건너뛰고 뒤의 정상 문자는 살린다.
+    const mixed = [_]u16{ 0xDE00, 'A' };
+    const m = compositionTextFromUtf16(&mixed, &out);
+    try testing.expectEqualStrings("A", out[0..m]);
+}
+
+test "compositionTextFromUtf16: 넘치면 글자 단위로 자른다" {
+    // 3바이트 한글 둘을 5바이트 버퍼에 — 하나만 들어가야 한다. **반쪽 글자를 쓰면 UTF-8이 깨진다.**
+    var small: [5]u8 = undefined;
+    const two = [_]u16{ 0xD55C, 0xAE00 };
+    const n = compositionTextFromUtf16(&two, &small);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("한", small[0..n]);
+
+    // 한 글자도 못 담으면 0이다(오류가 아니다 — 미리보기가 비는 것이 맞다).
+    var tiny: [2]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), compositionTextFromUtf16(&[_]u16{0xD55C}, &tiny));
+
+    // ASCII 는 1바이트씩 들어가 버퍼를 꽉 채운다.
+    var five: [5]u8 = undefined;
+    const ascii = [_]u16{ 'a', 'b', 'c', 'd', 'e', 'f' };
+    try testing.expectEqual(@as(usize, 5), compositionTextFromUtf16(&ascii, &five));
+    try testing.expectEqualStrings("abcde", &five);
+}
 
 test "keyFromVirtualKey: 기능키는 중립 Key 로, 문자 키는 null" {
     try testing.expect(keyFromVirtualKey(vk_return).? == .enter);

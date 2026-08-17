@@ -56,9 +56,10 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
 | `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
-| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos-releasefast` | `code` 변경 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
 | `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
+
+**`session host macOS (ReleaseFast)`는 required가 아니고 main push에서만 돈다.** 이 표에는 오래 required로 적혀 있었지만 실제 `required_status_checks.contexts`에는 없다 — 실행 시점을 PR에서 main push로 옮길 때 함께 뺀 것이 의도이고, 이 표가 그 결정을 따라오지 못했다(2026-08-17 정정). **Debug와 중복이 아니다**: 같은 스위트를 도는 것은 맞지만 실행 체제가 다르다. ReleaseFast에서는 `std.debug.assert`(session host 소스에 123개)와 정수 오버플로·배열 경계·`unreachable` 런타임 검사가 모두 사라지고 최적화가 fork/exec·소켓·스레딩 인터리빙을 바꾼다. 출하 `.dmg`가 ReleaseFast이므로 이 잡만이 **출하 체제**를 검증한다. 그래서 없애지 않고 시점만 뒤로 옮겼으며, 대가는 명시적이다 — PR이 초록이어도 머지 뒤 이 잡이 빨개질 수 있다. 근거와 실측(잡 8개 합계 24분 46초 중 이 잡 8분 14초)은 `ci.yml`의 job 주석이 소유한다.
 
 **Mermaid 제품 성능 게이트는 이 목록에서 뺐다(2026-08-17).** `mermaid macOS product path` job과 required 컨텍스트를 함께 제거했다. 근거는 회귀 압력이다 — Mermaid는 기능 추가를 멈춘 영역인데 그 job은 모든 `runtime`·`web` PR에서 macOS 러너 3분을 상시로 썼다. 병렬 배치라 wall-clock은 줄지 않고 러너 분만 줄어든다. **검증 수단은 남아 있다** — `mise run macos-mermaid-perf`는 그대로이고 [파일 패널 Markdown 읽기·소스 예산](#파일-패널-markdown-읽기소스-예산)의 Mermaid 행도 제품 계약으로 유효하다. Mermaid나 `web/dist/mermaid-helper.js` 경로를 다시 손댈 때는 로컬에서 이 게이트를 돌린다. 대가는 명시적이다: **다른 변경이 Mermaid tick 예산을 깨뜨려도 CI가 알려주지 않는다.** Mermaid에 기능을 다시 얹거나 네이티브 렌더로 옮기는 작업을 시작하면 job과 required 컨텍스트를 되살린다.
 

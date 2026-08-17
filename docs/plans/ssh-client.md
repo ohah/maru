@@ -18,7 +18,8 @@
 | S4b | **전송 루프** — 시퀀스 번호(방향별)·`NEWKEYS` 전환(옛 키로 보내고 그 뒤 교체)·평문↔암호 프레이밍 전환·추측 패킷 폐기(번호는 올린다)·strict KEX 수신 게이트 넷([계약 §4](../ssh-client.md)) | 바이트 열로 상태 전이 |
 | S5a | **호스트키 서명·지문** — `ssh-ed25519` blob 파싱, 교환 해시 서명 검증, `SHA256:` 지문 | RFC 8032 §7.1 벡터 + `ssh-keygen -lf` 와 지문 일치 |
 | S5b | **`known_hosts` 대조** — 호스트 매칭(평문 패턴·부정·해시 `\|1\|`)·`@revoked`·`@cert-authority` 제외·판정 넷 | 줄 파싱 + 판정 + `ssh-keygen -H` 와 해시 일치 |
-| S6 | **인증** — `publickey`(ed25519 서명)·`password`, `openssh-key-v1` 파싱(bcrypt_pbkdf) | 서명 바이트·키 파싱 |
+| S6a | **인증 프로토콜** — service 요청, `publickey`(session_id 를 덮는 서명)·`password`, 응답 넷, 배너 거르기 | RFC 8032 벡터로 서명 + 응답 파싱 |
+| S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(bcrypt_pbkdf) | 키 파일 바이트 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` | 상태 전이 |
 | S7b | **흐름 제어** — 채널 윈도 소비·`WINDOW_ADJUST`. **안 하면 대량 출력이 도중에 멈춘다**([계약 §3.1](../ssh-client.md)) | 윈도를 넘기는 바이트 열 |
 | S7c | **잡 메시지** — `IGNORE`·`DEBUG`·`UNIMPLEMENTED`·`DISCONNECT`·`GLOBAL_REQUEST`, 버전 앞 배너 여러 줄 | 각 메시지 주입 |

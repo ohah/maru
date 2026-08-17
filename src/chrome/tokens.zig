@@ -151,6 +151,20 @@ pub const ColorRole = enum {
     /// 카드 제목보다 시선을 먼저 끌지 않게 한다.
     agent_claude_fg,
     agent_codex_fg,
+    /// **파일 탐색기 아이콘 색.** 아이콘은 지금까지 라벨과 같은 색이라, 트리를 훑을 때 종류가 **모양
+    /// 하나로만** 구분됐다(작은 글리프에서 모양 차이는 약하다 — 사용자 요청 2026-08-18, VS Code 계열
+    /// 트리 비교). 색을 주면 같은 자리에서 종류가 먼저 읽힌다.
+    ///
+    /// **색은 종류의 보조 신호다** — 아이콘 모양과 파일 이름이 그대로 있고, 색은 그 둘을 빨리 묶어 주는
+    /// 역할이다(`agent_*_fg`·`git_*` 와 같은 판단). 그래서 명도를 본문 대역에 두어 제목보다 시선을 먼저
+    /// 끌지 않게 하고, 서로는 색상환에서 떨어뜨려 인접 행이 뭉치지 않게 한다.
+    file_icon_code_fg,
+    file_icon_web_fg,
+    file_icon_data_fg,
+    file_icon_config_fg,
+    file_icon_media_fg,
+    file_icon_doc_fg,
+    file_icon_package_fg,
     /// **터미널 본문 배경.** chrome 표면(`surface_bg` — 사이드바·도크)과 **다른 색**이고, 그 차이가
     /// 의미다: 이 색이 칠해진 자리는 "셸/문서 내용이 사는 곳"이다.
     ///
@@ -322,6 +336,16 @@ pub const Tokens = struct {
         // 신호를 잃는다.
         palette.set(.agent_claude_fg, .{ .r = 217, .g = 119, .b = 87 });
         palette.set(.agent_codex_fg, .{ .r = 90, .g = 179, .b = 214 });
+        // 파일 아이콘 색도 테마 입력이 없어 같은 자리의 보수적 폴백이다. 일곱은 서로 색상환에서 떨어져
+        // 있고 명도는 본문 대역(±)이라, 트리를 훑을 때 종류가 먼저 읽히되 이름보다 튀지 않는다. git·
+        // provider 셋과도 겹치지 않게 골랐다 — 같은 사이드바에서 신호가 섞이면 셋 다 의미를 잃는다.
+        palette.set(.file_icon_code_fg, .{ .r = 126, .g = 186, .b = 128 }); // 소스: 초록
+        palette.set(.file_icon_web_fg, .{ .r = 214, .g = 190, .b = 96 }); // 웹/스크립트: 노랑
+        palette.set(.file_icon_data_fg, .{ .r = 160, .g = 174, .b = 214 }); // 데이터: 연보라
+        palette.set(.file_icon_config_fg, .{ .r = 150, .g = 156, .b = 166 }); // 설정: 중성 회색
+        palette.set(.file_icon_media_fg, .{ .r = 186, .g = 138, .b = 206 }); // 이미지/미디어: 보라
+        palette.set(.file_icon_doc_fg, .{ .r = 104, .g = 178, .b = 196 }); // 문서: 청록
+        palette.set(.file_icon_package_fg, .{ .r = 206, .g = 128, .b = 110 }); // 패키지/아카이브: 주황빛 갈색
         palette.set(.terminal_bg, theme.terminal_background);
         palette.set(.diff_added_bg, theme.diff_added);
         palette.set(.diff_removed_bg, theme.diff_removed);

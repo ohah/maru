@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const icons = @import("../icons.zig");
+const tokens = @import("tokens.zig");
 
 pub const IconKind = enum(u8) {
     none,
@@ -75,6 +76,28 @@ fn extension(name: []const u8) ?[]const u8 {
 fn anyName(actual: []const u8, candidates: []const []const u8) bool {
     for (candidates) |candidate| if (std.ascii.eqlIgnoreCase(actual, candidate)) return true;
     return false;
+}
+
+/// 아이콘 셀에 줄 색. **분류와 같은 자리에 둔다** — 종류를 아는 곳이 색도 정해야 두 매핑이 갈리지 않는다
+/// (렌더가 자기 표를 따로 들면 새 `IconKind` 를 더할 때 한쪽만 갱신된다).
+///
+/// null 이면 행 색을 그대로 쓴다: 폴더와 `none`/`recent` 가 그렇다. **폴더는 색을 주지 않는다** — 트리에서
+/// 폴더는 이미 chevron·들여쓰기·굵기로 구분되고, 거기까지 칠하면 화면이 색으로 가득 차 정작 파일 종류
+/// 신호가 묻힌다(사용자 요청의 요지는 "파일 종류가 먼저 읽히게"다).
+pub fn colorRole(kind: IconKind) ?tokens.ColorRole {
+    return switch (kind) {
+        .none, .recent => null,
+        .folder, .folder_open, .folder_source, .folder_test, .folder_docs, .folder_assets, .folder_config, .folder_dependency, .folder_output => null,
+        .code => .file_icon_code_fg,
+        .web => .file_icon_web_fg,
+        .data => .file_icon_data_fg,
+        .config => .file_icon_config_fg,
+        .git => .file_icon_config_fg, // git 메타파일은 설정 계열로 묶는다(색을 하나 더 늘릴 만큼 자주 보이지 않는다)
+        .image => .file_icon_media_fg,
+        .document => .file_icon_doc_fg,
+        .archive, .package => .file_icon_package_fg,
+        .file => null, // 분류되지 않은 일반 파일 — 색을 주면 "종류를 안다"는 잘못된 신호가 된다
+    };
 }
 
 pub fn codepoint(kind: IconKind) ?u21 {

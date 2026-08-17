@@ -3296,3 +3296,101 @@ test "잡고 있는 목적지는 둘째 손가락에게 안 뺏긴다" {
     endAnyGesture();
     bridge.maru_mobile_clear_error();
 }
+
+// ── 마우스 휠·트랙패드 ────────────────────────────────────────────────────────
+//
+// 손가락과 **입력원이 다르다**: `down`/`up` 이 없고 델타가 곧 이벤트다. 줄 환산은 데스크톱과
+// 같은 함수(`session.input_math.wheelDeltaToLines`)가 하고, 적용은 손가락과 **같은 경로**로
+// 간다(alt 화면 변환·선택 해제·clamp 가 거기 있다).
+//
+// **이 묶음은 파일 맨 끝이다.** 스크롤백을 스스로 만들어야 하는데 그 글자가 화면을 바꿔 앞
+// 테스트들이 짚던 자리를 없앤다 — 중간에 끼웠다가 넷을 깨뜨리고 옮겼다(이 파일은 순서에
+// 기댄다: 여러 테스트가 앞이 남긴 화면·스크롤백을 전제한다).
+
+/// 스크롤백을 만든다. **개행으로는 안 된다** — `maru_mobile_input` 은 개행을 Enter 키로 바꾸고
+/// (계약 §3.1) 셸 에코가 없어 행이 안 넘어간다. 대신 **줄을 넘치게** 써서 autowrap 으로 행을
+/// 늘린다(터미널 모드에 안 걸린다).
+fn feedWrappedScrollback() void {
+    var n: u32 = 0;
+    while (n < 80) : (n += 1) {
+        _ = bridge.maru_mobile_input("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 60);
+    }
+}
+
+/// 본문 휠 테스트의 공통 준비 — 스크롤백을 만들고 바닥에 세운다.
+fn wheelSetup() void {
+    openTerminal(402, 874);
+    endAnyGesture();
+    feedWrappedScrollback();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+}
+
+test "휠 한 칸이 여러 줄을 움직인다" {
+    wheelSetup();
+    bridge.maru_mobile_wheel(1, 0, 0, 200, 300); // 노치 하나(양수 = 과거로)
+    // **한 줄이 아니다** — macOS 가 이벤트에 3 을 실어 보내는 것과 같은 수를 코어가 쓴다.
+    try std.testing.expect(bridge.maru_mobile_view_offset() >= 3);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+test "휠 부호는 손가락과 같다" {
+    wheelSetup();
+    bridge.maru_mobile_wheel(2, 0, 0, 200, 300); // 과거로
+    const past = bridge.maru_mobile_view_offset();
+    try std.testing.expect(past > 0);
+    bridge.maru_mobile_wheel(-2, 0, 0, 200, 300); // 현재로
+    try std.testing.expect(bridge.maru_mobile_view_offset() < past);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **한 줄이 안 되는 델타를 버리면 정밀 트랙패드가 아예 안 움직인다**(데스크톱이 겪어 누적기를
+// 둔 자리 — 같은 함수를 쓴다). 조금씩 여러 번 굴리면 결국 한 줄이 나와야 한다.
+test "한 줄이 안 되는 휠도 모이면 움직인다" {
+    wheelSetup();
+    var n: u32 = 0;
+    while (n < 3) : (n += 1) {
+        bridge.maru_mobile_wheel(5, 0, 1, 200, 300); // 정밀(px) — 줄 높이(22)의 1/4 남짓
+        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    }
+    bridge.maru_mobile_wheel(5, 0, 1, 200, 300);
+    bridge.maru_mobile_wheel(5, 0, 1, 200, 300);
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **비유한 값은 아무 일도 안 한다.** host 가 주는 float 이라 NaN 이 올 수 있고, 그것이 누적기에
+// 들어가면 그 뒤로 **영영 안 움직인다**(데스크톱이 같은 이유로 가드를 갖는다).
+test "휠의 비유한 값은 무시한다" {
+    wheelSetup();
+    bridge.maru_mobile_wheel(std.math.nan(f32), 0, 0, 200, 300);
+    bridge.maru_mobile_wheel(std.math.inf(f32), 0, 0, 200, 300);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    // 그 뒤에도 멀쩡히 움직여야 한다 — 누적기가 오염됐으면 여기서 안 움직인다.
+    bridge.maru_mobile_wheel(2, 0, 0, 200, 300);
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **가리키는 것이 대상이다.** 설정이 떠 있으면 그 목록이 움직인다 — 안 보이는 뒤 화면을 굴리면
+// 돌아왔을 때 보던 자리가 아니다(손가락 경로가 같은 이유로 막고 있는 자리다).
+test "밀린 화면 위의 휠은 그 목록을 움직인다" {
+    const small_h: u32 = 300; // 목록이 확실히 넘치는 크기
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
+    const body_before = bridge.maru_mobile_view_offset();
+    const list_before = bridge.settingsScrollPx();
+
+    // **아래로 굴린다**(음수). 목록이 맨 위에 있으므로 위로 굴리면 갈 데가 없어 무동작이다.
+    bridge.maru_mobile_wheel(-1, 0, 0, 200, 150);
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expect(bridge.settingsScrollPx() != list_before); // 목록이 움직였다
+    try std.testing.expectEqual(body_before, bridge.maru_mobile_view_offset()); // 본문은 그대로
+
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}

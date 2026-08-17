@@ -71,11 +71,11 @@ pub fn formatAgentSessionArchiveRelativeAge(now_ns: i128, activity_ns: i96, buf:
     const then: i128 = activity_ns;
     const delta_ns = if (now_ns > then) now_ns - then else 0;
     const minutes = @divFloor(delta_ns, 60 * std.time.ns_per_s);
-    if (minutes == 0) return "방금";
-    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}분 전", .{minutes}) catch "방금";
+    if (minutes == 0) return maru.i18n.t(.ad_time_now);
+    if (minutes < 60) return maru.i18n.format(buf, maru.i18n.t(.ad_time_minutes), &.{.{ .d = @intCast(minutes) }});
     const hours = @divFloor(minutes, 60);
-    if (hours < 24) return std.fmt.bufPrint(buf, "{d}시간 전", .{hours}) catch "방금";
-    return std.fmt.bufPrint(buf, "{d}일 전", .{@divFloor(hours, 24)}) catch "방금";
+    if (hours < 24) return maru.i18n.format(buf, maru.i18n.t(.ad_time_hours), &.{.{ .d = @intCast(hours) }});
+    return maru.i18n.format(buf, maru.i18n.t(.ad_time_days), &.{.{ .d = @intCast(@divFloor(hours, 24)) }});
 }
 
 pub fn agentSessionArchiveWithinRoot(record: agent_session_archive_backend.Record, root: []const u8) bool {
@@ -1452,16 +1452,26 @@ pub fn buildAgentSessionDockItems(
                 const parsed = record.parsed;
                 var age_buf: [32]u8 = undefined;
                 const age = formatAgentSessionArchiveRelativeAge(now_ns, agent_session_archive_backend.lastActivityNs(record), &age_buf);
-                const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
+                const model = if (parsed.model.len > 0) parsed.model else maru.i18n.t(.ad_no_model);
                 // 서브에이전트를 돌린 세션만 그 개수를 덧붙인다. 0이면 아무것도 그리지 않아 평범한
                 // 세션의 메타 줄이 길어지지 않는다(docs/agent-session-list.md §2.3). 상한 초과는
                 // `999+`로 — 스캐너가 그 값에서 세기를 멈추므로 정확한 수를 주장하지 않는다.
-                const metadata = if (record.subagent_count == 0)
-                    try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model })
-                else if (record.subagent_count >= agent_session_archive_backend.max_subagent_count)
-                    try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}+", .{ parsed.message_count, age, model, agent_session_archive_backend.max_subagent_count })
-                else
-                    try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}", .{ parsed.message_count, age, model, record.subagent_count });
+                const metadata = if (record.subagent_count == 0) blk: {
+                    var meta_buf: [256]u8 = undefined;
+                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary), &.{
+                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model },
+                    }));
+                } else if (record.subagent_count >= agent_session_archive_backend.max_subagent_count) blk: {
+                    var meta_buf: [256]u8 = undefined;
+                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary_sub_more), &.{
+                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model }, .{ .d = agent_session_archive_backend.max_subagent_count },
+                    }));
+                } else blk: {
+                    var meta_buf: [256]u8 = undefined;
+                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary_sub), &.{
+                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model }, .{ .d = record.subagent_count },
+                    }));
+                };
                 var expanded: ?chrome.components.session_dock.types.Expanded = null;
                 if (self.agent_session_inline_detail) |detail| if (inlineArchiveDetailMatchesRecord(&detail, &record)) {
                     const detail_state: chrome.components.session_dock.types.DetailState = switch (detail.state) {

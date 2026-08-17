@@ -22,7 +22,7 @@ pub const ScrollbackConfig = struct {
     lines: u32 = 1000,
 
     pub const schema = .{
-        .lines = theme.Meta{ .doc = "스크롤백 줄 수", .range = .{ 0, 100_000 }, .widget = .number },
+        .lines = theme.Meta{ .doc = .cfg_scrollback_lines, .range = .{ 0, 100_000 }, .widget = .number },
     };
 };
 
@@ -55,6 +55,16 @@ pub const Parsed = struct {
 
 /// `key = value` 한 줄에 하나, `#` 주석. **forgiving** — 없는 키·틀린 값은 기본값을 지키고 넘어간다
 /// (데스크톱과 같은 규율). 파일이 없거나 비어도 정상이다.
+/// 모바일 설정 행의 라벨. **comptime 에 해석한다** — 이 목록은 `inline for` 로 만드는 comptime
+/// 테이블이라 런타임 언어 조회(`i18n.t`)를 쓸 수 없다(`error: unable to resolve comptime value`).
+///
+/// 그래서 언어가 **`ko` 로 고정**된다. 지금 모바일 화면이 한국어이므로 퇴보는 아니지만, 이 화면은
+/// `ui.language` 를 따르지 못한다. 근본 원인은 번역이 아니라 **행 목록이 comptime 이라는 구조**이고,
+/// 모바일이 OS 로케일을 받는 슬라이스가 그것을 함께 든다(docs/mobile-config.md §4.2).
+fn mobileDocLabel(comptime doc: ?maru.i18n.Key, comptime key: []const u8) []const u8 {
+    return if (doc) |k| maru.i18n.tIn(.ko, k) else key;
+}
+
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Parsed {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -185,12 +195,12 @@ pub const rows: []const Row = blk: {
             const seg = meta.key_seg orelse dashed(sf.name);
             const key = if (meta.key) |k| k else cf.name ++ "." ++ seg;
             const row: ?Row = switch (@typeInfo(FieldT)) {
-                .bool => Row{ .key = key, .label = meta.doc, .kind = .toggle, .section = sectionOf(cf.name) },
-                .int => Row{ .key = key, .label = meta.doc, .kind = .number, .section = sectionOf(cf.name) },
+                .bool => Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .toggle, .section = sectionOf(cf.name) },
+                .int => Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .number, .section = sectionOf(cf.name) },
                 .@"enum" => e: {
                     var items: []const []const u8 = &.{};
                     for (@typeInfo(FieldT).@"enum".fields) |ef| items = items ++ [_][]const u8{dashed(ef.name)};
-                    break :e Row{ .key = key, .label = meta.doc, .kind = .choice, .items = items, .section = sectionOf(cf.name) };
+                    break :e Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .choice, .items = items, .section = sectionOf(cf.name) };
                 },
                 else => null, // []const u8(색·문자열) — 편집 수단이 없다
             };

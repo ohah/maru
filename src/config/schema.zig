@@ -199,7 +199,7 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (!meta.hidden) {
                     const full_key = comptime topKey(sf.name, meta);
-                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(config, sf.name), .section = meta.section });
                 }
             }
         }
@@ -213,7 +213,7 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (!meta.hidden) {
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
-                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                        try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
                 }
             }
@@ -287,7 +287,7 @@ fn appendNumberField(arena: std.mem.Allocator, config: theme.Config, comptime C:
     if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(config, sf.name)) else @field(config, sf.name);
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
+    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
 }
 
 // sub-struct 숫자 필드 한 개를 append(있으면).
@@ -299,7 +299,7 @@ fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime
     if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(@field(config, cf.name), sf.name)) else @field(@field(config, cf.name), sf.name);
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
+    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
 }
 
 /// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 숫자 입력 박스 → config). value는 range로 클램프, u32면 반올림 정수화.
@@ -336,6 +336,13 @@ fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []
 /// 한 enum 스키마 필드의 GUI dropdown 행 기술자. current는 현재 변형의 표시 토큰(dashed — config 파일 규약).
 /// 행 기술자에는 옵션 목록을 싣지 않는다 — 팝업을 열 때 platform이 `enumVariants`로 전체 변형을 따로 받는다
 /// (CS-4-1 열리는 팝업 목록 + ↑↓ 라이브 프리뷰; ←→ 순환은 cycleEnum).
+/// `Meta.doc`(키) → 표시 문자열. 여기서 한 번 해석해 Field 에 실어 보내므로 **소비자는 무변경**이다
+/// (`app_session/settings.zig` 의 18 곳이 `[]const u8` 을 그대로 받는다). 계약 §5.2 대로 이 해석은
+/// UI 스레드에서 일어난다 — Field 를 만드는 것이 세팅 화면을 그리는 경로다.
+pub fn docText(key: ?@import("../i18n.zig").Key) []const u8 {
+    return if (key) |k| @import("../i18n.zig").t(k) else "";
+}
+
 pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8, section: ?theme.Section = null };
 
 /// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.
@@ -362,7 +369,7 @@ fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: them
     if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     // current는 정적 @tagName(소유/해제 불요 — 핸들러가 self.allocator로 호출해도 누수 없음). 표시 토큰의 '_'→'-'
     // 변환(config 규약)은 표시 시점(dropdown.view, frame arena)에 한다 — 여기서 dupe하면 핸들러 경로가 누수된다.
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value), .section = meta.section });
+    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .current = @tagName(value), .section = meta.section });
 }
 
 /// 키로 enum 스키마 필드를 한 변형 순환한다(dropdown 사이클러 — dir=+1 다음/-1 이전, wrap). 매칭하는 enum 필드가
@@ -555,7 +562,7 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                     const full_key = comptime topKey(sf.name, meta);
-                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(config, sf.name), .section = meta.section });
                 }
             }
         }
@@ -569,7 +576,7 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
-                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                        try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
                 }
             }
@@ -598,7 +605,7 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                     const full_key = comptime topKey(sf.name, meta);
-                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                    try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(config, sf.name), .section = meta.section });
                 }
             }
         }
@@ -612,7 +619,7 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
-                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                        try list.append(arena, .{ .key = full_key, .doc = docText(meta.doc), .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
                 }
             }
@@ -1403,4 +1410,53 @@ test "editor.wrap은 설정 UI에 뜬다 — 값이 렌더에 닿는다" {
     // 랩을 끄면 잘린 뒤를 볼 수단이 없었기 때문이고, 단일 파일·비교 양쪽에 가로가 붙어 해소됐다
     // (native-editor-visual-mapping.md §4.1e). 이 단언은 그 되돌림이 조용히 뒤집히지 않게 잡는다.
     try std.testing.expectEqual(false, (theme.EditorConfig{}).wrap);
+}
+
+// 모든 GUI 필드가 **라벨을 갖는지** 본다.
+//
+// `Meta.doc` 이 `?Key` 라 빠뜨리면 `null` 이 되고, 그때 세팅 화면은 라벨 자리에 빈 문자열을 그린다 —
+// 크래시도 컴파일 오류도 없이 **이름 없는 행**이 생긴다. 문자열이던 시절에는 `""` 기본값이 같은 구멍을
+// 갖고 있었고, 키로 옮기면서 그 구멍을 테스트로 닫는다.
+test "스키마'd GUI 필드는 전부 라벨이 있다 — doc 키를 빠뜨리면 이름 없는 행이 생긴다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cfg: theme.Config = .{};
+
+    var bools: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena, cfg, &bools);
+    var nums: std.ArrayList(NumberField) = .empty;
+    try appendNumberFields(arena, cfg, &nums);
+    var enums: std.ArrayList(EnumField) = .empty;
+    try appendEnumFields(arena, cfg, &enums);
+    var texts: std.ArrayList(TextField) = .empty;
+    try appendTextFields(arena, cfg, &texts);
+
+    // 하나도 안 나오면 이 테스트가 아무것도 안 지킨다.
+    try std.testing.expect(bools.items.len + nums.items.len + enums.items.len + texts.items.len > 0);
+
+    for (bools.items) |f| try std.testing.expect(f.doc.len > 0);
+    for (nums.items) |f| try std.testing.expect(f.doc.len > 0);
+    for (enums.items) |f| try std.testing.expect(f.doc.len > 0);
+    for (texts.items) |f| try std.testing.expect(f.doc.len > 0);
+}
+
+// 라벨이 **현재 UI 언어를 따르는지** 본다. `docText` 가 해석을 한 자리에 모으는 것이 그 근거이고,
+// 이 테스트가 없으면 "키로 옮겼지만 늘 같은 언어로 나온다"를 못 잡는다.
+test "config 라벨은 UI 언어를 따른다" {
+    const i18n = @import("../i18n.zig");
+    const before = i18n.lang();
+    defer i18n.setLang(before);
+
+    i18n.setLang(.ko);
+    const ko_label = docText(.cfg_font_size);
+    i18n.setLang(.en);
+    const en_label = docText(.cfg_font_size);
+
+    try std.testing.expect(!std.mem.eql(u8, ko_label, en_label));
+    try std.testing.expectEqualStrings(i18n.tIn(.ko, .cfg_font_size), ko_label);
+    try std.testing.expectEqualStrings(i18n.tIn(.en, .cfg_font_size), en_label);
+
+    // 설명 없음(`null`)은 빈 문자열이다 — 위 완전성 테스트가 그 상태를 잡는다.
+    try std.testing.expectEqualStrings("", docText(null));
 }

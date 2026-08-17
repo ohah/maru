@@ -481,7 +481,7 @@ pub const inventory = [_]Proof{
     // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
     // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
     // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f38192ecf29b268c2111932f27028f5f49384617cf681da511effc0d45a8f42d" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9c73bff9afe6f1bef22da94a55e43f8c61568dce4308f80cfda02c8955144738" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

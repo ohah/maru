@@ -5534,7 +5534,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 체크포인트가 백업된다는 사실을 전혀 못 봤다(code-review). 둘 중 이쪽이 데이터 관련이라 우선하고, 묘비는
         // 화면 안내(writeEndedPlaceholderGuidance)로 pane에 계속 남으므로 토스트를 양보해도 정보가 사라지지 않는다.
         if workspaceRestoreIncomplete {
-            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.")
+            // 문장은 Zig 가 고른다 — Swift 는 **상태만** 알린다(docs/i18n.md §7.2).
+            if let session = primary?.appSession {
+                maru_macos_app_session_notice_workspace_restore_incomplete(session)
+            }
             withSurface(primary) { _ = renderTick() } // 위 renderTick은 이미 지나갔으므로 이 notice를 그릴 tick을 준다.
         }
         // M3e: 저장 시점 활성(key)이던 창을 다시 focus한다(docs/window-surface-mobility.md §8A.8). Zig가 active-window=1
@@ -5557,14 +5560,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
     /// 호출 뒤 bytes는 해제돼도 안전). 다음 renderTick이 최상위 오버레이로 그린다. 세션 없으면 무동작.
-    private func showNotice(_ message: String) {
-        guard let session = primary?.appSession else { return }
-        let bytes = Array(message.utf8)
-        _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_session_show_notice(session, buf.baseAddress, buf.count)
-        }
-    }
-
     /// workspace.v1 raw 텍스트를 읽는다(관대 UTF-8 디코드 — 깨진 바이트는 U+FFFD). 없으면 nil. 헤더 검증·창 분할은
     /// Zig ABI가 한다(파싱 권위 단일화) — 여기선 포맷을 파싱하지 않는다.
     private func loadWorkspaceText() -> String? {
@@ -7513,7 +7508,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.png] // maru 내장 디코더는 PNG만(F2-1)
-        panel.message = "배경 이미지로 쓸 PNG를 고르세요"
+        panel.message = String(cString: maru_macos_file_pick_message(UInt32(MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG)))
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         let bytes = Array(path.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
@@ -7543,7 +7538,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             "mp4", "mov", "m4v", "mp3", "m4a", "aac", "wav", "aiff", "aif", "flac", // media(FP15 — OS 코덱 allowlist)
             "pdf", // pdf(FP15)
         ].compactMap { UTType(filenameExtension: $0) }
-        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·미디어·PDF)"
+        panel.message = String(cString: maru_macos_file_pick_message(UInt32(MARU_FILE_PICK_MESSAGE_DOCK_FILE)))
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         let bytes = Array(path.utf8)
         let result = bytes.withUnsafeBufferPointer { p in
@@ -7561,9 +7556,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.message = operation == MARU_FILE_TREE_ROOT_PICK_REPLACE
-            ? "탐색기에서 열 폴더를 고르세요"
-            : "작업공간에 추가할 폴더를 고르세요"
+        // 문장은 Zig 가 고른다 — Swift 는 종류만 넘긴다(docs/i18n.md §7.2).
+        panel.message = String(cString: maru_macos_file_pick_message(UInt32(
+            operation == MARU_FILE_TREE_ROOT_PICK_REPLACE
+                ? MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER
+                : MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER)))
         guard panel.runModal() == .OK, let path = panel.url?.path else {
             _ = maru_macos_app_session_provide_file_tree_root_pick(session, nil, 0)
             return

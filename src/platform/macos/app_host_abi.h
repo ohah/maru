@@ -558,6 +558,18 @@ uint32_t maru_macos_app_instance_lease_acquire(const uint8_t *path, size_t path_
    스레드에서 호출한다(같은 값이면 무해). NULL·빈 값·128 바이트 초과는 무동작이며, 그때 `ui.language = auto`
    는 영어로 떨어진다. */
 void maru_macos_app_set_ui_locale(const uint8_t *tag, size_t tag_len);
+/* 작업공간 복원이 불완전했음을 알리는 notice 를 띄운다. Swift 는 상태만 알리고 문장은 Zig 가
+   고른다(docs/i18n.md §7.2) — 예전에는 Swift 가 한국어 문장을 조립해 show_notice 로 넘겼고,
+   그것이 §7.3 이 남겨 둔 마지막 구멍이었다. */
+void maru_macos_app_session_notice_workspace_restore_incomplete(MaruAppHostSession *session);
+/* 파일 선택 패널 안내 문구를 현재 UI 언어로 돌려준다. Swift 는 UI 문자열을 만들지 않는다
+   (docs/i18n.md §7.2) — 종류만 넘기고 문장은 Zig 가 고른다. 반환은 정적 널종단 문자열이라
+   host 가 해제하지 않는다. 알 수 없는 종류는 빈 문자열(패널이 안내 없이 뜬다). */
+#define MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG 0u
+#define MARU_FILE_PICK_MESSAGE_DOCK_FILE 1u
+#define MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER 2u
+#define MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER 3u
+const char *maru_macos_file_pick_message(uint32_t kind);
 /* CR0b bootstrap 5: 모든 AppSession teardown 뒤 app-global remote backend/pool/client를 정산한다.
    0=inactive, 1=settled. incident owner shutdown보다 반드시 먼저 호출한다. */
 uint32_t maru_macos_remote_backend_settle(void);

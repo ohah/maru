@@ -663,6 +663,34 @@ pub fn openDiffForScmRow(self: *AppSession, repo_override: ?[]const u8, row: scm
     openDiffTerm(self, repo, abs, row.path, row.orig_path, base);
 }
 
+/// 히스토리에서 고른 **커밋 하나의 파일** 비교를 연다(P4b). 커밋 OID까지 유일성 키에 넣어야 다른
+/// 커밋의 같은 파일이 서로를 덮지 않는다.
+pub fn openCommitDiffTerm(
+    self: *AppSession,
+    repo: []const u8,
+    abs_path: []const u8,
+    rel_path: []const u8,
+    orig_rel_path: ?[]const u8,
+    commit_oid: []const u8,
+) void {
+    if (diffTermForCommit(self, abs_path, .commit, commit_oid)) |existing| {
+        _ = self.activateExistingFileTerm(existing);
+        return;
+    }
+    const opened = pane_ops.openFileTermInActivePane(self, abs_path, .diff) catch return;
+    const entry = opened.term.file_entry orelse return;
+    entry.diff_base = .commit;
+    self.freeDiffPaths(entry);
+    entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
+    entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
+    entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
+    // **이 비교가 어느 커밋인지**는 열 때 정해 들고 다닌다 — 나중에 다시 구하면 그 사이 다른 커밋을
+    // 펼쳤을 때 남의 커밋을 읽는다.
+    entry.diff_commit_oid = self.allocator.dupe(u8, commit_oid) catch &.{};
+    self.requestDiffContent(entry);
+    editor_diff_ops.markRequested(self, opened.term);
+}
+
 /// 소스 컨트롤 행을 눌렀을 때 그 비교를 여는 지점. **유일성 키는 `(경로, kind, base)`**라 같은 파일의
 /// 스테이지·미스테이지 diff가 서로를 덮지 않는다(docs/editor-surface-dock.md §3.5).
 pub fn openDiffTerm(
@@ -694,11 +722,21 @@ pub fn openDiffTerm(
 }
 
 pub fn diffTermFor(self: *AppSession, abs_path: []const u8, base: dock_panel.DiffBase) ?*Term {
+    return diffTermForCommit(self, abs_path, base, "");
+}
+
+/// 위와 같되 **커밋 기준은 그 커밋까지** 본다(P4b 적대적 검증).
+///
+/// 유일성 키가 `(경로, kind, base)`뿐이면 **다른 커밋의 같은 파일이 같은 탭을 재사용**한다 — 사용자는
+/// 방금 누른 커밋을 눌렀는데 앞서 본 커밋의 내용을 보게 된다. 커밋마다 다른 탭이어야 두 커밋을 나란히
+/// 놓고 볼 수도 있다.
+pub fn diffTermForCommit(self: *AppSession, abs_path: []const u8, base: dock_panel.DiffBase, commit_oid: []const u8) ?*Term {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 const entry = term.file_entry orelse continue;
                 if (entry.kind != .diff or entry.diff_base != base) continue;
+                if (base == .commit and !std.mem.eql(u8, entry.diff_commit_oid, commit_oid)) continue;
                 if (std.mem.eql(u8, entry.path, abs_path)) return term;
             }
         }

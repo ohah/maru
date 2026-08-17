@@ -226,6 +226,9 @@ pub const LogResult = struct {
     limit: u32 = 0,
     /// `git log --format=…` 출력(owned).
     text: []u8 = &.{},
+    /// 상한에서 잘렸나. **조용히 자르지 않는다** — 목록 끝에 그 사실을 적어야 사용자가 "더 없다"와
+    /// "더 못 읽었다"를 구별한다(목록 읽기가 같은 규율을 갖는다).
+    truncated: bool = false,
 
     pub fn deinit(self: *LogResult, allocator: std.mem.Allocator) void {
         allocator.free(self.repo);
@@ -244,6 +247,8 @@ pub const CommitFilesResult = struct {
     oid: []u8 = &.{},
     /// `git show --name-status` 출력(owned).
     text: []u8 = &.{},
+    /// 상한에서 잘렸나(위와 같은 규율).
+    truncated: bool = false,
 
     pub fn deinit(self: *CommitFilesResult, allocator: std.mem.Allocator) void {
         allocator.free(self.oid);
@@ -643,6 +648,9 @@ pub const Backend = struct {
     /// 그 커밋이 바꾼 파일 목록을 읽는다(P4b). `oid`는 hex 검증을 거친 값이어야 한다 — argv 조립이
     /// 다시 검증하지만, 여기서도 임의 문자열을 그대로 넘기지 않는 것이 규율이다.
     pub fn submitCommitFiles(self: *Backend, git_exe: []const u8, repo: []const u8, oid: []const u8, request_id: u64) bool {
+        // **rev 자리에 넣어도 되는 값인지 여기서 막는다**(§6 심층 방어). blob spec 둘은 같은 술어로
+        // 이미 걸러지지만, 이 명령은 rev를 그대로 인자로 실으므로 그 검사가 여기 없으면 유일한 구멍이 된다.
+        if (!git_command.isHexRev(oid)) return false;
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.commit_files_inflight > 0 or state.commit_files_result != null) {
@@ -877,6 +885,7 @@ fn logWorker(job: *Job) void {
     const limit_arg = std.fmt.bufPrint(&limit_buf, "{d}", .{job.limit}) catch "200";
     if (runWithArg(state.allocator, .log, job.git_exe, job.repo, limit_arg)) |out| {
         result.text = out.bytes;
+        result.truncated = out.truncated;
         result.ok = true;
     } else |_| {}
     state.allocator.free(job.git_exe);
@@ -903,6 +912,7 @@ fn commitFilesWorker(job: *Job) void {
     result.oid = state.allocator.dupe(u8, job.snapshot_tree) catch &.{};
     if (runWithArg(state.allocator, .commit_files, job.git_exe, job.repo, job.snapshot_tree)) |out| {
         result.text = out.bytes;
+        result.truncated = out.truncated;
         result.ok = true;
     } else |_| {}
     state.allocator.free(job.git_exe);
@@ -2557,4 +2567,15 @@ test "실제 저장소: 커밋 파일 목록과 `커밋^` 쪽 blob (P4b)" {
     var spec_buf3: [std.fs.max_path_bytes + 72]u8 = undefined;
     const root_parent = maru.session.git_command.commitParentBlobSpec(root.oid, "a.txt", &spec_buf3).?;
     try std.testing.expectError(error.GitFailed, runWithArg(allocator, .show_blob, fixture.exe, fixture.root, root_parent));
+}
+
+test "commit_files 읽기는 hex가 아닌 rev를 거절한다 (P4b 적대적 검증)" {
+    // 이 명령은 rev를 **그대로 인자로** 싣는다 — `--upload-pack=…` 같은 값이 통과하면 우리가 닫아 둔
+    // 외부 프로세스 경로가 다시 열린다.
+    const allocator = std.testing.allocator;
+    var backend = try Backend.init(fixture_io);
+    defer backend.deinit();
+    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "--upload-pack=evil", 1));
+    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "HEAD", 2));
+    _ = allocator;
 }

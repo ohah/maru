@@ -259,12 +259,21 @@ pub const BlobSide = enum {
 ///
 /// **rev는 hex 해시만 받는다.** 사용자가 고른 문자열이 아니라 우리가 `merge-base`에서 받은 값이고, 여기서 형태를
 /// 강제하면 그 값이 어떤 경로로 오염돼도 `--upload-pack=…` 같은 인자로 해석될 수 없다(길이·문자 둘 다 본다).
-pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
-    if (rev.len < 7 or rev.len > 64) return null;
+/// 이 문자열을 **rev 자리에 그대로 넘겨도 되는가**. hex OID만 통과한다 — `--upload-pack=…` 같은 값이
+/// rev 자리에 오면 git 인자가 되어 우리가 닫아 둔 경로(외부 프로세스)를 다시 연다(§6 심층 방어).
+///
+/// 판정을 한 자리에 둔다: blob spec 둘과 커밋 파일 목록 읽기가 같은 술어를 쓴다.
+pub fn isHexRev(rev: []const u8) bool {
+    if (rev.len < 7 or rev.len > 64) return false;
     for (rev) |c| {
         const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-        if (!hex) return null;
+        if (!hex) return false;
     }
+    return true;
+}
+
+pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
+    if (!isHexRev(rev)) return null;
     if (rev.len + 1 + repo_relative_path.len > buf.len) return null;
     @memcpy(buf[0..rev.len], rev);
     buf[rev.len] = ':';
@@ -275,11 +284,7 @@ pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8
 /// `<rev>^:<경로>` — 그 커밋의 **부모** 쪽 blob(P4b). 루트 커밋에서는 git이 실패하고, 그게 곧
 /// "왼쪽이 없다"이다(호출자가 그 실패를 정상으로 읽는다).
 pub fn commitParentBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
-    if (rev.len < 7 or rev.len > 64) return null;
-    for (rev) |c| {
-        const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-        if (!hex) return null; // 임의 문자열을 rev로 넘기지 않는다(`--` 같은 인자 주입 차단)
-    }
+    if (!isHexRev(rev)) return null; // 임의 문자열을 rev로 넘기지 않는다(인자 주입 차단)
     if (rev.len + 2 + repo_relative_path.len > buf.len) return null;
     @memcpy(buf[0..rev.len], rev);
     buf[rev.len] = '^';
@@ -833,4 +838,12 @@ test "commitParentBlobSpec은 `^`를 붙이되 hex만 받는다" {
     // 임의 문자열은 거부한다 — rev 자리에 인자를 주입하는 길을 막는다.
     try testing.expect(commitParentBlobSpec("--upload-pack=x", "a", &buf) == null);
     try testing.expect(commitParentBlobSpec("abc", "a", &buf) == null); // 너무 짧다
+}
+
+test "isHexRev: rev 자리에 넣어도 되는 것만 통과한다" {
+    try testing.expect(isHexRev("650a0bbef96a1dd562e0d39f262260ae002c1545"));
+    try testing.expect(!isHexRev("--upload-pack=evil"));
+    try testing.expect(!isHexRev("HEAD"));
+    try testing.expect(!isHexRev("abc")); // 너무 짧다
+    try testing.expect(!isHexRev("650a0bb-x"));
 }

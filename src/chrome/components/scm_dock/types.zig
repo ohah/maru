@@ -165,6 +165,9 @@ pub const CommitFileItem = struct {
     status: StatusKind,
     /// 화면에 그대로 그릴 한 글자(`M`·`A`·`D`·`R`).
     letter: u8,
+    /// 지금 열려 있는 비교인가(강조). 목록이 **무엇을 보고 있는지** 말해야 파일 여럿을 오갈 때 길을
+    /// 잃지 않는다(변경 사항 탭의 파일 행과 같은 규율).
+    selected: bool = false,
 };
 
 pub const Item = union(enum) {

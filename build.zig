@@ -261,6 +261,12 @@ pub fn build(b: *std.Build) void {
         win32_frame_smoke_cmd.step.dependOn(b.getInstallStep());
         win32_frame_smoke_cmd.addArg("win32-frame-smoke");
         win32_frame_smoke_step.dependOn(&win32_frame_smoke_cmd.step);
+
+        const win32_terminal_smoke_step = b.step("win32-terminal-smoke", "Draw a live shell session on screen with D3D11 + DirectWrite");
+        const win32_terminal_smoke_cmd = b.addRunArtifact(exe);
+        win32_terminal_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_terminal_smoke_cmd.addArg("win32-terminal-smoke");
+        win32_terminal_smoke_step.dependOn(&win32_terminal_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

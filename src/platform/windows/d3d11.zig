@@ -171,7 +171,7 @@ pub const ID3D11DeviceContext = extern struct {
         RSSetScissorRects: *const anyopaque,
         CopySubresourceRegion: *const anyopaque,
         CopyResource: *const anyopaque,
-        UpdateSubresource: *const anyopaque,
+        UpdateSubresource: *const fn (*ID3D11DeviceContext, *anyopaque, UINT, ?*const Box, *const anyopaque, UINT, UINT) callconv(.winapi) void,
         CopyStructureCount: *const anyopaque,
         ClearRenderTargetView: *const fn (*ID3D11DeviceContext, *ID3D11RenderTargetView, *const [4]f32) callconv(.winapi) void,
     };
@@ -288,6 +288,7 @@ comptime {
         std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "IASetPrimitiveTopology") == 24);
         std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "OMSetRenderTargets") == 33);
         std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "OMSetBlendState") == 35);
+        std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "UpdateSubresource") == 48);
         std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "RSSetViewports") == 44);
         std.debug.assert(slot.at(ID3D11DeviceContext.VTable, "ClearRenderTargetView") == 50);
         // DXGI
@@ -373,6 +374,17 @@ pub const MappedSubresource = extern struct {
     depth_pitch: UINT,
 };
 
+/// `D3D11_BOX`. 텍스처의 **일부만** 갱신할 때 그 사각형을 가리킨다 — 아틀라스는 프레임마다 새 글리프 몇
+/// 개만 바뀌므로 전체를 다시 올리지 않는다. 2D 텍스처에서는 `front=0, back=1`이어야 한다.
+pub const Box = extern struct {
+    left: UINT,
+    top: UINT,
+    front: UINT = 0,
+    right: UINT,
+    bottom: UINT,
+    back: UINT = 1,
+};
+
 pub const SamplerDesc = extern struct {
     filter: UINT,
     address_u: UINT,
@@ -422,6 +434,11 @@ comptime {
         std.debug.assert(@sizeOf(InputElementDesc) == 32);
         std.debug.assert(@offsetOf(InputElementDesc, "aligned_byte_offset") == 20);
         std.debug.assert(@sizeOf(MappedSubresource) == 16);
+        std.debug.assert(@sizeOf(Box) == 24);
+        // `front`·`back`이 가운데 끼어 있다 — 2D만 쓰면서 순서를 헷갈리기 쉬운 자리다.
+        std.debug.assert(@offsetOf(Box, "front") == 8);
+        std.debug.assert(@offsetOf(Box, "right") == 12);
+        std.debug.assert(@offsetOf(Box, "back") == 20);
         std.debug.assert(@sizeOf(SamplerDesc) == 52);
         std.debug.assert(@offsetOf(SamplerDesc, "border_color") == 28);
         // 각 RT 항목은 7×UINT + u8 = 29바이트인데 4바이트 정렬로 32가 된다. 8개 배열이라 8 + 256 = 264.

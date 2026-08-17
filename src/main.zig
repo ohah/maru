@@ -95,6 +95,12 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "win32-terminal-smoke")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
+        try runWin32TerminalSmoke(io, allocator, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "app-smoke")) {
         try runAppSmoke(io, allocator, stdout);
         return;
@@ -806,6 +812,210 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
     try stdout.print("raster_skipped={d}\n", .{counts.skipped});
     try stdout.print("atlas_entries={d}\n", .{renderer_state.atlas.entryCount()});
     try stdout.writeAll("visible UI: 없다 — 이것은 중립 계약 스모크다. 화면에 올리는 것은 W7.2c-2다.\n");
+    try stdout.flush();
+    try stderr.flush();
+}
+
+/// `maru win32-terminal-smoke` — W7.2c-2. **실제 터미널 화면이 Windows에 뜬다.**
+///
+/// W7.2c-1이 세운 프레임(실제 PTY → Windows 셰이퍼 → DirectWrite)을 W7.2b가 세운 표시 경로에 흘려 넣는다.
+/// 그 사이를 잇는 것이 둘이다:
+///
+/// ⑴ **아틀라스 부분 업로드** — 프레임마다 새 글리프만 `UpdateSubresource`로 올린다(전체를 다시 올리지 않는다).
+/// ⑵ **셀 투영** — `metal_frame`의 `NativeMetalCell`을 `d3d11_cells.Cell`로 옮긴다(좌표계와 색 표현만 바꾼다).
+///
+/// 창 크기가 바뀌면 **터미널 격자도 바꾼다**(`resizeActiveSurface`) — 스왑체인만 맞추면 셸이 옛 크기로
+/// 계속 출력해 줄이 어긋난다.
+fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-terminal-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // ── 폰트와 셀 격자 ─────────────────────────────────────────────────────────────────────
+    var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
+        try stderr.print("maru win32-terminal-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer raster.destroy();
+    const cell_w = raster.metrics.width_px;
+    const cell_h = raster.metrics.height_px;
+
+    const scratch = try allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h));
+    defer allocator.free(scratch);
+    const builder = win32_terminal.FrameBuilder{
+        .shaper = .{ .raster = raster },
+        .rasterizer = .{ .raster = raster, .scratch = scratch },
+    };
+
+    // ── 창·표시 경로 ───────────────────────────────────────────────────────────────────────
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2c terminal)");
+    var window = win32_window.Window.create(allocator, title, 1000, 640) catch |err| {
+        try stderr.print("maru win32-terminal-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        if (win32_window.last_create_error == 8)
+            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 1000, .height_px = 640 };
+    var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+        try stderr.print("maru win32-terminal-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer present.destroy();
+    window.present.opaque_handle = @ptrCast(present);
+
+    // ── PTY와 중립 프레임 루프 ─────────────────────────────────────────────────────────────
+    const start = win32_window.cellsForClient(initial.width_px, initial.height_px, cell_w, cell_h) orelse
+        maru.terminal.Size{ .cols = 80, .rows = 24 };
+    const script = maru.app.fixture_script.interactiveEcho(@import("builtin").os.tag);
+    const command = maru.pty.resolveInteractiveShell();
+
+    var live: maru.app.LivePtySession = undefined;
+    try live.init(io, allocator, 10, .{ .command = command, .args = script.args, .size = start }, 16);
+    defer live.deinit();
+
+    var surfaces = [_]maru.session.surface.Surface{try maru.session.surface.Surface.init(allocator, 1, start)};
+    defer surfaces[0].deinit();
+    surfaces[0].title = "win32 terminal";
+    surfaces[0].command = command;
+
+    var tab_ptrs = [_]*maru.session.surface.Surface{&surfaces[0]};
+    var app_window: maru.session.window.AppWindow = .{ .tabs = &tab_ptrs };
+
+    var runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try live.attachSurface(&runtime, &surfaces[0], true);
+
+    var pump = live.pump(&runtime);
+    // **폰트가 정한 셀 크기를 렌더러에 알려 준다.** 기본값(0)으로 두면 아틀라스가 슬롯 크기를 다른 값으로
+    // 추정해 글리프가 아래에서 잘린다 — 실측으로 겪었다(베이스라인 17인데 슬롯이 그보다 낮았다).
+    // `glyph_cell_width_px`는 자간과 무관한 자연폭이다. 지금은 자간이 0이라 grid advance와 같다.
+    var renderer_state = maru.renderer.RendererState.init(allocator, .{
+        .text = .{
+            .font_size_px = 18,
+            .device_scale = 1,
+            .cell_width_px = @intCast(cell_w),
+            .glyph_cell_width_px = @intCast(cell_w),
+            .cell_height_px = @intCast(cell_h),
+        },
+    });
+    defer renderer_state.deinit();
+    var loop = maru.app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, io);
+
+    // ── 셀 파이프라인 — 아틀라스는 **비워 두고** 프레임마다 부분 업로드한다 ────────────────
+    var atlas_w = renderer_state.atlas.config.atlas_width_px;
+    var atlas_h = renderer_state.atlas.config.atlas_height_px;
+    var pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch |err| {
+        try stderr.print("maru win32-terminal-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        if (d3d11_cells.shaderError().len > 0)
+            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer pipeline.destroy();
+
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+
+    var counts: win32_terminal.FrameCounts = .{};
+    var frames: usize = 0;
+    var region_uploads: usize = 0;
+    var atlas_resizes: usize = 0;
+    var last_cells: usize = 0;
+    var close_requested = false;
+    var ended = false;
+    // 셸이 프롬프트를 낼 시간을 준 뒤 표식을 출력시킨다.
+    _ = usleep(400_000);
+    try maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = script.input });
+
+    var spins: usize = 0;
+    while (spins < 220 and !window.quit_requested and !close_requested) : (spins += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .resized => |r| {
+                try present.resize(r.width_px, r.height_px);
+                // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
+                if (win32_window.cellsForClient(r.width_px, r.height_px, cell_w, cell_h)) |size|
+                    loop.resizeActiveSurface(size) catch {};
+            },
+            .paint => {},
+            .close_requested => close_requested = true,
+        };
+
+        var tick = try loop.tickWithFrameBuilder(builder);
+        defer tick.deinit(allocator);
+        counts.add(tick.frame.render_frame);
+        if (tick.ended()) ended = true;
+
+        // ⑴ 아틀라스가 커졌으면 텍스처를 다시 만든다(중립 쪽이 전체를 무효화하고 재배치했으므로 안전하다).
+        const now_w = renderer_state.atlas.config.atlas_width_px;
+        const now_h = renderer_state.atlas.config.atlas_height_px;
+        if (now_w != atlas_w or now_h != atlas_h) {
+            try pipeline.resizeAtlas(now_w, now_h);
+            atlas_w = now_w;
+            atlas_h = now_h;
+            atlas_resizes += 1;
+        }
+
+        // ⑵ 이 프레임의 새 글리프만 올린다.
+        const rf = tick.frame.render_frame.glyph_raster_frame;
+        for (rf.uploads) |up| {
+            const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
+            pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch |err| {
+                try stderr.print("  경고: 아틀라스 업로드 실패({s}) slot=({d},{d}) {d}x{d}\n", .{ @errorName(err), up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px });
+                continue;
+            };
+            region_uploads += 1;
+        }
+
+        // ⑶ 중립 투영 → D3D11 셀.
+        const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+            allocator,
+            tick.frame.render_frame.glyph_quad_frame,
+            tick.frame.render_frame.draw_list.cells,
+            colors,
+        );
+        defer allocator.free(native);
+
+        cells.clearRetainingCapacity();
+        try cells.ensureTotalCapacity(allocator, native.len);
+        for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        last_cells = cells.items.len;
+
+        try present.beginFrame(clear);
+        try pipeline.draw(cells.items, present.width_px, present.height_px);
+        try present.present(false);
+        frames += 1;
+        _ = usleep(16_000);
+    }
+    if (close_requested) window.requestClose();
+
+    try stdout.writeAll("maru.win32-terminal-smoke.v1\n");
+    try stdout.print("font_family={s}\n", .{raster.family});
+    try stdout.print("cell_px={d}x{d}\n", .{ cell_w, cell_h });
+    try stdout.print("terminal_size={d}x{d}\n", .{ start.cols, start.rows });
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("cells_drawn_last={d}\n", .{last_cells});
+    try stdout.print("atlas_px={d}x{d} resizes={d}\n", .{ atlas_w, atlas_h, atlas_resizes });
+    try stdout.print("atlas_region_uploads={d}\n", .{region_uploads});
+    // **이 줄이 판정이다** — 올린 슬롯이 실제로 덮은 픽셀. 0이면 글자가 하나도 안 그려졌다.
+    try stdout.print("upload_non_clear_pixels={d}\n", .{counts.non_clear_pixels});
+    try stdout.print("fallback_glyphs={d} replacement_glyphs={d} raster_skipped={d}\n", .{ counts.fallback, counts.replacement, counts.skipped });
+    try stdout.print("shell_ended={}\n", .{ended});
+    try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
+    try stdout.writeAll("visible UI: 실제 셸 출력이 창에 그려진다.\n");
     try stdout.flush();
     try stderr.flush();
 }
@@ -1577,6 +1787,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru d3d11-cells-smoke
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
+        \\  maru win32-terminal-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1600,6 +1811,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  d3d11-cells-smoke draw a cell grid with synthesized glyphs through the D3D11 cell pipeline (Windows only; needs a D3D11 device)
         \\  dwrite-text-smoke render real text with DirectWrite glyphs plus synthesized box drawing (Windows only; needs a D3D11 device)
         \\  win32-frame-smoke run a live PTY through the Windows shaper and DirectWrite rasterizer into a neutral RenderFrame (Windows only; no window)
+        \\  win32-terminal-smoke draw a live shell session on screen with D3D11 + DirectWrite (Windows only; needs an interactive desktop)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)

@@ -237,6 +237,18 @@ pub const CellPipeline = struct {
     instance_capacity: u32 = 0,
     allocator: std.mem.Allocator,
 
+    /// 아틀라스를 **비워 둔 채로** 만든다. 실제 앱 경로(W7.2c-2)는 프레임마다 새 글리프만 부분 업로드하므로
+    /// 처음부터 픽셀을 갖고 있지 않다 — `create`에 전체 픽셀을 요구하면 호출자가 CPU 사본을 계속 들어야 한다.
+    pub fn createEmptyAtlas(
+        allocator: std.mem.Allocator,
+        device: *d3d11.ID3D11Device,
+        context: *d3d11.ID3D11DeviceContext,
+        atlas_w: u32,
+        atlas_h: u32,
+    ) Error!*CellPipeline {
+        return createInner(allocator, device, context, atlas_w, atlas_h, null);
+    }
+
     /// `atlas_pixels`는 **RGBA8**이고 길이가 `atlas_w * atlas_h * 4`여야 한다(커버리지는 알파).
     pub fn create(
         allocator: std.mem.Allocator,
@@ -246,8 +258,19 @@ pub const CellPipeline = struct {
         atlas_h: u32,
         atlas_pixels: []const u8,
     ) Error!*CellPipeline {
-        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         std.debug.assert(atlas_pixels.len == @as(usize, atlas_w) * atlas_h * 4);
+        return createInner(allocator, device, context, atlas_w, atlas_h, atlas_pixels);
+    }
+
+    fn createInner(
+        allocator: std.mem.Allocator,
+        device: *d3d11.ID3D11Device,
+        context: *d3d11.ID3D11DeviceContext,
+        atlas_w: u32,
+        atlas_h: u32,
+        atlas_pixels: ?[]const u8,
+    ) Error!*CellPipeline {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
 
         const compile = d3d11.loadD3DCompile() orelse return error.CompilerMissing;
 
@@ -362,13 +385,18 @@ pub const CellPipeline = struct {
                 .cpu_access_flags = 0,
                 .misc_flags = 0,
             };
-            const init = d3d11.SubresourceData{
-                .sys_mem = atlas_pixels.ptr,
-                // RGBA8이라 한 줄이 폭×4바이트다 — `glyph_pixels`의 `bytes_per_row`와 같은 값이어야 한다.
-                .sys_mem_pitch = atlas_w * 4,
-                .sys_mem_slice_pitch = 0,
-            };
-            try check(device.vtable.CreateTexture2D(device, &desc, &init, &atlas), error.CreateAtlasFailed);
+            // 초기 픽셀이 없으면 **비워 둔 채로** 만든다 — 실제 앱 경로는 프레임마다 부분 업로드한다.
+            if (atlas_pixels) |px| {
+                const init = d3d11.SubresourceData{
+                    .sys_mem = px.ptr,
+                    // RGBA8이라 한 줄이 폭×4바이트다 — `glyph_pixels`의 `bytes_per_row`와 같은 값이어야 한다.
+                    .sys_mem_pitch = atlas_w * 4,
+                    .sys_mem_slice_pitch = 0,
+                };
+                try check(device.vtable.CreateTexture2D(device, &desc, &init, &atlas), error.CreateAtlasFailed);
+            } else {
+                try check(device.vtable.CreateTexture2D(device, &desc, null, &atlas), error.CreateAtlasFailed);
+            }
         }
         errdefer d3d11.releaseOpt(atlas);
 
@@ -407,6 +435,77 @@ pub const CellPipeline = struct {
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.vs)));
         // 디바이스·컨텍스트는 **빌린 것이라 놓지 않는다** — 표시 경로가 주인이다.
         self.allocator.destroy(self);
+    }
+
+    /// 아틀라스의 **한 사각형만** 갱신한다. 프레임마다 새 글리프 몇 개만 바뀌므로 전체를 다시 올리지 않는다.
+    ///
+    /// `pixels`는 RGBA8이고 `bytes_per_row` 간격이며, 그 사각형 크기만큼을 담아야 한다. 텍스처 밖을
+    /// 가리키면 **그리지 않고 알린다** — `UpdateSubresource`는 범위를 검사하지 않아 넘치면 조용히 다른
+    /// 자리를 덮는다(아틀라스에서는 그것이 "글자가 다른 글자로 나온다"로 보인다).
+    pub fn uploadAtlasRegion(
+        self: *CellPipeline,
+        x_px: u32,
+        y_px: u32,
+        w_px: u32,
+        h_px: u32,
+        pixels: []const u8,
+        bytes_per_row: usize,
+    ) Error!void {
+        if (w_px == 0 or h_px == 0) return;
+        if (x_px + w_px > self.atlas_w or y_px + h_px > self.atlas_h) return error.CreateAtlasFailed;
+        if (bytes_per_row < @as(usize, w_px) * 4) return error.CreateAtlasFailed;
+        if (pixels.len < bytes_per_row * (h_px - 1) + @as(usize, w_px) * 4) return error.CreateAtlasFailed;
+
+        const box = d3d11.Box{ .left = x_px, .top = y_px, .right = x_px + w_px, .bottom = y_px + h_px };
+        self.context.vtable.UpdateSubresource(
+            self.context,
+            @ptrCast(self.atlas),
+            0,
+            &box,
+            pixels.ptr,
+            @intCast(bytes_per_row),
+            0,
+        );
+    }
+
+    /// 아틀라스가 커졌을 때 텍스처를 **다시 만든다**(빈 상태로).
+    ///
+    /// 이전 글리프가 사라지는 것이 맞다 — 중립 아틀라스가 텍스처를 키울 때는 `atlas_full`로 **전체를
+    /// 무효화하고 (0,0)부터 재배치**하므로(`renderer/glyph_atlas.zig`), 그 프레임의 글리프가 전부 새
+    /// 업로드로 다시 온다. 즉 오래된 UV가 남아 엉뚱한 픽셀을 샘플하는 일이 없다.
+    ///
+    /// **이 경로는 아직 실측으로 밟아 보지 못했다** — 1024×1024를 채울 만큼 고유 글리프가 나오는 상황을
+    /// 스모크로 만들지 못했다(계약 §2g "한계").
+    pub fn resizeAtlas(self: *CellPipeline, atlas_w: u32, atlas_h: u32) Error!void {
+        if (atlas_w == self.atlas_w and atlas_h == self.atlas_h) return;
+        if (atlas_w == 0 or atlas_h == 0) return error.CreateAtlasFailed;
+
+        const desc = d3d11.Texture2DDesc{
+            .width = atlas_w,
+            .height = atlas_h,
+            .mip_levels = 1,
+            .array_size = 1,
+            .format = d3d11.format_r8g8b8a8_unorm,
+            .sample_desc = .{ .count = 1, .quality = 0 },
+            .usage = d3d11.usage_default,
+            .bind_flags = d3d11.bind_shader_resource,
+            .cpu_access_flags = 0,
+            .misc_flags = 0,
+        };
+        var tex: ?*d3d11.ID3D11Texture2D = null;
+        try check(self.device.vtable.CreateTexture2D(self.device, &desc, null, &tex), error.CreateAtlasFailed);
+        errdefer d3d11.releaseOpt(tex);
+
+        var srv: ?*d3d11.ID3D11ShaderResourceView = null;
+        try check(self.device.vtable.CreateShaderResourceView(self.device, @ptrCast(tex.?), null, &srv), error.CreateAtlasFailed);
+
+        // **새 것이 다 서고 나서** 옛 것을 놓는다 — 중간에 실패해도 파이프라인이 유효한 아틀라스를 갖는다.
+        d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.atlas_srv)));
+        d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.atlas)));
+        self.atlas = tex.?;
+        self.atlas_srv = srv.?;
+        self.atlas_w = atlas_w;
+        self.atlas_h = atlas_h;
     }
 
     /// 인스턴스 버퍼가 `count`개를 담을 수 있게 한다. 모자라면 다시 만든다 — 줄어들 때는 그대로 둔다

@@ -2543,18 +2543,30 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     for (narrow.cells) |c| try std.testing.expect(c.codepoint != '+'); // 좁아서 "+" 없음
 }
 
-test "buildPaneTabBarDrawList: fixed tab width (rich) — left-aligned, leaves empty area" {
+test "buildPaneTabBarDrawList: 탭 폭은 하한이다 — 적으면 바를 꽉 채우고, 많으면 하한에서 멈춘다" {
     const allocator = std.testing.allocator;
-    // cols=40, "+"zone 3 → tab_cols=37. fixed_w=16: 탭0 [0,16), 탭1 [16,32), 나머지 [32,37) 빈(균등이면 ~18씩 stretch).
+    // cols=40, "+"zone 3 → tab_cols=37. 하한 16인데 2탭이면 균등 18이 더 넓다 → 18씩 채운다(빈 영역 없음).
+    // 옛 계약은 "고정 16 → [0,16)·[16,32)·나머지 빈 영역"이었다. 사용자 요청(2026-08-18)으로 고정 폭을
+    // **하한**으로 바꿨고, 그 결과가 이 col 이다.
     const titles = [_][]const u8{ "sh", "vim" };
     var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, .default, false, null, .default, 16, 0, null);
     defer dl.deinit(allocator);
-    // 탭1 'v'는 seg start(16) + 1칸 좌패딩 = col 17(고정폭이라 균등분할과 다른 위치 — stretch 안 함).
+    // 탭1 'v'는 seg start(18) + 1칸 좌패딩 = col 19.
     var v_col: ?u16 = null;
     for (dl.cells) |c| {
         if (c.codepoint == 'v') v_col = c.col;
     }
-    try std.testing.expectEqual(@as(?u16, 17), v_col);
+    try std.testing.expectEqual(@as(?u16, 19), v_col);
+
+    // 탭이 많아 균등(37/4=9)이 하한 16보다 좁아지면 하한이 이긴다 — 탭1 은 16+1=17 에서 시작한다.
+    const many = [_][]const u8{ "sh", "vim", "top", "cat" };
+    var dl2 = try buildPaneTabBarDrawList(allocator, &many, 40, .default, false, null, .default, 16, 0, null);
+    defer dl2.deinit(allocator);
+    var v2: ?u16 = null;
+    for (dl2.cells) |c| {
+        if (c.codepoint == 'v') v2 = c.col;
+    }
+    try std.testing.expectEqual(@as(?u16, 17), v2);
 }
 
 test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)" {

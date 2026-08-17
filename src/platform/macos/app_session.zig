@@ -2477,6 +2477,12 @@ pub const RepoStatusEntry = struct {
     /// 목록이 다시 읽혀야 하나. 뷰 진입·창 포커스·`.git` 이벤트가 이것을 세우고, 그때 이 저장소도
     /// 다시 읽힌다 — **비활성 저장소는 감시 대상이 아니다**(감시는 활성 저장소 하나에만 건다).
     stale: bool = false,
+    /// 마지막 읽기가 **실패**했나(경로가 사라졌거나 git이 실패했다). 실패도 기록해야 한다 — 안 그러면
+    /// 그 저장소는 영원히 "아직 안 읽은 것"이라 **매 tick git을 다시 띄우고**, 하나씩 도는 규율 때문에
+    /// 뒤의 저장소들은 차례가 영영 오지 않는다.
+    failed: bool = false,
+    /// 마지막 시도 시각. 실패한 저장소를 다시 읽기까지의 간격을 여기서 잰다.
+    read_ns: i128 = 0,
 };
 
 /// 저장소 하나의 커밋 메시지 초안. 저장소를 떠날 때 담고 돌아올 때 꺼낸다.
@@ -55301,6 +55307,34 @@ test "소스 컨트롤: 도크 **밖**을 눌러도 편집이 풀린다" {
     session.mouse(1, @as(f64, @floatFromInt(term_rect.x + term_rect.w / 2)), @as(f64, @floatFromInt(term_rect.y + term_rect.h / 2)), 0, 0);
     try std.testing.expect(session.scm_commit_focus_repo == null);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+}
+
+test "소스 컨트롤: 읽기에 실패한 저장소는 쉬었다 다시 읽는다" {
+    // 실패를 기록하지 않으면 그 저장소는 계속 "아직 안 읽은 것"이라 **매 tick git을 다시 띄우고**,
+    // 읽기가 하나씩 도는 규율 때문에 뒤의 저장소는 차례가 영영 오지 않는다(적대적 5회차).
+    const second: i128 = std.time.ns_per_s;
+    const fresh_failure: RepoStatusEntry = .{
+        .path = @constCast("/gone"),
+        .branch = @constCast(""),
+        .detached = false,
+        .count = 0,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .failed = true,
+        .read_ns = 100 * second,
+    };
+    try std.testing.expect(!scm_dock_ops.shouldReadRepoStatus(fresh_failure, 101 * second));
+    try std.testing.expect(scm_dock_ops.shouldReadRepoStatus(fresh_failure, 110 * second));
+    // 한 번도 못 읽은 저장소는 곧바로 읽는다 — 그것이 "읽는 중…"이 곧 끝난다는 약속이다.
+    try std.testing.expect(scm_dock_ops.shouldReadRepoStatus(null, 0));
+    // 성공해서 실려 있는 값은 낡았다고 표시될 때만 다시 읽는다.
+    var ok_entry = fresh_failure;
+    ok_entry.failed = false;
+    ok_entry.stale = false;
+    try std.testing.expect(!scm_dock_ops.shouldReadRepoStatus(ok_entry, 1000 * second));
+    ok_entry.stale = true;
+    try std.testing.expect(scm_dock_ops.shouldReadRepoStatus(ok_entry, 1000 * second));
 }
 
 test "소스 컨트롤: 그룹을 접으면 그 상자의 편집이 풀린다(글은 초안으로 남는다)" {

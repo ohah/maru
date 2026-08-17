@@ -2188,6 +2188,19 @@ pub fn build(b: *std.Build) void {
     const run_i18n_locale_boundary_tests = b.addRunArtifact(i18n_locale_boundary_tests);
     run_i18n_locale_boundary_tests.setCwd(b.path("."));
 
+    // **이 집계 step 은 boundary 테스트를 Debug 로만 돈다.** 아래 optimize 루프 안에서 등록되는 것들은
+    // `if (<loop>_optimize == .Debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
+    // 46개 중 44개가 `readSource` 로 소스 파일을 문자열로 읽어 선언 수·제품 caller 수를 세고, `maru`
+    // 모듈을 import 하는 것은 0개다. 세는 결과는 최적화 모드에 따라 달라질 수 없으므로 ReleaseFast
+    // 사본은 같은 답을 내려고 바이너리를 한 번 더 링크하는 비용일 뿐이다.
+    //
+    // 실측(2026-08-17, ubuntu-latest 2코어): `mise run check` 안에서 mise 가 태스크를 병렬로 돌리는데
+    // `check-boundaries` 만 13분 35초였고 나머지는 전부 1~39초였다 — 즉 `check` job 14분이 사실상
+    // 이 step 하나였다. 등록이 68개이고 그 중 33개가 두 모드로 링크되던 구조가 원인이다.
+    //
+    // 개별 집중 gate(`test-session-host-*`)는 **바꾸지 않는다.** 그쪽은 "Debug·ReleaseFast runtime
+    // N+boundary 1 exact-count" 계약을 문서가 소유하므로 두 모드를 그대로 돌린다. 그 gate 를 직접
+    // 부를 때만 ReleaseFast boundary 가 빌드되고, CI 의 집계 경로에서는 빠진다.
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
@@ -2849,7 +2862,7 @@ pub fn build(b: *std.Build) void {
         run_cr0b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr0b_boundary_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr0b_boundary_tests.step);
+        if (cr0b_optimize == .Debug) boundary_step.dependOn(&run_cr0b_boundary_tests.step);
     }
     const session_host_cr1_step = b.step(
         "test-session-host-cr1",
@@ -2888,7 +2901,7 @@ pub fn build(b: *std.Build) void {
         run_cr1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr1_boundary_tests.setCwd(b.path("."));
         session_host_cr1_step.dependOn(&run_cr1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr1_boundary_tests.step);
+        if (cr1_optimize == .Debug) boundary_step.dependOn(&run_cr1_boundary_tests.step);
     }
     const session_host_cr2a_step = b.step(
         "test-session-host-cr2a",
@@ -2925,7 +2938,7 @@ pub fn build(b: *std.Build) void {
         run_cr2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2a_boundary_tests.setCwd(b.path("."));
         session_host_cr2a_step.dependOn(&run_cr2a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2a_boundary_tests.step);
+        if (cr2a_optimize == .Debug) boundary_step.dependOn(&run_cr2a_boundary_tests.step);
     }
     const session_host_cr2b_step = b.step(
         "test-session-host-cr2b",
@@ -2973,7 +2986,7 @@ pub fn build(b: *std.Build) void {
         run_cr2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2b_boundary_tests.setCwd(b.path("."));
         session_host_cr2b_step.dependOn(&run_cr2b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2b_boundary_tests.step);
+        if (cr2b_optimize == .Debug) boundary_step.dependOn(&run_cr2b_boundary_tests.step);
     }
     const session_host_cr2c_step = b.step(
         "test-session-host-cr2c",
@@ -3033,7 +3046,7 @@ pub fn build(b: *std.Build) void {
         run_cr2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2c_boundary_tests.setCwd(b.path("."));
         session_host_cr2c_step.dependOn(&run_cr2c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2c_boundary_tests.step);
+        if (cr2c_optimize == .Debug) boundary_step.dependOn(&run_cr2c_boundary_tests.step);
     }
     const session_host_cr2d1_step = b.step(
         "test-session-host-cr2d1",
@@ -3133,7 +3146,7 @@ pub fn build(b: *std.Build) void {
         run_cr2d1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d1_boundary_tests.setCwd(b.path("."));
         session_host_cr2d1_step.dependOn(&run_cr2d1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2d1_boundary_tests.step);
+        if (cr2d1_optimize == .Debug) boundary_step.dependOn(&run_cr2d1_boundary_tests.step);
     }
     const session_host_cr2d2_step = b.step(
         "test-session-host-cr2d2",
@@ -3168,7 +3181,7 @@ pub fn build(b: *std.Build) void {
         run_cr2d2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d2_boundary_tests.setCwd(b.path("."));
         session_host_cr2d2_step.dependOn(&run_cr2d2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2d2_boundary_tests.step);
+        if (cr2d2_optimize == .Debug) boundary_step.dependOn(&run_cr2d2_boundary_tests.step);
     }
     const session_host_cr2d3_step = b.step(
         "test-session-host-cr2d3",
@@ -3242,7 +3255,7 @@ pub fn build(b: *std.Build) void {
         run_cr2d3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d3_boundary_tests.setCwd(b.path("."));
         session_host_cr2d3_step.dependOn(&run_cr2d3_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2d3_boundary_tests.step);
+        if (cr2d3_optimize == .Debug) boundary_step.dependOn(&run_cr2d3_boundary_tests.step);
     }
     const session_host_cr2d4_step = b.step(
         "test-session-host-cr2d4",
@@ -3288,7 +3301,7 @@ pub fn build(b: *std.Build) void {
         run_cr2d4_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d4_boundary_tests.setCwd(b.path("."));
         session_host_cr2d4_step.dependOn(&run_cr2d4_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2d4_boundary_tests.step);
+        if (cr2d4_optimize == .Debug) boundary_step.dependOn(&run_cr2d4_boundary_tests.step);
     }
 
     const session_host_cr2e_a_step = b.step(
@@ -3327,7 +3340,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_a_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_a_step.dependOn(&run_cr2e_a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_a_boundary_tests.step);
+        if (cr2e_a_optimize == .Debug) boundary_step.dependOn(&run_cr2e_a_boundary_tests.step);
     }
 
     const session_host_cr2e_b_step = b.step(
@@ -3366,7 +3379,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_b_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_b_step.dependOn(&run_cr2e_b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_b_boundary_tests.step);
+        if (cr2e_b_optimize == .Debug) boundary_step.dependOn(&run_cr2e_b_boundary_tests.step);
     }
     const session_host_cr2e_c_step = b.step(
         "test-session-host-cr2e-c",
@@ -3410,7 +3423,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_c_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_c_step.dependOn(&run_cr2e_c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_c_boundary_tests.step);
+        if (cr2e_c_optimize == .Debug) boundary_step.dependOn(&run_cr2e_c_boundary_tests.step);
     }
     const session_host_cr2e_d_step = b.step(
         "test-session-host-cr2e-d",
@@ -3445,7 +3458,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_d_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_d_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_d_step.dependOn(&run_cr2e_d_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_d_boundary_tests.step);
+        if (cr2e_d_optimize == .Debug) boundary_step.dependOn(&run_cr2e_d_boundary_tests.step);
     }
     const session_host_cr2e_e1_step = b.step(
         "test-session-host-cr2e-e1",
@@ -3480,7 +3493,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e1_step.dependOn(&run_cr2e_e1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e1_boundary_tests.step);
+        if (cr2e_e1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e1_boundary_tests.step);
     }
     const session_host_cr2e_e2a_step = b.step(
         "test-session-host-cr2e-e2a",
@@ -3515,7 +3528,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e2a_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e2a_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
+        if (cr2e_e2a_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
     }
     const session_host_cr2e_e2b_step = b.step(
         "test-session-host-cr2e-e2b",
@@ -3550,7 +3563,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e2b_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e2b_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
+        if (cr2e_e2b_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
     }
 
     const session_host_cr2e_e3a1_step = b.step(
@@ -3586,7 +3599,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3a1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3a1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3a1_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
+        if (cr2e_e3a1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
     }
     const session_host_cr2e_e3a2_step = b.step(
         "test-session-host-cr2e-e3a2",
@@ -3637,7 +3650,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3a2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3a2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3a2_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
+        if (cr2e_e3a2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
     }
     const cr2e_e3a2_workload_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -3743,7 +3756,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3b1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3b1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3b1_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
+        if (cr2e_e3b1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
     }
     const session_host_cr2e_e3b2_step = b.step(
         "test-session-host-cr2e-e3b2",
@@ -3793,7 +3806,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3b2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3b2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
+        if (cr2e_e3b2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
     }
     const session_host_cr2e_e3c1_step = b.step(
         "test-session-host-cr2e-e3c1",
@@ -3828,7 +3841,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c1_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
+        if (cr2e_e3c1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
     }
     const session_host_cr2e_e3c2_step = b.step(
         "test-session-host-cr2e-e3c2",
@@ -3863,7 +3876,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c2_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
+        if (cr2e_e3c2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
     }
     const session_host_cr2e_e3c3_step = b.step(
         "test-session-host-cr2e-e3c3",
@@ -3898,7 +3911,7 @@ pub fn build(b: *std.Build) void {
         run_cr2e_e3c3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c3_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c3_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
-        boundary_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
+        if (cr2e_e3c3_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
     }
     const session_host_cr3b_r2a_step = b.step(
         "test-session-host-cr3b-r2a",
@@ -3962,7 +3975,7 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2a_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2a_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
+        if (cr3b_r2a_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
     }
     const session_host_cr3b_r2b_step = b.step(
         "test-session-host-cr3b-r2b",
@@ -4012,7 +4025,7 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2b_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2b_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
+        if (cr3b_r2b_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
     }
     const session_host_cr3b_r2c_step = b.step(
         "test-session-host-cr3b-r2c",
@@ -4062,7 +4075,7 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2c_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2c_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
+        if (cr3b_r2c_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
     }
     const session_host_cr3b_r3_step = b.step(
         "test-session-host-cr3b-r3",
@@ -4112,7 +4125,7 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r3_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r3_step.dependOn(&run_cr3b_r3_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3b_r3_boundary_tests.step);
+        if (cr3b_r3_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r3_boundary_tests.step);
     }
     const session_host_cr3c_c1_step = b.step(
         "test-session-host-cr3c-c1",
@@ -4147,7 +4160,7 @@ pub fn build(b: *std.Build) void {
         run_cr3c_c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3c_c1_boundary_tests.setCwd(b.path("."));
         session_host_cr3c_c1_step.dependOn(&run_cr3c_c1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3c_c1_boundary_tests.step);
+        if (cr3c_c1_optimize == .Debug) boundary_step.dependOn(&run_cr3c_c1_boundary_tests.step);
     }
     const session_host_cr3c_c2_step = b.step(
         "test-session-host-cr3c-c2",
@@ -4182,7 +4195,7 @@ pub fn build(b: *std.Build) void {
         run_cr3c_c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3c_c2_boundary_tests.setCwd(b.path("."));
         session_host_cr3c_c2_step.dependOn(&run_cr3c_c2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr3c_c2_boundary_tests.step);
+        if (cr3c_c2_optimize == .Debug) boundary_step.dependOn(&run_cr3c_c2_boundary_tests.step);
     }
     const session_host_cr4a_step = b.step(
         "test-session-host-cr4a",
@@ -4469,7 +4482,7 @@ pub fn build(b: *std.Build) void {
         run_cr4a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4a_boundary_tests.setCwd(b.path("."));
         session_host_cr4a_step.dependOn(&run_cr4a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr4a_boundary_tests.step);
+        if (cr4a_optimize == .Debug) boundary_step.dependOn(&run_cr4a_boundary_tests.step);
     }
     const session_host_cr4b_step = b.step(
         "test-session-host-cr4b",
@@ -4558,7 +4571,7 @@ pub fn build(b: *std.Build) void {
         run_cr4b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4b_boundary_tests.setCwd(b.path("."));
         session_host_cr4b_step.dependOn(&run_cr4b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr4b_boundary_tests.step);
+        if (cr4b_optimize == .Debug) boundary_step.dependOn(&run_cr4b_boundary_tests.step);
     }
     const session_host_cr4c_c1_step = b.step(
         "test-session-host-cr4c-c1",
@@ -4593,7 +4606,7 @@ pub fn build(b: *std.Build) void {
         run_cr4c_c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4c_c1_boundary_tests.setCwd(b.path("."));
         session_host_cr4c_c1_step.dependOn(&run_cr4c_c1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr4c_c1_boundary_tests.step);
+        if (cr4c_c1_optimize == .Debug) boundary_step.dependOn(&run_cr4c_c1_boundary_tests.step);
     }
     const session_host_cr4c_c2_step = b.step(
         "test-session-host-cr4c-c2",
@@ -4670,7 +4683,7 @@ pub fn build(b: *std.Build) void {
         run_cr4c_c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4c_c2_boundary_tests.setCwd(b.path("."));
         session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr4c_c2_boundary_tests.step);
+        if (cr4c_c2_optimize == .Debug) boundary_step.dependOn(&run_cr4c_c2_boundary_tests.step);
     }
     const session_host_cr4c_step = b.step(
         "test-session-host-cr4c",

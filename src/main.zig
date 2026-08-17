@@ -1215,6 +1215,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // **큐에 실제로 들어간 리포트 수.** `mouse_reports` 는 이벤트마다 1 이라 휠 안쪽 루프가 1 번 돌든
     // 10 번 돌든 같은 값이다 — 그것으로는 "눈금당 한 번" 을 지키는지 볼 수 없다.
     var mouse_report_commands: usize = 0;
+    // **큐에서 버려진 코어 명령.** `enqueueCoreCommand` 는 큐가 차면 오류를 내는데 그것을 삼키면
+    // 선택·스크롤이 조용히 사라지고 원인을 못 찾는다(빠른 드래그에서 실제로 찰 수 있다).
+    var core_command_drops: usize = 0;
     var selections: usize = 0;
     var extends: usize = 0;
     var word_selections: usize = 0;
@@ -1403,7 +1406,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                 .pressed = true,
                                 .motion = false,
                                 .mods = win32_mouse.reportModifiers(m.mods),
-                            } }, io) catch {};
+                            } }, io) catch {
+                                core_command_drops += 1;
+                            };
                             mouse_report_commands += 1;
                         }
                         mouse_reports += 1;
@@ -1425,7 +1430,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                     }
                     if (alt_bytes.len > 0) {
                         // 프로그램이 화면을 다시 그리므로 **선택을 해제한다**(남으면 좌표가 어긋난 유령이다).
-                        runtime.enqueueCoreCommand(active.id, .select_clear, io) catch {};
+                        runtime.enqueueCoreCommand(active.id, .select_clear, io) catch {
+                            core_command_drops += 1;
+                        };
                         // **한 버퍼에 묶어 보낸다** — 줄마다 쓰면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍된다.
                         var batch: [512]u8 = undefined;
                         const per_batch = batch.len / alt_bytes.len;
@@ -1444,7 +1451,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         alt_scrolls += 1;
                         continue;
                     }
-                    runtime.enqueueCoreCommand(active.id, .{ .scroll = @as(isize, lines) }, io) catch {};
+                    runtime.enqueueCoreCommand(active.id, .{ .scroll = @as(isize, lines) }, io) catch {
+                        core_command_drops += 1;
+                    };
                     scrolls += 1;
                     continue;
                 }
@@ -1491,7 +1500,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         .pressed = pressed,
                         .motion = is_motion,
                         .mods = win32_mouse.reportModifiers(m.mods),
-                    } }, io) catch {};
+                    } }, io) catch {
+                        core_command_drops += 1;
+                    };
                     mouse_report_commands += 1;
                     mouse_reports += 1;
                     continue;
@@ -1535,7 +1546,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                     .row = cell.row,
                                     .col = cell.col,
                                     .block = win32_mouse.blockSelection(m.mods),
-                                } }, io) catch {};
+                                } }, io) catch {
+                                    core_command_drops += 1;
+                                };
                                 selections += 1;
                             },
                             .double => {
@@ -1545,14 +1558,18 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                 const n = @min(default_word_separators.len, sw.separators.len);
                                 @memcpy(sw.separators[0..n], default_word_separators[0..n]);
                                 sw.sep_len = @intCast(n);
-                                runtime.enqueueCoreCommand(active.id, .{ .select_word = sw }, io) catch {};
+                                runtime.enqueueCoreCommand(active.id, .{ .select_word = sw }, io) catch {
+                                    core_command_drops += 1;
+                                };
                                 // **더블·트리플 직후의 up 이 그 선택을 지우면 안 된다** — 단어가 1칸이면
                                 // "이동 없는 클릭" 판정에 걸려 즉시 해제된다.
                                 dragging = false;
                                 word_selections += 1;
                             },
                             .triple => {
-                                runtime.enqueueCoreCommand(active.id, .{ .select_line = cell.row }, io) catch {};
+                                runtime.enqueueCoreCommand(active.id, .{ .select_line = cell.row }, io) catch {
+                                    core_command_drops += 1;
+                                };
                                 dragging = false;
                                 line_selections += 1;
                             },
@@ -1563,7 +1580,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         runtime.enqueueCoreCommand(active.id, .{ .select_extend = .{
                             .row = cell.row,
                             .col = cell.col,
-                        } }, io) catch {};
+                        } }, io) catch {
+                            core_command_drops += 1;
+                        };
                         extends += 1;
                     },
                     .left_up => {
@@ -1572,7 +1591,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         runtime.enqueueCoreCommand(active.id, .{ .select_extend_or_collapse = .{
                             .row = cell.row,
                             .col = cell.col,
-                        } }, io) catch {};
+                        } }, io) catch {
+                            core_command_drops += 1;
+                        };
                     },
                     else => {},
                 }
@@ -1726,7 +1747,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     if (last_wheel_cell) |c| {
         try stdout.print("last_wheel_cell={d},{d}\n", .{ c.row, c.col });
     } else try stdout.writeAll("last_wheel_cell=none\n");
-    try stdout.print("capture_losses={d} report_commands={d}\n", .{ capture_losses, mouse_report_commands });
+    try stdout.print("capture_losses={d} report_commands={d} core_command_drops={d}\n", .{ capture_losses, mouse_report_commands, core_command_drops });
     // **코어가 실제로 무엇을 보고 있는지 찍는다.** 라우팅이 예상과 다를 때 "우리 판정이 틀렸나, 코어가
     // 모드를 못 받았나"를 가르는 유일한 줄이다 — 없으면 둘을 구분 못 해 엉뚱한 곳을 고친다.
     if (app_window.active()) |active| {

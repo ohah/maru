@@ -68,6 +68,54 @@ Metal의 대응물은 **D3D11**이고 표시·프레임 페이싱은 **DXGI**가
 있지 않은지는 W7에서 실제로 두 번째 구현을 붙여 봐야 드러난다 — 그것이 이 슬라이스가 이식성 주장을 검증하는
 방식이다.
 
+### 2b. Win32 창과 메시지 펌프 — 이벤트를 잃지 않는 규율 (W7.1 결정, 실측 2026-08-17)
+
+창은 `src/platform/windows/win32_window.zig` 하나가 소유한다. **호스트에 제2 언어를 두지 않는다**(§2) — macOS가
+`app_host_abi.zig`라는 C ABI 경계를 둔 것은 AppKit이 Objective-C/Swift 전용이기 때문인데, Win32에는 그 강제가
+없어 Zig에서 직접 부른다. 창이 하는 일은 셋뿐이다: 만들고, 펌프하고, OS 메시지를 **중립 이벤트**(`resized`·
+`paint`·`close_requested`)로 바꿔 호출자에게 준다. 그리기·입력 해석·앱 정책은 여기 없다.
+
+**표시 대상은 주입받는다.** `PresentTarget`이 그 자리이고 W7.2가 채운다. 웹뷰 합성 모델(§8)이 닿는 곳은
+창 스타일과 스왑체인 생성 **두 지점뿐**이라, 창이 표시 대상을 만들지 않고 받는 모양만 지키면 전환 비용이
+거기 머문다.
+
+**`PeekMessage`는 메시지의 절반만 준다.** Win32 메시지에는 두 갈래가 있다. `PostMessage` 계열은 스레드 큐에
+쌓여 `PeekMessageW`가 꺼내지만, `SendMessage` 계열은 **큐를 거치지 않고 `WndProc`을 곧장 부른다**.
+`ShowWindow`·`SetWindowPos`·`DestroyWindow`가 `WM_SIZE`를 그렇게 보낸다. 즉 **우리가 `poll` 안에 있지 않을 때도
+이벤트가 들어온다.** 그래서 `poll` 진입에서 큐를 통째로 비우면 그 이벤트가 사라진다 — 실측으로 겪었다:
+`show()`가 만든 `WM_SIZE`가 첫 `poll`에 지워져 스모크가 `resized_events=0`을 냈다.
+
+**규칙: 버퍼를 둘 두고 맞바꾼다.** `WndProc`은 언제나 `incoming`에 넣고, `poll`은 펌프를 끝낸 뒤 두 버퍼를
+맞바꿔 `outgoing`을 돌려준다. 넘긴 버퍼에는 다음 `poll`까지 아무도 쓰지 않으므로, 호출자가 슬라이스를 순회하는
+도중 `WndProc`이 이벤트를 더 올려도(순회 중 `requestClose`를 부르면 `DestroyWindow`가 `WM_SIZE`를 동기 전송한다)
+재할당으로 무효화되지 않는다. 한 버퍼를 빌려주면 그 use-after-free를 API가 **초대한다** — 대조군에서 실제로
+segfault가 났다.
+
+`WM_CLOSE`에서 **창을 닫지 않는다**. 호출자가 정책(세션 종료 확인 등)을 처리한 뒤 `requestClose`를 부른다 —
+macOS의 `windowShouldClose` 분담과 같다. `WM_PAINT`에서도 **그리지 않는다**(`BeginPaint`/`EndPaint`조차 하지
+않는다) — W7.2가 스왑체인으로 present하면 GDI 페인트 사이클과 섞이면 안 되고, 무효 영역 정리는
+`DefWindowProcW`에 맡긴다. 배경 브러시도 주지 않는다(OS가 먼저 칠하면 매 프레임 전체를 그리는 W7.2와 깜빡인다).
+
+**`user32`·`gdi32`는 명시적으로 링크해야 한다**(`build.zig`). 안 하면 `RegisterClassExW`가 0을 돌려주고
+`GetLastError`도 0이라 원인이 안 보인다 — atom이 0에서 49824로 바뀌는 것으로 확인했다.
+
+**실기 캡처** (Windows 10 Pro 19045, `maru win32-window-smoke`):
+
+![W7.1 Win32 창 — 생성 직후와 외부 리사이즈](images/w7-1-win32-window.png)
+
+창이 뜬 뒤 **외부에서** 960×600 → 640×400으로 줄이자 `resized_events` 1→2, `client_px` 944×561→624×361,
+`cells_at_8x16` 118×35→78×22가 따라왔다 — 메시지 펌프부터 셀 격자 변환까지가 한 줄로 이어진다는 증거다.
+클라이언트가 비어 있는 것은 정상이다(위 "배경 브러시를 주지 않는다").
+
+**`ERROR_NOT_ENOUGH_MEMORY`(8)는 메모리가 아니라 데스크톱 힙이다.** 창 생성이 8로 실패하면 그 세션 전체가
+창을 못 만드는 상태다(실측: 고아 프로세스 8,606개가 `SharedSection` 20MB를 채워 notepad조차 뜨지 않았다).
+앱 버그로 오진하기 쉬워 스모크가 이 코드를 따로 안내한다.
+
+**Zig의 게으른 분석이 테스트를 통째로 삼킨다.** `win32_window.zig`는 `main.zig`(root)만 import하는데, 테스트
+빌드에는 `main()`이 없어 그 import를 아무도 참조하지 않고 **파일 안의 테스트가 수집조차 되지 않는다**(실측:
+2,614개가 통과하는 동안 이 파일 테스트는 0개 돌았다). `main.zig`의 `test { _ = win32_window; }` 한 줄이 그
+구멍을 막는다 — `check-targets`가 `main.zig`를 놓쳤던 것과 같은 부류다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

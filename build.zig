@@ -98,6 +98,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // W7.1: Win32 창은 user32/gdi32를 부른다. `extern "user32"`만으로는 이 exe에 import가 안 붙어
+    // 호출이 조용히 실패한다(실측: `RegisterClassExW`도 시스템 `STATIC` 클래스 `CreateWindowExW`도
+    // null/0을 내면서 `GetLastError`는 0이었다 — "함수가 아예 안 돈" 모양이다). 명시적으로 링크한다.
+    if (target.result.os.tag == .windows) {
+        exe.root_module.linkSystemLibrary("user32", .{});
+        exe.root_module.linkSystemLibrary("gdi32", .{});
+    }
+
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the development CLI");

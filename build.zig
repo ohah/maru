@@ -116,6 +116,25 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // W7.6: 번들 ConPTY. **인박스 conhost 가 낡으면 없는 기능이 있다**(마우스 리포팅 — 계약 §4.3).
+    // 배치는 NuGet 패키지의 `build/native/*.targets` 가 정한 그대로다: `conpty.dll` 은 실행 파일 옆,
+    // `OpenConsole.exe` 는 아키텍처 하위 폴더. **틀리면 conpty.dll 이 시스템 conhost 로 조용히
+    // 되돌아가므로**(실패하지 않는다) 자리를 바꾸지 않는다.
+    //
+    // 파일이 없어도 빌드가 깨지지 않게 한다 — 소스 체크아웃에서 `assets/` 를 빼도 돌아야 하고,
+    // 런타임은 `pty/windows.zig` 가 kernel32 로 접는다.
+    if (target.result.os.tag == .windows and target.result.cpu.arch == .x86_64) {
+        const dll = "assets/windows/conpty/x64/conpty.dll";
+        const host = "assets/windows/conpty/x64/OpenConsole.exe";
+        const io = b.graph.io;
+        if (b.build_root.handle.access(io, dll, .{})) |_| {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(dll), "conpty.dll").step);
+        } else |_| {}
+        if (b.build_root.handle.access(io, host, .{})) |_| {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(host), "x64/OpenConsole.exe").step);
+        } else |_| {}
+    }
+
     const run_step = b.step("run", "Run the development CLI");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

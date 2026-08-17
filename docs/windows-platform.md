@@ -1407,6 +1407,62 @@ RPC를 건너간다. 그 JSON 키(`"zdotdir"`·`"term"`·`"login"`)는 **손으�
 이것이다 — 영속 호스트라 새 앱이 **옛 호스트**와 대화한다). **native 필드만 바꾸고 tag는 그대로 둔다.**
 tag를 바꿔야 한다면 명시적 converter와 version bump가 따로 필요하다.
 
+### 4.3 ConPTY를 함께 배포한다 — 인박스 conhost가 낡으면 기능이 없다 (W7.6 결정, 실측 2026-08-18)
+
+**`CreatePseudoConsole`을 kernel32에서 부르면 pty 호스트는 `%SystemRoot%\System32\conhost.exe`다.**
+그것이 OS와 함께 늙는다. 이 개발 기계는 conhost `10.0.19041.4522`인데, 클라이언트가 마우스를 켰을 때
+터미널에 알려 주는 기능([microsoft/terminal#9970](https://github.com/microsoft/terminal/pull/9970), 2021)이
+그보다 나중이라 **vim·htop이 마우스를 못 받았다**(§2k).
+
+**Microsoft의 방침이 "앱이 새 버전을 들고 다녀라"다.** 인박스에 개별 수정을 백포트하지 않고 NuGet으로
+배포하겠다고 못 박았다([discussion #17608](https://github.com/microsoft/terminal/discussions/17608)) —
+"terminal emulator authors ... to lock to specific versions and fully vet compatibility with them".
+Warp·Zed·Android Studio(pty4j)·WezTerm이 모두 같은 쌍을 번들한다.
+
+`assets/windows/conpty/`에 `Microsoft.Windows.Console.ConPTY` `1.24.260710001`의 x64 쌍을 둔다
+(MIT, Authenticode 서명 유효, 1.12 MB). 갱신 절차는 그 폴더의 `README.md`에 있다.
+
+**배치가 계약이다.** NuGet 패키지의 `build/native/*.targets`가 정한 그대로 설치한다:
+
+```
+zig-out/bin/
+  maru.exe
+  conpty.dll          ← 실행 파일 옆
+  x64/OpenConsole.exe ← 아키텍처 하위 폴더
+```
+
+**틀려도 실패하지 않는다** — `conpty.dll`은 `OpenConsole.exe`를 못 찾으면 시스템 `conhost.exe`로 조용히
+되돌아간다. 그래서 `maru win32-terminal-smoke`가 **`conpty=bundled|system`을 찍는다**. 이 줄이 없으면
+"배치가 틀린 것"과 "잘 된 것"을 구분할 방법이 없다(이 이식이 계속 경계해 온 "성공처럼 보이는 실패").
+
+**이름으로 로드하지 않는다.** `LoadLibraryW("conpty.dll")`은 CWD·PATH를 뒤지므로 사용자가 어떤 폴더에서
+실행하느냐에 따라 **남의 `conpty.dll`이 붙는다**(DLL 하이재킹). `GetModuleFileNameW`로 우리 실행 파일
+경로를 얻어 그 옆의 **전체 경로**로만 연다.
+
+**셋을 한 모듈에서 다 얻지 못하면 하나도 쓰지 않는다.** `Create`/`Close`/`Resize`를 섞으면 — kernel32의
+`Close`로 번들이 만든 `HPCON`을 닫는 식 — 그 자리에서 안 터지고 나중에 이상하게 터진다. 공식 DLL은
+`Conpty*` 이름과 함께 **kernel32와 같은 이름·시그니처**도 내보내므로 호출부는 그대로다.
+
+**경로가 MAX_PATH를 넘으면 번들을 안 쓴다.** 긴 경로에서 `CreatePseudoConsole`이 죽는 알려진 결함이 있다
+([#16860](https://github.com/microsoft/terminal/issues/16860)) — 기능 하나를 잃는 편이 죽는 것보다 낫다.
+
+**파일이 없어도 빌드와 실행이 둘 다 돌아간다.** `build.zig`는 `assets/`가 없으면 설치 단계를 건너뛰고,
+런타임은 kernel32로 접는다. 소스 체크아웃과 최소 배포가 계속 가능해야 하기 때문이다. 그리고 이 구조
+덕에 **사용자가 더 새 `conpty.dll`을 실행 파일 옆에 덮으면 그것을 쓴다** — 우리 갱신을 안 기다려도 된다.
+
+**실측 A/B**(같은 빌드, `conpty.dll`만 치웠다 넣었다):
+
+| | `conpty=` | `mouse_tracking` | `mouse_format` | 클릭 |
+|---|---|---|---|---|
+| 번들 `1.24.260710001` | `bundled` | **`any`** | **`sgr`** | **셸 리포트**(`reports=2 selections=0`) |
+| 인박스 `10.0.19041.4522` | `system` | `none` | `x10` | 로컬 선택(`reports=0 selections=1`) |
+
+나머지는 같다(`keys_to_shell=20` 양쪽). **§2k의 리포팅 코드는 한 줄도 안 바뀌었다.**
+
+**한계**: 사용자가 `cmd.exe`·`wsl.exe`를 **직접** 띄우면 그쪽은 여전히 시스템 conhost다(#17608에 그대로
+적혀 있다). 우리가 spawn하는 셸에만 적용된다. 그리고 지금은 **x64만** 번들한다 — 빌드가
+`x86_64-windows`만 겨냥하기 때문이고, arm64를 타깃에 넣을 때 같은 패키지의 arm64 쌍을 함께 넣는다.
+
 ## 5. 경로 구분자 — 입구에서 정규화한다
 
 Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9;9의 cwd, PEB의 `CurrentDirectory`(후행

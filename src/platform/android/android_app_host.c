@@ -1215,9 +1215,9 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
 
         // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지 하나에 한 번만 보낸다.
         if (action == AMOTION_EVENT_ACTION_CANCEL) {
-                pthread_mutex_lock(&g_bridge_lock);
-                maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
-                pthread_mutex_unlock(&g_bridge_lock);
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
+            pthread_mutex_unlock(&g_bridge_lock);
             g.has_ptr_id = 0;
             g.fling_vy = 0;
             return 1;

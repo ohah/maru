@@ -1334,7 +1334,6 @@ test "조합 중 문자열: 버퍼를 넘치면 잘린 글자를 통째로 버�
 // 테스트만 맞고 화면은 틀리게 된다(브리지가 여러 번 겪은 결함이다). 대신 **쓸어 보고 행동을
 // 잰다** — 어디가 먹는지를 브리지에게 물어 그 모양이 계약과 맞는지 본다.
 
-/// 하단 줄을 가로로 쓸어 chrome 이 down 을 먹는 구간을 찾는다. `{시작, 폭}`.
 /// 설정 화면을 연다. **진입점이 세션 목록의 앱 바로 옮겨졌다**(U3b) — 터미널 화면에는 chrome 이
 /// 없다. 뒤로 빠져 목록으로 간 뒤 톱니를 누른다. 좌표는 **제품에게 묻는다**.
 fn openSettings(w: u32, h: u32) void {
@@ -1371,22 +1370,6 @@ fn endAnyGesture() void {
     bridge.maru_mobile_pointer(3, 0, 0, 0, 0);
     bridge.maru_mobile_pointer(3, 0, 0, 0, now());
     bridge.maru_mobile_pointer(3, 0, 0, 0, now());
-}
-
-fn chromeClaimSpan(w: u32, y: f32) struct { x0: f32, width: f32 } {
-    var first: ?f32 = null;
-    var last: f32 = 0;
-    var x: f32 = 0;
-    while (x < @as(f32, @floatFromInt(w))) : (x += 1) {
-        const took = bridge.maru_mobile_pointer(0, 1, x, y, now()) == 1;
-        if (took) {
-            bridge.maru_mobile_pointer(3, 1, x, y, now()); // 잡은 것은 바로 취소해 다음 쓸기에 안 남긴다
-            if (first == null) first = x;
-            last = x;
-        }
-    }
-    if (first) |f| return .{ .x0 = f, .width = last - f + 1 };
-    return .{ .x0 = 0, .width = 0 };
 }
 
 // **설정 입구는 손가락 크기여야 한다.** 아이콘은 24 로 그리지만 받는 자리는 44 다(§5.1 —
@@ -2590,5 +2573,58 @@ test "본문: 둘째 손가락이 선택을 지우지 않는다" {
 
     bridge.maru_mobile_pointer(2, 11, q.x, q.y, now());
     bridge.maru_mobile_pointer(3, 0, 0, 0, 0);
+    bridge.maru_mobile_clear_error();
+}
+
+// **목적지는 제스처 동안 붙어 있어야 한다**(계약 §3.1). 둘째 손가락이 다른 표면에 닿아도
+// 그 제스처의 목적지는 안 바뀐다 — 안 그러면 키바를 미는 중에 본문이 같이 스크롤된다.
+//
+// **두 가지를 같이 잰다**: 목적지 이름과 **본문이 손을 댔는지**. 이름만 재면 판정력이 없다 —
+// 폭포를 막는 것이 두 겹(진입점의 early return + `routeClaim` 가드)이라 **한 겹만 깨면 이름은
+// 그대로**이고, 그 상태에서 본문은 실제로 선택을 지운다. 실측으로 갈랐다: `routeStale()` 을 늘
+// 참으로 만드는 변이는 이름 쪽이, 본문의 라우팅 가드를 지우는 변이는 선택 쪽이 잡는다(각각
+// 하나만으로는 82개가 전부 통과했다).
+test "잡고 있는 목적지는 둘째 손가락에게 안 뺏긴다" {
+    openTerminal(402, 874);
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("hello world", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 본문에 선택을 만들어 둔다 — 이것이 "본문이 손을 댔나" 의 판정자다.
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 11, q.x, q.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    const span0 = bridge.maru_mobile_selection_span();
+    bridge.maru_mobile_pointer(2, 11, q.x, q.y, now());
+
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 키바가 목적지를 잡는다.
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+    bridge.maru_mobile_pointer(0, 11, k.x, k.y, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // 둘째 손가락이 **본문 한가운데**에 닿아 움직인다. 키바가 안 놨으므로 목적지도, 선택도
+    // 그대로여야 한다(본문이 이 손가락을 받으면 `down` 이 선택을 지운다).
+    bridge.maru_mobile_pointer(0, 22, q.x, q.y, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    bridge.maru_mobile_pointer(1, 22, q.x, q.y + 90, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    try std.testing.expectEqual(span0, bridge.maru_mobile_selection_span());
+
+    // **소유자가 떼야 놓인다.** 그 전까지는 둘째가 떼도 그대로다.
+    bridge.maru_mobile_pointer(2, 22, q.x, q.y + 90, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    bridge.maru_mobile_pointer(2, 11, k.x, k.y, now());
+    try std.testing.expectEqualStrings("none", bridge.currentRouteName());
+
+    endAnyGesture();
     bridge.maru_mobile_clear_error();
 }

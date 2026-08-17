@@ -1599,6 +1599,13 @@ const TermRuntime = struct {
     /// 접을 수 있는 범위(§4.1f — 들여쓰기 층). **명령이 필요할 때 세어 여기 둔다** — 렌더는 할당하지
     /// 않고 이것을 읽기만 한다. 비어 있으면 아직 안 셌거나 접을 것이 없다.
     editor_fold_ranges: []const maru.session.editor.fold.Range = &.{},
+    /// 접힘이 적용된 **보이는 줄** 배열과 그 원래 줄 번호. 비어 있으면 접힌 것이 없어 `editor_lines`를
+    /// 그대로 그린다.
+    ///
+    /// **렌더를 안 고치려고 이 모양을 골랐다** — diff가 filler 행에 쓰는 `lines` + `line_numbers` 쌍과
+    /// 같다(§4.1f). 접힘이 바뀔 때만 다시 만들고 프레임마다는 읽기만 한다.
+    editor_visible_lines: []const []const u8 = &.{},
+    editor_visible_numbers: []const ?u32 = &.{},
     /// 접힌 머리 줄들. **오름차순**이고 `editor_fold_ranges.len`만큼의 자리를 미리 잡아 두므로
     /// 접기/펼치기가 다시 할당하지 않는다(`hiddenSpans`가 오름차순을 계약으로 요구한다).
     editor_folded_buf: []u32 = &.{},

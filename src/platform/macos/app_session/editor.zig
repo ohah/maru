@@ -133,6 +133,7 @@ const diff_frame = chrome_editor.diff_frame;
 /// pane 사각과 셀 크기로 편집기 op을 만든다. 반환값은 `scratch.ops[0..ops_len]`이 유효하다는 뜻이다.
 pub fn buildPaneOps(
     lines: []const []const u8,
+    numbers: ?[]const ?u32,
     first_line: usize,
     first_piece: u32,
     first_col: u16,
@@ -149,7 +150,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -255,7 +256,11 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         if (st.view == .compare) break :blk st.left_texts; // 아래 두 열 경로가 쓴다
         status_line[0] = editor_diff_ops.statusText(st.view);
         break :blk status_line[0..1];
-    } else term.rt.editor_lines;
+    } else if (term.rt.editor_visible_lines.len > 0)
+        // **접혀 있으면 보이는 줄만 그린다**(§4.1f). 번호는 아래에서 원래 값을 넘긴다.
+        term.rt.editor_visible_lines
+    else
+        term.rt.editor_lines;
     if (lines.len == 0) return null;
 
     // **본문 사각은 `body`다 — `grid`가 아니다**(`paneGeometry` 단일 출처).
@@ -317,7 +322,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -333,7 +338,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -848,6 +853,11 @@ pub fn foldAll(self: *AppSession) bool {
     // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 그대로 담는다.
     for (ranges, 0..) |r, i| term.rt.editor_folded_buf[i] = r.head;
     term.rt.editor_folded_len = ranges.len;
+    rebuildVisible(self, term) catch {
+        term.rt.editor_folded_len = 0; // 반영 못 하면 접지 않은 것으로 되돌린다(화면과 상태가 갈리지 않게)
+        return false;
+    };
+    term.rt.editor_first_line = 0; // 접으면 줄 수가 확 줄어 옛 위치가 문서 밖일 수 있다
     self.metal_dirty = true;
     return true;
 }
@@ -858,8 +868,62 @@ pub fn unfoldAll(self: *AppSession) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_folded_len == 0) return false;
     term.rt.editor_folded_len = 0;
+    rebuildVisible(self, term) catch {}; // 펼치기는 배열을 푸는 쪽이라 실패할 것이 없다
+    term.rt.editor_first_line = 0;
     self.metal_dirty = true;
     return true;
+}
+
+/// 접힘을 화면에 반영한다 — **보이는 줄만 모은 배열**과 그 원래 번호를 다시 만든다.
+///
+/// **렌더는 이 배열을 그냥 그린다.** diff가 filler 행에 쓰는 것과 같은 모양이라 프레임이 접힘을 몰라도
+/// 된다(§4.1f). 접힘이 바뀔 때만 돌고 프레임마다는 안 돈다.
+fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+    const lines = editorLines(term);
+    const heads = foldedHeads(term);
+    if (heads.len == 0) {
+        // 접힌 것이 없다 — 원본을 그대로 그린다(배열을 만들 이유가 없다).
+        if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
+        if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+        term.rt.editor_visible_lines = &.{};
+        term.rt.editor_visible_numbers = &.{};
+        return;
+    }
+
+    var span_buf: [max_fold_spans]editor_fold.Span = undefined;
+    const spans = editor_fold.hiddenSpans(term.rt.editor_fold_ranges, heads, &span_buf);
+
+    var visible: usize = 0;
+    for (0..lines.len) |i| {
+        if (!editor_fold.isHidden(spans, @intCast(i))) visible += 1;
+    }
+
+    const out_lines = try self.allocator.alloc([]const u8, visible);
+    errdefer self.allocator.free(out_lines);
+    const out_numbers = try self.allocator.alloc(?u32, visible);
+
+    var k: usize = 0;
+    for (lines, 0..) |line, i| {
+        if (editor_fold.isHidden(spans, @intCast(i))) continue;
+        out_lines[k] = line;
+        out_numbers[k] = @intCast(i + 1); // gutter는 1-based다
+        k += 1;
+    }
+
+    // 여기서부터 실패 지점이 없다 — 옛 것을 풀고 넘긴다(§2.0a commit-last).
+    if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
+    if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+    term.rt.editor_visible_lines = out_lines;
+    term.rt.editor_visible_numbers = out_numbers;
+}
+
+/// 한 번에 들 수 있는 숨는 구간 수. 접힘 자체가 `fold.max_depth`로 제한되고 구간은 그보다 적으므로
+/// 넉넉하다 — 넘으면 그 뒤가 안 접힐 뿐 죽지 않는다(§3.8).
+const max_fold_spans: usize = 4096;
+
+/// 접혀 있으면 **원래 줄 번호** 배열을, 아니면 `null`(프레임이 `first_line + n + 1`로 센다).
+fn foldNumbers(term: *Term) ?[]const ?u32 {
+    return if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers else null;
 }
 
 /// 지금 접혀 있는 머리 줄들(오름차순).
@@ -896,6 +960,8 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_path) |p| self.allocator.free(p);
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
+    if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
+    if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
     term.rt.editor_path = null;
 }
 
@@ -2865,4 +2931,60 @@ test "접힘 범위 계산이 어디서 할당에 실패해도 새거나 두 번
     // **공허해질 수 없게 센다** — 실패를 한 번도 안 겪으면 아무것도 지키지 않는다.
     try testing.expect(failed_steps >= 1);
     try testing.expect(ok_steps >= 1);
+}
+
+test "접으면 화면에서 그 줄들이 사라지고 번호는 원래 값이다" {
+    // **상태만 움직이고 렌더가 안 따라오면 아무 일도 안 일어난다.** 접힌 줄의 글자가 화면에서 빠지고,
+    // gutter가 **원래 줄 번호**를 그리는지(접힌 만큼 번호가 건너뛰는지) 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 5);
+    defer allocator.free(lines);
+    lines[0] = "head:";
+    lines[1] = "  zzz"; // 접히면 사라질 글자
+    lines[2] = "  zzz";
+    lines[3] = "tail";
+    lines[4] = "more";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    var before = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    var z_before: usize = 0;
+    for (before.dl.cells) |c| {
+        if (c.codepoint == 'z') z_before += 1;
+    }
+    before.dl.deinit(allocator);
+    try testing.expect(z_before > 0); // 접기 전에는 보인다 — 아니면 아래 판정이 공허하다
+
+    try testing.expect(foldAll(fx.session));
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer after.dl.deinit(allocator);
+
+    var z_after: usize = 0;
+    for (after.dl.cells) |c| {
+        if (c.codepoint == 'z') z_after += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), z_after); // **접힌 줄의 글자가 사라졌다**
+
+    // gutter가 원래 번호를 그린다 — 접힌 뒤 화면은 1·4·5줄이므로 '4'가 있어야 한다.
+    var saw_four = false;
+    for (after.dl.cells) |c| {
+        if (c.codepoint == '4') saw_four = true;
+    }
+    try testing.expect(saw_four);
+
+    // 펼치면 돌아온다.
+    try testing.expect(unfoldAll(fx.session));
+    var back = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer back.dl.deinit(allocator);
+    var z_back: usize = 0;
+    for (back.dl.cells) |c| {
+        if (c.codepoint == 'z') z_back += 1;
+    }
+    try testing.expectEqual(z_before, z_back);
 }

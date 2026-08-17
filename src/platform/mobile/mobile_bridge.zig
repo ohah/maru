@@ -357,6 +357,29 @@ pub fn keybarPressed() ?usize {
     return kb_pressed;
 }
 
+/// 본문 격자의 줄 수(테스트용). 앱 바·키바가 자리를 먹으면 이 값이 줄어야 한다 — 안 줄면
+/// 화면 밖에 줄이 그려지거나 마지막 줄이 바 밑에 깔린다.
+pub fn bodyRowCount() u16 {
+    return body_rows;
+}
+
+/// 터미널 앱 바의 뒤로가기 한가운데(테스트용). **좌표를 테스트가 따로 적지 않는다** — 배치가
+/// 바뀌면 테스트만 맞고 화면은 틀리게 된다. 폭이 0 이면 안 그려진 것이다.
+pub fn terminalBackCenter() struct { x: f32, y: f32 } {
+    return .{ .x = term_back_rect.x + term_back_rect.w / 2, .y = term_back_rect.y + term_back_rect.h / 2 };
+}
+
+/// 이 점이 뒤로가기 위인가(테스트용). **테스트가 사각형을 손으로 근사하지 않는다** — 경계에서
+/// 어긋나 "안 눌러야 할 자리가 눌렸다" 로 잘못 읽힌다(실제로 그렇게 짰다가 걸렀다).
+pub fn terminalBackHitAt(x: f32, y: f32) bool {
+    return term_back_rect.w > 0 and setHit(term_back_rect, x, y);
+}
+
+/// 그 뒤로가기가 지금 눌린 것으로 그려지나(테스트용 — 눌림은 색만 바꿔 quad 수로 안 잡힌다).
+pub fn terminalBackPressed() bool {
+    return term_back_pressed;
+}
+
 /// 키바가 지금 얼마나 밀려 있나(px). 설정 목록의 같은 훅과 짝이다 — 관성이 도는지를
 /// **그린 결과**로 재려면 이 값이 있어야 한다(키 rect 는 화면 밖으로 나가면 0 이 된다).
 pub fn keybarScrollPx() u32 {
@@ -928,6 +951,22 @@ const edge_w: f32 = 26.0;
 
 /// 키바 밴드의 **세로 범위**(스크롤 판정용). 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고,
 /// 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
+/// 터미널 앱 바의 자리(레이아웃이 잡아 준 값). **폭이 0 이면 안 그려졌다는 뜻**이고 그때는
+/// 누름 판정도 서지 않는다 — 옛 자리를 답하면 없는 버튼이 눌린다(키바가 같은 규율을 갖는다).
+/// 그 세션의 이름. **목록과 앱 바가 같은 말을 써야** 어디에 있는지 안다 — 두 곳에 따로 적으면
+/// 갈린다(세션이 여럿이 되면 M3/U2 가 이 값을 세션에서 가져온다).
+const session_title = "터미널";
+
+var term_bar_rect: SetRect = .{};
+/// 터미널 앱 바의 뒤로가기 자리.
+var term_back_rect: SetRect = .{};
+/// 그 뒤로가기가 지금 눌려 있나.
+var term_back_pressed: bool = false;
+/// 터미널 앱 바의 제스처. 다른 표면과 같은 규칙을 쓴다(§3.1).
+var term_press: gesture.Press = .{};
+/// 레이아웃 트리에서 앱 바를 가리키는 id. 키바 id 대역과 안 겹치게 둔다.
+const term_bar_id: u64 = 400;
+
 var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
 var key_bar_max_scroll: f32 = 0;
 /// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
@@ -955,7 +994,7 @@ var route: ?Route = null;
 fn routeStale() bool {
     return switch (route orelse return false) {
         .keybar => kb_touch.owner == null,
-        .chrome => set_touch.owner == null and !set_press.active() and !sess_press.active(),
+        .chrome => set_touch.owner == null and !set_press.active() and !sess_press.active() and !term_press.active(),
         .body => body_owner == null,
     };
 }
@@ -990,6 +1029,62 @@ fn routeClear() void {
 var kb_press: gesture.Press = .{};
 /// 가로 스크롤 델타의 기준. **제스처 상태가 아니다** — 임계와 무관하게 매 move 갱신한다.
 var kb_last_x: f32 = 0;
+
+/// 터미널 앱 바 — 왼쪽 뒤로가기, 가운데 세션 이름. **오른쪽은 비운다**(설정 입구는 부모
+/// 화면에 있고, 여기 또 두면 같은 것이 두 자리가 된다).
+fn drawTerminalBar(tk: *const tokens.Tokens) void {
+    term_back_rect = .{};
+    if (term_bar_rect.w <= 0) return; // 안 그려졌으면 누름 판정도 안 선다
+
+    push(.{
+        .x = @intFromFloat(term_bar_rect.x),
+        .y = @intFromFloat(term_bar_rect.y),
+        .w = @intFromFloat(term_bar_rect.w),
+        .h = @intFromFloat(term_bar_rect.h),
+    }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    // **44 이상 정사각**(§5.1 — 작게 그리고 넓게 받는다). 설정 화면과 같은 자리·같은 크기다.
+    term_back_rect = .{ .x = term_bar_rect.x, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    if (term_back_pressed) push(.{
+        .x = @intFromFloat(term_back_rect.x),
+        .y = @intFromFloat(term_back_rect.y),
+        .w = @intFromFloat(term_back_rect.w),
+        .h = @intFromFloat(term_back_rect.h),
+    }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = term_back_rect.x + (set_head_h - 22) / 2,
+            .y = term_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2, // arrow_left — 설정 화면과 같은 글리프
+        };
+        quad_count += 1;
+    }
+
+    // 제목은 그 세션의 이름이다 — 목록에서 누른 그 줄과 같은 말이라야 어디에 있는지 안다.
+    pushText(
+        session_title,
+        @intFromFloat(term_bar_rect.x + set_head_h),
+        @intFromFloat(term_bar_rect.y + (set_head_h - 17) / 2),
+        17,
+        tk.get(.surface_fg),
+    );
+    push(.{
+        .x = @intFromFloat(term_bar_rect.x),
+        .y = @intFromFloat(term_bar_rect.y + term_bar_rect.h - 1),
+        .w = @intFromFloat(term_bar_rect.w),
+        .h = 1,
+    }, tk.get(.divider), 0xFF, 0, 0);
+}
 
 /// 키 하나를 그린다 — 테두리 + 키캡 면 + 가운데 라벨.
 fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
@@ -2377,7 +2472,16 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = key_h + 10.0 } },
     }, &.{});
 
-    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ body, bar });
+    // ── 상단 앱 바: **돌아갈 길이 보여야 한다.** U3b 가 하단 바를 걷어내며 터미널 화면의
+    // chrome 을 통째로 없앴고, 남은 길은 가장자리 스와이프뿐이 됐다 — iOS 관례지만 **보이지
+    // 않고**, Android 는 시스템 뒤로가기가 따로 있어 같은 화면이 두 플랫폼에서 다르게 읽힌다
+    // (사용자 요청). 높이는 **다른 화면과 같은 값**이다 — 화면마다 다르면 옮길 때 본문이 튄다.
+    const app_bar = tree.card(.{
+        .id = term_bar_id,
+        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = set_head_h } },
+    }, &.{});
+
+    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ app_bar, body, bar });
 
     const built = try tree.build(root, .{
         .root_size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
@@ -2430,6 +2534,16 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 다른 키가 나가지 않는다(따로 계산하면 갈린다).
     // **자리를 다 못 채웠으면 안 섰다고 답한다.** 세우기만 하고 안 내리면, 레이아웃에서
     // 키바가 빠진 프레임에도 **옛 자리를 그대로 답해** 없는 키가 눌린다.
+    // 앱 바 자리를 기록한다 — **그리는 자리와 누르는 자리가 같아야** 한다(키바와 같은 규율).
+    term_bar_rect = .{};
+    for (built.entries) |entry| {
+        if (entry.id != term_bar_id) continue;
+        term_bar_rect = .{ .x = entry.rect.x, .y = entry.rect.y, .w = entry.rect.width, .h = entry.rect.height };
+        break;
+    }
+
+    drawTerminalBar(tk);
+
     key_bar_ready = false;
     for (built.entries) |entry| {
         if (entry.id != key_bar_id_base - 1) continue;
@@ -2747,7 +2861,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     const row_h: f32 = 56;
     sess_row_rect = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = row_h };
     if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
-    pushText("터미널", @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
+    pushText(session_title, @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y + row_h), .w = @intFromFloat(sess_row_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
 
@@ -2955,11 +3069,42 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 /// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
 /// 있으면 그 아래 키바·본문은 없는 것과 같다.
 fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 {
-    // **터미널 화면에는 chrome 이 없다.** 하단 44px 바를 걷어내면서 설정 입구가 부모 화면
-    // (세션 목록)의 앱 바로 갔다 — 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상
-    // 자리다), 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 썼다. 그래서 여기서는
-    // 아무것도 안 먹고 키바·본문이 받는다.
-    if (screenTop() == .terminal) return 0;
+    // **터미널 화면의 chrome 은 상단 앱 바 하나뿐이다.** 하단 44px 바는 걷어냈고(U3b — 하단은
+    // 이동 대상 자리이고 키보드가 늘 떠 있는 터미널에서 44px 를 영구히 썼다), 위쪽 뒤로가기만
+    // 남겼다. 그 띠 **밖은 안 먹는다** — 키바·본문이 받는다.
+    if (screenTop() == .terminal) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1; // 둘째 손가락은 이 표면의 제스처를 안 건드린다
+                if (term_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
+                if (!setHit(term_back_rect, x, y)) return 0;
+                if (!routeClaim(.chrome)) return 0;
+                term_press.begin(x, y, time_ms, false); // 이 띠에는 흐르는 것이 없다
+                term_back_pressed = true;
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(다른 화면과 같은 규칙).
+                if (term_press.move(x, y)) term_back_pressed = false;
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                term_back_pressed = false;
+                routeClear(); // 이 띠는 한 손가락 자리다 — 뗀 순간 끝이다
+                if (phase == 3) {
+                    term_press.cancel();
+                    return 1;
+                }
+                // **눌림 표시를 또 보지 않는다.** `down` 이 버튼 안에서만 잡으므로 "눌려 있었나"
+                // 와 "탭인가" 가 늘 같은 값이다 — 둘을 다 보면 한쪽이 죽고, 죽은 조건은 변이로도
+                // 안 드러난다(실제로 `end` 를 무시하는 변이가 통과했다).
+                if (term_press.end() == .tap) _ = maru_mobile_pop_screen();
+                return 1;
+            },
+        }
+    }
 
     // **세션 목록**: 톱니는 설정을, 줄은 그 세션을 민다. down 에서 바로 밀지 않고 up 까지
     // 기다린다 — 밀려던 손짓이 화면 전환이 되면 안 된다(키바와 같은 규율).
@@ -3151,6 +3296,8 @@ pub export fn maru_mobile_pop_screen() u32 {
     sess_press.cancel();
     kb_press.cancel();
     body_press.cancel();
+    term_press.cancel();
+    term_back_pressed = false;
     set_pressed = null;
     set_back_pressed = false;
     kb_pressed = null;

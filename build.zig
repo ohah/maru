@@ -104,6 +104,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         exe.root_module.linkSystemLibrary("user32", .{});
         exe.root_module.linkSystemLibrary("gdi32", .{});
+        // W7.2a: D3D11 표시 경로. `extern "d3d11"`/`extern "dxgi"`만으로는 import가 안 붙는다 —
+        // user32에서 겪은 것과 같은 부류다(그때는 `RegisterClassExW`가 조용히 0을 냈다).
+        exe.root_module.linkSystemLibrary("d3d11", .{});
+        exe.root_module.linkSystemLibrary("dxgi", .{});
     }
 
     b.installArtifact(exe);
@@ -230,6 +234,12 @@ pub fn build(b: *std.Build) void {
         win32_window_smoke_cmd.step.dependOn(b.getInstallStep());
         win32_window_smoke_cmd.addArg("win32-window-smoke");
         win32_window_smoke_step.dependOn(&win32_window_smoke_cmd.step);
+
+        const d3d11_present_smoke_step = b.step("d3d11-present-smoke", "Paint the Win32 window with D3D11 + DXGI (needs an interactive desktop and a D3D11 device)");
+        const d3d11_present_smoke_cmd = b.addRunArtifact(exe);
+        d3d11_present_smoke_cmd.step.dependOn(b.getInstallStep());
+        d3d11_present_smoke_cmd.addArg("d3d11-present-smoke");
+        d3d11_present_smoke_step.dependOn(&d3d11_present_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

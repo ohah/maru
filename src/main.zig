@@ -4,6 +4,8 @@ const maru = @import("maru");
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
 const win32_window = @import("platform/windows/win32_window.zig");
+// W7.2a D3D11+DXGI 표시 경로. 창과 같은 이유로 최상위 import다(위 주석).
+const d3d11_present = @import("platform/windows/d3d11_present.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -62,6 +64,11 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "win32-window-smoke")) {
         try runWin32WindowSmoke(allocator, stdout, stderr);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "d3d11-present-smoke")) {
+        try runD3d11PresentSmoke(allocator, stdout, stderr);
         return;
     }
 
@@ -224,6 +231,83 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
             try stdout.print("cells_at_8x16={d}x{d}\n", .{ size.cols, size.rows });
     }
     try stdout.writeAll("visible UI: 창만 뜬다. 그리기는 W7.2(D3D11+DXGI), 입력은 W7.4다.\n");
+    try stdout.flush();
+}
+
+/// `maru d3d11-present-smoke` — W7.2a. **창이 GPU로 칠해지는 것까지**를 사람이 눈으로 확인하는 자리.
+///
+/// W7.1 스모크와 갈라 둔 이유: 실패가 창에서 났는지 표시 경로에서 났는지 한 층씩 보여야 한다. 여기서
+/// 증명하는 것은 "D3D11 디바이스와 DXGI 스왑체인이 서고, 리사이즈를 따라가고, present가 화면에 닿는다"
+/// 까지다. 셀·글리프는 W7.2b다 — 그래서 지금은 **테마 배경 한 색**만 칠한다.
+fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru d3d11-present-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2a D3D11 present smoke)");
+    var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
+        try stderr.print("maru d3d11-present-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        if (win32_window.last_create_error == 8)
+            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    // `orelse`의 두 갈래는 타입이 같아야 한다 — 익명 리터럴은 `?ClientSize`의 payload로 추론되지 않는다.
+    const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
+    var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+        try stderr.print("maru d3d11-present-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.writeAll("  GPU/드라이버가 D3D11을 못 주는 환경(일부 CI·원격 세션)에서는 정상입니다.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer present.destroy();
+    // 창이 표시 대상을 **만들지 않고 받는다**(W7.1의 이음매). 여기가 그것을 채우는 유일한 자리다.
+    window.present.opaque_handle = @ptrCast(present);
+
+    // 터미널 테마 기본 배경과 같은 표현(0xAARRGGBB)을 쓴다 — W7.2c가 실제 `terminal_bg`를 넣을 자리다.
+    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+
+    var frames: usize = 0;
+    var resizes: usize = 0;
+    var close_requested = false;
+    var spins: usize = 0;
+    while (spins < 240 and !window.quit_requested and !close_requested) : (spins += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .resized => |r| {
+                resizes += 1;
+                // 최소화(0×0)에서도 부른다 — `resize`가 1로 올려 스왑체인을 살려 둔다.
+                present.resize(r.width_px, r.height_px) catch |err| {
+                    try stderr.print("resize 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+                    try stderr.flush();
+                    return error.UnknownCommand;
+                };
+            },
+            .paint => {},
+            .close_requested => close_requested = true,
+        };
+        present.clearAndPresent(clear, false) catch |err| {
+            try stderr.print("present 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+            try stderr.flush();
+            return error.UnknownCommand;
+        };
+        frames += 1;
+        _ = usleep(8_000); // 8ms — vsync를 끄고 돌리므로 스모크가 CPU를 태우지 않게.
+    }
+    if (close_requested) window.requestClose();
+
+    try stdout.writeAll("maru.d3d11-present-smoke.v1\n");
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("resize_events={d}\n", .{resizes});
+    try stdout.print("close_requested={}\n", .{close_requested});
+    try stdout.print("swapchain_px={d}x{d}\n", .{ present.width_px, present.height_px });
+    // 어느 드라이버로 섰는지 숨기지 않는다 — WARP로 떨어졌는데 모르면 성능을 잘못 판정한다.
+    try stdout.print("driver={s}\n", .{@tagName(present.driver)});
+    try stdout.print("clear_argb=0x{X:0>8}\n", .{@as(u32, 0xFF1E2430)});
+    try stdout.writeAll("visible UI: 창이 테마 배경색으로 칠해진다. 셀·글리프는 W7.2b, 입력은 W7.4다.\n");
     try stdout.flush();
 }
 
@@ -990,6 +1074,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-interactive-loop-smoke
         \\  maru app-pty-smoke
         \\  maru win32-window-smoke
+        \\  maru d3d11-present-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1009,6 +1094,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-interactive-loop-smoke run the interactive shell -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\  win32-window-smoke open a real Win32 window and report the neutral events it delivers (Windows only; needs an interactive desktop)
+        \\  d3d11-present-smoke paint that window with D3D11 + DXGI and report the present path (Windows only; needs a D3D11 device)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
@@ -1033,6 +1119,7 @@ test "development CLI imports maru module" {
 // 놓쳤던 것과 같은 부류이며, 여기 한 줄이 그 구멍을 막는다.
 test {
     _ = win32_window;
+    _ = d3d11_present;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

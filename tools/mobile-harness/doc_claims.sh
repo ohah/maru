@@ -70,6 +70,20 @@ echo "§3.1 IME 가 입력을 고쳐 쓰지 못한다"
 ck "iOS traits 여섯 개" 6 "$(grep -cE 'UITextAutocapitalizationTypeNone|UITextAutocorrectionTypeNo|UITextSpellCheckingTypeNo|UITextSmartQuotesTypeNo|UITextSmartDashesTypeNo|UITextSmartInsertDeleteTypeNo' $I)"
 ck "Android NO_SUGGESTIONS" 1 "$(grep -c 'TYPE_TEXT_FLAG_NO_SUGGESTIONS' src/platform/android/MaruActivity.java)"
 
+echo "§3.1 한 제스처의 뜻은 상태 하나가 든다"
+# **조합으로 되돌아가지 못하게 한다.** 전에는 표면마다 `active`·`moved`·`stop_tap`·`pressed` 를
+# 따로 들고 "탭이다" 를 자리마다 새로 만들었다 — 한 자리에서 한 항을 빠뜨려도 컴파일도 테스트도
+# 통과하고, 실제로 그 조합 하나가 톱니 판정으로 새어 설정이 안 열렸다.
+ck "표면마다 제스처 상태 하나" 4 "$(grep -c 'gesture.Press = .{}' $B)"
+ck "브리지에 남은 손수 제스처 상태" 0 "$(grep -cE '^var (set_active|set_stop_tap|set_moved|kb_stop_tap|kb_moved|ptr_down|ptr_moved|selecting)' $B)"
+# 임계가 다시 갈리면 같은 손짓이 표면마다 다르게 판정된다 — 한때 같은 10 이 세 곳에 있었다
+# (`slop_px` · 설정의 매직 10 · `long_press_slop`).
+ck "슬롭의 단일 출처" 1 "$(grep -c 'pub const slop_px' src/chrome/ui/scroll_area.zig)"
+ck "브리지에 박힌 슬롭 상수" 0 "$(grep -cE 'slop.*(f32|:) *= *[0-9]' $B)"
+# 컴포넌트가 소비처 없이도 CI 에서 돌아야 한다 — `refAllDecls` 는 한 단계라 `ui` 를 따로 ref
+# 하지 않으면 **테스트를 써 놔도 집계 밖**이다(`gesture` 12개가 실제로 그랬다).
+ck "ui 네임스페이스를 집계한다" 1 "$(grep -c 'testing.refAllDecls(ui);' src/chrome.zig)"
+
 echo "§3.1 판단은 코어가 한다"
 # 계약이 "뜻은 코어가 정한다" 고 적어 놨는데 host 가 스크롤·선택을 직접 부르면 그 말이
 # 거짓이 된다. **예외가 없어졌다** — 관성이 코어로 오면서 `maru_mobile_scroll` 을 부르는 host 가

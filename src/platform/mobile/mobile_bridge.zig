@@ -26,6 +26,7 @@ const tree = chrome.ui.tree;
 const layout = chrome.ui.layout;
 const paint_mod = chrome.ui.paint;
 const scroll_area = chrome.ui.scroll_area;
+const gesture = chrome.ui.gesture;
 const draw = chrome.draw;
 const tokens = chrome.tokens;
 
@@ -334,6 +335,12 @@ pub fn settingsPopupItemVisible(i: usize) bool {
     return i < set_item_rects.len and set_item_rects[i].w > 0;
 }
 
+/// 팝업이 열려 있나(테스트용). **`settingsPopupItemVisible` 로 대신 묻지 않는다** — 그것은
+/// "그 항목이 그려졌나" 이고, 열림 자체를 재려면 이 값이어야 한다.
+pub fn settingsPopupOpen() bool {
+    return set_open != null;
+}
+
 pub fn settingsPopupCap() usize {
     return set_item_rects.len;
 }
@@ -342,6 +349,18 @@ pub fn settingsPopupCap() usize {
 /// 줄 색인으로는 "흐르고 있다" 를 못 잰다.
 pub fn settingsScrollPx() u32 {
     return set_sa.offset_y_px;
+}
+
+/// 지금 눌린 것으로 **표시되는** 키(테스트용). 눌림은 색만 바꿔서 quad 수로는 안 잡힌다 —
+/// hover 가 없는 화면에서 이 표시가 "닿았다" 를 알리는 유일한 신호라(§2.4) 직접 물어야 한다.
+pub fn keybarPressed() ?usize {
+    return kb_pressed;
+}
+
+/// 키바가 지금 얼마나 밀려 있나(px). 설정 목록의 같은 훅과 짝이다 — 관성이 도는지를
+/// **그린 결과**로 재려면 이 값이 있어야 한다(키 rect 는 화면 밖으로 나가면 0 이 된다).
+pub fn keybarScrollPx() u32 {
+    return kb_sa.offset_y_px;
 }
 
 pub fn settingsRows() []const mobile_config.Row {
@@ -616,7 +635,7 @@ pub fn maru_mobile_scroll(dy_px: f32) void {
     // **선택 중에는 안 흘린다.** 플랫폼은 관성(느낌)만 갖고 그것을 적용할지는 의미라 코어가
     // 정한다 — host 는 MOVE 마다 관성 속도를 세워 두므로, 여기서 안 막으면 길게 눌러 선택하는
     // 동안에도 화면이 계속 흐른다(끌어서 범위를 넓히는 내내 글자가 도망간다).
-    if (selecting) {
+    if (body_press.state == .long_pressed) {
         scroll_px_carry = 0;
         return;
     }
@@ -687,23 +706,18 @@ pub export fn maru_mobile_set_long_press_ms(ms: u32) void {
 pub export fn maru_mobile_long_press_ms() u32 {
     return @intCast(long_press_ms);
 }
-/// 이만큼 움직이면 "누르고 있는" 것이 아니라 끄는 것이다(논리 px).
-const long_press_slop: f32 = 10;
-
-var ptr_down = false;
-var ptr_down_x: f32 = 0;
-var ptr_down_y: f32 = 0;
-var ptr_down_ms: u64 = 0;
+/// 본문의 제스처. **뜻은 상태 하나가 든다**(계약 §3.1) — 전에는 `ptr_down`·`ptr_moved`·
+/// `selecting` 이 따로 있었고, "길게 누름이 아직 살아 있나" 를 그 셋의 조합으로 봤다.
+/// 선택으로 들어가는 것도 여기 전이다(`long_pressed`).
+var body_press: gesture.Press = .{};
+/// 스크롤 델타·속도의 기준. **제스처 상태가 아니다.**
 var ptr_last_y: f32 = 0;
 var ptr_last_ms: u64 = 0;
-var ptr_moved = false;
 /// 손을 뗀 뒤 남은 세로 관성(px/ms). **코어가 든다** — 전에는 host 가 들었는데, 목적지를
 /// host 가 더는 모르게 되자(R2) 키바로 간 제스처의 세로 속도까지 본문에 흘렸다(회귀였다).
 /// 키바·설정 관성이 이미 여기서 도는 것과 같은 자리다.
 var body_fling: f32 = 0;
 /// 길게 눌러 선택에 들어갔다 — 이 뒤의 이동은 스크롤이 아니라 선택 확장이다.
-var selecting = false;
-
 /// 본문 안의 점을 셀로. 본문 밖이면 null.
 fn bodyCell(x: f32, y: f32) ?struct { row: u16, col: u16 } {
     const packed_cell = maru_mobile_hit_cell(x, y);
@@ -733,13 +747,13 @@ fn bodySlot(id: u32) ?*BodySlot {
 pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
     // **취소는 전부에게 간다** — 어느 표면이 잡고 있었든 놓아야 한다(계약 §3.1: id 무관).
     if (phase == 3) {
-        _ = chromePointer(3, pointer_id, x, y);
-        _ = keybarPointer(3, pointer_id, x, y);
+        _ = chromePointer(3, pointer_id, x, y, time_ms);
+        _ = keybarPointer(3, pointer_id, x, y, time_ms);
         bodyPointer(3, pointer_id, x, y, time_ms);
         return;
     }
-    if (chromePointer(phase, pointer_id, x, y) != 0) return;
-    if (keybarPointer(phase, pointer_id, x, y) != 0) return;
+    if (chromePointer(phase, pointer_id, x, y, time_ms) != 0) return;
+    if (keybarPointer(phase, pointer_id, x, y, time_ms) != 0) return;
     bodyPointer(phase, pointer_id, x, y, time_ms);
 }
 
@@ -755,6 +769,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
     if (phase == 3) {
         body_slots = @splat(.{});
         body_owner = null;
+        body_press.cancel();
         // **취소는 관성도 거둔다.** 두 host 가 이 phase 를 배경 전환 정리로도 쓰므로, 남기면
         // 돌아왔을 때 손대지 않은 화면이 저 혼자 흐른다(전에 host 에서 겪은 그것이다).
         body_fling = 0;
@@ -780,20 +795,17 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             }
             if (body_owner == null) body_owner = pointer_id;
             if (body_owner != pointer_id) return;
-            ptr_down = true;
-            ptr_down_x = x;
-            ptr_down_y = y;
-            ptr_down_ms = time_ms;
+            // **본문에는 탭이 없다** — 짚어서 관성을 세우는 것이 전부라 `stop_tap` 은 안 쓴다
+            // (그 처리는 바로 아래 `body_fling = 0` 이다).
+            body_press.begin(x, y, time_ms, false);
             ptr_last_y = y;
             ptr_last_ms = time_ms;
             // **누르면 관성이 선다** — 흐르는 화면을 짚어 세우는 것은 모든 스크롤 면의 약속이다.
             body_fling = 0;
-            ptr_moved = false;
             // 새로 누르면 이전 선택은 사라진다 — 데스크톱에서 클릭이 선택을 푸는 것과 같다.
-            if (selecting or core.selectionViewportSpan() != null) {
-                core.selectionClear();
-                selecting = false;
-            }
+            // **새로 누르면 이전 선택은 사라진다** — 데스크톱에서 클릭이 선택을 푸는 것과 같다.
+            // 선택 **상태**는 위 `begin` 이 이미 `pressed` 로 돌려놨다(그것이 전이다).
+            if (core.selectionViewportSpan() != null) core.selectionClear();
         },
         1 => { // move
             if (!routeIs(.body)) return;
@@ -801,26 +813,28 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             // 자리에서 델타가 나오면 화면이 점프한다(T1 이 스크롤 면에서 없앤 그 병).
             if (bodySlot(pointer_id)) |sl| sl.last_y = y;
             if (body_owner != pointer_id) return;
-            if (!ptr_down) return;
-            const dx = x - ptr_down_x;
-            const dy = y - ptr_down_y;
-            if (@abs(dx) > long_press_slop or @abs(dy) > long_press_slop) ptr_moved = true;
+            if (!body_press.active()) return;
+            // **슬롭을 넘으면 밀기다 — 길게 누름은 더 이상 안 잡힌다.** 임계는 스크롤 면과 같은
+            // 값을 쓴다(전에는 `long_press_slop` 이 같은 10 을 따로 들고 있었다 — 같은 손짓이
+            // 표면마다 다르게 판정되면 사용자는 이유를 모른다).
+            //
+            // **본문은 슬롭 전에도 흘린다** — 키바·설정과 다른 자리다. 터미널 뷰포트에는 탭이
+            // 없어 첫 10px 를 죽일 이유가 없고, 죽이면 끌기 시작이 굼떠 보인다.
+            _ = body_press.move(x, y);
 
-            if (selecting) {
+            if (body_press.state == .long_pressed) {
                 // **누른 칸을 벗어나기 전에는 안 늘린다.** 길게 눌러 단어를 잡은 직후에도
                 // move 는 계속 오는데, 그때마다 늘리면 head 가 **누른 칸으로 당겨져 단어
                 // 끝이 잘린다**(3칸 단어가 2칸이 되는 것을 픽셀로 재서 잡았다).
                 if (bodyCell(x, y)) |c| {
-                    if (bodyCell(ptr_down_x, ptr_down_y)) |d| {
+                    if (bodyCell(body_press.down_x, body_press.down_y)) |d| {
                         if (c.row != d.row or c.col != d.col) {
                             core.selectionExtend(c.row, c.col);
-                            // **여기가 "누른 칸을 벗어났다" 는 판정 그 자체다.** `ptr_moved` 를
-                            // px 임계로만 세우면 가로에서 거짓이 된다 — 셀 폭(8)이 임계(10)보다
-                            // 좁아, 9px 끌면 다른 칸으로 넘어가 여기까지 오는데도 안 서고
-                            // 다음 프레임 `checkLongPress` 가 늘린 것을 **되돌린다**(한 칸만큼
-                            // 넓히는 것이 아예 불가능했다). 세로는 줄 높이(22)가 임계보다 커서
-                            // 우연히 맞았다 — 우연에 기대지 않는다.
-                            ptr_moved = true;
+                            // **전에는 여기서 `ptr_moved` 를 세웠다.** 안 세우면 다음 프레임의
+                            // `checkLongPress` 가 늘린 것을 되돌렸다 — 셀 폭(8)이 임계(10)보다
+                            // 좁아 9px 끌면 여기까지 오는데도 "안 움직였다" 였기 때문이다.
+                            // 상태기계에서는 **이미 `long_pressed` 라 다시 안 잡힌다**(전이는
+                            // `pressed` 에서만 일어난다) — 그 뒷정리가 필요 없어졌다.
                         }
                     }
                 }
@@ -867,7 +881,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
                 }
                 routeClear(); // 마지막 손가락이었다 — 목적지를 놓는다(계약 §3.1)
             }
-            ptr_down = false;
+            _ = body_press.end(); // 본문에는 탭이 없다 — 결과를 안 쓴다
             // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다. 지우는 자리는
             // **다음 누름**이다(phase 0 이 이미 그렇게 한다).
             //
@@ -880,7 +894,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             //
             // 지울 이유도 없다 — 취소든 뗌이든 손가락이 없어진다는 뜻이고, 이미 만들어진 선택은
             // 진행 중인 제스처가 아니라 **결과**다. 다음 누름이 치운다.
-            selecting = false;
+            // (선택 **상태**는 위 `end`/`cancel` 이 이미 거뒀다 — 그것이 제스처의 단계다.)
         },
     }
 }
@@ -921,7 +935,6 @@ var key_bar_max_scroll: f32 = 0;
 /// 감쇠·임계가 손으로 있었고 설정 목록에도 같은 숫자가 또 있었다.
 var kb_sa: scroll_area.State = .{};
 /// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 키를 안 보낸다.
-var kb_stop_tap: bool = false;
 var kb_touch: scroll_area.Touch = .{};
 /// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
 /// 손가락이 지금 누르고 있는 키. **hover 가 없는 자리를 메우는 것이 눌림 표시**다(§2.4) —
@@ -942,7 +955,7 @@ var route: ?Route = null;
 fn routeStale() bool {
     return switch (route orelse return false) {
         .keybar => kb_touch.owner == null,
-        .chrome => set_touch.owner == null and !set_active,
+        .chrome => set_touch.owner == null and !set_press.active() and !sess_press.active(),
         .body => body_owner == null,
     };
 }
@@ -972,10 +985,11 @@ fn routeClear() void {
     route = null;
 }
 
-var kb_down_x: f32 = 0;
-var kb_down_y: f32 = 0;
+/// 키바의 제스처. **뜻은 상태 하나가 든다**(계약 §3.1) — 전에는 `kb_stop_tap`·`kb_moved`·
+/// `kb_down_x/y` 가 따로 있었다.
+var kb_press: gesture.Press = .{};
+/// 가로 스크롤 델타의 기준. **제스처 상태가 아니다** — 임계와 무관하게 매 move 갱신한다.
 var kb_last_x: f32 = 0;
-var kb_moved: f32 = 0;
 
 /// 키 하나를 그린다 — 테두리 + 키캡 면 + 가운데 라벨.
 fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
@@ -1086,13 +1100,14 @@ fn kbScroll() f32 {
 /// up 까지 기다려 **움직인 거리가 임계 아래일 때만** 키로 친다.
 ///
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
-fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
+fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 {
     // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
     // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 목적지가 남아 **복귀 후
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
     if (phase == 3) {
         if (routeIs(.keybar)) routeClear();
         kb_pressed = null;
+        kb_press.cancel();
         kb_touch.cancel();
         return 0;
     }
@@ -1108,16 +1123,13 @@ fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             return 1;
         }
         if (!routeClaim(.keybar)) return 0; // 이미 다른 표면의 제스처다
-        kb_down_x = x;
-        kb_down_y = y;
         kb_last_x = x;
-        kb_moved = 0;
         // **흐르는 중에 짚으면 멈추기만 한다.** 그 짚음은 세우려던 것이지 키를 누른 것이
         // 아니다 — 안 가리면 멈추려던 손가락이 그 자리 키를 터미널로 보낸다(재현했다).
-        kb_stop_tap = kb_touch.begin(pointer_id, x);
+        kb_press.begin(x, y, time_ms, kb_touch.begin(pointer_id, x));
         // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
         // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
-        kb_pressed = if (kb_stop_tap) null else keybarIndexAt(x, y);
+        kb_pressed = if (kb_press.canTap()) keybarIndexAt(x, y) else null;
         return 1;
     }
     if (!routeIs(.keybar)) return 0;
@@ -1128,15 +1140,17 @@ fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
             return 1;
         }
-        const dx = x - kb_last_x;
         kb_last_x = x;
-        kb_moved += @abs(dx);
         // **임계를 넘기 전에는 스크롤도 안 한다.** 예전에는 이동량을 늘 반영해서, 살짝 민 손짓이
         // **화면도 조금 움직이고 키도 나가는** 두 일을 한꺼번에 했다 — 같은 손짓이 어떨 때는
         // 스크롤로, 어떨 때는 입력으로 보이는 원인이었다(사용자가 화면에서 짚었다).
         // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
-        if (kb_moved < scroll_area.Touch.slop_px) return 1;
-        kb_pressed = null;
+        //
+        // **재는 법이 바뀌었다**: 전에는 `|dx|` 를 **더해** 왕복까지 쌓았고, 지금은 짚은 자리에서
+        // **가장 멀리 간 거리**로 잰다(AOSP `touchSlop` 과 같은 뜻). 제자리에서 떠는 손가락이
+        // 슬롭을 채워 키를 삼키던 자리가 없어진다.
+        if (kb_press.move(x, y)) kb_pressed = null;
+        if (kb_press.state == .pressed) return 1;
         kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
     }
@@ -1155,13 +1169,14 @@ fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // 그 손가락은 자기 기준을 갖고 있으므로 여기서는 **눌림만 거두고** 이동량을 새로 센다.
     if (kb_touch.owner) |next| {
         kb_last_x = x;
-        kb_moved = scroll_area.Touch.slop_px; // 이미 밀기다 — 이어받은 손가락이 키를 내지 않는다
-        kb_stop_tap = false;
+        kb_press.adoptAsScroll(x, y); // 이미 밀기다 — 이어받은 손가락이 키를 내지 않는다
         _ = next;
         return 1;
     }
-    // **10px 은 손가락이 가만히 있다고 보는 폭**이다. 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
-    if (phase == 2 and !kb_stop_tap and kb_moved < scroll_area.Touch.slop_px) {
+    const down_x = kb_press.down_x;
+    const down_y = kb_press.down_y;
+    // **탭은 `pressed` 에서만 나온다** — 밀었거나 세우려던 짚음이면 그 손짓은 이미 뜻이 있다.
+    if (kb_press.end() == .tap) {
         kb_touch.cancel(); // 탭이면 관성이 없다
         // **`<`/`>` 는 누르는 것이 아니라 신호다.** 한때 데스크톱 탭바의 `‹›` 가 클릭 가능하다는
         // 이유로 한 화면씩 옮기게 했는데, 두 가지가 어긋났다 — ① 데스크톱이 그런 것은 **마우스**
@@ -1169,7 +1184,7 @@ fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
         // 동작한다"), ② 표시 폭이 26px 이라 **44 기준에 미달하는 버튼**을 새로 만드는 꼴이었다
         // (44 를 지키려고 시작한 작업에서). 그래서 표시로만 두고, 그 자리를 눌러도 스크롤의
         // 시작점일 뿐 아무 키도 안 나간다.
-        _ = keybarTapAt(kb_down_x, kb_down_y);
+        _ = keybarTapAt(down_x, down_y);
     }
     return 1;
 }
@@ -2608,7 +2623,6 @@ var set_list: SetRect = .{}; // 목록이 보이는 창(헤더 아래) — 클�
 /// 소비처가 생긴 이상 규칙을 한곳에 둔다(계획 U1).
 var set_sa: scroll_area.State = .{};
 /// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 행을 안 누른다.
-var set_stop_tap: bool = false;
 var set_touch: scroll_area.Touch = .{};
 var set_max_scroll: f32 = 0;
 var set_pressed: ?usize = null;
@@ -2629,11 +2643,11 @@ var set_item_n: usize = 0;
 /// 끝까지 밀 일이 없고, 고르는 화면에서 미끄러지면 엉뚱한 것이 손가락 밑에 온다.
 var set_pop_sa: scroll_area.State = .{};
 var set_pop_max_scroll: f32 = 0;
-var set_active: bool = false;
-var set_down_x: f32 = 0;
-var set_down_y: f32 = 0;
+/// 설정 화면의 제스처. **뜻은 상태 하나가 든다**(계약 §3.1) — 전에는 `set_active`·`set_moved`·
+/// `set_stop_tap` 이 따로 있었고 "탭이다" 를 자리마다 조합으로 다시 만들었다.
+var set_press: gesture.Press = .{};
+/// 스크롤 델타의 기준. **제스처 상태가 아니다** — 임계와 무관하게 매 move 갱신한다.
 var set_last_y: f32 = 0;
-var set_moved: f32 = 0;
 
 /// 지금 스크롤 위치(px). 컴포넌트가 정수로 들고 있으므로 그리는 쪽만 f32 로 받는다.
 fn setScroll() f32 {
@@ -2668,6 +2682,12 @@ pub fn sessionsGearCenter() struct { x: f32, y: f32 } {
     return .{ .x = sess_gear_rect.x + sess_gear_rect.w / 2, .y = sess_gear_rect.y + sess_gear_rect.h / 2 };
 }
 
+/// 설정 화면 뒤로가기 한가운데(테스트용). **좌표를 테스트가 따로 적지 않는다** — 앱 바
+/// 배치가 바뀌면 테스트만 맞고 화면은 틀리게 된다(이 저장소가 여러 번 겪은 결함이다).
+pub fn settingsBackCenter() struct { x: f32, y: f32 } {
+    return .{ .x = set_back_rect.x + set_back_rect.w / 2, .y = set_back_rect.y + set_back_rect.h / 2 };
+}
+
 /// 세션 줄 한가운데.
 pub fn sessionsRowCenter() struct { x: f32, y: f32 } {
     return .{ .x = sess_row_rect.x + sess_row_rect.w / 2, .y = sess_row_rect.y + sess_row_rect.h / 2 };
@@ -2682,6 +2702,10 @@ pub fn sessionsGearSize() struct { w: f32, h: f32 } {
 var sess_gear_rect: SetRect = .{};
 var sess_row_rect: SetRect = .{};
 var sess_pressed: enum { none, gear, row } = .none;
+/// 세션 목록의 제스처. **설정 화면과 나눠 쓰지 않는다** — 전에는 `set_active`·`set_moved` 를
+/// 그대로 썼고(한 번에 한 화면만 떠서 동작하기는 했다), 이름이 거짓말을 하는 데다 둘 중
+/// 하나를 고치면 다른 하나가 조용히 바뀐다.
+var sess_press: gesture.Press = .{};
 
 /// 세션 목록. **이 앱의 뿌리 화면이다**(UX §2.2). 지금 실을 수 있는 것은 **진짜 세션 하나**뿐이라
 /// 한 줄이다 — 목록을 채워 보이려고 없는 세션을 그리지 않는다(계약 §2.4 가 경고한 자리이고,
@@ -2869,6 +2893,10 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 
     // ── 팝업: **행 옆에 얹는다**(하위 화면으로 밀지 않는다). 배경이 보여야 즉시-적용이
     // 그대로 미리보기가 되기 때문이다 — 하위 화면으로 밀면 바꾼 결과가 가려진다.
+    // **rect 도 같이 비운다.** 개수만 0 으로 두면 배열에는 **닫히기 전 값이 그대로 남아**
+    // `settingsPopupItemVisible` 이 닫힌 팝업을 "보인다" 고 답한다 — 그 훅으로 판정하는
+    // 테스트가 통과 보장 테스트가 된다(실제로 그렇게 짠 테스트가 결함을 못 잡았다).
+    set_item_rects = @splat(.{});
     set_item_n = 0;
     if (set_open) |oi| switch (set_items[oi].field.kind) {
         .choice => {
@@ -2926,7 +2954,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 
 /// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
 /// 있으면 그 아래 키바·본문은 없는 것과 같다.
-fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
+fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 {
     // **터미널 화면에는 chrome 이 없다.** 하단 44px 바를 걷어내면서 설정 입구가 부모 화면
     // (세션 목록)의 앱 바로 갔다 — 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상
     // 자리다), 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 썼다. 그래서 여기서는
@@ -2941,27 +2969,26 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
                 // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
-                set_active = true;
-                set_down_x = x;
-                set_down_y = y;
-                set_moved = 0;
+                sess_press.begin(x, y, time_ms, false); // 이 화면에는 흐르는 것이 없다
                 sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else .none;
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
-                if (set_moved >= scroll_area.Touch.slop_px) sess_pressed = .none;
+                if (sess_press.move(x, y)) sess_pressed = .none;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
                 const was = sess_pressed;
                 sess_pressed = .none;
-                set_active = false;
                 routeClear(); // 세션 목록은 한 손가락 화면이다 — 뗀 순간 끝이다
-                if (phase != 2 or set_moved >= scroll_area.Touch.slop_px) return 1;
+                if (phase == 3) {
+                    sess_press.cancel();
+                    return 1;
+                }
+                if (sess_press.end() != .tap) return 1;
                 switch (was) {
                     .gear => {
                         navPush(.settings);
@@ -2980,23 +3007,22 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     switch (phase) {
         0 => {
             if (!routeIs(.chrome) and !routeClaim(.chrome)) return 0;
-            set_active = true;
-            set_down_x = x;
-            set_down_y = y;
             set_last_y = y;
-            set_moved = 0;
             // 키바와 같은 규칙 — 흐르는 목록을 세우려 짚었는데 그 자리 토글이 뒤집히면 안 된다.
             const was_owned = set_touch.owner != null;
-            set_stop_tap = set_touch.begin(pointer_id, y);
-            // **둘째 손가락은 눌림 판정을 안 건드린다** — 안 가리면 그 down 이 `set_down_y`·
-            // `set_moved` 를 덮어써 첫 손가락의 "탭이냐 스크롤이냐" 가 오염된다.
+            const stopped = set_touch.begin(pointer_id, y);
+            // **둘째 손가락은 이 표면의 제스처를 안 건드린다**(계약 §3.1: 표면마다 한 제스처).
+            // 전에는 이 가드가 `set_pressed` 만 막고 있었고 `set_down_y`·`set_moved` 는 **가드
+            // 앞에서** 덮어써, 밀던 중에 다른 손가락이 닿으면 누적 이동량이 0 이 되어 **첫
+            // 손가락을 떼는 순간 그 손짓이 탭으로 판정됐다**(팝업이 닫히고 값이 골라졌다).
             if (was_owned) return 1;
+            set_press.begin(x, y, time_ms, stopped);
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
-            set_back_pressed = !set_stop_tap and set_open == null and setHit(set_back_rect, x, y);
+            set_back_pressed = set_press.canTap() and set_open == null and setHit(set_back_rect, x, y);
             set_pressed = null;
-            if (!set_stop_tap and set_open == null and !set_back_pressed) {
+            if (set_press.canTap() and set_open == null and !set_back_pressed) {
                 for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
                     set_pressed = i;
                     break;
@@ -3004,18 +3030,19 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             }
         },
         1 => {
-            if (!set_active) return 1;
+            if (!set_press.active()) return 1;
             const dy = y - set_last_y;
             // **기준점은 임계와 무관하게 매 move 갱신한다**(키바 `kb_last_x` 와 같은 규칙).
             // 갱신을 임계 뒤로 미뤘더니 문턱을 넘는 첫 프레임이 **down 지점과의 차이**를
             // 통째로 적용해 목록이 10px 이상 **툭 뛰고**, 그 값이 그대로 관성 씨앗이 됐다.
             set_last_y = y;
-            set_moved = @max(set_moved, @abs(x - set_down_x) + @abs(y - set_down_y));
             // **임계를 넘기 전에는 스크롤도 안 한다** — 살짝 민 손짓이 화면도 움직이고
             // 값도 바꾸면 같은 손짓이 어떨 때는 스크롤, 어떨 때는 입력으로 보인다.
-            if (set_moved < scroll_area.Touch.slop_px) return 1;
-            set_pressed = null;
-            set_back_pressed = false;
+            if (set_press.move(x, y)) {
+                set_pressed = null;
+                set_back_pressed = false;
+            }
+            if (set_press.state == .pressed) return 1;
             if (set_open != null) {
                 // **팝업이 열려 있으면 팝업을 민다.** 안 그러면 목록 16개짜리 팝업에서 아래
                 // 항목에 닿을 방법이 없다 — 화면이 유일한 입력 경로라 그 값이 영영 사라진다.
@@ -3027,18 +3054,24 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             }
         },
         else => {
-            const was = set_active;
-            set_active = false;
             // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
             // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
             if (phase == 3) set_touch.cancel() else set_touch.end(pointer_id, frame_dt_ms);
             // 마지막 손가락이면 목적지를 놓는다(계약 §3.1).
             if (phase == 3 or set_touch.owner == null) routeClear();
+            // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1) — 눌림 표시도 그대로
+            // 둔다. 표시를 먼저 지우고 빠져나갔더니 **첫 손가락을 떼도 아무 일이 안 났다**
+            // (둘째 손가락이 잠깐 닿았다 떨어진 것만으로 누르던 줄이 죽었다).
+            if (phase == 2 and set_touch.owner != null) return 1;
             const pressed = set_pressed;
             const back = set_back_pressed;
             set_pressed = null;
             set_back_pressed = false;
-            if (!was or phase == 3 or set_moved >= 10) return 1;
+            if (phase == 3) {
+                set_press.cancel();
+                return 1;
+            }
+            if (set_press.end() != .tap) return 1;
             if (set_open) |oi| {
                 // 팝업이 열려 있으면 **항목 아니면 닫기**(바깥 탭 = 취소).
                 var picked: ?usize = null;
@@ -3109,11 +3142,18 @@ pub export fn maru_mobile_pop_screen() u32 {
     if (nav_len <= 1) return 0; // 목록이 뿌리다 — 더 뺄 것이 없으면 앱을 내린다(UX §3)
     navPop();
     // **진행 중이던 손짓도 함께 거둔다.** 손가락을 댄 채 뒤로가기를 누르면 up 이 안 와서
-    // `set_active`·눌림 표시·관성이 터미널 화면까지 살아남는다 — 남은 관성이 목록을 계속
-    // 밀고, 다시 들어오면 누른 적 없는 행이 눌린 것처럼 보인다.
-    set_active = false;
+    // 제스처·눌림 표시·관성이 터미널 화면까지 살아남는다 — 남은 관성이 목록을 계속 밀고,
+    // 다시 들어오면 누른 적 없는 행이 눌린 것처럼 보인다.
+    // **네 표면을 다 거둔다.** 전에는 설정·목록만 거뒀는데, 본문을 짚은 채 뒤로 나가면 길게
+    // 누름이 프레임에서 계속 판정돼 **안 보이는 화면에서 단어가 잡혔다**(돌아오면 누른 적 없는
+    // 선택이 있다). 전이를 한 곳에 모아 놓고 그중 둘만 부르면 같은 병이 남는다.
+    set_press.cancel();
+    sess_press.cancel();
+    kb_press.cancel();
+    body_press.cancel();
     set_pressed = null;
     set_back_pressed = false;
+    kb_pressed = null;
     set_touch.cancel();
     return 1;
 }
@@ -3203,13 +3243,11 @@ var frame_dt_ms: f32 = 0;
 /// 누르고 있는 채로 시간이 지났는지 매 프레임 본다. **여기가 유일한 판정 자리다** —
 /// 두 곳에 두면 한쪽만 고쳐져 갈린다.
 fn checkLongPress(core: *terminal.core.TerminalCore) void {
-    // `selecting` 을 또 보지 않는다 — 선택을 늘리려면 누른 칸을 벗어나야 하고 그 순간
-    // `ptr_moved` 가 선다. 변이로 확인했다(그 조건을 지워도 아무 차이가 없었다).
-    if (!ptr_down or ptr_moved) return;
-    if (frame_ms < ptr_down_ms or frame_ms - ptr_down_ms < long_press_ms) return;
-    if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
+    // **판정은 상태기계가 한다** — `pressed` 일 때만 넘어가고, 한 제스처에 한 번만 true 다.
+    // 전에는 `!ptr_down or ptr_moved` 로 같은 것을 조합으로 봤다.
+    if (!body_press.holdPast(frame_ms, long_press_ms)) return;
+    if (bodyCell(body_press.down_x, body_press.down_y)) |c| {
         core.selectWordAt(c.row, c.col, &.{});
-        selecting = true;
         // **이 제스처는 스크롤이 아니다 — 여기서 속도를 거둔다.** 길게 누르기 전에도 손이
         // 떨려 `move` 가 오고(임계 10px 안이라 선택은 성립한다) 그 2px 가 0.125px/ms 로
         // 남는다 — 정지 임계(0.03)의 네 배다. 선택 중 `move` 는 속도 코드를 건너뛰므로 그

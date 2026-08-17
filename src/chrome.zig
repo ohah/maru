@@ -22,6 +22,7 @@ pub const ui = struct {
     pub const intent_table = @import("chrome/ui/intent_table.zig");
     pub const continuous_drag = @import("chrome/ui/continuous_drag.zig");
     pub const scroll_area = @import("chrome/ui/scroll_area.zig"); // 스크롤 컨테이너 좌표계 단일 출처 — docs/scroll-area.md
+    pub const gesture = @import("chrome/ui/gesture.zig"); // 한 제스처의 뜻(탭/스크롤/길게 누름) 단일 출처 — docs/mobile-platform.md 3.1
     pub const provisional_order = @import("chrome/ui/provisional_order.zig");
     pub const paint_style = @import("chrome/ui/paint_style.zig");
     pub const paint = @import("chrome/ui/paint.zig");
@@ -86,6 +87,11 @@ test {
     // 감싼 components의 자식도 별도로 ref한다).
     const testing = @import("std").testing;
     testing.refAllDecls(@This());
+    // **`ui` 도 별도로 ref 한다.** `refAllDecls` 는 한 단계라 `ui` 자체만 닿고 그 자식은
+    // **다른 코드가 우연히 참조할 때만** 집계에 들어온다 — 소비처가 아직 없는 새 컴포넌트는
+    // 테스트를 써 놔도 CI 에서 안 돈다(`gesture` 가 실제로 그랬다: 12개가 집계 밖이었고
+    // 변이 검사가 `zig test <파일>` 로 직접 돌렸을 때만 잡혔다).
+    testing.refAllDecls(ui);
     testing.refAllDecls(components);
     testing.refAllDecls(components.editor_view);
 }

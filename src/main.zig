@@ -212,7 +212,7 @@ fn hostHomeDir() ?[]const u8 {
     return maru.user_paths.homeDirFor(@import("builtin").os.tag, home, userprofile);
 }
 
-/// `maru win32-window-smoke` — W7.1이 실제로 무엇을 하는지 사람이 눈으로 확인하는 자리.
+/// `maru win32-window-smoke` — W7.1이 actual로 무엇을 하는지 사람이 눈으로 확인하는 자리.
 ///
 /// 창을 만들고 잠깐 펌프하며 **중립 이벤트**를 세어 보고한다. 아직 아무것도 그리지 않는다 — 그리는 것은
 /// W7.2(D3D11+DXGI)다. 그래서 보이는 것은 빈 창이고, 이 스모크가 증명하는 것은 "창이 뜨고 OS 이벤트가
@@ -224,19 +224,19 @@ fn hostHomeDir() ?[]const u8 {
 /// 그 상태에선 notepad도 안 떴다). 그래서 실패 안내가 오류 코드를 그대로 보여 주고 8을 따로 짚는다.
 fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru win32-window-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru win32-window-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.1 window smoke)");
     var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
-        try stderr.print("maru win32-window-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
-        try stderr.writeAll("  대화형 데스크톱이 없는 환경(CI·서비스·원격 자동화)에서는 정상입니다 — 평범한 세션에서 실행하세요.\n");
-        // 오류 8을 따로 말한다. 이름은 메모리지만 실제로는 **데스크톱 힙** 고갈이고, 그때는 세션 전체가
+        try stderr.print("maru win32-window-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.writeAll("  this is expected where there is no interactive desktop (CI, services, remote automation) — run it in a normal session.\n");
+        // 오류 8을 따로 말한다. 이름은 메모리지만 actual로는 **데스크톱 힙** 고갈이고, 그때는 세션 전체가
         // 창을 못 만든다(실측: 고아 프로세스 8,606개가 쌓여 notepad조차 뜨지 않았다). 이 구분이 없으면
         // 앱 버그로 오진한다 — 우리가 그렇게 한 번 헤맸다.
         if (win32_window.last_create_error == 8)
-            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+            try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted — check how many processes this session has.\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -271,7 +271,7 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
         if (win32_window.cellsForClient(c.width_px, c.height_px, 8, 16)) |size|
             try stdout.print("cells_at_8x16={d}x{d}\n", .{ size.cols, size.rows });
     }
-    try stdout.writeAll("visible UI: 창만 뜬다. 그리기는 W7.2(D3D11+DXGI), 입력은 W7.4다.\n");
+    try stdout.writeAll("visible UI: the window appears only. Drawing is W7.2 (D3D11+DXGI); input is W7.4.\n");
     try stdout.flush();
 }
 
@@ -282,15 +282,15 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
 /// 까지다. 셀·글리프는 W7.2b다 — 그래서 지금은 **테마 배경 한 색**만 칠한다.
 fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru d3d11-present-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru d3d11-present-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2a D3D11 present smoke)");
     var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
-        try stderr.print("maru d3d11-present-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.print("maru d3d11-present-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
         if (win32_window.last_create_error == 8)
-            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+            try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted — check how many processes this session has.\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -300,8 +300,8 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
     // `orelse`의 두 갈래는 타입이 같아야 한다 — 익명 리터럴은 `?ClientSize`의 payload로 추론되지 않는다.
     const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
     var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
-        try stderr.print("maru d3d11-present-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
-        try stderr.writeAll("  GPU/드라이버가 D3D11을 못 주는 환경(일부 CI·원격 세션)에서는 정상입니다.\n");
+        try stderr.print("maru d3d11-present-smoke: could not set up the present path({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.writeAll("  this is expected where the GPU/driver cannot provide D3D11 (some CI and remote sessions).\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -309,7 +309,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
     // 창이 표시 대상을 **만들지 않고 받는다**(W7.1의 이음매). 여기가 그것을 채우는 유일한 자리다.
     window.present.opaque_handle = @ptrCast(present);
 
-    // 터미널 테마 기본 배경과 같은 표현(0xAARRGGBB)을 쓴다 — W7.2c가 실제 `terminal_bg`를 넣을 자리다.
+    // 터미널 테마 기본 배경과 같은 표현(0xAARRGGBB)을 쓴다 — W7.2c가 actual `terminal_bg`를 넣을 자리다.
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
 
     var frames: usize = 0;
@@ -322,7 +322,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
                 resizes += 1;
                 // 최소화(0×0)에서도 부른다 — `resize`가 1로 올려 스왑체인을 살려 둔다.
                 present.resize(r.width_px, r.height_px) catch |err| {
-                    try stderr.print("resize 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+                    try stderr.print("resize failed: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
                     try stderr.flush();
                     return error.UnknownCommand;
                 };
@@ -333,7 +333,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
             .preedit_changed => {},
         };
         present.clearAndPresent(clear, false) catch |err| {
-            try stderr.print("present 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+            try stderr.print("present failed: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
             try stderr.flush();
             return error.UnknownCommand;
         };
@@ -350,13 +350,13 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
     // 어느 드라이버로 섰는지 숨기지 않는다 — WARP로 떨어졌는데 모르면 성능을 잘못 판정한다.
     try stdout.print("driver={s}\n", .{@tagName(present.driver)});
     try stdout.print("clear_argb=0x{X:0>8}\n", .{@as(u32, 0xFF1E2430)});
-    try stdout.writeAll("visible UI: 창이 테마 배경색으로 칠해진다. 셀·글리프는 W7.2b, 입력은 W7.4다.\n");
+    try stdout.writeAll("visible UI: the window is filled with the theme background. Cells and glyphs are W7.2b; input is W7.4.\n");
     try stdout.flush();
 }
 
 /// W7.2b 스모크가 아틀라스에 채워 넣는 코드포인트. **폰트를 쓰지 않는다** — `renderer.synthesizeGlyph`가
 /// codepoint에서 직접 픽셀을 만드는 것들만 골랐다(box-drawing·block·braille). 그래서 W7.3(DirectWrite)
-/// 전에도 "아틀라스에서 커버리지를 읽어 셀에 칠한다"는 경로 전체가 실제 픽셀로 검증된다.
+/// 전에도 "아틀라스에서 커버리지를 읽어 셀에 칠한다"는 경로 전체가 actual 픽셀로 검증된다.
 const cells_smoke_codepoints = [_]u32{
     0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, // 직선·모서리·T
     0x252C, 0x2534, 0x253C, 0x2550, 0x2551, 0x2554, 0x2557, 0x255A, // 사거리·이중선
@@ -367,11 +367,11 @@ const cells_smoke_codepoints = [_]u32{
 /// `maru d3d11-cells-smoke` — W7.2b. **글리프가 화면에 나오는 것까지**를 사람이 눈으로 확인하는 자리.
 ///
 /// W7.2a가 "창이 한 색으로 칠해진다"였다면 여기는 "셀 격자에 배경색과 글리프가 각각 제자리에 그려진다"다.
-/// 아직 실제 터미널 화면이 아니다(W7.2c가 `app.host` 프레임을 물린다) — 여기서 그리는 것은 이 스모크가
+/// 아직 actual 터미널 화면이 아니다(W7.2c가 `app.host` 프레임을 물린다) — 여기서 그리는 것은 이 스모크가
 /// 직접 만든 격자다. 그래도 아틀라스 업로드·UV 변환·인스턴스 드로우·블렌드가 전부 진짜 경로다.
 fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru d3d11-cells-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru d3d11-cells-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
@@ -392,7 +392,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     // **슬롯마다 따로 그린 뒤 옮겨 붙인다.** 넓은 아틀라스 중간으로 오프셋한 슬라이스를 그대로 넘기면
     // 안 된다 — `synthesizeGlyph`는 `len >= height * bytes_per_row`를 요구하는데 오프셋한 슬라이스는
     // 꼬리가 모자라 **빈 글리프로 안전 degrade**한다. 실측으로 겪었다: 슬롯 28개가 "채워졌다"고 나오면서
-    // 실제 덮인 픽셀은 0이었다(그래서 이 수를 따로 세어 보고한다 — 안 그러면 성공으로 보인다).
+    // actual 덮인 픽셀은 0이었다(그래서 이 수를 따로 세어 보고한다 — 안 그러면 성공으로 보인다).
     const slot_bpr: usize = @as(usize, cell_w) * 4;
     const scratch = try allocator.alloc(u8, slot_bpr * cell_h);
     defer allocator.free(scratch);
@@ -417,9 +417,9 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     // ── 창과 표시 경로 ─────────────────────────────────────────────────────────────────────
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2b D3D11 cells smoke)");
     var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
-        try stderr.print("maru d3d11-cells-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.print("maru d3d11-cells-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
         if (win32_window.last_create_error == 8)
-            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+            try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted — check how many processes this session has.\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -428,7 +428,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
 
     const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
     var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
-        try stderr.print("maru d3d11-cells-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.print("maru d3d11-cells-smoke: could not set up the present path({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -436,9 +436,9 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     window.present.opaque_handle = @ptrCast(present);
 
     var pipeline = d3d11_cells.CellPipeline.create(allocator, present.device, present.context, atlas_w, atlas_h, atlas_pixels) catch |err| {
-        try stderr.print("maru d3d11-cells-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        try stderr.print("maru d3d11-cells-smoke: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
         if (d3d11_cells.shaderError().len > 0)
-            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+            try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -467,7 +467,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
         while (row < size.rows) : (row += 1) {
             var col: u32 = 0;
             while (col < size.cols) : (col += 1) {
-                // 격자무늬 배경 — 배경 알파가 실제로 판정에 쓰이는지 보이게 한다. 알파 0인 셀은
+                // 격자무늬 배경 — 배경 알파가 actual로 판정에 쓰이는지 보이게 한다. 알파 0인 셀은
                 // clear color 가 그대로 비쳐야 한다(그것이 `NativeMetalCell`의 규약이다).
                 const checker = (row + col) % 3 == 0;
                 const bg: u32 = if (checker) 0xFF2E3A4E else 0x00000000;
@@ -490,7 +490,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
 
         try present.beginFrame(clear);
         pipeline.draw(cells.items, present.width_px, present.height_px) catch |err| {
-            try stderr.print("draw 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+            try stderr.print("draw failed: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
             try stderr.flush();
             return error.UnknownCommand;
         };
@@ -508,7 +508,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     try stdout.print("cells_drawn={d}\n", .{last_cell_count});
     try stdout.print("swapchain_px={d}x{d}\n", .{ present.width_px, present.height_px });
     try stdout.print("driver={s}\n", .{@tagName(present.driver)});
-    try stdout.writeAll("visible UI: 셀 격자에 배경색과 합성 글리프가 그려진다. 폰트 글리프는 W7.3, 실제 터미널 화면은 W7.2c다.\n");
+    try stdout.writeAll("visible UI: the cell grid is drawn with background colors and synthesized glyphs. Font glyphs are W7.3; the real terminal screen is W7.2c.\n");
     try stdout.flush();
 }
 
@@ -526,7 +526,7 @@ const dwrite_smoke_lines = [_][]const u8{
     "│  $ zig build test                            │",
     "│  All 2636 tests passed.                      │",
     "│                                              │",
-    "│  글자는 DirectWrite, 테두리는 합성 글리프다   │",
+    "│  text is DirectWrite, borders are synthesized glyphs   │",
     "│  ▁▂▃▄▅▆▇█  ░▒▓  ╔═╗ ╠═╣ ╚═╝                  │",
     "└──────────────────────────────────────────────┘",
 };
@@ -538,15 +538,15 @@ const dwrite_smoke_lines = [_][]const u8{
 /// 그 경로가 산 것이고, 테두리만 보이면 죽은 것이다.
 fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru dwrite-text-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru dwrite-text-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
 
-    // config `font.family`가 비어 있는 경우를 흉내 낸다 — 티어가 실제로 폰트를 고르는지 보려면
+    // config `font.family`가 비어 있는 경우를 흉내 낸다 — 티어가 actual로 폰트를 고르는지 보려면
     // 여기서 이름을 박지 않아야 한다(§3.1a의 셸 티어와 같은 판정).
     var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
-        try stderr.print("maru dwrite-text-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.print("maru dwrite-text-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -617,7 +617,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             synth_slots += 1;
         } else {
             covered = raster.rasterize(cp, slot_w, cell_h, slot_bpr, used, scratch) catch |err| blk: {
-                try stderr.print("  경고: U+{X:0>4} 래스터화 실패({s})\n", .{ cp, @errorName(err) });
+                try stderr.print("  warning: U+{X:0>4} rasterization failed({s})\n", .{ cp, @errorName(err) });
                 break :blk 0;
             };
             if (covered > 0) font_slots += 1 else blank_slots += 1;
@@ -635,7 +635,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     const want_w: i32 = @intCast(@min(@as(usize, 1600), (max_cols + 2) * cell_w + 24));
     const want_h: i32 = @intCast(@min(@as(usize, 1200), (dwrite_smoke_lines.len + 2) * cell_h + 60));
     var window = win32_window.Window.create(allocator, title, want_w, want_h) catch |err| {
-        try stderr.print("maru dwrite-text-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.print("maru dwrite-text-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -644,7 +644,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
 
     const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
     var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
-        try stderr.print("maru dwrite-text-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.print("maru dwrite-text-smoke: could not set up the present path({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -652,9 +652,9 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     window.present.opaque_handle = @ptrCast(present);
 
     var pipeline = d3d11_cells.CellPipeline.create(allocator, present.device, present.context, atlas_w, atlas_h, atlas_pixels) catch |err| {
-        try stderr.print("maru dwrite-text-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        try stderr.print("maru dwrite-text-smoke: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
         if (d3d11_cells.shaderError().len > 0)
-            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+            try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -731,33 +731,33 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     try stdout.print("cells_drawn={d}\n", .{cells.items.len});
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("driver={s}\n", .{@tagName(present.driver)});
-    try stdout.writeAll("visible UI: 글자는 DirectWrite, 테두리·블록은 합성 글리프. 실제 터미널 화면은 W7.2c다.\n");
+    try stdout.writeAll("visible UI: text uses DirectWrite; borders and blocks use synthesized glyphs. The real terminal screen is W7.2c.\n");
     try stdout.flush();
     // **성공 경로에서도 stderr를 비운다.** 위 래스터화 경고가 버퍼에 남아 있으면 조용히 사라진다 —
     // 실측으로 겪었다: 진단을 넣었는데 화면에 아무것도 안 나와 원인을 한참 찾았다.
     try stderr.flush();
 }
 
-/// `maru win32-frame-smoke` — W7.2c-1. **실제 PTY 출력이 Windows 셰이퍼·DirectWrite 래스터라이저를 지나
+/// `maru win32-frame-smoke` — W7.2c-1. **actual PTY 출력이 Windows 셰이퍼·DirectWrite 래스터라이저를 지나
 /// 중립 `RenderFrame`이 되는지**를 창 없이 확인한다.
 ///
 /// 창을 띄우지 않는 이유가 있다. 계약 §2a가 걸어 둔 질문은 "중립 렌더러 계약이 Metal 한 구현에만 맞춰져
 /// 있지 않은가"이고, 그 답은 **그림이 아니라 계약이 받아들이는가**로 나온다. 여기서 프레임이 서면 그
 /// 답이 예다 — 화면에 올리는 것은 W7.2c-2다.
 ///
-/// 판정은 **셋을 갈라 세는 것**이다(`win32_terminal.FrameCounts`): 잉크 있는 글리프 수, 실제로 올린
+/// 판정은 **셋을 갈라 세는 것**이다(`win32_terminal.FrameCounts`): 잉크 있는 글리프 수, actual로 올린
 /// 슬롯이 덮은 픽셀 수, 그리고 폴백·빈칸 수. 슬롯 수만 세면 글자가 하나도 안 그려져도 성공처럼 보인다 —
 /// W7.2b·W7.3에서 같은 함정을 두 번 겪었다.
 fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru win32-frame-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru win32-frame-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
 
     // ── 폰트 ───────────────────────────────────────────────────────────────────────────────
     var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
-        try stderr.print("maru win32-frame-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.print("maru win32-frame-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -772,7 +772,7 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
         .rasterizer = .{ .raster = raster, .scratch = scratch },
     };
 
-    // ── 실제 PTY와 중립 프레임 루프 ────────────────────────────────────────────────────────
+    // ── actual PTY와 중립 프레임 루프 ────────────────────────────────────────────────────────
     // 설정 순서는 `app/pty_loop_smoke.zig`와 같다 — 그쪽이 이 계약의 단일 출처이고, 여기서 다르게
     // 조립하면 두 경로가 갈린다.
     const size: maru.terminal.Size = .{ .cols = 80, .rows = 24 };
@@ -829,15 +829,15 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
     try stdout.print("replacement_glyphs={d}\n", .{counts.replacement});
     try stdout.print("raster_skipped={d}\n", .{counts.skipped});
     try stdout.print("atlas_entries={d}\n", .{renderer_state.atlas.entryCount()});
-    try stdout.writeAll("visible UI: 없다 — 이것은 중립 계약 스모크다. 화면에 올리는 것은 W7.2c-2다.\n");
+    try stdout.writeAll("visible UI: none — this is a neutral contract smoke. Putting it on screen is W7.2c-2.\n");
     try stdout.flush();
     try stderr.flush();
 }
 
-/// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 실제로 왕복시킨다.**
+/// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 actual로 왕복시킨다.**
 ///
 /// 순수 변환(`utf16ForClipboard`·`utf8ForTerminal`)은 모든 타깃에서 테스트가 돌지만, `GlobalAlloc`
-/// 소유권과 NUL 종단 규약은 **실제 Win32 만이 판정한다** — 그 둘이 이 파일에서 제일 틀리기 쉬운 자리다
+/// 소유권과 NUL 종단 규약은 **actual Win32 만이 판정한다** — 그 둘이 이 파일에서 제일 틀리기 쉬운 자리다
 /// (성공한 `SetClipboardData` 뒤에 `GlobalFree` 를 부르면 다른 앱이 해제된 메모리를 읽고, `GlobalSize` 로
 /// 길이를 재면 뒤쪽 쓰레기가 붙는다). 그래서 키보드를 끼지 않고 쓰기→읽기만 재는 스모크를 따로 둔다:
 /// 붙여넣기 화음은 합성 메시지로 모디파이어를 실을 수 없어(`GetKeyState` 가 큐 상태를 안 본다) 창을
@@ -851,7 +851,7 @@ fn runWin32ClipboardSmoke(
     const paste_encode_mode = arg != null and std.mem.eql(u8, arg.?, "--paste-encode");
     const expect_foreign: ?[]const u8 = if (paste_encode_mode) null else arg;
     if (builtin.os.tag != .windows) {
-        try stderr.writeAll("maru win32-clipboard-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru win32-clipboard-smoke: Windows only\n");
         try stderr.flush();
         return error.UnsupportedPlatform;
     }
@@ -861,10 +861,10 @@ fn runWin32ClipboardSmoke(
     // **다른 앱이 넣은 것을 읽는 모드.** 우리가 쓰고 우리가 읽으면 `GlobalAlloc` 이 요청한 크기를 정확히
     // 돌려주므로 NUL 종단 규약이 지켜지는지 판정되지 않는다 — 길이를 `GlobalSize` 로 재도 같은 답이 나온다
     // (대조군으로 확인했다). 붙여넣기는 **남이 쓴 것을 읽는 일**이고, 그 할당은 패딩될 수 있다.
-    // 그래서 외부 작성자가 넣은 값을 기대값과 맞춰 보는 모드를 따로 둔다.
+    // 그래서 외부 작성자가 넣은 값을 expected값과 맞춰 보는 모드를 따로 둔다.
     if (expect_foreign) |want| {
         const got = win32_clipboard.read(allocator, null) catch |err| {
-            try stderr.print("foreign: 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+            try stderr.print("foreign: read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
             try stderr.flush();
             return error.ClipboardRoundtripFailed;
         };
@@ -873,7 +873,7 @@ fn runWin32ClipboardSmoke(
             const ok = std.mem.eql(u8, text, want);
             try stdout.print("foreign_read_bytes={d} expect_bytes={d} match={}\n", .{ text.len, want.len, ok });
             if (!ok) {
-                try stderr.print("foreign: 기대 \"{f}\" 실제 \"{f}\"\n", .{
+                try stderr.print("foreign: expected \"{f}\" actual \"{f}\"\n", .{
                     std.zig.fmtString(want),
                     std.zig.fmtString(text),
                 });
@@ -894,11 +894,11 @@ fn runWin32ClipboardSmoke(
     // 바이트가 아니라 `encodePasteWith` 를 거친 바이트가 셸에 간다"는 것이다. 그 규칙만 떼어 잰다.
     if (paste_encode_mode) {
         const text = (win32_clipboard.read(allocator, null) catch |err| {
-            try stderr.print("paste-encode: 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+            try stderr.print("paste-encode: read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
             try stderr.flush();
             return error.ClipboardRoundtripFailed;
         }) orelse {
-            try stdout.writeAll("paste_encode: 클립보드가 비었다\n");
+            try stdout.writeAll("paste_encode: the clipboard is empty\n");
             try stdout.flush();
             return error.ClipboardRoundtripFailed;
         };
@@ -931,7 +931,7 @@ fn runWin32ClipboardSmoke(
     // 줄바꿈 규칙이 틀렸다면 왕복 결과가 원본과 달라진다.
     const cases = [_]struct { name: []const u8, input: []const u8, want_back: []const u8 }{
         .{ .name = "ascii", .input = "hello", .want_back = "hello" },
-        .{ .name = "hangul", .input = "한글 클립보드", .want_back = "한글 클립보드" },
+        .{ .name = "hangul", .input = "clipboard sample", .want_back = "clipboard sample" },
         .{ .name = "emoji", .input = "tab \u{1F389} ok", .want_back = "tab \u{1F389} ok" },
         // 쓸 때 LF→CRLF, 읽을 때 CRLF→CR. **왕복이 항등이 아니다** — 그게 맞는 동작이다:
         // Windows 앱에는 CRLF 를 주고, 셸에는 CR 하나를 준다(CRLF 를 주면 두 줄이 실행된다).
@@ -945,12 +945,12 @@ fn runWin32ClipboardSmoke(
 
     for (cases) |case| {
         win32_clipboard.write(allocator, null, case.input) catch |err| {
-            try stderr.print("  {s}: 쓰기 실패({s}, Win32 오류 {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
+            try stderr.print("  {s}: write failed({s}, Win32 error {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
             errors += 1;
             continue;
         };
         const got = win32_clipboard.read(allocator, null) catch |err| {
-            try stderr.print("  {s}: 읽기 실패({s}, Win32 오류 {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
+            try stderr.print("  {s}: read failed({s}, Win32 error {d})\n", .{ case.name, @errorName(err), win32_clipboard.last_error });
             errors += 1;
             continue;
         };
@@ -960,7 +960,7 @@ fn runWin32ClipboardSmoke(
                 passed += 1;
             } else {
                 failed += 1;
-                try stderr.print("  {s}: 기대 \"{f}\" 실제 \"{f}\"\n", .{
+                try stderr.print("  {s}: expected \"{f}\" actual \"{f}\"\n", .{
                     case.name,
                     std.zig.fmtString(case.want_back),
                     std.zig.fmtString(text),
@@ -969,7 +969,7 @@ fn runWin32ClipboardSmoke(
         } else {
             // 방금 썼는데 텍스트가 없다 = `SetClipboardData` 가 성공했다고 거짓말했거나 소유권 규칙이 깨졌다.
             failed += 1;
-            try stderr.print("  {s}: 방금 썼는데 읽으니 null 이다\n", .{case.name});
+            try stderr.print("  {s}: wrote it just now but reading gives null\n", .{case.name});
         }
     }
 
@@ -984,7 +984,7 @@ fn runWin32ClipboardSmoke(
             big_roundtrip = text.len;
         }
     } else |err| {
-        try stderr.print("  big: 쓰기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+        try stderr.print("  big: write failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
         errors += 1;
     }
 
@@ -996,9 +996,9 @@ fn runWin32ClipboardSmoke(
     if (failed > 0 or errors > 0) return error.ClipboardRoundtripFailed;
 }
 
-/// `maru win32-terminal-smoke` — W7.2c-2. **실제 터미널 화면이 Windows에 뜬다.**
+/// `maru win32-terminal-smoke` — W7.2c-2. **actual 터미널 화면이 Windows에 뜬다.**
 ///
-/// W7.2c-1이 세운 프레임(실제 PTY → Windows 셰이퍼 → DirectWrite)을 W7.2b가 세운 표시 경로에 흘려 넣는다.
+/// W7.2c-1이 세운 프레임(actual PTY → Windows 셰이퍼 → DirectWrite)을 W7.2b가 세운 표시 경로에 흘려 넣는다.
 /// 그 사이를 잇는 것이 둘이다:
 ///
 /// ⑴ **아틀라스 부분 업로드** — 프레임마다 새 글리프만 `UpdateSubresource`로 올린다(전체를 다시 올리지 않는다).
@@ -1008,14 +1008,14 @@ fn runWin32ClipboardSmoke(
 /// 계속 출력해 줄이 어긋난다.
 fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
-        try stderr.writeAll("maru win32-terminal-smoke: Windows 전용입니다\n");
+        try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
         try stderr.flush();
         return error.UnknownCommand;
     }
 
     // ── 폰트와 셀 격자 ─────────────────────────────────────────────────────────────────────
     var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
-        try stderr.print("maru win32-terminal-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -1033,9 +1033,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // ── 창·표시 경로 ───────────────────────────────────────────────────────────────────────
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2c terminal)");
     var window = win32_window.Window.create(allocator, title, 1000, 640) catch |err| {
-        try stderr.print("maru win32-terminal-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.print("maru win32-terminal-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
         if (win32_window.last_create_error == 8)
-            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+            try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted — check how many processes this session has.\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -1044,7 +1044,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
 
     const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 1000, .height_px = 640 };
     var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
-        try stderr.print("maru win32-terminal-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.print("maru win32-terminal-smoke: could not set up the present path({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -1093,9 +1093,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var atlas_w = renderer_state.atlas.config.atlas_width_px;
     var atlas_h = renderer_state.atlas.config.atlas_height_px;
     var pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch |err| {
-        try stderr.print("maru win32-terminal-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        try stderr.print("maru win32-terminal-smoke: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
         if (d3d11_cells.shaderError().len > 0)
-            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+            try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -1196,33 +1196,33 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                 // **확인 모달이 없으면 붙여넣지 않는다.** macOS 는 여기서 확인창을 띄우는데
                                 // Windows 엔 chrome 이 아직 없다(W8). 모달이 없다고 보호를 건너뛰면 위험한
                                 // 붙여넣기가 **조용히 실행된다** — 거절하고 세는 편이 맞다.
-                                try stderr.writeAll("  붙여넣기 보류: 위험한 내용이다(확인 UI 는 W8). 붙이지 않았다\n");
+                                try stderr.writeAll("  paste held: the content is risky (the confirm UI is W8). Nothing was pasted\n");
                                 pastes_blocked += 1;
                             } else if (maru.terminal.encodePasteWith(bracketed, allocator, text)) |encoded| {
                                 defer allocator.free(encoded);
-                                // 셸에 실제로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
+                                // 셸에 actual로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
                                 // 올라가면 화면에 아무것도 안 붙었는데 성공으로 읽힌다.
                                 if (maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = encoded })) |_| {
                                     pastes += 1;
                                     paste_bytes += encoded.len;
                                     if (bracketed) pastes_bracketed += 1;
                                 } else |err| {
-                                    try stderr.print("  경고: 붙여넣기 전송 실패({s})\n", .{@errorName(err)});
+                                    try stderr.print("  warning: paste send failed({s})\n", .{@errorName(err)});
                                     clipboard_errors += 1;
                                 }
                             } else |err| {
-                                try stderr.print("  경고: 붙여넣기 인코딩 실패({s})\n", .{@errorName(err)});
+                                try stderr.print("  warning: paste encoding failed({s})\n", .{@errorName(err)});
                                 clipboard_errors += 1;
                             }
                         }
                     } else |err| {
-                        try stderr.print("  경고: 클립보드 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+                        try stderr.print("  warning: clipboard read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
                         clipboard_errors += 1;
                     }
                     continue;
                 }
                 const outcome = loop.handleKeyEvent(resolver, key_ev, false, null) catch |err| {
-                    try stderr.print("  경고: 키 처리 실패({s})\n", .{@errorName(err)});
+                    try stderr.print("  warning: key handling failed({s})\n", .{@errorName(err)});
                     continue;
                 };
                 switch (outcome) {
@@ -1278,7 +1278,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 if (win32_clipboard.write(allocator, window.hwnd, bytes)) |_| {
                     osc52_writes += 1;
                 } else |err| {
-                    try stderr.print("  경고: 클립보드 쓰기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+                    try stderr.print("  warning: clipboard write failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
                     clipboard_errors += 1;
                 }
             }
@@ -1311,7 +1311,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         for (rf.uploads) |up| {
             const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
             pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch |err| {
-                try stderr.print("  경고: 아틀라스 업로드 실패({s}) slot=({d},{d}) {d}x{d}\n", .{ @errorName(err), up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px });
+                try stderr.print("  warning: atlas upload failed({s}) slot=({d},{d}) {d}x{d}\n", .{ @errorName(err), up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px });
                 continue;
             };
             region_uploads += 1;
@@ -1347,7 +1347,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("cells_drawn_last={d}\n", .{last_cells});
     try stdout.print("atlas_px={d}x{d} resizes={d}\n", .{ atlas_w, atlas_h, atlas_resizes });
     try stdout.print("atlas_region_uploads={d}\n", .{region_uploads});
-    // **이 줄이 판정이다** — 올린 슬롯이 실제로 덮은 픽셀. 0이면 글자가 하나도 안 그려졌다.
+    // **이 줄이 판정이다** — 올린 슬롯이 actual로 덮은 픽셀. 0이면 글자가 하나도 안 그려졌다.
     try stdout.print("upload_non_clear_pixels={d}\n", .{counts.non_clear_pixels});
     try stdout.print("fallback_glyphs={d} replacement_glyphs={d} raster_skipped={d}\n", .{ counts.fallback, counts.replacement, counts.skipped });
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
@@ -1357,7 +1357,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
-    try stdout.writeAll("visible UI: 실제 셸 출력이 창에 그려진다.\n");
+    try stdout.writeAll("visible UI: real shell output is drawn in the window.\n");
     try stdout.flush();
     try stderr.flush();
 }
@@ -1375,9 +1375,9 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
     // 다시 비교하지 않고, ConPTY(W4)가 들어오면 저절로 사라진다.
     if (!maru.pty.backend_available) {
         try stdout.writeAll(
-            "note: 이 플랫폼엔 아직 PTY 백엔드가 없어 `demo`·`app-pty-*`는 못 돕니다 " ++
+            "note: this platform has no PTY backend yet, so `demo` and `app-pty-*` cannot run " ++
                 "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
-                "      `app-smoke`·`app-loop-smoke`·`terminfo`는 지금도 동작합니다.\n",
+                "      `app-smoke`, `app-loop-smoke` and `terminfo` still work.\n",
         );
     }
     try stdout.writeAll("run `maru demo` or `zig build demo` for the first runnable PTY slice\n");
@@ -1390,7 +1390,7 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
 }
 
 fn runDemo(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // GUI가 붙기 전에도 실제 PTY -> reader -> runtime -> snapshot 경로를 사람이
+    // GUI가 붙기 전에도 actual PTY -> reader -> runtime -> snapshot 경로를 사람이
     // 실행해 볼 수 있어야 한다. 이 demo는 창을 띄우지 않고 같은 runtime 계약을 통과한다.
     const config: maru.app.HeadlessDemoConfig = .{};
     var result = try maru.app.runHeadlessDemo(io, allocator, config);
@@ -1406,7 +1406,7 @@ fn runDemo(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !vo
 }
 
 fn runAppSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // 아직 실제 AppKit/Metal UI를 띄우지 않는다. 이 smoke는 app host가
+    // 아직 actual AppKit/Metal UI를 띄우지 않는다. 이 smoke는 app host가
     // window/surface/runtime/renderer 계약을 한 frame으로 조립하는지 확인한다.
     const config: maru.app.AppSmokeConfig = .{};
     var result = try maru.app.runAppSmoke(io, allocator, config);
@@ -1421,7 +1421,7 @@ fn runAppSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer)
 }
 
 fn runAppLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // 실제 NSApplication loop를 붙이기 전에 반복 tick 계약을 먼저 고정한다.
+    // actual NSApplication loop를 붙이기 전에 반복 tick 계약을 먼저 고정한다.
     // 이렇게 해야 native UI가 drain/build/render 순서를 임의로 재구현하지 않는다.
     const config: maru.app.AppFrameLoopSmokeConfig = .{};
     var result = try maru.app.runAppFrameLoopSmoke(io, allocator, config);
@@ -1436,7 +1436,7 @@ fn runAppLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wri
 }
 
 fn runAppPtyLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // 실제 PTY reader thread를 쓰지만 아직 native window loop는 아니다.
+    // actual PTY reader thread를 쓰지만 아직 native window loop는 아니다.
     // 이 단계는 AppKit loop가 붙기 전에 PTY event batch마다 FrameLoop가 반복 frame을
     // 만들 수 있는지 확인한다.
     const config: maru.app.AppPtyLoopSmokeConfig = .{};
@@ -1454,11 +1454,11 @@ fn runAppPtyLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
 }
 
 fn runAppPtyInteractiveLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // 이 smoke는 사용자의 실제 interactive shell을 실행하지만, 제품 UI는 아직 아니다.
+    // 이 smoke는 사용자의 actual interactive shell을 실행하지만, 제품 UI는 아직 아니다.
     // 입력은 FrameLoop.handleKeyEvent를 통과해 PTY로 내려가므로, shell과 app input 경계가
     // 같이 검증된다. dotfile/prompt 영향이 있어 기본 check에는 넣지 않는다.
     // 각본은 셸마다 달라 `app/fixture_script.zig`가 단일 출처다 — 표식·인자·입력이 한 곳에 있어야
-    // "입력은 POSIX인데 기대값만 고쳤다" 같은 어긋남이 안 생긴다.
+    // "입력은 POSIX인데 expected값만 고쳤다" 같은 어긋남이 안 생긴다.
     const script = maru.app.fixture_script.interactiveEcho(builtin.os.tag);
     const config: maru.app.AppPtyLoopSmokeConfig = .{
         .artifact_dir = maru.app.pty_loop_smoke.default_interactive_artifact_dir,
@@ -1484,7 +1484,7 @@ fn runAppPtyInteractiveLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdou
 }
 
 fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    // 실제 PTY output이 app host renderer frame까지 들어가는지 확인한다.
+    // actual PTY output이 app host renderer frame까지 들어가는지 확인한다.
     // 아직 창을 띄우지 않기 때문에 visible UI 확인은 Metal/AppKit smoke가 맡는다.
     const config: maru.app.AppPtySmokeConfig = .{};
     var result = try maru.app.runAppPtySmoke(io, allocator, config);
@@ -1616,9 +1616,9 @@ const HostGatedFeature = enum {
 fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const u8 {
     if (os_tag != .windows) return null;
     return switch (feature) {
-        .ssh => "maru ssh는 Windows에서 아직 지원되지 않습니다 (docs/plans/windows-platform.md W9).",
-        .install_cli => "maru install-cli는 Windows에서 아직 지원되지 않습니다 (docs/plans/windows-platform.md W10).",
-        // 문구의 단일 출처는 그 게이트를 실제로 강제하는 곳이다 — 접착이 `cli/control_client.zig`로 옮겨 갔으므로
+        .ssh => "maru ssh is not supported on Windows yet (docs/plans/windows-platform.md W9).",
+        .install_cli => "maru install-cli is not supported on Windows yet (docs/plans/windows-platform.md W10).",
+        // 문구의 단일 출처는 그 게이트를 actual로 강제하는 곳이다 — 접착이 `cli/control_client.zig`로 옮겨 갔으므로
         // 문구도 거기 산다. 여기서 복제하면 둘이 갈려도 아무도 못 잡는다. **`gate`(이 빌드의 comptime 값)가 아니라
         // `gate_reason`(OS 무관 문구)을 쓴다** — 이 함수는 OS를 인자로 받아 두 갈래를 모두 답해야 하기 때문이다.
         .control_socket => maru.cli.control_client.gate_reason,
@@ -1647,7 +1647,7 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     }
 
     // `maru ssh [--terminfo-only] <ssh args...>`: 원격에 maru terminfo(xterm-maru)를 먼저 심고 평범한
-    // ssh로 exec한다. 순수 로직(파싱·스크립트·argv)은 maru.cli.ssh가 갖고, 여기선 인자 수집과 실제
+    // ssh로 exec한다. 순수 로직(파싱·스크립트·argv)은 maru.cli.ssh가 갖고, 여기선 인자 수집과 actual
     // 프로세스 교체(execve)만 한다. "ssh" 뒤 인자를 execve까지 유효하도록 소유 복사해 모은다.
     var collected: std.ArrayList([]const u8) = .empty;
     defer {
@@ -1683,7 +1683,7 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
 
     // execve용 null-terminated C argv(pty/macos.zig ArgvStorage와 같은 패턴). alloc은 미초기화
     // 메모리라, dupeZ가 도중에 실패(OOM)하면 아직 안 채운 슬롯은 쓰레기 slice다 — defer가 그걸 free하면
-    // heap이 손상된다. built로 실제 채운 개수를 세어 채운 것만 free한다(ArgvStorage의 initialized 가드와 동치).
+    // heap이 손상된다. built로 actual 채운 개수를 세어 채운 것만 free한다(ArgvStorage의 initialized 가드와 동치).
     const c_strings = try allocator.alloc([:0]u8, argv.len);
     defer allocator.free(c_strings);
     var built: usize = 0;
@@ -1700,7 +1700,7 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     // 현재 환경을 상속해 `/bin/sh -c <script>`를 exec한다 — 성공하면 이 프로세스가 sh→ssh로 대체된다
     // (SSH_AUTH_SOCK 등 그대로 흐른다. TERM은 스크립트가 ssh `-o SetEnv`로 정한다). 돌아오면 실패다.
     _ = std.c.execve("/bin/sh", c_argv, @ptrCast(std.c.environ));
-    try stderr.writeAll("maru ssh: /bin/sh exec에 실패했습니다\n");
+    try stderr.writeAll("maru ssh: failed to exec /bin/sh\n");
     try stderr.flush();
     return error.UnknownCommand;
 }
@@ -1716,12 +1716,12 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
 
     // `maru install-cli`: 현재 maru 바이너리를 `~/.local/bin/maru`에 symlink해 셸 PATH에서 쓸 수 있게
     // 한다(VS Code `code` 설치식). 순수 경로/PATH 로직은 maru.cli.install, 여기선 자기 경로 resolve와
-    // 실제 mkdir/symlink(std.c)만 한다. sudo가 필요 없는 user-level 경로라 권한 상승이 없다.
+    // actual mkdir/symlink(std.c)만 한다. sudo가 필요 없는 user-level 경로라 권한 상승이 없다.
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
 
     const home = hostHomeDir() orelse {
-        try stderr.writeAll("maru install-cli: 홈 디렉터리를 찾지 못해 설치 위치를 정할 수 없습니다($HOME)\n");
+        try stderr.writeAll("maru install-cli: cannot determine the install location: no home directory ($HOME)\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -1740,18 +1740,18 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
     // 기존 링크/파일을 지우고(없으면 무시) 새로 건다 — 재실행 안전(idempotent).
     _ = std.c.unlink(link.ptr);
     if (std.c.symlink(exe_path.ptr, link.ptr) != 0) {
-        try stderr.print("maru install-cli: symlink 실패: {s}\n", .{link});
+        try stderr.print("maru install-cli: symlink failed: {s}\n", .{link});
         try stderr.flush();
         return error.UnknownCommand;
     }
 
-    try stdout.print("maru CLI 설치 완료: {s} -> {s}\n", .{ link, exe_path });
+    try stdout.print("maru CLI installed: {s} -> {s}\n", .{ link, exe_path });
 
     // bin 디렉터리가 PATH에 없으면 추가 방법을 안내한다.
     if (std.c.getenv("PATH")) |path_z| {
         if (!maru.cli.install.pathContainsDir(std.mem.span(path_z), bindir)) {
             try stdout.print(
-                "\n주의: {s}가 PATH에 없습니다. 셸 설정(~/.zshrc 등)에 아래를 추가하세요:\n  export PATH=\"{s}:$PATH\"\n",
+                "\nnote: {s} is not on PATH. Add the following to your shell config (~/.zshrc etc.):\n  export PATH=\"{s}:$PATH\"\n",
                 .{ bindir, bindir },
             );
         }
@@ -1793,7 +1793,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     };
 
     const home_raw = hostHomeDir() orelse {
-        try stderr.writeAll("maru terminfo: 홈 디렉터리를 찾지 못해 캐시 위치를 정할 수 없습니다($HOME" ++
+        try stderr.writeAll("maru terminfo: cannot determine the cache location: no home directory ($HOME" ++
             (if (@import("builtin").os.tag == .windows) "·%USERPROFILE%" else "") ++ ")\n");
         try stderr.flush();
         return error.UnknownCommand;
@@ -1821,24 +1821,24 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         .path => try stdout.print("{s}\n", .{dir}),
         // 캐시가 컴파일돼 xterm-maru가 해석되는지 보고한다(아무것도 바꾸지 않는 안전 기본).
         .status => {
-            try stdout.print("maru terminfo 캐시: {s}\n", .{dir});
+            try stdout.print("maru terminfo cache: {s}\n", .{dir});
             try stdout.flush(); // system()이 fd로 직접 쓰므로 버퍼를 먼저 비운다.
             // **Windows에서는 상태를 알 수 없다 — 모른다고 말한다.** 프로브가
             // `TERMINFO=<dir> infocmp xterm-maru`인데 그 `VAR=값 명령` 접두는 POSIX 문법이고,
             // `system()`은 여기서 `%COMSPEC%`(cmd.exe)로 간다(실측: `'TERMINFO' is not recognized`).
-            // 즉 프로브가 **항상 실패**해서, 예전 코드는 캐시가 실제로 컴파일돼 있어도 늘
+            // 즉 프로브가 **항상 실패**해서, 예전 코드는 캐시가 actual로 컴파일돼 있어도 늘
             // "아직 컴파일 안 됨"이라고 단언했다 — 모르는 것을 아는 것처럼 말하는 쪽이 더 나쁘다.
             if (!posixShellCommandsWork()) {
-                try stdout.writeAll("상태: 알 수 없음 — 상태 확인이 POSIX 셸을 요구하는데 이 호스트의 `system()`은 cmd.exe로 갑니다\n");
+                try stdout.writeAll("status: unknown — checking requires a POSIX shell, but this host's `system()` goes to cmd.exe\n");
                 try stdout.flush();
                 return;
             }
             const cmd = try maru.terminfo_cache.statusCommand(allocator, dir);
             defer allocator.free(cmd);
             if (system(cmd.ptr) == 0) {
-                try stdout.writeAll("상태: xterm-maru 컴파일됨 (config term = \"xterm-maru\"면 이 캐시를 TERMINFO로 쓴다)\n");
+                try stdout.writeAll("status: xterm-maru compiled (config term = \"xterm-maru\"uses this cache as TERMINFO)\n");
             } else {
-                try stdout.writeAll("상태: 아직 컴파일 안 됨 — maru를 한 번 실행하면 자동 컴파일되거나, `maru terminfo --refresh`로 지금 컴파일한다\n");
+                try stdout.writeAll("status: not compiled yet — running maru once compiles it, or compile now with `maru terminfo --refresh`\n");
             }
         },
         // 업데이트로 terminfo 캡이 바뀐 뒤 등, 캐시를 강제로 비우고 다시 컴파일한다(보통은 자동 stale 감지로
@@ -1846,21 +1846,21 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         .refresh => {
             const cmd = try maru.terminfo_cache.refreshCommand(allocator, dir, maru.terminfo_cache.version());
             defer allocator.free(cmd);
-            try stdout.print("maru terminfo 캐시 재컴파일: {s}\n", .{dir});
+            try stdout.print("maru terminfo cache recompiled: {s}\n", .{dir});
             try stdout.flush();
             if (system(cmd.ptr) == 0) {
-                try stdout.writeAll("완료: xterm-maru 재컴파일됨\n");
+                try stdout.writeAll("done: xterm-maru recompiled\n");
             } else {
                 // Windows에서는 원인이 하나 더 있다. `system()`은 여기서 `/bin/sh`가 아니라 **cmd.exe**로
                 // 가는데(msvcrt), 재컴파일 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는 POSIX 스크립트다.
                 // 실측(PowerShell·cmd): 그 넷도 `tic`도 PATH에 없다 — 둘 다 git-bash의 `/usr/bin`에만 있다.
                 // 그래서 tic만 가리키면 사용자가 tic을 깔아도 여전히 실패한다. 계약 §8 "홈·캐시 위치" 참조.
                 try stderr.writeAll(if (!posixShellCommandsWork())
-                    "maru terminfo: 재컴파일은 이 호스트에서 지원되지 않습니다 — 재컴파일 명령이 POSIX 셸 문법(`d=...; rm -rf ...`)인데\n" ++
-                        "  `system()`이 cmd.exe로 갑니다. **git-bash에서 maru를 띄워도 같습니다**(셸이 아니라 %COMSPEC%가 정합니다).\n" ++
-                        "  재컴파일 없이도 터미널은 xterm-256color로 폴백해 정상 동작합니다.\n"
+                    "maru terminfo: recompiling is not supported on this host — the recompile command uses POSIX shell syntax (`d=...; rm -rf ...`) but\n" ++
+                        "  `system()` goes to cmd.exe. **This holds even when maru is launched from git-bash** (%COMSPEC% decides, not the shell).\n" ++
+                        "  even without recompiling, the terminal falls back to xterm-256color and works.\n"
                 else
-                    "maru terminfo: 재컴파일 실패 — tic(ncurses)이 설치돼 있는지 확인하세요(셸에선 xterm-256color로 폴백)\n");
+                    "maru terminfo: recompile failed — check that tic (ncurses) is installed (the shell falls back to xterm-256color)\n");
                 try stderr.flush();
                 return error.UnknownCommand;
             }
@@ -1874,16 +1874,16 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
             // POSIX에서 `rm -rf`는 대상이 없어도 0이라 이 검사가 정상 경로를 막지 않는다.
             if (system(cmd.ptr) != 0) {
                 try stdout.flush();
-                try stderr.print("maru terminfo: 캐시 삭제 실패 — {s}\n", .{dir});
+                try stderr.print("maru terminfo: failed to remove the cache — {s}\n", .{dir});
                 if (!posixShellCommandsWork())
                     // 이 명령만은 단일 외부 명령(`rm -rf '<경로>'`)이라 cmd.exe도 실행할 수 있다 —
                     // `rm.exe`가 PATH에 있으면(git 설치본) 된다. 그래서 안내가 "셸을 바꾸라"가 아니라
                     // "PATH에 rm이 있느냐"다(재컴파일 쪽과 원인이 다르다).
-                    try stderr.writeAll("  `rm`이 PATH에 없습니다(git 설치본의 usr 밑에 있습니다) — 해당 폴더를 직접 지워도 됩니다\n");
+                    try stderr.writeAll("  `rm` is not on PATH (it lives under a git installation's usr) — you can delete that folder yourself\n");
                 try stderr.flush();
                 return error.UnknownCommand;
             }
-            try stdout.print("maru terminfo 캐시 삭제: {s}\n", .{dir});
+            try stdout.print("maru terminfo cache removed: {s}\n", .{dir});
         },
     }
     try stdout.flush();
@@ -1909,7 +1909,7 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
     switch (cmd) {
         .anonymize => |an| {
             const input = std.Io.Dir.cwd().readFileAlloc(io, an.input, allocator, .limited(64 * 1024 * 1024)) catch |e| {
-                try stderr.print("maru trace anonymize: '{s}' 읽기 실패 ({s})\n", .{ an.input, @errorName(e) });
+                try stderr.print("maru trace anonymize: '{s}' read failed ({s})\n", .{ an.input, @errorName(e) });
                 try stderr.flush();
                 return error.UnknownCommand;
             };
@@ -1925,7 +1925,7 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
                 .username = if (std.c.getenv("USER")) |u| std.mem.span(u) else null,
             };
             const anon = maru.observability.trace.anonymizeTrace(allocator, input, opts) catch |e| {
-                try stderr.print("maru trace anonymize: 변환 실패 ({s}) — 유효한 maru.trace.v1인가요?\n", .{@errorName(e)});
+                try stderr.print("maru trace anonymize: conversion failed ({s}) — is it a valid maru.trace.v1?\n", .{@errorName(e)});
                 try stderr.flush();
                 return error.UnknownCommand;
             };
@@ -1940,7 +1940,7 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
 
             // 익명화는 secret(TOKEN=…)을 안 지운다 — 남아 있으면 경고(커밋 시 guardFixture가 차단).
             if (maru.observability.trace.traceHasSensitiveContent(allocator, anon) catch false) {
-                try stderr.writeAll("경고: 익명화 후에도 민감 할당(TOKEN/SECRET/… =값)이 남아 있습니다 — 커밋 전 수동 제거 필요\n");
+                try stderr.writeAll("warning: sensitive assignments (TOKEN/SECRET/… = value) remain after anonymizing — remove them by hand before committing\n");
                 try stderr.flush();
             }
         },
@@ -1951,10 +1951,10 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
 /// `maru sessions ...` / `maru session ...` 두 컨트롤 플레인 read-only 명령의 얇은 접착(Track C 1d·A2a). 순수
 /// 파싱·요청 조립·응답 포맷·소켓 발견 정책은 `maru.cli.sessions`가 갖고, 여긴 인자 수집·getenv/readdir/소켓 syscall·
 /// stdout/stderr I/O만 한다(ssh/terminfo와 같은 결 — §11 "소켓 syscall L4·CLI는 src/cli·main 얇게"). `--help`는
-/// 구현된 명령만 담은 help를 낸다(§11 CLI help gate). **A2a**: 요청은 이제 실제로 컨트롤 소켓에 connect해 왕복한다 —
+/// 구현된 명령만 담은 help를 낸다(§11 CLI help gate). **A2a**: 요청은 이제 actual로 컨트롤 소켓에 connect해 왕복한다 —
 /// 결정론 경로(`<cache>/maru/control`)에서 단일 인스턴스 소켓을 찾아(§4.2) `buildRequestBytes` 전송 → hello skip →
 /// 응답 프레임(1a `Framer`) 수신 → `renderResponse`로 사람이 읽게 낸다. 살아있는 인스턴스가 없거나 connect가 실패하면
-/// crash/트레이스 없이 graceful하게 안내하고 종료한다. 서버가 소켓을 실제로 띄우는 배선(accept-loop 스레드·메인
+/// crash/트레이스 없이 graceful하게 안내하고 종료한다. 서버가 소켓을 actual로 띄우는 배선(accept-loop 스레드·메인
 /// marshal(§5)·실 collector·capability auth(1e))은 **A2b/후속**이라, 지금은 보통 "인스턴스 없음"으로 접힌다.
 const SessionCli = enum { sessions, session };
 
@@ -2050,7 +2050,7 @@ fn runSessionCli(
     }
 }
 
-/// `sessions list`/`session get` 요청을 실제 컨트롤 소켓에 왕복한다(A2a). 소켓 흐름은 `cli.control_client`,
+/// `sessions list`/`session get` 요청을 actual 컨트롤 소켓에 왕복한다(A2a). 소켓 흐름은 `cli.control_client`,
 /// 요청 조립·응답 렌더만 `cli.sessions`. 살아있는 인스턴스가 없거나 connect 실패면 crash 없이 graceful 종료(exit 1).
 fn runSessionRequest(
     io: std.Io,
@@ -2083,13 +2083,13 @@ fn runSessionRequest(
 /// 판정을 앞으로 옮기면 새 오류가 집합에 들어가지 않아 두 호스트에서 같은 코드가 선다.
 ///
 /// 판정은 `printSmoke`의 미리 안내와 **같은 사실**(`pty.backend_available`)을 본다 — 갈리면 "안내는 안 뜨는데
-/// 실행하면 실패"가 된다. 그 상수와 실제 spawn 실패의 일치는 `pty/session.zig` 테스트가 지킨다.
+/// 실행하면 실패"가 된다. 그 상수와 actual spawn 실패의 일치는 `pty/session.zig` 테스트가 지킨다.
 /// 백엔드가 있는데 spawn이 실패하는 경우는 여기 안 걸리고 그대로 오류로 남는다(진짜 오류는 트레이스가 맞다).
 fn ptyBackendMissing(stderr: *std.Io.Writer) error{UnknownCommand} {
     stderr.writeAll(
-        "이 명령은 PTY 백엔드가 필요한데 이 플랫폼에는 아직 없습니다 " ++
+        "this command needs a PTY backend, which this platform does not have yet " ++
             "(docs/plans/windows-platform.md W4 — ConPTY).\n" ++
-            "PTY 없이 도는 것: maru app-smoke · maru app-loop-smoke · maru terminfo\n",
+            "runs without a PTY: maru app-smoke, maru app-loop-smoke, maru terminfo\n",
     ) catch {};
     stderr.flush() catch {};
     return error.UnknownCommand;
@@ -2097,14 +2097,14 @@ fn ptyBackendMissing(stderr: *std.Io.Writer) error{UnknownCommand} {
 
 fn writeSessionCliUsage(stderr: *std.Io.Writer, which: SessionCli, err: maru.cli.sessions.ParseError) !void {
     const reason = switch (err) {
-        error.MissingSubcommand => "서브커맨드가 필요합니다",
-        error.UnknownSubcommand => "알 수 없는 서브커맨드입니다",
-        error.MissingSurfaceId => "surface id가 필요합니다",
-        error.InvalidSurfaceId => "surface id는 음이 아닌 정수여야 합니다",
-        error.MissingWindowValue => "--window 에는 값이 필요합니다",
-        error.InvalidWindowValue => "--window 값은 음이 아닌 정수여야 합니다",
-        error.UnknownOption => "알 수 없는 옵션입니다",
-        error.UnexpectedArgument => "인자가 너무 많습니다",
+        error.MissingSubcommand => "a subcommand is required",
+        error.UnknownSubcommand => "unknown subcommand",
+        error.MissingSurfaceId => "a surface id is required",
+        error.InvalidSurfaceId => "the surface id must be a non-negative integer",
+        error.MissingWindowValue => "--window needs a value",
+        error.InvalidWindowValue => "the --window value must be a non-negative integer",
+        error.UnknownOption => "unknown option",
+        error.UnexpectedArgument => "too many arguments",
     };
     try stderr.print("maru {s}: {s}\n\n", .{ @tagName(which), reason });
     try stderr.writeAll(switch (which) {
@@ -2130,7 +2130,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
         \\  maru win32-terminal-smoke
-        \\  maru win32-clipboard-smoke [<기대값> | --paste-encode]
+        \\  maru win32-clipboard-smoke [<expected값> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -2221,7 +2221,7 @@ test "host gate: POSIX 전제 명령은 Windows에서만 접히고, 이유가 �
 // 도는 단언이고, 깨지면 기존 사용자에게 없던 줄이 출력된다는 뜻이다.
 test "PTY 안내는 백엔드가 있는 호스트에 새지 않는다" {
     if (builtin.os.tag == .macos) try std.testing.expect(maru.pty.backend_available);
-    // 반대 방향 — "안내를 띄우는 호스트에서는 실행이 실제로 실패한다" — 은 그 사실이 사는 곳
+    // 반대 방향 — "안내를 띄우는 호스트에서는 실행이 actual로 실패한다" — 은 그 사실이 사는 곳
     // (`src/pty/session.zig`)에서 spawn을 직접 불러 지킨다. 여기서 타입을 다시 비교하면 정의를 베껴 쓴
     // 동어반복이라 아무것도 못 잡는다.
 }

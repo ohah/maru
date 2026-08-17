@@ -48,6 +48,8 @@ pub const embedded_terminfo = @embedFile("maru_terminfo");
 comptime {
     @setEvalBranchQuota(embedded_terminfo.len + 100); // 소스 바이트 수만큼 comptime 루프 분기가 필요
     for (embedded_terminfo) |c| {
+        // 이 문장은 **개발자에게 하는 말**이라 한국어로 둔다 — 계약 §7.1 이 영어로 고정한 것은
+        // 사용자가 보는 CLI 출력이고, `@compileError` 는 빌드가 멈출 때 기여자가 읽는다.
         if (c == '\'') @compileError("terminfo/maru.terminfo에 작은따옴표(')가 생겼다 — maru ssh의 single-quoted 인라인이 깨진다. 따옴표를 빼거나 escape 로직을 추가하라.");
     }
 }

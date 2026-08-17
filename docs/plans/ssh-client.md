@@ -19,7 +19,7 @@
 | S5a | **호스트키 서명·지문** — `ssh-ed25519` blob 파싱, 교환 해시 서명 검증, `SHA256:` 지문 | RFC 8032 §7.1 벡터 + `ssh-keygen -lf` 와 지문 일치 |
 | S5b | **`known_hosts` 대조** — 호스트 매칭(평문 패턴·부정·해시 `\|1\|`)·`@revoked`·`@cert-authority` 제외·판정 넷 | 줄 파싱 + 판정 + `ssh-keygen -H` 와 해시 일치 |
 | S6a | **인증 프로토콜** — service 요청, `publickey`(session_id 를 덮는 서명)·`password`, 응답 넷, 배너 거르기 | RFC 8032 벡터로 서명 + 응답 파싱 |
-| S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(bcrypt_pbkdf) | 키 파일 바이트 |
+| S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(`aes256-ctr` + OpenSSH bcrypt KDF), `checkint`·패딩·공개키 일치 검사 | `ssh-keygen` 이 만든 같은 키의 평문본·암호본이 같은 값을 낸다 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` | 상태 전이 |
 | S7b | **흐름 제어** — 채널 윈도 소비·`WINDOW_ADJUST`. **안 하면 대량 출력이 도중에 멈춘다**([계약 §3.1](../ssh-client.md)) | 윈도를 넘기는 바이트 열 |
 | S7c | **잡 메시지** — `IGNORE`·`DEBUG`·`UNIMPLEMENTED`·`DISCONNECT`·`GLOBAL_REQUEST`, 버전 앞 배너 여러 줄 | 각 메시지 주입 |

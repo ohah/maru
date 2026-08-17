@@ -36,6 +36,7 @@ VT 파서/state machine을 구현할 때는 아래 명세를 1차 출처로 삼�
 | RFC 8032 (EdDSA) | Ed25519 서명과 **§7.1 테스트 벡터**(우리 호스트키 검증 테스트가 이 값으로 못박는다) | `references/specs/rfc8032-eddsa.txt` | https://www.rfc-editor.org/rfc/rfc8032.txt |
 | SSH chacha20-poly1305 | `chacha20-poly1305@openssh.com` AEAD(길이 필드 별도 키) | `references/specs/draft-sshm-chacha20-poly1305.txt` | https://datatracker.ietf.org/doc/draft-ietf-sshm-chacha20-poly1305/ |
 | SSH strict KEX | Terrapin(CVE-2023-48795) 대응 — 표시자·시퀀스 리셋·초기 KEX 제한 | `references/specs/draft-strict-kex.txt` | https://datatracker.ietf.org/doc/draft-ietf-sshm-strict-kex/ |
+| OpenSSH PROTOCOL.key | `openssh-key-v1` 개인키 파일 형식(헤더·bcrypt KDF 옵션·패딩 규칙) — RFC 가 없다 | `references/specs/openssh-protocol-key.txt` | https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.key |
 | OpenSSH PROTOCOL | 확장 목록(내용은 위 초안들로 옮겨졌다 — 링크 색인용) | `references/specs/openssh-protocol.txt` | https://github.com/openssh/openssh-portable/blob/master/PROTOCOL |
 | VT100 User Guide | DEC VT100 동작 매뉴얼 | `references/specs/vt100-user-guide-contents.html` | https://vt100.net/docs/vt100-ug/contents.html |
 

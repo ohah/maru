@@ -54996,6 +54996,36 @@ test "소스 컨트롤: 커밋 상자 caret도 깜빡임 게이트에 든다" {
     try std.testing.expectEqual(session.blink_visible, props.commit_edit.caret_visible);
 }
 
+test "소스 컨트롤: 목록의 뿌리는 **활성 터미널 하나**다 (사용자 결정 2026-08-17)" {
+    // 열린 터미널을 전부 세면 탭을 여럿 띄운 사용자에게 여덟 줄이 서고, 그중 무엇이 지금 보고 있는
+    // 것인지가 사라진다(사용자 화면 제시). 워크트리는 그 저장소의 것만 아래에 펼친다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    // 터미널을 하나 더 열고 **그 Term만** 다른 저장소에 세운다(비활성 탭이 목록에 새지 않아야 한다).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = pane_ops.activePane(session);
+    try std.testing.expect(pane.terms.items.len >= 2);
+    for (pane.terms.items, 0..) |term, index| {
+        term.rt.observation.cwd.clearRetainingCapacity();
+        // 활성이 아닌 Term에 **실재하는** 저장소 경로를 준다 — 목록에 새면 여기서 잡힌다.
+        try term.rt.observation.cwd.appendSlice(allocator, if (index == pane.active_term) "/tmp" else "/repo");
+        term.rt.observation.availability = .current;
+    }
+    scm_dock_ops.invalidateRepoList(session);
+
+    const repos = scm_dock_ops.repoEntries(session);
+    // 활성 Term은 `/tmp`(저장소 아님)라 뿌리가 없고, 그때 목록은 **마지막으로 읽은 저장소**만 든다.
+    try std.testing.expectEqual(@as(usize, 1), repos.entries.len);
+    try std.testing.expectEqualStrings("/repo", repos.entries[0].path);
+}
+
 test "소스 컨트롤: 비활성 저장소는 머리 줄 요약이 오면 `읽는 중…`을 벗는다 (P3d-③)" {
     // 읽기는 하나씩 돈다 — 그래서 "아직 안 읽은 저장소"가 실제로 생긴다. 그 줄은 0건이 아니라
     // **모르는 것**이고, 답이 오면 브랜치와 개수를 얻는다.

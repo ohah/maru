@@ -1906,36 +1906,25 @@ const commit_slow_after_ns: i128 = 5 * std.time.ns_per_s;
 /// 목록 항목 하나(경로는 세션 버퍼를 빌린다 — 프레임 안에서만 유효하다).
 pub const RepoEntry = maru.session.scm_repos.Entry;
 
-/// 지금 열린 터미널들이 서 있는 **저장소 루트들**. 순서는 탭·pane·Term 순서(사용자가 연 순서)이고
-/// 중복은 지운다.
+/// **활성 터미널이 선 저장소 하나**(사용자 결정 2026-08-17). 열린 터미널을 전부 세면 목록이 여덟 줄이
+/// 되어 "지금 무엇을 보고 있나"가 사라진다 — 실제로 그 화면을 보고 결정이 뒤집혔다.
 ///
-/// **원격·파일 Term은 건너뛴다** — `termCwd`가 null을 주고, 그건 "저장소가 없다"가 아니라 "물어볼 곳이
-/// 없다"이다(§3.5의 3-상태 판정과 같은 규율).
+/// 워크트리는 여기서 나오지 않는다: 그 저장소의 `worktree list`가 실려 오면 `collect`가 아래에 펼친다.
+///
+/// **원격·파일 Term이면 빈 목록이다** — `termCwd`가 null을 주고, 그건 "저장소가 없다"가 아니라 "물어볼
+/// 곳이 없다"이다(§3.5의 3-상태 판정과 같은 규율). 그때는 `ensureListed`가 **마지막으로 읽은
+/// 저장소**(`git_repo`)를 세우므로 화면은 그 자리에 그대로 머문다: 파일을 열었다고 목록이 비면,
+/// 사용자가 한 일(파일 열기)과 화면이 잃은 것(저장소)이 대응하지 않는다.
 fn collectRepoRoots(self: *AppSession, store: []u8, out: [][]const u8) usize {
-    var n: usize = 0;
-    var used: usize = 0;
-    for (self.tabs.items) |tab| {
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                if (n == out.len) return n;
-                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse continue;
-                var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const root = app_session_mod.AppSession.repoRootFor(cwd, &root_buf) orelse continue;
-                var seen = false;
-                for (out[0..n]) |existing| {
-                    if (std.mem.eql(u8, existing, root)) seen = true;
-                }
-                if (seen) continue;
-                if (used + root.len > store.len) return n; // 버퍼가 찼다 — 있는 만큼으로 목록을 만든다
-                @memcpy(store[used..][0..root.len], root);
-                out[n] = store[used..][0..root.len];
-                used += root.len;
-                n += 1;
-            }
-        }
-    }
-    return n;
+    if (out.len == 0) return 0;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.activeTerminalCwd(self, &cwd_buf) orelse return 0;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = app_session_mod.AppSession.repoRootFor(cwd, &root_buf) orelse return 0;
+    if (root.len > store.len) return 0;
+    @memcpy(store[0..root.len], root);
+    out[0] = store[0..root.len];
+    return 1;
 }
 
 /// 목록에 세울 항목들. **지금 읽어 둔 워크트리 목록만 편다** — 저장소마다 읽기를 새로 걸지 않는다

@@ -16,7 +16,8 @@
 | S3 | **KEX(curve25519)** — 임시 키쌍(씨앗 주입)·공유 비밀·교환 해시 `H`·키 유도. **서명 검증은 안 한다**(S5) | RFC 7748 §6.1 벡터 + `H`·키 조립을 손계산과 대조 |
 | S4 | **암호(chacha20-poly1305@openssh.com)** — 길이 필드 별도 키(**K_2** — 구형 OpenSSH 문서와 이름이 반대다, [계약 §3](../ssh-client.md)), AEAD, 패딩 규칙(길이 필드 제외) | **명세 Appendix A 워크드 예제와 바이트 일치** + 변조 거부 |
 | S4b | **전송 루프** — 시퀀스 번호(방향별)·`NEWKEYS` 전환(옛 키로 보내고 그 뒤 교체)·평문↔암호 프레이밍 전환·추측 패킷 폐기(번호는 올린다)·strict KEX 수신 게이트 넷([계약 §4](../ssh-client.md)) | 바이트 열로 상태 전이 |
-| S5 | **호스트키 검증** — `ssh-ed25519` 서명 검증, `known_hosts` 대조, TOFU, 지문 변경 거부 | 서명 위조·지문 변경 거부 |
+| S5a | **호스트키 서명·지문** — `ssh-ed25519` blob 파싱, 교환 해시 서명 검증, `SHA256:` 지문 | RFC 8032 §7.1 벡터 + `ssh-keygen -lf` 와 지문 일치 |
+| S5b | **`known_hosts` 대조** — 호스트 매칭(평문·해시 `\|1\|`)·TOFU·지문 변경 거부·`@revoked` | 줄 파싱 + 판정 |
 | S6 | **인증** — `publickey`(ed25519 서명)·`password`, `openssh-key-v1` 파싱(bcrypt_pbkdf) | 서명 바이트·키 파싱 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` | 상태 전이 |
 | S7b | **흐름 제어** — 채널 윈도 소비·`WINDOW_ADJUST`. **안 하면 대량 출력이 도중에 멈춘다**([계약 §3.1](../ssh-client.md)) | 윈도를 넘기는 바이트 열 |

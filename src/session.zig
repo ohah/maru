@@ -20,6 +20,8 @@ pub const ssh = struct {
     pub const cipher = @import("session/ssh/cipher.zig");
     /// 전송 루프 — 시퀀스 번호·`NEWKEYS` 전환·strict KEX 수신 게이트.
     pub const transport = @import("session/ssh/transport.zig");
+    /// 호스트키 — `ssh-ed25519` 서명 검증과 지문(RFC 8709).
+    pub const hostkey = @import("session/ssh/hostkey.zig");
     // **sans-io 경계는 `tests/boundary/ssh_sans_io.zig` 가 강제한다** — 이 디렉터리를 직접 훑어
     // `std.<X>` 를 허용 목록으로 건다. 여기 안에 두면 스캐너가 자기 자신을 스캔하게 되고,
     // 등록 목록으로 세던 앞선 판정자가 그래서 무력했다(그 파일 머리 주석에 실측을 적어 뒀다).

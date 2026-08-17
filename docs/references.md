@@ -32,6 +32,8 @@ VT 파서/state machine을 구현할 때는 아래 명세를 1차 출처로 삼�
 | RFC 8731 (curve25519 KEX) | `curve25519-sha256` 키 교환 — 공개키 길이·작은 위수 점 거부·K 의 mpint 인코딩 | `references/specs/rfc8731-curve25519-kex.txt` | https://www.rfc-editor.org/rfc/rfc8731.txt |
 | RFC 5656 (ECC) | ECDH 메시지 흐름과 **교환 해시 `H` 의 재료 순서**(§4 — RFC 8731 이 그대로 참조한다) | `references/specs/rfc5656-ecc.txt` | https://www.rfc-editor.org/rfc/rfc5656.txt |
 | RFC 7748 (Curve25519/448) | X25519 함수와 **§6.1 테스트 벡터**(우리 KEX 테스트가 이 값으로 못박는다) | `references/specs/rfc7748-curves.txt` | https://www.rfc-editor.org/rfc/rfc7748.txt |
+| RFC 8709 (Ed25519 in SSH) | `ssh-ed25519` 공개키·서명 blob 형식 | `references/specs/rfc8709-ed25519-ssh.txt` | https://www.rfc-editor.org/rfc/rfc8709.txt |
+| RFC 8032 (EdDSA) | Ed25519 서명과 **§7.1 테스트 벡터**(우리 호스트키 검증 테스트가 이 값으로 못박는다) | `references/specs/rfc8032-eddsa.txt` | https://www.rfc-editor.org/rfc/rfc8032.txt |
 | SSH chacha20-poly1305 | `chacha20-poly1305@openssh.com` AEAD(길이 필드 별도 키) | `references/specs/draft-sshm-chacha20-poly1305.txt` | https://datatracker.ietf.org/doc/draft-ietf-sshm-chacha20-poly1305/ |
 | SSH strict KEX | Terrapin(CVE-2023-48795) 대응 — 표시자·시퀀스 리셋·초기 KEX 제한 | `references/specs/draft-strict-kex.txt` | https://datatracker.ietf.org/doc/draft-ietf-sshm-strict-kex/ |
 | OpenSSH PROTOCOL | 확장 목록(내용은 위 초안들로 옮겨졌다 — 링크 색인용) | `references/specs/openssh-protocol.txt` | https://github.com/openssh/openssh-portable/blob/master/PROTOCOL |

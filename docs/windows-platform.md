@@ -1021,13 +1021,31 @@ Roaming(`%APPDATA%`)은 쓰지 않는다 — Warp도 `settings.toml`을 Local에
 
 #### 이 슬라이스가 닫지 않은 것
 
-**`--refresh`·`--clear`는 POSIX 셸을 요구한다.** `system()`은 Windows에서 `/bin/sh`가 아니라 **cmd.exe**로
-간다(msvcrt). 두 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는 POSIX 스크립트다. 실측: cmd/PowerShell PATH에는
-그 넷도 `tic`도 **없고**(둘 다 git-bash의 `/usr/bin`에만 있다), 그래서 두 명령은 git-bash에서만 돈다.
-이 슬라이스는 두 가지만 했다 — ⒜ 안내가 `tic`만 가리키던 것을 **셸과 tic 둘 다** 가리키게 고쳤고(그 전에는
-tic을 깔아도 계속 실패한다), ⒝ `--clear`가 `system()` 반환값을 **버리고** "삭제됨"을 exit 0으로 찍던 것을
-고쳤다 — 지우지 못했는데 지웠다고 말하고 있었다. `--refresh`를 Windows에서 실제로 돌리는 것은 `maru ssh`의
-`/bin/sh` 문제와 **같은 결정**이라 W9에서 함께 정한다.
+**`maru terminfo`의 셸 의존 — 무엇이 되고 무엇이 안 되는가.** `system()`은 Windows에서 `%COMSPEC%`
+(= cmd.exe)로 간다(msvcrt). **프로세스를 어느 셸에서 띄웠든 그렇다** — 적대적 검증에서 git-bash로 띄워도
+같다는 것을 확인했고, 그래서 처음 쓴 *"git-bash에서 실행하세요"* 안내를 지웠다(실측: cmd.exe가 `d='...'`를
+명령 이름으로 읽어 `'d' is not recognized`).
+
+| 서브커맨드 | Windows | 이유 |
+|---|---|---|
+| `--path` | **된다** | 순수 Zig — 셸을 안 쓴다 |
+| `--clear` | `rm.exe`가 PATH에 있으면 된다 | 명령이 `rm -rf '<경로>'` **단일 외부 명령**이라 cmd.exe도 실행한다(git 설치본에 `rm.exe`가 있다) |
+| `--status` | **판정 불가** | 프로브가 `TERMINFO=<dir> infocmp …` — `VAR=값 명령` 접두는 POSIX 문법이라 cmd.exe가 못 읽는다 |
+| `--refresh` | **안 된다** | `d=...; rm -rf "$d"; …` 대입·확장이 POSIX 문법이다. 무엇을 설치해도 안 된다 |
+
+세 번째 줄이 적대적 검증에서 나온 것이다. 프로브가 **항상 실패**하므로 예전 코드는 캐시가 실제로 컴파일돼
+있어도 늘 `"아직 컴파일 안 됨"`이라고 **단언**했다 — 모르는 것을 아는 것처럼 말하는 쪽이 더 나쁘다. 지금은
+`"상태: 알 수 없음"`이라고 답한다.
+
+이 슬라이스가 한 것은 셋이다 — ⒜ `--refresh` 안내가 `tic`만 가리키던 것을 **원인(POSIX 셸 문법)** 을 짚게
+고쳤고, ⒝ `--clear`가 `system()` 반환값을 **버리고** "삭제됨"을 exit 0으로 찍던 것을 고쳤으며(지우지 못했는데
+지웠다고 말하고 있었다), ⒞ `--status`가 모르는 것을 단언하던 것을 고쳤다. `--refresh`를 Windows에서 실제로
+돌리는 것은 `maru ssh`의 `/bin/sh` 문제와 **같은 결정**이라 W9에서 함께 정한다.
+
+> **셸 명령이 리터럴 경로를 받는 것은 실기로 확인했다.** 공백과 `$`가 든 경로(`/tmp/maru w85$real/…`)로 진짜
+> `sh` + 진짜 `tic`을 돌려 exit 0(`xterm-maru` 해석 성공)과 `.maru-version` 생성을 봤다. 주입 시도 8종
+> (`'; touch …`, `` `touch …` ``, `$(touch …)`, 개행 삽입 등)은 진짜 `sh`에서 **한 건도 실행되지 않았다.**
+> 예전 파라미터 확장 방식에서는 `$`가 든 캐시 경로 자체가 불가능했으므로, 이건 개선이기도 하다.
 
 **§7 격리 결정이 그대로 오지 않는다(W8 항목).** macOS는 비신뢰 브라우저 패널에
 `WKWebsiteDataStore.nonPersistent()`를 써서 "쿠키·localStorage·캐시가 디스크에 안 남는다"를 보장하는데,

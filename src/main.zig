@@ -557,6 +557,19 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
 // `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(pty/macos.zig와 같은 결).
 extern "c" fn system(command: [*:0]const u8) c_int;
 
+/// `system()`이 POSIX 셸 문법을 이해하는가. **Windows에서는 아니다.**
+///
+/// msvcrt의 `system()`은 `%COMSPEC%`(= cmd.exe)로 간다 — 프로세스를 **어느 셸에서 띄웠든** 그렇다.
+/// 실측: git-bash에서 `maru terminfo --refresh`를 돌려도 cmd.exe가 `d='...'`를 명령 이름으로 읽어
+/// `'d' is not recognized`로 죽는다. 그래서 "git-bash에서 실행하세요"는 **틀린 안내**였다.
+///
+/// 단일 외부 명령(예: `rm -rf '<경로>'`)은 cmd.exe도 실행할 수 있어, git이 설치돼 `rm.exe`가 PATH에
+/// 있으면 `--clear`는 우연히 동작한다. 반면 `VAR=값 명령` 접두나 `d=...; ...` 대입은 POSIX 문법이라
+/// 무엇을 깔아도 안 된다. 계약 §5.3 "이 슬라이스가 닫지 않은 것" 참조.
+fn posixShellCommandsWork() bool {
+    return @import("builtin").os.tag != .windows;
+}
+
 fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     // `maru terminfo [--status|--refresh|--clear|--path]`: maru 자체 terminfo(xterm-maru)의 로컬 캐시를
     // 관리한다. 순수 인자 파싱은 maru.cli.terminfo, 캐시 경로·버전·셸 명령은 maru.terminfo_cache(pty 자동
@@ -603,10 +616,20 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         .path => try stdout.print("{s}\n", .{dir}),
         // 캐시가 컴파일돼 xterm-maru가 해석되는지 보고한다(아무것도 바꾸지 않는 안전 기본).
         .status => {
-            const cmd = try maru.terminfo_cache.statusCommand(allocator, dir);
-            defer allocator.free(cmd);
             try stdout.print("maru terminfo 캐시: {s}\n", .{dir});
             try stdout.flush(); // system()이 fd로 직접 쓰므로 버퍼를 먼저 비운다.
+            // **Windows에서는 상태를 알 수 없다 — 모른다고 말한다.** 프로브가
+            // `TERMINFO=<dir> infocmp xterm-maru`인데 그 `VAR=값 명령` 접두는 POSIX 문법이고,
+            // `system()`은 여기서 `%COMSPEC%`(cmd.exe)로 간다(실측: `'TERMINFO' is not recognized`).
+            // 즉 프로브가 **항상 실패**해서, 예전 코드는 캐시가 실제로 컴파일돼 있어도 늘
+            // "아직 컴파일 안 됨"이라고 단언했다 — 모르는 것을 아는 것처럼 말하는 쪽이 더 나쁘다.
+            if (!posixShellCommandsWork()) {
+                try stdout.writeAll("상태: 알 수 없음 — 상태 확인이 POSIX 셸을 요구하는데 이 호스트의 `system()`은 cmd.exe로 갑니다\n");
+                try stdout.flush();
+                return;
+            }
+            const cmd = try maru.terminfo_cache.statusCommand(allocator, dir);
+            defer allocator.free(cmd);
             if (system(cmd.ptr) == 0) {
                 try stdout.writeAll("상태: xterm-maru 컴파일됨 (config term = \"xterm-maru\"면 이 캐시를 TERMINFO로 쓴다)\n");
             } else {
@@ -627,10 +650,10 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
                 // 가는데(msvcrt), 재컴파일 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는 POSIX 스크립트다.
                 // 실측(PowerShell·cmd): 그 넷도 `tic`도 PATH에 없다 — 둘 다 git-bash의 `/usr/bin`에만 있다.
                 // 그래서 tic만 가리키면 사용자가 tic을 깔아도 여전히 실패한다. 계약 §8 "홈·캐시 위치" 참조.
-                try stderr.writeAll(if (@import("builtin").os.tag == .windows)
-                    "maru terminfo: 재컴파일 실패 — Windows에서는 POSIX 셸(rm·mkdir -p·printf)과 tic(ncurses)이 둘 다 필요합니다.\n" ++
-                        "  둘 다 git-bash(C:\\Program Files\\Git\\usr\\bin)에는 있으나 cmd/PowerShell PATH에는 없습니다 — git-bash에서 실행하세요.\n" ++
-                        "  (재컴파일 없이도 셸은 xterm-256color로 폴백하므로 터미널은 정상 동작합니다)\n"
+                try stderr.writeAll(if (!posixShellCommandsWork())
+                    "maru terminfo: 재컴파일은 이 호스트에서 지원되지 않습니다 — 재컴파일 명령이 POSIX 셸 문법(`d=...; rm -rf ...`)인데\n" ++
+                        "  `system()`이 cmd.exe로 갑니다. **git-bash에서 maru를 띄워도 같습니다**(셸이 아니라 %COMSPEC%가 정합니다).\n" ++
+                        "  재컴파일 없이도 터미널은 xterm-256color로 폴백해 정상 동작합니다.\n"
                 else
                     "maru terminfo: 재컴파일 실패 — tic(ncurses)이 설치돼 있는지 확인하세요(셸에선 xterm-256color로 폴백)\n");
                 try stderr.flush();
@@ -647,8 +670,11 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
             if (system(cmd.ptr) != 0) {
                 try stdout.flush();
                 try stderr.print("maru terminfo: 캐시 삭제 실패 — {s}\n", .{dir});
-                if (@import("builtin").os.tag == .windows)
-                    try stderr.writeAll("  Windows에서는 `rm`이 cmd/PowerShell PATH에 없습니다 — git-bash에서 실행하거나 해당 폴더를 직접 지우세요\n");
+                if (!posixShellCommandsWork())
+                    // 이 명령만은 단일 외부 명령(`rm -rf '<경로>'`)이라 cmd.exe도 실행할 수 있다 —
+                    // `rm.exe`가 PATH에 있으면(git 설치본) 된다. 그래서 안내가 "셸을 바꾸라"가 아니라
+                    // "PATH에 rm이 있느냐"다(재컴파일 쪽과 원인이 다르다).
+                    try stderr.writeAll("  `rm`이 PATH에 없습니다(git 설치본의 usr 밑에 있습니다) — 해당 폴더를 직접 지워도 됩니다\n");
                 try stderr.flush();
                 return error.UnknownCommand;
             }

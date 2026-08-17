@@ -618,9 +618,109 @@ OS 호출은 락 밖에서 한다.
 (`OpenClipboard=True` 확인)에서도 우리 쓰기가 5/5 성공했다. 재현되지 않는 문제에 재시도 루프를 넣으면
 검증되지 않은 코드가 남으므로 넣지 않고 여기 적어 둔다.
 
-**복사(선택 영역 → 클립보드)는 아직 없다.** 무엇을 복사할지가 선택 영역이고 그것은 마우스와 같은 계층이라
-W7.4d에서 함께 정한다. `isCopyChord`는 그 자리를 미리 잡아 둔 것이고(붙여넣기와 같은 자리에서 판정한다),
-지금은 호출자가 없다.
+**복사(선택 영역 → 클립보드)는 §2k에서 붙었다.** 무엇을 복사할지가 선택 영역이라 마우스와 같은 계층이었다.
+
+### 2k. 마우스 — 선택·스크롤·리포팅 (W7.4d 결정)
+
+**중립 명령이 이미 다 있다.** `session/core_command.zig`가 `select_start`·`select_extend`·
+`select_extend_or_collapse`·`select_word`·`select_line`·`select_clear`·`scroll`·`scroll_and_extend`·
+`report_mouse`를 갖고 있고, **PTY 리더 스레드가 락 아래 원자적으로 적용한다**. 그래서 Windows가 하는 일은
+Win32 메시지를 그 명령으로 **번역하는 것뿐**이고, 메인 스레드는 코어를 만지지 않는다.
+
+이것이 §2h·§2i·§2j와 같은 결론이다 — 중립 계약은 이미 서 있고 플랫폼은 어댑터다.
+
+**규칙을 새로 만들지 않는다 — macOS가 쓰는 관례를 그대로 읽어 왔다.** 아래 표의 근거는 전부
+`platform/macos/app_session.zig`의 기존 판정이다. 마우스 관례를 두 플랫폼이 다르게 가지면 같은 코어가
+다르게 반응한다.
+
+| Win32 메시지 | 중립 `kind` | 명령 |
+|---|---|---|
+| `WM_LBUTTONDOWN` | 1 (down) | `select_start{row, col, block}` |
+| `WM_MOUSEMOVE`(버튼 눌림) | 2 (drag) | `select_extend{row, col}` |
+| `WM_LBUTTONUP` | 3 (up) | `select_extend_or_collapse{row, col}` |
+| `WM_LBUTTONDBLCLK` | 4 | `select_word{row, col, separators}` |
+| 같은 자리 3연타 | 5 | `select_line{row}` |
+| `WM_MOUSEWHEEL` | — | `scroll{lines}` 또는 alt 화면이면 화살표 키 |
+
+**모디파이어 비트는 중립 규약을 따른다** — 4=shift, 8=meta(alt), 16=ctrl, 32=command.
+
+**⑴ shift·alt가 마우스 리포팅을 누른다.** 셸이 마우스를 잡고 있어도(`mouse_tracking != .none`) shift나
+alt를 누르면 리포트하지 않고 **로컬 선택**을 한다. macOS의 판정이 그대로다:
+
+```zig
+if ((mods & 4) != 0 or (mods & 8) != 0) return; // shift·option은 셀렉션 override — 리포트 안 함
+```
+
+TUI가 마우스를 다 먹으면 사용자가 화면의 글자를 복사할 방법이 없어진다 — 그 탈출구다.
+
+**⑵ alt는 동시에 블록 선택이다.** `select_start{.block = (mods & 8) != 0}`. 리포팅을 누르는 것과 같은 키가
+사각 선택을 켠다.
+
+**⑶ command(32) 비트를 리포트에서 마스킹한다.** `reportMouse`의 `cb = button + mods + motion`에서 32가
+**SGR motion 비트와 겹친다** — 그대로 실으면 press가 motion으로 오인되거나 `cb`가 부풀어 리포트가 오염된다
+(macOS가 회귀 가드로 막아 둔 자리다). Windows엔 command 키가 없어 지금은 32가 설 일이 없지만, §2h가
+`Ctrl`을 `command`로 번역하므로 **마우스 경로에도 같은 위험이 있다** — 마스킹을 그대로 가져온다.
+
+**⑷ 버튼 없는 이동(hover)은 `any`(DECSET 1003)일 때만 리포트한다.** 그리고 **셀이 바뀔 때만** 보낸다 —
+`WM_MOUSEMOVE`는 픽셀마다 오는데 셀은 안 바뀌므로, 안 거르면 같은 셀 리포트가 PTY에 쏟아진다.
+
+**⑸ alt 화면 + `alternate_scroll`(DECSET 1007)이면 휠이 화살표 키가 된다.** 그리고 그때 **선택을 해제한다**
+— 프로그램이 화면을 다시 그리므로 남은 선택은 좌표가 어긋난 유령이다. 화살표는 **한 버퍼에 묶어** 보낸다:
+줄마다 쓰면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍된다.
+
+**픽셀→셀은 격자 안으로 clamp한다.** 드래그 중 포인터가 창 밖으로 나가도 선택이 끊기면 안 되므로
+(`SetCapture`로 창 밖 좌표가 계속 온다) 음수·초과 좌표를 가장자리 셀로 접는다. 순수 함수라 모든 타깃에서
+테스트한다.
+
+**휠 눈금 수를 OS에 묻되 규칙은 순수 함수가 갖는다.** `WM_MOUSEWHEEL`은 `WHEEL_DELTA`(120)의 배수를
+주고 정밀 터치패드는 그보다 작은 값을 보낸다 — 나머지를 누적하지 않으면 **작은 스크롤이 통째로 버려진다**.
+한 눈금이 몇 줄인지는 `SystemParametersInfoW(SPI_GETWHEELSCROLLLINES)`가 사용자 설정으로 답하고, 그 값과
+누적기는 순수 함수의 **인자**다(OS-as-parameter — §2h·§2i와 같은 규율).
+
+**더블·트리플 판정도 순수 함수다.** `GetDoubleClickTime()`(사용자 설정)과 `SM_CXDOUBLECLK` 슬롭을 인자로
+받아 시간·거리로 가른다. 트리플 뒤에는 카운터를 되돌린다 — 안 하면 네 번째 클릭이 4연타가 되어 무엇도
+아니게 된다.
+
+**복사가 여기서 붙는다.** §2j가 남겨 둔 `isCopyChord`에 드디어 호출자가 생긴다 — `extractSelection`으로
+선택 영역을 UTF-8로 꺼내 `win32_clipboard.write`에 넘긴다. 경계는 §2j 그대로다: **무엇을 복사할지는 중립
+코어가, 클립보드는 플랫폼이** 안다.
+
+**IME 후보창 위치도 여기다.** §2i가 미뤄 둔 `ImmSetCandidateWindow`/`CANDIDATEFORM`은 커서 셀을 픽셀로
+바꿔 IME에 주는 일이라 픽셀↔셀 변환과 같은 계층이다.
+
+#### 마우스 리포팅은 ConPTY가 막는다 — 코드가 아니라 플랫폼 사실이다 (실측 2026-08-18)
+
+**셸이 `DECSET 1000`을 켜도 우리 코어는 그것을 못 본다.** 측정이 그것을 정확히 갈랐다 — 같은 방법으로
+보낸 세 개 중 **`1007`(alternate scroll)만 도착하고 `1000`(마우스 트래킹)·`1006`(SGR 형식)은 사라졌다**:
+
+```text
+core_modes: mouse_tracking=none mouse_format=x10 alt_active=false alternate_scroll=true
+```
+
+전달 경로가 멀쩡하다는 것을 `1007`이 증명하므로, 남은 설명은 하나다: **ConPTY가 마우스 모드를 삼킨다.**
+이것은 알려진 한계이고 설계상 그렇다 — ConPTY는 `ReadConsoleInput`으로 `MOUSE_EVENT`를 받는 고전 콘솔
+앱도 호스팅해야 해서 마우스를 **그냥 통과시킬 수 없고 번역해야** 한다. 그래서 모드를 자기가 먹는다
+([microsoft/terminal#376](https://github.com/microsoft/terminal/issues/376), Terminal v1.9에서 ConPTY
+쪽 마우스 지원 자체는 들어갔다).
+
+**그러면 터미널은 앱이 마우스를 원하는지 어떻게 아는가 — 아직 방법이 없다.** 그 자리를 메우자는 것이
+[microsoft/terminal#6859](https://github.com/microsoft/terminal/issues/6859)("ConPTY: transmit
+DECSET/DECRST state when client application enters/exits `ENABLE_VIRTUAL_TERMINAL_INPUT` mode")인데
+**아직 열려 있다.**
+
+**`PSEUDOCONSOLE_PASSTHROUGH_MODE`(0x8)로도 안 된다 — 실험으로 확인했다.** `CreatePseudoConsole`의 flags를
+`0`에서 `0x8`로 바꿔 같은 측정을 돌렸는데 `mouse_tracking=none` 그대로였다. 그 플래그는 §4의 EOF·쓰기
+의미론 실측을 뒤흔들 수 있는 PTY 전역 변경이기도 하므로 **켜지 않았다**(그 판단은 사용자 몫이라 여기
+적어 둔다 — AGENTS.md 핵심 원칙).
+
+**그래서 리포팅 경로는 옳게 두되 잠들어 있다.** `report_mouse` 명령을 보내는 코드는 그대로 있고
+`mouse_tracking != .none`에서만 깨어난다 — Windows에서는 그 조건이 지금 서지 않으므로 **마우스는 언제나
+로컬 선택으로 간다**. 실용적으로는 나쁘지 않다(선택·스크롤이 늘 먹는다). 잃는 것은 vim·htop 같은 TUI가
+마우스를 받는 것이고, ConPTY가 #6859를 닫으면 **코드 변경 없이** 켜진다.
+
+이 판정은 macOS와 갈리는 자리다 — 같은 중립 코어인데 **PTY 계층이 모드를 안 넘겨서** 결과가 다르다.
+§2h·§2i·§2j에서는 "중립 계약이 이미 서 있고 플랫폼은 어댑터"였는데, 여기서는 **플랫폼 아래(PTY)가
+계약을 못 채운다**. W7 전체에서 처음 나온 종류의 벽이다.
 
 ## 3. 셸과 셸 통합
 

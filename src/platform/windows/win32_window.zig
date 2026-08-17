@@ -32,6 +32,7 @@ const builtin = @import("builtin");
 // import하면 그 파일이 `maru` 모듈과 이중 소유가 된다(실측: `file exists in modules 'maru' and 'root'`).
 const terminal = @import("maru").terminal;
 const win32_keys = @import("win32_keys.zig");
+const win32_mouse = @import("win32_mouse.zig");
 
 pub const Error = error{
     RegisterClassFailed,
@@ -62,6 +63,37 @@ pub const WindowEvent = union(enum) {
     /// "가장 최근 상태"만 뜻이 있고(중간 상태를 큐에 쌓아 재생할 이유가 없다), 슬라이스를 실으면
     /// 다음 조합이 그 버퍼를 덮어 이미 넘긴 이벤트가 무효화된다. 호출자가 `preeditText()`를 읽는다.
     preedit_changed,
+    /// 마우스가 움직이거나 눌리거나 굴렀다. **픽셀 그대로 준다** — 셀로 바꾸려면 격자 크기를 알아야 하고
+    /// 그것은 호출자(폰트를 아는 쪽)다. `WindowEvent.resized`가 픽셀만 주는 것과 같은 분담이다(§2k).
+    mouse: MouseEvent,
+};
+
+/// 창이 올리는 마우스 이벤트. **정책이 없다** — 선택이냐 리포팅이냐, 몇 연타냐는 호출자가
+/// `win32_mouse`의 순수 규칙으로 정한다.
+pub const MouseEvent = struct {
+    kind: Kind,
+    /// 클라이언트 영역 기준 픽셀. **음수와 초과가 온다** — 드래그 중 `SetCapture` 때문에 창 밖 좌표가
+    /// 계속 오고, 그것을 격자로 접는 것은 `win32_mouse.cellFromPixel`이다.
+    x_px: i32,
+    y_px: i32,
+    /// `win32_mouse.modifiersFrom`이 만든 중립 비트(4=shift, 8=alt, 16=ctrl).
+    mods: u8,
+    /// 휠일 때만 뜻이 있다. `WHEEL_DELTA`(120) 단위가 아닐 수 있다(정밀 터치패드).
+    wheel_delta: i32 = 0,
+
+    pub const Kind = enum {
+        /// 왼쪽 버튼이 눌렸다. 연타 판정은 호출자가 한다(`ClickTracker`) — 창이 `WM_LBUTTONDBLCLK`를
+        /// 쓰지 않는 이유는 **트리플이 없기** 때문이다. Win32는 더블까지만 알려 준다.
+        left_down,
+        left_up,
+        right_down,
+        right_up,
+        middle_down,
+        middle_up,
+        /// 버튼이 눌렸든 아니든 움직였다. 눌림 여부는 `mods`가 아니라 호출자의 드래그 상태가 안다.
+        moved,
+        wheel,
+    };
 };
 
 /// 클라이언트 영역 픽셀 크기. **이름을 준다** — 익명 구조체로 두면 호출자가 `orelse .{...}`로 기본값을
@@ -173,6 +205,21 @@ const GCS_COMPSTR: UINT = 0x0008;
 const WM_CLOSE: UINT = 0x0010;
 const WM_QUIT: UINT = 0x0012;
 const WM_PAINT: UINT = 0x000F;
+
+const WM_MOUSEMOVE: UINT = 0x0200;
+const WM_LBUTTONDOWN: UINT = 0x0201;
+const WM_LBUTTONUP: UINT = 0x0202;
+const WM_RBUTTONDOWN: UINT = 0x0204;
+const WM_RBUTTONUP: UINT = 0x0205;
+const WM_MBUTTONDOWN: UINT = 0x0207;
+const WM_MBUTTONUP: UINT = 0x0208;
+const WM_MOUSEWHEEL: UINT = 0x020A;
+/// 캡처를 잃었다(다른 창이 가져가거나 Alt+Tab). **드래그를 여기서 끝내야 한다** — 안 그러면 버튼을 뗀
+/// 적이 없는 채로 드래그 상태가 남아 다음 이동이 전부 선택 확장이 된다.
+const WM_CAPTURECHANGED: UINT = 0x0215;
+
+extern "user32" fn SetCapture(HWND) callconv(.winapi) ?HWND;
+extern "user32" fn ReleaseCapture() callconv(.winapi) i32;
 
 const WS_OVERLAPPEDWINDOW: DWORD = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
@@ -295,6 +342,9 @@ pub const Window = struct {
     /// 없다(`preedit_changed` doc). 고정 버퍼인 이유는 렌더 경로에 할당을 끼우지 않기 위해서다.
     preedit_buf: [256]u8 = undefined,
     preedit_len: usize = 0,
+    /// 지금 우리가 마우스를 잡고 있나(`SetCapture`). **우리 해제와 남의 탈취를 가르는 표시**다 —
+    /// `ReleaseCapture`도 `WM_CAPTURECHANGED`를 부르므로, 이것 없이는 드래그마다 up 이 두 번 올라간다.
+    capturing: bool = false,
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("MaruWindowClass");
 
@@ -313,6 +363,11 @@ pub const Window = struct {
         const wc = WNDCLASSEXW{
             .cbSize = @sizeOf(WNDCLASSEXW),
             // 폭·높이가 바뀌면 전체를 다시 그린다 — 셀 격자라 부분 무효화가 오히려 복잡하다.
+            //
+            // **`CS_DBLCLKS`를 일부러 켜지 않는다.** 켜면 두 번째 클릭이 `WM_LBUTTONDOWN`이 아니라
+            // `WM_LBUTTONDBLCLK`로 오는데, Win32 는 **트리플을 알려 주지 않는다** — 터미널엔 줄 선택
+            // (트리플)이 있어야 하므로 어차피 우리가 세야 하고, 그러려면 모든 클릭이 같은 메시지로
+            // 와야 한다. 세는 규칙은 `win32_mouse.ClickTracker`가 갖는다(§2k).
             .style = CS_HREDRAW | CS_VREDRAW,
             .lpfnWndProc = wndProc,
             .cbClsExtra = 0,
@@ -422,6 +477,23 @@ pub const Window = struct {
     /// 지금 조합 중인 문자열(UTF-8). 조합이 없으면 빈 슬라이스다. **다음 `preedit_changed`까지 유효하다.**
     pub fn preeditText(self: *const Window) []const u8 {
         return self.preedit_buf[0..self.preedit_len];
+    }
+
+    /// 마우스 이벤트를 올린다. **좌표는 픽셀 그대로** — 셀 변환은 격자를 아는 호출자 몫이다(§2k).
+    ///
+    /// 모디파이어는 `GetKeyState`로 **메시지 처리 시점** 기준으로 읽는다. `wParam`의 `MK_SHIFT`/`MK_CONTROL`
+    /// 비트를 쓰지 않는 이유는 그쪽엔 **Alt가 없기** 때문이다 — Alt는 리포팅 override이자 블록 선택 키라
+    /// (§2k) 없으면 두 기능이 통째로 죽는다. 두 출처를 섞느니 하나로 읽는다.
+    fn pushMouse(self: *Window, kind: MouseEvent.Kind, lparam: LPARAM, wheel: i32) void {
+        const mod = modifierState();
+        const pt = win32_mouse.pointFromLparam(lparam);
+        self.push(.{ .mouse = .{
+            .kind = kind,
+            .x_px = pt.x,
+            .y_px = pt.y,
+            .mods = win32_mouse.modifiersFrom(mod.ctrl, mod.shift, mod.alt),
+            .wheel_delta = wheel,
+        } });
     }
 
     /// `WM_IME_COMPOSITION`에서 조합 문자열을 읽어 UTF-8로 저장한다.
@@ -577,6 +649,53 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
         },
         WM_CHAR, WM_SYSCHAR => {
             if (self) |w| w.pushChar(@intCast(wparam));
+            return 0;
+        },
+        WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP => {
+            if (self) |w| {
+                const kind: MouseEvent.Kind = switch (msg) {
+                    WM_LBUTTONDOWN => .left_down,
+                    WM_LBUTTONUP => .left_up,
+                    WM_RBUTTONDOWN => .right_down,
+                    WM_RBUTTONUP => .right_up,
+                    WM_MBUTTONDOWN => .middle_down,
+                    WM_MBUTTONUP => .middle_up,
+                    else => .moved,
+                };
+                // **왼쪽 버튼 동안 포인터를 잡는다.** 안 잡으면 드래그가 창 밖으로 나가는 순간 메시지가
+                // 끊겨 선택이 거기서 멈추고, 밖에서 버튼을 떼면 `WM_LBUTTONUP`을 **영영 못 받아** 드래그
+                // 상태가 남는다.
+                if (kind == .left_down) {
+                    _ = SetCapture(w.hwnd);
+                    w.capturing = true;
+                }
+                if (kind == .left_up and w.capturing) {
+                    // **우리가 놓는 것은 `WM_CAPTURECHANGED`를 부른다.** 그 핸들러가 up 을 또 올리면
+                    // 드래그마다 up 이 두 번 온다(실측: 이벤트가 11 이 아니라 12 였다). 먼저 표시를
+                    // 지워 그쪽이 우리 해제를 남의 탈취로 오해하지 않게 한다.
+                    w.capturing = false;
+                    _ = ReleaseCapture();
+                }
+                w.pushMouse(kind, lparam, 0);
+            }
+            return 0;
+        },
+        WM_MOUSEWHEEL => {
+            // **휠 좌표는 화면 기준이다**(다른 마우스 메시지와 달리). 셀로 바꿀 때 어긋나므로 좌표를
+            // 쓰지 않고 델타만 싣는다 — 스크롤은 활성 표면 전체에 걸리지 커서 아래 셀에 걸리지 않는다.
+            if (self) |w| w.pushMouse(.wheel, 0, win32_mouse.wheelDeltaFromWparam(wparam));
+            return 0;
+        },
+        WM_CAPTURECHANGED => {
+            // **남이 캡처를 빼앗았을 때만** up 을 올린다(Alt+Tab 등). 버튼을 뗀 적이 없으므로 호출자가
+            // 드래그를 끝낼 수 있어야 한다 — 안 그러면 다음 이동이 전부 선택 확장이 된다. 우리가
+            // `ReleaseCapture` 로 놓은 경우는 `capturing` 이 이미 false 라 여기서 또 올리지 않는다.
+            if (self) |w| {
+                if (w.capturing) {
+                    w.capturing = false;
+                    w.pushMouse(.left_up, 0, 0);
+                }
+            }
             return 0;
         },
         WM_PAINT => {

@@ -17,6 +17,8 @@ const win32_terminal = @import("platform/windows/win32_terminal.zig");
 const win32_keys = @import("platform/windows/win32_keys.zig");
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
 const win32_clipboard = @import("platform/windows/win32_clipboard.zig");
+// W7.4d Win32 마우스 규칙(선택·스크롤·리포팅) — 전부 순수 함수다.
+const win32_mouse = @import("platform/windows/win32_mouse.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -256,6 +258,8 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
             // 이 스모크는 창 계약만 본다 — 입력은 W7.4a 의 터미널 스모크가 검증한다.
             .key => {},
             .preedit_changed => {},
+            // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
+            .mouse => {},
         };
         _ = usleep(8_000); // 8ms — 스모크가 CPU를 태우지 않게. 프레임 페이싱은 W7.2 몫이다.
     }
@@ -331,6 +335,8 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
             .close_requested => close_requested = true,
             .key => {},
             .preedit_changed => {},
+            // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
+            .mouse => {},
         };
         present.clearAndPresent(clear, false) catch |err| {
             try stderr.print("present failed: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
@@ -459,6 +465,8 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .close_requested => close_requested = true,
             .key => {},
             .preedit_changed => {},
+            // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
+            .mouse => {},
         };
 
         const size = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h) orelse continue;
@@ -676,6 +684,8 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .close_requested => close_requested = true,
             .key => {},
             .preedit_changed => {},
+            // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
+            .mouse => {},
         };
 
         cells.clearRetainingCapacity();
@@ -832,6 +842,71 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
     try stdout.writeAll("visible UI: none — this is a neutral contract smoke. Putting it on screen is W7.2c-2.\n");
     try stdout.flush();
     try stderr.flush();
+}
+
+/// 붙여넣기 한 번의 결과. **갈래별로 센다** — 합치면 "막혔는데 붙은 줄 알았다"를 못 가른다.
+const PasteOutcome = struct {
+    pastes: usize = 0,
+    paste_bytes: usize = 0,
+    bracketed: usize = 0,
+    blocked: usize = 0,
+    errors: usize = 0,
+};
+
+/// 클립보드를 읽어 활성 표면에 붙여넣는다 — W7.4b 의 규칙 그대로다.
+///
+/// **화음(`Ctrl+Shift+V`)과 우클릭이 이 함수를 공유한다.** 두 자리에 같은 규칙을 복사하면 한쪽만 고쳐져
+/// 어긋난다 — 그리고 그 규칙이 하필 **보안 규칙**이다(raw 바이트를 셸에 보내지 않는다: bracketed 래핑·
+/// 개행 정규화·ESC 치환. 클립보드의 `\x1b[201~` 이 래핑을 빠져나오면 명령이 실행된다).
+fn pasteClipboardIntoActive(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    hwnd: ?*anyopaque,
+    app_window: *maru.session.window.AppWindow,
+    runtime: *maru.app.SurfaceRuntime,
+    stderr: *std.Io.Writer,
+    paste_protection: bool,
+    bracketed_paste_is_safe: bool,
+    out: *PasteOutcome,
+) !void {
+    const maybe = win32_clipboard.read(allocator, hwnd) catch |err| {
+        try stderr.print("  warning: clipboard read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+        out.errors += 1;
+        return;
+    };
+    const text = maybe orelse return;
+    defer allocator.free(text);
+
+    var needs_confirm = false;
+    var bracketed = false;
+    if (app_window.active()) |active| {
+        // 판정과 bracketed 읽기만 락 안에서 — 인코딩(할당·복사)은 밖에서 한다(macOS `submitPaste` 순서).
+        active.lockCore(io);
+        needs_confirm = active.core.pasteNeedsConfirmation(text, paste_protection, bracketed_paste_is_safe);
+        bracketed = active.core.bracketedPasteEnabled();
+        active.unlockCore(io);
+    }
+    if (needs_confirm) {
+        // **확인 모달이 없으면 붙여넣지 않는다.** 모달이 없다고 보호를 건너뛰면 위험한 붙여넣기가
+        // 조용히 실행된다 — 거절하고 세는 편이 맞다(확인 UI 는 W8).
+        try stderr.writeAll("  paste held: the content is risky (the confirm UI is W8). Nothing was pasted\n");
+        out.blocked += 1;
+        return;
+    }
+    const encoded = maru.terminal.encodePasteWith(bracketed, allocator, text) catch |err| {
+        try stderr.print("  warning: paste encoding failed({s})\n", .{@errorName(err)});
+        out.errors += 1;
+        return;
+    };
+    defer allocator.free(encoded);
+    maru.app.host.sendInputToActiveSurface(app_window, runtime, .{ .bytes = encoded }) catch |err| {
+        try stderr.print("  warning: paste send failed({s})\n", .{@errorName(err)});
+        out.errors += 1;
+        return;
+    };
+    out.pastes += 1;
+    out.paste_bytes += encoded.len;
+    if (bracketed) out.bracketed += 1;
 }
 
 /// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 actual로 왕복시킨다.**
@@ -1126,10 +1201,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var preedit_updates: usize = 0;
     var preedit_failures: usize = 0;
     var preedit_max_bytes: usize = 0;
-    var pastes: usize = 0;
-    var paste_bytes: usize = 0;
-    var pastes_bracketed: usize = 0;
-    var pastes_blocked: usize = 0;
+    var paste_out: PasteOutcome = .{};
     // 붙여넣기 보호 설정. 이 스모크는 config 파일을 읽지 않으므로 **스키마 기본값을 그대로** 쓴다
     // (`config/theme.zig`: 둘 다 `true`). W7.5 에서 사용자 config 를 배선하면 거기서 온다.
     const paste_protection = true;
@@ -1137,6 +1209,36 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
     var osc52_reads_denied_unimplemented: usize = 0;
+    // W7.4d 마우스. **갈래별로 센다** — 합치면 "선택이 안 되는데 이벤트는 왔다"를 못 가른다.
+    var mouse_events: usize = 0;
+    var mouse_reports: usize = 0;
+    var selections: usize = 0;
+    var extends: usize = 0;
+    var word_selections: usize = 0;
+    var line_selections: usize = 0;
+    var scrolls: usize = 0;
+    var alt_scrolls: usize = 0;
+    var copies: usize = 0;
+    var copy_bytes: usize = 0;
+    var right_click_pastes: usize = 0;
+    var right_click_menus_unimplemented: usize = 0;
+    // 우클릭 동작. `config/theme.zig`의 `input.right_click` **기본값이 `paste`** 다(PuTTY/X11 식 —
+    // 사용자 결정). 이 스모크는 config 를 안 읽으므로 그 기본값을 그대로 쓴다(W7.5 에서 진짜 설정에서 온다).
+    const right_click_action: maru.config.theme.RightClick = .paste;
+    var dragging = false;
+    var last_motion_cell: ?win32_mouse.Cell = null;
+    var wheel_acc: win32_mouse.WheelAccumulator = .{};
+    var click_tracker: win32_mouse.ClickTracker = .{};
+    // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
+    // 무시하게 된다. 규칙은 순수 함수가 갖고 이 값들은 그 인자다(§2k, OS-as-parameter).
+    const double_click_ms = win32_mouse.systemDoubleClickMs();
+    const click_slop_x = win32_mouse.systemDoubleClickSlopX();
+    const click_slop_y = win32_mouse.systemDoubleClickSlopY();
+    const wheel_lines_per_notch = win32_mouse.systemWheelScrollLines();
+    // 단어 구분자. `config/theme.zig`의 `input.word_separators` **기본값이 빈 값**이다(공백만 경계라
+    // 비공백 run 전체를 선택한다). 이 스모크는 config 를 안 읽으므로 그 기본값을 그대로 쓴다 —
+    // 값을 지어내면 실제 앱과 다르게 동작한다. W7.5 에서 진짜 설정에서 온다.
+    const default_word_separators: []const u8 = "";
     // OSC 52 읽기 정책. 이 스모크는 config 를 읽지 않으므로 스키마 기본값(`deny`)을 그대로 쓴다 —
     // 원격 프로그램의 로컬 클립보드 탈취를 막는 사용자 결정이다(`config/theme.zig` `Osc52Config`).
     const osc52_read_policy: maru.config.theme.Osc52Read = .deny;
@@ -1166,59 +1268,37 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                // **복사가 여기서 붙는다.** §2j 가 `isCopyChord` 를 만들어 두고 호출자를 못 붙인 것은
+                // "무엇을 복사할지"가 선택 영역이고 그것이 마우스와 같은 계층이었기 때문이다(§2k).
+                // 경계는 그대로다 — 선택은 중립 코어가, 클립보드는 플랫폼이 안다.
+                if (win32_keys.isCopyChord(key_ev)) {
+                    const active = app_window.active() orelse continue;
+                    // 추출은 **락 아래**(코어 읽기), OS 호출은 락 밖 — §2j 의 규율 그대로다.
+                    const maybe_text: ?[]u8 = blk: {
+                        active.lockCore(io);
+                        defer active.unlockCore(io);
+                        break :blk active.core.extractSelection(allocator) catch null;
+                    };
+                    if (maybe_text) |text| {
+                        defer allocator.free(text);
+                        if (text.len > 0) {
+                            if (win32_clipboard.write(allocator, window.hwnd, text)) |_| {
+                                copies += 1;
+                                copy_bytes += text.len;
+                            } else |err| {
+                                try stderr.print("  warning: copy failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+                                clipboard_errors += 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // **붙여넣기는 플랫폼이 가로챈다.** 클립보드는 OS 소유이고 중립 레이어에 `Action`이 없다
                 // (`config/action.zig` 경계: Zig 는 selection, 플랫폼은 clipboard) — macOS 가 Swift 쪽에서
                 // 하는 것과 같은 자리다. `Ctrl+Shift+V`(Windows Terminal 관례)와 `Shift+Insert`(고전 관례)
                 // 둘 다 받는다.
                 if (win32_keys.isPasteChord(key_ev)) {
-                    if (win32_clipboard.read(allocator, window.hwnd)) |maybe| {
-                        if (maybe) |text| {
-                            defer allocator.free(text);
-                            // **raw 바이트를 셸에 보내지 않는다.** 중립 코어가 붙여넣기 규칙을 이미 갖고
-                            // 있다 — bracketed paste(DECSET 2004) 래핑, 개행 정규화, 그리고 **본문의
-                            // ESC·제어 바이트 제거**다. 그것을 건너뛰면 클립보드에 `\x1b[201~rm -rf ~` 가
-                            // 들어 있을 때 래핑을 빠져나와 명령이 실행된다. macOS `term.submitPaste` 와
-                            // 같은 순서로 부른다.
-                            var needs_confirm = false;
-                            var bracketed = false;
-                            if (app_window.active()) |active| {
-                                // 판정과 bracketed 읽기만 락 안에서 — 인코딩(할당·복사)은 밖에서 한다.
-                                active.lockCore(io);
-                                needs_confirm = active.core.pasteNeedsConfirmation(
-                                    text,
-                                    paste_protection,
-                                    bracketed_paste_is_safe,
-                                );
-                                bracketed = active.core.bracketedPasteEnabled();
-                                active.unlockCore(io);
-                            }
-                            if (needs_confirm) {
-                                // **확인 모달이 없으면 붙여넣지 않는다.** macOS 는 여기서 확인창을 띄우는데
-                                // Windows 엔 chrome 이 아직 없다(W8). 모달이 없다고 보호를 건너뛰면 위험한
-                                // 붙여넣기가 **조용히 실행된다** — 거절하고 세는 편이 맞다.
-                                try stderr.writeAll("  paste held: the content is risky (the confirm UI is W8). Nothing was pasted\n");
-                                pastes_blocked += 1;
-                            } else if (maru.terminal.encodePasteWith(bracketed, allocator, text)) |encoded| {
-                                defer allocator.free(encoded);
-                                // 셸에 actual로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
-                                // 올라가면 화면에 아무것도 안 붙었는데 성공으로 읽힌다.
-                                if (maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = encoded })) |_| {
-                                    pastes += 1;
-                                    paste_bytes += encoded.len;
-                                    if (bracketed) pastes_bracketed += 1;
-                                } else |err| {
-                                    try stderr.print("  warning: paste send failed({s})\n", .{@errorName(err)});
-                                    clipboard_errors += 1;
-                                }
-                            } else |err| {
-                                try stderr.print("  warning: paste encoding failed({s})\n", .{@errorName(err)});
-                                clipboard_errors += 1;
-                            }
-                        }
-                    } else |err| {
-                        try stderr.print("  warning: clipboard read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
-                        clipboard_errors += 1;
-                    }
+                    try pasteClipboardIntoActive(allocator, io, window.hwnd, &app_window, &runtime, stderr, paste_protection, bracketed_paste_is_safe, &paste_out);
                     continue;
                 }
                 const outcome = loop.handleKeyEvent(resolver, key_ev, false, null) catch |err| {
@@ -1247,6 +1327,203 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 }
                 preedit_updates += 1;
                 if (text.len > preedit_max_bytes) preedit_max_bytes = text.len;
+            },
+            // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
+            // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
+            .mouse => |m| {
+                const active = app_window.active() orelse continue;
+                mouse_events += 1;
+
+                const grid = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h);
+                const cols: u16 = if (grid) |g| g.cols else 0;
+                const rows: u16 = if (grid) |g| g.rows else 0;
+
+                // 셸이 마우스를 잡고 있는지는 코어가 안다. **enum 하나만 락 아래서 읽는다.**
+                const tracking: maru.terminal.MouseTracking = blk: {
+                    active.lockCore(io);
+                    defer active.unlockCore(io);
+                    break :blk active.core.mouse_tracking;
+                };
+                const to_shell = win32_mouse.reportsToShell(tracking != .none, m.mods);
+
+                if (m.kind == .wheel) {
+                    // 휠 좌표는 화면 기준이라 셀로 안 쓴다(§2k) — 스크롤은 활성 표면에 걸린다.
+                    const lines = wheel_acc.feed(m.wheel_delta, wheel_lines_per_notch);
+                    if (lines == 0) continue;
+                    if (to_shell) {
+                        const button: u8 = if (lines > 0) win32_mouse.button_wheel_up else win32_mouse.button_wheel_down;
+                        var n: i32 = @intCast(@abs(lines));
+                        while (n > 0) : (n -= 1) {
+                            runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{
+                                .button = button,
+                                .col = 0,
+                                .row = 0,
+                                .x_px = 0,
+                                .y_px = 0,
+                                .pressed = true,
+                                .motion = false,
+                                .mods = win32_mouse.reportModifiers(m.mods),
+                            } }, io) catch {};
+                        }
+                        mouse_reports += 1;
+                        continue;
+                    }
+                    // alt 화면 + alternate scroll(DECSET 1007)이면 휠이 화살표 키가 된다.
+                    var alt_bytes: []const u8 = &.{};
+                    var key_buf: [maru.terminal.input.encoded_key_buffer_len]u8 = undefined;
+                    {
+                        active.lockCore(io);
+                        defer active.unlockCore(io);
+                        if (active.core.alt_active and active.core.alternate_scroll) {
+                            const key: maru.terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
+                            alt_bytes = active.core.encodeKey(.{ .key = key }, &key_buf) catch &.{};
+                        }
+                    }
+                    if (alt_bytes.len > 0) {
+                        // 프로그램이 화면을 다시 그리므로 **선택을 해제한다**(남으면 좌표가 어긋난 유령이다).
+                        runtime.enqueueCoreCommand(active.id, .select_clear, io) catch {};
+                        // **한 버퍼에 묶어 보낸다** — 줄마다 쓰면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍된다.
+                        var batch: [512]u8 = undefined;
+                        const per_batch = batch.len / alt_bytes.len;
+                        var remaining: u32 = @intCast(@abs(lines));
+                        while (remaining > 0) {
+                            const count = @min(remaining, @as(u32, @intCast(per_batch)));
+                            var len: usize = 0;
+                            var i: u32 = 0;
+                            while (i < count) : (i += 1) {
+                                @memcpy(batch[len..][0..alt_bytes.len], alt_bytes);
+                                len += alt_bytes.len;
+                            }
+                            maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = batch[0..len] }) catch break;
+                            remaining -= count;
+                        }
+                        alt_scrolls += 1;
+                        continue;
+                    }
+                    runtime.enqueueCoreCommand(active.id, .{ .scroll = @as(isize, lines) }, io) catch {};
+                    scrolls += 1;
+                    continue;
+                }
+
+                const cell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+
+                if (to_shell) {
+                    const is_motion = m.kind == .moved;
+                    // 버튼 없는 이동은 any(1003)일 때만, 그리고 **셀이 바뀔 때만** 보낸다 —
+                    // `WM_MOUSEMOVE` 는 픽셀마다 오는데 셀은 안 바뀐다.
+                    if (is_motion and !dragging) {
+                        if (tracking != .any) continue;
+                        if (last_motion_cell) |last| {
+                            if (last.row == cell.row and last.col == cell.col) continue;
+                        }
+                        last_motion_cell = cell;
+                    }
+                    const button: u8 = switch (m.kind) {
+                        .left_down, .left_up => win32_mouse.button_left,
+                        .middle_down, .middle_up => win32_mouse.button_middle,
+                        .right_down, .right_up => win32_mouse.button_right,
+                        .moved => if (dragging) win32_mouse.button_left else win32_mouse.button_none,
+                        .wheel => unreachable,
+                    };
+                    const pressed = switch (m.kind) {
+                        .left_up, .right_up, .middle_up => false,
+                        else => true,
+                    };
+                    if (m.kind == .left_down) dragging = true;
+                    if (m.kind == .left_up) dragging = false;
+                    runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{
+                        .button = button,
+                        .col = cell.col,
+                        .row = cell.row,
+                        .x_px = @intCast(@max(m.x_px, 0)),
+                        .y_px = @intCast(@max(m.y_px, 0)),
+                        .pressed = pressed,
+                        .motion = is_motion,
+                        .mods = win32_mouse.reportModifiers(m.mods),
+                    } }, io) catch {};
+                    mouse_reports += 1;
+                    continue;
+                }
+
+                // **우클릭은 `input.right_click` 이 정한다** — 기본값이 `paste` 다(PuTTY/X11 식, 사용자
+                // 결정: `config/theme.zig` `RightClick`). 트래킹 중이면 위에서 이미 리포팅으로 갔다.
+                if (m.kind == .right_down) {
+                    switch (right_click_action) {
+                        .paste => {
+                            // 화음과 **같은 함수**를 부른다 — 규칙(bracketed 래핑·ESC 치환·보호 게이트)을
+                            // 두 곳에 복사하면 한쪽만 고쳐진다. 그리고 그 규칙이 보안 규칙이다.
+                            try pasteClipboardIntoActive(allocator, io, window.hwnd, &app_window, &runtime, stderr, paste_protection, bracketed_paste_is_safe, &paste_out);
+                            right_click_pastes += 1;
+                        },
+                        // context 메뉴는 chrome 이 있어야 한다(W8). 지금은 아무것도 하지 않고 센다 —
+                        // 조용히 무시하면 "우클릭이 안 먹는다"의 원인을 못 찾는다.
+                        .menu => right_click_menus_unimplemented += 1,
+                        // 트래킹이 아닌데 `reporting` 으로 뒀으면 보낼 곳이 없다. 무동작이 맞다.
+                        .reporting => {},
+                    }
+                    continue;
+                }
+
+                // 로컬 선택. **좌버튼만** — 트래킹 아닌 상태의 중클릭은 무시한다.
+                switch (m.kind) {
+                    .left_down => {
+                        const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+                        const kind = click_tracker.classify(
+                            @intCast(@divTrunc(now_ns, std.time.ns_per_ms)),
+                            m.x_px,
+                            m.y_px,
+                            double_click_ms,
+                            click_slop_x,
+                            click_slop_y,
+                        );
+                        switch (kind) {
+                            .single => {
+                                dragging = true;
+                                runtime.enqueueCoreCommand(active.id, .{ .select_start = .{
+                                    .row = cell.row,
+                                    .col = cell.col,
+                                    .block = win32_mouse.blockSelection(m.mods),
+                                } }, io) catch {};
+                                selections += 1;
+                            },
+                            .double => {
+                                // 단어 구분자는 config 값인데 이 스모크는 config 를 안 읽는다 — 스키마
+                                // 기본값을 그대로 실어 보낸다(W7.5 에서 진짜 설정에서 온다).
+                                var sw: maru.session.core_command.SelectWord = .{ .row = cell.row, .col = cell.col };
+                                const n = @min(default_word_separators.len, sw.separators.len);
+                                @memcpy(sw.separators[0..n], default_word_separators[0..n]);
+                                sw.sep_len = @intCast(n);
+                                runtime.enqueueCoreCommand(active.id, .{ .select_word = sw }, io) catch {};
+                                // **더블·트리플 직후의 up 이 그 선택을 지우면 안 된다** — 단어가 1칸이면
+                                // "이동 없는 클릭" 판정에 걸려 즉시 해제된다.
+                                dragging = false;
+                                word_selections += 1;
+                            },
+                            .triple => {
+                                runtime.enqueueCoreCommand(active.id, .{ .select_line = cell.row }, io) catch {};
+                                dragging = false;
+                                line_selections += 1;
+                            },
+                        }
+                    },
+                    .moved => {
+                        if (!dragging) continue;
+                        runtime.enqueueCoreCommand(active.id, .{ .select_extend = .{
+                            .row = cell.row,
+                            .col = cell.col,
+                        } }, io) catch {};
+                        extends += 1;
+                    },
+                    .left_up => {
+                        if (!dragging) continue;
+                        dragging = false;
+                        runtime.enqueueCoreCommand(active.id, .{ .select_extend_or_collapse = .{
+                            .row = cell.row,
+                            .col = cell.col,
+                        } }, io) catch {};
+                    },
+                    else => {},
+                }
             },
         };
 
@@ -1353,7 +1630,40 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes });
-    try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d}\n", .{ pastes, paste_bytes, pastes_bracketed, pastes_blocked });
+    try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
+    try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus_todo={d}\n", .{ copies, copy_bytes, right_click_pastes, right_click_menus_unimplemented });
+    // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.
+    try stdout.print("mouse_events={d} reports={d} selections={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, extends, word_selections, line_selections });
+    // **이 줄이 판정이다.** 명령을 몇 개 보냈는지가 아니라, 그것이 코어에 **닿아 선택이 생겼는지**를
+    // 본다 — 명령 수만 세면 리더가 하나도 적용 못 해도 성공처럼 보인다("성공처럼 보이는 실패").
+    {
+        const sel: ?[]u8 = if (app_window.active()) |active| blk: {
+            active.lockCore(io);
+            defer active.unlockCore(io);
+            break :blk active.core.extractSelection(allocator) catch null;
+        } else null;
+        if (sel) |text| {
+            defer allocator.free(text);
+            try stdout.print("selection_bytes={d}\n", .{text.len});
+        } else {
+            try stdout.writeAll("selection_bytes=0\n");
+        }
+    }
+    try stdout.print("scrolls={d} alt_scrolls={d} wheel_lines_per_notch={d} double_click_ms={d}\n", .{ scrolls, alt_scrolls, wheel_lines_per_notch, double_click_ms });
+    // **코어가 실제로 무엇을 보고 있는지 찍는다.** 라우팅이 예상과 다를 때 "우리 판정이 틀렸나, 코어가
+    // 모드를 못 받았나"를 가르는 유일한 줄이다 — 없으면 둘을 구분 못 해 엉뚱한 곳을 고친다.
+    if (app_window.active()) |active| {
+        active.lockCore(io);
+        const tracking = active.core.mouse_tracking;
+        const fmt_mode = active.core.mouse_format;
+        const alt = active.core.alt_active;
+        const alt_scroll = active.core.alternate_scroll;
+        const bracketed = active.core.bracketed_paste;
+        active.unlockCore(io);
+        try stdout.print("core_modes: mouse_tracking={s} mouse_format={s} alt_active={} alternate_scroll={} bracketed_paste={}\n", .{
+            @tagName(tracking), @tagName(fmt_mode), alt, alt_scroll, bracketed,
+        });
+    }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
@@ -2189,6 +2499,7 @@ test {
     _ = win32_terminal;
     _ = win32_keys;
     _ = win32_clipboard;
+    _ = win32_mouse;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

@@ -1,6 +1,7 @@
 //! ArchiveSessionDetailPanel의 bounded geometry·opaque action 투영이다.
 
 const icons = @import("../../../icons.zig");
+const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const tree = @import("../../ui/tree.zig");
 const ui_button = @import("../../ui/button.zig");
 const layout = @import("../../ui/layout.zig");
@@ -33,13 +34,61 @@ pub const NodeIds = struct {
 /// Action label은 tree가 소유한다. 예전에는 view가 문자열 상수를 들고 직접 그려, 같은 label이
 /// hit rect와 다른 곳에서 계산될 여지가 있었다. 단축키 표기는 계약대로 label이 명시로 포함하며
 /// Button이 도메인별로 합성하지 않는다.
-pub const labels = struct {
-    // 두 아이콘은 등록된 Chrome SVG glyph다(recent.svg / document.svg). 지금은 label 문자열의
-    // 일부로 그려지며, `leading_icon` 슬롯으로 옮기는 것은 registry 주입 경로가 생기는 후속이다.
-    pub const resume_session = icons.utf8(.recent) ++ " 터미널에서 이어하기  ⌘↵";
-    pub const reveal = icons.utf8(.document) ++ " 로그 보기  ⌘L";
-    pub const focus_live = "열린 세션으로 이동";
+/// 액션 라벨은 **아이콘 · 이름 · 단축키 셋으로 나눠서** 든다(i18n 계약 §6.2).
+///
+/// 예전에는 `icons.utf8(.recent) ++ " 터미널에서 이어하기  ⌘↵"` 처럼 한 문자열이었다 — 계약이
+/// "최악 사례가 셋을 다 갖는다"고 지목한 바로 그 자리다. 그러면 (1) 아이콘을 바꾸려면 번역 테이블을
+/// 고쳐야 하고, (2) 단축키가 keybinding 이 아니라 **문장에서** 오고, (3) 번역자가 정렬 공백까지 받는다.
+///
+/// 조립은 `renderActionLabel` 이 버퍼에 한다 — 세 조각의 **경계가 코드에 남아** 나중에 아이콘을
+/// `leading_icon` 슬롯으로 옮기거나 단축키를 keybinding 에서 끌어올 때 그 자리가 보인다.
+pub const ActionLabel = struct {
+    icon: []const u8,
+    name_key: i18n.Key,
+    shortcut: []const u8,
 };
+
+pub const labels = struct {
+    // 두 아이콘은 등록된 Chrome SVG glyph다(recent.svg / document.svg).
+    pub const resume_session: ActionLabel = .{ .icon = icons.utf8(.recent), .name_key = .ad_resume_action, .shortcut = "\u{2318}\u{21B5}" };
+    pub const reveal: ActionLabel = .{ .icon = icons.utf8(.document), .name_key = .ad_reveal_action, .shortcut = "\u{2318}L" };
+    pub const focus_live: ActionLabel = .{ .icon = "", .name_key = .common_focus_live, .shortcut = "" };
+};
+
+/// `label` 을 `buf` 에 조립한다 — `<icon> <name>  <shortcut>`(아이콘·단축키가 없으면 그 자리도 없다).
+/// 넘치면 자른다(폭은 호출자가 판단한다 — 여기서는 버퍼만 지킨다).
+/// 조립 결과가 사는 자리.
+///
+/// **`tree.text` 는 값을 복사하지 않고 슬라이스를 그대로 든다** — 그래서 조립 버퍼는 `Frame` 보다
+/// 오래 살아야 한다. 지역 배열로 두면 함수가 끝나는 순간 dangling 이 되고(빌드도 테스트도 안 잡는다),
+/// `Buffers` 에 넣으면 호출부 전부가 그것을 넘겨야 하며 하나라도 빠뜨리면 빈 슬라이스에 인덱싱해
+/// 죽는다(실제로 그렇게 한 번 죽였다).
+///
+/// 그래서 모듈 레벨에 둔다. 이 컴포넌트의 build 는 **UI 스레드에서 프레임마다 한 번** 불리고
+/// (i18n 계약 §5.2 의 소유 규칙과 같은 스레드), 다음 프레임이 같은 자리를 덮는다 — 발행된 tree 는
+/// 그 프레임 안에서만 읽히므로 덮이는 시점이 문제가 되지 않는다.
+var action_label_storage: [3][64]u8 = undefined;
+
+pub fn renderActionLabel(buf: []u8, label: ActionLabel) []const u8 {
+    var used: usize = 0;
+    const put = struct {
+        fn f(dst: []u8, at: *usize, src: []const u8) void {
+            const n = @min(src.len, dst.len - at.*);
+            @memcpy(dst[at.* .. at.* + n], src[0..n]);
+            at.* += n;
+        }
+    }.f;
+    if (label.icon.len > 0) {
+        put(buf, &used, label.icon);
+        put(buf, &used, " ");
+    }
+    put(buf, &used, i18n.t(label.name_key));
+    if (label.shortcut.len > 0) {
+        put(buf, &used, "  ");
+        put(buf, &used, label.shortcut);
+    }
+    return buf[0..used];
+}
 
 pub const Buffers = struct {
     nodes: []tree.UiNode,
@@ -99,9 +148,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 구간이라 label은 published tree가 살아 있는 동안 유효하다.
     const label_nodes = buffers.nodes[visible_turns.len..][0..action_count];
     const action_nodes = buffers.nodes[visible_turns.len + action_count ..][0..action_count];
-    label_nodes[0] = tree.text(.{ .id = NodeIds.resume_label, .value = labels.resume_session });
-    label_nodes[1] = tree.text(.{ .id = NodeIds.reveal_label, .value = labels.reveal });
-    if (focus_live != null) label_nodes[2] = tree.text(.{ .id = NodeIds.focus_live_label, .value = labels.focus_live });
+    label_nodes[0] = tree.text(.{ .id = NodeIds.resume_label, .value = renderActionLabel(&action_label_storage[0], labels.resume_session) });
+    label_nodes[1] = tree.text(.{ .id = NodeIds.reveal_label, .value = renderActionLabel(&action_label_storage[1], labels.reveal) });
+    if (focus_live != null) label_nodes[2] = tree.text(.{ .id = NodeIds.focus_live_label, .value = renderActionLabel(&action_label_storage[2], labels.focus_live) });
     // Button 계약 위반은 그대로 전파한다. 예전에는 셋 다 `InsufficientNodeBuffer`로 덮여, 미등록
     // 아이콘이나 floor 위반이 "버퍼가 작다"로 보고돼 버퍼를 키워도 영영 낫지 않았다.
     const dock_scale = props.scale_milli;

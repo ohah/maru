@@ -544,7 +544,7 @@ pub const inventory = [_]Proof{
     // 스키마 변형 순서와 어긋나면 "한국어"를 골랐는데 `en` 이 저장된다. enum 을 도는 것이 그 어긋남을
     // 정의상 불가능하게 만들고, 그 대가로 반사 하나가 는다. 이 하나 말고 다른 자리가 늘었다면
     // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "7fcc4d56cb550d8a6678f6ba2c09e5e2268827208bc34e6a8a36eae2c84998ae" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "827ae1c90f99d3cf4e35cd7158804ba5265c1e2c44b3b0cefa505a69b8147b2f" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -573,9 +573,5 @@ pub const inventory = [_]Proof{
     // 세션 카드 메타 줄을 **세그먼트**로 쪼개며 문장 키 셋(`ad_summary`·`ad_summary_sub`·`_more`)이
     // 세그먼트 키 셋(`ad_meta_messages`·`ad_meta_subagents`·`_more`)으로 바뀌어 digest가 움직인다.
     // 구분자와 색 위계는 컴포넌트가 소유하므로 문구에서 빠졌다. count는 1 그대로다.
-    // P4 적대적 검증: 커밋 상자 소유권 판정이 **탭까지** 보고(`scmCommitOwnsInput`), 저장소가 갈리면
-    // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
-    // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
-    // P4b: diff 탭 라벨 `커밋`이 키로 들어와 digest가 움직인다. count는 1 그대로다.
     .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "cd11ae2d76c5d2cbab201b0161b465a10523669e08992514cb23a9c069105922" },
 };

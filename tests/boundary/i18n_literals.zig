@@ -51,8 +51,6 @@ const inventory = [_]Entry{
     .{ .path = "src/cli/ssh.zig", .count = 1 },
 
     // ── 번역 대상 레이어(§7.2) ──
-    .{ .path = "src/chrome/components/archive_detail/build.zig", .count = 3 },
-    .{ .path = "src/chrome/components/archive_detail/view.zig", .count = 4 },
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
     .{ .path = "src/chrome/components/settings.zig", .count = 8 },
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
@@ -62,7 +60,7 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/app_session.zig", .count = 16 },
     .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 3 },
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 5 },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 1 },
     .{ .path = "src/platform/macos/app_session/sidebar.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_session/term.zig", .count = 1 },
     .{ .path = "src/platform/macos/chrome/lab.zig", .count = 15 },

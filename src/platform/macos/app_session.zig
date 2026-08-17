@@ -10270,6 +10270,9 @@ pub const AppSession = struct {
                         const anchor_x: i32 = @intCast(self.sidebar_width_px -| 4 * self.cell_width_px); // ⚙ 아이콘 col
                         const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
                         self.chrome_host.context_menu.show(anchor_x, anchor_y, items.len);
+                        // **`show` 가 켜짐 표시를 비우므로 그 뒤에 다시 세운다**(컴포넌트의 규약).
+                        // 순서를 바꾸면 체크가 안 그려진다 — 빌드도 테스트도 안 잡는 종류라 여기 적는다.
+                        _ = settings_ops.buildViewOptionsMenuItems(self);
                         self.metal_dirty = true;
                     },
                     .search => {

@@ -1259,9 +1259,14 @@ pub fn contextMenuItems(self: *const AppSession) []const []const u8 {
 /// itemAt/draws/accept 경로를 공유하고, 분기는 view_options_menu 플래그로 한다. 라벨은 정적 리터럴이라 소유 불요.
 pub fn buildViewOptionsMenuItems(self: *AppSession) []const []const u8 {
     const sb = self.loaded_config.config.sidebar;
-    self.context_menu_items_buf[0] = if (sb.show_branch) "\u{2713} 브랜치 표시" else "  브랜치 표시";
-    self.context_menu_items_buf[1] = if (sb.show_folder) "\u{2713} 폴더 표시" else "  폴더 표시";
+    // **라벨은 이름만, 켜짐은 상태로**(i18n 계약 §6.2). 예전에는 `"✓ 브랜치 표시"` / `"  브랜치 표시"`
+    // 두 문자열을 만들어 넘겼는데, 그러면 기호와 정렬 공백이 번역 단위에 섞이고 켜짐 여부가 문자열
+    // 비교로만 드러난다. 기호는 컴포넌트가 `checked_mask` 를 보고 그린다.
+    self.context_menu_items_buf[0] = maru.i18n.t(.set_show_branch);
+    self.context_menu_items_buf[1] = maru.i18n.t(.set_show_folder);
     self.context_menu_items_len = 2;
+    self.chrome_host.context_menu.checked_mask =
+        (@as(u64, @intFromBool(sb.show_branch)) << 0) | (@as(u64, @intFromBool(sb.show_folder)) << 1);
     return self.context_menu_items_buf[0..2];
 }
 

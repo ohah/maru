@@ -1342,7 +1342,12 @@ pub fn collectAgentSessionDock(
     // +1은 header의 정렬 토글 label이다.
     const text_op_budget = 22 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
     const ops = arena.alloc(chrome.draw.Op, paint_quad_budget + text_op_budget) catch return;
-    const runs = arena.alloc(chrome.draw.Run, 10 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
+    // 카드 하나가 쓰는 run 상한: title·summary·provider·chevron 넷에 **메타 줄의 세그먼트 넷과 그 사이
+    // 구분자 셋**(개수·시각·모델·서브에이전트)이 더해져 11이다. 메타는 op 하나지만 run 은 여럿이라
+    // (한 줄 안의 색 위계 — `chrome.draw.Run`), 이 몫을 op 예산과 같은 값으로 두면 카드가 몇 개만
+    // 늘어도 `view` 가 `InsufficientRunBuffer` 로 실패한다. 그 결과는 "메타 줄만 빠짐"이 아니라
+    // **도크 전체 정지**다(위 paint_quad_budget 주석과 같은 실패 양식). 여유 1을 더해 12로 잡는다.
+    const runs = arena.alloc(chrome.draw.Run, 10 + items.len * 12 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
     const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
     const tokens = self.buildChromeTokens();
     const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{

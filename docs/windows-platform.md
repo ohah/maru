@@ -943,6 +943,48 @@ line1\nline2.log  → [line1][nline2.log]  ← 막아야 하는 것
 보는 판단과 같은 뿌리이고, **정상 파일을 잃는 쪽보다 루트 밖을 읽는 쪽이 더 나쁘다**고 보아 이 방향을 택했다.
 `path_shape.isAbsolute`의 doc 주석이 이 대가를 명시한다.
 
+### 5.3 홈·캐시 위치 — `%USERPROFILE%`로 폴백한다 (W8.5 결정)
+
+`src/main.zig`는 네 자리에서 홈 디렉터리를 요구한다 — terminfo 캐시, 컨트롤 소켓 디렉터리, `maru ssh`의
+control path, `install-cli` 설치 위치. 그리고 다섯 번째로 `trace anonymize`가 홈 경로를 **매칭 키**로 쓴다.
+전부 `getenv("HOME")`을 각자 불렀고, Windows는 `HOME`을 주지 않는다.
+
+**실측 (Windows 10.0.19045)** — 고치기 전 `maru terminfo --path`:
+
+| 환경 | `HOME` | 결과 | 판정 |
+|---|---|---|---|
+| git-bash | MSYS가 넣고 Win32 형태로 변환해 전달 | `C:/Users/<user>/.cache/maru/terminfo` | 정상 — **그래서 이 결함이 가려져 있었다** |
+| cmd.exe · PowerShell | 없음 | 안내 후 exit 1 | 기능이 죽는다 |
+| `HOME=""` (빈 문자열) | `""` | **`/.cache/maru/terminfo`, exit 0** | **조용히 틀린다** — 안내보다 나쁘다 |
+
+세 번째 줄이 계획에 없던 것이다. `getenv`는 빈 값에도 non-null을 주므로 `orelse` 가드가 발화하지 않고,
+드라이브 루트의 엉뚱한 경로가 **성공으로** 나간다. `resolveClickedPath`가 `~/` 확장에서 같은 함정을 절대
+경로 검사로 이미 막고 있었는데 여기는 아니었다.
+
+**결정: `%USERPROFILE%` 폴백.** 판정은 `cli/home.zig`의 `homeDirFor(os_tag, home, userprofile)` 하나가
+하고(순수·OS 인자), `main.zig`의 `hostHomeDir()`이 환경변수 읽기만 한다. 규칙은 셋이다 — ⑴ 값이 있고
+비어 있지 않고 **그 OS 기준 절대 경로**여야 홈으로 친다, ⑵ Windows면 `HOME`이 못 쓰는 값일 때
+`%USERPROFILE%`로 폴백한다, ⑶ POSIX에서는 폴백하지 않는다(`USERPROFILE`은 maru가 정의한 적 없는 이름이라,
+우연히 설정돼 있으면 의도치 않은 위치에 캐시를 만든다).
+
+고친 뒤 셋 다 **git-bash와 같은 경로로 수렴한다** — `C:/Users/<user>/.cache/maru/terminfo`. 수렴이 요점이다:
+셸에서 만든 캐시와 Zig가 보는 캐시가 같은 곳이어야 한다.
+
+**`%LOCALAPPDATA%`를 쓰지 않은 이유.** Windows 관례로는 캐시가 거기 가는 것이 맞다. 그런데
+`terminfo_cache.cacheDirZ`의 계약이 *"셸 `${XDG_CACHE_HOME:-$HOME/.cache}`와 반드시 같은 경로로 resolve"*
+이고, 그 셸 명령이 실제로 `tic`을 돌려 캐시를 만든다. Zig가 `%LOCALAPPDATA%`를 쓰고 셸이 `$HOME/.cache`를
+쓰면 **둘이 갈려 계약이 깨진다.** 같은 규칙을 `cli.sessions.controlDir`와 서버측
+`control_socket.controlDirPath`도 공유하므로 셋 + 셸 명령을 한꺼번에 옮겨야 하고, 그러면 git-bash 사용자의
+경로가 이사한다. 관례를 따르려면 **별도 슬라이스**가 맞다 — 그때 옮길 것 넷을 여기 적어 둔다.
+
+**이 슬라이스가 닫지 않은 것 — `--refresh`·`--clear`는 POSIX 셸을 요구한다.** `system()`은 Windows에서
+`/bin/sh`가 아니라 **cmd.exe**로 간다(msvcrt). 재컴파일·삭제 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는
+POSIX 스크립트다. 실측: cmd/PowerShell PATH에는 그 넷도 `tic`도 **없고**, 둘 다 git-bash의 `/usr/bin`에만
+있다. 그래서 이 슬라이스는 두 가지만 한다 — ⒜ 안내가 `tic`만 가리키던 것을 **셸과 tic 둘 다** 가리키게
+고쳤다(그 전에는 tic을 깔아도 계속 실패한다), ⒝ `--clear`가 `system()` 반환값을 **버리고** "삭제됨"을
+exit 0으로 찍던 것을 고쳤다 — 지우지 못했는데 지웠다고 말하고 있었다. `--refresh`를 Windows에서 실제로
+돌리는 것은 `maru ssh`의 `/bin/sh` 문제와 **같은 결정**이라 W9에서 함께 정한다(계약 §8).
+
 ## 6. 실측 (2026-08-15, Windows 10.0.19045, zig 0.16.0)
 
 계약을 쓰기 전에 PoC로 확인한 것과 확인하지 못한 것을 정직하게 남긴다.

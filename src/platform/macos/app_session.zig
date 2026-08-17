@@ -21338,6 +21338,9 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
 }
 
 test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 승계 (세션)" {
+    // 기대값이 보간 결과("그룹 N")라 키 비교가 동어반복이 된다 — 언어를 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -21350,6 +21353,7 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    maru.i18n.setLang(.ko);
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // 탭 3개: [t0, t1, t2]
 
     // create_group(t0) → group_start 세팅 + projectRows에 group_header(소스 tab=0) 삽입, 아래 카드 depth 1(연속 파티션으로 t0~t2 한 그룹).
@@ -21488,6 +21492,9 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
 }
 
 test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞)·최상위 no-op·마커 카드 승계·마지막 멤버 소멸(주입 조건)" {
+    // 기대값이 보간 결과("그룹 N")라 키 비교가 동어반복이 된다 — 언어를 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -21500,6 +21507,7 @@ test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    maru.i18n.setLang(.ko);
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2, t3] 4개
     const t0 = session.tabs.items[0];
     const t1 = session.tabs.items[1];
@@ -25683,11 +25691,16 @@ test "사이드바 세션 목록: 터미널도 행이 되고, 에이전트 Term�
 // 이 테스트는 rows가 아니라 **그려진 결과**를 본다: 토글 슬롯(표시 row 인덱스 1)의 셀이 실제로 나왔는가.
 // rows만 보는 테스트는 이 결함을 통과시켰다("존재하지만 안 보인다"는 격차가 정확히 사용자가 본 증상이다).
 test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 소실 회귀)" {
+    // 요약 문구를 **코드포인트로** 센다(`진행중`의 세 글자) — 한국어일 때만 성립하므로 언어를 고정한다.
+    // 재는 것은 "말줄임이 걸려 요약이 사라지지 않는가"이지 문구가 아니다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const session = try initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
+    maru.i18n.setLang(.ko);
 
     try pane_ops.newTermInActivePane(session); // Term 2개 → 목록이 생긴다
     const tab = session.tabs.items[0];
@@ -54268,7 +54281,7 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
     );
     // 판정과 **문구가 같은 자리에서** 갈리는지도 함께 고정한다 — 판정만 검증하면 뷰가 다른 조건으로 문구를
     // 고르는 회귀(실제로 있었다: `.unknown`까지 이 문구로 뭉갠 것)를 못 잡는다.
-    try std.testing.expectEqualStrings("git 저장소가 아닙니다", git_ops.scmEmptyNotice(session, &probe_buf));
+    try std.testing.expectEqualStrings(maru.i18n.t(.git_not_a_repo), git_ops.scmEmptyNotice(session, &probe_buf));
 
     session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
     session.git_failed = true;
@@ -54311,7 +54324,7 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
     // **`.unknown`은 "저장소가 아니다"와 다른 사실이고 문구도 달라야 한다.** 둘을 한 문구로 뭉개면, 저장소 안에
     // 서 있는데 물어볼 곳만 없는 상태(원격 세션·diff 열람 중)에서 뷰가 없는 사실을 단정한다 — 2026-08-13에
     // 로컬 세션이 원격으로 오판됐을 때 이 문구가 진짜 원인을 가린 그 결함이다.
-    try std.testing.expectEqualStrings("저장소를 확인할 수 없습니다", git_ops.scmEmptyNotice(session, &target_buf));
+    try std.testing.expectEqualStrings(maru.i18n.t(.git_repo_unknown), git_ops.scmEmptyNotice(session, &target_buf));
     git_ops.followActiveTerminalRepo(session);
     try std.testing.expect(session.git_result != null);
 }
@@ -54375,7 +54388,7 @@ test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통�
         std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
     );
     // 그리고 안내는 "모른다"여야 한다 — "저장소가 아니다"라는 단정이 이 사건에서 진짜 원인을 가렸다.
-    try std.testing.expectEqualStrings("저장소를 확인할 수 없습니다", git_ops.scmEmptyNotice(session, &target_buf));
+    try std.testing.expectEqualStrings(maru.i18n.t(.git_repo_unknown), git_ops.scmEmptyNotice(session, &target_buf));
 
     // ⑵ **대조군(= 수정)**: 로컬 셸 통합이 보내는 빈 authority면 같은 경로가 로컬로 읽혀 저장소가 잡힌다.
     try term.surface.core.write(try std.fmt.bufPrint(&osc_buf, "\x1b]7;file://{s}\x07", .{repo}));
@@ -55515,11 +55528,11 @@ test "소스 컨트롤: 커밋할 수 없으면 그 이유를 말한다(빈 메�
 
     scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.submitCommit(session); // 메시지가 없다
-    try std.testing.expectEqualStrings("커밋 메시지를 입력하세요", session.scm_write_error.?);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_need_commit_message), session.scm_write_error.?);
 
     scm_dock_ops.insertCommitText(session, "fix: 무언가");
     scm_dock_ops.submitCommit(session); // 스테이지된 것이 없다(fixture 목록은 `.M` 하나뿐)
-    try std.testing.expectEqualStrings("스테이지된 변경이 없습니다", session.scm_write_error.?);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_nothing_staged), session.scm_write_error.?);
     // **글자는 그대로다** — 거절이 사용자의 글을 지우면 안 된다.
     try std.testing.expectEqualStrings("fix: 무언가", session.scm_commit_field.text.items);
 }

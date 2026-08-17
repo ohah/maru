@@ -26,6 +26,7 @@ const tree = chrome.ui.tree;
 const layout = chrome.ui.layout;
 const paint_mod = chrome.ui.paint;
 const scroll_area = chrome.ui.scroll_area;
+const input_math = maru.session.input_math;
 const gesture = chrome.ui.gesture;
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -436,6 +437,7 @@ fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
 }
 
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
+
     // **밀린 화면이 있으면 글자는 셸로 안 간다.** 설정을 열어도 소프트 키보드는 떠 있으므로
     // (§5.2 — 앱이 내리지 않는다) 여기서 안 막으면 사용자가 **안 보이는 셸에 타이핑**하게 된다.
     // 화면에 아무 반응이 없어 잃은 것도 모른다. 설정에 입력 칸이 생기면(검색) 그때 그쪽으로
@@ -641,6 +643,62 @@ fn snapToBottomOnInput(core: *terminal.core.TerminalCore) void {
 
 /// 플랫폼이 넘긴 논리 px 를 줄로 바꿔 코어에 태운다. **환산이 여기 있는 이유**는 셀 높이가
 /// 코어 쪽 값이기 때문이다 — 플랫폼은 배치를 모른다(§3).
+/// 휠 한 칸이 몇 줄인가. **macOS 는 이 3 을 이벤트에 이미 실어 보내고**(NSEvent 의 wheel
+/// deltaY 가 노치당 3), Android `AXIS_VSCROLL` 은 노치당 1 만 준다 — 같은 휠이 플랫폼마다
+/// 다르게 굴러가지 않도록 **여기서 한 번** 맞춘다.
+const wheel_lines_per_notch: f64 = 3.0;
+
+/// 한 줄이 안 되는 휠 델타를 모은다. **버리면 정밀 트랙패드가 아예 안 움직인다**(데스크톱이
+/// 겪어 `wheelDeltaToLines` 에 누적기를 둔 자리 — 같은 함수를 쓴다).
+var wheel_accum: f64 = 0;
+
+/// 마우스 휠·트랙패드. **플랫폼은 원시 델타만 넘긴다**(데스크톱 ABI 와 같은 모양) — 줄 환산은
+/// `maru.session.input_math.wheelDeltaToLines` 하나가 한다.
+///
+/// `precise != 0` 이면 델타가 **논리 px**(트랙패드), 0 이면 **노치**(휠)다. 부호는 손가락과 같다 —
+/// 양수면 과거(위)로 간다.
+///
+/// **비유한 값(NaN·Inf)은 여기서 따로 안 막는다** — `wheelDeltaToLines` 가 이미 막고 있고,
+/// 두 곳에서 막으면 한쪽이 죽는다(가드를 지우는 변이가 아무 테스트도 안 깼다). 그 보호가
+/// 경로에 남아 있는지는 계약 테스트가 지킨다.
+///
+/// **가로(`delta_x`)는 아직 안 쓴다.** 데스크톱은 그것을 탭 바 가로 스크롤로 보내는데, 모바일의
+/// 가로 스크롤 면은 키바뿐이고 마우스로 키바를 굴릴 이유가 아직 없다 — 쓰게 되면 그때 정한다
+/// (지금 받아 두는 것은 서명을 두 번 바꾸지 않으려는 것이다).
+pub export fn maru_mobile_wheel(delta_y: f32, delta_x: f32, precise: u32, x: f32, y: f32) void {
+    _ = delta_x;
+    _ = x;
+    _ = y;
+
+    // **밀린 화면 위에서 굴리면 그 목록이 움직인다.** 마우스는 가리키는 것이 곧 대상이다 —
+    // 안 보이는 뒤 화면을 굴리면 돌아왔을 때 보던 자리가 아니다.
+    if (screenTop() == .settings) {
+        const lines = input_math.wheelDeltaToLines(
+            &wheel_accum,
+            @as(f64, delta_y) * (if (precise != 0) 1.0 else wheel_lines_per_notch),
+            precise != 0,
+            @intFromFloat(set_row_h),
+            1000,
+        );
+        if (lines == 0) return;
+        _ = set_sa.scrollByPx(@intFromFloat(-@as(f32, @floatFromInt(lines)) * set_row_h), @intFromFloat(@max(0, set_max_scroll)));
+        return;
+    }
+
+    const line_h: u32 = if (body_line_h > 0) @intCast(body_line_h) else 1;
+    const lines = input_math.wheelDeltaToLines(
+        &wheel_accum,
+        @as(f64, delta_y) * (if (precise != 0) 1.0 else wheel_lines_per_notch),
+        precise != 0,
+        line_h,
+        1000,
+    );
+    if (lines == 0) return;
+    // **적용은 손가락과 같은 경로다** — alt 화면 변환·선택 해제·clamp 가 거기 있고, 두 벌이 되면
+    // 갈린다(휠만 alt 화면에서 뷰포트를 움직이는 일이 생긴다).
+    maru_mobile_scroll(@as(f32, @floatFromInt(lines)) * @as(f32, @floatFromInt(line_h)));
+}
+
 pub fn maru_mobile_scroll(dy_px: f32) void {
     // **밀린 화면이 있으면 뒤는 안 움직인다.** host 의 관성은 손을 뗀 뒤에도 몇 프레임 더
     // 도는데, 그 사이 톱니를 눌러 설정을 열면 **안 보이는 터미널이 계속 흘러** 돌아왔을 때

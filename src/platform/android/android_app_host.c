@@ -1193,6 +1193,22 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             return 1;
         }
 
+        // **마우스 휠·트랙패드.** 손가락과 달리 `down`/`up` 이 없고 델타가 곧 이벤트다 —
+        // 그래서 포인터 경로가 아니라 전용 진입점으로 보낸다. 줄 환산은 코어가 한다(§3.1):
+        // `AXIS_VSCROLL` 은 **노치**라 `precise=0` 이고, 트랙패드의 픽셀 델타는 이 축으로
+        // 안 온다(Android 는 그것도 노치로 준다).
+        if (action == AMOTION_EVENT_ACTION_SCROLL) {
+            float vs = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_VSCROLL, 0);
+            float hs = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HSCROLL, 0);
+            float lx = AMotionEvent_getX(ev, 0) / g.scale;
+            float ly = (AMotionEvent_getY(ev, 0) - (float)g.inset_top) / g.scale;
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_wheel(vs, hs, 0, lx, ly);
+            pthread_mutex_unlock(&g_bridge_lock);
+            LOGI("MARU_WHEEL vscroll=%.2f hscroll=%.2f view_offset=%u", vs, hs, maru_mobile_view_offset());
+            return 1;
+        }
+
         // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지 하나에 한 번만 보낸다.
         if (action == AMOTION_EVENT_ACTION_CANCEL) {
             pthread_mutex_lock(&g_bridge_lock);

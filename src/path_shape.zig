@@ -324,7 +324,65 @@ pub fn trimTrailingSep(base: []const u8) []const u8 {
     return base;
 }
 
+/// 루트 아래 경로에서 **루트를 뗀 나머지**를 돌려준다. 루트 밖이면 `null`.
+///
+/// **구분자가 정확히 한 바이트라고 가정하면 안 된다.** `path[root.len + 1 ..]`는 루트가 구분자로 끝날 때
+/// 한 바이트를 더 먹는다 — 루트가 `/`면 `/Users/x`가 `sers/x`가 되고, `C:/`면 `C:/a/b`가 `/b`가 되어
+/// **`a`가 통째로 사라진 채 `C:/b`를 연다.** 다른 파일을 여는 것이라 조용히 틀리는 쪽 중에서도 나쁘다.
+/// `pathWithin`이 받아들이는 루트 집합이 `{/}`에서 `{/, C:/, C:/repo/}`로 넓어져 이 가정이 깨졌다
+/// (docs/windows-platform.md §5.2 ⒝).
+///
+/// **경계도 함께 본다.** 루트가 구분자로 안 끝나면 그다음 바이트가 구분자여야 한다 — 아니면 `/a/proj`가
+/// `/a/project`의 루트로 통과한다(`repo_path.zig`가 이미 같은 검사를 갖고 있다).
+///
+/// 루트 자신이면 빈 슬라이스다. 반환값은 **앞에 구분자가 없다.**
+pub fn relativeUnderRoot(path: []const u8, root: []const u8) ?[]const u8 {
+    if (root.len == 0) return null;
+    if (path.len < root.len) return null;
+    if (!std.mem.eql(u8, path[0..root.len], root)) return null;
+    if (path.len == root.len) return path[path.len..]; // 루트 자신 — 빈 슬라이스
+    if (endsWithSep(root)) return path[root.len..];
+    if (path[root.len] != '/') return null; // 경계가 아니다
+    return path[root.len + 1 ..];
+}
+
 const testing = std.testing;
+
+test "relativeUnderRoot: 구분자로 끝나는 루트에서 첫 세그먼트를 안 먹는다" {
+    // **이것이 이 함수의 존재 이유다.** `path[root.len + 1 ..]` 는 여기서 한 바이트를 더 먹는다.
+    try testing.expectEqualStrings("Users/x", relativeUnderRoot("/Users/x", "/").?);
+    try testing.expectEqualStrings("a/b", relativeUnderRoot("C:/a/b", "C:/").?);
+    try testing.expectEqualStrings("a/b", relativeUnderRoot("C:/repo/a/b", "C:/repo/").?);
+
+    // 평범한 루트(구분자로 안 끝남)는 그대로.
+    try testing.expectEqualStrings("a/b", relativeUnderRoot("/repo/a/b", "/repo").?);
+    try testing.expectEqualStrings("a", relativeUnderRoot("C:/repo/a", "C:/repo").?);
+
+    // 루트 자신은 빈 슬라이스.
+    try testing.expectEqualStrings("", relativeUnderRoot("/repo", "/repo").?);
+    try testing.expectEqualStrings("", relativeUnderRoot("C:/", "C:/").?);
+    try testing.expectEqualStrings("", relativeUnderRoot("/", "/").?);
+
+    // **경계를 본다** — `/a/proj` 가 `/a/project` 의 루트로 통과하면 안 된다.
+    try testing.expect(relativeUnderRoot("/a/project/x", "/a/proj") == null);
+    try testing.expect(relativeUnderRoot("C:/project", "C:/proj") == null);
+
+    // 루트 밖.
+    try testing.expect(relativeUnderRoot("/other/x", "/repo") == null);
+    try testing.expect(relativeUnderRoot("/re", "/repo") == null);
+    try testing.expect(relativeUnderRoot("/repo/x", "") == null);
+}
+
+test "relativeUnderRoot: 옛 방식과 갈리는 지점을 못 박는다" {
+    // 옛 코드가 하던 계산을 그대로 재현해 **다르다는 것**을 고정한다. 같아지면 이 함수가 무의미해진
+    // 것이므로 테스트가 알려 준다.
+    const path = "C:/a/b";
+    const root = "C:/";
+    const old = path[root.len + 1 ..]; // 옛 계산
+    try testing.expectEqualStrings("/b", old); // `a` 가 사라지고 앞에 구분자가 남는다
+    try testing.expectEqualStrings("a/b", relativeUnderRoot(path, root).?);
+    try testing.expect(!std.mem.eql(u8, old, relativeUnderRoot(path, root).?));
+}
 
 test "isSep: 두 구분자를 모두 본다" {
     try testing.expect(isSep('/'));

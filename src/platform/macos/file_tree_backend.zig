@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const path_shape = maru.path_shape;
 const file_tree = maru.session.file_tree;
 const c = std.c;
 
@@ -351,7 +352,10 @@ pub fn openValidatedFileTreeRow(
     var current = validated.dir orelse return null;
     validated.dir = null;
     defer current.close(io);
-    const relative = if (root_path.len == 1) path[1..] else path[root_path.len + 1 ..];
+    // **구분자를 한 바이트로 가정하지 않는다.** 루트가 `/`·`C:/`·`C:/repo/` 처럼 구분자로 끝나면
+    // `root_path.len + 1` 이 첫 세그먼트를 먹어 **다른 파일을 연다**(`C:/a/b` → `/b` → `C:/b`).
+    // 규칙은 `path_shape.relativeUnderRoot` 가 단일 출처다(계약 §5.2 ⒝).
+    const relative = path_shape.relativeUnderRoot(path, root_path) orelse return null;
     const leaf = std.fs.path.basename(relative);
     if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return null;
     if (std.fs.path.dirname(relative)) |parent| {

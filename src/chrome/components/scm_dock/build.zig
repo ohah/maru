@@ -155,6 +155,9 @@ fn rowPaint(item: types.Item) tree.PaintStyle {
             .corner_radii_px = .{ 0, 0, 0, 0 },
             .border_widths_px = if (box.edit.focused) .{ 1, 1, 1, 1 } else .{ 1, 0, 1, 0 },
             .shadow = .none,
+            // **호버로 면이 밝아지지 않는다.** 여기서 마우스가 뜻하는 것은 "누를 수 있다"가 아니라
+            // "여기에 caret을 놓는다"이고 그건 커서 모양이 말한다(사용자 지적 2026-08-17).
+            .state_fill = false,
         },
         // **버튼 줄 자체는 칠하지 않는다** — 칠은 면 노드가 받는다(아래 여백까지 파래지면 글자가 그
         // 띠의 가운데보다 위에 앉는다).
@@ -169,6 +172,19 @@ fn commitFacePaint(enabled: bool) tree.PaintStyle {
         .corner_radii_px = .{ 0, 0, 0, 0 },
         .border_widths_px = .{ 0, 0, 0, 0 },
         .shadow = .none,
+    };
+}
+
+/// 그 줄 위에서 마우스가 무엇이라고 말하는가.
+fn rowCursor(item: types.Item) tree.CursorHint {
+    return switch (item) {
+        // 상자는 누르는 것이 아니라 **caret이 서는 자리**다.
+        .commit_box => .text,
+        .repo, .section, .file, .more => .press,
+        // 안내는 상태 진술이지 컨트롤이 아니다(action도 없다).
+        .notice => .auto,
+        // 버튼의 커서는 **면 노드**가 든다(아래 여백은 버튼이 아니다).
+        .commit_button => .auto,
     };
 }
 
@@ -231,6 +247,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 .variant = .ghost,
                 .paint = .{ .opacity = 0 },
                 .action = action,
+                .cursor = .press,
                 .overflow = .clip,
             });
             break :blk slot;
@@ -256,6 +273,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 .variant = .surface,
                 .paint = commitFacePaint(button.enabled),
                 .action = face_action,
+                // 누를 수 있는 면이라고 **컴포넌트가 말한다** — host가 intent로 다시 추론하지 않는다.
+                .cursor = .press,
                 .overflow = .clip,
             }, &.{});
             node.* = tree.card(.{
@@ -308,6 +327,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 목록에서 그 행만 캡슐처럼 떠 보인다(사용자 지적 2026-08-16). 이 목록의 행은 카드가 아니라
             // 표의 한 줄이다 — 밴드가 줄 폭을 꽉 채워야 위아래 행과 같은 격자로 읽힌다.
             .action = row_action_id,
+            // **커서도 이 층의 사실이다.** 상자는 글자를 놓는 자리(I-beam), 누를 수 있는 줄은 손,
+            // 안내는 진술이라 할 말이 없다.
+            .cursor = rowCursor(item),
             .overflow = .clip,
         }, action_nodes);
     }
@@ -428,6 +450,7 @@ fn isSelected(item: types.Item) bool {
 
 const std = @import("std");
 const testing = std.testing;
+const paint_style = @import("../../ui/paint_style.zig");
 
 fn testItems() [4]types.Item {
     return .{
@@ -794,4 +817,69 @@ test "커밋 상자는 편집 중일 때 테두리로 그 사실을 말한다 (�
     try testing.expectEqual(tokens.ColorRole.focus_accent, focused.visual.card.paint.border.?);
     // **높이는 안 바뀐다** — 포커스로 상자가 자라면 그 아래 목록이 통째로 밀린다.
     try testing.expectEqual(idle.rect.height, focused.rect.height);
+}
+
+test "커서는 컴포넌트가 선언한다(상자=I-beam·버튼 면=손·안내=할 말 없음)" {
+    // host가 intent로 다시 추론하면 그 판정의 주인이 둘이 된다. 실제로 도크 전체가 탐색기 행 판정을
+    // 물려받아 **화살표만** 나왔다(사용자 지적 2026-08-17).
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "a" } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
+        .{ .notice = "변경 사항 없음" },
+    };
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+    const cursorOf = struct {
+        fn get(f: Frame, id: u64) tree.CursorHint {
+            const index = f.tree.find(id) orelse return .auto;
+            return f.tree.entries[index].cursor;
+        }
+    }.get;
+    try testing.expectEqual(tree.CursorHint.press, cursorOf(frame, NodeIds.item(0)));
+    try testing.expectEqual(tree.CursorHint.text, cursorOf(frame, NodeIds.item(1)));
+    try testing.expectEqual(tree.CursorHint.press, cursorOf(frame, NodeIds.itemFace(2)));
+    // 버튼 **줄**은 아래 여백이라 할 말이 없다(면만 버튼이다).
+    try testing.expectEqual(tree.CursorHint.auto, cursorOf(frame, NodeIds.item(2)));
+    try testing.expectEqual(tree.CursorHint.auto, cursorOf(frame, NodeIds.item(3)));
+}
+
+test "커밋 상자는 호버로 면이 밝아지지 않는다(테두리는 그대로 따라간다)" {
+    // 여기서 마우스가 뜻하는 것은 "누를 수 있다"가 아니라 "여기에 caret을 놓는다"이고, 그건 커서가
+    // 말한다. 면까지 밝아지면 편집 중임을 말하는 테두리와 신호가 섞인다(사용자 지적 2026-08-17).
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .file = .{ .model_index = 0, .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .added = 1, .removed = 0, .has_delta = true, .action = .stage } },
+    };
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+    const tk = tokens.Tokens.tui(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
+        .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_active = .{ .r = 60, .g = 60, .b = 60 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
+        .accent = .{ .r = 221, .g = 161, .b = 94 },
+    });
+    const box = frame.tree.entries[frame.tree.find(NodeIds.item(0)) orelse return error.MissingBox];
+    const hovered_box = paint_style.resolveCard(box.id, box.visual.card, box.action, .{ .hovered = box.id }, &tk);
+    try testing.expectEqual(tokens.ColorRole.inset_bg, hovered_box.background); // 면은 그대로
+    // **파일 행은 반대다** — 그건 누르는 줄이라 호버가 보여야 한다(같은 규칙이 아니라 다른 사실).
+    const row = frame.tree.entries[frame.tree.find(NodeIds.item(1)) orelse return error.MissingRow];
+    const hovered_row = paint_style.resolveCard(row.id, row.visual.card, row.action, .{ .hovered = row.id }, &tk);
+    try testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_row.background);
 }

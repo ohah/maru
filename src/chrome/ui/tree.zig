@@ -20,6 +20,7 @@ pub const UiAction = struct {
 };
 
 pub const CardVariant = ui_style.CardVariant;
+pub const CursorHint = ui_style.CursorHint;
 pub const ButtonVariant = ui_style.ButtonVariant;
 pub const TextTone = ui_style.TextTone;
 pub const ShadowKind = ui_style.ShadowKind;
@@ -46,6 +47,8 @@ pub const CardOptions = struct {
     variant: CardVariant = .surface,
     paint: PaintStyle = .{},
     action: ?UiAction = null,
+    /// 이 면 위의 커서 모양. 기본 `auto`는 "할 말이 없다"이고, 그때는 host의 상위 규칙이 정한다.
+    cursor: CursorHint = .auto,
     direction: layout.Direction = .column,
     justify: layout.Justify = .start,
     align_items: layout.Align = .stretch,
@@ -77,6 +80,8 @@ pub const ButtonOptions = struct {
     paint: PaintStyle = .{},
     action: UiAction,
     overflow: layout.Overflow = .visible,
+    /// 이 면 위의 커서 모양. 기본 `auto`는 "할 말이 없다"이고, 그때는 host의 상위 규칙이 정한다.
+    cursor: CursorHint = .auto,
     leading_icon: ?LeadingIconProps = null,
 };
 
@@ -145,6 +150,8 @@ pub const NodeProps = union(enum) {
         variant: CardVariant,
         paint: PaintStyle,
         action: ?UiAction,
+        /// 이 면 위의 커서 모양(component가 선언한다 — `ui_style.CursorHint`).
+        cursor: CursorHint = .auto,
         /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. 의미(payload가 무엇을 옮기는지)는
         /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
         drag: ?DragDeclaration = null,
@@ -158,6 +165,8 @@ pub const NodeProps = union(enum) {
         paint: PaintStyle,
         action: UiAction,
         overflow: layout.Overflow,
+        /// 이 면 위의 커서 모양(component가 선언한다 — `ui_style.CursorHint`).
+        cursor: CursorHint = .auto,
         /// 선언된 leading icon 슬롯. paint/lowering이 final placement를 만들 때 필요하므로 style이
         /// 아니라 props에 실린다. 치수는 `ui/button.zig`가 `ButtonSize`와 token에서 한 번 계산한다.
         leading_icon: ?LeadingIconProps = null,
@@ -241,6 +250,7 @@ pub fn card(options: CardOptions, children: []const UiNode) UiNode {
             .variant = options.variant,
             .paint = options.paint,
             .action = options.action,
+            .cursor = options.cursor,
             .direction = options.direction,
             .justify = options.justify,
             .align_items = options.align_items,
@@ -272,6 +282,7 @@ pub fn button(options: ButtonOptions) UiNode {
             .variant = options.variant,
             .paint = options.paint,
             .action = options.action,
+            .cursor = options.cursor,
             .overflow = options.overflow,
             .leading_icon = options.leading_icon,
         } },
@@ -314,6 +325,9 @@ pub const RectEntry = struct {
     /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. payload가 무엇을 옮기는지는
     /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
     drag: ?DragDeclaration = null,
+    /// 이 면 위의 커서 모양. **published tree가 그 사실의 단일 출처다** — host가 "누를 수 있나"를
+    /// 다시 추론하면 판정의 주인이 둘이 된다.
+    cursor: CursorHint = .auto,
     /// 이것은 불변 semantic props의 정확한 투영이지 두 번째 스타일 출처가 아니다. `ui_paint`가 이
     /// 평탄화된 snapshot을 interaction이 쓰는 같은 rect/action과 함께 소비하므로, 뒤따르는 host/Metal
     /// 단계가 도메인 state에서 variant를 다시 찾아낼 수 없다.
@@ -453,6 +467,7 @@ const BuildState = struct {
             .effective_clip = effective_clip,
             .own_clip = own_clip,
             .action = actionFor(node),
+            .cursor = cursorFor(node),
             .visual = visualFor(node),
         };
         self.entry_count += 1;
@@ -689,6 +704,15 @@ fn actionFor(node: UiNode) ?UiAction {
         .card => |value| value.action,
         .button => |value| value.action,
         else => null,
+    };
+}
+
+/// 이 노드가 선언한 커서. 구조 노드(container·scroll_area)와 글자는 할 말이 없다.
+fn cursorFor(node: UiNode) CursorHint {
+    return switch (node.props) {
+        .card => |value| value.cursor,
+        .button => |value| value.cursor,
+        .container, .scroll_area, .text => .auto,
     };
 }
 

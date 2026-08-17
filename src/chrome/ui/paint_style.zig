@@ -85,12 +85,15 @@ pub fn resolveCard(
     applyPaintOverride(&result, visual.paint, tk);
 
     const enabled = action != null and action.?.enabled;
+    // **면이 상태를 따라가지 않는 카드가 있다**(`state_fill = false` — 텍스트 입력면). 테두리는 그대로
+    // 따라간다: 그건 "어디에 글자가 들어가는가"라는 다른 사실이다.
+    const fill = visual.paint.state_fill;
     if (enabled and state.capture != null and state.capture.?.id == id) {
-        result.background = .tab_active_bg;
+        if (fill) result.background = .tab_active_bg;
         result.border = .focus_accent;
     } else if (enabled and state.focused != null and state.focused.? == id) {
         result.border = .focus_accent;
-    } else if (enabled and state.hovered != null and state.hovered.? == id) {
+    } else if (enabled and fill and state.hovered != null and state.hovered.? == id) {
         result.background = .row_hover_bg;
     }
 

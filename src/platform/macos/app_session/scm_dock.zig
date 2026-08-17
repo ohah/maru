@@ -648,6 +648,19 @@ pub fn scmDockPointer(
     return table.resolve(action, self.scm_dock_snapshot_generation);
 }
 
+/// 지금 호버한 노드가 **선언한** 커서. 판정은 component가 했고(`build`의 `rowCursor`), 여기서는 그
+/// 값을 published tree에서 읽어 host 커서로 옮기기만 한다.
+///
+/// 도크 전체가 화살표였다: 탐색기 행 판정을 그대로 썼는데 이 뷰에는 그런 행이 없어 늘 "행 아님"이었다
+/// (사용자 지적 2026-08-17).
+pub fn scmHoverCursor(self: *AppSession) chrome.ui.tree.CursorHint {
+    const hovered = self.scm_dock_interaction.hovered orelse return .auto;
+    for (self.scm_dock_entries.items) |entry| {
+        if (entry.id == hovered) return entry.cursor;
+    }
+    return .auto;
+}
+
 /// intent를 실제 동작으로 옮긴다. **모델 인덱스는 다시 조회한다** — intent가 든 것은 인덱스뿐이고,
 /// 그 사이 목록이 갱신됐을 수 있다(늦은 클릭이 엉뚱한 파일을 열지 않게).
 /// 좌표를 아는 자리에서 부르는 판. **커밋 상자만 좌표가 필요하다** — caret은 tree hit이 아니라 글자

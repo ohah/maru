@@ -11789,6 +11789,22 @@ pub const AppSession = struct {
                     return if (self.agent_session_dock_interaction.hovered != null) .link else .default;
                 }
             }
+            // 소스 컨트롤은 자기 tree로 판정한다. 탐색기 행 판정(`fileTreeRowAt`)을 그대로 쓰면 이 뷰에는
+            // 그런 행이 없어 **도크 전체가 화살표**가 된다(사용자 지적 2026-08-17).
+            if (self.dock.view == .source_control) {
+                if (layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                    tab_ops.setHoveredTab(self, null);
+                    self.clearHoverUrlAnchor();
+                    // **커서는 component가 선언한다**(published tree의 `cursor`). host는 그 어휘를
+                    // 플랫폼 커서로 옮기기만 한다 — 여기서 "누를 수 있나"를 다시 추론하면 그 판정의
+                    // 주인이 둘이 된다.
+                    return switch (scm_dock_ops.scmHoverCursor(self)) {
+                        .press => .link,
+                        .text => .text,
+                        .arrow, .auto => .default,
+                    };
+                }
+            }
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
@@ -54671,6 +54687,29 @@ fn commitBoxPoint(session: *AppSession, dx: f64, dy: f64) !struct { x: f64, y: f
         .x = @as(f64, @floatFromInt(content.x)) + rect.x + dx,
         .y = @as(f64, @floatFromInt(content.y)) + rect.y + dy,
     };
+}
+
+test "소스 컨트롤: 커서가 자리를 말한다(상자=I-beam·저장소 줄=손)" {
+    // 도크 전체가 화살표였다 — 탐색기 행 판정을 그대로 썼는데 이 뷰에는 그런 행이 없어 늘 "행 아님"
+    // 이었다(사용자 지적 2026-08-17). 판정은 component가 하고(published `cursor`) host는 옮기기만 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    // 상자 위 — 여기서 마우스는 "caret을 놓는다"고 말한다.
+    const inside = try commitBoxPoint(session, 12, 6);
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(inside.x, inside.y, 0));
+
+    // 저장소 머리 줄 위 — 누를 수 있는 줄이므로 손이다(상자 **위쪽**이 그 줄이다).
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const box = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
+    const header_y = @as(f64, @floatFromInt(content.y)) + box.y - 4;
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(inside.x, header_y, 0));
 }
 
 test "소스 컨트롤: 커밋 상자를 누르면 키가 그리로 간다 (P3c)" {

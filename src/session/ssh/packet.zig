@@ -111,6 +111,21 @@ pub fn read(buf: []const u8) Error!Decoded {
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────
 
+test "프레이밍 상수는 명세 값 그대로다" {
+    // **상수를 양쪽에 쓰면 그 테스트는 자기충족이다.** 쓰기도 읽기도 `plain_block` 을 쓰므로
+    // 그것을 16 으로 바꿔도 왕복이 맞고, 박아 둔 실서버 패킷조차 총 1040바이트라 16 의 배수라서
+    // 통과했다(실측했다). 그래서 명세 숫자와 직접 맞댄다.
+    //
+    // RFC 4253 §6: "the total length ... MUST be a multiple of the cipher block size or 8,
+    // whichever is larger" — 암호 협상 전(이 모듈이 다루는 평문 구간)에는 8 이다. 같은 절이
+    // 패딩을 "at least four bytes" 로 정한다.
+    try std.testing.expectEqual(@as(usize, 8), plain_block);
+    try std.testing.expectEqual(@as(usize, 4), min_padding);
+    // 상한은 우리가 고른 값이지만 **아무 값이나 되는 것은 아니다** — §6.1 은 32768 을 "모든
+    // 구현이 받아야 하는 크기" 로 두므로 그보다 작게 잡으면 정상 서버를 끊게 된다.
+    try std.testing.expect(max_packet >= 32768);
+}
+
 test "쓴 패킷을 그대로 읽는다" {
     var prng = std.Random.DefaultPrng.init(1);
     var out: [256]u8 = undefined;

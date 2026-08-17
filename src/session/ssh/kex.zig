@@ -218,6 +218,19 @@ pub fn deriveKey(
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────
 
+test "메시지 번호는 명세 값 그대로다" {
+    // **상수를 양쪽에 쓰면 그 테스트는 자기충족이다.** 다른 테스트들은 `msg_kex_ecdh_*` 로 쓰고
+    // 같은 상수로 읽으므로, 둘을 **함께** 바꾸는 변이가 전부 살아남았다(실측했다 — 지난 슬라이스의
+    // strict 표시자 이름과 똑같은 부류다). 그래서 여기서는 명세 숫자와 직접 맞댄다:
+    // RFC 5656 §7.1 `#define SSH_MSG_KEX_ECDH_INIT 30` / `SSH_MSG_KEX_ECDH_REPLY 31`.
+    try std.testing.expectEqual(@as(u8, 30), msg_kex_ecdh_init);
+    try std.testing.expectEqual(@as(u8, 31), msg_kex_ecdh_reply);
+    // 길이 상수도 같은 이유로 못박는다(RFC 8731 §3 — 32바이트 고정, HASH 는 SHA-256).
+    try std.testing.expectEqual(@as(usize, 32), public_len);
+    try std.testing.expectEqual(@as(usize, 32), shared_len);
+    try std.testing.expectEqual(@as(usize, 32), hash_len);
+}
+
 test "INIT 을 쓰고 우리가 다시 읽는다" {
     const eph = try Ephemeral.fromSeed(@splat(7));
     var out: [64]u8 = undefined;

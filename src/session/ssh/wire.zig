@@ -197,6 +197,17 @@ pub fn readMpint(r: *Reader) Error![]const u8 {
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────
 
+test "필드 상한은 패킷 상한과 실제 트래픽 사이에 있다" {
+    // 위 `max_field` 주석이 "패킷 상한보다 작아야 의미가 있다" 고 약속하는데 **아무도 안 쟀다** —
+    // 8 로 줄여도 이 파일 테스트가 전부 통과한다(실측했다). 짧은 문자열로만 시험하기 때문이다.
+    // 주석의 약속을 게이트로 바꾼다.
+    const packet = @import("packet.zig");
+    try std.testing.expect(max_field < packet.max_packet);
+    // 그리고 **실제 필드보다 커야 한다.** RFC 4253 §6.1 이 32768 을 모든 구현이 받아야 하는
+    // 패킷 크기로 두므로, 필드 상한이 그보다 작으면 정상 서버의 KEXINIT 을 우리가 끊게 된다.
+    try std.testing.expect(max_field >= 32768);
+}
+
 test "string 은 길이 접두이고 이진을 담는다" {
     var out: [64]u8 = undefined;
     var w = Writer.init(&out);

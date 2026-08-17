@@ -498,6 +498,9 @@ pub export fn maru_macos_app_host_capabilities(out_capabilities: ?*Capabilities)
 /// 세션마다가 아니라 **프로세스 전역**이다(§5.2 — 현재 언어는 전역 하나, 창마다 다를 이유가 없다).
 /// Swift 가 세션을 만들기 전마다 메인 스레드에서 부른다(같은 값이면 무해). 빈 값·null 은 무동작이라 로케일을 못 읽는
 /// 환경에서도 안전하고, 그때는 `auto` 가 `en` 으로 떨어진다.
+/// **ABI 버전을 올리지 않는다.** 이 저장소의 관행은 기존 시그니처·struct layout 이 바뀔 때만 올리는
+/// 것이고(v169 = draw 계약 변경), export **추가**는 하위호환이라 올리지 않는다(`take_web_find_query`·
+/// `remote_backend_settle` 선례). 옛 Swift 가 이 함수를 안 불러도 `auto` 가 영어로 떨어질 뿐이다.
 pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize) void {
     const ptr = tag_ptr orelse return;
     if (tag_len == 0 or tag_len > 128) return;

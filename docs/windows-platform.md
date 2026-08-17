@@ -223,6 +223,67 @@ maru d3d11-cells-smoke: 셀 파이프라인을 세우지 못했습니다(ShaderC
 셀)·`#D8E0F0`(글리프 전경), 그리고 그 사이 부분 커버리지 블렌드. 하나라도 빠지면 규약의 한 갈래가 죽은
 것이다. 첫 열은 슬롯 0(빈 글리프)이라 배경만 남아, UV 0 자리가 커버리지 0임을 함께 보여 준다.
 
+### 2e. DirectWrite 글리프 래스터라이저와 폰트 티어 (W7.3 결정, 실측 2026-08-17)
+
+`src/platform/windows/dwrite_font.zig`가 **"코드포인트 하나를 픽셀로 만드는 것"만** 안다. 아틀라스 슬롯
+배치·캐시·eviction은 `renderer/glyph_atlas.zig`가, 픽셀을 GPU에 올리는 것은 §2d가 한다. 채우는 것은 중립
+계약이 요구하는 **RGBA8 버퍼 하나**다 — RGB는 흰색, 커버리지는 알파(`renderer/glyph_pixels.zig`와 같은 규약).
+
+**합성 글리프는 여기까지 오지 않는다.** box-drawing·block·braille·powerline은 `renderer.synthesizeGlyph`가
+코드포인트에서 직접 만든다(폰트로 그리면 셀에 안 맞아 이음매가 생긴다). 호출자가 `synthesizeGlyph(...) orelse
+<DirectWrite>` 순서를 지키므로, 이 파일은 **그 집합에 없는 글자만** 받는다.
+
+**셀 격자는 폰트가 정한다.** 주 폰트의 `GetMetrics`(ascent·descent·lineGap)와 `'M'`의 advance에서 셀
+픽셀 크기와 베이스라인을 유도하고 **올림**한다 — 내림하면 글리프가 반 픽셀 새어 옆 칸을 침범한다.
+음수 `line_gap`인 폰트가 실제로 있어 최소 1을 함께 보장한다(0이면 아틀라스 슬롯이 0바이트가 된다).
+
+유도 규칙은 **순수 함수**(`cellMetricsFrom`)가 소유하므로 DirectWrite 없이 모든 타깃에서 테스트된다. 그
+테스트가 흉내 내는 값은 추측이 아니라 실측이다 — 스모크가 `design_units`로 그 값을 보고한다:
+
+| Cascadia Mono | upem | ascent | descent | line_gap | `'M'` advance | → 18px에서 |
+|---|---|---|---|---|---|---|
+| 실측 | 2048 | 1900 | 480 | 0 | 1200 | 셀 **11×21**, 베이스라인 **17** |
+
+**회색 안티앨리어싱은 ClearType 텍스처를 평균해서 얻는다.** `IDWriteGlyphRunAnalysis`가 주는 알파 텍스처는
+`ALIASED_1x1`(안티앨리어싱 없음)과 `CLEARTYPE_3x1`(RGB 서브픽셀) 둘뿐이다. 터미널에 계단은 쓸 수 없고 우리
+아틀라스는 채널 하나만 쓰므로, 3바이트를 평균해 회색 커버리지로 만든다. 대가: ClearType 분석은 RGB
+스트라이프를 가정해 튜닝돼 있어 평균값이 "진짜 회색 AA"와 완전히 같지는 않다(화면으로 판정했다).
+
+#### 폰트 티어 — §3.1a의 셸 티어와 같은 모양
+
+**주 폰트**: config `font.family` → `Cascadia Mono` → `Consolas` → `Courier New`. Cascadia는 Windows
+Terminal의 기본이고 터미널용으로 설계됐다. Consolas는 Vista부터 어디나 있고, Courier New는 **없을 수가 없다**.
+config의 OS 접미 메커니즘(W2.5)이 일반적이라 `font.family.windows`는 이미 동작한다 — 여기서 정한 것은
+**아무것도 설정하지 않았을 때의 내장 기본값**뿐이다.
+
+**폴백**: config `font.fallback`(쉼표 구분) → `Malgun Gothic` → `Noto Sans KR` → `Microsoft YaHei` →
+`Microsoft JhengHei` → `Yu Gothic` → `Segoe UI Emoji` → `Segoe UI Symbol`. 없는 폰트는 조용히 건너뛴다
+(configuration.md가 정한 best-effort와 같은 규칙).
+
+**폴백이 필수인 이유는 실측이다.** 고정폭 라틴 폰트에는 한글이 없다 — Cascadia Mono에서 한글 10자가 전부
+`.notdef`였고 화면에 빈 칸으로 나왔다. macOS는 `kCTFontCascadeListAttribute`로 CoreText에 맡기지만
+DirectWrite의 자동 cascade는 `IDWriteFactory2` 이후에만 있어 **목록을 우리가 든다.** 폴백을 켜자
+`slots_blank`이 10에서 0으로 떨어졌다.
+
+**글리프가 없으면 다음 face로 내려간다.** `GetGlyphIndices`가 0(`.notdef`)을 주면 다음 폴백에 묻고, 전부
+없으면 0을 돌려준다 — 그것이 "그릴 수 없다"의 정직한 답이고 호출자가 빈 칸으로 둔다. face는
+`max_faces`까지만 연다(무한히 열지 않는다).
+
+**두 칸 글자는 두 칸 폭으로 그린다.** 한글·CJK는 `terminal.cellWidth`가 2를 주므로 아틀라스 슬롯도 두 칸
+폭으로 잡고 화면에서도 셀 하나를 두 칸 폭으로 그린다. 한 칸에 밀어 넣으면 글자가 반으로 잘리고, 셀 둘로
+쪼개면 UV를 반씩 잘라야 해 규약이 복잡해진다(`NativeMetalCell.width`도 폭을 셀이 드는 방식이다).
+
+**실기 캡처** (Windows 10 Pro 19045, `maru dwrite-text-smoke`):
+
+![W7.3 DirectWrite 글리프 — 라틴·한글·합성 글리프](images/w7-3-dwrite-text.png)
+
+폴백이 있을 때와 없을 때(같은 코드, 주 폰트도 같다):
+
+![W7.3 폰트 폴백 있음/없음 대비](images/w7-3-dwrite-fallback.png)
+
+판정은 **셋을 갈라 세는 것**이다 — `slots_from_font`·`slots_synthesized`·`slots_blank`. 합쳐 세면 폰트 경로가
+죽어도 합성 글리프가 수를 채워 성공처럼 보인다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

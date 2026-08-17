@@ -8,6 +8,8 @@ const win32_window = @import("platform/windows/win32_window.zig");
 const d3d11_present = @import("platform/windows/d3d11_present.zig");
 // W7.2b 셀 인스턴스 드로우.
 const d3d11_cells = @import("platform/windows/d3d11_cells.zig");
+// W7.3 DirectWrite 글리프 래스터라이저.
+const dwrite_font = @import("platform/windows/dwrite_font.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -76,6 +78,11 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "d3d11-cells-smoke")) {
         try runD3d11CellsSmoke(allocator, stdout, stderr);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "dwrite-text-smoke")) {
+        try runDwriteTextSmoke(allocator, stdout, stderr);
         return;
     }
 
@@ -472,6 +479,230 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     try stdout.print("driver={s}\n", .{@tagName(present.driver)});
     try stdout.writeAll("visible UI: 셀 격자에 배경색과 합성 글리프가 그려진다. 폰트 글리프는 W7.3, 실제 터미널 화면은 W7.2c다.\n");
     try stdout.flush();
+}
+
+/// W7.3 스모크가 그리는 화면. **두 경로가 한 화면에 나오게** 짰다 — 글자는 DirectWrite가 래스터화하고,
+/// 테두리와 블록은 `renderer.synthesizeGlyph`가 코드포인트에서 합성한다. 둘이 같은 아틀라스·같은 셰이더를
+/// 지나므로, 한쪽만 나오면 어느 경로가 죽었는지 화면으로 바로 갈린다.
+const dwrite_smoke_lines = [_][]const u8{
+    "┌──────────────────────────────────────────────┐",
+    "│ maru on Windows — W7.3 DirectWrite           │",
+    "│                                              │",
+    "│  ABCDEFGHIJKLMNOPQRSTUVWXYZ                  │",
+    "│  abcdefghijklmnopqrstuvwxyz                  │",
+    "│  0123456789  !@#$%^&*()  {}[]<>  +-*/=       │",
+    "│                                              │",
+    "│  $ zig build test                            │",
+    "│  All 2636 tests passed.                      │",
+    "│                                              │",
+    "│  글자는 DirectWrite, 테두리는 합성 글리프다   │",
+    "│  ▁▂▃▄▅▆▇█  ░▒▓  ╔═╗ ╠═╣ ╚═╝                  │",
+    "└──────────────────────────────────────────────┘",
+};
+
+/// `maru dwrite-text-smoke` — W7.3. **글자가 화면에 나오는 것까지**를 사람이 눈으로 확인하는 자리.
+///
+/// 셀 격자·아틀라스·인스턴스 드로우는 W7.2b가 세운 것을 그대로 쓴다. 이 슬라이스가 더하는 것은
+/// **DirectWrite가 코드포인트를 커버리지 픽셀로 바꾸는 경로** 하나다. 그래서 화면에서 글자가 읽히면
+/// 그 경로가 산 것이고, 테두리만 보이면 죽은 것이다.
+fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru dwrite-text-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // config `font.family`가 비어 있는 경우를 흉내 낸다 — 티어가 실제로 폰트를 고르는지 보려면
+    // 여기서 이름을 박지 않아야 한다(§3.1a의 셸 티어와 같은 판정).
+    var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
+        try stderr.print("maru dwrite-text-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer raster.destroy();
+
+    const cell_w = raster.metrics.width_px;
+    const cell_h = raster.metrics.height_px;
+
+    // ── 나올 코드포인트를 모아 아틀라스 슬롯을 배정한다 ────────────────────────────────────
+    //
+    // **슬롯 폭이 코드포인트마다 다르다.** 한글·CJK는 두 칸을 차지하므로(`terminal.cellWidth`) 슬롯도 두 칸
+    // 폭으로 잡고 화면에서도 두 칸에 걸쳐 그린다. 한 칸에 밀어 넣으면 글자가 반으로 잘린다.
+    const Slot = struct { x_px: u32, w_cells: u32 };
+    var slot_of = std.AutoHashMap(u32, Slot).init(allocator);
+    defer slot_of.deinit();
+    var order: std.ArrayList(u32) = .empty;
+    defer order.deinit(allocator);
+
+    var next_x: u32 = cell_w; // 슬롯 0(폭 1칸)은 비워 둔다 — 글리프 없는 셀이 가리킬 자리다.
+    var max_cols: usize = 0;
+    for (dwrite_smoke_lines) |line| {
+        var cols: usize = 0;
+        var it = (std.unicode.Utf8View.init(line) catch continue).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const w: u32 = @max(1, maru.terminal.cellWidth(@intCast(cp)));
+            cols += w;
+            if (cp == ' ') continue;
+            if (slot_of.get(cp) != null) continue;
+            try slot_of.put(cp, .{ .x_px = next_x, .w_cells = w });
+            try order.append(allocator, cp);
+            next_x += cell_w * w;
+        }
+        max_cols = @max(max_cols, cols);
+    }
+
+    const slots: u32 = @intCast(order.items.len + 1);
+    const atlas_w = next_x;
+    const atlas_h = cell_h;
+    const bytes_per_row: usize = @as(usize, atlas_w) * 4;
+    const atlas_pixels = try allocator.alloc(u8, bytes_per_row * atlas_h);
+    defer allocator.free(atlas_pixels);
+    @memset(atlas_pixels, 0);
+
+    // 슬롯마다 따로 그린 뒤 옮겨 붙인다(W7.2b에서 배운 것 — 오프셋 슬라이스는 조용히 빈 글리프가 된다).
+    // 버퍼는 **가장 넓은 슬롯**(두 칸)에 맞춰 한 번 잡고, 슬롯마다 필요한 만큼만 쓴다.
+    const wide_bpr: usize = @as(usize, cell_w) * 2 * 4;
+    const slot_buf = try allocator.alloc(u8, wide_bpr * cell_h);
+    defer allocator.free(slot_buf);
+    const scratch = try allocator.alloc(u8, dwrite_font.Rasterizer.scratchSize(cell_w * 2, cell_h));
+    defer allocator.free(scratch);
+
+    var synth_slots: usize = 0;
+    var font_slots: usize = 0;
+    var blank_slots: usize = 0;
+    var covered_total: u32 = 0;
+    for (order.items) |cp| {
+        const slot = slot_of.get(cp).?;
+        const slot_w = cell_w * slot.w_cells;
+        const slot_bpr: usize = @as(usize, slot_w) * 4;
+        const used = slot_buf[0 .. slot_bpr * cell_h];
+        @memset(used, 0);
+
+        // **합성이 먼저다.** 중립 계약이 정한 dispatch 순서다 — box-drawing·block을 폰트로 그리면
+        // 셀에 안 맞아 이음매가 생긴다.
+        var covered: u32 = 0;
+        if (maru.renderer.synthesizeGlyph(cp, slot_w, cell_h, slot_bpr, used)) |n| {
+            covered = n;
+            synth_slots += 1;
+        } else {
+            covered = raster.rasterize(cp, slot_w, cell_h, slot_bpr, used, scratch) catch |err| blk: {
+                try stderr.print("  경고: U+{X:0>4} 래스터화 실패({s})\n", .{ cp, @errorName(err) });
+                break :blk 0;
+            };
+            if (covered > 0) font_slots += 1 else blank_slots += 1;
+        }
+        covered_total += covered;
+
+        var y: usize = 0;
+        while (y < cell_h) : (y += 1) {
+            @memcpy(atlas_pixels[y * bytes_per_row + slot.x_px * 4 ..][0..slot_bpr], used[y * slot_bpr ..][0..slot_bpr]);
+        }
+    }
+
+    // ── 창·표시 경로·파이프라인 ────────────────────────────────────────────────────────────
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.3 DirectWrite text smoke)");
+    const want_w: i32 = @intCast(@min(@as(usize, 1600), (max_cols + 2) * cell_w + 24));
+    const want_h: i32 = @intCast(@min(@as(usize, 1200), (dwrite_smoke_lines.len + 2) * cell_h + 60));
+    var window = win32_window.Window.create(allocator, title, want_w, want_h) catch |err| {
+        try stderr.print("maru dwrite-text-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
+    var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+        try stderr.print("maru dwrite-text-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer present.destroy();
+    window.present.opaque_handle = @ptrCast(present);
+
+    var pipeline = d3d11_cells.CellPipeline.create(allocator, present.device, present.context, atlas_w, atlas_h, atlas_pixels) catch |err| {
+        try stderr.print("maru dwrite-text-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        if (d3d11_cells.shaderError().len > 0)
+            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer pipeline.destroy();
+
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+
+    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+    const fg = d3d11_cells.colorFromArgb(0xFFD8E0F0);
+    const bg_none = d3d11_cells.colorFromArgb(0x00000000);
+    var frames: usize = 0;
+    var close_requested = false;
+    var spins: usize = 0;
+    while (spins < 300 and !window.quit_requested and !close_requested) : (spins += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .resized => |r| try present.resize(r.width_px, r.height_px),
+            .paint => {},
+            .close_requested => close_requested = true,
+        };
+
+        cells.clearRetainingCapacity();
+        for (dwrite_smoke_lines, 0..) |line, row| {
+            var col: usize = 0;
+            var it = (std.unicode.Utf8View.init(line) catch continue).iterator();
+            while (it.nextCodepoint()) |cp| {
+                const w: u32 = @max(1, maru.terminal.cellWidth(@intCast(cp)));
+                const slot = slot_of.get(cp) orelse Slot{ .x_px = 0, .w_cells = 1 };
+                // 두 칸 글자는 **셀 하나를 두 칸 폭으로** 그린다 — 셀 둘로 쪼개면 UV를 반씩 잘라야 해서
+                // 규약이 복잡해지고, 터미널의 `NativeMetalCell.width`도 같은 방식(폭을 셀이 든다)이다.
+                try cells.append(allocator, .{
+                    .rect = .{
+                        @floatFromInt(12 + col * cell_w),
+                        @floatFromInt(12 + row * cell_h),
+                        @floatFromInt(cell_w * slot.w_cells),
+                        @floatFromInt(cell_h),
+                    },
+                    .uv = d3d11_cells.uvFromAtlasRect(slot.x_px, 0, cell_w * slot.w_cells, cell_h, atlas_w, atlas_h),
+                    .fg = fg,
+                    .bg = bg_none,
+                });
+                col += w;
+            }
+        }
+
+        try present.beginFrame(clear);
+        try pipeline.draw(cells.items, present.width_px, present.height_px);
+        try present.present(false);
+        frames += 1;
+        _ = usleep(8_000);
+    }
+    if (close_requested) window.requestClose();
+
+    try stdout.writeAll("maru.dwrite-text-smoke.v1\n");
+    try stdout.print("font_family={s}\n", .{raster.family});
+    // **시도한 수와 열린 수는 다르다** — 폴백 티어에 이름을 넣어도 그 폰트가 없으면 열리지 않는다.
+    try stdout.print("fallback_faces_opened={d}\n", .{raster.fallback_opened});
+    try stdout.print("em_size_px={d:.1}\n", .{raster.em_size_px});
+    try stdout.print("cell_px={d}x{d} baseline={d}\n", .{ cell_w, cell_h, raster.metrics.baseline_px });
+    // 셀이 **왜** 그 크기인지 설명하는 근거. 이 값 없이는 유도 규칙의 테스트가 무엇을 흉내 내는지 알 수 없다.
+    try stdout.print("design_units upem={d} ascent={d} descent={d} line_gap={d} advance={d}\n", .{
+        raster.design.upem,
+        raster.design.ascent,
+        raster.design.descent,
+        raster.design.line_gap,
+        raster.design.advance_width,
+    });
+    try stdout.print("atlas_px={d}x{d} slots={d}\n", .{ atlas_w, atlas_h, slots });
+    // **셋을 갈라 센다.** 합쳐 세면 폰트 경로가 죽어도 합성 글리프가 수를 채워 성공처럼 보인다.
+    try stdout.print("slots_from_font={d} slots_synthesized={d} slots_blank={d}\n", .{ font_slots, synth_slots, blank_slots });
+    try stdout.print("atlas_covered_pixels={d}\n", .{covered_total});
+    try stdout.print("cells_drawn={d}\n", .{cells.items.len});
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("driver={s}\n", .{@tagName(present.driver)});
+    try stdout.writeAll("visible UI: 글자는 DirectWrite, 테두리·블록은 합성 글리프. 실제 터미널 화면은 W7.2c다.\n");
+    try stdout.flush();
+    // **성공 경로에서도 stderr를 비운다.** 위 래스터화 경고가 버퍼에 남아 있으면 조용히 사라진다 —
+    // 실측으로 겪었다: 진단을 넣었는데 화면에 아무것도 안 나와 원인을 한참 찾았다.
+    try stderr.flush();
 }
 
 fn printSmoke(stdout: *std.Io.Writer) !void {
@@ -1239,6 +1470,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru win32-window-smoke
         \\  maru d3d11-present-smoke
         \\  maru d3d11-cells-smoke
+        \\  maru dwrite-text-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1260,6 +1492,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  win32-window-smoke open a real Win32 window and report the neutral events it delivers (Windows only; needs an interactive desktop)
         \\  d3d11-present-smoke paint that window with D3D11 + DXGI and report the present path (Windows only; needs a D3D11 device)
         \\  d3d11-cells-smoke draw a cell grid with synthesized glyphs through the D3D11 cell pipeline (Windows only; needs a D3D11 device)
+        \\  dwrite-text-smoke render real text with DirectWrite glyphs plus synthesized box drawing (Windows only; needs a D3D11 device)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
@@ -1286,6 +1519,7 @@ test {
     _ = win32_window;
     _ = d3d11_present;
     _ = d3d11_cells;
+    _ = dwrite_font;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

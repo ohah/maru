@@ -33,7 +33,10 @@ pub const NativeDrawGlyphRecord = extern struct {
     row: u16,
     col: u16,
     cell_width: u16,
-    reserved: u16 = 0,
+    /// 이 글리프의 ink 가 자기 칸 **왼쪽으로 넘치는 칸 수**(합자). 옛 `reserved` 자리라 ABI 크기는
+    /// 그대로다. 셰이퍼(`maru_left_overhang_cells`)가 폰트 ink bounds 로 재서 채운다 — 0 이 대부분이고,
+    /// 합자 글리프만 1(실측: `//`·`::`·`~~`·`===`)이다.
+    left_overhang_cells: u16 = 0,
     codepoint: u32,
     glyph_id: u32,
     drawable: u32,
@@ -220,14 +223,27 @@ fn coreTextGlyphRecordFromDrawRecord(
     cells: []const renderer.DrawCell,
 ) !coretext_font.CoreTextGlyphRecord {
     if (record.cell_index >= cells.len) return error.CoreTextDrawListRecordOutsideInput;
-    if (record.cell_width > 2) return error.CoreTextDrawListInvalidCellWidth;
+    // 폭 상한 4 = wide 문자(2) + 합자 오버항(최대 3칸까지 당김). `glyph_atlas` 가 슬롯을
+    // `cell_width` 만큼 넓히므로(span) 이 값이 곧 한 글리프가 먹는 최대 칸 수다.
+    if (record.cell_width > 4) return error.CoreTextDrawListInvalidCellWidth;
     if (record.codepoint > std.math.maxInt(u21)) return error.CoreTextDrawListInvalidCodepoint;
 
     const source_cell = cells[@intCast(record.cell_index)];
+    // **왼쪽 오버항 글리프는 자기 칸보다 왼쪽에서 시작한다.** 합자가 그렇다 — 폰트가 둘째 칸에 두 글자를
+    // 합친 모양을 놓고 그 ink 를 advance 왼쪽 밖으로 뺀다. 그 글리프를 자기 칸에만 그리면 넘친 부분이
+    // 잘려 첫 글자가 사라진 것처럼 보인다(사용자 제보 2026-08-17).
+    //
+    // 해결은 **wide 문자와 같은 경로**를 타는 것이다: 시작 칸을 왼쪽으로 당기고 칸 수를 늘리면, 슬롯이
+    // 그만큼 넓어지고 배치도 그 칸에서 시작한다(CJK 가 `cell_width = 2` 로 이미 그렇게 그려진다).
+    // 별도 오프셋 필드나 셰이더 분기를 만들지 않는 이유가 그것이다.
+    //
+    // 화면 왼쪽 경계는 넘지 않는다(`@min(.., col)`) — col 0 의 글리프가 오버항을 주장하면 그만큼만 당긴다.
+    const overhang: u16 = @min(record.left_overhang_cells, record.col);
+    if (record.cell_width + overhang > 4) return error.CoreTextDrawListInvalidCellWidth;
     return .{
         .row = record.row,
-        .col = record.col,
-        .cell_width = @intCast(record.cell_width),
+        .col = record.col - overhang,
+        .cell_width = @intCast(record.cell_width + overhang),
         .codepoint = @intCast(record.codepoint),
         .glyph_id = record.glyph_id,
         .font_name = coretext_probe.cStringField(&record.font_name),

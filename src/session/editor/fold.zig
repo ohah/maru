@@ -19,6 +19,13 @@ pub const Range = struct {
     first_hidden: u32,
     /// 접으면 숨는 마지막 줄(포함).
     last_hidden: u32,
+    /// **중첩 레벨**(1부터). 문서 맨 바깥 블록이 1이고, 그 안에 든 블록이 2다.
+    ///
+    /// **들여쓰기 폭이 아니다.** 공백 4칸이든 2칸이든 탭이든 "몇 겹 안쪽인가"는 같아야 한다 —
+    /// 레벨 접기(VSCode `editor.foldLevelN`)가 묻는 것이 그것이고, 폭으로 세면 들여쓰기 규약이
+    /// 다른 파일마다 같은 명령이 다른 곳을 접는다. 훑기가 이미 열린 블록을 스택으로 들고 있으므로
+    /// 그 **스택 깊이**가 곧 이 값이다.
+    level: u16,
 
     pub fn hiddenCount(self: Range) u32 {
         return self.last_hidden - self.first_hidden + 1;
@@ -124,7 +131,8 @@ fn walk(lines: []const []const u8, tab_width: u16, sink: anytype) void {
             depth -= 1;
             const e = stack[depth];
             if (last_content) |lc| {
-                if (lc > e.head) sink.push(.{ .head = @intCast(e.head), .first_hidden = @intCast(e.head + 1), .last_hidden = @intCast(lc) });
+                // **레벨은 스택 자리 + 1이다** — 이 블록을 품은 조상 수가 곧 `depth`다.
+                if (lc > e.head) sink.push(.{ .head = @intCast(e.head), .first_hidden = @intCast(e.head + 1), .last_hidden = @intCast(lc), .level = @intCast(depth + 1) });
             }
         }
 
@@ -141,7 +149,7 @@ fn walk(lines: []const []const u8, tab_width: u16, sink: anytype) void {
         depth -= 1;
         const e = stack[depth];
         if (last_content) |lc| {
-            if (lc > e.head) sink.push(.{ .head = @intCast(e.head), .first_hidden = @intCast(e.head + 1), .last_hidden = @intCast(lc) });
+            if (lc > e.head) sink.push(.{ .head = @intCast(e.head), .first_hidden = @intCast(e.head + 1), .last_hidden = @intCast(lc), .level = @intCast(depth + 1) });
         }
     }
 }
@@ -263,6 +271,50 @@ test "중첩은 각각 범위가 된다" {
     try testing.expectEqual(@as(u32, 1), rs[1].head); // 첫 메서드
     try testing.expectEqual(@as(u32, 2), rs[1].last_hidden);
     try testing.expectEqual(@as(u32, 3), rs[2].head); // 둘째 메서드
+}
+
+test "레벨은 몇 겹 안쪽인가다 — 들여쓰기 폭이 아니다" {
+    // 레벨 접기(VSCode `editor.foldLevelN`)가 묻는 것은 **중첩 겹수**다. 폭으로 세면 같은 명령이
+    // 들여쓰기 규약마다 다른 곳을 접는다 — 아래 두 문서는 폭이 4칸과 2칸으로 다르지만 구조가 같다.
+    const wide = [_][]const u8{
+        "class A:",
+        "    def m():",
+        "        if x:",
+        "            y = 1",
+        "            z = 2",
+    };
+    const narrow = [_][]const u8{
+        "class A:",
+        "  def m():",
+        "    if x:",
+        "      y = 1",
+        "      z = 2",
+    };
+    for ([_][]const []const u8{ &wide, &narrow }) |lines| {
+        var buf: [8]Range = undefined;
+        const rs = compute(lines, 4, &buf);
+        try testing.expectEqual(@as(usize, 3), rs.len);
+        try testing.expectEqual(@as(u16, 1), rs[0].level); // class
+        try testing.expectEqual(@as(u16, 2), rs[1].level); // def
+        try testing.expectEqual(@as(u16, 3), rs[2].level); // if
+    }
+}
+
+test "형제 블록은 같은 레벨이다 — 순서가 아니라 겹수다" {
+    const lines = [_][]const u8{
+        "a:",
+        "  1",
+        "b:",
+        "  2",
+        "  c:",
+        "    3",
+    };
+    var buf: [8]Range = undefined;
+    const rs = compute(&lines, 4, &buf);
+    try testing.expectEqual(@as(usize, 3), rs.len);
+    try testing.expectEqual(@as(u16, 1), rs[0].level); // a
+    try testing.expectEqual(@as(u16, 1), rs[1].level); // b — a의 형제
+    try testing.expectEqual(@as(u16, 2), rs[2].level); // c — b 안
 }
 
 test "탭과 공백을 섞어도 화면 깊이로 비교한다" {
@@ -407,8 +459,19 @@ test "적대적: 한 번 훑기가 옛 규칙과 같은 답을 낸다 — 무작
                 last_content = j;
             }
             const end = last_content orelse continue;
-            want[wn] = .{ .head = @intCast(i), .first_hidden = @intCast(i + 1), .last_hidden = @intCast(end) };
+            want[wn] = .{ .head = @intCast(i), .first_hidden = @intCast(i + 1), .last_hidden = @intCast(end), .level = 1 };
             wn += 1;
+        }
+
+        // **레벨은 조상 수 + 1이다** — 판정자는 "나를 품는 범위가 몇 개인가"를 직접 센다(느리지만
+        // 규칙이 눈에 보인다). 훑기 쪽은 스택 깊이로 같은 값을 내야 한다.
+        for (want[0..wn], 0..) |*w, k| {
+            var ancestors: u16 = 0;
+            for (want[0..wn], 0..) |o, m| {
+                if (m == k) continue;
+                if (o.head < w.head and o.last_hidden >= w.last_hidden) ancestors += 1;
+            }
+            w.level = ancestors + 1;
         }
 
         try testing.expectEqual(wn, got.len);
@@ -416,6 +479,7 @@ test "적대적: 한 번 훑기가 옛 규칙과 같은 답을 낸다 — 무작
             try testing.expectEqual(w.head, g.head);
             try testing.expectEqual(w.first_hidden, g.first_hidden);
             try testing.expectEqual(w.last_hidden, g.last_hidden);
+            try testing.expectEqual(w.level, g.level);
         }
     }
 }

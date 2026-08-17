@@ -8,6 +8,12 @@
 pub const ssh = struct {
     /// SSH 바이너리 패킷(RFC 4253 §6) — **sans-io**(계약 docs/ssh-client.md §2: 소켓을 모른다).
     pub const packet = @import("session/ssh/packet.zig");
+    /// 와이어 자료형(RFC 4251 §5) — string·name-list·mpint.
+    pub const wire = @import("session/ssh/wire.zig");
+    /// 버전 교환(RFC 4253 §4.2) — 배너 여러 줄을 넘긴다.
+    pub const version = @import("session/ssh/version.zig");
+    /// KEXINIT 협상(RFC 4253 §7.1) + strict KEX 표시자.
+    pub const kexinit = @import("session/ssh/kexinit.zig");
 };
 pub const input_math = @import("session/input_math.zig");
 pub const layout_math = @import("session/layout_math.zig");

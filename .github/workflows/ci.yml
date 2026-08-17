@@ -89,6 +89,16 @@ jobs:
       # 상황에서는 그 fallback 이 정확히 원치 않는 일을 한다. 이름을 갈면 넓은 prefix 도 새 이름을 보므로
       # 옛 것과 완전히 분리된다. 옆의 `mise-v0-` 이 같은 관행이다. 다시 상하면 `v3` 로 올린다.
       #
+      # **캐시 키에 `build.zig` 는 넣지 않는다.** 435KB 짜리 단일 파일이라 게이트 하나만 추가해도 바뀌고,
+      # 그때마다 여섯 잡의 캐시가 **한꺼번에** 무효가 됐다(실측 2026-08-17: 엔트리 32개가 해시 두 종으로
+      # 갈려 10GB 한도를 9.99GB 까지 채웠고, 그 포화는 LRU 밀어내기로 restore-key 적중을 불안정하게 한다).
+      # `.zig-cache` 는 내용 주소 지정이라 `build.zig` 가 바뀌면 영향받는 산출물만 해시가 달라져 자연히
+      # 다시 빌드한다 — GitHub 키까지 무효화할 이유가 없다. 의존성을 고정하는 `build.zig.zon` 과 캐시의
+      # 내용을 정하는 prune 스크립트만 남긴다.
+      #
+      # 키 **구성**이 바뀌어도 이름은 `v2` 로 둔다. 넓은 restore-key 가 끌어오는 옛 v2 캐시는 내용이
+      # 유효하므로 여기서는 그 fallback 이 바람직하다 — 이름을 올리는 것은 캐시가 **상했을** 때다.
+      #
       # **캐시 키에 `tools/ci/prune-zig-cache.sh` 를 넣는다.** 그 스크립트가 저장 직전에 캐시를 잘라
       # **캐시의 내용을 정한다** — 자르는 규칙이 바뀌면 그 전에 저장된 캐시는 새 규칙과 다른 물건이다.
       # 실제로 한 번 깨졌다: prune 이 산출물(`o/`)만 지우고 매니페스트(`h/`)를 남기자 그 캐시를 복원한
@@ -99,9 +109,9 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-check-
       - name: Run the checks the change needs
         env:
@@ -145,7 +155,7 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
@@ -170,9 +180,9 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-file-explorer-
       # 제품 셰이더는 런타임 컴파일(`newLibraryWithSource:`)이라 MSL 문법이 깨져도 빌드·단위 테스트·Metal
       # 계약 테스트가 전부 통과하고 앱을 띄워야만 드러난다. 수 초짜리 컴파일 스모크로 그 사각지대를 닫는다.
@@ -237,7 +247,7 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes
@@ -265,9 +275,9 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=Debug
@@ -281,7 +291,7 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)
@@ -320,9 +330,9 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-sessionhost-releasefast-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=ReleaseFast
@@ -336,7 +346,7 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
 
   # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
@@ -361,9 +371,9 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-slow-observer-
       - name: Verify real PTY slow-observer isolation and host RSS
         run: zig build test-session-host-slow-observer-macos
@@ -390,7 +400,7 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
   oracles:
     name: external oracles (libvterm, Alacritty)
     needs: changes
@@ -414,9 +424,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             tests/oracle/alacritty-dumper/target
-          key: zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-oracles-
 
       - name: Install libvterm
@@ -451,4 +461,4 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             tests/oracle/alacritty-dumper/target
-          key: zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}

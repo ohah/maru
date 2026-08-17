@@ -15,6 +15,25 @@ pub const PtyEvent = types.PtyEvent;
 pub const PtyHandle = types.PtyHandle;
 pub const PtySession = session.PtySession;
 pub const backend_available = session.backend_available;
+/// 이번 프로세스가 쓰는 ConPTY 구현. **진단 전용**이다 — `conpty.dll` 은 `OpenConsole.exe` 를 못 찾으면
+/// 시스템 conhost 로 **조용히 되돌아가므로**(실패하지 않는다) 이것 없이는 "배치가 틀린 것"과 "잘 된
+/// 것"을 못 가른다(계약 §4.3). 비-Windows 에서는 언제나 `.system` 이다.
+pub const WindowsConptySource = enum { system, bundled };
+
+/// **런타임 값이다.** 첫 spawn 에서 정해지므로 그 전에 물으면 아직 `.system` 이다.
+pub fn windowsConptySource() WindowsConptySource {
+    if (@import("builtin").os.tag != .windows) return .system;
+    return switch (@import("pty/windows.zig").conpty_source) {
+        .system => .system,
+        .bundled => .bundled,
+    };
+}
+
+/// 번들을 못 쓴 이유(진단). 성공했거나 아직 안 정해졌으면 빈 문자열이다.
+pub fn windowsConptyRejectReason() []const u8 {
+    if (@import("builtin").os.tag != .windows) return "";
+    return @import("pty/windows.zig").conpty_reject_reason;
+}
 // Windows 기본 셸 선택(config `shell.windows-shell`)을 소비할 호스트가 배럴을 통해 닿을 수 있어야 한다 —
 // W7에서 배선할 때 `pty.types.`를 직접 파고들지 않도록 여기서 함께 내보낸다.
 pub const WindowsShellKind = types.WindowsShellKind;

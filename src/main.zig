@@ -1687,6 +1687,16 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
+    // **어느 ConPTY 를 썼는지 찍는다.** `conpty.dll` 은 `OpenConsole.exe` 를 못 찾으면 시스템 conhost 로
+    // **조용히 되돌아간다** — 실패하지 않으므로 이 줄이 없으면 배치가 틀린 것과 잘 된 것을 못 가른다.
+    {
+        const reason = maru.pty.windowsConptyRejectReason();
+        try stdout.print("conpty={s}{s}{s}\n", .{
+            @tagName(maru.pty.windowsConptySource()),
+            if (reason.len > 0) " reason=" else "",
+            reason,
+        });
+    }
     try stdout.writeAll("visible UI: real shell output is drawn in the window.\n");
     try stdout.flush();
     try stderr.flush();

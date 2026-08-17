@@ -190,6 +190,119 @@ extern "kernel32" fn CreatePseudoConsole(size: COORD, hIn: HANDLE, hOut: HANDLE,
 extern "kernel32" fn ClosePseudoConsole(hpc: HANDLE) callconv(.winapi) void;
 extern "kernel32" fn ResizePseudoConsole(hpc: HANDLE, size: COORD) callconv(.winapi) i32;
 
+// ── 번들 ConPTY ───────────────────────────────────────────────────────────────────────────────
+//
+// **인박스 conhost 는 낡을 수 있다.** kernel32 의 `CreatePseudoConsole` 은 `%SystemRoot%\System32\
+// conhost.exe` 를 pty 호스트로 띄우는데, 그것이 오래됐으면 없는 기능이 있다 — 이 기계(conhost
+// 10.0.19041.4522)에서는 클라이언트가 마우스를 켜도 터미널에 알려 주지 않아 vim·htop 이 마우스를
+// 못 받았다(계약 §4.3의 실측 A/B).
+//
+// Microsoft 의 방침이 "인박스에 백포트하지 말고 앱이 새 버전을 들고 다녀라" 이므로
+// (`microsoft/terminal` discussion #17608) `assets/windows/conpty/` 의 쌍을 함께 배포하고
+// **있으면 그것을, 없으면 kernel32 를** 쓴다. 소스 빌드가 그 파일 없이도 계속 돌아야 한다.
+//
+// 공식 DLL 은 `Conpty*` 이름과 함께 **kernel32 와 같은 이름·시그니처**도 내보내므로
+// (`CreatePseudoConsole`·`ClosePseudoConsole`·`ResizePseudoConsole`) 호출부는 그대로다.
+
+/// 이번 프로세스가 쓰는 ConPTY 구현. 진단 전용이다 — **`bundled` 인데 마우스가 안 오면 배치가 틀린
+/// 것**이고, `system` 이면 애초에 번들을 못 찾은 것이다. 둘을 못 가르면 원인을 못 찾는다.
+pub const ConptySource = enum { system, bundled };
+pub var conpty_source: ConptySource = .system;
+/// 번들을 못 쓴 이유(진단). 성공이면 빈 문자열이다.
+pub var conpty_reject_reason: []const u8 = "";
+
+const ConptyCreateFn = *const fn (COORD, HANDLE, HANDLE, u32, *HANDLE) callconv(.winapi) i32;
+const ConptyCloseFn = *const fn (HANDLE) callconv(.winapi) void;
+const ConptyResizeFn = *const fn (HANDLE, COORD) callconv(.winapi) i32;
+
+var conpty_create: ?ConptyCreateFn = null;
+var conpty_close: ?ConptyCloseFn = null;
+var conpty_resize: ?ConptyResizeFn = null;
+var conpty_init_done: bool = false;
+
+extern "kernel32" fn LoadLibraryExW(?[*:0]const u16, ?*anyopaque, u32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetProcAddress(*anyopaque, [*:0]const u8) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetModuleFileNameW(?*anyopaque, [*]u16, u32) callconv(.winapi) u32;
+
+/// `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`. 전체 경로로 부르지만 **의존 DLL 탐색도 좁힌다**.
+const load_library_search_default_dirs: u32 = 0x1000;
+
+/// 번들 `conpty.dll` 을 한 번만 찾아 붙인다.
+///
+/// **이름으로 로드하지 않는다.** `LoadLibraryW("conpty.dll")` 은 CWD·PATH 를 뒤지므로, 사용자가 어떤
+/// 폴더에서 실행하느냐에 따라 남의 `conpty.dll` 이 붙는다(DLL 하이재킹). **우리 실행 파일 옆의 전체
+/// 경로**로만 연다.
+///
+/// **셋을 한 모듈에서 다 얻지 못하면 하나도 쓰지 않는다.** kernel32 의 `Close` 로 번들이 만든 HPCON 을
+/// 닫는 것 같은 섞임은 그 자리에서 안 터지고 나중에 이상하게 터진다.
+fn ensureConptyLoaded() void {
+    if (conpty_init_done) return;
+    conpty_init_done = true;
+    if (builtin.os.tag != .windows) return;
+
+    var buf: [max_path_utf16]u16 = undefined;
+    const len = GetModuleFileNameW(null, &buf, buf.len);
+    if (len == 0 or len >= buf.len) {
+        conpty_reject_reason = "실행 파일 경로를 못 읽었다";
+        return;
+    }
+    // 파일 이름을 떼고 `conpty.dll` 을 붙인다.
+    var dir_len: usize = len;
+    while (dir_len > 0 and buf[dir_len - 1] != '\\' and buf[dir_len - 1] != '/') dir_len -= 1;
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll");
+    if (dir_len + name.len + 1 > buf.len) {
+        conpty_reject_reason = "경로가 너무 길다";
+        return;
+    }
+    // **경로가 길면 `CreatePseudoConsole` 이 죽는다**(microsoft/terminal#16860). MAX_PATH 를 넘으면
+    // 번들을 쓰지 않고 인박스로 접는다 — 기능 하나를 잃는 편이 죽는 것보다 낫다.
+    if (dir_len + name.len >= 260) {
+        conpty_reject_reason = "설치 경로가 MAX_PATH 를 넘는다(#16860)";
+        return;
+    }
+    @memcpy(buf[dir_len..][0..name.len], name);
+    buf[dir_len + name.len] = 0;
+    const full: [*:0]const u16 = @ptrCast(&buf);
+
+    const lib = LoadLibraryExW(full, null, load_library_search_default_dirs) orelse {
+        conpty_reject_reason = "conpty.dll 이 실행 파일 옆에 없다";
+        return;
+    };
+    const c = GetProcAddress(lib, "CreatePseudoConsole");
+    const x = GetProcAddress(lib, "ClosePseudoConsole");
+    const r = GetProcAddress(lib, "ResizePseudoConsole");
+    if (c == null or x == null or r == null) {
+        conpty_reject_reason = "conpty.dll 에 세 심볼이 다 있지 않다";
+        return;
+    }
+    conpty_create = @ptrCast(@alignCast(c.?));
+    conpty_close = @ptrCast(@alignCast(x.?));
+    conpty_resize = @ptrCast(@alignCast(r.?));
+    conpty_source = .bundled;
+}
+
+fn conptyCreate(size: COORD, hIn: HANDLE, hOut: HANDLE, flags: u32, hpc: *HANDLE) i32 {
+    ensureConptyLoaded();
+    if (conpty_create) |f| return f(size, hIn, hOut, flags, hpc);
+    return CreatePseudoConsole(size, hIn, hOut, flags, hpc);
+}
+
+fn conptyClose(hpc: HANDLE) void {
+    // `ensureConptyLoaded` 를 여기서 다시 부르지 않는다 — create 가 이미 정했고, 중간에 바뀌면
+    // 만든 쪽과 닫는 쪽이 갈린다.
+    if (conpty_close) |f| return f(hpc);
+    ClosePseudoConsole(hpc);
+}
+
+fn conptyResize(hpc: HANDLE, size: COORD) i32 {
+    if (conpty_resize) |f| return f(hpc, size);
+    return ResizePseudoConsole(hpc, size);
+}
+
+/// `GetModuleFileNameW` 버퍼. `\\?\` 접두 긴 경로까지 받도록 넉넉히 둔다(그래도 위에서 MAX_PATH 로
+/// 거른다 — 버퍼가 넉넉한 것과 conpty 가 그 길이를 견디는 것은 다른 문제다).
+const max_path_utf16: usize = 32768;
+
 const invalid_handle_value: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 
 const error_handle_eof: u32 = 38;
@@ -370,9 +483,9 @@ pub const PtySession = struct {
 
         // ② pseudoconsole. 여기부터 `hpc`가 자기 사본을 갖는다.
         var hpc: HANDLE = null;
-        if (CreatePseudoConsole(coordFromSize(request.size), pipes.in_read, pipes.out_write, 0, &hpc) != 0)
+        if (conptyCreate(coordFromSize(request.size), pipes.in_read, pipes.out_write, 0, &hpc) != 0)
             return error.CreatePseudoConsoleFailed;
-        errdefer ClosePseudoConsole(hpc);
+        errdefer conptyClose(hpc);
 
         // ③ **우리 쪽 클라이언트 사본을 spawn 전에 닫는다.** 남겨 두면 자식이 pty에 붙지 않는다(§4.1a ★).
         pipes.closeChildEnds();
@@ -605,7 +718,7 @@ pub const PtySession = struct {
     fn handOffPtyClose(self: *PtySession) void {
         const hpc = self.takeHpc() orelse return;
         const thread = std.Thread.spawn(.{}, ptyCloser, .{hpc}) catch {
-            ClosePseudoConsole(hpc);
+            conptyClose(hpc);
             return;
         };
         thread.detach();
@@ -916,7 +1029,7 @@ pub const PtySession = struct {
         AcquireSRWLockExclusive(&self.hpc_lock);
         defer ReleaseSRWLockExclusive(&self.hpc_lock);
         const hpc = self.hpc orelse return error.SessionClosed;
-        if (ResizePseudoConsole(hpc, coordFromSize(size)) != 0) return error.ResizeFailed;
+        if (conptyResize(hpc, coordFromSize(size)) != 0) return error.ResizeFailed;
         self.size = size;
     }
 
@@ -1048,7 +1161,7 @@ fn exitStatusFromCode(code: u32) types.ExitStatus {
 
 /// 분리 스레드의 본문. `hpc` 하나만 소유한다 — 세션이 먼저 해제돼도 여기서 만지는 것이 없다.
 fn ptyCloser(hpc: HANDLE) void {
-    ClosePseudoConsole(hpc);
+    conptyClose(hpc);
 }
 
 /// 세션이 사라진 뒤의 뒷정리 몫. 세션 수명과 얽히지 않게 **자기 버퍼와 이벤트**를 따로 가진다
@@ -1096,7 +1209,7 @@ fn teardownThread(t: *Teardown) void {
         _ = CloseHandle(ev);
     }
 
-    if (t.hpc) |h| ClosePseudoConsole(h);
+    if (t.hpc) |h| conptyClose(h);
     _ = CloseHandle(t.out_read);
     _ = CloseHandle(t.in_write);
     std.heap.page_allocator.destroy(t);

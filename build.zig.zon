@@ -10,6 +10,9 @@
         "src",
         "tests",
         "docs",
+        // W7.6: 번들 ConPTY(`conpty.dll` + `OpenConsole.exe`, MIT). 여기 없으면 패키지로 소비될 때
+        // 빠져서 Windows 마우스가 조용히 죽는다 — `build.zig`는 파일이 없으면 그냥 안 넣는다.
+        "assets",
         "LICENSE",
         "terminal-strategy.md",
         "AGENTS.md",

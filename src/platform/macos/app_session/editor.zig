@@ -3247,6 +3247,49 @@ test "접으면 화면에서 그 줄들이 사라지고 번호는 원래 값이�
     try testing.expectEqual(z_before, z_back);
 }
 
+test "레벨 접기도 화면에 반영된다 — 바깥은 남고 안쪽만 사라지며 화살표 방향이 갈린다" {
+    // **상태만 움직이고 렌더가 안 따라오면 아무 일도 안 일어난다.** 전체 접기는 위 테스트가 셀까지
+    // 봤지만 레벨 접기는 "어느 겹이 남는가"가 다르다 — 레벨 2를 접으면 바깥(레벨 1) 머리와 그 직속
+    // 자식 머리는 보이고, **자식의 몸통만** 사라져야 한다. 그리고 gutter 화살표는 같은 화면에서
+    // 갈린다: 바깥은 펼침(▾), 접은 자식은 접힘(▸).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 4);
+    defer allocator.free(lines);
+    lines[0] = "outer:"; // 레벨 1 머리
+    lines[1] = "  inner:"; // 레벨 2 머리
+    lines[2] = "    zzz"; // 레벨 2의 몸통 — 이것만 사라져야 한다
+    lines[3] = "    zzz";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    try testing.expect(foldLevel(fx.session, 2));
+    var dl = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer dl.dl.deinit(allocator);
+
+    var z: usize = 0;
+    var saw_o = false; // outer의 'o'
+    var open_mark = false; // ▾
+    var collapsed_mark = false; // ▸
+    for (dl.dl.cells) |c| {
+        switch (c.codepoint) {
+            'z' => z += 1,
+            'o' => saw_o = true,
+            0x25BE => open_mark = true,
+            0x25B8 => collapsed_mark = true,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), z); // 안쪽 몸통이 사라졌다
+    try testing.expect(saw_o); // 바깥은 그대로 보인다
+    try testing.expect(open_mark and collapsed_mark); // 두 방향이 같은 화면에 선다
+}
+
 test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
     // `rebuildVisible`은 줄마다 `isHidden(spans, i)`를 부른다. 구간이 많아지면 줄×구간이라
     // **방금 `hiddenSpans`에서 고친 것과 같은 부류**다. 재고 확인한다.

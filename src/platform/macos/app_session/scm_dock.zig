@@ -30,10 +30,16 @@ const redact = maru.redact;
 
 const component = chrome.components.scm_dock;
 
-/// 도크 UI zoom. **Session Dock과 같은 값**을 쓴다 — 같은 컬럼의 두 뷰가 다른 축으로 커지면 뷰를
-/// 갈아 끼울 때 행 높이가 튄다(docs/editor-surface-dock.md §3.5).
+/// 도크가 그릴 **backing 스케일**. **Session Dock과 같은 값**을 쓴다 — 같은 컬럼의 두 뷰가 다른 축으로
+/// 커지면 뷰를 갈아 끼울 때 행 높이가 튄다(docs/editor-surface-dock.md §3.5).
+///
+/// **`agentSessionDockUiZoomMilli`가 아니라 `agentSessionDockScaleMilli`다**(사용자 보고 2026-08-18).
+/// 앞의 것은 **UI zoom만**(폰트 비율)이고, `DockMetrics.resolve`·`typography`가 받는 것은 **backing
+/// 스케일 × zoom**이다(`ui/spacing.zig`: "resolves logical steps once at backing scale"). zoom만 주면
+/// Retina(backing 2000)에서 이 도크의 모든 치수가 **절반**이 되고, 글리프는 실제 장치 스케일로 래스터돼
+/// 글자가 뭉개져 보인다 — 1x 화면(캡처 하니스 포함)에서는 두 값이 같아 **증상이 아예 안 나타난다**.
 pub fn scmDockScaleMilli(self: *const AppSession) u32 {
-    return agent_dock.agentSessionDockUiZoomMilli(self);
+    return agent_dock.agentSessionDockScaleMilli(self);
 }
 
 /// 스크롤 투영의 항목 열. 높이는 component가 정하고(`DockMetrics.itemHeight`) 이 구조체는 그 함수를

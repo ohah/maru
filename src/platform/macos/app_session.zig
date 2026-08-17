@@ -55288,6 +55288,28 @@ test "히스토리 탭: 커밋을 펼치면 그 커밋이 바꾼 파일이 아�
     try std.testing.expect(session.scm_expanded_commit == null);
 }
 
+test "소스 컨트롤 도크는 **backing 스케일**로 그린다(Retina에서 절반이 되지 않게)" {
+    // 사용자 보고 2026-08-18: Retina에서 이 도크만 글자가 뭉개지고 줄이 얇았다. 원인은 스케일 함수를
+    // 잘못 고른 것 — `DockMetrics`가 받는 값은 **backing × zoom**인데 zoom만 줬다(1x 화면에서는 두
+    // 값이 같아 캡처로도 안 잡혔다). 에이전트 도크는 처음부터 같은 값을 쓰고 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.scale_milli = 2000; // Retina
+    try std.testing.expectEqual(
+        agent_dock.agentSessionDockScaleMilli(session),
+        scm_dock_ops.scmDockScaleMilli(session),
+    );
+    // 그 값이 실제로 치수를 두 배로 만든다(1x와 같은 수가 나오면 그게 이 결함이다).
+    const retina = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    session.scale_milli = 1000;
+    const plain = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    try std.testing.expect(retina.row_h > plain.row_h);
+}
+
 test "히스토리: 출력이 잘리면 그 사실을 적는다 (P4b 적대적 검증)" {
     // "더 없다"와 "더 못 읽었다"는 다른 사실이다 — 조용히 자르면 사용자는 앞의 것으로 읽는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;

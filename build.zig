@@ -108,6 +108,8 @@ pub fn build(b: *std.Build) void {
         // user32에서 겪은 것과 같은 부류다(그때는 `RegisterClassExW`가 조용히 0을 냈다).
         exe.root_module.linkSystemLibrary("d3d11", .{});
         exe.root_module.linkSystemLibrary("dxgi", .{});
+        // W7.3: DirectWrite 글리프 래스터라이저.
+        exe.root_module.linkSystemLibrary("dwrite", .{});
     }
 
     b.installArtifact(exe);
@@ -246,6 +248,12 @@ pub fn build(b: *std.Build) void {
         d3d11_cells_smoke_cmd.step.dependOn(b.getInstallStep());
         d3d11_cells_smoke_cmd.addArg("d3d11-cells-smoke");
         d3d11_cells_smoke_step.dependOn(&d3d11_cells_smoke_cmd.step);
+
+        const dwrite_text_smoke_step = b.step("dwrite-text-smoke", "Render real text with DirectWrite glyphs plus synthesized box drawing");
+        const dwrite_text_smoke_cmd = b.addRunArtifact(exe);
+        dwrite_text_smoke_cmd.step.dependOn(b.getInstallStep());
+        dwrite_text_smoke_cmd.addArg("dwrite-text-smoke");
+        dwrite_text_smoke_step.dependOn(&dwrite_text_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

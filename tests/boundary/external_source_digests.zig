@@ -483,6 +483,9 @@ pub const inventory = [_]Proof{
     // 이어서 **down 쪽 가드**가 붙는다(2026-08-17 사용자 제보 — "도크가 열려 있으면 탭 전환이 안 된다"):
     // 소스 컨트롤 분기가 좌표를 안 보고 `return` 해서 창의 모든 primary down을 삼켰다. 위 커밋이 up·move를
     // 맞췄고 이것이 down을 맞춘다. count는 2 그대로다.
+    // 접힘(§4.1f)으로 Term rt에 필드 셋이 붙는다(`editor_fold_ranges` — 들여쓰기로 센 범위,
+    // `editor_folded_buf`·`_len` — 접힌 머리 줄. 버퍼를 미리 잡아 접기/펼치기가 다시 할당하지 않는다).
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f9cbf35b8c4ce0ee7d730ebb1cb74da91c3603f50aee9265159b8f7d25737d5c" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

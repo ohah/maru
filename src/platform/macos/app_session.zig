@@ -1596,6 +1596,13 @@ const TermRuntime = struct {
     editor_total_visual_rows: u32 = 0,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 여기를 움직인다.
     editor_first_line: usize = 0,
+    /// 접을 수 있는 범위(§4.1f — 들여쓰기 층). **명령이 필요할 때 세어 여기 둔다** — 렌더는 할당하지
+    /// 않고 이것을 읽기만 한다. 비어 있으면 아직 안 셌거나 접을 것이 없다.
+    editor_fold_ranges: []const maru.session.editor.fold.Range = &.{},
+    /// 접힌 머리 줄들. **오름차순**이고 `editor_fold_ranges.len`만큼의 자리를 미리 잡아 두므로
+    /// 접기/펼치기가 다시 할당하지 않는다(`hiddenSpans`가 오름차순을 계약으로 요구한다).
+    editor_folded_buf: []u32 = &.{},
+    editor_folded_len: usize = 0,
     /// 화면 맨 위 줄에서 **건너뛸 조각 수**(§4.1d — 앵커 + 조각 오프셋).
     ///
     /// **앵커는 `editor_first_line`, 오프셋은 이것**이다. 논리 줄만 들면 줄 안쪽에 설 수 없어,

@@ -7,6 +7,11 @@
 // sink 가 있다고 적었다(`context_menu_items_buf` 처럼 정적·동적이 한 배열에 섞이는 자리). 거기서는
 // 이 검사가 유일한 방어다.
 //
+// **원장을 올릴 때는 그것이 표시 문자열이 아님을 확인한다.** 이 게이트가 처음 잡은 둘이 그 예다:
+// SCM 히스토리 탭의 상대 시각·안내 9 건은 **표시 문자열이라 키로 옮겼고**(원장 0 유지),
+// CoreText 스모크의 9 건은 **디버그 출력 2 + 스모크 fixture 7**(탭 제목·기본 텍스트)이라 원장을 올렸다.
+// 늘었다는 사실만으로 자동 반영하면 게이트가 아무것도 안 지킨다 — 매번 그 자리를 열어 봐야 한다.
+//
 // **왜 개수 원장인가.** 남은 152 건은 대부분 **표시 문자열이 아니다** — config 파싱 진단(55),
 // Chrome Lab 개발 도구(15), 계약 §6.2 위반이라 I2 가 먼저 드는 자리(정렬 공백·아이콘 결합), trace
 // 로그. 그것들을 0 으로 만드는 것은 이 계약의 일이 아니므로 **현재 수를 고정**하고 **늘면 실패**시킨다.
@@ -50,7 +55,7 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/chrome/lab.zig", .count = 15 },
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 2 },
     .{ .path = "src/platform/macos/control_server.zig", .count = 1 },
-    .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 3 },
+    .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },
     .{ .path = "src/platform/macos/glyph_text_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/metal_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .count = 1 },

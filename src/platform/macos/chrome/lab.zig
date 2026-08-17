@@ -46,6 +46,15 @@ pub const ScenarioId = enum {
     /// 없으면 그 버튼의 자리를 아무도 못 본다 — 실제로 `+`가 상태 문자와 겹치고(#2209), 색 없는 테두리가
     /// 배경을 뚫고, 버튼이 개수 배지 위로 올라온 결함 셋이 전부 이 상태에서만 보였다.
     scm_row_hover,
+    /// 세션 기록 헤더의 **정렬 토글에 호버**한 상태. 이 토글은 `.ghost`라 평소에는 label만 보이고 면·테두리가
+    /// 없다 — 즉 **호버·pressed 때만 존재하는 그림**이고, 그 그림을 보던 골든이 하나도 없었다. 실제로
+    /// 목록 행용 hover 토큰(활성보다 밝게 잡은 색)이 그대로 깔려 작은 pill 하나만 튀는 상태가 사용자
+    /// 제보로만 드러났다(2026-08-17). 이 시나리오가 그 자리를 픽셀로 고정한다.
+    sort_toggle_hover,
+    /// 같은 토글을 **누르고 있는** 상태. 사용자가 실제로 지적한 그림이 이것이다("최신순 누를 때") — pressed는
+    /// hover보다 진해야 하지만 활성 밴드와 같은 세기로 칠하면 헤더에서 그 상자만 튄다. hover 캡처와 나란히
+    /// 놓아 **두 상태의 세기 차이**가 유지되는지도 함께 본다.
+    sort_toggle_pressed,
     /// 커밋 메시지 상자가 **편집 중**인 상태(P3c). caret·선택 밴드·여러 줄·랩은 전부 이 상태에서만
     /// 그려지고, 그 중 무엇도 단위 테스트가 "자리"까지 보지는 못한다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다.
@@ -207,6 +216,8 @@ pub fn buildFrame(
         .sticky_at_rest,
         .sticky_pinned,
         .sticky_pushed,
+        .sort_toggle_hover,
+        .sort_toggle_pressed,
         => buildDockFrame(scenario, tokens, buffers),
     };
 }
@@ -719,7 +730,8 @@ fn buildDockFrame(
             else => 0,
         },
         .items = switch (scenario.id) {
-            .retained_list => &retained,
+            // 호버 시나리오는 헤더만 보지만 목록이 비면 헤더 폭·개수 표기가 실제 사용과 달라진다.
+            .retained_list, .sort_toggle_hover, .sort_toggle_pressed => &retained,
             .font_specimen => &font_specimen,
             .partial_scroll => retained[1..],
             .partial_group_scroll, .scrollbar => &retained,
@@ -737,8 +749,28 @@ fn buildDockFrame(
         .child_rects = buffers.child_rects,
         .actions = buffers.dock_actions,
     });
-    const draws = try session_dock.view.view(dock_props, session_frame, .{}, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
+    // `.ghost` 토글의 면·테두리는 **호버할 때만** 존재한다. 포인터가 없는 캡처에서 그 그림을 보려면
+    // 상태를 직접 세워야 한다(scm 행 호버와 같은 근거).
+    const dock_state: chrome.ui.interaction.InteractionState = switch (scenario.id) {
+        .sort_toggle_hover => .{ .hovered = session_dock.build.NodeIds.sort_toggle },
+        // capture는 **action까지** 지목한다(제품에서도 press가 action에 붙는다). action id는 build가
+        // 발급하므로 발행된 표에서 그 intent를 찾아 쓴다 — 상수를 적으면 발급 순서가 바뀔 때 조용히 어긋난다.
+        .sort_toggle_pressed => .{ .capture = .{
+            .id = session_dock.build.NodeIds.sort_toggle,
+            .action_id = sortActionId(session_frame.actions),
+        } },
+        else => .{},
+    };
+    const draws = try session_dock.view.view(dock_props, session_frame, dock_state, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
     return .{ .tree = session_frame.tree, .draws = draws };
+}
+
+/// 발행된 action 표에서 정렬 토글의 action id를 찾는다. pressed 시나리오가 그 짝(`node id`, `action id`)을
+/// 둘 다 맞춰야 `resolveButton`이 press로 해석한다 — 하나만 맞으면 캡처가 평소 그림으로 돌아가 골든이
+/// "pressed를 본다"고 거짓말한다.
+fn sortActionId(actions: []const session_dock.ids.Entry) chrome.ui.tree.UiActionId {
+    for (actions) |entry| if (entry.intent == .toggle_sort) return entry.action_id;
+    return 0;
 }
 
 /// 소스 컨트롤 도크 한 프레임. **픽스처는 합성이다** — Lab은 deterministic·effect-free라 저장소를 읽지

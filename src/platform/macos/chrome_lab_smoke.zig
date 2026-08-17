@@ -746,6 +746,8 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
     if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
+    if (std.mem.eql(u8, raw, "sort-toggle-hover")) return .sort_toggle_hover;
+    if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
     return null;
 }
 
@@ -754,6 +756,8 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_rows => "scm-rows",
         .scm_row_hover => "scm-row-hover",
         .scm_commit_edit => "scm-commit-edit",
+        .sort_toggle_hover => "sort-toggle-hover",
+        .sort_toggle_pressed => "sort-toggle-pressed",
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",

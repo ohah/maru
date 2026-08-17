@@ -120,6 +120,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        // **드롭도 '비-텍스트 상호작용'이다**(commitMarkedTextIfComposing 주석의 규칙). 조합 중에 이미지를
+        // 끌어다 놓으면 AppKit marked 세션과 Zig preedit가 살아남아 조합 글자가 화면에 잔상으로 남고, 그
+        // 뒤 입력이 stale한 조합에 이어 붙는다(사용자 제보 2026-08-17). 키보드·포인터·메뉴가 이미 공유하는
+        // 그 규칙에 드롭을 합류시킨다 — 확정은 삽입 **전**에 하므로 조합 글자가 드롭 내용보다 앞에 온다.
+        commitMarkedTextIfComposing()
         // 내용 추출·삽입은 paste 로직을 가진 controller에 위임한다(클립보드 paste와 같은 경로 재사용 — keyDown이
         // handleKeyDown에 위임하는 것과 동형). 세션/PTY 접근은 controller가 소유한다. 드롭 지점(창 좌표)과 **이 뷰**를
         // 함께 넘긴다 — controller가 그 뷰의 창 surface로 스코프해 pane 라우팅(v115)까지 한 곳에서 처리한다.
@@ -213,9 +218,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // stale한 조합에 이어 붙는다 — 예: 'ㅈ' 조합 중 다른 탭으로 가면 그 'ㅈ' 세션이 살아남아 새 탭의 첫
     // 입력이 'ㅈ'부터 이어진다(사용자 보고). 키보드(keyDown: 단축키/특수키 우회), 포인터(handleMouse
     // kind==1: 사이드바 카드·탭 바 클릭의 탭/Term 전환은 버튼 무관 kind==1 게이트라 좌·중·우 다운 모두),
-    // 메뉴(runCatalogAction: next/previous_tab 등 — 키 단축키로 와도 keyDown을 안 거친다) 세 입력 모달리티가
-    // 이 한 규칙('비-텍스트 조작이면 조합 확정')을 공유한다. 커밋은 전환 '전'에 일어나므로 조합 글자는
-    // 떠나는(현재) 터미널로 들어가고 새 터미널은 빈 상태로 시작한다.
+    // 메뉴(runCatalogAction: next/previous_tab 등 — 키 단축키로 와도 keyDown을 안 거친다), 그리고
+    // **드롭(performDragOperation — 이미지·파일·URL)** 네 입력 모달리티가 이 한 규칙('비-텍스트 조작이면
+    // 조합 확정')을 공유한다. 커밋은 전환 '전'에 일어나므로 조합 글자는 떠나는(현재) 터미널로 들어가고
+    // 새 터미널은 빈 상태로 시작한다.
+    //
+    // 드롭이 뒤늦게 합류한 이유가 이 규칙의 성격을 보여 준다: 모달리티를 하나 더할 때마다 여기 합류시켜야
+    // 하는 **열린 목록**이라, 빠뜨리면 그 경로에서만 조합 잔상이 남는다(드롭이 실제로 그랬다 — 2026-08-17).
     //
     // 왜 Zig switchTab/focusTerm(전환의 단일 chokepoint)이 아니라 Swift 입력 경계에서 하나 — AppKit 입력기
     // 세션 종료(inputContext.discardMarkedText)는 NSView만 할 수 있다. Zig가 preedit를 커밋해도 그걸 못 부르면

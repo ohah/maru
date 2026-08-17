@@ -118,3 +118,12 @@ test "우리 줄은 SSH-2.0- 로 시작하고 공백이 없다" {
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, line, ' '));
     try std.testing.expect(line.len <= max_line - 2); // CRLF 자리를 남긴다
 }
+
+// **실서버 원문**(2026-08-17, `localhost:22` 캡처). 우리가 만든 문자열로만 테스트하면
+// 자기충족이다 — 진짜 서버가 보내는 줄로 한 번 못박는다.
+test "실서버(OpenSSH 10.2) 버전 줄" {
+    const got = try parse("SSH-2.0-OpenSSH_10.2\r\n");
+    try std.testing.expectEqualStrings("SSH-2.0-OpenSSH_10.2", got.line);
+    // **교환 해시에 이 원문이 들어간다** — CR 이 남으면 해시가 서버와 안 맞아 KEX 가 조용히 깨진다.
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, got.line, '\r'));
+}

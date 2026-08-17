@@ -14,6 +14,8 @@ pub const ssh = struct {
     pub const version = @import("session/ssh/version.zig");
     /// KEXINIT 협상(RFC 4253 §7.1) + strict KEX 표시자.
     pub const kexinit = @import("session/ssh/kexinit.zig");
+    /// **sans-io 경계를 코드로 잠근다** — 이 층에 소켓·파일·시계가 새면 테스트가 깬다.
+    pub const sans_io_boundary = @import("session/ssh/sans_io_boundary.zig");
 };
 pub const input_math = @import("session/input_math.zig");
 pub const layout_math = @import("session/layout_math.zig");

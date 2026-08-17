@@ -90,7 +90,10 @@ pub fn read(buf: []const u8) Error!Decoded {
     if (buf.len < 4) return Error.Incomplete;
     const len = std.mem.readInt(u32, buf[0..4], .big);
     if (len > max_packet) return Error.PacketTooLarge;
-    // **길이가 0 이면 패딩 필드조차 없다.** 그대로 두면 아래에서 빈 슬라이스를 자르게 된다.
+    // **길이가 하한 미만이면 패딩 필드조차 없다.** 이 줄이 없으면 길이 0 인 패킷에서 `total` 이 4 가
+    // 되어 "다 왔다" 로 통과하고, 바로 아래 `buf[4]` 가 **버퍼 밖**을 읽는다(실측: 4바이트 버퍼에서
+    // `index out of bounds: index 4, len 4`). 아래 가드들이 대신 잡아 주는 것처럼 보이지만, 그것은
+    // 넉넉한 버퍼로만 시험했을 때 얘기다.
     if (len < 1 + min_padding) return Error.MalformedPacket;
     const total = 4 + len;
     if (buf.len < total) return Error.Incomplete;
@@ -168,6 +171,14 @@ test "깨진 프레이밍은 거절한다" {
     var bad3: [16]u8 = undefined;
     std.mem.writeInt(u32, bad3[0..4], 2, .big);
     try std.testing.expectError(Error.MalformedPacket, read(&bad3));
+
+    // **버퍼가 선언한 길이에 딱 맞을 때**가 길이 하한 검사의 존재 이유다. 길이 0 이면 `total` 이
+    // 4 라 "다 왔다" 로 통과하는데, 그 다음 줄이 읽는 `buf[4]` 는 **버퍼 밖**이다. 넉넉한 버퍼로만
+    // 시험하면 이 검사를 지워도 다른 가드가 대신 잡는 것처럼 보인다(변이가 살아남아 알았다).
+    var tight = [_]u8{ 0, 0, 0, 0 };
+    try std.testing.expectError(Error.MalformedPacket, read(&tight));
+    var tight4 = [_]u8{ 0, 0, 0, 4, 0, 0, 0, 0 }; // 길이 4 — 패딩 필드는 있지만 하한 미만
+    try std.testing.expectError(Error.MalformedPacket, read(&tight4));
 
     // **payload 가 0바이트인 패킷.** 다른 가드(길이 하한·패딩 하한·블록 배수)를 전부 통과하는데
     // 메시지 번호가 없다 — 받아 주면 그것을 읽는 쪽이 죽는다. 길이 12, 패딩 11 이면 정확히 그 모양이다.

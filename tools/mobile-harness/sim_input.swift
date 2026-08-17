@@ -9,6 +9,7 @@
 // 사용:
 //   swift tools/mobile-harness/sim_input.swift drag <x0> <y0> <x1> <y1>   # 기기 논리 pt
 //   swift tools/mobile-harness/sim_input.swift tap  <x> <y>
+//   swift tools/mobile-harness/sim_input.swift hold <x> <y> <ms>   # 길게 누르기(선택)
 //
 // 좌표는 **기기 논리 좌표(pt)** 다. 창 안에서 기기 화면이 가운데 놓인다고 보고 베젤을 뺀다.
 // **창을 건드리지 말 것** — 제목줄을 클릭하면 창이 움직여 좌표가 통째로 어긋난다(겪었다).
@@ -57,6 +58,20 @@ case "drag" where a.count == 4:
     }
     post(.leftMouseUp, p1)
     print("drag \(a[0]),\(a[1]) -> \(a[2]),\(a[3])")
+case "hold" where a.count == 3:
+    // **누르고 있는 제스처.** `idb` 로는 못 만들지만(시작부터 균일하게 움직여 슬롭을 먼저
+    // 넘긴다) CGEvent 는 눌러 두고 기다리면 그만이다 — 길게 누름은 프레임에서 판정되므로
+    // 그 사이 이벤트를 더 보낼 필요가 없다.
+    //
+    // **2px 만 흔든다.** 진짜 손가락은 가만히 못 있고, 그 떨림이 속도로 남아 떼는 순간 화면을
+    // 미끄러뜨린 결함이 있었다(길게 누름 임계 10px 안이라 선택은 그대로 성립한다).
+    let hp = pt(a[0], a[1])
+    post(.mouseMoved, hp); usleep(100_000)
+    post(.leftMouseDown, hp); usleep(60_000)
+    post(.leftMouseDragged, CGPoint(x: hp.x + 2, y: hp.y + 2))
+    usleep(useconds_t(a[2] * 1000))
+    post(.leftMouseUp, CGPoint(x: hp.x + 2, y: hp.y + 2))
+    print("hold \(a[0]),\(a[1]) \(a[2])ms")
 case "tap" where a.count == 2:
     let p = pt(a[0], a[1])
     post(.mouseMoved, p); usleep(80_000)
@@ -64,6 +79,6 @@ case "tap" where a.count == 2:
     post(.leftMouseUp, p)
     print("tap \(a[0]),\(a[1])")
 default:
-    print("사용: sim_input.swift drag x0 y0 x1 y1 | tap x y  (기기 논리 pt)")
+    print("사용: sim_input.swift drag x0 y0 x1 y1 | tap x y | hold x y ms  (기기 논리 pt)")
     exit(1)
 }

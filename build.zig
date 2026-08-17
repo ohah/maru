@@ -2238,6 +2238,19 @@ pub fn build(b: *std.Build) void {
     const run_i18n_locale_boundary_tests = b.addRunArtifact(i18n_locale_boundary_tests);
     run_i18n_locale_boundary_tests.setCwd(b.path("."));
 
+    // sans-io: SSH 프로토콜 층이 소켓·파일·시계를 만지는가. 모바일 브리지는 계약상 OS 호출이 0 이라
+    // (docs/ssh-client.md §2) 그 성질이 깨지면 **모바일 링크 오류로 늦게** 드러난다. 허용 목록 방식이고
+    // 디렉터리를 직접 훑는다 — 앞선 판정자가 금지 목록 + 등록 개수라서 무력했던 실측을 그 파일이 적어 뒀다.
+    const ssh_sans_io_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/ssh_sans_io.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ssh_sans_io_boundary_tests = b.addRunArtifact(ssh_sans_io_boundary_tests);
+    run_ssh_sans_io_boundary_tests.setCwd(b.path("."));
+
     // **이 집계 step 은 boundary 테스트를 Debug 로만 돈다.** 아래 optimize 루프 안에서 등록되는 것들은
     // `if (<loop>_optimize == .Debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
     // 46개 중 44개가 `readSource` 로 소스 파일을 문자열로 읽어 선언 수·제품 caller 수를 세고, `maru`
@@ -2258,6 +2271,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
+    boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

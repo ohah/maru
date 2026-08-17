@@ -61,8 +61,13 @@ pub const Reader = struct {
     }
 
     /// 고정 길이 바이트열(길이 접두가 없다 — 예: KEXINIT 의 16바이트 cookie).
+    ///
+    /// **더하기로 검사하면 안 된다.** `n` 은 와이어에서 읽은 길이나 `declared - consumed` 같은
+    /// 언더플로 결과일 수 있고, `pos + n` 은 그때 감싸 돌아 **`Truncated` 대신 프로세스가
+    /// 죽는다**(ReleaseFast 에서는 검사가 통과해 범위 밖 슬라이스를 호출자에게 넘긴다).
+    /// `pos <= buf.len` 은 모든 전진이 지키는 불변이라 아래 뺄셈은 안전하다.
     pub fn fixed(self: *Reader, n: usize) Error![]const u8 {
-        if (self.pos + n > self.buf.len) return Error.Truncated;
+        if (n > self.buf.len - self.pos) return Error.Truncated;
         defer self.pos += n;
         return self.buf[self.pos..][0..n];
     }
@@ -88,6 +93,14 @@ pub const NameList = struct {
         var it = self.iterator();
         while (it.next()) |n| if (std.mem.eql(u8, n, name)) return true;
         return false;
+    }
+
+    /// 첫 항목. **그것이 상대의 "추측"이다**(RFC 4253 §7.1 — "The first algorithm in each
+    /// name-list MUST be the preferred (guessed) algorithm"). 빈 목록이면 null 이다.
+    pub fn first(self: NameList) ?[]const u8 {
+        if (self.raw.len == 0) return null;
+        var it = self.iterator();
+        return it.next();
     }
 
     /// **우리가 선호하는 순서로** 고른다(RFC 4253 §7.1 은 클라이언트 선호를 따른다).
@@ -129,6 +142,8 @@ pub const Writer = struct {
         self.pos += 4;
     }
 
+    /// **`bytes` 는 이 writer 의 버퍼와 겹치면 안 된다**(`packet.write` 와 같은 이유 — 그쪽
+    /// 주석에 실측을 적어 뒀다). 겹치면 Debug 에서 죽고 ReleaseFast 에서는 조용히 망가진다.
     pub fn raw(self: *Writer, bytes: []const u8) WriteError!void {
         if (self.pos + bytes.len > self.buf.len) return WriteError.NoSpace;
         @memcpy(self.buf[self.pos..][0..bytes.len], bytes);
@@ -171,7 +186,11 @@ pub const Writer = struct {
 pub fn readMpint(r: *Reader) Error![]const u8 {
     const v = try r.string();
     if (v.len == 0) return v; // 0
-    if (v[0] == 0 and v.len > 1 and v[1] & 0x80 == 0) return Error.MalformedMpint; // 쓸데없는 0
+    // 앞의 0 은 **다음 바이트의 최상위 비트가 설 때만** 정당하다(부호 자리). 그 조건이 아닌 0 은
+    // 전부 쓸데없다 — **한 바이트짜리 `00` 도 포함된다**. `v.len > 1` 로 걸면 그것이 빠져나가고,
+    // 그러면 0 에 표현이 둘 생긴다(§5 는 0 을 빈 문자열로만 허용한다). 우리 인코더는 빈 문자열만
+    // 내므로 상대가 보낸 `00` 을 재현 못 해 **교환 해시가 원인 불명으로 어긋난다**.
+    if (v[0] == 0 and (v.len == 1 or v[1] & 0x80 == 0)) return Error.MalformedMpint;
     if (v[0] & 0x80 != 0) return Error.MalformedMpint; // 음수는 우리 쓰임에 없다
     return v;
 }
@@ -207,6 +226,13 @@ test "이름 찾기는 부분 일치가 아니다" {
     const list = NameList{ .raw = "ssh-ed25519-cert-v01@openssh.com,rsa-sha2-256" };
     try std.testing.expect(!list.has("ssh-ed25519"));
     try std.testing.expect(list.has("rsa-sha2-256"));
+}
+
+test "첫 항목이 상대의 추측이다" {
+    // 이 값으로 §7.1 의 "추측이 틀렸으면 다음 패킷을 버린다" 를 판정한다.
+    try std.testing.expectEqualStrings("a", (NameList{ .raw = "a,bb,ccc" }).first().?);
+    try std.testing.expectEqualStrings("solo", (NameList{ .raw = "solo" }).first().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), (NameList{ .raw = "" }).first());
 }
 
 test "고르기는 우리 선호 순서를 따른다" {
@@ -255,6 +281,16 @@ test "mpint 읽기는 최소 길이를 어긴 값을 거절한다" {
     var ok = [_]u8{ 0, 0, 0, 2, 0, 0x80 }; // 0x80 앞의 0 은 정당하다
     var r3 = Reader.init(&ok);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0x80 }, try readMpint(&r3));
+
+    // **한 바이트짜리 `00`.** 0 의 두 번째 표현이다 — `v.len > 1` 로 거르면 여기서 빠져나간다.
+    var lone_zero = [_]u8{ 0, 0, 0, 1, 0 };
+    var r4 = Reader.init(&lone_zero);
+    try std.testing.expectError(Error.MalformedMpint, readMpint(&r4));
+
+    // 0 은 **빈 문자열**로만 온다(§5).
+    var zero = [_]u8{ 0, 0, 0, 0 };
+    var r5 = Reader.init(&zero);
+    try std.testing.expectEqual(@as(usize, 0), (try readMpint(&r5)).len);
 }
 
 test "읽기는 언제나 경계를 본다" {
@@ -271,6 +307,15 @@ test "읽기는 언제나 경계를 본다" {
     var r3 = Reader.init(&empty);
     try std.testing.expectError(Error.Truncated, r3.byte());
     try std.testing.expectError(Error.Truncated, r3.u32be());
+
+    // **`fixed` 는 더하기로 검사하면 감싸 돈다.** 와이어에서 온 길이나 언더플로한 뺄셈 결과가
+    // 그대로 들어오는 자리라, 검사가 통과하거나(ReleaseFast) 프로세스가 죽는다(Debug).
+    var some = [_]u8{ 1, 2, 3, 4 };
+    var r4 = Reader.init(&some);
+    r4.pos = 2;
+    try std.testing.expectError(Error.Truncated, r4.fixed(std.math.maxInt(usize) - 1));
+    try std.testing.expectError(Error.Truncated, r4.fixed(3)); // 남은 것은 2 뿐이다
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 4 }, try r4.fixed(2)); // 딱 맞는 것은 된다
 }
 
 test "쓰기는 버퍼를 넘지 않는다" {

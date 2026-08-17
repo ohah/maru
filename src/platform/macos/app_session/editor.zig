@@ -3275,13 +3275,17 @@ test "레벨 접기도 화면에 반영된다 — 바깥은 남고 안쪽만 사
     var z: usize = 0;
     var saw_o = false; // outer의 'o'
     var open_mark = false; // ▾
-    var collapsed_mark = false; // ▸
+    var collapsed_mark = false; // 접힘 표식
+    // **코드포인트를 여기 적지 않는다** — 컴포넌트가 소유한 글자에서 유도한다(글리프를 바꾸면
+    // 이 판정이 조용히 옛 문자를 찾게 된다).
+    const open_cp = chrome_editor.gutter.Fold.open.codepoint().?;
+    const collapsed_cp = chrome_editor.gutter.Fold.collapsed.codepoint().?;
     for (dl.dl.cells) |c| {
+        if (c.codepoint == open_cp) open_mark = true;
+        if (c.codepoint == collapsed_cp) collapsed_mark = true;
         switch (c.codepoint) {
             'z' => z += 1,
             'o' => saw_o = true,
-            0x25BE => open_mark = true,
-            0x25B8 => collapsed_mark = true,
             else => {},
         }
     }
@@ -3829,8 +3833,9 @@ test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {
     try ensureFoldRanges(fx.session, fx.term);
     try rebuildVisible(fx.session, fx.term);
 
-    const open_mark: u21 = 0x25BE; // ▾
-    const collapsed_mark: u21 = 0x25B8; // ▸
+    // 컴포넌트가 소유한 글자에서 유도한다(위와 같은 이유 — 숫자를 두 곳에 적지 않는다).
+    const open_mark: u21 = chrome_editor.gutter.Fold.open.codepoint().?;
+    const collapsed_mark: u21 = chrome_editor.gutter.Fold.collapsed.codepoint().?;
 
     var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     var opens: usize = 0;

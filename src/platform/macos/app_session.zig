@@ -46937,7 +46937,7 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
 // 원래는 "한글 예약 폭이 틀리면 잘리거나 덮인다"를 겨눴는데 **그 가설은 뮤테이션으로 반증됐다**: 폭을
 // 코드포인트 수(2칸)로 재도 이 레이아웃은 깨지지 않는다(우측 클리핑이 없고 예약이 1칸 여유를 둔다). 그래서
 // 이 테스트가 실제로 지키는 계약만 남겼다 — 표시기가 셀에 도달한다(표시기를 없애는 뮤테이션이 죽인다).
-test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어와 공존)" {
+test "WP-F1 R9: found/none 표시기가 셀까지 도달한다(긴 검색어와 공존)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -46990,8 +46990,9 @@ test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어�
         if (c.codepoint == 'F') has_prompt = true;
     }
     try std.testing.expect(has_prompt);
-    // 카운터("찾음")도, 방금 친 마지막 글자('Z')도 살아 있어야 한다 — 예약이 맞으면 둘은 겹치지 않는다.
-    var it = (std.unicode.Utf8View.init("찾음Z") catch unreachable).iterator();
+    // 카운터("found")도, 방금 친 마지막 글자('Z')도 살아 있어야 한다 — 예약이 맞으면 둘은 겹치지 않는다.
+    // find 오버레이는 **영어 고정**이라(계약 §2.1) 여기 글자도 영어다.
+    var it = (std.unicode.Utf8View.init("foundZ") catch unreachable).iterator();
     while (it.nextCodepoint()) |cp| {
         var found = false;
         for (raster.cells.items) |c| {
@@ -47305,7 +47306,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
 // WP-F1 적대적 R1: **오버레이가 거짓말을 하면 안 된다.** WebKit이 페이지를 노랗게 하이라이트했는데 카운터가
 // "0/0"이면 사용자는 "못 찾았다"로 읽는다 — 화면과 정면으로 모순된다. `WKFindResult`는 개수를 안 주므로
 // (§8) 그 자리에 **찾음/없음**을 낸다. 결과가 오기 전에는 아무것도 안 낸다(빈 자리 < 틀린 숫자).
-test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
+test "WP-F1: 웹 탭 카운터는 0/0이 아니라 found/none이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -47338,11 +47339,11 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     session.dispatchChromeAction(.find_query_changed);
     const req = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     web_ops.provideWebFindResult(session, req.seq, true);
-    try std.testing.expect(try findOverlayHasText(allocator, session, "찾음"));
+    try std.testing.expect(try findOverlayHasText(allocator, session, "found")); // find 오버레이는 영어 고정(계약 §2.1)
     try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
 
     web_ops.provideWebFindResult(session, req.seq, false);
-    try std.testing.expect(try findOverlayHasText(allocator, session, "없음"));
+    try std.testing.expect(try findOverlayHasText(allocator, session, "none")); // find 오버레이는 영어 고정(계약 §2.1)
 
     // 터미널로 돌아오면 다시 숫자 카운터다(페이지 답이 남지 않는다).
     term_ops.focusTerm(session, 0);
@@ -47352,8 +47353,8 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     // 숫자 카운터로 돌아온다("/"는 이 오버레이에서 카운터에만 나온다 — 프롬프트는 "Find: ", 검색어는 "a").
     // 정확한 숫자는 단언하지 않는다: 돌아오면서 **실제로 재검색**하므로(R5) 셸 출력에 'a'가 있으면 0이 아니다.
     try std.testing.expect(try findOverlayHasText(allocator, session, "/"));
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "찾음")));
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "없음")));
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "found")));
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "none")));
 }
 
 /// 오버레이를 **실제 렌더 경로**(buildChromeOverlayFrame과 같은 collectDraws)로 그려 `needle` 텍스트가 나오는지

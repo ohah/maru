@@ -125,7 +125,7 @@ pub const wrapper_script =
 pub const terminfo_only_script =
     // ctl($3)은 안 쓰지만(설치만 하고 세션을 안 띄움) buildArgv가 항상 $3에 넣으므로 자리를 맞춰 shift 3 한다.
     "elig=\"$1\"; dest=\"$2\"; shift 3; cache=\"" ++ cache_path ++ "\"; " ++
-    "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: 목적지만 지정하세요(원격 command 불가)' >&2; exit 2; }; " ++
+    "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: specify only the destination (no remote command)' >&2; exit 2; }; " ++
     emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'; rc=$?; " ++
     "[ \"$rc\" = 0 ] && [ -n \"$dest\" ] && { grep -qxF \"$dest\" \"$cache\" 2>/dev/null || { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; }; " ++
     "exit \"$rc\"";

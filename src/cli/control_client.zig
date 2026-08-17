@@ -22,7 +22,7 @@ const path_shape = @import("../path_shape.zig"); // 입구 구분자 정규화(�
 /// 컨트롤 소켓이 막힌 호스트에서 **사용자에게 보일 이유**. OS와 무관한 문구 그 자체이며, 단일 출처는 여기다 —
 /// `main.zig`의 `HostGatedFeature.control_socket`이 이 값을 되돌려 준다(그 함수는 OS를 인자로 받아 Windows가
 /// 아닌 호스트에서도 Windows 갈래를 답해야 하므로 아래 `gate`를 쓸 수 없다).
-pub const gate_reason: []const u8 = "Windows에서는 컨트롤 소켓이 아직 지원되지 않습니다";
+pub const gate_reason: []const u8 = "the control socket is not supported on Windows yet";
 
 /// **이 빌드**에서 컨트롤 소켓이 막혀 있으면 이유, 열려 있으면 null.
 ///
@@ -35,7 +35,7 @@ pub const gate: ?[]const u8 = if (builtin.os.tag == .windows) gate_reason else n
 /// `error.UnknownCommand`(main이 트레이스 없이 exit 1로 접는 sentinel)를 돌려준다 — 사용자 오타/부재에
 /// crash처럼 보이지 않게. `detail`은 있으면 괄호로 덧붙인다.
 pub fn noInstance(stderr: *std.Io.Writer, detail: ?[]const u8) error{UnknownCommand} {
-    stderr.writeAll("실행 중인 maru 인스턴스를 찾지 못했습니다") catch {};
+    stderr.writeAll("no running maru instance found") catch {};
     if (detail) |d| stderr.print(" ({s})", .{d}) catch {};
     stderr.writeAll(".\n") catch {};
     stderr.flush() catch {};
@@ -85,7 +85,7 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     const xdg: ?[]const u8 = if (c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
     const base_raw = user_paths.cacheBaseFor(builtin.os.tag, xdg, local);
     const home_raw = user_paths.homeDirFor(builtin.os.tag, home_env, local) orelse
-        return noInstance(stderr, "홈 디렉터리를 찾지 못해 컨트롤 소켓 위치를 정할 수 없습니다");
+        return noInstance(stderr, "cannot locate the control socket: no home directory");
     // **입구 정규화**(계약 §5). 환경변수 값은 native 구분자다 — `%LOCALAPPDATA%`는 역슬래시라 안 하면
     // 같은 뿌리가 두 철자로 갈린다(`…\Local/maru/control`). `main.zig`의 terminfo 경로는 하고 있었고
     // 여기만 빠져 있었다 — 적대적 검증에서 잡았다.
@@ -118,7 +118,7 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     // 발견 정책은 순수(1d pickSocket): 정확히 하나면 그 소켓, 없으면/여럿이면 graceful.
     const chosen = switch (sessions.pickSocket(names.items)) {
         .none => return noInstance(stderr, null),
-        .multiple => return noInstance(stderr, "여러 maru 인스턴스가 있습니다 — 인스턴스 선택은 아직 지원되지 않습니다"),
+        .multiple => return noInstance(stderr, "multiple maru instances found; selecting one is not supported yet"),
         .single => |name| name,
     };
     const socket_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ control_dir, chosen }, 0);
@@ -126,7 +126,7 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
 
     // ── connect(L4 syscall — 1b가 std.c로 소켓을 쓰는 선례) ──
     const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
-    if (fd < 0) return noInstance(stderr, "소켓을 만들 수 없습니다");
+    if (fd < 0) return noInstance(stderr, "cannot create the socket");
     errdefer _ = c.close(fd); // 에러 반환 시 닫는다 — 성공 반환(return fd) 시엔 caller가 소유·close
     var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
     @memset(&addr.path, 0);
@@ -146,11 +146,11 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     const auth_bytes = try cp.serializeAuthSelf(allocator, selector, null);
     defer allocator.free(auth_bytes);
     if (!writeAllFd(fd, auth_bytes) or !writeAllFd(fd, "\n"))
-        return noInstance(stderr, "auth 셀렉터 전송에 실패했습니다");
+        return noInstance(stderr, "failed to send the auth selector");
 
     // ── 요청 전송(응답/chunk 읽기는 caller) ──
     if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
-        return noInstance(stderr, "요청 전송에 실패했습니다");
+        return noInstance(stderr, "failed to send the request");
     return fd; // 성공 — caller가 읽고 close(errdefer 미발동)
 }
 
@@ -179,7 +179,7 @@ pub fn fetchResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes: []
         if (n <= 0) break; // EOF/에러 — 응답 없이 종료(grant 무응답 timeout 서버 reap 포함)
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
-    return noInstance(stderr, "서버가 응답하지 않았습니다");
+    return noInstance(stderr, "the server did not respond");
 }
 
 test "컨트롤 소켓 gate는 Windows에서만 닫히고, 닫혔으면 이유가 비어 있지 않다" {

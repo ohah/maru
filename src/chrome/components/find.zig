@@ -31,7 +31,9 @@ fn counterCols(state: *const State) u32 {
 /// 정면으로 모순된다("매치 0개"로 읽힌다). 결과가 아직 없으면(제출 전·응답 대기) 아무것도 그리지 않는다.
 fn pageIndicator(state: *const State) ?[]const u8 {
     const found = state.page_found orelse return null;
-    return if (found) "찾음" else "없음";
+    // **영어 고정**(계약 §2.1). find 오버레이는 "읽고 판단"이 아니라 **찾아서 옮겨 다니는** 자리라,
+    // 같은 오버레이가 `Find: ` 를 영어로 쓰는데 결과만 한국어이면 한 상자 안에서 언어가 섞인다.
+    return if (found) "found" else "none";
 }
 /// 표시 폭(칸). 한글 2자 = EAW wide 2칸씩 = 4칸(무 arena — caretRect가 예약에 쓴다).
 fn pageIndicatorCols(state: *const State) u32 {

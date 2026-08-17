@@ -976,6 +976,40 @@ static void maru_append_glyph_record(
 // 전방선언 — 정의는 아래(rasterizer와 공유). 셰이핑 단계에서 color_glyph_kind를 run 폰트 색으로 정하는 데 쓴다.
 static bool maru_font_is_color(CTFontRef font);
 
+/// 글리프 ink 가 자기 칸 **왼쪽으로 넘치는 칸 수**. 합자가 그렇다: 폰트(JetBrains Mono 등)가 `//` 를
+/// "첫 칸은 빈 글리프 + 둘째 칸에 두 글자를 합친 모양"으로 만들고, 그 합친 글리프의 ink 는 advance
+/// 왼쪽 밖에서 시작한다(`bounds.origin.x < 0`). 셀 크기 슬롯에 그리면 그 부분이 잘려 첫 글자가 사라진
+/// 것처럼 보였다(사용자 제보 2026-08-17).
+///
+/// **advance 를 칸 폭의 근사로 쓴다.** 셰이퍼는 device 셀 픽셀을 모르고, 등폭 폰트에서 advance 가 곧
+/// 칸 폭이다. 넘침이 advance 의 몇 배인지로 칸 수를 올림한다.
+static uint16_t maru_left_overhang_cells(CTFontRef font, CGGlyph glyph) {
+    if (font == NULL || glyph == 0) return 0;
+    CGRect bounds = CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, &glyph, NULL, 1);
+    if (!(bounds.origin.x < 0.0) || !isfinite((double)bounds.origin.x)) return 0;
+    CGSize advance = CGSizeZero;
+    CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &advance, 1);
+    if (!(advance.width > 0.0) || !isfinite((double)advance.width)) return 0;
+    // **올림이 아니라 반올림이다.** 올림으로 두면 left side bearing 이 조금만 음수인 **일반 글자**까지
+    // 1칸 오버항으로 잡혀 자기 칸을 왼쪽으로 당긴다 — 실측으로 기본 픽스처("Maru 한")가 그렇게 깨졌다
+    // (atlas 샘플 3칸 miss). 합자는 넘침이 advance 의 정수배에 가깝다(`//` 는 1.0, `===` 는 2.0),
+    // 일반 글자는 0.1 수준이므로 반올림이 그 둘을 가른다.
+    const double cells = round((double)(-bounds.origin.x) / (double)advance.width);
+    if (!(cells >= 1.0)) return 0;
+    // **상한 3칸(= 최대 4칸 합자).** 실측: `//`·`::`·`~~` 는 1칸, `===`·`!==` 는 2칸이 필요했고
+    // JetBrains Mono 에는 `<!--` 처럼 4글자 합자도 있다. 상한이 없으면 이상한 폰트 하나가 슬롯을
+    // 무한히 키워 atlas 를 먹으므로, downstream 의 슬롯 span 계약(`cell_width` 만큼 넓힘)과 맞춘 값에서
+    // 끊는다.
+    return (uint16_t)fmin(cells, 3.0);
+}
+
+/// 글리프가 잉크를 하나도 갖지 않는가(합자의 첫 칸처럼 폰트가 의도적으로 비운 글리프).
+static bool maru_glyph_ink_is_empty(CTFontRef font, CGGlyph glyph) {
+    if (font == NULL || glyph == 0) return false;
+    CGRect bounds = CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, &glyph, NULL, 1);
+    return !(bounds.size.width > 0.0) || !(bounds.size.height > 0.0);
+}
+
 static void maru_append_draw_glyph_record(
     MaruCoreTextDrawListShapeResult *result,
     MaruCoreTextDrawGlyphRecord *records,
@@ -983,6 +1017,7 @@ static void maru_append_draw_glyph_record(
     size_t cell_index,
     MaruCoreTextDrawCell cell,
     CFStringRef font_name,
+    CTFontRef run_font,
     CGGlyph glyph,
     uint32_t fallback,
     bool is_color_font
@@ -1001,9 +1036,15 @@ static void maru_append_draw_glyph_record(
     //       비트맵을 두 슬롯에 중복 업로드, 드물게 다른 글자와 glyph_id가 겹치면 aliasing).
     //   (2) font_name 복사 실패 시에도 드롭하지 않는다(합성은 폰트명 불요).
     const bool synth = maru_is_synthesized_glyph(cell.codepoint);
+    // **ink 가 없는 글리프는 그리지 않는다.** 합자를 켜면 폰트가 첫 칸을 빈 글리프로 치환하는데(실측:
+    // `//`·`::`·`~~` 가 모두 첫 칸에 같은 글리프 1742), 그것을 drawable 로 두면 atlas 슬롯을 하나
+    // 먹고 "모든 글리프가 샘플됨" 계약을 깨뜨린다(macos-metal-smoke 가 그 이유로 실패했다).
+    // 합자의 실제 모양은 둘째 칸 글리프가 왼쪽으로 넘쳐 그리므로 첫 칸은 비워 두는 것이 맞다.
+    const bool zero_ink = !synth && glyph != 0 && maru_glyph_ink_is_empty(run_font, glyph);
     const bool drawable = (glyph != 0 || synth) &&
         category != MaruGlyphCategorySpace &&
-        cell.width != 0;
+        cell.width != 0 &&
+        !zero_ink;
     if (glyph == 0 && !synth) {
         result->missing_glyph_count += 1;
         return;
@@ -1014,7 +1055,9 @@ static void maru_append_draw_glyph_record(
     record->row = cell.row;
     record->col = cell.col;
     record->cell_width = cell.width;
-    record->reserved = 0;
+    // `reserved` 는 왼쪽 오버항 칸 수를 싣는다(ABI 크기 불변 — Zig 쪽 필드 이름도 함께 바꿨다).
+    // 합성 글리프는 코드포인트로 직접 그리므로 폰트 ink 와 무관하다.
+    record->reserved = synth ? 0 : maru_left_overhang_cells(run_font, glyph);
     record->codepoint = cell.codepoint;
     // synth는 codepoint로 합성하므로 폰트 glyph_id는 무의미하다. 0으로 정규화해 downstream(cache_key)이
     // codepoint로 키잉하게 한다(glyph_id!=0이면 폰트 glyph_id로 키잉되어 중복/aliasing). 비-synth는 그대로.
@@ -1461,6 +1504,7 @@ void maru_macos_coretext_shape_draw_list(
                             owner,
                             owner_cell,
                             record_font_name,
+                            run_font,
                             glyphs[g],
                             run_fallback,
                             run_is_color
@@ -1993,6 +2037,13 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             CGSize glyph_advance = CGSizeZero;
             CTFontGetAdvancesForGlyphs(draw_font, kCTFontOrientationHorizontal, &glyph, &glyph_advance, 1);
             CGFloat x = floor((avail_w - glyph_advance.width) / 2.0);
+            // **왼쪽으로 넘치는 글리프(합자)는 슬롯 오른쪽에 붙여 그린다.** 셰이퍼가 그 글리프에
+            // 오버항 칸 수를 실어 슬롯을 한 칸 넓게 잡아 뒀으므로(coretext_shaper 의 `left_overhang_cells`),
+            // advance 를 슬롯 오른쪽 끝에 맞추면 왼쪽으로 넘친 ink 가 넓어진 슬롯 안에 정확히 들어온다.
+            // 가운데 정렬로 두면 그 절반이 여전히 잘린다(실측: 2칸 슬롯 · 1칸 advance 면 W/2 만 확보).
+            if (bounds.origin.x < 0.0 && isfinite((double)bounds.origin.x)) {
+                x = floor(avail_w - glyph_advance.width);
+            }
             CGFloat y = descent;
             if (line_height > 0.0 && line_height <= avail_h) {
                 y = descent + floor((avail_h - line_height) / 2.0);

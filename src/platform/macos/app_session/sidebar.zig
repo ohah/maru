@@ -1533,14 +1533,17 @@ pub fn spinnerBarsUtf8(self: *const AppSession, allocator: std.mem.Allocator) ![
 /// running 상태의 **문구**만. 파형과 따로 두는 이유는 소비처가 둘로 갈리기 때문이다 — 카드·목록 행의 상태줄은
 /// 파형 + 문구를 함께 쓰지만(`runningStatusLine`), 토글 행의 접힘 요약은 **문구만** 쓴다(`agentSummaryLine`).
 /// 문자열을 두 곳에 따로 적으면 문구를 바꿀 때 한쪽만 바뀐다.
-pub const running_label = "진행중";
+pub fn runningLabel() []const u8 {
+    return maru.i18n.t(.sb_in_progress);
+}
 
 /// running 상태줄/라벨 파형 문자열 "▁▅▇▃ 진행중"(owned). 사이드바 카드(workspaceStatusLine)와 단일 Term
 /// 폴백(agentStatusLine)이 **같은 문자열**을 쓰도록 단일화(code-review max — 옛 두 곳 중복 방지).
 pub fn runningStatusLine(self: *AppSession) ![]const u8 {
     const bars = try spinnerBarsUtf8(self, self.allocator);
     defer self.allocator.free(bars);
-    return std.fmt.allocPrint(self.allocator, "{s} " ++ running_label, .{bars});
+    // 문구가 런타임 값이 되어 `++`(comptime 결합)를 쓸 수 없다 — 파형과 문구를 인자로 넘긴다.
+    return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ bars, runningLabel() });
 }
 
 /// 배지의 **색 구간** — 어느 열 범위가 어느 종류인지. 색칠 루프가 셀만 보고는 알 수 없기 때문에 있다:
@@ -1777,7 +1780,7 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
 }
 
 /// 토글 행 **접힘 요약**의 상태 텍스트(owned). 상태 문구는 `agentStatusLine`을 단일 출처로 그대로 쓰되,
-/// running만 파형을 뺀 문구(`running_label`)로 바꾼다.
+/// running만 파형을 뺀 문구(`runningLabel()`)로 바꾼다.
 ///
 /// 요약이 상태줄과 갈리는 이유는 **자리**다: 이 텍스트는 running 집계 배지와 한 줄을 나눠 쓰고, 배지는 접힘과
 /// 무관하게 늘 같은 파형을 그린다(docs/sidebar-agent-list.md §2). 상태줄을 통째로 실으면 같은 프레임의 파형이
@@ -1788,7 +1791,7 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
 /// 마커가 사라지면 요약이 상태 없는 문구가 된다.
 pub fn agentSummaryLine(self: *AppSession, term: *Term) ![]const u8 {
     if (term.agent_kind != .none and term.agent_state == .running)
-        return self.allocator.dupe(u8, running_label);
+        return self.allocator.dupe(u8, runningLabel());
     return agentStatusLine(self, term);
 }
 
@@ -2039,7 +2042,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                     break :blk try std.fmt.allocPrint(self.allocator, "{s}{s} {s}", .{ hindent, tri, edit });
                 } else blk: {
                     const gname: []const u8 = if (gtab) |t| (t.group_start orelse "") else "";
-                    const label: []const u8 = if (gname.len > 0) gname else "그룹";
+                    const label: []const u8 = if (gname.len > 0) gname else maru.i18n.t(.sb_group);
                     break :blk if (gh.collapsed)
                         try std.fmt.allocPrint(self.allocator, "{s}{s} {s} ({d})", .{ hindent, tri, label, gh.member_count })
                     else

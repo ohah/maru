@@ -25254,7 +25254,7 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
-        const expected = try std.fmt.allocPrint(a, "{s} Codex " ++ sidebar_ops.running_label, .{bars});
+        const expected = try std.fmt.allocPrint(a, "{s} Codex {s}", .{ bars, sidebar_ops.runningLabel() });
         defer a.free(expected);
         try std.testing.expectEqualStrings(expected, label);
     }
@@ -25914,6 +25914,11 @@ test "사이드바 배지: 워크스페이스가 여럿이어도 구간이 남�
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {
+    // 기대값이 한국어 상태 문구다 — 재는 것은 **어느 상태로 분류하는가**이고 그 판정은 문장으로 봐야
+    // 드러난다. 고정은 아래 `init` **뒤**에 건다(init 이 ui.language 를 읽어 언어를 세운다).
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -25926,6 +25931,7 @@ test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    maru.i18n.setLang(.ko);
     const tab = tab_ops.activeTab(session);
     const term = tab.activePane().activeTerm();
 
@@ -26001,7 +26007,7 @@ test "agentSummaryLine: running만 파형을 뺀 문구, 나머지 상태는 상
         const summary = try sidebar_ops.agentSummaryLine(session, term);
         defer allocator.free(summary);
         // 문구만 — 파형이 한 칸이라도 남으면 그 줄에서 배지와 겹친다.
-        try std.testing.expectEqualStrings(sidebar_ops.running_label, summary);
+        try std.testing.expectEqualStrings(sidebar_ops.runningLabel(), summary);
         var it = std.unicode.Utf8Iterator{ .bytes = summary, .i = 0 };
         while (it.nextCodepoint()) |cp| try std.testing.expect(!sidebar_ops.isAgentSpinnerCp(cp));
         // 반면 상태줄은 파형을 그대로 유지한다(카드·목록 행이 쓰는 자리 — 거기엔 배지가 없다).
@@ -26009,7 +26015,7 @@ test "agentSummaryLine: running만 파형을 뺀 문구, 나머지 상태는 상
         defer allocator.free(status);
         const first_len = std.unicode.utf8ByteSequenceLength(status[0]) catch 1;
         try std.testing.expect(sidebar_ops.isAgentSpinnerCp(std.unicode.utf8Decode(status[0..first_len]) catch 0));
-        try std.testing.expect(std.mem.endsWith(u8, status, sidebar_ops.running_label));
+        try std.testing.expect(std.mem.endsWith(u8, status, sidebar_ops.runningLabel()));
     }
 
     // 나머지 상태는 **글자 하나 안 바뀐다** — 배지는 running만 세므로 이 상태들의 마커·문구를 대신 말해주지 않는다.
@@ -40290,6 +40296,12 @@ test "agent representative prioritizes blocked over running over active idle" {
     defer allocator.destroy(session);
     defer session.deinit();
 
+    // 기대값이 한국어 상태 문구다 — 재는 것은 **어느 상태로 분류하는가**이고 그 판정은 문장으로 봐야
+    // 드러난다. `init` 이 언어를 세우므로 **그 뒤**에 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+
     const tab = tab_ops.activeTab(session);
     const background = tab.activePane().terms.items[0];
     const active = tab.activeTerm();
@@ -54425,7 +54437,7 @@ test "브랜치 메뉴도 `.unknown`을 저장소 없음으로 단정하지 않�
 
     settings_ops.requestBranchMenu(session);
     try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않고 사용자에게 말한다
-    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, git_ops.notice_repo_unknown));
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, git_ops.noticeRepoUnknown()));
     // **`branch_menu_pending`은 일부러 단언하지 않는다.** 위에서 백엔드를 `shutting_down`으로 두었으므로
     // `submitBranches`는 어느 분기에서도 false를 돌려준다(git_backend.zig) — 그 상태에서 "요청이 안 걸렸다"를
     // 단언하면 `.unknown` 분기가 사라져도 통과하는 공허한 검사가 된다(코드 리뷰에서 지적). 이 테스트가
@@ -55843,7 +55855,7 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     try std.testing.expect(projection.items[0] == .repo);
     try std.testing.expect(projection.items[1] == .commit_box);
     try std.testing.expect(projection.items[2] == .commit_button);
-    try std.testing.expectEqualStrings(git_ops.notice_no_changes, projection.items[3].notice);
+    try std.testing.expectEqualStrings(git_ops.noticeNoChanges(), projection.items[3].notice);
     const props = scm_dock_ops.testProps(session, projection);
 
     // 그리고 그 문장이 실제로 **그려진다** — props에만 있고 화면에 없으면 같은 빈 면이다.
@@ -55868,7 +55880,7 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     var saw_notice = false;
     for (draws.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, git_ops.notice_no_changes) != null) saw_notice = true;
+            if (std.mem.indexOf(u8, run.text, git_ops.noticeNoChanges()) != null) saw_notice = true;
         },
         else => {},
     };

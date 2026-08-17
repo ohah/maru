@@ -1062,7 +1062,7 @@ pub fn buildDockScmDrawList(
         }
         const tail_cols: u16 = @intCast(std.unicode.utf8CountCodepoints(tail) catch tail.len);
         const name_end = cols -| tail_cols -| 1;
-        const branch = if (h.detached) "(detached)" else (h.branch orelse "(브랜치 없음)");
+        const branch = if (h.detached) "(detached)" else (h.branch orelse maru.i18n.t(.fp_no_branch));
         if (inset + 3 < name_end)
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, branch, 0, inset + 3, name_end, .{ .foreground = fg, .bold = true }, false, .head);
         if (tail.len > 0 and tail_cols < cols) {
@@ -1110,7 +1110,7 @@ pub fn buildDockScmDrawList(
             .more => |more| {
                 // "모두 보기 (N개 더)" — 숨은 개수를 말한다. 조용히 자르면 사용자는 파일이 사라졌다고 읽는다.
                 var buf: [48]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "모두 보기 ({d}개 더)", .{more.hidden}) catch "모두 보기";
+                const text = maru.i18n.format(&buf, maru.i18n.t(.scm_show_all_more), &.{.{ .d = @intCast(more.hidden) }});
                 if (cols > inset + 2)
                     _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, r, inset + 4, cols, .{ .foreground = accent }, false, .head);
             },
@@ -1206,7 +1206,7 @@ pub fn buildFileTreeDrawList(
         var conflict = false;
         switch (row) {
             .recent_header => |v| {
-                label = "최근 파일";
+                label = maru.i18n.t(.fp_recent_files);
                 marker = if (v.collapsed) '>' else 'v';
                 style = .{ .foreground = active_fg, .bold = true };
             },
@@ -1237,7 +1237,7 @@ pub fn buildFileTreeDrawList(
                 conflict = v.external_change;
             },
             .empty => {
-                label = "파일을 열면 트리가 표시됩니다";
+                label = maru.i18n.t(.fp_open_to_show_tree);
             },
         }
         if (edit) |active_edit| if (file_tree.rowIdentity(row)) |identity| {

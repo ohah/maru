@@ -522,12 +522,18 @@ pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
 /// 저장소 판정이 사용자에게 보이는 **두 문구**. 도크의 빈 안내와 브랜치 메뉴가 같은 판정을 쓰므로 문자열도
 /// 한 자리에 둔다 — 복붙해 두면 한쪽만 고쳐져 같은 상태를 두 가지로 말한다(적대적 검증에서 브랜치 메뉴가
 /// 실제로 옛 단정에 남아 있었다).
-pub const notice_not_a_repo = "git 저장소가 아닙니다";
-pub const notice_repo_unknown = "저장소를 확인할 수 없습니다";
+pub fn noticeNotARepo() []const u8 {
+    return maru.i18n.t(.git_not_a_repo);
+}
+pub fn noticeRepoUnknown() []const u8 {
+    return maru.i18n.t(.git_repo_unknown);
+}
 /// 읽기는 성공했고 바뀐 것이 없다. **위 둘과 같은 표에 둔다** — 사용자에게는 셋 다 "목록이 비었다"로
 /// 보이지만 서로 다른 사실이고, 문구를 흩어 두면 한쪽만 고쳐져 같은 화면이 두 가지를 말한다.
 /// 이 문장만 목록 컴포넌트가 그린다(나머지 둘은 목록을 그리기 전에 나온다).
-pub const notice_no_changes = "변경 사항 없음";
+pub fn noticeNoChanges() []const u8 {
+    return maru.i18n.t(.git_no_changes);
+}
 
 /// 목록이 비었을 때 도크가 낼 **안내 문구**. 우선순위는 실행할 수 없음 → 볼 것이 없음 → 실패 → 진행 중이다.
 ///
@@ -539,11 +545,11 @@ pub const notice_no_changes = "변경 사항 없음";
 /// 렌더 안 표현식으로 두지 않고 함수로 뺀 이유도 그것이다 — 세 상태를 테스트에서 각각 짚을 수 있어야 두 결론이
 /// 다시 한 문구로 접히는 회귀를 단위로 잡는다.
 pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
-    if (self.git_missing) return "git이 설치되어 있지 않습니다";
+    if (self.git_missing) return maru.i18n.t(.git_not_installed);
     return switch (gitRepoTarget(self, probe)) {
-        .none => notice_not_a_repo,
-        .unknown => notice_repo_unknown,
-        .repo => if (self.git_failed) "git 읽기에 실패했습니다" else "읽는 중…",
+        .none => noticeNotARepo(),
+        .unknown => noticeRepoUnknown(),
+        .repo => if (self.git_failed) maru.i18n.t(.git_read_failed) else maru.i18n.t(.scm_loading),
     };
 }
 

@@ -372,6 +372,11 @@ fn buildDrawListGlyphFrameProbe(
     // DrawList를 CoreText runtime shaper로 넘긴다. 아직 Metal smoke 입력으로 쓰지는 않지만,
     // 다음 PR에서 probe-derived surface를 제거하기 전에 제품 shaper 경계를 독립적으로
     // 검증하기 위한 세로 슬라이스다.
+    // **탭 바 픽스처**: `MARU_CORETEXT_SMOKE_FIXTURE=tabbar` 면 터미널 본문 대신 pane 탭 바 DrawList 를
+    // 태운다. 탭 폭·정렬 같은 **레이아웃** 회귀는 격자 덤프(`grid.pgm`)로만 눈에 보이고, 그 그림을 얻을
+    // 다른 헤드리스 경로가 없다(GPU 스모크는 창·drawable 이 필요해 이 환경에서 죽는다).
+    const tabbar_fixture = readFixtureKind() == .tabbar;
+
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
     core.clearDirty();
@@ -380,7 +385,10 @@ fn buildDrawListGlyphFrameProbe(
     // 그래도 덤프 파일은 남는다 — 눈으로 보는 것이 목적이기 때문이다).
     try core.write(readSmokeText());
 
-    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    var draw_list = if (tabbar_fixture)
+        try buildTabBarFixtureDrawList(allocator)
+    else
+        try renderer.buildDrawList(allocator, core.snapshot());
     var draw_list_owned = true;
     errdefer if (draw_list_owned) draw_list.deinit(allocator);
 
@@ -410,9 +418,16 @@ fn buildDrawListGlyphFrameProbe(
     draw_list_owned = false;
     defer frame.deinit(allocator);
     // 글리프 비트맵 덤프(요청 시). 렌더 회귀를 눈으로 볼 유일한 헤드리스 경로다 — 위 함수 주석 참고.
-    if (std.c.getenv("MARU_CORETEXT_GLYPH_DUMP") != null) writeGlyphBitmapDump(io, frame) catch |e| {
-        std.debug.print("glyph dump 실패: {s}\n", .{@errorName(e)});
-    };
+    if (std.c.getenv("MARU_CORETEXT_GLYPH_DUMP") != null) {
+        writeGlyphBitmapDump(io, frame) catch |e| {
+            std.debug.print("glyph dump 실패: {s}\n", .{@errorName(e)});
+        };
+        // 격자 덤프는 레이아웃(폭·정렬·겹침)을 보여 준다. 셀 크기는 **글리프 cache_key** 가 들고 있다 —
+        // 그것이 슬롯을 잡은 값이라 화면 배치와 같은 격자를 만든다.
+        writeGridBitmapDump(io, frame) catch |e| {
+            std.debug.print("grid dump 실패: {s}\n", .{@errorName(e)});
+        };
+    }
 
     return glyphFrameProbeFromRenderFrame(
         &font_registry,
@@ -421,6 +436,39 @@ fn buildDrawListGlyphFrameProbe(
         shaped.color_glyph_count,
         coretext_raster.CoreTextGlyphRasterizer.name,
         coretext_shaper.CoreTextDrawListShaper.name,
+    );
+}
+
+const FixtureKind = enum { terminal, tabbar };
+
+fn readFixtureKind() FixtureKind {
+    const raw_ptr = std.c.getenv("MARU_CORETEXT_SMOKE_FIXTURE") orelse return .terminal;
+    if (std.mem.eql(u8, std.mem.span(raw_ptr), "tabbar")) return .tabbar;
+    return .terminal;
+}
+
+/// pane 탭 바 한 줄. 탭 수는 `MARU_CORETEXT_SMOKE_TABS`(기본 3), 바 폭은 40칸이다 — **탭이 적을 때 남는
+/// 폭을 어떻게 쓰는지**가 이 픽스처의 관심사다(고정 폭 16을 하한으로 쓰는지).
+fn buildTabBarFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList {
+    const all_titles = [_][]const u8{ "세션호스트", "에디터", "프록시", "빌드", "로그" };
+    var count: usize = 3;
+    if (std.c.getenv("MARU_CORETEXT_SMOKE_TABS")) |raw_ptr| {
+        const parsed = std.fmt.parseInt(usize, std.mem.span(raw_ptr), 10) catch 3;
+        if (parsed >= 1 and parsed <= all_titles.len) count = parsed;
+    }
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0xd0, .g = 0xd0, .b = 0xd0 } };
+    const active_fg: terminal.Color = .{ .rgb = .{ .r = 0xff, .g = 0xff, .b = 0xff } };
+    return coretext_frame_builder.buildPaneTabBarDrawList(
+        allocator,
+        all_titles[0..count],
+        40,
+        fg,
+        true,
+        0,
+        active_fg,
+        16,
+        0,
+        null,
     );
 }
 
@@ -575,6 +623,76 @@ fn readSmokeText() []const u8 {
 /// 온전히 담겼는가"는 정확히 보인다. 합자가 잘리는 문제가 바로 그 층의 문제였다.
 ///
 /// 업로드된 슬롯을 가로로 이어 붙인다(슬롯 폭이 칸 수에 비례하므로 합자는 2~3배 넓게 나온다).
+/// 글리프를 **셀 격자 위 제 자리에** 합성해 화면에 가까운 PGM 을 남긴다(배경·커서는 없다).
+///
+/// 글리프를 가로로 이어 붙인 덤프(`writeGlyphBitmapDump`)는 "이 글리프가 온전한가"는 보여 주지만
+/// **레이아웃은 못 보여 준다** — 탭 폭처럼 배치가 문제인 회귀는 그 그림으로 판정할 수 없다. 이 덤프는
+/// `GlyphRun.row/col` 로 캔버스에 얹으므로 폭·정렬·겹침이 그대로 보인다. GPU 경로가 헤드리스에서 죽는
+/// 환경(창·drawable 필요)에서도 도는 것이 요점이다.
+fn writeGridBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
+    const glyphs = frame.glyph_frame.glyphs;
+    if (glyphs.len == 0) return;
+    // 셀 크기: `cache_key` 가 실제 메트릭을 들고 있으면 그것을 쓰고, **0 이면**(메트릭 없는 경로 —
+    // `glyph_atlas` 주석) 업로드된 슬롯에서 되짚는다. 슬롯 폭은 `cell_width` 배이므로 그만큼 나눈다.
+    var cell_w: usize = glyphs[0].run.cache_key.cell_width_px;
+    var cell_h: usize = glyphs[0].run.cache_key.cell_height_px;
+    if (cell_w == 0 or cell_h == 0) {
+        const uploads = frame.glyph_raster_frame.uploads;
+        if (uploads.len == 0) return;
+        const first = uploads[0];
+        if (first.glyph_index >= glyphs.len) return;
+        const span = @max(@as(usize, glyphs[first.glyph_index].run.cell_width), 1);
+        cell_w = @as(usize, first.slot.width_px) / span;
+        cell_h = first.slot.height_px;
+    }
+    if (cell_w == 0 or cell_h == 0) return;
+    var max_col: usize = 0;
+    var max_row: usize = 0;
+    for (glyphs) |g| {
+        max_col = @max(max_col, @as(usize, g.run.col) + @max(@as(usize, g.run.cell_width), 1));
+        max_row = @max(max_row, @as(usize, g.run.row) + 1);
+    }
+    const width = max_col * cell_w;
+    const height = max_row * cell_h;
+    if (width == 0 or height == 0) return;
+
+    const allocator = std.heap.page_allocator;
+    const canvas = try allocator.alloc(u8, width * height);
+    defer allocator.free(canvas);
+    @memset(canvas, 0);
+
+    // 업로드된 슬롯 픽셀을 glyph_index 로 되찾아 그 셀 위치에 얹는다.
+    for (frame.glyph_raster_frame.uploads) |u| {
+        if (u.glyph_index >= glyphs.len) continue;
+        const run = glyphs[u.glyph_index].run;
+        const x0 = @as(usize, run.col) * cell_w;
+        const y0 = @as(usize, run.row) * cell_h;
+        const w: usize = u.slot.width_px;
+        const h: usize = u.slot.height_px;
+        for (0..h) |y| {
+            const cy = y0 + y;
+            if (cy >= height) break;
+            for (0..w) |x| {
+                const cx = x0 + x;
+                if (cx >= width) break;
+                const src = u.bytes_offset + y * u.bytes_per_row + x * 4 + 3; // 알파 = coverage
+                if (src >= frame.glyph_raster_frame.pixels.len) continue;
+                const v = frame.glyph_raster_frame.pixels[src];
+                if (v > canvas[cy * width + cx]) canvas[cy * width + cx] = v; // 겹침은 밝은 쪽 유지
+            }
+        }
+    }
+
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "P5\n{d} {d}\n255\n", .{ width, height });
+    const body = try allocator.alloc(u8, header.len + canvas.len);
+    defer allocator.free(body);
+    @memcpy(body[0..header.len], header);
+    @memcpy(body[header.len..], canvas);
+    try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_dir ++ "/grid.pgm", .data = body });
+}
+
 fn writeGlyphBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
     const uploads = frame.glyph_raster_frame.uploads;
     if (uploads.len == 0) return;

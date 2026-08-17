@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  # 변경 영역 판정. 문서만 고친 PR에서 macOS 러너 4대와 외부 오라클까지 도는 것은 순수한 낭비다.
+  # 변경 영역 판정. 문서만 고친 PR에서 macOS 러너 세 대와 외부 오라클까지 도는 것은 순수한 낭비다.
   # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh이고, 아래 job들은 그 플래그만 소비한다.
   #
   # `code`와 `runtime`을 나눠 쓴다. macOS·오라클·성능 job은 `runtime`을 보므로 **주석만 고친 코드
@@ -338,61 +338,8 @@ jobs:
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
 
-  # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
-  # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.
-  #
-  # web/**도 트리거다 — 이 job은 `web/dist/mermaid-helper.js`를 빌드해 소비하므로 web 변경이
-  # 제품 pump를 깨뜨릴 수 있다(build.zig의 mermaid digest/helper 복사 경로).
-  mermaid-macos:
-    name: mermaid macOS product path
-    needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.web == 'true') }}
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-        with:
-          version: 2026.2.7
-          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
-          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            .zig-cache
-            ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
-          restore-keys: |
-            zig-v2-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
-            zig-v2-${{ runner.os }}-mermaid-
-      - run: bun install --cwd web --frozen-lockfile
-      - run: mise run macos-mermaid-perf
-      - name: Upload native Mermaid performance artifact
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: maru-mermaid-macos-artifacts
-          path: |
-            tests/artifacts/perf/mermaid-macos.json
-            zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json
-          if-no-files-found: error
-          retention-days: 14
-
   # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
-      - name: 저장 전에 캐시를 예산 안으로 줄인다
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: sh tools/ci/prune-zig-cache.sh 3072
-      - name: Save build cache (main만 — PR은 읽기만 한다)
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            .zig-cache
-            ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
   session-host-slow-observer-macos:
     name: session host slow observer macOS
     needs: changes

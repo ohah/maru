@@ -40,7 +40,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 ## 필수 CI 체크
 
-**draft PR 에서는 실행 job 을 건너뛴다.** 초안을 올려 놓고 고치는 동안 macOS 러너 다섯 대가 매 푸시마다 도는 것은 낭비다. 가드는 job-level `if` 의 `github.event.pull_request.draft != true` 이고, 스킵된 job 은 conclusion=skipped 로 보고돼 branch protection 이 통과로 취급한다. 두 가지가 함께 필요하다.
+**draft PR 에서는 실행 job 을 건너뛴다.** 초안을 올려 놓고 고치는 동안 macOS 러너 세 대가 매 푸시마다 도는 것은 낭비다. 가드는 job-level `if` 의 `github.event.pull_request.draft != true` 이고, 스킵된 job 은 conclusion=skipped 로 보고돼 branch protection 이 통과로 취급한다. 두 가지가 함께 필요하다.
 
 - **`changes` 판정 job 은 가드에서 제외한다.** 그것까지 스킵하면 `needs.changes.result != 'success'` 가 되어 소비 job 들이 fail-safe 로 **오히려 다 돈다**.
 - **트리거에 `ready_for_review` 를 넣는다.** 기본 types(opened·synchronize·reopened)에는 없어서, draft 를 푸는 순간 아무 이벤트도 오지 않아 건너뛴 job 이 영영 안 돈다.
@@ -55,15 +55,16 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `require label and assignee=ohah` | pr-metadata.yml `require-label-and-assignee` | 매 PR. 라벨 1개 이상 + assignee=ohah. |
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
-| `mermaid macOS product path` | ci.yml `mermaid-macos` | `code` 또는 `web` 변경 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. `web/dist/mermaid-helper.js`를 빌드해 소비하므로 web 축도 트리거다. |
 | `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
 | `session host macOS (ReleaseFast)` | ci.yml `session-host-macos-releasefast` | `code` 변경 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
 | `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
 
+**Mermaid 제품 성능 게이트는 이 목록에서 뺐다(2026-08-17).** `mermaid macOS product path` job과 required 컨텍스트를 함께 제거했다. 근거는 회귀 압력이다 — Mermaid는 기능 추가를 멈춘 영역인데 그 job은 모든 `runtime`·`web` PR에서 macOS 러너 3분을 상시로 썼다. 병렬 배치라 wall-clock은 줄지 않고 러너 분만 줄어든다. **검증 수단은 남아 있다** — `mise run macos-mermaid-perf`는 그대로이고 [파일 패널 Markdown 읽기·소스 예산](#파일-패널-markdown-읽기소스-예산)의 Mermaid 행도 제품 계약으로 유효하다. Mermaid나 `web/dist/mermaid-helper.js` 경로를 다시 손댈 때는 로컬에서 이 게이트를 돌린다. 대가는 명시적이다: **다른 변경이 Mermaid tick 예산을 깨뜨려도 CI가 알려주지 않는다.** Mermaid에 기능을 다시 얹거나 네이티브 렌더로 옮기는 작업을 시작하면 job과 required 컨텍스트를 되살린다.
+
 ### 변경 영역별 실행(job-level 게이트)
 
-문서 한 줄을 고친 PR에 macOS 러너 4대와 외부 오라클을 태우지 않는다. 어떤 축을 실행할지는 **`tools/ci/changed-areas.sh`가 단일 출처**이고, 워크플로는 그 결과(`code`·`runtime`·`web`·`docs`)만 소비한다. 축은 서로 독립이다 — Zig만 바꾸면 `web:check`를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지 않는다.
+문서 한 줄을 고친 PR에 macOS 러너 세 대와 외부 오라클을 태우지 않는다. 어떤 축을 실행할지는 **`tools/ci/changed-areas.sh`가 단일 출처**이고, 워크플로는 그 결과(`code`·`runtime`·`web`·`docs`)만 소비한다. 축은 서로 독립이다 — Zig만 바꾸면 `web:check`를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지 않는다.
 
 | 변경 경로 | `code` | `runtime` | `web` | `docs` |
 | --- | --- | --- | --- | --- |
@@ -74,7 +75,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `.mise.toml`, `.github/**`, `tools/ci/**` | ✓ | ✓ | ✓ | |
 | 그 밖의 모든 경로(미분류) | ✓ | ✓ | ✓ | |
 
-**`code`와 `runtime`을 나누는 이유.** 분류기는 확장자로만 영역을 가르므로 **주석 한 줄**만 고쳐도 `.zig`라는 이유로 macOS 러너 다섯 대가 돈다(실측: 문서 분할 PR 여덟 건이 전부 그랬고, 그때마다 cold-render 플래키에 노출됐다). 주석은 런타임 동작을 바꾸지 않으므로 macOS·오라클·성능 job은 `runtime`을 본다. **`check`(ubuntu)는 계속 `code`를 본다** — `check-boundaries`의 external source digest가 doc comment(`///`·`//!`)를 잠가서, 주석만 고쳐도 digest가 움직이고 그 게이트를 건너뛰면 값이 깨진 채 머지된다.
+**`code`와 `runtime`을 나누는 이유.** 분류기는 확장자로만 영역을 가르므로 **주석 한 줄**만 고쳐도 `.zig`라는 이유로 macOS 러너 세 대가 돈다(실측 당시엔 다섯 대였다: 문서 분할 PR 여덟 건이 전부 그랬고, 그때마다 cold-render 플래키에 노출됐다). 주석은 런타임 동작을 바꾸지 않으므로 macOS·오라클·성능 job은 `runtime`을 본다. **`check`(ubuntu)는 계속 `code`를 본다** — `check-boundaries`의 external source digest가 doc comment(`///`·`//!`)를 잠가서, 주석만 고쳐도 digest가 움직이고 그 게이트를 건너뛰면 값이 깨진 채 머지된다.
 
 주석 판정은 `*.zig`·`*.swift`·`*.m`·`*.h`에만 적용하고, 추가·삭제된 줄이 **전부 줄 시작 `//` 또는 빈 줄**일 때만 주석 전용으로 본다. 문자열 안의 `//`(`"https://…"`)는 줄 시작이 아니라 걸리지 않고, 한 줄이라도 코드가 섞이면 즉시 `runtime`을 켠다. `.mise.toml`·`.github/**`·`tools/ci/**`는 주석이 무해한지 겉으로 알 수 없어 판정 없이 항상 켠다.
 

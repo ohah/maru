@@ -29,18 +29,31 @@ const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("posix_walk.zig").posixWalk;
 
-/// 번역 대상 레이어. 여기 밖(`src/cli`·`src/main.zig`)은 **영어 고정**이라 계약 §7.1 이 다른 규칙을 준다.
+/// 번역 대상 레이어 — 여기서는 표시 문자열이 **키로** 가야 한다(§7.2).
 const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", "src/platform/mobile", "src/config" };
+
+/// **영어 고정 표면**(계약 §7.1) — CLI 는 스크립트가 파싱하고 이슈에 붙여 넣는 출력이라 언어를 고르지
+/// 않는다. 그래서 여기서는 키가 아니라 **영어 문장**이 정답이고, 한국어 리터럴은 곧 위반이다.
+///
+/// 원장을 0 이 아니라 현재 수로 두는 이유: I5 가 아직 진행 중이다(138 건). 늘면 실패하므로 **새 한국어가
+/// CLI 로 들어오지 못하고**, 줄이면 원장을 함께 줄이라고 말해 진행률이 원장에 남는다.
+const english_only_roots = [_][]const u8{"src/cli"};
+const english_only_files = [_][]const u8{"src/main.zig"};
 
 const Entry = struct { path: []const u8, count: usize };
 
 /// 파일별 남은 한국어 리터럴 수. **늘면 실패**하고, **줄어도 실패**한다(원장을 함께 줄이라는 뜻).
 /// 새 파일이 한글 리터럴을 들고 나타나면 원장에 없으므로 실패한다 — 그것이 이 게이트의 본래 목적이다.
 const inventory = [_]Entry{
+    // ── 영어 고정 표면(§7.1) — I5 가 줄여 간다 ──
+    .{ .path = "src/cli/browser/run.zig", .count = 41 },
+    .{ .path = "src/cli/ssh.zig", .count = 1 },
+    .{ .path = "src/main.zig", .count = 96 },
+
+    // ── 번역 대상 레이어(§7.2) ──
     .{ .path = "src/chrome/components/archive_detail/build.zig", .count = 3 },
     .{ .path = "src/chrome/components/archive_detail/view.zig", .count = 4 },
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
-    .{ .path = "src/chrome/components/find.zig", .count = 2 },
     .{ .path = "src/chrome/components/settings.zig", .count = 8 },
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
     .{ .path = "src/config/loader.zig", .count = 27 },
@@ -142,6 +155,33 @@ fn lookup(path: []const u8) ?usize {
     return null;
 }
 
+/// 원장과 어긋나면 **무엇을 어떻게 고칠지** 말하고 false 를 돌려준다. 두 축(§7.2 번역 대상 ·
+/// §7.1 영어 고정)이 같은 규칙을 쓰도록 한 자리에 둔다.
+fn reportIfDrifted(path: []const u8, found: usize) bool {
+    const expected = lookup(path) orelse 0;
+    if (found == expected) return true;
+
+    if (found > expected) {
+        std.debug.print(
+            \\
+            \\{s}: 한국어 리터럴 {d} 개 (원장 {d}) — **늘었다**.
+            \\  번역 대상 레이어면(§7.2) `src/i18n.zig` 에 키를 만들고 `i18n.t(.key)` 로 쓴다.
+            \\  영어 고정 표면이면(§7.1 — `src/cli`·`src/main.zig`) 그냥 **영어로 적는다**.
+            \\  표시가 아니면(진단·로그·fixture) 그 사실을 코드 주석에 적고 원장을 올린다.
+            \\  단일 출처: docs/i18n.md §7.
+            \\
+        , .{ path, found, expected });
+    } else {
+        std.debug.print(
+            \\
+            \\{s}: 한국어 리터럴 {d} 개 (원장 {d}) — **줄었다**. 원장을 이 값으로 낮춰라.
+            \\  줄어든 것을 통과시키면 원장이 헐거워져 나중에 새 리터럴이 그 여유에 숨는다.
+            \\
+        , .{ path, found, expected });
+    }
+    return false;
+}
+
 test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않는다" {
     const allocator = std.testing.allocator;
     var failed = false;
@@ -173,29 +213,37 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
             defer allocator.free(source);
 
             scanned += 1;
-            const found = countSource(source);
-            const expected = lookup(path) orelse 0;
-            if (found == expected) continue;
-
-            failed = true;
-            if (found > expected) {
-                std.debug.print(
-                    \\
-                    \\{s}: 한국어 리터럴 {d} 개 (원장 {d}) — **늘었다**.
-                    \\  표시 문자열이면 `src/i18n.zig` 에 키를 만들고 `i18n.t(.key)` 로 쓴다.
-                    \\  표시가 아니면(진단·로그·fixture) 그 사실을 코드 주석에 적고 원장을 올린다.
-                    \\  단일 출처: docs/i18n.md §7.2.
-                    \\
-                , .{ path, found, expected });
-            } else {
-                std.debug.print(
-                    \\
-                    \\{s}: 한국어 리터럴 {d} 개 (원장 {d}) — **줄었다**. 원장을 이 값으로 낮춰라.
-                    \\  줄어든 것을 통과시키면 원장이 헐거워져 나중에 새 리터럴이 그 여유에 숨는다.
-                    \\
-                , .{ path, found, expected });
-            }
+            if (!reportIfDrifted(path, countSource(source))) failed = true;
         }
+    }
+
+    // 영어 고정 표면(§7.1)도 같은 원장으로 본다 — 규칙은 다르지만(키가 아니라 영어) **한국어가 늘면
+    // 안 된다**는 점이 같고, 한 자리에서 세는 편이 원장을 나누는 것보다 어긋날 여지가 적다.
+    for (english_only_roots) |root| {
+        var dir = std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true }) catch continue;
+        defer dir.close(std.testing.io);
+
+        var walker = try posixWalk(dir, allocator);
+        defer walker.deinit();
+
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+            var path_buf: [512]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, entry.path });
+            const source = try dir.readFileAllocOptions(std.testing.io, entry.path, allocator, .limited(8 * 1024 * 1024), .of(u8), 0);
+            defer allocator.free(source);
+
+            scanned += 1;
+            if (!reportIfDrifted(path, countSource(source))) failed = true;
+        }
+    }
+    for (english_only_files) |path| {
+        const source = std.Io.Dir.cwd().readFileAllocOptions(std.testing.io, path, allocator, .limited(8 * 1024 * 1024), .of(u8), 0) catch continue;
+        defer allocator.free(source);
+        scanned += 1;
+        if (!reportIfDrifted(path, countSource(source))) failed = true;
     }
 
     // 훑을 파일이 없다면 경로가 바뀐 것이다 — 0 을 통과시키면 "규칙이 지켜진다"와 "아무것도 안 봤다"를

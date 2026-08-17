@@ -123,6 +123,10 @@ pub const UnresolvedArtifact = struct {
     /// run 별 "앞 run 에 이어 붙임" 표시. resolve 가 이 표시를 따라 앞 run 들의 실측 advance 를 누적해
     /// x 를 민다 — 그래야 한 줄 안에서 색만 바뀌는 구간들이 한 문장처럼 붙어 보인다.
     continues: []bool,
+    /// run 별 폭 한도(op 예산). **이어 붙이는 run 에는 이 한도가 개별로 걸려 있어 합계가 예산을 넘을 수
+    /// 있다** — CoreText truncation 은 run 하나만 보기 때문이다. resolve 가 누적 x 로 그 경계를 다시
+    /// 재서 넘는 글리프를 버린다(실측 캡처에서 모델명이 chevron 을 지나 카드 밖까지 뻗었다).
+    max_widths: []u32,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
@@ -132,6 +136,7 @@ pub const UnresolvedArtifact = struct {
         allocator.free(self.above_clips);
         allocator.free(self.cell_widths);
         allocator.free(self.continues);
+        allocator.free(self.max_widths);
         self.* = undefined;
     }
 };
@@ -777,6 +782,8 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(cell_widths);
     const continues = try allocator.alloc(bool, request.runs.len);
     errdefer allocator.free(continues);
+    const max_widths = try allocator.alloc(u32, request.runs.len);
+    errdefer allocator.free(max_widths);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
@@ -785,6 +792,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
         above_clips[index] = run.above_clip;
         cell_widths[index] = run.cell_w_px;
         continues[index] = run.continues_previous;
+        max_widths[index] = run.max_width_px;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -803,7 +811,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_widths = cell_widths, .continues = continues };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_widths = cell_widths, .continues = continues, .max_widths = max_widths };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -869,11 +877,23 @@ pub fn resolveArtifact(
     }
     var grid_run: ?u16 = null;
     var grid_cell: u32 = 0;
+    var dropped: usize = 0;
     for (unresolved.glyphs) |glyph| {
         const run_index: usize = glyph.run_index;
         const layout = unresolved.placements[run_index];
         var label_origin = labelOrigin(layout, glyph.origin, advances[run_index], glyph.line_height_px);
         label_origin.x_px += carry[run_index];
+        // **이어 붙인 만큼 예산도 줄어든다.** CoreText truncation 은 run 하나만 보고 자르므로, 각 run 이
+        // op 전체 폭을 자기 한도로 받으면 이어 붙인 합계가 그 폭을 넘는다(캡처에서 모델명이 chevron 을
+        // 지나 카드 밖까지 뻗었다). 누적 x 를 아는 이 자리에서 경계를 다시 재고, 넘는 글리프는 버린다 —
+        // 잘리는 편이 옆 요소를 덮는 것보다 낫다.
+        if (carry[run_index] > 0) {
+            const budget: f32 = @floatFromInt(unresolved.max_widths[run_index]);
+            if (carry[run_index] + glyph.x_px + glyph.advance_px > budget) {
+                dropped += 1;
+                continue;
+            }
+        }
         const grid_x: ?f32 = if (unresolved.cell_widths[run_index]) |cw| blk: {
             if (grid_run == null or grid_run.? != glyph.run_index) {
                 grid_run = glyph.run_index;
@@ -957,7 +977,15 @@ pub fn resolveArtifact(
         },
         else => {},
     };
-    if (record_index != total_count) return error.InvalidSystemTextArtifact;
+    // 예산을 넘겨 버린 글리프 수만큼 배열이 짧아진다. 그 몫을 빼고도 개수가 안 맞으면 불변식 위반이다.
+    if (record_index + dropped != total_count) return error.InvalidSystemTextArtifact;
+    if (dropped > 0) {
+        // 뒤쪽 미초기화 슬롯을 그대로 두면 렌더가 쓰레기 글리프를 그린다. 실제 개수로 줄여 소유권을
+        // 그대로 유지한다(`Artifact.deinit` 이 두 배열을 각각 해제하므로 재할당은 하지 않는다).
+        const shrunk_records = try allocator.realloc(records, record_index);
+        const shrunk_placements = try allocator.realloc(placements, record_index);
+        return .{ .records = shrunk_records, .placements = shrunk_placements };
+    }
     return .{ .records = records, .placements = placements };
 }
 
@@ -1020,6 +1048,7 @@ test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같�
         .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{ null, null, null }),
         .cell_widths = try allocator.dupe(?u16, &.{ null, null, null }),
         .continues = try allocator.dupe(bool, &.{ false, true, true }),
+        .max_widths = try allocator.dupe(u32, &.{ 10_000, 10_000, 10_000 }),
     };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
@@ -1033,6 +1062,60 @@ test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같�
     try std.testing.expectEqual(@as(f32, 141), artifact.placements[2].x_px); // 100 + 30 + run1(11)
     // 색은 run 마다 그대로 실린다 — 이어 붙였다고 앞 run 색으로 합쳐지지 않는다.
     try std.testing.expectEqual(@as(u32, 0x112233), artifact.placements[1].foreground);
+}
+
+// 이어 붙인 run 은 **예산도 함께 줄어든다**. CoreText truncation 은 run 하나만 보고 자르므로, 각 run 이
+// op 전체 폭을 자기 한도로 받으면 합계가 그 폭을 넘는다 — 실제로 세션 카드 메타 줄의 모델명이 chevron 을
+// 지나 카드 밖까지 뻗은 캡처를 봤다. 넘는 글리프는 버려야 옆 요소를 덮지 않는다.
+test "이어 붙인 run 이 폭 예산을 넘으면 그 글리프는 버려진다" {
+    const allocator = std.testing.allocator;
+    var font_name = [_]u8{0} ** 128;
+    @memcpy(font_name[0..6], "System");
+    const make = struct {
+        fn glyph(x_px: f32, advance: f32, run_index: u16, name: [128]u8) UnresolvedGlyph {
+            return .{
+                .glyph_id = 12,
+                .codepoint = 'A',
+                .fallback = false,
+                .color_glyph_kind = .monochrome,
+                .x_px = x_px,
+                .advance_px = advance,
+                .font_name = name,
+                .point_size = 14,
+                .line_height_px = 20,
+                .origin = .{ .x = 0, .y = 0 },
+                .foreground = 0xAABBCC,
+                .run_index = run_index,
+            };
+        }
+    };
+    // 예산 50. run0 이 40 을 쓰고, 이어 붙인 run1 의 두 번째 글리프가 40+10+10=60 으로 넘는다.
+    const glyphs = try allocator.dupe(UnresolvedGlyph, &.{
+        make.glyph(0, 40, 0, font_name),
+        make.glyph(0, 10, 1, font_name),
+        make.glyph(10, 10, 1, font_name),
+    });
+    const layouts = try allocator.dupe(chrome.draw.TextPlacement, &.{ .origin, .origin });
+    var unresolved = UnresolvedArtifact{
+        .glyphs = glyphs,
+        .placements = layouts,
+        .foregrounds = try allocator.dupe(u32, &.{ 0xAABBCC, 0xAABBCC }),
+        .scroll_flags = try allocator.dupe(bool, &.{ false, false }),
+        .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{ null, null }),
+        .cell_widths = try allocator.dupe(?u16, &.{ null, null }),
+        .continues = try allocator.dupe(bool, &.{ false, true }),
+        .max_widths = try allocator.dupe(u32, &.{ 50, 50 }),
+    };
+    defer unresolved.deinit(allocator);
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    var artifact = try resolveArtifact(allocator, &registry, unresolved);
+    defer artifact.deinit(allocator);
+
+    // 세 글리프 중 예산 안에 드는 둘만 남는다.
+    try std.testing.expectEqual(@as(usize, 2), artifact.placements.len);
+    try std.testing.expectEqual(@as(f32, 0), artifact.placements[0].x_px);
+    try std.testing.expectEqual(@as(f32, 40), artifact.placements[1].x_px);
 }
 
 test "leading icon group resolves measured label and SVG to one final-pixel artifact" {
@@ -1060,7 +1143,7 @@ test "leading icon group resolves measured label and SVG to one final-pixel arti
         .gap_px = 10,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0xAABBCC});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}), .max_widths = try allocator.dupe(u32, &.{10_000}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();
@@ -1084,7 +1167,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}), .max_widths = try allocator.dupe(u32, &.{10_000}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();

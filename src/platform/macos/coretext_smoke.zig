@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var draw_list_probe_error: ?anyerror = null;
-    const draw_list_probe = buildDrawListGlyphFrameProbe(allocator, appearance) catch |err| blk: {
+    const draw_list_probe = buildDrawListGlyphFrameProbe(io, allocator, appearance) catch |err| blk: {
         draw_list_probe_error = err;
         var empty = emptyGlyphFrameProbe(coretext_raster.CoreTextGlyphRasterizer.name);
         empty.renderer_shaper = coretext_shaper.CoreTextDrawListShaper.name;
@@ -364,6 +364,7 @@ fn buildGlyphFrameProbeWithRasterizer(
 }
 
 fn buildDrawListGlyphFrameProbe(
+    io: std.Io,
     allocator: std.mem.Allocator,
     appearance: config.ResolvedAppearance,
 ) !GlyphFrameProbe {
@@ -374,7 +375,10 @@ fn buildDrawListGlyphFrameProbe(
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
     core.clearDirty();
-    try core.write("Maru 한");
+    // 픽스처 문자열은 계약 테스트가 값(glyph 수 등)으로 잠그므로 기본값을 바꾸지 않는다. 덤프로 다른
+    // 조합을 보려면 `MARU_CORETEXT_SMOKE_TEXT` 를 준다(그 경우 계약 값이 달라져 스모크가 실패할 수 있고,
+    // 그래도 덤프 파일은 남는다 — 눈으로 보는 것이 목적이기 때문이다).
+    try core.write(readSmokeText());
 
     var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
     var draw_list_owned = true;
@@ -405,6 +409,10 @@ fn buildDrawListGlyphFrameProbe(
     );
     draw_list_owned = false;
     defer frame.deinit(allocator);
+    // 글리프 비트맵 덤프(요청 시). 렌더 회귀를 눈으로 볼 유일한 헤드리스 경로다 — 위 함수 주석 참고.
+    if (std.c.getenv("MARU_CORETEXT_GLYPH_DUMP") != null) writeGlyphBitmapDump(io, frame) catch |e| {
+        std.debug.print("glyph dump 실패: {s}\n", .{@errorName(e)});
+    };
 
     return glyphFrameProbeFromRenderFrame(
         &font_registry,
@@ -549,6 +557,63 @@ fn shapedGlyphRunForTest(
         surface,
         &font_registry,
     );
+}
+
+/// 덤프·확인용 픽스처 문자열. 기본값은 계약 테스트가 잠근 값이다.
+fn readSmokeText() []const u8 {
+    const raw_ptr = std.c.getenv("MARU_CORETEXT_SMOKE_TEXT") orelse return "Maru 한";
+    const raw = std.mem.span(raw_ptr);
+    if (raw.len == 0 or raw.len > 256) return "Maru 한";
+    return raw;
+}
+
+/// 셰이핑·래스터를 지난 **글리프 비트맵 자체**를 이미지로 남긴다(PGM, 알파를 그레이로).
+///
+/// **왜 이 경로인가**: 터미널 렌더를 눈으로 확인할 방법이 필요한데(합자 오버항 작업 2026-08-17),
+/// GPU 경로(`macos-metal-smoke`)는 창·drawable 이 필요해 헤드리스 환경에서 `terminal_grid=false` 로
+/// 죽는다. 이 스모크는 CPU 래스터만 쓰므로 어디서나 돈다 — 화면 합성은 못 보지만 "글리프가 슬롯 안에
+/// 온전히 담겼는가"는 정확히 보인다. 합자가 잘리는 문제가 바로 그 층의 문제였다.
+///
+/// 업로드된 슬롯을 가로로 이어 붙인다(슬롯 폭이 칸 수에 비례하므로 합자는 2~3배 넓게 나온다).
+fn writeGlyphBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
+    const uploads = frame.glyph_raster_frame.uploads;
+    if (uploads.len == 0) return;
+    var total_w: usize = 0;
+    var max_h: usize = 0;
+    for (uploads) |u| {
+        total_w += @as(usize, u.slot.width_px) + 1; // 1px 구분선
+        max_h = @max(max_h, @as(usize, u.slot.height_px));
+    }
+    if (total_w == 0 or max_h == 0) return;
+
+    const allocator = std.heap.page_allocator;
+    const canvas = try allocator.alloc(u8, total_w * max_h);
+    defer allocator.free(canvas);
+    @memset(canvas, 0);
+
+    var x_off: usize = 0;
+    for (uploads) |u| {
+        const w: usize = u.slot.width_px;
+        const h: usize = u.slot.height_px;
+        for (0..h) |y| {
+            for (0..w) |x| {
+                // RGBA 4bpp. 알파(offset+3)가 coverage 라 모양이 가장 뚜렷하다.
+                const src = u.bytes_offset + y * u.bytes_per_row + x * 4 + 3;
+                if (src >= frame.glyph_raster_frame.pixels.len) continue;
+                canvas[y * total_w + x_off + x] = frame.glyph_raster_frame.pixels[src];
+            }
+        }
+        x_off += w + 1;
+    }
+
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "P5\n{d} {d}\n255\n", .{ total_w, max_h });
+    const body = try allocator.alloc(u8, header.len + canvas.len);
+    defer allocator.free(body);
+    @memcpy(body[0..header.len], header);
+    @memcpy(body[header.len..], canvas);
+    try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_dir ++ "/glyphs.pgm", .data = body });
 }
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {

@@ -30,6 +30,18 @@ pub const min_padding = 4;
 /// **패킷 길이 상한.** RFC 4253 §6.1 은 32768 을 "모든 구현이 받아야 하는 크기" 로 두고,
 /// 그보다 큰 값을 받으면 **메모리를 그만큼 잡아 주게 된다** — 악의적 서버가 4GiB 를 부르면
 /// 그대로 죽는다. 우리는 터미널 트래픽만 다루므로 넉넉히 256KiB 로 자른다.
+///
+/// **무엇의 상한인지 하나로 정한다: 길이 필드에 적히는 값**(`padding_length + payload + padding`).
+/// 길이 필드 자신과 MAC 은 안 센다. 처음에는 쓰기가 길이 필드를 포함해 재고 읽기가 안 재서 같은
+/// 상수가 자리마다 4바이트씩 다른 뜻이었다 — 보안 경계에서 그런 어긋남은 "누가 맞나" 를 나중에
+/// 반대로 정하게 만든다. 암호 계층(`cipher.zig`)도 같은 기준을 쓴다.
+///
+/// **여기 `write` 에서는 두 표현이 오늘 우연히 같은 값을 낸다.** 패딩이 전체를 8의 배수로 만들고
+/// `max_packet` 도 8의 배수라, `total > max_packet` 로 재나 `1 + payload + pad > max_packet` 로
+/// 재나 받아들이는 payload 집합이 똑같다. 그래서 그 자리를 뒤집는 변이는 **살아남는 것이 정상**이다
+/// (테스트 구멍이 아니라 동치인 코드다 — 확인하고 적어 둔다). 그럼에도 같은 기준으로 적는 이유는
+/// `max_packet` 이 8의 배수가 아니게 되는 날 조용히 갈리기 때문이다. 암호 계층은 다르다: 거기서는
+/// 두 표현이 **실제로 다른 크기를 받아들이고**, 그 경계를 테스트가 짚는다.
 pub const max_packet = 256 * 1024;
 
 pub const Error = error{
@@ -54,7 +66,8 @@ pub const Error = error{
 pub fn write(out: []u8, payload: []const u8, rand: std.Random) Error!usize {
     const pad = paddingFor(payload.len);
     const total = 4 + 1 + payload.len + pad;
-    if (total > max_packet) return Error.PacketTooLarge;
+    // 상한은 **길이 필드에 적히는 값**을 잰다 — 읽기(`read`)와 같은 기준이다(위 `max_packet` 주석).
+    if (1 + payload.len + pad > max_packet) return Error.PacketTooLarge;
     if (out.len < total) return Error.MalformedPacket;
     std.mem.writeInt(u32, out[0..4], @intCast(1 + payload.len + pad), .big);
     out[4] = @intCast(pad);
@@ -124,6 +137,31 @@ test "프레이밍 상수는 명세 값 그대로다" {
     // 상한은 우리가 고른 값이지만 **아무 값이나 되는 것은 아니다** — §6.1 은 32768 을 "모든
     // 구현이 받아야 하는 크기" 로 두므로 그보다 작게 잡으면 정상 서버를 끊게 된다.
     try std.testing.expect(max_packet >= 32768);
+}
+
+test "쓸 수 있는 가장 큰 패킷은 읽을 수도 있다" {
+    // **같은 상수가 자리마다 다른 뜻이면 안 된다.** 기준은 길이 필드에 적히는 값이고, 그 말은
+    // "우리가 보낼 수 있는 가장 큰 패킷을 우리가 받을 수도 있다" 는 뜻이다 — 그것을 직접 잰다.
+    var prng = std.Random.DefaultPrng.init(21);
+    const allocator = std.testing.allocator;
+
+    var payload_len: usize = max_packet - 1;
+    while (1 + payload_len + paddingFor(payload_len) > max_packet) payload_len -= 1;
+    const biggest = try allocator.alloc(u8, payload_len + plain_block);
+    defer allocator.free(biggest);
+    @memset(biggest, 0x5a);
+    const out = try allocator.alloc(u8, writtenLen(payload_len) + 64);
+    defer allocator.free(out);
+
+    const n = try write(out, biggest[0..payload_len], prng.random());
+    const got = try read(out[0..n]);
+    try std.testing.expectEqual(payload_len, got.payload.len);
+
+    // 한 블록 더 크면 양쪽 다 거절한다.
+    try std.testing.expectError(Error.PacketTooLarge, write(out, biggest, prng.random()));
+    var too_long: [8]u8 = undefined;
+    std.mem.writeInt(u32, too_long[0..4], @intCast(max_packet + 1), .big);
+    try std.testing.expectError(Error.PacketTooLarge, read(&too_long));
 }
 
 test "쓴 패킷을 그대로 읽는다" {

@@ -876,11 +876,12 @@ pub fn foldAll(self: *AppSession) bool {
     // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 그대로 담는다.
     for (ranges, 0..) |r, i| term.rt.editor_folded_buf[i] = r.head;
     term.rt.editor_folded_len = ranges.len;
+    const anchor = topDocLine(term); // 상태를 바꾸기 **전에** 지금 맨 위가 문서 몇째 줄인지 잡는다
     rebuildVisible(self, term) catch {
         term.rt.editor_folded_len = 0; // 반영 못 하면 접지 않은 것으로 되돌린다(화면과 상태가 갈리지 않게)
         return false;
     };
-    term.rt.editor_first_line = 0; // 접으면 줄 수가 확 줄어 옛 위치가 문서 밖일 수 있다
+    restoreTop(term, anchor);
     self.metal_dirty = true;
     return true;
 }
@@ -891,9 +892,10 @@ pub fn unfoldAll(self: *AppSession) bool {
     if (term.kind != .editor) return false;
     if (isCompare(term)) return false;
     if (term.rt.editor_folded_len == 0) return false;
+    const anchor = topDocLine(term);
     term.rt.editor_folded_len = 0;
     rebuildVisible(self, term) catch {}; // 펼치기는 배열을 푸는 쪽이라 실패할 것이 없다
-    term.rt.editor_first_line = 0;
+    restoreTop(term, anchor);
     self.metal_dirty = true;
     return true;
 }
@@ -988,6 +990,47 @@ fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
 fn isCompare(term: *Term) bool {
     const st = term.rt.editor_diff orelse return false;
     return st.view == .compare;
+}
+
+/// 지금 화면 맨 위가 **문서 몇째 줄**인가(0-based). 접힘이 바뀌면 첨자의 뜻이 달라지므로, 위치를
+/// 옮길 때는 이 문서 좌표로 건너간다.
+fn topDocLine(term: *Term) usize {
+    const nums = term.rt.editor_visible_numbers;
+    if (nums.len == 0) return term.rt.editor_first_line; // 접힌 것이 없다 — 첨자가 곧 문서 줄이다
+    if (term.rt.editor_first_line >= nums.len) return term.rt.editor_first_line;
+    const v = nums[term.rt.editor_first_line] orelse return term.rt.editor_first_line;
+    return v - 1; // gutter는 1-based로 담는다
+}
+
+/// 접힘이 바뀐 뒤 **보던 자리로 되돌린다.** 그 줄이 숨었으면 그것을 품은 머리 줄로 간다(바로 앞의
+/// 보이는 줄이 곧 머리다 — 숨는 구간은 머리 바로 뒤에 붙는다).
+///
+/// **0으로 되돌리면 안 된다.** 3만 줄 문서의 9,001번 줄을 보다가 전체 접기를 하면 **1번 줄로 튀었다**
+/// (실측. 적대적 검증 2026-08-17). Vim `zM`도 VSCode "Fold All"도 보던 자리를 지킨다. 상한을 넘는
+/// 경우는 `clampScrollToGeometry`가 그리기 직전에 처리하므로 여기서 방어할 것이 없다.
+fn restoreTop(term: *Term, doc_line: usize) void {
+    const nums = term.rt.editor_visible_numbers;
+    if (nums.len == 0) { // 다 펼쳤다 — 문서 줄이 곧 첨자다
+        term.rt.editor_first_line = doc_line;
+        return;
+    }
+    const want: u32 = std.math.cast(u32, doc_line + 1) orelse std.math.maxInt(u32);
+    // 번호는 오름차순이다(문서 순서로 담는다). `want` 이하인 **마지막** 자리를 찾는다.
+    var lo: usize = 0;
+    var hi: usize = nums.len;
+    var best: usize = 0;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const v = nums[mid] orelse {
+            hi = mid; // 꼬리 채움(번호 없음)은 없는 것으로 본다
+            continue;
+        };
+        if (v <= want) {
+            best = mid;
+            lo = mid + 1;
+        } else hi = mid;
+    }
+    term.rt.editor_first_line = best;
 }
 
 /// 접혀 있으면 **원래 줄 번호** 배열을, 아니면 `null`(프레임이 `first_line + n + 1`로 센다).
@@ -3246,4 +3289,89 @@ test "접고 튕겨도 first_line은 보이는 배열 안에 있다" {
     const visible = fx.term.rt.editor_visible_lines.len;
     try testing.expectEqual(@as(usize, n / 3), visible); // 접힘이 실제로 갈렸다 — 아니면 공허하다
     try testing.expect(fx.term.rt.editor_first_line < visible);
+}
+
+/// 화면 맨 윗 행의 gutter 번호를 draw list에서 읽는다. **번호는 화면에 보이는 것이 진실이다** —
+/// 내부 첨자로 판정하면 접힘이 바뀐 뒤의 뜻 차이를 못 잡는다.
+fn topGutterNumber(dl: anytype) u32 {
+    var min_row: u16 = std.math.maxInt(u16);
+    for (dl.cells) |c| {
+        if (c.codepoint >= '0' and c.codepoint <= '9') min_row = @min(min_row, c.row);
+    }
+    const Digit = struct { col: u16, ch: u8 };
+    var digits: [16]Digit = undefined;
+    var n: usize = 0;
+    for (dl.cells) |c| {
+        if (c.row != min_row) continue;
+        if (c.codepoint < '0' or c.codepoint > '9') continue;
+        if (n < digits.len) {
+            digits[n] = .{ .col = c.col, .ch = @intCast(c.codepoint) };
+            n += 1;
+        }
+    }
+    std.mem.sort(Digit, digits[0..n], {}, struct {
+        fn lt(_: void, a: Digit, b: Digit) bool {
+            return a.col < b.col;
+        }
+    }.lt);
+    var v: u32 = 0;
+    for (digits[0..n]) |d| v = v * 10 + (d.ch - '0');
+    return v;
+}
+
+test "접기·펼치기가 보던 자리를 지킨다" {
+    // 고치기 전: 3만 줄 문서의 **9,001번 줄**을 보다가 전체 접기를 하니 **1번 줄**로 튀었고, 펼쳐도
+    // 1번 그대로였다(실측). 두 조작 다 `first_line = 0`을 박고 있었다. Vim `zM`·VSCode "Fold All"은
+    // 보던 자리를 지킨다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const n = 30_000;
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
+    for (0..n / 3) |b| {
+        lines[b * 3] = "h:";
+        lines[b * 3 + 1] = "  a";
+        lines[b * 3 + 2] = "  b";
+    }
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    // **몸통 줄에 세운다.** 머리 줄에 세우면 접혀도 그 줄이 그대로 남아 "자리를 지켰다"가 공허하다.
+    // 9,001번째 줄(0-based 9001)은 `"  a"` — 접히면 숨는다.
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -9001);
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const before = topGutterNumber(d1.dl);
+    d1.dl.deinit(allocator);
+    try testing.expectEqual(@as(u32, 9002), before); // 몸통 줄 위에 섰다 — 아니면 판정이 공허하다
+
+    try testing.expect(foldAll(fx.session));
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const folded_top = topGutterNumber(d2.dl);
+    d2.dl.deinit(allocator);
+    // 그 줄은 몸통("  a")이라 숨는다 — 품은 머리("h:", 바로 앞 줄)가 맨 위에 선다.
+    try testing.expectEqual(before - 1, folded_top);
+    // 접힘이 실제로 갈렸다(머리만 남는다) — 아니면 위 단언이 공허하다.
+    try testing.expectEqual(@as(usize, n / 3), fx.term.rt.editor_visible_lines.len);
+
+    try testing.expect(unfoldAll(fx.session));
+    var d3 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const back = topGutterNumber(d3.dl);
+    d3.dl.deinit(allocator);
+    try testing.expectEqual(before - 1, back); // 접었을 때 선 자리를 그대로 들고 나온다
+
+    // **머리 줄 위에서 접는 경우도 봐야 한다.** 그 줄은 안 숨으므로 **그 자리 그대로**여야 하는데,
+    // 위 단언들은 몸통에서만 서서 이 구분을 못 잡는다 — 탐색을 "want 미만"으로 바꾸는 뮤턴트가
+    // 그것만으로는 **살아남았다**(한 줄 위로 밀린다). 지금 맨 위(9,001)가 바로 머리 줄이다.
+    try testing.expect(foldAll(fx.session));
+    var d4 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const on_head = topGutterNumber(d4.dl);
+    d4.dl.deinit(allocator);
+    try testing.expectEqual(back, on_head);
 }

@@ -161,7 +161,15 @@ pub const Backend = enum {
 /// **POSIX에서는 글자 그대로 `std.c.pid_t`다** — 그래서 macOS 소비자(`session_host/**`의 `child_pid`
 /// 필드 등)는 타입이 하나도 안 바뀐다. 회귀 0이 이 별칭의 첫 계약이다.
 ///
-/// 소비자는 이 값을 **비교와 저장에만** 쓴다(같은 자식인가). 그러므로 두 OS에서 폭이 달라도 무방하다.
+/// **소비자가 부호를 쓴다 — 폭을 함부로 바꾸면 안 된다.** 처음에는 "비교와 저장에만 쓰니 폭이 달라도
+/// 무방하다"고 적었는데 거짓이었다(코드 리뷰가 잡았다). 실제로는 `session_host`가 `-1`을 **모호함
+/// 센티널**로 쓰고(`live_child_pid = -1`), handoff wire가 `i32`로 실어 `<= 0`을 거부하며, macOS 백엔드는
+/// 그 값을 `std.c.kill`·`waitid`에 그대로 넘긴다. `u32`였다면 `-1`이 표현 불가고 모든 `<= 0` 가드가
+/// `== 0`으로 무너진다.
+///
+/// 지금 안전한 이유는 **POSIX 갈래가 글자 그대로 `std.c.pid_t`**여서다(그 소비자들은 전부 POSIX 전용이다).
+/// Windows 갈래의 `u32`를 쓰는 코드는 아직 그 관례가 없다 — 세션 호스트를 Windows로 옮길 때 부호 규약을
+/// **함께** 정해야 한다.
 pub const ChildPid = if (@import("builtin").os.tag == .windows) u32 else std.c.pid_t;
 
 pub const ExitStatus = union(enum) {

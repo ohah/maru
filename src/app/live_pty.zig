@@ -852,7 +852,7 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
 
 // **중립 레이어가 PTY 백엔드에 요구하는 표면을 컴파일 시점에 고정한다.**
 //
-// 왜 이 테스트가 필요한가: 이 파일은 OS 중립인데 백엔드는 둘이다. 한쪽에만 있는 표면을 여기서 부르면
+// 왜 이 테스트가 필요한가: 이 파일은 OS 중립인데 백엔드는 **셋**이다(macOS·Windows·Unsupported). 한쪽에만 있는 표면을 여기서 부르면
 // 다른 쪽 타깃이 **컴파일 단계에서** 깨진다 — 그런데 그 깨짐은 그 타깃을 실제로 빌드해 봐야 보인다.
 // CI에 Windows 러너가 없으므로, 대신 `zig build test -Dtarget=…`가 이 테스트를 **컴파일**하는 것으로
 // 계약을 지킨다(실행이 아니라 분석이 요점이라 `_ = &f`로 참조만 한다).
@@ -864,32 +864,33 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
 // **백엔드는 셋이다** — macOS·Windows·`UnsupportedPtySession`(그 밖 전부). 합집합은 셋 **모두**가
 // 만족해야 한다. Windows에만 넣고 스텁을 빠뜨렸다가 Linux CI에서 잡혔다(`has no member named
 // 'PreparedAdoption'`). 그래서 이 테스트는 `-Dtarget=`으로 **세 갈래 다** 컴파일해야 뜻이 있다.
-test "중립 레이어가 요구하는 PTY 표면이 두 백엔드에 다 있다" {
-    // ① pid 타입이 중립 별칭으로 통일돼 있다. **comptime으로 단언한다** — 런타임 expect였다면
-    //    `-Dtarget=aarch64-macos`가 컴파일만 하고 실행은 안 하므로 macOS 갈래가 공허참이 된다.
+test "중립 레이어가 요구하는 PTY 표면이 세 백엔드에 다 있다" {
+    // **참조가 요점이다 — 타입 조회나 `@hasDecl`이 아니다.** 둘은 선언만 보고 **본문을 분석하지 않는다**
+    // (실측: 반환 타입이 틀린 함수도 `@typeInfo(...).return_type` 조회는 통과하고, 본문이 `@compileError`인
+    // 함수도 `@hasDecl`은 통과한다). 그런데 W7이 닫은 원래 결함은 **본문 오류**였다
+    // (`expected '*anyopaque', found 'u32'`). 그러니 함수 값을 실제로 참조해 분석을 강제해야 한다.
+    //
+    // `_ = f;`가 아니라 `_ = &f;`인 것도 그래서다 — 값 버리기는 분석을 강제하지 않는다(실측).
+    inline for (.{
+        LivePtySession.childPid, // ← 원래 결함이 여기였다. 반드시 본문을 분석시켜야 한다.
+        LivePtySession.initPreparedAdoption,
+        LivePtySession.commitPreparedOwnership,
+        LivePtySession.discardPreparedAdoption,
+        LivePtySession.revalidatePreparedOwnership,
+        LivePtySession.upgradeEligible,
+    }) |f| _ = &f;
+
+    // `PreparedAdoption`에서 중립 레이어가 부르는 것은 **`materialize` 하나**다(live_pty.zig:106).
+    // 그것만 참조한다 — 안 부르는 이름을 여기 적으면 백엔드에 짝퉁을 만들게 되고, 정작 macOS가 쓰는
+    // 이름(`prepareExact`·`validateInheritedMaster`)은 여전히 없는 채로 "표면이 맞다"는 착각만 남는다.
+    _ = &pty.PtySession.PreparedAdoption.materialize;
+
+    // pid 타입 계약. `-Dtarget=`은 컴파일만 하고 실행은 안 하므로 **comptime**이라야 뜻이 있다.
     comptime {
         if (@typeInfo(@TypeOf(LivePtySession.childPid)).@"fn".return_type.? != pty.ChildPid)
             @compileError("childPid는 중립 별칭 pty.ChildPid를 내야 한다");
         // POSIX에서는 `std.c.pid_t`와 **같은 타입**이어야 한다 — 다르면 macOS 소비자가 깨진다(회귀 0 계약).
         if (builtin.os.tag != .windows and pty.ChildPid != std.c.pid_t)
             @compileError("POSIX에서 pty.ChildPid는 std.c.pid_t와 같아야 한다(회귀 0)");
-    }
-
-    // ② exec-restore 표면이 존재한다(없으면 아래 참조가 컴파일되지 않는다).
-    inline for (.{
-        LivePtySession.initPreparedAdoption,
-        LivePtySession.commitPreparedOwnership,
-        LivePtySession.discardPreparedAdoption,
-        LivePtySession.revalidatePreparedOwnership,
-        LivePtySession.upgradeEligible,
-    }) |f| {
-        const g = f;
-        _ = &g;
-    }
-    comptime {
-        for (.{ "prepare", "discard", "revalidate", "materialize" }) |name| {
-            if (!@hasDecl(pty.PtySession.PreparedAdoption, name))
-                @compileError("PreparedAdoption에 " ++ name ++ "이(가) 없다");
-        }
     }
 }

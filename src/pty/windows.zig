@@ -1,9 +1,13 @@
 //! Windows PTY 백엔드 — ConPTY.
 //!
-//! 계약은 [docs/windows-platform.md](../../docs/windows-platform.md) §4다. `session.zig`의
-//! `UnsupportedPtySession`이 표면 명세이고, 여기서는 필수 13개를 채운다. 남은 4개(`resourceSamples`·
-//! `foregroundProcessNames`·`foregroundProcessGroup`·`processCwd`)는 §3.5·§3.6이 아직 결정하지 않아
-//! 스텁이다 — **거짓말하지 않는 스텁**이라 호출자는 "모른다"를 그대로 본다.
+//! 계약은 [docs/windows-platform.md](../../docs/windows-platform.md) §4다. **명세는 스텁이 아니라
+//! "중립 레이어가 실제로 부르는 것의 합집합"이다** — `UnsupportedPtySession`을 명세로 보던 기준으로는
+//! W7.0이 닫은 두 결함이 둘 다 안 잡혔다(그 스텁에도 같은 멤버가 없었다). 그 합집합은 §4의 표가 갖고,
+//! `app/live_pty.zig`의 테스트가 **컴파일 시점에** 고정한다.
+//!
+//! `resourceSamples`·`foregroundProcessNames`·`foregroundProcessGroup`·`processCwd`는 §3.5·§3.6이 아직
+//! 결정하지 않아 스텁이다 — **거짓말하지 않는 스텁**이라 호출자는 "모른다"를 그대로 본다.
+//! exec-restore 표면은 **막되 시끄럽게** 둔다(아래 `upgradeEligible` 근처).
 //!
 //! **이 파일은 Windows에서만 컴파일된다.** 그래서 OS 무관한 조립 규칙(커맨드라인 인용·환경 블록 내용)은
 //! 여기 두지 않고 [windows_spawn.zig](windows_spawn.zig)에 둔다 — 그쪽은 모든 타깃에서 테스트가 돈다.
@@ -986,7 +990,11 @@ pub const PtySession = struct {
     /// 실패할 수 없는 승격이라 macOS는 void를 낸다 — 여기서는 도달 자체가 계약 위반이다.
     pub fn commitPreparedOwnership(self: *PtySession) void {
         _ = self;
-        @panic("exec-restore는 Windows에서 지원되지 않는다(upgradeEligible이 항상 false여야 한다)");
+        // **왜 도달하지 않는가**: 이 함수의 유일한 호출 경로는 `platform/macos/session_host/**`이고
+        // 그 디렉터리는 이 타깃에서 컴파일되지 않는다. `upgradeEligible`이 false인 것은 **보조** 근거다 —
+        // 복원(restore) 쪽 경로는 그것을 안 보고 들어온다(코드 리뷰가 잡았다). 세션 호스트를 이 OS로
+        // 옮기는 순간 이 자리는 다시 판단해야 한다.
+        @panic("exec-restore는 이 플랫폼에서 지원되지 않는다(계약 §4)");
     }
 
     /// reader가 pause된 동안 자식이 죽었는지 보는 probe. 업그레이드 경로 전용이라 여기선 막는다.
@@ -997,31 +1005,17 @@ pub const PtySession = struct {
 
     /// 상속된 PTY를 새 이미지가 주워 쓰는 pre-commit 어댑션. **만들 수 없다** — `prepare`가 항상 실패하므로
     /// 나머지 메서드는 도달하지 않는다. 타입 자체는 중립 레이어의 시그니처가 요구해서 존재한다.
+    /// 상속된 PTY를 새 이미지가 주워 쓰는 pre-commit 어댑션.
+    ///
+    /// **중립 레이어가 부르는 것은 `materialize` 하나뿐이다**(`app/live_pty.zig:106`) — 그래서 그것만 둔다.
+    /// macOS 백엔드에는 `prepareExact`·`validateInheritedMaster`·`MasterIdentity` 등이 더 있지만 그
+    /// 소비자는 `platform/macos/session_host/**`뿐이라 이 타깃에서는 컴파일되지 않는다. **없는 것을
+    /// 흉내 내지 않는다** — 안 쓰이는 짝퉁을 넣으면 "표면이 맞다"는 착각만 주고, 정작 macOS가 쓰는
+    /// 이름(`prepareExact`)은 여전히 없다. 실제 이식은 그때 필요한 것을 보고 넣는다.
     pub const PreparedAdoption = struct {
-        size: terminal.Size = .{ .cols = 0, .rows = 0 },
-        committed: bool = false,
-
-        /// 시그니처는 macOS 쪽과 **같은 모양**으로 둔다(`anytype`으로 흐리지 않는다) — 흐리면 나중에 실제
-        /// 이식할 때 인자가 안 맞는 것을 컴파일러가 안 잡아 준다. `std.posix.fd_t`는 Windows에서 `HANDLE`이다.
-        pub fn prepare(inherited_slot: std.posix.fd_t, child_pid: types.ChildPid, size: terminal.Size) !PreparedAdoption {
-            _ = inherited_slot;
-            _ = child_pid;
-            _ = size;
-            return error.UnsupportedOnWindows;
-        }
-
-        pub fn discard(self: *PreparedAdoption) void {
-            _ = self; // 만들어진 적이 없으므로 풀 것도 없다
-        }
-
-        pub fn revalidate(self: *const PreparedAdoption) !void {
-            _ = self;
-            return error.UnsupportedOnWindows;
-        }
-
         pub fn materialize(self: *PreparedAdoption) PtySession {
             _ = self;
-            @panic("PreparedAdoption은 Windows에서 만들어질 수 없다(prepare가 항상 실패한다)");
+            @panic("PreparedAdoption은 이 플랫폼에서 만들어질 수 없다(exec-restore 미지원 — 계약 §4)");
         }
     };
 };

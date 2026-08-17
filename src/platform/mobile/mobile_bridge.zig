@@ -1611,7 +1611,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 단폭 글자는 왼쪽 절반만 쓴다. 줄 높이를 정하면 배율이 나오고, 칸 너비는 슬롯 절반이다.
     // 예전에는 상자(11x15)와 칸(5x22)이 달라서, 셀을 가장자리까지 채우는 합성 글리프가
     // 원리상 붙을 수 없었다.
-    const line_h: i32 = 22;
+    // **줄 높이는 config 가 정한다**(M10d). 예전에는 22 로 박혀 있어 글자 크기를 못 바꿨다 —
+    // 모바일에서는 이 값이 곧 `font.size` 다(아틀라스 셀 기하가 고정이라 브리지가 직접 정한다).
+    const line_h: i32 = @intCast(cfg().font.size);
     const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
     const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
     // chrome 라벨은 아직 예전 크기를 쓴다(본문 격자와 별개 — `pushText`).
@@ -1962,6 +1964,27 @@ fn oldestVictim(used: []const u64, n: usize) ?usize {
 /// 아틀라스 셀 크기(px). 종횡비를 지켜 그려야 글자가 안 늘어난다.
 var atlas_cell_w: u32 = 24;
 var atlas_cell_h: u32 = 32;
+
+/// 지금 글자를 **구울** 크기(px). host 가 굽기 직전에 묻는다 — 전에는 헤더 매크로가 그 값을
+/// 박아 두어 `font.size` 를 바꿔도 22px 로 구운 그림을 확대해 쓰느라 **흐려졌다**.
+///
+/// **셀에 안 넘치게 자른다.** 아틀라스 슬롯은 고정 기하(`MARU_ATLAS_CELL_W/H`)라 그보다 큰
+/// 글자를 구우면 이웃 슬롯을 침범한다 — 어센더·디센더 여유로 셀 높이의 0.7 을 상한으로 둔다
+/// (지금 값 22/32 가 그 비율이다).
+pub export fn maru_mobile_atlas_text_px() u32 {
+    const cap: u32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_h)) * 0.7);
+    return @min(cfg().font.size, @max(1, cap));
+}
+
+/// 굽는 크기가 바뀌면 **등록부를 비운다** — 그래야 다음 프레임부터 놓친 글자로 올라와 새 크기로
+/// 다시 구워진다. 슬롯 자체는 host 가 덮어쓰므로 여기서 지우는 것은 "어느 글자가 어디 있나" 뿐이다.
+var atlas_baked_px: u32 = 0;
+fn resetAtlasIfTextSizeChanged() void {
+    const px = maru_mobile_atlas_text_px();
+    if (px == atlas_baked_px) return;
+    atlas_baked_px = px;
+    atlas_n = 0;
+}
 
 pub export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
     atlas_cell_w = cell_w;
@@ -3470,6 +3493,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
+    resetAtlasIfTextSizeChanged();
     stepKeyBarFling();
     stepSetFling();
     stepBodyFling();

@@ -3394,3 +3394,55 @@ test "밀린 화면 위의 휠은 그 목록을 움직인다" {
     openTerminal(402, 874);
     bridge.maru_mobile_clear_error();
 }
+
+// ── 글자 크기(M10d) ──────────────────────────────────────────────────────────
+
+// **설정에 줄이 선다.** 줄은 스키마에서 만들어지므로(M10c) config 에 필드를 넣으면 자동으로
+// 나와야 한다 — 안 나오면 사용자가 그 값을 바꿀 길이 없다.
+test "글자 크기 줄이 설정에 있다" {
+    var found = false;
+    for (bridge.settingsRows()) |r| {
+        if (!std.mem.eql(u8, r.key, "font.size")) continue;
+        try std.testing.expectEqual(@as(@TypeOf(r.kind), .number), r.kind);
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
+// **값이 화면을 바꾼다.** 줄 높이가 곧 글자 크기라 크게 잡으면 같은 창에 들어가는 줄이 준다 —
+// 안 바뀌면 설정만 있고 아무 일도 안 하는 줄이 된다(그게 PoC 의 문제였다).
+test "글자 크기를 키우면 줄 수가 준다" {
+    endAnyGesture();
+    const src_small = "font.size = 16\n";
+    bridge.maru_mobile_load_config(src_small, src_small.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_small = bridge.bodyRowCount();
+
+    const src_big = "font.size = 32\n";
+    bridge.maru_mobile_load_config(src_big, src_big.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_big = bridge.bodyRowCount();
+
+    try std.testing.expect(rows_big < rows_small);
+
+    // 되돌린다 — 전역 상태라 다음 테스트가 기본값을 전제한다.
+    const src_def = "font.size = 22\n";
+    bridge.maru_mobile_load_config(src_def, src_def.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **범위 밖은 안 받는다.** 폰에서 6px 는 못 읽고 72px 는 한 화면에 열 줄이 안 들어간다 —
+// 스키마가 그 판정을 갖고 있고(§4.5 기기가 다르면 범위도 다르다) 브리지는 그 값을 그대로 쓴다.
+test "글자 크기는 범위 밖이면 기본값이다" {
+    const bad = "font.size = 200\n";
+    bridge.maru_mobile_load_config(bad, bad.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_bad = bridge.bodyRowCount();
+
+    const def = "font.size = 22\n";
+    bridge.maru_mobile_load_config(def, def.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(bridge.bodyRowCount(), rows_bad);
+    bridge.maru_mobile_clear_error();
+}

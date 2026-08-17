@@ -138,10 +138,12 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
         const number = row.number orelse continue; // 랩 이어짐 행은 번호가 없다
 
-        if (scratch_used + max_digits > text_scratch.len or
-            run_used >= runs.len or
-            op_count >= out.len)
-        {
+        // **여유를 `max_digits`로 요구하지 않는다.** 그것은 `usize` 최대(20자리)라, 실제로는 서너
+        // 바이트면 되는 줄에 스무 바이트를 요구해 **예약이 정확한데도 뒤쪽 줄을 버렸다** — 호출자가
+        // `scratchNeeded`(행 × 실제 자릿수)로 딱 맞게 떼어 주면 마지막 대여섯 줄의 번호가 사라졌다
+        // (실측: 3자리 40행에 120바이트를 주면 33행까지만 그려졌다. 적대적 검증 2026-08-17).
+        // 모자람 판정은 `bufPrint`에 맡긴다 — 실제로 쓸 수 있는지를 아는 유일한 자리다.
+        if (run_used >= runs.len or op_count >= out.len) {
             dropped += 1;
             continue;
         }
@@ -189,12 +191,27 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 /// 예약하게 되고, 그만큼 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 곧 다른 쪽의
 /// 손실이다. 자릿수 계산이 여기 있는 이유는 `build`의 규칙(1-based로 찍는다)과 같은 곳에 두기
 /// 위해서다. 호출자가 세면 그 규칙을 복제하게 된다.
-pub fn scratchNeeded(row_count: usize, max_line_number: usize) usize {
+///
+/// **접힘 표식 몫이 따로 붙는다.** 화살표는 3바이트짜리 UTF-8이고 `build`가 번호보다 **먼저** 쓰므로,
+/// 이 몫이 빠지면 앞 행의 화살표가 뒤 행의 번호를 밀어낸다 — 실측으로 3자리 40행 화면에서 **23줄의
+/// 번호가 사라졌다**(적대적 검증 2026-08-17). 접힘 표식을 안 넘기는 호출자(비교 뷰)는 `false`를 줘
+/// 예약을 늘리지 않는다.
+pub fn scratchNeeded(row_count: usize, max_line_number: usize, folds: bool) usize {
     var digits: usize = 1;
     var n = max_line_number;
     while (n >= 10) : (n /= 10) digits += 1;
-    return row_count * digits;
+    return row_count * (digits + if (folds) fold_mark_bytes else 0);
 }
+
+/// 접힘 표식 하나가 쓰는 최대 바이트. `Fold.glyph()`에서 유도한다 — 글자를 바꾸면 예약이 함께
+/// 따라오게 하려고 상수를 손으로 적지 않는다.
+pub const fold_mark_bytes: usize = blk: {
+    var m: usize = 0;
+    for (std.enums.values(Fold)) |f| {
+        if (f.glyph()) |g| m = @max(m, g.len);
+    }
+    break :blk m;
+};
 
 /// 본문이 정한 시각 배치를 gutter 행으로 옮긴다 — **랩이 켜졌을 때 쓴다.**
 ///
@@ -281,11 +298,11 @@ fn testProps(layout: geometry.Layout, rows: []const Row) Props {
 }
 
 test "scratchNeeded: 실제 자릿수만큼만 요구한다 — max_digits로 잡으면 20배다" {
-    try testing.expectEqual(@as(usize, 45), scratchNeeded(45, 9)); // 1자리
-    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 10)); // 2자리 경계
-    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 99));
-    try testing.expectEqual(@as(usize, 135), scratchNeeded(45, 100));
-    try testing.expectEqual(@as(usize, 0), scratchNeeded(0, 12345));
+    try testing.expectEqual(@as(usize, 45), scratchNeeded(45, 9, false)); // 1자리
+    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 10, false)); // 2자리 경계
+    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 99, false));
+    try testing.expectEqual(@as(usize, 135), scratchNeeded(45, 100, false));
+    try testing.expectEqual(@as(usize, 0), scratchNeeded(0, 12345, false));
 
     // **`build`가 실제로 쓰는 양을 넘지 않는가.** 이 둘이 갈리면 예약이 모자라 gutter가 죽는다.
     const layout = geometry.compute(80, 100, .{});
@@ -298,7 +315,64 @@ test "scratchNeeded: 실제 자릿수만큼만 요구한다 — max_digits로 �
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
     const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
-    try testing.expect(w.bytes <= scratchNeeded(rows.len, 100));
+    try testing.expect(w.bytes <= scratchNeeded(rows.len, 100, false));
+}
+
+test "접힘 표식은 랩 이어짐 행에 반복되지 않고 표 밖을 지어내지 않는다" {
+    // **가드가 없었다.** 규칙은 `rowsForVisual` 주석에만 있어서, "이어진 조각에는 안 붙인다"를
+    // 지워도 아무 테스트가 깨지지 않았다 — 접힌 줄이 랩되면 화살표가 행마다 서서 **접힌 줄 수를
+    // 오해하게 만든다**(적대적 검증 2026-08-17). 줄 번호가 같은 규칙을 이미 테스트로 지키고 있으므로
+    // 표식도 같은 자리에서 지킨다.
+    const visual = [_]visual_map.VisualRow{
+        .{ .line = 0, .piece = 0 }, // 접힌 머리
+        .{ .line = 0, .piece = 1 }, // 그 줄의 이어진 조각
+        .{ .line = 1, .piece = 0 }, // 표 밖(길이 1)
+    };
+    const folds = [_]Fold{.collapsed};
+    var buf: [4]Row = undefined;
+    const rows = rowsForVisual(&visual, 0, null, &folds, &buf);
+    try testing.expectEqual(Fold.collapsed, rows[0].fold);
+    try testing.expectEqual(Fold.none, rows[1].fold); // 이어진 조각에는 안 선다
+    try testing.expectEqual(Fold.none, rows[2].fold); // 표가 짧으면 지어내지 않는다
+
+    // **표를 안 주면 접힘 칸이 빈다** — 접힘을 모르는 호출자(비교 뷰)가 그대로 지나간다.
+    const bare = rowsForVisual(&visual, 0, null, null, &buf);
+    for (bare) |r| try testing.expectEqual(Fold.none, r.fold);
+}
+
+test "접힘 표식도 세로 스크롤에서 표를 절대 인덱스로 읽는다" {
+    // 번호가 겪은 결함과 같은 자리다(*"표를 뷰포트 기준으로 읽으면 화면 맨 위가 늘 표의 0번"*).
+    // 표식이 한 칸 밀리면 **접힌 줄이 아닌 곳에 ▸가 서서** 접을 수 없는 자리를 접을 수 있다고 말한다.
+    const visual = [_]visual_map.VisualRow{ .{ .line = 0, .piece = 0 }, .{ .line = 1, .piece = 0 } };
+    const folds = [_]Fold{ .none, .none, .collapsed, .open };
+    var buf: [4]Row = undefined;
+    const rows = rowsForVisual(&visual, 2, null, &folds, &buf); // first_line = 2
+    try testing.expectEqual(Fold.collapsed, rows[0].fold);
+    try testing.expectEqual(Fold.open, rows[1].fold);
+}
+
+test "접힘 표식 몫까지 예약한다 — 예약이 모자라면 뒤쪽 줄 번호가 사라진다" {
+    // **예약은 gutter가 받는 최소 크기다.** `frame`은 본문에 `text_bytes - gutter_reserve`만 주고
+    // 남은 것을 gutter에 넘기므로, 본문이 자기 몫을 다 쓴 화면(긴 줄들)에서 gutter가 갖는 것은
+    // 정확히 이 예약뿐이다. 화살표는 3바이트짜리 UTF-8이고 **번호보다 먼저** 쓰이므로, 그 몫이
+    // 예약에서 빠져 있으면 앞 행의 화살표가 뒤 행의 번호를 밀어낸다 —
+    // "번호가 없으면 화면 전체가 문서의 어디인지 알 수 없다"는 그 예약의 존재 이유가 무력해진다
+    // (적대적 검증 2026-08-17).
+    const layout = geometry.compute(80, 100, .{});
+    var rows: [40]Row = undefined;
+    for (&rows, 0..) |*r, i| r.* = .{ .number = 100 + i, .visual_row = @intCast(i), .fold = .collapsed };
+
+    // **행마다 op이 둘이다**(화살표 + 번호) — 저장소를 재는 테스트가 op 부족으로 먼저 걸리면
+    // 무엇이 모자랐는지 갈리지 않는다.
+    var ops: [rows.len * 2]draw.Op = undefined;
+    var runs: [rows.len * 2]draw.Run = undefined;
+    const need = scratchNeeded(rows.len, 100 + rows.len, true);
+    const scratch = try testing.allocator.alloc(u8, need);
+    defer testing.allocator.free(scratch);
+
+    const w = build(testProps(layout, &rows), &ops, scratch, runs[0..]);
+    try testing.expectEqual(@as(usize, 0), w.dropped_rows); // 한 줄도 못 그린 것이 없다
+    try testing.expect(w.bytes <= need);
 }
 
 test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 간격이 같아야 한다" {
@@ -425,8 +499,11 @@ test "op·run·문자 저장소 어느 쪽이 모자라도 죽지 않는다" {
         try testing.expectEqual(@min(cap, rows.len), w.ops);
         try testing.expectEqual(rows.len - @min(cap, rows.len), w.dropped_rows);
     }
-    // 문자 저장소만 모자란 경우도 같다.
-    for ([_]usize{ 0, 1, 5 }) |sc| {
+    // 문자 저장소만 모자란 경우도 같다. **번호 세 개가 각 1바이트이므로 3바이트 미만이 진짜 모자란
+    // 크기다** — 예전에는 `build`가 줄마다 `max_digits`(20) 여유를 요구해 5바이트도 "모자람"이었고,
+    // 그 요구가 결함이었다(예약이 정확한데도 뒤쪽 줄을 버렸다). 그것을 고치면서 이 값들도 실제
+    // 경계로 옮긴다.
+    for ([_]usize{ 0, 1, 2 }) |sc| {
         var ops: [8]draw.Op = undefined;
         var runs: [8]draw.Run = undefined;
         var scratch: [64]u8 = undefined;
@@ -477,7 +554,7 @@ test "번호를 밖에서 주면 그것을 쓴다 — diff는 좌우가 각자 �
     };
     const numbers = [_]?u32{ 7, null, 8 }; // 가운데가 빈 행(filler)
     var buf: [8]Row = undefined;
-    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    const rows = rowsForVisual(&visual, 0, &numbers, null, &buf);
     try testing.expectEqual(@as(?usize, 7), rows[0].number);
     try testing.expectEqual(@as(?usize, null), rows[1].number);
     try testing.expectEqual(@as(?usize, 8), rows[2].number);
@@ -490,7 +567,7 @@ test "밖에서 준 번호도 랩 이어짐에는 안 붙는다 — 두 규칙�
     };
     const numbers = [_]?u32{42};
     var buf: [4]Row = undefined;
-    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    const rows = rowsForVisual(&visual, 0, &numbers, null, &buf);
     try testing.expectEqual(@as(?usize, 42), rows[0].number);
     try testing.expectEqual(@as(?usize, null), rows[1].number);
 }
@@ -499,7 +576,7 @@ test "표가 짧으면 번호를 지어내지 않는다" {
     const visual = [_]visual_map.VisualRow{ .{ .line = 0, .piece = 0 }, .{ .line = 1, .piece = 0 } };
     const numbers = [_]?u32{5};
     var buf: [4]Row = undefined;
-    const rows = rowsForVisual(&visual, 0, &numbers, &buf);
+    const rows = rowsForVisual(&visual, 0, &numbers, null, &buf);
     try testing.expectEqual(@as(?usize, 5), rows[0].number);
     try testing.expectEqual(@as(?usize, null), rows[1].number);
 }
@@ -514,7 +591,7 @@ test "밖에서 준 번호 + 세로 스크롤: 표를 절대 인덱스로 읽는
     };
     const numbers = [_]?u32{ 10, 11, 12, null, 13 };
     var buf: [4]Row = undefined;
-    const rows = rowsForVisual(&visual, 2, &numbers, &buf);
+    const rows = rowsForVisual(&visual, 2, &numbers, null, &buf);
     try testing.expectEqual(@as(?usize, 12), rows[0].number);
     try testing.expectEqual(@as(?usize, null), rows[1].number); // 그 자리가 빈 행이다
 }

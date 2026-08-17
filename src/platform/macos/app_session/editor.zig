@@ -810,8 +810,10 @@ fn editorLines(term: *Term) []const []const u8 {
 
 /// **접힘 범위를 세는 원본.** 접힌 결과가 아니라 문서 전체다 — `editorLines`를 쓰면 접은 뒤 다시
 /// 세면서 접힌 것을 못 보게 된다(순환).
+///
+/// **diff 상태에서는 비어 있다 — 그것이 곧 "접을 수 없다"의 단일 출처다**(`foldsUnavailable`).
 fn foldSourceLines(term: *Term) []const []const u8 {
-    if (term.rt.editor_diff != null) return &.{}; // 비교에서는 접지 않는다(`isCompare`)
+    if (term.rt.editor_diff != null) return &.{};
     return term.rt.editor_lines;
 }
 
@@ -850,7 +852,13 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
     return layout.content.width;
 }
 
-/// 접을 범위를 세어 Term에 둔다(이미 있으면 그대로). **명령에서만 부른다** — 렌더는 할당하지 않는다.
+/// 접을 범위를 세어 Term에 둔다(이미 있으면 그대로). **명령과 여는 경로가 부른다** — 렌더는 할당하지
+/// 않는다.
+///
+/// **"이미 있으면 그대로"는 문서가 안 바뀐다는 전제 위에 서 있다.** 지금은 참이다 — `editor_lines`를
+/// 채우는 곳은 `openPathInActivePane` 하나이고 그것은 늘 **새 Term**을 만든다. N2에서 편집이 들어와
+/// 줄 배열이 살아 있는 Term에서 바뀌면 이 캐시가 옛 문서의 범위를 가리키므로, **그 슬라이스가 여기서
+/// 무효화 지점을 만들어야 한다**(§4.1f "범위 목록은 갱신 시점을 갖는다").
 ///
 /// **넘긴 뒤에는 실패 지점이 없다.** 이 세션에서 같은 자리의 이중 해제를 세 번 잡았다
 /// (native-editor-layering.md §2.0a) — 잡을 것을 **모두 잡은 뒤** 한꺼번에 넘긴다.
@@ -884,7 +892,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 pub fn foldAll(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
-    if (isCompare(term)) return false; // 아래 doc — 비교는 접지 않는다
+    if (foldsUnavailable(term)) return false; // 아래 doc — diff 상태에서는 접지 않는다
     ensureFoldRanges(self, term) catch return false; // 못 세면 아무 일도 안 한다
     const ranges = term.rt.editor_fold_ranges;
     if (ranges.len == 0) return false;
@@ -916,7 +924,7 @@ pub fn foldAll(self: *AppSession) bool {
 pub fn unfoldAll(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
-    if (isCompare(term)) return false;
+    if (foldsUnavailable(term)) return false;
     if (term.rt.editor_folded_len == 0) return false;
     const anchor = topDocLine(term);
     term.rt.editor_folded_len = 0;
@@ -1014,18 +1022,22 @@ fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
     self.metal_dirty = true;
 }
 
-/// 비교(좌우 두 열) 상태인가. **접힘은 여기서 거절한다.**
+/// 지금 이 Term에서 접힘이 성립하지 않는가. **접기·펼치기가 여기서 거절한다.**
 ///
 /// 이유가 랩과 같다(§4.1d 알려진 구멍): 비교는 **좌우 행이 짝을 이뤄 같은 높이에 서야** 성립하는데,
-/// 한쪽 행만 접으면 그 아래가 통째로 어긋난다. 게다가 렌더는 비교일 때 `st.left_texts`를 그리므로
+/// 한쪽 행만 접으면 그 아래가 통째로 어긋난다. 게다가 렌더는 diff일 때 `st.left_texts`를 그리므로
 /// **접힘 상태를 만들어도 화면이 그대로다** — 성공을 돌려주고 아무 일도 안 일어나면 사용자는 이유를
 /// 알 수 없다(적대적 검증 2026-08-17이 그 상태를 잡았다).
 ///
+/// **판정은 원본 유무 하나로 한다.** 초판은 `view == .compare`로 물었는데, diff는 `.loading`·
+/// `.unavailable`·`.unchanged`도 상태이고 그때도 렌더가 diff 경로를 탄다 — 그 셋이 거절을 그냥
+/// 지나가 같은 거짓 성공이 남아 있었다(적대적 검증 2026-08-17). 접힘의 원본은 `foldSourceLines`
+/// 하나이므로, 그것이 비었는지를 묻는 편이 뷰 종류를 나열하는 것보다 갈릴 여지가 없다.
+///
 /// VSCode의 diff가 "바뀌지 않은 구간 접기"를 제공하지만 그것은 **좌우를 함께 접는 다른 기능**이고,
 /// 들여쓰기 접힘을 한쪽에 적용하는 것과 다르다.
-fn isCompare(term: *Term) bool {
-    const st = term.rt.editor_diff orelse return false;
-    return st.view == .compare;
+fn foldsUnavailable(term: *Term) bool {
+    return foldSourceLines(term).len == 0;
 }
 
 /// 지금 화면 맨 위가 **문서 몇째 줄**인가(0-based). 접힘이 바뀌면 첨자의 뜻이 달라지므로, 위치를
@@ -3077,6 +3089,40 @@ test "접을 것이 없는 문서에서는 전체 접기가 무동작이다" {
     try testing.expect(!foldAll(fx.session));
 }
 
+test "diff가 로딩·불가 상태여도 접기를 거절한다 — 화면이 그대로인데 성공을 돌려주면 안 된다" {
+    // 비교 뷰의 거짓 성공은 이미 잡았는데(editor_diff.zig), **판정을 뷰 종류로 했다.** diff는
+    // `.loading`·`.unavailable`도 상태이고 그때도 렌더는 diff 경로를 타므로, 이 둘은 거절을 그냥
+    // 지나갔다. `foldSourceLines`가 그 상태에서 빈 배열을 내기 때문에 **접힘 상태만 서고 화면은
+    // 그대로**다 — 비교에서 결함이라고 판정한 것과 같은 부류다(적대적 검증 2026-08-17).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 4);
+    defer allocator.free(lines);
+    lines[0] = "a:";
+    lines[1] = "  1";
+    lines[2] = "b:";
+    lines[3] = "  2";
+    fx.term.rt.editor_lines = lines;
+
+    // 먼저 평범하게 접어 **범위를 만들어 둔다** — diff를 켜기 전에 파일을 열어 본 경로다.
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(unfoldAll(fx.session));
+
+    defer fx.term.rt.editor_diff = null;
+    for ([_]maru.session.editor.diff.View{ .loading, .{ .unavailable = .binary }, .unchanged }) |view| {
+        fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+        fx.term.rt.editor_diff.?.view = view;
+        try testing.expect(!foldAll(fx.session));
+        try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len); // 상태도 안 선다
+        try testing.expect(!unfoldAll(fx.session));
+    }
+}
+
 test "접힘 범위 계산이 어디서 할당에 실패해도 새거나 두 번 풀지 않는다" {
     // **같은 자리에서 이중 해제를 세 번 잡았다**(layering §2.0a). 세션 allocator는 init에 고정이라
     // `checkAllAllocationFailures`를 그대로 못 쓴다 — 세션을 실패 allocator로 만들고 **init이 끝난
@@ -3193,6 +3239,38 @@ test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
         try testing.expect(foldAll(fx.session));
         const t1 = monotonicMsForTest();
         std.debug.print("\n[측정] {d}블록 전체 접기(보이는 줄 만들기 포함): {d}ms\n", .{ blocks, t1 - t0 });
+    }
+}
+
+test "[측정] 큰 파일을 여는 값 — 범위 세기와 표식 만들기가 열기에 붙었다" {
+    // §4.1f가 갱신 시점을 *"문서를 열 때"*로 정하면서 `ensureFoldRanges`·`rebuildVisible`이 **모든
+    // 파일 열기 경로**에 들어갔다(`openPathInActivePane`). 접기 명령은 사용자가 기다릴 각오를 하고
+    // 누르지만 **여는 것은 아니다** — 그래서 여기에 값을 매겨 둔다.
+    //
+    // 접힘이 하나도 없는 상태에서도 표식은 줄마다 만들어지므로(`markFor` — 문서 줄 수만큼 이진 탐색
+    // 두 번), 접을 것이 많은 문서와 **평평한 문서 둘 다** 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ true, false }) |nested| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        const n = 120_000;
+        const lines = try allocator.alloc([]const u8, n);
+        defer allocator.free(lines);
+        for (0..n) |i| lines[i] = if (nested and i % 2 == 1) "  body" else if (nested) "head:" else "x";
+        fx.term.rt.editor_lines = lines;
+
+        const t0 = monotonicMsForTest();
+        try ensureFoldRanges(fx.session, fx.term); // 여는 경로가 부르는 그대로
+        try rebuildVisible(fx.session, fx.term);
+        const t1 = monotonicMsForTest();
+        std.debug.print("\n[측정] {d}줄 열기의 접힘 몫({s}): {d}ms\n", .{ n, if (nested) "블록 6만" else "평평", t1 - t0 });
+
+        // **재앙 감지선이지 예산이 아니다.** 여는 순간이 눈에 띄게 멈추면 여기서 걸린다.
+        try testing.expect(t1 - t0 < 500);
     }
 }
 

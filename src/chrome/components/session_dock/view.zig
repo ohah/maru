@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const icons = @import("../../../icons.zig");
+const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const badge = @import("../../ui/badge.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
@@ -37,7 +38,7 @@ const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
 const host_icon = icons.utf8Fit(.host, .standard);
 const resume_icon = icons.utf8(.recent);
 const reveal_icon = icons.utf8(.document);
-const host_label = "로컬";
+const host_label_key: i18n.Key = .sd_host_local;
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -69,16 +70,16 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     const count = if (props.loading or props.refreshing)
         // `loading`은 아직 보여 줄 record가 하나도 없는 첫 스캔이다. 이때 개수만 말하면 `0개 표시`가 되어
         // **세션이 없다는 뜻으로 읽힌다** — 스캔 중임을 말해야 한다(docs/agent-session-list.md §4).
-        std.fmt.bufPrint(&count_buf, "{d}개 표시 · 분석 중", .{props.displayed_count}) catch ""
+        i18n.format(&count_buf, i18n.t(.sd_count_analyzing), &.{.{ .d = props.displayed_count }})
     else if (props.partial)
-        std.fmt.bufPrint(&count_buf, "{d}개 표시 · 일부만 분석함", .{props.displayed_count}) catch ""
+        i18n.format(&count_buf, i18n.t(.sd_count_partial), &.{.{ .d = props.displayed_count }})
     else
-        std.fmt.bufPrint(&count_buf, "{d}개 표시", .{props.displayed_count}) catch "";
+        i18n.format(&count_buf, i18n.t(.sd_count), &.{.{ .d = props.displayed_count }});
     // 정렬 토글은 좁은 도크에서 발행되지 않는다. published tree의 유무가 단일 출처다 — view가 폭을
     // 다시 판정하면 두 곳의 규칙이 어긋난다.
     const sort_rect = find(frame.tree, build.NodeIds.sort_toggle);
-    try writer.headerStack(header, "Agent 세션 기록", count, sort_rect != null);
-    try writer.headerProvenance(header, host_label, sort_rect != null);
+    try writer.headerStack(header, i18n.t(.sd_header), count, sort_rect != null);
+    try writer.headerProvenance(header, i18n.t(host_label_key), sort_rect != null);
     // The in-flight state deliberately keeps the registered SVG at its idle optical size.  The
     // old Unicode clock frames were one terminal-cell glyphs, so clicking refresh made the
     // control visibly shrink even though its hit rect stayed 24pt.  Until component transforms
@@ -89,9 +90,9 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     // 고정이라 옆의 `로컬`과 refresh가 움직이지 않는다.
     if (sort_rect) |rect| try writer.centeredLabel(rect, props.sort_order.label());
 
-    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, "작업공간");
-    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, "프로젝트");
-    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, "전체");
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, i18n.t(.sd_scope_workspace));
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, i18n.t(.sd_scope_project));
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, i18n.t(.sd_scope_all));
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
     try writer.searchField(search);
 
@@ -411,7 +412,7 @@ const Writer = struct {
         const show_caret = self.props.search_focused and self.props.search_cursor_visible;
         const empty = self.props.search.len == 0 and self.props.search_preedit.len == 0;
         if (empty and !show_caret) {
-            return self.emit(x, y, "세션 검색", max_cols, .head, .muted_fg, .control, false, false);
+            return self.emit(x, y, i18n.t(.sd_search), max_cols, .head, .muted_fg, .control, false, false);
         }
         return self.emitJoined(x, y, self.props.search, self.props.search_preedit, if (show_caret) "|" else "", max_cols, if (empty) .muted_fg else .surface_fg);
     }
@@ -534,10 +535,10 @@ const Writer = struct {
         const detail = find(snapshot, build.NodeIds.expandedDetail(index)) orelse return error.MissingRect;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_heading_y, switch (expanded_props.state) {
-            .loading => "세션 분석 중",
-            .ready => "최근 대화",
-            .stale => "세션 원본이 변경되었습니다",
-            .unavailable => "세션을 열 수 없습니다",
+            .loading => i18n.t(.sd_detail_loading),
+            .ready => i18n.t(.sd_detail_ready),
+            .stale => i18n.t(.sd_detail_stale),
+            .unavailable => i18n.t(.sd_detail_unavailable),
         }, .surface_fg, .body, false, 0);
         switch (expanded_props.state) {
             .ready => {
@@ -549,19 +550,19 @@ const Writer = struct {
                 for (expanded_props.turns, 0..) |turn, turn_index| {
                     const turn_y = metrics.detail_turn_y + @as(u32, @intCast(turn_index)) * metrics.detail_turn_step;
                     try self.textAtY(detail, metrics.detail_inset_x, turn_y, switch (turn.role) {
-                        .user => "사용자",
-                        .assistant => "에이전트",
+                        .user => i18n.t(.sd_role_user),
+                        .assistant => i18n.t(.sd_role_assistant),
                     }, .muted_fg, .overline, false, 0);
                     const body_y = turn_y + typography.lineHeightPx(.overline, effectiveScale(self.props.scale_milli)) + spacing.px(.xxs, effectiveScale(self.props.scale_milli));
                     try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false, 0);
                 }
             },
             .loading => try self.skeletons(detail),
-            .stale => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, false, 0),
-            .unavailable => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "원본을 읽을 수 없습니다.", .muted_fg, .body, false, 0),
+            .stale => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, i18n.t(.sd_stale_hint), .muted_fg, .body, false, 0),
+            .unavailable => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, i18n.t(.sd_unavailable_hint), .muted_fg, .body, false, 0),
         }
-        try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, "터미널에서 이어하기");
-        try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, "로그 보기");
+        try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, i18n.t(.sd_resume));
+        try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, i18n.t(.sd_reveal));
         if (expanded_props.focus_live_enabled)
             try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, "열린 세션으로 이동");
     }
@@ -800,6 +801,13 @@ fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
 // read budget이라 "500개 중 N개"가 사실과 달랐다. 그리고 scanner가 `partial`을 세고 있었는데도 그 값이
 // DTO에 없어 **잘렸다는 사실이 화면에 전혀 나타나지 않았다** — 사용자는 목록이 전부인 줄 알았다.
 test "SessionDock 헤더는 잘림과 분석 중을 개수와 분리해 말한다" {
+    // 기대값이 한국어 문장이다 — 이 테스트가 재는 것은 **어느 분기가 어느 문구를 내는가**이고,
+    // 그 의미는 문장으로 봐야 드러난다(키 비교는 동어반복이 된다). 언어를 명시 고정해 두면 기본값이
+    // 로케일을 따라가도 이 검증이 흔들리지 않는다.
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko);
+
     const Case = struct { loading: bool = false, partial: bool, refreshing: bool, want: []const u8 };
     const cases = [_]Case{
         // 완료 + 전부 훑음 → 개수만. 상한을 광고하지 않는다.
@@ -973,16 +981,16 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     title_max_cols = text.max_cols;
                 }
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
-                if (std.mem.eql(u8, run.text, host_label)) {
+                if (std.mem.eql(u8, run.text, i18n.t(host_label_key))) {
                     host_label_max_cols = text.max_cols;
                     host_label_placement = text.placement;
                 }
-                if (std.mem.eql(u8, run.text, "작업공간")) {
+                if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_workspace))) {
                     workspace_origin_y = text.origin.y;
                     workspace_placement = text.placement;
                 }
-                if (std.mem.eql(u8, run.text, "프로젝트")) project_origin_y = text.origin.y;
-                if (std.mem.eql(u8, run.text, "전체")) all_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_project))) project_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_all))) all_origin_y = text.origin.y;
                 if (std.mem.eql(u8, run.text, "workspace")) {
                     saw_group_label = true;
                     group_label_x = text.origin.x;
@@ -1025,7 +1033,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     // what lets the measured path choose an ellipsis from the actual system UI font advance.
     try std.testing.expect(saw_untruncated_title);
     try std.testing.expect((title_max_cols orelse 0) < "a title that intentionally exceeds a narrow card".len);
-    try std.testing.expect((host_label_max_cols orelse 0) > Writer.plannedCols(host_label, 16));
+    try std.testing.expect((host_label_max_cols orelse 0) > Writer.plannedCols(i18n.t(host_label_key), 16));
     const metrics = types.DockMetrics.resolve(props.scale_milli);
     switch (host_label_placement orelse return error.TestUnexpectedResult) {
         .leading_icon_group => |group| {
@@ -1169,7 +1177,7 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
                 partial_title_clip = text.clip;
             }
             if (std.mem.indexOf(u8, run.text, "next-card-title") != null) next_title_scroll_clipped = text.scroll_clipped;
-            if (std.mem.indexOf(u8, run.text, "Agent 세션 기록") != null) {
+            if (std.mem.indexOf(u8, run.text, i18n.t(.sd_header)) != null) {
                 header_scroll_clipped = text.scroll_clipped;
                 header_clip = text.clip;
             }
@@ -1212,6 +1220,12 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
 // 목록을 스크롤 전/후로 두 번 렌더해 **모든 run이 정확히 같은 양만큼 움직였는지**를 본다. 겹침은 곧
 // "어떤 글자만 안 움직였다"이므로, 이 차분이 증상 그 자체를 고정한다.
 test "SessionDock scrolling moves every emitted run by the same virtualization offset" {
+    // 기대 문자열 중 하나가 보간 결과의 조각("61건")이라 **언어에 묶인다** — 영어면 "61 tool/permission
+    // records"가 되어 못 찾는다. 이 테스트가 재는 것은 스크롤 오프셋이지 문구가 아니므로 언어를 고정한다.
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko);
+
     const shift: i32 = -140;
     var props = types.Props{
         // 목록 아이템은 더 이상 viewport에 맞춰 축소되지 않는다. 이 테스트가 보려는 것은 평행이동의
@@ -1295,13 +1309,11 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
 
     // 목록에 속한 run만 본다. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리다.
     const list_texts = [_][]const u8{
-        "expanded-card-title",  "expanded-summary",  "expanded-meta",
-        "최근 대화",
+        "expanded-card-title",    "expanded-summary",  "expanded-meta",
+        i18n.t(.sd_detail_ready),
         "61건",
-        "detail-turn-text",
-        "터미널에서 이어하기",
-        "로그 보기",
-        "neighbour-card-title", "neighbour-summary", "neighbour-meta",
+        "detail-turn-text",       i18n.t(.sd_resume),  i18n.t(.sd_reveal),
+        "neighbour-card-title",   "neighbour-summary", "neighbour-meta",
     };
     var matched: usize = 0;
     for (list_texts) |needle| {
@@ -1315,7 +1327,7 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
     // 두 프레임 모두에 있어야 이 비교가 결함을 잡는다.
     try std.testing.expect(matched >= 3);
     var matched_detail = false;
-    inline for (.{ "최근 대화", "61건", "detail-turn-text" }) |needle| {
+    inline for (.{ i18n.t(.sd_detail_ready), "61건", "detail-turn-text" }) |needle| {
         if (originYFor(rested.ops, needle) != null and originYFor(scrolled.ops, needle) != null) matched_detail = true;
     }
     try std.testing.expect(matched_detail);
@@ -1377,8 +1389,8 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
     var reveal_label = false;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, "터미널에서 이어하기")) resume_label = text.placement;
-            reveal_label = reveal_label or std.mem.eql(u8, run.text, "로그 보기");
+            if (std.mem.eql(u8, run.text, i18n.t(.sd_resume))) resume_label = text.placement;
+            reveal_label = reveal_label or std.mem.eql(u8, run.text, i18n.t(.sd_reveal));
         },
         else => {},
     };
@@ -1592,7 +1604,7 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
             if (quad.fill_role == .inset_bg) count_pill_y = quad.rect.y;
         },
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, "작업공간")) workspace_y = text.origin.y;
+            if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_workspace))) workspace_y = text.origin.y;
             if (std.mem.eql(u8, run.text, "12")) count_y = text.origin.y;
         },
         else => {},
@@ -1658,7 +1670,7 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
     var label_placement: ?draw.TextPlacement = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, "터미널에서 이어하기")) {
+            if (std.mem.eql(u8, run.text, i18n.t(.sd_resume))) {
                 try std.testing.expect(!text.wide_icons);
                 try std.testing.expectEqual(typography.ChromeTextRole.button_label, text.text_role);
                 label_cols = text.max_cols;
@@ -2012,6 +2024,12 @@ test "SessionDock never emits a quad whose clip has collapsed to zero area" {
 // slot 폭을 키우는 것만으로는 이 결함이 안 고쳐진다(양자화는 그대로다). 그래서 여기서 고정하는 것은
 // 폭이 아니라 **계약**이다: 세그먼트·토글 label은 자기 slot 폭을 `max_width_px`로 그대로 싣는다.
 test "SessionDock segment and sort labels carry the exact slot width as their measured budget" {
+    // 슬롯 폭 예산은 라벨 폭에서 나온다 — 언어가 바뀌면 값이 달라진다. 이 테스트가 재는 것은
+    // "발행한 폭 == 잰 폭"이라는 **일치**이므로 언어를 고정해 한 벌만 본다.
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko);
+
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 480 },
         .cell_width_px = 8,
@@ -2057,10 +2075,10 @@ test "SessionDock segment and sort labels carry the exact slot width as their me
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
 
     const cases = [_]struct { label: []const u8, id: u64 }{
-        .{ .label = "작업공간", .id = build.NodeIds.scope_workspace },
-        .{ .label = "프로젝트", .id = build.NodeIds.scope_project },
-        .{ .label = "전체", .id = build.NodeIds.scope_all },
-        .{ .label = "오래된순", .id = build.NodeIds.sort_toggle },
+        .{ .label = i18n.t(.sd_scope_workspace), .id = build.NodeIds.scope_workspace },
+        .{ .label = i18n.t(.sd_scope_project), .id = build.NodeIds.scope_project },
+        .{ .label = i18n.t(.sd_scope_all), .id = build.NodeIds.scope_all },
+        .{ .label = i18n.t(.sd_sort_oldest), .id = build.NodeIds.sort_toggle },
     };
     for (cases) |case| {
         const slot = find(frame.tree, case.id) orelse return error.TestUnexpectedResult;
@@ -2145,8 +2163,8 @@ test "SessionDock segment labels take their foreground from the same resolver as
     var enabled_role: ?tokens.ColorRole = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, "작업공간")) disabled_role = text.role;
-            if (std.mem.eql(u8, run.text, "프로젝트")) enabled_role = text.role;
+            if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_workspace))) disabled_role = text.role;
+            if (std.mem.eql(u8, run.text, i18n.t(.sd_scope_project))) enabled_role = text.role;
         },
         else => {},
     };
@@ -2167,7 +2185,7 @@ test "SessionDock segment labels take their foreground from the same resolver as
 // 사라지는, 정확히 그 주석이 막으려던 상태다. 경계값 단언은 "왜 그 값인가"를 말해 주지 않으므로
 // 계약 자체를 여기서 고정한다: **토글이 발행된 모든 폭에서 제목 run이 존재한다.**
 test "SessionDock never publishes the sort toggle at a width that erases the header title" {
-    const heading = "Agent 세션 기록";
+    const heading = i18n.t(.sd_header);
     // 이 루프가 **경계를 실제로 가로지르는지** 세어 둔다. 토글이 한 번도 발행되지 않는 구간만 훑으면
     // 아래 단언이 한 번도 실행되지 않은 채 통과한다 — 회귀를 못 잡는 테스트가 되는 흔한 방식이고,
     // utility 폭이 커져 경계가 480pt 위로 올라가면 **조용히** 그렇게 된다.

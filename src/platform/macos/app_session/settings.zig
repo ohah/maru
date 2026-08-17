@@ -502,7 +502,7 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
             var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
             const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
             // §6.11: 전역은 빌트인 기본이 없어 사용자 바인딩(chord 존재)이 곧 override — 있으면 ↺(=해제).
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = chord == null };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title()), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = chord == null };
             i += 1;
         }
     }
@@ -1368,11 +1368,11 @@ pub fn requestBranchMenu(self: *AppSession) void {
     const repo = switch (git_ops.gitRepoTarget(self, &repo_buf)) {
         .repo => |found| found,
         .none => {
-            self.showNotice(git_ops.notice_not_a_repo);
+            self.showNotice(git_ops.noticeNotARepo());
             return;
         },
         .unknown => {
-            self.showNotice(git_ops.notice_repo_unknown);
+            self.showNotice(git_ops.noticeRepoUnknown());
             return;
         },
     };
@@ -2449,7 +2449,7 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
     var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
     if (cross or sel_sec == .global_hotkey) {
-        for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
+        for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title(), entry.key, q)) try globals.append(arena, entry);
     }
     return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
 }

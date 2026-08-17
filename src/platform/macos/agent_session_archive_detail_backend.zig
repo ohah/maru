@@ -217,7 +217,7 @@ fn redactTurns(allocator: std.mem.Allocator, parsed: *detail.Detail) void {
     const username = if (std.c.getenv("USER")) |value| std.mem.span(value) else null;
     for (parsed.turns.items) |*turn| {
         const replacement = if (redact.hasSensitiveContent(turn.text))
-            allocator.dupe(u8, "[민감한 내용은 표시하지 않음]")
+            allocator.dupe(u8, maru.i18n.t(.arch_redacted))
         else
             redact.anonymizeAlloc(allocator, turn.text, .{ .home = home, .username = username });
         const next = replacement catch continue;
@@ -273,6 +273,6 @@ test "detail worker redacts sensitive turns before publication" {
     , true);
     defer parsed.deinit(std.testing.allocator);
     redactTurns(std.testing.allocator, &parsed);
-    try std.testing.expectEqualStrings("[민감한 내용은 표시하지 않음]", parsed.turns.items[0].text);
+    try std.testing.expectEqualStrings(maru.i18n.t(.arch_redacted), parsed.turns.items[0].text);
     try std.testing.expectEqualStrings("at /Users/user/project", parsed.turns.items[1].text);
 }

@@ -375,15 +375,15 @@ pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool
 /// 화면이 말할 문장. **내부 값을 노출하지 않는다**(§7) — 세 이유를 사람 문장으로만 옮긴다.
 pub fn statusText(view: diff.View) []const u8 {
     return switch (view) {
-        .loading => "비교를 읽는 중입니다…",
-        .unchanged => "바뀐 곳이 없습니다.",
+        .loading => maru.i18n.t(.diff_loading),
+        .unchanged => maru.i18n.t(.diff_no_changes),
         .unavailable => |reason| switch (reason) {
-            .too_large => "변경이 너무 커서 비교를 표시하지 않습니다.",
-            .binary => "텍스트가 아니라 비교를 표시하지 않습니다.",
-            .unknown => "비교를 읽지 못했습니다.",
+            .too_large => maru.i18n.t(.diff_too_large),
+            .binary => maru.i18n.t(.diff_not_text),
+            .unknown => maru.i18n.t(.diff_read_failed),
         },
         // 좌우 배치는 슬라이스 c가 그린다. 그때까지 이 줄이 **판정이 섰다는 사실**을 말한다.
-        .compare => "비교 준비됨",
+        .compare => maru.i18n.t(.diff_ready),
     };
 }
 
@@ -395,7 +395,7 @@ fn nowMs(self: *AppSession) u64 {
 const testing = std.testing;
 
 test "판정이 서기 전에는 읽는 중이다" {
-    try testing.expectEqualStrings("비교를 읽는 중입니다…", statusText(.loading));
+    try testing.expectEqualStrings(maru.i18n.t(.diff_loading), statusText(.loading));
 }
 
 test "세 거절 이유가 각각 다른 문장이다 — 하나로 뭉개면 계약을 확인할 수 없다" {

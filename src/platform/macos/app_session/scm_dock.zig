@@ -386,7 +386,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         // 있어 **글자가 겹친다**(제품 캡처 2026-08-17). 저장소가 여럿이면 "어느 저장소가 비었나"도
         // 그 자리라야 말이 된다.
         if (repo_model != null and rows.len == 0) {
-            items[n] = .{ .notice = git_ops.notice_no_changes };
+            items[n] = .{ .notice = git_ops.noticeNoChanges() };
             n += 1;
             continue;
         }
@@ -1125,11 +1125,11 @@ fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
     const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse {
         // **감추지 않고 이유를 말한다** — 버튼은 꺼진 색이지만 눌리기는 한다.
-        setScmWriteNotice(self, "그 저장소를 아직 읽지 못했습니다");
+        setScmWriteNotice(self, maru.i18n.t(.scm_repo_unread));
         return;
     };
     if (!hasUnstaged(model.rows)) {
-        setScmWriteNotice(self, "스테이지할 변경이 없습니다");
+        setScmWriteNotice(self, maru.i18n.t(.scm_nothing_to_stage));
         return;
     }
     _ = submitWrite(self, repo, .stage_all, &.{});
@@ -1225,9 +1225,9 @@ pub fn drainScmWrite(self: *AppSession) void {
 /// 화면에 낼 실패 사유. **redact하고 자른다**(§5) — 홈 경로·IP·`user@host`가 stderr에 섞이고, hook 출력은
 /// 수천 줄이 될 수 있다. trace·로그에는 싣지 않는다(화면은 방금 누른 동작의 결과, 로그는 나중에 공유되는 산출물).
 fn writeErrorText(self: *AppSession, result: git_backend_mod.WriteResult) ?[]u8 {
-    if (!result.spawned) return self.allocator.dupe(u8, "git을 실행하지 못했습니다") catch null;
+    if (!result.spawned) return self.allocator.dupe(u8, maru.i18n.t(.scm_git_spawn_failed)) catch null;
     const raw = std.mem.trimEnd(u8, result.stderr, "\n");
-    if (raw.len == 0) return self.allocator.dupe(u8, "git 명령이 실패했습니다") catch null;
+    if (raw.len == 0) return self.allocator.dupe(u8, maru.i18n.t(.scm_git_command_failed)) catch null;
     // **마지막 줄만** 낸다. 목록 안 한 줄짜리 자리라 여러 줄을 담을 수 없고, hook 거부 사유는 보통 끝에 온다.
     const last_break = std.mem.lastIndexOfScalar(u8, raw, '\n');
     const last = if (last_break) |at| raw[at + 1 ..] else raw;
@@ -1784,14 +1784,14 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     // 저장소의 `status`이고, 파일 줄도 그 출력에서 나온다. 아직 그 저장소를 못 읽었을 때만 막는다:
     // 그때는 스테이지 여부도 목록도 모르므로 "무엇을 커밋하는지" 모르는 채 실행하는 것이 된다.
     if (repoStatusTextFor(self, repo_path) == null and !isCurrentRepo(self, repo_path)) {
-        setScmWriteNotice(self, "그 저장소를 아직 읽지 못했습니다");
+        setScmWriteNotice(self, maru.i18n.t(.scm_repo_unread));
         return;
     }
     // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
     _ = self.scm_commit_field.commitPreedit(self.allocator);
     const message = std.mem.trim(u8, self.scm_commit_field.text.items, " \t\r\n");
     if (message.len == 0) {
-        setScmWriteNotice(self, "커밋 메시지를 입력하세요");
+        setScmWriteNotice(self, maru.i18n.t(.scm_need_commit_message));
         return;
     }
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
@@ -1800,7 +1800,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     if (!model.has_staged) {
         // **감추지 않고 이유를 말한다.** 버튼은 꺼진 색이지만 눌리기는 하므로, 눌렀는데 아무 일도
         // 없으면 사용자는 앱이 멈춘 줄 안다.
-        setScmWriteNotice(self, "스테이지된 변경이 없습니다");
+        setScmWriteNotice(self, maru.i18n.t(.scm_nothing_staged));
         return;
     }
 
@@ -1808,7 +1808,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     const path = commitMessagePath(self, &path_buf) orelse return;
     // 메시지는 **원문 그대로** 쓴다(끝에 개행 하나만 보장 — git이 마지막 줄을 삼키지 않게).
     writeCommitMessageFile(self, path, self.scm_commit_field.text.items) catch {
-        setScmWriteNotice(self, "커밋 메시지를 임시 파일에 쓰지 못했습니다");
+        setScmWriteNotice(self, maru.i18n.t(.scm_commit_msg_write_failed));
         return;
     };
 

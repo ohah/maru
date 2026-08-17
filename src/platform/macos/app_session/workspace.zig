@@ -444,7 +444,7 @@ pub fn setWorkspaceRoot(self: *AppSession, text: []const u8) void {
         return;
     }
     if (!config_mod.loader.isValidWorkspaceRoot(trimmed)) {
-        self.chrome_host.settings.setMessage("시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)");
+        self.chrome_host.settings.setMessage(maru.i18n.t(.ws_cwd_must_be_absolute));
         return;
     }
     const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;

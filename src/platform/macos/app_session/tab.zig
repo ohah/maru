@@ -937,7 +937,9 @@ pub fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind, bre
         .nested => @intCast(@min(@as(usize, enclosing_depth) + 1, max_group_nesting)),
         .sibling => @max(@as(u8, 1), enclosing_depth),
     };
-    const name = std.fmt.allocPrint(self.allocator, "그룹 {d}", .{group_count + 1}) catch return;
+    // `i18n.format` 은 할당하지 않으므로(빌려준 버퍼에 쓴다) 스택 버퍼에 만든 뒤 복사한다.
+    var name_buf: [64]u8 = undefined;
+    const name = self.allocator.dupe(u8, maru.i18n.format(&name_buf, maru.i18n.t(.tab_group_n), &.{.{ .d = @intCast(group_count + 1) }})) catch return;
     tab.group_start = name; // owned
     tab.group_collapsed = false;
     tab.group_depth = new_depth;

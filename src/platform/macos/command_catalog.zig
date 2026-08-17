@@ -120,15 +120,22 @@ pub const entries = [_]Entry{
 pub const GlobalEntry = struct {
     action: GlobalAction,
     key: [:0]const u8,
-    title: [:0]const u8,
+    /// 표시 제목이 아니라 **키**를 든다 — 이 목록이 컨테이너 레벨 배열이라 comptime 이고, 런타임
+    /// 조회(`i18n.t`)는 거기서 쓸 수 없다. 해석은 소비처가 `title()` 로 한다(세팅 행 라벨·검색 두 곳).
+    title_key: maru.i18n.Key,
+
+    /// 현재 언어로 푼 표시 제목.
+    pub fn title(self: GlobalEntry) []const u8 {
+        return maru.i18n.t(self.title_key);
+    }
 };
 
 /// 세팅 `.global_hotkey` 섹션에 노출할 전역 액션 목록(3개). in-app `entries`와 달리 빌트인 기본 chord가 없다 —
 /// 사용자가 `keybind = global:<chord> = <action>`로 명시하지 않으면 미지정이다(chordForGlobalAction이 null).
 pub const global_entries = [_]GlobalEntry{
-    .{ .action = .toggle_window, .key = "toggle_window", .title = "창 토글" },
-    .{ .action = .show_window, .key = "show_window", .title = "창 표시" },
-    .{ .action = .toggle_quick_terminal, .key = "toggle_quick_terminal", .title = "퀵 터미널 토글" },
+    .{ .action = .toggle_window, .key = "toggle_window", .title_key = .cmd_toggle_window },
+    .{ .action = .show_window, .key = "show_window", .title_key = .cmd_show_window },
+    .{ .action = .toggle_quick_terminal, .key = "toggle_quick_terminal", .title_key = .cmd_toggle_quick },
 };
 
 /// 한 전역 액션에 현재 묶인 chord를 찾는다(표시용). in-app `chordForAction`과 달리 빌트인 기본 바인딩이 없으므로

@@ -5,9 +5,9 @@
 //! `app/host.zig`의 `resizeActiveSurface`·`closeActiveLivePty` 같은 것에 어떻게 연결할지는 호출자 몫이다 —
 //! 그래야 창이 앱 정책을 알지 않는다(macOS에서 `MaruAppHost`가 `AppSession`을 부르는 것과 같은 분담).
 //!
-//! **호스트에 제2 언어를 두지 않는다**(계약 §2). macOS가 `app_host_abi.zig`(212개 `export fn`)라는 C ABI
-//! 경계를 둔 것은 AppKit이 Objective-C/Swift 전용이기 때문인데, Win32에는 그 강제가 없다. 창·입력은
-//! 평범한 C API라 Zig에서 직접 부른다.
+//! **호스트에 제2 언어를 두지 않는다**(계약 §2). macOS가 `app_host_abi.zig`라는 이백 개 넘는 `pub export fn`
+//! 의 C ABI 경계를 둔 것은 AppKit이 Objective-C/Swift 전용이기 때문인데, Win32에는 그 강제가 없다. 창·입력은
+//! 평범한 C API라 Zig에서 직접 부른다. (개수를 숫자로 박지 않는다 — ABI가 늘 때마다 문서가 거짓이 된다.)
 //!
 //! ## 표시 대상은 **주입받는다** (W7.2가 채울 이음매)
 //!
@@ -19,8 +19,9 @@
 //! | 창 스타일 | `WS_EX_NOREDIRECTIONBITMAP` 필요 | 평범한 HWND |
 //! | 스왑체인 | `CreateSwapChainForComposition` | `CreateSwapChainForHwnd` |
 //!
-//! **그 결정이 닿는 곳은 이 두 지점뿐이다.** 아틀라스·draw-list·입력·IME는 무관하다(중립 렌더러는
-//! `present`라는 개념 자체가 없다 — `src/renderer/**`에 swapchain·drawable이 없다). 그래서 창이 표시
+//! **그 결정이 닿는 곳은 이 두 지점뿐이다.** 아틀라스·draw-list·입력·IME는 무관하다 — 중립 렌더러엔
+//! `present`라는 개념 자체가 없다(`src/renderer/**`에 swapchain이 없다. 거기 나오는 `drawable`은 "이 글리프를
+//! 그릴지"라는 무관한 뜻이고, 표시 대상을 가리키지 않는다). 그래서 창이 표시
 //! 대상을 **만들지 않고 받는** 모양만 지키면 전환 비용이 두 줄에 머문다. 반대로 "우리가 클라이언트
 //! 영역을 소유하고 HWND에 직접 present한다"를 여기 새기면 그때는 비싸진다 — macOS도 터미널이 화면을
 //! 독점하지 않고 `CALayer` subview로 합성되는 구조다.

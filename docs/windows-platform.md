@@ -340,6 +340,66 @@ atlas_entries=39
 Windows 값으로 채우자 프레임이 그대로 섰고, 고쳐야 했던 것은 계약이 아니라 이음매 한 줄(래스터라이저를
 넘길 자리)이었다.
 
+### 2g. 실제 터미널 화면 — 프레임을 픽셀로 (W7.2c-2, 실측 2026-08-17)
+
+§2f가 세운 프레임(실제 PTY → Windows 셰이퍼 → DirectWrite)을 §2c·§2d가 세운 표시 경로에 흘려 넣는다.
+그 사이를 잇는 것이 둘뿐이다.
+
+**⑴ 아틀라스 부분 업로드.** 프레임마다 새 글리프만 `UpdateSubresource`로 그 사각형에 올린다(전체를 다시
+올리지 않는다). `UpdateSubresource`는 범위를 검사하지 않아 넘치면 조용히 다른 자리를 덮으므로 —
+아틀라스에서는 그것이 **"글자가 다른 글자로 나온다"** 로 보인다 — 텍스처 밖을 가리키면 그리지 않고 알린다.
+
+**아틀라스가 커지면 텍스처를 다시 만든다.** 이전 글리프가 사라지는 것이 맞다: 중립 아틀라스는 텍스처를
+키울 때 `atlas_full`로 **전체를 무효화하고 (0,0)부터 재배치**하므로(`renderer/glyph_atlas.zig`) 그 프레임의
+글리프가 전부 새 업로드로 다시 온다. 즉 오래된 UV가 남아 엉뚱한 픽셀을 샘플하는 일이 없다. macOS 렌더러
+doc은 이 자리를 "growable atlas를 지원하려면 producer가 전체 업로드를 다시 보내야 한다"고 보수적으로 적어
+뒀는데, 무효화 규약을 보면 그럴 필요가 없다.
+
+**⑵ 셀 투영.** `metal_frame`의 `NativeMetalCell`을 `d3d11_cells.Cell`로 옮긴다. **정책은 중립 쪽에서
+받는다** — 커서 오버레이·패널 origin·배경 없는 셀 같은 것을 다시 만들면 두 백엔드가 같은 화면을 못 낸다.
+여기서 바꾸는 것은 좌표계(`(origin, row, col)` → 픽셀 사각형)와 색 표현(픽셀 → 0~1 UV, `0xAARRGGBB` → RGBA)
+뿐이다.
+
+`foreground`는 `0x00RRGGBB`로 **알파가 없다.** 그대로 풀면 알파 0이 되고 셰이더의 `cov * fg.a`가 커버리지를
+죽여 **글자가 아예 안 나온다.** 불투명으로 채워야 한다(순수 테스트가 이 회귀를 고정한다).
+
+**창 크기가 바뀌면 터미널 격자도 바꾼다**(`resizeActiveSurface`). 스왑체인만 맞추면 셸이 옛 크기로 계속
+출력해 줄이 어긋난다.
+
+#### 셀 메트릭을 렌더러에 알려 주지 않으면 글리프가 잘린다 (실측)
+
+`RendererState.init`의 `TextLayoutConfig`를 기본값(`.{}` — 전부 0)으로 두면 아틀라스가 슬롯 크기를 다른 값으로
+추정한다. 그러면 베이스라인이 슬롯 아래로 내려가 **글리프가 아래에서 잘린다.** 폰트가 정한 값을 넘겨야 한다:
+
+```zig
+.text = .{
+    .font_size_px = 18,
+    .device_scale = 1,
+    .cell_width_px = cell_w,        // grid advance(자간 반영)
+    .glyph_cell_width_px = cell_w,  // 폰트 글리프 자연폭(자간 무관)
+    .cell_height_px = cell_h,
+},
+```
+
+**화면을 보고 잡았고, 숫자가 확인해 줬다** — `upload_non_clear_pixels`가 1881에서 **2643(+40%)** 으로 늘었다.
+잘려 있던 부분이 그만큼이었다.
+
+**실기 캡처** (Windows 10 Pro 19045, `maru win32-terminal-smoke`):
+
+![W7.2c-2 실제 터미널 화면과 잘림 전/후](images/w7-2c-terminal.png)
+
+실제 PowerShell 7.6.3 세션이 창에 그려진다 — 프롬프트·경로·SGR 색(`echo` 노랑, `exit` 초록)·출력·계속 프롬프트.
+
+```text
+maru.win32-terminal-smoke.v1
+font_family=Cascadia Mono   cell_px=11x21   terminal_size=89x28
+frames_presented=220        cells_drawn_last=2485
+atlas_px=1024x1024 resizes=0   atlas_region_uploads=39
+upload_non_clear_pixels=2643
+fallback_glyphs=0 replacement_glyphs=0 raster_skipped=0
+swapchain_px=984x601 driver=hardware
+```
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

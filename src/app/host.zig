@@ -62,6 +62,33 @@ pub fn buildFrameAfterDrain(
     drain_summary: runtime_pump.DrainSummary,
     io: std.Io,
 ) HostError!AppHostFrame {
+    // 래스터라이저를 주지 않은 호출자는 fake를 쓴다 — 기존 동작 그대로다(`RendererState`가 같은 기본값을
+    // 갖는다). 실제 폰트 픽셀이 필요한 호스트는 아래 `…WithRasterizer`를 쓴다.
+    return buildFrameAfterDrainWithRasterizer(
+        allocator,
+        app_window,
+        renderer_state,
+        shaper,
+        renderer.FakeGlyphRasterizer{},
+        drain_summary,
+        io,
+    );
+}
+
+/// `buildFrameAfterDrain`과 같지만 **글리프 래스터라이저를 주입받는다.**
+///
+/// 이 변종을 둔 이유는 하나다: 코어 락 규율(`docs/io-render-threading.md` — 코어 읽기는 락 아래,
+/// shaping은 락 밖)이 여기 한 곳에만 있어야 한다. 플랫폼 호스트가 자기 래스터라이저를 쓰려고 이 함수
+/// 본문을 복사하면 그 규율이 두 곳으로 갈리고, 한쪽만 고쳐지는 순간 조용히 깨진다.
+pub fn buildFrameAfterDrainWithRasterizer(
+    allocator: std.mem.Allocator,
+    app_window: *window_mod.AppWindow,
+    renderer_state: *renderer.RendererState,
+    shaper: anytype,
+    rasterizer: anytype,
+    drain_summary: runtime_pump.DrainSummary,
+    io: std.Io,
+) HostError!AppHostFrame {
     // 실제 app loop에서는 queue drain과 frame 조립이 같은 frame 안에 있지만, smoke나
     // trace recorder는 raw event를 먼저 관찰해야 할 수 있다. 이 helper는 drain 결과를
     // 받은 뒤 active surface만 renderer frame으로 바꾸므로 두 경로가 같은 조립 코드를 쓴다.
@@ -78,7 +105,7 @@ pub fn buildFrameAfterDrain(
     active.unlockCore(io);
     var list = try list_or;
     errdefer list.deinit(allocator);
-    const render_frame = try renderer_state.buildFrameFromDrawList(allocator, list, shaper);
+    const render_frame = try renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, shaper, rasterizer);
 
     return .{
         .surface_id = active.id,

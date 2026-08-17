@@ -10,6 +10,9 @@ const d3d11_present = @import("platform/windows/d3d11_present.zig");
 const d3d11_cells = @import("platform/windows/d3d11_cells.zig");
 // W7.3 DirectWrite 글리프 래스터라이저.
 const dwrite_font = @import("platform/windows/dwrite_font.zig");
+// W7.2c 중립 텍스트 계약 어댑터와 프레임 빌더.
+const win32_text = @import("platform/windows/win32_text.zig");
+const win32_terminal = @import("platform/windows/win32_terminal.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -83,6 +86,12 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "dwrite-text-smoke")) {
         try runDwriteTextSmoke(allocator, stdout, stderr);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "win32-frame-smoke")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
+        try runWin32FrameSmoke(io, allocator, stdout, stderr);
         return;
     }
 
@@ -702,6 +711,102 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
     try stdout.flush();
     // **성공 경로에서도 stderr를 비운다.** 위 래스터화 경고가 버퍼에 남아 있으면 조용히 사라진다 —
     // 실측으로 겪었다: 진단을 넣었는데 화면에 아무것도 안 나와 원인을 한참 찾았다.
+    try stderr.flush();
+}
+
+/// `maru win32-frame-smoke` — W7.2c-1. **실제 PTY 출력이 Windows 셰이퍼·DirectWrite 래스터라이저를 지나
+/// 중립 `RenderFrame`이 되는지**를 창 없이 확인한다.
+///
+/// 창을 띄우지 않는 이유가 있다. 계약 §2a가 걸어 둔 질문은 "중립 렌더러 계약이 Metal 한 구현에만 맞춰져
+/// 있지 않은가"이고, 그 답은 **그림이 아니라 계약이 받아들이는가**로 나온다. 여기서 프레임이 서면 그
+/// 답이 예다 — 화면에 올리는 것은 W7.2c-2다.
+///
+/// 판정은 **셋을 갈라 세는 것**이다(`win32_terminal.FrameCounts`): 잉크 있는 글리프 수, 실제로 올린
+/// 슬롯이 덮은 픽셀 수, 그리고 폴백·빈칸 수. 슬롯 수만 세면 글자가 하나도 안 그려져도 성공처럼 보인다 —
+/// W7.2b·W7.3에서 같은 함정을 두 번 겪었다.
+fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-frame-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // ── 폰트 ───────────────────────────────────────────────────────────────────────────────
+    var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
+        try stderr.print("maru win32-frame-smoke: 폰트를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer raster.destroy();
+
+    // 두 칸 글자(한글·CJK)가 두 칸 폭 슬롯을 받으므로 스크래치는 그 폭에 맞춘다.
+    const scratch = try allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(raster.metrics.width_px * 2, raster.metrics.height_px));
+    defer allocator.free(scratch);
+
+    const builder = win32_terminal.FrameBuilder{
+        .shaper = .{ .raster = raster },
+        .rasterizer = .{ .raster = raster, .scratch = scratch },
+    };
+
+    // ── 실제 PTY와 중립 프레임 루프 ────────────────────────────────────────────────────────
+    // 설정 순서는 `app/pty_loop_smoke.zig`와 같다 — 그쪽이 이 계약의 단일 출처이고, 여기서 다르게
+    // 조립하면 두 경로가 갈린다.
+    const size: maru.terminal.Size = .{ .cols = 80, .rows = 24 };
+    // 각본은 `app/fixture_script.zig`가 단일 출처다(셸마다 다르다). 셸 선택은 §3.1a의 티어가 한다.
+    const script = maru.app.fixture_script.interactiveEcho(@import("builtin").os.tag);
+    const command = maru.pty.resolveInteractiveShell();
+
+    var live: maru.app.LivePtySession = undefined;
+    try live.init(io, allocator, 10, .{ .command = command, .args = script.args, .size = size }, 16);
+    defer live.deinit();
+
+    var surfaces = [_]maru.session.surface.Surface{try maru.session.surface.Surface.init(allocator, 1, size)};
+    defer surfaces[0].deinit();
+    surfaces[0].title = "win32 frame smoke";
+    surfaces[0].command = command;
+
+    var tab_ptrs = [_]*maru.session.surface.Surface{&surfaces[0]};
+    var app_window: maru.session.window.AppWindow = .{ .tabs = &tab_ptrs };
+
+    var runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try live.attachSurface(&runtime, &surfaces[0], true);
+
+    var pump = live.pump(&runtime);
+    var renderer_state = maru.renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var loop = maru.app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, io);
+
+    // 셸이 프롬프트를 낼 시간을 준 뒤, 눈에 보이는 글자를 만들 명령을 보낸다.
+    _ = usleep(400_000);
+    // 스크립트 바이트는 키 이벤트 경로가 아니라 입력 경로로 보낸다 — `handleKeyEvent`는 키바인딩 판정용이다.
+    try maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = script.input });
+
+    var counts: win32_terminal.FrameCounts = .{};
+    var frames: usize = 0;
+    var ended = false;
+    while (frames < 60 and !ended) : (frames += 1) {
+        var tick = try loop.tickWithFrameBuilder(builder);
+        defer tick.deinit(allocator);
+        counts.add(tick.frame.render_frame);
+        ended = tick.ended();
+        _ = usleep(16_000);
+    }
+
+    try stdout.writeAll("maru.win32-frame-smoke.v1\n");
+    try stdout.print("font_family={s}\n", .{raster.family});
+    try stdout.print("cell_px={d}x{d}\n", .{ raster.metrics.width_px, raster.metrics.height_px });
+    try stdout.print("frames_built={d}\n", .{frames});
+    try stdout.print("glyph_quads={d}\n", .{counts.glyph_quads});
+    try stdout.print("atlas_uploads={d}\n", .{counts.uploads});
+    // **이 줄이 판정이다.** 슬롯을 올렸는데 덮인 픽셀이 0이면 글자가 하나도 안 그려진 것이다.
+    try stdout.print("upload_non_clear_pixels={d}\n", .{counts.non_clear_pixels});
+    try stdout.print("fallback_glyphs={d}\n", .{counts.fallback});
+    try stdout.print("replacement_glyphs={d}\n", .{counts.replacement});
+    try stdout.print("raster_skipped={d}\n", .{counts.skipped});
+    try stdout.print("atlas_entries={d}\n", .{renderer_state.atlas.entryCount()});
+    try stdout.writeAll("visible UI: 없다 — 이것은 중립 계약 스모크다. 화면에 올리는 것은 W7.2c-2다.\n");
+    try stdout.flush();
     try stderr.flush();
 }
 
@@ -1471,6 +1576,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru d3d11-present-smoke
         \\  maru d3d11-cells-smoke
         \\  maru dwrite-text-smoke
+        \\  maru win32-frame-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1493,6 +1599,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  d3d11-present-smoke paint that window with D3D11 + DXGI and report the present path (Windows only; needs a D3D11 device)
         \\  d3d11-cells-smoke draw a cell grid with synthesized glyphs through the D3D11 cell pipeline (Windows only; needs a D3D11 device)
         \\  dwrite-text-smoke render real text with DirectWrite glyphs plus synthesized box drawing (Windows only; needs a D3D11 device)
+        \\  win32-frame-smoke run a live PTY through the Windows shaper and DirectWrite rasterizer into a neutral RenderFrame (Windows only; no window)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
@@ -1520,6 +1627,8 @@ test {
     _ = d3d11_present;
     _ = d3d11_cells;
     _ = dwrite_font;
+    _ = win32_text;
+    _ = win32_terminal;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

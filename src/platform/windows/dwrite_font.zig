@@ -560,6 +560,27 @@ pub const Rasterizer = struct {
         self.allocator.destroy(self);
     }
 
+    /// 코드포인트를 그릴 face와 글리프 번호. `face_index`는 `faces`의 인덱스(0이 주 폰트)다.
+    pub const GlyphChoice = struct { face_index: usize, glyph_id: u16 };
+
+    /// 어느 face의 어느 글리프로 그릴지 **고른다**(그리지는 않는다). 전부 없으면 `null`.
+    ///
+    /// **고르기와 그리기를 갈라 둔 이유**는 셰이퍼와 래스터라이저가 같은 답을 써야 하기 때문이다. 중립
+    /// 계약에서 셰이퍼가 `font_id`·`glyph_id`를 정하고 래스터라이저가 그 값을 받는데, 래스터라이저가
+    /// 코드포인트로 다시 풀면 두 결정이 갈릴 수 있다(폴백 목록이 같아도 순서 판정이 어긋나면 다른 글리프를
+    /// 그린다). 그래서 결정은 이 함수 하나가 소유한다.
+    pub fn glyphFor(self: *Rasterizer, cp: u32) ?GlyphChoice {
+        const cps = [_]u32{cp};
+        var glyph: [1]u16 = undefined;
+        for (self.faces[0..self.face_count], 0..) |candidate, i| {
+            const f = candidate orelse continue;
+            if (d3d11.failed(f.vtable.GetGlyphIndices(f, &cps, 1, &glyph))) continue;
+            // 글리프 0은 `.notdef`다 — 이 폰트에 없는 글자이므로 다음 폴백에 묻는다.
+            if (glyph[0] != 0) return .{ .face_index = i, .glyph_id = glyph[0] };
+        }
+        return null;
+    }
+
     /// 코드포인트를 `pixels`(RGBA8, `bytes_per_row` 간격)에 그린다. **중립 규약을 그대로 지킨다** —
     /// RGB는 흰색, 커버리지는 알파. 덮인 픽셀 수를 돌려준다(0이면 잉크 없음 — 공백 등).
     ///
@@ -575,23 +596,26 @@ pub const Rasterizer = struct {
         pixels: []u8,
         scratch: []u8,
     ) Error!u32 {
+        // 고르는 것은 `glyphFor`가 소유한다 — 없으면 0(빈 칸)이 정직한 답이다.
+        const choice = self.glyphFor(cp) orelse return 0;
+        return self.rasterizeGlyph(choice, cell_w, cell_h, bytes_per_row, pixels, scratch);
+    }
+
+    /// 이미 고른 face·글리프로 그린다. 셰이퍼가 정한 결정을 **그대로** 받는 자리다(위 `glyphFor` 참조).
+    pub fn rasterizeGlyph(
+        self: *Rasterizer,
+        choice: GlyphChoice,
+        cell_w: u32,
+        cell_h: u32,
+        bytes_per_row: usize,
+        pixels: []u8,
+        scratch: []u8,
+    ) Error!u32 {
         if (bytes_per_row < @as(usize, cell_w) * 4) return error.BufferTooSmall;
         if (pixels.len < bytes_per_row * cell_h) return error.BufferTooSmall;
-
-        // **face를 순서대로 내려간다.** 글리프 0은 `.notdef`(이 폰트에 없는 글자)이므로 다음 폴백에 묻는다.
-        // 전부 없으면 0을 돌려준다 — 그것이 "그릴 수 없다"의 정직한 답이고, 호출자가 빈 칸으로 둔다.
-        const cps = [_]u32{cp};
-        var glyph: [1]u16 = undefined;
-        var face: ?*IDWriteFontFace = null;
-        for (self.faces[0..self.face_count]) |candidate| {
-            const f = candidate orelse continue;
-            if (d3d11.failed(f.vtable.GetGlyphIndices(f, &cps, 1, &glyph))) continue;
-            if (glyph[0] != 0) {
-                face = f;
-                break;
-            }
-        }
-        const use_face = face orelse return 0;
+        if (choice.face_index >= self.face_count) return error.FontFaceFailed;
+        const use_face = self.faces[choice.face_index] orelse return error.FontFaceFailed;
+        var glyph = [_]u16{choice.glyph_id};
 
         const run = GlyphRun{
             .font_face = use_face,

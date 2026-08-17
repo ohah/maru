@@ -284,6 +284,62 @@ DirectWrite의 자동 cascade는 `IDWriteFactory2` 이후에만 있어 **목록�
 판정은 **셋을 갈라 세는 것**이다 — `slots_from_font`·`slots_synthesized`·`slots_blank`. 합쳐 세면 폰트 경로가
 죽어도 합성 글리프가 수를 채워 성공처럼 보인다.
 
+### 2f. 중립 프레임 계약을 Windows 백엔드가 만족시킨다 (W7.2c-1, 실측 2026-08-17)
+
+렌더러가 요구하는 duck-typed 계약은 **둘**이다. 그 둘을 채우는 얇은 층이 `src/platform/windows/win32_text.zig`다:
+
+| 계약 | 메서드 | 구현 |
+|---|---|---|
+| 셰이퍼 | `shape(DrawCell) ShapeResult` | `Shaper` — 코드포인트를 face·글리프로 고른다 |
+| 래스터라이저 | `rasterize(GlyphRasterRequest) GlyphRasterResult` | `NeutralRasterizer` — 그 결정으로 픽셀을 만든다 |
+
+DirectWrite 자체는 §2e(`dwrite_font.zig`)가 안다. 그렇게 갈라 두면 그 파일이 렌더러를 모르고(픽셀만 안다),
+이 파일이 DirectWrite를 모른다(계약만 안다).
+
+**`font_id` 매핑을 한 곳이 소유한다.** 셰이퍼가 `font_id`·`glyph_id`를 정하고 래스터라이저가 그 값을 받는다.
+래스터라이저가 코드포인트로 **다시 풀면** 두 결정이 갈릴 수 있고, 증상은 "글자가 이상한 폰트로 나온다"로만
+보인다. 그래서 `fontIdForFace`/`faceIndexFromFontId`가 같은 파일에 있고 순수 함수라 두 방향이 맞물리는지
+테스트된다. 합성 글리프는 face가 아니라 코드포인트가 정체이므로 **겹치지 않는 번호**(1)를 받고, face는 2부터
+센다 — 아틀라스 캐시 키가 둘을 갈라야 한다.
+
+**합성이 먼저라는 순서를 두 곳이 똑같이 지킨다.** 셰이퍼도 래스터라이저도 `isSynthesizedCodepoint` /
+`synthesizeGlyph`를 먼저 본다. 한쪽만 지키면 "셰이퍼는 합성이라 했는데 래스터라이저는 폰트로 그린다"가 된다.
+
+#### 조립 코드를 복사하지 않는다 — 중립 이음매를 한 줄 늘렸다
+
+플랫폼 호스트가 자기 래스터라이저를 쓰려면 `host.buildFrameAfterDrain`에 그 값을 넘길 자리가 필요했다.
+그 함수 본문에는 **코어 락 규율**(`io-render-threading.md` — 코어 읽기는 락 아래, shaping은 락 밖)이 있어,
+복사하면 규율이 두 곳으로 갈리고 한쪽만 고쳐지는 순간 조용히 깨진다. 그래서 W7.2c는 중립 레이어에
+`host.buildFrameAfterDrainWithRasterizer`를 추가했고, 기존 함수는 그것을 `FakeGlyphRasterizer`로 부른다
+(동작 무변). 프레임 조립은 여전히 `host.zig` 한 곳이 소유한다.
+
+Windows 프레임 빌더(`win32_terminal.zig`)는 중립 `FrameLoop.tickWithFrameBuilder`에 꽂히는 값일 뿐이다 —
+macOS `AppSession`이 CoreText 빌더를 꽂는 것과 같은 분담이다.
+
+#### 판정은 셋을 갈라 세는 것이다
+
+`maru win32-frame-smoke`는 **창을 띄우지 않는다.** §2a가 걸어 둔 질문("중립 렌더러 계약이 Metal 한 구현에만
+맞춰져 있지 않은가")의 답은 그림이 아니라 **계약이 받아들이는가**로 나온다. 실측:
+
+```text
+maru.win32-frame-smoke.v1
+font_family=Cascadia Mono
+cell_px=11x21
+frames_built=45
+glyph_quads=86400
+atlas_uploads=39
+upload_non_clear_pixels=1881
+fallback_glyphs=0  replacement_glyphs=0  raster_skipped=0
+atlas_entries=39
+```
+
+`upload_non_clear_pixels`가 판정이다 — 슬롯을 39개 올렸는데 덮인 픽셀이 0이면 글자가 하나도 안 그려진
+것이고, 슬롯 수만 세면 그것을 못 잡는다. W7.2b·W7.3에서 같은 함정을 두 번 겪었다.
+
+**그래서 §2a의 답은 예다.** 중립 계약은 Metal 한 구현에 맞춰져 있지 않았다 — 셰이퍼·래스터라이저 계약을
+Windows 값으로 채우자 프레임이 그대로 섰고, 고쳐야 했던 것은 계약이 아니라 이음매 한 줄(래스터라이저를
+넘길 자리)이었다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

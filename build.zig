@@ -254,6 +254,13 @@ pub fn build(b: *std.Build) void {
         dwrite_text_smoke_cmd.step.dependOn(b.getInstallStep());
         dwrite_text_smoke_cmd.addArg("dwrite-text-smoke");
         dwrite_text_smoke_step.dependOn(&dwrite_text_smoke_cmd.step);
+
+        // W7.2c-1은 창이 없다 — 실제 셸을 띄우므로 `check`에는 넣지 않는다(dotfile·프롬프트 영향).
+        const win32_frame_smoke_step = b.step("win32-frame-smoke", "Run a live PTY through the Windows shaper and DirectWrite rasterizer into a neutral RenderFrame");
+        const win32_frame_smoke_cmd = b.addRunArtifact(exe);
+        win32_frame_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_frame_smoke_cmd.addArg("win32-frame-smoke");
+        win32_frame_smoke_step.dependOn(&win32_frame_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

@@ -42459,11 +42459,17 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0); // 탭 down → arm
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
-    session.mouse(2, 333, 222, 0, 0); // 드래그
+    // **자기 탭 바 안에서 움직이는 동안은 고스트가 없다** — 그 구간은 재정렬이고(tabDropTarget도 자기 바를
+    // 재정렬로 돌린다), 사이드바 카드처럼 탭이 제자리에서 밀리는 것으로 보여야 한다.
+    session.mouse(2, @floatFromInt(pb.tabs.x + pb.tabs.w / 2), @floatFromInt(pb.full.y + 1), 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab)); // 제스처는 살아 있다
+    try std.testing.expect(testBuildFloatingTabFrame(session, builder, &built) == null);
+
+    session.mouse(2, 333, 222, 0, 0); // 바를 벗어나 드래그
     try std.testing.expectEqual(@as(f64, 333), session.pointer_gesture_owner.terminal_tab.x);
     try std.testing.expectEqual(@as(f64, 222), session.pointer_gesture_owner.terminal_tab.y);
 
-    // 드래그 중엔 floating 탭 frame이 빌드된다(커서 중심에 박스).
+    // 바를 벗어나면 floating 탭 frame이 빌드된다(커서 중심에 박스).
     const pf = testBuildFloatingTabFrame(session, builder, &built);
     try std.testing.expect(pf != null);
     try std.testing.expect(pf.?.origin_x < 333); // 박스가 커서 좌측으로 센터됨(폭/2 만큼)

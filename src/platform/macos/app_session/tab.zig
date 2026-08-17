@@ -314,6 +314,20 @@ pub fn dropTabAt(self: *AppSession, x_px: f64, y_px: f64) void {
     }
 }
 
+/// 드래그 좌표가 **그 탭이 원래 있던 pane 의 탭 바** 안인가. `tabDropTarget` 의 "자기 바 = 재정렬"
+/// 판정과 같은 기하를 쓴다 — 두 곳이 갈리면 고스트가 뜬 채로 재정렬되거나, 분리 중인데 고스트가 없다.
+fn dragIsOverOwnTabBar(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(self.allocator);
+    activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return false;
+    for (leaf_rects.items) |lr| {
+        if (lr.leaf != pane) continue;
+        const bar = pane_ops.paneBarRect(self, lr.rect) orelse return false;
+        return layout_math.pointInRect(x_px, y_px, bar);
+    }
+    return false;
+}
+
 /// 탭 드래그 중이면 끌리는 Term의 제목을 담은 'floating 탭'(박스 + 제목) frame을 만들어 PaneFrame으로 돌려준다
 /// (커서 중심에 배치). built_frames가 소유(deinit)하고, 반환 PaneFrame은 호출자가 pane_frames '맨 뒤'(맨 위)에
 /// 넣는다. 드래그 중이 아니거나 메트릭/제목을 못 구하면 null. macOS 렌더 패스(CoreText)에서만 부른다.
@@ -331,6 +345,12 @@ pub fn buildFloatingTabDrawListAndPlacement(self: *AppSession) ?struct { dl: ren
         .terminal_tab => |drag| {
             const pane = drag.pane;
             if (drag.index >= pane.terms.items.len) return null;
+            // **자기 탭 바 위에서는 고스트를 내지 않는다.** 그 구간은 드롭이 아니라 재정렬이고
+            // (`tabDropTarget` 이 같은 판정으로 자기 바를 재정렬로 돌린다), 화면도 그렇게 보여야 한다 —
+            // 탭이 제자리에서 밀리다가 **바를 벗어나는 순간** 분리된 고스트가 커서에 붙는 편이
+            // 사이드바 카드 드래그와 일관된다(사용자 요청 2026-08-18: "같은 팬 안에서는 왼쪽 탭처럼
+            // 이동되다가 벗어나면 분리"). 재정렬 미리보기는 `tab_drag_preview` 가 이미 소유한다.
+            if (dragIsOverOwnTabBar(self, pane, drag.x, drag.y)) return null;
             // 드래그 미리보기 라벨도 탭과 같은 해석(rename custom_name 우선). 탭바와 floating 미리보기가 어긋나지 않게.
             title = termLabel(pane.terms.items[drag.index]);
             drag_x = drag.x;

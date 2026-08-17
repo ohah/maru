@@ -272,7 +272,11 @@ Node = leaf(Pane)
   그 방향으로 새 split이 생긴다(`moveTermToNewSplit`: Term을 새 pane에 담아 `replaceLeaf(target → split{...})`, 소스가
   비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그
   중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보이고,
-  끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
+  끌리는 탭은 **자기 탭 바를 벗어난 뒤부터** **floating 탭 미리보기**(박스+제목)가 커서를 따라간다
+  (`buildFloatingTabFrame`, 맨 위 frame). 자기 바 안에서 움직이는 동안은 고스트가 없고 **탭이 제자리에서
+  밀리는 live reorder만** 보인다 — 그 구간은 드롭이 아니라 재정렬이고(`tabDropTarget`도 자기 바를 재정렬로
+  돌린다), 고스트 없는 사이드바 카드 드래그와 같은 손맛이어야 한다(사용자 요청 2026-08-18). 두 판정은
+  같은 기하(`paneBarRect`)를 읽는다 — 갈리면 "고스트가 뜬 채로 재정렬" 또는 "분리 중인데 고스트 없음"이 된다.
   **도메인 경계**: `tab_drag_*`는 `termRect()` 안의 terminal pane tree만 target으로 탐색한다. 오른쪽/하단 파일 도크와
   terminal↔dock outer divider는 drop target이 아니며, 그 위에서는 하이라이트를 지우고 mouse-up을 no-op으로 끝낸다.
   반대로 파일 탭도 terminal pane으로 들어오지 않는다. 파일 도크 내부 재정렬·그룹 이동·split 계약은

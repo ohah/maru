@@ -470,7 +470,11 @@ pub const inventory = [_]Proof{
     // ②b 적대적 3회차: "변경 사항 없음"을 스크롤 영역 위 겹쳐 그리던 것을 **목록 항목**으로 내리면서
     // 이 파일의 해당 테스트가 새 계약(항목 4개·`.notice`)을 본다. count는 2 그대로다 — 테스트 본문만
     // 바뀌고 반사 접근·Client 구성은 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "abce788ad7e26aa706e1d1f5e8d9bb1d5d5d661ed601a44354545f3da02fd56f" },
+    // 도크 위 더블·트리플 클릭이 터미널 `select_word`/`select_line`으로 새던 것을 막는 가드와 그 재현
+    // 테스트가 붙어 digest가 움직인다(2026-08-17 사용자 제보 — "도크의 클릭 이벤트가 안 되는 영역을 누르면
+    // 터미널 블록 이벤트가 잡힌다"). up·move 의 도크 판정 rect 를 down 과 맞춘 것(`tree_content` → `dock`)도
+    // 같은 커밋이다. count는 2 그대로다 — 반사 접근이나 Client 구성은 건드리지 않고 포인터 라우팅만 바꿨다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b1d2e018a5187b80d37e3fd9957897f47f4ddc080d79f43ac444819d91c25db9" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

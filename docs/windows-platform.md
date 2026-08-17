@@ -401,13 +401,21 @@ ADE의 핵심인 "이 pane에서 claude/codex가 도는가" 판정이다. macOS�
 
 ## 4. ConPTY 백엔드
 
-`src/pty/session.zig`의 `UnsupportedPtySession`이 명세다. 17개 표면 중 **13개가 필수**이고, 4개는 초기에
-빈 값으로 두어도 제품이 선다.
+**명세는 스텁이 아니라 "중립 레이어가 실제로 부르는 것의 합집합"이다.** 한때 이 절은
+`UnsupportedPtySession`을 명세로 삼고 "17개 중 13개 필수"라고 적었는데, 그 기준으로는 W7.0이 닫은 두
+결함이 **둘 다 안 잡혔다** — 스텁에도 같은 멤버가 없었기 때문이다. 기준을 바꿨다.
 
-| 필수 | `spawn` `close` `deinit` `readEvent` `readChunk` `waitIo` `writeInput` `writeInputNonBlocking` `signalWrite` `resize` `currentSize` `reapAfterEof` `reapIfExited` |
+| | |
 |---|---|
-| **보류 가능** | `resourceSamples` `foregroundProcessGroup` — Windows에 프로세스 그룹 개념이 없다 |
-| **§3.5·§3.6이 결정** | `processCwd` `foregroundProcessNames` |
+| **합집합**(중립 레이어가 `self.session.<name>`으로 부르는 것, 기계로 열거) | `childPid` `close` `commitPreparedOwnership` `deinit` `readChunk` `readEvent` `reapAfterEof` `reapIfExited` `resize` `revalidatePreparedOwnership` `signalWrite` `upgradeEligible` `waitIo` `writeInputNonBlocking` + `PreparedAdoption.materialize` |
+| **백엔드 셋 모두** 이 합집합을 만족해야 한다 | macOS · Windows · `UnsupportedPtySession`(그 밖 전부) |
+| **§3.5·§3.6이 결정**(거짓말하지 않는 스텁으로 둔다) | `processCwd` `foregroundProcessNames` `foregroundProcessGroup` `resourceSamples` |
+
+**합집합 밖은 흉내 내지 않는다.** macOS 백엔드에는 `prepareExact`·`validateInheritedMaster`·
+`MasterIdentity` 등이 더 있지만 그 소비자는 `platform/macos/session_host/**`뿐이라 다른 타깃에서는
+컴파일되지 않는다. 안 쓰이는 짝퉁을 넣으면 "표면이 맞다"는 착각만 주고, 정작 macOS가 쓰는 이름은 여전히
+없다 — W7.0이 처음에 `prepare`·`discard`·`revalidate`(중립 소비자 0개)를 넣고 `prepareExact`(실사용)를
+빠뜨려 그 함정을 그대로 밟았고, 코드 리뷰가 잡았다.
 
 구현은 `src/pty/windows.zig`이고, **OS 무관한 조립 규칙**(커맨드라인 인용·환경 블록 내용)은
 `src/pty/windows_spawn.zig`가 따로 가진다. 가른 이유는 후자가 모든 타깃에서 컴파일되어 **macOS·Linux CI에서도
@@ -418,7 +426,7 @@ ADE의 핵심인 "이 pane에서 claude/codex가 도는가" 판정이다. macOS�
 없다. 되물을 이유도 없다 — pseudoconsole 크기를 바꾸는 주체는 우리뿐이고(자식은 `mode con`으로 읽기만 한다),
 우리가 넘긴 COORD가 자식에게 그대로 간다는 것은 §6에서 확인했다. 그래서 마지막으로 세운 값을 돌려준다.
 
-**W7이 먼저 풀어야 했던 표면 두 가지 — 닫았다(W7.0).** `UnsupportedPtySession`이 "표면 명세"이지만, app
+**중립 레이어가 부르는데 백엔드가 안 가진 표면은 없다.** 한때 둘이 있었고 지금은 없다. `UnsupportedPtySession`이 "표면 명세"이지만, app
 레이어는 그보다 **넓은 집합**을 부른다. 그 차이가 Windows에서 컴파일되지 않아 조용히 잠복해 있었다.
 
 | 무엇 | 무엇이 깨졌나(실측) | 어떻게 닫았나 |
@@ -433,9 +441,19 @@ Windows로 옮길 때 함께 정한다. 지금 조용히 되는 척하면 이식
 
 **표면 대조는 스텁이 아니라 "app 레이어가 실제로 부르는 것의 합집합"을 기준으로 해야 한다** — 둘 다
 `UnsupportedPtySession`과의 대조로는 안 잡혔다(그 스텁에도 같은 멤버가 없다). 그래서 그 합집합을
-`app/live_pty.zig`의 테스트 *"중립 레이어가 요구하는 PTY 표면이 두 백엔드에 다 있다"* 가 **컴파일 시점에**
-고정한다 — 참조만 해도 의미 분석이 도므로, CI에 Windows 러너가 없어도 `zig build test -Dtarget=…`가
-계약을 지킨다. 대조군으로 별칭을 되돌리면 정확히 그 자리에서 깨진다 — POSIX 갈래를 깨 보면 `live_pty.zig`뿐 아니라
+`app/live_pty.zig`의 테스트 *"중립 레이어가 요구하는 PTY 표면이 세 백엔드에 다 있다"* 가 **컴파일 시점에**
+고정하고, `zig build check-targets`가 그것을 세 타깃(macOS·Linux·Windows)으로 **컴파일만** 해 본다.
+
+> **`zig build test -Dtarget=…`는 게이트가 못 된다.** 그 명령은 컴파일 뒤 산출물을 **실행**하려 하고 외래
+> 타깃 바이너리는 호스트에서 못 돈다 — 실측: 모든 컴파일이 깨끗해도 exit 1이다. 한동안 이 문서가 그것을
+> 게이트라고 적었는데, 실제로는 사람이 컴파일 오류 줄만 눈으로 거른 것이었고 **CI에는 그 잡이 아예
+> 없었다**(코드 리뷰가 잡았다). 그래서 Run을 만들지 않는 `check-targets`를 새로 두고 `mise run check`의
+> 의존에 넣었다 — 이제 required check가 실제로 돌린다.
+
+**참조가 요점이지 타입 조회가 아니다.** `@typeInfo(...).return_type` 조회도 `@hasDecl`도 선언만 보고
+**본문을 분석하지 않는다**(실측: 반환 타입이 틀린 함수도, 본문이 `@compileError`인 함수도 통과한다).
+그런데 원래 결함은 **본문 오류**였다. 그래서 테스트는 함수 값을 `_ = &f`로 실제 참조한다 — `_ = f`는
+분석을 강제하지 못한다. 대조군으로 별칭을 되돌리면 정확히 그 자리에서 깨진다 — POSIX 갈래를 깨 보면 `live_pty.zig`뿐 아니라
 `session_host/runtime_manager.zig:362`까지 컴파일 오류가 난다. **"회귀 0"이 말뿐이 아니라 강제된다**는 뜻이다.
 
 **백엔드는 셋이다** — macOS·Windows·`UnsupportedPtySession`(그 밖 전부). 합집합은 셋 **모두**가
@@ -1232,6 +1250,12 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
   "인스턴스 없음"으로 graceful하게 빠지는 것으로 충분하다.
 - ~~**hover 밑줄에도 존재검증을 둘 것인가**~~ → **둔다(결정 완료, §5.1a).** 재야 할 것으로 적어 둔 두 비용을
   실측했고 둘 다 예산 안이었다. 밑줄과 클릭이 이제 같은 술어를 쓴다.
+- **exec-restore(라이브 host 업그레이드)를 Windows에서 어떻게 할 것인가.** macOS는 host가 자기 자신을
+  `execve`로 갈아끼우며 상속된 PTY master **fd**를 새 이미지가 주워 계속 쓴다(`PreparedAdoption`). Windows에는
+  `execve`가 없고(자기 교체가 아니라 새 프로세스 생성), 핸들 상속(`bInheritHandles`)은 되지만 ConPTY `HPCON`의
+  소유 관계가 다르다. 지금은 **막되 시끄럽게** 두었다(§4) — `upgradeEligible`이 항상 false이고 `materialize`는
+  `@panic`이다. 세션 호스트를 Windows로 옮길 때 함께 정한다. **`ChildPid`의 부호 규약도 그때 같이 정한다** —
+  POSIX 소비자는 `-1`을 모호함 센티널로 쓰는데 Windows 갈래(`u32`)에는 그 관례가 없다(`pty/types.zig` doc).
 - **배포**. 코드 서명·인스톨러·업데이트 경로는 [배포·업데이트 전략](distribution.md)이 macOS 기준으로
   쓰여 있다.
 

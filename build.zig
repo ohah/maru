@@ -671,6 +671,35 @@ pub fn build(b: *std.Build) void {
     });
     const run_core_tests = b.addRunArtifact(core_tests);
 
+    // ── 크로스 타깃 **컴파일 전용** 게이트 (`zig build check-targets`) ──────────────────────────
+    //
+    // **왜 `zig build test -Dtarget=…`가 아닌가.** 그 명령은 컴파일 뒤 산출물을 **실행**하려 하고,
+    // 외래 타깃 바이너리는 호스트에서 못 돈다 — 실측: Windows 호스트에서 `-Dtarget=x86_64-linux`는
+    // 모든 컴파일이 깨끗해도 exit 1이다(`unable to execute binaries from the target`). 즉 그것을 게이트로
+    // 걸면 계약이 성립하든 말든 **항상 빨갛다.** 한동안 문서가 그걸 게이트라고 적었는데, 실제로는 사람이
+    // 컴파일 오류 줄만 눈으로 거른 것이었다(코드 리뷰가 잡았다).
+    //
+    // 그래서 여기서는 **Run을 만들지 않는다.** Compile 스텝에만 의존하면 Zig가 바이너리를 내는 데까지만
+    // 가고 실행하지 않는다 — 그것이 우리가 원하는 것이다. 중립 레이어가 세 백엔드(macOS·Windows·
+    // Unsupported) 모두에서 **컴파일되는지**를 CI에 Windows/macOS 러너 없이 지킨다(계약 §4).
+    const check_targets_step = b.step("check-targets", "다른 OS 타깃으로 컴파일만 해 본다(실행 없음)");
+    for ([_][]const u8{ "aarch64-macos", "x86_64-linux", "x86_64-windows" }) |triple| {
+        const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch @panic("bad triple");
+        const cross_target = b.resolveTargetQuery(query);
+        const cross_mod = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        });
+        cross_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+        cross_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
+        const cross_tests = addProjectTest(b, .{ .root_module = cross_mod });
+        // **Run이 없다** — 컴파일 산출물에만 의존한다.
+        check_targets_step.dependOn(&cross_tests.step);
+    }
+
     const exe_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
     });

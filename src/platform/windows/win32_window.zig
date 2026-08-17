@@ -251,7 +251,12 @@ pub const Window = struct {
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("MaruWindowClass");
 
-    pub fn create(allocator: std.mem.Allocator, title_utf16: [*:0]const u16, width: i32, height: i32) Error!*Window {
+    /// `window_width`·`window_height`는 **창 외곽**(프레임 포함) 픽셀이다 — `CreateWindowExW`의 규약이
+    /// 그렇다. 클라이언트는 그보다 작다(실측: 960×600 → 944×561). 셀 격자로 크기를 정하려면
+    /// (`cols * cell_w` 를 클라이언트로 만들려면) `AdjustWindowRectEx`로 프레임을 더해 넘겨야 하는데,
+    /// 그 계산은 셀 메트릭을 아는 쪽 몫이라 여기 두지 않는다 — W7.3(DirectWrite)이 그 값을 갖는다.
+    /// 지금은 그 호출자가 없으므로 정책을 발명하지 않고 규약만 이름과 문서로 못 박는다.
+    pub fn create(allocator: std.mem.Allocator, title_utf16: [*:0]const u16, window_width: i32, window_height: i32) Error!*Window {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         const hinstance = GetModuleHandleW(null) orelse {
             last_create_error = GetLastError();
@@ -298,8 +303,8 @@ pub const Window = struct {
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            width,
-            height,
+            window_width,
+            window_height,
             null,
             null,
             hinstance,

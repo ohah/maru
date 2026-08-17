@@ -110,6 +110,8 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("dxgi", .{});
         // W7.3: DirectWrite 글리프 래스터라이저.
         exe.root_module.linkSystemLibrary("dwrite", .{});
+        // W7.4c: IME 조합 문자열(`ImmGetCompositionStringW`).
+        exe.root_module.linkSystemLibrary("imm32", .{});
     }
 
     b.installArtifact(exe);

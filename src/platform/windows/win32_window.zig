@@ -58,6 +58,10 @@ pub const WindowEvent = union(enum) {
     /// 키가 눌렸다. **중립 `KeyEvent` 그대로 준다** — 창이 키바인딩 정책을 알지 않는다. 호출자가
     /// `FrameLoop.handleKeyEvent`에 넘기면 그쪽이 앱 동작이냐 셸 입력이냐를 정한다(W7.4a).
     key: terminal.input.KeyEvent,
+    /// IME 조합 문자열이 바뀌었다(한글 `ㅎ`→`하`→`한`). **바이트를 이벤트에 싣지 않는다** — 조합은
+    /// "가장 최근 상태"만 뜻이 있고(중간 상태를 큐에 쌓아 재생할 이유가 없다), 슬라이스를 실으면
+    /// 다음 조합이 그 버퍼를 덮어 이미 넘긴 이벤트가 무효화된다. 호출자가 `preeditText()`를 읽는다.
+    preedit_changed,
 };
 
 /// 클라이언트 영역 픽셀 크기. **이름을 준다** — 익명 구조체로 두면 호출자가 `orelse .{...}`로 기본값을
@@ -159,6 +163,13 @@ const VK_MENU: i32 = 0x12;
 /// `MapVirtualKeyW`의 `MAPVK_VK_TO_CHAR`. VK 를 **현재 레이아웃의** 문자로 바꾼다 — OEM 키(`,` `=` `[`)는
 /// VK 값이 문자와 다르므로 이 변환이 필요하다(직접 표를 만들면 레이아웃마다 틀린다).
 const MAPVK_VK_TO_CHAR: UINT = 2;
+const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
+const WM_IME_COMPOSITION: UINT = 0x010F;
+/// `ImmGetCompositionStringW`의 인덱스. `COMPSTR`은 **조합 중** 문자열(미리보기), `RESULTSTR`은 확정된
+/// 문자열이다. 우리는 전자만 읽고 후자는 `DefWindowProcW`가 `WM_CHAR`로 만들게 둔다 — 그러면 W7.4a의
+/// 문자 경로가 그대로 받고, 확정 처리를 두 곳에 두지 않는다.
+const GCS_COMPSTR: UINT = 0x0008;
 const WM_CLOSE: UINT = 0x0010;
 const WM_QUIT: UINT = 0x0012;
 const WM_PAINT: UINT = 0x000F;
@@ -190,6 +201,10 @@ extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(.winapi) isize;
 /// 조합 판정은 그 시점이어야 맞는다.
 extern "user32" fn GetKeyState(i32) callconv(.winapi) i16;
 extern "user32" fn MapVirtualKeyW(UINT, UINT) callconv(.winapi) UINT;
+extern "imm32" fn ImmGetContext(HWND) callconv(.winapi) ?*anyopaque;
+extern "imm32" fn ImmReleaseContext(HWND, *anyopaque) callconv(.winapi) i32;
+/// 버퍼가 `null`이면 필요한 **바이트 수**를 돌려준다(문자 수가 아니다 — UTF-16이라 2배다).
+extern "imm32" fn ImmGetCompositionStringW(*anyopaque, UINT, ?*anyopaque, UINT) callconv(.winapi) i32;
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(.winapi) ?HINSTANCE;
 /// **std의 것을 쓴다.** 직접 `extern`으로 선언하면 Zig가 사이에 끼우는 코드가 스레드 오류 값을 덮어
 /// 0으로 읽힐 수 있다(실측: 세 호출 지점에서 전부 0이 나왔다). std는 그 규약을 알고 있다.
@@ -276,6 +291,10 @@ pub const Window = struct {
     quit_requested: bool = false,
     /// WM_CHAR 로 먼저 온 UTF-16 상위 서로게이트. 짝이 오면 합쳐 코드포인트를 만든다(pushChar doc).
     pending_high_surrogate: ?u16 = null,
+    /// 현재 IME 조합 문자열(UTF-8). **가장 최근 상태만** 들고 있다 — 조합은 중간 단계를 재생할 이유가
+    /// 없다(`preedit_changed` doc). 고정 버퍼인 이유는 렌더 경로에 할당을 끼우지 않기 위해서다.
+    preedit_buf: [256]u8 = undefined,
+    preedit_len: usize = 0,
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("MaruWindowClass");
 
@@ -400,6 +419,40 @@ pub const Window = struct {
         self.events.push(self.allocator, ev);
     }
 
+    /// 지금 조합 중인 문자열(UTF-8). 조합이 없으면 빈 슬라이스다. **다음 `preedit_changed`까지 유효하다.**
+    pub fn preeditText(self: *const Window) []const u8 {
+        return self.preedit_buf[0..self.preedit_len];
+    }
+
+    /// `WM_IME_COMPOSITION`에서 조합 문자열을 읽어 UTF-8로 저장한다.
+    ///
+    /// **조합이 비어도 이벤트를 낸다** — 사용자가 조합을 지웠을 때(백스페이스로 `한`→`하`→빈 값)
+    /// 화면의 미리보기가 사라져야 하고, 그것을 알리는 신호가 이 이벤트뿐이다.
+    fn readComposition(self: *Window) void {
+        self.preedit_len = 0;
+        defer self.push(.preedit_changed);
+
+        const himc = ImmGetContext(self.hwnd) orelse return;
+        defer _ = ImmReleaseContext(self.hwnd, himc);
+
+        // 필요한 **바이트 수**를 먼저 묻는다(문자 수가 아니다).
+        const need = ImmGetCompositionStringW(himc, GCS_COMPSTR, null, 0);
+        if (need <= 0) return; // 0 = 조합 없음, 음수 = 오류. 둘 다 빈 미리보기다.
+        var wide: [128]u16 = undefined;
+        const want: usize = @intCast(need);
+        // 넘치면 **자른다.** 조합 문자열이 128 UTF-16 단위를 넘는 일은 사실상 없고, 잘려도 미리보기가
+        // 짧아질 뿐 확정 문자(`WM_CHAR` 경로)는 온전하다.
+        const bytes_to_read: UINT = @intCast(@min(want, wide.len * 2));
+        const got = ImmGetCompositionStringW(himc, GCS_COMPSTR, @ptrCast(&wide), bytes_to_read);
+        if (got <= 0) return;
+        const units: usize = @as(usize, @intCast(got)) / 2;
+        if (units == 0) return;
+
+        // 변환·잘림 규칙은 **순수 함수가 소유한다** — 그래야 `ImmGetCompositionStringW` 없이
+        // 단위/바이트 혼동과 서로게이트 처리가 모든 타깃에서 테스트된다.
+        self.preedit_len = win32_keys.compositionTextFromUtf16(wide[0..units], &self.preedit_buf);
+    }
+
     /// 눌린 모디파이어를 **메시지 처리 시점** 기준으로 읽는다(`GetKeyState` doc 참조).
     fn modifierState() struct { ctrl: bool, shift: bool, alt: bool } {
         // 최상위 비트가 "눌려 있다"다. 최하위 비트(토글 상태)를 보면 Caps Lock 처럼 잘못 읽는다.
@@ -507,6 +560,19 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
             // Alt+F4 밖의 조합도 삼켜진다. Alt+F4(창 닫기)는 사용자가 기대하는 동작이라 예외로 넘긴다.
             if (msg == WM_SYSKEYDOWN and wparam != 0x73) return 0; // 0x73 = VK_F4
             if (msg == WM_KEYDOWN) return 0;
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_IME_COMPOSITION => {
+            if (self) |w| w.readComposition();
+            // **`DefWindowProcW`에 넘긴다.** 확정 문자열(`GCS_RESULTSTR`)을 여기서 처리하지 않고 기본
+            // 처리가 `WM_CHAR`로 만들게 해야, W7.4a 의 문자 경로 하나가 확정을 받는다.
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_IME_ENDCOMPOSITION => {
+            if (self) |w| {
+                w.preedit_len = 0;
+                w.push(.preedit_changed);
+            }
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         WM_CHAR, WM_SYSCHAR => {

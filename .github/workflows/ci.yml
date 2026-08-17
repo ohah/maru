@@ -124,6 +124,9 @@ jobs:
   # 이 PR job에서 provider 파일 무변경 계약과 16,384-row/1,000-event 탐색기 artifact를 실행한다.
   # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos-debug·-releasefast)
   # 별도 job이 병렬로 소유한다.
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -213,6 +216,9 @@ jobs:
   # 두 컨텍스트 pending으로 영구 BLOCKED된다(2026-08-03 PR #1823에서 실측). 이름을 리터럴로 고정하면
   # skip될 때도 그 이름 그대로 conclusion=skipped가 보고돼 branch protection이 통과로 본다.
   # 두 job의 유일한 차이는 `-Doptimize`다 — 한쪽을 고치면 다른 쪽도 같이 고친다.
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -254,6 +260,9 @@ jobs:
             zig-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=Debug
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save Zig cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -306,6 +315,9 @@ jobs:
             zig-${{ runner.os }}-sessionhost-releasefast-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=ReleaseFast
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save Zig cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -359,6 +371,9 @@ jobs:
 
   # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -407,6 +422,9 @@ jobs:
   # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
   # Ghostty libghostty-vt 오라클은 Zig 0.15.2 + 무거운 Ghostty 빌드가 필요해
   # 기본 CI에서 제외한다(로컬에서 `mise run oracle-ghostty`).
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -462,6 +480,9 @@ jobs:
           path: tests/artifacts/**
           if-no-files-found: warn
           retention-days: 14
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

@@ -135,6 +135,13 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 
 ## CI 릴리스(GitHub Actions)
 
+**태그를 푸시하기 전에 `gh workflow run ci.yml`을 한 번 돌린다.** `session host macOS (ReleaseFast)`가
+`workflow_dispatch`에서만 도는 잡이고(2026-08-17 — PR → main push → 릴리스 전으로 시점을 옮겼다),
+출하 `.dmg`가 ReleaseFast이므로 **그 실행만이 출하 체제를 검증한다**. 안전 검사와
+`std.debug.assert`가 꺼진 모드에서 session host가 처음 깨지는 것을 릴리스 후에 발견하지 않기 위한
+단계다. 근거와 대가는 `.github/workflows/ci.yml`의 그 job 주석과
+[필수 CI 체크](performance-budget.md#필수-ci-체크)가 소유한다.
+
 `.github/workflows/release.yml`로 구현돼 있다. 태그 푸시(`v*`) 또는 수동 실행(workflow_dispatch) 시:
 
 1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비

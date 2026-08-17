@@ -8275,8 +8275,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         } else {
             targetDesc = "surface #\(target)"
         }
-        let scopeDesc = scope == 1 ? "쿠키·스토리지" : "제어"
-        return "pane #\(pane) → \(targetDesc) · \(scopeDesc) 취소"
+        // **영어 고정**(계약 §2) — 메뉴바는 찾아서 실행하는 자리라 번역하지 않는다. 이 항목만 한국어면
+        // 같은 메뉴 안에서 언어가 섞인다(다른 항목은 전부 영어다).
+        let scopeDesc = scope == 1 ? "cookies & storage" : "control"
+        return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

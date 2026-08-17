@@ -569,6 +569,13 @@ pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?ty
     return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
 }
 
+/// 절대 좌표 두 점이 만드는 밑줄 범위를 현재 뷰포트로 클립한다(밖이면 null). `urlSpanAtAbs`가 토큰
+/// 경계를 **재계산**하는 것과 달리, 이건 호출자가 이미 정한 범위를 그대로 그린다 — 공백 든 경로처럼
+/// 존재검증으로 늘린 범위는 재계산으로 복원할 수 없기 때문이다(매 프레임 stat을 할 수도 없다).
+pub fn spanBetweenAbs(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint) ?types.SelectionSpan {
+    return clipAbsSpanToViewport(self, start, end, false);
+}
+
 /// 추출한 링크: raw 텍스트(호출자 free) + 종류. file_path는 raw 경로 텍스트(`:line:col` 포함 가능)이고
 /// resolve/존재검증은 core.zig facade(extractUrlAt)가 한다. url은 OSC 8 URI나 스킴 URL을 그대로 담는다.
 pub const ExtractedLink = struct { text: []u8, kind: LinkKind };
@@ -583,8 +590,27 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
         return .{ .text = try allocator.dupe(u8, uri), .kind = .url };
     }
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
+    return extractFromBounds(self, allocator, bounds, scopes);
+}
+
+/// `bounds` 범위의 화면 텍스트를 모아 `linkSpanInWord`로 분류한다(없으면 null, 호출자 free).
+/// `extractUrlAt`의 본체이자, **공백 든 경로 확장**(core.zig)이 늘린 bounds로 다시 부르는 진입점이다 —
+/// 확장은 존재검증이 필요해 core가 하고, 여기는 주어진 범위를 읽어 분류만 한다(순수 유지).
+pub fn extractFromBounds(self: *const TerminalCore, allocator: std.mem.Allocator, bounds: WordBounds, scopes: LinkScopes) !?ExtractedLink {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    try appendBoundsText(self, &out, allocator, bounds);
+    const span = linkSpanInWord(out.items, scopes) orelse {
+        out.deinit(allocator);
+        return null;
+    };
+    const text = try allocator.dupe(u8, out.items[span.start..span.end]);
+    out.deinit(allocator);
+    return .{ .text = text, .kind = span.kind };
+}
+
+/// bounds가 덮는 셀들의 UTF-8을 `out`에 잇는다(soft-wrap 포함).
+fn appendBoundsText(self: *const TerminalCore, out: *std.ArrayList(u8), allocator: std.mem.Allocator, bounds: WordBounds) !void {
     var abs = bounds.start.row;
     while (abs <= bounds.end.row) : (abs += 1) {
         const row_cells = screen.absRow(self, abs) orelse break;
@@ -595,15 +621,72 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
         if (abs != bounds.end.row and screen.absRowWrapped(self, abs)) {
             while (to > from and isBoundarySpace(row_cells[to - 1])) to -= 1;
         }
-        try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
+        try appendRowUtf8(out, allocator, row_cells, self.grapheme_store.items, from, to);
     }
-    const span = linkSpanInWord(out.items, scopes) orelse {
-        out.deinit(allocator);
-        return null;
-    };
-    const text = try allocator.dupe(u8, out.items[span.start..span.end]);
-    out.deinit(allocator);
-    return .{ .text = text, .kind = span.kind };
+}
+
+/// 이 셀이 OSC 8 명시 하이퍼링크에 속하는가. 밑줄 범위를 누가 정하는지 가르는 데 쓴다 — 명시 링크는
+/// 셀의 link id가 범위를 정하므로(`linkBoundsAt`) 토큰 경계로 덮어쓰면 안 된다.
+pub fn cellHasOsc8Link(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
+    return cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0;
+}
+
+/// 클릭 셀이 속한 토큰의 경계(soft-wrap 포함). 공백 위치면 null. **공백 든 경로 확장의 출발점**이다 —
+/// core가 이 bounds에서 시작해 `extendEndOneSegment`로 늘려 가며 존재검증을 한다.
+pub fn wordBoundsAtPublic(self: *const TerminalCore, viewport_row: u16, col: u16) ?WordBounds {
+    return wordBoundsAt(self, viewport_row, col);
+}
+
+/// `end` 바로 뒤의 **공백 run 하나 + 비공백 run 하나**를 흡수한 새 end(더 붙일 것이 없으면 null).
+/// soft-wrap을 넘어 잇는다 — `C:\Program Files\…`가 줄 끝에서 접혀도 이어야 하기 때문이다.
+///
+/// **여기는 순수하다.** 어디까지 늘릴지는 존재검증을 하는 core가 정한다("규칙이 가르지 못하는 것을 존재가
+/// 가른다" — `looksLikeBareRelativeFor`와 같은 분담).
+pub fn extendEndOneSegment(self: *const TerminalCore, end: types.SelectionPoint) ?types.SelectionPoint {
+    var row = end.row;
+    var col: usize = @as(usize, end.col) + 1; // end는 포함 좌표라 그 다음 칸부터
+    var saw_space = false;
+    while (true) {
+        const cells = screen.absRow(self, row) orelse return null;
+        while (col < cells.len) : (col += 1) {
+            const is_space = isBoundarySpace(cells[col]);
+            if (!saw_space) {
+                if (!is_space) return null; // end 다음이 공백이 아니면 애초에 한 토큰이었다(있을 수 없음)
+                saw_space = true;
+                continue;
+            }
+            if (is_space) continue; // 공백이 여러 칸일 수 있다
+            // 비공백 run을 찾았다 — 그 run의 끝까지 간다.
+            var last = col;
+            while (last + 1 < cells.len and !isBoundarySpace(cells[last + 1])) last += 1;
+            // run이 행 끝에 닿고 soft-wrap이면 다음 행으로 이어진다.
+            if (last + 1 >= cells.len and screen.absRowWrapped(self, row)) {
+                const next = screen.absRow(self, row + 1) orelse return .{ .row = row, .col = @intCast(last) };
+                if (next.len > 0 and !isBoundarySpace(next[0])) {
+                    var r2 = row + 1;
+                    var l2: usize = 0;
+                    while (true) {
+                        const c2 = screen.absRow(self, r2) orelse break;
+                        l2 = 0;
+                        while (l2 + 1 < c2.len and !isBoundarySpace(c2[l2 + 1])) l2 += 1;
+                        if (l2 + 1 >= c2.len and screen.absRowWrapped(self, r2)) {
+                            const n2 = screen.absRow(self, r2 + 1) orelse break;
+                            if (n2.len == 0 or isBoundarySpace(n2[0])) break;
+                            r2 += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    return .{ .row = r2, .col = @intCast(l2) };
+                }
+            }
+            return .{ .row = row, .col = @intCast(last) };
+        }
+        // 행이 끝났다 — soft-wrap이면 다음 행에서 계속(공백만 있다가 끝난 경우 포함).
+        if (!screen.absRowWrapped(self, row)) return null;
+        row += 1;
+        col = 0;
+    }
 }
 
 /// 클릭 셀이 속한 단어가 링크인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려 extractUrlAt의

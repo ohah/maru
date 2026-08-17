@@ -19,6 +19,28 @@ const KittyImageStorage = kitty.KittyImageStorage;
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
+/// hover가 밑줄을 그릴 링크: 시작 anchor와 (공백 확장까지 반영한) 끝. `end`가 null이면 밑줄은 예전대로
+/// anchor에서 토큰 경계까지 계산한다(OSC 8 명시 링크 등 토큰 경계를 못 잡는 경우).
+pub const HoverLink = struct { anchor: types.SelectionPoint, end: ?types.SelectionPoint };
+
+/// 열 수 있는 링크: 열 대상 텍스트(호출자 소유)와 그것이 차지한 **화면 범위**. 범위는 밑줄이 쓴다 —
+/// 공백 든 경로는 토큰보다 넓어서, 밑줄을 토큰만큼만 그리면 "밑줄 밖을 눌러야 열리는" 상태가 된다.
+pub const OpenableLink = struct {
+    text: []u8,
+    kind: selection.LinkKind,
+    /// OSC 8 명시 링크처럼 토큰 경계를 못 잡는 경우 null(그때 밑줄은 예전대로 `urlSpanAtAbs`가 계산한다).
+    bounds: ?selection.WordBounds,
+};
+
+/// 공백 든 경로를 찾을 때 붙여 볼 세그먼트 상한. `C:\Program Files\Common Files\x.dll`이 2개,
+/// `/Users/John Smith/My Documents/a.txt`가 2개다 — 5면 현실 경로를 덮고, 최악 비용도 이동 간격의 2.4 %다.
+const max_space_segments: usize = 5;
+
+/// 연속으로 이만큼 실패하면 확장을 멈춘다. **1이면 안 된다** — 주 사례(`C:\Program Files\x.txt`)가
+/// 첫 물음(`C:\Program`)에서 실패하고 두 번째에서 성공하기 때문이다. 2면 그 사례를 살리면서 평범한
+/// 경로가 무는 헛 stat을 둘로 묶는다.
+const max_consecutive_misses: usize = 2;
+
 // 파일 존재검증의 Windows 갈래(`TerminalCore.pathExists`). CRT `_access`가 바이트를 ANSI 코드페이지로 읽어
 // 비-ASCII 경로를 놓치므로 Win32의 UTF-16 API를 직접 부른다 — 이유와 실측은 그 함수의 doc에.
 const invalid_file_attributes: u32 = 0xFFFF_FFFF;
@@ -1029,19 +1051,22 @@ pub const TerminalCore = struct {
         viewport_row: u16,
         col: u16,
         scopes: selection.LinkScopes,
-    ) !?types.SelectionPoint {
+    ) !?HoverLink {
         const anchor = selection.urlAnchorAt(self, viewport_row, col, scopes) orelse return null;
-        const ext = (try selection.extractUrlAt(self, allocator, viewport_row, col, scopes)) orelse return null;
-        defer allocator.free(ext.text);
-        if (ext.kind == .url) return anchor;
-        const abs = (self.resolveClickedPath(allocator, ext.text) catch null) orelse return null;
-        allocator.free(abs);
-        return anchor;
+        const link = (try self.openableLinkAt(allocator, viewport_row, col, scopes)) orelse return null;
+        allocator.free(link.text);
+        // 공백 든 경로는 토큰보다 넓다 — 밑줄이 그 끝까지 가야 "밑줄 보이는 곳 = 열리는 곳"이 성립한다.
+        return .{ .anchor = anchor, .end = if (link.bounds) |b| b.end else null };
     }
 
     /// anchor에서 시작하는 링크의 현재 뷰포트 밑줄 범위(종류 무관). 본문: selection.urlSpanAtAbs.
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
         return selection.urlSpanAtAbs(self, anchor);
+    }
+    /// 절대 좌표 두 점 사이의 밑줄 범위(뷰포트 클립). 본문: selection.spanBetweenAbs.
+    /// hover가 공백 확장으로 정해 둔 범위를 매 프레임 그릴 때 쓴다(재계산하지 않는다).
+    pub fn spanBetweenAbs(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint) ?types.SelectionSpan {
+        return selection.spanBetweenAbs(self, start, end);
     }
     /// 현재 뷰포트에 보이는 링크 전체(자동 감지 + OSC 8). 본문: selection.collectViewportLinks. 원격(host-backed)
     /// 세션에서 host가 client에 실어 보낼 목록을 만드는 데 쓴다(docs/link-detection.md §원격(host-backed) 세션).
@@ -1051,12 +1076,75 @@ pub const TerminalCore = struct {
     /// Cmd+클릭 위치의 링크 추출 + file_path면 cwd/$HOME resolve·존재검증(호출자가 .text를 free). url(스킴·OSC 8)은
     /// 그대로, file_path는 존재하는 절대 경로(없으면 전체 null=일반 클릭). 분류는 selection, resolve는 resolveClickedPath.
     pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16, scopes: selection.LinkScopes) !?selection.ExtractedLink {
+        const r = (try self.openableLinkAt(allocator, viewport_row, col, scopes)) orelse return null;
+        return .{ .text = r.text, .kind = r.kind };
+    }
+
+    /// 열 수 있는 링크 하나 — 텍스트(호출자 소유)와 **화면 범위**를 함께 준다. 밑줄은 그 범위를 그린다.
+    ///
+    /// **공백 든 경로를 여기서 잡는다.** 토큰 모델은 공백을 경계로 보므로 `C:\Program Files\x.txt`가
+    /// `C:\Program`에서 잘리고, 잘린 것은 존재 게이트가 죽인다 — 즉 예전에는 공백 경로가 **전혀** 안 잡혔다
+    /// (실측). 규칙은 `bare_relative`를 열 때와 같은 것이다: **문법으로 못 가르니 존재로 가른다.** 토큰이
+    /// 그대로 실재하면 그것을 쓰고, 아니면 공백 세그먼트를 하나씩 붙여 다시 물어 **실재하는 가장 긴 것**을
+    /// 취한다. 산문은 저절로 멈춘다(`/tmp/a and then` 같은 경로가 없으므로).
+    ///
+    /// **상한이 있다**(`max_space_segments`). 없으면 화면 끝까지 stat을 반복한다. 실측(Windows,
+    /// `GetFileAttributesW` + UTF-16 변환 포함): 확장 1회당 ~40 µs이고 상한 5면 최악 ~200 µs — 120Hz 마우스
+    /// 이동 간격 8333 µs의 2.4 %다. **공백이 없는 흔한 경로는 확장을 아예 안 탄다**(첫 물음에서 실재하므로).
+    ///
+    /// URL은 확장하지 않는다 — 공백은 URL의 종결자이지 일부가 아니다.
+    pub fn openableLinkAt(
+        self: *const TerminalCore,
+        allocator: std.mem.Allocator,
+        viewport_row: u16,
+        col: u16,
+        scopes: selection.LinkScopes,
+    ) !?OpenableLink {
         const ext = (try selection.extractUrlAt(self, allocator, viewport_row, col, scopes)) orelse return null;
-        if (ext.kind == .url) return ext;
-        // file_path: raw 경로 텍스트를 절대 경로로 resolve하고 존재할 때만 연다(오탐·미존재 경로는 안 연다).
+        // **OSC 8 명시 링크는 bounds를 주지 않는다.** 그 링크의 보이는 텍스트는 공백을 품을 수 있고
+        // (`ESC]8;;uri ST My File ESC]8;; ST`), 그 범위는 셀의 link id가 정한다(`linkBoundsAt`) — 토큰
+        // 경계를 끝으로 실으면 밑줄이 첫 단어로 **줄어든다.** null을 주면 밑줄이 예전 경로(`urlSpanAtAbs`)를
+        // 쓰고, 그쪽이 link id를 먼저 본다.
+        if (selection.cellHasOsc8Link(self, viewport_row, col))
+            return .{ .text = ext.text, .kind = ext.kind, .bounds = null };
+        const base_bounds = selection.wordBoundsAtPublic(self, viewport_row, col);
+        if (ext.kind == .url) return .{ .text = ext.text, .kind = .url, .bounds = base_bounds };
         defer allocator.free(ext.text);
-        const abs = (self.resolveClickedPath(allocator, ext.text) catch null) orelse return null;
-        return .{ .text = abs, .kind = .file_path };
+
+        // 토큰에서 시작해 공백 세그먼트를 붙여 가며 **실재하는 가장 긴 것**을 찾는다.
+        //
+        // **토큰이 실재해도 멈추지 않는 이유**(적대적 검증에서 잡았다): 화면이 `.../Documents Backup`인데
+        // 토큰 `.../Documents`가 실재하면, 거기서 끊으면 **사용자가 보고 있는 것과 다른 것**을 연다. 그래서
+        // 실재하더라도 한 칸 더 물어본다. 대신 **연속 실패 2회**면 멈춘다 — 그것이 비용 상한이다.
+        var bounds = base_bounds orelse return null;
+        var best: ?OpenableLink = null;
+        errdefer if (best) |b| allocator.free(b.text);
+        if (self.resolveClickedPath(allocator, ext.text) catch null) |abs|
+            best = .{ .text = abs, .kind = .file_path, .bounds = bounds };
+
+        var seg: usize = 0;
+        var misses: usize = 0;
+        while (seg < max_space_segments and misses < max_consecutive_misses) : (seg += 1) {
+            const next_end = selection.extendEndOneSegment(self, bounds.end) orelse break;
+            bounds = .{ .start = bounds.start, .end = next_end };
+            const wider = (try selection.extractFromBounds(self, allocator, bounds, scopes)) orelse {
+                misses += 1;
+                continue;
+            };
+            defer allocator.free(wider.text);
+            if (wider.kind != .file_path) {
+                misses += 1;
+                continue;
+            }
+            const abs = (self.resolveClickedPath(allocator, wider.text) catch null) orelse {
+                misses += 1;
+                continue;
+            };
+            misses = 0;
+            if (best) |b| allocator.free(b.text);
+            best = .{ .text = abs, .kind = .file_path, .bounds = bounds };
+        }
+        return best;
     }
 
     /// file_path 링크 raw 텍스트(`:line:col` 포함 가능)를 절대 경로로 resolve하고, 존재하면 그 경로(호출자 소유)를,
@@ -5865,6 +5953,59 @@ test "hover와 클릭이 같은 답을 낸다 — 존재검증까지" {
 // (Win32 UTF-16으로는 전부 실재). 그래서 그 경로는 클릭해도 안 열리고 밑줄도 안 떴다. `pathExists`가
 // OS별로 갈라 그것을 닫았고, 이 테스트가 되돌아오는 것을 막는다. POSIX에서는 늘 성립하던 것이라
 // **두 OS 모두에서 도는 것**이 요점이다 — Windows 러너가 없으므로 macOS/Linux CI가 이 계약의 절반을 지킨다.
+// **공백 든 경로.** 토큰 모델이 공백을 경계로 보므로 `C:\Program Files\x.txt`는 예전에 `C:\Program`에서
+// 잘렸고, 잘린 것은 존재 게이트가 죽여 **전혀** 안 잡혔다. `openableLinkAt`이 존재로 확장해 그것을 닫는다 —
+// 이 테스트가 ⑴ 확장이 실제로 되는가 ⑵ 산문으로 새지 않는가 ⑶ **밑줄 범위가 경로 전체를 덮는가**를 고정한다.
+// 두 OS 모두에서 돈다(임시 디렉터리를 실제로 만든다).
+test "공백 든 경로가 잡히고 밑줄이 경로 전체를 덮는다" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "Program Files", .default_dir);
+    var sub = try tmp.dir.openDir(io, "Program Files", .{});
+    defer sub.close(io);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const raw = path_buf[0..try sub.realPath(io, &path_buf)];
+    const dir = if (std.mem.startsWith(u8, raw, "\\\\?\\")) raw[4..] else raw;
+    // 화면에는 `/` 철자로 띄운다 — 두 OS에서 같은 문자열을 쓰기 위해서다(Windows도 `/`를 받는다).
+    const shown = try allocator.dupe(u8, dir);
+    defer allocator.free(shown);
+    for (shown) |*ch| {
+        if (ch.* == '\\') ch.* = '/';
+    }
+
+    var core = try TerminalCore.init(allocator, .{ .cols = 240, .rows = 4 });
+    defer core.deinit();
+    try core.write("see ");
+    try core.write(shown);
+    try core.write(" and more words");
+
+    const full = selection.link_scopes_full;
+    // ⑴ 확장이 된다 — 경로 안(col 6)에서 열 대상이 **공백 뒤까지** 나온다.
+    const link = (try core.openableLinkAt(allocator, 0, 6, full)) orelse {
+        std.debug.print("공백 경로가 안 잡혔다: {s}\n", .{shown});
+        return error.TestUnexpectedResult;
+    };
+    defer allocator.free(link.text);
+    if (std.mem.indexOf(u8, link.text, "Program Files") == null) {
+        std.debug.print("확장이 공백 앞에서 끊겼다: {s}\n", .{link.text});
+        return error.TestUnexpectedResult;
+    }
+    // ⑵ 산문으로 새지 않는다 — 뒤의 `and more words`는 실재하지 않으므로 포함되면 안 된다.
+    try std.testing.expect(std.mem.indexOf(u8, link.text, "and") == null);
+
+    // ⑶ 밑줄 범위가 경로 끝(공백 뒤 세그먼트)까지 덮는다. 토큰만 덮으면 "밑줄 밖을 눌러야 열리는" 상태다.
+    const bounds = link.bounds orelse return error.TestUnexpectedResult;
+    const token_end_col = 4 + std.mem.indexOfScalar(u8, shown, ' ').?; // "see " 4칸 + 공백 위치
+    try std.testing.expect(bounds.end.col > token_end_col);
+
+    // ⑷ hover도 같은 끝을 실어 준다(밑줄과 열림이 갈리지 않는다).
+    const hover = (try core.openableLinkAnchorAt(allocator, 0, 6, full)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(bounds.end.col, (hover.end orelse return error.TestUnexpectedResult).col);
+}
+
 test "존재검증은 비-ASCII 이름이 든 경로를 놓치지 않는다" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

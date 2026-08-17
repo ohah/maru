@@ -471,7 +471,7 @@ test "SessionDock build shares action rects with the completed tree" {
         .displayed_count = 1,
         .items = &.{
             .{ .group = .{ .identity = 11, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta", .selected = true } },
+            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = .{ .messages = "meta" }, .selected = true } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -571,7 +571,7 @@ test "SessionDock published geometry ignores terminal cell dimensions" {
         .displayed_count = 1,
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "title", .summary = "summary", .metadata = "metadata", .selected = true, .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "title", .summary = "summary", .metadata = .{ .messages = "metadata" }, .selected = true, .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
         },
     };
     var large_font_props = base_props;
@@ -623,8 +623,8 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
         .displayed_count = 2,
         .content_first_item_origin_y_px = -20,
         .items = &.{
-            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta" } },
-            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = "meta" } },
+            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = .{ .messages = "meta" } } },
+            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = .{ .messages = "meta" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -677,10 +677,10 @@ test "SessionDock list items keep their DockMetrics height instead of shrinking 
                 .provider = .claude,
                 .title = "expanded",
                 .summary = "summary",
-                .metadata = "meta",
+                .metadata = .{ .messages = "meta" },
                 .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true, .turns = &.{.{ .role = .user, .text = "turn" }} },
             } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next", .summary = "summary", .metadata = "meta" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next", .summary = "summary", .metadata = .{ .messages = "meta" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -729,8 +729,8 @@ test "SessionDock virtualization translates an expanded card's whole subtree" {
         .displayed_count = 2,
         .expanded_identity = 12,
         .items = &.{
-            .{ .card = .{ .identity = 12, .provider = .claude, .title = "expanded", .summary = "summary", .metadata = "meta", .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
-            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = "meta" } },
+            .{ .card = .{ .identity = 12, .provider = .claude, .title = "expanded", .summary = "summary", .metadata = .{ .messages = "meta" }, .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
+            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = .{ .messages = "meta" } } },
         },
     };
     var scrolled_props = props;
@@ -830,7 +830,7 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
             .provider = .claude,
             .title = "title",
             .summary = "summary",
-            .metadata = "metadata",
+            .metadata = .{ .messages = "metadata" },
             .selected = true,
             .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
         } }},
@@ -886,8 +886,8 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
 test "SessionDock publishes a scrollbar that stays put while the list scrolls" {
     const std = @import("std");
     const items = [_]types.Item{
-        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
-        .{ .card = .{ .identity = 2, .provider = .claude, .title = "d", .summary = "e", .metadata = "f" } },
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = .{ .messages = "c" } } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "d", .summary = "e", .metadata = .{ .messages = "f" } } },
     };
     const base = types.Props{
         .viewport_px = .{ .width = 640, .height = 480 },
@@ -981,13 +981,13 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
     const std = @import("std");
     const items = [_]types.Item{
         .{ .group = .{ .identity = 1, .label = "g", .count = 2 } },
-        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = .{ .messages = "c" } } },
         .{ .card = .{
             .identity = 2,
             .provider = .claude,
             .title = "d",
             .summary = "e",
-            .metadata = "f",
+            .metadata = .{ .messages = "f" },
             .expanded = .{ .state = .ready, .turns = &.{}, .action_record_count = 0, .focus_live_enabled = true },
         } },
     };
@@ -1049,7 +1049,7 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
 test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
     const std = @import("std");
     const items = [_]types.Item{
-        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = .{ .messages = "c" } } },
     };
     const Built = struct {
         nodes: [32]tree.UiNode = undefined,
@@ -1124,7 +1124,7 @@ test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
 test "SessionDock publishes no scrollbar when the list fits" {
     const std = @import("std");
     const items = [_]types.Item{
-        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = .{ .messages = "c" } } },
     };
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 480 },

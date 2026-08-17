@@ -553,5 +553,8 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "4e428b84c8408f7f6254a98e05c1092c4d7abdece85188afcbcdad7573dc7de6" },
+    // 세션 카드 메타 줄을 **세그먼트**로 쪼개며 문장 키 셋(`ad_summary`·`ad_summary_sub`·`_more`)이
+    // 세그먼트 키 셋(`ad_meta_messages`·`ad_meta_subagents`·`_more`)으로 바뀌어 digest가 움직인다.
+    // 구분자와 색 위계는 컴포넌트가 소유하므로 문구에서 빠졌다. count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "edf0eff68c0bac2365f8d4b4dbbbaca3413c24d39f758513966930882264d862" },
 };

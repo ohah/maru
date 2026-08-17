@@ -406,6 +406,84 @@ fallback_glyphs=0 replacement_glyphs=0 raster_skipped=0
 swapchain_px=984x601 driver=hardware
 ```
 
+### 2h. 키 입력과 ⌘ 매핑 (W7.4a 결정, 실측 2026-08-18)
+
+창이 `WM_KEYDOWN`/`WM_CHAR`를 받아 **중립 `KeyEvent`**로 바꿔 올리고, 앱 동작이냐 셸 입력이냐는
+`FrameLoop.handleKeyEvent`(중립 정책)가 정한다 — 창은 키바인딩을 알지 않는다. 변환 규칙은
+`src/platform/windows/win32_keys.zig`가 **순수 함수로** 소유하므로 Windows 러너 없이 세 타깃 전부에서
+테스트된다.
+
+**문자는 `WM_CHAR`가, 그 밖은 `WM_KEYDOWN`이 준다.** VK 코드는 물리 키이지 문자가 아니므로 거기서 문자를
+짐작하면 비영문 레이아웃(한글 두벌식·QWERTZ)이 깨진다 — 레이아웃·데드키 해석은 OS가 한다.
+`keyFromVirtualKey`가 문자 키에 `null`을 주는 것이 그 규칙이다.
+
+**Ctrl·Alt 조합만 `WM_KEYDOWN`에서 문자를 복원한다.** `WM_CHAR`는 그때 제어 바이트를 주는데
+(`Ctrl+A` → 0x01) 우리는 "문자 `a` + control"이 필요하다 — 인코딩은 중립 `encodeKey`가 해야 한다.
+복원은 `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`로 한다(OEM 키 `,` `=` `[`는 VK 값이 문자와 달라, 표를
+직접 만들면 레이아웃마다 틀린다). 그리고 `WM_CHAR`는 Ctrl·Alt가 눌린 동안 **무시한다** — 안 그러면 같은
+키가 두 번 입력된다.
+
+**UTF-16 서로게이트 쌍을 합친다.** BMP 밖 문자(이모지)는 `WM_CHAR`가 **두 번** 온다. 합치지 않으면 중립
+`charKeyFromCodepoint`가 lone surrogate를 거부해 글자가 조용히 사라진다.
+
+**`WM_SYSKEYDOWN`을 `DefWindowProcW`에 넘기지 않는다**(Alt+F4는 예외). 넘기면 Alt 조합이 시스템 메뉴를
+열고 삼켜진다.
+
+#### ⌘ 를 무엇에 매핑하는가 — 판정은 `controlByte`다
+
+macOS의 `Cmd`가 maru 바인딩의 주 모디파이어인데 Windows엔 그 키가 없다. **`Ctrl`을 그대로 주면 셸 키를
+빼앗는다** — 실측: plain `Cmd+<글자>` 바인딩이 쓰는 12글자(`[ ] A D E F G K O S T W`)가 전부 C0 제어
+바이트를 갖는 문자라, `Ctrl+D`(EOF)·`Ctrl+W`(단어 삭제)·`Ctrl+A`(줄 시작)를 잃는다. 그 열 개 없이는 셸에서
+일을 할 수 없다.
+
+그래서 규칙을 **중립 `terminal.input.controlByte`로 판정한다** — "셸이 이 문자를 Ctrl로 가져가는가"의
+단일 출처이고, 우리가 목록을 만들지 않는다.
+
+| Windows 물리 조합 | 중립 모디파이어 | 예 |
+|---|---|---|
+| `Ctrl+<c>`, `controlByte` 실패 | `command` | `Ctrl+,`(설정)·`Ctrl+0`~`9`(탭)·`Ctrl+=`(폰트) |
+| `Ctrl+<c>`, `controlByte` 성공 | `control` | **셸로** — `Ctrl+C`·`Ctrl+D`·`Ctrl+W` |
+| `Ctrl+Shift+<c>`, c가 밀려온 글자 | `command`(plain) | `Ctrl+Shift+T`=새 탭 — Windows Terminal 철자 |
+| `Ctrl+Shift+<c>`, 그 밖 | `command`+`shift` | `Ctrl+Shift+P`=커맨드 팔레트 — VS Code 철자 |
+| `Ctrl+Alt+<c>` | `command`+`shift` | 밀린 `Cmd+Shift+<c>`(새 워크스페이스·수직분할) |
+| `Alt+<c>` | `option` | meta — `Alt+b`가 ESC b(단어 왼쪽) |
+| 문자가 아닌 키 + `Ctrl` | `control` | `Ctrl+←`는 셸이 쓴다(`CSI 1;5D`) |
+
+**어느 쪽에 `Ctrl+Shift`를 주는지는 Windows 관례를 따랐다**(사용자 결정). plain `Cmd+X`가 가져가므로
+`Ctrl+Shift+T`가 새 탭, `Ctrl+Shift+D`가 분할이 되어 Windows Terminal과 **같은 철자가 같은 동작**을 한다.
+밀린 `Cmd+Shift+X` 여섯(`[ ] D E G T`)은 `Ctrl+Alt+X`로 간다.
+
+**밀려온 글자 집합을 손으로 박지 않는다.** `config.keybinding.default_app_bindings`·
+`default_terminal_bindings`를 **comptime에 훑어** 유도한다 — 손으로 적은 목록은 바인딩이 늘거나 줄 때
+반드시 어긋나고, 어긋나도 컴파일은 된다. 테스트가 그 유도를 검증한다("유도된 문자는 정의상 셸 충돌
+문자여야 한다", "비어 있으면 유도가 깨진 것이다").
+
+핵심 단언은 이것이다 — `Ctrl+<셸 문자>`는 반드시 `control`이어야 한다:
+
+```zig
+for ("acdefgkostw[]") |ch| {
+    const m = translateModifiers(true, false, false, .{ .char = ch });
+    try testing.expect(m.control);
+    try testing.expect(!m.command);
+}
+```
+
+`command`가 되면 앱 바인딩이 가로채 셸이 SIGINT·EOF·단어 삭제를 못 받는다.
+
+**실기 캡처** (Windows 10 Pro 19045, `maru win32-terminal-smoke`):
+
+![W7.4a 실제 타이핑 — 입력이 셸로 가고 출력이 돌아온다](images/w7-4a-keyboard.png)
+
+`echo WIN-KEY-OK 한글도`를 타이핑하자 셸이 실행해 출력이 화면에 돌아왔다. `keys_to_shell=46`·
+`bytes_to_shell=52`(한글이 3바이트라 키보다 바이트가 많다)·`shell_ended=false`(셸이 살아 있다)·
+`fallback_glyphs`가 0에서 3678로(한글 폴백 경로가 실제로 돌았다).
+
+**중복 입력이 없다는 것은 통제 측정으로 확인했다** — 3글자를 보내면 `keys_to_shell=3`이다. 그 측정을 하기
+전에 두 번 헛짚었다: `MainWindowHandle`이 아직 0일 때 `PostMessage`가 조용히 실패했고(반환값을 버렸다),
+터미널 스모크가 fixture 각본(`exit`으로 끝난다)을 보내 **셸이 죽은 뒤** 키가 도착했다. 후자는 스모크에서
+각본을 없애 고쳤다 — 터미널 스모크는 사람이 타이핑하는 자리이고, 각본으로 끝내는 검증은
+`win32-frame-smoke`(§2f)가 한다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

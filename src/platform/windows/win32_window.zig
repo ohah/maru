@@ -31,6 +31,7 @@ const builtin = @import("builtin");
 // **`maru`를 통해 받는다.** 이 파일은 `main.zig`(root 모듈)만 쓰는데, root가 `src/` 아래 파일을 상대
 // import하면 그 파일이 `maru` 모듈과 이중 소유가 된다(실측: `file exists in modules 'maru' and 'root'`).
 const terminal = @import("maru").terminal;
+const win32_keys = @import("win32_keys.zig");
 
 pub const Error = error{
     RegisterClassFailed,
@@ -54,6 +55,9 @@ pub const WindowEvent = union(enum) {
     close_requested,
     /// 그릴 때가 됐다. W7.2가 실제 present를 붙이기 전에는 호출자가 프레임만 조립한다.
     paint,
+    /// 키가 눌렸다. **중립 `KeyEvent` 그대로 준다** — 창이 키바인딩 정책을 알지 않는다. 호출자가
+    /// `FrameLoop.handleKeyEvent`에 넘기면 그쪽이 앱 동작이냐 셸 입력이냐를 정한다(W7.4a).
+    key: terminal.input.KeyEvent,
 };
 
 /// 클라이언트 영역 픽셀 크기. **이름을 준다** — 익명 구조체로 두면 호출자가 `orelse .{...}`로 기본값을
@@ -144,6 +148,17 @@ const CREATESTRUCTW = extern struct {
 const WM_DESTROY: UINT = 0x0002;
 const WM_NCCREATE: UINT = 0x0081;
 const WM_SIZE: UINT = 0x0005;
+const WM_KEYDOWN: UINT = 0x0100;
+const WM_CHAR: UINT = 0x0102;
+/// Alt 가 눌린 채 온 키다. Alt 조합을 이것으로도 받아야 `Alt+F` 같은 것이 메뉴로 새지 않는다.
+const WM_SYSKEYDOWN: UINT = 0x0104;
+const WM_SYSCHAR: UINT = 0x0106;
+const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12;
+/// `MapVirtualKeyW`의 `MAPVK_VK_TO_CHAR`. VK 를 **현재 레이아웃의** 문자로 바꾼다 — OEM 키(`,` `=` `[`)는
+/// VK 값이 문자와 다르므로 이 변환이 필요하다(직접 표를 만들면 레이아웃마다 틀린다).
+const MAPVK_VK_TO_CHAR: UINT = 2;
 const WM_CLOSE: UINT = 0x0010;
 const WM_QUIT: UINT = 0x0012;
 const WM_PAINT: UINT = 0x000F;
@@ -170,6 +185,11 @@ extern "user32" fn GetClientRect(HWND, *RECT) callconv(.winapi) i32;
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(.winapi) ?HCURSOR;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(.winapi) isize;
+/// **`GetAsyncKeyState`가 아니라 이것을 쓴다.** 전자는 "지금 물리적으로 눌려 있는가"라 메시지가 큐에서
+/// 늦게 처리되면 그 사이 상태를 읽는다. `GetKeyState`는 **처리 중인 메시지 시점의** 상태를 준다 — 키
+/// 조합 판정은 그 시점이어야 맞는다.
+extern "user32" fn GetKeyState(i32) callconv(.winapi) i16;
+extern "user32" fn MapVirtualKeyW(UINT, UINT) callconv(.winapi) UINT;
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(.winapi) ?HINSTANCE;
 /// **std의 것을 쓴다.** 직접 `extern`으로 선언하면 Zig가 사이에 끼우는 코드가 스레드 오류 값을 덮어
 /// 0으로 읽힐 수 있다(실측: 세 호출 지점에서 전부 0이 나왔다). std는 그 규약을 알고 있다.
@@ -254,6 +274,8 @@ pub const Window = struct {
     events: EventQueue = .{},
     allocator: std.mem.Allocator,
     quit_requested: bool = false,
+    /// WM_CHAR 로 먼저 온 UTF-16 상위 서로게이트. 짝이 오면 합쳐 코드포인트를 만든다(pushChar doc).
+    pending_high_surrogate: ?u16 = null,
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("MaruWindowClass");
 
@@ -377,6 +399,81 @@ pub const Window = struct {
     fn push(self: *Window, ev: WindowEvent) void {
         self.events.push(self.allocator, ev);
     }
+
+    /// 눌린 모디파이어를 **메시지 처리 시점** 기준으로 읽는다(`GetKeyState` doc 참조).
+    fn modifierState() struct { ctrl: bool, shift: bool, alt: bool } {
+        // 최상위 비트가 "눌려 있다"다. 최하위 비트(토글 상태)를 보면 Caps Lock 처럼 잘못 읽는다.
+        return .{
+            .ctrl = (GetKeyState(VK_CONTROL) & @as(i16, -32768)) != 0,
+            .shift = (GetKeyState(VK_SHIFT) & @as(i16, -32768)) != 0,
+            .alt = (GetKeyState(VK_MENU) & @as(i16, -32768)) != 0,
+        };
+    }
+
+    /// `WM_KEYDOWN`/`WM_SYSKEYDOWN`. 여기서 다루는 것은 **문자가 아닌 키**와 **Ctrl·Alt 조합**이다.
+    ///
+    /// 평범한 타이핑은 여기서 처리하지 않고 `WM_CHAR`에 맡긴다 — 레이아웃·데드키·IME 해석을 OS가 해야
+    /// 하고, VK 에서 문자를 짐작하면 비영문 레이아웃이 깨진다(`win32_keys.keyFromVirtualKey` doc).
+    fn pushKeyDown(self: *Window, vk: u32) void {
+        const mods = modifierState();
+        if (win32_keys.keyFromVirtualKey(vk)) |key| {
+            self.push(.{ .key = .{
+                .key = key,
+                .modifiers = win32_keys.translateModifiers(mods.ctrl, mods.shift, mods.alt, key),
+                .keypad = win32_keys.isKeypadVirtualKey(vk),
+            } });
+            return;
+        }
+        // 문자 키인데 Ctrl·Alt 가 눌렸다 — `WM_CHAR`는 제어 바이트를 주므로(Ctrl+A → 0x01) 여기서
+        // **문자를 복원해** 중립 인코더가 제어 바이트를 만들게 한다. 그래야 `Ctrl+Shift+T` 같은 앱
+        // 조합도 문자를 알 수 있다.
+        if (!mods.ctrl and !mods.alt) return; // 평범한 타이핑 — `WM_CHAR`가 받는다.
+        const mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR);
+        // 상위 비트는 데드키 표시다. 문자가 없으면(0) 버린다 — 모디파이어 키 자체 등.
+        const ch: u32 = mapped & 0x7FFF;
+        if (ch == 0) return;
+        const key: terminal.input.Key = .{ .char = @intCast(ch) };
+        self.push(.{ .key = .{
+            .key = key,
+            .modifiers = win32_keys.translateModifiers(mods.ctrl, mods.shift, mods.alt, key),
+            .keypad = win32_keys.isKeypadVirtualKey(vk),
+        } });
+    }
+
+    /// `WM_CHAR`/`WM_SYSCHAR`. 평범한 타이핑이 여기로 온다 — 레이아웃과 데드키가 이미 적용된 값이다.
+    ///
+    /// **UTF-16 서로게이트 쌍을 합친다.** BMP 밖 문자(이모지)는 상위·하위 서로게이트가 **두 번의**
+    /// `WM_CHAR`로 온다. 합치지 않으면 중립 `charKeyFromCodepoint`가 lone surrogate 를 거부해 글자가
+    /// 조용히 사라진다.
+    fn pushChar(self: *Window, unit: u32) void {
+        const mods = modifierState();
+        // Ctrl·Alt 조합은 `pushKeyDown`이 이미 처리했다 — 여기서 또 넣으면 두 번 입력된다.
+        if (mods.ctrl or mods.alt) return;
+
+        var cp: u32 = unit;
+        if (unit >= 0xD800 and unit <= 0xDBFF) {
+            // 상위 서로게이트 — 짝을 기다린다.
+            self.pending_high_surrogate = @intCast(unit);
+            return;
+        }
+        if (unit >= 0xDC00 and unit <= 0xDFFF) {
+            const high = self.pending_high_surrogate orelse return; // 짝 없는 하위는 버린다.
+            self.pending_high_surrogate = null;
+            cp = 0x10000 + ((@as(u32, high) - 0xD800) << 10) + (unit - 0xDC00);
+        } else {
+            self.pending_high_surrogate = null;
+        }
+
+        // 제어 문자는 `pushKeyDown`이 기능키로 이미 냈다(Enter·Tab·Backspace·Escape) — 여기서 또 내면
+        // 두 번 입력된다. 0x7F(DEL)도 같다.
+        if (cp < 0x20 or cp == 0x7F) return;
+
+        const key = terminal.input.charKeyFromCodepoint(cp) catch return;
+        self.push(.{ .key = .{
+            .key = key,
+            .modifiers = win32_keys.translateModifiers(false, mods.shift, false, key),
+        } });
+    }
 };
 
 fn windowFrom(hwnd: HWND) ?*Window {
@@ -402,6 +499,18 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
                 const raw: u32 = @bitCast(@as(i32, @truncate(lparam)));
                 w.push(.{ .resized = .{ .width_px = raw & 0xFFFF, .height_px = (raw >> 16) & 0xFFFF } });
             }
+            return 0;
+        },
+        WM_KEYDOWN, WM_SYSKEYDOWN => {
+            if (self) |w| w.pushKeyDown(@intCast(wparam));
+            // `WM_SYSKEYDOWN`을 `DefWindowProcW`에 넘기지 않는다 — 넘기면 Alt 조합이 시스템 메뉴를 열고
+            // Alt+F4 밖의 조합도 삼켜진다. Alt+F4(창 닫기)는 사용자가 기대하는 동작이라 예외로 넘긴다.
+            if (msg == WM_SYSKEYDOWN and wparam != 0x73) return 0; // 0x73 = VK_F4
+            if (msg == WM_KEYDOWN) return 0;
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_CHAR, WM_SYSCHAR => {
+            if (self) |w| w.pushChar(@intCast(wparam));
             return 0;
         },
         WM_PAINT => {

@@ -1456,21 +1456,25 @@ pub fn buildAgentSessionDockItems(
                 // 서브에이전트를 돌린 세션만 그 개수를 덧붙인다. 0이면 아무것도 그리지 않아 평범한
                 // 세션의 메타 줄이 길어지지 않는다(docs/agent-session-list.md §2.3). 상한 초과는
                 // `999+`로 — 스캐너가 그 값에서 세기를 멈추므로 정확한 수를 주장하지 않는다.
-                const metadata = if (record.subagent_count == 0) blk: {
-                    var meta_buf: [256]u8 = undefined;
-                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary), &.{
-                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model },
-                    }));
-                } else if (record.subagent_count >= agent_session_archive_backend.max_subagent_count) blk: {
-                    var meta_buf: [256]u8 = undefined;
-                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary_sub_more), &.{
-                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model }, .{ .d = agent_session_archive_backend.max_subagent_count },
-                    }));
-                } else blk: {
-                    var meta_buf: [256]u8 = undefined;
-                    break :blk try allocator.dupe(u8, maru.i18n.format(&meta_buf, maru.i18n.t(.ad_summary_sub), &.{
-                        .{ .d = parsed.message_count }, .{ .s = age }, .{ .s = model }, .{ .d = record.subagent_count },
-                    }));
+                // 메타 줄은 **세그먼트로** 넘긴다 — 구분자와 색 위계는 컴포넌트가 소유한다
+                // (`session_dock.types.CardMetadata`). 여기서 한 문장으로 뭉치면 개수·시각·모델이
+                // 한 색으로 읽히고, 빈 세그먼트가 생길 때 구분자 손질을 문구가 떠안게 된다.
+                var messages_buf: [64]u8 = undefined;
+                const messages = try allocator.dupe(u8, maru.i18n.format(&messages_buf, maru.i18n.t(.ad_meta_messages), &.{
+                    .{ .d = parsed.message_count },
+                }));
+                const subagents: []const u8 = if (record.subagent_count == 0) "" else blk: {
+                    var sub_buf: [64]u8 = undefined;
+                    const over = record.subagent_count >= agent_session_archive_backend.max_subagent_count;
+                    const key = if (over) maru.i18n.t(.ad_meta_subagents_more) else maru.i18n.t(.ad_meta_subagents);
+                    const count = if (over) agent_session_archive_backend.max_subagent_count else record.subagent_count;
+                    break :blk try allocator.dupe(u8, maru.i18n.format(&sub_buf, key, &.{.{ .d = count }}));
+                };
+                const metadata: chrome.components.session_dock.types.CardMetadata = .{
+                    .messages = messages,
+                    .age = try allocator.dupe(u8, age),
+                    .model = model,
+                    .subagents = subagents,
                 };
                 var expanded: ?chrome.components.session_dock.types.Expanded = null;
                 if (self.agent_session_inline_detail) |detail| if (inlineArchiveDetailMatchesRecord(&detail, &record)) {

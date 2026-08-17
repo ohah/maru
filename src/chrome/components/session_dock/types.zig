@@ -81,12 +81,25 @@ pub const Expanded = struct {
 
 /// `identity`는 platform이 snapshot generation과 함께 검증하는 opaque 값이다. component는 이 값을
 /// 비교/표시/명령 인자로 해석하지 않고 action table에 그대로 되돌린다.
+/// 카드 메타데이터 줄은 **세그먼트 목록**이지 문장 하나가 아니다. 셋을 한 문자열로 뭉치면 그 줄 전체가
+/// 한 색이 되어(옛 동작) 개수·시각·모델이 같은 무게로 읽힌다. 세그먼트로 두면 컴포넌트가 구분자와 색을
+/// 소유해 위계를 준다 — 개수는 본문색, 시각은 muted, 모델은 provider 계열색(docs/agent-session-list.md §3).
+///
+/// 각 세그먼트는 **이미 지역화된 최종 문자열**이다(어순은 언어가 정한다). 빈 세그먼트는 구분자까지 함께
+/// 빠진다 — subagent가 없는 카드가 흔하다.
+pub const CardMetadata = struct {
+    messages: []const u8 = "",
+    age: []const u8 = "",
+    model: []const u8 = "",
+    subagents: []const u8 = "",
+};
+
 pub const Card = struct {
     identity: u64,
     provider: Provider,
     title: []const u8,
     summary: []const u8,
-    metadata: []const u8,
+    metadata: CardMetadata,
     selected: bool = false,
     expanded: ?Expanded = null,
 };

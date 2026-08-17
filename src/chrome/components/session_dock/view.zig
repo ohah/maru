@@ -442,7 +442,7 @@ const Writer = struct {
     /// 메타 줄은 `provider` 토큰과 그 뒤의 나머지 메타로 **두 번** 그린다. provider 만 색이 다르기
     /// 때문이다 — provider 는 `Provider.colorRole()`(토큰 층이 색을 소유), 나머지는 `muted_fg` 다.
     /// provider 를 값으로 받는 이유도 그것이다: label 과 색 역할을 같은 곳에서 꺼내야 둘이 어긋나지 않는다.
-    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: []const u8) ViewError!void {
+    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: types.CardMetadata) ViewError!void {
         const provider = provider_id.label();
         try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, provider_id.colorRole(), .metadata, false, metrics.cardDisclosureReserve());
         const cw = self.props.cell_width_px;
@@ -461,7 +461,61 @@ const Writer = struct {
             @floor(available_px / @as(f32, @floatFromInt(cw))),
             @as(f32, @floatFromInt(std.math.maxInt(u16))),
         ));
-        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, .metadata, false, false);
+
+        // 세 값의 **위계**를 색으로 준다(§3): 개수는 본문색으로 먼저 읽히고, 시각은 muted 로 물러나며,
+        // 모델은 카드 좌상단 provider 라벨과 **같은 색**이라 "무엇이 돌렸는가"가 한 색으로 묶인다.
+        // 구분자는 컴포넌트 소유다 — platform 이 문자열에 넣으면 빈 세그먼트가 생길 때 ` ·  · ` 처럼
+        // 구분자만 남고, 그 손질을 platform·i18n 양쪽이 나눠 갖게 된다.
+        //
+        // **op 하나에 run 여럿**으로 낸다(`chrome.draw.Run`). 색마다 op 을 나누면 컴포넌트가 셀 격자로
+        // x 를 추정해야 하는데, 실제 렌더는 비례 폰트라 구간 사이가 눈에 띄게 벌어진다(실측: 캡처에서
+        // 구분자 양옆이 한 칸 넘게 떴다). run 으로 두면 platform 이 **측정된 advance** 로 잇는다.
+        var segment_runs: [7]draw.Run = undefined;
+        var segment_count: usize = 0;
+        const ordered = [_]struct { text: []const u8, role: tokens.ColorRole }{
+            .{ .text = metadata.messages, .role = .surface_fg },
+            .{ .text = metadata.age, .role = .muted_fg },
+            .{ .text = metadata.model, .role = provider_id.colorRole() },
+            .{ .text = metadata.subagents, .role = .muted_fg },
+        };
+        for (ordered) |segment| {
+            if (segment.text.len == 0) continue;
+            if (segment_count > 0) {
+                segment_runs[segment_count] = .{ .text = " · ", .role = .muted_fg };
+                segment_count += 1;
+            }
+            segment_runs[segment_count] = .{ .text = segment.text, .role = segment.role };
+            segment_count += 1;
+        }
+        if (segment_count == 0) return;
+        try self.emitRuns(x, y, segment_runs[0..segment_count], max_cols, .metadata);
+    }
+
+    /// 한 줄 안에서 색만 바뀌는 텍스트를 **op 하나 + run 여럿**으로 낸다. `emit` 과 달리 텍스트를 여러
+    /// 조각으로 실으므로, 이어 붙이는 일은 실측 advance 를 가진 platform 이 맡는다(`chrome.draw.Run`).
+    fn emitRuns(self: *Writer, x: f32, y: f32, segments: []const draw.Run, cols: u16, text_role: typography.ChromeTextRole) ViewError!void {
+        if (cols == 0 or segments.len == 0) return;
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        if (self.run_count + segments.len > self.runs.len) return error.InsufficientRunBuffer;
+        const first_run = self.run_count;
+        for (segments) |segment| {
+            const start = self.text_count;
+            try self.appendBytes(segment.text);
+            self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count], .role = segment.role };
+            self.run_count += 1;
+        }
+        self.ops[self.op_count] = .{ .text = .{
+            .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) },
+            .runs = self.runs[first_run..self.run_count],
+            .role = .muted_fg,
+            .text_role = text_role,
+            .max_cols = cols,
+            .anchor = .head,
+            .scroll_clipped = self.scroll_clipped,
+            .above_scroll = self.above_scroll,
+            .clip = self.active_clip,
+        } };
+        self.op_count += 1;
     }
 
     /// workspace 그룹에는 독립된 슬롯이 셋 있다 — disclosure affordance, 이름, 개수. 이를 terminal식
@@ -892,7 +946,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .search = "long query",
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "Claude · 메시지 1개 · claude-fixture", .selected = true } },
+            .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = .{ .messages = "Claude", .age = "메시지 1개", .model = "claude-fixture" }, .selected = true } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -1133,8 +1187,8 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
         // 첫 카드를 1px만 남기고 위로 밀어 올린다.
         .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.card_h - 1)),
         .items = &.{
-            .{ .card = .{ .identity = 1, .provider = .claude, .title = "partial-card-title", .summary = "visible-summary", .metadata = "visible-meta" } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-card-title", .summary = "next-summary", .metadata = "next-meta" } },
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "partial-card-title", .summary = "visible-summary", .metadata = .{ .messages = "visible-meta" } } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-card-title", .summary = "next-summary", .metadata = .{ .messages = "next-meta" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -1247,7 +1301,7 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
                 .provider = .claude,
                 .title = "expanded-card-title",
                 .summary = "expanded-summary",
-                .metadata = "expanded-meta",
+                .metadata = .{ .messages = "expanded-meta" },
                 .expanded = .{
                     .state = .ready,
                     .resume_enabled = true,
@@ -1256,7 +1310,7 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
                     .turns = &.{.{ .role = .user, .text = "detail-turn-text" }},
                 },
             } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "neighbour-card-title", .summary = "neighbour-summary", .metadata = "neighbour-meta" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "neighbour-card-title", .summary = "neighbour-summary", .metadata = .{ .messages = "neighbour-meta" } } },
         },
     };
     const tk = tokens.Tokens.rich(.{
@@ -1359,7 +1413,7 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
                 .provider = .claude,
                 .title = "expanded-title",
                 .summary = "expanded-summary",
-                .metadata = "expanded-meta",
+                .metadata = .{ .messages = "expanded-meta" },
                 .expanded = .{
                     .state = .ready,
                     .resume_enabled = true,
@@ -1367,7 +1421,7 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
                     .turns = &.{.{ .role = .user, .text = "turn-text" }},
                 },
             } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-title", .summary = "next-summary", .metadata = .{ .messages = "next-meta" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -1424,7 +1478,7 @@ test "SessionDock group header runs are scroll clipped and its pill stays inside
         .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.group_h / 2)),
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "OVERFLOWGROUP", .count = 7 } },
-            .{ .card = .{ .identity = 2, .provider = .claude, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
+            .{ .card = .{ .identity = 2, .provider = .claude, .title = "next-title", .summary = "next-summary", .metadata = .{ .messages = "next-meta" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -1633,7 +1687,7 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
             .provider = .codex,
             .title = "measured action",
             .summary = "summary",
-            .metadata = "metadata",
+            .metadata = .{ .messages = "metadata" },
             .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
         } }},
     };
@@ -1776,7 +1830,7 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
                     // 않으므로 이 회귀를 못 잡는다.
                     .title = "tool_use-id 처럼 아주 긴 제목이 카드 폭을 확실히 넘어가도록 충분히 길게 적는다",
                     .summary = "The messages below were generated by the user while running local commands",
-                    .metadata = "메시지 4212개 · 방금 · claude-opus-4-1-20250805 (with 1M context) (default)",
+                    .metadata = .{ .messages = "메시지 4212개", .age = "방금", .model = "claude-opus-4-1-20250805 (with 1M context) (default)" },
                 },
             },
         },
@@ -1854,7 +1908,9 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
         },
         else => {},
     };
-    // title·summary·provider·metadata 네 줄이 모두 검사됐다.
+    // title·summary·provider·metadata 네 줄이 모두 검사됐다. 메타 줄은 색이 셋이지만 **op 은 하나**다
+    // (run 여럿) — 그래서 이 개수는 색 위계가 생긴 뒤에도 4다. op 을 색마다 나누면 이 값이 늘고,
+    // 그때는 컴포넌트가 x 를 셀 격자로 추정했다는 뜻이라 구간 사이가 벌어진다.
     try std.testing.expectEqual(@as(usize, 4), checked_lines);
 }
 
@@ -1954,10 +2010,10 @@ test "SessionDock never emits a quad whose clip has collapsed to zero area" {
                 .provider = .claude,
                 .title = "밀려 올라간 펼친 카드",
                 .summary = "요약",
-                .metadata = "메타",
+                .metadata = .{ .messages = "메타" },
                 .expanded = .{ .state = .ready, .turns = &turns, .resume_enabled = true, .reveal_enabled = true },
             } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "다음 카드", .summary = "요약", .metadata = "메타" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "다음 카드", .summary = "요약", .metadata = .{ .messages = "메타" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -2042,7 +2098,7 @@ test "SessionDock segment and sort labels carry the exact slot width as their me
         .displayed_count = 1,
         .sort_order = .oldest_first,
         .items = &.{
-            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = .{ .messages = "메타" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -2127,7 +2183,7 @@ test "SessionDock segment labels take their foreground from the same resolver as
         .project_scope_enabled = true,
         .scope = .all,
         .items = &.{
-            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = .{ .messages = "메타" } } },
         },
     };
     var nodes: [32]tree.UiNode = undefined;
@@ -2185,7 +2241,7 @@ test "SessionDock segment labels take their foreground from the same resolver as
 // 계약은 셋이다: ⑴ provider 토큰이 **provider별로 다른 role**을 받는다 ⑵ 그 role이 나머지 메타(`muted_fg`)와
 // **다르다** — 같으면 메타 줄 전체가 한 덩어리로 읽혀 색을 준 이유가 사라진다 ⑶ 색 결정은 `Provider`가
 // 소유한다(컴포넌트가 literal이나 자기 매핑을 들지 않는다).
-test "SessionDock paints each provider token with its own role, distinct from the rest of the metadata" {
+test "SessionDock 메타 줄은 세 위계를 색으로 나눈다 — 개수=본문, 시각=muted, 모델=provider" {
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 480 },
         .cell_width_px = 8,
@@ -2194,8 +2250,8 @@ test "SessionDock paints each provider token with its own role, distinct from th
         .displayed_count = 2,
         .scope = .all,
         .items = &.{
-            .{ .card = .{ .identity = 1, .provider = .claude, .title = "클로드 카드", .summary = "요약", .metadata = "메시지 6개 · 20시간 전" } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "코덱스 카드", .summary = "요약", .metadata = "메시지 9개 · 3일 전" } },
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "클로드 카드", .summary = "요약", .metadata = .{ .messages = "메시지 6개", .age = "20시간 전", .model = "claude-opus-5" } } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "코덱스 카드", .summary = "요약", .metadata = .{ .messages = "메시지 9개", .age = "3일 전", .model = "gpt-5.6-sol" } } },
         },
     };
     var nodes: [48]tree.UiNode = undefined;
@@ -2233,12 +2289,21 @@ test "SessionDock paints each provider token with its own role, distinct from th
 
     var claude_role: ?tokens.ColorRole = null;
     var codex_role: ?tokens.ColorRole = null;
-    var metadata_role: ?tokens.ColorRole = null;
+    var messages_role: ?tokens.ColorRole = null;
+    var age_role: ?tokens.ColorRole = null;
+    var claude_model_role: ?tokens.ColorRole = null;
+    var codex_model_role: ?tokens.ColorRole = null;
+    // **run 의 색을 본다.** 메타 줄은 op 하나에 run 여럿이므로(구간이 실측 advance 로 이어지도록),
+    // op 의 role 만 보면 세 위계가 한 색으로 보인다 — 실제 픽셀 색은 `run.role orelse text.role` 이다.
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, types.Provider.claude.label())) claude_role = text.role;
-            if (std.mem.eql(u8, run.text, types.Provider.codex.label())) codex_role = text.role;
-            if (std.mem.indexOf(u8, run.text, "메시지 6개") != null) metadata_role = text.role;
+            const role = run.role orelse text.role;
+            if (std.mem.eql(u8, run.text, types.Provider.claude.label())) claude_role = role;
+            if (std.mem.eql(u8, run.text, types.Provider.codex.label())) codex_role = role;
+            if (std.mem.eql(u8, run.text, "메시지 6개")) messages_role = role;
+            if (std.mem.eql(u8, run.text, "20시간 전")) age_role = role;
+            if (std.mem.eql(u8, run.text, "claude-opus-5")) claude_model_role = role;
+            if (std.mem.eql(u8, run.text, "gpt-5.6-sol")) codex_model_role = role;
         },
         else => {},
     };
@@ -2248,10 +2313,17 @@ test "SessionDock paints each provider token with its own role, distinct from th
     try std.testing.expectEqual(@as(?tokens.ColorRole, types.Provider.codex.colorRole()), codex_role);
     // ⑴ provider끼리 다르다.
     try std.testing.expect(claude_role != codex_role);
-    // ⑵ 그리고 나머지 메타와도 다르다.
-    try std.testing.expectEqual(@as(?tokens.ColorRole, .muted_fg), metadata_role);
-    try std.testing.expect(claude_role != metadata_role);
-    try std.testing.expect(codex_role != metadata_role);
+
+    // ⑵ 메타 줄의 **세 위계**: 개수가 먼저 읽히고(본문색), 시각은 물러나며(muted), 모델은 좌상단 provider
+    //    라벨과 같은 색으로 묶인다. 셋이 한 색이면(옛 동작) 이 단언이 셋 중 둘에서 깨진다.
+    try std.testing.expectEqual(@as(?tokens.ColorRole, .surface_fg), messages_role);
+    try std.testing.expectEqual(@as(?tokens.ColorRole, .muted_fg), age_role);
+    try std.testing.expectEqual(claude_role, claude_model_role);
+    try std.testing.expectEqual(codex_role, codex_model_role);
+    // 그리고 세 위계가 실제로 서로 다른 role 이다 — 같은 값이 우연히 셋에 배정되는 것을 막는다.
+    try std.testing.expect(messages_role != age_role);
+    try std.testing.expect(messages_role != claude_model_role);
+    try std.testing.expect(age_role != claude_model_role);
 }
 
 // 적대적 검증에서 찾은 결함(2026-08-12): `build`의 의도는 주석에 적혀 있다 — "utility control이 제목을
@@ -2278,7 +2350,7 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
             .snapshot_generation = 14,
             .displayed_count = 3,
             .items = &.{
-                .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+                .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = .{ .messages = "메타" } } },
             },
         };
         var nodes: [32]tree.UiNode = undefined;

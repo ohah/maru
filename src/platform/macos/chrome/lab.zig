@@ -651,19 +651,19 @@ fn buildDockFrame(
         // 저장소 이름을 쓰면 그것이 골든 이미지에 **픽셀로 고정**돼 저장소에 영구히 남는다. 워크스페이스
         // 이름은 그룹 행의 레이아웃만 증명하면 되므로 명백히 가짜인 값을 쓴다.
         .{ .group = .{ .identity = 1, .label = "sample-workspace", .count = 3 } },
-        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = "94 messages · 3m ago · claude-opus-5", .selected = scenario.id == .retained_list } },
-        .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = "140 messages · 22h ago · gpt-5.6-sol" } },
-        .{ .card = .{ .identity = 4, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = "356 messages · 1d ago · claude-opus-5" } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = .{ .messages = "94 messages", .age = "3m ago", .model = "claude-opus-5" }, .selected = scenario.id == .retained_list } },
+        .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = .{ .messages = "140 messages", .age = "22h ago", .model = "gpt-5.6-sol" } } },
+        .{ .card = .{ .identity = 4, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = .{ .messages = "356 messages", .age = "1d ago", .model = "claude-opus-5" } } },
     };
     // 그룹 **둘**이 있어야 sticky의 세 번째 상태(다음 헤더가 밀어냄)를 만들 수 있다. 하나짜리
     // fixture로는 "상단 고정"까지만 보이고 두 헤더가 겹치는 회귀를 못 본다.
     const two_groups = [_]session_dock.types.Item{
         .{ .group = .{ .identity = 1, .label = "sample-workspace", .count = 2 } },
-        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = "94 messages · 3m ago · claude-opus-5" } },
-        .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = "140 messages · 22h ago · gpt-5.6-sol" } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = .{ .messages = "94 messages", .age = "3m ago", .model = "claude-opus-5" } } },
+        .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = .{ .messages = "140 messages", .age = "22h ago", .model = "gpt-5.6-sol" } } },
         .{ .group = .{ .identity = 4, .label = "second-workspace", .count = 2 } },
-        .{ .card = .{ .identity = 5, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = "356 messages · 1d ago · claude-opus-5" } },
-        .{ .card = .{ .identity = 6, .provider = .codex, .title = "Publish scrollbar inside preorder", .summary = "Keep the tree invariants while the gutter stays reserved", .metadata = "12 messages · 2d ago · gpt-5.6-sol" } },
+        .{ .card = .{ .identity = 5, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = .{ .messages = "356 messages", .age = "1d ago", .model = "claude-opus-5" } } },
+        .{ .card = .{ .identity = 6, .provider = .codex, .title = "Publish scrollbar inside preorder", .summary = "Keep the tree invariants while the gutter stays reserved", .metadata = .{ .messages = "12 messages", .age = "2d ago", .model = "gpt-5.6-sol" } } },
     };
     // This is deliberately a real Session Dock card, not an out-of-band font test canvas. The
     // retained-list fixture proves list behavior; this specimen instead makes font selection
@@ -671,9 +671,9 @@ fn buildDockFrame(
     // Korean line makes a missing primary glyph visibly exercise CoreText's fallback face.
     const font_specimen = [_]session_dock.types.Item{
         .{ .group = .{ .identity = 1, .label = "font specimen", .count = 3 } },
-        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Il1 O0 MWmw @# [] {} <>", .summary = "ASCII primary-face specimen", .metadata = "한글 가나다라마바사 · primary or fallback", .selected = true } },
-        .{ .card = .{ .identity = 3, .provider = .codex, .title = "rn m w |! `.,:; /\\", .summary = "narrow and wide glyph contours", .metadata = "가각간 한글 폰트 비교" } },
-        .{ .card = .{ .identity = 4, .provider = .claude, .title = "S5 2Z 8B 0O 1l I|", .summary = "same fixed grid, distinct ink", .metadata = "fallback face is reported in JSON" } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Il1 O0 MWmw @# [] {} <>", .summary = "ASCII primary-face specimen", .metadata = .{ .messages = "한글 가나다라마바사", .age = "primary or fallback" }, .selected = true } },
+        .{ .card = .{ .identity = 3, .provider = .codex, .title = "rn m w |! `.,:; /\\", .summary = "narrow and wide glyph contours", .metadata = .{ .messages = "가각간 한글 폰트 비교" } } },
+        .{ .card = .{ .identity = 4, .provider = .claude, .title = "S5 2Z 8B 0O 1l I|", .summary = "same fixed grid, distinct ink", .metadata = .{ .messages = "fallback face is reported in JSON" } } },
     };
     // sticky 세 상태의 스크롤 위치. clamp가 한 줄이라 offset 하나로 상태가 정해지므로, 그 offset을
     // 기하에서 유도한다 — 상수를 박으면 metric이 바뀔 때 시나리오가 조용히 다른 상태를 찍는다.

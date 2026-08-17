@@ -47,8 +47,8 @@ pub const inventory = [_]Proof{
     // 값 읽기·쓰기(valueOf·setValue)가 `Config` sub-struct 의 `schema` 메타를 comptime 에 훑는다.
     // 손으로 적은 키 표가 없어야 화면과 파일이 갈리지 않는다는 계약(docs/mobile-config.md §6)의
     // 구현이고, Client receiver 나 제품 vtable 과는 무관하다.
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "60698960e412d9d5c707d4518030c4e02f8982ab701d3834bdbe6e84dc3129c9" },
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "04c990d3283ec76c0a3ea17e585a4ad39c5c73b50468883f91da527ac790637a" },
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "6edaa4f2762f8e283a11b869328e0f8b62b12d4214ddd1ae7d4073885f3fcda8" },
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "e276e8e954a47819f79ae54a0937d9bb76134deda6876f143baf9da9f0a363a1" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
     // 더한 것은 그 대기 루프 하나뿐이다. 왜 필요한가: `shutting_down`은 새 결과를 버리게 할 뿐 돌고 있는
@@ -523,5 +523,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "706f5d60b668652bfbdef7c5781b1110cdf80f33ac8580d1954000e4a5743e8e" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "1bb920ff82bdd19a3fca68fc5b91470ab409489a2809cb363f9f045778f71fa9" },
 };

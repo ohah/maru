@@ -29,7 +29,13 @@ pub const Meta = struct {
     /// 키 segment override(없으면 필드명 dashed). 전체 키 = `<namespace>.<segment>`(namespace=Config 필드명 dashed).
     /// field명≠segment인 예외만 명시(`height_fraction` → `"height"`). `key`가 있으면 이건 무시된다.
     key_seg: ?[]const u8 = null,
-    doc: []const u8 = "",
+    /// 설명문 = **세팅 GUI 의 행 라벨**이기도 하다(`schema.zig` 의 "GUI 라벨" 단언, `settingsRowLabel`).
+    /// 그래서 번역 대상이고 문자열이 아니라 **키**를 든다 — 리터럴을 넣으면 컴파일이 막힌다(계약 §7.2
+    /// 1 차 방어). `null` 은 "설명 없음"이고, 소비자는 그때 키 이름을 대신 보여준다.
+    ///
+    /// 소비자(`BoolField.doc` 등)의 타입은 **바꾸지 않는다** — `schema.zig` 가 Field 를 만들 때 이미
+    /// 해석해 넣으므로 `app_session/settings.zig` 의 소비 18 곳이 무변경으로 남는다.
+    doc: ?@import("../i18n.zig").Key = null,
     /// 숫자 범위(min,max). f32 필드엔 **필수**(파서 검증 + GUI 위젯 공유). 그 외 타입엔 null.
     range: ?[2]f64 = null,
     /// **파일 파싱 전용** 범위 override(min,max). 없으면(기본) 파일 파싱도 `range`를 쓴다. GUI 위젯(range)보다
@@ -130,14 +136,14 @@ pub const FontConfig = struct {
     // 그래서 GUI·단축키는 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 parse_range로 더 넓은 [1,512]를
     // 허용한다(configuration.md "1~512"·resolveFont와 같은 계약).
     pub const schema = .{ // 키: font.size / font.line-height / font.letter-spacing / font.family / font.fallback / font.family-bold / font.family-italic (필드명 dashed)
-        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .parse_range = .{ font_size_file_min, font_size_file_max }, .widget = .number, .section = .font },
-        .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
-        .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
-        .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
-        .fallback = Meta{ .doc = "폴백 폰트(쉼표 구분)", .widget = .text, .section = .font },
-        .family_bold = Meta{ .doc = "bold 폰트 패밀리(빈 값=주 폰트 bold)", .widget = .text, .section = .font },
-        .family_italic = Meta{ .doc = "italic 폰트 패밀리(빈 값=주 폰트 italic)", .widget = .text, .section = .font },
-        .ligatures = Meta{ .doc = "프로그래밍 합자(=> != // 등)", .widget = .toggle, .section = .font },
+        .size = Meta{ .doc = .cfg_font_size, .range = .{ font_size_min, font_size_max }, .parse_range = .{ font_size_file_min, font_size_file_max }, .widget = .number, .section = .font },
+        .line_height = Meta{ .doc = .cfg_font_line_height, .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
+        .letter_spacing = Meta{ .doc = .cfg_font_letter_spacing, .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
+        .family = Meta{ .doc = .cfg_font_family, .widget = .text, .section = .font },
+        .fallback = Meta{ .doc = .cfg_font_fallback, .widget = .text, .section = .font },
+        .family_bold = Meta{ .doc = .cfg_font_family_bold, .widget = .text, .section = .font },
+        .family_italic = Meta{ .doc = .cfg_font_family_italic, .widget = .text, .section = .font },
+        .ligatures = Meta{ .doc = .cfg_font_ligatures, .widget = .toggle, .section = .font },
     };
 };
 
@@ -194,10 +200,10 @@ pub const ThemeConfig = struct {
 
     // 스키마-주도 색(CS-2). search_match*/sidebar_*는 config 키가 없어(preset 전용) 제외, palette는 특수(palette.N) 유지.
     pub const schema = .{
-        .background = Meta{ .doc = "배경색(#RRGGBB)", .widget = .color, .section = .theme },
-        .foreground = Meta{ .doc = "전경색(#RRGGBB)", .widget = .color, .section = .theme },
-        .cursor = Meta{ .doc = "커서색(#RRGGBB)", .widget = .color, .section = .theme },
-        .selection = Meta{ .doc = "선택 하이라이트 배경(#RRGGBB)", .widget = .color, .section = .theme },
+        .background = Meta{ .doc = .cfg_theme_background, .widget = .color, .section = .theme },
+        .foreground = Meta{ .doc = .cfg_theme_foreground, .widget = .color, .section = .theme },
+        .cursor = Meta{ .doc = .cfg_theme_cursor, .widget = .color, .section = .theme },
+        .selection = Meta{ .doc = .cfg_theme_selection, .widget = .color, .section = .theme },
     };
 };
 
@@ -602,11 +608,11 @@ pub const CursorConfig = struct {
 
     // color/text는 nullable이라 schema에서 제외(theme.sidebar_*·palette와 같은 선례 — theme.zig 상단 주석).
     pub const schema = .{
-        .shape = Meta{ .doc = "커서 모양", .widget = .dropdown, .section = .cursor },
-        .blink = Meta{ .doc = "커서 깜빡임", .widget = .toggle, .section = .cursor },
-        .blink_interval_ms = Meta{ .doc = "커서 깜빡임 반주기(ms)", .range = .{ 100, 10000 }, .widget = .number, .section = .cursor },
-        .blink_fade_ms = Meta{ .doc = "커서 깜빡임 페이드(ms, 0=즉각)", .range = .{ 0, 1000 }, .widget = .number, .section = .cursor },
-        .unfocused = Meta{ .doc = "포커스 잃을 때 커서", .widget = .dropdown, .section = .cursor },
+        .shape = Meta{ .doc = .cfg_cursor_shape, .widget = .dropdown, .section = .cursor },
+        .blink = Meta{ .doc = .cfg_cursor_blink, .widget = .toggle, .section = .cursor },
+        .blink_interval_ms = Meta{ .doc = .cfg_cursor_blink_interval_ms, .range = .{ 100, 10000 }, .widget = .number, .section = .cursor },
+        .blink_fade_ms = Meta{ .doc = .cfg_cursor_blink_fade_ms, .range = .{ 0, 1000 }, .widget = .number, .section = .cursor },
+        .unfocused = Meta{ .doc = .cfg_cursor_unfocused, .widget = .dropdown, .section = .cursor },
     };
 };
 
@@ -761,19 +767,19 @@ pub const InputConfig = struct {
     selection_clear_on_typing: bool = true,
 
     pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.link-open-target / input.paste-protection / input.bracketed-paste-is-safe / input.selection-clear-on-typing (필드명 dashed)
-        .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
-        .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
-        .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
-        .url_click_modifier = Meta{ .doc = "URL 클릭 수식키", .widget = .dropdown, .section = .input },
-        .mouse_hide_while_typing = Meta{ .doc = "타이핑 중 마우스 숨김", .widget = .toggle, .section = .input },
-        .option_as_meta = Meta{ .doc = "Option을 Meta(Alt)로", .widget = .toggle, .section = .input },
-        .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
-        .word_separators = Meta{ .doc = "더블클릭 단어 구분자", .widget = .text, .section = .input },
-        .link_detection = Meta{ .doc = "링크 자동 감지 범위", .widget = .dropdown, .section = .input },
-        .link_open_target = Meta{ .doc = "웹 링크 열기 대상", .widget = .dropdown, .section = .input },
-        .paste_protection = Meta{ .doc = "위험한 붙여넣기 확인", .widget = .toggle, .section = .input },
-        .bracketed_paste_is_safe = Meta{ .doc = "bracketed paste는 안전으로", .widget = .toggle, .section = .input },
-        .selection_clear_on_typing = Meta{ .doc = "타이핑하면 선택 해제", .widget = .toggle, .section = .input },
+        .page_keys = Meta{ .doc = .cfg_input_page_keys, .widget = .dropdown, .section = .input },
+        .shift_enter = Meta{ .doc = .cfg_input_shift_enter, .widget = .dropdown, .section = .input },
+        .ime_enter = Meta{ .doc = .cfg_input_ime_enter, .widget = .dropdown, .section = .input },
+        .url_click_modifier = Meta{ .doc = .cfg_input_url_click_modifier, .widget = .dropdown, .section = .input },
+        .mouse_hide_while_typing = Meta{ .doc = .cfg_input_mouse_hide_while_typing, .widget = .toggle, .section = .input },
+        .option_as_meta = Meta{ .doc = .cfg_input_option_as_meta, .widget = .toggle, .section = .input },
+        .right_click = Meta{ .doc = .cfg_input_right_click, .widget = .dropdown, .section = .input },
+        .word_separators = Meta{ .doc = .cfg_input_word_separators, .widget = .text, .section = .input },
+        .link_detection = Meta{ .doc = .cfg_input_link_detection, .widget = .dropdown, .section = .input },
+        .link_open_target = Meta{ .doc = .cfg_input_link_open_target, .widget = .dropdown, .section = .input },
+        .paste_protection = Meta{ .doc = .cfg_input_paste_protection, .widget = .toggle, .section = .input },
+        .bracketed_paste_is_safe = Meta{ .doc = .cfg_input_bracketed_paste_is_safe, .widget = .toggle, .section = .input },
+        .selection_clear_on_typing = Meta{ .doc = .cfg_input_selection_clear_on_typing, .widget = .toggle, .section = .input },
     };
 };
 
@@ -799,9 +805,9 @@ pub const KeyHintConfig = struct {
     modifier: HintModifier = .command,
 
     pub const schema = .{ // 키: keyhint.enabled / keyhint.delay / keyhint.modifier (namespace=Config 필드명 keyhint)
-        .enabled = Meta{ .doc = "모디파이어 홀드 시 단축키 힌트 표시", .widget = .toggle, .section = .input },
-        .delay = Meta{ .doc = "힌트 표시까지 홀드 시간(ms)", .range = .{ 0, 5000 }, .widget = .number, .section = .input },
-        .modifier = Meta{ .doc = "힌트를 띄우는 모디파이어(단독 홀드)", .widget = .dropdown, .section = .input },
+        .enabled = Meta{ .doc = .cfg_keyhint_enabled, .widget = .toggle, .section = .input },
+        .delay = Meta{ .doc = .cfg_keyhint_delay, .range = .{ 0, 5000 }, .widget = .number, .section = .input },
+        .modifier = Meta{ .doc = .cfg_keyhint_modifier, .widget = .dropdown, .section = .input },
     };
 };
 
@@ -819,7 +825,7 @@ pub const SessionConfig = struct {
         // 설정 GUI(workspace 섹션)에 토글로 노출한다 — 사용자가 GUI로 켜고 끌 수 있다(기본값 전환 대비 "끄는 수단"이자 opt-in
         // 진입점). 원격 색·이미지·prompt_marks 패리티가 붙어 실사용 가능해져 더는 숨기지 않는다(과거 code-review #8의 hidden 해제).
         // ⚠️적용 시점: 토글 뒤 새로 만드는 일반 Term부터. 실행 중 기존 Term은 process 사이를 소급 이동하지 않는다.
-        .keep_alive_after_quit = Meta{ .section = .workspace, .widget = .toggle, .doc = "정상 GUI 종료 후에도 터미널 세션을 유지하고 재실행 시 재접속(실험적, tmux식)" },
+        .keep_alive_after_quit = Meta{ .section = .workspace, .widget = .toggle, .doc = .cfg_session_keep_alive_after_quit },
     };
 };
 
@@ -927,11 +933,11 @@ pub const SidebarConfig = struct {
     agent_transcript_hook: bool = true,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
-        .show_branch = Meta{ .doc = "사이드바 카드에 git 브랜치 표시", .widget = .toggle, .section = .sidebar },
-        .show_folder = Meta{ .doc = "사이드바 카드에 폴더 경로 표시", .widget = .toggle, .section = .sidebar },
-        .agent_transcript_hook = Meta{ .doc = "에이전트 대화 표시용 claude 상태줄 훅 설치", .widget = .toggle, .section = .sidebar },
+        .show_branch = Meta{ .doc = .cfg_sidebar_show_branch, .widget = .toggle, .section = .sidebar },
+        .show_folder = Meta{ .doc = .cfg_sidebar_show_folder, .widget = .toggle, .section = .sidebar },
+        .agent_transcript_hook = Meta{ .doc = .cfg_sidebar_agent_transcript_hook, .widget = .toggle, .section = .sidebar },
         // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
-        .width_pt = Meta{ .key_seg = "width", .doc = "사이드바 폭(pt)", .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
+        .width_pt = Meta{ .key_seg = "width", .doc = .cfg_sidebar_width_pt, .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
     };
 };
 
@@ -958,7 +964,7 @@ pub const EditorConfig = struct {
         // 전이라 이 값이 렌더에 닿는 경로가 없다 — 지금 UI에 띄우면 사용자가 토글해도 아무 일이
         // 없어 **버그로 보인다**. `hidden`의 용도가 정확히 그것이다("미완성·실험 opt-in을 일반
         // 사용자 UI에서 가린다"). config 파일로는 지금도 켤 수 있고, 편집기가 배선될 때 벗긴다.
-        .wrap = Meta{ .doc = "긴 줄 자동 줄바꿈", .widget = .toggle, .section = .editor },
+        .wrap = Meta{ .doc = .cfg_editor_wrap, .widget = .toggle, .section = .editor },
     };
 };
 
@@ -967,7 +973,7 @@ pub const StatusBarConfig = struct {
     show: bool = true,
 
     pub const schema = .{ // 키: status-bar.show
-        .show = Meta{ .doc = "하단 상태표시줄 표시", .widget = .toggle, .section = .workspace },
+        .show = Meta{ .doc = .cfg_statusbar_show, .widget = .toggle, .section = .workspace },
     };
 };
 
@@ -995,16 +1001,16 @@ pub const QuickTerminalConfig = struct {
     minimal_tabs: bool = false,
 
     pub const schema = .{ // namespace quick-terminal(dashed). height_fraction/width_fraction은 키가 height/width라 key_seg 명시.
-        .height_fraction = Meta{ .key_seg = "height", .doc = "두께 비율(화면 대비)", .range = .{ 0.1, 1.0 }, .widget = .number, .section = .quick_terminal },
+        .height_fraction = Meta{ .key_seg = "height", .doc = .cfg_quick_height_fraction, .range = .{ 0.1, 1.0 }, .widget = .number, .section = .quick_terminal },
         // width 기본 0은 "center 가로를 height와 같게(정사각)"라는 **유효 sentinel**이라 range 하한을 0으로 둔다
         // (0.1로 두면 기본 0을 직렬화→재파싱할 때 spurious diagnostic이 난다 — code-review 후속). height는 sentinel이
         // 없어 0.1~1.0 그대로. 0<x<0.1(아주 좁은 폭)도 forgiving하게 허용(padding 0 허용과 같은 결).
-        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율(0=height 따라감)", .range = .{ 0, 1.0 }, .widget = .number, .section = .quick_terminal },
-        .auto_hide = Meta{ .doc = "포커스 잃으면 자동 숨김", .widget = .toggle, .section = .quick_terminal },
-        .screen = Meta{ .doc = "어느 화면에 띄울지", .widget = .dropdown, .section = .quick_terminal },
-        .position = Meta{ .doc = "어느 가장자리에서 나올지", .widget = .dropdown, .section = .quick_terminal },
-        .chrome = Meta{ .doc = "패널 chrome 수준", .widget = .dropdown, .section = .quick_terminal },
-        .minimal_tabs = Meta{ .doc = "minimal에서 탭 허용", .widget = .toggle, .section = .quick_terminal },
+        .width_fraction = Meta{ .key_seg = "width", .doc = .cfg_quick_width_fraction, .range = .{ 0, 1.0 }, .widget = .number, .section = .quick_terminal },
+        .auto_hide = Meta{ .doc = .cfg_quick_auto_hide, .widget = .toggle, .section = .quick_terminal },
+        .screen = Meta{ .doc = .cfg_quick_screen, .widget = .dropdown, .section = .quick_terminal },
+        .position = Meta{ .doc = .cfg_quick_position, .widget = .dropdown, .section = .quick_terminal },
+        .chrome = Meta{ .doc = .cfg_quick_chrome, .widget = .dropdown, .section = .quick_terminal },
+        .minimal_tabs = Meta{ .doc = .cfg_quick_minimal_tabs, .widget = .toggle, .section = .quick_terminal },
     };
 };
 
@@ -1169,28 +1175,28 @@ pub const Config = struct {
     // 최상위 스칼라(Config 직속 — sub-struct가 아니라 namespace가 없으므로 Meta.key로 전체 키를 명시한다, CS-2b).
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
-        .ui_language = Meta{ .key = "ui.language", .doc = "UI 표시 언어(auto=OS 로케일)", .widget = .dropdown, .section = .app },
-        .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
-        .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = "활성 탭 룩(connected|underline|pill)", .widget = .dropdown, .section = .theme },
-        .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = "시스템 라이트/다크 따라 테마 전환", .widget = .toggle, .section = .theme },
-        .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = "라이트 외관 프리셋", .widget = .dropdown, .section = .theme },
-        .theme_preset_dark = Meta{ .key = "theme.preset-dark", .doc = "다크 외관 프리셋", .widget = .dropdown, .section = .theme },
-        .blink_text = Meta{ .key = "text.blink", .doc = "SGR5 blink 글자 깜빡임", .widget = .toggle, .section = .theme },
-        .ambiguous_width = Meta{ .key = "text.ambiguous-width", .doc = "EAW Ambiguous 문자 폭", .widget = .dropdown, .section = .theme },
-        .emoji_width = Meta{ .key = "text.emoji-width", .doc = "이모지(VS16·키캡) 폭", .widget = .dropdown, .section = .theme },
-        .bold_is_bright = Meta{ .key = "theme.bold-is-bright", .doc = "bold를 bright 색으로", .widget = .toggle, .section = .theme },
-        .theme_min_contrast = Meta{ .key = "theme.min-contrast", .doc = "ANSI 팔레트 최소 명암비(0=끔, 라이트 배경 가독성)", .range = .{ 0.0, theme_min_contrast_max }, .widget = .number, .section = .theme },
-        .window_padding_top = Meta{ .key = "window.padding-top", .doc = "위 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
-        .window_padding_right = Meta{ .key = "window.padding-right", .doc = "오른쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
-        .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
-        .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
-        .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
-        .render_frame_rate = Meta{ .key = "render.frame-rate", .doc = "앱 주사율(Hz)", .range = .{ render_frame_rate_min, render_frame_rate_max }, .widget = .number, .section = .window },
-        .window_background_image = Meta{ .key = "window.background-image", .doc = "배경 이미지 PNG 경로", .widget = .text, .section = .window },
-        .window_blur = Meta{ .key = "window.blur", .doc = "창 뒤 배경 블러 반경(px, 0=끔, opacity<1일 때만)", .range = .{ 0, 100 }, .widget = .number, .section = .window },
-        .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
-        .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = "split 경계선 두께(pt, 0=숨김)", .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
-        .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
+        .ui_language = Meta{ .key = "ui.language", .doc = .cfg_ui_language, .widget = .dropdown, .section = .app },
+        .chrome_theme = Meta{ .key = "chrome.theme", .doc = .cfg_chrome_theme, .widget = .dropdown, .section = .theme },
+        .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = .cfg_chrome_tab_style, .widget = .dropdown, .section = .theme },
+        .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = .cfg_theme_follow_system, .widget = .toggle, .section = .theme },
+        .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = .cfg_theme_preset_light, .widget = .dropdown, .section = .theme },
+        .theme_preset_dark = Meta{ .key = "theme.preset-dark", .doc = .cfg_theme_preset_dark, .widget = .dropdown, .section = .theme },
+        .blink_text = Meta{ .key = "text.blink", .doc = .cfg_text_blink, .widget = .toggle, .section = .theme },
+        .ambiguous_width = Meta{ .key = "text.ambiguous-width", .doc = .cfg_text_ambiguous_width, .widget = .dropdown, .section = .theme },
+        .emoji_width = Meta{ .key = "text.emoji-width", .doc = .cfg_text_emoji_width, .widget = .dropdown, .section = .theme },
+        .bold_is_bright = Meta{ .key = "theme.bold-is-bright", .doc = .cfg_theme_bold_is_bright, .widget = .toggle, .section = .theme },
+        .theme_min_contrast = Meta{ .key = "theme.min-contrast", .doc = .cfg_theme_min_contrast, .range = .{ 0.0, theme_min_contrast_max }, .widget = .number, .section = .theme },
+        .window_padding_top = Meta{ .key = "window.padding-top", .doc = .cfg_window_padding_top, .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_right = Meta{ .key = "window.padding-right", .doc = .cfg_window_padding_right, .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = .cfg_window_padding_bottom, .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_left = Meta{ .key = "window.padding-left", .doc = .cfg_window_padding_left, .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_opacity = Meta{ .key = "window.opacity", .doc = .cfg_window_opacity, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
+        .render_frame_rate = Meta{ .key = "render.frame-rate", .doc = .cfg_render_frame_rate, .range = .{ render_frame_rate_min, render_frame_rate_max }, .widget = .number, .section = .window },
+        .window_background_image = Meta{ .key = "window.background-image", .doc = .cfg_window_background_image, .widget = .text, .section = .window },
+        .window_blur = Meta{ .key = "window.blur", .doc = .cfg_window_blur, .range = .{ 0, 100 }, .widget = .number, .section = .window },
+        .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = .cfg_window_unfocused_dim, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
+        .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = .cfg_split_divider_thickness, .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
+        .term = Meta{ .key = "term", .doc = .cfg_term, .widget = .text, .section = .terminal },
     };
 };
 
@@ -1200,7 +1206,7 @@ pub const FilePanelConfig = struct {
     external_link_target: ExternalLinkTarget = .in_app,
 
     pub const schema = .{
-        .external_link_target = Meta{ .doc = "파일 패널 외부 링크 열기 대상", .widget = .dropdown, .section = .workspace },
+        .external_link_target = Meta{ .doc = .cfg_filepanel_external_link_target, .widget = .dropdown, .section = .workspace },
     };
 };
 
@@ -1233,13 +1239,13 @@ pub const ShellConfig = struct {
 
     // command(text)·windows_shell(enum→dropdown)이 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
     pub const schema = .{
-        .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal, .abs_path = true },
+        .command = Meta{ .doc = .cfg_shell_command, .widget = .text, .section = .terminal, .abs_path = true },
         // **GUI에 노출하지 않는다(파일 전용).** 한때 `os.tag != .windows`로 숨겼는데, 설정 GUI를 그리는 코드가
         // `platform/macos`에만 있어서 그 식은 **GUI가 있는 유일한 플랫폼에서 숨기고 GUI가 없는 플랫폼에서
         // 보이게** 하는 정반대 효과였다(코드 리뷰 지적). 게다가 이 값을 실제 spawn에 넘기는 소비자가 아직
         // 없다(W7) — 동작하지 않는 컨트롤을 폼에 두지 않는다. Windows 호스트가 배선될 때 이 줄을 지운다.
         .windows_shell = Meta{
-            .doc = "Windows 기본 셸 종류(shell.command가 비었을 때)",
+            .doc = .cfg_shell_windows_shell,
             .section = .terminal,
             .hidden = true,
         },
@@ -1275,9 +1281,9 @@ pub const WorkspaceConfig = struct {
 
     // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·hold 토글은 스키마-주도.
     pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / hold-on-startup-failure
-        .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
-        .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
-        .hold_on_startup_failure = Meta{ .doc = "셸이 시작 직후 비정상 종료 시 창 유지(닫지 않음)", .widget = .toggle, .section = .workspace },
+        .tab_inherit_cwd = Meta{ .doc = .cfg_workspace_tab_inherit_cwd, .widget = .toggle, .section = .workspace },
+        .split_inherit_cwd = Meta{ .doc = .cfg_workspace_split_inherit_cwd, .widget = .toggle, .section = .workspace },
+        .hold_on_startup_failure = Meta{ .doc = .cfg_workspace_hold_on_startup_failure, .widget = .toggle, .section = .workspace },
     };
 };
 
@@ -1292,7 +1298,7 @@ pub const ShellIntegrationConfig = struct {
     ssh: bool = false,
 
     pub const schema = .{ // namespace shell-integration(dashed). 키: shell-integration.ssh
-        .ssh = Meta{ .doc = "평범한 ssh를 maru ssh로 라우팅", .widget = .toggle, .section = .terminal },
+        .ssh = Meta{ .doc = .cfg_shellint_ssh, .widget = .toggle, .section = .terminal },
     };
 };
 
@@ -1313,9 +1319,9 @@ pub const NotificationConfig = struct {
     history_limit: u32 = 64,
 
     pub const schema = .{ // 키: notifications.osc / notifications.update-check / notifications.history-limit
-        .osc = Meta{ .doc = "OSC 9/777 데스크톱 알림", .widget = .toggle, .section = .terminal },
-        .update_check = Meta{ .doc = "새 버전 출시 확인·안내", .widget = .toggle, .section = .terminal },
-        .history_limit = Meta{ .doc = "알림 센터 보관 개수", .range = .{ 8, 512 }, .widget = .number, .section = .terminal },
+        .osc = Meta{ .doc = .cfg_notif_osc, .widget = .toggle, .section = .terminal },
+        .update_check = Meta{ .doc = .cfg_notif_update_check, .widget = .toggle, .section = .terminal },
+        .history_limit = Meta{ .doc = .cfg_notif_history_limit, .range = .{ 8, 512 }, .widget = .number, .section = .terminal },
     };
 };
 
@@ -1330,8 +1336,8 @@ pub const ScrollbackConfig = struct {
     sticky_command: bool = true,
 
     pub const schema = .{ // 키: scrollback.lines (u32 range) / scrollback.sticky-command (bool)
-        .lines = Meta{ .doc = "스크롤백 보관 줄 수", .range = .{ 0, 100000 }, .widget = .number, .section = .terminal },
-        .sticky_command = Meta{ .doc = "스크롤 시 현재 명령줄을 최상단 고정(sticky)", .widget = .toggle, .section = .terminal },
+        .lines = Meta{ .doc = .cfg_scrollback_lines, .range = .{ 0, 100000 }, .widget = .number, .section = .terminal },
+        .sticky_command = Meta{ .doc = .cfg_scrollback_sticky_command, .widget = .toggle, .section = .terminal },
     };
 };
 
@@ -1346,7 +1352,7 @@ pub const ScrollConfig = struct {
     multiplier: f32 = 1.0,
 
     pub const schema = .{ // 키: scroll.multiplier (f32 range)
-        .multiplier = Meta{ .doc = "휠 스크롤 배수", .range = .{ 0.1, 10.0 }, .widget = .number, .section = .input },
+        .multiplier = Meta{ .doc = .cfg_scroll_multiplier, .range = .{ 0.1, 10.0 }, .widget = .number, .section = .input },
     };
 };
 
@@ -1365,7 +1371,7 @@ pub const Osc52Config = struct {
     read: Osc52Read = .deny,
 
     pub const schema = .{ // 키: osc52.read (enum)
-        .read = Meta{ .doc = "OSC 52 클립보드 읽기", .widget = .dropdown, .section = .terminal },
+        .read = Meta{ .doc = .cfg_osc52_read, .widget = .dropdown, .section = .terminal },
     };
 };
 
@@ -1382,8 +1388,8 @@ pub const BellConfig = struct {
     dock_badge: bool = false,
 
     pub const schema = .{ // 키: bell.audible / bell.visual / bell.dock-badge
-        .audible = Meta{ .doc = "BEL 수신 시 시스템 소리", .widget = .toggle, .section = .terminal },
-        .visual = Meta{ .doc = "BEL 수신 시 화면 번쩍임", .widget = .toggle, .section = .terminal },
-        .dock_badge = Meta{ .doc = "BEL 수신 시 Dock 배지", .widget = .toggle, .section = .terminal },
+        .audible = Meta{ .doc = .cfg_bell_audible, .widget = .toggle, .section = .terminal },
+        .visual = Meta{ .doc = .cfg_bell_visual, .widget = .toggle, .section = .terminal },
+        .dock_badge = Meta{ .doc = .cfg_bell_dock_badge, .widget = .toggle, .section = .terminal },
     };
 };

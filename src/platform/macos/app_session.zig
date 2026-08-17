@@ -4064,6 +4064,10 @@ pub const AppSession = struct {
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
     // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpanFor가 현재 뷰포트로 클립).
     hover_url_anchor: ?terminal.SelectionPoint = null,
+    /// hover 중인 링크의 **끝**(절대 좌표). 공백 든 경로는 토큰보다 넓어 `urlSpanAtAbs`가 재계산으로는
+    /// 못 구한다(그건 토큰 경계만 본다) — 존재검증으로 늘린 결과라 hover 때 한 번 정해 실어 둔다.
+    /// null이면 예전대로 anchor에서 토큰 경계까지 그린다.
+    hover_url_end: ?terminal.SelectionPoint = null,
     // 원격(host-backed) surface의 Cmd+hover 위치(**뷰포트 상대 셀**). 원격은 client core가 빈 placeholder라 절대
     // 좌표 anchor를 만들 수 없고, host가 실어 준 뷰포트 상대 span 목록(RenderSnapshot.links)에서 매 frame 다시
     // 조회한다 — 화면이 스크롤·갱신되면 host가 보낸 새 목록으로 자연히 갱신된다(로컬의 "anchor로 재계산"과 동형).
@@ -11783,6 +11787,7 @@ pub const AppSession = struct {
         }
         // 터미널 영역: (config 수식키)+hover URL이면 link(pointingHand), 아니면 text(iBeam).
         var next: ?terminal.SelectionPoint = null; // 로컬: 링크 시작 셀의 **절대** 좌표
+        var next_end: ?terminal.SelectionPoint = null; // 공백 확장까지 반영한 끝(없으면 토큰 경계로 계산)
         var next_remote: ?terminal.SelectionPoint = null; // 원격: hover 중인 **뷰포트** 셀
         var next_surface_id: u64 = 0; // 위 두 좌표가 속한 surface(0=hover 없음)
         if (self.urlModifierHeld(mods)) {
@@ -11816,7 +11821,9 @@ pub const AppSession = struct {
                         // 클릭하면 아무 일도 안 일어났다 — 위 불변식의 나머지 절반이 비어 있었다. 비용은 실측으로
                         // 무시할 수준이다(`openableLinkAnchorAt`의 doc).
                         if (s.core.openableLinkAnchorAt(self.allocator, cell.row, cell.col, linkScopesForTerm(self, hit.term)) catch null) |a| {
-                            next = a;
+                            next = a.anchor;
+                            // 공백 든 경로는 토큰보다 넓다 — 확장된 끝을 실어야 밑줄이 경로 전체를 덮는다.
+                            next_end = a.end;
                             next_surface_id = s.id;
                         }
                     }
@@ -11826,6 +11833,7 @@ pub const AppSession = struct {
         const changed = !pointEql(self.hover_url_anchor, next) or !pointEql(self.hover_remote_cell, next_remote) or
             self.hover_url_surface_id != next_surface_id; // 같은 좌표라도 pane이 바뀌면 밑줄을 옮겨 그려야 한다
         self.hover_url_anchor = next;
+        self.hover_url_end = next_end;
         self.hover_remote_cell = next_remote;
         self.hover_url_surface_id = next_surface_id;
         // 재검증용 좌표(레이아웃이 커서 아래에서 바뀌는 경우) — hover가 없으면 null로 비워 헛 재검증을 막는다.
@@ -11891,6 +11899,7 @@ pub const AppSession = struct {
             return self.remoteLinkSpanAt(surface, cell.row, cell.col);
         }
         const anchor = self.hover_url_anchor orelse return null;
+        if (self.hover_url_end) |end| return surface.core.spanBetweenAbs(anchor, end);
         return surface.core.urlSpanAtAbs(anchor);
     }
 

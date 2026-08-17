@@ -900,6 +900,7 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
         if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
         term.rt.editor_visible_lines = &.{};
         term.rt.editor_visible_numbers = &.{};
+        invalidateFoldDerived(self, term);
         return;
     }
 
@@ -940,6 +941,24 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     }
     term.rt.editor_visible_lines = out_lines;
     term.rt.editor_visible_numbers = out_numbers;
+    invalidateFoldDerived(self, term);
+}
+
+/// 접힘이 바뀌면 **보이는 줄이 달라지므로** 그것으로부터 나온 값이 전부 옛 것이다.
+///
+/// 가장 긴 줄이 접혀 숨어도 가로 상한이 그대로면 빈 곳으로 밀린다 — 실측: 2,000열짜리 줄이 숨었는데
+/// `max_cols`가 2000이라 `first_col`이 1911까지 갔다(화면엔 두 줄뿐. 적대적 검증 2026-08-17).
+/// 렌더가 싣는 값들도 옛 배열의 것이라 함께 버린다.
+fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
+    term.rt.editor_max_cols = 0;
+    term.rt.editor_max_cols_right = 0;
+    term.rt.editor_first_col = 0;
+    term.rt.editor_first_col_right = 0;
+    term.rt.editor_total_visual_rows = 0;
+    term.rt.editor_max_top_line = 0;
+    term.rt.editor_max_top_piece = 0;
+    term.rt.editor_first_piece = 0;
+    self.metal_dirty = true;
 }
 
 /// 한 번에 들 수 있는 숨는 구간 수. 접힘 자체가 `fold.max_depth`로 제한되고 구간은 그보다 적으므로
@@ -3092,4 +3111,42 @@ test "접은 뒤 끝까지 굴려도 마지막 화면이 안 빈다 — 스크�
 
     // **마지막 화면이 비면 안 된다** — 스크롤 상한이 접힘을 모르면 여기서 빈다.
     try testing.expectEqual(visible, drawn_rows);
+}
+
+test "가장 긴 줄이 접혀 숨으면 가로 상한도 다시 센다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // **들여쓴** 긴 줄이어야 접을 범위가 생긴다(처음엔 들여쓰기를 빼서 `foldAll`이 false였다).
+    const long = try allocator.alloc(u8, 2000);
+    defer allocator.free(long);
+    @memset(long, 'x');
+    long[0] = ' ';
+    long[1] = ' ';
+    const lines = try allocator.alloc([]const u8, 3);
+    defer allocator.free(lines);
+    lines[0] = "head:";
+    lines[1] = long; // 아주 긴 줄 — 접히면 숨는다
+    lines[2] = "tail";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    // 접기 전에 가로 상한을 세운다.
+    try testing.expect(scrollCols(fx.session, fx.term, fx.leaf_rect, -1_000_000, null));
+    const before = fx.term.rt.editor_max_cols;
+    try testing.expect(before > 1000);
+
+    // 접으면 그 긴 줄이 숨는다 — 남는 줄은 "head:"와 "tail"뿐이다.
+    try testing.expect(foldAll(fx.session));
+    _ = scrollCols(fx.session, fx.term, fx.leaf_rect, -1_000_000, null);
+    // 고치기 전: `max_cols`가 2000 그대로라 `first_col`이 **1911**까지 갔다 — 화면엔 두 줄뿐인데
+    // 1911열로 밀려 빈 화면이었다.
+    try testing.expect(fx.term.rt.editor_max_cols < before);
+
+    // **긴 줄이 숨었으니 가로로 밀 것이 없다.**
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 }

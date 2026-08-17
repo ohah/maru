@@ -350,7 +350,10 @@ pub const LivePtySession = struct {
         self.reader.setOutputByteCounter(counter);
     }
 
-    pub fn childPid(self: *const LivePtySession) std.c.pid_t {
+    /// 자식 프로세스 식별자. 타입은 **중립 별칭** `pty.ChildPid`다 — POSIX에서는 `std.c.pid_t`와 글자
+    /// 그대로 같고(소비자 무변), Windows에서는 ConPTY가 내는 `u32`다. 예전에는 여기가 `std.c.pid_t`를
+    /// 직접 써서 Windows에서 컴파일이 깨졌다(그 별칭이 거기서 `HANDLE`로 풀린다 — 계약 §4).
+    pub fn childPid(self: *const LivePtySession) pty.ChildPid {
         return self.session.childPid();
     }
 
@@ -845,4 +848,44 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
 
     live.closeAndDetach(&runtime);
     try std.testing.expect(live.link == null);
+}
+
+// **중립 레이어가 PTY 백엔드에 요구하는 표면을 컴파일 시점에 고정한다.**
+//
+// 왜 이 테스트가 필요한가: 이 파일은 OS 중립인데 백엔드는 둘이다. 한쪽에만 있는 표면을 여기서 부르면
+// 다른 쪽 타깃이 **컴파일 단계에서** 깨진다 — 그런데 그 깨짐은 그 타깃을 실제로 빌드해 봐야 보인다.
+// CI에 Windows 러너가 없으므로, 대신 `zig build test -Dtarget=…`가 이 테스트를 **컴파일**하는 것으로
+// 계약을 지킨다(실행이 아니라 분석이 요점이라 `_ = &f`로 참조만 한다).
+//
+// 실제로 둘 다 깨져 있었다(계약 §4의 "선행 정리 2건", W7에서 닫았다):
+//  ① `childPid()`가 `std.c.pid_t`를 썼는데 그 별칭이 Windows에서 `HANDLE`이라 백엔드의 `u32`와 안 맞았다.
+//  ② `PreparedAdoption` 계열(exec-restore)이 Windows 백엔드에 아예 없었다.
+test "중립 레이어가 요구하는 PTY 표면이 두 백엔드에 다 있다" {
+    // ① pid 타입이 중립 별칭으로 통일돼 있다. **comptime으로 단언한다** — 런타임 expect였다면
+    //    `-Dtarget=aarch64-macos`가 컴파일만 하고 실행은 안 하므로 macOS 갈래가 공허참이 된다.
+    comptime {
+        if (@typeInfo(@TypeOf(LivePtySession.childPid)).@"fn".return_type.? != pty.ChildPid)
+            @compileError("childPid는 중립 별칭 pty.ChildPid를 내야 한다");
+        // POSIX에서는 `std.c.pid_t`와 **같은 타입**이어야 한다 — 다르면 macOS 소비자가 깨진다(회귀 0 계약).
+        if (builtin.os.tag != .windows and pty.ChildPid != std.c.pid_t)
+            @compileError("POSIX에서 pty.ChildPid는 std.c.pid_t와 같아야 한다(회귀 0)");
+    }
+
+    // ② exec-restore 표면이 존재한다(없으면 아래 참조가 컴파일되지 않는다).
+    inline for (.{
+        LivePtySession.initPreparedAdoption,
+        LivePtySession.commitPreparedOwnership,
+        LivePtySession.discardPreparedAdoption,
+        LivePtySession.revalidatePreparedOwnership,
+        LivePtySession.upgradeEligible,
+    }) |f| {
+        const g = f;
+        _ = &g;
+    }
+    comptime {
+        for (.{ "prepare", "discard", "revalidate", "materialize" }) |name| {
+            if (!@hasDecl(pty.PtySession.PreparedAdoption, name))
+                @compileError("PreparedAdoption에 " ++ name ++ "이(가) 없다");
+        }
+    }
 }

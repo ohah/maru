@@ -955,9 +955,75 @@ pub const PtySession = struct {
         return null;
     }
 
-    pub fn childPid(self: *const PtySession) u32 {
+    pub fn childPid(self: *const PtySession) types.ChildPid {
         return self.child_pid;
     }
+
+    // ── exec-restore(라이브 host 업그레이드) 표면 — **명시적으로 막는다** ────────────────────────
+    //
+    // macOS는 host가 자기 자신을 `execve`로 새 이미지로 갈아끼우며, 상속된 PTY master **fd**를 새
+    // 프로세스가 주워 계속 쓴다(`PreparedAdoption`). 그 모델이 Windows에 그대로 오지 않는다 — `execve`가
+    // 없고(자기 교체가 아니라 새 프로세스 생성), 핸들 상속은 `bInheritHandles`로 되지만 ConPTY의 `HPCON`은
+    // 소유 관계가 다르다. **이식은 W7 밖의 별도 설계**다(계약 §8 "컨트롤 플레인 transport"와 같은 성격).
+    //
+    // 그런데 이 표면은 **중립 레이어**(`app/live_pty.zig`)가 시그니처로 들고 있어서, 없으면 Windows에서
+    // 컴파일이 깨진다(실측: `struct 'pty.windows.PtySession' has no member named 'PreparedAdoption'`).
+    // 그래서 W2가 `publishBrowserResult`에 쓴 것과 같은 규율로 **막되 시끄럽게 막는다** — 조용히 되는 척하면
+    // 이식하는 사람이 결정을 잊은 채 반쪽 동작을 얻는다.
+
+    /// **항상 false.** 업그레이드 경로가 아예 열리지 않으므로 아래 것들은 도달하지 않는다.
+    pub fn upgradeEligible(self: *const PtySession) bool {
+        _ = self;
+        return false;
+    }
+
+    /// 업그레이드가 시작되지 않으므로 호출될 일이 없다. 그래도 조용한 성공은 주지 않는다.
+    pub fn revalidatePreparedOwnership(self: *const PtySession) !void {
+        _ = self;
+        return error.UnsupportedOnWindows;
+    }
+
+    /// 실패할 수 없는 승격이라 macOS는 void를 낸다 — 여기서는 도달 자체가 계약 위반이다.
+    pub fn commitPreparedOwnership(self: *PtySession) void {
+        _ = self;
+        @panic("exec-restore는 Windows에서 지원되지 않는다(upgradeEligible이 항상 false여야 한다)");
+    }
+
+    /// reader가 pause된 동안 자식이 죽었는지 보는 probe. 업그레이드 경로 전용이라 여기선 막는다.
+    pub fn childExitedWithoutReap(self: *const PtySession) error{ChildProbeFailed}!bool {
+        _ = self;
+        return error.ChildProbeFailed;
+    }
+
+    /// 상속된 PTY를 새 이미지가 주워 쓰는 pre-commit 어댑션. **만들 수 없다** — `prepare`가 항상 실패하므로
+    /// 나머지 메서드는 도달하지 않는다. 타입 자체는 중립 레이어의 시그니처가 요구해서 존재한다.
+    pub const PreparedAdoption = struct {
+        size: terminal.Size = .{ .cols = 0, .rows = 0 },
+        committed: bool = false,
+
+        /// 시그니처는 macOS 쪽과 **같은 모양**으로 둔다(`anytype`으로 흐리지 않는다) — 흐리면 나중에 실제
+        /// 이식할 때 인자가 안 맞는 것을 컴파일러가 안 잡아 준다. `std.posix.fd_t`는 Windows에서 `HANDLE`이다.
+        pub fn prepare(inherited_slot: std.posix.fd_t, child_pid: types.ChildPid, size: terminal.Size) !PreparedAdoption {
+            _ = inherited_slot;
+            _ = child_pid;
+            _ = size;
+            return error.UnsupportedOnWindows;
+        }
+
+        pub fn discard(self: *PreparedAdoption) void {
+            _ = self; // 만들어진 적이 없으므로 풀 것도 없다
+        }
+
+        pub fn revalidate(self: *const PreparedAdoption) !void {
+            _ = self;
+            return error.UnsupportedOnWindows;
+        }
+
+        pub fn materialize(self: *PreparedAdoption) PtySession {
+            _ = self;
+            @panic("PreparedAdoption은 Windows에서 만들어질 수 없다(prepare가 항상 실패한다)");
+        }
+    };
 };
 
 // ── 조립 헬퍼 ─────────────────────────────────────────────────────────────────────────────────

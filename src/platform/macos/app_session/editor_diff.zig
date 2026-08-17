@@ -1525,3 +1525,39 @@ test "gutter 자릿수는 렌더와 같은 출처로 센다 — 최소 자릿수
     const want = chrome_editor.geometry.compute(m.total_cols, doc.len, .{}).content.width; // 렌더가 쓰는 출처
     try testing.expectEqual(want, editor_ops.visibleColsForTest(fx.session, body, fx.term, false));
 }
+
+test "비교 뷰에서는 접기를 거절한다 — 성공을 돌려주고 아무 일도 안 하면 안 된다" {
+    // `foldAll`은 `editorLines`를 쓰는데 비교에서는 **왼쪽 행 배열**이 나온다. 그러면 접힘 상태가
+    // 만들어지지만 렌더는 diff 경로를 타므로 **화면은 그대로**다 — 성공을 돌려주고 아무 일도 안
+    // 일어나면 사용자는 이유를 알 수 없다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // **이 Term을 활성으로 만든다** — `foldAll`은 활성 Term에 작용한다. 안 그러면 엉뚱한 Term을 보고
+    // `false`가 나와 "비교에서는 안 접힌다"고 오판한다(실제로 처음에 그렇게 읽었다).
+    const pane = pane_ops.activePane(fx.session);
+    fx.session.focusTerm(pane.terms.items.len - 1);
+
+    var entry = testEntry("a\n  b\n  c\n", "a\n  b\n  C\n");
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    poll(fx.session, fx.term);
+
+    var before = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const cells_before = before.dl.cells.len;
+    before.dl.deinit(allocator);
+
+    const folded = editor_ops.foldAll(fx.session);
+    var after = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer after.dl.deinit(allocator);
+
+    // **거절해야 한다.** 초판은 `true`를 돌려주면서 화면은 그대로였다(셀 20 → 20) — 접힘 상태를
+    // 만들지만 렌더가 비교 경로를 타서 무시했다. 이유는 랩과 같다: 좌우 행이 짝을 이뤄 같은 높이에
+    // 서야 비교가 성립한다.
+    try testing.expect(!folded);
+    try testing.expectEqual(cells_before, after.dl.cells.len);
+    try testing.expect(!editor_ops.unfoldAll(fx.session));
+}

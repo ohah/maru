@@ -846,6 +846,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 pub fn foldAll(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
+    if (isCompare(term)) return false; // 아래 doc — 비교는 접지 않는다
     ensureFoldRanges(self, term) catch return false; // 못 세면 아무 일도 안 한다
     const ranges = term.rt.editor_fold_ranges;
     if (ranges.len == 0) return false;
@@ -866,6 +867,7 @@ pub fn foldAll(self: *AppSession) bool {
 pub fn unfoldAll(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
+    if (isCompare(term)) return false;
     if (term.rt.editor_folded_len == 0) return false;
     term.rt.editor_folded_len = 0;
     rebuildVisible(self, term) catch {}; // 펼치기는 배열을 푸는 쪽이라 실패할 것이 없다
@@ -893,18 +895,23 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     var span_buf: [max_fold_spans]editor_fold.Span = undefined;
     const spans = editor_fold.hiddenSpans(term.rt.editor_fold_ranges, heads, &span_buf);
 
-    var visible: usize = 0;
-    for (0..lines.len) |i| {
-        if (!editor_fold.isHidden(spans, @intCast(i))) visible += 1;
-    }
+    // **줄마다 구간을 훑지 않는다.** 둘 다 문서 순서이므로 커서 하나로 나란히 간다 — 초판은
+    // `isHidden`을 줄마다 불러 O(줄 × 구간)이었고, 실측 1,000블록 5ms · 2,000 15ms · **4,000 57ms**
+    // (두 배마다 4배)였다. 4만 줄이면 전체 접기에 1.4초다(적대적 검증 2026-08-17).
+    var hidden_total: usize = 0;
+    for (spans) |sp| hidden_total += sp.last - sp.first + 1;
+    const visible = lines.len -| hidden_total;
 
     const out_lines = try self.allocator.alloc([]const u8, visible);
     errdefer self.allocator.free(out_lines);
     const out_numbers = try self.allocator.alloc(?u32, visible);
 
     var k: usize = 0;
+    var si: usize = 0;
     for (lines, 0..) |line, i| {
-        if (editor_fold.isHidden(spans, @intCast(i))) continue;
+        while (si < spans.len and spans[si].last < i) si += 1;
+        if (si < spans.len and i >= spans[si].first) continue; // 숨는 줄
+        if (k >= out_lines.len) break; // 방어 — 구간 합과 어긋나도 넘치지 않는다(아래에서 꼬리를 채운다)
         out_lines[k] = line;
         out_numbers[k] = @intCast(i + 1); // gutter는 1-based다
         k += 1;
@@ -913,6 +920,13 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     // 여기서부터 실패 지점이 없다 — 옛 것을 풀고 넘긴다(§2.0a commit-last).
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+    // **잘라서 넘기면 안 된다** — `free`는 잡을 때의 길이를 요구하므로 부분 슬라이스를 넘기면 해제가
+    // 어긋난다. 구간 합과 실제가 어긋나는 경우(상태와 범위가 잠시 갈릴 때)에만 꼬리가 남는데,
+    // 빈 줄·번호 없음으로 채워 배열을 온전히 유지한다.
+    while (k < out_lines.len) : (k += 1) {
+        out_lines[k] = "";
+        out_numbers[k] = null;
+    }
     term.rt.editor_visible_lines = out_lines;
     term.rt.editor_visible_numbers = out_numbers;
 }
@@ -920,6 +934,20 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// 한 번에 들 수 있는 숨는 구간 수. 접힘 자체가 `fold.max_depth`로 제한되고 구간은 그보다 적으므로
 /// 넉넉하다 — 넘으면 그 뒤가 안 접힐 뿐 죽지 않는다(§3.8).
 const max_fold_spans: usize = 4096;
+
+/// 비교(좌우 두 열) 상태인가. **접힘은 여기서 거절한다.**
+///
+/// 이유가 랩과 같다(§4.1d 알려진 구멍): 비교는 **좌우 행이 짝을 이뤄 같은 높이에 서야** 성립하는데,
+/// 한쪽 행만 접으면 그 아래가 통째로 어긋난다. 게다가 렌더는 비교일 때 `st.left_texts`를 그리므로
+/// **접힘 상태를 만들어도 화면이 그대로다** — 성공을 돌려주고 아무 일도 안 일어나면 사용자는 이유를
+/// 알 수 없다(적대적 검증 2026-08-17이 그 상태를 잡았다).
+///
+/// VSCode의 diff가 "바뀌지 않은 구간 접기"를 제공하지만 그것은 **좌우를 함께 접는 다른 기능**이고,
+/// 들여쓰기 접힘을 한쪽에 적용하는 것과 다르다.
+fn isCompare(term: *Term) bool {
+    const st = term.rt.editor_diff orelse return false;
+    return st.view == .compare;
+}
 
 /// 접혀 있으면 **원래 줄 번호** 배열을, 아니면 `null`(프레임이 `first_line + n + 1`로 센다).
 fn foldNumbers(term: *Term) ?[]const ?u32 {
@@ -2987,4 +3015,31 @@ test "접으면 화면에서 그 줄들이 사라지고 번호는 원래 값이�
         if (c.codepoint == 'z') z_back += 1;
     }
     try testing.expectEqual(z_before, z_back);
+}
+
+test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
+    // `rebuildVisible`은 줄마다 `isHidden(spans, i)`를 부른다. 구간이 많아지면 줄×구간이라
+    // **방금 `hiddenSpans`에서 고친 것과 같은 부류**다. 재고 확인한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]usize{ 1000, 2000, 4000 }) |blocks| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        const n = blocks * 2;
+        const lines = try allocator.alloc([]const u8, n);
+        defer allocator.free(lines);
+        for (0..blocks) |b| {
+            lines[b * 2] = "head:";
+            lines[b * 2 + 1] = "  body";
+        }
+        fx.term.rt.editor_lines = lines;
+
+        const t0 = monotonicMsForTest();
+        try testing.expect(foldAll(fx.session));
+        const t1 = monotonicMsForTest();
+        std.debug.print("\n[측정] {d}블록 전체 접기(보이는 줄 만들기 포함): {d}ms\n", .{ blocks, t1 - t0 });
+    }
 }

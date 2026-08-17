@@ -35,8 +35,8 @@ const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", 
 /// **영어 고정 표면**(계약 §7.1) — CLI 는 스크립트가 파싱하고 이슈에 붙여 넣는 출력이라 언어를 고르지
 /// 않는다. 그래서 여기서는 키가 아니라 **영어 문장**이 정답이고, 한국어 리터럴은 곧 위반이다.
 ///
-/// 원장을 0 이 아니라 현재 수로 두는 이유: I5 가 아직 진행 중이다(138 건). 늘면 실패하므로 **새 한국어가
-/// CLI 로 들어오지 못하고**, 줄이면 원장을 함께 줄이라고 말해 진행률이 원장에 남는다.
+/// 원장은 **거의 비어 있다** — I5 가 CLI 137 건을 영어로 옮겼다. 남은 항목이 0 이 되면 원장에서 빼고,
+/// 그러면 그 파일은 "한국어 0" 이 기본값이 되어 한 건만 들어와도 실패한다.
 const english_only_roots = [_][]const u8{"src/cli"};
 const english_only_files = [_][]const u8{"src/main.zig"};
 
@@ -45,10 +45,10 @@ const Entry = struct { path: []const u8, count: usize };
 /// 파일별 남은 한국어 리터럴 수. **늘면 실패**하고, **줄어도 실패**한다(원장을 함께 줄이라는 뜻).
 /// 새 파일이 한글 리터럴을 들고 나타나면 원장에 없으므로 실패한다 — 그것이 이 게이트의 본래 목적이다.
 const inventory = [_]Entry{
-    // ── 영어 고정 표면(§7.1) — I5 가 줄여 간다 ──
-    .{ .path = "src/cli/browser/run.zig", .count = 41 },
+    // ── 영어 고정 표면(§7.1) ──
+    // `main.zig`(96) 와 `cli/browser/run.zig`(41) 는 **0 이 되어 원장에서 빠졌다**. 남은 하나는
+    // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
-    .{ .path = "src/main.zig", .count = 96 },
 
     // ── 번역 대상 레이어(§7.2) ──
     .{ .path = "src/chrome/components/archive_detail/build.zig", .count = 3 },

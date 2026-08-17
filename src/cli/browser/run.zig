@@ -56,38 +56,38 @@ pub fn run(
 /// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(`writeSessionCliUsage` 동형).
 pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
     const reason = switch (err) {
-        error.MissingSubcommand => "서브커맨드가 필요합니다",
-        error.UnknownSubcommand => "알 수 없는 서브커맨드입니다",
-        error.MissingSurface => "--surface <id> 가 필요합니다",
-        error.InvalidSurface => "surface id는 음이 아닌 정수여야 합니다",
-        error.MissingSurfaceValue => "--surface 에는 값이 필요합니다",
-        error.MissingUrl => "navigate 에는 url이 필요합니다",
-        error.MissingScript => "exec 에는 script가 필요합니다",
-        error.MissingArgsValue => "exec --args 에는 JSON 배열 값이 필요합니다",
-        error.InvalidArgs => "exec --args 는 유효한 JSON 배열이어야 합니다",
-        error.MissingMaxResultBytesValue => "exec --max-result-bytes 에는 값이 필요합니다",
-        error.InvalidMaxResultBytes => "exec --max-result-bytes 는 1..16777216 범위의 정수여야 합니다",
-        error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
-        error.MissingRectValue => "screenshot --rect 에는 값이 필요합니다",
-        error.MissingScaleValue => "screenshot --scale 에는 값이 필요합니다",
-        error.InvalidRect => "--rect 는 x,y,w,h (수치 4개, w/h>0) 형식이어야 합니다",
-        error.InvalidScale => "--scale 은 양수여야 합니다",
-        error.MissingName => "--name 이 필요합니다",
-        error.MissingKey => "--key 가 필요합니다",
-        error.MissingSelector => "--selector 가 필요합니다",
-        error.MissingLocator => "click/type/scroll 에는 --selector 또는 --ref 중 하나가 필요합니다",
-        error.ConflictingLocator => "click/type/scroll 에는 --selector와 --ref 중 하나만 지정할 수 있습니다",
-        error.MissingWaitCondition => "wait 에는 --selector 또는 --load 중 하나가 필요합니다",
-        error.ConflictingWaitCondition => "wait 에는 --selector와 --load 중 하나만 지정할 수 있습니다",
-        error.MissingTimeoutValue => "wait --timeout 에는 값이 필요합니다",
-        error.InvalidTimeout => "wait --timeout 은 1..25000 범위의 정수여야 합니다",
-        error.MissingText => "type 에는 --text 가 필요합니다",
-        error.MissingValue => "--value 가 필요합니다",
-        error.MissingOptionValue => "옵션에 값이 필요합니다",
-        error.MissingMaxDepthValue => "snapshot --max-depth 에는 값이 필요합니다",
-        error.InvalidMaxDepth => "--max-depth 는 음이 아닌 정수여야 합니다",
-        error.UnknownOption => "알 수 없는 옵션입니다",
-        error.UnexpectedArgument => "인자가 너무 많습니다",
+        error.MissingSubcommand => "a subcommand is required",
+        error.UnknownSubcommand => "unknown subcommand",
+        error.MissingSurface => "--surface <id> is required",
+        error.InvalidSurface => "the surface id must be a non-negative integer",
+        error.MissingSurfaceValue => "--surface needs a value",
+        error.MissingUrl => "navigate needs a url",
+        error.MissingScript => "exec needs a script",
+        error.MissingArgsValue => "exec --args needs a JSON array value",
+        error.InvalidArgs => "exec --args must be a valid JSON array",
+        error.MissingMaxResultBytesValue => "exec --max-result-bytes needs a value",
+        error.InvalidMaxResultBytes => "exec --max-result-bytes must be an integer in 1..16777216",
+        error.MissingOutValue => "screenshot --out needs a value",
+        error.MissingRectValue => "screenshot --rect needs a value",
+        error.MissingScaleValue => "screenshot --scale needs a value",
+        error.InvalidRect => "--rect must be x,y,w,h (four numbers, w/h > 0)",
+        error.InvalidScale => "--scale must be positive",
+        error.MissingName => "--name is required",
+        error.MissingKey => "--key is required",
+        error.MissingSelector => "--selector is required",
+        error.MissingLocator => "click/type/scroll needs either --selector or --ref",
+        error.ConflictingLocator => "click/type/scroll takes only one of --selector and --ref",
+        error.MissingWaitCondition => "wait needs either --selector or --load",
+        error.ConflictingWaitCondition => "wait takes only one of --selector and --load",
+        error.MissingTimeoutValue => "wait --timeout needs a value",
+        error.InvalidTimeout => "wait --timeout must be an integer in 1..25000",
+        error.MissingText => "type needs --text",
+        error.MissingValue => "--value is required",
+        error.MissingOptionValue => "the option needs a value",
+        error.MissingMaxDepthValue => "snapshot --max-depth needs a value",
+        error.InvalidMaxDepth => "--max-depth must be a non-negative integer",
+        error.UnknownOption => "unknown option",
+        error.UnexpectedArgument => "too many arguments",
     };
     try stderr.print("maru browser: {s}\n\n", .{reason});
     try stderr.writeAll(browser.browser_help);
@@ -125,7 +125,7 @@ fn runExecuteScript(
 ) !void {
     const request_id: cp.Id = .{ .number = 1 };
     const request_bytes = browser.buildRequestBytes(allocator, .{ .exec = exec_cmd }, request_id) catch |err| switch (err) {
-        error.InvalidArgs => return executeError(stderr, "--args 는 유효한 JSON 배열이어야 합니다"),
+        error.InvalidArgs => return executeError(stderr, "--args must be a valid JSON array"),
         else => return err,
     };
     defer allocator.free(request_bytes);
@@ -162,20 +162,20 @@ fn runExecuteScript(
                     stderr.flush() catch {};
                     return error.UnknownCommand;
                 },
-                .failed => return executeError(stderr, "서버가 잘못된 executeScript stream을 반환했습니다"),
+                .failed => return executeError(stderr, "the server returned a malformed executeScript stream"),
             }
         }
         var read_buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &read_buf, read_buf.len);
-        if (n <= 0) return executeError(stderr, "서버가 응답을 끝내지 않았습니다");
+        if (n <= 0) return executeError(stderr, "the server did not finish the response");
         framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
     if (!validateJsonSlice(allocator, result.items))
-        return executeError(stderr, "executeScript 결과가 strict JSON이 아닙니다");
+        return executeError(stderr, "the executeScript result is not strict JSON");
 
     if (exec_cmd.out) |path| {
         publishResult(std.Io.Dir.cwd(), io, path, result.items) catch
-            return executeError(stderr, "출력 파일을 원자적으로 게시할 수 없습니다");
+            return executeError(stderr, "cannot publish the output file atomically");
         try stdout.print("executeScript: {d} bytes → {s}\n", .{ result.items.len, path });
     } else {
         try stdout.writeAll(result.items);
@@ -300,18 +300,18 @@ fn runScreenshot(
                     stderr.flush() catch {};
                     return error.UnknownCommand;
                 },
-                .failed => return screenshotError(stderr, "서버가 잘못된 screenshot stream을 반환했습니다"),
+                .failed => return screenshotError(stderr, "the server returned a malformed screenshot stream"),
             }
         }
         var buf: [4096]u8 = undefined;
         const n = c.read(fd, &buf, buf.len); // grant held면 사용자 클릭까지 블록(§9.6)
-        if (n <= 0) return screenshotError(stderr, "서버가 응답을 끝내지 않았습니다 (불완전한 스트림)");
+        if (n <= 0) return screenshotError(stderr, "the server did not finish the response (incomplete stream)");
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
     if (shot.out) |path| {
         publishResult(std.Io.Dir.cwd(), io, path, result.items) catch
-            return screenshotError(stderr, "출력 파일을 원자적으로 게시할 수 없습니다");
+            return screenshotError(stderr, "cannot publish the output file atomically");
         try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, result.items.len, path });
         try stdout.flush();
     } else {
@@ -360,7 +360,7 @@ fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const
 }
 
 fn wrappedStreamError(stderr: *std.Io.Writer, cmd_label: []const u8) error{UnknownCommand} {
-    stderr.print("maru browser {s}: 서버가 잘못된 {s} stream을 반환했습니다\n", .{ cmd_label, cmd_label }) catch {};
+    stderr.print("maru browser {s}: the server returned a malformed {s} stream\n", .{ cmd_label, cmd_label }) catch {};
     stderr.flush() catch {};
     return error.UnknownCommand;
 }

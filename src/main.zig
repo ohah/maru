@@ -145,6 +145,18 @@ fn dispatch(
     return error.UnknownCommand;
 }
 
+/// 이 호스트의 홈 디렉터리(없으면 null). 환경변수를 읽는 **I/O만** 여기서 하고 판정은
+/// `maru.cli.home.homeDirFor`(순수·OS 인자)가 한다 — 규칙이 갈리지 않게 네 소비자가 이 함수 하나를 쓴다
+/// (terminfo 캐시 · `install-cli` 위치 · ssh control path · `trace anonymize`의 매칭 키).
+///
+/// 반환 슬라이스는 **환경 블록을 borrow**한다(`std.mem.span` — free하지 않는다). 프로세스 수명 동안
+/// 유효하고, `main`이 환경을 바꾸지 않으므로 안전하다.
+fn hostHomeDir() ?[]const u8 {
+    const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
+    const userprofile: ?[]const u8 = if (std.c.getenv("USERPROFILE")) |u| std.mem.span(u) else null;
+    return maru.cli.home.homeDirFor(@import("builtin").os.tag, home, userprofile);
+}
+
 fn printSmoke(stdout: *std.Io.Writer) !void {
     // 기본 CLI는 의도적으로 작게 둔다. macOS 앱 host가 붙기 전에도
     // `zig build run` 하나로 모듈 그래프가 컴파일되는지 확인하기 위해서다.
@@ -452,9 +464,9 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     // 길거나 HOME/목적지가 없으면 빈 문자열 → 스크립트가 control socket 없이 폴백한다. getenv 같은 I/O는
     // 여기(main)서 하고, 경로 계산은 순수 함수(maru.cli.ssh.controlSocketPath)가 갖는다.
     const ctl: []const u8 = blk: {
-        const home = std.c.getenv("HOME") orelse break :blk "";
+        const home = hostHomeDir() orelse break :blk "";
         const dest = maru.cli.ssh.destination(parsed.ssh_args) orelse break :blk "";
-        break :blk maru.cli.ssh.controlSocketPath(allocator, std.mem.span(home), dest) catch |err| switch (err) {
+        break :blk maru.cli.ssh.controlSocketPath(allocator, home, dest) catch |err| switch (err) {
             error.ControlPathTooLong => "", // 경로 한도 초과 → control socket 없이 폴백
             error.OutOfMemory => return err,
         };
@@ -503,12 +515,11 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
 
-    const home_z = std.c.getenv("HOME") orelse {
-        try stderr.writeAll("maru install-cli: $HOME가 없어 설치 위치를 정할 수 없습니다\n");
+    const home = hostHomeDir() orelse {
+        try stderr.writeAll("maru install-cli: 홈 디렉터리를 찾지 못해 설치 위치를 정할 수 없습니다($HOME)\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
-    const home = std.mem.span(home_z);
 
     const bindir = try maru.cli.install.binDir(allocator, home);
     defer allocator.free(bindir);
@@ -563,8 +574,9 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         return error.UnknownCommand;
     };
 
-    const home_z = std.c.getenv("HOME") orelse {
-        try stderr.writeAll("maru terminfo: $HOME가 없어 캐시 위치를 정할 수 없습니다\n");
+    const home_raw = hostHomeDir() orelse {
+        try stderr.writeAll("maru terminfo: 홈 디렉터리를 찾지 못해 캐시 위치를 정할 수 없습니다($HOME" ++
+            (if (@import("builtin").os.tag == .windows) "·%USERPROFILE%" else "") ++ ")\n");
         try stderr.flush();
         return error.UnknownCommand;
     };
@@ -576,7 +588,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     const xdg_raw = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
     const xdg: ?[]const u8 = if (xdg_raw) |x| try maru.path_shape.normalizeSeparators(allocator, x) else null;
     defer if (xdg) |x| allocator.free(x);
-    const home = try maru.path_shape.normalizeSeparators(allocator, std.mem.span(home_z));
+    const home = try maru.path_shape.normalizeSeparators(allocator, home_raw);
     defer allocator.free(home);
 
     const dir = try maru.terminfo_cache.cacheDirZ(allocator, xdg, home);
@@ -607,7 +619,16 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
             if (system(cmd.ptr) == 0) {
                 try stdout.writeAll("완료: xterm-maru 재컴파일됨\n");
             } else {
-                try stderr.writeAll("maru terminfo: 재컴파일 실패 — tic(ncurses)이 설치돼 있는지 확인하세요(셸에선 xterm-256color로 폴백)\n");
+                // Windows에서는 원인이 하나 더 있다. `system()`은 여기서 `/bin/sh`가 아니라 **cmd.exe**로
+                // 가는데(msvcrt), 재컴파일 명령은 `rm -rf`·`mkdir -p`·`printf`를 쓰는 POSIX 스크립트다.
+                // 실측(PowerShell·cmd): 그 넷도 `tic`도 PATH에 없다 — 둘 다 git-bash의 `/usr/bin`에만 있다.
+                // 그래서 tic만 가리키면 사용자가 tic을 깔아도 여전히 실패한다. 계약 §8 "홈·캐시 위치" 참조.
+                try stderr.writeAll(if (@import("builtin").os.tag == .windows)
+                    "maru terminfo: 재컴파일 실패 — Windows에서는 POSIX 셸(rm·mkdir -p·printf)과 tic(ncurses)이 둘 다 필요합니다.\n" ++
+                        "  둘 다 git-bash(C:\\Program Files\\Git\\usr\\bin)에는 있으나 cmd/PowerShell PATH에는 없습니다 — git-bash에서 실행하세요.\n" ++
+                        "  (재컴파일 없이도 셸은 xterm-256color로 폴백하므로 터미널은 정상 동작합니다)\n"
+                else
+                    "maru terminfo: 재컴파일 실패 — tic(ncurses)이 설치돼 있는지 확인하세요(셸에선 xterm-256color로 폴백)\n");
                 try stderr.flush();
                 return error.UnknownCommand;
             }
@@ -616,7 +637,17 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         .clear => {
             const cmd = try maru.terminfo_cache.clearCommand(allocator);
             defer allocator.free(cmd);
-            _ = system(cmd.ptr);
+            // **반환값을 봐야 한다.** 예전에는 버렸는데, Windows에서 `system()`이 cmd.exe로 가 `rm`이 없어
+            // 실패하는데도 "삭제: <경로>"를 exit 0으로 찍었다(실측) — 지우지 않고 지웠다고 말하는 셈이다.
+            // POSIX에서 `rm -rf`는 대상이 없어도 0이라 이 검사가 정상 경로를 막지 않는다.
+            if (system(cmd.ptr) != 0) {
+                try stdout.flush();
+                try stderr.print("maru terminfo: 캐시 삭제 실패 — {s}\n", .{dir});
+                if (@import("builtin").os.tag == .windows)
+                    try stderr.writeAll("  Windows에서는 `rm`이 cmd/PowerShell PATH에 없습니다 — git-bash에서 실행하거나 해당 폴더를 직접 지우세요\n");
+                try stderr.flush();
+                return error.UnknownCommand;
+            }
             try stdout.print("maru terminfo 캐시 삭제: {s}\n", .{dir});
         },
     }
@@ -649,8 +680,13 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
             };
             defer allocator.free(input);
 
+            // 여기의 `home`은 **매칭 키**다(트레이스에서 홈 경로를 지운다) — 그래서 정규화하지 않는다
+            // (계약 §5, W3). 폴백을 넣되 그 값은 제한적이다(실측): 익명화기가 `…/Users/<name>/` 모양을
+            // **자체 규칙으로 이미** 일반화하므로 `C:\Users\me`는 `home`이 null이어도 지워진다. `home`이
+            // 값을 하는 것은 **관례 밖 홈**뿐이다 — `D:\myhome`은 `home` 없이는 그대로 남고, 있으면
+            // `D:/user`로 바뀐다. Windows 폴백은 그 자리를 닫는다.
             const opts: maru.redact.AnonymizeOptions = .{
-                .home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null,
+                .home = hostHomeDir(),
                 .username = if (std.c.getenv("USER")) |u| std.mem.span(u) else null,
             };
             const anon = maru.observability.trace.anonymizeTrace(allocator, input, opts) catch |e| {

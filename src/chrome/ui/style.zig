@@ -15,6 +15,12 @@ pub const CardVariant = enum { surface, raised, selected, danger };
 /// 상태(hover/focus/pressed/disabled) 해석은 variant와 독립이며 `paint_style`이 한 곳에서 얹는다.
 pub const ButtonVariant = enum { primary, secondary, ghost, danger };
 pub const TextTone = enum { primary, muted, accent, danger };
+/// 이 면 위에서 **마우스가 무엇이라고 말하는가**. 커서 모양은 색·테두리와 같은 층의 사실이라
+/// component가 선언하고(published tree에 실린다), host는 그것을 자기 플랫폼 커서로 옮기기만 한다 —
+/// host가 "무엇을 누를 수 있나"를 다시 추론하면 그 판정의 주인이 둘이 된다(사용자 지적 2026-08-17).
+///
+/// `auto`는 "이 노드는 할 말이 없다"는 뜻이다 — 상위 규칙(도크·터미널의 기본 커서)이 정한다.
+pub const CursorHint = enum { auto, arrow, text, press };
 pub const ShadowKind = enum { none, raised };
 
 /// 시각 override는 layout props와 같은 immutable component snapshot을 공유하지만 geometry를 푸는
@@ -31,6 +37,12 @@ pub const PaintStyle = struct {
     /// `null`은 variant 기본값을 유지하고, `.none`은 명시적으로 끈다.
     shadow: ?ShadowKind = null,
     opacity: u8 = 0xFF,
+    /// 호버·눌림이 **이 면의 배경을 덮는가**. 기본은 참이다(목록 행·버튼은 그래야 누를 수 있음이 보인다).
+    ///
+    /// 끄는 자리는 **텍스트 입력면**이다: 거기서 마우스가 뜻하는 것은 "누를 수 있다"가 아니라 "여기에
+    /// caret을 놓는다"이고, 그 신호는 커서 모양(I-beam)이 이미 낸다. 면까지 밝아지면 편집 중임을 말하는
+    /// 테두리와 신호가 섞인다(사용자 지적 2026-08-17). 테두리·전경 해석은 그대로 둔다.
+    state_fill: bool = true,
 };
 
 pub const CardVisual = struct { variant: CardVariant, paint: PaintStyle };

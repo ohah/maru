@@ -856,7 +856,9 @@ const Writer = struct {
         if (rect.rect.height < @as(f32, @floatFromInt(line_h)) or rect.rect.width <= 0) return;
         const box = draw.Rect{
             .x = @intFromFloat(@floor(rect.rect.x)),
-            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(line_h))) / 2)),
+            // **반올림한다**(내림이 아니라). 남는 높이가 홀수면 내림은 글자를 늘 위쪽으로 1px 밀고,
+            // 28px 면 위의 17px 줄처럼 그 차가 눈에 띄는 자리가 있다(커밋 버튼 — 사용자 지적 2026-08-17).
+            .y = @intFromFloat(@round(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(line_h))) / 2)),
             .w = @intFromFloat(@floor(rect.rect.width)),
             .h = line_h,
         };

@@ -455,6 +455,13 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     };
 
     const layout = editor_view.geometry.compute(total_cols, line_count, .{});
+    // **가로 막대가 서는 시나리오만 값을 낸다.** 손으로 적지 않고 fixture를 세는 이유는 제품이
+    // 여는 경로에서 세는 그 계산과 같아야 캡처가 제품을 예고하기 때문이다(§4.1a).
+    const hscroll_max_cols: ?u32 = if (scenario.id == .editor_hscroll) blk: {
+        var widest: u32 = 0;
+        for (lines) |line| widest = @max(widest, editor_view.content.lineColumnsUpTo(line, editor_view.frame.default_tab_width, editor_view.frame.max_cols_count_limit));
+        break :blk widest;
+    } else null;
     // 행 저장소가 고정이므로 **거기에 맞춰 자른다.** 지금 fixture로는 넘지 않지만, 줄을 늘리거나
     // 뷰포트를 키우면 `while (n < visible)` 루프가 배열 밖을 쓴다. 잘린 캡처가 나오는 편이
     // 메모리를 밟는 것보다 낫고, 그 상태는 골든이 즉시 잡는다.
@@ -543,7 +550,19 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .total_lines = if (scenario.id == .editor_folded) 24 else line_count,
         .line_numbers = if (scenario.id == .editor_folded) &editor_folded_numbers else null,
         .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
-        .visible_rows = @min(vp.rows, row_capacity),
+        // **가로 스크롤 시나리오만 막대를 세운다.** 값은 손으로 적지 않고 fixture에서 센다 —
+        // 제품이 여는 경로에서 세는 그 값과 같은 계산이어야 캡처가 제품을 예고한다(§4.1a).
+        .content_max_cols = hscroll_max_cols,
+        // **가로 막대가 자리를 먹는다**(§4.1a) — 제품은 `diff_frame.sideMetricsWith`가 같은 일을
+        // 한다. Lab이 이 몫을 안 빼면 막대가 뷰 밖에 그려져 캡처에 안 나오고, 그러면 이 시나리오가
+        // 예고해야 할 화면을 예고하지 못한다.
+        .visible_rows = editor_view.diff_frame.sideMetricsWith(
+            content_w,
+            view_h_px,
+            cell_w_px,
+            cell_h_px,
+            editor_view.frame.showsHorizontalBar(wrap_on, hscroll_max_cols, layout.content.width),
+        ).visible_rows,
         .wrap = wrap_on,
 
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px }),

@@ -143,6 +143,9 @@ pub fn buildPaneOps(
     first_line: usize,
     first_piece: u32,
     first_col: u16,
+    /// 문서에서 **가장 긴 줄**의 표시 폭(열). 가로 스크롤바가 이 값으로 막대를 그리고, 그 막대가
+    /// 자리를 먹으므로 본문 높이도 여기서 갈린다(§4.1a). `null`이면 막대가 없다.
+    content_max_cols: ?u32,
     wrap: bool,
     rect: chrome_draw.Rect,
     cell_w_px: u16,
@@ -156,7 +159,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -330,7 +333,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -346,7 +349,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -461,6 +464,10 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     // **실패해도 파일은 연다.** 접힘은 부가 기능이고, 여는 것을 막는 이유는 UTF-8 아님 하나다(§3.5).
     ensureFoldRanges(self, term) catch {};
     rebuildVisible(self, term) catch {};
+    // **가장 긴 줄도 여기서 센다** — 가로 스크롤바가 첫 프레임부터 서야 사용자가 그 축이 있다는
+    // 것을 안다(굴려 보기 전에는 알 길이 없다. 2026-08-18 사용자 지적). 접힘 화살표와 같은 이유·
+    // 같은 시점이다. 할당하지 않으므로 실패 지점이 없다.
+    ensureMaxCols(term, false);
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;
@@ -739,18 +746,7 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
 
     // **문서 전체에서 가장 긴 줄이 상한을 정한다.** 보이는 줄만 보면 세로로 굴릴 때마다 상한이
     // 출렁여, 오른쪽 끝을 보다가 위로 굴리면 본문이 제멋대로 왼쪽으로 튄다.
-    const tab_width = chrome_editor.frame.default_tab_width; // 렌더가 쓰는 그 값(단일 출처)
-    if (max_cols.* == 0) {
-        // **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 어차피 못 가므로 세면 낭비다.
-        // 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
-        const limit = chrome_editor.frame.max_cols_count_limit;
-        var max: u32 = 0;
-        for (lines) |line| {
-            max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
-            if (max >= limit) break; // 더 세도 답이 같다
-        }
-        max_cols.* = max;
-    }
+    ensureMaxCols(term, right); // 위 doc — 여는 경로와 같은 셈을 쓴다
 
     const visible = visibleCols(self, body, term, right);
     if (visible == 0) return false;
@@ -850,6 +846,37 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
     const m = chrome_editor.diff_frame.sideMetrics(side_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const layout = chrome_editor.geometry.compute(m.total_cols, line_count, .{});
     return layout.content.width;
+}
+
+/// 렌더에 넘길 **가장 긴 줄의 폭**. 0은 "아직 안 셌다"는 뜻이라 `null`로 바꾼다 — 렌더가 0을 길이로
+/// 믿으면 막대가 문서 전체를 덮는 것처럼 그려진다.
+fn maxColsForRender(term: *Term) ?u32 {
+    const v = term.rt.editor_max_cols;
+    return if (v == 0) null else v;
+}
+
+/// 문서에서 **가장 긴 줄**의 표시 폭을 세어 캐시한다(이미 있으면 그대로).
+///
+/// **여는 경로와 가로 스크롤 입력이 같이 쓴다.** 예전에는 첫 가로 휠에서만 셌는데, 그러면 굴리기
+/// 전에는 값이 0이라 **가로 스크롤바가 뜨지 않아** 사용자가 그 축이 있는지도 모른다(2026-08-18
+/// 사용자 지적으로 드러난 자리다 — 접힘 화살표가 같은 이유로 여는 경로에서 계산된다).
+///
+/// **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 `max_first_col` 때문에 어차피 못 가므로
+/// 세면 낭비다. 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
+fn ensureMaxCols(term: *Term, right: bool) void {
+    const cache = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
+    if (cache.* != 0) return;
+    const lines = if (right) rightTexts(term) else editorLines(term);
+    if (lines.len == 0) return;
+
+    const tab_width = chrome_editor.frame.default_tab_width; // 렌더가 쓰는 그 값(단일 출처)
+    const limit = chrome_editor.frame.max_cols_count_limit;
+    var max: u32 = 0;
+    for (lines) |line| {
+        max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
+        if (max >= limit) break; // 더 세도 답이 같다
+    }
+    cache.* = max;
 }
 
 /// 접을 범위를 세어 Term에 둔다(이미 있으면 그대로). **명령과 여는 경로가 부른다** — 렌더는 할당하지
@@ -3043,6 +3070,10 @@ test "override 없이 연 편집기는 config 기본을 따른다 — 되돌림�
     lines[1] = long;
     lines[2] = "short";
     fx.term.rt.editor_lines = lines;
+    // **새 내용이다 — 가장 긴 줄 캐시를 버린다.** 픽스처는 실제 파일을 열고, 여는 경로가 그 파일
+    // 기준으로 폭을 세어 둔다(가로 막대가 첫 프레임부터 서야 하므로). 줄 배열만 갈아 끼우는 것은
+    // 테스트의 방식이지 제품 경로가 아니다 — 제품에서 문서가 바뀌면 늘 새 Term이다.
+    fx.term.rt.editor_max_cols = 0;
 
     // ① 랩이 아니므로 접히지 않는다 — 시각 행 수가 논리 줄 수와 같다.
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
@@ -3294,6 +3325,79 @@ test "레벨 접기도 화면에 반영된다 — 바깥은 남고 안쪽만 사
     try testing.expect(open_mark and collapsed_mark); // 두 방향이 같은 화면에 선다
 }
 
+test "가로 막대가 첫 프레임부터 선다 — 굴려 보기 전에 축이 있는지 알 수 있다" {
+    // **이것이 이 슬라이스의 이유다.** 예전에는 가장 긴 줄을 *첫 가로 휠에서* 셌기 때문에, 굴려
+    // 보기 전에는 막대가 없어 그 축이 있는지도 알 수 없었다(2026-08-18 사용자 지적).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long = try allocator.alloc(u8, 2000);
+    defer allocator.free(long);
+    @memset(long, 'x');
+    const lines = try allocator.alloc([]const u8, 3);
+    defer allocator.free(lines);
+    lines[0] = "short";
+    lines[1] = long;
+    lines[2] = "short";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0;
+    ensureMaxCols(fx.term, false); // 여는 경로가 부르는 그대로 — 휠은 아직 안 왔다
+
+    try testing.expect(fx.term.rt.editor_max_cols > 1000);
+    fx.session.gpu_quads.clearRetainingCapacity(); // 앞선 프레임의 quad가 섞이면 판정이 공허해진다
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 막대는 셀이 아니라 **quad**로 내려간다(격자 밖이라 `fill`은 조용히 버려진다).
+    // **자리로 가른다**: 가로 막대는 본문 아래에 서고(y가 본문 바닥보다 크다), 세로 막대는 오른쪽
+    // 이라 y가 본문 안이다. 두께·길이로 가르면 thumb이 최소 길이로 clamp될 때 판정이 뒤집힌다.
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const inset: f32 = @floatFromInt(chrome_editor.frame.content_inset_px);
+    const body_top: f32 = @floatFromInt(body.y);
+    const body_h: f32 = @floatFromInt(body.h);
+    var below: usize = 0;
+    for (fx.session.gpu_quads.items) |q| {
+        // 본문 아래 절반쯤에서 시작하고 **얇은** quad — 배경(본문 전체를 덮는다)과 갈린다.
+        if (q.y > body_top + body_h / 2 and q.h <= inset * 4) below += 1;
+    }
+    try testing.expect(below > 0);
+
+    // 랩을 켜면 넘칠 것이 없다 — 축 자체가 사라진다(§4).
+    fx.term.rt.editor_wrap = true;
+    fx.term.rt.editor_total_visual_rows = 0;
+    var wrapped = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer wrapped.dl.deinit(allocator);
+    try testing.expect(!chrome_editor.frame.showsHorizontalBar(true, fx.term.rt.editor_max_cols, 40));
+}
+
+test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 붙었다" {
+    // 접힘 몫과 같은 자리다(§4.1f 표) — 여는 경로에 붙은 값은 접기를 안 쓰는 사용자도 문다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+
+    const n = 120_000;
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = "const x = 1; // 평범한 길이의 줄이다";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_max_cols = 0;
+
+    const t0 = monotonicMsForTest();
+    ensureMaxCols(fx.term, false);
+    const t1 = monotonicMsForTest();
+    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (max_cols={d})\n", .{ n, t1 - t0, fx.term.rt.editor_max_cols });
+    try testing.expect(t1 - t0 < 500); // 재앙 감지선이지 예산이 아니다
+}
+
 test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
     // `rebuildVisible`은 줄마다 `isHidden(spans, i)`를 부른다. 구간이 많아지면 줄×구간이라
     // **방금 `hiddenSpans`에서 고친 것과 같은 부류**다. 재고 확인한다.
@@ -3425,6 +3529,7 @@ test "가장 긴 줄이 접혀 숨으면 가로 상한도 다시 센다" {
     lines[2] = "tail";
     fx.term.rt.editor_lines = lines;
     fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0; // 새 내용이다 — 여는 경로가 세어 둔 값을 버린다(위 테스트와 같은 이유)
 
     // 접기 전에 가로 상한을 세운다.
     try testing.expect(scrollCols(fx.session, fx.term, fx.leaf_rect, -1_000_000, null));

@@ -91,6 +91,91 @@ pub fn build(props: Props, out: []draw.Op) Written {
     return .{ .ops = 1, .geometry = bar };
 }
 
+/// **가로 막대의 기하.** 세로(`scroll_area.ScrollbarGeometry`)와 축이 뒤집혀 있어 이름을 따로 둔다 —
+/// 같은 타입에 담으면 `thumb_y`가 사실은 x라는 식이 되어, 읽는 쪽이 매번 축을 되짚어야 한다.
+///
+/// 잡는 자리(`hit_y`/`hit_h`)가 그리는 자리보다 두꺼운 이유는 세로와 같다(§ScrollbarGeometry 주석 —
+/// 보이는 띠가 얇은 것은 디자인이고 조준 난이도까지 그 값에 묶을 이유는 없다).
+pub const HorizontalGeometry = struct {
+    track_x: f32,
+    track_y: f32,
+    track_w: f32,
+    track_h: f32,
+    /// 잡는 자리(거터 전체). 가로 범위는 track과 같으므로 y축만 따로 든다.
+    hit_y: f32,
+    hit_h: f32,
+    thumb_x: f32,
+    thumb_w: f32,
+    max_offset_px: u32,
+};
+
+pub const HorizontalProps = struct {
+    /// 본문 영역의 픽셀 사각. **막대는 이 아래 거터 안에 선다**(본문 위에 겹치지 않는다).
+    /// `gutter_w`는 그 **아래 여백의 높이**다 — 축이 뒤집힌 자리라 이름과 뜻이 갈리는 유일한 곳이고,
+    /// `ContentRect`를 그대로 쓰려고 감수한다(타입을 또 만들면 세로와 갈린다).
+    content: scroll_area.ContentRect,
+    /// 문서에서 **가장 긴 줄**의 표시 폭(열). 보이는 줄만 보면 세로로 굴릴 때마다 상한이 출렁인다
+    /// (`editor_max_cols`가 같은 이유로 문서 전체를 본다).
+    total_cols: u32,
+    /// 맨 왼쪽에 보이는 열.
+    first_col: u32,
+    cell_w_px: u16,
+    metrics: scroll_area.ScrollbarMetrics,
+};
+
+/// 가로 스크롤바를 그린다. §4.1a가 *"가로 스크롤바는 세로와 짝이다"*라고 정한 그 짝이다.
+///
+/// **랩이 켜지면 호출하지 않는다** — 랩은 넘칠 것을 없애므로 가로 축 자체가 없다(§4). 그 판정은
+/// 호출자가 한다(랩 여부를 아는 쪽이다).
+///
+/// 길이·위치 계산은 세로와 **같은 헬퍼**(`scroll_area.thumbSpan`)를 쓴다. 축만 다르고 규칙은 하나다.
+/// `buildHorizontal`이 쓴 양과 기하. **익명 struct를 반환하지 않는다** — 호출자가 `if/else`로
+/// 분기하면 두 가지의 타입이 서로 다른 익명 struct가 되어 컴파일이 안 된다(실제로 그렇게 막혔다).
+pub const HorizontalWritten = struct {
+    ops: usize,
+    geometry: ?HorizontalGeometry = null,
+};
+
+pub fn buildHorizontal(props: HorizontalProps, out: []draw.Op) HorizontalWritten {
+    if (props.content.w <= 0 or props.content.h <= 0 or props.metrics.width_px == 0) return .{ .ops = 0 };
+    const thickness: f32 = @floatFromInt(props.metrics.width_px);
+    if (props.content.gutter_w < thickness) return .{ .ops = 0 };
+
+    const content_w_px = std.math.mul(u32, props.total_cols, props.cell_w_px) catch std.math.maxInt(u32);
+    const offset_px = std.math.mul(u32, props.first_col, props.cell_w_px) catch std.math.maxInt(u32);
+
+    const span = scroll_area.thumbSpan(props.content.w, content_w_px, offset_px, props.metrics.min_thumb_px) orelse
+        return .{ .ops = 0 };
+
+    const bar: HorizontalGeometry = .{
+        // 아래 여백 안에서 가운데 — 세로가 오른쪽 여백에서 하는 것과 같다.
+        .track_x = props.content.x,
+        .track_y = props.content.y + props.content.h + (props.content.gutter_w - thickness) / 2,
+        .track_w = props.content.w,
+        .track_h = thickness,
+        .hit_y = props.content.y + props.content.h,
+        .hit_h = props.content.gutter_w,
+        .thumb_x = props.content.x + span.start_offset,
+        .thumb_w = span.len,
+        .max_offset_px = span.max_offset_px,
+    };
+    if (out.len == 0) return .{ .ops = 0, .geometry = bar };
+
+    // `quad`인 이유는 세로와 같다 — 셀 격자 밖이라 `fill`은 조용히 버려진다.
+    out[0] = .{ .quad = .{
+        .rect = .{
+            .x = @intFromFloat(@round(bar.thumb_x)),
+            .y = @intFromFloat(@round(bar.track_y)),
+            .w = @intFromFloat(@round(bar.thumb_w)),
+            .h = @intFromFloat(@round(bar.track_h)),
+        },
+        .fill_role = thumb_role,
+        .alpha = thumb_alpha,
+        .corner_radii = .{ 4, 4, 4, 4 },
+    } };
+    return .{ .ops = 1, .geometry = bar };
+}
+
 const testing = std.testing;
 
 fn testProps(total: u32, first: u32) Props {
@@ -163,4 +248,80 @@ test "op 저장소가 없어도 기하는 돌려준다 — 호출자가 잡는 �
     const w = build(testProps(20, 0), &none);
     try testing.expectEqual(@as(usize, 0), w.ops);
     try testing.expect(w.geometry != null);
+}
+
+fn testHProps(total_cols: u32, first_col: u32) HorizontalProps {
+    return .{
+        .content = .{ .x = 0, .y = 0, .w = 400, .h = 160, .gutter_w = 12 },
+        .total_cols = total_cols,
+        .first_col = first_col,
+        .cell_w_px = 8,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    };
+}
+
+test "가로: 가장 긴 줄이 화면에 다 들어가면 안 그린다" {
+    var ops: [4]draw.Op = undefined;
+    // 본문 400px / 셀 8px = 50열. 문서가 50열 이하면 밀 것이 없다.
+    try testing.expectEqual(@as(usize, 0), buildHorizontal(testHProps(50, 0), &ops).ops);
+    try testing.expect(buildHorizontal(testHProps(20, 0), &ops).geometry == null);
+}
+
+test "가로: 넘치면 thumb 길이가 비율을 따르고 오른쪽 끝에서 track 끝에 닿는다" {
+    var ops: [4]draw.Op = undefined;
+    const w = buildHorizontal(testHProps(100, 0), &ops); // 100열 중 50열이 보인다 → 절반
+    try testing.expectEqual(@as(usize, 1), w.ops);
+    const bar = w.geometry.?;
+    try testing.expectApproxEqAbs(@as(f32, 200), bar.thumb_w, 1); // 400 × (50/100)
+    try testing.expectApproxEqAbs(@as(f32, 0), bar.thumb_x, 1);
+
+    // 끝까지 밀면 thumb 오른쪽이 track 오른쪽에 닿는다 — 세로가 바닥에서 그러는 것과 같다.
+    const end = buildHorizontal(testHProps(100, 50), &ops).geometry.?;
+    try testing.expectApproxEqAbs(bar.track_x + bar.track_w, end.thumb_x + end.thumb_w, 1);
+}
+
+test "가로: 막대가 본문 아래 거터 안에 서고 본문을 덮지 않는다" {
+    var ops: [4]draw.Op = undefined;
+    const p = testHProps(100, 0);
+    const bar = buildHorizontal(p, &ops).geometry.?;
+    // 본문 바닥(y + h) 아래에서 시작한다 — 겹치면 마지막 줄 글자가 막대에 가린다.
+    try testing.expect(bar.track_y >= p.content.y + p.content.h);
+    try testing.expect(bar.track_y + bar.track_h <= p.content.y + p.content.h + p.content.gutter_w);
+    // 잡는 자리는 거터 전체다.
+    try testing.expectApproxEqAbs(p.content.y + p.content.h, bar.hit_y, 0.01);
+    try testing.expectApproxEqAbs(p.content.gutter_w, bar.hit_h, 0.01);
+}
+
+test "가로: thumb이 최소 길이보다 짧아지지 않는다" {
+    var ops: [4]draw.Op = undefined;
+    const bar = buildHorizontal(testHProps(100_000, 0), &ops).geometry.?;
+    try testing.expectApproxEqAbs(@as(f32, 24), bar.thumb_w, 0.01);
+}
+
+test "가로: 열 수 × 셀 폭이 u32를 넘어도 죽지 않는다" {
+    var ops: [4]draw.Op = undefined;
+    const w = buildHorizontal(testHProps(std.math.maxInt(u32), 0), &ops);
+    try testing.expectEqual(@as(usize, 1), w.ops);
+}
+
+test "가로와 세로가 같은 규칙을 쓴다 — 축만 바꾸면 같은 답이 나온다" {
+    // **규칙이 갈리지 않는지 본다.** 둘 다 `thumbSpan`을 쓰므로, 같은 비율·같은 최소 두께를 주면
+    // 길이가 같아야 한다. 한쪽만 고치는 회귀가 여기서 걸린다.
+    var ops: [4]draw.Op = undefined;
+    const v = build(.{
+        .content = .{ .x = 0, .y = 0, .w = 400, .h = 400, .gutter_w = 12 },
+        .total_visual_rows = 100,
+        .first_visual_row = 0,
+        .cell_h_px = 8,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, &ops).geometry.?;
+    const h = buildHorizontal(.{
+        .content = .{ .x = 0, .y = 0, .w = 400, .h = 400, .gutter_w = 12 },
+        .total_cols = 100,
+        .first_col = 0,
+        .cell_w_px = 8,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, &ops).geometry.?;
+    try testing.expectApproxEqAbs(v.thumb_h, h.thumb_w, 0.01);
+    try testing.expectEqual(v.max_offset_px, h.max_offset_px);
 }

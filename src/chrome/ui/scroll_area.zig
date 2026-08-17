@@ -482,6 +482,44 @@ pub const ContentRect = struct {
     gutter_w: f32,
 };
 
+/// 축 하나에서 thumb이 **얼마나 길고 어디서 시작하는가**. track 위 좌표가 아니라 **길이와 오프셋**만
+/// 낸다 — 그래야 세로·가로가 같은 규칙을 쓴다.
+///
+/// **규칙을 한 곳에 두려고 뽑았다.** 비율(`track × viewport / content`)·최소 두께·travel 매핑 셋은
+/// 축과 무관한데, 축마다 다시 적으면 한쪽만 고쳐질 자리가 된다(이 저장소가 반복해서 겪은 부류다).
+pub const ThumbSpan = struct {
+    /// thumb 길이(px).
+    len: f32,
+    /// track 시작점에서 thumb 시작까지의 거리(px).
+    start_offset: f32,
+    /// 스크롤 가능한 최대 오프셋(px). 0이면 스크롤할 것이 없다.
+    max_offset_px: u32,
+};
+
+/// 넘치지 않으면 `null`. 그 경우 호출자는 아무것도 그리지 않는다 — 넘치지 않는데 막대를 두면
+/// 사용자에게 없는 여백을 있다고 말하는 셈이다.
+pub fn thumbSpan(
+    /// 막대가 움직일 수 있는 전체 길이(= 뷰포트의 그 축 길이).
+    track_len: f32,
+    /// 문서 전체가 그 축에서 차지하는 길이(px).
+    content_len_px: u32,
+    /// 지금 스크롤 위치(px).
+    offset_px: u32,
+    min_thumb_px: u32,
+) ?ThumbSpan {
+    if (track_len <= 0) return null;
+    const viewport_len_px: u32 = @intFromFloat(@max(track_len, 0));
+    const max_offset = content_len_px -| viewport_len_px;
+    if (max_offset == 0) return null;
+
+    const proportional = track_len * track_len / @as(f32, @floatFromInt(content_len_px));
+    const len = @min(track_len, @max(@as(f32, @floatFromInt(min_thumb_px)), proportional));
+    const travel = track_len - len;
+    const clamped = @min(offset_px, max_offset);
+    const ratio = @as(f32, @floatFromInt(clamped)) / @as(f32, @floatFromInt(max_offset));
+    return .{ .len = len, .start_offset = travel * ratio, .max_offset_px = max_offset };
+}
+
 /// 스크롤할 것이 없거나 자리가 안 나오면 `null`이며, 그 경우 어떤 track/thumb도 발행하지 않는다 —
 /// 넘치지 않는 목록에 스크롤바를 그리면 사용자에게 없는 여백을 있다고 말하는 셈이다.
 pub fn scrollbarGeometry(
@@ -491,18 +529,14 @@ pub fn scrollbarGeometry(
     m: ScrollbarMetrics,
 ) ?ScrollbarGeometry {
     if (content.w <= 0 or content.h <= 0 or m.width_px == 0) return null;
-    const viewport_h_px: u32 = @intFromFloat(@max(content.h, 0));
-    const max_offset = content_height_px -| viewport_h_px;
-    if (max_offset == 0) return null;
     const width: f32 = @floatFromInt(m.width_px);
     if (content.gutter_w < width) return null;
 
+    // **길이 계산은 축 중립 헬퍼가 한다**(`thumbSpan`) — 가로 막대와 같은 규칙을 쓰게 하려고 뽑았다.
     const track_h = content.h;
-    const proportional = track_h * content.h / @as(f32, @floatFromInt(content_height_px));
-    const thumb_h = @min(track_h, @max(@as(f32, @floatFromInt(m.min_thumb_px)), proportional));
-    const travel = track_h - thumb_h;
-    const clamped_offset = @min(offset_px, max_offset);
-    const ratio = @as(f32, @floatFromInt(clamped_offset)) / @as(f32, @floatFromInt(max_offset));
+    const span = thumbSpan(track_h, content_height_px, offset_px, m.min_thumb_px) orelse return null;
+    const thumb_h = span.len;
+    const max_offset = span.max_offset_px;
     return .{
         // 여백 안에서 가운데. 컨테이너 바깥 edge에 붙이면 rounded clip에 닿아 잘려 보이고, content에
         // 붙이면 다시 카드와 겹친다.
@@ -513,7 +547,7 @@ pub fn scrollbarGeometry(
         // 잡는 자리는 거터 전체 — content edge에서 거터 끝까지. 막대는 그 안에 가운데로 뜬다.
         .hit_x = content.x + content.w,
         .hit_w = content.gutter_w,
-        .thumb_y = content.y + travel * ratio,
+        .thumb_y = content.y + span.start_offset,
         .thumb_h = thumb_h,
         .max_offset_px = max_offset,
     };

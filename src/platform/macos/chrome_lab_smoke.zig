@@ -199,6 +199,13 @@ const FontUsage = struct {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+
+    // **UI 언어를 고정한다.** 이 스모크가 남기는 캡처는 픽셀 단위 골든과 비교되므로(tests/golden/
+    // dock_visual.zig), 언어가 환경에 따라 달라지면 **같은 코드가 환경마다 다른 그림을 낸다.**
+    // `ui.language` 기본값은 `auto`(OS 로케일)이고 CI 러너와 개발기의 로케일이 같다는 보장이 없다.
+    // 골든이 한국어 렌더를 잡고 있으므로 여기서 `ko` 로 못 박는다 — 영어 레이아웃을 골든으로 잡고
+    // 싶으면 그 시나리오를 따로 추가할 일이지, 기본값에 맡길 일이 아니다.
+    maru.i18n.setLang(.ko);
     const scenario_id = try readScenario();
     const font_variant = try readFontVariant();
     var font_postscript_name_buf: [128]u8 = undefined;

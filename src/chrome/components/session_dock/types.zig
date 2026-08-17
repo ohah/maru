@@ -8,6 +8,7 @@ const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const spacing = @import("../../ui/spacing.zig");
+const tokens = @import("../../tokens.zig"); // 색은 role 로만 지목한다(literal RGB 금지)
 const ui_icon = @import("../../ui/icon.zig"); // 아이콘 슬롯 크기 토큰 단일 출처(ui/button과 같은 값을 쓴다)
 const typography = @import("../../ui/typography.zig");
 
@@ -43,6 +44,16 @@ pub const Provider = enum {
         return switch (self) {
             .codex => "Codex",
             .claude => "Claude",
+        };
+    }
+
+    /// provider 이름을 그릴 색 역할. 실제 색은 토큰 층이 소유하고(`tokens.ColorRole` 주석) 이 함수는
+    /// 매핑만 한다 — 컴포넌트가 literal RGB를 들고 있으면 테마를 갈 수 없다. provider 를 추가하면
+    /// 이 switch 가 컴파일 에러로 색 결정을 요구한다.
+    pub fn colorRole(self: Provider) tokens.ColorRole {
+        return switch (self) {
+            .codex => .agent_codex_fg,
+            .claude => .agent_claude_fg,
         };
     }
 };

@@ -135,7 +135,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // font zoom while the worker still owns actual glyph shaping and ellipsis.
                 try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, dock_metrics.cardDisclosureReserve());
                 try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, dock_metrics.cardDisclosureReserve());
-                try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider.label(), card.metadata);
+                try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
@@ -439,8 +439,12 @@ const Writer = struct {
         try self.emit(x, y, source, max_cols, .head, role, text_role, false, bold);
     }
 
-    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider: []const u8, metadata: []const u8) ViewError!void {
-        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, .surface_fg, .metadata, false, metrics.cardDisclosureReserve());
+    /// 메타 줄은 `provider` 토큰과 그 뒤의 나머지 메타로 **두 번** 그린다. provider 만 색이 다르기
+    /// 때문이다 — provider 는 `Provider.colorRole()`(토큰 층이 색을 소유), 나머지는 `muted_fg` 다.
+    /// provider 를 값으로 받는 이유도 그것이다: label 과 색 역할을 같은 곳에서 꺼내야 둘이 어긋나지 않는다.
+    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: []const u8) ViewError!void {
+        const provider = provider_id.label();
+        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, provider_id.colorRole(), .metadata, false, metrics.cardDisclosureReserve());
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -2175,6 +2179,79 @@ test "SessionDock segment labels take their foreground from the same resolver as
     try std.testing.expectEqual(@as(?tokens.ColorRole, expected), disabled_role);
     // 그리고 그 값은 활성 세그먼트와 **달라야** 한다 — 같으면 비활성이 눈에 구분되지 않는다.
     try std.testing.expect(disabled_role != enabled_role);
+}
+
+// provider 색은 "목록을 훑어서 어느 에이전트인지 가른다"는 일을 돕는 보조 신호다(tokens 주석). 그래서
+// 계약은 셋이다: ⑴ provider 토큰이 **provider별로 다른 role**을 받는다 ⑵ 그 role이 나머지 메타(`muted_fg`)와
+// **다르다** — 같으면 메타 줄 전체가 한 덩어리로 읽혀 색을 준 이유가 사라진다 ⑶ 색 결정은 `Provider`가
+// 소유한다(컴포넌트가 literal이나 자기 매핑을 들지 않는다).
+test "SessionDock paints each provider token with its own role, distinct from the rest of the metadata" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 21,
+        .displayed_count = 2,
+        .scope = .all,
+        .items = &.{
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "클로드 카드", .summary = "요약", .metadata = "메시지 6개 · 20시간 전" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "코덱스 카드", .summary = "요약", .metadata = "메시지 9개 · 3일 전" } },
+        },
+    };
+    var nodes: [48]tree.UiNode = undefined;
+    var entries: [48]tree.RectEntry = undefined;
+    var layout_items: [48]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [48]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [48]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [48]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [96]draw.Op = undefined;
+    var runs: [64]draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    var claude_role: ?tokens.ColorRole = null;
+    var codex_role: ?tokens.ColorRole = null;
+    var metadata_role: ?tokens.ColorRole = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, types.Provider.claude.label())) claude_role = text.role;
+            if (std.mem.eql(u8, run.text, types.Provider.codex.label())) codex_role = text.role;
+            if (std.mem.indexOf(u8, run.text, "메시지 6개") != null) metadata_role = text.role;
+        },
+        else => {},
+    };
+
+    // ⑶ 색 결정의 주인은 `Provider`다 — 이 단언이 컴포넌트가 몰래 다른 role을 고르는 것을 막는다.
+    try std.testing.expectEqual(@as(?tokens.ColorRole, types.Provider.claude.colorRole()), claude_role);
+    try std.testing.expectEqual(@as(?tokens.ColorRole, types.Provider.codex.colorRole()), codex_role);
+    // ⑴ provider끼리 다르다.
+    try std.testing.expect(claude_role != codex_role);
+    // ⑵ 그리고 나머지 메타와도 다르다.
+    try std.testing.expectEqual(@as(?tokens.ColorRole, .muted_fg), metadata_role);
+    try std.testing.expect(claude_role != metadata_role);
+    try std.testing.expect(codex_role != metadata_role);
 }
 
 // 적대적 검증에서 찾은 결함(2026-08-12): `build`의 의도는 주석에 적혀 있다 — "utility control이 제목을

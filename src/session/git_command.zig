@@ -82,6 +82,9 @@ pub const Worktree = struct {
     /// 분리 HEAD인가. **`branch.len == 0`으로 대신 판정하지 않는다** — unborn(커밋 전)도 브랜치가 비는데
     /// 그건 분리가 아니다(화면 문구가 달라야 한다).
     detached: bool = false,
+    /// git이 "정리해도 된다"고 표시한 워크트리 — **디렉터리가 사라졌다**. 화면은 이 줄을 세우지 않는다:
+    /// 그 자리에 커밋 상자를 달아도 커밋할 대상이 없고, 읽기는 실패만 되풀이한다.
+    prunable: bool = false,
 };
 
 /// `worktree list --porcelain` 출력을 쪼갠다. **할당하지 않는다** — `out`을 채우고 개수를 돌려준다.
@@ -113,6 +116,9 @@ pub fn collectWorktrees(text: []const u8, out: []Worktree) usize {
             item.branch = if (std.mem.startsWith(u8, ref, "refs/heads/")) ref["refs/heads/".len..] else ref;
         } else if (std.mem.eql(u8, line, "detached")) {
             item.detached = true;
+        } else if (std.mem.eql(u8, line, "prunable") or std.mem.startsWith(u8, line, "prunable ")) {
+            // 형식이 둘이다: 사유가 붙는 `prunable <reason>`과 사유 없는 줄. 둘 다 같은 사실이다.
+            item.prunable = true;
         }
     }
     return n;
@@ -662,4 +668,24 @@ test "브랜치 전환 명령: 개행 없이 만들고 수상한 이름은 거�
     // 버퍼가 모자라면 null(조용히 자르지 않는다).
     var tiny: [8]u8 = undefined;
     try testing.expect(branchSwitchCommand("feat/very-long-name", &tiny) == null);
+}
+
+test "디렉터리가 사라진 워크트리는 prunable로 표시된다" {
+    // 그 줄을 그대로 세우면 **커밋 상자가 달린 빈 줄**이 되고 읽기는 실패만 되풀이한다.
+    const text =
+        \\worktree /repo
+        \\HEAD abc
+        \\branch refs/heads/main
+        \\
+        \\worktree /gone
+        \\HEAD abc
+        \\branch refs/heads/wt
+        \\prunable gitdir file points to non-existent location
+        \\
+    ;
+    var out: [4]Worktree = undefined;
+    const n = collectWorktrees(text, &out);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expect(!out[0].prunable);
+    try std.testing.expect(out[1].prunable);
 }

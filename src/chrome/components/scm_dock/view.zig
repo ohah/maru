@@ -188,7 +188,12 @@ pub fn view(
         switch (item) {
             .repo => |repo| try writer.repoRow(row, repo, m),
             .commit_box => |box| try writer.commitBox(row, box, m),
-            .commit_button => |button| try writer.commitButton(row, button, state, tk, m),
+            .commit_button => |button| {
+                // **면 노드**가 그 줄의 칠과 action을 갖는다(아래 여백은 줄의 것이다) — 글자·호버 해석도
+                // 같은 rect를 봐야 띠의 가운데에 앉는다.
+                const face_index = frame.tree.find(build.NodeIds.itemFace(index)) orelse continue;
+                try writer.commitButton(frame.tree.entries[face_index], button, state, tk, m);
+            },
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
             .more => |more| {
@@ -758,17 +763,16 @@ const Writer = struct {
     /// 커밋 버튼 한 줄. **채운 면 위에서 읽히는 색**을 painter와 같은 함수에 물어 고른다.
     fn commitButton(
         self: *Writer,
-        rect: tree.RectEntry,
+        face: tree.RectEntry,
         item: types.CommitButtonItem,
         state: interaction.InteractionState,
         tk: *const tokens.Tokens,
         m: types.DockMetrics,
     ) ViewError!void {
-        // 아래 여백은 이 행이 갖는다(`itemHeight`) — 글자는 버튼 면의 세로 중앙이어야 하므로 그 여백을
-        // 뺀 사각형을 만들어 넘긴다. 안 그러면 라벨이 여백까지 포함한 중앙, 즉 면의 아래쪽에 앉는다.
-        var face = rect;
-        face.rect.height = @floatFromInt(m.commit_button_h);
-        const role = commitLabelRole(rect, state, tk, item.enabled);
+        // **면 rect를 그대로 받는다**(아래 여백은 그 줄의 것이고 이 rect에 없다). 예전에는 줄 rect에서
+        // 높이만 깎아 썼는데, 칠은 줄 전체가 받아 파랑이 여백까지 덮었다 — 글자가 그 띠의 가운데보다
+        // 위에 앉는 이유였다(사용자 지적 2026-08-17).
+        const role = commitLabelRole(face, state, tk, item.enabled);
         // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
         // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
         const label = switch (item.run) {
@@ -1869,11 +1873,13 @@ test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
         .child_rects = &hover_storage.child_rects,
         .actions = &hover_storage.actions,
     });
-    const hovered = try viewBudgeted(&hover_storage, hover_props, hover_frame, .{ .hovered = build.NodeIds.item(0) });
+    // 호버가 걸리는 것은 **면 노드**다(칠·action이 거기 있다 — 아래 여백은 줄의 것이라 칠하지 않는다).
+    const face_id = build.NodeIds.itemFace(0);
+    const hovered = try viewBudgeted(&hover_storage, hover_props, hover_frame, .{ .hovered = face_id });
     const label = findExactText(hovered, commit_label) orelse return error.MissingButton;
-    const button = hover_frame.tree.entries[hover_frame.tree.find(build.NodeIds.item(0)) orelse return error.MissingButton];
+    const button = hover_frame.tree.entries[hover_frame.tree.find(face_id) orelse return error.MissingButton];
     const tk = testTokens();
-    const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = build.NodeIds.item(0) }, &tk);
+    const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = face_id }, &tk);
     try testing.expect(resolved.background != .accent_bar); // 호버가 채움을 덮는다(전제 확인)
     try testing.expectEqual(tokens.ColorRole.surface_fg, label.role);
     try testing.expect(label.role != resolved.background); // 글자와 면이 같은 역할이면 그게 사라지는 것이다

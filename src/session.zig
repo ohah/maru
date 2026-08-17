@@ -123,6 +123,7 @@ pub const editor = struct {
     pub const diff = @import("session/editor/diff.zig");
     pub const diff_state = @import("session/editor/diff_state.zig");
     pub const intraline = @import("session/editor/intraline.zig");
+    pub const fold = @import("session/editor/fold.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

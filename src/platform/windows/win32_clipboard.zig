@@ -31,6 +31,9 @@ pub const Error = error{
     /// 일어난다. **U+FFFD 로 갈음하지 않고 실패로 올린다** — 셸 명령줄에 깨진 문자를 절반만 밀어 넣는 것이
     /// 붙여넣기를 거절하는 것보다 위험하다.
     InvalidUtf16,
+    /// 클립보드 데이터에 NUL 종단이 없다(`CF_UNICODETEXT` 규약 위반). **잘라서 주지 않는다** — 명령의
+    /// 앞부분만 셸에 붙는 것이 붙여넣기를 거절하는 것보다 위험하다.
+    Unterminated,
     OutOfMemory,
 };
 
@@ -202,6 +205,10 @@ pub fn read(allocator: std.mem.Allocator, hwnd: ?HWND) Error!?[]u8 {
     // 상한을 둔다 — 종단이 없는 잘못된 데이터에서 무한히 읽지 않는다(16 MiB 상당).
     const max_units: usize = 8 * 1024 * 1024;
     while (len < max_units and wide[len] != 0) len += 1;
+    // **상한에 닿으면 잘라서 주지 않고 실패로 올린다.** 여기 닿았다는 것은 NUL 종단이 없다는 뜻이라
+    // 데이터가 이미 잘못됐고, 그것을 잘라 셸 명령줄에 밀어 넣으면 **명령의 앞부분만** 붙는다 —
+    // `InvalidUtf16` 을 U+FFFD 로 갈음하지 않는 것과 같은 판단이다.
+    if (len == max_units) return error.Unterminated;
     if (len == 0) return null;
 
     return try utf8ForTerminal(allocator, wide[0..len]);

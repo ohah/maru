@@ -120,7 +120,10 @@ fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
     // **커밋 줄은 더 이상 고정이 아니다**(②b — 저장소마다 하나씩이라 목록 항목이다). 그것까지 빼면
     // 호스트가 세는 창이 `build`가 세우는 창보다 작아져, 목록 아래쪽이 항목이 있는데도 안 그려지고
     // 스크롤은 끝을 지나 빈 자리로 간다(적대적 4회차).
-    const fixed = m.tab_h + m.summary_h + if (has_branch) m.branch_h else 0;
+    // 요약 줄은 히스토리 탭에서 **자리까지** 없다(build가 높이 0으로 세운다) — 여기서도 같이 빼야
+    // 호스트가 세는 창과 컴포넌트가 세우는 창이 갈리지 않는다.
+    const summary_h: u32 = if (self.scm_tab == .history) 0 else m.summary_h;
+    const fixed = m.tab_h + summary_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }
 
@@ -1008,6 +1011,20 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     self.scm_log_text = &.{};
     self.scm_log_limit = app_session_mod.scm_log_limit_initial;
     self.scm_log_failed = false;
+    // **고른 커밋도 버린다**(적대적 검증). 인덱스는 그 목록 안의 자리라, 목록이 바뀌면 같은 번호가
+    // 다른 저장소의 다른 커밋을 가리킨다 — 화면에는 "무언가 골라 둔" 강조만 남는다.
+    self.scm_selected_commit = null;
+}
+
+/// 쓰기가 끝났으면 커밋 목록도 낡았다(적대적 검증). **커밋을 하면 그 목록이 곧 틀린다** — 방금 만든
+/// 커밋이 히스토리에 없으면 사용자는 커밋이 안 된 줄 안다.
+///
+/// 원문을 버리고 표식(`scm_log_repo`)을 지우면 다음 tick의 `pumpScmLog`가 다시 읽는다 — 읽기를 거는
+/// 자리는 여전히 하나다.
+pub fn invalidateScmLog(self: *AppSession) void {
+    if (self.scm_log_repo) |old| self.allocator.free(old);
+    self.scm_log_repo = null;
+    self.scm_log_failed = false;
 }
 
 /// 그 저장소의 커밋 상자로 포커스를 옮긴다(caret은 그대로).
@@ -1393,6 +1410,8 @@ pub fn drainScmWrite(self: *AppSession) void {
         clearScmWriteError(self);
         self.scm_write_error = writeErrorText(self, taken);
     }
+    // 커밋 목록도 낡았다 — 방금 만든 커밋이 히스토리에 없으면 커밋이 안 된 줄 안다.
+    invalidateScmLog(self);
     // 쓰기가 끝난 **뒤** 한 번 읽는다(§6-1 — 쓰기마다 읽기를 걸면 `+`를 빠르게 누를 때 프로세스가 줄줄이 뜬다).
     // **어느 저장소를 읽느냐**가 ②d에서 갈린다: 비활성 저장소에 쓴 것이면 목록 읽기(활성 저장소)는
     // 그 사실을 모르므로 그 저장소의 머리 줄 읽기를 낡았다고 표시한다.

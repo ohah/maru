@@ -466,7 +466,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, tab_nodes);
     top[1] = tree.card(.{
         .id = NodeIds.summary,
-        .style = .{ .height = .{ .px = @floatFromInt(m.summary_h) } },
+        // **끄면 자리도 없다**(적대적 검증). 그리기만 건너뛰면 히스토리 탭 위에 빈 띠가 남는다 —
+        // 화면에 아무 말도 하지 않는 20px는 그냥 잃은 자리다.
+        .style = .{ .height = .{ .px = if (props.show_summary) @as(f32, @floatFromInt(m.summary_h)) else 0 } },
         .variant = .surface,
         // 아래 경계선 하나로 고정 chrome과 목록을 가른다(테두리 없는 요약 줄이 목록에 섞이지 않게).
         .paint = .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
@@ -1029,4 +1031,29 @@ test "탭 줄의 칸은 누를 수 있다(P4 — 그전에는 컨테이너라 ac
     // 그리고 칸에는 **칠이 없다** — 있으면 탭 줄 아래 divider를 덮는다(컨테이너를 쓰던 이유).
     const slot = frame.tree.entries[frame.tree.find(NodeIds.tab(0)) orelse return error.MissingTab];
     try testing.expectEqual(@as(u8, 0), slot.visual.button.paint.opacity);
+}
+
+test "요약 줄을 끄면 자리도 없다(히스토리 탭 위에 빈 띠가 남지 않게)" {
+    // 그리기만 건너뛰면 화면에 아무 말도 하지 않는 20px가 남는다 — 좁은 도크에서 그건 잃은 자리다.
+    var on_storage: Storage = .{};
+    const on = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+    }, &on_storage);
+    var off_storage: Storage = .{};
+    const off = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .show_summary = false,
+    }, &off_storage);
+    const on_summary = on.tree.entries[on.tree.find(NodeIds.summary) orelse return error.MissingSummary];
+    const off_summary = off.tree.entries[off.tree.find(NodeIds.summary) orelse return error.MissingSummary];
+    try testing.expect(on_summary.rect.height > 0);
+    try testing.expectEqual(@as(f32, 0), off_summary.rect.height);
+    // 그만큼 목록이 커진다 — 자리를 뺏지 않는 것이 요점이다.
+    const on_content = on.tree.entries[on.tree.find(NodeIds.content) orelse return error.MissingContent];
+    const off_content = off.tree.entries[off.tree.find(NodeIds.content) orelse return error.MissingContent];
+    try testing.expectEqual(on_content.rect.height + on_summary.rect.height, off_content.rect.height);
 }

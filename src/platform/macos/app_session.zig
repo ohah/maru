@@ -9398,7 +9398,11 @@ pub const AppSession = struct {
     /// 게이트**를 쓰게 하는 단일 출처다(Session Dock 검색과 같은 규율) — 플래그만 보면 도크를 닫거나
     /// 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이 first responder를 요구한다.
     pub fn scmCommitOwnsInput(self: *const AppSession) bool {
-        return self.scm_commit_focus_repo != null and dock_ops.dockVisible(self) and self.dock.view == .source_control;
+        // **탭까지 본다**(P4 적대적 검증). 히스토리·에이전트 탭에는 상자가 그려지지 않는데 플래그만
+        // 보면 키가 계속 그 상자로 가고, 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다(도크를
+        // 닫거나 뷰를 바꿀 때와 같은 종류의 함정 — 그래서 여기 한 곳이 그 판정을 다 갖는다).
+        return self.scm_commit_focus_repo != null and dock_ops.dockVisible(self) and
+            self.dock.view == .source_control and self.scm_tab == .changes;
     }
 
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
@@ -55123,6 +55127,67 @@ test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리
     try std.testing.expect(first.ref_is_head); // `HEAD -> main`은 칩 하나다
     // 시각을 못 읽은 커밋은 **자리를 비운다**.
     try std.testing.expectEqualStrings("", projection.items[1].commit.when);
+}
+
+test "히스토리 탭에서는 커밋 상자가 키를 먹지 않는다 (P4 적대적 검증)" {
+    // 그 탭에는 상자가 **그려지지 않는다**. 플래그만 보면 키가 계속 그 상자로 가고, 사용자는 자기가
+    // 친 글자가 어디로 갔는지 알 수 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    try std.testing.expect(session.scmCommitOwnsInput()); // 변경 사항 탭에서는 먹는다
+    scm_dock_ops.selectScmTab(session, .history);
+    try std.testing.expect(!session.scmCommitOwnsInput());
+    // 그리고 쓰던 글은 **살아 있다** — 탭을 옮긴 것이 글을 버리는 동작은 아니다.
+    scm_dock_ops.selectScmTab(session, .changes);
+    try std.testing.expect(session.scmCommitOwnsInput());
+}
+
+test "히스토리 탭: 저장소가 바뀌면 고른 커밋도 버린다 (P4 적대적 검증)" {
+    // 인덱스는 그 목록 안의 자리다 — 목록이 바뀌면 같은 번호가 다른 커밋을 가리키고, 화면에는
+    // "무언가 골라 둔" 강조만 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.scm_log_repo = try allocator.dupe(u8, "/other");
+    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fA\x1f1\x1f\x1f제목\x1e");
+    session.scm_selected_commit = 0;
+    // 지금 읽고 있는 저장소는 `/repo`라 위 원문은 남의 것이다.
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expect(session.scm_log_repo == null);
+    try std.testing.expect(session.scm_selected_commit == null);
+}
+
+test "히스토리 탭: 쓰기가 끝나면 커밋 목록도 다시 읽는다 (P4 적대적 검증)" {
+    // 커밋을 했는데 히스토리에 그 커밋이 없으면 사용자는 커밋이 안 된 줄 안다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fA\x1f1\x1f\x1f옛 목록\x1e");
+    scm_dock_ops.invalidateScmLog(session);
+    // 표식이 사라져 다음 tick의 `pumpScmLog`가 다시 읽는다(원문은 그대로 두어 화면이 안 깜빡인다).
+    try std.testing.expect(session.scm_log_repo == null);
+    try std.testing.expect(session.scm_log_text.len > 0);
 }
 
 test "히스토리 탭: 커밋이 없는 것과 못 읽은 것을 구별한다 (P4)" {

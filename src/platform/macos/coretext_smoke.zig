@@ -518,9 +518,8 @@ fn buildDrawListGlyphFrameProbe(
     // 다음 PR에서 probe-derived surface를 제거하기 전에 제품 shaper 경계를 독립적으로
     // 검증하기 위한 세로 슬라이스다.
     // **탭 바 픽스처**: `MARU_CORETEXT_SMOKE_FIXTURE=tabbar` 면 터미널 본문 대신 pane 탭 바 DrawList 를
-    // 태운다. 탭 폭·정렬 같은 **레이아웃** 회귀는 격자 덤프(`grid.pgm`)로만 눈에 보이고, 그 그림을 얻을
+    // 태운다. 탭 폭·정렬 같은 **레이아웃** 회귀는 격자 덤프(`grid.ppm`)로만 눈에 보이고, 그 그림을 얻을
     // 다른 헤드리스 경로가 없다(GPU 스모크는 창·drawable 이 필요해 이 환경에서 죽는다).
-    const tabbar_fixture = readFixtureKind() == .tabbar;
 
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
@@ -530,10 +529,11 @@ fn buildDrawListGlyphFrameProbe(
     // 그래도 덤프 파일은 남는다 — 눈으로 보는 것이 목적이기 때문이다).
     try core.write(readSmokeText());
 
-    var draw_list = if (tabbar_fixture)
-        try buildTabBarFixtureDrawList(allocator)
-    else
-        try renderer.buildDrawList(allocator, core.snapshot());
+    var draw_list = switch (readFixtureKind()) {
+        .tabbar => try buildTabBarFixtureDrawList(allocator),
+        .filetree => try buildFileTreeFixtureDrawList(allocator),
+        .terminal => try renderer.buildDrawList(allocator, core.snapshot()),
+    };
     var draw_list_owned = true;
     errdefer if (draw_list_owned) draw_list.deinit(allocator);
 
@@ -584,12 +584,79 @@ fn buildDrawListGlyphFrameProbe(
     );
 }
 
-const FixtureKind = enum { terminal, tabbar };
+const FixtureKind = enum { terminal, tabbar, filetree };
 
 fn readFixtureKind() FixtureKind {
     const raw_ptr = std.c.getenv("MARU_CORETEXT_SMOKE_FIXTURE") orelse return .terminal;
-    if (std.mem.eql(u8, std.mem.span(raw_ptr), "tabbar")) return .tabbar;
+    const raw = std.mem.span(raw_ptr);
+    if (std.mem.eql(u8, raw, "tabbar")) return .tabbar;
+    if (std.mem.eql(u8, raw, "filetree")) return .filetree;
     return .terminal;
+}
+
+/// 파일 탐색기 여러 줄. **아이콘 색**이 관심사라 종류가 서로 다른 행을 한 화면에 세운다 — 색은 격자
+/// 덤프로 본다 — `writeGridBitmapDump` 가 커버리지를 그 glyph 의 전경색에 곱해 **컬러 PPM**(`grid.ppm`)
+/// 으로 내므로 종류색이 그대로 보인다. 폴더/일반 파일은 색이 없어야 하는 대조군이다.
+fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList {
+    const Row = maru.session.file_tree.Row;
+    const K = maru.chrome.file_tree_icon.IconKind;
+    const file = struct {
+        fn make(path: []const u8, label: []const u8, depth: u16, kind: K) Row {
+            return .{ .file = .{
+                .path = path,
+                .label = label,
+                .depth = depth,
+                .supported = true,
+                .open = false,
+                .active = false,
+                .dirty = false,
+                .external_change = false,
+                .symlink = false,
+                .icon_kind = @intFromEnum(kind),
+            } };
+        }
+    };
+    const rows = [_]Row{
+        .{ .root = .{ .path = "/w", .label = "workspace", .expanded = true, .loading = false, .icon_kind = @intFromEnum(K.folder_open) } },
+        .{ .directory = .{ .path = "/w/src", .label = "src", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_source) } },
+        file.make("/w/main.zig", "main.zig", 1, .code),
+        file.make("/w/app.tsx", "app.tsx", 1, .web),
+        file.make("/w/package.json", "package.json", 1, .data),
+        file.make("/w/.editorconfig", ".editorconfig", 1, .config),
+        file.make("/w/logo.png", "logo.png", 1, .image),
+        file.make("/w/README.md", "README.md", 1, .document),
+        file.make("/w/dist.tar.gz", "dist.tar.gz", 1, .archive),
+        file.make("/w/LICENSE", "LICENSE", 1, .file),
+    };
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0xc8, .g = 0xc8, .b = 0xc8 } };
+    const active_fg: terminal.Color = .{ .rgb = .{ .r = 0xff, .g = 0xff, .b = 0xff } };
+    var colors: [std.meta.fields(K).len]?terminal.Color = @splat(null);
+    inline for (std.meta.fields(K)) |field| {
+        const kind: K = @enumFromInt(field.value);
+        colors[field.value] = if (maru.chrome.file_tree_icon.colorRole(kind)) |role|
+            .{ .rgb = maru.chrome.tokens.Tokens.rich(fixtureThemeInput()).get(role) }
+        else
+            null;
+    }
+    return coretext_frame_builder.buildFileTreeDrawList(allocator, &rows, null, 0, rows.len, 30, fg, active_fg, null, &colors);
+}
+
+/// 픽스처 토큰 입력 — 제품 테마가 아니라 **고정 값**이라 덤프가 결정적이다.
+fn fixtureThemeInput() maru.chrome.tokens.ThemeColors {
+    return .{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 0xd0, .g = 0xd0, .b = 0xd0 },
+        .sidebar_background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
+        .sidebar_foreground = .{ .r = 0xc8, .g = 0xc8, .b = 0xc8 },
+        .sidebar_active = .{ .r = 0x33, .g = 0x38, .b = 0x40 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 0x14, .g = 0x14, .b = 0x14 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    };
 }
 
 /// pane 탭 바 한 줄. 탭 수는 `MARU_CORETEXT_SMOKE_TABS`(기본 3), 바 폭은 40칸이다 — **탭이 적을 때 남는
@@ -802,14 +869,21 @@ fn writeGridBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
     if (width == 0 or height == 0) return;
 
     const allocator = std.heap.page_allocator;
-    const canvas = try allocator.alloc(u8, width * height);
+    // **컬러(P6)** 로 낸다 — 색이 계약인 화면(파일 아이콘 종류색)은 회색조로는 회귀를 볼 수 없다.
+    // 커버리지(알파)를 그 glyph 의 전경색에 곱해 얹는다: 셰이더가 하는 일과 같은 규칙이다.
+    const canvas = try allocator.alloc(u8, width * height * 3);
     defer allocator.free(canvas);
     @memset(canvas, 0);
 
     // 업로드된 슬롯 픽셀을 glyph_index 로 되찾아 그 셀 위치에 얹는다.
     for (frame.glyph_raster_frame.uploads) |u| {
         if (u.glyph_index >= glyphs.len) continue;
-        const run = glyphs[u.glyph_index].run;
+        const g = glyphs[u.glyph_index];
+        const run = g.run;
+        const fgc = switch (run.style.foreground) {
+            .rgb => |c| c,
+            else => maru.color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff },
+        };
         const x0 = @as(usize, run.col) * cell_w;
         const y0 = @as(usize, run.row) * cell_h;
         const w: usize = u.slot.width_px;
@@ -823,19 +897,29 @@ fn writeGridBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
                 const src = u.bytes_offset + y * u.bytes_per_row + x * 4 + 3; // 알파 = coverage
                 if (src >= frame.glyph_raster_frame.pixels.len) continue;
                 const v = frame.glyph_raster_frame.pixels[src];
-                if (v > canvas[cy * width + cx]) canvas[cy * width + cx] = v; // 겹침은 밝은 쪽 유지
+                if (v == 0) continue;
+                const idx = (cy * width + cx) * 3;
+                const shade = [3]u8{
+                    @intCast(@as(u16, fgc.r) * v / 255),
+                    @intCast(@as(u16, fgc.g) * v / 255),
+                    @intCast(@as(u16, fgc.b) * v / 255),
+                };
+                // 겹침은 밝은 쪽 유지(회색조 때와 같은 규칙, 채널별로).
+                inline for (0..3) |c| {
+                    if (shade[c] > canvas[idx + c]) canvas[idx + c] = shade[c];
+                }
             }
         }
     }
 
     var header_buf: [64]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buf, "P5\n{d} {d}\n255\n", .{ width, height });
+    const header = try std.fmt.bufPrint(&header_buf, "P6\n{d} {d}\n255\n", .{ width, height });
     const body = try allocator.alloc(u8, header.len + canvas.len);
     defer allocator.free(body);
     @memcpy(body[0..header.len], header);
     @memcpy(body[header.len..], canvas);
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_dir ++ "/grid.pgm", .data = body });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_dir ++ "/grid.ppm", .data = body });
 }
 
 fn writeGlyphBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
@@ -1147,7 +1231,7 @@ test "CoreText draw-list shaper composes an NFD Hangul chrome label identically 
                 .external_change = false,
                 .symlink = false,
             } }};
-            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null);
+            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null, null);
             defer dl.deinit(a);
             var fr = renderer.FontIdentityRegistry.init(a);
             defer fr.deinit();

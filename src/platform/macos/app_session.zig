@@ -14969,6 +14969,7 @@ pub const AppSession = struct {
                                     dock_fg,
                                     dock_active_fg,
                                     file_tree_selection_paint,
+                                    &fileTreeIconColors(&self.buildChromeTokens()),
                                 )) |tdl| {
                                     self.collectShaped(&collected, tdl, pane_frame_builder, .{
                                         .pane = .{
@@ -30412,6 +30413,21 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
 // 통합한다(cross-pane 정합). 이 헬퍼들은 sidebar/overlay/floating의 DrawList lowering(buildFromDrawList =
 // shapeOnly→placeMultiPane([1])→finishPane)을 단발로 검증한다 — production 통합[N] 경로 자체는 visible GPU smoke가
 // 검증한다(atlas readback). production fn으로 두면 미사용이라 test 전용 free 함수로 분리해 둔다.
+/// `IconKind` 순서대로 푼 파일 트리 아이콘 색. **매핑의 주인은 chrome**(`file_tree_icon.colorRole`)이고
+/// 이 자리는 그것을 토큰으로 풀기만 한다 — comptime 으로 전 kind 를 훑으므로 새 kind 가 생기면 그 자리가
+/// 자동으로 채워진다(빠뜨릴 자리가 없다).
+fn fileTreeIconColors(tk: *const chrome.Tokens) [std.meta.fields(chrome.file_tree_icon.IconKind).len]?terminal.Color {
+    var out: [std.meta.fields(chrome.file_tree_icon.IconKind).len]?terminal.Color = undefined;
+    inline for (std.meta.fields(chrome.file_tree_icon.IconKind)) |field| {
+        const kind: chrome.file_tree_icon.IconKind = @enumFromInt(field.value);
+        out[field.value] = if (chrome.file_tree_icon.colorRole(kind)) |role|
+            .{ .rgb = tk.get(role) }
+        else
+            null;
+    }
+    return out;
+}
+
 fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
     const dl = try sidebar_ops.buildSidebarTitleDrawList(session);
     return pane_ops.paneFrameBuilder(session).buildFromDrawList(session.allocator, dl, &session.renderer_state);
@@ -34490,6 +34506,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
             40,
             fg,
             fg,
+            null,
             null,
         );
         defer dl.deinit(allocator);

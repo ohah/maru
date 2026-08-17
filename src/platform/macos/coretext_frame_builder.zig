@@ -1197,6 +1197,10 @@ pub fn buildFileTreeDrawList(
     fg: terminal.Color,
     active_fg: terminal.Color,
     selection: ?FileTreeSelectionPaint,
+    /// `IconKind` 순서대로 푼 아이콘 색(없으면 행 색을 그대로 쓴다). **분류→색 매핑은 chrome 이 소유**하고
+    /// (`file_tree_icon.colorRole`) 호출자가 그것을 토큰으로 풀어 넘긴다 — 렌더가 자기 표를 들면 새
+    /// `IconKind` 를 더할 때 한쪽만 갱신된다.
+    icon_colors: ?[]const ?terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -1262,10 +1266,19 @@ pub fn buildFileTreeDrawList(
         const end = cols -| state_cols;
         const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
         if (indent < end) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
-        const icon = file_tree_icon.codepointFromRaw(file_tree.rowIconKind(row));
+        const icon_raw = file_tree.rowIconKind(row);
+        const icon = file_tree_icon.codepointFromRaw(icon_raw);
         const icon_col = indent +| 2;
+        // 선택된 행은 accent 로 통째로 칠해지므로 아이콘도 그 대비색을 따른다(위 주석과 같은 이유) —
+        // 종류 색을 남기면 밝은 accent 위에서 읽히지 않는다.
+        var icon_style = style;
+        if (!selected) if (icon_colors) |colors| {
+            if (icon_raw < colors.len) if (colors[icon_raw]) |c| {
+                icon_style.foreground = c;
+            };
+        };
         if (icon) |cp| if (icon_col < end)
-            try cells.append(allocator, .{ .row = r, .col = icon_col, .codepoint = cp, .width = 1, .style = style });
+            try cells.append(allocator, .{ .row = r, .col = icon_col, .codepoint = cp, .width = 1, .style = icon_style });
         const label_col = if (icon != null) icon_col +| 2 else icon_col;
         if (label_col < end)
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, r, label_col, end, style, false, .head);
@@ -2722,7 +2735,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
         } },
         .empty,
     };
-    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright, null);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright, null, null);
     defer dl.deinit(allocator);
     var saw_active = false;
     var saw_dirty = false;
@@ -2738,7 +2751,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     var editing = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/doc.md" },
         .text = "renamed.md|",
-    }, 1, 1, 18, dim, bright, null);
+    }, 1, 1, 18, dim, bright, null, null);
     defer editing.deinit(allocator);
     var saw_rename_r = false;
     var saw_old_o = false;
@@ -2774,7 +2787,7 @@ test "파일 트리 rename 편집 텍스트도 cluster로 그린다(NFD는 음�
     var nfd = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/old.md" },
         .text = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}|",
-    }, 0, 1, 40, dim, dim, null);
+    }, 0, 1, 40, dim, dim, null, null);
     defer nfd.deinit(allocator);
     var nfd_syllables: usize = 0;
     var nfd_stray: usize = 0;
@@ -2789,7 +2802,7 @@ test "파일 트리 rename 편집 텍스트도 cluster로 그린다(NFD는 음�
     var compat = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/old.md" },
         .text = "\u{314E}\u{314F}\u{3134}\u{3131}\u{3161}\u{3139}|",
-    }, 0, 1, 40, dim, dim, null);
+    }, 0, 1, 40, dim, dim, null, null);
     defer compat.deinit(allocator);
     var compat_letters: usize = 0;
     for (compat.cells) |c| {
@@ -2821,7 +2834,7 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
             .symlink = false,
         },
     }};
-    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null, null);
     defer dl.deinit(allocator);
 
     // 음절 base(초성)는 셀 하나로 나오고, 중성·종성은 **셀이 아니라 풀**에 실린다.
@@ -2857,7 +2870,7 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
         .external_change = false,
         .symlink = false,
     } }};
-    var latin_dl = try buildFileTreeDrawList(allocator, &latin_rows, null, 0, 1, 40, dim, bright, null);
+    var latin_dl = try buildFileTreeDrawList(allocator, &latin_rows, null, 0, 1, 40, dim, bright, null, null);
     defer latin_dl.deinit(allocator);
     var saw_e_with_accent = false;
     var stray_accent_cells: usize = 0;
@@ -2900,7 +2913,7 @@ test "chrome DrawList 빌더는 할당 실패 지점 어디서든 새지 않는�
                 .external_change = false,
                 .symlink = false,
             } }};
-            var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, dim, null);
+            var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, dim, null, null);
             dl.deinit(allocator);
         }
     };
@@ -2926,7 +2939,7 @@ test "file tree focused selection applies its theme contrast color to every row 
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, bright, .{
         .index = 0,
         .foreground = on_accent,
-    });
+    }, null);
     defer dl.deinit(allocator);
     var saw_marker = false;
     var saw_label = false;
@@ -2940,6 +2953,58 @@ test "file tree focused selection applies its theme contrast color to every row 
         if (cell.codepoint == '!') saw_conflict = true;
     }
     try std.testing.expect(saw_marker and saw_label and saw_dirty and saw_conflict);
+}
+
+// 아이콘 색은 **종류의 보조 신호**다(사용자 요청 2026-08-18 — 트리에서 파일 종류가 먼저 읽히게).
+// 두 가지를 고정한다: ⑴ 색을 주면 아이콘만 라벨과 다른 색이 된다(라벨·marker 는 행 색 그대로),
+// ⑵ **선택된 행에서는 그 색을 버리고 accent 대비색을 따른다** — 종류 색을 남기면 밝은 accent 위에서
+// 읽히지 않는다(같은 이유로 marker·상태 글리프도 그렇게 한다).
+test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대비색을 따른다" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const on_accent: terminal.Color = .{ .rgb = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
+    const icon_color: terminal.Color = .{ .rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC } };
+    var colors: [std.meta.fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
+    colors[@intFromEnum(file_tree_icon.IconKind.document)] = icon_color;
+    const rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/README.md",
+        .label = "README.md",
+        .depth = 0,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+        .icon_kind = @intFromEnum(file_tree_icon.IconKind.document),
+    } }};
+
+    {
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, dim, null, &colors);
+        defer dl.deinit(allocator);
+        const icon_cp = file_tree_icon.codepoint(.document).?;
+        var saw_icon = false;
+        var saw_label = false;
+        for (dl.cells) |cell| {
+            if (cell.codepoint == icon_cp) {
+                try std.testing.expectEqual(icon_color, cell.style.foreground); // 아이콘만 종류 색
+                saw_icon = true;
+            } else if (cell.codepoint == 'R') {
+                try std.testing.expectEqual(dim, cell.style.foreground); // 라벨은 행 색 그대로
+                saw_label = true;
+            }
+        }
+        try std.testing.expect(saw_icon and saw_label);
+    }
+    {
+        // 선택된 행: 아이콘도 accent 대비색이다.
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, dim, .{
+            .index = 0,
+            .foreground = on_accent,
+        }, &colors);
+        defer dl.deinit(allocator);
+        for (dl.cells) |cell| try std.testing.expectEqual(on_accent, cell.style.foreground);
+    }
 }
 
 test "file tree icons occupy one cell between disclosure and label without state overlap" {
@@ -2961,7 +3026,7 @@ test "file tree icons occupy one cell between disclosure and label without state
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 16, dim, dim, .{
         .index = 0,
         .foreground = selected_fg,
-    });
+    }, null);
     defer dl.deinit(allocator);
     var saw_icon = false;
     var saw_label = false;
@@ -2979,7 +3044,7 @@ test "file tree icons occupy one cell between disclosure and label without state
     }
     try std.testing.expect(saw_icon and saw_label);
 
-    var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null);
+    var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null, null);
     defer narrow.deinit(allocator);
     for (narrow.cells, 0..) |cell, i| {
         try std.testing.expect(cell.col < 7);
@@ -3003,7 +3068,7 @@ test "file tree disclosure icon label and state cells never overlap at narrow wi
             .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
         } }};
         const cols: u16 = @intCast(cols_usize);
-        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null);
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null, null);
         defer dl.deinit(allocator);
         for (dl.cells, 0..) |cell, i| {
             try std.testing.expect(cell.col < cols);

@@ -127,6 +127,53 @@ macOS의 `windowShouldClose` 분담과 같다. `WM_PAINT`에서도 **그리지 �
 2,614개가 통과하는 동안 이 파일 테스트는 0개 돌았다). `main.zig`의 `test { _ = win32_window; }` 한 줄이 그
 구멍을 막는다 — `check-targets`가 `main.zig`를 놓쳤던 것과 같은 부류다.
 
+### 2c. D3D11 표시 경로와 COM 규약 (W7.2a 결정, 실측 2026-08-17)
+
+표시 경로는 `src/platform/windows/d3d11_present.zig`가 소유하고 **"화면에 내보내는 것"만** 안다 — 디바이스를
+만들고, 스왑체인을 잡고, 백버퍼를 지우고, present한다. 무엇을 그릴지(셀·아틀라스·셰이더)는 W7.2b가 이 위에
+얹는다. 창(§2b)과 같은 이유로 갈랐다: 실패가 어느 층에서 났는지 한 층씩 확인할 수 있어야 한다.
+
+**스왑체인은 HWND에 붙인다 — 그리고 합성 모델은 아직 정하지 않는다.** §8의 웹뷰 합성 결정은 열어 두고
+`CreateSwapChainForHwnd`로 간다. W7.1이 그 결정을 두 지점(창 `dwExStyle`·스왑체인 생성)에 가둬 뒀으므로
+전환이 설계대로 싸다. 다만 **W8이 다시 발견하지 않도록 결론을 적어 둔다**: HWND 오버레이로 웹뷰를 붙이면
+WebView2가 자식 HWND가 되고 그 영역 위에는 우리 스왑체인이 그릴 수 없다(airspace). 그러면 macOS의
+`터미널 < 웹뷰 < 오버레이` z-order가 뒤집혀 모달이 웹뷰 뒤로 숨는다. 그 순서를 지키려면 DirectComposition +
+WebView2 visual hosting이어야 한다 — **W8의 선택지는 사실상 하나다.**
+
+**COM을 Zig로 쓰는 규약** (이 저장소의 첫 COM 소비자다 — 이전엔 `IUnknown`도 `QueryInterface`도 없었다).
+COM 객체는 첫 워드가 vtable 포인터인 구조체이고, vtable은 함수 포인터가 **정해진 순서로** 늘어선 것이다.
+그 순서가 곧 ABI라 슬롯 하나를 빠뜨려도 **컴파일은 되고** 런타임에 엉뚱한 함수를 부른다. 그래서 둘을 지킨다:
+
+| | 규칙 | 왜 |
+|---|---|---|
+| ⑴ | 부르지 않는 슬롯도 **자리를 채운다**(`*const anyopaque`) | 타입이 없으니 실수로 못 부른다 |
+| ⑵ | 슬롯 번호를 **`@offsetOf`로 comptime에 못 박는다** | 위에 슬롯을 끼워 넣으면 그 자리에서 컴파일이 멈춘다. comptime이라 **Windows 러너 없이 세 타깃 전부** 이 게이트를 통과해야 한다 |
+
+**실측으로 정해진 값 셋.**
+
+- `AlphaMode`는 `UNSPECIFIED`여야 한다. `IGNORE`는 합성 스왑체인용이고, HWND에 주면
+  `CreateSwapChainForHwnd`가 `DXGI_ERROR_INVALID_CALL`(0x887A0001)로 거절한다.
+- **`MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)`은 터미널에 필수다.** 스왑체인을 만들면 DXGI가 그 창의
+  Alt+Enter를 후킹해 독점 전체화면을 토글한다 — Alt+Enter는 앱 키바인딩이라 그대로 두면 W7.4의 입력이 그
+  키를 영영 못 받는다. 스왑체인을 만든 **뒤에** 불러야 연결이 잡힌다.
+- 형식은 `B8G8R8A8_UNORM`, 스왑 효과는 `FLIP_DISCARD`, 버퍼 2장. BGRA인 이유는 합성기 기본 형식이라 present에
+  변환이 끼지 않고, `NativeMetalCell`의 색이 이미 `0xAARRGGBB`(= BGRA 바이트 순서)라 W7.2b가 그대로 쓴다.
+
+**하드웨어가 없으면 WARP로 선다.** 계획 문서가 "Windows는 WARP가 있어 GPU 없는 러너에서도 렌더 스모크를
+돌릴 여지가 있다"고 적어 둔 그 여지를 코드가 실제로 연다. 어느 쪽으로 섰는지는 숨기지 않고 보고한다
+(`driver=hardware|warp`) — WARP로 떨어진 줄 모르면 성능을 잘못 판정한다.
+
+**창 투명도는 여기서 정해지지 않는다.** `AlphaMode`가 `UNSPECIFIED`라 합성기가 알파를 무시하고 창은
+불투명하다. macOS의 `window_opacity_milli`에 해당하는 것은 스왑체인이 아니라 **합성 모델**(DirectComposition
+또는 레이어드 윈도)이 정하므로, §8의 웹뷰 결정과 같은 자리에서 함께 열린다.
+
+**실기 캡처** (Windows 10 Pro 19045, `maru d3d11-present-smoke`):
+
+![W7.2a D3D11 present — GPU가 칠한 화면과 리사이즈](images/w7-2a-d3d11-present.png)
+
+화면 중앙 픽셀이 요청한 `0xFF1E2430`과 정확히 같다. R/B가 뒤집혔다면 `#30241E`가 나왔을 것이므로 **채널
+순서까지 화면으로 확인된다** — 이것이 이 슬라이스의 판정식이다(present가 "성공을 반환했다"만으로는 부족하다).
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어
@@ -1308,8 +1355,15 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.
 - **웹뷰 합성 모델**. WebView2는 별도 HWND라 macOS의 `CALayer` subview 3겹 합성이 그대로 오지 않는다.
-  DirectComposition으로 합성할지 HWND 오버레이로 갈지가 W7의 남은 선행 결정이다. **GPU 백엔드는 정해졌다**
-  (아래 §2a) — 한때 이 항목과 묶여 있었으나 갈랐다.
+  DirectComposition으로 합성할지 HWND 오버레이로 갈지 — **W8로 미뤘다**(W7.2a 결정, §2c). W7.1이 그 결정을
+  두 지점(창 `dwExStyle`·스왑체인 생성)에 가둬 뒀으므로 전환이 싸고, 지금 필요한 것은 터미널이라 더 단순한
+  `CreateSwapChainForHwnd`로 갔다.
+
+  **다만 답은 사실상 정해져 있다.** HWND 오버레이로 가면 WebView2가 자식 HWND가 되고 그 영역 위에는 우리
+  스왑체인이 그릴 수 없다(airspace) — `터미널 < 웹뷰 < 오버레이` z-order가 뒤집혀 모달이 웹뷰 뒤로 숨는다.
+  그 순서를 지키려면 DirectComposition + WebView2 visual hosting이다. W8은 이 결론을 다시 발견하지 말고
+  **비용만 재면 된다**(COM 인터페이스 셋이 는다). **창 투명도도 같은 자리에서 열린다**(§2c).
+  **GPU 백엔드는 정해졌다**(§2a) — 한때 이 항목과 묶여 있었으나 갈랐다.
 - **`main.zig`의 컨트롤 플레인 transport**. unix domain socket을 named pipe로 옮기는 설계. 초기에는
   "인스턴스 없음"으로 graceful하게 빠지는 것으로 충분하다.
 - ~~**hover 밑줄에도 존재검증을 둘 것인가**~~ → **둔다(결정 완료, §5.1a).** 재야 할 것으로 적어 둔 두 비용을

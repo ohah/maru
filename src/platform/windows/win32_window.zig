@@ -56,6 +56,11 @@ pub const WindowEvent = union(enum) {
     paint,
 };
 
+/// 클라이언트 영역 픽셀 크기. **이름을 준다** — 익명 구조체로 두면 호출자가 `orelse .{...}`로 기본값을
+/// 얹을 때 타입이 안 맞는다(실측: W7.2a 배선에서 `incompatible types`로 걸렸다). 반환 타입은 계약이므로
+/// 이름이 있어야 한다.
+pub const ClientSize = struct { width_px: u32, height_px: u32 };
+
 /// 표시 대상 — **W7.2가 채운다.** 지금은 창이 스왑체인을 만들지 않는다는 사실을 타입으로 못 박아 두는
 /// 자리다(위 doc 참조). 비어 있어도 이름이 있는 편이, 나중에 "어디에 끼우지"를 찾아 헤매지 않게 한다.
 pub const PresentTarget = struct {
@@ -343,7 +348,7 @@ pub const Window = struct {
     /// 현재 클라이언트 영역(픽셀). **`null`은 "물어보지 못했다"만 뜻한다** — 최소화된 창의 0×0은 0×0으로
     /// 돌려준다. 둘을 `null` 하나로 뭉치면 호출자가 "최소화됐다"와 "질의가 실패했다"를 구분할 수 없는데,
     /// W7.2는 그 둘에 다르게 굴어야 한다(전자는 present를 거르고, 후자는 이전 크기를 유지한다).
-    pub fn clientSize(self: *const Window) ?struct { width_px: u32, height_px: u32 } {
+    pub fn clientSize(self: *const Window) ?ClientSize {
         var r: RECT = undefined;
         if (GetClientRect(self.hwnd, &r) == 0) return null;
         return .{

@@ -104,7 +104,25 @@ const MSG = extern struct {
 };
 const RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
 
+/// `WM_NCCREATE`/`WM_CREATE`의 `lParam`이 가리키는 것. 우리가 읽는 것은 `lpCreateParams` 하나지만,
+/// `extern struct`는 레이아웃이 맞아야 하므로 전부 적는다(x64 기준 필드 순서는 공개 헤더 정의다).
+const CREATESTRUCTW = extern struct {
+    lpCreateParams: ?*anyopaque,
+    hInstance: HINSTANCE,
+    hMenu: ?HMENU,
+    hwndParent: ?HWND,
+    cy: i32,
+    cx: i32,
+    y: i32,
+    x: i32,
+    style: DWORD,
+    lpszName: ?[*:0]const u16,
+    lpszClass: ?[*:0]const u16,
+    dwExStyle: DWORD,
+};
+
 const WM_DESTROY: UINT = 0x0002;
+const WM_NCCREATE: UINT = 0x0081;
 const WM_SIZE: UINT = 0x0005;
 const WM_CLOSE: UINT = 0x0010;
 const WM_QUIT: UINT = 0x0012;
@@ -210,6 +228,11 @@ pub const Window = struct {
     hwnd: HWND,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
+    ///
+    /// **창이 여럿이면 폴링 규약이 하나 더 필요하다.** `poll`의 `PeekMessageW(hwnd=null)`은 이 **스레드의**
+    /// 메시지를 전부 꺼내 각자의 `WndProc`으로 보낸다 — 즉 창 A의 `poll`이 창 B의 큐를 채운다. 동작은
+    /// 맞지만 B를 아무도 `poll`하지 않으면 B의 이벤트가 무한히 쌓인다. 창이 여러 개가 되는 시점(W8)에
+    /// 펌프를 창 밖으로 빼거나 모든 창을 매 프레임 `poll`하는 규약을 정한다. 지금은 창이 하나다.
     events: EventQueue = .{},
     allocator: std.mem.Allocator,
     quit_requested: bool = false,
@@ -268,14 +291,19 @@ pub const Window = struct {
             null,
             null,
             hinstance,
-            null,
+            // **여기서 넘긴다.** `CreateWindowExW`는 반환하기 **전에** `WM_NCCREATE`·`WM_CREATE`(그리고
+            // 경우에 따라 `WM_SIZE`)를 동기로 보낸다. 반환 뒤에 `GWLP_USERDATA`를 붙이면 그 구간의
+            // `WndProc`이 창을 못 찾아 이벤트가 `dropped`에도 안 잡히고 사라진다 — 계약이 생성 구간에서만
+            // 조용히 깨진다. `lpParam`으로 넘겨 `WM_NCCREATE`에서 붙이는 것이 Win32 표준 관용구다.
+            self,
         ) orelse {
             last_create_error = GetLastError();
             return error.CreateWindowFailed;
         };
-        self.hwnd = hwnd;
-        // `WndProc`이 이 창의 상태를 찾을 수 있게 포인터를 창에 붙인다(전역 대신 — 창이 여러 개여도 산다).
+        // `WM_NCCREATE`가 이미 붙였다. 그래도 여기서 한 번 더 쓰는 것은 방어가 아니라 **불변식 고정**이다 —
+        // `WM_NCCREATE`를 못 받는 경로가 생기더라도 반환 시점엔 반드시 붙어 있다.
         _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+        self.hwnd = hwnd;
         return self;
     }
 
@@ -333,6 +361,13 @@ fn windowFrom(hwnd: HWND) ?*Window {
 }
 
 fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+    // **가장 먼저 창을 붙인다.** 이 뒤에 오는 생성 구간 메시지(`WM_CREATE`·`WM_SIZE`)가 창을 찾을 수
+    // 있어야 한다. `DefWindowProcW`에 넘기는 것을 잊으면 창 생성이 통째로 실패한다.
+    if (msg == WM_NCCREATE) {
+        const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        if (cs.lpCreateParams) |p| _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(p)));
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
     const self = windowFrom(hwnd);
     switch (msg) {
         WM_SIZE => {

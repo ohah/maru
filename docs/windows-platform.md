@@ -91,6 +91,17 @@ Metal의 대응물은 **D3D11**이고 표시·프레임 페이싱은 **DXGI**가
 재할당으로 무효화되지 않는다. 한 버퍼를 빌려주면 그 use-after-free를 API가 **초대한다** — 대조군에서 실제로
 segfault가 났다.
 
+**창 포인터는 `lpParam`으로 넘겨 `WM_NCCREATE`에서 붙인다.** `CreateWindowExW`는 반환하기 **전에**
+`WM_NCCREATE`·`WM_CREATE`를 동기로 보낸다. 반환 뒤에 `GWLP_USERDATA`를 붙이면 그 구간의 `WndProc`이 창을
+못 찾아 이벤트가 `dropped`에도 안 잡히고 사라진다 — 계약이 생성 구간에서만 조용히 깨진다. 이 스타일
+(`WS_OVERLAPPEDWINDOW`, 비표시)에서는 반환 전 `WM_SIZE`가 오지 않아 지금은 드러나지 않지만, 구멍을 열어 둘
+이유가 없다.
+
+**창이 여럿이 되면 폴링 규약이 하나 더 필요하다.** `PeekMessageW(hwnd=null)`은 그 **스레드의** 메시지를 전부
+꺼내 각자의 `WndProc`으로 보낸다 — 창 A의 `poll`이 창 B의 큐를 채운다. 동작은 맞지만 B를 아무도 `poll`하지
+않으면 B의 이벤트가 무한히 쌓인다. 펌프를 창 밖으로 빼거나 모든 창을 매 프레임 `poll`하는 규약을 **W8에서**
+정한다. 지금은 창이 하나다.
+
 `WM_CLOSE`에서 **창을 닫지 않는다**. 호출자가 정책(세션 종료 확인 등)을 처리한 뒤 `requestClose`를 부른다 —
 macOS의 `windowShouldClose` 분담과 같다. `WM_PAINT`에서도 **그리지 않는다**(`BeginPaint`/`EndPaint`조차 하지
 않는다) — W7.2가 스왑체인으로 present하면 GDI 페인트 사이클과 섞이면 안 되고, 무효 영역 정리는

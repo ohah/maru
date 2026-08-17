@@ -46,6 +46,7 @@ const pure_std = [_]struct { name: []const u8, why: []const u8 }{
     .{ .name = "crypto", .why = "X25519·Ed25519·ChaCha20-Poly1305·SHA-2. 순수 계산이고 계약 §3 이 이것을 쓴다고 정한다." },
     .{ .name = "Random", .why = "인터페이스 타입. 실제 엔트로피는 호출자가 주입한다(우리가 OS 에서 안 뽑는다)." },
     .{ .name = "testing", .why = "단언 헬퍼. 테스트 블록에서만 쓰이고 OS 를 안 부른다." },
+    .{ .name = "base64", .why = "호출자 버퍼에 인코딩. 지문(`SHA256:<base64>`)이 이것으로 만들어지고, 할당도 OS 도 없다." },
 };
 
 /// `@import("std")` 를 이 이름 말고 다른 것에 묶으면 스캔이 통째로 빗나간다(`const s = @import(\"std\");

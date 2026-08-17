@@ -56,6 +56,7 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
         .editor_wide_glyph,
         .editor_wrap,
         .editor_hscroll,
+        .editor_folded,
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
         .editor_real_file,
@@ -85,6 +86,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_wide_glyph,
         .editor_wrap,
         .editor_hscroll,
+        .editor_folded,
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
         .editor_real_file,
@@ -742,6 +744,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-wide-glyph")) return .editor_wide_glyph;
     if (std.mem.eql(u8, raw, "editor-wrap")) return .editor_wrap;
     if (std.mem.eql(u8, raw, "editor-hscroll")) return .editor_hscroll;
+    if (std.mem.eql(u8, raw, "editor-folded")) return .editor_folded;
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
@@ -784,6 +787,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_wide_glyph => "editor-wide-glyph",
         .editor_wrap => "editor-wrap",
         .editor_hscroll => "editor-hscroll",
+        .editor_folded => "editor-folded",
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",

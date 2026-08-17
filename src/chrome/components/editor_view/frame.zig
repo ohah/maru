@@ -95,6 +95,9 @@ pub const Props = struct {
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
     line_numbers: ?[]const ?u32 = null,
+    /// 논리 줄마다의 **접힘 표식**(줄 인덱스로 읽는다). `null`이면 접힘 칸이 빈다 — 접힘을 모르는
+    /// 호출자(비교 뷰 등)는 그대로 두면 된다.
+    folds: ?[]const gutter.Fold = null,
     /// 문서 전체의 **시각 행** 수를 이미 알고 있으면 여기 넣는다. `null`이면 `lines`를 훑어 센다 —
     /// 줄당 전개가 들어가므로 큰 문서에서는 호출자가 캐시한 값을 주는 편이 낫다(§2 L2 캐시).
     ///
@@ -235,6 +238,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         scratch.visual_rows[0..cw.visual_rows],
         props.first_line,
         props.line_numbers,
+        props.folds,
         scratch.gutter_rows,
     );
     const gw = gutter.build(.{

@@ -107,6 +107,14 @@ pub const ScenarioId = enum {
     /// 올라와, 사용자에게는 리사이즈 한 번에 화면이 문서의 다른 곳으로 튄 것처럼 보인다. 코드
     /// 리뷰가 지적한 자리이고, 화면에 보이는 결함이므로 캡처로 고정한다.
     editor_wrap_stale_scroll,
+    /// N1 §4.1f — **접힌 편집기**. gutter 접힘 칸에 화살표가 서고(펼침 ▾ · 접힘 ▸), 접힌 만큼 줄
+    /// 번호가 **건너뛴다**. 화면에 보이는 변경이라 캡처로 고정한다 — 화살표가 번호나 본문을 덮으면
+    /// 여기서 드러난다.
+    ///
+    /// **접힘 계산은 여기서 안 한다.** 줄·번호·표식을 손으로 적어 넘긴다(다른 편집기 시나리오와 같다)
+    /// — 계산을 Lab에 복제하면 제품과 갈릴 자리가 하나 더 생기고, 그 계산은 단위·제품 테스트가 이미
+    /// 판정한다. 여기서 고정하는 것은 **그리기**다.
+    editor_folded,
     /// N1 §3.5 — **디스크에서 읽은 파일이 화면에 뜬다.** 앞의 편집기 시나리오들은 전부 소스에 박은
     /// 배열을 그리므로, `openPath`가 실제로 무엇을 돌려주는지는 증명하지 않는다. 여기서는 호출자가
     /// 파일을 써서 `openPath`로 읽고 그 줄들을 그대로 넘긴다(`Scenario.lines`).
@@ -202,7 +210,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -320,6 +328,20 @@ const editor_hazard_lines = [_][]const u8{
 /// 줄 2는 ASCII라 근사와 실제가 일치하고, 줄 3은 한글이라 **행마다 한 칸이 남아 근사가 틀리는**
 /// 경우다. 둘을 나란히 두면 어느 쪽이 깨졌는지 캡처에서 갈린다. 줄 4의 빈 줄은 **빈 줄이 행 하나를
 /// 지키는지**(caret 자리) 보고, 줄 5는 그 뒤 번호가 밀리지 않았는지 보여준다.
+/// 접힌 화면이 그리는 줄들 — 몸통이 숨어 **머리 줄만** 남았다.
+const editor_folded_lines = [_][]const u8{
+    "pub fn main() !void {",
+    "fn helper(a: u32) u32 {",
+    "const config = .{",
+    "// 접히지 않는 평범한 줄",
+};
+
+/// 위 줄들의 **원래 문서 번호**. 접힌 만큼 건너뛴다 — 이것이 접힘의 눈에 보이는 증거다.
+const editor_folded_numbers = [_]?u32{ 1, 8, 15, 24 };
+
+/// 줄마다의 접힘 표식. 셋은 접혀 있고(▸) 마지막 줄은 접을 자리가 아니다.
+const editor_folded_marks = [_]chrome.components.editor_view.gutter.Fold{ .collapsed, .collapsed, .open, .none };
+
 const editor_wrap_lines = [_][]const u8{
     // **자.** 랩이 몇 열에서 접히는지 캡처에서 **읽을 수 있게** 한다 — 글자가 화면 오른쪽에 닿아
     // 끝나면 "폭에 맞게 접혔는지"와 "넘쳐서 잘렸는지"가 그림상 같아 보인다. 이어지는 행의 첫 숫자가
@@ -406,6 +428,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
         .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
+        .editor_folded => &editor_folded_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -507,7 +530,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .first_line = first_line,
         .first_piece = first_piece,
         .first_col = vp.first_col,
-        .total_lines = line_count,
+        // **gutter 자릿수는 문서 줄 수로 잡는다** — 접히면 그리는 줄보다 번호가 크다.
+        .total_lines = if (scenario.id == .editor_folded) 24 else line_count,
+        .line_numbers = if (scenario.id == .editor_folded) &editor_folded_numbers else null,
+        .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
         .visible_rows = @min(vp.rows, row_capacity),
         .wrap = wrap_on,
 
@@ -738,7 +764,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
+            .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

@@ -1606,6 +1606,14 @@ const TermRuntime = struct {
     /// 같다(§4.1f). 접힘이 바뀔 때만 다시 만들고 프레임마다는 읽기만 한다.
     editor_visible_lines: []const []const u8 = &.{},
     editor_visible_numbers: []const ?u32 = &.{},
+    /// 그리는 줄마다의 **접힘 표식**(gutter 화살표). 줄 배열과 같은 축이고, 접힘이 바뀔 때만 다시
+    /// 채운다 — 렌더는 읽기만 한다.
+    ///
+    /// **저장소를 문서 줄 수만큼 미리 잡는다**(`editor_folded_buf`와 같은 규율). 보이는 줄은 문서
+    /// 줄보다 많을 수 없으므로 이 한 번으로 충분하고, 그래서 **펼치기가 할당 없이 끝난다** — 펼치기
+    /// 경로에 실패 지점이 생기면 실패했을 때 접힌 화면에 갇힌다(그 결함을 이미 한 번 잡았다).
+    editor_fold_marks: []chrome.components.editor_view.gutter.Fold = &.{},
+    editor_fold_marks_len: usize = 0,
     /// 접힌 머리 줄들. **오름차순**이고 `editor_fold_ranges.len`만큼의 자리를 미리 잡아 두므로
     /// 접기/펼치기가 다시 할당하지 않는다(`hiddenSpans`가 오름차순을 계약으로 요구한다).
     editor_folded_buf: []u32 = &.{},
@@ -7147,6 +7155,9 @@ pub const AppSession = struct {
             // 대상 자체는 여기서 정하지 않는다 — tick이 매 프레임 동기화한다(전환 경로마다 세우면 새는 문이 남는다).
             .toggle_find => self.toggleFind(),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
+            // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
+            .fold_all => _ = editor_ops.foldAll(self),
+            .unfold_all => _ = editor_ops.unfoldAll(self),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),

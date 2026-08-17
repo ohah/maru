@@ -489,6 +489,10 @@ pub const inventory = [_]Proof{
     // 접힘이 화면에 반영되며 Term rt에 필드 둘이 더 붙는다(`editor_visible_lines`·`_numbers` — 접힘을
     // 적용한 보이는 줄과 원래 번호. diff가 filler 행에 쓰는 것과 같은 모양이라 렌더를 안 고친다).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
+    // gutter 접힘 화살표(§4.1f)로 Term rt에 필드 둘이 더 붙고(`editor_fold_marks`·`_len` — 줄마다의
+    // 표식. 문서 줄 수만큼 미리 잡아 **펼치기가 할당 없이** 끝나게 한다), 접기/펼치기 액션 둘이
+    // dispatch에 붙는다(`fold_all`·`unfold_all` — 편집기 pane에 포인터 경로가 없어 명령이 유일한 길이다).
+    // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f9cbf35b8c4ce0ee7d730ebb1cb74da91c3603f50aee9265159b8f7d25737d5c" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

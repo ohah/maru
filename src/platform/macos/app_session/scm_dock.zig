@@ -278,7 +278,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const notice_rows: usize = if (self.scm_write_error != null) 1 else 0;
 
     // **저장소 머리 줄이 목록의 첫 층이다**(§3.5.1c). 지금 읽어 둔 저장소의 줄들은 자기 머리 줄 아래에
-    // 오고, 아직 안 읽은 저장소는 머리 줄만 선다("읽는 중…" — 배지의 빈자리와 구별한다).
+    // 오고, 아직 안 읽은 저장소는 머리 줄만 선다(maru.i18n.t(.scm_loading) — 배지의 빈자리와 구별한다).
     const repos = repoEntries(self);
     const current_repo = self.git_repo orelse "";
 
@@ -344,7 +344,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .collapsed = collapsed,
                 .primary = entry.primary,
                 .count = if (is_current) countFiles(model.rows) else (if (summary) |sum| sum.count else 0),
-                // 아직 답이 안 온 저장소만 "읽는 중…"이다 — **0건과 구별해야 한다**.
+                // 아직 답이 안 온 저장소만 maru.i18n.t(.scm_loading)이다 — **0건과 구별해야 한다**.
                 .pending = !is_current and summary == null,
                 // 읽지 못한 저장소는 그 사실을 적는다(0건으로 그리면 없는 사실을 단정한다).
                 .failed = if (summary) |sum| sum.failed else false,
@@ -498,11 +498,11 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
         items[0] = .{ .notice = if (self.scm_log_failed)
-            "커밋을 읽지 못했습니다"
+            maru.i18n.t(.scm_log_read_failed)
         else if (self.scm_log_repo == null)
-            "읽는 중…"
+            maru.i18n.t(.scm_loading)
         else
-            "커밋이 없습니다" };
+            maru.i18n.t(.scm_no_commits) };
         n = 1;
     }
     var it = maru.session.git_log.iterate(self.scm_log_text);
@@ -560,16 +560,20 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
 /// 규칙이 갈린다. 미래 시각(시계가 어긋난 커밋)은 `방금`으로 접는다 — "-3시간 전"은 읽을 수 없다.
 fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []const u8 {
     _ = self;
-    if (delta_s < 60) return "방금";
+    // 문구는 `agent_dock`·`notification` 과 **같은 키를 쓴다** — 같은 개념을 세 파일이 각자 적으면
+    // 한쪽만 고쳐지는 드리프트가 생긴다(i18n 리터럴 게이트가 이 자리를 잡았다).
+    // `i18n.format` 은 할당하지 않으므로 스택 버퍼에 만든 뒤 arena 로 복사한다.
+    var buf: [48]u8 = undefined;
+    if (delta_s < 60) return maru.i18n.t(.ad_time_now);
     const minutes = @divFloor(delta_s, 60);
-    if (minutes < 60) return std.fmt.allocPrint(arena, "{d}분 전", .{minutes}) catch "";
+    if (minutes < 60) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_minutes), &.{.{ .d = @intCast(minutes) }})) catch "";
     const hours = @divFloor(minutes, 60);
-    if (hours < 24) return std.fmt.allocPrint(arena, "{d}시간 전", .{hours}) catch "";
+    if (hours < 24) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_hours), &.{.{ .d = @intCast(hours) }})) catch "";
     const days = @divFloor(hours, 24);
-    if (days < 30) return std.fmt.allocPrint(arena, "{d}일 전", .{days}) catch "";
+    if (days < 30) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_days), &.{.{ .d = @intCast(days) }})) catch "";
     const months = @divFloor(days, 30);
-    if (months < 12) return std.fmt.allocPrint(arena, "{d}개월 전", .{months}) catch "";
-    return std.fmt.allocPrint(arena, "{d}년 전", .{@divFloor(months, 12)}) catch "";
+    if (months < 12) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_months), &.{.{ .d = @intCast(months) }})) catch "";
+    return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_years), &.{.{ .d = @intCast(@divFloor(months, 12)) }})) catch "";
 }
 
 /// 편집기의 선택을 DTO 값으로 옮긴다. 값 집합이 갈리면 여기서 컴파일로 걸린다.
@@ -2362,7 +2366,7 @@ pub fn repoStatusFor(self: *const AppSession, path: []const u8) ?app_session_mod
 }
 
 /// 목록 갱신 시점(뷰 진입·창 포커스·`.git` 이벤트)에 **전부 낡았다고 표시**한다. 지우지 않는 이유는
-/// 지운 값을 다시 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
+/// 지운 값을 다시 읽는 동안 머리 줄이 maru.i18n.t(.scm_loading)으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
 /// 보여 주다 조용히 바뀌는 편이 낫다(그 값은 방금 전 사실이다).
 /// 그 저장소 **하나만** 낡았다고 표시한다(쓰기가 끝난 뒤 — 그 줄만 사실이 바뀌었다).
 pub fn markRepoStatusStaleFor(self: *AppSession, repo: []const u8) void {

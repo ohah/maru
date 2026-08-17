@@ -127,6 +127,14 @@ ck "터미널 트리에 글자 노드가 없다" 0 "$(grep -c 'tree\.text(' $B)"
 # 하드코딩 라벨 배열이 다시 생기면 잡는다(`zsh`/`vim`/`logs`·`maru`/`web`/... 이 그 모양이었다).
 ck "브리지에 하드코딩 라벨 배열이 없다" 0 "$(grep -cE 'const [a-z_]+ = \[_\]\[\]const u8\{ *"' $B || true)"
 
+echo "§라우팅 — 목적지는 코어가 든다"
+# **host 가 "누가 먹었나" 를 들면 같은 사실이 두 층에 생긴다.** 그러면 정리도 두 곳에서 해야 하고,
+# 한쪽을 빠뜨려 "복귀 후 첫 손짓이 통째로 삼켜지는" 결함이 났다 — 같은 모양을 세 번 겪었다.
+ck "포인터 진입점이 하나다" 1 "$(grep -c 'pub export fn maru_mobile_.*pointer(' $B)"
+ck "헤더에 포인터 진입점이 하나다" 1 "$(grep -c '^void maru_mobile_pointer(' $H)"
+# 주석 속 과거 서술은 안 센다 — 왜 없앴는지 적어 두는 것이 오히려 필요하다.
+ck "host 에 남은 라우팅 상태" 0 "$(grep -hE '(chrome|keybar)_active|_(chrome|keybar)Active' $I $A | grep -vcE '^\s*(//|///|\*)' || true)"
+
 echo "§멀티터치 — 손가락을 아무거나 집지 않는다"
 # iOS 는 `multipleTouchEnabled` 를 켠 순간부터 `touches` 에 여럿이 들어온다. 그때 `anyObject` 가
 # 남아 있으면 **진짜로 임의 선택**이 된다 — 프레임마다 다른 손가락이 잡혀 좌표가 튄다.

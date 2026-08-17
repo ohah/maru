@@ -147,7 +147,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
     /// 이번 터치를 키바가 잡고 있나. down 에서 정해지고 up/cancel 에서 풀린다.
-    BOOL _keybarActive, _chromeActive;
 }
 
 /// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
@@ -363,41 +362,25 @@ static unsigned int maruPointerId(UITouch *t) {
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    // **제스처가 이미 잡혀 있으면 목적지를 다시 정하지 않는다.** 그 제스처의 나머지 손가락은
-    // 같은 곳으로 간다(Android 와 같은 규칙) — 손가락마다 다른 표면으로 보내면 키바를 밀면서
-    // 본문을 스크롤하는 상태가 생긴다.
-    if (_chromeActive) { [self routeChrome:0 touches:touches]; return; }
-    if (_keybarActive) { [self routeKeybar:0 touches:touches]; return; }
-    if (_hasBodyPtr) { [self sendPointer:0 touches:touches]; return; }
-
-    UITouch *first = touches.anyObject; // 아직 제스처가 없다 — 이 이벤트의 아무 손가락이 첫 손가락이다
-    if (!first) return;
-    CGPoint p = [first locationInView:self];
-    UIEdgeInsets safe = self.safeAreaInsets;
-    // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
-    float lx = (float)(p.x - safe.left);
-    float ly = (float)(p.y - safe.top);
-    // **밀린 화면이 가장 먼저다.** 설정이 올라와 있으면 그 아래 키바·본문은 없는 것과 같다.
-    if (maru_mobile_chrome_pointer(0, maruPointerId(first), lx, ly)) {
-        _chromeActive = YES;
-        return;
+    // **어디로 갈지는 코어가 정한다**(계약 §3.1) — 뷰는 좌표와 id 만 나른다. 목적지도, 그
+    // 제스처의 나머지 손가락을 같은 곳으로 보내는 것도 코어가 든다.
+    UITouch *first = touches.anyObject; // 로그용 — 이 이벤트의 아무 손가락이면 된다
+    if (first) {
+        CGPoint p = [first locationInView:self];
+        UIEdgeInsets safe = self.safeAreaInsets;
+        float lx = (float)(p.x - safe.left);
+        float ly = (float)(p.y - safe.top);
+        unsigned int cell = maru_mobile_hit_cell(lx, ly);
+        NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
+              p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
     }
-    // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
-    // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
-    if (maru_mobile_keybar_pointer(0, maruPointerId(first), lx, ly)) {
-        _keybarActive = YES;
-        return;
-    }
-    _keybarActive = NO;
-    unsigned int cell = maru_mobile_hit_cell(lx, ly);
-    NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
-          p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
     [self sendPointer:0 touches:touches];
 }
 
-/// 배경으로 나갈 때 키바 잡음을 푼다(AppDelegate 가 부른다 — ivar 에 직접 못 닿는다).
+/// 배경으로 나갈 때 잡음을 푼다(AppDelegate 가 부른다 — ivar 에 직접 못 닿는다).
+/// **키바·chrome 잡음은 이제 없다** — 목적지를 코어가 들므로 `maru_mobile_pointer(3,...)` 한 번이
+/// 전부 놓는다(R2). 남은 것은 본문 관성뿐이라 아래 하나만 남는다.
 - (void)releaseKeybarGrab {
-    _keybarActive = NO;
 }
 
 /// **본문 제스처 잡음도 푼다.** T3 가 `_hasBodyPtr` 을 들이면서 정리할 자리가 하나 늘었다 —
@@ -412,53 +395,28 @@ static unsigned int maruPointerId(UITouch *t) {
 /// 밀린 화면(설정)이 잡고 있는 동안의 나머지 위상. 키바와 같은 모양이다.
 /// 배경 전환처럼 **뗀 적 없이 끝나는** 경우에 뷰 쪽 잡음을 푼다(브리지 쪽은 호출자가 푼다).
 - (void)releaseChromeGrab {
-    _chromeActive = NO;
 }
 
-- (BOOL)routeChrome:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
-    if (!_chromeActive) return NO;
-    UIEdgeInsets safe = self.safeAreaInsets;
-    for (UITouch *touch in touches) {
-        CGPoint p = [touch locationInView:self];
-        maru_mobile_chrome_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
-    }
-    return YES;
-}
-
-- (BOOL)routeKeybar:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
-    if (!_keybarActive) return NO;
-    UIEdgeInsets safe = self.safeAreaInsets;
-    for (UITouch *touch in touches) {
-        CGPoint p = [touch locationInView:self];
-        maru_mobile_keybar_pointer(phase, maruPointerId(touch), (float)(p.x - safe.left), (float)(p.y - safe.top));
-    }
-    return YES;
-}
-
-/// 키바 제스처가 **끝났을 때** 한 번. 손가락마다 부르면 복사가 여러 번 나간다.
-- (void)finishKeybarGesture {
-    _keybarActive = NO;
-    {
-        NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
-        // 복사를 눌렀으면 코어가 꺼내 놓은 텍스트를 시스템 클립보드에 넣는다 —
-        // **꺼내는 것은 코어, 쓰는 것만 플랫폼**이다(§3: 브리지엔 OS 호출이 없다).
-        static unsigned char copy_buf[8192];
-        unsigned int cn = maru_mobile_take_copy(copy_buf, sizeof copy_buf);
-        if (cn > 0) {
-            // **바이트를 그대로 넣는다 — 변환을 안 거친다.** `initWithBytes:NSUTF8StringEncoding`
-            // 은 잘못된 UTF-8 에 nil 을 돌려주고, 그 nil 을 검사하는 가지를 두면 **실패가 조용히
-            // 지나간다**(붙여넣기가 옛 내용으로 나가도 사용자는 모른다). 검사를 더하는 대신
-            // **실패할 수 있는 변환 자체를 없앤다**: 클립보드는 UTF-8 바이트를 직접 받는다.
-            NSData *d = [NSData dataWithBytes:copy_buf length:cn];
-            [UIPasteboard.generalPasteboard setData:d forPasteboardType:@"public.utf8-plain-text"];
-            NSLog(@"MARU_COPY len=%u", cn);
-        }
+/// **어디로 갈지는 코어가 정한다**(계약 §3.1) — 뷰는 좌표와 손가락 id 만 나른다. 전에는
+/// `routeChrome:`·`routeKeybar:` 로 여기서 골랐고 그 답을 `_chromeActive`·`_keybarActive` 로
+/// 들었는데, **같은 사실을 두 층이 들다** 보니 정리도 두 곳에서 해야 했다("브리지와 뷰 양쪽을
+/// 푼다" 는 주석이 그 값이었다). 그 상태를 지웠다.
+- (void)finishGesture {
+    // **복사는 늘 시도한다.** 목적지를 뷰가 더는 모르므로 "키바가 끝났을 때만" 이라고 못 적는다 —
+    // `take_copy` 는 꺼낼 것이 없으면 0 을 돌려주므로 그냥 묻는다.
+    NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
+    static unsigned char copy_buf[8192];
+    unsigned int cn = maru_mobile_take_copy(copy_buf, sizeof copy_buf);
+    if (cn > 0) {
+        // **바이트를 그대로 넣는다 — 변환을 안 거친다.** `initWithBytes:NSUTF8StringEncoding` 은
+        // 잘못된 UTF-8 에 nil 을 돌려주고, 그 nil 을 검사하는 가지를 두면 실패가 조용히 지나간다.
+        NSData *d = [NSData dataWithBytes:copy_buf length:cn];
+        [UIPasteboard.generalPasteboard setData:d forPasteboardType:@"public.utf8-plain-text"];
+        NSLog(@"MARU_COPY len=%u", cn);
     }
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if ([self routeChrome:1 touches:touches]) return;
-    if ([self routeKeybar:1 touches:touches]) return;
     [self sendPointer:1 touches:touches];
 }
 
@@ -477,40 +435,21 @@ static unsigned int maruPointerId(UITouch *t) {
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     BOOL last = ![self anyTouchRemains:event];
-    if (_chromeActive) {
-        [self routeChrome:2 touches:touches];
-        if (last) _chromeActive = NO;
-        return;
-    }
-    if (_keybarActive) {
-        [self routeKeybar:2 touches:touches];
-        if (last) [self finishKeybarGesture];
-        return;
-    }
     [self sendPointer:2 touches:touches];
     [self rebaseBodyAfterEnded:touches event:event];
-    if (last) _hasBodyPtr = NO;
+    if (last) {
+        _hasBodyPtr = NO;
+        [self finishGesture];
+    }
     NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
           maru_mobile_view_offset(), maru_mobile_has_selection());
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지에 한 번 보내고 제스처를 통째로 끝낸다.
-    if (_chromeActive) {
-        maru_mobile_chrome_pointer(3, 0, 0, 0);
-        _chromeActive = NO;
-        return;
-    }
-    if (_keybarActive) {
-        maru_mobile_keybar_pointer(3, 0, 0, 0);
-        _keybarActive = NO;
-        return;
-    }
+    // **취소는 손가락을 안 가린다**(계약 §3.1) — 코어가 전부 놓는다.
     maru_mobile_pointer(3, 0, 0, 0, 0);
     _hasBodyPtr = NO;
     _flingVy = 0;
-    // **취소도 남긴다.** 로그가 없어서 "배경으로 나갈 때 iOS 가 취소를 보내는가" 를 두 번
-    // 헛짚었다 — 보내고 있었는데 그 사실이 안 보였다.
     NSLog(@"MARU_SCROLL cancelled view_offset=%u sel=%u", maru_mobile_view_offset(),
           maru_mobile_has_selection());
 }
@@ -1211,11 +1150,9 @@ static void loadConfigFile(void);
     // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
     // 브리지와 뷰 **양쪽**을 푼다: 브리지만 풀면 뷰가 계속 키바로 라우팅하고, 뷰만 풀면
     // 브리지의 `kb_active` 가 남는다.
-    maru_mobile_keybar_pointer(3, 0, 0, 0);
     // **밀린 화면(설정)이 잡고 있던 것도 같은 이유로 푼다.** 키바만 풀고 여기를 빠뜨렸더니,
     // 톱니를 누른 채 홈으로 나갔다 오면 `_chromeActive` 가 남아 **복귀 후 첫 손짓이 통째로
     // 삼켜졌다**(iOS 는 배경 전환에 touchesCancelled 를 안 보낸다 — 위 주석).
-    maru_mobile_chrome_pointer(3, 0, 0, 0);
     // **본문 관성도 거둔다.** 이건 브리지가 아니라 우리가 든 값이라 위 취소로 안 지워진다.
     // 감쇠가 시간 기준이 된 뒤로는 남겨 두면 복귀 프레임의 dt 가 "배경에 있던 시간"이 되어
     // (상한 100ms 로 잘려도) 화면이 한 번에 튄다.

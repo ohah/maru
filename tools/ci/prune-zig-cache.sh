@@ -33,11 +33,28 @@ fi
 # — 이 스크립트는 macOS 러너와 ubuntu 러너에서 같이 돈다.
 reverse() { tail -r 2>/dev/null || tac; }
 
+pruned=0
 for d in $(ls -dt "$cache"/o/* 2>/dev/null | reverse); do
   cur=$(size_mb "$cache")
   [ "$cur" -le "$budget_mb" ] && break
   rm -rf "$d"
+  pruned=1
 done
+
+# **매니페스트도 함께 버린다.** `o/<hash>`(산출물)만 지우고 `h/`(매니페스트)를 남기면 Zig 가 매니페스트를
+# 보고 **캐시 히트로 판단해** 이미 없는 산출물을 실행하려다 죽는다:
+#
+#   error: failed to spawn and capture stdio from ./.zig-cache/o/<hash>/test: FileNotFound
+#
+# 이 스크립트가 들어간 직후 **열린 PR 이 전부** 그렇게 깨졌다(main 은 캐시를 새로 만들며 도니까 통과해서
+# 더 안 보였다 — 저장은 main 만 하고 PR 은 읽기만 하는 구조가 그 비대칭을 만든다).
+#
+# `h/` 와 `o/` 의 해시는 1:1 이 아니라 짝을 찾아 지울 수 없으므로 통째로 비운다. 매니페스트는 작고,
+# 없으면 다시 만들 뿐이다 — 남은 `o/` 산출물은 재빌드가 같은 해시로 다시 쓰거나 다음 prune 이 걷는다.
+if [ "$pruned" = 1 ]; then
+  rm -rf "$cache/h"
+  echo "prune: 매니페스트(h/)도 버렸다 — 산출물만 지우면 캐시 히트가 없는 파일을 가리킨다"
+fi
 
 after=$(size_mb "$cache")
 # **숫자를 남긴다.** 다음에 또 커지면 로그에서 바로 보인다 — 이번에는 그 숫자가 없어서

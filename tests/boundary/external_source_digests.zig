@@ -477,7 +477,7 @@ pub const inventory = [_]Proof{
     // 테스트가 붙어 digest가 움직인다(2026-08-17 사용자 제보 — "도크의 클릭 이벤트가 안 되는 영역을 누르면
     // 터미널 블록 이벤트가 잡힌다"). up·move 의 도크 판정 rect 를 down 과 맞춘 것(`tree_content` → `dock`)도
     // 같은 커밋이다. count는 2 그대로다 — 반사 접근이나 Client 구성은 건드리지 않고 포인터 라우팅만 바꿨다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "9c73bff9afe6f1bef22da94a55e43f8c61568dce4308f80cfda02c8955144738" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a91c426ae159ba00783d14a4e52402b67d182741da3590dfa93b16feebb7d88f" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

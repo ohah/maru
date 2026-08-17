@@ -34,15 +34,13 @@ const branch_icon = icons.utf8Fit(.git_branch, .standard);
 const repo_icon = icons.utf8Fit(.folder, .standard);
 /// 아직 안 읽은 저장소 줄에 적는 말. **배지의 빈자리와 구별해야 한다** — 배지가 없는 것을 사용자는
 /// "변경 없음"으로 읽는다.
-<<<<<<< HEAD
-const repo_pending_label = "읽는 중…";
-/// 읽지 못한 저장소. **"읽는 중…"과 다른 사실이다** — 그쪽은 곧 온다는 약속이다.
-const repo_failed_label = "읽지 못함";
-=======
 fn repoPendingLabel() []const u8 {
     return i18n.t(.scm_loading);
 }
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
+/// 읽지 못한 저장소. **"읽는 중…"과 다른 사실이다** — 그쪽은 곧 온다는 약속이다.
+fn repoFailedLabel() []const u8 {
+    return i18n.t(.scm_load_failed);
+}
 const worktree_icon = icons.utf8Fit(.git_branch, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
@@ -73,34 +71,23 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
-<<<<<<< HEAD
-=======
-    bytes += props.empty_notice.len;
-    // 커밋 줄. 입력은 안내 문구와 본문 중 **긴 쪽**만 나간다(둘 중 하나만 그린다).
-    bytes += @max(commitPlaceholder().len, props.commit_message.len) + icon_bytes +
-        @max(commitLabel().len, @max(commitRunningLabel().len, commitSlowLabel().len));
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
 
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
         .repo => |repo| {
             text_ops += 5;
-<<<<<<< HEAD
             bytes += icon_bytes * 2 + repo.name.len +
-                @max(repo.branch.len, @max(repo_pending_label.len, repo_failed_label.len)) + count_digits;
+                @max(repo.branch.len, @max(repoPendingLabel().len, repoFailedLabel().len)) + count_digits;
         },
         // 입력은 **시각 행마다 한 조각**이고, 글자는 안내 문구와 본문 중 긴 쪽만 나간다.
         .commit_box => |box| {
             text_ops += @max(box.rows, 1);
-            bytes += @max(commit_placeholder.len, box.text.len);
+            bytes += @max(commitPlaceholder().len, box.text.len);
         },
         // 라벨 + `∨`.
         .commit_button => {
             text_ops += 2;
-            bytes += icon_bytes + @max(commit_label.len, @max(commit_running_label.len, commit_slow_label.len));
-=======
-            bytes += icon_bytes * 2 + repo.name.len + @max(repo.branch.len, repoPendingLabel().len) + count_digits;
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
+            bytes += icon_bytes + @max(commitLabel().len, @max(commitRunningLabel().len, commitSlowLabel().len));
         },
         // 아이콘·이름·경로·`+N`·`-N`·상태 문자 — 증감이 두 조각이라 5가 아니다.
         .file => |file| {
@@ -258,31 +245,7 @@ pub fn view(
         }
     }
 
-<<<<<<< HEAD
     // **커밋 입력·버튼은 여기 없다**(②b) — 저장소마다 하나씩이라 목록 줄로 내려갔다(위 루프).
-=======
-    // ── 커밋 입력·버튼(§3.5 목업 — 브랜치 줄 아래).
-    if (frame.tree.find(build.NodeIds.commit_box)) |index| {
-        try writer.commitBox(frame.tree.entries[index], m);
-    }
-    if (frame.tree.find(build.NodeIds.commit_button)) |index| {
-        const rect = frame.tree.entries[index];
-        // **활성 여부는 실제 index 상태가 정한다**(§7 — 낙관하지 않는다). 스테이지된 것이 없으면 커밋할
-        // 것이 없고, 그 사실은 색으로 말한다(누를 수 없는 것을 감추지 않는다).
-        // 라벨은 **가운데**다(채운 버튼의 관례 — 오른쪽 끝에 붙이면 그 넓은 면이 왜 칠해졌는지 안 보인다).
-        const role = commitLabelRole(rect, state, tk, props.commit_enabled);
-        // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
-        // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
-        const label = switch (props.commit_run) {
-            .idle => commitLabel(),
-            .running => commitRunningLabel(),
-            .slow => commitSlowLabel(),
-        };
-        try writer.centered(rect, label, role, .control);
-        // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다(P3c 이후). 지금은 그 자리를 말만 한다.
-        try writer.icon(rect, rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
-    }
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
 
     // `ChromeDraw`는 layer와 op 슬라이스만 든다 — run·text 바이트는 op이 빌려 가리키므로 호출자가
     // 준 버퍼의 수명이 곧 그 슬라이스의 수명이다(Session Dock과 같은 계약).
@@ -488,14 +451,9 @@ const Writer = struct {
         const name_x = kind_x + @as(f32, @floatFromInt(m.icon_extent + m.gap));
         if (repo.pending or repo.failed) {
             // 오른쪽 자리를 그대로 쓴다(브랜치가 설 자리) — 읽고 나면 그 자리에 브랜치와 배지가 온다.
-<<<<<<< HEAD
-            const label = if (repo.failed) repo_failed_label else repo_pending_label;
+            const label = if (repo.failed) repoFailedLabel() else repoPendingLabel();
             try self.trailing(rect, label, .muted_fg, .supporting, m.inset_x);
             const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + m.inset_x));
-=======
-            try self.trailing(rect, repoPendingLabel(), .muted_fg, .supporting, m.inset_x);
-            const budget = self.measureBudget(repoPendingLabel()) + @as(f32, @floatFromInt(m.gap + m.inset_x));
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
             try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
             return;
         }
@@ -750,13 +708,8 @@ const Writer = struct {
         // 빈 상자에는 **안내 문구**를 흐리게 둔다. 빈 채로 두면 어디를 눌러야 할지 알 수 없고, 그 자리가
         // 입력란이라는 사실이 화면에 없다. 편집 중이어도 비어 있으면 그대로 둔다 — caret이 그 위에 서서
         // 두 사실(여기가 입력란이다 / 지금 여기로 글자가 간다)을 함께 말한다.
-<<<<<<< HEAD
         if (item.text.len == 0) {
-            try self.topLine(rect, inset, pad_y, commit_placeholder, .muted_fg, .control);
-=======
-        if (props.commit_message.len == 0) {
             try self.topLine(rect, inset, pad_y, commitPlaceholder(), .muted_fg, .control);
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
             if (edit.focused and edit.caret_visible) try self.commitCaret(rect, m, 0, 0, line_h);
             return;
         }
@@ -836,9 +789,9 @@ const Writer = struct {
         // 도는 동안은 **무슨 일이 일어나는지**를 그 자리에 적는다. 눌렀는데 라벨이 그대로면 사용자는
         // 다시 누르고, 두 번째 누름은 조용히 거부된다(쓰기는 하나씩이다).
         const label = switch (item.run) {
-            .idle => commit_label,
-            .running => commit_running_label,
-            .slow => commit_slow_label,
+            .idle => commitLabel(),
+            .running => commitRunningLabel(),
+            .slow => commitSlowLabel(),
         };
         try self.centered(face, label, role, .control);
         // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다. 지금은 그 자리를 말만 한다.
@@ -1280,10 +1233,11 @@ test "읽지 못한 저장소는 0건이 아니라 그 사실을 적는다" {
     const items = [_]types.Item{
         .{ .repo = .{ .index = 0, .name = "gone-wt", .primary = false, .failed = true } },
     };
-<<<<<<< HEAD
     const draws = try renderFixture(&storage, .{}, &items);
-    try testing.expect(findText(draws, "읽지 못함") != null);
-    try testing.expect(findText(draws, "읽는 중") == null);
+    // 원문 대신 키로 비교한다 — 이 테스트가 재는 것은 **어느 사실을 적는가**이고, 그것은 키가
+    // 더 정확히 드러낸다(원문 비교는 표시 언어에 묶여 기본값이 로케일을 따라가면 깨진다).
+    try testing.expect(findText(draws, i18n.t(.scm_load_failed)) != null);
+    try testing.expect(findText(draws, i18n.t(.scm_loading)) == null);
 }
 
 test "변경이 없다는 말은 그 저장소 줄 **아래**에 온다(겹치지 않는다)" {
@@ -1301,26 +1255,6 @@ test "변경이 없다는 말은 그 저장소 줄 **아래**에 온다(겹치�
     try testing.expectEqual(tokens.ColorRole.muted_fg, notice.role);
     const repo = findText(draws, "clean-probe") orelse return error.MissingRepoRow;
     try testing.expect(notice.origin.y > repo.origin.y);
-=======
-    const frame = try build.build(props, .{
-        .nodes = &storage.nodes,
-        .entries = &storage.entries,
-        .layout_items = &storage.layout_items,
-        .flex_scratch = &storage.flex_scratch,
-        .child_rects = &storage.child_rects,
-        .actions = &storage.actions,
-    });
-    const draws = try viewBudgeted(&storage, props, frame, .{});
-    const text = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
-    // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
-    try testing.expect(findText(draws, "main") != null);
-    // **고정 chrome도 전부 남는다.** 이 세 줄이 예산 밖이면 `view`가 실패하고 도크가 통째로 빈 화면이
-    // 된다 — 목록이 빌 때는 행 예산의 여유가 없어 그 부족이 곧바로 드러난다(2026-08-16 실제 증상).
-    try testing.expect(findText(draws, i18n.t(.scm_history)) != null); // 탭 줄
-    try testing.expect(findExactText(draws, commitPlaceholder()) != null); // 커밋 입력
-    try testing.expect(findExactText(draws, commitLabel()) != null); // 커밋 버튼
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
 }
 
 test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 맞는 크기)" {
@@ -1728,7 +1662,6 @@ test "동작이 없는 행은 그 자리를 비워 두지 않는다(충돌 행�
     try testing.expect(wb > wa);
 }
 
-<<<<<<< HEAD
 test "빈 커밋 상자는 안내 문구를, 버튼은 index 상태로만 켠다 (②b)" {
     // 빈 채로 두면 그 자리가 입력란이라는 사실이 화면에 없다. 커밋 버튼의 활성은 **실제 index 상태**로만
     // 정한다(§7 — 스테이지 여부를 추정하면 커밋할 것이 없는데 켜진다).
@@ -1738,20 +1671,6 @@ test "빈 커밋 상자는 안내 문구를, 버튼은 index 상태로만 켠다
         .{ .commit_button = .{ .repo_index = 0, .enabled = false } },
     };
     const off_props: types.Props = .{
-=======
-test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index 상태로만 켠다" {
-    // 빈 채로 두면 그 자리가 입력란이라는 사실이 화면에 없다. 그리고 커밋 버튼의 활성은 **실제 index
-    // 상태**로만 정한다(§7 — 낙관하지 않는다: 스테이지 여부를 추정하면 커밋할 것이 없는데 켜진다).
-    var storage: TestStorage = .{};
-    const empty = try renderFixture(&storage, .{}, &.{});
-    const hint = findExactText(empty, commitPlaceholder()) orelse return error.MissingPlaceholder;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
-    const off = findExactText(empty, commitLabel()) orelse return error.MissingButton;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, off.role); // 스테이지 0건 → 꺼짐(채우지 않는다)
-
-    var storage2: TestStorage = .{};
-    const props: types.Props = .{
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
         .branch = "main",
         .items = &off_storage.commit_items,
@@ -1764,11 +1683,10 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
         .child_rects = &off_storage.child_rects,
         .actions = &off_storage.actions,
     });
-<<<<<<< HEAD
     const off = try viewBudgeted(&off_storage, off_props, off_frame, .{});
-    const hint = findExactText(off, commit_placeholder) orelse return error.MissingPlaceholder;
+    const hint = findExactText(off, commitPlaceholder()) orelse return error.MissingPlaceholder;
     try testing.expectEqual(tokens.ColorRole.muted_fg, hint.role);
-    const off_label = findExactText(off, commit_label) orelse return error.MissingButton;
+    const off_label = findExactText(off, commitLabel()) orelse return error.MissingButton;
     try testing.expectEqual(tokens.ColorRole.muted_fg, off_label.role); // 꺼짐 — 채우지 않는다
 
     var on_storage: TestStorage = .{};
@@ -1790,21 +1708,11 @@ test "빈 커밋 상자는 안내 문구를 흐리게 두고, 버튼은 index �
         .actions = &on_storage.actions,
     });
     const on = try viewBudgeted(&on_storage, on_props, on_frame, .{});
-    try testing.expect(findExactText(on, commit_placeholder) == null); // 글자가 있으면 안내는 없다
+    try testing.expect(findExactText(on, commitPlaceholder()) == null); // 글자가 있으면 안내는 없다
     const msg = findExactText(on, "fix: 무언가를 고친다") orelse return error.MissingMessage;
     try testing.expectEqual(tokens.ColorRole.surface_fg, msg.role);
-    const on_label = findExactText(on, commit_label) orelse return error.MissingButton;
+    const on_label = findExactText(on, commitLabel()) orelse return error.MissingButton;
     try testing.expectEqual(tokens.ColorRole.surface_bg, on_label.role); // 켜지면 채운 면 위 reverse
-=======
-    const filled = try viewBudgeted(&storage2, props, frame, .{});
-    // 메시지가 있으면 안내 문구 대신 그 글자를 **또렷하게** 그린다.
-    try testing.expect(findExactText(filled, commitPlaceholder()) == null);
-    const msg = findExactText(filled, "fix: 무언가를 고친다") orelse return error.MissingMessage;
-    try testing.expectEqual(tokens.ColorRole.surface_fg, msg.role);
-    const on = findExactText(filled, commitLabel()) orelse return error.MissingButton;
-    // 켜지면 **채운 버튼**이라 글자가 배경색(reverse)이다.
-    try testing.expectEqual(tokens.ColorRole.surface_bg, on.role);
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
 }
 
 /// 커밋 줄 fixture. **상자는 목록 항목이다**(②b) — 그 그룹 안에 살기 때문이다.
@@ -1988,18 +1896,11 @@ test "호버해도 커밋 버튼 글자가 면에 묻히지 않는다" {
         .child_rects = &hover_storage.child_rects,
         .actions = &hover_storage.actions,
     });
-<<<<<<< HEAD
     // 호버가 걸리는 것은 **면 노드**다(칠·action이 거기 있다 — 아래 여백은 줄의 것이라 칠하지 않는다).
     const face_id = build.NodeIds.itemFace(0);
     const hovered = try viewBudgeted(&hover_storage, hover_props, hover_frame, .{ .hovered = face_id });
-    const label = findExactText(hovered, commit_label) orelse return error.MissingButton;
-    const button = hover_frame.tree.entries[hover_frame.tree.find(face_id) orelse return error.MissingButton];
-=======
-    const hovered = try viewBudgeted(&hover_storage, props, hover_frame, .{ .hovered = build.NodeIds.commit_button });
     const label = findExactText(hovered, commitLabel()) orelse return error.MissingButton;
-    // 배경이 accent가 아니게 됐으면 글자는 보통 글자색이어야 한다 — **같은 함수에 물어** 고른다.
-    const button = hover_frame.tree.entries[hover_frame.tree.find(build.NodeIds.commit_button) orelse return error.MissingButton];
->>>>>>> 8d28d58b (feat(i18n): 아카이브 상세·SCM 도크를 키로 옮긴다 (I3c 65/76))
+    const button = hover_frame.tree.entries[hover_frame.tree.find(face_id) orelse return error.MissingButton];
     const tk = testTokens();
     const resolved = paint_style.resolveCard(button.id, button.visual.card, button.action, .{ .hovered = face_id }, &tk);
     try testing.expect(resolved.background != .accent_bar); // 호버가 채움을 덮는다(전제 확인)

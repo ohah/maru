@@ -2408,6 +2408,140 @@ test "프리셋은 네 색이 다 맞을 때만 그 이름이다" {
 // **작은 화면에서 긴 팝업이 넘치면 그 값을 영영 못 고른다**(화면이 유일한 입력 경로).
 // 목록 영역 안으로 가두고 밀 수 있어야 한다 — 밀기 전에는 아래 항목이 안 보이고(rect 없음),
 // 민 뒤에는 보인다.
+// **흐르는 목록을 세우려 짚은 것은 아무것도 누른 것이 아니다.** 뒤로가기 위에서 세우면
+// 화면이 넘어가 버린다 — 사용자는 목록을 멈추려 했을 뿐이다(키바가 같은 규칙을 갖는다).
+// `stop_tap` 이 상태가 아니라 **제스처에 붙는 표시**인 이유가 이것이다.
+test "흐르는 설정 목록을 뒤로가기 위에서 세워도 안 넘어간다" {
+    const small_h: u32 = 300;
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
+
+    // 자리는 제품에게 묻는다 — 앱 바 배치가 바뀌면 테스트만 맞고 화면은 틀리게 된다.
+    const back = bridge.settingsBackCenter();
+    try std.testing.expect(back.x > 0 and back.y > 0);
+
+    // ① **멈춰 있을 때** 짚으면 눌린 티가 난다(quad 가 하나 는다). 아래 ②의 대조군이다.
+    const idle_q = bridge.maru_mobile_build(402, small_h, now());
+    bridge.maru_mobile_pointer(0, 3, back.x, back.y, now());
+    const pressed_q = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expect(pressed_q > idle_q);
+    bridge.maru_mobile_pointer(3, 0, 0, 0, now());
+
+    // 목록을 튕겨 관성을 만든다. **move 사이에 프레임을 돌린다** — 속도는 프레임에서 재므로
+    // (컴포넌트 `Touch.step`) 이벤트만 몰아 보내면 관성이 안 선다.
+    bridge.maru_mobile_pointer(0, 1, 200, 250, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 200, now());
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 150, now());
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 150, now());
+    const at_release = bridge.settingsScrollPx();
+    const gliding_q = bridge.maru_mobile_build(402, small_h, now());
+    // 아직 흐르고 있어야 이 테스트가 뜻이 있다.
+    try std.testing.expect(bridge.settingsScrollPx() != at_release);
+
+    // ② **흐르는 중에** 같은 자리를 짚는다 — 세우기만 하는 짚음이라 눌린 티가 안 나야 한다.
+    // 표시와 결과를 **따로** 재는 이유는 둘이 겹쳐 있어(눌림 표시 가드 + `Press.end`) 한쪽만
+    // 깨면 안 드러나기 때문이다(변이로 확인했다).
+    bridge.maru_mobile_pointer(0, 2, back.x, back.y, now());
+    const stop_q = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expectEqual(gliding_q, stop_q);
+
+    // ③ 떼도 화면이 안 넘어간다.
+    bridge.maru_mobile_pointer(2, 2, back.x, back.y, now());
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
+
+    bridge.maru_mobile_pointer(3, 0, 0, 0, now());
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
+// **비소유자가 떼는 것은 이 표면의 제스처를 안 끝낸다**(계약 §3.1 — 본문·키바가 지키던
+// 규칙인데 설정만 빠져 있었다). 두 손가락으로 짚고 있다가 **둘째를 떼면** 그 순간 값이
+// 바뀌면 안 된다 — 누른 사람은 아직 첫 손가락을 들지 않았다.
+test "설정: 둘째 손가락을 떼는 것으로는 값이 안 바뀐다" {
+    const src = "cursor.blink = true\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    openSettings(402, 874);
+
+    var found = false;
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "cursor.blink")) continue;
+        // 첫 손가락이 그 줄을 짚는다(안 뗀다).
+        bridge.maru_mobile_pointer(0, 11, 200, y, now());
+        // 둘째 손가락이 다른 자리를 짚었다 뗀다.
+        bridge.maru_mobile_pointer(0, 22, 380, y + 60, now());
+        bridge.maru_mobile_pointer(2, 22, 380, y + 60, now());
+        _ = bridge.maru_mobile_build(402, 874, now());
+        // 아직 아무 값도 안 바뀌었어야 한다 — 저장 요청이 서지 않는다.
+        var out0: [4096]u8 = undefined;
+        try std.testing.expectEqual(@as(c_ulong, 0), bridge.maru_mobile_take_config_write(&out0, out0.len));
+
+        // 첫 손가락을 떼면 그때 바뀐다(같은 제스처가 살아 있었다는 뜻이다).
+        bridge.maru_mobile_pointer(2, 11, 200, y, now());
+        _ = bridge.maru_mobile_build(402, 874, now());
+        var out1: [4096]u8 = undefined;
+        try std.testing.expect(bridge.maru_mobile_take_config_write(&out1, out1.len) > 0);
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+
+    bridge.maru_mobile_pointer(3, 0, 0, 0, now());
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
+// **재현: 둘째 손가락이 첫 손가락의 "밀었다" 를 지운다.** 설정의 `down` 은 `set_down_x/y`·
+// `set_moved` 를 **가드보다 먼저** 덮어쓴다 — 주석은 "둘째 손가락은 눌림 판정을 안 건드린다"
+// 라고 적혀 있지만 막고 있는 것은 `set_pressed` 뿐이다. 그래서 팝업을 밀던 중에 다른 손가락이
+// 닿으면 누적 이동량이 0 이 되고, 첫 손가락을 떼는 순간 그 손짓이 **탭으로 판정돼 팝업이 닫히고
+// 그 자리 항목이 골라진다**(밀려던 사람은 값을 바꾼 적이 없다).
+test "밀던 손짓은 둘째 손가락이 닿아도 탭이 되지 않는다" {
+    const small_h: u32 = 500;
+    _ = bridge.maru_mobile_build(402, small_h, now());
+    openSettings(402, small_h);
+
+    var opened = false;
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "theme.preset")) continue;
+        bridge.maru_mobile_pointer(0, 1, 200, y, now());
+        bridge.maru_mobile_pointer(2, 1, 200, y, now());
+        _ = bridge.maru_mobile_build(402, small_h, now());
+        opened = true;
+        break;
+    }
+    try std.testing.expect(opened);
+    try std.testing.expect(bridge.settingsPopupOpen());
+
+    // 첫 손가락이 팝업을 민다(임계를 훌쩍 넘는다).
+    bridge.maru_mobile_pointer(0, 11, 300, 300, now());
+    bridge.maru_mobile_pointer(1, 11, 300, 200, now());
+    bridge.maru_mobile_pointer(1, 11, 300, 120, now());
+    // **둘째 손가락이 닿았다 뗀다.** 이 손가락은 첫 손가락의 판정을 건드리면 안 된다.
+    // **먼저 떼는 것이 요점이다** — 첫 손가락이 마지막이 되어야 "비소유자의 up 은 제스처를
+    // 안 끝낸다" 가드에 가리지 않고 **누적 이동량이 살아 있는지**가 그대로 드러난다.
+    bridge.maru_mobile_pointer(0, 22, 100, 300, now());
+    bridge.maru_mobile_pointer(2, 22, 100, 300, now());
+    // 첫 손가락을 뗀다 — 민 손짓이므로 아무 일도 없어야 한다.
+    bridge.maru_mobile_pointer(2, 11, 300, 120, now());
+    _ = bridge.maru_mobile_build(402, small_h, now());
+
+    // 팝업이 그대로 열려 있어야 한다. 닫혔다면 그 손짓이 탭으로 판정된 것이다.
+    try std.testing.expect(bridge.settingsPopupOpen());
+
+    bridge.maru_mobile_pointer(3, 0, 0, 0, now());
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
 test "긴 팝업은 화면 안에 갇히고 밀 수 있다" {
     const small_h: u32 = 500; // 16×44=704 보다 작다
     _ = bridge.maru_mobile_build(402, small_h, now());
@@ -2792,6 +2926,155 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
 // **두 손가락 제스처는 기기에서 스크립트로 못 만든다**(`adb shell input`·`idb` 둘 다 다중
 // 터치가 없다). 그래서 브리지 경계에서 값으로 잠근다 — host 가 T2 에서 보내기 시작한
 // `ACTION_POINTER_DOWN`/`_UP` 흐름을 그대로 흉내 낸다.
+// **재현: 키를 누른 채 화면을 빠져나가면 뗄 때 그 키가 나간다.** 화면 전환은 진행 중이던
+// 손짓을 거두는데(`maru_mobile_pop_screen`), 설정·목록만 거두고 **키바·본문은 빠져 있었다**.
+// 사용자는 뒤로 갔지 키를 누른 것이 아니다 — 없는 화면의 키가 셸로 간다.
+test "키를 누른 채 뒤로 나가면 뗄 때 키가 안 나간다" {
+    openTerminal(402, 874);
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+    const before = bridge.maru_mobile_input("", 0);
+
+    bridge.maru_mobile_pointer(0, 81, k.x, k.y, now()); // 누른 채로 둔다
+    try std.testing.expectEqual(@as(?usize, vis), bridge.keybarPressed());
+
+    // 손가락을 댄 채 화면을 뺀다(하드웨어 뒤로가기).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 이제 뗀다 — 아무 키도 나가면 안 된다.
+    bridge.maru_mobile_pointer(2, 81, k.x, k.y, now());
+    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0));
+
+    // **키바 쪽은 여기서 따로 못 잰다.** 화면 전환이 키바 제스처도 거두게 해 뒀지만(네 표면을
+    // 같이 거둔다), 돌아오는 길에 취소가 한 번 더 지나가 **그 줄을 지워도 결과가 같다**(변이로
+    // 확인했다). 판정력 없는 단언을 남기면 통과 보장 테스트가 되므로 안 적는다 — 거두는 이유는
+    // 본문에서 실제로 난 결함(아래 테스트)과 같은 병을 키바에 남기지 않으려는 것이다.
+
+    endAnyGesture();
+    openTerminal(402, 874);
+    keybarScrollToStart();
+    bridge.maru_mobile_clear_error();
+}
+
+// **본문도 같다 — 짚은 채 나가면 안 보이는 화면에서 선택이 잡힌다.** 길게 누름은 프레임마다
+// 판정되는데 그 판정이 화면을 안 본다. 돌아오면 누른 적 없는 단어가 잡혀 있다.
+test "본문을 짚은 채 뒤로 나가면 선택이 안 잡힌다" {
+    openTerminal(402, 874);
+    endAnyGesture();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("hello world", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(3, 0, 0, 0, now());
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 82, q.x, q.y, now()); // 누른 채로 둔다
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+
+    // 시계가 지나도 선택이 잡히면 안 된다 — 그 화면에는 본문이 없다.
+    holdPast(900);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+
+    bridge.maru_mobile_pointer(2, 82, q.x, q.y, now());
+    endAnyGesture();
+    openTerminal(402, 874);
+    bridge.maru_mobile_clear_error();
+}
+
+// **누르면 보이고, 밀기 시작하면 표시가 사라진다.** hover 가 없는 화면에서 눌림 표시가
+// "닿았다" 를 알리는 유일한 신호다(§2.4). 지금까지 키바 테스트는 **나가는 바이트**만 봤고
+// 표시는 아무도 안 봤다 — 표시를 늘 켜 두는 변이가 전부 통과했다.
+test "키바: 누르면 눌린 티가 나고 밀면 사라진다" {
+    openTerminal(402, 874);
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(?usize, null), bridge.keybarPressed());
+
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+    bridge.maru_mobile_pointer(0, 61, k.x, k.y, now());
+    try std.testing.expectEqual(@as(?usize, vis), bridge.keybarPressed());
+
+    // 임계를 넘겨 민다 — 누른 것이 아니었으므로 표시를 거둔다.
+    bridge.maru_mobile_pointer(1, 61, k.x - 40, k.y, now());
+    try std.testing.expectEqual(@as(?usize, null), bridge.keybarPressed());
+
+    endAnyGesture();
+    keybarScrollToStart();
+    bridge.maru_mobile_clear_error();
+}
+
+// **흐르는 키바를 짚으면 눌린 티도 안 난다.** 결과(키가 안 나감)만 재면 `Press.end` 가 막아도
+// 통과하므로 표시를 따로 잰다 — 둘이 겹쳐 있어 한쪽만 깨면 안 드러난다(변이로 확인했다).
+test "키바: 흐르는 것을 세우는 짚음은 눌린 티가 안 난다" {
+    openTerminal(402, 874);
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // **덜 세게 민다** — 한 번에 끝(최대 오프셋)까지 가면 관성이 갈 자리가 없어 "흐르고 있다"
+    // 가 거짓이 된다(그렇게 짰다가 걸렀다). move 사이에 프레임을 돌려야 속도가 선다.
+    const vis0 = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const ky = keyCenter(vis0).y;
+    bridge.maru_mobile_pointer(0, 62, 340, ky, now());
+    bridge.maru_mobile_pointer(1, 62, 320, ky, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(1, 62, 300, ky, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(2, 62, 300, ky, now());
+    const at_release = bridge.keybarScrollPx();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(bridge.keybarScrollPx() != at_release); // 흐르고 있다
+
+    // 흐르는 중에 키 자리를 짚는다 — 세우기만 한다.
+    const v2 = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k2 = keyCenter(v2);
+    bridge.maru_mobile_pointer(0, 63, k2.x, k2.y, now());
+    try std.testing.expectEqual(@as(?usize, null), bridge.keybarPressed());
+
+    endAnyGesture();
+    keybarScrollToStart();
+    bridge.maru_mobile_clear_error();
+}
+
+// **이어받은 손가락은 키를 내지 않는다.** 소유자가 떠나면 남은 손가락이 제스처를 잇는데,
+// 그 손가락은 **아무것도 누른 적이 없다** — 그 자리에서 떼는 것으로 키가 나가면 밀다가 손을
+// 바꾼 사람에게 글자가 찍힌다.
+test "키바: 이어받은 손가락이 떼도 키가 안 나간다" {
+    openTerminal(402, 874);
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+    const before = bridge.maru_mobile_input("", 0);
+
+    // 첫 손가락이 짚고, 둘째가 다른 키 자리에 닿는다.
+    bridge.maru_mobile_pointer(0, 71, k.x, k.y, now());
+    const v2 = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    _ = v2;
+    bridge.maru_mobile_pointer(0, 72, k.x + 60, k.y, now());
+    // **소유자가 떠난다** — 둘째가 이어받는다.
+    bridge.maru_mobile_pointer(2, 71, k.x, k.y, now());
+    // 이어받은 손가락이 그 자리에서 그대로 뗀다.
+    bridge.maru_mobile_pointer(2, 72, k.x + 60, k.y, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0));
+
+    endAnyGesture();
+    keybarScrollToStart();
+    bridge.maru_mobile_clear_error();
+}
+
 test "키바: 둘째 손가락이 첫 손가락의 탭 판정을 오염시키지 않는다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();

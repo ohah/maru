@@ -222,23 +222,11 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
 /// (docs/mobile-config.md §7).
 #define MARU_CONFIG_MAX_BYTES (1u << 20)
 
-/// 관성 감쇠(**밀리초당**)와 멈춤 문턱. **본문 관성은 host 몫이지만**(docs/mobile-platform.md §3.1 —
-/// 코어에 시계가 없다) 그 **숫자는 공유해야** 한다: 같은 손짓이 본문·키바·설정에서 다르게 미끄러지면
-/// 사용자는 이유를 모른다. 예전에는 0.92 가 세 곳(두 host + Zig 컴포넌트)에 따로 있었다.
-///
-/// **프레임당이 아니라 밀리초당이다.** 프레임당으로 두면 같은 손짓이 기기마다 다르게 미끄러진다 —
-/// 30Hz Android 와 60Hz iOS 에서 정확히 두 배 차이가 났다(200ms 에 200px 을 민 손짓이 610px 대
-/// 402px). Flutter `FrictionSimulation`·RN 이 쓰는 `OverScroller`/`decelerationRate` 도 시간 기준이다.
-/// 값은 60Hz 프레임당 0.92 와 같은 자리다(`0.92^(1/16.667)`) — 손맛을 유지하면서 의존만 뗀다.
-///
-/// **Zig 쪽 값은 `chrome.ui.scroll_area.Touch` 가 갖는다**(데스크톱과 공유하는 코드라 이 헤더를
-/// 못 읽는다). 두 값이 같은지는 `doc_claims.sh` 가 본다.
-#define MARU_FLING_DECAY_PER_MS 0.995012f
-#define MARU_FLING_STOP_BELOW 0.03f
+/// **관성은 코어가 든다.** 전에는 이 헤더가 감쇠·상한을 host 에 나눠 줬는데, 그러려면 host 가
+/// "이 제스처가 본문 것인가" 를 알아야 했다 — 그 지식을 R2 가 걷어내자 **가드만 사라지고 재는
+/// 코드가 남아** 키바를 비스듬히 튕겨도 본문이 흘렀다. 지금은 본문·키바·설정이 모두
+/// `chrome.ui.scroll_area.Touch` 의 값 하나로 흐르고 host 는 좌표만 나른다(§3.1).
 
-/// 속도 상한(px/ms). 튄 이벤트 하나가 화면을 날리지 않게 한다 — RN·Flutter 의
-/// `maxFlingVelocity`(8000dp/s) 와 같은 자리다.
-#define MARU_FLING_MAX_VELOCITY 8.0f
 /// 코어가 실제로 들고 있는 스크롤백 줄 수(진단·테스트용). config 가 코어에 **닿았는지**는
 /// 코어에 물어야 안다 — 파싱된 값을 되읽으면 "닿았다" 를 재는 것이 아니다. host 는 안 쓴다.
 unsigned int maru_mobile_scrollback_lines(void);

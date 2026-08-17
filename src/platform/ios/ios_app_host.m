@@ -107,7 +107,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 @interface ChromeView : UIView <UITextInput>
 /// 배경으로 나갈 때 AppDelegate 가 부른다 — 키바가 잡고 있던 터치를 푼다.
 /// 같은 자리에서 밀린 화면(설정)이 잡고 있던 터치를 푼다.
-- (void)releaseBodyGrab;
 @end
 
 @implementation ChromeView {
@@ -136,15 +135,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSMutableString *_composing;
     id<UITextInputDelegate> _inputDelegate;
     UITextInputStringTokenizer *_tokenizer;
-    float _flingVy;   // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다, 헤더 주석 참조)
-    double _ptrLastT; // 직전 이동 이벤트의 시각(ms). 속도를 시간으로 재려면 필요하다.
-    double _flingT;   // 직전 관성 프레임의 시각(ms).
-    unsigned int _bodyPtrId; // 본문 제스처를 소유한 손가락(관성 계산용 — 판정은 코어가 한다)
-    BOOL _hasBodyPtr;
-    float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
-    /// 이번 터치를 키바가 잡고 있나. down 에서 정해지고 up/cancel 에서 풀린다.
 }
 
 /// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
@@ -321,41 +313,10 @@ static unsigned int maruPointerId(UITouch *t) {
         float ly = (float)(p.y - safe.top);
         unsigned int pid = maruPointerId(touch);
         double t_ms = touch.timestamp * 1000.0;
-        // **본문 관성만 우리 몫이다**(§3.1 — 코어에 시계가 없다). 소유자의 이동만 속도로 친다.
-        if (phase == 0 && !_hasBodyPtr) { _bodyPtrId = pid; _hasBodyPtr = YES; _flingVy = 0; _ptrLastY = ly; _ptrLastT = t_ms; }
-        if (phase == 1 && _hasBodyPtr && pid == _bodyPtrId) {
-            float dt = (float)(t_ms - _ptrLastT);
-            if (dt < 1.0f) dt = 1.0f;
-            if (dt > 100.0f) dt = 100.0f;
-            float v = (ly - _ptrLastY) / dt;
-            if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
-            if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
-            _flingVy = v;
-            _ptrLastY = ly;
-            _ptrLastT = t_ms;
-        }
+        // **관성은 코어가 든다.** 전에는 여기서 속도를 쟀는데, 그러려면 "이 제스처가 본문
+        // 것인가" 를 알아야 하고 그 지식은 R2 로 사라졌다 — 남은 채로 두니 키바를 비스듬히
+        // 튕겨도 본문이 흘렀다. 목적지를 아는 쪽이 재는 것이 맞다(§3.1).
         maru_mobile_pointer(phase, pid, lx, ly, (unsigned long long)t_ms);
-    }
-}
-
-/// 소유 손가락이 떼졌을 때 **남은 손가락으로 기준을 다시 잡고 속도를 버린다** — 본문 관성이
-/// host 몫이라 여기서 한다(AOSP `ScrollView.onSecondaryPointerUp` 과 같은 자리).
-- (void)rebaseBodyAfterEnded:(NSSet<UITouch *> *)ended event:(UIEvent *)event {
-    if (!_hasBodyPtr) return;
-    BOOL ownerEnded = NO;
-    for (UITouch *t in ended) if (maruPointerId(t) == _bodyPtrId) ownerEnded = YES;
-    if (!ownerEnded) return;
-    _hasBodyPtr = NO;
-    UIEdgeInsets safe = self.safeAreaInsets;
-    for (UITouch *t in event.allTouches) {
-        if (t.view != self) continue; // 남의 손가락을 이어받지 않는다(위 주석)
-        if (t.phase == UITouchPhaseEnded || t.phase == UITouchPhaseCancelled) continue;
-        _bodyPtrId = maruPointerId(t);
-        _hasBodyPtr = YES;
-        _ptrLastY = (float)([t locationInView:self].y - safe.top);
-        _ptrLastT = t.timestamp * 1000.0;
-        _flingVy = 0; // 불연속이 fling 이 되지 않게
-        break;
     }
 }
 
@@ -373,14 +334,6 @@ static unsigned int maruPointerId(UITouch *t) {
               p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
     }
     [self sendPointer:0 touches:touches];
-}
-
-/// **본문 제스처 잡음도 푼다.** T3 가 `_hasBodyPtr` 을 들이면서 정리할 자리가 하나 늘었다 —
-/// 안 풀면 복귀 후 `touchesBegan` 이 "이미 본문 제스처가 있다" 로 보고 목적지를 다시 안 정해
-/// **키바·설정이 영영 안 눌린다**(뗀 적 없이 끝나는 경우가 배경 전환이다).
-- (void)releaseBodyGrab {
-    _hasBodyPtr = NO;
-    _flingVy = 0;
 }
 
 /// **어디로 갈지는 코어가 정한다**(계약 §3.1) — 뷰는 좌표와 손가락 id 만 나른다. 전에는
@@ -425,44 +378,16 @@ static unsigned int maruPointerId(UITouch *t) {
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     BOOL last = ![self anyTouchRemains:event];
     [self sendPointer:2 touches:touches];
-    [self rebaseBodyAfterEnded:touches event:event];
-    if (last) {
-        _hasBodyPtr = NO;
-        [self finishGesture];
-    }
-    NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
-          maru_mobile_view_offset(), maru_mobile_has_selection());
+    if (last) [self finishGesture];
+    NSLog(@"MARU_SCROLL view_offset=%u sel=%u", maru_mobile_view_offset(),
+          maru_mobile_has_selection());
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     // **취소는 손가락을 안 가린다**(계약 §3.1) — 코어가 전부 놓는다.
     maru_mobile_pointer(3, 0, 0, 0, 0);
-    _hasBodyPtr = NO;
-    _flingVy = 0;
     NSLog(@"MARU_SCROLL cancelled view_offset=%u sel=%u", maru_mobile_view_offset(),
           maru_mobile_has_selection());
-}
-
-/// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
-/// 배경으로 나갈 때 관성을 거둔다 — 시각도 함께 지워 복귀 프레임이 "멈춰 있던 시간"을
-/// dt 로 쓰지 않게 한다.
-- (void)stopFlingForBackground {
-    _flingVy = 0;
-    _flingT = 0;
-}
-
-- (void)stepFling {
-    // **간격은 안 흐를 때도 재 둔다** — 안 그러면 관성이 시작된 첫 프레임의 dt 가 "멈춰 있던
-    // 시간" 이 되어 한 번에 튄다.
-    double now_ms = CACurrentMediaTime() * 1000.0;
-    float dt = (_flingT == 0.0) ? 16.0f : (float)(now_ms - _flingT);
-    _flingT = now_ms;
-    if (_flingVy == 0) return;
-    if (dt < 1.0f) dt = 1.0f;
-    if (dt > 100.0f) dt = 100.0f;
-    maru_mobile_scroll(_flingVy * dt);
-    _flingVy *= powf(MARU_FLING_DECAY_PER_MS, dt); // 헤더가 단일 출처(키바·설정과 같은 값)
-    if (fabsf(_flingVy) < MARU_FLING_STOP_BELOW) _flingVy = 0; // 영원히 도는 것을 막는다
 }
 
 /// 좌측 가장자리에서 밀면 화면 한 장을 뺀다. **끝났을 때 한 번만** 민다 — 진행 중에 밀면
@@ -1001,7 +926,6 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
 - (void)tick {
     [self recordPace];
-    [self stepFling];   // 손을 뗀 뒤 남은 관성을 프레임마다 흘린다
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
@@ -1145,8 +1069,6 @@ static void loadConfigFile(void);
     // **본문 관성도 거둔다.** 이건 브리지가 아니라 우리가 든 값이라 위 취소로 안 지워진다.
     // 감쇠가 시간 기준이 된 뒤로는 남겨 두면 복귀 프레임의 dt 가 "배경에 있던 시간"이 되어
     // (상한 100ms 로 잘려도) 화면이 한 번에 튄다.
-    [(ChromeView *)self.window.rootViewController.view stopFlingForBackground];
-    [(ChromeView *)self.window.rootViewController.view releaseBodyGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
     // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.

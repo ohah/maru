@@ -42,6 +42,13 @@ fn now() u64 {
     return fake_ms;
 }
 
+/// 시계를 정확히 `ms` 만큼 돌리고 한 프레임 돌린다. **관성의 간격이 시험 대상일 때** 쓴다 —
+/// `now()` 는 부를 때마다 16 을 더해서 "5초 뒤 한 프레임" 을 만들 수가 없다.
+fn advanceFrame(w: u32, h: u32, ms: u64) void {
+    fake_ms += ms;
+    _ = bridge.maru_mobile_build(w, h, fake_ms);
+}
+
 /// 시계를 앞으로 돌리고 한 프레임 돌린다. **길게 누름은 프레임에서 판정**되므로, 시간만
 /// 흘려서는 안 잡힌다(손가락이 가만히 있으면 move 가 안 오는 그 상황과 같다).
 fn holdPast(ms: u64) void {
@@ -436,6 +443,138 @@ test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
     bridge.maru_mobile_scroll(4); // 누적 24 > 22 — 여기서 한 줄
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_view_offset());
     bridge.maru_mobile_scroll_to_bottom();
+}
+// **재현: 키바로 간 제스처의 세로 속도가 본문 관성으로 샌다.**
+// 관성을 host 가 들던 시절, host 는 목적지도 알아서(`keybar_active`) 본문 제스처일 때만
+// 속도를 쟀다. R2 로 그 지식을 host 에서 걷어내며 **가드까지 같이 사라져** 키바를 비스듬히
+// 튕기면 본문이 흘렀다(재현: view_offset 18 → 16). 관성이 코어로 온 지금은 목적지를 아는
+// 쪽이 재므로 샐 수가 없다.
+//
+// **양쪽을 다 잰다.** "키바 제스처는 본문을 안 흘린다" 만 재면 **관성을 통째로 지워도 통과**한다.
+test "관성은 본문 제스처의 것이다 — 키바로 간 손짓은 본문을 안 흘린다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(400); // 과거를 보는 자리 — 위아래로 움직일 수 있다
+    const parked = bridge.maru_mobile_view_offset();
+    try std.testing.expect(parked > 0);
+
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // ① 키바를 비스듬히 튕긴다 — 가로로 밀되 세로 성분이 크다.
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+    bridge.maru_mobile_pointer(0, 11, k.x, k.y, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    bridge.maru_mobile_pointer(1, 11, k.x - 60, k.y - 40, now());
+    bridge.maru_mobile_pointer(2, 11, k.x - 60, k.y - 40, now());
+    var f: u32 = 0;
+    while (f < 12) : (f += 1) _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(parked, bridge.maru_mobile_view_offset());
+
+    // ② 같은 세기로 **본문을** 튕기면 손을 뗀 뒤에도 흘러야 한다(관성이 살아 있다는 증거).
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 12, q.x, q.y, now());
+    try std.testing.expectEqualStrings("body", bridge.currentRouteName());
+    bridge.maru_mobile_pointer(1, 12, q.x, q.y - 40, now());
+    bridge.maru_mobile_pointer(2, 12, q.x, q.y - 40, now());
+    const at_release = bridge.maru_mobile_view_offset();
+    f = 0;
+    while (f < 12) : (f += 1) _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(bridge.maru_mobile_view_offset() != at_release);
+
+    keybarScrollToStart();
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **짚어서 세우는 것은 그 면을 짚었을 때다.** 관성이 host 에 있던 시절에는 host 가 목적지를
+// 몰라 **첫 손가락이 어디에 닿든** 본문 관성을 껐다(두 host 다 `down` 에서 무조건 0 으로 만들었다).
+// 코어로 옮기면서 규칙이 "본문을 짚으면 본문이 선다" 로 좁혀졌다 — 흐르는 화면을 세우려고
+// 키를 누르는 사람은 없고, 키를 누르려던 사람이 화면까지 멈추기를 바라지도 않는다.
+// **행동이 바뀐 자리이므로 테스트로 적어 둔다**(사고가 아니라 결정이라는 뜻이다).
+test "흐르는 본문은 키바를 눌러도 안 서고, 본문을 짚으면 선다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(600);
+    keybarScrollToStart();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
+    const k = keyCenter(vis);
+
+    // ① 본문을 튕기고, 흐르는 중에 **키바**를 누른다 — 계속 흘러야 한다.
+    bridge.maru_mobile_pointer(0, 31, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 31, q.x, q.y + 40, now());
+    bridge.maru_mobile_pointer(2, 31, q.x, q.y + 40, now());
+    advanceFrame(402, 874, 16);
+    bridge.maru_mobile_pointer(0, 32, k.x, k.y, now());
+    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
+    const at_press = bridge.maru_mobile_view_offset();
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+    try std.testing.expect(bridge.maru_mobile_view_offset() != at_press);
+    bridge.maru_mobile_pointer(2, 32, k.x, k.y, now());
+    endAnyGesture();
+
+    // ② 같은 상황에서 **본문**을 짚으면 그 자리에 선다.
+    bridge.maru_mobile_pointer(0, 33, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 33, q.x, q.y + 40, now());
+    bridge.maru_mobile_pointer(2, 33, q.x, q.y + 40, now());
+    advanceFrame(402, 874, 16);
+    bridge.maru_mobile_pointer(0, 34, q.x, q.y, now());
+    const stopped = bridge.maru_mobile_view_offset();
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(stopped, bridge.maru_mobile_view_offset());
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+}
+
+// **멈췄다 재개한 프레임이 화면을 날리면 안 된다.** 관성이 host 에 있을 때는 두 host 가 각자
+// `dt` 를 100ms 로 잘랐다 — 코어로 옮기면서 그 상한을 빠뜨렸다가 여기서 잡았다. 배경에 오래
+// 있다 온 프레임의 간격은 초 단위이고, 그것을 속도에 그대로 곱하면 한 프레임에 스크롤백
+// 끝까지 간다. `Touch.step` 이 [1,100] 으로 자르는 것과 같은 규칙이다.
+test "관성은 오래 멈췄다 온 프레임에 튀지 않는다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(400);
+    const parked = bridge.maru_mobile_view_offset();
+    try std.testing.expect(parked > 0);
+
+    // 본문을 튕긴다.
+    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 21, q.x, q.y, now());
+    bridge.maru_mobile_pointer(1, 21, q.x, q.y + 40, now());
+    bridge.maru_mobile_pointer(2, 21, q.x, q.y + 40, now());
+
+    // **한 프레임을 5초 뒤로 준다.** 상한이 없으면 이 한 번이 100ms 짜리 프레임 50개만큼 민다.
+    const jump = bridge.maru_mobile_view_offset();
+    advanceFrame(402, 874, 5000);
+    const moved = @as(i64, bridge.maru_mobile_view_offset()) - @as(i64, jump);
+    // 100ms 상한 × 속도 상한(8px/ms) = 800px, 줄 높이 22 → 최대 36줄. 넉넉히 잡아도 60줄을
+    // 넘으면 상한이 없는 것이다(상한이 없으면 5000ms × 속도로 수백 줄이 된다).
+    try std.testing.expect(@abs(moved) < 60);
+
+    endAnyGesture();
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
 }
 
 // **입력하면 바닥으로 스냅한다.** 과거를 보는 중에 친 글자가 화면 밖에 찍히면 친 것이

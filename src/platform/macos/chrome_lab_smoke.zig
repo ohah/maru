@@ -230,19 +230,23 @@ pub fn main(init: std.process.Init) !void {
     const tokens = labTokens();
     // sticky 시나리오는 그룹 둘 + 카드 넷이라 항목이 가장 많다(6). 여기 상한은 `bufferSizes`가
     // 보고하는 값 이상이어야 하고, 모자라면 캡처가 조용히 비는 대신 fail-close 한다.
-    var entries: [24]chrome.ui.tree.RectEntry = undefined;
-    var items: [24]chrome.ui.layout.Item = undefined;
-    var flex_scratch: [24]chrome.ui.layout.FlexScratch = undefined;
-    var child_rects: [24]chrome.ui.layout.UiRect = undefined;
+    // 소스 컨트롤 도크가 가장 큰 tree다: 행마다 자식(머리 줄의 동작 버튼 둘·커밋 버튼 면)이 붙어
+    // entry 수가 노드 수보다 크다(②c). 여유를 두 배로 잡는다 — 모자라면 `MaxEntriesExceeded`로 시나리오가
+    // 통째로 실패하고(골든이 red가 아니라 **안 만들어진다**) 원인이 한참 뒤에 드러난다.
+    var entries: [48]chrome.ui.tree.RectEntry = undefined;
+    var items: [48]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [48]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [48]chrome.ui.layout.UiRect = undefined;
     var ops: [lab.frame_op_capacity]chrome.draw.Op = undefined;
     var dock_nodes: [24]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [20]chrome.components.session_dock.ids.Entry = undefined;
     // Button이 label을 자식으로 들면서 action마다 node가 둘이다(Button + label).
     var detail_nodes: [20]chrome.ui.tree.UiNode = undefined;
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
-    // 소스 컨트롤 도크: 행 6 + 동작 버튼(충돌 행 제외 5) + 탭 칸 3 + 고정 chrome 4 + 여유.
-    var scm_nodes: [32]chrome.ui.tree.UiNode = undefined;
-    var scm_actions: [24]chrome.components.scm_dock.ids.Entry = undefined;
+    // 소스 컨트롤 도크: 행 6 + 동작 버튼(충돌 행 제외 5) + **머리 줄 동작 둘**(②c) + 커밋 버튼 면 +
+    // 탭 칸 3 + 고정 chrome 4 + 여유.
+    var scm_nodes: [48]chrome.ui.tree.UiNode = undefined;
+    var scm_actions: [40]chrome.components.scm_dock.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.

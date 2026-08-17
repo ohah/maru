@@ -50,6 +50,12 @@ pub const NodeIds = struct {
         return item(index) + 1;
     }
 
+    /// 저장소 머리 줄의 동작 버튼(0 = 새로고침, 1 = 전체 스테이지). 커밋 버튼의 면과 같은 자리를
+    /// 쓰지만 **항목 종류가 다르므로 겹치지 않는다**(한 항목이 둘 다일 수 없다).
+    pub fn repoAction(index: usize, slot: usize) u64 {
+        return item(index) + 2 + @as(u64, @intCast(slot));
+    }
+
     /// 커밋 버튼의 **면**. 그 줄은 면(28px)과 아래 여백(8px)으로 되어 있고 **칠은 면만** 받는다 —
     /// 줄 전체를 칠하면 파랑이 여백까지 덮어 글자가 그 띠의 가운데보다 위에 앉는다(사용자 지적
     /// 2026-08-17). 호버·눌림 해석도 이 노드가 받아야 여백을 지나갈 때 면이 밝아지지 않는다.
@@ -82,7 +88,8 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
             break :blk base + pill.box.w;
         },
         .file => base + m.status_extent,
-        // 저장소 머리 줄에는 아직 행 동작 버튼이 없다(동작 아이콘 줄은 다음 조각) — 비켜설 것이 없다.
+        // 머리 줄의 동작 버튼은 **가장 바깥**에 앉으므로 비켜설 것이 없다(자리를 비우는 쪽은 브랜치 칩과
+        // 개수 배지이고, 그건 `view.repoRow`가 같은 상수로 한다 — ②c).
         .repo, .commit_box, .commit_button, .more, .notice => base,
     };
 }
@@ -121,10 +128,12 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 커밋 버튼 줄은 **면 노드 하나를 더** 갖는다(칠이 아래 여백을 덮지 않게).
+    // 커밋 버튼 줄은 **면 노드 하나를 더** 갖고, 저장소 머리 줄은 **동작 버튼 둘**을 더 갖는다(②c).
     var faces: usize = 0;
-    for (items) |item| if (item == .commit_button) {
-        faces += 1;
+    for (items) |item| switch (item) {
+        .commit_button => faces += 1,
+        .repo => faces += repo_action_count,
+        else => {},
     };
     // 행 + 행 동작 버튼 + 커밋 버튼 면 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
     // **커밋 상자·버튼은 고정이 아니다**(②b) — 저장소마다 하나씩이라 `items`에 들어 있다.
@@ -139,9 +148,14 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         .child_rects = node_count + 3,
         // 행 열기 + 행 동작 + 그룹 토글/일괄 동작 + 커밋 상자·버튼은 전부 **행당 둘** 상한 안이고,
         // +2는 스크롤바다.
-        .actions = items.len * 2 + 2,
+        // 행당 둘이 상한인데 **머리 줄만 셋**이다(접기 + 동작 둘 — ②c). +2는 스크롤바다.
+        .actions = items.len * 2 + faces + 2,
     };
 }
+
+/// 머리 줄에 앉는 동작 버튼 수(새로고침·전체 스테이지). 커밋 ✓는 **넣지 않는다** — 그 그룹 안에 이미
+/// 커밋 버튼 줄이 있어 같은 동작이 두 자리가 된다.
+pub const repo_action_count: usize = 2;
 
 pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer };
 
@@ -192,8 +206,7 @@ fn actionOf(item: types.Item) types.RowAction {
     return switch (item) {
         .section => |section| section.action,
         .file => |file| file.action,
-        // 저장소 머리 줄의 동작 아이콘 줄(새로고침·스테이지·커밋…)은 다음 조각이다 — 지금은 줄 전체가
-        // 접기 버튼이다.
+        // 머리 줄의 동작은 `RowAction`(스테이지/언스테이지) 어휘가 아니다 — 자기 버튼 둘을 따로 낸다(②c).
         .repo, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
@@ -253,6 +266,61 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             break :blk slot;
         } else &.{};
 
+        // **머리 줄은 동작 버튼 둘을 자식으로 갖는다**(②c — 새로고침·전체 스테이지). 히트 사각형은
+        // 늘 있고 글리프만 호버를 따른다(파일 행과 같은 규율): `build`는 포인터 상태를 모르고, 무엇보다
+        // 호버할 때만 선언하면 tree가 포인터마다 달라져 히트테스트가 자기 자신을 쫓는다.
+        if (item == .repo) {
+            const repo = item.repo;
+            const slots = buffers.nodes[action_cursor..][0..repo_action_count];
+            action_cursor += repo_action_count;
+            const intents = [repo_action_count]ids.Intent{
+                .{ .refresh_repo = repo.index },
+                .{ .stage_all_repo = repo.index },
+            };
+            // 새로고침은 읽기라 언제나 켠다. 전체 스테이지는 그 저장소를 읽었을 때만 — **꺼져도 그린다**
+            // (감추면 "왜 안 눌리는가"를 말할 기회가 사라진다).
+            const enabled = [repo_action_count]bool{ true, repo.can_stage_all };
+            for (slots, 0..) |*slot, action_index| {
+                const action = table.append(
+                    props.snapshot_generation,
+                    intents[action_index],
+                    enabled[action_index],
+                ) catch return error.InsufficientActionBuffer;
+                slot.* = tree.button(.{
+                    .id = NodeIds.repoAction(index, action_index),
+                    .style = .{
+                        .width = .{ .px = @floatFromInt(m.action_extent) },
+                        .height = .{ .px = @floatFromInt(m.action_extent) },
+                        .margin = .{ .right = @floatFromInt(if (action_index + 1 == repo_action_count) m.inset_x else m.gap) },
+                    },
+                    // 행 동작 버튼과 같은 규율: 칠하지 않는다(호버 밴드 위에서 구멍처럼 보인다).
+                    .variant = .ghost,
+                    .paint = .{ .opacity = 0 },
+                    .action = action,
+                    .cursor = .press,
+                    .overflow = .clip,
+                });
+            }
+            const toggle = table.append(
+                props.snapshot_generation,
+                .{ .toggle_repo = repo.index },
+                true,
+            ) catch return error.InsufficientActionBuffer;
+            node.* = tree.card(.{
+                .id = NodeIds.item(index),
+                .style = .{ .height = .{ .px = @floatFromInt(m.itemHeight(item)) } },
+                .direction = .row,
+                .justify = .end,
+                .align_items = .center,
+                .variant = .surface,
+                .paint = rowPaint(item),
+                .action = toggle,
+                .cursor = rowCursor(item),
+                .overflow = .clip,
+            }, slots);
+            continue;
+        }
+
         // 커밋 버튼 줄은 **면 노드**를 자식으로 갖는다. 칠도 action도 그 면이 받는다 — 줄 전체가
         // 칠해지면 파랑이 아래 여백까지 덮어 글자가 띠의 가운데보다 위에 앉고(사용자 지적 2026-08-17),
         // action이 줄에 있으면 그 여백을 눌러도 커밋이 걸린다.
@@ -291,7 +359,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         }
 
         const row_intent: ?ids.Intent = switch (item) {
-            .repo => |repo| .{ .toggle_repo = repo.index },
+            // 머리 줄은 위에서 자기 버튼들과 함께 세웠다.
+            .repo => unreachable,
             // 상자와 버튼은 **어느 저장소인지 싣는다**(②b) — 안 실으면 아래 그룹의 상자를 눌렀는데
             // 위 그룹이 편집되거나, 더 나쁘게는 다른 저장소로 커밋된다.
             .commit_box => |box| .{ .commit_focus = box.repo_index },
@@ -584,7 +653,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }
@@ -882,4 +951,38 @@ test "커밋 상자는 호버로 면이 밝아지지 않는다(테두리는 그�
     const row = frame.tree.entries[frame.tree.find(NodeIds.item(1)) orelse return error.MissingRow];
     const hovered_row = paint_style.resolveCard(row.id, row.visual.card, row.action, .{ .hovered = row.id }, &tk);
     try testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_row.background);
+}
+
+test "저장소 머리 줄은 동작 버튼 둘을 갖는다(꺼져도 히트 사각형은 있다) (②c)" {
+    // 감추면 "왜 안 눌리는가"를 말할 기회가 사라진다(P1 계약). 그리고 자리는 **호버와 무관하게**
+    // 예약해야 브랜치 칩·개수 배지가 마우스를 따라 움직이지 않는다.
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "a", .can_stage_all = false } },
+    };
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 500 },
+        .items = &items,
+        .branch = "main",
+    }, &storage);
+    var refresh: ?ids.Intent = null;
+    var stage_all: ?ids.Intent = null;
+    var stage_enabled = true;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .refresh_repo => refresh = entry.intent,
+        .stage_all_repo => {
+            stage_all = entry.intent;
+            stage_enabled = entry.enabled;
+        },
+        else => {},
+    };
+    try testing.expect(refresh != null);
+    try testing.expect(stage_all != null);
+    // 읽지 못한 저장소라 전체 스테이지는 **꺼져 있다** — 그래도 표에 있고 히트 사각형도 있다.
+    try testing.expect(!stage_enabled);
+    for (0..repo_action_count) |slot| {
+        const index = frame.tree.find(NodeIds.repoAction(0, slot)) orelse return error.MissingRepoAction;
+        try testing.expect(frame.tree.entries[index].rect.width > 0);
+        try testing.expectEqual(tree.CursorHint.press, frame.tree.entries[index].cursor);
+    }
 }

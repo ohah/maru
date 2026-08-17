@@ -55088,6 +55088,41 @@ test "소스 컨트롤: 비활성 저장소를 펼치면 파일 줄이 서고 **
     try std.testing.expectEqual(@as(u32, 1), row.repo_index);
 }
 
+test "소스 컨트롤: 머리 줄 새로고침은 **그 저장소**를 다시 읽게 한다 (P3d-②c)" {
+    // 읽기라 언제나 실행한다. 다만 활성 저장소면 목록 읽기를, 아니면 그 머리 줄 읽기를 다시 건다 —
+    // 둘이 같은 사실을 각자 들지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.git_result.?.worktrees = try git_backend_mod.worker_allocator.dupe(
+        u8,
+        "worktree /repo\nbranch refs/heads/main\n\nworktree /other\nbranch refs/heads/side\n",
+    );
+    scm_dock_ops.invalidateRepoList(session);
+    try session.scm_repo_status.append(allocator, .{
+        .path = try allocator.dupe(u8, "/other"),
+        .branch = try allocator.dupe(u8, "side"),
+        .detached = false,
+        .count = 0,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .status_text = try allocator.dupe(u8, "# branch.head side\n"),
+    });
+    _ = scm_dock_ops.repoEntries(session); // 목록을 세운다(자리 = intent의 인덱스)
+
+    // 비활성 저장소(자리 1)의 새로고침 → 그 요약만 낡았다고 표시된다.
+    try std.testing.expect(!session.scm_repo_status.items[0].stale);
+    scm_dock_ops.applyScmDockIntent(session, .{ .refresh_repo = 1 });
+    try std.testing.expect(session.scm_repo_status.items[0].stale);
+}
+
 test "소스 컨트롤: 강조는 (저장소, 행) 쌍이다 (P3d-②d)" {
     // 인덱스만 들면 저장소마다 따로 서는 모델에서 **같은 번호의 남의 행**이 함께 강조된다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;

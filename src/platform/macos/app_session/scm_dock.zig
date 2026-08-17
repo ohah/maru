@@ -341,6 +341,8 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .pending = !is_current and summary == null,
                 // 읽지 못한 저장소는 그 사실을 적는다(0건으로 그리면 없는 사실을 단정한다).
                 .failed = if (summary) |sum| sum.failed else false,
+                // **전체 스테이지**는 그 저장소를 읽었고 스테이지할 것이 있을 때만 켠다(②c).
+                .can_stage_all = if (repo_model) |rm| hasUnstaged(rm.rows) else false,
             },
         };
         n += 1;
@@ -798,6 +800,21 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         .commit_focus => |index| if (repoPathAt(self, index)) |repo| focusCommitRepo(self, repo),
         // **어느 저장소로 커밋하는가**를 intent가 실어 온다(②b). 인덱스는 지금 목록에서 다시 찾는다.
         .commit => |index| if (repoPathAt(self, index)) |repo| submitCommitFor(self, repo),
+        // **새로고침은 읽기라 언제나 실행한다**(②c). 활성 저장소면 목록 읽기를, 아니면 그 머리 줄
+        // 읽기를 다시 건다 — 둘이 같은 사실을 각자 들지 않는다.
+        .refresh_repo => |index| {
+            const repo = repoPathAt(self, index) orelse return;
+            if (isCurrentRepo(self, repo)) {
+                git_ops.refreshGitStatus(self);
+            } else {
+                markRepoStatusStaleFor(self, repo);
+            }
+            self.metal_dirty = true;
+        },
+        .stage_all_repo => |index| {
+            const repo = repoPathAt(self, index) orelse return;
+            submitStageAllFor(self, repo);
+        },
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
@@ -1101,6 +1118,35 @@ pub fn clearScmPending(self: *AppSession) void {
 
 /// 섹션 헤더의 일괄 `+`/`−`. **방향은 host가 지금 상태로 다시 정한다**(intent가 방향을 싣지 않는 이유 —
 /// published tree와 host 상태가 어긋날 수 있다).
+/// 그 저장소의 **모든 변경**을 스테이지한다(②c). `git add -A`라 경로를 싣지 않는다 — 화면에 안 보이는
+/// 파일(10행 상한에 걸린 것)까지 드는 것이 "모두"의 뜻이다.
+fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
+    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse {
+        // **감추지 않고 이유를 말한다** — 버튼은 꺼진 색이지만 눌리기는 한다.
+        setScmWriteNotice(self, "그 저장소를 아직 읽지 못했습니다");
+        return;
+    };
+    if (!hasUnstaged(model.rows)) {
+        setScmWriteNotice(self, "스테이지할 변경이 없습니다");
+        return;
+    }
+    _ = submitWrite(self, repo, .stage_all, &.{});
+}
+
+/// 스테이지할 것이 남아 있나(= `변경 사항` 그룹에 파일이 있나). **충돌 행은 세지 않는다** — `git add`가
+/// 충돌을 "해결됨"으로 표시하므로 그 행은 일괄 대상이 아니다(모델이 이미 `.none`으로 준다).
+fn hasUnstaged(rows: []const scm_view.Row) bool {
+    for (rows) |row| switch (row) {
+        .file => |file| {
+            if (file.section == .changes and file.action == .stage) return true;
+        },
+        else => {},
+    };
+    return false;
+}
+
 fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
     const repo = repoPathAt(self, ref.repo_index) orelse return;
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;

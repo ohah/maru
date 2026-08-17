@@ -535,7 +535,8 @@ fn isSelected(item: types.Item) bool {
     return switch (item) {
         .file => |file| file.selected,
         .commit => |commit| commit.selected,
-        .repo, .commit_file, .load_more, .commit_box, .commit_button, .section, .more, .notice => false,
+        .commit_file => |file| file.selected,
+        .repo, .load_more, .commit_box, .commit_button, .section, .more, .notice => false,
     };
 }
 

@@ -496,13 +496,16 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         while (files.next()) |_| commit_file_rows += 1;
         // 읽는 중이거나 실패면 그 사실을 한 줄로 말한다(빈 자리는 "바꾼 것이 없다"로 읽힌다).
         if (commit_file_rows == 0) commit_file_rows = 1;
+        if (self.scm_commit_files_truncated) commit_file_rows += 1;
     }
 
     const notice_rows: usize = if (count == 0) 1 else 0;
     // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
     // 눌러도 아무 일이 없어 고장으로 읽힌다.
     const more_rows: usize = if (count >= self.scm_log_limit) 1 else 0;
-    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows + commit_file_rows) catch return null;
+    // 출력이 상한에서 잘렸으면 **그 사실을 적는다** — "더 없다"와 "더 못 읽었다"는 다른 사실이다.
+    const truncated_rows: usize = if (self.scm_log_truncated) 1 else 0;
+    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows + truncated_rows + commit_file_rows) catch return null;
     var n: usize = 0;
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
@@ -562,8 +565,13 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .dir = entry.path[0 .. entry.path.len - std.fs.path.basename(entry.path).len],
                     .status = commitFileStatus(entry.letter),
                     .letter = entry.letter,
+                    .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
                 },
             };
+            n += 1;
+        }
+        if (self.scm_commit_files_truncated and n < items.len) {
+            items[n] = .{ .notice = "이 커밋의 파일 목록이 잘렸습니다" };
             n += 1;
         }
         // 읽었는데 파일이 없다 — 빈 커밋(`--allow-empty`)이 실제로 있다.
@@ -573,6 +581,10 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         }
     }
 
+    if (truncated_rows == 1 and n < items.len) {
+        items[n] = .{ .notice = "출력이 너무 커서 목록이 잘렸습니다" };
+        n += 1;
+    }
     if (more_rows == 1 and n < items.len) {
         items[n] = .load_more;
         n += 1;
@@ -638,14 +650,9 @@ fn openCommitFileDiff(self: *AppSession, index: u32) void {
         }
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, entry.path }) catch return;
-        git_ops.openDiffTerm(self, repo, abs, entry.path, entry.orig_path, .commit);
-        // **그 비교가 어느 커밋인지**를 entry가 든다 — 나중에 다시 구하면 그 사이 다른 커밋을 펼쳤을 수 있다.
-        if (git_ops.diffTermFor(self, abs, .commit)) |term| {
-            if (term.file_entry) |file_entry| {
-                if (file_entry.diff_commit_oid.len > 0) self.allocator.free(file_entry.diff_commit_oid);
-                file_entry.diff_commit_oid = self.allocator.dupe(u8, oid) catch &.{};
-            }
-        }
+        git_ops.openCommitDiffTerm(self, repo, abs, entry.path, entry.orig_path, oid);
+        self.scm_selected_commit_file = index;
+        self.metal_dirty = true;
         return;
     }
 }
@@ -1094,6 +1101,7 @@ pub fn drainScmLog(self: *AppSession) void {
     // **실패도 기록한다**(그 탭이 영영 "읽는 중"으로 남지 않게). 첫 커밋 전 저장소는 `git log`가
     // 실패하는데, 그건 오류가 아니라 "커밋이 없다"이고 화면 문구가 그렇게 갈린다.
     self.scm_log_failed = !taken.ok;
+    self.scm_log_truncated = taken.truncated;
     const text_copy = self.allocator.dupe(u8, taken.text) catch return;
     const repo_copy = self.allocator.dupe(u8, taken.repo) catch {
         self.allocator.free(text_copy);
@@ -1103,6 +1111,9 @@ pub fn drainScmLog(self: *AppSession) void {
     if (self.scm_log_repo) |old| self.allocator.free(old);
     self.scm_log_text = text_copy;
     self.scm_log_repo = repo_copy;
+    // **새 목록이다** — 옛 화면을 겨냥한 늦은 클릭을 거부한다(파일 목록이 같은 이유로 세대를 올린다).
+    // 커밋 줄의 intent는 **자리**를 싣고 그 자리가 여기서 다른 커밋을 가리키게 되기 때문이다.
+    git_ops.bumpScmDockGeneration(self);
 }
 
 /// 저장소가 바뀌었으면 히스토리 원문을 버린다. **남의 커밋을 그리는 것보다 빈 화면이 낫다.**
@@ -1116,9 +1127,15 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     self.scm_log_text = &.{};
     self.scm_log_limit = app_session_mod.scm_log_limit_initial;
     self.scm_log_failed = false;
+    self.scm_log_truncated = false;
     // **고른 커밋도 버린다**(적대적 검증). 인덱스는 그 목록 안의 자리라, 목록이 바뀌면 같은 번호가
     // 다른 저장소의 다른 커밋을 가리킨다 — 화면에는 "무언가 골라 둔" 강조만 남는다.
     self.scm_selected_commit = null;
+    // **펼친 커밋과 그 파일도 버린다**(P4b 적대적 검증). 남겨 두면 그 OID를 **새 저장소에서** 읽는다 —
+    // 대개 실패하지만, 실패든 아니든 그건 이 저장소의 사실이 아니다.
+    if (self.scm_expanded_commit) |oid| self.allocator.free(oid);
+    self.scm_expanded_commit = null;
+    dropCommitFiles(self);
 }
 
 /// 히스토리에서 커밋을 **펼치거나 접는다**(P4b). 같은 커밋을 다시 누르면 접힌다 — 목록에서 자리를
@@ -1145,6 +1162,9 @@ fn dropCommitFiles(self: *AppSession) void {
     if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
     self.scm_commit_files_text = &.{};
     self.scm_commit_files_failed = false;
+    self.scm_commit_files_truncated = false;
+    // 그 커밋의 파일 목록이 사라졌다 — 그 안의 자리를 가리키던 강조도 뜻을 잃는다.
+    self.scm_selected_commit_file = null;
 }
 
 /// 펼친 커밋의 파일 목록을 읽는다. **펼쳤을 때만** 돈다 — 안 펼친 커밋을 미리 읽는 것은 프로세스를
@@ -1178,6 +1198,7 @@ pub fn drainCommitFiles(self: *AppSession) void {
     self.scm_commit_files_inflight = 0;
     self.metal_dirty = true;
     self.scm_commit_files_failed = !taken.ok;
+    self.scm_commit_files_truncated = taken.truncated;
     const text_copy = self.allocator.dupe(u8, taken.text) catch return;
     const oid_copy = self.allocator.dupe(u8, taken.oid) catch {
         self.allocator.free(text_copy);
@@ -1187,6 +1208,8 @@ pub fn drainCommitFiles(self: *AppSession) void {
     if (self.scm_commit_files_oid) |old| self.allocator.free(old);
     self.scm_commit_files_text = text_copy;
     self.scm_commit_files_oid = oid_copy;
+    // 펼친 커밋 아래에 줄이 생겼다 = 그 아래 모든 자리가 밀린다.
+    git_ops.bumpScmDockGeneration(self);
 }
 
 /// 쓰기가 끝났으면 커밋 목록도 낡았다(적대적 검증). **커밋을 하면 그 목록이 곧 틀린다** — 방금 만든

@@ -81,7 +81,7 @@ pub const inventory = [_]Proof{
     // P3c-2에서 커밋 end-to-end 둘이 붙으며 움직인다(실제 `git commit`이 만들어지는가 · pre-commit
     // hook이 거부하면 커밋이 안 만들어지고 이유가 stderr로 오는가). fixture에 `commit`·`capture`
     // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "884642d31ae3626d24da61a67c3b831b7785956dffe1af8dabd3945896228f27" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "568afef48b721b252cb6132e07e7f427033b55fc909fa3ce310c2c300034b768" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -500,7 +500,7 @@ pub const inventory = [_]Proof{
     // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
     // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a4bf529c5fcf16a76f838a976f0e75109e0c4b74a17c16fb70959e92d4791382" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d8d3bd0338134b41e36a41298db5a51d5bc8adf1c871cb88ed6ef5131af88966" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

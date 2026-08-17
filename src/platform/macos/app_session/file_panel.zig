@@ -1402,25 +1402,25 @@ pub fn buildFileTreeContextMenuItems(self: *AppSession) []const []const u8 {
     const target = self.file_tree_context_target orelse return &.{};
     var n: usize = 0;
     if (!(target.symlink and (target.row_kind == .root or target.row_kind == .directory))) {
-        self.context_menu_items_buf[n] = "새 파일…";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_new_file);
         n += 1;
-        self.context_menu_items_buf[n] = "새 폴더…";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_new_folder);
         n += 1;
     }
     if (target.row_kind == .file or target.row_kind == .directory) {
-        self.context_menu_items_buf[n] = "이름 변경";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_rename);
         n += 1;
-        self.context_menu_items_buf[n] = "휴지통으로 이동";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_move_to_trash);
         n += 1;
     }
     if (target.row_kind == .root) {
-        self.context_menu_items_buf[n] = "파일 열기…";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_open_file);
         n += 1;
-        self.context_menu_items_buf[n] = "폴더 열기…";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_open_folder);
         n += 1;
-        self.context_menu_items_buf[n] = "작업공간에 폴더 추가…";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_add_folder_to_workspace);
         n += 1;
-        self.context_menu_items_buf[n] = "작업공간에서 폴더 제거";
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_remove_folder_from_workspace);
         n += 1;
     }
     self.context_menu_items_len = n;
@@ -1428,9 +1428,9 @@ pub fn buildFileTreeContextMenuItems(self: *AppSession) []const []const u8 {
 }
 
 pub fn buildFileTreeBackgroundMenuItems(self: *AppSession) []const []const u8 {
-    self.context_menu_items_buf[0] = "파일 열기…";
-    self.context_menu_items_buf[1] = "폴더 열기…";
-    self.context_menu_items_buf[2] = "작업공간에 폴더 추가…";
+    self.context_menu_items_buf[0] = maru.i18n.t(.ctx_open_file);
+    self.context_menu_items_buf[1] = maru.i18n.t(.ctx_open_folder);
+    self.context_menu_items_buf[2] = maru.i18n.t(.ctx_add_folder_to_workspace);
     self.context_menu_items_len = 3;
     return self.context_menu_items_buf[0..3];
 }

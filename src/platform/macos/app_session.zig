@@ -19262,14 +19262,14 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
     // ── (1) **마커 카드**(t0) 우클릭 → 그룹째 고정(cardPinRole=.group). 마커는 그룹 시작이라 개별 pin이면 C2 캐시 권위
     //    (§12.2)가 깨지므로 그룹째로 위임(GP3 유지). accept → 마커+모든 멤버 통째 pinned.
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
-    try std.testing.expectEqualStrings("그룹째 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_pin), settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
     settings_ops.acceptContextMenu(session);
     try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned);
     // 다시 열면 "그룹 고정 해제"(그룹째 토글 상태 반영). 해제 → 전부 unpinned.
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
-    try std.testing.expectEqualStrings("그룹 고정 해제", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_unpin), settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
     settings_ops.acceptContextMenu(session);
@@ -19279,7 +19279,7 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
     //    라벨은 "그룹 내 위치 고정", accept → local_pinned만 세팅되고 **전역 pinned는 불변**(그룹째 고정이 아님).
     const m1 = session.tabs.items[1];
     session.context_menu_target = .{ .workspace = m1 };
-    try std.testing.expectEqualStrings("그룹 내 위치 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_local_pin), settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = m1 };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
     settings_ops.acceptContextMenu(session);
@@ -19287,13 +19287,13 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
     try std.testing.expect(!session.tabs.items[0].pinned and !m1.pinned); // ★ 전역 pinned 불변(그룹째 아님)
     // 다시 열면 "그룹 내 고정 해제"(로컬 토글 상태 반영).
     session.context_menu_target = .{ .workspace = m1 };
-    try std.testing.expectEqualStrings("그룹 내 고정 해제", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_local_unpin), settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
 
     // ── (3) **최상위**(그룹 미소속) 카드 → 개별 전역 pin(cardPinRole=.individual, tab_ops.togglePin — 현행 유지).
     tab_ops.ungroupTab(session, session.tabs.items[0]); // 그룹 풀어 전부 최상위 카드로
     const top0 = session.tabs.items[0];
     session.context_menu_target = .{ .workspace = top0 };
-    try std.testing.expectEqualStrings("위치 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_pin), settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = top0 };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
     settings_ops.acceptContextMenu(session);
@@ -20647,14 +20647,14 @@ test "SR5(c): promote 마커 숨김 — leaf 멤버=여기서 최상위로 분�
     session.context_menu_target = .{ .workspace = leaf };
     const leaf_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_count, leaf_items.len);
-    try std.testing.expectEqualStrings("그룹에서 빼기", leaf_items[ctx_menu_group_remove]);
-    try std.testing.expectEqualStrings("여기서 최상위로 분리", leaf_items[ctx_menu_group_promote]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_remove), leaf_items[ctx_menu_group_remove]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_promote), leaf_items[ctx_menu_group_promote]);
 
     // 마커 카드: remove만(promote 숨김 — promoteTabToTopLevelInPlace no-op이라 죽은 항목 방지). len=ctx_menu_group_promote.
     session.context_menu_target = .{ .workspace = marker };
     const marker_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_group_promote, marker_items.len);
-    try std.testing.expectEqualStrings("그룹에서 빼기", marker_items[ctx_menu_group_remove]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_remove), marker_items[ctx_menu_group_remove]);
     // 마커에도 promote를 강제 dispatch하면 no-op(방어 — 숨겨도 인덱스 도달 불가지만 액션 자체가 안전).
     tab_ops.promoteTabToTopLevelInPlace(session, marker);
     try std.testing.expect(!marker.top_level); // 마커엔 top_level 안 씀(leaf-only §13.8)
@@ -23135,7 +23135,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         defer session.deinit();
         inline for (0..1) |_| _ = try tab_ops.newTab(session); // [t0,t1]
         const x = session.tabs.items[0];
-        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, x));
+        try std.testing.expectEqualStrings(maru.i18n.t(.ctx_pin), pinMenuLabel(session, x));
         rightClickPin(session, x);
         try expectCardTopLevelPinned(session, x);
     }
@@ -23166,7 +23166,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         const y = try tab_ops.newTab(session); // ★ 그룹 존재 시 새 워크스페이스 — 흡수 방지로 그룹 **앞**에 삽입돼야
         try std.testing.expect(tab_ops.cardPinRole(session, y) == .individual); // ★ 흡수 안 됨(옛 버그면 .local)
         try std.testing.expect(tab_ops.enclosingGroupMarkerIndex(session, 0) == null); // ★ y가 index0(그룹 앞)·그룹 밖
-        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, y)); // "그룹 내 위치 고정" 아님
+        try std.testing.expectEqualStrings(maru.i18n.t(.ctx_pin), pinMenuLabel(session, y)); // "그룹 내 위치 고정" 아님
         rightClickPin(session, y);
         try expectCardTopLevelPinned(session, y);
     }
@@ -23206,7 +23206,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         const x = session.tabs.items[0];
         rightClickPin(session, x);
         try expectCardTopLevelPinned(session, x);
-        try std.testing.expectEqualStrings("고정 해제", pinMenuLabel(session, x));
+        try std.testing.expectEqualStrings(maru.i18n.t(.ctx_unpin), pinMenuLabel(session, x));
         rightClickPin(session, x); // 해제
         try std.testing.expect(!x.pinned); // 개별 pin 풀림
         try std.testing.expect(tab_ops.enclosingGroupMarkerIndex(session, 0) == null); // 여전히 최상위(그룹 흡수 없음)
@@ -30350,12 +30350,12 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len + 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqual(ctx_menu_group_remove, items.len); // 최상위 카드 → 빼기 미포함(버퍼 최대 ctx_menu_count보다 1 적다)
     try std.testing.expectEqualStrings("Rename", items[0]);
-    try std.testing.expectEqualStrings("위치 고정", items[1]); // 미고정 → "위치 고정"
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_pin), items[1]); // 미고정 → "위치 고정"
     try std.testing.expectEqualStrings("배경: 없음", items[ctx_menu_bg_first]);
     try std.testing.expectEqualStrings("바: 없음", items[ctx_menu_accent_first]);
-    try std.testing.expectEqualStrings("새 그룹으로 묶기", items[ctx_menu_group_create]);
-    try std.testing.expectEqualStrings("형제 그룹으로 분리", items[ctx_menu_group_sibling]); // SG5-3 형제 액션
-    try std.testing.expectEqualStrings("그룹 풀기", items[ctx_menu_group_ungroup]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_create), items[ctx_menu_group_create]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_sibling), items[ctx_menu_group_sibling]); // SG5-3 형제 액션
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_ungroup), items[ctx_menu_group_ungroup]);
     try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_menu_group_color_first]); // SG5-2 그룹 색 프리셋(카드 색과 같은 팔레트)
     try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_menu_group_color_first + 2]);
 
@@ -30370,7 +30370,7 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.context_menu_target = .{ .workspace = tab };
     const grouped_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_group_promote, grouped_items.len); // 마커 → remove만(promote 숨김)
-    try std.testing.expectEqualStrings("그룹에서 빼기", grouped_items[ctx_menu_group_remove]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_remove), grouped_items[ctx_menu_group_remove]);
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;
     settings_ops.acceptContextMenu(session);
@@ -30384,7 +30384,7 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
 
     // 다시 열면 "고정 해제"가 뜬다(토글 상태 반영).
     session.context_menu_target = .{ .workspace = tab };
-    try std.testing.expectEqualStrings("고정 해제", settings_ops.buildContextMenuItems(session)[1]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_unpin), settings_ops.buildContextMenuItems(session)[1]);
 
     // accept selected=3(배경: 앰버, idx 0=Rename·1=Pin·2=없음·3=앰버) → background_color = 0xDDA15E.
     session.context_menu_target = .{ .workspace = tab };
@@ -30472,7 +30472,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     try std.testing.expectEqual(@as(usize, 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqualStrings("Rename", items[0]); // 그룹 이름 편집(startRename(.group))
     try std.testing.expectEqualStrings("그룹 고정", items[ctx_group_menu_pin]); // GP3 §12.10 — 미고정 그룹 → "그룹 고정"
-    try std.testing.expectEqualStrings("그룹 풀기", items[ctx_group_menu_ungroup]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_ungroup), items[ctx_group_menu_ungroup]);
     try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_group_menu_color_first]); // 카드 메뉴와 같은 색 라벨 공유
     try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_group_menu_color_first + 2]);
 
@@ -30580,8 +30580,8 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
     try std.testing.expect(session.terminal_context_menu);
     const items = settings_ops.contextMenuItems(session);
     try std.testing.expectEqual(@as(usize, 2), items.len);
-    try std.testing.expectEqualStrings("복사", items[0]);
-    try std.testing.expectEqualStrings("붙여넣기", items[1]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_copy), items[0]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_paste), items[1]);
 
     // 항목 0(복사) accept → pending=.copy, 메뉴 닫힘(terminal_context_menu 비움).
     session.chrome_host.context_menu.selected = 0;
@@ -33739,7 +33739,7 @@ test "file tree header and populated blank left click are inert while right clic
 
     session.mouse(1, header_x, blank_y, 2, 0);
     try std.testing.expect(session.file_tree_background_menu);
-    try std.testing.expectEqualStrings("작업공간에 폴더 추가…", settings_ops.contextMenuItems(session)[2]);
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_add_folder_to_workspace), settings_ops.contextMenuItems(session)[2]);
     settings_ops.closeContextMenu(session);
 }
 
@@ -55686,7 +55686,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .href = "",
     });
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
-    try std.testing.expectEqualStrings("복사", session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings("복사", session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
     session.chrome_host.context_menu.selected = 0;
     settings_ops.acceptContextMenu(session);
     const action = settings_ops.takeFileMenuAction(session).?;
@@ -55720,7 +55720,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .href = "",
     });
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
-    try std.testing.expectEqualStrings("붙여넣기", session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings("붙여넣기", session.context_menu_items_buf[0]); // session/content_menu.zig 소유 — I3d 가 옮긴다
     try std.testing.expectEqualStrings("전체 선택", session.context_menu_items_buf[1]);
     settings_ops.closeContextMenu(session);
 

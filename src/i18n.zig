@@ -260,6 +260,33 @@ pub const Table = struct {
     set_section_editor: [:0]const u8,
     set_section_other: [:0]const u8,
 
+    // ── 컨텍스트 메뉴 (I3a 슬라이스 6) ──
+    // 계약 §7.2 가 "정적·동적이 한 배열에 섞여 타입 전환이 불가능하다"고 지목한 자리다
+    // (`context_menu_items_buf` 는 `[N][]const u8` 이고 리터럴과 동적 라벨이 같은 배열을 쓴다).
+    // 키로 옮겨도 그 배열의 타입은 못 바꾸므로 **2 차 리터럴 검사가 여기서는 영구 방어로 남는다.**
+    ctx_new_file: [:0]const u8,
+    ctx_new_folder: [:0]const u8,
+    ctx_rename: [:0]const u8,
+    ctx_move_to_trash: [:0]const u8,
+    ctx_open_file: [:0]const u8,
+    ctx_open_folder: [:0]const u8,
+    ctx_add_folder_to_workspace: [:0]const u8,
+    ctx_remove_folder_from_workspace: [:0]const u8,
+    ctx_group_create: [:0]const u8,
+    ctx_group_sibling: [:0]const u8,
+    ctx_group_ungroup: [:0]const u8,
+    ctx_group_remove: [:0]const u8,
+    ctx_group_promote: [:0]const u8,
+    ctx_copy: [:0]const u8,
+    ctx_paste: [:0]const u8,
+    // pin 라벨 6 종 — 세 축(그룹째·그룹 내·개별)이 각각 켬/끔을 갖는다.
+    ctx_group_unpin: [:0]const u8,
+    ctx_group_pin: [:0]const u8,
+    ctx_local_unpin: [:0]const u8,
+    ctx_local_pin: [:0]const u8,
+    ctx_unpin: [:0]const u8,
+    ctx_pin: [:0]const u8,
+
     // ── 언어 선택 (I4b) ──
     // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
     set_language_auto: [:0]const u8,
@@ -465,6 +492,27 @@ pub const en: Table = .{
     .set_section_editor = "Editor",
     .set_section_other = "Other",
     .set_language_auto = "Automatic (OS language)",
+    .ctx_new_file = "New File\u{2026}",
+    .ctx_new_folder = "New Folder\u{2026}",
+    .ctx_rename = "Rename",
+    .ctx_move_to_trash = "Move to Trash",
+    .ctx_open_file = "Open File\u{2026}",
+    .ctx_open_folder = "Open Folder\u{2026}",
+    .ctx_add_folder_to_workspace = "Add Folder to Workspace\u{2026}",
+    .ctx_remove_folder_from_workspace = "Remove Folder from Workspace",
+    .ctx_group_create = "Group Selection",
+    .ctx_group_sibling = "Split into Sibling Group",
+    .ctx_group_ungroup = "Ungroup",
+    .ctx_group_remove = "Remove from Group",
+    .ctx_group_promote = "Promote to Top Level",
+    .ctx_copy = "Copy",
+    .ctx_paste = "Paste",
+    .ctx_group_unpin = "Unpin Group",
+    .ctx_group_pin = "Pin Group",
+    .ctx_local_unpin = "Unpin in Group",
+    .ctx_local_pin = "Pin in Group",
+    .ctx_unpin = "Unpin",
+    .ctx_pin = "Pin",
 };
 
 pub const ko: Table = .{
@@ -667,6 +715,27 @@ pub const ko: Table = .{
     .set_section_editor = "편집기",
     .set_section_other = "기타",
     .set_language_auto = "자동 (OS 언어)",
+    .ctx_new_file = "새 파일\u{2026}",
+    .ctx_new_folder = "새 폴더\u{2026}",
+    .ctx_rename = "이름 변경",
+    .ctx_move_to_trash = "휴지통으로 이동",
+    .ctx_open_file = "파일 열기\u{2026}",
+    .ctx_open_folder = "폴더 열기\u{2026}",
+    .ctx_add_folder_to_workspace = "작업공간에 폴더 추가\u{2026}",
+    .ctx_remove_folder_from_workspace = "작업공간에서 폴더 제거",
+    .ctx_group_create = "새 그룹으로 묶기",
+    .ctx_group_sibling = "형제 그룹으로 분리",
+    .ctx_group_ungroup = "그룹 풀기",
+    .ctx_group_remove = "그룹에서 빼기",
+    .ctx_group_promote = "여기서 최상위로 분리",
+    .ctx_copy = "복사",
+    .ctx_paste = "붙여넣기",
+    .ctx_group_unpin = "그룹 고정 해제",
+    .ctx_group_pin = "그룹째 고정",
+    .ctx_local_unpin = "그룹 내 고정 해제",
+    .ctx_local_pin = "그룹 내 위치 고정",
+    .ctx_unpin = "고정 해제",
+    .ctx_pin = "위치 고정",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.

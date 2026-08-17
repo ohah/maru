@@ -1183,11 +1183,11 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         //  · 최상위 카드(.individual) = 개별 전역 위치 고정(togglePin, 현행)
         self.context_menu_items_buf[n] = switch (tab_ops.cardPinRole(self, t.workspace)) {
             .group => if (tab_ops.enclosingGroupMarkerTab(self, t.workspace)) |mk|
-                (if (mk.pinned) "그룹 고정 해제" else "그룹째 고정")
+                (if (mk.pinned) maru.i18n.t(.ctx_group_unpin) else maru.i18n.t(.ctx_group_pin))
             else
-                (if (t.workspace.pinned) "고정 해제" else "위치 고정"),
-            .local => if (t.workspace.local_pinned) "그룹 내 고정 해제" else "그룹 내 위치 고정",
-            .individual => if (t.workspace.pinned) "고정 해제" else "위치 고정",
+                (if (t.workspace.pinned) maru.i18n.t(.ctx_unpin) else maru.i18n.t(.ctx_pin)),
+            .local => if (t.workspace.local_pinned) maru.i18n.t(.ctx_local_unpin) else maru.i18n.t(.ctx_local_pin),
+            .individual => if (t.workspace.pinned) maru.i18n.t(.ctx_unpin) else maru.i18n.t(.ctx_pin),
         };
         n += 1;
         for (tab_bg_labels) |lbl| {
@@ -1201,11 +1201,11 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         // 사이드바 그룹(SG3c·SG5-3) — 위치 파생 마커(group_start) 세팅/제거(단축키·팔레트와 같은 세션 메서드).
         // 항상 노출(pin처럼 인덱스 고정) — ungroup은 그룹에 안 속하면 no-op이라 안전. "새 그룹으로 묶기"=중첩(depth+1),
         // "형제 그룹으로 분리"=같은 depth 형제(SG5-3, 명시적 분리 — 그룹 안 카드에서 형제 최상위/형제 그룹 생성).
-        self.context_menu_items_buf[n] = "새 그룹으로 묶기"; // ctx_menu_group_create
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_create); // ctx_menu_group_create
         n += 1;
-        self.context_menu_items_buf[n] = "형제 그룹으로 분리"; // ctx_menu_group_sibling
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_sibling); // ctx_menu_group_sibling
         n += 1;
-        self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_menu_group_ungroup
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_ungroup); // ctx_menu_group_ungroup
         n += 1;
         for (tab_group_color_labels) |lbl| { // 그룹 공통 색(SG5-2) — ctx_menu_group_color_first부터. 소속 그룹 마커에 색 세팅
             self.context_menu_items_buf[n] = lbl;
@@ -1214,7 +1214,7 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 맨 끝에 붙인다(최상위 카드엔 안 뜸 — tabIsInGroup).
         // ungroup(그룹 통째 해제)과 달리 이 카드 하나만 최상위로 뺀다. 맨 끝 조건부라 앞 고정 인덱스를 안 흔든다(sel==ctx_menu_group_remove).
         if (tab_ops.tabIsInGroup(self, t.workspace)) {
-            self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
+            self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_remove); // ctx_menu_group_remove
             n += 1;
             // "여기서 최상위로 분리"(promote-in-place, §14.5·§14.7) — remove 바로 뒤. removeFromGroup(그룹 밖 이동+unpin)과
             // 달리 **제자리** top_level만 세팅(위치·pin 불변 — 고정 top카드 가능). **마커 카드(group_start!=null)에선 숨긴다**
@@ -1222,7 +1222,7 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
             // 죽은 항목이 된다(remove는 마커에서도 nested subgroup 빼기로 유효해 유지). 조건부라 마커면 promote 슬롯이 비어
             // 메뉴가 한 칸 짧아지고(ctx_menu_group_remove까지), sel이 ctx_menu_group_promote에 절대 도달 못 해 인덱스가 안 흔들린다.
             if (t.workspace.group_start == null) {
-                self.context_menu_items_buf[n] = "여기서 최상위로 분리"; // ctx_menu_group_promote
+                self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_promote); // ctx_menu_group_promote
                 n += 1;
             }
         }
@@ -1234,7 +1234,7 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         // 그룹 고정/해제(toggleGroupPin — GP3 §12.10). 마커 pinned = 그룹 고정 권위(§12.2)라 헤더에서 그룹째 토글한다.
         self.context_menu_items_buf[n] = if (t.group.pinned) "그룹 고정 해제" else "그룹 고정"; // ctx_group_menu_pin
         n += 1;
-        self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_group_menu_ungroup
+        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_ungroup); // ctx_group_menu_ungroup
         n += 1;
         for (tab_group_color_labels) |lbl| { // 그룹 색 프리셋 — ctx_group_menu_color_first부터(카드 메뉴와 같은 라벨)
             self.context_menu_items_buf[n] = lbl;
@@ -1263,8 +1263,8 @@ pub fn buildViewOptionsMenuItems(self: *AppSession) []const []const u8 {
 /// 터미널 본문 우클릭 메뉴 항목(input.right-click=menu) — 복사/붙여넣기. rename·view_options와 같은
 /// context_menu_items_buf·itemAt/draws/accept 경로를 공유하고 분기는 terminal_context_menu 플래그로 한다(F2-5).
 pub fn buildTerminalContextMenuItems(self: *AppSession) []const []const u8 {
-    self.context_menu_items_buf[0] = "복사";
-    self.context_menu_items_buf[1] = "붙여넣기";
+    self.context_menu_items_buf[0] = maru.i18n.t(.ctx_copy);
+    self.context_menu_items_buf[1] = maru.i18n.t(.ctx_paste);
     self.context_menu_items_len = 2;
     return self.context_menu_items_buf[0..2];
 }

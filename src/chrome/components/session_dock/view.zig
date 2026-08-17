@@ -535,23 +535,23 @@ const Writer = struct {
         const detail = find(snapshot, build.NodeIds.expandedDetail(index)) orelse return error.MissingRect;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_heading_y, switch (expanded_props.state) {
-            .loading => i18n.t(.sd_detail_loading),
-            .ready => i18n.t(.sd_detail_ready),
+            .loading => i18n.t(.common_session_analyzing),
+            .ready => i18n.t(.common_recent_conversation),
             .stale => i18n.t(.sd_detail_stale),
-            .unavailable => i18n.t(.sd_detail_unavailable),
+            .unavailable => i18n.t(.common_session_unavailable),
         }, .surface_fg, .body, false, 0);
         switch (expanded_props.state) {
             .ready => {
                 if (expanded_props.action_record_count > 0) {
                     var count: [80]u8 = undefined;
-                    const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{expanded_props.action_record_count}) catch "도구/권한 관련 기록";
+                    const label = i18n.format(&count, i18n.t(.common_action_records), &.{.{ .d = expanded_props.action_record_count }});
                     try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_record_y, label, .muted_fg, .metadata, false, 0);
                 }
                 for (expanded_props.turns, 0..) |turn, turn_index| {
                     const turn_y = metrics.detail_turn_y + @as(u32, @intCast(turn_index)) * metrics.detail_turn_step;
                     try self.textAtY(detail, metrics.detail_inset_x, turn_y, switch (turn.role) {
-                        .user => i18n.t(.sd_role_user),
-                        .assistant => i18n.t(.sd_role_assistant),
+                        .user => i18n.t(.common_role_user),
+                        .assistant => i18n.t(.common_role_assistant),
                     }, .muted_fg, .overline, false, 0);
                     const body_y = turn_y + typography.lineHeightPx(.overline, effectiveScale(self.props.scale_milli)) + spacing.px(.xxs, effectiveScale(self.props.scale_milli));
                     try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false, 0);
@@ -564,7 +564,7 @@ const Writer = struct {
         try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, i18n.t(.sd_resume));
         try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, i18n.t(.sd_reveal));
         if (expanded_props.focus_live_enabled)
-            try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, "열린 세션으로 이동");
+            try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, i18n.t(.common_focus_live));
     }
 
     /// button 텍스트는 하나의 semantic content 묶음이지, 셀 추정값이 우연히 측정 label 앞에 오는 아이콘
@@ -1309,11 +1309,11 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
 
     // 목록에 속한 run만 본다. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리다.
     const list_texts = [_][]const u8{
-        "expanded-card-title",    "expanded-summary",  "expanded-meta",
-        i18n.t(.sd_detail_ready),
+        "expanded-card-title",               "expanded-summary",  "expanded-meta",
+        i18n.t(.common_recent_conversation),
         "61건",
-        "detail-turn-text",       i18n.t(.sd_resume),  i18n.t(.sd_reveal),
-        "neighbour-card-title",   "neighbour-summary", "neighbour-meta",
+        "detail-turn-text",                  i18n.t(.sd_resume),  i18n.t(.sd_reveal),
+        "neighbour-card-title",              "neighbour-summary", "neighbour-meta",
     };
     var matched: usize = 0;
     for (list_texts) |needle| {
@@ -1327,7 +1327,7 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
     // 두 프레임 모두에 있어야 이 비교가 결함을 잡는다.
     try std.testing.expect(matched >= 3);
     var matched_detail = false;
-    inline for (.{ i18n.t(.sd_detail_ready), "61건", "detail-turn-text" }) |needle| {
+    inline for (.{ i18n.t(.common_recent_conversation), "61건", "detail-turn-text" }) |needle| {
         if (originYFor(rested.ops, needle) != null and originYFor(scrolled.ops, needle) != null) matched_detail = true;
     }
     try std.testing.expect(matched_detail);

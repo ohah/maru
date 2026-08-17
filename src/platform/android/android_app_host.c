@@ -171,7 +171,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
     jobject paint = (*env)->NewObject(env, pCls,
         (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1 /* ANTI_ALIAS_FLAG */);
     (*env)->CallVoidMethod(env, paint,
-        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)MARU_ATLAS_TEXT_PX);
+        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)maru_mobile_atlas_text_px());
     (*env)->CallVoidMethod(env, paint,
         (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
     // **번들한 폰트를 쓴다.** maru 가 이미 `assets/fonts/` 에 OFL 폰트를 동봉하고 있고,
@@ -1469,7 +1469,7 @@ static int bakerOpen(struct android_app *app, GlyphBaker *b, uint32_t CW, uint32
     b->paint = (*env)->NewObject(env, pCls,
         (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1);
     (*env)->CallVoidMethod(env, b->paint,
-        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)MARU_ATLAS_TEXT_PX);
+        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)maru_mobile_atlas_text_px());
     (*env)->CallVoidMethod(env, b->paint,
         (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
 

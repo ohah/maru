@@ -47,7 +47,8 @@ pub const inventory = [_]Proof{
     // 값 읽기·쓰기(valueOf·setValue)가 `Config` sub-struct 의 `schema` 메타를 comptime 에 훑는다.
     // 손으로 적은 키 표가 없어야 화면과 파일이 갈리지 않는다는 계약(docs/mobile-config.md §6)의
     // 구현이고, Client receiver 나 제품 vtable 과는 무관하다.
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "6edaa4f2762f8e283a11b869328e0f8b62b12d4214ddd1ae7d4073885f3fcda8" },
+    // `font.size`(M10d)가 붙어 바뀐다 — 모바일 config 에 `FontConfig` 가 생겼다. count 는 9 그대로다.
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9, .digest_hex = "a036be4220efe60b4264d4c66dfb91b0cb8e86a3e866f8a11831ba9dff6edc95" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "e276e8e954a47819f79ae54a0937d9bb76134deda6876f143baf9da9f0a363a1" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —

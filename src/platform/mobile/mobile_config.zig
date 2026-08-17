@@ -26,6 +26,21 @@ pub const ScrollbackConfig = struct {
     };
 };
 
+/// 글자 크기. **모바일에서는 이 값이 곧 줄 높이(논리 px)** 다 — 데스크톱은 pt 를 받아 폰트
+/// 메트릭으로 셀을 정하지만, 모바일은 아틀라스 셀 기하가 고정이라 브리지가 줄 높이를 직접
+/// 정한다(계약 §4 "글자 상자가 곧 칸이다"). 기본값 22 는 지금 화면의 줄 높이 그대로다.
+///
+/// **범위는 폰에 맞춘다.** 데스크톱은 [6,72] 를 허용하지만 폰에서 6px 는 못 읽고 72px 는 한
+/// 화면에 열 줄이 안 들어간다 — 기기가 다르면 기본값도 범위도 다르다는 계약(§4.5)이 여기도
+/// 적용된다. 굽는 크기가 이 값을 따라가므로(M10d-2) 너무 키우면 아틀라스가 커진다.
+pub const FontConfig = struct {
+    size: u32 = 22,
+
+    pub const schema = .{
+        .size = theme.Meta{ .doc = .cfg_font_size, .range = .{ 12, 40 }, .widget = .number },
+    };
+};
+
 pub const Config = struct {
     /// 빌린다 — 색 세트는 데스크톱과 뜻이 같고, `theme.preset` 이 이 타입을 통째로 돌려준다.
     ///
@@ -41,6 +56,7 @@ pub const Config = struct {
     },
     /// 빌린다 — 커서 모양·색은 뜻이 같다.
     cursor: theme.CursorConfig = .{},
+    font: FontConfig = .{},
     scrollback: ScrollbackConfig = .{},
 };
 
@@ -162,6 +178,7 @@ fn dashed(comptime name: []const u8) []const u8 {
 fn sectionOf(comptime ns: []const u8) []const u8 {
     if (std.mem.eql(u8, ns, "theme")) return "모양";
     if (std.mem.eql(u8, ns, "cursor")) return "커서";
+    if (std.mem.eql(u8, ns, "font")) return "모양";
     if (std.mem.eql(u8, ns, "scrollback")) return "터미널";
     return "기타";
 }

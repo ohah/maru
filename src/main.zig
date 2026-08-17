@@ -846,8 +846,10 @@ fn runWin32ClipboardSmoke(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
-    expect_foreign: ?[]const u8,
+    arg: ?[]const u8,
 ) !void {
+    const paste_encode_mode = arg != null and std.mem.eql(u8, arg.?, "--paste-encode");
+    const expect_foreign: ?[]const u8 = if (paste_encode_mode) null else arg;
     if (builtin.os.tag != .windows) {
         try stderr.writeAll("maru win32-clipboard-smoke: Windows 전용입니다\n");
         try stderr.flush();
@@ -885,6 +887,44 @@ fn runWin32ClipboardSmoke(
         try stdout.flush();
         try stderr.flush();
         return error.ClipboardRoundtripFailed;
+    }
+
+    // **지금 클립보드에 있는 것을 붙여넣기 규칙에 태워 본다.** 붙여넣기 화음은 합성 메시지로 누를 수
+    // 없어(모디파이어가 안 실린다) 창 쪽 경로가 미측정으로 남는데, 그 경로에서 정작 중요한 것은 "raw
+    // 바이트가 아니라 `encodePasteWith` 를 거친 바이트가 셸에 간다"는 것이다. 그 규칙만 떼어 잰다.
+    if (paste_encode_mode) {
+        const text = (win32_clipboard.read(allocator, null) catch |err| {
+            try stderr.print("paste-encode: 읽기 실패({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_clipboard.last_error });
+            try stderr.flush();
+            return error.ClipboardRoundtripFailed;
+        }) orelse {
+            try stdout.writeAll("paste_encode: 클립보드가 비었다\n");
+            try stdout.flush();
+            return error.ClipboardRoundtripFailed;
+        };
+        defer allocator.free(text);
+
+        for ([_]bool{ false, true }) |bracketed| {
+            const encoded = try maru.terminal.encodePasteWith(bracketed, allocator, text);
+            defer allocator.free(encoded);
+            // ESC 가 본문에 살아 있으면 `\x1b[201~` 로 래핑을 빠져나올 수 있다 — 그것이 이 규칙의 요점이다.
+            const has_esc = std.mem.indexOfScalar(u8, encoded, 0x1B) != null;
+            const body = if (bracketed and encoded.len >= 12) encoded[6 .. encoded.len - 6] else encoded;
+            const body_has_esc = std.mem.indexOfScalar(u8, body, 0x1B) != null;
+            const wrapped = std.mem.startsWith(u8, encoded, "\x1b[200~") and std.mem.endsWith(u8, encoded, "\x1b[201~");
+            try stdout.print(
+                "paste_encode bracketed={} raw_bytes={d} encoded_bytes={d} wrapped={} body_has_esc={} any_esc={}\n",
+                .{ bracketed, text.len, encoded.len, wrapped, body_has_esc, has_esc },
+            );
+        }
+        // 보호 게이트는 코어 상태(bracketed)와 설정만 보는 순수 판정이라 창 없이도 잰다.
+        for ([_]bool{ false, true }) |bracketed| {
+            const needs = maru.terminal.pasteNeedsConfirmationWith(bracketed, text, true, true);
+            try stdout.print("paste_needs_confirm bracketed={} needs={}\n", .{ bracketed, needs });
+        }
+        try stdout.flush();
+        try stderr.flush();
+        return;
     }
 
     // 한글·이모지·CRLF·CR단독을 한 번에 태운다 — `CF_TEXT`(ANSI 949)로 샜다면 한글에서 깨지고,
@@ -1088,6 +1128,12 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var preedit_max_bytes: usize = 0;
     var pastes: usize = 0;
     var paste_bytes: usize = 0;
+    var pastes_bracketed: usize = 0;
+    var pastes_blocked: usize = 0;
+    // 붙여넣기 보호 설정. 이 스모크는 config 파일을 읽지 않으므로 **스키마 기본값을 그대로** 쓴다
+    // (`config/theme.zig`: 둘 다 `true`). W7.5 에서 사용자 config 를 배선하면 거기서 온다.
+    const paste_protection = true;
+    const bracketed_paste_is_safe = true;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
     var clipboard_errors: usize = 0;
@@ -1124,13 +1170,44 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                     if (win32_clipboard.read(allocator, window.hwnd)) |maybe| {
                         if (maybe) |text| {
                             defer allocator.free(text);
-                            // 셸에 실제로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
-                            // 올라가면 화면에 아무것도 안 붙었는데 성공으로 읽힌다.
-                            if (maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = text })) |_| {
-                                pastes += 1;
-                                paste_bytes += text.len;
+                            // **raw 바이트를 셸에 보내지 않는다.** 중립 코어가 붙여넣기 규칙을 이미 갖고
+                            // 있다 — bracketed paste(DECSET 2004) 래핑, 개행 정규화, 그리고 **본문의
+                            // ESC·제어 바이트 제거**다. 그것을 건너뛰면 클립보드에 `\x1b[201~rm -rf ~` 가
+                            // 들어 있을 때 래핑을 빠져나와 명령이 실행된다. macOS `term.submitPaste` 와
+                            // 같은 순서로 부른다.
+                            var needs_confirm = false;
+                            var bracketed = false;
+                            if (app_window.active()) |active| {
+                                // 판정과 bracketed 읽기만 락 안에서 — 인코딩(할당·복사)은 밖에서 한다.
+                                active.lockCore(io);
+                                needs_confirm = active.core.pasteNeedsConfirmation(
+                                    text,
+                                    paste_protection,
+                                    bracketed_paste_is_safe,
+                                );
+                                bracketed = active.core.bracketedPasteEnabled();
+                                active.unlockCore(io);
+                            }
+                            if (needs_confirm) {
+                                // **확인 모달이 없으면 붙여넣지 않는다.** macOS 는 여기서 확인창을 띄우는데
+                                // Windows 엔 chrome 이 아직 없다(W8). 모달이 없다고 보호를 건너뛰면 위험한
+                                // 붙여넣기가 **조용히 실행된다** — 거절하고 세는 편이 맞다.
+                                try stderr.writeAll("  붙여넣기 보류: 위험한 내용이다(확인 UI 는 W8). 붙이지 않았다\n");
+                                pastes_blocked += 1;
+                            } else if (maru.terminal.encodePasteWith(bracketed, allocator, text)) |encoded| {
+                                defer allocator.free(encoded);
+                                // 셸에 실제로 들어간 것만 붙여넣기로 센다 — 전송이 실패했는데 `pastes` 가
+                                // 올라가면 화면에 아무것도 안 붙었는데 성공으로 읽힌다.
+                                if (maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = encoded })) |_| {
+                                    pastes += 1;
+                                    paste_bytes += encoded.len;
+                                    if (bracketed) pastes_bracketed += 1;
+                                } else |err| {
+                                    try stderr.print("  경고: 붙여넣기 전송 실패({s})\n", .{@errorName(err)});
+                                    clipboard_errors += 1;
+                                }
                             } else |err| {
-                                try stderr.print("  경고: 붙여넣기 전송 실패({s})\n", .{@errorName(err)});
+                                try stderr.print("  경고: 붙여넣기 인코딩 실패({s})\n", .{@errorName(err)});
                                 clipboard_errors += 1;
                             }
                         }
@@ -1265,7 +1342,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes });
-    try stdout.print("pastes={d} paste_bytes={d}\n", .{ pastes, paste_bytes });
+    try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d}\n", .{ pastes, paste_bytes, pastes_bracketed, pastes_blocked });
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });

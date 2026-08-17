@@ -562,6 +562,17 @@ Windows가 필요하면 다른 형식으로 자동 합성해 준다.
 하면 블록된다). 그 사이 코어 락을 잡고 있으면 PTY 리더가 막힌다. pending 바이트를 락 안에서 복사해 두고,
 OS 호출은 락 밖에서 한다.
 
+**raw 클립보드 바이트를 셸에 보내지 않는다 — `encodePasteWith`를 반드시 거친다.** 중립 코어가 붙여넣기
+규칙을 이미 갖고 있다: bracketed paste(DECSET 2004) 래핑, 개행 정규화, 그리고 **본문의 ESC·제어 바이트를
+공백으로 치환**하는 것이다. 마지막 것이 보안 규칙이다 — 클립보드에 `\x1b[201~`이 들어 있으면 래핑 괄호를
+일찍 닫고 뒤따르는 `\r` 종료 바이트가 "타이핑"으로 **실행된다**. macOS `term.submitPaste`와 같은 순서로
+부른다: 판정과 `bracketedPasteEnabled()`만 락 안에서 읽고, 인코딩(할당·복사)은 락 밖에서 한다.
+
+**보호 게이트를 통과하지 못하면 붙여넣지 않는다.** `pasteNeedsConfirmation`이 참이면 macOS는 확인 모달을
+띄우는데 Windows엔 chrome이 아직 없다(W8). **모달이 없다고 보호를 건너뛰면 위험한 붙여넣기가 조용히
+실행되므로**, 거절하고 `pastes_blocked`로 센다. 지금 스모크는 config 파일을 읽지 않아 스키마 기본값
+(`paste_protection=true`, `bracketed_paste_is_safe=true`)을 쓴다 — 사용자 config 배선은 W7.5다.
+
 **붙여넣기 화음은 두 개를 받는다** — `Ctrl+Shift+V`(Windows Terminal 관례)와 `Shift+Insert`(고전 관례).
 평범한 `Ctrl+V`와 `Ctrl+C`는 **가로채지 않는다**: `Ctrl+C`는 SIGINT여야 하고, `Ctrl+V`는 셸이 쓴다(§2h의
 `shellTakesControl`이 판정하는 것과 같은 이유).
@@ -576,6 +587,11 @@ OS 호출은 락 밖에서 한다.
 - **NUL 종단 규칙.** 우리가 쓰고 우리가 읽으면 `GlobalAlloc`이 요청한 크기를 정확히 돌려줘서 `GlobalSize`로
   길이를 재도 답이 같다 — 대조군으로 확인했다(바꿔도 5/5 통과). 그 규칙은 다른 앱이 패딩된 할당에 넣었을
   때만 의미가 있어, 외부 작성자 모드(`win32-clipboard-smoke <기대값>`)가 그 자리를 대신 지킨다.
+- **붙여넣기 규칙은 화음 없이 잰다.** `win32-clipboard-smoke --paste-encode`가 지금 클립보드에 있는 것을
+  `encodePasteWith`에 태워 본다. 악의적 클립보드(`safe\x1b[201~rm -rf ~\x1b[200~`, 24바이트)를 넣으면
+  `wrapped=true`·`body_has_esc=false`로 나온다 — ESC가 공백으로 치환돼 인젝션이 죽었고, 바이트 수가
+  24로 그대로인 것이 **제거가 아니라 치환**임을 보여 준다. 보호 게이트도 같이 잰다: 평범한 여러 줄은
+  bracketed면 `needs=false`(래핑이 안전하게 만든다)인데, 인젝션이 들어 있으면 bracketed여도 `needs=true`다.
 - **붙여넣기 화음의 실기 경로.** 합성 메시지로는 모디파이어를 실을 수 없다 — `PostMessageW`가 스레드 키
   상태 테이블을 갱신하지 않아 `GetKeyState(VK_SHIFT)`가 눌림을 못 본다(실측: `Shift+Insert`를 보내면
   평범한 Insert로 `\x1b[2~` 4바이트가 셸에 간다). 화음 판정은 순수 함수(`isPasteChord`)로 테스트하고,

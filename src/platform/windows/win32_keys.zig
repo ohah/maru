@@ -175,6 +175,35 @@ pub fn translateModifiers(
     return .{ .option = alt, .shift = shift };
 }
 
+// ── 클립보드 조합 ────────────────────────────────────────────────────────────────────────────
+
+/// 이 키가 **붙여넣기**인가. `translateModifiers`를 지난 중립 `KeyEvent`를 받는다.
+///
+/// **왜 바인딩 표가 아니라 여기서 판정하는가**: 클립보드는 OS 소유라 중립 레이어에 `Action`이 없다
+/// (`config/action.zig` 경계: "Zig는 selection, 플랫폼은 clipboard"). macOS도 Swift 쪽에서 같은 자리를
+/// 갖는다. 실제로 `V`·`C`·`Insert`를 쓰는 바인딩이 표에 **하나도 없다**(실측) — 플랫폼이 처리한다는 뜻이다.
+///
+/// 둘을 받는다:
+/// - `Ctrl+Shift+V` — Windows Terminal·VS Code 관례. `v`는 밀려온 글자가 아니므로 `command`+`shift`로 온다.
+/// - `Shift+Insert` — X11 시절부터의 터미널 관례. Windows 콘솔도 받아 준다.
+///
+/// 순수라서 **모든 타깃에서** 테스트가 돈다.
+pub fn isPasteChord(ev: input.KeyEvent) bool {
+    if (ev.key == .insert) return ev.modifiers.shift and !ev.modifiers.control and !ev.modifiers.command;
+    if (ev.key != .char) return false;
+    if (foldLower(ev.key.char) != 'v') return false;
+    // `Ctrl+Shift+V`는 `translateModifiers`를 지나 `command`+`shift`가 된다.
+    return ev.modifiers.command and ev.modifiers.shift;
+}
+
+/// 이 키가 **복사**인가. 지금은 선택 영역이 없어(W7.4d) 호출자가 쓸 일이 없지만, 판정을 붙여넣기와 같은
+/// 자리에 둬야 둘이 갈리지 않는다 — 한쪽만 고치면 `Ctrl+Shift+C`가 복사도 아니고 셸 입력도 아닌 상태가 된다.
+pub fn isCopyChord(ev: input.KeyEvent) bool {
+    if (ev.key != .char) return false;
+    if (foldLower(ev.key.char) != 'c') return false;
+    return ev.modifiers.command and ev.modifiers.shift;
+}
+
 // ── IME 조합 문자열 변환 ─────────────────────────────────────────────────────────────────────
 
 /// IME 조합 문자열(UTF-16LE)을 UTF-8로 옮긴다. 담을 수 있는 만큼만 쓰고 **쓴 바이트 수**를 돌려준다.
@@ -220,6 +249,41 @@ pub fn compositionTextFromUtf16(units: []const u16, out: []u8) usize {
 }
 
 const testing = std.testing;
+
+test "isPasteChord: Ctrl+Shift+V 와 Shift+Insert 를 받고 셸 키는 안 가로챈다" {
+    // `Ctrl+Shift+V` → `translateModifiers` 를 지나면 command+shift 다('v' 는 밀려온 글자가 아니다).
+    const v = input.KeyEvent{ .key = .{ .char = 'V' }, .modifiers = translateModifiers(true, true, false, .{ .char = 'V' }) };
+    try testing.expect(isPasteChord(v));
+
+    // `Shift+Insert` — X11 시절부터의 터미널 관례.
+    try testing.expect(isPasteChord(.{ .key = .insert, .modifiers = .{ .shift = true } }));
+
+    // **plain `Ctrl+V` 는 붙여넣기가 아니다.** 'v' 는 C0 를 갖는 문자라 셸이 가져간다(literal-next).
+    // 여기서 가로채면 셸이 `Ctrl+V` 를 못 받는다 — 그 회귀를 이 단언이 막는다.
+    const ctrl_v = input.KeyEvent{ .key = .{ .char = 'v' }, .modifiers = translateModifiers(true, false, false, .{ .char = 'v' }) };
+    try testing.expect(!isPasteChord(ctrl_v));
+    try testing.expect(ctrl_v.modifiers.control);
+
+    // 맨 Insert·맨 V 도 아니다.
+    try testing.expect(!isPasteChord(.{ .key = .insert, .modifiers = .{} }));
+    try testing.expect(!isPasteChord(.{ .key = .{ .char = 'v' }, .modifiers = .{} }));
+    // 다른 글자의 Ctrl+Shift 도 아니다.
+    try testing.expect(!isPasteChord(.{ .key = .{ .char = 'p' }, .modifiers = .{ .command = true, .shift = true } }));
+}
+
+test "isCopyChord: 붙여넣기와 같은 자리에서 판정한다" {
+    const c = input.KeyEvent{ .key = .{ .char = 'C' }, .modifiers = translateModifiers(true, true, false, .{ .char = 'C' }) };
+    try testing.expect(isCopyChord(c));
+
+    // **plain `Ctrl+C` 는 SIGINT 다.** 복사로 가로채면 실행 중단을 잃는다 — 가장 중요한 셸 키다.
+    const ctrl_c = input.KeyEvent{ .key = .{ .char = 'c' }, .modifiers = translateModifiers(true, false, false, .{ .char = 'c' }) };
+    try testing.expect(!isCopyChord(ctrl_c));
+    try testing.expect(ctrl_c.modifiers.control);
+
+    // 복사와 붙여넣기가 서로를 삼키지 않는다.
+    try testing.expect(!isCopyChord(.{ .key = .{ .char = 'v' }, .modifiers = .{ .command = true, .shift = true } }));
+    try testing.expect(!isPasteChord(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true, .shift = true } }));
+}
 
 test "compositionTextFromUtf16: 한글 조합이 UTF-8 3바이트로 온다" {
     var out: [64]u8 = undefined;

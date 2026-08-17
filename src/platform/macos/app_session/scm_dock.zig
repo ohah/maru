@@ -96,11 +96,6 @@ fn commitDisplayCaret(self: *const AppSession) usize {
     return @min(field.caret, field.text.items.len) + field.preedit.items.len;
 }
 
-/// 커밋 상자가 보여 줄 **시각 행** 수. 내용을 따라 자라고 상한에서 멈춘다(§12.2).
-fn commitRows(self: *AppSession) u32 {
-    return commitRowsOf(self, commitDisplayText(self));
-}
-
 /// 이미 얻어 둔 표시 텍스트로 세는 판. **`propsFor`가 이것을 쓴다** — 거기서 `commitRows`를 부르면
 /// 합성 버퍼를 다시 채우게 되고, 그 프레임의 props가 이미 그 버퍼를 가리키고 있다(같은 내용이라
 /// 지금은 무해하지만, 슬라이스를 든 채 그 버퍼를 다시 쓰는 모양 자체가 함정이다).
@@ -120,9 +115,12 @@ fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     // **고정 chrome을 전부 뺀다.** 하나라도 빠뜨리면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가
-    // 어긋난다(탭 줄에서 실제로 그랬다). 커밋 상자는 내용을 따라 자라므로 그 높이도 여기서 센다.
-    const commit_h = m.commitBoxHeight(commitRows(self)) + m.commit_button_h + m.commit_pad_y;
-    const fixed = m.tab_h + m.summary_h + commit_h + if (has_branch) m.branch_h else 0;
+    // 어긋난다(탭 줄에서 실제로 그랬다).
+    //
+    // **커밋 줄은 더 이상 고정이 아니다**(②b — 저장소마다 하나씩이라 목록 항목이다). 그것까지 빼면
+    // 호스트가 세는 창이 `build`가 세우는 창보다 작아져, 목록 아래쪽이 항목이 있는데도 안 그려지고
+    // 스크롤은 끝을 지나 빈 자리로 간다(적대적 4회차).
+    const fixed = m.tab_h + m.summary_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }
 
@@ -339,11 +337,16 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     else
         model.head.branch orelse "";
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+    const viewport_h = listViewportHeightPx(self, branch.len > 0);
+    if (self.scm_commit_reveal) {
+        self.scm_commit_reveal = false;
+        revealCommitBox(self, items[0..n], m, viewport_h);
+    }
     const list_items = ScrollItems{ .items = items[0..n], .metrics = m };
     const scroll = chrome.ui.scroll_area.project(
         list_items,
         ScrollItems.heightPx,
-        list_items.extent(listViewportHeightPx(self, branch.len > 0)),
+        list_items.extent(viewport_h),
         self.scm_scroll.offset_y_px,
     );
     return .{
@@ -358,6 +361,42 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .file_count = countFiles(model.rows),
         .has_staged = model.has_staged,
     };
+}
+
+/// 편집 중인 상자를 **목록 창 안으로 끌어온다**.
+///
+/// 상자는 이제 목록 줄이라 창 밖으로 스크롤될 수 있다(②b). 그 상태에서 키를 치면 글자는 들어가는데
+/// **화면에는 아무 일도 안 일어난다** — 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다(상자가
+/// 목록에서 사라졌을 때와 같은 종류의 함정이고, 그쪽은 포커스를 뗐다). 여기서는 뗄 이유가 없으므로
+/// 창을 옮긴다(편집기가 caret을 따라가는 것과 같은 규율).
+fn revealCommitBox(self: *AppSession, items: []const component.types.Item, m: component.types.DockMetrics, viewport_h: u32) void {
+    if (viewport_h == 0) return;
+    const focus = self.scm_commit_focus_repo orelse return;
+    const repos = repoEntries(self);
+    var target: ?u32 = null;
+    for (repos.entries, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.path, focus)) target = @intCast(index);
+    }
+    const repo_index = target orelse return;
+    var y: u32 = 0;
+    for (items) |item| {
+        const height = m.itemHeight(item);
+        const is_target = switch (item) {
+            .commit_box => |box| box.repo_index == repo_index,
+            else => false,
+        };
+        if (is_target) {
+            const bottom = y + height;
+            if (y < self.scm_scroll.offset_y_px) {
+                self.scm_scroll.offset_y_px = y;
+            } else if (bottom > self.scm_scroll.offset_y_px + viewport_h) {
+                // 상자가 창보다 크면 **위쪽을 보인다** — caret이 들어가는 첫 줄이 거기다.
+                self.scm_scroll.offset_y_px = if (height >= viewport_h) y else bottom - viewport_h;
+            }
+            return;
+        }
+        y += height;
+    }
 }
 
 /// 편집기의 선택을 DTO 값으로 옮긴다. 값 집합이 갈리면 여기서 컴파일로 걸린다.
@@ -1339,12 +1378,14 @@ pub fn handleCommitKey(self: *AppSession, ev: chrome.input.InputEvent) bool {
 /// 글자가 바뀐 뒤 — 스크롤을 caret에 맞추고 다시 그린다. **상자 높이가 함께 바뀐다**(랩 결과가 달라지므로).
 fn afterEdit(self: *AppSession) void {
     scrollCommitToCaret(self);
+    self.scm_commit_reveal = true;
     self.metal_dirty = true;
 }
 
 /// caret만 움직인 뒤. 글자는 그대로라 상자 높이는 안 바뀌지만 스크롤은 따라가야 한다.
 fn afterMove(self: *AppSession) void {
     scrollCommitToCaret(self);
+    self.scm_commit_reveal = true;
     self.metal_dirty = true;
 }
 
@@ -1903,6 +1944,11 @@ pub fn toggleRepoCollapsed(self: *AppSession, path: []const u8) void {
         self.allocator.free(copy);
         return;
     };
+    // **접으면 그 상자는 화면에 없다** — 포커스를 두면 키가 보이지 않는 상자로 계속 들어간다(목록에서
+    // 빠졌을 때와 같은 함정). 쓰던 글은 초안으로 남으므로 다시 펴면 그대로 있다.
+    if (self.scm_commit_focus_repo) |focus| {
+        if (std.mem.eql(u8, focus, path)) blurCommit(self);
+    }
     self.metal_dirty = true;
 }
 

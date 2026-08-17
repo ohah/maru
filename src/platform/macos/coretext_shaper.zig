@@ -12,6 +12,9 @@ pub const draw_cell_bold_bit: u16 = 1 << 0;
 /// italic(SGR 3) cell — 셰이퍼가 italic face(font.family-italic 또는 주 family italic variant)로 그린다(F2-3).
 /// bold와 같이 켜지면 bold-italic face. native MaruDrawCellItalicBit와 동일 비트.
 pub const draw_cell_italic_bit: u16 = 1 << 1;
+/// 커서가 앉은 칸(`MaruDrawCellCursorBit`). 셰이퍼가 이 비트로 run 을 갈라 그 칸만 합자 없이 그린다 —
+/// 근거는 `cellIsAtCursor` 주석.
+pub const draw_cell_cursor_bit: u16 = 1 << 2;
 
 pub const NativeDrawCell = extern struct {
     row: u16,
@@ -132,7 +135,7 @@ pub const CoreTextDrawListShaper = struct {
         defer native_cells.deinit(allocator);
         try native_cells.ensureTotalCapacity(allocator, list.cells.len);
         for (list.cells) |cell| {
-            native_cells.appendAssumeCapacity(nativeDrawCellFromDrawCell(cell));
+            native_cells.appendAssumeCapacity(nativeDrawCellFromDrawCell(cell, list.cursor));
         }
 
         const record_capacity = try std.math.mul(usize, list.cells.len, 2);
@@ -191,12 +194,28 @@ pub const CoreTextDrawListShaper = struct {
     }
 };
 
-fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell) NativeDrawCell {
+/// **커서가 앉은 칸은 합자를 풀어 그린다.** 셰이퍼는 이 비트가 다르면 face 가 같아도 run 을 갈라
+/// 그 칸만 합자 없이 셰이핑한다(`MaruDrawCellCursorBit`). 편집 중 `===` 가 이어진 한 덩어리면 커서가
+/// 어느 글자에 있는지 알 수 없다 — Ghostty 도 같은 이유로 커서 위 합자를 푼다(사용자 요청 2026-08-17).
+///
+/// 커서가 **보이지 않으면**(hidden·blink off) 풀지 않는다. 안 그러면 깜빡임마다 합자가 붙었다 떨어져
+/// 글자가 흔들린다.
+fn cellIsAtCursor(cell: renderer.DrawCell, cursor: terminal.Cursor) bool {
+    if (!cursor.visible) return false;
+    if (cell.row != cursor.row) return false;
+    // wide 셀은 자기 폭만큼 열을 차지하므로 그 범위 안이면 커서 칸이다.
+    const span: u16 = if (cell.width == 0) 1 else cell.width;
+    return cursor.col >= cell.col and cursor.col < cell.col + span;
+}
+
+fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell, cursor: terminal.Cursor) NativeDrawCell {
     return .{
         .row = cell.row,
         .col = cell.col,
         .width = cell.width,
-        .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) | (if (cell.style.italic) draw_cell_italic_bit else 0),
+        .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) |
+            (if (cell.style.italic) draw_cell_italic_bit else 0) |
+            (if (cellIsAtCursor(cell, cursor)) draw_cell_cursor_bit else 0),
         .codepoint = cell.codepoint,
         .grapheme_offset = cell.grapheme_offset,
         .grapheme_count = cell.grapheme_count,
@@ -676,11 +695,35 @@ test "CoreText draw list native ABI sizes stay aligned" {
 test "nativeDrawCellFromDrawCell carries style.bold into the bold style flag" {
     // bold cell만 셰이퍼가 bold 폰트 face를 고르므로, DrawCell.style.bold → style_flags bit0
     // 매핑이 끊기면 활성 탭/ SGR bold가 조용히 regular로 그려진다. 그 회귀를 여기서 잡는다.
-    const bold = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{ .bold = true } });
+    const no_cursor: terminal.Cursor = .{ .row = 9, .col = 9, .visible = false };
+    const bold = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{ .bold = true } }, no_cursor);
     try std.testing.expectEqual(draw_cell_bold_bit, bold.style_flags & draw_cell_bold_bit);
 
-    const regular = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{} });
+    const regular = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{} }, no_cursor);
     try std.testing.expectEqual(@as(u16, 0), regular.style_flags & draw_cell_bold_bit);
+}
+
+// 커서 칸은 **합자를 풀어** 그려야 편집 중 어느 글자에 있는지 보인다(Ghostty 동등 — 사용자 요청
+// 2026-08-17). 셰이퍼는 그 판정을 `style_flags` 비트로만 받으므로, 이 매핑이 끊기면 커서 아래 합자가
+// 계속 붙어 있고 그것을 알아챌 방법이 없다. 세 경계를 함께 든다: 같은 칸 / wide 셀 범위 / 커서 숨김.
+test "nativeDrawCellFromDrawCell marks the cursor cell so its run drops ligatures" {
+    const cell: renderer.DrawCell = .{ .row = 3, .col = 5, .codepoint = '=' };
+    const at = nativeDrawCellFromDrawCell(cell, .{ .row = 3, .col = 5, .visible = true });
+    try std.testing.expectEqual(draw_cell_cursor_bit, at.style_flags & draw_cell_cursor_bit);
+
+    const other_col = nativeDrawCellFromDrawCell(cell, .{ .row = 3, .col = 6, .visible = true });
+    try std.testing.expectEqual(@as(u16, 0), other_col.style_flags & draw_cell_cursor_bit);
+    const other_row = nativeDrawCellFromDrawCell(cell, .{ .row = 4, .col = 5, .visible = true });
+    try std.testing.expectEqual(@as(u16, 0), other_row.style_flags & draw_cell_cursor_bit);
+
+    // wide 셀은 자기 폭만큼 열을 차지한다 — 커서가 둘째 열에 있어도 그 셀이 커서 칸이다.
+    const wide: renderer.DrawCell = .{ .row = 0, .col = 2, .width = 2, .codepoint = '한' };
+    const wide_second = nativeDrawCellFromDrawCell(wide, .{ .row = 0, .col = 3, .visible = true });
+    try std.testing.expectEqual(draw_cell_cursor_bit, wide_second.style_flags & draw_cell_cursor_bit);
+
+    // **커서가 안 보이면 풀지 않는다.** 깜빡임마다 합자가 붙었다 떨어지면 글자가 흔들린다.
+    const hidden = nativeDrawCellFromDrawCell(cell, .{ .row = 3, .col = 5, .visible = false });
+    try std.testing.expectEqual(@as(u16, 0), hidden.style_flags & draw_cell_cursor_bit);
 }
 
 test "CoreText draw list shaper preserves DrawList metadata and styles" {

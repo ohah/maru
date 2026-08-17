@@ -55265,7 +55265,7 @@ test "히스토리 탭: 커밋을 펼치면 그 커밋이 바꾼 파일이 아�
     // 아직 못 읽었으면 **그 사실**을 한 줄로 말한다(빈 자리는 "바꾼 것이 없다"로 읽힌다).
     {
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-        try std.testing.expectEqualStrings("읽는 중…", projection.items[1].notice);
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_loading), projection.items[1].notice);
     }
 
     session.scm_commit_files_oid = try allocator.dupe(u8, "abcdef1234567");
@@ -55308,7 +55308,7 @@ test "히스토리: 출력이 잘리면 그 사실을 적는다 (P4b 적대적 �
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
         var saw = false;
         for (projection.items) |item| switch (item) {
-            .notice => |text| if (std.mem.indexOf(u8, text, "잘렸습니다") != null) {
+            .notice => |text| if (std.mem.eql(u8, text, maru.i18n.t(.scm_list_truncated))) {
                 saw = true;
             },
             else => {},
@@ -55325,7 +55325,7 @@ test "히스토리: 출력이 잘리면 그 사실을 적는다 (P4b 적대적 �
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
         var saw_files = false;
         for (projection.items) |item| switch (item) {
-            .notice => |text| if (std.mem.indexOf(u8, text, "파일 목록이 잘렸습니다") != null) {
+            .notice => |text| if (std.mem.eql(u8, text, maru.i18n.t(.scm_commit_files_truncated))) {
                 saw_files = true;
             },
             else => {},
@@ -55473,19 +55473,19 @@ test "히스토리 탭: 커밋이 없는 것과 못 읽은 것을 구별한다 (
     // ① 아직 못 읽었다.
     {
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-        try std.testing.expectEqualStrings("읽는 중…", projection.items[0].notice);
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_loading), projection.items[0].notice);
     }
     // ② 읽었는데 커밋이 없다(첫 커밋 전 저장소).
     session.scm_log_repo = try allocator.dupe(u8, "/repo");
     {
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-        try std.testing.expectEqualStrings("커밋이 없습니다", projection.items[0].notice);
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_commits), projection.items[0].notice);
     }
     // ③ 읽기가 실패했다 — 위 둘과 **다른 사실**이다.
     session.scm_log_failed = true;
     {
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-        try std.testing.expectEqualStrings("커밋을 읽지 못했습니다", projection.items[0].notice);
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_log_read_failed), projection.items[0].notice);
     }
 }
 

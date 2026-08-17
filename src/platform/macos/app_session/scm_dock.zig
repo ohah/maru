@@ -545,9 +545,9 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
             if (n < items.len) {
                 items[n] = .{ .notice = if (self.scm_commit_files_failed)
-                    "이 커밋의 파일을 읽지 못했습니다"
+                    maru.i18n.t(.scm_commit_files_failed)
                 else
-                    "읽는 중…" };
+                    maru.i18n.t(.scm_loading) };
                 n += 1;
             }
             continue;
@@ -571,18 +571,18 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             n += 1;
         }
         if (self.scm_commit_files_truncated and n < items.len) {
-            items[n] = .{ .notice = "이 커밋의 파일 목록이 잘렸습니다" };
+            items[n] = .{ .notice = maru.i18n.t(.scm_commit_files_truncated) };
             n += 1;
         }
         // 읽었는데 파일이 없다 — 빈 커밋(`--allow-empty`)이 실제로 있다.
         if (!any_file and n < items.len) {
-            items[n] = .{ .notice = "이 커밋이 바꾼 파일이 없습니다" };
+            items[n] = .{ .notice = maru.i18n.t(.scm_commit_no_files) };
             n += 1;
         }
     }
 
     if (truncated_rows == 1 and n < items.len) {
-        items[n] = .{ .notice = "출력이 너무 커서 목록이 잘렸습니다" };
+        items[n] = .{ .notice = maru.i18n.t(.scm_list_truncated) };
         n += 1;
     }
     if (more_rows == 1 and n < items.len) {

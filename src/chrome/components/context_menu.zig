@@ -16,6 +16,9 @@ pub const layer = draw.Layer.modal;
 
 /// 순수 UI 상태 — open + anchor(우클릭 px) + selected(강조 항목) + item_count(키 nav clamp용, show가 받음).
 /// 항목 라벨·실행 대상은 platform이 든다(target은 라이브 포인터라 chrome이 안 가짐). heap 없음(deinit 불필요).
+/// 켜짐 표시 글리프. BMP 기호라 폰트가 갖고 있다(이모지 fallback 위험 없음) — 사이드바 닫기 `✕` 와 같은 결.
+const check_glyph = "\u{2713}";
+
 pub const State = struct {
     open: bool = false,
     anchor_x: i32 = 0, // 우클릭 px(메뉴 좌상단 기준 — menuRect가 화면 안으로 clamp)
@@ -33,6 +36,22 @@ pub const State = struct {
     /// 머리글과 같은 이유로 별도 필드다: 컴포넌트는 행이 무엇인지 모르고, 고를 수 없는 줄에 Enter가
     /// 닿으면 **없는 동작**을 부른다. 0이면 기존 메뉴와 완전히 같다.
     footer_count: usize = 0,
+    /// **켜짐 표시가 붙는 줄**의 비트마스크(bit i = items[i]). 컴포넌트가 그 줄 앞에 `✓` 를 그리고,
+    /// 꺼진 줄에는 **같은 폭의 공백**을 그려 라벨 열을 맞춘다.
+    ///
+    /// 왜 별도 필드인가: 예전에는 platform 이 `"✓ 브랜치 표시"` / `"  브랜치 표시"` 두 문자열을 만들어
+    /// 넘겼다. 그러면 **기호와 정렬 공백이 번역 단위에 섞여**(i18n 계약 §6.2) 언어가 바뀔 때 기호까지
+    /// 번역 테이블에 들어가고, 켜짐 여부가 문자열 비교로만 드러난다. 상태는 상태로 두고 그리기는
+    /// 컴포넌트가 한다 — `header_count`·`footer_count` 를 별도 필드로 둔 것과 같은 이유다.
+    ///
+    /// 0 이면 기존 메뉴와 **완전히 같다**(우클릭·브랜치 메뉴는 이 값을 안 쓴다).
+    checked_mask: u64 = 0,
+
+    /// `items[i]` 에 켜짐 표시가 붙는가.
+    pub fn isChecked(self: *const State, i: usize) bool {
+        if (i >= 64) return false; // 마스크 밖 — 메뉴가 64 줄을 넘을 일은 없다(넘으면 표시만 빠진다)
+        return (self.checked_mask & (@as(u64, 1) << @intCast(i))) != 0;
+    }
 
     /// 우클릭 위치(x,y px)와 항목 수로 연다 — 선택은 첫 항목. platform이 항목/대상을 세팅한 뒤 부른다.
     pub fn show(self: *State, x: i32, y: i32, item_count: usize) void {
@@ -56,6 +75,10 @@ pub const State = struct {
         // 지금은 호출부가 그런 메뉴를 안 열지만, 상태 자체가 유효하지 않으면 다음 호출부가 그 위에서 인덱싱한다.
         self.selected = @min(self.header_count, item_count -| 1);
         self.item_count = item_count;
+        // **켜짐 표시는 열 때마다 비운다.** 이 상태는 메뉴마다 다른데 컴포넌트는 어느 메뉴가 열리는지
+        // 모른다 — 안 비우면 보기 옵션에서 켜 둔 표시가 **다음에 여는 우클릭 메뉴에 그대로 남는다**.
+        // 필요한 호출부가 `show` 뒤에 다시 세운다(그 순서가 규약이다).
+        self.checked_mask = 0;
         self.open = true;
     }
 
@@ -197,8 +220,16 @@ pub fn view(
             // 머리글은 강조하지 않는다(고를 수 없는 줄이 선택된 것처럼 보이면 안 된다).
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = row_y, .w = rect.w, .h = ch }, .role = .tab_active_bg } });
         }
-        const runs = try arena.alloc(draw.Run, 1);
-        runs[0] = .{ .text = it };
+        // 켜짐 표시는 **컴포넌트가** 그린다(§6.2 — 기호는 번역 단위가 아니다). 꺼진 줄에는 같은 폭의
+        // 공백을 넣어 라벨이 같은 열에서 시작하게 한다 — 안 그러면 토글할 때마다 글자가 좌우로 흔들린다.
+        const mark: []const u8 = if (state.checked_mask == 0) "" else if (state.isChecked(i)) check_glyph ++ " " else "  ";
+        const runs = try arena.alloc(draw.Run, if (mark.len == 0) 1 else 2);
+        if (mark.len == 0) {
+            runs[0] = .{ .text = it };
+        } else {
+            runs[0] = .{ .text = mark };
+            runs[1] = .{ .text = it };
+        }
         // 머리글은 **약한 색**으로 — 항목과 같은 색이면 고를 수 있는 줄로 읽힌다.
         const role: tokens.ColorRole = if (state.selectable(i)) .surface_fg else .muted_fg;
         try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw)), .y = row_y }, .runs = runs, .role = role } }); // 좌패딩 1칸

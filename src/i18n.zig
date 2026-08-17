@@ -565,6 +565,20 @@ pub const Table = struct {
     ws_cwd_must_be_absolute: [:0]const u8,
     arch_redacted: [:0]const u8,
 
+    // ── 아카이브 상세 액션 (I2) ──
+    // **아이콘·단축키를 뺀 이름만** 든다. 예전에는 `icons.utf8(.recent) ++ " 터미널에서 이어하기  ⌘↵"`
+    // 처럼 셋이 한 문자열이었다(계약 §6.2 가 "최악 사례"로 지목한 자리) — 아이콘을 바꾸려면 번역
+    // 테이블을 고쳐야 하고, 단축키가 keybinding 이 아니라 문장에서 왔다.
+    ad_resume_action: [:0]const u8,
+    ad_reveal_action: [:0]const u8,
+
+    // ── 보기 옵션 메뉴 (I2) ──
+    // **기호를 빼고 이름만 든다.** 예전에는 `"✓ 브랜치 표시"` / `"  브랜치 표시"` 두 문자열이었고,
+    // 그러면 체크 기호와 정렬 공백이 번역 단위에 섞인다(계약 §6.2). 켜짐 여부는 이제 컴포넌트의
+    // `checked_mask` 가 든다.
+    set_show_branch: [:0]const u8,
+    set_show_folder: [:0]const u8,
+
     // ── 모바일 (I3e) ──
     // `터미널`·`커서`·`기타`·`테마 프리셋` 은 이미 있는 `set_section_*`·`set_theme_preset` 을 **재사용**한다.
     mob_sessions: [:0]const u8,
@@ -931,6 +945,10 @@ pub const en: Table = .{
     .tab_group_n = "Group {0}",
     .ws_cwd_must_be_absolute = "The start directory must be an absolute path or ~/… (relative paths and ~user are ignored)",
     .arch_redacted = "[sensitive content hidden]",
+    .ad_resume_action = "Resume in terminal",
+    .ad_reveal_action = "View log",
+    .set_show_branch = "Show branch",
+    .set_show_folder = "Show folder",
     .mob_sessions = "Sessions",
     .mob_settings = "Settings",
     .mob_appearance = "Appearance",
@@ -1404,6 +1422,10 @@ pub const ko: Table = .{
     .tab_group_n = "그룹 {0}",
     .ws_cwd_must_be_absolute = "시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)",
     .arch_redacted = "[민감한 내용은 표시하지 않음]",
+    .ad_resume_action = "터미널에서 이어하기",
+    .ad_reveal_action = "로그 보기",
+    .set_show_branch = "브랜치 표시",
+    .set_show_folder = "폴더 표시",
     .mob_sessions = "세션",
     .mob_settings = "설정",
     .mob_appearance = "모양",

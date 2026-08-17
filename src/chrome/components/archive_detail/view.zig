@@ -63,7 +63,14 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     var heading: [384]u8 = undefined;
     const heading_text = std.fmt.bufPrint(&heading, "{s}  {s}", .{ provider, props.title }) catch props.title;
     try writer.text(header, 0, heading_text, .surface_fg);
-    try writer.text(header, 1, stateLabel(props), if (props.state == .ready) .muted_fg else .accent_bar);
+    // 스피너 프레임은 **문구 앞에 따로** 그린다(§6.2 — 프레임은 상태이지 번역 단위가 아니다).
+    const state_role: tokens.ColorRole = if (props.state == .ready) .muted_fg else .accent_bar;
+    if (props.state == .loading) {
+        try writer.text(header, 1, spinnerFrame(props.spinner_phase), state_role);
+        try writer.text(header, 3, stateLabel(props), state_role);
+    } else {
+        try writer.text(header, 1, stateLabel(props), state_role);
+    }
 
     const metadata = find(frame.tree, build.NodeIds.metadata) orelse return error.MissingRect;
     try writer.text(metadata, 0, props.metadata, .muted_fg);
@@ -100,10 +107,14 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     }
 
     // label은 published tree가 소유한다. view가 자기 상수를 그리면 tree의 Text child와 갈릴 수 있다.
-    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, build.labels.resume_session);
-    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, build.labels.reveal);
+    // 라벨은 **아이콘 · 이름 · 단축키 셋**으로 나뉘어 있어(§6.2) 그릴 때 조립한다. build 가 tree 에
+    // 실은 것과 **같은 함수**를 쓰므로 둘이 갈리지 않는다 — 위 주석이 말하는 "tree 가 소유한다"는
+    // 뜻은 그 값이 한 출처에서 나온다는 것이고, 조립 함수가 그 출처다.
+    var label_buf: [3][64]u8 = undefined;
+    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, build.renderActionLabel(&label_buf[0], build.labels.resume_session));
+    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, build.renderActionLabel(&label_buf[1], build.labels.reveal));
     if (props.state == .ready and props.focus_live_enabled) {
-        try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, build.labels.focus_live);
+        try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, build.renderActionLabel(&label_buf[2], build.labels.focus_live));
     }
     return .{ .layer = .pane_overlay, .ops = buffers.ops[0..writer.op_count] };
 }
@@ -240,14 +251,18 @@ fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
     return snapshot.entries[index];
 }
 
+/// 스피너 프레임 — **문구와 분리한다**(i18n 계약 §6.2). 예전에는 `"◴ 분석 중"` 처럼 한 문자열이라
+/// 프레임 문자가 번역 단위에 섞였다: 번역자가 네 문장을 각각 받고, 프레임을 바꾸려면 테이블 네 곳을
+/// 고쳐야 한다. 프레임은 **애니메이션 상태**이지 문장이 아니다.
+const spinner_frames = [_][]const u8{ "\u{25F4}", "\u{25F7}", "\u{25F6}", "\u{25F5}" };
+
+fn spinnerFrame(phase: u8) []const u8 {
+    return spinner_frames[phase & 3];
+}
+
 fn stateLabel(props: types.Props) []const u8 {
     return switch (props.state) {
-        .loading => switch (props.spinner_phase & 3) {
-            0 => "◴ 분석 중",
-            1 => "◷ 분석 중",
-            2 => "◶ 분석 중",
-            else => "◵ 분석 중",
-        },
+        .loading => i18n.t(.common_session_analyzing),
         .ready => i18n.t(.ad_summary_subtitle),
         .stale => i18n.t(.ad_stale_badge),
         .unavailable => i18n.t(.ad_unavailable_badge),

@@ -90,7 +90,8 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
         .file => base + m.status_extent,
         // 머리 줄의 동작 버튼은 **가장 바깥**에 앉으므로 비켜설 것이 없다(자리를 비우는 쪽은 브랜치 칩과
         // 개수 배지이고, 그건 `view.repoRow`가 같은 상수로 한다 — ②c).
-        .repo, .commit_box, .commit_button, .more, .notice => base,
+        // 커밋 줄은 오른쪽 끝에 **짧은 해시**가 앉지만 동작 버튼이 없어 비켜설 것이 없다.
+        .repo, .commit, .load_more, .commit_box, .commit_button, .more, .notice => base,
     };
 }
 
@@ -173,6 +174,7 @@ fn rowPaint(item: types.Item) tree.PaintStyle {
             // "여기에 caret을 놓는다"이고 그건 커서 모양이 말한다(사용자 지적 2026-08-17).
             .state_fill = false,
         },
+        // 고른 커밋은 목록에서 **선택 밴드**로 말한다(파일 행이 `selected` variant를 쓰는 것과 같다).
         // **버튼 줄 자체는 칠하지 않는다** — 칠은 면 노드가 받는다(아래 여백까지 파래지면 글자가 그
         // 띠의 가운데보다 위에 앉는다).
         else => flat,
@@ -194,7 +196,7 @@ fn rowCursor(item: types.Item) tree.CursorHint {
     return switch (item) {
         // 상자는 누르는 것이 아니라 **caret이 서는 자리**다.
         .commit_box => .text,
-        .repo, .section, .file, .more => .press,
+        .repo, .section, .file, .more, .commit, .load_more => .press,
         // 안내는 상태 진술이지 컨트롤이 아니다(action도 없다).
         .notice => .auto,
         // 버튼의 커서는 **면 노드**가 든다(아래 여백은 버튼이 아니다).
@@ -207,7 +209,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 머리 줄의 동작은 `RowAction`(스테이지/언스테이지) 어휘가 아니다 — 자기 버튼 둘을 따로 낸다(②c).
-        .repo, .commit_box, .commit_button, .more, .notice => .none,
+        .repo, .commit_box, .commit_button, .more, .notice, .commit, .load_more => .none,
     };
 }
 
@@ -233,7 +235,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = .{ .repo_index = section.repo_index, .section = section.section } },
                 .file => |file| .{ .row_action = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
-                .repo, .commit_box, .commit_button, .more, .notice => unreachable, // actionOf가 이미 `.none`으로 걸렀다
+                .repo, .commit_box, .commit_button, .more, .notice, .commit, .load_more => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
             slot[0] = tree.button(.{
@@ -369,6 +371,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .section => |section| .{ .toggle_section = section.section },
             .file => |file| .{ .open_row = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
             .more => |more| .{ .expand_section = more.section },
+            // 커밋 줄 클릭은 **고르기**다(P4). 그 커밋의 diff를 여는 것은 P4b이고, 지금 여는 것이
+            // 없는데 intent만 실으면 host가 "무엇을 열지" 두 곳에서 정하게 된다.
+            .commit => |commit| .{ .select_commit = commit.index },
+            .load_more => .load_more_commits,
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice => null,
         };
@@ -525,7 +531,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 fn isSelected(item: types.Item) bool {
     return switch (item) {
         .file => |file| file.selected,
-        .repo, .commit_box, .commit_button, .section, .more, .notice => false,
+        .commit => |commit| commit.selected,
+        .repo, .load_more, .commit_box, .commit_button, .section, .more, .notice => false,
     };
 }
 
@@ -665,7 +672,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

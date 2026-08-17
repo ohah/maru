@@ -497,7 +497,7 @@ pub const inventory = [_]Proof{
     // 스키마 변형 순서와 어긋나면 "한국어"를 골랐는데 `en` 이 저장된다. enum 을 도는 것이 그 어긋남을
     // 정의상 불가능하게 만들고, 그 대가로 반사 하나가 는다. 이 하나 말고 다른 자리가 늘었다면
     // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "25896fd41547dbf12da264d8a69146ef5122828f314a81749785acc7000f9c9d" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "0f0a3117f80f3e575fa520f093ff67a962bf8c7517bc9a9d36263594c507e5a5" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -523,5 +523,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "5929089671e9cbe64491bbe29be373854b410050650c5753fce3b60d616d9397" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "706f5d60b668652bfbdef7c5781b1110cdf80f33ac8580d1954000e4a5743e8e" },
 };

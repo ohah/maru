@@ -96,7 +96,8 @@ pub fn cellFromPixel(
 pub fn pixelBelowCell(row: u16, col: u16, cell_w: u32, cell_h: u32) Point {
     return .{
         .x = @intCast(@as(u64, col) * cell_w),
-        .y = @intCast(@as(u64, row + 1) * cell_h),
+        // **`row + 1` 을 u16 에서 하지 않는다** — 넓힌 뒤 더한다. u16 최대 행에서 오버플로로 죽는다.
+        .y = @intCast((@as(u64, row) + 1) * cell_h),
     };
 }
 

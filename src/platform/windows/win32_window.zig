@@ -93,6 +93,10 @@ pub const MouseEvent = struct {
         /// 버튼이 눌렸든 아니든 움직였다. 눌림 여부는 `mods`가 아니라 호출자의 드래그 상태가 안다.
         moved,
         wheel,
+        /// 남이 마우스 캡처를 가져갔다(Alt+Tab 등). **`left_up`과 다르다** — 버튼을 뗀 자리를 모르므로
+        /// 좌표가 없다. `left_up`으로 올리면 좌표 0,0 이 실려 선택이 **좌상단으로 튄다**. 호출자는
+        /// 드래그만 끝내고 선택은 건드리지 않는다.
+        capture_lost,
     };
 };
 
@@ -220,6 +224,8 @@ const WM_CAPTURECHANGED: UINT = 0x0215;
 
 extern "user32" fn SetCapture(HWND) callconv(.winapi) ?HWND;
 extern "user32" fn ReleaseCapture() callconv(.winapi) i32;
+/// 화면 좌표를 클라이언트 좌표로. **휠만 화면 기준으로 오므로** 그 자리에서만 쓴다.
+extern "user32" fn ScreenToClient(HWND, *POINT) callconv(.winapi) i32;
 
 const WS_OVERLAPPEDWINDOW: DWORD = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
@@ -516,12 +522,17 @@ pub const Window = struct {
     /// 비트를 쓰지 않는 이유는 그쪽엔 **Alt가 없기** 때문이다 — Alt는 리포팅 override이자 블록 선택 키라
     /// (§2k) 없으면 두 기능이 통째로 죽는다. 두 출처를 섞느니 하나로 읽는다.
     fn pushMouse(self: *Window, kind: MouseEvent.Kind, lparam: LPARAM, wheel: i32) void {
-        const mod = modifierState();
         const pt = win32_mouse.pointFromLparam(lparam);
+        self.pushMousePoint(kind, pt.x, pt.y, wheel);
+    }
+
+    /// 좌표를 **이미 클라이언트 기준으로 바꾼 뒤** 올린다(휠 경로가 쓴다 — 그쪽만 화면 기준으로 온다).
+    fn pushMousePoint(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32, wheel: i32) void {
+        const mod = modifierState();
         self.push(.{ .mouse = .{
             .kind = kind,
-            .x_px = pt.x,
-            .y_px = pt.y,
+            .x_px = x_px,
+            .y_px = y_px,
             .mods = win32_mouse.modifiersFrom(mod.ctrl, mod.shift, mod.alt),
             .wheel_delta = wheel,
         } });
@@ -749,9 +760,21 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
             return 0;
         },
         WM_MOUSEWHEEL => {
-            // **휠 좌표는 화면 기준이다**(다른 마우스 메시지와 달리). 셀로 바꿀 때 어긋나므로 좌표를
-            // 쓰지 않고 델타만 싣는다 — 스크롤은 활성 표면 전체에 걸리지 커서 아래 셀에 걸리지 않는다.
-            if (self) |w| w.pushMouse(.wheel, 0, win32_mouse.wheelDeltaFromWparam(wparam));
+            // **휠만 좌표가 화면 기준이다**(다른 마우스 메시지는 클라이언트 기준). 그대로 실으면 셀
+            // 변환이 창 위치만큼 어긋난다 — 창이 (100,100)에 있으면 화면 (100,100)이 셀 (0,0)인데
+            // 화면 좌표를 그냥 나누면 엉뚱한 셀이 된다. 여기서 클라이언트 기준으로 바꿔 **다른
+            // 메시지와 같은 규약으로** 올린다.
+            //
+            // 좌표를 버리고 (0,0)을 실으면 안 된다: xterm 규약에서 휠 리포트도 셀 좌표를 싣고, 앱이
+            // 그것으로 **어느 pane 을 굴릴지** 정한다(less·vim 분할). 늘 좌상단이라고 말하면 틀린다.
+            if (self) |w| {
+                const screen = win32_mouse.pointFromLparam(lparam);
+                var pt = POINT{ .x = screen.x, .y = screen.y };
+                // 실패하면 `pt` 가 그대로 화면 좌표로 남는다. 자기 `wndProc` 안이라 hwnd 가 유효하므로
+                // 사실상 안 일어나고, 일어나도 좌표가 밀릴 뿐 크래시는 없다.
+                _ = ScreenToClient(hwnd, &pt);
+                w.pushMousePoint(.wheel, pt.x, pt.y, win32_mouse.wheelDeltaFromWparam(wparam));
+            }
             return 0;
         },
         WM_CAPTURECHANGED => {
@@ -761,7 +784,9 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.wina
             if (self) |w| {
                 if (w.capturing) {
                     w.capturing = false;
-                    w.pushMouse(.left_up, 0, 0);
+                    // **좌표를 싣지 않는다.** 버튼을 뗀 자리를 모르므로 `left_up`(좌표 0,0)으로 올리면
+                    // 선택이 좌상단까지 끌려간다.
+                    w.pushMousePoint(.capture_lost, 0, 0, 0);
                 }
             }
             return 0;

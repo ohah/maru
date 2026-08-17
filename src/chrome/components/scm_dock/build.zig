@@ -40,7 +40,7 @@ pub const NodeIds = struct {
     /// 항목 하나가 쓰는 id 차선. 행 자신과 그 행의 동작 버튼이 같은 차선을 나눠 쓰므로, 가상화로 창이
     /// 밀려도 같은 항목이 같은 id 구조를 유지한다.
     pub const item_base: u64 = 0x5343_1000;
-    const item_stride: u64 = 2;
+    const item_stride: u64 = 4;
 
     pub fn item(index: usize) u64 {
         return item_base + @as(u64, @intCast(index)) * item_stride;
@@ -48,6 +48,13 @@ pub const NodeIds = struct {
 
     pub fn itemAction(index: usize) u64 {
         return item(index) + 1;
+    }
+
+    /// 커밋 버튼의 **면**. 그 줄은 면(28px)과 아래 여백(8px)으로 되어 있고 **칠은 면만** 받는다 —
+    /// 줄 전체를 칠하면 파랑이 여백까지 덮어 글자가 그 띠의 가운데보다 위에 앉는다(사용자 지적
+    /// 2026-08-17). 호버·눌림 해석도 이 노드가 받아야 여백을 지나갈 때 면이 밝아지지 않는다.
+    pub fn itemFace(index: usize) u64 {
+        return item(index) + 2;
     }
 };
 
@@ -114,9 +121,14 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     for (items) |item| if (actionOf(item) != .none) {
         action_buttons += 1;
     };
-    // 행 + 행 동작 버튼 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
+    // 커밋 버튼 줄은 **면 노드 하나를 더** 갖는다(칠이 아래 여백을 덮지 않게).
+    var faces: usize = 0;
+    for (items) |item| if (item == .commit_button) {
+        faces += 1;
+    };
+    // 행 + 행 동작 버튼 + 커밋 버튼 면 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
     // **커밋 상자·버튼은 고정이 아니다**(②b) — 저장소마다 하나씩이라 `items`에 들어 있다.
-    const node_count = items.len + action_buttons + tab_order.len + 4;
+    const node_count = items.len + action_buttons + faces + tab_order.len + 4;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -144,13 +156,19 @@ fn rowPaint(item: types.Item) tree.PaintStyle {
             .border_widths_px = if (box.edit.focused) .{ 1, 1, 1, 1 } else .{ 1, 0, 1, 0 },
             .shadow = .none,
         },
-        .commit_button => |button| .{
-            .background = if (button.enabled) .accent_bar else .inset_bg,
-            .corner_radii_px = .{ 0, 0, 0, 0 },
-            .border_widths_px = .{ 0, 0, 0, 0 },
-            .shadow = .none,
-        },
+        // **버튼 줄 자체는 칠하지 않는다** — 칠은 면 노드가 받는다(아래 여백까지 파래지면 글자가 그
+        // 띠의 가운데보다 위에 앉는다).
         else => flat,
+    };
+}
+
+/// 커밋 버튼의 **면** 칠. 채운 면이다(누르는 것이라 면이 보여야 한다). 꺼졌으면 채우지 않는다.
+fn commitFacePaint(enabled: bool) tree.PaintStyle {
+    return .{
+        .background = if (enabled) .accent_bar else .inset_bg,
+        .corner_radii_px = .{ 0, 0, 0, 0 },
+        .border_widths_px = .{ 0, 0, 0, 0 },
+        .shadow = .none,
     };
 }
 
@@ -218,12 +236,48 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             break :blk slot;
         } else &.{};
 
+        // 커밋 버튼 줄은 **면 노드**를 자식으로 갖는다. 칠도 action도 그 면이 받는다 — 줄 전체가
+        // 칠해지면 파랑이 아래 여백까지 덮어 글자가 띠의 가운데보다 위에 앉고(사용자 지적 2026-08-17),
+        // action이 줄에 있으면 그 여백을 눌러도 커밋이 걸린다.
+        if (item == .commit_button) {
+            const button = item.commit_button;
+            const slot = buffers.nodes[action_cursor .. action_cursor + 1];
+            action_cursor += 1;
+            const face_action = table.append(
+                props.snapshot_generation,
+                .{ .commit = button.repo_index },
+                true,
+            ) catch return error.InsufficientActionBuffer;
+            // **카드다**(버튼 노드가 아니라). 호버·눌림 해석이 `paint_style.resolveCard`를 지나야 하고
+            // 라벨 색도 그 해석 결과에서 나온다 — 줄 카드들과 같은 길을 쓴다.
+            slot[0] = tree.card(.{
+                .id = NodeIds.itemFace(index),
+                .style = .{ .height = .{ .px = @floatFromInt(m.commit_button_h) }, .flex = .{ .grow = 1 } },
+                .variant = .surface,
+                .paint = commitFacePaint(button.enabled),
+                .action = face_action,
+                .overflow = .clip,
+            }, &.{});
+            node.* = tree.card(.{
+                .id = NodeIds.item(index),
+                .style = .{ .height = .{ .px = @floatFromInt(m.itemHeight(item)) } },
+                .direction = .row,
+                .justify = .start,
+                .align_items = .start,
+                .variant = .surface,
+                .paint = rowPaint(item),
+                .overflow = .clip,
+            }, slot);
+            continue;
+        }
+
         const row_intent: ?ids.Intent = switch (item) {
             .repo => |repo| .{ .toggle_repo = repo.index },
             // 상자와 버튼은 **어느 저장소인지 싣는다**(②b) — 안 실으면 아래 그룹의 상자를 눌렀는데
             // 위 그룹이 편집되거나, 더 나쁘게는 다른 저장소로 커밋된다.
             .commit_box => |box| .{ .commit_focus = box.repo_index },
-            .commit_button => |button| .{ .commit = button.repo_index },
+            // 버튼은 위에서 **면 노드**가 가져갔다(칠·action 둘 다).
+            .commit_button => unreachable,
             .section => |section| .{ .toggle_section = section.section },
             .file => |file| .{ .open_row = file.model_index },
             .more => |more| .{ .expand_section = more.section },
@@ -712,8 +766,15 @@ test "커밋 줄의 intent는 **어느 저장소인지**를 싣는다 (②b)" {
     try testing.expectEqual(@as(u32, 1), focus_repos[1]);
     try testing.expectEqual(@as(u32, 1), commit_repos[1]);
     // **꺼진 버튼도 히트 사각형을 갖는다** — 없애면 "왜 안 눌리는가"를 말할 기회가 사라진다.
-    const off = frame.tree.entries[frame.tree.find(NodeIds.item(2)) orelse return error.MissingButton];
+    // 히트도 칠도 **면 노드**의 것이다(줄에는 아래 여백이 붙어 있어, 거기까지 누르면 커밋이 걸린다).
+    const off = frame.tree.entries[frame.tree.find(NodeIds.itemFace(2)) orelse return error.MissingButton];
     try testing.expect(off.action != null);
+    const row = frame.tree.entries[frame.tree.find(NodeIds.item(2)) orelse return error.MissingButton];
+    try testing.expect(row.action == null); // 여백은 버튼이 아니다
+    // 면은 줄보다 **아래 여백만큼 낮다** — 칠이 그 여백을 덮으면 글자가 띠의 가운데보다 위에 앉는다.
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_button_h)), off.rect.height);
+    try testing.expectEqual(@as(f32, @floatFromInt(m.commit_button_h + m.commit_pad_y)), row.rect.height);
 }
 
 test "커밋 상자는 편집 중일 때 테두리로 그 사실을 말한다 (②b — 포커스는 상자마다 다르다)" {

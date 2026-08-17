@@ -1915,6 +1915,9 @@ fn worktreesFor(self: *AppSession, root: []const u8, out: [][]const u8) []const 
     var used: usize = 0;
     for (items[0..n]) |item| {
         if (used == out.len) break;
+        // **사라진 워크트리는 세우지 않는다.** git이 `prunable`로 말해 준다 — 그 줄을 그리면 커밋 상자가
+        // 달린 빈 줄이 되고, 읽기는 실패만 되풀이한다(제품 캡처 2026-08-17에서 실제로 그랬다).
+        if (item.prunable) continue;
         out[used] = item.path;
         used += 1;
     }

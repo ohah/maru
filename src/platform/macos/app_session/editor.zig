@@ -873,12 +873,22 @@ pub fn foldAll(self: *AppSession) bool {
     const ranges = term.rt.editor_fold_ranges;
     if (ranges.len == 0) return false;
 
+    // **실패하면 있던 자리로 되돌린다 — 0이 아니다.** 이미 접힌 채로 다시 접다 실패하면 화면은 접힌
+    // 그대로인데 상태만 "안 접힘"이 된다. 그러면 `unfoldAll`이 `folded_len == 0`을 보고 거절해
+    // **숨은 줄을 영영 못 되찾는다**(할당 실패 주입으로 실측: 문서 4줄인데 화면 2줄, 펼치기 불가.
+    // 적대적 검증 2026-08-17).
+    const prev_len = term.rt.editor_folded_len;
+    // N1의 접힘 상태는 **전부 아니면 없음**이라(전체 접기/펼치기뿐) 아래에서 버퍼를 덮어써도 되돌릴
+    // 내용이 같다. 범위별·레벨 접기가 오면 **덮기 전에 옛 머리 집합을 따로 들어야 한다** — 그때
+    // 이 단언이 먼저 터진다.
+    std.debug.assert(prev_len == 0 or prev_len == ranges.len);
+
     // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 그대로 담는다.
     for (ranges, 0..) |r, i| term.rt.editor_folded_buf[i] = r.head;
     term.rt.editor_folded_len = ranges.len;
     const anchor = topDocLine(term); // 상태를 바꾸기 **전에** 지금 맨 위가 문서 몇째 줄인지 잡는다
     rebuildVisible(self, term) catch {
-        term.rt.editor_folded_len = 0; // 반영 못 하면 접지 않은 것으로 되돌린다(화면과 상태가 갈리지 않게)
+        term.rt.editor_folded_len = prev_len; // 화면이 그대로니 상태도 그대로 둔다
         return false;
     };
     restoreTop(term, anchor);
@@ -3374,4 +3384,43 @@ test "접기·펼치기가 보던 자리를 지킨다" {
     const on_head = topGutterNumber(d4.dl);
     d4.dl.deinit(allocator);
     try testing.expectEqual(back, on_head);
+}
+
+test "접힌 채로 다시 접다 실패해도 숨은 줄을 되찾을 수 있다" {
+    // 고치기 전: 실패하면 상태만 "안 접힘"이 되고 화면은 접힌 그대로였다 — 문서 4줄인데 화면 2줄,
+    // 그리고 `unfoldAll`이 `folded_len == 0`을 보고 거절해 **되돌릴 길이 없었다**(실측).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+    var stuck_checked: usize = 0;
+
+    var step: usize = 0;
+    while (step < 6) : (step += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = fa.allocator();
+        var fx = try PaneFixture.init(alloc);
+        defer fx.deinit(alloc);
+
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+        const lines = try backing.alloc([]const u8, 4);
+        defer backing.free(lines);
+        lines[0] = "a:";
+        lines[1] = "  1";
+        lines[2] = "b:";
+        lines[3] = "  2";
+        fx.term.rt.editor_lines = lines;
+
+        if (!foldAll(fx.session)) continue; // 먼저 성공적으로 접어 둔다
+        try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_visible_lines.len);
+
+        fa.fail_index = fa.allocations + step; // 그 뒤의 할당부터 실패한다
+        if (foldAll(fx.session)) continue; // 이번 step은 실패를 못 겪었다
+        stuck_checked += 1;
+
+        // 화면은 접힌 그대로다. 그렇다면 **되돌릴 수 있어야 한다.**
+        try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_visible_lines.len);
+        try testing.expect(unfoldAll(fx.session));
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len); // 원본을 그대로 그린다
+    }
+    try testing.expect(stuck_checked >= 1); // 실패를 한 번도 못 겪었으면 아무것도 지키지 않았다
 }

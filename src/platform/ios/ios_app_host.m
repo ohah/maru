@@ -106,9 +106,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 @interface ChromeView : UIView <UITextInput>
 /// 배경으로 나갈 때 AppDelegate 가 부른다 — 키바가 잡고 있던 터치를 푼다.
-- (void)releaseKeybarGrab;
 /// 같은 자리에서 밀린 화면(설정)이 잡고 있던 터치를 푼다.
-- (void)releaseChromeGrab;
 - (void)releaseBodyGrab;
 @end
 
@@ -377,24 +375,12 @@ static unsigned int maruPointerId(UITouch *t) {
     [self sendPointer:0 touches:touches];
 }
 
-/// 배경으로 나갈 때 잡음을 푼다(AppDelegate 가 부른다 — ivar 에 직접 못 닿는다).
-/// **키바·chrome 잡음은 이제 없다** — 목적지를 코어가 들므로 `maru_mobile_pointer(3,...)` 한 번이
-/// 전부 놓는다(R2). 남은 것은 본문 관성뿐이라 아래 하나만 남는다.
-- (void)releaseKeybarGrab {
-}
-
 /// **본문 제스처 잡음도 푼다.** T3 가 `_hasBodyPtr` 을 들이면서 정리할 자리가 하나 늘었다 —
 /// 안 풀면 복귀 후 `touchesBegan` 이 "이미 본문 제스처가 있다" 로 보고 목적지를 다시 안 정해
 /// **키바·설정이 영영 안 눌린다**(뗀 적 없이 끝나는 경우가 배경 전환이다).
 - (void)releaseBodyGrab {
     _hasBodyPtr = NO;
     _flingVy = 0;
-}
-
-/// 키바가 잡고 있는 동안의 포인터. 먹었으면 YES 를 돌려 본문 경로를 건너뛴다.
-/// 밀린 화면(설정)이 잡고 있는 동안의 나머지 위상. 키바와 같은 모양이다.
-/// 배경 전환처럼 **뗀 적 없이 끝나는** 경우에 뷰 쪽 잡음을 푼다(브리지 쪽은 호출자가 푼다).
-- (void)releaseChromeGrab {
 }
 
 /// **어디로 갈지는 코어가 정한다**(계약 §3.1) — 뷰는 좌표와 손가락 id 만 나른다. 전에는
@@ -404,6 +390,9 @@ static unsigned int maruPointerId(UITouch *t) {
 - (void)finishGesture {
     // **복사는 늘 시도한다.** 목적지를 뷰가 더는 모르므로 "키바가 끝났을 때만" 이라고 못 적는다 —
     // `take_copy` 는 꺼낼 것이 없으면 0 을 돌려주므로 그냥 묻는다.
+    // **이름을 그대로 둔다** — 판정자와 검증 기록이 `MARU_KEYBAR` 를 본다. 다만 이제 이 줄은
+    // "키바 제스처가 끝났다" 가 아니라 **어떤 제스처든 끝났고 그때 눌러 둔 수정자가 이랬다** 는
+    // 뜻이다(목적지를 host 가 더는 모른다).
     NSLog(@"MARU_KEYBAR armed=%u", maru_mobile_armed_mods());
     static unsigned char copy_buf[8192];
     unsigned int cn = maru_mobile_take_copy(copy_buf, sizeof copy_buf);
@@ -1157,8 +1146,6 @@ static void loadConfigFile(void);
     // 감쇠가 시간 기준이 된 뒤로는 남겨 두면 복귀 프레임의 dt 가 "배경에 있던 시간"이 되어
     // (상한 100ms 로 잘려도) 화면이 한 번에 튄다.
     [(ChromeView *)self.window.rootViewController.view stopFlingForBackground];
-    [(ChromeView *)self.window.rootViewController.view releaseKeybarGrab];
-    [(ChromeView *)self.window.rootViewController.view releaseChromeGrab];
     [(ChromeView *)self.window.rootViewController.view releaseBodyGrab];
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는

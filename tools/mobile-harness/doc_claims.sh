@@ -132,6 +132,10 @@ echo "§라우팅 — 목적지는 코어가 든다"
 # 한쪽을 빠뜨려 "복귀 후 첫 손짓이 통째로 삼켜지는" 결함이 났다 — 같은 모양을 세 번 겪었다.
 ck "포인터 진입점이 하나다" 1 "$(grep -c 'pub export fn maru_mobile_.*pointer(' $B)"
 ck "헤더에 포인터 진입점이 하나다" 1 "$(grep -c '^void maru_mobile_pointer(' $H)"
+# 계약 문서가 옛 함수 이름을 **계약으로** 적고 있으면 안 된다. 헤더/계획 문서는 "전에는
+# 이랬다" 를 적을 수 있으므로 대상은 스펙 하나뿐이다 — 실제로 R2 뒤에도 "세 포인터 함수가
+# 전부 pointer_id 를 싣는다" 가 남아 있었다.
+ck "스펙에 옛 포인터 함수 이름이 없다" 0 "$(grep -c 'keybar_pointer\|chrome_pointer' docs/mobile-platform.md)"
 # 주석 속 과거 서술은 안 센다 — 왜 없앴는지 적어 두는 것이 오히려 필요하다.
 ck "host 에 남은 라우팅 상태" 0 "$(grep -hE '(chrome|keybar)_active|_(chrome|keybar)Active' $I $A | grep -vcE '^\s*(//|///|\*)' || true)"
 
@@ -145,7 +149,11 @@ ck "iOS 에 남은 anyObject" 1 "$(grep -c 'touches.anyObject' $I)"
 ck "Android 가 사건의 손가락을 쓴다" 1 "$(grep -c 'ACTION_POINTER_INDEX_SHIFT' $A)"
 # **배경 전환에 잡음을 다 풀어야 한다.** 뗀 적 없이 끝나는 경우가 그것이고, 하나라도 남으면
 # 복귀 후 그 표면이 굳는다(실제로 `_hasBodyPtr` 를 빠뜨려 키바·설정이 안 눌릴 뻔했다).
-ck "iOS 가 배경에서 잡음 셋을 다 푼다" 3 "$(grep -cE 'release(Keybar|Chrome|Body)Grab\]' $I)"
+# **R2 로 잡음이 하나가 됐다** — 목적지는 코어가 들므로 취소 한 번이 chrome·키바를 다 놓고,
+# host 에 남은 것은 본문 관성뿐이다. 그래서 "취소를 보낸다 + 본문 잡음을 푼다" 둘을 센다.
+# 두 자리다: `touchesCancelled`(제스처를 OS 가 뺏었다)와 배경 정리(뗀 적 없이 끝난다).
+ck "iOS 가 코어에 취소를 보내는 자리" 2 "$(grep -c 'maru_mobile_pointer(3, 0, 0, 0, 0);' $I)"
+ck "iOS 가 배경에서 본문 잡음을 푼다" 1 "$(grep -c 'releaseBodyGrab\]' $I)"
 # `allTouches` 는 이벤트에 딸린 전부다. 우리 뷰로 안 거르면 남의 터치가 "아직 손가락이 있다" 로
 # 읽혀 **그 표면이 잡힌 채 굳는다**(마지막 손가락 판정과 이어받기 둘 다).
 ck "iOS 가 우리 뷰의 손가락만 센다" 2 "$(grep -c 't.view != self' $I)"

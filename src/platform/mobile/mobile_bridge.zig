@@ -761,7 +761,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             // 중복을 "남은 손가락" 으로 이어받아 **제스처가 영영 안 끝난다**(테스트가 잡았다).
             // **본문은 마지막 순서다** — chrome·키바가 안 먹었을 때만 잡는다(계약 §3.1).
             // host 가 그 순서로 물어보므로 여기 오면 앞의 둘이 사양한 것이다.
-            if (!routeIs(.body) and !routeClaim(.body, pointer_id)) return;
+            if (!routeIs(.body) and !routeClaim(.body)) return;
             if (bodySlot(pointer_id)) |sl| {
                 sl.last_y = y;
             } else for (&body_slots) |*sl| {
@@ -913,10 +913,6 @@ var kb_pressed: ?usize = null;
 const Route = enum { chrome, keybar, body };
 var route: ?Route = null;
 
-/// 그 목적지를 잡은 손가락. **목적지는 소유 손가락에 딸린다** — 둘째 손가락이 다른 표면 위에
-/// 닿아도 제스처의 목적지는 안 바뀐다(키바를 밀면서 본문이 같이 스크롤되는 것을 막는다).
-var route_owner: ?u32 = null;
-
 /// 지금 목적지에 **닿아 있는 손가락이 하나도 없나.** `up` 이 안 온 채 끝난 제스처가 목적지를
 /// 붙잡고 있으면 그 표면이 다음 터치를 계속 먹어 **다른 자리를 눌러도 아무 일이 안 난다** —
 /// 이 저장소에서 그 "굳음" 을 두 번 겪었다(키바 잡음·iOS `_hasBodyPtr`). 상태가 사실과
@@ -930,13 +926,17 @@ fn routeStale() bool {
 }
 
 /// 목적지를 잡는다. 주인이 있으면 실패하되, **그 주인이 손가락을 다 뗐으면 빼앗는다**(위).
-fn routeClaim(r: Route, id: u32) bool {
+///
+/// **손가락 id 는 안 받는다.** 처음엔 `route_owner` 로 들었는데 **읽는 자리가 한 곳도 없었다**
+/// — 소유 판정은 이미 표면마다 자기 손가락으로 한다(`kb_touch.owner`·`body_owner`·
+/// `set_touch.owner`) 그리고 `routeStale` 이 그것을 본다. 같은 사실을 두 곳에 두면 정리도 두
+/// 곳이 되고, 그것이 R 이 host 에서 없앤 바로 그 병이다.
+fn routeClaim(r: Route) bool {
     if (route != null) {
         if (!routeStale()) return false;
         routeClear();
     }
     route = r;
-    route_owner = id;
     return true;
 }
 
@@ -948,7 +948,6 @@ fn routeIs(r: Route) bool {
 /// 제스처가 끝났다 — 목적지를 놓는다.
 fn routeClear() void {
     route = null;
-    route_owner = null;
 }
 
 var kb_down_x: f32 = 0;
@@ -1058,7 +1057,7 @@ fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             _ = kb_touch.begin(pointer_id, x); // 코어는 이 손가락도 추적한다(이어받기 대비)
             return 1;
         }
-        if (!routeClaim(.keybar, pointer_id)) return 0; // 이미 다른 표면의 제스처다
+        if (!routeClaim(.keybar)) return 0; // 이미 다른 표면의 제스처다
         kb_down_x = x;
         kb_down_y = y;
         kb_last_x = x;
@@ -2891,7 +2890,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
             0 => {
                 // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
                 if (routeIs(.chrome)) return 1;
-                if (!routeClaim(.chrome, pointer_id)) return 0;
+                if (!routeClaim(.chrome)) return 0;
                 set_active = true;
                 set_down_x = x;
                 set_down_y = y;
@@ -2930,7 +2929,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // 설정 화면이 떠 있으면 **전부 먹는다**.
     switch (phase) {
         0 => {
-            if (!routeIs(.chrome) and !routeClaim(.chrome, pointer_id)) return 0;
+            if (!routeIs(.chrome) and !routeClaim(.chrome)) return 0;
             set_active = true;
             set_down_x = x;
             set_down_y = y;

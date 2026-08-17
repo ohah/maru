@@ -132,9 +132,13 @@ pub fn buildRichTextArtifact(
             const row_px: u32 = @intCast(text.origin.y);
             const row: u16 = @intCast(@min(row_px / cell_height_px, rows));
             if (row >= rows or col_px / cell_width_px >= cols) continue;
-            const start_col: u16 = @intCast(col_px / cell_width_px);
+            const op_start_col: u16 = @intCast(col_px / cell_width_px);
+            // 멀티-run 은 한 줄 안의 스타일 구간이므로 **앞 run 끝에서 이어** 놓는다. 이 격자 경로는
+            // 실측 advance 대신 열을 세지만, 같은 열에서 다시 시작하면 구간들이 겹쳐 그려진다.
+            var start_col = op_start_col;
             for (text.runs) |run| {
-                const end_limit = @min(cols, std.math.add(u16, start_col, text.max_cols) catch cols);
+                const end_limit = @min(cols, std.math.add(u16, op_start_col, text.max_cols) catch cols);
+                if (start_col >= end_limit) break;
                 var plan = chrome.text_layout.plan(run.text, start_col, end_limit, text.anchor, if (text.wide_icons) &wideChromeIconGlyph else null);
                 while (plan.next()) |_| {}
                 const end_col = plan.endCol();
@@ -145,9 +149,10 @@ pub fn buildRichTextArtifact(
                     .end_col = end_col,
                     .offset_x_px = @floatFromInt(col_px % cell_width_px),
                     .offset_y_px = @floatFromInt(row_px % cell_height_px),
-                    .foreground = packRgb(tk.get(text.role)),
+                    .foreground = packRgb(tk.get(run.role orelse text.role)),
                     .text_role = text.text_role,
                 });
+                start_col = end_col;
             }
         },
         else => {},
@@ -239,6 +244,9 @@ pub fn richTextFingerprint(
                 if (!system_text.shapesRun(text, run, op_max_width)) continue;
                 fingerprintMixValue(&state, run.text.len);
                 fingerprintMixValue(&state, @intFromBool(run.bold));
+                // run 별 색은 op 의 role 과 별개로 artifact 픽셀을 바꾼다. 섞지 않으면 색만 바뀐 프레임이
+                // 옛 artifact 를 그대로 재사용해 위계가 조용히 사라진다.
+                fingerprintMixValue(&state, if (run.role) |role| packRgb(tk.get(role)) else 0);
                 for (run.text) |byte| fingerprintMixByte(&state, byte);
             }
         },
@@ -351,14 +359,19 @@ fn buildTextDrawListFiltered(
             const col: u16 = @intCast(@min(@as(u32, @intCast(text.origin.x)) / cell_width_px, cols));
             const row: u16 = @intCast(@min(@as(u32, @intCast(text.origin.y)) / cell_height_px, rows));
             if (col >= cols or row >= rows) continue;
-            const style: terminal.Style = .{ .foreground = .{ .rgb = tk.get(text.role) } };
+            // 여기도 멀티-run 은 이어 놓는다(위 placement 경로와 같은 규칙) — 그리고 run 이 자기 role 을
+            // 들면 그 구간만 다른 색이다. 두 경로가 갈리면 같은 draw 가 셀/측정에서 다르게 보인다.
+            var run_col = col;
             for (text.runs) |run| {
                 const end_limit = @min(cols, std.math.add(u16, col, text.max_cols) catch cols);
-                var plan = chrome.text_layout.plan(run.text, col, end_limit, text.anchor, if (text.wide_icons) &wideChromeIconGlyph else null);
+                if (run_col >= end_limit) break;
+                const style: terminal.Style = .{ .foreground = .{ .rgb = tk.get(run.role orelse text.role) } };
+                var plan = chrome.text_layout.plan(run.text, run_col, end_limit, text.anchor, if (text.wide_icons) &wideChromeIconGlyph else null);
                 while (plan.next()) |item| switch (item) {
                     .ellipsis => |ellipsis_col| try cells.append(allocator, .{ .row = row, .col = ellipsis_col, .codepoint = chrome.text_layout.ellipsis_glyph, .width = 1, .style = style }),
                     .cluster => |cluster| try appendCluster(allocator, &cells, &pool, run.text, cluster, row, style),
                 };
+                run_col = plan.endCol();
             }
         },
         else => {},

@@ -202,6 +202,20 @@ const input_elements = [_]d3d11.InputElementDesc{
     .{ .semantic_name = "TEXCOORD", .semantic_index = 3, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 48, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
 };
 
+comptime {
+    // **두 곳이 서로를 검증하게 한다.** `Cell`을 재배치하면 위 오프셋 단언이 잡지만, 여기 리터럴 오프셋만
+    // 잘못 고치면 아무것도 안 잡고 런타임에 색과 좌표가 뒤섞인다(오류가 아니라 잘못된 그림이 나온다).
+    // 필드 이름과 슬롯 순서를 여기서 묶어 둔다.
+    const bound = [_][]const u8{ "rect", "uv", "fg", "bg" };
+    std.debug.assert(input_elements.len == bound.len);
+    for (input_elements, bound) |elem, name| {
+        std.debug.assert(elem.aligned_byte_offset == @offsetOf(Cell, name));
+        // 넷 다 `[4]f32`이므로 형식도 하나여야 한다 — 하나만 바꾸면 스트라이드가 어긋난다.
+        std.debug.assert(elem.format == d3d11.format_r32g32b32a32_float);
+        std.debug.assert(elem.input_slot_class == d3d11.input_per_instance_data);
+    }
+}
+
 // ── 파이프라인 ───────────────────────────────────────────────────────────────────────────────
 
 /// 셀을 그리는 데 필요한 GPU 자원 묶음. 디바이스는 **빌려 쓴다**(소유하지 않는다) — 표시 경로가 주인이다.

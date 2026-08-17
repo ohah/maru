@@ -89,6 +89,31 @@ pub fn cellFromPixel(
     return .{ .row = @intCast(row), .col = @intCast(col) };
 }
 
+/// 셀의 **왼쪽 아래** 픽셀. `cellFromPixel`의 역방향이다.
+///
+/// IME 후보창을 커서에 붙이는 데 쓴다(§2k) — 후보 목록은 조합 중인 글자 **아래**에 뜨는 것이 관례라
+/// 세로는 다음 줄의 위(= 이 셀의 아래)를 준다. 그래서 `y`가 `(row + 1) * cell_h`다.
+pub fn pixelBelowCell(row: u16, col: u16, cell_w: u32, cell_h: u32) Point {
+    return .{
+        .x = @intCast(@as(u64, col) * cell_w),
+        .y = @intCast(@as(u64, row + 1) * cell_h),
+    };
+}
+
+/// 셀 하나를 덮는 사각형(왼·위·오른·아래). IME 에 "여기는 가리지 마라"로 준다.
+pub const CellRect = struct { left: i32, top: i32, right: i32, bottom: i32 };
+
+pub fn rectForCell(row: u16, col: u16, cell_w: u32, cell_h: u32) CellRect {
+    const left: i64 = @as(i64, col) * cell_w;
+    const top: i64 = @as(i64, row) * cell_h;
+    return .{
+        .left = @intCast(left),
+        .top = @intCast(top),
+        .right = @intCast(left + cell_w),
+        .bottom = @intCast(top + cell_h),
+    };
+}
+
 /// `GetKeyState` 로 읽은 눌림 상태를 중립 `mods` 비트로 바꾼다.
 ///
 /// **command(32)를 세우지 않는다.** Windows엔 ⌘가 없고, §2h가 키보드에서 `Ctrl`을 `command`로 번역하는
@@ -311,6 +336,29 @@ test "wheelDeltaFromWparam: 아래로 굴리면 음수다" {
     try testing.expectEqual(@as(i32, -120), wheelDeltaFromWparam(@as(usize, 0xFF88) << 16));
     // 하위 워드(버튼 상태)는 무시한다.
     try testing.expectEqual(@as(i32, 120), wheelDeltaFromWparam((@as(usize, 120) << 16) | 0x0004));
+}
+
+test "pixelBelowCell·rectForCell: 후보창은 글자 아래에 붙고 셀을 가리지 않는다" {
+    // 후보 목록은 조합 중인 글자 **아래**에 뜨는 것이 관례라 다음 줄의 위를 준다.
+    const p = pixelBelowCell(3, 5, 10, 20);
+    try testing.expectEqual(@as(i32, 50), p.x);
+    try testing.expectEqual(@as(i32, 80), p.y); // (3+1)*20 — 이 셀의 아래
+
+    // 첫 줄 첫 칸도 0 이 아니라 한 줄 아래다(0 을 주면 후보창이 글자를 덮는다).
+    const first = pixelBelowCell(0, 0, 10, 20);
+    try testing.expectEqual(@as(i32, 0), first.x);
+    try testing.expectEqual(@as(i32, 20), first.y);
+
+    const r = rectForCell(3, 5, 10, 20);
+    try testing.expectEqual(@as(i32, 50), r.left);
+    try testing.expectEqual(@as(i32, 60), r.top);
+    try testing.expectEqual(@as(i32, 60), r.right);
+    try testing.expectEqual(@as(i32, 80), r.bottom);
+
+    // `cellFromPixel` 과 왕복이 맞는다 — 사각형 안의 점은 그 셀로 돌아온다.
+    const back = cellFromPixel(r.left, r.top, 10, 20, 80, 24).?;
+    try testing.expectEqual(@as(u16, 3), back.row);
+    try testing.expectEqual(@as(u16, 5), back.col);
 }
 
 test "reportsToShell: shift·alt 가 리포팅을 누른다" {

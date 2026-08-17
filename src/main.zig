@@ -1228,6 +1228,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
+    var last_ime_caret: ?win32_mouse.Cell = null;
+    var ime_caret_updates: usize = 0;
     var click_tracker: win32_mouse.ClickTracker = .{};
     // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
     // 무시하게 된다. 규칙은 순수 함수가 갖고 이 값들은 그 인자다(§2k, OS-as-parameter).
@@ -1532,6 +1534,24 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         counts.add(tick.frame.render_frame);
         if (tick.ended()) ended = true;
 
+        // **IME 후보창을 커서에 붙인다**(§2k). 조합이 시작될 때가 아니라 **커서가 움직일 때마다**
+        // 갱신한다 — IME 는 조합을 시작하는 순간의 위치를 쓰므로, 그 전에 최신값이 들어 있어야 한다.
+        // 값이 그대로면 부르지 않는다(IME 가 무시하긴 하지만 매 프레임 IMM 컨텍스트를 여는 비용을 뺀다).
+        if (app_window.active()) |active| {
+            const cur: struct { row: u16, col: u16 } = blk: {
+                active.lockCore(io);
+                defer active.unlockCore(io);
+                break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
+            };
+            const changed = last_ime_caret == null or
+                last_ime_caret.?.row != cur.row or last_ime_caret.?.col != cur.col;
+            if (changed) {
+                window.setImeCaret(cur.row, cur.col, cell_w, cell_h);
+                last_ime_caret = .{ .row = cur.row, .col = cur.col };
+                ime_caret_updates += 1;
+            }
+        }
+
         // **OSC 52 를 배수한다.** 셸이 클립보드 읽기·쓰기를 요청하면 코어가 pending 으로 들고 있고
         // 플랫폼이 정책을 확인한 뒤 OS 를 만진다 — 코어가 OS 를 직접 만지지 않는 것이 그 설계다.
         if (app_window.active()) |active| {
@@ -1629,7 +1649,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("fallback_glyphs={d} replacement_glyphs={d} raster_skipped={d}\n", .{ counts.fallback, counts.replacement, counts.skipped });
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
-    try stdout.print("preedit_updates={d} failures={d} max_bytes={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes });
+    try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
     try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus_todo={d}\n", .{ copies, copy_bytes, right_click_pastes, right_click_menus_unimplemented });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.

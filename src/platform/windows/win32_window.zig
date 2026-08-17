@@ -252,6 +252,37 @@ extern "imm32" fn ImmGetContext(HWND) callconv(.winapi) ?*anyopaque;
 extern "imm32" fn ImmReleaseContext(HWND, *anyopaque) callconv(.winapi) i32;
 /// 버퍼가 `null`이면 필요한 **바이트 수**를 돌려준다(문자 수가 아니다 — UTF-16이라 2배다).
 extern "imm32" fn ImmGetCompositionStringW(*anyopaque, UINT, ?*anyopaque, UINT) callconv(.winapi) i32;
+extern "imm32" fn ImmSetCandidateWindow(*anyopaque, *const CANDIDATEFORM) callconv(.winapi) i32;
+extern "imm32" fn ImmSetCompositionWindow(*anyopaque, *const COMPOSITIONFORM) callconv(.winapi) i32;
+
+/// `ptCurrentPos`를 쓴다(조합 창을 그 점에 둔다).
+const CFS_POINT: DWORD = 0x0002;
+/// `rcArea`가 **가리면 안 되는 영역**이다. 후보창을 그 사각형 밖으로 밀어낸다 — 조합 중인 글자를
+/// 후보 목록이 덮는 것을 막는 것이 이 스타일의 존재 이유다.
+const CFS_EXCLUDE: DWORD = 0x0080;
+
+const CANDIDATEFORM = extern struct {
+    dwIndex: DWORD,
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
+const COMPOSITIONFORM = extern struct {
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
+
+comptime {
+    // §2c의 COM 규약과 같은 이유 — 레이아웃이 어긋나도 **컴파일은 되고** 런타임에 후보창이 엉뚱한
+    // 자리에 뜬다(조용히 틀린다). 공개 헤더가 정한 크기를 못 박는다.
+    std.debug.assert(@sizeOf(CANDIDATEFORM) == 32);
+    std.debug.assert(@sizeOf(COMPOSITIONFORM) == 28);
+    std.debug.assert(@offsetOf(CANDIDATEFORM, "ptCurrentPos") == 8);
+    std.debug.assert(@offsetOf(CANDIDATEFORM, "rcArea") == 16);
+    std.debug.assert(@offsetOf(COMPOSITIONFORM, "ptCurrentPos") == 4);
+    std.debug.assert(@offsetOf(COMPOSITIONFORM, "rcArea") == 12);
+}
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(.winapi) ?HINSTANCE;
 /// **std의 것을 쓴다.** 직접 `extern`으로 선언하면 Zig가 사이에 끼우는 코드가 스레드 오류 값을 덮어
 /// 0으로 읽힐 수 있다(실측: 세 호출 지점에서 전부 0이 나왔다). std는 그 규약을 알고 있다.
@@ -494,6 +525,43 @@ pub const Window = struct {
             .mods = win32_mouse.modifiersFrom(mod.ctrl, mod.shift, mod.alt),
             .wheel_delta = wheel,
         } });
+    }
+
+    /// IME 후보창·조합창을 커서 셀에 붙인다 — §2i가 W7.4d로 미뤄 둔 자리다.
+    ///
+    /// **두 개를 다 부른다.** IME 마다 무엇을 보는지가 다르다: 어떤 IME 는 조합창(`COMPOSITIONFORM`)
+    /// 위치를 기준으로 후보를 배치하고, 어떤 IME 는 `CANDIDATEFORM`을 직접 읽는다. 하나만 부르면 그쪽을
+    /// 안 보는 IME 에서 후보창이 창 좌상단에 남는다.
+    ///
+    /// `CFS_EXCLUDE`로 **조합 중인 셀을 가리지 말라고** 알린다 — 후보 목록이 지금 치는 글자를 덮으면
+    /// 무엇을 고르는지 안 보인다. 좌표는 클라이언트 기준이고 계산은 순수 함수가 한다(`win32_mouse`).
+    ///
+    /// 호출자가 매 프레임 불러도 된다 — 값이 같으면 IME 가 무시한다. 실패는 삼킨다(후보창 위치가
+    /// 기본값으로 남을 뿐 조합 자체는 동작한다).
+    pub fn setImeCaret(self: *Window, row: u16, col: u16, cell_w: u32, cell_h: u32) void {
+        if (cell_w == 0 or cell_h == 0) return;
+        const himc = ImmGetContext(self.hwnd) orelse return;
+        defer _ = ImmReleaseContext(self.hwnd, himc);
+
+        const below = win32_mouse.pixelBelowCell(row, col, cell_w, cell_h);
+        const cell = win32_mouse.rectForCell(row, col, cell_w, cell_h);
+        const area = RECT{ .left = cell.left, .top = cell.top, .right = cell.right, .bottom = cell.bottom };
+
+        const comp = COMPOSITIONFORM{
+            .dwStyle = CFS_POINT,
+            // 조합창은 **글자 자리**에 둔다(아래가 아니라) — 조합 중인 글자가 거기 그려진다.
+            .ptCurrentPos = .{ .x = cell.left, .y = cell.top },
+            .rcArea = area,
+        };
+        _ = ImmSetCompositionWindow(himc, &comp);
+
+        const cand = CANDIDATEFORM{
+            .dwIndex = 0,
+            .dwStyle = CFS_EXCLUDE,
+            .ptCurrentPos = .{ .x = below.x, .y = below.y },
+            .rcArea = area,
+        };
+        _ = ImmSetCandidateWindow(himc, &cand);
     }
 
     /// `WM_IME_COMPOSITION`에서 조합 문자열을 읽어 UTF-8로 저장한다.

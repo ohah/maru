@@ -146,6 +146,56 @@ fn walk(lines: []const []const u8, tab_width: u16, sink: anytype) void {
     }
 }
 
+/// 화면에서 **숨는 줄 구간**(양끝 포함). 접힌 범위들을 합쳐 얻는다 — 중첩된 것을 각각 들고 있으면
+/// 렌더가 같은 줄을 여러 번 판정한다.
+pub const Span = struct { first: u32, last: u32 };
+
+/// 접힌 머리 줄들(`collapsed`)로부터 숨는 구간을 만든다. **문서 순서로 나오고 겹치지 않는다.**
+///
+/// **왜 구간인가**: 렌더가 줄마다 "이 줄 숨나?"를 물으면 O(줄 × 범위)다. 구간을 한 번 만들어 두면
+/// 줄을 훑으며 커서 하나로 판정한다 — O(줄 + 구간).
+///
+/// **중첩은 합친다.** 바깥과 안쪽을 둘 다 접었으면 바깥이 안쪽을 덮으므로 한 구간이다. 안 합치면
+/// 같은 줄이 두 구간에 들어가 렌더가 두 번 건너뛴다.
+///
+/// **`collapsed`는 오름차순·중복 없음**이다(머리 줄 번호 집합). 범위도 문서 순서라 한 번에 훑는다.
+///
+/// `collapsed`에 범위가 없는 머리가 섞여 있어도 무시한다 — 문서가 바뀌어 범위가 사라졌는데 상태가
+/// 남아 있는 경우다(§4.1f: 소스는 나중에 비동기라 상태와 범위가 잠시 어긋날 수 있다).
+pub fn hiddenSpans(ranges: []const Range, collapsed: []const u32, out: []Span) []Span {
+    // **`collapsed`는 오름차순이어야 한다.** 둘 다 문서 순서이므로 한 번에 나란히 훑으면 되는데,
+    // 어기면 접힌 것을 **조용히 빠뜨린다**. 초판은 머리마다 목록을 훑어 전체 접기에서 O(n²)였다 —
+    // 실측 2,000블록 1.6ms · 4,000블록 6.3ms(두 배마다 4배). ReleaseFast에서는 사라지는 검사다.
+    if (std.debug.runtime_safety and collapsed.len > 1) {
+        for (collapsed[1..], 0..) |v, i| std.debug.assert(v > collapsed[i]);
+    }
+    var n: usize = 0;
+    var c: usize = 0;
+    for (ranges) |r| {
+        while (c < collapsed.len and collapsed[c] < r.head) c += 1;
+        if (c >= collapsed.len or collapsed[c] != r.head) continue;
+        if (n > 0 and r.first_hidden <= out[n - 1].last + 1) {
+            // 앞 구간과 이어지거나 겹친다 — 늘린다(중첩·연속 접힘).
+            out[n - 1].last = @max(out[n - 1].last, r.last_hidden);
+            continue;
+        }
+        if (n >= out.len) break; // 저장소가 모자라면 거기까지만(§3.8)
+        out[n] = .{ .first = r.first_hidden, .last = r.last_hidden };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// 그 줄이 숨는가. **구간을 훑는 쪽이 빠르지만**, 한 줄만 물어보는 자리(gutter 화살표 판정 등)를 위해
+/// 둔다 — 구간 수가 적어 선형 탐색으로 충분하다.
+pub fn isHidden(spans: []const Span, line: u32) bool {
+    for (spans) |s| {
+        if (line < s.first) return false; // 문서 순서라 더 볼 것이 없다
+        if (line <= s.last) return true;
+    }
+    return false;
+}
+
 const testing = std.testing;
 
 test "더 깊게 들여쓴 연속 줄이 한 범위다" {
@@ -412,4 +462,82 @@ test "[측정] 아주 긴 들여쓰기 한 줄" {
     std.debug.print("\n[측정] {d}MiB 공백 들여쓰기: 깊이={?d}, {d}µs\n", .{ n >> 20, d, t1 - t0 });
     try testing.expectEqual(@as(?u32, n), d); // u32에 들어간다
     try testing.expect(t1 - t0 < 200_000); // 재앙 감지선
+}
+
+test "접힌 범위가 숨는 구간이 된다" {
+    const lines = [_][]const u8{ "a:", "  1", "  2", "b:", "  3" };
+    var rbuf: [8]Range = undefined;
+    const rs = compute(&lines, 4, &rbuf);
+    var sbuf: [8]Span = undefined;
+
+    try testing.expectEqual(@as(usize, 0), hiddenSpans(rs, &.{}, &sbuf).len); // 아무것도 안 접었다
+
+    const one = hiddenSpans(rs, &.{0}, &sbuf);
+    try testing.expectEqual(@as(usize, 1), one.len);
+    try testing.expectEqual(@as(u32, 1), one[0].first);
+    try testing.expectEqual(@as(u32, 2), one[0].last);
+    try testing.expect(isHidden(one, 1) and isHidden(one, 2));
+    try testing.expect(!isHidden(one, 0) and !isHidden(one, 3));
+}
+
+test "중첩을 둘 다 접으면 한 구간으로 합친다 — 같은 줄을 두 번 건너뛰면 안 된다" {
+    const lines = [_][]const u8{ "class A:", "    def m():", "        x = 1", "        y = 2" };
+    var rbuf: [8]Range = undefined;
+    const rs = compute(&lines, 4, &rbuf);
+    try testing.expectEqual(@as(usize, 2), rs.len);
+
+    var sbuf: [8]Span = undefined;
+    const both = hiddenSpans(rs, &.{ 0, 1 }, &sbuf);
+    try testing.expectEqual(@as(usize, 1), both.len); // 바깥이 안쪽을 덮는다
+    try testing.expectEqual(@as(u32, 1), both[0].first);
+    try testing.expectEqual(@as(u32, 3), both[0].last);
+}
+
+test "이어붙은 접힘도 한 구간이다 — 사이에 보이는 줄이 없다" {
+    const lines = [_][]const u8{ "a:", "  1", "b:", "  2" };
+    var rbuf: [8]Range = undefined;
+    const rs = compute(&lines, 4, &rbuf);
+    var sbuf: [8]Span = undefined;
+    const s = hiddenSpans(rs, &.{ 0, 2 }, &sbuf);
+    // 1은 숨고 2(머리)는 보이므로 **합쳐지면 안 된다**.
+    try testing.expectEqual(@as(usize, 2), s.len);
+    try testing.expect(!isHidden(s, 2));
+}
+
+test "범위가 사라진 머리가 상태에 남아 있어도 무시한다" {
+    const lines = [_][]const u8{ "a:", "  1" };
+    var rbuf: [8]Range = undefined;
+    const rs = compute(&lines, 4, &rbuf);
+    var sbuf: [8]Span = undefined;
+    const s = hiddenSpans(rs, &.{ 0, 99 }, &sbuf); // 99는 범위가 없다
+    try testing.expectEqual(@as(usize, 1), s.len);
+}
+
+test "[측정] 전체 접기 — 큰 문서에서 숨는 구간 만들기" {
+    // §4가 **전체 접기**를 요구한다. 그때 `collapsed`가 모든 머리라, 머리마다 목록을 훑으면 O(n²)다.
+    const alloc = testing.allocator;
+    for ([_]usize{ 2000, 4000 }) |blocks| {
+        const n = blocks * 2;
+        const lines = try alloc.alloc([]const u8, n);
+        defer alloc.free(lines);
+        for (0..blocks) |b| {
+            lines[b * 2] = "head:";
+            lines[b * 2 + 1] = "  body";
+        }
+        const rbuf = try alloc.alloc(Range, n);
+        defer alloc.free(rbuf);
+        const rs = compute(lines, 4, rbuf);
+
+        const collapsed = try alloc.alloc(u32, rs.len);
+        defer alloc.free(collapsed);
+        for (rs, 0..) |r, i| collapsed[i] = r.head;
+
+        const sbuf = try alloc.alloc(Span, rs.len);
+        defer alloc.free(sbuf);
+        const t0 = monotonicUs();
+        const spans = hiddenSpans(rs, collapsed, sbuf);
+        const t1 = monotonicUs();
+        std.debug.print("\n[측정] {d}블록 전체 접기: {d}구간, {d}µs\n", .{ blocks, spans.len, t1 - t0 });
+        try testing.expect(t1 - t0 < 100_000);
+    }
 }

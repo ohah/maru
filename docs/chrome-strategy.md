@@ -145,9 +145,15 @@ pub const Op = union(enum) {
     text:   struct { origin: Px, runs: []const Run, role: ColorRole, wide_icons: bool = false },
     // wide_icons=true는 컴포넌트가 직접 소유한 등록 SVG glyph만 2셀로 측정·lower한다.
 };
-pub const Run = struct { text: []const u8, bold: bool = false };
+pub const Run = struct { text: []const u8, bold: bool = false, role: ?ColorRole = null };
 pub const ChromeDraw = struct { layer: Layer, ops: []const Op };  // 한 컴포넌트의 한 프레임 출력
 ```
+
+**한 op 의 run 여럿 = 한 줄 안의 스타일 구간**이고, platform 이 **실측 advance 로 이어** 놓는다
+(`system_text` 의 `continues_previous`). `Run.role` 이 있으면 그 구간만 다른 색이다. 컴포넌트는 비례
+폰트의 advance 를 모르므로 색마다 op 을 나누면 x 를 셀 격자로 추정하게 되고, 그러면 구간 사이가 눈에
+띄게 벌어진다(세션 카드 메타 줄에서 실제로 그렇게 벌어진 캡처를 봤다 — 2026-08-18). 그래서 한 줄
+안에서 색만 바뀌는 텍스트는 **op 하나 + run 여럿**으로 낸다.
 
 ### 5.3 Backend — `platform/macos/chrome/metal_lowering.zig` (구현) + 나머지 backend 추출
 ChromeDraw를 실제 합성 입력으로 lowering한다. 현재 `metal_lowering.zig`의 `lower`는 오버레이

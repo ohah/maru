@@ -55,8 +55,14 @@ pub const Sides = struct {
 /// 라우팅한다. 같은 layer 안에서는 ops 순서가 Z(뒤가 위).
 pub const Layer = enum { sidebar, pane_overlay, modal };
 
-/// 텍스트 한 조각(스타일 변화 단위). 멀티-run은 한 줄 안의 스타일 구간들.
-pub const Run = struct { text: []const u8, bold: bool = false };
+/// 텍스트 한 조각(스타일 변화 단위). 멀티-run은 한 줄 안의 스타일 구간들이다 — **같은 op 의 run 들은
+/// 앞 run 의 실제 advance 에 이어서** 놓인다(platform text worker 가 측정값으로 잇는다). 컴포넌트가
+/// 셀 격자로 x 를 추정해 op 을 여러 개 내리면 비례 폰트에서 구간 사이가 벌어지므로, 한 줄 안에서 색만
+/// 바뀌는 텍스트는 **op 하나 + run 여럿**으로 낸다.
+///
+/// `role` 이 있으면 그 구간만 다른 색이다(null 이면 op 의 role 을 따른다) — 세션 카드 메타 줄의
+/// 개수·시각·모델 위계가 이 필드를 쓴다.
+pub const Run = struct { text: []const u8, bold: bool = false, role: ?tokens.ColorRole = null };
 
 /// 컴포넌트는 native 폰트 메트릭을 소유하지 않은 채로 텍스트 내용 묶음을 선언할 수 있다. 평범한
 /// 텍스트는 `.origin`을 유지하고, 측정된 label 묶음과 등록 SVG 전용 컨트롤은 platform text worker가

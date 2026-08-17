@@ -76,6 +76,10 @@ pub const Request = struct {
         line_height_px: ?u16 = null,
         /// 편집기 셀 폭(device px, §2.0). 글자 x를 **셀 인덱스**로 놓을 때 쓴다.
         cell_w_px: ?u16 = null,
+        /// 같은 op 의 앞 run 에 **이어서** 놓는가(`chrome.draw.Run` 계약). 컴포넌트는 비례 폰트의
+        /// advance 를 모르므로 한 줄 안에서 색이 바뀌는 구간을 스스로 이어 붙일 수 없다 — 셀 격자로
+        /// 추정해 op 을 나누면 구간 사이가 눈에 띄게 벌어진다. 그 이음은 **측정값을 가진 이쪽**이 한다.
+        continues_previous: bool = false,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -116,6 +120,9 @@ pub const UnresolvedArtifact = struct {
     /// `font_px`·`line_height_px`는 여기 두지 않는다 — 둘은 `shapeUnresolvedRun`이 `Run`에서 직접
     /// 읽어 shaping 시점에 소비하므로, 결과 구조에 다시 실으면 아무도 읽지 않는 필드가 된다.
     cell_widths: []?u16,
+    /// run 별 "앞 run 에 이어 붙임" 표시. resolve 가 이 표시를 따라 앞 run 들의 실측 advance 를 누적해
+    /// x 를 민다 — 그래야 한 줄 안에서 색만 바뀌는 구간들이 한 문장처럼 붙어 보인다.
+    continues: []bool,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
@@ -124,6 +131,7 @@ pub const UnresolvedArtifact = struct {
         allocator.free(self.scroll_flags);
         allocator.free(self.above_clips);
         allocator.free(self.cell_widths);
+        allocator.free(self.continues);
         self.* = undefined;
     }
 };
@@ -442,6 +450,7 @@ pub fn prepareRequest(
             // 갈라져 캐시가 그 줄을 영구히 잃는다(`shapesTextOp` 주석).
             if (!shapesTextOp(text)) continue;
             const max_width = opMaxWidthPx(text, cell_width_px) orelse continue;
+            var first_run = true;
             for (text.runs) |run| {
                 if (!shapesRun(text, run, max_width)) continue;
                 try runs.append(allocator, .{
@@ -449,7 +458,11 @@ pub fn prepareRequest(
                     .role = text.text_role,
                     .origin = text.origin,
                     .max_width_px = max_width,
-                    .foreground = packRgb(tk.get(text.role)),
+                    // run 이 자기 role 을 들면 그 구간만 다른 색이다(한 줄 안의 위계). 없으면 op 색.
+                    .foreground = packRgb(tk.get(run.role orelse text.role)),
+                    // **한 op 의 두 번째 run 부터**는 앞 run 끝에 이어 붙인다. 셰이핑에서 걸러진 run 은
+                    // 여기 오지 않으므로, 이 표시는 실제로 발행되는 run 들의 순서를 따른다.
+                    .continues_previous = !first_run,
                     .anchor = text.anchor,
                     .placement = text.placement,
                     .font_px = text.font_px,
@@ -458,6 +471,7 @@ pub fn prepareRequest(
                     .scroll_clipped = text.scroll_clipped,
                     .above_clip = if (text.above_scroll) text.clip else null,
                 });
+                first_run = false;
             }
         },
         else => {},
@@ -761,6 +775,8 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(above_clips);
     const cell_widths = try allocator.alloc(?u16, request.runs.len);
     errdefer allocator.free(cell_widths);
+    const continues = try allocator.alloc(bool, request.runs.len);
+    errdefer allocator.free(continues);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
@@ -768,6 +784,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
         scroll_flags[index] = run.scroll_clipped;
         above_clips[index] = run.above_clip;
         cell_widths[index] = run.cell_w_px;
+        continues[index] = run.continues_previous;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -786,7 +803,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_widths = cell_widths };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_widths = cell_widths, .continues = continues };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -841,12 +858,22 @@ pub fn resolveArtifact(
     //
     // glyph는 run 안에서 논리 순서로 오므로 run이 바뀔 때만 카운터를 리셋한다. 리거처로 codepoint와
     // glyph가 1:1이 아니면 근사가 되지만, 코드 편집기 폰트에서 리거처는 통상 꺼 둔다.
+    // **이어 붙이는 run 의 x 오프셋**을 먼저 만든다(`chrome.draw.Run` 계약). 컴포넌트는 비례 폰트의
+    // advance 를 모르므로 한 줄 안에서 색이 바뀌는 구간을 이어 놓을 수 없고, 셀 격자로 추정해 op 을
+    // 나누면 구간 사이가 벌어진다. 실측 advance 를 가진 이 자리에서 잇는다 — 앞 run 이 셰이핑되지
+    // 않았으면(빈 문자열·필터) 그 폭은 0 이라 자연히 건너뛴다.
+    const carry = try allocator.alloc(f32, unresolved.placements.len);
+    defer allocator.free(carry);
+    for (carry, 0..) |*value, index| {
+        value.* = if (index > 0 and unresolved.continues[index]) carry[index - 1] + advances[index - 1] else 0;
+    }
     var grid_run: ?u16 = null;
     var grid_cell: u32 = 0;
     for (unresolved.glyphs) |glyph| {
         const run_index: usize = glyph.run_index;
         const layout = unresolved.placements[run_index];
-        const label_origin = labelOrigin(layout, glyph.origin, advances[run_index], glyph.line_height_px);
+        var label_origin = labelOrigin(layout, glyph.origin, advances[run_index], glyph.line_height_px);
+        label_origin.x_px += carry[run_index];
         const grid_x: ?f32 = if (unresolved.cell_widths[run_index]) |cw| blk: {
             if (grid_run == null or grid_run.? != glyph.run_index) {
                 grid_run = glyph.run_index;
@@ -951,6 +978,63 @@ fn labelOrigin(layout: chrome.draw.TextPlacement, fallback: chrome.draw.Px, adva
     };
 }
 
+// 한 줄 안에서 색만 바뀌는 구간(`chrome.draw.Run`)이 **실측 advance 로 이어지는지**. 컴포넌트는 비례
+// 폰트의 advance 를 모르므로 스스로 잇지 못하고, 셀 격자로 추정해 op 을 나누면 구간 사이가 벌어진다
+// (세션 카드 메타 줄에서 실제로 그렇게 벌어진 캡처를 봤다). 그 이음이 이 자리의 책임이다.
+test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같은 origin 에서 겹치지 않는다)" {
+    const allocator = std.testing.allocator;
+    var font_name = [_]u8{0} ** 128;
+    @memcpy(font_name[0..6], "System");
+    const glyph = struct {
+        // 글리프의 색은 **그 run 의 색**이다(`shapeUnresolvedRun` 이 `run.foreground` 를 싣는다) —
+        // fixture 도 그 경로대로 run 마다 다른 색을 준다.
+        fn make(x_px: f32, advance: f32, run_index: u16, foreground: u32, name: [128]u8) UnresolvedGlyph {
+            return .{
+                .glyph_id = 12,
+                .codepoint = 'A',
+                .fallback = false,
+                .color_glyph_kind = .monochrome,
+                .x_px = x_px,
+                .advance_px = advance,
+                .font_name = name,
+                .point_size = 14,
+                .line_height_px = 20,
+                .origin = .{ .x = 100, .y = 40 },
+                .foreground = foreground,
+                .run_index = run_index,
+            };
+        }
+    };
+    // run0: 폭 30(=0+30). run1: 이어 붙임. run2: 이어 붙임 → run0+run1 만큼 밀린다.
+    const glyphs = try allocator.dupe(UnresolvedGlyph, &.{
+        glyph.make(0, 30, 0, 0xAABBCC, font_name),
+        glyph.make(0, 11, 1, 0x112233, font_name),
+        glyph.make(0, 7, 2, 0x445566, font_name),
+    });
+    const layouts = try allocator.dupe(chrome.draw.TextPlacement, &.{ .origin, .origin, .origin });
+    var unresolved = UnresolvedArtifact{
+        .glyphs = glyphs,
+        .placements = layouts,
+        .foregrounds = try allocator.dupe(u32, &.{ 0xAABBCC, 0x112233, 0x445566 }),
+        .scroll_flags = try allocator.dupe(bool, &.{ false, false, false }),
+        .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{ null, null, null }),
+        .cell_widths = try allocator.dupe(?u16, &.{ null, null, null }),
+        .continues = try allocator.dupe(bool, &.{ false, true, true }),
+    };
+    defer unresolved.deinit(allocator);
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    var artifact = try resolveArtifact(allocator, &registry, unresolved);
+    defer artifact.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), artifact.placements.len);
+    try std.testing.expectEqual(@as(f32, 100), artifact.placements[0].x_px);
+    try std.testing.expectEqual(@as(f32, 130), artifact.placements[1].x_px); // 100 + run0(30)
+    try std.testing.expectEqual(@as(f32, 141), artifact.placements[2].x_px); // 100 + 30 + run1(11)
+    // 색은 run 마다 그대로 실린다 — 이어 붙였다고 앞 run 색으로 합쳐지지 않는다.
+    try std.testing.expectEqual(@as(u32, 0x112233), artifact.placements[1].foreground);
+}
+
 test "leading icon group resolves measured label and SVG to one final-pixel artifact" {
     const allocator = std.testing.allocator;
     var font_name = [_]u8{0} ** 128;
@@ -976,7 +1060,7 @@ test "leading icon group resolves measured label and SVG to one final-pixel arti
         .gap_px = 10,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0xAABBCC});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();
@@ -1000,7 +1084,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}), .continues = try allocator.dupe(bool, &.{false}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();

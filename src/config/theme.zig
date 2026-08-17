@@ -54,6 +54,20 @@ pub const Meta = struct {
     /// 값을 diagnostic + 기본값 유지로 거른다 — GUI·파일이 같은 "절대경로" 규칙을 쓰게 한다(config-gui.md §1
     /// 드리프트 방지). GUI(commitSelectedText)는 저장된 값에 access(X_OK) 안내를 별도로 띄운다.
     abs_path: bool = false,
+    /// text 필드가 **파일시스템 경로**인지. true면 파일 파싱이 구분자를 POSIX(`/`)로 정규화해 저장한다
+    /// (입구 정규화 — docs/windows-platform.md §5 규칙 1). Windows 사용자는 `workspace.root = C:\proj`처럼
+    /// native로 적는 것이 자연스러운데, 그대로 두면 L2가 `/`로 이어 붙인 결과와 섞여
+    /// `C:\proj/docs`가 된다. `abs_path`는 이것을 **함의한다**(절대경로 요구 필드는 정의상 경로다).
+    ///
+    /// **POSIX 호스트에서는 아무것도 안 바꾼다** — 거기서 `\`는 파일 이름 글자라 바꾸면 다른 파일을
+    /// 가리킨다(§5.1의 회귀). 판정은 `path_shape.normalizeSeparatorsFor(os_tag, …)`가 소유한다.
+    path_value: bool = false,
+
+    /// 이 필드가 경로인가 — `abs_path`가 `path_value`를 함의한다. 둘을 따로 적게 두면 한쪽만 붙이는
+    /// 실수가 조용히 정규화를 건너뛴다.
+    pub fn isPath(self: Meta) bool {
+        return self.path_value or self.abs_path;
+    }
 };
 
 /// macOS app host frame-loop timer cadence. 60Hz is the default interactive cadence;
@@ -1194,7 +1208,7 @@ pub const Config = struct {
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = .cfg_window_padding_left, .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_opacity = Meta{ .key = "window.opacity", .doc = .cfg_window_opacity, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .render_frame_rate = Meta{ .key = "render.frame-rate", .doc = .cfg_render_frame_rate, .range = .{ render_frame_rate_min, render_frame_rate_max }, .widget = .number, .section = .window },
-        .window_background_image = Meta{ .key = "window.background-image", .doc = .cfg_window_background_image, .widget = .text, .section = .window },
+        .window_background_image = Meta{ .key = "window.background-image", .doc = .cfg_window_background_image, .widget = .text, .section = .window, .path_value = true },
         .window_blur = Meta{ .key = "window.blur", .doc = .cfg_window_blur, .range = .{ 0, 100 }, .widget = .number, .section = .window },
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = .cfg_window_unfocused_dim, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = .cfg_split_divider_thickness, .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },

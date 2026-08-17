@@ -49,11 +49,17 @@ def entry_pattern(path: str) -> re.Pattern[str]:
 
 
 def run_gate() -> tuple[int, str]:
+    # **인코딩을 명시한다.** 안 주면 Python 이 로케일 기본으로 읽는데, 한국어 Windows 는 cp949 라
+    # 게이트가 뱉는 UTF-8 한국어에서 `UnicodeDecodeError` 로 죽는다(실측: 이 저장소의 진단 메시지가
+    # 전부 한국어다). `errors="replace"` 는 그래도 못 읽는 바이트가 있을 때 도구가 멈추지 않게 한다 —
+    # 여기서 읽는 것은 사람이 볼 진단이지 판정 데이터가 아니다.
     proc = subprocess.run(
         ["zig", "build", "check-boundaries"],
         cwd=REPO,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return proc.returncode, proc.stdout + proc.stderr
 

@@ -10,6 +10,9 @@
 const std = @import("std");
 const theme = @import("theme.zig");
 const appearance = @import("appearance.zig");
+// 경로 값 정규화(입구 규칙 — docs/windows-platform.md §5). OS 를 인자로 받는 순수 함수라 두 갈래가
+// 모든 타깃에서 테스트된다.
+const path_shape = @import("../path_shape.zig");
 
 /// config 한 줄의 키·값 쌍(직렬화 토큰). loader.updateConfigText/serialize가 소비. loader.KeyValue가 이걸 재출력한다
 /// (KeyValue를 여기 두는 이유: appendSerialized가 쓰는데 schema는 loader를 import하면 사이클이라 — loader→schema 단방향).
@@ -125,6 +128,14 @@ fn parseAndSet(
                     try diags.append(a, .{ .line = line_no, .message = full_key ++ "는 실행 파일 절대경로여야 함(~·상대경로 무시 — 기본 셸 사용)" });
                     return;
                 }
+            }
+            // **경로 값은 입구에서 구분자를 정규화한다**(docs/windows-platform.md §5 규칙 1). Windows
+            // 사용자는 `workspace.root = C:\proj` 처럼 native 로 적는 것이 자연스러운데, 그대로 두면 L2 가
+            // `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다 — `$HOME` 입구에서 이미 한 번 겪은
+            // 증상이다(W3). POSIX 호스트에서는 아무것도 안 바꾼다(`\` 가 파일 이름 글자다).
+            if (comptime meta.isPath()) {
+                ptr.* = try path_shape.normalizeSeparators(a, trimmed);
+                return;
             }
             ptr.* = try a.dupe(u8, trimmed);
         }

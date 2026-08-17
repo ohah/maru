@@ -23,6 +23,7 @@ const editor_diff_ops = @import("editor_diff.zig");
 const workspace_ops = @import("workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
+const editor_fold = maru.session.editor.fold;
 const chrome_editor = maru.chrome.components.editor_view;
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
@@ -811,6 +812,61 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
     return layout.content.width;
 }
 
+/// 접을 범위를 세어 Term에 둔다(이미 있으면 그대로). **명령에서만 부른다** — 렌더는 할당하지 않는다.
+///
+/// **넘긴 뒤에는 실패 지점이 없다.** 이 세션에서 같은 자리의 이중 해제를 세 번 잡았다
+/// (native-editor-layering.md §2.0a) — 잡을 것을 **모두 잡은 뒤** 한꺼번에 넘긴다.
+fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+    if (term.rt.editor_fold_ranges.len > 0) return;
+    const lines = editorLines(term);
+    if (lines.len == 0) return;
+
+    const tab_width = chrome_editor.frame.default_tab_width;
+    const n = editor_fold.countRanges(lines, tab_width);
+    if (n == 0) return;
+
+    const ranges = try self.allocator.alloc(editor_fold.Range, n);
+    errdefer self.allocator.free(ranges);
+    const folded = try self.allocator.alloc(u32, n); // 접기/펼치기가 다시 할당하지 않게 미리 잡는다
+
+    // 여기서부터 실패 지점이 없다 — 넘긴다.
+    _ = editor_fold.compute(lines, tab_width, ranges);
+    term.rt.editor_fold_ranges = ranges;
+    term.rt.editor_folded_buf = folded;
+    term.rt.editor_folded_len = 0;
+}
+
+/// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
+/// 편집기가 아니거나 접을 것이 없으면 `false`.
+pub fn foldAll(self: *AppSession) bool {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return false;
+    ensureFoldRanges(self, term) catch return false; // 못 세면 아무 일도 안 한다
+    const ranges = term.rt.editor_fold_ranges;
+    if (ranges.len == 0) return false;
+
+    // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 그대로 담는다.
+    for (ranges, 0..) |r, i| term.rt.editor_folded_buf[i] = r.head;
+    term.rt.editor_folded_len = ranges.len;
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 전부 펼친다.
+pub fn unfoldAll(self: *AppSession) bool {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_folded_len == 0) return false;
+    term.rt.editor_folded_len = 0;
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 지금 접혀 있는 머리 줄들(오름차순).
+pub fn foldedHeads(term: *const Term) []const u32 {
+    return term.rt.editor_folded_buf[0..term.rt.editor_folded_len];
+}
+
 /// 활성 Term이 편집기면 그 뷰의 랩을 뒤집는다. 아니면 무동작(true를 안 돌려주므로 호출자가 안다).
 ///
 /// **override를 세우는 방식이다** — 지금 보이는 값의 반대를 뷰에 박는다. config를 바꾸지 않는 이유는
@@ -838,6 +894,8 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     if (term.rt.editor_path) |p| self.allocator.free(p);
+    if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
+    if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
     term.rt.editor_path = null;
 }
 
@@ -2712,4 +2770,99 @@ test "override 없이 연 편집기는 config 기본을 따른다 — 되돌림�
     defer wrapped.dl.deinit(allocator);
     try testing.expect(fx.term.rt.editor_total_visual_rows > lines.len); // 접혔다
     try testing.expect(!scrollCols(fx.session, fx.term, fx.leaf_rect, -20, null)); // 가로 축을 안 가져간다
+}
+
+test "전체 접기·펼치기 — 접힌 머리가 오름차순이고 다시 할당하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 6);
+    defer allocator.free(lines);
+    lines[0] = "a:";
+    lines[1] = "  1";
+    lines[2] = "  2";
+    lines[3] = "b:";
+    lines[4] = "  3";
+    lines[5] = "c";
+    fx.term.rt.editor_lines = lines;
+
+    try testing.expect(foldAll(fx.session));
+    const heads = foldedHeads(fx.term);
+    try testing.expectEqual(@as(usize, 2), heads.len);
+    try testing.expectEqual(@as(u32, 0), heads[0]);
+    try testing.expectEqual(@as(u32, 3), heads[1]);
+    // **오름차순이어야 한다** — `hiddenSpans`가 그것을 계약으로 요구한다(어기면 조용히 빠뜨린다).
+    for (heads[1..], 0..) |h, i| try testing.expect(h > heads[i]);
+
+    // 숨는 구간이 실제로 나온다.
+    var sbuf: [8]editor_fold.Span = undefined;
+    const spans = editor_fold.hiddenSpans(fx.term.rt.editor_fold_ranges, heads, &sbuf);
+    try testing.expectEqual(@as(usize, 2), spans.len);
+    try testing.expect(editor_fold.isHidden(spans, 1) and editor_fold.isHidden(spans, 4));
+    try testing.expect(!editor_fold.isHidden(spans, 0) and !editor_fold.isHidden(spans, 5));
+
+    // **다시 접어도 새로 할당하지 않는다** — 버퍼를 미리 잡아 뒀다.
+    const buf_ptr = fx.term.rt.editor_folded_buf.ptr;
+    try testing.expect(unfoldAll(fx.session));
+    try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len);
+    try testing.expect(foldAll(fx.session));
+    try testing.expectEqual(buf_ptr, fx.term.rt.editor_folded_buf.ptr);
+
+    // 펼칠 것이 없으면 `false`(호출자가 무동작을 안다).
+    try testing.expect(unfoldAll(fx.session));
+    try testing.expect(!unfoldAll(fx.session));
+}
+
+test "접을 것이 없는 문서에서는 전체 접기가 무동작이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const flat = try allocator.alloc([]const u8, 3);
+    defer allocator.free(flat);
+    for (flat) |*l| l.* = "x";
+    fx.term.rt.editor_lines = flat;
+    try testing.expect(!foldAll(fx.session));
+}
+
+test "접힘 범위 계산이 어디서 할당에 실패해도 새거나 두 번 풀지 않는다" {
+    // **같은 자리에서 이중 해제를 세 번 잡았다**(layering §2.0a). 세션 allocator는 init에 고정이라
+    // `checkAllAllocationFailures`를 그대로 못 쓴다 — 세션을 실패 allocator로 만들고 **init이 끝난
+    // 뒤부터** 실패 지점을 민다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+    var failed_steps: usize = 0;
+    var ok_steps: usize = 0;
+
+    var step: usize = 0;
+    while (step < 12) : (step += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = fa.allocator();
+        var fx = try PaneFixture.init(alloc);
+        defer fx.deinit(alloc);
+
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+        const lines = try backing.alloc([]const u8, 4);
+        defer backing.free(lines);
+        lines[0] = "a:";
+        lines[1] = "  1";
+        lines[2] = "b:";
+        lines[3] = "  2";
+        fx.term.rt.editor_lines = lines;
+
+        fa.fail_index = fa.allocations + step;
+        if (foldAll(fx.session)) ok_steps += 1 else failed_steps += 1;
+        _ = foldAll(fx.session); // 반쯤 지어진 상태에서 다시 불러도 안전해야 한다
+        _ = unfoldAll(fx.session);
+    }
+    // **공허해질 수 없게 센다** — 실패를 한 번도 안 겪으면 아무것도 지키지 않는다.
+    try testing.expect(failed_steps >= 1);
+    try testing.expect(ok_steps >= 1);
 }

@@ -875,6 +875,9 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     errdefer self.allocator.free(ranges);
     const folded = try self.allocator.alloc(u32, n); // 접기/펼치기가 다시 할당하지 않게 미리 잡는다
     errdefer self.allocator.free(folded);
+    // 되돌리기용 백업도 지금 잡는다 — 되돌리는 자리에 실패 지점이 있으면 실패했을 때 갇힌다.
+    const folded_prev = try self.allocator.alloc(u32, n);
+    errdefer self.allocator.free(folded_prev);
     // 표식도 여기서 잡는다 — 보이는 줄은 문서 줄보다 많을 수 없으므로 이 크기로 늘 충분하다.
     const marks = try self.allocator.alloc(chrome_editor.gutter.Fold, lines.len);
 
@@ -882,6 +885,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     _ = editor_fold.compute(lines, tab_width, ranges);
     term.rt.editor_fold_ranges = ranges;
     term.rt.editor_folded_buf = folded;
+    term.rt.editor_folded_prev = folded_prev;
     term.rt.editor_folded_len = 0;
     term.rt.editor_fold_marks = marks;
     term.rt.editor_fold_marks_len = 0;
@@ -890,6 +894,31 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
 /// 편집기가 아니거나 접을 것이 없으면 `false`.
 pub fn foldAll(self: *AppSession) bool {
+    return applyFold(self, null);
+}
+
+/// **그 중첩 레벨의 블록만 접는다**(VSCode `editor.foldLevelN`). 레벨 1이 문서 맨 바깥이다.
+///
+/// **집합을 합치지 않고 갈아 끼운다.** VSCode는 기존 접힘 위에 더하지만 Vim `foldlevel`은 그 레벨에
+/// 맞춰 열고 닫는다 — 두 선례가 갈리는 자리다. N1에는 **개별 접기가 없어** 접힘 상태가 늘 "전체 ·
+/// 어느 레벨 · 없음" 중 하나이므로, 갈아 끼우는 쪽이 (a) 같은 명령을 두 번 눌러도 결과가 같고
+/// (b) 레벨 2를 본 뒤 레벨 1을 누르면 더 크게 접히는 예측 가능한 사다리가 된다. 합치기를 택하면
+/// 되돌릴 방법이 전체 펼치기뿐이라 사다리를 내려올 수 없다.
+///
+/// 그 레벨에 블록이 없으면 **아무 일도 안 한다**(`false`) — 갈아 끼우는 모델에서 빈 집합을 넣으면
+/// "접기 명령을 눌렀는데 펼쳐지는" 화면이 된다.
+pub fn foldLevel(self: *AppSession, level: u16) bool {
+    return applyFold(self, level);
+}
+
+/// 접힘 집합을 바꾸는 **유일한 경로**. `level`이 `null`이면 전부, 아니면 그 레벨만 접는다.
+///
+/// **실패하면 있던 집합으로 되돌린다 — 비우는 것이 아니다.** 이미 접힌 채로 다시 접다 실패하면
+/// 화면은 접힌 그대로인데 상태만 "안 접힘"이 된다. 그러면 `unfoldAll`이 `folded_len == 0`을 보고
+/// 거절해 **숨은 줄을 영영 못 되찾는다**(할당 실패 주입으로 실측: 문서 4줄인데 화면 2줄, 펼치기
+/// 불가. 적대적 검증 2026-08-17). 레벨 접기가 들어오면서 **길이만으로는 되돌릴 수 없어**
+/// (같은 길이라도 다른 머리들이다) 백업 배열을 함께 든다.
+fn applyFold(self: *AppSession, level: ?u16) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
     if (foldsUnavailable(term)) return false; // 아래 doc — diff 상태에서는 접지 않는다
@@ -897,21 +926,23 @@ pub fn foldAll(self: *AppSession) bool {
     const ranges = term.rt.editor_fold_ranges;
     if (ranges.len == 0) return false;
 
-    // **실패하면 있던 자리로 되돌린다 — 0이 아니다.** 이미 접힌 채로 다시 접다 실패하면 화면은 접힌
-    // 그대로인데 상태만 "안 접힘"이 된다. 그러면 `unfoldAll`이 `folded_len == 0`을 보고 거절해
-    // **숨은 줄을 영영 못 되찾는다**(할당 실패 주입으로 실측: 문서 4줄인데 화면 2줄, 펼치기 불가.
-    // 적대적 검증 2026-08-17).
     const prev_len = term.rt.editor_folded_len;
-    // N1의 접힘 상태는 **전부 아니면 없음**이라(전체 접기/펼치기뿐) 아래에서 버퍼를 덮어써도 되돌릴
-    // 내용이 같다. 범위별·레벨 접기가 오면 **덮기 전에 옛 머리 집합을 따로 들어야 한다** — 그때
-    // 이 단언이 먼저 터진다.
-    std.debug.assert(prev_len == 0 or prev_len == ranges.len);
+    @memcpy(term.rt.editor_folded_prev[0..prev_len], term.rt.editor_folded_buf[0..prev_len]);
 
-    // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 그대로 담는다.
-    for (ranges, 0..) |r, i| term.rt.editor_folded_buf[i] = r.head;
-    term.rt.editor_folded_len = ranges.len;
-    const anchor = topDocLine(term); // 상태를 바꾸기 **전에** 지금 맨 위가 문서 몇째 줄인지 잡는다
+    // `hiddenSpans`가 **오름차순**을 계약으로 요구한다. `compute`가 문서 순서로 내므로 걸러도
+    // 순서가 유지된다.
+    var n: usize = 0;
+    for (ranges) |r| {
+        if (level) |want| if (r.level != want) continue;
+        term.rt.editor_folded_buf[n] = r.head;
+        n += 1;
+    }
+    if (n == 0) return false; // 그 레벨에 블록이 없다 — 위 doc
+
+    term.rt.editor_folded_len = n;
+    const anchor = topDocLine(term); // 화면을 다시 만들기 **전에** 맨 위가 문서 몇째 줄인지 잡는다
     rebuildVisible(self, term) catch {
+        @memcpy(term.rt.editor_folded_buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
         term.rt.editor_folded_len = prev_len; // 화면이 그대로니 상태도 그대로 둔다
         return false;
     };
@@ -1151,6 +1182,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_path) |p| self.allocator.free(p);
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
+    if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
     if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
@@ -3269,6 +3301,18 @@ test "[측정] 큰 파일을 여는 값 — 범위 세기와 표식 만들기가
         const t1 = monotonicMsForTest();
         std.debug.print("\n[측정] {d}줄 열기의 접힘 몫({s}): {d}ms\n", .{ n, if (nested) "블록 6만" else "평평", t1 - t0 });
 
+        // **여는 것만으로 무는 메모리도 함께 적는다.** 접기를 한 번도 안 누른 사용자까지 이 값을
+        // 물기 때문이다 — 큰 파일을 여러 개 띄우면 누적된다. 접은 뒤의 값은 `editor_visible_*`가
+        // 더해져 더 커지므로 접고 나서 잰다.
+        _ = foldAll(fx.session);
+        const rt = &fx.term.rt;
+        const held = rt.editor_fold_ranges.len * @sizeOf(editor_fold.Range) +
+            rt.editor_folded_buf.len * @sizeOf(u32) +
+            rt.editor_fold_marks.len * @sizeOf(chrome_editor.gutter.Fold) +
+            rt.editor_visible_lines.len * @sizeOf([]const u8) +
+            rt.editor_visible_numbers.len * @sizeOf(?u32);
+        std.debug.print("[측정] 같은 문서의 접힘 자료구조({s}): {d}KiB\n", .{ if (nested) "접은 뒤" else "평평", held / 1024 });
+
         // **재앙 감지선이지 예산이 아니다.** 여는 순간이 눈에 띄게 멈추면 여기서 걸린다.
         try testing.expect(t1 - t0 < 500);
     }
@@ -3631,6 +3675,94 @@ test "접기 명령이 액션에서 끝까지 이어진다" {
     fx.session.dispatchAppAction(.unfold_all);
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len); // 원본을 그대로 그린다
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_folded_len);
+}
+
+test "레벨 접기는 그 겹의 블록만 접고, 명령이 끝까지 이어진다" {
+    // §4.1f가 N1 범위에 넣은 **레벨 접기**. 전체 접기와 달리 "어느 겹을 접는가"를 고르므로,
+    // 레벨 1은 최상위만(안쪽은 그 아래 숨는다), 레벨 2는 **함수 본문은 보이고 그 안 블록만** 접힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 6);
+    defer allocator.free(lines);
+    lines[0] = "class A:";
+    lines[1] = "    def m():";
+    lines[2] = "        x = 1";
+    lines[3] = "        y = 2";
+    lines[4] = "    def n():";
+    lines[5] = "        z = 3";
+    fx.term.rt.editor_lines = lines;
+
+    // 레벨 1 — 맨 바깥(class)만 접는다. 화면에 그 머리 한 줄만 남는다.
+    fx.session.dispatchAppAction(.fold_level_1);
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_visible_lines.len);
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_folded_len);
+
+    // 레벨 2 — **갈아 끼운다**(위 doc: 합치지 않는다). class는 펼쳐지고 두 메서드가 접힌다.
+    fx.session.dispatchAppAction(.fold_level_2);
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_folded_len);
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_visible_lines.len); // class + def m + def n
+    try testing.expectEqualStrings("class A:", fx.term.rt.editor_visible_lines[0]);
+    try testing.expectEqualStrings("    def n():", fx.term.rt.editor_visible_lines[2]);
+
+    // 레벨 3 — 그 겹에 블록이 없다. **아무 일도 안 한다**(빈 집합을 넣어 펼쳐지면 안 된다).
+    try testing.expect(!foldLevel(fx.session, 3));
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_folded_len); // 레벨 2가 그대로다
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_visible_lines.len);
+
+    try testing.expect(unfoldAll(fx.session));
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len);
+}
+
+test "레벨 접기가 실패해도 옛 집합으로 되돌린다 — 길이만으로는 못 되돌린다" {
+    // 전체 접기뿐이던 시절에는 집합이 "전부 아니면 없음"이라 길이가 곧 내용이었다. 레벨 접기가
+    // 들어오면 **같은 길이라도 다른 머리들**이라, 되돌리기가 길이만 보면 화면과 상태가 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+    var restored: usize = 0;
+
+    var step: usize = 0;
+    while (step < 12) : (step += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = fa.allocator();
+        var fx = try PaneFixture.init(alloc);
+        defer fx.deinit(alloc);
+
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+        const lines = try backing.alloc([]const u8, 6);
+        defer backing.free(lines);
+        lines[0] = "a:";
+        lines[1] = "  1";
+        lines[2] = "  b:";
+        lines[3] = "    2";
+        lines[4] = "c:";
+        lines[5] = "  3";
+        fx.term.rt.editor_lines = lines;
+
+        // 레벨 2를 먼저 세운다(머리 하나: `b:`). 여기서 실패하면 이 회차는 볼 것이 없다.
+        if (!foldLevel(fx.session, 2)) continue;
+        const before = fx.term.rt.editor_folded_buf[0];
+        const before_visible = fx.term.rt.editor_visible_lines.len;
+
+        // 그다음 레벨 1(머리 둘)이 할당에 실패하게 민다.
+        fa.fail_index = fa.allocations + step;
+        if (foldLevel(fx.session, 1)) continue; // 성공했으면 이 회차는 되돌리기를 안 본다
+
+        // **집합이 옛 것 그대로여야 한다** — 길이도, 그 안의 머리도.
+        try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_folded_len);
+        try testing.expectEqual(before, fx.term.rt.editor_folded_buf[0]);
+        try testing.expectEqual(before_visible, fx.term.rt.editor_visible_lines.len);
+        // 그리고 **펼치기가 여전히 듣는다**(갇히지 않는다).
+        try testing.expect(unfoldAll(fx.session));
+        restored += 1;
+    }
+    // 공허해질 수 없게 센다 — 되돌리기를 한 번도 안 겪으면 아무것도 지키지 않는다.
+    try testing.expect(restored >= 1);
 }
 
 test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {

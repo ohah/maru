@@ -1618,6 +1618,13 @@ const TermRuntime = struct {
     /// 접기/펼치기가 다시 할당하지 않는다(`hiddenSpans`가 오름차순을 계약으로 요구한다).
     editor_folded_buf: []u32 = &.{},
     editor_folded_len: usize = 0,
+    /// 접힘 집합을 바꾸기 **직전의 집합**. 다시 만들기가 실패하면 여기서 되돌린다.
+    ///
+    /// **길이만 되돌리는 것으로는 부족하다.** 전체 접기뿐이던 시절에는 집합이 "전부 아니면 없음"이라
+    /// 길이가 곧 내용이었지만, 레벨 접기가 들어오면 같은 길이라도 **다른 머리들**이다. 백업 없이
+    /// 되돌리면 화면과 상태가 갈린다(그 부류를 이미 한 번 잡았다 — 펼치기가 거절돼 숨은 줄을 영영
+    /// 못 되찾은 결함). `editor_folded_buf`와 같은 크기를 미리 잡아 **되돌리기에 실패 지점이 없다.**
+    editor_folded_prev: []u32 = &.{},
     /// 화면 맨 위 줄에서 **건너뛸 조각 수**(§4.1d — 앵커 + 조각 오프셋).
     ///
     /// **앵커는 `editor_first_line`, 오프셋은 이것**이다. 논리 줄만 들면 줄 안쪽에 설 수 없어,
@@ -7158,6 +7165,10 @@ pub const AppSession = struct {
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
+            // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).
+            .fold_level_1 => _ = editor_ops.foldLevel(self, 1),
+            .fold_level_2 => _ = editor_ops.foldLevel(self, 2),
+            .fold_level_3 => _ = editor_ops.foldLevel(self, 3),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),

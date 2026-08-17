@@ -126,6 +126,13 @@ pub const Action = union(enum) {
     // 팝업과 사용자 키바인딩으로 쓴다 — 아무 chord도 뺏지 않는다.
     fold_all,
     unfold_all,
+    // 그 **중첩 레벨**의 블록만 접는다(VSCode `editor.foldLevelN`). 레벨 1이 문서 맨 바깥이다.
+    // **셋까지만 낸다** — 커맨드 팝업 항목이 레벨마다 하나씩 늘고, 4단계보다 깊은 곳을 레벨로
+    // 지목하는 일은 드물다(그 깊이는 전체 접기가 더 빠르다). VSCode는 7까지 두지만 그쪽은 chord로
+    // 부르므로 목록을 늘리는 비용이 없다.
+    fold_level_1,
+    fold_level_2,
+    fold_level_3,
     // 스크롤백 Find의 다음/이전 매치로 이동(⌘G/⌘⇧G) — **오버레이가 닫혀 있어도** 동작한다(보존된 검색어로
     // 재검색해 네비게이션, macOS Find Next 관례). dispatchAppAction이 findNavigate로 넘긴다. 오버레이가 열린
     // 동안엔 모달 라우팅이 키를 가로채므로(Enter/Shift+Enter가 next/prev) 이 액션은 닫힌 경우를 위한 것이다.
@@ -200,6 +207,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "fold_all")) return .fold_all;
     if (std.mem.eql(u8, value, "unfold_all")) return .unfold_all;
+    if (std.mem.eql(u8, value, "fold_level_1")) return .fold_level_1;
+    if (std.mem.eql(u8, value, "fold_level_2")) return .fold_level_2;
+    if (std.mem.eql(u8, value, "fold_level_3")) return .fold_level_3;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
     if (std.mem.eql(u8, value, "find_previous")) return .find_previous;
     if (std.mem.eql(u8, value, "increase_font_size")) return .increase_font_size;

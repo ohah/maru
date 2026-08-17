@@ -296,7 +296,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     var visual_rows: [512]chrome_editor.visual_map.VisualRow = undefined;
     var gutter_rows: [512]chrome_editor.gutter.Row = undefined;
     var counts: [4096]u32 = undefined;
-    var count_scratch: [8192]u8 = undefined;
+    // **세는 쪽과 그리는 쪽이 같은 크기를 쓴다**(`content.count_scratch_bytes`) — 갈리면 같은 줄의
+    // 행 수가 달라진다.
+    var count_scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined;
 
     // **원점은 0,0이다.** 컴포넌트가 내는 좌표는 pane **상대**여야 한다 — 창 절대 좌표를 주면
     // `buildTextDrawList`가 셀 인덱스로 바꿀 때 pane 폭을 넘어 글자가 잘린다. 화면상의 자리는
@@ -615,7 +617,7 @@ fn scrollPieces(self: *AppSession, term: *Term, delta_rows: i32, total_lines: us
 fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
     const lines = editorLines(term);
     if (line >= lines.len or content_cols == 0) return 1;
-    var scratch: [8192]u8 = undefined;
+    var scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined; // 렌더와 같은 크기
     const c = chrome_editor.content.rowCount(
         lines[line],
         chrome_editor.frame.default_tab_width,
@@ -3423,4 +3425,50 @@ test "접힌 채로 다시 접다 실패해도 숨은 줄을 되찾을 수 있�
         try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len); // 원본을 그대로 그린다
     }
     try testing.expect(stuck_checked >= 1); // 실패를 한 번도 못 겪었으면 아무것도 지키지 않았다
+}
+
+test "탭이 든 긴 줄이 랩에서 끝까지 그려지고 닿는다" {
+    // 세는 저장소가 8 KiB였을 때 이 줄은 **103행**으로 세어졌다(실제 250행) — 랩에서 59%가 그려지지도
+    // 닿지도 않았다. 상수만 키우고 **제품 두 자리 중 하나라도 안 쓰면** 다시 갈리므로 여기서 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long = try allocator.alloc(u8, 10_000);
+    defer allocator.free(long);
+    var i: usize = 0;
+    while (i < long.len) : (i += 2) {
+        long[i] = 'a';
+        long[i + 1] = '\t';
+    }
+    const lines = try allocator.alloc([]const u8, 1);
+    defer allocator.free(lines);
+    lines[0] = long;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+
+    // 렌더가 실어 둔 시각 행 수 — 넉넉한 저장소로 잰 값과 같아야 한다.
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const cols = visibleCols(fx.session, body, fx.term, false);
+    const big = try allocator.alloc(u8, 1 << 20);
+    defer allocator.free(big);
+    const want = chrome_editor.content.rowCount(long, chrome_editor.frame.default_tab_width, cols, true, big);
+    try testing.expect(!want.truncated); // 기준이 절단됐으면 판정이 공허하다
+    try testing.expect(want.rows > 100); // 8 KiB 시절 값(103행)보다 확실히 크다
+    try testing.expectEqual(@as(usize, want.rows), fx.term.rt.editor_total_visual_rows);
+
+    // 스크롤도 같은 값을 봐야 한다 — 끝 조각까지 닿는다.
+    for (0..40) |_| {
+        _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -20);
+        var dx = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        dx.dl.deinit(allocator);
+    }
+    try testing.expectEqual(fx.term.rt.editor_max_top_piece, fx.term.rt.editor_first_piece);
+    try testing.expect(fx.term.rt.editor_first_piece > 100); // 8 KiB 시절엔 여기까지 못 갔다
 }

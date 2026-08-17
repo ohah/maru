@@ -234,6 +234,17 @@ pub fn build(
 /// 적어지는데, **그 사실을 `RowCount.truncated`로 함께 돌려준다** — §3.8이 "초장문에서 기능을
 /// 줄인다"고 허용한 범위이지만 **조용해서는 안 되기 때문이다**(그 값이 스크롤바 길이가 되므로,
 /// 알리지 않으면 문서가 일찍 끝난 것처럼 보인다).
+/// `rowCount`에 줄 저장소를 **얼마나 줘야 하는가**. 세는 쪽과 그리는 쪽이 이 값을 함께 쓴다 —
+/// 둘이 갈리면 같은 줄의 행 수가 달라진다.
+///
+/// **8 KiB로는 모자랐다**: 탭이 든 1만 바이트 줄(TSV·로그)이 8 KiB에서 **103행**, 넉넉한 저장소에서
+/// **250행**이었다(실측. 적대적 검증 2026-08-17). 랩에서 그 줄의 59%가 그려지지도 닿지도 않는다.
+/// 위의 "전개가 원본과 같으면 저장소를 안 쓴다" 빠른 길은 **탭이 있으면 안 탄다** — 그래서 한글 긴
+/// 줄에서 겪은 같은 사고(60행 대 1,305행. 2026-08-16)가 탭 줄에는 그대로 남아 있었다.
+///
+/// 64 KiB면 전개 6만 열까지 덮는다. 그보다 긴 줄은 여전히 절단되지만 `RowCount.truncated`가 알린다.
+pub const count_scratch_bytes: usize = 64 * 1024;
+
 pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) RowCount {
     if (!wrap or view_cols == 0) return .{ .rows = 1 };
 
@@ -1794,4 +1805,29 @@ test "긴 비ASCII 줄도 저장소와 무관하게 같은 조각 수를 준다 
     try std.testing.expectEqual(r_big.rows, r_small.rows);
     try std.testing.expect(!r_small.truncated);
     try std.testing.expect(r_small.rows > 1000);
+}
+
+test "탭이 든 긴 줄도 행 수가 절단되지 않는다" {
+    // 8 KiB 저장소에서는 **103행**이었고 실제는 **250행**이다 — 랩에서 그 줄의 59%가 못 닿는다.
+    // 빠른 길(전개 없음)은 탭이 있으면 안 타므로, 저장소 크기가 그대로 답이 된다.
+    const a = std.testing.allocator;
+    const line = try a.alloc(u8, 10_000);
+    defer a.free(line);
+    var i: usize = 0;
+    while (i < line.len) : (i += 2) {
+        line[i] = 'a';
+        line[i + 1] = '\t';
+    }
+
+    const big = try a.alloc(u8, 1 << 20);
+    defer a.free(big);
+    const want = rowCount(line, 4, 80, true, big);
+    try std.testing.expect(!want.truncated); // 기준 자체가 절단됐으면 판정이 공허하다
+
+    const scratch = try a.alloc(u8, count_scratch_bytes);
+    defer a.free(scratch);
+    const got = rowCount(line, 4, 80, true, scratch);
+    try std.testing.expect(!got.truncated);
+    try std.testing.expectEqual(want.rows, got.rows);
+    try std.testing.expect(got.rows > 200); // 8 KiB였다면 103행이다
 }

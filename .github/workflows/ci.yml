@@ -7,6 +7,11 @@ on:
   # 그 전환에 아무 이벤트도 안 오고, draft 동안 건너뛴 job 이 영영 안 돈다.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # 수동 실행. `session host macOS (ReleaseFast)` 가 이 이벤트에서만 도는 유일한 잡이므로,
+  # 릴리스 빌드 전에는 반드시 한 번 돌린다: `gh workflow run ci.yml`.
+  # 다른 잡들도 함께 도는데, `changes` 가 base/head 없이 fail-safe 로 전 영역을 켜기 때문이다
+  # (릴리스 전 전수 검증이 목적이라 그 편이 맞다).
+  workflow_dispatch:
 
 # 같은 ref에서 새 푸시가 오면 진행 중인 실행을 취소한다.
 concurrency:
@@ -296,17 +301,22 @@ jobs:
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)
     needs: changes
-    # **PR에서는 안 돈다 — main push에서만.** Debug와 같은 테스트를 도는 게 아니라 *다른 실행 체제*다:
-    # ReleaseFast는 런타임 안전 검사가 꺼져 Debug가 트랩하던 UB가 진짜 UB가 되고, 코드가 빨라져
-    # fork/exec·소켓·스레딩의 인터리빙도 달라진다. 그래서 없앨 수 없고 **시점만 뒤로 옮긴다**.
+    # **자동으로는 돌지 않는다 — `workflow_dispatch` 수동 실행 전용이다.** Debug와 같은 테스트를 도는 게
+    # 아니라 *다른 실행 체제*다: ReleaseFast는 런타임 안전 검사가 꺼져 Debug가 트랩하던 UB가 진짜 UB가
+    # 되고(session host 소스의 `std.debug.assert` 123개도 사라진다), 코드가 빨라져 fork/exec·소켓·스레딩의
+    # 인터리빙도 달라진다. 출하 `.dmg`가 ReleaseFast이므로 **이 잡만이 출하 체제를 검증한다** — 그래서
+    # 없애지 않고 실행 시점만 계속 뒤로 옮긴다: PR → main push → 릴리스 빌드 전(2026-08-17).
     #
-    # 대가는 명시적이다: PR이 초록이어도 머지 뒤 이 잡이 빨개질 수 있다. 대신 PR마다 8분을 돌려받는다
-    # (실측: 잡 8개 합계 24분 46초 중 이 잡 하나가 8분 14초).
-    # ⚠️ 이 잡은 branch protection의 **필수 체크**였다 — PR에서 안 돌게 하려면 그 목록에서도 빼야 한다
-    # (필수인데 실행되지 않으면 PR이 영영 pending으로 막힌다). 이 PR과 함께 설정을 바꾼다.
-    # 이 job 은 main push 에서만 돈다 — 거기서는 `github.event.pull_request` 가 항상 null 이라
-    # draft 가드를 달아도 늘 참이다. 없는 게이팅을 있는 것처럼 보이게 하므로 달지 않는다.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    # 대가는 명시적이고, 이번에 더 커진다: main이 초록이어도 릴리스 직전에 이 잡이 처음 빨개질 수 있다.
+    # 그래서 **릴리스 전에 반드시 한 번 돌린다**(`gh workflow run ci.yml`). 얻는 것은 main push마다
+    # macOS 러너 14분과, main 그룹 캐시 항목 하나(약 500MB × 최신 2개)다 — 아래 저장 스텝이 push
+    # 이벤트에서만 저장하므로 수동 실행은 복원만 하고 캐시를 늘리지 않는다.
+    #
+    # ⚠️ 이 잡은 branch protection의 필수 체크가 **아니다**(PR에서 안 돌던 때 함께 뺐다). 필수인데
+    # 실행되지 않으면 PR이 영영 pending으로 막히므로, 다시 필수로 올리려면 실행 조건부터 되돌려야 한다.
+    # draft 가드는 달지 않는다 — 수동 실행에는 `github.event.pull_request`가 없어 늘 참이고,
+    # 없는 게이팅을 있는 것처럼 보이게 한다.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:

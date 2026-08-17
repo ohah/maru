@@ -203,6 +203,7 @@ pub fn followActiveTerminalRepo(self: *AppSession) void {
 fn clearScmResult(self: *AppSession) void {
     if (self.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
     self.git_result = null;
+    scm_dock_ops.invalidateRepoList(self); // 저장소가 갈렸다 — 목록도 다시 걷는다
     self.git_failed = false; // 옛 저장소의 실패를 새 저장소에 물려주지 않는다
     self.scm_scroll = .{}; // 다른 목록이므로 스크롤·선택은 의미가 없다(엉뚱한 행이 선택돼 보인다)
     self.scm_selected_row = null;
@@ -325,6 +326,9 @@ pub fn drainGitStatus(self: *AppSession) void {
         self.git_failed = false;
         if (self.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
         self.git_result = result;
+        // 새 결과에는 새 워크트리 목록이 실려 있을 수 있다 — 목록 캐시를 그 자리에서 무효화한다
+        // (주기를 기다리면 방금 만든 워크트리가 최대 500ms 늦게 뜬다).
+        scm_dock_ops.invalidateRepoList(self);
         // 새 목록이다 — 옛 화면을 겨냥한 늦은 클릭을 거부한다(세대 대조).
         bumpScmDockGeneration(self);
         // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번

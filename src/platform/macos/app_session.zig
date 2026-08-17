@@ -2457,6 +2457,14 @@ pub const WebNavAction = struct { surface_id: u64, code: u8 };
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
+/// 목록 항목 하나(세션 소유). 문자열이 세션 것이라 프레임 밖에서도 유효하다 — arena 버퍼를 들고
+/// 있으면 다음 프레임에 남의 글자를 가리킨다.
+pub const RepoListEntry = struct {
+    path: []u8,
+    origin: []u8,
+    primary: bool,
+};
+
 /// 비활성 저장소 하나의 머리 줄 요약(P3d-③). `git status` **하나**에서 나온 값이다.
 pub const RepoStatusEntry = struct {
     path: []u8,
@@ -3742,15 +3750,23 @@ pub const AppSession = struct {
     ///
     /// 경로·브랜치 문자열은 세션 소유다(읽기 결과 버퍼는 프레임마다 사라진다).
     scm_repo_status: std.ArrayList(RepoStatusEntry) = .empty,
+    /// 목록에 세울 저장소·워크트리(세션 소유 문자열). **저주기 캐시다**(§3.5.1c): 이 목록은 매 프레임
+    /// 필요한데 만드는 데 `repoRootFor`의 walk-up이 들어가고, 그건 경로 구성요소마다 `access(2)`를 쓴다 —
+    /// 캐시 없이 두면 터미널 수 × 경로 깊이만큼의 blocking syscall이 **프레임마다** 돈다(cwd 캐시가
+    /// `proc_cwd_poll_interval_ns`를 둔 것과 같은 이유·같은 주기).
+    scm_repo_list: std.ArrayList(RepoListEntry) = .empty,
+    /// 캐시를 component `Entry` 뷰로 빌려 줄 때 쓰는 자리(프레임 안에서만 유효).
+    scm_repo_entry_view: [maru.session.scm_repos.max_entries]maru.session.scm_repos.Entry = undefined,
+    /// 마지막으로 목록을 걸은 시각. 주기가 곧 "터미널을 새로 열었을 때 목록에 뜨기까지"의 상한이다.
+    scm_repo_list_walked_ns: i128 = 0,
+    /// 그 목록이 상한에 걸려 잘렸나(화면이 그 사실을 적는다).
+    scm_repo_list_truncated: bool = false,
     /// 이 프레임에 그린 **커밋 상자들의 published 노드 id**(목록 자리 = 저장소 자리로 색인). 상자가
     /// 저장소마다 하나씩이라 고정 id가 없고(②b), 창이 스크롤되면 같은 상자의 id가 달라진다 —
     /// 그리는 쪽이 매 프레임 다시 적는다.
     ///
     /// **첫 클릭에도 필요하다**: 그 클릭이 caret을 놓으려면 아직 포커스가 없는 상자의 rect를 알아야 한다.
     scm_commit_box_nodes: [maru.session.scm_repos.max_entries]?u64 = @splat(null),
-    /// intent가 든 목록 자리를 경로로 되찾을 때 쓰는 자리(프레임 안에서만 유효). 목록 버퍼는 arena
-    /// 것이라 호출이 끝나면 사라진다 — 그 슬라이스를 그대로 들면 댕글링이다.
-    scm_repo_path_scratch: [std.fs.max_path_bytes]u8 = undefined,
     /// 도는 머리 줄 읽기의 request id(0 = 없음). **하나씩 돈다** — 목록이 여덟이어도 프로세스는 하나다.
     scm_repo_status_inflight: u64 = 0,
     scm_repo_status_seq: u64 = 0,
@@ -16929,6 +16945,11 @@ pub const AppSession = struct {
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
+        for (self.scm_repo_list.items) |entry| { // 목록 캐시
+            self.allocator.free(entry.path);
+            self.allocator.free(entry.origin);
+        }
+        self.scm_repo_list.deinit(self.allocator);
         if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
@@ -54790,6 +54811,9 @@ test "소스 컨트롤: 비활성 저장소는 머리 줄 요약이 오면 `읽�
         u8,
         "worktree /repo\nbranch refs/heads/main\n\nworktree /other\nbranch refs/heads/side\n",
     );
+    // 읽기 결과가 바뀌면 목록 캐시가 무효화된다(제품은 결과를 싣는 그 자리에서 한다) — 테스트는
+    // 결과를 손으로 심으므로 같은 문을 직접 연다.
+    scm_dock_ops.invalidateRepoList(session);
 
     {
         const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
@@ -54831,6 +54855,67 @@ test "소스 컨트롤: 비활성 저장소는 머리 줄 요약이 오면 `읽�
         else => {},
     };
     try std.testing.expect(checked);
+}
+
+test "소스 컨트롤: 목록에서 사라진 저장소의 요약은 버린다(상한이 막히지 않게)" {
+    // 요약 캐시 상한은 목록 상한과 같다. 저장소를 여닫으며 옛 항목이 쌓여 그 자리가 차면 **새 저장소가
+    // 영영 `읽는 중…`으로 남는다** — 게다가 그 값들은 이미 화면에 없는 저장소의 것이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    // 목록에 없는 저장소의 요약을 하나 심는다(이전에 열려 있던 것).
+    try session.scm_repo_status.append(allocator, .{
+        .path = try allocator.dupe(u8, "/gone"),
+        .branch = try allocator.dupe(u8, "old"),
+        .detached = false,
+        .count = 3,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+    });
+    try std.testing.expectEqual(@as(usize, 1), session.scm_repo_status.items.len);
+
+    // 목록을 다시 걸으면 그 항목은 사라진다.
+    scm_dock_ops.invalidateRepoList(session);
+    _ = scm_dock_ops.repoEntries(session);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_repo_status.items.len);
+}
+
+test "소스 컨트롤: 편집 중인 상자의 저장소가 목록에서 사라지면 포커스를 뗀다" {
+    // 그 저장소의 터미널이 닫히면 목록에서 빠지는데, 포커스를 그대로 두면 키는 계속 그 상자로 가고
+    // **화면에는 그 상자가 없다** — 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    // 목록에 없는 저장소의 상자를 편집 중이라고 두고(그 저장소가 방금 사라진 상황),
+    scm_dock_ops.focusCommitRepo(session, "/gone");
+    scm_dock_ops.insertCommitText(session, "쓰던 글");
+    try std.testing.expect(session.scm_commit_focus_repo != null);
+
+    // tick이 그 사실을 알아채고 뗀다.
+    scm_dock_ops.settleCommitInput(session);
+    try std.testing.expect(session.scm_commit_focus_repo == null);
+    // **글은 잃지 않는다** — 그 저장소의 초안으로 남는다.
+    var found = false;
+    for (session.scm_commit_drafts.items) |draft| {
+        if (std.mem.eql(u8, draft.repo, "/gone")) {
+            try std.testing.expectEqualStrings("쓰던 글", draft.text);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "소스 컨트롤: 늦게 온 머리 줄 요약은 남의 줄을 채우지 않는다" {
@@ -54889,8 +54974,7 @@ test "소스 컨트롤: 목록은 터미널이 선 저장소와 그 워크트리
         .ok = true,
     };
 
-    var store: scm_dock_ops.RepoEntryStore = .{};
-    const got = scm_dock_ops.collectRepoEntries(session, &store);
+    const got = scm_dock_ops.repoEntries(session);
     try std.testing.expectEqual(@as(usize, 2), got.entries.len);
     try std.testing.expectEqualStrings(root, got.entries[0].path);
     try std.testing.expect(got.entries[0].primary); // 저장소 자신
@@ -55269,14 +55353,15 @@ test "소스 컨트롤: 변경이 없으면 빈 목록이 아니라 문장을 �
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
-    // 머리 줄 + 커밋 줄 둘뿐이고 **파일 줄은 없다**(P3d·②b — 목록의 첫 층이 저장소이고 상자는 그
-    // 그룹 안에 산다). 변경이 없어도 상자는 선다 — 커밋할 것이 없다는 사실은 버튼 색이 말한다.
-    try std.testing.expectEqual(@as(usize, 3), projection.items.len);
+    // 머리 줄 + 커밋 줄 둘 + **안내 한 줄**이고 파일 줄은 없다(P3d·②b — 목록의 첫 층이 저장소이고
+    // 상자는 그 그룹 안에 산다). 변경이 없어도 상자는 선다 — 커밋할 것이 없다는 사실은 버튼 색이 말한다.
+    // 안내가 **목록 항목인 것**이 핵심이다: 스크롤 영역 위쪽에 그리면 머리 줄과 글자가 겹친다.
+    try std.testing.expectEqual(@as(usize, 4), projection.items.len);
     try std.testing.expect(projection.items[0] == .repo);
     try std.testing.expect(projection.items[1] == .commit_box);
     try std.testing.expect(projection.items[2] == .commit_button);
+    try std.testing.expectEqualStrings(git_ops.notice_no_changes, projection.items[3].notice);
     const props = scm_dock_ops.testProps(session, projection);
-    try std.testing.expectEqualStrings(git_ops.notice_no_changes, props.empty_notice);
 
     // 그리고 그 문장이 실제로 **그려진다** — props에만 있고 화면에 없으면 같은 빈 면이다.
     const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);

@@ -57,14 +57,13 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1 + 빈 안내 1.
-    // **커밋 줄은 고정이 아니다**(②b) — 저장소마다 하나씩이라 아래 항목 루프가 센다.
-    var text_ops: usize = 10;
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1.
+    // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
+    var text_ops: usize = 9;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
-    bytes += props.empty_notice.len;
 
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
@@ -211,14 +210,10 @@ pub fn view(
             }
         }
     }
-    // 목록이 비었으면 그 자리에 한 줄 안내를 낸다. **빈 화면과 구별돼야 한다** — "변경 사항 없음"과
-    // "읽는 중"과 "저장소가 아님"은 사용자에게 서로 다른 사실이다(§3.5 빈 상태 표).
-    // **저장소 머리 줄만 있는 것도 "비어 있음"이다**(P3d). `items.len == 0`으로 세면 머리 줄 하나 때문에
-    // 변경이 없는데도 안내가 사라진다 — 그 화면은 "아직 못 읽었다"와 구별되지 않는다.
-    if (!hasContentRows(props.items) and props.empty_notice.len > 0) {
-        const content = frame.tree.entries[content_index];
-        try writer.line(content, @floatFromInt(m.inset_x + m.disclosure_extent), props.empty_notice, .muted_fg, .supporting, false);
-    }
+    // **빈 안내는 목록 항목이다**(②b — `.notice`). 예전에는 스크롤 영역 rect 위쪽에 직접 그렸는데,
+    // 그 자리에 저장소 머리 줄이 서면서 **글자가 겹쳤다**(제품 캡처 2026-08-17). 그리고 저장소가
+    // 여럿이면 "어느 저장소가 비었나"는 그 그룹의 줄이라야 말이 된다.
+
     writer.scroll_clipped = false;
     writer.active_clip = null;
     writer.container_clip = null;
@@ -297,16 +292,6 @@ fn sectionTitle(section: types.Section) []const u8 {
         .staged => "스테이지된 변경",
         .changes => "변경 사항",
     };
-}
-
-/// 저장소 머리 줄 말고 **내용이 있는 줄**이 있나.
-fn hasContentRows(items: []const types.Item) bool {
-    for (items) |item| switch (item) {
-        // 머리 줄·커밋 줄은 "그 저장소에 변경이 있다"는 뜻이 아니다 — 빈 저장소에도 상자는 선다.
-        .repo, .commit_box, .commit_button => {},
-        else => return true,
-    };
-    return false;
 }
 
 fn actionOf(item: types.Item) types.RowAction {
@@ -1218,32 +1203,21 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
 }
 
-test "빈 목록은 안내 한 줄을 낸다(빈 화면과 구별한다)" {
+test "변경이 없다는 말은 그 저장소 줄 **아래**에 온다(겹치지 않는다)" {
+    // 예전에는 스크롤 영역 rect 위쪽에 직접 그렸다. 목록의 첫 층이 저장소가 되면서 그 자리에 머리 줄이
+    // 서고, 두 글자가 **한자리에 겹쳐** 둘 다 못 읽는 화면이 됐다(제품 캡처 2026-08-17).
     var storage: TestStorage = .{};
-    const props: types.Props = .{
-        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
-        .items = &.{},
-        .branch = "main",
-        .empty_notice = "변경 사항 없음",
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "clean-probe", .branch = "main", .primary = true } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0 } },
+        .{ .notice = "변경 사항 없음" },
     };
-    const frame = try build.build(props, .{
-        .nodes = &storage.nodes,
-        .entries = &storage.entries,
-        .layout_items = &storage.layout_items,
-        .flex_scratch = &storage.flex_scratch,
-        .child_rects = &storage.child_rects,
-        .actions = &storage.actions,
-    });
-    const draws = try viewBudgeted(&storage, props, frame, .{});
-    const text = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
-    try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
-    // 브랜치 줄은 그대로 남는다 — 변경이 없다는 것과 저장소를 못 잡은 것은 다르다.
-    try testing.expect(findText(draws, "main") != null);
-    // **고정 chrome도 남는다.** 예산 밖이면 `view`가 실패하고 도크가 통째로 빈 화면이 된다 — 목록이
-    // 빌 때는 행 예산의 여유가 없어 그 부족이 곧바로 드러난다(2026-08-16 실제 증상).
-    try testing.expect(findText(draws, "히스토리") != null); // 탭 줄
-    // 커밋 줄은 **여기 없다**(②b) — 저장소마다 하나씩이라 목록 항목이고, 목록이 비면 그것도 없다.
-    try testing.expect(findExactText(draws, commit_placeholder) == null);
+    const draws = try renderFixture(&storage, .{}, &items);
+    const notice = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, notice.role);
+    const repo = findText(draws, "clean-probe") orelse return error.MissingRepoRow;
+    try testing.expect(notice.origin.y > repo.origin.y);
 }
 
 test "아이콘은 셀이 아니라 logical 슬롯에 놓인다(행 높이에 맞는 크기)" {

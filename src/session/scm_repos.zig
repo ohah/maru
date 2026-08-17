@@ -82,6 +82,23 @@ fn append(out: []Entry, n: *usize, entry: Entry) bool {
     return true;
 }
 
+/// **지금 읽고 있는 저장소를 목록 맨 앞에 세운다**(이미 있으면 그대로 둔다). 새 개수를 준다.
+///
+/// 이 불변식이 깨지면 화면이 조용히 거짓말을 한다: 활성 저장소의 파일 줄은 그 머리 줄 **아래**에만
+/// 붙으므로, 목록에 그 저장소가 없으면 **읽어 둔 변경이 통째로 안 보인다**. 터미널이 상한만큼 다른
+/// 저장소에 서 있고 활성 저장소가 파일 트리에서 온 경우가 그렇다 — 그래서 자리가 차 있으면
+/// **맨 뒤를 밀어낸다**(상한은 지키되 불변식을 먼저 지킨다).
+pub fn ensureListed(roots: [][]const u8, count: usize, active: []const u8) usize {
+    for (roots[0..count]) |root| {
+        if (std.mem.eql(u8, root, active)) return count;
+    }
+    if (roots.len == 0) return count;
+    var i = @min(count, roots.len - 1);
+    while (i > 0) : (i -= 1) roots[i] = roots[i - 1];
+    roots[0] = active;
+    return if (count < roots.len) count + 1 else count;
+}
+
 /// 머리 줄 하나가 쓰는 요약. `git status --porcelain=v2 --branch` **하나**에서 전부 나온다 —
 /// 그것이 비활성 저장소를 가볍게 읽을 수 있는 근거다(§3.5.1c).
 pub const Summary = struct {
@@ -209,4 +226,32 @@ test "빈 입력은 빈 목록이다(자르지 않았다고 말한다)" {
     const got = collect(&.{}, &buf);
     try testing.expectEqual(@as(usize, 0), got.entries.len);
     try testing.expect(!got.truncated);
+}
+
+test "활성 저장소는 이미 있으면 자리를 지킨다(목록이 재배열되지 않는다)" {
+    var roots = [_][]const u8{ "/a", "/b", "/c" };
+    const slice: [][]const u8 = roots[0..];
+    try testing.expectEqual(@as(usize, 3), ensureListed(slice, 3, "/b"));
+    try testing.expectEqualStrings("/a", roots[0]); // 앞으로 끌어오면 누를 자리가 프레임마다 움직인다
+}
+
+test "활성 저장소가 없으면 맨 앞에 선다" {
+    var roots: [4][]const u8 = undefined;
+    roots[0] = "/a";
+    roots[1] = "/b";
+    const slice: [][]const u8 = roots[0..];
+    try testing.expectEqual(@as(usize, 3), ensureListed(slice, 2, "/z"));
+    try testing.expectEqualStrings("/z", roots[0]);
+    try testing.expectEqualStrings("/a", roots[1]);
+    try testing.expectEqualStrings("/b", roots[2]);
+}
+
+test "자리가 차 있어도 활성 저장소는 들어간다(맨 뒤를 밀어낸다)" {
+    // 건너뛰면 **읽어 둔 변경이 통째로 안 보인다** — 파일 줄은 그 머리 줄 아래에만 붙기 때문이다.
+    var roots = [_][]const u8{ "/a", "/b", "/c" };
+    const slice: [][]const u8 = roots[0..];
+    try testing.expectEqual(@as(usize, 3), ensureListed(slice, 3, "/z"));
+    try testing.expectEqualStrings("/z", roots[0]);
+    try testing.expectEqualStrings("/a", roots[1]);
+    try testing.expectEqualStrings("/b", roots[2]); // "/c"가 밀려났다(상한은 지킨다)
 }

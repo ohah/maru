@@ -162,8 +162,6 @@ pub const Props = struct {
     behind: u32 = 0,
     has_ab: bool = false,
     summary: Summary = .{},
-    /// 목록 대신 그릴 한 줄 안내(`변경 사항 없음`·`읽는 중…`). 있으면 목록은 비어 있다.
-    empty_notice: []const u8 = "",
     /// 지금 열려 있는 탭. 모르는 값은 platform이 `.changes`로 clamp한다(§3.5.1) — component는 받은 값을
     /// 그대로 그린다.
     active_tab: Tab = .changes,

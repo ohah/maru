@@ -240,9 +240,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
 
     // **저장소 머리 줄이 목록의 첫 층이다**(§3.5.1c). 지금 읽어 둔 저장소의 줄들은 자기 머리 줄 아래에
     // 오고, 아직 안 읽은 저장소는 머리 줄만 선다("읽는 중…" — 배지의 빈자리와 구별한다).
-    const store = arena.create(RepoEntryStore) catch return null;
-    store.* = .{};
-    const repos = collectRepoEntries(self, store);
+    const repos = repoEntries(self);
     const current_repo = self.git_repo orelse "";
 
     var repo_rows: usize = repos.entries.len;
@@ -250,8 +248,9 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const current_collapsed = repoCollapsed(self, current_repo);
     const model_rows: usize = if (current_collapsed) 0 else model.rows.len;
 
-    // 저장소마다 **커밋 줄 둘**(입력·버튼)이 더 붙는다 — 접힌 저장소는 그것도 없다(②b).
-    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows * 3) catch return null;
+    // 저장소마다 **커밋 줄 둘**(입력·버튼)과 **빈 안내 한 줄**이 더 붙을 수 있다 — 접힌 저장소는
+    // 그것도 없다(②b).
+    const items = arena.alloc(component.types.Item, model_rows + notice_rows + repo_rows * 4) catch return null;
     var n: usize = 0;
     if (self.scm_write_error) |err| {
         items[n] = .{ .notice = err };
@@ -318,6 +317,14 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         n += 1;
 
         if (!is_current) continue;
+        // **변경이 없다는 말은 그 그룹의 줄이다**(②b). 스크롤 영역 위쪽에 그리면 이제 그 자리에 머리
+        // 줄이 있어 **글자가 겹친다**(제품 캡처에서 실제로 그랬다 — 둘 다 못 읽는 화면이 됐다).
+        // 그리고 저장소가 여럿이면 "어느 저장소가 비었나"도 그 자리라야 말이 된다.
+        if (model.rows.len == 0) {
+            items[n] = .{ .notice = git_ops.notice_no_changes };
+            n += 1;
+            continue;
+        }
         model_start = n;
         for (model.rows, 0..) |row, index| {
             items[n] = itemFor(row, index, self.scm_selected_row, self.scm_collapsed);
@@ -362,9 +369,9 @@ fn selectionOf(sel: ?text_field.TextField.Selection) ?component.types.Selection 
 
 fn propsFor(self: *AppSession, projection: Projection, window: []const component.types.Item) component.types.Props {
     const content = dock_ops.dockGeometry(self).tree_content;
-    // **한 번만 만든다.** 아래 두 자리(글자·행 수)가 각자 부르면 합성 버퍼를 다시 채우면서 이미 넘긴
-    // 슬라이스를 뒤에서 건드리게 된다.
-    _ = commitDisplayText(self); // 합성 버퍼를 이 프레임 값으로 채워 둔다(항목이 그 슬라이스를 쓴다)
+    // **여기서 합성 버퍼를 다시 채우지 않는다.** 그 글자는 `project`가 이미 만들어 항목에 실었고,
+    // 다시 부르면 **이미 넘긴 슬라이스를 뒤에서 건드리는** 모양이 된다(내용이 같아 지금은 무해하지만
+    // 그 패턴 자체가 함정이다 — 같은 이유로 한 번 고쳤던 자리다).
     return .{
         .viewport_px = .{
             .x = 0,
@@ -390,7 +397,6 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         // 읽기는 됐는데 바뀐 것이 없다 — 그 사실을 **문장으로** 말한다. 이 자리를 비워 두면 화면이
         // "아직 못 읽었다"와 똑같아진다(§3.5 빈 상태 표). 다른 두 문장은 목록을 그리기도 전에
         // 나오므로(`git_result == null` 경로) 여기서 고를 것은 이 하나뿐이다.
-        .empty_notice = if (!projection.has_rows) git_ops.notice_no_changes else "",
     };
 }
 
@@ -617,16 +623,10 @@ pub fn applyScmDockIntentAt(self: *AppSession, intent: component.ids.Intent, x_p
 ///
 /// 반환 슬라이스는 **이 프레임 동안만** 유효하다(호출자가 곧바로 쓴다).
 fn repoPathAt(self: *AppSession, index: u32) ?[]const u8 {
-    const store = self.allocator.create(RepoEntryStore) catch return null;
-    defer self.allocator.destroy(store);
-    store.* = .{};
-    const repos = collectRepoEntries(self, store);
+    const repos = repoEntries(self);
     if (index >= repos.entries.len) return null;
-    // `store`가 곧 사라지므로 경로를 세션 버퍼로 옮긴다 — 호출자가 그대로 쓰면 댕글링이다.
-    const path = repos.entries[index].path;
-    if (path.len > self.scm_repo_path_scratch.len) return null;
-    @memcpy(self.scm_repo_path_scratch[0..path.len], path);
-    return self.scm_repo_path_scratch[0..path.len];
+    // 캐시는 세션 소유라 그대로 빌려 줘도 된다(프레임 안에서 쓴다).
+    return repos.entries[index].path;
 }
 
 /// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).
@@ -678,8 +678,7 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
-            var store: RepoEntryStore = .{};
-            const repos = collectRepoEntries(self, &store);
+            const repos = repoEntries(self);
             if (index >= repos.entries.len) return;
             toggleRepoCollapsed(self, repos.entries[index].path);
         },
@@ -719,6 +718,19 @@ pub fn focusedCommitRepo(self: *const AppSession) ?[]const u8 {
 ///
 /// 포커스 플래그는 그대로 둔다 — 도크를 다시 펴면 쓰던 자리에서 이어 쓰는 것이 맞다.
 pub fn settleCommitInput(self: *AppSession) void {
+    // **편집 중인 상자가 화면에서 사라졌으면 뗀다**(②b). 그 저장소의 터미널이 닫히면 목록에서 빠지는데,
+    // 포커스를 그대로 두면 키는 계속 그 상자로 가고 **화면에는 그 상자가 없다** — 사용자는 자기가 친
+    // 글자가 어디로 갔는지 알 수 없다. 쓰던 글은 초안으로 남으므로 잃지 않는다.
+    if (self.scm_commit_focus_repo) |focus| {
+        if (self.dock.view == .source_control and dock_ops.dockVisible(self)) {
+            const repos = repoEntries(self);
+            var listed = false;
+            for (repos.entries) |entry| {
+                if (std.mem.eql(u8, entry.path, focus)) listed = true;
+            }
+            if (!listed) blurCommit(self);
+        }
+    }
     if (self.scm_commit_field.preedit.items.len == 0) return;
     if (self.scmCommitOwnsInput()) return;
     if (self.scm_commit_field.commitPreedit(self.allocator)) self.metal_dirty = true;
@@ -794,8 +806,7 @@ pub fn focusCommitAt(self: *AppSession, repo_index: usize, repo: []const u8, x_p
 /// (`publishScmDockFrame` 직전), 여기서는 그것을 쓴다.
 pub fn commitBoxRect(self: *AppSession) ?chrome.ui.layout.UiRect {
     const repo = focusedCommitRepo(self) orelse return commitBoxRectAt(self, 0);
-    var store: RepoEntryStore = .{};
-    const repos = collectRepoEntries(self, &store);
+    const repos = repoEntries(self);
     for (repos.entries, 0..) |entry, index| {
         if (std.mem.eql(u8, entry.path, repo)) return commitBoxRectAt(self, index);
     }
@@ -1732,23 +1743,104 @@ fn collectRepoRoots(self: *AppSession, store: []u8, out: [][]const u8) usize {
 /// 목록에 세울 항목들. **지금 읽어 둔 워크트리 목록만 편다** — 저장소마다 읽기를 새로 걸지 않는다
 /// (읽기는 순차이고, N개를 동시에 띄우지 않는다는 §6 규율은 저장소가 여럿이어도 같다). 아직 안 읽은
 /// 저장소는 자기 한 줄로만 뜨고, 그 저장소를 보는 순간 읽기가 나머지를 채운다.
-pub fn collectRepoEntries(self: *AppSession, store: *RepoEntryStore) maru.session.scm_repos.Collected {
+/// 목록을 **저주기로만** 다시 걷는다. 주기는 cwd 캐시와 같은 500ms다 — 그 값이 곧 "터미널을 새로
+/// 열었을 때 목록에 뜨기까지"의 상한이고, 이 목록을 만드는 walk-up이 경로 구성요소마다 `access(2)`를
+/// 쓰므로 프레임마다 걸으면 blocking syscall이 초당 수천 번이 된다(cwd 캐시가 같은 이유로 있다).
+const repo_list_poll_interval_ns: i128 = 500 * std.time.ns_per_ms;
+
+/// 목록을 **지금 다시 걷게** 한다. 읽기 결과가 바뀌면 워크트리 목록도 바뀔 수 있으므로 그 순간
+/// 무효화한다 — 주기(500ms)를 기다리면 방금 만든 워크트리가 그만큼 늦게 뜬다.
+pub fn invalidateRepoList(self: *AppSession) void {
+    self.scm_repo_list_walked_ns = 0;
+}
+
+/// 목록에 세울 저장소·워크트리(세션 소유 슬라이스). **캐시를 먼저 본다.**
+pub fn repoEntries(self: *AppSession) maru.session.scm_repos.Collected {
+    refreshRepoList(self);
+    // 세션 저장소를 `Entry` 뷰로 빌려 준다 — 호출자는 읽기만 한다.
+    var buf = self.scm_repo_entry_view[0..@min(self.scm_repo_list.items.len, self.scm_repo_entry_view.len)];
+    for (self.scm_repo_list.items[0..buf.len], 0..) |entry, index| {
+        buf[index] = .{ .path = entry.path, .origin = entry.origin, .primary = entry.primary };
+    }
+    return .{ .entries = buf, .truncated = self.scm_repo_list_truncated };
+}
+
+/// 주기가 지났으면 다시 걷는다. **문자열을 통째로 갈아 끼우지 않는다** — 같은 목록이면 그대로 두어
+/// 프레임 사이에 슬라이스가 흔들리지 않게 한다(비교가 싸다: 경로 몇 개).
+fn refreshRepoList(self: *AppSession) void {
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    // `walked_ns == 0`은 **무효화 신호**다(읽기 결과가 바뀐 직후) — 주기와 무관하게 다시 걷는다.
+    if (self.scm_repo_list_walked_ns != 0 and now - self.scm_repo_list_walked_ns < repo_list_poll_interval_ns) return;
+    self.scm_repo_list_walked_ns = now;
+
+    var store: RepoEntryStore = .{};
+    const fresh = collectRepoEntriesUncached(self, &store);
+    // 같은 목록이면 손대지 않는다.
+    if (fresh.entries.len == self.scm_repo_list.items.len) {
+        var same = true;
+        for (fresh.entries, self.scm_repo_list.items) |entry, cached| {
+            if (!std.mem.eql(u8, entry.path, cached.path) or entry.primary != cached.primary) same = false;
+        }
+        if (same) {
+            self.scm_repo_list_truncated = fresh.truncated;
+            // 목록이 같아도 **요약 청소는 한다** — 캐시에 남은 옛 항목은 목록이 바뀌던 순간에 생겼고,
+            // 그 뒤로 목록이 안정되면 여기 말고는 치울 자리가 없다(그러면 상한이 막힌다).
+            dropStaleRepoStatus(self);
+            return;
+        }
+    }
+    for (self.scm_repo_list.items) |entry| {
+        self.allocator.free(entry.path);
+        self.allocator.free(entry.origin);
+    }
+    self.scm_repo_list.clearRetainingCapacity();
+    for (fresh.entries) |entry| {
+        const path = self.allocator.dupe(u8, entry.path) catch break;
+        const origin = self.allocator.dupe(u8, entry.origin) catch {
+            self.allocator.free(path);
+            break;
+        };
+        self.scm_repo_list.append(self.allocator, .{ .path = path, .origin = origin, .primary = entry.primary }) catch {
+            self.allocator.free(path);
+            self.allocator.free(origin);
+            break;
+        };
+    }
+    self.scm_repo_list_truncated = fresh.truncated;
+    dropStaleRepoStatus(self);
+}
+
+/// 목록에서 사라진 저장소의 머리 줄 요약을 버린다.
+///
+/// **안 버리면 상한이 막힌다**: 요약 캐시는 목록 상한(8)과 같은 상한을 두는데, 저장소를 여닫으며
+/// 옛 항목이 쌓이면 그 자리가 차서 **새 저장소가 영영 `읽는 중…`으로 남는다**. 게다가 그 값들은 이미
+/// 화면에 없는 저장소의 것이라 들고 있을 이유도 없다.
+fn dropStaleRepoStatus(self: *AppSession) void {
+    var index: usize = 0;
+    while (index < self.scm_repo_status.items.len) {
+        const entry = self.scm_repo_status.items[index];
+        var listed = false;
+        for (self.scm_repo_list.items) |repo| {
+            if (std.mem.eql(u8, repo.path, entry.path)) listed = true;
+        }
+        if (listed) {
+            index += 1;
+            continue;
+        }
+        self.allocator.free(entry.path);
+        self.allocator.free(entry.branch);
+        _ = self.scm_repo_status.orderedRemove(index);
+    }
+}
+
+/// 목록을 **지금 실제로 걷는다**(캐시 없음). `refreshRepoList`만 부른다.
+fn collectRepoEntriesUncached(self: *AppSession, store: *RepoEntryStore) maru.session.scm_repos.Collected {
     var root_count = collectRepoRoots(self, &store.path_bytes, &store.roots);
     // **우리가 읽은 저장소는 언제나 목록에 있다.** 보통은 터미널에서 나오지만, 그 터미널이 닫혔거나
     // 활성 Term이 파일 Term·원격이면 목록에서 빠질 수 있다 — 그때 목록을 그대로 두면 방금 읽어 화면에
     // 그리고 있는 저장소가 목록에 없는 모순이 된다(그 줄들이 붙을 머리 줄이 사라진다).
     if (self.git_repo) |repo| {
-        var present = false;
-        for (store.roots[0..root_count]) |root| {
-            if (std.mem.eql(u8, root, repo)) present = true;
-        }
-        if (!present and root_count < store.roots.len) {
-            // 맨 앞에 넣는다 — "지금 보고 있는 것"이 목록 첫 줄이어야 눈이 거기서 시작한다.
-            var i = root_count;
-            while (i > 0) : (i -= 1) store.roots[i] = store.roots[i - 1];
-            store.roots[0] = repo;
-            root_count += 1;
-        }
+        root_count = maru.session.scm_repos.ensureListed(&store.roots, root_count, repo);
     }
     const roots = store.roots[0..root_count];
     var repos: [maru.session.scm_repos.max_entries]maru.session.scm_repos.Repo = undefined;
@@ -1875,9 +1967,11 @@ pub fn pumpRepoStatus(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_repo_status_inflight != 0) return; // 하나씩
     if (self.scm_write_inflight != 0) return; // 쓰기 중에는 읽지 않는다(§6)
+    // **활성 저장소는 건너뛴다**(아래 루프) — 그래서 이 읽기는 목록 읽기와 **같은 저장소를 겹치지
+    // 않는다**. §6의 `index.lock` 규율이 걸리는 조건이 그 겹침이므로, 슬롯을 나눠 둘이 동시에 돌아도
+    // 그 규율을 깨지 않는다.
 
-    var store: RepoEntryStore = .{};
-    const repos = collectRepoEntries(self, &store);
+    const repos = repoEntries(self);
     const current = self.git_repo orelse "";
     for (repos.entries) |entry| {
         if (std.mem.eql(u8, entry.path, current)) continue; // 활성은 목록 읽기가 채운다

@@ -3816,6 +3816,16 @@ pub const AppSession = struct {
     /// 히스토리에서 고른 커밋의 자리(P4). 파일 행 강조와 **다른 축**이라 값을 따로 든다 — 탭이
     /// 다르면 같은 번호가 다른 것을 가리킨다.
     scm_selected_commit: ?u32 = null,
+    /// 지금 **펼친 커밋**의 OID(P4b). 하나만 펼친다 — 여럿이면 각각 읽기가 필요하고, 히스토리에서
+    /// 동시에 두 커밋의 파일을 비교하는 일은 드물다.
+    scm_expanded_commit: ?[]u8 = null,
+    /// 그 커밋이 바꾼 파일 목록 원문(`git show --name-status`).
+    scm_commit_files_text: []u8 = &.{},
+    /// 그 원문이 **어느 커밋**의 것인가. 늦게 온 답이 남의 줄을 채우지 않게 OID로 맞춘다.
+    scm_commit_files_oid: ?[]u8 = null,
+    scm_commit_files_inflight: u64 = 0,
+    scm_commit_files_seq: u64 = 0,
+    scm_commit_files_failed: bool = false,
     scm_selected_row: ?usize = null,
     /// 강조된 행이 **어느 저장소의 것인가**(②d). 인덱스만 들면 저장소마다 따로 서는 모델에서 같은
     /// 번호의 남의 행이 함께 강조된다.
@@ -7774,6 +7784,8 @@ pub const AppSession = struct {
         if (entry.diff_rel_path.len > 0) self.allocator.free(entry.diff_rel_path);
         if (entry.diff_orig_rel_path.len > 0) self.allocator.free(entry.diff_orig_rel_path);
         if (entry.diff_repo.len > 0) self.allocator.free(entry.diff_repo);
+        if (entry.diff_commit_oid.len > 0) self.allocator.free(entry.diff_commit_oid); // P4b
+        entry.diff_commit_oid = &.{};
         entry.diff_rel_path = &.{};
         entry.diff_orig_rel_path = &.{};
         entry.diff_repo = &.{};
@@ -7827,6 +7839,9 @@ pub const AppSession = struct {
             // 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다).
             switch (entry.diff_base) {
                 .turn => if (self.turn_ring.latest()) |snap| snap.oid() else "",
+                // 커밋 기준은 **그 비교가 든 커밋**이다(P4b) — 여기서 다시 구하면 그 사이 다른 커밋을
+                // 펼쳤을 때 남의 커밋을 읽는다.
+                .commit => entry.diff_commit_oid,
                 else => if (self.git_result) |r| r.merge_base else "",
             },
             entry.diff_base,
@@ -13811,6 +13826,16 @@ pub const AppSession = struct {
             else
                 .changes;
             scm_dock_ops.selectScmTab(self, tab);
+            // MARU_FORCE_SCM_COMMIT_EXPAND=<n> — 그 자리의 커밋을 펼친 것처럼 만든다(P4b). 펼치기는
+            // 클릭으로만 일어나므로 포인터 없는 캡처 하니스에서는 그 화면을 얻을 방법이 없다.
+            if (tab == .history) {
+                if (std.c.getenv("MARU_FORCE_SCM_COMMIT_EXPAND")) |raw_index| {
+                    if (self.scm_expanded_commit == null) {
+                        const index = std.fmt.parseInt(u32, std.mem.span(raw_index), 10) catch 0;
+                        scm_dock_ops.applyScmDockIntent(self, .{ .select_commit = index });
+                    }
+                }
+            }
         }
         if (std.c.getenv("MARU_FORCE_SCM") != null and self.dock.view != .source_control) {
             dock_ops.openDockTo(self, .source_control);
@@ -13828,6 +13853,8 @@ pub const AppSession = struct {
         scm_dock_ops.dropScmLogIfRepoChanged(self); // 저장소가 갈렸으면 옛 커밋 목록을 버린다(P4)
         scm_dock_ops.drainScmLog(self); // 도착한 커밋 목록을 싣는다(P4)
         scm_dock_ops.pumpScmLog(self); // 히스토리 탭을 보고 있고 아직 못 읽었으면 읽기를 건다(P4)
+        scm_dock_ops.drainCommitFiles(self); // 펼친 커밋의 파일 목록을 싣는다(P4b)
+        scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -17117,6 +17144,9 @@ pub const AppSession = struct {
         if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
         if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
         if (self.scm_log_repo) |path| self.allocator.free(path); // 히스토리 원문의 저장소(P4)
+        if (self.scm_expanded_commit) |oid| self.allocator.free(oid); // 펼친 커밋(P4b)
+        if (self.scm_commit_files_oid) |oid| self.allocator.free(oid);
+        if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
@@ -55157,8 +55187,8 @@ test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리
 
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
     var text_buf: [512]u8 = undefined;
-    const text = try std.fmt.bufPrint(&text_buf, "abcdef1234567\x1f홍길동\x1f{d}\x1fHEAD -> main\x1f첫 커밋\x1e" ++
-        "9876543210abc\x1fJane\x1f0\x1f\x1f시각 없는 커밋\x1e", .{now_s - 7200});
+    const text = try std.fmt.bufPrint(&text_buf, "abcdef1234567\x1fparent0\x1f홍길동\x1f{d}\x1fHEAD -> main\x1f첫 커밋\x1e" ++
+        "9876543210abc\x1f\x1fJane\x1f0\x1f\x1f시각 없는 커밋\x1e", .{now_s - 7200});
     session.scm_log_text = try allocator.dupe(u8, text);
     session.scm_log_repo = try allocator.dupe(u8, "/repo");
     scm_dock_ops.selectScmTab(session, .history);
@@ -55197,6 +55227,52 @@ test "히스토리 탭에서는 커밋 상자가 키를 먹지 않는다 (P4 적
     try std.testing.expect(session.scmCommitOwnsInput());
 }
 
+test "히스토리 탭: 커밋을 펼치면 그 커밋이 바꾼 파일이 아래에 온다 (P4b)" {
+    // 고르기와 펼치기는 **같은 클릭**이다 — 커밋을 눌렀을 때 사용자가 보려는 것은 "무엇을 바꿨나"이고,
+    // 그것을 따로 여는 두 번째 컨트롤을 만들 이유가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .history);
+
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    session.scm_log_text = try allocator.dupe(u8, "abcdef1234567\x1fp\x1fA\x1f1\x1f\x1f제목\x1e");
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_commit = 0 });
+    try std.testing.expect(session.scm_expanded_commit != null);
+    try std.testing.expectEqualStrings("abcdef1234567", session.scm_expanded_commit.?);
+
+    // 아직 못 읽었으면 **그 사실**을 한 줄로 말한다(빈 자리는 "바꾼 것이 없다"로 읽힌다).
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("읽는 중…", projection.items[1].notice);
+    }
+
+    session.scm_commit_files_oid = try allocator.dupe(u8, "abcdef1234567");
+    session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/main.zig\nA\tnew.txt\n");
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("main.zig", projection.items[1].commit_file.name);
+        try std.testing.expectEqualStrings("src/", projection.items[1].commit_file.dir);
+        try std.testing.expectEqual(@as(u8, 'M'), projection.items[1].commit_file.letter);
+        try std.testing.expectEqualStrings("new.txt", projection.items[2].commit_file.name);
+        // 상태 색은 목록 파일 행과 **같은 표**를 쓴다.
+        try std.testing.expectEqual(
+            chrome.components.scm_dock.types.StatusKind.added,
+            projection.items[2].commit_file.status,
+        );
+    }
+
+    // 같은 커밋을 다시 누르면 접힌다 — 자리를 돌려받는 길이 그 줄 자신이어야 한다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_commit = 0 });
+    try std.testing.expect(session.scm_expanded_commit == null);
+}
+
 test "히스토리 탭: 저장소가 바뀌면 고른 커밋도 버린다 (P4 적대적 검증)" {
     // 인덱스는 그 목록 안의 자리다 — 목록이 바뀌면 같은 번호가 다른 커밋을 가리키고, 화면에는
     // "무언가 골라 둔" 강조만 남는다.
@@ -55210,7 +55286,7 @@ test "히스토리 탭: 저장소가 바뀌면 고른 커밋도 버린다 (P4 �
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
     session.scm_log_repo = try allocator.dupe(u8, "/other");
-    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fA\x1f1\x1f\x1f제목\x1e");
+    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fp\x1fA\x1f1\x1f\x1f제목\x1e");
     session.scm_selected_commit = 0;
     // 지금 읽고 있는 저장소는 `/repo`라 위 원문은 남의 것이다.
     scm_dock_ops.dropScmLogIfRepoChanged(session);
@@ -55230,7 +55306,7 @@ test "히스토리 탭: 쓰기가 끝나면 커밋 목록도 다시 읽는다 (P
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
     session.scm_log_repo = try allocator.dupe(u8, "/repo");
-    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fA\x1f1\x1f\x1f옛 목록\x1e");
+    session.scm_log_text = try allocator.dupe(u8, "aaa\x1fp\x1fA\x1f1\x1f\x1f옛 목록\x1e");
     scm_dock_ops.invalidateScmLog(session);
     // 표식이 사라져 다음 tick의 `pumpScmLog`가 다시 읽는다(원문은 그대로 두어 화면이 안 깜빡인다).
     try std.testing.expect(session.scm_log_repo == null);

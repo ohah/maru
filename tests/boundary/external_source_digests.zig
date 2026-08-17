@@ -81,7 +81,7 @@ pub const inventory = [_]Proof{
     // P3c-2에서 커밋 end-to-end 둘이 붙으며 움직인다(실제 `git commit`이 만들어지는가 · pre-commit
     // hook이 거부하면 커밋이 안 만들어지고 이유가 stderr로 오는가). fixture에 `commit`·`capture`
     // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "0608f4a8a9a02dd3b9d3be09094f3b7c52ad83325772e3127c5e8ae15d86fad1" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "884642d31ae3626d24da61a67c3b831b7785956dffe1af8dabd3945896228f27" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -500,7 +500,7 @@ pub const inventory = [_]Proof{
     // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
     // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "41f9c60ac33fdf976db788bee5b186bae87834318dc642dde835c7aecc6b0886" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a4bf529c5fcf16a76f838a976f0e75109e0c4b74a17c16fb70959e92d4791382" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -549,7 +549,7 @@ pub const inventory = [_]Proof{
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
     // editor-surface-structure.md, §9 → plans/editor-surface.md). count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "a80ce26e2306ab9cb9dbe16429907c0e1a7f4e5aa99749663de6fb5b32ef232f" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "e09ee6010812633e740ece718c1e4523a050a5ef2980807a00a2018f91d21593" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
@@ -573,5 +573,9 @@ pub const inventory = [_]Proof{
     // 세션 카드 메타 줄을 **세그먼트**로 쪼개며 문장 키 셋(`ad_summary`·`ad_summary_sub`·`_more`)이
     // 세그먼트 키 셋(`ad_meta_messages`·`ad_meta_subagents`·`_more`)으로 바뀌어 digest가 움직인다.
     // 구분자와 색 위계는 컴포넌트가 소유하므로 문구에서 빠졌다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "edf0eff68c0bac2365f8d4b4dbbbaca3413c24d39f758513966930882264d862" },
+    // P4 적대적 검증: 커밋 상자 소유권 판정이 **탭까지** 보고(`scmCommitOwnsInput`), 저장소가 갈리면
+    // 고른 커밋을 버리며, 쓰기가 끝나면 커밋 목록을 다시 읽게 되면서 digest가 움직인다. count는 2 그대로다.
+    // P4: 히스토리 목록 끝의 `커밋 더 보기` 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
+    // P4b: diff 탭 라벨 `커밋`이 키로 들어와 digest가 움직인다. count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "af07b6ee577651f7eae051f1a7e99f74bfc272fe468222369e955e17cf97799f" },
 };

@@ -148,6 +148,8 @@ const State = struct {
     repo_status_result: ?RepoStatusResult = null,
     log_inflight: usize = 0,
     log_result: ?LogResult = null,
+    commit_files_inflight: usize = 0,
+    commit_files_result: ?CommitFilesResult = null,
     /// 쓰기도 **별도 슬롯**이다. 읽기와 공유하면 스테이지 결과가 목록 갱신에 밀려 사라지고, 호출자의
     /// in-flight가 안 풀려 `+`가 영영 안 눌린 것처럼 보인다(diff 슬롯을 가른 것과 같은 이유).
     /// **깊이는 1이다** — §6이 "큐가 아니라 in-flight 하나"라고 못박았다.
@@ -162,6 +164,7 @@ const State = struct {
         if (self.branches_result) |*r| r.deinit(self.allocator);
         if (self.repo_status_result) |*r| r.deinit(self.allocator);
         if (self.log_result) |*r| r.deinit(self.allocator);
+        if (self.commit_files_result) |*r| r.deinit(self.allocator);
         if (self.write_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -228,6 +231,24 @@ pub const LogResult = struct {
         allocator.free(self.repo);
         allocator.free(self.text);
         self.repo = &.{};
+        self.text = &.{};
+    }
+};
+
+/// 커밋 하나가 바꾼 파일 목록 읽기 결과(P4b). 히스토리 목록 읽기와 **다른 슬롯**이다 — 목록을 다시
+/// 읽는 동안에도 펼친 커밋의 파일이 남아 있어야 한다.
+pub const CommitFilesResult = struct {
+    request_id: u64,
+    ok: bool = false,
+    /// 어느 커밋의 답인지. 사용자가 빠르게 다른 커밋을 펼치면 늦게 온 답이 남의 줄을 채운다.
+    oid: []u8 = &.{},
+    /// `git show --name-status` 출력(owned).
+    text: []u8 = &.{},
+
+    pub fn deinit(self: *CommitFilesResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.oid);
+        allocator.free(self.text);
+        self.oid = &.{};
         self.text = &.{};
     }
 };
@@ -619,6 +640,56 @@ pub const Backend = struct {
         return result;
     }
 
+    /// 그 커밋이 바꾼 파일 목록을 읽는다(P4b). `oid`는 hex 검증을 거친 값이어야 한다 — argv 조립이
+    /// 다시 검증하지만, 여기서도 임의 문자열을 그대로 넘기지 않는 것이 규율이다.
+    pub fn submitCommitFiles(self: *Backend, git_exe: []const u8, repo: []const u8, oid: []const u8, request_id: u64) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.commit_files_inflight > 0 or state.commit_files_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.commit_files_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonCommitFiles();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseCommitFilesJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseCommitFilesJob(job);
+        job.snapshot_tree = state.allocator.dupe(u8, oid) catch return self.releaseCommitFilesJob(job);
+        const thread = std.Thread.spawn(.{}, commitFilesWorker, .{job}) catch return self.releaseCommitFilesJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseCommitFilesJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        state.allocator.free(job.git_exe);
+        state.allocator.free(job.repo);
+        if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
+        state.allocator.destroy(job);
+        return self.abandonCommitFiles();
+    }
+
+    fn abandonCommitFiles(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.commit_files_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    pub fn takeCommitFilesResult(self: *Backend) ?CommitFilesResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.commit_files_result orelse return null;
+        state.commit_files_result = null;
+        return result;
+    }
+
     fn releaseRepoStatusJob(self: *Backend, job: *Job) bool {
         const state = job.state;
         state.allocator.free(job.git_exe);
@@ -825,6 +896,32 @@ fn logWorker(job: *Job) void {
     state.release();
 }
 
+fn commitFilesWorker(job: *Job) void {
+    const state = job.state;
+    var result: CommitFilesResult = .{ .request_id = job.request_id };
+    // 커밋 OID는 `snapshot_tree` 자리를 빌린다 — 그 필드는 "이 작업이 읽을 rev"라는 같은 뜻이다.
+    result.oid = state.allocator.dupe(u8, job.snapshot_tree) catch &.{};
+    if (runWithArg(state.allocator, .commit_files, job.git_exe, job.repo, job.snapshot_tree)) |out| {
+        result.text = out.bytes;
+        result.ok = true;
+    } else |_| {}
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    // 실패도 결과로 남긴다 — 안 남기면 in-flight가 안 풀려 그 커밋이 영영 "읽는 중"이다.
+    if (!state.shutting_down and state.commit_files_result == null) {
+        state.commit_files_result = result;
+    } else {
+        result.deinit(state.allocator);
+    }
+    state.commit_files_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
 fn branchesWorker(job: *Job) void {
     const state = job.state;
     var result: BranchesResult = .{ .request_id = job.request_id };
@@ -876,6 +973,28 @@ fn diffWorker(job: *Job) void {
         return;
     }
 
+    if (target.base == .commit) {
+        // 히스토리에서 고른 커밋: `커밋^ ↔ 커밋`(P4b). 둘 다 커밋이라 작업트리를 읽지 않는다 —
+        // 그 커밋 시점의 두 쪽이라 지금 파일이 무엇이든 화면이 바뀌지 않아야 한다.
+        //
+        // **왼쪽 실패는 정상일 수 있다**: 루트 커밋에는 `^`가 없다. 그때는 오른쪽만 실려 "새로 생긴
+        // 파일"과 같은 모양이 되는데, 루트 커밋의 파일은 실제로 그렇다.
+        if (commitParentSide(state.allocator, job, target.merge_base)) |out| {
+            result.original = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        if (commitSide(state.allocator, job, target.merge_base)) |out| {
+            result.modified = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        result.ok = had_side;
+        result.truncated = truncated;
+        finishDiff(state, job, target, result);
+        return;
+    }
+
     if (target.base == .branch) {
         // 브랜치 섹션: 갈린 지점(merge-base) ↔ HEAD. 둘 다 커밋이라 작업트리를 읽지 않는다.
         if (commitSide(state.allocator, job, target.merge_base)) |out| {
@@ -898,7 +1017,8 @@ fn diffWorker(job: *Job) void {
         // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
         const side: git_command.BlobSide = switch (target.base) {
             .staged, .conflict => .head,
-            .unstaged, .untracked, .branch, .turn => .index,
+            // `.commit`은 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
+            .unstaged, .untracked, .branch, .turn, .commit => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
@@ -1016,6 +1136,17 @@ fn commitSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !Output 
     const path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
     const trimmed = std.mem.trim(u8, rev, " \t\r\n"); // merge-base 출력은 개행으로 끝난다
     const spec = git_command.commitBlobSpec(trimmed, path, &spec_buf) orelse return error.BadRev;
+    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+}
+
+/// 그 커밋의 **부모** 쪽 blob. 루트 커밋에서는 git이 실패하고 그게 곧 "왼쪽이 없다"이다.
+fn commitParentSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !Output {
+    var spec_buf: [std.fs.max_path_bytes + 72]u8 = undefined;
+    const target = job.diff.?;
+    // rename은 왼쪽이 옛 경로다 — 새 경로로 부모를 읽으면 그 blob이 없어 왼쪽이 통째로 빈다.
+    const path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
+    const trimmed = std.mem.trim(u8, rev, " \t\r\n");
+    const spec = git_command.commitParentBlobSpec(trimmed, path, &spec_buf) orelse return error.BadRev;
     return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
 }
 
@@ -2360,4 +2491,70 @@ test "자식의 stdin은 /dev/null이다(stdin을 읽는 hook이 멈추지 않�
     try testing.expect(!out.ok());
     // **즉시 EOF**여야 한다. 상속된 stdin이면 여기서 블록하거나 남의 입력을 삼킨다.
     try testing.expect(std.mem.indexOf(u8, out.stderr_bytes, "hook: stdin was eof") != null);
+}
+
+test "실제 저장소: 커밋 파일 목록과 `커밋^` 쪽 blob (P4b)" {
+    // **가정이 아니라 git에게 묻는다**: 루트 커밋에 `^`가 없다는 것, `show`가 그 커밋도 파일로 낸다는
+    // 것, 첫 부모 기준이 병합에서도 한 줄에 한 상태를 준다는 것 — 셋 다 명령의 실제 동작이다.
+    const allocator = std.testing.allocator;
+    var fixture = (try WriteFixture.init(allocator)) orelse return error.SkipZigTest;
+    defer fixture.deinit(allocator);
+
+    // ① 루트 커밋: 파일 하나.
+    try fixture.write("a.txt", "one\n");
+    try fixture.plainGit(allocator, &.{ "add", "a.txt" });
+    try fixture.plainGit(allocator, &.{ "commit", "-q", "-m", "root" });
+
+    // ② 두 번째 커밋: 그 파일을 고치고 하나를 더한다.
+    try fixture.write("a.txt", "two\n");
+    try fixture.write("b.txt", "new\n");
+    try fixture.plainGit(allocator, &.{ "add", "a.txt", "b.txt" });
+    try fixture.plainGit(allocator, &.{ "commit", "-q", "-m", "second" });
+
+    // 목록을 읽어 두 커밋의 OID를 얻는다(제품과 같은 명령).
+    const log_out = try runWithArg(allocator, .log, fixture.exe, fixture.root, "10");
+    defer allocator.free(log_out.bytes);
+    var it = maru.session.git_log.iterate(log_out.bytes);
+    const second = it.next() orelse return error.MissingCommit;
+    const root = it.next() orelse return error.MissingCommit;
+    try std.testing.expect(second.hasParent());
+    try std.testing.expect(!root.hasParent()); // **루트 커밋은 부모가 없다**
+
+    // ③ 두 번째 커밋이 바꾼 파일: `a.txt`(M)와 `b.txt`(A).
+    const files_out = try runWithArg(allocator, .commit_files, fixture.exe, fixture.root, second.oid);
+    defer allocator.free(files_out.bytes);
+    var names = maru.session.git_status.iterateNameStatus(files_out.bytes);
+    var saw_modified = false;
+    var saw_added = false;
+    while (names.next()) |entry| {
+        if (std.mem.eql(u8, entry.path, "a.txt") and entry.letter == 'M') saw_modified = true;
+        if (std.mem.eql(u8, entry.path, "b.txt") and entry.letter == 'A') saw_added = true;
+    }
+    try std.testing.expect(saw_modified and saw_added);
+
+    // ④ 루트 커밋도 파일을 낸다(`diff <oid>^ <oid>`였다면 여기서 실패한다).
+    const root_files = try runWithArg(allocator, .commit_files, fixture.exe, fixture.root, root.oid);
+    defer allocator.free(root_files.bytes);
+    var root_names = maru.session.git_status.iterateNameStatus(root_files.bytes);
+    const first_entry = root_names.next() orelse return error.MissingRootFile;
+    try std.testing.expectEqualStrings("a.txt", first_entry.path);
+    try std.testing.expectEqual(@as(u8, 'A'), first_entry.letter);
+
+    // ⑤ 비교의 두 쪽: `커밋^:a.txt`는 옛 내용, `커밋:a.txt`는 새 내용.
+    var spec_buf: [std.fs.max_path_bytes + 72]u8 = undefined;
+    const parent_spec = maru.session.git_command.commitParentBlobSpec(second.oid, "a.txt", &spec_buf).?;
+    const left = try runWithArg(allocator, .show_blob, fixture.exe, fixture.root, parent_spec);
+    defer allocator.free(left.bytes);
+    try std.testing.expectEqualStrings("one\n", left.bytes);
+
+    var spec_buf2: [std.fs.max_path_bytes + 72]u8 = undefined;
+    const own_spec = maru.session.git_command.commitBlobSpec(second.oid, "a.txt", &spec_buf2).?;
+    const right = try runWithArg(allocator, .show_blob, fixture.exe, fixture.root, own_spec);
+    defer allocator.free(right.bytes);
+    try std.testing.expectEqualStrings("two\n", right.bytes);
+
+    // ⑥ 루트 커밋의 `^`는 **없다** — 그 실패가 곧 "왼쪽이 없다"이다.
+    var spec_buf3: [std.fs.max_path_bytes + 72]u8 = undefined;
+    const root_parent = maru.session.git_command.commitParentBlobSpec(root.oid, "a.txt", &spec_buf3).?;
+    try std.testing.expectError(error.GitFailed, runWithArg(allocator, .show_blob, fixture.exe, fixture.root, root_parent));
 }

@@ -115,6 +115,11 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 5;
             bytes += commit.subject.len + commit.author.len + commit.when.len + commit.short_oid.len + commit.ref.len;
         },
+        // 아이콘·이름·경로·상태 문자 — 넷.
+        .commit_file => |file| {
+            text_ops += 4;
+            bytes += icon_bytes + file.name.len + file.dir.len + 2;
+        },
         .load_more => {
             text_ops += 1;
             bytes += i18n.t(.scm_load_more).len;
@@ -217,6 +222,8 @@ pub fn view(
             },
             .commit => |commit| try writer.commitRow(row, commit, m),
             // 목록 끝의 "더 보기". `모두 보기`와 같은 자리·같은 색이다(둘 다 목록을 늘리는 컨트롤이다).
+            // 펼친 커밋의 파일 줄 — 상태 문자는 오른쪽 끝, 이름은 한 칸 더 들여쓴다(그 커밋에 속한다).
+            .commit_file => |file| try writer.commitFileRow(row, file, m),
             .load_more => try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), i18n.t(.scm_load_more), .focus_accent, .control, false),
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
@@ -360,7 +367,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 히스토리 줄에는 행 동작이 없다(고르기뿐이다 — P4).
-        .repo, .commit, .load_more, .commit_box, .commit_button, .more, .notice => .none,
+        .repo, .commit, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
 
@@ -928,6 +935,24 @@ const Writer = struct {
             const x = rect.rect.x + inset;
             if (x + w < right) try self.emitAt(x, sub_y, commit.author, .muted_fg, .supporting);
         }
+    }
+
+    /// 펼친 커밋 아래의 파일 한 줄(P4b). 파일 행과 같은 격자이되 **동작 버튼이 없다** — 지난 커밋의
+    /// 파일은 스테이지할 대상이 아니다.
+    fn commitFileRow(self: *Writer, rect: tree.RectEntry, file: types.CommitFileItem, m: types.DockMetrics) ViewError!void {
+        const inset: f32 = @floatFromInt(m.inset_x);
+        // 그 커밋에 속한다는 것을 들여쓰기로 말한다(그룹 안의 파일 행과 같은 규율).
+        const indent = inset + @as(f32, @floatFromInt(m.disclosure_extent));
+        if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
+            var icon_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &icon_buf) catch 0;
+            if (len > 0) try self.icon(rect, indent, icon_buf[0..len], m.icon_extent, .muted_fg);
+        }
+        var letter_buf: [1]u8 = .{file.letter};
+        try self.trailing(rect, letter_buf[0..], statusRole(file.status), .supporting, m.inset_x);
+        const name_x = indent + @as(f32, @floatFromInt(m.icon_extent + m.gap));
+        const right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
+        try self.lineWithin(rect, name_x - rect.rect.x, right, file.name, .surface_fg, .control, true);
     }
 
     /// 글자 하나를 (x, y)에 그대로 놓는다(세로 가운데 계산 없이 — 두 줄 행이 자기 y를 안다).

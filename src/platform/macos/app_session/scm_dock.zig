@@ -489,11 +489,20 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     var counting = maru.session.git_log.iterate(self.scm_log_text);
     while (counting.next()) |_| count += 1;
 
+    // 펼친 커밋의 파일 줄도 목록에 든다(P4b).
+    var commit_file_rows: usize = 0;
+    if (self.scm_expanded_commit != null) {
+        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        while (files.next()) |_| commit_file_rows += 1;
+        // 읽는 중이거나 실패면 그 사실을 한 줄로 말한다(빈 자리는 "바꾼 것이 없다"로 읽힌다).
+        if (commit_file_rows == 0) commit_file_rows = 1;
+    }
+
     const notice_rows: usize = if (count == 0) 1 else 0;
     // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
     // 눌러도 아무 일이 없어 고장으로 읽힌다.
     const more_rows: usize = if (count >= self.scm_log_limit) 1 else 0;
-    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows) catch return null;
+    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows + commit_file_rows) catch return null;
     var n: usize = 0;
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
@@ -509,6 +518,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     var index: u32 = 0;
     while (it.next()) |commit| : (index += 1) {
         if (n >= items.len) break;
+        const expanded = if (self.scm_expanded_commit) |oid| std.mem.eql(u8, oid, commit.oid) else false;
         var refs = maru.session.git_log.refs(commit.refs);
         const first_ref = refs.next();
         items[n] = .{
@@ -522,9 +532,45 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .ref = if (first_ref) |ref| ref.name else "",
                 .ref_is_head = if (first_ref) |ref| ref.kind == .head else false,
                 .selected = self.scm_selected_commit != null and self.scm_selected_commit.? == index,
+                .expanded = expanded,
             },
         };
         n += 1;
+        if (!expanded) continue;
+
+        // 펼친 커밋의 파일 줄. 원문이 아직 없으면 **그 사실**을 한 줄로 말한다.
+        if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
+            if (n < items.len) {
+                items[n] = .{ .notice = if (self.scm_commit_files_failed)
+                    "이 커밋의 파일을 읽지 못했습니다"
+                else
+                    "읽는 중…" };
+                n += 1;
+            }
+            continue;
+        }
+        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var file_index: u32 = 0;
+        var any_file = false;
+        while (files.next()) |entry| : (file_index += 1) {
+            if (n >= items.len) break;
+            any_file = true;
+            items[n] = .{
+                .commit_file = .{
+                    .index = file_index,
+                    .name = std.fs.path.basename(entry.path),
+                    .dir = entry.path[0 .. entry.path.len - std.fs.path.basename(entry.path).len],
+                    .status = commitFileStatus(entry.letter),
+                    .letter = entry.letter,
+                },
+            };
+            n += 1;
+        }
+        // 읽었는데 파일이 없다 — 빈 커밋(`--allow-empty`)이 실제로 있다.
+        if (!any_file and n < items.len) {
+            items[n] = .{ .notice = "이 커밋이 바꾼 파일이 없습니다" };
+            n += 1;
+        }
     }
 
     if (more_rows == 1 and n < items.len) {
@@ -552,6 +598,56 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .file_count = 0,
         .has_staged = false,
     };
+}
+
+/// `--name-status`의 상태 문자를 화면 색 종류로. 목록 파일 행과 **같은 표**를 쓴다 — 같은 글자가
+/// 두 탭에서 다른 색이면 사용자가 그 색을 못 믿는다.
+fn commitFileStatus(letter: u8) component.types.StatusKind {
+    return switch (letter) {
+        'A', 'C' => .added,
+        'D' => .deleted,
+        else => .modified, // `M`·`R`·`T`…
+    };
+}
+
+/// 목록 자리 → 커밋 OID. **지금 원문에서 다시 찾는다** — intent가 든 것은 자리뿐이고, 그 사이 목록이
+/// 늘어났을 수 있다(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
+///
+/// 반환 슬라이스는 세션이 든 원문을 빌린다(호출자가 곧바로 쓴다).
+fn commitOidAt(self: *AppSession, index: u32) ?[]const u8 {
+    var it = maru.session.git_log.iterate(self.scm_log_text);
+    var i: u32 = 0;
+    while (it.next()) |commit| : (i += 1) {
+        if (i == index) return commit.oid;
+    }
+    return null;
+}
+
+/// 펼친 커밋의 그 파일 비교를 연다(P4b).
+fn openCommitFileDiff(self: *AppSession, index: u32) void {
+    const oid = self.scm_expanded_commit orelse return;
+    const repo = self.git_repo orelse return;
+    var it = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+    var i: u32 = 0;
+    while (it.next()) |entry| : (i += 1) {
+        if (i != index) continue;
+        // 저장소 밖 경로는 **여는 단계에서** 막는다(목록 행과 같은 심층 방어).
+        if (!maru.session.repo_path.isSafeRelative(entry.path)) {
+            self.showNoticeKey(.git_path_outside_repo);
+            return;
+        }
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, entry.path }) catch return;
+        git_ops.openDiffTerm(self, repo, abs, entry.path, entry.orig_path, .commit);
+        // **그 비교가 어느 커밋인지**를 entry가 든다 — 나중에 다시 구하면 그 사이 다른 커밋을 펼쳤을 수 있다.
+        if (git_ops.diffTermFor(self, abs, .commit)) |term| {
+            if (term.file_entry) |file_entry| {
+                if (file_entry.diff_commit_oid.len > 0) self.allocator.free(file_entry.diff_commit_oid);
+                file_entry.diff_commit_oid = self.allocator.dupe(u8, oid) catch &.{};
+            }
+        }
+        return;
+    }
 }
 
 /// `3시간 전`처럼 사람이 읽는 상대 시각. **arena에 만든다**(프레임 안에서만 쓴다).
@@ -938,8 +1034,13 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         },
         .select_commit => |index| {
             self.scm_selected_commit = index;
+            // **고르기와 펼치기는 같은 클릭이다**(P4b). 커밋을 눌렀을 때 사용자가 보려는 것은 "그 커밋이
+            // 무엇을 바꿨나"이고, 그것을 따로 여는 두 번째 컨트롤을 만들 이유가 없다.
+            if (commitOidAt(self, index)) |oid| toggleCommitExpanded(self, oid);
             self.metal_dirty = true;
         },
+        // 펼친 커밋의 파일 → `커밋^ ↔ 커밋` 비교를 연다.
+        .open_commit_file => |index| openCommitFileDiff(self, index),
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
@@ -1018,6 +1119,74 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     // **고른 커밋도 버린다**(적대적 검증). 인덱스는 그 목록 안의 자리라, 목록이 바뀌면 같은 번호가
     // 다른 저장소의 다른 커밋을 가리킨다 — 화면에는 "무언가 골라 둔" 강조만 남는다.
     self.scm_selected_commit = null;
+}
+
+/// 히스토리에서 커밋을 **펼치거나 접는다**(P4b). 같은 커밋을 다시 누르면 접힌다 — 목록에서 자리를
+/// 돌려받는 길이 그 줄 자신이어야 한다(그룹 헤더와 같은 규율).
+pub fn toggleCommitExpanded(self: *AppSession, oid: []const u8) void {
+    if (self.scm_expanded_commit) |current| {
+        const same = std.mem.eql(u8, current, oid);
+        self.allocator.free(current);
+        self.scm_expanded_commit = null;
+        dropCommitFiles(self);
+        if (same) {
+            self.metal_dirty = true;
+            return; // 접기
+        }
+    }
+    self.scm_expanded_commit = self.allocator.dupe(u8, oid) catch null;
+    self.metal_dirty = true;
+}
+
+/// 펼친 커밋의 파일 원문을 버린다(다른 커밋을 펼쳤거나 접었다).
+fn dropCommitFiles(self: *AppSession) void {
+    if (self.scm_commit_files_oid) |old| self.allocator.free(old);
+    self.scm_commit_files_oid = null;
+    if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
+    self.scm_commit_files_text = &.{};
+    self.scm_commit_files_failed = false;
+}
+
+/// 펼친 커밋의 파일 목록을 읽는다. **펼쳤을 때만** 돈다 — 안 펼친 커밋을 미리 읽는 것은 프로세스를
+/// 공짜로 띄우는 일이다(§6 비용 규율, 히스토리 목록과 같은 판단).
+pub fn pumpCommitFiles(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    if (self.scm_tab != .history) return;
+    if (self.scm_commit_files_inflight != 0) return;
+    const oid = self.scm_expanded_commit orelse return;
+    if (self.scm_commit_files_oid) |current| {
+        if (std.mem.eql(u8, current, oid)) return; // 이미 그 커밋을 읽어 뒀다(실패도 답이다)
+    }
+    const repo = self.git_repo orelse return;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_commit_files_seq += 1;
+    if (!self.git_backend.?.submitCommitFiles(git_exe, repo, oid, self.scm_commit_files_seq)) return;
+    self.scm_commit_files_inflight = self.scm_commit_files_seq;
+}
+
+/// 도착한 파일 목록을 싣는다. **OID로 맞춘다** — 사용자가 빠르게 다른 커밋을 펼치면 늦게 온 답이
+/// 남의 줄을 채운다.
+pub fn drainCommitFiles(self: *AppSession) void {
+    const backend = &(self.git_backend orelse return);
+    var taken = backend.takeCommitFilesResult() orelse return;
+    defer taken.deinit(git_backend_mod.worker_allocator);
+    if (taken.request_id != self.scm_commit_files_inflight) return;
+    self.scm_commit_files_inflight = 0;
+    self.metal_dirty = true;
+    self.scm_commit_files_failed = !taken.ok;
+    const text_copy = self.allocator.dupe(u8, taken.text) catch return;
+    const oid_copy = self.allocator.dupe(u8, taken.oid) catch {
+        self.allocator.free(text_copy);
+        return;
+    };
+    if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
+    if (self.scm_commit_files_oid) |old| self.allocator.free(old);
+    self.scm_commit_files_text = text_copy;
+    self.scm_commit_files_oid = oid_copy;
 }
 
 /// 쓰기가 끝났으면 커밋 목록도 낡았다(적대적 검증). **커밋을 하면 그 목록이 곧 틀린다** — 방금 만든

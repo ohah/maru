@@ -75,6 +75,18 @@ pub const Kind = enum {
     ///
     /// 상한(`-n`)은 호출자가 인자로 준다 — 화면이 "더 보기"로 늘릴 수 있어야 하므로 명령이 그 수를 고정하면 안 된다.
     log,
+    /// 커밋 하나가 **바꾼 파일들**(P4b): `git show --format= --name-status <oid>`.
+    ///
+    /// **`git diff <oid>^ <oid>`가 아니다** — 루트 커밋에는 `^`가 없어 그 명령이 실패한다. `show`는
+    /// 루트 커밋도 "전부 새로 생긴 파일"로 낸다.
+    ///
+    /// **`--first-parent -m`**: 병합 커밋은 기본적으로 아무 파일도 안 낸다(combined diff를 생략한다).
+    /// 첫 부모 기준으로 보면 한 줄에 한 상태라 이 목록의 모양과 맞는다(combined diff는 파일마다 상태가
+    /// 여럿이다).
+    ///
+    /// **numstat은 읽지 않는다**(②d와 같은 판단): 파일 줄의 실체는 상태 문자와 경로이고, 증감 숫자는
+    /// 프로세스를 하나 더 쓴다. 그 자리는 비워 두는 길이 이미 있다.
+    commit_files,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -260,9 +272,25 @@ pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8
     return buf[0 .. rev.len + 1 + repo_relative_path.len];
 }
 
+/// `<rev>^:<경로>` — 그 커밋의 **부모** 쪽 blob(P4b). 루트 커밋에서는 git이 실패하고, 그게 곧
+/// "왼쪽이 없다"이다(호출자가 그 실패를 정상으로 읽는다).
+pub fn commitParentBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
+    if (rev.len < 7 or rev.len > 64) return null;
+    for (rev) |c| {
+        const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+        if (!hex) return null; // 임의 문자열을 rev로 넘기지 않는다(`--` 같은 인자 주입 차단)
+    }
+    if (rev.len + 2 + repo_relative_path.len > buf.len) return null;
+    @memcpy(buf[0..rev.len], rev);
+    buf[rev.len] = '^';
+    buf[rev.len + 1] = ':';
+    @memcpy(buf[rev.len + 2 ..][0..repo_relative_path.len], repo_relative_path);
+    return buf[0 .. rev.len + 2 + repo_relative_path.len];
+}
+
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 26; // 기본 3 + config 덮어쓰기 16 + kind별 최대 6 + 여유
+pub const max_argv = 28; // 기본 3 + config 덮어쓰기 16 + kind별 최대 9(commit_files) + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 const config_overrides = [_][]const u8{
@@ -440,6 +468,26 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "-n";
             n += 1;
             buf[n] = arg orelse "200";
+            n += 1;
+        },
+        .commit_files => {
+            buf[n] = "show";
+            n += 1;
+            buf[n] = "--format="; // 커밋 헤더는 목록이 이미 갖고 있다 — 파일 줄만 받는다
+            n += 1;
+            buf[n] = "--name-status";
+            n += 1;
+            buf[n] = "--find-renames";
+            n += 1;
+            buf[n] = "--first-parent";
+            n += 1;
+            buf[n] = "-m";
+            n += 1;
+            buf[n] = "--no-ext-diff";
+            n += 1;
+            buf[n] = "--no-textconv";
+            n += 1;
+            buf[n] = arg orelse "HEAD";
             n += 1;
         },
         .show_blob => {
@@ -746,4 +794,43 @@ test "log: 상한을 안 주면 기본값이 붙는다(무제한으로 새지 �
         if (std.mem.eql(u8, a, "-n") and index + 1 < argv.len) limit = argv[index + 1];
     }
     try std.testing.expectEqualStrings("200", limit orelse "");
+}
+
+test "commit_files: 루트·병합에서도 파일이 나오게 만든다" {
+    // `diff <oid>^ <oid>`는 루트 커밋에서 실패하고, `show`는 병합에서 기본적으로 아무 파일도 안 낸다 —
+    // 그래서 `show` + `--first-parent -m`이다.
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.commit_files, "/usr/bin/git", "/repo", "abc1234", &buf);
+    var saw_show = false;
+    var saw_name_status = false;
+    var saw_first_parent = false;
+    var saw_m = false;
+    var saw_rev = false;
+    for (argv) |a| {
+        if (std.mem.eql(u8, a, "show")) saw_show = true;
+        if (std.mem.eql(u8, a, "--name-status")) saw_name_status = true;
+        if (std.mem.eql(u8, a, "--first-parent")) saw_first_parent = true;
+        if (std.mem.eql(u8, a, "-m")) saw_m = true;
+        if (std.mem.eql(u8, a, "abc1234")) saw_rev = true;
+        // 외부 프로그램을 부르는 길은 여기서도 닫는다.
+        try testing.expect(!std.mem.eql(u8, a, "--ext-diff"));
+    }
+    try testing.expect(saw_show and saw_name_status and saw_first_parent and saw_m and saw_rev);
+    // 커밋 헤더는 목록이 이미 갖고 있다 — 파일 줄만 받는다.
+    var saw_empty_format = false;
+    for (argv) |a| if (std.mem.eql(u8, a, "--format=")) {
+        saw_empty_format = true;
+    };
+    try testing.expect(saw_empty_format);
+}
+
+test "commitParentBlobSpec은 `^`를 붙이되 hex만 받는다" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "650a0bbef96a1dd562e0d39f262260ae002c1545^:src/main.zig",
+        commitParentBlobSpec("650a0bbef96a1dd562e0d39f262260ae002c1545", "src/main.zig", &buf).?,
+    );
+    // 임의 문자열은 거부한다 — rev 자리에 인자를 주입하는 길을 막는다.
+    try testing.expect(commitParentBlobSpec("--upload-pack=x", "a", &buf) == null);
+    try testing.expect(commitParentBlobSpec("abc", "a", &buf) == null); // 너무 짧다
 }

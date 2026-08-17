@@ -2130,7 +2130,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
         \\  maru win32-terminal-smoke
-        \\  maru win32-clipboard-smoke
+        \\  maru win32-clipboard-smoke [<기대값> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -2155,7 +2155,9 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  dwrite-text-smoke render real text with DirectWrite glyphs plus synthesized box drawing (Windows only; needs a D3D11 device)
         \\  win32-frame-smoke run a live PTY through the Windows shaper and DirectWrite rasterizer into a neutral RenderFrame (Windows only; no window)
         \\  win32-terminal-smoke draw a live shell session on screen with D3D11 + DirectWrite (Windows only; needs an interactive desktop)
-        \\  win32-clipboard-smoke round-trip text through the OS clipboard (Windows only; no window needed)
+        \\  win32-clipboard-smoke round-trip text through the OS clipboard (Windows only; no window needed).
+        \\                        with <expected>: read what another app put there and compare.
+        \\                        with --paste-encode: run the current clipboard through the paste rules.
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)

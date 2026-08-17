@@ -42,6 +42,9 @@ fn repoFailedLabel() []const u8 {
     return i18n.t(.scm_load_failed);
 }
 const worktree_icon = icons.utf8Fit(.git_branch, .standard);
+/// 머리 줄의 동작 아이콘(②c). **이미 있는 자산을 쓴다** — 커밋 ✓는 그룹 안 버튼과 겹쳐 넣지 않는다.
+const refresh_icon = icons.utf8Fit(.reset, .standard);
+const stage_all_icon = icons.utf8Fit(.plus, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
 const unstage_glyph = "−";
@@ -75,7 +78,7 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
         .repo => |repo| {
-            text_ops += 5;
+            text_ops += 5 + build.repo_action_count; // 동작 아이콘 둘(②c)
             bytes += icon_bytes * 2 + repo.name.len +
                 @max(repo.branch.len, @max(repoPendingLabel().len, repoFailedLabel().len)) + count_digits;
         },
@@ -209,6 +212,27 @@ pub fn view(
             // 안내는 상태 진술이라 강조색을 쓰지 않는다(빈 안내와 같은 톤).
             .notice => |text| try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), text, .muted_fg, .supporting, false),
         }
+        // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
+        if (item == .repo) {
+            const repo = item.repo;
+            const hovered = isHovered(state, row.id) or hoveredRepoAction(state, index);
+            if (hovered) {
+                inline for (.{ refresh_icon, stage_all_icon }, 0..) |glyph, slot| {
+                    if (frame.tree.find(build.NodeIds.repoAction(index, slot))) |slot_index| {
+                        const rect = frame.tree.entries[slot_index];
+                        // 꺼진 버튼은 **흐리게** 그린다(감추지 않는다 — "왜 안 눌리는가"를 말할 수 있게).
+                        const enabled = if (slot == 0) true else repo.can_stage_all;
+                        try writer.icon(
+                            rect,
+                            0,
+                            glyph,
+                            m.icon_extent,
+                            if (enabled) .surface_fg else .muted_fg,
+                        );
+                    }
+                }
+            }
+        }
         // 호버한 행에만 동작 버튼의 글리프를 낸다. **히트 사각형은 항상 있고**(build), 보이는 것만
         // 호버를 따른다 — 사용자는 호버해야 누를 수 있으므로 이 둘이 어긋나지 않는다.
         if (frame.tree.find(build.NodeIds.itemAction(index))) |action_index| {
@@ -323,6 +347,17 @@ fn actionOf(item: types.Item) types.RowAction {
     };
 }
 
+/// 머리 줄의 **동작 버튼 위**에 포인터가 있나. 버튼 위에서는 행 자체의 hover가 풀리므로(자식이
+/// 가져간다) 이것도 함께 봐야 아이콘이 깜빡이지 않는다.
+fn hoveredRepoAction(state: interaction.InteractionState, index: usize) bool {
+    const hovered = state.hovered orelse return false;
+    var slot: usize = 0;
+    while (slot < build.repo_action_count) : (slot += 1) {
+        if (hovered == build.NodeIds.repoAction(index, slot)) return true;
+    }
+    return false;
+}
+
 fn isHovered(state: interaction.InteractionState, id: tree.UiId) bool {
     const hovered = state.hovered orelse return false;
     return hovered == id;
@@ -426,8 +461,12 @@ const Writer = struct {
     /// **종류 아이콘과 브랜치 칩이 같은 글리프를 쓰지 않는다.** 워크트리 줄에 `⑂`가 둘이면 둘 중 무엇이
     /// 종류이고 무엇이 브랜치인지 읽히지 않는다 — 그래서 칩은 **글자만** 그린다.
     fn repoRow(self: *Writer, rect: tree.RectEntry, repo: types.RepoItem, m: types.DockMetrics) ViewError!void {
-        const inset: f32 = @floatFromInt(m.inset_x);
         const scale = effectiveScale(self.props.scale_milli);
+        // **동작 아이콘 자리를 늘 비켜 둔다**(②c). 호버할 때만 비키면 브랜치 칩과 개수 배지가 마우스를
+        // 따라 움직이고, 안 비키면 아이콘이 그 위에 겹쳐 그려진다(제품 캡처 2026-08-17에서 실제로 그랬다).
+        const action_band: u32 = @intCast(build.repo_action_count * (m.action_extent + m.gap));
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const right_inset: u32 = m.inset_x + action_band;
         try self.icon(rect, inset, if (repo.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
         // 주 워크트리는 폴더, 링크된 워크트리는 브랜치 글리프 — 워크트리는 "딸린 것"이라는 사실이
         // 보여야 같은 이름의 두 줄을 사용자가 구별한다.
@@ -440,7 +479,7 @@ const Writer = struct {
         var count_buf: [16]u8 = undefined;
         const count_text = std.fmt.bufPrint(&count_buf, "{d}", .{repo.count}) catch "";
         const pill = if (repo.count > 0 and !repo.pending and !repo.failed) badge.countPill(rect.rect, .{
-            .inset_x = m.inset_x,
+            .inset_x = right_inset,
             .label_cols = @max(@as(u16, @intCast(count_text.len)), 1),
             .cell_width_px = self.cell_width_px,
             .scale_milli = scale,
@@ -451,16 +490,17 @@ const Writer = struct {
         const name_x = kind_x + @as(f32, @floatFromInt(m.icon_extent + m.gap));
         if (repo.pending or repo.failed) {
             // 오른쪽 자리를 그대로 쓴다(브랜치가 설 자리) — 읽고 나면 그 자리에 브랜치와 배지가 온다.
+            // main의 i18n 라벨 함수와 ②c의 오른쪽 여백(아이콘 자리)을 **둘 다** 쓴다.
             const label = if (repo.failed) repoFailedLabel() else repoPendingLabel();
-            try self.trailing(rect, label, .muted_fg, .supporting, m.inset_x);
-            const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + m.inset_x));
+            try self.trailing(rect, label, .muted_fg, .supporting, right_inset);
+            const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + right_inset));
             try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
             return;
         }
         const right_edge: f32 = if (pill) |p|
             @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
         else
-            rect.rect.x + rect.rect.width - inset;
+            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset));
 
         // 브랜치는 오른쪽에 붙는다(이름이 길면 이름이 먼저 잘린다 — 어느 저장소인지가 어느 브랜치인지보다
         // 앞선다). 자리를 못 잡으면 아예 안 그린다.
@@ -1224,6 +1264,28 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "머리 줄의 동작 아이콘은 브랜치 칩·개수 배지를 덮지 않는다 (②c)" {
+    // 자리를 비켜 두지 않으면 아이콘이 그 위에 겹쳐 그려져 둘 다 못 읽는다(제품 캡처 2026-08-17).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "repo", .branch = "main", .count = 3, .can_stage_all = true } },
+    };
+    const draws = try renderFixture(&storage, .{ .hovered = build.NodeIds.item(0) }, &items);
+    const branch = findText(draws, "main") orelse return error.MissingBranch;
+    // 아이콘 둘은 그 오른쪽에 앉는다 — 겹치면 x가 브랜치 글자 안으로 들어온다.
+    var icon_left: i32 = std.math.maxInt(i32);
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            // 아이콘 조각은 글리프 하나짜리 문자열이다(`utf8Fit`) — 그 조각만 골라 본다.
+            if (!std.mem.eql(u8, run.text, refresh_icon) and !std.mem.eql(u8, run.text, stage_all_icon)) continue;
+            icon_left = @min(icon_left, text.origin.x);
+        },
+        else => {},
+    };
+    try testing.expect(icon_left < std.math.maxInt(i32)); // 아이콘이 실제로 그려졌다(호버 중)
+    try testing.expect(icon_left > branch.origin.x);
 }
 
 test "읽지 못한 저장소는 0건이 아니라 그 사실을 적는다" {

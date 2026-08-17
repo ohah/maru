@@ -5,6 +5,10 @@
 //! props로 읽고 platform(L4)이 구현/투영한다. 이 레이어엔 OS 타입(Metal·CoreText·AppKit·PTY)이 새지 않는다
 //! — tests/boundary/imports.zig가 강제.
 
+pub const ssh = struct {
+    /// SSH 바이너리 패킷(RFC 4253 §6) — **sans-io**(계약 docs/ssh-client.md §2: 소켓을 모른다).
+    pub const packet = @import("session/ssh/packet.zig");
+};
 pub const input_math = @import("session/input_math.zig");
 pub const layout_math = @import("session/layout_math.zig");
 pub const web_panel_layout = @import("session/web_panel_layout.zig"); // Phase 4a: 웹 패널 rect(본문 rect)·px↔pt y-flip·surface 생애주기 diff 순수 계산(docs/plans/web-panel.md §10 4a·§11·§14)
@@ -112,4 +116,7 @@ pub const AppWindow = window.AppWindow;
 test {
     @import("std").testing.refAllDecls(@This());
     @import("std").testing.refAllDecls(editor);
+    // **네임스페이스 자식은 따로 ref 한다** — `refAllDecls` 는 한 단계라, 소비처가 아직 없는
+    // 모듈은 테스트를 써 놔도 집계 밖이다(chrome.ui.gesture 가 실제로 그랬다).
+    @import("std").testing.refAllDecls(ssh);
 }

@@ -1136,6 +1136,10 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     const bracketed_paste_is_safe = true;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
+    var osc52_reads_denied_unimplemented: usize = 0;
+    // OSC 52 읽기 정책. 이 스모크는 config 를 읽지 않으므로 스키마 기본값(`deny`)을 그대로 쓴다 —
+    // 원격 프로그램의 로컬 클립보드 탈취를 막는 사용자 결정이다(`config/theme.zig` `Osc52Config`).
+    const osc52_read_policy: maru.config.theme.Osc52Read = .deny;
     var clipboard_errors: usize = 0;
 
     var counts: win32_terminal.FrameCounts = .{};
@@ -1279,9 +1283,16 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 }
             }
             if (want_read) {
-                // OSC 52 읽기 응답은 셸에 되돌려 줘야 한다. 그 인코딩(base64 + OSC 52 프레이밍)은 중립
-                // 계층 몫이라 여기서 만들지 않는다 — W7.5 에서 그 자리를 찾아 붙인다.
                 osc52_reads += 1;
+                // **읽기는 정책이 막는다.** `osc52.read` 기본값이 `deny` 다 — 원격/내부 프로그램이 로컬
+                // 클립보드를 탈취하는 것을 막는 사용자 결정이고(`config/theme.zig`), macOS 도 같은 판정을
+                // 한다. pending 은 정책과 무관하게 위에서 이미 소비했다(안 그러면 매 tick 재트리거된다).
+                //
+                // `allow` 일 때 보낼 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)을 여기서 만들지 않는다. 그
+                // 인코더(`formatOsc52ReadResponse`)가 **중립이 아니라 macOS `app_session.zig` 안에** 있어,
+                // Windows 가 쓰려면 중립으로 들어올려야 한다 — 그것은 이 슬라이스 밖의 설계 결정이라
+                // 사용자에게 보고하고 정한다(AGENTS.md 핵심 원칙).
+                if (osc52_read_policy == .allow) osc52_reads_denied_unimplemented += 1;
             }
         }
 

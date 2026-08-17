@@ -533,6 +533,15 @@ clipboard". Windows도 같은 선을 지킨다: `win32_clipboard.zig`는 OS 클�
 pending으로 들고 있고(`pendingClipboardWrite`·`clipboardReadPending`), 플랫폼이 정책을 확인한 뒤 배수한다.
 코어가 OS를 직접 만지지 않는 것이 그 설계다.
 
+**읽기 정책은 `osc52.read`이고 기본값이 `deny`다** — 원격/내부 프로그램의 로컬 클립보드 탈취를 막는
+사용자 결정이다(`config/theme.zig`의 `Osc52Config`, 2026-06-20). 쓰기는 하드코딩 allow다. pending은
+**정책과 무관하게 소비한다** — 안 그러면 매 tick 재트리거된다(macOS와 같은 규율).
+
+**읽기 응답은 아직 안 만든다 — 그 인코더가 중립이 아니기 때문이다.** `ESC ] 52 ; <Pc> ; <base64> ST`를
+만드는 `formatOsc52ReadResponse`가 **macOS `app_session.zig` 안에** 있다. Windows가 `allow`를 지원하려면
+그것을 중립으로 들어올려야 하는데(`terminal/input_report.zig`의 `encodePasteWith` 옆이 제자리다), 그것은
+이 슬라이스 밖의 설계 결정이라 사용자에게 보고하고 정한다. 기본값이 `deny`라 지금 기능 손실은 없다.
+
 **`CF_UNICODETEXT` 하나만 쓴다.** `CF_TEXT`는 ANSI 코드페이지이고 이 기계의 ACP가 949라, UTF-8 바이트를
 그대로 넣으면 비영문이 깨진다(§5.3에서 `_access`가 같은 함정을 밟았다). `CF_UNICODETEXT`는 UTF-16이고,
 Windows가 필요하면 다른 형식으로 자동 합성해 준다.

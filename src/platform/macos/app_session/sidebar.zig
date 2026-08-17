@@ -676,18 +676,16 @@ pub fn sidebarActiveBg(self: *const AppSession) u32 {
 /// 목록 행(에이전트 행·토글) 호버 배경 — **활성 밴드 위에 겹쳐도 구분되도록** 활성색을 배경 반대 방향으로 한
 /// 단계 더 민다. 배경↔활성이 이루는 방향을 그대로 연장하므로 사용자가 사이드바 색을 바꿔도 관계가 유지된다
 /// (호버가 활성보다 한 톤 밝다). 채널 포화는 클램프한다.
+/// **식은 `chrome.tokens.rowHoverBg`가 소유한다.** 2026-08-17까지 같은 계산이 이 파일에도 있었고 토큰
+/// 쪽은 `sidebar_active`를 그대로 담고 있었다 — 그래서 사이드바만 활성보다 밝은 호버를 얻고 chrome
+/// 컴포넌트(도크 카드·버튼)는 활성과 **완전히 같은 색**을 받았다(적대적 검증에서 드러났다). 식을 토큰
+/// 층으로 올리고 여기서 호출한다(`tokens.statusBarBg`와 같은 관계).
 pub fn sidebarRowHoverBg(self: *const AppSession) u32 {
-    const bg = self.appearance.theme.sidebar_background;
-    const ac = self.appearance.theme.sidebar_active;
-    const step = struct {
-        fn f(b: u8, a: u8) u32 {
-            const bi: i32 = @intCast(b);
-            const ai: i32 = @intCast(a);
-            const v = ai + @divTrunc(ai - bi, 1); // 배경→활성 델타만큼 한 번 더
-            return @intCast(std.math.clamp(v, 0, 255));
-        }
-    }.f;
-    return 0xFF00_0000 | (step(bg.r, ac.r) << 16) | (step(bg.g, ac.g) << 8) | step(bg.b, ac.b);
+    const hover = chrome.tokens.rowHoverBg(
+        self.appearance.theme.sidebar_background,
+        self.appearance.theme.sidebar_active,
+    );
+    return 0xFF00_0000 | (@as(u32, hover.r) << 16) | (@as(u32, hover.g) << 8) | hover.b;
 }
 
 pub fn sidebarHoverBg(self: *const AppSession) u32 {

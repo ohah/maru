@@ -276,34 +276,13 @@ fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, en
             .home_path
         else if (scopes.dot_relative and rel == .dot)
             .dot_relative
-        else if (scopes.bare_relative and looksLikeBareRelative(word))
+        else if (scopes.bare_relative and path_shape.looksLikeBareRelative(word))
             .bare_relative
         else
             return null;
     const end = trimPathTail(word);
     if (end == 0) return null;
     return .{ .start = 0, .end = end, .scope = scope };
-}
-
-/// dot-prefix 없는 상대 경로(src/foo.zig)인지 — 오탐 억제: 슬래시 필수 + (콤마 전) 점 필수 + 첫 글자가 글자/
-/// 숫자/밑줄/'.' + '$'·'//' 시작 금지. "foo/bar"(점 없음)·"$10/x"·"//foo"는 false. "./"·"../"는 dot_relative
-/// 분기에서 이미 잡히므로 여기 도달 시 해당 아님.
-fn looksLikeBareRelative(word: []const u8) bool {
-    if (word.len == 0) return false;
-    const c0 = word[0];
-    if (c0 == '$') return false;
-    if (std.mem.startsWith(u8, word, "//")) return false;
-    if (!(std.ascii.isAlphanumeric(c0) or c0 == '_' or c0 == '.')) return false;
-    const comma = std.mem.indexOfScalar(u8, word, ',') orelse word.len;
-    const head = word[0..comma];
-    const slash = std.mem.indexOfScalar(u8, head, '/') orelse return false; // 슬래시 필수
-    if (std.mem.indexOfScalar(u8, head, '.') == null) return false; // 점 필수(파일스러움)
-    // 첫 세그먼트(첫 '/' 전)는 글자/숫자/_/-/. 만 허용 — "foo~/x"(mid-word ~)·"a:b/x" 등 제외
-    // (Ghostty 첫 세그 [\w][\w\-.]*와 같은 취지). ~ 는 home_path(~/)에서만 의미를 갖는다.
-    for (head[0..slash]) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
-    }
-    return true;
 }
 
 /// 파일 경로 끝을 다듬는다. 콤마에서 끊고(다음 토큰), 끝의 문장 부호·매달린 ':'를 제거하되 균형 잡힌 ')'와

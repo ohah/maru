@@ -198,6 +198,67 @@ pub fn detectableRelativePrefixFor(os_tag: std.Target.Os.Tag, path: []const u8) 
     return win.kind;
 }
 
+/// 접두 없는 상대 경로(`src/main.zig`·Windows에서 `src\main.zig`)인가.
+///
+/// 본체는 `looksLikeBareRelativeFor`이고, 여기는 호스트 OS를 채워 넣는 얇은 래퍼다.
+pub fn looksLikeBareRelative(word: []const u8) bool {
+    return looksLikeBareRelativeFor(@import("builtin").os.tag, word);
+}
+
+/// 본체 — 판정 기준이 되는 OS를 **인자로** 받는다(위 두 술어와 같은 이유·같은 모양).
+///
+/// 오탐 억제는 넷이다: 구분자 필수 · (콤마 전) 점 필수 · 첫 글자가 글자/숫자/`_`/`.` · 첫 세그먼트가
+/// 글자/숫자/`_`/`-`/`.` 만. `foo/bar`(점 없음)·`$10/x`·`//foo`·`a:b/x`는 전부 거짓이다.
+/// `./`·`../`·`~/`는 `detectableRelativePrefixFor`가 먼저 잡으므로 여기 오지 않는다.
+///
+/// **Windows에서 `\`도 구분자로 받는 이유와 그 대가.** 계약 §5.2 ⒜는 이 갈래에 "규칙이 없다"고 적었다 —
+/// `src\main.zig`와 `line1\nline2.log`가 세그먼트 모양으로 구별되지 않기 때문이다(접두 갈래에서 통한
+/// `isEscapeLikeSegment`가 여기서는 4건 중 3건 오탐). 그 판단은 **감지가 마지막 방어선이던 때**의 것이다.
+/// hover에도 존재검증이 들어온 뒤 다시 쟀다 — 이전 세션이 실제 도구를 돌려 캡처해 둔 코퍼스
+/// (`zig`·PowerShell·git·이스케이프 출력) 369 토큰에서 이 규칙으로 **새로 밑줄이 뜬 것은 2개**이고
+/// 둘 다 진짜 경로다(`src\main.zig:10:5` · `src\pty\types.zig:372:11` — zig 컴파일 에러의 상대 경로,
+/// 이 갈래에서 가장 값진 사례). **밑줄 뜬 오탐 0.** 이스케이프 출력(`line1\nline2.log`·`col\tvalue.csv`)은
+/// 감지는 통과하지만 그런 파일이 실재하지 않아 존재 게이트에서 떨어진다. 즉 **규칙이 가르지 못하는 것을
+/// 존재가 가른다** — 계약 §5.2 ⒜가 "규칙이 없다"고 적었을 때는 감지가 마지막 방어선이었다.
+///
+/// 대가 둘. ⑴ 세그먼트 규칙 때문에 **한 글자 디렉터리 이름을 잃는다**(실측에서 `.zig-cache\o\…\build.exe`
+/// 하나) — 접두 갈래가 이미 치른 것과 같은 대가다. ⑵ 이스케이프 문자열이 **우연히 실재하는 경로와 겹치면**
+/// 밑줄이 뜬다. 손으로 만든 집합에서 나온 유일한 사례가 JSON 안의 `src\\main.zig`인데,
+/// `std.fs.path.resolve`가 중복 구분자를 접어 **그 JSON이 가리키던 바로 그 파일**을 열므로 해롭지 않다.
+///
+/// **POSIX 회귀는 0이다** — `os_tag`가 Windows가 아니면 구분자 집합이 `/` 하나뿐이라 예전과 같은 함수다.
+pub fn looksLikeBareRelativeFor(os_tag: std.Target.Os.Tag, word: []const u8) bool {
+    if (word.len == 0) return false;
+    const c0 = word[0];
+    if (c0 == '$') return false;
+    if (std.mem.startsWith(u8, word, "//")) return false;
+    if (!(std.ascii.isAlphanumeric(c0) or c0 == '_' or c0 == '.')) return false;
+    const comma = std.mem.indexOfScalar(u8, word, ',') orelse word.len;
+    const head = word[0..comma];
+    const seps: []const u8 = if (os_tag == .windows) "/\\" else "/";
+    const sep = std.mem.indexOfAny(u8, head, seps) orelse return false; // 구분자 필수
+    if (std.mem.indexOfScalar(u8, head, '.') == null) return false; // 점 필수(파일스러움)
+    // **접두 형태는 접두 갈래가 판정을 소유한다** — `.\`·`..\`·`~\`로 시작하면 여기서 손대지 않는다.
+    // 안 그러면 `detectableRelativePrefixFor`가 이스케이프로 보고 거부한 `.\d+`가 이 갈래로 흘러들어
+    // 분류를 통과한다(기존 테스트 "linkSpanInWord classifies extra schemes and file paths"가 그것을 잡았다).
+    // 감지 종류 우선순위표가 이미 dot_relative를 bare보다 구체적이라고 정해 둔 것과 같은 규율이다.
+    //
+    // **세그먼트 규칙(`isEscapeLikeSegment`)을 여기 걸지 않는 이유는 실측이다.** 그것도 후보였는데, 둘을
+    // 코퍼스로 견주니 저장소 실제 상대 경로 539건에서는 손실이 둘 다 0인 반면 세그먼트 규칙 쪽만
+    // `.zig-cache\o\…\build.exe`(한 글자 디렉터리)를 잃었다. 접두 소유 규칙은 기존 테스트가 요구하는
+    // 정규식 조각 넷을 그대로 막으면서 그 손실이 없다 — **더 좁은 규칙으로 같은 것을 얻는다.**
+    // 남는 이스케이프(`line1\nline2.log`)는 감지로는 못 가르고 존재 게이트가 가른다(§5.2 ⒜).
+    if (os_tag == .windows and (std.mem.startsWith(u8, word, ".\\") or
+        std.mem.startsWith(u8, word, "..\\") or
+        std.mem.startsWith(u8, word, "~\\"))) return false;
+    // 첫 세그먼트(첫 구분자 전)는 글자/숫자/_/-/. 만 — `foo~/x`(mid-word ~)·`a:b/x` 등 제외.
+    // `~`는 home 갈래에서만 의미를 갖는다(Ghostty 첫 세그 `[\w][\w\-.]*`와 같은 취지).
+    for (head[0..sep]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
+    }
+    return true;
+}
+
 /// 플랫폼이 중립 레이어로 넘기는 경로의 구분자를 **POSIX(`/`)로 정규화**한다(입구 정규화).
 ///
 /// **왜 입구인가**: L2는 경로를 이을 때 항상 `/`를 쓰는데(docs/layering-and-portability.md §4.1) 입력이
@@ -328,6 +389,49 @@ test "detectableRelativePrefixFor: POSIX 철자는 회귀 0, 역슬래시는 Win
         try testing.expect(detectableRelativePrefixFor(mac, t) == null);
     }
     try testing.expectEqual(RelativePrefix.home, detectableRelativePrefixFor(win, "~\\bin").?);
+}
+
+test "looksLikeBareRelativeFor: POSIX 회귀 0, 역슬래시는 Windows에서만" {
+    const win = std.Target.Os.Tag.windows;
+    const mac = std.Target.Os.Tag.macos;
+
+    // POSIX 철자 — **모든 호스트에서 예전 그대로**. 이 줄이 회귀 0의 계약이다.
+    for ([_]std.Target.Os.Tag{ win, mac, .linux }) |os| {
+        try testing.expect(looksLikeBareRelativeFor(os, "src/main.zig"));
+        try testing.expect(looksLikeBareRelativeFor(os, "a/b/c.txt"));
+        try testing.expect(!looksLikeBareRelativeFor(os, "foo/bar")); // 점 필수
+        try testing.expect(!looksLikeBareRelativeFor(os, "plain.txt")); // 구분자 필수
+        try testing.expect(!looksLikeBareRelativeFor(os, "$10/x.txt")); // `$` 시작 금지
+        try testing.expect(!looksLikeBareRelativeFor(os, "//foo/x.txt")); // 프로토콜 상대·UNC
+        try testing.expect(!looksLikeBareRelativeFor(os, "a:b/x.txt")); // 첫 세그먼트 문자집합
+    }
+
+    // 역슬래시 철자 — Windows에서만. macOS에서 `src\main.zig`는 그 이름의 **한 파일**이다.
+    for ([_][]const u8{ "src\\main.zig", "src\\pty\\types.zig:372:11", "docs\\a.md" }) |t| {
+        try testing.expect(looksLikeBareRelativeFor(win, t));
+        try testing.expect(!looksLikeBareRelativeFor(mac, t));
+    }
+
+    // **접두 형태는 접두 갈래가 소유한다** — bare가 재판정하지 않는다. 안 그러면 접두 갈래가 거부한
+    // 정규식 조각이 이 갈래로 흘러들어 분류를 통과한다(`linkSpanInWord` 테스트가 그것을 잡았다).
+    for ([_][]const u8{ ".\\d+", ".\\s*", ".\\d{2,4}", ".\\n", "..\\d+", "~\\d+" }) |t|
+        try testing.expect(!looksLikeBareRelativeFor(win, t));
+    // 정상 접두 경로도 여기서는 거짓이다 — 앞선 `detectableRelativePrefixFor`가 이미 참을 냈다.
+    try testing.expect(!looksLikeBareRelativeFor(win, ".\\src\\main.zig"));
+    try testing.expect(detectableRelativePrefixFor(win, ".\\src\\main.zig") != null);
+
+    // 세그먼트 규칙을 여기 걸지 **않는** 대가와 이득. 한 글자 디렉터리가 살고(이득),
+    // 접두가 아닌 이스케이프 모양은 분류를 통과한다(대가 — 존재 게이트가 받는다).
+    try testing.expect(looksLikeBareRelativeFor(win, ".zig-cache\\o\\x\\build.exe"));
+    try testing.expect(looksLikeBareRelativeFor(win, ".zig-cache/o/x/build.exe"));
+    try testing.expect(looksLikeBareRelativeFor(win, "line1\\nline2.log")); // 존재 게이트 몫
+
+    // 역슬래시가 **뒤쪽** 세그먼트에 오는 것은 두 OS 모두 통과한다 — POSIX에서 `dir/a\b.txt`는 이름이
+    // `a\b.txt`인 평범한 파일이고, Windows에서는 `dir\a\b.txt`와 같은 뜻이다.
+    try testing.expect(looksLikeBareRelativeFor(mac, "dir/a\\b.txt"));
+    try testing.expect(looksLikeBareRelativeFor(win, "dir/a\\b.txt"));
+    // 첫 세그먼트에 역슬래시가 있으면 두 OS 모두 예전부터 거부한다(문자집합 검사) — 회귀 아님.
+    try testing.expect(!looksLikeBareRelativeFor(mac, "a\\b/c.txt"));
 }
 
 // 오탐 스윕이 찾은 **유일한 공통 모양**(정규식 클래스 세그먼트)을 고정한다. 이 목록이 무너지면 터미널에

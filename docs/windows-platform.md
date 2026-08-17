@@ -744,6 +744,36 @@ conhost는 **10.0.19041.4522**(Windows 10 19045)로, #9970(2021)보다 오래된
 `conpty.dll` 경로가 길면 `CreatePseudoConsole`이 죽는다
 ([#16860](https://github.com/microsoft/terminal/issues/16860)).
 
+**Microsoft가 그렇게 하라고 말한다.** 인박스 conhost에 개별 수정을 백포트하는 대신 NuGet으로 배포하겠다는
+것이 공식 방침이다([discussion #17608](https://github.com/microsoft/terminal/discussions/17608)) —
+"terminal emulator authors ... to lock to specific versions and fully vet compatibility with them".
+한계도 같이 적혀 있다: 사용자가 `cmd.exe`·`wsl.exe`를 **직접** 띄우면 그쪽은 여전히 시스템 conhost다.
+
+**그리고 실제로 다들 그렇게 한다** — 이 개발 기계에서 확인한 것만:
+
+| 제품 | 번들 위치 | 버전 |
+|---|---|---|
+| Warp | `Warp\conpty.dll` + `Warp\x64\OpenConsole.exe` | — |
+| Zed | `Zed\conpty.dll` + `Zed\{arm64,x64}\OpenConsole.exe` | 1.22.250314001 |
+| Android Studio(pty4j) | `lib\pty4j\win\x86-64\` 에 쌍 | — |
+
+WezTerm도 `assets/windows/conhost`에 쌍을 둔다([wezterm#7774](https://github.com/wezterm/wezterm/issues/7774)).
+`conpty.dll`을 루트에, `OpenConsole.exe`를 아키텍처 하위 폴더에 두는 배치가 공통이다.
+
+##### 실측: 새 ConPTY 를 물리면 **고쳐진다** (2026-08-18)
+
+권고를 믿지 않고 재 봤다. Zed 가 번들한 `conpty.dll`(1.22.250314001)을 동적 로드해
+`CreatePseudoConsole`만 그쪽 것으로 바꾸고, 나머지는 전부 그대로 둔 A/B다:
+
+| | `mouse_tracking` | `mouse_format` | 클릭이 간 곳 |
+|---|---|---|---|
+| 인박스 conhost 10.0.19041.4522 | `none` | `x10` | 로컬 선택(`reports=0 selections=1`) |
+| 번들 `conpty.dll` 1.22.250314001 | **`any`** | **`sgr`** | **셸 리포트**(`reports=2 selections=0`) |
+
+ConPTY 가 `CSI?1003h`(any-event — #9970 리뷰에서 1002 대신 이것을 쓰기로 한 그대로)와 `CSI?1006h`를
+보냈고, **우리 코드는 한 줄도 안 바뀌었는데 라우팅이 바뀌었다.** §2k 의 리포팅 경로가 옳다는 것과, 남은
+것이 배포 결정뿐이라는 것을 동시에 보인다. (실험은 되돌렸다 — 번들 여부는 사용자 결정이다.)
+
 **이것은 배포 결정이라 사용자에게 보고하고 정한다**(AGENTS.md 핵심 원칙) — 산출물에 Microsoft 바이너리
 둘이 늘어난다. 넣는다면 모양은 정해져 있다: `conpty.dll`을 **동적 로드**해 있으면 쓰고 없으면 kernel32로
 접는다(소스 빌드가 계속 돌아야 한다). §4의 spawn 절차·EOF 규약은 그대로다 — 같은 API의 새 구현이다.

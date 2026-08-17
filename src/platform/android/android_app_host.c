@@ -7,7 +7,6 @@
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
 #define VK_USE_PLATFORM_ANDROID_KHR
-#include <math.h> // powf — 관성 감쇠가 시간 기준이라 필요하다
 #include <android_native_app_glue.h>
 #include <android/log.h>
 #include <android/bitmap.h>
@@ -80,13 +79,13 @@ static struct {
     uint32_t atlas_cols, atlas_rows;
     float scale;
     int inset_top, inset_bottom;
-    float touch_last_y;   // 직전 MOVE 의 논리 y — 이동량을 내는 기준
-    float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
-    float fling_vy;       // 손을 뗀 뒤 남은 관성(**px/ms** — 프레임당이 아니다)
+    // **아래 셋은 로그 전용이다** — 제스처의 뜻도 관성도 코어가 든다(§3.1). iOS 에는 없다:
+    // 이 플랫폼만 입력을 스크립트로 넣을 수 있어(`adb shell input`) 기기 판정이 여기서 돌고,
+    // "손가락은 갔는데 화면은 안 흘렀다" 를 한 줄로 보이려면 손가락 쪽 값이 필요하다.
+    float touch_last_y;   // 직전 MOVE 의 논리 y — 누적의 기준
+    float touch_total_dy; // 이번 제스처에 손가락이 간 거리(화면이 흐른 양이 아니다)
     unsigned int ptr_id;  // 본문 제스처를 소유한 손가락 id
     int has_ptr_id;       // 소유자가 있나(0 이면 본문 제스처가 없다)
-    double ptr_last_t;    // 직전 이동 이벤트의 시각(ms)
-    double fling_t;       // 직전 관성 프레임의 시각(ms)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
     int ready;
     int frames;
@@ -627,23 +626,6 @@ static int initVulkan(ANativeWindow *win) {
 static void drawFrame(void) {
     if (!g.ready) return;
     // 손을 뗀 뒤 남은 관성을 **경과한 시간만큼** 흘리고 감쇠시킨다(iOS `stepFling` 과 같은 값).
-    // 간격은 안 흐를 때도 재 둔다 — 안 그러면 첫 프레임의 dt 가 "멈춰 있던 시간" 이 되어 튄다.
-    {
-        struct timespec fnow;
-        clock_gettime(CLOCK_MONOTONIC, &fnow);
-        double now_ms = (double)fnow.tv_sec * 1000.0 + (double)fnow.tv_nsec / 1.0e6;
-        float dt = (g.fling_t == 0.0) ? 16.0f : (float)(now_ms - g.fling_t);
-        g.fling_t = now_ms;
-        if (g.fling_vy != 0.0f) {
-            if (dt < 1.0f) dt = 1.0f;
-            if (dt > 100.0f) dt = 100.0f;
-            pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_scroll(g.fling_vy * dt);
-            pthread_mutex_unlock(&g_bridge_lock);
-            g.fling_vy *= powf(MARU_FLING_DECAY_PER_MS, dt);
-            if (g.fling_vy < MARU_FLING_STOP_BELOW && g.fling_vy > -MARU_FLING_STOP_BELOW) g.fling_vy = 0.0f;
-        }
-    }
     // **창 크기를 직접 본다.** 드라이버가 OUT_OF_DATE 를 안 알려 주는 경우가 있다(실측:
     // 이 에뮬레이터는 리사이즈 뒤에도 계속 VK_SUCCESS 를 돌려주고, SurfaceFlinger 가 낡은
     // 버퍼를 늘려 화면만 맞아 보인다 — 실제로는 잘못된 해상도로 그리고 있다).
@@ -1200,8 +1182,6 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             unsigned int did = (unsigned int)AMotionEvent_getPointerId(ev, 0);
             g.touch_last_y = dly;
             g.touch_total_dy = 0;
-            g.fling_vy = 0;
-            g.ptr_last_t = ev_ms;
             g.ptr_id = did;
             g.has_ptr_id = 1;
             pthread_mutex_lock(&g_bridge_lock);
@@ -1219,7 +1199,6 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
             pthread_mutex_unlock(&g_bridge_lock);
             g.has_ptr_id = 0;
-            g.fling_vy = 0;
             return 1;
         }
 
@@ -1233,22 +1212,13 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                 pthread_mutex_lock(&g_bridge_lock);
                 maru_mobile_pointer(1, id, lx, ly, (unsigned long long)ev_ms);
                 pthread_mutex_unlock(&g_bridge_lock);
-                // **본문 관성은 host 몫이다**(계약 §3.1 — 코어에 시계가 없다). 소유자의 이동만
-                // 속도로 친다 — 나머지는 코어가 기준만 갱신한다.
-                // **관성은 본문 것이다.** 목적지를 host 가 더는 모르므로 늘 재 두고, 실제로
-                // 흘릴지는 코어가 정한다(`maru_mobile_scroll` 이 밀린 화면에서는 무시한다).
+                // **관성은 코어가 든다.** 전에는 여기서 속도를 쟀고, 그러려면 "이 제스처가
+                // 본문 것인가" 를 알아야 했다(`keybar_active`). 그 지식이 R2 로 사라졌는데
+                // 재는 것만 남겨 두니 **키바를 비스듬히 튕겨도 본문이 흘렀다** — 목적지를
+                // 아는 쪽이 잰다(§3.1). 여기 남은 것은 로그용 누적 이동량뿐이다.
                 if (g.has_ptr_id && id == g.ptr_id) {
-                    float dy = ly - g.touch_last_y;
+                    g.touch_total_dy += ly - g.touch_last_y;
                     g.touch_last_y = ly;
-                    float pdt = (float)(ev_ms - g.ptr_last_t);
-                    if (pdt < 1.0f) pdt = 1.0f;
-                    if (pdt > 100.0f) pdt = 100.0f;
-                    float v = dy / pdt;
-                    if (v > MARU_FLING_MAX_VELOCITY) v = MARU_FLING_MAX_VELOCITY;
-                    if (v < -MARU_FLING_MAX_VELOCITY) v = -MARU_FLING_MAX_VELOCITY;
-                    g.fling_vy = v;
-                    g.ptr_last_t = ev_ms;
-                    g.touch_total_dy += dy;
                 }
             }
             return 1;
@@ -1264,9 +1234,8 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                 maru_mobile_pointer(ph, id, lx, ly, (unsigned long long)ev_ms);
                 pthread_mutex_unlock(&g_bridge_lock);
 
-            // **본문 소유자가 떼지면 남은 손가락이 이어받는다** — 여기서는 기준을 다시 잡고
-            // **속도를 버린다**(AOSP `ScrollView.onSecondaryPointerUp` 이 하는 그것이다).
-            // 코어 쪽 기준은 손가락마다 있어 할 일이 없지만, **본문 관성은 host 가 든다**.
+            // **본문 소유자가 떼지면 남은 손가락이 이어받는다** — 로그용 누적의 기준을 다시
+            // 잡는다. 관성의 인수인계(속도 버리기)는 코어가 한다.
             if (ph == 2 && g.has_ptr_id && id == g.ptr_id) {
                 g.has_ptr_id = 0;
                 for (size_t i = 0; i < pcount; i++) {
@@ -1274,8 +1243,6 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                     g.ptr_id = (unsigned int)AMotionEvent_getPointerId(ev, i);
                     g.has_ptr_id = 1;
                     g.touch_last_y = (AMotionEvent_getY(ev, i) - (float)g.inset_top) / g.scale;
-                    g.ptr_last_t = ev_ms;
-                    g.fling_vy = 0; // 불연속이 fling 이 되지 않게
                     break;
                 }
             }
@@ -1287,7 +1254,11 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                 drainClipboard(app);
                 unsigned int vo = maru_mobile_view_offset();
                 unsigned int has_sel = maru_mobile_has_selection();
-                LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
+                // **`finger_dy` 는 손가락이 간 거리이지 화면이 흐른 양이 아니다.** 둘을 나란히
+                // 두는 것이 요점이다 — 키바로 간 손짓은 `finger_dy` 가 크면서 `view_offset` 이
+                // 그대로여야 한다(그 둘이 같이 움직인 것이 R2 가 만든 회귀였다). 이름을 `dy` 로
+                // 두면 "본문이 그만큼 흘렀다" 로 읽힌다.
+                LOGI("MARU_SCROLL finger_dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
                 g.has_ptr_id = 0;
             }
             return 1;
@@ -1748,14 +1719,9 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         maru_mobile_report_focus(cmd == APP_CMD_GAINED_FOCUS);
         // 누르고 있던 손가락을 정리한다 — 이 OS 는 취소를 보내 주지만(실측) 그것에
         // 기대지 않는다. 두 플랫폼이 같은 자리에서 같은 정리를 한다.
-        if (cmd == APP_CMD_LOST_FOCUS) {
-            maru_mobile_pointer(3, 0, 0, 0, 0);
-            // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
-                            // **본문 관성도 거둔다**(iOS 와 같은 자리). 브리지가 아니라 우리가 든 값이라 위
-            // 취소로 안 지워지고, 감쇠가 시간 기준이라 남겨 두면 복귀 프레임이 튄다.
-            g.fling_vy = 0.0f;
-            g.fling_t = 0.0;
-        }
+        // **취소 하나면 끝난다.** 목적지도 관성도 코어가 드므로, 전에 여기서 따로 거두던
+        // 미끄러짐 상태가 host 에 없다.
+        if (cmd == APP_CMD_LOST_FOCUS) maru_mobile_pointer(3, 0, 0, 0, 0);
         pthread_mutex_unlock(&g_bridge_lock);
         return;
     }

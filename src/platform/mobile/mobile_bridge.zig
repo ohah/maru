@@ -695,7 +695,12 @@ var ptr_down_x: f32 = 0;
 var ptr_down_y: f32 = 0;
 var ptr_down_ms: u64 = 0;
 var ptr_last_y: f32 = 0;
+var ptr_last_ms: u64 = 0;
 var ptr_moved = false;
+/// 손을 뗀 뒤 남은 세로 관성(px/ms). **코어가 든다** — 전에는 host 가 들었는데, 목적지를
+/// host 가 더는 모르게 되자(R2) 키바로 간 제스처의 세로 속도까지 본문에 흘렸다(회귀였다).
+/// 키바·설정 관성이 이미 여기서 도는 것과 같은 자리다.
+var body_fling: f32 = 0;
 /// 길게 눌러 선택에 들어갔다 — 이 뒤의 이동은 스크롤이 아니라 선택 확장이다.
 var selecting = false;
 
@@ -750,6 +755,9 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
     if (phase == 3) {
         body_slots = @splat(.{});
         body_owner = null;
+        // **취소는 관성도 거둔다.** 두 host 가 이 phase 를 배경 전환 정리로도 쓰므로, 남기면
+        // 돌아왔을 때 손대지 않은 화면이 저 혼자 흐른다(전에 host 에서 겪은 그것이다).
+        body_fling = 0;
         if (routeIs(.body)) routeClear();
     }
     switch (phase) {
@@ -777,6 +785,9 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             ptr_down_y = y;
             ptr_down_ms = time_ms;
             ptr_last_y = y;
+            ptr_last_ms = time_ms;
+            // **누르면 관성이 선다** — 흐르는 화면을 짚어 세우는 것은 모든 스크롤 면의 약속이다.
+            body_fling = 0;
             ptr_moved = false;
             // 새로 누르면 이전 선택은 사라진다 — 데스크톱에서 클릭이 선택을 푸는 것과 같다.
             if (selecting or core.selectionViewportSpan() != null) {
@@ -820,7 +831,14 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             // 손가락이 가만히 있으면 move 가 아예 안 오기 때문이다.
             // 스크롤이다. 델타는 직전 move 대비다.
             maru_mobile_scroll(y - ptr_last_y);
+            // **속도는 px/ms 다**(프레임당이 아니다 — 30Hz 기기에서 두 배 멀리 가는 것을 T1 이
+            // 실측으로 잡았다). 간격은 아래위로 자른다: 0 이면 나눗셈이 폭발하고, 손가락이
+            // 멈췄다 다시 움직인 긴 간격은 속도가 아니라 **정지**다.
+            const dt_ms = @max(1.0, @min(100.0, @as(f32, @floatFromInt(time_ms -| ptr_last_ms))));
+            const v = (y - ptr_last_y) / dt_ms;
+            body_fling = @max(-scroll_area.Touch.max_velocity, @min(scroll_area.Touch.max_velocity, v));
             ptr_last_y = y;
+            ptr_last_ms = time_ms;
         },
         else => { // up · cancel
             if (phase == 2) {
@@ -840,6 +858,10 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
                         // **이어받는다.** 그 손가락은 자기 기준을 갖고 있으므로 그것으로 잇는다 —
                         // 여기서 옛 좌표를 남기면 다음 move 에서 점프한다.
                         ptr_last_y = sl.last_y;
+                        ptr_last_ms = time_ms;
+                        // **이어받는 자리의 불연속은 관성이 아니다**(AOSP `ScrollView` 가
+                        // `VelocityTracker.clear()` 로 하는 그것이다).
+                        body_fling = 0;
                         return; // 제스처는 계속된다 — 선택·롱프레스 상태를 안 거둔다
                     }
                 }
@@ -1024,6 +1046,34 @@ fn stepKeyBarFling() void {
     // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
     if (screenTop() != .terminal) return;
     _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)), frame_dt_ms);
+}
+
+/// 본문 세로 관성을 한 프레임 몫만큼 흘린다. **키바·설정과 같은 자리에서 돈다.**
+///
+/// **전에는 host 가 이것을 들었다.** 그때는 host 가 목적지도 알아서(`keybar_active`) "본문
+/// 제스처일 때만" 속도를 쟀는데, R2 로 그 지식을 걷어내면서 **가드까지 같이 사라져** 키바를
+/// 비스듬히 튕기면 본문이 흘렀다. 관성은 목적지를 아는 쪽이 들어야 한다 — 여기가 그 자리다.
+///
+/// **손가락이 닿아 있는 동안에는 안 흘린다**(키바와 같은 이유 — `move` 가 이미 그만큼 흘렸다).
+fn stepBodyFling() void {
+    if (body_fling == 0) return;
+    if (body_owner != null) return; // 아직 끌고 있다
+    // 밀린 화면 뒤에서 계속 흐르면 돌아왔을 때 보던 자리가 아니다(`maru_mobile_scroll` 도
+    // 같은 판정을 하지만, 여기서 멈춰야 **관성 자체가** 그 화면에 갇혀 있지 않는다).
+    if (screenTop() != .terminal) {
+        body_fling = 0;
+        return;
+    }
+    // **간격은 위아래로 자른다** — `Touch.step` 과 같은 규칙이다(멈췄다 재개한 프레임의 dt 를
+    // 그대로 곱하면 한 프레임에 화면을 날린다). 두 host 가 들고 있던 상한을 여기로 옮겼다.
+    const dt = std.math.clamp(frame_dt_ms, 1, 100);
+    maru_mobile_scroll(body_fling * dt);
+    // **끝에 닿았을 때 속도를 따로 죽이지 않는다.** `Touch.step` 은 그렇게 하지만 여기서는
+    // 관측되는 차이가 없다 — 다음 `down` 이 이미 속도를 0 으로 만들어 "죽은 속도가 남아
+    // 튄다" 가 성립하지 않고, 감쇠가 1초 안에 스스로 멈춘다. 조건을 뒤집는 변이로 확인했다
+    // (아무 테스트도 안 깨졌다). 헛방어를 남기면 다음 사람이 그것을 계약으로 읽는다.
+    body_fling *= std.math.pow(f32, scroll_area.Touch.decay_per_ms, dt);
+    if (@abs(body_fling) < scroll_area.Touch.stop_below) body_fling = 0;
 }
 
 /// 지금 키바 가로 위치(px).
@@ -3174,6 +3224,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     frame_seq +%= 1;
     stepKeyBarFling();
     stepSetFling();
+    stepBodyFling();
     if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패

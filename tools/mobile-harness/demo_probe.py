@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 
 # 대본의 마지막 줄. 여기가 바뀌면 이 상수도 함께 고쳐야 한다(그래야 조용히 빗나가지 않는다).
-ANCHOR = '"\\x1b[53move\\x1b[0m \\x1b[4;58;5;196mucol\\x1b[0m \\x1b[8mhid\\x1b[0m|\\r\\n";'
+# **끝 표시(`;`)를 앵커에 넣지 않는다.** 대본은 계속 자라서 이 줄 뒤에 `++` 가 붙는 일이
+# 생기고(실제로 이모지 줄이 붙으며 그렇게 됐다), 그때 도구가 조용히 못 쓰게 된다 —
+# "대본 앵커를 못 찾았다" 로 기기 검증이 통째로 막혔다.
+ANCHOR = '"\\x1b[53move\\x1b[0m \\x1b[4;58;5;196mucol\\x1b[0m \\x1b[8mhid\\x1b[0m|\\r\\n"'
 
 
 def append(bridge: str, tail: str) -> int:
@@ -26,7 +29,8 @@ def append(bridge: str, tail: str) -> int:
         print("대본 앵커를 못 찾았다 — 대본이 바뀌었으면 demo_probe.py 의 ANCHOR 도 고친다",
               file=sys.stderr)
         return 1
-    p.write_text(src.replace(ANCHOR, ANCHOR[:-1] + " ++\n    " + tail), encoding="utf-8")
+    # 앵커 **바로 뒤에** 끼운다. 뒤에 `++` 가 오든 `;` 가 오든 그 앞자리는 늘 유효하다.
+    p.write_text(src.replace(ANCHOR, ANCHOR + " ++\n    " + tail, 1), encoding="utf-8")
     return 0
 
 
@@ -37,13 +41,13 @@ def main() -> int:
     mode, bridge = sys.argv[1], sys.argv[2]
     if mode == "cursor" and len(sys.argv) == 5:
         shape, pos = sys.argv[3], sys.argv[4]
-        return append(bridge, '"\\x1b[' + shape + ' q\\x1b[' + pos + 'H";')
+        return append(bridge, '"\\x1b[' + shape + ' q\\x1b[' + pos + 'H"')
     if mode == "lines" and len(sys.argv) == 4:
         # **스크롤백을 만든다.** 번호를 찍어서 화면이 실제로 어느 줄을 보고 있는지 읽히게 한다 —
         # 같은 글자만 반복하면 스크롤됐는지 눈으로 구분할 수 없다.
         n = int(sys.argv[3])
         body = "".join(f"line {i:03d}\\r\\n" for i in range(1, n + 1))
-        return append(bridge, '"' + body + '";')
+        return append(bridge, '"' + body + '"')
     print(__doc__)
     return 2
 

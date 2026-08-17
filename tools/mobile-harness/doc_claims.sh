@@ -101,19 +101,24 @@ ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-harness/Info.plist.in)"
 
 echo "§관성 — 숫자가 갈리지 않는다"
-# 본문 관성은 host 몫이지만(계약 §3.1) **숫자는 공유**해야 한다 — 같은 손짓이 본문·키바·설정에서
-# 다르게 미끄러지면 사용자는 이유를 모른다. 예전에는 0.92 가 세 곳에 따로 있었다.
-ck "헤더가 감쇠를 소유한다" 1 "$(grep -c 'define MARU_FLING_DECAY_PER_MS' $H)"
-ck "host 에 남은 감쇠 하드코딩" 0 "$(grep -cE '\*= 0\.9[0-9]*f' $I $A | awk -F: '{s+=$2} END{print s+0}')"
-# Zig 컴포넌트는 데스크톱과 공유하는 코드라 이 헤더를 못 읽는다 — **값이 같은지**를 여기서 본다.
-ck "헤더와 컴포넌트의 감쇠가 같다" "$(grep -oE 'define MARU_FLING_DECAY_PER_MS [0-9.]+' $H | grep -oE '[0-9]+\.[0-9]+')" "$(grep -oE 'decay_per_ms: f32 = [0-9.]+' src/chrome/ui/scroll_area.zig | grep -oE '[0-9]+\.[0-9]+')"
+# **관성은 코어 한 곳에서 돈다.** 본문·키바·설정이 같은 값으로 흘러야 하고(다르면 사용자는
+# 이유를 모른다), 그 값은 `scroll_area.Touch` 가 갖는다. host 가 자기 관성을 들면 목적지를
+# 몰라 **남의 제스처까지 흘린다** — 실제로 R2 뒤에 키바를 비스듬히 튕기면 본문이 흘렀다.
+ck "host 에 관성이 남았나" 0 "$(grep -ciE 'fling(_v|Vy|_t)' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "감쇠의 단일 출처" 1 "$(grep -c 'decay_per_ms: f32 = ' src/chrome/ui/scroll_area.zig)"
 # **프레임당 감쇠가 다시 생기면 잡는다.** 그것이 30Hz 기기를 두 배 멀리 미끄러뜨렸다.
-ck "프레임당 감쇠가 남았나" 0 "$(grep -cE '\*= *(MARU_FLING_DECAY_PER_MS|0\.9[0-9]*f?) *;' $I $A src/chrome/ui/scroll_area.zig | awk -F: '{s+=$2} END{print s+0}')"
-ck "두 host 가 시간으로 감쇠한다" 2 "$(grep -c 'powf(MARU_FLING_DECAY_PER_MS' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+# **관성이 사는 파일을 같이 본다** — 코드가 브리지로 옮겨왔는데 세는 자리를 안 옮기면, 거기
+# 프레임당 감쇠가 다시 생겨도 판정자가 침묵한다(실제로 변이로 확인했다).
+ck "프레임당 감쇠가 남았나" 0 "$(grep -cE '\*= *0\.9[0-9]*f? *;' $I $A $B src/chrome/ui/scroll_area.zig | awk -F: '{s+=$2} END{print s+0}')"
+ck "코어가 시간으로 감쇠한다" 1 "$(grep -c 'std.math.pow(f32, scroll_area.Touch.decay_per_ms' $B)"
 # 이관은 **반쯤 하기가 제일 쉽다** — 실제로 목록만 옮기고 키바·팝업에 손수 스크롤이 남아 있었다.
 # 브리지에 f32 스크롤 변수가 다시 생기면 그때부터 규칙이 갈린다.
 # `*_max_scroll` 은 레이아웃이 잰 콘텐츠 길이지 스크롤 위치가 아니다 — 그건 남아도 된다.
-ck "브리지에 남은 손수 스크롤 상태" 0 "$(grep -E '^var .*(_scroll|_fling): f32' $B | grep -vc 'max_scroll' || true)"
+# `body_fling` 도 예외다: **본문은 ScrollArea 가 될 수 없다.** 키바·설정은 픽셀 오프셋을 옮기는
+# 면이지만 본문은 코어의 뷰포트를 **줄 단위**로 옮긴다(`maru_mobile_scroll` 이 px 를 모아 줄로
+# 바꾼다) — `Touch.step` 이 쓸 `State.offset_y_px` 가 아예 없다. 대신 감쇠·상한은 같은 곳에서
+# 가져다 쓰고, 그것은 위의 "감쇠의 단일 출처" 가 본다.
+ck "브리지에 남은 손수 스크롤 상태" 0 "$(grep -E '^var .*(_scroll|_fling): f32' $B | grep -vcE 'max_scroll|body_fling' || true)"
 # 슬롭도 감쇠와 같다 — 네 곳에 `10` 이 흩어져 있었다. 컴포넌트가 소유하고 브리지는 읽기만 한다.
 ck "브리지에 남은 슬롭 하드코딩" 0 "$(grep -cE '_moved < 1[0-9]\b' $B || true)"
 
@@ -149,14 +154,15 @@ ck "iOS 에 남은 anyObject" 1 "$(grep -c 'touches.anyObject' $I)"
 ck "Android 가 사건의 손가락을 쓴다" 1 "$(grep -c 'ACTION_POINTER_INDEX_SHIFT' $A)"
 # **배경 전환에 잡음을 다 풀어야 한다.** 뗀 적 없이 끝나는 경우가 그것이고, 하나라도 남으면
 # 복귀 후 그 표면이 굳는다(실제로 `_hasBodyPtr` 를 빠뜨려 키바·설정이 안 눌릴 뻔했다).
-# **R2 로 잡음이 하나가 됐다** — 목적지는 코어가 들므로 취소 한 번이 chrome·키바를 다 놓고,
-# host 에 남은 것은 본문 관성뿐이다. 그래서 "취소를 보낸다 + 본문 잡음을 푼다" 둘을 센다.
+# **이제 잡음이 아예 없다** — 목적지도 관성도 코어가 드니 host 가 들 상태가 없고, 배경 정리는
+# 취소 한 번이다. 그래서 "취소를 보낸다" 만 세고, **host 에 본문 제스처 상태가 없다** 를 같이 본다.
 # 두 자리다: `touchesCancelled`(제스처를 OS 가 뺏었다)와 배경 정리(뗀 적 없이 끝난다).
 ck "iOS 가 코어에 취소를 보내는 자리" 2 "$(grep -c 'maru_mobile_pointer(3, 0, 0, 0, 0);' $I)"
-ck "iOS 가 배경에서 본문 잡음을 푼다" 1 "$(grep -c 'releaseBodyGrab\]' $I)"
+ck "iOS 에 남은 본문 제스처 상태" 0 "$(grep -cE '_hasBodyPtr|_bodyPtrId' $I)"
 # `allTouches` 는 이벤트에 딸린 전부다. 우리 뷰로 안 거르면 남의 터치가 "아직 손가락이 있다" 로
-# 읽혀 **그 표면이 잡힌 채 굳는다**(마지막 손가락 판정과 이어받기 둘 다).
-ck "iOS 가 우리 뷰의 손가락만 센다" 2 "$(grep -c 't.view != self' $I)"
+# 읽혀 **마지막 손가락 판정이 틀리고 그 표면이 잡힌 채 굳는다**. 자리는 하나다 —
+# 이어받기는 코어가 하므로(`body_slots`) 뷰에는 `anyTouchRemains` 만 남았다.
+ck "iOS 가 우리 뷰의 손가락만 센다" 1 "$(grep -c 't.view != self' $I)"
 
 echo "§inset — 컷아웃을 빠뜨리지 않는다"
 # `systemBars()` 만 물으면 카메라 홀이 있는 기기에서 짧게 나온다(실측: 홀이 y=64..130 인데 63 을

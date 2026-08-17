@@ -70,6 +70,18 @@ echo "§3.1 IME 가 입력을 고쳐 쓰지 못한다"
 ck "iOS traits 여섯 개" 6 "$(grep -cE 'UITextAutocapitalizationTypeNone|UITextAutocorrectionTypeNo|UITextSpellCheckingTypeNo|UITextSmartQuotesTypeNo|UITextSmartDashesTypeNo|UITextSmartInsertDeleteTypeNo' $I)"
 ck "Android NO_SUGGESTIONS" 1 "$(grep -c 'TYPE_TEXT_FLAG_NO_SUGGESTIONS' src/platform/android/MaruActivity.java)"
 
+echo "§5 안전 영역은 네 변 다"
+# **좌우를 빠뜨리면 곡면 화면에서 양끝 글자가 모서리에 말린다** — 홀펀치·평면 기기에서는 그
+# 값이 0 이라 아무 차이가 없어 **안 드러난 채 오래 잠복한다**(그래서 기기로 못 본다. 판정자가
+# 유일한 방벽이다). iOS 는 `safeAreaInsets` 로 넷을 다 쓰고 있었고 Android 만 위·아래였다.
+# **선언이 아니라 읽는 자리를 센다** — `got_left = 0` 같은 초기화까지 세면 실제 조회를 지워도
+# 수가 그대로다(변이로 확인했다).
+ck "Android 가 네 변을 다 읽는다" 4 "$(grep -c 'GetFieldID(env, boxCls, "' $A)"
+ck "Android 가 좌우를 폭에서 뺀다" 1 "$(grep -c 'g.inset_left - g.inset_right' $A)"
+ck "Android 가 좌측만큼 그림을 민다" 1 "$(grep -c 'float ox = (float)g.inset_left;' $A)"
+# **그리는 자리와 누르는 자리가 같아야 한다** — 폭만 줄이고 터치를 안 옮기면 오른쪽 끝이 안 눌린다.
+ck "Android 터치 x 가 좌측 inset 을 뺀다" 0 "$(grep -cE 'AMotionEvent_getX\(ev, [0-9a-z]+\) / g.scale' $A)"
+
 echo "§3.1 한 제스처의 뜻은 상태 하나가 든다"
 # **조합으로 되돌아가지 못하게 한다.** 전에는 표면마다 `active`·`moved`·`stop_tap`·`pressed` 를
 # 따로 들고 "탭이다" 를 자리마다 새로 만들었다 — 한 자리에서 한 항을 빠뜨려도 컴파일도 테스트도

@@ -78,7 +78,10 @@ static struct {
     unsigned int quad_cap;
     uint32_t atlas_cols, atlas_rows;
     float scale;
-    int inset_top, inset_bottom;
+    // **좌우도 든다.** 곡면(waterfall) 화면은 유리가 옆으로 말려 그 띠의 글자가 휘어 보이고,
+    // 가로 모드에서는 노치가 옆으로 간다 — 둘 다 `left`/`right` 로 온다. iOS 는 이미
+    // `safeAreaInsets` 로 넷을 다 쓰고 있었고 여기만 위·아래만 읽고 있었다.
+    int inset_top, inset_bottom, inset_left, inset_right;
     // **아래 셋은 로그 전용이다** — 제스처의 뜻도 관성도 코어가 든다(§3.1). iOS 에는 없다:
     // 이 플랫폼만 입력을 스크립트로 넣을 수 있어(`adb shell input`) 기기 판정이 여기서 돌고,
     // "손가락은 갔는데 화면은 안 흘렀다" 를 한 줄로 보이려면 손가락 쪽 값이 필요하다.
@@ -655,7 +658,12 @@ static void drawFrame(void) {
     // 박았을 때는 540x1200 이 되어 레이아웃이 화면 위쪽만 채웠다).
     float scale = g.scale;
     // 상태바·제스처바를 뺀 영역만 준다 — iOS 의 safeAreaInsets 와 같은 자리다.
-    unsigned int lw = (unsigned int)(g.extent.width / scale);
+    // **좌우도 뺀다.** 안 빼면 곡면 화면에서 **본문 양끝 글자가 모서리에 말리고**, 가로
+    // 모드에서는 노치 밑에 깔린다. 홀펀치·평면 기기에서는 이 값이 0 이라 아무 차이가 없어
+    // **안 드러난 채 오래 잠복하는** 자리다.
+    int avail_w_px = (int)g.extent.width - g.inset_left - g.inset_right;
+    if (avail_w_px < 1) avail_w_px = 1;
+    unsigned int lw = (unsigned int)(avail_w_px / scale);
     // **소프트 키보드도 inset 이다.** 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라
     // 하단(보조 키바·상태바)이 통째로 가려진다 — 그 키바의 존재 이유가 "소프트 키보드에
     // Ctrl·Esc·Tab·화살표가 없다" 인데 정작 키보드가 뜨면 못 쓰게 된다.
@@ -745,7 +753,9 @@ static void drawFrame(void) {
         float cx = (float)q->cell_x * (half ? 2.0f : 1.0f);
         float qkind = is_color ? 3.0f : (half ? 1.0f : (float)q->kind);
         float oy = (float)g.inset_top;
-        Push p = {{q->x * scale, q->y * scale + oy, (q->x + q->w) * scale, (q->y + q->h) * scale + oy},
+        // **가로도 밀어 준다.** 폭만 줄이고 원점을 안 옮기면 그림이 왼쪽 띠에 걸린 채로 좁아진다.
+        float ox = (float)g.inset_left;
+        Push p = {{q->x * scale + ox, q->y * scale + oy, (q->x + q->w) * scale + ox, (q->y + q->h) * scale + oy},
                   {q->r, q->g, q->b, q->a},
                   {q->radius * scale, (float)g.extent.width, (float)g.extent.height, qkind},
                   {cx, (float)q->cell_y, cols, rows}};
@@ -801,10 +811,10 @@ static void drawFrame(void) {
 // 상태바·제스처바 밑으로 UI 가 깔리지 않게 **실제 inset** 을 받아 온다. NDK 에는 inset
 // API 가 없어서 JNI 로 `View.getRootWindowInsets()` 를 부른다 — iOS 의 `safeAreaInsets`
 // 와 같은 자리다. 값을 못 얻으면 0 으로 두고 진행한다(그리기를 막을 이유는 없다).
-static void queryInsets(struct android_app *app, int *top, int *bottom) {
+static void queryInsets(struct android_app *app, int *top, int *bottom, int *left, int *right) {
     // **실패하면 이전 값을 지킨다.** 예전에는 먼저 0 으로 밀어 버려, 조회가 실패하면 UI 가
     // 조용히 상태바 밑으로 들어갔다 — 화면만 이상하고 이유는 안 보인다.
-    int got_top = 0, got_bottom = 0, ok = 0;
+    int got_top = 0, got_bottom = 0, got_left = 0, got_right = 0, ok = 0;
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
     if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) { LOGI("insets_attach_failed"); return; }
@@ -835,10 +845,17 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
         jclass boxCls = (*env)->GetObjectClass(env, box);
         got_top = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "top", "I"));
         got_bottom = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "bottom", "I"));
+        got_left = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "left", "I"));
+        got_right = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "right", "I"));
         ok = 1;
     }
     (*vm)->DetachCurrentThread(vm);
-    if (ok) { *top = got_top; *bottom = got_bottom; } else LOGI("insets_read_failed");
+    if (ok) {
+        *top = got_top;
+        *bottom = got_bottom;
+        *left = got_left;
+        *right = got_right;
+    } else LOGI("insets_read_failed");
 }
 
 // **입력**: 문자는 IME 가 만든다. `MaruActivity.java` 가 `InputConnection` 으로 받아
@@ -1177,7 +1194,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         // `keybar_active` 로 들고 있었는데, **같은 사실을 두 층이 들다** 보니 정리도 두 곳에서
         // 해야 했고 한쪽을 빠뜨려 "복귀 후 첫 손짓이 통째로 삼켜지는" 결함이 났다(R).
         if (action == AMOTION_EVENT_ACTION_DOWN) {
-            float dlx = AMotionEvent_getX(ev, 0) / g.scale;
+            float dlx = (AMotionEvent_getX(ev, 0) - (float)g.inset_left) / g.scale;
             float dly = (AMotionEvent_getY(ev, 0) - (float)g.inset_top) / g.scale;
             unsigned int did = (unsigned int)AMotionEvent_getPointerId(ev, 0);
             g.touch_last_y = dly;
@@ -1200,7 +1217,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         if (action == AMOTION_EVENT_ACTION_SCROLL) {
             float vs = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_VSCROLL, 0);
             float hs = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HSCROLL, 0);
-            float lx = AMotionEvent_getX(ev, 0) / g.scale;
+            float lx = (AMotionEvent_getX(ev, 0) - (float)g.inset_left) / g.scale;
             float ly = (AMotionEvent_getY(ev, 0) - (float)g.inset_top) / g.scale;
             pthread_mutex_lock(&g_bridge_lock);
             maru_mobile_wheel(vs, hs, 0, lx, ly);
@@ -1223,7 +1240,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             // 손가락이 이어받는 순간 옛 자리에서 델타가 나와 화면이 점프한다(T1 이 없앤 그 병).
             for (size_t i = 0; i < pcount; i++) {
                 unsigned int id = (unsigned int)AMotionEvent_getPointerId(ev, i);
-                float lx = AMotionEvent_getX(ev, i) / g.scale;
+                float lx = (AMotionEvent_getX(ev, i) - (float)g.inset_left) / g.scale;
                 float ly = (AMotionEvent_getY(ev, i) - (float)g.inset_top) / g.scale;
                 pthread_mutex_lock(&g_bridge_lock);
                 maru_mobile_pointer(1, id, lx, ly, (unsigned long long)ev_ms);
@@ -1243,7 +1260,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         if (action == AMOTION_EVENT_ACTION_POINTER_DOWN || action == AMOTION_EVENT_ACTION_POINTER_UP ||
             action == AMOTION_EVENT_ACTION_UP) {
             unsigned int id = (unsigned int)AMotionEvent_getPointerId(ev, aidx);
-            float lx = AMotionEvent_getX(ev, aidx) / g.scale;
+            float lx = (AMotionEvent_getX(ev, aidx) - (float)g.inset_left) / g.scale;
             float ly = (AMotionEvent_getY(ev, aidx) - (float)g.inset_top) / g.scale;
             unsigned int ph = (action == AMOTION_EVENT_ACTION_POINTER_DOWN) ? 0 : 2;
                 pthread_mutex_lock(&g_bridge_lock);
@@ -1389,10 +1406,10 @@ static void teardownVulkan(void) {
     // 지운다**: 창이 부서졌다 서는 사이의 공백이 표본에 섞이면 중앙값이 거짓말을 하고,
     // 주기 기준이 남으면 재개 첫 프레임이 옛 시각과 비교돼 한 프레임을 건너뛴다.
     float scale = g.scale;
-    int it = g.inset_top, ib = g.inset_bottom;
+    int it = g.inset_top, ib = g.inset_bottom, il = g.inset_left, ir = g.inset_right;
     uint32_t ac = g.atlas_cols, ar = g.atlas_rows;
     memset(&g, 0, sizeof g);
-    g.scale = scale; g.inset_top = it; g.inset_bottom = ib;
+    g.scale = scale; g.inset_top = it; g.inset_bottom = ib; g.inset_left = il; g.inset_right = ir;
     g.atlas_cols = ac; g.atlas_rows = ar;
     LOGI("MARU_LIFECYCLE window_destroyed vulkan_torn_down");
 }
@@ -1751,8 +1768,9 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         int32_t dpi = AConfiguration_getDensity(app->config);
         g.scale = (dpi > 0 && dpi != ACONFIGURATION_DENSITY_ANY &&
                    dpi != ACONFIGURATION_DENSITY_NONE) ? (float)dpi / 160.0f : 2.0f;
-        queryInsets(app, &g.inset_top, &g.inset_bottom);
-        LOGI("density=%d scale=%.3f inset top=%d bottom=%d", dpi, g.scale, g.inset_top, g.inset_bottom);
+        queryInsets(app, &g.inset_top, &g.inset_bottom, &g.inset_left, &g.inset_right);
+        LOGI("density=%d scale=%.3f inset top=%d bottom=%d left=%d right=%d", dpi, g.scale,
+             g.inset_top, g.inset_bottom, g.inset_left, g.inset_right);
         // 기기에서 굽는다. 실패하면 글리프 없이 뜨는 편이 낫다 — 예전 폴백은 개발
         // 스크립트가 push 한 파일에 기대는 것이라 실제 앱에는 그 파일이 없었다.
         if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh))
@@ -1811,7 +1829,7 @@ static void recreateVulkan(struct android_app *app) {
     teardownVulkan();
     // **inset 도 다시 읽는다.** 창이 커지거나 줄면 상태바·제스처바 영역도 달라지는데,
     // 예전에는 창 생성 때 한 번만 읽어 그 뒤로 옛 값을 썼다 — iOS 는 매 프레임 읽는다.
-    queryInsets(app, &g.inset_top, &g.inset_bottom);
+    queryInsets(app, &g.inset_top, &g.inset_bottom, &g.inset_left, &g.inset_right);
     if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_recreated");
 }
 

@@ -330,9 +330,16 @@ pub const DockMetrics = struct {
     ///
     /// **13pt 역할 기준이다**(text-field-editor.md §12.3 ①) — chrome 글자가 사용자 등폭 폰트라 셀 =
     /// 실제 advance인 덕분에 셀 단위 랩이 성립한다. 12pt 역할로 낮추면 그 순간 랩이 깨진다.
+    /// 상자 안 **스크롤바 거터**. 목록과 같은 규율로 **늘 비워 둔다** — 글이 8행을 넘는 순간 막대가
+    /// 나타나는데, 그때 폭이 줄면 글이 통째로 다시 접혀 커서가 튄다(목록이 같은 이유로 gutter를 상시
+    /// 소유한다).
+    pub fn commitGutterPx(self: DockMetrics) u32 {
+        return self.scrollbar_width + self.scrollbar_inset_x * 2;
+    }
+
     pub fn commitViewCols(self: DockMetrics, box_width_px: f32, cell_width_px: u32) u16 {
         const cell: f32 = @floatFromInt(@max(cell_width_px, 1));
-        const usable = box_width_px - @as(f32, @floatFromInt(self.inset_x * 2));
+        const usable = box_width_px - @as(f32, @floatFromInt(self.inset_x * 2 + self.commitGutterPx()));
         if (usable < cell) return 1; // 한 열은 늘 있다 — 0열이면 랩이 무한 루프가 될 자리다
         const cols = @floor(usable / cell);
         return @intFromFloat(@min(cols, @as(f32, @floatFromInt(std.math.maxInt(u16)))));

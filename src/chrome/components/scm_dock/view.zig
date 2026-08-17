@@ -18,6 +18,7 @@ const file_tree_icon = @import("../../file_tree_icon.zig");
 const tree = @import("../../ui/tree.zig");
 const typography = @import("../../ui/typography.zig");
 const text_area = @import("../text_area.zig");
+const scroll_area = @import("../../ui/scroll_area.zig");
 const text_field = @import("../text_field.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
@@ -70,6 +71,7 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1.
     // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
     var text_ops: usize = 9;
+    var quad_extra: usize = 0;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
@@ -85,6 +87,7 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         // 입력은 **시각 행마다 한 조각**이고, 글자는 안내 문구와 본문 중 긴 쪽만 나간다.
         .commit_box => |box| {
             text_ops += @max(box.rows, 1);
+            quad_extra += 2; // 스크롤바(막대+thumb) — 넘칠 때만 그리지만 예산은 늘 잡는다
             bytes += @max(commitPlaceholder().len, box.text.len);
         },
         // 라벨 + `∨`.
@@ -120,7 +123,7 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         // **커밋 상자의 선택 밴드(시각 행당 최대 하나) + caret 하나**.
         // quad = entry당 배경 + 배지(행당 최대 하나) + 활성 탭 밑줄 + **커밋 상자의 선택 밴드와 caret**
         // (상자는 여럿일 수 있지만 **포커스는 하나**라 밴드는 그 상자의 시각 행 수, caret은 하나다).
-        .ops = entry_count + props.items.len + 1 + commitBandBudget(props.items) + 1 + text_ops,
+        .ops = entry_count + props.items.len + 1 + commitBandBudget(props.items) + 1 + text_ops + quad_extra,
         .runs = text_ops,
         .text_bytes = bytes,
     };
@@ -767,6 +770,11 @@ const Writer = struct {
         const visible = @min(@as(usize, @max(item.rows, 1)), wrapped.lines.len - first);
         const width = rect.rect.width - inset * 2;
 
+        // **넘치면 그 사실을 막대로 말한다**(사용자 요청 2026-08-17). 글이 상자보다 길면 지금까지는
+        // 화면에 아무 표시가 없어 "여기서 끝"으로 읽혔다. 자리는 `commitGutterPx`가 늘 비워 두므로
+        // 막대가 나타나고 사라져도 글이 다시 접히지 않는다.
+        try self.commitScrollbar(rect, m, wrapped.lines.len, first, visible, line_h, pad_y);
+
         for (0..visible) |offset| {
             const row = first + offset;
             const span_line = wrapped.lines[row];
@@ -836,6 +844,59 @@ const Writer = struct {
         try self.centered(face, label, role, .control);
         // 분할 표시(`∨`) — 보조 메뉴가 붙을 자리다. 지금은 그 자리를 말만 한다.
         try self.icon(face, face.rect.width - @as(f32, @floatFromInt(m.inset_x + m.icon_extent)), chevron_down_icon, m.icon_extent, role);
+    }
+
+    /// 커밋 상자의 세로 스크롤바. **목록 스크롤바와 같은 기하 함수를 쓴다**(`scroll_area`) — 두 곳이
+    /// 각자 비율을 계산하면 같은 화면에서 막대 길이 규칙이 갈린다.
+    ///
+    /// 지금은 **그리기만** 한다: 잡아 끄는 것은 목록 스크롤바가 하는 일이고, 상자 안 스크롤은 caret이
+    /// 끌고 간다(§12.2). 그래도 그리는 이유는 "더 있다"가 화면에 없으면 사용자가 글이 잘렸다고 읽기
+    /// 때문이다.
+    fn commitScrollbar(
+        self: *Writer,
+        rect: tree.RectEntry,
+        m: types.DockMetrics,
+        total_rows: usize,
+        first_row: usize,
+        visible_rows: usize,
+        line_h: f32,
+        pad_y: f32,
+    ) ViewError!void {
+        if (total_rows <= visible_rows) return; // 다 보이면 막대는 거짓 신호다
+        const gutter: f32 = @floatFromInt(m.commitGutterPx());
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const view_h = line_h * @as(f32, @floatFromInt(visible_rows));
+        const content: scroll_area.ContentRect = .{
+            .x = rect.rect.x + inset,
+            .y = rect.rect.y + pad_y,
+            .w = rect.rect.width - inset * 2 - gutter,
+            .h = view_h,
+            .gutter_w = gutter,
+        };
+        const geometry = scroll_area.scrollbarGeometry(
+            content,
+            @intFromFloat(line_h * @as(f32, @floatFromInt(total_rows))),
+            @intFromFloat(line_h * @as(f32, @floatFromInt(first_row))),
+            m.scrollbarMetrics(),
+        ) orelse return;
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(geometry.track_x)),
+                .y = @intFromFloat(@floor(geometry.track_y)),
+                .w = @intFromFloat(@max(geometry.track_w, 1)),
+                .h = @intFromFloat(@max(geometry.track_h, 1)),
+            },
+            .fill_role = .inset_bg,
+        });
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(geometry.track_x)),
+                .y = @intFromFloat(@floor(geometry.thumb_y)),
+                .w = @intFromFloat(@max(geometry.track_w, 1)),
+                .h = @intFromFloat(@max(geometry.thumb_h, 1)),
+            },
+            .fill_role = .muted_fg,
+        });
     }
 
     /// caret 하나. **글자 위가 아니라 글자 사이**에 서는 얇은 막대다 — 블록 caret은 터미널의 것이고,
@@ -1053,6 +1114,15 @@ fn countTextOps(draws: draw.ChromeDraw) usize {
 
 /// **정확히 그 글자만** 담은 text op. 부분 일치로 찾으면 요약 줄의 `+12 -3`이 행 동작의 `+`로 오인된다
 /// (적대적 검증에서 이 테스트가 실제로 그렇게 통과할 뻔했다).
+fn countAllQuads(draws: draw.ChromeDraw) usize {
+    var n: usize = 0;
+    for (draws.ops) |op| switch (op) {
+        .quad => n += 1,
+        else => {},
+    };
+    return n;
+}
+
 fn findExactText(draws: draw.ChromeDraw, needle: []const u8) ?draw.Op.Text {
     for (draws.ops) |op| switch (op) {
         .text => |text| {
@@ -1264,6 +1334,26 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다" {
+    // 넘치는데 표시가 없으면 사용자는 **글이 잘렸다**고 읽는다(사용자 요청 2026-08-17).
+    var storage: TestStorage = .{};
+    const short_text = "한 줄";
+    const long_text = "가나다라마바사아자차카타파하 " ** 40; // 상한(8행)을 확실히 넘긴다
+    const short_items = [_]types.Item{
+        .{ .commit_box = .{ .repo_index = 0, .rows = 1, .text = short_text } },
+    };
+    const short_draws = try renderFixture(&storage, .{}, &short_items);
+    const short_quads = countAllQuads(short_draws);
+
+    var storage2: TestStorage = .{};
+    const long_items = [_]types.Item{
+        .{ .commit_box = .{ .repo_index = 0, .rows = 8, .text = long_text } },
+    };
+    const long_draws = try renderFixture(&storage2, .{}, &long_items);
+    // 막대 + thumb 둘이 더 나온다 — 다 보이는 상자에는 없다(거짓 신호가 되므로).
+    try testing.expectEqual(short_quads + 2, countAllQuads(long_draws));
 }
 
 test "머리 줄의 동작 아이콘은 브랜치 칩·개수 배지를 덮지 않는다 (②c)" {

@@ -489,7 +489,15 @@ pub const inventory = [_]Proof{
     // 리터럴→키 교체, 그리고 함수 셋으로의 분리뿐이라 반사가 늘거나 준 것이 아니다.
     // i18n I3a 슬라이스 3에서 또 움직인다 — 이 파일의 notice 리터럴 10건이 `showNoticeKey`로 옮겨졌다.
     // count는 2 그대로다(반사 무변).
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8e1effefb11b038bf6ae2159e1f6eca0e80ce12ae45bdba3d27695ea5da585a6" },
+    //
+    // **i18n I4b 에서 count 가 2 → 3 으로 늘었다.** 지금까지 이 파일의 i18n 변경은 전부 반사를 안
+    // 건드렸으므로, 이 증가는 눈여겨볼 것이다. 늘린 자리는 `uiLanguageVariants` 하나이고
+    // `@field(maru.i18n.Preference, f.name)` — 언어 드롭다운의 표시 목록을 **enum 을 한 바퀴 돌아**
+    // 만든다. 손으로 나열하지 않는 이유는 팝업 선택이 **인덱스로** 저장되기 때문이다: 표시 순서가
+    // 스키마 변형 순서와 어긋나면 "한국어"를 골랐는데 `en` 이 저장된다. enum 을 도는 것이 그 어긋남을
+    // 정의상 불가능하게 만들고, 그 대가로 반사 하나가 는다. 이 하나 말고 다른 자리가 늘었다면
+    // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "25896fd41547dbf12da264d8a69146ef5122828f314a81749785acc7000f9c9d" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -515,5 +523,5 @@ pub const inventory = [_]Proof{
     // 잠그는 테스트 셋 추가다. 테스트는 digest 대상이 아니지만 그 보조 함수 `placeholderSet`이 비-test
     // 토큰이라 값이 바뀐다. count 는 여전히 1 이다. 마지막으로 term.zig 의 클립보드 안내 둘을 보간
     // 진입점으로 흡수하며 키 둘이 늘어 또 움직였다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "b9a2c9c86787e8a8758e120a67123ebd9d4413d2e76c88e90cf2331c77fad674" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "5929089671e9cbe64491bbe29be373854b410050650c5753fce3b60d616d9397" },
 };

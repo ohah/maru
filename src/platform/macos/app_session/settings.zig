@@ -311,7 +311,18 @@ pub fn settingsRowMatches(label: []const u8, key: []const u8, query: []const u8)
     return std.ascii.indexOfIgnoreCase(label, query) != null or std.ascii.indexOfIgnoreCase(key, query) != null;
 }
 
-/// 섹션 표시 라벨(config_mod.Section → 한국어). null=스키마 섹션 미지정 그룹("기타").
+/// 언어 드롭다운의 표시 목록. **`Preference` 선언 순서 그대로** 만든다 — 팝업 선택은 인덱스로
+/// 적용되므로(`enumIndex`·`dropdown.show(len, cur_idx)`) 이 순서가 스키마의 변형 순서와 어긋나면
+/// **다른 언어가 저장된다.** enum 을 한 바퀴 도는 것이 그 어긋남을 정의상 불가능하게 만든다.
+fn uiLanguageVariants(arena: std.mem.Allocator) ![]const []const u8 {
+    const fields = @typeInfo(maru.i18n.Preference).@"enum".fields;
+    const out = try arena.alloc([]const u8, fields.len);
+    inline for (fields, 0..) |f, i| out[i] = maru.i18n.preferenceLabel(@field(maru.i18n.Preference, f.name));
+    return out;
+}
+
+/// 섹션 표시 라벨. null=스키마 섹션 미지정 그룹("기타"). 표시 문자열은 `i18n` 이 소유하므로
+/// **현재 UI 언어를 따른다** — 예전에는 여기서 한국어 리터럴을 직접 돌려줬다.
 pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
     const s = sec orelse return maru.i18n.t(.set_section_other);
     return maru.i18n.t(switch (s) {
@@ -422,7 +433,14 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
         const is_def = if (std.mem.eql(u8, e.key, "theme.preset"))
             true
         else if (defaults.enumCurrentFor(e.key)) |dv| std.mem.eql(u8, dv, e.current) else true;
-        rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = e.current }, .is_default = is_def };
+        // `ui.language` 만 **표시명**을 쓴다(`자동`/`English`/`한국어`). 저장값(`e.current`)은 건드리지
+        // 않는다 — 바로 위 `is_def` 가 그 값으로 기본값 여부를 재기 때문이다. 계약 §5 가 짚은 함정이
+        // 그것이고, 여기서 표시와 비교가 갈라져 있어 표시만 바꾸면 된다.
+        const shown: []const u8 = if (std.mem.eql(u8, e.key, "ui.language"))
+            maru.i18n.preferenceLabel(std.meta.stringToEnum(maru.i18n.Preference, e.current) orelse .auto)
+        else
+            e.current;
+        rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = shown }, .is_default = is_def };
         i += 1;
     }
     for (cf.texts) |t| {
@@ -518,6 +536,7 @@ pub fn buildSettingsDropdownItems(self: *AppSession, arena: std.mem.Allocator) !
     if (sel >= after_nums and sel < after_enums) {
         const e = cf.enums[sel - after_nums];
         if (std.mem.eql(u8, e.key, "theme.preset")) return themePresetVariants(self, arena);
+        if (std.mem.eql(u8, e.key, "ui.language")) return uiLanguageVariants(arena);
         return (try config_mod.schema.enumVariants(arena, self.loaded_config.config, e.key)) orelse &.{};
     }
     if (sel >= after_enums and sel < after_texts) {
@@ -2813,4 +2832,51 @@ test "세팅 네비의 첫 섹션은 app 이다 — 읽을 수 없는 화면에�
     const sections = try buildSectionList(session, arena);
     try std.testing.expect(sections.len > 0);
     try std.testing.expectEqual(config_mod.Section.app, sections[0].section.?);
+}
+
+// 표시 목록과 저장 변형의 **순서**를 잠근다.
+//
+// 팝업 선택은 인덱스로 적용된다(`enumIndex` → `dropdown.show(len, cur_idx)` → 고른 인덱스로 저장).
+// 그래서 표시 목록의 순서가 스키마 변형 순서와 갈리면 **"한국어"를 골랐는데 `en` 이 저장된다** —
+// 크래시도 경고도 없이 다른 언어가 된다. 지금은 둘 다 같은 enum(`i18n.Preference`)을 도므로 정의상
+// 맞지만, 표시 목록을 손으로 나열하는 쪽으로 바뀌는 순간 그 보장이 사라진다.
+test "언어 드롭다운: 표시 목록이 저장 변형과 같은 순서다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg: config_mod.theme.Config = .{};
+    const shown = try uiLanguageVariants(arena);
+    const stored = (try config_mod.schema.enumVariants(arena, cfg, "ui.language")) orelse
+        return error.KeyHasNoVariants;
+
+    try std.testing.expectEqual(stored.len, shown.len);
+    for (stored, 0..) |token, i| {
+        const pref = std.meta.stringToEnum(maru.i18n.Preference, token) orelse return error.UnknownVariant;
+        try std.testing.expectEqualStrings(maru.i18n.preferenceLabel(pref), shown[i]);
+    }
+}
+
+// 표시명이 저장값과 **실제로 다른지** 본다. 같으면 이 기능이 아무것도 안 한 것인데, 위 순서 테스트는
+// 그 상태에서도 통과한다(양쪽이 나란히 `auto`·`en`·`ko`가 되므로).
+test "언어 드롭다운: 표시명은 저장 토큰과 다르다 — 언어 이름은 자기 언어로 적힌다" {
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
+    try std.testing.expectEqualStrings("English", maru.i18n.preferenceLabel(.en));
+    try std.testing.expectEqualStrings("한국어", maru.i18n.preferenceLabel(.ko));
+
+    // 언어 이름은 **현재 UI 언어와 무관하게 고정**이다 — 영어 화면에서 "한국어"를 "Korean"으로 쓰면
+    // 한국어만 읽는 사람이 자기 줄을 못 알아본다.
+    maru.i18n.setLang(.en);
+    try std.testing.expectEqualStrings("한국어", maru.i18n.preferenceLabel(.ko));
+    maru.i18n.setLang(.ko);
+    try std.testing.expectEqualStrings("English", maru.i18n.preferenceLabel(.en));
+
+    // `auto` 는 언어 이름이 아니라 동작이라 **읽는 사람의 언어를 따른다.**
+    maru.i18n.setLang(.en);
+    const auto_en = maru.i18n.preferenceLabel(.auto);
+    maru.i18n.setLang(.ko);
+    const auto_ko = maru.i18n.preferenceLabel(.auto);
+    try std.testing.expect(!std.mem.eql(u8, auto_en, auto_ko));
 }

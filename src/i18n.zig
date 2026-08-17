@@ -259,6 +259,10 @@ pub const Table = struct {
     set_section_global_hotkey: [:0]const u8,
     set_section_editor: [:0]const u8,
     set_section_other: [:0]const u8,
+
+    // ── 언어 선택 (I4b) ──
+    // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
+    set_language_auto: [:0]const u8,
 };
 
 pub const en: Table = .{
@@ -460,6 +464,7 @@ pub const en: Table = .{
     .set_section_global_hotkey = "Global Hotkey",
     .set_section_editor = "Editor",
     .set_section_other = "Other",
+    .set_language_auto = "Automatic (OS language)",
 };
 
 pub const ko: Table = .{
@@ -661,6 +666,7 @@ pub const ko: Table = .{
     .set_section_global_hotkey = "글로벌 핫키",
     .set_section_editor = "편집기",
     .set_section_other = "기타",
+    .set_language_auto = "자동 (OS 언어)",
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.
@@ -826,6 +832,22 @@ pub fn resolve(pref: Preference, locale: ?[]const u8) Lang {
         .ko => .ko,
         // 로케일이 없으면(주입 실패·미지원 platform) `en`. 계약 §5의 "해석 실패는 en" 그대로다.
         .auto => if (locale) |tag| fromLocale(tag) else .en,
+    };
+}
+
+/// 언어 선택 드롭다운의 **표시명**.
+///
+/// **번역 테이블에 통째로 두지 않는다.** 언어 이름은 자기 언어로 적어야 한다 — 자기가 읽을 수 있는
+/// 언어를 찾는 자리이므로 현재 UI 언어로 번역하면 오히려 못 찾는다(영어 화면에서 `한국어`를 `Korean`
+/// 으로 쓰면 한국어만 읽는 사람이 그 줄을 못 알아본다). 그래서 `en`·`ko` 는 **고정**이다.
+///
+/// `auto` 만 예외로 키를 쓴다 — 그것은 언어 이름이 아니라 "OS 를 따른다"는 **동작**이라, 읽는 사람의
+/// 언어로 적히는 편이 맞다.
+pub fn preferenceLabel(p: Preference) [:0]const u8 {
+    return switch (p) {
+        .auto => t(.set_language_auto),
+        .en => "English",
+        .ko => "한국어",
     };
 }
 

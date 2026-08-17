@@ -699,7 +699,7 @@ TUI가 마우스를 다 먹으면 사용자가 화면의 글자를 복사할 방
 `CANDIDATEFORM`(32B)·`COMPOSITIONFORM`(28B)은 크기와 오프셋을 comptime에 못 박는다 — §2c의 COM 규약과
 같은 이유다. 어긋나도 **컴파일은 되고** 런타임에 후보창이 엉뚱한 자리에 뜬다(조용히 틀린다).
 
-#### 마우스 리포팅은 ConPTY가 막는다 — 코드가 아니라 플랫폼 사실이다 (실측 2026-08-18)
+#### 마우스 리포팅이 안 오는 이유는 **인박스 conhost가 낡아서**다 (실측 2026-08-18)
 
 **셸이 `DECSET 1000`을 켜도 우리 코어는 그것을 못 본다.** 측정이 그것을 정확히 갈랐다 — 같은 방법으로
 보낸 세 개 중 **`1007`(alternate scroll)만 도착하고 `1000`(마우스 트래킹)·`1006`(SGR 형식)은 사라졌다**:
@@ -714,24 +714,47 @@ core_modes: mouse_tracking=none mouse_format=x10 alt_active=false alternate_scro
 ([microsoft/terminal#376](https://github.com/microsoft/terminal/issues/376), Terminal v1.9에서 ConPTY
 쪽 마우스 지원 자체는 들어갔다).
 
-**그러면 터미널은 앱이 마우스를 원하는지 어떻게 아는가 — 아직 방법이 없다.** 그 자리를 메우자는 것이
-[microsoft/terminal#6859](https://github.com/microsoft/terminal/issues/6859)("ConPTY: transmit
-DECSET/DECRST state when client application enters/exits `ENABLE_VIRTUAL_TERMINAL_INPUT` mode")인데
-**아직 열려 있다.**
+**그런데 트리거는 DECSET이 아니다.** ConPTY가 터미널에 마우스 모드를 알려 주는 기능은 이미 있다 —
+[microsoft/terminal#9970](https://github.com/microsoft/terminal/pull/9970)이 그것이고, 조건은 클라이언트가
+**`SetConsoleMode(stdin, ENABLE_MOUSE_INPUT)`**을 부르는 것이다(VT를 stdout에 쓰는 것이 아니다). 그러면
+ConPTY가 터미널에 `CSI ? 1002 h` + `CSI ? 1006 h`를 보낸다. 2021년 5월에 머지돼 Windows Terminal v1.9에
+들어갔다.
 
-**`PSEUDOCONSOLE_PASSTHROUGH_MODE`(0x8)로도 안 된다 — 실험으로 확인했다.** `CreatePseudoConsole`의 flags를
-`0`에서 `0x8`로 바꿔 같은 측정을 돌렸는데 `mouse_tracking=none` 그대로였다. 그 플래그는 §4의 EOF·쓰기
-의미론 실측을 뒤흔들 수 있는 PTY 전역 변경이기도 하므로 **켜지 않았다**(그 판단은 사용자 몫이라 여기
-적어 둔다 — AGENTS.md 핵심 원칙).
+**그 트리거로도 이 기계에서는 안 온다 — conhost 버전 때문이다.** 스크립트로 `ENABLE_MOUSE_INPUT`을
+실제로 켜고(반환 `after=0x98 ok=True`) 측정했는데 `mouse_tracking=none` 그대로였다. 이 기계의 인박스
+conhost는 **10.0.19041.4522**(Windows 10 19045)로, #9970(2021)보다 오래된 코드다.
 
-**그래서 리포팅 경로는 옳게 두되 잠들어 있다.** `report_mouse` 명령을 보내는 코드는 그대로 있고
-`mouse_tracking != .none`에서만 깨어난다 — Windows에서는 그 조건이 지금 서지 않으므로 **마우스는 언제나
-로컬 선택으로 간다**. 실용적으로는 나쁘지 않다(선택·스크롤이 늘 먹는다). 잃는 것은 vim·htop 같은 TUI가
-마우스를 받는 것이고, ConPTY가 #6859를 닫으면 **코드 변경 없이** 켜진다.
+**우리 파서 탓이 아니다.** `terminal/parser.zig`가 `1000`·`1002`·`1003`·`1006`을 모두 처리한다 — ConPTY가
+보냈다면 받았을 것이다.
 
-이 판정은 macOS와 갈리는 자리다 — 같은 중립 코어인데 **PTY 계층이 모드를 안 넘겨서** 결과가 다르다.
-§2h·§2i·§2j에서는 "중립 계약이 이미 서 있고 플랫폼은 어댑터"였는데, 여기서는 **플랫폼 아래(PTY)가
-계약을 못 채운다**. W7 전체에서 처음 나온 종류의 벽이다.
+**`PSEUDOCONSOLE_PASSTHROUGH_MODE`(0x8)로도 안 된다.** flags를 `0`→`0x8`로 바꿔 같은 측정을 돌렸는데
+그대로였다(실험 후 되돌렸다). 그 플래그는 §4의 EOF·쓰기 의미론 실측을 뒤흔들 수 있는 PTY 전역 변경이라
+어차피 함부로 켤 자리가 아니다.
+
+##### 해결책은 있다 — **새 ConPTY를 함께 배포한다**
+
+`CreatePseudoConsole`을 kernel32에서 부르면 **`%SystemRoot%\System32\conhost.exe`**가 pty 호스트가 된다.
+그래서 OS가 낡으면 방법이 없어 보이지만, Microsoft가 그 자리를 위해 **재배포 가능한 쌍**을 낸다 —
+`Microsoft.Windows.Console.ConPTY` 패키지의 **`conpty.dll` + `OpenConsole.exe`**(MIT). 인박스 대신
+`conpty.dll!CreatePseudoConsole`을 부르면 원하는 버전을 **핀으로 고정**할 수 있다. Windows Terminal이
+자기 `OpenConsole.exe`를 들고 다니는 이유가 그것이고, WezTerm도 같은 쌍을 번들한다
+([wezterm#7774](https://github.com/wezterm/wezterm/issues/7774)).
+
+**둘을 반드시 쌍으로 올려야 한다** — `OpenConsole.exe`만 바꾸면 안 맞는다. 그리고 알려진 함정 하나:
+`conpty.dll` 경로가 길면 `CreatePseudoConsole`이 죽는다
+([#16860](https://github.com/microsoft/terminal/issues/16860)).
+
+**이것은 배포 결정이라 사용자에게 보고하고 정한다**(AGENTS.md 핵심 원칙) — 산출물에 Microsoft 바이너리
+둘이 늘어난다. 넣는다면 모양은 정해져 있다: `conpty.dll`을 **동적 로드**해 있으면 쓰고 없으면 kernel32로
+접는다(소스 빌드가 계속 돌아야 한다). §4의 spawn 절차·EOF 규약은 그대로다 — 같은 API의 새 구현이다.
+
+**그때까지 리포팅 경로는 옳게 두되 잠들어 있다.** `report_mouse` 명령을 보내는 코드는 그대로 있고
+`mouse_tracking != .none`에서만 깨어난다 — 지금 Windows에서는 그 조건이 안 서므로 마우스는 언제나 로컬
+선택으로 간다(선택·스크롤은 늘 먹는다). 잃는 것은 vim·htop 같은 TUI의 마우스이고, **새 ConPTY를 얹으면
+코드 변경 없이 켜진다**.
+
+이 자리가 W7 전체에서 처음으로 **플랫폼 아래(PTY)가 중립 계약을 못 채운** 사례다 — §2h·§2i·§2j는 전부
+"중립 계약은 이미 서 있고 플랫폼은 어댑터"였다.
 
 ## 3. 셸과 셸 통합
 

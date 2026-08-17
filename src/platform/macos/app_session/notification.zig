@@ -64,13 +64,17 @@ pub fn formatRelativeTime(self: *AppSession, arena: std.mem.Allocator, delta_ns:
     _ = self;
     const ns: i128 = if (delta_ns < 0) 0 else delta_ns;
     const sec = @divFloor(ns, std.time.ns_per_s);
-    if (sec < 60) return "방금";
+    // 문구는 `agent_dock.formatAgentSessionArchiveRelativeAge` 와 **같은 키를 쓴다** — 같은 개념을
+    // 두 파일이 각자 적고 있었고(중복 리터럴), 그러면 한쪽만 고쳐지는 드리프트가 생긴다.
+    // 여기는 arena 소유 슬라이스를 돌려주므로 스택 버퍼에 만든 뒤 복사한다(`i18n.format` 은 할당하지 않는다).
+    var buf: [48]u8 = undefined;
+    if (sec < 60) return maru.i18n.t(.ad_time_now);
     const min = @divFloor(sec, 60);
-    if (min < 60) return std.fmt.allocPrint(arena, "{d}분 전", .{min});
+    if (min < 60) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_minutes), &.{.{ .d = @intCast(min) }}));
     const hour = @divFloor(min, 60);
-    if (hour < 24) return std.fmt.allocPrint(arena, "{d}시간 전", .{hour});
+    if (hour < 24) return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_hours), &.{.{ .d = @intCast(hour) }}));
     const day = @divFloor(hour, 24);
-    return std.fmt.allocPrint(arena, "{d}일 전", .{day});
+    return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_days), &.{.{ .d = @intCast(day) }}));
 }
 
 /// 알림 카드 선택(Enter/클릭)을 처리한다 — selected(역순: 0=최신)를 히스토리 인덱스로 되돌려 그 surface를 봤다는

@@ -750,6 +750,12 @@ test "아카이브 범위 칩: OSC 7이 없어도 커널 폴백으로 눌리는 
 }
 
 test "archive relative age uses the worker mtime without filesystem access" {
+    // 기대값이 한국어 문장이다 — 재는 것은 **어느 시간 단위를 고르는가**이고 그것은 문장으로 봐야
+    // 드러난다(키 비교는 보간 결과를 다시 만들어 동어반복이 된다). 언어를 고정한다.
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("방금", agent_dock.formatAgentSessionArchiveRelativeAge(100, 200, &buf));
     try std.testing.expectEqualStrings("5분 전", agent_dock.formatAgentSessionArchiveRelativeAge(5 * 60 * std.time.ns_per_s, 0, &buf));
@@ -26280,6 +26286,11 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
 }
 
 test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatRelativeTime 경계" {
+    // formatRelativeTime 의 기대값이 한국어 문장이다 — 재는 것은 **경계**(60초·60분·24시간)이고 그
+    // 판정은 문장으로 봐야 드러난다. 언어를 고정하되 **세션 생성 뒤에** 건다(아래 참고).
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
     // 인앱 알림 센터의 토대 — 드레인되면 사라지는 OS 배너와 달리 히스토리는 보관·열람된다. 상한(ring) 초과 시 가장
     // 오래된 걸 버리고, unread 캐시는 push/markRead/cap-drop 3곳에서만 정확히 증감해야 종 배지 수가 맞는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
@@ -26294,6 +26305,10 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+
+    // **`AppSession.init` 이 `ui.language` 를 읽어 언어를 덮는다**(applyPreference). 그래서 언어 고정은
+    // 반드시 **init 뒤**에 걸어야 한다 — 앞에 걸면 조용히 지워지고 테스트가 기본 언어로 돈다.
+    maru.i18n.setLang(.ko);
 
     // push 2건 → len 2, unread 2, owned dupe.
     _ = notification_ops.pushNotificationHistory(session, "ws1", "done", 1);
@@ -30581,7 +30596,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     const items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(@as(usize, 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqualStrings("Rename", items[0]); // 그룹 이름 편집(startRename(.group))
-    try std.testing.expectEqualStrings("그룹 고정", items[ctx_group_menu_pin]); // GP3 §12.10 — 미고정 그룹 → "그룹 고정"
+    try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_pin_header), items[ctx_group_menu_pin]); // GP3 §12.10 — 미고정 그룹 → "그룹 고정"
     try std.testing.expectEqualStrings(maru.i18n.t(.ctx_group_ungroup), items[ctx_group_menu_ungroup]);
     try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_group_menu_color_first]); // 카드 메뉴와 같은 색 라벨 공유
     try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_group_menu_color_first + 2]);
@@ -46123,7 +46138,7 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
         },
         else => {},
     };
-    try std.testing.expectEqualStrings("테마 프리셋", first_dropdown.?); // 프리셋이 최상단 enum
+    try std.testing.expectEqualStrings(maru.i18n.t(.set_theme_preset), first_dropdown.?); // 프리셋이 최상단 enum
     try std.testing.expect(any_color and !any_color_enabled); // 색 행 존재 + 전부 잠금
 
     // "사용자 지정"으로 풀면 색 행 활성(편집 가능).

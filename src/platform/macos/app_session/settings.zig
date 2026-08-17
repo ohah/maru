@@ -477,7 +477,7 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
         const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
         // §6.11: 팔레트 행 ↺는 **선택 셀**이 override(config.theme.palette[sel] 있음)일 때만 — ↺/Backspace가 그 셀만 리셋.
         const pal_is_def = self.loaded_config.config.theme.palette[sel] == null;
-        rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, "ANSI 팔레트"), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active, .is_default = pal_is_def };
+        rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, maru.i18n.t(.set_ansi_palette)), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active, .is_default = pal_is_def };
         i += 1;
     }
     if (cf.keybind_entries.len > 0) {
@@ -516,7 +516,12 @@ pub fn buildSettingsSectionLabels(self: *AppSession, arena: std.mem.Allocator) !
     // 이 행은 섹션이 아니라 requestResetAll 액션(nav_reset_row=sections.len으로 컴포넌트에 알림). 라벨 글리프는 단일 출처.
     const labels = try arena.alloc([]const u8, sections.len + 1);
     for (sections, 0..) |s, i| labels[i] = s.label;
-    labels[sections.len] = try std.fmt.allocPrint(arena, "{s} 초기화", .{chrome.components.settings.reset_glyph});
+    // 라벨은 arena 소유여야 하는데 `i18n.format` 은 **빌려준 버퍼에 쓰고 슬라이스를 돌려준다**(할당하지
+    // 않는다). 그래서 스택 버퍼에 만든 뒤 arena 로 복사한다 — 반환 슬라이스가 이 함수보다 오래 산다.
+    var reset_buf: [64]u8 = undefined;
+    labels[sections.len] = try arena.dupe(u8, maru.i18n.format(&reset_buf, maru.i18n.t(.set_reset_named), &.{
+        .{ .s = chrome.components.settings.reset_glyph },
+    }));
     return labels;
 }
 
@@ -1232,7 +1237,7 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
     // 카드 메뉴와 같은 인프라(tab_group_color_labels·tab_color_presets·setGroupColorForTab)를 재사용해 같은 색 메뉴를 공유한다.
     if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .group) {
         // 그룹 고정/해제(toggleGroupPin — GP3 §12.10). 마커 pinned = 그룹 고정 권위(§12.2)라 헤더에서 그룹째 토글한다.
-        self.context_menu_items_buf[n] = if (t.group.pinned) "그룹 고정 해제" else "그룹 고정"; // ctx_group_menu_pin
+        self.context_menu_items_buf[n] = if (t.group.pinned) maru.i18n.t(.ctx_group_unpin) else maru.i18n.t(.ctx_group_pin_header); // ctx_group_menu_pin
         n += 1;
         self.context_menu_items_buf[n] = maru.i18n.t(.ctx_group_ungroup); // ctx_group_menu_ungroup
         n += 1;
@@ -1893,7 +1898,7 @@ pub fn themePresetVariants(_: *AppSession, arena: std.mem.Allocator) ![]const []
     const fields = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields;
     const out = try arena.alloc([]const u8, fields.len + 1);
     inline for (fields, 0..) |f, i| out[i] = f.name;
-    out[fields.len] = "사용자 지정";
+    out[fields.len] = maru.i18n.t(.set_custom);
     return out;
 }
 
@@ -2387,26 +2392,26 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
     // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
     // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
-    if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
+    if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches(maru.i18n.t(.set_theme_preset), "theme.preset", q)) {
         // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
         // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
-        const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
-        try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
+        const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else maru.i18n.t(.set_custom);
+        try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = maru.i18n.t(.set_theme_preset), .current = cur_name, .section = .theme });
     }
     var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
     for (texts_all.items) |t| if (settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
     // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
     // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
     if (cross or sel_sec == .terminal) {
-        if (settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
-            try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
+        if (settingsRowMatches(maru.i18n.t(.set_shell_args_ph), "shell.args", q))
+            try texts.append(arena, .{ .key = "shell.args", .doc = maru.i18n.t(.set_shell_args_ph), .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
         for (self.loaded_config.config.env) |entry| {
             const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
             if (settingsRowMatches(entry[0..eq], "env", q))
                 try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
         }
-        if (settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
-            try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
+        if (settingsRowMatches(maru.i18n.t(.set_env_ph), "env", q))
+            try texts.append(arena, .{ .key = "env.", .doc = maru.i18n.t(.set_env_ph), .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
     }
     // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
     // 선례). 라벨=chord 표시(formatChord), 값=rhs config 문자열(macroRhsString, 예 "text:hello"). 키="macro.<chord
@@ -2421,14 +2426,14 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
                 try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
             }
         }
-        if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
-            try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
+        if (settingsRowMatches(maru.i18n.t(.set_macro_ph), "macro", q))
+            try texts.append(arena, .{ .key = "macro.", .doc = maru.i18n.t(.set_macro_ph), .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
     }
     // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
     // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
     if (cross or sel_sec == .workspace) {
-        if (settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
-            try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
+        if (settingsRowMatches(maru.i18n.t(.set_cwd_ph), "workspace.root", q))
+            try texts.append(arena, .{ .key = "workspace.root", .doc = maru.i18n.t(.set_cwd_ph), .value = self.loaded_config.config.workspace.root, .section = .workspace });
     }
     var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
     for (colors_all.items) |c| if (settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
@@ -2439,7 +2444,7 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     if (cross or sel_sec == .input) {
         for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
     }
-    const palette_on = (cross or sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
+    const palette_on = (cross or sel_sec == .theme) and settingsRowMatches(maru.i18n.t(.set_ansi_palette), "theme.palette", q);
     // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
     // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
     var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
@@ -2585,7 +2590,7 @@ pub fn commitSelectedText(self: *AppSession) void {
                     // owned(untrimmed)를 쓰면 "/bin/zsh "처럼 공백이 섞인 유효 경로를 실행 불가로 오탐한다.
                     const stored = self.loaded_config.config.shell.command;
                     if (stored.len > 0 and !isExecutablePath(stored))
-                        self.chrome_host.settings.setMessage("셸 실행 파일을 찾을 수 없어 기본 셸로 실행됩니다 (실행 파일 절대경로 필요 · 시작 위치는 이 필드가 아님)");
+                        self.chrome_host.settings.setMessage(maru.i18n.t(.set_shell_not_found));
                 }
             }
         }

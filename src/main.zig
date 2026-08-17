@@ -1212,6 +1212,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // W7.4d 마우스. **갈래별로 센다** — 합치면 "선택이 안 되는데 이벤트는 왔다"를 못 가른다.
     var mouse_events: usize = 0;
     var mouse_reports: usize = 0;
+    // **큐에 실제로 들어간 리포트 수.** `mouse_reports` 는 이벤트마다 1 이라 휠 안쪽 루프가 1 번 돌든
+    // 10 번 돌든 같은 값이다 — 그것으로는 "눈금당 한 번" 을 지키는지 볼 수 없다.
+    var mouse_report_commands: usize = 0;
     var selections: usize = 0;
     var extends: usize = 0;
     var word_selections: usize = 0;
@@ -1374,8 +1377,12 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 const to_shell = win32_mouse.reportsToShell(tracking != .none, m.mods);
 
                 if (m.kind == .wheel) {
-                    const lines = wheel_acc.feed(m.wheel_delta, wheel_lines_per_notch);
-                    if (lines == 0) continue;
+                    // **눈금과 줄을 가른다.** 리포팅은 xterm 규약상 눈금당 한 번이고, 사용자 설정
+                    // (`SPI_GETWHEELSCROLLLINES`)은 로컬 스크롤백이 한 눈금에 몇 줄을 갈지 정하는 값이다.
+                    // 섞으면 이 기계 설정(10)에서 TUI 가 한 번 굴림에 열 칸씩 튄다.
+                    const notches = wheel_acc.feed(m.wheel_delta);
+                    if (notches == 0) continue;
+                    const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                     if (to_shell) {
                         // **휠 리포트에도 셀 좌표를 싣는다.** 앱이 그것으로 어느 pane 을 굴릴지 정한다
                         // (less·vim 분할) — (0,0)을 실으면 늘 좌상단이라고 말하는 셈이다. 창이 화면
@@ -1383,8 +1390,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         const wcell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
                         last_mouse_cell = wcell;
                         last_wheel_cell = wcell;
-                        const button: u8 = if (lines > 0) win32_mouse.button_wheel_up else win32_mouse.button_wheel_down;
-                        var n: i32 = @intCast(@abs(lines));
+                        // **눈금당 한 번**이다(줄 수만큼이 아니다).
+                        const button: u8 = if (notches > 0) win32_mouse.button_wheel_up else win32_mouse.button_wheel_down;
+                        var n: i32 = @intCast(@abs(notches));
                         while (n > 0) : (n -= 1) {
                             runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{
                                 .button = button,
@@ -1396,10 +1404,14 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                 .motion = false,
                                 .mods = win32_mouse.reportModifiers(m.mods),
                             } }, io) catch {};
+                            mouse_report_commands += 1;
                         }
                         mouse_reports += 1;
                         continue;
                     }
+                    // 사용자가 "휠 스크롤 안 함"으로 뒀으면 로컬 경로는 여기서 끝이다 — 0 줄짜리 명령을
+                    // 넣고 `scrolls` 를 올리면 아무 일도 안 했는데 스크롤한 것으로 보고된다.
+                    if (lines == 0) continue;
                     // alt 화면 + alternate scroll(DECSET 1007)이면 휠이 화살표 키가 된다.
                     var alt_bytes: []const u8 = &.{};
                     var key_buf: [maru.terminal.input.encoded_key_buffer_len]u8 = undefined;
@@ -1480,6 +1492,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                         .motion = is_motion,
                         .mods = win32_mouse.reportModifiers(m.mods),
                     } }, io) catch {};
+                    mouse_report_commands += 1;
                     mouse_reports += 1;
                     continue;
                 }
@@ -1713,7 +1726,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     if (last_wheel_cell) |c| {
         try stdout.print("last_wheel_cell={d},{d}\n", .{ c.row, c.col });
     } else try stdout.writeAll("last_wheel_cell=none\n");
-    try stdout.print("capture_losses={d}\n", .{capture_losses});
+    try stdout.print("capture_losses={d} report_commands={d}\n", .{ capture_losses, mouse_report_commands });
     // **코어가 실제로 무엇을 보고 있는지 찍는다.** 라우팅이 예상과 다를 때 "우리 판정이 틀렸나, 코어가
     // 모드를 못 받았나"를 가르는 유일한 줄이다 — 없으면 둘을 구분 못 해 엉뚱한 곳을 고친다.
     if (app_window.active()) |active| {

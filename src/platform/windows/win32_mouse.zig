@@ -160,20 +160,23 @@ pub fn blockSelection(mods: u8) bool {
 pub const WheelAccumulator = struct {
     remainder: i32 = 0,
 
-    /// 이번 메시지의 `delta`를 넣고 **지금 스크롤할 줄 수**를 받는다. 남은 것은 다음 호출로 넘어간다.
+    /// 이번 메시지의 `delta`를 넣고 **완성된 눈금 수**를 받는다. 남은 것은 다음 호출로 넘어간다.
     ///
-    /// `lines_per_notch`는 사용자 설정(`SPI_GETWHEELSCROLLLINES`)이라 **인자로 받는다**. 0이면 사용자가
-    /// "스크롤 안 함"으로 둔 것이므로 0줄이다(그 설정을 우리가 뒤집지 않는다).
-    pub fn feed(self: *WheelAccumulator, delta: i32, lines_per_notch: u32) i32 {
-        if (lines_per_notch == 0) {
-            // 누적도 하지 않는다 — 설정이 바뀌면 그때부터 세는 것이 맞고, 안 그러면 꺼 둔 동안 쌓인 것이
-            // 켜는 순간 한꺼번에 튄다.
-            self.remainder = 0;
-            return 0;
-        }
+    /// **줄 수가 아니라 눈금을 돌려준다.** 둘은 쓰임이 다르다 — 마우스 리포팅은 xterm 규약상 **눈금당
+    /// 한 번**이고, 사용자 설정(`SPI_GETWHEELSCROLLLINES`)은 **로컬 스크롤백**이 한 눈금에 몇 줄을 움직일지
+    /// 정하는 값이다. 여기서 미리 곱해 버리면 리포팅 쪽이 그 배수만큼 부풀어 TUI 가 한 번 굴림에 열 칸씩
+    /// 튄다(이 기계 설정이 10 이다).
+    pub fn feed(self: *WheelAccumulator, delta: i32) i32 {
         self.remainder += delta;
         const notches = @divTrunc(self.remainder, wheel_delta);
         self.remainder -= notches * wheel_delta;
+        return notches;
+    }
+
+    /// 눈금 수를 **로컬 스크롤백**의 줄 수로 바꾼다. 0이면 사용자가 "스크롤 안 함"으로 둔 것이라 0줄이다
+    /// (그 설정을 우리가 뒤집지 않는다). 리포팅에는 쓰지 않는다.
+    pub fn linesForNotches(notches: i32, lines_per_notch: u32) i32 {
+        if (lines_per_notch == 0) return 0;
         return notches * @as(i32, @intCast(@min(lines_per_notch, 255)));
     }
 
@@ -404,25 +407,41 @@ test "blockSelection: alt 가 사각 선택을 켠다" {
 test "WheelAccumulator: 나머지를 버리지 않는다" {
     var acc: WheelAccumulator = .{};
 
-    // 한 눈금 = 설정한 줄 수.
-    try testing.expectEqual(@as(i32, 3), acc.feed(wheel_delta, 3));
-    try testing.expectEqual(@as(i32, -3), acc.feed(-wheel_delta, 3));
+    // 한 번 굴리면 한 눈금.
+    try testing.expectEqual(@as(i32, 1), acc.feed(wheel_delta));
+    try testing.expectEqual(@as(i32, -1), acc.feed(-wheel_delta));
 
     // **정밀 터치패드**: 눈금보다 작은 값이 온다. 버리면 느린 스크롤이 통째로 안 먹는다 —
     // 40 씩 세 번이면 한 눈금이 되어야 한다.
     acc.reset();
-    try testing.expectEqual(@as(i32, 0), acc.feed(40, 3));
-    try testing.expectEqual(@as(i32, 0), acc.feed(40, 3));
-    try testing.expectEqual(@as(i32, 3), acc.feed(40, 3));
+    try testing.expectEqual(@as(i32, 0), acc.feed(40));
+    try testing.expectEqual(@as(i32, 0), acc.feed(40));
+    try testing.expectEqual(@as(i32, 1), acc.feed(40));
 
     // 한 번에 여러 눈금이 와도 다 센다.
     acc.reset();
-    try testing.expectEqual(@as(i32, 6), acc.feed(wheel_delta * 2, 3));
+    try testing.expectEqual(@as(i32, 2), acc.feed(wheel_delta * 2));
 
-    // 사용자가 "스크롤 안 함"으로 뒀으면 0 이고, 그동안 쌓지도 않는다(켜는 순간 튀면 안 된다).
+    // 방향이 섞여도 나머지가 정확히 상쇄된다.
     acc.reset();
-    try testing.expectEqual(@as(i32, 0), acc.feed(wheel_delta * 5, 0));
-    try testing.expectEqual(@as(i32, 3), acc.feed(wheel_delta, 3));
+    try testing.expectEqual(@as(i32, 0), acc.feed(60));
+    try testing.expectEqual(@as(i32, 0), acc.feed(-60));
+    try testing.expectEqual(@as(i32, 0), acc.feed(119));
+    try testing.expectEqual(@as(i32, 1), acc.feed(1));
+}
+
+test "linesForNotches: 눈금과 줄 수를 가른다" {
+    // **이 분리가 요점이다.** 마우스 리포팅은 xterm 규약상 눈금당 한 번이고, 줄 수는 로컬 스크롤백만의
+    // 값이다. 눈금에 미리 곱해 두면 리포팅이 그 배수만큼 부풀어 TUI 가 한 번 굴림에 열 칸씩 튄다.
+    try testing.expectEqual(@as(i32, 3), WheelAccumulator.linesForNotches(1, 3));
+    try testing.expectEqual(@as(i32, 30), WheelAccumulator.linesForNotches(3, 10));
+    try testing.expectEqual(@as(i32, -10), WheelAccumulator.linesForNotches(-1, 10));
+
+    // 사용자가 "스크롤 안 함"으로 뒀으면 0 줄이다 — 그 설정을 우리가 뒤집지 않는다.
+    try testing.expectEqual(@as(i32, 0), WheelAccumulator.linesForNotches(5, 0));
+
+    // 터무니없는 설정(WHEEL_PAGESCROLL 등 상류에서 접지만) 에서도 곱셈이 폭주하지 않게 상한을 둔다.
+    try testing.expectEqual(@as(i32, 255), WheelAccumulator.linesForNotches(1, 100_000));
 }
 
 test "ClickTracker: 시간과 거리로 연타를 가르고 트리플 뒤에 되돌린다" {

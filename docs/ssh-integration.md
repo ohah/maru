@@ -26,15 +26,25 @@
 - **안전 폴백**: 원격 command가 붙은 경우(`bootstrapEligible`이 false)는 이중 실행을 피하려 부트스트랩을 건너뛰고, `tic`이 없거나 설치 실패면 `TERM=xterm-256color`로 폴백한다.
 - **자기식별**(`src/terminal/core.zig`): XTVERSION(`CSI > q`) → `maru`, XTGETTCAP(`DCS + q TN ST`) → `xterm-maru`.
 - **COLORTERM 전달**(2026-08-18): ssh 가 원격에 전달하는 환경변수는 `TERM` 뿐이라, `env` 로 세운 로컬
-  `COLORTERM=truecolor` 는 원격에 가지 않는다. terminfo 를 읽지 않고 **`TERM` 문자열 패턴과 `COLORTERM`
-  만** 보는 앱(Node 계열 다수)은 그래서 `xterm-maru` 를 모르는 이름으로 취급해 **16색으로 떨어졌다**
-  (`Tc` 캡이 있어도 그 앱들은 안 본다). tmux 안에서는 tmux 가 자기 `screen-256color` 를 세워 256색으로
-  승격되므로 **"tmux 밖에서만 색이 죽는"** 증상으로 관측됐다. 그래서 세션 ssh 에
-  `-o SetEnv=COLORTERM=truecolor` 를 붙이되, 이 옵션은 OpenSSH 7.8+ 전용이고 모르는 ssh 에 주면 연결
-  자체가 실패하므로 **`ssh -o <opt> -V` 로 먼저 검증해 아는 ssh 에서만** 붙인다(네트워크에 나가지 않고
-  지원=0·미지원=255). **서버 협조에 달린 보조 수단**이다 — sshd 가 `AcceptEnv` 로 허용하지 않으면 조용히
-  버려진다(배포판 기본값은 대개 `LANG LC_*`). 원격 셸을 maru 가 실행해 `env` 로 주입하는 방식은 더 확실하지만
-  `ForceCommand`/`RemoteCommand` 와 부딪히고 로그인 방식을 maru 가 정하게 되므로 채택하지 않았다.
+  `COLORTERM=truecolor` 는 원격에 가지 않는다. 그래서 terminfo 를 읽지 않고 **`TERM` 문자열 패턴과
+  `COLORTERM` 만** 보는 앱이 색 단계를 낮게 잡는다 — claude 번들의 `supports-color` 로직을 실측하면
+  `/^screen|^xterm|…/` 에 `xterm-maru` 가 `^xterm` 으로 걸려 **level 1(16색)**, tmux 의
+  `screen-256color` 는 `-256color$` 로 **level 2(256색)**, `COLORTERM==="truecolor"` 면 **level 3** 이다.
+  이것이 "tmux 밖에서만 색이 죽는다"의 정확한 기전이다(`Tc` 캡이 있어도 그 앱은 terminfo 를 안 본다).
+  그래서 세션 ssh 를 `env TERM=… COLORTERM=truecolor ssh -o SendEnv=COLORTERM …` 으로 띄운다.
+  - **`SetEnv` 가 아니라 `SendEnv` 인 이유**(적대적 검증, `ssh -G` 실측): `SetEnv` 는 first-wins 라
+    커맨드라인에 하나 주면 사용자 `~/.ssh/config` 의 `SetEnv` 가 **통째로 사라진다**. `SendEnv` 는 목록에
+    **누적**되고 사용자 `SetEnv` 도 건드리지 않으며, OpenSSH 3.9 부터 있어 버전 프리플라이트도 필요 없다
+    (`SetEnv` 는 7.8+ 라 구버전에서 연결이 깨진다 — 리뷰 #4 가 TERM 전달 수단으로 배제한 이유).
+  - **서버 협조가 필요하다.** sshd 가 `AcceptEnv COLORTERM` 을 허용해야 하고, 배포판 기본값은 대개
+    `LANG LC_*` 뿐이다(macOS 는 `100-macos.conf` 가 그 둘만). 허용하지 않으면 조용히 버려지고 동작은
+    지금과 같다.
+  - **tmux 안은 이 경로로 고쳐지지 않는다.** tmux 의 `update-environment` 기본 목록에 `COLORTERM` 이 없어
+    (실측 9개 항목) 이미 떠 있는 서버에 attach 하면 새 pane 셸에 값이 들어가지 않는다. tmux 안은 종전대로
+    `screen-256color` 의 256색이고, 굳이 truecolor 로 올리려면 사용자가
+    `tmux set -ga update-environment COLORTERM` 을 두거나 tmux 쪽 `terminal-features` 를 설정해야 한다.
+  - 원격 셸을 maru 가 실행해 `env` 로 주입하는 방식은 채택하지 않았다 — `ForceCommand`/`RemoteCommand` 와
+    부딪히고 로그인 셸 실행 방식을 maru 가 정하게 된다.
 
 **베이스/clean-room**: terminfo `tic`은 공개 도구, ControlMaster는 OpenSSH 공개 기능이다. 같은 문제를 푸는 Ghostty `ghostty +ssh`(MIT)는 **동작 비교**로만 확인했고 셸 구절·idiom은 maru가 독립 작성했다(코드 미복사).
 

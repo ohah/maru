@@ -47,7 +47,12 @@ rm -f /tmp/maru_abi.$$
 echo "ABI 헤더 ↔ Zig export"
 # **`md5` 는 macOS 전용이다** — Linux 에서는 없어서 양쪽이 **빈 값으로 같아져** 항상 통과했다.
 # 해시가 필요한 것도 아니다(집합 비교면 충분하고, 다를 때 무엇이 다른지도 보인다).
-h=$(grep -oE 'maru_mobile_[a-z_]+' $H | sort -u)
+# **선언 줄만 본다.** 전에는 파일 전체에서 이름을 긁어 **주석에 적힌 이름까지 선언으로 셌다** —
+# 선언을 지우고 그 이름을 주석에 남기면 집합이 그대로라 **거짓 통과**한다(실제로 겪었다).
+# 선언은 열 0 에서 반환형으로 시작하는 줄이다(`void maru_mobile_x(...);`).
+# 반환형은 소문자만이 아니다(`const MaruQuad *maru_mobile_quads(void);`) — 실제로 이 하나를
+# 놓쳐 집합이 어긋났다.
+h=$(grep -E '^[A-Za-z_][A-Za-z0-9_ ]*\*? *maru_mobile_[a-z_]+\(' $H | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
 z=$(grep -oE '^pub export fn maru_mobile_[a-z_]+' $B | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
 ck "선언 집합" "$(printf '%s' "$h" | wc -l | tr -d ' ')" "$(printf '%s' "$z" | wc -l | tr -d ' ')"
 if [ "$h" != "$z" ]; then
@@ -67,8 +72,11 @@ ck "Android NO_SUGGESTIONS" 1 "$(grep -c 'TYPE_TEXT_FLAG_NO_SUGGESTIONS' src/pla
 
 echo "§3.1 판단은 코어가 한다"
 # 계약이 "뜻은 코어가 정한다" 고 적어 놨는데 host 가 스크롤·선택을 직접 부르면 그 말이
-# 거짓이 된다. host 는 원시 포인터만 넘겨야 한다 — 관성(`maru_mobile_scroll`)은 예외다.
+# 거짓이 된다. **예외가 없어졌다** — 관성이 코어로 오면서 `maru_mobile_scroll` 을 부르는 host 가
+# 사라졌고, 그래서 그 선언을 헤더에서 내렸다. 지금 host 가 넣는 것은 원시 포인터뿐이다.
 ck "host 가 선택 API 를 직접 부르지 않는다" 0 "$(grep -cE 'maru_mobile_(selection_clear|select)' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "host 가 스크롤을 직접 부르지 않는다" 0 "$(grep -c 'maru_mobile_scroll(' $I $A | awk -F: '{s+=$2} END{print s+0}')"
+ck "헤더에 스크롤 델타 진입점이 없다" 0 "$(grep -c '^void maru_mobile_scroll(' $H)"
 ck "두 host 다 포인터를 넘긴다" 2 "$(grep -l maru_mobile_pointer $I $A | wc -l | tr -d ' ')"
 # 길게 누름 지연은 OS 값이다 — 코어에 박으면 플랫폼 차이와 접근성 설정을 지운다.
 ck "두 host 다 OS 값을 넘긴다" 2 "$(grep -l maru_mobile_set_long_press_ms $I $A | wc -l | tr -d ' ')"

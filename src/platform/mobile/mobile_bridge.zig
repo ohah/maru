@@ -599,7 +599,7 @@ fn snapToBottomOnInput(core: *terminal.core.TerminalCore) void {
 
 /// 플랫폼이 넘긴 논리 px 를 줄로 바꿔 코어에 태운다. **환산이 여기 있는 이유**는 셀 높이가
 /// 코어 쪽 값이기 때문이다 — 플랫폼은 배치를 모른다(§3).
-pub export fn maru_mobile_scroll(dy_px: f32) void {
+pub fn maru_mobile_scroll(dy_px: f32) void {
     // **밀린 화면이 있으면 뒤는 안 움직인다.** host 의 관성은 손을 뗀 뒤에도 몇 프레임 더
     // 도는데, 그 사이 톱니를 눌러 설정을 열면 **안 보이는 터미널이 계속 흘러** 돌아왔을 때
     // 보던 자리가 아니다(§3 "전환에서 스크롤 위치를 잃지 않는다").
@@ -3210,6 +3210,11 @@ fn checkLongPress(core: *terminal.core.TerminalCore) void {
     if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
         core.selectWordAt(c.row, c.col, &.{});
         selecting = true;
+        // **이 제스처는 스크롤이 아니다 — 여기서 속도를 거둔다.** 길게 누르기 전에도 손이
+        // 떨려 `move` 가 오고(임계 10px 안이라 선택은 성립한다) 그 2px 가 0.125px/ms 로
+        // 남는다 — 정지 임계(0.03)의 네 배다. 선택 중 `move` 는 속도 코드를 건너뛰므로 그
+        // 값이 그대로 살아남아, 손을 떼는 순간 **방금 고른 글자가 흘러간다**(재현: 27 → 28).
+        body_fling = 0;
     }
 }
 

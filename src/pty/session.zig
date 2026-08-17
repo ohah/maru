@@ -183,7 +183,9 @@ const UnsupportedPtySession = struct {
     pub const PreparedAdoption = struct {
         pub fn materialize(self: *PreparedAdoption) UnsupportedPtySession {
             _ = self;
-            @panic("PreparedAdoption은 이 플랫폼에서 만들어질 수 없다(exec-restore 미지원 — 계약 §4)");
+            // 문구를 조심해서 쓴다: 이 struct는 필드가 없어 `.{}`로 **만들어진다**(실측). 막는 것은
+            // 생성이 아니라 **쓰임**이다 — 유일한 소비자 `live_pty.initPreparedAdoption`이 여기로 온다.
+            @panic("exec-restore는 이 플랫폼에서 지원되지 않는다 — PreparedAdoption을 쓸 수 없다(계약 §4)");
         }
     };
 };

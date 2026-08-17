@@ -1003,8 +1003,6 @@ pub const PtySession = struct {
         return error.ChildProbeFailed;
     }
 
-    /// 상속된 PTY를 새 이미지가 주워 쓰는 pre-commit 어댑션. **만들 수 없다** — `prepare`가 항상 실패하므로
-    /// 나머지 메서드는 도달하지 않는다. 타입 자체는 중립 레이어의 시그니처가 요구해서 존재한다.
     /// 상속된 PTY를 새 이미지가 주워 쓰는 pre-commit 어댑션.
     ///
     /// **중립 레이어가 부르는 것은 `materialize` 하나뿐이다**(`app/live_pty.zig:106`) — 그래서 그것만 둔다.
@@ -1015,7 +1013,9 @@ pub const PtySession = struct {
     pub const PreparedAdoption = struct {
         pub fn materialize(self: *PreparedAdoption) PtySession {
             _ = self;
-            @panic("PreparedAdoption은 이 플랫폼에서 만들어질 수 없다(exec-restore 미지원 — 계약 §4)");
+            // 문구를 조심해서 쓴다: 이 struct는 필드가 없어 `.{}`로 **만들어진다**(실측). 막는 것은
+            // 생성이 아니라 **쓰임**이다 — 유일한 소비자 `live_pty.initPreparedAdoption`이 여기로 온다.
+            @panic("exec-restore는 이 플랫폼에서 지원되지 않는다 — PreparedAdoption을 쓸 수 없다(계약 §4)");
         }
     };
 };

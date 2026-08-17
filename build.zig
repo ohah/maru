@@ -698,6 +698,25 @@ pub fn build(b: *std.Build) void {
         const cross_tests = addProjectTest(b, .{ .root_module = cross_mod });
         // **Run이 없다** — 컴파일 산출물에만 의존한다.
         check_targets_step.dependOn(&cross_tests.step);
+
+        // **`main.zig`도 반드시 넣는다.** 중립 모듈(`maru.zig`)만 컴파일하면 CLI 진입점이 빠지는데,
+        // 거기가 W2의 호스트 게이트(`hostGateReason`·terminfo·`install-cli`·`maru ssh`)와 W8.5의 경로
+        // 정책이 사는 자리라 타깃별로 가장 잘 깨진다. 실측으로 확인했다 — `main.zig`에 macOS 전용 타입
+        // 오류를 심으면 `maru.zig`만 도는 게이트는 **통과해 버린다**(적대적 검증에서 잡았다).
+        const cross_exe_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = cross_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = cross_mod },
+                .{ .name = "session_host_build_options", .module = session_host_product_options.createModule() },
+            },
+        });
+        // **테스트가 아니라 실행 파일로 컴파일한다.** 테스트 빌드는 test 블록이 참조하는 것만 분석하므로
+        // `main()`과 그 아래(호스트 게이트·경로 정책)가 통째로 빠진다 — 실측: `main.zig`에 macOS 전용 타입
+        // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
+        const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
+        check_targets_step.dependOn(&cross_exe.step);
     }
 
     const exe_tests = addProjectTest(b, .{

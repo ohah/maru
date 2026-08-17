@@ -25,8 +25,22 @@ pub const Range = struct {
     }
 };
 
-/// 그 줄의 **표시 들여쓰기 깊이**(열). 탭은 탭 폭까지 나아간다 — 화면에서 보이는 깊이가 기준이다
-/// (§4.2가 표시 폭을 단일 출처로 둔 것과 같은 규율). 공백·탭 외 문자가 나오면 멈춘다.
+/// 그 줄의 **선행 공백 폭**(열). 탭은 탭스톱까지 나아가고, **공백·탭이 아닌 것이 나오면 거기서
+/// 끝난다**.
+///
+/// **"화면에서 보이는 깊이"가 아니다.** 초판 주석이 그렇게 적었는데 그 표현은 탭 폭을 설명하려던
+/// 것이었고, CR·NBSP 같은 경우에 **반대 결론을 유도한다** — 렌더는 CR을 1칸, NBSP를 `<U+00A0>`
+/// 8칸으로 그리므로 "보이는 깊이"를 따르면 그것들도 들여쓰기에 넣어야 한다. 접힘이 알아야 하는 것은
+/// 화면 시작 열이 아니라 **선행 공백의 깊이**이고, 탭이 포함되는 이유도 "보여서"가 아니라 **탭이
+/// 공백이기 때문**이다. 규칙을 하나로 못박는다(적대적 검증 2026-08-17이 두 서술의 충돌을 잡았다).
+///
+/// **§3.8과도 그쪽이 맞다** — NBSP·전각 공백·폭 0 공백은 hazard로 표기되어 드러나는 문자다. 그것을
+/// 들여쓰기로 세면 **보이지 않는 문자가 접힘 구조를 바꾼다**(그 절이 막으려는 것).
+///
+/// **CR도 여기서 멈춘다.** 초판은 `\r`만 건너뛰었는데(CRLF 잔여로 봤다) 두 가지가 틀렸다 — 줄에
+/// 넘어오는 텍스트는 이미 줄 끝 문자가 빠져 있고(`open.lineText`의 `contentEnd`), 줄 **안**의 CR은
+/// §3.8이 말하는 **내용**이다. 게다가 렌더는 CR을 **1칸**으로 센다(실측) — 건너뛰면 화면과 한 칸
+/// 어긋난다. "공백·탭 외에는 멈춘다"는 위 규칙 하나만 남긴다.
 ///
 /// **빈 줄(공백만 있는 줄 포함)은 `null`이다** — 깊이가 0이 아니라 "깊이가 없다"이다. 0으로 치면
 /// 함수 사이 빈 줄마다 범위가 끊겨 접힘이 쓸모없어진다.
@@ -36,8 +50,7 @@ pub fn indentOf(line: []const u8, tab_width: u16) ?u32 {
     for (line) |c| switch (c) {
         ' ' => col += 1,
         '\t' => col = ((col / stop) + 1) * stop,
-        '\r' => {}, // CRLF의 잔여는 내용이 아니다
-        else => return col,
+        else => return col, // 공백·탭이 아니면 거기서 들여쓰기가 끝난다
     };
     return null; // 끝까지 공백이었다 = 빈 줄
 }
@@ -312,4 +325,91 @@ test "중첩 상한을 넘으면 그 아래를 안 접을 뿐 나머지는 그�
     try testing.expectEqual(@as(u32, @intCast(n - 1)), rs[0].last_hidden); // 끝까지 덮는다
     // 문서 순서다.
     for (rs[1..], 0..) |r, k| try testing.expect(r.head > rs[k].head);
+}
+
+test "적대적: 한 번 훑기가 옛 규칙과 같은 답을 낸다 — 무작위 대조" {
+    // 알고리즘을 통째로 바꿨다(줄마다 앞 훑기 → 스택 한 번 훑기). **빠르면서 틀리면 최악**이므로,
+    // 느리지만 규칙이 눈에 보이는 판정자를 테스트 안에 두고 무작위로 대조한다.
+    var prng = std.Random.DefaultPrng.init(0xBEEF_F01D);
+    const rnd = prng.random();
+    const vocab = [_][]const u8{ "x", "  x", "    x", "      x", "\tx", "", "   " };
+
+    var round: usize = 0;
+    while (round < 2000) : (round += 1) {
+        var storage: [24][]const u8 = undefined;
+        const n = rnd.uintLessThan(usize, storage.len);
+        for (0..n) |i| storage[i] = vocab[rnd.uintLessThan(usize, vocab.len)];
+        const lines = storage[0..n];
+
+        var fast: [32]Range = undefined;
+        const got = compute(lines, 4, &fast);
+
+        // 판정자: 줄마다 앞으로 훑어 "더 깊은 연속 구간"을 찾는다(초판 규칙 그대로).
+        var want: [32]Range = undefined;
+        var wn: usize = 0;
+        for (lines, 0..) |line, i| {
+            const head = indentOf(line, 4) orelse continue;
+            var last_content: ?usize = null;
+            var j = i + 1;
+            while (j < lines.len) : (j += 1) {
+                const d = indentOf(lines[j], 4) orelse continue;
+                if (d <= head) break;
+                last_content = j;
+            }
+            const end = last_content orelse continue;
+            want[wn] = .{ .head = @intCast(i), .first_hidden = @intCast(i + 1), .last_hidden = @intCast(end) };
+            wn += 1;
+        }
+
+        try testing.expectEqual(wn, got.len);
+        for (got, want[0..wn]) |g, w| {
+            try testing.expectEqual(w.head, g.head);
+            try testing.expectEqual(w.first_hidden, g.first_hidden);
+            try testing.expectEqual(w.last_hidden, g.last_hidden);
+        }
+    }
+}
+
+test "공백·탭이 아니면 거기서 들여쓰기가 끝난다 — CR도 내용이다" {
+    // 초판은 `\r`만 건너뛰어 화면과 한 칸 어긋났다(렌더는 CR을 1칸으로 센다 — 실측).
+    try testing.expectEqual(@as(?u32, 2), indentOf("  x", 4));
+    try testing.expectEqual(@as(?u32, 0), indentOf("\rx", 4)); // CR에서 멈춘다
+    try testing.expectEqual(@as(?u32, 2), indentOf("  \r x", 4)); // 공백 둘 뒤 CR에서 멈춘다
+    try testing.expectEqual(@as(?u32, null), indentOf("   ", 4)); // 공백만 = 빈 줄
+    try testing.expectEqual(@as(?u32, null), indentOf("", 4));
+    try testing.expectEqual(@as(?u32, 4), indentOf("\tx", 4)); // 탭은 탭스톱까지
+    try testing.expectEqual(@as(?u32, 4), indentOf("  \tx", 4)); // 공백 둘 뒤 탭 → 다음 스톱
+    // **탭 폭 0은 1로 본다**(0으로 안 나눈다) — 그러면 탭이 다음 1의 배수, 즉 한 칸 나아간다.
+    // 처음엔 2로 적었는데 그건 "탭이 0칸"이라는 기대였고 틀렸다(코드가 맞았다).
+    try testing.expectEqual(@as(?u32, 3), indentOf("  \tx", 0));
+}
+
+test "비표준 공백은 들여쓰기가 아니다 — §3.8이 표기로 드러내는 것들" {
+    // NBSP·전각 공백 등은 **보기에만 공백**이고 §3.8이 `<U+00A0>` 표기로 드러낸다. 들여쓰기로 세면
+    // 화면(표기 8칸)과 계산(1칸)이 갈리고, 더 나쁘게는 **보이지 않는 문자로 접힘 구조가 바뀐다** —
+    // 그게 §3.8이 막으려는 것이다. 여기서 멈추는 것이 맞다.
+    try testing.expectEqual(@as(?u32, 0), indentOf("\u{00A0}x", 4)); // NBSP
+    try testing.expectEqual(@as(?u32, 0), indentOf("\u{3000}x", 4)); // 전각 공백
+    try testing.expectEqual(@as(?u32, 2), indentOf("  \u{00A0}x", 4)); // 진짜 공백 둘 뒤에서 멈춘다
+    try testing.expectEqual(@as(?u32, 0), indentOf("\u{200B}x", 4)); // 폭 0 공백
+
+    // **빈 줄로 착각하지 않는다** — 내용이 있는 줄이다(깊이 0).
+    try testing.expect(indentOf("\u{00A0}", 4) != null);
+}
+
+test "[측정] 아주 긴 들여쓰기 한 줄" {
+    // `indentOf`는 접두사를 훑는다. 공백 수백만 개짜리 줄에서 그 비용과 `u32` 범위를 확인한다.
+    const alloc = testing.allocator;
+    const n = 4 << 20; // 4 MiB
+    const line = try alloc.alloc(u8, n + 1);
+    defer alloc.free(line);
+    @memset(line[0..n], ' ');
+    line[n] = 'x';
+
+    const t0 = monotonicUs();
+    const d = indentOf(line, 4);
+    const t1 = monotonicUs();
+    std.debug.print("\n[측정] {d}MiB 공백 들여쓰기: 깊이={?d}, {d}µs\n", .{ n >> 20, d, t1 - t0 });
+    try testing.expectEqual(@as(?u32, n), d); // u32에 들어간다
+    try testing.expect(t1 - t0 < 200_000); // 재앙 감지선
 }

@@ -240,6 +240,12 @@ pub fn build(b: *std.Build) void {
         d3d11_present_smoke_cmd.step.dependOn(b.getInstallStep());
         d3d11_present_smoke_cmd.addArg("d3d11-present-smoke");
         d3d11_present_smoke_step.dependOn(&d3d11_present_smoke_cmd.step);
+
+        const d3d11_cells_smoke_step = b.step("d3d11-cells-smoke", "Draw a cell grid with synthesized glyphs through the D3D11 cell pipeline");
+        const d3d11_cells_smoke_cmd = b.addRunArtifact(exe);
+        d3d11_cells_smoke_cmd.step.dependOn(b.getInstallStep());
+        d3d11_cells_smoke_cmd.addArg("d3d11-cells-smoke");
+        d3d11_cells_smoke_step.dependOn(&d3d11_cells_smoke_cmd.step);
     }
 
     if (target.result.os.tag == .macos) {

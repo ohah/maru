@@ -6,6 +6,8 @@ const maru = @import("maru");
 const win32_window = @import("platform/windows/win32_window.zig");
 // W7.2a D3D11+DXGI 표시 경로. 창과 같은 이유로 최상위 import다(위 주석).
 const d3d11_present = @import("platform/windows/d3d11_present.zig");
+// W7.2b 셀 인스턴스 드로우.
+const d3d11_cells = @import("platform/windows/d3d11_cells.zig");
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
@@ -69,6 +71,11 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "d3d11-present-smoke")) {
         try runD3d11PresentSmoke(allocator, stdout, stderr);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "d3d11-cells-smoke")) {
+        try runD3d11CellsSmoke(allocator, stdout, stderr);
         return;
     }
 
@@ -308,6 +315,162 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
     try stdout.print("driver={s}\n", .{@tagName(present.driver)});
     try stdout.print("clear_argb=0x{X:0>8}\n", .{@as(u32, 0xFF1E2430)});
     try stdout.writeAll("visible UI: 창이 테마 배경색으로 칠해진다. 셀·글리프는 W7.2b, 입력은 W7.4다.\n");
+    try stdout.flush();
+}
+
+/// W7.2b 스모크가 아틀라스에 채워 넣는 코드포인트. **폰트를 쓰지 않는다** — `renderer.synthesizeGlyph`가
+/// codepoint에서 직접 픽셀을 만드는 것들만 골랐다(box-drawing·block·braille). 그래서 W7.3(DirectWrite)
+/// 전에도 "아틀라스에서 커버리지를 읽어 셀에 칠한다"는 경로 전체가 실제 픽셀로 검증된다.
+const cells_smoke_codepoints = [_]u32{
+    0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, // 직선·모서리·T
+    0x252C, 0x2534, 0x253C, 0x2550, 0x2551, 0x2554, 0x2557, 0x255A, // 사거리·이중선
+    0x2588, 0x2592, 0x2584, 0x2580, 0x258C, 0x2590, 0x2596, 0x259A, // block·shade·half
+    0x28FF, 0x2801, 0x2847, 0x28B6, // braille
+};
+
+/// `maru d3d11-cells-smoke` — W7.2b. **글리프가 화면에 나오는 것까지**를 사람이 눈으로 확인하는 자리.
+///
+/// W7.2a가 "창이 한 색으로 칠해진다"였다면 여기는 "셀 격자에 배경색과 글리프가 각각 제자리에 그려진다"다.
+/// 아직 실제 터미널 화면이 아니다(W7.2c가 `app.host` 프레임을 물린다) — 여기서 그리는 것은 이 스모크가
+/// 직접 만든 격자다. 그래도 아틀라스 업로드·UV 변환·인스턴스 드로우·블렌드가 전부 진짜 경로다.
+fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru d3d11-cells-smoke: Windows 전용입니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    const cell_w: u32 = 16;
+    const cell_h: u32 = 32;
+
+    // ── 아틀라스를 합성 글리프로 채운다 ────────────────────────────────────────────────────
+    // 슬롯 0은 **비워 둔다** — 글리프 없는 셀이 가리킬 자리다(커버리지 0이라 배경만 남는다).
+    const slots: u32 = cells_smoke_codepoints.len + 1;
+    const atlas_w = cell_w * slots;
+    const atlas_h = cell_h;
+    const bytes_per_row: usize = @as(usize, atlas_w) * 4;
+    const atlas_pixels = try allocator.alloc(u8, bytes_per_row * atlas_h);
+    defer allocator.free(atlas_pixels);
+    @memset(atlas_pixels, 0);
+
+    // **슬롯마다 따로 그린 뒤 옮겨 붙인다.** 넓은 아틀라스 중간으로 오프셋한 슬라이스를 그대로 넘기면
+    // 안 된다 — `synthesizeGlyph`는 `len >= height * bytes_per_row`를 요구하는데 오프셋한 슬라이스는
+    // 꼬리가 모자라 **빈 글리프로 안전 degrade**한다. 실측으로 겪었다: 슬롯 28개가 "채워졌다"고 나오면서
+    // 실제 덮인 픽셀은 0이었다(그래서 이 수를 따로 세어 보고한다 — 안 그러면 성공으로 보인다).
+    const slot_bpr: usize = @as(usize, cell_w) * 4;
+    const scratch = try allocator.alloc(u8, slot_bpr * cell_h);
+    defer allocator.free(scratch);
+
+    var filled_slots: usize = 0;
+    var filled_pixels: u32 = 0;
+    for (cells_smoke_codepoints, 0..) |cp, i| {
+        @memset(scratch, 0);
+        const n = maru.renderer.synthesizeGlyph(cp, cell_w, cell_h, slot_bpr, scratch) orelse continue;
+        filled_slots += 1;
+        filled_pixels += n;
+
+        const x_px = (i + 1) * cell_w;
+        var y: usize = 0;
+        while (y < cell_h) : (y += 1) {
+            const src = scratch[y * slot_bpr ..][0..slot_bpr];
+            const dst_off = y * bytes_per_row + x_px * 4;
+            @memcpy(atlas_pixels[dst_off..][0..slot_bpr], src);
+        }
+    }
+
+    // ── 창과 표시 경로 ─────────────────────────────────────────────────────────────────────
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2b D3D11 cells smoke)");
+    var window = win32_window.Window.create(allocator, title, 960, 600) catch |err| {
+        try stderr.print("maru d3d11-cells-smoke: 창을 만들지 못했습니다({s}, Win32 오류 {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        if (win32_window.last_create_error == 8)
+            try stderr.writeAll("  오류 8(ERROR_NOT_ENOUGH_MEMORY)은 보통 데스크톱 힙 고갈입니다 — 이 세션의 프로세스 수를 확인하세요.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 960, .height_px = 600 };
+    var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+        try stderr.print("maru d3d11-cells-smoke: 표시 경로를 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer present.destroy();
+    window.present.opaque_handle = @ptrCast(present);
+
+    var pipeline = d3d11_cells.CellPipeline.create(allocator, present.device, present.context, atlas_w, atlas_h, atlas_pixels) catch |err| {
+        try stderr.print("maru d3d11-cells-smoke: 셀 파이프라인을 세우지 못했습니다({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        if (d3d11_cells.shaderError().len > 0)
+            try stderr.print("  셰이더 컴파일러: {s}\n", .{d3d11_cells.shaderError()});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer pipeline.destroy();
+
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+
+    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+    var frames: usize = 0;
+    var close_requested = false;
+    var spins: usize = 0;
+    var last_cell_count: usize = 0;
+    while (spins < 240 and !window.quit_requested and !close_requested) : (spins += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .resized => |r| try present.resize(r.width_px, r.height_px),
+            .paint => {},
+            .close_requested => close_requested = true,
+        };
+
+        const size = win32_window.cellsForClient(present.width_px, present.height_px, cell_w, cell_h) orelse continue;
+        cells.clearRetainingCapacity();
+        var row: u32 = 0;
+        while (row < size.rows) : (row += 1) {
+            var col: u32 = 0;
+            while (col < size.cols) : (col += 1) {
+                // 격자무늬 배경 — 배경 알파가 실제로 판정에 쓰이는지 보이게 한다. 알파 0인 셀은
+                // clear color 가 그대로 비쳐야 한다(그것이 `NativeMetalCell`의 규약이다).
+                const checker = (row + col) % 3 == 0;
+                const bg: u32 = if (checker) 0xFF2E3A4E else 0x00000000;
+                // 글리프는 슬롯을 순환시킨다. 첫 열은 슬롯 0(빈 글리프)이라 배경만 나온다.
+                const slot: u32 = if (col == 0) 0 else @intCast(1 + ((row * size.cols + col) % cells_smoke_codepoints.len));
+                try cells.append(allocator, .{
+                    .rect = .{
+                        @floatFromInt(col * cell_w),
+                        @floatFromInt(row * cell_h),
+                        @floatFromInt(cell_w),
+                        @floatFromInt(cell_h),
+                    },
+                    .uv = d3d11_cells.uvFromAtlasRect(slot * cell_w, 0, cell_w, cell_h, atlas_w, atlas_h),
+                    .fg = d3d11_cells.colorFromArgb(0xFFD8E0F0),
+                    .bg = d3d11_cells.colorFromArgb(bg),
+                });
+            }
+        }
+        last_cell_count = cells.items.len;
+
+        try present.beginFrame(clear);
+        pipeline.draw(cells.items, present.width_px, present.height_px) catch |err| {
+            try stderr.print("draw 실패: {s} (HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+            try stderr.flush();
+            return error.UnknownCommand;
+        };
+        try present.present(false);
+        frames += 1;
+        _ = usleep(8_000);
+    }
+    if (close_requested) window.requestClose();
+
+    try stdout.writeAll("maru.d3d11-cells-smoke.v1\n");
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("atlas_px={d}x{d}\n", .{ atlas_w, atlas_h });
+    try stdout.print("atlas_slots={d} filled={d}\n", .{ slots, filled_slots });
+    try stdout.print("atlas_covered_pixels={d}\n", .{filled_pixels});
+    try stdout.print("cells_drawn={d}\n", .{last_cell_count});
+    try stdout.print("swapchain_px={d}x{d}\n", .{ present.width_px, present.height_px });
+    try stdout.print("driver={s}\n", .{@tagName(present.driver)});
+    try stdout.writeAll("visible UI: 셀 격자에 배경색과 합성 글리프가 그려진다. 폰트 글리프는 W7.3, 실제 터미널 화면은 W7.2c다.\n");
     try stdout.flush();
 }
 
@@ -1075,6 +1238,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-smoke
         \\  maru win32-window-smoke
         \\  maru d3d11-present-smoke
+        \\  maru d3d11-cells-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
@@ -1095,6 +1259,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\  win32-window-smoke open a real Win32 window and report the neutral events it delivers (Windows only; needs an interactive desktop)
         \\  d3d11-present-smoke paint that window with D3D11 + DXGI and report the present path (Windows only; needs a D3D11 device)
+        \\  d3d11-cells-smoke draw a cell grid with synthesized glyphs through the D3D11 cell pipeline (Windows only; needs a D3D11 device)
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
@@ -1120,6 +1285,7 @@ test "development CLI imports maru module" {
 test {
     _ = win32_window;
     _ = d3d11_present;
+    _ = d3d11_cells;
 }
 
 // W2가 지키려는 성질: **Windows에서 maru가 빌드·실행된다.** 그러려면 POSIX 전제 명령 셋(ssh·install-cli·

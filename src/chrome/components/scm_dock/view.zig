@@ -34,6 +34,8 @@ const repo_icon = icons.utf8Fit(.folder, .standard);
 /// 아직 안 읽은 저장소 줄에 적는 말. **배지의 빈자리와 구별해야 한다** — 배지가 없는 것을 사용자는
 /// "변경 없음"으로 읽는다.
 const repo_pending_label = "읽는 중…";
+/// 읽지 못한 저장소. **"읽는 중…"과 다른 사실이다** — 그쪽은 곧 온다는 약속이다.
+const repo_failed_label = "읽지 못함";
 const worktree_icon = icons.utf8Fit(.git_branch, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
@@ -69,7 +71,8 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
         .repo => |repo| {
             text_ops += 5;
-            bytes += icon_bytes * 2 + repo.name.len + @max(repo.branch.len, repo_pending_label.len) + count_digits;
+            bytes += icon_bytes * 2 + repo.name.len +
+                @max(repo.branch.len, @max(repo_pending_label.len, repo_failed_label.len)) + count_digits;
         },
         // 입력은 **시각 행마다 한 조각**이고, 글자는 안내 문구와 본문 중 긴 쪽만 나간다.
         .commit_box => |box| {
@@ -418,7 +421,7 @@ const Writer = struct {
         // 읽는데, 그건 **아직 모르는 것**과 다른 사실이다.
         var count_buf: [16]u8 = undefined;
         const count_text = std.fmt.bufPrint(&count_buf, "{d}", .{repo.count}) catch "";
-        const pill = if (repo.count > 0 and !repo.pending) badge.countPill(rect.rect, .{
+        const pill = if (repo.count > 0 and !repo.pending and !repo.failed) badge.countPill(rect.rect, .{
             .inset_x = m.inset_x,
             .label_cols = @max(@as(u16, @intCast(count_text.len)), 1),
             .cell_width_px = self.cell_width_px,
@@ -428,10 +431,11 @@ const Writer = struct {
         }) else null;
 
         const name_x = kind_x + @as(f32, @floatFromInt(m.icon_extent + m.gap));
-        if (repo.pending) {
+        if (repo.pending or repo.failed) {
             // 오른쪽 자리를 그대로 쓴다(브랜치가 설 자리) — 읽고 나면 그 자리에 브랜치와 배지가 온다.
-            try self.trailing(rect, repo_pending_label, .muted_fg, .supporting, m.inset_x);
-            const budget = self.measureBudget(repo_pending_label) + @as(f32, @floatFromInt(m.gap + m.inset_x));
+            const label = if (repo.failed) repo_failed_label else repo_pending_label;
+            try self.trailing(rect, label, .muted_fg, .supporting, m.inset_x);
+            const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + m.inset_x));
             try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
             return;
         }
@@ -1201,6 +1205,18 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "읽지 못한 저장소는 0건이 아니라 그 사실을 적는다" {
+    // 배지가 없거나 `0`이면 사용자는 "변경 없음"으로 읽는다 — 우리는 그 사실을 **모른다**.
+    // 그리고 "읽는 중…"과도 달라야 한다: 그쪽은 곧 온다는 약속이다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "gone-wt", .primary = false, .failed = true } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findText(draws, "읽지 못함") != null);
+    try testing.expect(findText(draws, "읽는 중") == null);
 }
 
 test "변경이 없다는 말은 그 저장소 줄 **아래**에 온다(겹치지 않는다)" {

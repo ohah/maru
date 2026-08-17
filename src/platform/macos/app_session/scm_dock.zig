@@ -276,6 +276,8 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .count = if (is_current) countFiles(model.rows) else (if (summary) |sum| sum.count else 0),
                 // 아직 답이 안 온 저장소만 "읽는 중…"이다 — **0건과 구별해야 한다**.
                 .pending = !is_current and summary == null,
+                // 읽지 못한 저장소는 그 사실을 적는다(0건으로 그리면 없는 사실을 단정한다).
+                .failed = if (summary) |sum| sum.failed else false,
             },
         };
         n += 1;
@@ -2009,6 +2011,18 @@ pub fn markRepoStatusStale(self: *AppSession) void {
 }
 
 /// 아직 안 읽었거나 낡은 저장소 **하나**에 읽기를 건다. 매 tick 부르되 대부분은 그냥 돌아간다.
+const repo_status_retry_ns: i128 = 5 * std.time.ns_per_s;
+
+/// 그 저장소를 **지금** 읽을 것인가. 순수 판정이라 여기서 단위로 짚는다.
+///
+/// 실패한 저장소는 쉬었다 간다: 곧바로 다시 걸면 사라진 워크트리 하나가 매 tick git을 띄우고,
+/// 하나씩 도는 규율(§6) 때문에 뒤의 저장소는 차례가 **영영** 오지 않는다.
+pub fn shouldReadRepoStatus(known: ?app_session_mod.RepoStatusEntry, now: i128) bool {
+    const entry = known orelse return true; // 아직 한 번도 못 읽었다
+    if (entry.failed) return now - entry.read_ns >= repo_status_retry_ns;
+    return entry.stale;
+}
+
 pub fn pumpRepoStatus(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_repo_status_inflight != 0) return; // 하나씩
@@ -2019,10 +2033,10 @@ pub fn pumpRepoStatus(self: *AppSession) void {
 
     const repos = repoEntries(self);
     const current = self.git_repo orelse "";
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
     for (repos.entries) |entry| {
         if (std.mem.eql(u8, entry.path, current)) continue; // 활성은 목록 읽기가 채운다
-        const known = repoStatusFor(self, entry.path);
-        if (known != null and !known.?.stale) continue;
+        if (!shouldReadRepoStatus(repoStatusFor(self, entry.path), now)) continue;
         submitRepoStatus(self, entry.path);
         return; // **하나만** 건다 — 나머지는 다음 tick에
     }
@@ -2047,7 +2061,13 @@ pub fn drainRepoStatus(self: *AppSession) void {
     defer taken.deinit(git_backend_mod.worker_allocator);
     if (taken.request_id != self.scm_repo_status_inflight) return; // 낡은 답은 버린다
     self.scm_repo_status_inflight = 0;
-    if (!taken.ok or taken.repo.len == 0) return; // 실패는 조용히 둔다 — 다음 갱신에 다시 읽는다
+    if (taken.repo.len == 0) return; // 어느 저장소의 답인지 모르면 실을 자리가 없다
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    if (!taken.ok) {
+        // **실패도 기록한다.** 안 기록하면 그 저장소는 계속 "아직 안 읽은 것"이라 매 tick 다시 읽힌다.
+        recordRepoStatusFailure(self, taken.repo, now);
+        return;
+    }
 
     const summary = maru.session.scm_repos.summarize(taken.text);
     const branch_copy = self.allocator.dupe(u8, summary.branch) catch return;
@@ -2062,6 +2082,7 @@ pub fn drainRepoStatus(self: *AppSession) void {
             .ahead = summary.ahead,
             .behind = summary.behind,
             .has_ab = summary.has_ab,
+            .read_ns = now,
         };
         self.metal_dirty = true;
         return;
@@ -2083,6 +2104,42 @@ pub fn drainRepoStatus(self: *AppSession) void {
         .ahead = summary.ahead,
         .behind = summary.behind,
         .has_ab = summary.has_ab,
+        .read_ns = now,
+    }) catch {
+        self.allocator.free(path_copy);
+        self.allocator.free(branch_copy);
+        return;
+    };
+    self.metal_dirty = true;
+}
+
+/// 읽기 실패를 캐시에 남긴다. **개수는 0으로 두지 않고 "읽지 못함"으로 그린다** — 0건은 사실을
+/// 단정하는 값이고, 우리는 그 사실을 모른다.
+fn recordRepoStatusFailure(self: *AppSession, repo: []const u8, now: i128) void {
+    for (self.scm_repo_status.items) |*entry| {
+        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        entry.failed = true;
+        entry.stale = false;
+        entry.read_ns = now;
+        self.metal_dirty = true;
+        return;
+    }
+    if (self.scm_repo_status.items.len >= maru.session.scm_repos.max_entries) return;
+    const path_copy = self.allocator.dupe(u8, repo) catch return;
+    const branch_copy = self.allocator.dupe(u8, "") catch {
+        self.allocator.free(path_copy);
+        return;
+    };
+    self.scm_repo_status.append(self.allocator, .{
+        .path = path_copy,
+        .branch = branch_copy,
+        .detached = false,
+        .count = 0,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .failed = true,
+        .read_ns = now,
     }) catch {
         self.allocator.free(path_copy);
         self.allocator.free(branch_copy);

@@ -275,6 +275,12 @@ test "every Button variant resolves a distinct command surface and one foregroun
     // 그리고 방향까지: hover 가 가장 어둡고 활성이 가장 밝다(dark 테마 기준 fixture).
     try std.testing.expect(ghost_hover_rgb.r < ghost_press_rgb.r);
     try std.testing.expect(ghost_press_rgb.r < active_rgb.r);
+    // 목록 행 hover 는 **활성보다 밝다**. 이 role 도 2026-08-17까지 `sidebar_active` 를 그대로 담아
+    // 자기 주석("활성색과 완전히 같아 구분이 0")이 금지한 상태였다 — 값이 아니라 이름만 달랐다.
+    // 그래서 방향까지 단언한다: 활성 밴드 위에 겹쳐도 구분되려면 반드시 더 밝아야 한다.
+    const row_hover_rgb = rich.get(.row_hover_bg);
+    try std.testing.expect(!std.meta.eql(row_hover_rgb, active_rgb));
+    try std.testing.expect(row_hover_rgb.r > active_rgb.r);
     // disabled는 언제나 마지막이라 danger의 강한 색도 비활성으로 가라앉는다.
     const disabled_danger = resolveButton(1, .{ .variant = .danger, .paint = .{} }, .{ .id = 2, .enabled = false }, .{}, &tk);
     try std.testing.expect(disabled_danger.background != .danger_bg);

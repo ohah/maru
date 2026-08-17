@@ -65,6 +65,27 @@ fn dividerBg(panel: Rgb) Rgb {
     return if (lum < 128) lightenRgb(panel, 24) else darkenRgb(panel, 24);
 }
 
+/// 목록 행 호버 — **활성 밴드보다 한 단계 더 밝게**. 배경→활성 델타만큼 한 번 더 옮긴다.
+///
+/// 이 식은 platform(`sidebar.zig sidebarRowHoverBg`)이 이미 갖고 있던 것이고, 그동안 토큰 쪽은
+/// `sidebar_active`를 **그대로** 담고 있었다. 즉 같은 의미가 두 곳에 있고 값이 갈려서, 사이드바는
+/// 활성보다 밝은 호버를 얻는데 chrome 컴포넌트(도크 카드·버튼)는 **활성과 완전히 같은 색**을 받았다 —
+/// `row_hover_bg` role 주석이 "활성보다 한 단계 밝다"고 적고 있었는데도 그랬다(2026-08-17 적대적 검증).
+/// 그래서 식을 이 층으로 올리고 platform이 이것을 호출한다(`statusBarBg`와 같은 관계).
+///
+/// 델타를 그대로 한 번 더 쓰므로 light 테마(활성이 배경보다 어두운 경우)에서는 자동으로 **더 어두워진다**
+/// — 방향이 배경 대비로 정해지기 때문에 명암 판정을 따로 두지 않아도 양쪽에서 구분이 유지된다.
+pub fn rowHoverBg(panel: Rgb, active: Rgb) Rgb {
+    const step = struct {
+        fn f(b: u8, a: u8) u8 {
+            const bi: i16 = @intCast(b);
+            const ai: i16 = @intCast(a);
+            return @intCast(std.math.clamp(ai + (ai - bi), 0, 255));
+        }
+    }.f;
+    return .{ .r = step(panel.r, active.r), .g = step(panel.g, active.g), .b = step(panel.b, active.b) };
+}
+
 /// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider는 panel background 대비에서
 /// 오고, focus_accent/drop_zone은 rich에서 분리할 수 있게 별도 role로 둔다.
 pub const ColorRole = enum {
@@ -79,6 +100,10 @@ pub const ColorRole = enum {
     /// 목록 행(에이전트 행·토글) 호버 — **활성 밴드 위에 겹쳐도 구분되어야** 하므로 활성보다 한 단계 밝다.
     /// `tab_hover_bg`(배경↔활성 중간)를 쓰면 활성 카드의 목록에서 활성색보다 어두워 호버가 사라지고,
     /// `tab_active_bg`를 쓰면 활성색과 **완전히 같아** 역시 구분이 0이다(사용자 제보).
+    ///
+    /// **값은 `rowHoverBg`가 준다.** 2026-08-17까지 이 role은 `sidebar_active`를 그대로 담아 바로 위
+    /// 문장이 금지한 상태("활성색과 완전히 같아 구분이 0")였다 — 의도는 주석에만 있고 값은 아니었다.
+    /// platform이 같은 식을 따로 갖고 있어서 사이드바만 옳게 보였고, 그 어긋남은 적대적 검증에서 드러났다.
     row_hover_bg,
     /// 경량 컨트롤(`.ghost` 버튼 — 헤더 정렬 토글·도크 유틸리티)을 **누르고 있는** 동안의 면.
     ///
@@ -268,7 +293,7 @@ pub const Tokens = struct {
         palette.set(.inset_bg, insetBg(theme.sidebar_background));
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
-        palette.set(.row_hover_bg, theme.sidebar_active);
+        palette.set(.row_hover_bg, rowHoverBg(theme.sidebar_background, theme.sidebar_active)); // 활성보다 한 단계 더(위 함수 주석 — platform과 같은 식)
         // tui 는 파생색을 쓰지 않는다(위 role 주석) — 활성과 같은 값이고 pressed 구분은 테두리가 한다.
         palette.set(.control_press_bg, theme.sidebar_active);
         palette.set(.divider, dividerBg(theme.sidebar_background));

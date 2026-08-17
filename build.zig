@@ -221,6 +221,17 @@ pub fn build(b: *std.Build) void {
     app_pty_smoke_cmd.addArg("app-pty-smoke");
     app_pty_smoke_step.dependOn(&app_pty_smoke_cmd.step);
 
+    // W7.1 창 스모크는 Win32와 **대화형 데스크톱**이 필요하다 — macOS visible window smoke를 window
+    // server 때문에 OS로 게이트하는 것과 같은 이유다(아래). 그래서 `check`에 넣지 않는다: 사람이
+    // 평범한 세션에서 직접 돌려 눈으로 보는 스모크다.
+    if (target.result.os.tag == .windows) {
+        const win32_window_smoke_step = b.step("win32-window-smoke", "Open a real Win32 window and report its neutral events (needs an interactive desktop)");
+        const win32_window_smoke_cmd = b.addRunArtifact(exe);
+        win32_window_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_window_smoke_cmd.addArg("win32-window-smoke");
+        win32_window_smoke_step.dependOn(&win32_window_smoke_cmd.step);
+    }
+
     if (target.result.os.tag == .macos) {
         const macos_swift_target = swiftMacOSTarget(b, target.result);
 

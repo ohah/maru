@@ -534,8 +534,10 @@ test "정렬 방향 토글은 두 상태를 왕복한다" {
     const SortOrder = chrome.components.session_dock.types.SortOrder;
     try std.testing.expectEqual(SortOrder.oldest_first, SortOrder.newest_first.toggled());
     try std.testing.expectEqual(SortOrder.newest_first, SortOrder.oldest_first.toggled());
-    try std.testing.expectEqualStrings("최신순", SortOrder.newest_first.label());
-    try std.testing.expectEqualStrings("오래된순", SortOrder.oldest_first.label());
+    // 라벨은 **키가 옳게 골라졌는가**를 본다 — 원문 문자열로 비교하면 언어 설정에 묶여, 이 테스트의
+    // 주 검증(왕복)이 표시 언어 때문에 깨진다.
+    try std.testing.expectEqualStrings(maru.i18n.t(.sd_sort_newest), SortOrder.newest_first.label());
+    try std.testing.expectEqualStrings(maru.i18n.t(.sd_sort_oldest), SortOrder.oldest_first.label());
 }
 
 // 점진 발행은 빈 화면을 피하려는 것이므로, 보여 줄 목록이 이미 있으면 켜지 않는다. 특히 이전 스캔이

@@ -4,6 +4,7 @@
 //! scope/filter를 끝낸 화면용 문자열만 이 구조로 투영하고, component는 그 immutable snapshot만 읽는다.
 
 const std = @import("std");
+const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const spacing = @import("../../ui/spacing.zig");
@@ -21,8 +22,8 @@ pub const SortOrder = enum {
 
     pub fn label(self: SortOrder) []const u8 {
         return switch (self) {
-            .newest_first => "최신순",
-            .oldest_first => "오래된순",
+            .newest_first => i18n.t(.sd_sort_newest),
+            .oldest_first => i18n.t(.sd_sort_oldest),
         };
     }
 
@@ -279,8 +280,13 @@ pub const DockMetrics = struct {
             .action_gap = geometryPx(spacing.px(.xs, scale)),
             .root_inset = geometryPx(spacing.px(.lg, scale)),
             .header_content_inset_x = geometryPx(spacing.px(.xs, scale)),
-            // The provenance pair has enough room for its 18pt SVG, 8pt gap, and Korean label
+            // The provenance pair has enough room for its 18pt SVG, 8pt gap, and the host label
             // without asking terminal-cell metrics where a Chrome header control should begin.
+            //
+            // **이 72pt 는 한국어 라벨("로컬")을 재고 정한 값이다** — 계약 §6.1 이 경계하는 모양이다.
+            // 지금은 영어("Local")가 더 좁게 들어가 넘치지 않으므로 값을 그대로 둔다. 호스트 라벨이
+            // 늘거나(원격 이름) 라틴보다 넓은 문자를 쓰는 언어가 붙으면 그때는 라벨에서 계산해야 한다 —
+            // 알림 패널이 같은 이유로 이미 상수에서 계산으로 바뀌었다(`notifications.minPanelCols`).
             .header_host_label_w = geometryPx(spacing.pointsPx(72, scale)),
             .header_host_icon_extent = geometryPx(spacing.pointsPx(ui_icon.Size.default.extentPt(), scale)),
             .header_host_icon_gap = geometryPx(spacing.px(.xs, scale)),

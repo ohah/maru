@@ -86,6 +86,9 @@ pub fn parseLine(line: []const u8) ?Line {
 /// 호스트" 가 되고, 그러면 **`mismatch`(하드 실패)가 `unknown`(프롬프트)으로 강등된다** —
 /// 중간자 앞에서 정확히 그 차이가 위험하다. 해시 쪽은 아래 `matchesHashed` 를 본다.
 pub fn matchesHost(hosts: []const u8, host: []const u8) bool {
+    // **빈 이름은 호스트가 아니다.** 안 막으면 `*` 줄에 맞아 `verify` 가 `trusted` 를 낸다 —
+    // 호출자가 빈 문자열을 넘긴 실수가 **조용한 신뢰**가 되는, 이 층에서 가장 나쁜 방향이다.
+    if (host.len == 0) return false;
     if (std.mem.startsWith(u8, hosts, hash_magic)) return matchesHashed(hosts, host);
     var it = std.mem.splitScalar(u8, hosts, ',');
     var positive = false;
@@ -323,6 +326,19 @@ test "호스트 매칭 — 목록·와일드카드·부정·포트" {
     // 비표준 포트는 `[host]:port` 원문 그대로 맞댄다.
     try std.testing.expect(matchesHost("[jump.example.org]:2222", "[jump.example.org]:2222"));
     try std.testing.expect(!matchesHost("[jump.example.org]:2222", "jump.example.org"));
+
+    // **빈 이름은 호스트가 아니다.** 안 막으면 `*` 줄에 맞아 조용히 신뢰가 된다(탐침으로 찾았다).
+    try std.testing.expect(!matchesHost("*", ""));
+    try std.testing.expect(!matchesHost("example.com", ""));
+    try std.testing.expect(!matchesHost("|1|9GynkVIVFafP+0NWUHjrabu0z5o=|jE4vNVarJ+VnEWapE1NLmaws8mU=", ""));
+    const wild_file = "* " ++ ed ++ " " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.unknown, verify(wild_file, "", ed, &vector_blob));
+
+    // 부정만 있는 줄은 아무것도 안 맞는다(양의 일치가 있어야 한다).
+    try std.testing.expect(!matchesHost("!x.example.com", "y.example.com"));
+    // 쉼표만 있는 필드·모르는 해시 버전도 안 맞는다(fail-closed).
+    try std.testing.expect(!matchesHost(",,,", "example.com"));
+    try std.testing.expect(!matchesHost("|9|abc|def", "example.com"));
 }
 
 test "해시 호스트명이 ssh-keygen -H 와 맞는다" {

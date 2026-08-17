@@ -25,6 +25,16 @@
 - **설치 캐시**: 설치한 목적지를 `${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts`에 기록해, 재접속 시 부트스트랩 round-trip을 건너뛴다.
 - **안전 폴백**: 원격 command가 붙은 경우(`bootstrapEligible`이 false)는 이중 실행을 피하려 부트스트랩을 건너뛰고, `tic`이 없거나 설치 실패면 `TERM=xterm-256color`로 폴백한다.
 - **자기식별**(`src/terminal/core.zig`): XTVERSION(`CSI > q`) → `maru`, XTGETTCAP(`DCS + q TN ST`) → `xterm-maru`.
+- **COLORTERM 전달**(2026-08-18): ssh 가 원격에 전달하는 환경변수는 `TERM` 뿐이라, `env` 로 세운 로컬
+  `COLORTERM=truecolor` 는 원격에 가지 않는다. terminfo 를 읽지 않고 **`TERM` 문자열 패턴과 `COLORTERM`
+  만** 보는 앱(Node 계열 다수)은 그래서 `xterm-maru` 를 모르는 이름으로 취급해 **16색으로 떨어졌다**
+  (`Tc` 캡이 있어도 그 앱들은 안 본다). tmux 안에서는 tmux 가 자기 `screen-256color` 를 세워 256색으로
+  승격되므로 **"tmux 밖에서만 색이 죽는"** 증상으로 관측됐다. 그래서 세션 ssh 에
+  `-o SetEnv=COLORTERM=truecolor` 를 붙이되, 이 옵션은 OpenSSH 7.8+ 전용이고 모르는 ssh 에 주면 연결
+  자체가 실패하므로 **`ssh -o <opt> -V` 로 먼저 검증해 아는 ssh 에서만** 붙인다(네트워크에 나가지 않고
+  지원=0·미지원=255). **서버 협조에 달린 보조 수단**이다 — sshd 가 `AcceptEnv` 로 허용하지 않으면 조용히
+  버려진다(배포판 기본값은 대개 `LANG LC_*`). 원격 셸을 maru 가 실행해 `env` 로 주입하는 방식은 더 확실하지만
+  `ForceCommand`/`RemoteCommand` 와 부딪히고 로그인 방식을 maru 가 정하게 되므로 채택하지 않았다.
 
 **베이스/clean-room**: terminfo `tic`은 공개 도구, ControlMaster는 OpenSSH 공개 기능이다. 같은 문제를 푸는 Ghostty `ghostty +ssh`(MIT)는 **동작 비교**로만 확인했고 셸 구절·idiom은 maru가 독립 작성했다(코드 미복사).
 

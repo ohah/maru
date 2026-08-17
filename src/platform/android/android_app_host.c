@@ -88,8 +88,6 @@ static struct {
     double ptr_last_t;    // 직전 이동 이벤트의 시각(ms)
     double fling_t;       // 직전 관성 프레임의 시각(ms)
     int keyboard_px;      // 소프트 키보드가 덮는 높이(backing px) — Java `ImeInsets` 가 채운다
-    int keybar_active;    // 이번 터치를 보조 키바가 잡고 있나(down 에서 서고 up/cancel 에서 풀린다)
-    int chrome_active;    // 이번 터치를 밀린 화면(설정)이 잡고 있나 — 키바보다 먼저 본다
     int ready;
     int frames;
     double last_ms;
@@ -1192,9 +1190,10 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         size_t pcount = AMotionEvent_getPointerCount(ev);
         int64_t ev_ms = AMotionEvent_getEventTime(ev) / 1000000;
 
-        // **첫 down 이 목적지를 정하고, 그 제스처의 나머지 손가락은 같은 곳으로 간다.**
-        // 표면마다 한 번에 한 제스처다(계약 §3.1) — 손가락마다 다른 표면으로 보내면 키바를
-        // 밀면서 본문을 스크롤하는 것 같은 상태가 생긴다.
+        // **어디로 갈지는 코어가 정한다**(계약 §3.1) — host 는 좌표와 손가락 id 만 나른다.
+        // 전에는 여기서 chrome·키바·본문을 차례로 물어보고 그 답을 `chrome_active`·
+        // `keybar_active` 로 들고 있었는데, **같은 사실을 두 층이 들다** 보니 정리도 두 곳에서
+        // 해야 했고 한쪽을 빠뜨려 "복귀 후 첫 손짓이 통째로 삼켜지는" 결함이 났다(R).
         if (action == AMOTION_EVENT_ACTION_DOWN) {
             float dlx = AMotionEvent_getX(ev, 0) / g.scale;
             float dly = (AMotionEvent_getY(ev, 0) - (float)g.inset_top) / g.scale;
@@ -1205,17 +1204,6 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             g.ptr_last_t = ev_ms;
             g.ptr_id = did;
             g.has_ptr_id = 1;
-            // **밀린 화면(설정)이 먼저다.** 톱니를 누르면 여기서 먹고, 설정이 떠 있으면 전부 먹는다.
-            pthread_mutex_lock(&g_bridge_lock);
-            unsigned int on_chrome = maru_mobile_chrome_pointer(0, did, dlx, dly);
-            pthread_mutex_unlock(&g_bridge_lock);
-            if (on_chrome) { g.chrome_active = 1; return 1; }
-            // **보조 키바가 그다음이다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
-            // 여기서는 "키바가 먹었다" 만 정해지고, **키를 칠지는 손을 뗄 때 정해진다**(밀면 스크롤).
-            pthread_mutex_lock(&g_bridge_lock);
-            unsigned int on_bar = maru_mobile_keybar_pointer(0, did, dlx, dly);
-            pthread_mutex_unlock(&g_bridge_lock);
-            if (on_bar) { g.keybar_active = 1; return 1; }
             pthread_mutex_lock(&g_bridge_lock);
             maru_mobile_pointer(0, did, dlx, dly, (unsigned long long)ev_ms);
             pthread_mutex_unlock(&g_bridge_lock);
@@ -1227,13 +1215,9 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
 
         // **취소는 손가락을 안 가린다**(계약 §3.1) — 목적지 하나에 한 번만 보낸다.
         if (action == AMOTION_EVENT_ACTION_CANCEL) {
-            pthread_mutex_lock(&g_bridge_lock);
-            if (g.chrome_active) maru_mobile_chrome_pointer(3, 0, 0, 0);
-            else if (g.keybar_active) maru_mobile_keybar_pointer(3, 0, 0, 0);
-            else maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
-            pthread_mutex_unlock(&g_bridge_lock);
-            g.chrome_active = 0;
-            g.keybar_active = 0;
+                pthread_mutex_lock(&g_bridge_lock);
+                maru_mobile_pointer(3, 0, 0, 0, (unsigned long long)ev_ms);
+                pthread_mutex_unlock(&g_bridge_lock);
             g.has_ptr_id = 0;
             g.fling_vy = 0;
             return 1;
@@ -1247,13 +1231,13 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                 float lx = AMotionEvent_getX(ev, i) / g.scale;
                 float ly = (AMotionEvent_getY(ev, i) - (float)g.inset_top) / g.scale;
                 pthread_mutex_lock(&g_bridge_lock);
-                if (g.chrome_active) maru_mobile_chrome_pointer(1, id, lx, ly);
-                else if (g.keybar_active) maru_mobile_keybar_pointer(1, id, lx, ly);
-                else maru_mobile_pointer(1, id, lx, ly, (unsigned long long)ev_ms);
+                maru_mobile_pointer(1, id, lx, ly, (unsigned long long)ev_ms);
                 pthread_mutex_unlock(&g_bridge_lock);
                 // **본문 관성은 host 몫이다**(계약 §3.1 — 코어에 시계가 없다). 소유자의 이동만
                 // 속도로 친다 — 나머지는 코어가 기준만 갱신한다.
-                if (!g.chrome_active && !g.keybar_active && g.has_ptr_id && id == g.ptr_id) {
+                // **관성은 본문 것이다.** 목적지를 host 가 더는 모르므로 늘 재 두고, 실제로
+                // 흘릴지는 코어가 정한다(`maru_mobile_scroll` 이 밀린 화면에서는 무시한다).
+                if (g.has_ptr_id && id == g.ptr_id) {
                     float dy = ly - g.touch_last_y;
                     g.touch_last_y = ly;
                     float pdt = (float)(ev_ms - g.ptr_last_t);
@@ -1276,16 +1260,14 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             float lx = AMotionEvent_getX(ev, aidx) / g.scale;
             float ly = (AMotionEvent_getY(ev, aidx) - (float)g.inset_top) / g.scale;
             unsigned int ph = (action == AMOTION_EVENT_ACTION_POINTER_DOWN) ? 0 : 2;
-            pthread_mutex_lock(&g_bridge_lock);
-            if (g.chrome_active) maru_mobile_chrome_pointer(ph, id, lx, ly);
-            else if (g.keybar_active) maru_mobile_keybar_pointer(ph, id, lx, ly);
-            else maru_mobile_pointer(ph, id, lx, ly, (unsigned long long)ev_ms);
-            pthread_mutex_unlock(&g_bridge_lock);
+                pthread_mutex_lock(&g_bridge_lock);
+                maru_mobile_pointer(ph, id, lx, ly, (unsigned long long)ev_ms);
+                pthread_mutex_unlock(&g_bridge_lock);
 
             // **본문 소유자가 떼지면 남은 손가락이 이어받는다** — 여기서는 기준을 다시 잡고
             // **속도를 버린다**(AOSP `ScrollView.onSecondaryPointerUp` 이 하는 그것이다).
             // 코어 쪽 기준은 손가락마다 있어 할 일이 없지만, **본문 관성은 host 가 든다**.
-            if (ph == 2 && !g.chrome_active && !g.keybar_active && g.has_ptr_id && id == g.ptr_id) {
+            if (ph == 2 && g.has_ptr_id && id == g.ptr_id) {
                 g.has_ptr_id = 0;
                 for (size_t i = 0; i < pcount; i++) {
                     if ((int32_t)i == aidx) continue; // 방금 떼진 손가락
@@ -1299,13 +1281,13 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
             }
 
             if (action == AMOTION_EVENT_ACTION_UP) {
-                if (g.chrome_active) g.chrome_active = 0;
-                else if (g.keybar_active) { g.keybar_active = 0; drainClipboard(app); }
-                else {
-                    unsigned int vo = maru_mobile_view_offset();
-                    unsigned int has_sel = maru_mobile_has_selection();
-                    LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
-                }
+                // **복사는 늘 시도한다.** 목적지를 host 가 더는 모르므로 "키바가 끝났을 때만"
+                // 이라고 못 적는다 — `take_copy` 는 꺼낼 것이 없으면 0 을 돌려주므로 그냥 묻는다.
+                // host 의 판단이 또 하나 줄었다.
+                drainClipboard(app);
+                unsigned int vo = maru_mobile_view_offset();
+                unsigned int has_sel = maru_mobile_has_selection();
+                LOGI("MARU_SCROLL dy=%.1f view_offset=%u sel=%u", g.touch_total_dy, vo, has_sel);
                 g.has_ptr_id = 0;
             }
             return 1;
@@ -1769,11 +1751,7 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         if (cmd == APP_CMD_LOST_FOCUS) {
             maru_mobile_pointer(3, 0, 0, 0, 0);
             // 키바가 잡고 있던 것도 함께 푼다 — 안 풀면 복귀 후 첫 터치가 통째로 키바로 간다.
-            maru_mobile_keybar_pointer(3, 0, 0, 0);
-            maru_mobile_chrome_pointer(3, 0, 0, 0);
-            g.chrome_active = 0;
-            g.keybar_active = 0;
-            // **본문 관성도 거둔다**(iOS 와 같은 자리). 브리지가 아니라 우리가 든 값이라 위
+                            // **본문 관성도 거둔다**(iOS 와 같은 자리). 브리지가 아니라 우리가 든 값이라 위
             // 취소로 안 지워지고, 감쇠가 시간 기준이라 남겨 두면 복귀 프레임이 튄다.
             g.fling_vy = 0.0f;
             g.fling_t = 0.0;

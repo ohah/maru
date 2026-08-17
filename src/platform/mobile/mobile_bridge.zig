@@ -718,7 +718,33 @@ fn bodySlot(id: u32) ?*BodySlot {
     return null;
 }
 
+/// **터치의 유일한 진입점.** host 는 좌표와 손가락 id 만 나르고 **어디로 갈지는 여기서 정한다**
+/// (계약 §3.1). 전에는 진입점이 셋이고 host 가 `chrome_active`·`keybar_active` 로 골랐는데,
+/// 같은 사실을 두 층이 들다 보니 정리도 두 곳에서 해야 했고 한쪽을 빠뜨려 **복귀 후 첫 손짓이
+/// 통째로 삼켜지는** 결함이 났다(같은 모양을 세 번 겪었다 — 키바 잡음·iOS `_hasBodyPtr`·
+/// 배경 정리).
+///
+/// 순서는 **밀린 화면(chrome) → 보조 키바 → 본문**이다. 위가 떠 있으면 아래는 없는 것과 같다.
 pub export fn maru_mobile_pointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
+    // **취소는 전부에게 간다** — 어느 표면이 잡고 있었든 놓아야 한다(계약 §3.1: id 무관).
+    if (phase == 3) {
+        _ = chromePointer(3, pointer_id, x, y);
+        _ = keybarPointer(3, pointer_id, x, y);
+        bodyPointer(3, pointer_id, x, y, time_ms);
+        return;
+    }
+    if (chromePointer(phase, pointer_id, x, y) != 0) return;
+    if (keybarPointer(phase, pointer_id, x, y) != 0) return;
+    bodyPointer(phase, pointer_id, x, y, time_ms);
+}
+
+/// 지금 제스처가 어디로 가고 있나(테스트용). **"이 터치가 어디로 갔나" 가 곧 재려는 성질**이라
+/// 간접 효과(셀 판정·키 바이트)로 우회하지 않는다 — 우회하면 판정이 흐려진다.
+pub fn currentRouteName() []const u8 {
+    return if (route) |r| @tagName(r) else "none";
+}
+
+fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
     const core = &(term_core orelse return);
     // **취소는 손가락을 안 가린다**(계약 §3.1) — 전부 놓는다.
     if (phase == 3) {
@@ -1011,7 +1037,7 @@ fn kbScroll() f32 {
 /// up 까지 기다려 **움직인 거리가 임계 아래일 때만** 키로 친다.
 ///
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
-pub export fn maru_mobile_keybar_pointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
+fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
     // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 목적지가 남아 **복귀 후
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
@@ -2851,7 +2877,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 
 /// chrome(설정 화면·톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 — 설정이 떠
 /// 있으면 그 아래 키바·본문은 없는 것과 같다.
-pub export fn maru_mobile_chrome_pointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
+fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32) u32 {
     // **터미널 화면에는 chrome 이 없다.** 하단 44px 바를 걷어내면서 설정 입구가 부모 화면
     // (세션 목록)의 앱 바로 갔다 — 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상
     // 자리다), 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 썼다. 그래서 여기서는

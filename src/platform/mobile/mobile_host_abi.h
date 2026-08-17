@@ -316,31 +316,11 @@ unsigned long long maru_mobile_selection_span(void);
 
 /// 선택이 살아 있는가(1/0). host 가 복사 버튼을 띄울지 정할 때 쓴다.
 unsigned int maru_mobile_has_selection(void);
-
-/// 보조 키바 포인터(논리 px). **소프트 키보드에는 Ctrl·Esc·Tab·화살표가 없다** — 그것 없이는
-/// 프로세스를 못 멈추고(Ctrl+C) vim 에서 못 빠져나온다.
-///
-/// `phase`: 0=down · 1=move · 2=up · 3=cancel (`maru_mobile_pointer` 와 같은 값).
-/// 1=키바가 먹었다(플랫폼은 더 할 일이 없다), 0=키바 밖이니 본문 처리로 넘어가라.
-///
-/// **탭과 가로 스크롤을 브리지가 가른다.** 키가 손가락 크기(44)라 폰 세로 폭을 넘으므로 밀어서
-/// 나머지에 닿아야 하고, 그래서 down 에서 바로 키를 칠 수 없다(밀려던 것이 입력이 된다).
-/// up 까지 기다려 움직인 거리가 임계 아래일 때만 키로 친다 — host 는 그 판정을 몰라도 된다.
-///
-/// **좌표 해석은 코어 쪽이 한다** — 그리는 자리와 판정하는 자리가 갈리면 눌러도 다른 키가
-/// 나간다(docs/mobile-platform.md §3).
-unsigned int maru_mobile_keybar_pointer(unsigned int phase, unsigned int pointer_id, float x, float y);
-
-/// chrome(설정 화면·그 입구인 톱니)이 이 터치를 먹었나. **키바보다 먼저** 물어야 한다 —
-/// 설정이 밀려 올라와 있으면 그 아래 키바·본문은 없는 것과 같다(스택 — docs/mobile-ux.md §3).
-/// 1=먹었다, 0=아니니 키바→본문 순으로 넘겨라. 위상은 keybar_pointer 와 같다(0=down·1=move·
-/// 2=up·3=cancel).
-///
-/// **답을 보는 것은 `down` 뿐이다.** 한 번 먹었으면 host 가 자기 플래그로 잡고 있다가 up/cancel
-/// 에서 푼다 — 손짓 도중에 소유가 바뀌면 같은 손짓이 두 곳에서 해석되기 때문이다(키바도 같은
-/// 모양이다). 그래서 `down` 이 아닌 위상의 답은 host 가 무시해도 맞다. 뒤로가기처럼 **손을 뗀
-/// 적 없이** 화면이 바뀌는 경로는 브리지 쪽 상태만 정리되고, host 의 잡음은 up 에서 풀린다.
-unsigned int maru_mobile_chrome_pointer(unsigned int phase, unsigned int pointer_id, float x, float y);
+/// **터치 진입점은 하나뿐이다**(R2). 전에는 `keybar_pointer`·`chrome_pointer` 가 따로 있고
+/// host 가 "누가 먹었나" 를 들고 골랐는데, 같은 사실을 두 층이 들다 보니 정리도 두 곳에서 해야
+/// 했고 한쪽을 빠뜨려 **복귀 후 첫 손짓이 통째로 삼켜지는** 결함이 났다(같은 모양을 세 번 겪었다).
+/// 지금은 `maru_mobile_pointer` 하나가 받고 **어디로 갈지는 코어가 정한다**
+/// (docs/mobile-platform.md §3.1 — chrome → 키바 → 본문 순).
 
 /// 밀린 화면을 하나 뺀다(Android 하드웨어 뒤로가기 · iOS 좌측 가장자리 스와이프).
 /// 1=뺐다, 0=뺄 것이 없다 — 0이면 host 가 자기 관례대로 처리한다(Android 는 앱을 내린다).

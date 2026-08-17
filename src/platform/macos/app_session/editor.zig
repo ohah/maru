@@ -777,11 +777,22 @@ fn rightTexts(term: *Term) []const []const u8 {
 }
 
 /// 이 편집기가 그리는 줄들(비교면 왼쪽 행, 아니면 문서 줄).
+/// **렌더가 그리는 줄들.** 스크롤 상한·열 수 계산이 전부 이것을 봐야 한다 — 렌더가 접힘을 적용한
+/// 배열을 그리는데 상한을 전체 문서로 세면, 접은 뒤 끝까지 굴렸을 때 **화면이 통째로 빈다**
+/// (실측: 300줄을 접어 100줄이 됐는데 `first_line`이 266까지 갔다. 적대적 검증 2026-08-17).
 fn editorLines(term: *Term) []const []const u8 {
     if (term.rt.editor_diff) |st| {
         if (st.view != .compare) return &.{};
         return st.left_texts;
     }
+    if (term.rt.editor_visible_lines.len > 0) return term.rt.editor_visible_lines;
+    return term.rt.editor_lines;
+}
+
+/// **접힘 범위를 세는 원본.** 접힌 결과가 아니라 문서 전체다 — `editorLines`를 쓰면 접은 뒤 다시
+/// 세면서 접힌 것을 못 보게 된다(순환).
+fn foldSourceLines(term: *Term) []const []const u8 {
+    if (term.rt.editor_diff != null) return &.{}; // 비교에서는 접지 않는다(`isCompare`)
     return term.rt.editor_lines;
 }
 
@@ -823,7 +834,7 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
 /// (native-editor-layering.md §2.0a) — 잡을 것을 **모두 잡은 뒤** 한꺼번에 넘긴다.
 fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     if (term.rt.editor_fold_ranges.len > 0) return;
-    const lines = editorLines(term);
+    const lines = foldSourceLines(term);
     if (lines.len == 0) return;
 
     const tab_width = chrome_editor.frame.default_tab_width;
@@ -881,7 +892,7 @@ pub fn unfoldAll(self: *AppSession) bool {
 /// **렌더는 이 배열을 그냥 그린다.** diff가 filler 행에 쓰는 것과 같은 모양이라 프레임이 접힘을 몰라도
 /// 된다(§4.1f). 접힘이 바뀔 때만 돌고 프레임마다는 안 돈다.
 fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
-    const lines = editorLines(term);
+    const lines = foldSourceLines(term);
     const heads = foldedHeads(term);
     if (heads.len == 0) {
         // 접힌 것이 없다 — 원본을 그대로 그린다(배열을 만들 이유가 없다).
@@ -3042,4 +3053,43 @@ test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
         const t1 = monotonicMsForTest();
         std.debug.print("\n[측정] {d}블록 전체 접기(보이는 줄 만들기 포함): {d}ms\n", .{ blocks, t1 - t0 });
     }
+}
+
+test "접은 뒤 끝까지 굴려도 마지막 화면이 안 빈다 — 스크롤과 렌더가 같은 배열을 본다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // 접으면 300줄이 머리 100줄로 줄어든다.
+    const lines = try allocator.alloc([]const u8, 300);
+    defer allocator.free(lines);
+    for (0..100) |b| {
+        lines[b * 3] = "head:";
+        lines[b * 3 + 1] = "  x";
+        lines[b * 3 + 2] = "  y";
+    }
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+
+    try testing.expect(foldAll(fx.session));
+    try testing.expectEqual(@as(usize, 100), fx.term.rt.editor_visible_lines.len);
+
+    _ = scrollLines(fx.session, fx.term, fx.leaf_rect, -1_000_000);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
+    const visible: usize = inner_h / fx.session.cell_height_px;
+    var drawn_rows: usize = 0;
+    for (drawn.dl.cells) |c| drawn_rows = @max(drawn_rows, @as(usize, c.row) + 1);
+    // 고치기 전: 상한을 **전체 문서**(300줄)로 세어 `first_line`이 266까지 갔고 보이는 줄은 100개라
+    // **화면이 통째로 비었다**(그린 행 0).
+    try testing.expect(fx.term.rt.editor_first_line < fx.term.rt.editor_visible_lines.len);
+
+    // **마지막 화면이 비면 안 된다** — 스크롤 상한이 접힘을 모르면 여기서 빈다.
+    try testing.expectEqual(visible, drawn_rows);
 }

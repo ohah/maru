@@ -500,7 +500,7 @@ pub const inventory = [_]Proof{
     // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
     // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e610b1325c43fcdccd9346bd1a67fa6da7d0c87cea966170587bb08c39eb6dff" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "72af21620e557f7c96f73f770bbbc6e89bccd3378a872cd3725b71b32dd8f9e0" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -573,5 +573,5 @@ pub const inventory = [_]Proof{
     // 세션 카드 메타 줄을 **세그먼트**로 쪼개며 문장 키 셋(`ad_summary`·`ad_summary_sub`·`_more`)이
     // 세그먼트 키 셋(`ad_meta_messages`·`ad_meta_subagents`·`_more`)으로 바뀌어 digest가 움직인다.
     // 구분자와 색 위계는 컴포넌트가 소유하므로 문구에서 빠졌다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "cd11ae2d76c5d2cbab201b0161b465a10523669e08992514cb23a9c069105922" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "2081e456b0c83411381369251650f820250608db201f2b827e9b3fb8c72a3ed4" },
 };

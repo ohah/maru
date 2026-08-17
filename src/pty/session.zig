@@ -132,6 +132,68 @@ const UnsupportedPtySession = struct {
         _ = self;
         return error.UnsupportedPlatform;
     }
+
+    pub fn childPid(self: *const UnsupportedPtySession) types.ChildPid {
+        _ = self;
+        return 0;
+    }
+
+    // ── exec-restore(라이브 host 업그레이드) 표면 ────────────────────────────────────────────────
+    //
+    // **이 스텁에도 있어야 한다.** 이 표면들의 소비자는 `app/live_pty.zig`(중립 레이어)이고, 그 파일은
+    // 백엔드가 무엇이든 컴파일된다 — 즉 `UnsupportedPtySession`이 골라지는 타깃(Linux 등)에서도 분석된다.
+    // 실측: 없이 두면 `struct 'pty.session.UnsupportedPtySession' has no member named 'PreparedAdoption'`으로
+    // Linux CI가 깨진다. Windows 백엔드에만 넣고 여기를 빠뜨려 실제로 겪었다.
+    //
+    // 계약 §4가 적어 둔 "표면 대조는 스텁이 아니라 **app 레이어가 부르는 것의 합집합**을 기준으로 해야
+    // 한다"가 바로 이 말이다 — 그 합집합은 백엔드 **셋 전부**가 만족해야 한다.
+
+    /// 항상 false — 업그레이드 경로가 열리지 않으므로 아래 것들에 도달하지 않는다.
+    pub fn upgradeEligible(self: *const UnsupportedPtySession) bool {
+        _ = self;
+        return false;
+    }
+
+    pub fn revalidatePreparedOwnership(self: *const UnsupportedPtySession) !void {
+        _ = self;
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn commitPreparedOwnership(self: *UnsupportedPtySession) void {
+        _ = self;
+        @panic("exec-restore는 이 플랫폼에서 지원되지 않는다(upgradeEligible이 항상 false여야 한다)");
+    }
+
+    pub fn childExitedWithoutReap(self: *const UnsupportedPtySession) error{ChildProbeFailed}!bool {
+        _ = self;
+        return error.ChildProbeFailed;
+    }
+
+    pub const PreparedAdoption = struct {
+        size: terminal.Size = .{ .cols = 0, .rows = 0 },
+        committed: bool = false,
+
+        pub fn prepare(inherited_slot: std.posix.fd_t, child_pid: types.ChildPid, size: terminal.Size) !PreparedAdoption {
+            _ = inherited_slot;
+            _ = child_pid;
+            _ = size;
+            return error.UnsupportedPlatform;
+        }
+
+        pub fn discard(self: *PreparedAdoption) void {
+            _ = self;
+        }
+
+        pub fn revalidate(self: *const PreparedAdoption) !void {
+            _ = self;
+            return error.UnsupportedPlatform;
+        }
+
+        pub fn materialize(self: *PreparedAdoption) UnsupportedPtySession {
+            _ = self;
+            @panic("PreparedAdoption은 이 플랫폼에서 만들어질 수 없다(prepare가 항상 실패한다)");
+        }
+    };
 };
 
 // skip 조건을 **OS 이름이 아니라 백엔드 유무**로 잡는다. 그래야 ConPTY(W4)가 들어오는 날 이 테스트가 저절로

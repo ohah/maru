@@ -860,6 +860,10 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
 // 실제로 둘 다 깨져 있었다(계약 §4의 "선행 정리 2건", W7에서 닫았다):
 //  ① `childPid()`가 `std.c.pid_t`를 썼는데 그 별칭이 Windows에서 `HANDLE`이라 백엔드의 `u32`와 안 맞았다.
 //  ② `PreparedAdoption` 계열(exec-restore)이 Windows 백엔드에 아예 없었다.
+//
+// **백엔드는 셋이다** — macOS·Windows·`UnsupportedPtySession`(그 밖 전부). 합집합은 셋 **모두**가
+// 만족해야 한다. Windows에만 넣고 스텁을 빠뜨렸다가 Linux CI에서 잡혔다(`has no member named
+// 'PreparedAdoption'`). 그래서 이 테스트는 `-Dtarget=`으로 **세 갈래 다** 컴파일해야 뜻이 있다.
 test "중립 레이어가 요구하는 PTY 표면이 두 백엔드에 다 있다" {
     // ① pid 타입이 중립 별칭으로 통일돼 있다. **comptime으로 단언한다** — 런타임 expect였다면
     //    `-Dtarget=aarch64-macos`가 컴파일만 하고 실행은 안 하므로 macOS 갈래가 공허참이 된다.

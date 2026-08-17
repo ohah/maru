@@ -438,6 +438,11 @@ Windows로 옮길 때 함께 정한다. 지금 조용히 되는 척하면 이식
 계약을 지킨다. 대조군으로 별칭을 되돌리면 정확히 그 자리에서 깨진다 — POSIX 갈래를 깨 보면 `live_pty.zig`뿐 아니라
 `session_host/runtime_manager.zig:362`까지 컴파일 오류가 난다. **"회귀 0"이 말뿐이 아니라 강제된다**는 뜻이다.
 
+**백엔드는 셋이다** — macOS·Windows·`UnsupportedPtySession`(그 밖 전부). 합집합은 셋 **모두**가
+만족해야 한다. W7.0에서 Windows에만 넣고 스텁을 빠뜨렸다가 **Linux CI에서 잡혔다**
+(`struct 'pty.session.UnsupportedPtySession' has no member named 'PreparedAdoption'`) — 로컬에서
+Windows 네이티브와 macOS 크로스컴파일만 돌려 본 탓이다. 이제 세 타깃을 다 돌린다.
+
 합집합이 실제로 완전한지는 기계로 확인했다 — 중립 레이어가 `self.session.<name>`으로 부르는 이름 14개
 (`childPid`·`close`·`commitPreparedOwnership`·`deinit`·`readChunk`·`readEvent`·`reapAfterEof`·`reapIfExited`·
 `resize`·`revalidatePreparedOwnership`·`signalWrite`·`upgradeEligible`·`waitIo`·`writeInputNonBlocking`)가

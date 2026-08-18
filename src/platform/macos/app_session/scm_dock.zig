@@ -1233,16 +1233,27 @@ fn repoPathAt(self: *AppSession, index: u32) ?[]const u8 {
     return repos.entries[index].path;
 }
 
-/// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).
-pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
-    if (self.scm_commit_focus_repo == null) return;
-    const rect = commitBoxRect(self) orelse return blurCommit(self);
+/// 창 좌표가 **편집 중인 커밋 상자 안**인가. 포인터가 그 상자를 뜻하는지 묻는 자리가 둘이라(클릭의
+/// 포커스 해제 · 휠의 대상 판정) 한 함수로 둔다 — 두 곳이 각자 재면 경계 한 픽셀에서 갈리고, 그 갈림은
+/// "가장자리에서만 휠이 목록으로 샌다"처럼 재현하기 어려운 증상이 된다.
+///
+/// 편집 중인 상자가 없거나 그 상자가 화면(발행된 tree)에 없으면 false다.
+pub fn pointInCommitBox(self: *AppSession, x_px: f64, y_px: f64) bool {
+    if (self.scm_commit_focus_repo == null) return false;
+    const rect = commitBoxRect(self) orelse return false;
     const content = dock_ops.dockGeometry(self).tree_content;
     const local_x = x_px - @as(f64, @floatFromInt(content.x));
     const local_y = y_px - @as(f64, @floatFromInt(content.y));
-    const inside = local_x >= rect.x and local_x < rect.x + rect.width and
+    return local_x >= rect.x and local_x < rect.x + rect.width and
         local_y >= rect.y and local_y < rect.y + rect.height;
-    if (!inside) blurCommit(self);
+}
+
+/// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).
+pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
+    if (self.scm_commit_focus_repo == null) return;
+    // **상자가 화면에서 사라졌으면 뗀다**(스크롤로 밀려났거나 그룹이 접혔다) — `pointInCommitBox`는
+    // 그 경우도 false를 내므로 아래 한 줄이 두 사실을 함께 처리한다.
+    if (!pointInCommitBox(self, x_px, y_px)) blurCommit(self);
 }
 
 pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void {
@@ -1866,6 +1877,53 @@ fn rememberCommitBoxNode(self: *AppSession, window: []const component.types.Item
         },
         else => {},
     };
+}
+
+/// 상자 한 행의 높이(px). 트랙패드의 점 단위를 행으로 바꿀 때 쓴다 — **그리기와 같은 출처**여야
+/// "한 행 굴렸는데 반 행만 움직인다"가 안 생긴다(`commitBoxHeight`가 같은 값을 쓴다).
+pub fn commitRowHeightPx(self: *AppSession) u32 {
+    return component.types.DockMetrics.resolve(scmDockScaleMilli(self)).commit_row_h;
+}
+
+/// 휠 한 틱이 상자에 무엇을 했나.
+///
+/// **`absorbed`와 `ignored`를 가르는 것이 계약이다.** 굴릴 것이 있는데 이번 틱에 잔여만 쌓였으면
+/// 소비해야 한다 — 안 그러면 트랙패드로 천천히 굴리는 동안 **뒤의 목록**이 대신 움직인다. 반대로
+/// 글이 다 보이면(막대도 안 그려진다) 소비하지 않는다 — 상자 위가 죽은 구역이 되어 목록이 안 굴러간다.
+pub const CommitWheel = enum { scrolled, absorbed, ignored };
+
+/// 휠로 상자 안을 굴린다.
+///
+/// **위치의 단일 출처는 `scm_commit_first_row`다.** 여기서는 목록·사이드바가 쓰는 것과 **같은 순수
+/// 함수**(`scroll_area.State.scrollByWheel`)에 그 값을 실어 부호·잔여·클램프를 그쪽이 정하게 하고
+/// 결과만 되받는다 — 같은 규칙을 두 번 적으면 한쪽만 고쳐진다(방향이 뒤집힌 스크롤은 그렇게 생긴다).
+///
+/// **다 보이면 굴리지 않는다.** 그때 막대는 애초에 안 그려지고(거짓 신호가 되므로), 굴릴 것이 없는데
+/// 소비하면 뒤의 목록이 못 움직인다.
+pub fn scrollCommitByWheel(self: *AppSession, delta: f64, unit_rows: f64) CommitWheel {
+    if (self.scm_commit_focus_repo == null) return .ignored;
+    var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
+    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    const visible = text_area.visibleRows(wrapped, commit_max_rows);
+    if (wrapped.lines.len <= visible) {
+        self.scm_commit_wheel_residue = 0; // 굴릴 것이 없으면 잔여도 없다
+        return .ignored;
+    }
+    const max_first: u32 = @intCast(wrapped.lines.len - visible);
+    var state: chrome.ui.scroll_area.State = .{
+        .offset_y_px = self.scm_commit_first_row,
+        .wheel_residue_px = self.scm_commit_wheel_residue,
+    };
+    const moved = state.scrollByWheel(delta, unit_rows, max_first);
+    self.scm_commit_wheel_residue = state.wheel_residue_px;
+    if (!moved) return .absorbed; // 잔여만 쌓였다 — 그래도 이 휠은 상자의 것이다
+    self.scm_commit_first_row = state.offset_y_px;
+    return .scrolled;
+}
+
+/// 포인터가 상자를 떠났다 — 가는 도중이던 잔여를 버린다(목록·탐색기와 같은 규율).
+pub fn dropCommitWheelResidue(self: *AppSession) void {
+    self.scm_commit_wheel_residue = 0;
 }
 
 /// caret이 상자 밖으로 나갔으면 첫 행을 옮긴다(제약 ⑥ — 시각 행으로 센다).

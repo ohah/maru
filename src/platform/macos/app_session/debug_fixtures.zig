@@ -20,6 +20,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const settings_ops = @import("settings.zig");
 const DropPlan = AppSession.DropPlan;
+const dock_ops = @import("dock.zig"); // 캡처 게이트가 도크 content 원점을 창 좌표로 옮길 때 쓴다
 const scm_dock_ops = @import("scm_dock.zig");
 const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
@@ -909,6 +910,27 @@ pub fn applyForcedCommitMessage(self: *AppSession) void {
 ///
 /// **상태를 심지 않는다** — 사용자 클릭과 같은 진입점(`.open_remote_menu`)을 태우므로 앵커·항목·원격
 /// 유무 판정은 전부 제품이 한다. 이미 열려 있으면 다시 열지 않는다(매 tick 열면 선택이 첫 줄로 되돌아간다).
+/// 커밋 상자를 **휠로 굴린 상태**를 캡처한다(`MARU_FORCE_SCM_COMMIT_WHEEL=<틱 수>`, 음수면 위로).
+/// 휠은 포인터 장치 입력이라 캡처 하니스가 낼 수 없다 — 호버·커밋 편집을 같은 이유로 강제하는 자리다.
+///
+/// **상태를 심지 않는다**: 사용자 손짓과 같은 진입점(`scrollWheel`)을 상자 안 좌표로 태우므로 대상
+/// 판정·부호·클램프는 전부 제품이 한다. 한 번만 굴린다(매 tick 굴리면 끝까지 가 버려 중간 상태가 없다).
+pub fn applyForcedCommitWheel(self: *AppSession) void {
+    if (self.debug_commit_wheel_done) return;
+    const raw = std.c.getenv("MARU_FORCE_SCM_COMMIT_WHEEL") orelse return;
+    if (self.dock.view != .source_control) return;
+    if (self.scm_commit_focus_repo == null) return; // 편집 중인 상자만 굴린다(제품 규칙과 같다)
+    const ticks = std.fmt.parseInt(i32, std.mem.span(raw), 10) catch return;
+    const rect = scm_dock_ops.commitBoxRect(self) orelse return; // 아직 발행 전이다 — 다음 tick에 다시 본다
+    const content = dock_ops.dockGeometry(self).tree_content;
+    const x = @as(f64, @floatFromInt(content.x)) + rect.x + 12;
+    const y = @as(f64, @floatFromInt(content.y)) + rect.y + 8;
+    const step: f64 = if (ticks < 0) -1 else 1;
+    var left: i32 = if (ticks < 0) -ticks else ticks;
+    while (left > 0) : (left -= 1) self.scrollWheel(step, 0, false, x, y);
+    self.debug_commit_wheel_done = true;
+}
+
 pub fn applyForcedRemoteMenu(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_SCM_MENU") == null) return;
     if (self.dock.view != .source_control) return;

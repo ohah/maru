@@ -294,6 +294,42 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     const scm_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .source_control and
         layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
     if (!scm_wheel_target) self.scm_scroll.dropWheelResidue();
+    // **커밋 상자 위의 휠은 그 상자를 굴린다**(사용자 결정 2026-08-18). 그전까지는 상자 위에서도 뒤의
+    // 목록이 움직였다 — 상자에는 "글이 더 있다"는 막대가 떠 있는데 굴리면 **다른 것**이 움직이니
+    // 그 막대가 고장으로 읽힌다. 상자 안 스크롤에 포인터로 닿는 길이 이것 하나뿐이기도 하다
+    // (막대는 그리기 전용이고, caret 경로는 키보드다 — docs/editor-surface-dock.md §3.5).
+    //
+    // **목록 분기보다 앞이다.** 상자는 목록 안에 있는 줄이라(②b) 두 rect가 겹치고, 뒤에 두면 목록이
+    // 먼저 소비해 상자에는 영영 닿지 않는다.
+    //
+    // **판정은 클릭과 같은 함수를 쓴다**(`pointInCommitBox`). 여기서 rect를 다시 재면 경계 한 픽셀에서
+    // 두 입구가 갈려, "가장자리에서만 휠이 목록으로 샌다"는 재현하기 어려운 증상이 된다.
+    const commit_wheel_target = scm_wheel_target and scm_dock_ops.pointInCommitBox(self, x_px, y_px);
+    if (!commit_wheel_target) scm_dock_ops.dropCommitWheelResidue(self);
+    if (commit_wheel_target) {
+        // 트랙패드(precise)는 점 단위라 행 높이로 나눠 행으로 바꾸고, 휠 눈금은 한 틱이 한 행이다.
+        const row_h: f64 = @floatFromInt(@max(scm_dock_ops.commitRowHeightPx(self), 1));
+        const unit_rows: f64 = if (precise)
+            @as(f64, @floatFromInt(self.scale_milli)) / 1000.0 / row_h
+        else
+            1.0;
+        switch (scm_dock_ops.scrollCommitByWheel(
+            self,
+            delta_y * @as(f64, self.appearance.scroll_multiplier),
+            unit_rows,
+        )) {
+            // 끝에 닿아도 소비한다 — 상자 안에서 굴린 손이 뒤의 목록을 움직이면 안 된다(도크·탐색기와
+            // 같은 규율). 잔여만 쌓인 틱도 상자의 것이다.
+            .scrolled => {
+                self.metal_dirty = true;
+                return;
+            },
+            .absorbed => return,
+            // **글이 다 보이면 넘긴다.** 그때는 막대도 안 그려지고, 여기서 삼키면 상자 위가 죽은
+            // 구역이 되어 목록이 안 굴러간다(짧은 메시지가 기본 상태다).
+            .ignored => {},
+        }
+    }
     if (scm_wheel_target) {
         const unit: f64 = if (precise)
             @as(f64, @floatFromInt(self.scale_milli)) / 1000.0

@@ -3962,6 +3962,13 @@ pub const AppSession = struct {
     scm_commit_started_ns: i128 = 0,
     /// 상자가 보여 줄 **첫 시각 행**(세로 스크롤). 논리 줄이 아니다(§12.3 ⑥).
     scm_commit_first_row: u32 = 0,
+    /// 아직 한 **행**을 못 채운 휠 잔여. 위치가 아니라 "그 위치로 가는 도중"이라 위와 따로 든다 —
+    /// 트랙패드는 한 틱이 한 행보다 작고, 그 조각을 버리면 부드러운 스크롤이 계단으로 끊긴다.
+    /// 목록·사이드바가 픽셀로 같은 것을 드는 것과 같은 자리다(`scroll_area.State.wheel_residue_px`).
+    scm_commit_wheel_residue: f64 = 0,
+    /// 캡처 게이트가 상자를 이미 굴렸나(`MARU_FORCE_SCM_COMMIT_WHEEL`). 매 tick 굴리면 끝까지 가 버려
+    /// 중간 상태가 캡처에 안 남는다 — 강제 호버·커밋 메시지가 쓰는 것과 같은 1회성 래치다.
+    debug_commit_wheel_done: bool = false,
     /// 표시 텍스트 합성 버퍼 — 본문에 IME 조합 글자를 caret 자리에 **끼워** 만든 결과다. component는
     /// 할당을 안 하므로(props는 빌린 슬라이스) 이 합성은 host가 소유한다. 조합이 없으면 안 쓴다.
     scm_commit_display: std.ArrayList(u8) = .empty,
@@ -13980,6 +13987,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
+        debug_fixtures.applyForcedCommitWheel(self); // 캡처 전용: 휠은 포인터 장치 입력이라 하니스가 못 낸다
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
@@ -56754,6 +56762,86 @@ test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 �
     const right = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 1.5, @floatFromInt(m.commit_pad_y + 2));
     scm_dock_ops.focusCommitAt(session, 0, "/repo", right.x, right.y);
     try std.testing.expectEqual(@as(usize, 3), session.scm_commit_field.caret);
+}
+
+test "소스 컨트롤: 상자 위의 휠은 상자를 굴리고, 그 방향은 목록과 같다" {
+    // 그전까지는 상자 위에서도 **뒤의 목록**이 움직였다 — 상자에 "글이 더 있다"는 막대가 떠 있는데
+    // 굴리면 다른 것이 움직이니 그 막대가 고장으로 읽힌다(사용자 결정 2026-08-18).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    // 상한(8행)을 넘겨야 굴릴 것이 있다.
+    scm_dock_ops.insertCommitText(session, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12");
+    // caret은 글 끝이라 마지막 화면에 붙어 있다 — 위로 굴려 첫 행을 되돌린다.
+    try std.testing.expect(session.scm_commit_first_row > 0);
+
+    const inside = try commitBoxPoint(session, 12, 8);
+    const before_box = session.scm_commit_first_row;
+    const before_list = session.scm_scroll.offset_y_px;
+    session.scrollWheel(1, 0, false, inside.x, inside.y);
+    try std.testing.expect(session.scm_commit_first_row != before_box); // 상자가 움직였다
+    try std.testing.expectEqual(before_list, session.scm_scroll.offset_y_px); // 목록은 그대로다
+
+    // **방향이 목록과 같아야 한다.** 두 곳이 같은 부호 규칙(`scroll_area.State.scrollByWheel`)을 쓰는지가
+    // 계약이다 — 한쪽만 뒤집히면 같은 손짓이 화면 위아래로 갈린다.
+    const box_up = @as(i64, session.scm_commit_first_row) - @as(i64, before_box);
+    session.scm_commit_first_row = before_box;
+    var list_state: chrome.ui.scroll_area.State = .{ .offset_y_px = 10 };
+    _ = list_state.scrollByWheel(1, 1, 100);
+    const list_up = @as(i64, list_state.offset_y_px) - 10;
+    try std.testing.expect((box_up < 0) == (list_up < 0));
+}
+
+test "소스 컨트롤: 글이 다 보이는 상자는 휠을 삼키지 않는다(목록이 굴러간다)" {
+    // 삼키면 상자 위가 **죽은 구역**이 된다 — 짧은 메시지가 기본 상태이므로 그쪽이 흔한 화면이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.insertCommitText(session, "한 줄"); // 상자 안에 다 들어간다
+
+    const inside = try commitBoxPoint(session, 12, 8);
+    try std.testing.expectEqual(
+        scm_dock_ops.CommitWheel.ignored,
+        scm_dock_ops.scrollCommitByWheel(session, -1, 1),
+    );
+    // 그 자리의 휠은 목록으로 간다(목록이 굴러갈 것이 있으면 움직이고, 없으면 최소한 삼켜지지 않는다).
+    session.scrollWheel(-1, 0, false, inside.x, inside.y);
+    try std.testing.expectEqual(@as(u32, 0), session.scm_commit_first_row);
+}
+
+test "소스 컨트롤: 상자 밖 휠은 목록 것이고, 상자를 떠나면 잔여가 남지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.insertCommitText(session, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12");
+
+    // 잔여를 일부러 남긴다(트랙패드가 한 행을 못 채운 상태).
+    session.scm_commit_wheel_residue = 0.4;
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const outside_y: f64 = @floatFromInt(content.y + 2); // 목록 위쪽 — 상자보다 위다
+    const before_box = session.scm_commit_first_row;
+    session.scrollWheel(-1, 0, false, @as(f64, @floatFromInt(content.x)) + 12, outside_y);
+    try std.testing.expectEqual(before_box, session.scm_commit_first_row); // 상자는 그대로
+    // **가는 도중이던 잔여는 버린다** — 남겨 두면 다음에 상자로 돌아왔을 때 누른 적 없는 한 행이 튄다.
+    try std.testing.expectEqual(@as(f64, 0), session.scm_commit_wheel_residue);
 }
 
 test "소스 컨트롤: 상자 아래 여백을 눌러도 보이는 줄 안에 caret이 선다" {

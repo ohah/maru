@@ -1499,7 +1499,9 @@ pub fn buildAgentSessionDockItems(
                                 .user => .user,
                                 .assistant => .assistant,
                             },
-                            .text = turn.text,
+                            // 가려진 턴의 문구는 **여기서** 푼다 — 워커가 만들어 캐시하면 언어를 바꿔도
+                            // 그 줄만 옛 언어로 남는다(계약 §5.2). 이 코드는 UI 스레드에서 돈다.
+                            .text = if (turn.redacted) maru.i18n.t(.arch_redacted) else turn.text,
                         };
                         action_record_count = parsed_detail.action_records;
                     };

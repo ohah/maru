@@ -216,11 +216,16 @@ fn redactTurns(allocator: std.mem.Allocator, parsed: *detail.Detail) void {
     const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
     const username = if (std.c.getenv("USER")) |value| std.mem.span(value) else null;
     for (parsed.turns.items) |*turn| {
-        const replacement = if (redact.hasSensitiveContent(turn.text))
-            allocator.dupe(u8, maru.i18n.t(.arch_redacted))
-        else
-            redact.anonymizeAlloc(allocator, turn.text, .{ .home = home, .username = username });
-        const next = replacement catch continue;
+        // 가려야 하는 턴은 **플래그만** 세우고 문장은 안 만든다. 이 함수는 떼어낸 워커에서 돌고, 여기서
+        // `i18n.t()` 로 만든 문장은 그 시점의 언어에 얼어붙어 캐시된다 — 사용자가 나중에 화면 언어를
+        // 바꾸면 이 줄만 옛 언어로 남아 계약 §5.2 를 깬다. 문구는 그리는 쪽(UI 스레드)이 키에서 푼다.
+        if (redact.hasSensitiveContent(turn.text)) {
+            allocator.free(turn.text);
+            turn.text = &.{};
+            turn.redacted = true;
+            continue;
+        }
+        const next = redact.anonymizeAlloc(allocator, turn.text, .{ .home = home, .username = username }) catch continue;
         allocator.free(turn.text);
         turn.text = next;
     }
@@ -273,6 +278,13 @@ test "detail worker redacts sensitive turns before publication" {
     , true);
     defer parsed.deinit(std.testing.allocator);
     redactTurns(std.testing.allocator, &parsed);
-    try std.testing.expectEqualStrings(maru.i18n.t(.arch_redacted), parsed.turns.items[0].text);
+    // 가려진 턴은 **플래그**로 표시되고 원문은 사라진다. 문구를 여기서 만들지 않는 것이 계약이다 —
+    // 만들면 이 워커가 돈 시점의 언어에 얼어붙어, 나중에 화면 언어를 바꿔도 이 줄만 옛 언어로 남는다.
+    try std.testing.expect(parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
+    // 그리고 **민감한 원문이 남지 않았다** — 이 테스트가 원래 지키던 것이 그것이다.
+    try std.testing.expect(std.mem.indexOf(u8, parsed.turns.items[0].text, "API_TOKEN") == null);
+    // 가릴 필요가 없는 턴은 익명화만 거치고 플래그가 안 선다.
+    try std.testing.expect(!parsed.turns.items[1].redacted);
     try std.testing.expectEqualStrings("at /Users/user/project", parsed.turns.items[1].text);
 }

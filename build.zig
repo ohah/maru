@@ -2350,6 +2350,23 @@ pub fn build(b: *std.Build) void {
         ssh_mode_step.dependOn(&run_ssh_modes.step);
     }
     boundary_step.dependOn(ssh_mode_step);
+
+    // **내장 SSH 클라이언트의 실서버 스모크**(계획 S8). 제품 경로가 아니라 시험대다 — 데스크톱의
+    // `maru ssh` 는 시스템 `ssh` 래퍼로 그대로 두고(계약 §3.4), 내장 클라이언트는 모바일용이다.
+    // `src/session/ssh/` 는 전부 sans-io 라 스스로는 아무 데도 못 붙으므로, 소켓을 든 이 드라이버가
+    // 있어야 진짜 sshd 와 왕복할 수 있다. sshd 를 띄우고 키를 만드는 일은 `tools/ssh/client_smoke.sh`
+    // 가 한다(없으면 SKIP — 환경 의존이라 기본 `check` 에 안 넣는다).
+    const ssh_client_smoke_exe = b.addExecutable(.{
+        .name = "ssh-client-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/ssh/client_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    const ssh_client_smoke_step = b.step("ssh-client-smoke", "Build the built-in SSH client real-server smoke driver");
+    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_client_smoke_exe, .{}).step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,

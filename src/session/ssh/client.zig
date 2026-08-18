@@ -87,8 +87,6 @@ pub const Options = struct {
     /// `TERM` 값. 원격이 이것으로 terminfo 를 고른다.
     term: []const u8 = "xterm-256color",
     size: channel.TerminalSize,
-    /// 이 클라이언트의 버전 문자열 꼬리(`SSH-2.0-maru_<이것>`).
-    app_version: []const u8 = "0.1",
     /// 우리가 광고할 채널 윈도. 0 이면 기본(2MiB).
     window: u32 = 0,
     /// **pty 를 요청하나.** 터미널이면 참이다(기본).
@@ -214,6 +212,10 @@ pub const Client = struct {
     /// 우리 버전 줄을 낸다. **`feed` 보다 먼저 한 번 부른다.**
     pub fn start(self: *Client, wire_out: []u8) Error![]const u8 {
         if (self.state != .idle) return Error.UnexpectedMessage;
+        // **버전 문자열은 comptime 이다**(`version.clientLine` 이 그렇게 생겼다). 예전에는
+        // `Options.app_version` 이 있었는데 **아무 데도 안 쓰였다** — 설정해도 조용히 무시되는
+        // 필드였다. 작동하지 않는 옵션은 사용자를 속이므로 없앴다. 런타임으로 바꿀 이유가
+        // 생기면 `clientLine` 부터 바꿔야 한다.
         const line = version.clientLine("0.1");
         if (line.len > self.v_c_buf.len) return Error.ShortBuffer;
         @memcpy(self.v_c_buf[0..line.len], line);

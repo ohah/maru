@@ -540,6 +540,7 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_disconnect_description", "maru_mobile_ssh_banner",
         "maru_mobile_ssh_exit_status",            "maru_mobile_ssh_exit_signal",
         "maru_mobile_ssh_last_error",             "maru_mobile_ssh_clear_error",
+        "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -569,4 +570,24 @@ test "세션 하나가 드는 자리" {
     const one = @sizeOf(@TypeOf(ssh.slots[0]));
     try testing.expect(one <= 128 * 1024);
     try testing.expect(one * ssh.max_sessions <= 512 * 1024);
+}
+
+test "개인키 PEM 을 읽어 64바이트를 만든다" {
+    // **파일은 host 가 읽는다** — 여기는 바이트만 받는다. 실패하면 이름이 남고, 성공하면
+    // `open` 에 그대로 넘길 수 있는 값이 나온다.
+    var secret: [64]u8 = @splat(0xAB);
+
+    // 쓰레기: base64 도 아니다.
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_load_key("not a key!", 10, "", 0, &secret));
+    try testing.expectEqualStrings("key_not_base64", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+    // **실패하면 출력 자리를 비운다** — 남겨 두면 호출자가 쓰레기를 키로 쓴다.
+    for (secret) |b| try testing.expectEqual(@as(u8, 0), b);
+
+    // base64 는 맞지만 `openssh-key-v1` 이 아니다.
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_load_key("aGVsbG8=", 8, "", 0, &secret));
+    try testing.expectEqualStrings("BadMagic", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+
+    // 빈 입력도 **이름을 남긴다**(§5) — 조용히 실패하면 host 는 왜 안 붙는지 모른다.
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_load_key("", 0, "", 0, &secret));
+    try testing.expectEqualStrings("key_empty", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
 }

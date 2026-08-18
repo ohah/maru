@@ -69,8 +69,11 @@
 ```text
 src/platform/
   mobile/                  두 모바일 타깃의 공통분모(OS 호출 없음)
-    mobile_host_abi.h      플랫폼↔코어 C ABI(quad·입력·조회)
+    mobile_host_abi.h      플랫폼↔코어 C ABI(quad·입력·조회·SSH 세션)
     mobile_bridge.zig      chrome→quad 투영, 아틀라스 등록부, 입력·hit-test
+    mobile_ssh.zig         SSH 세션 ABI(핸들·배압·오류 코드 — §3.0)
+  mobile_host/             두 host 가 함께 쓰는 **OS 를 부르는** C
+    ssh_pump.{c,h}         소켓·스레드·세션 루프. 화면과 자물쇠는 host 가 훅으로 준다
   ios/
     ios_app_host.m         UIKit host + Metal 백엔드 + CoreText 래스터
   android/
@@ -90,6 +93,12 @@ src/platform/
 
 **`platform/mobile` 에는 OS 호출이 없다.** 있으면 `ios/`·`android/` 로 내려야 한다. 이
 규칙이 "공통분모" 를 관찰 가능하게 만든다 — 지키는지 여부를 파일 내용으로 판정할 수 있다.
+
+**`platform/mobile_host` 는 그 규칙의 예외가 아니라 다른 층이다.** 소켓·스레드·OS 난수처럼
+**두 host 가 똑같이 필요한 OS 호출**을 여기 모은다. 두 host 에 같은 루프를 두 벌 쓰면 갈리고,
+갈리면 한쪽에서만 나는 결함이 생긴다 — 그리고 그 결함은 기기에서만 보인다. 여기 있는 것은
+데스크톱에서 **그대로 링크해 실서버와 왕복**하므로(`mise run ssh-client-smoke` 의 펌프 회차)
+기기에 올리기 전에 초록을 볼 수 있다.
 
 **Vulkan 백엔드를 Linux 와 공유할지는 아직 정하지 않는다.** Linux 백엔드가 생길 때
 공통분모가 드러나므로, 그전에 추상 층을 만들면 하나뿐인 사용처에 맞춘 잘못된 경계가 된다.
@@ -143,6 +152,17 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
 안 돌려보내면 커서 위치를 묻는 프로그램이 답을 기다리며 멈춘다(그전에는 답을 버리고 이름만
 남겼는데, 그때는 돌려보낼 상대가 없었다). **어느 세션의 바이트인지는 아직 안 가른다** — 화면이
 하나이기 때문이고, 세션이 여럿이 되면 그 라우팅은 서버 목록(S9b)·세션 호스트 부착(S10)이 정한다.
+
+**소켓 루프는 `mobile_host/ssh_pump.c` 하나다.** host 가 하는 일은 (1) 키 바이트를 읽어
+`maru_mobile_ssh_load_key` 에 넣고, (2) 접속 정보와 훅(자물쇠·화면·답 가져오기)을 주어
+`maru_ssh_pump_start` 를 부르고, (3) 화면 훅에서 `maru_mobile_term_write` 를 부르는 것뿐이다.
+**호스트키는 핀 고정으로 판정한다** — 자동 승인은 없다는 약속([SSH 계약](ssh-client.md) §4)을
+물어볼 화면이 없는 지금도 지키는 방법이고, 목록 화면(S9b)이 생기면 물어보기 + `known_hosts` 로
+옮긴다.
+
+**그 스레드는 스택을 크게 잡아야 한다.** 코어가 패킷 상한(256KiB)짜리 버퍼를 스택에 잡아
+한 번의 `feed` 가 500KiB 를 넘는데, 새 스레드의 기본 스택은 그보다 작다(iOS 512KiB ·
+Android 1MiB) — 명시하지 않으면 **첫 걸음에서 앱이 죽는다**(실측: `SIGILL`, 스택 가드).
 
 **실패는 두 벌로 답한다.** host 가 분기해야 하는 것(호스트키 승인 · 인증 실패)은 `MARU_SSH_ERR_*`
 정수 코드이고, 진단용 이름은 `maru_mobile_ssh_last_error` 다 — 이름만으로는 UI 를 못 고르고,

@@ -456,6 +456,16 @@ const char *maru_mobile_ssh_exit_signal(unsigned int handle);
 const char *maru_mobile_ssh_last_error(unsigned int handle);
 void maru_mobile_ssh_clear_error(unsigned int handle);
 
+/// 개인키 파일 내용(PEM 텍스트)에서 `seed(32) ‖ public(32)` 를 만든다. **파일은 host 가 읽는다** —
+/// 이 층은 OS 를 모른다. 나온 64바이트를 `open` 에 넘긴 뒤 host 는 **자기 사본을 지운다**.
+/// 암호 걸린 키면 `passphrase` 를 준다(없으면 길이 0). 실패하면 `MARU_SSH_ERR_BAD_ARG` 이고
+/// 이유는 `maru_mobile_ssh_last_load_error`.
+int maru_mobile_ssh_load_key(const unsigned char *pem, unsigned int pem_len,
+                             const unsigned char *passphrase, unsigned int pass_len,
+                             unsigned char *out_secret);
+/// 키 읽기 실패 이름(세션이 아직 없어 세션별 자리에 못 남긴다).
+const char *maru_mobile_ssh_last_load_error(void);
+
 /// 원격 출력을 화면에 넣는다. `maru_mobile_ssh_screen_*` 에서 가져온 바이트를 그대로 준다.
 /// 반환값은 **코어에 닿은 누적 바이트** — 안 늘면 안 닿은 것이고 이유는 `maru_mobile_last_error`.
 unsigned long maru_mobile_term_write(const unsigned char *bytes, unsigned long len);

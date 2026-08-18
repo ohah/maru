@@ -30,10 +30,15 @@ pub const msg_userauth_request: u8 = 50;
 pub const msg_userauth_failure: u8 = 51;
 pub const msg_userauth_success: u8 = 52;
 pub const msg_userauth_banner: u8 = 53;
-/// **번호 60 은 방법마다 뜻이 다르다**(RFC 4252 §5.4 — "method specific"). `publickey` 에서는
-/// `PK_OK` 이고 `keyboard-interactive` 에서는 `INFO_REQUEST` 다. 우리는 `publickey` 만 하므로
-/// 그렇게 읽지만, 방법을 늘리면 **이 번호의 해석부터 갈라야 한다**.
-pub const msg_userauth_pk_ok: u8 = 60;
+/// **번호 60 은 방법마다 뜻이 다르다**(RFC 4252 §5.4 — "method specific"). 우리가 하는 두 방법에서
+/// 이미 갈린다: `publickey` 면 `PK_OK`(§7), `password` 면 **`PASSWD_CHANGEREQ`**(§8) 다.
+/// (`keyboard-interactive` 에서는 또 `INFO_REQUEST` 다 — 방법을 늘리면 여기부터 갈라야 한다.)
+///
+/// 그래서 `parseResponse` 는 **어느 방법으로 요청했는지**를 받는다. 처음에는 안 받고 무조건 `PK_OK`
+/// 로 읽었는데, 그러면 만료된 비밀번호에 서버가 보내는 변경 요구가 "이 키를 받아 줄 테니 서명을
+/// 보내라" 로 읽히고, 그 **공격자가 고른 프롬프트 텍스트가 `sanitizeBanner` 를 안 거쳐** 배너에
+/// 대해 닫아 둔 OSC 0/2/52 구멍이 다시 열린다.
+pub const msg_userauth_method_specific: u8 = 60;
 
 pub const service_name = "ssh-userauth";
 pub const method_publickey = "publickey";
@@ -72,7 +77,8 @@ pub fn parseServiceAccept(payload: []const u8) Error!void {
 
 /// ed25519 개인키에서 SSH 공개키 blob 을 만든다(`string "ssh-ed25519" · string key`).
 pub fn publicKeyBlob(out: []u8, secret: [secret_key_len]u8) Error![]const u8 {
-    const pair = keyPair(secret) catch return Error.BadPrivateKey;
+    var pair = keyPair(secret) catch return Error.BadPrivateKey;
+    defer wipe(&pair);
     var w = wire.Writer.init(out);
     try w.string(hostkey.alg_name);
     try w.string(&pair.public_key.toBytes());
@@ -104,7 +110,8 @@ pub fn signedData(
 ///
 /// **개인키를 복사해 두지 않는다.** 호출자는 이 함수가 끝난 뒤 자기 버퍼를 지운다(계약 §4).
 pub fn signBlob(out: []u8, secret: [secret_key_len]u8, data: []const u8) Error![]const u8 {
-    const pair = keyPair(secret) catch return Error.BadPrivateKey;
+    var pair = keyPair(secret) catch return Error.BadPrivateKey;
+    defer wipe(&pair);
     const sig = pair.sign(data, null) catch return Error.BadPrivateKey;
     var w = wire.Writer.init(out);
     try w.string(hostkey.alg_name);
@@ -160,9 +167,16 @@ pub const Response = union(enum) {
     banner: struct { message: []const u8, language: []const u8 },
     /// 이 키로 인증해도 된다는 뜻(§7). 우리는 서명을 바로 보내므로 보통 안 온다.
     pk_ok: struct { algorithm: []const u8, key_blob: []const u8 },
+    /// **비밀번호가 만료돼 바꾸라는 요구**(§8 — 서버가 SHOULD 로 보낸다). `prompt` 는 **원문**이라
+    /// 보여 주기 전에 `sanitizeBanner` 를 거친다(배너와 같은 이유 — 검증 안 된 상대의 텍스트다).
+    /// 우리는 비밀번호 변경을 안 하므로 상위는 이것을 실패로 다루되 그 문구는 보여 준다.
+    passwd_change_req: struct { prompt: []const u8, language: []const u8 },
 };
 
-pub fn parseResponse(payload: []const u8) Error!Response {
+/// 어느 방법으로 요청했나 — **번호 60 의 해석이 여기 달렸다**(위 상수 주석).
+pub const Method = enum { publickey, password };
+
+pub fn parseResponse(payload: []const u8, method: Method) Error!Response {
     var r = wire.Reader.init(payload);
     return switch (try r.byte()) {
         msg_userauth_success => .success,
@@ -174,12 +188,34 @@ pub fn parseResponse(payload: []const u8) Error!Response {
             .message = try r.string(),
             .language = try r.string(),
         } },
-        msg_userauth_pk_ok => .{ .pk_ok = .{
-            .algorithm = try r.string(),
-            .key_blob = try r.string(),
-        } },
+        msg_userauth_method_specific => switch (method) {
+            .publickey => .{ .pk_ok = .{
+                .algorithm = try r.string(),
+                .key_blob = try r.string(),
+            } },
+            .password => .{ .passwd_change_req = .{
+                .prompt = try r.string(),
+                .language = try r.string(),
+            } },
+        },
         else => Error.UnexpectedMessage,
     };
+}
+
+/// 키쌍 안의 비밀 바이트를 지운다.
+///
+/// **계약 §4 는 소거를 코어의 일로 정한다.** 모듈 주석이 "개인키를 복사해 두지 않는다" 고 적었지만
+/// 그것은 사실이 아니었다 — 값으로 받은 인자와 `SecretKey`·`KeyPair` 가 **세 겹 스택 프레임**에
+/// 남는다. 호출자가 자기 버퍼를 지워도 그것들은 그대로라, 계약이 걱정하는 바로 그 플랫폼에서
+/// 코어 덤프·스왑이 키를 유출한다.
+/// 키쌍의 **비밀만** 지운다.
+///
+/// **호출부의 `defer wipe(&pair)` 는 변이 검사로 못 잡는다 — 스택 지역이라 테스트가 그것을 볼
+/// 방법이 없다**(실측: 세 자리 모두 지우기를 빼도 전 테스트가 통과한다). 그래서 검정력은 여기,
+/// 헬퍼에 건다: "무엇을 지우고 무엇을 남기나" 가 틀리면(예: 통째로 밀어 공개키까지 날리기, 또는
+/// 아무것도 안 지우기) 아래 테스트가 죽는다. 호출부가 빠진 것은 코드 리뷰가 볼 몫이다.
+fn wipe(pair: *Ed25519.KeyPair) void {
+    std.crypto.secureZero(u8, &pair.secret_key.bytes);
 }
 
 /// 배너를 화면에 올리기 전에 거르는 정책(RFC 4252 §5.4 — "control character filtering ...
@@ -212,8 +248,20 @@ pub fn sanitizeBanner(out: []u8, message: []const u8) Error![]const u8 {
     return out[0..n];
 }
 
+/// 개인키에서 키쌍을 만든다. **공개키가 씨앗에서 유도된 것인지 여기서 직접 잰다.**
+///
+/// `Ed25519.KeyPair.fromSecretKey` 안에도 같은 검사가 있지만 그것은 `if (std.debug.runtime_safety)`
+/// 뒤에 있어 **배포 `.dmg` 가 쓰는 ReleaseFast 에서 사라진다**(실측: 그 모드에서만 테스트가 깨졌고,
+/// `zig build test` 는 Debug 라 CI 가 못 봤다). 그러면 씨앗과 안 맞는 공개키를 광고하면서 서명해
+/// 서버만 USERAUTH_FAILURE 를 내고, 계약 §4.4.3 이 약속한 "왜 인증이 안 되는지" 가 사라진다.
+///
+/// **`private_key` 에도 같은 대조가 있는데 중복이 아니다.** 그쪽은 *파일*이 일관적인지 보고, 여기는
+/// *건네받은 씨앗*이 그런지 본다 — 이 함수의 입력은 파일에서만 오지 않는다(Keychain·Keystore·
+/// 테스트). 신뢰 경계가 둘이라 검사도 둘이고, 그래서 오류 이름도 각 호출자에 맞게 다르다.
 fn keyPair(secret: [secret_key_len]u8) !Ed25519.KeyPair {
-    return Ed25519.KeyPair.fromSecretKey(try Ed25519.SecretKey.fromBytes(secret));
+    const derived = try Ed25519.KeyPair.generateDeterministic(secret[0..32].*);
+    if (!std.mem.eql(u8, secret[32..64], &derived.public_key.toBytes())) return error.KeyMismatch;
+    return derived;
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────
@@ -370,13 +418,13 @@ test "응답을 읽는다" {
 
     var w = wire.Writer.init(&buf);
     try w.byte(msg_userauth_success);
-    try std.testing.expectEqual(Response.success, try parseResponse(w.written()));
+    try std.testing.expectEqual(Response.success, try parseResponse(w.written(), .publickey));
 
     var f = wire.Writer.init(&buf);
     try f.byte(msg_userauth_failure);
     try f.nameList(&.{ "publickey", "password" });
     try f.boolean(false);
-    switch (try parseResponse(f.written())) {
+    switch (try parseResponse(f.written(), .publickey)) {
         .failure => |fail| {
             try std.testing.expect(fail.methods.has("password"));
             try std.testing.expect(!fail.partial_success);
@@ -389,7 +437,7 @@ test "응답을 읽는다" {
     try p.byte(msg_userauth_failure);
     try p.nameList(&.{"password"});
     try p.boolean(true);
-    switch (try parseResponse(p.written())) {
+    switch (try parseResponse(p.written(), .publickey)) {
         .failure => |fail| try std.testing.expect(fail.partial_success),
         else => return error.WrongVariant,
     }
@@ -398,7 +446,7 @@ test "응답을 읽는다" {
     try b.byte(msg_userauth_banner);
     try b.string("welcome");
     try b.string("en");
-    switch (try parseResponse(b.written())) {
+    switch (try parseResponse(b.written(), .publickey)) {
         .banner => |banner| {
             try std.testing.expectEqualStrings("welcome", banner.message);
             try std.testing.expectEqualStrings("en", banner.language);
@@ -407,10 +455,10 @@ test "응답을 읽는다" {
     }
 
     var k = wire.Writer.init(&buf);
-    try k.byte(msg_userauth_pk_ok);
+    try k.byte(msg_userauth_method_specific);
     try k.string("ssh-ed25519");
     try k.string("blob");
-    switch (try parseResponse(k.written())) {
+    switch (try parseResponse(k.written(), .publickey)) {
         .pk_ok => |ok| {
             try std.testing.expectEqualStrings("ssh-ed25519", ok.algorithm);
             try std.testing.expectEqualStrings("blob", ok.key_blob);
@@ -421,7 +469,47 @@ test "응답을 읽는다" {
     // 모르는 번호는 거절한다.
     var u = wire.Writer.init(&buf);
     try u.byte(99);
-    try std.testing.expectError(Error.UnexpectedMessage, parseResponse(u.written()));
+    try std.testing.expectError(Error.UnexpectedMessage, parseResponse(u.written(), .publickey));
+}
+
+test "번호 60 은 방법마다 다르게 읽는다" {
+    // RFC 4252 §5.4 — 60 은 "method specific" 이고, **우리가 하는 두 방법에서 이미 갈린다**:
+    // `publickey` 면 PK_OK(§7), `password` 면 PASSWD_CHANGEREQ(§8 — 만료된 비밀번호에 서버가
+    // SHOULD 로 보낸다). 무조건 PK_OK 로 읽으면 비밀번호 변경 요구가 "서명을 보내라" 로 읽힌다.
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_userauth_method_specific);
+    try w.string("your password has expired");
+    try w.string("en");
+    const bytes = w.written();
+
+    switch (try parseResponse(bytes, .publickey)) {
+        .pk_ok => |ok| try std.testing.expectEqualStrings("your password has expired", ok.algorithm),
+        else => return error.WrongVariant,
+    }
+    switch (try parseResponse(bytes, .password)) {
+        .passwd_change_req => |req| {
+            try std.testing.expectEqualStrings("your password has expired", req.prompt);
+            try std.testing.expectEqualStrings("en", req.language);
+        },
+        else => return error.WrongVariant,
+    }
+
+    // **그 프롬프트도 검증 안 된 상대의 텍스트다** — 배너와 같이 걸러야 한다. 원문은 그대로
+    // 주되(계약대로), `sanitizeBanner` 가 실제로 걸러 내는지 여기서 잇는다.
+    var evil = wire.Writer.init(&buf);
+    try evil.byte(msg_userauth_method_specific);
+    try evil.string("\x1b]0;pwned\x07expired");
+    try evil.string("");
+    switch (try parseResponse(evil.written(), .password)) {
+        .passwd_change_req => |req| {
+            try std.testing.expect(std.mem.indexOfScalar(u8, req.prompt, 0x1b) != null); // 원문 그대로
+            var clean: [128]u8 = undefined;
+            const shown = try sanitizeBanner(&clean, req.prompt);
+            try std.testing.expectEqualStrings("]0;pwnedexpired", shown);
+        },
+        else => return error.WrongVariant,
+    }
 }
 
 test "배너의 제어문자를 걸러 낸다" {
@@ -458,9 +546,9 @@ test "잘린 응답은 거절한다" {
     const full = w.written();
     var i: usize = 1;
     while (i < full.len) : (i += 1) {
-        if (parseResponse(full[0..i])) |_| return error.TruncatedResponseAccepted else |_| {}
+        if (parseResponse(full[0..i], .publickey)) |_| return error.TruncatedResponseAccepted else |_| {}
     }
-    _ = try parseResponse(full);
+    _ = try parseResponse(full, .publickey);
 }
 
 test "개인키가 이상하면 거절한다" {
@@ -479,10 +567,22 @@ test "메시지 번호와 이름은 명세 값 그대로다" {
     try std.testing.expectEqual(@as(u8, 51), msg_userauth_failure);
     try std.testing.expectEqual(@as(u8, 52), msg_userauth_success);
     try std.testing.expectEqual(@as(u8, 53), msg_userauth_banner);
-    try std.testing.expectEqual(@as(u8, 60), msg_userauth_pk_ok); // §7 (방법별 번호)
+    try std.testing.expectEqual(@as(u8, 60), msg_userauth_method_specific); // §7 (방법별 번호)
     try std.testing.expectEqualStrings("ssh-userauth", service_name);
     try std.testing.expectEqualStrings("ssh-connection", connection_service);
     try std.testing.expectEqualStrings("publickey", method_publickey);
     try std.testing.expectEqualStrings("password", method_password);
     try std.testing.expectEqual(@as(usize, 64), secret_key_len);
+}
+
+test "wipe 는 비밀만 지우고 공개키는 남긴다" {
+    var pair = try Ed25519.KeyPair.generateDeterministic(@as([32]u8, @splat(7)));
+    const pub_before = pair.public_key.toBytes();
+    try std.testing.expect(!std.mem.allEqual(u8, &pair.secret_key.bytes, 0));
+
+    wipe(&pair);
+    try std.testing.expect(std.mem.allEqual(u8, &pair.secret_key.bytes, 0));
+    // **공개키는 살아 있어야 한다** — 서명 뒤에도 어느 키였는지 말할 수 있어야 하고, 공개키는
+    // 애초에 비밀이 아니다. 통째로 미는 구현이면 여기서 죽는다.
+    try std.testing.expectEqualSlices(u8, &pub_before, &pair.public_key.toBytes());
 }

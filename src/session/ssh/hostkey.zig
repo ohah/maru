@@ -44,20 +44,29 @@ pub const Error = error{
 } || wire.Error;
 
 /// 서버 호스트키 blob(`K_S`)에서 ed25519 공개키를 꺼낸다.
+///
+/// **뒤에 남는 바이트가 있으면 거절한다.** 이 blob 은 정본 인코딩이어야 한다 — 여분을 흘려 보내면
+/// **같은 키에 서로 다른 blob 이 무한히 생긴다**. 그러면 아래가 전부 어긋난다:
+///   - `known_hosts` 는 blob 바이트를 그대로 맞대므로, 폐기된 키에 한 바이트만 붙이면
+///     `revoked` 가 `unknown` 으로 **강등된다**(TOFU 프롬프트로 간다 — 계약 §4.4.1 이 도달 불가라고
+///     못박은 자리다).
+///   - 지문은 blob 전체를 해싱하므로 `ssh-keygen -lf` 와 **다른 값**이 나와, 사용자가 대조해도
+///     그 차이를 알 수 없다.
+///   - 교환 해시는 서버가 보낸 원문을 덮으므로 **서명은 그대로 통과한다** — 즉 이 검사가 유일한 그물이다.
 pub fn parsePublicKey(blob: []const u8) Error![key_len]u8 {
     var r = wire.Reader.init(blob);
     if (!std.mem.eql(u8, try r.string(), alg_name)) return Error.UnsupportedAlgorithm;
     const key = try r.string();
-    if (key.len != key_len) return Error.MalformedBlob;
+    if (key.len != key_len or r.rest().len != 0) return Error.MalformedBlob;
     return key[0..key_len].*;
 }
 
-/// 서명 blob 에서 64바이트 서명을 꺼낸다.
+/// 서명 blob 에서 64바이트 서명을 꺼낸다. **여분 바이트는 거절한다**(위와 같은 이유 — 정본 인코딩).
 pub fn parseSignature(blob: []const u8) Error![sig_len]u8 {
     var r = wire.Reader.init(blob);
     if (!std.mem.eql(u8, try r.string(), alg_name)) return Error.UnsupportedAlgorithm;
     const sig = try r.string();
-    if (sig.len != sig_len) return Error.MalformedBlob;
+    if (sig.len != sig_len or r.rest().len != 0) return Error.MalformedBlob;
     return sig[0..sig_len].*;
 }
 
@@ -241,6 +250,46 @@ test "길이가 틀린 blob 을 거절한다" {
         const blob = try buildBlob(&buf, alg_name, filler[0..bad]);
         try std.testing.expectError(Error.MalformedBlob, parseSignature(blob));
     }
+}
+
+test "여분 바이트가 붙은 blob 은 거절한다" {
+    // **같은 키에 서로 다른 blob 이 생기면 안 된다.** `known_hosts` 는 blob 바이트를 맞대므로,
+    // 폐기된 키에 한 바이트만 붙이면 `revoked` 가 `unknown` 으로 강등된다 — TOFU 프롬프트로 가고,
+    // 지문도 `ssh-keygen -lf` 와 달라져 사용자가 그 차이를 알 방법이 없다. 서명은 서버가 보낸
+    // 원문을 덮으므로 **그대로 통과한다** — 그래서 이 검사가 유일한 그물이다.
+    var buf: [256]u8 = undefined;
+    const canonical = try buildBlob(&buf, alg_name, &([_]u8{0x11} ** 32));
+    _ = try parsePublicKey(canonical); // 정본은 통과한다
+
+    var padded: [256]u8 = undefined;
+    @memcpy(padded[0..canonical.len], canonical);
+    for ([_]usize{ 1, 2, 8 }) |extra| {
+        @memset(padded[canonical.len..][0..extra], 0);
+        try std.testing.expectError(
+            Error.MalformedBlob,
+            parsePublicKey(padded[0 .. canonical.len + extra]),
+        );
+    }
+
+    // 서명 blob 도 같다.
+    const sig_canonical = try buildBlob(&buf, alg_name, &([_]u8{0x22} ** 64));
+    _ = try parseSignature(sig_canonical);
+    @memcpy(padded[0..sig_canonical.len], sig_canonical);
+    padded[sig_canonical.len] = 0;
+    try std.testing.expectError(Error.MalformedBlob, parseSignature(padded[0 .. sig_canonical.len + 1]));
+
+    // **검증 경로에서도 걸린다** — 파싱만 막고 검증이 딴 길로 가면 의미가 없다.
+    var key_buf: [128]u8 = undefined;
+    var sig_buf: [128]u8 = undefined;
+    const key_blob = try buildBlob(&key_buf, alg_name, &rfc8032_test2.public_key);
+    const sig_blob = try buildBlob(&sig_buf, alg_name, &rfc8032_test2.signature);
+    var padded_key: [256]u8 = undefined;
+    @memcpy(padded_key[0..key_blob.len], key_blob);
+    padded_key[key_blob.len] = 0;
+    try std.testing.expectError(
+        Error.MalformedBlob,
+        verifyExchangeHash(padded_key[0 .. key_blob.len + 1], sig_blob, &rfc8032_test2.message),
+    );
 }
 
 test "잘린 blob 은 거절한다" {

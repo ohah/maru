@@ -25,9 +25,12 @@
 // **이 게이트가 막지 못하는 것 — 정직하게.**
 //   - 허용된 네임스페이스 **안에서** 순수하지 않은 것을 부르는 것은 못 본다(예: `std.mem` 에는
 //     그런 것이 없지만, 나중에 여는 이름에는 있을 수 있다). 여는 줄마다 이유를 적는 것이 방어다.
-//   - 이 스캔은 `src/session/ssh/` 안만 본다. 그래서 **바깥 모듈 import 를 같이 막는다** — 안 막으면
-//     `@import("../../platform/x.zig")` 한 줄로 계약을 통째로 우회할 수 있다. 다만 형제 파일이
-//     늘어나는 것 자체는 막지 않는다(그 파일도 같이 스캔되므로).
+//   - 이 스캔은 `src/session/ssh/` 안만 본다. 그래서 **바깥으로 나가는 문을 같이 막는다** — 형제
+//     `.zig` 가 아닌 import(`../../platform/x.zig`·`root`·`builtin`), `@cImport`, `@extern`, `asm`.
+//     처음에는 경로 구분자만 봤는데 `@import("root")`·`@extern`·`asm`·`extern` 이 점수 0 으로 빠져나갔다
+//     (실측). 형제 파일이 늘어나는 것 자체는 막지 않는다(그 파일도 같이 스캔되므로).
+//   - **여기 없는 우회가 또 있을 수 있다.** 이 판정자는 "우리가 아는 문" 을 닫을 뿐이고, 그것이
+//     `pure_std` 를 허용 목록으로 둔 이유다 — std 쪽은 기본이 막힘이지만 언어 기능 쪽은 아니다.
 //   - 무한 루프·전역 상태 같은 "순수성의 의미" 는 대상이 아니다.
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
@@ -119,9 +122,30 @@ fn scan(
     const t = tokens.items;
 
     for (t, 0..) |token, i| {
-        // `@cImport` 는 C 헤더를 끌어온다 — 이 층에 있으면 안 된다(platform 전용).
-        if (token.tag == .builtin and std.mem.eql(u8, token.text, "@cImport")) {
-            try addViolation(allocator, out, path, "@cImport", .{});
+        // **OS 로 나가는 다른 문**들. `@cImport` 만 막아 두고 허용 목록을 자랑했는데, 아래 넷은
+        // `std.` 라는 토큰을 아예 안 거쳐서 점수 0 을 받았다(코드리뷰가 셋을 잡았고, 넷째는 그
+        // 수정을 적대적으로 다시 재 보다 실측으로 찾았다):
+        //   - `@extern(..., .{ .name = "socket" })` — 링커에게 직접 심볼을 달라고 한다.
+        //   - `extern "c" fn socket(...)` — **같은 일을 키워드로** 한다(아래 별도 블록).
+        //   - `asm volatile ("svc #0")` — 시스템 콜을 직접 친다.
+        //   - `@import("root")` — 아래 import 규칙에서 따로 막는다.
+        if (token.tag == .builtin and
+            (std.mem.eql(u8, token.text, "@cImport") or std.mem.eql(u8, token.text, "@extern")))
+        {
+            try addViolation(allocator, out, path, "{s}", .{token.text});
+            continue;
+        }
+        if (token.tag == .keyword_asm) {
+            try addViolation(allocator, out, path, "asm (시스템 콜을 직접 친다)", .{});
+            continue;
+        }
+        // `extern "c" fn socket(...) c_int;` — **빌트인이 아니라 키워드**다. `@extern` 만 막았을
+        // 때 이 형태가 그대로 통과하는 것을 실측했다(같은 결함의 두 번째 얼굴). `extern struct`·
+        // `extern union` 은 메모리 배치라 문이 아니므로 통과시킨다.
+        if (token.tag == .keyword_extern and
+            !eq(t, i + 1, "struct") and !eq(t, i + 1, "union"))
+        {
+            try addViolation(allocator, out, path, "extern 선언(링커에게 심볼을 직접 달라고 한다)", .{});
             continue;
         }
 
@@ -138,9 +162,16 @@ fn scan(
             } else {
                 // (3) **형제 파일만 import 한다.** 이 스캔은 `src/session/ssh/` 안만 보므로, 바깥
                 // 모듈을 끌어오면 그 모듈이 무엇을 하든 검사 밖이다 — 즉 한 줄로 계약을 우회할 수
-                // 있다. 경로 구분자(`/`)나 상위(`..`)가 있으면 바깥이다.
+                // 있다.
                 const name = std.mem.trim(u8, quoted, "\"");
-                if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.startsWith(u8, name, "..")) {
+                // **`root` 는 앱 전체다**(`src/maru.zig` — `platform` 을 포함한다). 경로 구분자가
+                // 없어서 "형제 파일" 로 보이지만 한 줄로 트리의 모든 소켓·파일·시계에 닿는다.
+                // `builtin` 도 이름만으로는 형제처럼 보이므로, **형제는 `.zig` 로 끝나는 것**뿐이라고
+                // 못박는다 — 금지 목록이 아니라 모양 규칙이라 새 특수 이름이 생겨도 막힌다.
+                const sibling = std.mem.endsWith(u8, name, ".zig") and
+                    std.mem.indexOfScalar(u8, name, '/') == null and
+                    !std.mem.startsWith(u8, name, "..");
+                if (!sibling) {
                     try addViolation(allocator, out, path, "형제 파일이 아닌 `{s}` 를 import 한다(검사 밖이 된다)", .{name});
                 }
             }
@@ -289,7 +320,7 @@ test "판정자는 Zig 0.16 의 진짜 OS 진입점을 잡는다" {
     ));
 }
 
-test "판정자는 std 를 거치지 않는 우회 셋을 잡는다" {
+test "판정자는 std 를 거치지 않는 우회를 잡는다" {
     // 아래 셋은 전부 `std.<금지이름>` 이라는 **토큰 열이 없어서** 앞선 판정자를 그냥 빠져나갔다
     // (셋 다 실측으로 통과하는 것을 봤다 — 바로 옆 cli_purity.zig 도 이 구멍을 한계로 적어 뒀다).
 
@@ -308,6 +339,29 @@ test "판정자는 std 를 거치지 않는 우회 셋을 잡는다" {
     // (d) std 를 값으로 넘기기(받는 쪽에서 무엇이든 할 수 있다).
     try std.testing.expectEqual(@as(usize, 1), try countViolations(
         \\pub fn f() void { helper(std); }
+    ));
+    // (e) **`root` 는 앱 전체다** — 경로 구분자가 없어 "형제" 로 보이지만 platform 에 닿는다.
+    try std.testing.expectEqual(@as(usize, 1), try countViolations(
+        \\const root = @import("root");
+    ));
+    try std.testing.expectEqual(@as(usize, 1), try countViolations(
+        \\const b = @import("builtin");
+    ));
+    // (f) 링커에게 심볼을 직접 달라고 하기.
+    try std.testing.expectEqual(@as(usize, 1), try countViolations(
+        \\const socket = @extern(*const fn (c_int, c_int, c_int) callconv(.c) c_int, .{ .name = "socket" });
+    ));
+    // (g) 시스템 콜을 직접 치기.
+    try std.testing.expectEqual(@as(usize, 1), try countViolations(
+        \\pub fn f() void { asm volatile ("svc #0"); }
+    ));
+    // (h) **`extern` 키워드** — `@extern` 만 막으면 이 형태로 그대로 나간다(실측).
+    try std.testing.expectEqual(@as(usize, 1), try countViolations(
+        \\pub extern "c" fn socket(a: c_int, b: c_int, c: c_int) c_int;
+    ));
+    // 메모리 배치는 문이 아니다 — 오탐하지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), try countViolations(
+        \\const S = extern struct { a: u32 };
     ));
 
     // 합법 형태는 통과한다.

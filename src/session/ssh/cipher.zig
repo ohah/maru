@@ -61,7 +61,15 @@ pub const Cipher = struct {
     /// `K_2` — 길이 필드 전용(키 재료의 뒤 절반).
     length_key: [32]u8,
 
-    pub fn init(key: [key_len]u8) Cipher {
+    /// 키 재료를 **가져온다**(옮기는 것이지 복사가 아니다) — 원본은 여기서 지워진다.
+    ///
+    /// **값으로 받으면 지울 수 없는 사본이 남는다.** 호출자의 배열은 호출자가 `defer` 로 지울 수
+    /// 있어도, 값 인자로 만들어진 **매개변수 사본**은 아무도 주소를 모른다(컴파일러가 복사를 없앨
+    /// 의무도 없다). 세션 키가 스택 어딘가에 그대로 남아, 크래시 덤프·코어 파일·스왑에 실린다.
+    /// 포인터로 받고 **원본까지 지우는 것**이 "이제 키는 이 `Cipher` 하나가 갖는다" 를 타입으로
+    /// 말하는 유일한 방법이다.
+    pub fn initMove(key: *[key_len]u8) Cipher {
+        defer std.crypto.secureZero(u8, key);
         return .{ .payload_key = key[0..32].*, .length_key = key[32..64].* };
     }
 
@@ -241,9 +249,16 @@ const FixedPadding = struct {
     }
 };
 
+/// 테스트용: 고정 키로 `Cipher` 를 만든다. `initMove` 가 원본을 지우므로 **매번 새 사본**이
+/// 필요하다 — 그 번거로움이 곧 "키는 한 곳만 갖는다" 는 계약이다.
+fn testCipher(key: [key_len]u8) Cipher {
+    var k = key;
+    return Cipher.initMove(&k);
+}
+
 test "명세 워크드 예제와 바이트가 같다 (draft Appendix A)" {
     var padding = FixedPadding{ .bytes = vector.plain[70..76] }; // 4e 43 e8 04 dc 6c
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [128]u8 = undefined;
     const n = try cipher.seal(&out, vector.seq, vector.payload, padding.random());
     try std.testing.expectEqual(vector.wire.len, n);
@@ -251,7 +266,7 @@ test "명세 워크드 예제와 바이트가 같다 (draft Appendix A)" {
 }
 
 test "명세 벡터를 우리가 다시 푼다" {
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     // 길이 필드부터 — 몸통이 얼마나 올지 이것으로 안다.
     const body_len = try cipher.decryptLength(vector.seq, vector.wire[0..length_len].*);
     try std.testing.expectEqual(@as(u32, 0x48), body_len);
@@ -282,7 +297,7 @@ test "패딩은 길이 필드를 빼고 8의 배수를 맞춘다" {
 
 test "왕복한다" {
     var prng = std.Random.DefaultPrng.init(11);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [512]u8 = undefined;
     var plain: [512]u8 = undefined;
     for ([_]usize{ 1, 2, 7, 8, 63, 64, 65, 200 }) |len| {
@@ -299,7 +314,7 @@ test "시퀀스 번호가 다르면 안 풀린다" {
     // **nonce 가 시퀀스 번호다.** 번호를 안 올리거나 어긋나면 여기서 걸린다 — strict KEX 의
     // 리셋이 한쪽만 돌았을 때 나타나는 증상이 정확히 이것이다(계약 §4).
     var prng = std.Random.DefaultPrng.init(12);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [128]u8 = undefined;
     var plain: [128]u8 = undefined;
     const n = try cipher.seal(&out, 5, "hello", prng.random());
@@ -316,7 +331,7 @@ test "시퀀스 번호가 다르면 안 풀린다" {
 test "변조를 거부한다" {
     // **태그가 안 맞으면 아무것도 안 푼다**(draft §7 — MAC before decryption).
     var prng = std.Random.DefaultPrng.init(13);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [128]u8 = undefined;
     var plain: [128]u8 = undefined;
     const n = try cipher.seal(&out, 1, "tamper me", prng.random());
@@ -337,7 +352,7 @@ test "태그가 틀리면 출력 버퍼를 건드리지 않는다" {
     // 버퍼에 위조 패킷의 평문이 쓰이는지**뿐이고, 그것이 바로 이 MUST 가 막으려는 것이다 —
     // 호출자가 실패한 버퍼를 재사용하거나 들여다보면 공격자가 고른 바이트를 보게 된다.
     var prng = std.Random.DefaultPrng.init(21);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [128]u8 = undefined;
     const n = try cipher.seal(&out, 1, "do not decrypt me", prng.random());
 
@@ -359,7 +374,7 @@ test "인증됐어도 패딩 규칙을 어긴 패킷은 거절한다" {
     // 태그가 맞는다는 것은 **상대가 진짜 서버라는 뜻일 뿐**, 그가 규칙을 지켰다는 뜻이 아니다.
     // 패딩이 4 미만이면 RFC 4253 §6 위반이고, 받아 주면 패딩 바이트가 payload 로 새어 상위가
     // 메시지 뒤에 붙은 쓰레기를 파싱한다. 키를 우리가 쥐고 있으니 그런 패킷을 만들어 확인한다.
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     for ([_]u8{ 0, 1, 3 }) |bad_pad| {
         var body = [_]u8{0} ** 16;
         body[0] = bad_pad;
@@ -383,7 +398,7 @@ test "seal 은 버퍼와 상한을 먼저 본다" {
     // **둘 다 아무 테스트도 안 잡던 자리다**(변이로 확인했다). 버퍼 검사를 지우면 `seal` 이
     // **버퍼 밖에 쓴다** — 조용한 메모리 손상이고, 정상 경로만 시험하면 영원히 안 보인다.
     var prng = std.Random.DefaultPrng.init(22);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
 
     // 딱 한 바이트 모자란 버퍼.
     const need = Cipher.sealedLen(5);
@@ -420,7 +435,7 @@ test "버퍼 길이가 길이 필드와 안 맞으면 태그가 잡는다" {
     // 태그는 **암호화된 길이 필드까지** 덮으므로 그 불일치가 곧 태그 불일치로 나타난다 —
     // 즉 따로 검사를 넣을 필요가 없고, 그 사실을 여기서 못박는다(넣었다면 헛방어였다).
     var prng = std.Random.DefaultPrng.init(23);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [256]u8 = undefined;
     var plain: [256]u8 = undefined;
     const n = try cipher.seal(&out, 4, "length must match", prng.random());
@@ -434,10 +449,10 @@ test "버퍼 길이가 길이 필드와 안 맞으면 태그가 잡는다" {
 
 test "키가 다르면 안 풀린다" {
     var prng = std.Random.DefaultPrng.init(14);
-    var a = Cipher.init(vector.key);
+    var a = testCipher(vector.key);
     var other = vector.key;
     other[0] ^= 1;
-    var b = Cipher.init(other);
+    var b = testCipher(other);
     var out: [128]u8 = undefined;
     var plain: [128]u8 = undefined;
     const n = try a.seal(&out, 0, "secret", prng.random());
@@ -450,7 +465,7 @@ test "두 인스턴스를 맞바꾸면 못 푼다" {
     var swapped = vector.key;
     @memcpy(swapped[0..32], vector.key[32..64]);
     @memcpy(swapped[32..64], vector.key[0..32]);
-    var cipher = Cipher.init(swapped);
+    var cipher = testCipher(swapped);
     const body_len = cipher.decryptLength(vector.seq, vector.wire[0..length_len].*);
     // 0x48 이 나오면 안 된다 — 거절되거나 다른 값이어야 한다.
     if (body_len) |v| try std.testing.expect(v != 0x48) else |_| {}
@@ -460,7 +475,7 @@ test "두 인스턴스를 맞바꾸면 못 푼다" {
 
 test "깨진 프레이밍은 거절한다" {
     var prng = std.Random.DefaultPrng.init(15);
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var out: [128]u8 = undefined;
     var plain: [128]u8 = undefined;
     const n = try cipher.seal(&out, 2, "x", prng.random());
@@ -477,7 +492,7 @@ test "깨진 프레이밍은 거절한다" {
 test "길이 필드가 규칙을 어기면 거절한다" {
     // `decryptLength` 는 **아직 인증되지 않은** 값을 다룬다 — 그래서 여기서 거르는 것이 의미가 있다.
     // 상한·배수·하한을 어긴 길이를 만들어 내는 암호문을 역산해 넣는다.
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     const nonce = nonceFor(9);
     for ([_]u32{ 0, 1, 5, 7, 9, packet.max_packet + 8 }) |bad_len| {
         var plain_len: [length_len]u8 = undefined;
@@ -500,7 +515,7 @@ test "길이 필드가 규칙을 어기면 거절한다" {
 test "payload 가 0바이트인 패킷은 거절한다" {
     // `packet.read` 와 같은 이유 — SSH 메시지는 전부 메시지 번호로 시작한다. 몸통 8바이트에
     // 패딩 7 이면 payload 가 0 이 되는데, 다른 가드는 전부 통과한다.
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     var body = [_]u8{0} ** 8;
     body[0] = 7; // 패딩 7 → payload 0
     var wire_bytes: [length_len + 8 + tag_len]u8 = undefined;
@@ -518,7 +533,7 @@ test "payload 가 0바이트인 패킷은 거절한다" {
 }
 
 test "키를 지운다" {
-    var cipher = Cipher.init(vector.key);
+    var cipher = testCipher(vector.key);
     cipher.clear();
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &cipher.payload_key);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &cipher.length_key);

@@ -292,6 +292,44 @@ test "해시 호스트명도 소문자로 바꿔 해싱한다 (OpenSSH 실측)" 
     try std.testing.expect(matchesHost(line, &upper)); // 대문자로 물어도 같은 값이어야 한다
 }
 
+test "패턴보다 긴 호스트는 안 맞는다" {
+    // **접두 일치가 되면 안 된다.** `example.com` 줄이 `example.com.evil.net` 을 신뢰하면 공격자가
+    // 하위 도메인 하나로 우리가 아는 서버 행세를 한다. 기존 테스트는 패턴과 **같거나 짧은** 호스트만
+    // 맞대서, 이 성질을 지키는 가드를 지워도 16개가 전부 통과했다(코드리뷰가 잡았다).
+    try std.testing.expect(!matchesHost("example.com", "example.com.evil.net"));
+    try std.testing.expect(!matchesHost("example.com", "example.commercial"));
+    try std.testing.expect(!matchesHost("[jump.org]:22", "[jump.org]:2222"));
+    // 와일드카드가 **명시된** 경우에만 늘어난다.
+    try std.testing.expect(matchesHost("example.com*", "example.com.evil.net"));
+    // 반대로 호스트가 패턴보다 짧아도 안 맞는다.
+    try std.testing.expect(!matchesHost("example.com", "example.co"));
+
+    // 판정까지 이어진다.
+    const file = "example.com " ++ ed ++ " " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.unknown, verify(file, "example.com.evil.net", ed, &vector_blob));
+}
+
+test "부정은 어느 자리에 있어도 이긴다" {
+    // 기존 부정 테스트가 전부 `!pattern` 을 **마지막 칸**에 뒀다 — 그러면 "즉시 반환" 과 "플래그만
+    // 지움" 이 구분되지 않아, 부정을 약화하는 변이가 살아남았다. 앞·중간·뒤를 다 잰다.
+    try std.testing.expect(!matchesHost("!secret.example.com,*.example.com", "secret.example.com"));
+    try std.testing.expect(!matchesHost("*.example.com,!secret.example.com", "secret.example.com"));
+    try std.testing.expect(!matchesHost("a.com,!secret.example.com,*.example.com", "secret.example.com"));
+    // 부정에 안 걸리는 호스트는 여전히 맞는다.
+    try std.testing.expect(matchesHost("!secret.example.com,*.example.com", "public.example.com"));
+}
+
+test "키 종류는 정확 일치다" {
+    // 접두 일치면 `ssh-ed25519-cert-v01@openssh.com` 줄이 **평범한 호스트키로 읽힌다**(§3·§4.4.1 이
+    // 금지한 것). 기존 테스트는 접두를 공유하지 않는 `ssh-rsa` 로만 시험해서 못 잡았다.
+    var buf: [512]u8 = undefined;
+    const file = std.fmt.bufPrint(&buf, "example.com {s}-cert-v01@openssh.com {s}\n", .{ ed, vector_b64 }) catch unreachable;
+    try std.testing.expectEqual(Verdict.unknown, verify(file, "example.com", ed, &vector_blob));
+    // 반대 방향(파일이 짧은 이름, 우리가 긴 이름)도 안 맞아야 한다.
+    const short = "example.com ssh-ed " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.unknown, verify(short, "example.com", ed, &vector_blob));
+}
+
 test "주석 처리한 줄은 되살아나지 않는다" {
     // **`#` 검사가 살아 있는 가드다.** `ssh` 는 `known_hosts` 에 `hostname,ipaddr` 를 함께 적는다.
     // 그 줄을 주석 처리하면 `#` 이 **첫 패턴에만** 붙고 쉼표 뒤 패턴은 멀쩡해서, 검사가 없으면
@@ -301,6 +339,13 @@ test "주석 처리한 줄은 되살아나지 않는다" {
     // 와일드카드가 섞인 경우도 같다 — 이쪽이 더 위험하다(아무 호스트나 맞는다).
     const commented_wild = "#old.example.com,* " ++ ed ++ " " ++ vector_b64 ++ "\n";
     try std.testing.expectEqual(Verdict.unknown, verify(commented_wild, "anything.example.net", ed, &vector_blob));
+
+    // **들여쓴 주석도 주석이다.** `#` 을 줄의 첫 글자로만 보면(line[0]) 앞에 공백이 있는 순간
+    // 판정이 살아난다 — 우리는 토큰의 첫 글자로 본다(first[0]).
+    const indented = "   #old.example.com,203.0.113.9 " ++ ed ++ " " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.unknown, verify(indented, "203.0.113.9", ed, &vector_blob));
+    const tabbed = "\t#a.com,* " ++ ed ++ " " ++ vector_b64 ++ "\n";
+    try std.testing.expectEqual(Verdict.unknown, verify(tabbed, "anything.net", ed, &vector_blob));
 
     // 주석을 푼 줄은 물론 산다 — 위가 "무조건 unknown" 이 아님을 못박는다.
     const live = "example.com,203.0.113.9 " ++ ed ++ " " ++ vector_b64 ++ "\n";

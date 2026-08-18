@@ -8,6 +8,7 @@
 //! 배너 있는 서버에 못 붙는다. `SSH-` 로 시작하는 줄이 나올 때까지 넘긴다.
 
 const std = @import("std");
+const packet = @import("packet.zig");
 
 /// **식별 문자열**의 상한(RFC 4253 §4.2 — "The maximum length of the string is 255 characters,
 /// **including the Carriage Return and Line Feed**"). 그래서 재는 대상은 CR·LF 를 **뺀** 길이가
@@ -21,18 +22,26 @@ pub const max_line = 255;
 /// **L4 에 주는 뜻**: 줄이 안 끝난 채 이만큼 쌓이면 `LineTooLong` 이므로, 읽기 버퍼가 이보다
 /// 작으면 정상 배너를 못 담아 영원히 `Incomplete` 를 받는다.
 ///
-/// **4KiB 인 이유**: 아래 `max_banner_lines` 와 곱한 값이 이 층이 버전 교환에 쓰는 **최악 버퍼**다
-/// (`consumed` 는 버전 줄을 찾은 뒤에야 나오므로 호출자는 그때까지 배너를 다 들고 있어야 한다).
-/// 4KiB × 64 = 256KiB 로 **패킷 상한과 같게** 맞췄다 — 상한을 늘리면 그 곱이 조용히 커져서, 이
-/// 층이 SSH 경로에서 가장 큰 버퍼를 요구하게 된다.
-pub const max_banner_line = 4 * 1024;
-
 /// 버전 줄을 몇 줄까지 기다리나. 명세에 수가 없어 우리가 정한다 — 배너가 이보다 길면
 /// 정상적인 sshd 가 아니다.
 pub const max_banner_lines = 64;
 
+/// **패킷 상한에서 거꾸로 유도한다.** 이 층이 버전 교환에 요구하는 최악 버퍼(`max_exchange_bytes`)
+/// 가 `packet.max_packet` 을 넘지 않아야 한다 — 넘으면 SSH 경로에서 **가장 큰 메모리를 요구하는
+/// 것이 버전 교환**이 된다.
+///
+/// 손으로 4KiB 를 적어 뒀다가 줄 끝(CRLF)과 식별 문자열을 빼먹어 그 관계가 383바이트 어긋났고,
+/// 그 부족분이 **정의를 되풀이하는 자기충족 단언** 뒤에 숨어 살아남았다. 유도해 두면 그 종류의
+/// 어긋남이 생길 수 없다. 값은 약 4KiB 다.
+pub const max_banner_line = (packet.max_packet - max_line) / max_banner_lines - 2;
+
 /// 버전 교환이 요구하는 **최악 버퍼**. L4 는 읽기 버퍼를 이보다 작게 잡으면 안 된다.
-pub const max_exchange_bytes = max_banner_line * max_banner_lines;
+///
+/// **줄 끝(CRLF)과 식별 문자열까지 센다.** 처음에는 `max_banner_line * max_banner_lines` 로만
+/// 뒀는데, 그러면 실제로 받아들이는 것보다 383바이트 작다 — 그 값대로 버퍼를 잡은 L4 는 정확히
+/// 그만큼을 보내는 서버 앞에서 **영원히 `Incomplete` 만 받는다**(`consumed` 는 `SSH-` 줄을 찾아야
+/// 나오므로 더 읽을 수도 버릴 수도 없다). 진단 없는 livelock 이다.
+pub const max_exchange_bytes = max_banner_lines * (max_banner_line + 2) + max_line;
 
 pub const Error = error{
     /// 줄이 상한을 넘었다(또는 배너가 너무 많다).
@@ -216,8 +225,11 @@ test "배너 줄에는 식별 문자열 상한을 안 씌운다" {
 test "버전 교환의 최악 버퍼는 패킷 상한을 안 넘는다" {
     // **상한 둘의 곱이 계약이다.** 배너 줄 상한만 보고 늘리면 호출자가 들고 있어야 할 최악
     // 버퍼가 조용히 커져, 이 층이 SSH 경로에서 가장 큰 메모리를 요구하게 된다.
-    const packet = @import("packet.zig");
-    try std.testing.expectEqual(max_exchange_bytes, max_banner_line * max_banner_lines);
+    // **정의를 되풀이하면 아무것도 안 잰다.** 처음 이 자리에 있던 단언이 그랬고, 그래서 383바이트
+    // 부족분이 살아남았다. 여기서는 **parse 가 실제로 받아들이는 최악**을 조립해 맞댄다.
+    const worst_banner = max_banner_lines * (max_banner_line + 2); // 줄마다 CRLF
+    const worst_total = worst_banner + max_line; // + 식별 문자열(CR·LF 포함 상한)
+    try std.testing.expectEqual(worst_total, max_exchange_bytes);
     try std.testing.expect(max_exchange_bytes <= packet.max_packet);
 }
 

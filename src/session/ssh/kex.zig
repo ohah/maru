@@ -60,6 +60,7 @@ pub const Ephemeral = struct {
     /// 씨앗에서 만든다. **엔트로피는 호출자 것**이다(위 모듈 주석).
     pub fn generate(rand: std.Random) Error!Ephemeral {
         var seed: [X25519.seed_length]u8 = undefined;
+        defer std.crypto.secureZero(u8, &seed); // 씨앗이 곧 개인키다(아래 `fromSeed` 주석)
         rand.bytes(&seed);
         return fromSeed(seed);
     }
@@ -145,6 +146,7 @@ pub fn exchangeHash(in: ExchangeHashInput) Error![hash_len]u8 {
     // mpint 규칙(앞 0 제거·부호 자리 0 덧대기)은 **인코더 한 곳이 소유한다** — 여기서 다시 짜면
     // 두 벌이 되고, 갈리는 순간 교환 해시만 조용히 틀린다. 최악 크기는 4 + 1 + 32 다.
     var buf: [4 + 1 + shared_len]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buf); // 공유 비밀의 인코딩이다 — 남길 이유가 없다
     var w = wire.Writer.init(&buf);
     try w.mpint(&in.k);
     h.update(w.written());
@@ -192,7 +194,12 @@ pub fn deriveKey(
     letter: KeyLetter,
     session_id: []const u8,
 ) Error!void {
+    // **여기 남는 것은 전부 비밀이다.** `K` 의 mpint 인코딩은 모든 세션 키가 유도되는 값이고,
+    // `block` 은 세션 키 그 자체다 — 계약 §4.2 가 임시 키를 지우라고 한 것과 같은 이유로 지운다.
     var mp: [4 + 1 + shared_len]u8 = undefined;
+    // 스택 지역이라 **테스트로는 관측할 수 없다**(변이 검사에서 살아남는다 — 그것이 구멍이
+    // 아니라 이 종류의 한계다). 리뷰가 볼 몫으로 남긴다.
+    defer std.crypto.secureZero(u8, &mp);
     var w = wire.Writer.init(&mp);
     try w.mpint(&k);
     const k_mpint = w.written();
@@ -209,6 +216,7 @@ pub fn deriveKey(
             hasher.update(out[0..produced]); // 지금까지 만든 것 **전부**
         }
         var block: [hash_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &block);
         hasher.final(&block);
         const take = @min(hash_len, out.len - produced);
         @memcpy(out[produced..][0..take], block[0..take]);
@@ -575,6 +583,47 @@ test "64바이트 키는 K2 = HASH(K || H || K1) 로 잇는다" {
     var odd: [40]u8 = undefined;
     try deriveKey(&odd, k, h, .enc_s2c, session_id);
     try std.testing.expectEqualSlices(u8, long[0..40], &odd);
+}
+
+test "파생의 K 도 mpint 로 먹인다 (최상위 비트가 선 경우)" {
+    // **이것을 안 재면 `mpint` 를 `string` 으로 바꿔도 모든 테스트가 통과한다**(실측: 34/34 green).
+    // 기존 파생 테스트는 전부 기대값을 **같은** `wire.Writer.mpint` 로 만들고, K 도 최상위 비트가
+    // 0 인 값만 골라서 — 그 경우 mpint 와 고정 길이 문자열이 바이트 동일하다.
+    //
+    // 제품의 K 는 무작위 X25519 공유 비밀이라 **약 절반**이 0x80 이상이다. 틀리면 그 절반의 연결이
+    // 서버와 다른 세션 키를 유도하고, 증상은 KEX 가 끝난 한참 뒤 AEAD 태그 실패로 나온다
+    // (계약 §4.2 가 이름 붙여 둔 "재현이 지독히 어려운" 결함이다).
+    const k: [32]u8 = @splat(0x80);
+    const h: [32]u8 = @splat(0x42);
+    const sid = "session";
+
+    var hasher = Sha256.init(.{});
+    hasher.update(&[_]u8{ 0, 0, 0, 33, 0 }); // mpint: 길이 33 + 부호 자리 0x00
+    hasher.update(&k);
+    hasher.update(&h);
+    hasher.update("C");
+    hasher.update(sid);
+    var want: [hash_len]u8 = undefined;
+    hasher.final(&want);
+
+    var got: [hash_len]u8 = undefined;
+    try deriveKey(&got, k, h, .enc_c2s, sid);
+    try std.testing.expectEqualSlices(u8, &want, &got);
+
+    // 앞이 0 인 K 는 반대로 줄어든다 — 두 방향을 다 재야 규칙을 지킨 것이다.
+    var k0: [32]u8 = @splat(0x44);
+    k0[0] = 0;
+    var shrink = Sha256.init(.{});
+    shrink.update(&[_]u8{ 0, 0, 0, 31 });
+    shrink.update(k0[1..]);
+    shrink.update(&h);
+    shrink.update("C");
+    shrink.update(sid);
+    var want2: [hash_len]u8 = undefined;
+    shrink.final(&want2);
+    var got2: [hash_len]u8 = undefined;
+    try deriveKey(&got2, k0, h, .enc_c2s, sid);
+    try std.testing.expectEqualSlices(u8, &want2, &got2);
 }
 
 test "글자마다 다른 키가 나온다" {

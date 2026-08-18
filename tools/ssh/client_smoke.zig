@@ -139,8 +139,17 @@ fn recvChannel(out: []u8) ![]const u8 {
     while (true) {
         const p = try recv(out);
         if (p[0] >= 90 and p[0] <= 100) return p;
+        // **재키잉 요구는 넘기면 안 된다.** 넘기면 서버가 우리 KEXINIT 을 기다리며 교착하고,
+        // 20 초 뒤 읽기 타임아웃으로 죽는다 — 그러면 증상이 "출력이 모자란다" 로 보여 **흐름
+        // 제어를 의심하게 된다**(실측으로 그렇게 오진했다). 우리는 아직 재키잉을 안 하므로
+        // 여기서 그 사실을 이름 그대로 말하고 죽는다.
+        if (p[0] == kexinit.msg_kexinit) return error.ServerAskedForRekey;
+        // `SSH_MSG_DISCONNECT` 도 이름을 밝힌다 — 계약 §3.2 는 이유를 사용자에게 보여 주라고 한다.
+        if (p[0] == msg_disconnect) return error.ServerDisconnected;
     }
 }
+
+const msg_disconnect: u8 = 1;
 
 var pkt: [1 << 18]u8 = undefined;
 var scratch: [8192]u8 = undefined;
@@ -338,10 +347,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **짧은 출력으로는 흐름 제어가 안 탄다.** 초기 윈도 안에서 끝나면 우리가 채워 주는 경로가
     // 한 번도 안 돌아, 계약 §3.1 이 말한 "대량 출력이 도중에 멈춘다" 를 재현도 반증도 못 한다.
     // 그래서 스모크는 **윈도보다 큰 출력**을 요구한다.
-    while (true) {
-        const payload = recvChannel(&pkt) catch break;
+    while (!peer_closed) {
+        // **오류 이름을 삼키지 않는다.** 처음에는 `catch break` 였는데, 그러면 재키잉 요구도
+        // 멈춤도 전부 "루프 끝" 이 되어 아래 바이트 수 검사에서 **"출력이 모자란다 — 흐름 제어가
+        // 멈췄을 수 있다"** 로 나온다. 실제 원인은 서버가 재키잉을 요구한 것이었고, 그 오진을
+        // 실측으로 겪었다. 정상 종료(상대가 소켓을 닫음)만 루프를 끝낸다.
+        const payload = recvChannel(&pkt) catch |e| switch (e) {
+            error.Closed => break,
+            else => return e,
+        };
         try handle(&ch, payload);
-        if (peer_closed) break;
     }
 
     say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, exit-status {?d}", .{ if (want_pty) "pty" else "no-pty", got, stderr_bytes, adjusts, exit_code });

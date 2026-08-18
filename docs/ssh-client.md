@@ -59,7 +59,15 @@ OpenSSH 서버에서 "길이가 쓰레기로 풀린다/태그 불일치" 로 **�
 **이 문서와 코드는 draft 명명을 쓴다.**
 
 **안 하는 것**(정직하게 못박는다): RSA·ECDSA 호스트키, AES-GCM/CTR, `diffie-hellman-*`,
-agent 전달, 포트 포워딩, X11, SFTP/SCP, 다중 채널, `keyboard-interactive`.
+agent 전달, 포트 포워딩, X11, SFTP/SCP, 다중 채널, `keyboard-interactive`, **재키잉**.
+
+**재키잉을 안 하는 것은 시한폭탄이다 — 그래서 따로 적는다.** 서버는 일정 트래픽·시간마다
+`SSH_MSG_KEXINIT` 을 다시 보내 키를 갈자고 한다(OpenSSH 기본 `RekeyLimit` 은 **1GB 또는 1시간**).
+우리가 답하지 않으면 서버는 우리 KEXINIT 을 기다리며 **세션이 통째로 멈춘다** — 실측:
+`RekeyLimit 1M` 로 띄운 sshd 에서 917,504바이트를 받고 굳었다. 즉 **한 시간 넘는 터미널 세션은
+반드시 이것을 만난다**. 층에는 이미 조각이 있다(`kexinit.Phase.rekey` 는 재키잉에서 strict 표시자를
+무시하고 초기값을 잇는다, `transport.Phase.established`, `applyNegotiation`) — 없는 것은 그것을
+엮는 흐름과 `session_id` 를 초기 `H` 로 고정하는 규칙이다.
 
 **`keyboard-interactive` 를 뺀 값이 생각보다 크다.** 많은 서버가 비밀번호를 `password` 가 아니라
 그것으로 받고(2FA 도 그 위에 얹힌다), 그런 서버에서는 **키가 없으면 못 붙는다**. 이 기계의 sshd 는

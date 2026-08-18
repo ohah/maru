@@ -904,6 +904,20 @@ pub fn applyForcedCommitMessage(self: *AppSession) void {
 ///
 /// **성사될 때까지 다시 건다.** 첫 tick에는 목록 읽기가 없어(`git_result == null`) 원격 유무를 모르고
 /// 조용히 돌아간다 — 커밋 픽스처가 같은 이유로 재시도한다.
+/// `∨` 보조 메뉴를 연 상태를 캡처한다(`MARU_FORCE_SCM_MENU=1`, P6b). 메뉴는 클릭으로만 열리므로
+/// 포인터 없는 캡처 하니스에서는 그 화면에 도달할 방법이 없다(호버·커밋 상자와 같은 자리).
+///
+/// **상태를 심지 않는다** — 사용자 클릭과 같은 진입점(`.open_remote_menu`)을 태우므로 앵커·항목·원격
+/// 유무 판정은 전부 제품이 한다. 이미 열려 있으면 다시 열지 않는다(매 tick 열면 선택이 첫 줄로 되돌아간다).
+pub fn applyForcedRemoteMenu(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SCM_MENU") == null) return;
+    if (self.dock.view != .source_control) return;
+    if (self.scm_remote_menu_open) return;
+    if (self.git_result == null) return; // 아직 읽기 전이다
+    if (self.scm_write_error != null) return; // 이유가 이미 적혔다
+    scm_dock_ops.applyScmDockIntent(self, .open_remote_menu);
+}
+
 pub fn applyForcedFetch(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_SCM_FETCH") == null) return;
     // **커밋 픽스처에 얹지 않는다.** 그쪽은 `MARU_FORCE_SCM_COMMIT`이 없으면 첫 줄에서 돌아가므로,

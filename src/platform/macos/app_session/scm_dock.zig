@@ -19,6 +19,8 @@ const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const metal_frame = app_session_mod.metal_frame;
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
+const term_ops = @import("term.zig"); // 명령 주입 대상(활성 터미널) 판정 — P6b
+const settings_ops = @import("settings.zig"); // 컨텍스트 메뉴 열고 닫기(브랜치 메뉴와 같은 장치)
 const agent_dock = @import("agent_dock.zig");
 const scm_view = app_session_mod.scm_view;
 const scm_row_capacity = app_session_mod.scm_row_capacity;
@@ -1339,6 +1341,8 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         // 원격 갱신(P6). 대상은 **브랜치 줄이 말하는 그 저장소**(활성 저장소)다 — 그 줄의 ahead/behind가
         // 곧 이 버튼이 바꾸는 값이고, 다른 저장소를 갱신하면 화면과 결과가 어긋난다.
         .fetch_remote => submitFetch(self),
+        // `∨` — `push`/`pull`을 넣어 줄 보조 메뉴(P6b).
+        .open_remote_menu => openRemoteMenu(self),
         .scroll_thumb, .scroll_track => {},
     }
 }
@@ -1372,6 +1376,55 @@ fn submitFetch(self: *AppSession) void {
     self.scm_fetch_repo = self.allocator.dupe(u8, repo) catch null;
     clearScmWriteError(self); // 지난 실패 문구가 새 시도 위에 남지 않게
     self.metal_dirty = true;
+}
+
+/// `∨` 보조 메뉴를 연다(P6b — 쓰기·원격 §4). 여는 자리는 그 `∨`의 **발행된 rect**다: 메뉴는 누른 자리에서
+/// 자라야 하고, 그 자리를 여기서 다시 계산하면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다.
+///
+/// **원격이 없으면 열지 않는다.** 원격이 없는 저장소에서 `push`/`pull`은 무엇을 골라도 실패한다 — 칩과
+/// 같은 판정을 쓰고, 이유도 같은 자리에 적는다.
+fn openRemoteMenu(self: *AppSession) void {
+    if (self.git_result == null) return; // 아직 모른다 — 단정하지 않는다(칩과 같은 규율)
+    if (!scmHasRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_remote));
+    const rect = scmNodeRect(self, component.build.NodeIds.remote_menu) orelse return;
+    const content = dock_ops.dockGeometry(self).tree_content;
+    settings_ops.closeContextMenu(self);
+    self.context_menu_items_buf[0] = maru.i18n.t(.scm_menu_push);
+    self.context_menu_items_buf[1] = maru.i18n.t(.scm_menu_pull);
+    self.context_menu_items_len = 2;
+    self.scm_remote_menu_open = true;
+    // 도크-로컬 rect를 창 좌표로 옮긴다. 메뉴 자신이 작업영역 안으로 clamp하므로(브랜치 줄은 바닥이라
+    // 아래로 자랄 자리가 없다) 여기서 위로 띄우는 계산을 따로 하지 않는다.
+    self.chrome_host.context_menu.show(
+        @intFromFloat(@as(f64, @floatFromInt(content.x)) + rect.x),
+        @intFromFloat(@as(f64, @floatFromInt(content.y)) + rect.y),
+        2,
+    );
+    self.metal_dirty = true;
+}
+
+/// 발행된 도크 tree에서 그 노드의 rect(도크-로컬). 고정 chrome은 창이 스크롤돼도 같은 id를 쓴다.
+fn scmNodeRect(self: *AppSession, id: u64) ?chrome.ui.layout.UiRect {
+    for (self.scm_dock_entries.items) |entry| {
+        if (entry.id == id) return entry.rect;
+    }
+    return null;
+}
+
+/// 고른 줄을 **활성 터미널에 명령으로 넣어 준다**(P6b). 실행은 사용자가 한다 — 남의 저장소를 바꾸는 일이고
+/// hook·충돌·강제 여부가 걸린다(쓰기·원격 §4, 브랜치 전환과 같은 패턴이라 개행을 붙이지 않는다).
+///
+/// **`pasteText`를 쓰지 않는다.** 그쪽은 커밋 상자가 입력을 소유하면 글자를 **커밋 메시지로** 보낸다 —
+/// 사용자가 고른 것은 "터미널에서 실행할 명령"이므로 그 라우팅이 여기서는 틀린다(상자에 `git push`가
+/// 적히고 아무 일도 안 일어난다).
+pub fn applyRemoteMenuSelection(self: *AppSession, index: usize) void {
+    const cmd: []const u8 = switch (index) {
+        0 => "git push",
+        1 => "git pull",
+        else => return,
+    };
+    if (!term_ops.activeTermIsTerminal(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
+    term_ops.submitPaste(self, cmd, false, term_ops.activeSurface(self).id);
 }
 
 /// 끝난 fetch를 거둔다. **성공이든 실패든 목록을 다시 읽는다** — 성공이면 remote-tracking ref가 바뀌어

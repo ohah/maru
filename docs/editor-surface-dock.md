@@ -84,7 +84,7 @@ workspace에 영속한다(탐색기로 되돌아오는 재시작을 강요하지
 | 리뷰 대상(PR 번호·제목) | **로컬 git 밖** — GitHub API/`gh` 필요 | **범위 밖**(§10.12) | 자리도 두지 않는다 — 히스토리 탭이 로컬 커밋을 보여 준다 |
 | 원격 / 현재 브랜치 | `git symbolic-ref --short HEAD` + 원격 이름 | 포함(`payhere-pos-pc / fix/…` 형태) | |
 | ahead/behind | `git rev-parse --abbrev-ref origin/HEAD` → `git rev-list --count --left-right <base>...HEAD` | 포함 | |
-| `Fetch ∨` | 원격 갱신 + 보조 메뉴(`push`·`pull`은 터미널 주입) | 포함 — [쓰기·원격](editor-surface-dock-write.md) §4 | **갱신은 P6a로 들어왔다**(칩 하나). `∨` 보조 메뉴는 P6b |
+| `Fetch ∨` | 원격 갱신 + 보조 메뉴(`push`·`pull`은 터미널 주입) | 포함 — [쓰기·원격](editor-surface-dock-write.md) §4 | 갱신 P6a · `∨` 보조 메뉴 P6b(둘 다 2026-08-18 완료) |
 
 **ahead/behind의 기준은 `@{u}`가 아니라 기본 브랜치다.** 초판 목업이 `→ origin/main`을 보여 주는데, PR 브랜치의 `@{u}`는 보통
 `origin/<자기 브랜치>`라 그걸 쓰면 항상 `0 0`이 나온다(실측 확인). 리뷰가 알고 싶은 것은 "기본 브랜치 대비 내 브랜치"이므로

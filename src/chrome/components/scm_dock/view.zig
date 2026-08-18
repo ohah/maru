@@ -68,15 +68,15 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 5(아이콘·이름·↑·↓·원격 갱신 칩) + 호버 동작 1.
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 6(아이콘·이름·↑·↓·원격 갱신 칩·`∨`) + 호버 동작 1.
     // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
-    var text_ops: usize = 11;
+    var text_ops: usize = 12;
     var quad_extra: usize = 0;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     // 브랜치 줄 — 이름·아이콘 + `↑ N`/`↓ N` 둘(화살표 3바이트 + 공백 + 자릿수).
-    bytes += props.branch.len + icon_bytes + (count_digits + 5) * 2;
+    bytes += props.branch.len + icon_bytes * 2 + (count_digits + 5) * 2;
     // 원격 갱신 칩 — **긴 쪽으로 잡는다**(도는 중 문구가 더 길다). 모자라면 도크가 통째로 빈다.
     bytes += @max(i18n.t(.scm_fetch).len, i18n.t(.scm_fetching).len);
 
@@ -298,6 +298,21 @@ pub fn view(
             // 잡으면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(탭 칸에서 이미 겪은 갈림).
             const fetch_label = types.fetchLabel(props.fetch);
             var fetch_right: u32 = m.inset_x;
+            // `∨`(P6b)는 칩 오른쪽이다 — 글리프는 그룹 접힘과 같은 자산을 쓴다(같은 뜻: "여기 더 있다").
+            if (frame.tree.find(build.NodeIds.remote_menu)) |menu_index| {
+                const menu_rect = frame.tree.entries[menu_index];
+                // **`icon`으로 그린다**(`centered`가 아니라). PUA 글리프는 글자로 셰이핑되지 않고 등록된
+                // SVG를 rect 안에 직접 그리는 경로를 타야 한다 — 글자 경로로 보내면 폰트 폴백이 **작은
+                // 네모**를 낸다(제품 캡처 2026-08-18에서 실측: `∨` 자리에 깨진 상자가 떴다).
+                const glyph_x = (menu_rect.rect.width - @as(f32, @floatFromInt(m.icon_extent))) / 2;
+                try writer.icon(
+                    menu_rect,
+                    @max(glyph_x, 0),
+                    chevron_down_icon,
+                    m.icon_extent,
+                    if (props.fetch.enabled) .accent_bar else .muted_fg,
+                );
+            }
             if (frame.tree.find(build.NodeIds.fetch)) |fetch_index| {
                 const chip = frame.tree.entries[fetch_index];
                 // 꺼진 버튼은 **감추지 않고 흐리게** 둔다(§3.5 — 왜 안 되는지 말할 기회를 남긴다).
@@ -309,8 +324,11 @@ pub fn view(
                 // 탭 언더바·개수 배지가 이미 그 색이라, 같은 화면 안에서 "누를 수 있는 것"으로 읽힌다.
                 const role: tokens.ColorRole = if (props.fetch.enabled and !props.fetch.running) .accent_bar else .muted_fg;
                 try writer.centered(chip, fetch_label, role, .control);
-                // ahead/behind는 그 칩을 **비켜 앉는다**. 안 비키면 두 글자가 같은 자리에 겹친다.
-                fetch_right = m.inset_x + @as(u32, @intFromFloat(@max(chip.rect.width, 0))) + m.gap;
+                // ahead/behind는 그 **묶음 전체**(칩 + `∨`)를 비켜 앉는다. 칩 폭만 빼면 `∨` 위에 겹친다.
+                const group_left = chip.rect.x;
+                const row_right = rect.rect.x + rect.rect.width;
+                fetch_right = @intFromFloat(@max(row_right - group_left, 0));
+                fetch_right += m.gap;
             }
             if (props.has_ab) {
                 // ── ahead/behind는 **조각 둘**이다(사용자 지적 2026-08-18). 한 문자열로 그리면 ⑴ 화살표와
@@ -1636,6 +1654,9 @@ test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 
     // 왼쪽부터 `↑` → `↓` → 칩 순서다. 같은 자리면 글자가 포개져 셋 다 못 읽는다.
     try testing.expect(ahead.origin.x < behind.origin.x);
     try testing.expect(behind.origin.x < chip.origin.x);
+    // `∨`(P6b)도 그려지고, ahead/behind는 **묶음 전체**를 비켜 앉는다 — 칩 폭만 빼면 그 위에 겹친다.
+    const menu_rect = frame.tree.entries[frame.tree.find(build.NodeIds.remote_menu) orelse return error.MissingRemoteMenu].rect;
+    try testing.expect(@as(f32, @floatFromInt(behind.origin.x)) < menu_rect.x);
     // 칩은 브랜치 줄의 rect 안에 있다 — 글자가 tree가 준 자리를 벗어나면 히트 사각형과 어긋난다.
     const chip_rect = frame.tree.entries[frame.tree.find(build.NodeIds.fetch) orelse return error.MissingFetch].rect;
     try testing.expect(@as(f32, @floatFromInt(chip.origin.x)) >= chip_rect.x);
@@ -1792,9 +1813,11 @@ test "파일 행에 종류 아이콘이 붙는다(탐색기와 같은 분류기)
         },
         else => {},
     };
-    // 파일 종류 + 브랜치 줄 = 둘(그룹 헤더가 없는 fixture이고, **커밋 버튼의 `∨`는 이제 목록 항목**이라
-    // 이 fixture에는 없다 — ②b에서 커밋 줄이 저장소 그룹 안으로 내려갔다).
-    try testing.expectEqual(@as(usize, 2), icons_seen);
+    // 파일 종류 + 브랜치 줄 아이콘 + 브랜치 줄 `∨`(P6b) = 셋. 그룹 헤더가 없는 fixture이고, **커밋 버튼의
+    // `∨`는 이제 목록 항목**이라 여기 없다(②b에서 커밋 줄이 저장소 그룹 안으로 내려갔다).
+    //
+    // **`∨`가 아이콘 경로로 세어져야 한다**: 글자 경로로 그리면 폰트 폴백이 작은 네모를 낸다(실측).
+    try testing.expectEqual(@as(usize, 3), icons_seen);
 }
 
 test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {

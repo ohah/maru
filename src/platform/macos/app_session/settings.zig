@@ -66,6 +66,7 @@ const tab_accent_labels = app_session_mod.tab_accent_labels;
 const content_menu = app_session_mod.content_menu;
 const detectThemePreset = AppSession.detectThemePreset;
 const dock_ops = @import("dock.zig");
+const scm_dock_ops = @import("scm_dock.zig"); // 도크 `∨` 메뉴 선택 적용(P6b)
 const fontDirectInputLabel = AppSession.fontDirectInputLabel;
 const font_size_min = app_session_mod.font_size_min;
 const setAppKeepAlivePolicy = app_session_mod.setAppKeepAlivePolicy;
@@ -1434,6 +1435,7 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.view_options_menu = false;
     self.terminal_context_menu = false;
     self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
+    self.scm_remote_menu_open = false; // 도크 `∨`도 같은 규율(P6b)
     self.resource_menu_open = false; // 얼린 행 순서도 여기서 놓는다(다음에 열 때 다시 정렬한다)
     self.resource_menu_len = 0;
     self.agent_menu_open = false; // 에이전트 팝오버도 같은 규율 — 플래그를 빠뜨리면 다음 메뉴의 accept가 엉뚱한 분기로 간다
@@ -1478,6 +1480,13 @@ pub fn acceptContextMenu(self: *AppSession) void {
             null;
         closeContextMenu(self);
         if (key) |k| _ = self.activateSurfaceById(k);
+        return;
+    }
+    // 도크 브랜치 줄의 `∨`(P6b) — 고른 명령을 터미널에 넣고 닫는다. 브랜치 목록과 같은 규율이다.
+    if (self.scm_remote_menu_open) {
+        const selected = self.chrome_host.context_menu.selected;
+        closeContextMenu(self); // 먼저 닫는다 — 주입한 명령이 메뉴에 가리지 않게
+        scm_dock_ops.applyRemoteMenuSelection(self, selected);
         return;
     }
     // 브랜치 목록이 그다음이다 — 다른 메뉴 상태와 배타이고, 고른 이름을 터미널에 넣고 닫는다.

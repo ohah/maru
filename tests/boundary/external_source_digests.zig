@@ -530,6 +530,9 @@ pub const inventory = [_]Proof{
     // N1.5 기본 경로 전환(2026-08-18)으로 또 바뀐다: 비교 캡처 훅의 래치 필드 `debug_scm_diff_opened`
     // 하나와 그 훅 호출(`scm_dock_ops.maybeDebugOpenScmDiff`)이 붙는다. count는 2 그대로다 — 새 `@field`
     // 반사가 없고 Client 구성·receiver 집합도 안 건드린다.
+    // P6b `∨` 보조 메뉴로 또 움직인다: 메뉴 열림 플래그 하나(`scm_remote_menu_open`)와 그 캡처 게이트를
+    // 태우는 tick 호출 하나가 는다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
+    // 집합도 건드리지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d9c2b12349a6fbba3dd8220be89719e5f7e20e32adf9a5cbbfce6abe1c1d89f8" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -574,7 +577,9 @@ pub const inventory = [_]Proof{
     // 스키마 변형 순서와 어긋나면 "한국어"를 골랐는데 `en` 이 저장된다. enum 을 도는 것이 그 어긋남을
     // 정의상 불가능하게 만들고, 그 대가로 반사 하나가 는다. 이 하나 말고 다른 자리가 늘었다면
     // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "827ae1c90f99d3cf4e35cd7158804ba5265c1e2c44b3b0cefa505a69b8147b2f" },
+    // P6b: 컨텍스트 메뉴 accept 분기 하나(도크 `∨`)와 닫기에서 그 플래그를 내리는 줄이 는다. 다른 메뉴들과
+    // **배타**라 분기 순서가 곧 계약이고, count는 그대로다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "7209336fd34258ea1cbd36b6f0ba6a24c2bea480b1ad54574f7ef7d816a16b5a" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -611,5 +616,6 @@ pub const inventory = [_]Proof{
     // 들어와 digest가 움직인다. count는 1 그대로다.
     // P6a: 원격 갱신 문구 넷(`Fetch`·`가져오는 중…`·원격 없음·가져왔음)이 키로 들어와 digest가 움직인다.
     // count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "fa345f4ac4891b3adf1a453c103901e2ca5ee7aa88137ad29159b77e8eada1db" },
+    // P6b: `∨` 메뉴 두 줄과 "넣을 터미널이 없다" 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8f13f07db79d10b3de8534b66334a9ded79d42b4f57077556b534394bb48475f" },
 };

@@ -971,19 +971,46 @@ pub const Tree = struct {
         }
     }
 
+    /// **단일 자식 디렉터리 체인의 끝**을 찾는다(compact 표시). `a/b/c` 처럼 중간에 디렉터리 하나만
+    /// 있는 구간은 한 줄로 접어 보이는 것이 훑기 쉽다(사용자가 제시한 참고 트리의 `release / app`).
+    ///
+    /// **아직 읽지 않았거나 읽는 중인 노드에서 멈춘다** — 자식 수를 모르는 상태에서 접으면 다 읽힌 뒤
+    /// 줄이 바뀌어 보이는 것이 흔들린다. 파일이 섞여 있거나 자식이 둘 이상이면 거기서 끝난다.
+    fn compactChainEnd(node: *const Node) *const Node {
+        var cur = node;
+        while (cur.loaded and !cur.loading and cur.children.items.len == 1) {
+            const only = &cur.children.items[0];
+            if (!only.kind.isDirectory()) break;
+            cur = only;
+        }
+        return cur;
+    }
+
+    /// 접힌 줄의 라벨 — 마지막 노드의 경로에서 **첫 노드의 부모 경로**를 뗀 나머지(`b/c`)다. 새 문자열을
+    /// 만들지 않으므로 할당이 없고, 여러 단계 체인도 그대로 담긴다.
+    fn compactLabel(head: *const Node, tail: *const Node) []const u8 {
+        if (head == tail) return head.name;
+        const parent_len = head.path.len - head.name.len; // head.path = `<parent>/<head.name>`
+        if (tail.path.len <= parent_len) return tail.name; // 방어: 경로가 기대 형태가 아니면 이름만
+        return tail.path[parent_len..];
+    }
+
     fn appendChildrenRows(allocator: std.mem.Allocator, children: []const Node, depth: u16, open: []const OpenState, out: *std.ArrayList(Row)) !void {
-        for (children) |node| {
+        for (children) |*node| {
             if (node.kind.isDirectory()) {
+                // 체인의 **끝 노드**가 그 줄의 주인이다: 접기/펼치기·경로 매칭이 그것을 향해야 펼쳤을 때
+                // 실제 내용이 나온다(중간 노드를 펼쳐 봐야 또 한 겹이 나올 뿐이다).
+                const tail = compactChainEnd(node);
                 try out.append(allocator, .{ .directory = .{
-                    .path = node.path,
-                    .label = node.name,
+                    .path = tail.path,
+                    .label = compactLabel(node, tail),
                     .depth = depth,
-                    .expanded = node.expanded,
-                    .loading = node.loading,
+                    .expanded = tail.expanded,
+                    .loading = tail.loading,
                     .symlink = node.kind.isSymlink(),
-                    .identity = node.identity,
+                    .identity = tail.identity,
                 } });
-                if (node.expanded) try appendChildrenRows(allocator, node.children.items, depth +| 1, open, out);
+                if (tail.expanded) try appendChildrenRows(allocator, tail.children.items, depth +| 1, open, out);
             } else {
                 var row = fileRow(node.path, node.name, depth, node.kind.isSymlink(), open);
                 row.identity = node.identity;
@@ -1532,4 +1559,71 @@ test "file tree transaction clone is independent and pinned root rejects replace
     defer rows.deinit(allocator);
     try tree.buildRows(allocator, &.{}, &rows);
     try std.testing.expectEqualStrings("docs", rows.items[1].directory.label);
+}
+
+// 단일 자식 디렉터리 체인은 **한 줄로 접어** 보인다(사용자가 제시한 참고 트리의 `release / app`).
+// 여기서 고정하는 것은 셋이다: ⑴ 라벨이 이어진 경로이고 ⑵ 그 줄의 주인은 **끝 노드**이며(펼치기·경로
+// 매칭이 그것을 향한다) ⑶ **아직 안 읽은 노드에서는 접지 않는다**(자식 수를 모르는 채 접으면 다 읽힌 뒤
+// 줄이 바뀐다).
+test "file tree compact: 단일 자식 디렉터리 체인은 한 줄로 접히고 끝 노드가 그 줄의 주인이다" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+
+    // /w → release → app → main.zig. release·app 은 각각 자식이 하나뿐이다.
+    try tree.applySnapshot("/w", &.{.{ .name = "release", .kind = .directory }});
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(allocator);
+
+    // 아직 release 를 안 읽었다 — 접지 않는다(자식 수를 모른다).
+    try tree.buildRows(allocator, &.{}, &rows);
+    var saw_plain = false;
+    for (rows.items) |row| switch (row) {
+        .directory => |d| if (std.mem.eql(u8, d.label, "release")) {
+            saw_plain = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_plain);
+
+    // 읽고 나면 접힌다: release/app 한 줄.
+    try tree.applySnapshot("/w/release", &.{.{ .name = "app", .kind = .directory }});
+    try tree.applySnapshot("/w/release/app", &.{.{ .name = "main.zig", .kind = .file }});
+    try tree.buildRows(allocator, &.{}, &rows);
+    var compact_label: ?[]const u8 = null;
+    var compact_path: ?[]const u8 = null;
+    for (rows.items) |row| switch (row) {
+        .directory => |d| if (d.depth == 1) {
+            compact_label = d.label;
+            compact_path = d.path;
+        },
+        else => {},
+    };
+    try std.testing.expectEqualStrings("release/app", compact_label.?);
+    try std.testing.expectEqualStrings("/w/release/app", compact_path.?); // 끝 노드가 주인이다
+
+    // 그 줄을 펼치면 **끝 노드의 자식**이 나온다(중간을 한 번 더 펼칠 필요가 없다).
+    _ = try tree.toggleDirectory(compact_path.?);
+    try tree.buildRows(allocator, &.{}, &rows);
+    var saw_child = false;
+    for (rows.items) |row| switch (row) {
+        .file => |f| if (std.mem.eql(u8, f.label, "main.zig")) {
+            saw_child = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_child);
+
+    // 자식이 둘이 되면 더는 접지 않는다.
+    try tree.applySnapshot("/w/release", &.{ .{ .name = "app", .kind = .directory }, .{ .name = "notes.md", .kind = .file } });
+    try tree.buildRows(allocator, &.{}, &rows);
+    var saw_release_only = false;
+    for (rows.items) |row| switch (row) {
+        .directory => |d| if (d.depth == 1 and std.mem.eql(u8, d.label, "release")) {
+            saw_release_only = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_release_only);
 }

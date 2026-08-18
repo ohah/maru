@@ -360,7 +360,10 @@ test "archive detail view renders only redacted turn DTOs and exact action label
     try std.testing.expect(!user_turn_wide_icons.?);
     const resume_entry = frame.tree.entries[frame.tree.find(build.NodeIds.resume_session).?];
     const max_cols: u16 = @intFromFloat(@floor((resume_entry.rect.width - 16) / 8));
-    const cols = Writer.plannedCols(build.labels.resume_session, max_cols);
+    // 라벨은 세 조각으로 나뉘어 있어(§6.2) 폭도 **조립한 결과**로 잰다 — build 와 같은 함수를 쓰므로
+    // 둘이 갈리지 않는다.
+    var label_probe: [64]u8 = undefined;
+    const cols = Writer.plannedCols(build.renderActionLabel(&label_probe, build.labels.resume_session), max_cols);
     const expected_x: i32 = @intFromFloat(@floor(resume_entry.rect.x + (resume_entry.rect.width - @as(f32, @floatFromInt(@as(u32, cols) * 8))) / 2));
     try std.testing.expectEqual(expected_x, resume_origin_x.?);
     try std.testing.expect(saw_redacted_turn);
@@ -438,7 +441,10 @@ test "hovered primary action keeps its label distinguishable from the quad benea
     var label_color: ?tokens.ColorRole = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, "터미널에서 이어하기") != null) label_color = text.role;
+            // 라벨이 세 조각으로 나뉘어(§6.2) 조립된 뒤 그려지므로 **이름 부분**으로 찾는다 —
+            // 원문을 박으면 언어가 바뀔 때 못 찾고, 아이콘·단축키까지 붙은 전체 문자열로 찾으면
+            // 조립 방식이 바뀔 때 깨진다.
+            if (std.mem.indexOf(u8, run.text, i18n.t(.ad_resume_action)) != null) label_color = text.role;
         },
         else => {},
     };

@@ -280,10 +280,9 @@ test "detail worker redacts sensitive turns before publication" {
     redactTurns(std.testing.allocator, &parsed);
     // 가려진 턴은 **플래그**로 표시되고 원문은 사라진다. 문구를 여기서 만들지 않는 것이 계약이다 —
     // 만들면 이 워커가 돈 시점의 언어에 얼어붙어, 나중에 화면 언어를 바꿔도 이 줄만 옛 언어로 남는다.
+    // 빈 문자열이라는 것이 곧 **민감한 원문이 남지 않았다**는 뜻이다 — 이 테스트가 원래 지키던 것.
     try std.testing.expect(parsed.turns.items[0].redacted);
     try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
-    // 그리고 **민감한 원문이 남지 않았다** — 이 테스트가 원래 지키던 것이 그것이다.
-    try std.testing.expect(std.mem.indexOf(u8, parsed.turns.items[0].text, "API_TOKEN") == null);
     // 가릴 필요가 없는 턴은 익명화만 거치고 플래그가 안 선다.
     try std.testing.expect(!parsed.turns.items[1].redacted);
     try std.testing.expectEqualStrings("at /Users/user/project", parsed.turns.items[1].text);

@@ -3504,3 +3504,17 @@ test "C 선언으로 원격 출력과 답을 부른다" {
     const after = c_abi.maru_mobile_term_write("hi", 2);
     try std.testing.expectEqual(before + 2, after);
 }
+
+test "격자 크기는 코어가 답한다" {
+    // **host 가 따로 세면 갈린다.** 원격에 알릴 pty 크기와 우리가 그리는 격자가 달라지면
+    // 원격 프로그램이 화면을 엉뚱한 폭으로 그린다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const cols = bridge.maru_mobile_term_cols();
+    const rows = bridge.maru_mobile_term_rows();
+    try std.testing.expect(cols > 0);
+    try std.testing.expect(rows > 0);
+
+    // 창이 바뀌면 값도 따라간다 — 고정값을 돌려주면 회전 뒤에 어긋난다.
+    _ = bridge.maru_mobile_build(800, 500, now());
+    try std.testing.expect(bridge.maru_mobile_term_cols() != cols or bridge.maru_mobile_term_rows() != rows);
+}

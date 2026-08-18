@@ -620,7 +620,10 @@ fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList
         .{ .root = .{ .path = "/w", .label = "workspace", .expanded = true, .loading = false, .icon_kind = @intFromEnum(K.folder_open) } },
         .{ .directory = .{ .path = "/w/src", .label = "src", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_source) } },
         file.make("/w/main.zig", "main.zig", 1, .code),
-        file.make("/w/app.tsx", "app.tsx", 1, .web),
+        file.make("/w/app.tsx", "app.tsx", 1, .ts),
+        file.make("/w/index.js", "index.js", 1, .js),
+        file.make("/w/page.html", "page.html", 1, .markup),
+        file.make("/w/theme.css", "theme.css", 1, .style),
         file.make("/w/package.json", "package.json", 1, .data),
         file.make("/w/.editorconfig", ".editorconfig", 1, .config),
         file.make("/w/logo.png", "logo.png", 1, .image),
@@ -875,11 +878,24 @@ fn writeGridBitmapDump(io: std.Io, frame: renderer.RenderFrame) !void {
     defer allocator.free(canvas);
     @memset(canvas, 0);
 
-    // 업로드된 슬롯 픽셀을 glyph_index 로 되찾아 그 셀 위치에 얹는다.
-    for (frame.glyph_raster_frame.uploads) |u| {
-        if (u.glyph_index >= glyphs.len) continue;
-        const g = glyphs[u.glyph_index];
+    // 업로드된 슬롯 픽셀을 그 셀 위치에 얹는다. **glyph 를 순회하고 그 glyph 의 픽셀을 찾는다** —
+    // 업로드를 순회하면 같은 글리프가 여러 번 나오는 화면(반복 글자, 같은 실루엣을 공유하는 아이콘)에서
+    // **첫 자리만** 그려진다(atlas 캐시 히트라 업로드가 하나뿐이다). 그래서 덤프에 글자가 듬성듬성했고,
+    // 색만 다른 같은 아이콘은 한 줄만 보였다. 같은 cache_key 의 업로드를 재사용해 모두 그린다.
+    for (glyphs) |g| {
         const run = g.run;
+        const upload: ?@TypeOf(frame.glyph_raster_frame.uploads[0]) = blk: {
+            for (frame.glyph_raster_frame.uploads) |cand| {
+                if (cand.glyph_index >= glyphs.len) continue;
+                const ck = glyphs[cand.glyph_index].run.cache_key;
+                if (ck.font_id == run.cache_key.font_id and ck.glyph_id == run.cache_key.glyph_id and
+                    ck.font_size_px == run.cache_key.font_size_px and ck.device_scale == run.cache_key.device_scale and
+                    ck.raster_font_size_milli == run.cache_key.raster_font_size_milli and
+                    ck.cell_width_px == run.cache_key.cell_width_px) break :blk cand;
+            }
+            break :blk null;
+        };
+        const u = upload orelse continue;
         const fgc = switch (run.style.foreground) {
             .rgb => |c| c,
             else => maru.color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff },

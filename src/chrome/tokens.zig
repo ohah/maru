@@ -165,6 +165,12 @@ pub const ColorRole = enum {
     file_icon_media_fg,
     file_icon_doc_fg,
     file_icon_package_fg,
+    /// 웹 계열 세분화(2026-08-18) — 글리프는 `web` 과 같고 **색이 종류를 가른다**. 한 폴더에 js·ts·css 가
+    /// 섞이는 것이 흔해, 그때 색이 유일한 구분 신호가 된다. 셋은 서로 그리고 `file_icon_web_fg`(js) 와도
+    /// 색상환에서 떨어뜨렸다.
+    file_icon_ts_fg,
+    file_icon_markup_fg,
+    file_icon_style_fg,
     /// **터미널 본문 배경.** chrome 표면(`surface_bg` — 사이드바·도크)과 **다른 색**이고, 그 차이가
     /// 의미다: 이 색이 칠해진 자리는 "셸/문서 내용이 사는 곳"이다.
     ///
@@ -346,6 +352,9 @@ pub const Tokens = struct {
         palette.set(.file_icon_media_fg, .{ .r = 186, .g = 138, .b = 206 }); // 이미지/미디어: 보라
         palette.set(.file_icon_doc_fg, .{ .r = 104, .g = 178, .b = 196 }); // 문서: 청록
         palette.set(.file_icon_package_fg, .{ .r = 206, .g = 128, .b = 110 }); // 패키지/아카이브: 주황빛 갈색
+        palette.set(.file_icon_ts_fg, .{ .r = 96, .g = 160, .b = 216 }); // TypeScript: 파랑(js 노랑과 대비)
+        palette.set(.file_icon_markup_fg, .{ .r = 214, .g = 142, .b = 96 }); // HTML/템플릿: 주황
+        palette.set(.file_icon_style_fg, .{ .r = 120, .g = 190, .b = 178 }); // CSS/스타일: 청록빛 초록
         palette.set(.terminal_bg, theme.terminal_background);
         palette.set(.diff_added_bg, theme.diff_added);
         palette.set(.diff_removed_bg, theme.diff_removed);

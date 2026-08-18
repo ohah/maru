@@ -972,6 +972,35 @@ test "행 동작 버튼은 상태 문자 자리를 침범하지 않는다" {
     try testing.expect(button_right <= status_left);
 }
 
+test "스크롤된 항목 rect는 뷰포트 밖으로 뻗고, 그 사실을 effective_clip이 든다" {
+    // host의 히트 판정이 **항목 rect만** 보면 안 되는 이유가 여기 있다: 가상화는 창의 첫 항목을 음수
+    // origin으로 올려 두므로(부분 가림), 그 rect는 목록 위쪽 띠 아래로 들어간다. 눌리는 자리를 자르는
+    // 값은 `effective_clip`이고, 일반 히트테스트(`interaction.zig`)도 그것으로 후보를 자른다.
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .commit_box = .{ .repo_index = 0, .rows = 8, .text = "본문" } },
+        .{ .file = .{ .name = "a.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
+    };
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+        // 창의 첫 항목이 8px 잘린 채 시작한다(스크롤 중간 — 가상화가 내는 그 상태다).
+        .content_first_item_origin_y_px = -8,
+        .content_h_px = 900,
+        .scroll_offset_px = 8,
+    }, &storage);
+
+    const index = frame.tree.find(NodeIds.item(0)) orelse return error.MissingBox;
+    const entry = frame.tree.entries[index];
+    const clip = entry.effective_clip orelse return error.MissingClip;
+    // 상자 rect는 clip 위로 뻗어 있다(그리기는 잘리지만 rect는 안 잘린다).
+    try testing.expect(entry.rect.y < clip.y);
+    // 그리고 그 clip은 목록 뷰포트다 — 위쪽 고정 chrome(탭·요약)보다 아래에서 시작한다.
+    const content = frame.tree.entries[frame.tree.find(NodeIds.content) orelse return error.MissingContent].rect;
+    try testing.expect(clip.y >= content.y);
+}
+
 test "도크의 카드는 전부 각진 모서리다(목록은 표이지 캡슐 묶음이 아니다)" {
     // 카드 기본 반지름을 그대로 두면 행·탭 줄·요약 줄·브랜치 줄이 각자 둥근 캡슐로 떠 보인다. 이 도크의
     // 줄들은 **표의 행**이라 폭을 꽉 채워야 위아래가 같은 격자로 읽힌다(사용자 지적 2026-08-16).

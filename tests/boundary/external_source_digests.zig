@@ -546,6 +546,9 @@ pub const inventory = [_]Proof{
     // 커밋 상자 휠(2026-08-18 사용자 결정)로 또 움직인다: 휠 잔여 하나(`scm_commit_wheel_residue`)와 캡처
     // 게이트의 1회성 래치 하나가 붙고, tick이 그 게이트를 태우는 호출 하나가 는다. **위치는 새로 안 든다** —
     // `scm_commit_first_row`가 그대로 단일 출처다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
+    // 적대적 검증 회차(2026-08-19)로 다시 움직인다: 커밋 상자 히트 판정이 발행 entry의 `effective_clip`을
+    // 함께 보게 되면서 테스트가 늘고(투영이 그 상자를 늘 창 안에 두는 불변식), 캡처 게이트가 clip 안의
+    // 점을 고른다. count는 2 그대로다 — 새 `@field` 반사도 Client 구성 변화도 없다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "50ccbdcbd82e6b438ba49ca19f98d6104580abc12df8612204088f2391d6ca39" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

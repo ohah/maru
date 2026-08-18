@@ -55275,6 +55275,24 @@ fn openScmDockWithCommitBox(session: *AppSession, allocator: std.mem.Allocator, 
 }
 
 /// 커밋 상자 **바닥 여백** 안의 한 점.
+/// 목록을 그 offset으로 옮기고 **같은 경로로 다시 발행한다**(투영 → build → publish). 발행된 rect는
+/// 스크롤이 반영된 값이라, 스크롤 뒤의 히트 판정을 보려면 이 순서를 그대로 다시 태워야 한다.
+fn republishScmDock(session: *AppSession, arena: std.mem.Allocator, offset_y_px: u32) !void {
+    session.scm_scroll.offset_y_px = offset_y_px;
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
+}
+
 fn commitBoxPointBottom(session: *AppSession) !struct { x: f64, y: f64 } {
     const content = dock_ops.dockGeometry(session).tree_content;
     const rect = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
@@ -56762,6 +56780,60 @@ test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 �
     const right = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 1.5, @floatFromInt(m.commit_pad_y + 2));
     scm_dock_ops.focusCommitAt(session, 0, "/repo", right.x, right.y);
     try std.testing.expectEqual(@as(usize, 3), session.scm_commit_field.caret);
+}
+
+test "소스 컨트롤: 편집 중인 상자는 늘 창 안에 온전히 있다(휠·클릭 판정이 그 위에 선다)" {
+    // 이 불변식(`revealCommitBox`)이 있어서 상자 rect가 목록 뷰포트 밖으로 **부분적으로** 나가는 상태가
+    // 포커스된 동안에는 생기지 않는다 — 휠·포커스 해제 판정이 그 사실 위에 서 있다. 누군가 reveal을
+    // 느슨하게 하면(성능·다른 요구) 그 판정이 조용히 "안 보이는 상자"를 맞히기 시작하므로 여기서 잠근다.
+    //
+    // 컴포넌트 쪽 쌍둥이: `scm_dock.build`의 "스크롤된 항목 rect는 뷰포트 밖으로 뻗고, 그 사실을
+    // effective_clip이 든다" — 그쪽이 rect와 clip이 갈린다는 사실을, 이쪽이 그 갈림이 포커스된 상자에는
+    // 안 닿는다는 사실을 든다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.insertCommitText(session, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12");
+
+    // **목록을 길게 만든다** — 짧으면 스크롤이 상한에 걸려 이 시나리오를 시도조차 못 한다.
+    var status: std.ArrayList(u8) = .empty;
+    defer status.deinit(allocator);
+    try status.appendSlice(allocator, "# branch.head main\n");
+    for (0..40) |i| {
+        var line: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b file{d}.txt\n", .{i});
+        try status.appendSlice(allocator, text);
+    }
+    // 앞 결과를 **먼저 지운다**(worker allocator 소유 — 그냥 덮어쓰면 샌다).
+    if (session.git_result) |*old_result| old_result.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, status.items),
+        .ok = true,
+    };
+
+    // 상자를 반쯤 가릴 만큼 굴려 본다(계산해서 그 자리를 만든다).
+    try republishScmDock(session, arena_state.allocator(), 0);
+    const at_top = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
+    const clip_at_top = scm_dock_ops.commitBoxClip(session) orelse return error.MissingClip;
+    try republishScmDock(session, arena_state.allocator(), @intFromFloat(@max(at_top.y - clip_at_top.y, 0) + 8));
+
+    // **투영이 되돌린다.** 상자는 clip 안에 온전히 남는다 — 위로도, 아래로도 잘리지 않는다.
+    const box = scm_dock_ops.commitBoxRect(session) orelse return error.MissingCommitBox;
+    const clip = scm_dock_ops.commitBoxClip(session) orelse return error.MissingClip;
+    try std.testing.expect(box.y >= clip.y);
+    try std.testing.expect(box.y + box.height <= clip.y + clip.height);
+
+    // 그 위쪽 고정 띠(요약·탭)는 상자가 아니다 — 휠도 그쪽으로 안 간다.
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const above_y = @as(f64, @floatFromInt(content.y)) + @max(clip.y - 2, 0);
+    const x = @as(f64, @floatFromInt(content.x)) + box.x + 12;
+    try std.testing.expect(!scm_dock_ops.pointInCommitBox(session, x, above_y));
 }
 
 test "소스 컨트롤: 상자 위의 휠은 상자를 굴리고, 그 방향은 목록과 같다" {

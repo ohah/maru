@@ -124,9 +124,11 @@ pub const FontConfig = struct {
     /// maru는 다수 관례를 따라 **기본 켬**을 택한다(사용자 결정 2026-08). 합자를 쓰려고 코딩 폰트를 고른 사용자가
     /// 별도 설정 없이 기대한 모양을 보는 쪽이 놀람이 적다는 판단이다.
     ///
-    /// 등폭 격자는 깨지지 않는다: 코딩 폰트의 합자는 대개 `calt`(문맥 대체)로 구현돼 **글자 수를 유지**하고 칸마다
-    /// 조각을 하나씩 놓는다. 셀 수를 줄이는 `liga`는 셀이 비는 문제([#2123](https://github.com/ohah/maru/issues/2123))가
-    /// 있었으나, 셰이핑이 run 단위로 바뀌며 CoreText가 각 칸에 glyph를 배정해 해소됐다. loader가 `font.ligatures` 키로 파싱.
+    /// 등폭 격자는 깨지지 않는다: 코딩 폰트의 합자는 **글자 수를 유지**하고 칸마다 조각을 하나씩 놓는다. 다만 그
+    /// 합자 글리프의 ink 는 자기 자리보다 **왼쪽에서 시작**해서, 래스터 슬롯을 advance 폭으로만 잡으면 잘렸다
+    /// (`//` 가 `/` 하나로 — [#2123](https://github.com/ohah/maru/issues/2123)). 지금은 두 렌더 경로가 그 넘침을
+    /// 받아 슬롯을 넓힌다(터미널 `left_overhang_cells`, chrome `left_overhang_px`) — 자세한 것은
+    /// docs/font-strategy.md "Ligature". loader가 `font.ligatures` 키로 파싱.
     ligatures: bool = true,
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).

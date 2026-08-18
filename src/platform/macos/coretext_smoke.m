@@ -116,6 +116,10 @@ typedef struct {
     uint32_t color_glyph_kind;
     float x_px;
     float advance_px;
+    /// 이 글리프의 ink 가 자기 자리 **왼쪽으로 넘치는 px**(합자). 0 이 대부분이고, 합자 글리프만 양수다
+    /// (`//` 는 advance 의 0.75 배). chrome 텍스트는 셀 개념이 없어 터미널의 `left_overhang_cells`(칸 수)
+    /// 대신 px 로 싣는다 — 호출자가 래스터 슬롯을 그만큼 넓히고 그린 자리를 왼쪽으로 당긴다.
+    float left_overhang_px;
     char font_name[128];
 } MaruChromeTextGlyphRecord;
 
@@ -1943,6 +1947,14 @@ void maru_macos_coretext_shape_chrome_text(
                 glyph_records[out].color_glyph_kind = run_font != NULL && maru_font_is_color(run_font) ? 1u : 0u;
                 glyph_records[out].x_px = (float)position.x;
                 glyph_records[out].advance_px = (float)advance.width;
+                // 합자는 폰트가 **둘째 글리프에 두 글자를 합친 모양**을 놓고 그 ink 를 자기 자리 왼쪽 밖으로
+                // 뺀다(첫 글리프는 빈 자리). 그 넘침을 재서 실어 준다 — 슬롯을 advance 폭으로만 잡으면
+                // 넘친 부분이 잘려 `//` 가 `/` 하나로 보인다(#2123).
+                {
+                    CGRect ink = CTFontGetBoundingRectsForGlyphs(run_font, kCTFontOrientationHorizontal, &glyph, NULL, 1);
+                    const double over = -(double)ink.origin.x;
+                    glyph_records[out].left_overhang_px = (isfinite(over) && over > 0.0) ? (float)over : 0.0f;
+                }
                 glyph_records[out].font_name[0] = '\0';
                 (void)maru_copy_cfstring(run_name, glyph_records[out].font_name, sizeof(glyph_records[out].font_name));
                 out++;

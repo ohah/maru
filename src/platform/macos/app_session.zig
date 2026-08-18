@@ -56507,6 +56507,44 @@ test "소스 컨트롤: 원격이 없으면 fetch를 걸지 않고 이유를 적
     try std.testing.expect(session.scm_write_error == null);
 }
 
+test "소스 컨트롤: ahead/behind 기준은 기본 브랜치이고, 없으면 `@{u}`로 돌아간다 (§3.5)" {
+    // PR 브랜치의 `@{u}`는 보통 `origin/<자기 브랜치>`라 `# branch.ab`가 늘 `+0 -0`이다(실측 2026-08-18:
+    // 같은 브랜치가 `origin/HEAD` 기준으로는 `0 1`이었다). 그 값을 그리면 화면이 "차이 없음"이라고
+    // **거짓말**한다 — 방금 색까지 붙인 숫자라 더욱 그렇다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    git_ops.rememberGitRepo(session, "/repo");
+    session.git_result = .{
+        // `@{u}` 기준으로는 차이가 없다고 나온다.
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +0 -0\n"),
+        // 기본 브랜치 기준으로는 1 앞서 있다(왼쪽 = behind, 오른쪽 = ahead).
+        .ahead_behind = try git_backend_mod.worker_allocator.dupe(u8, "0\t1\n"),
+        .ok = true,
+    };
+
+    const with_base = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(u32, 1), with_base.ahead);
+    try std.testing.expectEqual(@as(u32, 0), with_base.behind);
+    try std.testing.expect(with_base.has_ab);
+
+    // origin/HEAD가 없는 저장소(로컬 전용)에서는 그 읽기가 실패한다 — 그때는 `@{u}` 값으로 돌아간다.
+    git_backend_mod.worker_allocator.free(session.git_result.?.ahead_behind);
+    session.git_result.?.ahead_behind = &.{};
+    git_backend_mod.worker_allocator.free(session.git_result.?.status);
+    session.git_result.?.status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +2 -3\n");
+    const fallback = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(u32, 2), fallback.ahead);
+    try std.testing.expectEqual(@as(u32, 3), fallback.behind);
+    try std.testing.expect(fallback.has_ab);
+}
+
 test "소스 컨트롤: `∨` 메뉴는 명령을 넣어 줄 뿐이고, 넣을 곳이 없으면 그렇게 말한다 (P6b)" {
     // `push`/`pull`은 **우리가 실행하지 않는다**(쓰기·원격 §4) — 활성 터미널에 글자를 넣고 엔터는
     // 사용자가 친다. 넣을 터미널이 없으면 조용히 사라지지 않고 그 사실을 적는다.

@@ -101,6 +101,9 @@ pub const Result = struct {
     /// `git worktree list --porcelain` 출력. 도크가 워크트리마다 한 줄을 세우기 때문에 읽는다(§3.5.1c).
     /// **선택이다** — 실패해도 목록은 성립한다(그 저장소는 자기 한 줄로만 뜬다).
     worktrees: []u8 = &.{},
+    /// `git rev-list --count --left-right origin/HEAD...HEAD` 출력 — **기본 브랜치 대비** ahead/behind(§3.5).
+    /// **선택이다**: origin/HEAD가 없거나 unborn이면 실패하고, 그때 호출자는 `status`의 `@{u}` 값으로 돌아간다.
+    ahead_behind: []u8 = &.{},
     /// `git remote` 출력 — 이 저장소에 원격이 **있는가**(P6). 도크의 `Fetch`를 켤지 정하는 사실이고,
     /// **선택이다**: 못 읽으면 원격이 없는 것으로 보고 버튼을 끈다(없는 것을 눌러 실패로 배우게 하지 않는다).
     remotes: []u8 = &.{},
@@ -124,6 +127,7 @@ pub const Result = struct {
         allocator.free(self.merge_base);
         allocator.free(self.worktrees);
         allocator.free(self.remotes);
+        allocator.free(self.ahead_behind);
         allocator.free(self.turn_name_status);
         allocator.free(self.turn_numstat);
         self.* = .{};
@@ -1464,6 +1468,9 @@ fn worker(job: *Job) void {
         // **원격 목록도 선택이다.** 못 읽으면 `Fetch`가 꺼진 채 "원격 없음"으로 보이는데, 그건 틀릴 수
         // 있어도 **안전한 쪽으로 틀린다**(누르면 될 것을 못 누른다 vs. 안 되는 것을 눌러 실패를 본다).
         .{ git_command.Kind.remotes, "remotes" },
+        // **기본 브랜치 대비 ahead/behind도 선택이다**(§3.5). origin/HEAD가 없는 저장소(로컬 전용·clone
+        // 아님)에서는 실패하는데 그건 정상이고, 그때는 화면이 `@{u}` 값으로 돌아간다.
+        .{ git_command.Kind.ahead_behind, "ahead_behind" },
     }) |pair| {
         if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
             @field(result, pair[1]) = out.bytes;

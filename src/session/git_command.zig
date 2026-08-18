@@ -40,6 +40,19 @@ pub const Kind = enum {
     numstat_staged,
     /// 아직 스테이지되지 않은 변경의 +N -N (`index ↔ worktree`).
     numstat_worktree,
+    /// **기본 브랜치 대비 ahead/behind**(`rev-list --count --left-right origin/HEAD...HEAD`).
+    ///
+    /// **`status --branch`의 `# branch.ab`를 쓰지 않는 이유**(§3.5): 그 값은 `@{u}` 기준인데 PR 브랜치의
+    /// upstream은 보통 `origin/<자기 브랜치>`라 **항상 `0 0`**이 나온다(실측 2026-08-18: 이 저장소의 작업
+    /// 브랜치에서 `# branch.ab +0 -0`인데 `origin/HEAD` 기준으로는 `0 1`이었다). 리뷰가 알고 싶은 것은
+    /// "기본 브랜치 대비 내 브랜치"다.
+    ///
+    /// **삼점이다.** `A...B`는 양쪽의 공통 조상 이후만 센다 — 두 점(`A..B`)이면 기준이 갈린 뒤 기본
+    /// 브랜치에 쌓인 커밋이 behind에 안 잡힌다.
+    ///
+    /// 출력은 `<behind>\t<ahead>` 한 줄이다(왼쪽 = origin/HEAD에만 있는 것 = 내가 뒤처진 수).
+    /// **실패해도 목록은 성립한다** — origin/HEAD가 없거나 unborn이면 호출자가 `@{u}` 값으로 되돌아간다.
+    ahead_behind,
     /// 기본 브랜치와 갈린 지점(`merge-base origin/HEAD HEAD`). 이 값이 "브랜치에 COMMIT 됨" 섹션의 왼쪽이다.
     /// **실패해도 목록은 성립한다** — origin/HEAD가 없는 저장소(로컬 전용·clone 아님)에서는 그 섹션만 숨긴다.
     merge_base,
@@ -499,6 +512,16 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "remote";
             n += 1;
         },
+        .ahead_behind => {
+            buf[n] = "rev-list";
+            n += 1;
+            buf[n] = "--count";
+            n += 1;
+            buf[n] = "--left-right";
+            n += 1;
+            buf[n] = "origin/HEAD...HEAD";
+            n += 1;
+        },
         .branches => {
             buf[n] = "for-each-ref";
             n += 1;
@@ -768,6 +791,21 @@ test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 �
     try testing.expect(has(named, "deadbeef"));
     // 읽기 전용 계약은 여기에도 그대로 붙는다.
     try testing.expect(has(named, "core.pager=cat"));
+}
+
+test "ahead/behind는 기본 브랜치 기준 삼점 rev-list다 (`@{u}`가 아니다)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.ahead_behind, "/usr/bin/git", "/repo", null, &buf);
+
+    try testing.expect(has(argv, "rev-list"));
+    try testing.expect(has(argv, "--count"));
+    try testing.expect(has(argv, "--left-right"));
+    // **삼점이어야 한다.** 두 점이면 기준이 갈린 뒤 기본 브랜치에 쌓인 커밋이 behind에 안 잡힌다.
+    try testing.expect(has(argv, "origin/HEAD...HEAD"));
+    try testing.expect(!has(argv, "origin/HEAD..HEAD"));
+    // 읽기 전용 계약(외부 프로세스 차단)은 여기에도 붙는다.
+    try testing.expect(has(argv, "core.pager=cat"));
+    try testing.expect(argv.len <= max_argv);
 }
 
 test "원격 목록은 이름만 읽는다 — `-v`가 없어야 URL이 안 실린다" {

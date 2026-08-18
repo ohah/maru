@@ -119,6 +119,9 @@ pub const Step = struct {
     exit_status: ?u32 = null,
     /// 신호로 죽었다면 그 이름(`SIG` 접두 없이). `exit_status` 와 **둘 중 하나**만 온다(§6.10).
     exit_signal: ?[]const u8 = null,
+    /// 서버가 보낸 배너(RFC 4252 §5.4 — 법적 고지 등). **이미 걸러져 있다**(제어문자 제거) —
+    /// 서버가 고른 문자열이 그대로 화면에 가면 OSC 로 창 제목·클립보드에 손댈 수 있다.
+    banner: ?[]const u8 = null,
 };
 
 pub const Client = struct {
@@ -164,6 +167,9 @@ pub const Client = struct {
     exit_signal_len: usize = 0,
     /// 재키잉 횟수(진단용). 0 이면 그 경로를 안 탔다는 뜻이다.
     rekeys: usize = 0,
+    /// 걸러 둔 배너. `feed` 한 번이 돌려주고 다음 호출에서 비운다.
+    banner_buf: [1024]u8 = undefined,
+    banner_len: usize = 0,
     /// **셸이 한 번이라도 떴나.** `state` 는 재키잉 중에 `key_exchange` 로 돌아가는데, 그때
     /// `write` 가 `NotReady` 를 내면 **호출자가 재키잉을 알아야** 한다 — 알 필요가 없어야 한다.
     /// 그래서 "쓸 수 있는 세션인가"(이 값)와 "지금 보낼 수 있나"(윈도·§7.1)를 가른다.
@@ -232,6 +238,7 @@ pub const Client = struct {
         var w: Out = .{ .buf = wire_out };
         var s: Out = .{ .buf = screen_out };
         var consumed: usize = 0;
+        self.banner_len = 0; // 지난 호출의 것을 물려주지 않는다
 
         // **진행은 "먹었나" 만이 아니다 — "상태가 옮겨졌나" 도 진행이다.**
         //
@@ -257,6 +264,7 @@ pub const Client = struct {
             .state = self.state,
             .exit_status = self.exit_status,
             .exit_signal = if (self.exit_signal_len == 0) null else self.exit_signal_buf[0..self.exit_signal_len],
+            .banner = if (self.banner_len == 0) null else self.banner_buf[0..self.banner_len],
         };
     }
 
@@ -395,6 +403,16 @@ pub const Client = struct {
         if (msg == msg_ignore or msg == msg_debug or msg == msg_unimplemented) return;
         if (msg == msg_global_request) return; // `want_reply` 는 S7c 가 다룬다
 
+        // **배너는 어느 상태에서나 온다** — RFC 4252 §5.4 는 "at any time after this
+        // authentication protocol starts and before authentication is successful" 라고 못박는다.
+        //
+        // 예전에는 `authenticating` 에서만 받았고, 그러면 `requesting_service`(SERVICE_ACCEPT 를
+        // 기다리는 사이)에 온 배너가 `UnexpectedMessage` 로 **세션을 죽인다**. **OpenSSH 는 그
+        // 자리에서 안 보낸다**(실측 — 배너를 켠 sshd 로 확인했고 옛 코드도 통과했다). 즉 이것은
+        // 명세가 허락하는데 우리가 안 받던 자리이지, OpenSSH 에서 재현된 결함은 아니다.
+        // 그래도 받는다: 비용이 한 줄이고 서버는 OpenSSH 만 있는 것이 아니다.
+        if (msg == userauth.msg_userauth_banner) return self.onBanner(payload);
+
         // **서버가 재키잉을 요구했다**(계약 §3.0.1). 어느 상태에서나 올 수 있다.
         if (msg == kexinit.msg_kexinit and self.state != .negotiating) return self.beginRekey(payload, w);
 
@@ -501,6 +519,21 @@ pub const Client = struct {
         self.state = .authenticating;
     }
 
+    /// 배너를 걸러 보관한다. **거르는 것이 계약이다**(§4.4.2) — 서버가 고른 문자열이 그대로
+    /// 화면에 가면 OSC 0/2·52 로 창 제목을 바꾸고 클립보드에 쓴다. 이 층이 표시를 모르므로
+    /// **여기서 걸러 두고** 호출자에게는 안전한 것만 준다.
+    fn onBanner(self: *Client, payload: []const u8) Error!void {
+        var r = wire.Reader.init(payload);
+        _ = try r.byte();
+        const message = try r.string();
+        const clean = userauth.sanitizeBanner(&self.banner_buf, message) catch {
+            // 너무 길면 버린다 — 배너 때문에 세션을 죽일 이유는 없다.
+            self.banner_len = 0;
+            return;
+        };
+        self.banner_len = clean.len;
+    }
+
     fn onAuthResponse(self: *Client, payload: []const u8, w: *Out) Error!void {
         switch (try userauth.parseResponse(payload, .publickey)) {
             .success => {
@@ -508,7 +541,7 @@ pub const Client = struct {
                 try self.emit(w, try self.ch.writeOpen(&buf, 0));
                 self.state = .opening_channel;
             },
-            .banner => {}, // 배너는 넘긴다 — 보여 주기는 UI 정책이다(계약 §4.4.2)
+            .banner => {}, // 위 `onBanner` 가 이미 처리한다(여기 오지 않는다)
             .failure => return Error.AuthFailed,
             else => return Error.UnexpectedMessage,
         }
@@ -984,4 +1017,80 @@ test "거대한 exit-signal 이름은 잘라서 담는다" {
     try wr.string("");
     const step = try feedChannel(&c, wr.written(), &w, &scr);
     try testing.expectEqual(@as(usize, 32), step.exit_signal.?.len);
+}
+
+/// 인증 프로토콜 중인 클라이언트를 만든다(암호는 안 붙인다 — 여기서 볼 것은 배너 처리다).
+fn authPhaseClient(state: State) Client {
+    var prng = std.Random.DefaultPrng.init(61);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    c.state = state;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+    return c;
+}
+
+fn bannerPayload(buf: []u8, message: []const u8) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.byte(userauth.msg_userauth_banner);
+    try w.string(message);
+    try w.string("en");
+    return w.written();
+}
+
+test "배너는 인증 중 어느 상태에서나 받는다" {
+    // **적대적 검증 6회차가 찾은 것.** RFC 4252 §5.4: "at any time after this authentication
+    // protocol starts and before authentication is successful". `authenticating` 에서만 받으면
+    // `requesting_service` 에 온 배너가 `UnexpectedMessage` 로 세션을 죽인다.
+    //
+    // **OpenSSH 는 그 자리에서 안 보낸다**(실측) — 그래서 실서버 스모크로는 안 잡힌다. 명세가
+    // 허락하는 자리를 우리가 안 받던 것이고, 판정은 이 테스트가 소유한다.
+    var buf: [256]u8 = undefined;
+    const payload = try bannerPayload(&buf, "legal notice");
+
+    for ([_]State{ .requesting_service, .authenticating }) |st| {
+        var c = authPhaseClient(st);
+        var w: [8192]u8 = undefined;
+        var scr: [64 * 1024]u8 = undefined;
+        var pbuf: [1024]u8 = undefined;
+        var prng = std.Random.DefaultPrng.init(3);
+        const n = try packet.write(&pbuf, payload, prng.random());
+        const step = try c.feed(pbuf[0..n], &w, &scr);
+        try testing.expectEqual(st, step.state); // 상태가 안 바뀐다 — 세션이 산다
+        try testing.expectEqualStrings("legal notice", step.banner.?);
+    }
+}
+
+test "배너는 걸러서 준다" {
+    // 계약 §4.4.2 — 서버가 고른 문자열이다. 그대로 화면에 가면 OSC 0/2·52 로 창 제목을 바꾸고
+    // 클립보드에 쓴다. 이 층이 표시를 모르므로 여기서 걸러 두고 안전한 것만 준다.
+    var c = authPhaseClient(.authenticating);
+    var buf: [256]u8 = undefined;
+    const payload = try bannerPayload(&buf, "hi\x1b]0;pwned\x07 there\n");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(5);
+    const n = try packet.write(&pbuf, payload, prng.random());
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &w, &scr);
+    const b = step.banner.?;
+    try testing.expect(std.mem.indexOfScalar(u8, b, 0x1b) == null); // ESC 가 없다
+    try testing.expect(std.mem.indexOfScalar(u8, b, 0x07) == null); // BEL 도 없다
+    try testing.expect(std.mem.indexOf(u8, b, "there") != null); // 본문은 남는다
+    try testing.expect(std.mem.indexOfScalar(u8, b, '\n') != null); // 줄바꿈은 남긴다
+}
+
+test "배너는 다음 feed 로 물려주지 않는다" {
+    // 한 번 준 것을 계속 주면 호출자가 같은 고지를 여러 번 띄운다.
+    var c = authPhaseClient(.authenticating);
+    var buf: [256]u8 = undefined;
+    const payload = try bannerPayload(&buf, "once");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const n = try packet.write(&pbuf, payload, prng.random());
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(pbuf[0..n], &w, &scr);
+    const second = try c.feed("", &w, &scr);
+    try testing.expectEqual(@as(?[]const u8, null), second.banner);
 }

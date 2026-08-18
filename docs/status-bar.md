@@ -395,16 +395,17 @@ libproc은 헤드리스로 못 고정한다(살아 있는 프로세스가 필요
 - **어댑터(테스트 밖)**: `proc_pid_rusage`·`proc_listchildpids` 호출과 `rc != 0` 처리. 여기엔 로직을 두지 않는다
   — 로직이 어댑터로 새면 그 부분은 영영 검증되지 않는다.
 
-### 자리 — 우측 배열은 이미 꽉 찼다
+### 자리 — 우측 배열을 넷으로 늘렸다
 
-`max_status_bar_right_items = 3`(blocked·running·알림)이라 **상수를 4로 늘려야** 한다. 우측 배열은 **앞이 더
+`max_status_bar_right_items`는 **4**다(blocked·running·알림·리소스). 우측 배열은 **앞이 더
 오른쪽**이고 폭이 모자라면 뒤부터 버리므로, 리소스는 **배열 마지막**(가장 왼쪽)에 둔다 — 가장 먼저 버려져야
-하는 항목이다. 막힌 에이전트가 리소스 숫자에 밀려 사라지면 안 된다.
+하는 항목이다. 막힌 에이전트가 리소스 숫자에 밀려 사라지면 안 된다. 실제 채우는 순서도
+`blocked_agents` → `running_agents` → `notifications` → `resource`다.
 
-`ItemId`에 값을 **반드시 추가**한다. `publish`는 폭 배열과 **같은 순서의 id 배열**을 받아 슬롯 `index`로
+`ItemId`에도 값이 있다(`resource = 6`). `publish`는 폭 배열과 **같은 순서의 id 배열**을 받아 슬롯 `index`로
 되짚으므로, 항목만 늘리고 id를 안 늘리면 인덱스가 밀려 "누른 것과 실행된 것"이 갈린다(§5.6이 그래서 인덱스를
-id로 쓰지 말라고 못 박아 뒀다). 클릭 동작은 없지만(`statusBarItemClickable`이 false) id는 있다 —
-없으면 인덱스가 밀린다.
+id로 쓰지 말라고 못 박아 뒀다). **지금은 클릭도 받는다** — `statusBarItemClickable`이 `.resource`에 `true`를
+돌려주고, 누르면 탭별 내역 팝오버가 뜬다(§4.2). 처음에는 id만 넣고 클릭은 없었다.
 
 ### 값이 없으면 항목이 없다
 

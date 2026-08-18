@@ -38,7 +38,12 @@ skip_or_fail() {
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 DRIVER="$ROOT/zig-out/bin/ssh-client-smoke"
-PORT=${MARU_SSH_SMOKE_PORT:-22987}
+# **포트를 고정하지 않는다.** 고정이면 두 실행이 겹칠 때 뒤엣것이 "안 떴다" 며 SKIP 하고
+# **조용히 통과**한다(실측: 동시에 둘 돌리니 하나는 3 회차 OK, 다른 하나는 0 회차에 EXIT=0).
+# CI 가 잡을 병렬로 돌리거나 사람이 두 번 돌리면 한쪽이 아무것도 안 재고 초록이 된다.
+# PID 로 흩고, 그래도 겹치면 다음 짝을 시도한다.
+PORT_BASE=${MARU_SSH_SMOKE_PORT:-$((20000 + ($$ % 20000)))}
+PORT_TRIES=${MARU_SSH_SMOKE_PORT_TRIES:-20}
 EXPECT_BYTES=8388608
 # **stderr 도 같은 윈도를 먹는다**(RFC 4254 §5.2). 안 내보내면 확장 데이터 경로를 아예 안 타서,
 # 그 회계가 빠져도 스모크가 초록이 된다(실측으로 확인한 구멍이다).
@@ -78,8 +83,8 @@ chmod 600 "$DIR/hostkey" "$DIR/clientkey" "$DIR/authorized_keys"
 
 # 2) 우리 sshd. **`ForceCommand` 로 1MiB 를 쏟게 한다** — 흐름 제어를 강제로 태우는 자리다.
 #    `yes` 를 쓰지 않는 이유: 끝이 없으면 exit-status 를 못 본다.
-cat >"$DIR/sshd_config" <<EOF
-Port $PORT
+cat >"$DIR/sshd_config.tmpl" <<EOF
+Port 0
 ListenAddress 127.0.0.1
 HostKey $DIR/hostkey
 PidFile $PIDFILE
@@ -93,22 +98,31 @@ AuthorizedKeysFile $DIR/authorized_keys
 PermitRootLogin no
 ForceCommand head -c $EXPECT_BYTES /dev/zero | tr '\\0' 'A'; head -c $EXPECT_STDERR /dev/zero | tr '\\0' 'E' >&2
 EOF
-chmod 600 "$DIR/sshd_config"
+chmod 600 "$DIR/sshd_config.tmpl"
 
-"$SSHD" -f "$DIR/sshd_config" -E "$DIR/sshd.log" || {
-	sed -n '1,5p' "$DIR/sshd.log" >&2 2>/dev/null || true
-	skip_or_fail "sshd 를 못 띄웠다(권한 문제일 수 있다)"
-}
-
-# 뜨기를 기다린다.
-i=0
-while [ ! -s "$PIDFILE" ] && [ $i -lt 50 ]; do
-	i=$((i + 1))
-	sleep 0.1
+# 포트가 빌 때까지 짝(주 포트 + echo 포트)을 옮겨 가며 시도한다.
+try=0
+PORT=""
+while [ $try -lt "$PORT_TRIES" ]; do
+	try_port=$((PORT_BASE + try * 2))
+	sed -e "s|^Port .*|Port $try_port|" "$DIR/sshd_config.tmpl" >"$DIR/sshd_config"
+	chmod 600 "$DIR/sshd_config"
+	rm -f "$PIDFILE"
+	"$SSHD" -f "$DIR/sshd_config" -E "$DIR/sshd.log" 2>/dev/null || true
+	i=0
+	while [ ! -s "$PIDFILE" ] && [ $i -lt 30 ]; do
+		i=$((i + 1))
+		sleep 0.1
+	done
+	if [ -s "$PIDFILE" ]; then
+		PORT=$try_port
+		break
+	fi
+	try=$((try + 1))
 done
-[ -s "$PIDFILE" ] || {
+[ -n "$PORT" ] || {
 	sed -n '1,5p' "$DIR/sshd.log" >&2 2>/dev/null || true
-	skip_or_fail "sshd 가 포트 $PORT 에 안 떴다 — 이미 쓰이는 포트일 수 있다(MARU_SSH_SMOKE_PORT 로 바꾼다)"
+	skip_or_fail "sshd 를 어느 포트에도 못 띄웠다($PORT_TRIES 번 시도, $PORT_BASE 부터)"
 }
 
 # 3) 우리 클라이언트로 **두 번** 붙는다.
@@ -127,7 +141,7 @@ USER_NAME=$(id -un)
 #    나머지 회차는 받기만 해서 보내는 쪽 흐름 제어가 선 위에서 한 번도 안 돈다(그 검사를 지워도
 #    스모크가 초록이었다 — 실측). 초기 윈도가 0 이라 **기다렸다 보내는 것**도 여기서 증명된다.
 ECHO_PORT=$((PORT + 1))
-sed -e "s|^Port .*|Port $ECHO_PORT|" -e "s|^PidFile .*|PidFile $DIR/sshd2.pid|" -e "s|^ForceCommand .*|ForceCommand cat|" "$DIR/sshd_config" >"$DIR/sshd_config2"
+sed -e "s|^Port .*|Port $ECHO_PORT|" -e "s|^PidFile .*|PidFile $DIR/sshd2.pid|" -e "s|^ForceCommand .*|ForceCommand cat|" "$DIR/sshd_config.tmpl" >"$DIR/sshd_config2"
 chmod 600 "$DIR/sshd_config2"
 "$SSHD" -f "$DIR/sshd_config2" -E "$DIR/sshd2.log" || {
 	skip_or_fail "echo 회차용 sshd 를 못 띄웠다"

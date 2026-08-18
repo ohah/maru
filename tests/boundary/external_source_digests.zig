@@ -53,7 +53,12 @@ pub const inventory = [_]Proof{
     // 정규화한다(docs/windows-platform.md §5 규칙 1: Windows 사용자가 `workspace.root = C:\proj` 로 적으면
     // L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다). count 는 108 그대로다 — 늘어난 것은
     // comptime 분기 하나와 `path_shape` 호출뿐이고 `@field` 로 도는 자리는 건드리지 않았다.
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "d4c1fc8207dce1d90ce06f085978ecbb29cb0098bb3295e03813ec6fce79f6f2" },
+    //
+    // 이어서 `tryParseFor(os_tag, …)` 로 OS 를 인자로 받게 바꿔 또 바뀐다. 호스트 고정으로 두면 이
+    // 저장소에 Windows 러너가 없어 Windows 갈래가 한 번도 안 돌고, 정규화를 지워도 CI 가 초록이었다
+    // (리뷰 지적, 대조군으로 확인). count 는 여전히 108 이다 — 인자 하나가 늘고 호출이 `~For` 로
+    // 바뀌었을 뿐 `@field` 반사 자리는 그대로다.
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "cbeea97783995a582c4c69fafa136d0aebf78745c6309969b0c0b1087ce240b1" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

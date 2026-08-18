@@ -1192,8 +1192,30 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     };
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
 
-    // 빌트인 바인딩만 보는 리졸버. 사용자 config 배선은 W7.5 의 config 경로 정규화와 함께 온다.
-    const resolver = maru.config.KeyBindingResolver{};
+    // **사용자 config 를 읽는다**(W7.5). 여기까지 하드코딩하던 값들 — 붙여넣기 보호·OSC 52 읽기 정책·
+    // 단어 구분자·우클릭 동작 — 이 전부 진짜 설정에서 온다. 없거나 못 읽으면 기본값이다(forgiving:
+    // 설정 파일이 없어도 터미널은 정상 동작해야 한다).
+    //
+    // **`Parsed` 를 세션 내내 들고 있어야 한다** — 리졸버가 바인딩 슬라이스를, 코어가 문자열 값을
+    // arena 에서 **빌린다**. 먼저 해제하면 dangling 이다.
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    // **검증에 실패하면 사용자 바인딩을 안 쓴다.** 모호한 바인딩(중복·앱/터미널 충돌)을 그대로 쓰면
+    // 어떤 키가 어디로 갈지 매번 달라진다 — 빌트인으로 접고 그 사실을 알린다.
+    var resolver = maru.config.KeyBindingResolver{
+        .app_bindings = loaded.keybindings,
+        .terminal_bindings = loaded.terminal_bindings,
+        .unbinds = loaded.unbinds,
+    };
+    var binding_config_rejected = false;
+    resolver.validate() catch |err| {
+        try stderr.print("  warning: user keybindings are ambiguous({s}) — falling back to built-ins\n", .{@errorName(err)});
+        resolver = .{};
+        binding_config_rejected = true;
+    };
+
     var keys_to_shell: usize = 0;
     var bytes_to_shell: usize = 0;
     var app_actions: usize = 0;
@@ -1202,10 +1224,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var preedit_failures: usize = 0;
     var preedit_max_bytes: usize = 0;
     var paste_out: PasteOutcome = .{};
-    // 붙여넣기 보호 설정. 이 스모크는 config 파일을 읽지 않으므로 **스키마 기본값을 그대로** 쓴다
-    // (`config/theme.zig`: 둘 다 `true`). W7.5 에서 사용자 config 를 배선하면 거기서 온다.
-    const paste_protection = true;
-    const bracketed_paste_is_safe = true;
+    // 붙여넣기 보호 설정 — **사용자 config 에서 온다**(W7.5).
+    const paste_protection = cfg.input.paste_protection;
+    const bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
     var osc52_reads_denied_unimplemented: usize = 0;
@@ -1229,9 +1250,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var right_click_pastes: usize = 0;
     var right_click_menus_unimplemented: usize = 0;
     var capture_losses: usize = 0;
-    // 우클릭 동작. `config/theme.zig`의 `input.right_click` **기본값이 `paste`** 다(PuTTY/X11 식 —
-    // 사용자 결정). 이 스모크는 config 를 안 읽으므로 그 기본값을 그대로 쓴다(W7.5 에서 진짜 설정에서 온다).
-    const right_click_action: maru.config.theme.RightClick = .paste;
+    // 우클릭 동작 — **사용자 config 에서 온다**(W7.5). 기본값은 `paste` 다(PuTTY/X11 식, 사용자 결정).
+    const right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
@@ -1250,13 +1270,12 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     const click_slop_x = win32_mouse.systemDoubleClickSlopX();
     const click_slop_y = win32_mouse.systemDoubleClickSlopY();
     const wheel_lines_per_notch = win32_mouse.systemWheelScrollLines();
-    // 단어 구분자. `config/theme.zig`의 `input.word_separators` **기본값이 빈 값**이다(공백만 경계라
-    // 비공백 run 전체를 선택한다). 이 스모크는 config 를 안 읽으므로 그 기본값을 그대로 쓴다 —
-    // 값을 지어내면 실제 앱과 다르게 동작한다. W7.5 에서 진짜 설정에서 온다.
-    const default_word_separators: []const u8 = "";
-    // OSC 52 읽기 정책. 이 스모크는 config 를 읽지 않으므로 스키마 기본값(`deny`)을 그대로 쓴다 —
-    // 원격 프로그램의 로컬 클립보드 탈취를 막는 사용자 결정이다(`config/theme.zig` `Osc52Config`).
-    const osc52_read_policy: maru.config.theme.Osc52Read = .deny;
+    // 단어 구분자 — **사용자 config 에서 온다**(W7.5). 기본값은 빈 값이라 공백만 경계다(비공백 run
+    // 전체를 선택한다). 문자열을 arena 에서 빌리므로 `loaded` 가 살아 있어야 한다.
+    const default_word_separators: []const u8 = cfg.input.word_separators;
+    // OSC 52 읽기 정책 — **사용자 config 에서 온다**(W7.5). 기본값은 `deny` 다(원격 프로그램의 로컬
+    // 클립보드 탈취를 막는 사용자 결정 — `config/theme.zig` `Osc52Config`).
+    const osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
     var clipboard_errors: usize = 0;
 
     var counts: win32_terminal.FrameCounts = .{};
@@ -1769,6 +1788,15 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // **조용히 되돌아간다** — 실패하지 않으므로 이 줄이 없으면 배치가 틀린 것과 잘 된 것을 못 가른다.
     {
         const reason = maru.pty.windowsConptyRejectReason();
+        // **config 가 실제로 읽혔는지 찍는다.** 값이 기본값과 같으면 "읽었는데 기본값" 과 "아예 안 읽었다" 를
+        // 구분할 수 없다 — 경로와 바인딩 개수를 함께 내면 갈린다.
+        try stdout.print("config_bindings: app={d} terminal={d} unbinds={d} rejected={}\n", .{
+            loaded.keybindings.len, loaded.terminal_bindings.len, loaded.unbinds.len, binding_config_rejected,
+        });
+        try stdout.print("config_input: paste_protection={} bracketed_safe={} right_click={s} word_separators=\"{f}\"\n", .{
+            paste_protection, bracketed_paste_is_safe, @tagName(right_click_action), std.zig.fmtString(default_word_separators),
+        });
+        try stdout.print("config_osc52_read={s} diagnostics={d}\n", .{ @tagName(osc52_read_policy), loaded.diagnostics.len });
         try stdout.print("conpty={s}{s}{s}\n", .{
             @tagName(maru.pty.windowsConptySource()),
             if (reason.len > 0) " reason=" else "",

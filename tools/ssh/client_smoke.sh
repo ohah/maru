@@ -63,6 +63,15 @@ fi
 if ! command -v ssh-keygen >/dev/null 2>&1; then
 	skip_or_fail "ssh-keygen 이 없다"
 fi
+# **드라이버를 여기서 짓는다.** 예전에는 "없으면 실패" 만 봤는데, 있기만 하면 **낡았어도** 그대로
+# 돌았다 — 방금 고친 코드가 아니라 옛 바이너리를 재고 초록이 난다(실측으로 겪었다: 상태기계를
+# 바꾼 뒤 이 스크립트를 직접 돌려 통과했는데, 돌아간 것은 옛 바이너리였다).
+if command -v zig >/dev/null 2>&1; then
+	if ! (cd "$ROOT" && zig build ssh-client-smoke); then
+		echo "[ssh-client-smoke] FAIL: 드라이버 빌드 실패" >&2
+		exit 1
+	fi
+fi
 if [ ! -x "$DRIVER" ]; then
 	echo "[ssh-client-smoke] FAIL: $DRIVER 없음 — 'zig build ssh-client-smoke' 먼저." >&2
 	exit 1
@@ -71,12 +80,16 @@ fi
 DIR=$(mktemp -d)
 PIDFILE="$DIR/sshd.pid"
 
+# **띄운 것을 하나도 안 남긴다.** 예전에는 pid 파일을 하나씩 적었는데, 회차를 늘리면서 새로
+# 띄운 sshd 를 목록에 안 넣어 **listener 가 그대로 살아남았다**(실측: `pgrep sshd` 에 두 개).
+# 목록은 잊히므로 전수로 돈다.
 cleanup() {
-	if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; fi
-	if [ -f "$DIR/sshd2.pid" ]; then kill "$(cat "$DIR/sshd2.pid")" 2>/dev/null || true; fi
-	if [ -f "$DIR/sshd3.pid" ]; then kill "$(cat "$DIR/sshd3.pid")" 2>/dev/null || true; fi
-	if [ -f "$DIR/sshd4.pid" ]; then kill "$(cat "$DIR/sshd4.pid")" 2>/dev/null || true; fi
-	if [ -f "$DIR/sshd5.pid" ]; then kill "$(cat "$DIR/sshd5.pid")" 2>/dev/null || true; fi
+	# `$PIDFILE` 은 글롭에도 걸려 두 번 돈다. 그 사이 sshd 가 제 pid 파일을 지우므로
+	# `cat` 실패는 정상이다 — 조용히 넘긴다.
+	for _pid in "$PIDFILE" "$DIR"/*.pid; do
+		[ -f "$_pid" ] || continue
+		kill "$(cat "$_pid" 2>/dev/null)" 2>/dev/null || true
+	done
 	rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
@@ -220,11 +233,22 @@ start_sshd "$DIR/sshd5.pid" "$((PORT + 3))" "$DIR/sshd5.log" "echo MARU_BANNER_O
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 1 0 banner
 ROUNDS=$((ROUNDS + 1))
 
+# 9) **서버가 끊는 회차.** `MaxAuthTries 0` 이면 sshd 는 인증을 한 번도 안 받고 `DISCONNECT` 를
+#    보낸다(실측: 사유 2, "Too many authentication failures"). 사유·설명을 위로 올리는 경로는
+#    여기 말고 실서버 소비자가 없어서, 이 회차가 없으면 그 경로는 단위 테스트에만 있다.
+start_sshd "$DIR/sshd6.pid" "$((PORT + 5))" "$DIR/sshd6.log" "true" "MaxAuthTries 0" || {
+	sed -n '1,5p' "$DIR/sshd6.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 끊김 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 disconnect
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 7 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 7 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 8 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 8 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 일곱 회차 완주"
+echo "[ssh-client-smoke] 여덟 회차 완주"

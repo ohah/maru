@@ -387,7 +387,11 @@ pub const Channel = struct {
     /// Debug 에서는 패닉이고 배포가 쓰는 ReleaseFast 에서는 조용히 감싸 돌아, 채울 필요가 없는데
     /// 채우는 패킷이 계속 나간다. 기본값(2MiB)에서는 안 닿아서 **큰 윈도를 광고한 드라이버에서만**
     /// 드러난다(적대적 검증이 잡았다).
+    /// **닫힌 채널에는 보충할 것이 없다.** 이 물음과 `writeWindowAdjust` 는 같은 답을 해야
+    /// 한다 — 여기서 "필요하다" 고 하고 저기서 `UnexpectedMessage` 를 내면, 그 말을 믿고 쓰는
+    /// 드라이버가 **자기 실수도 아닌 오류로 죽는다**(실측: 서버가 끊은 직후 그 모양이 났다).
     pub fn pendingWindowAdjust(self: Channel) u32 {
+        if (self.state != .open and self.state != .eof_sent and self.state != .close_sent) return 0;
         if (self.local_window >= self.local_window_max / 2) return 0;
         return self.local_window_max - self.local_window;
     }
@@ -1168,7 +1172,9 @@ test "윈도가 2^31 이상이어도 넘치지 않는다" {
     // 절반 판정을 곱으로 쓰면 이 구간에서 `u32` 를 넘는다 — Debug 는 패닉, ReleaseFast 는 조용히
     // 감싸 돌아 **필요 없는 보충 패킷이 계속 나간다**. 기본값(2MiB)에서는 안 닿는 자리다.
     for ([_]u32{ 0x8000_0000, 0xC000_0000, 0xFFFF_FFFF }) |big| {
-        var ch: Channel = .{ .local_window_max = big, .local_window = big };
+        // **열린 채널로 잰다** — 닫힌 채널은 아예 "보충 없음" 이라, 상태를 안 주면 이 산수를
+        // 재는 것이 아니라 상태 가지를 재게 된다.
+        var ch: Channel = .{ .local_window_max = big, .local_window = big, .state = .open };
         try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust()); // 가득 찼으면 안 채운다
 
         ch.local_window = big / 2;
@@ -1179,6 +1185,23 @@ test "윈도가 2^31 이상이어도 넘치지 않는다" {
     }
 
     // 0 이어도 나눗셈이 안전하다(1/0 이 아니라 0/2 다).
-    var zero: Channel = .{ .local_window_max = 0, .local_window = 0 };
+    var zero: Channel = .{ .local_window_max = 0, .local_window = 0, .state = .open };
     try testing.expectEqual(@as(u32, 0), zero.pendingWindowAdjust());
+}
+
+test "닫힌 채널은 보충이 필요하다고 말하지 않는다" {
+    // 두 함수가 같은 답을 해야 한다. 어긋나면 그 말을 믿고 쓴 쪽이 오류로 죽는다.
+    var ch = Channel{};
+    ch.state = .open;
+    ch.local_id = 0;
+    ch.remote_id = 0;
+    ch.local_window = 1;
+    try std.testing.expect(ch.pendingWindowAdjust() != 0);
+    var buf: [64]u8 = undefined;
+    _ = try ch.writeWindowAdjust(&buf);
+
+    ch.local_window = 1;
+    ch.state = .closed;
+    try std.testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust());
+    try std.testing.expectError(Error.UnexpectedMessage, ch.writeWindowAdjust(&buf));
 }

@@ -128,7 +128,28 @@ fn pump() !client.State {
             banner_len = n;
         }
     }
+    // **서버가 끊었으면 이유를 남긴다.** 상태만 보면 "닫혔다" 까지만 알고 왜인지는 모른다 —
+    // 그 "왜" 가 실서버 붙일 때 유일하게 쓸모 있는 정보다(인증 실패·호스트 거부 등).
+    if (step.disconnect) |d| {
+        disconnect_reason = d.reason;
+        const n = @min(d.description.len, disconnect_seen.len);
+        @memcpy(disconnect_seen[0..n], d.description[0..n]);
+        disconnect_len = n;
+    }
     return step.state;
+}
+
+var disconnect_reason: ?client.DisconnectReason = null;
+var disconnect_seen: [256]u8 = undefined;
+var disconnect_len: usize = 0;
+
+/// 서버가 끊었으면 그 이유를 찍는다. 안 끊었으면 아무것도 안 한다.
+fn printDisconnect() void {
+    if (disconnect_reason) |r| {
+        std.debug.print("[ssh-client-smoke]   서버가 끊었다: reason={d} {s}\n", .{
+            @intFromEnum(r), disconnect_seen[0..disconnect_len],
+        });
+    }
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -151,6 +172,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const expect_banner = std.mem.eql(u8, mode, "banner");
     const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
         std.mem.eql(u8, mode, "self-rekey");
+    // **서버가 끊기를 기대하는 회차**(`MaxAuthTries 0`). `Step.disconnect` 는 이 자리 말고
+    // 소비자가 없어서, 이 회차가 없으면 사유·설명 경로를 실서버로는 아무도 안 밟는다.
+    const expect_disconnect = std.mem.eql(u8, mode, "disconnect");
 
     var parsed = try loadKey(key_path);
     defer parsed.clear();
@@ -181,9 +205,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
             continue;
         }
         if (st == .ready) break;
-        if (st == .closed) return fail("셸이 뜨기 전에 닫혔다");
+        if (st == .closed) {
+            printDisconnect();
+            if (!expect_disconnect) return fail("셸이 뜨기 전에 닫혔다");
+            const r = disconnect_reason orelse return fail("끊겼는데 이유가 없다");
+            // 실측(OpenSSH 10.2): `MaxAuthTries 0` 이면 사유 2(`protocol error`)에
+            // "Too many authentication failures" 가 실려 온다.
+            if (@intFromEnum(r) != 2) return fail("끊긴 사유가 2 가 아니다");
+            if (disconnect_len == 0) return fail("끊긴 설명이 비었다");
+            say("{s}: 서버가 끊었다 — 사유 {d}, 설명 {d}B", .{ mode, @intFromEnum(r), disconnect_len });
+            say("OK", .{});
+            return;
+        }
         try fill();
     }
+    if (expect_disconnect) return fail("서버가 끊기를 기대했는데 안 끊었다");
     if (cl.state != .ready) return fail("셸이 안 떴다");
     say("셸 준비됨 ({s})", .{mode});
 

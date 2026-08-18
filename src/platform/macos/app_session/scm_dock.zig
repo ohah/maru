@@ -507,11 +507,17 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         if (self.scm_commit_files_truncated) file_rows += 1;
     }
     const notice_rows: usize = if (rows.len == 0) 1 else 0;
-    const items = arena.alloc(component.types.Item, rows.len + notice_rows + file_rows) catch return null;
+    // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — `가져오기`는 어느 탭에서도 눌린다).
+    const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
+    const items = arena.alloc(component.types.Item, rows.len + notice_rows + action_rows + file_rows) catch return null;
     var n: usize = 0;
+    if (self.scm_write_error) |err| {
+        items[n] = .{ .notice = err };
+        n += 1;
+    }
     if (rows.len == 0) {
-        items[0] = .{ .notice = maru.i18n.t(.scm_no_turns) };
-        n = 1;
+        items[n] = .{ .notice = maru.i18n.t(.scm_no_turns) };
+        n += 1;
     }
 
     for (rows, 0..) |row, index| {
@@ -657,22 +663,29 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     }
 
     const notice_rows: usize = if (count == 0) 1 else 0;
+    // **방금 누른 동작의 결과는 어느 탭에서도 보여야 한다**(P6). `가져오기`는 브랜치 줄에 있어 히스토리·
+    // 에이전트 탭에서도 눌린다 — 이 줄이 없으면 눌러도 아무 말이 없어 "고장"으로 읽힌다.
+    const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
     // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
     // 눌러도 아무 일이 없어 고장으로 읽힌다.
     const more_rows: usize = if (count >= self.scm_log_limit) 1 else 0;
     // 출력이 상한에서 잘렸으면 **그 사실을 적는다** — "더 없다"와 "더 못 읽었다"는 다른 사실이다.
     const truncated_rows: usize = if (self.scm_log_truncated) 1 else 0;
-    const items = arena.alloc(component.types.Item, count + notice_rows + more_rows + truncated_rows + commit_file_rows) catch return null;
+    const items = arena.alloc(component.types.Item, count + notice_rows + action_rows + more_rows + truncated_rows + commit_file_rows) catch return null;
     var n: usize = 0;
+    if (self.scm_write_error) |err| {
+        items[n] = .{ .notice = err };
+        n += 1;
+    }
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
-        items[0] = .{ .notice = if (self.scm_log_failed)
+        items[n] = .{ .notice = if (self.scm_log_failed)
             maru.i18n.t(.scm_log_read_failed)
         else if (self.scm_log_repo == null)
             maru.i18n.t(.scm_loading)
         else
             maru.i18n.t(.scm_no_commits) };
-        n = 1;
+        n += 1;
     }
     var it = maru.session.git_log.iterate(self.scm_log_text);
     var index: u32 = 0;
@@ -1286,6 +1299,9 @@ pub fn scmHasRemote(self: *AppSession) bool {
 fn submitFetch(self: *AppSession) void {
     if (self.scm_fetch_inflight != 0) return; // 도는 중에 또 누르면 흘린다(프로세스를 쌓지 않는다)
     const repo = self.git_repo orelse return;
+    // **아직 안 읽었으면 아무 말도 하지 않는다.** "원격이 없다"는 단정인데 그때 우리가 아는 것은
+    // "모른다"뿐이다(머리 줄이 `읽는 중…`과 0건을 가르는 것과 같은 규율).
+    if (self.git_result == null) return;
     // 원격이 없으면 **왜 안 되는지 적는다**(§3.5 — 비활성 컨트롤은 이유를 말한다). tree가 이미 action을
     // 껐지만, 그 판단이 프레임 사이에 뒤집힐 수 있어 실행 직전에 한 번 더 본다.
     if (!scmHasRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_remote));
@@ -1321,6 +1337,8 @@ pub fn drainScmFetch(self: *AppSession) void {
         self.scm_write_error = writeErrorText(self, taken);
     }
     // fetch가 바꾸는 것은 remote-tracking ref다 — 그 저장소의 머리 줄을 다시 읽어야 ahead/behind가 따라온다.
+    // **쓰기가 도는 중이면 그 읽기는 §6-1이 막는다** — 그래도 잃지 않는다: 그 쓰기가 끝날 때
+    // `drainScmWrite`가 한 번 읽고, 비활성 저장소들은 위 호출이 낡음으로 표시해 둔다.
     if (self.scm_fetch_repo) |repo| {
         if (isCurrentRepo(self, repo)) {
             git_ops.refreshGitStatus(self);
@@ -2627,6 +2645,12 @@ fn finishCommit(self: *AppSession, ok: bool) void {
     // 그 저장소의 초안도 함께 지운다(빈 글을 담으면 `stashCommitDraft`가 항목을 없앤다).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (git_ops.gitRepoRoot(self, &repo_buf)) |repo| stashCommitDraft(self, repo);
+}
+
+/// 테스트가 그 자리에 문구를 심는 유일한 통로. 제품 경로와 **같은 함수**를 태워, 지우는 규칙(저장소가
+/// 바뀌면 사라진다)을 테스트가 자기만의 대입으로 우회하지 않게 한다.
+pub fn setScmWriteNoticeForTest(self: *AppSession, text: []const u8) void {
+    setScmWriteNotice(self, text);
 }
 
 /// 실패가 아니라 **안내**를 목록 위 한 줄로 낸다(빈 메시지·스테이지 0건처럼 git을 부르기도 전에 끝난

@@ -99,6 +99,9 @@ pub fn rememberGitRepo(self: *AppSession, repo: []const u8) void {
         if (std.mem.eql(u8, current, repo)) return;
         // **초안을 옮겨 담는 유일한 자리**다 — 여기가 옛 저장소와 새 저장소를 동시에 아는 곳이다.
         scm_dock_ops.switchCommitDraft(self, current, repo);
+        // 방금 누른 동작의 결과 줄은 **그 저장소의 것**이다(P6). 남겨 두면 다른 저장소의 목록 위에
+        // `원격에서 가져왔습니다`가 그대로 떠서, 하지도 않은 일을 한 것처럼 말한다.
+        scm_dock_ops.clearScmWriteError(self);
         self.allocator.free(current);
         self.git_repo = null;
     } else {

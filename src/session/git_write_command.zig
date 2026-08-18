@@ -140,6 +140,15 @@ const shared_config_overrides = [_][]const u8{
 /// hook을 끄는 쌍. **커밋에는 붙이지 않는다**(§3).
 const hooks_off = [_][]const u8{ "-c", "core.hooksPath=/dev/null" };
 
+/// fetch에만 붙는 **멈춤 방지** 쌍. 원격이 연결은 됐는데 데이터가 안 오면 그 프로세스는 영영 안 끝나고,
+/// 화면은 `가져오는 중…`에 고착돼 다시 누를 수도 없다(슬롯이 하나다). 20초 동안 1 KiB/s에도 못 미치면
+/// 접는다 — **닿지 않는 호스트**는 이 값이 못 막고 OS의 TCP 타임아웃이 정한다(SSH 쪽은 `ConnectTimeout`이
+/// 그 자리를 맡는다).
+const fetch_stall_guards = [_][]const u8{
+    "-c", "http.lowSpeedLimit=1024",
+    "-c", "http.lowSpeedTime=20",
+};
+
 /// 자격증명 helper를 끄는 쌍. **fetch에는 붙이지 않는다**(§4) — 붙이면 인증이 필요한 원격에서 항상 실패한다.
 /// 나머지 명령은 네트워크를 쓰지 않으므로 helper가 뜰 이유가 없고, 그건 곧 "config가 지정한 프로그램을 우리가
 /// 실행하는" 경로라 닫아 둔다.
@@ -172,9 +181,15 @@ pub const env_overrides = [_]EnvOverride{
 /// 막는다. 즉 **우리가 자격증명을 묻는 창을 만들지 않는다**(§4)가 두 겹으로 성립한다.
 pub const fetch_env_overrides = [_]EnvOverride{
     .{ .name = "GIT_TERMINAL_PROMPT", .value = "0" },
+    // **비우는 것이 아니라 `0`으로 덮는다.** 목록에서 빼면 사용자 환경의 `GIT_CONFIG_NOSYSTEM=1`이 그대로
+    // 상속돼(우리 프로세스는 상속 후 덮어쓰는 규율이다) 시스템 config가 배제되고, 그러면 macOS의
+    // keychain helper가 사라져 위 예외가 무의미해진다. git은 이 값을 boolean으로 읽으므로 `0`이 곧 "쓴다"다.
+    .{ .name = "GIT_CONFIG_NOSYSTEM", .value = "0" },
     .{ .name = "GIT_PAGER", .value = "cat" },
     .{ .name = "GIT_ASKPASS", .value = "" },
-    .{ .name = "GIT_SSH_COMMAND", .value = "ssh -o BatchMode=yes" },
+    // `ConnectTimeout`은 **닿지 않는 호스트**를 막는다(BatchMode는 묻는 것만 막는다) — 없으면 OS의 TCP
+    // 타임아웃까지 슬롯이 잡혀 있고, 그 동안 화면은 `가져오는 중…`에 고착된다.
+    .{ .name = "GIT_SSH_COMMAND", .value = "ssh -o BatchMode=yes -o ConnectTimeout=10" },
 };
 
 /// 그 명령이 쓸 환경 목록. 호출자(platform)는 이 함수만 부르고 어느 배열인지 고르지 않는다 — 고르게 두면
@@ -186,6 +201,8 @@ pub fn envOverrides(kind: Kind) []const EnvOverride {
 /// 고정 인자 수의 상한(경로 제외). 가장 긴 형태가 `rm --cached -r -- .`(하위명령 3 + `--` + 대상 1)이라
 /// 그 넷을 잡고 `--` 하나를 더한다. **정확히 이 값으로 조립되는지 테스트가 고정한다** — config를 하나
 /// 늘리면 배열 길이가 따라오지만, 하위명령이 길어지면 여기 숫자를 손으로 고쳐야 한다.
+/// **fetch도 이 안이다**: `credential.helper=`를 안 붙이는 대신 멈춤 방지 둘이 붙어(`-c` 넷) 같은 자리를
+/// 쓰고, 하위명령은 `fetch --prune` 둘이라 `rm --cached -r -- .`보다 짧다.
 pub const fixed_argv_max: usize = 3 + shared_config_overrides.len + hooks_off.len + credential_off.len + 4 + 1;
 
 /// 한 번에 넘길 경로의 상한. `ARG_MAX`(macOS 기본 1 MiB)에 여유를 크게 두고 **바이트와 개수 둘 다**로 자른다 —
@@ -253,7 +270,12 @@ pub fn build(
             n += 1;
         }
     }
-    if (!kind.usesNetwork()) {
+    if (kind.usesNetwork()) {
+        for (fetch_stall_guards) |override| {
+            buf[n] = override;
+            n += 1;
+        }
+    } else {
         for (credential_off) |override| {
             buf[n] = override;
             n += 1;
@@ -561,6 +583,15 @@ test "§4 fetch만 credential helper를 살려 둔다(나머지는 끈다)" {
     try testing.expect(has(fetch_argv, "core.pager=cat"));
     try testing.expect(has(fetch_argv, "diff.external="));
     try testing.expect(has(fetch_argv, "protocol.ext.allow=never"));
+    // 멈춤 방지 — 연결은 됐는데 데이터가 안 오는 원격에서 슬롯이 영영 잡히지 않게.
+    try testing.expect(has(fetch_argv, "http.lowSpeedLimit=1024"));
+    try testing.expect(has(fetch_argv, "http.lowSpeedTime=20"));
+    // 그 둘은 **fetch에만** 붙는다(네트워크를 안 쓰는 명령에 http 설정을 얹을 이유가 없다).
+    var s_buf: [64][]const u8 = undefined;
+    const stage_argv = try buildFixture(.stage, &.{"a.zig"}, null, &s_buf);
+    try testing.expect(!has(stage_argv, "http.lowSpeedLimit=1024"));
+    // 어느 형태든 버퍼 상한 안이다.
+    try testing.expect(fetch_argv.len <= fixed_argv_max);
 
     for ([_]Kind{ .stage, .unstage, .stage_all, .commit }) |kind| {
         var k_buf: [64][]const u8 = undefined;
@@ -573,9 +604,22 @@ test "§4 fetch만 credential helper를 살려 둔다(나머지는 끈다)" {
 
 test "§4 fetch 환경: 시스템 config를 배제하지 않고 ssh는 BatchMode로 묻지 않는다" {
     const fetch_env = envOverrides(.fetch);
-    // **`GIT_CONFIG_NOSYSTEM`이 없어야 한다.** macOS의 `credential.helper=osxkeychain`이 시스템 config에서
+    // **`GIT_CONFIG_NOSYSTEM`을 `0`으로 덮는다.** macOS의 `credential.helper=osxkeychain`이 시스템 config에서
     // 오므로(실측 2026-08-18) 배제하면 HTTPS 원격이 늘 인증 실패로 끝난다.
-    for (fetch_env) |e| try testing.expect(!std.mem.eql(u8, e.name, "GIT_CONFIG_NOSYSTEM"));
+    // **없는 것이 아니라 `0`이다** — 목록에서 빼면 사용자 환경의 `=1`이 상속돼 같은 사고가 난다.
+    var seen_nosystem = false;
+    for (fetch_env) |e| if (std.mem.eql(u8, e.name, "GIT_CONFIG_NOSYSTEM")) {
+        try testing.expectEqualStrings("0", e.value);
+        seen_nosystem = true;
+    };
+    try testing.expect(seen_nosystem);
+    // 네트워크를 안 쓰는 쪽은 여전히 배제한다(그쪽은 helper가 필요 없다).
+    var seen_off = false;
+    for (env_overrides) |e| if (std.mem.eql(u8, e.name, "GIT_CONFIG_NOSYSTEM")) {
+        try testing.expectEqualStrings("1", e.value);
+        seen_off = true;
+    };
+    try testing.expect(seen_off);
 
     var seen_ssh = false;
     var seen_prompt = false;
@@ -584,6 +628,8 @@ test "§4 fetch 환경: 시스템 config를 배제하지 않고 ssh는 BatchMode
         if (std.mem.eql(u8, e.name, "GIT_SSH_COMMAND")) {
             // 묻지 않고 실패한다 — `ssh-askpass`는 우리 프로세스 밖이라 통제할 수 없다.
             try testing.expect(std.mem.indexOf(u8, e.value, "BatchMode=yes") != null);
+            // 닿지 않는 호스트도 접는다 — BatchMode는 "묻지 않는다"일 뿐 "기다리지 않는다"가 아니다.
+            try testing.expect(std.mem.indexOf(u8, e.value, "ConnectTimeout=") != null);
             seen_ssh = true;
         }
         if (std.mem.eql(u8, e.name, "GIT_TERMINAL_PROMPT")) {
@@ -598,10 +644,11 @@ test "§4 fetch 환경: 시스템 config를 배제하지 않고 ssh는 BatchMode
     }
     try testing.expect(seen_ssh and seen_prompt and seen_askpass);
 
-    // 네트워크를 안 쓰는 명령은 예전 목록 그대로다(시스템 config 배제 포함).
+    // 명령 종류가 목록을 고른다 — 고르는 곳이 둘이면 "fetch인데 읽기 환경으로 돌았다"가 조용히 생긴다.
     for ([_]Kind{ .stage, .unstage, .stage_all, .commit }) |kind| {
         try testing.expectEqual(@as(usize, env_overrides.len), envOverrides(kind).len);
     }
+    try testing.expectEqual(@as(usize, fetch_env_overrides.len), envOverrides(.fetch).len);
 }
 
 test "저장소는 -C로 준다(프로세스 cwd를 건드리지 않는다)" {

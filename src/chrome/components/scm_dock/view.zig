@@ -300,7 +300,13 @@ pub fn view(
             if (frame.tree.find(build.NodeIds.fetch)) |fetch_index| {
                 const chip = frame.tree.entries[fetch_index];
                 // 꺼진 버튼은 **감추지 않고 흐리게** 둔다(§3.5 — 왜 안 되는지 말할 기회를 남긴다).
-                const role: tokens.ColorRole = if (props.fetch.enabled and !props.fetch.running) .focus_accent else .muted_fg;
+                //
+                // **켜진 쪽은 `accent_bar`다(`focus_accent`가 아니다).** rich 토큰셋에서 `focus_accent`는
+                // `sidebar_active`(배경색)를 밝힌 값이라 **글자색으로 쓰면 오히려 어둡다** — 제품 캡처
+                // 실측(2026-08-18)에서 켜진 칩이 (128,132,140)이고 꺼진 `muted_fg`가 (207,207,207)이라
+                // **꺼진 것이 더 밝은** 뒤집힌 화면이 나왔다. `accent_bar`는 테마의 시그니처 색이고
+                // 탭 언더바·개수 배지가 이미 그 색이라, 같은 화면 안에서 "누를 수 있는 것"으로 읽힌다.
+                const role: tokens.ColorRole = if (props.fetch.enabled and !props.fetch.running) .accent_bar else .muted_fg;
                 try writer.centered(chip, fetch_label, role, .control);
                 // ahead/behind는 그 칩을 **비켜 앉는다**. 안 비키면 두 글자가 같은 자리에 겹친다.
                 fetch_right = m.inset_x + @as(u32, @intFromFloat(@max(chip.rect.width, 0))) + m.gap;
@@ -1577,6 +1583,9 @@ test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 
     const draws = try viewBudgeted(&storage, props, frame, .{});
 
     const chip = findText(draws, i18n.t(.scm_fetch)) orelse return error.MissingFetchLabel;
+    // **켜진 칩은 강조색이다** — 꺼진 것과 같은 회색이면 "누를 수 있다"가 화면에 하나도 안 남는다
+    // (브랜치 줄에는 행 호버 밴드가 없어서 색이 유일한 신호다).
+    try testing.expectEqual(tokens.ColorRole.accent_bar, chip.role);
     const ab = findText(draws, "↑2 ↓1") orelse return error.MissingAheadBehind;
     // ahead/behind가 칩보다 **왼쪽**이다. 같은 자리면 두 글자가 포개져 둘 다 못 읽는다.
     try testing.expect(ab.origin.x < chip.origin.x);

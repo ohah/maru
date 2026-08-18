@@ -518,21 +518,30 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         props.fetch.enabled and !props.fetch.running,
     ) catch return error.InsufficientActionBuffer;
     const fetch_label = types.fetchLabel(props.fetch);
-    fetch_slot[0] = tree.button(.{
+    // **카드다**(투명 버튼이 아니라). 행 동작 아이콘은 행 호버 밴드가 affordance를 대신하지만 **브랜치
+    // 줄에는 그 밴드가 없다** — 투명하게 두면 커서만 바뀌고 눌린다는 신호가 화면에 하나도 없다. 카드로
+    // 두면 호버·눌림 해석이 `paint_style.resolveCard`를 지나 면이 밝아진다(커밋 버튼과 같은 길).
+    fetch_slot[0] = tree.card(.{
         .id = NodeIds.fetch,
         .style = .{
             .width = .{ .px = @floatFromInt(m.fetchChipWidthPx(fetch_label, props.cell_width_px)) },
             .height = .{ .px = @floatFromInt(m.action_extent) },
             .margin = .{ .right = @floatFromInt(m.inset_x) },
         },
-        // 행 동작 버튼과 같은 규율: 칠하지 않는다(호버 밴드 위에서 구멍처럼 보인다).
-        .variant = .ghost,
-        .paint = .{ .opacity = 0 },
+        .variant = .surface,
+        .paint = .{
+            .background = .inset_bg,
+            // **각진 모서리다.** 이 도크의 카드는 전부 그렇다(위 계약 — 줄들이 표의 행으로 읽혀야 한다).
+            // 둥근 것이 필요한 자리는 badge(개수 pill)가 따로 있고 그건 카드가 아니라 paint다.
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = .{ 0, 0, 0, 0 },
+            .shadow = .none,
+        },
         .action = fetch_action,
         // 꺼져 있으면 **누르는 손이 아니다** — 커서가 "된다"고 말해 놓고 안 되면 그게 고장으로 읽힌다.
         .cursor = if (props.fetch.enabled and !props.fetch.running) .press else .arrow,
         .overflow = .clip,
-    });
+    }, &.{});
     top[3] = tree.card(.{
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },

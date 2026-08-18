@@ -25,6 +25,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+# **인코딩을 로케일에 맡기지 않는다.** 이 저장소의 소스·진단이 전부 UTF-8 한국어인데 한국어 Windows 의
+# 기본은 cp949 다. 셋 다 따로 물어야 한다 — 실측(py 3.11, cp949 호스트):
+#   read_text()   -> UnicodeDecodeError (원장의 한국어 주석)
+#   write_text()  -> LF 를 CRLF 로 번역해, 한 해시 바꾸려다 원장 630 줄이 통째로 CRLF 가 된다
+#   print()       -> em-dash 에서 UnicodeEncodeError
+# 앞서 `subprocess.run` 만 고치고 "된다" 고 본 것은 **digest 가 최신이라 파일을 읽지도 않고 조기
+# 반환하는 경로**를 밟은 것이었다 — 이 도구는 할 일이 없을 때만 돌고 정작 필요할 때 죽었다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 REPO = Path(__file__).resolve().parent.parent
 INVENTORY = REPO / "tests" / "boundary" / "external_source_digests.zig"
 
@@ -87,7 +100,7 @@ def main() -> int:
         want_count = int(found["count"])
         want_digest = found["digest"]
 
-        source = INVENTORY.read_text()
+        source = INVENTORY.read_text(encoding="utf-8")
         entry = entry_pattern(path).search(source)
         if entry is None:
             print(f"inventory에 '{path}' 항목이 없다 — 새 항목은 손으로 추가해야 한다.", file=sys.stderr)
@@ -114,7 +127,9 @@ def main() -> int:
         INVENTORY.write_text(
             entry_pattern(path).sub(
                 lambda m: m["head"] + m["count"] + m["mid"] + want_digest, source, count=1
-            )
+            ),
+            encoding="utf-8",
+            newline="\n",  # 줄 끝 번역을 끈다 — 안 끄면 한 해시 바꾸려다 원장 전체가 CRLF 가 된다
         )
         updated.append((path, have_digest, want_digest))
     else:

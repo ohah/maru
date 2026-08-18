@@ -535,7 +535,11 @@ pub const inventory = [_]Proof{
     // P6b `∨` 보조 메뉴로 또 움직인다: 메뉴 열림 플래그 하나(`scm_remote_menu_open`)와 그 캡처 게이트를
     // 태우는 tick 호출 하나가 는다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
     // 집합도 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ad613986b500ace638a157d6fd82dfe376f633f762546b21b06ccc225dfa9d1b" },
+    // 편집기 스크롤바 드래그(scroll-area.md 소비자 표)로 또 바뀐다: 드래그 대상 태그에 편집기 둘이 붙고
+    // (`editor_vertical`·`editor_horizontal` — 축마다 offset 해석이 달라 태그도 둘이다), 가로 드래그
+    // 수명(`editor_hscroll_drag`)과 **잡은 Term**(`editor_scrollbar_term`)이 필드로 붙는다. count는 2
+    // 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합도 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "50ccbdcbd82e6b438ba49ca19f98d6104580abc12df8612204088f2391d6ca39" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

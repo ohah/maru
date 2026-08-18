@@ -102,6 +102,7 @@ const unknown_key_message = "알 수 없는 key — 무시";
 /// 키 인식 규칙을 복제하지 않으려고 버리는 config에 실제로 적용해 보고 그 진단만 골라 온다 — 규칙이 한 곳
 /// (`applyKey`)에 남는다.
 fn validateForeignOsKey(
+    os_tag: std.Target.Os.Tag,
     a: std.mem.Allocator,
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
@@ -115,7 +116,7 @@ fn validateForeignOsKey(
     var scratch_global: std.ArrayList(keybinding.GlobalBinding) = .empty;
     var scratch_env: std.ArrayList([]const u8) = .empty;
     // 값은 형식 진단을 피하려고 빈 문자열을 준다 — 우리가 볼 것은 키 인식 결과뿐이다.
-    try applyKey(a, &scratch_config, &scratch_binds, &scratch_unbinds, &scratch_term, &scratch_global, &scratch_env, &scratch_diags, line_no, base_key, "");
+    try applyKey(os_tag, a, &scratch_config, &scratch_binds, &scratch_unbinds, &scratch_term, &scratch_global, &scratch_env, &scratch_diags, line_no, base_key, "");
     for (scratch_diags.items) |d| {
         if (std.mem.eql(u8, d.message, unknown_key_message)) try diags.append(a, d);
     }
@@ -140,7 +141,14 @@ fn hostOsSuffix() ?[]const u8 {
 ///
 /// 각 줄은 **정확히 한 패스에서만** 적용되므로 `env.<KEY>` 누적이나 keybinding 목록이 중복되지 않는다. 패스
 /// 안에서는 파일 순서가 보존되고, 패스 사이에서만 OS 키가 뒤에 온다.
+/// 호스트 OS 로 `parseFor` 를 부르는 얇은 래퍼. 프로덕션 호출자가 그대로 쓴다.
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed {
+    return parseFor(@import("builtin").os.tag, allocator, source);
+}
+
+/// `parse` 의 **OS 인자 버전**. 경로 값 정규화가 호스트마다 갈리는데 저장소에 Windows CI 러너가 없다 —
+/// 그 갈래를 인자로 받아야 macOS·Linux CI 에서도 두 쪽이 다 돈다(계약 §5, verification-matrix).
+pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -173,11 +181,11 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         // "없는 키를 실재"로 보고한다(코드 리뷰에서 실측).
         const split = splitOsSuffix(key);
         if (split.os) |os| if (os != host_os) {
-            try validateForeignOsKey(a, &diags, line_no, split.base);
+            try validateForeignOsKey(os_tag, a, &diags, line_no, split.base);
             continue;
         };
 
-        try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
+        try applyKey(os_tag, a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
     }
 
     config.env = try env_overrides.toOwnedSlice(a); // 누적한 env.<KEY>를 Config로(arena 소유)
@@ -203,6 +211,7 @@ pub fn isValidWorkspaceRoot(trimmed: []const u8) bool {
 }
 
 fn applyKey(
+    os_tag: std.Target.Os.Tag,
     a: std.mem.Allocator,
     config: *theme.Config,
     binds: *std.ArrayList(keybinding.AppBinding),
@@ -242,7 +251,7 @@ fn applyKey(
     // 스키마-주도 스칼라(CS-1+CS-2: font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·
     // scrollback.*·bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command). 매칭되면 파싱·적용하고 끝.
     // 미매칭이면 false → 아래 if-else(특수 5종 + 최상위 스칼라)로 폴백. 단일 출처: docs/config-schema.md.
-    if (try schema.tryParse(a, config, key, value, diags, line_no)) return;
+    if (try schema.tryParseFor(os_tag, a, config, key, value, diags, line_no)) return;
     if (std.mem.eql(u8, key, "theme.preset")) {
         // 이름 붙은 컬러 테마(프리셋). config.theme를 통째로 그 색 세트로 깐다(theme.presetColors가 단일 출처).
         // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
@@ -323,7 +332,7 @@ fn applyKey(
         // `workspace.root = C:\proj` 처럼 native 로 적는 것이 자연스러운데, 그대로 두면 L2 가 `/` 로 이어
         // 붙인 결과와 섞여 `C:\proj/docs` 가 된다. 스키마-주도 경로 필드(`Meta.isPath`)와 **같은 규칙**을
         // 쓴다 — 이 키만 명시 핸들러라 빠지면 그 자리만 다르게 동작한다. POSIX 호스트에서는 무동작이다.
-        config.workspace.root = try path_shape.normalizeSeparators(a, trimmed);
+        config.workspace.root = try path_shape.normalizeSeparatorsFor(os_tag, a, trimmed);
         // workspace.{tab,split}-inherit-cwd는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "cursor.color") or std.mem.eql(u8, key, "cursor.text")) {
         // 커서 색 override(opt-in). nullable이라 스키마-주도에서 빠져 여기서 다룬다(palette와 동형). 색 검증·
@@ -1441,30 +1450,53 @@ test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보�
     try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len); // env. (빈 KEY) 한 건
 }
 
-test "parse: 경로 값은 입구에서 구분자를 정규화한다 (스키마-주도 필드)" {
-    // `Meta.isPath()` 가 붙은 필드는 파일 파싱에서 `\` → `/` 로 정규화된다(§5 규칙 1). `workspace.root`
-    // (명시 핸들러)와 **같은 규칙**이어야 한다 — 한쪽만 걸리면 그 키만 다르게 동작한다.
-    const windows = @import("builtin").os.tag == .windows;
+test "parseFor: 경로 값은 입구에서 구분자를 정규화한다 — 두 OS 갈래가 모든 타깃에서 돈다" {
+    // **`parseFor` 로 OS 를 준다.** 호스트 고정 래퍼(`parse`)로 쓰면 이 저장소에 Windows 러너가 없어
+    // (verification-matrix) Windows 갈래가 **한 번도 안 돌고**, POSIX 갈래는 "안 바뀐다" 를 단언하므로
+    // 정규화를 통째로 지워도 CI 가 초록이다 — 검증이 아니라 장식이 된다. `path_shape` 가 `~For` 로
+    // OS 를 인자로 받는 이유가 그것이고, 그 규율이 로더 배선까지 와야 의미가 있다.
+    const a = std.testing.allocator;
 
-    // `shell.command` — `abs_path` 가 `path_value` 를 함의한다. Windows 에서만 `C:\…` 가 절대경로로
-    // 인정되므로(그 검사는 호스트 규칙을 쓴다) 거기서만 값이 남는다.
-    if (windows) {
-        var p = try parse(std.testing.allocator, "shell.command = C:\\Program Files\\PowerShell\\7\\pwsh.exe\n");
-        defer p.deinit();
-        try std.testing.expectEqualStrings("C:/Program Files/PowerShell/7/pwsh.exe", p.config.shell.command);
+    // `window.background-image` — 절대경로를 요구하지 않는 순수 `path_value` 필드라 두 OS 에서 모두
+    // 값이 살아남는다. 그래서 **갈리는 것이 구분자뿐**이고, 정규화 유무를 정확히 잡는다.
+    {
+        var w = try parseFor(.windows, a, "window.background-image = C:\\pics\\bg.png\n");
+        defer w.deinit();
+        try std.testing.expectEqualStrings("C:/pics/bg.png", w.config.window_background_image);
+
+        var l = try parseFor(.linux, a, "window.background-image = C:\\pics\\bg.png\n");
+        defer l.deinit();
+        try std.testing.expectEqualStrings("C:\\pics\\bg.png", l.config.window_background_image);
     }
 
-    // `window.background-image` — 절대경로를 요구하지 않는 순수 `path_value` 필드.
+    // `shell.command` — `abs_path` 가 `path_value` 를 함의한다. **수용 검사는 호스트 규칙을 쓴다**
+    // (`std.fs.path.isAbsolute`)라 `C:\…` 는 POSIX 호스트에서 거부된다. 그래서 정규화 자체는 두 OS 에서
+    // 모두 통과하는 철자로 본다.
     {
-        var p = try parse(std.testing.allocator, "window.background-image = C:\\pics\\bg.png\n");
-        defer p.deinit();
-        const expected = if (windows) "C:/pics/bg.png" else "C:\\pics\\bg.png";
-        try std.testing.expectEqualStrings(expected, p.config.window_background_image);
+        var w = try parseFor(.windows, a, "shell.command = /opt\\bin\\sh\n");
+        defer w.deinit();
+        try std.testing.expectEqualStrings("/opt/bin/sh", w.config.shell.command);
+
+        var l = try parseFor(.linux, a, "shell.command = /opt\\bin\\sh\n");
+        defer l.deinit();
+        try std.testing.expectEqualStrings("/opt\\bin\\sh", l.config.shell.command);
     }
 
-    // **경로가 아닌 text 필드는 건드리지 않는다** — `\` 를 값으로 쓰는 설정이 깨지면 안 된다.
+    // `workspace.root` — 명시 핸들러라 스키마 경로와 **같은 규칙**이어야 한다(한쪽만 걸리면 그 키만
+    // 다르게 동작한다).
     {
-        var p = try parse(std.testing.allocator, "input.word-separators = a\\b\n");
+        var w = try parseFor(.windows, a, "workspace.root = /proj\\sub\n");
+        defer w.deinit();
+        try std.testing.expectEqualStrings("/proj/sub", w.config.workspace.root);
+
+        var l = try parseFor(.linux, a, "workspace.root = /proj\\sub\n");
+        defer l.deinit();
+        try std.testing.expectEqualStrings("/proj\\sub", l.config.workspace.root);
+    }
+
+    // **경로가 아닌 text 필드는 어느 OS 에서도 안 건드린다** — `\` 를 값으로 쓰는 설정이 깨지면 안 된다.
+    for ([_]std.Target.Os.Tag{ .windows, .linux }) |tag| {
+        var p = try parseFor(tag, a, "input.word-separators = a\\b\n");
         defer p.deinit();
         try std.testing.expectEqualStrings("a\\b", p.config.input.word_separators);
     }

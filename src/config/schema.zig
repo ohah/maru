@@ -32,7 +32,23 @@ pub const Diag = struct { line: usize, message: []const u8 };
 /// 타입만 열면 어떤 config 구조체든 같은 엔진을 탄다 — 모바일 config 가 자기 스키마 메타를 들고
 /// 이 함수를 그대로 쓴다(docs/mobile-config.md §3). 데스크톱은 계속 `*theme.Config` 를 넘기므로
 /// comptime 에 같은 코드가 찍혀 **동작이 그대로**다(round-trip 대칭 테스트가 그것을 못박는다).
+/// 호스트 OS 로 `tryParseFor` 를 부르는 얇은 래퍼. 기존 호출자가 그대로 쓴다.
 pub fn tryParse(
+    a: std.mem.Allocator,
+    config: anytype,
+    key: []const u8,
+    value: []const u8,
+    diags: *std.ArrayList(Diag),
+    line_no: usize,
+) !bool {
+    return tryParseFor(@import("builtin").os.tag, a, config, key, value, diags, line_no);
+}
+
+/// `tryParse` 의 **OS 인자 버전**. 경로 값 정규화가 호스트마다 갈리는데(`` 는 POSIX 에서 파일 이름
+/// 글자다) 저장소에 Windows CI 러너가 없다 — 그 갈래를 인자로 받아야 macOS·Linux CI 에서도 두 쪽이
+/// 다 돈다(`path_shape.normalizeSeparatorsFor`·`isDetectableAbsoluteFor` 와 같은 선례).
+pub fn tryParseFor(
+    os_tag: std.Target.Os.Tag,
     a: std.mem.Allocator,
     config: anytype,
     key: []const u8,
@@ -47,7 +63,7 @@ pub fn tryParse(
             const meta: theme.Meta = @field(Cfg.schema, sf.name);
             const full_key = comptime topKey(sf.name, meta);
             if (std.mem.eql(u8, key, full_key)) {
-                try parseAndSet(a, &@field(config, sf.name), full_key, meta, value, diags, line_no);
+                try parseAndSet(os_tag, a, &@field(config, sf.name), full_key, meta, value, diags, line_no);
                 return true;
             }
         }
@@ -61,7 +77,7 @@ pub fn tryParse(
                 const meta: theme.Meta = @field(sch, sf.name);
                 const full_key = comptime keyOf(cf.name, sf.name, meta);
                 if (std.mem.eql(u8, key, full_key)) {
-                    try parseAndSet(a, &@field(@field(config, cf.name), sf.name), full_key, meta, value, diags, line_no);
+                    try parseAndSet(os_tag, a, &@field(@field(config, cf.name), sf.name), full_key, meta, value, diags, line_no);
                     return true;
                 }
             }
@@ -73,6 +89,7 @@ pub fn tryParse(
 /// 한 필드 포인터에 값을 파싱해 넣는다(실패면 diagnostic + 기본값 유지). 타입으로 comptime 분기:
 /// bool / f32(범위 메타 필수) / enum / []const u8(widget=.color면 #RRGGBB 검증, 아니면 비-빈 dupe).
 fn parseAndSet(
+    os_tag: std.Target.Os.Tag,
     a: std.mem.Allocator,
     ptr: anytype,
     comptime full_key: []const u8,
@@ -134,7 +151,7 @@ fn parseAndSet(
             // `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다 — `$HOME` 입구에서 이미 한 번 겪은
             // 증상이다(W3). POSIX 호스트에서는 아무것도 안 바꾼다(`\` 가 파일 이름 글자다).
             if (comptime meta.isPath()) {
-                ptr.* = try path_shape.normalizeSeparators(a, trimmed);
+                ptr.* = try path_shape.normalizeSeparatorsFor(os_tag, a, trimmed);
                 return;
             }
             ptr.* = try a.dupe(u8, trimmed);

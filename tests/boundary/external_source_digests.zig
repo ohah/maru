@@ -549,7 +549,7 @@ pub const inventory = [_]Proof{
     // 적대적 검증 회차(2026-08-19)로 다시 움직인다: 커밋 상자 히트 판정이 발행 entry의 `effective_clip`을
     // 함께 보게 되면서 테스트가 늘고(투영이 그 상자를 늘 창 안에 두는 불변식), 캡처 게이트가 clip 안의
     // 점을 고른다. count는 2 그대로다 — 새 `@field` 반사도 Client 구성 변화도 없다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "50ccbdcbd82e6b438ba49ca19f98d6104580abc12df8612204088f2391d6ca39" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c656f7028c1fafae80248c1a0bebb6ca5c87c863aa3d411775c33f8be354102c" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

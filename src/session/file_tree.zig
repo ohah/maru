@@ -1678,3 +1678,43 @@ test "file tree compact: 단일 자식 디렉터리 체인은 한 줄로 접히�
     };
     try std.testing.expect(saw_release_only);
 }
+
+test "file tree compact + 무시: 접힌 줄의 무시 판정은 **끝 노드**에서 온다" {
+    // 두 기능이 만나는 자리다(체인 접기 ← → git 무시 표시). 접힌 줄이 가리키는 경로는 끝 노드이므로
+    // 흐려지는 근거도 그 노드에서 와야 한다 — 중간 노드에서 가져오면 사용자가 보는 경로와 어긋난다.
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+    try tree.applySnapshot("/w", &.{.{ .name = "build", .kind = .directory }});
+    try tree.applySnapshot("/w/build", &.{.{ .name = "out", .kind = .directory }});
+    try tree.applySnapshot("/w/build/out", &.{.{ .name = "app.js", .kind = .file }});
+
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(allocator);
+
+    // 끝 노드만 무시로 표시한다(git 이 실제로 답하는 대상은 화면에 보이는 그 경로다).
+    tree.markIgnored("/w/build/out", true);
+    try tree.buildRows(allocator, &.{}, &rows);
+    var found = false;
+    for (rows.items) |row| switch (row) {
+        .directory => |d| if (std.mem.eql(u8, d.path, "/w/build/out")) {
+            try std.testing.expectEqualStrings("build/out", d.label); // 접힌 줄이 맞다
+            try std.testing.expect(d.ignored);
+            found = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
+
+    // 중간 노드만 표시된 상태로는 그 줄이 흐려지지 않는다 — 판정의 출처가 끝 노드 하나임을 못 박는다.
+    tree.markIgnored("/w/build/out", false);
+    tree.markIgnored("/w/build", true);
+    try tree.buildRows(allocator, &.{}, &rows);
+    for (rows.items) |row| switch (row) {
+        .directory => |d| if (std.mem.eql(u8, d.path, "/w/build/out")) {
+            try std.testing.expect(!d.ignored);
+        },
+        else => {},
+    };
+}

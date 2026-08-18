@@ -2431,6 +2431,26 @@ pub fn build(b: *std.Build) void {
     const ssh_pump_smoke_exe = b.addExecutable(.{ .name = "ssh-pump-smoke", .root_module = ssh_pump_mod });
     ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_pump_smoke_exe, .{}).step);
 
+    // **펌프는 리눅스로도 컴파일된다.** 이 파일은 세 경로(빌드 스크립트·NDK·Xcode)로 불리는데,
+    // 표준 모드에 따라 glibc 가 POSIX 선언을 감춰 **한 경로에서만 깨지는** 일이 실제로 났다
+    // (`-std=c11` 리눅스에서 `getaddrinfo` 가 사라져 CI 만 빨갰다). 여기서 그 조합을 상시 굽는다.
+    const pump_linux = b.addObject(.{
+        .name = "ssh-pump-linux",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }),
+            .optimize = .Debug,
+            .link_libc = true,
+        }),
+    });
+    pump_linux.root_module.addIncludePath(b.path("src/platform/mobile"));
+    pump_linux.root_module.addCSourceFile(.{
+        .file = b.path("src/platform/mobile_host/ssh_pump.c"),
+        .flags = &.{"-std=c11"},
+    });
+    const pump_linux_step = b.step("check-ssh-pump-portable", "Compile the SSH pump for linux-gnu (glibc feature macros)");
+    pump_linux_step.dependOn(&pump_linux.step);
+    boundary_step.dependOn(pump_linux_step);
+
     // 펌프의 단위 테스트(핀 없는 접속·인자 검사)는 소켓을 쓰므로 sans-io 게이트 밖이다.
     const ssh_pump_tests = addProjectTest(b, .{ .root_module = ssh_pump_mod });
     const run_ssh_pump_tests = b.addRunArtifact(ssh_pump_tests);

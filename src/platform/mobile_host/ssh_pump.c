@@ -1,4 +1,23 @@
 // 두 host 가 함께 쓰는 SSH 소켓 펌프 — 계약은 `ssh_pump.h` 머리에.
+
+// **POSIX 를 명시적으로 켠다 — 어떤 표준 모드로 불려도.**
+//
+// `-std=c11` 로 부르면 glibc 는 ISO 만 노출해 `getaddrinfo`·`struct addrinfo` 가 통째로
+// 사라진다(실측: CI 리눅스에서 컴파일 오류 9개. macOS 는 기본이 관대해 안 걸렸고, Android NDK
+// 빌드는 `-std` 를 안 줘서 역시 안 걸렸다 — **세 빌드 경로 중 하나에서만 깨졌다**).
+// 컴파일 방식이 셋이므로 플래그에 기대지 않고 소스에서 못박는다.
+//
+// **Darwin 에는 안 건다.** 거기서 `_POSIX_C_SOURCE` 를 좁게 걸면 반대로 `arc4random_buf` 와
+// `SO_NOSIGPIPE` 같은 확장이 사라진다.
+#if defined(__linux__)
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#endif
+
 #include "ssh_pump.h"
 
 #include "../mobile/mobile_host_abi.h"

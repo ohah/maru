@@ -27,6 +27,7 @@
 //! 독점하지 않고 `CALayer` subview로 합성되는 구조다.
 
 const std = @import("std");
+const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
 // **`maru`를 통해 받는다.** 이 파일은 `main.zig`(root 모듈)만 쓰는데, root가 `src/` 아래 파일을 상대
 // import하면 그 파일이 `maru` 모듈과 이중 소유가 된다(실측: `file exists in modules 'maru' and 'root'`).
@@ -126,7 +127,7 @@ const UINT = u32;
 const DWORD = u32;
 const ATOM = u16;
 
-const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 
 comptime {
     // **Win32 구조체는 크기가 계약이다.** `RegisterClassExW`는 `cbSize`로 버전을 판별하고, `WM_NCCREATE`의
@@ -222,10 +223,10 @@ const WM_MOUSEWHEEL: UINT = 0x020A;
 /// 적이 없는 채로 드래그 상태가 남아 다음 이동이 전부 선택 확장이 된다.
 const WM_CAPTURECHANGED: UINT = 0x0215;
 
-extern "user32" fn SetCapture(HWND) callconv(.winapi) ?HWND;
-extern "user32" fn ReleaseCapture() callconv(.winapi) i32;
+extern "user32" fn SetCapture(HWND) callconv(abi.winapi) ?HWND;
+extern "user32" fn ReleaseCapture() callconv(abi.winapi) i32;
 /// 화면 좌표를 클라이언트 좌표로. **휠만 화면 기준으로 오므로** 그 자리에서만 쓴다.
-extern "user32" fn ScreenToClient(HWND, *POINT) callconv(.winapi) i32;
+extern "user32" fn ScreenToClient(HWND, *POINT) callconv(abi.winapi) i32;
 
 const WS_OVERLAPPEDWINDOW: DWORD = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
@@ -236,30 +237,30 @@ const CS_HREDRAW: UINT = 0x0002;
 const CS_VREDRAW: UINT = 0x0001;
 const IDC_ARROW: usize = 32512;
 
-extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(.winapi) ATOM;
-extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWORD, i32, i32, i32, i32, ?HWND, ?HMENU, ?HINSTANCE, ?*anyopaque) callconv(.winapi) ?HWND;
-extern "user32" fn DefWindowProcW(HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn DestroyWindow(HWND) callconv(.winapi) i32;
-extern "user32" fn PostQuitMessage(i32) callconv(.winapi) void;
-extern "user32" fn PeekMessageW(*MSG, ?HWND, UINT, UINT, UINT) callconv(.winapi) i32;
-extern "user32" fn TranslateMessage(*const MSG) callconv(.winapi) i32;
-extern "user32" fn DispatchMessageW(*const MSG) callconv(.winapi) LRESULT;
-extern "user32" fn ShowWindow(HWND, i32) callconv(.winapi) i32;
-extern "user32" fn GetClientRect(HWND, *RECT) callconv(.winapi) i32;
-extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(.winapi) ?HCURSOR;
-extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(.winapi) isize;
-extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(.winapi) isize;
+extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(abi.winapi) ATOM;
+extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWORD, i32, i32, i32, i32, ?HWND, ?HMENU, ?HINSTANCE, ?*anyopaque) callconv(abi.winapi) ?HWND;
+extern "user32" fn DefWindowProcW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
+extern "user32" fn DestroyWindow(HWND) callconv(abi.winapi) i32;
+extern "user32" fn PostQuitMessage(i32) callconv(abi.winapi) void;
+extern "user32" fn PeekMessageW(*MSG, ?HWND, UINT, UINT, UINT) callconv(abi.winapi) i32;
+extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
+extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
+extern "user32" fn ShowWindow(HWND, i32) callconv(abi.winapi) i32;
+extern "user32" fn GetClientRect(HWND, *RECT) callconv(abi.winapi) i32;
+extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
+extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(abi.winapi) isize;
+extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(abi.winapi) isize;
 /// **`GetAsyncKeyState`가 아니라 이것을 쓴다.** 전자는 "지금 물리적으로 눌려 있는가"라 메시지가 큐에서
 /// 늦게 처리되면 그 사이 상태를 읽는다. `GetKeyState`는 **처리 중인 메시지 시점의** 상태를 준다 — 키
 /// 조합 판정은 그 시점이어야 맞는다.
-extern "user32" fn GetKeyState(i32) callconv(.winapi) i16;
-extern "user32" fn MapVirtualKeyW(UINT, UINT) callconv(.winapi) UINT;
-extern "imm32" fn ImmGetContext(HWND) callconv(.winapi) ?*anyopaque;
-extern "imm32" fn ImmReleaseContext(HWND, *anyopaque) callconv(.winapi) i32;
+extern "user32" fn GetKeyState(i32) callconv(abi.winapi) i16;
+extern "user32" fn MapVirtualKeyW(UINT, UINT) callconv(abi.winapi) UINT;
+extern "imm32" fn ImmGetContext(HWND) callconv(abi.winapi) ?*anyopaque;
+extern "imm32" fn ImmReleaseContext(HWND, *anyopaque) callconv(abi.winapi) i32;
 /// 버퍼가 `null`이면 필요한 **바이트 수**를 돌려준다(문자 수가 아니다 — UTF-16이라 2배다).
-extern "imm32" fn ImmGetCompositionStringW(*anyopaque, UINT, ?*anyopaque, UINT) callconv(.winapi) i32;
-extern "imm32" fn ImmSetCandidateWindow(*anyopaque, *const CANDIDATEFORM) callconv(.winapi) i32;
-extern "imm32" fn ImmSetCompositionWindow(*anyopaque, *const COMPOSITIONFORM) callconv(.winapi) i32;
+extern "imm32" fn ImmGetCompositionStringW(*anyopaque, UINT, ?*anyopaque, UINT) callconv(abi.winapi) i32;
+extern "imm32" fn ImmSetCandidateWindow(*anyopaque, *const CANDIDATEFORM) callconv(abi.winapi) i32;
+extern "imm32" fn ImmSetCompositionWindow(*anyopaque, *const COMPOSITIONFORM) callconv(abi.winapi) i32;
 
 /// `ptCurrentPos`를 쓴다(조합 창을 그 점에 둔다).
 const CFS_POINT: DWORD = 0x0002;
@@ -289,7 +290,7 @@ comptime {
     std.debug.assert(@offsetOf(COMPOSITIONFORM, "ptCurrentPos") == 4);
     std.debug.assert(@offsetOf(COMPOSITIONFORM, "rcArea") == 12);
 }
-extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(.winapi) ?HINSTANCE;
+extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(abi.winapi) ?HINSTANCE;
 /// **std의 것을 쓴다.** 직접 `extern`으로 선언하면 Zig가 사이에 끼우는 코드가 스레드 오류 값을 덮어
 /// 0으로 읽힐 수 있다(실측: 세 호출 지점에서 전부 0이 나왔다). std는 그 규약을 알고 있다.
 fn GetLastError() u32 {
@@ -686,7 +687,7 @@ fn windowFrom(hwnd: HWND) ?*Window {
     return @ptrFromInt(@as(usize, @bitCast(raw)));
 }
 
-fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.winapi) LRESULT {
     // **가장 먼저 창을 붙인다.** 이 뒤에 오는 생성 구간 메시지(`WM_CREATE`·`WM_SIZE`)가 창을 찾을 수
     // 있어야 한다. `DefWindowProcW`에 넘기는 것을 잊으면 창 생성이 통째로 실패한다.
     if (msg == WM_NCCREATE) {

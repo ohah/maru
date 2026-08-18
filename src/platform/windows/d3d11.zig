@@ -19,6 +19,7 @@
 //! 잘못 넣어 `DXGI_ERROR_INVALID_CALL`만 보고 원인을 헤맨 적이 있다(§2c 실측).
 
 const std = @import("std");
+const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 
 pub const HRESULT = i32;
 pub const UINT = u32;
@@ -60,7 +61,7 @@ pub const IUnknown = extern struct {
     pub const VTable = extern struct {
         QueryInterface: *const anyopaque,
         AddRef: *const anyopaque,
-        Release: *const fn (*IUnknown) callconv(.winapi) u32,
+        Release: *const fn (*IUnknown) callconv(abi.winapi) u32,
     };
 
     pub fn release(self: *IUnknown) void {
@@ -92,27 +93,27 @@ pub const ID3D11Device = extern struct {
         AddRef: *const anyopaque,
         Release: *const anyopaque,
         // ID3D11Device
-        CreateBuffer: *const fn (*ID3D11Device, *const BufferDesc, ?*const SubresourceData, *?*ID3D11Buffer) callconv(.winapi) HRESULT,
+        CreateBuffer: *const fn (*ID3D11Device, *const BufferDesc, ?*const SubresourceData, *?*ID3D11Buffer) callconv(abi.winapi) HRESULT,
         CreateTexture1D: *const anyopaque,
-        CreateTexture2D: *const fn (*ID3D11Device, *const Texture2DDesc, ?*const SubresourceData, *?*ID3D11Texture2D) callconv(.winapi) HRESULT,
+        CreateTexture2D: *const fn (*ID3D11Device, *const Texture2DDesc, ?*const SubresourceData, *?*ID3D11Texture2D) callconv(abi.winapi) HRESULT,
         CreateTexture3D: *const anyopaque,
-        CreateShaderResourceView: *const fn (*ID3D11Device, *anyopaque, ?*const anyopaque, *?*ID3D11ShaderResourceView) callconv(.winapi) HRESULT,
+        CreateShaderResourceView: *const fn (*ID3D11Device, *anyopaque, ?*const anyopaque, *?*ID3D11ShaderResourceView) callconv(abi.winapi) HRESULT,
         CreateUnorderedAccessView: *const anyopaque,
-        CreateRenderTargetView: *const fn (*ID3D11Device, *anyopaque, ?*const anyopaque, *?*ID3D11RenderTargetView) callconv(.winapi) HRESULT,
+        CreateRenderTargetView: *const fn (*ID3D11Device, *anyopaque, ?*const anyopaque, *?*ID3D11RenderTargetView) callconv(abi.winapi) HRESULT,
         CreateDepthStencilView: *const anyopaque,
-        CreateInputLayout: *const fn (*ID3D11Device, [*]const InputElementDesc, UINT, *const anyopaque, usize, *?*ID3D11InputLayout) callconv(.winapi) HRESULT,
-        CreateVertexShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11VertexShader) callconv(.winapi) HRESULT,
+        CreateInputLayout: *const fn (*ID3D11Device, [*]const InputElementDesc, UINT, *const anyopaque, usize, *?*ID3D11InputLayout) callconv(abi.winapi) HRESULT,
+        CreateVertexShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11VertexShader) callconv(abi.winapi) HRESULT,
         CreateGeometryShader: *const anyopaque,
         CreateGeometryShaderWithStreamOutput: *const anyopaque,
-        CreatePixelShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11PixelShader) callconv(.winapi) HRESULT,
+        CreatePixelShader: *const fn (*ID3D11Device, *const anyopaque, usize, ?*anyopaque, *?*ID3D11PixelShader) callconv(abi.winapi) HRESULT,
         CreateHullShader: *const anyopaque,
         CreateDomainShader: *const anyopaque,
         CreateComputeShader: *const anyopaque,
         CreateClassLinkage: *const anyopaque,
-        CreateBlendState: *const fn (*ID3D11Device, *const BlendDesc, *?*ID3D11BlendState) callconv(.winapi) HRESULT,
+        CreateBlendState: *const fn (*ID3D11Device, *const BlendDesc, *?*ID3D11BlendState) callconv(abi.winapi) HRESULT,
         CreateDepthStencilState: *const anyopaque,
         CreateRasterizerState: *const anyopaque,
-        CreateSamplerState: *const fn (*ID3D11Device, *const SamplerDesc, *?*ID3D11SamplerState) callconv(.winapi) HRESULT,
+        CreateSamplerState: *const fn (*ID3D11Device, *const SamplerDesc, *?*ID3D11SamplerState) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -130,24 +131,24 @@ pub const ID3D11DeviceContext = extern struct {
         SetPrivateData: *const anyopaque,
         SetPrivateDataInterface: *const anyopaque,
         // ID3D11DeviceContext — 부르지 않는 슬롯도 **자리를 채운다**(규칙 ⑴).
-        VSSetConstantBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer) callconv(.winapi) void,
-        PSSetShaderResources: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11ShaderResourceView) callconv(.winapi) void,
-        PSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11PixelShader, ?*const anyopaque, UINT) callconv(.winapi) void,
-        PSSetSamplers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11SamplerState) callconv(.winapi) void,
-        VSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11VertexShader, ?*const anyopaque, UINT) callconv(.winapi) void,
+        VSSetConstantBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer) callconv(abi.winapi) void,
+        PSSetShaderResources: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11ShaderResourceView) callconv(abi.winapi) void,
+        PSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11PixelShader, ?*const anyopaque, UINT) callconv(abi.winapi) void,
+        PSSetSamplers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11SamplerState) callconv(abi.winapi) void,
+        VSSetShader: *const fn (*ID3D11DeviceContext, ?*ID3D11VertexShader, ?*const anyopaque, UINT) callconv(abi.winapi) void,
         DrawIndexed: *const anyopaque,
         Draw: *const anyopaque,
-        Map: *const fn (*ID3D11DeviceContext, *anyopaque, UINT, UINT, UINT, *MappedSubresource) callconv(.winapi) HRESULT,
-        Unmap: *const fn (*ID3D11DeviceContext, *anyopaque, UINT) callconv(.winapi) void,
-        PSSetConstantBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer) callconv(.winapi) void,
-        IASetInputLayout: *const fn (*ID3D11DeviceContext, ?*ID3D11InputLayout) callconv(.winapi) void,
-        IASetVertexBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer, [*]const UINT, [*]const UINT) callconv(.winapi) void,
+        Map: *const fn (*ID3D11DeviceContext, *anyopaque, UINT, UINT, UINT, *MappedSubresource) callconv(abi.winapi) HRESULT,
+        Unmap: *const fn (*ID3D11DeviceContext, *anyopaque, UINT) callconv(abi.winapi) void,
+        PSSetConstantBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer) callconv(abi.winapi) void,
+        IASetInputLayout: *const fn (*ID3D11DeviceContext, ?*ID3D11InputLayout) callconv(abi.winapi) void,
+        IASetVertexBuffers: *const fn (*ID3D11DeviceContext, UINT, UINT, [*]const ?*ID3D11Buffer, [*]const UINT, [*]const UINT) callconv(abi.winapi) void,
         IASetIndexBuffer: *const anyopaque,
         DrawIndexedInstanced: *const anyopaque,
-        DrawInstanced: *const fn (*ID3D11DeviceContext, UINT, UINT, UINT, UINT) callconv(.winapi) void,
+        DrawInstanced: *const fn (*ID3D11DeviceContext, UINT, UINT, UINT, UINT) callconv(abi.winapi) void,
         GSSetConstantBuffers: *const anyopaque,
         GSSetShader: *const anyopaque,
-        IASetPrimitiveTopology: *const fn (*ID3D11DeviceContext, UINT) callconv(.winapi) void,
+        IASetPrimitiveTopology: *const fn (*ID3D11DeviceContext, UINT) callconv(abi.winapi) void,
         VSSetShaderResources: *const anyopaque,
         VSSetSamplers: *const anyopaque,
         Begin: *const anyopaque,
@@ -156,9 +157,9 @@ pub const ID3D11DeviceContext = extern struct {
         SetPredication: *const anyopaque,
         GSSetShaderResources: *const anyopaque,
         GSSetSamplers: *const anyopaque,
-        OMSetRenderTargets: *const fn (*ID3D11DeviceContext, UINT, ?[*]const ?*ID3D11RenderTargetView, ?*anyopaque) callconv(.winapi) void,
+        OMSetRenderTargets: *const fn (*ID3D11DeviceContext, UINT, ?[*]const ?*ID3D11RenderTargetView, ?*anyopaque) callconv(abi.winapi) void,
         OMSetRenderTargetsAndUnorderedAccessViews: *const anyopaque,
-        OMSetBlendState: *const fn (*ID3D11DeviceContext, ?*ID3D11BlendState, ?*const [4]f32, UINT) callconv(.winapi) void,
+        OMSetBlendState: *const fn (*ID3D11DeviceContext, ?*ID3D11BlendState, ?*const [4]f32, UINT) callconv(abi.winapi) void,
         OMSetDepthStencilState: *const anyopaque,
         SOSetTargets: *const anyopaque,
         DrawAuto: *const anyopaque,
@@ -167,13 +168,13 @@ pub const ID3D11DeviceContext = extern struct {
         Dispatch: *const anyopaque,
         DispatchIndirect: *const anyopaque,
         RSSetState: *const anyopaque,
-        RSSetViewports: *const fn (*ID3D11DeviceContext, UINT, [*]const Viewport) callconv(.winapi) void,
+        RSSetViewports: *const fn (*ID3D11DeviceContext, UINT, [*]const Viewport) callconv(abi.winapi) void,
         RSSetScissorRects: *const anyopaque,
         CopySubresourceRegion: *const anyopaque,
         CopyResource: *const anyopaque,
-        UpdateSubresource: *const fn (*ID3D11DeviceContext, *anyopaque, UINT, ?*const Box, *const anyopaque, UINT, UINT) callconv(.winapi) void,
+        UpdateSubresource: *const fn (*ID3D11DeviceContext, *anyopaque, UINT, ?*const Box, *const anyopaque, UINT, UINT) callconv(abi.winapi) void,
         CopyStructureCount: *const anyopaque,
-        ClearRenderTargetView: *const fn (*ID3D11DeviceContext, *ID3D11RenderTargetView, *const [4]f32) callconv(.winapi) void,
+        ClearRenderTargetView: *const fn (*ID3D11DeviceContext, *ID3D11RenderTargetView, *const [4]f32) callconv(abi.winapi) void,
     };
 };
 
@@ -192,7 +193,7 @@ pub const IDXGIFactory2 = extern struct {
         GetParent: *const anyopaque,
         // IDXGIFactory
         EnumAdapters: *const anyopaque,
-        MakeWindowAssociation: *const fn (*IDXGIFactory2, HWND, UINT) callconv(.winapi) HRESULT,
+        MakeWindowAssociation: *const fn (*IDXGIFactory2, HWND, UINT) callconv(abi.winapi) HRESULT,
         GetWindowAssociation: *const anyopaque,
         CreateSwapChain: *const anyopaque,
         CreateSoftwareAdapter: *const anyopaque,
@@ -209,7 +210,7 @@ pub const IDXGIFactory2 = extern struct {
             ?*const anyopaque, // fullscreen desc
             ?*anyopaque, // restrict-to output
             *?*IDXGISwapChain1,
-        ) callconv(.winapi) HRESULT,
+        ) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -229,12 +230,12 @@ pub const IDXGISwapChain1 = extern struct {
         // IDXGIDeviceSubObject
         GetDevice: *const anyopaque,
         // IDXGISwapChain
-        Present: *const fn (*IDXGISwapChain1, UINT, UINT) callconv(.winapi) HRESULT,
-        GetBuffer: *const fn (*IDXGISwapChain1, UINT, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        Present: *const fn (*IDXGISwapChain1, UINT, UINT) callconv(abi.winapi) HRESULT,
+        GetBuffer: *const fn (*IDXGISwapChain1, UINT, *const GUID, *?*anyopaque) callconv(abi.winapi) HRESULT,
         SetFullscreenState: *const anyopaque,
         GetFullscreenState: *const anyopaque,
         GetDesc: *const anyopaque,
-        ResizeBuffers: *const fn (*IDXGISwapChain1, UINT, UINT, UINT, UINT, UINT) callconv(.winapi) HRESULT,
+        ResizeBuffers: *const fn (*IDXGISwapChain1, UINT, UINT, UINT, UINT, UINT) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -246,8 +247,8 @@ pub const ID3DBlob = extern struct {
         QueryInterface: *const anyopaque,
         AddRef: *const anyopaque,
         Release: *const anyopaque,
-        GetBufferPointer: *const fn (*ID3DBlob) callconv(.winapi) [*]u8,
-        GetBufferSize: *const fn (*ID3DBlob) callconv(.winapi) usize,
+        GetBufferPointer: *const fn (*ID3DBlob) callconv(abi.winapi) [*]u8,
+        GetBufferSize: *const fn (*ID3DBlob) callconv(abi.winapi) usize,
     };
 
     pub fn bytes(self: *ID3DBlob) []const u8 {
@@ -513,14 +514,14 @@ pub extern "d3d11" fn D3D11CreateDevice(
     device: *?*ID3D11Device,
     feature_level_out: ?*UINT,
     context: *?*ID3D11DeviceContext,
-) callconv(.winapi) HRESULT;
+) callconv(abi.winapi) HRESULT;
 
-pub extern "dxgi" fn CreateDXGIFactory1(riid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT;
+pub extern "dxgi" fn CreateDXGIFactory1(riid: *const GUID, out: *?*anyopaque) callconv(abi.winapi) HRESULT;
 
 // ── 셰이더 컴파일러 (동적 로딩) ──────────────────────────────────────────────────────────────
 
-extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(abi.winapi) ?*anyopaque;
+extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(abi.winapi) ?*anyopaque;
 
 const D3DCompileFn = *const fn (
     src: [*]const u8,
@@ -534,7 +535,7 @@ const D3DCompileFn = *const fn (
     flags2: UINT,
     code: *?*ID3DBlob,
     errors: *?*ID3DBlob,
-) callconv(.winapi) HRESULT;
+) callconv(abi.winapi) HRESULT;
 
 /// `D3DCompile`을 **동적으로** 찾는다. import 라이브러리로 링크하지 않는 이유가 둘이다:
 ///

@@ -22,6 +22,7 @@
 //! 필요하면 다른 형식으로 자동 변환해 준다.
 
 const std = @import("std");
+const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
 
 pub const Error = error{
@@ -54,17 +55,17 @@ const cf_unicodetext: UINT = 13;
 /// `SetClipboardData`가 거부하거나 나중에 해제 규칙이 어긋난다).
 const gmem_moveable: UINT = 0x0002;
 
-extern "user32" fn OpenClipboard(?HWND) callconv(.winapi) i32;
-extern "user32" fn CloseClipboard() callconv(.winapi) i32;
-extern "user32" fn EmptyClipboard() callconv(.winapi) i32;
-extern "user32" fn GetClipboardData(UINT) callconv(.winapi) ?HANDLE;
-extern "user32" fn SetClipboardData(UINT, ?HANDLE) callconv(.winapi) ?HANDLE;
-extern "user32" fn IsClipboardFormatAvailable(UINT) callconv(.winapi) i32;
-extern "kernel32" fn GlobalAlloc(UINT, usize) callconv(.winapi) ?HANDLE;
-extern "kernel32" fn GlobalFree(?HANDLE) callconv(.winapi) ?HANDLE;
-extern "kernel32" fn GlobalLock(HANDLE) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GlobalUnlock(HANDLE) callconv(.winapi) i32;
-extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+extern "user32" fn OpenClipboard(?HWND) callconv(abi.winapi) i32;
+extern "user32" fn CloseClipboard() callconv(abi.winapi) i32;
+extern "user32" fn EmptyClipboard() callconv(abi.winapi) i32;
+extern "user32" fn GetClipboardData(UINT) callconv(abi.winapi) ?HANDLE;
+extern "user32" fn SetClipboardData(UINT, ?HANDLE) callconv(abi.winapi) ?HANDLE;
+extern "user32" fn IsClipboardFormatAvailable(UINT) callconv(abi.winapi) i32;
+extern "kernel32" fn GlobalAlloc(UINT, usize) callconv(abi.winapi) ?HANDLE;
+extern "kernel32" fn GlobalFree(?HANDLE) callconv(abi.winapi) ?HANDLE;
+extern "kernel32" fn GlobalLock(HANDLE) callconv(abi.winapi) ?*anyopaque;
+extern "kernel32" fn GlobalUnlock(HANDLE) callconv(abi.winapi) i32;
+extern "kernel32" fn GetLastError() callconv(abi.winapi) u32;
 
 // ── 순수 변환 ────────────────────────────────────────────────────────────────────────────────
 

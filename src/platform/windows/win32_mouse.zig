@@ -16,6 +16,7 @@
 //! 판정을 읽어 온 것이다. 마우스 관례를 두 플랫폼이 다르게 가지면 같은 코어가 다르게 반응한다.
 
 const std = @import("std");
+const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
 
 /// 중립 모디파이어 비트(`terminal.input_report.reportMouse`의 `mods` 규약).
@@ -247,9 +248,9 @@ pub const ClickTracker = struct {
 // 값을 코드에 박지 않는 이유는 셋 다 **사용자·접근성 설정**이기 때문이다 — 느린 더블클릭을 쓰는
 // 사용자에게 500ms 를 강요하거나, "휠 스크롤 안 함"으로 둔 설정을 뒤집으면 안 된다.
 
-extern "user32" fn GetDoubleClickTime() callconv(.winapi) u32;
-extern "user32" fn GetSystemMetrics(i32) callconv(.winapi) i32;
-extern "user32" fn SystemParametersInfoW(u32, u32, ?*anyopaque, u32) callconv(.winapi) i32;
+extern "user32" fn GetDoubleClickTime() callconv(abi.winapi) u32;
+extern "user32" fn GetSystemMetrics(i32) callconv(abi.winapi) i32;
+extern "user32" fn SystemParametersInfoW(u32, u32, ?*anyopaque, u32) callconv(abi.winapi) i32;
 
 const SM_CXDOUBLECLK: i32 = 36;
 const SM_CYDOUBLECLK: i32 = 37;

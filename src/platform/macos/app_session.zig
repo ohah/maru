@@ -3767,6 +3767,11 @@ pub const AppSession = struct {
     file_tree_mutation_backend: file_tree_mutation_backend.Backend = undefined,
     file_tree_initialized: bool = false,
     file_tree_rows: std.ArrayList(file_tree.Row) = .empty,
+    /// `check-ignore` 질의용 재사용 버퍼(경로 바이트와 그 슬라이스). 스캔마다 새 ArrayList 를 만들지
+    /// 않으려는 자리이고, 다음 질의가 덮어쓴다 — 결과 반영이 같은 tick 안에서 끝나므로 안전하다.
+    git_ignore_query_buf: std.ArrayList(u8) = .empty,
+    git_ignore_query_paths: std.ArrayList([]const u8) = .empty,
+    git_ignore_request_id: u64 = 0,
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
     /// 탐색기 세로 스크롤(SV2a). 단위는 **backing pixel**이라 행 경계 사이에서 멈출 수 있고, 그 부분
@@ -15035,6 +15040,7 @@ pub const AppSession = struct {
                                     dock_active_fg,
                                     file_tree_selection_paint,
                                     &fileTreeIconColors(&self.buildChromeTokens()),
+                                    .{ .rgb = self.buildChromeTokens().palette.get(.muted_fg) },
                                 )) |tdl| {
                                     self.collectShaped(&collected, tdl, pane_frame_builder, .{
                                         .pane = .{
@@ -17192,6 +17198,8 @@ pub const AppSession = struct {
             self.file_tree_backend.deinit();
             self.file_tree.deinit();
             self.file_tree_rows.deinit(self.allocator);
+            self.git_ignore_query_buf.deinit(self.allocator);
+            self.git_ignore_query_paths.deinit(self.allocator);
             self.file_tree_entry_inputs.deinit(self.allocator);
             self.file_tree_open_states.deinit(self.allocator);
             if (self.file_tree_followed_cwd) |p| { // ET-CWD: 마지막으로 따라간 cwd(owned)
@@ -34583,6 +34591,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
             40,
             fg,
             fg,
+            null,
             null,
             null,
         );

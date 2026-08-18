@@ -1201,6 +1201,10 @@ pub fn buildFileTreeDrawList(
     /// (`file_tree_icon.colorRole`) 호출자가 그것을 토큰으로 풀어 넘긴다 — 렌더가 자기 표를 들면 새
     /// `IconKind` 를 더할 때 한쪽만 갱신된다.
     icon_colors: ?[]const ?terminal.Color,
+    /// git 이 무시하는 행(`Row.ignored`)의 색. null 이면 흐리게 하지 않는다 — 저장소가 아니거나 아직
+    /// 안 물어본 상태에서 **모르는 것을 흐리게 그리지 않기** 위해서다. 아이콘 종류색도 이 색으로 덮는다:
+    /// 무시된 줄은 통째로 뒤로 물러나야 하고, 거기만 색이 살아 있으면 오히려 더 눈에 띈다.
+    ignored_fg: ?terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -1252,6 +1256,13 @@ pub fn buildFileTreeDrawList(
                 label = maru.i18n.t(.fp_open_to_show_tree);
             },
         }
+        // git 이 무시하는 행은 흐리게 — 추적되는 소스와 같은 무게로 읽히면 훑기가 어렵다. 이름 편집 중
+        // (`edit`)이거나 선택된 행은 아래에서 각자 색으로 덮으므로, 그 둘보다 **먼저** 적용한다.
+        const row_ignored = file_tree.rowIgnored(row);
+        if (row_ignored) if (ignored_fg) |c| {
+            style.foreground = c;
+            style.bold = false;
+        };
         if (edit) |active_edit| if (file_tree.rowIdentity(row)) |identity| {
             if (identity.eql(active_edit.identity)) {
                 label = active_edit.text;
@@ -1272,7 +1283,8 @@ pub fn buildFileTreeDrawList(
         // 선택된 행은 accent 로 통째로 칠해지므로 아이콘도 그 대비색을 따른다(위 주석과 같은 이유) —
         // 종류 색을 남기면 밝은 accent 위에서 읽히지 않는다.
         var icon_style = style;
-        if (!selected) if (icon_colors) |colors| {
+        // 무시된 행은 아이콘 종류색도 죽인다(위 `ignored_fg` 주석) — `style` 이 이미 그 색이라 그대로 둔다.
+        if (!selected and !(row_ignored and ignored_fg != null)) if (icon_colors) |colors| {
             if (icon_raw < colors.len) if (colors[icon_raw]) |c| {
                 icon_style.foreground = c;
             };
@@ -2735,7 +2747,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
         } },
         .empty,
     };
-    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright, null, null);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright, null, null, null);
     defer dl.deinit(allocator);
     var saw_active = false;
     var saw_dirty = false;
@@ -2751,7 +2763,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     var editing = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/doc.md" },
         .text = "renamed.md|",
-    }, 1, 1, 18, dim, bright, null, null);
+    }, 1, 1, 18, dim, bright, null, null, null);
     defer editing.deinit(allocator);
     var saw_rename_r = false;
     var saw_old_o = false;
@@ -2787,7 +2799,7 @@ test "파일 트리 rename 편집 텍스트도 cluster로 그린다(NFD는 음�
     var nfd = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/old.md" },
         .text = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}|",
-    }, 0, 1, 40, dim, dim, null, null);
+    }, 0, 1, 40, dim, dim, null, null, null);
     defer nfd.deinit(allocator);
     var nfd_syllables: usize = 0;
     var nfd_stray: usize = 0;
@@ -2802,7 +2814,7 @@ test "파일 트리 rename 편집 텍스트도 cluster로 그린다(NFD는 음�
     var compat = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/old.md" },
         .text = "\u{314E}\u{314F}\u{3134}\u{3131}\u{3161}\u{3139}|",
-    }, 0, 1, 40, dim, dim, null, null);
+    }, 0, 1, 40, dim, dim, null, null, null);
     defer compat.deinit(allocator);
     var compat_letters: usize = 0;
     for (compat.cells) |c| {
@@ -2834,7 +2846,7 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
             .symlink = false,
         },
     }};
-    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null, null);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null, null, null);
     defer dl.deinit(allocator);
 
     // 음절 base(초성)는 셀 하나로 나오고, 중성·종성은 **셀이 아니라 풀**에 실린다.
@@ -2870,7 +2882,7 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
         .external_change = false,
         .symlink = false,
     } }};
-    var latin_dl = try buildFileTreeDrawList(allocator, &latin_rows, null, 0, 1, 40, dim, bright, null, null);
+    var latin_dl = try buildFileTreeDrawList(allocator, &latin_rows, null, 0, 1, 40, dim, bright, null, null, null);
     defer latin_dl.deinit(allocator);
     var saw_e_with_accent = false;
     var stray_accent_cells: usize = 0;
@@ -2913,7 +2925,7 @@ test "chrome DrawList 빌더는 할당 실패 지점 어디서든 새지 않는�
                 .external_change = false,
                 .symlink = false,
             } }};
-            var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, dim, null, null);
+            var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, dim, null, null, null);
             dl.deinit(allocator);
         }
     };
@@ -2939,7 +2951,7 @@ test "file tree focused selection applies its theme contrast color to every row 
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, bright, .{
         .index = 0,
         .foreground = on_accent,
-    }, null);
+    }, null, null);
     defer dl.deinit(allocator);
     var saw_marker = false;
     var saw_label = false;
@@ -2959,6 +2971,58 @@ test "file tree focused selection applies its theme contrast color to every row 
 // 두 가지를 고정한다: ⑴ 색을 주면 아이콘만 라벨과 다른 색이 된다(라벨·marker 는 행 색 그대로),
 // ⑵ **선택된 행에서는 그 색을 버리고 accent 대비색을 따른다** — 종류 색을 남기면 밝은 accent 위에서
 // 읽히지 않는다(같은 이유로 marker·상태 글리프도 그렇게 한다).
+// git 이 무시하는 행은 **통째로 뒤로 물러난다**(사용자 요청 2026-08-18) — 라벨도 아이콘도 흐려지고,
+// 아이콘 종류색은 죽는다(무시된 줄만 색이 살아 있으면 오히려 더 눈에 띈다). `ignored_fg` 가 null 이면
+// 아무것도 하지 않는다: 저장소가 아니거나 아직 안 물어본 상태에서 **모르는 것을 흐리게 그리지 않는다**.
+test "file tree: 무시된 행은 라벨·아이콘이 함께 흐려지고, 모르면 그대로다" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xC8, .b = 0xC8 } };
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x60, .g = 0x60, .b = 0x60 } };
+    const icon_color: terminal.Color = .{ .rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC } };
+    var colors: [std.meta.fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
+    colors[@intFromEnum(file_tree_icon.IconKind.js)] = icon_color;
+    const rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/w/dist.map.js",
+        .label = "dist.map.js",
+        .depth = 0,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+        .icon_kind = @intFromEnum(file_tree_icon.IconKind.js),
+        .ignored = true,
+    } }};
+    const icon_cp = file_tree_icon.codepoint(.js).?;
+
+    {
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, fg, fg, null, &colors, dim);
+        defer dl.deinit(allocator);
+        var saw_icon = false;
+        var saw_label = false;
+        for (dl.cells) |cell| {
+            if (cell.codepoint == icon_cp) {
+                try std.testing.expectEqual(dim, cell.style.foreground); // 종류색이 죽고 흐려진다
+                saw_icon = true;
+            } else if (cell.codepoint == 'd') {
+                try std.testing.expectEqual(dim, cell.style.foreground); // 라벨도 흐려진다
+                saw_label = true;
+            }
+        }
+        try std.testing.expect(saw_icon and saw_label);
+    }
+    {
+        // 모르는 상태(null): 종류색과 본문색 그대로 — 흐리게 하지 않는다.
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, fg, fg, null, &colors, null);
+        defer dl.deinit(allocator);
+        for (dl.cells) |cell| {
+            if (cell.codepoint == icon_cp) try std.testing.expectEqual(icon_color, cell.style.foreground);
+            if (cell.codepoint == 'd') try std.testing.expectEqual(fg, cell.style.foreground);
+        }
+    }
+}
+
 test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대비색을 따른다" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
@@ -2980,7 +3044,7 @@ test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대�
     } }};
 
     {
-        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, dim, null, &colors);
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, dim, null, &colors, null);
         defer dl.deinit(allocator);
         const icon_cp = file_tree_icon.codepoint(.document).?;
         var saw_icon = false;
@@ -3001,7 +3065,7 @@ test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대�
         var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, dim, .{
             .index = 0,
             .foreground = on_accent,
-        }, &colors);
+        }, &colors, null);
         defer dl.deinit(allocator);
         for (dl.cells) |cell| try std.testing.expectEqual(on_accent, cell.style.foreground);
     }
@@ -3026,7 +3090,7 @@ test "file tree icons occupy one cell between disclosure and label without state
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 16, dim, dim, .{
         .index = 0,
         .foreground = selected_fg,
-    }, null);
+    }, null, null);
     defer dl.deinit(allocator);
     var saw_icon = false;
     var saw_label = false;
@@ -3044,7 +3108,7 @@ test "file tree icons occupy one cell between disclosure and label without state
     }
     try std.testing.expect(saw_icon and saw_label);
 
-    var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null, null);
+    var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null, null, null);
     defer narrow.deinit(allocator);
     for (narrow.cells, 0..) |cell, i| {
         try std.testing.expect(cell.col < 7);
@@ -3068,7 +3132,7 @@ test "file tree disclosure icon label and state cells never overlap at narrow wi
             .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
         } }};
         const cols: u16 = @intCast(cols_usize);
-        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null, null);
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null, null, null);
         defer dl.deinit(allocator);
         for (dl.cells, 0..) |cell, i| {
             try std.testing.expect(cell.col < cols);

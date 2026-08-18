@@ -618,6 +618,8 @@ fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList
     };
     const rows = [_]Row{
         .{ .root = .{ .path = "/w", .label = "workspace", .expanded = true, .loading = false, .icon_kind = @intFromEnum(K.folder_open) } },
+        // git 이 무시하는 항목 — 흐리게 그려져야 한다(아이콘 종류색도 함께 죽는다).
+        .{ .directory = .{ .path = "/w/node_modules", .label = "node_modules", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_dependency), .ignored = true } },
         .{ .directory = .{ .path = "/w/src", .label = "src", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_source) } },
         // compact 표시: 단일 자식 디렉터리 체인이 한 줄로 접힌 모습(`buildRows` 가 만드는 라벨 형태 그대로).
         .{ .directory = .{ .path = "/w/release/app", .label = "release/app", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_output) } },
@@ -632,6 +634,11 @@ fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList
         file.make("/w/README.md", "README.md", 1, .document),
         file.make("/w/dist.tar.gz", "dist.tar.gz", 1, .archive),
         file.make("/w/LICENSE", "LICENSE", 1, .file),
+        blk: {
+            var r = file.make("/w/dist.map.js", "dist.map.js", 1, .js);
+            r.file.ignored = true; // 무시된 **파일**: 종류색(js 노랑)이 죽고 흐려진다
+            break :blk r;
+        },
     };
     const fg: terminal.Color = .{ .rgb = .{ .r = 0xc8, .g = 0xc8, .b = 0xc8 } };
     const active_fg: terminal.Color = .{ .rgb = .{ .r = 0xff, .g = 0xff, .b = 0xff } };
@@ -643,7 +650,8 @@ fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList
         else
             null;
     }
-    return coretext_frame_builder.buildFileTreeDrawList(allocator, &rows, null, 0, rows.len, 30, fg, active_fg, null, &colors);
+    const ignored_fg: terminal.Color = .{ .rgb = maru.chrome.tokens.Tokens.rich(fixtureThemeInput()).get(.muted_fg) };
+    return coretext_frame_builder.buildFileTreeDrawList(allocator, &rows, null, 0, rows.len, 30, fg, active_fg, null, &colors, ignored_fg);
 }
 
 /// 픽스처 토큰 입력 — 제품 테마가 아니라 **고정 값**이라 덤프가 결정적이다.
@@ -1249,7 +1257,7 @@ test "CoreText draw-list shaper composes an NFD Hangul chrome label identically 
                 .external_change = false,
                 .symlink = false,
             } }};
-            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null, null);
+            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null, null, null);
             defer dl.deinit(a);
             var fr = renderer.FontIdentityRegistry.init(a);
             defer fr.deinit();

@@ -21,6 +21,7 @@ const term_ops = @import("term.zig");
 const scroll_ops = @import("scroll.zig");
 const diag_gate = app_session_mod.diag_gate;
 const git_command = app_session_mod.git_command;
+const git_status = maru.session.git_status; // check-ignore 출력 파서(순수 계층)
 const layout_math = app_session_mod.layout_math;
 const scm_dock_ops = @import("scm_dock.zig");
 const dock_ops = @import("dock.zig");
@@ -252,6 +253,7 @@ pub fn drainGitStatus(self: *AppSession) void {
             if (entry.diff_request_id == 0) self.requestDiffContent(entry);
         }
     }
+    drainIgnoreResults(self); // 탐색기 무시 표시 — 같은 tick 에서 걷어 rows 를 한 번만 다시 만든다
     var backend = &(self.git_backend orelse return);
     // 턴 스냅샷 결과를 링에 넣는다. 같은 tree가 연달아 오면 링이 스스로 무시한다(빈 비교 방지 — §6.1).
     while (backend.takeBranchesResult()) |taken| {
@@ -482,6 +484,84 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// 셋 다 실패하면 null이고 뷰는 빈 안내를 낸다.
 ///
 /// **"없다"와 "모른다"를 구별해야 하는 호출자는 `gitRepoTarget`을 쓴다.** 이 함수는 둘을 같은 null로 뭉갠다.
+/// 방금 읽은 디렉터리의 항목들이 git 무시 대상인지 묻는다(파일 탐색기 흐리게 표시).
+///
+/// **경로는 저장소 루트 기준 상대경로**로 넘긴다 — `git -C <repo> check-ignore` 가 그렇게 해석하고,
+/// 절대경로를 주면 저장소 밖 경로로 취급돼 조용히 답이 비는 경우가 있다.
+///
+/// 한 번에 `check_ignore_batch` 개까지만 묻는다(argv 한도). 그보다 많은 디렉터리는 **첫 배치만** 판정이
+/// 서고 나머지는 판정 없이 남는다 — 흐리게 하지 않는 쪽이라 틀린 표시가 되지는 않는다. 배치를 여러 번
+/// 돌리는 것은 후속(요청 큐가 필요하다).
+pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
+    if (self.git_backend == null) return;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = gitRepoRoot(self, &repo_buf) orelse return; // 저장소가 아니면 물어볼 것이 없다
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+
+    // 상대경로 조각을 한 버퍼에 이어 담고 슬라이스만 넘긴다(항목마다 할당하지 않는다).
+    self.git_ignore_query_buf.clearRetainingCapacity();
+    self.git_ignore_query_paths.clearRetainingCapacity();
+    for (entries) |entry| {
+        if (self.git_ignore_query_paths.items.len >= git_command.check_ignore_batch) break;
+        const start = self.git_ignore_query_buf.items.len;
+        self.git_ignore_query_buf.appendSlice(self.allocator, dir_path) catch break;
+        self.git_ignore_query_buf.append(self.allocator, '/') catch break;
+        self.git_ignore_query_buf.appendSlice(self.allocator, entry.name) catch break;
+        const abs = self.git_ignore_query_buf.items[start..];
+        // 저장소 루트 접두를 떼어 상대경로로 만든다. 밖이면 건너뛴다(그 항목은 판정 없이 남는다).
+        if (abs.len <= repo.len or !std.mem.startsWith(u8, abs, repo)) {
+            self.git_ignore_query_buf.shrinkRetainingCapacity(start);
+            continue;
+        }
+        var rel = abs[repo.len..];
+        if (rel.len > 0 and rel[0] == '/') rel = rel[1..];
+        if (rel.len == 0) {
+            self.git_ignore_query_buf.shrinkRetainingCapacity(start);
+            continue;
+        }
+        self.git_ignore_query_paths.append(self.allocator, rel) catch break;
+    }
+    if (self.git_ignore_query_paths.items.len == 0) return;
+    self.git_ignore_request_id +%= 1;
+    // 거절되면(이미 하나가 돌고 있음) 그냥 넘어간다 — 다음 스캔이 다시 묻는다.
+    _ = self.git_backend.?.submitCheckIgnore(git_exe, repo, self.git_ignore_query_paths.items, self.git_ignore_request_id);
+}
+
+/// `check-ignore` 결과를 트리에 반영한다. 무시된 것으로 돌아온 경로만 표시하고, 이번 배치에서 물었던
+/// 나머지는 **표시를 지운다** — 그렇게 해야 `.gitignore` 를 고쳐 무시가 풀린 항목이 흐린 채로 남지 않는다.
+pub fn drainIgnoreResults(self: *AppSession) void {
+    var backend = &(self.git_backend orelse return);
+    while (backend.takeIgnoreResult()) |taken| {
+        var res = taken;
+        defer res.deinit(git_backend_mod.worker_allocator);
+        if (!res.ok) continue;
+        // 물었던 경로를 먼저 지우고(이번 답이 권위다), 무시된 것만 다시 세운다.
+        for (self.git_ignore_query_paths.items) |rel| {
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (joinRepoPath(self, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, false);
+        }
+        var it = git_status.iterateIgnored(res.text);
+        while (it.next()) |rel| {
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (joinRepoPath(self, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, true);
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+}
+
+/// 저장소 루트 기준 상대경로를 트리가 쓰는 절대경로로 되돌린다.
+fn joinRepoPath(self: *AppSession, rel: []const u8, buf: []u8) ?[]const u8 {
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = gitRepoRoot(self, &repo_buf) orelse return null;
+    if (repo.len + 1 + rel.len > buf.len) return null;
+    @memcpy(buf[0..repo.len], repo);
+    buf[repo.len] = '/';
+    @memcpy(buf[repo.len + 1 ..][0..rel.len], rel);
+    return buf[0 .. repo.len + 1 + rel.len];
+}
+
 pub fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
     return switch (gitRepoTarget(self, buf)) {
         .repo => |found| found,

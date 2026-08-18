@@ -20,6 +20,17 @@ const git_log = @import("git_log.zig"); // 커밋 목록 `--format`의 단일 �
 pub const Kind = enum {
     /// 네 섹션의 상태 문자 + 브랜치/upstream/ahead·behind를 **한 번에**. `--branch` 덕에 rev-list가 따로 필요 없다.
     status,
+    /// 파일 탐색기의 **무시된 항목 판정**(`check-ignore -z <경로들>`). 무시된 경로만 NUL 구분으로 돌아온다.
+    ///
+    /// **왜 `status --ignored` 가 아닌가**: 그건 무시된 트리 *안까지* 열거해 `node_modules` 같은 곳에서
+    /// 비용이 폭발한다. 탐색기는 "지금 펼쳐 보이는 항목"만 알면 되므로 질의 범위가 화면에 비례하는 편이
+    /// 맞다(사용자 결정 2026-08-18). `.gitignore` 를 우리가 파싱하는 선택지는 부정·중첩·`**` 문법을 다시
+    /// 구현해야 하고 git 과 미세하게 어긋날 수 있어 택하지 않았다 — 판정 권위는 git 에 남긴다.
+    ///
+    /// **`--stdin` 이 아니라 인자로 넘기는 이유**: 이 backend 의 실행 경로(fork+exec+pipe)는 stdout 만
+    /// 읽는다. stdin 파이프를 더하는 것은 저수준 변경이라, 같은 정확도를 argv 배치로 얻는다 —
+    /// `checkIgnoreBatch` 가 한 번에 넘길 수 있는 개수를 알려 주고 호출자가 그만큼씩 끊는다.
+    check_ignore,
     /// **목록 행의 +N -N** (`HEAD ↔ 작업트리`). 2판은 파일 하나가 한 행이고 그 행의 기본 비교가 HEAD 기준이므로
     /// 증감도 같은 범위여야 한다 — index 기준 숫자를 쓰면 화면의 `+3 -1`과 눌러서 열리는 diff의 줄 수가 다르다
     /// (docs/editor-surface-dock.md §3.5.2). **unborn(첫 커밋 전)에서는 실패한다** — HEAD가 없다. 그건 오류가 아니라
@@ -332,6 +343,26 @@ pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
 /// `git_exe`와 `repo`를 받아 argv를 `buf`에 채우고 그 슬라이스를 돌려준다. 할당하지 않는다.
 /// `git_exe`는 호출자가 **절대 경로로 해석해 둔** 실행 파일이다 — PATH 탐색을 이 모듈이 하지 않는 이유는
 /// PATH hijack을 막는 책임이 "무엇을 실행할지 고르는" 쪽(L4)에 있어서다(§6).
+/// `check-ignore` 한 번에 넘길 수 있는 경로 개수. `build` 가 만드는 고정 접두(exe·-C·repo·config
+/// 덮어쓰기·서브커맨드·-z)를 뺀 나머지다. 호출자는 이 크기로 끊어 여러 번 부른다.
+pub const check_ignore_batch: usize = blk: {
+    var buf: [max_argv][]const u8 = undefined;
+    const prefix = build(.check_ignore, "git", "/", null, &buf);
+    break :blk max_argv - prefix.len;
+};
+
+/// `check-ignore` argv — 고정 접두 뒤에 경로들을 붙인다. `paths.len` 은 `check_ignore_batch` 이하여야
+/// 한다(넘으면 잘라 낸다 — argv 를 넘겨 exec 이 실패하는 것보다 덜 그린 편이 낫다).
+pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, paths: []const []const u8, buf: *[max_argv][]const u8) []const []const u8 {
+    const prefix = build(.check_ignore, git_exe, repo, null, buf);
+    var n = prefix.len;
+    for (paths[0..@min(paths.len, check_ignore_batch)]) |path| {
+        buf[n] = path;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8, buf: *[max_argv][]const u8) []const []const u8 {
     var n: usize = 0;
     buf[n] = git_exe;
@@ -353,6 +384,14 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = "--porcelain";
             n += 1;
+        },
+        .check_ignore => {
+            buf[n] = "check-ignore";
+            n += 1;
+            // `-z`: 출력이 NUL 구분 — 경로에 개행이 들어갈 수 있다.
+            buf[n] = "-z";
+            n += 1;
+            // 경로는 `buildCheckIgnore` 가 이어 붙인다(이 자리는 고정 접두만 만든다).
         },
         .status => {
             buf[n] = "status";
@@ -885,4 +924,32 @@ test "turn_name_status: 두 tree를 각각의 인자로 넘긴다" {
         try testing.expect(!std.mem.eql(u8, a, "--cached")); // 작업트리·index가 아니라 tree 둘이다
     }
     try testing.expect(saw_name_status);
+}
+
+// `check-ignore` 는 경로를 **인자로** 받는다(이 backend 의 실행 경로가 stdout 만 읽으므로 `--stdin` 을
+// 쓰지 않는다 — 위 `check_ignore` 주석). 그래서 한 번에 넘길 수 있는 개수가 argv 한도에 묶이고, 그
+// 개수를 상수로 노출해 호출자가 끊어 부른다. 여기서 고정하는 것은 ⑴ 접두가 그대로이고 ⑵ 경로가 그 뒤에
+// 순서대로 붙으며 ⑶ 배치 크기를 넘겨도 argv 를 넘지 않는다는 것이다.
+test "check-ignore argv: 고정 접두 뒤에 경로가 붙고 배치 한도를 넘지 않는다" {
+    var buf: [max_argv][]const u8 = undefined;
+    const paths = [_][]const u8{ "node_modules", "src/main.zig", "build/out" };
+    const argv = buildCheckIgnore("git", "/repo", &paths, &buf);
+
+    try std.testing.expectEqualStrings("git", argv[0]);
+    try std.testing.expectEqualStrings("-C", argv[1]);
+    try std.testing.expectEqualStrings("/repo", argv[2]);
+    // 서브커맨드와 -z 가 접두 끝에 있고, 그 뒤가 경로다.
+    try std.testing.expectEqualStrings("check-ignore", argv[argv.len - 5]);
+    try std.testing.expectEqualStrings("-z", argv[argv.len - 4]);
+    try std.testing.expectEqualStrings("node_modules", argv[argv.len - 3]);
+    try std.testing.expectEqualStrings("src/main.zig", argv[argv.len - 2]);
+    try std.testing.expectEqualStrings("build/out", argv[argv.len - 1]);
+
+    // 배치 한도를 넘겨 주면 잘라 낸다 — argv 를 넘겨 exec 이 실패하는 것보다 덜 그린 편이 낫다.
+    var many: [max_argv * 2][]const u8 = undefined;
+    for (&many) |*m| m.* = "x";
+    const clamped = buildCheckIgnore("git", "/repo", &many, &buf);
+    try std.testing.expect(clamped.len <= max_argv);
+    try std.testing.expectEqual(check_ignore_batch, clamped.len - (clamped.len - check_ignore_batch));
+    try std.testing.expect(check_ignore_batch > 0);
 }

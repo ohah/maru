@@ -96,6 +96,13 @@ pub const Row = union(enum) {
         symlink: bool,
         identity: ?Identity = null,
         icon_kind: u8 = 0,
+        /// git 이 무시하는 항목인가(`check-ignore`). 렌더가 흐리게 그린다 — `node_modules` 같은 줄이
+        /// 추적되는 소스와 같은 무게로 읽히면 훑기가 어렵다(사용자 요청 2026-08-18).
+        ///
+        /// **판정은 git 이 한다.** 우리가 `.gitignore` 를 파싱하지 않는 이유는 부정·중첩·`**` 문법을 다시
+        /// 구현해야 하고 git 과 미세하게 어긋날 수 있어서다. 저장소가 아니거나 아직 안 물어본 항목은
+        /// false 이고, 그때는 지금과 같은 모습이다(모르면 흐리게 하지 않는다).
+        ignored: bool = false,
     };
 
     pub const FileRow = struct {
@@ -110,11 +117,22 @@ pub const Row = union(enum) {
         symlink: bool,
         identity: ?Identity = null,
         icon_kind: u8 = 0,
+        /// git 이 무시하는 항목인가 — `DirectoryRow.ignored` 와 같은 계약이다.
+        ignored: bool = false,
     };
 };
 
 /// L3 classifier result stored on the immutable row snapshot without importing the upper layer.
 /// Zero means unclassified/none; AppSession annotates every newly projected row exactly once.
+/// 행이 git 무시 대상인가. 아이콘 종류와 같은 자리에서 꺼내 렌더가 한 번만 묻는다.
+pub fn rowIgnored(row: Row) bool {
+    return switch (row) {
+        .directory => |v| v.ignored,
+        .file, .recent_file => |v| v.ignored,
+        else => false,
+    };
+}
+
 pub fn rowIconKind(row: Row) u8 {
     return switch (row) {
         .recent_header => |v| v.icon_kind,
@@ -273,6 +291,9 @@ const Node = struct {
     loaded: bool = false,
     expanded: bool = false,
     loading: bool = false,
+    /// git 이 무시하는 항목인가(`check-ignore` 결과). 기본 false = **모름** — 저장소가 아니거나 아직
+    /// 안 물어본 상태에서 흐리게 그리지 않기 위해서다(`Row.ignored` 주석과 같은 계약).
+    ignored: bool = false,
 
     fn deinit(self: *Node, allocator: std.mem.Allocator) void {
         for (self.children.items) |*child| child.deinit(allocator);
@@ -939,6 +960,29 @@ pub const Tree = struct {
         dir.loading = false;
     }
 
+    /// 경로로 노드를 찾아 무시 표시를 남긴다(`check-ignore` 결과 반영). 못 찾으면 조용히 넘어간다 —
+    /// 질의가 도는 사이 트리가 접히거나 새로 읽혀 그 경로가 사라질 수 있고, 그건 오류가 아니다.
+    ///
+    /// **표시만 한다**: 자식으로 전파하지 않는다. git 은 무시된 디렉터리 안을 다시 판정하지 않으므로
+    /// (그 안을 물어도 같은 답이다) 펼쳐 보이는 항목마다 물어보는 이 설계에서는 전파가 필요 없고,
+    /// 전파하면 `.gitignore` 의 부정 규칙(`!keep.txt`)이 있는 트리에서 틀린 답을 만든다.
+    pub fn markIgnored(self: *Tree, path: []const u8, ignored: bool) void {
+        for (self.roots.items) |*root| {
+            if (markIgnoredIn(root.children.items, path, ignored)) return;
+        }
+    }
+
+    fn markIgnoredIn(children: []Node, path: []const u8, ignored: bool) bool {
+        for (children) |*node| {
+            if (std.mem.eql(u8, node.path, path)) {
+                node.ignored = ignored;
+                return true;
+            }
+            if (markIgnoredIn(node.children.items, path, ignored)) return true;
+        }
+        return false;
+    }
+
     pub fn buildRows(self: *const Tree, allocator: std.mem.Allocator, open: []const OpenState, out: *std.ArrayList(Row)) !void {
         out.clearRetainingCapacity();
         if (self.roots.items.len == 0) {
@@ -1001,19 +1045,26 @@ pub const Tree = struct {
                 // 체인의 **끝 노드**가 그 줄의 주인이다: 접기/펼치기·경로 매칭이 그것을 향해야 펼쳤을 때
                 // 실제 내용이 나온다(중간 노드를 펼쳐 봐야 또 한 겹이 나올 뿐이다).
                 const tail = compactChainEnd(node);
-                try out.append(allocator, .{ .directory = .{
-                    .path = tail.path,
-                    .label = compactLabel(node, tail),
-                    .depth = depth,
-                    .expanded = tail.expanded,
-                    .loading = tail.loading,
-                    .symlink = node.kind.isSymlink(),
-                    .identity = tail.identity,
-                } });
+                try out.append(allocator, .{
+                    .directory = .{
+                        .path = tail.path,
+                        .label = compactLabel(node, tail),
+                        .depth = depth,
+                        .expanded = tail.expanded,
+                        .loading = tail.loading,
+                        .symlink = node.kind.isSymlink(),
+                        // 둘 다 **tail**에서 온다. 접힌 줄이 가리키는 디렉터리가 tail 이므로(위 주석),
+                        // 무시 판정도 화면에 보이는 그 경로의 것이어야 한다 — 중간 노드에서 가져오면 사용자가
+                        // 보는 경로와 흐려지는 근거가 어긋난다.
+                        .identity = tail.identity,
+                        .ignored = tail.ignored,
+                    },
+                });
                 if (tail.expanded) try appendChildrenRows(allocator, tail.children.items, depth +| 1, open, out);
             } else {
                 var row = fileRow(node.path, node.name, depth, node.kind.isSymlink(), open);
                 row.identity = node.identity;
+                row.ignored = node.ignored;
                 try out.append(allocator, .{ .file = row });
             }
         }

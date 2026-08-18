@@ -142,6 +142,8 @@ const State = struct {
     snapshot_result: ?SnapshotResult = null,
     branches_inflight: usize = 0,
     branches_result: ?BranchesResult = null,
+    ignore_inflight: usize = 0,
+    ignore_result: ?IgnoreResult = null,
     /// 머리 줄용 가벼운 읽기(P3d-③). **자기 슬롯을 쓴다** — 목록 읽기와 섞이면 둘 중 하나가 다른 쪽을
     /// 기다리게 되고, 사용자가 보고 있는 저장소의 갱신이 배경 읽기에 밀린다.
     repo_status_inflight: usize = 0,
@@ -162,6 +164,7 @@ const State = struct {
         if (self.diff_result) |*r| r.deinit(self.allocator);
         if (self.snapshot_result) |*r| r.deinit(self.allocator);
         if (self.branches_result) |*r| r.deinit(self.allocator);
+        if (self.ignore_result) |*r| r.deinit(self.allocator);
         if (self.repo_status_result) |*r| r.deinit(self.allocator);
         if (self.log_result) |*r| r.deinit(self.allocator);
         if (self.commit_files_result) |*r| r.deinit(self.allocator);
@@ -186,6 +189,9 @@ const Job = struct {
     limit: u32 = 0,
     /// 파일 목록 읽기가 쓸 명령(P4b 커밋 · P5 턴). 다른 작업은 쓰지 않는다.
     file_list_kind: git_command.Kind = .commit_files,
+    /// `check-ignore` 가 물어볼 경로들(owned, 저장소 루트 기준 상대경로). 다른 작업은 쓰지 않는다.
+    /// 한 배치는 `git_command.check_ignore_batch` 이하다 — 호출자가 그만큼씩 끊어 넣는다.
+    ignore_paths: [][]u8 = &.{},
 
     const DiffTarget = struct {
         rel_path: []u8,
@@ -202,6 +208,19 @@ const Job = struct {
 
 /// 턴 스냅샷 결과. `tree`가 비어 있으면 실패다(저장소가 아니거나 git이 거절).
 /// 로컬 브랜치 목록. `for-each-ref` 출력을 **줄 단위 그대로** 담는다 — 쪼개는 것은 소비자(순수 파서)가 한다.
+/// `check-ignore` 결과 — **무시된 경로만** NUL 구분으로 담긴 원문(owned)이다. 파싱은 순수 계층
+/// (`git_status.iterateIgnored`)이 하고, 여기서는 바이트만 나른다(백엔드가 의미를 해석하지 않는다).
+pub const IgnoreResult = struct {
+    request_id: u64,
+    ok: bool = false,
+    text: []u8 = &.{},
+
+    pub fn deinit(self: *IgnoreResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        self.text = &.{};
+    }
+};
+
 pub const BranchesResult = struct {
     request_id: u64,
     ok: bool = false,
@@ -550,6 +569,72 @@ pub const Backend = struct {
     /// 스냅샷 실패로 목록·diff가 영향을 받지 않게 결과 슬롯을 나눠 뒀다.
     /// 로컬 브랜치 목록을 비동기로 읽는다. 읽기 전용이라 index/네트워크를 안 건드린다(git_command.branches 계약).
     /// 이미 하나가 돌고 있거나 결과가 안 걷혔으면 **거절한다**(false) — 클릭 연타로 프로세스가 쌓이지 않게.
+    /// 파일 탐색기의 **무시된 항목 판정**을 건다(사용자 결정 2026-08-18). 이미 하나가 돌고 있거나 결과가
+    /// 안 걷혔으면 거절한다 — 트리를 빠르게 펼칠 때 프로세스가 쌓이지 않게, 다른 읽기와 같은 규율이다.
+    /// 거절되면 그 화면은 그냥 판정이 없는 상태로 남는다(모르면 흐리게 하지 않는다).
+    pub fn submitCheckIgnore(self: *Backend, git_exe: []const u8, repo: []const u8, paths: []const []const u8, request_id: u64) bool {
+        if (paths.len == 0) return false;
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.ignore_inflight >= max_inflight or state.ignore_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.ignore_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonIgnore();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseIgnoreJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseIgnoreJob(job);
+        // 경로는 호출자 문자열 수명에 매이지 않게 복사한다(다른 job 필드와 같은 규율).
+        const owned = state.allocator.alloc([]u8, @min(paths.len, git_command.check_ignore_batch)) catch return self.releaseIgnoreJob(job);
+        var filled: usize = 0;
+        for (paths[0..owned.len]) |path| {
+            owned[filled] = state.allocator.dupe(u8, path) catch break;
+            filled += 1;
+        }
+        job.ignore_paths = owned[0..filled];
+        if (filled == 0) {
+            state.allocator.free(owned);
+            job.ignore_paths = &.{};
+            return self.releaseIgnoreJob(job);
+        }
+        const thread = std.Thread.spawn(.{}, ignoreWorker, .{job}) catch return self.releaseIgnoreJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseIgnoreJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        state.allocator.free(job.git_exe);
+        state.allocator.free(job.repo);
+        for (job.ignore_paths) |p| state.allocator.free(p);
+        if (job.ignore_paths.len > 0) state.allocator.free(job.ignore_paths);
+        state.allocator.destroy(job);
+        return self.abandonIgnore();
+    }
+
+    fn abandonIgnore(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.ignore_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    /// 완료된 `check-ignore` 결과의 소유권을 넘긴다(없으면 null).
+    pub fn takeIgnoreResult(self: *Backend) ?IgnoreResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const r = state.ignore_result orelse return null;
+        state.ignore_result = null;
+        return r;
+    }
+
     pub fn submitBranches(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -971,6 +1056,32 @@ fn commitFilesWorker(job: *Job) void {
     state.release();
 }
 
+fn ignoreWorker(job: *Job) void {
+    const state = job.state;
+    var result: IgnoreResult = .{ .request_id = job.request_id };
+    // `run` 은 kind 하나로 argv 를 만드는 경로라, 경로가 붙는 이 명령만 argv 를 직접 조립해 넘긴다.
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const argv = git_command.buildCheckIgnore(job.git_exe, job.repo, job.ignore_paths, &argv_buf);
+    if (runArgv(state.allocator, argv)) |out| {
+        result.text = out.bytes;
+        // **exit code 1 은 "무시된 것이 없음"이다**(git 계약) — 실패가 아니다. `runArgv` 가 그 구분을 준다.
+        result.ok = true;
+    } else |_| {}
+
+    state.mutex.lockUncancelable(state.io);
+    if (state.ignore_result) |*old| old.deinit(state.allocator);
+    state.ignore_result = result;
+    state.ignore_inflight -= 1;
+    state.mutex.unlock(state.io);
+
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    for (job.ignore_paths) |p| state.allocator.free(p);
+    if (job.ignore_paths.len > 0) state.allocator.free(job.ignore_paths);
+    state.allocator.destroy(job);
+    state.release();
+}
+
 fn branchesWorker(job: *Job) void {
     const state = job.state;
     var result: BranchesResult = .{ .request_id = job.request_id };
@@ -1376,6 +1487,21 @@ fn runWithEnv(
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv_slices = git_command.build(kind, git_exe, repo, arg, &argv_buf);
+    return runArgvWithEnv(allocator, argv_slices, index_file);
+}
+
+/// **argv 를 직접 받는 진입점.** `check-ignore` 는 경로가 argv 뒤에 붙어 kind 하나로 만들 수 없어
+/// (`git_command.buildCheckIgnore`) 이 자리를 쓴다. 아래 본문은 원래 `runWithEnv` 의 것 그대로다 —
+/// 실행 방식(fork+exec+pipe·환경 덮어쓰기·exit code 해석)을 두 벌로 만들지 않기 위해 갈랐다.
+fn runArgv(allocator: std.mem.Allocator, argv_slices: []const []const u8) !Output {
+    return runArgvWithEnv(allocator, argv_slices, null);
+}
+
+fn runArgvWithEnv(
+    allocator: std.mem.Allocator,
+    argv_slices: []const []const u8,
+    index_file: ?[]const u8,
+) !Output {
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —

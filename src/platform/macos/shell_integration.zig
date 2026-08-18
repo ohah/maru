@@ -82,7 +82,7 @@ const zsh_zshenv =
     \\  # 정확히 복원한다. 종결자는 ST(ESC \).
     \\  #
     \\  # **authority(host)는 비워 보낸다** — `file://` + 경로 = `file:///path`, VTE 규약상 localhost다
-    \\  # (docs/ssh-integration.md §9.2의 maru.i18n.t(.git_local_check) 첫 항목). 이 스크립트는 maru가 직접 spawn한 **로컬
+    \\  # (docs/ssh-integration.md §9.2의 "로컬 판정" 첫 항목). 이 스크립트는 maru가 직접 spawn한 **로컬
     \\  # pty**에서만 로드되므로(원격 rc는 사용자가 별도 스니펫을 넣는다 — §9.5) 여기서 보고하는 cwd는
     \\  # 정의상 로컬이고, 그 사실을 hostname 문자열로 추측하게 만들 이유가 없다.
     \\  #
@@ -92,7 +92,7 @@ const zsh_zshenv =
     \\  # hostIsLocal은 양쪽이 다 FQDN인데 전체가 다르면 **다른 호스트로 단정한다**(box.corp.com vs
     \\  # box.home.net을 막는 규율 — core.zig). 그러면 로컬 세션이 통째로 원격 취급돼 폴더줄에 `host:`
     \\  # 접두가 붙고 cwd 상속·링크 감지·git 저장소 조회가 전부 꺼진다(사용자 보고 2026-08-13: 소스 컨트롤
-    \\  # 뷰가 로컬 저장소에 서 있는데 maru.i18n.t(.git_not_a_repo)). 로컬 보고자가 로컬임을 명시하면 그 추측
+    \\  # 뷰가 로컬 저장소에 서 있는데 "git 저장소가 아닙니다"). 로컬 보고자가 로컬임을 명시하면 그 추측
     \\  # 자체가 사라진다. ssh로 들어가면 원격 스니펫이 ${HOST}를 실어 원격 판정은 그대로 동작한다.
     \\  #
     \\  # ⚠️ **이 함수를 원격 rc에 그대로 복사하지 말 것.** 원격 셸이 authority를 비우면 maru는 그 세션을

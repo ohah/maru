@@ -287,7 +287,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const notice_rows: usize = if (self.scm_write_error != null) 1 else 0;
 
     // **저장소 머리 줄이 목록의 첫 층이다**(§3.5.1c). 지금 읽어 둔 저장소의 줄들은 자기 머리 줄 아래에
-    // 오고, 아직 안 읽은 저장소는 머리 줄만 선다(maru.i18n.t(.scm_loading) — 배지의 빈자리와 구별한다).
+    // 오고, 아직 안 읽은 저장소는 머리 줄만 선다("읽는 중…" — 배지의 빈자리와 구별한다).
     const repos = repoEntries(self);
     const current_repo = self.git_repo orelse "";
 
@@ -353,7 +353,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .collapsed = collapsed,
                 .primary = entry.primary,
                 .count = if (is_current) countFiles(model.rows) else (if (summary) |sum| sum.count else 0),
-                // 아직 답이 안 온 저장소만 maru.i18n.t(.scm_loading)이다 — **0건과 구별해야 한다**.
+                // 아직 답이 안 온 저장소만 "읽는 중…"이다 — **0건과 구별해야 한다**.
                 .pending = !is_current and summary == null,
                 // 읽지 못한 저장소는 그 사실을 적는다(0건으로 그리면 없는 사실을 단정한다).
                 .failed = if (summary) |sum| sum.failed else false,
@@ -3057,7 +3057,7 @@ pub fn repoStatusFor(self: *const AppSession, path: []const u8) ?app_session_mod
 }
 
 /// 목록 갱신 시점(뷰 진입·창 포커스·`.git` 이벤트)에 **전부 낡았다고 표시**한다. 지우지 않는 이유는
-/// 지운 값을 다시 읽는 동안 머리 줄이 maru.i18n.t(.scm_loading)으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
+/// 지운 값을 다시 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡이기 때문이다 — 낡은 값을
 /// 보여 주다 조용히 바뀌는 편이 낫다(그 값은 방금 전 사실이다).
 /// 그 저장소 **하나만** 낡았다고 표시한다(쓰기가 끝난 뒤 — 그 줄만 사실이 바뀌었다).
 pub fn markRepoStatusStaleFor(self: *AppSession, repo: []const u8) void {

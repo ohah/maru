@@ -4496,11 +4496,13 @@ fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.
         .web => |w| w.url orelse "", // WebMeta.url은 ?[]const u8(로드 전 null)
         else => "",
     }) else "";
-    const action = switch (e.scope) {
-        .browser_storage => "이 사이트의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
-        else => "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
-    };
-    return std.fmt.bufPrint(buf, "에이전트가 {s} 합니다. 대상: {s}. 허용하시겠습니까?", .{ action, url }) catch buf[0..0];
+    // **표시 문자열이라 키로 든다.** 이 문장은 로그인 토큰 접근을 묻는 동의문인데, 버튼은 이미
+    // 번역돼 있어(`btn_allow`/`btn_deny`) 여기만 한국어면 영어 UI 아래에서 무엇을 허용하는지 못 읽는다.
+    const action = maru.i18n.t(switch (e.scope) {
+        .browser_storage => .grant_scope_storage,
+        else => .grant_scope_control,
+    });
+    return maru.i18n.format(buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = action }, .{ .s = url } });
 }
 
 /// 5f-0b-3b: 인가·유효한 `browser.subscribe`를 메인에서 즉시 처리한다(async 아님). 연결 outbound(pending에 실림)를

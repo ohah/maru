@@ -105,7 +105,7 @@ pub const Transport = struct {
     strict_kex: bool = false,
     phase: Phase = .initial_kex,
     /// 상대에게서 받은 **첫 메시지 번호**. `null` 이면 아직 아무것도 안 받았다.
-    /// strict 여부와 무관하게 기록해 두고 `enableStrictKex` 가 되짚는다.
+    /// strict 여부와 무관하게 기록해 두고 `applyNegotiation` 이 되짚는다.
     first_from_peer: ?u8 = null,
     /// **추측 패킷 하나를 버려야 한다**(RFC 4253 §7.1). `kexinit.negotiate` 의 `discard_guess`
     /// 를 여기 넣어 두면 다음 패킷을 먹되 **시퀀스 번호는 올린다**.
@@ -198,7 +198,7 @@ pub const Transport = struct {
         // **첫 메시지는 strict 여부와 무관하게 기억한다.** `strict_kex` 는 서버 KEXINIT 에서
         // 유도되므로 그 첫 패킷을 먹는 시점에는 **반드시 false** 다 — 여기서 조건부로 검사하면
         // draft §3.2 의 MUST 가 영영 발동하지 않는다(Terrapin 의 prefix injection 모양이다).
-        // 판정은 `enableStrictKex` 가 사후에 한다.
+        // 판정은 `applyNegotiation` 이 사후에 한다.
         if (self.first_from_peer == null) self.first_from_peer = msg;
 
         // **계수도 strict 와 무관하게 센다.** 진짜 서버 KEXINIT 은 strict 가 켜지기 **전에**
@@ -252,16 +252,33 @@ pub const Transport = struct {
         return err;
     }
 
-    /// strict KEX 를 켠다. **사후 검사가 여기서 돈다**(draft §3.2).
+    /// 협상 결과 중 **전송기가 알아야 하는 것**. `kexinit.Negotiated` 를 그대로 받지 않는 것은
+    /// 전송기가 협상 모듈을 import 하지 않게 하기 위해서다(층이 한 방향으로만 흐른다).
+    pub const Negotiation = struct {
+        /// 양쪽이 strict KEX 를 말했나(draft §3.1 — 한쪽만으로는 안 켠다).
+        strict_kex: bool,
+        /// 서버 추측이 틀려 **다음 패킷 하나를 버려야** 하나(RFC 4253 §7.1).
+        discard_guess: bool,
+    };
+
+    /// 협상 결과를 전송기에 반영한다. **사후 검사가 여기서 돈다**(draft §3.2).
     ///
-    /// `strict_kex` 를 필드에 그냥 쓰면 안 되는 이유가 이것이다 — 그 값은 서버 KEXINIT 을 읽고 나서야
-    /// 정해지는데, "상대의 첫 메시지가 KEXINIT 이었나" 는 **그보다 앞선 일**을 되짚는 물음이다.
-    pub fn enableStrictKex(self: *Transport) Error!void {
+    /// **둘을 한 번에 받는 것이 요점이다.** 처음에는 `enableStrictKex()` 와 `pending_discard`
+    /// 필드가 따로였는데, 그러면 드라이버가 **뒤의 것을 잊을 수 있다** — 잊으면 버릴 추측 패킷을
+    /// 진짜로 처리하고, 그것이 정확히 코드리뷰가 잡은 결함이다. 잊을 수 있는 단계가 둘이면 언젠가
+    /// 잊는다. 협상 결과 하나를 통째로 넘기게 하면 반쪽만 반영하는 상태가 안 생긴다.
+    ///
+    /// `strict_kex` 를 필드에 그냥 쓰면 안 되는 이유도 여기 있다 — 그 값은 서버 KEXINIT 을 읽고
+    /// 나서야 정해지는데, "상대의 첫 메시지가 KEXINIT 이었나" 는 **그보다 앞선 일**을 되짚는 물음이다.
+    pub fn applyNegotiation(self: *Transport, n: Negotiation) Error!void {
         if (self.poison) |e| return e;
-        if (self.first_from_peer) |first| {
-            if (first != msg_kexinit) return self.poisonUnless(Error.FirstMessageNotKexInit);
+        if (n.strict_kex) {
+            if (self.first_from_peer) |first| {
+                if (first != msg_kexinit) return self.poisonUnless(Error.FirstMessageNotKexInit);
+            }
         }
-        self.strict_kex = true;
+        self.strict_kex = n.strict_kex;
+        self.pending_discard = n.discard_guess;
     }
 
     /// 우리가 `NEWKEYS` 를 **보낸 직후** 부른다. 그 패킷은 옛 키로 나갔고 여기서 새 키로 바꾼다.
@@ -554,7 +571,7 @@ test "strict KEX: 상대의 첫 메시지는 KEXINIT 이어야 한다" {
         var t: Transport = .{};
         const n = try packet.write(&out, &[_]u8{first}, prng.random());
         _ = (try t.feed(&plain, out[0..n])).?; // 그 시점에는 막을 근거가 없다
-        try std.testing.expectError(Error.FirstMessageNotKexInit, t.enableStrictKex());
+        try std.testing.expectError(Error.FirstMessageNotKexInit, t.applyNegotiation(.{ .strict_kex = true, .discard_guess = false }));
         try std.testing.expect(!t.strict_kex); // 실패했으면 켜지도 않는다
     }
 
@@ -562,7 +579,7 @@ test "strict KEX: 상대의 첫 메시지는 KEXINIT 이어야 한다" {
     var ok: Transport = .{};
     const k = try packet.write(&out, &[_]u8{msg_kexinit}, prng.random());
     _ = (try ok.feed(&plain, out[0..k])).?;
-    try ok.enableStrictKex();
+    try ok.applyNegotiation(.{ .strict_kex = true, .discard_guess = false });
     try std.testing.expect(ok.strict_kex);
 
     // **진짜 KEXINIT 이 계수에 들어가 있어야 한다** — strict 가 켜진 뒤에만 세면 주입된 두 번째가
@@ -571,7 +588,7 @@ test "strict KEX: 상대의 첫 메시지는 KEXINIT 이어야 한다" {
 
     // 아무것도 안 받은 상태에서 켜는 것은 막지 않는다(그럴 일은 없지만 판정할 근거도 없다).
     var fresh: Transport = .{};
-    try fresh.enableStrictKex();
+    try fresh.applyNegotiation(.{ .strict_kex = true, .discard_guess = false });
 }
 
 test "strict KEX: 같은 KEX 메시지를 두 번 받지 않는다" {

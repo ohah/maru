@@ -338,6 +338,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 한 번 잡으면 줄이지 않는다: 접힘은 보이는 줄을 줄일 뿐 늘리지 못하므로 문서를 다시 열기 전까지
     // 이 크기로 충분하고, 매 프레임 크기를 재는 자리가 되지 않는다.
     const row_cache: ?*chrome_editor.frame.RowCache = blk: {
+        // **폭을 라이브로 끄는 동안에는 다시 세지 않는다**(§2.1 저하 동작). 창 리사이즈는 여기 없다 —
+        // 그쪽은 `windowDidResize`가 드래그 중 세션 resize를 아예 보류하고 끝날 때 한 번만 한다.
+        term.rt.editor_row_cache.hold = widthDragActive(self);
         if (term.rt.editor_row_cache.prefix.len <= lines.len) {
             const grown = self.allocator.alloc(u32, lines.len + 1) catch break :blk null;
             if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
@@ -867,6 +870,18 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
 
 /// 렌더에 넘길 **가장 긴 줄의 폭**. 0은 "아직 안 셌다"는 뜻이라 `null`로 바꾼다 — 렌더가 0을 길이로
 /// 믿으면 막대가 문서 전체를 덮는 것처럼 그려진다.
+/// 편집기 pane의 **폭이 지금 매 프레임 바뀌는 중인가**(§2.1 저하 동작의 조건).
+///
+/// **창 리사이즈는 여기 없다.** `MaruAppHost.windowDidResize`가 `inLiveResize` 동안 세션 resize를
+/// 보류하고 `windowDidEndLiveResize`에서 한 번만 적용하므로(zsh가 SIGWINCH마다 redraw하며 프롬프트를
+/// 중복시키던 문제로 도입된 정책), 창을 끄는 동안 이 pane의 폭은 그대로다.
+///
+/// 남는 두 경로가 **라이브**다 — 사이드바 우측 경계 드래그(`setSidebarWidthPx`를 drag마다 부른다)와
+/// pane divider 드래그(`routeDividerCapture`, 같은 패턴). 둘 다 편집기가 설 사각의 폭을 직접 끈다.
+fn widthDragActive(self: *const AppSession) bool {
+    return self.pointerGestureIs(.sidebar_divider) or pane_ops.dividerCaptureActive(self);
+}
+
 fn maxColsForRender(term: *Term) ?u32 {
     const v = term.rt.editor_max_cols;
     return if (v == 0) null else v;
@@ -3428,6 +3443,136 @@ test "가로 막대가 첫 프레임부터 선다 — 굴려 보기 전에 축�
     var wrapped = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer wrapped.dl.deinit(allocator);
     try testing.expect(!chrome_editor.frame.showsHorizontalBar(true, fx.term.rt.editor_max_cols, 40));
+}
+
+test "폭 드래그 중에는 시각 행을 다시 세지 않고, 놓으면 정확해진다 (§2.1 저하 동작)" {
+    // **제품 경로로 증명한다.** 컴포넌트의 `hold`가 켜지는 조건은 제품이 정하므로(`widthDragActive`),
+    // 그 배선이 빠지면 컴포넌트 테스트는 그대로 초록인 채 화면만 뻑뻑해진다.
+    //
+    // 창 리사이즈는 여기 대상이 아니다 — `windowDidResize`가 드래그 중 세션 resize를 보류한다.
+    // 라이브로 폭을 끄는 것은 사이드바 경계와 pane divider 둘이고, 여기서는 앞의 것으로 세운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long_line = "이 줄은 좁은 pane에서 여러 조각으로 접힐 만큼 길다 — 그래야 시각 행이 논리 줄보다 많아진다";
+    const lines = try allocator.alloc([]const u8, 400);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = long_line;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var first = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    first.dl.deinit(allocator);
+    const before = fx.term.rt.editor_total_visual_rows;
+    try testing.expect(before > lines.len); // 실제로 접혔다 — 아니면 이 테스트가 아무것도 안 본다
+
+    // ① 드래그 중: 폭을 여러 셀 줄여도 시각 행 수는 직전 값 그대로다.
+    fx.session.pointer_gesture_owner = .{ .sidebar_divider = .{ .start_pt = 0 } };
+    var narrow = fx.leaf_rect;
+    // **조각 수가 실제로 달라질 만큼 좁힌다.** 몇 셀만 줄이면 같은 조각 수가 나와(실측: 10셀 축소에
+    // 800행 그대로) 저하가 걸렸는지 안 걸렸는지 이 테스트가 구분하지 못한다.
+    narrow.w = @divTrunc(narrow.w, 2);
+    var during = appendPaneFrame(fx.session, narrow, fx.term) orelse return error.EditorPaneDidNotDraw;
+    during.dl.deinit(allocator);
+    try testing.expectEqual(before, fx.term.rt.editor_total_visual_rows);
+
+    // ② 놓으면: 같은 폭인데 이번에는 다시 세어 좁아진 만큼 늘어난다.
+    fx.session.pointer_gesture_owner = .none;
+    var after = appendPaneFrame(fx.session, narrow, fx.term) orelse return error.EditorPaneDidNotDraw;
+    after.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_total_visual_rows > before);
+}
+
+test "첫 프레임이 드래그 중이어도 시각 행은 정확하다 — 저하할 직전 값이 없다" {
+    // 사이드바를 끌기 시작한 뒤 그 pane에 문서가 처음 그려지는 순서다. 저하가 "값이 없을 때"까지
+    // 적용되면 막대가 통째로 틀린 채 드래그 내내 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long_line = "이 줄은 좁은 pane에서 여러 조각으로 접힐 만큼 길다 — 그래야 시각 행이 논리 줄보다 많아진다";
+    const lines = try allocator.alloc([]const u8, 400);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = long_line;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    fx.session.pointer_gesture_owner = .{ .sidebar_divider = .{ .start_pt = 0 } };
+    defer fx.session.pointer_gesture_owner = .none;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const per_line = piecesOfLine(fx.term, 0, visibleColsForTest(fx.session, body, fx.term, false));
+    try testing.expect(per_line > 1);
+    try testing.expectEqual(per_line * @as(u32, @intCast(lines.len)), fx.term.rt.editor_total_visual_rows);
+}
+
+test "[측정] 폭을 라이브로 끄는 드래그 — 캐시가 매 프레임 무효다 (§2.1 남은 구간)" {
+    // **어느 드래그인지가 중요하다.** §2.1은 이 작업을 분리 대상으로 적으며 근거를 *"창 리사이즈 중에는
+    // 매 프레임 발생한다"*고 썼는데, **이 구현에서 창 경로는 이미 닫혀 있다** — `MaruAppHost`의
+    // `windowDidResize`가 `inLiveResize`면 세션 resize를 보류하고 `windowDidEndLiveResize`에서 한 번만
+    // 처리한다(zsh가 SIGWINCH마다 redraw하며 프롬프트를 중복시키던 문제로 도입된 정책). 그래서 창을
+    // 끄는 동안 편집기 폭은 안 바뀌고 계수도 안 돈다.
+    //
+    // **라이브로 폭을 바꾸는 경로는 둘이다**: 사이드바 폭 드래그(`setSidebarWidthPx` — drag마다 갱신)와
+    // pane divider 드래그(`routeDividerCapture` — 같은 패턴). 이 테스트가 재는 것이 그 둘이다.
+    //
+    // 폭이 바뀌면 모든 줄의 조각 수가 바뀌므로 캐시가 매번 무효가 되고, 캐시가 계수 상한(`[4096]u32`)을
+    // 없앴으므로 그 비용은 이제 문서 크기에 **그대로 비례한다**(예전에는 4,096줄에서 잘려 캡됐다 — 대신
+    // 값이 틀렸다). 창 리사이즈에서는 같은 비용이 **놓는 순간 1회** 든다.
+    //
+    // 폭은 **셀 하나만큼** 줄인다 — 1px씩 줄이면 열 수가 그대로라 캐시가 맞아 버려서 드래그를 재는 것이
+    // 아니게 된다(이 테스트가 스스로를 무력화하는 자리다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const frames = 20;
+    for ([_]usize{ 1_000, 5_000, 20_000 }) |n| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        const lines = try allocator.alloc([]const u8, n);
+        defer allocator.free(lines);
+        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        fx.term.rt.editor_lines = lines;
+        fx.term.rt.editor_wrap = true;
+        fx.term.rt.editor_max_cols = 0;
+
+        var warm = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        warm.dl.deinit(allocator);
+
+        const cell_w: u32 = @intCast(fx.session.cell_width_px);
+        // 저하를 켠 쪽과 안 켠 쪽을 **같은 조건에서** 잰다 — 제스처 유무가 유일한 차이다.
+        for ([_]bool{ false, true }) |degrade| {
+            fx.session.pointer_gesture_owner = if (degrade) .{ .sidebar_divider = .{ .start_pt = 0 } } else .none;
+            defer fx.session.pointer_gesture_owner = .none;
+
+            const t0 = monotonicMsForTest();
+            for (0..frames) |i| {
+                var rect = fx.leaf_rect;
+                rect.w -= @intCast(cell_w * (i + 1)); // 드래그: 매 프레임 한 셀씩 좁아진다
+                var drawn = appendPaneFrame(fx.session, rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+                drawn.dl.deinit(allocator);
+            }
+            const total = monotonicMsForTest() - t0;
+            std.debug.print("\n[측정] 드래그 중 랩 {d}줄 (저하 {s}): {d}프레임 {d}ms (프레임당 {d}µs)\n", .{
+                n,
+                if (degrade) "켬" else "끔",
+                frames,
+                total,
+                total * 1000 / frames,
+            });
+        }
+    }
 }
 
 test "[측정] 랩 켠 문서의 프레임 비용 — 계수 캐시가 그것을 문서 크기에서 떼어 놓는다" {

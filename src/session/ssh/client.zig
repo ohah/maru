@@ -489,6 +489,10 @@ pub const Client = struct {
         }
         // `IGNORE`·`DEBUG` 는 뜻이 없다(§11.2·§11.3). `UNIMPLEMENTED` 는 **우리가 보낸 것에 대한
         // 답**이라 여기서 할 일이 없다 — 우리는 모르는 메시지를 안 보낸다.
+        //
+        // **`DEBUG` 의 `always_display`(SHOULD)를 안 따르는 것은 결정이다**(계약 §3.2): 이 층에서
+        // 화면으로 가는 길은 원격 셸 출력 하나뿐이라, 거기 끼워 넣으면 사용자가 서버 문자열과
+        // 셸 출력을 구별할 수 없다.
         if (msg == msg_ignore or msg == msg_debug or msg == msg_unimplemented) return;
         if (msg == msg_global_request) return try self.onGlobalRequest(payload, w);
 

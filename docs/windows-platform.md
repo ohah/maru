@@ -857,6 +857,25 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 
 두 번째가 **보안 설정이 실제로 게이트를 여닫는다**는 증거다. 값만 보고 넘어갔으면 못 봤을 자리다.
 
+**바인딩도 개수가 아니라 발화로 잰다.** 모디파이어 없는 키(F5)를 골라 합성으로 눌렀다 — §2h의 한계
+(합성 메시지에 모디파이어가 안 실린다)를 우회하는 자리다:
+
+| config | F5 ×3 |
+|---|---|
+| 없음 | `keys_to_shell=3 bytes_to_shell=15` (F5 시퀀스가 셸로), `app_actions=0` |
+| `keybind = f5 = new_tab` | `keys_to_shell=0`, **`app_actions=3`** |
+
+**리졸버 조립은 `Parsed.keyBindingResolver()`가 소유한다** — 손으로 세 필드를 옮겨 담으면 바인딩 종류가
+늘 때 그 자리만 빠진다(적대적 검증 4라운드가 잡았다: 같은 헬퍼가 이미 있는데 다시 조립하고 있었다).
+
+`validate()`는 **불변식 확인이지 활성 폴백이 아니다.** 로더가 app·terminal·unbind를 같은 dedup 풀에서
+만들어 chord가 구조적으로 충돌하지 않으므로(`loader.Parsed.terminal_bindings` doc) 지금 config 경로로는
+안 밟힌다 — 그래도 부르는 이유는 그 불변식이 깨졌을 때 조용히 이상해지지 않게 하기 위해서고,
+`rejected`가 0이 아니면 그것이 드러난다.
+
+**잘못된 config에 죽지 않는다.** 범위 밖 `font.size`, 없는 enum 값, 모르는 키, 중복 바인딩을 한꺼번에
+넣어도 `exit=0`·`diagnostics=5`이고 전부 기본값으로 접힌다.
+
 **폰트도 config에서 온다 — config를 읽어 놓고 안 쓰던 자리였다.** 적대적 검증 1라운드가 잡았다:
 래스터라이저를 여전히 `create(allocator, "", "", 18.0)`으로 만들고 있었다. `font.family`·`font.fallback`·
 `font.size`를 넘기도록 고쳤고, **그래서 config 로드가 폰트 생성보다 앞에 온다.** 빈 값이면 §2e의 티어가
@@ -1620,6 +1639,13 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
    > POSIX 호스트에서는 무동작이다. 판정은 `path_shape.normalizeSeparatorsFor(os_tag, …)`가 소유하므로
    > 두 갈래가 모든 타깃에서 테스트된다. 경로가 **아닌** text 필드(`input.word-separators`)는 안 건드리는
    > 것도 테스트가 고정한다 — `\`를 값으로 쓰는 설정이 깨지면 안 된다.
+   >
+   > **UNC 가 깨지지 않는지 재 봤다 — 안 깨진다.** `\\server\share`의 앞 역슬래시는 구분자가 아니라
+   > 접두 문법이라 정규화가 그것을 `//server/share`로 바꾸는데, Win32 가 그것을 받는지가 의심스러웠다.
+   > 측정 결과 `GetFullPathNameW`·`GetFileAttributesW` 둘 다 받는다 — `//localhost/C$/Windows`가
+   > `\\localhost\C$\Windows`로 정규화되고 존재 판정도 통과한다(드라이브 경로·혼합 경로도 같다).
+   > **그래서 OS 경계에서 native 로 되돌리는 변환을 두지 않는다** — 없는 문제에 코드를 넣으면 검증되지
+   > 않은 경로가 남는다.
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 

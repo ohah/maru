@@ -1206,13 +1206,15 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     };
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
 
-    // **검증에 실패하면 사용자 바인딩을 안 쓴다.** 모호한 바인딩(중복·앱/터미널 충돌)을 그대로 쓰면
-    // 어떤 키가 어디로 갈지 매번 달라진다 — 빌트인으로 접고 그 사실을 알린다.
-    var resolver = maru.config.KeyBindingResolver{
-        .app_bindings = loaded.keybindings,
-        .terminal_bindings = loaded.terminal_bindings,
-        .unbinds = loaded.unbinds,
-    };
+    // **리졸버 조립은 `Parsed` 가 소유한다.** 손으로 세 필드를 옮겨 담으면 바인딩 종류가 늘 때 이 자리만
+    // 빠진다 — macOS 도 같은 헬퍼를 쓴다.
+    var resolver = loaded.keyBindingResolver();
+
+    // **불변식 확인이지 활성 폴백이 아니다.** 로더가 app·terminal·unbind 를 **같은 dedup 풀**에서 만들어
+    // chord 가 구조적으로 충돌하지 않는다(`loader.Parsed.terminal_bindings` doc). 그래서 이 갈래는 지금
+    // config 경로로는 안 밟힌다 — 그래도 부르는 이유는 그 불변식이 깨졌을 때 **조용히 이상해지지 않게**
+    // 하기 위해서다. 모호한 바인딩을 그대로 쓰면 어떤 키가 어디로 갈지 매번 달라진다.
+    // `rejected` 가 0 이 아니면 그 불변식이 깨진 것이고, 보고 줄이 그것을 드러낸다.
     var binding_config_rejected = false;
     resolver.validate() catch |err| {
         try stderr.print("  warning: user keybindings are ambiguous({s}) — falling back to built-ins\n", .{@errorName(err)});

@@ -55,8 +55,18 @@ pub const our = struct {
 pub const Error = error{
     /// KEXINIT 이 아니다.
     NotKexInit,
-    /// 우리와 서버가 겹치는 알고리즘이 없다.
-    NoCommonAlgorithm,
+    /// 겹치는 KEX 알고리즘이 없다.
+    NoCommonKex,
+    /// **겹치는 호스트키 알고리즘이 없다** — 계약 §3 은 이때 "이 서버는 ed25519 호스트키를 안
+    /// 준다" 를 사용자에게 그대로 보여 주라고 한다. 여섯 경우를 오류 하나로 뭉개면 **어떤
+    /// 호출자도 그 문장을 만들 수 없다**(모바일에는 `ssh -vvv` 같은 대안도 없다).
+    NoCommonHostKey,
+    /// 겹치는 암호가 없다(방향은 아래 둘로 가른다 — 한 방향만 막힌 서버가 실제로 있다).
+    NoCommonCipherC2s,
+    NoCommonCipherS2c,
+    /// 압축을 `none` 으로 못 한다.
+    NoCommonCompressionC2s,
+    NoCommonCompressionS2c,
 } || wire.Error || wire.Writer.WriteError;
 
 /// 서버 KEXINIT 에서 읽어 낸 목록들.
@@ -183,13 +193,13 @@ fn guessWrong(peer: Peer) bool {
 pub fn negotiate(peer: Peer, phase: Phase) Error!Negotiated {
     // **압축은 `none` 만 받는다**(계약 §3). 서버가 그것을 안 주면 붙지 않는다 — 조용히
     // 다른 것을 고르면 우리가 못 푸는 데이터를 받게 된다.
-    if (peer.comp_c2s.pick(&our.compression) == null) return Error.NoCommonAlgorithm;
-    if (peer.comp_s2c.pick(&our.compression) == null) return Error.NoCommonAlgorithm;
+    if (peer.comp_c2s.pick(&our.compression) == null) return Error.NoCommonCompressionC2s;
+    if (peer.comp_s2c.pick(&our.compression) == null) return Error.NoCommonCompressionS2c;
     return .{
-        .kex = peer.kex.pick(&our.kex) orelse return Error.NoCommonAlgorithm,
-        .host_key = peer.host_key.pick(&our.host_key) orelse return Error.NoCommonAlgorithm,
-        .cipher_c2s = peer.cipher_c2s.pick(&our.cipher) orelse return Error.NoCommonAlgorithm,
-        .cipher_s2c = peer.cipher_s2c.pick(&our.cipher) orelse return Error.NoCommonAlgorithm,
+        .kex = peer.kex.pick(&our.kex) orelse return Error.NoCommonKex,
+        .host_key = peer.host_key.pick(&our.host_key) orelse return Error.NoCommonHostKey,
+        .cipher_c2s = peer.cipher_c2s.pick(&our.cipher) orelse return Error.NoCommonCipherC2s,
+        .cipher_s2c = peer.cipher_s2c.pick(&our.cipher) orelse return Error.NoCommonCipherS2c,
         .strict_kex = switch (phase) {
             // 표시자는 **초기 KEXINIT 에서만** 유효하다(draft §3.1).
             .initial => peer.strictKex(),
@@ -323,10 +333,10 @@ test "암호 협상도 방향을 따로 본다" {
     // 한 방향에만 우리 암호를 주는 서버는 합법이다(§7.1 은 두 목록을 독립으로 둔다). 그런데
     // 그때 붙으면 **서버가 안 준 암호로 첫 패킷을 쓴다** — 두 방향을 다 봐야 잡힌다.
     var out: [1024]u8 = undefined;
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    try std.testing.expectError(Error.NoCommonCipherS2c, negotiate(try parse(
         try test_server_kexinit.build(&out, .{ .cipher_s2c = "aes128-ctr" }),
     ), .initial));
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    try std.testing.expectError(Error.NoCommonCipherC2s, negotiate(try parse(
         try test_server_kexinit.build(&out, .{
             .cipher = "aes128-ctr",
             .cipher_s2c = "chacha20-poly1305@openssh.com",
@@ -426,21 +436,26 @@ test "서버 추측이 틀리면 다음 패킷을 버리라고 알린다" {
 test "겹치는 것이 없으면 붙지 않는다" {
     var out: [1024]u8 = undefined;
     // ed25519 호스트키가 없는 서버 — 계약대로 실패한다(조용히 다른 것을 고르지 않는다).
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    // **어떤 실패인지 구분해서 알려 준다** — 계약 §3 이 "이 서버는 ed25519 호스트키를 안 준다"
+    // 를 보여 주라고 하는데, 오류 하나로 뭉개면 호출자가 그 문장을 만들 수 없다.
+    try std.testing.expectError(Error.NoCommonHostKey, negotiate(try parse(
         try test_server_kexinit.build(&out, .{ .host_key = "rsa-sha2-512,ecdsa-sha2-nistp256" }),
     ), .initial));
+    try std.testing.expectError(Error.NoCommonKex, negotiate(try parse(
+        try test_server_kexinit.build(&out, .{ .kex = "diffie-hellman-group14-sha256" }),
+    ), .initial));
     // 우리 암호가 없는 서버.
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    try std.testing.expectError(Error.NoCommonCipherC2s, negotiate(try parse(
         try test_server_kexinit.build(&out, .{ .cipher = "aes128-ctr,aes256-gcm@openssh.com" }),
     ), .initial));
     // **압축을 강제하는 서버** — `none` 이 없으면 우리가 못 푼다. **방향을 따로 잰다**:
     // 한 방향만 검사하면 나머지 방향의 가드를 지워도 안 드러난다(변이로 확인했다).
     // c2s 만 막힌 서버(s2c 는 멀쩡하다) — 두 방향을 다 검사해야 잡힌다.
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    try std.testing.expectError(Error.NoCommonCompressionC2s, negotiate(try parse(
         try test_server_kexinit.build(&out, .{ .comp = "zlib@openssh.com", .comp_s2c = "none" }),
     ), .initial));
     // s2c 만 막힌 서버.
-    try std.testing.expectError(Error.NoCommonAlgorithm, negotiate(try parse(
+    try std.testing.expectError(Error.NoCommonCompressionS2c, negotiate(try parse(
         try test_server_kexinit.build(&out, .{ .comp_s2c = "zlib@openssh.com" }),
     ), .initial));
 }

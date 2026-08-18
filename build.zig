@@ -2332,6 +2332,24 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);
     boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
+
+    // SSH 층은 **세 최적화 모드로 다 돈다.** `std` 의 몇몇 검사가 `if (std.debug.runtime_safety)`
+    // 뒤에 있어 **배포가 쓰는 ReleaseFast 에서 사라지는데**, `zig build test` 는 Debug 라 CI 가
+    // 영영 못 본다 — 실제로 개인키 공개키 대조가 그렇게 빠져 있었다(docs/ssh-client.md §4.4.4).
+    const ssh_mode_step = b.step("check-ssh-modes", "Run the SSH core in Debug/ReleaseSafe/ReleaseFast");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe, .ReleaseFast }) |mode| {
+        const ssh_modes = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/session/ssh/ssh.zig"),
+                .target = target,
+                .optimize = mode,
+            }),
+        });
+        const run_ssh_modes = b.addRunArtifact(ssh_modes);
+        run_ssh_modes.setCwd(b.path("."));
+        ssh_mode_step.dependOn(&run_ssh_modes.step);
+    }
+    boundary_step.dependOn(ssh_mode_step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,

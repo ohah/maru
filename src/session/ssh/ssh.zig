@@ -185,6 +185,11 @@ test "적대적 입력: 유효 메시지를 망가뜨려도 패닉시키지 못�
 
     const seeds = [_][]const u8{ valid_kexinit, pkt_buf[0..pkt_len], valid_blob, valid_version };
 
+    // 상태기계를 하나 세워 두고 계속 먹인다(위 주석).
+    fuzz_opts = .{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } };
+    fuzz_client = client.Client.init(fuzz_opts, rand);
+    _ = try fuzz_client.start(&fuzz_wire);
+
     var i: usize = 0;
     while (i < 2500) : (i += 1) {
         const seed = seeds[rand.uintLessThan(usize, seeds.len)];
@@ -216,6 +221,15 @@ test "적대적 입력: 유효 메시지를 망가뜨려도 패닉시키지 못�
         _ = version.parse(m) catch {};
         _ = known_hosts.verify(m, "host.example", "ssh-ed25519", &([_]u8{0} ** 32));
 
+        // **세션 상태기계도 훑는다.** 이것이 모바일이 쓸 코드이고 선 위의 바이트를 가장 먼저 받는
+        // 자리다 — 여기서 패닉하면 앱이 죽는다. 상태기계라 **같은 클라이언트에 계속 먹여야** 깊은
+        // 상태에 닿는다(매번 새로 만들면 늘 `version_exchange` 만 본다). 오류가 나면 그 연결은
+        // 끝이므로 새로 세운다.
+        _ = fuzz_client.feed(m, &fuzz_wire, &fuzz_screen) catch {
+            fuzz_client = client.Client.init(fuzz_opts, rand);
+            _ = fuzz_client.start(&fuzz_wire) catch {};
+        };
+
         var t: transport.Transport = .{};
         if (t.feed(&out, m)) |maybe| {
             if (maybe) |got| switch (got) {
@@ -228,6 +242,11 @@ test "적대적 입력: 유효 메시지를 망가뜨려도 패닉시키지 못�
         _ = t2.send(&wire_out, m[0..@min(m.len, 64)], rand) catch {};
     }
 }
+
+var fuzz_client: client.Client = undefined;
+var fuzz_opts: client.Options = undefined;
+var fuzz_wire: [64 * 1024]u8 = undefined;
+var fuzz_screen: [64 * 1024]u8 = undefined;
 
 // ---------------------------------------------------------------------------
 // **실서버 왕복 벡터** — 교환 해시 `H` 의 유일한 독립 근거다.

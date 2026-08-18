@@ -125,6 +125,8 @@ src/platform/
 | 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
 | 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
 | 플랫폼 → 코어 | 원격 출력을 화면에 넣는다 | `maru_mobile_term_write(bytes, len)` |
+| 플랫폼 → 코어 | 입력 목적지(로컬 코어 / 원격) | `maru_mobile_set_input_sink(sink)` |
+| 코어 → 플랫폼 | 원격으로 보낼 입력 바이트 | `maru_mobile_take_input(out, cap)` |
 | 코어 → 플랫폼 | 원격에 돌려보낼 답(DSR·DA) | `maru_mobile_take_response(out, cap)` |
 
 ### 3.0 SSH 세션 — 여기만 핸들을 쓴다
@@ -150,6 +152,19 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
 **접속 정보는 아직 개발용 자리에서 온다.** `filesDir/ssh.conf`(`host`·`port`·`user`·`identity`·
 `fingerprint`)가 있으면 앱이 뜰 때 붙는다. 파일이 없으면 아무 일도 안 한다 — 기존 동작 그대로다.
 **서버 목록 화면(S9b)이 그 자리를 대신하고 키는 Keystore(S9c)로 옮긴다.**
+
+**입력은 목적지만 갈린다 — 인코딩은 한 곳이다.** 확정된 글자·특수키·수정자 조합을 바이트로
+만드는 일은 코어 몫이고(§3), 원격 세션에서는 그 바이트가 **코어로 가면 안 된다**: 코어에 쓰는
+것은 *출력*을 그리는 일이라 사용자가 친 글자가 화면에 한 번 찍히고 원격에는 영영 안 간다
+(실측: `whoami` 를 쳐도 아무 일도 안 났다). `maru_mobile_set_input_sink(1)` 이면 브리지가 그
+바이트를 모아 두고 host 가 `maru_mobile_take_input` 으로 가져가 원격에 보낸다.
+
+**셸이 뜨기 전에 친 것도 잃지 않는다.** host 는 세션이 `ready` 일 때만 가져간다 — 가져가면
+브리지에서 사라지는데 그때 못 보내면 그 글자가 통째로 없어진다. 그래서 그전에는 브리지에
+남아 있다가 함께 나간다(type-ahead — 실제 터미널이 그렇게 군다).
+
+**목적지를 바꾸면 밀린 것은 버린다.** 로컬에서 친 글자가 원격으로 뒤늦게 흘러가면 **사용자가
+안 친 명령이 실행된다.**
 
 **받은 바이트는 갈 곳이 있어야 한다.** `screen` 에서 가져온 것을 `maru_mobile_term_write` 로 넣고,
 코어가 만든 답은 `maru_mobile_take_response` 로 가져가 `maru_mobile_ssh_write` 로 **돌려보낸다** —

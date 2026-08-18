@@ -469,6 +469,18 @@ const char *maru_mobile_ssh_last_load_error(void);
 /// 원격 출력을 화면에 넣는다. `maru_mobile_ssh_screen_*` 에서 가져온 바이트를 그대로 준다.
 /// 반환값은 **코어에 닿은 누적 바이트** — 안 늘면 안 닿은 것이고 이유는 `maru_mobile_last_error`.
 unsigned long maru_mobile_term_write(const unsigned char *bytes, unsigned long len);
+/// 확정된 입력이 **어디로 가나**. 0=로컬 코어(기본), 1=host 가 가져간다(원격 세션).
+///
+/// **원격에 붙으면 입력은 코어로 가면 안 된다.** 코어에 쓰는 것은 *출력*을 그리는 일이라,
+/// 그렇게 두면 사용자가 친 글자가 화면에 한 번 찍히고 원격에는 영영 안 간다. 인코딩(수정자·
+/// 특수키·IME 확정)은 코어 몫이므로 그대로 두고 **목적지만** 가른다.
+void maru_mobile_set_input_sink(unsigned int sink);
+unsigned int maru_mobile_input_sink(void);
+/// 원격으로 보낼 바이트를 가져간다. **가져가면 사라진다.** 자리가 모자라면 0 이고 아무것도
+/// 안 지운다 — 잘라 보내면 명령이 반만 나간다. 셸이 뜨기 전에 친 글자도 여기 모였다가 함께
+/// 나간다(type-ahead).
+unsigned long maru_mobile_take_input(unsigned char *out, unsigned long cap);
+
 /// 지금 터미널 격자(열·행). 원격에 알릴 pty 크기는 **코어가 들고 있는 값**이어야 한다 —
 /// host 가 따로 세면 그리는 격자와 원격이 믿는 크기가 갈린다. 화면이 아직 없으면 0.
 unsigned int maru_mobile_term_cols(void);

@@ -697,6 +697,18 @@ static void drawFrame(void) {
             maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
         }
     }
+    // **친 것을 원격으로 보낸다.** 브리지가 인코딩해 모아 둔 것을 가져가 펌프에 넘긴다.
+    // 셸이 뜨기 전에는 **안 가져간다** — 가져가면 우리 손에서 사라지는데 펌프는 아직 못 보내
+    // 그 글자가 통째로 없어진다(브리지에 두면 type-ahead 로 남는다).
+    if (maru_ssh_pump_is_running() && maru_ssh_pump_state() == MARU_SSH_STATE_READY) {
+        static unsigned char input_buf[4096];
+        unsigned long got = maru_mobile_take_input(input_buf, sizeof input_buf);
+        if (got > 0) {
+            unsigned long sent = maru_ssh_pump_write(input_buf, got);
+            if (sent != got) LOGI("MARU_SSH input_partial sent=%lu of=%lu", sent, got);
+        }
+    }
+
     // **격자가 바뀌면 원격에 알린다.** 키보드가 오르내리면 보이는 행 수가 바뀌는데(그때 코어가
     // 격자를 다시 잡는다), 안 알리면 원격은 처음 크기를 믿고 그린다 — `less`·`vim` 이 화면
     // 절반에만 그리거나 줄이 어긋난다. 값은 코어에게 묻는다(host 가 따로 세면 갈린다).
@@ -1004,6 +1016,12 @@ static void ssh_state(void *ctx, unsigned int state) {
     (void)ctx;
     // **상태를 로그로 남긴다.** 기기에서 "안 붙는다" 를 볼 때 어디까지 갔는지가 첫 단서다.
     LOGI("MARU_SSH state=%u error=%s", state, maru_ssh_pump_error());
+    // **입력 목적지를 세션과 함께 옮긴다.** 안 옮기면 사용자가 친 글자가 화면에 한 번 찍히고
+    // 원격에는 영영 안 간다(실측). 세션이 끝나면 로컬로 되돌린다 — 안 되돌리면 그 뒤 입력이
+    // 아무 데도 안 가고 조용히 쌓인다.
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+    pthread_mutex_unlock(&g_bridge_lock);
     if (state != MARU_SSH_STATE_CLOSED) return;
     // **끝났으면 서비스를 내린다.** 안 내리면 알림이 "유지 중" 인 채로 남아, 끊긴 것을 알리는
     // 대신 붙어 있다고 거짓말한다.

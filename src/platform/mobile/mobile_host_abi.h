@@ -469,6 +469,10 @@ const char *maru_mobile_ssh_last_load_error(void);
 /// 원격 출력을 화면에 넣는다. `maru_mobile_ssh_screen_*` 에서 가져온 바이트를 그대로 준다.
 /// 반환값은 **코어에 닿은 누적 바이트** — 안 늘면 안 닿은 것이고 이유는 `maru_mobile_last_error`.
 unsigned long maru_mobile_term_write(const unsigned char *bytes, unsigned long len);
+/// 지금 터미널 격자(열·행). 원격에 알릴 pty 크기는 **코어가 들고 있는 값**이어야 한다 —
+/// host 가 따로 세면 그리는 격자와 원격이 믿는 크기가 갈린다. 화면이 아직 없으면 0.
+unsigned int maru_mobile_term_cols(void);
+unsigned int maru_mobile_term_rows(void);
 /// 코어가 만든 답(DSR·DA 등)을 가져간다. **가져가면 사라진다.** host 는 이것을
 /// `maru_mobile_ssh_write` 로 원격에 돌려보낸다 — 안 돌려보내면 묻는 프로그램이 멈춘다.
 /// 자리가 모자라면 **0 이고 아무것도 안 지운다**(잘라 보내면 원격 화면이 어긋난다).

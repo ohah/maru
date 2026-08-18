@@ -299,8 +299,11 @@ chrome-android-app)
         -o "$OUT/glue.o" -I"$GLUE"
     # `-u ANativeActivity_onCreate` 가 없으면 glue 의 진입점이 --gc-sections 로 잘려
     # 앱이 "네이티브 진입점 없음"으로 죽는다.
+    # **펌프도 같이 링크한다.** 소켓 루프는 두 host 가 함께 쓰는 C 한 벌이다
+    # (`src/platform/mobile_host/ssh_pump.c` — 데스크톱 스모크가 같은 파일을 링크해 증명한다).
     "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -shared -O2 \
-        "$ANDROID/android_app_host.c" "$OUT/glue.o" "$LIB_OUT/libmaru-mobile-android.a" \
+        "$ANDROID/android_app_host.c" "$ROOT/src/platform/mobile_host/ssh_pump.c" \
+        "$OUT/glue.o" "$LIB_OUT/libmaru-mobile-android.a" \
         -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -ljnigraphics -lm \
         -o "$OUT/libmaruchrome.so"
     # 셰이더·폰트는 **APK asset** 으로 들어간다 — /data/local/tmp 는 개발 스크립트 자리라
@@ -319,8 +322,10 @@ chrome-android-app)
     # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
     # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).
     mkdir -p "$OUT/java"
+    # IME shim 과 **SSH 포그라운드 서비스** 둘뿐이다. `android.*` 만 써서 AndroidX 도
+    # kotlin-stdlib 도 없다 — 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(§1).
     javac -source 8 -target 8 -nowarn -bootclasspath "$SDK/platforms/android-35/android.jar" \
-        -d "$OUT/java" "$ANDROID/MaruActivity.java"
+        -d "$OUT/java" "$ANDROID/MaruActivity.java" "$ANDROID/MaruSshService.java"
     "$BT/d8" --min-api 29 --output "$OUT" $(find "$OUT/java" -name '*.class')
     python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.write(sys.argv[3],"classes.dex");z.close()' \
         "$OUT/base.apk" "$OUT/libmaruchrome.so" "$OUT/classes.dex"

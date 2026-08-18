@@ -10,6 +10,13 @@
           package="dev.maru.chrome">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
+    <!-- 원격 세션(SSH)에 필요한 것들. **포그라운드 서비스가 아니면 배경에서 소켓이 끊긴다** —
+         OS 가 프로세스를 거두기 때문이고, 그러면 "잠깐 다른 앱 봤더니 끊겼다" 가 매번 난다.
+         API 34 부터는 종류(`dataSync`)를 매니페스트와 코드 양쪽에서 밝혀야 한다. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- debuggable 은 개발 빌드 전용이다 — run-as 로 앱 내부의 래스터 결과를 꺼내
          두 플랫폼 픽셀을 대조한다(tools/mobile-harness/atlas_diff.py). 배포에는 빼야 한다. -->
     <application android:label="MaruChrome" android:debuggable="true">
@@ -25,5 +32,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 소켓을 드는 자리. `exported=false` — 다른 앱이 우리 세션을 시작할 이유가 없다. -->
+        <service android:name="dev.maru.MaruSshService"
+                 android:foregroundServiceType="dataSync"
+                 android:exported="false" />
     </application>
 </manifest>

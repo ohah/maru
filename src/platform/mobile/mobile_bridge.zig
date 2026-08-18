@@ -470,6 +470,18 @@ pub export fn maru_mobile_term_write(ptr: [*]const u8, len: usize) usize {
     return term_written;
 }
 
+/// 지금 터미널 격자(열·행). **host 가 따로 세면 두 값이 갈린다** — 원격에 알릴 pty 크기는
+/// 코어가 실제로 들고 있는 값이어야 하고(그리는 격자와 같아야 한다), 화면이 아직 없으면 0 이다.
+pub export fn maru_mobile_term_cols() u32 {
+    const core = &(term_core orelse return 0);
+    return core.size.cols;
+}
+
+pub export fn maru_mobile_term_rows() u32 {
+    const core = &(term_core orelse return 0);
+    return core.size.rows;
+}
+
 /// 코어가 만든 답을 가져간다(**가져가면 사라진다**). host 는 이것을 `maru_mobile_ssh_write` 로
 /// 원격에 돌려보낸다 — 안 돌려보내면 커서 위치를 묻는 프로그램이 답을 기다리며 멈춘다.
 ///

@@ -13,6 +13,7 @@
 package dev.maru;
 
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
@@ -227,6 +228,55 @@ public class MaruActivity extends android.app.NativeActivity {
         // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
         // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());
+        maybeStartSsh();
+    }
+
+    /// **개발용 접속 자리.** `filesDir/ssh.conf` 가 있으면 그 서버로 붙는다.
+    ///
+    /// 서버 목록 화면(S9b)이 그 자리를 대신하고 키는 Keystore(S9c)로 옮긴다 — 지금은 배선이
+    /// 도는지 보는 것이 목적이라, 화면 없이도 붙을 수 있는 자리를 하나 둔다. 파일이 없으면
+    /// 아무 일도 안 한다(기존 동작 그대로).
+    ///
+    /// 형식은 `키=값` 한 줄씩: `host` · `port` · `user` · `identity`(개인키 파일 경로) ·
+    /// `fingerprint`(`SHA256:...`). **지문은 필수다** — 자동 승인은 없다(SSH 계약 §4).
+    private void maybeStartSsh() {
+        java.io.File conf = new java.io.File(getFilesDir(), "ssh.conf");
+        if (!conf.exists()) return;
+        java.util.Properties p = new java.util.Properties();
+        byte[] key;
+        try (java.io.FileInputStream in = new java.io.FileInputStream(conf)) {
+            p.load(in);
+            String identity = p.getProperty("identity");
+            if (identity == null) return;
+            java.io.File keyFile = new java.io.File(identity);
+            key = new byte[(int) keyFile.length()];
+            try (java.io.FileInputStream ki = new java.io.FileInputStream(keyFile)) {
+                int off = 0;
+                while (off < key.length) {
+                    int n = ki.read(key, off, key.length - off);
+                    if (n <= 0) break;
+                    off += n;
+                }
+            }
+        } catch (java.io.IOException e) {
+            android.util.Log.i("MaruChrome", "MARU_SSH conf_read_failed " + e);
+            return;
+        }
+        String host = p.getProperty("host");
+        String user = p.getProperty("user");
+        String fingerprint = p.getProperty("fingerprint");
+        if (host == null || user == null || fingerprint == null) {
+            android.util.Log.i("MaruChrome", "MARU_SSH conf_incomplete");
+            return;
+        }
+        Intent intent = new Intent(this, MaruSshService.class);
+        intent.putExtra("host", host);
+        intent.putExtra("port", Integer.parseInt(p.getProperty("port", "22")));
+        intent.putExtra("user", user);
+        intent.putExtra("key", key);
+        intent.putExtra("fingerprint", fingerprint);
+        // **`startForegroundService` 여야 한다.** 배경에서 `startService` 는 API 26+ 에서 막힌다.
+        startForegroundService(intent);
     }
 
     /// IME inset 을 native 로 넘긴다. **익명 클래스를 안 쓴다**(위 `ShowKeyboard` 와 같은 이유 —

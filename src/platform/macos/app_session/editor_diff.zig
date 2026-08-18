@@ -1616,6 +1616,20 @@ test "비교의 가로 막대는 잡은 열만 민다 — 오른쪽을 끌면 �
 
     _ = editor_ops.routeScrollbarCapture(fx.session, 3, mid_x, @floatCast(right_bar.track_y));
     try testing.expect(!editor_ops.scrollbarCaptureActive(fx.session));
+
+    // **반대쪽도 본다.** 오른쪽만 검증하면 "늘 오른쪽을 민다"는 뮤턴트가 살아남는다(실측으로 확인했다 —
+    // 그 뮤턴트는 단일 편집기 테스트가 잡았지만, 비교 안에서 대칭이 깨지는 것은 여기서만 보인다).
+    const left_bar = fx.term.rt.editor_horizontal_scrollbar orelse return error.NoLeftHorizontalScrollbar;
+    const right_after = fx.term.rt.editor_first_col_right;
+    try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(left_bar.thumb_x), @floatCast(left_bar.track_y)));
+    const left_mid_x: f64 = @as(f64, left_bar.track_x) + @as(f64, left_bar.track_w) / 2;
+    _ = editor_ops.routeScrollbarCapture(fx.session, 2, left_mid_x, @floatCast(left_bar.track_y));
+    scroll_ops.applyPendingEditorHScroll(fx.session);
+
+    try testing.expect(fx.term.rt.editor_first_col > 0); // 왼쪽이 움직였고
+    try testing.expectEqual(right_after, fx.term.rt.editor_first_col_right); // 오른쪽은 그대로다
+
+    _ = editor_ops.routeScrollbarCapture(fx.session, 3, left_mid_x, @floatCast(left_bar.track_y));
 }
 
 test "비교의 세로 막대는 좌우 어느 쪽을 잡아도 같은 곳으로 간다 — 세로는 공유다 (§3.5)" {

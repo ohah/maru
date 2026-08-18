@@ -1816,8 +1816,10 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         try stdout.print("config_bindings: app={d} terminal={d} unbinds={d} rejected={}\n", .{
             loaded.keybindings.len, loaded.terminal_bindings.len, loaded.unbinds.len, binding_config_rejected,
         });
-        try stdout.print("config_input: paste_protection={} bracketed_safe={} right_click={s} word_separators=\"{f}\"\n", .{
-            paste_protection, bracketed_paste_is_safe, @tagName(right_click_action), std.zig.fmtString(default_word_separators),
+        // `option_as_meta` 도 찍는다 — 리터럴 `false` 로 박혀 있던 자리라, 값이 실제로 흐르는지
+        // 눈에 보이지 않으면 같은 실수가 조용히 되살아난다.
+        try stdout.print("config_input: paste_protection={} bracketed_safe={} right_click={s} option_as_meta={} word_separators=\"{f}\"\n", .{
+            paste_protection, bracketed_paste_is_safe, @tagName(right_click_action), option_as_meta, std.zig.fmtString(default_word_separators),
         });
         try stdout.print("config_osc52_read={s} diagnostics={d}\n", .{ @tagName(osc52_read_policy), loaded.diagnostics.len });
         try stdout.print("conpty={s}{s}{s}\n", .{

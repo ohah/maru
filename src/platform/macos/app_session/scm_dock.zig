@@ -901,6 +901,12 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .ahead = projection.ahead,
         .behind = projection.behind,
         .has_ab = projection.has_ab,
+        // 원격 갱신 버튼(P6). **누를 수 있는가는 저장소 사실이고**(원격이 있나), **도는 중인가는 세션
+        // 상태다** — 둘을 한 값으로 합치면 도는 동안 "원격이 없다"로 보인다.
+        .fetch = .{
+            .enabled = scmHasRemote(self),
+            .running = self.scm_fetch_inflight != 0,
+        },
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
         // **커밋 줄은 props가 아니라 목록 항목이다**(②b) — 저장소마다 하나씩이라 여기 하나만 실으면
@@ -1262,7 +1268,65 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
             if (index >= repos.entries.len) return;
             toggleRepoCollapsed(self, repos.entries[index].path);
         },
+        // 원격 갱신(P6). 대상은 **브랜치 줄이 말하는 그 저장소**(활성 저장소)다 — 그 줄의 ahead/behind가
+        // 곧 이 버튼이 바꾸는 값이고, 다른 저장소를 갱신하면 화면과 결과가 어긋난다.
+        .fetch_remote => submitFetch(self),
         .scroll_thumb, .scroll_track => {},
+    }
+}
+
+/// 이 저장소에 원격이 있나(P6). **`git remote` 출력이 유일한 출처다** — 못 읽었으면(선택 명령이라 실패할
+/// 수 있다) 없는 것으로 본다: 버튼이 꺼진 채 이유를 말하는 쪽이, 눌러서 실패로 배우는 쪽보다 낫다.
+pub fn scmHasRemote(self: *AppSession) bool {
+    const result = self.git_result orelse return false;
+    return std.mem.trim(u8, result.remotes, " \t\r\n").len > 0;
+}
+
+/// 원격 갱신을 건다(P6 — §3.6 §4). **쓰기와 다른 in-flight**라 커밋·스테이지를 막지 않는다.
+fn submitFetch(self: *AppSession) void {
+    if (self.scm_fetch_inflight != 0) return; // 도는 중에 또 누르면 흘린다(프로세스를 쌓지 않는다)
+    const repo = self.git_repo orelse return;
+    // 원격이 없으면 **왜 안 되는지 적는다**(§3.5 — 비활성 컨트롤은 이유를 말한다). tree가 이미 action을
+    // 껐지만, 그 판단이 프레임 사이에 뒤집힐 수 있어 실행 직전에 한 번 더 본다.
+    if (!scmHasRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_remote));
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+    self.scm_fetch_seq += 1;
+    if (!self.git_backend.?.submitFetch(git_exe, repo, self.scm_fetch_seq)) return;
+    self.scm_fetch_inflight = self.scm_fetch_seq;
+    if (self.scm_fetch_repo) |old| self.allocator.free(old);
+    self.scm_fetch_repo = self.allocator.dupe(u8, repo) catch null;
+    clearScmWriteError(self); // 지난 실패 문구가 새 시도 위에 남지 않게
+    self.metal_dirty = true;
+}
+
+/// 끝난 fetch를 거둔다. **성공이든 실패든 목록을 다시 읽는다** — 성공이면 remote-tracking ref가 바뀌어
+/// ahead/behind가 낡았고, 실패면 우리가 아는 것과 저장소가 갈렸을 수 있다(§5·§7과 같은 규율).
+pub fn drainScmFetch(self: *AppSession) void {
+    const backend = &(self.git_backend orelse return);
+    var taken = backend.takeFetchResult() orelse return;
+    defer taken.deinit(git_backend_mod.worker_allocator);
+    if (taken.request_id != self.scm_fetch_inflight) return; // 낡은 결과는 버린다
+    self.scm_fetch_inflight = 0;
+    self.metal_dirty = true;
+    clearScmWriteError(self);
+    if (taken.ok()) {
+        // **성공도 말한다.** 아무 말이 없으면 "눌렀는데 아무 일도 안 일어났다"로 읽힌다 — 원격에 새 것이
+        // 없으면 화면 숫자가 그대로라 더욱 그렇다.
+        setScmWriteNotice(self, maru.i18n.t(.scm_fetch_done));
+    } else {
+        self.scm_write_error = writeErrorText(self, taken);
+    }
+    // fetch가 바꾸는 것은 remote-tracking ref다 — 그 저장소의 머리 줄을 다시 읽어야 ahead/behind가 따라온다.
+    if (self.scm_fetch_repo) |repo| {
+        if (isCurrentRepo(self, repo)) {
+            git_ops.refreshGitStatus(self);
+        } else {
+            markRepoStatusStaleFor(self, repo);
+        }
     }
 }
 

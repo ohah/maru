@@ -9,6 +9,8 @@ const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const ui_icon = @import("../../ui/icon.zig");
 const typography = @import("../../ui/typography.zig");
+const display_width = @import("../../../display_width.zig"); // 칩 폭 = 표시 칸 수 × 셀 폭(§4.2와 같은 규칙)
+const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 
 /// 목록 그룹. `scm_view.Section`과 **같은 값 집합**이지만 component는 그쪽을 import하지 않는다 —
 /// platform이 값을 옮기고, 값이 갈리면 그 변환 함수가 exhaustive switch에서 컴파일로 걸린다.
@@ -240,6 +242,9 @@ pub const Props = struct {
     ahead: u32 = 0,
     behind: u32 = 0,
     has_ab: bool = false,
+    /// 브랜치 줄의 **원격 갱신 버튼**(P6). 자리는 **늘 있다** — 원격이 없어도 감추지 않고 비활성으로
+    /// 그린다(§3.5: 누를 수 없는 상황은 비활성으로 보여 주고 왜 안 되는지 말한다).
+    fetch: FetchState = .{},
     summary: Summary = .{},
     /// 지금 열려 있는 탭. 모르는 값은 platform이 `.changes`로 clamp한다(§3.5.1) — component는 받은 값을
     /// 그대로 그린다.
@@ -264,6 +269,36 @@ pub const Props = struct {
     /// 그 결과만 여기 싣는다(props는 immutable이고, 편집 상태가 둘이면 caret이 갈린다).
     commit_edit: CommitEdit = .{},
 };
+
+/// 원격 갱신 버튼의 상태(P6 — §3.6 §4). **`push`/`pull`은 여기 없다**: 그 둘은 우리가 실행하지 않고
+/// 활성 터미널에 명령을 넣어 주므로 이 버튼의 상태가 아니다.
+pub const FetchState = struct {
+    /// 누를 수 있나. **원격이 있는가**가 유일한 조건이다(도는 중인지는 `running`이 따로 말한다) —
+    /// 원격이 없는 저장소에서 `fetch`는 무엇을 해도 실패한다.
+    enabled: bool = false,
+    /// 지금 도는 중인가. **버튼이 그 사실을 말한다**(커밋 버튼과 같은 규율) — 눌렀는데 표시가 없으면
+    /// 사용자는 다시 누르고, 두 번째 누름은 조용히 거부된다.
+    running: bool = false,
+};
+
+/// 그 버튼에 적을 말. **`build`와 `view`가 같은 함수를 본다** — 폭은 build가 정하고 글자는 view가
+/// 그리므로, 문자열을 두 곳에서 고르면 "칩은 좁은데 글자는 긴" 프레임이 나온다.
+pub fn fetchLabel(state: FetchState) []const u8 {
+    return if (state.running) i18n.t(.scm_fetching) else i18n.t(.scm_fetch);
+}
+
+/// 그 말이 차지하는 **표시 칸 수**. 한글은 두 칸이라 바이트 길이로 세면 칩이 절반 폭이 된다.
+pub fn fetchLabelCols(text: []const u8) u32 {
+    var cols: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(i + n, text.len);
+        cols += @intCast(display_width.clusterCols(text, i, end));
+        i = end;
+    }
+    return cols;
+}
 
 /// 커밋 실행 상태. `slow`는 **문구일 뿐**이다 — 상한을 넘겨도 프로세스를 죽이지 않는다(쓰기 문서 §3:
 /// hook은 테스트 전체를 돌 수도 있고, 중간에 죽이면 index·`.git`이 어중간해진다).
@@ -339,6 +374,8 @@ pub const DockMetrics = struct {
     status_extent: u32,
     /// 호버 동작 버튼 하나의 폭·높이.
     action_extent: u32,
+    /// 글자가 든 칩의 좌우 여백(원격 갱신). 아이콘 버튼과 달리 폭이 글자에서 나오므로 여백만 상수다.
+    chip_pad_x: u32,
     /// 그룹 헤더의 접힘 표시가 차지하는 가로 자리.
     disclosure_extent: u32,
     /// **아이콘 한 변(logical px)**. 셀 크기가 아니라 디자인 토큰(`ui/icon.Size`)에서 온다 — 셀로 그리면
@@ -380,6 +417,7 @@ pub const DockMetrics = struct {
             .gap = s.px(6, scale_milli),
             .status_extent = s.px(14, scale_milli),
             .action_extent = s.px(20, scale_milli),
+            .chip_pad_x = s.px(6, scale_milli),
             .disclosure_extent = s.px(16, scale_milli),
             // 행 높이 24px에 18pt 아이콘은 꽉 차 보인다 — 목록 행은 밀집한 자리라 `compact`가 맞다.
             .icon_extent = s.px(ui_icon.Size.compact.extentPt(), scale_milli),
@@ -439,6 +477,13 @@ pub const DockMetrics = struct {
             // "모두 보기"와 안내는 파일 행과 같은 높이를 쓴다(줄이 하나이므로).
             .more, .notice => self.row_h,
         };
+    }
+
+    /// 원격 갱신 칩의 폭(P6). 글자 + 좌우 여백이고, **글자가 길어지면 칩도 커진다**(`가져오는 중…`) —
+    /// 고정 폭으로 두면 도는 동안 글자가 잘려 무슨 상태인지 못 읽는다.
+    pub fn fetchChipWidthPx(self: DockMetrics, label: []const u8, cell_width_px: u32) u32 {
+        const cols = fetchLabelCols(label);
+        return cols * @max(cell_width_px, 1) + self.chip_pad_x * 2;
     }
 
     pub fn scrollbarMetrics(self: DockMetrics) scroll_area.ScrollbarMetrics {

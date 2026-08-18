@@ -702,6 +702,7 @@ MARU_SCREENSHOT_DELAY_MS=1500 MARU_SCREENSHOT=<path> ./zig-out/Maru.app/Contents
 MARU_FORCE_NOTIFICATIONS=<n>   # 안 읽은 알림 n개
 MARU_FORCE_AGENT=1             # 활성 Term을 running으로
 MARU_FORCE_SCM=1               # 우측 도크를 소스 컨트롤 뷰로 열어 둔 것처럼(뷰 전환의 유일한 진입점이 스위처 아이콘 클릭이라 캡처로 도달할 수 없다)
+MARU_FORCE_SCM_FETCH=1         # 그 저장소에 원격 갱신(fetch --prune)을 실제로 건다 — 사용자 클릭과 같은 진입점(P6)
 MARU_FORCE_SIDEBAR_CARDS=<n>   # 워크스페이스 카드 n개 — 사이드바가 뷰포트를 넘치게(경계를 만든다)
 MARU_FORCE_SIDEBAR_HOVER=edge  # 뷰포트 바닥에 걸친 카드에 호버 밴드(§5.3의 quad 클립을 겨냥)
 MARU_FORCE_SIDEBAR_SCROLL=max  # 사이드바를 끝까지 굴려 둔 상태(상단 클립 분기를 켠다)

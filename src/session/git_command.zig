@@ -69,6 +69,13 @@ pub const Kind = enum {
     /// 브랜치를 **바꾸는 일은 우리가 하지 않는다** — 고른 이름을 활성 터미널에 `git switch <name>`으로 넣어
     /// 주고 실행은 사용자 셸이 한다(hook·dirty tree·충돌이 평소처럼 사용자에게 보인다).
     branches,
+    /// 이 저장소에 등록된 **원격 이름들**(`git remote`). 도크의 `Fetch` 버튼을 켤지 정하는 유일한 사실이다
+    /// (§3.5 — "원격 없는 저장소의 Fetch"는 **비활성으로 보여 주고 이유를 말한다"). 없는 것을 눌러 보고
+    /// 실패로 배우게 하지 않는다.
+    ///
+    /// **네트워크를 쓰지 않는다.** `git remote`는 config에 적힌 이름을 읽을 뿐이라 읽기 계약 안이다
+    /// (`-v`가 아니므로 URL도 싣지 않는다 — 우리는 존재 여부만 알면 되고, URL에는 `user@host`가 들어간다).
+    remotes,
     /// 이 저장소에 딸린 **워크트리 목록**(`worktree list --porcelain`). 도크가 저장소마다 한 줄이 아니라
     /// **워크트리마다 한 줄**을 세우기 때문에 필요하다(§3.5.1c — 사용자가 목표 화면을 제시했다).
     ///
@@ -488,6 +495,10 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = arg orelse ""; // 스냅샷 tree OID
             n += 1;
         },
+        .remotes => {
+            buf[n] = "remote";
+            n += 1;
+        },
         .branches => {
             buf[n] = "for-each-ref";
             n += 1;
@@ -757,6 +768,24 @@ test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 �
     try testing.expect(has(named, "deadbeef"));
     // 읽기 전용 계약은 여기에도 그대로 붙는다.
     try testing.expect(has(named, "core.pager=cat"));
+}
+
+test "원격 목록은 이름만 읽는다 — `-v`가 없어야 URL이 안 실린다" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.remotes, "/usr/bin/git", "/repo", null, &buf);
+
+    try testing.expect(has(argv, "remote"));
+    // **`-v`/`--verbose`가 붙으면 URL이 온다** — `user@host`가 든 문자열을 우리가 들 이유가 없다.
+    try testing.expect(!has(argv, "-v"));
+    try testing.expect(!has(argv, "--verbose"));
+    // 원격을 **바꾸는** 하위명령이 섞이면 안 된다(읽기 계약).
+    for ([_][]const u8{ "add", "remove", "rm", "rename", "set-url", "update", "prune" }) |verb| {
+        try testing.expect(!has(argv, verb));
+    }
+    // 읽기 전용 계약(외부 프로세스 차단)은 여기에도 붙는다.
+    try testing.expect(has(argv, "core.pager=cat"));
+    try testing.expect(has(argv, "credential.helper=")); // 네트워크를 안 쓰므로 helper를 열 이유가 없다
+    try testing.expect(argv.len <= max_argv);
 }
 
 test "브랜치 목록은 plumbing으로만 읽고 쓰기 동사를 쓰지 않는다" {

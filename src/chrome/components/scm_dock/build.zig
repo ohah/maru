@@ -27,6 +27,8 @@ pub const NodeIds = struct {
     pub const tabs: u64 = 0x5343_0006;
     pub const commit_box: u64 = 0x5343_0007;
     pub const commit_button: u64 = 0x5343_0008;
+    /// 브랜치 줄의 원격 갱신 버튼(P6). 고정 chrome이라 항목 차선을 쓰지 않는다.
+    pub const fetch: u64 = 0x5343_0009;
 
     /// 탭 하나의 칸. **칸을 나누는 결정은 여기(tree) 하나가 소유한다** — `view`가 자기 산수로 다시
     /// 나누면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(옛 셀 그리드 경로가 그렇게 갈렸다).
@@ -138,7 +140,10 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     };
     // 행 + 행 동작 버튼 + 커밋 버튼 면 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
     // **커밋 상자·버튼은 고정이 아니다**(②b) — 저장소마다 하나씩이라 `items`에 들어 있다.
-    const node_count = items.len + action_buttons + faces + tab_order.len + 4;
+    // 마지막 +1은 브랜치 줄의 **원격 갱신 버튼**이다(P6) — 원격이 없어도 자리는 늘 있으므로(비활성으로
+    // 그린다) props에 따라 늘었다 줄지 않는다. 세지 않으면 목록이 꽉 찬 프레임에서 노드 버퍼가 모자라
+    // **도크가 통째로 빈다**.
+    const node_count = items.len + action_buttons + faces + tab_order.len + 4 + 1;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -150,7 +155,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         // 행 열기 + 행 동작 + 그룹 토글/일괄 동작 + 커밋 상자·버튼은 전부 **행당 둘** 상한 안이고,
         // +2는 스크롤바다.
         // 행당 둘이 상한인데 **머리 줄만 셋**이다(접기 + 동작 둘 — ②c). +2는 스크롤바다.
-        .actions = items.len * 2 + faces + tab_order.len + 2,
+        // +1은 브랜치 줄의 원격 갱신이다(P6).
+        .actions = items.len * 2 + faces + tab_order.len + 2 + 1,
     };
 }
 
@@ -501,13 +507,42 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         },
     }, row_nodes);
     // 브랜치 줄은 **목록 아래**다(2판 — §3.5). 브랜치를 못 잡았으면 높이 0으로 두어 그 줄이 아예 없다.
+    //
+    // 그 줄의 오른쪽 끝에 **원격 갱신 버튼**이 앉는다(P6 — 목업의 `Fetch ∨`). 자리는 늘 잡되 **누를 수
+    // 있는지는 `enabled`가 말한다**: 원격이 없는 저장소나 이미 도는 중이면 꺼진다. 브랜치를 못 잡은
+    // 프레임에서는 줄 자체가 높이 0이라 이 버튼도 함께 사라진다(없는 저장소를 fetch할 수는 없다).
+    const fetch_slot = buffers.nodes[action_cursor + tab_order.len + 4 ..][0..1];
+    const fetch_action = table.append(
+        props.snapshot_generation,
+        .fetch_remote,
+        props.fetch.enabled and !props.fetch.running,
+    ) catch return error.InsufficientActionBuffer;
+    const fetch_label = types.fetchLabel(props.fetch);
+    fetch_slot[0] = tree.button(.{
+        .id = NodeIds.fetch,
+        .style = .{
+            .width = .{ .px = @floatFromInt(m.fetchChipWidthPx(fetch_label, props.cell_width_px)) },
+            .height = .{ .px = @floatFromInt(m.action_extent) },
+            .margin = .{ .right = @floatFromInt(m.inset_x) },
+        },
+        // 행 동작 버튼과 같은 규율: 칠하지 않는다(호버 밴드 위에서 구멍처럼 보인다).
+        .variant = .ghost,
+        .paint = .{ .opacity = 0 },
+        .action = fetch_action,
+        // 꺼져 있으면 **누르는 손이 아니다** — 커서가 "된다"고 말해 놓고 안 되면 그게 고장으로 읽힌다.
+        .cursor = if (props.fetch.enabled and !props.fetch.running) .press else .arrow,
+        .overflow = .clip,
+    });
     top[3] = tree.card(.{
         .id = NodeIds.branch,
         .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
+        .direction = .row,
+        .justify = .end,
+        .align_items = .center,
         .variant = .surface,
         .paint = if (props.branch.len == 0) .{} else .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
         .overflow = .clip,
-    }, &.{});
+    }, if (props.branch.len == 0) &.{} else fetch_slot);
 
     // **커밋 상자·버튼은 여기 없다**(②b). 저장소마다 하나씩이므로 목록 항목으로 내려갔다 —
     // 고정 chrome에 하나만 두면 "지금 어느 저장소로 커밋하는가"가 화면에 없고, 그 어긋남은 잘못된
@@ -633,9 +668,9 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     // 호출처가 이 실패를 삼키면 도크가 통째로 멈추므로, 상한 산술은 `bufferSizes` 하나가 소유한다.
     const items = testItems();
     const sizes = bufferSizes(&items);
-    // 행 4 + 버튼 3 + 탭 칸 3 + **고정 4**(탭 줄·요약·목록·브랜치). 커밋 상자·버튼은 ②b에서 목록
-    // 항목으로 내려갔으므로 고정에 없다 — 이 숫자가 그 사실을 잠근다.
-    try testing.expectEqual(items.len + 3 + tab_order.len + 4, sizes.nodes);
+    // 행 4 + 버튼 3 + 탭 칸 3 + **고정 4**(탭 줄·요약·목록·브랜치) + **원격 갱신 1**(P6). 커밋 상자·버튼은
+    // ②b에서 목록 항목으로 내려갔으므로 고정에 없다 — 이 숫자가 그 사실을 잠근다.
+    try testing.expectEqual(items.len + 3 + tab_order.len + 4 + 1, sizes.nodes);
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -648,6 +683,74 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
         .child_rects = &storage.child_rects,
         .actions = &storage.actions,
     }));
+}
+
+test "브랜치 줄의 원격 갱신 칩: 자리는 늘 있고 켜짐은 원격이 정한다 (P6)" {
+    var storage: Storage = .{};
+    const on = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = true },
+    }, &storage);
+
+    const branch_rect = on.tree.entries[on.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    const chip_index = on.tree.find(NodeIds.fetch) orelse return error.MissingFetch;
+    const chip = on.tree.entries[chip_index].rect;
+    // 칩은 브랜치 줄 **안**의 오른쪽 끝이다(줄 밖으로 나가면 목록 위에 떠 있는 버튼이 된다).
+    try testing.expect(chip.width > 0 and chip.height > 0);
+    try testing.expect(chip.x >= branch_rect.x);
+    try testing.expect(chip.x + chip.width <= branch_rect.x + branch_rect.width);
+    try testing.expect(chip.y >= branch_rect.y and chip.y + chip.height <= branch_rect.y + branch_rect.height);
+    // 누를 수 있다고 커서가 말한다.
+    try testing.expectEqual(tree.CursorHint.press, on.tree.entries[chip_index].cursor);
+
+    var enabled_seen = false;
+    for (on.actions) |entry| if (entry.intent == .fetch_remote) {
+        enabled_seen = entry.enabled;
+    };
+    try testing.expect(enabled_seen);
+
+    // 원격이 없으면 **꺼진다** — 자리는 그대로 있고(감추지 않는다) action만 거절한다.
+    var storage_off: Storage = .{};
+    const off = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = false },
+    }, &storage_off);
+    const off_index = off.tree.find(NodeIds.fetch) orelse return error.MissingFetch;
+    try testing.expect(off.tree.entries[off_index].rect.width > 0); // 감추지 않는다
+    try testing.expectEqual(tree.CursorHint.arrow, off.tree.entries[off_index].cursor); // 누르는 손이 아니다
+    for (off.actions) |entry| if (entry.intent == .fetch_remote) {
+        try testing.expect(!entry.enabled);
+    };
+
+    // 도는 중에도 거절한다(쓰기 하나씩과 같은 규율) — 그리고 **칩이 커진다**(문구가 길어지므로).
+    var storage_run: Storage = .{};
+    const running = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = true, .running = true },
+    }, &storage_run);
+    const run_chip = running.tree.entries[running.tree.find(NodeIds.fetch) orelse return error.MissingFetch].rect;
+    try testing.expect(run_chip.width > chip.width);
+    for (running.actions) |entry| if (entry.intent == .fetch_remote) {
+        try testing.expect(!entry.enabled);
+    };
+}
+
+test "브랜치를 못 잡으면 원격 갱신 칩도 함께 사라진다 (P6)" {
+    // 줄 자체가 높이 0인데 버튼만 남으면 **없는 저장소를 fetch하는 컨트롤**이 화면에 뜬다.
+    var storage: Storage = .{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "",
+        .fetch = .{ .enabled = true },
+    }, &storage);
+    try testing.expect(frame.tree.find(NodeIds.fetch) == null);
 }
 
 test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 돌려준다)" {
@@ -681,7 +784,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file, .fetch_remote => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

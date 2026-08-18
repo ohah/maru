@@ -897,6 +897,20 @@ pub fn applyForcedCommitMessage(self: *AppSession) void {
     // 측정된 advance로 그려지므로, 둘이 어긋나면 밴드가 글자에서 밀린다.
     if (std.c.getenv("MARU_FORCE_SCM_COMMIT_SELECT") != null) self.scm_commit_field.selectAll();
     forceCommitRun(self);
+    forceFetch(self);
+}
+
+/// 원격 갱신을 **실제로 건다**(`MARU_FORCE_SCM_FETCH=1`, P6). 사용자 클릭과 **같은 진입점**
+/// (`applyScmDockIntent(.fetch_remote)`)을 태우므로 원격 유무 판정·슬롯·실패 문구는 전부 제품이 한다.
+///
+/// **성사될 때까지 다시 건다.** 첫 tick에는 목록 읽기가 없어(`git_result == null`) 원격 유무를 모르고
+/// 조용히 돌아간다 — 커밋 픽스처가 같은 이유로 재시도한다.
+fn forceFetch(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SCM_FETCH") == null) return;
+    if (self.scm_fetch_inflight != 0) return; // 이미 돈다
+    if (self.git_result == null) return; // 아직 읽기 전이다
+    if (self.scm_write_error != null) return; // 결과·이유가 이미 적혔다 — 재시도가 그걸 덮지 않게
+    scm_dock_ops.applyScmDockIntent(self, .fetch_remote);
 }
 
 /// 커밋 **실행**까지 헤드리스로 확인한다(`MARU_FORCE_SCM_COMMIT_RUN=1`). 사용자 클릭과 **같은

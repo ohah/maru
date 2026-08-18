@@ -3876,6 +3876,13 @@ pub const AppSession = struct {
     scm_write_seq: u64 = 0,
     /// 마지막 쓰기가 실패했을 때 화면에 낼 사유(redact·절단 후, 세션 allocator 소유). §5 — 실패는 사실대로.
     scm_write_error: ?[]u8 = null,
+    /// 도는 **원격 갱신**의 request id(0 = 없음, P6). 쓰기와 **다른 슬롯**이다 — fetch는 index를 만지지
+    /// 않으므로 §6의 직렬화 대상이 아니고, 네트워크라 오래 걸린다. 쓰기 슬롯을 쓰면 느린 원격 하나가
+    /// 커밋과 목록 갱신을 통째로 붙잡는다(§6-1이 쓰기 중 읽기를 막는다).
+    scm_fetch_inflight: u64 = 0,
+    scm_fetch_seq: u64 = 0,
+    /// 그 fetch가 향한 저장소. 끝난 뒤 **그 저장소를** 다시 읽어야 ahead/behind가 방금 받은 ref를 본다.
+    scm_fetch_repo: ?[]u8 = null,
     /// 낙관적으로 옮겨 놓은 행(§7). **경로는 세션 allocator 소유**다 — 모델 버퍼는 프레임마다 다시 만들어져
     /// 그 슬라이스를 들고 있으면 다음 프레임에 남의 글자를 가리킨다.
     ///
@@ -13801,6 +13808,9 @@ pub const AppSession = struct {
         // 끝난 쓰기를 **읽기보다 먼저** 거둔다 — 거두는 순간 목록 읽기를 한 번 걸므로, 순서가 반대면
         // 그 읽기가 같은 tick에 안 돌고 화면이 한 프레임 늦게 갱신된다(쓰기 문서 §6-1).
         scm_dock_ops.drainScmWrite(self);
+        // 원격 갱신도 같은 자리에서 거둔다(P6). **쓰기와 다른 슬롯**이라 둘이 서로를 기다리지 않는다 —
+        // 느린 fetch가 도는 동안에도 스테이지·커밋 결과는 제때 들어온다.
+        scm_dock_ops.drainScmFetch(self);
         // N1.5 b: 네이티브 diff Term의 네 상태를 옮긴다. **결과가 안 와도 매 tick 봐야 한다** — 재시도 창
         // (6초)이 지났는지는 결과가 아니라 시간이 말한다. 판정이 선 Term은 곧바로 반환하므로 비용이 없다.
         for (self.tabs.items) |tab| {
@@ -17284,6 +17294,7 @@ pub const AppSession = struct {
         if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
+        if (self.scm_fetch_repo) |path| self.allocator.free(path); // 도는 fetch가 향한 저장소(P6)
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);
@@ -56444,6 +56455,61 @@ test "소스 컨트롤: 비운 초안은 남지 않는다(비운 것도 뜻이�
     git_ops.rememberGitRepo(session, "/repo-a");
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
     try std.testing.expectEqual(@as(usize, 0), session.scm_commit_drafts.items.len);
+}
+
+test "소스 컨트롤: 원격이 없으면 fetch를 걸지 않고 이유를 적는다(P6)" {
+    // 목업의 `Fetch ∨`는 늘 보이지만, 원격이 없는 저장소에서 그것을 실행하면 무엇을 해도 실패한다.
+    // §3.5는 "누를 수 없는 상황은 비활성으로 보여 주고 **왜 안 되는지 말한다**"이므로 둘 다 확인한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    git_ops.rememberGitRepo(session, "/repo");
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .ok = true,
+    };
+    // 원격 목록이 비어 있다 = 원격이 없다.
+    try std.testing.expect(!scm_dock_ops.scmHasRemote(session));
+    scm_dock_ops.applyScmDockIntent(session, .fetch_remote);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_fetch_inflight); // 프로세스를 띄우지 않는다
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_remote), session.scm_write_error.?);
+
+    // 원격이 하나라도 있으면 켜진다. **줄바꿈·공백만 있는 출력은 없는 것**이다(git이 빈 줄을 낼 수 있다).
+    git_backend_mod.worker_allocator.free(session.git_result.?.remotes);
+    session.git_result.?.remotes = try git_backend_mod.worker_allocator.dupe(u8, "\n  \n");
+    try std.testing.expect(!scm_dock_ops.scmHasRemote(session));
+    git_backend_mod.worker_allocator.free(session.git_result.?.remotes);
+    session.git_result.?.remotes = try git_backend_mod.worker_allocator.dupe(u8, "origin\n");
+    try std.testing.expect(scm_dock_ops.scmHasRemote(session));
+}
+
+test "소스 컨트롤: fetch는 쓰기 슬롯을 잡지 않는다(느린 원격이 커밋을 막지 않는다)" {
+    // §6의 직렬화는 `index.lock` 때문에 있는 규칙이고 fetch는 index를 만지지 않는다. 두 in-flight가
+    // 같은 값이면 느린 원격 하나가 커밋·스테이지와 **목록 읽기까지**(§6-1) 통째로 붙잡는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.scm_fetch_inflight = 7; // fetch가 도는 중
+    try std.testing.expectEqual(@as(u64, 0), session.scm_write_inflight);
+
+    // 그 동안에도 쓰기 슬롯은 비어 있다 — 커밋 경로가 in-flight로 막히지 않는다는 뜻이다.
+    // 그리고 fetch가 도는 동안 또 누르면 **흘린다**(프로세스를 쌓지 않는다).
+    git_ops.rememberGitRepo(session, "/repo");
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .remotes = try git_backend_mod.worker_allocator.dupe(u8, "origin\n"),
+        .ok = true,
+    };
+    scm_dock_ops.applyScmDockIntent(session, .fetch_remote);
+    try std.testing.expectEqual(@as(u64, 7), session.scm_fetch_inflight); // 새 요청이 걸리지 않았다
+    try std.testing.expect(session.scm_write_error == null); // 흘린 것은 실패가 아니다
+    session.scm_fetch_inflight = 0;
 }
 
 test "소스 컨트롤: 커밋할 수 없으면 그 이유를 말한다(빈 메시지·스테이지 0건)" {

@@ -58,6 +58,9 @@ pub const Intent = union(enum) {
     /// 머리 줄의 **전체 스테이지**(②c). `git add -A`라 경로를 싣지 않는다 — 화면에 안 보이는 파일까지
     /// 드는 것이 "모두"의 뜻이다.
     stage_all_repo: u32,
+    /// 브랜치 줄의 **원격 갱신**(P6). 대상은 **브랜치 줄이 말하는 그 저장소**(활성 저장소)라 인덱스를
+    /// 싣지 않는다 — 줄이 하나뿐이므로 실으면 두 곳이 같은 사실을 들게 된다.
+    fetch_remote,
     /// 스크롤바. 목표 offset은 포인터 좌표의 함수라 intent에 실을 수 없다 — host가 같은 published
     /// 기하로 좌표를 offset으로 바꾼다.
     scroll_thumb,

@@ -68,14 +68,16 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 3(아이콘·이름·ahead/behind) + 호버 동작 1.
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 4(아이콘·이름·ahead/behind·원격 갱신 칩) + 호버 동작 1.
     // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
-    var text_ops: usize = 9;
+    var text_ops: usize = 10;
     var quad_extra: usize = 0;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
+    // 원격 갱신 칩 — **긴 쪽으로 잡는다**(도는 중 문구가 더 길다). 모자라면 도크가 통째로 빈다.
+    bytes += @max(i18n.t(.scm_fetch).len, i18n.t(.scm_fetching).len);
 
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
@@ -291,10 +293,22 @@ pub fn view(
             const rect = frame.tree.entries[index];
             try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
             try writer.line(rect, @floatFromInt(m.inset_x + m.disclosure_extent + m.gap), props.branch, .surface_fg, .control, true);
+            // ── 원격 갱신 칩(P6). **글자는 tree가 준 rect 안에 놓는다** — 여기서 자기 산수로 자리를
+            // 잡으면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(탭 칸에서 이미 겪은 갈림).
+            const fetch_label = types.fetchLabel(props.fetch);
+            var fetch_right: u32 = m.inset_x;
+            if (frame.tree.find(build.NodeIds.fetch)) |fetch_index| {
+                const chip = frame.tree.entries[fetch_index];
+                // 꺼진 버튼은 **감추지 않고 흐리게** 둔다(§3.5 — 왜 안 되는지 말할 기회를 남긴다).
+                const role: tokens.ColorRole = if (props.fetch.enabled and !props.fetch.running) .focus_accent else .muted_fg;
+                try writer.centered(chip, fetch_label, role, .control);
+                // ahead/behind는 그 칩을 **비켜 앉는다**. 안 비키면 두 글자가 같은 자리에 겹친다.
+                fetch_right = m.inset_x + @as(u32, @intFromFloat(@max(chip.rect.width, 0))) + m.gap;
+            }
             if (props.has_ab) {
                 var buf: [32]u8 = undefined;
                 const text = std.fmt.bufPrint(&buf, "↑{d} ↓{d}", .{ props.ahead, props.behind }) catch "";
-                try writer.trailing(rect, text, .muted_fg, .supporting, m.inset_x);
+                try writer.trailing(rect, text, .muted_fg, .supporting, fetch_right);
             }
         }
     }
@@ -1537,6 +1551,71 @@ test "히스토리 커밋 줄은 두 줄이다(제목이 마지막까지 남는�
     // 체크아웃된 브랜치 칩만 강조색이다.
     const ref = findText(draws, "main") orelse return error.MissingRef;
     try testing.expectEqual(tokens.ColorRole.focus_accent, ref.role);
+}
+
+test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 (P6)" {
+    // 둘 다 브랜치 줄의 **오른쪽 끝**을 노린다 — 칩을 비켜 두지 않으면 `↑2 ↓0`이 그 위에 그려진다
+    // (머리 줄 동작 아이콘에서 이미 한 번 겪은 겹침).
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .has_ab = true,
+        .ahead = 2,
+        .behind = 1,
+        .fetch = .{ .enabled = true },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+
+    const chip = findText(draws, i18n.t(.scm_fetch)) orelse return error.MissingFetchLabel;
+    const ab = findText(draws, "↑2 ↓1") orelse return error.MissingAheadBehind;
+    // ahead/behind가 칩보다 **왼쪽**이다. 같은 자리면 두 글자가 포개져 둘 다 못 읽는다.
+    try testing.expect(ab.origin.x < chip.origin.x);
+    // 칩은 브랜치 줄의 rect 안에 있다 — 글자가 tree가 준 자리를 벗어나면 히트 사각형과 어긋난다.
+    const chip_rect = frame.tree.entries[frame.tree.find(build.NodeIds.fetch) orelse return error.MissingFetch].rect;
+    try testing.expect(@as(f32, @floatFromInt(chip.origin.x)) >= chip_rect.x);
+    try testing.expect(@as(f32, @floatFromInt(chip.origin.x)) < chip_rect.x + chip_rect.width);
+}
+
+test "도는 중에는 칩이 그 사실을 말한다 (P6)" {
+    // 눌렀는데 표시가 없으면 사용자는 다시 누르고, 두 번째 누름은 조용히 거부된다(커밋 버튼과 같은 이유).
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = true, .running = true },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    // **정확히 그 문구다.** 부분 일치로 보면 영어에서 `Fetching…`이 `Fetch`를 포함해 둘 다 통과한다.
+    var seen_running = false;
+    var seen_idle = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, i18n.t(.scm_fetching))) seen_running = true;
+            if (std.mem.eql(u8, run.text, i18n.t(.scm_fetch))) seen_idle = true;
+        },
+        else => {},
+    };
+    try testing.expect(seen_running);
+    try testing.expect(!seen_idle); // 두 문구가 함께 뜨지 않는다
 }
 
 test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다" {

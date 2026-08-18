@@ -1499,9 +1499,7 @@ pub fn buildAgentSessionDockItems(
                                 .user => .user,
                                 .assistant => .assistant,
                             },
-                            // 가려진 턴의 문구는 **여기서** 푼다 — 워커가 만들어 캐시하면 언어를 바꿔도
-                            // 그 줄만 옛 언어로 남는다(계약 §5.2). 이 코드는 UI 스레드에서 돈다.
-                            .text = if (turn.redacted) maru.i18n.t(.arch_redacted) else turn.text,
+                            .text = turnText(turn),
                         };
                         action_record_count = parsed_detail.action_records;
                     };
@@ -1603,6 +1601,18 @@ pub fn publishAgentSessionDockFrame(
     // The component action table itself carries this generation, and the click path resolves
     // against this exact published value.
     self.agent_session_dock_snapshot_generation = generation;
+}
+
+/// 상세 턴 하나가 화면에 낼 문자열.
+///
+/// 가려진 턴의 문구는 **여기서** 푼다 — 워커가 만들어 캐시하면 그 시점 언어에 얼어붙어, 사용자가 화면
+/// 언어를 바꿔도 그 줄만 옛 언어로 남는다(계약 §5.2: 한 프레임 안에 두 언어가 섞이지 않는다). 이 코드는
+/// UI 스레드에서 돈다.
+///
+/// 한 줄짜리를 함수로 빼 둔 이유는 **테스트가 붙을 자리를 만들기 위해서**다. 이 해석이 죽으면 가려진
+/// 턴이 빈 줄로 보이는데, 크래시가 아니라 조용히 사라지는 종류라 다른 어떤 테스트도 말하지 않는다.
+fn turnText(turn: maru.session.agent_session_archive_detail.Turn) []const u8 {
+    return if (turn.redacted) maru.i18n.t(.arch_redacted) else turn.text;
 }
 
 /// Selection/source changes invalidate the actually painted action capability before the
@@ -2132,3 +2142,27 @@ pub fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 pub const session_dock_ui_zoom_min_milli: u32 = 750;
 
 pub const session_dock_ui_zoom_max_milli: u32 = 1500;
+
+// 가려진 턴의 문구가 **화면 언어를 따라가는지** 본다.
+//
+// 워커는 플래그만 세우고 문장은 안 만든다(계약 §5.2 — 번역 문자열의 수명은 프레임을 넘기지 않는다).
+// 그 해석이 죽으면 가려진 턴이 **빈 줄**로 보이고 가려졌다는 표시가 사라진다 — 크래시가 아니라 조용히
+// 사라지는 종류라, 이 테스트가 없으면 되돌려도 아무도 말하지 않는다(실제로 그랬다).
+test "가려진 턴의 문구는 그리는 시점의 언어로 풀린다" {
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
+    const redacted: maru.session.agent_session_archive_detail.Turn = .{ .role = .user, .text = &.{}, .redacted = true };
+    const plain: maru.session.agent_session_archive_detail.Turn = .{ .role = .assistant, .text = @constCast("본문 그대로") };
+
+    maru.i18n.setLang(.ko);
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .arch_redacted), turnText(redacted));
+    maru.i18n.setLang(.en);
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.en, .arch_redacted), turnText(redacted));
+
+    // 두 언어가 실제로 다른 문장이어야 위 둘이 무언가를 지킨다 — 같으면 해석이 죽어도 통과한다.
+    try std.testing.expect(!std.mem.eql(u8, maru.i18n.tIn(.ko, .arch_redacted), maru.i18n.tIn(.en, .arch_redacted)));
+
+    // 가리지 않은 턴은 원문 그대로다 — 모든 턴을 가림 문구로 바꿔도 위 단언은 통과하기 때문이다.
+    try std.testing.expectEqualStrings("본문 그대로", turnText(plain));
+}

@@ -206,9 +206,6 @@ const Writer = struct {
         try self.emit(x, y, source, max_cols, foreground, true);
     }
 
-    /// `emit`의 계획을 그대로 따라가되 렌더링된 셀 폭만 돌려준다. draw op을 만들기 전에 action label을
-    /// 가운데 정렬하기 위해서다. 이 계산을 `text_layout.plan` 위에 두면 byte 길이로 가운데를 잡는 일을
-    /// 피하고, 말줄임된 label이 측정 경로와 paint 경로에서 같은 자리를 차지한다.
     /// `emit` 의 계획을 그대로 따라가되 렌더링된 셀 폭만 돌려준다.
     ///
     /// **`wide_icons` 를 `emit` 과 같은 값으로 넘겨야 한다.** 아이콘을 chrome 아이콘으로 볼지가 폭을

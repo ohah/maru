@@ -1654,6 +1654,10 @@ const TermRuntime = struct {
     /// 스크롤이 필요 없으면 `null`이다 — 그때는 막대도 없다.
     editor_scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
     editor_horizontal_scrollbar: ?chrome.components.editor_view.scrollbar.HorizontalGeometry = null,
+    /// 비교 뷰 **오른쪽 열**의 막대 기하(왼쪽은 위 두 필드가 든다 — 단일 편집기와 같은 자리를 쓴다).
+    /// 세로는 좌우 값이 같지만(§3.5 세로 공유) **자리가 둘**이라 각각 들어야 어느 쪽을 눌렀는지 안다.
+    editor_scrollbar_right: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
+    editor_horizontal_scrollbar_right: ?chrome.components.editor_view.scrollbar.HorizontalGeometry = null,
     /// 비교 뷰 **오른쪽 열**의 가로 위치. 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구하므로
     /// (editor-surface-dock §3.5) 좌우가 각자 든다 — 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
     /// 다른 쪽이 엉뚱한 곳을 본다. 단일 파일 편집기는 이 값을 쓰지 않는다(§4.1e).
@@ -4226,6 +4230,8 @@ pub const AppSession = struct {
     /// 움직여야 하므로 활성 Term을 다시 묻지 않는다. Term이 죽으면 비운다(`invalidateForFreedPane`·
     /// `destroyTerm` 경로) — 죽은 포인터로 스크롤하면 그 자리에서 터진다.
     editor_scrollbar_term: ?*Term = null,
+    /// 잡은 **가로** 막대가 비교 뷰의 오른쪽 열인가(§3.5 — 가로는 각자다). 단일 편집기는 늘 `false`.
+    editor_hscroll_right: bool = false,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
     // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
     // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.

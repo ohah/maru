@@ -125,6 +125,9 @@ pub const PaneFrame = struct {
     /// 스크롤이 필요 없으면 `null`이고 그때는 막대도 없다.
     scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
     horizontal_scrollbar: ?chrome_editor.scrollbar.HorizontalGeometry = null,
+    /// 비교 뷰 오른쪽 열의 짝(단일 편집기는 `null`).
+    right_scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
+    right_horizontal_scrollbar: ?chrome_editor.scrollbar.HorizontalGeometry = null,
 };
 
 /// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
@@ -213,7 +216,19 @@ pub fn buildDiffPaneOps(
         .cell_h_px = cell_h_px,
         .font_px = font_px,
     }, scratch);
-    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece };
+    return .{
+        .ops = scratch.ops[0..w.ops],
+        .ops_len = w.ops,
+        .visual_rows = w.visual_rows,
+        .total_visual_rows = w.total_visual_rows,
+        .max_top_line = w.max_top_line,
+        .max_top_piece = w.max_top_piece,
+        // **왼쪽 열이 단일 편집기와 같은 자리를 쓴다** — 오른쪽은 아래 두 필드가 든다.
+        .scrollbar = w.left_scrollbar,
+        .horizontal_scrollbar = w.left_horizontal_scrollbar,
+        .right_scrollbar = w.right_scrollbar,
+        .right_horizontal_scrollbar = w.right_horizontal_scrollbar,
+    };
 }
 
 /// 편집기 배경·스크롤바 quad가 실리는 합성 층. **제품과 Chrome Lab이 함께 읽는 단일 출처다.**
@@ -388,6 +403,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
     term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+    // 비교 뷰 오른쪽 열(단일 편집기는 `null`이라 그대로 비워진다).
+    term.rt.editor_scrollbar_right = if (pf.right_scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+    term.rt.editor_horizontal_scrollbar_right = if (pf.right_horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     // **아직 다 세지 못했으면 다음 프레임을 부른다**(§2.1 점진 계수). 이 렌더 루프는 dirty가 없으면
     // 투영을 건너뛰므로(idle skip), 이것을 안 세우면 진행이 거기서 멈춰 막대가 근사값인 채로 남는다.
     // 다 세면 더 요청하지 않으므로 idle로 돌아간다.
@@ -931,27 +949,42 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
 
+    // **세로를 먼저 본다** — 오른쪽 아래 모서리에서 둘이 만나면 세로가 이긴다(세로는 늘 있고 가로는
+    // 랩이면 없다). 비교 뷰는 열이 둘이라 각 축을 좌우 모두 본다.
     if (term.rt.editor_scrollbar) |bar| {
-        if (bar.trackContains(x_px, y_px)) {
-            self.editor_scrollbar_term = term;
-            if (self.dock_list_scroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorScrollFromBarPx(self, jumped);
-            self.scrollbar_drag_target = .editor_vertical;
-            self.pointer_gesture_owner = .none;
-            self.metal_dirty = true;
-            return true;
-        }
+        if (bar.trackContains(x_px, y_px)) return beginVertical(self, term, bar, x_px, y_px);
+    }
+    if (term.rt.editor_scrollbar_right) |bar| {
+        // **세로는 좌우 값이 같다**(§3.5 세로 공유) — 어느 자리를 눌렀든 같은 곳으로 간다.
+        if (bar.trackContains(x_px, y_px)) return beginVertical(self, term, bar, x_px, y_px);
     }
     if (term.rt.editor_horizontal_scrollbar) |bar| {
-        if (bar.trackContains(x_px, y_px)) {
-            self.editor_scrollbar_term = term;
-            if (self.editor_hscroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorHScrollFromBarPx(self, jumped);
-            self.scrollbar_drag_target = .editor_horizontal;
-            self.pointer_gesture_owner = .none;
-            self.metal_dirty = true;
-            return true;
-        }
+        if (bar.trackContains(x_px, y_px)) return beginHorizontal(self, term, bar, x_px, y_px, false);
+    }
+    if (term.rt.editor_horizontal_scrollbar_right) |bar| {
+        // **가로는 각자다**(§3.5) — 오른쪽 막대는 오른쪽 열만 민다.
+        if (bar.trackContains(x_px, y_px)) return beginHorizontal(self, term, bar, x_px, y_px, true);
     }
     return false;
+}
+
+fn beginVertical(self: *AppSession, term: *Term, bar: chrome.ui.scroll_area.ScrollbarGeometry, x_px: f64, y_px: f64) bool {
+    self.editor_scrollbar_term = term;
+    if (self.dock_list_scroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorScrollFromBarPx(self, jumped);
+    self.scrollbar_drag_target = .editor_vertical;
+    self.pointer_gesture_owner = .none;
+    self.metal_dirty = true;
+    return true;
+}
+
+fn beginHorizontal(self: *AppSession, term: *Term, bar: chrome_editor.scrollbar.HorizontalGeometry, x_px: f64, y_px: f64, right: bool) bool {
+    self.editor_scrollbar_term = term;
+    self.editor_hscroll_right = right;
+    if (self.editor_hscroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorHScrollFromBarPx(self, jumped);
+    self.scrollbar_drag_target = .editor_horizontal;
+    self.pointer_gesture_owner = .none;
+    self.metal_dirty = true;
+    return true;
 }
 
 /// 진행 중인 편집기 막대 드래그의 move/up. 좌표를 흡수만 하고 **tick이 최종 하나를 적용한다**
@@ -975,6 +1008,7 @@ pub fn routeScrollbarCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64)
                 self.editor_hscroll_drag.end();
                 self.scrollbar_drag_target = .none;
                 self.editor_scrollbar_term = null;
+                self.editor_hscroll_right = false; // 다음 down이 자기 열을 새로 정한다
             }
             return true;
         },
@@ -1004,6 +1038,11 @@ pub fn setEditorScrollFromBarPx(self: *AppSession, offset_px: u32) void {
     if (cell_h == 0) return;
     const target_row: u32 = offset_px / cell_h;
 
+    // **비교 뷰는 캐시가 비어 있다** — `buildDiffPaneOps`에 `row_cache`를 안 넘긴다(좌우 두 캐시가
+    // 필요한데 저장소가 하나다 — #2371이 한계로 적은 자리). 그래서 아래 `line = target_row` 선형
+    // 경로로 떨어지는데, **랩이 꺼진 비교에서는 그것이 정확하다**(시각 행 = 행 배열 인덱스). 랩을 켠
+    // 비교는 애초에 좌우가 어긋나 비교가 성립하지 않는다(§3.5 "알려진 구멍") — 그 구멍이 닫힐 때
+    // 좌우 캐시와 함께 본다.
     const c = &term.rt.editor_row_cache;
     var line: usize = target_row;
     var piece: u32 = 0;
@@ -1047,8 +1086,10 @@ pub fn setEditorHScrollFromBarPx(self: *AppSession, offset_px: u32) void {
     if (cell_w == 0) return;
     const col_u32 = @min(offset_px / cell_w, @as(u32, chrome_editor.frame.max_first_col));
     const col: u16 = @intCast(col_u32);
-    if (col == term.rt.editor_first_col) return;
-    term.rt.editor_first_col = col;
+    // **잡은 막대의 열에 간다**(§3.5 — 가로는 각자다). 비교 뷰가 아니면 늘 왼쪽이다.
+    const slot = if (self.editor_hscroll_right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
+    if (col == slot.*) return;
+    slot.* = col;
     self.metal_dirty = true;
 }
 

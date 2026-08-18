@@ -496,8 +496,12 @@ pub const Client = struct {
         // 중일 때만 그랬는데, 그러면 인증 중에 온 확장 하나가 세션을 죽인다. 서버는 OpenSSH 만
         // 있는 것이 아니고, 모르는 번호 하나로 못 붙는 서버가 생기는 것이 훨씬 나쁘다.
         //
-        // **키 교환 중에는 예외로 끊는다.** strict KEX(draft §3.2)는 그 사이의 예상 밖 패킷에
-        // 연결을 끊으라고 요구한다 — 여기서 답하고 살아 있으면 그 요구를 어긴다.
+        // **초기 키 교환 중에는 예외로 끊는다.** strict KEX(draft §3.2)는 그 사이의 예상 밖
+        // 패킷에 연결을 끊으라고 요구한다 — 여기서 답하고 살아 있으면 그 요구를 어긴다.
+        //
+        // **재키잉은 여기 안 든다.** 그때 상태는 `ready` 이고, 재키잉 중에도 상대의 패킷은
+        // 정상적으로 온다(우리 `KEXINIT` 이 닿기 전에 떠난 것들이다). `UNIMPLEMENTED` 는
+        // 3 번이라 §7.1 이 재키잉 중에도 허용하므로 그대로 답한다.
         if (!recognizedMessage(msg)) {
             switch (self.state) {
                 .version_exchange, .negotiating, .key_exchange, .awaiting_new_keys, .host_key_decision => {
@@ -1966,4 +1970,21 @@ test "끊긴 뒤에는 미뤄 둔 것도 안 나간다" {
 
     const after = try c.feed(&[_]u8{}, &out, &scr);
     try testing.expectEqual(@as(usize, 0), after.wire.len);
+}
+
+test "재키잉 중에 온 모르는 번호에는 그대로 답한다" {
+    // 초기 KEX 와 재키잉을 같은 것으로 묶으면 안 된다. 재키잉 중 상대의 패킷은 정상이고
+    // (§7.1 — 우리 `KEXINIT` 이 닿기 전에 떠난 것), `UNIMPLEMENTED` 는 3 번이라 그 사이에도
+    // 보낼 수 있다. 여기서 끊으면 재키잉과 겹친 확장 하나가 세션을 죽인다.
+    var c = readyClient();
+    c.t.phase = .rekeying;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(71);
+    const n = try packet.write(&pbuf, &[_]u8{ 77, 0, 0, 0, 0 }, prng.random());
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(msg_unimplemented, dec.payload[0]);
+    try testing.expectEqual(@as(?transport.Error, null), c.t.poison);
 }

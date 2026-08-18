@@ -424,7 +424,9 @@ pub fn paneTabAreaCols(bar_cols: u16) u16 {
 /// 세로 위치를 잡는다(옛 .m의 slot×slot_h 균일 기하 폐기 — code-review #1·#5·#6). 색칠 루프도 slot=row/32로 슬롯을 디코드한다.
 /// line_count=1이면 단일행 중앙. 최대 4줄(이름·브랜치·경로·상태) 지원(base 32 — slot≤2047). 밴드 셀(slot_id=0)은 이 인코딩과
 /// 무관하게 row=표시 row 인덱스 그대로(렌더러가 slot_id로 분기) — 여기를 인코딩 단일 출처로 고정한다. buildSidebarDrawList가
-/// 4줄(이름·브랜치·경로·상태, `lines: [4]`)까지 쓰고, 슬롯 높이도 4줄을 담게 키웠다(sidebar_slot_height_ratio_milli=4600).
+/// 4줄(이름·브랜치·경로·상태, `lines: [4]`)까지 쓰고, 슬롯 높이도 4줄을 담게 키웠다
+/// (`app_session/sidebar.zig`의 `sidebar_slot_height_ratio_milli` — 값은 그쪽이 소유한다. 여기 숫자를 적어 두면
+/// 그 상수가 바뀔 때 같이 안 바뀐다. 실제로 4.6×에서 5.2×로 커진 뒤 이 주석만 4600으로 남아 있었다).
 /// applySidebarGlyphPyTop이 base 32·×4를 decode에 쓰므로, 이 값을 바꾸면 아래 "인코딩 값 고정" 테스트가 깨져 동기 수정을 강제한다.
 pub const sidebar_line_base: u16 = 32;
 pub fn sidebarGlyphRow(slot: usize, line_index: u16, line_count: u16) u16 {

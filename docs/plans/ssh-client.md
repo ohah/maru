@@ -20,10 +20,10 @@
 | S5b | **`known_hosts` 대조** — 호스트 매칭(평문 패턴·부정·해시 `\|1\|`)·`@revoked`·`@cert-authority` 제외·판정 넷 | 줄 파싱 + 판정 + `ssh-keygen -H` 와 해시 일치 |
 | S6a | **인증 프로토콜** — service 요청, `publickey`(session_id 를 덮는 서명)·`password`, 응답 넷, 배너 거르기 | RFC 8032 벡터로 서명 + 응답 파싱 |
 | S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(`aes256-ctr` + OpenSSH bcrypt KDF), `checkint`·패딩·공개키 일치 검사 | `ssh-keygen` 이 만든 같은 키의 평문본·암호본이 같은 값을 낸다 |
-| S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` | 상태 전이 |
-| S7b | **흐름 제어** — 채널 윈도 소비·`WINDOW_ADJUST`. **안 하면 대량 출력이 도중에 멈춘다**([계약 §3.1](../ssh-client.md)) | 윈도를 넘기는 바이트 열 |
+| S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` + **보내는 쪽 흐름 제어**(윈도·최대 패킷을 넘겨 보내지 않는다 — 실서버가 초기 윈도 `0` 을 광고하므로 첫 바이트부터 필요하다) | 상태 전이 + 실서버 왕복 |
+| S7b | **받는 쪽 흐름 제어** — 우리 윈도 소비와 `WINDOW_ADJUST` 보내기. **안 하면 대량 출력이 도중에 멈춘다**([계약 §3.1](../ssh-client.md)). 보내는 쪽은 S7 이 이미 막는다 | 윈도를 넘기는 바이트 열 |
 | S7c | **잡 메시지** — `IGNORE`·`DEBUG`·`UNIMPLEMENTED`·`DISCONNECT`·`GLOBAL_REQUEST`, 버전 앞 배너 여러 줄 | 각 메시지 주입 |
-| S8 | **실서버 검증 하니스** — `std.net` 소켓 어댑터로 진짜 sshd 와 한 번 왕복한다. **제품 경로가 아니다**(아래) | **실서버 왕복** — 여기서 처음 상호운용이 증명된다 |
+| S8 | **실서버 검증 하니스** — `std.net` 소켓 어댑터로 진짜 sshd 와 왕복하는 것을 **상시화**한다(`mise run ssh-smoke`). **제품 경로가 아니다**(아래). 상호운용 자체는 S7 에서 일회용 프로브로 이미 증명했다 | **실서버 왕복이 CI 에 선다** |
 | S9 | **모바일 배선** — host 소켓 ABI(브리지엔 OS 호출 0), 키 저장은 Keychain/Keystore | 기기 |
 | S9b | **서버 목록 화면** — 호스트·사용자·포트·키를 등록·관리(모바일은 UI 가 유일한 입력 경로) | 화면 |
 | S9c | **키 생성 + 공개키 보여 주기** — 기기에서 ed25519 를 만들고 한 줄을 복사하게 한다 | 기기 |

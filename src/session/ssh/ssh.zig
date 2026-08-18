@@ -18,6 +18,7 @@ pub const hostkey = @import("hostkey.zig");
 pub const known_hosts = @import("known_hosts.zig");
 pub const userauth = @import("userauth.zig");
 pub const private_key = @import("private_key.zig");
+pub const channel = @import("channel.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -299,4 +300,97 @@ test "실서버 왕복: OpenSSH 10.2 의 서명이 우리 H 로 검증된다" {
         "SHA256:rQpDY0/WqGkMQ0gOagr8I433r3BchUCBalzEl0YJMcc",
         try hostkey.fingerprint(&fp, reply.host_key),
     );
+}
+
+// ---------------------------------------------------------------------------
+// **실서버가 실제로 하는 순서**(2026-08-18, OpenSSH 10.2 에 붙여 본 것). 추측이 아니라 실측이고,
+// 셋 다 "그럴 리 없다" 고 생각하기 쉬운 자리다.
+//
+//   1. 열기 확인의 **초기 윈도가 0** 이다. 그 다음 `WINDOW_ADJUST +2MiB` 가 온다.
+//   2. 채널 요청의 답 **앞에 다른 사건이 끼어든다**(위 조정이 `shell` 수락보다 먼저 왔다).
+//   3. 인증 직후 채널 메시지가 아닌 것이 온다(`GLOBAL_REQUEST hostkeys-00@openssh.com`·`DEBUG`).
+//      그 분류는 S7c 몫이고, 여기서는 채널 층이 그것을 **자기 것으로 착각하지 않는지**만 본다.
+
+test "조립: 실서버가 하는 대로 — 초기 윈도 0 · 답보다 먼저 오는 조정" {
+    var ch: channel.Channel = .{};
+    var out: [256]u8 = undefined;
+    var buf: [256]u8 = undefined;
+
+    _ = try ch.writeOpen(&out, 0);
+
+    // (1) 초기 윈도 0 으로 열린다. **이때 데이터를 보내면 명세 위반이다** — 드라이버가 "열렸으니
+    // 보내도 되겠지" 로 짠 순간 첫 바이트부터 어긴다. 보내는 쪽 흐름 제어를 S7 에 둔 이유가 이것이다.
+    var w = wire.Writer.init(&buf);
+    try w.byte(channel.msg_channel_open_confirmation);
+    try w.u32be(0);
+    try w.u32be(0); // 서버 채널 번호도 0 이었다
+    try w.u32be(0); // ← 초기 윈도 0
+    try w.u32be(32768);
+    try std.testing.expect((try ch.receive(w.written())) == .opened);
+    try std.testing.expectEqual(@as(u32, 0), ch.sendableLen());
+    try std.testing.expectError(channel.Error.WouldExceedWindow, ch.writeData(&out, "x"));
+
+    // (2) pty-req 수락 → 그 다음 조정이 오고 → 그 다음에 shell 수락이 온다.
+    _ = try ch.writePtyReq(&out, "xterm-256color", .{ .cols = 80, .rows = 24 }, "");
+    var w2 = wire.Writer.init(&buf);
+    try w2.byte(channel.msg_channel_success);
+    try w2.u32be(0);
+    try std.testing.expect((try ch.receive(w2.written())) == .request_success);
+
+    _ = try ch.writeShell(&out);
+    var w3 = wire.Writer.init(&buf);
+    try w3.byte(channel.msg_channel_window_adjust);
+    try w3.u32be(0);
+    try w3.u32be(2 * 1024 * 1024);
+    // **답을 기다리는 중에 온다.** 이것을 "예상 밖" 으로 다루는 드라이버는 실서버에서 죽는다.
+    try std.testing.expect((try ch.receive(w3.written())) == .window_adjusted);
+    try std.testing.expectEqual(@as(u32, 32768), ch.sendableLen()); // 이제 최대 패킷이 상한이다
+
+    var w4 = wire.Writer.init(&buf);
+    try w4.byte(channel.msg_channel_success);
+    try w4.u32be(0);
+    try std.testing.expect((try ch.receive(w4.written())) == .request_success);
+    _ = try ch.writeData(&out, "이제 보낼 수 있다");
+
+    // (3) 데이터 → EOF → exit-status → CLOSE 로 끝난다.
+    var w5 = wire.Writer.init(&buf);
+    try w5.byte(channel.msg_channel_data);
+    try w5.u32be(0);
+    try w5.string("MARU_S7_OK\n");
+    try std.testing.expect((try ch.receive(w5.written())) == .data);
+
+    var w6 = wire.Writer.init(&buf);
+    try w6.byte(channel.msg_channel_eof);
+    try w6.u32be(0);
+    try std.testing.expect((try ch.receive(w6.written())) == .eof);
+    try std.testing.expectEqual(channel.State.open, ch.state); // EOF 는 닫힘이 아니다
+
+    var w7 = wire.Writer.init(&buf);
+    try w7.byte(channel.msg_channel_request);
+    try w7.u32be(0);
+    try w7.string("exit-status");
+    try w7.boolean(false);
+    try w7.u32be(0);
+    const ev = try ch.receive(w7.written());
+    try std.testing.expectEqual(@as(u32, 0), ev.exit_status);
+
+    var w8 = wire.Writer.init(&buf);
+    try w8.byte(channel.msg_channel_close);
+    try w8.u32be(0);
+    try std.testing.expect((try ch.receive(w8.written())) == .closed);
+    _ = try ch.writeClose(&out);
+    try std.testing.expectEqual(channel.State.close_sent, ch.state);
+}
+
+test "조립: 채널 층은 남의 메시지를 자기 것으로 착각하지 않는다" {
+    // 인증 직후 실서버가 보낸 것들이다(실측). 라우팅은 드라이버 몫이지만, 채널 층이 이것들을
+    // 받아 버리면 **상태가 조용히 오염된다** — 거절하는 것이 계약이다.
+    var ch: channel.Channel = .{};
+    var out: [256]u8 = undefined;
+    _ = try ch.writeOpen(&out, 0);
+    // GLOBAL_REQUEST hostkeys-00@openssh.com
+    try std.testing.expectError(channel.Error.NotChannelMessage, ch.receive(&[_]u8{ 80, 0, 0, 0, 1, 'x' }));
+    // SSH_MSG_DEBUG
+    try std.testing.expectError(channel.Error.NotChannelMessage, ch.receive(&[_]u8{ 4, 0 }));
+    try std.testing.expectEqual(channel.State.opening, ch.state); // 흔적을 안 남긴다
 }

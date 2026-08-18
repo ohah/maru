@@ -19,6 +19,9 @@
 //!     가드를 지워도·`sendableLen` 이 최대 패킷을 무시해도·보낸 뒤 윈도를 안 줄여도 세 회차가 다
 //!     초록이다. 그 셋은 단위 테스트가 잡는다(`channel.zig` 의 변이 검사).
 //!   - **채우는 시점(절반)이 최적인지**도 안 본다. 바닥에서 채워도 전송은 끝난다 — 느려질 뿐이다.
+//!   - **재키잉의 호스트키 재검증**도 못 잡는다. 그 검사는 *재키잉에서 상대가 바뀐 경우*를 막는
+//!     것인데, 정직한 서버는 매번 같은 키를 낸다 — 검증을 지워도 통과한다(실측). 적대적 서버를
+//!     흉내 내야 잡히고, 그것은 단위 테스트가 할 일이다.
 //!   - 확인한 서버는 **OpenSSH 하나**다. Dropbear·네트워크 장비는 다르게 굴 수 있다.
 
 const std = @import("std");
@@ -158,16 +161,117 @@ fn recvChannel(out: []u8) ![]const u8 {
         // 20 초 뒤 읽기 타임아웃으로 죽는다 — 그러면 증상이 "출력이 모자란다" 로 보여 **흐름
         // 제어를 의심하게 된다**(실측으로 그렇게 오진했다). 우리는 아직 재키잉을 안 하므로
         // 여기서 그 사실을 이름 그대로 말하고 죽는다.
-        if (p[0] == kexinit.msg_kexinit) return error.ServerAskedForRekey;
+        // **서버가 재키잉을 요구했다** — 답하지 않으면 서로 기다리다 멈춘다(실측: `RekeyLimit 1M`
+        // 서버에서 917,504바이트 뒤 교착). 여기서 투명하게 처리하고 루프를 잇는다.
+        if (p[0] == kexinit.msg_kexinit) {
+            var i_s_copy: [4096]u8 = undefined;
+            if (p.len > i_s_copy.len) return error.KexInitTooLarge;
+            @memcpy(i_s_copy[0..p.len], p);
+            try doRekey(i_s_copy[0..p.len]);
+            continue;
+        }
         // `SSH_MSG_DISCONNECT` 도 이름을 밝힌다 — 계약 §3.2 는 이유를 사용자에게 보여 주라고 한다.
         if (p[0] == msg_disconnect) return error.ServerDisconnected;
     }
 }
 
 const msg_disconnect: u8 = 1;
+const msg_newkeys_id: u8 = 21;
+
+/// **재키잉**(RFC 4253 §7.1·§9, draft strict-kex §3.3). 서버가 `KEXINIT` 을 다시 보냈을 때 답한다.
+///
+/// 안 하면 서로 기다리다 세션이 멈춘다 — OpenSSH 기본 `RekeyLimit` 은 1GB/1시간이라 **한 시간
+/// 넘는 터미널 세션은 반드시 이것을 만난다**.
+///
+/// 초기 KEX 와 다른 점 둘이 요점이다.
+///   - `session_id` 는 **첫 `H`** 를 그대로 쓴다(§7.2). 새 `H` 로 바꾸면 인증에 쓴 서명의 근거가
+///     달라진다.
+///   - strict 표시자는 **초기값을 잇는다**(draft §3.1 — 재키잉 KEXINIT 의 표시자는 무시한다).
+///     `kexinit.Phase.rekey` 가 그것을 강제한다.
+fn doRekey(i_s: []const u8) !void {
+    // **보내기 제한이 여기서부터 걸린다**(§7.1). 우리 KEXINIT 을 보내기 **전에** 부른다.
+    try t.beginRekey();
+
+    var i_c_buf: [4096]u8 = undefined;
+    const i_c = try kexinit.write(&i_c_buf, prng.random());
+    try send(i_c);
+
+    const peer = try kexinit.parse(i_s);
+    const neg = try kexinit.negotiate(peer, .{ .rekey = strict_kex_initial });
+    try t.applyNegotiation(.{ .strict_kex = neg.strict_kex, .discard_guess = neg.discard_guess });
+
+    var seed: [32]u8 = undefined;
+    prng.random().bytes(&seed);
+    var eph = try kex.Ephemeral.fromSeed(seed);
+    defer eph.clear();
+    var init_buf: [128]u8 = undefined;
+    try send(try kex.writeInit(&init_buf, eph.public));
+
+    var rk_pkt: [1 << 18]u8 = undefined;
+    const reply = try kex.parseReply(try recvKexMessage(&rk_pkt, kex.msg_kex_ecdh_reply));
+    var k = try eph.sharedSecret(reply.q_s);
+    defer std.crypto.secureZero(u8, &k);
+    const h = try kex.exchangeHash(.{
+        .v_c = v_c,
+        .v_s = v_s,
+        .i_c = i_c,
+        .i_s = i_s,
+        .k_s = reply.host_key,
+        .q_c = &eph.public,
+        .q_s = reply.q_s,
+        .k = k,
+    });
+    // **호스트키는 매번 다시 검증한다** — 재키잉에서 서버가 바뀌었을 수 있다(중간자).
+    try hostkey.verifyExchangeHash(reply.host_key, reply.signature, &h);
+
+    try send(&[_]u8{msg_newkeys_id});
+    if ((try recvKexMessage(&rk_pkt, msg_newkeys_id))[0] != msg_newkeys_id) return error.ExpectedNewKeys;
+
+    var key_c2s: [64]u8 = undefined;
+    var key_s2c: [64]u8 = undefined;
+    // **`session_id` 는 첫 `H`, 해시는 새 `H`** — 둘을 헷갈리면 키가 서버와 다르게 나온다.
+    try kex.deriveKey(&key_c2s, k, h, .enc_c2s, &session_id);
+    try kex.deriveKey(&key_s2c, k, h, .enc_s2c, &session_id);
+    var c_send = cipher.Cipher.initMove(&key_c2s);
+    var c_recv = cipher.Cipher.initMove(&key_s2c);
+    t.enableSendKeys(&c_send);
+    t.enableRecvKeys(&c_recv);
+    if (t.phase != .established) return error.RekeyDidNotFinish;
+
+    rekeys_done += 1;
+    say("재키잉 {d} 회차 완료", .{rekeys_done});
+}
+
+/// KEX 메시지 하나를 기다린다. **그 사이에 오는 채널 데이터는 처리한다** — §7.1 이 "arbitrary
+/// number of messages that may be in-flight" 를 처리하라고 요구한다. 버리면 출력이 사라진다.
+fn recvKexMessage(out: []u8, want: u8) ![]const u8 {
+    while (true) {
+        const p = try recv(out);
+        if (p[0] == want) return p;
+        if (p[0] >= 90 and p[0] <= 100) {
+            try handle(p);
+            continue;
+        }
+        if (p[0] == msg_disconnect) return error.ServerDisconnected;
+        // 그 밖(IGNORE·DEBUG 등)은 넘긴다.
+    }
+}
 
 var pkt: [1 << 18]u8 = undefined;
 var scratch: [8192]u8 = undefined;
+
+/// 채널. **전역인 이유**: 재키잉이 `recvChannel` 안에서 투명하게 일어나는데, 그 사이에도 상대의
+/// 채널 데이터가 온다(RFC 4253 §7.1) — 그것을 처리하려면 채널이 거기서 보여야 한다.
+var ch: channel.Channel = .{};
+
+/// 재키잉이 다시 쓰는 것들. `session_id` 는 **첫 `H`** 로 고정된다(RFC 4253 §7.2 — "Once computed,
+/// the session identifier is not changed, even if keys are later re-exchanged").
+var v_c: []const u8 = &.{};
+var v_s_store: [512]u8 = undefined;
+var v_s: []const u8 = &.{};
+var session_id: [32]u8 = undefined;
+var strict_kex_initial = false;
+var rekeys_done: usize = 0;
 
 // **두 루프가 같은 카운터를 센다.** 처음에는 받는 루프에만 뒀는데, 보내는 동안에도 데이터가
 // 오므로(우리가 `cat` 에 보낸 것이 그대로 돌아온다) 그만큼이 통째로 안 세어졌다 — 4MiB 를
@@ -195,6 +299,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // 넘겨 보내지 않는다)가 선 위에서 한 번도 안 돈다 — 그 검사를 지워도 스모크가 초록이었다(실측).
     // 이 회차는 서버가 `cat` 이라 우리가 보낸 것이 그대로 돌아온다.
     const want_echo = std.mem.eql(u8, mode, "echo");
+    // **재키잉이 실제로 돌았는지 본다.** 서버 설정이 틀려 재키잉이 안 걸리면 이 회차는 그냥 평범한
+    // 전송이 되고, 그러면 **아무것도 안 재면서 초록**이 된다 — 이 스모크에서 다섯 번 나온 부류다.
+    const want_rekey = std.mem.eql(u8, mode, "rekey");
     const port = try std.fmt.parseInt(u16, port_str, 10);
     const expect_bytes = try std.fmt.parseInt(usize, expect_bytes_str, 10);
     const expect_stderr = try std.fmt.parseInt(usize, expect_stderr_str, 10);
@@ -205,11 +312,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer sock.close();
 
     // ---- 버전 교환 ----
-    const v_c = version.clientLine("0.1");
+    v_c = version.clientLine("0.1");
     try sock.writeAll(v_c);
     try sock.writeAll("\r\n");
-    var v_s_buf: [512]u8 = undefined;
-    const v_s = blk: while (true) {
+    const v_s_buf = &v_s_store;
+    v_s = blk: while (true) {
         if (in_len > 0) {
             // **`Incomplete` 만 "더 읽어라" 다.** 처음에는 모든 오류를 삼키고 계속 읽었는데,
             // 그러면 쓰레기나 제어문자가 든 버전 줄이 **20초 stall** 로 나타난다(실측) — 층은
@@ -267,6 +374,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **여기가 이 스모크의 존재 이유다.** 서버가 자기 `H` 에 서명했고 그것이 우리 `H` 로 검증되면
     // 우리 해석이 서버와 바이트 단위로 같다는 뜻이다(계약 §4.4.4.1).
     try hostkey.verifyExchangeHash(reply.host_key, reply.signature, &h);
+    // **첫 `H` 가 곧 `session_id` 다** — 재키잉해도 안 바뀐다(RFC 4253 §7.2).
+    session_id = h;
+    strict_kex_initial = neg.strict_kex;
     var fp_buf: [128]u8 = undefined;
     say("호스트키 검증 OK — {s}", .{try hostkey.fingerprint(&fp_buf, reply.host_key)});
 
@@ -311,7 +421,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     say("인증 성공", .{});
 
     // ---- 채널 ----
-    var ch: channel.Channel = .{};
     var ch_buf: [1024]u8 = undefined;
     try send(try ch.writeOpen(&ch_buf, 0));
     switch (try ch.receive(try recvChannel(&pkt))) {
@@ -324,10 +433,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (want_pty) {
         try send(try ch.writePtyReq(&ch_buf, "xterm-256color", .{ .cols = 80, .rows = 24 }, ""));
-        try awaitReply(&ch, "pty-req");
+        try awaitReply("pty-req");
     }
     try send(try ch.writeShell(&ch_buf));
-    try awaitReply(&ch, "shell");
+    try awaitReply("shell");
     if (want_pty) try send(try ch.writeWindowChange(&ch_buf, .{ .cols = 120, .rows = 40 }));
 
     if (want_echo) {
@@ -337,7 +446,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         while (ch.sendableLen() == 0) {
             if (waited > 100) return fail("윈도가 끝내 안 열렸다");
             waited += 1;
-            try handle(&ch, try recvChannel(&pkt));
+            try handle(try recvChannel(&pkt));
         }
         say("보낼 수 있게 되기까지 사건 {d} 개를 기다렸다 (윈도 {d})", .{ waited, ch.remote_window });
 
@@ -350,7 +459,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         while (sent < expect_bytes) {
             const room = ch.sendableLen();
             if (room == 0) {
-                try handle(&ch, try recvChannel(&pkt));
+                try handle(try recvChannel(&pkt));
                 continue;
             }
             const n = @min(@min(@as(usize, room), chunk.len), expect_bytes - sent);
@@ -375,10 +484,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             error.Closed => break,
             else => return e,
         };
-        try handle(&ch, payload);
+        try handle(payload);
     }
 
-    say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, exit-status {?d}", .{ if (want_pty) "pty" else "no-pty", got, stderr_bytes, adjusts, exit_code });
+    say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, 재키잉 {d} 회, exit-status {?d}", .{ mode, got, stderr_bytes, adjusts, rekeys_done, exit_code });
 
     if (got < expect_bytes) return fail("출력이 모자란다 — 흐름 제어가 멈췄을 수 있다");
     // **stderr 도 본다.** 확장 데이터는 같은 윈도를 먹는데(§5.2), pty 를 요청하면 서버가 그것을
@@ -386,13 +495,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (stderr_bytes < expect_stderr) return fail("stderr 가 모자란다 — 확장 데이터 경로가 안 돌았다");
     if (adjusts == 0) return fail("보충이 한 번도 안 돌았다 — 이 스모크가 S7b 를 안 재고 있다");
     if (exit_code != 0) return fail("exit-status 가 0 이 아니다");
+    if (want_rekey and rekeys_done == 0) return fail("재키잉이 한 번도 안 돌았다 — 이 회차가 S7d 를 안 재고 있다");
     say("OK", .{});
 }
 
 const msg_newkeys: u8 = 21;
 
 /// 사건 하나를 처리하고 흐름 제어를 돌린다. **보내는 루프와 받는 루프가 같은 것을 쓴다.**
-fn handle(ch: *channel.Channel, payload: []const u8) !void {
+fn handle(payload: []const u8) !void {
     var buf: [1024]u8 = undefined;
     switch (try ch.receive(payload)) {
         .data => |d| got += d.len,
@@ -414,7 +524,7 @@ fn handle(ch: *channel.Channel, payload: []const u8) !void {
 }
 
 /// 채널 요청의 답을 기다린다. **답 앞에 다른 사건이 끼어든다**(계약 §3.1.1).
-fn awaitReply(ch: *channel.Channel, what: []const u8) !void {
+fn awaitReply(what: []const u8) !void {
     var buf: [1024]u8 = undefined;
     while (true) switch (try ch.receive(try recvChannel(&pkt))) {
         .request_success => return say("{s} 수락", .{what}),

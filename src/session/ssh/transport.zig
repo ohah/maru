@@ -42,14 +42,24 @@ pub const Error = error{
     DuplicateKexMessage,
     /// 암호 구간인데 키가 없다(또는 그 반대) — 전환 순서가 어긋났다.
     WrongPhase,
+    /// **재키잉 중에 보내면 안 되는 것을 보내려 한다**(RFC 4253 §7.1). 채널 데이터가 대표적이다.
+    NotAllowedDuringRekey,
 } || packet.Error || cipher.Error;
 
 /// 연결이 어느 구간인가. **strict KEX 의 판정이 이 값에 달렸다.**
 pub const Phase = enum {
     /// 초기 KEX — strict KEX 면 여기서 KEX 메시지 말고는 못 받는다.
     initial_kex,
-    /// 초기 KEX 완료. 이후 재키잉은 이 상태에서 시작한다.
+    /// 초기 KEX 완료. 정상 트래픽이 오간다.
     established,
+    /// **재키잉 중** — 우리가 `KEXINIT` 을 보냈고 아직 `NEWKEYS` 를 안 보냈다.
+    ///
+    /// **§3.2 의 초기 KEX 제한은 여기 안 걸린다**(draft 는 "during the initial KEX" 라고 못박는다).
+    /// 대신 RFC 4253 §7.1 의 **보내기 제한**이 걸린다 — 그 사이에는 채널 데이터를 보낼 수 없다.
+    /// 받는 쪽에는 제한이 없다: "each party MUST be prepared to process an arbitrary number of
+    /// messages that may be in-flight before receiving a SSH_MSG_KEXINIT message from the other
+    /// party"(§7.1). 즉 상대의 채널 데이터는 재키잉 중에도 계속 온다.
+    rekeying,
 };
 
 /// 꺼낸 패킷 하나.
@@ -128,6 +138,17 @@ pub const Transport = struct {
     /// (계수 규칙의 예외와 같은 자리다).
     poison: ?Error = null,
 
+    /// **이번 KEX 에서** 키를 갈았나(양쪽 다 갈아야 KEX 가 끝난다). 재키잉마다 리셋된다.
+    ///
+    /// 예전에는 `send_cipher != null and recv_cipher != null` 로 판정했는데, 재키잉에서는 둘 다
+    /// **이미 non-null** 이라 그 판정이 늘 참이 된다 — 즉 재키잉이 시작하자마자 끝난 것으로 보인다.
+    kex_send_done: bool = false,
+    kex_recv_done: bool = false,
+
+    /// 이번 재키잉에서 우리 `KEXINIT` 을 보냈나. §7.1 은 "further SSH_MSG_KEXINIT messages MUST
+    /// NOT be sent" 라고 못박는다 — 한 번만 보낸다.
+    sent_kexinit_this_kex: bool = false,
+
     /// payload 하나를 선에 나갈 바이트로 만든다. **시퀀스 번호를 여기서 올린다.**
     ///
     /// `NEWKEYS` 를 보낼 때도 그냥 부르면 된다 — 그 패킷은 **옛 키로** 나가야 하고, 전환은
@@ -139,6 +160,14 @@ pub const Transport = struct {
         rand: std.Random,
     ) Error!usize {
         if (self.poison) |e| return e;
+        // **재키잉 중에는 보낼 수 있는 것이 정해져 있다**(§7.1). 이것을 안 막으면 채널 데이터가
+        // 그 사이에 나가고, 상대는 그것을 규칙 위반으로 보아 연결을 끊는다 — 증상은 "가끔 끊긴다"
+        // 이고 원인이 재키잉이라는 것을 짚기 어렵다.
+        if (self.phase == .rekeying) {
+            if (payload.len == 0) return Error.MalformedPacket;
+            if (!self.allowedDuringRekey(payload[0])) return self.poisonUnless(Error.NotAllowedDuringRekey);
+            if (payload[0] == msg_kexinit) self.sent_kexinit_this_kex = true;
+        }
         const n = if (self.send_cipher) |c|
             try c.seal(out, self.send_seq, payload, rand)
         else
@@ -246,6 +275,34 @@ pub const Transport = struct {
         return .{ .packet = .{ .payload = got.payload, .consumed = got.consumed, .seq = seq } };
     }
 
+    /// 재키잉을 시작한다. **우리 `KEXINIT` 을 보내기 직전에** 부른다.
+    ///
+    /// **왜 보내기 전인가.** §7.1 의 제한은 "Once a party has sent a SSH_MSG_KEXINIT message" 부터
+    /// 걸린다. 보낸 뒤에 상태를 바꾸면 그 사이에 채널 데이터를 보낼 수 있고, 그것이 정확히 §7.1 이
+    /// 금지하는 것이다. 이 함수를 부르면 `send` 가 그때부터 막는다.
+    ///
+    /// 서버가 먼저 `KEXINIT` 을 보냈든(그쪽이 시작) 우리가 먼저든 같다 — 어느 쪽이든 우리가 우리
+    /// `KEXINIT` 을 보내야 하고, 그 직전이 이 자리다.
+    pub fn beginRekey(self: *Transport) Error!void {
+        if (self.poison) |e| return e;
+        if (self.phase != .established) return Error.WrongPhase;
+        self.phase = .rekeying;
+        self.kex_send_done = false;
+        self.kex_recv_done = false;
+        self.sent_kexinit_this_kex = false;
+    }
+
+    /// 재키잉 중에 이 메시지를 보내도 되나(RFC 4253 §7.1).
+    ///
+    /// 허용: 전송 계층 일반(1~19, 단 `SERVICE_REQUEST`(5)·`SERVICE_ACCEPT`(6) 제외) · 협상(20~29,
+    /// 단 `KEXINIT` 은 한 번만) · KEX 방법별(30~49). **그 밖은 전부 금지**이고 채널 데이터(94)가
+    /// 대표적이다 — 보내면 상대가 끊는다.
+    fn allowedDuringRekey(self: *Transport, msg: u8) bool {
+        if (msg == msg_kexinit) return !self.sent_kexinit_this_kex;
+        if (msg == 5 or msg == 6) return false;
+        return msg <= 49;
+    }
+
     /// 실패를 박는다. `ShortBuffer` 는 재시도 가능이라 그대로 흘린다.
     fn poisonUnless(self: *Transport, err: Error) Error {
         if (err != Error.ShortBuffer and self.poison == null) self.poison = err;
@@ -287,6 +344,7 @@ pub const Transport = struct {
     /// 받으면 아무도 주소를 모르는 키 사본이 스택에 남는다). 재키잉마다 한 벌씩 쌓이는 자리다.
     pub fn enableSendKeys(self: *Transport, c: *cipher.Cipher) void {
         defer c.clear();
+        self.kex_send_done = true;
         // **이 한 줄은 변이 검사로 못 잡는다 — 증명 가능한 등가라서다.** 바로 다음 대입이 같은
         // 자리를 통째로 덮어써서 옛 키 바이트는 어차피 사라진다. 그래도 남겨 둔다: 대입이 언젠가
         // 조건부가 되면 그때는 등가가 아니게 되고, 그 변화는 눈에 안 띈다.
@@ -300,6 +358,7 @@ pub const Transport = struct {
     /// 상대의 `NEWKEYS` 를 **받은 직후** 부른다. `c` 를 가져온다(위와 같다).
     pub fn enableRecvKeys(self: *Transport, c: *cipher.Cipher) void {
         defer c.clear();
+        self.kex_recv_done = true;
         if (self.recv_cipher) |*old| old.clear();
         self.recv_cipher = c.*;
         if (self.strict_kex) self.recv_seq = 0;
@@ -312,7 +371,7 @@ pub const Transport = struct {
     /// 받는 쪽에서만 판정하면 "받고 나서 보낸" 연결이 영원히 `initial_kex` 에 갇힌다 — 그러면
     /// 정상 트래픽(`SSH_MSG_IGNORE`·채널 데이터)이 전부 §3.2 위반으로 끊긴다.
     fn settlePhase(self: *Transport) void {
-        if (self.send_cipher != null and self.recv_cipher != null) self.phase = .established;
+        if (self.kex_send_done and self.kex_recv_done) self.phase = .established;
     }
 
     /// 키를 전부 지운다. 연결이 끝날 때 부른다.
@@ -994,4 +1053,154 @@ test "ShortBuffer 는 연결을 죽이지 않는다" {
     var big: [256]u8 = undefined;
     const got = (try t.feed(&big, wire_buf[0..n])).?.packet;
     try std.testing.expectEqualSlices(u8, &payload, got.payload);
+}
+
+// ---------------------------------------------------------------------------
+// 재키잉(S7d). **안 하면 한 시간 넘는 세션이 멈춘다** — OpenSSH 기본 `RekeyLimit` 은 1GB/1시간이고,
+// 서버가 다시 보낸 `KEXINIT` 에 우리가 답하지 않으면 서로 기다린다(실측: `RekeyLimit 1M` 서버에서
+// 917,504바이트 뒤 교착).
+
+/// 초기 KEX 를 마친 전송기(양쪽 키가 붙어 `established`).
+fn establishedTransport() Transport {
+    var t: Transport = .{ .strict_kex = true, .first_from_peer = msg_kexinit };
+    var a = testCipher();
+    var b = testCipher();
+    t.enableSendKeys(&a);
+    t.enableRecvKeys(&b);
+    return t;
+}
+
+test "초기 KEX 가 끝나면 established 다" {
+    const t = establishedTransport();
+    try std.testing.expectEqual(Phase.established, t.phase);
+}
+
+test "재키잉 중에는 채널 데이터를 못 보낸다" {
+    // RFC 4253 §7.1: `KEXINIT` 을 보낸 뒤 `NEWKEYS` 까지는 1~19(5·6 제외)·20~29·30~49 만 보낸다.
+    // 채널 데이터를 그 사이에 보내면 상대가 끊는다 — 증상은 "가끔 끊긴다" 라 원인을 짚기 어렵다.
+    var prng = std.Random.DefaultPrng.init(7);
+    var out: [256]u8 = undefined;
+    var t = establishedTransport();
+
+    // established 에서는 당연히 보낼 수 있다.
+    _ = try t.send(&out, &[_]u8{ 94, 1, 2, 3 }, prng.random());
+
+    try t.beginRekey();
+    try std.testing.expectEqual(Phase.rekeying, t.phase);
+    try std.testing.expectError(
+        Error.NotAllowedDuringRekey,
+        t.send(&out, &[_]u8{ 94, 1, 2, 3 }, prng.random()),
+    );
+    // **끊으라는 실패다** — 이후 호출도 같은 오류다(sans-io 에서 "끊어라" 의 등가물).
+    try std.testing.expectError(Error.NotAllowedDuringRekey, t.send(&out, &[_]u8{msg_ignore}, prng.random()));
+}
+
+test "재키잉 중에 보낼 수 있는 것과 없는 것" {
+    var prng = std.Random.DefaultPrng.init(11);
+    var out: [256]u8 = undefined;
+
+    // 허용: IGNORE(2)·DEBUG(4)·KEXINIT(20, 한 번)·KEX_ECDH_INIT(30)·NEWKEYS(21)
+    for ([_]u8{ 2, 4, 20, 21, 30, 49 }) |msg| {
+        var t = establishedTransport();
+        try t.beginRekey();
+        _ = try t.send(&out, &[_]u8{ msg, 0 }, prng.random());
+    }
+    // 금지: SERVICE_REQUEST(5)·SERVICE_ACCEPT(6)·채널(90~100)·인증(50~52)
+    for ([_]u8{ 5, 6, 50, 52, 90, 94, 100 }) |msg| {
+        var t = establishedTransport();
+        try t.beginRekey();
+        try std.testing.expectError(
+            Error.NotAllowedDuringRekey,
+            t.send(&out, &[_]u8{ msg, 0 }, prng.random()),
+        );
+    }
+}
+
+test "KEXINIT 은 재키잉마다 한 번만 보낸다" {
+    // §7.1: "further SSH_MSG_KEXINIT messages MUST NOT be sent". 두 번 보내면 상대가 협상을 다시
+    // 시작한 것으로 읽어 상태가 갈린다.
+    var prng = std.Random.DefaultPrng.init(13);
+    var out: [256]u8 = undefined;
+    var t = establishedTransport();
+    try t.beginRekey();
+    _ = try t.send(&out, &[_]u8{ msg_kexinit, 1 }, prng.random());
+    try std.testing.expectError(
+        Error.NotAllowedDuringRekey,
+        t.send(&out, &[_]u8{ msg_kexinit, 1 }, prng.random()),
+    );
+}
+
+test "재키잉 중에도 받는 데는 제한이 없다" {
+    // §7.1: "each party MUST be prepared to process an arbitrary number of messages that may be
+    // in-flight before receiving a SSH_MSG_KEXINIT message from the other party." 상대의 채널
+    // 데이터가 재키잉 중에도 온다 — 그것을 거절하면 정상 서버와 못 논다.
+    var prng = std.Random.DefaultPrng.init(17);
+    var out: [512]u8 = undefined;
+    var plain: [512]u8 = undefined;
+    var t = establishedTransport();
+    try t.beginRekey();
+
+    var sender = testCipher();
+    const n = try sender.seal(&out, t.recv_seq, &[_]u8{ 94, 7, 7 }, prng.random());
+    const got = (try t.feed(&plain, out[0..n])).?.packet;
+    try std.testing.expectEqual(@as(u8, 94), got.payload[0]);
+}
+
+test "양쪽 키를 다 갈아야 재키잉이 끝난다" {
+    // **재키잉에서는 두 cipher 가 이미 non-null 이다** — `send_cipher != null and recv_cipher != null`
+    // 로 판정하면 재키잉이 시작하자마자 끝난 것으로 보이고, 그러면 §7.1 제한이 즉시 풀려 채널
+    // 데이터가 그 사이에 나간다.
+    var t = establishedTransport();
+    try t.beginRekey();
+    try std.testing.expect(t.send_cipher != null and t.recv_cipher != null); // 둘 다 이미 있다
+
+    var a = testCipher();
+    t.enableSendKeys(&a);
+    try std.testing.expectEqual(Phase.rekeying, t.phase); // 아직이다
+
+    var b = testCipher();
+    t.enableRecvKeys(&b);
+    try std.testing.expectEqual(Phase.established, t.phase);
+}
+
+test "strict KEX 는 재키잉에서도 시퀀스를 리셋한다" {
+    // draft §3.3: "both the client and server MUST reset their sequence numbers at the conclusion
+    // of the initial KEX **and for each subsequent KEX**." 재키잉에서 안 리셋하면 그 뒤 모든
+    // AEAD 태그가 어긋난다.
+    var prng = std.Random.DefaultPrng.init(19);
+    var out: [256]u8 = undefined;
+    var t = establishedTransport();
+    _ = try t.send(&out, &[_]u8{ 94, 1 }, prng.random());
+    _ = try t.send(&out, &[_]u8{ 94, 2 }, prng.random());
+    try std.testing.expect(t.send_seq > 0);
+
+    try t.beginRekey();
+    _ = try t.send(&out, &[_]u8{ msg_kexinit, 1 }, prng.random());
+    var a = testCipher();
+    t.enableSendKeys(&a);
+    try std.testing.expectEqual(@as(u32, 0), t.send_seq);
+}
+
+test "established 가 아니면 재키잉을 시작할 수 없다" {
+    var t: Transport = .{};
+    try std.testing.expectError(Error.WrongPhase, t.beginRekey());
+    var t2 = establishedTransport();
+    try t2.beginRekey();
+    try std.testing.expectError(Error.WrongPhase, t2.beginRekey()); // 이미 재키잉 중이다
+}
+
+test "재키잉 중 §3.2 초기 KEX 제한은 안 걸린다" {
+    // draft §3.2 는 "during the initial KEX" 라고 못박는다. 재키잉에 그 제한을 걸면 상대의 채널
+    // 데이터가 `NonKexMessageDuringInitialKex` 로 거절되어 정상 서버와 못 논다.
+    var prng = std.Random.DefaultPrng.init(23);
+    var out: [512]u8 = undefined;
+    var plain: [512]u8 = undefined;
+    var t = establishedTransport();
+    try t.beginRekey();
+    var sender = testCipher();
+    // KEXINIT 을 두 번 받아도(초기 KEX 였다면 DuplicateKexMessage) 재키잉에서는 통과한다.
+    for (0..2) |_| {
+        const n = try sender.seal(&out, t.recv_seq, &[_]u8{ msg_kexinit, 1 }, prng.random());
+        _ = (try t.feed(&plain, out[0..n])).?.packet;
+    }
 }

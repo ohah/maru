@@ -1606,6 +1606,9 @@ test "비교의 가로 막대는 잡은 열만 민다 — 오른쪽을 끌면 �
 
     // 오른쪽 막대를 끈다.
     try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(right_bar.thumb_x), @floatCast(right_bar.track_y)));
+    // **무엇을 잡았는지 못박는다.** 좌표가 세로 막대와 겹치면 판정 순서상 세로가 먼저 잡히는데, 그때는
+    // 아래 단언이 "열이 안 움직였다"로 실패해 **왜 실패했는지 말하지 않는다**.
+    try testing.expectEqual(@as(@TypeOf(fx.session.scrollbar_drag_target), .editor_horizontal), fx.session.scrollbar_drag_target);
     const mid_x: f64 = @as(f64, right_bar.track_x) + @as(f64, right_bar.track_w) / 2;
     _ = editor_ops.routeScrollbarCapture(fx.session, 2, mid_x, @floatCast(right_bar.track_y));
     scroll_ops.applyPendingEditorHScroll(fx.session);
@@ -1622,6 +1625,7 @@ test "비교의 가로 막대는 잡은 열만 민다 — 오른쪽을 끌면 �
     const left_bar = fx.term.rt.editor_horizontal_scrollbar orelse return error.NoLeftHorizontalScrollbar;
     const right_after = fx.term.rt.editor_first_col_right;
     try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(left_bar.thumb_x), @floatCast(left_bar.track_y)));
+    try testing.expectEqual(@as(@TypeOf(fx.session.scrollbar_drag_target), .editor_horizontal), fx.session.scrollbar_drag_target);
     const left_mid_x: f64 = @as(f64, left_bar.track_x) + @as(f64, left_bar.track_w) / 2;
     _ = editor_ops.routeScrollbarCapture(fx.session, 2, left_mid_x, @floatCast(left_bar.track_y));
     scroll_ops.applyPendingEditorHScroll(fx.session);
@@ -1660,6 +1664,7 @@ test "비교의 세로 막대는 좌우 어느 쪽을 잡아도 같은 곳으로
 
         const bar = (if (use_right) fx.term.rt.editor_scrollbar_right else fx.term.rt.editor_scrollbar) orelse return error.NoScrollbar;
         try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(bar.track_x), @floatCast(bar.thumb_y)));
+        try testing.expectEqual(@as(@TypeOf(fx.session.scrollbar_drag_target), .editor_vertical), fx.session.scrollbar_drag_target);
         const mid_y: f64 = @as(f64, bar.track_y) + @as(f64, bar.track_h) / 2;
         _ = editor_ops.routeScrollbarCapture(fx.session, 2, @floatCast(bar.track_x), mid_y);
         scroll_ops.applyPendingScrollbarScroll(fx.session);

@@ -125,6 +125,11 @@ pub const Props = struct {
     total_visual_rows: ?u32 = null,
     /// 화면 맨 위 줄까지의 **시각 행** 수. `null`이면 여기서 센다.
     first_visual_row: ?u32 = null,
+    /// 줄별 시각 행 수를 프레임 사이에 살려 두는 캐시(`RowCache`). 주면 조건이 같은 다음 프레임부터
+    /// 계수를 건너뛰고, 조건이 갈리면 **여기서 다시 채운다** — 호출자는 저장소만 대면 된다.
+    ///
+    /// `total_visual_rows`·`first_visual_row`를 직접 준 경우 그쪽이 이긴다(호출자가 이미 아는 값이다).
+    row_cache: ?*RowCache = null,
     /// 그릴 수 있는 시각 행 수(뷰포트 높이 / 셀 높이).
     visible_rows: u16,
     wrap: bool,
@@ -178,6 +183,48 @@ pub const Scratch = struct {
     row_counts: []u32,
     /// 그 계수에 쓰는 탭 전개 버퍼. 줄마다 재사용한다.
     count_scratch: []u8,
+};
+
+/// 줄마다의 시각 행 수를 **프레임 사이에 살려 두는** 호출자 소유 캐시.
+///
+/// **왜 필요한가.** 스크롤바 길이는 문서 전체의 시각 행 수에서 나오는데(§4.1a) 그 계수가 문서
+/// 크기에 비례한다. 캐시가 없으면 정지 상태에서도 **매 프레임** 전 문서를 다시 접어 본다 — 실측으로
+/// 4,000줄 랩 문서가 프레임당 12.9ms였다(ReleaseFast, 2026-08-18). 60fps 예산의 76%다.
+///
+/// **왜 접두합인가.** 총합만 캐시하면 막대 **위치**(화면 맨 위 줄까지의 시각 행 수)를 여전히 매
+/// 프레임 세야 하고, 문서 끝으로 내려갈수록 그 비용이 문서 전체에 수렴한다. `prefix[i]`가 0..i 줄의
+/// 합이면 총합도 위치도 조회 하나다.
+///
+/// **저장소는 호출자가 준다**(`Scratch`와 같은 규율) — 컴포넌트는 할당하지 않는다. 자리가 모자라면
+/// 캐시를 쓰지 않고 예전 경로로 내려갈 뿐 죽지 않는다.
+pub const RowCache = struct {
+    /// `prefix[i]` = 0번 줄부터 `i-1`번 줄까지의 시각 행 합(`prefix[0] = 0`). 유효하려면 길이가
+    /// `lines.len + 1` 이상이어야 한다.
+    prefix: []u32,
+    /// 아래 다섯이 **전부** 같을 때만 위 접두합이 유효하다. 하나라도 다르면 다시 센다.
+    ///
+    /// **줄 배열은 주소와 길이 둘 다 본다** — 접힘이 바뀌면 보이는 줄 배열이 갈리는데, 같은 버퍼를
+    /// 재사용하면 주소가 같고 길이만 달라질 수 있다(그 반대도 마찬가지다).
+    lines_ptr: usize = 0,
+    lines_len: usize = 0,
+    /// 본문이 쓰는 **열 수**. 창 리사이즈·gutter 자릿수 변화가 여기로 들어온다 — 랩이 갈리는 값이라
+    /// 이것이 바뀌면 모든 줄의 행 수가 바뀔 수 있다.
+    content_width: u16 = 0,
+    wrap: bool = false,
+    tab_width: u8 = 0,
+    /// 채워진 적이 있는가. 위 키가 우연히 0으로 맞는 첫 프레임을 유효로 읽지 않기 위한 플래그다.
+    filled: bool = false,
+
+    /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
+    fn hits(self: *const RowCache, lines: []const []const u8, width: u16, wrap: bool, tab_width: u8) bool {
+        return self.filled and
+            self.lines_ptr == @intFromPtr(lines.ptr) and
+            self.lines_len == lines.len and
+            self.content_width == width and
+            self.wrap == wrap and
+            self.tab_width == tab_width and
+            self.prefix.len > lines.len;
+    }
 };
 
 /// 스크롤 상한 한 쌍. 익명 struct로 두면 분기마다 타입이 갈린다.
@@ -278,7 +325,34 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 붙기 전에는 늘 0이라 아무도 못 봤다(적대적 검증에서 드러났다).
     var first_visual: u32 = @intCast(@min(props.first_line, std.math.maxInt(u32)));
     var counted_rows: usize = 0; // 아래에서 실제로 센 줄 수(막대 위치 계산이 같은 값을 쓴다)
-    const total_visual: u32 = props.total_visual_rows orelse blk: {
+
+    // **캐시가 있으면 조건이 갈릴 때만 센다.** 여기서 채우는 이유는 계수에 필요한 `content.width`가
+    // 이 안에서 정해지기 때문이다 — 호출자가 그 폭을 다시 구하면 출처가 둘이 되고, 갈리는 순간
+    // 막대 길이가 화면과 어긋난다(같은 부류를 §4.1e에서 이미 잡았다).
+    //
+    // 자리가 모자라면 **조용히 예전 경로로 내려간다**(`Scratch`와 같은 규율) — 캐시는 빠르게 하는
+    // 장치이지 정확성의 전제가 아니다.
+    const cache: ?*RowCache = blk: {
+        const c = props.row_cache orelse break :blk null;
+        if (c.prefix.len <= props.lines.len) break :blk null;
+        if (!c.hits(props.lines, layout.content.width, props.wrap, props.tab_width)) {
+            var sum: u32 = 0;
+            c.prefix[0] = 0;
+            for (props.lines, 0..) |line, i| {
+                sum +|= content.rowCount(line, props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
+                c.prefix[i + 1] = sum;
+            }
+            c.lines_ptr = @intFromPtr(props.lines.ptr);
+            c.lines_len = props.lines.len;
+            c.content_width = layout.content.width;
+            c.wrap = props.wrap;
+            c.tab_width = props.tab_width;
+            c.filled = true;
+        }
+        break :blk c;
+    };
+
+    const total_visual: u32 = props.total_visual_rows orelse if (cache) |c| c.prefix[props.lines.len] else blk: {
         var sum: u32 = 0;
         var counted: usize = 0;
         while (counted < props.lines.len and counted < scratch.row_counts.len) : (counted += 1) {
@@ -306,6 +380,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 돌고, 이미 센 구간은 그 결과를 재사용한다.
     if (props.first_visual_row) |given| {
         first_visual = given;
+    } else if (cache) |c| {
+        // 캐시가 있으면 접두합 조회 하나다 — 문서 끝으로 내려가도 비용이 늘지 않는다.
+        first_visual = c.prefix[@min(props.first_line, props.lines.len)];
     } else {
         var prefix: u32 = 0;
         const upto = @min(props.first_line, props.lines.len);
@@ -341,13 +418,18 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // 위에 서고, 끝까지 굴려도 **마지막 줄들이 손에 안 닿는다**(실측: 5000줄 랩 문서에서
             // 마지막 17줄. 적대적 검증 2026-08-16). 필요한 것은 마지막 한 화면분뿐이라 그 줄만
             // 직접 센다 — 앞에서 이미 센 구간은 그 값을 재사용한다.
-            const rows: u32 = if (i < counted_rows) scratch.row_counts[i] else content.rowCount(
-                props.lines[i],
-                props.tab_width,
-                layout.content.width,
-                props.wrap,
-                scratch.count_scratch,
-            ).rows;
+            const rows: u32 = if (cache) |c|
+                c.prefix[i + 1] - c.prefix[i]
+            else if (i < counted_rows)
+                scratch.row_counts[i]
+            else
+                content.rowCount(
+                    props.lines[i],
+                    props.tab_width,
+                    layout.content.width,
+                    props.wrap,
+                    scratch.count_scratch,
+                ).rows;
             if (rows >= need) break :blk .{ .line = i, .piece = rows - need };
             need -= rows;
         }
@@ -526,6 +608,110 @@ fn testProps(lines: []const []const u8, wrap: bool) Props {
         .scrollbar_gutter_px = 16,
         .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
     };
+}
+
+// ── `RowCache` — 줄별 행 수를 프레임 사이에 살려 두는 캐시(§2.1) ──────────────────────────────
+//
+// **이 테스트들이 증명하는 것**: 캐시를 켜도 답이 달라지지 않고(같은 그림), 조건이 갈리면 반드시
+// 다시 센다는 것. 둘 다 **조용히** 틀린다 — 낡은 캐시를 쓰면 op 개수도 크래시도 정상이고 막대
+// 길이만 어긋나므로, 화면을 재는 테스트가 없으면 아무도 못 본다.
+
+test "캐시를 켜도 답이 같다 — 캐시는 빠르게 할 뿐 값을 바꾸지 않는다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200; // 뷰 폭보다 길어 여러 조각으로 접힌다
+    const lines = [_][]const u8{ long, "short", long, "tail" };
+
+    const without = build(testProps(&lines, true), bufs.scratch());
+
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(&lines, true);
+    props.row_cache = &cache;
+    const with = build(props, bufs.scratch());
+
+    try testing.expect(without.total_visual_rows > lines.len); // 실제로 접혔다(둘 다 의미 있는 값이다)
+    try testing.expectEqual(without.total_visual_rows, with.total_visual_rows);
+    try testing.expectEqual(without.max_top_line, with.max_top_line);
+    try testing.expectEqual(without.max_top_piece, with.max_top_piece);
+}
+
+test "폭이 바뀌면 캐시를 다시 센다 — 랩이 갈리는 값이다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const lines = [_][]const u8{ long, long };
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+
+    var wide = testProps(&lines, true);
+    wide.row_cache = &cache;
+    const w1 = build(wide, bufs.scratch());
+
+    // 창을 좁힌다 — 같은 줄이 더 많은 조각으로 접힌다. 캐시가 폭을 안 보면 옛 값이 그대로 나온다.
+    var narrow = testProps(&lines, true);
+    narrow.row_cache = &cache;
+    narrow.total_cols = 24;
+    narrow.rect = .{ .x = 0, .y = 0, .w = 24 * 8, .h = 320 };
+    const w2 = build(narrow, bufs.scratch());
+
+    try testing.expect(w2.total_visual_rows > w1.total_visual_rows);
+}
+
+test "랩을 끄면 캐시를 다시 센다 — 조각이 사라진다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const lines = [_][]const u8{ long, long };
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+
+    var wrapped = testProps(&lines, true);
+    wrapped.row_cache = &cache;
+    const on = build(wrapped, bufs.scratch());
+
+    var flat = testProps(&lines, false);
+    flat.row_cache = &cache;
+    const off = build(flat, bufs.scratch());
+
+    try testing.expect(on.total_visual_rows > lines.len); // 켰을 때는 접혔고
+    try testing.expectEqual(@as(u32, lines.len), off.total_visual_rows); // 끄면 줄마다 한 행이다
+}
+
+test "캐시 자리가 모자라면 예전 경로로 내려간다 — 없는 것보다 낫지만 전제는 아니다" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "one", "two", "three" };
+    // 줄 수 + 1이 필요한데 하나 모자라게 준다.
+    var prefix: [lines.len]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(&lines, false);
+    props.row_cache = &cache;
+
+    const w = build(props, bufs.scratch());
+    try testing.expectEqual(@as(u32, lines.len), w.total_visual_rows); // 답은 그대로다
+    try testing.expect(!cache.filled); // 자리가 없으니 채우지도 않았다
+}
+
+test "막대 위치도 캐시에서 나온다 — 문서 중간에서도 같은 답이다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    // **문서가 화면보다 확실히 커야 한다** — 다 들어가면 막대가 아예 없어(`scrollbar == null`) 이
+    // 테스트가 아무것도 비교하지 못한다.
+    const lines = [_][]const u8{ long, long, long, long, long, long, long, long, "tail" };
+
+    var mid_plain = testProps(&lines, true);
+    mid_plain.first_line = 2;
+    const without = build(mid_plain, bufs.scratch());
+
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var mid_cached = testProps(&lines, true);
+    mid_cached.first_line = 2;
+    mid_cached.row_cache = &cache;
+    const with = build(mid_cached, bufs.scratch());
+
+    // 막대 위치는 `first_visual_row`에서 나오고 그것이 op 좌표에 실린다 — 기하로 비교한다.
+    try testing.expect(without.scrollbar != null);
+    try testing.expect(with.scrollbar != null);
+    try testing.expectEqual(without.scrollbar.?.thumb_y, with.scrollbar.?.thumb_y);
+    try testing.expectEqual(without.scrollbar.?.thumb_h, with.scrollbar.?.thumb_h);
 }
 
 test "배경이 맨 앞에 온다 — painter 순서" {

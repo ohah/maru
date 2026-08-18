@@ -1614,6 +1614,15 @@ const TermRuntime = struct {
     /// 경로에 실패 지점이 생기면 실패했을 때 접힌 화면에 갇힌다(그 결함을 이미 한 번 잡았다).
     editor_fold_marks: []chrome.components.editor_view.gutter.Fold = &.{},
     editor_fold_marks_len: usize = 0,
+    /// 줄별 시각 행 수의 **접두합 캐시**(§2.1 — 문서 크기에 비례하는 작업을 매 프레임 하지 않는다).
+    ///
+    /// **왜 여기 있나.** 스크롤바 길이와 위치는 문서 전체의 시각 행 수에서 나오는데(§4.1a) 그 계수가
+    /// 문서 크기에 비례한다. 캐시가 없으면 정지 상태에서도 매 프레임 전 문서를 다시 접어 보게 되고,
+    /// 실측으로 4,000줄 랩 문서가 프레임당 12.9ms였다(ReleaseFast, 2026-08-18 — 60fps 예산의 76%).
+    ///
+    /// 유효성 판정과 계수는 **컴포넌트가 한다**(`frame.RowCache`) — 랩이 갈리는 본문 폭이 그쪽에서
+    /// 정해지므로, 제품이 그 폭을 다시 구하면 출처가 둘이 된다. 여기는 저장소만 소유한다.
+    editor_row_cache: chrome.components.editor_view.frame.RowCache = .{ .prefix = &.{} },
     /// 접힌 머리 줄들. **오름차순**이고 `editor_fold_ranges.len`만큼의 자리를 미리 잡아 두므로
     /// 접기/펼치기가 다시 할당하지 않는다(`hiddenSpans`가 오름차순을 계약으로 요구한다).
     editor_folded_buf: []u32 = &.{},

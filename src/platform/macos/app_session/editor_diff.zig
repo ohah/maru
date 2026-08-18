@@ -154,6 +154,9 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     term.rt.editor_first_piece = 0;
     term.rt.editor_max_top_line = 0;
     term.rt.editor_max_top_piece = 0;
+    // **줄별 행 수 캐시도 옛 내용의 것이다**(§2.1). 새 줄 배열이 우연히 같은 주소·길이로 잡히면
+    // 주소·길이 키만으로는 못 걸러지므로, 내용이 갈리는 이 자리에서 버린다.
+    term.rt.editor_row_cache.filled = false;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.

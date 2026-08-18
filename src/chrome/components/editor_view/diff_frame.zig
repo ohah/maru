@@ -43,6 +43,9 @@ pub const Side = struct {
     /// **비교 뷰는 `null`로 둔다** — §3.5의 "가로는 각자다"를 지키려면 좌우 열이 각자 막대를 가져야
     /// 하는데, 그 히트테스트가 아직 없다(계획 표의 "비교 뷰의 가로 스크롤"과 같은 슬라이스다).
     content_max_cols: ?u32 = null,
+    /// 줄별 시각 행 수 캐시(`frame.RowCache`). **열마다 각자다** — 좌우는 줄 배열도 폭도 다르므로
+    /// 하나를 공유하면 매 프레임 서로의 캐시를 무효화한다. `null`이면 캐시 없이 그린다.
+    row_cache: ?*frame.RowCache = null,
 };
 
 pub const Props = struct {
@@ -185,6 +188,7 @@ pub fn buildSide(
         .line_numbers = side.numbers,
         .folds = side.folds,
         .content_max_cols = side.content_max_cols,
+        .row_cache = side.row_cache,
         .row_bands = side.bands,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,

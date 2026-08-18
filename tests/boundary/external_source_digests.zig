@@ -504,7 +504,11 @@ pub const inventory = [_]Proof{
     // 푸는 comptime 루프) `buildFileTreeDrawList` 호출이 그 배열을 넘긴다. count 는 2 그대로다 — 그 루프의
     // `@field` 는 `std.meta.fields` 순회이지 이름으로 무엇을 읽는 반사가 아니고, Client 구성·receiver 집합도
     // 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ce2a547252451b008b9566edcdf7b1210d887671bee8f85fc98f5f1dad76264b" },
+    // 줄별 시각 행 수 캐시(§2.1)로 또 바뀐다: Term rt에 `editor_row_cache` 하나가 붙는다
+    // (`frame.RowCache` — 접두합 저장소. 정지 상태에서 매 프레임 돌던 전 문서 계수를 없애고, 계수
+    // 상한 `[4096]u32`가 만들던 시각 행 근사도 함께 닫는다). count는 2 그대로다 — 필드 하나와 그
+    // 해제뿐이고 새 `@field` 반사도 Client 구성·receiver 집합 변화도 없다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6de562dbd7aae13d6bac6e92820d0f45cdcebb1699f2800eef95563c18f6d0af" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

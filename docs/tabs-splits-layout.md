@@ -243,9 +243,11 @@ Node = leaf(Pane)
   지킨다. cmux 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다. **상단탭 Warp 폴리시(인라인 "+")**:
   "+"를 바 far-right가 아니라 **마지막 탭 바로 뒤**에 둔다(Warp식 — 탭과 "+"가 좌측 묶음, 오른쪽은 빈 바). `tabbar.Metrics.plusZoneStart`
   가 `has_scroll`이면 옛대로 far-right(‹·gap·› 뒤), 아니면 `tabsEndCol`(=`min(tab_count*tab_w, tab_cols)`)을 돌려주고 렌더
-  (`coretext` `plus_start`)가 같은 값을 써 단일 정합("보이는 + = 클릭되는 +"). **`inPlusZone`은 cols까지가 아니라 버튼 폭(2칸)으로
-  한정** — "+" 오른쪽 빈 바 영역을 클릭해도 새 Term이 안 생긴다(빈 영역 무동작, 사용자 결정 ①; 그 영역은 마지막 탭으로 clamp되는
-  기존 동작). 탭이 넘쳐 `has_scroll`이면 "+"는 ‹› 뒤 far-right로 폴백.
+  (`coretext` `plus_start`)가 같은 값을 써 단일 정합("보이는 + = 클릭되는 +"). **`inPlusZone`은 cols까지가 아니라 버튼 폭
+  (`plus_button_cols`)으로 한정** — "+" 오른쪽 빈 바 영역을 클릭해도 새 Term이 안 생긴다(빈 영역 무동작, 사용자 결정 ①; 그 영역은
+  마지막 탭으로 clamp되는 기존 동작). 탭이 넘쳐 `has_scroll`이면 "+"는 ‹› 뒤 far-right로 폴백.
+  **버튼 폭은 처음 2칸이었다가 3칸으로 넓혔다**(2026-08-18 — 좁아서 누르기 어려웠다). 같은 변경에서 ‹›도 1칸에서
+  `scroll_button_cols`(2칸)로 넓혔고, 그래서 far-right 폴백 위치도 `tab_cols + 3`이 아니라 `tab_cols + scroll_button_cols * 2`다.
 - **divider 렌더·드래그 리사이즈(PR6)**: 두 panel 사이 경계에 divider 선을 그리고, 끌어서 비율을 조절한다. 선은
   layout을 안 바꾸고(틈 없이 abut) **seam 중심 overlay 셀**로 터미널 위·커서 아래에 그린다(`metal_frame.replace`의
   `pane_overlay_cells`, cursor suffix 앞 insert). hit-test는 `layoutDividers`가 주는 seg(split 노드+경계 pos+부모

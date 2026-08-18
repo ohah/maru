@@ -40,6 +40,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 DRIVER="$ROOT/zig-out/bin/ssh-client-smoke"
 # 모바일 ABI 로만 붙는 드라이버(S9-2). 같은 sshd 를 쓰되 진입점이 다르다.
 ABI_DRIVER="$ROOT/zig-out/bin/ssh-abi-smoke"
+# 두 host 가 쓸 C 펌프를 그대로 링크한 드라이버(S9-3).
+PUMP_DRIVER="$ROOT/zig-out/bin/ssh-pump-smoke"
 # **포트를 고정하지 않는다.** 고정이면 두 실행이 겹칠 때 뒤엣것이 "안 떴다" 며 SKIP 하고
 # **조용히 통과**한다(실측: 동시에 둘 돌리니 하나는 3 회차 OK, 다른 하나는 0 회차에 EXIT=0).
 # CI 가 잡을 병렬로 돌리거나 사람이 두 번 돌리면 한쪽이 아무것도 안 재고 초록이 된다.
@@ -275,11 +277,46 @@ start_sshd "$DIR/sshd8.pid" "$((PORT + 9))" "$DIR/sshd8.log" "cat" || {
 "$ABI_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" MARU_ABI_OK "$ABI_ECHO_BYTES"
 ROUNDS=$((ROUNDS + 1))
 
+# 12) **C 펌프 회차(S9-3).** 두 host 가 쓸 소켓 펌프(`src/platform/mobile_host/ssh_pump.c`)를
+#     그대로 링크한 드라이버로 붙는다. 앞 회차들은 Zig 이 소켓을 들었으므로 기기가 쓸 C 코드는
+#     한 줄도 안 지났다. **호스트키는 핀 고정**이라 지문을 먼저 뽑아 넘긴다 — 자동 승인이 없다는
+#     계약을 이 자리에서도 지킨다.
+if [ ! -x "$PUMP_DRIVER" ]; then
+	echo "[ssh-client-smoke] FAIL: $PUMP_DRIVER 없음" >&2
+	exit 1
+fi
+start_sshd "$DIR/sshd9.pid" "$((PORT + 11))" "$DIR/sshd9.log" "echo MARU_PUMP_OK" || {
+	sed -n '1,5p' "$DIR/sshd9.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 펌프 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+HOSTKEY_FP=$(ssh-keygen -lf "$DIR/hostkey.pub" | awk '{print $2}')
+"$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$HOSTKEY_FP" MARU_PUMP_OK
+ROUNDS=$((ROUNDS + 1))
+
+# 13) **핀이 틀리면 안 붙는다.** 위 회차가 초록이어도 핀 검사가 죽어 있으면 그것은 무검증
+#     접속이다 — 일부러 틀린 지문을 주고 **실패해야** 통과로 본다.
+pin_out=$("$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" \
+	"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" MARU_PUMP_OK 2>&1) && {
+	echo "[ssh-client-smoke] FAIL: 틀린 지문으로도 붙었다 — 핀 검사가 안 돈다" >&2
+	exit 1
+}
+# **이유까지 본다.** "무슨 이유로든 실패" 를 통과로 보면, 드라이버가 아예 안 떠도(경로 오타·
+# 빌드 실패) 이 회차가 초록이 된다 — 이 저장소에서 그 부류를 여러 번 겪었다.
+case "$pin_out" in
+*host_key_mismatch*) : ;;
+*)
+	echo "[ssh-client-smoke] FAIL: 핀 불일치가 아닌 이유로 끝났다: $pin_out" >&2
+	exit 1
+	;;
+esac
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 10 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 10 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 12 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 12 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열 회차 완주"
+echo "[ssh-client-smoke] 열두 회차 완주"

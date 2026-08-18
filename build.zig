@@ -2414,6 +2414,28 @@ pub fn build(b: *std.Build) void {
         }),
     });
     ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_abi_smoke_exe, .{}).step);
+
+    // **두 host 가 쓸 C 펌프**(`src/platform/mobile_host/ssh_pump.c`)를 그대로 링크해 실서버와
+    // 왕복한다. 기기에 올리기 전에 소켓·스레드·세션 루프·호스트키 핀이 도는 것을 여기서 본다 —
+    // 그러면 기기에서 실패했을 때 남는 후보가 host 배선뿐이다.
+    const ssh_pump_mod = b.createModule(.{
+        .root_source_file = b.path("tools/ssh/pump_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "mobile_ssh", .module = mobile_ssh_mod }},
+    });
+    ssh_pump_mod.addIncludePath(b.path("src/platform/mobile_host"));
+    ssh_pump_mod.addIncludePath(b.path("src/platform/mobile"));
+    ssh_pump_mod.addCSourceFile(.{ .file = b.path("src/platform/mobile_host/ssh_pump.c"), .flags = &.{"-std=c11"} });
+    ssh_pump_mod.link_libc = true;
+    const ssh_pump_smoke_exe = b.addExecutable(.{ .name = "ssh-pump-smoke", .root_module = ssh_pump_mod });
+    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_pump_smoke_exe, .{}).step);
+
+    // 펌프의 단위 테스트(핀 없는 접속·인자 검사)는 소켓을 쓰므로 sans-io 게이트 밖이다.
+    const ssh_pump_tests = addProjectTest(b, .{ .root_module = ssh_pump_mod });
+    const run_ssh_pump_tests = b.addRunArtifact(ssh_pump_tests);
+    test_step.dependOn(&run_ssh_pump_tests.step);
+    test_mobile_step.dependOn(&run_ssh_pump_tests.step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,

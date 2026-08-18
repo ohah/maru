@@ -15,7 +15,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const client = maru.session.ssh.client;
-const channel = maru.session.ssh.channel;
+const private_key = maru.session.ssh.private_key;
 
 // 숫자의 단일 출처는 `mobile_host_abi.h` 다. 여기 상수는 그 값을 **그대로** 든다 —
 // 계약 테스트가 헤더를 읽어 대조한다(한쪽만 고치면 링크는 되고 동작만 어긋난다).
@@ -214,7 +214,85 @@ fn screenFree(s: *Slot) []u8 {
     return s.screen[s.screen_len..];
 }
 
+/// PEM 본문을 벗기고 base64 를 푼 뒤 `openssh-key-v1` 로 파싱할 자리. **할당이 없다** —
+/// 이 층은 allocator 를 안 든다(계약 §2). 키 하나가 이 안에 들어가야 한다.
+var key_scratch: [16 * 1024]u8 = undefined;
+var key_blob: [16 * 1024]u8 = undefined;
+
 // ── 진입점 ──────────────────────────────────────────────────────────────────
+
+/// 개인키 파일 내용(PEM 텍스트)에서 `seed(32) ‖ public(32)` 를 만든다.
+///
+/// **파일은 host 가 읽는다**(이 층은 OS 를 모른다). host 는 Keychain·Keystore 나 앱 저장소에서
+/// 바이트를 꺼내 여기 넣고, 나온 64바이트를 `open` 에 그대로 넘긴 뒤 **자기 사본을 지운다**.
+///
+/// **암호 걸린 키도 받는다** — `passphrase` 가 비면 평문 키만 열린다. KDF 비용 상한은 호출자
+/// 정책이라 여기서 기본값을 쓴다(계약 §4.4.3.1).
+pub export fn maru_mobile_ssh_load_key(
+    pem: [*]const u8,
+    pem_len: u32,
+    passphrase: [*]const u8,
+    pass_len: u32,
+    out_secret: [*]u8,
+) c_int {
+    @memset(out_secret[0..secret_key_bytes], 0);
+    if (pem_len == 0) {
+        last_load_error = "key_empty";
+        return err_bad_arg;
+    }
+
+    // **PEM 껍데기를 벗긴다.** `-----BEGIN/END-----` 줄과 줄바꿈을 뺀 나머지가 base64 다.
+    var b64_len: usize = 0;
+    var lines = std.mem.splitScalar(u8, pem[0..pem_len], '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "-----")) continue;
+        if (b64_len + trimmed.len > key_scratch.len) {
+            last_load_error = "key_too_large";
+            return err_bad_arg;
+        }
+        @memcpy(key_scratch[b64_len..][0..trimmed.len], trimmed);
+        b64_len += trimmed.len;
+    }
+    const decoder = std.base64.standard.Decoder;
+    const blob_len = decoder.calcSizeForSlice(key_scratch[0..b64_len]) catch {
+        last_load_error = "key_not_base64";
+        return err_bad_arg;
+    };
+    if (blob_len > key_blob.len) {
+        last_load_error = "key_too_large";
+        return err_bad_arg;
+    }
+    decoder.decode(key_blob[0..blob_len], key_scratch[0..b64_len]) catch {
+        last_load_error = "key_not_base64";
+        return err_bad_arg;
+    };
+
+    var parsed = private_key.parse(key_blob[0..blob_len], passphrase[0..pass_len], &key_scratch, .{}) catch |e| {
+        last_load_error = @errorName(e);
+        // **실패해도 남기지 않는다** — 중간 산물에 키 재료가 들어 있다.
+        std.crypto.secureZero(u8, &key_scratch);
+        std.crypto.secureZero(u8, &key_blob);
+        return err_bad_arg;
+    };
+    @memcpy(out_secret[0..secret_key_bytes], &parsed.secret);
+    parsed.clear();
+    std.crypto.secureZero(u8, &key_scratch);
+    std.crypto.secureZero(u8, &key_blob);
+    last_load_error = "";
+    return ok;
+}
+
+/// 키 읽기 실패 이름. **세션이 아직 없으므로 세션별 자리에 못 남긴다** — 이 자리가 그것을 든다.
+var last_load_error: []const u8 = "";
+var load_error_buf: [64]u8 = @splat(0);
+
+pub export fn maru_mobile_ssh_last_load_error() [*:0]const u8 {
+    @memset(&load_error_buf, 0);
+    const n = @min(last_load_error.len, load_error_buf.len - 1);
+    @memcpy(load_error_buf[0..n], last_load_error[0..n]);
+    return @ptrCast(&load_error_buf);
+}
 
 pub export fn maru_mobile_ssh_open(
     user: [*]const u8,

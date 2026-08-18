@@ -69,7 +69,6 @@ const Socket = struct {
 var sock: Socket = undefined;
 var in_buf: [64 * 1024]u8 = undefined;
 var in_len: usize = 0;
-var scratch: [8192]u8 = undefined;
 var file_buf: [8192]u8 = undefined;
 var screen_head: [4096]u8 = undefined;
 var screen_head_len: usize = 0;
@@ -104,7 +103,9 @@ fn secureEntropy(dst: []u8) !void {
     }
 }
 
-fn loadKey(path: []const u8) !ssh.private_key.Parsed {
+/// **host 가 하는 일은 파일을 읽는 것뿐이다.** PEM 을 벗기고 키를 푸는 것은 ABI 가 한다
+/// (`maru_mobile_ssh_load_key`) — 기기에서도 같은 자리를 쓰므로 여기서 그것을 밟아 둔다.
+fn loadSecret(path: []const u8, out: *[64]u8) !void {
     var path_z: [1024]u8 = undefined;
     if (path.len >= path_z.len) return error.PathTooLong;
     @memcpy(path_z[0..path.len], path);
@@ -114,27 +115,18 @@ fn loadKey(path: []const u8) !ssh.private_key.Parsed {
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
 
-    var raw: [8192]u8 = undefined;
     var len: usize = 0;
-    while (len < raw.len) {
-        const n = c.read(fd, raw[len..].ptr, raw.len - len);
+    while (len < file_buf.len) {
+        const n = c.read(fd, file_buf[len..].ptr, file_buf.len - len);
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
         len += @intCast(n);
     }
-    var b64: [8192]u8 = undefined;
-    var b64_len: usize = 0;
-    var lines = std.mem.splitScalar(u8, raw[0..len], '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \r");
-        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "-----")) continue;
-        @memcpy(b64[b64_len..][0..trimmed.len], trimmed);
-        b64_len += trimmed.len;
+    if (abi.maru_mobile_ssh_load_key(&file_buf, @intCast(len), "", 0, out) != abi.ok) {
+        say("키를 못 읽었다: {s}", .{std.mem.span(abi.maru_mobile_ssh_last_load_error())});
+        return error.KeyLoadFailed;
     }
-    const decoder = std.base64.standard.Decoder;
-    const out_len = try decoder.calcSizeForSlice(b64[0..b64_len]);
-    try decoder.decode(file_buf[0..out_len], b64[0..b64_len]);
-    return ssh.private_key.parse(file_buf[0..out_len], "", &scratch, .{});
+    std.crypto.secureZero(u8, file_buf[0..len]); // 읽은 원문을 안 남긴다
 }
 
 /// 쌓인 선 바이트를 보낸다. **부분 전송을 그대로 흉내 낸다** — 소켓이 받은 만큼만 `consume`
@@ -196,8 +188,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // (같은 이유로 코어 스모크의 에코 회차도 pty 를 끈다.)
     const want_pty: u32 = if (send_bytes > 0) 0 else 1;
 
-    var parsed = try loadKey(key_path);
-    defer parsed.clear();
+    var secret: [64]u8 = undefined;
+    try loadSecret(key_path, &secret);
+    defer std.crypto.secureZero(u8, &secret);
 
     // **난수는 host 가 준다.** 기기에서는 `SecRandomCopyBytes`(iOS)·`SecureRandom`(Android)이
     // 이 자리이고, 데스크톱에서는 OS 난수를 그대로 쓴다 — 여기가 L4 라 OS 를 부를 수 있다.
@@ -211,7 +204,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const opened = abi.maru_mobile_ssh_open(
         user.ptr,
         @intCast(user.len),
-        &parsed.secret,
+        &secret,
         &entropy,
         "xterm-256color",
         14,

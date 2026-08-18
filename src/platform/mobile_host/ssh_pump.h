@@ -1,0 +1,66 @@
+// 두 모바일 host(iOS·Android)가 **함께 쓰는 SSH 소켓 펌프**.
+//
+// **왜 여기 있나.** `platform/mobile` 은 OS 호출이 0인 층이라(docs/mobile-platform.md §2) 소켓을
+// 들 수 없고, 두 host 에 같은 루프를 두 벌 쓰면 갈린다 — 갈리면 한쪽에서만 나는 결함이 생긴다.
+// 그래서 **OS 를 부르는 공용 C** 를 이 층에 둔다: 소켓·스레드·난수만 하고, 화면에 넣는 일과
+// 자물쇠는 host 가 훅으로 준다(그쪽은 플랫폼마다 다르다).
+//
+// **데스크톱에서 먼저 증명된다** — `tools/ssh/pump_smoke.zig` 가 이 파일을 그대로 링크해 진짜
+// sshd 와 왕복한다. 기기에서 "안 된다" 가 났을 때 프로토콜·펌프는 이미 초록이므로 남은 것은
+// host 배선뿐이다.
+#ifndef MARU_SSH_PUMP_H
+#define MARU_SSH_PUMP_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// 접속에 필요한 것. **문자열은 호출자가 소유**하고 `start` 가 도는 동안 살아 있어야 한다.
+typedef struct {
+    const char *host; /// 이름 또는 주소(getaddrinfo 가 푼다)
+    unsigned short port;
+    const char *user;
+    /// `seed(32) ‖ public(32)` — `maru_mobile_ssh_load_key` 가 만든 값.
+    const unsigned char *secret;
+    unsigned int cols;
+    unsigned int rows;
+    /// **기대하는 호스트키 지문**(`SHA256:...`). 다르면 붙지 않는다.
+    ///
+    /// 자동 승인은 없다(SSH 계약 §4). 아직 물어볼 화면이 없어서, 지금은 **핀 고정**으로 그
+    /// 약속을 지킨다 — 사용자가 미리 넣은 지문과 서버 것이 같아야 한다. 목록 화면(S9b)이
+    /// 생기면 그때 물어보고 `known_hosts` 로 옮긴다.
+    const char *expect_fingerprint;
+} MaruSshPumpConfig;
+
+/// host 가 주는 것. **펌프는 화면도 자물쇠도 모른다.**
+typedef struct {
+    /// 브리지 호출을 직렬화한다(Android 는 그리기 스레드가 따로다). 없으면 안 부른다.
+    void (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
+    /// 원격 출력. host 는 이것을 `maru_mobile_term_write` 로 넣는다.
+    void (*screen)(void *ctx, const unsigned char *bytes, unsigned long len);
+    /// 코어가 만든 답을 가져간다(`maru_mobile_take_response`). 없으면 답을 안 보낸다.
+    unsigned long (*take_response)(void *ctx, unsigned char *out, unsigned long cap);
+    /// 상태가 바뀌면 알린다(`MARU_SSH_STATE_*`). 화면 표시용이라 없어도 된다.
+    void (*state_changed)(void *ctx, unsigned int state);
+    void *ctx;
+} MaruSshPumpHooks;
+
+/// 붙는다. **스레드를 하나 띄우고 즉시 돌아온다** — 호출자를 막지 않는다.
+/// 0=시작함, 음수=시작도 못 함(이미 돌고 있거나 인자가 이상하다).
+int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *hooks);
+/// 멈추라고 표시하고 스레드가 끝날 때까지 기다린다. 안 돌고 있으면 아무 일도 안 한다.
+void maru_ssh_pump_stop(void);
+/// 지금 상태(`MARU_SSH_STATE_*`). 안 돌고 있으면 `MARU_SSH_STATE_INVALID`.
+unsigned int maru_ssh_pump_state(void);
+/// 마지막 실패 이름. 없으면 빈 문자열.
+const char *maru_ssh_pump_error(void);
+/// 키 입력을 원격으로 보낸다(host 의 IME·키바가 부른다). 보낸 바이트 수.
+unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len);
+/// 창 크기가 바뀌었다.
+void maru_ssh_pump_resize(unsigned int cols, unsigned int rows);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

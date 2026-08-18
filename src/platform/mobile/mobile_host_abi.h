@@ -334,6 +334,136 @@ unsigned long long maru_mobile_keybar_rect(unsigned int index);
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);
 
+/// ── SSH 세션 ────────────────────────────────────────────────────────────────
+///
+/// **브리지는 소켓을 모른다**(§3 — 이 층에 OS 호출이 0이다). host 가 TCP 를 들고, 읽은 바이트를
+/// `feed` 로 밀어 넣고 `out` 에 쌓인 바이트를 내보낸다. 프로토콜 판단은 전부 코어가 한다
+/// (계약: docs/ssh-client.md §2).
+///
+/// **여기만 핸들을 쓴다.** 나머지 모바일 ABI 는 화면이 하나라는 전제의 싱글턴이지만, 원격 세션은
+/// 여러 개일 수 있고 **재접속은 새 세션**이다(SSH 에는 재개가 없다 — 계약 §4.1). 핸들에는 세대가
+/// 섞여 있어, 닫은 뒤 남은 옛 핸들로 새 세션을 건드릴 수 없다.
+///
+/// **스레드는 host 가 든다**(§3). Android 는 소켓 스레드와 그리기 스레드가 다르므로 브리지 호출을
+/// 같은 자물쇠로 직렬화해야 한다 — 이 함수들도 그 자물쇠 안이다.
+/// 동시에 들 수 있는 세션 수. **자리는 미리 잡아 둔다**(고정 주소가 필요하다 — 코어가 교환
+/// 해시에 쓸 원문을 안에 들고 있어 복사·이동하면 어긋난다). 실측으로 세션 하나가 약 109KiB,
+/// 넷이면 약 435KiB 다 — 늘리면 그만큼 상주 메모리가 는다.
+#define MARU_SSH_MAX_SESSIONS 4
+/// `seed(32) ‖ public(32)`. host 가 Keychain·Keystore 에서 꺼내 온다(계약 §3.4).
+#define MARU_SSH_SECRET_KEY_BYTES 64
+/// **난수의 근원은 host 다.** 이 층은 OS 를 못 부르는데 SSH 는 임시키·패딩·cookie 에 예측
+/// 불가능한 바이트가 필요하다 — `SecRandomCopyBytes`(iOS) · `SecureRandom`(Android)에서 채운다.
+/// 예측 가능한 값을 주면 그 세션의 비밀이 통째로 깨진다.
+#define MARU_SSH_ENTROPY_BYTES 32
+#define MARU_SSH_MAX_USER 64
+#define MARU_SSH_MAX_TERM 32
+/// 세션 하나가 드는 버퍼. **선(out)은 최소 한 걸음(4KiB)보다 넉넉해야** 하고, 화면은 채널 패킷
+/// 하나(32KiB)가 들어가야 한다 — 못 담으면 코어가 한 발도 못 나간다(계약 §3.5).
+#define MARU_SSH_OUT_BYTES 32768
+#define MARU_SSH_SCREEN_BYTES 65536
+
+/// 상태. **숫자는 이 헤더가 단일 출처다** — 브리지가 코어 enum 을 여기 값으로 명시적으로
+/// 옮기므로 Zig 쪽 선언 순서가 바뀌어도 host 가 읽는 값은 안 움직인다(계약 테스트가 대조한다).
+#define MARU_SSH_STATE_IDLE 0
+#define MARU_SSH_STATE_VERSION_EXCHANGE 1
+#define MARU_SSH_STATE_NEGOTIATING 2
+#define MARU_SSH_STATE_KEY_EXCHANGE 3
+/// **사용자에게 물어야 한다**(TOFU — 계약 §4). 답하기 전에는 한 발도 안 나간다.
+#define MARU_SSH_STATE_HOST_KEY_DECISION 4
+#define MARU_SSH_STATE_AWAITING_NEW_KEYS 5
+#define MARU_SSH_STATE_REQUESTING_SERVICE 6
+#define MARU_SSH_STATE_AUTHENTICATING 7
+#define MARU_SSH_STATE_OPENING_CHANNEL 8
+#define MARU_SSH_STATE_REQUESTING_PTY 9
+#define MARU_SSH_STATE_STARTING_SHELL 10
+/// 셸이 떴다 — 화면 바이트가 오고 키 입력을 보낼 수 있다.
+#define MARU_SSH_STATE_READY 11
+#define MARU_SSH_STATE_CLOSED 12
+/// 핸들이 틀렸다(이미 닫았거나 세대가 지났다).
+#define MARU_SSH_STATE_INVALID 0xFFFFFFFFu
+
+/// 결과 코드. 0=성공, 음수=실패. **이름 문자열만으로는 부족하다** — 호스트키 승인과 인증 실패는
+/// UI 가 다르고, host 가 그 둘을 코드로 갈라야 한다(나머지 모바일 ABI 의 `last_error` 관례는
+/// 진단용으로 그대로 있다: `maru_mobile_ssh_last_error`).
+#define MARU_SSH_OK 0
+#define MARU_SSH_ERR_BAD_HANDLE (-1)
+#define MARU_SSH_ERR_NO_SLOT (-2)
+#define MARU_SSH_ERR_BAD_ARG (-3)
+/// 호스트키를 아직 승인 안 했거나, 서명이 안 맞는다 — 사용자에게 지문을 보이고 물어야 한다.
+#define MARU_SSH_ERR_HOST_KEY (-4)
+#define MARU_SSH_ERR_AUTH (-5)
+#define MARU_SSH_ERR_PROTOCOL (-6)
+/// 아직 셸이 안 떴다(또는 `open` 전이다).
+#define MARU_SSH_ERR_NOT_READY (-7)
+/// 버퍼가 찼다 — **오류가 아니라 배압이다.** `out`·`screen` 을 비우고 다시 부른다.
+#define MARU_SSH_ERR_BUFFER (-8)
+
+/// 세션을 연다. 성공이면 `*out_handle` 에 핸들이 들어가고 **버전 줄이 이미 `out` 에 쌓여 있다** —
+/// 여는 것과 첫 바이트를 내는 것을 나누면 host 가 한쪽을 잊는다.
+///
+/// `secret_key`(64B)와 `entropy`(32B)는 **복사한 뒤 호출자가 지운다.** 브리지도 `close` 에서 지운다.
+/// `window` 0=기본(2MiB). `pty` 0 이면 stdout·stderr 가 따로 온다(계약 §3.5).
+int maru_mobile_ssh_open(const unsigned char *user, unsigned int user_len,
+                         const unsigned char *secret_key, const unsigned char *entropy,
+                         const unsigned char *term, unsigned int term_len,
+                         unsigned int cols, unsigned int rows, unsigned int window,
+                         unsigned int pty, unsigned int *out_handle);
+/// 닫는다. **비밀을 지운다**(개인키·세션키). 이미 닫힌 핸들이면 `MARU_SSH_ERR_BAD_HANDLE`.
+int maru_mobile_ssh_close(unsigned int handle);
+/// 지금 상태(`MARU_SSH_STATE_*`). 핸들이 틀리면 `MARU_SSH_STATE_INVALID`.
+unsigned int maru_mobile_ssh_state(unsigned int handle);
+
+/// 소켓에서 읽은 바이트를 먹인다. `*consumed` 에 **먹은 만큼**이 들어가고, 나머지는 host 가
+/// 다음에 다시 준다(덜 온 패킷은 못 먹는다). 버퍼가 차면 `MARU_SSH_ERR_BUFFER` — 비우고 다시.
+int maru_mobile_ssh_feed(unsigned int handle, const unsigned char *bytes, unsigned int len,
+                         unsigned int *consumed);
+/// 키 입력을 보낸다. **상대가 허락한 만큼만 나간다**(흐름 제어 — 계약 §3.1). `*sent` 가 보낸 양이고
+/// 나머지는 호출자가 다음에 다시 준다.
+int maru_mobile_ssh_write(unsigned int handle, const unsigned char *bytes, unsigned int len,
+                          unsigned int *sent);
+/// 창 크기가 바뀌었다(`window-change`).
+int maru_mobile_ssh_resize(unsigned int handle, unsigned int cols, unsigned int rows);
+/// 더 보낼 것이 없다(`CHANNEL_EOF`).
+int maru_mobile_ssh_eof(unsigned int handle);
+
+/// 선에 내보낼 바이트. **`consume` 을 부를 때까지 남아 있다** — 소켓이 부분만 받아도 잃지 않는다.
+const unsigned char *maru_mobile_ssh_out_ptr(unsigned int handle);
+unsigned int maru_mobile_ssh_out_len(unsigned int handle);
+int maru_mobile_ssh_out_consume(unsigned int handle, unsigned int n);
+/// 화면에 그릴 바이트(원격 stdout·stderr). 규칙은 `out` 과 같다.
+const unsigned char *maru_mobile_ssh_screen_ptr(unsigned int handle);
+unsigned int maru_mobile_ssh_screen_len(unsigned int handle);
+int maru_mobile_ssh_screen_consume(unsigned int handle, unsigned int n);
+
+/// 호스트키 지문(`SHA256:...`). `MARU_SSH_STATE_HOST_KEY_DECISION` 에서 사용자에게 보인다.
+/// 아직 없으면 빈 문자열. 다음 호출까지 산다.
+const char *maru_mobile_ssh_host_key_fingerprint(unsigned int handle);
+/// 사용자가 승인했다. 이 뒤에야 다음 발이 나간다.
+int maru_mobile_ssh_accept_host_key(unsigned int handle);
+
+/// 서버가 끊은 이유(RFC 4253 §11.1). 0=안 끊겼다. 설명은 **이미 걸러져 있다**(제어문자 제거).
+unsigned int maru_mobile_ssh_disconnect_reason(unsigned int handle);
+const char *maru_mobile_ssh_disconnect_description(unsigned int handle);
+/// 서버 배너(법적 고지 등). 없으면 빈 문자열. 이것도 걸러져 있다.
+const char *maru_mobile_ssh_banner(unsigned int handle);
+/// 셸이 끝났으면 `MARU_SSH_OK` 와 `*code`, 아직이면 `MARU_SSH_ERR_NOT_READY`.
+int maru_mobile_ssh_exit_status(unsigned int handle, unsigned int *code);
+/// 신호로 죽었으면 그 이름(`SIG` 접두 없이). 아니면 빈 문자열.
+const char *maru_mobile_ssh_exit_signal(unsigned int handle);
+
+/// 마지막 실패 이름(코어 오류 이름 그대로). **읽은 쪽이 비운다** — §5 의 규율을 따른다.
+const char *maru_mobile_ssh_last_error(unsigned int handle);
+void maru_mobile_ssh_clear_error(unsigned int handle);
+
+/// 원격 출력을 화면에 넣는다. `maru_mobile_ssh_screen_*` 에서 가져온 바이트를 그대로 준다.
+/// 반환값은 **코어에 닿은 누적 바이트** — 안 늘면 안 닿은 것이고 이유는 `maru_mobile_last_error`.
+unsigned long maru_mobile_term_write(const unsigned char *bytes, unsigned long len);
+/// 코어가 만든 답(DSR·DA 등)을 가져간다. **가져가면 사라진다.** host 는 이것을
+/// `maru_mobile_ssh_write` 로 원격에 돌려보낸다 — 안 돌려보내면 묻는 프로그램이 멈춘다.
+/// 자리가 모자라면 **0 이고 아무것도 안 지운다**(잘라 보내면 원격 화면이 어긋난다).
+unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,8 @@
 //! 잡느라 오래 걸린 것들이라, 값이 싼 자리로 내려 둔다.
 const std = @import("std");
 const bridge = @import("mobile_bridge");
+/// 헤더를 C 로 읽어 그대로 부른다 — 정규식 게이트가 못 보는 **인자 타입**을 컴파일이 잡는다.
+const c_abi = @cImport(@cInclude("mobile_host_abi.h"));
 
 /// 단일 코드포인트 등록. 계약은 **열**을 받지만(`❤` 와 `❤️` 를 갈라야 해서) 대부분의 테스트는
 /// 클러스터를 안 쓴다.
@@ -3445,4 +3447,60 @@ test "글자 크기는 범위 밖이면 기본값이다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqual(bridge.bodyRowCount(), rows_bad);
     bridge.maru_mobile_clear_error();
+}
+
+// ── 원격 출력과 답(S9-2) ────────────────────────────────────────────────────
+
+test "원격 출력이 화면에 들어간다" {
+    // **ABI 로 받은 바이트가 갈 곳이 있어야 한다.** 없으면 SSH 가 붙어도 화면은 그대로다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+    const before = bridge.maru_mobile_term_write("", 0);
+    const after = bridge.maru_mobile_term_write("hello", 5);
+    try std.testing.expectEqual(before + 5, after); // **닿은 만큼만 센다**
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+test "원격이 물으면 답을 가져갈 수 있다" {
+    // **답을 안 돌려보내면 묻는 프로그램이 멈춘다.** 예전에는 여기서 버리고 이름만 남겼는데
+    // (돌려보낼 상대가 없던 시절), 이제 상대가 생겼다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_take_response(&out, out.len); // 남은 것을 비운다
+
+    _ = bridge.maru_mobile_term_write("\x1b[6n", 4); // 커서 위치를 묻는다
+    const n = bridge.maru_mobile_take_response(&out, out.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqual(@as(u8, 0x1b), out[0]);
+    try std.testing.expectEqual(@as(u8, 'R'), out[n - 1]); // CPR 은 `R` 로 끝난다
+
+    // **가져가면 사라진다.**
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_response(&out, out.len));
+}
+
+test "자리가 모자라면 답을 자르지 않는다" {
+    // 반쪽 시퀀스를 보내면 원격은 그때부터 화면이 어긋난다 — 자르느니 안 보낸다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_take_response(&out, out.len);
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_term_write("\x1b[6n", 4);
+    var tiny: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_response(&tiny, tiny.len));
+    try std.testing.expectEqualStrings("response_too_large", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    // 안 지웠으므로 넉넉한 자리로는 그대로 가져간다.
+    try std.testing.expect(bridge.maru_mobile_take_response(&out, out.len) > 0);
+}
+
+test "C 선언으로 원격 출력과 답을 부른다" {
+    // `unsigned long` 자리에 `u32` 를 두는 식의 어긋남은 링크가 아니라 **값이** 깨지는 부류라
+    // 이름 대조로는 안 잡힌다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var out: [64]u8 = undefined;
+    _ = c_abi.maru_mobile_take_response(&out, out.len);
+    const before = c_abi.maru_mobile_term_write("", 0);
+    const after = c_abi.maru_mobile_term_write("hi", 2);
+    try std.testing.expectEqual(before + 2, after);
 }

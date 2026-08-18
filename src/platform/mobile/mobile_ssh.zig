@@ -1,0 +1,467 @@
+//! 모바일 host 가 SSH 세션을 쓰는 C ABI(계약 [docs/mobile-platform.md](../../../docs/mobile-platform.md) §3,
+//! [docs/ssh-client.md](../../../docs/ssh-client.md) §2·§3.5).
+//!
+//! **이 층에 OS 호출이 0이다.** 소켓은 host 가 든다 — 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인
+//! 바이트를 `out` 에서 가져가 보낸다. 프로토콜 판단은 전부 코어(`session.ssh.client`)가 한다.
+//!
+//! **여기만 핸들을 쓴다.** 나머지 모바일 ABI 는 화면이 하나라는 전제의 싱글턴인데, 원격 세션은
+//! 여러 개일 수 있고 재접속은 새 세션이다(SSH 에 재개가 없다 — 계약 §4.1). 핸들에 세대를 섞어
+//! **닫은 뒤 남은 옛 핸들이 새 세션을 건드리지 못하게** 한다: 이 부류(stale handle)는 조용히
+//! 남의 세션에 바이트를 쓰는 모양이라 증상이 원인과 멀다.
+//!
+//! **양방향에 배압이 있다.** `out`·`screen` 이 차면 `feed` 는 먹은 만큼만 알려 주고 멈춘다 —
+//! 넘치게 두면 잃고, 잃으면 세션이 조용히 깨진다.
+
+const std = @import("std");
+const maru = @import("maru");
+const client = maru.session.ssh.client;
+const channel = maru.session.ssh.channel;
+
+// 숫자의 단일 출처는 `mobile_host_abi.h` 다. 여기 상수는 그 값을 **그대로** 든다 —
+// 계약 테스트가 헤더를 읽어 대조한다(한쪽만 고치면 링크는 되고 동작만 어긋난다).
+pub const max_sessions = 4;
+pub const secret_key_bytes = 64;
+pub const entropy_bytes = 32;
+pub const max_user = 64;
+pub const max_term = 32;
+pub const out_bytes = 32768;
+pub const screen_bytes = 65536;
+
+pub const state_invalid: u32 = 0xFFFF_FFFF;
+
+pub const ok: c_int = 0;
+pub const err_bad_handle: c_int = -1;
+pub const err_no_slot: c_int = -2;
+pub const err_bad_arg: c_int = -3;
+pub const err_host_key: c_int = -4;
+pub const err_auth: c_int = -5;
+pub const err_protocol: c_int = -6;
+pub const err_not_ready: c_int = -7;
+pub const err_buffer: c_int = -8;
+
+/// 세션 하나. **자리를 고정해서 든다** — `client.Client` 는 교환 해시에 쓸 원문을 안에 들고 있어
+/// 복사·이동하면 어긋난다(계약 §3.5). 그래서 전역 배열이고, 핸들은 그 자리의 번호다.
+const Slot = struct {
+    used: bool = false,
+    /// 닫을 때마다 오른다. 핸들 상위 16비트에 실려 **옛 핸들을 구별**한다.
+    gen: u16 = 0,
+    /// 난수원. **host 가 준 씨앗으로만** 선다 — 이 층은 OS 를 못 부른다.
+    csprng: std.Random.DefaultCsprng = undefined,
+    cl: client.Client = undefined,
+    user: [max_user]u8 = undefined,
+    user_len: usize = 0,
+    term: [max_term]u8 = undefined,
+    term_len: usize = 0,
+
+    out: [out_bytes]u8 = undefined,
+    out_len: usize = 0,
+    screen: [screen_bytes]u8 = undefined,
+    screen_len: usize = 0,
+
+    /// 지문·배너·끊긴 설명·신호 이름은 **코어 안을 가리키는 값이라 다음 `feed` 까지만 산다**
+    /// (계약 §3.5). host 가 나중에 읽어도 맞도록 여기 복사해 둔다.
+    fp: [96]u8 = @splat(0),
+    banner: [512]u8 = @splat(0),
+    disconnect_desc: [512]u8 = @splat(0),
+    disconnect_reason: u32 = 0,
+    exit_signal: [32]u8 = @splat(0),
+    exit_status: ?u32 = null,
+    err_name: [64]u8 = @splat(0),
+};
+
+/// **테스트가 들여다본다.** 닫을 때 비밀을 정말 지웠는지는 바깥에서 행동만으로 못 재고,
+/// 못 재면 그 한 줄은 있으나 마나다.
+pub var slots: [max_sessions]Slot = @splat(.{});
+
+/// 빈 문자열 하나를 돌려줄 자리. 핸들이 틀렸을 때 null 을 주면 host 가 그것을 문자열로 읽는다.
+const empty: [1:0]u8 = .{0};
+
+fn handleOf(index: usize, gen: u16) u32 {
+    return (@as(u32, gen) << 16) | @as(u32, @intCast(index + 1));
+}
+
+/// 핸들 → 슬롯. **세대까지 맞아야 한다.** 번호만 보면 닫힌 뒤 재사용된 자리를 옛 핸들이
+/// 건드린다 — 그 세션의 바이트가 남의 화면에 섞여 나가는 모양이고, 원인을 짚기 아주 어렵다.
+fn slotOf(handle: u32) ?*Slot {
+    const index = (handle & 0xFFFF);
+    if (index == 0 or index > max_sessions) return null;
+    const s = &slots[index - 1];
+    if (!s.used) return null;
+    if (s.gen != @as(u16, @truncate(handle >> 16))) return null;
+    return s;
+}
+
+fn setError(s: *Slot, name: []const u8) void {
+    // **먼저 난 실패를 남긴다**(브리지 관례) — 뒤에 난 것으로 덮으면 원인이 결과에 가린다.
+    if (s.err_name[0] != 0) return;
+    @memset(&s.err_name, 0);
+    const n = @min(name.len, s.err_name.len - 1);
+    @memcpy(s.err_name[0..n], name[0..n]);
+}
+
+/// 코어 오류를 host 가 **분기할 수 있는** 범주로 낮춘다. **테스트가 전수로 본다** — 이 표가
+/// 틀리면 사용자는 엉뚱한 것을 고치려 든다(인증 실패를 호스트키 문제로 보여 주는 식).
+///
+/// **`else` 가 없다.** 코어에 오류가 하나 늘면 여기서 컴파일이 깨지고, 그때 "이건 host 가 어떻게
+/// 다뤄야 하나" 를 정하게 된다 — `else` 를 두면 새 오류가 조용히 "프로토콜 오류" 로 접힌다.
+pub fn statusOf(e: client.Error) c_int {
+    return switch (e) {
+        // 호스트키: 사용자에게 지문을 보이고 물어야 하는 자리 + 서버 신원 증명 실패.
+        // `HostKeyChanged` 는 **세션 도중** 키가 바뀐 것이라 특히 사용자에게 보여야 한다 —
+        // 승인한 지문과 지금 상대가 다르다는 뜻이다.
+        error.HostKeyNotAccepted,
+        error.HostKeyRejected,
+        error.HostKeyChanged,
+        error.BadSignature,
+        => err_host_key,
+        // 인증.
+        error.AuthFailed, error.UnexpectedService => err_auth,
+        // host 가 준 값이 이상하다(키 바이트).
+        error.BadSeed, error.BadPrivateKey => err_bad_arg,
+        // 아직 못 쓴다.
+        error.NotReady, error.NotStarted => err_not_ready,
+        // 자리 부족 — 비우고 다시 부르면 된다.
+        error.ShortBuffer, error.NoSpace => err_buffer,
+        // 나머지는 전부 프로토콜·암호 실패다. 세션은 못 산다.
+        error.UnexpectedMessage,
+        error.ChannelRefused,
+        error.RequestFailed,
+        error.NonKexMessageDuringInitialKex,
+        error.FirstMessageNotKexInit,
+        error.SequenceWrapBeforeKexComplete,
+        error.DuplicateKexMessage,
+        error.WrongPhase,
+        error.NotAllowedDuringRekey,
+        error.PacketTooLarge,
+        error.MalformedPacket,
+        error.Incomplete,
+        error.BadTag,
+        error.NotKexInit,
+        error.NoCommonKex,
+        error.NoCommonHostKey,
+        error.NoCommonCipherC2s,
+        error.NoCommonCipherS2c,
+        error.NoCommonCompressionC2s,
+        error.NoCommonCompressionS2c,
+        error.Truncated,
+        error.TooLarge,
+        error.MalformedMpint,
+        error.NotKexEcdhReply,
+        error.BadPublicKeyLength,
+        error.WeakPublicKey,
+        error.UnsupportedAlgorithm,
+        error.MalformedBlob,
+        error.NotChannelMessage,
+        error.WrongChannel,
+        error.WouldExceedWindow,
+        error.WindowOverflow,
+        error.WindowExhausted,
+        error.DataExceedsMaxPacket,
+        error.LineTooLong,
+        error.UnsupportedProtocol,
+        error.MalformedVersion,
+        => err_protocol,
+    };
+}
+
+/// 코어 상태를 **헤더가 정한 숫자**로 옮긴다. `@intFromEnum` 을 쓰지 않는 것이 요점이다 —
+/// 코어 enum 에 값을 하나 끼워 넣으면 host 가 읽는 뜻이 통째로 밀린다.
+fn stateOf(st: client.State) u32 {
+    return switch (st) {
+        .idle => 0,
+        .version_exchange => 1,
+        .negotiating => 2,
+        .key_exchange => 3,
+        .host_key_decision => 4,
+        .awaiting_new_keys => 5,
+        .requesting_service => 6,
+        .authenticating => 7,
+        .opening_channel => 8,
+        .requesting_pty => 9,
+        .starting_shell => 10,
+        .ready => 11,
+        .closed => 12,
+    };
+}
+
+fn copyZ(dst: []u8, src: []const u8) void {
+    @memset(dst, 0);
+    const n = @min(src.len, dst.len - 1);
+    @memcpy(dst[0..n], src[0..n]);
+}
+
+/// `feed` 한 걸음이 낸 것을 슬롯에 챙긴다. **다음 `feed` 면 사라지는 값들이라 여기서 복사한다.**
+fn absorb(s: *Slot, step: client.Step) void {
+    s.out_len += step.wire.len;
+    s.screen_len += step.screen.len;
+    if (step.banner) |b| {
+        if (s.banner[0] == 0) copyZ(&s.banner, b);
+    }
+    if (step.exit_status) |code| s.exit_status = code;
+    if (step.exit_signal) |sig| copyZ(&s.exit_signal, sig);
+    if (step.disconnect) |d| {
+        s.disconnect_reason = @intFromEnum(d.reason);
+        copyZ(&s.disconnect_desc, d.description);
+    }
+}
+
+/// 선에 낼 자리. **한 걸음이 필요한 만큼 없으면 배압이다**(계약 §3.5).
+fn outFree(s: *Slot) []u8 {
+    return s.out[s.out_len..];
+}
+
+fn screenFree(s: *Slot) []u8 {
+    return s.screen[s.screen_len..];
+}
+
+// ── 진입점 ──────────────────────────────────────────────────────────────────
+
+pub export fn maru_mobile_ssh_open(
+    user: [*]const u8,
+    user_len: u32,
+    secret_key: [*]const u8,
+    entropy: [*]const u8,
+    term: [*]const u8,
+    term_len: u32,
+    cols: u32,
+    rows: u32,
+    window: u32,
+    pty: u32,
+    out_handle: *u32,
+) c_int {
+    out_handle.* = 0;
+    if (user_len == 0 or user_len > max_user) return err_bad_arg;
+    if (term_len == 0 or term_len > max_term) return err_bad_arg;
+    if (cols == 0 or rows == 0) return err_bad_arg;
+
+    // **0 씨앗은 받지 않는다.** host 가 난수를 못 채웠는데 그대로 열면 임시키·cookie 가 예측
+    // 가능해져 그 세션의 비밀이 통째로 깨진다 — 그리고 화면은 멀쩡해서 아무도 모른다.
+    var seed: [entropy_bytes]u8 = undefined;
+    @memcpy(&seed, entropy[0..entropy_bytes]);
+    var any: u8 = 0;
+    for (seed) |b| any |= b;
+    if (any == 0) return err_bad_arg;
+
+    const s = free: {
+        for (&slots) |*cand| {
+            if (!cand.used) break :free cand;
+        }
+        break :free null;
+    } orelse return err_no_slot;
+
+    // **자리는 다 되고 나서 표시한다.** 중간에 실패하고 되돌리는 가지를 두면, 그 가지는 거의
+    // 안 돌아 변이 검사에서 살아남고(테스트가 못 밟는다) 언젠가 틀린 채로 남는다.
+    s.* = .{ .used = false, .gen = s.gen +% 1 };
+    @memcpy(s.user[0..user_len], user[0..user_len]);
+    s.user_len = user_len;
+    @memcpy(s.term[0..term_len], term[0..term_len]);
+    s.term_len = term_len;
+    s.csprng = std.Random.DefaultCsprng.init(seed);
+    std.crypto.secureZero(u8, &seed);
+
+    var key: [secret_key_bytes]u8 = undefined;
+    @memcpy(&key, secret_key[0..secret_key_bytes]);
+    s.cl = client.Client.init(.{
+        .user = s.user[0..s.user_len],
+        .secret_key = key,
+        .term = s.term[0..s.term_len],
+        .size = .{ .cols = cols, .rows = rows },
+        .window = window,
+        .pty = pty != 0,
+    }, s.csprng.random());
+    std.crypto.secureZero(u8, &key);
+
+    // **여는 것과 첫 바이트를 내는 것을 안 나눈다.** 나누면 host 가 한쪽을 잊고, 잊으면 서버는
+    // 우리 버전 줄을 영영 못 받아 "연결은 됐는데 아무 일도 안 난다" 가 된다.
+    const line = s.cl.start(outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        s.cl.clear(); // 비밀은 남기지 않는다
+        return statusOf(e);
+    };
+    s.out_len += line.len;
+    s.used = true;
+    out_handle.* = handleOf(indexOf(s), s.gen);
+    return ok;
+}
+
+fn indexOf(s: *Slot) usize {
+    return (@intFromPtr(s) - @intFromPtr(&slots[0])) / @sizeOf(Slot);
+}
+
+pub export fn maru_mobile_ssh_close(handle: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    // **비밀을 지운다** — 개인키와 세션키가 여기 있었다. 슬롯은 재사용되므로 남은 바이트는
+    // 다음 세션의 메모리가 된다.
+    s.cl.clear();
+    std.crypto.secureZero(u8, &s.out);
+    std.crypto.secureZero(u8, &s.screen);
+    s.used = false;
+    s.out_len = 0;
+    s.screen_len = 0;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_state(handle: u32) u32 {
+    const s = slotOf(handle) orelse return state_invalid;
+    return stateOf(s.cl.state);
+}
+
+pub export fn maru_mobile_ssh_feed(handle: u32, bytes: [*]const u8, len: u32, consumed: *u32) c_int {
+    consumed.* = 0;
+    const s = slotOf(handle) orelse return err_bad_handle;
+    // **자리 검사는 코어가 한다** — 한 걸음이 못 들어가면 `ShortBuffer` 다(계약 §3.5). 여기서
+    // 같은 검사를 또 하면 두 벌이 되어 갈리고(코어가 상한을 바꾸면 이쪽만 옛 값이다), 이름도
+    // 안 남아 §5 의 "왜 실패했나" 가 사라진다. 그 오류를 `MARU_SSH_ERR_BUFFER` 로 낮춘다 —
+    // **오류가 아니라 배압이다**: 비우고 다시 부르면 된다.
+    const step = s.cl.feed(bytes[0..len], outFree(s), screenFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    absorb(s, step);
+    consumed.* = @intCast(step.consumed);
+    return ok;
+}
+
+/// 채널 데이터 한 개가 payload 위에 더 쓰는 바이트(채널 머리 9 + 패킷 프레이밍·태그).
+///
+/// **넉넉히 잡는다** — 모자라면 마지막 한 조각에서 `NoSpace` 가 나고, 그 경계는 버퍼가 얼마나
+/// 찼느냐에 따라 걸리기도 안 걸리기도 해서 테스트로 잡히지 않는다.
+const frame_overhead = 128;
+
+pub export fn maru_mobile_ssh_write(handle: u32, bytes: [*]const u8, len: u32, sent: *u32) c_int {
+    sent.* = 0;
+    const s = slotOf(handle) orelse return err_bad_handle;
+    // **여기만 미리 잰다.** `write` 는 코어가 우리 버퍼를 안 보고 창·길이로만 자르므로(아래),
+    // 자를 값을 계산하려면 남은 자리를 알아야 한다.
+    const room = outFree(s).len;
+    if (room <= frame_overhead) {
+        setError(s, "ssh_out_full");
+        return err_buffer;
+    }
+    // **코어는 우리 버퍼 크기를 모른다** — 창과 데이터 길이로만 자른다. 그대로 넘기면 자리가
+    // 모자랄 때 한 바이트도 못 보내고(`NoSpace`), host 는 자기 버퍼 사정을 짐작해 스스로 잘라야
+    // 한다. 버퍼를 아는 쪽이 자른다. 나머지는 `sent` 를 보고 호출자가 다시 준다(계약 §3.1 과
+    // 같은 규약이다 — 흐름 제어로 못 보내는 것과 구별할 필요가 없다).
+    const capped = @min(len, @as(u32, @intCast(room - frame_overhead)));
+    const r = s.cl.write(bytes[0..capped], outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += r.wire.len;
+    sent.* = @intCast(r.sent);
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_resize(handle: u32, cols: u32, rows: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    if (cols == 0 or rows == 0) return err_bad_arg;
+    const wire = s.cl.resize(.{ .cols = cols, .rows = rows }, outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += wire.len;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_eof(handle: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const wire = s.cl.eof(outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += wire.len;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_out_ptr(handle: u32) [*]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return &s.out;
+}
+
+pub export fn maru_mobile_ssh_out_len(handle: u32) u32 {
+    const s = slotOf(handle) orelse return 0;
+    return @intCast(s.out_len);
+}
+
+pub export fn maru_mobile_ssh_out_consume(handle: u32, n: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    if (n > s.out_len) return err_bad_arg;
+    std.mem.copyForwards(u8, s.out[0 .. s.out_len - n], s.out[n..s.out_len]);
+    s.out_len -= n;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_screen_ptr(handle: u32) [*]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return &s.screen;
+}
+
+pub export fn maru_mobile_ssh_screen_len(handle: u32) u32 {
+    const s = slotOf(handle) orelse return 0;
+    return @intCast(s.screen_len);
+}
+
+pub export fn maru_mobile_ssh_screen_consume(handle: u32, n: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    if (n > s.screen_len) return err_bad_arg;
+    std.mem.copyForwards(u8, s.screen[0 .. s.screen_len - n], s.screen[n..s.screen_len]);
+    s.screen_len -= n;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_host_key_fingerprint(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    if (s.cl.state != .host_key_decision and s.fp[0] == 0) return &empty;
+    if (s.fp[0] == 0) {
+        var buf: [96]u8 = undefined;
+        const fp = s.cl.hostKeyFingerprint(&buf) catch |e| {
+            setError(s, @errorName(e));
+            return &empty;
+        };
+        copyZ(&s.fp, fp);
+    }
+    return @ptrCast(&s.fp);
+}
+
+pub export fn maru_mobile_ssh_accept_host_key(handle: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    s.cl.acceptHostKey();
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_disconnect_reason(handle: u32) u32 {
+    const s = slotOf(handle) orelse return 0;
+    return s.disconnect_reason;
+}
+
+pub export fn maru_mobile_ssh_disconnect_description(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return @ptrCast(&s.disconnect_desc);
+}
+
+pub export fn maru_mobile_ssh_banner(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return @ptrCast(&s.banner);
+}
+
+pub export fn maru_mobile_ssh_exit_status(handle: u32, code: *u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const got = s.exit_status orelse return err_not_ready;
+    code.* = got;
+    return ok;
+}
+
+pub export fn maru_mobile_ssh_exit_signal(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return @ptrCast(&s.exit_signal);
+}
+
+pub export fn maru_mobile_ssh_last_error(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return @ptrCast(&s.err_name);
+}
+
+pub export fn maru_mobile_ssh_clear_error(handle: u32) void {
+    const s = slotOf(handle) orelse return;
+    @memset(&s.err_name, 0);
+}

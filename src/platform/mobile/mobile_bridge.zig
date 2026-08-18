@@ -76,6 +76,11 @@ var quad_count: usize = 0;
 const terminal = maru.terminal;
 const color = maru.color;
 const mobile_config = @import("mobile_config.zig");
+// **SSH 진입점을 링크에 남긴다.** `maru_mobile_ssh_*` 는 이 파일이 안 부르는 export 라, 참조가
+// 없으면 정적 라이브러리에서 통째로 빠지고 host 는 링크 오류를 본다(계약 ABI 는 한 벌이다).
+comptime {
+    _ = @import("mobile_ssh.zig");
+}
 
 // **고정 버퍼로는 resize 를 못 버틴다.** `FixedBufferAllocator` 는 마지막 할당 말고는
 // free 가 no-op 이라, 격자가 바뀔 때마다 옛 격자를 영영 못 돌려받는다 — 512KB 로 **resize
@@ -107,6 +112,8 @@ fn cfg() mobile_config.Config {
 fn hex(text: []const u8, fallback: color.Rgb) color.Rgb {
     return color.parseHex(text) orelse fallback;
 }
+/// 원격에서 받아 코어에 **닿은** 누적 바이트. host 가 "출력이 죽었나" 를 이 값으로 판정한다.
+var term_written: usize = 0;
 var term_cols: u16 = 0;
 var term_rows: u16 = 0;
 
@@ -434,6 +441,51 @@ fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
         core.clearResponse();
     }
     if (core.shellEvents().len > 0) core.clearShellEvents();
+}
+
+/// 원격 출력(SSH)을 화면에 넣는다. host 가 `maru_mobile_ssh_screen_*` 에서 가져온 바이트를
+/// 그대로 준다 — **바이트만 오간다**(§3).
+///
+/// 반환값은 **코어에 닿은 누적 바이트**다. 안 늘면 안 닿은 것이고, 왜인지는 `last_error` 에 있다
+/// (§5 — 조용히 실패하지 않는다).
+///
+/// **답(DSR·DA 등)은 여기서 안 버린다.** 원격이 물어본 것이라 돌려보내야 하고, 그 자리가
+/// `maru_mobile_take_response` 다. 로컬 셸이 없던 시절에는 버리고 이름만 남겼는데(그때는
+/// 돌려보낼 상대가 없었다), 이제 상대가 생겼다.
+///
+/// **어느 세션의 바이트인지는 아직 안 가른다** — 화면이 하나이기 때문이다. 세션이 여럿이 되면
+/// 그 라우팅은 서버 목록(S9b)·세션 호스트 부착(S10)이 정한다.
+pub export fn maru_mobile_term_write(ptr: [*]const u8, len: usize) usize {
+    const core = &(term_core orelse {
+        setLastError("term_write_before_core");
+        return term_written;
+    });
+    core.write(ptr[0..len]) catch {
+        setLastError("term_write_failed");
+        return term_written;
+    };
+    // 셸 이벤트(OSC 133 등)는 모바일이 아직 안 쓴다 — 쌓아 두면 자라기만 한다.
+    if (core.shellEvents().len > 0) core.clearShellEvents();
+    term_written += len;
+    return term_written;
+}
+
+/// 코어가 만든 답을 가져간다(**가져가면 사라진다**). host 는 이것을 `maru_mobile_ssh_write` 로
+/// 원격에 돌려보낸다 — 안 돌려보내면 커서 위치를 묻는 프로그램이 답을 기다리며 멈춘다.
+///
+/// **자리가 모자라면 0 이고 아무것도 안 지운다.** 잘라 보내면 원격은 반쪽짜리 시퀀스를 읽고
+/// 그때부터 화면이 어긋난다 — config 쓰기가 같은 이유로 같은 규칙을 쓴다.
+pub export fn maru_mobile_take_response(out: [*]u8, cap: usize) usize {
+    const core = &(term_core orelse return 0);
+    const pending = core.pendingResponse();
+    if (pending.len == 0) return 0;
+    if (pending.len > cap) {
+        setLastError("response_too_large");
+        return 0;
+    }
+    @memcpy(out[0..pending.len], pending);
+    core.clearResponse();
+    return pending.len;
 }
 
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {

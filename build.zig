@@ -1899,6 +1899,9 @@ pub fn build(b: *std.Build) void {
     mobile_bridge_tests.root_module.addAnonymousImport("mobile_host_abi_for_test", .{
         .root_source_file = b.path("src/platform/mobile/mobile_host_abi.h"),
     });
+    // 헤더를 C 로도 읽어 **인자 타입**까지 컴파일이 대조하게 한다(정규식 게이트의 사각지대).
+    mobile_bridge_tests.root_module.addIncludePath(b.path("src/platform/mobile"));
+    mobile_bridge_tests.root_module.link_libc = true;
     const run_mobile_bridge_tests = b.addRunArtifact(mobile_bridge_tests);
     test_step.dependOn(&run_mobile_bridge_tests.step);
     // 이 스위트만 따로 돌릴 수단이 필요하다. 전체 `test` 는 session host 테스트가 유닉스 소켓
@@ -1906,6 +1909,33 @@ pub fn build(b: *std.Build) void {
     // 모바일은 CI 가 없어 로컬 실행이 유일한 판정자다.
     const test_mobile_step = b.step("test-mobile", "Run the mobile bridge contract tests");
     test_mobile_step.dependOn(&run_mobile_bridge_tests.step);
+
+    // SSH ABI 는 별도 파일이라 별도 모듈이다. **헤더는 같은 것을 읽는다** — 숫자의 단일 출처가
+    // 하나여야 host 가 상태·결과 코드를 오해하지 않는다.
+    const mobile_ssh_mod = b.addModule("mobile_ssh", .{
+        .root_source_file = b.path("src/platform/mobile/mobile_ssh.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const mobile_ssh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/mobile_ssh_contract.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "mobile_ssh", .module = mobile_ssh_mod }},
+        }),
+    });
+    mobile_ssh_tests.root_module.addAnonymousImport("mobile_ssh_abi_for_test", .{
+        .root_source_file = b.path("src/platform/mobile/mobile_host_abi.h"),
+    });
+    // **헤더를 C 로도 읽는다.** 이름·개수는 `abi_types.py` 가 정규식으로 보지만 인자 타입은
+    // 못 본다 — `@cImport` 로 부르면 컴파일이 그것을 잡는다.
+    mobile_ssh_tests.root_module.addIncludePath(b.path("src/platform/mobile"));
+    mobile_ssh_tests.root_module.link_libc = true;
+    const run_mobile_ssh_tests = b.addRunArtifact(mobile_ssh_tests);
+    test_step.dependOn(&run_mobile_ssh_tests.step);
+    test_mobile_step.dependOn(&run_mobile_ssh_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.
@@ -2367,6 +2397,23 @@ pub fn build(b: *std.Build) void {
     });
     const ssh_client_smoke_step = b.step("ssh-client-smoke", "Build the built-in SSH client real-server smoke driver");
     ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_client_smoke_exe, .{}).step);
+
+    // **모바일 ABI 로만** 같은 sshd 에 붙는 드라이버(S9-2). 위 스모크는 코어가 실서버에서 돈다는
+    // 것을 증명하지만 그 사이의 ABI 는 한 줄도 안 지난다 — 기기에서 "안 된다" 가 났을 때
+    // 프로토콜 탓인지 배선 탓인지 가르려면 이 층만으로 한 번 붙여 봐야 한다.
+    const ssh_abi_smoke_exe = b.addExecutable(.{
+        .name = "ssh-abi-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/ssh/abi_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "mobile_ssh", .module = mobile_ssh_mod },
+            },
+        }),
+    });
+    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_abi_smoke_exe, .{}).step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,

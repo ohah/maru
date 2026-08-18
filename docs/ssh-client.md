@@ -33,6 +33,11 @@ flowchart TD
 - **L2**(`src/session/ssh/`): 패킷·KEX·인증·채널·키 파싱. **OS 호출 0**, 할당은 주입받는다.
 - **L4**: 소켓(연결·읽기·쓰기·타임아웃), 키 저장(iOS Keychain·Android Keystore), `known_hosts`
   파일 입출력.
+- **모바일 경계**(`src/platform/mobile/mobile_ssh.zig` + `mobile_host_abi.h` 의 `MARU_SSH_*`):
+  위 상태기계를 C ABI 로 낸다. **이 층에도 OS 호출이 0이다** — host 가 소켓·키·**난수**를 들고
+  바이트만 오간다([모바일 계약](mobile-platform.md) §3.0). 데스크톱 검증 드라이버
+  (`tools/ssh/client_smoke.zig`)와 **같은 코어**를 부르고, ABI 자체는 `tools/ssh/abi_smoke.zig`
+  가 실서버로 한 번 더 밟는다.
 
 **왜 sans-io 인가.** 모바일 브리지는 계약상 OS 를 못 부른다(모바일 §3). 같은 이유로 데스크톱은
 `std.net`, 모바일은 host 소켓을 쓰되 **프로토콜 코드는 하나**다. 덤으로 **헤드리스 테스트**가
@@ -84,7 +89,12 @@ agent 전달, 포트 포워딩, X11, SFTP/SCP, 다중 채널, `keyboard-interact
 **and for each subsequent KEX**"). 그리고 재키잉 `KEXINIT` 의 strict 표시자는 **무시하고 초기값을
 잇는다**(§3.1) — `kexinit.Phase.rekey` 가 그것을 강제한다.
 
-**호스트키는 재키잉마다 다시 검증한다.** 그 사이에 상대가 바뀌었을 수 있다.
+**호스트키는 재키잉마다 다시 검증한다 — 서명과 *동일성* 둘 다.** 서명 검증만으로는 부족하다:
+`verifyExchangeHash` 는 "**제시된** 키가 이 `H` 에 서명했다" 만 말하므로, 상대가 고른 **다른** 키도
+그대로 통과한다. 그러면 사용자에게 보여 주고 승인받은 지문이 지금 세션의 상대와 달라지는데,
+TOFU 가 약속한 것이 정확히 그 동일성이다. 그래서 재키잉의 `KEX_ECDH_REPLY` 는 **처음 승인한 키와
+바이트가 같아야** 하고, 다르면 `HostKeyChanged` 로 끊는다. 비교는 **보관보다 먼저** 한다 — 먼저
+덮어쓰면 비교할 원본이 사라진다.
 
 **어느 쪽이 시작하든 같다.** `beginRekey()` 는 양방향이라 우리가 먼저 걸 수도 있다. 다만 **언제
 걸지의 정책은 아직 없다** — 서버가 요구할 때 답하는 것으로 실제 문제(세션 멈춤)가 닫히기 때문이다.

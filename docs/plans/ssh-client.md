@@ -22,7 +22,7 @@
 | S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(`aes256-ctr` + OpenSSH bcrypt KDF), `checkint`·패딩·공개키 일치 검사 | `ssh-keygen` 이 만든 같은 키의 평문본·암호본이 같은 값을 낸다 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` + **보내는 쪽 흐름 제어**(윈도·최대 패킷을 넘겨 보내지 않는다 — 실서버가 초기 윈도 `0` 을 광고하므로 첫 바이트부터 필요하다) | 상태 전이 + 실서버 왕복 |
 | S7b | **받는 쪽 흐름 제어** — 우리 윈도 소비(자동)와 `WINDOW_ADJUST` 보내기(절반에서). 잊으면 조용히 멈추는 대신 `WindowExhausted` 로 죽는다 | 초기 윈도의 3000 배를 흘려 보낸다 — 보충 없이는 못 지난다 |
-| S7d | **재키잉** — 서버가 다시 보낸 `KEXINIT` 에 답하고 키를 간다. `session_id` 는 **초기 `H`** 로 고정, strict 표시자는 초기값을 잇고, §7.1 의 보내기 제한을 건다([계약 §3.0.1](../ssh-client.md)) | `RekeyLimit 1M` 실서버로 8MiB — 재키잉 10 회를 지나 완주한다 |
+| S7d | **재키잉** — 서버가 다시 보낸 `KEXINIT` 에 답하고 키를 간다. `session_id` 는 **초기 `H`** 로 고정, strict 표시자는 초기값을 잇고, §7.1 의 보내기 제한을 건다([계약 §3.0.1](../ssh-client.md)) | `RekeyLimit 1M` 실서버 세 회차 — 받으며(10 회)·보내며(6 회)·**우리가 시작하며**(미룬 송신을 태운다) |
 | S7c | **잡 메시지** — `IGNORE`·`DEBUG`·`UNIMPLEMENTED`·`DISCONNECT`·`GLOBAL_REQUEST`, 버전 앞 배너 여러 줄 | 각 메시지 주입 |
 | S8 | **실서버 검증 하니스** — 소켓 어댑터(`std.c`)와 드라이버로 진짜 sshd 와 왕복한다. `mise run ssh-client-smoke` 가 **일회용 sshd 를 스스로 띄우고** 8MiB 를 받는다. **제품 경로가 아니다**(아래) | 실서버 왕복 + 흐름 제어가 실제로 도는지 |
 | S9 | **모바일 배선** — host 소켓 ABI(브리지엔 OS 호출 0), 키 저장은 Keychain/Keystore | 기기 |

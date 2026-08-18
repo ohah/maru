@@ -9,7 +9,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 h = (ROOT / "src/platform/mobile/mobile_host_abi.h").read_text(encoding="utf-8")
-z = (ROOT / "src/platform/mobile/mobile_bridge.zig").read_text(encoding="utf-8")
+# **Zig 쪽은 한 파일이 아니다.** SSH ABI 는 `mobile_ssh.zig` 에 있고, 여기 안 넣으면 그 진입점
+# 전부가 "헤더에만 있다" 로 보이거나(더 나쁘게는) 새 파일을 통째로 안 보게 된다 — 게이트가
+# 조용히 절반만 지키는 상태가 이 저장소에서 여러 번 났다.
+z = "\n".join(
+    (ROOT / name).read_text(encoding="utf-8")
+    for name in (
+        "src/platform/mobile/mobile_bridge.zig",
+        "src/platform/mobile/mobile_ssh.zig",
+    )
+)
 
 # C 선언: 반환형 이름(인자...);
 #

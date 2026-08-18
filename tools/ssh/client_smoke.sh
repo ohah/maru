@@ -38,6 +38,8 @@ skip_or_fail() {
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 DRIVER="$ROOT/zig-out/bin/ssh-client-smoke"
+# 모바일 ABI 로만 붙는 드라이버(S9-2). 같은 sshd 를 쓰되 진입점이 다르다.
+ABI_DRIVER="$ROOT/zig-out/bin/ssh-abi-smoke"
 # **포트를 고정하지 않는다.** 고정이면 두 실행이 겹칠 때 뒤엣것이 "안 떴다" 며 SKIP 하고
 # **조용히 통과**한다(실측: 동시에 둘 돌리니 하나는 3 회차 OK, 다른 하나는 0 회차에 EXIT=0).
 # CI 가 잡을 병렬로 돌리거나 사람이 두 번 돌리면 한쪽이 아무것도 안 재고 초록이 된다.
@@ -188,6 +190,8 @@ start_sshd "$DIR/sshd2.pid" "$((PORT + 1))" "$DIR/sshd2.log" "cat" || {
 	exit 1
 }
 ECHO_BYTES=4194304
+# ABI 회차는 같은 것을 재되 짧게 — 여기서 재는 것은 대역이 아니라 **배선이 도는가**다.
+ABI_ECHO_BYTES=1048576
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 echo
 ROUNDS=$((ROUNDS + 1))
 
@@ -244,11 +248,38 @@ start_sshd "$DIR/sshd6.pid" "$((PORT + 5))" "$DIR/sshd6.log" "true" "MaxAuthTrie
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 disconnect
 ROUNDS=$((ROUNDS + 1))
 
+# 10) **모바일 ABI 회차(S9-2).** 위 아홉 회차는 코어(`client.zig`)를 직접 부르는 드라이버가
+#     돌린다 — 그 사이에 낀 `maru_mobile_ssh_*` 는 한 줄도 안 지난다. 기기에서 "안 된다" 가
+#     났을 때 가장 비싼 물음이 **프로토콜 탓이냐 배선 탓이냐**이고, ABI 만으로 한 번 붙여 두면
+#     이후 실패가 host 쪽으로 좁혀진다.
+if [ ! -x "$ABI_DRIVER" ]; then
+	echo "[ssh-client-smoke] FAIL: $ABI_DRIVER 없음" >&2
+	exit 1
+fi
+start_sshd "$DIR/sshd7.pid" "$((PORT + 7))" "$DIR/sshd7.log" "echo MARU_ABI_OK" || {
+	sed -n '1,5p' "$DIR/sshd7.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: ABI 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$ABI_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" MARU_ABI_OK 0
+ROUNDS=$((ROUNDS + 1))
+
+# 11) **ABI 로 보내는 회차.** 위 회차는 받기만 해서 `maru_mobile_ssh_write` 와 부분 전송
+#     (`out_consume`)이 선 위에서 한 번도 안 돈다. 서버를 `cat` 으로 두고 보낸 것이 그대로
+#     돌아오는지 본다 — 흐름 제어와 배압이 ABI 를 통해서도 도는지가 여기서 판정된다.
+start_sshd "$DIR/sshd8.pid" "$((PORT + 9))" "$DIR/sshd8.log" "cat" || {
+	sed -n '1,5p' "$DIR/sshd8.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: ABI 에코 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$ABI_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" MARU_ABI_OK "$ABI_ECHO_BYTES"
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 8 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 8 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 10 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 10 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 여덟 회차 완주"
+echo "[ssh-client-smoke] 열 회차 완주"

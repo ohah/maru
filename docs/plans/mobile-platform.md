@@ -172,9 +172,10 @@ MaruActivity(NativeActivity)   투명 입력 View 를 얹고 소프트 키보드
   - **인증**: peer-cred 를 대신할 것. 기기 페어링? 토큰? 공개키?
   - **암호화**: 전송이 이미 암호화하는가, 아니면 우리가 종단간으로 하는가.
   - **신뢰 등급**: 원격 클라이언트가 `browser.*` 같은 write 능력을 갖는가.
-  - **코어가 만든 답을 어디로 흘리는가**: 지금은 `response_dropped` 로 버린다. 원격 쪽이
-    정해질 때 `maru_mobile_take_response` 류 ABI 를 함께 낸다(지금 뚫으면 소비처 없는
-    인터페이스가 된다).
+  - **코어가 만든 답을 어디로 흘리는가**: **닫혔다**(S9-2). 전송이 SSH 로 정해졌으므로
+    `maru_mobile_take_response(out, cap)` 이 답을 내주고, host 가 `maru_mobile_ssh_write` 로
+    돌려보낸다. 받는 쪽은 `maru_mobile_term_write` 다. 자리가 모자라면 **자르지 않고 0** 을
+    돌려준다 — 반쪽 시퀀스를 보내면 원격 화면이 그때부터 어긋난다.
 
 한 가지는 이미 실측했다 — `session_host` 클라이언트(23k줄)가 **iOS 타깃으로 그대로
 컴파일된다**. 코어 쪽은 이식 가능하고, 막는 것은 전송·인증 계약뿐이다.

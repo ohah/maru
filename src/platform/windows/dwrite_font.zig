@@ -23,6 +23,7 @@
 //! 않다. 실측으로 화면을 보고 판정한다(추측하지 않는다).
 
 const std = @import("std");
+const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
 const d3d11 = @import("d3d11.zig");
 
@@ -70,8 +71,8 @@ const IDWriteFontCollection = extern struct {
         AddRef: *const anyopaque,
         Release: *const anyopaque,
         GetFontFamilyCount: *const anyopaque,
-        GetFontFamily: *const fn (*IDWriteFontCollection, UINT, *?*IDWriteFontFamily) callconv(.winapi) HRESULT,
-        FindFamilyName: *const fn (*IDWriteFontCollection, [*:0]const u16, *UINT, *BOOL) callconv(.winapi) HRESULT,
+        GetFontFamily: *const fn (*IDWriteFontCollection, UINT, *?*IDWriteFontFamily) callconv(abi.winapi) HRESULT,
+        FindFamilyName: *const fn (*IDWriteFontCollection, [*:0]const u16, *UINT, *BOOL) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -87,7 +88,7 @@ const IDWriteFontFamily = extern struct {
         GetFont: *const anyopaque,
         // IDWriteFontFamily
         GetFamilyNames: *const anyopaque,
-        GetFirstMatchingFont: *const fn (*IDWriteFontFamily, UINT, UINT, UINT, *?*IDWriteFont) callconv(.winapi) HRESULT,
+        GetFirstMatchingFont: *const fn (*IDWriteFontFamily, UINT, UINT, UINT, *?*IDWriteFont) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -107,7 +108,7 @@ const IDWriteFont = extern struct {
         GetSimulations: *const anyopaque,
         GetMetrics: *const anyopaque,
         HasCharacter: *const anyopaque,
-        CreateFontFace: *const fn (*IDWriteFont, *?*IDWriteFontFace) callconv(.winapi) HRESULT,
+        CreateFontFace: *const fn (*IDWriteFont, *?*IDWriteFontFace) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -122,10 +123,10 @@ const IDWriteFontFace = extern struct {
         GetIndex: *const anyopaque,
         GetSimulations: *const anyopaque,
         IsSymbolFont: *const anyopaque,
-        GetMetrics: *const fn (*IDWriteFontFace, *FontMetrics) callconv(.winapi) void,
+        GetMetrics: *const fn (*IDWriteFontFace, *FontMetrics) callconv(abi.winapi) void,
         GetGlyphCount: *const anyopaque,
-        GetDesignGlyphMetrics: *const fn (*IDWriteFontFace, [*]const u16, UINT, [*]GlyphMetrics, BOOL) callconv(.winapi) HRESULT,
-        GetGlyphIndices: *const fn (*IDWriteFontFace, [*]const u32, UINT, [*]u16) callconv(.winapi) HRESULT,
+        GetDesignGlyphMetrics: *const fn (*IDWriteFontFace, [*]const u16, UINT, [*]GlyphMetrics, BOOL) callconv(abi.winapi) HRESULT,
+        GetGlyphIndices: *const fn (*IDWriteFontFace, [*]const u32, UINT, [*]u16) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -135,8 +136,8 @@ const IDWriteGlyphRunAnalysis = extern struct {
         QueryInterface: *const anyopaque,
         AddRef: *const anyopaque,
         Release: *const anyopaque,
-        GetAlphaTextureBounds: *const fn (*IDWriteGlyphRunAnalysis, UINT, *Rect) callconv(.winapi) HRESULT,
-        CreateAlphaTexture: *const fn (*IDWriteGlyphRunAnalysis, UINT, *const Rect, [*]u8, UINT) callconv(.winapi) HRESULT,
+        GetAlphaTextureBounds: *const fn (*IDWriteGlyphRunAnalysis, UINT, *Rect) callconv(abi.winapi) HRESULT,
+        CreateAlphaTexture: *const fn (*IDWriteGlyphRunAnalysis, UINT, *const Rect, [*]u8, UINT) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -146,7 +147,7 @@ const IDWriteFactory = extern struct {
         QueryInterface: *const anyopaque,
         AddRef: *const anyopaque,
         Release: *const anyopaque,
-        GetSystemFontCollection: *const fn (*IDWriteFactory, *?*IDWriteFontCollection, BOOL) callconv(.winapi) HRESULT,
+        GetSystemFontCollection: *const fn (*IDWriteFactory, *?*IDWriteFontCollection, BOOL) callconv(abi.winapi) HRESULT,
         CreateCustomFontCollection: *const anyopaque,
         RegisterFontCollectionLoader: *const anyopaque,
         UnregisterFontCollectionLoader: *const anyopaque,
@@ -176,7 +177,7 @@ const IDWriteFactory = extern struct {
             f32, // baselineOriginX
             f32, // baselineOriginY
             *?*IDWriteGlyphRunAnalysis,
-        ) callconv(.winapi) HRESULT,
+        ) callconv(abi.winapi) HRESULT,
     };
 };
 
@@ -266,7 +267,7 @@ const measuring_mode_natural: UINT = 0;
 const texture_cleartype_3x1: UINT = 1;
 const cleartype_bytes_per_pixel: usize = 3;
 
-extern "dwrite" fn DWriteCreateFactory(factory_type: UINT, iid: *const d3d11.GUID, out: *?*anyopaque) callconv(.winapi) HRESULT;
+extern "dwrite" fn DWriteCreateFactory(factory_type: UINT, iid: *const d3d11.GUID, out: *?*anyopaque) callconv(abi.winapi) HRESULT;
 
 // ── 폰트 티어 ────────────────────────────────────────────────────────────────────────────────
 

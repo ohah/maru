@@ -876,10 +876,27 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
 /// 보류하고 `windowDidEndLiveResize`에서 한 번만 적용하므로(zsh가 SIGWINCH마다 redraw하며 프롬프트를
 /// 중복시키던 문제로 도입된 정책), 창을 끄는 동안 이 pane의 폭은 그대로다.
 ///
-/// 남는 두 경로가 **라이브**다 — 사이드바 우측 경계 드래그(`setSidebarWidthPx`를 drag마다 부른다)와
-/// pane divider 드래그(`routeDividerCapture`, 같은 패턴). 둘 다 편집기가 설 사각의 폭을 직접 끈다.
+/// 남는 **세 경로**가 라이브다. 셋을 각각 물어야 하는 것 자체가 이 코드베이스의 상태를 드러낸다 —
+/// "지금 폭을 끄는 중인가"의 단일 출처가 없고 capture 권위가 셋으로 갈려 있다(pane divider는 CIM2로
+/// `InteractionState`에 이관됐고, 나머지 둘은 `PointerGestureOwner`의 서로 다른 variant다).
+///
+/// | 경로 | drag마다 부르는 것 | capture 권위 |
+/// |---|---|---|
+/// | 사이드바 우측 경계 | `sidebar_ops.setSidebarWidthPx` | `PointerGestureOwner.sidebar_divider` |
+/// | pane divider | tick coalescer가 최종 좌표 하나를 적용 | `InteractionState`(CIM2) |
+/// | dock 바깥 경계 | `dock_ops.setDockSizeFromPointer` | `PointerGestureOwner.dock_outer_divider` |
+///
+/// **dock을 빠뜨렸다가 적대적 검증에서 잡았다**(2026-08-18) — `setDockSizeFromPointer`는 dock이
+/// `.right`면 x축을 끌고 `resizeTabPanes`로 전 탭 pane을 다시 재운다. 그 경로에서만 저하가 안 걸려
+/// 큰 문서가 여전히 프레임당 수십 ms였다.
+///
+/// dock이 `.bottom`이면 높이만 바뀌어 캐시 키(줄 배열·본문 폭·랩·탭 폭)가 그대로다. 그때는 `hold`가
+/// 켜져도 캐시가 맞아 저하 분기를 타지 않으므로, side를 따로 보지 않는다 — 판정을 늘리면 그 자리가
+/// 또 하나의 "빠뜨릴 수 있는 조건"이 된다.
 fn widthDragActive(self: *const AppSession) bool {
-    return self.pointerGestureIs(.sidebar_divider) or pane_ops.dividerCaptureActive(self);
+    return self.pointerGestureIs(.sidebar_divider) or
+        self.pointerGestureIs(.dock_outer_divider) or
+        pane_ops.dividerCaptureActive(self);
 }
 
 fn maxColsForRender(term: *Term) ?u32 {
@@ -3471,6 +3488,25 @@ test "폭 드래그 중에는 시각 행을 다시 세지 않고, 놓으면 정�
     try testing.expect(before > lines.len); // 실제로 접혔다 — 아니면 이 테스트가 아무것도 안 본다
 
     // ① 드래그 중: 폭을 여러 셀 줄여도 시각 행 수는 직전 값 그대로다.
+    //
+    // **폭을 끄는 제스처가 셋이라 셋을 다 본다.** dock을 빠뜨린 채로 첫 구현이 나갔고 적대적 검증이
+    // 그것을 잡았다 — 한 제스처만 검증하면 나머지가 조용히 빠진다(pane divider는 `InteractionState`가
+    // 들어 여기서 세울 수 없으므로 `PointerGestureOwner` 둘을 본다).
+    var held = fx.leaf_rect;
+    held.w = @divTrunc(held.w, 2);
+
+    fx.session.pointer_gesture_owner = .{ .sidebar_divider = .{ .start_pt = 0 } };
+    var by_sidebar = appendPaneFrame(fx.session, held, fx.term) orelse return error.EditorPaneDidNotDraw;
+    by_sidebar.dl.deinit(allocator);
+    try testing.expectEqual(before, fx.term.rt.editor_total_visual_rows);
+
+    // **dock도 같은 축이다** — `setDockSizeFromPointer`는 dock이 `.right`면 x를 끌고 `resizeTabPanes`로
+    // 전 탭 pane을 다시 재운다. 첫 구현이 이 경로를 빠뜨렸고 적대적 검증이 잡았다.
+    fx.session.pointer_gesture_owner = .{ .dock_outer_divider = .{ .offset_px = 0 } };
+    var by_dock = appendPaneFrame(fx.session, held, fx.term) orelse return error.EditorPaneDidNotDraw;
+    by_dock.dl.deinit(allocator);
+    try testing.expectEqual(before, fx.term.rt.editor_total_visual_rows);
+
     fx.session.pointer_gesture_owner = .{ .sidebar_divider = .{ .start_pt = 0 } };
     var narrow = fx.leaf_rect;
     // **조각 수가 실제로 달라질 만큼 좁힌다.** 몇 셀만 줄이면 같은 조각 수가 나와(실측: 10셀 축소에
@@ -3552,8 +3588,10 @@ test "[측정] 폭을 라이브로 끄는 드래그 — 캐시가 매 프레임 
 
         const cell_w: u32 = @intCast(fx.session.cell_width_px);
         // 저하를 켠 쪽과 안 켠 쪽을 **같은 조건에서** 잰다 — 제스처 유무가 유일한 차이다.
+        // 켠 쪽은 dock 경계 제스처로 세운다: 사이드바로만 재면 dock 경로가 빠져도 이 측정이 그대로
+        // 좋아 보인다(첫 구현이 실제로 그 상태였고 적대적 검증이 잡았다).
         for ([_]bool{ false, true }) |degrade| {
-            fx.session.pointer_gesture_owner = if (degrade) .{ .sidebar_divider = .{ .start_pt = 0 } } else .none;
+            fx.session.pointer_gesture_owner = if (degrade) .{ .dock_outer_divider = .{ .offset_px = 0 } } else .none;
             defer fx.session.pointer_gesture_owner = .none;
 
             const t0 = monotonicMsForTest();

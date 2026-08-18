@@ -828,6 +828,35 @@ MOUSE x=0 y=0  buttons=0xFF800000  flags=0x4    ← MOUSE_WHEELED, 상위 워드
 이 자리가 W7 전체에서 처음으로 **플랫폼 아래(PTY)가 중립 계약을 못 채운** 사례다 — §2h·§2i·§2j는 전부
 "중립 계약은 이미 서 있고 플랫폼은 어댑터"였다.
 
+### 2l. 사용자 config 를 실제로 읽는다 (W7.5 결정, 실측 2026-08-18)
+
+W7.4a~W7.4d가 값을 **하드코딩**해 두고 "W7.5에서 진짜 설정에서 온다"고 적어 둔 자리 넷을 닫는다 —
+`input.paste-protection`·`input.bracketed-paste-is-safe`·`input.right-click`·`input.word-separators`,
+그리고 `osc52.read`와 키바인딩이다. 진입점은 `config.loader.loadDefault` 하나다.
+
+**`Parsed`(arena)를 세션 내내 들고 있어야 한다.** 리졸버가 바인딩 슬라이스를, 코어가 문자열 값을 그
+arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loadDefault`의 계약이고 macOS도 같다.
+
+**검증에 실패하면 사용자 바인딩을 안 쓴다.** `KeyBindingResolver.validate()`가 중복·앱/터미널 충돌을
+거부하면 빌트인으로 접고 그 사실을 알린다(`rejected=true`). 모호한 바인딩을 그대로 쓰면 **어떤 키가
+어디로 갈지 매번 달라진다** — 조용히 하나를 고르는 것보다 접는 편이 낫다.
+
+**"값이 도착했다"와 "동작이 바뀐다"는 다르다.** 스모크가 읽은 값을 찍되(`config_input`·`config_osc52_read`·
+`config_bindings`), 판정은 **행동**으로 한다. 값만 찍으면 기본값과 같을 때 "읽었는데 기본값"과 "아예 안
+읽었다"를 구분할 수 없다. 실측 A/B 둘:
+
+| config | 우클릭 결과 |
+|---|---|
+| 없음(기본 `paste`) | `pastes=1 paste_bytes=21` |
+| `input.right-click = menu` | `pastes=0`, `right_click_menus_todo=1` |
+
+| config | 여러 줄 붙여넣기(개행 = 즉시 실행 트리거) |
+|---|---|
+| 없음(보호 켜짐) | `blocked=1 pastes=0` — "paste held: the content is risky" |
+| `input.paste-protection = false` | `pastes=1 paste_bytes=17` |
+
+두 번째가 **보안 설정이 실제로 게이트를 여닫는다**는 증거다. 값만 보고 넘어갔으면 못 봤을 자리다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어
@@ -1565,16 +1594,18 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
    ⓑ **OS API**(OSC 9;9 cwd·PEB `CurrentDirectory`·프로세스 열거) — 그 소비자가 W4·W7에서 생기므로 그때
    건다. ⓒ **config 파일** — **아직 안 걸렸다**(아래).
 
-   > **알려진 공백 — config에서 온 경로는 정규화되지 않는다.** Windows 사용자는 `workspace.root = C:\proj`나
-   > `shell.command = C:\…\pwsh.exe`처럼 자연스럽게 native로 적고, 로더는 그것을 **경고 없이 받아들인다**
-   > (실측: `isValidWorkspaceRoot("C:\proj")`가 참, 값에 역슬래시가 그대로 남는다). 지금 문제가 안 되는 것은
-   > 그 값을 소비하는 자리(`app_session`의 spawn·workspace)가 Windows에 아직 없기 때문이라, **W7에서 그
-   > 소비자가 생기는 순간 살아난다.**
+   > **닫혔다 — W7.5에서 ⑴(로더)로 정했다.** 근거는 이 규칙 자신이 "입구에서"라고 못 박은 것이다. ⑵
+   > (소비처마다)는 같은 규칙을 흩어 놓아 **한쪽만 고쳐지는 부류**를 만든다 — 같은 슬라이스에서 고친
+   > 루트 스트라이핑(§5.2 ⒝)이 정확히 그 사고였다.
    >
-   > 어디서 정규화할지가 결정 사항이다 — ⑴ 로더가 파싱하며(모든 소비자가 한 번에 덮이지만 중립 L2가
-   > 자기 입력을 고치는 모양) ⑵ 플랫폼이 config를 소비할 때(계약의 "입구" 정의에 맞지만 소비처마다 걸어야
-   > 한다). 어느 쪽이든 **경로 값 키만** 골라야 한다(`workspace.root`·`shell.command`·`window.background-image`
-   > — 스키마에 `abs_path` 표식이 이미 있다).
+   > 경로 키가 세 자리에 흩어져 있어 표식을 스키마 1급으로 올렸다. `Meta.path_value`를 더하고
+   > **`abs_path`가 그것을 함의**하게 했다 — 둘을 따로 적게 두면 한쪽만 붙이는 실수가 조용히 정규화를
+   > 건너뛴다. 걸린 곳은 `shell.command`(함의)·`window.background-image`(신규 표식)·`workspace.root`
+   > (명시 핸들러라 같은 헬퍼를 직접 부른다) 셋이다.
+   >
+   > POSIX 호스트에서는 무동작이다. 판정은 `path_shape.normalizeSeparatorsFor(os_tag, …)`가 소유하므로
+   > 두 갈래가 모든 타깃에서 테스트된다. 경로가 **아닌** text 필드(`input.word-separators`)는 안 건드리는
+   > 것도 테스트가 고정한다 — `\`를 값으로 쓰는 설정이 깨지면 안 된다.
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 

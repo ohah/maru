@@ -110,11 +110,52 @@ src/platform/
 | 코어 → 플랫폼 | 그 글자가 **컬러**인가(어느 아틀라스에 구울지) | `maru_mobile_missing_is_color` |
 | 플랫폼 → 코어 | 컬러 아틀라스에 구운 글리프 등록 | `maru_mobile_color_atlas_add` · `maru_mobile_next_color_slot` |
 | 코어 → 플랫폼 | 마지막 실패 이름(읽은 쪽이 비운다) | `maru_mobile_last_error` / `_clear_error` |
+| 플랫폼 → 코어 | 원격에서 읽은 바이트(SSH) | `maru_mobile_ssh_feed(h, bytes, len, &consumed)` |
+| 코어 → 플랫폼 | 원격으로 보낼 바이트 | `maru_mobile_ssh_out_ptr/len` · `_out_consume` |
+| 코어 → 플랫폼 | 화면에 그릴 원격 출력 | `maru_mobile_ssh_screen_ptr/len` · `_screen_consume` |
+| 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
+| 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
+| 플랫폼 → 코어 | 원격 출력을 화면에 넣는다 | `maru_mobile_term_write(bytes, len)` |
+| 코어 → 플랫폼 | 원격에 돌려보낼 답(DSR·DA) | `maru_mobile_take_response(out, cap)` |
+
+### 3.0 SSH 세션 — 여기만 핸들을 쓴다
+
+**소켓은 host 가 든다.** 브리지에 OS 호출이 0이라는 규칙(§2)은 원격에도 그대로 걸린다 — host 가
+TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트를 `out` 에서 가져가 보낸다.
+프로토콜 판단은 전부 코어가 한다([SSH 계약](ssh-client.md) §2). 단일 출처는
+`mobile_host_abi.h` 의 `MARU_SSH_*` 와 `src/platform/mobile/mobile_ssh.zig` 다.
+
+**나머지 ABI 는 화면이 하나라는 전제의 싱글턴인데, 원격 세션은 그렇지 않다.** 서버가 여럿일 수
+있고 **재접속은 새 세션**이다(SSH 에 재개가 없다 — SSH 계약 §4.1). 그래서 여기만 핸들을 쓰고,
+핸들에는 **세대**가 섞여 있다. 번호만 쓰면 닫은 뒤 재사용된 자리를 옛 핸들이 건드려 **끝난
+세션의 입력이 새 세션으로 나간다** — 증상이 원인과 멀어 잡기 어려운 부류라 자료구조로 막는다.
+
+**양방향에 배압이 있다.** `out`·`screen` 이 차면 `feed` 는 먹은 만큼만 알려 주고 멈춘다.
+`out` 은 **`consume` 할 때까지 남는다** — 소켓이 부분만 받아도 잃지 않는다(부분 전송은 예외가
+아니라 정상이다).
+
+**난수는 host 가 준다.** 이 층은 OS 를 못 부르는데 SSH 는 임시키·패딩·cookie 에 예측 불가능한
+바이트가 필요하다. `open` 이 32바이트 씨앗을 받아 CSPRNG 를 세우고, **0 씨앗은 거절한다** —
+그대로 열면 그 세션의 비밀이 통째로 깨지는데 화면은 멀쩡해서 아무도 모른다.
+
+**받은 바이트는 갈 곳이 있어야 한다.** `screen` 에서 가져온 것을 `maru_mobile_term_write` 로 넣고,
+코어가 만든 답은 `maru_mobile_take_response` 로 가져가 `maru_mobile_ssh_write` 로 **돌려보낸다** —
+안 돌려보내면 커서 위치를 묻는 프로그램이 답을 기다리며 멈춘다(그전에는 답을 버리고 이름만
+남겼는데, 그때는 돌려보낼 상대가 없었다). **어느 세션의 바이트인지는 아직 안 가른다** — 화면이
+하나이기 때문이고, 세션이 여럿이 되면 그 라우팅은 서버 목록(S9b)·세션 호스트 부착(S10)이 정한다.
+
+**실패는 두 벌로 답한다.** host 가 분기해야 하는 것(호스트키 승인 · 인증 실패)은 `MARU_SSH_ERR_*`
+정수 코드이고, 진단용 이름은 `maru_mobile_ssh_last_error` 다 — 이름만으로는 UI 를 못 고르고,
+코드만으로는 무엇이 틀렸는지 로그에 안 남는다.
 
 **브리지는 스레드를 모른다.** 자물쇠는 스레드가 둘인 플랫폼이 갖는다. Android 는 IME 가
 Java UI 스레드에서 오고 그리는 쪽은 NativeActivity 스레드라(실측 tid 14832 vs 14850) host 가
 `pthread_mutex` 로 브리지 호출을 직렬화한다. iOS 는 UIKit 이 둘 다 main 에서 부르므로 없다 —
 대칭이 깨진 게 아니라 사정이 다른 것이고, 그 차이는 각 host 파일 머리에 적는다.
+
+**SSH 가 이 사정을 바꾼다.** 소켓을 읽는 곳은 UI 스레드가 아니다(Android 는 포그라운드 서비스,
+iOS 는 백그라운드 큐) — 그래서 **iOS 도 직렬화가 필요해진다**. `maru_mobile_ssh_*` 는 그리기
+호출과 **같은 자물쇠** 안에서 불러야 한다.
 
 ### 3.1 포인터는 누가 해석하는가
 

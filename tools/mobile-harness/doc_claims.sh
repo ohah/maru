@@ -5,6 +5,9 @@
 # 판정자가 통째로 안 돈다(실제로 워크트리를 지우자 한 줄도 못 돌았다).
 cd "$(dirname "$0")/../.." || exit 1
 B=src/platform/mobile/mobile_bridge.zig
+# SSH ABI 는 별도 파일이지만 **같은 계약 아래 있다** — OS 호출 0·조용한 catch 0·헤더 대조를
+# 똑같이 받는다. 여기 안 적으면 새 파일만 규칙 밖에 선다.
+S=src/platform/mobile/mobile_ssh.zig
 H=src/platform/mobile/mobile_host_abi.h
 I=src/platform/ios/ios_app_host.m
 A=src/platform/android/android_app_host.c
@@ -18,14 +21,14 @@ ck() { # 이름, 기대, 실제
 }
 
 echo "§3 브리지에 OS 호출이 없다"
-ck "브리지의 @cImport/OS import" 0 "$(grep -cE '@cImport|std\.os\.|std\.posix\.' $B)"
+ck "브리지의 @cImport/OS import" 0 "$(grep -cE '@cImport|std\.os\.|std\.posix\.' $B $S | awk -F: '{s+=$2} END{print s+0}')"
 
 echo "§5 조용히 실패하지 않는다"
 # `catch {}` 만 세면 `catch return` 이 그대로 빠져나간다 — **연산을 끝내 버리는** 형태를 전부 본다.
 # `catch null` 은 세지 않는다: 그건 끝내는 게 아니라 **호출자가 검사해야 하는 값**을 돌려주는
 # 것이고, 실제로 그 자리(`keyFromId`)의 호출자가 `key_unknown_id` 를 남긴다. 오류를 남기고 도는
 # `catch { setLastError(...) ... }` 는 블록이 비지 않으므로 안 걸린다.
-ck "브리지의 조용한 catch" 0 "$(grep -cE 'catch \{\}|catch return' $B)"
+ck "브리지의 조용한 catch" 0 "$(grep -cE 'catch \{\}|catch return' $B $S | awk -F: '{s+=$2} END{print s+0}')"
 ck "두 host 가 last_error 를 읽고 비운다" 2 "$(grep -l maru_mobile_clear_error $I $A | wc -l | tr -d ' ')"
 
 echo "§4 셀 기하·글자 크기 단일 출처"
@@ -53,7 +56,7 @@ echo "ABI 헤더 ↔ Zig export"
 # 반환형은 소문자만이 아니다(`const MaruQuad *maru_mobile_quads(void);`) — 실제로 이 하나를
 # 놓쳐 집합이 어긋났다.
 h=$(grep -E '^[A-Za-z_][A-Za-z0-9_ ]*\*? *maru_mobile_[a-z_]+\(' $H | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
-z=$(grep -oE '^pub export fn maru_mobile_[a-z_]+' $B | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
+z=$(grep -hoE '^pub export fn maru_mobile_[a-z_]+' $B $S | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
 ck "선언 집합" "$(printf '%s' "$h" | wc -l | tr -d ' ')" "$(printf '%s' "$z" | wc -l | tr -d ' ')"
 if [ "$h" != "$z" ]; then
   printf "  틀림 %-42s\n" "선언 집합이 다르다 — 한쪽에만 있는 것:"

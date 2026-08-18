@@ -2353,8 +2353,21 @@ pub fn build(b: *std.Build) void {
     const run_i18n_literal_boundary_tests = b.addRunArtifact(i18n_literal_boundary_tests);
     run_i18n_literal_boundary_tests.setCwd(b.path("."));
 
+    // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
+    // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
+    const conflict_marker_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/conflict_markers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_conflict_marker_boundary_tests = b.addRunArtifact(conflict_marker_boundary_tests);
+    run_conflict_marker_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
+    boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);

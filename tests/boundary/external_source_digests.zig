@@ -601,7 +601,7 @@ pub const inventory = [_]Proof{
     // 4차 검증이 앵커를 뜨는 쪽은 여전히 스키마 다섯 종류만 안다는 것을 잡아 또 움직인다 — 팔레트·단축키·
     // 전역 단축키 행이 남아 있었고, 그중 전역 단축키 라벨은 `t(title_key)` 라 언어를 정통으로 탄다.
     // 합성 키로 그 셋까지 앵커하고, keep-alive 토글은 재적용 전에 전역을 세운다. count는 여전히 3이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "f58a2f2cbeb29347786ded0cb7c5a4a7d88080bbcd9f7ac9bb757c840c8e303a" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "f5a28ba7b7db842edec7e5bc6ff7b65e2008f9b0109f87d20791ee8d8bdd564b" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -644,5 +644,5 @@ pub const inventory = [_]Proof{
     // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
     // 4차 검증이 원자화의 **근거로 든 호출부를 같은 브랜치가 지웠다**는 것을 잡아 주석이 움직인다(워커는
     // 이제 키만 넘긴다). 원자성은 남긴다 — 그 규칙이 깨지는 것을 컴파일러가 말해 주지 않기 때문이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "a36b3213d631ef197ce63b173fd970ca1b1391d188d836a46f5cb9dcde6c10ec" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "7118af6286cd6e6c1b2ff2ec477e6d51b440f8665d2c073504c2548fee9d7654" },
 };

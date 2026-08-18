@@ -155,6 +155,22 @@ pub const CommitItem = struct {
     expanded: bool = false,
 };
 
+/// 에이전트 탭의 **턴 한 줄**(P5 — §3.5.4). 1급 항목은 파일이 아니라 턴이다.
+pub const TurnItem = struct {
+    /// 목록 안 자리(0 = 진행 중). 클릭 intent가 이것을 싣고 host가 같은 스냅샷에서 다시 찾는다.
+    index: u32 = 0,
+    /// 사람이 읽을 이름(`진행 중`·`마지막 턴`·`3턴 전`). **host가 만든다** — 세는 규칙이 화면 문구다.
+    title: []const u8,
+    /// 그 턴을 돌린 에이전트(`claude`·`codex`). 모르면 빈 문자열이고 그 자리는 비운다.
+    agent: []const u8 = "",
+    /// 이미 사람이 읽을 꼴로 만든 상대 시각. **진행 중은 빈 문자열**이다(끝나지 않았다).
+    when: []const u8 = "",
+    selected: bool = false,
+    expanded: bool = false,
+    /// 진행 중인 턴인가. 오른쪽이 **작업트리**라 계속 변한다는 사실을 화면이 말한다.
+    live: bool = false,
+};
+
 /// 펼친 커밋 아래의 파일 한 줄(P4b). 변경 사항 탭의 `FileItem`과 **다른 항목**이다 — 그쪽은 작업트리
 /// 상태이고 이쪽은 그 커밋이 바꾼 것이라, 클릭이 여는 비교 기준도 동작(스테이지)도 다르다.
 pub const CommitFileItem = struct {
@@ -183,6 +199,8 @@ pub const Item = union(enum) {
     /// 목록이 불완전하다는 진술(누를 수 없다).
     /// 히스토리 탭의 커밋 줄(P4).
     commit: CommitItem,
+    /// 에이전트 탭의 턴 줄(P5).
+    turn: TurnItem,
     /// 펼친 커밋 아래의 파일 줄(P4b).
     commit_file: CommitFileItem,
     /// 히스토리 목록 끝의 **더 보기**(P4). 상한만큼 읽었을 때만 선다 — 끝까지 읽었으면 없다(있으면
@@ -405,7 +423,8 @@ pub const DockMetrics = struct {
             // 커밋 줄은 파일 행과 같은 높이다 — 목록 두 탭이 같은 격자를 쓰면 탭을 오가도 눈이 안 튄다.
             // **두 줄이다**(§3.5.3): 제목 / 작성자·시각·해시. 한 줄에 몰면 좁은 도크에서 제목이 거의
             // 남지 않는다 — 목록에서 가장 중요한 것이 "무엇을 한 커밋인가"다.
-            .commit => self.commit_row_two_line_h,
+            // 턴 줄도 두 줄이다(제목 / 에이전트 · 시각) — 커밋 줄과 같은 격자를 쓴다.
+            .commit, .turn => self.commit_row_two_line_h,
             // 커밋 안의 파일 줄은 **파일 행과 같은 높이**다 — 두 탭이 같은 격자를 쓴다.
             .commit_file => self.row_h,
             .load_more => self.row_h,

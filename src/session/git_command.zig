@@ -87,6 +87,11 @@ pub const Kind = enum {
     /// **numstat은 읽지 않는다**(②d와 같은 판단): 파일 줄의 실체는 상태 문자와 경로이고, 증감 숫자는
     /// 프로세스를 하나 더 쓴다. 그 자리는 비워 두는 길이 이미 있다.
     commit_files,
+    /// 턴 하나가 바꾼 파일들(P5): `git diff --name-status <treeA> <treeB>`.
+    ///
+    /// **양쪽 다 tree다** — 그래서 작업트리가 어떻게 바뀌든 그 턴의 목록은 고정된다(§3.5.4가 타임라인을
+    /// 두 스냅샷 사이로 잡은 이유). 두 rev는 `arg`에 `<A> <B>`로 붙여 넘긴다.
+    turn_name_status,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -495,6 +500,26 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = arg orelse "HEAD";
             n += 1;
         },
+        .turn_name_status => {
+            buf[n] = "diff";
+            n += 1;
+            buf[n] = "--name-status";
+            n += 1;
+            buf[n] = "--find-renames";
+            n += 1;
+            buf[n] = "--no-ext-diff";
+            n += 1;
+            buf[n] = "--no-textconv";
+            n += 1;
+            // 두 tree는 **각각의 인자**여야 한다(`A..B`는 커밋 범위 문법이라 tree에는 쓰지 않는다).
+            // 호출자가 `<A> <B>`로 붙여 주고 여기서 공백에서 쪼갠다 — 이 층은 할당하지 않으므로 슬라이스만 나눈다.
+            const pair = arg orelse "";
+            const sep = std.mem.indexOfScalar(u8, pair, ' ') orelse pair.len;
+            buf[n] = pair[0..sep];
+            n += 1;
+            buf[n] = if (sep < pair.len) pair[sep + 1 ..] else "";
+            n += 1;
+        },
         .show_blob => {
             buf[n] = "show";
             n += 1;
@@ -846,4 +871,18 @@ test "isHexRev: rev 자리에 넣어도 되는 것만 통과한다" {
     try testing.expect(!isHexRev("HEAD"));
     try testing.expect(!isHexRev("abc")); // 너무 짧다
     try testing.expect(!isHexRev("650a0bb-x"));
+}
+
+test "turn_name_status: 두 tree를 각각의 인자로 넘긴다" {
+    // `A..B`는 커밋 범위 문법이라 tree에는 쓰지 않는다 — 둘을 각각 넘겨야 git이 tree 비교로 읽는다.
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.turn_name_status, "/usr/bin/git", "/repo", "aaaa111 bbbb222", &buf);
+    try testing.expectEqualStrings("aaaa111", argv[argv.len - 2]);
+    try testing.expectEqualStrings("bbbb222", argv[argv.len - 1]);
+    var saw_name_status = false;
+    for (argv) |a| {
+        if (std.mem.eql(u8, a, "--name-status")) saw_name_status = true;
+        try testing.expect(!std.mem.eql(u8, a, "--cached")); // 작업트리·index가 아니라 tree 둘이다
+    }
+    try testing.expect(saw_name_status);
 }

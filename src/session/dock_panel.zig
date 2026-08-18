@@ -84,6 +84,9 @@ pub const DiffBase = enum {
     /// 병합 커밋은 **첫 부모 기준**이다(`commit_files`가 같은 기준으로 목록을 낸다) — 목록과 본문이
     /// 다른 기준을 쓰면 목록에 있는 파일이 본문에서 "변경 없음"으로 보인다.
     commit,
+    /// 에이전트 타임라인의 **완료된 턴 하나**: `스냅샷[K+1] ↔ 스냅샷[K]`(P5). 양쪽 다 tree라
+    /// 작업트리가 어떻게 바뀌든 그 비교는 고정된다 — `turn`(마지막 스냅샷 ↔ 작업트리)과 **다른 기준**이다.
+    turn_range,
     /// 병합 충돌 중인 파일: `HEAD ↔ 작업트리`. index에 stage 0이 없어 `:<경로>`를 못 읽으므로(실측) 왼쪽을
     /// HEAD로 잡는다 — 그러면 작업트리의 충돌 표시를 그대로 볼 수 있다.
     conflict,
@@ -99,6 +102,7 @@ pub const DiffBase = enum {
             .conflict => i18n.t(.dock_conflict),
             .turn => i18n.t(.dock_last_turn),
             .commit => i18n.t(.dock_commit),
+            .turn_range => i18n.t(.dock_turn),
         };
     }
 };
@@ -214,6 +218,9 @@ pub const Entry = struct {
     diff_rel_path: []u8 = &.{},
     /// rename의 **옛 경로**(그 외 빈 값). 왼쪽(HEAD)은 이 경로로 읽어야 한다 — 새 경로는 HEAD에 없다.
     diff_orig_rel_path: []u8 = &.{},
+    /// `.turn_range` 기준의 **오른쪽 tree**(P5). 왼쪽은 아래 `diff_commit_oid`가 든다 — 두 기준이
+    /// "왼쪽 rev"라는 같은 자리를 공유하고, 오른쪽이 있는 기준만 이 값을 더 든다.
+    diff_right_oid: []u8 = &.{},
     /// `.commit` 기준이 비교할 **커밋 OID**(P4b). 왼쪽은 `<oid>^:<경로>`, 오른쪽은 `<oid>:<경로>`다.
     /// 다른 기준에서는 비어 있다 — 그 값들은 목록 읽기가 준 merge-base·스냅샷 tree를 쓴다.
     diff_commit_oid: []u8 = &.{},

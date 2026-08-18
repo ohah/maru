@@ -115,6 +115,11 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 5;
             bytes += commit.subject.len + commit.author.len + commit.when.len + commit.short_oid.len + commit.ref.len;
         },
+        // 제목·에이전트·시각 — 셋.
+        .turn => |turn| {
+            text_ops += 3;
+            bytes += turn.title.len + turn.agent.len + turn.when.len;
+        },
         // 아이콘·이름·경로·상태 문자 — 넷.
         .commit_file => |file| {
             text_ops += 4;
@@ -221,6 +226,8 @@ pub fn view(
                 try writer.commitButton(frame.tree.entries[face_index], button, state, tk, m);
             },
             .commit => |commit| try writer.commitRow(row, commit, m),
+            // 턴 줄도 두 줄이다: 제목 / 에이전트 · 시각. **진행 중은 시각이 없다**(끝나지 않았다).
+            .turn => |turn| try writer.turnRow(row, turn, m),
             // 목록 끝의 "더 보기". `모두 보기`와 같은 자리·같은 색이다(둘 다 목록을 늘리는 컨트롤이다).
             // 펼친 커밋의 파일 줄 — 상태 문자는 오른쪽 끝, 이름은 한 칸 더 들여쓴다(그 커밋에 속한다).
             .commit_file => |file| try writer.commitFileRow(row, file, m),
@@ -367,7 +374,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 히스토리 줄에는 행 동작이 없다(고르기뿐이다 — P4).
-        .repo, .commit, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => .none,
+        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => .none,
     };
 }
 
@@ -934,6 +941,52 @@ const Writer = struct {
             const w = self.measureBudget(commit.author);
             const x = rect.rect.x + inset;
             if (x + w < right) try self.emitAt(x, sub_y, commit.author, .muted_fg, .supporting);
+        }
+    }
+
+    /// 에이전트 탭의 턴 한 줄(P5 — §3.5.4).
+    ///
+    /// 위: 제목(`진행 중`·`마지막 턴`·`N턴 전`). 아래: 에이전트 · 상대시각(흐리게).
+    /// **진행 중은 강조색**이다 — 그 줄만 오른쪽이 작업트리라 계속 변한다는 사실을 색이 말한다.
+    fn turnRow(self: *Writer, rect: tree.RectEntry, turn: types.TurnItem, m: types.DockMetrics) ViewError!void {
+        const scale = effectiveScale(self.props.scale_milli);
+        const inset: f32 = @floatFromInt(m.inset_x);
+        const gap: f32 = @floatFromInt(m.gap);
+        const title_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        const sub_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
+        if (rect.rect.height < title_h + sub_h) return;
+        const pad_y = (rect.rect.height - title_h - sub_h) / 2;
+
+        const left = rect.rect.x + inset;
+        const right = rect.rect.x + rect.rect.width - inset;
+        if (right > left) {
+            try self.emit(
+                left,
+                rect.rect.y + pad_y,
+                turn.title,
+                self.colsFor(right - left),
+                // **강조색을 쓰지 않는다**: 이 테마에서 그 역할은 본문보다 흐려서, 진행 중 줄이 오히려
+                // 덜 중요해 보였다(제품 캡처 2026-08-18). "진행 중"이라는 말과 빈 시각이 이미 그 사실을
+                // 말하므로 색을 하나 더 얹지 않는다.
+                .surface_fg,
+                .control,
+                true,
+                @intFromFloat(@max(right - left, 0)),
+                .origin,
+            );
+        }
+
+        const sub_y = rect.rect.y + pad_y + title_h;
+        var sub_right = right;
+        if (turn.when.len > 0) {
+            const w = self.measureBudget(turn.when);
+            if (sub_right - w > left) {
+                try self.emitAt(sub_right - w, sub_y, turn.when, .muted_fg, .supporting);
+                sub_right -= w + gap;
+            }
+        }
+        if (turn.agent.len > 0 and left + self.measureBudget(turn.agent) < sub_right) {
+            try self.emitAt(left, sub_y, turn.agent, .muted_fg, .supporting);
         }
     }
 

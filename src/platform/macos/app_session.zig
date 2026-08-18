@@ -3846,6 +3846,10 @@ pub const AppSession = struct {
     /// 펼친 커밋에서 **지금 열어 둔 파일**의 자리(P4b). 목록이 무엇을 보고 있는지 말해야 파일 여럿을
     /// 오갈 때 길을 잃지 않는다.
     scm_selected_commit_file: ?u32 = null,
+    /// 에이전트 탭에서 **펼친 턴**의 자리(P5). 커밋과 마찬가지로 한 번에 하나만 펼친다.
+    scm_expanded_turn: ?u32 = null,
+    /// 지금 고른 턴의 자리(강조).
+    scm_selected_turn: ?u32 = null,
     scm_selected_row: ?usize = null,
     /// 강조된 행이 **어느 저장소의 것인가**(②d). 인덱스만 들면 저장소마다 따로 서는 모델에서 같은
     /// 번호의 남의 행이 함께 강조된다.
@@ -7805,7 +7809,9 @@ pub const AppSession = struct {
         if (entry.diff_orig_rel_path.len > 0) self.allocator.free(entry.diff_orig_rel_path);
         if (entry.diff_repo.len > 0) self.allocator.free(entry.diff_repo);
         if (entry.diff_commit_oid.len > 0) self.allocator.free(entry.diff_commit_oid); // P4b
+        if (entry.diff_right_oid.len > 0) self.allocator.free(entry.diff_right_oid); // P5
         entry.diff_commit_oid = &.{};
+        entry.diff_right_oid = &.{};
         entry.diff_rel_path = &.{};
         entry.diff_orig_rel_path = &.{};
         entry.diff_repo = &.{};
@@ -7862,8 +7868,12 @@ pub const AppSession = struct {
                 // 커밋 기준은 **그 비교가 든 커밋**이다(P4b) — 여기서 다시 구하면 그 사이 다른 커밋을
                 // 펼쳤을 때 남의 커밋을 읽는다.
                 .commit => entry.diff_commit_oid,
+                // 턴 범위는 **왼쪽 tree**를 여기로 보내고, 오른쪽 tree는 아래 인자가 따로 든다(P5).
+                .turn_range => entry.diff_commit_oid,
                 else => if (self.git_result) |r| r.merge_base else "",
             },
+            // 오른쪽 rev는 **턴 범위만** 갖는다(다른 기준은 작업트리이거나 커밋 자신이다).
+            if (entry.diff_base == .turn_range) entry.diff_right_oid else "",
             entry.diff_base,
             entry.diff_request_id,
         )) {
@@ -13851,6 +13861,22 @@ pub const AppSession = struct {
             scm_dock_ops.selectScmTab(self, tab);
             // MARU_FORCE_SCM_COMMIT_EXPAND=<n> — 그 자리의 커밋을 펼친 것처럼 만든다(P4b). 펼치기는
             // 클릭으로만 일어나므로 포인터 없는 캡처 하니스에서는 그 화면을 얻을 방법이 없다.
+            // MARU_FORCE_SCM_TURNS=<n> — 관측한 턴이 없는 하니스에서 타임라인을 찍기 위해 스냅샷을
+            // n개 심는다(P5). 링은 **이번 실행에서 관측한 것**이라 헤드리스에는 비어 있다.
+            if (tab == .agent) {
+                if (std.c.getenv("MARU_FORCE_SCM_TURNS")) |raw_count| {
+                    if (self.turn_ring.len == 0) {
+                        const count = std.fmt.parseInt(usize, std.mem.span(raw_count), 10) catch 3;
+                        const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+                        var i: usize = 0;
+                        while (i < count) : (i += 1) {
+                            var oid_buf: [16]u8 = undefined;
+                            const oid = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
+                            self.turn_ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                        }
+                    }
+                }
+            }
             if (tab == .history) {
                 if (std.c.getenv("MARU_FORCE_SCM_COMMIT_EXPAND")) |raw_index| {
                     if (self.scm_expanded_commit == null) {
@@ -13877,7 +13903,7 @@ pub const AppSession = struct {
         scm_dock_ops.drainScmLog(self); // 도착한 커밋 목록을 싣는다(P4)
         scm_dock_ops.pumpScmLog(self); // 히스토리 탭을 보고 있고 아직 못 읽었으면 읽기를 건다(P4)
         scm_dock_ops.drainCommitFiles(self); // 펼친 커밋의 파일 목록을 싣는다(P4b)
-        scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b)
+        scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b·P5 공용 슬롯)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -55380,6 +55406,92 @@ test "히스토리 탭에서는 커밋 상자가 키를 먹지 않는다 (P4 적
     // 그리고 쓰던 글은 **살아 있다** — 탭을 옮긴 것이 글을 버리는 동작은 아니다.
     scm_dock_ops.selectScmTab(session, .changes);
     try std.testing.expect(session.scmCommitOwnsInput());
+}
+
+test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)" {
+    // 지금 결함(§2)을 구조로 고친다: 턴 K를 **스냅샷 두 개 사이**로 잡으면 작업트리가 어떻게 바뀌든
+    // 그 항목이 고정된다. 진행 중만 오른쪽이 작업트리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .agent);
+
+    // 링이 비면 **오류가 아니라** "이번 실행에서 관측한 턴이 없다"이다.
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_turns), projection.items[0].notice);
+    }
+
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
+    session.turn_ring.push("aaaaaaa1111", 1, now_s - 7200, 1); // claude
+    session.turn_ring.push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 60초 미만이라 `방금`이다
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(usize, 2), projection.items.len); // 진행 중 + 턴 하나
+    const live = projection.items[0].turn;
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_turn_live), live.title);
+    try std.testing.expect(live.live);
+    try std.testing.expectEqualStrings("", live.when); // 아직 끝나지 않았다
+    const last = projection.items[1].turn;
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_turn_last), last.title);
+    try std.testing.expect(!last.live);
+    try std.testing.expectEqualStrings("codex", last.agent); // "누가"는 오른쪽 스냅샷이 든다
+    try std.testing.expectEqualStrings(maru.i18n.t(.ad_time_now), last.when);
+}
+
+test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 온다 (P5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .agent);
+    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+
+    // 완료된 턴(자리 1)을 펼친다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
+    try std.testing.expect(session.scm_expanded_turn != null);
+    session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\n");
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings("a.zig", projection.items[2].commit_file.name);
+    }
+
+    // 같은 줄을 다시 누르면 접힌다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
+    try std.testing.expect(session.scm_expanded_turn == null);
+}
+
+test "에이전트 탭: 진행 중인 턴은 tree 둘로 읽지 않는다 (P5)" {
+    // 오른쪽이 작업트리라 tree 비교가 성립하지 않는다 — 그 줄의 파일은 변경 사항 탭이 이미 보여 준다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    scm_dock_ops.selectScmTab(session, .agent);
+    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 0 }); // 진행 중
+    try std.testing.expect(session.scm_expanded_turn != null);
+    // 읽기를 걸지 않는다(키를 만들 수 없다).
+    scm_dock_ops.pumpCommitFiles(session);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_commit_files_inflight);
 }
 
 test "히스토리 탭: 커밋을 펼치면 그 커밋이 바꾼 파일이 아래에 온다 (P4b)" {

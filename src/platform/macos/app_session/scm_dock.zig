@@ -128,7 +128,7 @@ fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
     // 스크롤은 끝을 지나 빈 자리로 간다(적대적 4회차).
     // 요약 줄은 히스토리 탭에서 **자리까지** 없다(build가 높이 0으로 세운다) — 여기서도 같이 빼야
     // 호스트가 세는 창과 컴포넌트가 세우는 창이 갈리지 않는다.
-    const summary_h: u32 = if (self.scm_tab == .history) 0 else m.summary_h;
+    const summary_h: u32 = if (self.scm_tab == .changes) m.summary_h else 0;
     const fixed = m.tab_h + summary_h + if (has_branch) m.branch_h else 0;
     return content.h -| fixed;
 }
@@ -273,6 +273,7 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // **히스토리 탭은 다른 목록이다**(P4). 같은 스크롤·같은 격자를 쓰지만 행의 출처가 `git log`라
     // 여기서 갈린다 — 두 목록을 한 함수에 섞으면 "이 행이 어느 탭 것인가" 판정이 행마다 생긴다.
     if (self.scm_tab == .history) return projectHistory(self, arena);
+    if (self.scm_tab == .agent) return projectAgentTurns(self, arena);
 
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
@@ -486,6 +487,139 @@ fn revealCommitBox(self: *AppSession, items: []const component.types.Item, m: co
 /// 히스토리 탭의 투영(P4). 커밋 원문 한 덩어리를 행으로 편다.
 ///
 /// **상대 시각은 여기서 만든다** — component에는 시간이 없고, `%ar`는 git의 로케일·문구를 탄다.
+/// 에이전트 탭의 투영(P5 — §3.5.4). **1급 항목은 턴이다.**
+///
+/// 링은 **메모리·창 로컬**이라 앱을 껐다 켜면 사라진다 — 빈 목록은 오류가 아니라 "이번 실행에서 관측한
+/// 턴이 없다"이고, 안내 문구도 그렇게 쓴다.
+fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
+    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+
+    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
+    const rows = self.turn_ring.timeline(&rows_buf);
+
+    // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
+    var file_rows: usize = 0;
+    if (self.scm_expanded_turn != null) {
+        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        while (files.next()) |_| file_rows += 1;
+        if (file_rows == 0) file_rows = 1; // 읽는 중·실패·빈 턴을 한 줄로 말한다
+        if (self.scm_commit_files_truncated) file_rows += 1;
+    }
+    const notice_rows: usize = if (rows.len == 0) 1 else 0;
+    const items = arena.alloc(component.types.Item, rows.len + notice_rows + file_rows) catch return null;
+    var n: usize = 0;
+    if (rows.len == 0) {
+        items[0] = .{ .notice = maru.i18n.t(.scm_no_turns) };
+        n = 1;
+    }
+
+    for (rows, 0..) |row, index| {
+        if (n >= items.len) break;
+        const live = row.head == null;
+        // "언제·누가"는 **오른쪽 스냅샷**(그 턴이 끝난 순간)이 든다. 진행 중은 아직 끝나지 않았다.
+        const head = row.head;
+        items[n] = .{
+            .turn = .{
+                .index = @intCast(index),
+                .title = turnTitle(arena, row.back, live),
+                .agent = if (head) |snap| agentKindLabel(snap.agent_kind) else "",
+                .when = if (head) |snap|
+                    (if (snap.captured_s == 0) "" else relativeTime(self, arena, now_s - snap.captured_s))
+                else
+                    "",
+                .selected = self.scm_selected_turn != null and self.scm_selected_turn.? == index,
+                .expanded = self.scm_expanded_turn != null and self.scm_expanded_turn.? == index,
+                .live = live,
+            },
+        };
+        n += 1;
+        if (self.scm_expanded_turn == null or self.scm_expanded_turn.? != index) continue;
+
+        if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
+            if (n < items.len) {
+                items[n] = .{ .notice = if (self.scm_commit_files_failed)
+                    maru.i18n.t(.scm_turn_files_failed)
+                else
+                    maru.i18n.t(.scm_loading) };
+                n += 1;
+            }
+            continue;
+        }
+        if (self.scm_commit_files_truncated and n < items.len) {
+            items[n] = .{ .notice = maru.i18n.t(.scm_commit_files_truncated) };
+            n += 1;
+        }
+        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var file_index: u32 = 0;
+        var any_file = false;
+        while (files.next()) |entry| : (file_index += 1) {
+            if (n >= items.len) break;
+            any_file = true;
+            items[n] = .{
+                .commit_file = .{
+                    .index = file_index,
+                    .name = std.fs.path.basename(entry.path),
+                    .dir = entry.path[0 .. entry.path.len - std.fs.path.basename(entry.path).len],
+                    .status = commitFileStatus(entry.letter),
+                    .letter = entry.letter,
+                    .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
+                },
+            };
+            n += 1;
+        }
+        if (!any_file and n < items.len) {
+            items[n] = .{ .notice = maru.i18n.t(.scm_turn_no_files) };
+            n += 1;
+        }
+    }
+
+    const list_items = ScrollItems{ .items = items[0..n], .metrics = m };
+    const viewport_h = listViewportHeightPx(self, false);
+    const scroll = chrome.ui.scroll_area.project(
+        list_items,
+        ScrollItems.heightPx,
+        list_items.extent(viewport_h),
+        self.scm_scroll.offset_y_px,
+    );
+    return .{
+        .items = items[0..n],
+        .scroll = scroll,
+        .branch = "",
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .summary = .{ .added = 0, .removed = 0 },
+        .has_rows = rows.len > 0,
+        .file_count = 0,
+        .has_staged = false,
+    };
+}
+
+/// 턴 줄의 제목. **세는 규칙이 곧 화면 문구다** — `진행 중`·`마지막 턴`·`N턴 전`.
+fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
+    if (live) return maru.i18n.t(.scm_turn_live);
+    if (back == 1) return maru.i18n.t(.scm_turn_last);
+    return std.fmt.allocPrint(arena, "{d}{s}", .{ back, maru.i18n.t(.scm_turn_back_suffix) }) catch
+        maru.i18n.t(.scm_turn_last);
+}
+
+/// 에이전트 종류 라벨(모르면 빈 문자열 — 그 자리를 비운다).
+fn agentKindLabel(kind: u8) []const u8 {
+    // 값 집합이 갈리면 여기서 컴파일로 걸린다(순수 층은 정수만 받으므로 여기서 되돌린다).
+    const parsed: app_session_mod.AgentKind = switch (kind) {
+        0 => .none,
+        1 => .claude,
+        2 => .codex,
+        else => return "",
+    };
+    return switch (parsed) {
+        .none => "",
+        .claude => "claude",
+        .codex => "codex",
+    };
+}
+
 fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     // **벽시계다**(`awake`는 부팅 이후 경과라 커밋 시각과 뺄 수 없다 — 그러면 전부 "방금"이 된다).
@@ -663,6 +797,32 @@ fn openCommitFileDiff(self: *AppSession, index: u32) void {
     }
 }
 
+/// 펼친 턴의 그 파일 비교를 연다(P5). **양쪽 다 tree**라 작업트리를 읽지 않는다 — 그 턴의 결과가
+/// 지금 파일 상태와 무관하게 고정된다(§3.5.4가 타임라인을 두 스냅샷 사이로 잡은 이유).
+fn openTurnFileDiff(self: *AppSession, index: u32) void {
+    const repo = self.git_repo orelse return;
+    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    const key = expandedTurnKey(self, &key_buf) orelse return;
+    const sep = std.mem.indexOfScalar(u8, key, ' ') orelse return;
+    const base_tree = key[0..sep];
+    const head_tree = key[sep + 1 ..];
+    var it = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+    var i: u32 = 0;
+    while (it.next()) |entry| : (i += 1) {
+        if (i != index) continue;
+        if (!maru.session.repo_path.isSafeRelative(entry.path)) {
+            self.showNoticeKey(.git_path_outside_repo);
+            return;
+        }
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, entry.path }) catch return;
+        git_ops.openTurnDiffTerm(self, repo, abs, entry.path, entry.orig_path, base_tree, head_tree);
+        self.scm_selected_commit_file = index;
+        self.metal_dirty = true;
+        return;
+    }
+}
+
 /// `3시간 전`처럼 사람이 읽는 상대 시각. **arena에 만든다**(프레임 안에서만 쓴다).
 ///
 /// git의 `%ar`를 쓰지 않는 이유: 그 문구는 git의 로케일을 타서 같은 화면 안에서 다른 상대시각 표기와
@@ -709,7 +869,9 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .snapshot_generation = self.scm_dock_snapshot_generation,
         .active_tab = self.scm_tab, // 어느 탭이 활성인지는 세션이 든다(P4)
         // 히스토리에서 `+N -N`은 작업트리의 숫자라 커밋 목록과 관계가 없다 — 0으로 두면 틀린 진술이다.
-        .show_summary = self.scm_tab != .history,
+        // 히스토리·에이전트 탭에서 `+N -N`은 **작업트리의 숫자**라 그 목록과 관계가 없다 — 0으로 두면
+        // "바뀐 것이 없다"는 틀린 진술이고, 자리까지 없애야 빈 띠가 안 남는다.
+        .show_summary = self.scm_tab == .changes,
         .items = window,
         .scroll_offset_px = projection.scroll.offset_y_px,
         .content_h_px = projection.scroll.content_height_px,
@@ -1054,6 +1216,13 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         },
         // 펼친 커밋의 파일 → `커밋^ ↔ 커밋` 비교를 연다.
         .open_commit_file => |index| openCommitFileDiff(self, index),
+        // 턴 줄도 **고르기이자 펼치기**다(커밋 줄과 같은 규율).
+        .select_turn => |index| {
+            self.scm_selected_turn = index;
+            toggleTurnExpanded(self, index);
+            self.metal_dirty = true;
+        },
+        .open_turn_file => |index| openTurnFileDiff(self, index),
         .toggle_repo => |index| {
             // **인덱스는 목록 기준**이라 지금 목록에서 다시 찾는다 — 늦게 온 클릭이 다른 저장소를 접지
             // 않게(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
@@ -1161,6 +1330,39 @@ pub fn toggleCommitExpanded(self: *AppSession, oid: []const u8) void {
     self.metal_dirty = true;
 }
 
+/// 턴을 펼치거나 접는다(P5). 같은 줄을 다시 누르면 접힌다 — 커밋 줄과 같은 규율이고, 파일 목록
+/// 슬롯도 **같은 것**을 쓴다(두 탭 모두 한 번에 하나만 펼친다).
+pub fn toggleTurnExpanded(self: *AppSession, index: u32) void {
+    if (self.scm_expanded_turn) |current| {
+        self.scm_expanded_turn = null;
+        dropCommitFiles(self);
+        if (current == index) {
+            self.metal_dirty = true;
+            return;
+        }
+    }
+    self.scm_expanded_turn = index;
+    // 커밋 쪽 펼침도 함께 접는다 — 슬롯이 하나라 둘이 동시에 열려 있으면 서로의 파일을 그린다.
+    if (self.scm_expanded_commit) |oid| {
+        self.allocator.free(oid);
+        self.scm_expanded_commit = null;
+    }
+    self.metal_dirty = true;
+}
+
+/// 펼친 턴의 **두 tree**를 `<A> <B>` 키로 만든다(없으면 null — 그 자리에 턴이 없다).
+fn expandedTurnKey(self: *AppSession, buf: []u8) ?[]const u8 {
+    const index = self.scm_expanded_turn orelse return null;
+    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
+    const rows = self.turn_ring.timeline(&rows_buf);
+    if (index >= rows.len) return null;
+    const row = rows[index];
+    // **진행 중은 오른쪽이 작업트리**라 tree 둘로 읽을 수 없다 — 그 줄의 파일 목록은 이미 변경 사항
+    // 탭이 보여 주는 것과 같으므로 여기서 따로 읽지 않는다.
+    const head = row.head orelse return null;
+    return std.fmt.bufPrint(buf, "{s} {s}", .{ row.base.oid(), head.oid() }) catch null;
+}
+
 /// 펼친 커밋의 파일 원문을 버린다(다른 커밋을 펼쳤거나 접었다).
 fn dropCommitFiles(self: *AppSession) void {
     if (self.scm_commit_files_oid) |old| self.allocator.free(old);
@@ -1177,11 +1379,16 @@ fn dropCommitFiles(self: *AppSession) void {
 /// 공짜로 띄우는 일이다(§6 비용 규율, 히스토리 목록과 같은 판단).
 pub fn pumpCommitFiles(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
-    if (self.scm_tab != .history) return;
     if (self.scm_commit_files_inflight != 0) return;
-    const oid = self.scm_expanded_commit orelse return;
+    // 두 탭이 **같은 슬롯**을 쓴다(한 번에 하나만 펼친다). 무엇을 읽을지는 지금 보고 있는 탭이 정한다.
+    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    const key: []const u8 = switch (self.scm_tab) {
+        .history => self.scm_expanded_commit orelse return,
+        .agent => expandedTurnKey(self, &key_buf) orelse return,
+        .changes => return,
+    };
     if (self.scm_commit_files_oid) |current| {
-        if (std.mem.eql(u8, current, oid)) return; // 이미 그 커밋을 읽어 뒀다(실패도 답이다)
+        if (std.mem.eql(u8, current, key)) return; // 이미 그것을 읽어 뒀다(실패도 답이다)
     }
     const repo = self.git_repo orelse return;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1190,7 +1397,12 @@ pub fn pumpCommitFiles(self: *AppSession) void {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_commit_files_seq += 1;
-    if (!self.git_backend.?.submitCommitFiles(git_exe, repo, oid, self.scm_commit_files_seq)) return;
+    const submitted = switch (self.scm_tab) {
+        .history => self.git_backend.?.submitCommitFiles(git_exe, repo, key, self.scm_commit_files_seq),
+        .agent => self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq),
+        .changes => false,
+    };
+    if (!submitted) return;
     self.scm_commit_files_inflight = self.scm_commit_files_seq;
 }
 

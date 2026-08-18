@@ -76,6 +76,7 @@ cleanup() {
 	if [ -f "$DIR/sshd2.pid" ]; then kill "$(cat "$DIR/sshd2.pid")" 2>/dev/null || true; fi
 	if [ -f "$DIR/sshd3.pid" ]; then kill "$(cat "$DIR/sshd3.pid")" 2>/dev/null || true; fi
 	if [ -f "$DIR/sshd4.pid" ]; then kill "$(cat "$DIR/sshd4.pid")" 2>/dev/null || true; fi
+	if [ -f "$DIR/sshd5.pid" ]; then kill "$(cat "$DIR/sshd5.pid")" 2>/dev/null || true; fi
 	rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
@@ -207,11 +208,23 @@ ROUNDS=$((ROUNDS + 1))
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 self-rekey 65536
 ROUNDS=$((ROUNDS + 1))
 
+# 8) **배너 회차.** 서버가 `Banner` 를 켜면 `USERAUTH_BANNER` 가 온다(RFC 4252 §5.4 — 법적 고지).
+#    그것을 걸러서 호출자에게 주는 경로는 여기 말고 소비자가 없어서, 이 회차가 없으면 아무도
+#    `sanitizeBanner` 를 안 쓴다. 드라이버가 "배너를 받았나" 를 단언한다.
+printf 'AUTHORIZED USE ONLY\nThis system is monitored.\n' >"$DIR/banner.txt"
+start_sshd "$DIR/sshd5.pid" "$((PORT + 3))" "$DIR/sshd5.log" "echo MARU_BANNER_OK" "Banner $DIR/banner.txt" || {
+	sed -n '1,5p' "$DIR/sshd5.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 배너 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 1 0 banner
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 6 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 6 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 7 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 7 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 여섯 회차 완주"
+echo "[ssh-client-smoke] 일곱 회차 완주"

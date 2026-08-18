@@ -94,6 +94,9 @@ var screen_out: [1 << 19]u8 = undefined;
 var cl: client.Client = undefined;
 var prng = std.Random.DefaultPrng.init(0x5390);
 var got: usize = 0;
+var banners: usize = 0;
+var banner_seen: [256]u8 = undefined;
+var banner_len: usize = 0;
 
 fn fill() !void {
     if (in_len == in_buf.len) return error.InputBufferFull;
@@ -115,6 +118,16 @@ fn pump() !client.State {
     if (step.consumed > 0) consume(step.consumed);
     if (step.wire.len > 0) try sock.writeAll(step.wire);
     got += step.screen.len;
+    // **배너를 받았는지 센다.** 서버가 배너를 켰는데 0 이면 그 경로가 안 돌았다는 뜻이다 —
+    // `sanitizeBanner` 는 이 자리 말고는 소비자가 없어서, 안 세면 아무도 그것을 안 쓴다.
+    if (step.banner) |b| {
+        banners += 1;
+        if (banner_len == 0) {
+            const n = @min(b.len, banner_seen.len);
+            @memcpy(banner_seen[0..n], b[0..n]);
+            banner_len = n;
+        }
+    }
     return step.state;
 }
 
@@ -134,6 +147,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const expect_stderr = try std.fmt.parseInt(usize, expect_stderr_str, 10);
     const want_window = try std.fmt.parseInt(u32, window_arg, 10);
     const want_pty = std.mem.eql(u8, mode, "pty");
+    // 이 회차의 서버가 배너를 켰나(스크립트가 정한다).
+    const expect_banner = std.mem.eql(u8, mode, "banner");
     const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
         std.mem.eql(u8, mode, "self-rekey");
 
@@ -211,7 +226,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
     }
 
-    say("{s}: 화면 {d}B, 보낸 {d}B, 재키잉 {d} 회, exit-status {?d}", .{ mode, got, sent, cl.rekeys, cl.exit_status });
+    say("{s}: 화면 {d}B, 보낸 {d}B, 재키잉 {d} 회, 배너 {d} 개, exit-status {?d}", .{ mode, got, sent, cl.rekeys, banners, cl.exit_status });
+    if (banners > 0) say("  배너: {s}", .{std.mem.trim(u8, banner_seen[0..banner_len], "\n")});
+    // **배너를 기대했는데 0 이면 그 경로가 안 돈 것이다.** 서버가 켰는지는 호출자가 안다.
+    if (expect_banner and banners == 0) return fail("배너를 못 받았다 — 그 경로가 안 돌았다");
     if (got < expect_bytes + expect_stderr) return fail("출력이 모자란다 — 흐름 제어가 멈췄을 수 있다");
     say("OK", .{});
 }

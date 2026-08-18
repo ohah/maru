@@ -15,6 +15,7 @@ const editor = maru.session.editor;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
+const Pane = app_session_mod.Pane;
 const pane_ops = @import("pane.zig");
 const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
@@ -118,6 +119,12 @@ pub const PaneFrame = struct {
     /// 스크롤 **상한** `(줄, 조각)` — 같은 이유로 함께 낸다(§4.1d).
     max_top_line: usize,
     max_top_piece: u32,
+    /// 그린 막대의 기하(**pane 상대 좌표**). 드래그가 이것을 잡는다 — 호출자가 pane 원점을 더해
+    /// 창 좌표로 옮긴 뒤 `rt`에 싣는다(포인터는 창 좌표로 온다).
+    ///
+    /// 스크롤이 필요 없으면 `null`이고 그때는 막대도 없다.
+    scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
+    horizontal_scrollbar: ?chrome_editor.scrollbar.HorizontalGeometry = null,
 };
 
 /// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
@@ -170,7 +177,7 @@ pub fn buildPaneOps(
         .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
         scratch,
     );
-    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece };
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece, .scrollbar = w.scrollbar, .horizontal_scrollbar = w.horizontal_scrollbar };
 }
 
 /// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
@@ -376,6 +383,11 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
     term.rt.editor_max_top_line = pf.max_top_line;
     term.rt.editor_max_top_piece = pf.max_top_piece;
+    // **막대 기하를 창 좌표로 옮겨 싣는다.** 컴포넌트는 pane 상대(원점 0,0)로 그리고 포인터는 창
+    // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
+    // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
+    term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+    term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     // **아직 다 세지 못했으면 다음 프레임을 부른다**(§2.1 점진 계수). 이 렌더 루프는 dirty가 없으면
     // 투영을 건너뛰므로(idle skip), 이것을 안 세우면 진행이 거기서 멈춰 막대가 근사값인 채로 남는다.
     // 다 세면 더 요청하지 않으므로 idle로 돌아간다.
@@ -903,6 +915,165 @@ fn widthDragActive(self: *const AppSession) bool {
     return self.pointerGestureIs(.sidebar_divider) or
         self.pointerGestureIs(.dock_outer_divider) or
         pane_ops.dividerCaptureActive(self);
+}
+
+/// 편집기 스크롤바를 **잡았는가**. 잡았으면 드래그를 시작하고 `true`를 준다.
+///
+/// **세로·가로를 한 자리에서 판정한다** — 두 막대는 pane 안에서 겹치지 않으므로(세로는 오른쪽 거터,
+/// 가로는 아래 거터) 순서만 정하면 된다. 세로를 먼저 본다: 오른쪽 아래 모서리에서 둘이 만나면 세로가
+/// 이긴다(세로가 늘 있고 가로는 랩이면 없다).
+///
+/// 기하는 **렌더가 창 좌표로 실어 둔 값**을 쓴다(`rt.editor_scrollbar`) — 여기서 다시 계산하면
+/// "보이는 자리"와 "잡히는 자리"가 갈린다.
+pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    // **좌표가 가리키는 pane의 Term을 본다** — 활성 pane을 가정하면 split에서 다른 열의 막대를 눌렀을 때
+    // 엉뚱한 문서가 스크롤된다(`beginDividerCapture`가 좌표로 판정하는 것과 같은 규율이다).
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return false;
+
+    if (term.rt.editor_scrollbar) |bar| {
+        if (bar.trackContains(x_px, y_px)) {
+            self.editor_scrollbar_term = term;
+            if (self.dock_list_scroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorScrollFromBarPx(self, jumped);
+            self.scrollbar_drag_target = .editor_vertical;
+            self.pointer_gesture_owner = .none;
+            self.metal_dirty = true;
+            return true;
+        }
+    }
+    if (term.rt.editor_horizontal_scrollbar) |bar| {
+        if (bar.trackContains(x_px, y_px)) {
+            self.editor_scrollbar_term = term;
+            if (self.editor_hscroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorHScrollFromBarPx(self, jumped);
+            self.scrollbar_drag_target = .editor_horizontal;
+            self.pointer_gesture_owner = .none;
+            self.metal_dirty = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// 진행 중인 편집기 막대 드래그의 move/up. 좌표를 흡수만 하고 **tick이 최종 하나를 적용한다**
+/// (CIM2 §4.3 — move 수가 아니라 tick 수가 상한이다).
+pub fn routeScrollbarCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
+    switch (self.scrollbar_drag_target) {
+        .editor_vertical => {
+            if (kind == 2) {
+                self.dock_list_scroll_drag.absorb(x_px, y_px);
+            } else {
+                self.dock_list_scroll_drag.end();
+                self.scrollbar_drag_target = .none;
+                self.editor_scrollbar_term = null;
+            }
+            return true;
+        },
+        .editor_horizontal => {
+            if (kind == 2) {
+                self.editor_hscroll_drag.absorb(x_px, y_px);
+            } else {
+                self.editor_hscroll_drag.end();
+                self.scrollbar_drag_target = .none;
+                self.editor_scrollbar_term = null;
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// 편집기 막대 드래그가 진행 중인가 — `mouse()`가 **다른 판정보다 먼저** 물어야 한다(이관 계약 §2:
+/// "진행 중인 capture가 최우선"). 안 그러면 포인터가 본문 위로 지나는 순간 드래그가 끊긴다.
+pub fn scrollbarCaptureActive(self: *const AppSession) bool {
+    return self.scrollbar_drag_target == .editor_vertical or self.scrollbar_drag_target == .editor_horizontal;
+}
+
+/// 세로 막대 드래그가 준 **px offset**을 편집기 좌표 `(논리 줄, 조각)`으로 옮긴다.
+///
+/// **왜 변환이 필요한가.** 막대는 `시각 행 × 셀 높이`로 만들어지는데(스크롤바 컴포넌트) 편집기가 드는
+/// 좌표는 논리 줄과 조각이다. 랩·접힘 때문에 둘은 **비선형**이라 비율로 근사하면 손가락과 화면이
+/// 어긋난다 — 접두합(`RowCache.prefix`)을 되짚어야 정확하다.
+///
+/// **아직 다 세지 못한 구간은 "줄당 한 행"으로 친다**(§2.1 점진 계수와 같은 근사). 그 구간에서는 드래그가
+/// 조금 어긋나지만, 계수가 끝나면 다음 드래그부터 정확하다 — 화면을 멈추는 것보다 낫다.
+pub fn setEditorScrollFromBarPx(self: *AppSession, offset_px: u32) void {
+    // **잡은 Term에 간다** — 드래그 도중 포커스가 옮겨져도 손가락이 잡은 그 문서가 움직여야 한다.
+    const term = self.editor_scrollbar_term orelse return;
+    if (term.kind != .editor) return;
+    const cell_h: u32 = @intCast(self.cell_height_px);
+    if (cell_h == 0) return;
+    const target_row: u32 = offset_px / cell_h;
+
+    const c = &term.rt.editor_row_cache;
+    var line: usize = target_row;
+    var piece: u32 = 0;
+    if (c.filled and c.filled_upto > 0 and c.prefix.len > c.filled_upto) {
+        // 접두합에서 `prefix[i] <= target < prefix[i+1]`인 i를 찾는다 — 그 i가 논리 줄이고 나머지가 조각.
+        if (target_row < c.prefix[c.filled_upto]) {
+            var lo: usize = 0;
+            var hi: usize = c.filled_upto; // prefix[hi] > target 이 보장된다
+            while (lo + 1 < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (c.prefix[mid] <= target_row) lo = mid else hi = mid;
+            }
+            line = lo;
+            piece = target_row - c.prefix[lo];
+        } else {
+            // 안 센 구간 — 줄당 한 행으로 친다.
+            line = c.filled_upto + (target_row - c.prefix[c.filled_upto]);
+            piece = 0;
+        }
+    }
+
+    // **상한을 넘지 않는다**(§4.1d) — 렌더가 실어 둔 값이 단일 출처다.
+    if (line > term.rt.editor_max_top_line) {
+        line = term.rt.editor_max_top_line;
+        piece = term.rt.editor_max_top_piece;
+    } else if (line == term.rt.editor_max_top_line and piece > term.rt.editor_max_top_piece) {
+        piece = term.rt.editor_max_top_piece;
+    }
+
+    if (line == term.rt.editor_first_line and piece == term.rt.editor_first_piece) return;
+    term.rt.editor_first_line = line;
+    term.rt.editor_first_piece = piece;
+    self.metal_dirty = true;
+}
+
+/// 가로 막대 드래그가 준 **px offset**을 **열**로 옮긴다. 세로와 달리 선형이다(열 × 셀 폭).
+pub fn setEditorHScrollFromBarPx(self: *AppSession, offset_px: u32) void {
+    const term = self.editor_scrollbar_term orelse return;
+    if (term.kind != .editor) return;
+    const cell_w: u32 = @intCast(self.cell_width_px);
+    if (cell_w == 0) return;
+    const col_u32 = @min(offset_px / cell_w, @as(u32, chrome_editor.frame.max_first_col));
+    const col: u16 = @intCast(col_u32);
+    if (col == term.rt.editor_first_col) return;
+    term.rt.editor_first_col = col;
+    self.metal_dirty = true;
+}
+
+/// pane 상대 막대 기하를 **창 좌표**로 옮긴다. 축마다 옮길 필드가 달라 둘로 나뉜다 —
+/// 한 함수에 담으면 세로의 `hit_x`와 가로의 `hit_y` 중 무엇을 옮기는지가 인자 순서에 숨는다.
+fn shiftScrollbar(bar: chrome.ui.scroll_area.ScrollbarGeometry, dx: i32, dy: i32) chrome.ui.scroll_area.ScrollbarGeometry {
+    var out = bar;
+    const fx: f32 = @floatFromInt(dx);
+    const fy: f32 = @floatFromInt(dy);
+    out.track_x += fx;
+    out.track_y += fy;
+    out.hit_x += fx;
+    out.thumb_y += fy;
+    return out;
+}
+
+fn shiftHorizontalScrollbar(bar: chrome_editor.scrollbar.HorizontalGeometry, dx: i32, dy: i32) chrome_editor.scrollbar.HorizontalGeometry {
+    var out = bar;
+    const fx: f32 = @floatFromInt(dx);
+    const fy: f32 = @floatFromInt(dy);
+    out.track_x += fx;
+    out.track_y += fy;
+    out.hit_y += fy;
+    out.thumb_x += fx;
+    return out;
 }
 
 /// 비교 뷰의 **좌우 가장 긴 줄**을 센다(§4.1a — 가로 막대가 첫 프레임부터 서야 그 축이 있다는 것을
@@ -3672,6 +3843,99 @@ test "[측정] 드래그를 놓는 순간 — 점진 계수가 그 값을 프레
             t5 - t4,
         });
     }
+}
+
+test "세로 막대를 끌면 문서가 그만큼 움직인다 — px를 (줄, 조각)으로 되짚는다" {
+    // 막대는 **시각 행 × 셀 높이**로 만들어지는데 편집기 좌표는 `(논리 줄, 조각)`이다. 랩 때문에 둘은
+    // 비선형이라 비율로 근사하면 손가락과 화면이 어긋난다 — 접두합을 되짚어야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // **줄 길이를 섞는다.** 모두 같은 길이면 시각 행 ↔ 논리 줄이 **선형**이라, 접두합을 안 쓰고 비율로
+    // 근사해도 같은 답이 나온다 — 그러면 이 테스트가 역매핑을 검증하지 못한다(뮤턴트로 확인했다).
+    const long_line = "이 줄은 좁은 pane에서 여러 조각으로 접힐 만큼 길다 — 그래야 시각 행이 논리 줄보다 많아진다";
+    const lines = try allocator.alloc([]const u8, 600);
+    defer allocator.free(lines);
+    // 앞쪽 절반은 짧고 뒤쪽 절반은 길다 — **한쪽에 몰려야** 비선형이다. 균등하게 섞으면 논리 줄 절반이
+    // 시각 행도 절반이라 비율 근사와 답이 같아진다(그 픽스처로는 뮤턴트가 안 죽는 것을 확인했다).
+    for (lines, 0..) |*l, i| l.* = if (i < lines.len / 2) "짧다" else long_line;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    // 계수가 끝날 때까지 그린다(점진 계수 — §2.1). 그래야 접두합이 정확하다.
+    var guard: usize = 0;
+    while (guard < 64) : (guard += 1) {
+        var f = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        f.dl.deinit(allocator);
+        if (fx.term.rt.editor_row_cache.filled_upto >= lines.len) break;
+    }
+    const bar = fx.term.rt.editor_scrollbar orelse return error.NoScrollbar;
+
+    // 막대 중간쯤을 잡아 끈다.
+    try testing.expect(beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(bar.track_x), @floatCast(bar.thumb_y)));
+    try testing.expect(scrollbarCaptureActive(fx.session));
+    const mid_y: f64 = @as(f64, bar.track_y) + @as(f64, bar.track_h) / 2;
+    _ = routeScrollbarCapture(fx.session, 2, @floatCast(bar.track_x), mid_y);
+    scroll_ops.applyPendingScrollbarScroll(fx.session);
+
+    // 실제로 움직였고, 상한을 넘지 않았다.
+    try testing.expect(fx.term.rt.editor_first_line > 0);
+    try testing.expect(fx.term.rt.editor_first_line <= fx.term.rt.editor_max_top_line);
+
+    // **판정은 "끈 자리에 막대가 서는가"다** — 그것이 드래그가 옳다는 뜻이다(손가락과 막대가 어긋나지
+    // 않는다). 다시 그려 새 thumb 위치를 본다.
+    //
+    // 비율 근사로 계산하면 앞쪽이 짧고 뒤쪽이 긴 이 문서에서 **다른 시각 행에 서므로** thumb이 손가락을
+    // 벗어난다(그 뮤턴트가 여기서 죽는다). thumb 위를 잡았으므로 `grab_dy`가 0이라, 끈 y가 곧 새 thumb의
+    // 위쪽이어야 한다.
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    after.dl.deinit(allocator);
+    const bar2 = fx.term.rt.editor_scrollbar orelse return error.NoScrollbar;
+    const drift = @abs(@as(f64, bar2.thumb_y) - mid_y);
+    // 한 줄이 한 시각 행이므로 셀 높이 두 칸이면 "같은 자리"다(반올림·clamp 여유).
+    try testing.expect(drift <= @as(f64, @floatFromInt(fx.session.cell_height_px * 2)));
+
+    // up이 캡처를 끝낸다.
+    _ = routeScrollbarCapture(fx.session, 3, @floatCast(bar.track_x), mid_y);
+    try testing.expect(!scrollbarCaptureActive(fx.session));
+}
+
+test "가로 막대를 끌면 열이 움직인다 — 세로와 축이 다르다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    // 랩을 끄고 아주 긴 줄을 준다 — 그래야 가로 막대가 선다(랩이면 축 자체가 없다).
+    const wide = "const value = compute(index); // " ++ ("가로로 아주 긴 줄이다 " ** 20);
+    const lines = try allocator.alloc([]const u8, 40);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = wide;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_max_cols = 0;
+    ensureMaxCols(fx.term, false); // 여는 경로가 부르는 그대로 — 줄을 직접 꽂았으니 여기서 센다
+
+    var f = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    f.dl.deinit(allocator);
+    const bar = fx.term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
+
+    try testing.expect(beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(bar.thumb_x), @floatCast(bar.track_y)));
+    try testing.expectEqual(@as(@TypeOf(fx.session.scrollbar_drag_target), .editor_horizontal), fx.session.scrollbar_drag_target);
+
+    const mid_x: f64 = @as(f64, bar.track_x) + @as(f64, bar.track_w) / 2;
+    _ = routeScrollbarCapture(fx.session, 2, mid_x, @floatCast(bar.track_y));
+    scroll_ops.applyPendingEditorHScroll(fx.session);
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+
+    _ = routeScrollbarCapture(fx.session, 3, mid_x, @floatCast(bar.track_y));
+    try testing.expect(!scrollbarCaptureActive(fx.session));
 }
 
 test "[측정] 폭을 라이브로 끄는 드래그 — 캐시가 매 프레임 무효다 (§2.1 남은 구간)" {

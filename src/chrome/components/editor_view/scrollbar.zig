@@ -16,6 +16,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
+const continuous_drag = @import("../../ui/continuous_drag.zig");
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -107,6 +108,108 @@ pub const HorizontalGeometry = struct {
     thumb_x: f32,
     thumb_w: f32,
     max_offset_px: u32,
+
+    /// thumb을 잡은 지점(`grab_dx` = 누른 x - thumb left)을 유지한 채 pointer를 따라가는 offset.
+    ///
+    /// **세로(`scroll_area.ScrollbarGeometry.offsetForPointer`)와 같은 식이고 축만 뒤집혔다.** 그것을
+    /// 재사용하지 않는 이유는 이 타입이 별도인 이유와 같다 — 같은 함수에 담으면 `thumb_y`가 사실은 x라는
+    /// 식이 되어, 읽는 쪽이 매번 축을 되짚어야 한다.
+    pub fn offsetForPointer(self: HorizontalGeometry, pointer_x: f64, grab_dx: f32) u32 {
+        if (!std.math.isFinite(pointer_x) or !std.math.isFinite(grab_dx)) return 0;
+        const travel = self.track_w - self.thumb_w;
+        if (travel <= 0 or self.max_offset_px == 0) return 0;
+        const thumb_left = std.math.clamp(
+            pointer_x - @as(f64, grab_dx),
+            @as(f64, self.track_x),
+            @as(f64, self.track_x + travel),
+        );
+        const ratio = (thumb_left - @as(f64, self.track_x)) / @as(f64, travel);
+        const scaled = @round(ratio * @as(f64, @floatFromInt(self.max_offset_px)));
+        return @intFromFloat(std.math.clamp(scaled, 0, @as(f64, @floatFromInt(self.max_offset_px))));
+    }
+
+    /// thumb 바깥 track click은 그 지점에 thumb 중앙을 놓는다(세로와 같은 규칙).
+    pub fn offsetForTrackClick(self: HorizontalGeometry, pointer_x: f64) u32 {
+        return self.offsetForPointer(pointer_x, self.thumb_w / 2);
+    }
+
+    pub fn thumbContains(self: HorizontalGeometry, x: f64) bool {
+        return x >= self.thumb_x and x < self.thumb_x + self.thumb_w;
+    }
+
+    /// 같은 track에서 offset만 바뀐 기하(세로 `withOffset`의 짝). track click이 화면을 옮긴 **직후**의
+    /// thumb 자리를 알아야 이어지는 드래그의 grab 지점이 튀지 않는데, 그 시점에는 아직 새 프레임이
+    /// 그려지지 않았다.
+    pub fn withOffset(self: HorizontalGeometry, offset_px: u32) HorizontalGeometry {
+        if (self.max_offset_px == 0) return self;
+        var next = self;
+        const travel = self.track_w - self.thumb_w;
+        const ratio = @as(f32, @floatFromInt(@min(offset_px, self.max_offset_px))) / @as(f32, @floatFromInt(self.max_offset_px));
+        next.thumb_x = self.track_x + travel * ratio;
+        return next;
+    }
+
+    /// 포인터가 가로 막대를 잡는가 — **보이는 막대가 아니라 아래 거터 전체**로 판정한다(세로가 좌우
+    /// 거터로 판정하는 것과 같다). 축이 뒤집혀 여기서는 `hit_y`/`hit_h`가 그 띠다.
+    pub fn trackContains(self: HorizontalGeometry, x: f64, y: f64) bool {
+        return y >= self.hit_y and y < self.hit_y + self.hit_h and
+            x >= self.track_x and x < self.track_x + self.track_w;
+    }
+};
+
+/// 가로 막대 드래그의 수명(세로 `scroll_area.Drag`의 축 뒤집힌 짝).
+///
+/// **흡수·중복 억제 규율도 같다**(CIM2 §4.3) — move는 좌표를 덮어쓰기만 하고 tick이 최종 하나를
+/// 적용하며, clamp 결과가 같으면 effect를 재실행하지 않는다. 그것을 `Coalescer`가 소유한다.
+pub const HorizontalDrag = struct {
+    active: bool = false,
+    coalescer: continuous_drag.Coalescer(u32) = .{},
+    /// 누른 x - thumb left. 이것을 유지해야 손가락과 막대가 어긋나지 않는다.
+    grab_dx: f32 = 0,
+    geometry: HorizontalGeometry = .{
+        .track_x = 0,
+        .track_y = 0,
+        .track_w = 0,
+        .track_h = 0,
+        .hit_y = 0,
+        .hit_h = 0,
+        .thumb_x = 0,
+        .thumb_w = 0,
+        .max_offset_px = 0,
+    },
+
+    /// 누른 자리가 thumb 밖이면 **먼저 그 지점으로 뛴 뒤** 그 위치를 잡은 것으로 친다(세로와 같은
+    /// 규칙 — 그래야 눌렀다 끌기 시작하는 순간 위치가 튀지 않는다). 뛴 offset을 돌려준다.
+    pub fn begin(self: *HorizontalDrag, bar: HorizontalGeometry, x: f64, y: f64) ?u32 {
+        if (!bar.trackContains(x, y)) return null;
+        if (bar.thumbContains(x)) {
+            self.* = .{ .grab_dx = @floatCast(x - @as(f64, bar.thumb_x)), .geometry = bar, .active = true };
+            return null;
+        }
+        const jumped = bar.offsetForTrackClick(x);
+        self.* = .{ .grab_dx = bar.thumb_w / 2, .geometry = bar.withOffset(jumped), .active = true };
+        return jumped;
+    }
+
+    /// move 하나를 흡수한다(tick이 최종 하나만 적용한다).
+    pub fn absorb(self: *HorizontalDrag, x_px: f64, y_px: f64) void {
+        if (!self.active) return;
+        self.coalescer.absorb(x_px, y_px);
+    }
+
+    /// tick이 소비한다. clamp 결과가 직전과 같으면 `null` — 경계에 닿은 채 미는 동안 effect가
+    /// 반복되지 않는다.
+    pub fn takeOffset(self: *HorizontalDrag) ?u32 {
+        if (!self.active) return null;
+        const point = self.coalescer.take() orelse return null;
+        const offset = self.geometry.offsetForPointer(point.x_px, self.grab_dx);
+        if (!self.coalescer.commitIfChanged(offset)) return null;
+        return offset;
+    }
+
+    pub fn end(self: *HorizontalDrag) void {
+        self.* = .{};
+    }
 };
 
 pub const HorizontalProps = struct {

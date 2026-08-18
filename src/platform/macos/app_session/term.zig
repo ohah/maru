@@ -572,6 +572,16 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
     // `pane.terms`에서 빼는 경로만 덮는데, **in-place 교체**(respawnEndedPlaceholder·rebuildFileTermSurface)는
     // 길이를 안 바꾸고 슬롯만 갈아끼운 뒤 옛 Term을 해제한다 — 길이 검사만으로는 그 dangling을 못 잡는다.
     tab_ops.cancelTabDragForTerm(self, term);
+    // 편집기 막대 드래그도 `*Term`을 프레임 간 들고 있다 — 같은 barrier가 필요하다(죽은 포인터로
+    // 스크롤하면 그 자리에서 터진다).
+    if (self.editor_scrollbar_term == term) {
+        self.editor_scrollbar_term = null;
+        self.dock_list_scroll_drag.end();
+        self.editor_hscroll_drag.end();
+        if (self.scrollbar_drag_target == .editor_vertical or self.scrollbar_drag_target == .editor_horizontal) {
+            self.scrollbar_drag_target = .none;
+        }
+    }
     notifySurfaceClosed(self, surface_id);
     // 이 surface로 가던 미전송 입력 큐를 회수한다 — flush는 맵 순회 중이라 엔트리를 못 지우고 비우기만 한다
     // (pending_pastes 주석). 잔여 바이트는 대상이 사라졌으니 버린다(다시 쓸 수 없다).

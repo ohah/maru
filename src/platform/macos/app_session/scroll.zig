@@ -162,8 +162,21 @@ pub fn applyPendingScrollbarScroll(self: *AppSession) void {
     switch (self.scrollbar_drag_target) {
         .overlay => setOverlayScrollOffsetPx(self, offset_px),
         .sidebar => sidebar_ops.setSidebarScrollOffsetPx(self, offset_px),
+        // **편집기는 px를 자기 단위로 옮긴다**(scroll-area.md 소비자 표) — 세로는 `(논리 줄, 조각)`이라
+        // 시각 행으로 나눈 뒤 접두합을 되짚고, 가로는 열이라 셀 폭으로 나눈다.
+        .editor_vertical => editor_ops.setEditorScrollFromBarPx(self, offset_px),
+        .editor_horizontal => {}, // 가로는 자기 Drag가 소비한다(아래 `applyPendingEditorHScroll`)
         .dock_list, .none => dock_ops.setDockListScrollOffsetPx(self, offset_px),
     }
+}
+
+/// 편집기 **가로** 막대의 tick 소비. 세로와 나눈 이유는 드래그 상태 타입이 다르기 때문이다
+/// (`HorizontalDrag` — `grab_dx` + `HorizontalGeometry`). 흡수·중복 억제 규율은 세로와 같다.
+pub fn applyPendingEditorHScroll(self: *AppSession) void {
+    if (self.scrollbar_drag_target != .editor_horizontal) return;
+    const offset_px = self.editor_hscroll_drag.takeOffset() orelse return;
+    self.scrollbar_scroll_applications +|= 1;
+    editor_ops.setEditorHScrollFromBarPx(self, offset_px);
 }
 
 /// 소스 컨트롤 목록의 스크롤 좌표계(SV3a). **브랜치 헤더 한 줄을 뺀** 나머지가 뷰포트다 — 헤더는

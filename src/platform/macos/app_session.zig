@@ -1645,6 +1645,15 @@ const TermRuntime = struct {
     /// `line == 0 and piece == 0`이면 아직 안 그렸거나 문서가 화면에 다 들어간다.
     editor_max_top_line: usize = 0,
     editor_max_top_piece: u32 = 0,
+    /// 렌더가 실어 두는 **막대 기하**(창 좌표). 포인터가 막대를 잡았는지 판정하고 드래그가 이 값으로
+    /// offset을 계산한다 — `editor_max_top_line`을 싣는 것과 같은 관례다(렌더만 아는 값을 입력이 쓴다).
+    ///
+    /// **창 좌표로 옮겨 싣는다.** 컴포넌트는 pane 상대로 그리는데(원점 0,0) 포인터는 창 좌표로 오므로,
+    /// 둘을 같은 축에서 비교하지 않으면 "보이는 자리"와 "잡히는 자리"가 갈린다.
+    ///
+    /// 스크롤이 필요 없으면 `null`이다 — 그때는 막대도 없다.
+    editor_scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
+    editor_horizontal_scrollbar: ?chrome.components.editor_view.scrollbar.HorizontalGeometry = null,
     /// 비교 뷰 **오른쪽 열**의 가로 위치. 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구하므로
     /// (editor-surface-dock §3.5) 좌우가 각자 든다 — 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
     /// 다른 쪽이 엉뚱한 곳을 본다. 단일 파일 편집기는 이 값을 쓰지 않는다(§4.1e).
@@ -4197,7 +4206,19 @@ pub const AppSession = struct {
     /// `dock_list_scroll_drag`(기하·coalescing)는 하나로 두고 대상만 여기서 가른다. 발행 저장소를
     /// 나눈 것과는 이유가 다르다 — 저장소는 둘이 동시에 화면에 있어서 나눴고, 이건 동시에 잡히지
     /// 않아서 합쳤다.
-    scrollbar_drag_target: enum { none, dock_list, sidebar, overlay } = .none,
+    /// 스크롤바 드래그가 **누구의 것인가**(scroll-area.md 소비자 표의 "대상 태그"). capture 수명과
+    /// tree·매핑은 공유하고 `offset_px`를 무엇으로 해석할지만 여기서 갈린다.
+    ///
+    /// 편집기는 축이 둘이라 태그도 둘이다 — 세로는 `(논리 줄, 조각)`, 가로는 **열**로 해석하므로
+    /// 같은 태그로 묶으면 어느 축의 offset인지 모른다.
+    scrollbar_drag_target: enum { none, dock_list, sidebar, overlay, editor_vertical, editor_horizontal } = .none,
+    /// 편집기 **가로** 막대의 드래그 수명. 세로는 도크와 공유하는 `dock_list_scroll_drag`를 쓰지만
+    /// 그것은 세로 전용 타입이라(`grab_dy` + `ScrollbarGeometry`) 가로는 자기 짝이 필요하다.
+    editor_hscroll_drag: chrome.components.editor_view.scrollbar.HorizontalDrag = .{},
+    /// 편집기 막대 드래그가 **잡은 Term**. 드래그 도중 포커스가 옮겨져도 손가락이 잡은 그 문서가
+    /// 움직여야 하므로 활성 Term을 다시 묻지 않는다. Term이 죽으면 비운다(`invalidateForFreedPane`·
+    /// `destroyTerm` 경로) — 죽은 포인터로 스크롤하면 그 자리에서 터진다.
+    editor_scrollbar_term: ?*Term = null,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
     // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
     // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.
@@ -9857,6 +9878,11 @@ pub const AppSession = struct {
         if (scroll_ops.scrollbarCaptureActive(self) and (kind == 2 or kind == 3)) {
             if (scroll_ops.routeScrollbarCapture(self, kind, y_px)) return true;
         }
+        // **편집기 막대 드래그도 진행 중이면 최우선이다**(이관 계약 §2 — 포인터가 본문 위로 지나도
+        // 소유권이 넘어가지 않는다). 축이 둘이라 x·y를 함께 넘긴다(가로는 x를 본다).
+        if (editor_ops.scrollbarCaptureActive(self) and (kind == 2 or kind == 3)) {
+            if (editor_ops.routeScrollbarCapture(self, kind, x_px, y_px)) return true;
+        }
         if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
             if (kind == 2) scroll_ops.dragScrollbarTo(self, y_px) else {
                 self.finishPointerGesture();
@@ -10565,8 +10591,23 @@ pub const AppSession = struct {
                     self.mouse_drag_selecting = false;
                     return;
                 }
+                // ⓑ 편집기 스크롤바 클릭 → 막대 드래그(세로·가로). **divider 뒤·pane 선택 앞**이다 —
+                //    divider는 pane 경계(seam)라 더 바깥이고, 막대는 pane 안쪽 거터라 pane 선택보다
+                //    먼저 봐야 한다(안 그러면 막대를 눌러도 그냥 pane 포커스만 옮겨진다).
+                //    기하는 렌더가 창 좌표로 실어 둔 값을 쓴다 — 여기서 다시 계산하면 보이는 자리와
+                //    잡히는 자리가 갈린다.
+
                 // ② split에서 다른 panel의 터미널 영역 클릭 → 그 pane 포커스(활성 panel이면 아래 선택 경로로).
                 if (Model.paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
+                    // ⓑ 그 pane의 편집기 스크롤바를 눌렀는가 — **포커스 이동보다 먼저** 본다. 막대를
+                    //    눌렀는데 포커스만 옮겨지면 한 번 더 눌러야 끌 수 있다. 좌표가 가리키는 pane을
+                    //    넘기므로 split에서 다른 열의 막대도 그 열이 스크롤된다.
+                    if (editor_ops.beginScrollbarGesture(self, pane, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane); // 잡았으면 그 pane이 활성이 되는 것이 자연스럽다
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
                     if (pane != pane_ops.activePane(self) and pane_ops.focusPaneByPtr(self, pane)) {
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
@@ -13766,6 +13807,8 @@ pub const AppSession = struct {
         // 스크롤만 "놓아야 움직이는" 것으로 보였다(제보).
         pane_ops.applyPendingDividerResize(self);
         scroll_ops.applyPendingScrollbarScroll(self);
+        // 편집기 **가로** 막대는 드래그 상태 타입이 달라(축이 뒤집혔다) 소비도 따로 돈다.
+        scroll_ops.applyPendingEditorHScroll(self);
         // Session Dock scrollbar도 같은 규율이다 — 도크의 drag는 chrome interaction tree가 소유하지만
         // 소비 지점은 동일하게 tick 하나다.
         agent_dock.applyAgentSessionDockScrollDrag(self);

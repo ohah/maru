@@ -299,6 +299,9 @@ pub const Written = struct {
     /// 그린 막대의 기하. 스크롤이 필요 없으면 `null`이고 그때는 막대 op도 없다.
     /// 드래그·클릭을 붙일 때 호출자가 쓴다(`scroll_area.offsetForPointer`).
     scrollbar: ?scroll_area.ScrollbarGeometry,
+    /// 그린 **가로** 막대의 기하. 축이 뒤집혀 타입이 따로다(`scrollbar.HorizontalGeometry`) — 세로와
+    /// 한 타입에 담으면 `thumb_y`가 사실은 x라는 식이 된다. 랩이 켜졌거나 넘치지 않으면 `null`이다.
+    horizontal_scrollbar: ?scrollbar.HorizontalGeometry = null,
 };
 
 /// 한 프레임을 조립해 `scratch.ops` 앞쪽을 채운다. 반환한 `ops` 개수만큼이 유효하다.
@@ -547,6 +550,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
+        .horizontal_scrollbar = hw.geometry,
     };
 }
 

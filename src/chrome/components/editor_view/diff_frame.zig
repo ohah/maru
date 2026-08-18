@@ -15,6 +15,7 @@
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
+const scrollbar_mod = @import("scrollbar.zig");
 const frame = @import("frame.zig");
 const gutter = @import("gutter.zig");
 const geometry = @import("geometry.zig"); // 본문 열 수 — 가로 막대가 서는지 판정할 때 쓴다
@@ -76,9 +77,18 @@ pub const Written = struct {
     max_top_piece: u32 = 0,
     visual_rows: usize,
     truncated: bool,
-    /// 오른쪽 열이 시작하는 x. **아직 소비처가 없다** — 히트테스트(어느 열을 눌렀나)가 붙을 때
-    /// 쓰라고 함께 낸다. 지금 두 열을 가르는 테스트들은 `columns()`를 다시 불러 같은 값을 얻는다.
+    /// 오른쪽 열이 시작하는 x. 히트테스트(어느 열을 눌렀나)가 쓴다 — 제품은 같은 판정을
+    /// `isRightColumn`으로 하고, 그쪽은 `columns()`를 다시 불러 같은 값을 얻는다.
     split_x: i32,
+    /// 좌우 막대의 기하(드래그가 잡는다). **세로는 값이 같지만 자리가 둘**이라 각각 낸다 — 어느 쪽을
+    /// 눌러도 같은 곳으로 가지만, 눌렀는지 판정하려면 두 자리를 다 알아야 한다.
+    ///
+    /// **가로는 값도 다르다**(§3.5 — 가로는 각자다). 원본과 수정본의 가장 긴 줄이 달라 막대 길이도
+    /// 갈린다.
+    left_scrollbar: ?scroll_area.ScrollbarGeometry = null,
+    right_scrollbar: ?scroll_area.ScrollbarGeometry = null,
+    left_horizontal_scrollbar: ?scrollbar_mod.HorizontalGeometry = null,
+    right_horizontal_scrollbar: ?scrollbar_mod.HorizontalGeometry = null,
 };
 
 pub const Columns = struct { left: draw.Rect, right: draw.Rect };
@@ -297,6 +307,10 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         .visual_rows = @max(lw.visual_rows, rw.visual_rows),
         .truncated = lw.truncated or rw.truncated or moved < rw.ops,
         .split_x = cols.right.x,
+        .left_scrollbar = lw.scrollbar,
+        .right_scrollbar = rw.scrollbar,
+        .left_horizontal_scrollbar = lw.horizontal_scrollbar,
+        .right_horizontal_scrollbar = rw.horizontal_scrollbar,
     };
 }
 

@@ -24,6 +24,7 @@ const chrome_editor = maru.chrome.components.editor_view;
 const editor_ops = @import("editor.zig");
 const term_ops = @import("term.zig");
 const pane_ops = @import("pane.zig");
+const scroll_ops = @import("scroll.zig");
 
 /// diff Term 하나가 드는 것. **행들은 줄 배열을 빌리고, 줄 배열은 entry의 두 쪽 버퍼를 빌린다** —
 /// 그래서 entry 내용이 갈릴 때 `invalidate`가 먼저 불려야 한다(호출자 계약).
@@ -1569,6 +1570,90 @@ test "비교가 서면 좌우 가장 긴 줄을 센다 — 가로 막대가 첫 
 
     try testing.expect(fx.term.rt.editor_max_cols > 0); // 왼쪽도 셌다
     try testing.expect(fx.term.rt.editor_max_cols_right > fx.term.rt.editor_max_cols); // 오른쪽이 더 길다
+}
+
+test "비교의 가로 막대는 잡은 열만 민다 — 오른쪽을 끌면 오른쪽만 (§3.5)" {
+    // §3.5가 *"가로는 각자다"*를 요구한다 — 좌우 줄 길이가 달라 한쪽을 따라가면 반대쪽이 엉뚱한 곳을
+    // 본다. 막대도 각자이므로 **잡은 막대의 열만** 움직여야 한다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+
+    // 양쪽 모두 넘치게 준다 — 그래야 막대가 좌우에 다 선다.
+    var lb: std.ArrayList(u8) = .empty;
+    defer lb.deinit(allocator);
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    for (0..300) |_| try lb.append(allocator, 'L');
+    try lb.append(allocator, '\n');
+    for (0..400) |_| try rb.append(allocator, 'R');
+    try rb.append(allocator, '\n');
+    var entry = testEntry(lb.items, rb.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    // **Fixture는 Term을 pane에 붙이기만 한다** — 드래그 진입점이 `pane.activeTerm()`을 보므로
+    // 여기서 활성으로 만든다(제품에서는 파일을 열면 그 Term이 활성이 된다).
+    fx.session.focusTerm(pane_ops.activePane(fx.session).terms.items.len - 1);
+    poll(fx.session, fx.term);
+
+    var f = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    f.dl.deinit(allocator);
+
+    const right_bar = fx.term.rt.editor_horizontal_scrollbar_right orelse return error.NoRightHorizontalScrollbar;
+    const left_before = fx.term.rt.editor_first_col;
+
+    // 오른쪽 막대를 끈다.
+    try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(right_bar.thumb_x), @floatCast(right_bar.track_y)));
+    const mid_x: f64 = @as(f64, right_bar.track_x) + @as(f64, right_bar.track_w) / 2;
+    _ = editor_ops.routeScrollbarCapture(fx.session, 2, mid_x, @floatCast(right_bar.track_y));
+    scroll_ops.applyPendingEditorHScroll(fx.session);
+
+    // **오른쪽만 움직였다** — 왼쪽까지 따라가면 §3.5가 깨진다.
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+    try testing.expectEqual(left_before, fx.term.rt.editor_first_col);
+
+    _ = editor_ops.routeScrollbarCapture(fx.session, 3, mid_x, @floatCast(right_bar.track_y));
+    try testing.expect(!editor_ops.scrollbarCaptureActive(fx.session));
+}
+
+test "비교의 세로 막대는 좌우 어느 쪽을 잡아도 같은 곳으로 간다 — 세로는 공유다 (§3.5)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+
+    // 같은 문서를 두 번 세워 왼쪽 막대와 오른쪽 막대를 각각 끌고 결과를 비교한다.
+    var results: [2]usize = undefined;
+    for ([_]bool{ false, true }, 0..) |use_right, idx| {
+        var fx = try Fixture.init(allocator);
+        defer fx.deinit(allocator);
+        // **좌우가 달라야 비교가 선다** — 같은 내용을 주면 `view = unchanged`가 되어 상태 문구 한 줄만
+        // 그리고 막대가 아예 없다(첫 시도가 그랬다).
+        var left: std.ArrayList(u8) = .empty;
+        defer left.deinit(allocator);
+        var right: std.ArrayList(u8) = .empty;
+        defer right.deinit(allocator);
+        for (0..200) |_| try left.appendSlice(allocator, "line\n");
+        for (0..200) |_| try right.appendSlice(allocator, "LINE\n");
+        var entry = testEntry(left.items, right.items);
+        fx.term.file_entry = &entry;
+        fx.term.rt.editor_wrap = false;
+        fx.session.focusTerm(pane_ops.activePane(fx.session).terms.items.len - 1);
+        poll(fx.session, fx.term);
+        var f = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+        f.dl.deinit(allocator);
+
+        const bar = (if (use_right) fx.term.rt.editor_scrollbar_right else fx.term.rt.editor_scrollbar) orelse return error.NoScrollbar;
+        try testing.expect(editor_ops.beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), @floatCast(bar.track_x), @floatCast(bar.thumb_y)));
+        const mid_y: f64 = @as(f64, bar.track_y) + @as(f64, bar.track_h) / 2;
+        _ = editor_ops.routeScrollbarCapture(fx.session, 2, @floatCast(bar.track_x), mid_y);
+        scroll_ops.applyPendingScrollbarScroll(fx.session);
+        results[idx] = fx.term.rt.editor_first_line;
+        _ = editor_ops.routeScrollbarCapture(fx.session, 3, @floatCast(bar.track_x), mid_y);
+    }
+    try testing.expect(results[0] > 0); // 실제로 움직였다
+    try testing.expectEqual(results[0], results[1]); // 좌우가 같은 곳으로 갔다
 }
 
 test "비교 뷰에서는 접기를 거절한다 — 성공을 돌려주고 아무 일도 안 하면 안 된다" {

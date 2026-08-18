@@ -68,14 +68,15 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 4(아이콘·이름·ahead/behind·원격 갱신 칩) + 호버 동작 1.
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 5(아이콘·이름·↑·↓·원격 갱신 칩) + 호버 동작 1.
     // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
-    var text_ops: usize = 10;
+    var text_ops: usize = 11;
     var quad_extra: usize = 0;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
-    bytes += props.branch.len + icon_bytes + count_digits * 2 + 8; // 브랜치 줄
+    // 브랜치 줄 — 이름·아이콘 + `↑ N`/`↓ N` 둘(화살표 3바이트 + 공백 + 자릿수).
+    bytes += props.branch.len + icon_bytes + (count_digits + 5) * 2;
     // 원격 갱신 칩 — **긴 쪽으로 잡는다**(도는 중 문구가 더 길다). 모자라면 도크가 통째로 빈다.
     bytes += @max(i18n.t(.scm_fetch).len, i18n.t(.scm_fetching).len);
 
@@ -312,9 +313,28 @@ pub fn view(
                 fetch_right = m.inset_x + @as(u32, @intFromFloat(@max(chip.rect.width, 0))) + m.gap;
             }
             if (props.has_ab) {
-                var buf: [32]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "↑{d} ↓{d}", .{ props.ahead, props.behind }) catch "";
-                try writer.trailing(rect, text, .muted_fg, .supporting, fetch_right);
+                // ── ahead/behind는 **조각 둘**이다(사용자 지적 2026-08-18). 한 문자열로 그리면 ⑴ 화살표와
+                // 숫자가 붙어 읽기 어렵고 ⑵ 색이 하나라 "보낼 것"과 "받을 것"이 같은 무게로 보인다.
+                // 목록이 이미 `+N` 초록 / `-N` 빨강을 쓰므로 같은 role을 그대로 빌려 온다 — 같은 패널
+                // 안에서 색의 뜻이 갈리지 않는다. **0은 회색**이다: 색은 "할 일이 있다"는 신호여야 한다.
+                var behind_buf: [24]u8 = undefined;
+                var ahead_buf: [24]u8 = undefined;
+                const behind_text = std.fmt.bufPrint(&behind_buf, "↓ {d}", .{props.behind}) catch "";
+                const ahead_text = std.fmt.bufPrint(&ahead_buf, "↑ {d}", .{props.ahead}) catch "";
+                const behind_w = try writer.trailingWidth(
+                    rect,
+                    behind_text,
+                    if (props.behind > 0) .git_deleted_fg else .muted_fg,
+                    .supporting,
+                    fetch_right,
+                );
+                _ = try writer.trailingWidth(
+                    rect,
+                    ahead_text,
+                    if (props.ahead > 0) .git_added_fg else .muted_fg,
+                    .supporting,
+                    fetch_right + behind_w + m.gap,
+                );
             }
         }
     }
@@ -1159,6 +1179,28 @@ const Writer = struct {
         );
     }
 
+    /// `trailing`의 **폭을 돌려주는** 판. 오른쪽 끝에서부터 조각을 여러 개 쌓을 때 쓴다 — 다음 조각의
+    /// `right_inset`이 이 값에서 나온다. 못 그렸으면 0이라 그 자리만큼 다음 조각이 오른쪽으로 붙는다.
+    fn trailingWidth(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, right_inset: u32) ViewError!u32 {
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < line_h or rect.rect.width <= 0) return 0;
+        const width = self.measureBudget(source);
+        const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset)) - width;
+        if (x < rect.rect.x) return 0;
+        try self.emit(
+            x,
+            rect.rect.y + (rect.rect.height - line_h) / 2,
+            source,
+            self.colsFor(width),
+            role,
+            text_role,
+            false,
+            @intFromFloat(@max(width, 0)),
+            .origin,
+        );
+        return @intFromFloat(@max(width, 0));
+    }
+
     /// rect 안에서 가로·세로 중앙에 놓는 글자(행 동작 버튼).
     fn centered(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole) ViewError!void {
         const line_h = typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli));
@@ -1472,7 +1514,7 @@ test "행 글자와 요약·브랜치가 한 번에 나온다" {
     try testing.expectEqual(tokens.ColorRole.git_added_fg, findExactText(draws, "+12").?.role); // 요약 줄
     try testing.expectEqual(tokens.ColorRole.git_deleted_fg, findExactText(draws, "-3").?.role);
     try testing.expect(findText(draws, "main") != null); // 브랜치 줄
-    try testing.expect(findText(draws, "↑2") != null);
+    try testing.expect(findText(draws, "↑ 2") != null);
 }
 
 test "상태 문자는 종류마다 다른 색 역할로 나온다(색만으로 구분하지 않되, 색은 다르다)" {
@@ -1586,9 +1628,14 @@ test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 
     // **켜진 칩은 강조색이다** — 꺼진 것과 같은 회색이면 "누를 수 있다"가 화면에 하나도 안 남는다
     // (브랜치 줄에는 행 호버 밴드가 없어서 색이 유일한 신호다).
     try testing.expectEqual(tokens.ColorRole.accent_bar, chip.role);
-    const ab = findText(draws, "↑2 ↓1") orelse return error.MissingAheadBehind;
-    // ahead/behind가 칩보다 **왼쪽**이다. 같은 자리면 두 글자가 포개져 둘 다 못 읽는다.
-    try testing.expect(ab.origin.x < chip.origin.x);
+    // ahead/behind는 조각 둘이고 **색이 갈린다**: 보낼 것은 초록(`+N`과 같은 role), 받을 것은 빨강.
+    const ahead = findExactText(draws, "↑ 2") orelse return error.MissingAheadBehind;
+    const behind = findExactText(draws, "↓ 1") orelse return error.MissingAheadBehind;
+    try testing.expectEqual(tokens.ColorRole.git_added_fg, ahead.role);
+    try testing.expectEqual(tokens.ColorRole.git_deleted_fg, behind.role);
+    // 왼쪽부터 `↑` → `↓` → 칩 순서다. 같은 자리면 글자가 포개져 셋 다 못 읽는다.
+    try testing.expect(ahead.origin.x < behind.origin.x);
+    try testing.expect(behind.origin.x < chip.origin.x);
     // 칩은 브랜치 줄의 rect 안에 있다 — 글자가 tree가 준 자리를 벗어나면 히트 사각형과 어긋난다.
     const chip_rect = frame.tree.entries[frame.tree.find(build.NodeIds.fetch) orelse return error.MissingFetch].rect;
     try testing.expect(@as(f32, @floatFromInt(chip.origin.x)) >= chip_rect.x);

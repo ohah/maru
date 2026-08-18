@@ -530,7 +530,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         },
         .variant = .surface,
         .paint = .{
-            .background = .inset_bg,
+            // **면을 파 내지 않는다**(사용자 지적 2026-08-18): 배경은 줄과 같고 글자색만 다르다. 그래도
+            // 카드로 두는 이유는 호버·눌림 해석이다 — 그 상태에서만 면이 밝아져 "누르는 것"이라고 말한다.
+            .background = .surface_bg,
             // **각진 모서리다.** 이 도크의 카드는 전부 그렇다(위 계약 — 줄들이 표의 행으로 읽혀야 한다).
             // 둥근 것이 필요한 자리는 badge(개수 pill)가 따로 있고 그건 카드가 아니라 paint다.
             .corner_radii_px = .{ 0, 0, 0, 0 },

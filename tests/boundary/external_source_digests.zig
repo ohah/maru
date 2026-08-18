@@ -524,7 +524,7 @@ pub const inventory = [_]Proof{
     // 동작 클릭을 먼저 보는 분기와 그 호버 배경을 얹는 자리가 생긴다. count 는 2 그대로다 — 새 `@field`
     // 반사가 없고 Client 구성·receiver 집합도 건드리지 않는다.
     // P6a 원격 갱신으로 또 움직인다: fetch in-flight 상태 셋(`scm_fetch_inflight`·`_seq`·`_repo`)이 붙고
-    // tick이 그 결과를 거두는 호출 하나가 는다. **쓰기 상태와 따로 두는 것이 계약이다** — fetch는 index를
+    // tick이 그 결과를 거두는 호출 둘(결과 거둠 · 캡처 게이트)이 는다. **쓰기 상태와 따로 두는 것이 계약이다** — fetch는 index를
     // 만지지 않아 §6 직렬화 대상이 아니다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·
     // receiver 집합도 건드리지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "40ef6f6c748dad2fcabce848c52d8fe0222845ab2e26660f90e34a8847f2dfa9" },

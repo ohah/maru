@@ -13925,6 +13925,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
+        debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
@@ -56484,6 +56485,41 @@ test "소스 컨트롤: 원격이 없으면 fetch를 걸지 않고 이유를 적
     git_backend_mod.worker_allocator.free(session.git_result.?.remotes);
     session.git_result.?.remotes = try git_backend_mod.worker_allocator.dupe(u8, "origin\n");
     try std.testing.expect(scm_dock_ops.scmHasRemote(session));
+
+    // **저장소가 바뀌면 그 문구는 사라진다.** 남겨 두면 다른 저장소의 목록 위에서 하지도 않은 일을
+    // 한 것처럼 말한다(결과 줄은 "방금 누른 동작"의 것이고 그 동작에는 대상이 있다).
+    // **여기서 실제 제출을 태우지 않는다** — worker가 detached라 테스트 종료와 경합한다(git_backend의
+    // 수명 테스트가 같은 이유로 spawn을 피한다). 지우는 규칙만 보는 자리다.
+    scm_dock_ops.setScmWriteNoticeForTest(session, maru.i18n.t(.scm_fetch_done));
+    try std.testing.expect(session.scm_write_error != null);
+    git_ops.rememberGitRepo(session, "/other-repo");
+    try std.testing.expect(session.scm_write_error == null);
+}
+
+test "소스 컨트롤: 방금 누른 동작의 결과는 어느 탭에서도 보인다 (P6)" {
+    // `가져오기`는 **브랜치 줄**에 있어 히스토리·에이전트 탭에서도 눌린다. 결과 줄이 변경 사항 탭에만
+    // 있으면 다른 탭에서는 눌러도 아무 말이 없어 "고장"으로 읽힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    const message = maru.i18n.t(.scm_fetch_done);
+    session.scm_write_error = try allocator.dupe(u8, message);
+
+    for ([_]chrome.components.scm_dock.types.Tab{ .changes, .history, .agent }) |tab| {
+        session.scm_tab = tab;
+        const projection = scm_dock_ops.project(session, arena_state.allocator()) orelse return error.MissingProjection;
+        try std.testing.expect(projection.items.len > 0);
+        switch (projection.items[0]) {
+            .notice => |text| try std.testing.expectEqualStrings(message, text),
+            else => return error.FirstRowIsNotTheNotice,
+        }
+    }
 }
 
 test "소스 컨트롤: fetch는 쓰기 슬롯을 잡지 않는다(느린 원격이 커밋을 막지 않는다)" {

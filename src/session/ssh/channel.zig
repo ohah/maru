@@ -4,11 +4,18 @@
 //! 상태와 라우팅이 는다. 그래서 이 파일은 채널 **표**가 아니라 채널 **하나**를 든다 — 우리 것이
 //! 아닌 번호로 온 메시지는 받지 않는다.
 //!
-//! **보내는 쪽 흐름 제어는 여기 있고, 받는 쪽은 S7b 다.** 상대가 광고한 윈도·최대 패킷을 넘겨
-//! 보내는 것은 **명세 위반**이라(§5.2 "MUST NOT generate data packets larger than...") 그것을 막는
-//! 일은 미룰 수 없다 — 미루면 그 사이에 만들어진 드라이버가 규칙을 어긴 채로 굳는다. 반대로 **우리
-//! 윈도를 소비하고 `WINDOW_ADJUST` 로 채우는 일**은 안 해도 프로토콜을 어기지는 않고(그저 대량
-//! 출력이 도중에 멈춘다) 그것을 재려면 윈도를 넘기는 바이트 열이 필요하다 — S7b 가 맡는다.
+//! **흐름 제어는 양방향 다 여기 있다.**
+//!
+//! *보내는 쪽*: 상대가 광고한 윈도·최대 패킷을 넘겨 보내는 것은 명세 위반이고(§5.2 "MUST NOT
+//! generate data packets larger than..."), 어기면 서버가 흘려도 되므로 **조용히 데이터가 사라진다**.
+//!
+//! *받는 쪽*: 우리가 광고한 윈도는 상대가 보낼 때마다 줄고, `WINDOW_ADJUST` 로 채워 주지 않으면
+//! **상대가 멈춘다**(계약 §3.1). 이 실패는 처음에 안 보인다 — 로그인하고 몇 줄 치는 동안은 초기
+//! 윈도 안이라 멀쩡하고, `cat 큰파일` 에서 갑자기 멈춘다.
+//!
+//! **잊으면 조용히 멈추는 대신 시끄럽게 틀리게 만들었다.** 소비는 `receive` 가 자동으로 하므로
+//! 잊을 수 없고, 채워 주기를 잊은 채 윈도가 바닥나면 그다음 데이터에서 `WindowExhausted` 로
+//! 죽는다. 멈춤은 원인을 짚기 어렵지만 오류는 자리를 알려 준다.
 
 const std = @import("std");
 const wire = @import("wire.zig");
@@ -63,6 +70,13 @@ pub const Error = error{
     WouldExceedWindow,
     /// 윈도가 `2^32 - 1` 을 넘게 늘어난다(§5.2 — "MUST NOT be increased above").
     WindowOverflow,
+    /// **상대가 우리 윈도를 넘겨 보냈다.** §5.2 는 "Both parties MAY ignore all extra data" 라
+    /// 하지만 우리는 **흘리지 않고 오류를 낸다** — 터미널 출력이 조용히 사라지면 화면이 깨진 채
+    /// 남고, 그 증상은 우리 렌더 결함과 구별되지 않는다. 게다가 이 자리는 우리가 채워 주기를
+    /// 잊었을 때 나는 자리이기도 하다(잊으면 상대가 멈추는 대신 여기서 죽는다).
+    WindowExhausted,
+    /// 상대가 우리가 광고한 최대 패킷보다 큰 데이터를 보냈다(§5.2).
+    DataExceedsMaxPacket,
 } || wire.Error || wire.Writer.WriteError;
 
 /// 채널이 어디까지 왔나.
@@ -177,8 +191,11 @@ pub const Channel = struct {
     remote_id: u32 = 0,
     state: State = .idle,
 
-    /// **우리가 광고한 윈도** — 상대가 우리에게 보낼 수 있는 양. 소비와 보충은 S7b 다.
+    /// **우리가 광고한 윈도** — 상대가 우리에게 보낼 수 있는 **남은** 양. 데이터를 받을 때마다
+    /// 줄고 `writeWindowAdjust` 로 는다.
     local_window: u32 = default_window,
+    /// 우리가 유지하려는 윈도 크기. `local_window` 를 여기까지 채운다.
+    local_window_max: u32 = default_window,
     local_max_packet: u32 = default_max_packet,
 
     /// **상대가 광고한 윈도** — 우리가 보낼 수 있는 양. 보낼 때마다 줄고 `WINDOW_ADJUST` 로 는다.
@@ -192,6 +209,8 @@ pub const Channel = struct {
         try w.byte(msg_channel_open);
         try w.string(channel_type_session);
         try w.u32be(local_id);
+        // **광고하는 값과 유지하려는 값은 같다.** 다르면 첫 보충 때 광고보다 커지거나 작아진다.
+        self.local_window = self.local_window_max;
         try w.u32be(self.local_window);
         try w.u32be(self.local_max_packet);
         self.local_id = local_id;
@@ -349,6 +368,50 @@ pub const Channel = struct {
         };
     }
 
+    /// 받은 데이터만큼 우리 윈도를 줄인다. **`receive` 가 자동으로 부르므로 잊을 수 없다.**
+    fn consumeWindow(self: *Channel, len: usize) Error!void {
+        if (len > self.local_max_packet) return Error.DataExceedsMaxPacket;
+        if (len > self.local_window) return Error.WindowExhausted;
+        self.local_window -= @intCast(len);
+    }
+
+    /// 지금 채워 줘야 할 양. `0` 이면 아직 아니다.
+    ///
+    /// **절반에서 채운다.** 매번 보내면 데이터 한 조각마다 패킷이 하나씩 더 붙어 대량 전송이
+    /// 느려지고, 바닥까지 기다리면 그 사이에 상대가 멈춘다. 절반은 그 둘 사이이고 OpenSSH 도
+    /// 같은 자리에서 채운다.
+    ///
+    /// **나누지 곱하지 않는다.** 처음에는 `local_window * 2 >= local_window_max` 로 썼는데,
+    /// 윈도가 `2^31` 이상이면 그 곱이 `u32` 를 넘는다 — §5.2 는 "Implementations MUST correctly
+    /// handle window sizes of up to 2^32 - 1 bytes" 라고 **명시적으로 요구**하는 구간이다.
+    /// Debug 에서는 패닉이고 배포가 쓰는 ReleaseFast 에서는 조용히 감싸 돌아, 채울 필요가 없는데
+    /// 채우는 패킷이 계속 나간다. 기본값(2MiB)에서는 안 닿아서 **큰 윈도를 광고한 드라이버에서만**
+    /// 드러난다(적대적 검증이 잡았다).
+    pub fn pendingWindowAdjust(self: Channel) u32 {
+        if (self.local_window >= self.local_window_max / 2) return 0;
+        return self.local_window_max - self.local_window;
+    }
+
+    /// `WINDOW_ADJUST` 를 쓰고 우리 윈도를 채운다(§5.2).
+    ///
+    /// **채울 것이 없으면 오류다.** 조건 없이 부르는 드라이버는 채널당 패킷을 두 배로 만들고,
+    /// 그 낭비는 대량 전송에서만 드러난다 — 그때는 원인이 여기라고 생각하기 어렵다.
+    pub fn writeWindowAdjust(self: *Channel, out: []u8) Error![]const u8 {
+        if (self.state != .open and self.state != .eof_sent and self.state != .close_sent) {
+            return Error.UnexpectedMessage;
+        }
+        const add = self.pendingWindowAdjust();
+        if (add == 0) return Error.UnexpectedMessage;
+        var w = wire.Writer.init(out);
+        try w.byte(msg_channel_window_adjust);
+        try w.u32be(self.remote_id);
+        try w.u32be(add);
+        // **쓴 뒤에 늘린다** — 보내는 쪽과 같은 이유다(버퍼가 모자라 실패하면 상대는 그 양을
+        // 모르는데 우리만 아는 상태가 된다. 그러면 상대가 멈춘 뒤에도 우리는 여유가 있다고 믿는다).
+        self.local_window += add;
+        return w.written();
+    }
+
     /// 채널 번호가 우리 것인지, 지금 상태에서 올 수 있는 메시지인지 본다.
     ///
     /// **번호부터 본다.** 상태만 보면 남의 채널 앞으로 온 메시지를 우리 상태에 반영하게 된다 —
@@ -397,6 +460,7 @@ pub const Channel = struct {
     fn recvData(self: *Channel, r: *wire.Reader) Error!Event {
         try self.expectOurChannel(r, &.{ .open, .eof_sent, .close_sent });
         const data = try r.string();
+        try self.consumeWindow(data.len);
         return .{ .data = data };
     }
 
@@ -404,6 +468,9 @@ pub const Channel = struct {
         try self.expectOurChannel(r, &.{ .open, .eof_sent, .close_sent });
         const type_code = try r.u32be();
         const data = try r.string();
+        // **확장 데이터도 같은 윈도를 먹는다**(§5.2 — "Data sent with these messages consumes the
+        // same window as ordinary data"). 빼먹으면 stderr 가 많은 명령에서 회계가 어긋난다.
+        try self.consumeWindow(data.len);
         return .{ .extended_data = .{ .type_code = type_code, .data = data } };
     }
 
@@ -939,4 +1006,179 @@ test "열기 확인은 한 번만 받는다" {
     try testing.expectError(Error.UnexpectedMessage, ch.receive(w.written()));
     try testing.expectEqual(@as(u32, 42), ch.remote_id);
     try testing.expectEqual(@as(u32, 1000), ch.remote_window);
+}
+
+// ---------------------------------------------------------------------------
+// 받는 쪽 흐름 제어(S7b). 계약 §3.1 이 말한 **"대량 출력이 도중에 멈춘다"** 를 여기서 재현하고
+// 막는다. 이 결함은 처음에 안 보인다 — 초기 윈도 안에서는 멀쩡하다.
+
+/// 데이터 패킷 하나를 만든다.
+fn dataPacket(buf: []u8, id: u32, len: usize, fill: []u8) ![]const u8 {
+    @memset(fill[0..len], 'x');
+    var w = wire.Writer.init(buf);
+    try w.byte(msg_channel_data);
+    try w.u32be(id);
+    try w.string(fill[0..len]);
+    return w.written();
+}
+
+test "윈도를 안 채우면 대량 출력이 멈춘다 — 그리고 조용히가 아니라 시끄럽게" {
+    // **계약 §3.1 의 그 결함이다.** 예전 같으면 상대가 그냥 안 보내서 화면이 멈추고, 사용자는
+    // "네트워크가 느리다" 로 오해한다. 여기서는 우리 회계가 바닥나는 순간 오류가 난다 —
+    // 멈춤은 원인을 짚기 어렵지만 오류는 자리를 알려 준다.
+    var ch = try openedChannel(1000, 1000);
+    ch.local_window = 300; // 작게 잡아 빨리 바닥나게 한다
+    ch.local_window_max = 300;
+    ch.local_max_packet = 128;
+
+    var fill: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
+
+    // 128 씩 두 번은 들어온다(총 256 ≤ 300).
+    _ = try ch.receive(try dataPacket(&buf, 7, 128, &fill));
+    _ = try ch.receive(try dataPacket(&buf, 7, 128, &fill));
+    try testing.expectEqual(@as(u32, 44), ch.local_window);
+
+    // 세 번째는 윈도를 넘는다 — 채워 주지 않았기 때문이다.
+    try testing.expectError(Error.WindowExhausted, ch.receive(try dataPacket(&buf, 7, 128, &fill)));
+    try testing.expectEqual(@as(u32, 44), ch.local_window); // 거절은 회계를 안 건드린다
+}
+
+test "채워 주면 대량 출력이 끝까지 흐른다" {
+    // 같은 상황에서 드라이버가 계약대로 채우면 멈추지 않는다. **1MiB 를 128 바이트씩** 흘려
+    // 보낸다 — 초기 윈도(300)의 3000 배가 넘으므로 보충 없이는 절대 못 지난다.
+    var ch = try openedChannel(1000, 1000);
+    ch.local_window = 300;
+    ch.local_window_max = 300;
+    ch.local_max_packet = 128;
+
+    var fill: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
+    var out: [64]u8 = undefined;
+
+    var received: usize = 0;
+    var adjusts: usize = 0;
+    while (received < 1024 * 1024) {
+        const ev = try ch.receive(try dataPacket(&buf, 7, 128, &fill));
+        received += ev.data.len;
+        // **드라이버가 하는 일은 이 두 줄이다**(계약 §3.1 의 루프).
+        if (ch.pendingWindowAdjust() != 0) {
+            _ = try ch.writeWindowAdjust(&out);
+            adjusts += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1024 * 1024), received);
+    try testing.expect(adjusts > 3000); // 실제로 여러 번 채웠다
+    try testing.expectEqual(@as(u32, 300), ch.local_window_max);
+    try testing.expect(ch.local_window <= 300); // 광고한 것보다 커지지 않는다
+}
+
+test "절반에서 채운다 — 매번도 바닥에서도 아니다" {
+    var ch = try openedChannel(1000, 1000);
+    ch.local_window = 100;
+    ch.local_window_max = 100;
+    ch.local_max_packet = 100;
+
+    var fill: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
+
+    // 40 을 받으면 60 남는다 — 아직 절반 위라 안 채운다(매번 채우면 패킷이 두 배가 된다).
+    _ = try ch.receive(try dataPacket(&buf, 7, 40, &fill));
+    try testing.expectEqual(@as(u32, 60), ch.local_window);
+    try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust());
+
+    // 20 을 더 받으면 40 남는다 — 절반 아래라 채운다.
+    _ = try ch.receive(try dataPacket(&buf, 7, 20, &fill));
+    try testing.expectEqual(@as(u32, 40), ch.local_window);
+    try testing.expectEqual(@as(u32, 60), ch.pendingWindowAdjust());
+
+    var out: [64]u8 = undefined;
+    const bytes = try ch.writeWindowAdjust(&out);
+    var r = wire.Reader.init(bytes);
+    try testing.expectEqual(@as(u8, 93), try r.byte());
+    try testing.expectEqual(@as(u32, 42), try r.u32be()); // 상대 번호로 보낸다
+    try testing.expectEqual(@as(u32, 60), try r.u32be());
+    try testing.expectEqual(@as(usize, 0), r.rest().len);
+    try testing.expectEqual(@as(u32, 100), ch.local_window); // 광고한 값까지 찼다
+    try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust());
+}
+
+test "채울 것이 없는데 보내면 오류다" {
+    // 조건 없이 부르는 드라이버는 채널당 패킷을 두 배로 만든다. 그 낭비는 대량 전송에서만
+    // 드러나고, 그때는 원인이 여기라고 생각하기 어렵다.
+    var ch = try openedChannel(1000, 1000);
+    var out: [64]u8 = undefined;
+    try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust());
+    try testing.expectError(Error.UnexpectedMessage, ch.writeWindowAdjust(&out));
+}
+
+test "확장 데이터도 같은 윈도를 먹는다" {
+    // §5.2: "Data sent with these messages consumes the same window as ordinary data."
+    // 빼먹으면 stderr 가 많은 명령에서 회계가 어긋나고, 그 어긋남은 한참 뒤에 드러난다.
+    var ch = try openedChannel(1000, 1000);
+    ch.local_window = 100;
+    ch.local_window_max = 100;
+    ch.local_max_packet = 100;
+
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_channel_extended_data);
+    try w.u32be(7);
+    try w.u32be(extended_data_stderr);
+    try w.string("0123456789");
+    _ = try ch.receive(w.written());
+    try testing.expectEqual(@as(u32, 90), ch.local_window);
+}
+
+test "우리가 광고한 최대 패킷보다 큰 데이터는 거절한다" {
+    var ch = try openedChannel(1000, 1000);
+    ch.local_max_packet = 64;
+    var fill: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
+    try testing.expectError(Error.DataExceedsMaxPacket, ch.receive(try dataPacket(&buf, 7, 65, &fill)));
+    _ = try ch.receive(try dataPacket(&buf, 7, 64, &fill));
+}
+
+test "쓰기가 실패하면 우리 윈도가 앞서 나가지 않는다" {
+    // **순서가 계약이다.** 먼저 늘리면 상대는 그 양을 모르는데 우리만 아는 상태가 된다 —
+    // 상대가 멈춘 뒤에도 우리는 여유가 있다고 믿어 원인을 엉뚱한 데서 찾게 된다.
+    var ch = try openedChannel(1000, 1000);
+    ch.local_window = 10;
+    ch.local_window_max = 100;
+    var tiny: [3]u8 = undefined;
+    try testing.expectError(wire.Writer.WriteError.NoSpace, ch.writeWindowAdjust(&tiny));
+    try testing.expectEqual(@as(u32, 10), ch.local_window);
+}
+
+test "열 때 광고하는 값과 유지하려는 값이 같다" {
+    // 다르면 첫 보충에서 광고한 것보다 커지거나 작아진다 — 전자는 §5.2 위반이고 후자는 느려진다.
+    var ch: Channel = .{ .local_window_max = 4096 };
+    var out: [128]u8 = undefined;
+    const bytes = try ch.writeOpen(&out, 7);
+    var r = wire.Reader.init(bytes);
+    _ = try r.byte();
+    _ = try r.string();
+    _ = try r.u32be();
+    try testing.expectEqual(@as(u32, 4096), try r.u32be());
+    try testing.expectEqual(ch.local_window_max, ch.local_window);
+}
+
+test "윈도가 2^31 이상이어도 넘치지 않는다" {
+    // §5.2: "Implementations MUST correctly handle window sizes of up to 2^32 - 1 bytes."
+    // 절반 판정을 곱으로 쓰면 이 구간에서 `u32` 를 넘는다 — Debug 는 패닉, ReleaseFast 는 조용히
+    // 감싸 돌아 **필요 없는 보충 패킷이 계속 나간다**. 기본값(2MiB)에서는 안 닿는 자리다.
+    for ([_]u32{ 0x8000_0000, 0xC000_0000, 0xFFFF_FFFF }) |big| {
+        var ch: Channel = .{ .local_window_max = big, .local_window = big };
+        try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust()); // 가득 찼으면 안 채운다
+
+        ch.local_window = big / 2;
+        try testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust()); // 딱 절반도 아직 아니다
+
+        ch.local_window = big / 2 - 1;
+        try testing.expectEqual(big - (big / 2 - 1), ch.pendingWindowAdjust());
+    }
+
+    // 0 이어도 나눗셈이 안전하다(1/0 이 아니라 0/2 다).
+    var zero: Channel = .{ .local_window_max = 0, .local_window = 0 };
+    try testing.expectEqual(@as(u32, 0), zero.pendingWindowAdjust());
 }

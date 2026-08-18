@@ -45,7 +45,10 @@ fn tableKeys(allocator: std.mem.Allocator, source: []const u8) ![][]const u8 {
     errdefer keys.deinit(allocator);
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
+        // 줄 끝 주석을 먼저 뗀다. 안 떼면 `key: [:0]const u8, // 설명` 이 모양에 안 맞아 **그 키만
+        // 조용히 안 세어진다** — `NoKeysFound` 는 전부 못 읽었을 때만 막지 일부 누락은 못 막는다.
+        const code = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
+        const trimmed = std.mem.trim(u8, code, " \t\r");
         const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
         if (!std.mem.eql(u8, std.mem.trim(u8, trimmed[colon + 1 ..], " \t\r"), "[:0]const u8,")) continue;
         const name = trimmed[0..colon];
@@ -76,6 +79,23 @@ fn isIdentChar(c: u8) bool {
     return c == '_' or std.ascii.isAlphanumeric(c);
 }
 
+/// 줄 주석을 뗀 소스를 붙인다.
+///
+/// **주석 속 `.key` 는 참조가 아니다.** 이 구분이 없으면 이 게이트는 자기 존재 이유로 든 사고 —
+/// 자동 치환이 셸 스크립트 본문과 doc comment 에 `maru.i18n.t(.git_local_check)` 를 글자 그대로 써
+/// 넣은 것 — 을 **그 사고가 살아 있는 동안에는 못 잡고** 되돌린 뒤에야 잡는다. 순서가 거꾸로다.
+///
+/// 문자열 리터럴 안의 `//` 도 함께 잘리므로 소비자 쪽 참조를 **덜** 세는 쪽으로 틀릴 수 있다. 그 방향의
+/// 오류는 "고아가 아닌데 고아라고 말한다"라서 사람이 즉시 본다 — 반대 방향(놓치는 것)보다 낫다.
+fn appendWithoutComments(allocator: std.mem.Allocator, out: *std.ArrayList(u8), source: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        const code = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
+        try out.appendSlice(allocator, code);
+        try out.append(allocator, '\n');
+    }
+}
+
 /// 표 파일에서 **정의 세 덩어리**(`Table` struct 와 `en`/`ko` 값)를 뺀 나머지를 붙인다. 그 덩어리
 /// 안의 이름은 참조가 아니라 선언이라, 세면 고아가 전부 사라진다.
 fn appendWithoutDefinitions(allocator: std.mem.Allocator, out: *std.ArrayList(u8), source: []const u8) !void {
@@ -97,12 +117,12 @@ fn appendWithoutDefinitions(allocator: std.mem.Allocator, out: *std.ArrayList(u8
             }
         }
         const at = best orelse break :outer;
-        try out.appendSlice(allocator, rest[0..at]);
+        try appendWithoutComments(allocator, out, rest[0..at]);
         const body = rest[at + best_head.len ..];
         const close = std.mem.indexOf(u8, body, "\n};") orelse break :outer;
         rest = body[close + 3 ..];
     }
-    try out.appendSlice(allocator, rest);
+    try appendWithoutComments(allocator, out, rest);
 }
 
 /// `roots` 아래 `.zig` 를 전부 이어 붙인 하나의 버퍼. 파일마다 다시 훑지 않으려는 것뿐이다.
@@ -127,7 +147,7 @@ fn readAllSources(allocator: std.mem.Allocator, roots: []const []const u8) ![]u8
             if (std.mem.endsWith(u8, entry.basename, "i18n.zig"))
                 try appendWithoutDefinitions(allocator, &out, source)
             else
-                try out.appendSlice(allocator, source);
+                try appendWithoutComments(allocator, &out, source);
             try out.append(allocator, '\n');
         }
     }
@@ -212,4 +232,28 @@ test "스캐너는 표 정의부를 빼고, 같은 파일의 진짜 소비자는
     try std.testing.expect(!referenced(out.items, "lonely"));
     // 같은 파일 안의 진짜 소비자(`preferenceLabel` 같은 자리)는 살아 남는다.
     try std.testing.expect(referenced(out.items, "spoken"));
+}
+
+// 위 두 자기검사가 다루지 못한 두 눈멂을 따로 못 박는다. 둘 다 **덜 보는 쪽**이라 조용하다.
+test "스캐너는 줄 끝 주석이 붙은 키도 세고, 주석 속 참조는 안 센다" {
+    const allocator = std.testing.allocator;
+
+    // (a) 트레일링 주석이 붙어도 키다. 예전에는 이 줄이 모양에 안 맞아 **그 키만** 안 세어졌고,
+    //     `NoKeysFound` 는 전부 못 읽었을 때만 막으므로 아무 말 없이 통과했다.
+    const source =
+        \\pub const Table = struct {
+        \\    plain: [:0]const u8,
+        \\    commented: [:0]const u8, // 이 줄도 키다
+        \\};
+    ;
+    const keys = try tableKeys(allocator, source);
+    defer allocator.free(keys);
+    try std.testing.expectEqual(@as(usize, 2), keys.len);
+
+    // (b) 주석 안의 `.key` 는 참조가 아니다. 이 구분이 없으면 게이트가 **사고가 살아 있는 동안** 못
+    //     잡고 되돌린 뒤에야 잡는다 — 순서가 거꾸로다.
+    var stripped: std.ArrayList(u8) = .empty;
+    defer stripped.deinit(allocator);
+    try appendWithoutComments(allocator, &stripped, "// 예전에는 .commented 를 여기 적어 두었다\nconst x = 1;");
+    try std.testing.expect(!referenced(stripped.items, "commented"));
 }

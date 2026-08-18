@@ -173,7 +173,7 @@ const Writer = struct {
         for (parts) |part| {
             if (used_cols >= max_cols) return;
             const budget: u16 = max_cols - used_cols;
-            const planned = Writer.plannedCols(part, budget);
+            const planned = Writer.plannedCols(part, budget, false); // `emit` 과 같은 값
             try self.emit(pen_x, y, part, budget, role, false);
             used_cols += planned;
             pen_x += @as(f32, @floatFromInt(@as(u32, planned) * cw));
@@ -191,7 +191,7 @@ const Writer = struct {
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        const text_cols = plannedCols(source, max_cols);
+        const text_cols = plannedCols(source, max_cols, true); // 아래 `emit` 이 `true` 다
         if (text_cols == 0) return;
         const text_width_px: f32 = @floatFromInt(@as(u32, text_cols) * cw);
         const x = rect.rect.x + (rect.rect.width - text_width_px) / 2;
@@ -209,8 +209,14 @@ const Writer = struct {
     /// `emit`의 계획을 그대로 따라가되 렌더링된 셀 폭만 돌려준다. draw op을 만들기 전에 action label을
     /// 가운데 정렬하기 위해서다. 이 계산을 `text_layout.plan` 위에 두면 byte 길이로 가운데를 잡는 일을
     /// 피하고, 말줄임된 label이 측정 경로와 paint 경로에서 같은 자리를 차지한다.
-    fn plannedCols(source: []const u8, max_cols: u16) u16 {
-        var plan = text_layout.plan(source, 0, max_cols, .head, isDetailIcon);
+    /// `emit` 의 계획을 그대로 따라가되 렌더링된 셀 폭만 돌려준다.
+    ///
+    /// **`wide_icons` 를 `emit` 과 같은 값으로 넘겨야 한다.** 아이콘을 chrome 아이콘으로 볼지가 폭을
+    /// 바꾸므로, 재는 쪽과 그리는 쪽이 다른 값을 쓰면 조각이 겹치거나 사이가 벌어진다. 예전에는 이
+    /// 함수가 `isDetailIcon` 을 고정으로 썼는데 `runsAt` 은 `emit(.., false)` 로 그려, 조각에
+    /// Plane-15 코드포인트가 들어오는 순간 어긋나는 상태였다(당시 조각은 스피너와 문구뿐이라 안 드러났다).
+    fn plannedCols(source: []const u8, max_cols: u16, wide_icons: bool) u16 {
+        var plan = text_layout.plan(source, 0, max_cols, .head, if (wide_icons) isDetailIcon else null);
         while (plan.next()) |_| {}
         return plan.endCol();
     }
@@ -395,11 +401,69 @@ test "archive detail view renders only redacted turn DTOs and exact action label
     // 라벨은 세 조각으로 나뉘어 있어(§6.2) 폭도 **조립한 결과**로 잰다 — build 와 같은 함수를 쓰므로
     // 둘이 갈리지 않는다.
     var label_probe: [64]u8 = undefined;
-    const cols = Writer.plannedCols(build.renderActionLabel(&label_probe, build.labels.resume_session), max_cols);
+    const cols = Writer.plannedCols(build.renderActionLabel(&label_probe, build.labels.resume_session), max_cols, true);
     const expected_x: i32 = @intFromFloat(@floor(resume_entry.rect.x + (resume_entry.rect.width - @as(f32, @floatFromInt(@as(u32, cols) * 8))) / 2));
     try std.testing.expectEqual(expected_x, resume_origin_x.?);
     try std.testing.expect(saw_redacted_turn);
     try std.testing.expect(saw_action_count);
+}
+
+// 로딩 줄은 스피너 프레임과 상태 문구를 **다른 조각**으로 그린다(§6.2). 그 둘이 같은 baseline 에
+// 나란히 서는지는 지금까지 어떤 단언도 보지 않았다 — 실제로 열 오프셋을 `Writer.text` 의 **행 번호**
+// 자리에 넘겨 문구가 헤더 카드 아래로 내려가고 클립이 통째로 버린 적이 있다(화면에는 도는 `◴` 만 남았다).
+// 크래시가 아니라 글자가 사라지는 종류라, 이 테스트가 없으면 다시 같은 자리로 돌아간다.
+test "로딩 줄은 스피너와 문구를 같은 줄에 이어 그린다" {
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko);
+
+    const props = types.Props{
+        .viewport_px = .{ .width = 480, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 4,
+        .state = .loading,
+        .provider = .claude,
+        .title = "문서 확인",
+        .metadata = "메시지 3개",
+        .spinner_phase = 0,
+    };
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [18]tree.RectEntry = undefined;
+    var items: [18]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [18]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [3]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
+    var ops: [24]draw.Op = undefined;
+    var runs: [24]draw.Run = undefined;
+    var bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &testTokens(), .{ .ops = &ops, .runs = &runs, .text_bytes = &bytes });
+
+    const phrase = i18n.t(.common_session_analyzing);
+    var spinner_origin: ?struct { x: i32, y: i32 } = null;
+    var phrase_origin: ?struct { x: i32, y: i32 } = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, spinnerFrame(0))) spinner_origin = .{ .x = text.origin.x, .y = text.origin.y };
+            // 이 문구는 화면에 **두 번** 나온다 — 헤더의 상태 줄과 본문의 안내 줄. 우리가 재는 것은
+            // 헤더 줄이므로 스피너와 같은 y 를 가진 것을 고른다. 첫 매치를 그냥 잡으면 발행 순서에
+            // 기대게 되고, 그 순서는 이 테스트가 지키려는 계약이 아니다.
+            if (std.mem.eql(u8, run.text, phrase) and spinner_origin != null and text.origin.y == spinner_origin.?.y)
+                phrase_origin = .{ .x = text.origin.x, .y = text.origin.y };
+        },
+        else => {},
+    };
+
+    // 둘 다 실제로 발행됐는가 — 문구가 클립에 먹히면 이 자리에서 `null` 이다.
+    const spin = spinner_origin orelse return error.TestUnexpectedResult;
+    const said = phrase_origin orelse return error.TestUnexpectedResult;
+
+    // **같은 줄**이다. 예전 결함은 정확히 여기서 갈렸다(문구만 한 줄 아래로 내려갔다).
+    try std.testing.expectEqual(spin.y, said.y);
+
+    // 그리고 문구가 스피너 **오른쪽**에 선다 — 겹치면 x 가 같거나 작아진다.
+    try std.testing.expect(said.x > spin.x);
 }
 
 test "archive detail loading skeleton and stale state never enable source actions" {

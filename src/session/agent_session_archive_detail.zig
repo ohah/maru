@@ -17,6 +17,10 @@ pub const Role = enum { user, assistant };
 pub const Turn = struct {
     role: Role,
     text: []u8,
+    /// 이 턴이 **민감 내용이라 통째로 가려졌는가.** 가림 문구 자체는 여기 담지 않는다 — 담으면 워커가
+    /// 문장을 만든 시점의 언어에 얼어붙어, 사용자가 화면 언어를 바꿔도 이 줄만 옛 언어로 남는다
+    /// (계약 §5.2: 한 프레임 안에서 두 언어가 섞이지 않는다). 문구는 그리는 쪽이 키에서 푼다.
+    redacted: bool = false,
 
     pub fn deinit(self: *Turn, allocator: std.mem.Allocator) void {
         allocator.free(self.text);

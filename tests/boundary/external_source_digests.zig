@@ -592,7 +592,10 @@ pub const inventory = [_]Proof{
     // 화면 언어가 바뀌면 폼 필터의 매칭 키(`meta.doc`)도 함께 바뀌어 선택이 다른 설정으로 미끄러지던 것을
     // 막으며 움직였다(키로 다시 앉히는 `reanchorSelectedByKey`·`indexOfSettingsKey` 추가). count는 3 그대로다 —
     // 새 코드에 반사 접근이 없다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "c84d3531f5d54a1866f2ad002084d3819f79e302bea7f4eeeb2b1bb95a4ba248" },
+    // 적대적 검증이 그 재고정의 폴백이 **섹션까지는 안 옮긴다**는 것을 잡아 또 움직인다(교차 검색으로 다른
+    // 섹션의 행을 고른 경우 — 쿼리만 지우면 그 행이 여전히 목록 밖이다). 재고정을 `reapplyUiLanguage` 안으로
+    // 옮겨 언어를 바꾸는 네 경로가 전부 타게 했다. count는 여전히 3이다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "10ff9baf21ed4a09fc18e24d39abf6675dda0498b283062d11fddeff7c339c4c" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

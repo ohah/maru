@@ -1754,13 +1754,13 @@ test "전체 접기: 루트는 남기고 그 아래를 모두 접는다" {
     var tree = Tree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.replaceExplicitRoots(&.{"/w"});
-    _ = tree.takeScanRequest();
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
     try tree.applySnapshot("/w", &.{
         .{ .name = "src", .kind = .directory },
         .{ .name = "a.txt", .kind = .file },
     });
     _ = try tree.toggleDirectory("/w/src");
-    _ = tree.takeScanRequest();
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
     try tree.applySnapshot("/w/src", &.{.{ .name = "deep", .kind = .directory }});
     _ = try tree.toggleDirectory("/w/src/deep");
 
@@ -1778,7 +1778,7 @@ test "전체 접기는 scan 을 예약하지 않는다 — 감추는 동작이�
     var tree = Tree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.replaceExplicitRoots(&.{"/w"});
-    _ = tree.takeScanRequest();
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
     try tree.applySnapshot("/w", &.{.{ .name = "src", .kind = .directory }});
     _ = try tree.toggleDirectory("/w/src");
     while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);

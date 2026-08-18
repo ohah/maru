@@ -47,11 +47,11 @@ const Entry = struct { path: []const u8, count: usize };
 const inventory = [_]Entry{
     // ── 영어 고정 표면(§7.1) ──
     // **토크나이저로 바꾸자 드러난 것들.** 줄 단위 스캐너는 멀티라인 문자열(`\\`)을 못 봤다.
-    //   · `cli/browser.zig` 40 — **help 텍스트가 한국어다**(§7.1 위반). 영어화는 후속이 든다.
+    //   · `cli/browser.zig` 20 — **help 텍스트가 한국어다**(§7.1 위반). 영어화는 후속이 든다.
     //   · `main.zig` 1 — Windows 스모크 usage 한 줄(같은 성격).
     .{ .path = "src/cli/browser.zig", .count = 20 },
     .{ .path = "src/main.zig", .count = 1 },
-    // `main.zig`(96) 와 `cli/browser/run.zig`(41) 는 **0 이 되어 원장에서 빠졌다**. 남은 하나는
+    // `cli/browser/run.zig`(41) 는 **0 이 되어 원장에서 빠졌다**. `cli/ssh.zig` 에 남은 하나는
     // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
 
@@ -59,7 +59,10 @@ const inventory = [_]Entry{
     // **표시 문자열이 아닌 것들** — 토크나이저 전환으로 드러났고, 각각 성격을 확인해 등재했다.
     //   · `shell_integration.zig` 48 — maru 가 쓰는 **셸 스크립트 본문·주석**이다. 사용자가 파일을
     //     열면 보지만 앱 UI 가 아니고, `agent_statusline` 의 설치 마커처럼 **파일 포맷의 일부**다.
-    //   · `agent_statusline.zig` 5 · `remote_runtime.zig` 3 — 모듈 doc 주석과 진단.
+    //   · `agent_statusline.zig` 5 — **셸 훅 스크립트 본문 3줄 + settings.json 에 쓰는 설치 마커 2개**다.
+    //     바로 위 `shell_integration` 과 같은 성격(파일 포맷의 일부)이지 doc 주석이 아니다 — 새 스캐너는
+    //     doc 주석을 애초에 토큰으로 세지 않으므로 그 근거는 성립할 수 없었다.
+    //   · `remote_runtime.zig` 3 — 진단 문자열.
     .{ .path = "src/platform/macos/shell_integration.zig", .count = 48 },
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
     .{ .path = "src/chrome/components/settings.zig", .count = 8 },

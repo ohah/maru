@@ -3470,4 +3470,109 @@ test "keep-alive 토글은 재적용이 미러를 되돌리기 전에 전역을 
     // 전역과 미러가 **둘 다** 새 값이어야 한다. 순서가 틀리면 미러만 옛 값으로 남고, 그 값이 파일로 간다.
     try std.testing.expect(!app_session_mod.app_keep_alive_after_quit);
     try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
+
+    // **조기 반환에 가려지지 않게** 한 번 더 본다. 위 단언만으로는 "순서가 맞다"가 아니라 "조기 반환
+    // 또는 순서 중 하나는 살아 있다"만 고정된다 — 언어가 안 바뀌면 미러 되쓰기 자체가 안 일어나기
+    // 때문이다. 그래서 이번에는 **언어가 바뀌는 상태**로 만들어 그 되쓰기가 실제로 도는 경로에서 잰다.
+    app_session_mod.app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+    // 언어가 실제로 바뀌게 만든다 — 그래야 재적용이 행 목록을 만들고 미러 되쓰기가 실제로 돈다.
+    session.loaded_config.config.ui_language = if (maru.i18n.lang() == .ko) .en else .ko;
+
+    toggleSelectedSetting(session);
+
+    try std.testing.expect(!app_session_mod.app_keep_alive_after_quit);
+    try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
+}
+
+// **`keyAtRow` 는 모든 행에 답해야 한다** — 시나리오가 아니라 성질로 못 박는다.
+//
+// 4차가 잡은 결함은 "`keyAtRow` 가 여덟 종류 중 다섯만 안다"였고, 그것을 막는 것이 시나리오 테스트
+// 하나(전역 단축키 행)뿐이었다. 그러면 `SettingsSectionFields` 에 **아홉 번째 행 종류**가 붙는 순간
+// 같은 구멍이 조용히 다시 생긴다 — 앵커가 `null` 이 되어 재고정이 통째로 안 돌고, 그 상태는 컴파일도
+// 되고 다른 테스트도 전부 통과한다. 행 수(`total()`)와 앵커 가능 행 수가 **같다**는 것이 계약이다.
+test "keyAtRow 는 모든 섹션의 모든 행에 앵커를 준다 (행 종류가 늘어도)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.chrome_host.settings.show();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const sections = try buildSectionList(session, arena_state.allocator());
+    try std.testing.expect(sections.len > 0); // 섹션이 0 이면 아래 루프가 아무것도 안 본다
+
+    var rows_seen: usize = 0;
+    for (0..sections.len) |sec| {
+        session.chrome_host.settings.section = sec;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const cf = try currentSectionFields(session, arena.allocator());
+        var probe: [128]u8 = undefined;
+        for (0..cf.total()) |i| {
+            rows_seen += 1;
+            if (keyAtRow(cf, i, &probe) == null) {
+                std.debug.print("\n섹션 {d} 의 {d}번 행에 앵커가 없다 — 행 종류가 늘었는데 `keyAtRow` 가 모른다.\n", .{ sec, i });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    // 행을 하나도 안 봤으면 위 루프가 무의미하다 — 그 상태도 "전부 앵커 가능" 으로 통과한다.
+    try std.testing.expect(rows_seen > 0);
+}
+
+// 앵커를 **못 잡는** 경로에도 행 수 갱신은 와야 한다.
+//
+// 쿼리가 0행을 통과시키면 `keyAtRow` 가 `null` 이고 재고정은 할 것이 없다. 그래도 통과 행 수는
+// 달라졌으므로 `setFieldCount` 는 줘야 한다 — 안 주면 `moveSelection` 이 옛 셈으로 wrap 해 ↑↓ 가
+// 갇힌다. 브랜치의 다른 테스트는 전부 유효한 행에 앉히므로 이 분기를 한 번도 안 탔다.
+test "앵커를 못 잡아도 행 수는 다시 알린다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
+    session.chrome_host.settings.show();
+    session.loaded_config.config.ui_language = .ko;
+    reapplyUiLanguage(session);
+
+    // 아무 행도 통과시키지 않는 쿼리 — 그러면 선택이 가리킬 행이 없어 앵커가 `null` 이다.
+    session.chrome_host.settings.startSearch();
+    for ("zzqqxx") |c| session.chrome_host.settings.appendSearchCp(c);
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const empty = try currentSectionFields(session, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 0), empty.total()); // 전제가 성립하는지 먼저 본다
+    }
+    session.chrome_host.settings.setFieldCount(999); // 낡은 셈을 심어 둔다
+
+    session.loaded_config.config.ui_language = .en;
+    reapplyUiLanguage(session);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const visible = try currentSectionFields(session, arena.allocator());
+    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
 }

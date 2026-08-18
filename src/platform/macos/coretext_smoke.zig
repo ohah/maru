@@ -619,6 +619,8 @@ fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList
     const rows = [_]Row{
         .{ .root = .{ .path = "/w", .label = "workspace", .expanded = true, .loading = false, .icon_kind = @intFromEnum(K.folder_open) } },
         .{ .directory = .{ .path = "/w/src", .label = "src", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_source) } },
+        // compact 표시: 단일 자식 디렉터리 체인이 한 줄로 접힌 모습(`buildRows` 가 만드는 라벨 형태 그대로).
+        .{ .directory = .{ .path = "/w/release/app", .label = "release/app", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_output) } },
         file.make("/w/main.zig", "main.zig", 1, .code),
         file.make("/w/app.tsx", "app.tsx", 1, .ts),
         file.make("/w/index.js", "index.js", 1, .js),

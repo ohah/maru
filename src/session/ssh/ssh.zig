@@ -103,3 +103,126 @@ test "조립: 버전 교환 → KEXINIT → strict 켜기 → 폐기 처리" {
         },
     }
 }
+
+// 어떤 바이트열도 **오류로 끝나야** 한다 — 패닉·UB 는 안 된다. ReleaseSafe 로 돌려 UB 가 잡히게 한다.
+test "적대적 입력: 어떤 바이트열도 패닉시키지 못한다" {
+    var prng = std.Random.DefaultPrng.init(0xA55E);
+    const rand = prng.random();
+    var buf: [1024]u8 = undefined;
+    var out: [2048]u8 = undefined;
+    var scratch: [2048]u8 = undefined;
+
+    var i: usize = 0;
+    while (i < 1500) : (i += 1) {
+        const len = rand.uintLessThan(usize, buf.len);
+        rand.bytes(buf[0..len]);
+        const b = buf[0..len];
+
+        // 구조적 편향: 앞머리를 그럴싸하게 만들어 깊은 경로까지 들어가게 한다.
+        if (i % 4 == 1 and len > 16) {
+            b[0] = kexinit.msg_kexinit;
+        } else if (i % 4 == 2 and len > 16) {
+            @memcpy(b[0..15], "openssh-key-v1\x00");
+        } else if (i % 4 == 3 and len > 8) {
+            b[0] = 60; // userauth method-specific
+        }
+
+        _ = packet.read(b) catch {};
+        _ = kexinit.parse(b) catch {};
+        _ = hostkey.parsePublicKey(b) catch {};
+        _ = hostkey.parseSignature(b) catch {};
+        _ = private_key.kdfRounds(b) catch {};
+        // **`max_kdf_rounds = 0` 이라 bcrypt 는 안 돈다** — Debug 에서 KDF 에 닿는 호출 하나가
+        // 약 470ms 라 그것만으로 퍼즈가 29초가 됐다(실측). KDF 는 std 코드고 여기서 볼 것은 그
+        // **앞뒤 파싱**이다. KDF 뒤 구조 파싱은 실제 키 벡터로 도는 단위 테스트가 덮는다.
+        _ = private_key.parse(b, "pw", &scratch, .{ .max_kdf_rounds = 0 }) catch {};
+        _ = userauth.parseResponse(b, .publickey) catch {};
+        _ = userauth.parseResponse(b, .password) catch {};
+        _ = version.parse(b) catch {};
+        var r = wire.Reader.init(b);
+        _ = r.string() catch {};
+        _ = r.nameList() catch {};
+        _ = r.u32be() catch {};
+
+        var t: transport.Transport = .{};
+        _ = t.feed(&out, b) catch {};
+        var t2: transport.Transport = .{ .strict_kex = true, .pending_discard = true, .first_from_peer = kexinit.msg_kexinit };
+        _ = t2.feed(&out, b) catch {};
+
+        _ = known_hosts.parseLine(b);
+        _ = known_hosts.matchesHost(b, "host.example");
+        _ = known_hosts.verify(b, "host.example", "ssh-ed25519", &[_]u8{0} ** 32);
+    }
+}
+
+// **유효한 것을 비트 단위로 망가뜨린다.** 순수 무작위는 첫 길이 검사에서 튕겨 깊은 경로에 안 닿는다.
+test "적대적 입력: 유효 메시지를 망가뜨려도 패닉시키지 못한다" {
+    var prng = std.Random.DefaultPrng.init(0x1234);
+    const rand = prng.random();
+    var out: [4096]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    var wire_out: [4096]u8 = undefined;
+
+    // 씨앗 1: 우리 KEXINIT 페이로드
+    var kexinit_buf: [4096]u8 = undefined;
+    const valid_kexinit = try kexinit.write(&kexinit_buf, rand);
+
+    // 씨앗 2: 그것을 담은 온전한 패킷
+    var pkt_buf: [4096]u8 = undefined;
+    const pkt_len = try packet.write(&pkt_buf, valid_kexinit, rand);
+
+    // 씨앗 3: ed25519 공개키 blob
+    var blob_buf: [128]u8 = undefined;
+    var w = wire.Writer.init(&blob_buf);
+    try w.string(hostkey.alg_name);
+    try w.string(&([_]u8{7} ** 32));
+    const valid_blob = w.written();
+
+    // 씨앗 4: 버전 줄
+    const valid_version = "SSH-2.0-OpenSSH_10.2\r\n";
+
+    const seeds = [_][]const u8{ valid_kexinit, pkt_buf[0..pkt_len], valid_blob, valid_version };
+
+    var i: usize = 0;
+    while (i < 2500) : (i += 1) {
+        const seed = seeds[rand.uintLessThan(usize, seeds.len)];
+        var mutated: [4096]u8 = undefined;
+        @memcpy(mutated[0..seed.len], seed);
+        var m = mutated[0..seed.len];
+
+        // 1~4 군데를 뒤집는다.
+        const flips = 1 + rand.uintLessThan(usize, 4);
+        var f: usize = 0;
+        while (f < flips and m.len > 0) : (f += 1) {
+            m[rand.uintLessThan(usize, m.len)] ^= @as(u8, 1) << rand.int(u3);
+        }
+        // 가끔 길이도 자른다(잘린 입력이 다른 경로다).
+        if (i % 5 == 0 and m.len > 1) m = m[0 .. rand.uintLessThan(usize, m.len) + 1];
+
+        _ = packet.read(m) catch {};
+        _ = kexinit.parse(m) catch {};
+        if (kexinit.parse(m)) |peer| {
+            _ = kexinit.negotiate(peer, .initial) catch {};
+            _ = kexinit.negotiate(peer, .{ .rekey = true }) catch {};
+        } else |_| {}
+        _ = hostkey.parsePublicKey(m) catch {};
+        _ = hostkey.parseSignature(m) catch {};
+        _ = private_key.kdfRounds(m) catch {};
+        _ = private_key.parse(m, "pw", &scratch, .{ .max_kdf_rounds = 0 }) catch {};
+        _ = userauth.parseResponse(m, .publickey) catch {};
+        _ = userauth.parseResponse(m, .password) catch {};
+        _ = version.parse(m) catch {};
+        _ = known_hosts.verify(m, "host.example", "ssh-ed25519", &([_]u8{0} ** 32));
+
+        var t: transport.Transport = .{};
+        if (t.feed(&out, m)) |maybe| {
+            if (maybe) |got| switch (got) {
+                .packet => |pk| std.mem.doNotOptimizeAway(pk.payload.len),
+                .discarded => |d| std.mem.doNotOptimizeAway(d.consumed),
+            };
+        } else |_| {}
+        var t2: transport.Transport = .{ .strict_kex = true, .pending_discard = true, .first_from_peer = kexinit.msg_kexinit };
+        _ = t2.feed(&out, m) catch {};
+        _ = t2.send(&wire_out, m[0..@min(m.len, 64)], rand) catch {};
+    }
+}

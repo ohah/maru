@@ -196,6 +196,11 @@ fn doRekey(i_s: []const u8) !void {
     const i_c = try kexinit.write(&i_c_buf, prng.random());
     try send(i_c);
 
+    try finishKex(i_s, i_c);
+}
+
+/// 재키잉의 뒷부분 — 협상부터 `NEWKEYS` 까지. 서버가 시작했든 우리가 시작했든 같다.
+fn finishKex(i_s: []const u8, i_c: []const u8) !void {
     const peer = try kexinit.parse(i_s);
     const neg = try kexinit.negotiate(peer, .{ .rekey = strict_kex_initial });
     try t.applyNegotiation(.{ .strict_kex = neg.strict_kex, .discard_guess = neg.discard_guess });
@@ -244,6 +249,25 @@ fn doRekey(i_s: []const u8) !void {
     say("재키잉 {d} 회차 완료", .{rekeys_done});
 }
 
+/// **우리가 시작하는 재키잉.** 서버의 `KEXINIT` 을 기다렸다가 나머지는 `doRekey` 와 같다.
+fn doSelfRekey() !void {
+    try t.beginRekey();
+    var i_c_buf: [4096]u8 = undefined;
+    const i_c = try kexinit.write(&i_c_buf, prng.random());
+    try send(i_c);
+
+    // 서버 `KEXINIT` 을 기다린다. **그 사이 채널 데이터가 계속 온다** — 서버는 아직 우리 것을
+    // 못 봤다. 그것을 처리하다 보충이 필요해지는데, 재키잉 중이라 미뤄야 한다.
+    var rk_pkt: [1 << 18]u8 = undefined;
+    var i_s_buf: [4096]u8 = undefined;
+    const i_s = blk: {
+        const p = try recvKexMessage(&rk_pkt, kexinit.msg_kexinit);
+        @memcpy(i_s_buf[0..p.len], p);
+        break :blk i_s_buf[0..p.len];
+    };
+    try finishKex(i_s, i_c);
+}
+
 /// KEX 메시지 하나를 기다린다. **그 사이에 오는 채널 데이터는 처리한다** — §7.1 이 "arbitrary
 /// number of messages that may be in-flight" 를 처리하라고 요구한다. 버리면 출력이 사라진다.
 fn recvKexMessage(out: []u8, want: u8) ![]const u8 {
@@ -279,6 +303,8 @@ var rekeys_done: usize = 0;
 /// 연결이 죽는다(실측). 보충은 멱등이라 그냥 미루면 되고, 아래 둘은 한 번뿐이라 기억해 둔다.
 var deferred_channel_failure = false;
 var deferred_close = false;
+/// 재키잉 때문에 실제로 미룬 횟수. 0 이면 이 회차가 그 자리를 안 재고 있다는 뜻이다.
+var deferrals: usize = 0;
 
 // **두 루프가 같은 카운터를 센다.** 처음에는 받는 루프에만 뒀는데, 보내는 동안에도 데이터가
 // 오므로(우리가 `cat` 에 보낸 것이 그대로 돌아온다) 그만큼이 통째로 안 세어졌다 — 4MiB 를
@@ -305,10 +331,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **보내는 쪽을 태우는 회차.** 나머지 회차는 받기만 해서, 보내는 쪽 흐름 제어(윈도·최대 패킷을
     // 넘겨 보내지 않는다)가 선 위에서 한 번도 안 돈다 — 그 검사를 지워도 스모크가 초록이었다(실측).
     // 이 회차는 서버가 `cat` 이라 우리가 보낸 것이 그대로 돌아온다.
-    const want_echo = std.mem.eql(u8, mode, "echo");
+    const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
+        std.mem.eql(u8, mode, "self-rekey");
     // **재키잉이 실제로 돌았는지 본다.** 서버 설정이 틀려 재키잉이 안 걸리면 이 회차는 그냥 평범한
     // 전송이 되고, 그러면 **아무것도 안 재면서 초록**이 된다 — 이 스모크에서 다섯 번 나온 부류다.
-    const want_rekey = std.mem.eql(u8, mode, "rekey");
+    const want_rekey = std.mem.eql(u8, mode, "rekey") or std.mem.eql(u8, mode, "rekey-echo");
+    // **우리가 시작하는 재키잉.** 서버가 시작하면 그쪽은 이미 송신을 멈춘 뒤라(§7.1) 재키잉 중에
+    // 데이터가 안 오고, 그래서 "미뤄 둔 채널 송신" 경로가 선 위에서 한 번도 안 탄다(실측: 미룸 0 회).
+    // 우리가 먼저 `KEXINIT` 을 보내면 서버는 그것을 볼 때까지 계속 보내므로 그 자리가 열린다.
+    const want_self_rekey = std.mem.eql(u8, mode, "self-rekey");
+    // **광고할 윈도**(0 이면 채널 기본 2MiB). 작게 잡으면 보충이 잦아져 **재키잉과 겹친다** —
+    // 그 겹침이 이 스모크가 재현하려는 자리다(재키잉 중 보충을 보내면 연결이 죽는다). 기본 윈도로는
+    // 서버가 재키잉을 시작할 때 이미 송신을 멈춘 뒤라 겹칠 확률이 낮아, 결함이 있어도 통과했다.
+    const window_arg = it.next() orelse "0";
+    const want_window = try std.fmt.parseInt(u32, window_arg, 10);
+    if (want_window != 0) {
+        ch.local_window_max = want_window;
+        ch.local_window = want_window;
+    }
     const port = try std.fmt.parseInt(u16, port_str, 10);
     const expect_bytes = try std.fmt.parseInt(usize, expect_bytes_str, 10);
     const expect_stderr = try std.fmt.parseInt(usize, expect_stderr_str, 10);
@@ -463,7 +503,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
         var data_buf: [8192]u8 = undefined;
         var chunk: [4096]u8 = undefined;
         @memset(&chunk, 'Z');
+        var self_rekeyed = false;
         while (sent < expect_bytes) {
+            // **절반쯤에서 우리가 재키잉을 건다.** 서버는 우리 `KEXINIT` 을 볼 때까지 계속
+            // 보내므로, 그 데이터가 재키잉 중에 도착해 보충이 필요해진다 — 그때 미루지 않으면
+            // 연결이 죽는다.
+            if (want_self_rekey and !self_rekeyed and sent > expect_bytes / 2) {
+                self_rekeyed = true;
+                try doSelfRekey();
+            }
             const room = ch.sendableLen();
             if (room == 0) {
                 try handle(try recvChannel(&pkt));
@@ -494,7 +542,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try handle(payload);
     }
 
-    say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, 재키잉 {d} 회, exit-status {?d}", .{ mode, got, stderr_bytes, adjusts, rekeys_done, exit_code });
+    say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, 재키잉 {d} 회, 미룸 {d} 회, exit-status {?d}", .{ mode, got, stderr_bytes, adjusts, rekeys_done, deferrals, exit_code });
 
     if (got < expect_bytes) return fail("출력이 모자란다 — 흐름 제어가 멈췄을 수 있다");
     // **stderr 도 본다.** 확장 데이터는 같은 윈도를 먹는데(§5.2), pty 를 요청하면 서버가 그것을
@@ -533,7 +581,10 @@ fn handle(payload: []const u8) !void {
 /// 끝나면 다음 호출에서 그대로 나간다. 이것을 조건 없이 보내던 것이 **연결을 죽였다**(실측:
 /// 재키잉 중 `WINDOW_ADJUST` → `NotAllowedDuringRekey` → poison. 타이밍에 달려 가끔만 났다).
 fn flushChannelSends() !void {
-    if (!t.canSendChannelMessages()) return;
+    if (!t.canSendChannelMessages()) {
+        if (deferred_channel_failure or deferred_close or ch.pendingWindowAdjust() != 0) deferrals += 1;
+        return;
+    }
     var buf: [1024]u8 = undefined;
     if (deferred_channel_failure) {
         deferred_channel_failure = false;

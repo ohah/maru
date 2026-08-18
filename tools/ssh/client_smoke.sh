@@ -75,6 +75,7 @@ cleanup() {
 	if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; fi
 	if [ -f "$DIR/sshd2.pid" ]; then kill "$(cat "$DIR/sshd2.pid")" 2>/dev/null || true; fi
 	if [ -f "$DIR/sshd3.pid" ]; then kill "$(cat "$DIR/sshd3.pid")" 2>/dev/null || true; fi
+	if [ -f "$DIR/sshd4.pid" ]; then kill "$(cat "$DIR/sshd4.pid")" 2>/dev/null || true; fi
 	rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
@@ -185,13 +186,32 @@ start_sshd "$DIR/sshd3.pid" "$((PORT + 2))" "$DIR/sshd3.log" "$BULK_CMD" "RekeyL
 	exit 1
 }
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$EXPECT_BYTES" "$EXPECT_STDERR" rekey
+REKEY_PORT=$STARTED_PORT
+ROUNDS=$((ROUNDS + 1))
+
+# 6) **보내면서 재키잉**(S7d × S7b). 앞 회차는 받기만 해서, 재키잉 중에 **미뤄 둔 채널 송신**이
+#    선 위에서 한 번도 안 탄다 — `WINDOW_ADJUST` 를 재키잉 중에 보내면 연결이 죽는 자리다(실측).
+#    `cat` + `RekeyLimit 1M` 이면 우리가 보내는 4MiB 동안 서버가 여러 번 키를 갈자고 한다.
+start_sshd "$DIR/sshd4.pid" "$((REKEY_PORT + 2))" "$DIR/sshd4.log" "cat" "RekeyLimit 1M" || {
+	sed -n '1,5p' "$DIR/sshd4.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 보내며-재키잉 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+# 윈도를 64KiB 로 좁혀 보충이 재키잉과 **결정적으로 겹치게** 한다.
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 rekey-echo 65536
+ROUNDS=$((ROUNDS + 1))
+
+# 7) **우리가 시작하는 재키잉**. 서버가 시작하면 그쪽은 이미 송신을 멈춘 뒤라(§7.1) 재키잉 중에
+#    데이터가 안 오고, 그래서 "미뤄 둔 채널 송신" 경로가 한 번도 안 탄다(실측: 미룸 0 회).
+#    우리가 먼저 보내면 서버는 그것을 볼 때까지 계속 보내므로 그 자리가 열린다.
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 self-rekey 65536
 ROUNDS=$((ROUNDS + 1))
 
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 4 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 4 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 6 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 6 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 네 회차 완주"
+echo "[ssh-client-smoke] 여섯 회차 완주"

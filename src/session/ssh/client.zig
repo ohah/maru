@@ -40,6 +40,9 @@ pub const Error = error{
     Disconnected,
     /// 아직 셸이 안 떴는데 쓰려 한다.
     NotReady,
+    /// `start` 를 안 부르고 `feed` 했다. **조용한 무동작보다 낫다** — 안 그러면 호출자가 아무
+    /// 일도 안 하면서 영원히 읽는다(실측으로 그 모양을 여러 번 겪었다).
+    NotStarted,
     /// 호출자 버퍼가 모자란다.
     ShortBuffer,
 } || transport.Error || kexinit.Error || kex.Error || hostkey.Error ||
@@ -114,6 +117,8 @@ pub const Step = struct {
     state: State,
     /// 셸이 끝났다면 그 코드.
     exit_status: ?u32 = null,
+    /// 신호로 죽었다면 그 이름(`SIG` 접두 없이). `exit_status` 와 **둘 중 하나**만 온다(§6.10).
+    exit_signal: ?[]const u8 = null,
 };
 
 pub const Client = struct {
@@ -148,9 +153,15 @@ pub const Client = struct {
 
     /// 재키잉 중에 미뤄 둔 채널 응답. **재키잉 중에는 채널 메시지를 못 보낸다**(계약 §3.0.1).
     deferred_close: bool = false,
+    /// 모르는 채널 요청에 답할 것이 밀려 있나(§5.4 — `want_reply` 면 답해야 한다).
+    deferred_request_failure: bool = false,
     /// 재키잉 중인가(우리가 시작했든 서버가 시작했든).
     rekeying: bool = false,
     exit_status: ?u32 = null,
+    /// 신호로 죽었을 때 그 이름. **`exit_status` 를 `null` 로 두고 끝내면 "끝났는지" 조차 모른다** —
+    /// 옛 드라이버는 이것을 오류로 올렸는데, 오류는 세션을 죽이므로 정보만 남기는 편이 낫다.
+    exit_signal_buf: [32]u8 = undefined,
+    exit_signal_len: usize = 0,
     /// 재키잉 횟수(진단용). 0 이면 그 경로를 안 탔다는 뜻이다.
     rekeys: usize = 0,
     /// **셸이 한 번이라도 떴나.** `state` 는 재키잉 중에 `key_exchange` 로 돌아가는데, 그때
@@ -168,11 +179,21 @@ pub const Client = struct {
     }
 
     /// 비밀을 지운다. **연결이 끝나면 부른다.**
+    ///
+    /// **지운 뒤에는 못 쓴다.** 처음에는 상태를 그대로 뒀는데, 그러면 키가 0 인 채로 세션이
+    /// 계속 굴러간다 — 그 결과는 "왜인지 서버가 다 거절한다" 로 나타나고 원인이 여기라는 것을
+    /// 짚기 어렵다(실측). 그래서 `closed` 로 못박는다.
+    ///
+    /// **`h`·`session_id` 는 안 지운다.** 비밀이 아니다 — `H` 는 공개 값들과 `K` 의 해시이고
+    /// 서버가 거기에 **서명해서 보내는** 값이며, `session_id` 는 인증 서명에 그대로 들어간다.
+    /// 지울 이유가 없는 것을 지우면 다음 사람이 "이건 왜 안 지우지" 를 거꾸로 묻게 된다.
     pub fn clear(self: *Client) void {
         self.t.clear();
         if (self.eph) |*e| e.clear();
         std.crypto.secureZero(u8, &self.k);
         std.crypto.secureZero(u8, &self.opts.secret_key);
+        self.state = .closed;
+        self.shell_ready = false;
     }
 
     /// 우리 버전 줄을 낸다. **`feed` 보다 먼저 한 번 부른다.**
@@ -204,6 +225,8 @@ pub const Client = struct {
     pub fn feed(self: *Client, input: []const u8, wire_out: []u8, screen_out: []u8) Error!Step {
         // **버퍼가 한 걸음도 못 담으면 시작하지 않는다.** 조용히 0 을 돌려주면 호출자가 영원히
         // 맴돈다 — 이 저장소에서 "아무것도 안 하면서 초록" 을 여러 번 겪었다.
+        // **`start` 를 안 불렀으면 오류다.** 조용히 아무 일도 안 하면 호출자가 영원히 읽는다.
+        if (self.state == .idle) return Error.NotStarted;
         if (wire_out.len < min_wire_out) return Error.ShortBuffer;
         if (screen_out.len < self.ch.local_max_packet) return Error.ShortBuffer;
         var w: Out = .{ .buf = wire_out };
@@ -233,6 +256,7 @@ pub const Client = struct {
             .screen = s.written(),
             .state = self.state,
             .exit_status = self.exit_status,
+            .exit_signal = if (self.exit_signal_len == 0) null else self.exit_signal_buf[0..self.exit_signal_len],
         };
     }
 
@@ -310,13 +334,22 @@ pub const Client = struct {
     /// 한 걸음. 입력에서 먹을 수 있으면 먹고, 상태를 옮긴다.
     fn step(self: *Client, input: []const u8, consumed: *usize, w: *Out, s: *Out) Error!void {
         switch (self.state) {
-            .idle => return,
+            .idle => unreachable, // `feed` 가 입구에서 막는다
+            // **닫힌 뒤에 온 것은 흘려보낸다.** 세션은 끝났고 그 바이트로 할 일이 없다 — 파싱하면
+            // 오류가 나는데(예: 버전 줄), 끝난 연결에서 그것을 실패로 올릴 이유가 없다.
+            .closed => {
+                consumed.* += input.len;
+                return;
+            },
             .version_exchange => {
                 const p = version.parse(input) catch |e| {
                     if (e == version.Error.Incomplete) return;
                     return e;
                 };
-                if (p.line.len > self.v_s_buf.len) return Error.ShortBuffer;
+                // **길이 검사가 필요 없다 — 구조가 보장한다.** 버퍼가 `version.max_line` 이고
+                // `version.parse` 가 그보다 긴 줄을 `LineTooLong` 으로 이미 거절한다. 검사를
+                // 두면 영영 안 도는 가지가 되고, 그런 가지는 변이 검사에서 살아남아 "구멍" 처럼
+                // 보인다(적대적 검증에서 실제로 그렇게 보였다).
                 @memcpy(self.v_s_buf[0..p.line.len], p.line);
                 self.v_s_len = p.line.len;
                 consumed.* += p.consumed;
@@ -366,10 +399,6 @@ pub const Client = struct {
         if (msg == kexinit.msg_kexinit and self.state != .negotiating) return self.beginRekey(payload, w);
 
         switch (self.state) {
-            // **닫힌 뒤에도 메시지가 온다.** 우리 `CHANNEL_CLOSE` 와 서버 것이 엇갈리거나,
-            // `exit-status` 가 뒤따라온다 — 그것을 오류로 다루면 **정상 종료가 실패로 보인다**
-            // (실측: 4KiB 왕복이 `UnexpectedMessage` 로 끝났다).
-            .closed => {},
             .negotiating => try self.onKexInit(payload, w),
             .key_exchange => try self.onKexReply(payload, w),
             .awaiting_new_keys => try self.onNewKeys(payload, w),
@@ -513,14 +542,23 @@ pub const Client = struct {
             .data => |d| try s.append(d),
             .extended_data => |x| try s.append(x.data),
             .exit_status => |code| self.exit_status = code,
-            .exit_signal => self.exit_status = null,
+            .exit_signal => |sig| {
+                const n = @min(sig.name.len, self.exit_signal_buf.len);
+                @memcpy(self.exit_signal_buf[0..n], sig.name[0..n]);
+                self.exit_signal_len = n;
+            },
             .eof => {},
             .closed => {
                 self.deferred_close = true;
                 self.state = .closed;
             },
             .window_adjusted => {},
-            .unknown_request => {},
+            // **`want_reply` 면 답해야 한다**(§5.4 — "If the request is not recognized ...
+            // SSH_MSG_CHANNEL_FAILURE is returned"). 안 답하면 서버가 기다린다 — OpenSSH 는
+            // `keepalive@openssh.com` 을 그렇게 보내고, 답이 없으면 연결이 죽은 것으로 본다.
+            .unknown_request => |u| if (u.want_reply) {
+                self.deferred_request_failure = true;
+            },
         }
         try self.flushDeferred(w);
     }
@@ -529,6 +567,10 @@ pub const Client = struct {
     fn flushDeferred(self: *Client, w: *Out) Error!void {
         if (!self.t.canSendChannelMessages()) return;
         var buf: [256]u8 = undefined;
+        if (self.deferred_request_failure) {
+            self.deferred_request_failure = false;
+            try self.emit(w, try self.ch.writeChannelFailure(&buf));
+        }
         if (self.deferred_close) {
             self.deferred_close = false;
             if (self.ch.state != .closed) try self.emit(w, try self.ch.writeClose(&buf));
@@ -681,4 +723,265 @@ test "clear 는 비밀을 지운다" {
     c.clear();
     try testing.expect(std.mem.allEqual(u8, &c.k, 0));
     try testing.expect(std.mem.allEqual(u8, &c.opts.secret_key, 0));
+}
+
+/// 셸이 뜬 클라이언트를 만든다 — 채널 사건만 시험하려는 테스트용.
+///
+/// **전송기를 평문으로 둔다.** 암호를 붙이면 이 테스트가 KEX 를 다시 짜야 하는데, 여기서 보려는
+/// 것은 채널 사건 처리이지 암호가 아니다.
+fn readyClient() Client {
+    var prng = std.Random.DefaultPrng.init(99);
+    var c = Client.init(.{
+        .user = "u",
+        .secret_key = @splat(0),
+        .size = .{ .cols = 80, .rows = 24 },
+    }, prng.random());
+    c.state = .ready;
+    c.shell_ready = true;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+    c.ch.state = .open;
+    c.ch.local_id = 0;
+    c.ch.remote_id = 0;
+    c.ch.remote_window = 1 << 20;
+    c.ch.remote_max_packet = 32768;
+    return c;
+}
+
+/// 채널 페이로드 하나를 평문 패킷으로 싸서 먹인다.
+fn feedChannel(c: *Client, payload: []const u8, wire_out: []u8, screen_out: []u8) !Step {
+    var buf: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const n = try packet.write(&buf, payload, prng.random());
+    return c.feed(buf[0..n], wire_out, screen_out);
+}
+
+test "모르는 채널 요청에 want_reply 면 답한다" {
+    // **리팩터가 지웠던 자리다.** 검증 도구에는 있었는데 상태기계로 옮기며 빠졌다 — §5.4 는
+    // "If the request is not recognized ... SSH_MSG_CHANNEL_FAILURE is returned" 라고 못박고,
+    // OpenSSH 는 `keepalive@openssh.com` 을 그렇게 보낸다. 안 답하면 연결이 죽은 것으로 본다.
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(0);
+    try wr.string("keepalive@openssh.com");
+    try wr.boolean(true);
+    const step = try feedChannel(&c, wr.written(), &w, &scr);
+
+    // 답이 나갔다 — `CHANNEL_FAILURE`(100) 이고 상대 채널 번호로 간다.
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(channel.msg_channel_failure, dec.payload[0]);
+}
+
+test "want_reply 가 거짓이면 답하지 않는다" {
+    // 안 물었는데 답하면 상대가 그것을 다른 요청의 답으로 읽는다.
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(0);
+    try wr.string("nothing@example.com");
+    try wr.boolean(false);
+    const step = try feedChannel(&c, wr.written(), &w, &scr);
+    try testing.expectEqual(@as(usize, 0), step.wire.len);
+}
+
+test "신호로 죽으면 그 이름을 잃지 않는다" {
+    // §6.10 은 `exit-status` 와 `exit-signal` 중 하나만 온다고 한다. 신호 쪽을 버리면 사용자에게
+    // "끝났는지" 조차 못 알려 준다 — 옛 드라이버는 오류로 올렸는데, 오류는 세션을 죽이므로
+    // 정보만 남기는 편이 낫다.
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(0);
+    try wr.string("exit-signal");
+    try wr.boolean(false);
+    try wr.string("TERM");
+    try wr.boolean(false);
+    try wr.string("");
+    try wr.string("");
+    const step = try feedChannel(&c, wr.written(), &w, &scr);
+    try testing.expectEqualStrings("TERM", step.exit_signal.?);
+    try testing.expectEqual(@as(?u32, null), step.exit_status);
+}
+
+test "화면 바이트는 stdout 과 stderr 를 합친다" {
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_data);
+    try wr.u32be(0);
+    try wr.string("out");
+    const a = try feedChannel(&c, wr.written(), &w, &scr);
+    try testing.expectEqualStrings("out", a.screen);
+
+    var wr2 = wire.Writer.init(&buf);
+    try wr2.byte(channel.msg_channel_extended_data);
+    try wr2.u32be(0);
+    try wr2.u32be(channel.extended_data_stderr);
+    try wr2.string("err");
+    const b = try feedChannel(&c, wr2.written(), &w, &scr);
+    try testing.expectEqualStrings("err", b.screen);
+}
+
+test "버퍼가 한 걸음도 못 담으면 조용히 0 이 아니라 오류다" {
+    // 조용히 0 을 돌려주면 호출자가 아무 일도 안 하면서 영원히 맴돈다.
+    var c = readyClient();
+    var tiny_wire: [16]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.ShortBuffer, c.feed("", &tiny_wire, &scr));
+
+    var w: [8192]u8 = undefined;
+    var tiny_screen: [16]u8 = undefined;
+    try testing.expectError(Error.ShortBuffer, c.feed("", &w, &tiny_screen));
+}
+
+test "재키잉 중에도 쓰기는 오류가 아니라 0 바이트다" {
+    // **호출자가 재키잉을 알 필요가 없다.** `NotReady` 를 내면 모든 드라이버가 재키잉 상태를
+    // 알아야 하고, 그러면 그 지식이 두 층에 생긴다.
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    try c.t.beginRekey();
+    const r = try c.write("ls\n", &w);
+    try testing.expectEqual(@as(usize, 0), r.sent);
+    try testing.expectEqual(@as(usize, 0), r.wire.len);
+    // 세션 자체는 여전히 쓸 수 있다 — `NotReady` 가 아니다.
+    try testing.expect(c.shell_ready);
+}
+
+test "윈도가 0 이면 쓰기가 0 바이트다" {
+    var c = readyClient();
+    c.ch.remote_window = 0;
+    var w: [8192]u8 = undefined;
+    const r = try c.write("x", &w);
+    try testing.expectEqual(@as(usize, 0), r.sent);
+}
+
+test "상대가 허락한 만큼만 나간다" {
+    var c = readyClient();
+    c.ch.remote_window = 10;
+    c.ch.remote_max_packet = 10;
+    var w: [8192]u8 = undefined;
+    const r = try c.write("0123456789abcdef", &w);
+    try testing.expectEqual(@as(usize, 10), r.sent);
+    try testing.expect(r.wire.len > 0);
+}
+
+test "clear 뒤에는 못 쓴다" {
+    // **적대적 검증 3회차가 찾은 것.** 지운 뒤에도 상태를 그대로 두면 키가 0 인 채로 세션이
+    // 계속 굴러간다 — 결과는 "왜인지 서버가 다 거절한다" 로 나타나고 원인을 짚기 어렵다.
+    var prng = std.Random.DefaultPrng.init(41);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0xAB), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.start(&out);
+    c.clear();
+    try testing.expectEqual(State.closed, c.state);
+    // 더 먹여도 아무 데도 안 간다(닫힘은 조용히 넘긴다 — 정상 종료 뒤 메시지가 오므로).
+    const step = try c.feed("SSH-2.0-x\r\n", &out, &scr);
+    try testing.expectEqual(State.closed, step.state);
+    try testing.expectError(Error.NotReady, c.write("x", &out));
+}
+
+test "start 없이 feed 하면 조용히 넘기지 않는다" {
+    var prng = std.Random.DefaultPrng.init(43);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.NotStarted, c.feed("SSH-2.0-x\r\n", &out, &scr));
+}
+
+test "호스트키를 승인하기 전에는 한 발도 안 나간다" {
+    // 계약 §4 — 자동 승인은 없다. 여기서 새면 TOFU 가 무의미해진다.
+    var prng = std.Random.DefaultPrng.init(47);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.start(&out);
+    c.state = .host_key_decision;
+
+    for (0..5) |_| {
+        const step = try c.feed("", &out, &scr);
+        try testing.expectEqual(@as(usize, 0), step.wire.len);
+        try testing.expectEqual(State.host_key_decision, step.state);
+    }
+
+    c.acceptHostKey();
+    const step = try c.feed("", &out, &scr);
+    try testing.expect(step.wire.len > 0);
+    try testing.expectEqual(State.awaiting_new_keys, step.state);
+}
+
+test "서버가 거대한 KEXINIT 을 보내도 버퍼를 안 넘는다" {
+    // **여기는 죽은 가지가 아니다.** `KEXINIT` 페이로드는 패킷 상한(256KiB)까지 올 수 있는데
+    // 우리 보관 버퍼는 4KiB 다 — 교환 해시에 쓸 원문만 담으면 되기 때문이다. 검사를 빼면
+    // 적대적 서버가 스택을 넘긴다.
+    var prng = std.Random.DefaultPrng.init(51);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.start(&out);
+    _ = try c.feed("SSH-2.0-x\r\n", &out, &scr);
+
+    var big: [8192]u8 = undefined;
+    @memset(&big, 0);
+    big[0] = kexinit.msg_kexinit;
+    var wire_buf: [16384]u8 = undefined;
+    const n = try packet.write(&wire_buf, &big, prng.random());
+    try testing.expectError(Error.ShortBuffer, c.feed(wire_buf[0..n], &out, &scr));
+}
+
+test "서버가 거대한 호스트키 blob 을 보내도 버퍼를 안 넘는다" {
+    // 호스트키는 wire string 이라 `max_field`(128KiB)까지 올 수 있다. 우리 버퍼는 512B —
+    // ed25519 blob 은 51B 다. 검사를 빼면 적대적 서버가 스택을 넘긴다.
+    var prng = std.Random.DefaultPrng.init(53);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    c.state = .key_exchange;
+    c.t.phase = .initial_kex;
+
+    var payload: [4096]u8 = undefined;
+    var w = wire.Writer.init(&payload);
+    try w.byte(kex.msg_kex_ecdh_reply);
+    try w.string(&([_]u8{7} ** 1024)); // 512 보다 큰 호스트키
+    try w.string(&([_]u8{8} ** 32));
+    try w.string(&([_]u8{9} ** 64));
+
+    var wire_buf: [8192]u8 = undefined;
+    const n = try packet.write(&wire_buf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.ShortBuffer, c.feed(wire_buf[0..n], &out, &scr));
+}
+
+test "거대한 exit-signal 이름은 잘라서 담는다" {
+    // 신호 이름도 wire string 이라 상한이 크다. 여기서 자르지 않으면 32B 버퍼를 넘는다.
+    // **자르는 것이 맞다** — 이름은 사용자에게 보여 줄 값이고, 그것 때문에 세션을 죽일 이유는 없다.
+    var c = readyClient();
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [512]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(0);
+    try wr.string("exit-signal");
+    try wr.boolean(false);
+    try wr.string(&([_]u8{'A'} ** 200));
+    try wr.boolean(false);
+    try wr.string("");
+    try wr.string("");
+    const step = try feedChannel(&c, wr.written(), &w, &scr);
+    try testing.expectEqual(@as(usize, 32), step.exit_signal.?.len);
 }

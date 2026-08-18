@@ -329,3 +329,7 @@ run = "sh tools/terminfo/install.sh"
 [tasks.ssh-smoke]
 description = "Opt-in `maru ssh` propagation smoke over `ssh localhost` (skips if no sshd/key). Needs `mise run build` first."
 run = "sh tools/ssh/smoke.sh"
+
+[tasks.ssh-client-smoke]
+description = "Built-in SSH client real-server smoke — spins up a throwaway sshd, transfers 8MiB (skips if no sshd; MARU_SSH_SMOKE_REQUIRE=1 turns skip into failure)."
+run = ["zig build ssh-client-smoke", "sh tools/ssh/client_smoke.sh"]

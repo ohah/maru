@@ -106,6 +106,10 @@ pub const Options = struct {
 pub const min_wire_out = 4096;
 
 /// `feed` 한 번의 결과.
+///
+/// **`banner` 와 `exit_signal` 은 `Client` 안을 가리킨다** — `wire`·`screen` 이 호출자 버퍼를
+/// 가리키는 것과 다르다. 다음 `feed` 까지만 살고, `Client` 를 복사·이동하면 그 순간 어긋난다.
+/// 들고 있어야 하면 **복사한다**. 전송기의 `Received.payload` 와 같은 규칙이다(계약 §4.5).
 pub const Step = struct {
     /// 입력에서 소비한 바이트. 호출자는 그만큼 앞으로 민다.
     consumed: usize,
@@ -124,6 +128,11 @@ pub const Step = struct {
     banner: ?[]const u8 = null,
 };
 
+/// **약 10KiB 다.** 교환 해시에 쓸 원문(`I_C`·`I_S` 각 4KiB)을 그대로 들어야 해서 그렇다 —
+/// 다시 만들면 cookie 가 달라져 해시가 안 맞는다(계약 §4.2).
+///
+/// **자리를 고정해서 든다**(전역·힙). 값으로 옮기면 10KiB 를 복사할 뿐 아니라, 앞선 `Step` 이
+/// 가리키던 `banner`·`exit_signal` 이 옛 자리를 보게 된다.
 pub const Client = struct {
     state: State = .idle,
     t: transport.Transport = .{},
@@ -1093,4 +1102,66 @@ test "배너는 다음 feed 로 물려주지 않는다" {
     _ = try c.feed(pbuf[0..n], &w, &scr);
     const second = try c.feed("", &w, &scr);
     try testing.expectEqual(@as(?[]const u8, null), second.banner);
+}
+
+test "화면 버퍼가 차면 멈추고 나머지는 다음에 준다" {
+    // **적대적 검증 8회차가 찾은 구멍.** 입구 검사(너무 작은 버퍼는 오류)는 덮여 있었지만
+    // **중간에 멈추는 것**은 안 덮였다. 호출자 버퍼는 유한하고(모바일은 특히), 한 번에 다
+    // 담으려 들면 `ShortBuffer` 로 죽는다 — 멈추고 `consumed` 만큼만 먹었다고 알려야 한다.
+    var c = readyClient();
+    c.ch.local_max_packet = 4096; // 화면 버퍼 요구치를 낮춘다
+    var prng = std.Random.DefaultPrng.init(71);
+
+    // 데이터 패킷 셋을 한 입력에 담는다.
+    var payload: [2048]u8 = undefined;
+    @memset(&payload, 'x');
+    var one: [4096]u8 = undefined;
+    var wr = wire.Writer.init(&one);
+    try wr.byte(channel.msg_channel_data);
+    try wr.u32be(0);
+    try wr.string(&payload);
+    var input: [16384]u8 = undefined;
+    var len: usize = 0;
+    for (0..3) |_| len += try packet.write(input[len..], wr.written(), prng.random());
+
+    // 화면 버퍼가 둘밖에 못 담는다.
+    var w: [8192]u8 = undefined;
+    var scr: [5000]u8 = undefined;
+    const step = try c.feed(input[0..len], &w, &scr);
+    try testing.expect(step.consumed < len); // 다 안 먹었다
+    try testing.expect(step.screen.len > 0); // 그래도 진행했다
+
+    // 나머지는 다음 호출에서 나온다 — 잃는 것이 없다.
+    const rest = try c.feed(input[step.consumed..len], &w, &scr);
+    try testing.expect(rest.consumed > 0);
+}
+
+test "shell 수락이 세션을 쓸 수 있게 만든다" {
+    // `readyClient` 는 `shell_ready` 를 손으로 세우므로 **진짜 전이**가 안 덮였다 —
+    // 그것을 안 세워도 테스트가 다 통과했다(적대적 검증 8회차).
+    var prng = std.Random.DefaultPrng.init(73);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    c.state = .starting_shell;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+    c.ch.state = .open;
+    c.ch.remote_window = 1 << 20;
+    c.ch.remote_max_packet = 32768;
+
+    var out: [8192]u8 = undefined;
+    // 아직은 못 쓴다.
+    try testing.expectError(Error.NotReady, c.write("x", &out));
+
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_success);
+    try wr.u32be(0);
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try feedChannel(&c, wr.written(), &out, &scr);
+    try testing.expectEqual(State.ready, step.state);
+
+    // 이제 쓸 수 있다.
+    const r = try c.write("ls\n", &out);
+    try testing.expectEqual(@as(usize, 3), r.sent);
 }

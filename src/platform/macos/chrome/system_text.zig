@@ -101,6 +101,8 @@ pub const UnresolvedGlyph = struct {
     color_glyph_kind: renderer.ColorGlyphKind,
     x_px: f32,
     advance_px: f32,
+    /// ink 가 자기 자리 왼쪽으로 넘치는 px(합자만 양수). `resolve` 가 래스터 슬롯을 넓히고 x 를 당긴다.
+    left_overhang_px: f32 = 0,
     font_name: [128]u8,
     point_size: u16,
     line_height_px: f32,
@@ -913,6 +915,17 @@ pub fn resolveArtifact(
         const name = probe.cStringField(&glyph.font_name);
         const font_id = try registry.intern(.{ .postscript_name = name });
         const advance = @max(glyph.advance_px, 1.0);
+        // **합자는 자기 자리보다 왼쪽에서 시작한다.** 폰트가 둘째 글리프에 두 글자를 합친 모양을 놓고 그
+        // ink 를 advance 왼쪽 밖으로 빼기 때문이다(첫 글리프는 빈 자리). 슬롯을 advance 폭으로만 잡으면
+        // 넘친 부분이 **잘려** `//` 가 `/` 하나로 보인다(#2123 — 편집기 본문에서 사용자가 본 그림).
+        //
+        // 터미널 셀 경로는 같은 사실을 `left_overhang_cells` 로 받아 칸 수를 늘려 해결했다. chrome 텍스트는
+        // 셀이 없으므로 px 로 받아 **슬롯을 넓히고 그린 자리를 그만큼 왼쪽으로 당긴다** — 래스터가 왼쪽으로
+        // 넘치는 글리프를 슬롯 오른쪽에 붙여 그리므로(coretext_smoke.m), 넓힌 슬롯 안에 ink 가 온전히 들어온다.
+        //
+        // **전진 칸 수는 건드리지 않는다.** CoreText 가 합자에도 글자마다 글리프를 하나씩 주므로(빈 글리프 +
+        // 합자 글리프) 격자는 이미 맞다 — 여기서 칸을 더 세면 뒤 글자가 오히려 밀린다.
+        const overhang = @max(glyph.left_overhang_px, 0.0);
         record.* = .{
             .row = @intCast(record_index / 256),
             .col = @intCast(record_index % 256),
@@ -923,11 +936,11 @@ pub fn resolveArtifact(
             .fallback = glyph.fallback,
             .color_glyph_kind = glyph.color_glyph_kind,
             .raster_font_size_milli = @intCast(@as(u32, glyph.point_size) * 1000),
-            .raster_width_px = @intFromFloat(@ceil(advance)),
+            .raster_width_px = @intFromFloat(@ceil(advance + overhang)),
             .raster_height_px = @intFromFloat(@ceil(glyph.line_height_px)),
         };
         placement.* = .{
-            .x_px = label_origin.x_px + (grid_x orelse glyph.x_px),
+            .x_px = label_origin.x_px + (grid_x orelse glyph.x_px) - overhang,
             .y_px = label_origin.y_px,
             .advance_px = advance,
             .line_height_px = glyph.line_height_px,
@@ -1009,6 +1022,66 @@ fn labelOrigin(layout: chrome.draw.TextPlacement, fallback: chrome.draw.Px, adva
 // 한 줄 안에서 색만 바뀌는 구간(`chrome.draw.Run`)이 **실측 advance 로 이어지는지**. 컴포넌트는 비례
 // 폰트의 advance 를 모르므로 스스로 잇지 못하고, 셀 격자로 추정해 op 을 나누면 구간 사이가 벌어진다
 // (세션 카드 메타 줄에서 실제로 그렇게 벌어진 캡처를 봤다). 그 이음이 이 자리의 책임이다.
+// [#2123] 편집기 본문에서 `//` 가 `/` 하나로 보였다. 원인은 합자 글리프의 ink 가 자기 자리보다 **왼쪽에서
+// 시작**하는데(폰트가 두 글자를 합친 모양을 둘째 글리프에 놓는다) 래스터 슬롯을 advance 폭으로만 잡아
+// 넘친 부분이 잘린 것이다. 슬롯을 넓히고 그린 자리를 당기는 계약을 여기서 못 박는다 — 값이 없는(0) 글리프는
+// 예전과 **한 픽셀도 다르지 않아야** 한다(합자가 아닌 모든 글자가 그 경우다).
+test "합자처럼 왼쪽으로 넘치는 글리프는 슬롯이 넓어지고 그 만큼 왼쪽에서 그려진다" {
+    const allocator = std.testing.allocator;
+    var font_name = [_]u8{0} ** 128;
+    @memcpy(font_name[0..6], "System");
+    const make = struct {
+        fn glyph(x_px: f32, advance: f32, overhang: f32, name: [128]u8) UnresolvedGlyph {
+            return .{
+                .glyph_id = 12,
+                .codepoint = '/',
+                .fallback = false,
+                .color_glyph_kind = .monochrome,
+                .x_px = x_px,
+                .advance_px = advance,
+                .left_overhang_px = overhang,
+                .font_name = name,
+                .point_size = 14,
+                .line_height_px = 20,
+                .origin = .{ .x = 100, .y = 40 },
+                .foreground = 0xAABBCC,
+                .run_index = 0,
+            };
+        }
+    };
+    // 두 글리프 모두 advance 8: 앞은 넘침 없음(보통 글자), 뒤는 왼쪽으로 6px 넘침(합자).
+    const glyphs = try allocator.dupe(UnresolvedGlyph, &.{
+        make.glyph(0, 8, 0, font_name),
+        make.glyph(8, 8, 6, font_name),
+    });
+    var unresolved = UnresolvedArtifact{
+        .glyphs = glyphs,
+        .placements = try allocator.dupe(chrome.draw.TextPlacement, &.{ .origin, .origin }),
+        .foregrounds = try allocator.dupe(u32, &.{ 0xAABBCC, 0xAABBCC }),
+        .scroll_flags = try allocator.dupe(bool, &.{ false, false }),
+        .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{ null, null }),
+        .cell_widths = try allocator.dupe(?u16, &.{ null, null }),
+        .continues = try allocator.dupe(bool, &.{ false, false }),
+        .max_widths = try allocator.dupe(u32, &.{ 10_000, 10_000 }),
+    };
+    defer unresolved.deinit(allocator);
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    var artifact = try resolveArtifact(allocator, &registry, unresolved);
+    defer artifact.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), artifact.placements.len);
+    // 넘침이 없는 글리프: 슬롯도 자리도 예전 그대로다(이 수정이 일반 글자를 건드리지 않는다는 증거).
+    try std.testing.expectEqual(@as(f32, 100), artifact.placements[0].x_px);
+    try std.testing.expectEqual(@as(u16, 8), artifact.records[0].raster_width_px);
+    // 합자: 슬롯이 넘침만큼 넓어지고(8 → 14) 그린 자리는 그만큼 왼쪽으로 간다(108 → 102).
+    // 슬롯만 넓히고 자리를 안 당기면 ink 가 여전히 오른쪽 밖으로 나가고, 자리만 당기면 글자가 왼쪽으로 밀린다.
+    try std.testing.expectEqual(@as(u16, 14), artifact.records[1].raster_width_px);
+    try std.testing.expectEqual(@as(f32, 102), artifact.placements[1].x_px);
+    // **전진(advance)은 그대로다.** 격자는 글리프 수로 이미 맞으므로 여기서 폭을 늘리면 뒤 글자가 밀린다.
+    try std.testing.expectEqual(@as(f32, 8), artifact.placements[1].advance_px);
+}
+
 test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같은 origin 에서 겹치지 않는다)" {
     const allocator = std.testing.allocator;
     var font_name = [_]u8{0} ** 128;
@@ -1305,6 +1378,7 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
             .color_glyph_kind = if (native_glyph.color_glyph_kind != 0) .color else .monochrome,
             .x_px = native_glyph.x_px,
             .advance_px = native_glyph.advance_px,
+            .left_overhang_px = native_glyph.left_overhang_px,
             .font_name = native_glyph.font_name,
             .point_size = point_size,
             // 편집기 줄 높이는 셀에서 오고(호출자가 device px로 준다), 아니면 토큰 line height다.

@@ -644,5 +644,5 @@ pub const inventory = [_]Proof{
     // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
     // 4차 검증이 원자화의 **근거로 든 호출부를 같은 브랜치가 지웠다**는 것을 잡아 주석이 움직인다(워커는
     // 이제 키만 넘긴다). 원자성은 남긴다 — 그 규칙이 깨지는 것을 컴파일러가 말해 주지 않기 때문이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "4d06911967b13fdfa6fd037b638950e844f90c366df68b5a8c1ee0642fd2b04c" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "a36b3213d631ef197ce63b173fd970ca1b1391d188d836a46f5cb9dcde6c10ec" },
 };

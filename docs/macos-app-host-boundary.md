@@ -164,4 +164,4 @@ Web의 `renderMermaid` mailbox는 독립 timeout을 갖지 않고 Zig exact term
 
 ## 남은 한계
 
-현재 app shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`가 AppKit/Metal UI를 그리며 key/resize/close event를 Zig app session ABI로 내려보낸다. 표준 메뉴바와 `.app` bundle은 구현돼 있고 `mise run macos-app-bundle`이 Info.plist·CLI·web/font resources를 패키징하며 Developer ID 배포는 [distribution.md]의 서명·공증 경로를 쓴다. `install_cli`도 command catalog·팔릿에서 `~/.local/bin/maru` symlink를 설치하는 구현 상태다. 남은 한계는 이 문서의 각 자동 smoke가 실제 사용자 장시간 조작, 모든 AppKit firstResponder 경합, 모든 배포 환경의 Gatekeeper 결과를 완전히 대체하지 못한다는 점이다.
+현재 app shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`가 AppKit/Metal UI를 그리며 key/resize/close event를 Zig app session ABI로 내려보낸다. 표준 메뉴바와 `.app` bundle은 구현돼 있고 `zig build macos-app-bundle`이 Info.plist·CLI·web/font resources를 패키징하며 Developer ID 배포는 [distribution.md]의 서명·공증 경로를 쓴다. `install_cli`도 command catalog·팔릿에서 `~/.local/bin/maru` symlink를 설치하는 구현 상태다. 남은 한계는 이 문서의 각 자동 smoke가 실제 사용자 장시간 조작, 모든 AppKit firstResponder 경합, 모든 배포 환경의 Gatekeeper 결과를 완전히 대체하지 못한다는 점이다.

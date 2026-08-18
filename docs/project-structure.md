@@ -83,20 +83,35 @@ src/
                         수신과 방출, 이력·읽음 상태, 패널·배지, 벨 플래시, 원격 폴링, F13), agent.zig(에이전트 관측 —
                         상태·종류·트랜스크립트 폴링, 상태줄, 스피너, 사이드바 행, 세션 재개, F14.
                         세션 기록 도크는 여기가 아니라 agent_dock.zig 소유다), git.zig(git·SCM — 저장소 탐지,
-                        브랜치·상태 갱신, SCM 뷰 행, diff term, F15). 각 파일은 `*AppSession`을 받는
+                        브랜치·상태 갱신, SCM 뷰 행, diff term, F15), term.zig(term·surface — 생성/파괴·등록·
+                        조회·포커스·종료, F16. `Term`/`Surface`가 거의 모든 도메인에 걸리므로 경계를 이름이 아니라
+                        내용으로 잡았다), debug_fixtures.zig(`MARU_*` 환경변수 게이트로 사이드바 접힘·가짜 브랜치·
+                        그룹 상태·드래그 고스트·알림 배지를 강제하는 **디버그/스모크 하네스** — 게이트는 분리 시점
+                        40여 개에서 57개로 계속 는다(2026-08-18 실측). 함수 이름은
+                        `maybeDebugOpenSettings`였지만 하는 일이 세팅이 아니라 시나리오 강제라, 제품 경로를 읽는
+                        사람이 이 분량을 지나지 않도록 따로 뺐다). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고, `app_session.zig`에는 ABI가 직접 부르는 진입을 얇은 facade로 남긴다.
+                        **F 시리즈가 아닌 파일도 이 폴더에 산다** — editor.zig·editor_diff.zig(네이티브 편집기의
+                        platform 쪽 절반 — 파일 읽기/권한 판정, diff Term 배선. docs/plans/native-editor.md가 단계를
+                        소유한다)와 scm_dock.zig(소스 컨트롤 도크의 호스트 배선 — `session/scm_view.zig`의 행 모델을
+                        component props로 투영하고 포인터를 그 tree로 라우팅한다. Session Dock과 같은 경로를 쓴다)는
+                        **분해로 떼어낸 것이 아니라 처음부터 여기에 쓴** 새 기능이고, 그래서 아래 "test는
+                        그룹 파일로 옮기지 않는다"의 예외다 — 자기 test를 함께 갖는다(§2-c-3의 "새 파일을 처음
+                        작성할 때만 그 파일에 test를 쓴다").
                         **다만 허브가 이미 얇아졌다는 뜻은 아니다** — 분해는 진행 중이고(72,317줄에서 출발),
-                        F 시리즈가 옮긴 것은 그룹 본문뿐이다. test 850여 개는 판정자가 그룹 밖 표면에 훨씬 넓게
+                        F 시리즈가 옮긴 것은 그룹 본문뿐이다. test 900여 개는 판정자가 그룹 밖 표면에 훨씬 넓게
                         닿아 동반 이동 시 pub화가 6배로 늘기 때문에 **의도적으로 허브에 남겼다**(아래 항목).
                         현재 줄 수와 남은 단계는 docs/app-session-decomposition.md가 단일 출처다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).
-                        **이 17개는 독립 모듈이 아니라 한 모듈(`AppSession`)의 조각이다** — 필드를
-                        공유하므로 서로를 부르고, 실측상 양방향 쌍이 39개다(43% 밀도). 순환은 결함이
-                        아니라 이 구조의 성질이고, 얻은 것은 모듈 경계가 아니라 **탐색성**이다
+                        **분해로 떼어낸 이 17개(find + F1~F16 + debug_fixtures)는 독립 모듈이 아니라 한
+                        모듈(`AppSession`)의 조각이다** — 필드를 공유하므로 서로를 부르고, 2026-08-10 실측으로
+                        양방향 쌍이 39개였다(43% 밀도). 순환은 결함이 아니라 이 구조의 성질이고, 얻은 것은
+                        모듈 경계가 아니라 **탐색성**이다
                         (docs/app-session-decomposition.md "그룹 파일 17개는 독립 모듈이 아니다").
-                        **test는 그룹 파일로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
-                        동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측).
+                        **분해로 떼어낸 파일의 test는 그룹으로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
+                        동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측). 위 세 예외(editor·editor_diff·
+                        scm_dock)는 분해 산물이 아니므로 이 규칙 밖이다.
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.
                         persistent-session P2: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는
                         vtable 계약 `term_runtime_backend.zig`(TermRuntimeBackend·RuntimeHandle — opaque, PtyIo와 같은

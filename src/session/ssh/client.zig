@@ -30,6 +30,9 @@ pub const Error = error{
     HostKeyNotAccepted,
     /// 사용자가 호스트키를 거절했다(또는 `known_hosts` 가 다르다).
     HostKeyRejected,
+    /// **재키잉에서 서버가 다른 호스트키를 내밀었다.** 서명은 맞을 수 있다 — 서명 검증은 "이 키가
+    /// 이 `H` 에 서명했다" 만 말하지 그 키가 사용자가 승인한 키인지는 안 본다.
+    HostKeyChanged,
     /// 인증이 거절됐다.
     AuthFailed,
     /// 서버가 채널을 안 열어 줬다.
@@ -561,6 +564,17 @@ pub const Client = struct {
 
     fn onKexReply(self: *Client, payload: []const u8, w: *Out) Error!void {
         const reply = try kex.parseReply(payload);
+        // **재키잉에서 키가 바뀌면 여기서 끊는다 — 보관하기 전에 본다.**
+        //
+        // 예전에는 아래에서 "지문이 바뀌었으면 서명 검증이 이미 실패한다" 고 적어 두고 그냥
+        // 넘어갔는데, **그 말이 틀렸다**: `verifyExchangeHash` 는 *제시된* 키로 서명을 확인하므로
+        // 공격자가 고른 다른 키도 그대로 통과한다. 그러면 사용자에게 보여 준 지문과 지금 세션의
+        // 상대가 달라지고, TOFU 가 약속한 것이 정확히 그 동일성이다.
+        //
+        // 비교를 **보관보다 먼저** 두는 것이 요점이다. 먼저 덮어쓰면 비교할 원본이 사라진다.
+        if (self.rekeying and !std.mem.eql(u8, self.host_key_buf[0..self.host_key_len], reply.host_key)) {
+            return Error.HostKeyChanged;
+        }
         if (reply.host_key.len > self.host_key_buf.len) return Error.ShortBuffer;
         @memcpy(self.host_key_buf[0..reply.host_key.len], reply.host_key);
         self.host_key_len = reply.host_key.len;
@@ -580,7 +594,8 @@ pub const Client = struct {
         // 아닐 수 있다.
         try hostkey.verifyExchangeHash(reply.host_key, reply.signature, &self.h);
         if (self.rekeying) {
-            // 재키잉에서는 다시 묻지 않는다 — 지문이 바뀌었으면 위 검증이 이미 실패한다.
+            // 재키잉에서는 다시 묻지 않는다 — **키가 그대로임을 위에서 이미 확인했다**(바뀌었으면
+            // `HostKeyChanged` 로 끊었다). 사용자에게 같은 지문을 또 보여 줄 이유가 없다.
             return self.afterHostKey(w);
         }
         self.session_id = self.h;
@@ -1991,4 +2006,38 @@ test "재키잉 중에 온 모르는 번호에는 그대로 답한다" {
     const dec = try packet.read(step.wire);
     try testing.expectEqual(msg_unimplemented, dec.payload[0]);
     try testing.expectEqual(@as(?transport.Error, null), c.t.poison);
+}
+
+test "재키잉에서 호스트키가 바뀌면 끊는다" {
+    // **서명 검증은 "이 키가 이 H 에 서명했다" 만 말한다** — 그 키가 사용자가 승인한 키인지는
+    // 안 본다. 즉 재키잉에서 다른 키로 갈아 끼워도 서명은 맞고, 그러면 우리가 사용자에게 보여
+    // 준 지문이 지금 세션의 상대와 다르다 — TOFU 가 약속한 것이 바로 그 동일성이다.
+    var c = readyClient();
+    var key_a: [128]u8 = undefined;
+    var wa = wire.Writer.init(&key_a);
+    try wa.string(hostkey.alg_name);
+    try wa.string(&([_]u8{7} ** 32));
+    const blob_a = wa.written();
+    @memcpy(c.host_key_buf[0..blob_a.len], blob_a);
+    c.host_key_len = blob_a.len;
+
+    // 다른 키 B 를 담은 재키잉 답.
+    var payload: [256]u8 = undefined;
+    var w = wire.Writer.init(&payload);
+    try w.byte(kex.msg_kex_ecdh_reply);
+    var key_b: [128]u8 = undefined;
+    var wb = wire.Writer.init(&key_b);
+    try wb.string(hostkey.alg_name);
+    try wb.string(&([_]u8{9} ** 32)); // 다른 키
+    try w.string(wb.written());
+    try w.string(&([_]u8{1} ** 32)); // Q_S
+    try w.string(&([_]u8{0} ** 83)); // 서명 — 여기까지 가지 않는다
+
+    c.rekeying = true;
+    c.state = .key_exchange;
+    var out: [8192]u8 = undefined;
+    var o: Client.Out = .{ .buf = &out };
+    try testing.expectError(Error.HostKeyChanged, c.onKexReply(w.written(), &o));
+    // **바뀐 키를 보관하지도 않는다** — 그 뒤에 지문을 물으면 승인한 키가 나와야 한다.
+    try testing.expectEqualSlices(u8, blob_a, c.host_key_buf[0..c.host_key_len]);
 }

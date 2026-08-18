@@ -240,6 +240,13 @@ init은 흔들지 않으므로 남의 코드를 시험하지 않고 빠르다(`e
 
 **라이브로 폭을 끄는 경로는 셋이다** — 사이드바 우측 경계 드래그(`sidebar_ops.setSidebarWidthPx`를 drag마다 부른다), pane divider 드래그(CIM2로 `InteractionState`에 이관됐고 tick coalescer가 최종 좌표 하나를 적용한다), dock 바깥 경계 드래그(`dock_ops.setDockSizeFromPointer` — dock이 `.right`면 x를 끌고 `resizeTabPanes`로 전 탭 pane을 다시 재운다). **셋을 각각 물어야 하는 것 자체가 상태를 드러낸다** — "지금 폭을 끄는 중인가"의 단일 출처가 없고 capture 권위가 `InteractionState`와 `PointerGestureOwner`의 두 variant로 갈려 있다([Chrome 상호작용 이관](chrome-interaction-migration.md) CIM2가 그 통합을 소유한다). 실측으로 그 상태의 2만 줄 랩 문서가 프레임당 **60.9ms**였다(ReleaseFast — 약 16fps). **그 구간은 §2.1이 같은 절에서 규정한 "저하 동작"으로 닫았다**: 그 드래그가 활성인 동안 계수를 보류하고 직전 결과로 그린다(`frame.RowCache.hold` — 조건은 제품의 `widthDragActive`가 정한다). 60.9ms → 0.2ms이고, 대가는 드래그 중 막대 길이가 옛 폭 기준인 것이다. **줄 배열이 그대로일 때만 저하한다** — 저하가 겨냥한 것은 폭 변경이고, 줄이 바뀐 상태에서 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 다른 문서의 값이다.
 
+**이 선택의 베이스.** 저하 동작도 "드래그 중인지 명시적으로 묻는 방식"도 이 문서가 지어낸 것이 아니라 선례가 있다.
+
+- **부정확한 값으로 계속 그린다** — [xi-editor #610](https://github.com/xi-editor/xi-editor/issues/610)이 같은 문제(*"incremental computation is not always possible … when changing the wrap width"*)를 다루며 async로 가고, 그동안 *"for pending chunks, the breaks are not necessarily accurate … in these intermediate states, the document is still rendered, and interaction is still possible"*라고 적었다. 동기도 같다 — *"this is all motivated by drag-resizing of the window."* §2.1의 "저하 동작을 허용한다"가 그것과 같은 결론이다.
+- **드래그 중인지 상태로 묻는다** — Apple의 live resize 권고가 [`inLiveResize`](https://developer.apple.com/documentation/appkit/nsview/inliveresize)를 검사해 비싼 계산을 건너뛰고 [`viewDidEndLiveResize`](https://developer.apple.com/documentation/appkit/nsview/1483543-viewdidendliveresize)에서 수행하라고 한다(캐시 준비는 `viewWillStartLiveResize`). `widthDragActive` + `RowCache.hold`가 그 구조이고, 이 저장소의 `windowDidResize` 보류도 같은 패턴이다.
+
+**택하지 않은 것과 이유.** "캐시가 직전 프레임 폭을 기억해 변동 중인지 스스로 판정"하는 방식도 검토했고 **버렸다.** ⑴ 위 두 선례 모두 상태를 명시적으로 알지 추론하지 않는다(async pending 여부 / live resize 플래그). ⑵ 그것은 사실상 1프레임 debounce인데, 웹에서 흔한 debounce는 시간 기반이고 프레임 기반은 **렌더 루프가 계속 돈다는 전제**를 요구한다. 이 루프에는 idle skip이 있어(§투영 게이트) 드래그를 놓은 뒤 프레임이 한 번 더 온다는 보장이 없고, 그러면 손을 뗐는데도 막대가 옛 폭 기준으로 남는다. ⑶ 저하 중에는 캐시 키를 갱신하지 않으므로 "직전 폭"을 키와 별개 필드로 들어야 하고, 안 그러면 한 번 저하한 뒤 영영 miss로 남아 절대 정확해지지 않는다.
+
 **그래서 워커에 남는 것은 "드래그를 놓는 순간의 한 프레임"이다** — 그때 전 문서를 한 번 세므로 2만 줄에서 ~60ms가 한 번 튄다(창 리사이즈도 같은 자리에서 한 번 든다). 위 표의 배치는 그 스파이크를 없애기 위해 여전히 유효하다.
 
 **워커에는 스냅샷을 넘긴다.** §3.0의 rope가 persistent/copy-on-write이므로 **메인은 옛 스냅샷으로 계속 그리면서** 워커가 새 결과를 만들 수 있다 — Zed가 tree-sitter 백그라운드 파싱을 지탱하는 방식과 같고, **이것이 rope를 persistent로 두는 두 번째 이유다**(첫째는 §3.0의 편집 복잡도).

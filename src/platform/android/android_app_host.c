@@ -697,6 +697,22 @@ static void drawFrame(void) {
             maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
         }
     }
+    // **격자가 바뀌면 원격에 알린다.** 키보드가 오르내리면 보이는 행 수가 바뀌는데(그때 코어가
+    // 격자를 다시 잡는다), 안 알리면 원격은 처음 크기를 믿고 그린다 — `less`·`vim` 이 화면
+    // 절반에만 그리거나 줄이 어긋난다. 값은 코어에게 묻는다(host 가 따로 세면 갈린다).
+    {
+        static unsigned int last_cols, last_rows;
+        unsigned int cols = maru_mobile_term_cols();
+        unsigned int rows = maru_mobile_term_rows();
+        if (cols && rows && (cols != last_cols || rows != last_rows)) {
+            if (last_cols && maru_ssh_pump_is_running()) {
+                maru_ssh_pump_resize(cols, rows);
+                LOGI("MARU_SSH resize cols=%u rows=%u", cols, rows);
+            }
+            last_cols = cols;
+            last_rows = rows;
+        }
+    }
     pthread_mutex_unlock(&g_bridge_lock);
 
     // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
@@ -981,10 +997,24 @@ static unsigned long ssh_take_response(void *ctx, unsigned char *out, unsigned l
     return maru_mobile_take_response(out, cap);
 }
 
+/// 서비스 클래스. **세션이 끝났다고 알릴 자리**라 들고 있는다.
+static jclass g_ssh_service_cls;
+
 static void ssh_state(void *ctx, unsigned int state) {
     (void)ctx;
     // **상태를 로그로 남긴다.** 기기에서 "안 붙는다" 를 볼 때 어디까지 갔는지가 첫 단서다.
     LOGI("MARU_SSH state=%u error=%s", state, maru_ssh_pump_error());
+    if (state != MARU_SSH_STATE_CLOSED) return;
+    // **끝났으면 서비스를 내린다.** 안 내리면 알림이 "유지 중" 인 채로 남아, 끊긴 것을 알리는
+    // 대신 붙어 있다고 거짓말한다.
+    if (!g_ssh_service_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_ssh_service_cls, "onSessionEnded", "()V");
+    if (m) (*env)->CallStaticVoidMethod(env, g_ssh_service_cls, m);
+    (*vm)->DetachCurrentThread(vm);
+    LOGI("MARU_SSH service_stopped");
 }
 
 /// 접속 정보를 든다. **문자열은 우리가 소유한다** — 펌프는 `start` 가 도는 동안 이 포인터를 본다.
@@ -993,14 +1023,32 @@ static char g_ssh_user[128];
 static char g_ssh_fingerprint[128];
 static unsigned char g_ssh_secret[MARU_SSH_SECRET_KEY_BYTES];
 
+/// 개인키 파일을 읽는다. **우리 프로세스 안에서만 읽는다** — 경로만 건네받는 이유다.
+static unsigned int readKeyFile(const char *path, unsigned char *out, unsigned int cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(out, 1, cap, f);
+    fclose(f);
+    return (unsigned int)n;
+}
+
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring host, jint port,
-                                            jstring user, jbyteArray key_pem, jstring fingerprint) {
-    (void)cls;
-    if (!host || !user || !key_pem || !fingerprint) {
+                                            jstring user, jstring key_path, jstring fingerprint) {
+    if (!host || !user || !key_path || !fingerprint) {
         LOGI("MARU_SSH start_missing_args");
         return;
     }
+    // **이미 돌고 있으면 아무것도 안 건드린다.** 먼저 덮어쓰고 나중에 거절하면, 도는 세션이
+    // 보고 있는 값이 그 사이 바뀐다.
+    //
+    // 판정은 **`is_running` 으로 한다 — 상태가 아니다.** 끝난 세션도 `CLOSED` 를 들고 있어야
+    // host 가 알림을 내릴 수 있어서, 상태로 재면 한 번 끊긴 뒤로 **재접속이 영영 막힌다**.
+    if (maru_ssh_pump_is_running()) {
+        LOGI("MARU_SSH already_running state=%u", maru_ssh_pump_state());
+        return;
+    }
+    if (!g_ssh_service_cls) g_ssh_service_cls = (*env)->NewGlobalRef(env, cls);
     const char *h = (*env)->GetStringUTFChars(env, host, NULL);
     snprintf(g_ssh_host, sizeof g_ssh_host, "%s", h ? h : "");
     if (h) (*env)->ReleaseStringUTFChars(env, host, h);
@@ -1011,17 +1059,17 @@ Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring hos
     snprintf(g_ssh_fingerprint, sizeof g_ssh_fingerprint, "%s", f ? f : "");
     if (f) (*env)->ReleaseStringUTFChars(env, fingerprint, f);
 
-    // **키는 ABI 가 푼다.** host 가 하는 일은 바이트를 넘기는 것뿐이고, 푼 뒤 원문은 지운다.
-    jsize pem_len = (*env)->GetArrayLength(env, key_pem);
-    jbyte *pem = (*env)->GetByteArrayElements(env, key_pem, NULL);
-    if (!pem) {
-        LOGI("MARU_SSH key_unavailable");
+    // **키는 우리가 읽고 ABI 가 푼다.** 파일 바이트는 이 함수 밖으로 안 나간다.
+    static unsigned char pem[16 * 1024];
+    const char *kp = (*env)->GetStringUTFChars(env, key_path, NULL);
+    unsigned int pem_len = kp ? readKeyFile(kp, pem, sizeof pem) : 0;
+    if (kp) (*env)->ReleaseStringUTFChars(env, key_path, kp);
+    if (pem_len == 0) {
+        LOGI("MARU_SSH key_unreadable");
         return;
     }
-    int loaded = maru_mobile_ssh_load_key((const unsigned char *)pem, (unsigned int)pem_len,
-                                          (const unsigned char *)"", 0, g_ssh_secret);
-    memset(pem, 0, (size_t)pem_len);
-    (*env)->ReleaseByteArrayElements(env, key_pem, pem, 0);
+    int loaded = maru_mobile_ssh_load_key(pem, pem_len, (const unsigned char *)"", 0, g_ssh_secret);
+    memset(pem, 0, sizeof pem);
     if (loaded != MARU_SSH_OK) {
         LOGI("MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
         return;

@@ -211,6 +211,10 @@ public class MaruActivity extends android.app.NativeActivity {
     protected void onResume() {
         super.onResume();
         applyLongPressTimeout();
+        // **돌아올 때마다 본다.** SSH 에는 재개가 없어서(계약 §4.1) 끊긴 세션은 되살릴 수 없고
+        // 다시 붙는 수밖에 없다 — `onCreate` 에서만 보면 한 번 끊긴 뒤 프로세스를 죽였다
+        // 켜야만 다시 붙는다. 이미 돌고 있으면 네이티브가 거절하므로 여기서는 그냥 부른다.
+        maybeStartSsh();
     }
 
     @Override
@@ -228,7 +232,6 @@ public class MaruActivity extends android.app.NativeActivity {
         // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
         // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());
-        maybeStartSsh();
     }
 
     /// **개발용 접속 자리.** `filesDir/ssh.conf` 가 있으면 그 서버로 붙는다.
@@ -243,25 +246,14 @@ public class MaruActivity extends android.app.NativeActivity {
         java.io.File conf = new java.io.File(getFilesDir(), "ssh.conf");
         if (!conf.exists()) return;
         java.util.Properties p = new java.util.Properties();
-        byte[] key;
         try (java.io.FileInputStream in = new java.io.FileInputStream(conf)) {
             p.load(in);
-            String identity = p.getProperty("identity");
-            if (identity == null) return;
-            java.io.File keyFile = new java.io.File(identity);
-            key = new byte[(int) keyFile.length()];
-            try (java.io.FileInputStream ki = new java.io.FileInputStream(keyFile)) {
-                int off = 0;
-                while (off < key.length) {
-                    int n = ki.read(key, off, key.length - off);
-                    if (n <= 0) break;
-                    off += n;
-                }
-            }
         } catch (java.io.IOException e) {
             android.util.Log.i("MaruChrome", "MARU_SSH conf_read_failed " + e);
             return;
         }
+        String identity = p.getProperty("identity");
+        if (identity == null) return;
         String host = p.getProperty("host");
         String user = p.getProperty("user");
         String fingerprint = p.getProperty("fingerprint");
@@ -273,7 +265,9 @@ public class MaruActivity extends android.app.NativeActivity {
         intent.putExtra("host", host);
         intent.putExtra("port", Integer.parseInt(p.getProperty("port", "22")));
         intent.putExtra("user", user);
-        intent.putExtra("key", key);
+        // **키는 경로만 넘긴다** — extra 는 `system_server` 를 지난다(개인키가 프로세스 밖으로
+        // 나가면 안 된다). 파일은 네이티브가 우리 프로세스 안에서 읽는다.
+        intent.putExtra("identity", identity);
         intent.putExtra("fingerprint", fingerprint);
         // **`startForegroundService` 여야 한다.** 배경에서 `startService` 는 API 26+ 에서 막힌다.
         startForegroundService(intent);

@@ -41,7 +41,11 @@ typedef struct {
     void (*screen)(void *ctx, const unsigned char *bytes, unsigned long len);
     /// 코어가 만든 답을 가져간다(`maru_mobile_take_response`). 없으면 답을 안 보낸다.
     unsigned long (*take_response)(void *ctx, unsigned char *out, unsigned long cap);
-    /// 상태가 바뀌면 알린다(`MARU_SSH_STATE_*`). 화면 표시용이라 없어도 된다.
+    /// 상태가 바뀌면 알린다(`MARU_SSH_STATE_*`).
+    ///
+    /// **끝은 반드시 온다** — 어떻게 끝나든(정상 종료·선 끊김·오류) 마지막으로
+    /// `MARU_SSH_STATE_CLOSED` 가 한 번 온다. host 는 그때 알림을 내리고 서비스를 접는다.
+    /// 이 훅 **안에서** `maru_ssh_pump_stop` 을 불러도 된다(자기 자신은 안 거둔다).
     void (*state_changed)(void *ctx, unsigned int state);
     void *ctx;
 } MaruSshPumpHooks;
@@ -53,6 +57,9 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
 void maru_ssh_pump_stop(void);
 /// 지금 상태(`MARU_SSH_STATE_*`). 안 돌고 있으면 `MARU_SSH_STATE_INVALID`.
 unsigned int maru_ssh_pump_state(void);
+/// **지금 돌고 있나.** 상태(`state`)로는 이것을 못 판단한다 — 끝난 세션도 `CLOSED` 를 들고
+/// 있어야 host 가 알림을 내릴 수 있기 때문이다. "다시 붙어도 되나" 는 이 함수가 답한다.
+int maru_ssh_pump_is_running(void);
 /// 마지막 실패 이름. 없으면 빈 문자열.
 const char *maru_ssh_pump_error(void);
 /// 키 입력을 원격으로 보낸다(host 의 IME·키바가 부른다). 보낸 바이트 수.

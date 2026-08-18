@@ -633,5 +633,5 @@ pub const inventory = [_]Proof{
     // 현재 언어를 `std.atomic.Value` 로 바꾸고(떼어낸 아카이브 워커가 `t()` 를 부른다 — 평범한 `var` 였을 때
     // UI 스레드의 쓰기와 겹치는 자료 경합이었다), 참조 0인 키 15개를 지우며 움직인다. count는 1 그대로다 —
     // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "0d9942b71e81c4a6827ad71c4653a79615d106a5d54cf6c1862ce990146fc25e" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "827e40ad6bfae3236ce14666d14d8327de591e2ad7e11f2ef3b6dc1716f11437" },
 };

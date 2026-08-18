@@ -878,17 +878,26 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 
 **폰트도 config에서 온다 — config를 읽어 놓고 안 쓰던 자리였다.** 적대적 검증 1라운드가 잡았다:
 래스터라이저를 여전히 `create(allocator, "", "", 18.0)`으로 만들고 있었다. `font.family`·`font.fallback`·
-`font.size`를 넘기도록 고쳤고, **그래서 config 로드가 폰트 생성보다 앞에 온다.** 빈 값이면 §2e의 티어가
-고른다 — 거기서 이름을 박으면 그 티어가 죽는다.
+`font.size`를 넘기도록 고쳤고, **그래서 config 로드가 폰트 생성보다 앞에 온다.**
 
-| config | 결과 |
+| config | 결과(이 기계) |
 |---|---|
 | 없음 | `font_family=Cascadia Mono` `cell_px=9x17` |
 | `font.family = Consolas` + `font.size = 22` | `font_family=Consolas` `cell_px=13x26`, 격자 75×23 |
 
+**"없음" 줄을 오해하면 안 된다 — 기본값은 빈 값이 아니다.** `config/theme.zig`가 `family = "JetBrains
+Mono"`, `fallback = "Jetendard"`를 주고 `fontCandidates`는 **설정값을 맨 앞에** 놓는다. 그래서 config
+파일이 없어도 JetBrains Mono를 먼저 찾고, 그 폰트가 이 기계에 없어서 티어의 Cascadia Mono로 내려간
+것이다. "빈 값이라 티어가 골랐다"가 아니다 — JetBrains Mono가 설치된 기계에서는 그 줄이 달라진다.
+`Jetendard`는 macOS 번들 한글 폰트라 Windows에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
+
 **아직 안 배선한 것**(정직하게 적는다): 테마 색·팔레트·`max_scrollback` 같은 앱 수준 값은 이 스모크가
-하드코딩한다. 그것들의 소비자는 chrome·app 계층이라 W8과 함께 온다. `dwrite-text-smoke`는 **일부러**
-빈 이름을 넘긴다 — 티어가 실제로 고르는지 보는 스모크라 config가 끼면 그 판정이 흐려진다.
+하드코딩한다. `shell.command`·`shell.windows-shell`도 소비자가 없다 — 스모크는
+`resolveInteractiveShell()`(config를 안 읽는 진입점)로 셸을 고르므로, 정규화한 `shell.command`가
+`CreateProcessW`까지 가지 않는다. `font.line-height`·`font.letter-spacing`도 §2e의 래스터라이저가
+em 크기만 받아 소비자가 없다. 그것들의 소비자는 chrome·app 계층이라 W8과 함께 온다.
+`dwrite-text-smoke`는 **일부러** 빈 이름을 넘긴다 — 티어가 실제로 고르는지 보는 스모크라 config가
+끼면 그 판정이 흐려진다.
 
 ## 3. 셸과 셸 통합
 

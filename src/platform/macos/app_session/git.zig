@@ -13,6 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const path_shape = maru.path_shape;
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
@@ -513,12 +514,17 @@ pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: 
         self.git_ignore_query_buf.appendSlice(self.allocator, entry.name) catch break;
         const abs = self.git_ignore_query_buf.items[start..];
         // 저장소 루트 접두를 떼어 상대경로로 만든다. 밖이면 건너뛴다(그 항목은 판정 없이 남는다).
-        if (abs.len <= repo.len or !std.mem.startsWith(u8, abs, repo)) {
+        //
+        // **`startsWith` 만으로는 부족하다** — 그것은 `/a/proj` 를 `/a/project/x` 의 루트로 통과시켜
+        // `rel = "ect/x"` 라는 쓰레기를 만든다. `abs` 는 파일 트리의 `dir_path`, `repo` 는 터미널 cwd 에서
+        // 거슬러 올라간 값이라 **서로 다른 출처**이고 형제 접두가 실제로 가능하다. 그 경로가
+        // `check-ignore` 로 가면 판정이 어긋나 `.gitignore` 된 항목이 흐려지지 않는다.
+        // 경계 검사와 후행 구분자 처리를 함께 갖는 `path_shape.relativeUnderRoot` 가 단일 출처다
+        // (계약 §5.2 ⒝ — 문서가 "두 곳" 이라 한 것은 `root.len + 1` 철자만 센 것이었다).
+        const rel = path_shape.relativeUnderRoot(abs, repo) orelse {
             self.git_ignore_query_buf.shrinkRetainingCapacity(start);
             continue;
-        }
-        var rel = abs[repo.len..];
-        if (rel.len > 0 and rel[0] == '/') rel = rel[1..];
+        };
         if (rel.len == 0) {
             self.git_ignore_query_buf.shrinkRetainingCapacity(start);
             continue;

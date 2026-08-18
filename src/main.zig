@@ -1101,8 +1101,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
 
     // ── 폰트와 셀 격자 ─────────────────────────────────────────────────────────────────────
     //
-    // **config 값을 그대로 넘긴다.** 빈 값이면 §2e 의 티어가 Cascadia Mono → Consolas → … 로 고른다 —
-    // 여기서 이름을 박으면 그 티어가 죽는다.
+    // **config 값을 그대로 넘긴다** — 여기서 이름을 박으면 §2e 의 티어가 죽는다.
+    //
+    // **기본값이 비어 있지 않다는 점에 주의한다**(`config/theme.zig`: `family = "JetBrains Mono"`,
+    // `fallback = "Jetendard"`). `fontCandidates` 는 설정값을 **맨 앞에** 놓고 그다음이 티어이므로,
+    // config 파일이 없어도 JetBrains Mono 를 먼저 찾고 없을 때 Cascadia Mono 로 내려간다. 이 기계에서
+    // `font_family=Cascadia Mono` 로 보이는 것은 그 폰트가 없어서지 "빈 값이라 티어가 골라서" 가 아니다.
+    // `Jetendard` 는 macOS 번들 한글 폰트라 Windows 에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
     var raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
         try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();

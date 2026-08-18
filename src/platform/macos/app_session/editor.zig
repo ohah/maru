@@ -918,6 +918,17 @@ fn maxColsForRender(term: *Term) ?u32 {
 ///
 /// **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 `max_first_col` 때문에 어차피 못 가므로
 /// 세면 낭비다. 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
+///
+/// **줄이 많을 때는 점진으로 나누지 않는다**(2026-08-18 결정). 세로 축은 같은 부류의 전 문서 훑기를
+/// 점진 계수로 나눴는데(§2.1) 이 가로 축은 그대로 둔다 — 이유는 성능이 아니라 **화면**이다.
+/// `content_max_cols`가 `null`이면 가로 막대를 **아예 안 그리고**, 그 막대는 본문 아래 여백에서
+/// **자리를 먹으므로**(§4.1a) 생겼다 사라지면 본문 높이가 출렁인다. 세로 막대는 안 센 줄을 한 행으로
+/// 쳐도 "짧게라도" 그려지지만 가로는 그렇지 않다.
+///
+/// **실측(ReleaseFast, 2026-08-18)**: 2만 줄(2.1MB) 파일을 여는 전체가 25ms이고 그중 이 셈이 22ms다.
+/// 파일 읽기 자체는 ~3ms라 **"읽기에 묻힌다"는 근거는 성립하지 않는다** — 그렇게 짐작했다가 재 보고
+/// 틀린 것을 확인했다. 그대로 두는 근거는 **절대값이 작다**는 것뿐이다(한 번 툭 끊기는 정도). 이 값이
+/// 커지면(더 큰 문서·느린 기기) 위의 "잠정 막대" 문제를 풀고 점진으로 가야 한다.
 fn ensureMaxCols(term: *Term, right: bool) void {
     const cache = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
     if (cache.* != 0) return;
@@ -3765,6 +3776,52 @@ test "[측정] 랩 켠 문서의 프레임 비용 — 계수 캐시가 그것을
             rows -| @as(u32, @intCast(n)),
         });
     }
+}
+
+test "[측정] 여는 경로의 내역 — 파일 읽기가 얼마이고 가장 긴 줄 세기가 그중 얼마인가" {
+    // `ensureMaxCols`(가로 막대 근거)를 세로처럼 점진으로 바꿀지 판단하려면, 그 값이 **여는 경로
+    // 전체에서 차지하는 몫**을 알아야 한다. 파일 읽기 자체가 훨씬 크면 그 안에 묻히는 값이고,
+    // 반대면 사용자가 기다리는 시간의 상당 부분이 된다.
+    //
+    // **실제 파일로 잰다** — 메모리에 줄 배열만 꽂으면 읽기·줄 나누기가 빠져 비교가 성립하지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 2만 줄 × 약 175B — 앞선 측정과 같은 크기의 문서다.
+    const line = "const value = compute(index); // 이 줄은 창보다 길어서 랩이 켜지면 여러 조각으로 접힌다\n";
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for (0..20_000) |_| try text.appendSlice(allocator, line);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "big.zig", .data = text.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "big.zig" });
+    defer allocator.free(path);
+
+    // ① 여는 경로 전체(파일 읽기 + 줄 나누기 + 접힘 범위·표식 + 가장 긴 줄 세기).
+    const t0 = monotonicMsForTest();
+    const opened = try openPathInActivePane(fx.session, path);
+    const t1 = monotonicMsForTest();
+
+    // ② 그중 가장 긴 줄 세기만 — 캐시를 버리고 같은 셈을 다시 돌린다.
+    opened.rt.editor_max_cols = 0;
+    const t2 = monotonicMsForTest();
+    ensureMaxCols(opened, false);
+    const t3 = monotonicMsForTest();
+
+    const total = t1 - t0;
+    const max_cols_ms = t3 - t2;
+    std.debug.print("\n[측정] 2만 줄 파일 열기 전체 {d}ms 중 가장 긴 줄 세기 {d}ms (줄 {d}, {d}KB)\n", .{
+        total,
+        max_cols_ms,
+        opened.rt.editor_lines.len,
+        text.items.len / 1024,
+    });
 }
 
 test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 붙었다" {

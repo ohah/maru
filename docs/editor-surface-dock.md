@@ -86,6 +86,11 @@ workspace에 영속한다(탐색기로 되돌아오는 재시작을 강요하지
 | ahead/behind | `git rev-parse --abbrev-ref origin/HEAD` → `git rev-list --count --left-right <base>...HEAD` | 포함 | |
 | `Fetch ∨` | 원격 갱신 + 보조 메뉴(`push`·`pull`은 터미널 주입) | 포함 — [쓰기·원격](editor-surface-dock-write.md) §4 | 갱신 P6a · `∨` 보조 메뉴 P6b(둘 다 2026-08-18 완료) |
 
+**구현 완료(2026-08-18).** 아래 규칙대로 `rev-list --count --left-right origin/HEAD...HEAD`를 목록 읽기에 함께
+건다(선택 명령 — 실패하면 그 저장소는 `@{u}` 값으로 돌아간다). 그 전까지 화면은 `status --branch`의
+`# branch.ab`를 그렸고, 그래서 **작업 브랜치에서 늘 `↑0 ↓0`**이었다(실측: 같은 브랜치가 기본 브랜치 기준으로는
+`0 1`). 색이 붙은 뒤라 그 거짓말이 더 눈에 띄었다.
+
 **ahead/behind의 기준은 `@{u}`가 아니라 기본 브랜치다.** 초판 목업이 `→ origin/main`을 보여 주는데, PR 브랜치의 `@{u}`는 보통
 `origin/<자기 브랜치>`라 그걸 쓰면 항상 `0 0`이 나온다(실측 확인). 리뷰가 알고 싶은 것은 "기본 브랜치 대비 내 브랜치"이므로
 **`origin/HEAD`가 가리키는 기본 브랜치를 기준으로 쓴다** — 이 값은 네트워크 없이 로컬에서 읽힌다(실측: `origin/main`).

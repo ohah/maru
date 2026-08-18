@@ -97,6 +97,30 @@ pub const Head = struct {
     unborn: bool = false,
 };
 
+/// 기본 브랜치 대비 ahead/behind(§3.5). `status --branch`의 `# branch.ab`와 **다른 사실**이다 — 그쪽은
+/// `@{u}` 기준이라 PR 브랜치에서 늘 `0 0`이다.
+pub const AheadBehind = struct { ahead: u32, behind: u32 };
+
+/// `git rev-list --count --left-right origin/HEAD...HEAD`의 한 줄을 읽는다.
+///
+/// 출력은 `<왼쪽>\t<오른쪽>`이고 **왼쪽이 behind**다(기준에만 있는 커밋 = 내가 못 받은 것), 오른쪽이 ahead다
+/// (내게만 있는 커밋 = 아직 안 보낸 것). 형식이 어긋나면 **null**이다 — 0으로 뭉개면 "차이 없음"이라는
+/// 틀린 진술이 되고, null이면 호출자가 `@{u}` 값으로 되돌아간다.
+///
+/// 구분자는 탭이지만 공백도 받는다(git 버전·설정에 따라 흔들릴 여지를 남긴다 — 숫자 둘이 순서대로 오는
+/// 것이 계약이다).
+pub fn parseAheadBehind(text: []const u8) ?AheadBehind {
+    const line = std.mem.trim(u8, text, " \t\r\n");
+    if (line.len == 0) return null;
+    var it = std.mem.tokenizeAny(u8, line, " \t");
+    const left = it.next() orelse return null;
+    const right = it.next() orelse return null;
+    if (it.next() != null) return null; // 셋 이상이면 우리가 아는 형식이 아니다
+    const behind = std.fmt.parseInt(u32, left, 10) catch return null;
+    const ahead = std.fmt.parseInt(u32, right, 10) catch return null;
+    return .{ .ahead = ahead, .behind = behind };
+}
+
 pub fn parseHead(text: []const u8) Head {
     var head: Head = .{};
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -523,6 +547,33 @@ test "unborn 저장소도 브랜치 이름을 읽는다(oid가 (initial))" {
 
 // `check-ignore --stdin -z` 는 무시된 경로만, 입력 순서대로, NUL 로 끝나 돌아온다. 경로에 공백·개행이
 // 있어도 갈리지 않는 것이 `-z` 를 쓰는 이유다.
+test "기본 브랜치 대비 ahead/behind: 왼쪽이 behind, 오른쪽이 ahead다" {
+    // 실측 형식(2026-08-18): `git rev-list --count --left-right origin/HEAD...HEAD` → "0\t1"
+    // (이 저장소의 작업 브랜치가 main보다 1 앞섰을 때). 두 값을 뒤집으면 화면이 "받을 것이 있다"를
+    // "보낼 것이 있다"로 말한다 — 색까지 갈리므로 조용히 틀리지 않는다.
+    const got = parseAheadBehind("0\t1\n") orelse return error.MissingAheadBehind;
+    try testing.expectEqual(@as(u32, 1), got.ahead);
+    try testing.expectEqual(@as(u32, 0), got.behind);
+
+    const both = parseAheadBehind("3\t7") orelse return error.MissingAheadBehind;
+    try testing.expectEqual(@as(u32, 7), both.ahead);
+    try testing.expectEqual(@as(u32, 3), both.behind);
+
+    // 공백 구분도 받는다(형식이 흔들려도 숫자 둘이 순서대로 오는 것이 계약이다).
+    const spaced = parseAheadBehind("2 5\n") orelse return error.MissingAheadBehind;
+    try testing.expectEqual(@as(u32, 5), spaced.ahead);
+    try testing.expectEqual(@as(u32, 2), spaced.behind);
+
+    // **어긋나면 null이다** — 0으로 뭉개면 "차이 없음"이라는 틀린 진술이 된다(호출자는 그때 `@{u}`로 돌아간다).
+    try testing.expect(parseAheadBehind("") == null);
+    try testing.expect(parseAheadBehind("\n") == null);
+    try testing.expect(parseAheadBehind("0") == null); // 한 값만
+    try testing.expect(parseAheadBehind("0\t1\t2") == null); // 셋
+    try testing.expect(parseAheadBehind("a\tb") == null);
+    try testing.expect(parseAheadBehind("-1\t2") == null); // 음수는 이 명령의 출력이 아니다
+    try testing.expect(parseAheadBehind("fatal: ambiguous argument") == null);
+}
+
 test "check-ignore -z 출력에서 무시된 경로만 꺼낸다(공백·개행 포함 경로 보존)" {
     var it = iterateIgnored("node_modules\x00build/out put\x00weird\nname.log\x00");
     try std.testing.expectEqualStrings("node_modules", it.next().?);

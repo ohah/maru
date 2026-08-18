@@ -436,13 +436,17 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         list_items.extent(viewport_h),
         self.scm_scroll.offset_y_px,
     );
+    // **기준은 기본 브랜치다**(§3.5). `status`의 `# branch.ab`는 `@{u}` 기준이라 PR 브랜치에서 늘 `0 0`이고
+    // (실측 2026-08-18), 그 숫자를 그대로 그리면 화면이 "차이 없음"이라고 **거짓말**한다. 기본 브랜치 기준
+    // 읽기가 성공했으면 그것을 쓰고, 없으면(origin/HEAD가 없는 저장소·unborn) `@{u}` 값으로 돌아간다.
+    const ab = defaultBranchAheadBehind(self);
     return .{
         .items = items[0..n],
         .scroll = scroll,
         .branch = branch,
-        .ahead = model.head.ahead,
-        .behind = model.head.behind,
-        .has_ab = model.head.has_ab,
+        .ahead = if (ab) |v| v.ahead else model.head.ahead,
+        .behind = if (ab) |v| v.behind else model.head.behind,
+        .has_ab = ab != null or model.head.has_ab,
         .summary = .{ .added = model.total_added, .removed = model.total_removed },
         .has_rows = model.rows.len > 0,
         .file_count = countFiles(model.rows),
@@ -1345,6 +1349,15 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         .open_remote_menu => openRemoteMenu(self),
         .scroll_thumb, .scroll_track => {},
     }
+}
+
+/// 기본 브랜치(`origin/HEAD`) 대비 ahead/behind. 없으면 null이고 호출자가 `@{u}` 값으로 돌아간다.
+///
+/// **활성 저장소만 갖는다.** 이 값을 쓰는 자리는 브랜치 줄 하나뿐이고 그 줄은 활성 저장소를 말한다 —
+/// 비활성 저장소까지 읽으면 저장소마다 프로세스가 하나씩 더 뜨는데 그 숫자는 화면에 나오지도 않는다.
+fn defaultBranchAheadBehind(self: *AppSession) ?maru.session.git_status.AheadBehind {
+    const result = self.git_result orelse return null;
+    return maru.session.git_status.parseAheadBehind(result.ahead_behind);
 }
 
 /// 이 저장소에 원격이 있나(P6). **`git remote` 출력이 유일한 출처다** — 못 읽었으면(선택 명령이라 실패할

@@ -528,13 +528,13 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     (if (snap.captured_s == 0) "" else relativeTime(self, arena, now_s - snap.captured_s))
                 else
                     "",
-                .selected = self.scm_selected_turn != null and self.scm_selected_turn.? == index,
-                .expanded = self.scm_expanded_turn != null and self.scm_expanded_turn.? == index,
+                .selected = keyMatches(self.scm_selected_turn, row),
+                .expanded = keyMatches(self.scm_expanded_turn, row),
                 .live = live,
             },
         };
         n += 1;
-        if (self.scm_expanded_turn == null or self.scm_expanded_turn.? != index) continue;
+        if (!keyMatches(self.scm_expanded_turn, row)) continue;
 
         if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
             if (n < items.len) {
@@ -564,6 +564,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .status = commitFileStatus(entry.letter),
                     .letter = entry.letter,
                     .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
+                    .from_turn = true, // 이 줄을 누르면 `스냅샷 ↔ 스냅샷`이 열린다(커밋과 다른 비교다)
                 },
             };
             n += 1;
@@ -594,6 +595,20 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .file_count = 0,
         .has_staged = false,
     };
+}
+
+/// 그 턴 줄이 지금 고른/펼친 것인가. **키는 두 tree**(`<A> <B>`)라 링이 밀려도 같은 턴을 가리킨다.
+fn keyMatches(stored: ?[]const u8, row: maru.session.turn_snapshot.Ring.TimelineRow) bool {
+    const key = stored orelse return false;
+    var buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    const made = timelineRowKey(row, &buf) orelse return false;
+    return std.mem.eql(u8, key, made);
+}
+
+/// 타임라인 행의 키. **진행 중은 오른쪽이 작업트리**라 키가 없다(그 줄은 읽지 않는다).
+fn timelineRowKey(row: maru.session.turn_snapshot.Ring.TimelineRow, buf: []u8) ?[]const u8 {
+    const head = row.head orelse return null;
+    return std.fmt.bufPrint(buf, "{s} {s}", .{ row.base.oid(), head.oid() }) catch null;
 }
 
 /// 턴 줄의 제목. **세는 규칙이 곧 화면 문구다** — `진행 중`·`마지막 턴`·`N턴 전`.
@@ -801,8 +816,7 @@ fn openCommitFileDiff(self: *AppSession, index: u32) void {
 /// 지금 파일 상태와 무관하게 고정된다(§3.5.4가 타임라인을 두 스냅샷 사이로 잡은 이유).
 fn openTurnFileDiff(self: *AppSession, index: u32) void {
     const repo = self.git_repo orelse return;
-    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
-    const key = expandedTurnKey(self, &key_buf) orelse return;
+    const key = expandedTurnKey(self) orelse return;
     const sep = std.mem.indexOfScalar(u8, key, ' ') orelse return;
     const base_tree = key[0..sep];
     const head_tree = key[sep + 1 ..];
@@ -1218,7 +1232,14 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         .open_commit_file => |index| openCommitFileDiff(self, index),
         // 턴 줄도 **고르기이자 펼치기**다(커밋 줄과 같은 규율).
         .select_turn => |index| {
-            self.scm_selected_turn = index;
+            // **진행 중 줄은 변경 사항 탭으로 보낸다**(적대적 검증). 그 줄은 오른쪽이 작업트리라 tree
+            // 둘로 읽을 수 없어 펼칠 것이 없는데, 아무 일도 안 하면 죽은 컨트롤이 된다 — 그 줄이
+            // 가리키는 목록은 실제로 변경 사항 탭이 이미 보여 준다.
+            if (isLiveTurnRow(self, index)) {
+                selectScmTab(self, .changes);
+                return;
+            }
+            selectTurn(self, index);
             toggleTurnExpanded(self, index);
             self.metal_dirty = true;
         },
@@ -1310,6 +1331,11 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     // 대개 실패하지만, 실패든 아니든 그건 이 저장소의 사실이 아니다.
     if (self.scm_expanded_commit) |oid| self.allocator.free(oid);
     self.scm_expanded_commit = null;
+    // 턴 쪽도 같이 버린다 — 링은 저장소가 갈리면 통째로 비워지므로 그 키는 어느 턴도 가리키지 않는다.
+    if (self.scm_expanded_turn) |key| self.allocator.free(key);
+    self.scm_expanded_turn = null;
+    if (self.scm_selected_turn) |key| self.allocator.free(key);
+    self.scm_selected_turn = null;
     dropCommitFiles(self);
 }
 
@@ -1330,18 +1356,47 @@ pub fn toggleCommitExpanded(self: *AppSession, oid: []const u8) void {
     self.metal_dirty = true;
 }
 
+/// 그 자리가 **진행 중** 줄인가(오른쪽이 작업트리라 tree 둘로 읽을 수 없는 줄).
+fn isLiveTurnRow(self: *AppSession, index: u32) bool {
+    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
+    const rows = self.turn_ring.timeline(&rows_buf);
+    if (index >= rows.len) return false;
+    return rows[index].head == null;
+}
+
+/// 고른 턴을 세운다. **키로 든다**(자리는 새 턴이 들어오면 밀린다). 진행 중은 키가 없어 강조가 없다 —
+/// 그 줄은 늘 맨 위라 눈으로 찾기 쉽고, 밴드가 없다고 잃을 것이 없다.
+fn selectTurn(self: *AppSession, index: u32) void {
+    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
+    const rows = self.turn_ring.timeline(&rows_buf);
+    if (index >= rows.len) return;
+    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    if (self.scm_selected_turn) |old| self.allocator.free(old);
+    self.scm_selected_turn = null;
+    const key = timelineRowKey(rows[index], &key_buf) orelse return;
+    self.scm_selected_turn = self.allocator.dupe(u8, key) catch null;
+}
+
 /// 턴을 펼치거나 접는다(P5). 같은 줄을 다시 누르면 접힌다 — 커밋 줄과 같은 규율이고, 파일 목록
 /// 슬롯도 **같은 것**을 쓴다(두 탭 모두 한 번에 하나만 펼친다).
 pub fn toggleTurnExpanded(self: *AppSession, index: u32) void {
+    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
+    const rows = self.turn_ring.timeline(&rows_buf);
+    if (index >= rows.len) return;
+    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    // **진행 중은 키가 없다** — 그래도 고르기는 되고, 펼침만 성립하지 않는다.
+    const key = timelineRowKey(rows[index], &key_buf);
     if (self.scm_expanded_turn) |current| {
+        const same = if (key) |k| std.mem.eql(u8, current, k) else false;
+        self.allocator.free(current);
         self.scm_expanded_turn = null;
         dropCommitFiles(self);
-        if (current == index) {
+        if (same) {
             self.metal_dirty = true;
             return;
         }
     }
-    self.scm_expanded_turn = index;
+    if (key) |k| self.scm_expanded_turn = self.allocator.dupe(u8, k) catch null;
     // 커밋 쪽 펼침도 함께 접는다 — 슬롯이 하나라 둘이 동시에 열려 있으면 서로의 파일을 그린다.
     if (self.scm_expanded_commit) |oid| {
         self.allocator.free(oid);
@@ -1350,17 +1405,10 @@ pub fn toggleTurnExpanded(self: *AppSession, index: u32) void {
     self.metal_dirty = true;
 }
 
-/// 펼친 턴의 **두 tree**를 `<A> <B>` 키로 만든다(없으면 null — 그 자리에 턴이 없다).
-fn expandedTurnKey(self: *AppSession, buf: []u8) ?[]const u8 {
-    const index = self.scm_expanded_turn orelse return null;
-    var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = self.turn_ring.timeline(&rows_buf);
-    if (index >= rows.len) return null;
-    const row = rows[index];
-    // **진행 중은 오른쪽이 작업트리**라 tree 둘로 읽을 수 없다 — 그 줄의 파일 목록은 이미 변경 사항
-    // 탭이 보여 주는 것과 같으므로 여기서 따로 읽지 않는다.
-    const head = row.head orelse return null;
-    return std.fmt.bufPrint(buf, "{s} {s}", .{ row.base.oid(), head.oid() }) catch null;
+/// 펼친 턴의 두 tree 키(없으면 null). **저장된 키를 그대로 쓴다** — 자리로 다시 찾으면 링이 밀렸을 때
+/// 다른 턴을 읽는다.
+fn expandedTurnKey(self: *AppSession) ?[]const u8 {
+    return self.scm_expanded_turn;
 }
 
 /// 펼친 커밋의 파일 원문을 버린다(다른 커밋을 펼쳤거나 접었다).
@@ -1381,10 +1429,9 @@ pub fn pumpCommitFiles(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_commit_files_inflight != 0) return;
     // 두 탭이 **같은 슬롯**을 쓴다(한 번에 하나만 펼친다). 무엇을 읽을지는 지금 보고 있는 탭이 정한다.
-    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
     const key: []const u8 = switch (self.scm_tab) {
         .history => self.scm_expanded_commit orelse return,
-        .agent => expandedTurnKey(self, &key_buf) orelse return,
+        .agent => expandedTurnKey(self) orelse return,
         .changes => return,
     };
     if (self.scm_commit_files_oid) |current| {

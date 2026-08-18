@@ -184,6 +184,9 @@ pub const CommitFileItem = struct {
     /// 지금 열려 있는 비교인가(강조). 목록이 **무엇을 보고 있는지** 말해야 파일 여럿을 오갈 때 길을
     /// 잃지 않는다(변경 사항 탭의 파일 행과 같은 규율).
     selected: bool = false,
+    /// **턴의 파일인가**(P5). 같은 줄 모양을 두 탭이 쓰지만 여는 비교가 다르다 — 커밋은 `커밋^ ↔ 커밋`,
+    /// 턴은 `스냅샷 ↔ 스냅샷`이다. 이 값이 없으면 intent가 한쪽으로만 가서 다른 탭의 클릭이 죽는다.
+    from_turn: bool = false,
 };
 
 pub const Item = union(enum) {

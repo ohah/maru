@@ -56521,6 +56521,9 @@ test "소스 컨트롤: ahead/behind 기준은 기본 브랜치이고, 없으면
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
 
     git_ops.rememberGitRepo(session, "/repo");
+    // **먼저 지운다.** 위 헬퍼가 이미 결과를 하나 심어 뒀고, 그냥 덮어쓰면 그 버퍼가 샌다(worker allocator
+    // 소유라 세션 deinit이 마지막 것만 해제한다).
+    if (session.git_result) |*old_result| old_result.deinit(git_backend_mod.worker_allocator);
     session.git_result = .{
         // `@{u}` 기준으로는 차이가 없다고 나온다.
         .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +0 -0\n"),

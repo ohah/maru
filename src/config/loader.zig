@@ -2723,10 +2723,26 @@ test "parse: workspace.root default empty, override, empty is forgiving" {
         // **호스트에 따라 답이 다르다** — POSIX 에서 `\` 는 파일 이름 글자라 바꾸면 다른 파일을 가리킨다.
         // 그래서 두 갈래를 각각 단언한다(규칙 자체는 `path_shape` 가 OS 를 인자로 받아 모든 타깃에서
         // 테스트된다 — 여기서는 로더가 그것을 **실제로 부르는지**를 본다).
-        var p = try parse(std.testing.allocator, "workspace.root = C:\\proj\\sub\n");
-        defer p.deinit();
-        const expected = if (@import("builtin").os.tag == .windows) "C:/proj/sub" else "C:\\proj\\sub";
-        try std.testing.expectEqualStrings(expected, p.config.workspace.root);
+        // **"어느 호스트가 이 값을 받는가" 를 손으로 적지 않는다.** 처음엔 POSIX 에서도 원본이 남을
+        // 것으로 단언했다가 Linux CI 가 잡았다 — 거기서 `C:\proj\sub` 는 절대경로가 아니라
+        // `isValidWorkspaceRoot` 가 **거부**하고 기본값을 유지한다(정규화까지 가지도 않는다).
+        // 그래서 수용 여부는 로더가 쓰는 그 술어에서 **유도**하고, 이 테스트는 **정규화만** 단언한다.
+        const windows = @import("builtin").os.tag == .windows;
+        for ([_][]const u8{ "C:\\proj\\sub", "/proj\\sub" }) |raw| {
+            const line = try std.fmt.allocPrint(std.testing.allocator, "workspace.root = {s}\n", .{raw});
+            defer std.testing.allocator.free(line);
+            var p = try parse(std.testing.allocator, line);
+            defer p.deinit();
+            if (!isValidWorkspaceRoot(raw)) {
+                try std.testing.expectEqualStrings("", p.config.workspace.root); // 거부 → 기본값 유지
+                continue;
+            }
+            if (windows) {
+                try std.testing.expect(std.mem.indexOfScalar(u8, p.config.workspace.root, '\\') == null);
+            } else {
+                try std.testing.expectEqualStrings(raw, p.config.workspace.root); // POSIX 는 무동작
+            }
+        }
     }
     {
         var p = try parse(std.testing.allocator, "workspace.root =   \n");

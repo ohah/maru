@@ -48,6 +48,9 @@ EXPECT_BYTES=8388608
 # **stderr 도 같은 윈도를 먹는다**(RFC 4254 §5.2). 안 내보내면 확장 데이터 경로를 아예 안 타서,
 # 그 회계가 빠져도 스모크가 초록이 된다(실측으로 확인한 구멍이다).
 EXPECT_STDERR=65536
+# **백슬래시를 안 쓴다.** `tr '\\0'` 같은 것은 heredoc·sed·원격 셸을 거치며 세 번 해석돼
+# 조용히 다른 명령이 된다(실측: `tr ' '` 이 되어 stderr 가 안 나왔다).
+BULK_CMD="yes A | head -c $EXPECT_BYTES; yes E | head -c $EXPECT_STDERR >&2"
 
 # sshd 를 찾는다. 리눅스는 PATH 에 없을 수 있어 흔한 자리를 같이 본다.
 SSHD=""
@@ -83,11 +86,31 @@ chmod 600 "$DIR/hostkey" "$DIR/clientkey" "$DIR/authorized_keys"
 
 # 2) 우리 sshd. **`ForceCommand` 로 1MiB 를 쏟게 한다** — 흐름 제어를 강제로 태우는 자리다.
 #    `yes` 를 쓰지 않는 이유: 끝이 없으면 exit-status 를 못 본다.
-cat >"$DIR/sshd_config.tmpl" <<EOF
-Port 0
+# (설정은 `start_sshd` 가 포트마다 통째로 쓴다 — 아래.)
+
+# 빈 포트를 찾아 sshd 를 띄운다. 뜬 포트를 `STARTED_PORT` 에 남긴다.
+#
+# **두 서버가 같은 함수를 쓴다.** 예전에는 echo 회차용 서버가 `PORT + 1` 을 고정으로 썼는데,
+# 그 포트가 막혀 있으면 **앞 두 회차만 돌고 SKIP 으로 통과**했다 — 부분 실행이 성공으로 보고되는
+# 자리다(이 스모크에서 네 번째로 나온 "조용히 통과").
+start_sshd() {
+	_pidfile=$1
+	_base=$2
+	_log=$3
+	_cmd=$4
+	_conf="$_pidfile.conf"
+	STARTED_PORT=""
+	_try=0
+	while [ $_try -lt "$PORT_TRIES" ]; do
+		_port=$((_base + _try * 2))
+		# **설정을 통째로 쓴다.** 예전에는 템플릿을 `sed` 로 갈아 끼웠는데, `ForceCommand` 안의
+		# 파이프(`|`)가 `s|…|…|` 구분자와 충돌해 sed 가 죽었다 — 그리고 그 죽음이 "sshd 를 못
+		# 띄웠다" 로 접혀 **조용히 통과**했다. 문자열을 끼워 넣지 않으면 그 부류가 아예 없다.
+		cat >"$_conf" <<EOF
+Port $_port
 ListenAddress 127.0.0.1
 HostKey $DIR/hostkey
-PidFile $PIDFILE
+PidFile $_pidfile
 LogLevel ERROR
 StrictModes no
 UsePAM no
@@ -96,34 +119,30 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthorizedKeysFile $DIR/authorized_keys
 PermitRootLogin no
-ForceCommand head -c $EXPECT_BYTES /dev/zero | tr '\\0' 'A'; head -c $EXPECT_STDERR /dev/zero | tr '\\0' 'E' >&2
+ForceCommand $_cmd
 EOF
-chmod 600 "$DIR/sshd_config.tmpl"
-
-# 포트가 빌 때까지 짝(주 포트 + echo 포트)을 옮겨 가며 시도한다.
-try=0
-PORT=""
-while [ $try -lt "$PORT_TRIES" ]; do
-	try_port=$((PORT_BASE + try * 2))
-	sed -e "s|^Port .*|Port $try_port|" "$DIR/sshd_config.tmpl" >"$DIR/sshd_config"
-	chmod 600 "$DIR/sshd_config"
-	rm -f "$PIDFILE"
-	"$SSHD" -f "$DIR/sshd_config" -E "$DIR/sshd.log" 2>/dev/null || true
-	i=0
-	while [ ! -s "$PIDFILE" ] && [ $i -lt 30 ]; do
-		i=$((i + 1))
-		sleep 0.1
+		chmod 600 "$_conf"
+		rm -f "$_pidfile"
+		"$SSHD" -f "$_conf" -E "$_log" 2>/dev/null || true
+		_i=0
+		while [ ! -s "$_pidfile" ] && [ $_i -lt 30 ]; do
+			_i=$((_i + 1))
+			sleep 0.1
+		done
+		if [ -s "$_pidfile" ]; then
+			STARTED_PORT=$_port
+			return 0
+		fi
+		_try=$((_try + 1))
 	done
-	if [ -s "$PIDFILE" ]; then
-		PORT=$try_port
-		break
-	fi
-	try=$((try + 1))
-done
-[ -n "$PORT" ] || {
+	return 1
+}
+
+start_sshd "$PIDFILE" "$PORT_BASE" "$DIR/sshd.log" "$BULK_CMD" || {
 	sed -n '1,5p' "$DIR/sshd.log" >&2 2>/dev/null || true
 	skip_or_fail "sshd 를 어느 포트에도 못 띄웠다($PORT_TRIES 번 시도, $PORT_BASE 부터)"
 }
+PORT=$STARTED_PORT
 
 # 3) 우리 클라이언트로 **두 번** 붙는다.
 #
@@ -134,20 +153,31 @@ done
 #      - `pty`   : `pty-req`·`window-change` 를 태운다. stderr 는 합쳐지므로 0 을 기대한다.
 #      - `no-pty`: 확장 데이터(stderr)를 태운다.
 USER_NAME=$(id -un)
+ROUNDS=0
 "$DRIVER" "$PORT" "$USER_NAME" "$DIR/clientkey" "$EXPECT_BYTES" 0 pty
+ROUNDS=$((ROUNDS + 1))
 "$DRIVER" "$PORT" "$USER_NAME" "$DIR/clientkey" "$EXPECT_BYTES" "$EXPECT_STDERR" no-pty
+ROUNDS=$((ROUNDS + 1))
 
 # 4) **보내는 쪽**을 태우는 회차. 서버를 `cat` 으로 바꿔 우리가 보낸 것이 그대로 돌아오게 한다 —
 #    나머지 회차는 받기만 해서 보내는 쪽 흐름 제어가 선 위에서 한 번도 안 돈다(그 검사를 지워도
 #    스모크가 초록이었다 — 실측). 초기 윈도가 0 이라 **기다렸다 보내는 것**도 여기서 증명된다.
-ECHO_PORT=$((PORT + 1))
-sed -e "s|^Port .*|Port $ECHO_PORT|" -e "s|^PidFile .*|PidFile $DIR/sshd2.pid|" -e "s|^ForceCommand .*|ForceCommand cat|" "$DIR/sshd_config.tmpl" >"$DIR/sshd_config2"
-chmod 600 "$DIR/sshd_config2"
-"$SSHD" -f "$DIR/sshd_config2" -E "$DIR/sshd2.log" || {
-	skip_or_fail "echo 회차용 sshd 를 못 띄웠다"
+start_sshd "$DIR/sshd2.pid" "$((PORT + 1))" "$DIR/sshd2.log" "cat" || {
+	sed -n '1,5p' "$DIR/sshd2.log" >&2 2>/dev/null || true
+	# **여기서는 SKIP 이 아니라 실패다.** 주 서버가 떴다는 것은 환경이 멀쩡하다는 뜻이라,
+	# echo 회차만 못 띄우는 것은 건너뛸 일이 아니라 고칠 일이다.
+	echo "[ssh-client-smoke] FAIL: echo 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
 }
-i=0
-while [ ! -s "$DIR/sshd2.pid" ] && [ $i -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
-[ -s "$DIR/sshd2.pid" ] || skip_or_fail "echo 회차용 sshd 가 포트 $ECHO_PORT 에 안 떴다"
 ECHO_BYTES=4194304
-"$DRIVER" "$ECHO_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 echo
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 echo
+ROUNDS=$((ROUNDS + 1))
+
+# **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
+# 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
+# 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
+if [ "$ROUNDS" -ne 3 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 3 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+	exit 1
+fi
+echo "[ssh-client-smoke] 세 회차 완주"

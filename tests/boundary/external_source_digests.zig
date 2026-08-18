@@ -515,7 +515,10 @@ pub const inventory = [_]Proof{
     // 집합도 건드리지 않는다.
     // 탐색기 무시 표시로 또 움직인다: `check-ignore` 질의 버퍼 셋(`git_ignore_query_*`)이 붙고, 그 결과를
     // 트리에 반영하는 자리가 생긴다. count 는 2 그대로다 — 새 `@field` 반사가 없다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b8e2f4dd3fb9a089c4159d7ea2838f14b578ad9eba0e8b1a61bb34c5664b56c0" },
+    // 탐색기 헤더 동작 버튼으로 또 움직인다: 호버 자리 하나(`dock_action_hovered_slot`)가 붙고, 뷰 바에서
+    // 동작 클릭을 먼저 보는 분기와 그 호버 배경을 얹는 자리가 생긴다. count 는 2 그대로다 — 새 `@field`
+    // 반사가 없고 Client 구성·receiver 집합도 건드리지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "40ef6f6c748dad2fcabce848c52d8fe0222845ab2e26660f90e34a8847f2dfa9" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

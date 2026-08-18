@@ -52,6 +52,7 @@
 #define MARU_ICON_ARROW_DOWN 0xF0028u
 #define MARU_ICON_ARROW_LEFT 0xF0029u
 #define MARU_ICON_ARROW_RIGHT 0xF002Au
+#define MARU_ICON_COLLAPSE_ALL 0xF002Bu
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -96,6 +97,7 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF0028u:
         case 0xF0029u:
         case 0xF002Au:
+        case 0xF002Bu:
             return true;
         default:
             return false;

@@ -2,6 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
+const icons = maru.icons;
 const terminal = maru.terminal;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
@@ -532,6 +533,7 @@ fn buildDrawListGlyphFrameProbe(
     var draw_list = switch (readFixtureKind()) {
         .tabbar => try buildTabBarFixtureDrawList(allocator),
         .filetree => try buildFileTreeFixtureDrawList(allocator),
+        .dockbar => try buildDockViewBarFixtureDrawList(allocator),
         .terminal => try renderer.buildDrawList(allocator, core.snapshot()),
     };
     var draw_list_owned = true;
@@ -584,14 +586,33 @@ fn buildDrawListGlyphFrameProbe(
     );
 }
 
-const FixtureKind = enum { terminal, tabbar, filetree };
+const FixtureKind = enum { terminal, tabbar, filetree, dockbar };
 
 fn readFixtureKind() FixtureKind {
     const raw_ptr = std.c.getenv("MARU_CORETEXT_SMOKE_FIXTURE") orelse return .terminal;
     const raw = std.mem.span(raw_ptr);
     if (std.mem.eql(u8, raw, "tabbar")) return .tabbar;
     if (std.mem.eql(u8, raw, "filetree")) return .filetree;
+    if (std.mem.eql(u8, raw, "dockbar")) return .dockbar;
     return .terminal;
+}
+
+/// 도크 뷰 바 한 줄. 왼쪽이 뷰 스위처 셋, **오른쪽 끝이 동작 버튼 둘**이다 — 그 자리(오른쪽 정렬·셀 격자)가
+/// 이 픽스처의 관심사라, 격자 덤프로 눈에 보이는 유일한 헤드리스 경로다(GPU 스모크는 창이 필요하다).
+fn buildDockViewBarFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList {
+    const actions = [_]u21{
+        icons.codepointFit(.reset, .tight),
+        icons.codepoint(.collapse_all),
+    };
+    return coretext_frame_builder.buildDockViewBarDrawList(
+        allocator,
+        24, // 뷰 3슬롯 + 동작 2슬롯 = 20칸이 들어가고 가운데가 빈다(오른쪽 정렬이 보이도록)
+        1,
+        0,
+        .{ .rgb = .{ .r = 0xE6, .g = 0xE9, .b = 0xF2 } },
+        .{ .rgb = .{ .r = 0x8A, .g = 0x92, .b = 0xA6 } },
+        &actions,
+    );
 }
 
 /// 파일 탐색기 여러 줄. **아이콘 색**이 관심사라 종류가 서로 다른 행을 한 화면에 세운다 — 색은 격자

@@ -486,6 +486,11 @@ pub const Client = struct {
     }
 
     /// 호스트키가 승인된 뒤 — `NEWKEYS` 를 보낸다.
+    ///
+    /// **키는 상대 `NEWKEYS` 를 받을 때 양쪽 다 켠다.** RFC 4253 §7.3 은 보내는 쪽을 우리
+    /// `NEWKEYS` **직후**에 바꾸라고 하는데, 우리는 그 사이에 **아무것도 안 보내므로** 결과가
+    /// 같다. 그 불변이 깨지면(그 창에서 무엇이든 보내면) 옛 키로 나가고 strict KEX 의 시퀀스
+    /// 리셋도 어긋난다 — 아래 테스트가 그 창을 지킨다.
     fn afterHostKey(self: *Client, w: *Out) Error!void {
         try self.emit(w, &[_]u8{msg_newkeys});
         self.state = .awaiting_new_keys;
@@ -1233,4 +1238,35 @@ test "resize 는 window-change 를 낸다" {
     try testing.expectEqual(false, try r.boolean()); // §6.7 — 답을 요구하지 않는다
     try testing.expectEqual(@as(u32, 120), try r.u32be());
     try testing.expectEqual(@as(u32, 40), try r.u32be());
+}
+
+test "우리 NEWKEYS 와 상대 것 사이에는 아무것도 안 나간다" {
+    // **암묵 불변을 명시로 바꾼다.** RFC 4253 §7.3 은 보내는 쪽 키를 우리 `NEWKEYS` 직후에
+    // 바꾸라고 하는데, 우리는 상대 것을 받을 때 양쪽을 함께 켠다 — 그 사이에 아무것도 안
+    // 보내므로 결과가 같다. 그 창에서 무엇이든 나가면 **옛 키로 나가고** strict KEX 의 시퀀스
+    // 리셋도 어긋난다. 그러면 그 뒤 모든 AEAD 태그가 실패하는데 증상은 한참 뒤에 나온다.
+    var prng = std.Random.DefaultPrng.init(83);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.start(&out);
+    c.state = .host_key_decision;
+    c.acceptHostKey();
+
+    // 승인 → `NEWKEYS` 하나가 나간다.
+    const first = try c.feed("", &out, &scr);
+    try testing.expectEqual(State.awaiting_new_keys, first.state);
+    const dec = try packet.read(first.wire);
+    try testing.expectEqual(@as(u8, msg_newkeys), dec.payload[0]);
+    try testing.expectEqual(first.wire.len, packet.writtenLen(1)); // 그 하나뿐이다
+
+    // 상대 것을 받기 전에는 **한 바이트도** 더 안 나간다.
+    for (0..5) |_| {
+        const step = try c.feed("", &out, &scr);
+        try testing.expectEqual(@as(usize, 0), step.wire.len);
+        try testing.expectEqual(State.awaiting_new_keys, step.state);
+    }
+    // 호출자도 못 쓴다 — 셸이 안 떴다.
+    try testing.expectError(Error.NotReady, c.write("x", &out));
+    try testing.expectError(Error.NotReady, c.eof(&out));
 }

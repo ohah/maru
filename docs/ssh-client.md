@@ -109,8 +109,15 @@ ed25519 호스트키를 안 준다" 를 그대로 보여 준다**(무엇을 고�
 
 ```zig
 const ev = try ch.receive(payload);
-if (ch.pendingWindowAdjust() != 0) try send(try ch.writeWindowAdjust(&out));
+if (t.canSendChannelMessages() and ch.pendingWindowAdjust() != 0)
+    try send(try ch.writeWindowAdjust(&out));
 ```
+
+**`canSendChannelMessages()` 를 빼면 안 된다.** `WINDOW_ADJUST` 도 채널 메시지라 **재키잉 중에는
+못 보낸다**(§3.0.1 — RFC 4253 §7.1). 조건 없이 보내면 그 순간 연결이 죽는다 — 실측으로 재현했고,
+타이밍에 달려 있어 **가끔만** 나므로 더 나쁘다. **미루면 그만이다**: `pendingWindowAdjust` 는
+멱등이라 재키잉이 끝난 뒤 다음 호출에서 그대로 나간다. 같은 이유로 `CHANNEL_CLOSE`·`CHANNEL_FAILURE`
+같은 다른 채널 응답도 재키잉 동안 미뤄 두었다가 끝난 뒤 보낸다.
 
 **잊으면 조용히 멈추는 대신 시끄럽게 틀린다.** 채워 주기를 잊은 채 윈도가 바닥나면 그다음
 데이터에서 `WindowExhausted` 가 난다 — 멈춤은 "네트워크가 느리다" 로 오해되지만 오류는 자리를

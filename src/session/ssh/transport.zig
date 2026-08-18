@@ -292,6 +292,18 @@ pub const Transport = struct {
         self.sent_kexinit_this_kex = false;
     }
 
+    /// **지금 채널 메시지를 보내도 되나.** 재키잉 중에는 §7.1 이 막는다.
+    ///
+    /// **이것이 없으면 계약 §3.1 의 흐름 제어 두 줄이 연결을 죽인다** — 그 두 줄은 조건 없이
+    /// `WINDOW_ADJUST`(93)를 보내는데, 그것도 채널 메시지라 재키잉 중에는 금지다. 실측으로
+    /// 재현했다: 재키잉 중 보충을 시도하면 `NotAllowedDuringRekey` 로 연결이 죽는다. 타이밍에
+    /// 달려 있어 **가끔만** 나므로 더 나쁘다.
+    ///
+    /// **미루면 그만이다.** `pendingWindowAdjust` 는 멱등이라 재키잉이 끝난 뒤 그대로 보내면 된다.
+    pub fn canSendChannelMessages(self: Transport) bool {
+        return self.phase != .rekeying and self.poison == null;
+    }
+
     /// 재키잉 중에 이 메시지를 보내도 되나(RFC 4253 §7.1).
     ///
     /// 허용: 전송 계층 일반(1~19, 단 `SERVICE_REQUEST`(5)·`SERVICE_ACCEPT`(6) 제외) · 협상(20~29,
@@ -300,7 +312,9 @@ pub const Transport = struct {
     fn allowedDuringRekey(self: *Transport, msg: u8) bool {
         if (msg == msg_kexinit) return !self.sent_kexinit_this_kex;
         if (msg == 5 or msg == 6) return false;
-        return msg <= 49;
+        // **0 은 배정된 메시지 번호가 아니다**(RFC 4250 §4.1.2 는 1 부터 쓴다). 허용 범위를
+        // 넉넉히 잡으면 그만큼 §7.1 이 막으려던 것이 새어 나간다.
+        return msg >= 1 and msg <= 49;
     }
 
     /// 실패를 박는다. `ShortBuffer` 는 재시도 가능이라 그대로 흘린다.
@@ -342,7 +356,13 @@ pub const Transport = struct {
     ///
     /// **`c` 를 가져온다** — 호출자의 것은 여기서 지워진다(`Cipher.initMove` 와 같은 이유: 값으로
     /// 받으면 아무도 주소를 모르는 키 사본이 스택에 남는다). 재키잉마다 한 벌씩 쌓이는 자리다.
-    pub fn enableSendKeys(self: *Transport, c: *cipher.Cipher) void {
+    pub fn enableSendKeys(self: *Transport, c: *cipher.Cipher) Error!void {
+        if (self.poison) |e| return e;
+        // **KEX 중에만 키를 간다.** `established` 에서 부르면 KEX 를 announce 하지 않고 키를 바꾼
+        // 것이라, 상대는 그것을 모르고 그 뒤 모든 패킷이 어긋난다. 게다가 `beginRekey` 를 빠뜨린
+        // 드라이버가 여기서 조용히 통과하면 §7.1 게이트가 **영영 안 걸려**, 이 슬라이스가 막으려던
+        // 결함(재키잉 중 채널 데이터 송신)이 그대로 난다 — 적대적 검증이 그 구멍을 찾았다.
+        if (self.phase == .established) return Error.WrongPhase;
         defer c.clear();
         self.kex_send_done = true;
         // **이 한 줄은 변이 검사로 못 잡는다 — 증명 가능한 등가라서다.** 바로 다음 대입이 같은
@@ -356,7 +376,9 @@ pub const Transport = struct {
     }
 
     /// 상대의 `NEWKEYS` 를 **받은 직후** 부른다. `c` 를 가져온다(위와 같다).
-    pub fn enableRecvKeys(self: *Transport, c: *cipher.Cipher) void {
+    pub fn enableRecvKeys(self: *Transport, c: *cipher.Cipher) Error!void {
+        if (self.poison) |e| return e;
+        if (self.phase == .established) return Error.WrongPhase;
         defer c.clear();
         self.kex_recv_done = true;
         if (self.recv_cipher) |*old| old.clear();
@@ -492,7 +514,7 @@ test "NEWKEYS 전환: 옛 키로 보내고 그 다음 바꾼다" {
 
     {
         var c = testCipher();
-        t.enableSendKeys(&c);
+        try t.enableSendKeys(&c);
     }
     try std.testing.expectEqual(@as(u32, 0), t.send_seq); // strict KEX 리셋(draft §3.3)
     // 이제부터는 암호 프레이밍이다.
@@ -520,11 +542,11 @@ test "NEWKEYS 를 받으면 받는 번호도 0 으로 리셋한다" {
 
     {
         var c = testCipher();
-        t.enableRecvKeys(&c);
+        try t.enableRecvKeys(&c);
     }
     {
         var c = testCipher();
-        t.enableSendKeys(&c);
+        try t.enableSendKeys(&c);
     } // 우리도 NEWKEYS 를 보냈다 → established
     try std.testing.expectEqual(@as(u32, 0), t.recv_seq);
 
@@ -547,13 +569,13 @@ test "strict KEX 가 아니면 번호를 리셋하지 않는다" {
     _ = try t.send(&out, &[_]u8{msg_newkeys}, prng.random());
     {
         var c = testCipher();
-        t.enableSendKeys(&c);
+        try t.enableSendKeys(&c);
     }
     try std.testing.expectEqual(@as(u32, 2), t.send_seq);
 
     {
         var c = testCipher();
-        t.enableRecvKeys(&c);
+        try t.enableRecvKeys(&c);
     }
     try std.testing.expectEqual(@as(u32, 0), t.recv_seq); // 받은 것이 없어 0 일 뿐이다
 }
@@ -760,22 +782,22 @@ test "양쪽 키가 붙어야 established 이고 순서를 안 탄다" {
         if (recv_first) {
             {
                 var c = testCipher();
-                t.enableRecvKeys(&c);
+                try t.enableRecvKeys(&c);
             }
             try std.testing.expectEqual(Phase.initial_kex, t.phase); // 한쪽만으로는 아니다
             {
                 var c = testCipher();
-                t.enableSendKeys(&c);
+                try t.enableSendKeys(&c);
             }
         } else {
             {
                 var c = testCipher();
-                t.enableSendKeys(&c);
+                try t.enableSendKeys(&c);
             }
             try std.testing.expectEqual(Phase.initial_kex, t.phase);
             {
                 var c = testCipher();
-                t.enableRecvKeys(&c);
+                try t.enableRecvKeys(&c);
             }
         }
         try std.testing.expectEqual(Phase.established, t.phase);
@@ -791,11 +813,11 @@ test "established 뒤에는 KEX 아닌 메시지가 정상이다" {
     var t: Transport = .{ .strict_kex = true, .first_from_peer = msg_kexinit };
     {
         var c = testCipher();
-        t.enableRecvKeys(&c);
+        try t.enableRecvKeys(&c);
     }
     {
         var c = testCipher();
-        t.enableSendKeys(&c);
+        try t.enableSendKeys(&c);
     }
 
     var sender = testCipher();
@@ -919,7 +941,7 @@ test "키를 넘기면 넘긴 쪽에는 안 남는다" {
     try std.testing.expect(!std.mem.allEqual(u8, &c.payload_key, 0));
 
     var t: Transport = .{};
-    t.enableSendKeys(&c);
+    try t.enableSendKeys(&c);
     try std.testing.expect(std.mem.allEqual(u8, &c.payload_key, 0)); // 넘긴 쪽
     try std.testing.expect(std.mem.allEqual(u8, &c.length_key, 0));
     try std.testing.expect(!std.mem.allEqual(u8, &t.send_cipher.?.payload_key, 0)); // 받은 쪽은 산다
@@ -927,7 +949,7 @@ test "키를 넘기면 넘긴 쪽에는 안 남는다" {
     // 재키잉: 옛 키는 새 키가 들어올 때 지워진다.
     const old_key = t.send_cipher.?.payload_key;
     var c2 = testCipher();
-    t.enableSendKeys(&c2);
+    try t.enableSendKeys(&c2);
     try std.testing.expect(std.mem.eql(u8, &t.send_cipher.?.payload_key, &old_key)); // 같은 test_key
 
     t.clear();
@@ -1061,17 +1083,17 @@ test "ShortBuffer 는 연결을 죽이지 않는다" {
 // 917,504바이트 뒤 교착).
 
 /// 초기 KEX 를 마친 전송기(양쪽 키가 붙어 `established`).
-fn establishedTransport() Transport {
+fn establishedTransport() !Transport {
     var t: Transport = .{ .strict_kex = true, .first_from_peer = msg_kexinit };
     var a = testCipher();
     var b = testCipher();
-    t.enableSendKeys(&a);
-    t.enableRecvKeys(&b);
+    try t.enableSendKeys(&a);
+    try t.enableRecvKeys(&b);
     return t;
 }
 
 test "초기 KEX 가 끝나면 established 다" {
-    const t = establishedTransport();
+    const t = try establishedTransport();
     try std.testing.expectEqual(Phase.established, t.phase);
 }
 
@@ -1080,7 +1102,7 @@ test "재키잉 중에는 채널 데이터를 못 보낸다" {
     // 채널 데이터를 그 사이에 보내면 상대가 끊는다 — 증상은 "가끔 끊긴다" 라 원인을 짚기 어렵다.
     var prng = std.Random.DefaultPrng.init(7);
     var out: [256]u8 = undefined;
-    var t = establishedTransport();
+    var t = try establishedTransport();
 
     // established 에서는 당연히 보낼 수 있다.
     _ = try t.send(&out, &[_]u8{ 94, 1, 2, 3 }, prng.random());
@@ -1101,13 +1123,13 @@ test "재키잉 중에 보낼 수 있는 것과 없는 것" {
 
     // 허용: IGNORE(2)·DEBUG(4)·KEXINIT(20, 한 번)·KEX_ECDH_INIT(30)·NEWKEYS(21)
     for ([_]u8{ 2, 4, 20, 21, 30, 49 }) |msg| {
-        var t = establishedTransport();
+        var t = try establishedTransport();
         try t.beginRekey();
         _ = try t.send(&out, &[_]u8{ msg, 0 }, prng.random());
     }
     // 금지: SERVICE_REQUEST(5)·SERVICE_ACCEPT(6)·채널(90~100)·인증(50~52)
     for ([_]u8{ 5, 6, 50, 52, 90, 94, 100 }) |msg| {
-        var t = establishedTransport();
+        var t = try establishedTransport();
         try t.beginRekey();
         try std.testing.expectError(
             Error.NotAllowedDuringRekey,
@@ -1121,7 +1143,7 @@ test "KEXINIT 은 재키잉마다 한 번만 보낸다" {
     // 시작한 것으로 읽어 상태가 갈린다.
     var prng = std.Random.DefaultPrng.init(13);
     var out: [256]u8 = undefined;
-    var t = establishedTransport();
+    var t = try establishedTransport();
     try t.beginRekey();
     _ = try t.send(&out, &[_]u8{ msg_kexinit, 1 }, prng.random());
     try std.testing.expectError(
@@ -1137,7 +1159,7 @@ test "재키잉 중에도 받는 데는 제한이 없다" {
     var prng = std.Random.DefaultPrng.init(17);
     var out: [512]u8 = undefined;
     var plain: [512]u8 = undefined;
-    var t = establishedTransport();
+    var t = try establishedTransport();
     try t.beginRekey();
 
     var sender = testCipher();
@@ -1150,16 +1172,16 @@ test "양쪽 키를 다 갈아야 재키잉이 끝난다" {
     // **재키잉에서는 두 cipher 가 이미 non-null 이다** — `send_cipher != null and recv_cipher != null`
     // 로 판정하면 재키잉이 시작하자마자 끝난 것으로 보이고, 그러면 §7.1 제한이 즉시 풀려 채널
     // 데이터가 그 사이에 나간다.
-    var t = establishedTransport();
+    var t = try establishedTransport();
     try t.beginRekey();
     try std.testing.expect(t.send_cipher != null and t.recv_cipher != null); // 둘 다 이미 있다
 
     var a = testCipher();
-    t.enableSendKeys(&a);
+    try t.enableSendKeys(&a);
     try std.testing.expectEqual(Phase.rekeying, t.phase); // 아직이다
 
     var b = testCipher();
-    t.enableRecvKeys(&b);
+    try t.enableRecvKeys(&b);
     try std.testing.expectEqual(Phase.established, t.phase);
 }
 
@@ -1169,7 +1191,7 @@ test "strict KEX 는 재키잉에서도 시퀀스를 리셋한다" {
     // AEAD 태그가 어긋난다.
     var prng = std.Random.DefaultPrng.init(19);
     var out: [256]u8 = undefined;
-    var t = establishedTransport();
+    var t = try establishedTransport();
     _ = try t.send(&out, &[_]u8{ 94, 1 }, prng.random());
     _ = try t.send(&out, &[_]u8{ 94, 2 }, prng.random());
     try std.testing.expect(t.send_seq > 0);
@@ -1177,14 +1199,14 @@ test "strict KEX 는 재키잉에서도 시퀀스를 리셋한다" {
     try t.beginRekey();
     _ = try t.send(&out, &[_]u8{ msg_kexinit, 1 }, prng.random());
     var a = testCipher();
-    t.enableSendKeys(&a);
+    try t.enableSendKeys(&a);
     try std.testing.expectEqual(@as(u32, 0), t.send_seq);
 }
 
 test "established 가 아니면 재키잉을 시작할 수 없다" {
     var t: Transport = .{};
     try std.testing.expectError(Error.WrongPhase, t.beginRekey());
-    var t2 = establishedTransport();
+    var t2 = try establishedTransport();
     try t2.beginRekey();
     try std.testing.expectError(Error.WrongPhase, t2.beginRekey()); // 이미 재키잉 중이다
 }
@@ -1195,7 +1217,7 @@ test "재키잉 중 §3.2 초기 KEX 제한은 안 걸린다" {
     var prng = std.Random.DefaultPrng.init(23);
     var out: [512]u8 = undefined;
     var plain: [512]u8 = undefined;
-    var t = establishedTransport();
+    var t = try establishedTransport();
     try t.beginRekey();
     var sender = testCipher();
     // KEXINIT 을 두 번 받아도(초기 KEX 였다면 DuplicateKexMessage) 재키잉에서는 통과한다.
@@ -1203,4 +1225,57 @@ test "재키잉 중 §3.2 초기 KEX 제한은 안 걸린다" {
         const n = try sender.seal(&out, t.recv_seq, &[_]u8{ msg_kexinit, 1 }, prng.random());
         _ = (try t.feed(&plain, out[0..n])).?.packet;
     }
+}
+
+test "KEX 밖에서는 키를 못 간다" {
+    // **적대적 검증 2회차가 찾은 구멍.** `beginRekey` 를 빠뜨린 드라이버가 키만 갈면 예전에는
+    // 조용히 통과했다 — 그러면 §7.1 게이트가 **영영 안 걸려** 재키잉 중 채널 데이터가 나가고,
+    // 이 슬라이스가 막으려던 결함이 그대로 난다. 상대도 KEX 를 모르므로 그 뒤 모든 패킷이 어긋난다.
+    var t = try establishedTransport();
+    var a = testCipher();
+    try std.testing.expectError(Error.WrongPhase, t.enableSendKeys(&a));
+    var b = testCipher();
+    try std.testing.expectError(Error.WrongPhase, t.enableRecvKeys(&b));
+
+    // 재키잉을 선언하면 된다.
+    try t.beginRekey();
+    var c = testCipher();
+    try t.enableSendKeys(&c);
+    var d = testCipher();
+    try t.enableRecvKeys(&d);
+    try std.testing.expectEqual(Phase.established, t.phase);
+}
+
+test "재키잉 보내기 허용 범위는 1..49 다" {
+    // 0 은 배정된 메시지 번호가 아니다(RFC 4250 §4.1.2). 넉넉히 잡으면 §7.1 이 막으려던 것이 샌다.
+    var prng = std.Random.DefaultPrng.init(29);
+    var out: [256]u8 = undefined;
+    var t = try establishedTransport();
+    try t.beginRekey();
+    try std.testing.expectError(Error.NotAllowedDuringRekey, t.send(&out, &[_]u8{ 0, 0 }, prng.random()));
+}
+
+test "재키잉 중에는 채널 메시지를 보내면 안 된다고 미리 알려 준다" {
+    // **적대적 검증 3회차가 찾은 것.** 계약 §3.1 의 두 줄은 조건 없이 `WINDOW_ADJUST`(93)를
+    // 보내는데, 그것도 채널 메시지라 재키잉 중에는 §7.1 이 막는다 — 그대로 두면 연결이 죽고,
+    // 타이밍에 달려 있어 **가끔만** 난다. 드라이버가 물어볼 수 있어야 미룰 수 있다.
+    var t = try establishedTransport();
+    try std.testing.expect(t.canSendChannelMessages());
+
+    try t.beginRekey();
+    try std.testing.expect(!t.canSendChannelMessages());
+
+    var a = testCipher();
+    try t.enableSendKeys(&a);
+    try std.testing.expect(!t.canSendChannelMessages()); // 아직 반쪽이다
+    var b = testCipher();
+    try t.enableRecvKeys(&b);
+    try std.testing.expect(t.canSendChannelMessages());
+
+    // 죽은 연결에도 보내면 안 된다.
+    var prng = std.Random.DefaultPrng.init(31);
+    var out: [64]u8 = undefined;
+    try t.beginRekey();
+    _ = t.send(&out, &[_]u8{ 94, 1 }, prng.random()) catch {};
+    try std.testing.expect(!t.canSendChannelMessages());
 }

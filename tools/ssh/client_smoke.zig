@@ -234,11 +234,13 @@ fn doRekey(i_s: []const u8) !void {
     try kex.deriveKey(&key_s2c, k, h, .enc_s2c, &session_id);
     var c_send = cipher.Cipher.initMove(&key_c2s);
     var c_recv = cipher.Cipher.initMove(&key_s2c);
-    t.enableSendKeys(&c_send);
-    t.enableRecvKeys(&c_recv);
+    try t.enableSendKeys(&c_send);
+    try t.enableRecvKeys(&c_recv);
     if (t.phase != .established) return error.RekeyDidNotFinish;
 
     rekeys_done += 1;
+    // **미뤄 둔 것을 지금 보낸다.** 재키잉 동안 쌓인 보충이 여기서 나가지 않으면 상대가 멈춘다.
+    try flushChannelSends();
     say("재키잉 {d} 회차 완료", .{rekeys_done});
 }
 
@@ -272,6 +274,11 @@ var v_s: []const u8 = &.{};
 var session_id: [32]u8 = undefined;
 var strict_kex_initial = false;
 var rekeys_done: usize = 0;
+
+/// 재키잉 중에 미뤄 둔 채널 응답. **재키잉 중에는 채널 메시지를 못 보낸다**(§7.1) — 보내면
+/// 연결이 죽는다(실측). 보충은 멱등이라 그냥 미루면 되고, 아래 둘은 한 번뿐이라 기억해 둔다.
+var deferred_channel_failure = false;
+var deferred_close = false;
 
 // **두 루프가 같은 카운터를 센다.** 처음에는 받는 루프에만 뒀는데, 보내는 동안에도 데이터가
 // 오므로(우리가 `cat` 에 보낸 것이 그대로 돌아온다) 그만큼이 통째로 안 세어졌다 — 4MiB 를
@@ -390,8 +397,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try kex.deriveKey(&key_s2c, k, h, .enc_s2c, &h);
     var c_send = cipher.Cipher.initMove(&key_c2s);
     var c_recv = cipher.Cipher.initMove(&key_s2c);
-    t.enableSendKeys(&c_send);
-    t.enableRecvKeys(&c_recv);
+    try t.enableSendKeys(&c_send);
+    try t.enableRecvKeys(&c_recv);
     if (t.phase != .established) return fail("암호 전환이 안 끝났다");
     say("암호 켜짐", .{});
 
@@ -503,18 +510,38 @@ const msg_newkeys: u8 = 21;
 
 /// 사건 하나를 처리하고 흐름 제어를 돌린다. **보내는 루프와 받는 루프가 같은 것을 쓴다.**
 fn handle(payload: []const u8) !void {
-    var buf: [1024]u8 = undefined;
     switch (try ch.receive(payload)) {
         .data => |d| got += d.len,
         .extended_data => |x| stderr_bytes += x.data.len,
         .exit_status => |code| exit_code = code,
         .exit_signal => return error.RemoteKilledBySignal,
-        .unknown_request => |u| if (u.want_reply) try send(try ch.writeChannelFailure(&buf)),
+        .unknown_request => |u| if (u.want_reply) {
+            deferred_channel_failure = true;
+        },
         .closed => {
             peer_closed = true;
-            if (ch.state != .closed) try send(try ch.writeClose(&buf));
+            if (ch.state != .closed) deferred_close = true;
         },
         else => {},
+    }
+    try flushChannelSends();
+}
+
+/// 미뤄 둔 채널 송신과 흐름 제어 보충을 내보낸다.
+///
+/// **재키잉 중에는 아무것도 안 보낸다**(§7.1). 보충은 멱등이라 미뤄도 손해가 없고, 재키잉이
+/// 끝나면 다음 호출에서 그대로 나간다. 이것을 조건 없이 보내던 것이 **연결을 죽였다**(실측:
+/// 재키잉 중 `WINDOW_ADJUST` → `NotAllowedDuringRekey` → poison. 타이밍에 달려 가끔만 났다).
+fn flushChannelSends() !void {
+    if (!t.canSendChannelMessages()) return;
+    var buf: [1024]u8 = undefined;
+    if (deferred_channel_failure) {
+        deferred_channel_failure = false;
+        try send(try ch.writeChannelFailure(&buf));
+    }
+    if (deferred_close) {
+        deferred_close = false;
+        try send(try ch.writeClose(&buf));
     }
     // **계약 §3.1 의 두 줄.** 이것을 빼면 대량 출력이 도중에 멈춘다.
     if (ch.pendingWindowAdjust() != 0) {
@@ -525,12 +552,11 @@ fn handle(payload: []const u8) !void {
 
 /// 채널 요청의 답을 기다린다. **답 앞에 다른 사건이 끼어든다**(계약 §3.1.1).
 fn awaitReply(what: []const u8) !void {
-    var buf: [1024]u8 = undefined;
     while (true) switch (try ch.receive(try recvChannel(&pkt))) {
         .request_success => return say("{s} 수락", .{what}),
         .request_failure => return fail("채널 요청 거절"),
         .window_adjusted => {
-            if (ch.pendingWindowAdjust() != 0) try send(try ch.writeWindowAdjust(&buf));
+            try flushChannelSends();
         },
         .data, .extended_data => {},
         else => return fail("답을 기다리는 중 예상 밖 사건"),

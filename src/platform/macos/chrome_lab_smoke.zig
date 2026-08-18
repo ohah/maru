@@ -202,6 +202,10 @@ const FontUsage = struct {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+    // 오버레이 컴포넌트는 op·run·텍스트를 **프레임 arena** 에 담는다(제품에서도 그렇다 — 프레임마다
+    // 통째로 버린다). 그 메모리는 lowering 이 끝날 때까지 살아야 하므로 여기서 열고 프로세스 끝에 닫는다.
+    var frame_arena = std.heap.ArenaAllocator.init(allocator);
+    defer frame_arena.deinit();
 
     // **UI 언어를 고정한다.** 이 스모크가 남기는 캡처는 픽셀 단위 골든과 비교되므로(tests/golden/
     // dock_visual.zig), 언어가 환경에 따라 달라지면 **같은 코드가 환경마다 다른 그림을 낸다.**
@@ -324,6 +328,8 @@ pub fn main(init: std.process.Init) !void {
         .scm_actions = &scm_actions,
         .text_runs = &text_runs,
         .text_bytes = &text_bytes,
+        // 오버레이 시나리오만 쓴다 — 나머지는 고정 슬라이스에 채우므로 이 값을 안 본다.
+        .arena = frame_arena.allocator(),
     });
     // This is deliberately the same semantic-to-CoreText-to-Metal path that the macOS host uses
     // for SessionDock. The older Lab-only lowerer drew cards without glyph atlas data, which made
@@ -756,6 +762,8 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     if (std.mem.eql(u8, raw, "sort-toggle-hover")) return .sort_toggle_hover;
     if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
+    if (std.mem.eql(u8, raw, "context-menu-checked")) return .context_menu_checked;
+    if (std.mem.eql(u8, raw, "context-menu-unchecked")) return .context_menu_unchecked;
     return null;
 }
 
@@ -766,6 +774,8 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_commit_edit => "scm-commit-edit",
         .sort_toggle_hover => "sort-toggle-hover",
         .sort_toggle_pressed => "sort-toggle-pressed",
+        .context_menu_checked => "context-menu-checked",
+        .context_menu_unchecked => "context-menu-unchecked",
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",

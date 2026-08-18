@@ -115,6 +115,13 @@ pub const ScenarioId = enum {
     /// — 계산을 Lab에 복제하면 제품과 갈릴 자리가 하나 더 생기고, 그 계산은 단위·제품 테스트가 이미
     /// 판정한다. 여기서 고정하는 것은 **그리기**다.
     editor_folded,
+    /// 체크 열이 있는 컨텍스트 메뉴(사이드바 ⚙ — 보기 옵션). **이 컴포넌트에도 Lab 시나리오가 없었다** —
+    /// 그래서 재는 쪽(`menuRect`)과 그리는 쪽(`view`)이 갈려 가장 긴 줄이 테두리에 닿는 결함이 골든 없이
+    /// 나갔다. 켜짐 하나·꺼짐 하나를 한 캡처에 담아 마크 폭과 상자 폭이 함께 보이게 한다.
+    context_menu_checked,
+    /// 같은 메뉴에서 **둘 다 꺼진** 상태. 예전에는 `checked_mask == 0` 이 "체크 열 없음"과 같은 뜻이라
+    /// 이 상태에서 라벨이 두 칸 왼쪽으로 튀었다 — 위 캡처와 **같은 폭**이어야 한다는 것이 계약이다.
+    context_menu_unchecked,
     /// N1 §3.5 — **디스크에서 읽은 파일이 화면에 뜬다.** 앞의 편집기 시나리오들은 전부 소스에 박은
     /// 배열을 그리므로, `openPath`가 실제로 무엇을 돌려주는지는 증명하지 않는다. 여기서는 호출자가
     /// 파일을 써서 `openPath`로 읽고 그 줄들을 그대로 넘긴다(`Scenario.lines`).
@@ -185,6 +192,10 @@ pub const FrameBuffers = struct {
     scm_actions: []scm_dock.ids.Entry = &.{},
     text_runs: []chrome.draw.Run,
     text_bytes: []u8,
+    /// 오버레이 컴포넌트(`context_menu`)는 op 를 **arena 에 append** 한다 — 도크처럼 고정 슬라이스에
+    /// 채우지 않는다. 그 시나리오에서만 쓰이므로 기본값을 두어 기존 호출부를 건드리지 않는다.
+    /// 없이 그 시나리오를 부르면 빈 프레임이 나오고, 캡처가 비어 골든이 그것을 잡는다.
+    arena: ?std.mem.Allocator = null,
 };
 
 pub const Frame = struct {
@@ -210,6 +221,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
+        .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
@@ -793,7 +805,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -839,6 +851,50 @@ fn sortActionId(actions: []const session_dock.ids.Entry) chrome.ui.tree.UiAction
 const commit_fixture_message = "fix: 커밋 상자를 그린다\n\n랩이 켜져 있어 이 줄은 도크 폭에서 접힌다.";
 /// caret 오프셋 — 둘째(빈) 줄 다음 본문 안이다.
 const commit_fixture_caret: usize = 40;
+
+/// 체크 열이 있는 컨텍스트 메뉴 한 프레임. **제품과 같은 `context_menu.view` 를 부른다** — 조합을 Lab 이
+/// 따로 들면 캡처가 제품을 예고하지 못한다(재는 쪽과 그리는 쪽이 갈렸던 것이 바로 이 컴포넌트다).
+///
+/// 라벨은 제품과 **같은 키**에서 온다. Lab 이 `.ko` 를 고정하므로 한글 라벨이 나오고, **한글이 EAW Wide 라
+/// 마크 2칸이 상자 폭에 들어갔는지가 눈으로 보인다** — 영어 라벨이면 그 차이가 덜 드러난다.
+fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const arena = buffers.arena orelse return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
+
+    // 사이드바 ⚙ 의 보기 옵션 메뉴와 같은 두 줄. 길이가 다른 두 라벨이라 **가장 긴 줄**이 상자 폭을
+    // 정하고, 그 줄이 테두리에 닿는지가 이 캡처의 판정 대상이다.
+    // **제품이 쓰는 그 키를 읽는다** — Lab 이 자기 리터럴을 들면 문구가 바뀔 때 캡처만 옛 폭에 머문다.
+    // Lab 은 `.ko` 를 고정하므로(`chrome_lab_smoke.zig`) 제품의 한국어 화면과 같은 폭이 나온다.
+    const items = [_][]const u8{ maru.i18n.t(.set_show_branch), maru.i18n.t(.set_show_folder) };
+
+    var state: chrome.components.context_menu.State = .{};
+    state.show(context_menu_fixture_anchor_x, context_menu_fixture_anchor_y, items.len);
+    // 켜짐 하나·꺼짐 하나 → 마크 두 종류가 한 캡처에 든다. 둘 다 꺼짐 시나리오는 **같은 폭**이어야 한다.
+    state.checked_mask = if (scenario.id == .context_menu_checked) 0b01 else 0b00;
+
+    const p: chrome.props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = scenario.cell_w_px,
+        .cell_height_px = scenario.cell_h_px,
+        .sidebar_width_px = 0,
+        .backing_width_px = @intFromFloat(scenario.viewport_px.width),
+        .backing_height_px = @intFromFloat(scenario.viewport_px.height),
+    } };
+
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    try chrome.components.context_menu.view(&state, &items, p, tokens, arena, &ops);
+
+    return .{
+        // 메뉴는 자기 hit-test 를 `itemAt` 으로 한다(트리를 안 쓴다) — 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = chrome.components.context_menu.layer, .ops = ops.items },
+    };
+}
+
+/// 앵커. 화면 왼쪽 위에서 조금 떨어뜨려 상자 테두리 네 변이 다 보이게 한다.
+const context_menu_fixture_anchor_x: i32 = 24;
+const context_menu_fixture_anchor_y: i32 = 24;
 
 fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const items = [_]scm_dock.types.Item{

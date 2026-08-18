@@ -1,32 +1,20 @@
-//! **내장 SSH 클라이언트의 실서버 스모크**(계획 S8). 진짜 sshd 와 한 번 왕복한다.
+//! **내장 SSH 클라이언트의 실서버 스모크**(계획 S8). 진짜 sshd 와 왕복한다.
 //!
 //! **제품 경로가 아니다.** 데스크톱의 `maru ssh` 는 시스템 `ssh` 래퍼로 그대로 두고(계약 §3.4),
 //! 내장 클라이언트는 모바일용이다. 여기 있는 것은 그 클라이언트를 **데스크톱에서 검증**하기 위한
-//! 소켓 어댑터와 드라이버다. 그래서 `src/` 가 아니라 `tools/` 에 산다.
+//! 소켓 어댑터다.
 //!
-//! **왜 있어야 하나.** `src/session/ssh/` 는 전부 sans-io 라 스스로는 아무 데도 못 붙는다. 그리고
-//! 서버 구현마다 관대함이 달라 상호운용은 명세만으로 안 닫힌다 — 진짜 sshd 와의 왕복이 유일한
-//! 판정자다(계획 "위험" 절).
-//!
-//! **드라이버가 계약대로인지도 여기서 잰다.** 계약 §3.1 의 흐름 제어 두 줄, §3.1.1 의 실서버
-//! 순서(초기 윈도 0 · 답보다 먼저 오는 사건 · 채널 아닌 메시지)를 그대로 따라 쓴다 — 문서가
-//! 말한 대로 짜서 실제로 붙는지 보는 것이 이 파일의 절반이다.
+//! **세션 로직은 여기 없다.** 예전에는 핸드셰이크·인증·채널·재키잉을 이 파일이 다 들고 있었는데,
+//! 모바일도 **같은 순서**가 필요해 `src/session/ssh/client.zig` 로 옮겼다(S9). 두 벌을 두면
+//! 갈리고, 갈리면 한쪽에서만 나는 결함이 생긴다. 이제 이 파일은 **소켓과 판정**만 든다 —
+//! 그래서 이 스모크가 초록이면 **모바일이 쓸 코드가 실서버에서 도는 것**이 증명된다.
 //!
 //! **이 스모크가 못 잡는 것 — 정직하게.**
-//!
-//!   - **보내는 쪽 윈도 가드**는 원리적으로 못 잡는다. 그 가드는 *버그 있는 드라이버*를 막는
-//!     것인데, 여기 드라이버는 `sendableLen()` 으로 잘라 보내므로 애초에 넘길 수가 없다. 실측:
-//!     가드를 지워도·`sendableLen` 이 최대 패킷을 무시해도·보낸 뒤 윈도를 안 줄여도 세 회차가 다
-//!     초록이다. 그 셋은 단위 테스트가 잡는다(`channel.zig` 의 변이 검사).
-//!   - **채우는 시점(절반)이 최적인지**도 안 본다. 바닥에서 채워도 전송은 끝난다 — 느려질 뿐이다.
-//!   - **드라이버 오용을 막는 가드**는 원리적으로 못 잡는다 — 여기 드라이버가 올바르게 굴기
-//!     때문이다. §7.1 보내기 제한(`NotAllowedDuringRekey`)과 "KEX 밖에서 키 못 갈기"
-//!     (`WrongPhase`)가 그렇다: 지워도 세 회차가 다 통과한다(실측). 그 둘은 S9 의 모바일
-//!     드라이버를 위한 방어이고, 단위 테스트가 잡는다.
-//!   - **재키잉의 호스트키 재검증**도 못 잡는다. 그 검사는 *재키잉에서 상대가 바뀐 경우*를 막는
-//!     것인데, 정직한 서버는 매번 같은 키를 낸다 — 검증을 지워도 통과한다(실측). 적대적 서버를
-//!     흉내 내야 잡히고, 그것은 단위 테스트가 할 일이다.
-//!   - 확인한 서버는 **OpenSSH 하나**다. Dropbear·네트워크 장비는 다르게 굴 수 있다.
+//!   - **드라이버 오용을 막는 가드**는 원리적으로 못 잡는다 — `client.zig` 가 올바르게 굴기
+//!     때문이다(§7.1 보내기 제한·"KEX 밖에서 키 못 갈기"). 단위 테스트가 잡는다.
+//!   - **채우는 시점(절반)이 최적인지**는 안 본다. 바닥에서 채워도 전송은 끝난다 — 느려질 뿐이다.
+//!   - **재키잉의 호스트키 재검증**도 못 잡는다. 정직한 서버는 매번 같은 키를 낸다.
+//!   - 확인한 서버는 **OpenSSH 하나**다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -34,18 +22,13 @@ const posix = std.posix;
 const c = std.c;
 
 const ssh = @import("maru").session.ssh;
-const version = ssh.version;
-const kexinit = ssh.kexinit;
-const kex = ssh.kex;
-const cipher = ssh.cipher;
-const transport = ssh.transport;
-const hostkey = ssh.hostkey;
-const userauth = ssh.userauth;
-const channel = ssh.channel;
-const private_key = ssh.private_key;
-const wire = ssh.wire;
+const client = ssh.client;
 
 /// 선이 조용해지면 이만큼 기다렸다 포기한다. 로컬 sshd 라 정상 왕복은 밀리초 단위다.
+///
+/// **멈춤을 행이 아니라 실패로 만든다.** 흐름 제어가 틀리면 서버가 우리를 기다리며 조용히
+/// 멈추는데, 안 자르면 스모크가 **행**한다 — CI 에서 행은 실패보다 나쁘다(실측: 우리 윈도를
+/// 안 줄이는 변이에서 10분 넘게 안 끝났다).
 const read_timeout_s = 20;
 
 /// 소켓 어댑터. **이 struct 가 L4 의 전부다** — 프로토콜은 한 줄도 모른다.
@@ -56,12 +39,6 @@ const Socket = struct {
         const fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
         if (fd < 0) return error.SocketFailed;
         errdefer _ = c.close(fd);
-        // **읽기에 시간 제한을 건다.** 흐름 제어가 틀리면 서버가 우리를 기다리며 조용히 멈추는데,
-        // 그것을 안 자르면 스모크가 **행**한다 — CI 에서 그것은 실패보다 나쁘다(잡 하나가 러너를
-        // 물고 늘어지고, 로그만 봐서는 무엇을 기다리는지도 모른다). 실측으로 겪었다: 우리 윈도를
-        // 안 줄이는 변이를 넣었더니 스모크가 10 분 넘게 안 끝났다.
-        const tv: posix.timeval = .{ .sec = read_timeout_s, .usec = 0 };
-        _ = c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(posix.timeval));
         var addr: posix.sockaddr.in = .{
             .family = posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
@@ -69,10 +46,11 @@ const Socket = struct {
             .zero = @splat(0),
         };
         if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) != 0) return error.ConnectFailed;
+        const tv: posix.timeval = .{ .sec = read_timeout_s, .usec = 0 };
+        _ = c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(posix.timeval));
         // **`SIGPIPE` 로 죽지 않는다.** 상대가 먼저 끊은 뒤 쓰면 기본 동작이 프로세스 종료라,
-        // 이름 있는 오류가 아니라 **신호로 죽는다**(실측: 버전 줄 뒤 바로 끊는 서버에 exit 141).
-        // 소켓을 드는 층이면 어디서나 같은 함정이고, 모바일에서 그것은 앱이 죽는 것이다 — 이
-        // 저장소의 `control_socket.setNoSigPipe` 가 같은 이유로 같은 옵션을 건다.
+        // 이름 있는 오류가 아니라 **신호로 죽는다**(실측: exit 141). 소켓을 드는 층이면 어디서나
+        // 같은 함정이고, 모바일에서 그것은 앱이 죽는 것이다.
         if (builtin.os.tag == .macos) {
             var on: c_int = 1;
             _ = c.setsockopt(fd, posix.SOL.SOCKET, c.SO.NOSIGPIPE, @ptrCast(&on), @sizeOf(c_int));
@@ -106,17 +84,16 @@ const Socket = struct {
     }
 };
 
-/// 선에서 읽은 바이트를 모아 두는 자리. **프로토콜 층은 이 버퍼를 모른다** — `feed` 가 먹은 만큼
-/// 우리가 민다(계약 §4.5).
-/// **층이 요구하는 최악 버퍼**(계약 §3.3 — 배너 줄 상한 × 줄 수). 임의로 잡으면 정상 배너를
-/// 못 담아 영원히 "더 읽어라" 만 받거나, 반대로 층의 상한보다 커서 우리 버퍼가 먼저 찬다.
-var in_buf: [version.max_exchange_bytes]u8 = undefined;
-var in_len: usize = 0;
-
-var t: transport.Transport = .{};
 var sock: Socket = undefined;
-var out_wire: [1 << 18]u8 = undefined;
-var prng = std.Random.DefaultPrng.init(0x5388);
+/// 선에서 읽은 바이트를 모아 두는 자리. **층이 요구하는 최악 버퍼**(계약 §3.3).
+var in_buf: [1 << 20]u8 = undefined;
+var in_len: usize = 0;
+var wire_out: [1 << 19]u8 = undefined;
+var screen_out: [1 << 19]u8 = undefined;
+
+var cl: client.Client = undefined;
+var prng = std.Random.DefaultPrng.init(0x5390);
+var got: usize = 0;
 
 fn fill() !void {
     if (in_len == in_buf.len) return error.InputBufferFull;
@@ -128,196 +105,18 @@ fn consume(n: usize) void {
     in_len -= n;
 }
 
-fn send(payload: []const u8) !void {
-    const n = try t.send(&out_wire, payload, prng.random());
-    try sock.writeAll(out_wire[0..n]);
+/// 한 번 먹이고 나온 것을 선에 보낸다. 화면 바이트는 세기만 한다.
+var made_progress = false;
+
+/// 한 번 먹이고 나온 것을 선에 보낸다. 화면 바이트는 세기만 한다.
+fn pump() !client.State {
+    const step = try cl.feed(in_buf[0..in_len], &wire_out, &screen_out);
+    made_progress = step.consumed > 0 or step.screen.len > 0 or step.wire.len > 0;
+    if (step.consumed > 0) consume(step.consumed);
+    if (step.wire.len > 0) try sock.writeAll(step.wire);
+    got += step.screen.len;
+    return step.state;
 }
-
-/// 패킷 하나를 받는다. **버린 추측 패킷은 여기서 흡수한다** — 드라이버가 그것을 진짜로 처리하는
-/// 것이 코드리뷰가 잡은 결함이었고, union 이라 이제 실수할 수 없다.
-fn recv(out: []u8) ![]const u8 {
-    while (true) {
-        if (in_len > 0) {
-            if (try t.feed(out, in_buf[0..in_len])) |received| switch (received) {
-                .discarded => |d| {
-                    consume(d.consumed);
-                    continue;
-                },
-                .packet => |p| {
-                    consume(p.consumed);
-                    return p.payload;
-                },
-            };
-        }
-        try fill();
-    }
-}
-
-/// 채널 메시지만 골라 받는다.
-///
-/// **실서버는 채널 아닌 것을 섞어 보낸다**(계약 §3.1.1 — 인증 직후 `GLOBAL_REQUEST
-/// hostkeys-00@openssh.com` 과 `SSH_MSG_DEBUG` 가 왔다). 분류는 S7c 몫이고 여기서는 넘긴다.
-fn recvChannel(out: []u8) ![]const u8 {
-    while (true) {
-        const p = try recv(out);
-        if (p[0] >= 90 and p[0] <= 100) return p;
-        // **재키잉 요구는 넘기면 안 된다.** 넘기면 서버가 우리 KEXINIT 을 기다리며 교착하고,
-        // 20 초 뒤 읽기 타임아웃으로 죽는다 — 그러면 증상이 "출력이 모자란다" 로 보여 **흐름
-        // 제어를 의심하게 된다**(실측으로 그렇게 오진했다). 우리는 아직 재키잉을 안 하므로
-        // 여기서 그 사실을 이름 그대로 말하고 죽는다.
-        // **서버가 재키잉을 요구했다** — 답하지 않으면 서로 기다리다 멈춘다(실측: `RekeyLimit 1M`
-        // 서버에서 917,504바이트 뒤 교착). 여기서 투명하게 처리하고 루프를 잇는다.
-        if (p[0] == kexinit.msg_kexinit) {
-            var i_s_copy: [4096]u8 = undefined;
-            if (p.len > i_s_copy.len) return error.KexInitTooLarge;
-            @memcpy(i_s_copy[0..p.len], p);
-            try doRekey(i_s_copy[0..p.len]);
-            continue;
-        }
-        // `SSH_MSG_DISCONNECT` 도 이름을 밝힌다 — 계약 §3.2 는 이유를 사용자에게 보여 주라고 한다.
-        if (p[0] == msg_disconnect) return error.ServerDisconnected;
-    }
-}
-
-const msg_disconnect: u8 = 1;
-const msg_newkeys_id: u8 = 21;
-
-/// **재키잉**(RFC 4253 §7.1·§9, draft strict-kex §3.3). 서버가 `KEXINIT` 을 다시 보냈을 때 답한다.
-///
-/// 안 하면 서로 기다리다 세션이 멈춘다 — OpenSSH 기본 `RekeyLimit` 은 1GB/1시간이라 **한 시간
-/// 넘는 터미널 세션은 반드시 이것을 만난다**.
-///
-/// 초기 KEX 와 다른 점 둘이 요점이다.
-///   - `session_id` 는 **첫 `H`** 를 그대로 쓴다(§7.2). 새 `H` 로 바꾸면 인증에 쓴 서명의 근거가
-///     달라진다.
-///   - strict 표시자는 **초기값을 잇는다**(draft §3.1 — 재키잉 KEXINIT 의 표시자는 무시한다).
-///     `kexinit.Phase.rekey` 가 그것을 강제한다.
-fn doRekey(i_s: []const u8) !void {
-    // **보내기 제한이 여기서부터 걸린다**(§7.1). 우리 KEXINIT 을 보내기 **전에** 부른다.
-    try t.beginRekey();
-
-    var i_c_buf: [4096]u8 = undefined;
-    const i_c = try kexinit.write(&i_c_buf, prng.random());
-    try send(i_c);
-
-    try finishKex(i_s, i_c);
-}
-
-/// 재키잉의 뒷부분 — 협상부터 `NEWKEYS` 까지. 서버가 시작했든 우리가 시작했든 같다.
-fn finishKex(i_s: []const u8, i_c: []const u8) !void {
-    const peer = try kexinit.parse(i_s);
-    const neg = try kexinit.negotiate(peer, .{ .rekey = strict_kex_initial });
-    try t.applyNegotiation(.{ .strict_kex = neg.strict_kex, .discard_guess = neg.discard_guess });
-
-    var seed: [32]u8 = undefined;
-    prng.random().bytes(&seed);
-    var eph = try kex.Ephemeral.fromSeed(seed);
-    defer eph.clear();
-    var init_buf: [128]u8 = undefined;
-    try send(try kex.writeInit(&init_buf, eph.public));
-
-    var rk_pkt: [1 << 18]u8 = undefined;
-    const reply = try kex.parseReply(try recvKexMessage(&rk_pkt, kex.msg_kex_ecdh_reply));
-    var k = try eph.sharedSecret(reply.q_s);
-    defer std.crypto.secureZero(u8, &k);
-    const h = try kex.exchangeHash(.{
-        .v_c = v_c,
-        .v_s = v_s,
-        .i_c = i_c,
-        .i_s = i_s,
-        .k_s = reply.host_key,
-        .q_c = &eph.public,
-        .q_s = reply.q_s,
-        .k = k,
-    });
-    // **호스트키는 매번 다시 검증한다** — 재키잉에서 서버가 바뀌었을 수 있다(중간자).
-    try hostkey.verifyExchangeHash(reply.host_key, reply.signature, &h);
-
-    try send(&[_]u8{msg_newkeys_id});
-    if ((try recvKexMessage(&rk_pkt, msg_newkeys_id))[0] != msg_newkeys_id) return error.ExpectedNewKeys;
-
-    var key_c2s: [64]u8 = undefined;
-    var key_s2c: [64]u8 = undefined;
-    // **`session_id` 는 첫 `H`, 해시는 새 `H`** — 둘을 헷갈리면 키가 서버와 다르게 나온다.
-    try kex.deriveKey(&key_c2s, k, h, .enc_c2s, &session_id);
-    try kex.deriveKey(&key_s2c, k, h, .enc_s2c, &session_id);
-    var c_send = cipher.Cipher.initMove(&key_c2s);
-    var c_recv = cipher.Cipher.initMove(&key_s2c);
-    try t.enableSendKeys(&c_send);
-    try t.enableRecvKeys(&c_recv);
-    if (t.phase != .established) return error.RekeyDidNotFinish;
-
-    rekeys_done += 1;
-    // **미뤄 둔 것을 지금 보낸다.** 재키잉 동안 쌓인 보충이 여기서 나가지 않으면 상대가 멈춘다.
-    try flushChannelSends();
-    say("재키잉 {d} 회차 완료", .{rekeys_done});
-}
-
-/// **우리가 시작하는 재키잉.** 서버의 `KEXINIT` 을 기다렸다가 나머지는 `doRekey` 와 같다.
-fn doSelfRekey() !void {
-    try t.beginRekey();
-    var i_c_buf: [4096]u8 = undefined;
-    const i_c = try kexinit.write(&i_c_buf, prng.random());
-    try send(i_c);
-
-    // 서버 `KEXINIT` 을 기다린다. **그 사이 채널 데이터가 계속 온다** — 서버는 아직 우리 것을
-    // 못 봤다. 그것을 처리하다 보충이 필요해지는데, 재키잉 중이라 미뤄야 한다.
-    var rk_pkt: [1 << 18]u8 = undefined;
-    var i_s_buf: [4096]u8 = undefined;
-    const i_s = blk: {
-        const p = try recvKexMessage(&rk_pkt, kexinit.msg_kexinit);
-        @memcpy(i_s_buf[0..p.len], p);
-        break :blk i_s_buf[0..p.len];
-    };
-    try finishKex(i_s, i_c);
-}
-
-/// KEX 메시지 하나를 기다린다. **그 사이에 오는 채널 데이터는 처리한다** — §7.1 이 "arbitrary
-/// number of messages that may be in-flight" 를 처리하라고 요구한다. 버리면 출력이 사라진다.
-fn recvKexMessage(out: []u8, want: u8) ![]const u8 {
-    while (true) {
-        const p = try recv(out);
-        if (p[0] == want) return p;
-        if (p[0] >= 90 and p[0] <= 100) {
-            try handle(p);
-            continue;
-        }
-        if (p[0] == msg_disconnect) return error.ServerDisconnected;
-        // 그 밖(IGNORE·DEBUG 등)은 넘긴다.
-    }
-}
-
-var pkt: [1 << 18]u8 = undefined;
-var scratch: [8192]u8 = undefined;
-
-/// 채널. **전역인 이유**: 재키잉이 `recvChannel` 안에서 투명하게 일어나는데, 그 사이에도 상대의
-/// 채널 데이터가 온다(RFC 4253 §7.1) — 그것을 처리하려면 채널이 거기서 보여야 한다.
-var ch: channel.Channel = .{};
-
-/// 재키잉이 다시 쓰는 것들. `session_id` 는 **첫 `H`** 로 고정된다(RFC 4253 §7.2 — "Once computed,
-/// the session identifier is not changed, even if keys are later re-exchanged").
-var v_c: []const u8 = &.{};
-var v_s_store: [512]u8 = undefined;
-var v_s: []const u8 = &.{};
-var session_id: [32]u8 = undefined;
-var strict_kex_initial = false;
-var rekeys_done: usize = 0;
-
-/// 재키잉 중에 미뤄 둔 채널 응답. **재키잉 중에는 채널 메시지를 못 보낸다**(§7.1) — 보내면
-/// 연결이 죽는다(실측). 보충은 멱등이라 그냥 미루면 되고, 아래 둘은 한 번뿐이라 기억해 둔다.
-var deferred_channel_failure = false;
-var deferred_close = false;
-/// 재키잉 때문에 실제로 미룬 횟수. 0 이면 이 회차가 그 자리를 안 재고 있다는 뜻이다.
-var deferrals: usize = 0;
-
-// **두 루프가 같은 카운터를 센다.** 처음에는 받는 루프에만 뒀는데, 보내는 동안에도 데이터가
-// 오므로(우리가 `cat` 에 보낸 것이 그대로 돌아온다) 그만큼이 통째로 안 세어졌다 — 4MiB 를
-// 보내고 2.77MiB 만 받았다고 나왔다. 드라이버가 틀린 것이지 제품이 아니었다.
-var got: usize = 0;
-var stderr_bytes: usize = 0;
-var adjusts: usize = 0;
-var exit_code: ?u32 = null;
-var peer_closed = false;
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var it = std.process.Args.Iterator.init(init.args);
@@ -327,295 +126,94 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const key_path = it.next() orelse return fail("개인키 경로를 인자로 준다");
     const expect_bytes_str = it.next() orelse return fail("기대 stdout 바이트 수를 인자로 준다");
     const expect_stderr_str = it.next() orelse return fail("기대 stderr 바이트 수를 인자로 준다");
-    // **pty 를 요청하면 stderr 가 따로 안 온다** — 서버가 그것을 pty 로 합쳐 `CHANNEL_DATA` 로
-    // 보낸다(실측). 즉 `pty-req` 와 확장 데이터는 **한 연결에서 둘 다 볼 수 없다**. 그래서 모드를
-    // 인자로 받아 스모크가 두 번 돈다.
     const mode = it.next() orelse "pty";
-    const want_pty = std.mem.eql(u8, mode, "pty");
-    // **보내는 쪽을 태우는 회차.** 나머지 회차는 받기만 해서, 보내는 쪽 흐름 제어(윈도·최대 패킷을
-    // 넘겨 보내지 않는다)가 선 위에서 한 번도 안 돈다 — 그 검사를 지워도 스모크가 초록이었다(실측).
-    // 이 회차는 서버가 `cat` 이라 우리가 보낸 것이 그대로 돌아온다.
-    const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
-        std.mem.eql(u8, mode, "self-rekey");
-    // **재키잉이 실제로 돌았는지 본다.** 서버 설정이 틀려 재키잉이 안 걸리면 이 회차는 그냥 평범한
-    // 전송이 되고, 그러면 **아무것도 안 재면서 초록**이 된다 — 이 스모크에서 다섯 번 나온 부류다.
-    const want_rekey = std.mem.eql(u8, mode, "rekey") or std.mem.eql(u8, mode, "rekey-echo");
-    // **우리가 시작하는 재키잉.** 서버가 시작하면 그쪽은 이미 송신을 멈춘 뒤라(§7.1) 재키잉 중에
-    // 데이터가 안 오고, 그래서 "미뤄 둔 채널 송신" 경로가 선 위에서 한 번도 안 탄다(실측: 미룸 0 회).
-    // 우리가 먼저 `KEXINIT` 을 보내면 서버는 그것을 볼 때까지 계속 보내므로 그 자리가 열린다.
-    const want_self_rekey = std.mem.eql(u8, mode, "self-rekey");
-    // **광고할 윈도**(0 이면 채널 기본 2MiB). 작게 잡으면 보충이 잦아져 **재키잉과 겹친다** —
-    // 그 겹침이 이 스모크가 재현하려는 자리다(재키잉 중 보충을 보내면 연결이 죽는다). 기본 윈도로는
-    // 서버가 재키잉을 시작할 때 이미 송신을 멈춘 뒤라 겹칠 확률이 낮아, 결함이 있어도 통과했다.
     const window_arg = it.next() orelse "0";
-    const want_window = try std.fmt.parseInt(u32, window_arg, 10);
-    if (want_window != 0) {
-        ch.local_window_max = want_window;
-        ch.local_window = want_window;
-    }
+
     const port = try std.fmt.parseInt(u16, port_str, 10);
     const expect_bytes = try std.fmt.parseInt(usize, expect_bytes_str, 10);
     const expect_stderr = try std.fmt.parseInt(usize, expect_stderr_str, 10);
+    const want_window = try std.fmt.parseInt(u32, window_arg, 10);
+    const want_pty = std.mem.eql(u8, mode, "pty");
+    const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
+        std.mem.eql(u8, mode, "self-rekey");
 
-    const key_pem = try readFile(key_path);
+    var parsed = try loadKey(key_path);
+    defer parsed.clear();
 
     sock = try Socket.connect(port);
     defer sock.close();
 
-    // ---- 버전 교환 ----
-    v_c = version.clientLine("0.1");
-    try sock.writeAll(v_c);
-    try sock.writeAll("\r\n");
-    const v_s_buf = &v_s_store;
-    v_s = blk: while (true) {
-        if (in_len > 0) {
-            // **`Incomplete` 만 "더 읽어라" 다.** 처음에는 모든 오류를 삼키고 계속 읽었는데,
-            // 그러면 쓰레기나 제어문자가 든 버전 줄이 **20초 stall** 로 나타난다(실측) — 층은
-            // 그것을 `MalformedVersion` 으로 이미 거절하는데 드라이버가 그 이름을 지운 것이다.
-            // 계약 §3.2.2 가 막으려던 것이 정확히 그 줄이라, 이름이 사라지면 방어도 안 보인다.
-            if (version.parse(in_buf[0..in_len])) |p| {
-                @memcpy(v_s_buf[0..p.line.len], p.line);
-                consume(p.consumed);
-                break :blk v_s_buf[0..p.line.len];
-            } else |e| if (e != version.Error.Incomplete) return e;
+    cl = client.Client.init(.{
+        .user = user,
+        .secret_key = parsed.secret,
+        .size = .{ .cols = 80, .rows = 24 },
+        .window = want_window,
+        .pty = want_pty,
+    }, prng.random());
+    defer cl.clear();
+
+    try sock.writeAll(try cl.start(&wire_out));
+
+    // **셸이 뜰 때까지 민다.** 중간에 호스트키를 물으면 승인한다 — 스모크는 방금 만든 일회용
+    // 서버라 TOFU 가 그대로 맞다(제품에서는 사용자가 답한다, 계약 §4).
+    var rounds: usize = 0;
+    while (rounds < 100_000) : (rounds += 1) {
+        const st = try pump();
+        if (st == .host_key_decision) {
+            var fp: [128]u8 = undefined;
+            say("호스트키 {s}", .{try cl.hostKeyFingerprint(&fp)});
+            cl.acceptHostKey();
+            continue;
         }
+        if (st == .ready) break;
+        if (st == .closed) return fail("셸이 뜨기 전에 닫혔다");
         try fill();
-    };
-    say("V_S = {s}", .{v_s});
-
-    // ---- KEXINIT ----
-    var i_c_buf: [4096]u8 = undefined;
-    const i_c = try kexinit.write(&i_c_buf, prng.random());
-    try send(i_c);
-
-    var i_s_buf: [4096]u8 = undefined;
-    const i_s = blk: {
-        // **원문을 복사해 둔다** — `payload` 는 다음 `feed` 까지만 산다(계약 §4.5).
-        const p = try recv(&pkt);
-        @memcpy(i_s_buf[0..p.len], p);
-        break :blk i_s_buf[0..p.len];
-    };
-    const peer = try kexinit.parse(i_s);
-    const neg = try kexinit.negotiate(peer, .initial);
-    say("협상 kex={s} hostkey={s} cipher={s} strict={}", .{ neg.kex, neg.host_key, neg.cipher_c2s, neg.strict_kex });
-    // **한 번에 반영한다** — 반쪽만 반영되는 상태가 안 생긴다.
-    try t.applyNegotiation(.{ .strict_kex = neg.strict_kex, .discard_guess = neg.discard_guess });
-
-    // ---- ECDH ----
-    var seed: [32]u8 = undefined;
-    prng.random().bytes(&seed);
-    var eph = try kex.Ephemeral.fromSeed(seed);
-    defer eph.clear();
-    var init_buf: [128]u8 = undefined;
-    try send(try kex.writeInit(&init_buf, eph.public));
-
-    const reply = try kex.parseReply(try recv(&pkt));
-    var k = try eph.sharedSecret(reply.q_s);
-    defer std.crypto.secureZero(u8, &k);
-    const h = try kex.exchangeHash(.{
-        .v_c = v_c,
-        .v_s = v_s,
-        .i_c = i_c,
-        .i_s = i_s,
-        .k_s = reply.host_key,
-        .q_c = &eph.public,
-        .q_s = reply.q_s,
-        .k = k,
-    });
-    // **여기가 이 스모크의 존재 이유다.** 서버가 자기 `H` 에 서명했고 그것이 우리 `H` 로 검증되면
-    // 우리 해석이 서버와 바이트 단위로 같다는 뜻이다(계약 §4.4.4.1).
-    try hostkey.verifyExchangeHash(reply.host_key, reply.signature, &h);
-    // **첫 `H` 가 곧 `session_id` 다** — 재키잉해도 안 바뀐다(RFC 4253 §7.2).
-    session_id = h;
-    strict_kex_initial = neg.strict_kex;
-    var fp_buf: [128]u8 = undefined;
-    say("호스트키 검증 OK — {s}", .{try hostkey.fingerprint(&fp_buf, reply.host_key)});
-
-    // ---- NEWKEYS ----
-    try send(&[_]u8{msg_newkeys});
-    if ((try recv(&pkt))[0] != msg_newkeys) return fail("NEWKEYS 가 아니다");
-
-    var key_c2s: [64]u8 = undefined;
-    var key_s2c: [64]u8 = undefined;
-    try kex.deriveKey(&key_c2s, k, h, .enc_c2s, &h);
-    try kex.deriveKey(&key_s2c, k, h, .enc_s2c, &h);
-    var c_send = cipher.Cipher.initMove(&key_c2s);
-    var c_recv = cipher.Cipher.initMove(&key_s2c);
-    try t.enableSendKeys(&c_send);
-    try t.enableRecvKeys(&c_recv);
-    if (t.phase != .established) return fail("암호 전환이 안 끝났다");
-    say("암호 켜짐", .{});
-
-    // ---- 인증 ----
-    var sr_buf: [64]u8 = undefined;
-    try send(try userauth.writeServiceRequest(&sr_buf));
-    try userauth.parseServiceAccept(try recv(&pkt));
-
-    var parsed = try private_key.parse(key_pem, "", &scratch, .{});
-    defer parsed.clear();
-    defer std.crypto.secureZero(u8, &scratch);
-    var kb_buf: [128]u8 = undefined;
-    const key_blob = try userauth.publicKeyBlob(&kb_buf, parsed.secret);
-    var sd_buf: [512]u8 = undefined;
-    const sd = try userauth.signedData(&sd_buf, &h, user, key_blob);
-    var sig_buf: [128]u8 = undefined;
-    const sig = try userauth.signBlob(&sig_buf, parsed.secret, sd);
-    var req_buf: [1024]u8 = undefined;
-    try send(try userauth.writePublicKeyRequest(&req_buf, user, key_blob, sig));
-
-    while (true) switch (try userauth.parseResponse(try recv(&pkt), .publickey)) {
-        .success => break,
-        .banner => continue,
-        .failure => return fail("인증 실패"),
-        else => return fail("예상 밖 인증 응답"),
-    };
-    say("인증 성공", .{});
-
-    // ---- 채널 ----
-    var ch_buf: [1024]u8 = undefined;
-    try send(try ch.writeOpen(&ch_buf, 0));
-    switch (try ch.receive(try recvChannel(&pkt))) {
-        .opened => {},
-        .open_failed => return fail("채널 거절"),
-        else => return fail("예상 밖 채널 사건"),
     }
-    // **계약 §3.1.1: 초기 윈도가 0 일 수 있다.** 그것을 여기서 값으로 남긴다.
-    say("채널 열림 — 초기 윈도 {d}, 최대 패킷 {d}", .{ ch.remote_window, ch.remote_max_packet });
+    if (cl.state != .ready) return fail("셸이 안 떴다");
+    say("셸 준비됨 ({s})", .{mode});
 
-    if (want_pty) {
-        try send(try ch.writePtyReq(&ch_buf, "xterm-256color", .{ .cols = 80, .rows = 24 }, ""));
-        try awaitReply("pty-req");
-    }
-    try send(try ch.writeShell(&ch_buf));
-    try awaitReply("shell");
-    if (want_pty) try send(try ch.writeWindowChange(&ch_buf, .{ .cols = 120, .rows = 40 }));
-
+    // 보내는 회차: **상대가 허락한 만큼만** 나간다(계약 §3.1). 못 보내면 받아서 윈도를 연다.
+    var sent: usize = 0;
     if (want_echo) {
-        // **초기 윈도가 0 이면 기다려야 한다**(계약 §3.1.1). "채널이 열렸으니 보낸다" 로 짜면
-        // 첫 바이트부터 §5.2 를 어기고, 서버는 그것을 흘려도 되므로 **조용히 사라진다**.
-        var waited: usize = 0;
-        while (ch.sendableLen() == 0) {
-            if (waited > 100) return fail("윈도가 끝내 안 열렸다");
-            waited += 1;
-            try handle(try recvChannel(&pkt));
-        }
-        say("보낼 수 있게 되기까지 사건 {d} 개를 기다렸다 (윈도 {d})", .{ waited, ch.remote_window });
-
-        // 상대가 허락한 만큼만 잘라 보낸다 — `sendableLen` 이 그 한도다.
-        var sent: usize = 0;
-        // **데이터 버퍼는 청크보다 커야 한다** — 머리(메시지 번호·채널 번호·길이)가 붙는다.
-        var data_buf: [8192]u8 = undefined;
         var chunk: [4096]u8 = undefined;
         @memset(&chunk, 'Z');
-        var self_rekeyed = false;
         while (sent < expect_bytes) {
-            // **절반쯤에서 우리가 재키잉을 건다.** 서버는 우리 `KEXINIT` 을 볼 때까지 계속
-            // 보내므로, 그 데이터가 재키잉 중에 도착해 보충이 필요해진다 — 그때 미루지 않으면
-            // 연결이 죽는다.
-            if (want_self_rekey and !self_rekeyed and sent > expect_bytes / 2) {
-                self_rekeyed = true;
-                try doSelfRekey();
-            }
-            const room = ch.sendableLen();
-            if (room == 0) {
-                try handle(try recvChannel(&pkt));
+            const r = try cl.write(chunk[0..@min(chunk.len, expect_bytes - sent)], &wire_out);
+            if (r.sent == 0) {
+                // **더 읽는 판정은 "버퍼가 비었나" 가 아니라 "진행했나" 다.** 남은 바이트가
+                // 불완전 패킷이면 `feed` 가 아무것도 못 하는데, 버퍼가 안 비었다고 안 읽으면
+                // **영원히 맴돈다**(실측: `in_len=1088` 에서 무한 spin).
+                _ = try pump();
+                if (!made_progress) try fill();
                 continue;
             }
-            const n = @min(@min(@as(usize, room), chunk.len), expect_bytes - sent);
-            try send(try ch.writeData(&data_buf, chunk[0..n]));
-            sent += n;
+            try sock.writeAll(r.wire);
+            sent += r.sent;
         }
-        try send(try ch.writeEof(&ch_buf)); // `cat` 은 EOF 를 봐야 끝난다
+        // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
+        try sock.writeAll(try cl.eof(&wire_out));
+        // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
+        try sock.writeAll(try cl.eof(&wire_out));
+        // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
+        try sock.writeAll(try cl.eof(&wire_out));
         say("보낸 바이트 {d}", .{sent});
     }
 
-    // ---- 대량 전송 (S7b 판정자) ----
-    //
-    // **짧은 출력으로는 흐름 제어가 안 탄다.** 초기 윈도 안에서 끝나면 우리가 채워 주는 경로가
-    // 한 번도 안 돌아, 계약 §3.1 이 말한 "대량 출력이 도중에 멈춘다" 를 재현도 반증도 못 한다.
-    // 그래서 스모크는 **윈도보다 큰 출력**을 요구한다.
-    while (!peer_closed) {
-        // **오류 이름을 삼키지 않는다.** 처음에는 `catch break` 였는데, 그러면 재키잉 요구도
-        // 멈춤도 전부 "루프 끝" 이 되어 아래 바이트 수 검사에서 **"출력이 모자란다 — 흐름 제어가
-        // 멈췄을 수 있다"** 로 나온다. 실제 원인은 서버가 재키잉을 요구한 것이었고, 그 오진을
-        // 실측으로 겪었다. 정상 종료(상대가 소켓을 닫음)만 루프를 끝낸다.
-        const payload = recvChannel(&pkt) catch |e| switch (e) {
-            error.Closed => break,
+    while (true) {
+        const st = try pump();
+        if (st == .closed) break;
+        if (got >= expect_bytes + expect_stderr and cl.exit_status != null) break;
+        // **비울 것이 남았으면 더 안 읽는다** — `feed` 가 버퍼가 차서 멈춘 것일 수 있다.
+        if (made_progress and in_len > 0) continue;
+        fill() catch |e| switch (e) {
+            error.Closed, error.Stalled => break,
             else => return e,
         };
-        try handle(payload);
     }
 
-    say("{s}: 받은 바이트 {d} (stderr {d}), 보충 {d} 회, 재키잉 {d} 회, 미룸 {d} 회, exit-status {?d}", .{ mode, got, stderr_bytes, adjusts, rekeys_done, deferrals, exit_code });
-
-    if (got < expect_bytes) return fail("출력이 모자란다 — 흐름 제어가 멈췄을 수 있다");
-    // **stderr 도 본다.** 확장 데이터는 같은 윈도를 먹는데(§5.2), pty 를 요청하면 서버가 그것을
-    // pty 로 합쳐 보내 그 경로가 아예 안 돈다 — 그래서 `no-pty` 회차가 따로 있다.
-    if (stderr_bytes < expect_stderr) return fail("stderr 가 모자란다 — 확장 데이터 경로가 안 돌았다");
-    if (adjusts == 0) return fail("보충이 한 번도 안 돌았다 — 이 스모크가 S7b 를 안 재고 있다");
-    if (exit_code != 0) return fail("exit-status 가 0 이 아니다");
-    if (want_rekey and rekeys_done == 0) return fail("재키잉이 한 번도 안 돌았다 — 이 회차가 S7d 를 안 재고 있다");
+    say("{s}: 화면 {d}B, 보낸 {d}B, 재키잉 {d} 회, exit-status {?d}", .{ mode, got, sent, cl.rekeys, cl.exit_status });
+    if (got < expect_bytes + expect_stderr) return fail("출력이 모자란다 — 흐름 제어가 멈췄을 수 있다");
     say("OK", .{});
-}
-
-const msg_newkeys: u8 = 21;
-
-/// 사건 하나를 처리하고 흐름 제어를 돌린다. **보내는 루프와 받는 루프가 같은 것을 쓴다.**
-fn handle(payload: []const u8) !void {
-    switch (try ch.receive(payload)) {
-        .data => |d| got += d.len,
-        .extended_data => |x| stderr_bytes += x.data.len,
-        .exit_status => |code| exit_code = code,
-        .exit_signal => return error.RemoteKilledBySignal,
-        .unknown_request => |u| if (u.want_reply) {
-            deferred_channel_failure = true;
-        },
-        .closed => {
-            peer_closed = true;
-            if (ch.state != .closed) deferred_close = true;
-        },
-        else => {},
-    }
-    try flushChannelSends();
-}
-
-/// 미뤄 둔 채널 송신과 흐름 제어 보충을 내보낸다.
-///
-/// **재키잉 중에는 아무것도 안 보낸다**(§7.1). 보충은 멱등이라 미뤄도 손해가 없고, 재키잉이
-/// 끝나면 다음 호출에서 그대로 나간다. 이것을 조건 없이 보내던 것이 **연결을 죽였다**(실측:
-/// 재키잉 중 `WINDOW_ADJUST` → `NotAllowedDuringRekey` → poison. 타이밍에 달려 가끔만 났다).
-fn flushChannelSends() !void {
-    if (!t.canSendChannelMessages()) {
-        if (deferred_channel_failure or deferred_close or ch.pendingWindowAdjust() != 0) deferrals += 1;
-        return;
-    }
-    var buf: [1024]u8 = undefined;
-    if (deferred_channel_failure) {
-        deferred_channel_failure = false;
-        try send(try ch.writeChannelFailure(&buf));
-    }
-    if (deferred_close) {
-        deferred_close = false;
-        try send(try ch.writeClose(&buf));
-    }
-    // **계약 §3.1 의 두 줄.** 이것을 빼면 대량 출력이 도중에 멈춘다.
-    if (ch.pendingWindowAdjust() != 0) {
-        try send(try ch.writeWindowAdjust(&buf));
-        adjusts += 1;
-    }
-}
-
-/// 채널 요청의 답을 기다린다. **답 앞에 다른 사건이 끼어든다**(계약 §3.1.1).
-fn awaitReply(what: []const u8) !void {
-    while (true) switch (try ch.receive(try recvChannel(&pkt))) {
-        .request_success => return say("{s} 수락", .{what}),
-        .request_failure => return fail("채널 요청 거절"),
-        .window_adjusted => {
-            try flushChannelSends();
-        },
-        .data, .extended_data => {},
-        else => return fail("답을 기다리는 중 예상 밖 사건"),
-    };
 }
 
 fn say(comptime fmt: []const u8, args: anytype) void {
@@ -627,11 +225,11 @@ fn fail(comptime msg: []const u8) error{SmokeFailed} {
     return error.SmokeFailed;
 }
 
+var scratch: [8192]u8 = undefined;
 var file_buf: [8192]u8 = undefined;
 
-/// 개인키 파일을 읽어 base64 몸통을 디코딩한다. **PEM 껍데기는 이 층 밖이다**(계약 §4.4.3 —
-/// `openssh-key-v1` 파서는 디코딩된 blob 을 받는다).
-fn readFile(path: []const u8) ![]const u8 {
+/// 개인키 파일을 읽어 base64 몸통을 디코딩하고 파싱한다. **PEM 껍데기는 이 층 밖이다.**
+fn loadKey(path: []const u8) !ssh.private_key.Parsed {
     var path_z: [1024]u8 = undefined;
     if (path.len >= path_z.len) return error.PathTooLong;
     @memcpy(path_z[0..path.len], path);
@@ -650,11 +248,10 @@ fn readFile(path: []const u8) ![]const u8 {
         len += @intCast(n);
     }
 
-    // `-----BEGIN/END-----` 줄을 빼고 이어 붙인다.
-    var b64_len: usize = 0;
     var b64: [8192]u8 = undefined;
-    var it = std.mem.splitScalar(u8, raw[0..len], '\n');
-    while (it.next()) |line| {
+    var b64_len: usize = 0;
+    var lines = std.mem.splitScalar(u8, raw[0..len], '\n');
+    while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \r");
         if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "-----")) continue;
         @memcpy(b64[b64_len..][0..trimmed.len], trimmed);
@@ -663,5 +260,5 @@ fn readFile(path: []const u8) ![]const u8 {
     const decoder = std.base64.standard.Decoder;
     const out_len = try decoder.calcSizeForSlice(b64[0..b64_len]);
     try decoder.decode(file_buf[0..out_len], b64[0..b64_len]);
-    return file_buf[0..out_len];
+    return ssh.private_key.parse(file_buf[0..out_len], "", &scratch, .{});
 }

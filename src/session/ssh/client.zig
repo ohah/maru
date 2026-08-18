@@ -115,8 +115,9 @@ const max_reply_packet = cipher.Cipher.sealedLen(1);
 
 /// `feed` 한 번의 결과.
 ///
-/// **`banner` 와 `exit_signal` 은 `Client` 안을 가리킨다** — `wire`·`screen` 이 호출자 버퍼를
-/// 가리키는 것과 다르다. 다음 `feed` 까지만 살고, `Client` 를 복사·이동하면 그 순간 어긋난다.
+/// **`banner`·`exit_signal`·`disconnect.description` 은 `Client` 안을 가리킨다** — `wire`·`screen`
+/// 이 호출자 버퍼를 가리키는 것과 다르다. 다음 `feed` 까지만 살고, `Client` 를 복사·이동하면
+/// 그 순간 어긋난다.
 /// 들고 있어야 하면 **복사한다**. 전송기의 `Received.payload` 와 같은 규칙이다(계약 §4.5).
 pub const Step = struct {
     /// 입력에서 소비한 바이트. 호출자는 그만큼 앞으로 민다.
@@ -680,10 +681,20 @@ pub const Client = struct {
         const clean = userauth.sanitizeBanner(&self.disconnect_buf, desc) catch {
             self.disconnect_len = 0;
             self.disconnected = true;
+            self.closeMachine();
             return;
         };
         self.disconnect_len = clean.len;
         self.disconnected = true;
+        self.closeMachine();
+    }
+
+    /// **연결을 끝내는 주체는 우리다.** `Disconnected` 를 돌려주는 것만으로는 부족하다 — 오류를
+    /// 흘려 보낸 드라이버가 그 뒤에도 먹이고 쓸 수 있고, 그러면 끝난 연결에 바이트를 짜 넣는다
+    /// (RFC 4253 §11.1 은 이 메시지 뒤에 연결을 끝내라고 한다).
+    fn closeMachine(self: *Client) void {
+        self.state = .closed;
+        self.shell_ready = false;
     }
 
     /// 배너를 걸러 보관한다. **거르는 것이 계약이다**(§4.4.2) — 서버가 고른 문자열이 그대로
@@ -1789,4 +1800,121 @@ test "최소 크기 버퍼로도 밀린 답을 다 비운다" {
     }
     try testing.expectEqual(@as(u8, 0), c.pending_request_failures);
     try testing.expect(rounds > 1); // 한 번에 다 못 내보낸다는 뜻 — 그 가지를 실제로 돌렸다
+}
+
+test "DISCONNECT 뒤에는 기계가 닫힌다" {
+    // **오류 하나만 돌려주고 기계가 살아 있으면 호출자가 반쪽만 지킬 수 있다.** 오류를 흘려 보낸
+    // 드라이버는 그 뒤에도 먹이고 쓸 수 있고, 그러면 이미 끝난 연결에 바이트를 짜 넣는다.
+    // §11.1 은 이 메시지 뒤에 연결을 끝내라고 한다 — 끝내는 주체가 우리여야 한다.
+    var c = readyClient();
+    var buf: [128]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(11);
+    try w.string("bye");
+    try w.string("");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(59);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+
+    // 뒤에 온 바이트는 흘려보낸다 — 끝난 연결에서 파싱 오류를 올릴 이유가 없다.
+    const after = try c.feed("garbage", &out, &scr);
+    try testing.expectEqual(State.closed, after.state);
+    try testing.expect(after.disconnect != null);
+    // 쓰기도 막힌다.
+    try testing.expectError(Error.NotReady, c.write("x", &out));
+}
+
+test "설명이 너무 길어도 끊긴 것은 끊긴 것이다" {
+    // 설명을 못 담는 것과 세션이 안 끝나는 것은 다른 일이다. 거름망이 자리를 못 잡아 설명을
+    // 버릴 때도 **연결은 끝난다** — 여기서 안 닫으면 이유 못 담은 서버 하나가 좀비를 만든다.
+    var c = readyClient();
+    var buf: [2048]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(2);
+    const long: [1024]u8 = @splat('x'); // `disconnect_buf`(512) 보다 길다
+    try w.string(&long);
+    try w.string("");
+    var pbuf: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(61);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+
+    const after = try c.feed("garbage", &out, &scr);
+    try testing.expectEqual(State.closed, after.state);
+    try testing.expect(after.disconnect != null);
+    try testing.expectEqual(@as(usize, 0), after.disconnect.?.description.len);
+    try testing.expectEqual(DisconnectReason.protocol_error, after.disconnect.?.reason);
+}
+
+test "적대적 입력: 붙은 뒤의 상태기계도 어떤 바이트열에 안 죽는다" {
+    // `ssh.zig` 의 fuzz 는 **`version_exchange` 에서 출발**한다 — 씨앗을 아무리 흔들어도 온전한
+    // 핸드셰이크를 못 만들어 `ready` 뒤의 경로(잡 메시지·채널)에는 닿지 못한다. 그래서 붙은
+    // 다음의 상태기계는 여기서 따로 흔든다. **닿았는지도 센다** — 전부 파싱 실패로 튕기면
+    // 아무것도 안 재면서 초록이 된다.
+    var prng = std.Random.DefaultPrng.init(0xF00D);
+    const rand = prng.random();
+
+    var seeds: [5][]const u8 = undefined;
+    var seed_store: [5][512]u8 = undefined;
+    {
+        var b: [256]u8 = undefined;
+        var w = wire.Writer.init(&b);
+        try w.byte(msg_disconnect);
+        try w.u32be(11);
+        try w.string("bye now");
+        try w.string("en");
+        seeds[0] = seed_store[0][0..try packet.write(&seed_store[0], w.written(), rand)];
+    }
+    {
+        var b: [256]u8 = undefined;
+        var w = wire.Writer.init(&b);
+        try w.byte(msg_global_request);
+        try w.string("hostkeys-00@openssh.com");
+        try w.boolean(true);
+        seeds[1] = seed_store[1][0..try packet.write(&seed_store[1], w.written(), rand)];
+    }
+    seeds[2] = seed_store[2][0..try packet.write(&seed_store[2], &[_]u8{ 77, 1, 2, 3 }, rand)];
+    seeds[3] = seed_store[3][0..try packet.write(&seed_store[3], &[_]u8{ msg_debug, 0, 0, 0, 1, 'x' }, rand)];
+    {
+        var b: [256]u8 = undefined;
+        var w = wire.Writer.init(&b);
+        try w.byte(94); // CHANNEL_DATA
+        try w.u32be(0);
+        try w.string("hello");
+        seeds[4] = seed_store[4][0..try packet.write(&seed_store[4], w.written(), rand)];
+    }
+
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var reached: usize = 0;
+    var i: usize = 0;
+    while (i < 3000) : (i += 1) {
+        const seed = seeds[rand.uintLessThan(usize, seeds.len)];
+        var mutated: [512]u8 = undefined;
+        @memcpy(mutated[0..seed.len], seed);
+        var m = mutated[0..seed.len];
+        const flips = 1 + rand.uintLessThan(usize, 4);
+        var f: usize = 0;
+        while (f < flips and m.len > 0) : (f += 1) {
+            m[rand.uintLessThan(usize, m.len)] ^= @as(u8, 1) << rand.int(u3);
+        }
+        if (i % 5 == 0 and m.len > 1) m = m[0 .. rand.uintLessThan(usize, m.len) + 1];
+
+        if (c.feed(m, &out, &scr)) |step| {
+            if (step.consumed > 0) reached += 1;
+            if (step.state == .closed) c = readyClient(); // 끊긴 뒤는 다 흘려보내므로 다시 세운다
+        } else |_| {
+            c = readyClient();
+        }
+    }
+    // 이 값은 실측이다 — 씨앗이나 판정을 바꿔 닿는 수가 무너지면 여기서 걸린다.
+    try testing.expect(reached > 300);
 }

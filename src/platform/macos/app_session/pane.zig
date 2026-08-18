@@ -106,6 +106,12 @@ pub fn invalidateForFreedPane(self: *AppSession, pane: *Pane) void {
     if (self.hovered_tab) |ht| {
         if (ht.pane == pane) self.hovered_tab = null;
     }
+    // ✕·+ 호버도 그 pane 을 가리키면 함께 비운다 — 해제된 pane 포인터가 남으면 다음 프레임이 그것을
+    // 비교하며 stale 하이라이트를 그린다(hovered_tab 과 같은 이유).
+    if (self.hovered_tab_close) |hc| {
+        if (hc.pane == pane) self.hovered_tab_close = null;
+    }
+    if (self.hovered_plus == pane) self.hovered_plus = null;
     self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버는 transient(surface_id 키) — pane 해제 시 보수적으로 비운다(다음 이동이 재설정)
     self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
     switch (self.pointer_gesture_owner) {
@@ -819,6 +825,8 @@ pub fn moveTermToPane(self: *AppSession, src: *Pane, src_idx: usize, dst: *Pane,
     dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
 
     self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
+    self.hovered_tab_close = null; // ✕ 호버도 같은 이유로 비운다
+    self.hovered_plus = null;
     self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
     self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
     if (src.terms.items.len == 0) collapsePane(self, src); // 마지막 Term이 나갔으면 src collapse(형제로)
@@ -1483,6 +1491,8 @@ pub fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usiz
         self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
     }
     self.hovered_tab = null;
+    self.hovered_tab_close = null; // ✕ 호버도 같은 이유로 비운다
+    self.hovered_plus = null;
     self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
     self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
     target_tab.panes.appendAssumeCapacity(pane);

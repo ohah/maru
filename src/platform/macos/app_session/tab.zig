@@ -1549,11 +1549,28 @@ pub fn setHoveredTab(self: *AppSession, tab: ?TabRef) void {
     self.metal_dirty = true;
 }
 
+/// ✕ 존 호버 — 값이 바뀔 때만 재그림을 요청한다(`setHoveredTab` 과 같은 규율: 마우스 이동마다 프레임을
+/// 새로 그리면 idle 비용이 는다).
+pub fn setHoveredTabClose(self: *AppSession, tab: ?TabRef) void {
+    if (tabRefEql(self.hovered_tab_close, tab)) return;
+    self.hovered_tab_close = tab;
+    self.metal_dirty = true;
+}
+
+/// "+" 버튼 호버 — 같은 규율.
+pub fn setHoveredPlus(self: *AppSession, pane: ?*Pane) void {
+    if (self.hovered_plus == pane) return;
+    self.hovered_plus = pane;
+    self.metal_dirty = true;
+}
+
 /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 좌측
 /// grip+라벨 세그먼트면 grip(grab 커서). 활성 탭 leaf rect를 펴 각 pane 바를 hit-test한다. hoverCursor이 호출한다.
 pub fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
     var next: ?TabRef = null;
     var next_scroll: ?ScrollRef = null;
+    var next_close: ?TabRef = null; // ✕ 존 위 — 렌더가 그 자리에 호버 배경을 얹는다(‹/› 와 같은 규율)
+    var next_plus: ?*Pane = null;
     var on_bar = false; // 탭 바 위 여부(탭 영역) — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
     var on_grip = false; // 좌측 grip+라벨 세그먼트 위 여부 — grab(openHand) 커서
     // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 레이아웃을 다시 깐다(할당 churn 제거, 결과는 최신).
@@ -1579,14 +1596,22 @@ pub fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
                     next_scroll = .{ .pane = lr.leaf, .right = true };
                     break;
                 }
-                if (m.inPlusZone(x_px)) break; // "+" 버튼 위 — 탭 호버 아님(마지막 탭에 ✕ 오표시 방지)
-                next = .{ .pane = lr.leaf, .tab = m.tabIndex(count, x_px) };
+                if (m.inPlusZone(x_px)) { // "+" 버튼 위 — 탭 호버 아님(마지막 탭에 ✕ 오표시 방지)
+                    next_plus = lr.leaf;
+                    break;
+                }
+                const tab_index = m.tabIndex(count, x_px);
+                next = .{ .pane = lr.leaf, .tab = tab_index };
+                // ✕ 는 **호버한 탭에만** 그려지므로(위 `hovered_tab` 주석), 그 안에서 다시 ✕ 존인지 본다.
+                if (m.inCloseZone(tab_index, x_px)) next_close = .{ .pane = lr.leaf, .tab = tab_index };
                 break;
             }
         }
     } else |_| {}
     setHoveredTab(self, next);
     scroll_ops.setHoveredScroll(self, next_scroll);
+    setHoveredTabClose(self, next_close);
+    setHoveredPlus(self, next_plus);
     return if (on_grip) .grip else if (on_bar) .tabs else .none;
 }
 

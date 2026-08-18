@@ -214,6 +214,16 @@ pub const RowCache = struct {
     tab_width: u8 = 0,
     /// 채워진 적이 있는가. 위 키가 우연히 0으로 맞는 첫 프레임을 유효로 읽지 않기 위한 플래그다.
     filled: bool = false,
+    /// **조건이 갈려도 다시 세지 않는다**(§2.1 "저하 동작을 허용한다" — *"랩은 직전 결과를 쓴다"*).
+    ///
+    /// 폭을 **라이브로 바꾸는 드래그** 중에 호출자가 켠다. 그동안은 모든 줄의 조각 수가 매 프레임
+    /// 달라져 캐시가 매번 무효가 되는데, 그 계수는 문서 크기에 비례하므로(실측: 2만 줄 랩 문서에서
+    /// 프레임당 60.9ms, ReleaseFast) 드래그가 그만큼 뻑뻑해진다. 막대 길이가 잠깐 옛 폭 기준인 것이
+    /// 드래그가 16fps로 끊기는 것보다 낫다 — 그리고 드래그가 끝나면 그 프레임이 정확히 다시 센다.
+    ///
+    /// **아직 한 번도 안 채워졌으면 이 플래그는 무시된다** — 보여 줄 "직전 값"이 없으므로 저하할 것이
+    /// 없고, 그 상태로 넘기면 막대가 통째로 틀린다.
+    hold: bool = false,
 
     /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
     fn hits(self: *const RowCache, lines: []const []const u8, width: u16, wrap: bool, tab_width: u8) bool {
@@ -336,6 +346,12 @@ pub fn build(props: Props, scratch: Scratch) Written {
         const c = props.row_cache orelse break :blk null;
         if (c.prefix.len <= props.lines.len) break :blk null;
         if (!c.hits(props.lines, layout.content.width, props.wrap, props.tab_width)) {
+            // **저하**: 드래그 중이면 옛 값을 그대로 쓴다(§2.1). 단 **줄 배열이 그대로일 때만**이다 —
+            // 저하가 겨냥하는 것은 폭이 바뀌는 드래그이고, 그동안 문서의 줄 집합은 변하지 않는다.
+            // 줄이 바뀌었는데 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 **다른 문서의 값**이다.
+            if (c.hold and c.filled and
+                c.lines_ptr == @intFromPtr(props.lines.ptr) and
+                c.lines_len == props.lines.len) break :blk c;
             var sum: u32 = 0;
             c.prefix[0] = 0;
             for (props.lines, 0..) |line, i| {
@@ -687,6 +703,67 @@ test "캐시 자리가 모자라면 예전 경로로 내려간다 — 없는 것
     const w = build(props, bufs.scratch());
     try testing.expectEqual(@as(u32, lines.len), w.total_visual_rows); // 답은 그대로다
     try testing.expect(!cache.filled); // 자리가 없으니 채우지도 않았다
+}
+
+test "hold를 켜면 폭이 바뀌어도 다시 세지 않는다 — §2.1 저하 동작" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const lines = [_][]const u8{ long, long };
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+
+    var wide = testProps(&lines, true);
+    wide.row_cache = &cache;
+    const before = build(wide, bufs.scratch());
+
+    // 드래그가 시작됐다 — 폭이 바뀌어도 옛 값을 그대로 쓴다.
+    cache.hold = true;
+    var narrow = testProps(&lines, true);
+    narrow.row_cache = &cache;
+    narrow.total_cols = 24;
+    narrow.rect = .{ .x = 0, .y = 0, .w = 24 * 8, .h = 320 };
+    const held = build(narrow, bufs.scratch());
+    try testing.expectEqual(before.total_visual_rows, held.total_visual_rows);
+
+    // 드래그가 끝났다 — 같은 폭이지만 이번에는 정확히 센다.
+    cache.hold = false;
+    const settled = build(narrow, bufs.scratch());
+    try testing.expect(settled.total_visual_rows > before.total_visual_rows);
+}
+
+test "hold여도 아직 안 채워진 캐시는 센다 — 보여 줄 직전 값이 없다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const lines = [_][]const u8{ long, long };
+    var prefix: [lines.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix, .hold = true };
+    var props = testProps(&lines, true);
+    props.row_cache = &cache;
+
+    const w = build(props, bufs.scratch());
+    try testing.expect(cache.filled); // 저하하지 않고 채웠다
+    try testing.expect(w.total_visual_rows > lines.len); // 그래서 막대가 맞다
+}
+
+test "hold 중 문서가 짧아지면 저하하지 않는다 — 옛 접두합이 지금 문서를 못 덮는다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const four = [_][]const u8{ long, long, long, long };
+    var prefix: [four.len + 1]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+
+    var full = testProps(&four, true);
+    full.row_cache = &cache;
+    _ = build(full, bufs.scratch());
+
+    // 접힘 등으로 보이는 줄이 줄었다. hold여도 옛 값을 쓰면 안 되는 자리다.
+    cache.hold = true;
+    const two = [_][]const u8{ long, long };
+    var fewer = testProps(&two, true);
+    fewer.row_cache = &cache;
+    const w = build(fewer, bufs.scratch());
+    try testing.expectEqual(cache.prefix[two.len], w.total_visual_rows); // 지금 문서 기준으로 다시 셌다
+    try testing.expectEqual(@as(usize, two.len), cache.lines_len);
 }
 
 test "막대 위치도 캐시에서 나온다 — 문서 중간에서도 같은 답이다" {

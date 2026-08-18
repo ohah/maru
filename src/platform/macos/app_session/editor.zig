@@ -376,6 +376,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
     term.rt.editor_max_top_line = pf.max_top_line;
     term.rt.editor_max_top_piece = pf.max_top_piece;
+    // **아직 다 세지 못했으면 다음 프레임을 부른다**(§2.1 점진 계수). 이 렌더 루프는 dirty가 없으면
+    // 투영을 건너뛰므로(idle skip), 이것을 안 세우면 진행이 거기서 멈춰 막대가 근사값인 채로 남는다.
+    // 다 세면 더 요청하지 않으므로 idle로 돌아간다.
+    if (row_cache) |c| {
+        if (c.filled_upto < lines.len) self.metal_dirty = true;
+    }
 
     const tokens = self.buildChromeTokens();
     const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
@@ -3085,14 +3091,29 @@ test "4096줄을 넘는 랩 문서의 시각 행 수가 근사가 아니다 — 
     fx.term.rt.editor_lines = lines;
     fx.term.rt.editor_wrap = true;
 
-    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
-    drawn.dl.deinit(allocator);
+    // **점진 계수라 한 프레임에 끝나지 않는다**(§2.1) — 다 셀 때까지 프레임을 돌린다. 제품에서는
+    // 렌더가 `metal_dirty`로 그 프레임을 스스로 부른다.
+    var first = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    first.dl.deinit(allocator);
+    const after_one = fx.term.rt.editor_total_visual_rows;
+
+    var frames: usize = 1;
+    while (fx.term.rt.editor_row_cache.filled_upto < n) : (frames += 1) {
+        if (frames > 64) return error.ProgressiveCountDidNotFinish; // 진행이 멈추면 여기서 드러난다
+        var step = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        step.dl.deinit(allocator);
+    }
 
     // 기대값은 손으로 적지 않는다 — 렌더가 쓰는 그 계수로 한 줄을 재고 줄 수를 곱한다(모든 줄이 같다).
     const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
     const per_line = piecesOfLine(fx.term, 0, visibleColsForTest(fx.session, body, fx.term, false));
     try testing.expect(per_line > 1); // 실제로 접혔다 — 아니면 이 테스트가 아무것도 안 본다
     try testing.expectEqual(per_line * n, fx.term.rt.editor_total_visual_rows);
+
+    // **진행 중에는 실제보다 짧게 보인다**(안 센 줄을 한 행으로 치므로). 그 성질을 여기서 못박는다 —
+    // 근사가 반대로(실제보다 길게) 나오면 막대가 문서 밖을 가리킨다.
+    try testing.expect(after_one < per_line * n);
+    try testing.expect(frames > 1); // 정말 나눠 셌다
 }
 
 test "적대적: 4096줄을 넘는 랩 문서도 끝에 닿는다" {
@@ -3552,6 +3573,76 @@ test "첫 프레임이 드래그 중이어도 시각 행은 정확하다 — 저
     const per_line = piecesOfLine(fx.term, 0, visibleColsForTest(fx.session, body, fx.term, false));
     try testing.expect(per_line > 1);
     try testing.expectEqual(per_line * @as(u32, @intCast(lines.len)), fx.term.rt.editor_total_visual_rows);
+}
+
+test "[측정] 드래그를 놓는 순간 — 점진 계수가 그 값을 프레임에 나눈다 (§2.1)" {
+    // 저하 동작이 드래그 **중**을 닫았고, 남은 것은 **놓는 순간**이었다. 점진 계수(§2.1) 전에는 그
+    // 프레임에서 전 문서를 한 번 세어 2만 줄에 **62ms**가 튀었다(측정 근거, ReleaseFast). 지금은
+    // `count_chunk_lines`씩 나눠 세므로 프레임당 그 몫만 든다 — 대신 정확해지기까지 여러 프레임이
+    // 걸리고, 그동안 막대는 실제보다 짧다(안 센 줄을 한 행으로 친다).
+    //
+    // **워커로 가지 않은 이유는 §2.1에 적었다** — 랩 계수는 줄마다 독립이라 나눌 수 있고, 스레딩의
+    // 유지보수 비용(스냅샷 수명·revision 폐기·비결정적 테스트)이 이득보다 크다.
+    //
+    // **비교 대상을 함께 찍는다.** 같은 문서를 여는 경로에도 문서 크기에 비례하는 값이 이미 있다
+    // (`ensureMaxCols` — 가장 긴 줄 세기). 놓는 순간의 값이 그것과 같은 급이면 "이미 받아들이고 있는
+    // 비용"이고, 훨씬 크면 다른 판단이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]usize{ 5_000, 20_000 }) |n| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        const lines = try allocator.alloc([]const u8, n);
+        defer allocator.free(lines);
+        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        fx.term.rt.editor_lines = lines;
+        fx.term.rt.editor_wrap = true;
+        fx.term.rt.editor_max_cols = 0;
+
+        var warm = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        warm.dl.deinit(allocator);
+
+        // ① 드래그: 저하가 걸린 채 폭을 여러 번 끈다(여기는 이미 싸다 — 앞 측정이 0.2ms).
+        fx.session.pointer_gesture_owner = .{ .dock_outer_divider = .{ .offset_px = 0 } };
+        const cell_w: u32 = @intCast(fx.session.cell_width_px);
+        var final_rect = fx.leaf_rect;
+        for (0..10) |i| {
+            var rect = fx.leaf_rect;
+            rect.w -= @intCast(cell_w * (i + 1));
+            final_rect = rect;
+            var drawn = appendPaneFrame(fx.session, rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+            drawn.dl.deinit(allocator);
+        }
+
+        // ② 놓는다: 같은 폭인데 이번에는 센다. 이 한 프레임이 재는 대상이다.
+        fx.session.pointer_gesture_owner = .none;
+        const t0 = monotonicMsForTest();
+        var settle = appendPaneFrame(fx.session, final_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        const t1 = monotonicMsForTest();
+        settle.dl.deinit(allocator);
+
+        // ③ 그 다음 프레임: 캐시가 맞으므로 공짜여야 한다. 아니면 "한 번"이 아니라 지속 비용이다.
+        const t2 = monotonicMsForTest();
+        var after = appendPaneFrame(fx.session, final_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        const t3 = monotonicMsForTest();
+        after.dl.deinit(allocator);
+
+        // ④ 비교: 같은 문서를 여는 경로에 이미 있는 문서 크기 비례 값.
+        fx.term.rt.editor_max_cols = 0;
+        const t4 = monotonicMsForTest();
+        ensureMaxCols(fx.term, false);
+        const t5 = monotonicMsForTest();
+
+        std.debug.print("\n[측정] {d}줄 — 놓는 프레임 {d}ms, 다음 프레임 {d}ms, (비교) 여는 경로 가장 긴 줄 세기 {d}ms\n", .{
+            n,
+            t1 - t0,
+            t3 - t2,
+            t5 - t4,
+        });
+    }
 }
 
 test "[측정] 폭을 라이브로 끄는 드래그 — 캐시가 매 프레임 무효다 (§2.1 남은 구간)" {

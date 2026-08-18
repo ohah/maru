@@ -67,6 +67,14 @@ pub fn showsHorizontalBar(wrap: bool, content_max_cols: ?u32, view_cols: u16) bo
     return max_cols > view_cols;
 }
 
+/// 랩 계수를 **한 프레임에 몇 줄까지** 진행할지(§2.1 점진 계수). 줄마다 독립이라 나눠 셀 수 있고,
+/// 그래서 이 작업은 워커가 아니라 메인에 남는다.
+///
+/// 값의 근거: 실측으로 랩 켠 줄 하나가 약 3.1µs다(2만 줄 62ms, ReleaseFast). 2,048줄이면 프레임당
+/// 약 6.4ms로 60fps 예산(16.7ms) 안에 들어오고, 2만 줄 문서가 10프레임(약 167ms)에 정확해진다.
+/// 더 잘게 쪼개면 정확해지기까지 더 오래 걸리고, 크게 잡으면 한 프레임이 예산을 넘는다.
+pub const count_chunk_lines: usize = 2048;
+
 pub const max_first_col: u16 = 10_000;
 
 /// 가장 긴 줄을 셀 때 **여기까지만 센다**. `max_first_col`을 넘는 부분은 어차피 못 가므로 세는 것이
@@ -224,6 +232,34 @@ pub const RowCache = struct {
     /// **아직 한 번도 안 채워졌으면 이 플래그는 무시된다** — 보여 줄 "직전 값"이 없으므로 저하할 것이
     /// 없고, 그 상태로 넘기면 막대가 통째로 틀린다.
     hold: bool = false,
+    /// **몇 줄까지 정확히 셌는가**(§2.1 점진 계수). `prefix[0..filled_upto]`만 실제 계수 결과이고,
+    /// 그 뒤는 아직 안 봤다. `lines_len`과 같아지면 완성이다.
+    ///
+    /// 아직 덜 센 구간은 **줄당 한 행**으로 친다 — 랩을 모르니 최소값이고, 프레임이 지날수록 실제
+    /// 값으로 수렴한다. 그동안 막대는 실제보다 짧게(문서가 짧다고) 보이지만 화면은 멈추지 않는다
+    /// (§2.1 "저하 동작을 허용한다"와 같은 축이다).
+    filled_upto: usize = 0,
+
+    /// 문서 전체의 시각 행 수. 아직 안 센 구간은 줄당 한 행으로 친다.
+    fn totalRows(self: *const RowCache, lines_len: usize) u32 {
+        const counted = self.prefix[@min(self.filled_upto, lines_len)];
+        const rest = lines_len -| self.filled_upto;
+        return counted +| @as(u32, @intCast(@min(rest, std.math.maxInt(u32))));
+    }
+
+    /// 화면 맨 위 줄까지의 시각 행 수. 같은 근사를 쓴다.
+    fn rowsBefore(self: *const RowCache, line: usize) u32 {
+        if (line <= self.filled_upto) return self.prefix[line];
+        const counted = self.prefix[self.filled_upto];
+        const rest = line - self.filled_upto;
+        return counted +| @as(u32, @intCast(@min(rest, std.math.maxInt(u32))));
+    }
+
+    /// 그 줄의 행 수를 캐시가 알고 있는가(안 셌으면 호출자가 직접 센다).
+    fn rowsOf(self: *const RowCache, line: usize) ?u32 {
+        if (line >= self.filled_upto) return null;
+        return self.prefix[line + 1] - self.prefix[line];
+    }
 
     /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
     fn hits(self: *const RowCache, lines: []const []const u8, width: u16, wrap: bool, tab_width: u8) bool {
@@ -352,23 +388,34 @@ pub fn build(props: Props, scratch: Scratch) Written {
             if (c.hold and c.filled and
                 c.lines_ptr == @intFromPtr(props.lines.ptr) and
                 c.lines_len == props.lines.len) break :blk c;
-            var sum: u32 = 0;
-            c.prefix[0] = 0;
-            for (props.lines, 0..) |line, i| {
-                sum +|= content.rowCount(line, props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
-                c.prefix[i + 1] = sum;
-            }
+            // **조건이 갈렸다 — 처음부터 다시 센다.** 키는 여기서 갱신하고 진행도만 0으로 되돌린다.
+            // 그래야 다음 프레임이 `hits`로 들어와 **이어서** 셀 수 있다(그러지 않으면 매 프레임
+            // 처음부터 다시 시작해 영영 끝나지 않는다).
             c.lines_ptr = @intFromPtr(props.lines.ptr);
             c.lines_len = props.lines.len;
             c.content_width = layout.content.width;
             c.wrap = props.wrap;
             c.tab_width = props.tab_width;
             c.filled = true;
+            c.filled_upto = 0;
+            c.prefix[0] = 0;
+        }
+        // **이번 프레임 몫만 센다**(§2.1 점진 계수). 줄마다 독립이라 나눌 수 있고, 그래서 이 작업은
+        // 워커가 아니라 메인에 남는다. 다 셀 때까지 호출자가 프레임을 계속 요청한다.
+        if (c.filled_upto < props.lines.len) {
+            const end = @min(props.lines.len, c.filled_upto + count_chunk_lines);
+            var sum: u32 = c.prefix[c.filled_upto];
+            var i: usize = c.filled_upto;
+            while (i < end) : (i += 1) {
+                sum +|= content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
+                c.prefix[i + 1] = sum;
+            }
+            c.filled_upto = end;
         }
         break :blk c;
     };
 
-    const total_visual: u32 = props.total_visual_rows orelse if (cache) |c| c.prefix[props.lines.len] else blk: {
+    const total_visual: u32 = props.total_visual_rows orelse if (cache) |c| c.totalRows(props.lines.len) else blk: {
         var sum: u32 = 0;
         var counted: usize = 0;
         while (counted < props.lines.len and counted < scratch.row_counts.len) : (counted += 1) {
@@ -398,7 +445,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         first_visual = given;
     } else if (cache) |c| {
         // 캐시가 있으면 접두합 조회 하나다 — 문서 끝으로 내려가도 비용이 늘지 않는다.
-        first_visual = c.prefix[@min(props.first_line, props.lines.len)];
+        first_visual = c.rowsBefore(@min(props.first_line, props.lines.len));
     } else {
         var prefix: u32 = 0;
         const upto = @min(props.first_line, props.lines.len);
@@ -434,8 +481,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // 위에 서고, 끝까지 굴려도 **마지막 줄들이 손에 안 닿는다**(실측: 5000줄 랩 문서에서
             // 마지막 17줄. 적대적 검증 2026-08-16). 필요한 것은 마지막 한 화면분뿐이라 그 줄만
             // 직접 센다 — 앞에서 이미 센 구간은 그 값을 재사용한다.
+            // **아직 안 센 줄은 캐시가 모른다** — 그 구간은 직접 센다. 이 훑기는 마지막 한 화면분뿐이라
+            // 점진 중에도 싸다.
             const rows: u32 = if (cache) |c|
-                c.prefix[i + 1] - c.prefix[i]
+                (c.rowsOf(i) orelse content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows)
             else if (i < counted_rows)
                 scratch.row_counts[i]
             else
@@ -789,6 +838,90 @@ test "막대 위치도 캐시에서 나온다 — 문서 중간에서도 같은 
     try testing.expect(with.scrollbar != null);
     try testing.expectEqual(without.scrollbar.?.thumb_y, with.scrollbar.?.thumb_y);
     try testing.expectEqual(without.scrollbar.?.thumb_h, with.scrollbar.?.thumb_h);
+}
+
+test "점진 계수: 한 프레임에 다 세지 않고 이어서 완성한다 (§2.1)" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    // chunk보다 확실히 긴 문서라야 나뉘는 것이 보인다.
+    const n = count_chunk_lines + 100;
+    var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = long;
+    const lines = lines_buf[0..n];
+
+    var prefix: [count_chunk_lines + 101]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(lines, true);
+    props.row_cache = &cache;
+
+    const first = build(props, bufs.scratch());
+    try testing.expectEqual(count_chunk_lines, cache.filled_upto); // 딱 한 몫만 셌다
+
+    // 아직 안 센 줄은 한 행으로 치므로 **실제보다 짧다** — 반대로 나오면 막대가 문서 밖을 가리킨다.
+    const second = build(props, bufs.scratch());
+    try testing.expectEqual(n, cache.filled_upto); // 두 번째에 완성
+    try testing.expect(second.total_visual_rows > first.total_visual_rows);
+
+    // 완성 뒤에는 값이 안정된다(다시 세지 않는다).
+    const third = build(props, bufs.scratch());
+    try testing.expectEqual(second.total_visual_rows, third.total_visual_rows);
+    try testing.expectEqual(n, cache.filled_upto);
+}
+
+test "점진 계수: 조건이 갈리면 진행도를 0으로 되돌리고 다시 시작한다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const n = count_chunk_lines + 100;
+    var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = long;
+    const lines = lines_buf[0..n];
+
+    var prefix: [count_chunk_lines + 101]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(lines, true);
+    props.row_cache = &cache;
+    _ = build(props, bufs.scratch());
+    _ = build(props, bufs.scratch());
+    try testing.expectEqual(n, cache.filled_upto);
+
+    // 폭이 바뀌었다 — 옛 계수는 무효다.
+    var narrow = testProps(lines, true);
+    narrow.row_cache = &cache;
+    narrow.total_cols = 24;
+    narrow.rect = .{ .x = 0, .y = 0, .w = 24 * 8, .h = 320 };
+    _ = build(narrow, bufs.scratch());
+    try testing.expectEqual(count_chunk_lines, cache.filled_upto); // 처음부터 다시, 한 몫만
+}
+
+test "점진 계수: hold 중에는 진행하지 않는다 — 드래그가 끝나야 센다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200;
+    const n = count_chunk_lines + 100;
+    var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = long;
+    const lines = lines_buf[0..n];
+
+    var prefix: [count_chunk_lines + 101]u32 = undefined;
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(lines, true);
+    props.row_cache = &cache;
+    _ = build(props, bufs.scratch()); // 한 몫 셌다
+    const at_hold_start = cache.filled_upto;
+
+    // 드래그가 시작됐다 — 폭이 바뀌어도 옛 결과를 쓰고 진행도 하지 않는다.
+    cache.hold = true;
+    var narrow = testProps(lines, true);
+    narrow.row_cache = &cache;
+    narrow.total_cols = 24;
+    narrow.rect = .{ .x = 0, .y = 0, .w = 24 * 8, .h = 320 };
+    _ = build(narrow, bufs.scratch());
+    _ = build(narrow, bufs.scratch());
+    try testing.expectEqual(at_hold_start, cache.filled_upto); // 그대로다
+
+    // 놓으면 새 폭으로 처음부터 다시 시작한다.
+    cache.hold = false;
+    _ = build(narrow, bufs.scratch());
+    try testing.expectEqual(count_chunk_lines, cache.filled_upto);
 }
 
 test "배경이 맨 앞에 온다 — painter 순서" {

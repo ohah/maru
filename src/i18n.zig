@@ -434,6 +434,14 @@ pub const Table = struct {
     scm_commit: [:0]const u8,
     scm_committing: [:0]const u8,
     scm_commit_slow: [:0]const u8,
+    /// 브랜치 줄의 원격 갱신 버튼(P6). **`push`/`pull`은 이 버튼이 아니다** — 그 둘은 터미널에 명령을
+    /// 넣어 주고 실행은 사용자가 한다(docs/editor-surface-dock-write.md §4).
+    scm_fetch: [:0]const u8,
+    scm_fetching: [:0]const u8,
+    /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
+    scm_no_remote: [:0]const u8,
+    /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
+    scm_fetch_done: [:0]const u8,
     scm_changes: [:0]const u8,
     scm_history: [:0]const u8,
     scm_agent: [:0]const u8,
@@ -985,6 +993,10 @@ pub const en: Table = .{
     .scm_commit = "Commit",
     .scm_committing = "Committing…",
     .scm_commit_slow = "The commit is taking a while",
+    .scm_fetch = "Fetch",
+    .scm_fetching = "Fetching…",
+    .scm_no_remote = "This repository has no remote",
+    .scm_fetch_done = "Fetched from the remote",
     .scm_changes = "Changes",
     .scm_history = "History",
     .scm_agent = "Agent",
@@ -1469,6 +1481,10 @@ pub const ko: Table = .{
     .scm_commit = "커밋",
     .scm_committing = "커밋 중…",
     .scm_commit_slow = "커밋이 오래 걸리는 중",
+    .scm_fetch = "가져오기",
+    .scm_fetching = "가져오는 중…",
+    .scm_no_remote = "이 저장소에는 원격이 없습니다",
+    .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",
     .scm_agent = "에이전트",

@@ -83,6 +83,11 @@ pub const inventory = [_]Proof{
     // 헬퍼가 늘었을 뿐 count는 2 그대로다 — 반사 접근도 Client 구성도 건드리지 않는다.
     // 탐색기 무시 표시(`check-ignore`)로 움직인다: submit/worker/take 셋과 argv 를 직접 받는 진입점이
     // 붙는다. count 는 2 그대로다 — 실행 방식은 기존 경로를 그대로 쓰고(진입점만 갈랐다) 새 반사가 없다.
+    // P6a에서 **원격 갱신 슬롯**이 붙으며 움직인다. `fetch --prune`은 쓰기와 같은 실행 경로를 쓰되
+    // 결과가 들어갈 자리만 다르므로(`WriteSlot`), submit/abandon을 슬롯 인자 하나로 일반화하고
+    // `fetch_inflight`/`fetch_result`를 더했다. 읽기 쪽에는 `remotes`(`git remote`) 한 줄이 늘었다.
+    // count는 2 그대로다 — 더한 것은 슬롯과 명령 하나뿐이고 `@field` 반사 접근이나 Client 구성·
+    // receiver 집합은 건드리지 않는다.
     .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "ed2a872e07a42892f493781870374fcc8fc624d869b1f5c1986b5e3a2e828cd9" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
@@ -518,6 +523,10 @@ pub const inventory = [_]Proof{
     // 탐색기 헤더 동작 버튼으로 또 움직인다: 호버 자리 하나(`dock_action_hovered_slot`)가 붙고, 뷰 바에서
     // 동작 클릭을 먼저 보는 분기와 그 호버 배경을 얹는 자리가 생긴다. count 는 2 그대로다 — 새 `@field`
     // 반사가 없고 Client 구성·receiver 집합도 건드리지 않는다.
+    // P6a 원격 갱신으로 또 움직인다: fetch in-flight 상태 셋(`scm_fetch_inflight`·`_seq`·`_repo`)이 붙고
+    // tick이 그 결과를 거두는 호출 하나가 는다. **쓰기 상태와 따로 두는 것이 계약이다** — fetch는 index를
+    // 만지지 않아 §6 직렬화 대상이 아니다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·
+    // receiver 집합도 건드리지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "40ef6f6c748dad2fcabce848c52d8fe0222845ab2e26660f90e34a8847f2dfa9" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -597,5 +606,7 @@ pub const inventory = [_]Proof{
     // P4b: diff 탭 라벨 `커밋`이 키로 들어와 digest가 움직인다. count는 1 그대로다.
     // P5: 에이전트 타임라인 문구(진행 중·마지막 턴·N턴 전·빈 목록)와 diff 탭 라벨 `턴`이 키로
     // 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "d250712a5f847bf13a88f2861076615597f0d7eaff8a7e9ebc9b0429309d5a19" },
+    // P6a: 원격 갱신 문구 넷(`Fetch`·`가져오는 중…`·원격 없음·가져왔음)이 키로 들어와 digest가 움직인다.
+    // count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "fa345f4ac4891b3adf1a453c103901e2ca5ee7aa88137ad29159b77e8eada1db" },
 };

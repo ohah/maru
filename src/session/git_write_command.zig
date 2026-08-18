@@ -37,19 +37,42 @@ pub const Kind = enum {
     unstage_all_unborn,
     /// `commit -F <메시지 파일>` — `-m`이 아니다(§2: 여러 줄·따옴표·비ASCII를 argv에 싣지 않는다).
     commit,
+    /// `fetch --prune` — **우리가 직접 실행하는 유일한 네트워크 명령**이다(§4). 나머지(`push`·`pull`)는
+    /// 저장소를 바꾸므로 사용자 터미널에 명령을 넣어 주고 실행은 사용자가 한다.
+    ///
+    /// 여기 있는 이유는 "쓰기"라서가 아니라 **읽기 명령의 전제를 뒤집기 때문이다**: 읽기는 네트워크를 아예
+    /// 막고 credential helper를 빈 값으로 덮는데, fetch가 그러면 인증이 필요한 원격에서 **항상** 실패한다.
+    /// 그 예외를 읽기 쪽에 두면 "네트워크 없음"이라는 그 모듈의 계약이 무너진다.
+    fetch,
 
     /// 이 명령이 경로 인자를 받는가. `_all` 변종과 커밋은 받지 않는다 — 경로를 주면 조립을 거부한다
     /// (`add -A -- <경로>`는 "모두"가 아니라 그 경로만 담아 사용자가 누른 것과 다른 일을 한다).
     pub fn takesPaths(self: Kind) bool {
         return switch (self) {
             .stage, .unstage, .unstage_unborn => true,
-            .stage_all, .unstage_all, .unstage_all_unborn, .commit => false,
+            .stage_all, .unstage_all, .unstage_all_unborn, .commit, .fetch => false,
         };
     }
 
-    /// hook을 허용하는가. **커밋만이다**(§3).
+    /// hook을 허용하는가. **커밋만이다**(§3). fetch에도 hook이 있지만(`post-fetch`는 없고 `reference-transaction`이
+    /// 돈다) 그건 사용자가 기대하는 동작이 아니라 우리가 배경에서 거는 갱신이므로 막는다.
     pub fn allowsHooks(self: Kind) bool {
         return self == .commit;
+    }
+
+    /// 네트워크를 쓰는가. **이 한 값이 credential helper와 환경을 가른다**(§4) — 나머지 명령은 helper를 빈
+    /// 값으로 덮어 외부 프로그램 실행 경로를 닫지만, fetch는 그러면 인증이 필요한 원격에서 늘 실패한다.
+    pub fn usesNetwork(self: Kind) bool {
+        return self == .fetch;
+    }
+
+    /// `--`를 붙이는가. 경로를 받지 않는 명령 중에서도 `_all` 변종은 붙이고(§2 표의 형태다), 커밋·fetch는
+    /// 뒤에 경로 자리가 아예 없어 붙이지 않는다.
+    pub fn takesPathSeparator(self: Kind) bool {
+        return switch (self) {
+            .commit, .fetch => false,
+            else => true,
+        };
     }
 };
 
@@ -103,12 +126,11 @@ pub fn validatePath(path: []const u8) PathError!void {
     }
 }
 
-/// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. 읽기 쪽과 **같은 목록이되 hook만
-/// 갈린다** — 그래서 배열을 복제하지 않고 hook 쌍만 조건부로 붙인다.
+/// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. 읽기 쪽과 **같은 목록이되 hook과
+/// 자격증명만 갈린다** — 그래서 배열을 복제하지 않고 그 둘만 조건부로 붙인다.
 const shared_config_overrides = [_][]const u8{
     "-c", "core.pager=cat", //           pager 프로세스 실행 금지
     "-c", "diff.external=", //           external diff 프로그램 금지
-    "-c", "credential.helper=", //       자격증명 helper 프로세스 금지
     "-c", "protocol.ext.allow=never", // ext:: 원격 = 임의 명령 실행 벡터
     // 경로를 **있는 그대로** 주고받는다. 기본값(true)이면 비ASCII 경로를 C-quote해서 내주는데, 그 문자열을
     // 다시 git에 넘기면 "그런 파일 없음"이 된다(읽기 쪽과 같은 이유 — 한글 파일명이 전부 안 열렸다).
@@ -118,21 +140,53 @@ const shared_config_overrides = [_][]const u8{
 /// hook을 끄는 쌍. **커밋에는 붙이지 않는다**(§3).
 const hooks_off = [_][]const u8{ "-c", "core.hooksPath=/dev/null" };
 
-/// 하위 프로세스에 덮어써서 넘길 환경변수.
+/// 자격증명 helper를 끄는 쌍. **fetch에는 붙이지 않는다**(§4) — 붙이면 인증이 필요한 원격에서 항상 실패한다.
+/// 나머지 명령은 네트워크를 쓰지 않으므로 helper가 뜰 이유가 없고, 그건 곧 "config가 지정한 프로그램을 우리가
+/// 실행하는" 경로라 닫아 둔다.
+const credential_off = [_][]const u8{ "-c", "credential.helper=" };
+
+pub const EnvOverride = struct { name: []const u8, value: []const u8 };
+
+/// 하위 프로세스에 덮어써서 넘길 환경변수 — **네트워크를 쓰지 않는 명령**의 것.
 ///
 /// **`GIT_OPTIONAL_LOCKS`가 여기 없는 것이 계약이다.** 읽기는 그것을 `0`으로 두어 index를 안 잠그지만, 쓰기가
 /// 안 잠그면 동시 실행이 index를 깬다(§1). 실수로 추가되지 않도록 테스트가 부재를 고정한다.
-pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
+pub const env_overrides = [_]EnvOverride{
     .{ .name = "GIT_TERMINAL_PROMPT", .value = "0" }, // 프롬프트는 우리 화면에 못 그린다 — 뜨면 영영 안 끝난다
     .{ .name = "GIT_CONFIG_NOSYSTEM", .value = "1" }, // /etc/gitconfig 의 외부 프로그램 설정 배제
     .{ .name = "GIT_PAGER", .value = "cat" },
     .{ .name = "GIT_ASKPASS", .value = "" }, // 자격증명 프롬프트 프로그램 금지
 };
 
+/// fetch의 환경. 두 곳이 갈린다(§4).
+///
+/// - **`GIT_CONFIG_NOSYSTEM`이 없다.** macOS의 `credential.helper=osxkeychain`은 **시스템 config**가 준다
+///   (실측 2026-08-18: `git config --show-origin --get credential.helper` →
+///   `file:/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig`). 그것을 배제하면 helper가
+///   사라져 HTTPS 원격 fetch가 **항상** 인증 실패로 끝난다 — §4가 지키라고 한 바로 그 경로다. 시스템 config가
+///   pager·external diff를 지정할 위험은 남지만, 위 `-c`가 config보다 **뒤에 이겨서** 그 축은 그대로 닫힌다.
+/// - **`GIT_SSH_COMMAND`가 있다.** SSH 원격에서 `ssh-askpass`가 뜨는 상황은 우리 프로세스 밖이라 통제할 수
+///   없다. `BatchMode=yes`로 **묻지 않고 실패**하게 한다(§4).
+///
+/// `GIT_ASKPASS`는 그대로 빈 값이다 — 빈 값이면 git이 터미널 프롬프트로 내려가고, 그건 `GIT_TERMINAL_PROMPT=0`이
+/// 막는다. 즉 **우리가 자격증명을 묻는 창을 만들지 않는다**(§4)가 두 겹으로 성립한다.
+pub const fetch_env_overrides = [_]EnvOverride{
+    .{ .name = "GIT_TERMINAL_PROMPT", .value = "0" },
+    .{ .name = "GIT_PAGER", .value = "cat" },
+    .{ .name = "GIT_ASKPASS", .value = "" },
+    .{ .name = "GIT_SSH_COMMAND", .value = "ssh -o BatchMode=yes" },
+};
+
+/// 그 명령이 쓸 환경 목록. 호출자(platform)는 이 함수만 부르고 어느 배열인지 고르지 않는다 — 고르게 두면
+/// "fetch인데 읽기 환경으로 돌았다" 같은 어긋남이 실행 쪽에서 조용히 생긴다.
+pub fn envOverrides(kind: Kind) []const EnvOverride {
+    return if (kind.usesNetwork()) &fetch_env_overrides else &env_overrides;
+}
+
 /// 고정 인자 수의 상한(경로 제외). 가장 긴 형태가 `rm --cached -r -- .`(하위명령 3 + `--` + 대상 1)이라
 /// 그 넷을 잡고 `--` 하나를 더한다. **정확히 이 값으로 조립되는지 테스트가 고정한다** — config를 하나
 /// 늘리면 배열 길이가 따라오지만, 하위명령이 길어지면 여기 숫자를 손으로 고쳐야 한다.
-pub const fixed_argv_max: usize = 3 + shared_config_overrides.len + hooks_off.len + 4 + 1;
+pub const fixed_argv_max: usize = 3 + shared_config_overrides.len + hooks_off.len + credential_off.len + 4 + 1;
 
 /// 한 번에 넘길 경로의 상한. `ARG_MAX`(macOS 기본 1 MiB)에 여유를 크게 두고 **바이트와 개수 둘 다**로 자른다 —
 /// 경로 하나가 4 KiB까지 갈 수 있어 개수만으로는 상한이 안 선다.
@@ -199,6 +253,12 @@ pub fn build(
             n += 1;
         }
     }
+    if (!kind.usesNetwork()) {
+        for (credential_off) |override| {
+            buf[n] = override;
+            n += 1;
+        }
+    }
 
     switch (kind) {
         .stage => {
@@ -239,11 +299,20 @@ pub fn build(
             buf[n] = message_file.?;
             n += 1;
         },
+        // **`--prune`이 붙는다**(§4). 안 붙이면 원격에서 지워진 브랜치의 remote-tracking ref가 영영 남고,
+        // 그 ref는 화면의 ahead/behind와 히스토리 칩에 계속 뜬다 — 사라진 브랜치를 "있다"고 말하게 된다.
+        .fetch => {
+            buf[n] = "fetch";
+            n += 1;
+            buf[n] = "--prune";
+            n += 1;
+        },
     }
 
-    // **`--`는 커밋을 뺀 모든 쓰기에 붙는다.** 없으면 `-`로 시작하는 파일 이름이 옵션으로 해석된다(§2).
-    // `_all` 변종도 예외가 아니다 — `add -A --`·`restore --staged -- .`가 §2 표의 형태다.
-    if (kind != .commit) {
+    // **`--`는 커밋·fetch를 뺀 모든 쓰기에 붙는다.** 없으면 `-`로 시작하는 파일 이름이 옵션으로 해석된다(§2).
+    // `_all` 변종도 예외가 아니다 — `add -A --`·`restore --staged -- .`가 §2 표의 형태다. 커밋과 fetch는
+    // 뒤에 경로 자리가 아예 없어 붙일 대상이 없다(fetch에 `--`를 붙이면 refspec 자리가 열린다).
+    if (kind.takesPathSeparator()) {
         buf[n] = "--";
         n += 1;
     }
@@ -258,7 +327,7 @@ pub fn build(
             buf[n] = ".";
             n += 1;
         },
-        .stage_all, .commit => {},
+        .stage_all, .commit, .fetch => {},
     }
 
     return buf[0..n];
@@ -448,7 +517,7 @@ test "§3 hook: 커밋만 허용하고 나머지 쓰기는 막는다" {
     const commit = try buildFixture(.commit, &.{}, "/tmp/msg", &buf);
     try testing.expect(!has(commit, "core.hooksPath=/dev/null"));
 
-    for ([_]Kind{ .stage, .unstage, .unstage_unborn, .stage_all, .unstage_all, .unstage_all_unborn }) |kind| {
+    for ([_]Kind{ .stage, .unstage, .unstage_unborn, .stage_all, .unstage_all, .unstage_all_unborn, .fetch }) |kind| {
         var k_buf: [64][]const u8 = undefined;
         const paths: []const []const u8 = if (kind.takesPaths()) &.{"a.zig"} else &.{};
         const argv = try buildFixture(kind, paths, null, &k_buf);
@@ -464,6 +533,75 @@ test "외부 프로세스 차단은 읽기와 같다(pager·external diff·crede
     try testing.expect(has(argv, "credential.helper="));
     try testing.expect(has(argv, "protocol.ext.allow=never"));
     try testing.expect(has(argv, "core.quotePath=false"));
+}
+
+test "§4 fetch: `fetch --prune`이고 경로 자리가 없다" {
+    var buf: [64][]const u8 = undefined;
+    const argv = try buildFixture(.fetch, &.{}, null, &buf);
+    try testing.expect(has(argv, "fetch"));
+    // **`--prune`**: 없으면 원격에서 지워진 브랜치의 remote-tracking ref가 남아 화면이 없는 브랜치를 말한다.
+    try testing.expect(has(argv, "--prune"));
+    // `--`를 붙이면 refspec 자리가 열린다 — fetch는 뒤에 아무것도 오지 않는다.
+    try testing.expect(!has(argv, "--"));
+    try testing.expectEqualStrings("--prune", argv[argv.len - 1]);
+    // 경로를 주면 거부한다(§2 규율 — "모두"가 아닌 다른 일을 하게 된다).
+    var p_buf: [64][]const u8 = undefined;
+    try testing.expectError(error.PathsNotAllowed, buildFixture(.fetch, &.{"a.zig"}, null, &p_buf));
+    // 메시지 파일도 커밋 전용이다.
+    var m_buf: [64][]const u8 = undefined;
+    try testing.expectError(error.MessageFileMismatch, buildFixture(.fetch, &.{}, "/tmp/msg", &m_buf));
+}
+
+test "§4 fetch만 credential helper를 살려 둔다(나머지는 끈다)" {
+    // 끄면 인증이 필요한 원격에서 **항상** 실패한다 — §4가 이 예외를 명시한다.
+    var f_buf: [64][]const u8 = undefined;
+    const fetch_argv = try buildFixture(.fetch, &.{}, null, &f_buf);
+    try testing.expect(!has(fetch_argv, "credential.helper="));
+    // 나머지 축(pager·external diff·ext 원격)은 fetch에서도 그대로 닫혀 있다.
+    try testing.expect(has(fetch_argv, "core.pager=cat"));
+    try testing.expect(has(fetch_argv, "diff.external="));
+    try testing.expect(has(fetch_argv, "protocol.ext.allow=never"));
+
+    for ([_]Kind{ .stage, .unstage, .stage_all, .commit }) |kind| {
+        var k_buf: [64][]const u8 = undefined;
+        const paths: []const []const u8 = if (kind.takesPaths()) &.{"a.zig"} else &.{};
+        const message: ?[]const u8 = if (kind == .commit) "/tmp/msg" else null;
+        const argv = try buildFixture(kind, paths, message, &k_buf);
+        try testing.expect(has(argv, "credential.helper="));
+    }
+}
+
+test "§4 fetch 환경: 시스템 config를 배제하지 않고 ssh는 BatchMode로 묻지 않는다" {
+    const fetch_env = envOverrides(.fetch);
+    // **`GIT_CONFIG_NOSYSTEM`이 없어야 한다.** macOS의 `credential.helper=osxkeychain`이 시스템 config에서
+    // 오므로(실측 2026-08-18) 배제하면 HTTPS 원격이 늘 인증 실패로 끝난다.
+    for (fetch_env) |e| try testing.expect(!std.mem.eql(u8, e.name, "GIT_CONFIG_NOSYSTEM"));
+
+    var seen_ssh = false;
+    var seen_prompt = false;
+    var seen_askpass = false;
+    for (fetch_env) |e| {
+        if (std.mem.eql(u8, e.name, "GIT_SSH_COMMAND")) {
+            // 묻지 않고 실패한다 — `ssh-askpass`는 우리 프로세스 밖이라 통제할 수 없다.
+            try testing.expect(std.mem.indexOf(u8, e.value, "BatchMode=yes") != null);
+            seen_ssh = true;
+        }
+        if (std.mem.eql(u8, e.name, "GIT_TERMINAL_PROMPT")) {
+            try testing.expectEqualStrings("0", e.value);
+            seen_prompt = true;
+        }
+        // 빈 값이면 git이 터미널 프롬프트로 내려가고 그건 위 변수가 막는다 — 자격증명 창을 우리가 안 만든다.
+        if (std.mem.eql(u8, e.name, "GIT_ASKPASS")) {
+            try testing.expectEqualStrings("", e.value);
+            seen_askpass = true;
+        }
+    }
+    try testing.expect(seen_ssh and seen_prompt and seen_askpass);
+
+    // 네트워크를 안 쓰는 명령은 예전 목록 그대로다(시스템 config 배제 포함).
+    for ([_]Kind{ .stage, .unstage, .stage_all, .commit }) |kind| {
+        try testing.expectEqual(@as(usize, env_overrides.len), envOverrides(kind).len);
+    }
 }
 
 test "저장소는 -C로 준다(프로세스 cwd를 건드리지 않는다)" {

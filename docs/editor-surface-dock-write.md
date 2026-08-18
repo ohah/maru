@@ -70,6 +70,24 @@
 **SSH도 마찬가지다.** `ssh-askpass`가 뜨는 상황은 우리 프로세스 밖의 일이라 통제할 수 없다. `GIT_SSH_COMMAND`에
 `BatchMode=yes`를 실어 **묻지 않고 실패**하게 한다.
 
+**시스템 config를 배제하지 않는다**(P6에서 추가 — 실측이 규칙을 하나 더 낳았다). 나머지 쓰기는
+`GIT_CONFIG_NOSYSTEM=1`로 `/etc/gitconfig`의 외부 프로그램 설정을 배제하는데, fetch가 그러면 **helper 자체가
+사라진다**: macOS에서 `credential.helper=osxkeychain`을 주는 것이 바로 그 시스템 config다(실측 2026-08-18 —
+`git config --show-origin --get credential.helper` →
+`file:/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig`, 그리고 `GIT_CONFIG_NOSYSTEM=1`을
+걸면 그 값이 사라진다). 그러면 helper를 빈 값으로 덮은 것과 결과가 같아져 이 절의 예외가 무의미해진다.
+시스템 config가 pager·external diff를 지정할 위험은 남지만, 우리가 붙이는 `-c`가 config보다 **뒤에 이겨서**
+그 축은 그대로 닫힌다.
+
+**fetch는 쓰기 슬롯을 쓰지 않는다**(P6). §6의 직렬화는 `index.lock` 때문에 있는 규칙이고 `fetch`는 index를
+만지지 않는다 — remote-tracking ref만 쓴다. 무엇보다 **네트워크라 오래 걸려서**, 같은 슬롯에 넣으면 느린 원격
+하나가 커밋·스테이지는 물론 §6-1대로 **목록 읽기까지** 붙잡아 도크가 멈춘 것처럼 보인다. 그래서 in-flight를
+따로 두고, 그 동안에도 쓰기와 읽기는 평소대로 돈다.
+
+**원격이 없으면 누를 수 없다.** 그 판정의 출처는 `git remote`(읽기 명령) **하나**다. 없는 저장소에서 버튼을
+켜 두고 실패로 배우게 하지 않는다 — 자리는 그대로 두고 비활성으로 그리며, 눌리면 이유를 적는다(§3.5).
+성공도 말한다: 원격에 새 것이 없으면 화면 숫자가 그대로라, 아무 말이 없으면 "눌렀는데 아무 일도 안 일어났다"가 된다.
+
 ## 5. 실패는 사실대로 보여 준다
 
 읽기 명령의 stderr는 화면·로그에 싣지 않는다(§6 — 경로·사용자·저장소 정보가 든다). 쓰기는 그럴 수 없다: hook이 거부한

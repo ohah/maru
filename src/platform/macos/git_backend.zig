@@ -101,6 +101,9 @@ pub const Result = struct {
     /// `git worktree list --porcelain` 출력. 도크가 워크트리마다 한 줄을 세우기 때문에 읽는다(§3.5.1c).
     /// **선택이다** — 실패해도 목록은 성립한다(그 저장소는 자기 한 줄로만 뜬다).
     worktrees: []u8 = &.{},
+    /// `git remote` 출력 — 이 저장소에 원격이 **있는가**(P6). 도크의 `Fetch`를 켤지 정하는 사실이고,
+    /// **선택이다**: 못 읽으면 원격이 없는 것으로 보고 버튼을 끈다(없는 것을 눌러 실패로 배우게 하지 않는다).
+    remotes: []u8 = &.{},
     /// 마지막 턴 스냅샷 이후 바뀐 것(§6.1). 스냅샷이 없으면 빈 문자열이고 그 섹션은 안 나온다.
     turn_name_status: []u8 = &.{},
     turn_numstat: []u8 = &.{},
@@ -120,6 +123,7 @@ pub const Result = struct {
         allocator.free(self.branch_numstat);
         allocator.free(self.merge_base);
         allocator.free(self.worktrees);
+        allocator.free(self.remotes);
         allocator.free(self.turn_name_status);
         allocator.free(self.turn_numstat);
         self.* = .{};
@@ -157,6 +161,11 @@ const State = struct {
     /// **깊이는 1이다** — §6이 "큐가 아니라 in-flight 하나"라고 못박았다.
     write_inflight: usize = 0,
     write_result: ?WriteResult = null,
+    /// **fetch는 쓰기와 또 다른 슬롯이다**(P6). index를 만지지 않으므로 §6의 직렬화(`index.lock` 때문에
+    /// 있는 규칙) 대상이 아니고, 무엇보다 **네트워크라 오래 걸린다** — 쓰기 슬롯을 쓰면 느린 원격 하나가
+    /// 커밋 버튼과 목록 갱신을 통째로 붙잡는다(§6-1이 쓰기 중 읽기를 막으므로 도크가 멈춘 것처럼 보인다).
+    fetch_inflight: usize = 0,
+    fetch_result: ?WriteResult = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -169,6 +178,7 @@ const State = struct {
         if (self.log_result) |*r| r.deinit(self.allocator);
         if (self.commit_files_result) |*r| r.deinit(self.allocator);
         if (self.write_result) |*r| r.deinit(self.allocator);
+        if (self.fetch_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -426,19 +436,49 @@ pub const Backend = struct {
         message_file: ?[]const u8,
         request_id: u64,
     ) bool {
+        // **fetch는 이 문으로 못 들어온다.** 들어오면 네트워크 명령이 index 슬롯을 잡아 §6-1대로 목록
+        // 읽기까지 멈춘다 — 슬롯이 갈린 이유가 사라진다.
+        if (kind.usesNetwork()) return false;
+        return self.submitWriteJob(.index, git_exe, repo, kind, paths, message_file, request_id);
+    }
+
+    /// 원격 갱신(`fetch --prune`)을 건다(P6). **쓰기와 다른 슬롯**이라 커밋·스테이지가 막히지 않는다 —
+    /// fetch는 index를 만지지 않으므로 §6의 직렬화 대상이 아니고, 네트워크라 오래 걸린다.
+    pub fn submitFetch(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+        return self.submitWriteJob(.network, git_exe, repo, .fetch, &.{}, null, request_id);
+    }
+
+    fn submitWriteJob(
+        self: *Backend,
+        slot: WriteSlot,
+        git_exe: []const u8,
+        repo: []const u8,
+        kind: git_write_command.Kind,
+        paths: []const []const u8,
+        message_file: ?[]const u8,
+        request_id: u64,
+    ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
-        if (state.shutting_down or state.write_inflight != 0 or state.write_result != null) {
+        const busy = switch (slot) {
+            .index => state.write_inflight != 0 or state.write_result != null,
+            .network => state.fetch_inflight != 0 or state.fetch_result != null,
+        };
+        if (state.shutting_down or busy) {
             state.mutex.unlock(state.io);
             return false;
         }
-        state.write_inflight += 1;
+        switch (slot) {
+            .index => state.write_inflight += 1,
+            .network => state.fetch_inflight += 1,
+        }
         _ = state.refs.fetchAdd(1, .monotonic);
         state.mutex.unlock(state.io);
 
-        const job = state.allocator.create(WriteJob) catch return self.abandonWrite();
+        const job = state.allocator.create(WriteJob) catch return self.abandonWrite(slot);
         job.* = .{
             .state = state,
+            .slot = slot,
             .git_exe = &.{},
             .repo = &.{},
             .paths = &.{},
@@ -448,44 +488,47 @@ pub const Backend = struct {
         };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch {
             job.deinit();
-            return self.abandonWrite();
+            return self.abandonWrite(slot);
         };
         job.repo = state.allocator.dupe(u8, repo) catch {
             job.deinit();
-            return self.abandonWrite();
+            return self.abandonWrite(slot);
         };
         job.paths = state.allocator.alloc([]u8, paths.len) catch {
             job.deinit();
-            return self.abandonWrite();
+            return self.abandonWrite(slot);
         };
         // 부분 실패에서 `deinit`이 미초기화 슬라이스를 free하지 않도록 먼저 비운다.
         for (job.paths) |*p| p.* = &.{};
         for (paths, job.paths) |src, *dst| {
             dst.* = state.allocator.dupe(u8, src) catch {
                 job.deinit();
-                return self.abandonWrite();
+                return self.abandonWrite(slot);
             };
         }
         if (message_file) |m| {
             job.message_file = state.allocator.dupe(u8, m) catch {
                 job.deinit();
-                return self.abandonWrite();
+                return self.abandonWrite(slot);
             };
         }
 
         const thread = std.Thread.spawn(.{}, writeWorker, .{job}) catch {
             job.deinit();
-            return self.abandonWrite();
+            return self.abandonWrite(slot);
         };
         thread.detach();
         return true;
     }
 
     /// 제출에 실패했을 때 잡아 둔 자리를 되돌린다. **`abandon`과 슬롯이 달라 따로 있다.**
-    fn abandonWrite(self: *Backend) bool {
+    fn abandonWrite(self: *Backend, slot: WriteSlot) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
-        state.write_inflight -= 1;
+        switch (slot) {
+            .index => state.write_inflight -= 1,
+            .network => state.fetch_inflight -= 1,
+        }
         state.mutex.unlock(state.io);
         state.release();
         return false;
@@ -498,6 +541,17 @@ pub const Backend = struct {
         defer state.mutex.unlock(state.io);
         const taken = state.write_result;
         state.write_result = null;
+        return taken;
+    }
+
+    /// 끝난 fetch 결과를 가져간다(호출자 소유). 쓰기와 **같은 모양**이다 — 성공 여부와 stderr를 함께 싣는
+    /// 이유도 같다(§5: 성공을 추정하지 않고, 실패 이유를 가공해서 보여 준다).
+    pub fn takeFetchResult(self: *Backend) ?WriteResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const taken = state.fetch_result;
+        state.fetch_result = null;
         return taken;
     }
 
@@ -1407,6 +1461,9 @@ fn worker(job: *Job) void {
         // **워크트리 목록도 선택이다.** 아주 오래된 git에는 `worktree list`가 없고, 그때는 그 저장소가
         // 목록에 자기 한 줄로만 뜬다 — 워크트리를 못 찾는 것이지 저장소를 못 읽는 것이 아니다.
         .{ git_command.Kind.worktree_list, "worktrees" },
+        // **원격 목록도 선택이다.** 못 읽으면 `Fetch`가 꺼진 채 "원격 없음"으로 보이는데, 그건 틀릴 수
+        // 있어도 **안전한 쪽으로 틀린다**(누르면 될 것을 못 누른다 vs. 안 되는 것을 눌러 실패를 본다).
+        .{ git_command.Kind.remotes, "remotes" },
     }) |pair| {
         if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
             @field(result, pair[1]) = out.bytes;
@@ -1726,8 +1783,13 @@ pub const WriteResult = struct {
     }
 };
 
+/// 결과가 들어갈 자리. **fetch를 쓰기와 가르는 유일한 축이다** — 실행 경로(argv·env 조립, spawn, stderr
+/// 수집)는 같고, 어느 슬롯에 결과를 놓고 어느 in-flight를 푸는지만 다르다.
+const WriteSlot = enum { index, network };
+
 const WriteJob = struct {
     state: *State,
+    slot: WriteSlot = .index,
     git_exe: []u8,
     repo: []u8,
     /// 경로 문자열과 그 슬라이스 배열 둘 다 job이 소유한다 — 호출자의 프레임 arena는 이 worker보다 먼저 죽는다.
@@ -1776,9 +1838,18 @@ fn writeWorker(job: *WriteJob) void {
     }
 
     state.mutex.lockUncancelable(state.io);
-    if (state.write_result) |*old| old.deinit(allocator); // 못 가져간 결과는 버린다(최신이 사실이다)
-    state.write_result = result;
-    state.write_inflight -= 1;
+    switch (job.slot) {
+        .index => {
+            if (state.write_result) |*old| old.deinit(allocator); // 못 가져간 결과는 버린다(최신이 사실이다)
+            state.write_result = result;
+            state.write_inflight -= 1;
+        },
+        .network => {
+            if (state.fetch_result) |*old| old.deinit(allocator);
+            state.fetch_result = result;
+            state.fetch_inflight -= 1;
+        },
+    }
     state.mutex.unlock(state.io);
 
     job.deinit();
@@ -1855,7 +1926,7 @@ pub fn runWriteSync(
     outer: while (std.c.environ[i]) |entry| : (i += 1) {
         const pair = std.mem.span(entry);
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-        for (git_write_command.env_overrides) |o| {
+        for (git_write_command.envOverrides(kind)) |o| {
             if (std.mem.eql(u8, pair[0..eq], o.name)) continue :outer;
         }
         // 사용자 환경의 `GIT_INDEX_FILE`은 항상 버린다 — 남겨 두면 우리 쓰기가 **남의 index**에 간다.
@@ -1865,7 +1936,9 @@ pub fn runWriteSync(
         env_store.append(allocator, copy) catch return error.GitFailed;
         env_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
     }
-    for (git_write_command.env_overrides) |o| {
+    // **환경 목록은 명령 종류가 고른다**(fetch만 갈린다 — §4). 여기서 배열을 직접 고르면 "fetch인데 읽기
+    // 환경으로 돌았다"가 조용히 생긴다.
+    for (git_write_command.envOverrides(kind)) |o| {
         const joined = std.fmt.allocPrintSentinel(allocator, "{s}={s}", .{ o.name, o.value }, 0) catch return error.GitFailed;
         env_store.append(allocator, joined) catch return error.GitFailed;
         env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;

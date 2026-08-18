@@ -31,6 +31,7 @@ const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const dock_list_scrollbar_inset_px = app_session_mod.dock_list_scrollbar_inset_px;
 const dock_view_bar = app_session_mod.dock_view_bar;
+const icons = app_session_mod.icons;
 const AgentSessionArchiveSmokeProbe = app_session_mod.AgentSessionArchiveSmokeProbe;
 const scm_dock_ops = @import("scm_dock.zig");
 const agent_dock = app_session_mod.agent_dock;
@@ -250,6 +251,104 @@ pub fn pendingDockEntryOwnsInput(self: *const AppSession) bool {
         entry.surface_id == surface_id
     else
         entry.surface_id == 0;
+}
+
+/// 뷰 바 오른쪽 끝의 동작 버튼. **뷰마다 다르다** — 지금은 탐색기에만 있다(소스 컨트롤은 자기 머리 줄에
+/// 이미 동작을 들고 있고, 세션 목록은 새로 고칠 대상이 없다).
+pub const DockAction = enum {
+    /// 루트를 다시 읽는다. watcher 가 놓친 변경(원격 마운트·권한)이나 사용자가 밖에서 만든 파일을 위해서다.
+    refresh,
+    /// 루트만 남기고 펼친 폴더를 모두 접는다. 깊이 들어간 트리에서 돌아오는 유일한 수단이 하나씩 접기뿐이면
+    /// 사용자는 도크를 닫았다 연다(그러면 선택도 잃는다).
+    collapse_all,
+};
+
+const explorer_actions = [_]DockAction{ .refresh, .collapse_all };
+
+/// 한 뷰가 가질 수 있는 동작 수의 상한. 렌더가 스택 버퍼를 잡는 근거라 목록이 늘면 **여기부터** 걸린다
+/// (`dockActionGlyphs` 가 이 크기로 단언한다).
+pub const max_dock_actions: usize = explorer_actions.len;
+
+/// 지금 뷰의 동작 목록. 순서가 곧 왼쪽부터의 자리라, 여기 순서를 바꾸면 버튼 자리가 바뀐다.
+pub fn dockActions(self: *const AppSession) []const DockAction {
+    if (!dockVisible(self)) return &.{};
+    return switch (self.dock.view) {
+        .explorer => &explorer_actions,
+        else => &.{},
+    };
+}
+
+/// 동작 버튼의 glyph. **그림은 자산 이름으로 고른다**(codepoint 리터럴 금지 — docs/chrome-strategy.md §9.7).
+/// `reset` 은 octicon sync(양방향 화살표)라 새로 고침 그림이고, 이미 세션·소스 컨트롤 도크가 같은 뜻으로 쓴다.
+/// 전체 접기는 **접힌 뒤의 모습**(`>`)을 쓴다 — 결과를 가리키는 그림이라 따로 배우지 않아도 읽힌다.
+pub fn dockActionGlyph(action: DockAction) u21 {
+    return switch (action) {
+        .refresh => icons.codepointFit(.reset, .tight),
+        .collapse_all => icons.codepointFit(.chevron_right, .tight),
+    };
+}
+
+/// 지금 뷰의 동작 glyph 를 호출자 버퍼에 담아 돌려준다. 렌더가 자기 표를 들면 동작이 늘 때 한쪽만 갱신된다.
+pub fn dockActionGlyphs(self: *const AppSession, buf: *[max_dock_actions]u21) []const u21 {
+    const actions = dockActions(self);
+    std.debug.assert(actions.len <= buf.len);
+    for (actions, 0..) |action, index| buf[index] = dockActionGlyph(action);
+    return buf[0..actions.len];
+}
+
+pub fn setHoveredDockAction(self: *AppSession, slot: ?usize) void {
+    if (usizeOptEql(self.dock_action_hovered_slot, slot)) return;
+    self.dock_action_hovered_slot = slot;
+    self.metal_dirty = true;
+}
+
+/// 동작 버튼을 눌렀을 때. **자리(index)로 받는다** — 목록은 뷰마다 다르고, 그 대응은 `dockActions` 하나가
+/// 소유한다(누른 자리와 도는 동작이 두 표에서 나오면 어긋난다).
+pub fn runDockAction(self: *AppSession, slot: usize) void {
+    const actions = dockActions(self);
+    if (slot >= actions.len) return;
+    switch (actions[slot]) {
+        .refresh => refreshDockTree(self),
+        .collapse_all => collapseDockTree(self),
+    }
+}
+
+/// 보이는 루트를 다시 읽는다. 열려 있는 하위 폴더까지 훑지 않는다 — 스캔 결과가 도착하면 그 아래는
+/// 평소의 lazy 규율대로 다시 채워지고, 여기서 전부 예약하면 큰 트리에서 새로 고침 한 번이 수백 건이 된다.
+fn refreshDockTree(self: *AppSession) void {
+    var index: usize = 0;
+    while (index < self.file_tree.rootCount()) : (index += 1) {
+        const path = self.file_tree.rootAt(index) orelse continue;
+        // 실패해도 조용히 넘어간다 — 큐가 꽉 찬 상황이고, 그때는 이미 예약된 스캔이 곧 같은 일을 한다.
+        self.file_tree.requeueScan(path) catch continue;
+    }
+    self.metal_dirty = true;
+}
+
+/// 루트만 남기고 접는다. 바뀐 것이 없으면 **행 재투영도 하지 않는다** — 이미 접힌 트리에서 누르면
+/// 아무 일도 일어나지 않아야 하고, 그때 선택·스크롤을 건드릴 이유가 없다.
+fn collapseDockTree(self: *AppSession) void {
+    if (!self.file_tree.collapseAll()) return;
+    self.file_tree_rows_dirty = true;
+    file_panel_ops.updateFileTree(self) catch {};
+    self.metal_dirty = true;
+}
+
+/// 좌표가 동작 버튼 위인지. 그리는 조건과 **같은 chrome 기하**를 보므로 안 보이는 버튼은 눌리지도 않는다.
+pub fn dockActionAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+    if (!dockVisible(self)) return null;
+    const actions = dockActions(self);
+    if (actions.len == 0) return null;
+    const bar = dockGeometry(self).view_bar;
+    if (bar.h == 0 or x_px < 0 or y_px < 0) return null;
+    if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
+    return dock_view_bar.actionAtPoint(
+        .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
+        self.cell_width_px,
+        actions.len,
+        @intFromFloat(x_px),
+        @intFromFloat(y_px),
+    );
 }
 
 /// 좌표가 뷰 바의 어느 슬롯 위인지(렌더·hover·클릭 공용 — 기하가 두 벌이 되지 않게).

@@ -924,6 +924,10 @@ pub fn buildDockViewBarDrawList(
     active_index: usize,
     active_fg: terminal.Color,
     muted_fg: terminal.Color,
+    /// 바 오른쪽 끝 동작 버튼의 glyph(없으면 빈 슬라이스). **어떤 동작인지는 호출자가 안다** — 렌더는
+    /// codepoint 만 받는다(뷰 슬롯이 chrome 기하를 그대로 쓰는 것과 같은 결). 자리는 `dock_view_bar.actionRect`
+    /// 가 계산한 것과 **같은 셀 수**라, 그린 자리와 눌리는 자리가 갈라지지 않는다.
+    action_glyphs: []const u21,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -944,6 +948,25 @@ pub fn buildDockViewBarDrawList(
             .width = @intCast(dock_view_bar.icon_cols),
             .style = .{ .foreground = if (index == active_index) active_fg else muted_fg, .bold = index == active_index },
         });
+    }
+    // 동작 버튼의 시작 열은 **chrome 기하가 준다**(hit-test 가 쓰는 것과 같은 함수). 뷰 슬롯과 겹치는
+    // 폭이면 null 이라 하나도 그리지 않는다 — 좁은 도크에서 뷰 전환을 먼저 지키는 정책이 그 함수 하나에만 있다.
+    if (dock_view_bar.actionStartCol(cols, action_glyphs.len)) |start_col| {
+        const actions_start: u16 = @intCast(start_col);
+        for (action_glyphs, 0..) |cp, index| {
+            const col: u16 = actions_start +| @as(u16, @intCast(index)) *| slot_cols +|
+                @as(u16, @intCast(dock_view_bar.icon_col_offset));
+            if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
+            try cells.append(allocator, .{
+                .row = @max(rows, 1) / 2,
+                .col = col,
+                .codepoint = cp,
+                .width = @intCast(dock_view_bar.icon_cols),
+                // 동작은 **뷰가 아니다** — 활성 개념이 없으므로 항상 muted 로 두고, 호버 배경만 session 이
+                // 얹는다(뷰 슬롯의 활성 강조와 헷갈리면 지금 어느 뷰인지 읽기 어려워진다).
+                .style = .{ .foreground = muted_fg },
+            });
+        }
     }
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = @max(rows, 1) },
@@ -991,7 +1014,7 @@ pub fn buildDockSessionListDrawList(
 }
 
 test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
-    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } });
+    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{});
     defer dl.deinit(std.testing.allocator);
     var count: usize = 0;
     for (dl.cells) |c| {

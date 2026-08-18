@@ -3796,6 +3796,9 @@ pub const AppSession = struct {
     file_tree_hovered_row: ?usize = null,
     /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
     dock_view_hovered_slot: ?usize = null,
+    /// 뷰 바 오른쪽 끝 동작 버튼의 호버 자리. 뷰 슬롯과 **다른 필드**다 — 한 필드로 겸하면 어느 쪽 자리인지
+    /// 몰라 배경이 엉뚱한 슬롯에 선다.
+    dock_action_hovered_slot: ?usize = null,
     /// 소스 컨트롤 뷰의 git 읽기 backend와 마지막 결과(docs/editor-surface-dock.md §3.5). 결과 텍스트는 세션이 소유하고
     /// 행 모델은 프레임마다 그 위에서 다시 만든다 — 목록이 화면 폭·높이에 따라 잘리므로 미리 굳혀 둘 이유가 없다.
     git_backend: ?git_backend_mod.Backend = null,
@@ -10206,6 +10209,12 @@ pub const AppSession = struct {
                 // 뷰 스위처가 트리보다 먼저다 — 바는 트리 위에 있고 rect가 겹치지 않지만, 순서를 명시해
                 // 나중에 바가 커져도 트리 클릭에 먹히지 않게 한다(docs/file-explorer.md §3.5).
                 if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
+                    // 동작 버튼을 **먼저** 본다. 자리는 겹치지 않지만(chrome 기하가 겹치면 아예 안 그린다)
+                    // 순서를 명시해 두면 나중에 슬롯 수가 늘어도 뷰 전환이 동작 클릭을 먹지 않는다.
+                    if (dock_ops.dockActionAt(self, x_px, y_px)) |action_slot| {
+                        dock_ops.runDockAction(self, action_slot);
+                        return;
+                    }
                     if (dock_ops.dockViewSlotAt(self, x_px, y_px)) |slot| {
                         if (dock_ops.dockViewForSlot(slot)) |view| dock_ops.enterDockView(self, view);
                     }
@@ -11858,6 +11867,7 @@ pub const AppSession = struct {
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
         file_panel_ops.setHoveredFileTreeRow(self, if (dock_ops.dockVisible(self)) file_panel_ops.fileTreeRowAt(self, x_px, y_px) else null);
         dock_ops.setHoveredDockViewSlot(self, dock_ops.dockViewSlotAt(self, x_px, y_px));
+        dock_ops.setHoveredDockAction(self, dock_ops.dockActionAt(self, x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -11955,10 +11965,13 @@ pub const AppSession = struct {
                 self.clearHoverUrlAnchor();
                 file_panel_ops.setHoveredFileTreeRow(self, null);
                 const slot = dock_ops.dockViewSlotAt(self, x_px, y_px);
+                const action = dock_ops.dockActionAt(self, x_px, y_px);
                 dock_ops.setHoveredDockViewSlot(self, slot);
-                return if (slot != null) .link else .default; // 슬롯 위만 클릭 가능(여백은 화살표)
+                dock_ops.setHoveredDockAction(self, action);
+                return if (slot != null or action != null) .link else .default; // 누를 수 있는 자리만(여백은 화살표)
             }
             dock_ops.setHoveredDockViewSlot(self, null);
+            dock_ops.setHoveredDockAction(self, null);
             // SessionDock hover is owned by the same published tree that mouse down/up uses.
             // The dispatch above already clears a stale card highlight for tree-outside points;
             // this branch only selects the cursor response without a second archive row hit-test.
@@ -14564,6 +14577,20 @@ pub const AppSession = struct {
                             self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)),
                         );
                     }
+                    // 동작 버튼은 **활성이 없다** — 호버 배경만 선다(어느 뷰인지 읽는 신호와 겹치지 않게).
+                    if (self.dock_action_hovered_slot) |hovered| {
+                        if (dock_view_bar.actionRect(
+                            bar_rect,
+                            self.cell_width_px,
+                            dock_ops.dockActions(self).len,
+                            hovered,
+                        )) |slot| {
+                            self.appendBarBgQuad(
+                                .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
+                                self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)),
+                            );
+                        }
+                    }
                     self.appendBarBgQuad(.{
                         .x = dg.view_bar.x,
                         .y = dg.view_bar.y + dg.view_bar.h -| 1,
@@ -14954,6 +14981,9 @@ pub const AppSession = struct {
                         const visible_rows: u16 = @intCast(@min(file_panel_ops.fileTreeVisibleRows(self), @as(usize, std.math.maxInt(u16))));
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                        // 동작 glyph 는 프레임마다 **스택 버퍼**에 담는다 — 목록이 뷰마다 다르고 짧아서
+                        // 할당할 이유가 없고, 렌더 경로에서 실패할 수 있는 자리를 늘리지 않는다.
+                        var action_glyph_buf: [dock_ops.max_dock_actions]u21 = undefined;
                         if (tree_cols > 0 and dg.view_bar.h > 0) {
                             if (coretext_frame_builder.buildDockViewBarDrawList(
                                 self.allocator,
@@ -14962,6 +14992,7 @@ pub const AppSession = struct {
                                 dock_ops.dockViewSlotIndex(self),
                                 dock_active_fg,
                                 dock_fg,
+                                dock_ops.dockActionGlyphs(self, &action_glyph_buf),
                             )) |bdl| {
                                 self.collectShaped(&collected, bdl, pane_frame_builder, .{
                                     .pane = .{
@@ -59582,4 +59613,78 @@ test "ui.language=auto: 주입한 로케일이 화면 언어를 정한다" {
         maru.i18n.tIn(.en, .app_close_running),
         session.chrome_host.confirm.message,
     );
+}
+
+// 탐색기 헤더의 동작 버튼(새로 고침·전체 접기). 자리·클릭·결과를 한 테스트가 잇는다 — 셋이 갈라지면
+// "보이는데 안 눌리는" 버튼이 되고, 그것은 사용자가 버그로 보고할 때까지 아무 게이트도 못 잡는다.
+test "탐색기 헤더 동작: 오른쪽 끝 버튼이 전체 접기·새로 고침을 실제로 돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    _ = session.takeFilePanelPickRequest();
+    dock_ops.setDockView(session, .explorer);
+    const dg = dock_ops.dockGeometry(session);
+    if (dg.view_bar.h == 0) return error.SkipZigTest; // 바가 접힌 형상은 이 계약의 대상이 아니다
+
+    // 펼친 폴더가 있는 트리를 만든다.
+    try session.file_tree.replaceExplicitRoots(&.{"/w"});
+    while (session.file_tree.takeScanRequest()) |owned| allocator.free(owned);
+    try session.file_tree.applySnapshot("/w", &.{
+        .{ .name = "src", .kind = .directory },
+        .{ .name = "a.txt", .kind = .file },
+    });
+    _ = try session.file_tree.toggleDirectory("/w/src");
+    while (session.file_tree.takeScanRequest()) |owned| allocator.free(owned);
+    // 상태는 **행 투영**으로 본다 — 사용자가 보는 것과 같은 값이고, 내부 노드를 들여다보면 투영이 깨져도
+    // 테스트는 통과한다.
+    try std.testing.expect(try dirExpandedInRows(session, "/w/src"));
+
+    // 동작 버튼 자리를 chrome 기하에서 얻는다 — 테스트가 좌표를 손으로 만들면 **그린 자리와 다른 곳**을
+    // 눌러 놓고 통과할 수 있다(그 어긋남이 정확히 이 기능의 위험이다).
+    const actions = dock_ops.dockActions(session);
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    const bar = dock_view_bar.Rect{ .x = dg.view_bar.x, .y = dg.view_bar.y, .w = dg.view_bar.w, .h = dg.view_bar.h };
+    const collapse_index = for (actions, 0..) |a, i| {
+        if (a == .collapse_all) break i;
+    } else return error.MissingCollapseAction;
+    const slot = dock_view_bar.actionRect(bar, session.cell_width_px, actions.len, collapse_index) orelse
+        return error.SkipZigTest; // 도크가 좁아 동작을 안 그리는 형상
+    const cx: f64 = @floatFromInt(slot.x + slot.w / 2);
+    const cy: f64 = @floatFromInt(slot.y + slot.h / 2);
+
+    // 그 자리는 **뷰 전환이 아니다** — 두 판정이 같은 좌표를 두고 다투면 누를 때마다 뷰가 바뀐다.
+    try std.testing.expect(dock_ops.dockViewSlotAt(session, cx, cy) == null);
+    try std.testing.expectEqual(collapse_index, dock_ops.dockActionAt(session, cx, cy).?);
+
+    // 클릭 → 접힌다(뷰는 그대로다).
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(!try dirExpandedInRows(session, "/w/src"));
+    try std.testing.expectEqual(dock_panel.View.explorer, session.dock.view);
+
+    // 새로 고침 → 루트 스캔이 예약된다(그 전에는 큐가 비어 있다).
+    try std.testing.expect(session.file_tree.takeScanRequest() == null);
+    const refresh_index = for (actions, 0..) |a, i| {
+        if (a == .refresh) break i;
+    } else return error.MissingRefreshAction;
+    const rslot = dock_view_bar.actionRect(bar, session.cell_width_px, actions.len, refresh_index).?;
+    session.mouse(1, @floatFromInt(rslot.x + rslot.w / 2), @floatFromInt(rslot.y + rslot.h / 2), 0, 0);
+    const queued = session.file_tree.takeScanRequest() orelse return error.MissingScanRequest;
+    defer allocator.free(queued);
+    try std.testing.expectEqualStrings("/w", queued);
+}
+
+/// 투영된 행에서 그 디렉터리가 펼쳐져 있는지. 없으면 error 라 "행이 사라져서 통과"하는 경우를 막는다.
+fn dirExpandedInRows(session: *AppSession, path: []const u8) !bool {
+    session.file_tree_rows_dirty = true;
+    try file_panel_ops.updateFileTree(session);
+    for (session.file_tree_rows.items) |row| switch (row) {
+        .directory => |d| if (std.mem.eql(u8, d.path, path)) return d.expanded,
+        else => {},
+    };
+    return error.MissingDirectoryRow;
 }

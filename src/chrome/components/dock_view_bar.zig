@@ -52,6 +52,49 @@ pub fn slotAtPoint(bar: Rect, cell_width_px: u32, x: u32, y: u32) ?usize {
     return null;
 }
 
+/// 바 **오른쪽 끝**에 붙는 동작 슬롯(새로고침·전체 접기 …). 뷰 스위처와 **같은 슬롯 폭**을 쓴다 — 한 바 안에서
+/// 누를 수 있는 자리의 크기가 두 종류면 어느 쪽이 버튼인지 손이 배우지 못한다.
+///
+/// 개수는 호출자가 준다. chrome은 **무슨 동작인지 모르고 자리만 센다**(뷰 열거를 모르는 것과 같은 이유) —
+/// 뷰마다 동작 수가 다르므로 그 결정은 session이 갖는다.
+///
+/// `index` 0이 가장 왼쪽이다. 오른쪽 정렬이지만 **읽는 순서는 왼쪽부터**여야 목록이 늘어나도 기존 버튼의
+/// 자리가 안 바뀐다(오른쪽 끝에 붙는 것은 새로 생긴 쪽).
+pub fn actionRect(bar: Rect, cell_width_px: u32, count: usize, index: usize) ?Rect {
+    if (index >= count or count == 0) return null;
+    if (bar.h == 0 or bar.w == 0 or cell_width_px == 0) return null;
+    // **오른쪽 끝은 바 픽셀 폭이 아니라 셀 격자의 끝이다.** 도크 폭은 드래그로 정해져 셀 배수가 아닌 것이
+    // 보통이고, 아이콘은 셀 격자에 그려진다(`buildDockViewBarDrawList` 가 `cols = 폭 / 셀폭` 으로 받는다).
+    // 픽셀 끝에 붙이면 눌리는 자리가 그린 자리보다 최대 한 셀 못 미치게 밀려, 아이콘 왼쪽을 눌러도 반응이
+    // 없고 오른쪽 여백이 눌린다 — 왼쪽 정렬인 뷰 슬롯에는 없던, 오른쪽 정렬이 만든 함정이다.
+    const start_col = actionStartCol(bar.w / cell_width_px, count) orelse return null;
+    const col = start_col + slot_cols * @as(u32, @intCast(index));
+    return .{ .x = bar.x + col * cell_width_px, .y = bar.y, .w = slot_cols * cell_width_px, .h = bar.h };
+}
+
+/// 동작 슬롯이 시작하는 **셀 열**(그릴 자리가 없으면 null). 렌더는 셀 격자에, hit-test 는 픽셀에 살지만
+/// **자리를 정하는 식은 이것 하나다** — 두 벌이면 지금은 같은 값이어도 한쪽만 고쳐지는 날 어긋난다.
+pub fn actionStartCol(cols: u32, count: usize) ?u32 {
+    if (count == 0) return null;
+    // 뷰 스위처와 겹치면 **하나도 그리지 않는다**. 반쯤 겹친 버튼은 무엇이 눌리는지 알 수 없고, 좁은 도크에서
+    // 뷰 전환은 동작 버튼보다 먼저 지켜야 하는 기능이다(슬롯이 다 안 들어가면 아예 안 그리는 정책과 같은 결).
+    const need = slot_cols * @as(u32, @intCast(slot_count + count));
+    if (cols < need) return null;
+    return cols - slot_cols * @as(u32, @intCast(count));
+}
+
+/// 좌표가 몇 번째 동작 슬롯 위인지. 동작이 안 그려지는 상황이면 null이라 호출자가 no-op으로 둔다 —
+/// **보이지 않는 버튼은 눌리지도 않는다**(그리는 조건과 판정 조건이 같은 함수에서 나온다).
+pub fn actionAtPoint(bar: Rect, cell_width_px: u32, count: usize, x: u32, y: u32) ?usize {
+    if (y < bar.y or y >= bar.y + bar.h) return null;
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const rect = actionRect(bar, cell_width_px, count, index) orelse return null;
+        if (x >= rect.x and x < rect.x + rect.w) return index;
+    }
+    return null;
+}
+
 const testing = std.testing;
 
 test "슬롯은 셀 정렬 폭으로 좌측부터 이어 붙는다" {
@@ -83,4 +126,56 @@ test "hit-test는 슬롯 안에서만 자리를 돌려준다" {
     try testing.expect(slotAtPoint(bar, 8, 12, 4) == null);
     try testing.expect(slotAtPoint(bar, 8, 12, 23) == null);
     try testing.expect(slotAtPoint(.{ .x = 10, .y = 5, .w = 200, .h = 0 }, 8, 12, 5) == null);
+}
+
+test "동작 슬롯은 오른쪽 끝에 이어 붙고 뷰 슬롯과 겹치지 않는다" {
+    const bar = Rect{ .x = 100, .y = 20, .w = 320, .h = 18 };
+    const a = actionRect(bar, 8, 2, 0).?;
+    const b = actionRect(bar, 8, 2, 1).?;
+    try testing.expectEqual(a.x + a.w, b.x); // 사이가 벌어지거나 겹치지 않는다
+    try testing.expectEqual(bar.x + bar.w, b.x + b.w); // 마지막이 바 오른쪽 끝에 붙는다
+    try testing.expectEqual(@as(u32, 32), a.w); // 뷰 슬롯과 같은 폭(4셀 × 8px)
+    // 뷰 슬롯 마지막 자리보다 오른쪽이다 — 겹치면 두 판정이 같은 좌표를 두고 다툰다.
+    const last_view = slotRect(bar, 8, slot_count - 1).?;
+    try testing.expect(a.x >= last_view.x + last_view.w);
+    try testing.expect(actionRect(bar, 8, 2, 2) == null);
+    try testing.expect(actionRect(bar, 8, 0, 0) == null);
+}
+
+test "폭이 모자라면 동작을 하나도 그리지 않는다 — 뷰 전환이 먼저다" {
+    // 뷰 3슬롯(96px) + 동작 2슬롯(64px) = 160px 이 필요하다.
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 159, .h = 18 }, 8, 2, 0) == null);
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 160, .h = 18 }, 8, 2, 0) != null);
+    // 그 폭에서도 뷰 슬롯은 계속 그려진다(동작만 사라진다).
+    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 159, .h = 18 }, 8, 0) != null);
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 320, .h = 0 }, 8, 2, 0) == null);
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 320, .h = 18 }, 0, 2, 0) == null);
+}
+
+test "동작 hit-test 는 그려지는 자리에서만 값을 돌려준다" {
+    const bar = Rect{ .x = 100, .y = 20, .w = 320, .h = 18 };
+    const a = actionRect(bar, 8, 2, 0).?;
+    try testing.expectEqual(@as(usize, 0), actionAtPoint(bar, 8, 2, a.x + 1, 25).?);
+    try testing.expectEqual(@as(usize, 1), actionAtPoint(bar, 8, 2, a.x + a.w + 1, 25).?);
+    // 뷰 스위처 자리·바 밖은 동작이 아니다.
+    try testing.expect(actionAtPoint(bar, 8, 2, bar.x + 1, 25) == null);
+    try testing.expect(actionAtPoint(bar, 8, 2, a.x + 1, 10) == null);
+    // 안 그려지는 폭에서는 같은 좌표라도 눌리지 않는다.
+    try testing.expect(actionAtPoint(.{ .x = 100, .y = 20, .w = 159, .h = 18 }, 8, 2, 250, 25) == null);
+}
+
+test "동작 슬롯은 **셀 격자**의 오른쪽 끝에 붙는다 — 바 픽셀 폭이 아니라" {
+    // 도크 폭은 드래그로 정해져 셀 배수가 아닌 것이 보통이다(여기서는 셀 8px 에 폭 325px = 40셀 + 5px).
+    // 아이콘은 40셀 격자에 그려지므로 마지막 동작 슬롯의 오른쪽 끝도 40셀 자리여야 한다.
+    const bar = Rect{ .x = 0, .y = 0, .w = 325, .h = 18 };
+    const last = actionRect(bar, 8, 2, 1).?;
+    try testing.expectEqual(@as(u32, 320), last.x + last.w); // 40셀 × 8px — 남는 5px 는 격자 밖이다
+    try testing.expect(last.x + last.w < bar.x + bar.w);
+    // 그 자투리를 눌러도 동작이 아니다(그리지 않은 자리는 눌리지도 않는다).
+    try testing.expect(actionAtPoint(bar, 8, 2, 322, 5) == null);
+    try testing.expectEqual(@as(usize, 1), actionAtPoint(bar, 8, 2, 319, 5).?);
+    // 폭이 셀 배수면 격자 끝 = 바 끝이라 예전 결과와 같다(회귀 방지).
+    const aligned = Rect{ .x = 0, .y = 0, .w = 320, .h = 18 };
+    const last_aligned = actionRect(aligned, 8, 2, 1).?;
+    try testing.expectEqual(@as(u32, 320), last_aligned.x + last_aligned.w);
 }

@@ -763,6 +763,37 @@ pub const Tree = struct {
         return node.expanded;
     }
 
+    /// 루트만 남기고 펼친 폴더를 모두 접는다. **루트는 접지 않는다** — 루트까지 접으면 화면에 폴더 이름 한
+    /// 줄만 남아, 되돌리려면 방금 지운 것과 같은 수의 클릭이 든다(그 상태는 도크를 닫은 것과 구분되지 않는다).
+    ///
+    /// scan 을 예약하지 않는다. 접기는 **이미 읽은 것을 감추는** 동작이라, 다시 펼칠 때 `toggleDirectory` 가
+    /// 그때 필요한 것만 읽는다(접는 김에 재스캔하면 큰 트리에서 접기가 느려진다 — 새로 고침은 별개 동작이다).
+    ///
+    /// 되돌린 것이 하나라도 있으면 true. 호출자가 "이미 다 접혀 있었다"를 no-op 으로 둘 수 있게 한다.
+    pub fn collapseAll(self: *Tree) bool {
+        var changed = false;
+        for (self.roots.items) |*root| {
+            for (root.children.items) |*child| {
+                if (collapseSubtree(child)) changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn collapseSubtree(node: *Node) bool {
+        var changed = false;
+        if (node.expanded) {
+            node.expanded = false;
+            changed = true;
+        }
+        // 자식도 접어 둔다 — 접힌 부모 아래의 펼침 상태가 살아 있으면 부모를 다시 펼쳤을 때 접기 전 깊이가
+        // 통째로 돌아온다(사용자가 방금 없앤 것이 되살아난다).
+        for (node.children.items) |*child| {
+            if (collapseSubtree(child)) changed = true;
+        }
+        return changed;
+    }
+
     pub fn invalidatePath(self: *Tree, changed_path: []const u8) !void {
         for (self.roots.items) |*root| {
             if (!pathWithin(changed_path, root.path)) continue;
@@ -1717,4 +1748,41 @@ test "file tree compact + 무시: 접힌 줄의 무시 판정은 **끝 노드**�
         },
         else => {},
     };
+}
+
+test "전체 접기: 루트는 남기고 그 아래를 모두 접는다" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+    _ = tree.takeScanRequest();
+    try tree.applySnapshot("/w", &.{
+        .{ .name = "src", .kind = .directory },
+        .{ .name = "a.txt", .kind = .file },
+    });
+    _ = try tree.toggleDirectory("/w/src");
+    _ = tree.takeScanRequest();
+    try tree.applySnapshot("/w/src", &.{.{ .name = "deep", .kind = .directory }});
+    _ = try tree.toggleDirectory("/w/src/deep");
+
+    try std.testing.expect(tree.collapseAll());
+    // 루트는 그대로 펼쳐져 있다 — 접으면 남는 것이 이름 한 줄뿐이다.
+    try std.testing.expect(tree.roots.items[0].expanded);
+    try std.testing.expect(!tree.findNode("/w/src").?.expanded);
+    // 접힌 부모 **아래**도 접힌다. 안 그러면 부모를 다시 펼쳤을 때 접기 전 깊이가 통째로 돌아온다.
+    try std.testing.expect(!tree.findNode("/w/src/deep").?.expanded);
+    // 이미 다 접혀 있으면 바뀐 것이 없다(호출자가 no-op 으로 둘 수 있다).
+    try std.testing.expect(!tree.collapseAll());
+}
+
+test "전체 접기는 scan 을 예약하지 않는다 — 감추는 동작이지 다시 읽는 동작이 아니다" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+    _ = tree.takeScanRequest();
+    try tree.applySnapshot("/w", &.{.{ .name = "src", .kind = .directory }});
+    _ = try tree.toggleDirectory("/w/src");
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+
+    _ = tree.collapseAll();
+    try std.testing.expect(tree.takeScanRequest() == null);
 }

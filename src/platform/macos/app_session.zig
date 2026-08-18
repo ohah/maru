@@ -3498,6 +3498,11 @@ pub const AppSession = struct {
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
+    /// 호버 중인 탭 ✕(닫기) 존과 "+"(새 Term) 버튼. **‹/› 와 같은 규율**이다 — 그 둘은 이미 호버하면 밝아져
+    /// "여기가 눌린다"를 알리는데 ✕·+ 만 그 신호가 없어, 작은 글리프를 조준하는 느낌이었다(사용자 요청
+    /// 2026-08-18: "왼쪽 사이드바처럼"). 렌더가 이 값으로 그 자리에 호버 배경을 얹는다.
+    hovered_tab_close: ?TabRef = null,
+    hovered_plus: ?*Pane = null,
     // Phase 7e-4: 마우스가 호버 중인 browser 주소창 nav 버튼(없으면 null). hoverCursor가 밴드 버튼 존이면 세우고(그 위면
     // pointingHand), 렌더 "1c"가 이 surface·이 버튼 존에 hover 배경 quad를 그려 클릭 영역(3칸)을 드러낸다("버튼이 작아
     // affordance 부족" 피드백). hovered_tab과 같은 transient — 트리/탭 변경 시 함께 null로 정리(stale 하이라이트 방지).
@@ -14450,9 +14455,31 @@ pub const AppSession = struct {
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
+                        const sw = chrome.components.tabbar.Metrics.scroll_button_cols;
                         scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols, self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
-                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + 2, self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
+                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw, self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
                     };
+                    // ✕·"+" 호버 배경 — ‹/› 와 **같은 신호**다(사용자 요청 2026-08-18). 그 둘만 호버 표시가
+                    // 없어서 작은 글리프를 조준하는 느낌이었다. 배경은 호버일 때만 얹는다: ‹/› 는 항상 버튼
+                    // 자리를 차지하지만 ✕ 는 호버한 탭에만 나타나고 "+" 는 바 배경과 이어져 보이는 편이 낫다.
+                    if (m_opt) |m| {
+                        if (self.hovered_plus) |hp| if (hp == lr.leaf and m.hasPlusZone()) {
+                            const ps = m.plusZoneStart();
+                            var i: u32 = 0;
+                            while (i < chrome.components.tabbar.Metrics.plus_button_cols and ps + i < m.cols) : (i += 1) {
+                                scroll_ops.appendScrollButtonQuad(self, m, ps + i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                            }
+                        };
+                        if (self.hovered_tab_close) |hc| if (hc.pane == lr.leaf) {
+                            const seg = m.segOf(hc.tab);
+                            if (seg.has_close and seg.end_col > seg.start_col) {
+                                var i: u32 = seg.end_col -| 2;
+                                while (i < seg.end_col and i < m.cols) : (i += 1) {
+                                    scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                                }
+                            }
+                        };
+                    }
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
                     if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(sidebar_ops.sidebarBg(self)))) |cell| pane_chrome.append(self.allocator, cell) catch {};
@@ -40142,6 +40169,67 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
 
 // TS1 탭 스타일 축(chrome.tab-style=underline): 활성 탭에 **본문색 cutout 배경이 없고** 앰버 언더바만 방출되는지
 // 고정한다(connected와 같은 세그먼트 기하, fill만 다름 — §7). config enum → appearance → 토큰 → 렌더 분기 전 경로 검증.
+// ✕·"+" 호버 배경은 **‹/› 와 같은 신호**다(사용자 요청 2026-08-18: "왼쪽 사이드바처럼"). 그 둘만 호버
+// 표시가 없어 작은 글리프를 조준하는 느낌이었다. 여기서 고정하는 것은 "호버한 자리에만 배경 quad 가
+// 생긴다" — 호버가 없으면 그 색의 quad 가 아예 없어야 한다(항상 칠하면 바가 얼룩진다).
+test "탭 바: ✕·+ 는 호버한 자리에만 배경 quad 를 얹는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich;
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
+    _ = try session.tick();
+
+    const hover_bg = session.chromeQuadBg(sidebar_ops.sidebarActiveBg(session));
+    const countHoverQuads = struct {
+        fn f(sess: *AppSession, bg: u32) usize {
+            var n: usize = 0;
+            for (sess.gpu_quads.items) |q| {
+                if (q.layer == 2 and q.fill_color0 == bg) n += 1;
+            }
+            return n;
+        }
+    }.f;
+
+    // 호버 없음(포인터를 바 밖 터미널 본문에 둔다) → 그 색 quad 가 없다.
+    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 400), 400, 0);
+    _ = try session.tick();
+    const idle = countHoverQuads(session, hover_bg);
+
+    // "+" 위 → quad 가 늘어난다.
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 2, session.buildChromeTokens().space.tab_width_cols, 0).?;
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
+    const plus_x: f64 = @floatFromInt(pb.tabs.x + (m.plusZoneStart() + chrome.components.tabbar.Metrics.plus_button_cols / 2) * session.cell_width_px);
+    _ = session.hoverCursor(plus_x, bar_y, 0);
+    try std.testing.expect(session.hovered_plus != null);
+    _ = try session.tick();
+    try std.testing.expect(countHoverQuads(session, hover_bg) > idle);
+
+    // ✕ 위 → 역시 늘어난다(그리고 plus 호버는 풀린다).
+    const seg0 = m.segOf(0);
+    try std.testing.expect(seg0.has_close);
+    _ = session.hoverCursor(seg0.close_start_px + 1, bar_y, 0);
+    try std.testing.expect(session.hovered_tab_close != null);
+    try std.testing.expect(session.hovered_plus == null);
+    _ = try session.tick();
+    try std.testing.expect(countHoverQuads(session, hover_bg) > idle);
+}
+
 test "TS1 chrome.tab-style=underline: no cutout bg quad, only the amber underbar" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -40379,10 +40467,14 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
-    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 3, 0, 0).?;
-    // 탭 1 ✕ zone col = (1+1)*tab_w - 1(우측 안쪽). x = bar.x + (2*tab_w - 1)*cw.
-    const close_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w - 1) * session.cell_width_px);
+    // **hit-test 와 같은 인자로** metrics 를 만든다: `updateHoveredTab` 은 `pb.tabs`(grip 제외)와 실제
+    // `tab_width_cols` 로 만든다. 전체 바 rect 로 만들면 세그먼트가 어긋나 테스트가 엉뚱한 자리를 짚는다.
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const bar = pb.tabs;
+    const m = barMetrics(bar, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
+    // ✕ 자리도 **세그먼트에서 직접** 뽑는다(칸 산수는 탭 폭·패딩이 바뀌면 조용히 다른 칸을 짚는다).
+    const seg1_close = m.segOf(1);
+    const close_x: f64 = seg1_close.close_start_px + 1;
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 호버 → hovered_tab이 (활성 pane, 탭 1)로 설정된다(✕가 그려질 대상).
@@ -40390,6 +40482,25 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
     try std.testing.expect(m.inCloseZone(1, close_x)); // ✕ zone 안
+    // ✕ **존 위**라는 것도 따로 선다 — 렌더가 그 자리에만 호버 배경을 얹는다(‹/› 와 같은 신호,
+    // 사용자 요청 2026-08-18). 탭 위이되 ✕ 밖이면 이 값은 비어 있어야 한다.
+    try std.testing.expect(session.hovered_tab_close != null);
+    try std.testing.expectEqual(@as(usize, 1), session.hovered_tab_close.?.tab);
+    // 제목 자리는 **세그먼트에서 직접** 뽑는다 — 칸 산수로 짚으면 탭 폭에 따라 ✕ 존과 겹칠 수 있다.
+    const seg1 = m.segOf(1);
+    const tab1_title_x: f64 = seg1.start_px + 1;
+    try std.testing.expect(seg1.has_close and tab1_title_x < seg1.close_start_px); // 이 좌표가 ✕ 밖임을 먼저 못박는다
+    _ = session.hoverCursor(tab1_title_x, bar_y, 0);
+    try std.testing.expect(session.hovered_tab != null); // 여전히 그 탭 호버
+    try std.testing.expect(session.hovered_tab_close == null); // 그러나 ✕ 존은 아니다
+    // "+" 버튼 위: 탭 호버는 풀리고 plus 호버가 선다(마지막 탭에 ✕ 오표시 방지 규칙과 짝).
+    const plus_x: f64 = @floatFromInt(bar.x + (m.plusZoneStart() + chrome.components.tabbar.Metrics.plus_button_cols / 2) * session.cell_width_px);
+    _ = session.hoverCursor(plus_x, bar_y, 0);
+    try std.testing.expect(session.hovered_plus != null);
+    try std.testing.expect(session.hovered_tab == null);
+    try std.testing.expect(session.hovered_tab_close == null);
+    // 다시 ✕ 위로 돌아와 아래 클릭이 그 자리를 누르게 한다.
+    _ = session.hoverCursor(close_x, bar_y, 0);
 
     // ✕ 클릭 → 탭 1 Term 닫힘 → 2개. 닫은 뒤 호버는 비워진다(stale 방지).
     session.mouse(1, close_x, bar_y, 0, 0);

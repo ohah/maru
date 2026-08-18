@@ -61,6 +61,9 @@ pub const Intent = union(enum) {
     /// 브랜치 줄의 **원격 갱신**(P6). 대상은 **브랜치 줄이 말하는 그 저장소**(활성 저장소)라 인덱스를
     /// 싣지 않는다 — 줄이 하나뿐이므로 실으면 두 곳이 같은 사실을 들게 된다.
     fetch_remote,
+    /// 그 칩 오른쪽의 `∨` — **보조 메뉴**를 연다(P6b). 메뉴 항목(`push`/`pull`)은 우리가 실행하지 않고
+    /// 활성 터미널에 명령을 넣어 주므로, 무엇을 넣을지는 host가 정한다.
+    open_remote_menu,
     /// 스크롤바. 목표 offset은 포인터 좌표의 함수라 intent에 실을 수 없다 — host가 같은 published
     /// 기하로 좌표를 offset으로 바꾼다.
     scroll_thumb,

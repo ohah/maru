@@ -3886,6 +3886,9 @@ pub const AppSession = struct {
     scm_fetch_seq: u64 = 0,
     /// 그 fetch가 향한 저장소. 끝난 뒤 **그 저장소를** 다시 읽어야 ahead/behind가 방금 받은 ref를 본다.
     scm_fetch_repo: ?[]u8 = null,
+    /// 브랜치 줄 `∨`의 보조 메뉴가 열려 있나(P6b). 다른 메뉴 상태와 **배타**다 — 이 플래그를 빠뜨리면
+    /// 다음 메뉴의 accept가 엉뚱한 분기로 간다(브랜치·리소스 메뉴가 같은 규율을 갖는다).
+    scm_remote_menu_open: bool = false,
     /// 낙관적으로 옮겨 놓은 행(§7). **경로는 세션 allocator 소유**다 — 모델 버퍼는 프레임마다 다시 만들어져
     /// 그 슬라이스를 들고 있으면 다음 프레임에 남의 글자를 가리킨다.
     ///
@@ -13933,6 +13936,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
+        debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
@@ -56501,6 +56505,28 @@ test "소스 컨트롤: 원격이 없으면 fetch를 걸지 않고 이유를 적
     try std.testing.expect(session.scm_write_error != null);
     git_ops.rememberGitRepo(session, "/other-repo");
     try std.testing.expect(session.scm_write_error == null);
+}
+
+test "소스 컨트롤: `∨` 메뉴는 명령을 넣어 줄 뿐이고, 넣을 곳이 없으면 그렇게 말한다 (P6b)" {
+    // `push`/`pull`은 **우리가 실행하지 않는다**(쓰기·원격 §4) — 활성 터미널에 글자를 넣고 엔터는
+    // 사용자가 친다. 넣을 터미널이 없으면 조용히 사라지지 않고 그 사실을 적는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 범위 밖 인덱스는 아무 일도 하지 않는다(메뉴가 두 줄인데 세 번째가 오면 그건 우리 버그다).
+    scm_dock_ops.applyRemoteMenuSelection(session, 9);
+    try std.testing.expect(session.scm_write_error == null);
+
+    // 활성 Term을 web으로 바꿔 "넣을 터미널이 없는" 상태를 만든다.
+    const term = pane_ops.activePane(session).activeTerm();
+    const saved = term.kind;
+    term.kind = .web;
+    defer term.kind = saved;
+    scm_dock_ops.applyRemoteMenuSelection(session, 0);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_terminal), session.scm_write_error.?);
 }
 
 test "소스 컨트롤: 방금 누른 동작의 결과는 어느 탭에서도 보인다 (P6)" {

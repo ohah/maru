@@ -29,6 +29,8 @@ pub const NodeIds = struct {
     pub const commit_button: u64 = 0x5343_0008;
     /// 브랜치 줄의 원격 갱신 버튼(P6). 고정 chrome이라 항목 차선을 쓰지 않는다.
     pub const fetch: u64 = 0x5343_0009;
+    /// 그 옆의 `∨`(P6b) — `push`/`pull`을 터미널에 넣어 주는 보조 메뉴를 연다.
+    pub const remote_menu: u64 = 0x5343_000A;
 
     /// 탭 하나의 칸. **칸을 나누는 결정은 여기(tree) 하나가 소유한다** — `view`가 자기 산수로 다시
     /// 나누면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(옛 셀 그리드 경로가 그렇게 갈렸다).
@@ -140,10 +142,10 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     };
     // 행 + 행 동작 버튼 + 커밋 버튼 면 + 탭 칸 셋 + 고정 chrome 넷(탭 줄·요약·스크롤 영역·브랜치 줄).
     // **커밋 상자·버튼은 고정이 아니다**(②b) — 저장소마다 하나씩이라 `items`에 들어 있다.
-    // 마지막 +1은 브랜치 줄의 **원격 갱신 버튼**이다(P6) — 원격이 없어도 자리는 늘 있으므로(비활성으로
+    // 마지막 +2는 브랜치 줄의 **원격 갱신 버튼과 `∨`**다(P6·P6b) — 원격이 없어도 자리는 늘 있으므로(비활성으로
     // 그린다) props에 따라 늘었다 줄지 않는다. 세지 않으면 목록이 꽉 찬 프레임에서 노드 버퍼가 모자라
     // **도크가 통째로 빈다**.
-    const node_count = items.len + action_buttons + faces + tab_order.len + 4 + 1;
+    const node_count = items.len + action_buttons + faces + tab_order.len + 4 + 2;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 scroll area가 preorder 안에서 내는 track/thumb다.
@@ -155,8 +157,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         // 행 열기 + 행 동작 + 그룹 토글/일괄 동작 + 커밋 상자·버튼은 전부 **행당 둘** 상한 안이고,
         // +2는 스크롤바다.
         // 행당 둘이 상한인데 **머리 줄만 셋**이다(접기 + 동작 둘 — ②c). +2는 스크롤바다.
-        // +1은 브랜치 줄의 원격 갱신이다(P6).
-        .actions = items.len * 2 + faces + tab_order.len + 2 + 1,
+        // +2는 브랜치 줄의 원격 갱신과 그 보조 메뉴다(P6·P6b).
+        .actions = items.len * 2 + faces + tab_order.len + 2 + 2,
     };
 }
 
@@ -511,7 +513,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 그 줄의 오른쪽 끝에 **원격 갱신 버튼**이 앉는다(P6 — 목업의 `Fetch ∨`). 자리는 늘 잡되 **누를 수
     // 있는지는 `enabled`가 말한다**: 원격이 없는 저장소나 이미 도는 중이면 꺼진다. 브랜치를 못 잡은
     // 프레임에서는 줄 자체가 높이 0이라 이 버튼도 함께 사라진다(없는 저장소를 fetch할 수는 없다).
-    const fetch_slot = buffers.nodes[action_cursor + tab_order.len + 4 ..][0..1];
+    const fetch_slot = buffers.nodes[action_cursor + tab_order.len + 4 ..][0..2];
     const fetch_action = table.append(
         props.snapshot_generation,
         .fetch_remote,
@@ -526,7 +528,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{
             .width = .{ .px = @floatFromInt(m.fetchChipWidthPx(fetch_label, props.cell_width_px)) },
             .height = .{ .px = @floatFromInt(m.action_extent) },
-            .margin = .{ .right = @floatFromInt(m.inset_x) },
+            // 칩과 `∨` 사이는 **좁게** 둔다 — 둘이 한 컨트롤 묶음으로 읽혀야 한다(목업의 `Fetch ∨`).
+            .margin = .{ .right = @floatFromInt(m.gap) },
         },
         .variant = .surface,
         .paint = .{
@@ -542,6 +545,32 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .action = fetch_action,
         // 꺼져 있으면 **누르는 손이 아니다** — 커서가 "된다"고 말해 놓고 안 되면 그게 고장으로 읽힌다.
         .cursor = if (props.fetch.enabled and !props.fetch.running) .press else .arrow,
+        .overflow = .clip,
+    }, &.{});
+    // `∨`는 **자기 히트 사각형**이다(P6b). 칩과 합치면 "갱신"과 "메뉴 열기"가 같은 클릭이 되어, 누를
+    // 때마다 네트워크가 도는 컨트롤 위에 메뉴가 뜬다. **도는 중에도 열린다** — `push`/`pull`은 우리가
+    // 실행하는 것이 아니라 터미널에 넣어 주는 글자라 fetch와 겹치지 않는다.
+    const menu_action = table.append(
+        props.snapshot_generation,
+        .open_remote_menu,
+        props.fetch.enabled,
+    ) catch return error.InsufficientActionBuffer;
+    fetch_slot[1] = tree.card(.{
+        .id = NodeIds.remote_menu,
+        .style = .{
+            .width = .{ .px = @floatFromInt(m.disclosure_extent) },
+            .height = .{ .px = @floatFromInt(m.action_extent) },
+            .margin = .{ .right = @floatFromInt(m.inset_x) },
+        },
+        .variant = .surface,
+        .paint = .{
+            .background = .surface_bg,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = .{ 0, 0, 0, 0 },
+            .shadow = .none,
+        },
+        .action = menu_action,
+        .cursor = if (props.fetch.enabled) .press else .arrow,
         .overflow = .clip,
     }, &.{});
     top[3] = tree.card(.{
@@ -679,9 +708,9 @@ test "버퍼가 모자라면 실패하고 반쯤 만든 tree를 내지 않는다
     // 호출처가 이 실패를 삼키면 도크가 통째로 멈추므로, 상한 산술은 `bufferSizes` 하나가 소유한다.
     const items = testItems();
     const sizes = bufferSizes(&items);
-    // 행 4 + 버튼 3 + 탭 칸 3 + **고정 4**(탭 줄·요약·목록·브랜치) + **원격 갱신 1**(P6). 커밋 상자·버튼은
-    // ②b에서 목록 항목으로 내려갔으므로 고정에 없다 — 이 숫자가 그 사실을 잠근다.
-    try testing.expectEqual(items.len + 3 + tab_order.len + 4 + 1, sizes.nodes);
+    // 행 4 + 버튼 3 + 탭 칸 3 + **고정 4**(탭 줄·요약·목록·브랜치) + **원격 갱신 2**(P6 칩 · P6b `∨`).
+    // 커밋 상자·버튼은 ②b에서 목록 항목으로 내려갔으므로 고정에 없다 — 이 숫자가 그 사실을 잠근다.
+    try testing.expectEqual(items.len + 3 + tab_order.len + 4 + 2, sizes.nodes);
     var storage: Storage = .{};
     try testing.expectError(error.InsufficientNodeBuffer, build(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 300, .height = 400 },
@@ -752,6 +781,50 @@ test "브랜치 줄의 원격 갱신 칩: 자리는 늘 있고 켜짐은 원격�
     };
 }
 
+test "`∨`는 칩 오른쪽의 **자기 히트 사각형**이고 도는 중에도 열린다 (P6b)" {
+    var storage: Storage = .{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = true, .running = true },
+    }, &storage);
+
+    const chip = frame.tree.entries[frame.tree.find(NodeIds.fetch) orelse return error.MissingFetch].rect;
+    const menu_index = frame.tree.find(NodeIds.remote_menu) orelse return error.MissingRemoteMenu;
+    const menu = frame.tree.entries[menu_index].rect;
+    // 칩 **오른쪽**이고 겹치지 않는다 — 겹치면 "갱신"을 누르려다 메뉴가 뜬다.
+    try testing.expect(menu.x >= chip.x + chip.width);
+    try testing.expect(menu.width > 0 and menu.height > 0);
+    try testing.expectEqual(tree.CursorHint.press, frame.tree.entries[menu_index].cursor);
+
+    // **fetch가 도는 중에도 메뉴는 열린다.** `push`/`pull`은 우리가 실행하는 것이 아니라 터미널에 넣어
+    // 주는 글자라 네트워크 슬롯과 겹치지 않는다.
+    var saw_menu = false;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .open_remote_menu => {
+            saw_menu = true;
+            try testing.expect(entry.enabled);
+        },
+        .fetch_remote => try testing.expect(!entry.enabled), // 도는 중이라 갱신은 거절한다
+        else => {},
+    };
+    try testing.expect(saw_menu);
+
+    // 원격이 없으면 둘 다 꺼진다 — `push`/`pull`도 원격이 없으면 무엇을 골라도 실패한다.
+    var storage_off: Storage = .{};
+    const off = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = false },
+    }, &storage_off);
+    for (off.actions) |entry| switch (entry.intent) {
+        .open_remote_menu, .fetch_remote => try testing.expect(!entry.enabled),
+        else => {},
+    };
+}
+
 test "브랜치를 못 잡으면 원격 갱신 칩도 함께 사라진다 (P6)" {
     // 줄 자체가 높이 0인데 버튼만 남으면 **없는 저장소를 fetch하는 컨트롤**이 화면에 뜬다.
     var storage: Storage = .{};
@@ -795,7 +868,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file, .fetch_remote => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file, .fetch_remote, .open_remote_menu => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

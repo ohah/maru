@@ -442,6 +442,12 @@ pub const Table = struct {
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
     scm_fetch_done: [:0]const u8,
+    /// `∨` 보조 메뉴의 두 줄(P6b). **우리가 실행하지 않는다** — 활성 터미널에 명령을 넣어 주고 엔터는
+    /// 사용자가 친다. 그래서 문구가 동작이 아니라 **넣어 줄 명령**을 말한다.
+    scm_menu_push: [:0]const u8,
+    scm_menu_pull: [:0]const u8,
+    /// 명령을 넣을 터미널이 없다(활성 surface가 터미널이 아니다).
+    scm_no_terminal: [:0]const u8,
     scm_changes: [:0]const u8,
     scm_history: [:0]const u8,
     scm_agent: [:0]const u8,
@@ -997,6 +1003,9 @@ pub const en: Table = .{
     .scm_fetching = "Fetching…",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
+    .scm_menu_push = "Type git push",
+    .scm_menu_pull = "Type git pull",
+    .scm_no_terminal = "No terminal to type into",
     .scm_changes = "Changes",
     .scm_history = "History",
     .scm_agent = "Agent",
@@ -1485,6 +1494,9 @@ pub const ko: Table = .{
     .scm_fetching = "가져오는 중…",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
+    .scm_menu_push = "git push 넣기",
+    .scm_menu_pull = "git pull 넣기",
+    .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",
     .scm_agent = "에이전트",

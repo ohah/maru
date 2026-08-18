@@ -1165,6 +1165,61 @@ pub fn applyScmDockIntentAt(self: *AppSession, intent: component.ids.Intent, x_p
 /// 터미널이 열리고 닫히며 목록이 바뀔 수 있다(파일 행이 모델 인덱스를 다시 조회하는 것과 같은 규율).
 ///
 /// 반환 슬라이스는 **이 프레임 동안만** 유효하다(호출자가 곧바로 쓴다).
+/// 캡처 전용: 소스 컨트롤 도크의 파일 행을 **클릭한 것처럼** 열어 비교를 띄운다
+/// (`MARU_OPEN_SCM_DIFF=<파일 행 순번|last>`, 0-based).
+///
+/// **왜 필요한가.** N1.5의 기본 경로 전환은 계약이 *"실제 클릭 경로를 눈으로 확인한 뒤에"* 하라고
+/// 정했는데(plans/native-editor.md), 스크린샷 하니스에는 포인터가 없어 도크 행을 누를 수가 없다.
+/// 강제 호버 훅이 같은 이유로 있는 자리다.
+///
+/// **제품 경로를 그대로 태운다** — `.open_row` 핸들러가 하는 일(저장소 → 모델 → 파일 행 →
+/// `selectRow` + `openDiffForScmRow`)을 같은 순서로 부른다. 여기서 `entry.diff_*`를 직접 채우면
+/// 그것은 클릭 경로가 아니라 그 배관의 복제가 되어, 확인하려던 것을 확인하지 못한다.
+///
+/// **모델이 찰 때까지 기다린다.** 목록은 git 백엔드의 비동기 결과라 첫 프레임에는 비어 있다.
+/// 그래서 래치는 **실제로 연 뒤에만** 세운다 — 실패한 프레임에서 세우면 목록이 도착해도 안 연다.
+///
+/// 도크가 소스 컨트롤 뷰가 아니면 **여기서 연다**(캡처 하니스는 그 전환도 누를 수 없다).
+/// env 미설정이면 무동작.
+pub fn maybeDebugOpenScmDiff(self: *AppSession) void {
+    if (self.debug_scm_diff_opened or !self.dock_initialized) return;
+    const raw = std.c.getenv("MARU_OPEN_SCM_DIFF") orelse return;
+    // **다른 훅과 달리 `"0"`을 끄는 값으로 보지 않는다** — 여기서 그것은 "첫 파일 행"이라는 **인덱스**다.
+    // 끄려면 env를 지운다(빈 값은 아래에서 무동작).
+    const spec = std.mem.span(raw);
+    if (spec.len == 0) return;
+
+    self.dock.presented = true;
+    self.dock.view = .source_control;
+
+    // **첫 저장소만 본다** — 캡처 하니스는 한 저장소를 열고 찍는다. 목록에 저장소가 여럿인 화면을
+    // 찍어야 하면 그때 인덱스를 받게 늘린다.
+    const repo = repoPathAt(self, 0) orelse return; // 목록이 아직 없다 — 다음 프레임에 다시 본다
+    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse return;
+
+    // **파일 행만 센다** — 섹션 머리·"더 보기"·안내 줄은 클릭 대상이 아니다.
+    const want_last = std.mem.eql(u8, spec, "last");
+    const want_index: usize = if (want_last) 0 else std.fmt.parseInt(usize, spec, 10) catch 0;
+    var seen: usize = 0;
+    var chosen: ?struct { index: usize, file: scm_view.FileRow } = null;
+    for (model.rows, 0..) |row, i| {
+        switch (row) {
+            .file => |f| {
+                if (want_last or seen == want_index) chosen = .{ .index = i, .file = f };
+                seen += 1;
+            },
+            else => {},
+        }
+    }
+    const pick = chosen orelse return; // 변경된 파일이 하나도 없다
+
+    self.debug_scm_diff_opened = true;
+    selectRow(self, repo, @intCast(pick.index));
+    git_ops.openDiffForScmRow(self, repo, pick.file);
+}
+
 fn repoPathAt(self: *AppSession, index: u32) ?[]const u8 {
     const repos = repoEntries(self);
     if (index >= repos.entries.len) return null;

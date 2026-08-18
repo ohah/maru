@@ -85,14 +85,21 @@ pub fn isDiffTerm(term: *const Term) bool {
     return entry.kind == .diff;
 }
 
-/// 비교를 **네이티브 편집기로** 열까. 지금은 훅으로만 켠다 — 기본 경로는 CM6 그대로다(이관은 화면이
-/// 서고 실제 클릭 경로를 확인한 뒤에 뒤집는다).
+/// 비교를 **네이티브 편집기로** 열까. **기본이 네이티브다**(2026-08-18 — N1.5 기본 경로 전환).
+///
+/// **전환 전에 실제 클릭 경로를 확인했다**(계획이 정한 조건). 소스 컨트롤 도크 행을 클릭한 것과 같은
+/// 경로(`MARU_OPEN_SCM_DIFF` 훅 → `openDiffForScmRow`)로 열어 좌우 배치·색·줄 번호·가로 막대가 실제
+/// 제품 화면에 뜨는 것을 캡처로 봤다. 그때 CM6 대비 유일한 후퇴였던 **가로 막대**를 같은 슬라이스에서
+/// 채웠다(§4.1a — CM6는 WebKit이 그려 주던 것이라 네이티브에서는 직접 그려야 한다).
+///
+/// **`MARU_NATIVE_DIFF=0`으로 되돌릴 수 있다.** 전환 직후 회귀가 나오면 사용자가 CM6로 돌아갈 길을
+/// 남긴다 — 훅을 지우는 것은 그 경로를 실제로 안 쓰게 된 뒤의 일이다.
 ///
 /// **세션이 init에서 한 번 읽어 든다**(`AppSession.native_diff`). 분기가 프로세스 전역 환경을 직접
 /// 읽으면 그 분기를 확인하려는 테스트가 env를 건드려야 하고, 그것이 같은 프로세스의 다른 테스트로
 /// 샌다 — 실제로 이 테스트를 쓰다가 그 문제를 만났다.
 pub fn nativeDiffFromEnv() bool {
-    const raw = std.c.getenv("MARU_NATIVE_DIFF") orelse return false;
+    const raw = std.c.getenv("MARU_NATIVE_DIFF") orelse return true;
     return valueEnables(std.mem.span(raw));
 }
 
@@ -193,14 +200,18 @@ pub fn poll(self: *AppSession, term: *Term) void {
             st.view = .{ .unavailable = reason };
             st.settled = true;
         },
-        .compare => computeRows(self, entry, st),
+        .compare => computeRows(self, term, entry, st),
     }
     st.settled_on = flags;
     self.metal_dirty = true;
 }
 
 /// 두 쪽이 왔다 — 줄로 자르고 대응을 만든다. **여기서만 할당한다.**
-fn computeRows(self: *AppSession, entry: *dock_panel.Entry, st: *State) void {
+///
+/// **끝에서 좌우 가장 긴 줄을 센다** — 가로 막대가 첫 프레임부터 서야 사용자가 그 축이 있다는 것을
+/// 안다(§4.1a, 2026-08-18 사용자 지적으로 단일 편집기에 붙은 그 규칙과 같은 자리다). 여는 경로가
+/// 문서 편집기에 `ensureMaxCols`를 부르는 것과 같은 시점이고, 비교는 그 자리가 여기다.
+fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *State) void {
     st.settled = true;
     // **한쪽만 바이너리여도 비교하지 않는다.** 한쪽을 글자로 읽어 대응을 만들면 뜻 없는 줄 짝이 화면에 뜬다.
     if (diff_state.isBinary(entry.diff_original) or diff_state.isBinary(entry.diff_modified)) {
@@ -227,7 +238,12 @@ fn computeRows(self: *AppSession, entry: *dock_panel.Entry, st: *State) void {
     materialize(self.allocator, st) catch {
         st.view.compare.deinit(self.allocator);
         st.view = .{ .unavailable = .unknown };
+        return;
     };
+    // **행 배열이 선 뒤에 센다** — `ensureMaxCols`가 그 배열(`left_texts`/`right_texts`)을 읽으므로
+    // `materialize` 앞에서 부르면 빈 것을 세고 0으로 굳는다(캐시는 0을 "안 셌다"로 읽어 다음 프레임에
+    // 다시 세지만, 그때는 이미 막대 없이 한 프레임이 나간 뒤다).
+    editor_ops.ensureMaxColsForDiff(term);
 }
 
 /// 행 배열을 **화면이 받는 모양**으로 한 번 옮겨 담는다.
@@ -1527,6 +1543,32 @@ test "gutter 자릿수는 렌더와 같은 출처로 센다 — 최소 자릿수
     const m = chrome_editor.diff_frame.sideMetrics(cols.left.w, body.h -| inset * 2, 8, 16);
     const want = chrome_editor.geometry.compute(m.total_cols, doc.len, .{}).content.width; // 렌더가 쓰는 출처
     try testing.expectEqual(want, editor_ops.visibleColsForTest(fx.session, body, fx.term, false));
+}
+
+test "비교가 서면 좌우 가장 긴 줄을 센다 — 가로 막대가 첫 프레임부터 뜬다 (§4.1a)" {
+    // 단일 편집기는 **여는 경로**에서 센다(굴려 보기 전에 그 축이 있는지 알 수 있어야 한다 —
+    // 2026-08-18 사용자 지적). 비교는 두 쪽이 비동기로 도착하므로 그 자리가 `computeRows`다.
+    //
+    // **좌우 각자다**(§3.5) — 원본과 수정본의 가장 긴 줄이 다르고, 막대 길이도 그래서 각자여야 한다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 오른쪽을 훨씬 길게 준다 — 좌우 캐시가 **다른 값**이어야 각자 센 것이 증명된다.
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    for (0..300) |_| try rb.append(allocator, 'R');
+    try rb.append(allocator, '\n');
+    var entry = testEntry("short\n", rb.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_max_cols = 0;
+    fx.term.rt.editor_max_cols_right = 0;
+
+    poll(fx.session, fx.term);
+
+    try testing.expect(fx.term.rt.editor_max_cols > 0); // 왼쪽도 셌다
+    try testing.expect(fx.term.rt.editor_max_cols_right > fx.term.rt.editor_max_cols); // 오른쪽이 더 길다
 }
 
 test "비교 뷰에서는 접기를 거절한다 — 성공을 돌려주고 아무 일도 안 하면 안 된다" {

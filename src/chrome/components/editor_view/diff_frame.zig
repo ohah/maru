@@ -163,6 +163,14 @@ pub const Shared = struct {
     cell_w_px: u16,
     cell_h_px: u16,
     font_px: u16,
+    /// 가로 막대 자리를 **양쪽 다** 뗄 것인가. `null`이면 각 열이 자기 `content_max_cols`로 정한다
+    /// (단일 편집기 경로가 그렇다 — 열이 하나뿐이라 통일할 것이 없다).
+    ///
+    /// **비교 뷰는 이것을 반드시 준다.** 막대는 본문 아래 여백에서 **자리를 먹으므로**(§4.1a) 한쪽만
+    /// 서면 그쪽 `visible_rows`가 한 행 작아지는데, 스크롤 상한(`max_top`)은 `build`가 **한쪽 값만**
+    /// 골라 쓴다(세로를 공유하므로 — §3.5). 그러면 짧아진 쪽이 문서 끝에 못 닿거나 긴 쪽 아래가
+    /// 빈다. 좌우를 같은 판정으로 묶으면 `visible_rows`가 같아져 그 어긋남이 생기지 않는다.
+    force_horizontal_bar: ?bool = null,
 };
 
 /// 한 열을 그린다. 좌표는 `rect`가 정하므로 **열이 어디에 있든** 같은 함수다.
@@ -177,7 +185,8 @@ pub fn buildSide(
     // 열 수(`total_cols`)를 알아야 판정할 수 있는데 그 값이 이 계산에서 나오므로, 한 번 재고 나서
     // 막대가 서면 다시 잰다. 두 번째 계산은 폭을 안 바꾸므로(막대는 아래에만 붙는다) 열 수는 같다.
     const probe = sideMetrics(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px);
-    const shows_h_bar = frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
+    const shows_h_bar = shared.force_horizontal_bar orelse
+        frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
     const m = sideMetricsWith(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
     return frame.build(.{
         .lines = side.lines,
@@ -242,6 +251,13 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     const left_bg_x = outer.x;
     const right_bg_end = outer.x + @as(i32, @intCast(outer.w));
 
+    // **막대 판정을 좌우가 함께 한다**(§3.5 세로 공유). 한쪽만 서면 그쪽 `visible_rows`가 한 행
+    // 작아지는데 아래에서 `max_top`은 한쪽 값만 고르므로, 짧아진 쪽이 끝에 못 닿거나 긴 쪽 아래가
+    // 빈다. 한쪽이라도 넘치면 **양쪽 다** 자리를 뗀다 — 안 넘치는 쪽에는 빈 띠가 남지만 그것이
+    // 스크롤이 끝에 안 닿는 것보다 낫다.
+    const wants_h_bar =
+        frame.showsHorizontalBar(props.wrap, props.left.content_max_cols, geometry.compute(sideMetrics(cols.left.w, cols.left.h, props.cell_w_px, props.cell_h_px).total_cols, props.left.total_lines orelse props.left.lines.len, .{}).content.width) or
+        frame.showsHorizontalBar(props.wrap, props.right.content_max_cols, geometry.compute(sideMetrics(cols.right.w, cols.right.h, props.cell_w_px, props.cell_h_px).total_cols, props.right.total_lines orelse props.right.lines.len, .{}).content.width);
     const shared: Shared = .{
         .first_line = props.first_line,
         .first_piece = props.first_piece,
@@ -250,6 +266,7 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         .cell_w_px = props.cell_w_px,
         .cell_h_px = props.cell_h_px,
         .font_px = props.font_px,
+        .force_horizontal_bar = wants_h_bar,
     };
     const lw = buildSide(props.left, shared, cols.left, .{
         .x = left_bg_x,
@@ -284,6 +301,59 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
 }
 
 const testing = std.testing;
+
+test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를 좌우가 함께 뗀다 (§3.5)" {
+    // 가로 막대는 본문 아래 여백에서 **자리를 먹는다**(§4.1a). 한쪽만 서면 그쪽 `visible_rows`가 한 행
+    // 작아지는데 `max_top`은 `build`가 한쪽 값만 고르므로(세로를 공유하니까 — §3.5), 짧아진 쪽이 문서
+    // 끝에 못 닿거나 긴 쪽 아래가 빈다. 그래서 **한쪽이라도 넘치면 양쪽 다** 뗀다.
+    //
+    // 판정: 오른쪽만 넘치는 프레임의 그린 행 수가, 아무도 안 넘치는 프레임보다 **적어야** 한다.
+    // 한쪽만 뗐다면 `@max(lw, rw)`가 안 뗀 쪽 값을 골라 둘이 같아진다(그 뮤턴트가 여기서 죽는다).
+    var ops: [512]draw.Op = undefined;
+    var text: [4096]u8 = undefined;
+    var runs: [512]draw.Run = undefined;
+    var content_rows: [128]@import("content.zig").Row = undefined;
+    var visual_rows: [128]@import("../../ui/visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [128]gutter.Row = undefined;
+    var counts: [128]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+    const s: frame.Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+
+    // 화면(20행)보다 긴 문서라야 "행이 줄었다"가 관측된다.
+    var lines: [40][]const u8 = undefined;
+    for (&lines) |*l| l.* = "ok";
+    const rect: draw.Rect = .{ .x = 0, .y = 0, .w = 640, .h = 320 }; // 320/16 = 20행
+
+    const spilled = build(.{
+        .left = .{ .lines = &lines, .content_max_cols = 4 },
+        .right = .{ .lines = &lines, .content_max_cols = 400 }, // 오른쪽만 넘친다
+        .rect = rect,
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+    }, s);
+
+    const flat = build(.{
+        .left = .{ .lines = &lines, .content_max_cols = 4 },
+        .right = .{ .lines = &lines, .content_max_cols = 4 }, // 아무도 안 넘친다
+        .rect = rect,
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+    }, s);
+
+    try testing.expect(flat.visual_rows > 0); // 실제로 그렸다
+    try testing.expect(spilled.visual_rows < flat.visual_rows); // 양쪽 다 자리를 뗐다
+}
 
 test "두 열이 서로를 침범하지 않고 가운데 한 칸이 빈다" {
     const cols = columns(.{ .x = 0, .y = 0, .w = 801, .h = 600 }, 8);

@@ -165,7 +165,10 @@ pub fn applyPendingScrollbarScroll(self: *AppSession) void {
         // **편집기는 px를 자기 단위로 옮긴다**(scroll-area.md 소비자 표) — 세로는 `(논리 줄, 조각)`이라
         // 시각 행으로 나눈 뒤 접두합을 되짚고, 가로는 열이라 셀 폭으로 나눈다.
         .editor_vertical => editor_ops.setEditorScrollFromBarPx(self, offset_px),
-        .editor_horizontal => {}, // 가로는 자기 Drag가 소비한다(아래 `applyPendingEditorHScroll`)
+        // **여기 못 온다.** 이 함수는 세로 전용 `dock_list_scroll_drag`의 offset을 먼저 가져오는데(위
+        // `orelse return`), 가로 드래그 중에는 그 Drag가 비활성이라 거기서 빠진다. 가로는 자기 Drag를
+        // 쓰는 `applyPendingEditorHScroll`이 소비한다. `switch`가 모든 태그를 요구해 자리만 둔다.
+        .editor_horizontal => {},
         .dock_list, .none => dock_ops.setDockListScrollOffsetPx(self, offset_px),
     }
 }

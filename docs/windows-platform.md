@@ -857,6 +857,20 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 
 두 번째가 **보안 설정이 실제로 게이트를 여닫는다**는 증거다. 값만 보고 넘어갔으면 못 봤을 자리다.
 
+**폰트도 config에서 온다 — config를 읽어 놓고 안 쓰던 자리였다.** 적대적 검증 1라운드가 잡았다:
+래스터라이저를 여전히 `create(allocator, "", "", 18.0)`으로 만들고 있었다. `font.family`·`font.fallback`·
+`font.size`를 넘기도록 고쳤고, **그래서 config 로드가 폰트 생성보다 앞에 온다.** 빈 값이면 §2e의 티어가
+고른다 — 거기서 이름을 박으면 그 티어가 죽는다.
+
+| config | 결과 |
+|---|---|
+| 없음 | `font_family=Cascadia Mono` `cell_px=9x17` |
+| `font.family = Consolas` + `font.size = 22` | `font_family=Consolas` `cell_px=13x26`, 격자 75×23 |
+
+**아직 안 배선한 것**(정직하게 적는다): 테마 색·팔레트·`max_scrollback` 같은 앱 수준 값은 이 스모크가
+하드코딩한다. 그것들의 소비자는 chrome·app 계층이라 W8과 함께 온다. `dwrite-text-smoke`는 **일부러**
+빈 이름을 넘긴다 — 티어가 실제로 고르는지 보는 스모크라 config가 끼면 그 판정이 흐려진다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

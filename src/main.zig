@@ -1088,8 +1088,22 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         return error.UnknownCommand;
     }
 
+    // ── 사용자 config ──────────────────────────────────────────────────────────────────────
+    //
+    // **폰트보다 먼저 읽는다** — `font.family`·`font.fallback`·`font.size` 가 래스터라이저 생성 인자다.
+    // 없거나 못 읽으면 기본값이다(forgiving: 설정 파일이 없어도 터미널은 정상 동작해야 한다).
+    //
+    // **`Parsed`(arena)를 세션 내내 들고 있어야 한다** — 리졸버가 바인딩 슬라이스를, 래스터라이저와
+    // 코어가 문자열 값을 arena 에서 **빌린다**. 먼저 해제하면 dangling 이다.
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
     // ── 폰트와 셀 격자 ─────────────────────────────────────────────────────────────────────
-    var raster = dwrite_font.Rasterizer.create(allocator, "", "", 18.0) catch |err| {
+    //
+    // **config 값을 그대로 넘긴다.** 빈 값이면 §2e 의 티어가 Cascadia Mono → Consolas → … 로 고른다 —
+    // 여기서 이름을 박으면 그 티어가 죽는다.
+    var raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
         try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
@@ -1191,16 +1205,6 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         },
     };
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
-
-    // **사용자 config 를 읽는다**(W7.5). 여기까지 하드코딩하던 값들 — 붙여넣기 보호·OSC 52 읽기 정책·
-    // 단어 구분자·우클릭 동작 — 이 전부 진짜 설정에서 온다. 없거나 못 읽으면 기본값이다(forgiving:
-    // 설정 파일이 없어도 터미널은 정상 동작해야 한다).
-    //
-    // **`Parsed` 를 세션 내내 들고 있어야 한다** — 리졸버가 바인딩 슬라이스를, 코어가 문자열 값을
-    // arena 에서 **빌린다**. 먼저 해제하면 dangling 이다.
-    var loaded = try maru.config.loader.loadDefault(io, allocator);
-    defer loaded.deinit();
-    const cfg = loaded.config;
 
     // **검증에 실패하면 사용자 바인딩을 안 쓴다.** 모호한 바인딩(중복·앱/터미널 충돌)을 그대로 쓰면
     // 어떤 키가 어디로 갈지 매번 달라진다 — 빌트인으로 접고 그 사실을 알린다.

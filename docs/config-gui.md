@@ -16,10 +16,10 @@ PR 분해를 단일 출처로 둔다. config 키·메타는 [config-schema.md], 
 ## 0. 목표와 범위
 
 - **메타가 곧 UI.** schema 필드 1개 = 세팅 행 1개. 위젯 종류·범위·라벨·섹션이 메타에서 파생되므로, 새 config
-  키를 추가하면(스키마 decl 1줄) **세팅 화면에도 자동으로** 뜬다(GUI 코드 추가 0줄). 단,
-  `chrome.theme`은 TUI 제거 전의 읽기 호환 키라 예외다. 세팅 UI와 검색 결과 모두에서 숨기며,
-  `tui` 또는 `chrome.preset = cell`을 새로 선택·변경하는 진입점은 만들지 않는다. 기존 config 값은
-  자동 변환·삭제하지 않고 로더 호환 경로만 유지한다([Chrome 전략](chrome-strategy.md#chrome-전용-전환-정책)).
+  키를 추가하면(스키마 decl 1줄) **세팅 화면에도 자동으로** 뜬다(GUI 코드 추가 0줄).
+  뒤집어 말하면 **필드를 되돌리면 행도 되살아난다** — 그래서 제거한 chrome 키(`chrome.theme` 룩·
+  `chrome.preset` 큐레이션)가 UI에 다시 나타나지 않는지를 테스트가 가드로 지킨다
+  ([Chrome 전략](chrome-strategy.md#chrome-전용-전환-정책)).
 - **config 파일이 단일 출처.** GUI는 파일을 읽고 쓰는 편집기. 저장은 **기본값 위 override만**([config-schema.md]
   §0; 직렬화는 S0-1b 의존 — §7).
 - **Zig+GPU chrome.** 네이티브 뷰 비사용([chrome-strategy.md], [ui-strategy-zig-gpu-renderer]). 이식성.

@@ -1176,7 +1176,7 @@ test "커밋 상자는 호버로 면이 밝아지지 않는다(테두리는 그�
         .items = &items,
         .branch = "main",
     }, &storage);
-    const tk = tokens.Tokens.tui(.{
+    const tk = tokens.Tokens.base(.{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 },
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 200, .g = 200, .b = 200 },

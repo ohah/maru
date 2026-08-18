@@ -1522,7 +1522,7 @@ fn viewBudgeted(
 }
 
 fn testTokens() tokens.Tokens {
-    return tokens.Tokens.tui(.{
+    return tokens.Tokens.base(.{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 }, // 픽스처: 비교 밴드 입력(§7)
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 200, .g = 200, .b = 200 },

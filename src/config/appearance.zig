@@ -85,7 +85,6 @@ pub const ResolvedAppearance = struct {
     font: ResolvedFontRequest,
     theme: ResolvedTheme,
     cursor: ResolvedCursor,
-    chrome_theme: theme.ChromeTheme = .rich, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a). 기본 rich(theme.Config 기본값과 일치 — 실제 값은 resolve가 config에서 채움)
     chrome_tab_style: theme.ChromeTabStyle = .underline, // connected|underline|pill — buildChromeTokens가 chrome 중립 tokens.TabActiveStyle로 매핑(§7). 기본 underline(미니멀, 사용자 요청)
 
     blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
@@ -131,7 +130,6 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
             .text = if (config.cursor.text) |c| try parseHexColor(c) else null,
             .unfocused = config.cursor.unfocused,
         },
-        .chrome_theme = config.chrome_theme,
         .chrome_tab_style = config.chrome_tab_style,
         .blink_text = config.blink_text,
         .bold_is_bright = config.bold_is_bright,

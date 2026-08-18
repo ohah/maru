@@ -875,11 +875,6 @@ pub const QuickTerminalChrome = enum {
 /// 읽기 호환 값이고, 새 component/UI의 설정 진입점은 rich/Metal만 쓴다. rich는 분리 색 팔레트(C4a — tui가
 /// sidebar_active로 공유하던 role을 파생색으로 분리)를 쓴다. platform buildChromeTokens가 호환 config를 위해
 /// tui()/rich()로 분기한다. 제거·migration은 별도 정책이 확정된 뒤에만 한다.
-pub const ChromeTheme = enum {
-    tui,
-    rich,
-};
-
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `chrome.theme`(룩)·`theme.preset`(색)과 직교.
 /// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = lifted 회색으로 채운 둥근 캡슐(Warp식 떠 있는 pill).
 /// rich 경로에서만 의미(tui는 셀 밴드 유지). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
@@ -888,40 +883,6 @@ pub const ChromeTabStyle = enum {
     underline,
     pill,
 };
-
-/// chrome 레이아웃 프리셋(`chrome.preset` — TS3, chrome-strategy.md §7). **여러 chrome 축**(룩 `chrome.theme` + 탭
-/// `chrome.tab-style`)을 한 노브로 묶은 큐레이션 — `theme.preset`이 색 세트를 한 번에 까는 패턴과 동형. loader가 `chrome.preset`
-/// 키로 파싱해 `chromePresetValues()`로 두 축을 깔고, 개별 `chrome.theme`/`chrome.tab-style` 키가 그 *뒤에서* override한다
-/// (loader 순차 — 나중 줄 우선). 메가 enum이 아니라 **묶음**이라 직교 축은 그대로(색=theme.preset과도 직교).
-pub const ChromePreset = enum {
-    minimal, // rich + underline — 박스 없이 언더바만(가장 미니멀, 현 기본과 동일 조합)
-    cutout, // rich + connected — 본문색 cutout 탭(아래 본문과 이어짐)
-    capsule, // rich + pill — Warp식 lifted 둥근 캡슐 탭
-    cell, // tui legacy compatibility — settings UI에는 노출하지 않는다.
-};
-
-/// 프리셋이 *제어하는* 축만 담는다. `chrome_tab_style = null`이면 그 프리셋은 탭 스타일 축을 **건드리지 않는다**
-/// (loader가 기존 값 보존) — cell(tui)은 셀 밴드라 tab_style이 무관해, 임의값(underline)으로 덮으면 사용자가 앞서 둔
-/// `chrome.tab-style = pill`을 조용히 리셋한다(code-review high 지적). 그래서 cell은 null로 둔다.
-pub const ChromePresetValues = struct { chrome_theme: ChromeTheme, chrome_tab_style: ?ChromeTabStyle };
-
-/// 프리셋 → (룩, 탭 스타일?) 묶음 단일 출처. 프리셋 추가 시 enum + 이 switch만 늘리면 된다.
-pub fn chromePresetValues(preset: ChromePreset) ChromePresetValues {
-    return switch (preset) {
-        .minimal => .{ .chrome_theme = .rich, .chrome_tab_style = .underline },
-        .cutout => .{ .chrome_theme = .rich, .chrome_tab_style = .connected },
-        .capsule => .{ .chrome_theme = .rich, .chrome_tab_style = .pill },
-        .cell => .{ .chrome_theme = .tui, .chrome_tab_style = null }, // tui는 셀 밴드라 tab_style 무관 → 축을 안 건드린다(기존 값 보존)
-    };
-}
-
-/// dashed config 토큰("minimal")을 ChromePreset로(parseDashedEnum 특수화). loader chrome.preset 핸들러가 쓴다.
-pub fn parseChromePreset(value: []const u8) ?ChromePreset {
-    return parseDashedEnum(ChromePreset, value);
-}
-
-/// 모든 chrome 프리셋 이름을 dashed로 `|` 결합(loader diagnostic용 — 프리셋 추가 시 자동 동기화).
-pub const chrome_preset_names_joined = enumNamesJoined(ChromePreset);
 
 /// 사이드바 세션 카드에 보조 정보를 표시할지. view options 메뉴(앱)와 config가 **양방향**으로 공유한다 —
 /// 앱에서 토글하면 config 파일에 저장되고, config를 편집하면 다음 로드/Reload에 반영된다. 이름줄은 카드
@@ -1038,10 +999,6 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// 파일 도크에서 동시에 유지할 WKWebView 상한. 탭 metadata는 남기고 non-dirty LRU view만 해제한다.
     file_panel: FilePanelConfig = .{},
-    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마. 기본 rich(둥근 모서리·분리 색 팔레트 룩)이며 세팅 UI는
-    /// 이 Chrome 전용 경로만 노출한다. `tui`는 기존 파일을 읽는 호환 값일 뿐 새 선택지로 제공하지 않는다.
-    /// loader가 `chrome.theme` 키를 파싱한다.
-    chrome_theme: ChromeTheme = .rich,
     /// 활성 탭 룩(`chrome.tab-style` = connected|underline|pill). 기본 **underline**(미니멀 — 언더바만, 사용자 요청). connected는
     /// 본문색 cutout + 앰버 언더바, pill은 Warp식 lifted 캡슐. `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema).
     chrome_tab_style: ChromeTabStyle = .underline,
@@ -1192,7 +1149,6 @@ pub const Config = struct {
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
         .ui_language = Meta{ .key = "ui.language", .doc = .cfg_ui_language, .widget = .dropdown, .section = .app },
-        .chrome_theme = Meta{ .key = "chrome.theme", .doc = .cfg_chrome_theme, .widget = .dropdown, .section = .theme },
         .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = .cfg_chrome_tab_style, .widget = .dropdown, .section = .theme },
         .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = .cfg_theme_follow_system, .widget = .toggle, .section = .theme },
         .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = .cfg_theme_preset_light, .widget = .dropdown, .section = .theme },

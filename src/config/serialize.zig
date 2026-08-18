@@ -113,7 +113,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.cursor.blink = false;
     cfg.cursor.color = "#ff5555"; // nullable 색 round-trip(loader 수동 핸들러 ↔ serialize 수동 emit) 대칭 검증
     cfg.cursor.text = "#101010";
-    cfg.chrome_theme = .rich;
     cfg.blink_text = true;
     cfg.ambiguous_width = .wide;
     cfg.emoji_width = .narrow; // 기본 wide의 반대값 — 기본값 누수로 통과하는 가짜 green 방지(round-trip 강제)
@@ -171,7 +170,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(false, got.cursor.blink);
     try std.testing.expectEqualStrings("#ff5555", got.cursor.color.?);
     try std.testing.expectEqualStrings("#101010", got.cursor.text.?);
-    try std.testing.expectEqual(theme.ChromeTheme.rich, got.chrome_theme);
     try std.testing.expectEqual(true, got.blink_text);
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, got.ambiguous_width);
     try std.testing.expectEqual(theme.EmojiWidth.narrow, got.emoji_width);

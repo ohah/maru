@@ -560,7 +560,13 @@ pub const inventory = [_]Proof{
     // 목록 스크롤바 드래그(2026-08-19)로 움직인다: 드래그 상태 하나(`scm_scroll_drag` — 규칙은
     // `scroll_area.Drag`가 소유한다)가 붙는다. **위치는 새로 안 든다** — `scm_scroll`이 그대로 단일
     // 출처다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7fd47f718550049e366e6457c3d4fa050ed11a265663ec19c8ecabaeaef027cc" },
+    // tui chrome 룩 제거(2026-08-19)로 또 바뀐다: `appearance.chrome_theme`를 읽던 토큰셋 분기가 사라져
+    // `buildChromeTokens`가 `Tokens.rich` 하나만 부르고, tui 셀 밴드/셀 바 기하를 고정하던 테스트들이 rich
+    // 자료구조(gpu_quads·leaf rect) 기준으로 다시 쓰였다. count는 2 그대로다 — 새 `@field` 반사가 없고
+    // Client 구성·receiver 집합도 안 건드린다.
+    // 위 tui 제거를 main 에 리베이스하며 값이 다시 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
+    // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b4f9922884ec957a0f35225501d3daf4e994e33e5b0571d79a198d1a4311f4b4" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -618,7 +624,13 @@ pub const inventory = [_]Proof{
     // 4차 검증이 앵커를 뜨는 쪽은 여전히 스키마 다섯 종류만 안다는 것을 잡아 또 움직인다 — 팔레트·단축키·
     // 전역 단축키 행이 남아 있었고, 그중 전역 단축키 라벨은 `t(title_key)` 라 언어를 정통으로 탄다.
     // 합성 키로 그 셋까지 앵커하고, keep-alive 토글은 재적용 전에 전역을 세운다. count는 여전히 3이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "f5a28ba7b7db842edec7e5bc6ff7b65e2008f9b0109f87d20791ee8d8bdd564b" },
+    // tui 제거 후속(2026-08-19): `settingsExposesConfigKey`(제거된 `chrome.theme`·`chrome.preset`을 이름으로
+    // 걸러 내던 하드코딩 필터)와 그 호출부 10곳을 지웠다. 두 키가 사라진 뒤로 그 함수는 항상 true를 돌려주는
+    // 죽은 분기였고, 그것을 부르던 테스트 단언은 **동어반복**이라 키를 되살려도 통과했다(적대적 검증에서 발견).
+    // count는 3 그대로다 — `@field` 반사나 Client 구성은 안 건드린다.
+    // 위 tui 제거를 main 에 리베이스하며 값이 다시 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
+    // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "6d600a60d6a2b2a1e9a1805ae3620428c4511bb59adb6ff463036324c16c77d0" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -661,5 +673,8 @@ pub const inventory = [_]Proof{
     // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
     // 4차 검증이 원자화의 **근거로 든 호출부를 같은 브랜치가 지웠다**는 것을 잡아 주석이 움직인다(워커는
     // 이제 키만 넘긴다). 원자성은 남긴다 — 그 규칙이 깨지는 것을 컴파일러가 말해 주지 않기 때문이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "7118af6286cd6e6c1b2ff2ec477e6d51b440f8665d2c073504c2548fee9d7654" },
+    // tui chrome 룩 제거(2026-08-19)로 바뀐다: 설정 행 라벨 `cfg_chrome_theme`(필드 선언 + en/ko 값 3줄)이
+    // 소비처를 잃어 지웠다 — `chrome.theme` Meta가 사라지면서 이 키를 읽는 곳이 0이 됐다. count는 1 그대로다
+    // — 문자열 상수만 줄었고 `@field` 반사나 Client 구성은 안 건드린다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "53a3e08fe9d4f4bc86694af301a219661494b1671b77053c2d2eee12480eac59" },
 };

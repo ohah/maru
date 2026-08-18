@@ -949,21 +949,25 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
 
+    // **판정은 `Drag.begin` 한 곳이다.** 여기서 `trackContains`를 또 부르면 같은 질문에 답하는 자리가
+    // 둘이 되고, 한쪽이 바뀌면 "눌렀는데 안 잡힌다"가 조용히 생긴다 — 이 저장소가 여러 번 겪은 부류다.
+    // 그래서 **차례로 시도하고 선 것을 쓴다**(실패한 시도는 상태를 건드리지 않는다).
+    //
     // **세로를 먼저 본다** — 오른쪽 아래 모서리에서 둘이 만나면 세로가 이긴다(세로는 늘 있고 가로는
     // 랩이면 없다). 비교 뷰는 열이 둘이라 각 축을 좌우 모두 본다.
     if (term.rt.editor_scrollbar) |bar| {
-        if (bar.trackContains(x_px, y_px)) return beginVertical(self, term, bar, x_px, y_px);
+        if (beginVertical(self, term, bar, x_px, y_px)) return true;
     }
     if (term.rt.editor_scrollbar_right) |bar| {
         // **세로는 좌우 값이 같다**(§3.5 세로 공유) — 어느 자리를 눌렀든 같은 곳으로 간다.
-        if (bar.trackContains(x_px, y_px)) return beginVertical(self, term, bar, x_px, y_px);
+        if (beginVertical(self, term, bar, x_px, y_px)) return true;
     }
     if (term.rt.editor_horizontal_scrollbar) |bar| {
-        if (bar.trackContains(x_px, y_px)) return beginHorizontal(self, term, bar, x_px, y_px, false);
+        if (beginHorizontal(self, term, bar, x_px, y_px, false)) return true;
     }
     if (term.rt.editor_horizontal_scrollbar_right) |bar| {
         // **가로는 각자다**(§3.5) — 오른쪽 막대는 오른쪽 열만 민다.
-        if (bar.trackContains(x_px, y_px)) return beginHorizontal(self, term, bar, x_px, y_px, true);
+        if (beginHorizontal(self, term, bar, x_px, y_px, true)) return true;
     }
     return false;
 }
@@ -971,13 +975,9 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
 fn beginVertical(self: *AppSession, term: *Term, bar: chrome.ui.scroll_area.ScrollbarGeometry, x_px: f64, y_px: f64) bool {
     self.editor_scrollbar_term = term;
     if (self.dock_list_scroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorScrollFromBarPx(self, jumped);
-    // **`begin`의 `null`은 두 가지다** — thumb을 잡아 점프하지 않은 것(성공)과 track 밖이라 시작하지
-    // 못한 것(실패). 반환값으로는 못 가르므로 `active`를 본다. 안 그러면 드래그는 비활성인데 태그만
-    // 세워져, move가 흡수되지 않는 채 up까지 그 태그가 남는다.
-    //
-    // **지금은 도달 불가다**(호출자가 같은 `trackContains`로 이미 걸렀다 — 뮤턴트로 확인했고 테스트가
-    // 이 분기를 죽이지 못한다). 그래도 두는 이유는 판정이 **두 곳**에 있기 때문이다: 한쪽이 바뀌면
-    // 그때 여기서 조용히 어긋나는 대신 시작이 거절된다.
+    // **여기가 유일한 성공 판정이다.** `begin`의 `null`은 두 가지를 뜻하므로(thumb을 잡아 점프하지 않은
+    // 성공 · track 밖이라 시작 못 한 실패) 반환값으로는 못 가른다 — `active`가 그 답이다.
+    // 실패면 잡은 것을 되돌리고 `false`를 준다: 호출자가 다음 막대를 시도한다.
     if (!self.dock_list_scroll_drag.active) {
         self.editor_scrollbar_term = null;
         return false;

@@ -925,10 +925,13 @@ fn maxColsForRender(term: *Term) ?u32 {
 /// **자리를 먹으므로**(§4.1a) 생겼다 사라지면 본문 높이가 출렁인다. 세로 막대는 안 센 줄을 한 행으로
 /// 쳐도 "짧게라도" 그려지지만 가로는 그렇지 않다.
 ///
-/// **실측(ReleaseFast, 2026-08-18)**: 2만 줄(2.1MB) 파일을 여는 전체가 25ms이고 그중 이 셈이 22ms다.
-/// 파일 읽기 자체는 ~3ms라 **"읽기에 묻힌다"는 근거는 성립하지 않는다** — 그렇게 짐작했다가 재 보고
-/// 틀린 것을 확인했다. 그대로 두는 근거는 **절대값이 작다**는 것뿐이다(한 번 툭 끊기는 정도). 이 값이
-/// 커지면(더 큰 문서·느린 기기) 위의 "잠정 막대" 문제를 풀고 점진으로 가야 한다.
+/// **실측(ReleaseFast, 2026-08-18 — 단계마다 직접 잰다)**: 2만 줄(2.1MB)에서 읽기+파싱 3ms,
+/// 줄 배열 ~0ms, 이 셈 **24ms**다. **"읽기에 묻힌다"는 근거는 성립하지 않는다** — 그렇게 짐작했다가
+/// 재 보고 틀린 것을 확인했다(읽기의 8배다). 그대로 두는 근거는 **절대값이 작다**는 것뿐이다(한 번
+/// 툭 끊기는 정도). 이 값이 커지면(더 큰 문서·느린 기기) 위의 "잠정 막대" 문제를 풀고 점진으로 간다.
+///
+/// **읽기 값은 하한이다** — 하니스가 방금 쓴 파일을 바로 읽어 OS 페이지 캐시가 따뜻하다. 콜드 읽기는
+/// 권한 없이 잴 수 없다. 다만 그 값이 커져도 이 셈이 사라지지는 않는다.
 fn ensureMaxCols(term: *Term, right: bool) void {
     const cache = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
     if (cache.* != 0) return;
@@ -3778,12 +3781,18 @@ test "[측정] 랩 켠 문서의 프레임 비용 — 계수 캐시가 그것을
     }
 }
 
-test "[측정] 여는 경로의 내역 — 파일 읽기가 얼마이고 가장 긴 줄 세기가 그중 얼마인가" {
-    // `ensureMaxCols`(가로 막대 근거)를 세로처럼 점진으로 바꿀지 판단하려면, 그 값이 **여는 경로
-    // 전체에서 차지하는 몫**을 알아야 한다. 파일 읽기 자체가 훨씬 크면 그 안에 묻히는 값이고,
-    // 반대면 사용자가 기다리는 시간의 상당 부분이 된다.
+test "[측정] 여는 경로의 내역 — 단계마다 직접 잰다" {
+    // `ensureMaxCols`(가로 막대 근거)를 세로처럼 점진으로 나눌지 판단하려면 그 값이 **여는 경로에서
+    // 차지하는 몫**을 알아야 한다.
     //
-    // **실제 파일로 잰다** — 메모리에 줄 배열만 꽂으면 읽기·줄 나누기가 빠져 비교가 성립하지 않는다.
+    // **재실행으로 근사하지 않는다.** 처음엔 전체를 한 번 재고 `ensureMaxCols`만 다시 돌려 뺐는데,
+    // 두 번째 호출은 줄 배열과 그 바이트가 이미 CPU 캐시에 올라와 있어 **첫 실행보다 빠르다**. 몫을
+    // 알고 싶으면 같은 실행 안에서 단계마다 재야 한다 — 여기서는 `openPathInActivePane`이 하는 일을
+    // 같은 순서로 직접 밟는다.
+    //
+    // **한계: OS 페이지 캐시는 따뜻하다.** 방금 쓴 파일을 바로 읽으므로 읽기 값은 "캐시 히트"에
+    // 가깝다. 콜드 읽기(디스크에서 처음 가져오기)는 이 하니스로 잴 수 없다 — 캐시를 비우려면 권한이
+    // 필요하다. 그래서 아래 읽기 값은 **하한**이다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;
@@ -3791,7 +3800,6 @@ test "[측정] 여는 경로의 내역 — 파일 읽기가 얼마이고 가장 
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    // 2만 줄 × 약 175B — 앞선 측정과 같은 크기의 문서다.
     const line = "const value = compute(index); // 이 줄은 창보다 길어서 랩이 켜지면 여러 조각으로 접힌다\n";
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
@@ -3803,24 +3811,35 @@ test "[측정] 여는 경로의 내역 — 파일 읽기가 얼마이고 가장 
     const path = try std.fs.path.join(allocator, &.{ root, "big.zig" });
     defer allocator.free(path);
 
-    // ① 여는 경로 전체(파일 읽기 + 줄 나누기 + 접힘 범위·표식 + 가장 긴 줄 세기).
+    // ① 파일 읽기 + 줄 파싱(`openPath`) — 여는 경로의 첫 단계 그대로.
     const t0 = monotonicMsForTest();
-    const opened = try openPathInActivePane(fx.session, path);
+    var opened = try openPath(fx.session.io, allocator, path);
     const t1 = monotonicMsForTest();
+    defer opened.deinit(allocator);
 
-    // ② 그중 가장 긴 줄 세기만 — 캐시를 버리고 같은 셈을 다시 돌린다.
-    opened.rt.editor_max_cols = 0;
+    // ② 줄 슬라이스 배열 만들기 — 같은 경로가 하는 그대로.
+    const n = opened.file.lineCount();
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
     const t2 = monotonicMsForTest();
-    ensureMaxCols(opened, false);
+    for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
     const t3 = monotonicMsForTest();
 
-    const total = t1 - t0;
-    const max_cols_ms = t3 - t2;
-    std.debug.print("\n[측정] 2만 줄 파일 열기 전체 {d}ms 중 가장 긴 줄 세기 {d}ms (줄 {d}, {d}KB)\n", .{
-        total,
-        max_cols_ms,
-        opened.rt.editor_lines.len,
+    // ③ 가장 긴 줄 세기 — **이 문서에서 처음 도는 실행**이다(재실행 근사가 아니다).
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_max_cols = 0;
+    const t4 = monotonicMsForTest();
+    ensureMaxCols(fx.term, false);
+    const t5 = monotonicMsForTest();
+
+    std.debug.print("\n[측정] 2만 줄({d}KB) 여는 경로: 읽기+파싱 {d}ms · 줄 배열 {d}ms · 가장 긴 줄 세기 {d}ms (max_cols={d})\n", .{
         text.items.len / 1024,
+        t1 - t0,
+        t3 - t2,
+        t5 - t4,
+        fx.term.rt.editor_max_cols,
     });
 }
 

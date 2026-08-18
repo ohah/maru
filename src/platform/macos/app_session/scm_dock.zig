@@ -1244,8 +1244,42 @@ pub fn pointInCommitBox(self: *AppSession, x_px: f64, y_px: f64) bool {
     const content = dock_ops.dockGeometry(self).tree_content;
     const local_x = x_px - @as(f64, @floatFromInt(content.x));
     const local_y = y_px - @as(f64, @floatFromInt(content.y));
+    // **그 entry의 clip으로 한 번 더 자른다.** 발행된 항목 rect는 스크롤에 따라 뷰포트 밖으로도 뻗는다
+    // (그리기만 잘린다) — 상자 rect만 보면 상자가 위로 밀린 상태에서 **요약·탭 띠 위**를 눌러도
+    // "상자 안"이 되어, 안 보이는 상자가 굴러가거나 편집이 안 떨어진다(적대적 검증 2026-08-19).
+    //
+    // **일반 히트테스트가 쓰는 바로 그 값이다**(`interaction.zig`가 `effective_clip`으로 후보를 자른다).
+    // 여기서 "스크롤 영역 rect"를 따로 찾아 자르면 같은 사실에 규칙이 둘이 되고, 상자에 clip하는 조상이
+    // 하나 더 생기는 날 조용히 갈린다.
+    if (commitBoxClip(self)) |clip| {
+        if (local_x < clip.x or local_x >= clip.x + clip.width) return false;
+        if (local_y < clip.y or local_y >= clip.y + clip.height) return false;
+    }
     return local_x >= rect.x and local_x < rect.x + rect.width and
         local_y >= rect.y and local_y < rect.y + rect.height;
+}
+
+/// 편집 중인 상자 entry의 **effective clip**(없으면 null = 안 잘린다).
+pub fn commitBoxClip(self: *AppSession) ?chrome.ui.layout.UiRect {
+    const entry = focusedCommitBoxEntry(self) orelse return null;
+    return entry.effective_clip;
+}
+
+/// 편집 중인 상자의 **발행된 entry**. rect도 clip도 여기서 나온다 — 같은 탐색(저장소 → 노드 id →
+/// 발행 entry)을 두 곳에 적으면 한쪽만 고쳐진다.
+fn focusedCommitBoxEntry(self: *AppSession) ?chrome.ui.tree.RectEntry {
+    const repo = focusedCommitRepo(self) orelse return null;
+    const repos = repoEntries(self);
+    for (repos.entries, 0..) |entry, index| {
+        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        if (index >= self.scm_commit_box_nodes.len) return null;
+        const id = self.scm_commit_box_nodes[index] orelse return null;
+        for (self.scm_dock_entries.items) |published| {
+            if (published.id == id) return published;
+        }
+        return null;
+    }
+    return null;
 }
 
 /// 상자 **밖**을 눌렀으면 편집을 뗀다. 안이면 아무것도 안 한다(그 클릭은 caret을 놓는 클릭이다).

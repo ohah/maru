@@ -923,8 +923,11 @@ pub fn applyForcedCommitWheel(self: *AppSession) void {
     const ticks = std.fmt.parseInt(i32, std.mem.span(raw), 10) catch return;
     const rect = scm_dock_ops.commitBoxRect(self) orelse return; // 아직 발행 전이다 — 다음 tick에 다시 본다
     const content = dock_ops.dockGeometry(self).tree_content;
+    // **clip 안의 점을 고른다.** 상자 위쪽이 잘린 상태에서 `rect.y + 8`을 찍으면 그 점은 상자 밖으로
+    // 판정돼(제품 규칙), 게이트가 조용히 아무 일도 안 하고 래치만 세운다.
+    const top = if (scm_dock_ops.commitBoxClip(self)) |clip| @max(rect.y, clip.y) else rect.y;
     const x = @as(f64, @floatFromInt(content.x)) + rect.x + 12;
-    const y = @as(f64, @floatFromInt(content.y)) + rect.y + 8;
+    const y = @as(f64, @floatFromInt(content.y)) + top + 8;
     const step: f64 = if (ticks < 0) -1 else 1;
     var left: i32 = if (ticks < 0) -ticks else ticks;
     while (left > 0) : (left -= 1) self.scrollWheel(step, 0, false, x, y);

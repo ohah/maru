@@ -324,15 +324,21 @@ fn applyKey(
         // 절대경로 또는 `~`/`~/…`만 받는다 — 상대경로·`~user`(다른 사용자)는 spawn 시 어차피 무시되므로 여기서
         // 미리 거른다(forgiving+diagnostic). 형식 규칙은 GUI 커밋과 공유하는 isValidWorkspaceRoot 단일 헬퍼로 — 드리프트
         // 방지. $HOME 확장은 platform layer가 하므로 loader는 형식만 본다(순수 파서 — env 비의존).
-        if (!isValidWorkspaceRoot(trimmed)) {
+        // **정규화를 먼저 하고 그 결과를 검사한다.** 계약 §5 규칙 2 가 "정규화 이전에 역슬래시로 거르던
+        // 가드는 정규화 이후에도 같은 것을 막도록 다시 쓴다" 고 못 박은 자리다. 순서를 뒤집으면 Windows
+        // 사용자가 자연스럽게 적는 `~\projects` 가 **거부된다** — `isValidWorkspaceRoot` 는 `~` 나 `~/`
+        // 접두만 보고, `~\projects` 는 어느 호스트에서도 절대경로가 아니다. `~/projects` 와 `C:\proj` 는
+        // 되는데 그 하나만 안 되는 것은 사용자가 이유를 알 수 없다.
+        //
+        // 경로 값은 입구에서 구분자를 정규화한다(§5 규칙 1) — 그대로 두면 L2 가 `/` 로 이어 붙인 결과와
+        // 섞여 `C:\proj/docs` 가 된다. 스키마-주도 경로 필드(`Meta.isPath`)와 **같은 규칙**을 쓴다.
+        // POSIX 호스트에서는 무동작이다.
+        const normalized = try path_shape.normalizeSeparatorsFor(os_tag, a, trimmed);
+        if (!isValidWorkspaceRoot(normalized)) {
             try diags.append(a, .{ .line = line_no, .message = "workspace.root는 절대경로 또는 ~/… — 무시(기본값 유지)" });
             return;
         }
-        // **경로 값은 입구에서 구분자를 정규화한다**(docs/windows-platform.md §5 규칙 1). Windows 사용자는
-        // `workspace.root = C:\proj` 처럼 native 로 적는 것이 자연스러운데, 그대로 두면 L2 가 `/` 로 이어
-        // 붙인 결과와 섞여 `C:\proj/docs` 가 된다. 스키마-주도 경로 필드(`Meta.isPath`)와 **같은 규칙**을
-        // 쓴다 — 이 키만 명시 핸들러라 빠지면 그 자리만 다르게 동작한다. POSIX 호스트에서는 무동작이다.
-        config.workspace.root = try path_shape.normalizeSeparatorsFor(os_tag, a, trimmed);
+        config.workspace.root = normalized;
         // workspace.{tab,split}-inherit-cwd는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "cursor.color") or std.mem.eql(u8, key, "cursor.text")) {
         // 커서 색 override(opt-in). nullable이라 스키마-주도에서 빠져 여기서 다룬다(palette와 동형). 색 검증·
@@ -1020,7 +1026,10 @@ pub fn loadFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Load
 pub fn defaultConfigPath(allocator: std.mem.Allocator) LoadError!?[]const u8 {
     if (std.c.getenv("MARU_CONFIG")) |override_z| {
         const override = std.mem.span(override_z);
-        if (override.len > 0) return try allocator.dupe(u8, override);
+        // **여기도 정규화한다.** 아래 `%LOCALAPPDATA%` 갈래가 하는 것과 같은 이유이고, 이쪽이 오히려
+        // **우선순위가 높은 환경변수**다. 빼먹으면 사용자가 어떻게 띄웠느냐에 따라 config 경로 철자가
+        // 둘로 갈려, 그 경로를 잇거나 비교하는 소비자가 어긋난다.
+        if (override.len > 0) return try path_shape.normalizeSeparators(allocator, override);
     }
     const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
     const local: ?[]const u8 = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
@@ -1499,6 +1508,37 @@ test "parseFor: 경로 값은 입구에서 구분자를 정규화한다 — 두 
         var p = try parseFor(tag, a, "input.word-separators = a\\b\n");
         defer p.deinit();
         try std.testing.expectEqualStrings("a\\b", p.config.input.word_separators);
+    }
+}
+
+test "parseFor: workspace.root 수용 검사는 정규화된 값을 본다 (§5 규칙 2)" {
+    const a = std.testing.allocator;
+
+    // **Windows 사용자가 자연스럽게 적는 철자다.** 정규화 전에 검사하면 `isValidWorkspaceRoot` 가
+    // `~` 나 `~/` 접두만 보므로 `~\projects` 가 거부된다 — `~/projects` 와 `C:\proj` 는 되는데 이것만
+    // 안 되는 것은 사용자가 이유를 알 수 없다. 계약 §5 규칙 2 가 "가드는 정규화 이후 형태를 본다" 고
+    // 못 박은 자리다.
+    {
+        var w = try parseFor(.windows, a, "workspace.root = ~\\projects\n");
+        defer w.deinit();
+        try std.testing.expectEqualStrings("~/projects", w.config.workspace.root);
+        try std.testing.expectEqual(@as(usize, 0), w.diagnostics.len);
+    }
+
+    // POSIX 에서는 정규화가 무동작이라 `~\projects` 가 여전히 형식에 안 맞는다 — 거기서는 `\` 가 파일
+    // 이름 글자이므로 **거부가 맞다**(그 이름의 디렉터리를 만들 수는 있지만 `~` 확장 대상이 아니다).
+    {
+        var l = try parseFor(.linux, a, "workspace.root = ~\\projects\n");
+        defer l.deinit();
+        try std.testing.expectEqualStrings("", l.config.workspace.root);
+        try std.testing.expectEqual(@as(usize, 1), l.diagnostics.len);
+    }
+
+    // 정규화가 수용을 넓히기만 하는 것은 아니다 — 원래 되던 철자는 그대로 된다.
+    for ([_]std.Target.Os.Tag{ .windows, .linux }) |tag| {
+        var p = try parseFor(tag, a, "workspace.root = ~/projects\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("~/projects", p.config.workspace.root);
     }
 }
 

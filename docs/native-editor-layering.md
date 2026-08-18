@@ -238,7 +238,7 @@ init은 흔들지 않으므로 남의 코드를 시험하지 않고 빠르다(`e
 
 **"창 리사이즈 중"이라는 근거는 이 구현에서 성립하지 않는다.** `MaruAppHost.windowDidResize`가 `inLiveResize` 동안 세션 resize를 **보류**하고 `windowDidEndLiveResize`에서 최종 크기로 한 번만 적용하기 때문이다(zsh가 SIGWINCH마다 상대 커서 이동으로 redraw하며 프롬프트를 중복시키던 문제로 도입된 정책). 창을 끄는 동안 편집기 폭은 바뀌지 않고, 그래서 계수도 돌지 않는다.
 
-**라이브로 폭을 끄는 경로는 둘이다** — 사이드바 우측 경계 드래그(`sidebar_ops.setSidebarWidthPx`를 drag마다 부른다)와 pane divider 드래그(`pane_ops.routeDividerCapture`, 같은 패턴). 실측으로 그 상태의 2만 줄 랩 문서가 프레임당 **60.9ms**였다(ReleaseFast — 약 16fps). **그 구간은 §2.1이 같은 절에서 규정한 "저하 동작"으로 닫았다**: 그 드래그가 활성인 동안 계수를 보류하고 직전 결과로 그린다(`frame.RowCache.hold` — 조건은 제품의 `widthDragActive`가 정한다). 60.9ms → 0.2ms이고, 대가는 드래그 중 막대 길이가 옛 폭 기준인 것이다. **줄 배열이 그대로일 때만 저하한다** — 저하가 겨냥한 것은 폭 변경이고, 줄이 바뀐 상태에서 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 다른 문서의 값이다.
+**라이브로 폭을 끄는 경로는 셋이다** — 사이드바 우측 경계 드래그(`sidebar_ops.setSidebarWidthPx`를 drag마다 부른다), pane divider 드래그(CIM2로 `InteractionState`에 이관됐고 tick coalescer가 최종 좌표 하나를 적용한다), dock 바깥 경계 드래그(`dock_ops.setDockSizeFromPointer` — dock이 `.right`면 x를 끌고 `resizeTabPanes`로 전 탭 pane을 다시 재운다). **셋을 각각 물어야 하는 것 자체가 상태를 드러낸다** — "지금 폭을 끄는 중인가"의 단일 출처가 없고 capture 권위가 `InteractionState`와 `PointerGestureOwner`의 두 variant로 갈려 있다([Chrome 상호작용 이관](chrome-interaction-migration.md) CIM2가 그 통합을 소유한다). 실측으로 그 상태의 2만 줄 랩 문서가 프레임당 **60.9ms**였다(ReleaseFast — 약 16fps). **그 구간은 §2.1이 같은 절에서 규정한 "저하 동작"으로 닫았다**: 그 드래그가 활성인 동안 계수를 보류하고 직전 결과로 그린다(`frame.RowCache.hold` — 조건은 제품의 `widthDragActive`가 정한다). 60.9ms → 0.2ms이고, 대가는 드래그 중 막대 길이가 옛 폭 기준인 것이다. **줄 배열이 그대로일 때만 저하한다** — 저하가 겨냥한 것은 폭 변경이고, 줄이 바뀐 상태에서 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 다른 문서의 값이다.
 
 **그래서 워커에 남는 것은 "드래그를 놓는 순간의 한 프레임"이다** — 그때 전 문서를 한 번 세므로 2만 줄에서 ~60ms가 한 번 튄다(창 리사이즈도 같은 자리에서 한 번 든다). 위 표의 배치는 그 스파이크를 없애기 위해 여전히 유효하다.
 

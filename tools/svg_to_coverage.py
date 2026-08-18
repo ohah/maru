@@ -123,6 +123,10 @@ ICONS = [
     ("arrow_down", FIT_STANDARD, 0xF0028, "assets/icons/arrow-down.svg"),
     ("arrow_left", FIT_STANDARD, 0xF0029, "assets/icons/arrow-left.svg"),
     ("arrow_right", FIT_STANDARD, 0xF002A, "assets/icons/arrow-right.svg"),
+    # 탐색기 헤더의 "전체 접기". **기존 자산으로는 읽히지 않았다** — chevron 하나(`>`)는 "다음/펼치기"로
+    # 읽히고(방향이 반대다), `sidebar_collapse`는 사이드바를 접는 다른 동작이다. 마주 보는 chevron 둘이
+    # "모은다"를 그려 접기를 가리킨다. Maru 자작(획 굵기는 arrow_* 와 같은 결로 맞췄다).
+    ("collapse_all", FIT_STANDARD, 0xF002B, "assets/icons/collapse-all.svg"),
 ]
 
 

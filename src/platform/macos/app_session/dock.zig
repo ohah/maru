@@ -280,11 +280,12 @@ pub fn dockActions(self: *const AppSession) []const DockAction {
 
 /// 동작 버튼의 glyph. **그림은 자산 이름으로 고른다**(codepoint 리터럴 금지 — docs/chrome-strategy.md §9.7).
 /// `reset` 은 octicon sync(양방향 화살표)라 새로 고침 그림이고, 이미 세션·소스 컨트롤 도크가 같은 뜻으로 쓴다.
-/// 전체 접기는 **접힌 뒤의 모습**(`>`)을 쓴다 — 결과를 가리키는 그림이라 따로 배우지 않아도 읽힌다.
+/// 전체 접기는 **전용 자산**이다 — chevron 하나(`>`)를 재사용해 봤더니 "다음/펼치기"로 읽혀(방향이 반대다)
+/// 접기라는 뜻이 서지 않았다. 마주 보는 chevron 둘이 "모은다"를 그린다.
 pub fn dockActionGlyph(action: DockAction) u21 {
     return switch (action) {
         .refresh => icons.codepointFit(.reset, .tight),
-        .collapse_all => icons.codepointFit(.chevron_right, .tight),
+        .collapse_all => icons.codepoint(.collapse_all),
     };
 }
 

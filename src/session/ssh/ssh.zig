@@ -19,6 +19,7 @@ pub const known_hosts = @import("known_hosts.zig");
 pub const userauth = @import("userauth.zig");
 pub const private_key = @import("private_key.zig");
 pub const channel = @import("channel.zig");
+pub const client = @import("client.zig");
 
 test {
     std.testing.refAllDecls(@This());

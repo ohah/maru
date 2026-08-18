@@ -22,6 +22,7 @@
 //!   - 확인한 서버는 **OpenSSH 하나**다. Dropbear·네트워크 장비는 다르게 굴 수 있다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const c = std.c;
 
@@ -61,6 +62,14 @@ const Socket = struct {
             .zero = @splat(0),
         };
         if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) != 0) return error.ConnectFailed;
+        // **`SIGPIPE` 로 죽지 않는다.** 상대가 먼저 끊은 뒤 쓰면 기본 동작이 프로세스 종료라,
+        // 이름 있는 오류가 아니라 **신호로 죽는다**(실측: 버전 줄 뒤 바로 끊는 서버에 exit 141).
+        // 소켓을 드는 층이면 어디서나 같은 함정이고, 모바일에서 그것은 앱이 죽는 것이다 — 이
+        // 저장소의 `control_socket.setNoSigPipe` 가 같은 이유로 같은 옵션을 건다.
+        if (builtin.os.tag == .macos) {
+            var on: c_int = 1;
+            _ = c.setsockopt(fd, posix.SOL.SOCKET, c.SO.NOSIGPIPE, @ptrCast(&on), @sizeOf(c_int));
+        }
         return .{ .fd = fd };
     }
 
@@ -75,7 +84,11 @@ const Socket = struct {
     fn writeAll(self: Socket, bytes: []const u8) !void {
         var off: usize = 0;
         while (off < bytes.len) {
-            const n = c.write(self.fd, bytes.ptr + off, bytes.len - off);
+            // Linux 는 `SO_NOSIGPIPE` 가 없어 `send(MSG_NOSIGNAL)` 로 같은 것을 얻는다.
+            const n = if (builtin.os.tag == .linux)
+                c.send(self.fd, bytes.ptr + off, bytes.len - off, posix.MSG.NOSIGNAL)
+            else
+                c.write(self.fd, bytes.ptr + off, bytes.len - off);
             if (n <= 0) return error.WriteFailed;
             off += @intCast(n);
         }
@@ -88,7 +101,9 @@ const Socket = struct {
 
 /// 선에서 읽은 바이트를 모아 두는 자리. **프로토콜 층은 이 버퍼를 모른다** — `feed` 가 먹은 만큼
 /// 우리가 민다(계약 §4.5).
-var in_buf: [1 << 20]u8 = undefined;
+/// **층이 요구하는 최악 버퍼**(계약 §3.3 — 배너 줄 상한 × 줄 수). 임의로 잡으면 정상 배너를
+/// 못 담아 영원히 "더 읽어라" 만 받거나, 반대로 층의 상한보다 커서 우리 버퍼가 먼저 찬다.
+var in_buf: [version.max_exchange_bytes]u8 = undefined;
 var in_len: usize = 0;
 
 var t: transport.Transport = .{};
@@ -196,11 +211,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var v_s_buf: [512]u8 = undefined;
     const v_s = blk: while (true) {
         if (in_len > 0) {
+            // **`Incomplete` 만 "더 읽어라" 다.** 처음에는 모든 오류를 삼키고 계속 읽었는데,
+            // 그러면 쓰레기나 제어문자가 든 버전 줄이 **20초 stall** 로 나타난다(실측) — 층은
+            // 그것을 `MalformedVersion` 으로 이미 거절하는데 드라이버가 그 이름을 지운 것이다.
+            // 계약 §3.2.2 가 막으려던 것이 정확히 그 줄이라, 이름이 사라지면 방어도 안 보인다.
             if (version.parse(in_buf[0..in_len])) |p| {
                 @memcpy(v_s_buf[0..p.line.len], p.line);
                 consume(p.consumed);
                 break :blk v_s_buf[0..p.line.len];
-            } else |_| {}
+            } else |e| if (e != version.Error.Incomplete) return e;
         }
         try fill();
     };

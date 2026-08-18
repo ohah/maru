@@ -2669,6 +2669,9 @@ pub const AppSession = struct {
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
     pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
         debug_fixtures.maybeDebugOpenNativeEditor(self);
+        // 비교 캡처 훅도 여기 붙는다 — 소스 컨트롤 목록이 git 백엔드의 비동기 결과라 **매 tick 다시
+        // 봐야** 하고, 이 진입이 그 주기를 이미 갖고 있다(위 두 훅과 같은 자리).
+        scm_dock_ops.maybeDebugOpenScmDiff(self);
         return debug_fixtures.maybeDebugOpenFilePanel(self);
     }
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
@@ -4037,6 +4040,10 @@ pub const AppSession = struct {
     debug_file_panel_opened: bool = false,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
     debug_native_editor_opened: bool = false,
+    /// 캡처 전용 훅(`MARU_OPEN_SCM_DIFF`)이 비교를 이미 열었는가. **성공했을 때만** 세운다 —
+    /// 소스 컨트롤 모델은 git 백엔드의 비동기 결과라 첫 프레임에는 비어 있고, 그때 래치를 세우면
+    /// 목록이 도착한 뒤에도 영영 안 연다.
+    debug_scm_diff_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
     // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
     // (Swift가 batch를 적용했다는 전제). 비어 있으면 직전 tick에 web Term이 없었음.

@@ -358,8 +358,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -369,7 +369,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term), row_cache, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -905,8 +905,23 @@ fn widthDragActive(self: *const AppSession) bool {
         pane_ops.dividerCaptureActive(self);
 }
 
-fn maxColsForRender(term: *Term) ?u32 {
-    const v = term.rt.editor_max_cols;
+/// 비교 뷰의 **좌우 가장 긴 줄**을 센다(§4.1a — 가로 막대가 첫 프레임부터 서야 그 축이 있다는 것을
+/// 사용자가 안다). 문서 편집기가 여는 경로에서 `ensureMaxCols`를 부르는 것과 같은 시점·같은 셈이고,
+/// 비교는 두 문서라 **두 번** 부른다.
+///
+/// **행 배열이 선 뒤에 불러야 한다** — 이 셈이 `left_texts`/`right_texts`를 읽으므로 그 전에 부르면
+/// 빈 것을 센다. 호출자(`editor_diff.computeRows`)가 그 순서를 지킨다.
+pub fn ensureMaxColsForDiff(term: *Term) void {
+    ensureMaxCols(term, false);
+    ensureMaxCols(term, true);
+}
+
+/// 렌더에 넘길 **가장 긴 줄의 열 수**(0 = 아직 안 셌다 → 막대 없음).
+///
+/// **비교 뷰는 열마다 각자다**(§3.5) — 왼쪽은 원본, 오른쪽은 수정본이라 가장 긴 줄이 다르고,
+/// 막대 길이도 그래서 각자여야 한다.
+fn maxColsForRender(term: *Term, right: bool) ?u32 {
+    const v = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
     return if (v == 0) null else v;
 }
 

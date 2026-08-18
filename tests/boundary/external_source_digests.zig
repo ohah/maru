@@ -527,7 +527,10 @@ pub const inventory = [_]Proof{
     // tick이 그 결과를 거두는 호출 둘(결과 거둠 · 캡처 게이트)이 는다. **쓰기 상태와 따로 두는 것이 계약이다** — fetch는 index를
     // 만지지 않아 §6 직렬화 대상이 아니다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·
     // receiver 집합도 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c9b70c3ea3c1752ba99144a468146ae39c34edf809a4ca8447c6051070b24b66" },
+    // N1.5 기본 경로 전환(2026-08-18)으로 또 바뀐다: 비교 캡처 훅의 래치 필드 `debug_scm_diff_opened`
+    // 하나와 그 훅 호출(`scm_dock_ops.maybeDebugOpenScmDiff`)이 붙는다. count는 2 그대로다 — 새 `@field`
+    // 반사가 없고 Client 구성·receiver 집합도 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d9c2b12349a6fbba3dd8220be89719e5f7e20e32adf9a5cbbfce6abe1c1d89f8" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

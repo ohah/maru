@@ -1165,3 +1165,72 @@ test "shell 수락이 세션을 쓸 수 있게 만든다" {
     const r = try c.write("ls\n", &out);
     try testing.expectEqual(@as(usize, 3), r.sent);
 }
+
+test "eof 는 채널이 열려 있을 때만 나간다" {
+    // §5.3 — 더 보낼 것이 없다는 알림이다. **채널은 아직 열려 있다**(반대 방향 출력은 계속 온다).
+    // 이미 알렸거나 상대가 먼저 닫았으면 할 일이 없다 — 오류가 아니다(보내는 동안 상대가 닫는
+    // 것을 실서버에서 겪었고, 그때 세션을 실패로 만들 이유가 없다).
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+
+    const bytes = try c.eof(&out);
+    try testing.expect(bytes.len > 0);
+    const dec = try packet.read(bytes);
+    try testing.expectEqual(channel.msg_channel_eof, dec.payload[0]);
+    try testing.expectEqual(channel.State.eof_sent, c.ch.state);
+
+    // 두 번째는 조용히 아무것도 안 한다.
+    const again = try c.eof(&out);
+    try testing.expectEqual(@as(usize, 0), again.len);
+
+    // 셸이 안 떴으면 오류다 — 그것은 호출자의 순서 실수다.
+    var fresh = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, c.rand);
+    try testing.expectError(Error.NotReady, fresh.eof(&out));
+}
+
+test "eof 는 재키잉 중에 안 나간다" {
+    // §7.1 — 재키잉 중에는 채널 메시지를 못 보낸다. 오류가 아니라 **0 바이트**다(호출자가
+    // 재키잉을 알 필요가 없다는 원칙과 같다).
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    try c.t.beginRekey();
+    const bytes = try c.eof(&out);
+    try testing.expectEqual(@as(usize, 0), bytes.len);
+    try testing.expectEqual(channel.State.open, c.ch.state); // 상태도 안 움직인다
+}
+
+test "지문은 ssh-keygen 과 같은 값이다" {
+    // **사용자가 대조하는 값이다**(계약 §4). 다른 값을 보여 주면 TOFU 가 무의미해진다 —
+    // 이 벡터는 `hostkey.zig` 가 `ssh-keygen -lf` 와 맞대 둔 것과 같은 blob 이다.
+    var prng = std.Random.DefaultPrng.init(81);
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+
+    var blob: [128]u8 = undefined;
+    var w = wire.Writer.init(&blob);
+    try w.string(hostkey.alg_name);
+    try w.string(&([_]u8{7} ** 32));
+    const written = w.written();
+    @memcpy(c.host_key_buf[0..written.len], written);
+    c.host_key_len = written.len;
+
+    var out: [128]u8 = undefined;
+    const fp = try c.hostKeyFingerprint(&out);
+    // 같은 blob 을 `hostkey.fingerprint` 에 직접 넣은 것과 같아야 한다 — 두 벌이 되면 갈린다.
+    var out2: [128]u8 = undefined;
+    try testing.expectEqualStrings(try hostkey.fingerprint(&out2, written), fp);
+    try testing.expect(std.mem.startsWith(u8, fp, "SHA256:"));
+}
+
+test "resize 는 window-change 를 낸다" {
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    const bytes = try c.resize(.{ .cols = 120, .rows = 40 }, &out);
+    const dec = try packet.read(bytes);
+    var r = wire.Reader.init(dec.payload);
+    try testing.expectEqual(channel.msg_channel_request, try r.byte());
+    _ = try r.u32be();
+    try testing.expectEqualStrings(channel.request_window_change, try r.string());
+    try testing.expectEqual(false, try r.boolean()); // §6.7 — 답을 요구하지 않는다
+    try testing.expectEqual(@as(u32, 120), try r.u32be());
+    try testing.expectEqual(@as(u32, 40), try r.u32be());
+}

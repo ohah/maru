@@ -1168,7 +1168,11 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // `glyph_cell_width_px`는 자간과 무관한 자연폭이다. 지금은 자간이 0이라 grid advance와 같다.
     var renderer_state = maru.renderer.RendererState.init(allocator, .{
         .text = .{
-            .font_size_px = 18,
+            // **래스터라이저와 같은 크기를 쓴다.** 여기만 18 로 박혀 있어 config 를 바꾸면(또는 기본
+            // 14 로만 와도) 글리프는 그 크기로 그려지는데 캐시 키·아틀라스 슬롯은 18 로 잡혔다 —
+            // `GlyphCacheKey` 가 실제 크기를 구분 못 하고, 메트릭 없는 폴백 슬롯이 엉뚱한 변으로 선다.
+            // f32→u16 변환(NaN·범위 보정)은 `textConfigFromFontSize` 가 단일 출처다.
+            .font_size_px = maru.renderer.textConfigFromFontSize(cfg.font.size, 1).font_size_px,
             .device_scale = 1,
             .cell_width_px = @intCast(cell_w),
             .glyph_cell_width_px = @intCast(cell_w),
@@ -1256,6 +1260,8 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var right_click_pastes: usize = 0;
     var right_click_menus_unimplemented: usize = 0;
     var capture_losses: usize = 0;
+    // Alt 를 meta 로 쓸지 — **사용자 config 에서 온다**. 기본 `true` 다(Alt+B/F 가 readline 단어 이동).
+    const option_as_meta = cfg.input.option_as_meta;
     // 우클릭 동작 — **사용자 config 에서 온다**(W7.5). 기본값은 `paste` 다(PuTTY/X11 식, 사용자 결정).
     const right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
     var dragging = false;
@@ -1341,7 +1347,11 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                     try pasteClipboardIntoActive(allocator, io, window.hwnd, &app_window, &runtime, stderr, paste_protection, bracketed_paste_is_safe, &paste_out);
                     continue;
                 }
-                const outcome = loop.handleKeyEvent(resolver, key_ev, false, null) catch |err| {
+                // **`option_as_meta` 를 config 에서 넘긴다.** 세 번째 인자가 그것인데 리터럴 `false` 를
+                // 넘기고 있었다 — 스키마 기본값은 `true` 다. 그 상태로는 `translateModifiers` 가 Alt+B 에
+                // `.option = true` 를 옳게 세워도 `encodeKey` 의 가드가 꺼져 ESC 접두가 안 붙고,
+                // readline 의 단어 이동(Alt+B/F/.)이 글자 `b` 를 그냥 찍는다.
+                const outcome = loop.handleKeyEvent(resolver, key_ev, option_as_meta, null) catch |err| {
                     try stderr.print("  warning: key handling failed({s})\n", .{@errorName(err)});
                     continue;
                 };
@@ -1577,10 +1587,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                                 selections += 1;
                             },
                             .double => {
-                                // 단어 구분자는 config 값인데 이 스모크는 config 를 안 읽는다 — 스키마
-                                // 기본값을 그대로 실어 보낸다(W7.5 에서 진짜 설정에서 온다).
+                                // **UTF-8 경계에서 자른다.** 고정 64 바이트 버퍼를 `@min` 으로 그냥 끊으면
+                                // 여러 바이트 문자 한가운데가 잘리고, 코어의 `selectWordAt` 은 잘못된 UTF-8 을
+                                // 만나면 `Utf8View.init` 이 실패해 **구분자를 전부 버린다**(하나도 아니고 전부).
+                                // 그러면 더블클릭이 조용히 "공백만 경계" 로 되돌아간다. `。、「」…` 처럼 3 바이트
+                                // 문자로 채우면 22 자에서 그 경계를 밟는다. macOS 도 같은 헬퍼를 쓴다.
                                 var sw: maru.session.core_command.SelectWord = .{ .row = cell.row, .col = cell.col };
-                                const n = @min(default_word_separators.len, sw.separators.len);
+                                const n = maru.width.truncateToBoundary(default_word_separators, sw.separators.len);
                                 @memcpy(sw.separators[0..n], default_word_separators[0..n]);
                                 sw.sep_len = @intCast(n);
                                 runtime.enqueueCoreCommand(active.id, .{ .select_word = sw }, io) catch {
@@ -1788,6 +1801,10 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         });
     }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
+    // **읽기 요청을 갈라 찍는다.** `osc52_reads` 는 정책과 무관하게 오르므로 그것만으로는 "정책이 막았다" 와
+    // "정책은 allow 인데 응답 인코더가 없어 못 보냈다" 가 구분되지 않는다 — 후자는 사용자가
+    // `osc52.read = allow` 로 켠 뒤에야 나타나고, 조용하면 원인을 못 찾는다.
+    try stdout.print("osc52_reads_unanswered_allow={d}\n", .{osc52_reads_denied_unimplemented});
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     // **어느 ConPTY 를 썼는지 찍는다.** `conpty.dll` 은 `OpenConsole.exe` 를 못 찾으면 시스템 conhost 로

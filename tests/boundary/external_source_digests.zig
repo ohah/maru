@@ -511,7 +511,7 @@ pub const inventory = [_]Proof{
     // 탭 바 ✕·"+" 호버로 다시 움직인다: 호버 상태 둘(`hovered_tab_close`·`hovered_plus`)이 붙고 그 자리에
     // 배경 quad 를 얹는 분기가 생긴다. count 는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
     // 집합도 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "57e867301dc3fbeb07396cc5cc930021c9559f0c19908a889e5209613e7f77ed" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "970ee9a9a96633cd3c53b74c5cb63f63295cc8b7270fb6ee3b1c458f0cf4bca2" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

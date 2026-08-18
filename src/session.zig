@@ -30,6 +30,9 @@ pub const ssh = struct {
     pub const private_key = @import("session/ssh/private_key.zig");
     /// `session` 채널(RFC 4254) — `pty-req`·`shell`·데이터·`window-change`·종료 + 흐름 제어 양방향.
     pub const channel = @import("session/ssh/channel.zig");
+    /// **세션 하나를 잇는 상태기계** — 버전 교환→KEX→인증→채널→셸. sans-io 라 host 가 바이트를
+    /// 밀어 넣는다(모바일은 그것 말고는 방법이 없다). 검증 도구와 모바일이 **같은 것**을 쓴다.
+    pub const client = @import("session/ssh/client.zig");
     // **sans-io 경계는 `tests/boundary/ssh_sans_io.zig` 가 강제한다** — 이 디렉터리를 직접 훑어
     // `std.<X>` 를 허용 목록으로 건다. 여기 안에 두면 스캐너가 자기 자신을 스캔하게 되고,
     // 등록 목록으로 세던 앞선 판정자가 그래서 무력했다(그 파일 머리 주석에 실측을 적어 뒀다).

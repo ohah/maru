@@ -27,6 +27,16 @@ pub const IconKind = enum(u8) {
     document,
     archive,
     package,
+    /// 웹/스크립트 계열 **세분화**(2026-08-18). 글리프는 `web` 과 같은 실루엣을 공유하고 **색으로 가른다** —
+    /// maru 아이콘은 단색 coverage 라 작은 셀에 언어 글자(JS·TS)를 넣으면 뭉개진다. 참고 디자인(VS Code 계열)이
+    /// 모양+색으로 가르는 것을 색 축만 취한 것이고, 모양까지 가르려면 언어마다 SVG 를 그려야 한다(후속).
+    ///
+    /// **끝에 추가한다** — `IconKind` 는 `file_tree.Row.icon_kind` 에 raw u8 로 실려 다니므로 중간에 끼우면
+    /// 그 값의 의미가 통째로 밀린다.
+    js,
+    ts,
+    markup,
+    style,
 };
 
 pub const RowType = enum { empty, recent_header, recent_file, root, directory, file };
@@ -57,7 +67,10 @@ fn classifyFile(name: []const u8) IconKind {
     if (anyName(name, &.{ "dockerfile", "makefile", "justfile", "cmakelists.txt", ".editorconfig" })) return .config;
     const ext = extension(name) orelse return .file;
     if (anyName(ext, &.{ "zig", "c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm", "swift", "rs", "go", "java", "kt", "kts", "py", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "ps1", "sql" })) return .code;
-    if (anyName(ext, &.{ "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte", "html", "htm", "css", "scss", "sass", "less" })) return .web;
+    if (anyName(ext, &.{ "js", "jsx", "mjs", "cjs" })) return .js;
+    if (anyName(ext, &.{ "ts", "tsx", "mts", "cts" })) return .ts;
+    if (anyName(ext, &.{ "html", "htm", "vue", "svelte", "astro" })) return .markup;
+    if (anyName(ext, &.{ "css", "scss", "sass", "less", "styl" })) return .style;
     if (anyName(ext, &.{ "json", "jsonc", "csv", "tsv", "xml", "graphql", "gql", "proto" })) return .data;
     if (anyName(ext, &.{ "yaml", "yml", "toml", "ini", "conf", "cfg", "properties", "env" })) return .config;
     if (anyName(ext, &.{ "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff", "heic" })) return .image;
@@ -96,6 +109,12 @@ pub fn colorRole(kind: IconKind) ?tokens.ColorRole {
         .image => .file_icon_media_fg,
         .document => .file_icon_doc_fg,
         .archive, .package => .file_icon_package_fg,
+        // 웹 계열 넷은 서로 다른 색으로 갈린다(글리프는 같다) — 한 폴더에 js·ts·css 가 섞이는 것이 흔하고,
+        // 그때 색이 유일한 구분 신호가 된다.
+        .js => .file_icon_web_fg,
+        .ts => .file_icon_ts_fg,
+        .markup => .file_icon_markup_fg,
+        .style => .file_icon_style_fg,
         .file => null, // 분류되지 않은 일반 파일 — 색을 주면 "종류를 안다"는 잘못된 신호가 된다
     };
 }
@@ -116,6 +135,8 @@ pub fn codepoint(kind: IconKind) ?u21 {
         .file => icons.codepoint(.file),
         .code => icons.codepoint(.file_code),
         .web => icons.codepoint(.web),
+        // 세분화된 넷은 **같은 실루엣**을 쓴다(위 `IconKind` 주석) — 색이 구분을 맡는다.
+        .js, .ts, .markup, .style => icons.codepoint(.web),
         .data => icons.codepoint(.data),
         .config => icons.codepoint(.file_config),
         .git => icons.codepoint(.git_branch),
@@ -141,10 +162,34 @@ test "file tree icon: directory semantic groups and open fallback" {
 
 test "file tree icon: extension groups are ASCII-insensitive with generic fallback" {
     try std.testing.expectEqual(IconKind.code, classify(.file, "main.ZIG", false));
-    try std.testing.expectEqual(IconKind.web, classify(.file, "view.TSX", false));
+    try std.testing.expectEqual(IconKind.ts, classify(.file, "view.TSX", false));
     try std.testing.expectEqual(IconKind.document, classify(.file, "README.md", false));
     try std.testing.expectEqual(IconKind.image, classify(.file, "logo.SVG", false));
     try std.testing.expectEqual(IconKind.git, classify(.file, ".gitignore", false));
     try std.testing.expectEqual(IconKind.file, classify(.file, "unknown.zzz", false));
     try std.testing.expectEqual(IconKind.file, classify(.file, "LICENSE", false));
+}
+
+// 웹 계열은 **색으로 갈린다**(글리프는 공유) — 한 폴더에 js·ts·css 가 섞이는 것이 흔하고, 그때 색이
+// 유일한 구분 신호다. 그래서 ⑴ 분류가 넷으로 갈리고 ⑵ 색은 서로 다르되 ⑶ 글리프는 같아야 한다.
+test "file tree icon: 웹 계열은 색으로 갈리고 글리프는 공유한다" {
+    try std.testing.expectEqual(IconKind.js, classify(.file, "app.js", false));
+    try std.testing.expectEqual(IconKind.js, classify(.file, "bundle.MJS", false));
+    try std.testing.expectEqual(IconKind.ts, classify(.file, "main.ts", false));
+    try std.testing.expectEqual(IconKind.markup, classify(.file, "index.html", false));
+    try std.testing.expectEqual(IconKind.markup, classify(.file, "Page.vue", false));
+    try std.testing.expectEqual(IconKind.style, classify(.file, "theme.scss", false));
+
+    // 색은 넷이 서로 다르다.
+    const roles = [_]?tokens.ColorRole{ colorRole(.js), colorRole(.ts), colorRole(.markup), colorRole(.style) };
+    for (roles, 0..) |a, i| {
+        try std.testing.expect(a != null);
+        for (roles[i + 1 ..]) |b| try std.testing.expect(a.? != b.?);
+    }
+    // 글리프는 같다 — 모양까지 가르려면 언어마다 SVG 가 필요하다(후속).
+    const cp = codepoint(.js).?;
+    try std.testing.expectEqual(cp, codepoint(.ts).?);
+    try std.testing.expectEqual(cp, codepoint(.markup).?);
+    try std.testing.expectEqual(cp, codepoint(.style).?);
+    try std.testing.expectEqual(cp, codepoint(.web).?);
 }

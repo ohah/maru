@@ -88,7 +88,7 @@ pub const inventory = [_]Proof{
     // `fetch_inflight`/`fetch_result`를 더했다. 읽기 쪽에는 `remotes`(`git remote`) 한 줄이 늘었다.
     // count는 2 그대로다 — 더한 것은 슬롯과 명령 하나뿐이고 `@field` 반사 접근이나 Client 구성·
     // receiver 집합은 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "ed2a872e07a42892f493781870374fcc8fc624d869b1f5c1986b5e3a2e828cd9" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "f87641a4886d22c80b7bffc5c42d6caf751806063a3baf1ab18583b87f93a001" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -527,7 +527,7 @@ pub const inventory = [_]Proof{
     // tick이 그 결과를 거두는 호출 둘(결과 거둠 · 캡처 게이트)이 는다. **쓰기 상태와 따로 두는 것이 계약이다** — fetch는 index를
     // 만지지 않아 §6 직렬화 대상이 아니다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·
     // receiver 집합도 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "40ef6f6c748dad2fcabce848c52d8fe0222845ab2e26660f90e34a8847f2dfa9" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c9b70c3ea3c1752ba99144a468146ae39c34edf809a4ca8447c6051070b24b66" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

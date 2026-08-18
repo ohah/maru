@@ -273,6 +273,27 @@ pub const NumstatIterator = struct {
     }
 };
 
+/// `check-ignore --stdin -z` 출력에서 **무시된 경로**를 하나씩 꺼낸다. 출력은 입력 순서대로, 무시된
+/// 것만, NUL 로 끝나는 경로들이다(`-v` 없이 쓰므로 부가 정보가 없다). 빈 조각은 건너뛴다 — 마지막
+/// NUL 뒤의 빈 꼬리가 항목으로 세지 않도록.
+pub fn iterateIgnored(text: []const u8) IgnoredIterator {
+    return .{ .rest = text };
+}
+
+pub const IgnoredIterator = struct {
+    rest: []const u8,
+
+    pub fn next(self: *IgnoredIterator) ?[]const u8 {
+        while (self.rest.len > 0) {
+            const end = std.mem.indexOfScalar(u8, self.rest, 0) orelse self.rest.len;
+            const item = self.rest[0..end];
+            self.rest = if (end < self.rest.len) self.rest[end + 1 ..] else self.rest[end..];
+            if (item.len > 0) return item;
+        }
+        return null;
+    }
+};
+
 pub fn iterateNumstat(text: []const u8) NumstatIterator {
     return .{ .lines = std.mem.splitScalar(u8, text, '\n') };
 }
@@ -498,4 +519,20 @@ test "unborn 저장소도 브랜치 이름을 읽는다(oid가 (initial))" {
     try std.testing.expect(head.unborn);
     // 커밋이 하나라도 있으면 그 자리에 해시가 온다 — 폴백을 타면 안 된다.
     try std.testing.expect(!parseHead("# branch.oid 995e148\n# branch.head main\n").unborn);
+}
+
+// `check-ignore --stdin -z` 는 무시된 경로만, 입력 순서대로, NUL 로 끝나 돌아온다. 경로에 공백·개행이
+// 있어도 갈리지 않는 것이 `-z` 를 쓰는 이유다.
+test "check-ignore -z 출력에서 무시된 경로만 꺼낸다(공백·개행 포함 경로 보존)" {
+    var it = iterateIgnored("node_modules\x00build/out put\x00weird\nname.log\x00");
+    try std.testing.expectEqualStrings("node_modules", it.next().?);
+    try std.testing.expectEqualStrings("build/out put", it.next().?);
+    try std.testing.expectEqualStrings("weird\nname.log", it.next().?);
+    try std.testing.expect(it.next() == null);
+
+    // 빈 출력(무시된 것 없음)과 꼬리 NUL 만 있는 출력 모두 항목이 없다.
+    var empty = iterateIgnored("");
+    try std.testing.expect(empty.next() == null);
+    var tail = iterateIgnored("\x00\x00");
+    try std.testing.expect(tail.next() == null);
 }

@@ -720,6 +720,10 @@ pub fn updateFileTree(self: *AppSession) !void {
                 return err;
             },
         };
+        // 방금 읽은 디렉터리의 항목들을 git 에 물어 **무시 여부**를 표시한다(사용자 결정 2026-08-18).
+        // 여기가 자리인 이유: 그 목록이 지금 손에 있고, "펼쳐 보이는 것"만 묻는다는 규칙이 자연히 지켜진다.
+        // 거절되거나 실패하면 그 화면은 판정 없이 남는다 — 모르면 흐리게 하지 않는다.
+        git_ops.requestIgnoredForPaths(self, result.path, result.entries.items);
         changed = true;
     }
 

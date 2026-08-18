@@ -74,6 +74,7 @@ PIDFILE="$DIR/sshd.pid"
 cleanup() {
 	if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; fi
 	if [ -f "$DIR/sshd2.pid" ]; then kill "$(cat "$DIR/sshd2.pid")" 2>/dev/null || true; fi
+	if [ -f "$DIR/sshd3.pid" ]; then kill "$(cat "$DIR/sshd3.pid")" 2>/dev/null || true; fi
 	rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
@@ -98,6 +99,7 @@ start_sshd() {
 	_base=$2
 	_log=$3
 	_cmd=$4
+	_extra=${5:-}
 	_conf="$_pidfile.conf"
 	STARTED_PORT=""
 	_try=0
@@ -119,6 +121,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthorizedKeysFile $DIR/authorized_keys
 PermitRootLogin no
+$_extra
 ForceCommand $_cmd
 EOF
 		chmod 600 "$_conf"
@@ -173,11 +176,22 @@ ECHO_BYTES=4194304
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$ECHO_BYTES" 0 echo
 ROUNDS=$((ROUNDS + 1))
 
+# 5) **재키잉 회차**(S7d). `RekeyLimit 1M` 로 띄운 서버는 8MiB 를 보내는 동안 열 번쯤 키를 갈자고
+#    한다. 우리가 답하지 않으면 서로 기다리다 멈춘다 — 실측으로 917,504바이트에서 교착했다.
+#    OpenSSH 기본은 1GB/1시간이라 **한 시간 넘는 세션이면 반드시** 이 자리를 지난다.
+start_sshd "$DIR/sshd3.pid" "$((PORT + 2))" "$DIR/sshd3.log" "$BULK_CMD" "RekeyLimit 1M" || {
+	sed -n '1,5p' "$DIR/sshd3.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 재키잉 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$EXPECT_BYTES" "$EXPECT_STDERR" rekey
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 3 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 3 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 4 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 4 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 세 회차 완주"
+echo "[ssh-client-smoke] 네 회차 완주"

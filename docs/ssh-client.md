@@ -59,20 +59,32 @@ OpenSSH 서버에서 "길이가 쓰레기로 풀린다/태그 불일치" 로 **�
 **이 문서와 코드는 draft 명명을 쓴다.**
 
 **안 하는 것**(정직하게 못박는다): RSA·ECDSA 호스트키, AES-GCM/CTR, `diffie-hellman-*`,
-agent 전달, 포트 포워딩, X11, SFTP/SCP, 다중 채널, `keyboard-interactive`, **재키잉**.
+agent 전달, 포트 포워딩, X11, SFTP/SCP, 다중 채널, `keyboard-interactive`.
 
-**재키잉을 안 하는 것은 시한폭탄이다 — 그래서 따로 적는다.** 서버는 일정 트래픽·시간마다
-`SSH_MSG_KEXINIT` 을 다시 보내 키를 갈자고 한다(OpenSSH 기본 `RekeyLimit` 은 **1GB 또는 1시간**).
-우리가 답하지 않으면 서버는 우리 KEXINIT 을 기다리며 **세션이 통째로 멈춘다** — 실측:
-`RekeyLimit 1M` 로 띄운 sshd 에서 917,504바이트를 받고 굳었다. 즉 **한 시간 넘는 터미널 세션은
-반드시 이것을 만난다**. 층에는 이미 조각이 있다(`kexinit.Phase.rekey` 는 재키잉에서 strict 표시자를
-무시하고 초기값을 잇는다, `transport.Phase.established`, `applyNegotiation`) — 없는 것은 그것을
-엮는 흐름과 `session_id` 를 초기 `H` 로 고정하는 규칙이다.
+### 3.0.1 재키잉은 한다 — 안 하면 한 시간 뒤에 멈춘다
 
-**`keyboard-interactive` 를 뺀 값이 생각보다 크다.** 많은 서버가 비밀번호를 `password` 가 아니라
-그것으로 받고(2FA 도 그 위에 얹힌다), 그런 서버에서는 **키가 없으면 못 붙는다**. 이 기계의 sshd 는
-`publickey,password,keyboard-interactive` 셋을 다 광고하는 것을 실측했지만(그래서 스모크는 돈다),
-잠긴 서버에서는 다르다 — 붙는 서버를 늘려야 할 때 **가장 먼저 열 후보**가 이것이다.
+서버는 일정 트래픽·시간마다 `SSH_MSG_KEXINIT` 을 다시 보내 키를 갈자고 한다(OpenSSH 기본
+`RekeyLimit` 은 **1GB 또는 1시간**). 답하지 않으면 서버가 우리 `KEXINIT` 을 기다리며 **세션이 통째로
+멈춘다** — 실측: `RekeyLimit 1M` 서버에서 917,504바이트를 받고 굳었다. 즉 **한 시간 넘는 터미널
+세션은 반드시 이것을 만난다**.
+
+초기 KEX 와 다른 점 셋이 규칙의 전부다.
+
+- **`session_id` 는 첫 `H` 로 고정된다**(RFC 4253 §7.2 — "Once computed, the session identifier is
+  not changed, even if keys are later re-exchanged"). 새 `H` 로 바꾸면 인증에 쓴 서명의 근거가 달라진다.
+  키 유도에는 **새 `H` 와 옛 `session_id` 를 함께** 먹인다 — 둘을 헷갈리면 키가 서버와 다르게 나온다.
+- **`KEXINIT` 을 보낸 뒤에는 보낼 수 있는 것이 정해져 있다**(§7.1): 전송 계층 일반(1~19, 단
+  `SERVICE_REQUEST`·`SERVICE_ACCEPT` 제외) · 협상(20~29, `KEXINIT` 은 한 번만) · KEX 방법별(30~49).
+  **채널 데이터는 못 보낸다.** 보내면 상대가 끊고, 증상은 "가끔 끊긴다" 라 원인을 짚기 어렵다.
+- **받는 데는 제한이 없다.** §7.1 이 "each party MUST be prepared to process an arbitrary number of
+  messages that may be in-flight" 라고 요구한다 — 재키잉 중에도 상대의 채널 데이터는 계속 오고,
+  그것을 버리면 출력이 사라진다.
+
+**strict KEX 는 재키잉에서도 시퀀스를 리셋한다**(draft §3.3 — "at the conclusion of the initial KEX
+**and for each subsequent KEX**"). 그리고 재키잉 `KEXINIT` 의 strict 표시자는 **무시하고 초기값을
+잇는다**(§3.1) — `kexinit.Phase.rekey` 가 그것을 강제한다.
+
+**호스트키는 재키잉마다 다시 검증한다.** 그 사이에 상대가 바뀌었을 수 있다.
 
 **좁힌 값은 검증할 표면이 준다는 것이다.** 알고리즘 하나마다 상호운용·보안 검증이 따라붙는다 —
 필요해지면 그때 넓히되, 넓히는 순간 그 비용도 같이 온다.

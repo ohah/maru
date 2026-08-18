@@ -36,10 +36,11 @@ pub const Error = error{
     ChannelRefused,
     /// 채널 요청(`pty-req`·`shell`)이 거절됐다.
     RequestFailed,
-    /// 서버가 끊었다(`SSH_MSG_DISCONNECT`). **이유는 `Step.disconnect` 가 들고 있다** — 오류
-    /// 이름만으로는 "왜 못 붙는지" 를 못 전한다.
-    Disconnected,
     /// 아직 셸이 안 떴는데 쓰려 한다.
+    ///
+    /// **`SSH_MSG_DISCONNECT` 는 여기 없다.** 서버가 끊은 것은 오류가 아니라 `Step` 으로 온다
+    /// (`state == .closed` + `Step.disconnect`) — 오류에는 이유를 못 싣고, 이유 없는 "끊겼다" 는
+    /// 사용자가 고칠 것을 안 준다.
     NotReady,
     /// `start` 를 안 부르고 `feed` 했다. **조용한 무동작보다 낫다** — 안 그러면 호출자가 아무
     /// 일도 안 하면서 영원히 읽는다(실측으로 그 모양을 여러 번 겪었다).
@@ -135,8 +136,9 @@ pub const Step = struct {
     /// 서버가 보낸 배너(RFC 4252 §5.4 — 법적 고지 등). **이미 걸러져 있다**(제어문자 제거) —
     /// 서버가 고른 문자열이 그대로 화면에 가면 OSC 로 창 제목·클립보드에 손댈 수 있다.
     banner: ?[]const u8 = null,
-    /// 서버가 끊은 이유(RFC 4253 §11.1). **`feed` 가 `Disconnected` 를 내기 직전에 채운다** —
-    /// 오류만 보면 "왜" 가 사라지고, 그 "왜" 가 사용자가 유일하게 고칠 수 있는 것이다
+    /// 서버가 끊은 이유(RFC 4253 §11.1). **끊긴 사실(`state == .closed`)과 같은 `Step` 에 온다** —
+    /// 오류로 올리면 값을 못 실어 이유를 읽으러 한 번 더 불러야 하고, 오류를 받고 멈춘 호출자는
+    /// 그 "왜" 를 영영 못 본다. 그리고 그 "왜" 가 사용자가 유일하게 고칠 수 있는 것이다
     /// ("Too many authentication failures" · "No supported authentication methods available").
     disconnect: ?Disconnect = null,
 };
@@ -221,7 +223,7 @@ pub const Client = struct {
     /// 걸러 둔 배너. `feed` 한 번이 돌려주고 다음 호출에서 비운다.
     banner_buf: [1024]u8 = undefined,
     banner_len: usize = 0,
-    /// 끊긴 이유. `Disconnected` 오류와 **같은 `feed` 호출**에서 나온다.
+    /// 끊긴 이유. 상태가 `closed` 로 가는 **같은 `feed` 호출**에서 나온다.
     disconnect_buf: [512]u8 = undefined,
     /// **답을 미뤄 둔 전역 요청의 수**(§7.1). 재키잉 중에는 `REQUEST_FAILURE`(82) 를 보낼 수
     /// 없어서, 그 사이에 온 요청의 답을 여기 세어 두고 재키잉이 끝나면 내보낸다.
@@ -315,14 +317,17 @@ pub const Client = struct {
             // 한 걸음이 실제로 필요한 만큼만 남겨 둔다. 넉넉히 잡으면(예: 패킷 상한 256KiB)
             // 모바일이 못 쓸 크기를 요구하게 된다.
             if (w.remaining() < min_wire_out or s.remaining() < self.ch.local_max_packet) break;
-            // **밀린 것을 먼저 비운다.** 입력이 없어도 비워야 한다 — 서버의 keepalive(채널
-            // 요청 `keepalive@openssh.com`, 실측)에 답하는 자리라서, 다음 패킷이 올 때까지
-            // 미루면 서버가 우리를 죽은 것으로 본다.
-            // (`stepPacket` 도 끝에서 같은 것을 부르지만 그쪽은 **패킷이 있을 때만** 돈다.)
-            try self.flushDeferred(&w);
             const before_consumed = consumed;
             const before_state = self.state;
             try self.step(input[consumed..], &consumed, &w, &s);
+            // **밀린 것을 비운다.** 입력이 없어도 비워야 한다 — 서버의 keepalive(채널 요청
+            // `keepalive@openssh.com`, 실측)에 답하는 자리라서, 다음 패킷이 올 때까지 미루면
+            // 서버가 우리를 죽은 것으로 본다. (`stepPacket` 도 끝에서 같은 것을 부르지만 그쪽은
+            // **패킷이 있을 때만** 돈다.)
+            //
+            // **`step` 뒤에 둔다.** 앞에 두면 같은 `feed` 안에서 방금 읽은 `DISCONNECT` 를 모른
+            // 채로 큐를 비워, 이미 끝난 연결에 보낼 바이트를 만들어 준다(실측: 72 바이트).
+            try self.flushDeferred(&w);
             if (consumed == before_consumed and self.state == before_state) break;
         }
         return .{
@@ -473,11 +478,14 @@ pub const Client = struct {
         const msg = payload[0];
         // **전송 계층 잡 메시지는 어느 상태에서나 온다**(계약 §3.2). 분류는 S7c 가 넓히고,
         // 여기서는 세션을 죽이지 않게만 다룬다.
-        // **끊긴 이유를 먼저 담는다.** 그래야 `Disconnected` 를 받은 호출자가 같은 `Step` 에서
-        // "왜" 를 읽는다 — 오류 이름만으로는 사용자가 고칠 것이 없다(RFC 4253 §11.1).
+        // **끊긴 이유를 담고 기계를 닫는다**(RFC 4253 §11.1).
+        // **오류가 아니라 `Step` 으로 올린다.** 오류에는 값을 못 싣는 언어라, 오류로 올리면
+        // 이유를 읽으려고 `feed` 를 한 번 더 불러야 한다 — 오류를 받고 멈춘 호출자는 **이유를
+        // 영영 못 본다**. 끊긴 사실과 그 이유는 한 번에 와야 한다. 상태는 `closed` 로 가므로
+        // (`onDisconnect` 안) 이것을 성공으로 오해할 자리는 없다.
         if (msg == msg_disconnect) {
             self.onDisconnect(payload) catch {};
-            return Error.Disconnected;
+            return;
         }
         // `IGNORE`·`DEBUG` 는 뜻이 없다(§11.2·§11.3). `UNIMPLEMENTED` 는 **우리가 보낸 것에 대한
         // 답**이라 여기서 할 일이 없다 — 우리는 모르는 메시지를 안 보낸다.
@@ -689,12 +697,19 @@ pub const Client = struct {
         self.closeMachine();
     }
 
-    /// **연결을 끝내는 주체는 우리다.** `Disconnected` 를 돌려주는 것만으로는 부족하다 — 오류를
-    /// 흘려 보낸 드라이버가 그 뒤에도 먹이고 쓸 수 있고, 그러면 끝난 연결에 바이트를 짜 넣는다
+    /// **연결을 끝내는 주체는 우리다.** 이유만 실어 주고 기계를 살려 두면, 상태를 안 보는
+    /// 드라이버가 그 뒤에도 먹이고 쓸 수 있고 그러면 끝난 연결에 바이트를 짜 넣는다
     /// (RFC 4253 §11.1 은 이 메시지 뒤에 연결을 끝내라고 한다).
     fn closeMachine(self: *Client) void {
         self.state = .closed;
         self.shell_ready = false;
+        // **미뤄 둔 것도 같이 버린다.** 연결이 끝났는데 큐가 남아 있으면 그 다음 `feed` 가 끝난
+        // 연결에 보낼 바이트를 만들어 준다 — 드라이버는 그것을 닫힌 소켓에 쓰고 EPIPE 를 보며,
+        // 증상이 "서버가 끊었다" 가 아니라 "쓰기 실패" 로 보인다(실측: 72 바이트가 나갔다).
+        self.pending_request_failures = 0;
+        self.deferred_request_failure = false;
+        self.deferred_close = false;
+        self.ch.state = .closed; // 윈도 보충도 여기서 멎는다
     }
 
     /// 배너를 걸러 보관한다. **거르는 것이 계약이다**(§4.4.2) — 서버가 고른 문자열이 그대로
@@ -1483,11 +1498,13 @@ test "끊긴 이유를 같은 Step 에서 준다" {
     const n = try packet.write(&pbuf, w.written(), prng.random());
     var out: [8192]u8 = undefined;
     var scr: [64 * 1024]u8 = undefined;
-    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+    const step = try c.feed(pbuf[0..n], &out, &scr);
 
-    // 오류를 받은 뒤에도 이유를 읽을 수 있다.
-    try testing.expectEqual(DisconnectReason.no_more_auth_methods_available, c.disconnect_reason);
-    try testing.expectEqualStrings("No supported authentication methods available", c.disconnect_buf[0..c.disconnect_len]);
+    // **끊긴 사실과 이유가 한 번에 온다.**
+    try testing.expectEqual(State.closed, step.state);
+    const d = step.disconnect orelse return error.TestExpectedDisconnect;
+    try testing.expectEqual(DisconnectReason.no_more_auth_methods_available, d.reason);
+    try testing.expectEqualStrings("No supported authentication methods available", d.description);
 }
 
 test "모르는 사유 코드도 설명을 잃지 않는다" {
@@ -1504,9 +1521,10 @@ test "모르는 사유 코드도 설명을 잃지 않는다" {
     const n = try packet.write(&pbuf, w.written(), prng.random());
     var out: [8192]u8 = undefined;
     var scr: [64 * 1024]u8 = undefined;
-    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
-    try testing.expectEqual(@as(u32, 9999), @intFromEnum(c.disconnect_reason));
-    try testing.expectEqualStrings("서버가 새로 만든 이유", c.disconnect_buf[0..c.disconnect_len]);
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    const d = step.disconnect orelse return error.TestExpectedDisconnect;
+    try testing.expectEqual(@as(u32, 9999), @intFromEnum(d.reason));
+    try testing.expectEqualStrings("서버가 새로 만든 이유", d.description);
 }
 
 test "끊긴 이유도 걸러서 준다" {
@@ -1523,8 +1541,8 @@ test "끊긴 이유도 걸러서 준다" {
     const n = try packet.write(&pbuf, w.written(), prng.random());
     var out: [8192]u8 = undefined;
     var scr: [64 * 1024]u8 = undefined;
-    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
-    const d = c.disconnect_buf[0..c.disconnect_len];
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    const d = (step.disconnect orelse return error.TestExpectedDisconnect).description;
     try testing.expect(std.mem.indexOfScalar(u8, d, 0x1b) == null);
     try testing.expect(std.mem.indexOf(u8, d, "thing") != null);
 }
@@ -1818,7 +1836,9 @@ test "DISCONNECT 뒤에는 기계가 닫힌다" {
     const n = try packet.write(&pbuf, w.written(), prng.random());
     var out: [8192]u8 = undefined;
     var scr: [64 * 1024]u8 = undefined;
-    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+    const first = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(State.closed, first.state);
+    try testing.expect(first.disconnect != null);
 
     // 뒤에 온 바이트는 흘려보낸다 — 끝난 연결에서 파싱 오류를 올릴 이유가 없다.
     const after = try c.feed("garbage", &out, &scr);
@@ -1844,12 +1864,13 @@ test "설명이 너무 길어도 끊긴 것은 끊긴 것이다" {
     const n = try packet.write(&pbuf, w.written(), prng.random());
     var out: [8192]u8 = undefined;
     var scr: [64 * 1024]u8 = undefined;
-    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+    const first = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(State.closed, first.state);
+    try testing.expectEqual(@as(usize, 0), (first.disconnect orelse return error.TestExpectedDisconnect).description.len);
 
     const after = try c.feed("garbage", &out, &scr);
     try testing.expectEqual(State.closed, after.state);
     try testing.expect(after.disconnect != null);
-    try testing.expectEqual(@as(usize, 0), after.disconnect.?.description.len);
     try testing.expectEqual(DisconnectReason.protocol_error, after.disconnect.?.reason);
 }
 
@@ -1917,4 +1938,32 @@ test "적대적 입력: 붙은 뒤의 상태기계도 어떤 바이트열에 안
     }
     // 이 값은 실측이다 — 씨앗이나 판정을 바꿔 닿는 수가 무너지면 여기서 걸린다.
     try testing.expect(reached > 300);
+}
+
+test "끊긴 뒤에는 미뤄 둔 것도 안 나간다" {
+    // 서버가 끊었으면 연결은 끝이다(§11.1). 그런데 미뤄 둔 답·윈도 보충이 큐에 남아 있으면
+    // **끝난 연결에 바이트를 만들어 준다** — 드라이버는 그것을 이미 닫힌 소켓에 쓰고 EPIPE 를
+    // 본다. 원인이 "서버가 끊었다" 가 아니라 "쓰기 실패" 로 보이는 것이 이 부류의 나쁜 점이다.
+    var c = readyClient();
+    c.ch.local_window = 1; // 보충이 필요한 상태
+    c.pending_request_failures = 3; // 미뤄 둔 답도 있다
+    try testing.expect(c.ch.pendingWindowAdjust() != 0);
+
+    var buf: [128]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(2);
+    try w.string("bye");
+    try w.string("");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(67);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(State.closed, step.state);
+    try testing.expectEqual(@as(usize, 0), step.wire.len);
+
+    const after = try c.feed(&[_]u8{}, &out, &scr);
+    try testing.expectEqual(@as(usize, 0), after.wire.len);
 }

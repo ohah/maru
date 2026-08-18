@@ -95,11 +95,27 @@ fn countMarkers(path: []const u8, source: []const u8, report: *bool) usize {
     return found;
 }
 
-/// 제외 디렉터리 아래인가. `posixWalk` 가 주는 경로는 `/` 구분이므로 접두어 비교로 충분하다.
+/// 제외 디렉터리 아래인가.
+///
+/// **접두어가 아니라 경로 세그먼트로 본다.** 접두어만 보면 최상위(`node_modules/…`)만 걸러지고
+/// **중첩된 것**(`web/node_modules/…`)이 통과한다 — 그 아래에는 8 MiB를 넘는 번들이 있어 읽기 상한에
+/// 걸리고, 게이트가 위반이 아니라 **환경 때문에** 죽는다(실측 2026-08-19: `web/node_modules`가 설치된
+/// 작업 트리에서 `StreamTooLong`. CI는 그 디렉터리가 없어 초록이었다).
+///
+/// 세그먼트 비교라 `web/dist`·`crates/target` 같은 중첩 생성물도 함께 걸러진다 — 그 셋 다 "우리가 쓴
+/// 소스가 아닌 곳"이라는 같은 이유로 목록에 있다.
 fn skipped(path: []const u8) bool {
+    // **여러 세그먼트로 된 항목**(`assets/fonts`)은 접두어로 본다 — 세그먼트 비교로는 안 걸린다.
     for (skip_dirs) |dir| {
+        if (std.mem.indexOfScalar(u8, dir, '/') == null) continue;
         if (std.mem.startsWith(u8, path, dir) and
             (path.len == dir.len or path[dir.len] == '/')) return true;
+    }
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |segment| {
+        for (skip_dirs) |dir| {
+            if (std.mem.eql(u8, segment, dir)) return true;
+        }
     }
     return false;
 }
@@ -109,6 +125,22 @@ fn wanted(basename: []const u8) bool {
         if (std.mem.endsWith(u8, basename, ext)) return true;
     }
     return false;
+}
+
+test "제외 목록은 **중첩된** 생성물 디렉터리도 거른다" {
+    // 접두어만 보던 판은 최상위 `node_modules/`만 걸렀다 — `web/node_modules/` 아래 8 MiB 번들에서
+    // 읽기 상한에 걸려, 게이트가 위반이 아니라 **환경 때문에** 죽었다(실측 2026-08-19).
+    try std.testing.expect(skipped("node_modules/pkg/index.js"));
+    try std.testing.expect(skipped("web/node_modules/typescript/lib/typescript.js"));
+    try std.testing.expect(skipped("web/dist/app.js"));
+    try std.testing.expect(skipped("crates/target/debug/build.rs"));
+    try std.testing.expect(skipped("assets/fonts/a.md")); // 두 세그먼트 항목은 접두어로 걸린다
+
+    // **우리 소스는 계속 훑는다** — 이름이 비슷하다고 거르면 그쪽 마커를 못 잡는다.
+    try std.testing.expect(!skipped("src/session/git_command.zig"));
+    try std.testing.expect(!skipped("web/src/main.ts"));
+    try std.testing.expect(!skipped("docs/node_modules_notes.md")); // 세그먼트가 아니라 이름의 일부다
+    try std.testing.expect(!skipped("assets/icons/plus.svg"));
 }
 
 test "머지 충돌 마커가 커밋되지 않았다" {

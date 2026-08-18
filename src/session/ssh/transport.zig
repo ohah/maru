@@ -53,23 +53,47 @@ pub const Phase = enum {
 };
 
 /// 꺼낸 패킷 하나.
-pub const Received = struct {
-    /// 메시지 번호부터. **언제나 `out` 안을 가리키고 최소 1바이트다.**
-    ///
-    /// 평문 구간과 암호 구간이 **같은 소유자**를 갖게 하려고 평문도 `out` 으로 복사한다. 처음에는
-    /// 평문 경로가 `packet.read` 의 슬라이스를 그대로 돌려줬는데, 그것은 **호출자의 입력 버퍼**를
-    /// 가리킨다 — 문서대로 `consumed` 만큼 버퍼를 미는 드라이버가 자기가 들고 있는 `I_S`·`K_S`·
-    /// `Q_S` 를 memmove 로 덮어쓰고, 그러면 교환 해시가 틀려 **증상이 중간자와 구별되지 않는다**.
-    /// 초기 KEX 전체가 그 구간이라 실서버에서만 드러난다.
-    payload: []const u8,
-    /// 선 버퍼에서 먹은 바이트 수. 호출자는 그만큼 앞으로 민다.
-    consumed: usize,
-    /// 이 패킷에 매겨진 시퀀스 번호. `SSH_MSG_UNIMPLEMENTED` 로 되돌려 줄 때 쓴다(draft §3.3).
-    seq: u32,
-    /// **버린 추측 패킷이다**(RFC 4253 §7.1). 참이면 `payload` 를 보지 않는다 — 빈 슬라이스로
-    /// 알리던 옛 방식은 `payload.len >= 1` 불변을 깨서, 문서대로 `payload[0]` 을 보는 드라이버가
-    /// 정상 핸드셰이크에서 죽었다.
-    discarded: bool = false,
+/// `feed` 가 돌려주는 것. **union 인 것이 요점이다.**
+///
+/// 처음에는 `discarded: bool = false` 필드였는데, 그것은 **무시할 수 있는 플래그**였다. 계약
+/// §4.5 를 그대로 따라 쓴 드라이버(`consumed` 만큼 밀고 `payload[0]` 로 분기)가 그 필드의 존재를
+/// 모르면 **버린 추측 패킷을 진짜로 처리**하고, 컴파일러는 아무 말도 안 한다 — 실측했다:
+/// 공격자가 고른 `20 AA BB CC` 가 서버 KEXINIT 자리에서 그대로 수용됐다. 기본값(`= false`)까지
+/// 붙어 있어 우리 쪽 생성 자리에서도 빠뜨리기 쉬웠다.
+///
+/// 원래 지적은 "빈 payload 로 알리지 말라" 였고 그 수정은 맞았지만, **bool 로 바꾼 것이 조용한
+/// 실패를 만들었다** — 빈 슬라이스는 최소한 시끄럽게 죽었다. union 이면 `switch` 가 강제되어
+/// 둘 다 아니게 된다.
+pub const Received = union(enum) {
+    /// 상대가 보낸 진짜 패킷.
+    packet: Packet,
+    /// **버린 추측 패킷**(RFC 4253 §7.1). 내용은 없고 먹은 바이트만 있다.
+    discarded: Discarded,
+
+    pub const Packet = struct {
+        /// 메시지 번호부터. **언제나 `out` 안을 가리키고 최소 1바이트다.**
+        ///
+        /// **다음 `feed` 가 같은 `out` 을 덮어쓴다 — 들고 있을 것은 복사해야 한다.** 초기 KEX 의
+        /// `I_S`·`K_S`·`Q_S` 가 정확히 "들고 있어야 하는 것" 이라, 이 규칙을 모르면 교환 해시가
+        /// 조용히 틀리고 **증상이 중간자와 구별되지 않는다**(실측: 보관한 `I_S` 가 다음 패킷을
+        /// 읽는 순간 그 패킷 내용으로 바뀐다).
+        ///
+        /// 평문 구간과 암호 구간이 **같은 소유자**를 갖게 하려고 평문도 `out` 으로 복사한다.
+        /// 처음에는 평문 경로가 `packet.read` 의 슬라이스를 그대로 돌려줬는데, 그것은 **호출자의
+        /// 입력 버퍼**를 가리켜 `consumed` 만큼 미는 드라이버가 자기 `I_S` 를 memmove 로 덮어썼다.
+        /// 소유자를 하나로 만든 것은 맞았지만 **수명 규칙은 그것과 별개**다 — 위 문단이 그것이다.
+        payload: []const u8,
+        /// 선 버퍼에서 먹은 바이트 수. 호출자는 그만큼 앞으로 민다.
+        consumed: usize,
+        /// 이 패킷에 매겨진 시퀀스 번호. `SSH_MSG_UNIMPLEMENTED` 로 되돌려 줄 때 쓴다(draft §3.3).
+        seq: u32,
+    };
+
+    pub const Discarded = struct {
+        /// 버린 바이트 수. **이것만큼은 밀어야 한다** — 안 밀면 같은 바이트를 다시 먹는데
+        /// `pending_discard` 는 이미 내려가 있어, 그 다음에는 **진짜로 처리한다**.
+        consumed: usize,
+    };
 };
 
 pub const Transport = struct {
@@ -91,6 +115,19 @@ pub const Transport = struct {
     seen_ecdh_reply: u8 = 0,
     seen_newkeys: u8 = 0,
 
+    /// **되돌릴 수 없는 실패.** draft §3.2 의 MUST 넷은 전부 "연결을 끊어라" 이고, 프레이밍·AEAD
+    /// 실패는 길이 필드가 암호화돼 있어 **어디서부터 다음 패킷인지 알 방법이 원리적으로 없다**.
+    /// 그런데 이 층은 소켓이 없어 스스로 끊지 못한다 — 오류만 낸다.
+    ///
+    /// **오류만 내는 것으로는 부족했다**(실측): wrap 오류를 무시하고 `send` 를 다시 부르면
+    /// `send_seq` 가 이미 0 으로 넘어가 있어 검사가 통과하고, 초기 KEX 가 **감싸 돈 채로 계속**
+    /// 된다 — 명세가 금지한 바로 그 상태다. sans-io 에서 "끊어라" 의 등가물은 **상태를 못 쓰게
+    /// 만드는 것**이다. 그래서 첫 실패를 여기 박아 두고 이후 모든 호출이 같은 오류를 낸다.
+    ///
+    /// **`ShortBuffer` 만 예외다** — 상대가 아니라 우리 버퍼 얘기라 재시도가 정상 동작이다
+    /// (계수 규칙의 예외와 같은 자리다).
+    poison: ?Error = null,
+
     /// payload 하나를 선에 나갈 바이트로 만든다. **시퀀스 번호를 여기서 올린다.**
     ///
     /// `NEWKEYS` 를 보낼 때도 그냥 부르면 된다 — 그 패킷은 **옛 키로** 나가야 하고, 전환은
@@ -101,6 +138,7 @@ pub const Transport = struct {
         payload: []const u8,
         rand: std.Random,
     ) Error!usize {
+        if (self.poison) |e| return e;
         const n = if (self.send_cipher) |c|
             try c.seal(out, self.send_seq, payload, rand)
         else
@@ -108,7 +146,7 @@ pub const Transport = struct {
         self.send_seq +%= 1;
         // **wrap 금지에는 방향 한정이 없다**(draft §3.2). 받는 쪽만 재면 보내는 쪽이 조용히 감싸 돈다.
         if (self.strict_kex and self.phase == .initial_kex and self.send_seq == 0) {
-            return Error.SequenceWrapBeforeKexComplete;
+            return self.poisonUnless(Error.SequenceWrapBeforeKexComplete);
         }
         return n;
     }
@@ -127,7 +165,13 @@ pub const Transport = struct {
     /// 겹치면 안 된다**(`cipher.open` 주석).
     ///
     /// 시퀀스 번호는 **꺼낸 패킷마다** 오른다 — 버리는 패킷도 마찬가지다.
+    /// 바이트를 먹인다. **한 번 실패하면 이 연결은 끝난다** — 아래 `poison` 참조.
     pub fn feed(self: *Transport, out: []u8, buf: []const u8) Error!?Received {
+        if (self.poison) |e| return e;
+        return self.feedOne(out, buf) catch |err| return self.poisonUnless(err);
+    }
+
+    fn feedOne(self: *Transport, out: []u8, buf: []const u8) Error!?Received {
         const got = (self.readOne(out, buf) catch |err| {
             // **`Incomplete` 만 "아직 안 왔다" 다.** 프레이밍이 깨졌거나 태그가 틀린 것은 **이미
             // 받은 패킷**이므로 번호를 올려야 한다(계약 §4.5 는 예외 없이 "받은 것은 센다" 다).
@@ -196,10 +240,16 @@ pub const Transport = struct {
                 msg_newkeys => self.seen_newkeys -|= 1,
                 else => {},
             }
-            return .{ .payload = got.payload, .consumed = got.consumed, .seq = seq, .discarded = true };
+            return .{ .discarded = .{ .consumed = got.consumed } };
         }
 
-        return .{ .payload = got.payload, .consumed = got.consumed, .seq = seq };
+        return .{ .packet = .{ .payload = got.payload, .consumed = got.consumed, .seq = seq } };
+    }
+
+    /// 실패를 박는다. `ShortBuffer` 는 재시도 가능이라 그대로 흘린다.
+    fn poisonUnless(self: *Transport, err: Error) Error {
+        if (err != Error.ShortBuffer and self.poison == null) self.poison = err;
+        return err;
     }
 
     /// strict KEX 를 켠다. **사후 검사가 여기서 돈다**(draft §3.2).
@@ -207,8 +257,9 @@ pub const Transport = struct {
     /// `strict_kex` 를 필드에 그냥 쓰면 안 되는 이유가 이것이다 — 그 값은 서버 KEXINIT 을 읽고 나서야
     /// 정해지는데, "상대의 첫 메시지가 KEXINIT 이었나" 는 **그보다 앞선 일**을 되짚는 물음이다.
     pub fn enableStrictKex(self: *Transport) Error!void {
+        if (self.poison) |e| return e;
         if (self.first_from_peer) |first| {
-            if (first != msg_kexinit) return Error.FirstMessageNotKexInit;
+            if (first != msg_kexinit) return self.poisonUnless(Error.FirstMessageNotKexInit);
         }
         self.strict_kex = true;
     }
@@ -318,7 +369,7 @@ test "시퀀스 번호는 방향마다 따로 오른다" {
     try std.testing.expectEqual(@as(u32, 0), t.recv_seq); // 받은 것은 없다
 
     const wire_bytes = plainKexInit(&out, prng.random());
-    const got = (try t.feed(&plain, wire_bytes)).?;
+    const got = (try t.feed(&plain, wire_bytes)).?.packet;
     try std.testing.expectEqual(@as(u32, 0), got.seq); // 첫 수신은 0 번
     try std.testing.expectEqual(@as(u32, 1), t.recv_seq);
     try std.testing.expectEqual(@as(u32, 2), t.send_seq); // 보내는 쪽은 안 움직인다
@@ -405,7 +456,7 @@ test "NEWKEYS 를 받으면 받는 번호도 0 으로 리셋한다" {
     // 안 맞아 여기서 깨진다 — 번호만 보면 "왜 0 이어야 하는지" 가 안 남으므로 그 결과까지 잰다.
     var server_send = testCipher();
     const n = try server_send.seal(&out, 0, &[_]u8{ 94, 0, 0, 0, 1 }, prng.random());
-    const got = (try t.feed(&plain, out[0..n])).?;
+    const got = (try t.feed(&plain, out[0..n])).?.packet;
     try std.testing.expectEqual(@as(u32, 0), got.seq);
     try std.testing.expectEqual(@as(u8, 94), got.payload[0]);
 }
@@ -451,7 +502,7 @@ test "양방향 왕복 — 보낸 쪽 번호와 받는 쪽 번호가 맞물린�
     for (0..8) |i| {
         const payload = [_]u8{ msg_ignore, @intCast(i) };
         const n = try client.send(&out, &payload, prng.random());
-        const got = (try server.feed(&plain, out[0..n])).?;
+        const got = (try server.feed(&plain, out[0..n])).?.packet;
         try std.testing.expectEqualSlices(u8, &payload, got.payload);
         try std.testing.expectEqual(@as(u32, @intCast(i)), got.seq);
     }
@@ -590,17 +641,16 @@ test "추측 패킷은 먹되 번호는 올린다" {
     var t: Transport = .{ .strict_kex = true, .first_from_peer = msg_kexinit, .pending_discard = true };
     const n = try packet.write(&out, &[_]u8{msg_kex_ecdh_reply}, prng.random());
     const got = (try t.feed(&plain, out[0..n])).?;
-    // **빈 payload 로 알리지 않는다.** 그러면 `payload.len >= 1` 불변이 깨져, 문서대로
-    // `payload[0]` 을 보는 드라이버가 정상 핸드셰이크에서 죽는다(코드리뷰가 잡았다).
-    try std.testing.expect(got.discarded);
-    try std.testing.expectEqual(@as(usize, 1), got.payload.len);
-    try std.testing.expectEqual(@as(u8, msg_kex_ecdh_reply), got.payload[0]);
+    // **폐기는 타입으로 알린다.** 빈 payload 로 알리던 옛 방식은 `payload.len >= 1` 불변을 깨서
+    // `payload[0]` 을 보는 드라이버를 죽였고(코드리뷰가 잡았다), 그것을 `bool` 로 바꿨더니 이번엔
+    // **안 봐도 컴파일되어** 버린 패킷이 조용히 처리됐다(적대적 검증이 잡았다). union 은 둘 다 아니다.
+    try std.testing.expect(got == .discarded);
+    try std.testing.expect(got.discarded.consumed > 0);
     try std.testing.expectEqual(@as(u32, 1), t.recv_seq);
     try std.testing.expect(!t.pending_discard); // 한 번만 버린다
 
     // **버린 것은 "받아들인" 것이 아니라 계수에 안 들어간다** — 그 다음 진짜 REPLY 가 살아야 한다.
-    const got2 = (try t.feed(&plain, out[0..n])).?;
-    try std.testing.expect(!got2.discarded);
+    const got2 = (try t.feed(&plain, out[0..n])).?.packet;
     try std.testing.expectEqual(@as(u32, 1), got2.seq);
     try std.testing.expectEqual(@as(u32, 2), t.recv_seq);
 }
@@ -621,7 +671,7 @@ test "버릴 패킷도 strict 허용 목록을 지나야 한다" {
     // strict 가 아니면 무엇이든 버릴 수 있다(§3.2 는 strict 일 때의 제한이다).
     var loose: Transport = .{ .first_from_peer = msg_kexinit, .pending_discard = true };
     const got = (try loose.feed(&plain, out[0..n])).?;
-    try std.testing.expect(got.discarded);
+    try std.testing.expect(got == .discarded);
 }
 
 test "양쪽 키가 붙어야 established 이고 순서를 안 탄다" {
@@ -674,7 +724,7 @@ test "established 뒤에는 KEX 아닌 메시지가 정상이다" {
 
     var sender = testCipher();
     const n = try sender.seal(&out, 0, &[_]u8{ 94, 0, 0, 0, 0 }, prng.random()); // CHANNEL_DATA
-    const got = (try t.feed(&plain, out[0..n])).?;
+    const got = (try t.feed(&plain, out[0..n])).?.packet;
     try std.testing.expectEqual(@as(u8, 94), got.payload[0]);
 }
 
@@ -709,7 +759,7 @@ test "payload 는 구간과 무관하게 out 을 가리킨다" {
         } else try packet.write(&wire_buf, &payload, prng.random());
 
         @memset(&out, 0xC7);
-        const got = (try t.feed(&out, wire_buf[0..n])).?;
+        const got = (try t.feed(&out, wire_buf[0..n])).?.packet;
         // `out` 안을 가리킨다.
         try std.testing.expect(@intFromPtr(got.payload.ptr) >= @intFromPtr(&out));
         try std.testing.expect(@intFromPtr(got.payload.ptr) < @intFromPtr(&out) + out.len);
@@ -823,8 +873,108 @@ test "ShortBuffer 뒤 큰 버퍼로 다시 먹여도 번호가 안 어긋난다"
     try std.testing.expectEqual(@as(u32, 0), t.recv_seq); // 아직 아무것도 받아들이지 않았다
 
     var big: [256]u8 = undefined;
-    const got = (try t.feed(&big, wire_buf[0..n])).?;
+    const got = (try t.feed(&big, wire_buf[0..n])).?.packet;
     try std.testing.expectEqual(@as(u32, 0), got.seq); // 첫 패킷은 0번이다
     try std.testing.expectEqualSlices(u8, &payload, got.payload);
     try std.testing.expectEqual(@as(u32, 1), t.recv_seq);
+}
+
+test "버린 패킷은 타입이 다르므로 실수로 처리할 수 없다" {
+    // **적대적 방향 검증이 찾은 것.** `discarded: bool = false` 였을 때, 계약 §4.5 를 그대로 따라
+    // 쓴 드라이버(`consumed` 만큼 밀고 `payload[0]` 로 분기)가 그 필드를 안 보면 공격자가 고른
+    // 패킷을 **진짜로 처리**했다 — 실측으로 `20 AA BB CC` 가 서버 KEXINIT 자리에서 수용됐다.
+    // union 이라 이제 그 드라이버는 **컴파일되지 않는다**. 여기서는 그 성질을 값으로 확인한다.
+    var prng = std.Random.DefaultPrng.init(5);
+    var wire_buf: [512]u8 = undefined;
+    var n: usize = 0;
+    n += try packet.write(wire_buf[n..], &[_]u8{ msg_kexinit, 0xAA, 0xBB, 0xCC }, prng.random());
+    n += try packet.write(wire_buf[n..], &[_]u8{ msg_kexinit, 0x11, 0x22, 0x33 }, prng.random());
+
+    var t: Transport = .{ .pending_discard = true };
+    var out: [256]u8 = undefined;
+    var rest: []const u8 = wire_buf[0..n];
+
+    const first = (try t.feed(&out, rest)).?;
+    try std.testing.expect(first == .discarded); // 진짜 패킷으로 오해할 길이 없다
+    rest = rest[first.discarded.consumed..];
+
+    const second = (try t.feed(&out, rest)).?.packet;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ msg_kexinit, 0x11, 0x22, 0x33 }, second.payload);
+}
+
+test "payload 는 다음 feed 가 덮어쓴다 — 들 것은 복사한다" {
+    // **적대적 방향 검증이 찾은 것.** payload 소유자를 `out` 으로 통일한 것은 맞았지만, 그것이
+    // 위험을 **없앤 것이 아니라 옮긴 것**이었다: 이제는 다음 `feed` 가 덮어쓴다. 초기 KEX 의
+    // `I_S`·`K_S`·`Q_S` 가 정확히 "들고 있어야 하는 것" 이라, 이 규칙을 모르면 교환 해시가
+    // 조용히 틀리고 증상이 중간자와 구별되지 않는다.
+    var prng = std.Random.DefaultPrng.init(9);
+    var wire_buf: [512]u8 = undefined;
+    var n: usize = 0;
+    n += try packet.write(wire_buf[n..], &[_]u8{ msg_kexinit, 0xAA, 0xAA, 0xAA }, prng.random());
+    n += try packet.write(wire_buf[n..], &[_]u8{ msg_kex_ecdh_reply, 0x55, 0x55, 0x55 }, prng.random());
+
+    var t: Transport = .{};
+    var out: [256]u8 = undefined;
+    var rest: []const u8 = wire_buf[0..n];
+
+    const first = (try t.feed(&out, rest)).?.packet;
+    // **계약대로 하는 드라이버**: 들고 있을 것은 바로 복사한다.
+    var i_s: [4]u8 = undefined;
+    @memcpy(&i_s, first.payload[0..4]);
+    const borrowed = first.payload; // 복사 안 한 쪽 — 아래에서 바뀌는 것을 보인다
+    rest = rest[first.consumed..];
+
+    _ = (try t.feed(&out, rest)).?.packet;
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ msg_kexinit, 0xAA, 0xAA, 0xAA }, &i_s);
+    // 빌린 쪽은 바뀌었다 — 이것이 문서가 말해야 하는 규칙이다.
+    try std.testing.expectEqual(@as(u8, msg_kex_ecdh_reply), borrowed[0]);
+}
+
+test "끊으라는 실패는 되돌릴 수 없다" {
+    // **적대적 방향 검증이 찾은 것.** draft §3.2 의 MUST 넷은 "연결을 끊어라" 인데, 이 층은 소켓이
+    // 없어 오류만 낸다. 그런데 오류를 무시하고 다시 부르면 `send_seq` 가 이미 0 으로 넘어가 있어
+    // 검사가 통과하고 **초기 KEX 가 감싸 돈 채로 계속됐다**(실측). sans-io 에서 "끊어라" 의
+    // 등가물은 상태를 못 쓰게 만드는 것이다.
+    var prng = std.Random.DefaultPrng.init(3);
+    var out: [256]u8 = undefined;
+    var t: Transport = .{
+        .strict_kex = true,
+        .phase = .initial_kex,
+        .send_seq = 0xFFFF_FFFF,
+        .first_from_peer = msg_kexinit,
+    };
+    try std.testing.expectError(
+        Error.SequenceWrapBeforeKexComplete,
+        t.send(&out, &[_]u8{msg_ignore}, prng.random()),
+    );
+    // 무시하고 재시도해도 **같은 오류**가 난다 — 조용히 지나가지 않는다.
+    try std.testing.expectError(
+        Error.SequenceWrapBeforeKexComplete,
+        t.send(&out, &[_]u8{msg_ignore}, prng.random()),
+    );
+    // 받는 쪽도 같이 죽는다(한 연결이다).
+    var plain: [256]u8 = undefined;
+    try std.testing.expectError(
+        Error.SequenceWrapBeforeKexComplete,
+        t.feed(&plain, &[_]u8{ 0, 0, 0, 12, 6, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }),
+    );
+}
+
+test "ShortBuffer 는 연결을 죽이지 않는다" {
+    // 재시도가 정상 동작인 유일한 오류다 — 이것까지 박으면 큰 버퍼로 다시 먹이는 드라이버가
+    // 영영 못 붙는다(계수 규칙의 예외와 같은 자리).
+    var prng = std.Random.DefaultPrng.init(31);
+    var wire_buf: [256]u8 = undefined;
+    var t: Transport = .{};
+    const payload = [_]u8{ msg_kexinit, 1, 2, 3, 4, 5, 6, 7 };
+    const n = try packet.write(&wire_buf, &payload, prng.random());
+
+    var tiny: [3]u8 = undefined;
+    try std.testing.expectError(Error.ShortBuffer, t.feed(&tiny, wire_buf[0..n]));
+    try std.testing.expectEqual(@as(?Error, null), t.poison);
+
+    var big: [256]u8 = undefined;
+    const got = (try t.feed(&big, wire_buf[0..n])).?.packet;
+    try std.testing.expectEqualSlices(u8, &payload, got.payload);
 }

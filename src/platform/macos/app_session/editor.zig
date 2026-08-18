@@ -971,6 +971,17 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
 fn beginVertical(self: *AppSession, term: *Term, bar: chrome.ui.scroll_area.ScrollbarGeometry, x_px: f64, y_px: f64) bool {
     self.editor_scrollbar_term = term;
     if (self.dock_list_scroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorScrollFromBarPx(self, jumped);
+    // **`begin`의 `null`은 두 가지다** — thumb을 잡아 점프하지 않은 것(성공)과 track 밖이라 시작하지
+    // 못한 것(실패). 반환값으로는 못 가르므로 `active`를 본다. 안 그러면 드래그는 비활성인데 태그만
+    // 세워져, move가 흡수되지 않는 채 up까지 그 태그가 남는다.
+    //
+    // **지금은 도달 불가다**(호출자가 같은 `trackContains`로 이미 걸렀다 — 뮤턴트로 확인했고 테스트가
+    // 이 분기를 죽이지 못한다). 그래도 두는 이유는 판정이 **두 곳**에 있기 때문이다: 한쪽이 바뀌면
+    // 그때 여기서 조용히 어긋나는 대신 시작이 거절된다.
+    if (!self.dock_list_scroll_drag.active) {
+        self.editor_scrollbar_term = null;
+        return false;
+    }
     self.scrollbar_drag_target = .editor_vertical;
     self.pointer_gesture_owner = .none;
     self.metal_dirty = true;
@@ -981,6 +992,11 @@ fn beginHorizontal(self: *AppSession, term: *Term, bar: chrome_editor.scrollbar.
     self.editor_scrollbar_term = term;
     self.editor_hscroll_right = right;
     if (self.editor_hscroll_drag.begin(bar, x_px, y_px)) |jumped| setEditorHScrollFromBarPx(self, jumped);
+    if (!self.editor_hscroll_drag.active) { // 위 세로와 같은 이유
+        self.editor_scrollbar_term = null;
+        self.editor_hscroll_right = false;
+        return false;
+    }
     self.scrollbar_drag_target = .editor_horizontal;
     self.pointer_gesture_owner = .none;
     self.metal_dirty = true;
@@ -3943,6 +3959,33 @@ test "세로 막대를 끌면 문서가 그만큼 움직인다 — px를 (줄, �
     // up이 캡처를 끝낸다.
     _ = routeScrollbarCapture(fx.session, 3, @floatCast(bar.track_x), mid_y);
     try testing.expect(!scrollbarCaptureActive(fx.session));
+}
+
+test "막대 밖을 누르면 드래그가 서지 않는다 — 태그만 남으면 안 된다" {
+    // `Drag.begin`의 `null`은 두 가지다: thumb을 잡아 점프하지 않은 것(성공)과 track 밖이라 시작하지
+    // 못한 것(실패). 반환값으로 못 가르므로 `active`를 봐야 하는데, 안 보면 **드래그는 비활성인데
+    // 태그만 세워져** move가 흡수되지 않는 채 up까지 그 태그가 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 400);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = "line";
+    fx.term.rt.editor_lines = lines;
+
+    var f = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    f.dl.deinit(allocator);
+    const bar = fx.term.rt.editor_scrollbar orelse return error.NoScrollbar;
+
+    // 막대의 **왼쪽 바깥**(본문 한가운데)을 누른다 — 거터 안이 아니다.
+    const outside_x: f64 = @as(f64, bar.hit_x) - 40;
+    try testing.expect(!beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), outside_x, @floatCast(bar.thumb_y)));
+    try testing.expect(!scrollbarCaptureActive(fx.session)); // 태그가 안 남았다
+    try testing.expect(fx.session.editor_scrollbar_term == null); // 잡은 Term도 안 남았다
 }
 
 test "가로 막대를 끌면 열이 움직인다 — 세로와 축이 다르다" {

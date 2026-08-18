@@ -91,7 +91,7 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
         // 머리 줄의 동작 버튼은 **가장 바깥**에 앉으므로 비켜설 것이 없다(자리를 비우는 쪽은 브랜치 칩과
         // 개수 배지이고, 그건 `view.repoRow`가 같은 상수로 한다 — ②c).
         // 커밋 줄은 오른쪽 끝에 **짧은 해시**가 앉지만 동작 버튼이 없어 비켜설 것이 없다.
-        .repo, .commit, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => base,
+        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => base,
     };
 }
 
@@ -196,7 +196,7 @@ fn rowCursor(item: types.Item) tree.CursorHint {
     return switch (item) {
         // 상자는 누르는 것이 아니라 **caret이 서는 자리**다.
         .commit_box => .text,
-        .repo, .section, .file, .more, .commit, .commit_file, .load_more => .press,
+        .repo, .section, .file, .more, .commit, .turn, .commit_file, .load_more => .press,
         // 안내는 상태 진술이지 컨트롤이 아니다(action도 없다).
         .notice => .auto,
         // 버튼의 커서는 **면 노드**가 든다(아래 여백은 버튼이 아니다).
@@ -209,7 +209,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 머리 줄의 동작은 `RowAction`(스테이지/언스테이지) 어휘가 아니다 — 자기 버튼 둘을 따로 낸다(②c).
-        .repo, .commit_box, .commit_button, .more, .notice, .commit, .commit_file, .load_more => .none,
+        .repo, .commit_box, .commit_button, .more, .notice, .commit, .turn, .commit_file, .load_more => .none,
     };
 }
 
@@ -235,7 +235,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = .{ .repo_index = section.repo_index, .section = section.section } },
                 .file => |file| .{ .row_action = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
-                .repo, .commit_box, .commit_button, .more, .notice, .commit, .commit_file, .load_more => unreachable, // actionOf가 이미 `.none`으로 걸렀다
+                .repo, .commit_box, .commit_button, .more, .notice, .commit, .turn, .commit_file, .load_more => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
             slot[0] = tree.button(.{
@@ -376,6 +376,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .commit => |commit| .{ .select_commit = commit.index },
             .load_more => .load_more_commits,
             .commit_file => |file| .{ .open_commit_file = file.index },
+            .turn => |turn| .{ .select_turn = turn.index },
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice => null,
         };
@@ -535,6 +536,7 @@ fn isSelected(item: types.Item) bool {
     return switch (item) {
         .file => |file| file.selected,
         .commit => |commit| commit.selected,
+        .turn => |turn| turn.selected,
         .commit_file => |file| file.selected,
         .repo, .load_more, .commit_box, .commit_button, .section, .more, .notice => false,
     };
@@ -676,7 +678,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

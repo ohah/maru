@@ -184,13 +184,18 @@ const Job = struct {
     diff: ?DiffTarget = null,
     /// 히스토리 읽기가 요청한 커밋 수(P4). 다른 작업은 쓰지 않는다.
     limit: u32 = 0,
+    /// 파일 목록 읽기가 쓸 명령(P4b 커밋 · P5 턴). 다른 작업은 쓰지 않는다.
+    file_list_kind: git_command.Kind = .commit_files,
 
     const DiffTarget = struct {
         rel_path: []u8,
         /// rename의 옛 경로(그 외 빈 값). 왼쪽(HEAD)만 이 경로를 쓴다.
         orig_rel_path: []u8,
-        /// `.branch` 기준의 왼쪽 커밋(merge-base 해시). 다른 기준에서는 빈 값이다.
+        /// `.branch` 기준의 왼쪽 커밋(merge-base 해시). `.turn`은 스냅샷 tree, `.commit`은 그 커밋,
+        /// `.turn_range`는 **왼쪽 스냅샷 tree**다 — 전부 "왼쪽 rev"라는 같은 자리다.
         merge_base: []u8,
+        /// `.turn_range`의 **오른쪽 tree**. 다른 기준에서는 빈 값이다(오른쪽이 작업트리이거나 그 커밋 자신).
+        right_rev: []u8 = &.{},
         base: dock_panel.DiffBase,
     };
 };
@@ -238,12 +243,15 @@ pub const LogResult = struct {
     }
 };
 
-/// 커밋 하나가 바꾼 파일 목록 읽기 결과(P4b). 히스토리 목록 읽기와 **다른 슬롯**이다 — 목록을 다시
-/// 읽는 동안에도 펼친 커밋의 파일이 남아 있어야 한다.
+/// **펼친 항목 하나의 파일 목록** 읽기 결과(P4b 커밋 · P5 턴). 목록 읽기와 **다른 슬롯**이다 —
+/// 목록을 다시 읽는 동안에도 펼친 항목의 파일이 남아 있어야 한다.
+///
+/// 슬롯이 하나인 이유: 두 탭 모두 **한 번에 하나만** 펼치므로 동시에 둘을 읽을 일이 없다.
 pub const CommitFilesResult = struct {
     request_id: u64,
     ok: bool = false,
-    /// 어느 커밋의 답인지. 사용자가 빠르게 다른 커밋을 펼치면 늦게 온 답이 남의 줄을 채운다.
+    /// 어느 항목의 답인지 — 커밋이면 그 OID, 턴이면 `<treeA> <treeB>`. 사용자가 빠르게 다른 항목을
+    /// 펼치면 늦게 온 답이 남의 줄을 채운다.
     oid: []u8 = &.{},
     /// `git show --name-status` 출력(owned).
     text: []u8 = &.{},
@@ -483,6 +491,9 @@ pub const Backend = struct {
         rel_path: []const u8,
         orig_rel_path: []const u8,
         merge_base: []const u8,
+        /// `.turn_range`의 **오른쪽 tree**(P5). 다른 기준은 빈 문자열이다 — 오른쪽이 작업트리이거나
+        /// 커밋 자신이라 따로 받을 값이 없다.
+        right_rev: []const u8,
         base: dock_panel.DiffBase,
         request_id: u64,
     ) bool {
@@ -506,6 +517,7 @@ pub const Backend = struct {
         job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .merge_base = &.{}, .base = base };
         job.diff.?.orig_rel_path = state.allocator.dupe(u8, orig_rel_path) catch return self.releaseDiffJob(job);
         job.diff.?.merge_base = state.allocator.dupe(u8, merge_base) catch return self.releaseDiffJob(job);
+        job.diff.?.right_rev = state.allocator.dupe(u8, right_rev) catch return self.releaseDiffJob(job);
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -648,9 +660,26 @@ pub const Backend = struct {
     /// 그 커밋이 바꾼 파일 목록을 읽는다(P4b). `oid`는 hex 검증을 거친 값이어야 한다 — argv 조립이
     /// 다시 검증하지만, 여기서도 임의 문자열을 그대로 넘기지 않는 것이 규율이다.
     pub fn submitCommitFiles(self: *Backend, git_exe: []const u8, repo: []const u8, oid: []const u8, request_id: u64) bool {
+        return self.submitFileList(git_exe, repo, .commit_files, oid, request_id);
+    }
+
+    /// 턴 하나가 바꾼 파일 목록(P5). 키는 `<treeA> <treeB>`이고 **둘 다 hex여야 한다**.
+    pub fn submitTurnFiles(self: *Backend, git_exe: []const u8, repo: []const u8, pair: []const u8, request_id: u64) bool {
+        return self.submitFileList(git_exe, repo, .turn_name_status, pair, request_id);
+    }
+
+    /// 펼친 항목 하나의 파일 목록을 읽는다(커밋·턴 공용).
+    fn submitFileList(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        kind: git_command.Kind,
+        key: []const u8,
+        request_id: u64,
+    ) bool {
         // **rev 자리에 넣어도 되는 값인지 여기서 막는다**(§6 심층 방어). blob spec 둘은 같은 술어로
-        // 이미 걸러지지만, 이 명령은 rev를 그대로 인자로 실으므로 그 검사가 여기 없으면 유일한 구멍이 된다.
-        if (!git_command.isHexRev(oid)) return false;
+        // 이미 걸러지지만, 이 명령들은 rev를 그대로 인자로 실으므로 그 검사가 여기 없으면 유일한 구멍이 된다.
+        if (!isRevKey(key)) return false;
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.commit_files_inflight > 0 or state.commit_files_result != null) {
@@ -662,10 +691,10 @@ pub const Backend = struct {
         state.mutex.unlock(state.io);
 
         const job = state.allocator.create(Job) catch return self.abandonCommitFiles();
-        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .file_list_kind = kind };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseCommitFilesJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseCommitFilesJob(job);
-        job.snapshot_tree = state.allocator.dupe(u8, oid) catch return self.releaseCommitFilesJob(job);
+        job.snapshot_tree = state.allocator.dupe(u8, key) catch return self.releaseCommitFilesJob(job);
         const thread = std.Thread.spawn(.{}, commitFilesWorker, .{job}) catch return self.releaseCommitFilesJob(job);
         thread.detach();
         return true;
@@ -905,12 +934,22 @@ fn logWorker(job: *Job) void {
     state.release();
 }
 
+/// rev 키로 넘겨도 되는 값인가. 커밋은 hex 하나, 턴은 hex 둘(공백 구분)이다 — **둘 다** 검사한다.
+fn isRevKey(key: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, key, ' ');
+    var n: usize = 0;
+    while (it.next()) |part| : (n += 1) {
+        if (!git_command.isHexRev(part)) return false;
+    }
+    return n == 1 or n == 2;
+}
+
 fn commitFilesWorker(job: *Job) void {
     const state = job.state;
     var result: CommitFilesResult = .{ .request_id = job.request_id };
     // 커밋 OID는 `snapshot_tree` 자리를 빌린다 — 그 필드는 "이 작업이 읽을 rev"라는 같은 뜻이다.
     result.oid = state.allocator.dupe(u8, job.snapshot_tree) catch &.{};
-    if (runWithArg(state.allocator, .commit_files, job.git_exe, job.repo, job.snapshot_tree)) |out| {
+    if (runWithArg(state.allocator, job.file_list_kind, job.git_exe, job.repo, job.snapshot_tree)) |out| {
         result.text = out.bytes;
         result.truncated = out.truncated;
         result.ok = true;
@@ -983,6 +1022,25 @@ fn diffWorker(job: *Job) void {
         return;
     }
 
+    if (target.base == .turn_range) {
+        // 턴 하나: 스냅샷 tree 둘. **양쪽 다 tree라** 작업트리를 읽지 않는다 — 그 턴의 결과가 지금
+        // 파일 상태와 무관하게 고정된다(§3.5.4).
+        if (commitSide(state.allocator, job, target.merge_base)) |out| {
+            result.original = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        if (commitSide(state.allocator, job, target.right_rev)) |out| {
+            result.modified = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        result.ok = had_side;
+        result.truncated = truncated;
+        finishDiff(state, job, target, result);
+        return;
+    }
+
     if (target.base == .commit) {
         // 히스토리에서 고른 커밋: `커밋^ ↔ 커밋`(P4b). 둘 다 커밋이라 작업트리를 읽지 않는다 —
         // 그 커밋 시점의 두 쪽이라 지금 파일이 무엇이든 화면이 바뀌지 않아야 한다.
@@ -1028,7 +1086,8 @@ fn diffWorker(job: *Job) void {
         const side: git_command.BlobSide = switch (target.base) {
             .staged, .conflict => .head,
             // `.commit`은 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
-            .unstaged, .untracked, .branch, .turn, .commit => .index,
+            // `.commit`·`.turn_range`는 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
+            .unstaged, .untracked, .branch, .turn, .commit, .turn_range => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
@@ -1061,6 +1120,7 @@ fn finishDiff(state: *State, job: *Job, target: Job.DiffTarget, result_in: DiffR
     state.allocator.free(target.rel_path);
     if (target.orig_rel_path.len > 0) state.allocator.free(target.orig_rel_path);
     if (target.merge_base.len > 0) state.allocator.free(target.merge_base);
+    if (target.right_rev.len > 0) state.allocator.free(target.right_rev);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -1769,7 +1829,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
 
     // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
     // (내용을 고정하면 이 파일을 고칠 때마다 테스트가 깨진다).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .staged, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .staged, 1));
     const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var staged_result = staged;
     defer staged_result.deinit(worker_allocator);
@@ -1777,7 +1837,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
     try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .unstaged, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .unstaged, 2));
     const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var unstaged_result = unstaged;
     defer unstaged_result.deinit(worker_allocator);
@@ -1785,7 +1845,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
 
     // untracked는 왼쪽이 **없는 것이 정상**이다 — 실패로 접지 않는다.
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .untracked, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .untracked, 3));
     const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var untracked_result = untracked;
     defer untracked_result.deinit(worker_allocator);
@@ -1794,7 +1854,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(untracked_result.modified.len > 0);
 
     // 없는 경로는 실패를 **결과로** 싣는다(in-flight가 풀려야 화면이 "여는 중"에 안 갇힌다).
-    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", .staged, 4));
+    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", "", .staged, 4));
     const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var missing_result = missing;
     defer missing_result.deinit(worker_allocator);
@@ -1829,7 +1889,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
     const merge_base = std.mem.trim(u8, listed.merge_base, " \t\r\n");
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", merge_base, .branch, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", merge_base, "", .branch, 2));
     var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer result.deinit(worker_allocator);
     try testing.expect(result.ok);
@@ -1837,7 +1897,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     try testing.expect(result.modified.len > 0); // HEAD:build.zig
 
     // hex가 아닌 rev는 애초에 spec이 안 만들어져 실패한다(인자 주입 차단이 실제로 걸리는지).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", .branch, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", "", .branch, 3));
     var bad = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer bad.deinit(worker_allocator);
     try testing.expectEqual(@as(usize, 0), bad.original.len);
@@ -1875,7 +1935,7 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", .conflict, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .conflict, 1));
     var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer result.deinit(worker_allocator);
 
@@ -2578,4 +2638,14 @@ test "commit_files 읽기는 hex가 아닌 rev를 거절한다 (P4b 적대적 �
     try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "--upload-pack=evil", 1));
     try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "HEAD", 2));
     _ = allocator;
+}
+
+test "파일 목록 읽기는 hex가 아닌 rev를 거절한다(커밋·턴 둘 다) (P5)" {
+    var backend = try Backend.init(fixture_io);
+    defer backend.deinit();
+    const good = "650a0bbef96a1dd562e0d39f262260ae002c1545";
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", "HEAD HEAD~1", 1));
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " --upload-pack=x", 2));
+    // 셋 이상도 거절한다 — 인자가 하나 더 붙는 길을 열지 않는다.
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " " ++ good ++ " " ++ good, 3));
 }

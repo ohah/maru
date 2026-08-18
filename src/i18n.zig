@@ -459,6 +459,8 @@ pub const Table = struct {
     dock_branch: [:0]const u8,
     /// diff 탭 라벨: 히스토리에서 고른 커밋 하나(`커밋^ ↔ 커밋`).
     dock_commit: [:0]const u8,
+    /// diff 탭 라벨: 에이전트 타임라인의 완료된 턴 하나(`스냅샷 ↔ 스냅샷`).
+    dock_turn: [:0]const u8,
     dock_conflict: [:0]const u8,
     dock_last_turn: [:0]const u8,
     arch_untitled: [:0]const u8,
@@ -483,6 +485,18 @@ pub const Table = struct {
     scm_commit_files_truncated: [:0]const u8,
     /// 그 커밋이 바꾼 파일이 없다(빈 커밋 — `--allow-empty`가 실제로 있다).
     scm_commit_no_files: [:0]const u8,
+    /// 에이전트 탭: 이번 실행에서 관측한 턴이 없다. **오류가 아니다**(링은 메모리·창 로컬이다).
+    scm_no_turns: [:0]const u8,
+    /// 에이전트 탭: 아직 끝나지 않은 턴(오른쪽이 작업트리라 계속 변한다).
+    scm_turn_live: [:0]const u8,
+    /// 에이전트 탭: 직전에 끝난 턴.
+    scm_turn_last: [:0]const u8,
+    /// 에이전트 탭: `N턴 전`의 접미. 숫자는 host가 붙인다.
+    scm_turn_back_suffix: [:0]const u8,
+    /// 에이전트 탭: 그 턴의 파일 목록을 읽지 못했다.
+    scm_turn_files_failed: [:0]const u8,
+    /// 에이전트 탭: 그 턴이 바꾼 파일이 없다.
+    scm_turn_no_files: [:0]const u8,
     ad_no_model: [:0]const u8,
     ad_meta_messages: [:0]const u8,
     ad_meta_subagents: [:0]const u8,
@@ -852,6 +866,7 @@ pub const en: Table = .{
     .dock_new_file = "New file",
     .dock_branch = "Branch",
     .dock_commit = "Commit",
+    .dock_turn = "Turn",
     .dock_conflict = "Conflict",
     .dock_last_turn = "Last turn",
     .arch_untitled = "Untitled session",
@@ -870,6 +885,12 @@ pub const en: Table = .{
     .scm_commit_files_failed = "Could not read this commit's files",
     .scm_commit_files_truncated = "This commit's file list was truncated",
     .scm_commit_no_files = "This commit changed no files",
+    .scm_no_turns = "No agent turns observed in this run",
+    .scm_turn_live = "In progress",
+    .scm_turn_last = "Last turn",
+    .scm_turn_back_suffix = " turns ago",
+    .scm_turn_files_failed = "Could not read this turn's files",
+    .scm_turn_no_files = "This turn changed no files",
     .ad_no_model = "No model info",
     .ad_meta_messages = "{0} messages",
     .ad_meta_subagents = "{0} subagents",
@@ -1329,6 +1350,7 @@ pub const ko: Table = .{
     .dock_new_file = "새 파일",
     .dock_branch = "브랜치",
     .dock_commit = "커밋",
+    .dock_turn = "턴",
     .dock_conflict = "충돌",
     .dock_last_turn = "마지막 턴",
     .arch_untitled = "제목 없는 세션",
@@ -1347,6 +1369,12 @@ pub const ko: Table = .{
     .scm_commit_files_failed = "이 커밋의 파일을 읽지 못했습니다",
     .scm_commit_files_truncated = "이 커밋의 파일 목록이 잘렸습니다",
     .scm_commit_no_files = "이 커밋이 바꾼 파일이 없습니다",
+    .scm_no_turns = "이번 실행에서 관측한 에이전트 턴이 없습니다",
+    .scm_turn_live = "진행 중",
+    .scm_turn_last = "마지막 턴",
+    .scm_turn_back_suffix = "턴 전",
+    .scm_turn_files_failed = "이 턴의 파일을 읽지 못했습니다",
+    .scm_turn_no_files = "이 턴이 바꾼 파일이 없습니다",
     .ad_no_model = "모델 정보 없음",
     .ad_meta_messages = "메시지 {0}개",
     .ad_meta_subagents = "서브에이전트 {0}",

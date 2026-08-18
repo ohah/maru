@@ -276,7 +276,15 @@ pub fn drainGitStatus(self: *AppSession) void {
     }
     while (backend.takeSnapshotResult()) |taken| {
         var snapshot = taken;
-        self.turn_ring.push(snapshot.tree, snapshot.surface_id);
+        // **"언제·누가"는 여기서 붙인다**(P5). 링은 순서만 알지 시간을 모르고, 에이전트 종류는 그 turn을
+        // 돌린 Term이 갖고 있다 — 스냅샷이 도착한 이 자리가 둘을 아는 유일한 지점이다.
+        const captured_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+        self.turn_ring.push(
+            snapshot.tree,
+            snapshot.surface_id,
+            captured_s,
+            @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
+        );
         snapshot.deinit(git_backend_mod.worker_allocator);
         // 새 기준이 생겼으니 목록을 다시 읽는다(그 섹션이 이제 나온다).
         refreshGitStatus(self);
@@ -553,6 +561,19 @@ pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
     };
 }
 
+/// 그 surface를 든 Term의 에이전트 종류(없으면 `.none`). 스냅샷은 surface_id만 싣고 오므로 여기서
+/// 되찾는다 — Term이 그 사이 닫혔으면 `.none`이고, 그건 "모른다"가 아니라 "그 값을 잃었다"이다.
+fn agentKindForSurface(self: *AppSession, surface_id: u64) app_session_mod.AgentKind {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.surface.id == surface_id) return term.agent_kind;
+            }
+        }
+    }
+    return .none;
+}
+
 /// `repoRootFor`의 walk-up을 저주기로 캐시한다. **매 프레임 도는 경로이기 때문**이다: `repoRootFor`는 루트까지
 /// 올라가며 경로 구성요소마다 `access(2)`를 한 번씩 쓴다(깊은 cwd면 호출당 여덟 번쯤). tick이 이걸 프레임마다
 /// 돌리면 blocking syscall이 초당 수천 번이 되어 프레임 페이싱과 배터리를 갉는다.
@@ -689,6 +710,50 @@ pub fn openCommitDiffTerm(
     entry.diff_commit_oid = self.allocator.dupe(u8, commit_oid) catch &.{};
     self.requestDiffContent(entry);
     editor_diff_ops.markRequested(self, opened.term);
+}
+
+/// 에이전트 타임라인에서 고른 **턴 하나의 파일** 비교를 연다(P5). 유일성 키에 두 tree가 들어간다 —
+/// 턴마다 다른 탭이어야 두 턴을 나란히 놓고 볼 수 있다.
+pub fn openTurnDiffTerm(
+    self: *AppSession,
+    repo: []const u8,
+    abs_path: []const u8,
+    rel_path: []const u8,
+    orig_rel_path: ?[]const u8,
+    base_tree: []const u8,
+    head_tree: []const u8,
+) void {
+    if (diffTermForTurn(self, abs_path, base_tree, head_tree)) |existing| {
+        _ = self.activateExistingFileTerm(existing);
+        return;
+    }
+    const opened = pane_ops.openFileTermInActivePane(self, abs_path, .diff) catch return;
+    const entry = opened.term.file_entry orelse return;
+    entry.diff_base = .turn_range;
+    self.freeDiffPaths(entry);
+    entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
+    entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
+    entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
+    entry.diff_commit_oid = self.allocator.dupe(u8, base_tree) catch &.{};
+    entry.diff_right_oid = self.allocator.dupe(u8, head_tree) catch &.{};
+    self.requestDiffContent(entry);
+    editor_diff_ops.markRequested(self, opened.term);
+}
+
+/// 같은 파일이라도 **턴이 다르면 다른 탭**이다(커밋과 같은 규율).
+pub fn diffTermForTurn(self: *AppSession, abs_path: []const u8, base_tree: []const u8, head_tree: []const u8) ?*Term {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                const entry = term.file_entry orelse continue;
+                if (entry.kind != .diff or entry.diff_base != .turn_range) continue;
+                if (!std.mem.eql(u8, entry.diff_commit_oid, base_tree)) continue;
+                if (!std.mem.eql(u8, entry.diff_right_oid, head_tree)) continue;
+                if (std.mem.eql(u8, entry.path, abs_path)) return term;
+            }
+        }
+    }
+    return null;
 }
 
 /// 소스 컨트롤 행을 눌렀을 때 그 비교를 여는 지점. **유일성 키는 `(경로, kind, base)`**라 같은 파일의

@@ -598,7 +598,10 @@ pub const inventory = [_]Proof{
     // 3차 검증이 그 섹션 탐색이 **스키마 필드가 아닌 행**(`shell.args`·`env.*` 등)에서 무동작이라는 것과,
     // 행 목록을 만드는 것만으로 `keep_alive_after_quit` 미러가 되돌려진다는 것을 잡아 또 움직인다. 섹션을
     // 행 빌더로 찾고, 언어가 안 바뀌면 곧장 나간다. count는 여전히 3이다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "c47b0ae71ec648d262e7469a1d048aa11565363a845198b1aab9f18ef1bfe256" },
+    // 4차 검증이 앵커를 뜨는 쪽은 여전히 스키마 다섯 종류만 안다는 것을 잡아 또 움직인다 — 팔레트·단축키·
+    // 전역 단축키 행이 남아 있었고, 그중 전역 단축키 라벨은 `t(title_key)` 라 언어를 정통으로 탄다.
+    // 합성 키로 그 셋까지 앵커하고, keep-alive 토글은 재적용 전에 전역을 세운다. count는 여전히 3이다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "f58a2f2cbeb29347786ded0cb7c5a4a7d88080bbcd9f7ac9bb757c840c8e303a" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -639,5 +642,7 @@ pub const inventory = [_]Proof{
     // 현재 언어를 `std.atomic.Value` 로 바꾸고(떼어낸 아카이브 워커가 `t()` 를 부른다 — 평범한 `var` 였을 때
     // UI 스레드의 쓰기와 겹치는 자료 경합이었다), 참조 0인 키 15개를 지우며 움직인다. count는 1 그대로다 —
     // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "827e40ad6bfae3236ce14666d14d8327de591e2ad7e11f2ef3b6dc1716f11437" },
+    // 4차 검증이 원자화의 **근거로 든 호출부를 같은 브랜치가 지웠다**는 것을 잡아 주석이 움직인다(워커는
+    // 이제 키만 넘긴다). 원자성은 남긴다 — 그 규칙이 깨지는 것을 컴파일러가 말해 주지 않기 때문이다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "4d06911967b13fdfa6fd037b638950e844f90c366df68b5a8c1ee0642fd2b04c" },
 };

@@ -3846,10 +3846,11 @@ pub const AppSession = struct {
     /// 펼친 커밋에서 **지금 열어 둔 파일**의 자리(P4b). 목록이 무엇을 보고 있는지 말해야 파일 여럿을
     /// 오갈 때 길을 잃지 않는다.
     scm_selected_commit_file: ?u32 = null,
-    /// 에이전트 탭에서 **펼친 턴**의 자리(P5). 커밋과 마찬가지로 한 번에 하나만 펼친다.
-    scm_expanded_turn: ?u32 = null,
-    /// 지금 고른 턴의 자리(강조).
-    scm_selected_turn: ?u32 = null,
+    /// 에이전트 탭에서 **펼친 턴**(P5). **자리가 아니라 두 tree 키**(`<A> <B>`)다 — 새 턴이 들어오면
+    /// 자리가 밀려 같은 번호가 다른 턴을 가리킨다(적대적 검증). 한 번에 하나만 펼친다.
+    scm_expanded_turn: ?[]u8 = null,
+    /// 지금 고른 턴(강조). 같은 이유로 키다.
+    scm_selected_turn: ?[]u8 = null,
     scm_selected_row: ?usize = null,
     /// 강조된 행이 **어느 저장소의 것인가**(②d). 인덱스만 들면 저장소마다 따로 서는 모델에서 같은
     /// 번호의 남의 행이 함께 강조된다.
@@ -15878,6 +15879,15 @@ pub const AppSession = struct {
                 if (label.len == 0) return allocator.dupe(u8, base);
                 // **커밋 기준은 어느 커밋인지까지 적는다**(P4b 적대적 검증). 커밋마다 다른 탭이 열리는데
                 // 라벨이 전부 `이름 · 커밋`이면 탭 줄에서 서로를 구별할 수 없다.
+                // 턴 비교도 같은 이유로 **어느 턴인지** 적는다(오른쪽 tree의 짧은 해시 — 그 턴이 끝난
+                // 순간이다). 라벨이 전부 `이름 · 턴`이면 탭 줄에서 구별할 수 없다.
+                if (entry.diff_base == .turn_range and entry.diff_right_oid.len >= maru.session.git_log.short_oid_len) {
+                    return std.fmt.allocPrint(allocator, "{s} · {s} {s}", .{
+                        base,
+                        label,
+                        entry.diff_right_oid[0..maru.session.git_log.short_oid_len],
+                    });
+                }
                 if (entry.diff_base == .commit and entry.diff_commit_oid.len >= maru.session.git_log.short_oid_len) {
                     return std.fmt.allocPrint(allocator, "{s} · {s} {s}", .{
                         base,
@@ -17226,6 +17236,8 @@ pub const AppSession = struct {
         if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
         if (self.scm_log_repo) |path| self.allocator.free(path); // 히스토리 원문의 저장소(P4)
         if (self.scm_expanded_commit) |oid| self.allocator.free(oid); // 펼친 커밋(P4b)
+        if (self.scm_expanded_turn) |key| self.allocator.free(key); // 펼친 턴(P5)
+        if (self.scm_selected_turn) |key| self.allocator.free(key);
         if (self.scm_commit_files_oid) |oid| self.allocator.free(oid);
         if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
@@ -55461,7 +55473,8 @@ test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 �
 
     // 완료된 턴(자리 1)을 펼친다.
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
-    try std.testing.expect(session.scm_expanded_turn != null);
+    // **자리가 아니라 두 tree 키**를 든다 — 새 턴이 들어오면 자리가 밀린다.
+    try std.testing.expectEqualStrings("aaaaaaa1111 bbbbbbb2222", session.scm_expanded_turn.?);
     session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
     session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\n");
     {
@@ -55472,6 +55485,94 @@ test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 �
     // 같은 줄을 다시 누르면 접힌다.
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
     try std.testing.expect(session.scm_expanded_turn == null);
+}
+
+test "에이전트 탭: 새 턴이 들어와도 펼친 줄이 바뀌지 않는다 (P5 적대적 검증)" {
+    // 자리로 들면 새 턴이 push될 때마다 아래로 밀려 **같은 번호가 다른 턴**을 가리킨다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .agent);
+    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 }); // 마지막 턴
+
+    // 새 턴이 들어온다 — 그 줄은 이제 자리 2다.
+    session.turn_ring.push("ccccccc3333", 1, 300, 2);
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    var expanded_count: usize = 0;
+    for (projection.items) |item| switch (item) {
+        .turn => |turn| if (turn.expanded) {
+            expanded_count += 1;
+            // 펼친 것은 여전히 **그 턴**이다(제목이 한 칸 밀렸다).
+            var title_buf: [32]u8 = undefined;
+            const want = try std.fmt.bufPrint(&title_buf, "2{s}", .{maru.i18n.t(.scm_turn_back_suffix)});
+            try std.testing.expectEqualStrings(want, turn.title);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), expanded_count);
+}
+
+test "에이전트 탭: 턴 파일 클릭은 **턴 비교**를 연다 (P5 적대적 검증)" {
+    // 같은 줄 모양을 두 탭이 쓰지만 여는 비교가 다르다 — 구분이 없으면 intent가 커밋 경로로만 가서
+    // 턴 파일 클릭이 **아무 일도 안 한다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .agent);
+    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
+    session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\n");
+
+    // 그 줄이 실어 내는 intent가 **턴 쪽**이다.
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expect(projection.items[2].commit_file.from_turn);
+
+    // 그리고 그것을 적용하면 `스냅샷 ↔ 스냅샷` 탭이 열린다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .open_turn_file = 0 });
+    var found = false;
+    for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        const entry = term.file_entry orelse continue;
+        if (entry.kind != .diff or entry.diff_base != .turn_range) continue;
+        found = true;
+        try std.testing.expectEqualStrings("aaaaaaa1111", entry.diff_commit_oid); // 왼쪽 tree
+        try std.testing.expectEqualStrings("bbbbbbb2222", entry.diff_right_oid); // 오른쪽 tree
+    };
+    try std.testing.expect(found);
+}
+
+test "에이전트 탭: 저장소가 갈리면 펼친 턴도 버린다 (P5 적대적 검증)" {
+    // 링은 저장소가 갈리면 통째로 비워진다 — 그 키는 어느 턴도 가리키지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.scm_log_repo = try allocator.dupe(u8, "/other");
+    session.scm_expanded_turn = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    session.scm_selected_turn = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expect(session.scm_expanded_turn == null);
+    try std.testing.expect(session.scm_selected_turn == null);
 }
 
 test "에이전트 탭: 진행 중인 턴은 tree 둘로 읽지 않는다 (P5)" {
@@ -55487,9 +55588,12 @@ test "에이전트 탭: 진행 중인 턴은 tree 둘로 읽지 않는다 (P5)" 
     scm_dock_ops.selectScmTab(session, .agent);
     session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
 
-    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 0 }); // 진행 중
-    try std.testing.expect(session.scm_expanded_turn != null);
-    // 읽기를 걸지 않는다(키를 만들 수 없다).
+    // **진행 중 줄은 변경 사항 탭으로 보낸다** — tree 둘로 읽을 수 없어 펼칠 것이 없는데, 아무 일도
+    // 안 하면 죽은 컨트롤이 된다. 그 줄이 가리키는 목록은 실제로 그 탭이 보여 준다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 0 });
+    try std.testing.expectEqual(chrome.components.scm_dock.types.Tab.changes, session.scm_tab);
+    try std.testing.expect(session.scm_expanded_turn == null);
+    // 읽기도 걸지 않는다(키를 만들 수 없다).
     scm_dock_ops.pumpCommitFiles(session);
     try std.testing.expectEqual(@as(u64, 0), session.scm_commit_files_inflight);
 }

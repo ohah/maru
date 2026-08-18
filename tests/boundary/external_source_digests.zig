@@ -511,7 +511,7 @@ pub const inventory = [_]Proof{
     // 탭 바 ✕·"+" 호버로 다시 움직인다: 호버 상태 둘(`hovered_tab_close`·`hovered_plus`)이 붙고 그 자리에
     // 배경 quad 를 얹는 분기가 생긴다. count 는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
     // 집합도 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5ffdfb287202fa9177dc5876e0e448cee2186664ed72df90f58d06edc58175cd" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "57e867301dc3fbeb07396cc5cc930021c9559f0c19908a889e5209613e7f77ed" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -590,5 +590,5 @@ pub const inventory = [_]Proof{
     // P4b: diff 탭 라벨 `커밋`이 키로 들어와 digest가 움직인다. count는 1 그대로다.
     // P5: 에이전트 타임라인 문구(진행 중·마지막 턴·N턴 전·빈 목록)와 diff 탭 라벨 `턴`이 키로
     // 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "31b0467b9f667eb5d167b39b1c11310774b1c7f3bce5e024fc964a5bed2c1bcb" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "d250712a5f847bf13a88f2861076615597f0d7eaff8a7e9ebc9b0429309d5a19" },
 };

@@ -375,7 +375,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             // 없는데 intent만 실으면 host가 "무엇을 열지" 두 곳에서 정하게 된다.
             .commit => |commit| .{ .select_commit = commit.index },
             .load_more => .load_more_commits,
-            .commit_file => |file| .{ .open_commit_file = file.index },
+            .commit_file => |file| if (file.from_turn)
+                .{ .open_turn_file = file.index }
+            else
+                .{ .open_commit_file = file.index },
             .turn => |turn| .{ .select_turn = turn.index },
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice => null,

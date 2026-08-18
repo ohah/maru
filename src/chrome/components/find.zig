@@ -35,9 +35,15 @@ fn pageIndicator(state: *const State) ?[]const u8 {
     // 같은 오버레이가 `Find: ` 를 영어로 쓰는데 결과만 한국어이면 한 상자 안에서 언어가 섞인다.
     return if (found) "found" else "none";
 }
-/// 표시 폭(칸). 한글 2자 = EAW wide 2칸씩 = 4칸(무 arena — caretRect가 예약에 쓴다).
+/// 표시 폭(칸) — **문자열에서 잰다**(무 arena — `caretRect` 가 예약에 쓴다).
+///
+/// 예전에는 `4` 가 박혀 있었다. 그 값은 한글 두 자(`찾음`/`없음`, EAW wide 2칸씩)를 잰 것이라,
+/// 영어로 옮기자 `found`(5칸)가 예약을 한 칸 넘어 입력 영역을 침범했다 — 계약 §6.1 이 이 자리를
+/// 이름으로 짚어 "영어는 5칸이라 그 예약을 침범한다"고 경고한 그대로다. 폭을 문자열에서 파생시키면
+/// 문구가 바뀔 때 예약이 따라오고, 아래 테스트가 `counterCols == displayCols(counter)` 를 고정한다.
 fn pageIndicatorCols(state: *const State) u32 {
-    return if (pageIndicator(state) == null) 0 else 4;
+    const label = pageIndicator(state) orelse return 0;
+    return overlay_input.displayCols(label);
 }
 fn numDigits(n: usize) u32 {
     var d: u32 = 1;
@@ -468,4 +474,32 @@ test "find view/caret: 긴 검색어는 tail 창(선두 …)으로 오른쪽 정
     const cr = caretRect(&s, p) orelse return error.CaretHidden;
     try std.testing.expect(cr.x >= lay.x);
     try std.testing.expect(cr.x < lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw))); // 패널 안
+}
+
+// 표시 폭 예약이 **실제 글자 폭과 같은지** 본다.
+//
+// `view` 는 `panel_cols - counter_cols - 1` 에 카운터를 그리고 `textCols` 는 같은 값을 검색어에서
+// 빼 둔다. 둘이 어긋나면 카운터가 입력 영역을 침범하거나(예약 부족) 빈 칸이 남는다(예약 과다).
+// 예전에는 `4` 가 박혀 있었고 그것은 **한글 두 자를 잰 값**이라, 영어로 옮기는 순간 조용히 어긋났다.
+test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)" {
+    var s: State = .{};
+    s.target = .page;
+
+    // 결과 없음(제출 전) — 예약 0.
+    s.page_found = null;
+    try std.testing.expectEqual(@as(u32, 0), pageIndicatorCols(&s));
+
+    // 두 상태 모두 예약 == 실제 폭.
+    for ([_]bool{ true, false }) |found| {
+        s.page_found = found;
+        const label = pageIndicator(&s) orelse return error.NoIndicator;
+        try std.testing.expectEqual(overlay_input.displayCols(label), pageIndicatorCols(&s));
+    }
+
+    // 두 문구의 폭이 **다르다**는 것이 이 테스트가 지키는 것이다 — 같으면 상수로 둬도 안 깨지고,
+    // 그러면 이 테스트가 아무것도 안 지킨다.
+    s.page_found = true;
+    const found_cols = pageIndicatorCols(&s);
+    s.page_found = false;
+    try std.testing.expect(found_cols != pageIndicatorCols(&s));
 }

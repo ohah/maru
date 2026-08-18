@@ -19,7 +19,10 @@ const width = @import("width.zig"); // UTF-8 경계 절단(truncateToBoundary) �
 
 /// 지원 언어. 계약 §2가 영어·한국어로 범위를 정했고, 중국어·일본어는 이 enum과 `Table`만 늘리면 확장된다
 /// (CJK는 한글과 같은 EAW Wide라 배치 규칙이 그대로 성립한다 — 계약 §6.5).
-pub const Lang = enum { en, ko };
+///
+/// 태그 타입을 명시하는 이유는 하나다 — 현재 언어가 `std.atomic.Value` 에 들어가고(아래 `current`),
+/// 그 안의 extern struct 는 크기가 정해진 타입만 담는다.
+pub const Lang = enum(u8) { en, ko };
 
 /// 표시 문자열의 키 = 이 struct의 필드.
 ///
@@ -426,7 +429,6 @@ pub const Table = struct {
     scm_loading: [:0]const u8,
     scm_load_failed: [:0]const u8,
     scm_show_all_more: [:0]const u8,
-    scm_show_all: [:0]const u8,
     /// 히스토리 목록 끝에서 커밋을 **더 읽는다**(P4). `모두 보기`와 다른 말이다 — 그쪽은 이미 읽은 것을
     /// 다 펴는 것이고, 이쪽은 git을 다시 부른다.
     scm_load_more: [:0]const u8,
@@ -450,7 +452,6 @@ pub const Table = struct {
     scm_no_terminal: [:0]const u8,
     scm_changes: [:0]const u8,
     scm_history: [:0]const u8,
-    scm_agent: [:0]const u8,
     scm_staged: [:0]const u8,
 
     // ── session 레이어 (I3d) ──
@@ -530,19 +531,9 @@ pub const Table = struct {
     app_last_activity: [:0]const u8,
     app_shared_all_windows: [:0]const u8,
     app_editor: [:0]const u8,
-    common_none: [:0]const u8,
-    color_amber: [:0]const u8,
-    color_blue: [:0]const u8,
-    color_green: [:0]const u8,
-    color_red: [:0]const u8,
-    color_purple: [:0]const u8,
-    lbl_background: [:0]const u8,
-    lbl_bar: [:0]const u8,
-    lbl_group_color: [:0]const u8,
     set_direct_input: [:0]const u8,
     app_more_lines: [:0]const u8,
     upd_available_ver: [:0]const u8,
-    upd_available: [:0]const u8,
     upd_github: [:0]const u8,
     upd_brew: [:0]const u8,
     st_blocked: [:0]const u8,
@@ -553,7 +544,6 @@ pub const Table = struct {
     app_closed_tab: [:0]const u8,
     exit_immediate: [:0]const u8,
     exit_code: [:0]const u8,
-    exit_normal: [:0]const u8,
     exit_signal: [:0]const u8,
     exit_abnormal: [:0]const u8,
     exit_read_error: [:0]const u8,
@@ -567,7 +557,6 @@ pub const Table = struct {
     fp_no_branch: [:0]const u8,
     fp_recent_files: [:0]const u8,
     fp_open_to_show_tree: [:0]const u8,
-    git_local_check: [:0]const u8,
     diff_loading: [:0]const u8,
     diff_no_changes: [:0]const u8,
     diff_too_large: [:0]const u8,
@@ -587,7 +576,6 @@ pub const Table = struct {
     scm_nothing_staged: [:0]const u8,
     scm_commit_msg_write_failed: [:0]const u8,
     sb_in_progress: [:0]const u8,
-    sb_awaiting_input: [:0]const u8,
     sb_group: [:0]const u8,
     tab_group_n: [:0]const u8,
     ws_cwd_must_be_absolute: [:0]const u8,
@@ -615,6 +603,13 @@ pub const Table = struct {
 
     // ── 작업공간 복원 (I3f) ──
     ws_restore_incomplete: [:0]const u8,
+
+    // ── 브라우저 권한 확인 (리뷰 후속) ──
+    // **로그인 토큰 접근을 묻는 문장이다.** 영어 UI 아래 한국어 동의문이 뜨면 사용자가 무엇을
+    // 허용하는지 못 읽는다 — 버튼(`btn_allow`/`btn_deny`)은 이미 번역돼 있어 더 어긋나 보였다.
+    grant_scope_storage: [:0]const u8,
+    grant_scope_control: [:0]const u8,
+    grant_prompt: [:0]const u8,
 
     // ── 파일 선택 패널 (I3f) ──
     // **Swift 는 이 문장을 만들지 않는다**(계약 §7.2) — ABI 로 키를 받아 표시만 한다.
@@ -922,19 +917,9 @@ pub const en: Table = .{
     .app_last_activity = "Last activity",
     .app_shared_all_windows = "Maru (app · shared by all windows)",
     .app_editor = "Editor",
-    .common_none = "None",
-    .color_amber = "Amber",
-    .color_blue = "Blue",
-    .color_green = "Green",
-    .color_red = "Red",
-    .color_purple = "Purple",
-    .lbl_background = "Background: ",
-    .lbl_bar = "Bar: ",
-    .lbl_group_color = "Group color: ",
     .set_direct_input = "Enter directly\u{2026}",
     .app_more_lines = "\u{2026} {0} more lines",
     .upd_available_ver = "New version {0} available",
-    .upd_available = "New version available",
     .upd_github = "Get the latest release from GitHub",
     .upd_brew = "Update with brew upgrade maru",
     .st_blocked = "Blocked",
@@ -945,7 +930,6 @@ pub const en: Table = .{
     .app_closed_tab = "(closed tab)",
     .exit_immediate = "Immediate exit",
     .exit_code = "Exit code {0}",
-    .exit_normal = "Exited",
     .exit_signal = "Signal {0}",
     .exit_abnormal = "Abnormal exit",
     .exit_read_error = "Read error",
@@ -955,7 +939,6 @@ pub const en: Table = .{
     .fp_no_branch = "(no branch)",
     .fp_recent_files = "Recent files",
     .fp_open_to_show_tree = "Open a file to show the tree",
-    .git_local_check = "Local check",
     .diff_loading = "Loading the diff\u{2026}",
     .diff_no_changes = "No changes.",
     .diff_too_large = "The change is too large to show a diff.",
@@ -975,7 +958,6 @@ pub const en: Table = .{
     .scm_nothing_staged = "There are no staged changes",
     .scm_commit_msg_write_failed = "Could not write the commit message to a temporary file",
     .sb_in_progress = "In progress",
-    .sb_awaiting_input = "Awaiting input",
     .sb_group = "Group",
     .tab_group_n = "Group {0}",
     .ws_cwd_must_be_absolute = "The start directory must be an absolute path or ~/… (relative paths and ~user are ignored)",
@@ -988,12 +970,14 @@ pub const en: Table = .{
     .mob_settings = "Settings",
     .mob_appearance = "Appearance",
     .ws_restore_incomplete = "The saved workspace was only partially restored — on quit the previous checkpoint is kept as workspace.v1.bak before saving.",
+    .grant_scope_storage = "read and write this site's cookies and storage (including login tokens)",
+    .grant_scope_control = "control this browser (navigate, click, type, read)",
+    .grant_prompt = "An agent wants to {0}. Target: {1}. Allow?",
     .pick_background_png = "Choose a PNG to use as the background",
     .pick_dock_file = "Choose a file to open in the dock (Markdown, HTML, SVG, text/code, images, media, PDF)",
     .pick_explorer_folder = "Choose a folder to open in the explorer",
     .pick_workspace_folder = "Choose a folder to add to the workspace",
     .scm_show_all_more = "Show all ({0} more)",
-    .scm_show_all = "Show all",
     .scm_load_more = "Load more commits",
     .scm_commit_placeholder = "Commit message…",
     .scm_commit = "Commit",
@@ -1008,7 +992,6 @@ pub const en: Table = .{
     .scm_no_terminal = "No terminal to type into",
     .scm_changes = "Changes",
     .scm_history = "History",
-    .scm_agent = "Agent",
     .scm_staged = "Staged changes",
     .cfg_font_size = "Font size (pt)",
     .cfg_font_line_height = "Line height multiplier",
@@ -1271,8 +1254,8 @@ pub const ko: Table = .{
     .fp_mutation_not_found = "대상이 사라져 파일 변경을 완료하지 못했습니다.",
     .fp_mutation_denied = "권한이 없어 파일을 변경할 수 없습니다.",
     .fp_mutation_failed = "파일 변경에 실패했습니다. 트리와 열린 탭은 유지됩니다.",
-    .fp_manual_recovery = "자동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {0}",
-    .fp_manual_recovery_fallback = "자동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.",
+    .fp_manual_recovery = "수동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {0}",
+    .fp_manual_recovery_fallback = "수동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.",
     .fp_abort_unsaved = "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.",
     .fp_abort_edit_check = "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.",
     .dbg_editor_not_utf8 = "네이티브 편집기: UTF-8이 아니라 열지 않았습니다.",
@@ -1413,19 +1396,9 @@ pub const ko: Table = .{
     .app_last_activity = "마지막 활동",
     .app_shared_all_windows = "Maru(앱 · 모든 창 공유)",
     .app_editor = "편집기",
-    .common_none = "없음",
-    .color_amber = "앰버",
-    .color_blue = "파랑",
-    .color_green = "초록",
-    .color_red = "빨강",
-    .color_purple = "보라",
-    .lbl_background = "배경: ",
-    .lbl_bar = "바: ",
-    .lbl_group_color = "그룹 색: ",
     .set_direct_input = "직접 입력\u{2026}",
     .app_more_lines = "\u{2026} {0}줄 더",
     .upd_available_ver = "새 버전 {0} 사용 가능",
-    .upd_available = "새 버전 사용 가능",
     .upd_github = "GitHub 릴리스에서 최신 버전을 받으세요",
     .upd_brew = "brew upgrade maru 로 업데이트하세요",
     .st_blocked = "막힘",
@@ -1436,7 +1409,6 @@ pub const ko: Table = .{
     .app_closed_tab = "(닫힌 탭)",
     .exit_immediate = "즉시 종료",
     .exit_code = "종료 코드 {0}",
-    .exit_normal = "종료",
     .exit_signal = "시그널 {0}",
     .exit_abnormal = "비정상 종료",
     .exit_read_error = "읽기 오류",
@@ -1446,7 +1418,6 @@ pub const ko: Table = .{
     .fp_no_branch = "(브랜치 없음)",
     .fp_recent_files = "최근 파일",
     .fp_open_to_show_tree = "파일을 열면 트리가 표시됩니다",
-    .git_local_check = "로컬 판정",
     .diff_loading = "비교를 읽는 중입니다\u{2026}",
     .diff_no_changes = "바뀐 곳이 없습니다.",
     .diff_too_large = "변경이 너무 커서 비교를 표시하지 않습니다.",
@@ -1466,7 +1437,6 @@ pub const ko: Table = .{
     .scm_nothing_staged = "스테이지된 변경이 없습니다",
     .scm_commit_msg_write_failed = "커밋 메시지를 임시 파일에 쓰지 못했습니다",
     .sb_in_progress = "진행중",
-    .sb_awaiting_input = "입력 대기",
     .sb_group = "그룹",
     .tab_group_n = "그룹 {0}",
     .ws_cwd_must_be_absolute = "시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)",
@@ -1479,12 +1449,14 @@ pub const ko: Table = .{
     .mob_settings = "설정",
     .mob_appearance = "모양",
     .ws_restore_incomplete = "저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.",
+    .grant_scope_storage = "이 사이트의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
+    .grant_scope_control = "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
+    .grant_prompt = "에이전트가 {0} 합니다. 대상: {1}. 허용하시겠습니까?",
     .pick_background_png = "배경 이미지로 쓸 PNG를 고르세요",
     .pick_dock_file = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·미디어·PDF)",
     .pick_explorer_folder = "탐색기에서 열 폴더를 고르세요",
     .pick_workspace_folder = "작업공간에 추가할 폴더를 고르세요",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
-    .scm_show_all = "모두 보기",
     .scm_load_more = "커밋 더 보기",
     .scm_commit_placeholder = "커밋 메시지…",
     .scm_commit = "커밋",
@@ -1499,7 +1471,6 @@ pub const ko: Table = .{
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",
-    .scm_agent = "에이전트",
     .scm_staged = "스테이지된 변경",
     .cfg_font_size = "폰트 크기(pt)",
     .cfg_font_line_height = "행간 배수",
@@ -1626,19 +1597,26 @@ pub const Key = std.meta.FieldEnum(Table);
 /// 전환 도중(I3-0~I3a 슬라이스 5)에는 이 값이 한시적으로 `ko` 였다 — 배선 전에 `en` 을 두면 키로 옮긴
 /// 문자열이 전부 영어로 나와 **옮기는 작업이 표시를 바꿔** 버렸기 때문이다. I4a 가 배선을 붙이며 계약이
 /// 정한 값으로 되돌렸다.
-var current: Lang = .en;
+///
+/// **원자적으로 읽고 쓴다.** 소유는 여전히 UI 스레드지만, 읽기는 UI 스레드만 하는 것이 아니다 —
+/// 아카이브 상세를 읽는 **떼어낸 워커 스레드**가 민감 내용을 대체 문구로 바꾸며 `t()` 를 부른다
+/// (`agent_session_archive_detail_backend.zig` 의 `redactTurns`). 평범한 `var` 였을 때 그 조합은
+/// UI 스레드의 쓰기와 워커의 읽기가 동기화 없이 겹치는 자료 경합이었다. 값이 enum 하나뿐이라 관측되는
+/// 손상은 없더라도 정의되지 않은 동작이고, 스레드 새니타이저가 잡는 종류다. `.monotonic` 이면 충분하다 —
+/// 이 값과 함께 건너가는 다른 상태가 없고(문자열은 static), 워커가 어느 쪽 언어를 보든 문장은 온전하다.
+var current: std.atomic.Value(Lang) = .init(.en);
 
 pub fn setLang(l: Lang) void {
-    current = l;
+    current.store(l, .monotonic);
 }
 
 pub fn lang() Lang {
-    return current;
+    return current.load(.monotonic);
 }
 
 /// 제품 호출부가 쓰는 조회. 인자는 키 하나뿐이라 호출부에 언어를 실어 나르지 않는다.
 pub fn t(key: Key) [:0]const u8 {
-    return tIn(current, key);
+    return tIn(lang(), key);
 }
 
 /// 언어를 명시하는 조회 — **테스트가 전역을 건드리지 않고** 양쪽 언어를 확인할 때 쓴다.
@@ -2050,10 +2028,10 @@ test "Preference 는 Lang 과 다른 타입이다 — auto 를 표시 언어로 
 }
 
 test "applyPreference: 전역 로케일을 거쳐 현재 언어를 바꾼다" {
-    const lang_before = current;
+    const lang_before = lang();
     const locale_before_len = os_locale_len;
     defer {
-        current = lang_before;
+        setLang(lang_before);
         os_locale_len = locale_before_len;
     }
 

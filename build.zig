@@ -2358,12 +2358,20 @@ pub fn build(b: *std.Build) void {
     const conflict_marker_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/conflict_markers.zig"),
+    // i18n 3차 방어: 표에 **아무도 안 쓰는 키**가 남지 않는가. 1차(파라미터 타입)·2차(리터럴 개수)는
+    // "화면 문자열이 키를 거치는가"를 보지만, 되돌린 작업의 잔해로 남은 키는 둘 다 통과한다 — 실제로
+    // 15개가 쌓여 있었다. 참조 0이면 실패하고 이름을 전부 출력한다.
+    const i18n_orphan_key_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/i18n_orphan_keys.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     const run_conflict_marker_boundary_tests = b.addRunArtifact(conflict_marker_boundary_tests);
     run_conflict_marker_boundary_tests.setCwd(b.path("."));
+    const run_i18n_orphan_key_boundary_tests = b.addRunArtifact(i18n_orphan_key_boundary_tests);
+    run_i18n_orphan_key_boundary_tests.setCwd(b.path("."));
 
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
@@ -2374,6 +2382,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);
+    boundary_step.dependOn(&run_i18n_orphan_key_boundary_tests.step);
     boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
 
     // SSH 층은 **세 최적화 모드로 다 돈다.** `std` 의 몇몇 검사가 `if (std.debug.runtime_safety)`

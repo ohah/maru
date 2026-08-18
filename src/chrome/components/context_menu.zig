@@ -44,13 +44,23 @@ pub const State = struct {
     /// 번역 테이블에 들어가고, 켜짐 여부가 문자열 비교로만 드러난다. 상태는 상태로 두고 그리기는
     /// 컴포넌트가 한다 — `header_count`·`footer_count` 를 별도 필드로 둔 것과 같은 이유다.
     ///
-    /// 0 이면 기존 메뉴와 **완전히 같다**(우클릭·브랜치 메뉴는 이 값을 안 쓴다).
-    checked_mask: u64 = 0,
+    /// `null` 이면 **체크 열이 없는 메뉴**다(우클릭·브랜치 메뉴 — 기존과 완전히 같다).
+    /// 값이 있으면 체크 열이 있고, 그 값이 `0` 이어도 **열은 남는다** — 전부 꺼진 상태와 열이 없는
+    /// 상태는 다르다. 예전에는 `0` 이 둘을 겸해서, 보기 옵션 두 개를 다 끄면 라벨이 두 칸 왼쪽으로
+    /// 튀었다가 하나를 켜면 되돌아왔다(팝업은 토글 중에도 열려 있으므로 눈에 보인다).
+    checked_mask: ?u64 = null,
 
     /// `items[i]` 에 켜짐 표시가 붙는가.
     pub fn isChecked(self: *const State, i: usize) bool {
+        const mask = self.checked_mask orelse return false;
         if (i >= 64) return false; // 마스크 밖 — 메뉴가 64 줄을 넘을 일은 없다(넘으면 표시만 빠진다)
-        return (self.checked_mask & (@as(u64, 1) << @intCast(i))) != 0;
+        return (mask & (@as(u64, 1) << @intCast(i))) != 0;
+    }
+
+    /// 체크 열이 차지하는 칸. 열이 없으면 0 — `menuRect` 와 `view` 가 **같은 값**을 써야 라벨이
+    /// 상자를 넘지 않는다(예전에는 `view` 만 마크를 그려 가장 긴 줄이 테두리에 닿았다).
+    pub fn markCols(self: *const State) u32 {
+        return if (self.checked_mask == null) 0 else 2;
     }
 
     /// 우클릭 위치(x,y px)와 항목 수로 연다 — 선택은 첫 항목. platform이 항목/대상을 세팅한 뒤 부른다.
@@ -78,7 +88,7 @@ pub const State = struct {
         // **켜짐 표시는 열 때마다 비운다.** 이 상태는 메뉴마다 다른데 컴포넌트는 어느 메뉴가 열리는지
         // 모른다 — 안 비우면 보기 옵션에서 켜 둔 표시가 **다음에 여는 우클릭 메뉴에 그대로 남는다**.
         // 필요한 호출부가 `show` 뒤에 다시 세운다(그 순서가 규약이다).
-        self.checked_mask = 0;
+        self.checked_mask = null;
         self.open = true;
     }
 
@@ -144,7 +154,9 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
         const w = overlay_input.displayCols(it);
         if (w > max_cols) max_cols = w;
     }
-    const box_w = (max_cols + 2) * cw; // 좌우 1칸 패딩
+    // 체크 열은 **모든 줄 앞에** 붙으므로 가장 긴 줄에 더한다 — 안 더하면 그 줄이 우측 패딩을
+    // 먹고 테두리에 닿는다(`itemAt` 도 이 rect 를 쓰므로 히트 영역까지 어긋난다).
+    const box_w = (max_cols + state.markCols() + 2) * cw; // 좌우 1칸 패딩
     const box_h = @as(u32, @intCast(items.len)) * ch;
     var x = state.anchor_x;
     var y = state.anchor_y;
@@ -222,7 +234,7 @@ pub fn view(
         }
         // 켜짐 표시는 **컴포넌트가** 그린다(§6.2 — 기호는 번역 단위가 아니다). 꺼진 줄에는 같은 폭의
         // 공백을 넣어 라벨이 같은 열에서 시작하게 한다 — 안 그러면 토글할 때마다 글자가 좌우로 흔들린다.
-        const mark: []const u8 = if (state.checked_mask == 0) "" else if (state.isChecked(i)) check_glyph ++ " " else "  ";
+        const mark: []const u8 = if (state.checked_mask == null) "" else if (state.isChecked(i)) check_glyph ++ " " else "  ";
         const runs = try arena.alloc(draw.Run, if (mark.len == 0) 1 else 2);
         if (mark.len == 0) {
             runs[0] = .{ .text = it };
@@ -444,4 +456,45 @@ test "context_menu menuRect: 상태바 앵커는 사이드바로 밀지 않는�
     // **workspace 안 앵커는 종전 그대로** — 사이드바 우클릭 메뉴가 chrome 위로 겹치지 않는 규칙은 산다.
     s.show(20, 50, items.len);
     try std.testing.expect(menuRect(&s, &items, p).?.x >= 200);
+}
+
+// 체크 열이 **상자 폭에 반영되는지**, 그리고 **전부 꺼짐이 열 없음과 구분되는지** 본다.
+//
+// 둘 다 눈에만 보이고 크래시하지 않는 종류라 테스트가 없으면 그대로 남는다.
+// (a) `menuRect` 가 마크 폭을 안 세면 가장 긴 줄이 우측 패딩을 먹고 테두리에 닿는다.
+// (b) `checked_mask` 가 `0` 으로 둘을 겸하면, 보기 옵션을 다 끈 순간 라벨이 두 칸 왼쪽으로 튄다 —
+//     그 팝업은 토글 중에도 열려 있으므로 사용자가 그 흔들림을 본다.
+test "체크 열은 상자 폭에 들어가고, 전부 꺼짐은 열 없음과 다르다" {
+    const items = [_][]const u8{ "브랜치 표시", "폴더 표시" };
+    const p: props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 960,
+        .backing_height_px = 600,
+    } };
+
+    var plain: State = .{};
+    plain.show(10, 10, items.len);
+    try std.testing.expectEqual(@as(u32, 0), plain.markCols());
+
+    var checked: State = .{};
+    checked.show(10, 10, items.len);
+    checked.checked_mask = 0b11;
+    try std.testing.expectEqual(@as(u32, 2), checked.markCols());
+
+    // (a) 체크 열이 있는 메뉴가 **더 넓다** — 정확히 마크 폭만큼.
+    const plain_rect = menuRect(&plain, &items, p) orelse return error.TestUnexpectedResult;
+    const checked_rect = menuRect(&checked, &items, p) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(plain_rect.w + 2 * p.metrics.cell_width_px, checked_rect.w);
+
+    // (b) 전부 꺼져도 열은 남는다 — 폭이 켜졌을 때와 같다.
+    checked.checked_mask = 0;
+    try std.testing.expectEqual(@as(u32, 2), checked.markCols());
+    const off_rect = menuRect(&checked, &items, p) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(checked_rect.w, off_rect.w);
+
+    // `show` 는 열을 없앤다(다음 메뉴로 새지 않게) — 그 뒤 호출부가 다시 세우는 것이 규약이다.
+    checked.show(10, 10, items.len);
+    try std.testing.expectEqual(@as(?u64, null), checked.checked_mask);
 }

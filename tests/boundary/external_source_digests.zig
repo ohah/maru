@@ -589,7 +589,10 @@ pub const inventory = [_]Proof{
     // 그 슬라이스가 의도하지 않은 것을 바꾼 것이다.
     // P6b: 컨텍스트 메뉴 accept 분기 하나(도크 `∨`)와 닫기에서 그 플래그를 내리는 줄이 는다. 다른 메뉴들과
     // **배타**라 분기 순서가 곧 계약이고, count는 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "7209336fd34258ea1cbd36b6f0ba6a24c2bea480b1ad54574f7ef7d816a16b5a" },
+    // 화면 언어가 바뀌면 폼 필터의 매칭 키(`meta.doc`)도 함께 바뀌어 선택이 다른 설정으로 미끄러지던 것을
+    // 막으며 움직였다(키로 다시 앉히는 `reanchorSelectedByKey`·`indexOfSettingsKey` 추가). count는 3 그대로다 —
+    // 새 코드에 반사 접근이 없다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "c84d3531f5d54a1866f2ad002084d3819f79e302bea7f4eeeb2b1bb95a4ba248" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -627,5 +630,8 @@ pub const inventory = [_]Proof{
     // P6a: 원격 갱신 문구 넷(`Fetch`·`가져오는 중…`·원격 없음·가져왔음)이 키로 들어와 digest가 움직인다.
     // count는 1 그대로다.
     // P6b: `∨` 메뉴 두 줄과 "넣을 터미널이 없다" 문구가 키로 들어와 digest가 움직인다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8f13f07db79d10b3de8534b66334a9ded79d42b4f57077556b534394bb48475f" },
+    // 현재 언어를 `std.atomic.Value` 로 바꾸고(떼어낸 아카이브 워커가 `t()` 를 부른다 — 평범한 `var` 였을 때
+    // UI 스레드의 쓰기와 겹치는 자료 경합이었다), 참조 0인 키 15개를 지우며 움직인다. count는 1 그대로다 —
+    // 반사 접근은 여전히 `tIn` 의 `inline else` 하나뿐이다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "0d9942b71e81c4a6827ad71c4653a79615d106a5d54cf6c1862ce990146fc25e" },
 };

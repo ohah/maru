@@ -791,6 +791,8 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
         const di = config_mod.schema.enumIndex(config_mod.Config{}, e.key) orelse return; // 기본 변형의 선언순 인덱스
         if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, di)) {
             reapplyLoadedConfig(self);
+            // ↺ 로 언어를 기본값으로 되돌려도 라벨 언어가 바뀐다 — 라이브 프리뷰와 같은 이유로 다시 앉힌다.
+            if (std.mem.eql(u8, e.key, "ui.language")) reanchorSelectedByKey(self, e.key);
             markConfigKeyRemoved(self, e.key);
             self.metal_dirty = true;
         }
@@ -2373,6 +2375,44 @@ pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]Settings
 }
 
 /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
+/// 화면 언어가 바뀐 **직후** 선택 행을 `key` 에 다시 맞춘다.
+///
+/// 폼 필터는 `meta.doc` 로 검색한다(§2·§4). 그런데 `doc` 은 이제 언어에 따라 달라지므로, `ui.language`
+/// 를 라이브 프리뷰(↑↓)하는 순간 **필터를 통과하는 행 집합과 그 순서가 함께 바뀐다**. `selected` 는
+/// 인덱스일 뿐이라 그 자리에 다른 설정이 들어와도 모르고, 그 상태로 Enter 를 누르면 **사용자가 열지도
+/// 않은 키**에 값이 써진다. 그래서 인덱스가 아니라 키를 기준으로 다시 앉힌다.
+///
+/// 새 언어의 라벨이 쿼리와 안 맞아 행 자체가 사라지면(한국어 라벨로 찾아 놓고 영어로 바꾼 경우) 쿼리를
+/// 지운다 — 편집 중인 행이 목록 밖에 있는 상태가 그대로 남는 것보다, 필터가 풀려 그 행이 다시 보이는
+/// 쪽이 되돌리기 쉽다.
+fn reanchorSelectedByKey(self: *AppSession, key: []const u8) void {
+    if (indexOfSettingsKey(self, key)) |i| {
+        self.chrome_host.settings.selected = i;
+        return;
+    }
+    self.chrome_host.settings.endSearch();
+    if (indexOfSettingsKey(self, key)) |i| self.chrome_host.settings.selected = i;
+}
+
+/// 현재 필터를 통과하는 행들에서 `key` 의 행 인덱스. `currentSectionFields` 와 **같은 순서**(bool → number
+/// → enum → text → color)로 세야 핸들러의 인덱싱과 어긋나지 않는다.
+fn indexOfSettingsKey(self: *AppSession, key: []const u8) ?usize {
+    var scratch = std.heap.ArenaAllocator.init(self.allocator);
+    defer scratch.deinit();
+    const cf = currentSectionFields(self, scratch.allocator()) catch return null;
+    var base: usize = 0;
+    for (cf.bools, 0..) |f, i| if (std.mem.eql(u8, f.key, key)) return base + i;
+    base += cf.bools.len;
+    for (cf.nums, 0..) |f, i| if (std.mem.eql(u8, f.key, key)) return base + i;
+    base += cf.nums.len;
+    for (cf.enums, 0..) |f, i| if (std.mem.eql(u8, f.key, key)) return base + i;
+    base += cf.enums.len;
+    for (cf.texts, 0..) |f, i| if (std.mem.eql(u8, f.key, key)) return base + i;
+    base += cf.texts.len;
+    for (cf.colors, 0..) |f, i| if (std.mem.eql(u8, f.key, key)) return base + i;
+    return null;
+}
+
 pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
     // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
     // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
@@ -2496,6 +2536,9 @@ pub fn applyDropdownIndex(self: *AppSession, idx: usize, persist: bool) void {
             } else {
                 reapplyLoadedConfig(self);
             }
+            // 언어를 바꿨으면 행 라벨이 통째로 다른 언어가 된다 — 필터가 걸린 상태면 이 인덱스가 다른
+            // 설정을 가리키게 되므로 키로 다시 앉힌다(안 하면 확정이 **다른 키**에 써진다).
+            if (std.mem.eql(u8, e.key, "ui.language")) reanchorSelectedByKey(self, e.key);
             if (persist) markConfigKeyDirty(self, e.key);
         }
         return;
@@ -2898,4 +2941,95 @@ test "언어 드롭다운: 표시명은 저장 토큰과 다르다 — 언어 �
     maru.i18n.setLang(.ko);
     const auto_ko = maru.i18n.preferenceLabel(.auto);
     try std.testing.expect(!std.mem.eql(u8, auto_en, auto_ko));
+}
+
+/// 필터를 통과하는 행들 중 `i` 번째 행의 config 키(테스트용 — `indexOfSettingsKey` 의 역방향).
+fn settingsKeyAt(self: *AppSession, allocator: std.mem.Allocator, i: usize) !?[]const u8 {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const cf = try currentSectionFields(self, scratch.allocator());
+    var n = i;
+    if (n < cf.bools.len) return cf.bools[n].key;
+    n -= cf.bools.len;
+    if (n < cf.nums.len) return cf.nums[n].key;
+    n -= cf.nums.len;
+    if (n < cf.enums.len) return cf.enums[n].key;
+    n -= cf.enums.len;
+    if (n < cf.texts.len) return cf.texts[n].key;
+    n -= cf.texts.len;
+    if (n < cf.colors.len) return cf.colors[n].key;
+    return null;
+}
+
+// 필터가 걸린 채로 언어를 라이브 프리뷰하면 **선택이 다른 키로 미끄러지던** 것을 막는다.
+//
+// 폼 필터는 `meta.doc` 로 검색하는데 그 `doc` 이 언어를 탄다. 그래서 언어를 바꾸는 순간 통과 행 집합과
+// 순서가 같이 바뀌고, `selected` 는 인덱스라 그대로 남는다 — 그 자리에 다른 설정이 들어와 있으면
+// 사용자가 열지도 않은 키에 값이 써진다. 크래시가 아니라 **조용한 오기록**이라 다른 테스트가 못 잡는다.
+test "언어를 바꿔도 선택은 같은 설정에 남는다 (검색 필터가 켜진 채로)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+
+    session.chrome_host.settings.show();
+    session.loaded_config.config.ui_language = .ko;
+    reapplyUiLanguage(session);
+
+    // 두 언어 모두에서 여러 행을 통과시키는 쿼리 — 통과 집합이 언어마다 달라 순서가 밀린다.
+    session.chrome_host.settings.startSearch();
+    session.chrome_host.settings.appendSearchCp('o');
+
+    const before = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
+    session.chrome_host.settings.selected = before;
+
+    // 드롭다운에서 `en` 을 고른 것과 같은 경로 — 프리뷰라 persist=false.
+    applyDropdownIndex(session, try uiLanguageVariantIndex(session, allocator, "en"), false);
+    try std.testing.expectEqual(maru.i18n.Lang.en, maru.i18n.lang()); // 언어가 실제로 바뀌었어야 아래가 의미 있다
+
+    // 선택은 여전히 그 키를 가리킨다(인덱스는 옮겨졌을 수 있다 — 키가 기준이다).
+    const after = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(after, session.chrome_host.settings.selected);
+
+    // 이 자리가 **실제로 미끄러지는** 자리였음을 확인한다 — 안 그러면 위 단언은 아무것도 안 지킨다.
+    // 옛 인덱스에는 이제 다른 설정이 앉아 있고, 그것이 바로 예전에 값이 잘못 써지던 키다.
+    try std.testing.expect(after != before);
+    const key_at_old = (try settingsKeyAt(session, allocator, before)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!std.mem.eql(u8, key_at_old, "ui.language"));
+
+    // 새 언어의 라벨이 쿼리와 안 맞아 행이 **사라지는** 경우엔 필터를 푼다 — 편집 중인 행이 목록 밖에
+    // 남는 것보다 낫다. (`언어` 는 한국어 라벨에만 있다.)
+    session.loaded_config.config.ui_language = .ko;
+    reapplyUiLanguage(session);
+    session.chrome_host.settings.startSearch();
+    var q_it = (try std.unicode.Utf8View.init("언어")).iterator();
+    while (q_it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
+    session.chrome_host.settings.selected =
+        indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
+
+    applyDropdownIndex(session, try uiLanguageVariantIndex(session, allocator, "en"), false);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.searchQuery().len);
+    const rescued = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(rescued, session.chrome_host.settings.selected);
+}
+
+/// `ui.language` 드롭다운에서 `name` 변형의 인덱스(테스트 헬퍼 — 선언 순서를 테스트에 박지 않는다).
+fn uiLanguageVariantIndex(self: *AppSession, allocator: std.mem.Allocator, name: []const u8) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const variants = (try config_mod.schema.enumVariants(arena.allocator(), self.loaded_config.config, "ui.language")) orelse
+        return error.TestUnexpectedResult;
+    for (variants, 0..) |v, i| if (std.mem.eql(u8, v, name)) return i;
+    return error.TestUnexpectedResult;
 }

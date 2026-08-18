@@ -46,11 +46,21 @@ const Entry = struct { path: []const u8, count: usize };
 /// 새 파일이 한글 리터럴을 들고 나타나면 원장에 없으므로 실패한다 — 그것이 이 게이트의 본래 목적이다.
 const inventory = [_]Entry{
     // ── 영어 고정 표면(§7.1) ──
+    // **토크나이저로 바꾸자 드러난 것들.** 줄 단위 스캐너는 멀티라인 문자열(`\\`)을 못 봤다.
+    //   · `cli/browser.zig` 40 — **help 텍스트가 한국어다**(§7.1 위반). 영어화는 후속이 든다.
+    //   · `main.zig` 1 — Windows 스모크 usage 한 줄(같은 성격).
+    .{ .path = "src/cli/browser.zig", .count = 20 },
+    .{ .path = "src/main.zig", .count = 1 },
     // `main.zig`(96) 와 `cli/browser/run.zig`(41) 는 **0 이 되어 원장에서 빠졌다**. 남은 하나는
     // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
 
     // ── 번역 대상 레이어(§7.2) ──
+    // **표시 문자열이 아닌 것들** — 토크나이저 전환으로 드러났고, 각각 성격을 확인해 등재했다.
+    //   · `shell_integration.zig` 48 — maru 가 쓰는 **셸 스크립트 본문·주석**이다. 사용자가 파일을
+    //     열면 보지만 앱 UI 가 아니고, `agent_statusline` 의 설치 마커처럼 **파일 포맷의 일부**다.
+    //   · `agent_statusline.zig` 5 · `remote_runtime.zig` 3 — 모듈 doc 주석과 진단.
+    .{ .path = "src/platform/macos/shell_integration.zig", .count = 48 },
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
     .{ .path = "src/chrome/components/settings.zig", .count = 8 },
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
@@ -70,7 +80,7 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/glyph_text_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/metal_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .count = 1 },
-    .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 3 },
     .{ .path = "src/platform/macos/session_host/remote_screen.zig", .count = 2 },
     .{ .path = "src/platform/macos/session_host/remote_term_backend.zig", .count = 2 },
     .{ .path = "src/platform/macos/session_host/shutdown_n1_baseline.zig", .count = 1 },
@@ -78,7 +88,7 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 3 },
     .{ .path = "src/session/agent_observer.zig", .count = 3 },
     .{ .path = "src/session/agent_selection.zig", .count = 1 },
-    .{ .path = "src/session/agent_statusline.zig", .count = 2 },
+    .{ .path = "src/session/agent_statusline.zig", .count = 5 },
     .{ .path = "src/session/control_bridge.zig", .count = 1 },
 };
 
@@ -86,62 +96,71 @@ fn isHangulLead(b: u8) bool {
     return b == 0xEA or b == 0xEB or b == 0xEC or b == 0xED;
 }
 
-/// 한 줄에서 **문자열 리터럴 안의** 한글 존재 여부로 리터럴을 센다. 주석은 문자열 밖의 `//` 부터 자른다.
-fn countLine(line: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    var in_str = false;
-    var has_hangul = false;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (in_str) {
-            if (c == '\\') {
-                i += 1;
-                continue;
-            }
-            if (c == '"') {
-                in_str = false;
-                if (has_hangul) n += 1;
-                has_hangul = false;
-                continue;
-            }
-            if (isHangulLead(c)) has_hangul = true;
-        } else {
-            if (c == '"') {
-                in_str = true;
-                has_hangul = false;
-            } else if (c == '/' and i + 1 < line.len and line[i + 1] == '/') break;
-        }
-    }
-    return n;
+fn hasHangul(bytes: []const u8) bool {
+    for (bytes) |b| if (isHangulLead(b)) return true;
+    return false;
 }
 
-/// `test` 블록을 뺀 제품 경로만 센다. 첫 `test` 이후를 통째로 자르지 않는다 — 그 뒤에도 제품 코드가
-/// 이어지는 파일이 있다(`app_session.zig` 가 그렇다). 중괄호 깊이로 블록 끝을 찾는다.
-fn countSource(src: []const u8) usize {
+/// 제품 경로(= top-level `test` 블록 **밖**)의 한국어 문자열 리터럴 수.
+///
+/// **토크나이저로 센다.** 예전에는 줄 단위로 `{`/`}` 를 세어 test 블록 끝을 찾았는데, 그 방식은
+/// **문자열·주석 안의 중괄호까지 세어** 한 번 어긋나면 그 파일의 나머지 전부를 test 로 오인한다.
+/// 실측에서 19 개 파일이 그렇게 막혀 있었고, 그중 `app_host_abi.zig` 는 198 행에서 멈춰 브라우저
+/// 권한 **동의문 3 건**(로그인 쿠키 접근을 묻는 문장)이 게이트를 그냥 통과했다.
+///
+/// 옆의 `cli_purity.zig` 가 같은 문제를 이미 토크나이저로 풀었다 — 그 방식을 그대로 쓴다.
+/// 파싱 오류가 있는 파일은 **실패**시킨다(조용히 0 을 세면 그 파일이 영원히 감시 밖이 된다).
+fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    if (tree.errors.len != 0) return error.SourceHasParseErrors;
+
+    var in_test = try allocator.alloc(bool, tree.tokens.len);
+    defer allocator.free(in_test);
+    @memset(in_test, false);
+
+    // **모든 `test` 블록**의 토큰을 마스킹한다. 깊이로 top-level 만 고르지 않는 이유: Zig 에서 `test` 는
+    // top-level 이거나 struct 멤버뿐이고 **둘 다 테스트 코드**다. 깊이 추적은 `.{` 같은 토큰 때문에
+    // 어긋나기 쉬운데, 한 번 어긋나면 test 이름 문자열까지 제품 코드로 세어 게이트가 거짓 경보를 낸다.
+    const tags = tree.tokens.items(.tag);
+    var token: std.zig.Ast.TokenIndex = 0;
+    while (token < tree.tokens.len) {
+        if (tags[token] == .keyword_test) {
+            var cursor = token;
+            var body_depth: usize = 0;
+            var body_started = false;
+            while (cursor < tree.tokens.len) : (cursor += 1) {
+                in_test[cursor] = true;
+                switch (tags[cursor]) {
+                    .l_brace => {
+                        body_started = true;
+                        body_depth += 1;
+                    },
+                    .r_brace => {
+                        if (!body_started or body_depth == 0) return error.SourceHasParseErrors;
+                        body_depth -= 1;
+                        if (body_depth == 0) break;
+                    },
+                    else => {},
+                }
+            }
+            if (!body_started or body_depth != 0 or cursor == tree.tokens.len) return error.SourceHasParseErrors;
+            token = cursor + 1;
+            continue;
+        }
+        token += 1;
+    }
+
+    // 문자열 리터럴 토큰만 센다 — 주석은 애초에 토큰이 아니고, 멀티라인(`\\`)도 여기서 잡힌다.
     var total: usize = 0;
-    var in_test = false;
-    var depth: i32 = 0;
-    var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |line| {
-        if (!in_test and std.mem.startsWith(u8, line, "test \"")) {
-            in_test = true;
-            depth = 0;
-            for (line) |c| {
-                if (c == '{') depth += 1;
-                if (c == '}') depth -= 1;
-            }
-            continue;
+    for (tree.tokens.items(.tag), 0..) |tag, i| {
+        if (in_test[i]) continue;
+        switch (tag) {
+            .string_literal, .multiline_string_literal_line => {
+                if (hasHangul(tree.tokenSlice(@intCast(i)))) total += 1;
+            },
+            else => {},
         }
-        if (in_test) {
-            for (line) |c| {
-                if (c == '{') depth += 1;
-                if (c == '}') depth -= 1;
-            }
-            if (depth <= 0) in_test = false;
-            continue;
-        }
-        total += countLine(line);
     }
     return total;
 }
@@ -211,7 +230,7 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
             defer allocator.free(source);
 
             scanned += 1;
-            if (!reportIfDrifted(path, countSource(source))) failed = true;
+            if (!reportIfDrifted(path, try countSource(allocator, source))) failed = true;
         }
     }
 
@@ -234,14 +253,14 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
             defer allocator.free(source);
 
             scanned += 1;
-            if (!reportIfDrifted(path, countSource(source))) failed = true;
+            if (!reportIfDrifted(path, try countSource(allocator, source))) failed = true;
         }
     }
     for (english_only_files) |path| {
         const source = std.Io.Dir.cwd().readFileAllocOptions(std.testing.io, path, allocator, .limited(8 * 1024 * 1024), .of(u8), 0) catch continue;
         defer allocator.free(source);
         scanned += 1;
-        if (!reportIfDrifted(path, countSource(source))) failed = true;
+        if (!reportIfDrifted(path, try countSource(allocator, source))) failed = true;
     }
 
     // 훑을 파일이 없다면 경로가 바뀐 것이다 — 0 을 통과시키면 "규칙이 지켜진다"와 "아무것도 안 봤다"를

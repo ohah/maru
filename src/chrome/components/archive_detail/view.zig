@@ -63,11 +63,15 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     var heading: [384]u8 = undefined;
     const heading_text = std.fmt.bufPrint(&heading, "{s}  {s}", .{ provider, props.title }) catch props.title;
     try writer.text(header, 0, heading_text, .surface_fg);
-    // 스피너 프레임은 **문구 앞에 따로** 그린다(§6.2 — 프레임은 상태이지 번역 단위가 아니다).
+    // 스피너 프레임은 **문구와 다른 조각**으로 그린다(§6.2 — 프레임은 상태이지 번역 단위가 아니다).
+    //
+    // 한 줄 안에서 나란히 놓아야 한다. `Writer.text` 의 둘째 인자는 **행 번호**이지 열이 아니어서
+    // (`y = rect.y + ch*(line+1) + …`, x 는 고정) 거기에 열 오프셋을 넘기면 문구가 헤더 카드 아래로
+    // 내려가고 `effective_clip` 이 통째로 버린다 — 화면에는 도는 `◴` 만 남고 글자가 사라진다.
+    // 그래서 조각 배열을 받는 `runsAt` 으로 같은 baseline 에 이어 그린다.
     const state_role: tokens.ColorRole = if (props.state == .ready) .muted_fg else .accent_bar;
     if (props.state == .loading) {
-        try writer.text(header, 1, spinnerFrame(props.spinner_phase), state_role);
-        try writer.text(header, 3, stateLabel(props), state_role);
+        try writer.runsAt(header, 1, &.{ spinnerFrame(props.spinner_phase), " ", stateLabel(props) }, state_role);
     } else {
         try writer.text(header, 1, stateLabel(props), state_role);
     }
@@ -146,6 +150,34 @@ const Writer = struct {
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
         try self.emit(x, y, source, max_cols, role, false);
+    }
+
+    /// `text` 와 **같은 줄·같은 시작 x** 에 여러 조각을 이어 그린다. 조각을 나눠 두는 이유는
+    /// §6.2 다 — 스피너 프레임처럼 번역 단위가 아닌 것이 문장에 섞이면 안 된다. 붙여서 그리는 것과
+    /// 한 문자열로 두는 것은 화면상 같지만, **소유가 다르다**.
+    fn runsAt(self: *Writer, rect: tree.RectEntry, line: u32, parts: []const []const u8, role: tokens.ColorRole) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const x = rect.rect.x + @as(f32, @floatFromInt(cw));
+        const m = types.Metrics.fromCellHeight(ch);
+        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1) + m.line_gap * line));
+        if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+
+        // 예산은 **줄 전체**가 나눠 쓴다 — 앞 조각이 쓴 칸을 빼고 다음 조각에 넘긴다.
+        var used_cols: u16 = 0;
+        var pen_x = x;
+        for (parts) |part| {
+            if (used_cols >= max_cols) return;
+            const budget: u16 = max_cols - used_cols;
+            const planned = Writer.plannedCols(part, budget);
+            try self.emit(pen_x, y, part, budget, role, false);
+            used_cols += planned;
+            pen_x += @as(f32, @floatFromInt(@as(u32, planned) * cw));
+        }
     }
 
     fn action(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {

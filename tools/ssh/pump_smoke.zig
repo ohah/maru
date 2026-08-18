@@ -242,3 +242,36 @@ test "닿지 않는 주소에서도 시한 안에 포기한다" {
     try std.testing.expect(elapsed < 5_000);
     try std.testing.expectEqualStrings("connect_failed", std.mem.span(pump.maru_ssh_pump_error()));
 }
+
+test "끝난 뒤에는 다시 붙을 수 있다" {
+    // **끝났다는 표시(`CLOSED`)를 "돌고 있다" 로 읽으면 재접속이 영영 막힌다.** 세션은 사용자가
+    // 안 멈춰도 끝나고(선이 끊긴다), 그 뒤 앱은 다시 붙어야 한다 — 프로세스를 죽였다 켜야만
+    // 되는 상태가 되면 그것은 앱이 아니라 일회용 도구다.
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    @memcpy(host_z[0.."127.0.0.1".len], "127.0.0.1");
+    var user_z: [8]u8 = @splat(0);
+    user_z[0] = 'u';
+    var fp_z: [8]u8 = @splat(0);
+    var cfg: pump.MaruSshPumpConfig = .{
+        .host = &host_z,
+        .port = 1, // 아무도 안 듣는다 — 곧 실패한다
+        .user = &user_z,
+        .secret = &secret,
+        .cols = 80,
+        .rows = 24,
+        .expect_fingerprint = &fp_z,
+    };
+
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, null));
+    // 스스로 끝날 때까지 기다린다(멈추라고 안 한다 — 실제 끊김이 그런 모양이다).
+    var waited: usize = 0;
+    while (waited < 3000 and pump.maru_ssh_pump_is_running() != 0) : (waited += 20) sleepMs(20);
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
+    // **끝을 알리는 상태는 남아 있어야 한다** — host 가 그것으로 알림을 내린다.
+    try std.testing.expectEqual(@as(c_uint, 12), pump.maru_ssh_pump_state());
+
+    // 그리고 다시 붙을 수 있어야 한다.
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, null));
+    pump.maru_ssh_pump_stop();
+}

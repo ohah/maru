@@ -56,6 +56,12 @@ static unsigned int g_handle;
 static int g_fd = -1;
 static char g_error[64];
 static MaruSshPumpConfig g_cfg;
+/// **문자열은 우리가 복사해 든다.** 호출자에게 "start 가 도는 동안 살려 두라" 고 요구하면
+/// 언젠가 안 지켜진다 — 서비스가 다시 시작되면서 같은 자리를 덮어쓰는 것이 가장 흔한 모양이고,
+/// 그때 세션은 이미 그 포인터를 보고 있다.
+static char g_host[256];
+static char g_user[128];
+static char g_fingerprint[128];
 static MaruSshPumpHooks g_hooks;
 static unsigned char g_secret[MARU_SSH_SECRET_KEY_BYTES];
 /// `write`·`resize` 는 **다른 스레드에서** 온다(IME·회전). 세션 슬롯을 두 스레드가 만지므로
@@ -398,11 +404,17 @@ static void *pump_main(void *unused) {
 done:
     if (g_handle != 0) {
         pthread_mutex_lock(&g_session_lock);
-        set_state(maru_mobile_ssh_state(g_handle));
         maru_mobile_ssh_close(g_handle);
         g_handle = 0;
         pthread_mutex_unlock(&g_session_lock);
     }
+    // **펌프가 끝났으면 세션은 끝났다 — 그것을 반드시 알린다.**
+    //
+    // 코어 상태를 그대로 올리면 안 된다: 선이 끊겼을 때(모바일에서 가장 흔한 끝이다) 코어는
+    // 여전히 `ready` 다 — 끊긴 것은 소켓이지 프로토콜이 아니기 때문이다. 그대로 두면 host 는
+    // "붙어 있다" 고 믿고 알림도 "유지 중" 인 채로 남는다(실측: 서버를 죽여도 아무 일도 안
+    // 났고 서비스가 그대로 살아 있었다).
+    set_state(MARU_SSH_STATE_CLOSED);
     if (g_fd >= 0) {
         close(g_fd);
         g_fd = -1;
@@ -427,6 +439,13 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     if (cfg->port == 0 || cfg->cols == 0 || cfg->rows == 0) return -2;
 
     g_cfg = *cfg;
+    snprintf(g_host, sizeof g_host, "%s", cfg->host);
+    snprintf(g_user, sizeof g_user, "%s", cfg->user);
+    snprintf(g_fingerprint, sizeof g_fingerprint, "%s",
+             cfg->expect_fingerprint ? cfg->expect_fingerprint : "");
+    g_cfg.host = g_host;
+    g_cfg.user = g_user;
+    g_cfg.expect_fingerprint = g_fingerprint;
     g_hooks = hooks ? *hooks : (MaruSshPumpHooks){0};
     memcpy(g_secret, cfg->secret, sizeof g_secret);
     g_error[0] = 0;
@@ -458,12 +477,18 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
 void maru_ssh_pump_stop(void) {
     if (!g_joinable) return;
     g_stop = 1;
+    // **자기 자신은 안 거둔다.** 끝을 알리는 훅(`state_changed`) 안에서 host 가 `stop` 을 부르는
+    // 것은 자연스러운 흐름인데(서비스를 내린다), 거기서 자기 스레드를 `join` 하면 그 자리에서
+    // 교착한다 — 앱이 멈춘 채로 남는다.
+    if (pthread_equal(pthread_self(), g_thread)) return;
     pthread_join(g_thread, NULL);
     g_joinable = 0;
     g_running = 0;
 }
 
 unsigned int maru_ssh_pump_state(void) { return g_state; }
+
+int maru_ssh_pump_is_running(void) { return g_running ? 1 : 0; }
 
 const char *maru_ssh_pump_error(void) { return g_error; }
 

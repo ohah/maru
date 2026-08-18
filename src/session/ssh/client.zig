@@ -36,7 +36,8 @@ pub const Error = error{
     ChannelRefused,
     /// 채널 요청(`pty-req`·`shell`)이 거절됐다.
     RequestFailed,
-    /// 서버가 끊었다(`SSH_MSG_DISCONNECT`).
+    /// 서버가 끊었다(`SSH_MSG_DISCONNECT`). **이유는 `Step.disconnect` 가 들고 있다** — 오류
+    /// 이름만으로는 "왜 못 붙는지" 를 못 전한다.
     Disconnected,
     /// 아직 셸이 안 떴는데 쓰려 한다.
     NotReady,
@@ -103,6 +104,15 @@ pub const Options = struct {
 /// 도는 루프**가 된다 — 그래서 `feed` 가 입구에서 거절한다.
 pub const min_wire_out = 4096;
 
+/// 1 바이트 답 하나가 선에서 차지하는 크기. **어림수를 쓰지 않는다** — 모자라게 잡으면 마지막
+/// 한 개에서 `NoSpace` 로 죽고, 그 경계는 버퍼 크기에 따라 걸리기도 안 걸리기도 해서 테스트로
+/// 잡히지 않는다(변이 검사에서 실제로 그렇게 살아남았다). 프레이밍이 아는 값을 그대로 쓴다.
+///
+/// **밀린 답을 비울 때 `min_wire_out` 으로 재면 안 된다.** 최소 크기(4096) 버퍼를 준 호출자는
+/// 한 번 부를 때마다 답을 하나씩만 내보내게 되어 255 개를 비우는 데 `feed` 를 255 번 부른다 —
+/// 그 사이 서버는 답을 기다린다.
+const max_reply_packet = cipher.Cipher.sealedLen(1);
+
 /// `feed` 한 번의 결과.
 ///
 /// **`banner` 와 `exit_signal` 은 `Client` 안을 가리킨다** — `wire`·`screen` 이 호출자 버퍼를
@@ -124,6 +134,39 @@ pub const Step = struct {
     /// 서버가 보낸 배너(RFC 4252 §5.4 — 법적 고지 등). **이미 걸러져 있다**(제어문자 제거) —
     /// 서버가 고른 문자열이 그대로 화면에 가면 OSC 로 창 제목·클립보드에 손댈 수 있다.
     banner: ?[]const u8 = null,
+    /// 서버가 끊은 이유(RFC 4253 §11.1). **`feed` 가 `Disconnected` 를 내기 직전에 채운다** —
+    /// 오류만 보면 "왜" 가 사라지고, 그 "왜" 가 사용자가 유일하게 고칠 수 있는 것이다
+    /// ("Too many authentication failures" · "No supported authentication methods available").
+    disconnect: ?Disconnect = null,
+};
+
+/// 서버가 끊은 이유(RFC 4253 §11.1).
+pub const Disconnect = struct {
+    reason: DisconnectReason,
+    /// **서버가 고른 문자열이다** — 배너와 같은 거름망을 지나 온다(계약 §4.4.2).
+    description: []const u8,
+};
+
+/// 끊은 사유 코드(RFC 4253 §11.1). **이름을 든다** — 숫자만 보여 주면 사용자가 못 읽는다.
+pub const DisconnectReason = enum(u32) {
+    host_not_allowed_to_connect = 1,
+    protocol_error = 2,
+    key_exchange_failed = 3,
+    reserved = 4,
+    mac_error = 5,
+    compression_error = 6,
+    service_not_available = 7,
+    protocol_version_not_supported = 8,
+    host_key_not_verifiable = 9,
+    connection_lost = 10,
+    by_application = 11,
+    too_many_connections = 12,
+    auth_cancelled_by_user = 13,
+    no_more_auth_methods_available = 14,
+    illegal_user_name = 15,
+    /// 표에 없는 값. **오류로 다루지 않는다** — 사유 코드는 IANA 가 늘리고, 모르는 값 때문에
+    /// 설명까지 버리면 "왜" 가 사라진다.
+    _,
 };
 
 /// **약 10KiB 다.** 교환 해시에 쓸 원문(`I_C`·`I_S` 각 4KiB)을 그대로 들어야 해서 그렇다 —
@@ -177,6 +220,14 @@ pub const Client = struct {
     /// 걸러 둔 배너. `feed` 한 번이 돌려주고 다음 호출에서 비운다.
     banner_buf: [1024]u8 = undefined,
     banner_len: usize = 0,
+    /// 끊긴 이유. `Disconnected` 오류와 **같은 `feed` 호출**에서 나온다.
+    disconnect_buf: [512]u8 = undefined,
+    /// **답을 미뤄 둔 전역 요청의 수**(§7.1). 재키잉 중에는 `REQUEST_FAILURE`(82) 를 보낼 수
+    /// 없어서, 그 사이에 온 요청의 답을 여기 세어 두고 재키잉이 끝나면 내보낸다.
+    pending_request_failures: u8 = 0,
+    disconnect_len: usize = 0,
+    disconnect_reason: DisconnectReason = @enumFromInt(0),
+    disconnected: bool = false,
     /// **셸이 한 번이라도 떴나.** `state` 는 재키잉 중에 `key_exchange` 로 돌아가는데, 그때
     /// `write` 가 `NotReady` 를 내면 **호출자가 재키잉을 알아야** 한다 — 알 필요가 없어야 한다.
     /// 그래서 "쓸 수 있는 세션인가"(이 값)와 "지금 보낼 수 있나"(윈도·§7.1)를 가른다.
@@ -263,6 +314,11 @@ pub const Client = struct {
             // 한 걸음이 실제로 필요한 만큼만 남겨 둔다. 넉넉히 잡으면(예: 패킷 상한 256KiB)
             // 모바일이 못 쓸 크기를 요구하게 된다.
             if (w.remaining() < min_wire_out or s.remaining() < self.ch.local_max_packet) break;
+            // **밀린 것을 먼저 비운다.** 입력이 없어도 비워야 한다 — 서버의 keepalive(채널
+            // 요청 `keepalive@openssh.com`, 실측)에 답하는 자리라서, 다음 패킷이 올 때까지
+            // 미루면 서버가 우리를 죽은 것으로 본다.
+            // (`stepPacket` 도 끝에서 같은 것을 부르지만 그쪽은 **패킷이 있을 때만** 돈다.)
+            try self.flushDeferred(&w);
             const before_consumed = consumed;
             const before_state = self.state;
             try self.step(input[consumed..], &consumed, &w, &s);
@@ -276,6 +332,10 @@ pub const Client = struct {
             .exit_status = self.exit_status,
             .exit_signal = if (self.exit_signal_len == 0) null else self.exit_signal_buf[0..self.exit_signal_len],
             .banner = if (self.banner_len == 0) null else self.banner_buf[0..self.banner_len],
+            .disconnect = if (!self.disconnected) null else .{
+                .reason = self.disconnect_reason,
+                .description = self.disconnect_buf[0..self.disconnect_len],
+            },
         };
     }
 
@@ -401,18 +461,42 @@ pub const Client = struct {
             },
             .packet => |p| {
                 consumed.* += p.consumed;
-                try self.dispatch(p.payload, w, s);
+                // **시퀀스 번호를 같이 넘긴다** — 모르는 메시지에 답할 때 그 번호를 실어야 한다
+                // (§11.4: "packet sequence number of rejected message").
+                try self.dispatch(p.payload, p.seq, w, s);
             },
         }
     }
 
-    fn dispatch(self: *Client, payload: []const u8, w: *Out, s: *Out) Error!void {
+    fn dispatch(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out) Error!void {
         const msg = payload[0];
         // **전송 계층 잡 메시지는 어느 상태에서나 온다**(계약 §3.2). 분류는 S7c 가 넓히고,
         // 여기서는 세션을 죽이지 않게만 다룬다.
-        if (msg == msg_disconnect) return Error.Disconnected;
+        // **끊긴 이유를 먼저 담는다.** 그래야 `Disconnected` 를 받은 호출자가 같은 `Step` 에서
+        // "왜" 를 읽는다 — 오류 이름만으로는 사용자가 고칠 것이 없다(RFC 4253 §11.1).
+        if (msg == msg_disconnect) {
+            self.onDisconnect(payload) catch {};
+            return Error.Disconnected;
+        }
+        // `IGNORE`·`DEBUG` 는 뜻이 없다(§11.2·§11.3). `UNIMPLEMENTED` 는 **우리가 보낸 것에 대한
+        // 답**이라 여기서 할 일이 없다 — 우리는 모르는 메시지를 안 보낸다.
         if (msg == msg_ignore or msg == msg_debug or msg == msg_unimplemented) return;
-        if (msg == msg_global_request) return; // `want_reply` 는 S7c 가 다룬다
+        if (msg == msg_global_request) return try self.onGlobalRequest(payload, w);
+
+        // **우리가 아무 뜻도 없는 번호는 답하고 넘어간다**(§11.4 — MUST). 예전에는 채널을 여는
+        // 중일 때만 그랬는데, 그러면 인증 중에 온 확장 하나가 세션을 죽인다. 서버는 OpenSSH 만
+        // 있는 것이 아니고, 모르는 번호 하나로 못 붙는 서버가 생기는 것이 훨씬 나쁘다.
+        //
+        // **키 교환 중에는 예외로 끊는다.** strict KEX(draft §3.2)는 그 사이의 예상 밖 패킷에
+        // 연결을 끊으라고 요구한다 — 여기서 답하고 살아 있으면 그 요구를 어긴다.
+        if (!recognizedMessage(msg)) {
+            switch (self.state) {
+                .version_exchange, .negotiating, .key_exchange, .awaiting_new_keys, .host_key_decision => {
+                    return Error.UnexpectedMessage;
+                },
+                else => return self.emit(w, &unimplemented(seq)),
+            }
+        }
 
         // **배너는 어느 상태에서나 온다** — RFC 4252 §5.4 는 "at any time after this
         // authentication protocol starts and before authentication is successful" 라고 못박는다.
@@ -436,7 +520,7 @@ pub const Client = struct {
                 try self.sendAuth(w);
             },
             .authenticating => try self.onAuthResponse(payload, w),
-            .opening_channel, .requesting_pty, .starting_shell, .ready => try self.onChannel(payload, w, s),
+            .opening_channel, .requesting_pty, .starting_shell, .ready => try self.onChannel(payload, seq, w, s),
             else => return Error.UnexpectedMessage,
         }
     }
@@ -535,6 +619,73 @@ pub const Client = struct {
         self.state = .authenticating;
     }
 
+    /// 이 번호에 우리가 뜻을 두고 있나. **아니면 `UNIMPLEMENTED` 로 답할 대상이다**(§11.4).
+    ///
+    /// "이 자리에 맞나" 가 아니라 "번호를 아나" 다 — 아는 번호가 엉뚱한 자리에 오면 그것은
+    /// 규약 위반이라 오류로 올려야 하고, 모르는 번호는 그냥 확장이라 답하고 넘어가야 한다.
+    fn recognizedMessage(msg: u8) bool {
+        return switch (msg) {
+            1...6 => true, // DISCONNECT·IGNORE·UNIMPLEMENTED·DEBUG·SERVICE_REQUEST/ACCEPT
+            20, 21 => true, // KEXINIT·NEWKEYS
+            30, 31 => true, // KEX 방법별(ECDH init/reply)
+            50...53, 60 => true, // USERAUTH 계열
+            80...82 => true, // GLOBAL_REQUEST·REQUEST_SUCCESS/FAILURE
+            90...100 => true, // 채널 계열
+            else => false,
+        };
+    }
+
+    /// 모르는 메시지에 대한 답(§11.4). **거절한 메시지의 시퀀스 번호를 싣는다.**
+    fn unimplemented(seq: u32) [5]u8 {
+        var out: [5]u8 = undefined;
+        out[0] = msg_unimplemented;
+        std.mem.writeInt(u32, out[1..5], seq, .big);
+        return out;
+    }
+
+    /// 전역 요청(RFC 4254 §4). **`want_reply` 면 답해야 한다** — 안 답하면 서버가 기다린다.
+    ///
+    /// **실측(OpenSSH 10.2)**: 인증 직후 `hostkeys-00@openssh.com` 을 보내는데 `want_reply` 는
+    /// **0** 이다. 즉 답하는 가지는 OpenSSH 로는 안 돈다 — 서버 keepalive 도 전역이 아니라
+    /// *채널* 요청(`keepalive@openssh.com`, confirm 1)으로 오고 그쪽은 채널 층이 답한다.
+    /// 그래도 답을 구현한다: §4 가 `want_reply` 를 정의해 뒀고, 안 답하면 그렇게 보내는 서버에
+    /// 매달린 채로 멈추기 때문이다.
+    fn onGlobalRequest(self: *Client, payload: []const u8, w: *Out) Error!void {
+        var r = wire.Reader.init(payload);
+        _ = try r.byte();
+        _ = try r.string(); // 요청 이름 — 우리가 아는 것이 없다
+        const want_reply = try r.boolean();
+        if (!want_reply) return;
+        // **우리는 어떤 전역 요청도 안 받는다**(포트 포워딩을 안 하므로). 실패로 답한다.
+        //
+        // 단, **지금 보낼 수 있을 때만 지금 보낸다.** `REQUEST_FAILURE` 는 82 번이라 재키잉 중에는
+        // 금지된 번호이고(§7.1 은 1~49 만 허용), 그대로 보내면 전송기가 우리 쪽을 poison 해
+        // **답 하나 때문에 세션이 죽는다**(실측: 테스트가 `NotAllowedDuringRekey` 로 죽었다).
+        // 서버의 요청은 우리 `KEXINIT` 이 닿기 전에 떠난 것일 수 있어 이 겹침은 정상이므로,
+        // §7.1 이 말한 대로 줄 세웠다가 뒤에 보낸다.
+        if (!self.t.canSendChannelMessages()) {
+            // 포화시킨다. 재키잉 중에 요청을 쏟아부어도 세는 값이 감싸 돌지 않는다.
+            if (self.pending_request_failures < std.math.maxInt(u8)) self.pending_request_failures += 1;
+            return;
+        }
+        try self.emit(w, &[_]u8{msg_request_failure});
+    }
+
+    /// 끊긴 이유를 담는다(§11.1). **설명은 걸러서** 담는다 — 서버가 고른 문자열이다.
+    fn onDisconnect(self: *Client, payload: []const u8) Error!void {
+        var r = wire.Reader.init(payload);
+        _ = try r.byte();
+        self.disconnect_reason = @enumFromInt(try r.u32be());
+        const desc = try r.string();
+        const clean = userauth.sanitizeBanner(&self.disconnect_buf, desc) catch {
+            self.disconnect_len = 0;
+            self.disconnected = true;
+            return;
+        };
+        self.disconnect_len = clean.len;
+        self.disconnected = true;
+    }
+
     /// 배너를 걸러 보관한다. **거르는 것이 계약이다**(§4.4.2) — 서버가 고른 문자열이 그대로
     /// 화면에 가면 OSC 0/2·52 로 창 제목을 바꾸고 클립보드에 쓴다. 이 층이 표시를 모르므로
     /// **여기서 걸러 두고** 호출자에게는 안전한 것만 준다.
@@ -563,9 +714,16 @@ pub const Client = struct {
         }
     }
 
-    fn onChannel(self: *Client, payload: []const u8, w: *Out, s: *Out) Error!void {
+    fn onChannel(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out) Error!void {
         var buf: [1024]u8 = undefined;
-        switch (try self.ch.receive(payload)) {
+        // **채널 메시지가 아니면 `UNIMPLEMENTED` 로 답한다**(§11.4 — MUST). 끊으면 안 된다:
+        // 서버가 우리가 모르는 확장을 하나 보냈다고 세션이 죽으면, 그 서버에는 영영 못 붙는다.
+        const ev = self.ch.receive(payload) catch |e| {
+            if (e != channel.Error.NotChannelMessage) return e;
+            try self.emit(w, &unimplemented(seq));
+            return;
+        };
+        switch (ev) {
             .opened => {
                 if (self.opts.pty) {
                     try self.emit(w, try self.ch.writePtyReq(&buf, self.opts.term, self.opts.size, ""));
@@ -616,6 +774,13 @@ pub const Client = struct {
     fn flushDeferred(self: *Client, w: *Out) Error!void {
         if (!self.t.canSendChannelMessages()) return;
         var buf: [256]u8 = undefined;
+        // 재키잉 때문에 미뤄 둔 전역 요청 답(§7.1). **미뤄 둔 것은 한 자리에서 나간다** —
+        // 내보내는 자리가 둘이면 하나가 조용히 안 도는 상태가 생긴다.
+        while (self.pending_request_failures > 0) {
+            if (w.remaining() < max_reply_packet) break; // 자리가 없으면 다음 `feed` 에서
+            try self.emit(w, &[_]u8{msg_request_failure});
+            self.pending_request_failures -= 1;
+        }
         if (self.deferred_request_failure) {
             self.deferred_request_failure = false;
             try self.emit(w, try self.ch.writeChannelFailure(&buf));
@@ -660,6 +825,7 @@ const msg_unimplemented: u8 = 3;
 const msg_debug: u8 = 4;
 const msg_newkeys: u8 = 21;
 const msg_global_request: u8 = 80;
+const msg_request_failure: u8 = 82;
 
 const testing = std.testing;
 
@@ -1271,4 +1437,356 @@ test "우리 NEWKEYS 와 상대 것 사이에는 아무것도 안 나간다" {
     // 호출자도 못 쓴다 — 셸이 안 떴다.
     try testing.expectError(Error.NotReady, c.write("x", &out));
     try testing.expectError(Error.NotReady, c.eof(&out));
+}
+
+// ---------------------------------------------------------------------------
+// 잡 메시지(S7c). 계약 §3.2 — **끊는 것이 아니라 답한다.**
+
+test "사유 코드는 RFC 4253 §11.1 표 그대로다" {
+    // 숫자를 이름으로 옮기는 자리라 표와 직접 맞댄다. 쓰는 쪽과 읽는 쪽에 같은 상수를 쓰면
+    // 자기충족이라 오타가 안 잡힌다.
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(DisconnectReason.host_not_allowed_to_connect));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(DisconnectReason.protocol_error));
+    try testing.expectEqual(@as(u32, 3), @intFromEnum(DisconnectReason.key_exchange_failed));
+    try testing.expectEqual(@as(u32, 7), @intFromEnum(DisconnectReason.service_not_available));
+    try testing.expectEqual(@as(u32, 9), @intFromEnum(DisconnectReason.host_key_not_verifiable));
+    try testing.expectEqual(@as(u32, 11), @intFromEnum(DisconnectReason.by_application));
+    try testing.expectEqual(@as(u32, 14), @intFromEnum(DisconnectReason.no_more_auth_methods_available));
+    try testing.expectEqual(@as(u32, 15), @intFromEnum(DisconnectReason.illegal_user_name));
+    try testing.expectEqual(@as(u8, 82), msg_request_failure);
+}
+
+test "끊긴 이유를 같은 Step 에서 준다" {
+    // **오류 이름만으로는 사용자가 고칠 것이 없다.** `DISCONNECT` 는 서버가 "왜 못 붙는지" 를
+    // 말해 주는 유일한 통로다 — 그것을 버리면 §3.2 가 요구한 "이유를 보여 준다" 가 불가능해진다.
+    var c = readyClient();
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(@intFromEnum(DisconnectReason.no_more_auth_methods_available));
+    try w.string("No supported authentication methods available");
+    try w.string("en");
+
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(3);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+
+    // 오류를 받은 뒤에도 이유를 읽을 수 있다.
+    try testing.expectEqual(DisconnectReason.no_more_auth_methods_available, c.disconnect_reason);
+    try testing.expectEqualStrings("No supported authentication methods available", c.disconnect_buf[0..c.disconnect_len]);
+}
+
+test "모르는 사유 코드도 설명을 잃지 않는다" {
+    // 사유 코드는 IANA 가 늘린다. 모르는 값 때문에 설명까지 버리면 "왜" 가 사라진다.
+    var c = readyClient();
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(9999);
+    try w.string("서버가 새로 만든 이유");
+    try w.string("");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(5);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+    try testing.expectEqual(@as(u32, 9999), @intFromEnum(c.disconnect_reason));
+    try testing.expectEqualStrings("서버가 새로 만든 이유", c.disconnect_buf[0..c.disconnect_len]);
+}
+
+test "끊긴 이유도 걸러서 준다" {
+    // 서버가 고른 문자열이다 — 배너와 같은 위험이고 같은 거름망을 쓴다(계약 §4.4.2).
+    var c = readyClient();
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_disconnect);
+    try w.u32be(2);
+    try w.string("bad\x1b]0;pwned\x07 thing");
+    try w.string("");
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.Disconnected, c.feed(pbuf[0..n], &out, &scr));
+    const d = c.disconnect_buf[0..c.disconnect_len];
+    try testing.expect(std.mem.indexOfScalar(u8, d, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, d, "thing") != null);
+}
+
+test "모르는 메시지에는 UNIMPLEMENTED 로 답한다" {
+    // §11.4 는 MUST 다: "An implementation MUST respond to all unrecognized messages with an
+    // SSH_MSG_UNIMPLEMENTED message". 끊으면 안 된다 — 서버가 우리가 모르는 확장을 하나
+    // 보냈다고 세션이 죽으면 그 서버에는 영영 못 붙는다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var pbuf: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(11);
+    // **앞에 두 개를 흘려 보낸다** — 시퀀스가 0 이 아니라야 "무엇을 거절했는지" 를 진짜로
+    // 싣는지 잴 수 있다. 0 이면 아무 값이나 실어도 통과한다.
+    var used: usize = 0;
+    used += try packet.write(pbuf[used..], &[_]u8{ msg_ignore, 0, 0, 0, 0 }, prng.random());
+    used += try packet.write(pbuf[used..], &[_]u8{ msg_ignore, 0, 0, 0, 0 }, prng.random());
+    used += try packet.write(pbuf[used..], &[_]u8{ 77, 1, 2, 3 }, prng.random()); // 배정 안 된 번호
+    const step = try c.feed(pbuf[0..used], &out, &scr);
+
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(msg_unimplemented, dec.payload[0]);
+    // **거절한 메시지의 시퀀스 번호를 싣는다**(§11.4). 세 번째로 받았으니 2 다.
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, dec.payload[1..5], .big));
+    try testing.expectEqual(@as(usize, 5), dec.payload.len);
+    try testing.expectEqual(State.ready, step.state); // 세션은 산다
+}
+
+test "전역 요청에 want_reply 면 실패로 답한다" {
+    // RFC 4254 §4 — "The recipient will respond ... if 'want reply' is TRUE". 안 답하면 그렇게
+    // 보내는 서버가 답을 기다린 채 멈춘다. **OpenSSH 10.2 는 `hostkeys-00@openssh.com` 을
+    // `want_reply` 0 으로 보낸다(실측)** — 이 가지를 실서버 스모크로는 못 밟으므로 여기서 잰다.
+    var c = readyClient();
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_global_request);
+    try w.string("hostkeys-00@openssh.com");
+    try w.boolean(true);
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(13);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(msg_request_failure, dec.payload[0]);
+    try testing.expectEqual(@as(usize, 1), dec.payload.len);
+}
+
+test "전역 요청이 want_reply 를 안 켰으면 답하지 않는다" {
+    // 안 물었는데 답하면 상대가 그것을 다른 요청의 답으로 읽는다.
+    var c = readyClient();
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_global_request);
+    try w.string("hostkeys-00@openssh.com");
+    try w.boolean(false);
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(17);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(@as(usize, 0), step.wire.len);
+}
+
+test "IGNORE·DEBUG·UNIMPLEMENTED 는 세션을 안 건드린다" {
+    // §11.2·§11.3 — 뜻이 없다. `UNIMPLEMENTED` 는 우리가 보낸 것에 대한 답이라 할 일이 없다
+    // (우리는 모르는 메시지를 안 보낸다).
+    for ([_]u8{ msg_ignore, msg_debug, msg_unimplemented }) |msg| {
+        var c = readyClient();
+        var out: [8192]u8 = undefined;
+        var scr: [64 * 1024]u8 = undefined;
+        var pbuf: [1024]u8 = undefined;
+        var prng = std.Random.DefaultPrng.init(19);
+        const n = try packet.write(&pbuf, &[_]u8{ msg, 0, 0, 0, 0 }, prng.random());
+        const step = try c.feed(pbuf[0..n], &out, &scr);
+        try testing.expectEqual(@as(usize, 0), step.wire.len);
+        try testing.expectEqual(State.ready, step.state);
+    }
+}
+
+test "재키잉 중에 온 전역 요청은 답을 미룬다" {
+    // **답이 세션을 죽이면 안 답한 것만 못하다.** `REQUEST_FAILURE`(82) 는 재키잉 중에 보낼 수
+    // 없는 번호라(§7.1, 1~49 만 허용) 그대로 보내면 전송기가 `NotAllowedDuringRekey` 로
+    // **우리 쪽을 poison** 한다 — 서버가 끊기 전에 우리가 먼저 죽는다.
+    //
+    // 서버의 `GLOBAL_REQUEST` 는 우리 `KEXINIT` 이 닿기 전에 떠난 것일 수 있으므로 이 겹침은
+    // 규칙 위반이 아니라 정상이다. §7.1 이 말한 대로 **줄 세웠다가 뒤에 보낸다.**
+    var c = readyClient();
+    c.t.phase = .rekeying;
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(msg_global_request);
+    try w.string("hostkeys-00@openssh.com");
+    try w.boolean(true);
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(23);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(@as(usize, 0), step.wire.len); // 지금은 아무것도 안 나간다
+    try testing.expectEqual(@as(?transport.Error, null), c.t.poison); // 살아 있다
+
+    // 재키잉이 끝나면 밀린 답이 나간다.
+    c.t.phase = .established;
+    const after = try c.feed(&[_]u8{}, &out, &scr);
+    const dec = try packet.read(after.wire);
+    try testing.expectEqual(msg_request_failure, dec.payload[0]);
+}
+
+test "모르는 번호는 인증 중에도 세션을 안 죽인다" {
+    // 예전에는 채널 상태에서만 답했다. 그러면 인증 중에 온 확장 하나로 **그 서버에는 영영 못
+    // 붙는다** — 로그에는 `UnexpectedMessage` 만 남아 원인을 짚기도 어렵다.
+    var c = readyClient();
+    c.state = .authenticating;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(29);
+    const n = try packet.write(&pbuf, &[_]u8{ 7, 0, 0, 0, 0 }, prng.random()); // EXT_INFO — 우리는 안 쓴다
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(msg_unimplemented, dec.payload[0]);
+    try testing.expectEqual(State.authenticating, step.state); // 하던 일을 계속한다
+}
+
+test "키 교환 중 모르는 번호는 끊는다" {
+    // strict KEX 는 그 사이의 예상 밖 패킷에 **연결을 끊으라**고 요구한다(draft §3.2).
+    // 여기서 답하고 살아 있으면 그 요구를 어긴다 — 답하는 쪽이 늘 옳은 것이 아니다.
+    var c = readyClient();
+    c.state = .key_exchange;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(31);
+    const n = try packet.write(&pbuf, &[_]u8{ 77, 0, 0, 0, 0 }, prng.random());
+    try testing.expectError(Error.UnexpectedMessage, c.feed(pbuf[0..n], &out, &scr));
+}
+
+test "SERVICE_ACCEPT 는 인증으로 넘어간다" {
+    // **아는 번호를 모르는 번호로 잘못 분류하면 `UNIMPLEMENTED` 만 보내며 영원히 기다린다.**
+    // `recognizedMessage` 가 모든 메시지 앞에 서 있으므로 본 경로 하나는 여기서 직접 잰다
+    // (지금까지 이 전이는 실서버 스모크만 재고 있었고, 그래서 범위를 좁히는 변이가 살아남았다).
+    var prng = std.Random.DefaultPrng.init(41);
+    const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(7));
+    var secret: [userauth.secret_key_len]u8 = undefined;
+    @memcpy(secret[0..32], &@as([32]u8, @splat(7)));
+    @memcpy(secret[32..64], &kp.public_key.toBytes());
+
+    var c = Client.init(.{
+        .user = "u",
+        .secret_key = secret,
+        .size = .{ .cols = 80, .rows = 24 },
+    }, prng.random());
+    c.state = .requesting_service;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+
+    var buf: [64]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(userauth.msg_service_accept);
+    try w.string("ssh-userauth");
+    var pbuf: [1024]u8 = undefined;
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(State.authenticating, step.state);
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(userauth.msg_userauth_request, dec.payload[0]);
+}
+
+test "재키잉 중 전역 요청이 쏟아져도 세는 값이 안 감싸 돈다" {
+    // 답은 요청 순서대로 짝지어지므로 **수가 곧 뜻이다.** 감싸 돌면 255 개를 넘긴 순간 0 이 되어
+    // 밀린 답이 통째로 사라지고, 서버는 답을 기다리다 끊는다. 넘치면 버릴지언정 되감지 않는다.
+    var c = readyClient();
+    c.t.phase = .rekeying;
+    var pbuf: [64 * 1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(43);
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        var buf: [64]u8 = undefined;
+        var w = wire.Writer.init(&buf);
+        try w.byte(msg_global_request);
+        try w.string("hostkeys-00@openssh.com");
+        try w.boolean(true);
+        used += try packet.write(pbuf[used..], w.written(), prng.random());
+    }
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(pbuf[0..used], &out, &scr);
+    try testing.expectEqual(@as(u8, 255), c.pending_request_failures);
+    try testing.expectEqual(@as(?transport.Error, null), c.t.poison);
+
+    // 재키잉이 끝나면 **밀린 답이 하나도 안 빠지고** 나간다. 하나만 나가고 마는 것과 구별하려면
+    // 세어야 한다 — 개수가 곧 짝짓기이므로 모자라면 서버는 계속 기다린다.
+    c.t.phase = .established;
+    var replies: usize = 0;
+    var rounds: usize = 0;
+    while (c.pending_request_failures > 0 and rounds < 40) : (rounds += 1) {
+        const after = try c.feed(&[_]u8{}, &out, &scr);
+        var rest = after.wire;
+        while (rest.len > 0) {
+            const dec = try packet.read(rest);
+            try testing.expectEqual(msg_request_failure, dec.payload[0]);
+            replies += 1;
+            rest = rest[dec.consumed..];
+        }
+    }
+    try testing.expectEqual(@as(u8, 0), c.pending_request_failures);
+    try testing.expectEqual(@as(usize, 255), replies);
+}
+
+test "CHANNEL_FAILURE 는 요청 실패로 올라온다" {
+    // 100 번을 모르는 번호로 분류하면 pty 를 거절당해도 `UNIMPLEMENTED` 만 보내며 영원히
+    // 기다린다 — 사용자에게는 "멈춤" 으로 보인다. 아는 번호는 아는 번호로 다뤄야 한다.
+    var c = readyClient();
+    c.state = .requesting_pty;
+    var buf: [16]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(100); // SSH_MSG_CHANNEL_FAILURE
+    try w.u32be(0); // recipient channel
+    var pbuf: [1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(47);
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.RequestFailed, c.feed(pbuf[0..n], &out, &scr));
+}
+
+test "최소 크기 버퍼로도 밀린 답을 다 비운다" {
+    // 계약이 약속한 최소 버퍼는 `min_wire_out` 하나다. 그 크기에서 답이 한 번에 하나씩만
+    // 나가면 255 개를 비우는 데 `feed` 를 255 번 불러야 하고, 그 사이 서버는 답을 기다린다.
+    var c = readyClient();
+    c.t.phase = .rekeying;
+    var pbuf: [64 * 1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(53);
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < 255) : (i += 1) {
+        var buf: [64]u8 = undefined;
+        var w = wire.Writer.init(&buf);
+        try w.byte(msg_global_request);
+        try w.string("hostkeys-00@openssh.com");
+        try w.boolean(true);
+        used += try packet.write(pbuf[used..], w.written(), prng.random());
+    }
+    // **실제 세션은 암호 프레이밍이다.** 평문으로 재면 답 하나가 16 바이트라 255 개가 4096 에
+    // 다 들어가고, "자리가 없으면 다음에" 가지가 영영 안 돈다.
+    var key: [cipher.key_len]u8 = @splat(1);
+    var cc = cipher.Cipher.initMove(&key);
+    try c.t.enableSendKeys(&cc); // 이 호출이 재키잉을 끝낸 것으로 본다 — 다시 재키잉 중으로 둔다
+    c.t.phase = .rekeying;
+
+    var out: [min_wire_out]u8 = undefined; // **딱 최소 크기**
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(pbuf[0..used], &out, &scr);
+    try testing.expectEqual(@as(u8, 255), c.pending_request_failures);
+
+    // 답 하나가 36 바이트이므로 4096 에는 다 안 들어간다 — 나눠 내보내야 하고, 넘겨 쓰면
+    // `NoSpace` 로 죽는다.
+    try testing.expect(255 * cipher.Cipher.sealedLen(1) > min_wire_out);
+
+    c.t.phase = .established;
+    var rounds: usize = 0;
+    while (c.pending_request_failures > 0 and rounds < 10) : (rounds += 1) {
+        _ = try c.feed(&[_]u8{}, &out, &scr);
+    }
+    try testing.expectEqual(@as(u8, 0), c.pending_request_failures);
+    try testing.expect(rounds > 1); // 한 번에 다 못 내보낸다는 뜻 — 그 가지를 실제로 돌렸다
 }

@@ -500,7 +500,11 @@ pub const inventory = [_]Proof{
     // (`editor_fold_ranges`·`editor_folded_buf`·`_len`·`editor_folded_prev`·`editor_fold_marks`),
     // 접기 액션 다섯이 dispatch에 붙는다(`fold_all`·`unfold_all`·`fold_level_1`~`_3`).
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합을 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "72af21620e557f7c96f73f770bbbc6e89bccd3378a872cd3725b71b32dd8f9e0" },
+    // 파일 트리 아이콘 종류색으로 다시 움직인다: `fileTreeIconColors` 가 붙고(chrome `colorRole` 을 토큰으로
+    // 푸는 comptime 루프) `buildFileTreeDrawList` 호출이 그 배열을 넘긴다. count 는 2 그대로다 — 그 루프의
+    // `@field` 는 `std.meta.fields` 순회이지 이름으로 무엇을 읽는 반사가 아니고, Client 구성·receiver 집합도
+    // 건드리지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ce2a547252451b008b9566edcdf7b1210d887671bee8f85fc98f5f1dad76264b" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

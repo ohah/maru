@@ -88,7 +88,9 @@ pub const inventory = [_]Proof{
     // `fetch_inflight`/`fetch_result`를 더했다. 읽기 쪽에는 `remotes`(`git remote`) 한 줄이 늘었다.
     // count는 2 그대로다 — 더한 것은 슬롯과 명령 하나뿐이고 `@field` 반사 접근이나 Client 구성·
     // receiver 집합은 건드리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "f87641a4886d22c80b7bffc5c42d6caf751806063a3baf1ab18583b87f93a001" },
+    // 기본 브랜치 대비 ahead/behind 읽기(§3.5 교정)로 또 움직인다: `Result`에 `ahead_behind` 한 줄과 그
+    // 선택 명령 하나가 는다. count는 2 그대로다 — 새 `@field` 반사도 Client 구성 변화도 없다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "c0a00970b422f927346aa609ba5dc543cd57d7955ec77515441c81434cd6d114" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.

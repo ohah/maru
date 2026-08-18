@@ -106,7 +106,6 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | 특수 키 | 이유 | 처리 |
 |---|---|---|
 | `theme.preset` | 한 줄이 여러 필드를 채움(확장) | `presetColors()`가 `config.theme`를 통째로 깔고, 뒤 개별 색이 override(순차) — 현행 유지 |
-| `chrome.preset` | 한 줄이 여러 chrome 축을 채움(TS3 — 룩 `chrome.theme` + 탭 `chrome.tab-style`) | `chromePresetValues()` 단일 출처로 두 축을 깔고, 뒤 개별 키가 override(theme.preset과 동형) |
 | `cursor.color` / `cursor.text` | **nullable 색**(스키마 제너릭은 non-null 필드만) | `dupValidColor` 재사용 명시 핸들러 — 유효할 때만 슬롯 갱신(palette와 동형) |
 | `window.padding-x` / `-y` | **alias**(두 필드 동시) | `padding-x`→left+right 같은 값 — 현행 유지(제너릭은 1키=1필드) |
 | `theme.palette.N` | **인덱스 키**(N=0~15) | suffix 파싱 + 색 검증 — 현행 유지. GUI는 16칸 팔레트 에디터(bespoke) |
@@ -146,7 +145,7 @@ comptime 가드는 **코드 안쪽**(필드 ↔ 메타)만 닫는다. 문서와�
 - **판정 SSOT는 로더 자신이다.** 문서에서 뽑은 키로 `<key> = 1` 한 줄을 실제로 `loader.parse`에 태워 unknown-key 진단이
   나오는지 본다. 값 타입이 안 맞아 다른 진단이 나오는 건 "키가 알려졌다"는 증거라 통과다. 사용자가 그 줄을 적었을 때와
   같은 경로를 태우므로 정의상 어긋날 수 없다. (직렬화 dump인 `configKeyValues`를 기준으로 삼으면 **입력 전용 키**
-  — `theme.preset`·`chrome.preset`·`window.padding-x/y`처럼 파싱 시 여러 키로 확장되고 되쓰기에는 안 나오는 키 — 가
+  — `theme.preset`·`window.padding-x/y`처럼 파싱 시 여러 키로 확장되고 되쓰기에는 안 나오는 키 — 가
   전부 오탐이 된다. 실제로 게이트를 처음 붙였을 때 이 4행이 걸려 기준을 바로잡았다.)
 - **두 규칙**: (A) `configuration.md` 키 표의 모든 행은 실재해야 한다(사용자 공개 계약이라 "적혀 있으면 동작한다"가
   성립해야 한다). (B) 다른 설계 문서가 **키 선언 형식**(리스트 항목 + 백틱 키 + 같은 줄 기본값 표기)으로 소개하면

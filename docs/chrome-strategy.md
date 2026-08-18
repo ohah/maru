@@ -4,13 +4,31 @@ chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)�
 
 ### Chrome 전용 전환 정책
 
-새 디자인 시스템과 새 제품 chrome surface는 **rich/Metal Chrome만** 대상으로 한다. 기존
-cell-grid TUI chrome은 제거 전까지 이미 저장된 config를 읽고 회귀 fixture를 유지하기 위한
-호환 경로일 뿐, 새 component·layout·interaction에 TUI fallback을 추가하지 않는다. 설정 UI는
-`chrome.theme = tui`와 `chrome.preset = cell`을 새로 선택·변경하는 진입점을 제공하지 않으며, 기존 config에
-그 값이 있더라도 이 전환 단계에서는 자동 변경·삭제하지 않는다. TUI enum/parser·lowering과
-그 fixture의 실제 제거는 호환 기간·설정 migration·기존 config 처리 정책을 별도 문서로 확정한
-뒤 수행한다.
+새 디자인 시스템과 새 제품 chrome surface는 **rich/Metal Chrome만** 대상으로 한다. cell-grid TUI
+룩(`chrome.theme = tui`)은 **제거됐다**(2026-08-19) — 이 문서가 오래 예고하던 그 전환이다.
+
+**제거 방식과 기존 config 처리.** config 키 `chrome.theme`을 통째로 없앴다(값이 `rich` 하나만 남으면
+선택지가 없는 키다). **`chrome.preset`도 함께 없앴다** — 그 키의 존재 이유는 "룩 + 탭 두 축을 한 번에
+고르는 큐레이션"이었는데 룩 축이 사라져 `chrome.tab-style`과 1:1이 됐기 때문이다. 축이 하나면 같은 것을
+두 이름으로 설정하는 셈이고, 설정 UI에도 노출되지 않아 발견 경로가 파일 직접 편집뿐이었다. 앞으로 다른
+chrome 축(밀도·모서리 등)이 생겨 다시 묶을 값이 있으면 enum + switch 하나로 되살린다.
+
+**기존 파일은 고치지 않는다** — loader가 forgiving이라 남아 있는 `chrome.theme`/`chrome.preset` 줄은
+"알 수 없는 key — 무시" diagnostic만 내고 나머지 줄은 그대로 적용된다(그 동작은 `loader.zig`의
+"제거된 chrome.theme 줄이 있는 옛 config도 나머지 키를 잃지 않는다" 테스트가 고정한다). migration
+스크립트도 파일 자동 수정도 없다.
+
+> **하나는 화면이 바뀐다.** `chrome.theme = tui`는 렌더가 이미 rich였으므로 제거해도 무변화다. 반면
+> `chrome.preset = capsule`(또는 `cutout`)을 쓰던 파일은 그 줄이 무시되면서 탭 스타일이 기본
+> `underline`으로 돌아간다 — `chrome.tab-style = pill`처럼 개별 축으로 한 줄 바꾸면 복구된다.
+
+**아직 남은 것 하나.** 렌더 경로의 셀 밴드 갈래(`sidebar.zig`의 `has_radius == false`)는 코드에 그대로
+있다. 그 분기는 `chrome.theme`이 아니라 **quad의 corner radius**로 갈리므로 config 축 제거와 독립이다.
+
+**실측(2026-08-19)**: 그 갈래 안에 런타임 프로브를 넣고 `test-macos-app-host-abi` 전 범위(3,600여 개)를
+돌리니 **도달 0회**였다 — `Tokens.rich`가 `corner_radius_px = 8`을 깔기 때문이다. 제거 후보이지만
+**테스트가 닿지 않는 상태**(특정 드롭 타깃·그룹 헤더 조합에서 radius 0인 quad가 나올 여지)가 남아 있어,
+제거는 그 경우를 먼저 훑은 뒤 별도 작업으로 한다. 여기서 지우지 않은 이유가 그것이다.
 
 새 Metal UI의 component tree·typed flex layout·paint/Metal 경계는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이 단일 출처다. 이 문서는 그 시스템이 소비하는 chrome token·semantic draw·host 구조를 소유한다.
 
@@ -276,13 +294,17 @@ U-tab2의 **connected**(본문색 cutout + 테마 accent 언더바)를 시작점
 
 ### 7.1 왜 직교 축인가 (메가 enum 금지)
 
-maru에는 이미 **두 직교 축**이 있다 — `theme.preset`(색 세트)과 `chrome.theme`(룩 tui\|rich, 코드 주석이 "직교"라 명시). 탭 스타일은 **세 번째 직교 축**으로 붙는다:
+maru에는 색 축(`theme.preset`)이 이미 있었고, 여기에 룩 축(`chrome.theme` = tui|rich)이 나란히 있었다.
+탭 스타일은 그 위에 **또 하나의 직교 축**으로 붙는다:
 
 ```
 theme.preset      = maru | gruvbox-dark | ...        (색)        — 있음
-chrome.theme      = tui | rich                       (룩)        — parser/read 호환만, 설정 UI 비노출
-chrome.tab-style  = connected | pill | underline     (탭)        — 신규 축
+chrome.tab-style  = connected | pill | underline     (탭)        — 이 절의 축
+                                                     (룩)        — 옛 chrome.theme. tui 제거로 축 자체가 사라졌다(§전환 정책)
 ```
+
+**축이 하나 사라져도 이 절의 논지는 그대로다.** 요점은 "룩·색·탭을 한 메가 enum에 섞지 말자"이지 축의 개수가
+아니다 — 축이 줄면 남은 축의 값이 늘 뿐, 서로의 조합을 열거하는 enum으로 되돌아가지 않는다.
 
 `theme = rich-pill-gruvbox` 같은 **단일 메가 enum은 금지**(색 × 룩 × 탭 = 조합 폭발). 각 축은 독립 토큰/키로 두고, 더 가면 여러 축을 한 번에 까는 `chrome.preset`(레이아웃 프리셋, `theme.preset`이 색에 쓰는 preset→토큰 패턴 동형)으로 큐레이션한다.
 
@@ -312,7 +334,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 
 ### 7.4 config & 세팅 GUI (거의 공짜)
 
-`chrome.tab-style`은 `chrome.theme`와 같은 **최상위 스칼라 enum**으로 `Config.schema` + `Meta{ .key="chrome.tab-style", .widget=.dropdown, .section=.theme }`(CS-2b 패턴)에 등록한다. 다만 schema 등록은 parser/serialize와 문서 정합의 단일 출처일 뿐 항상 GUI 노출을 뜻하지 않는다. 전환 정책상 `settingsExposesConfigKey`가 `chrome.theme`과 `chrome.preset`을 모두 걸러 TUI 재진입을 막고, `chrome.tab-style`만 rich/Metal 선택지로 세팅 화면에 보인다. `configuration.md` 키 표에는 호환 키까지 행을 유지해야 한다(**CS-3 doc-drift 가드**). **ABI 무변경**(스타일은 Zig 렌더가 소유 — Swift로 나가는 필드 없음).
+`chrome.tab-style`은 (제거된 `chrome.theme`가 그랬듯) **최상위 스칼라 enum**으로 `Config.schema` + `Meta{ .key="chrome.tab-style", .widget=.dropdown, .section=.theme }`(CS-2b 패턴)에 등록한다. 다만 schema 등록은 parser/serialize와 문서 정합의 단일 출처일 뿐 항상 GUI 노출을 뜻하지 않는다. 전환 정책상 `settingsExposesConfigKey`가 `chrome.theme`과 `chrome.preset`을 모두 걸러 TUI 재진입을 막고, `chrome.tab-style`만 rich/Metal 선택지로 세팅 화면에 보인다. `configuration.md` 키 표에는 호환 키까지 행을 유지해야 한다(**CS-3 doc-drift 가드**). **ABI 무변경**(스타일은 Zig 렌더가 소유 — Swift로 나가는 필드 없음).
 
 ### 7.5 큐레이션·검증
 
@@ -323,7 +345,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 
 - **TS1 ✅** — 토큰(`tab_active_style`) + config(`chrome.tab-style`) + `connected`·`underline` 분기 + 헤드리스 테스트 + `configuration.md` 행.
 - **TS2 ✅** — `pill`(실제 Warp 벤치마킹 — lifted 회색 fill로 채운 둥근 캡슐 + 옅은 밝은 테두리, `tab_pill_inset_px` 토큰; 포커스=fill 밝기). 세 스타일 다 동작.
-- **TS3 ✅(호환 메커니즘)** — `chrome.preset`(여러 축 묶음 레이아웃 프리셋) parser/read 지원: `ChromePreset` enum(`minimal`=rich+underline / `cutout`=rich+connected / `capsule`=rich+pill / `cell`=tui) + `chromePresetValues()` 단일 출처 + loader-special 키(`theme.preset` 동형 — 두 축을 깔고 개별 `chrome.theme`/`chrome.tab-style`가 뒤에서 override) + `configuration.md` 행 + 헤드리스 테스트. 이 중 `cell`은 저장된 설정 호환용이다. 전환 정책 때문에 `chrome.preset` synthetic 드롭다운·write-back은 만들지 않으며, `chrome.theme`도 GUI에 노출하지 않는다. rich/Metal에서 유효한 `chrome.tab-style`만 GUI 드롭다운으로 선택한다.
+- **TS3 ~~호환 메커니즘~~ — 되돌렸다(2026-08-19).** `chrome.preset`(여러 축 묶음 레이아웃 프리셋)은 `ChromePreset` enum + `chromePresetValues()` + loader-special 키로 구현했다가 **tui 제거와 함께 없앴다**. 묶을 축이 룩·탭 둘이어서 큐레이션이 의미가 있었는데, 룩 축이 사라지자 `chrome.tab-style`과 1:1이 됐기 때문이다(같은 것을 두 이름으로 설정하는 셈이고, GUI에 노출도 안 됐다). **다시 필요해지면 enum + switch 하나로 복원된다** — 그때는 묶을 축이 둘 이상인지부터 확인한다. GUI 드롭다운은 그때도 지금도 `chrome.tab-style` 하나다.
 
 ## 8. 테스트 전략 (관측 가능성 우선)
 

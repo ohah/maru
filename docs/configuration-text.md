@@ -73,7 +73,7 @@
 >   프로그램)은 렌더 per-cell 하한이 밝히는 방향으로 교정한다 — 단 번들 테마 팔레트·powerline·faint를 건드리지 않도록
 >   **좁게** 적용한다(조건은 위 키 표).
 >
-> 색 룩만 정하며, chrome **디자인 룩**(`chrome.theme` = tui|rich)과는 직교다.
+> 색 룩만 정한다. chrome 쪽 축(`chrome.tab-style`)과는 직교다.
 
 ### Ambiguous 문자 폭 (`text.ambiguous-width`)
 

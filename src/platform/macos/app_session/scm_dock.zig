@@ -2423,7 +2423,7 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
     const text_bytes = try allocator.alloc(u8, budget.text_bytes);
     defer allocator.free(text_bytes);
 
-    const tokens = chrome.tokens.Tokens.tui(.{
+    const tokens = chrome.tokens.Tokens.base(.{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 },
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .foreground = .{ .r = 200, .g = 200, .b = 200 },

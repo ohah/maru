@@ -43,7 +43,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 |---|---|---|
 | **App** | `ui.*` | language(`auto`\|`en`\|`ko`, 기본 `auto`=OS 로케일). **네비 최상단이다** — 읽을 수 없는 언어로 뜬 화면에서는 다른 섹션을 고르는 것부터 어렵기 때문이다. `Section` enum 선언 순서가 곧 네비 순서라(`buildSectionList`가 선언 순으로 모은다) `app`을 첫 변형으로 두어 그 순서를 만든다. 단일 출처: [다국어](i18n.md) |
 | **Appearance › Font** | `font.*` | family, size, line-height, letter-spacing, (신규) family-bold/italic, fallback |
-| **Appearance › Theme** | `theme.*`, `chrome.theme` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, bold-is-bright, follow-system (search_match\*/sidebar_\*는 config 키가 없어 preset에서 파생 — 직접 편집/노출 안 함, theme.zig 상단 주석) |
+| **Appearance › Theme** | `theme.*` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, bold-is-bright, follow-system (search_match\*/sidebar_\*는 config 키가 없어 preset에서 파생 — 직접 편집/노출 안 함, theme.zig 상단 주석) |
 | **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, blink-fade, unfocused |
 | **Appearance › Window** | `window.*` | padding, (신규) opacity, blur, background-image, unfocused-dim |
 | **Input › Keys** | `input.*` | page-keys, shift-enter, ime-enter, (신규) option-as-meta |

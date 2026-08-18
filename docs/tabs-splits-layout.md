@@ -235,7 +235,7 @@ Node = leaf(Pane)
     = connected|underline|pill` 직교 축으로 활성 탭 룩을 고른다 — `underline`=언더바만(배경 박스 없음), `pill`=strip보다 밝은
     lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(실제 Warp 벤치마킹 — 밝은 fill로 띄움, 포커스=fill 밝기). 스타일은
     `appendActiveTabHighlight`의 **세그먼트 안 fill만** 바꾸고 탭
-    세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕/‹›는 그대로다. `chrome.theme`(tui\|rich)·`theme.preset`(색)과
+    세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕/‹›는 그대로다. `theme.preset`(색)과
     직교. 단일 출처: [chrome-strategy.md §7](chrome-strategy.md).
 - **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를
   `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭

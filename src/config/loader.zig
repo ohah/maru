@@ -253,18 +253,6 @@ fn applyKey(
         };
         config.theme = theme.presetColors(preset);
         // theme.background/foreground/cursor/selection은 스키마-주도로 이주(CS-1/CS-2). palette.N만 특수(인덱스).
-    } else if (std.mem.eql(u8, key, "chrome.preset")) {
-        // chrome 레이아웃 프리셋(TS3) — 여러 chrome 축(룩 chrome.theme + 탭 chrome.tab-style)을 한 번에 깐다
-        // (chromePresetValues 단일 출처). 개별 chrome.theme/chrome.tab-style 키가 이 줄 *뒤에* 오면 그 축만 override한다
-        // (loader 순차 — schema.tryParse가 그 두 키를 처리). 알 수 없는 값은 forgiving(diagnostic + 무시). theme.preset과 동형.
-        const cp = theme.parseChromePreset(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "chrome.preset은 " ++ theme.chrome_preset_names_joined ++ " — 무시" });
-            return;
-        };
-        const v = theme.chromePresetValues(cp);
-        config.chrome_theme = v.chrome_theme;
-        // tab_style은 프리셋이 제어할 때만 깐다(null=무관, 예: cell/tui) — 기존 chrome.tab-style을 임의값으로 안 덮음(code-review high).
-        if (v.chrome_tab_style) |ts| config.chrome_tab_style = ts;
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -283,7 +271,7 @@ fn applyKey(
         // 기존(보통 null) 값을 유지한다(forgiving). 유효하면 dupe된 색으로 갱신.
         const validated = try dupValidColor(a, diags, line_no, key, value, "");
         if (validated.len != 0) config.theme.palette[idx] = validated;
-        // cursor.*·input.*·quick-terminal.*(CS-1/CS-2)와 chrome.theme·text.*·theme.bold-is-bright·window.padding-{4방}·
+        // cursor.*·input.*·quick-terminal.*(CS-1/CS-2)와 text.*·theme.bold-is-bright·window.padding-{4방}·
         // term(최상위 스칼라, CS-2b)은 스키마-주도로 이주 — 위 schema.tryParse가 처리. padding-x/y(alias)만 여기 남는다.
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
         // x는 left+right 동시 alias(대칭 좌우 여백). 한 번 파싱해 두 필드에 같은 값. 명시 left/right와 혼용 시
@@ -345,7 +333,7 @@ fn applyKey(
 
 // enum/bool 파싱 헬퍼(parseCursorShape·parsePageKeys·parseShiftEnter·parseImeEnter·parseQuickTerminal*·
 // parseAmbiguousWidth·parseBool)는 스키마-주도 이주(CS-1/CS-2/CS-2b)로 schema의 타입 분기 파싱이 대신한다 — 전부 제거.
-// loader 명시 핸들러에 남은 파싱은 parseThemePreset(theme.preset)·parseChromePreset(chrome.preset)·parseUintMax(padding alias)·dupValidColor(palette)뿐.
+// loader 명시 핸들러에 남은 파싱은 parseThemePreset(theme.preset)·parseUintMax(padding alias)·dupValidColor(palette)뿐.
 
 /// `keybind = <chord> = <rhs>` 한 줄을 처리한다. chord에 `global:` 접두사가 있으면 전역(OS) 단축키이고
 /// rhs는 GlobalAction(toggle_window/show_window)이다(별도 네임스페이스 — 자기들끼리만 dedup). 접두사가
@@ -1031,38 +1019,21 @@ pub fn loadDefault(io: std.Io, allocator: std.mem.Allocator) LoadError!Parsed {
     return loadFile(io, allocator, path);
 }
 
-test "chrome.preset 묶음(TS3): 두 축을 깔고 개별 키가 뒤에서 override (theme.preset 동형)" {
-    // capsule = rich + pill. 그 *뒤* chrome.tab-style = underline → tab_style만 override(룩 rich 유지).
+// 제거된 키가 남아 있는 **옛 config 파일**을 그대로 읽을 수 있어야 한다. chrome-strategy.md가
+// "기존 파일은 고치지 않는다 — forgiving 로더가 무시한다"고 약속하는데, 그 약속은 산문이 아니라
+// 여기서 고정한다. tui 룩 제거(2026-08-19)로 `chrome.theme`이 사라졌고, 사용자 파일에는 남아 있다.
+test "제거된 chrome.theme 줄이 있는 옛 config도 나머지 키를 잃지 않는다" {
     var p = try parse(std.testing.allocator,
-        \\chrome.preset = capsule
-        \\chrome.tab-style = underline
+        \\chrome.theme = tui
+        \\chrome.tab-style = pill
+        \\font.size = 15
     );
     defer p.deinit();
-    try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // 프리셋이 깐 룩
-    try std.testing.expectEqual(theme.ChromeTabStyle.underline, p.config.chrome_tab_style); // 개별 키가 override(나중 줄 우선)
-
-    // 프리셋만 → 두 축 다 프리셋 값.
-    var p2 = try parse(std.testing.allocator, "chrome.preset = capsule");
-    defer p2.deinit();
-    try std.testing.expectEqual(theme.ChromeTheme.rich, p2.config.chrome_theme);
-    try std.testing.expectEqual(theme.ChromeTabStyle.pill, p2.config.chrome_tab_style);
-
-    // cell 프리셋 → tui 룩이되, tab_style 축은 **안 건드린다**(tui라 무관 — 앞서 둔 pill을 보존, code-review high).
-    var p3 = try parse(std.testing.allocator,
-        \\chrome.tab-style = pill
-        \\chrome.preset = cell
-    );
-    defer p3.deinit();
-    try std.testing.expectEqual(theme.ChromeTheme.tui, p3.config.chrome_theme);
-    try std.testing.expectEqual(theme.ChromeTabStyle.pill, p3.config.chrome_tab_style); // cell이 underline로 안 덮음(보존)
-
-    // 알 수 없는 값 → forgiving(기본값 유지 + diagnostic).
-    var p4 = try parse(std.testing.allocator, "chrome.preset = bogus");
-    defer p4.deinit();
-    const d = theme.Config{};
-    try std.testing.expectEqual(d.chrome_theme, p4.config.chrome_theme);
-    try std.testing.expectEqual(d.chrome_tab_style, p4.config.chrome_tab_style);
-    try std.testing.expect(p4.diagnostics.len >= 1); // 미지값 안내
+    // 없어진 키는 무시되고 **뒤 줄이 계속 적용된다** — 파싱이 그 줄에서 멈추면 사용자가 나머지 설정을 잃는다.
+    try std.testing.expectEqual(theme.ChromeTabStyle.pill, p.config.chrome_tab_style);
+    try std.testing.expectEqual(@as(f32, 15), p.config.font.size);
+    // 조용히 삼키지 않는다 — 무엇이 무시됐는지 진단으로 알린다.
+    try std.testing.expect(p.diagnostics.len >= 1);
 }
 
 test "parse: full config sets every field" {
@@ -1078,7 +1049,6 @@ test "parse: full config sets every field" {
         \\cursor.blink = false
         \\cursor.color = #ff5555
         \\cursor.text = #101010
-        \\chrome.theme = rich
         \\sidebar.show-branch = false
         \\editor.wrap = true
         \\sidebar.show-folder = false
@@ -1106,7 +1076,6 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.cursor.blink);
     try std.testing.expectEqualStrings("#ff5555", p.config.cursor.color.?);
     try std.testing.expectEqualStrings("#101010", p.config.cursor.text.?);
-    try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(false, p.config.sidebar.show_branch); // sidebar.show-branch 파싱(기본 true)
     // 편집기 랩. **기본이 `false`라** 이 테스트는 켜는 쪽을 확인한다 — 기본값과 같은 값을 넣으면
     // 파싱이 통째로 안 돌아도 통과한다. 기본값을 `true`→`false`로 되돌렸을 때(2026-08-16) 이 테스트가
@@ -2008,7 +1977,6 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
         \\cursor.color = nope
         \\theme.background = not-a-color
         \\nonsense.key = 1
-        \\chrome.theme = neon
         \\missing equals
     );
     defer p.deinit();
@@ -2018,9 +1986,8 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
     try std.testing.expectEqual(defaults.cursor.blink, p.config.cursor.blink);
     try std.testing.expectEqual(defaults.cursor.color, p.config.cursor.color); // 틀린 색은 null 유지(미지정)
     try std.testing.expectEqualStrings(defaults.theme.background, p.config.theme.background);
-    try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → 기본값(rich) 폴백(C4a)
-    // 8개 문제 줄 각각 diagnostic(cursor.color=nope·chrome.theme=neon·누락 '=' 포함).
-    try std.testing.expectEqual(@as(usize, 8), p.diagnostics.len);
+    // 7개 문제 줄 각각 diagnostic(cursor.color=nope·누락 '=' 포함).
+    try std.testing.expectEqual(@as(usize, 7), p.diagnostics.len);
 }
 
 test "parse: theme.palette.N parses ANSI 16 overrides; out-of-range/bad index/color are forgiving" {
@@ -2277,12 +2244,10 @@ test "parse: resolved appearance never fails on parsed config (values pre-valida
     var p = try parse(std.testing.allocator,
         \\font.size = 999
         \\theme.cursor = #zzzzzz
-        \\chrome.theme = rich
     );
     defer p.deinit();
     // 잘못된 값은 default로 걸러졌으므로 resolve가 성공해야 한다.
-    const ra = try appearance.resolve(p.config);
-    try std.testing.expectEqual(theme.ChromeTheme.rich, ra.chrome_theme); // config→ResolvedAppearance 전파(C4a)
+    _ = try appearance.resolve(p.config);
 }
 
 test "loadFile: missing path yields default config, not an error" {

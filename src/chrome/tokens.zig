@@ -293,19 +293,22 @@ pub const ThemeColors = struct {
     diff_removed: Rgb,
 };
 
-/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
+/// 한 테마 = 토큰 묶음. `Tokens.base(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
 /// `Tokens.rich(...)`는 C4. 컴포넌트는 이 값만 소비한다.
 pub const Tokens = struct {
     palette: std.EnumArray(ColorRole, Rgb),
     space: Spacing = .{},
     border: Border = .{},
 
-    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 15개 ColorRole을 채운다 — **역할→색 매핑의 단일
+    /// 기반 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 15개 ColorRole을 채운다 — **역할→색 매핑의 단일
     /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider는 sidebar_background의 명암
     /// 반대 방향으로 파생해 light/dark 모두에서 panel과 다른 RGB를 보장한다. rich도 divider의 출처를 바꾸지 않는다.
-    /// muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 15역할을
+    /// muted_fg는 sidebar_foreground. initFill 기본값은 15역할을
     /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
-    pub fn tui(theme: ThemeColors) Tokens {
+    ///
+    /// **이름이 `tui`였다**(옛 chrome 룩 축). 그 룩을 제거하면서 개명했다 — 지금 이 함수는 룩이 아니라
+    /// `rich`가 그 위에 파생색을 얹는 **공통 바닥**이다(`rich`의 첫 줄이 `var tk = base(theme);`).
+    pub fn base(theme: ThemeColors) Tokens {
         var palette = std.EnumArray(ColorRole, Rgb).initFill(theme.foreground);
         palette.set(.surface_bg, theme.sidebar_background);
         palette.set(.surface_fg, theme.sidebar_foreground);
@@ -367,7 +370,7 @@ pub const Tokens = struct {
     /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리(C4b)는 space.corner_radius_px/border_width_px로 분리(tui=0 → 직각·셀 fill).
     /// 그라데이션·shadow는 후속. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
     pub fn rich(theme: ThemeColors) Tokens {
-        var tk = tui(theme);
+        var tk = base(theme);
         tk.palette.set(.focus_accent, lightenRgb(theme.sidebar_active, 40));
         tk.palette.set(.drop_zone, lightenRgb(theme.sidebar_active, 16));
         tk.palette.set(.tab_hover_bg, darkenRgb(theme.sidebar_active, 12));
@@ -425,7 +428,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
             return .{ .r = r, .g = g, .b = b };
         }
     };
-    const tk = Tokens.tui(.{
+    const tk = Tokens.base(.{
         .foreground = c.rgb(1, 1, 1),
         .sidebar_background = c.rgb(2, 2, 2),
         .sidebar_foreground = c.rgb(3, 3, 3),
@@ -459,12 +462,12 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
         }
     };
     // 어두운 패널 → keycap이 더 밝게(대비).
-    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(20, 20, 20))), Tokens.rich(c.theme(c.rgb(20, 20, 20))) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(c.theme(c.rgb(20, 20, 20))), Tokens.rich(c.theme(c.rgb(20, 20, 20))) }) |tk| {
         try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg))); // 패널과 안 같음(안 사라짐)
         try std.testing.expect(tk.get(.keycap_bg).r > tk.get(.surface_bg).r); // 어두운 패널 → 더 밝게
     }
     // 밝은(near-white) 패널 → keycap이 더 어둡게(단순 lighten이면 near-white로 saturate돼 묻혔다 — 리뷰 #1).
-    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(238, 232, 213))), Tokens.rich(c.theme(c.rgb(238, 232, 213))) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(c.theme(c.rgb(238, 232, 213))), Tokens.rich(c.theme(c.rgb(238, 232, 213))) }) |tk| {
         try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg)));
         try std.testing.expect(tk.get(.keycap_bg).r < tk.get(.surface_bg).r); // 밝은 패널 → 더 어둡게
     }
@@ -479,10 +482,10 @@ test "inset_bg는 dark/light 테마에서 surface와 반대 방향으로 분리�
             return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9), .diff_added = rgb(64, 160, 64), .diff_removed = rgb(176, 64, 64) };
         }
     };
-    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(40, 40, 40))), Tokens.rich(c.theme(c.rgb(40, 40, 40))) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(c.theme(c.rgb(40, 40, 40))), Tokens.rich(c.theme(c.rgb(40, 40, 40))) }) |tk| {
         try std.testing.expect(tk.get(.inset_bg).r < tk.get(.surface_bg).r);
     }
-    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(220, 220, 220))), Tokens.rich(c.theme(c.rgb(220, 220, 220))) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(c.theme(c.rgb(220, 220, 220))), Tokens.rich(c.theme(c.rgb(220, 220, 220))) }) |tk| {
         try std.testing.expect(tk.get(.inset_bg).r > tk.get(.surface_bg).r);
     }
 }
@@ -507,7 +510,7 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
         .diff_removed = c.rgb(176, 64, 64),
         .accent = c.rgb(9, 9, 9),
     };
-    const t = Tokens.tui(theme);
+    const t = Tokens.base(theme);
     const r = Tokens.rich(theme);
     // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = panel 대비 파생. rich: interactive role만 분리 파생.
     try std.testing.expectEqual(c.rgb(44, 44, 44), t.get(.divider)); // sidebar_background(20) 대비 파생 = 44
@@ -548,7 +551,7 @@ test "divider is always distinct from the panel in tui and rich, including the p
         }
     };
     inline for ([_]ThemeColors{ c.theme(40, 64), c.theme(240, 180), c.theme(0, 255), c.theme(255, 0) }) |theme| {
-        const tui = Tokens.tui(theme);
+        const tui = Tokens.base(theme);
         const rich = Tokens.rich(theme);
         try std.testing.expect(!std.meta.eql(tui.get(.divider), tui.get(.surface_bg)));
         try std.testing.expect(!std.meta.eql(rich.get(.divider), rich.get(.surface_bg)));
@@ -571,7 +574,7 @@ test "divider keeps the documented 24-channel separation away from gamut endpoin
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
-    inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(theme), Tokens.rich(theme) }) |tk| {
         try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).r);
         try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).g);
         try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).b);
@@ -593,7 +596,7 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
-    const t = Tokens.tui(theme);
+    const t = Tokens.base(theme);
     const r = Tokens.rich(theme);
     // tui: 모양 토큰 0(직각·테두리 없음 → lowering이 셀 fill 유지). rich: >0(둥근·테두리 → GPU quad).
     try std.testing.expectEqual(@as(u16, 0), t.space.corner_radius_px);
@@ -669,7 +672,7 @@ test "git 상태 역할: 셋이 서로 다르고, 고친 것은 테마 accent를
         .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
         .accent = .{ .r = 221, .g = 161, .b = 94 },
     };
-    const tk = Tokens.tui(theme);
+    const tk = Tokens.base(theme);
     const modified = tk.get(.git_modified_fg);
     const added = tk.get(.git_added_fg);
     const deleted = tk.get(.git_deleted_fg);
@@ -705,7 +708,7 @@ test "비교 밴드 색은 자기 역할에만 산다 — 다른 역할을 덮�
         .diff_added = c.rgb(1, 250, 2), // 팔레트 어디에도 없는 값
         .diff_removed = c.rgb(250, 1, 2),
     };
-    inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
+    inline for ([_]Tokens{ Tokens.base(theme), Tokens.rich(theme) }) |tk| {
         try std.testing.expectEqual(theme.diff_added, tk.get(.diff_added_bg));
         try std.testing.expectEqual(theme.diff_removed, tk.get(.diff_removed_bg));
         inline for (@typeInfo(ColorRole).@"enum".fields) |f| {

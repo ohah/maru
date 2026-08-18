@@ -67,7 +67,7 @@ const inventory = [_]Entry{
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
     .{ .path = "src/chrome/components/settings.zig", .count = 8 },
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
-    .{ .path = "src/config/loader.zig", .count = 27 },
+    .{ .path = "src/config/loader.zig", .count = 25 },
     .{ .path = "src/config/schema.zig", .count = 28 },
     .{ .path = "src/platform/macos/agent_session_archive_backend.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },

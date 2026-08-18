@@ -3518,3 +3518,78 @@ test "격자 크기는 코어가 답한다" {
     _ = bridge.maru_mobile_build(800, 500, now());
     try std.testing.expect(bridge.maru_mobile_term_cols() != cols or bridge.maru_mobile_term_rows() != rows);
 }
+
+// ── 입력 목적지(S9-3) ───────────────────────────────────────────────────────
+
+test "기본은 로컬 코어다" {
+    // 원격이 없을 때는 지금까지 하던 대로다 — 이 값이 뒤집히면 로컬 데모가 통째로 죽는다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_input_sink(0);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_sink());
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_input("x", 1);
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_input(&out, out.len));
+}
+
+test "원격이면 입력이 코어로 안 가고 host 가 가져간다" {
+    // **코어에 쓰면 화면에 한 번 찍히고 원격에는 영영 안 간다**(실측: `whoami` 를 쳐도 아무
+    // 일도 안 났다). 목적지를 바꾸면 같은 바이트가 host 쪽으로 나와야 한다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    _ = bridge.maru_mobile_input("ls -al", 6);
+    var out: [64]u8 = undefined;
+    const n = bridge.maru_mobile_take_input(&out, out.len);
+    try std.testing.expectEqualStrings("ls -al", out[0..n]);
+    // **가져가면 사라진다.**
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_input(&out, out.len));
+}
+
+test "특수키도 같은 통로로 나간다" {
+    // 글자만 원격에 가고 Enter 는 로컬로 가면, 명령이 영영 실행되지 않는다 — 경로마다 목적지를
+    // 따로 정하면 언젠가 한 곳을 빠뜨린다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_take_input(&out, out.len);
+
+    _ = bridge.maru_mobile_input("ls\n", 3); // 개행은 Enter 키로 인코딩된다
+    const n = bridge.maru_mobile_take_input(&out, out.len);
+    try std.testing.expect(n >= 3);
+    try std.testing.expectEqualStrings("ls", out[0..2]);
+    try std.testing.expectEqual(@as(u8, '\r'), out[2]); // 터미널의 Enter 는 CR 이다
+}
+
+test "자리가 모자라면 입력을 자르지 않는다" {
+    // 반만 보내면 원격에서 엉뚱한 명령이 실행된다 — 자르느니 안 보낸다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_take_input(&out, out.len);
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_input("abcdefgh", 8);
+    var tiny: [3]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_input(&tiny, tiny.len));
+    try std.testing.expectEqualStrings("input_too_large", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    // 안 지웠으므로 넉넉한 자리로는 그대로 나온다.
+    const n = bridge.maru_mobile_take_input(&out, out.len);
+    try std.testing.expectEqualStrings("abcdefgh", out[0..n]);
+}
+
+test "목적지를 바꾸면 밀린 입력은 버린다" {
+    // 로컬에서 친 글자가 원격으로 뒤늦게 흘러가면 **사용자가 안 친 명령이 실행된다.**
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_input_sink(1);
+    _ = bridge.maru_mobile_input("rm -rf x", 8);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_input(&out, out.len));
+}

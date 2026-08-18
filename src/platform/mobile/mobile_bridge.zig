@@ -569,10 +569,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 다른 바이트**가 된다.
     var rest = ptr[0..len];
     while (std.mem.indexOfAny(u8, rest, "\r\n")) |i| {
-        if (i > 0) core.write(rest[0..i]) catch {
-            setLastError("core_write_input");
-            return @intCast(delivered_len);
-        };
+        if (i > 0) sendInput(core, rest[0..i]);
         delivered_len += i;
         // CRLF 는 Enter 한 번이다.
         var skip: usize = 1;
@@ -581,10 +578,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
         rest = rest[i + skip ..];
     }
     if (rest.len > 0) {
-        core.write(rest) catch {
-            setLastError("core_write_input");
-            return @intCast(delivered_len);
-        };
+        sendInput(core, rest);
         delivered_len += rest.len;
     }
     drainUnconsumed(core);
@@ -621,16 +615,69 @@ fn keyFromId(key_id: u32, codepoint: u32) ?terminal.input.Key {
 
 /// 키 하나를 인코딩해 코어에 쓴다. **키 경로와 개행 경로가 같은 자리를 쓴다** — 안 그러면
 /// 같은 Enter 가 입력 수단에 따라 다른 바이트가 된다.
+/// 확정된 입력이 **어디로 가나**. 0=로컬 코어(기본), 1=host 가 가져간다(원격 세션).
+///
+/// **원격에 붙으면 입력은 코어로 가면 안 된다.** 코어에 쓰는 것은 *출력*을 그리는 일이라,
+/// 원격 세션에서 그렇게 하면 사용자가 친 글자가 화면에 한 번 찍히고 **원격에는 영영 안 간다**
+/// (실측: `whoami` 를 쳐도 아무 일도 안 났다). 인코딩은 여기 한 곳이어야 하므로(§3 — 의미는
+/// 코어가 정한다) 목적지만 가른다.
+var input_sink: u32 = 0;
+/// 원격으로 나갈 바이트. **가져가면 사라진다.** 셸이 뜨기 전에 친 글자도 여기 모였다가 함께
+/// 나간다(type-ahead) — 실제 터미널이 그렇게 군다.
+var input_out: [4096]u8 = undefined;
+var input_out_len: usize = 0;
+
+/// 확정된 입력 한 조각. **모든 입력 경로가 여기를 지난다** — 조각마다 목적지를 따로 정하면
+/// 언젠가 한 곳을 빠뜨리고, 그 경로만 원격에 안 간다.
+fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
+    if (input_sink == 0) {
+        core.write(bytes) catch setLastError("core_write_input");
+        return;
+    }
+    if (input_out_len + bytes.len > input_out.len) {
+        // **넘치면 버리고 이름을 남긴다.** 조용히 자르면 명령 한 줄이 반만 나가 원격에서
+        // 엉뚱한 것이 실행된다.
+        setLastError("input_overflow");
+        return;
+    }
+    @memcpy(input_out[input_out_len..][0..bytes.len], bytes);
+    input_out_len += bytes.len;
+}
+
+/// 입력 목적지를 정한다. host 가 원격 세션을 열고 닫을 때 부른다.
+pub export fn maru_mobile_set_input_sink(sink: u32) void {
+    if (input_sink == sink) return;
+    input_sink = sink;
+    // **바꾸면 비운다.** 옛 목적지로 가려던 바이트가 새 목적지로 새어 나가면, 로컬에서 친
+    // 글자가 원격에 뒤늦게 실행된다.
+    input_out_len = 0;
+}
+
+pub export fn maru_mobile_input_sink() u32 {
+    return input_sink;
+}
+
+/// 원격으로 보낼 바이트를 가져간다. **가져가면 사라진다.** 자리가 모자라면 0 이고 아무것도
+/// 안 지운다 — 잘라 보내면 명령이 반만 나간다(config 쓰기와 같은 규칙).
+pub export fn maru_mobile_take_input(out: [*]u8, cap: usize) usize {
+    if (input_out_len == 0) return 0;
+    if (input_out_len > cap) {
+        setLastError("input_too_large");
+        return 0;
+    }
+    @memcpy(out[0..input_out_len], input_out[0..input_out_len]);
+    const n = input_out_len;
+    input_out_len = 0;
+    return n;
+}
+
 fn writeKey(core: *terminal.core.TerminalCore, key: terminal.input.Key, mods: terminal.input.ModifierSet) void {
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const bytes = core.encodeKey(.{ .key = key, .modifiers = mods }, &buf) catch {
         setLastError("key_encode");
         return;
     };
-    core.write(bytes) catch {
-        setLastError("core_write_input");
-        return;
-    };
+    sendInput(core, bytes);
     delivered_len += bytes.len;
 }
 
@@ -814,10 +861,7 @@ pub fn maru_mobile_scroll(dy_px: f32) void {
                 @memcpy(batch[used..][0..bytes.len], bytes);
                 used += bytes.len;
             }
-            core.write(batch[0..used]) catch {
-                setLastError("core_write_input");
-                break;
-            };
+            sendInput(core, batch[0..used]);
             // **이 바이트도 코어에 닿은 것이다.** 누적값이 "전달한 바이트" 라고 헤더에 적어
             // 놓고 이 경로만 빼면, 같은 값이 어떤 때는 참이고 어떤 때는 아니게 된다.
             delivered_len += used;

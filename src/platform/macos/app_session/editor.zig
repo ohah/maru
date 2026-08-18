@@ -146,6 +146,8 @@ pub fn buildPaneOps(
     /// 문서에서 **가장 긴 줄**의 표시 폭(열). 가로 스크롤바가 이 값으로 막대를 그리고, 그 막대가
     /// 자리를 먹으므로 본문 높이도 여기서 갈린다(§4.1a). `null`이면 막대가 없다.
     content_max_cols: ?u32,
+    /// 줄별 시각 행 수 캐시(§2.1). `null`이면 매 프레임 다시 센다 — 그래도 그림은 같다.
+    row_cache: ?*chrome_editor.frame.RowCache,
     wrap: bool,
     rect: chrome_draw.Rect,
     cell_w_px: u16,
@@ -159,7 +161,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -330,10 +332,25 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         .count_scratch = &count_scratch,
     };
 
+    // **캐시 자리는 필요할 때 잡고, 못 잡으면 없이 그린다**(§2.1의 "저하 동작"과 같은 결) — 캐시는
+    // 빠르게 하는 장치이지 정확성의 전제가 아니라, 여기서 실패해도 화면은 그대로 나온다.
+    //
+    // 한 번 잡으면 줄이지 않는다: 접힘은 보이는 줄을 줄일 뿐 늘리지 못하므로 문서를 다시 열기 전까지
+    // 이 크기로 충분하고, 매 프레임 크기를 재는 자리가 되지 않는다.
+    const row_cache: ?*chrome_editor.frame.RowCache = blk: {
+        if (term.rt.editor_row_cache.prefix.len <= lines.len) {
+            const grown = self.allocator.alloc(u32, lines.len + 1) catch break :blk null;
+            if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
+            term.rt.editor_row_cache = .{ .prefix = grown }; // 자리가 바뀌었으니 키도 처음으로 되돌린다
+        }
+        break :blk &term.rt.editor_row_cache;
+    };
+
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -349,7 +366,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term), wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term), row_cache, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -1077,6 +1094,10 @@ fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
     term.rt.editor_max_top_line = 0;
     term.rt.editor_max_top_piece = 0;
     term.rt.editor_first_piece = 0;
+    // **줄 배열의 주소·길이만으로는 이 변화를 못 잡는다.** 보이는 줄은 미리 잡아 둔 한 버퍼의 앞부분을
+    // 쓰므로, 레벨 접기를 갈아 끼웠을 때 접힌 줄 수가 우연히 같으면 주소도 길이도 그대로다 — 내용만
+    // 다른 그 상태를 캐시가 "맞다"고 읽는다. 접힘을 바꾸는 곳은 여기 하나이므로 여기서 버린다.
+    term.rt.editor_row_cache.filled = false;
     self.metal_dirty = true;
 }
 
@@ -1213,6 +1234,8 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
     if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
+    if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
+    term.rt.editor_row_cache = .{ .prefix = &.{} };
     term.rt.editor_path = null;
 }
 
@@ -3005,6 +3028,38 @@ test "적대적: 조각 스크롤은 한 칸씩 N번과 N칸 한 번이 같다" 
     }
 }
 
+test "4096줄을 넘는 랩 문서의 시각 행 수가 근사가 아니다 — 스크롤바 길이가 여기서 나온다" {
+    // **예전에는 앞에서부터 4,096줄만 세고 나머지를 "논리 줄 하나"로 쳤다**(계수 상한이 호출자가 준
+    // 스택 `[4096]u32`였다). 그러면 20,000줄 랩 문서의 시각 행이 40,000이 아니라 24,096으로 나와
+    // **막대가 실제보다 1.66배 길게** 뜬다 — 문서가 짧다고 판정되기 때문이다.
+    //
+    // 이 근사는 **조용하다**: op도 크래시도 정상이고 막대 길이만 어긋난다. §2.1 캐시(`RowCache`)가
+    // 그 상한을 없앴고, 이 테스트가 되돌아오는 것을 막는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const long_line = "이 줄은 좁은 pane에서 여러 조각으로 접힐 만큼 길다 — 그래야 시각 행이 논리 줄보다 많아진다";
+    const n = 5_000; // 상한(4,096)을 넘는다
+    const lines = try allocator.alloc([]const u8, n);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = long_line;
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    // 기대값은 손으로 적지 않는다 — 렌더가 쓰는 그 계수로 한 줄을 재고 줄 수를 곱한다(모든 줄이 같다).
+    const body = editorBodyRect(fx.session, fx.leaf_rect, fx.term);
+    const per_line = piecesOfLine(fx.term, 0, visibleColsForTest(fx.session, body, fx.term, false));
+    try testing.expect(per_line > 1); // 실제로 접혔다 — 아니면 이 테스트가 아무것도 안 본다
+    try testing.expectEqual(per_line * n, fx.term.rt.editor_total_visual_rows);
+}
+
 test "적대적: 4096줄을 넘는 랩 문서도 끝에 닿는다" {
     // 상한(`max_top`)은 렌더가 센 `row_counts`를 **뒤에서부터** 훑어 구하는데, 그 배열은 문서
     // **앞에서부터** 4096줄만 채워진다. 뒤쪽 줄은 "1행"으로 근사되므로, 실제로는 여러 조각인 줄들이
@@ -3373,6 +3428,66 @@ test "가로 막대가 첫 프레임부터 선다 — 굴려 보기 전에 축�
     var wrapped = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer wrapped.dl.deinit(allocator);
     try testing.expect(!chrome_editor.frame.showsHorizontalBar(true, fx.term.rt.editor_max_cols, 40));
+}
+
+test "[측정] 랩 켠 문서의 프레임 비용 — 계수 캐시가 그것을 문서 크기에서 떼어 놓는다" {
+    // §2.1이 *"문서 크기에 비례하는 작업은 메인에서 하지 않는다"*고 못박았고, 그 표의 한 줄이
+    // **전 문서 랩 재계산**이다. 캐시(`frame.RowCache`)가 들어오기 전 이 자리의 실측은 이랬다
+    // (ReleaseFast, 20프레임 평균, 2026-08-18):
+    //
+    // | 문서 | 프레임당 | 시각 행(센 값) |
+    // |---|---|---|
+    // | 1,000줄 | 3.3ms | 2,000 (정확) |
+    // | 4,000줄 | 12.9ms | 8,000 (정확) |
+    // | 20,000줄 | 12.7ms | **24,096** (실제 40,000) |
+    //
+    // 두 가지가 함께 드러났다. ⑴ 계수가 **매 프레임** 돌았다 — 계약이 적은 "리사이즈 중"만이 아니다.
+    // ⑵ 20,000줄이 4,000줄보다 빨랐다 — 계수 루프의 상한이 호출자가 준 `row_counts` 배열 길이인데
+    // 제품이 그것을 스택 `[4096]u32`로 줬기 때문이다. 넘는 줄은 "논리 줄 하나"로 근사되므로 **비용이
+    // 캡되는 대신 시각 행 수가 틀렸다**(막대가 실제보다 1.66배 길었다). 성능과 정확성이 한 상한에
+    // 묶여 있었고, 캐시가 둘을 함께 풀었다.
+    //
+    // 그래서 계속 세 크기를 잰다: 캐시가 도로 빠지거나 무효화가 매 프레임 걸리면 위 표로 돌아가는데,
+    // **그 회귀는 조용하다**(그림은 같고 프레임만 느려진다). 시계가 ms 해상도라 여러 프레임을 합친다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const frames = 20;
+    for ([_]usize{ 1_000, 4_000, 20_000 }) |n| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const saved = fx.term.rt.editor_lines;
+        defer fx.term.rt.editor_lines = saved;
+
+        const lines = try allocator.alloc([]const u8, n);
+        defer allocator.free(lines);
+        // 랩이 실제로 일어나게 본문보다 긴 줄을 준다(짧으면 조각이 하나라 셈이 싸다).
+        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        fx.term.rt.editor_lines = lines;
+        fx.term.rt.editor_wrap = true;
+        fx.term.rt.editor_max_cols = 0;
+
+        // 첫 프레임은 폰트·픽스처 워밍이 섞이므로 재는 구간에서 뺀다.
+        var warm = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+        warm.dl.deinit(allocator);
+
+        const t0 = monotonicMsForTest();
+        for (0..frames) |_| {
+            var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+            drawn.dl.deinit(allocator);
+        }
+        const total = monotonicMsForTest() - t0;
+        // 상한에 걸렸으면 초과분이 "줄당 1행"으로 들어간다 — 그 사실을 값으로 남긴다.
+        const rows = fx.term.rt.editor_total_visual_rows;
+        std.debug.print("\n[측정] 랩 {d}줄: {d}프레임 {d}ms (프레임당 {d}µs, 시각 행 {d} = 논리 {d} + {d})\n", .{
+            n,
+            frames,
+            total,
+            total * 1000 / frames,
+            rows,
+            n,
+            rows -| @as(u32, @intCast(n)),
+        });
+    }
 }
 
 test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 붙었다" {

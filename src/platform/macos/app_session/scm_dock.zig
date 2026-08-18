@@ -536,9 +536,11 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         n += 1;
         if (!keyMatches(self.scm_expanded_turn, row)) continue;
 
-        if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
+        var row_key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+        const row_key = timelineRowKey(row, &row_key_buf) orelse continue;
+        if (!filesLoadedFor(self, row_key) or self.scm_commit_files_failed) {
             if (n < items.len) {
-                items[n] = .{ .notice = if (self.scm_commit_files_failed)
+                items[n] = .{ .notice = if (self.scm_commit_files_failed and filesLoadedFor(self, row_key))
                     maru.i18n.t(.scm_turn_files_failed)
                 else
                     maru.i18n.t(.scm_loading) };
@@ -689,7 +691,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .short_oid = commit.shortOid(),
                 .ref = if (first_ref) |ref| ref.name else "",
                 .ref_is_head = if (first_ref) |ref| ref.kind == .head else false,
-                .selected = self.scm_selected_commit != null and self.scm_selected_commit.? == index,
+                .selected = if (self.scm_selected_commit) |sel| std.mem.eql(u8, sel, commit.oid) else false,
                 .expanded = expanded,
             },
         };
@@ -697,9 +699,9 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         if (!expanded) continue;
 
         // 펼친 커밋의 파일 줄. 원문이 아직 없으면 **그 사실**을 한 줄로 말한다.
-        if (self.scm_commit_files_oid == null or self.scm_commit_files_failed) {
+        if (!filesLoadedFor(self, commit.oid) or self.scm_commit_files_failed) {
             if (n < items.len) {
-                items[n] = .{ .notice = if (self.scm_commit_files_failed)
+                items[n] = .{ .notice = if (self.scm_commit_files_failed and filesLoadedFor(self, commit.oid))
                     maru.i18n.t(.scm_commit_files_failed)
                 else
                     maru.i18n.t(.scm_loading) };
@@ -794,6 +796,9 @@ fn commitOidAt(self: *AppSession, index: u32) ?[]const u8 {
 fn openCommitFileDiff(self: *AppSession, index: u32) void {
     const oid = self.scm_expanded_commit orelse return;
     const repo = self.git_repo orelse return;
+    // **실린 목록이 그 커밋의 것일 때만 연다**(적대적 검증). 늦게 온 클릭이 다른 항목의 목록에서
+    // 같은 번호를 집으면 **엉뚱한 파일**이 열린다 — 그리는 쪽과 같은 불변식을 여기서도 건다.
+    if (!filesLoadedFor(self, oid)) return;
     var it = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
     var i: u32 = 0;
     while (it.next()) |entry| : (i += 1) {
@@ -817,6 +822,8 @@ fn openCommitFileDiff(self: *AppSession, index: u32) void {
 fn openTurnFileDiff(self: *AppSession, index: u32) void {
     const repo = self.git_repo orelse return;
     const key = expandedTurnKey(self) orelse return;
+    if (!filesLoadedFor(self, key)) return; // 위와 같은 이유
+
     const sep = std.mem.indexOfScalar(u8, key, ' ') orelse return;
     const base_tree = key[0..sep];
     const head_tree = key[sep + 1 ..];
@@ -1222,7 +1229,11 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
             self.metal_dirty = true;
         },
         .select_commit => |index| {
-            self.scm_selected_commit = index;
+            // **OID로 든다**(자리는 새 커밋이 생기면 밀린다 — 적대적 검증).
+            if (commitOidAt(self, index)) |oid| {
+                if (self.scm_selected_commit) |old_sel| self.allocator.free(old_sel);
+                self.scm_selected_commit = self.allocator.dupe(u8, oid) catch null;
+            }
             // **고르기와 펼치기는 같은 클릭이다**(P4b). 커밋을 눌렀을 때 사용자가 보려는 것은 "그 커밋이
             // 무엇을 바꿨나"이고, 그것을 따로 여는 두 번째 컨트롤을 만들 이유가 없다.
             if (commitOidAt(self, index)) |oid| toggleCommitExpanded(self, oid);
@@ -1326,6 +1337,7 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     self.scm_log_truncated = false;
     // **고른 커밋도 버린다**(적대적 검증). 인덱스는 그 목록 안의 자리라, 목록이 바뀌면 같은 번호가
     // 다른 저장소의 다른 커밋을 가리킨다 — 화면에는 "무언가 골라 둔" 강조만 남는다.
+    if (self.scm_selected_commit) |oid| self.allocator.free(oid);
     self.scm_selected_commit = null;
     // **펼친 커밋과 그 파일도 버린다**(P4b 적대적 검증). 남겨 두면 그 OID를 **새 저장소에서** 읽는다 —
     // 대개 실패하지만, 실패든 아니든 그건 이 저장소의 사실이 아니다.
@@ -1353,7 +1365,20 @@ pub fn toggleCommitExpanded(self: *AppSession, oid: []const u8) void {
         }
     }
     self.scm_expanded_commit = self.allocator.dupe(u8, oid) catch null;
+    // 턴 쪽 펼침도 접는다 — 슬롯이 하나라 둘이 동시에 열려 있으면 서로의 파일을 그린다(적대적 검증).
+    if (self.scm_expanded_turn) |key| {
+        self.allocator.free(key);
+        self.scm_expanded_turn = null;
+    }
     self.metal_dirty = true;
+}
+
+/// 실려 있는 파일 목록이 **그 키의 것**인가. 슬롯을 두 탭이 공유하므로, 키를 확인하지 않으면 앞서
+/// 펼친 항목의 파일이 새 항목 아래에 그려진다(적대적 검증에서 실제로 그랬다 — 탭을 오가면 커밋의 파일이
+/// 턴 아래에 섰다). 읽는 중에도 같은 이유로 옛 목록이 남지 않는다.
+fn filesLoadedFor(self: *const AppSession, key: []const u8) bool {
+    const current = self.scm_commit_files_oid orelse return false;
+    return std.mem.eql(u8, current, key);
 }
 
 /// 그 자리가 **진행 중** 줄인가(오른쪽이 작업트리라 tree 둘로 읽을 수 없는 줄).

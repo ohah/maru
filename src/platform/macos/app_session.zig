@@ -3829,9 +3829,11 @@ pub const AppSession = struct {
     scm_log_failed: bool = false,
     /// 그 출력이 상한에서 잘렸나. **조용히 자르지 않는다**(목록 읽기와 같은 규율).
     scm_log_truncated: bool = false,
-    /// 히스토리에서 고른 커밋의 자리(P4). 파일 행 강조와 **다른 축**이라 값을 따로 든다 — 탭이
-    /// 다르면 같은 번호가 다른 것을 가리킨다.
-    scm_selected_commit: ?u32 = null,
+    /// 히스토리에서 고른 커밋의 **OID**(P4). 파일 행 강조와 다른 축이라 값을 따로 든다.
+    ///
+    /// **자리가 아니라 OID다**(적대적 검증): 커밋을 하나 만들면 목록이 통째로 한 칸 밀려 같은 번호가
+    /// 다른 커밋을 가리킨다 — 강조가 조용히 옮겨 간다(펼침을 OID로 든 것과 같은 이유).
+    scm_selected_commit: ?[]u8 = null,
     /// 지금 **펼친 커밋**의 OID(P4b). 하나만 펼친다 — 여럿이면 각각 읽기가 필요하고, 히스토리에서
     /// 동시에 두 커밋의 파일을 비교하는 일은 드물다.
     scm_expanded_commit: ?[]u8 = null,
@@ -17236,6 +17238,7 @@ pub const AppSession = struct {
         if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
         if (self.scm_log_repo) |path| self.allocator.free(path); // 히스토리 원문의 저장소(P4)
         if (self.scm_expanded_commit) |oid| self.allocator.free(oid); // 펼친 커밋(P4b)
+        if (self.scm_selected_commit) |oid| self.allocator.free(oid); // 고른 커밋(P4)
         if (self.scm_expanded_turn) |key| self.allocator.free(key); // 펼친 턴(P5)
         if (self.scm_selected_turn) |key| self.allocator.free(key);
         if (self.scm_commit_files_oid) |oid| self.allocator.free(oid);
@@ -55520,6 +55523,84 @@ test "에이전트 탭: 새 턴이 들어와도 펼친 줄이 바뀌지 않는�
     try std.testing.expectEqual(@as(usize, 1), expanded_count);
 }
 
+test "히스토리: 새 커밋이 생겨도 강조가 옮겨 가지 않는다 (적대적 검증)" {
+    // 자리로 들면 목록이 한 칸 밀릴 때 **같은 번호가 다른 커밋**을 가리킨다 — 강조가 조용히 옮겨 간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .history);
+
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    session.scm_log_text = try allocator.dupe(u8, "aaaaaaa1111\x1fp\x1fA\x1f1\x1f\x1f첫째\x1e");
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_commit = 0 });
+
+    // 새 커밋이 목록 맨 위에 들어온다 — 앞서 고른 커밋은 이제 자리 1이다.
+    allocator.free(session.scm_log_text);
+    session.scm_log_text = try allocator.dupe(u8, "bbbbbbb2222\x1fp\x1fA\x1f2\x1f\x1f새것\x1eaaaaaaa1111\x1fp\x1fA\x1f1\x1f\x1f첫째\x1e");
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    var selected_subject: []const u8 = "";
+    for (projection.items) |item| switch (item) {
+        .commit => |commit| if (commit.selected) {
+            selected_subject = commit.subject;
+        },
+        else => {},
+    };
+    // 고른 것은 여전히 **그 커밋**이다(자리는 밀렸다).
+    try std.testing.expectEqualStrings("첫째", selected_subject);
+}
+
+test "펼친 항목의 파일만 그린다 — 탭을 오가도 남의 파일이 서지 않는다 (P5 적대적 검증)" {
+    // 읽기 슬롯을 두 탭이 공유한다. 키를 확인하지 않으면 앞서 펼친 커밋의 파일이 **턴 아래**에 그려진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+
+    // 턴을 펼쳐 두고,
+    scm_dock_ops.selectScmTab(session, .agent);
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
+    // **커밋 쪽 파일**이 실려 있다고 하자(앞서 히스토리에서 펼쳤던 것).
+    session.scm_commit_files_oid = try allocator.dupe(u8, "abcdef1234567");
+    session.scm_commit_files_text = try allocator.dupe(u8, "M\t남의파일.zig\n");
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    for (projection.items) |item| switch (item) {
+        .commit_file => return error.ForeignFilesDrawn, // 그 목록은 이 턴의 것이 아니다
+        else => {},
+    };
+    // 대신 "읽는 중"이라고 말한다(그 턴의 답은 아직 없다).
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_loading), projection.items[2].notice);
+}
+
+test "커밋을 펼치면 턴 펼침이 접힌다(슬롯이 하나다) (P5 적대적 검증)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+
+    session.scm_expanded_turn = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    scm_dock_ops.toggleCommitExpanded(session, "abcdef1234567");
+    try std.testing.expect(session.scm_expanded_turn == null);
+    try std.testing.expectEqualStrings("abcdef1234567", session.scm_expanded_commit.?);
+}
+
 test "에이전트 탭: 턴 파일 클릭은 **턴 비교**를 연다 (P5 적대적 검증)" {
     // 같은 줄 모양을 두 탭이 쓰지만 여는 비교가 다르다 — 구분이 없으면 intent가 커밋 경로로만 가서
     // 턴 파일 클릭이 **아무 일도 안 한다**.
@@ -55806,7 +55887,7 @@ test "히스토리 탭: 저장소가 바뀌면 고른 커밋도 버린다 (P4 �
 
     session.scm_log_repo = try allocator.dupe(u8, "/other");
     session.scm_log_text = try allocator.dupe(u8, "aaa\x1fp\x1fA\x1f1\x1f\x1f제목\x1e");
-    session.scm_selected_commit = 0;
+    session.scm_selected_commit = try allocator.dupe(u8, "aaa");
     // 지금 읽고 있는 저장소는 `/repo`라 위 원문은 남의 것이다.
     scm_dock_ops.dropScmLogIfRepoChanged(session);
     try std.testing.expect(session.scm_log_repo == null);

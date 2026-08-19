@@ -338,12 +338,17 @@ pub fn trimTrailingSep(base: []const u8) []const u8 {
 /// 루트 자신이면 빈 슬라이스다. 반환값은 **앞에 구분자가 없다.**
 pub fn relativeUnderRoot(path: []const u8, root: []const u8) ?[]const u8 {
     if (root.len == 0) return null;
-    if (path.len < root.len) return null;
-    if (!std.mem.eql(u8, path[0..root.len], root)) return null;
-    if (path.len == root.len) return path[path.len..]; // 루트 자신 — 빈 슬라이스
-    if (endsWithSep(root)) return path[root.len..];
-    if (path[root.len] != '/') return null; // 경계가 아니다
-    return path[root.len + 1 ..];
+    // **후행 구분자를 먼저 벗기고 잰다.** 안 그러면 길이 비교가 비대칭을 만든다 — 루트가 `/proj/`
+    // (6바이트)일 때 그 **직계 자식의 부모**인 `/proj`(5바이트)가 루트보다 짧아 거절되는데, 손자
+    // `/proj/a/x`는 통과한다. `pathWithin`은 같은 입력을 받아들이므로 그쪽과도 어긋난다.
+    // (루트가 `/` 하나뿐이면 벗기지 않는다 — 빈 문자열이 되면 절대경로가 상대경로로 바뀐다.)
+    const base = trimTrailingSep(root);
+    if (path.len < base.len) return null;
+    if (!std.mem.eql(u8, path[0..base.len], base)) return null;
+    if (path.len == base.len) return path[path.len..]; // 루트 자신 — 빈 슬라이스
+    if (endsWithSep(base)) return path[base.len..]; // 루트가 `/` 하나인 경우
+    if (path[base.len] != '/') return null; // 경계가 아니다 — `/a/proj` vs `/a/project`
+    return path[base.len + 1 ..];
 }
 
 const testing = std.testing;
@@ -371,6 +376,28 @@ test "relativeUnderRoot: 구분자로 끝나는 루트에서 첫 세그먼트를
     try testing.expect(relativeUnderRoot("/other/x", "/repo") == null);
     try testing.expect(relativeUnderRoot("/re", "/repo") == null);
     try testing.expect(relativeUnderRoot("/repo/x", "") == null);
+}
+
+test "relativeUnderRoot: 후행 구분자 루트에서 자식과 손자가 같은 규칙을 받는다" {
+    // **비대칭이 있었다.** 길이 비교를 후행 구분자를 단 채로 하면 루트 `/proj/`(6)보다 그 **직계 자식의
+    // 부모**인 `/proj`(5)가 짧아 거절되는데, 손자 `/proj/a/x`는 통과했다 — 같은 트리의 이웃이 다른
+    // 답을 받는다. `pathWithin`은 같은 입력을 받아들이므로 그쪽과도 어긋났다.
+    // 도달 경로는 좁다(프로덕션 루트는 canonicalize 되어 후행 구분자가 안 남는다). 남는 통로는
+    // `dirnamePosix("/foo//bar.txt")`가 `"/foo/"`를 주는 자리다.
+    try testing.expectEqualStrings("", relativeUnderRoot("/proj", "/proj/").?); // 루트 자신
+    try testing.expectEqualStrings("x", relativeUnderRoot("/proj/x", "/proj/").?); // 자식
+    try testing.expectEqualStrings("a/x", relativeUnderRoot("/proj/a/x", "/proj/").?); // 손자
+
+    // 드라이브 루트도 같다.
+    try testing.expectEqualStrings("", relativeUnderRoot("C:", "C:/").?);
+    try testing.expectEqualStrings("x", relativeUnderRoot("C:/x", "C:/").?);
+
+    // `/` 하나짜리 루트는 벗기지 않는다 — 벗기면 빈 문자열이라 절대경로가 상대경로로 바뀐다.
+    try testing.expectEqualStrings("Users/x", relativeUnderRoot("/Users/x", "/").?);
+    try testing.expectEqualStrings("", relativeUnderRoot("/", "/").?);
+
+    // 경계 검사는 후행 구분자가 있어도 그대로 산다.
+    try testing.expect(relativeUnderRoot("/a/project/x", "/a/proj/") == null);
 }
 
 test "relativeUnderRoot: 옛 방식과 갈리는 지점을 못 박는다" {

@@ -691,5 +691,5 @@ pub const inventory = [_]Proof{
     // — 문자열 상수만 줄었고 `@field` 반사나 Client 구성은 안 건드린다.
     // 편집기 상태바(2026-08-19): 읽기 전용·행 수 세는 중 두 문구가 키로 들어와 digest가 움직인다.
     // count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "53a3e08fe9d4f4bc86694af301a219661494b1671b77053c2d2eee12480eac59" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8e960dbb6bdb99473b2e51431226da44bd9403ae9bb0f21ff47a2c9344efca82" },
 };

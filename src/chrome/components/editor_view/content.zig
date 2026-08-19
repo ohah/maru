@@ -177,12 +177,34 @@ pub fn build(
         var src_col: u32 = 0;
 
         while (it.next()) |piece| : (piece_idx += 1) {
-            // **원본을 이 조각의 시작 열까지 전진시킨다.** 걸친 cluster(쪼개진 탭·2칸 글자·8칸 표기)
-            // 에서는 그 안으로 들어가지 않고 **cluster 시작에 머문다** — 거기에는 원본 byte가 없다
-            // (실측 48%). 클릭은 거기서부터 걸으면 되고 거리는 여전히 조각 폭 이내다.
+            // **원본을 이 조각의 시작 열까지 전진시킨다 — 걸친 cluster는 렌더가 하는 대로 따른다.**
+            //
+            // 전개가 걸친 것을 처리하는 방식이 **종류마다 다르고**, 병행 걸음이 그것을 따라야 한다:
+            //
+            // - **일반 cluster**는 *"통째로 뺀다"*(`expandTabs`의 `col >= range.start`) — 셀 격자라
+            //   반쪽을 그릴 수 없다. 그래서 화면 0열의 byte는 **버려진 cluster 다음**이고, 걸음도
+            //   지나가야 한다.
+            // - **탭**은 *"공백이라 걸쳐도 잘라 낼 수 있다"*(`from = @max(col, range.start)`) — 잔여
+            //   폭이 화면 0열부터 그려진다. 그래서 그 자리의 byte는 **탭 자신**이고, 걸음은 머문다.
+            // - **§3.8 표기**도 같다(`shown_from`) — ASCII 문자열이라 잘라 그린다.
+            //
+            // 셋을 한 규칙으로 뭉치면 어느 쪽이든 어긋난다. 실측(적대적 검증 3·4회차): 지나가기만
+            // 하면 한글 straddle은 19% → 0%로 낫지만 **랩+탭이 0% → 26.4%로 깨지고**, 머물기만 하면
+            // 그 반대다.
+            //
+            // 머무는 경우 `src_col`이 `start_col`보다 작게 남는데, 그 값이 `start_byte_col`로 실려
+            // **탭스톱 계산의 시작점**이 된다(탭 폭은 줄 절대 열로 정해진다).
             while (src_i < row.bytes.len and src_col < start_col) {
                 const st = stepColumn(row.bytes, src_i, src_col, props.tab_width);
-                if (st.next_col > start_col) break;
+                if (st.next_col > start_col) {
+                    // 걸쳤다. 렌더가 잘라 그리는 종류면 여기 머물고, 버리는 종류면 지나간다.
+                    const splits = splitsWhenStraddling(row.bytes, src_i);
+                    if (!splits) {
+                        src_i = st.next_byte;
+                        src_col = st.next_col;
+                    }
+                    break;
+                }
                 src_i = st.next_byte;
                 src_col = st.next_col;
             }
@@ -200,8 +222,11 @@ pub fn build(
             visual_out[visual_row] = .{
                 .line = @intCast(line_idx),
                 .piece = piece_idx,
-                .start_col = start_col,
+                // **화면 0열의 열**과 **시작 byte의 열**을 따로 싣는다. 걸친 것을 지나갔으면 둘이
+                // 같고(`src_col`), 머물렀으면 byte 쪽이 더 작다(위 루프 주석).
+                .start_col = @max(src_col, start_col),
                 .start_byte = @intCast(src_i),
+                .start_byte_col = src_col,
             };
             const text = piece.slice(expanded);
             defer visual_row += 1;
@@ -364,7 +389,11 @@ pub fn byteAtPoint(
     bytes: []const u8,
     tab_width: u16,
     start_byte: usize,
-    start_col: u32,
+    /// `start_byte`가 있는 **절대 열**(탭스톱 계산의 시작점 — `VisualRow.start_byte_col`).
+    start_byte_col: u32,
+    /// 화면 0열에 해당하는 **절대 열**(`VisualRow.start_col`). 걸친 탭·§3.8 표기를 렌더가 잘라
+    /// 그리면 `start_byte_col`보다 크다.
+    screen_col0: u32,
     row_cols: u32,
     x_px: i32,
     cell_w_px: u16,
@@ -375,20 +404,31 @@ pub fn byteAtPoint(
 
     const click_px: u32 = @intCast(x_px);
     // 이 행이 덮는 열 범위. 그 너머는 **행 끝**으로 clamp한다.
-    const row_end_col: u32 = start_col +| row_cols;
+    const row_end_col: u32 = screen_col0 +| row_cols;
 
     var i = @min(start_byte, bytes.len);
-    var col = start_col;
+    var col = start_byte_col;
     while (i < bytes.len) {
+        // **탭스톱은 절대 열로 센다** — 그래서 `col`이 화면 0열이 아니라 진짜 열이어야 한다.
         const st = stepColumn(bytes, i, col, tab_width);
         if (st.next_col > row_end_col) break; // 이 행을 넘어간다 — 행 끝이다
 
+        // (초판에 있던 "화면 왼쪽 밖은 지나간다" 분기는 **구조적으로 도달 불가**라 뺐다 — 계측에서
+        //  실행 0회였다. `build`가 세우는 불변식 때문이다: 걸친 것이 잘리는 종류면 걸음이 그 cluster
+        //  **안에 머물러** 첫 걸음의 `next_col`이 이미 `screen_col0`을 넘고, 버리는 종류면
+        //  `start_byte_col == screen_col0`이라 마찬가지다. 열은 그 뒤로 단조 증가한다.)
+
         // cluster가 차지하는 픽셀 범위 `[lo, hi)`. 중점보다 왼쪽이면 앞, 아니면 뒤.
+        // 잘려 들어온 cluster는 왼쪽이 화면 0에 붙는다.
         //
         // **중점은 정수 나눗셈으로 내린다.** `cell_w_px`가 정수라 폭이 홀수면 중점이 반 픽셀에
         // 걸린다 — 어긋나 봐야 1픽셀이라 보이지 않지만, 방향을 안 정하면 구현마다 답이 갈린다.
-        const lo = (col - start_col) * cell_w_px;
-        const hi = (st.next_col - start_col) * cell_w_px;
+        // **뺄셈을 saturating으로 둔다.** 이 걸음이 `screen_col0` 뒤에서 시작한다는 것은 `build`가
+        // 세우는 불변식(`start_byte_col <= start_col`)에 기대는데, 그 결합이 이 함수 밖에 있어
+        // 호출자가 바뀌면 조용히 깨진다 — 그때 `-`는 u32 언더플로로 **죽는다**. 답이 달라지지
+        // 않으면서 죽지만 않게 한다(7차 적대적 검증이 짚었다).
+        const lo = if (col > screen_col0) (col -| screen_col0) * cell_w_px else 0;
+        const hi = (st.next_col -| screen_col0) * cell_w_px;
         if (click_px < lo + (hi - lo) / 2) return i;
         if (click_px < hi) return st.next_byte;
 
@@ -397,6 +437,29 @@ pub fn byteAtPoint(
     }
     // 행 끝 너머 — 마지막으로 지난 자리다.
     return i;
+}
+
+/// 시작 열에 **걸쳤을 때** 전개가 그것을 잘라 그리는 종류인가(§4.1g).
+///
+/// 렌더는 걸친 것을 둘로 나눠 다룬다 — **자를 수 있으면 자르고**(탭은 공백, §3.8은 ASCII 표기),
+/// **못 자르면 통째로 버린다**(셀 격자라 글자 반쪽을 그릴 수 없다). 병행 걸음이 그 판정을 따라야
+/// `start_byte`가 화면과 맞는다.
+///
+/// **cluster 전체를 훑는다 — 첫 codepoint만 보면 틀린다.** GB9가 ZWJ를 앞 글자에 흡수하므로
+/// `ad<ZWJ>min`은 첫 cp가 정상인데 뒤에 hazard가 붙어 있고, 렌더는 그것을 자른다(`expandTabs`가
+/// 같은 이유로 `hazard_in_cluster`를 cluster 단위로 정한다). 첫 cp만 보면 그 갈래를 통째로
+/// 지나가게 되고, 실측으로 그런 줄의 **25.6%**가 화면과 다른 글자를 답했다(적대적 검증 5회차).
+fn splitsWhenStraddling(bytes: []const u8, i: usize) bool {
+    if (bytes[i] == '\t') return true;
+    const base = text_layout.decodeCodepoint(bytes, i);
+    const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
+    var scan = i;
+    while (scan < end) {
+        if (hazard.classifyInText(bytes, scan) != null) return true;
+        const seq = std.unicode.utf8ByteSequenceLength(bytes[scan]) catch 1;
+        scan += @max(1, @min(seq, end - scan));
+    }
+    return false;
 }
 
 /// 한 걸음: 이 위치의 cluster(또는 탭)를 지나면 **다음 byte와 다음 열**이 어디인가.
@@ -2276,7 +2339,7 @@ test "byteAtPoint: 아무 픽셀을 쏴도 cluster 경계이고 줄 범위 안�
                 // 행 밖(음수·오른쪽 한참)까지 포함해 쏜다 — 드래그는 화면을 벗어난다.
                 const span: i32 = @intCast((piece.cols + 8) * cell_w);
                 const x: i32 = @as(i32, @intCast(rand.uintLessThan(u32, @intCast(span + 40)))) - 20;
-                const off = byteAtPoint(line.items, tab_width, start_byte, acc, piece.cols, x, cell_w);
+                const off = byteAtPoint(line.items, tab_width, start_byte, acc, acc, piece.cols, x, cell_w);
                 shots += 1;
 
                 // ⑴ 줄 범위 안
@@ -2306,37 +2369,64 @@ test "byteAtPoint 결정표: 걸친 자리마다 무엇을 답하는가 (§4.1g)
     {
         // ① 2칸 글자: 왼쪽 절반이면 앞(0), 오른쪽이면 뒤(3바이트 = "가" 다음).
         const line = "가나";
-        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 4, 0, cw));
-        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 4, 9, cw));
-        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 4, 10, cw));
-        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 4, 19, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 0, 4, 0, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 0, 4, 9, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 0, 4, 10, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 0, 4, 19, cw));
     }
     {
         // ② 탭(폭 4 → 40px): 같은 절반 규칙. 20px가 경계다.
         const line = "\tx";
-        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 5, 19, cw));
-        try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 4, 0, 0, 5, 20, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 0, 5, 19, cw));
+        try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 4, 0, 0, 0, 5, 20, cw));
     }
     {
         // ③ §3.8 표기: `\u{202E}`가 `<U+202E>` 8칸(80px)으로 그려진다. 40px가 경계다.
         //    **안으로 들어가지 않는다** — 그 안에는 문서에 없는 offset뿐이다.
         const line = "\u{202E}x";
-        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 9, 39, cw));
-        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 9, 40, cw)); // U+202E는 3바이트
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 0, 9, 39, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 0, 9, 40, cw)); // U+202E는 3바이트
     }
     {
         // ④ 행 끝 너머 → 행 끝. 행 왼쪽 밖 → 행 시작.
         const line = "ab";
-        try std.testing.expectEqual(@as(usize, 2), byteAtPoint(line, 4, 0, 0, 2, 9_999, cw));
-        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 2, -50, cw));
+        try std.testing.expectEqual(@as(usize, 2), byteAtPoint(line, 4, 0, 0, 0, 2, 9_999, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 0, 2, -50, cw));
     }
     {
         // ⑤ **랩된 두 번째 행**: "줄 끝"이 아니라 "행 끝"이다(적대적 검증 19회차).
         //    "abcdef"를 2열씩 끊었다고 보고 세 번째 행(start_col=4, start_byte=4, cols=2)을 본다.
         //    그 행 오른쪽 너머를 눌러도 **줄 맨 끝(6)이 아니라 그 행의 끝**에서 멈춘다.
         const line = "abcdefghij";
-        try std.testing.expectEqual(@as(usize, 6), byteAtPoint(line, 4, 4, 4, 2, 9_999, cw));
+        try std.testing.expectEqual(@as(usize, 6), byteAtPoint(line, 4, 4, 4, 4, 2, 9_999, cw));
         // 그 행의 왼쪽 밖은 줄 시작(0)이 아니라 **행 시작**(4)이다.
-        try std.testing.expectEqual(@as(usize, 4), byteAtPoint(line, 4, 4, 4, 2, -1, cw));
+        try std.testing.expectEqual(@as(usize, 4), byteAtPoint(line, 4, 4, 4, 4, 2, -1, cw));
+    }
+}
+
+test "byteAtPoint: 왼쪽에서 잘린 cluster는 보이는 잔여분의 중점으로 가른다 (§4.1g)" {
+    // **`start_byte_col`이 `screen_col0`과 다른 유일한 경우이고, 그것을 재는 유일한 테스트다.**
+    // 7차 적대적 검증이 잡았다: 다른 모든 호출이 두 인자에 같은 값을 넘겨, 계약이 명문화한 "보이는
+    // 잔여분의 중점"이 코드에 고정돼 있지 않았다(cluster 전체 중점으로 바꿔도 전 스위트가 통과했다).
+    const cw: u16 = 10;
+
+    {
+        // 탭(폭 4, 절대 열 [0,4))이 화면 0열=절대 2에서 잘렸다 → 보이는 잔여 2칸(20px).
+        // 잔여분 중점은 10px다. 그 왼쪽이면 탭 앞(0), 오른쪽이면 탭 뒤(1바이트).
+        const line = "\tX";
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 2, 4, 0, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 2, 4, 9, cw));
+        try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 4, 0, 0, 2, 4, 10, cw));
+        try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 4, 0, 0, 2, 4, 19, cw));
+
+        // **cluster 전체의 중점(20px)으로 가르면 이 셋이 전부 0이 된다** — 계약이 배격한 해석이다.
+        // 그 중점은 화면 **밖**이라(절대 열 2 = 화면 0) 보이는 픽셀 전부가 한쪽으로 간다.
+    }
+    {
+        // §3.8 표기: `\u{202E}`가 `<U+202E>` 8칸이 되고, 화면 0열=절대 5에서 잘렸다 → 잔여 3칸(30px).
+        // 잔여분 중점은 15px. 표기 **안으로 들어가지 않는다** — 앞이면 0, 뒤면 그 문자 다음(3바이트).
+        const line = "\u{202E}Y";
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 5, 3, 14, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 5, 3, 15, cw));
     }
 }

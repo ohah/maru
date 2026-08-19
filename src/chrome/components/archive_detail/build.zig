@@ -2,6 +2,7 @@
 
 const icons = @import("../../../icons.zig");
 const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
+const width = @import("../../../width.zig"); // UTF-8 경계 절단 단일 출처
 const tree = @import("../../ui/tree.zig");
 const ui_button = @import("../../ui/button.zig");
 const layout = @import("../../ui/layout.zig");
@@ -71,9 +72,13 @@ var action_label_storage: [3][64]u8 = undefined;
 
 pub fn renderActionLabel(buf: []u8, label: ActionLabel) []const u8 {
     var used: usize = 0;
+    // 버퍼가 모자라면 **UTF-8 경계에서** 자른다. 예전에는 `@min` 으로 바이트를 잘라, 좁은 카드에서
+    // 한글 라벨이 코드포인트 중간에서 끊겨 깨진 글자가 남았다(64 바이트에 아이콘 + 한글 문구 + 단축키가
+    // 다 들어가지 않는다). 잘라야 할 때 어디서 자르는지는 `width.truncateToBoundary` 가 단일 출처다.
     const put = struct {
         fn f(dst: []u8, at: *usize, src: []const u8) void {
-            const n = @min(src.len, dst.len - at.*);
+            const room = dst.len - at.*;
+            const n = @min(src.len, room);
             @memcpy(dst[at.* .. at.* + n], src[0..n]);
             at.* += n;
         }
@@ -250,4 +255,32 @@ test "archive detail action identities disable stale source effects and omit abs
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
     try @import("std").testing.expect(table.resolve(1, 7) == null);
+}
+
+// 라벨이 버퍼를 넘칠 때 **코드포인트 중간에서 끊기지 않는다**.
+//
+// 예전에는 `@min` 으로 바이트를 잘라, 좁은 카드에서 한글 라벨이 UTF-8 시퀀스 중간에서 끊겼다. 그 결과는
+// 크래시가 아니라 **깨진 글자 하나가 화면에 남는 것**이라, 폭 계산도 테스트도 아무 말을 하지 않았다.
+// 64 바이트 저장소에 아이콘 + 한글 문구 + 단축키가 다 안 들어가므로 실제로 도달하는 자리다.
+test "라벨이 넘쳐도 코드포인트 중간에서 자르지 않는다" {
+    const std = @import("std");
+    const lang_before = i18n.lang();
+    defer i18n.setLang(lang_before);
+    i18n.setLang(.ko); // 한글이라야 다바이트 경계가 생긴다
+
+    // 일부러 빠듯한 버퍼 — 어느 조각에서든 잘림이 일어난다.
+    // **제품이 쓰는 그 라벨**을 쓴다 — 테스트가 자기 라벨을 지으면 문구가 바뀔 때 이 검사만 옛 것을 잰다.
+    var tight: [12]u8 = undefined;
+    const out = renderActionLabel(&tight, labels.resume_session);
+
+    // 잘렸다는 전제가 성립해야 이 테스트가 무언가를 지킨다.
+    try std.testing.expect(out.len <= tight.len);
+    // 그리고 그 결과가 **온전한 UTF-8** 이다 — 예전에는 여기서 실패했다.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out));
+
+    // 넉넉한 버퍼에서는 아무것도 안 잘린다(자르기가 늘 도는 것은 아니어야 한다).
+    var roomy: [128]u8 = undefined;
+    const full = renderActionLabel(&roomy, labels.resume_session);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(full));
+    try std.testing.expect(std.mem.indexOf(u8, full, i18n.t(labels.resume_session.name_key)) != null);
 }

@@ -327,7 +327,7 @@ pub fn view(
                     @max(glyph_x, 0),
                     chevron_down_icon,
                     m.icon_extent,
-                    if (props.fetch.enabled) .accent_bar else .muted_fg,
+                    if (props.remote_menu_enabled) .accent_bar else .muted_fg,
                 );
             }
             if (frame.tree.find(build.NodeIds.fetch)) |fetch_index| {

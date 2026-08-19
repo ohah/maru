@@ -53,6 +53,15 @@ pub const Kind = enum {
     /// 출력은 `<behind>\t<ahead>` 한 줄이다(왼쪽 = origin/HEAD에만 있는 것 = 내가 뒤처진 수).
     /// **실패해도 목록은 성립한다** — origin/HEAD가 없거나 unborn이면 호출자가 `@{u}` 값으로 되돌아간다.
     ahead_behind,
+    /// 기준으로 **고를 수 있는 이름들**(§3.5). `branches`와 같은 형식이되 원격 추적 ref까지 본다.
+    base_candidates,
+    /// **기준 브랜치 이름 자체**(`rev-parse --abbrev-ref origin/HEAD` → `origin/main`). §3.5 표의 첫 명령이고,
+    /// 네트워크 없이 로컬에서 읽힌다.
+    ///
+    /// **왜 따로 읽나**: `ahead_behind`의 실패만으로는 "기준이 없다"와 "HEAD가 unborn이다"를 가를 수 없다.
+    /// 두 상태의 답이 다르다 — 앞은 사용자가 기준을 골라야 하고, 뒤는 첫 커밋을 하면 저절로 풀린다.
+    /// 이 읽기는 unborn 저장소에서도 성공하므로(원격 HEAD는 로컬 HEAD와 무관하다) 그 둘을 가른다.
+    default_base,
     /// 기본 브랜치와 갈린 지점(`merge-base origin/HEAD HEAD`). 이 값이 "브랜치에 COMMIT 됨" 섹션의 왼쪽이다.
     /// **실패해도 목록은 성립한다** — origin/HEAD가 없는 저장소(로컬 전용·clone 아님)에서는 그 섹션만 숨긴다.
     merge_base,
@@ -329,6 +338,51 @@ pub fn commitParentBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf
     return buf[0 .. rev.len + 2 + repo_relative_path.len];
 }
 
+/// 비교의 **기준**(base) — 기본값은 `origin/HEAD`가 가리키는 기본 브랜치다(docs/editor-surface-dock.md §3.5).
+/// 이 값 하나가 ahead/behind·merge-base·브랜치 범위 diff 셋 모두의 왼쪽이다: 셋이 서로 다른 기준을 쓰면
+/// 화면의 `↑N`과 그 아래 "브랜치에 COMMIT 됨" 목록이 **다른 질문의 답**이 된다.
+pub const default_base_ref = "origin/HEAD";
+
+/// 같은 기준의 삼점 범위. `A...B`는 공통 조상 이후만 센다 — 두 점이면 기준에 새로 쌓인 커밋이 behind에서 빠진다.
+pub const default_base_range = default_base_ref ++ "...HEAD";
+
+/// git의 refname 상한이 아니라 **우리가 argv에 싣는 상한**이다. 이보다 긴 이름은 받지 않는다.
+pub const max_base_ref_len = 255;
+pub const max_base_range_len = max_base_ref_len + "...HEAD".len;
+
+/// 이 문자열을 **기준 자리에 그대로 넘겨도 되는가**(`isHexRev`와 같은 규율의 술어다).
+///
+/// 기준은 `isHexRev`가 받는 값과 달리 **사용자가 고른 이름**이라 형태를 우리가 강제해야 한다:
+/// - `-`로 시작하면 git이 rev가 아니라 **옵션**으로 읽는다(`--upload-pack=…` — 우리가 닫아 둔 경로가 열린다).
+/// - `..`가 들어가면 우리가 붙이는 `...HEAD`와 합쳐져 **다른 범위**가 된다(기준 하나가 두 점 범위로 둔갑한다).
+/// - 그 밖의 글자는 허용 목록으로 막는다. `^`·`~`·`:`·`@{`는 전부 rev 문법이라 이름이 식으로 바뀐다.
+///
+/// 허용을 좁게 잡은 대가로 `@{u}` 같은 정당한 식도 못 쓰지만, 기준 목록은 우리가 읽은 ref 이름에서 오므로
+/// 그 손해가 없다(고르는 쪽이 식을 타이핑하지 않는다).
+pub fn isSafeBaseRef(ref: []const u8) bool {
+    if (ref.len == 0 or ref.len > max_base_ref_len) return false;
+    if (ref[0] == '-' or ref[0] == '/' or ref[0] == '.') return false;
+    if (ref[ref.len - 1] == '/' or ref[ref.len - 1] == '.') return false;
+    if (std.mem.indexOf(u8, ref, "..") != null) return false;
+    if (std.mem.indexOf(u8, ref, "//") != null) return false;
+    for (ref) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            c == '_' or c == '-' or c == '.' or c == '/' or c == '+';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// `<기준>...HEAD`. 기준이 위 술어를 통과하지 못하면 null이고, 그때 호출자는 기본값으로 돌아간다 —
+/// **거절이 곧 기본값이 아니다**: 되돌리는 판단은 호출자가 하고, 여기서는 "이 이름은 못 싣는다"만 말한다.
+pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
+    if (!isSafeBaseRef(base)) return null;
+    @memcpy(buf[0..base.len], base);
+    const tail = "...HEAD";
+    @memcpy(buf[base.len..][0..tail.len], tail);
+    return buf[0 .. base.len + tail.len];
+}
+
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
 pub const max_argv = 28; // 기본 3 + config 덮어쓰기 16 + kind별 최대 9(commit_files) + 여유
@@ -455,7 +509,8 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
         .merge_base => {
             buf[n] = "merge-base";
             n += 1;
-            buf[n] = "origin/HEAD";
+            // `arg`는 **기준 ref**다(없으면 기본 브랜치). 호출자가 검증한 값만 온다 — `isSafeBaseRef`.
+            buf[n] = arg orelse default_base_ref;
             n += 1;
             buf[n] = "HEAD";
             n += 1;
@@ -473,7 +528,9 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             // `A...B` = B가 갈린 지점 이후 바꾼 것(공통 조상 기준). `A..B`(두 점)로 쓰면 기본 브랜치에 새로 들어온
             // 커밋까지 "내가 바꾼 것"으로 잡혀 목록이 부풀어 오른다.
-            buf[n] = "origin/HEAD...HEAD";
+            // `arg`는 **이미 만들어진 삼점 범위**다(`baseRange`) — 여기서 이어 붙이면 버퍼가 필요하고,
+            // 그 버퍼의 수명이 argv보다 짧으면 조용히 쓰레기를 싣는다.
+            buf[n] = arg orelse default_base_range;
             n += 1;
         },
         .snapshot_read_tree => {
@@ -512,6 +569,16 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "remote";
             n += 1;
         },
+        .default_base => {
+            buf[n] = "rev-parse";
+            n += 1;
+            // `--abbrev-ref`: `refs/remotes/origin/main`이 아니라 `origin/main`으로 받는다 — 그 형태가
+            // 그대로 다음 명령의 기준 자리에 들어간다(형태를 두 번 바꾸지 않는다).
+            buf[n] = "--abbrev-ref";
+            n += 1;
+            buf[n] = default_base_ref;
+            n += 1;
+        },
         .ahead_behind => {
             buf[n] = "rev-list";
             n += 1;
@@ -519,10 +586,10 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = "--left-right";
             n += 1;
-            buf[n] = "origin/HEAD...HEAD";
+            buf[n] = arg orelse default_base_range; // 범위 문자열 그대로(`baseRange`)
             n += 1;
         },
-        .branches => {
+        .branches, .base_candidates => {
             buf[n] = "for-each-ref";
             n += 1;
             // 최근에 쓴 브랜치가 위로 — 브랜치가 많은 저장소에서 찾는 수고를 줄인다.
@@ -536,6 +603,14 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = "refs/heads/";
             n += 1;
+            // **기준 후보에는 원격 추적 ref도 넣는다**(§3.5). `origin/HEAD`가 없는 저장소의 대표가
+            // `clone --single-branch`인데, 그 저장소에서 사용자가 고르고 싶은 기준은 보통 `origin/main`이다 —
+            // 로컬 브랜치만 보여 주면 정작 필요한 이름이 목록에 없다.
+            // 브랜치 **전환** 목록은 그대로 로컬만 본다: 원격 추적 ref로 checkout하면 detached HEAD가 된다.
+            if (kind == .base_candidates) {
+                buf[n] = "refs/remotes/";
+                n += 1;
+            }
         },
         .log => {
             buf[n] = "log";
@@ -806,6 +881,73 @@ test "ahead/behind는 기본 브랜치 기준 삼점 rev-list다 (`@{u}`가 아�
     // 읽기 전용 계약(외부 프로세스 차단)은 여기에도 붙는다.
     try testing.expect(has(argv, "core.pager=cat"));
     try testing.expect(argv.len <= max_argv);
+}
+
+test "기준 읽기: 이름을 `origin/main` 형태로 받는다(refs/ 접두어가 아니라)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.default_base, "/usr/bin/git", "/repo", null, &buf);
+
+    try testing.expect(has(argv, "rev-parse"));
+    // `--abbrev-ref`가 없으면 `refs/remotes/origin/main`이 나오고, 그 문자열을 다음 명령의 기준 자리에
+    // 그대로 넣으면 형태가 두 가지가 된다(같은 기준이 화면에서 다르게 보인다).
+    try testing.expect(has(argv, "--abbrev-ref"));
+    try testing.expect(has(argv, "origin/HEAD"));
+    try testing.expect(!has(argv, "origin/HEAD...HEAD")); // 범위가 아니라 이름 하나를 묻는다
+    try testing.expect(has(argv, "core.pager=cat")); // 읽기 전용 계약
+    try testing.expect(argv.len <= max_argv);
+}
+
+test "기준을 넘기면 세 명령이 **같은** 기준을 쓴다" {
+    // 이 셋이 갈리면 화면의 `↑N`과 그 아래 "브랜치에 COMMIT 됨" 목록이 서로 다른 질문의 답이 된다(§3.5).
+    var buf: [max_argv][]const u8 = undefined;
+    var range_buf: [max_base_range_len]u8 = undefined;
+    const range = baseRange("origin/release", &range_buf).?;
+    try testing.expectEqualStrings("origin/release...HEAD", range);
+
+    try testing.expect(has(build(.merge_base, "/usr/bin/git", "/repo", "origin/release", &buf), "origin/release"));
+    try testing.expect(has(build(.ahead_behind, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
+    try testing.expect(has(build(.branch_name_status, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
+    try testing.expect(has(build(.branch_numstat, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
+
+    // 안 넘기면 기본값이다 — 기준을 고른 적 없는 저장소가 지금과 똑같이 돈다.
+    try testing.expect(has(build(.merge_base, "/usr/bin/git", "/repo", null, &buf), "origin/HEAD"));
+    try testing.expect(has(build(.ahead_behind, "/usr/bin/git", "/repo", null, &buf), "origin/HEAD...HEAD"));
+}
+
+test "isSafeBaseRef: 기준 자리에 넣어도 되는 이름만 통과한다" {
+    try testing.expect(isSafeBaseRef("origin/main"));
+    try testing.expect(isSafeBaseRef("main"));
+    try testing.expect(isSafeBaseRef("release-1.2.x"));
+    try testing.expect(isSafeBaseRef("feature/a_b+c"));
+
+    // 옵션 주입: git이 rev가 아니라 인자로 읽는다 — 우리가 닫아 둔 외부 프로세스 경로가 다시 열린다.
+    try testing.expect(!isSafeBaseRef("--upload-pack=touch /tmp/x"));
+    try testing.expect(!isSafeBaseRef("-main"));
+    // `..`: 우리가 붙이는 `...HEAD`와 합쳐져 **다른 범위**가 된다.
+    try testing.expect(!isSafeBaseRef("a..b"));
+    try testing.expect(!isSafeBaseRef("origin/main..."));
+    // rev 문법 글자들 — 이름이 식으로 바뀐다.
+    try testing.expect(!isSafeBaseRef("HEAD^"));
+    try testing.expect(!isSafeBaseRef("HEAD~3"));
+    try testing.expect(!isSafeBaseRef("main:file"));
+    try testing.expect(!isSafeBaseRef("@{u}"));
+    try testing.expect(!isSafeBaseRef("main branch")); // 공백
+    try testing.expect(!isSafeBaseRef("main\n"));
+    try testing.expect(!isSafeBaseRef(""));
+
+    // 길이 상한 — argv에 싣는 값이라 우리가 정한다.
+    var long: [max_base_ref_len + 1]u8 = @splat('a');
+    try testing.expect(!isSafeBaseRef(&long));
+    try testing.expect(isSafeBaseRef(long[0..max_base_ref_len]));
+}
+
+test "baseRange: 거절은 null이지 기본값이 아니다" {
+    var buf: [max_base_range_len]u8 = undefined;
+    // 되돌리는 판단은 호출자가 한다 — 여기서 조용히 `origin/HEAD`로 바꾸면 사용자가 고른 기준이
+    // 무시된 채 **다른 저장소의 답**이 화면에 뜬다(그것이 이 값을 고르게 한 이유였다).
+    try testing.expect(baseRange("--upload-pack=x", &buf) == null);
+    try testing.expect(baseRange("", &buf) == null);
+    try testing.expectEqualStrings("main...HEAD", baseRange("main", &buf).?);
 }
 
 test "원격 목록은 이름만 읽는다 — `-v`가 없어야 URL이 안 실린다" {

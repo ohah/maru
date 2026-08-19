@@ -943,6 +943,31 @@ pub fn applyForcedRemoteMenu(self: *AppSession) void {
     scm_dock_ops.applyScmDockIntent(self, .open_remote_menu);
 }
 
+/// 기준 브랜치 목록을 연 상태를 캡처한다(`MARU_FORCE_SCM_BASE_MENU=1`, §3.5). 두 단계를 거친다 —
+/// `∨`를 열고, 그 안의 "기준 브랜치 고르기"를 누른다. 목록 읽기는 비동기라 메뉴는 **그다음 tick**에 뜬다.
+///
+/// **상태를 심지 않는다**: 자리는 제품이 만든 표에서 찾고(`.pick_base`가 몇 번째인지 여기서 세지 않는다),
+/// 항목·앵커·기본값 줄 유무 판정도 전부 제품이 한다. 원격이 없는 저장소에서 그 자리가 0번으로 바뀌는데,
+/// 여기서 자리를 굳혀 두면 캡처가 **제품과 다른 경로**를 타게 된다.
+pub fn applyForcedBaseMenu(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SCM_BASE_MENU") == null) return;
+    if (self.dock.view != .source_control) return;
+    if (self.scm_base_menu_open) return; // 이미 그 화면이다
+    if (self.branch_menu_pending) return; // 목록을 기다리는 중 — 도착하면 제품이 연다
+    if (self.git_result == null) return; // 아직 읽기 전이다
+    if (!self.scm_remote_menu_open) {
+        scm_dock_ops.applyScmDockIntent(self, .open_remote_menu);
+        return;
+    }
+    for (self.scm_remote_menu_items[0..self.scm_remote_menu_len], 0..) |item, i| {
+        if (item != .pick_base) continue;
+        // 사용자 클릭과 같은 순서다 — 메뉴를 닫고 고른 자리를 적용한다.
+        settings_ops.closeContextMenu(self);
+        scm_dock_ops.applyRemoteMenuSelection(self, i);
+        return;
+    }
+}
+
 pub fn applyForcedFetch(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_SCM_FETCH") == null) return;
     // **커밋 픽스처에 얹지 않는다.** 그쪽은 `MARU_FORCE_SCM_COMMIT`이 없으면 첫 줄에서 돌아가므로,

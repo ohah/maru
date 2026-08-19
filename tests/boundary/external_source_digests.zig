@@ -117,7 +117,11 @@ pub const inventory = [_]Proof{
     // receiver 집합은 건드리지 않는다.
     // 기본 브랜치 대비 ahead/behind 읽기(§3.5 교정)로 또 움직인다: `Result`에 `ahead_behind` 한 줄과 그
     // 선택 명령 하나가 는다. count는 2 그대로다 — 새 `@field` 반사도 Client 구성 변화도 없다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "c0a00970b422f927346aa609ba5dc543cd57d7955ec77515441c81434cd6d114" },
+    // 비교 기준 고르기(§3.5)로 또 움직인다: `Result`에 `default_base` 한 줄(`rev-parse --abbrev-ref
+    // origin/HEAD`)과 `Job.base`가 늘고, `submit`이 그 기준을 받아 세 명령(ahead/behind·merge-base·브랜치
+    // 범위)에 같은 값으로 넘긴다. `submitBranches`는 목록 종류를 인자로 받는다(전환용/기준 후보용).
+    // **count는 그대로다** — 새 진입점이 아니라 기존 두 진입점의 인자가 늘었을 뿐이다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "b8ebf1c8523305520d3ae36ab2294098957aa618217fd038c16295de6b23020c" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -599,7 +603,12 @@ pub const inventory = [_]Proof{
     // 같은 파일을 건드려 digest 가 낡았기 때문이고, count 와 사유는 그대로다.
     // 죽은 pub 19개를 닫으며 바뀐다(2026-08-19): 파일 밖에서 아무도 이름으로 참조하지 않는 타입·함수·상수의
     // `pub` 만 뗐다(선언·본문·동작은 그대로). count 는 2 그대로다 — `@field` 반사나 Client 구성은 안 건드린다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a6d667669f50670c1dbfdd0f9982c0093590ec47594ab4ce64f8b8be44bcc756" },
+    // 기준 고르기(§3.5)로 또 움직인다: 고른 기준과 그 저장소를 드는 필드 둘, 메뉴 항목 표 둘
+    // (`∨`의 항목·기준 목록의 줄 — 자리가 아니라 뜻으로 되돌리기 위한 것), 그리고 그 규율을 고정하는
+    // 테스트가 늘었다. **count는 그대로다** — 외부에서 부르는 자리가 아니라 세션 상태와 테스트만 늘었다.
+    // 그 슬라이스를 main 에 두 번 리베이스하며 값이 그때마다 수렴했다(2026-08-19): 사이에 들어온 편집기·
+    // 셀 밴드·죽은 pub 정리 커밋들이 같은 파일을 건드려 **양쪽 digest 가 모두 낡았다**. 사유는 다 살아 있다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "89d851576f6233a631b87c6fef5eb5cc8cd4e95526b8d62090a898a4a7fb6fdf" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -667,7 +676,14 @@ pub const inventory = [_]Proof{
     // `settingsRowMatches` 가 `Lang` enum 을 `inline for` 로 돌며 `@field` 로 각 변형을 꺼내기 때문이다.
     // 반사가 는 것이 맞고, 그 반사가 이 계약의 핵심이다: 언어가 늘면 판정이 **자동으로** 그 언어까지 본다.
     // 손으로 두 언어를 나열했다면 셋째 언어를 더하는 날 조용히 어긋난다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "731251e2dc79558efb411f148f32a2d828a0f469945911b63b5bffcf671c8224" },
+    // 기준 고르기(§3.5)로 또 움직인다: `requestBranchMenu`가 **용도**를 함께 받고(전환/기준), 그 용도가
+    // 읽을 명령을 고른다. accept 라우팅에 기준 목록 분기가 앞에 서고(같은 버퍼를 쓰므로 순서가 계약이다),
+    // `closeContextMenu`는 `∨` 항목 표를 **지우지 않는다**(accept가 닫은 뒤에 그 표를 읽는다).
+    // **count는 그대로다** — 진입점 수는 같고 인자와 분기만 늘었다.
+    // 같은 슬라이스의 적대적 검증에서 한 줄이 더 붙어 값이 또 움직였다(2026-08-19): `clearBranchMenuText`의
+    // "열린 메뉴를 먼저 닫는다" 가드가 **기준 목록까지** 본다. 그 목록도 같은 버퍼에서 이름을 빌리므로
+    // 플래그만 다를 뿐 같은 UAF였다. count는 그대로다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "3235d07e9f13729c3ea54a7cf45ff035fb1e521cd03aa60fdd13ec8e90a60e86" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -717,5 +733,8 @@ pub const inventory = [_]Proof{
     // count는 1 그대로다.
     // 모바일 서버 목록 화면(S9b-2b)이 키 넷을 더해 바뀐다 — 표에 항목이 는 것뿐이라 `@field`
     // 로 도는 자리는 그대로다(count 1).
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "b51457d87a995fa63f352fb02f262f97f6a6b335f74e0bcc3a215759990aaeab" },
+    // 기준 고르기(§3.5) 문구 둘(`scm_menu_pick_base`·`scm_base_default`)로 또 움직인다. count는 그대로다 —
+    // 표에 키가 늘어난 것이지 이 파일을 부르는 자리가 는 것이 아니다. 두 슬라이스가 같은 표에 각각
+    // 키를 더해 값이 수렴했다(2026-08-19) — 사유는 위아래 둘 다 살아 있다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "e50dcf8e14b8e3c4c4226c6c7282733ac9f0e13e152838e4818d3d539372e141" },
 };

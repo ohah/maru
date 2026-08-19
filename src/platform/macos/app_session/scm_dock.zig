@@ -940,6 +940,10 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
             .enabled = scmHasRemote(self),
             .running = self.scm_fetch_inflight != 0,
         },
+        // `∨`는 **fetch와 따로 판정한다**(§3.5). 원격이 없어도 메뉴에는 고를 것이 남는다(비교 기준) —
+        // 오히려 `origin/HEAD`가 없는 저장소가 원격 없는 저장소라, fetch에 묶어 두면 이 기능이 가장
+        // 필요한 곳에서 열리지 않는다. 아직 못 읽었으면 열지 않는다(그때 아는 것은 "모른다"뿐이다).
+        .remote_menu_enabled = self.git_result != null,
         .summary = projection.summary,
         .changed_file_count = projection.file_count,
         // **커밋 줄은 props가 아니라 목록 항목이다**(②b) — 저장소마다 하나씩이라 여기 하나만 실으면
@@ -1551,20 +1555,35 @@ fn submitFetch(self: *AppSession) void {
 /// 같은 판정을 쓰고, 이유도 같은 자리에 적는다.
 fn openRemoteMenu(self: *AppSession) void {
     if (self.git_result == null) return; // 아직 모른다 — 단정하지 않는다(칩과 같은 규율)
-    if (!scmHasRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_remote));
     const rect = scmNodeRect(self, component.build.NodeIds.remote_menu) orelse return;
     const content = dock_ops.dockGeometry(self).tree_content;
     settings_ops.closeContextMenu(self);
-    self.context_menu_items_buf[0] = maru.i18n.t(.scm_menu_push);
-    self.context_menu_items_buf[1] = maru.i18n.t(.scm_menu_pull);
-    self.context_menu_items_len = 2;
+
+    // **실을 수 있는 것만 싣는다.** `push`/`pull`은 원격이 없으면 무엇을 골라도 실패하므로 그 저장소의
+    // 메뉴에는 아예 없다(§4 — 비활성 컨트롤은 이유를 말하되, 메뉴 줄에는 이유를 적을 자리가 없다).
+    // 기준 고르기는 원격과 무관하게 늘 있다: `origin/HEAD`가 없는 저장소의 대표가 **원격 없는 저장소**라
+    // 원격을 조건으로 걸면 정작 이 기능이 필요한 곳에서 못 연다.
+    var n: usize = 0;
+    if (scmHasRemote(self)) {
+        self.scm_remote_menu_items[n] = .push;
+        self.context_menu_items_buf[n] = maru.i18n.t(.scm_menu_push);
+        n += 1;
+        self.scm_remote_menu_items[n] = .pull;
+        self.context_menu_items_buf[n] = maru.i18n.t(.scm_menu_pull);
+        n += 1;
+    }
+    self.scm_remote_menu_items[n] = .pick_base;
+    self.context_menu_items_buf[n] = maru.i18n.t(.scm_menu_pick_base);
+    n += 1;
+    self.scm_remote_menu_len = n;
+    self.context_menu_items_len = n;
     self.scm_remote_menu_open = true;
     // 도크-로컬 rect를 창 좌표로 옮긴다. 메뉴 자신이 작업영역 안으로 clamp하므로(브랜치 줄은 바닥이라
     // 아래로 자랄 자리가 없다) 여기서 위로 띄우는 계산을 따로 하지 않는다.
     self.chrome_host.context_menu.show(
         @intFromFloat(@as(f64, @floatFromInt(content.x)) + rect.x),
         @intFromFloat(@as(f64, @floatFromInt(content.y)) + rect.y),
-        2,
+        n,
     );
     self.metal_dirty = true;
 }
@@ -1577,20 +1596,144 @@ fn scmNodeRect(self: *AppSession, id: u64) ?chrome.ui.layout.UiRect {
     return null;
 }
 
+/// 이 저장소에 **고른 기준**이 있으면 그것(없으면 빈 값 — 그러면 `origin/HEAD`다).
+///
+/// **저장소를 대조한다.** 기준 필드는 하나뿐인데 기준은 저장소마다 다른 사실이라, 짝이 안 맞으면
+/// 남의 저장소에서 고른 이름으로 숫자를 세게 된다(§3.5).
+pub fn scmBaseRefFor(self: *AppSession, repo: []const u8) []const u8 {
+    const ref = self.scm_base_ref orelse return &.{};
+    const owner = self.scm_base_repo orelse return &.{};
+    if (!std.mem.eql(u8, owner, repo)) return &.{};
+    return ref;
+}
+
+/// `origin/HEAD`가 **없는** 저장소인가(§3.5). 없으면 되돌아갈 기본값이 없으므로 기준 목록에서
+/// "기본값" 줄을 뺀다 — 없는 것을 고르게 두면 고른 뒤 아무 일도 안 일어난다.
+///
+/// **결과를 아직 못 받았으면 "없다"고 하지 않는다**: 그때 우리가 아는 것은 "모른다"뿐이고,
+/// 이 술어의 소비자는 그 둘을 다르게 다뤄야 한다(빈 상태 3-상태와 같은 규율).
+pub fn scmDefaultBaseMissing(self: *AppSession) bool {
+    const result = self.git_result orelse return false;
+    return std.mem.trim(u8, result.default_base, " \t\r\n").len == 0;
+}
+
+/// 기준 목록에 **뜰 줄들**을 만든다 — 화면에 실을 글자(`context_menu_items_buf`)와 그 줄이 무엇인지
+/// (`scm_base_menu_rows`)를 **함께** 세운다. 줄이 걸러지거나(원격 이름) 빠질 수 있어(`기본값`)
+/// 자리만으로는 뜻을 되돌릴 수 없기 때문이다(`∨` 메뉴와 같은 규율).
+fn buildBaseMenuRows(self: *AppSession) usize {
+    var n: usize = 0;
+    // "기본값"은 **되돌아갈 곳이 있을 때만** 뜬다. `origin/HEAD`가 없는 저장소에서 이 줄을 고르면
+    // 기준이 없는 상태로 돌아가는 것이라, 고르기 전과 후가 같다(아무 말도 하지 않는 선택지다).
+    if (!scmDefaultBaseMissing(self)) {
+        self.context_menu_items_buf[n] = maru.i18n.t(.scm_base_default);
+        self.scm_base_menu_rows[n] = .default_base;
+        n += 1;
+    }
+    const room = @min(self.scm_base_menu_rows.len, self.context_menu_items_buf.len);
+    for (self.branch_menu_names[0..self.branch_menu_len], 0..) |name, i| {
+        if (n >= room) break;
+        // **원격 이름 자체는 뺀다.** `refs/remotes/origin/HEAD`의 짧은 이름이 `origin`이라 목록에 그대로
+        // 뜨는데, 그것은 위의 `기본값` 줄과 **같은 것을 가리킨다**(제품 캡처 2026-08-19에서 나란히 떴다).
+        // 같은 뜻의 줄이 둘이면 사용자는 둘이 다르다고 읽는다. 판정은 이미 읽어 둔 `git remote` 출력으로
+        // 한다 — 이름이 그 목록에 있으면 그것은 브랜치가 아니라 원격이다(git 버전에 기대지 않는다).
+        if (isRemoteName(self, name)) continue;
+        self.context_menu_items_buf[n] = name;
+        self.scm_base_menu_rows[n] = .{ .branch = i };
+        n += 1;
+    }
+    self.scm_base_menu_len = n;
+    self.context_menu_items_len = n;
+    return n;
+}
+
+/// 테스트가 부르는 이름 — 줄 만들기는 rect·메뉴 표시와 **분리돼 있다**(그래야 발행된 tree 없이도
+/// 자리↔뜻 대응을 단언할 수 있다).
+pub fn buildBaseMenuRowsForTest(self: *AppSession) usize {
+    return buildBaseMenuRows(self);
+}
+
+/// 이 이름이 **원격 이름**인가(`git remote` 출력 한 줄과 정확히 같은가).
+fn isRemoteName(self: *AppSession, name: []const u8) bool {
+    const result = self.git_result orelse return false;
+    var it = std.mem.tokenizeAny(u8, result.remotes, "\r\n");
+    while (it.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), name)) return true;
+    }
+    return false;
+}
+
+/// 걷은 목록으로 **기준 브랜치 메뉴**를 연다(§3.5). 자리는 브랜치 줄의 `∨` — 그 메뉴에서 왔다.
+pub fn openBaseMenu(self: *AppSession) void {
+    const rect = scmNodeRect(self, component.build.NodeIds.remote_menu) orelse return;
+    const content = dock_ops.dockGeometry(self).tree_content;
+    settings_ops.closeContextMenu(self);
+    const n = buildBaseMenuRows(self);
+    if (n == 0) return self.showNoticeKey(.set_no_branches);
+    self.scm_base_menu_open = true;
+    self.chrome_host.context_menu.show(
+        @intFromFloat(@as(f64, @floatFromInt(content.x)) + rect.x),
+        @intFromFloat(@as(f64, @floatFromInt(content.y)) + rect.y),
+        n,
+    );
+    self.metal_dirty = true;
+}
+
+/// 고른 기준을 세운다. **우리가 실행하는 것은 읽기뿐이다** — 이 선택은 다음 목록 읽기의 인자를 바꾼다.
+pub fn applyBaseMenuSelection(self: *AppSession, index: usize) void {
+    if (index >= self.scm_base_menu_len) return;
+    switch (self.scm_base_menu_rows[index]) {
+        .default_base => setScmBase(self, null),
+        .branch => |i| {
+            if (i >= self.branch_menu_len) return;
+            const name = self.branch_menu_names[i];
+            // **여기서 거른다**(백엔드의 같은 검사는 심층 방어다 — §6). 목록은 우리가 읽은 ref 이름이라
+            // 정상이면 늘 통과하지만, 통과 못 한 이름을 조용히 무시하면 사용자는 "골랐는데 안 바뀐다"만 본다.
+            if (!maru.session.git_command.isSafeBaseRef(name)) return self.showNoticeKey(.set_branch_name_invalid);
+            setScmBase(self, name);
+        },
+    }
+}
+
+fn setScmBase(self: *AppSession, ref: ?[]const u8) void {
+    const repo = self.git_repo orelse return;
+    if (self.scm_base_ref) |old| self.allocator.free(old);
+    self.scm_base_ref = null;
+    if (ref) |name| {
+        self.scm_base_ref = self.allocator.dupe(u8, name) catch null;
+        // 복사에 실패했으면 저장소도 세우지 않는다 — 짝이 반만 서면 다음 프레임이 남의 기준을 쓴다.
+        if (self.scm_base_ref == null) return;
+    }
+    if (self.scm_base_repo) |old| self.allocator.free(old);
+    self.scm_base_repo = self.allocator.dupe(u8, repo) catch null;
+    // 기준이 바뀌면 숫자와 "브랜치에 COMMIT 됨" 목록이 **함께** 달라진다 — 셋이 한 읽기에서 오므로
+    // 다시 읽는 것 말고 다른 갱신 경로가 없다. 지금 못 걸 수도 있으므로(읽기·쓰기가 도는 중) 사실로
+    // 남겨 두고, 실제로 제출된 자리에서 내린다.
+    self.scm_base_reread_pending = true;
+    git_ops.refreshGitStatus(self);
+    self.metal_dirty = true;
+}
+
 /// 고른 줄을 **활성 터미널에 명령으로 넣어 준다**(P6b). 실행은 사용자가 한다 — 남의 저장소를 바꾸는 일이고
 /// hook·충돌·강제 여부가 걸린다(쓰기·원격 §4, 브랜치 전환과 같은 패턴이라 개행을 붙이지 않는다).
 ///
 /// **`pasteText`를 쓰지 않는다.** 그쪽은 커밋 상자가 입력을 소유하면 글자를 **커밋 메시지로** 보낸다 —
 /// 사용자가 고른 것은 "터미널에서 실행할 명령"이므로 그 라우팅이 여기서는 틀린다(상자에 `git push`가
 /// 적히고 아무 일도 안 일어난다).
+///
+/// 기준 고르기(§3.5)는 명령이 아니라 **다음 읽기의 인자**를 바꾼다 — 터미널로 나가지 않는다.
 pub fn applyRemoteMenuSelection(self: *AppSession, index: usize) void {
-    const cmd: []const u8 = switch (index) {
-        0 => "git push",
-        1 => "git pull",
-        else => return,
-    };
-    if (!term_ops.activeTermIsTerminal(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
-    term_ops.submitPaste(self, cmd, false, term_ops.activeSurface(self).id);
+    // **index가 아니라 뜻으로 되돌린다**(§3.5). 원격이 없는 저장소에서는 `push`/`pull`이 빠져 0번이
+    // 기준 고르기다 — 자리를 여기서 다시 세면 그 저장소에서 엉뚱한 항목이 실행된다.
+    if (index >= self.scm_remote_menu_len) return;
+    switch (self.scm_remote_menu_items[index]) {
+        .push, .pull => {
+            const cmd: []const u8 = if (self.scm_remote_menu_items[index] == .push) "git push" else "git pull";
+            if (!term_ops.activeTermIsTerminal(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
+            term_ops.submitPaste(self, cmd, false, term_ops.activeSurface(self).id);
+        },
+        // 목록 읽기는 비동기다 — 결과가 오면 `drainGitStatus`가 `openBaseMenu`를 부른다(브랜치 메뉴와 같은 길).
+        .pick_base => settings_ops.requestBranchMenu(self, .pick_base),
+    }
 }
 
 /// 끝난 fetch를 거둔다. **성공이든 실패든 목록을 다시 읽는다** — 성공이면 remote-tracking ref가 바뀌어

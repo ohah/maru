@@ -104,6 +104,12 @@ pub const Result = struct {
     /// `git rev-list --count --left-right origin/HEAD...HEAD` 출력 — **기본 브랜치 대비** ahead/behind(§3.5).
     /// **선택이다**: origin/HEAD가 없거나 unborn이면 실패하고, 그때 호출자는 `status`의 `@{u}` 값으로 돌아간다.
     ahead_behind: []u8 = &.{},
+    /// `git rev-parse --abbrev-ref origin/HEAD` 출력 — **기준 브랜치의 이름**(§3.5). 비어 있으면
+    /// `origin/HEAD`가 없는 저장소다(clone 방식에 따라 없을 수 있다).
+    ///
+    /// **`ahead_behind`가 비었다는 사실과 다른 사실이다**: 그쪽은 기준이 없어도, HEAD가 unborn이어도 빈다.
+    /// 두 상태의 답이 달라서(앞은 사용자가 기준을 골라야 하고 뒤는 첫 커밋이 풀어 준다) 따로 읽는다.
+    default_base: []u8 = &.{},
     /// `git remote` 출력 — 이 저장소에 원격이 **있는가**(P6). 도크의 `Fetch`를 켤지 정하는 사실이고,
     /// **선택이다**: 못 읽으면 원격이 없는 것으로 보고 버튼을 끈다(없는 것을 눌러 실패로 배우게 하지 않는다).
     remotes: []u8 = &.{},
@@ -128,6 +134,7 @@ pub const Result = struct {
         allocator.free(self.worktrees);
         allocator.free(self.remotes);
         allocator.free(self.ahead_behind);
+        allocator.free(self.default_base);
         allocator.free(self.turn_name_status);
         allocator.free(self.turn_numstat);
         self.* = .{};
@@ -203,6 +210,10 @@ const Job = struct {
     limit: u32 = 0,
     /// 파일 목록 읽기가 쓸 명령(P4b 커밋 · P5 턴). 다른 작업은 쓰지 않는다.
     file_list_kind: git_command.Kind = .commit_files,
+    /// 비교의 **기준**(owned, 빈 값이면 `origin/HEAD`). ahead/behind·merge-base·브랜치 범위 셋이 이 하나를
+    /// 쓴다 — 갈리면 화면의 숫자와 그 아래 목록이 서로 다른 질문의 답이 된다(§3.5).
+    /// **여기 오는 값은 이미 `git_command.isSafeBaseRef`를 통과했다**(`submit`이 거른다).
+    base: []u8 = &.{},
     /// `check-ignore` 가 물어볼 경로들(owned, 저장소 루트 기준 상대경로). 다른 작업은 쓰지 않는다.
     /// 한 배치는 `git_command.check_ignore_batch` 이하다 — 호출자가 그만큼씩 끊어 넣는다.
     ignore_paths: [][]u8 = &.{},
@@ -385,6 +396,8 @@ pub const Backend = struct {
         /// 마지막 턴 스냅샷 tree(없으면 빈 문자열 — 그러면 그 섹션을 아예 안 읽는다).
         snapshot_tree: []const u8,
         index_file: []const u8,
+        /// 비교의 **기준**(빈 값이면 `origin/HEAD`). 세 명령이 이 하나를 쓴다(§3.5).
+        base: []const u8,
         request_id: u64,
     ) bool {
         const state = self.state orelse return false;
@@ -416,6 +429,14 @@ pub const Backend = struct {
         };
         job.snapshot_tree = state.allocator.dupe(u8, snapshot_tree) catch &.{};
         job.index_file = state.allocator.dupe(u8, index_file) catch &.{};
+        // **심층 방어이지 정책이 아니다.** 고른 기준을 거르는 자리는 호출자(고를 때·읽어 올 때)다 —
+        // 여기서 조용히 기본값으로 돌아가면 사용자가 고른 기준 대신 **다른 질문의 답**이 화면에 뜬다.
+        // 그래도 argv에 싣기 직전에 한 번 더 보는 이유는 이 값이 파일(workspace)을 거쳐 오기 때문이다
+        // (§6: 밖에서 온 문자열은 인자 자리에서 다시 본다).
+        job.base = if (git_command.isSafeBaseRef(base))
+            state.allocator.dupe(u8, base) catch &.{}
+        else
+            &.{};
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.free(job.git_exe);
             state.allocator.free(job.repo);
@@ -693,7 +714,16 @@ pub const Backend = struct {
         return r;
     }
 
-    pub fn submitBranches(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+    /// 브랜치 목록을 읽는다. `kind`는 `.branches`(전환용 — 로컬만) 또는 `.base_candidates`(기준 후보 —
+    /// 원격 추적 ref 포함)다. 결과는 같은 슬롯으로 오므로 **부르는 쪽이 용도를 기억해야 한다**.
+    pub fn submitBranches(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        kind: git_command.Kind,
+        request_id: u64,
+    ) bool {
+        std.debug.assert(kind == .branches or kind == .base_candidates);
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.branches_inflight >= max_inflight or state.branches_result != null) {
@@ -705,7 +735,7 @@ pub const Backend = struct {
         state.mutex.unlock(state.io);
 
         const job = state.allocator.create(Job) catch return self.abandonBranches();
-        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .file_list_kind = kind };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseBranchesJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseBranchesJob(job);
         const thread = std.Thread.spawn(.{}, branchesWorker, .{job}) catch return self.releaseBranchesJob(job);
@@ -1143,7 +1173,9 @@ fn ignoreWorker(job: *Job) void {
 fn branchesWorker(job: *Job) void {
     const state = job.state;
     var result: BranchesResult = .{ .request_id = job.request_id };
-    if (run(state.allocator, .branches, job.git_exe, job.repo)) |out| {
+    // 어떤 목록인지는 **호출자가 정한다**(전환용 로컬 브랜치 / 기준 후보 — §3.5). 여기서 고르면
+    // 같은 워커가 두 뜻을 갖고, 부르는 쪽은 무엇이 올지 모른 채 결과를 받는다.
+    if (run(state.allocator, job.file_list_kind, job.git_exe, job.repo)) |out| {
         result.text = out.bytes;
         result.ok = true;
     } else |_| {}
@@ -1452,7 +1484,17 @@ fn worker(job: *Job) void {
     var result: Result = .{ .request_id = job.request_id };
     var ok = true;
     var truncated = false;
-    // 브랜치 범위 셋은 **선택**이다: origin/HEAD가 없으면 실패하는데 그건 정상이고 그 섹션만 없다.
+    // **기준은 여기서 한 번 정해 셋이 함께 쓴다**(§3.5). 갈리면 화면의 `↑N`과 그 아래 "브랜치에 COMMIT 됨"
+    // 목록이 서로 다른 질문의 답이 된다. 고른 기준이 없으면(빈 값) 기본 브랜치(`origin/HEAD`)다.
+    var range_buf: [git_command.max_base_range_len]u8 = undefined;
+    const base_ref: []const u8 = if (job.base.len > 0) job.base else git_command.default_base_ref;
+    // `submit`이 이미 걸렀으므로 여기서 null이 나오지 않는다. 그래도 orelse를 두는 이유는 그 사실이
+    // **다른 파일의 규율**이기 때문이다 — 그쪽이 느슨해지면 여기서 죽는 대신 기본값으로 돈다.
+    const base_range: []const u8 = if (job.base.len > 0)
+        (git_command.baseRange(job.base, &range_buf) orelse git_command.default_base_range)
+    else
+        git_command.default_base_range;
+    // 브랜치 범위 셋은 **선택**이다: 기준이 없으면 실패하는데 그건 정상이고 그 섹션만 없다.
     // 여기서 ok를 내리면 기준을 못 잡는 저장소에서 목록 전체가 실패로 보인다.
     inline for (.{
         .{ git_command.Kind.merge_base, "merge_base" },
@@ -1471,8 +1513,17 @@ fn worker(job: *Job) void {
         // **기본 브랜치 대비 ahead/behind도 선택이다**(§3.5). origin/HEAD가 없는 저장소(로컬 전용·clone
         // 아님)에서는 실패하는데 그건 정상이고, 그때는 화면이 `@{u}` 값으로 돌아간다.
         .{ git_command.Kind.ahead_behind, "ahead_behind" },
+        // **기준 이름 읽기도 선택이다**(§3.5). `origin/HEAD`가 없는 저장소에서 실패하고, 그 실패가 곧
+        // "사용자가 기준을 골라야 한다"는 신호다 — `ahead_behind`의 실패만으로는 unborn과 구별되지 않는다.
+        .{ git_command.Kind.default_base, "default_base" },
     }) |pair| {
-        if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
+        const arg: ?[]const u8 = switch (pair[0]) {
+            .merge_base => base_ref,
+            .branch_name_status, .branch_numstat, .ahead_behind => base_range,
+            // 기준 이름 자체를 묻는 읽기에는 기준을 안 넘긴다 — 그 답이 곧 기본값이다.
+            else => null,
+        };
+        if (runWithArg(state.allocator, pair[0], job.git_exe, job.repo, arg)) |out| {
             @field(result, pair[1]) = out.bytes;
             // **선택 명령의 잘림도 화면에 말한다**(적대적 검증 2026-08-14). 여기서 삼키면 `numstat_head`가
             // 상한에 걸렸을 때 앞쪽 파일만 숫자를 갖고 나머지는 조용히 빈 채로 남는다 — 사용자는 그것을
@@ -1504,6 +1555,7 @@ fn worker(job: *Job) void {
     }
     result.ok = ok;
     result.truncated = truncated;
+    if (job.base.len > 0) state.allocator.free(job.base);
     if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
     if (job.index_file.len > 0) state.allocator.free(job.index_file);
     state.allocator.free(job.git_exe);
@@ -2002,7 +2054,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submit(exe, repo, "", "", 7));
+    try testing.expect(backend.submit(exe, repo, "", "", "", 7));
 
     // git status는 큰 저장소에서 수백 ms 걸린다. 10초까지 기다린 뒤에도 없으면 배관이 끊긴 것으로 본다.
     var spins: usize = 0;
@@ -2089,7 +2141,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     defer backend.deinit();
 
     // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
-    try testing.expect(backend.submit(exe, repo, "", "", 1));
+    try testing.expect(backend.submit(exe, repo, "", "", "", 1));
     var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
     defer listed.deinit(worker_allocator);
     if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다

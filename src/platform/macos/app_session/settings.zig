@@ -1369,7 +1369,10 @@ pub fn clearBranchMenuText(self: *AppSession) void {
     // **해제와 닫기를 묶는다.** 메뉴 항목(`context_menu_items_buf`)이 이 버퍼를 빌리므로, 열린 채로 해제하면
     // 다음 draw가 해제된 메모리를 읽는다. 재발행이 늘 뒤따르지도 않는다 — 새 목록이 0개면 `openBranchMenu`가
     // 알림만 띄우고 돌아온다.
-    if (self.branch_menu_open) closeContextMenu(self);
+    // **기준 목록도 같은 버퍼를 빌린다**(§3.5 — 도크 `∨`에서 갈라져 나온 목록이라 이름 슬라이스의
+    // 출처가 같다). 이 조건에 그쪽을 빠뜨리면 그 메뉴가 열린 채 버퍼가 해제돼 같은 UAF가 난다 —
+    // 위 주석이 막으려던 것과 **한 글자도 다르지 않은 상황**이고, 플래그만 다르다.
+    if (self.branch_menu_open or self.scm_base_menu_open) closeContextMenu(self);
     if (self.branch_menu_text.len > 0) self.allocator.free(self.branch_menu_text);
     self.branch_menu_text = &.{};
     self.branch_menu_len = 0;
@@ -1377,8 +1380,11 @@ pub fn clearBranchMenuText(self: *AppSession) void {
 
 /// 상태바 브랜치 항목에서 브랜치 목록을 **요청**한다. 결과는 다음 tick에 `drainGitStatus`가 걷어 메뉴를 연다.
 /// git 실행은 백엔드 스레드라 클릭이 UI를 멈추지 않는다.
-pub fn requestBranchMenu(self: *AppSession) void {
+pub fn requestBranchMenu(self: *AppSession, purpose: app_session_mod.BranchMenuPurpose) void {
     if (self.branch_menu_pending) return; // 연타로 프로세스가 쌓이지 않게
+    // **용도를 요청과 함께 기억한다**(§3.5). 결과 슬롯이 하나라 도착한 목록만 보고는 어느 클릭의 답인지
+    // 알 수 없다 — 기준을 고르려고 연 목록이 전환 메뉴로 열리면 고른 이름이 터미널에 들어간다.
+    self.branch_menu_purpose = purpose;
     // 백엔드는 **지연 생성**이다(소스 컨트롤을 연 적 없으면 없다). 없으면 조용히 무시되던 것을 여기서 만든다 —
     // `refreshGitStatus`와 같은 규율. 안 그러면 도크를 한 번도 안 연 사용자에겐 브랜치 클릭이 아무 일도 안 한다.
     if (self.git_backend == null) {
@@ -1410,7 +1416,13 @@ pub fn requestBranchMenu(self: *AppSession) void {
         },
     };
     self.git_request_seq +%= 1;
-    if (backend.submitBranches(git_exe, repo, self.git_request_seq)) self.branch_menu_pending = true;
+    const kind: git_command.Kind = switch (purpose) {
+        // 전환 목록은 로컬 브랜치만이다 — 원격 추적 ref로 checkout하면 detached HEAD가 된다.
+        .switch_branch => .branches,
+        // 기준 후보는 원격 추적 ref까지다: `origin/HEAD`가 없는 저장소에서 고르고 싶은 이름이 보통 거기 있다.
+        .pick_base => .base_candidates,
+    };
+    if (backend.submitBranches(git_exe, repo, kind, self.git_request_seq)) self.branch_menu_pending = true;
 }
 
 /// 걷은 목록으로 메뉴를 연다. 앵커는 **상태바 브랜치 항목 위**다 — 메뉴는 위로 펼쳐야 바에 가리지 않는다.
@@ -1463,6 +1475,10 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.terminal_context_menu = false;
     self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
     self.scm_remote_menu_open = false; // 도크 `∨`도 같은 규율(P6b)
+    // **항목 표는 여기서 지우지 않는다.** accept 경로가 **닫은 뒤에** 고른 자리를 뜻으로 되돌리기
+    // 때문이다(브랜치 목록 텍스트를 살려 두는 것과 같은 이유). 표는 열 때마다 다시 만들고, 그 사이
+    // 열려 있다는 플래그가 없으면 accept가 이 분기로 오지 않는다.
+    self.scm_base_menu_open = false; // 그 `∨`에서 갈라져 나온 기준 목록(§3.5)
     self.resource_menu_open = false; // 얼린 행 순서도 여기서 놓는다(다음에 열 때 다시 정렬한다)
     self.resource_menu_len = 0;
     self.agent_menu_open = false; // 에이전트 팝오버도 같은 규율 — 플래그를 빠뜨리면 다음 메뉴의 accept가 엉뚱한 분기로 간다
@@ -1514,6 +1530,15 @@ pub fn acceptContextMenu(self: *AppSession) void {
         const selected = self.chrome_host.context_menu.selected;
         closeContextMenu(self); // 먼저 닫는다 — 주입한 명령이 메뉴에 가리지 않게
         scm_dock_ops.applyRemoteMenuSelection(self, selected);
+        return;
+    }
+    // 기준 브랜치 목록(§3.5) — `∨` 메뉴에서 갈라져 나왔고 브랜치 전환 목록과 **같은 버퍼**를 쓴다.
+    // 그래서 전환 분기보다 먼저 본다: 뒤에 두면 두 플래그가 함께 서는 순간 고르기만 하려던 이름이
+    // `git switch`로 터미널에 들어간다.
+    if (self.scm_base_menu_open) {
+        const selected = self.chrome_host.context_menu.selected;
+        closeContextMenu(self);
+        scm_dock_ops.applyBaseMenuSelection(self, selected);
         return;
     }
     // 브랜치 목록이 그다음이다 — 다른 메뉴 상태와 배타이고, 고른 이름을 터미널에 넣고 닫는다.

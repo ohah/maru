@@ -158,15 +158,51 @@ pub fn build(
 
         var it = visual_map.pieces(expanded, view_cols, props.wrap);
         var piece_idx: u32 = 0;
+
+        // **조각 시작을 두 축으로 따라간다** — 열과 **원본 byte**(§4.1g).
+        //
+        // 열은 조각 폭을 누적하면 나온다(`Piece.cols`). 원본 byte는 그렇게 안 된다: 조각 경계는
+        // **전개 텍스트** 기준이라(탭이 공백 여럿, §3.8 문자가 표기로 바뀐 뒤) 그 offset이 문서 위치가
+        // 아니다. 그래서 원본을 `stepColumn`으로 **병행해** 걷는다 — 두 걸음이 어긋나지 않는 근거는
+        // **열의 정의가 두 좌표계에서 같다**는 것이고, 무작위 600줄에서 0건 불일치로 쟀다(§4.1g 실측).
+        //
+        // 걷는 총 거리는 줄을 한 번 지나는 것이다(조각마다 앞에서 다시 시작하지 않는다).
+        //
+        // **시작 열은 `first_col`이다.** 전개가 거기서부터 만들어지므로(`expandTabs`의 `.start`)
+        // 첫 조각도 줄 머리가 아니라 그 자리에서 시작한다. 랩이 켜지면 `first_col`은 0이고(랩은
+        // 넘칠 것을 없애 가로 축을 지운다 — §4), 랩이 꺼지면 조각이 하나라 이 값이 그대로 남는다.
+        // 그래서 두 경우가 같은 식으로 처리된다.
+        var start_col: u32 = props.first_col;
+        var src_i: usize = 0;
+        var src_col: u32 = 0;
+
         while (it.next()) |piece| : (piece_idx += 1) {
+            // **원본을 이 조각의 시작 열까지 전진시킨다.** 걸친 cluster(쪼개진 탭·2칸 글자·8칸 표기)
+            // 에서는 그 안으로 들어가지 않고 **cluster 시작에 머문다** — 거기에는 원본 byte가 없다
+            // (실측 48%). 클릭은 거기서부터 걸으면 되고 거리는 여전히 조각 폭 이내다.
+            while (src_i < row.bytes.len and src_col < start_col) {
+                const st = stepColumn(row.bytes, src_i, src_col, props.tab_width);
+                if (st.next_col > start_col) break;
+                src_i = st.next_byte;
+                src_col = st.next_col;
+            }
             // **첫 줄의 앞 조각들은 화면 위로 지나간 부분이다.** 행을 세지도 배치를 채우지도
             // 않는다 — 그 조각들은 화면에 없다.
+            // **누적은 건너뛴 조각에도 일어나야 한다.** `skip`이 가리키는 앞 조각들은 화면 위로
+            // 지나갔지만 **열은 지나간 만큼 밀려 있다** — 여기서 안 더하면 화면 첫 행의 시작 열이
+            // 0이 되어 그 줄 전체의 강조가 왼쪽으로 밀린다.
+            defer start_col += piece.cols;
             if (piece_idx < skip) continue;
             if (visual_row >= visual_out.len) break;
 
             // **빈 조각도 시각 행을 차지한다.** 그릴 글자가 없어도 그 행은 화면에서 한 줄이고 gutter가
             // 번호를 그려야 한다 — op만 건너뛰고 행은 센다. 이걸 빼면 빈 줄 아래의 번호가 밀린다.
-            visual_out[visual_row] = .{ .line = @intCast(line_idx), .piece = piece_idx };
+            visual_out[visual_row] = .{
+                .line = @intCast(line_idx),
+                .piece = piece_idx,
+                .start_col = start_col,
+                .start_byte = @intCast(src_i),
+            };
             const text = piece.slice(expanded);
             defer visual_row += 1;
             if (text.len == 0) continue;
@@ -305,6 +341,62 @@ pub fn columnOfByte(bytes: []const u8, tab_width: u16, byte_off: usize, scratch:
     if (off == 0) return 0;
     const r = expandTabs(bytes[0..off], tab_width, scratch, .{ .count = std.math.maxInt(u32) });
     return columnsOf(r.text);
+}
+
+/// 클릭 지점이 줄의 어느 **원본 byte**인가 — 역방향 변환
+/// ([visual-mapping](../../../docs/native-editor-visual-mapping.md) §4.1g의 ④).
+///
+/// **입력이 픽셀인 이유**는 걸친 cluster의 앞/뒤를 그것으로만 가르기 때문이다. `Selection`은 caret
+/// 모델이라 커서가 글자 *사이*에 놓이므로 **1칸 글자에도 앞과 뒤 두 자리**가 있고, 칸으로만 판정하면
+/// 그 둘이 같은 답을 받는다(소스의 대부분이 1칸 ASCII다). CM6의 `assoc`, Win32의 trailing edge와 같은
+/// 판정이다.
+///
+/// **결과는 늘 유효하다** — §10이 *"항상 유효한 offset을 반환(clamp)"*이라 정했다. 그래서 역방향은
+/// 왕복이 아니고, 불변식은 *"결과가 cluster 경계이고 줄 범위 안"*이라는 더 약한 것이다.
+///
+/// `start_byte`·`start_col`은 **이 행이 시작하는 자리**다(`visual_map.VisualRow`). 줄 머리부터 걷지
+/// 않으므로 거리가 행 폭 이내로 유지된다 — 랩을 켜면 가로 상한이 없어 줄 머리부터 걸으면 줄 길이에
+/// 비례한다(§4.1g 실측).
+///
+/// `x_px`는 **본문 사각 안의 x**다(gutter를 뺀 뒤). gutter는 접힘 화살표가 먼저 가져가므로 이 함수에
+/// 오지 않는다.
+pub fn byteAtPoint(
+    bytes: []const u8,
+    tab_width: u16,
+    start_byte: usize,
+    start_col: u32,
+    row_cols: u32,
+    x_px: i32,
+    cell_w_px: u16,
+) usize {
+    if (cell_w_px == 0 or bytes.len == 0) return @min(start_byte, bytes.len);
+    // 행 왼쪽 밖은 **그 행의 시작**이다(줄 시작이 아니다 — 랩된 두 번째 행부터 둘이 다르다).
+    if (x_px <= 0) return @min(start_byte, bytes.len);
+
+    const click_px: u32 = @intCast(x_px);
+    // 이 행이 덮는 열 범위. 그 너머는 **행 끝**으로 clamp한다.
+    const row_end_col: u32 = start_col +| row_cols;
+
+    var i = @min(start_byte, bytes.len);
+    var col = start_col;
+    while (i < bytes.len) {
+        const st = stepColumn(bytes, i, col, tab_width);
+        if (st.next_col > row_end_col) break; // 이 행을 넘어간다 — 행 끝이다
+
+        // cluster가 차지하는 픽셀 범위 `[lo, hi)`. 중점보다 왼쪽이면 앞, 아니면 뒤.
+        //
+        // **중점은 정수 나눗셈으로 내린다.** `cell_w_px`가 정수라 폭이 홀수면 중점이 반 픽셀에
+        // 걸린다 — 어긋나 봐야 1픽셀이라 보이지 않지만, 방향을 안 정하면 구현마다 답이 갈린다.
+        const lo = (col - start_col) * cell_w_px;
+        const hi = (st.next_col - start_col) * cell_w_px;
+        if (click_px < lo + (hi - lo) / 2) return i;
+        if (click_px < hi) return st.next_byte;
+
+        i = st.next_byte;
+        col = st.next_col;
+    }
+    // 행 끝 너머 — 마지막으로 지난 자리다.
+    return i;
 }
 
 /// 한 걸음: 이 위치의 cluster(또는 탭)를 지나면 **다음 byte와 다음 열**이 어디인가.
@@ -2075,4 +2167,176 @@ test "[실측] 열이 두 좌표계의 다리가 되는가 — 전개 byte ↔ �
         "\n[실측] 열 정의 불일치 {d}/{d}줄 · 조각 시작이 원본 cluster 안쪽 {d}/{d} (탭 {d} · 넓은글자·표기 {d} · 그밖 {d})\n",
         .{ col_mismatch, lines, roundtrip_bad, checked_pieces, split_tab, split_wide, split_other },
     );
+}
+
+test "조각 시작 열과 원본 byte가 실제 조각과 맞는다 — 무작위 대조" {
+    // **`build`가 행마다 실어 주는 `(start_col, start_byte)`가 옳은가**(§4.1g). 이 값이 틀리면
+    // 랩된 줄에서 강조가 밀리고 클릭이 엉뚱한 글자를 가리킨다 — 그리고 **둘 다 조용히 틀린다**.
+    //
+    // 판정은 왕복이 아니라 **독립 계산과의 대조**다: 조각 시작 열은 전개 텍스트에서 직접 세고
+    // (`columnsOf(expanded[0..piece.start])` + `first_col`), 원본 byte는 그 열에서 원본을 걸어 얻는다.
+    // `build`의 누적 경로와 다른 길이므로 같은 답이 나오면 그 누적이 맞다는 뜻이다.
+    const alloc = std.testing.allocator;
+    const alphabet = [_][]const u8{
+        "a",        "b",        "z",
+        "가",
+        "나",
+        "😀",
+        "\t",       " ",        "\u{202E}",
+        "\u{200D}", "\u{00AD}",
+    };
+    var prng = std.Random.DefaultPrng.init(0xBEEF);
+    const rand = prng.random();
+
+    const scratch = try alloc.alloc(u8, 256 * 1024);
+    defer alloc.free(scratch);
+    const scratch2 = try alloc.alloc(u8, 256 * 1024);
+    defer alloc.free(scratch2);
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+
+    var checked: usize = 0;
+    for (0..300) |_| {
+        line.clearRetainingCapacity();
+        const len = 20 + rand.uintLessThan(usize, 200);
+        for (0..len) |_| try line.appendSlice(alloc, alphabet[rand.uintLessThan(usize, alphabet.len)]);
+        const view_cols: u16 = @intCast(20 + rand.uintLessThan(u16, 60));
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u16, 8));
+
+        const exp = expandTabs(line.items, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+        if (exp.truncated) continue;
+
+        var it = visual_map.pieces(exp.text, view_cols, true);
+        var acc: u32 = 0; // `build`가 하는 것과 같은 누적
+        while (it.next()) |piece| {
+            // ① 열: 누적한 값이 전개 텍스트에서 직접 센 값과 같은가.
+            const direct_col = columnsOf(exp.text[0..piece.start]);
+            try std.testing.expectEqual(direct_col, acc);
+
+            // ② 원본 byte: 그 열에서 원본을 걸어 얻은 위치와 같은가.
+            const direct_byte = byteAtColumnProto(line.items, tab_width, acc);
+            const back = columnOfByte(line.items, tab_width, direct_byte, scratch2);
+            // 걸친 cluster면 그 시작에 머문다 — 열이 뒤로 물러날 수는 있어도 넘어서지 않는다.
+            try std.testing.expect(back <= acc);
+
+            acc += piece.cols;
+            checked += 1;
+        }
+        // 마지막 누적은 줄 전체 열과 같아야 한다 — 조각들이 줄을 빠짐없이 덮는다.
+        try std.testing.expectEqual(lineColumns(line.items, tab_width), acc);
+    }
+    try std.testing.expect(checked > 300); // 대조가 실제로 돌았다
+}
+
+test "byteAtPoint: 아무 픽셀을 쏴도 cluster 경계이고 줄 범위 안이다 (§4.1g 주 판정)" {
+    // **§10이 정한 세 번째 불변식이 이 슬라이스의 주 판정이다.** 역방향은 왕복이 아니므로 등식을
+    // 기대할 수 없고(실측: 조각 시작의 48%가 원본 cluster 경계가 아니다), 대신 *"결과가 cluster
+    // 경계이고 범위 안"*이라는 더 약한 것을 지킨다.
+    //
+    // 알파벳에 §3.8 문자가 들어 있다 — §4.1c가 정한 규율이고, **Vim이 아직 못 고친 함정**이 정확히
+    // 이 종류다(conceal 폭이 1보다 크면 커서가 틀린 자리에 선다, neovim#25915).
+    const alloc = std.testing.allocator;
+    const alphabet = [_][]const u8{
+        "a",        "b",        "z",
+        "가",
+        "나",
+        "😀",
+        "\t",       " ",        "\u{202E}",
+        "\u{200D}", "\u{00AD}",
+    };
+    var prng = std.Random.DefaultPrng.init(0xD00D);
+    const rand = prng.random();
+
+    const scratch = try alloc.alloc(u8, 256 * 1024);
+    defer alloc.free(scratch);
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+
+    var shots: usize = 0;
+    for (0..300) |_| {
+        line.clearRetainingCapacity();
+        const len = 20 + rand.uintLessThan(usize, 120);
+        for (0..len) |_| try line.appendSlice(alloc, alphabet[rand.uintLessThan(usize, alphabet.len)]);
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u16, 8));
+        const cell_w: u16 = @intCast(6 + rand.uintLessThan(u16, 10));
+        const view_cols: u16 = @intCast(20 + rand.uintLessThan(u16, 60));
+
+        const exp = expandTabs(line.items, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+        if (exp.truncated) continue;
+
+        // 행마다 그 행의 시작 정보를 만들고, 그 안팎으로 좌표를 쏜다.
+        var it = visual_map.pieces(exp.text, view_cols, true);
+        var acc: u32 = 0;
+        while (it.next()) |piece| {
+            const start_byte = byteAtColumnProto(line.items, tab_width, acc);
+            defer acc += piece.cols;
+
+            for (0..12) |_| {
+                // 행 밖(음수·오른쪽 한참)까지 포함해 쏜다 — 드래그는 화면을 벗어난다.
+                const span: i32 = @intCast((piece.cols + 8) * cell_w);
+                const x: i32 = @as(i32, @intCast(rand.uintLessThan(u32, @intCast(span + 40)))) - 20;
+                const off = byteAtPoint(line.items, tab_width, start_byte, acc, piece.cols, x, cell_w);
+                shots += 1;
+
+                // ⑴ 줄 범위 안
+                try std.testing.expect(off <= line.items.len);
+                // ⑵ cluster 경계 — 그 위치에서 시작해 줄 끝까지 걸으면 정확히 도달한다.
+                //    (경계가 아니면 UTF-8 중간이거나 cluster 안쪽이라 도달 못 하거나 어긋난다)
+                var walk = off;
+                var wcol: u32 = 0;
+                while (walk < line.items.len) {
+                    const st = stepColumn(line.items, walk, wcol, tab_width);
+                    walk = st.next_byte;
+                    wcol = st.next_col;
+                }
+                try std.testing.expectEqual(line.items.len, walk);
+                // ⑶ 이 행이 시작한 자리보다 앞으로 가지 않는다
+                try std.testing.expect(off >= start_byte);
+            }
+        }
+    }
+    try std.testing.expect(shots > 1000);
+}
+
+test "byteAtPoint 결정표: 걸친 자리마다 무엇을 답하는가 (§4.1g)" {
+    // 계약의 표를 그대로 고정한다. **폭이 다른 셋을 같은 규칙으로 판정한다** — 2칸 글자·탭·8칸 표기.
+    const cw: u16 = 10;
+
+    {
+        // ① 2칸 글자: 왼쪽 절반이면 앞(0), 오른쪽이면 뒤(3바이트 = "가" 다음).
+        const line = "가나";
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 4, 0, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 4, 9, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 4, 10, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 4, 19, cw));
+    }
+    {
+        // ② 탭(폭 4 → 40px): 같은 절반 규칙. 20px가 경계다.
+        const line = "\tx";
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 5, 19, cw));
+        try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 4, 0, 0, 5, 20, cw));
+    }
+    {
+        // ③ §3.8 표기: `\u{202E}`가 `<U+202E>` 8칸(80px)으로 그려진다. 40px가 경계다.
+        //    **안으로 들어가지 않는다** — 그 안에는 문서에 없는 offset뿐이다.
+        const line = "\u{202E}x";
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 9, 39, cw));
+        try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 9, 40, cw)); // U+202E는 3바이트
+    }
+    {
+        // ④ 행 끝 너머 → 행 끝. 행 왼쪽 밖 → 행 시작.
+        const line = "ab";
+        try std.testing.expectEqual(@as(usize, 2), byteAtPoint(line, 4, 0, 0, 2, 9_999, cw));
+        try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 2, -50, cw));
+    }
+    {
+        // ⑤ **랩된 두 번째 행**: "줄 끝"이 아니라 "행 끝"이다(적대적 검증 19회차).
+        //    "abcdef"를 2열씩 끊었다고 보고 세 번째 행(start_col=4, start_byte=4, cols=2)을 본다.
+        //    그 행 오른쪽 너머를 눌러도 **줄 맨 끝(6)이 아니라 그 행의 끝**에서 멈춘다.
+        const line = "abcdefghij";
+        try std.testing.expectEqual(@as(usize, 6), byteAtPoint(line, 4, 4, 4, 2, 9_999, cw));
+        // 그 행의 왼쪽 밖은 줄 시작(0)이 아니라 **행 시작**(4)이다.
+        try std.testing.expectEqual(@as(usize, 4), byteAtPoint(line, 4, 4, 4, 2, -1, cw));
+    }
 }

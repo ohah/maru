@@ -5088,3 +5088,55 @@ test "[측정] 열→byte 역방향 — 클릭 지점까지 훑는 비용" {
         }
     }
 }
+
+test "[측정] 조각 시작을 함께 내는 비용 — 렌더 루프에 걸음이 하나 더 붙는다 (§4.1g)" {
+    // **계약이 "구현 슬라이스에서 잰다"고 미뤄 둔 값이다.** `content.build`가 조각을 순회하며 원본을
+    // `stepColumn`으로 **병행해** 걸어 `start_byte`를 낸다 — 전개(`expandTabs`)와 별개 걸음이므로
+    // 공짜가 아니다. 그 몫이 프레임 예산에서 얼마인지 재지 않으면 "작다"는 말은 추측이다.
+    //
+    // 같은 문서를 두 번 그려 비교하지 않는다 — 두 번째는 CPU 캐시가 따뜻해 첫 번째보다 빠르다(여는
+    // 경로 측정에서 같은 함정을 만났다). 대신 **랩을 켜고 끈 두 문서**를 각각 여러 프레임 그려,
+    // 병행 걸음이 실제로 도는 랩 켠 쪽이 얼마나 더 드는지 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 본문 폭보다 훨씬 긴 줄 — 랩을 켜면 줄마다 여러 조각이 된다.
+    const line = "const value = compute(index); // 탭\t한글 가나다 그리고 이모지 😀 를 섞어 조각이 여러 개가 되게 한다\n";
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for (0..3_000) |_| try text.appendSlice(allocator, line);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "wrap.zig", .data = text.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wrap.zig" });
+    defer allocator.free(path);
+
+    const term = try openPathInActivePane(fx.session, path);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
+
+    for ([_]bool{ false, true }) |wrap| {
+        term.rt.editor_wrap = wrap;
+        term.rt.editor_row_cache.filled = false; // 랩이 갈리면 캐시가 무효다
+        var slowest: u64 = 0;
+        var total: u64 = 0;
+        const frames: usize = 30;
+        for (0..frames) |_| {
+            const t0 = monotonicMsForTest();
+            _ = appendPaneFrame(fx.session, leaf, term);
+            const dt = monotonicMsForTest() - t0;
+            total += dt;
+            if (dt > slowest) slowest = dt;
+        }
+        std.debug.print("\n[측정] 랩={s}: 프레임 평균 {d}ms, 최악 {d}ms ({d}줄)\n", .{
+            if (wrap) "켬" else "끔",
+            total / frames,
+            slowest,
+            term.rt.editor_lines.len,
+        });
+    }
+}

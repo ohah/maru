@@ -311,13 +311,15 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
 ///
 /// **판정이 현재 언어를 안 본다는 것이 이 함수의 계약이다.** 예전에는 현재 언어로 푼 문자열 하나만 봤고,
 /// 그래서 통과 행 집합과 순서가 언어를 탔다 — `selected` 는 인덱스일 뿐이라 언어가 바뀌는 순간 다른 설정을
-/// 가리키게 되고, 확정이 **사용자가 열지도 않은 키**에 값을 썼다. 실측으로 542개 쿼리 중 386개가 두 언어에서
-/// 서로 다른 집합을 냈다. 전환 지점마다 선택을 다시 앉히는 방식으로도 막아 봤지만, 다른 창이 언어를 바꾼
+/// 가리키게 되고, 확정이 **사용자가 열지도 않은 키**에 값을 썼다. 실측(쿼리 4186개, 전 섹션, 순서 포함
+/// 비교)으로 **1499개(35.8%)** 가 두 언어에서 서로 다른 나열을 냈다. 전환 지점마다 선택을 다시 앉히는 방식으로도 막아 봤지만, 다른 창이 언어를 바꾼
 /// 경우처럼 **이 창이 아무 코드도 안 도는 경로**가 남았다(i18n 계약 §5.2). 판정에서 언어를 빼면 그 경로가
 /// 통째로 사라진다 — 흔들릴 것이 없으므로 붙잡을 것도 없다.
 ///
 /// 대가는 **화면에 안 보이는 문장으로 행이 통과하는 것**이다(영어 UI 에서 `폰트` 로 걸러도 그 행이 남는다).
-/// 그 성질 자체는 새롭지 않다 — 키 매칭이 이미 그랬다. 실측으로 통과 행이 36% 늘고 짧은 쿼리에 몰린다.
+/// 그 성질 자체는 새롭지 않다 — 키 매칭이 이미 그랬다. 실측으로 통과 행이 **+15.8%** 늘고, 그 증가는
+/// 한국어 화면에 몰린다(en +8.2% / ko +24.5% — 한국어 화면이 이제 영어 문장으로도 걸리기 때문이다).
+/// 짧은 쿼리라고 특별히 더 늘지는 않는다(≤3자 +15.7%로 전체와 같다).
 /// 그것을 감수하는 이유는, "결과가 조금 많다" 와 "선택이 조용히 다른 키로 미끄러진다" 가 같은 무게가 아니기
 /// 때문이다. 부수 효과로 **영어 이름으로도 찾을 수 있다**(한국어 화면에서 `language` 로 `ui.language` 를).
 pub fn settingsRowMatches(doc_key: ?maru.i18n.Key, label: []const u8, key: []const u8, query: []const u8) bool {
@@ -1824,8 +1826,13 @@ fn captureSelectedRowKey(self: *AppSession, buf: []u8) ?[]const u8 {
 
 /// 행 집합이 바뀐 뒤, 앞서 떠 둔 키로 선택을 다시 앉히고 행 수를 다시 알린다.
 ///
-/// 그 행이 사라졌으면(파일이 지운 `env.FOO`) 앉힐 자리가 없으므로 행 수만 갱신한다 — 그때 컴포넌트가
+/// 뜰 키가 아예 없었으면(설정 폼이 닫혀 있었거나 통과 행이 0이었으면) 행 수만 갱신한다 — 그때 컴포넌트가
 /// `selected` 를 범위 안으로 clamp 한다.
+///
+/// **키는 있는데 그 행이 사라졌으면**(파일이 지운 `env.FOO`) `reanchorSelectedByKey` 의 폴백이 돈다 —
+/// 검색 쿼리를 지우고 그 키가 살던 섹션으로 옮긴 뒤 다시 찾는다. 여기서도 그 폴백이 맞다고 본 이유는,
+/// 사라진 행을 가리키는 선택을 그대로 두면 **다음 Enter 가 남의 행에 간다**는 것이 언어 축과 똑같기
+/// 때문이다. 다만 사용자가 친 검색어가 지워지는 것은 눈에 띄는 부작용이라 여기 적어 둔다.
 fn restoreSelectedRowKey(self: *AppSession, anchored: ?[]const u8) void {
     if (!self.chrome_host.settings.open) return;
     if (anchored) |key| {
@@ -2491,22 +2498,21 @@ pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]Settings
     return list.items;
 }
 
-/// 화면 언어가 바뀐 **직후** 선택 행을 `key` 에 다시 맞춘다.
+/// 행 집합이 바뀐 **직후** 선택 행을 `key` 에 다시 맞춘다.
 ///
-/// 폼 필터는 `meta.doc` 로 검색한다(§2·§4). 그런데 `doc` 은 이제 언어에 따라 달라지므로, `ui.language`
-/// 를 라이브 프리뷰(↑↓)하는 순간 **필터를 통과하는 행 집합과 그 순서가 함께 바뀐다**. `selected` 는
-/// 인덱스일 뿐이라 그 자리에 다른 설정이 들어와도 모르고, 그 상태로 Enter 를 누르면 **사용자가 열지도
-/// 않은 키**에 값이 써진다. 그래서 인덱스가 아니라 키를 기준으로 다시 앉힌다.
+/// `selected` 는 인덱스일 뿐이라 통과 행 집합이 바뀌면 그 자리에 다른 설정이 들어와도 모르고, 그 상태로
+/// Enter 를 누르면 **사용자가 열지도 않은 키**에 값이 써진다. 그래서 인덱스가 아니라 키로 다시 앉힌다.
+///
+/// 집합을 바꾸는 축은 **파일**이다(`reloadConfig` — 다른 창이나 편집기가 `env.*`·`macro.*` 를 더하거나
+/// 지운다). 언어 축은 필터가 언어를 안 보게 되면서 사라졌다(`settingsRowMatches` 의 계약).
 ///
 /// 새 언어의 라벨이 쿼리와 안 맞아 행 자체가 사라지면(한국어 라벨로 찾아 놓고 영어로 바꾼 경우) 쿼리를
 /// 지운다 — 편집 중인 행이 목록 밖에 있는 상태가 그대로 남는 것보다, 필터가 풀려 그 행이 다시 보이는
 /// 쪽이 되돌리기 쉽다.
 ///
 /// **쿼리를 지우는 것만으로는 부족하다 — 섹션도 함께 옮긴다.** 검색은 교차 섹션이라(`cross`), 사용자는
-/// `font` 섹션에 서서 `app` 섹션의 `ui.language` 행을 고를 수 있다. 그 상태에서 쿼리만 지우면 섹션
-/// 게이트가 되살아나 그 행이 **여전히 목록에 없고**, `selected` 는 남의 행을 가리킨 채로 남는다. 그러면
-/// 확정이 그 행에 값을 쓸 뿐 아니라 `markConfigKeyDirty(.., "ui.language")` 가 아예 안 불려 **고른 언어가
-/// 파일에 안 써진다**(재시작하면 사라진다).
+/// `font` 섹션에 서서 `terminal` 섹션의 행을 고를 수 있다. 그 상태에서 쿼리만 지우면 섹션 게이트가
+/// 되살아나 그 행이 **여전히 목록에 없고**, `selected` 는 남의 행을 가리킨 채로 남는다.
 fn reanchorSelectedByKey(self: *AppSession, key: []const u8) void {
     // 행이 아직 필터를 통과하더라도 **행 수는 이미 달라졌을 수 있다** — `doc` 이 언어를 타므로 통과
     // 집합 자체가 바뀐다. 그래서 이 갱신은 두 분기 **앞**에 둔다. 앞선 판은 폴백에만 두어, 행이 남아
@@ -2546,7 +2552,7 @@ fn indexOfSettingsKey(self: *AppSession, key: []const u8) ?usize {
 /// 아는 유일한 자리이므로 그것을 쓴다.
 ///
 /// 쿼리가 이미 비워진 뒤에 불린다는 것이 전제다(그래야 섹션 게이트가 살아 있다). 비용은 섹션 수만큼의
-/// arena 빌드인데, 언어가 실제로 바뀔 때만 도는 경로라 문제가 되지 않는다.
+/// arena 빌드인데, **앵커 행이 사라졌을 때만** 도는 폴백이라 문제가 되지 않는다.
 fn sectionIndexOfSettingsKey(self: *AppSession, key: []const u8) ?usize {
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
@@ -3108,120 +3114,6 @@ fn settingsKeyAt(self: *AppSession, allocator: std.mem.Allocator, i: usize) !?[]
     return try allocator.dupe(u8, key);
 }
 
-/// `ui.language` 드롭다운에서 `name` 변형의 인덱스(테스트 헬퍼 — 선언 순서를 테스트에 박지 않는다).
-fn uiLanguageVariantIndex(self: *AppSession, allocator: std.mem.Allocator, name: []const u8) !usize {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const variants = (try config_mod.schema.enumVariants(arena.allocator(), self.loaded_config.config, "ui.language")) orelse
-        return error.TestUnexpectedResult;
-    for (variants, 0..) |v, i| if (std.mem.eql(u8, v, name)) return i;
-    return error.TestUnexpectedResult;
-}
-
-/// `key` 가 config 쓰기 대기 목록에 올랐는가(테스트 헬퍼).
-fn isConfigKeyDirty(self: *AppSession, key: []const u8) bool {
-    for (self.config_dirty_keys.items) |dirty| {
-        if (std.mem.eql(u8, dirty, key)) return true;
-    }
-    return false;
-}
-
-// 언어를 **안** 바꾸는 config 변경이 이 경로에서 부작용을 내지 않는가.
-//
-// `reapplyUiLanguage` 가 행 목록을 만들면 그것만으로 `keep_alive_after_quit` 가 앱 전역으로 되동기화된다.
-// keep-alive 토글은 ①config 에 새 값을 쓰고 ②`reapplyLoadedConfig` 를 부르고 ③전역을 세우는 순서라,
-// ②가 ①을 **옛 전역으로 되돌린다**. 언어가 안 바뀌면 곧장 나가는 것이 그것을 막는다.
-test "언어를 안 바꾸는 토글은 config 미러를 되돌리지 않는다" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const keep_before = app_session_mod.app_keep_alive_after_quit;
-    defer app_session_mod.app_keep_alive_after_quit = keep_before;
-
-    // 앱 전역과 config 미러를 켠 상태에서 시작한다 — 되돌림이 관찰되려면 둘이 같아야 한다.
-    app_session_mod.app_keep_alive_after_quit = true;
-    session.loaded_config.config.session.keep_alive_after_quit = true;
-    session.chrome_host.settings.show();
-
-    // 언어는 그대로 두고 config 만 바꾼다 — 토글이 하는 일과 같은 순서다.
-    session.loaded_config.config.session.keep_alive_after_quit = false;
-    reapplyLoadedConfig(session);
-
-    // 새 값이 살아 있어야 한다. 되돌아가면 껐는데 켜진 채로 남는다.
-    try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
-}
-
-// #8 의 근본 — **토글이 전역보다 config 미러를 먼저 쓰면 되돌려진다.**
-//
-// keep-alive 는 앱 전역이 정본이고 `loaded_config.config` 는 창마다의 미러다. 재적용 경로가 그 미러를
-// 전역에서 되동기화하므로, 전역을 나중에 세우면 방금 쓴 새 값이 **옛 전역으로 덮인다**. 앞선 판은 언어
-// 변경 경로에서만 그것을 막았는데(조기 반환), 그 경로 밖에서도 같은 되돌림이 가능한 구조였다.
-test "keep-alive 토글은 재적용이 미러를 되돌리기 전에 전역을 세운다" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const keep_before = app_session_mod.app_keep_alive_after_quit;
-    defer app_session_mod.app_keep_alive_after_quit = keep_before;
-
-    // 켜 둔 상태에서 그 행을 찾아 토글한다 — 되돌림은 켜짐 → 꺼짐에서만 관찰된다.
-    app_session_mod.app_keep_alive_after_quit = true;
-    session.loaded_config.config.session.keep_alive_after_quit = true;
-    session.chrome_host.settings.show();
-
-    const row = blk: {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const sections = try buildSectionList(session, arena.allocator());
-        const saved = session.chrome_host.settings.section;
-        for (0..sections.len) |i| {
-            session.chrome_host.settings.section = i;
-            if (indexOfSettingsKey(session, "session.keep-alive-after-quit")) |r| break :blk r;
-        }
-        session.chrome_host.settings.section = saved;
-        return error.TestUnexpectedResult;
-    };
-    session.chrome_host.settings.selected = row;
-
-    toggleSelectedSetting(session);
-
-    // 전역과 미러가 **둘 다** 새 값이어야 한다. 순서가 틀리면 미러만 옛 값으로 남고, 그 값이 파일로 간다.
-    try std.testing.expect(!app_session_mod.app_keep_alive_after_quit);
-    try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
-
-    // **조기 반환에 가려지지 않게** 한 번 더 본다. 위 단언만으로는 "순서가 맞다"가 아니라 "조기 반환
-    // 또는 순서 중 하나는 살아 있다"만 고정된다 — 언어가 안 바뀌면 미러 되쓰기 자체가 안 일어나기
-    // 때문이다. 그래서 이번에는 **언어가 바뀌는 상태**로 만들어 그 되쓰기가 실제로 도는 경로에서 잰다.
-    app_session_mod.app_keep_alive_after_quit = true;
-    session.loaded_config.config.session.keep_alive_after_quit = true;
-    // 언어가 실제로 바뀌게 만든다 — 그래야 재적용이 행 목록을 만들고 미러 되쓰기가 실제로 돈다.
-    session.loaded_config.config.ui_language = if (maru.i18n.lang() == .ko) .en else .ko;
-
-    toggleSelectedSetting(session);
-
-    try std.testing.expect(!app_session_mod.app_keep_alive_after_quit);
-    try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
-}
-
 // **`keyAtRow` 는 모든 행에 답해야 한다** — 시나리오가 아니라 성질로 못 박는다.
 //
 // 4차가 잡은 결함은 "`keyAtRow` 가 여덟 종류 중 다섯만 안다"였고, 그것을 막는 것이 시나리오 테스트
@@ -3314,12 +3206,36 @@ test "앵커를 못 잡아도 행 수는 다시 알린다" {
 // `env.*`·`macro.*` 를 더하거나 지우면 통과 행 집합이 그 자리에서 바뀌는데, `selected` 는 인덱스라 그 자리에
 // 다른 설정이 들어와도 모른다. **이것은 언어와 무관한 축**이라 필터를 언어 독립으로 만든 것으로는 안 닫힌다 —
 // 행 집합을 바꾸는 것이 언어가 아니라 파일이기 때문이다.
+//
+// **`reloadConfig` 를 실제로 부른다.** 앞선 판은 `capture` → 바꿈 → `restore` 세 줄을 테스트가 손으로 올바른
+// 순서에 늘어놓고 그 셋이 서로 맞는지만 봤다. 그러면 정작 **프로덕션 배선**(그 세 줄이 `reloadConfig` 안
+// 어디에 놓였는가)은 무엇을 해도 초록이다 — 적대적 검증이 capture 를 맨 뒤로 옮기고 두 줄을 통째로 지워도
+// 통과하는 것을 보였다. 순서가 이 배선의 전부인데 그 순서를 안 재고 있었다.
 test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload 축)" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+
+    // config 를 임시 파일로 박는다 — 개발자의 실제 파일을 읽지도 쓰지도 않는다.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const cfg_path = try std.fmt.allocPrintSentinel(allocator, "{s}/config", .{root}, 0);
+    defer allocator.free(cfg_path);
+
+    const prev = std.c.getenv("MARU_CONFIG");
+    defer if (prev) |v| {
+        _ = app_session_mod.setenv("MARU_CONFIG", v, 1);
+    } else {
+        _ = app_session_mod.unsetenv("MARU_CONFIG");
+    };
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "env.ZZZ_LAST = 1\n" });
+    try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("MARU_CONFIG", cfg_path.ptr, 1));
+
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+    try session.init(io, allocator, .{
         .abi_version = app_session_mod.abi_version,
         .cols = 40,
         .rows = 10,
@@ -3329,20 +3245,18 @@ test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload �
     defer session.deinit();
 
     session.chrome_host.settings.show();
-    // env 행이 사는 섹션으로 간다 — 거기서 행이 늘어나는 것을 관찰한다.
-    const home = sectionIndexOfSettingsKey(session, "env.") orelse return error.SkipZigTest;
+    const home = sectionIndexOfSettingsKey(session, "env.") orelse return error.TestUnexpectedResult;
     session.chrome_host.settings.section = home;
     refreshSettingsFieldCount(session);
 
-    const anchor = "env."; // 빈 KEY sentinel = "환경변수 추가" 행. env 행들 **뒤에** 선다
+    // 앵커는 env 행들 **뒤에** 서는 sentinel("환경변수 추가" 행)이다. 앞에 행이 늘면 밀린다.
+    const anchor = "env.";
     const before = indexOfSettingsKey(session, anchor) orelse return error.TestUnexpectedResult;
     session.chrome_host.settings.selected = before;
 
-    // reload 가 하는 순서 그대로 — **바뀌기 전에** 뜨고, 바꾸고, 앉힌다.
-    var anchored_buf: [128]u8 = undefined;
-    const anchored = captureSelectedRowKey(session, &anchored_buf);
-    session.setEnvVar("AAA_PROBE", "1"); // 파일이 env 변수를 더한 것과 같은 상태 — 뒤 행들이 밀린다
-    restoreSelectedRowKey(session, anchored);
+    // 파일이 env 변수를 하나 더 얻는다 → 다음 reload 에서 행이 는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "env.AAA_FIRST = 1\nenv.ZZZ_LAST = 1\n" });
+    reloadConfig(session);
 
     // 선택은 여전히 그 행이고, 행 수도 다시 알렸다.
     const after = indexOfSettingsKey(session, anchor) orelse return error.TestUnexpectedResult;
@@ -3465,4 +3379,93 @@ fn settingsRowKeys(self: *AppSession, allocator: std.mem.Allocator, lang: maru.i
 fn freeKeyList(allocator: std.mem.Allocator, keys: [][]const u8) void {
     for (keys) |k| allocator.free(k);
     allocator.free(keys);
+}
+
+// `reapplyLoadedConfig` 는 **config 미러를 되쓰지 않는다** — 성질로 못 박는다.
+//
+// 예전에 `reapplyUiLanguage` 가 행 목록을 만들면서 `currentSectionFields` 를 불렀고, 그 함수의 첫 문장이
+// `keep_alive_after_quit` 를 앱 전역으로 되동기화했다. keep-alive 토글은 ①config 에 새 값 ②재적용 ③전역
+// 세우기 순서라 ②가 ①을 **옛 전역으로 되돌렸다** — 껐는데 켜진 채로 남는, 화면만 보면 성공처럼 보이는
+// 손실이다. 지금은 재적용 경로에서 `currentSectionFields` 로 가는 길이 없어 그 위험이 **구조적으로** 없다.
+//
+// 그 사실을 시나리오가 아니라 성질로 잰다. 시나리오로 재던 앞선 판은 조기 반환이 먼저 막아 주는 바람에
+// **아무것도 안 지키면서 초록**이었다(적대적 검증이 그것을 뮤테이션으로 보였다). 여기서는 미러와 전역을
+// 일부러 어긋나게 해 두고 재적용이 그 어긋남을 **건드리지 않는지** 본다 — 되쓰는 길이 다시 생기면 실패한다.
+test "재적용은 config 미러를 되쓰지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const keep_before = app_session_mod.app_keep_alive_after_quit;
+    defer app_session_mod.app_keep_alive_after_quit = keep_before;
+
+    // 전역과 미러를 **일부러 어긋나게** 둔다 — 되쓰는 길이 있으면 재적용이 미러를 전역 값으로 덮는다.
+    app_session_mod.app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = false;
+    session.chrome_host.settings.show(); // 폼이 열려 있어야 그 길이 열릴 여지가 생긴다
+
+    reapplyLoadedConfig(session);
+
+    try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
+}
+
+// 앵커 행이 **사라졌을 때** 폴백이 그 키의 섹션까지 옮기는가.
+//
+// `sectionIndexOfSettingsKey` 는 스키마가 아니라 **행 빌더**로 섹션을 찾는다 — 스키마만 보면
+// `theme.preset`·`shell.args`·`env.*`·`macro.*` 처럼 **행은 있는데 스키마 필드가 아닌** 것을 못 찾아
+// 섹션 이동이 통째로 무동작이 된다. 그 함수를 `null` 만 돌려주게 만들어도 다른 테스트는 전부 통과했다
+// (그것을 부르던 유일한 테스트가 FAIL 이 아니라 **SKIP** 으로 새어 나갔다) — 그 구멍을 여기서 막는다.
+test "앵커 행이 사라지면 그 키가 살던 섹션으로 옮겨 다시 찾는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.chrome_host.settings.show();
+
+    // 합성 행(스키마 필드가 아님)의 섹션을 찾는다 — 스키마만 보는 구현은 여기서 `null` 을 낸다.
+    const home = sectionIndexOfSettingsKey(session, "env.") orelse return error.TestUnexpectedResult;
+
+    // 그 행이 사는 곳이 **아닌** 섹션에 서서, 교차 검색으로 그 행을 고른 상태를 만든다.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const sections = try buildSectionList(session, arena_state.allocator());
+    var elsewhere: ?usize = null;
+    for (0..sections.len) |i| if (i != home) {
+        elsewhere = i;
+        break;
+    };
+    session.chrome_host.settings.section = elsewhere orelse return error.TestUnexpectedResult;
+    session.chrome_host.settings.startSearch();
+    for ("env") |c| session.chrome_host.settings.appendSearchCp(c);
+    session.chrome_host.settings.selected =
+        indexOfSettingsKey(session, "env.") orelse return error.TestUnexpectedResult;
+
+    // 쿼리를 그 행이 안 걸리는 것으로 바꿔 **행이 사라진** 상태를 만든다(파일이 그 행을 지운 것과 같다).
+    session.chrome_host.settings.startSearch();
+    for ("zzqqxx") |c| session.chrome_host.settings.appendSearchCp(c);
+    reanchorSelectedByKey(session, "env.");
+
+    // 쿼리가 풀리고 **섹션도 그 키가 살던 곳으로** 옮겨져 그 행이 다시 목록에 있다.
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.searchQuery().len);
+    try std.testing.expectEqual(home, session.chrome_host.settings.section);
+    const found = indexOfSettingsKey(session, "env.") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(found, session.chrome_host.settings.selected);
 }

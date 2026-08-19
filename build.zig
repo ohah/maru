@@ -2343,6 +2343,18 @@ pub fn build(b: *std.Build) void {
     const run_cwd_axis_boundary_tests = b.addRunArtifact(cwd_axis_boundary_tests);
     run_cwd_axis_boundary_tests.setCwd(b.path("."));
 
+    // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
+    // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
+    const neutral_path_join_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/neutral_path_join.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_neutral_path_join_boundary_tests = b.addRunArtifact(neutral_path_join_boundary_tests);
+    run_neutral_path_join_boundary_tests.setCwd(b.path("."));
+
     // cli/ 순수 경계 — `cli/`의 제품 코드는 파싱·wire·렌더만 갖고 소켓/프로세스/파일 syscall은 명시된
     // 예외 파일에만 둔다. 그 순수성이 파서·validator를 살아 있는 앱 없이 단위 테스트할 수 있는 근거인데,
     // 2026-08-16까지 그 규칙은 **파일 주석에만** 있었다(imports.zig의 강제 레이어 목록에 src/cli가 없었다).
@@ -2453,6 +2465,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);

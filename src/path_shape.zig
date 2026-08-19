@@ -479,6 +479,75 @@ pub fn trimTrailingSep(base: []const u8) []const u8 {
     return base;
 }
 
+/// 중립 층 경로에 **이름 한 칸**을 잇는다. 결과는 계약대로 `/`만 쓴다(§5 규칙 1).
+///
+/// **`std.fs.path.join`을 쓰면 안 되는 자리다.** 그것은 호스트 native 구분자를 넣으므로 Windows에서
+/// `D:/proj` + `lib`이 **`D:/proj\lib`** 이 된다 — 한 문자열 안에 구분자가 둘 섞인다. 실측한 끝단 증상은
+/// 크래시가 아니라 **조용한 오답**이다. 폴더 이름을 바꾸면 열려 있던 탭의 새 경로가
+/// `D:/proj\lib/main.zig`가 되고, 중립 층이 그것을 이렇게 답한다:
+///
+/// ```text
+///                        join(native)   '/'로 이음(대조군)
+/// 바뀐 폴더 안인가?      false          true
+/// 프로젝트 루트 안인가?  false          true
+/// ```
+///
+/// `pathWithin`의 경계 판정이 `/`만 세기 때문이다(그 자리는 POSIX에서 `p\q`가 합법 파일명이라 `\`를
+/// 경계로 셀 수 없다 — W1.5 회귀). 방향은 fail-closed라 보안 구멍은 아니지만 이름 바꾸기가 망가진다.
+///
+/// **`os_tag`를 안 받는다.** 중립 층은 어느 호스트에서든 `/`다 — 즉 이 규칙에는 갈래가 없고, 그래서
+/// macOS·Linux CI가 이 함수를 **전부** 지킨다(docs/windows-platform.md §2m.4의 표가 가르는 것이
+/// 규칙과 배선의 차이다).
+///
+/// `name`은 검증된 한 칸이어야 한다(`file_tree_mutation.validateName`이 `/`·`\`·NUL·`.`·`..`·빈 값을
+/// 막는다). 빈 `parent`는 조용히 `/name`이라는 절대경로를 지어내므로 **거부한다** — 부르는 쪽의 버그다.
+pub fn joinNeutral(allocator: std.mem.Allocator, parent: []const u8, name: []const u8) ![]u8 {
+    if (parent.len == 0) return error.EmptyParent;
+    const base = trimTrailingSep(parent);
+    // `/`는 `trimTrailingSep`이 일부러 안 다듬는다(다듬으면 절대경로가 상대경로가 된다). 그대로 이으면
+    // `//name`이 되므로 여기서 한 번 더 본다.
+    if (endsWithSep(base)) return std.mem.concat(allocator, u8, &.{ base, name });
+    return std.mem.concat(allocator, u8, &.{ base, "/", name });
+}
+
+test "joinNeutral: 호스트와 무관하게 `/`로만 잇는다" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { parent: []const u8, name: []const u8, want: []const u8 }{
+        .{ .parent = "D:/proj", .name = "lib", .want = "D:/proj/lib" },
+        .{ .parent = "/home/u/proj", .name = "lib", .want = "/home/u/proj/lib" },
+        // 드라이브 루트 — 후행 구분자를 안 다듬으면 `C://lib`이 된다.
+        .{ .parent = "C:/", .name = "lib", .want = "C:/lib" },
+        // POSIX 루트 — 다듬으면 절대경로가 사라진다.
+        .{ .parent = "/", .name = "a", .want = "/a" },
+        // 후행 구분자가 붙어 들어와도 이중 슬래시를 안 낸다.
+        .{ .parent = "D:/proj/", .name = "lib", .want = "D:/proj/lib" },
+        .{ .parent = "D:/proj//", .name = "lib", .want = "D:/proj/lib" },
+        // UNC 공유 루트.
+        .{ .parent = "//srv/share", .name = "lib", .want = "//srv/share/lib" },
+        // 비-ASCII 이름도 그대로 나른다.
+        .{ .parent = "D:/proj", .name = "\u{d55c}\u{ae00}", .want = "D:/proj/\u{d55c}\u{ae00}" },
+    };
+    for (cases) |c| {
+        const got = try joinNeutral(a, c.parent, c.name);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+    try std.testing.expectError(error.EmptyParent, joinNeutral(a, "", "lib"));
+}
+
+// **이 저장소가 실제로 밟은 자리를 못 박는다.** `std.fs.path.join`이 Windows에서 무엇을 내는지 위 표로
+// 적었는데, 그 표가 낡으면 아무도 모른다. 그래서 두 결과가 **갈린다는 사실 자체**를 Windows에서 검사한다.
+test "joinNeutral: Windows 에서 std.fs.path.join 과 실제로 갈린다" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const native = try std.fs.path.join(a, &.{ "D:/proj", "lib" });
+    defer a.free(native);
+    const neutral = try joinNeutral(a, "D:/proj", "lib");
+    defer a.free(neutral);
+    try std.testing.expect(std.mem.indexOfScalar(u8, native, '\x5C') != null); // 섞인다
+    try std.testing.expect(std.mem.indexOfScalar(u8, neutral, '\x5C') == null); // 안 섞인다
+    try std.testing.expectEqualStrings("D:/proj/lib", neutral);
+}
 /// 루트 아래 경로에서 **루트를 뗀 나머지**를 돌려준다. 루트 밖이면 `null`.
 ///
 /// **구분자가 정확히 한 바이트라고 가정하면 안 된다.** `path[root.len + 1 ..]`는 루트가 구분자로 끝날 때

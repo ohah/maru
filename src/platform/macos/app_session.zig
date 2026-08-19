@@ -158,9 +158,9 @@ pub const WebNavState = struct {
 /// 사용자가 활성화한 외부 링크(http/https)를 platform이 **어떻게** 열지. in_app=`surface_id`의 WKWebView에
 /// navigate, system=OS 기본 브라우저(`NSWorkspace.open`). 파일 패널(문서 안 링크)과 터미널 화면 링크가 같은
 /// 실행 경로를 공유한다 — 정책(어느 쪽을 고를지)만 호출처별로 다르고 실행은 하나다.
-pub const ExternalLinkActionKind = enum(u8) { in_app = 1, system = 2 };
+const ExternalLinkActionKind = enum(u8) { in_app = 1, system = 2 };
 
-pub const ExternalLinkAction = struct {
+const ExternalLinkAction = struct {
     kind: ExternalLinkActionKind,
     surface_id: u64,
     url: []const u8,
@@ -857,7 +857,7 @@ pub const resource_header_rows: usize = 2;
 /// 팝오버 **꼬리**의 고를 수 없는 줄 수: 앱 자신 한 줄. 탭 행과 섞지 않는다 — 무거운 순 정렬에 넣으면
 /// 값에 따라 떠다니고 행 상한에 걸려 사라지는데, 앱은 항상 있으므로 항상 보여야 한다(§4.1). 클릭 대상도
 /// 없다(점프할 탭이 없다) — 그래서 머리글과 같이 **선택 불가**다.
-pub const resource_footer_rows: usize = 1;
+const resource_footer_rows: usize = 1;
 /// 앱 자신 행의 그룹 키. Term surface_id와 절대 겹치지 않아야 해서 최대값을 센티넬로 쓴다 — id는 1부터
 /// 증가하며 재사용하지 않으므로(session-local) 이 값에 도달하지 않는다.
 const resource_app_key: u64 = std.math.maxInt(u64);
@@ -1805,9 +1805,9 @@ const PendingConfirm = union(enum) {
     file_tree_delete,
 };
 
-pub const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
+const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
 pub const FilePanelSaveCloseAction = struct { surface_id: u64, request_id: u64 };
-pub const FilePanelCloseUnlockAction = struct { surface_id: u64, request_id: u64 };
+const FilePanelCloseUnlockAction = struct { surface_id: u64, request_id: u64 };
 
 /// Cmd+Q 종료 확인 모달의 결정. host(Swift)가 FrameSummary.quit_decision으로 읽어 NSApp.reply로 종료를 진행/취소한다.
 /// 값은 ABI 약속이라(0/1/2) Swift drainQuitDecision의 case와 일치해야 한다.
@@ -1819,7 +1819,7 @@ const QuitDecision = enum(u32) {
 
 /// 1e-confirm-2b: browser grant 확인 모달의 결정 latch(§9.2 Model B). named 타입이라 field·takeGrantDecision 반환이 같은
 /// 타입을 공유한다(익명 struct는 매 리터럴이 별개 타입이라 불가). app_host_abi.drainGrantPrompts가 async_id로 head와 대조.
-pub const GrantConfirmDecision = struct { async_id: u64, approved: bool };
+const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 
 /// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
@@ -2040,7 +2040,7 @@ pub const PendingFileTreeRootValidation = struct {
     auto: bool = false,
 };
 
-pub const FileTreeTrashAction = struct {
+const FileTreeTrashAction = struct {
     id: u64,
     path: []const u8,
     identity: file_tree_mutation_backend.Identity,
@@ -2287,14 +2287,14 @@ pub var app_remote_client: ?RemoteSessionClient = null;
 pub var app_remote_host_pool: ?RemoteHostPool = null;
 pub var app_remote_backend: ?RemoteSessionBackend = null;
 
-pub const RemoteBackendSettlementOutcome = enum(u32) {
+const RemoteBackendSettlementOutcome = enum(u32) {
     inactive = 0,
     settled = 1,
 };
 
 /// AppHost ABI는 Linux cross-compile에서도 같은 raw 값을 가져야 한다. macOS 전용 owner 타입을
 /// 반환형으로 노출하면 non-macOS barrel의 빈 stub을 역참조하므로 ABI contract는 이 중립 enum이 소유한다.
-pub const IncidentOwnerTerminationOutcome = enum(u32) {
+const IncidentOwnerTerminationOutcome = enum(u32) {
     inactive = 0,
     joined = 1,
     detached = 2,
@@ -2466,7 +2466,7 @@ fn agentInfoWire(
 /// A1 collector 결과(단일 세션 편의 래퍼). 빌린 슬라이스(SurfaceDto·surface_ids·title/cwd/git_branch)의 backing
 /// 메모리를 arena로 소유한다 — `snapshot`은 arena 메모리를 빌리므로 `deinit` 전까지만 유효하다(control_surface.zig
 /// "collector 소유 버퍼를 빌린다" 계약). arena는 heap-pin(std.json.Parsed 선례)이라 값 복사가 안전하다.
-pub const SessionCollection = struct {
+const SessionCollection = struct {
     arena: *std.heap.ArenaAllocator,
     snapshot: maru.session.CollectorSnapshot,
 
@@ -2539,7 +2539,7 @@ pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
 /// 목록 항목 하나(세션 소유). 문자열이 세션 것이라 프레임 밖에서도 유효하다 — arena 버퍼를 들고
 /// 있으면 다음 프레임에 남의 글자를 가리킨다.
-pub const RepoListEntry = struct {
+const RepoListEntry = struct {
     path: []u8,
     origin: []u8,
     primary: bool,
@@ -2576,7 +2576,7 @@ pub const RepoStatusEntry = struct {
 pub const scm_repo_status_text_max: usize = 512 * 1024;
 
 /// 저장소 하나의 커밋 메시지 초안. 저장소를 떠날 때 담고 돌아올 때 꺼낸다.
-pub const CommitDraft = struct {
+const CommitDraft = struct {
     repo: []u8,
     text: []u8,
 };
@@ -6483,14 +6483,14 @@ pub const AppSession = struct {
 
     /// 확인 대화상자의 버튼 라벨을 **키로** 든다. 기본값이 공용 확인/취소라 대부분의 호출부는 메시지 키만
     /// 넘긴다. chrome 의 `Buttons`(문자열)는 아직 그대로라 여기서 풀어 넘긴다 — 그쪽은 I3c 범위다.
-    pub const ConfirmKeys = struct {
+    const ConfirmKeys = struct {
         confirm: maru.i18n.Key = .common_confirm,
         cancel: maru.i18n.Key = .common_cancel,
     };
 
     /// 세 갈래 버전. `alternate` 는 기본값이 없다 — 세 번째 선택지는 대화상자마다 다른 행동이라
     /// 기본값을 두면 뜻이 흐려진다.
-    pub const ConfirmChoiceKeys = struct {
+    const ConfirmChoiceKeys = struct {
         primary: maru.i18n.Key,
         alternate: maru.i18n.Key,
         cancel: maru.i18n.Key = .common_cancel,
@@ -6513,7 +6513,7 @@ pub const AppSession = struct {
         });
     }
 
-    pub fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
+    fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
         self.cancelPendingConfirm();
         if (owner != .file_panel_close and self.pending_file_panel_close != null) {
             file_panel_ops.cancelFilePanelClose(self);
@@ -6526,7 +6526,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    pub fn showConfirmChoices(self: *AppSession, owner: PendingConfirm, message: []const u8, choices: chrome.components.confirm.Choices) void {
+    fn showConfirmChoices(self: *AppSession, owner: PendingConfirm, message: []const u8, choices: chrome.components.confirm.Choices) void {
         self.showConfirmButtons(owner, message, .{ .confirm = choices.primary, .cancel = choices.cancel });
         self.chrome_host.confirm.showChoices(self.chrome_host.confirm.message, choices);
     }
@@ -7558,7 +7558,7 @@ pub const AppSession = struct {
         return action;
     }
 
-    pub const FilePanelEntryInfo = struct {
+    const FilePanelEntryInfo = struct {
         path: []const u8,
         kind: dock_panel.EntryKind,
     };
@@ -11321,7 +11321,7 @@ pub const AppSession = struct {
 
     /// 드롭 라우팅 판정 결과 — **"거부"와 "해당 없음"을 구분한다**(둘 다 0으로 접으면, 거부해 놓고 호스트가 그냥
     /// 활성 pane에 삽입해 버려 애초에 막으려던 오삽입이 그대로 일어난다 — code-review).
-    pub const DropRoute = enum(i32) {
+    const DropRoute = enum(i32) {
         /// 드롭 자체를 **거부**한다 — 호스트는 내용을 삽입하면 안 된다(포커스도 안 옮겼다).
         refused = -1,
         /// 라우팅 대상이 아니다(사이드바·pane 밖) — 호스트는 기존대로 **활성 pane**에 삽입한다(기존 동작 보존).
@@ -12694,7 +12694,7 @@ pub const AppSession = struct {
     /// A1 collector 편의 래퍼(단일 세션 = A1 산출물·헤드리스 테스트). `gpa`에서 private arena를 만들어 이 세션 하나를
     /// 평탄화하고 backing 메모리를 소유하는 `SessionCollection`을 돌려준다(caller가 `deinit`). A2는 대신
     /// `collectSessionInto`를 공유 리스트로 창마다 호출한다.
-    pub fn collectSession(
+    fn collectSession(
         self: *AppSession,
         gpa: std.mem.Allocator,
         window_id: u64,

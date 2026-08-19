@@ -143,6 +143,10 @@ jobs:
       #
       # PR 에서만 돈다(push 는 볼 "중간" 이 없다). 코드가 안 바뀐 PR 은 위 스텝이 이미 건너뛰었으므로
       # 여기서도 건너뛴다 — 원장이 보는 파일은 전부 코드다.
+      #
+      # **CI 시간은 대부분의 PR 에서 늘지 않는다**(실측 0.03초). 스크립트가 원장을 안 건드린 PR 을 곧장
+      # 끝내기 때문이다 — 이 사고는 "원장을 고치긴 했는데 너무 늦은 커밋에서" 일 때만 성립하므로, 원장이
+      # PR diff 에 없으면 검사할 것이 없다. 빌드가 실제로 도는 것은 그 좁은 경우뿐이다.
       - name: 중간 커밋도 경계 게이트를 통과하는가
         if: ${{ github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
         run: sh tools/ci/per-commit-boundaries.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"

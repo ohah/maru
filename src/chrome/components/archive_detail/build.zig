@@ -78,7 +78,7 @@ pub fn renderActionLabel(buf: []u8, label: ActionLabel) []const u8 {
     const put = struct {
         fn f(dst: []u8, at: *usize, src: []const u8) void {
             const room = dst.len - at.*;
-            const n = @min(src.len, room);
+            const n = width.truncateToBoundary(src, room);
             @memcpy(dst[at.* .. at.* + n], src[0..n]);
             at.* += n;
         }

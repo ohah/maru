@@ -1,30 +1,38 @@
 #!/bin/sh
-# PR 의 **중간 커밋**들이 경계 게이트를 통과하는지 확인한다.
+# PR 의 **중간 커밋**이 히스토리를 빨갛게 남기는 두 형태를 잡는다 — **빌드 없이**.
 #
 # 왜 필요한가 — 이 저장소가 같은 사고를 두 번 냈다. 리베이스에서 값이 움직였을 때 그 수렴을 **팁 커밋에
-# 몰아** 넣으면 작업 트리는 초록인데 앞 커밋들이 빨간 상태로 `main` 에 남는다. CI 는 팁만 보므로 그것을
-# 못 잡고, `git bisect`·커밋별 CI·그 지점 체크아웃이 그 구간에서 죽는다.
+# 몰아** 넣으면 작업 트리는 초록인데 앞 커밋들이 빨간 채로 `main` 에 남는다. CI 는 팁만 보므로 못 잡고,
+# `git bisect`·커밋별 CI·그 지점 체크아웃이 그 구간에서 죽는다.
 #   · 2026-08-18: `build.zig` 반쪽 섞임 → 9 커밋이 `zig build` 조차 안 됨
 #   · 2026-08-19: digest 원장 낡음 → 2 커밋이 `check-boundaries` 실패
-# 규율은 `docs/project-rules.md` `## 리베이스와 머지` 에 있고, 이 스크립트가 그 규율의 **기계 절반**이다.
+# 규율은 `docs/project-rules.md` `## 리베이스와 머지` 에 있고, 이것이 그 **기계 절반**이다.
 #
-# **비용은 "언제 도는가" 로만 줄인다 — "어느 커밋을 보는가" 로는 줄이지 않는다.**
-# 앞 판은 "원장이 참조하는 파일을 건드린 커밋만" 보게 해서 값싸게 만들려 했는데, 그 전제가 틀렸다:
-# `check-boundaries` 는 테스트 바이너리 **열 개**를 묶고 원장에 묶인 것은 그중 하나뿐이다. `build.zig` 는
-# 목록에 아예 없었고, 실제 사고 구간에서 `build.zig` 를 건드린 **확실히 빨간 커밋을 "무관" 으로 건너뛰었다**.
-# 건너뛴 수를 출력하는 것이 정직해 보였지만 그 수가 거짓 단언을 싣고 있었다. 그래서 발동 조건만 좁히고,
-# 발동하면 **중간 커밋을 전부 본다**.
+# **왜 커밋마다 게이트를 돌리지 않는가 — 실측했더니 못 쓸 비용이었다.**
+# 앞 판은 중간 커밋마다 워크트리를 만들어 `zig build check-boundaries` 를 돌렸다. 캐시를 공유해도
+# **커밋당 3분 48초**였고(중간 커밋 2개에 7분 33초), 발동 조건이 최근 60 커밋의 **38%** 에 걸린다.
+# CI 러너는 로컬보다 느리다. 그 비용은 이 사고가 주는 손해(bisect 몇 칸)에 비해 크다.
 #
-# 팁 커밋은 보지 않는다 — 같은 job 의 `mise run check` 가 이미 그것을 돌린다.
+# **대신 두 형태의 서명을 직접 본다.** 둘 다 `git` 과 `zig ast-check` 만으로 밀리초~초 단위다.
+#
+#   ① **원장만 고치는 커밋** — 사고 2 의 정확한 서명이다. 실제로 `42e1965b`·`0534ce89` 둘 다 파일 하나
+#      (`external_source_digests.zig`)만 건드렸다. 소스와 **같은 커밋**에서 수렴시켰다면 그런 커밋이
+#      아예 안 생긴다. 앞선 커밋이 원장이 보는 파일을 건드렸을 때만 잡는다 — `main` 의 드리프트를
+#      고치는 단독 PR 은 그 앞이 없으므로 정상이다.
+#
+#   ② **파싱 안 되는 `.zig`** — 사고 1 의 서명이다. 자동 해소가 `build.zig` 의 블록을 반쪽씩 이어 붙여
+#      `error: expected field initializer` 가 났다. `zig ast-check` 가 초 단위로 잡는다.
+#
+# **한계 — 이 둘 밖은 못 본다.** 중간 커밋이 다른 이유로 게이트를 깨는 경우(경계 위반을 넣었다가 뒤
+# 커밋에서 고침, 충돌 마커를 넣었다가 지움)는 안 잡힌다. 그것까지 보려면 커밋마다 빌드해야 하고 그
+# 비용이 위와 같다. **좁힌 채로 "전부 봤다" 고 말하지 않는 것**이 이 주석의 목적이다.
 #
 # 사용법: sh tools/ci/per-commit-boundaries.sh <base-sha> <head-sha>
-# 종료 코드: 0 = 전부 통과(또는 볼 커밋 없음), 1 = 하나라도 실패, 2 = 범위를 해석할 수 없음
+# 종료 코드: 0 = 통과, 1 = 빨간 커밋 있음, 2 = 범위를 해석할 수 없음
 set -eu
 
 BASE="${1:?base sha required}"
 HEAD_SHA="${2:?head sha required}"
-
-# 게이트 결과를 바꿀 수 있는 자리. 이 중 **아무것도** 안 건드린 PR 은 중간 커밋이 빨갈 수 없다.
 LEDGER="tests/boundary/external_source_digests.zig"
 
 # **범위를 못 읽으면 시끄럽게 죽는다.** 앞 판은 `|| true` 로 삼켰고, 그래서 얕은 클론(CI 기본 depth=1)에서
@@ -33,71 +41,55 @@ LEDGER="tests/boundary/external_source_digests.zig"
 for rev in "$BASE" "$HEAD_SHA"; do
   if ! git rev-parse --verify --quiet "$rev^{commit}" >/dev/null; then
     echo "범위를 해석할 수 없다: '$rev' 가 이 클론에 없다." >&2
-    echo "CI 라면 checkout 의 fetch-depth 가 얕다는 뜻이다 — `check` job 에 fetch-depth: 0 이 필요하다." >&2
+    echo "CI 라면 checkout 의 fetch-depth 가 얕다는 뜻이다 — check job 에 fetch-depth: 0 이 필요하다." >&2
     exit 2
   fi
 done
 
-# **언제 도는가.** 원장·`build.zig`·경계 테스트 중 하나라도 PR 이 건드렸을 때만 본다. 셋 다 안 건드렸으면
-# 중간 커밋이 게이트를 깰 방법이 없다(게이트의 판정자와 그 입력이 그대로이므로). 대부분의 PR 이 여기서 끝난다.
-if ! git diff --name-only "$BASE..$HEAD_SHA" |
-  grep -qE "^($LEDGER|build\.zig|tests/boundary/)"; then
-  echo "경계 게이트의 입력(원장·build.zig·tests/boundary/)을 안 건드린 PR — 중간 커밋이 그것을 깰 수 없다."
-  exit 0
-fi
+WATCHED="$(sed -n 's/.*\.path = "\([^"]*\)".*/\1/p' "$LEDGER" | sort -u)"
+COMMITS="$(git rev-list --reverse "$BASE..$HEAD_SHA")"
+tmp_zig="$(mktemp -t percommit).zig"
+trap 'rm -f "$tmp_zig"' EXIT INT TERM
+[ -n "$COMMITS" ] || { echo "빈 범위 — 볼 커밋이 없다."; exit 0; }
 
-# `base..head` 의 커밋을 **오래된 것부터**. 팁은 뺀다(같은 job 이 이미 본다).
-HEAD_FULL="$(git rev-parse "$HEAD_SHA")"
-COMMITS="$(git rev-list --reverse "$BASE..$HEAD_SHA" | grep -v "^$HEAD_FULL$" || true)"
-
-if [ -z "$COMMITS" ]; then
-  echo "중간 커밋 없음 — 팁 하나뿐이다(같은 job 의 check 가 그것을 본다)."
-  exit 0
-fi
-
-SHARED_CACHE="$(git rev-parse --show-toplevel)/.zig-cache"
-work=""
-# 중간에 죽거나 취소돼도 워크트리를 남기지 않는다(이 워크플로는 `cancel-in-progress` 를 켜 두었다).
-cleanup() {
-  [ -n "$work" ] && git worktree remove --force "$work" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-total=0
 failed=0
-failed_list=""
+seen_watched=0   # 앞선 커밋이 원장이 보는 파일을 건드렸는가(①의 전제)
+checked=0
 
 for sha in $COMMITS; do
-  total=$((total + 1))
-  work="$(mktemp -d)"
-  # 워크트리를 detached 로 붙여 그 커밋의 트리를 그대로 재현한다. 게이트는 cwd 기준으로 소스를 읽으므로
-  # **그 커밋이 보던 파일**을 보게 된다. zig 캐시는 본체와 공유해 커밋마다 처음부터 빌드하지 않는다
-  # (`$PWD` 를 쓰면 `cd` 뒤에 평가돼 워크트리의 캐시를 가리킨다 — 그러면 매번 cold 다).
-  git worktree add -q --detach "$work" "$sha"
+  checked=$((checked + 1))
   short="$(git rev-parse --short "$sha")"
-  echo "── $short 에서 check-boundaries"
-  # **한 번만 돌린다.** 앞 판은 실패 시 사유를 얻으려고 한 번 더 돌렸고, zig 는 실패한 run step 을 캐시하지
-  # 않으므로 그 재실행이 정확히 두 배였다(실측: 커밋 하나에 4분 추가).
-  if out="$(cd "$work" && ZIG_LOCAL_CACHE_DIR="$SHARED_CACHE" zig build check-boundaries 2>&1)"; then
-    echo "   OK"
-  else
-    echo "   FAIL — 이 커밋에서 경계 게이트가 빨갛다"
-    # `error:` 는 줄머리로만 본다. `mismatch` 를 넓게 잡으면 **통과한 테스트 이름**이 걸린다 —
-    # `known_hosts.test.아는 호스트인데 키가 다르면 mismatch 다...OK` 가 그것이고, 실측에서 그 노이즈가
-    # 진짜 사유를 밀어냈다.
-    printf '%s\n' "$out" | grep -E "inventory mismatch|^error:" | head -3 || true
+  touched="$(git diff-tree --no-commit-id --name-only -r -m --first-parent "$sha")"
+  [ -n "$touched" ] || continue
+
+  # ① 원장만 고치는 커밋
+  if [ "$(printf '%s\n' "$touched")" = "$LEDGER" ] && [ "$seen_watched" -eq 1 ]; then
+    echo "FAIL $short — **원장만 고치는 커밋**이다."
+    echo "     앞 커밋이 원장이 보는 파일을 건드렸는데 수렴을 여기로 미뤘다 → 그 사이 커밋들이 빨갛다."
+    echo "     고치는 법: 이 커밋을 그 소스 커밋에 fixup 으로 접는다(\`git rebase -i\`)."
     failed=$((failed + 1))
-    failed_list="$failed_list $short"
   fi
-  git worktree remove --force "$work"
-  work=""
+
+  # ② 파싱 안 되는 .zig
+  for f in $touched; do
+    case "$f" in *.zig) ;; *) continue ;; esac
+    git cat-file -e "$sha:$f" 2>/dev/null || continue   # 그 커밋에서 지워진 파일
+    # `ast-check` 는 파일 인자를 받는다(stdin 을 안 받는다) — 그 커밋의 내용을 임시 파일로 꺼내 본다.
+    git show "$sha:$f" > "$tmp_zig"
+    if ! out="$(zig ast-check "$tmp_zig" 2>&1)"; then
+      echo "FAIL $short — \`$f\` 가 파싱되지 않는다(그 커밋에서 \`zig build\` 가 무엇이든 실패한다)."
+      printf '%s\n' "$out" | head -2 | sed 's/^/     /'
+      failed=$((failed + 1))
+    fi
+  done
+
+  # 다음 커밋의 ① 판정을 위해, 이 커밋이 원장이 보는 파일을 건드렸는지 기억한다.
+  for path in $WATCHED; do
+    if printf '%s\n' "$touched" | grep -qxF "$path"; then seen_watched=1; break; fi
+  done
 done
 
 echo ""
-echo "중간 커밋 $total 개를 전부 검사했다."
-if [ "$failed" -ne 0 ]; then
-  echo "빨간 커밋$failed_list"
-  echo "고치는 법: 그 커밋에 수렴을 접어 넣는다(\`git rebase -i\` 의 fixup). 팁에 새 커밋을 얹으면 이 검사가 다시 잡는다."
-  exit 1
-fi
+echo "커밋 $checked 개를 봤다(원장만 고치는 커밋 · 파싱 안 되는 .zig)."
+[ "$failed" -eq 0 ] || exit 1
 exit 0

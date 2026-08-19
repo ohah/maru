@@ -2413,34 +2413,57 @@ pub fn build(b: *std.Build) void {
     // `src/session/ssh/` 는 전부 sans-io 라 스스로는 아무 데도 못 붙으므로, 소켓을 든 이 드라이버가
     // 있어야 진짜 sshd 와 왕복할 수 있다. sshd 를 띄우고 키를 만드는 일은 `tools/ssh/client_smoke.sh`
     // 가 한다(없으면 SKIP — 환경 의존이라 기본 `check` 에 안 넣는다).
-    const ssh_client_smoke_exe = b.addExecutable(.{
-        .name = "ssh-client-smoke",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/ssh/client_smoke.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
-        }),
-    });
-    const ssh_client_smoke_step = b.step("ssh-client-smoke", "Build the built-in SSH client real-server smoke driver");
-    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_client_smoke_exe, .{}).step);
+    // **드라이버 셋 전부가 POSIX 호스트 전용이다** — Windows 에서는 스텝이 아무것도 안 만든다.
+    // 이유가 두 겹이고 **둘 다 실측했다**:
+    //
+    // ⒜ **Zig 쪽이 raw BSD 소켓을 든다.** `tools/ssh/{client,abi}_smoke.zig` 가 `std.c.socket`·
+    //    `std.c.open` 을 직접 부르는데 Windows 에서 `std.c.O` 는 `void` 라 컴파일이 안 된다
+    //    (`parameter of type 'void' not allowed in calling convention 'x86_64_win'`).
+    //    `std.process.Args.Iterator.init` 도 Windows 에서는 `@compileError` 다.
+    //    Zig 0.16 의 크로스플랫폼 소켓 API 는 `std.Io.net` 인데 **이 저장소는 아직 한 곳도 안 쓴다.**
+    // ⒝ **더 중요한 것 — 구동할 하네스가 없다.** `tools/ssh/client_smoke.sh` 는 `#!/bin/sh` 이고
+    //    `/usr/sbin/sshd`·`ssh-keygen` 을 찾아 일회용 sshd 를 띄운다. 즉 Zig 쪽만 포팅해도
+    //    **Windows 에서 그 바이너리를 돌릴 것이 없다** — 검증되지 않은 소켓 코드만 한 벌 남는다.
+    //
+    // 그래서 지금은 가른다. Windows 에서 이 스모크를 진짜로 돌리려면 ⒜ `std.Io.net` 포팅과
+    // ⒝ OpenSSH for Windows 를 쓰는 PowerShell 하네스가 **둘 다** 필요하고, 그것은 `maru ssh` 의
+    // Windows 지원(W9, docs/plans/windows-platform.md)과 함께 갈 일이다.
+    //
+    // **어떤 게이트도 이 스텝에 의존하지 않는다**(CI·mise 도 안 부른다). 그래서 여기서 빠지는 것이
+    // 다른 검사를 조용히 비우지 않는다 — `zig build test` 는 이것과 무관하게 돈다.
+    const ssh_smoke_host_supported = target.result.os.tag != .windows;
+    const ssh_client_smoke_step = b.step("ssh-client-smoke", "Build the built-in SSH client real-server smoke driver (POSIX hosts only)");
+    if (ssh_smoke_host_supported) {
+        const ssh_client_smoke_exe = b.addExecutable(.{
+            .name = "ssh-client-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/ssh/client_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_client_smoke_exe, .{}).step);
 
-    // **모바일 ABI 로만** 같은 sshd 에 붙는 드라이버(S9-2). 위 스모크는 코어가 실서버에서 돈다는
-    // 것을 증명하지만 그 사이의 ABI 는 한 줄도 안 지난다 — 기기에서 "안 된다" 가 났을 때
-    // 프로토콜 탓인지 배선 탓인지 가르려면 이 층만으로 한 번 붙여 봐야 한다.
-    const ssh_abi_smoke_exe = b.addExecutable(.{
-        .name = "ssh-abi-smoke",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/ssh/abi_smoke.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "maru", .module = maru_mod },
-                .{ .name = "mobile_ssh", .module = mobile_ssh_mod },
-            },
-        }),
-    });
-    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_abi_smoke_exe, .{}).step);
+        // **모바일 ABI 로만** 같은 sshd 에 붙는 드라이버(S9-2). 위 스모크는 코어가 실서버에서 돈다는
+        // 것을 증명하지만 그 사이의 ABI 는 한 줄도 안 지난다 — 기기에서 "안 된다" 가 났을 때
+        // 프로토콜 탓인지 배선 탓인지 가르려면 이 층만으로 한 번 붙여 봐야 한다.
+        const ssh_abi_smoke_exe = b.addExecutable(.{
+            .name = "ssh-abi-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/ssh/abi_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "mobile_ssh", .module = mobile_ssh_mod },
+                },
+            }),
+        });
+        ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_abi_smoke_exe, .{}).step);
+    } else {
+        ssh_client_smoke_step.dependOn(noteSkippedStep(b, "ssh-client-smoke", "POSIX 호스트 전용 — raw BSD 소켓 + `#!/bin/sh` sshd 하네스 (docs/mobile-platform.md §2)"));
+    }
 
     // **두 host 가 쓸 C 펌프**(`src/platform/mobile_host/ssh_pump.c`)를 그대로 링크해 실서버와
     // 왕복한다. 기기에 올리기 전에 소켓·스레드·세션 루프·호스트키 핀이 도는 것을 여기서 본다 —
@@ -2475,6 +2498,12 @@ pub fn build(b: *std.Build) void {
         const run_ssh_pump_tests = b.addRunArtifact(ssh_pump_tests);
         test_step.dependOn(&run_ssh_pump_tests.step);
         test_mobile_step.dependOn(&run_ssh_pump_tests.step);
+    } else {
+        // 같은 이유로 `test`·`test-mobile` 에서도 빠진다 — 조용히 빠지면 그 호스트에서 펌프가
+        // 검사됐다고 오해한다. 이식성 가드(`check-ssh-pump-portable`)는 계속 돈다.
+        const note = noteSkippedStep(b, "ssh-pump 단위 테스트", "POSIX 호스트 전용 — `check-ssh-pump-portable` 이 이식성은 계속 본다");
+        test_step.dependOn(note);
+        test_mobile_step.dependOn(note);
     }
 
     // **펌프는 리눅스로도 컴파일된다.** 이 파일은 세 경로(빌드 스크립트·NDK·Xcode)로 불리는데,
@@ -8386,4 +8415,25 @@ fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {
     };
     const version = target.os.version_range.semver.min;
     return b.fmt("{s}-apple-macosx{d}.{d}", .{ arch, version.major, version.minor });
+}
+
+/// **호스트에서 빠지는 스텝이 조용히 초록이 되지 않게** 한 줄을 남긴다.
+///
+/// 아무것도 안 만드는 스텝은 `zig build <이름>` 이 아무 말 없이 exit 0 이라, 그 기기의 개발자가
+/// "돌았다" 고 읽는다 — 이 저장소가 이미 밟은 함정이다(체크가 0 개인데 전부 초록으로 본 사고).
+/// 실패시키지는 않는다: 그 호스트에 소비자가 없어서 빠지는 것이지 무언가 깨진 것이 아니다.
+fn noteSkippedStep(b: *std.Build, step_name: []const u8, reason: []const u8) *std.Build.Step {
+    const Note = struct {
+        fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+            std.debug.print("{s}\n", .{step.name});
+        }
+    };
+    const s = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    s.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = b.fmt("[skip] {s}: {s}", .{ step_name, reason }),
+        .owner = b,
+        .makeFn = Note.make,
+    });
+    return s;
 }

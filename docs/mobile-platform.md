@@ -100,6 +100,18 @@ src/platform/
 데스크톱에서 **그대로 링크해 실서버와 왕복**하므로(`mise run ssh-client-smoke` 의 펌프 회차)
 기기에 올리기 전에 초록을 볼 수 있다.
 
+> **그 "데스크톱" 에 Windows 는 없다 — 호스트가 Windows 면 펌프 스텝이 통째로 빠진다.**
+> 펌프는 `<netdb.h>`·`<sys/socket.h>` 를 직접 부르는 POSIX 코드이고 스모크도 `std.c.timespec`
+> 처럼 Windows 에서 `void` 로 풀리는 타입을 쓴다. 모바일 = iOS + Android 라 **Windows 는 이
+> 펌프의 소비자가 아니다.** 그런데 한때 스텝이 호스트 무관하게 걸려 있어, Windows 기기에서는
+> `zig build test` 가 자기 변경과 무관하게 통째로 실패했다 — 그 기기의 개발자가 게이트를 아예
+> 못 돌린다. `build.zig` 가 `target.result.os.tag != .windows` 로 가른다.
+>
+> **이식성 가드는 안 빠진다.** `zig build check-ssh-pump-portable` 이 linux-gnu 로 **크로스
+> 컴파일**하므로 Windows 호스트에서도 돈다 — glibc feature macro 조합처럼 "한 경로에서만 깨지는"
+> 사고를 잡는 진짜 자리는 그쪽이다. Windows 에서 빠지는 것은 **실서버와 왕복하는 스모크**뿐이고,
+> 그 회차는 macOS·Linux CI 가 계속 돈다.
+
 **Vulkan 백엔드를 Linux 와 공유할지는 아직 정하지 않는다.** Linux 백엔드가 생길 때
 공통분모가 드러나므로, 그전에 추상 층을 만들면 하나뿐인 사용처에 맞춘 잘못된 경계가 된다.
 

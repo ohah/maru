@@ -261,6 +261,16 @@ pub const RowCache = struct {
         return self.prefix[line + 1] - self.prefix[line];
     }
 
+    /// **행 수를 아직 다 못 셌는가**(§2.1 점진 계수). 그 동안 안 센 줄은 한 행으로 쳐서 총 행 수가
+    /// 실제보다 작고, 그래서 **스크롤바가 실제보다 짧다** — 사용자가 보는 저하다.
+    ///
+    /// **랩이 꺼져 있으면 저하가 아니다**: 그때는 한 줄이 정확히 한 행이라 근사가 곧 정답이다.
+    /// 판정을 여기 두는 이유는 그 사실(근사의 조건)이 계수 규칙과 같은 자리에 있어야 하기 때문이다 —
+    /// 상태바가 자기 식으로 다시 재면 "세는 중"이라고 말하면서 화면은 이미 정확할 수 있다.
+    pub fn countingIncomplete(self: *const RowCache) bool {
+        return self.wrap and self.filled and self.filled_upto < self.lines_len;
+    }
+
     /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
     fn hits(self: *const RowCache, lines: []const []const u8, width: u16, wrap: bool, tab_width: u8) bool {
         return self.filled and
@@ -637,6 +647,27 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "계수가 끝나기 전에는 저하라고 말한다 — 랩이 꺼져 있으면 아니다 (§2.1)" {
+    // 안 센 줄을 한 행으로 치므로 총 행 수가 실제보다 작고, 그래서 **스크롤바가 짧다**. 그 사실을
+    // 상태바가 말해야 한다(조용히 줄어들면 사용자는 버그로 읽는다).
+    var prefix: [8]u32 = @splat(0);
+    var cache: RowCache = .{ .prefix = &prefix, .wrap = true, .filled = true, .lines_len = 4, .filled_upto = 2 };
+    try std.testing.expect(cache.countingIncomplete());
+
+    cache.filled_upto = 4; // 다 셌다
+    try std.testing.expect(!cache.countingIncomplete());
+
+    // **랩이 꺼져 있으면 근사가 곧 정답이다**(한 줄 = 한 행) — 저하가 아니다.
+    cache.wrap = false;
+    cache.filled_upto = 2;
+    try std.testing.expect(!cache.countingIncomplete());
+
+    // 아직 채우지도 않았으면(조건이 갈려 무효) 그건 저하가 아니라 **다음 프레임에 다시 세는 것**이다.
+    cache.wrap = true;
+    cache.filled = false;
+    try std.testing.expect(!cache.countingIncomplete());
+}
 
 const TestBuffers = struct {
     ops: [256]draw.Op = undefined,

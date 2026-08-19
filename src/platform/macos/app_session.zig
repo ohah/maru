@@ -818,7 +818,9 @@ const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
-const max_status_bar_right_items: usize = 4; // blocked·running·알림·리소스
+// blocked·running·알림 + 편집기 셋(저하·읽기 전용·줄바꿈) + 리소스. 편집기 셋은 활성 pane이
+// 편집기일 때만 실리므로 평소에는 넷만 쓴다.
+const max_status_bar_right_items: usize = 7;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -16463,6 +16465,57 @@ pub const AppSession = struct {
             }
         }
 
+        // **편집기 pane이 활성일 때만 나오는 셋**(native-editor-layering.md §2.2). 상태바는 창 전폭 띠라
+        // 늘 떠 있으면 터미널을 쓰는 동안에도 기존 항목을 밀어낸다 — 그래서 조건부다.
+        //
+        // 배열 순서 = 버려지는 순서다(뒤가 먼저 사라진다). **저하 → 읽기 전용 → 줄바꿈** 순으로 넣어
+        // "축소가 일어났다"는 사실이 가장 오래 남게 한다(§2.2: 조용히 줄어들면 사용자는 버그로 읽는다).
+        // 리소스보다는 **앞**이다 — 리소스가 가장 먼저 사라져야 한다는 아래 계약을 그대로 둔다.
+        if (rn < max_status_bar_right_items and self.surface_initialized and self.tabs.items.len > 0) {
+            const active_term = pane_ops.activePane(self).activeTerm();
+            if (active_term.kind == .editor) {
+                // ① 저하: 행 수를 아직 다 못 셌다 → 스크롤바가 실제보다 짧다(§2.1).
+                if (active_term.rt.editor_row_cache.countingIncomplete() and rn < max_status_bar_right_items) {
+                    if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_counting_rows), bar_cols, fg, icon_fg, .plain)) |dl| {
+                        right_frames[rn] = dl;
+                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                        right_ids[rn] = .editor_degraded;
+                        rn += 1;
+                    }
+                }
+                // ② 읽기 전용: **N1 편집기는 전부 읽기 전용이다**. 편집이 막혀 있음을 알리는 유일한
+                // 상시 자리라(§2.2), 값이 늘 같아도 그 사실을 말한다 — 사용자는 "왜 안 써지지"를 묻는다.
+                if (rn < max_status_bar_right_items) {
+                    if (self.buildStatusBarItem(null, maru.i18n.t(.editor_readonly), bar_cols, fg, icon_fg, .plain)) |dl| {
+                        right_frames[rn] = dl;
+                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                        right_ids[rn] = .editor_readonly;
+                        rn += 1;
+                    }
+                }
+                // ③ 줄바꿈: 파일이 쓰던 것을 그대로 말한다(저장이 되돌릴 값이기도 하다 — 문서 모델 §3.5).
+                // **인코딩은 넣지 않는다**: 이 편집기는 UTF-8만 열므로(같은 절) 그 자리는 늘 같은 값이고,
+                // 폭을 다투는 띠에서 변하지 않는 값은 자리만 먹는다. 다른 인코딩이 열리는 날 함께 넣는다.
+                if (active_term.rt.editor_doc) |*doc| {
+                    if (rn < max_status_bar_right_items) {
+                        // `none`(줄바꿈이 하나도 없는 파일)은 **말하지 않는다** — 그때 "LF"라고 적으면
+                        // 파일에 없는 사실을 단정하는 것이고, 저장이 되돌릴 값도 없다.
+                        const eol: ?[]const u8 = switch (doc.file.doc.format.dominant_ending) {
+                            .lf => "LF",
+                            .crlf => "CRLF",
+                            .none => null,
+                        };
+                        if (eol) |text| if (self.buildStatusBarItem(null, text, bar_cols, fg, icon_fg, .plain)) |dl| {
+                            right_frames[rn] = dl;
+                            right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                            right_ids[rn] = .editor_eol;
+                            rn += 1;
+                        };
+                    }
+                }
+            }
+        }
+
         // 리소스는 **배열 마지막**(= 가장 왼쪽)이다. 폭이 모자라면 뒤부터 버려지므로 가장 먼저 사라져야 한다 —
         // 막힌 에이전트가 리소스 숫자에 밀려 없어지면 안 된다(docs/status-bar.md §6 "자리").
         // 아이콘이 없다(등록부가 닫혀 있어 SVG 추가가 필요하다 — 숫자가 쓸모 있다고 확인된 뒤로 미룬다).
@@ -16649,6 +16702,9 @@ pub const AppSession = struct {
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
             .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
+            // 편집기 셋은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
+            // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
+            .editor_degraded, .editor_readonly, .editor_eol => {},
         }
         self.metal_dirty = true;
     }
@@ -16660,6 +16716,9 @@ pub const AppSession = struct {
             // 브랜치도 이제 누를 수 있다 — 목록이 생겼다(§6에서 내려온 항목).
             .notifications, .running_agents, .blocked_agents, .cwd, .git_branch => true,
             .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
+            // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
+            // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
+            .editor_degraded, .editor_readonly, .editor_eol => false,
         };
     }
 
@@ -47014,6 +47073,55 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
 
 // SB1: **긴 경로는 잎이 남아야 한다.** 순수 함수(`text_layout.elidePathMiddle`)만 통과하고 배선이 빠지면
 // 화면은 그대로 끝이 잘린다 — 그래서 실제 항목 DrawList에 잎(마지막 디렉터리)이 실렸는지로 본다.
+test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서가 버려지는 순서다" {
+    // §2.2: 상태바는 창 전폭 띠라 늘 떠 있으면 터미널을 쓰는 동안에도 기존 항목을 밀어낸다 —
+    // 그래서 편집기 항목은 **조건부**다. 그리고 배열 순서 = 버려지는 순서라, "축소가 일어났다"는
+    // 사실이 가장 오래 남아야 한다(저하 → 읽기 전용 → 줄바꿈).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+
+    // ① 터미널이 활성이면 **하나도** 안 나온다.
+    session.collectStatusBarItems(&collected, builder, colors);
+    for (session.statusBarTree().entries) |e| {
+        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        try std.testing.expect(id != .editor_readonly and id != .editor_eol and id != .editor_degraded);
+    }
+
+    // ② 편집기 pane을 연다 — 이 저장소의 실제 파일을 그대로 쓴다(줄바꿈이 LF인 파일).
+    _ = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    var readonly_at: ?usize = null;
+    var eol_at: ?usize = null;
+    for (session.statusBarTree().entries, 0..) |e, i| {
+        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+            .editor_readonly => readonly_at = i,
+            .editor_eol => eol_at = i,
+            else => {},
+        }
+    }
+    // **읽기 전용은 상시 자리다**(편집이 막혀 있음을 알리는 유일한 표시).
+    try std.testing.expect(readonly_at != null);
+    // 줄바꿈은 그 **왼쪽**이다 = 먼저 버려진다. 트리 순서가 곧 화면 좌우이므로 x로 본다.
+    if (eol_at) |eol_i| {
+        const entries = session.statusBarTree().entries;
+        try std.testing.expect(entries[eol_i].rect.x < entries[readonly_at.?].rect.x);
+    }
+}
+
 test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

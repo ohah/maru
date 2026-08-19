@@ -437,6 +437,11 @@ pub const Table = struct {
     scm_commit_slow: [:0]const u8,
     /// 브랜치 줄의 원격 갱신 버튼(P6). **`push`/`pull`은 이 버튼이 아니다** — 그 둘은 터미널에 명령을
     /// 넣어 주고 실행은 사용자가 한다(docs/editor-surface-dock-write.md §4).
+    /// 편집기 pane 상태바(native-editor-layering.md §2.2). **읽기 전용은 상시 자리**이고(편집이 막혀
+    /// 있음을 알리는 유일한 표시), 저하는 축소가 일어났을 때만 나타난다.
+    editor_readonly: [:0]const u8,
+    /// 행 수를 아직 다 못 셌다 — 그동안 스크롤바 길이가 실제보다 짧다(§2.1의 "없는 대로 그린다").
+    editor_counting_rows: [:0]const u8,
     scm_fetch: [:0]const u8,
     scm_fetching: [:0]const u8,
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
@@ -982,6 +987,8 @@ pub const en: Table = .{
     .scm_commit = "Commit",
     .scm_committing = "Committing…",
     .scm_commit_slow = "The commit is taking a while",
+    .editor_readonly = "Read-only",
+    .editor_counting_rows = "Counting rows…",
     .scm_fetch = "Fetch",
     .scm_fetching = "Fetching…",
     .scm_no_remote = "This repository has no remote",
@@ -1460,6 +1467,8 @@ pub const ko: Table = .{
     .scm_commit = "커밋",
     .scm_committing = "커밋 중…",
     .scm_commit_slow = "커밋이 오래 걸리는 중",
+    .editor_readonly = "읽기 전용",
+    .editor_counting_rows = "행 수 세는 중…",
     .scm_fetch = "가져오기",
     .scm_fetching = "가져오는 중…",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",

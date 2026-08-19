@@ -321,6 +321,10 @@ pub export fn maru_mobile_input_kind() u32 {
     //
     // 그리고 **"안 하는 중" 과 "글자 칸" 은 다른 값이어야 한다** — 같은 0 으로 말하면 host 가
     // 하드웨어 키보드로 친 글자를 어디로 보낼지 못 고른다(터미널 vs 설정 칸).
+    if (edit_target == .server_field) {
+        const f: ServerField = @enumFromInt(srv_edit_field);
+        return if (f == .port) 1 else 2;
+    }
     const i = set_edit orelse return 0; // 0=글자(터미널) · 1=숫자 칸 · 2=글자 칸
     return if (set_items[i].field.kind == .number) 1 else 2;
 }
@@ -361,6 +365,7 @@ fn editNumberInput(bytes: []const u8) void {
 
 /// 편집을 확정한다 — **범위 밖이면 안 넣는다**(스키마의 range 가 그 판정의 단일 출처다).
 fn commitNumberEdit() void {
+    if (edit_target == .server_field) return commitServerFieldEdit();
     const i = set_edit orelse return;
     defer {
         set_edit = null;
@@ -408,6 +413,7 @@ fn editBackspace() void {
 /// 문자열 편집을 확정한다. **못 쓰는 값이면 안 넣는다** — 색이 깨지면 화면이 통째로 안 보이게
 /// 될 수 있고, 그 상태로 파일에 실리면 다음 실행에서도 그대로다.
 fn commitTextEdit() void {
+    if (edit_target == .server_field) return commitServerFieldEdit();
     const i = set_edit orelse return;
     defer {
         set_edit = null;
@@ -448,6 +454,13 @@ fn settingChangedText(row: mobile_config.Row, text: []const u8) void {
         break :blk &.{};
     };
 }
+
+/// **무엇을 편집 중인가.** 버퍼와 입력 경로는 하나지만 확정이 갈 곳은 둘이다(설정 줄 · 서버
+/// 칸). 두 벌을 두면 백스페이스·넘침·취소 규칙이 갈리고, 한쪽만 고치는 일이 생긴다.
+const EditTarget = enum { none, setting, server_field };
+var edit_target: EditTarget = .none;
+/// 서버 편집 화면에서 지금 치고 있는 칸(`ServerField`).
+var srv_edit_field: usize = 0;
 
 /// 지금 편집 중인 설정 줄(그 줄에 숫자를 친다). null 이면 편집 중이 아니다.
 var set_edit: ?usize = null;
@@ -692,6 +705,12 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 친 숫자가 거기로 간다 — 그전에는 키보드가 떠 있는데 글자를 버리고 있었다("키보드는 있는데
     // 아무것도 안 써지는" 상태). 받을 곳이 없을 때만 버리고, 그때는 **신호를 남긴다**(§5).
     if (screenTop() != .terminal) {
+        // 서버 칸도 같은 입력 경로다(버퍼·백스페이스·넘침 규칙이 하나여야 갈리지 않는다).
+        if (edit_target == .server_field) {
+            const f: ServerField = @enumFromInt(srv_edit_field);
+            if (f == .port) editNumberInput(ptr[0..len]) else editTextInput(ptr[0..len]);
+            return @intCast(delivered_len);
+        }
         if (set_edit) |i| {
             if (set_items[i].field.kind == .text) editTextInput(ptr[0..len]) else editNumberInput(ptr[0..len]);
             return @intCast(delivered_len);
@@ -871,6 +890,24 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     if (screenTop() != .terminal) {
         // **편집 중이면 지우기·확정은 그 칸의 것이다.** 그전에는 통째로 버려서 숫자 칸에서
         // 백스페이스가 아무 일도 안 했다 — 오타를 낸 사용자가 고칠 방법이 없었다.
+        if (edit_target == .server_field) {
+            switch (key_id) {
+                4 => { // BACKSPACE — 글자 단위(S9b-1 과 같은 규칙)
+                    editBackspace();
+                    return @intCast(delivered_len);
+                },
+                1 => { // ENTER
+                    commitServerFieldEdit();
+                    return @intCast(delivered_len);
+                },
+                2 => { // ESCAPE = 취소
+                    edit_target = .none;
+                    set_edit_len = 0;
+                    return @intCast(delivered_len);
+                },
+                else => {},
+            }
+        }
         if (set_edit) |edit_i| {
             const is_text = set_items[edit_i].field.kind == .text;
             switch (key_id) {
@@ -3042,7 +3079,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers };
+const Screen = enum { sessions, terminal, settings, servers, server_edit };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -3184,6 +3221,35 @@ pub fn serversEntryCenter() struct { x: f32, y: f32 } {
     return .{ .x = sess_servers_rect.x + sess_servers_rect.w / 2, .y = sess_servers_rect.y + sess_servers_rect.h / 2 };
 }
 
+/// 편집 화면의 **뒤로** 한가운데(테스트용).
+pub fn serverEditBackCenter() struct { x: f32, y: f32 } {
+    return .{ .x = srv_edit_back_rect.x + srv_edit_back_rect.w / 2, .y = srv_edit_back_rect.y + srv_edit_back_rect.h / 2 };
+}
+
+/// 서버 목록의 **추가 줄** 한가운데(테스트용).
+pub fn serverAddCenter() ?struct { x: f32, y: f32 } {
+    if (srv_add_rect.h <= 0) return null;
+    return .{ .x = srv_add_rect.x + srv_add_rect.w / 2, .y = srv_add_rect.y + srv_add_rect.h / 2 };
+}
+
+/// 목록에서 그 줄의 **편집** 자리 한가운데(테스트용).
+pub fn serverEditHitCenter(i: usize) ?struct { x: f32, y: f32 } {
+    if (i >= srv_edit_rects_in_list.len or srv_edit_rects_in_list[i].h <= 0) return null;
+    const r = srv_edit_rects_in_list[i];
+    return .{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 };
+}
+
+/// 편집 화면의 줄(칸 다섯 · 저장 · 삭제) 한가운데(테스트용).
+pub fn serverEditRowCenterY(i: usize) ?f32 {
+    if (i >= srv_edit_rects.len or srv_edit_rects[i].h <= 0) return null;
+    return srv_edit_rects[i].y + srv_edit_rects[i].h / 2;
+}
+
+/// 편집 화면의 줄 수(칸 + 저장 + 삭제).
+pub fn serverEditRowN() usize {
+    return server_field_n + 2;
+}
+
 /// 서버 목록의 지금 스크롤 위치(테스트용).
 pub fn serverScrollY() f32 {
     return srvScroll();
@@ -3300,6 +3366,241 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32) void {
     push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y + row_h), .w = @intFromFloat(sess_servers_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
 
+// ── 서버 편집 화면 (S9b-2b-2) ───────────────────────────────────────────────
+
+/// 편집 화면의 칸. **순서가 곧 화면 순서**다(주소를 먼저 묻는 것이 아니라, 사람이 부르는
+/// 이름부터 묻는다 — 목록에 보이는 것이 그것이다).
+const ServerField = enum { name, host, port, user, fingerprint };
+const server_field_n = @typeInfo(ServerField).@"enum".fields.len;
+
+/// 편집 중인 서버의 **사본**. config 의 문자열은 파싱 arena 것이라 다음 읽기에서 사라지므로,
+/// 화면이 들고 있으려면 자기 자리에 복사해야 한다. 저장할 때 이 값으로 목록을 다시 적는다.
+const ServerDraft = struct {
+    name: [48]u8 = undefined,
+    name_len: usize = 0,
+    host: [64]u8 = undefined,
+    host_len: usize = 0,
+    user: [32]u8 = undefined,
+    user_len: usize = 0,
+    fingerprint: [80]u8 = undefined,
+    fingerprint_len: usize = 0,
+    port: u16 = 22,
+
+    fn text(self: *const ServerDraft, f: ServerField) []const u8 {
+        return switch (f) {
+            .name => self.name[0..self.name_len],
+            .host => self.host[0..self.host_len],
+            .user => self.user[0..self.user_len],
+            .fingerprint => self.fingerprint[0..self.fingerprint_len],
+            .port => "", // 숫자다 — `port` 를 직접 본다
+        };
+    }
+
+    /// 그 칸에 값을 넣는다. **자리보다 길면 안 넣고 알린다** — 잘라 넣으면 지문이 반쪽이 되어
+    /// 접속이 "호스트키가 다르다" 로 실패한다(원인과 증상이 멀어지는 자리다).
+    ///
+    /// 지금 편집 버퍼가 64바이트라 **이름·사용자만 이 한계에 실제로 닿는다**(주소는 딱 64,
+    /// 지문은 80). 그래도 칸마다 재는 이유는 이 함수가 그 버퍼에 묶여 있지 않아서다 — 값이
+    /// 다른 데서(가져오기·원격 등록) 올 때 길이를 아는 쪽은 여기뿐이다.
+    fn set(self: *ServerDraft, f: ServerField, value: []const u8) bool {
+        switch (f) {
+            .name => {
+                if (value.len > self.name.len) return false;
+                @memcpy(self.name[0..value.len], value);
+                self.name_len = value.len;
+            },
+            .host => {
+                if (value.len > self.host.len) return false;
+                @memcpy(self.host[0..value.len], value);
+                self.host_len = value.len;
+            },
+            .user => {
+                if (value.len > self.user.len) return false;
+                @memcpy(self.user[0..value.len], value);
+                self.user_len = value.len;
+            },
+            .fingerprint => {
+                if (value.len > self.fingerprint.len) return false;
+                @memcpy(self.fingerprint[0..value.len], value);
+                self.fingerprint_len = value.len;
+            },
+            .port => unreachable, // 숫자는 `setPort` 가 받는다 — 파싱은 뜻을 아는 자리에서 한다
+        }
+        return true;
+    }
+
+    /// 포트를 넣는다. **0 은 못 쓴다** — 붙을 수 없는 포트라 그대로 오류다.
+    fn setPort(self: *ServerDraft, v: u16) bool {
+        if (v == 0) return false;
+        self.port = v;
+        return true;
+    }
+
+    fn toServer(self: *const ServerDraft) mobile_config.Server {
+        return .{
+            .name = self.name[0..self.name_len],
+            .host = self.host[0..self.host_len],
+            .user = self.user[0..self.user_len],
+            .fingerprint = self.fingerprint[0..self.fingerprint_len],
+            .port = self.port,
+        };
+    }
+};
+
+/// 오른쪽 값이 `max_w` 를 넘으면 **앞을 자르고 `…` 를 붙인다**. 안 자르면 라벨 위에 겹쳐
+/// 그려져 둘 다 못 읽는다(지문이 그렇다 — 화면으로 잡았다).
+///
+/// **앞을 자르는 이유**: 지문·주소는 뒤쪽이 서로 다르다. 뒤를 자르면 `SHA256:` 만 남아 어느
+/// 서버인지 구별이 안 된다.
+fn fitRight(text: []const u8, max_w: i32, px: i32, buf: []u8) []const u8 {
+    if (textWidth(text, px) <= max_w) return text;
+    const ell = "\u{2026}";
+    const ell_w = textWidth(ell, px);
+    var start = text.len;
+    var w: i32 = ell_w;
+    while (start > 0) {
+        var next = start - 1;
+        while (next > 0 and (text[next] & 0xC0) == 0x80) next -= 1; // UTF-8 경계
+        const piece_w = textWidth(text[next..start], px);
+        if (w + piece_w > max_w) break;
+        w += piece_w;
+        start = next;
+    }
+    const tail = text[start..];
+    if (ell.len + tail.len > buf.len) return tail;
+    @memcpy(buf[0..ell.len], ell);
+    @memcpy(buf[ell.len..][0..tail.len], tail);
+    return buf[0 .. ell.len + tail.len];
+}
+
+/// 위 두 함수는 화면 안에서만 쓰지만 **판정은 밖에서 한다** — 화면 픽셀을 헤드리스에서 못
+/// 보므로(아틀라스가 안 구워진다) 자르기 규칙만이라도 테스트가 직접 잰다.
+pub fn fitRightForTest(text: []const u8, max_w: i32, px: i32, buf: []u8) []const u8 {
+    return fitRight(text, max_w, px, buf);
+}
+pub fn textWidthForTest(text: []const u8, px: i32) i32 {
+    return textWidth(text, px);
+}
+
+var srv_draft: ServerDraft = .{};
+/// 편집 중인 서버의 목록 번호. null 이면 **새로 만드는 중**이다(저장할 때 끝에 붙는다).
+var srv_edit_index: ?usize = null;
+var srv_edit_rects: [server_field_n + 2]SetRect = @splat(.{}); // 칸 다섯 + 저장 + 삭제
+var srv_edit_pressed: ?usize = null;
+var srv_edit_back_rect: SetRect = .{};
+var srv_edit_back_pressed = false;
+var srv_edit_press: gesture.Press = .{};
+
+/// 그 서버를 편집 화면으로 연다(`null` 이면 새로 만든다).
+fn openServerEdit(i: ?usize) void {
+    srv_draft = .{};
+    srv_edit_index = i;
+    if (i) |idx| {
+        const list = servers();
+        if (idx < list.len) {
+            const srv = list[idx];
+            _ = srv_draft.set(.name, srv.name);
+            _ = srv_draft.set(.host, srv.host);
+            _ = srv_draft.set(.user, srv.user);
+            _ = srv_draft.set(.fingerprint, srv.fingerprint);
+            _ = srv_draft.setPort(srv.port);
+        }
+    }
+    edit_target = .none;
+    set_edit_len = 0;
+    navPush(.server_edit);
+}
+
+/// 지금 초안을 목록에 넣고 파일로 낸다. **저장은 목록 통째로 다시 적는 일**이다 — 값 하나만
+/// 고치면 지우기와 번호 다시 매기기를 못 한다(config 계약 §4.3).
+fn saveServerDraft() void {
+    var list: [mobile_config.max_servers]mobile_config.Server = @splat(.{});
+    const cur = servers();
+    var n: usize = 0;
+    for (cur) |srv| {
+        if (n == list.len) break;
+        list[n] = srv;
+        n += 1;
+    }
+    const draft = srv_draft.toServer();
+    if (srv_edit_index) |idx| {
+        if (idx >= n) return;
+        list[idx] = draft;
+    } else {
+        if (n == list.len) {
+            // **자리가 없으면 조용히 버리지 않는다**(계약 §5) — 저장을 누른 사용자는 들어간 줄
+            // 알고 화면을 떠난다.
+            setLastError("servers_full");
+            return;
+        }
+        list[n] = draft;
+        n += 1;
+    }
+    writeServers(list[0..n]);
+}
+
+/// 지금 편집 중인 서버를 목록에서 뺀다.
+fn deleteServerDraft() void {
+    const idx = srv_edit_index orelse {
+        navPop(); // 새로 만들던 중이면 지울 것이 없다 — 그냥 나간다
+        return;
+    };
+    var list: [mobile_config.max_servers]mobile_config.Server = @splat(.{});
+    const cur = servers();
+    var n: usize = 0;
+    for (cur, 0..) |srv, i| {
+        if (i == idx) continue;
+        list[n] = srv;
+        n += 1;
+    }
+    writeServers(list[0..n]);
+}
+
+/// 목록을 파일 본문에 반영하고 저장 요청을 세운다(설정 값 저장과 같은 순서).
+fn writeServers(list: []const mobile_config.Server) void {
+    const next = mobile_config.withServers(term_allocator, cfg_source, list) catch {
+        setLastError("config_write_build");
+        return;
+    };
+    if (cfg_source.len > 0) term_allocator.free(cfg_source);
+    cfg_source = next;
+    // **파일이 곧 값이다** — 다시 파싱해 화면이 같은 것을 본다(§1).
+    const parsed = mobile_config.parse(term_allocator, cfg_source) catch {
+        setLastError("config_parse");
+        return;
+    };
+    if (cfg_parsed) |*old_parsed| old_parsed.deinit();
+    cfg_parsed = parsed;
+    if (cfg_write.len > 0) term_allocator.free(cfg_write);
+    cfg_write = term_allocator.dupe(u8, cfg_source) catch blk: {
+        setLastError("config_write_alloc");
+        break :blk &.{};
+    };
+    navPop(); // 목록으로 돌아간다 — 바뀐 결과가 그 화면에 있다
+}
+
+/// 서버 칸 편집을 확정한다. **자리보다 길면 안 넣고 알린다**(위 `ServerDraft.set`).
+fn commitServerFieldEdit() void {
+    defer {
+        edit_target = .none;
+        set_edit_len = 0;
+    }
+    if (set_edit_len == 0) return; // 아무것도 안 치고 확정 — 값을 안 바꾼다
+    const f: ServerField = @enumFromInt(srv_edit_field);
+    const text = set_edit_buf[0..set_edit_len];
+    if (f == .port) {
+        // **파싱은 여기서 한다** — 어떤 칸인지 아는 자리가 여기고, 실패를 이름 있는 오류로
+        // 남길 수 있는 자리도 여기다(`ServerDraft` 는 오류 이름을 모른다).
+        const v = std.fmt.parseInt(u16, text, 10) catch {
+            setLastError("server_field_invalid"); // 65535 를 넘거나 숫자가 아니다
+            return;
+        };
+        if (!srv_draft.setPort(v)) setLastError("server_field_invalid");
+        return;
+    }
+    if (!srv_draft.set(f, text)) setLastError("server_field_invalid");
+}
+
 // ── 서버 목록 화면 (S9b-2b) ─────────────────────────────────────────────────
 
 /// 서버 줄 높이. **두 줄이 들어간다**(이름 + `user@host:port`) — 주소를 안 보이면 이름이
@@ -3312,6 +3613,12 @@ var srv_max_scroll: f32 = 0;
 var srv_back_rect: SetRect = .{};
 var srv_back_pressed = false;
 var srv_row_rects: [mobile_config.max_servers]SetRect = @splat(.{});
+/// 줄 오른쪽의 **편집** 자리(목록 화면). 접속과 편집을 같은 탭에 얹으면 하나는 못 쓴다.
+var srv_edit_rects_in_list: [mobile_config.max_servers]SetRect = @splat(.{});
+var srv_add_rect: SetRect = .{};
+var srv_add_pressed = false;
+/// 이번 짚음이 닿은 **편집** 자리(목록 화면).
+var srv_edit_hit: ?usize = null;
 var srv_pressed: ?usize = null;
 var srv_press: gesture.Press = .{};
 var srv_last_y: f32 = 0;
@@ -3359,16 +3666,28 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
     srv_max_scroll = @max(0, @as(f32, @floatFromInt(list.len)) * srv_row_h - srv_list.h);
     srv_sa.clamp(@intFromFloat(@max(0, srv_max_scroll)));
     srv_row_rects = @splat(.{});
+    srv_edit_rects_in_list = @splat(.{});
 
     // **빈 목록도 말을 한다.** 아무것도 안 그리면 화면이 고장 난 것처럼 보이고, 사용자는
     // 무엇을 해야 하는지 모른다(등록 수단은 다음 슬라이스라 지금은 어디에 적는지를 알린다).
     if (list.len == 0) {
-        pushText(maru.i18n.tIn(.ko, .mob_servers_empty), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24), 17, tk.get(.surface_fg));
-        pushText(maru.i18n.tIn(.ko, .mob_servers_empty_hint), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24 + 26), 14, tk.get(.muted_fg));
-        return;
+        // 안내는 **추가 줄 아래**에 둔다 — 줄이 먼저 보여야 무엇을 누를지 안다.
+        pushText(maru.i18n.tIn(.ko, .mob_servers_empty), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + srv_row_h + 20), 17, tk.get(.surface_fg));
     }
 
-    for (list, 0..) |srv, i| {
+    // **추가 줄은 목록 끝에 있다**(iOS·Android 설정 앱 관례). 목록이 비어도 이 줄은 있다 —
+    // 그것이 없으면 화면이 유일한 입력 경로라는 계약(§2)이 거짓이 된다.
+    for (0..list.len + 1) |i| {
+        if (i == list.len) {
+            const ry_add = srv_list.y + @as(f32, @floatFromInt(i)) * srv_row_h - srvScroll();
+            if (ry_add + srv_row_h >= srv_list.y and ry_add <= srv_list.y + srv_list.h) {
+                srv_add_rect = .{ .x = srv_list.x, .y = ry_add, .w = srv_list.w, .h = srv_row_h };
+                if (srv_add_pressed) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry_add), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+                pushText(maru.i18n.tIn(.ko, .mob_server_add), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry_add + (srv_row_h - 17) / 2), 17, tk.get(.accent_bar));
+            } else srv_add_rect = .{};
+            break;
+        }
+        const srv = list[i];
         const ry = srv_list.y + @as(f32, @floatFromInt(i)) * srv_row_h - srvScroll();
         // **안 보이는 행은 rect 를 안 남긴다** — 남기면 화면 밖인데 눌린다(설정 목록에서 겪었다).
         if (ry + srv_row_h < srv_list.y or ry > srv_list.y + srv_list.h) continue;
@@ -3383,10 +3702,94 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         const addr = std.fmt.bufPrint(&addr_buf, "{s}@{s}:{d}", .{ srv.user, srv.host, srv.port }) catch srv.host;
         // **온전하지 않으면 그렇게 말한다.** 눌러도 안 붙는 줄을 멀쩡한 줄처럼 그리면 실패가
         // 네트워크 문제처럼 보인다(계약 §4.3).
+        // **줄 오른쪽은 편집이다.** 탭이 접속인 자리에서 편집까지 같은 탭에 얹으면 둘 중
+        // 하나는 못 쓴다 — 길게 누르기는 발견하기 어려워(숨은 기능) 눈에 보이는 자리를 준다.
+        srv_edit_rects_in_list[i] = .{ .x = srv_list.x + srv_list.w - 88, .y = ry, .w = 88, .h = srv_row_h };
+        pushText(maru.i18n.tIn(.ko, .mob_server_edit_short), @intFromFloat(srv_list.x + srv_list.w - 88 + 16), @intFromFloat(ry + (srv_row_h - 15) / 2), 15, tk.get(.accent_bar));
+
         const sub_role: tokens.ColorRole = if (srv.isComplete()) .muted_fg else .accent_bar;
         pushText(if (srv.isComplete()) addr else maru.i18n.tIn(.ko, .mob_server_no_fingerprint), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
         push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry + srv_row_h - 1), .w = @intFromFloat(srv_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     }
+}
+
+/// 편집 화면. **설정 화면과 같은 줄 모양**이다(라벨 왼쪽, 값 오른쪽, 눌러서 편집) — 두 화면이
+/// 다르게 굴면 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다.
+fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    srv_edit_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    if (srv_edit_back_pressed) push(.{ .x = @intFromFloat(srv_edit_back_rect.x), .y = @intFromFloat(srv_edit_back_rect.y), .w = @intFromFloat(srv_edit_back_rect.w), .h = @intFromFloat(srv_edit_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = srv_edit_back_rect.x + (set_head_h - 22) / 2,
+            .y = srv_edit_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2,
+        };
+        quad_count += 1;
+    }
+    pushText(maru.i18n.tIn(.ko, if (srv_edit_index == null) .mob_server_add else .mob_server_edit), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    srv_edit_rects = @splat(.{});
+    var y = win.y + set_head_h + 1;
+    inline for (@typeInfo(ServerField).@"enum".fields, 0..) |f, i| {
+        const field: ServerField = @enumFromInt(f.value);
+        const rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+        srv_edit_rects[i] = rect;
+        if (srv_edit_pressed == i) push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y), .w = @intFromFloat(rect.w), .h = @intFromFloat(rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        const label = maru.i18n.tIn(.ko, switch (field) {
+            .name => .mob_server_name,
+            .host => .mob_server_host,
+            .port => .mob_server_port,
+            .user => .mob_server_user,
+            .fingerprint => .mob_server_fingerprint,
+        });
+        pushText(label, @intFromFloat(rect.x + set_pad_x), @intFromFloat(rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
+
+        // 값(편집 중이면 치는 값 + 캐럿). 설정의 글자 칸과 **같은 규칙**이다(S9b-1).
+        const editing = edit_target == .server_field and srv_edit_field == i;
+        var buf: [96]u8 = undefined;
+        const value = if (editing)
+            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+        else if (field == .port)
+            (std.fmt.bufPrint(&buf, "{d}", .{srv_draft.port}) catch "?")
+        else
+            srv_draft.text(field);
+        const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
+        // **라벨 자리를 침범하지 않는다** — 값이 길면 앞을 자른다(지문이 그렇다).
+        var fit_buf: [96]u8 = undefined;
+        const label_w = textWidth(label, 16);
+        const room = @as(i32, @intFromFloat(rect.w - set_pad_x * 2 - 12)) - label_w;
+        const shown = fitRight(value, @max(40, room), 15, &fit_buf);
+        pushText(shown, @intFromFloat(rect.x + rect.w - set_pad_x - @as(f32, @floatFromInt(textWidth(shown, 15)))), @intFromFloat(rect.y + (set_row_h - 15) / 2), 15, tk.get(role));
+        push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y + set_row_h - 1), .w = @intFromFloat(rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+        y += set_row_h;
+    }
+
+    // ── 저장 · 삭제. **저장이 위다** — 흔한 쪽이 손가락에 가깝고, 지우기가 실수로 눌리면 안 된다.
+    y += 12;
+    const save_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    srv_edit_rects[server_field_n] = save_rect;
+    if (srv_edit_pressed == server_field_n) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_server_save), @intFromFloat(save_rect.x + set_pad_x), @intFromFloat(save_rect.y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
+    push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y + set_row_h - 1), .w = @intFromFloat(save_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    y += set_row_h;
+
+    const del_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    srv_edit_rects[server_field_n + 1] = del_rect;
+    if (srv_edit_pressed == server_field_n + 1) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_server_delete), @intFromFloat(del_rect.x + set_pad_x), @intFromFloat(del_rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
 fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
@@ -3690,6 +4093,71 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         }
     }
 
+    // ── 서버 편집 화면. 줄을 누르면 그 칸을 치고, 저장·삭제는 그 아래 두 줄이다.
+    if (screenTop() == .server_edit) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome)) return 0;
+                srv_edit_press.begin(x, y, time_ms, false);
+                srv_edit_back_pressed = setHit(srv_edit_back_rect, x, y);
+                srv_edit_pressed = null;
+                if (!srv_edit_back_pressed) {
+                    for (srv_edit_rects, 0..) |r, i| {
+                        if (setHit(r, x, y)) {
+                            srv_edit_pressed = i;
+                            break;
+                        }
+                    }
+                }
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                if (srv_edit_press.move(x, y)) {
+                    srv_edit_pressed = null;
+                    srv_edit_back_pressed = false;
+                }
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                const was_back = srv_edit_back_pressed;
+                const was = srv_edit_pressed;
+                srv_edit_back_pressed = false;
+                srv_edit_pressed = null;
+                routeClear();
+                if (phase == 3) {
+                    srv_edit_press.cancel();
+                    return 1;
+                }
+                if (srv_edit_press.end() != .tap) return 1;
+                if (was_back) {
+                    // **나가면 안 저장한다** — 저장은 누르는 일이다(설정의 즉시 적용과 다른 이유:
+                    // 서버 한 줄은 값 다섯이 함께 맞아야 뜻이 있다).
+                    edit_target = .none;
+                    set_edit_len = 0;
+                    navPop();
+                    return 1;
+                }
+                if (was) |i| {
+                    if (i == server_field_n) {
+                        saveServerDraft();
+                    } else if (i == server_field_n + 1) {
+                        deleteServerDraft();
+                    } else {
+                        // 그 칸을 입력 대상으로 삼는다(설정의 글자 칸과 같은 규칙 — S9b-1).
+                        edit_target = .server_field;
+                        srv_edit_field = i;
+                        set_edit_len = 0;
+                        kb_raise_req = true;
+                    }
+                }
+                return 1;
+            },
+        }
+    }
+
     // ── 서버 목록 화면. 설정과 같은 규칙이다(밀면 스크롤, 짧게 누르면 그 줄).
     if (screenTop() == .servers) {
         switch (phase) {
@@ -3702,13 +4170,25 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 srv_press.begin(x, y, time_ms, stopped);
                 srv_back_pressed = setHit(srv_back_rect, x, y);
                 srv_pressed = null;
+                srv_edit_hit = null;
+                srv_add_pressed = false;
                 if (!srv_back_pressed and !stopped) {
-                    for (srv_row_rects, 0..) |r, i| {
+                    // **편집 자리를 먼저 본다** — 줄 전체가 접속이라 나중에 보면 영영 안 걸린다.
+                    for (srv_edit_rects_in_list, 0..) |r, i| {
                         if (setHit(r, x, y)) {
-                            srv_pressed = i;
+                            srv_edit_hit = i;
                             break;
                         }
                     }
+                    if (srv_edit_hit == null) {
+                        for (srv_row_rects, 0..) |r, i| {
+                            if (setHit(r, x, y)) {
+                                srv_pressed = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (srv_edit_hit == null and srv_pressed == null) srv_add_pressed = setHit(srv_add_rect, x, y);
                 }
                 return 1;
             },
@@ -3717,6 +4197,8 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (srv_press.move(x, y)) { // 임계를 넘으면 밀려던 것이다
                     srv_pressed = null;
                     srv_back_pressed = false;
+                    srv_edit_hit = null;
+                    srv_add_pressed = false;
                 }
                 srv_touch.move(&srv_sa, pointer_id, y, @intFromFloat(@max(0, srv_max_scroll)));
                 srv_last_y = y;
@@ -3726,8 +4208,12 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (!routeIs(.chrome)) return 0;
                 const was_back = srv_back_pressed;
                 const was_row = srv_pressed;
+                const was_edit = srv_edit_hit;
+                const was_add = srv_add_pressed;
                 srv_back_pressed = false;
                 srv_pressed = null;
+                srv_edit_hit = null;
+                srv_add_pressed = false;
                 srv_touch.end(pointer_id, frame_dt_ms);
                 routeClear();
                 if (phase == 3) {
@@ -3737,6 +4223,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (srv_press.end() != .tap) return 1;
                 if (was_back) {
                     navPop();
+                    return 1;
+                }
+                if (was_edit) |i| {
+                    openServerEdit(i);
+                    return 1;
+                }
+                if (was_add) {
+                    openServerEdit(null);
                     return 1;
                 }
                 if (was_row) |i| connectToServer(i);
@@ -3871,6 +4365,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
 
 /// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
 pub export fn maru_mobile_pop_screen() u32 {
+    if (edit_target == .server_field) {
+        // 서버 칸도 같다 — 하드웨어 뒤로가기(Android)·스와이프(iOS)가 **먼저 편집을 거둔다**.
+        // 안 거두면 화면을 나가도 목적지가 남아, 다음 화면에서 친 글자가 **안 보이는 초안**으로
+        // 들어간다(그 화면은 이미 없다).
+        edit_target = .none;
+        set_edit_len = 0;
+        return 1;
+    }
     if (set_edit != null) {
         // 편집 중이면 **먼저 그것을 거둔다**(확정 없이 취소 — 값은 그대로).
         set_edit = null;
@@ -3893,6 +4395,8 @@ pub export fn maru_mobile_pop_screen() u32 {
     sess_press.cancel();
     kb_press.cancel();
     body_press.cancel();
+    srv_press.cancel();
+    srv_edit_press.cancel();
     term_press.cancel();
     term_back_pressed = false;
     set_pressed = null;
@@ -4032,6 +4536,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .settings => drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .servers => drawServers(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

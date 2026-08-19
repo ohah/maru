@@ -118,6 +118,7 @@ static void drainConfigWrite(struct android_app *app);
 static void syncInputKind(void);
 static void raiseKeyboardIfAsked(void);
 static void startSshIfAsked(void);
+static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -1323,6 +1324,13 @@ JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta,
                                      jint unicode) {
     (void)env; (void)cls;
+    dispatchKey(key_code, meta, unicode);
+}
+
+/// 키 하나를 브리지로 보낸다. **두 경로가 여기로 모인다** — Java 의 InputConnection
+/// (`nativeKey`)과 네이티브 입력 큐(`onInputEvent`). 각자 표를 들면 어느 한쪽에서만 되는
+/// 키가 생긴다.
+static void dispatchKey(int32_t key_code, int32_t meta, int unicode) {
     // Android meta 비트 → 우리 표. Meta(⌘) 는 안드로이드에서 META_META_ON 이다.
     // **표를 스위치보다 먼저 만든다** — 이름 붙은 키가 아닐 때 수정자를 봐야 하기 때문이다.
     unsigned int mods = 0;
@@ -1578,7 +1586,31 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         }
         return 0;
     }
-    // 키는 여기서 안 본다 — 소프트 키보드 문자는 `MaruActivity` 의 InputConnection 이 준다.
+    // **키도 여기로 온다 — 늘 InputConnection 을 지나지는 않는다.** 숫자 키보드
+    // (`TYPE_CLASS_NUMBER`)는 숫자를 `commitText` 가 아니라 **키 이벤트**로 보내고, 그것은
+    // 이 네이티브 큐로 들어온다. 여기서 버리면 **포트 칸에 숫자를 못 친다**(기기에서 그 상태로
+    // 막혔다 — 칸은 편집 중인데 아무것도 안 써졌다). 하드웨어 키보드도 같은 길이다.
+    //
+    // 처리는 **Java 쪽과 같은 함수**로 보낸다(`nativeKey` 가 하는 일을 그대로 부른다) —
+    // 두 경로가 각자 표를 들면 어느 하나에서만 되는 키가 생긴다.
+    if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_KEY) {
+        if (AKeyEvent_getAction(ev) != AKEY_EVENT_ACTION_DOWN) return 0;
+        int32_t code = AKeyEvent_getKeyCode(ev);
+        // **뒤로가기는 안 가로챈다** — 화면 스택을 Java 가 든다(`onBackPressed`).
+        if (code == AKEYCODE_BACK) return 0;
+        int32_t meta = AKeyEvent_getMetaState(ev);
+        // 유니코드는 이 API 로 못 얻는다(`getUnicodeChar` 는 Java `KeyEvent` 것이다).
+        // **숫자·기호는 키 코드에서 바로 나온다** — 그 둘이 이 경로로 오는 전부다.
+        int unicode = 0;
+        if (code >= AKEYCODE_0 && code <= AKEYCODE_9) unicode = '0' + (code - AKEYCODE_0);
+        else if (code == AKEYCODE_PERIOD) unicode = '.';
+        else if (code == AKEYCODE_COMMA) unicode = ',';
+        else if (code == AKEYCODE_MINUS) unicode = '-';
+        else if (code == AKEYCODE_PLUS) unicode = '+';
+        else if (code == AKEYCODE_SPACE) unicode = ' ';
+        dispatchKey(code, meta, unicode);
+        return 1;
+    }
     return 0;
 }
 

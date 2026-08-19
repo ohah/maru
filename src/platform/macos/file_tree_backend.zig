@@ -939,6 +939,68 @@ test "leaf open: 루트 밖 identity 를 요구해도 링크로는 못 연다" {
     cap.deinit(io);
 }
 
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetProcessHandleCount(process: ?*anyopaque, count: *u32) callconv(.winapi) i32;
+
+fn windowsHandleCount() u32 {
+    var n: u32 = 0;
+    if (GetProcessHandleCount(GetCurrentProcess(), &n) == 0) return 0;
+    return n;
+}
+
+// 위 `nullable root validation closes descriptors …` 의 **Windows 쪽 대칭**이다. 그쪽은
+// `std.c.fcntl(F.GETFD)` 로 fd 를 세는데 Windows 에 그 축이 없어, 같은 성질이 여기서는 한 번도
+// 검증되지 않고 있었다 — 실패 경로에서 디렉터리 핸들 하나가 새면 파일 트리 스캔마다 쌓인다.
+//
+// `GetProcessHandleCount` 가 이 기기에서 **흔들리지 않는 것**을 먼저 쟀다(무작업 구간 drift 0).
+// 그래도 다른 스레드가 핸들을 열 수 있으므로 여유를 둔다 — 200 회에 하나씩만 새도 200 이 느는
+// 반면, 여유는 8 이다. "새는가" 와 "잡음" 이 그 간격으로 갈린다.
+test "windows: 루트 검증이 실패·성공 어느 쪽에서도 핸들을 안 남긴다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const rounds = 200;
+    const slack = 8;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const native = buf[0..try tmp.dir.realPath(io, &buf)];
+    const tmp_root = try path_shape.normalizeSeparators(allocator, native);
+    defer allocator.free(tmp_root);
+    const root = try std.fmt.allocPrint(allocator, "{s}/root", .{tmp_root});
+    defer allocator.free(root);
+    // 중간 칸이 없는 경로 — `openCanonicalDirectoryNoFollow` 의 실패 경로를 탄다.
+    const missing = try std.fmt.allocPrint(allocator, "{s}/no_such_dir/child", .{root});
+    defer allocator.free(missing);
+
+    // **macOS 대칭 테스트와 같은 두 갈래를 쓴다.** 처음엔 존재하지 않는 경로로만 돌렸는데,
+    // 그것은 `realPath` 에서 먼저 끝나 **핸들을 열지도 않는다** — 실패 경로에서 안 닫도록 고의로
+    // 망가뜨려도 이 테스트가 통과했다(적대적 검증이 잡았다). 실제로 여는 갈래는 둘이다:
+    // ⓐ 중간 칸이 없는 경로를 `openCanonicalDirectoryNoFollow` 에 **직접** 넣는다(루트는 열린다).
+    // ⓑ `validateRootSnapshotImpl(…, force_identity_failure = true)` — 디렉터리를 연 **뒤에** 실패한다.
+    const before_a = windowsHandleCount();
+    var i: usize = 0;
+    while (i < rounds) : (i += 1) try std.testing.expect(openCanonicalDirectoryNoFollow(io, missing) == null);
+    try std.testing.expect(windowsHandleCount() <= before_a + slack);
+
+    const before_b = windowsHandleCount();
+    i = 0;
+    while (i < rounds) : (i += 1) try std.testing.expect((try validateRootSnapshotImpl(allocator, io, root, true)) == null);
+    try std.testing.expect(windowsHandleCount() <= before_b + slack);
+
+    // ⓒ 성공 경로도 반복해서 연다 — 열고 닫는 쪽이 새면 여기서 걸린다.
+    const before_c = windowsHandleCount();
+    i = 0;
+    while (i < rounds) : (i += 1) {
+        var v = (try validateRootSnapshot(allocator, io, root)) orelse return error.TestUnexpectedResult;
+        v.deinit(allocator, io);
+    }
+    try std.testing.expect(windowsHandleCount() <= before_c + slack);
+}
+
 test "file tree backend rejects mutual directory symlink cycles" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

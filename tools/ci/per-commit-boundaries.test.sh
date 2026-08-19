@@ -21,14 +21,20 @@ if ! command -v zig >/dev/null 2>&1; then
   echo "zig 가 PATH 에 없다 — 이 테스트는 `zig ast-check` 경로를 돈다. mise 가 있는 job 에서 돌려야 한다." >&2
   exit 2
 fi
-work="$(mktemp -d)"
+# **픽스처를 저장소 안에 만든다.** 저장소 밖(`mktemp -d`)에 두면 CI 의 `zig` 가 mise shim 이라 그 밖에서
+# 버전을 못 풀어 실패하고, 그것이 "파싱 안 됨" 으로 오인돼 정상 케이스 둘이 빨갛게 나온다(CI 가 잡았다).
+# `.zig-cache/` 는 이미 무시 목록에 있고, 같은 저장소의 다른 테스트도 `.zig-cache/tmp` 를 쓴다.
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+work="$repo_root/.zig-cache/tmp/percommit-test-$$"
+mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT INT TERM
 fails=0
 
 check() { # <이름> <기대 종료코드> <실제 종료코드> [기대 문구]
   name="$1"; want="$2"; got="$3"; needle="${4:-}"
   if [ "$got" != "$want" ]; then
-    echo "FAIL $name — 종료코드 기대 $want, 실제 $got"; fails=$((fails + 1)); return
+    # 출력까지 찍는다 — 안 찍으면 "왜 틀렸는가" 를 CI 로그에서 알 수 없다(실제로 그래서 한 번 헤맸다).
+    echo "FAIL $name — 종료코드 기대 $want, 실제 $got"; sed 's/^/    /' "$work/out"; fails=$((fails + 1)); return
   fi
   if [ -n "$needle" ] && ! grep -qF "$needle" "$work/out"; then
     echo "FAIL $name — 출력에 '$needle' 이 없다"; sed 's/^/    /' "$work/out"; fails=$((fails + 1)); return

@@ -61,7 +61,7 @@ pub const inventory = [_]Proof{
     // 설정 폼 필터가 **언어와 무관하게** 판정하도록 `Field` 5종이 해석된 `doc` 과 함께 `doc_key` 를 싣게
     // 되며 움직인다(생성 지점 9곳이 `.doc_key = meta.doc` 을 함께 준다). count 는 108 그대로다 — 반사 접근이
     // 늘거나 준 것이 아니라 **필드가 하나 늘었을 뿐**이다.
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "7ba20afc4dcce2524ef70fd34e23c51246ed7983b9af788fbbed0bed2d2ad0a3" },
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "62337834d551b98525d47d45b3bab88bc61f61a122434d498fa60b588a1c551b" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

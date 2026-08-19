@@ -1192,6 +1192,14 @@ static void sshState(void *ctx, unsigned int state) {
         maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
         // **비밀번호를 물어야 하면 화면을 연다**(그 자리에서 펌프가 기다린다). 벗어나면 끈다.
         maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
+        // **처음 보는 서버면 지문을 묻는다**(Android 와 같은 자리). 지문이 이미 있으면 펌프가
+        // 그 자리에서 판정하고 이 상태를 스쳐 지나간다.
+        if (state == MARU_SSH_STATE_HOST_KEY_DECISION) {
+            const char *fp = maru_ssh_pump_host_key_fingerprint();
+            if (fp && fp[0]) maru_mobile_set_host_key_prompt((const unsigned char *)fp, strlen(fp));
+        } else {
+            maru_mobile_set_host_key_prompt((const unsigned char *)"", 0);
+        }
     });
 }
 
@@ -1206,6 +1214,14 @@ static void pumpSshOnMainThread(void) {
             maru_ssh_pump_password((const char *)pw, (unsigned int)n);
             memset(pw, 0, sizeof pw);
             NSLog(@"MARU_SSH password_supplied bytes=%lu", n);
+        }
+    }
+    // 지문 승인·거절도 같은 자리에서 나른다.
+    {
+        unsigned int d = maru_mobile_take_host_key_decision();
+        if (d != 0) {
+            maru_ssh_pump_accept_host_key(d == 1);
+            NSLog(@"MARU_SSH host_key_%s", d == 1 ? "accepted" : "rejected");
         }
     }
     if (maru_ssh_pump_state() == MARU_SSH_STATE_READY) {
@@ -1295,7 +1311,8 @@ static void startSshIfAsked(void) {
     unsigned int port = maru_mobile_server_port(idx);
     // **비어 있으면 안 붙는다.** 브리지가 온전한 줄만 요청하지만 버퍼가 모자라도 0 이 오므로
     // (자르지 않는 계약) 여기서도 본다 — 반쪽 주소로 붙으면 실패가 오타처럼 보인다.
-    if (!host_len || !user_len || !fp_len || !port) {
+    // **지문은 빼고 본다** — 처음 붙는 서버는 없는 것이 정상이고 그때는 화면이 묻는다(Android 와 같다).
+    if (!host_len || !user_len || !port) {
         NSLog(@"MARU_SSH connect_incomplete index=%u", idx);
         return;
     }

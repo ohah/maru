@@ -167,6 +167,51 @@ var preedit_len: usize = 0;
 
 /// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
+/// **처음 보는 서버의 지문을 묻는 중인가.** host 가 세션 상태를 보고 켠다.
+var hostkey_prompt = false;
+var hostkey_fp: [128]u8 = undefined;
+var hostkey_fp_len: usize = 0;
+/// 사용자의 답(0=아직, 1=승인, 2=거절). **가져가면 사라진다.**
+var hostkey_answer: u32 = 0;
+/// 지금 붙는 중인 서버의 번호. **승인한 지문을 어디에 적을지**가 이 값이다 — 요청은 가져가면
+/// 사라지므로(§접속 요청) 여기 남겨 둔다.
+var ssh_connecting: ?usize = null;
+
+/// host 가 "이 지문을 물어라" 를 알린다. 0 길이면 화면을 거둔다.
+pub export fn maru_mobile_set_host_key_prompt(fp: [*]const u8, len: usize) void {
+    if (len == 0) {
+        if (hostkey_prompt) {
+            hostkey_prompt = false;
+            hostkey_fp_len = 0;
+            if (screenTop() == .host_key) navPop();
+        }
+        return;
+    }
+    if (hostkey_prompt) return; // 이미 묻는 중이다 — 같은 물음을 두 번 밀지 않는다
+    if (len > hostkey_fp.len) {
+        // **자르지 않는다** — 반쪽 지문을 보여 주면 사용자가 확인할 수 없는 것을 확인한 셈이 된다.
+        setLastError("host_key_fp_too_long");
+        return;
+    }
+    @memcpy(hostkey_fp[0..len], fp[0..len]);
+    hostkey_fp_len = len;
+    hostkey_answer = 0;
+    hostkey_prompt = true;
+    navPush(.host_key);
+}
+
+/// 사용자의 답을 가져간다(0=아직, 1=승인, 2=거절). **가져가면 사라진다.**
+pub export fn maru_mobile_take_host_key_decision() u32 {
+    const a = hostkey_answer;
+    hostkey_answer = 0;
+    return a;
+}
+
+/// 지금 보여 주고 있는 지문(테스트·진단용).
+pub fn hostKeyFingerprintShown() []const u8 {
+    return hostkey_fp[0..hostkey_fp_len];
+}
+
 /// **비밀번호를 묻는 중인가.** host 가 세션 상태를 보고 켠다(`maru_mobile_set_password_prompt`).
 /// 화면이 그 값을 보고 서고, 사용자가 확정하면 host 가 가져간다.
 var password_prompt = false;
@@ -243,6 +288,7 @@ fn connectToServer(i: usize) void {
     const list = servers();
     if (i >= list.len or !list[i].isComplete()) return;
     ssh_connect_req = @intCast(i + 1);
+    ssh_connecting = i; // 승인한 지문을 이 줄에 적는다
     navPop(); // 목록 → 세션 목록
     navPush(.terminal);
 }
@@ -275,7 +321,10 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     // "원격 세션이 있나" 는 **입력 목적지가 이미 아는 사실**이다(host 가 상태로 세운다) — 그
     // 사실을 두 번 세면 갈린다.
     if (input_sink == 0) {
-        if (firstComplete(next.servers[0..next.server_count])) |i| ssh_connect_req = @intCast(i + 1);
+        if (firstComplete(next.servers[0..next.server_count])) |i| {
+            ssh_connect_req = @intCast(i + 1);
+            ssh_connecting = i;
+        }
     }
     if (cfg_source.len > 0) term_allocator.free(cfg_source);
     cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {
@@ -3096,7 +3145,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers, server_edit, password };
+const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -3768,14 +3817,92 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         srv_edit_rects_in_list[i] = .{ .x = srv_list.x + srv_list.w - 88, .y = ry, .w = 88, .h = srv_row_h };
         pushText(maru.i18n.tIn(.ko, .mob_server_edit_short), @intFromFloat(srv_list.x + srv_list.w - 88 + 16), @intFromFloat(ry + (srv_row_h - 15) / 2), 15, tk.get(.accent_bar));
 
-        const sub_role: tokens.ColorRole = if (srv.isComplete()) .muted_fg else .accent_bar;
-        pushText(if (srv.isComplete()) addr else maru.i18n.tIn(.ko, .mob_server_no_fingerprint), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
+        // **지문이 없는 것은 오류가 아니다** — 처음 붙는 서버다(누르면 지문을 보여 주고 묻는다).
+        const first = srv.isFirstConnect();
+        const sub_role: tokens.ColorRole = if (!srv.isComplete()) .accent_bar else if (first) .accent_bar else .muted_fg;
+        const sub_text = if (!srv.isComplete())
+            maru.i18n.tIn(.ko, .mob_server_incomplete)
+        else if (first)
+            maru.i18n.tIn(.ko, .mob_server_first_connect)
+        else
+            addr;
+        pushText(sub_text, @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
         push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry + srv_row_h - 1), .w = @intFromFloat(srv_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     }
 }
 
 /// 편집 화면. **설정 화면과 같은 줄 모양**이다(라벨 왼쪽, 값 오른쪽, 눌러서 편집) — 두 화면이
 /// 다르게 굴면 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다.
+/// 호스트키 승인 화면. **지문을 크게 보인다** — 사용자가 다른 경로로 받은 값과 눈으로 맞대야
+/// 하는 유일한 자리다(그래서 줄여 쓰지 않는다).
+fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_hostkey_title), @intFromFloat(win.x + set_pad_x), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    var y = win.y + set_head_h + 1;
+    pushText(maru.i18n.tIn(.ko, .mob_hostkey_hint), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + 14), 14, tk.get(.muted_fg));
+    y += 46;
+
+    // **지문은 두 줄로 나눠 통째로 보인다.** 줄이면(`…`) 눈으로 맞댈 수가 없다 — 이 화면의
+    // 존재 이유가 그 대조다.
+    const fp = hostKeyFingerprintShown();
+    const half = fp.len / 2;
+    pushText(fp[0..half], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
+    y += 22;
+    pushText(fp[half..], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
+    y += 34;
+
+    hk_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    if (hk_pressed == .ok) push(.{ .x = @intFromFloat(hk_ok_rect.x), .y = @intFromFloat(hk_ok_rect.y), .w = @intFromFloat(hk_ok_rect.w), .h = @intFromFloat(hk_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_hostkey_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
+    y += set_row_h;
+    hk_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    if (hk_pressed == .cancel) push(.{ .x = @intFromFloat(hk_cancel_rect.x), .y = @intFromFloat(hk_cancel_rect.y), .w = @intFromFloat(hk_cancel_rect.w), .h = @intFromFloat(hk_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_hostkey_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
+}
+
+var hk_ok_rect: SetRect = .{};
+var hk_cancel_rect: SetRect = .{};
+var hk_pressed: enum { none, ok, cancel } = .none;
+var hk_press: gesture.Press = .{};
+
+/// 두 버튼 한가운데(테스트용).
+pub fn hostKeyOkCenter() struct { x: f32, y: f32 } {
+    return .{ .x = hk_ok_rect.x + hk_ok_rect.w / 2, .y = hk_ok_rect.y + hk_ok_rect.h / 2 };
+}
+pub fn hostKeyCancelCenter() struct { x: f32, y: f32 } {
+    return .{ .x = hk_cancel_rect.x + hk_cancel_rect.w / 2, .y = hk_cancel_rect.y + hk_cancel_rect.h / 2 };
+}
+
+/// 승인한다 — **그 지문을 그 서버 줄에 적는다**. 안 적으면 다음에 붙을 때 또 묻고, 그러면
+/// "처음 보는 서버" 라는 말이 거짓이 된다(그리고 매번 묻는 물음은 사람이 안 읽는다).
+fn acceptHostKey() void {
+    hostkey_answer = 1;
+    hostkey_prompt = false;
+    if (screenTop() == .host_key) navPop();
+
+    const idx = ssh_connecting orelse return;
+    const list = servers();
+    if (idx >= list.len) return;
+    var next: [mobile_config.max_servers]mobile_config.Server = @splat(.{});
+    var n: usize = 0;
+    for (list) |srv| {
+        next[n] = srv;
+        n += 1;
+    }
+    next[idx].fingerprint = hostKeyFingerprintShown();
+    writeServers(next[0..n]);
+    // `writeServers` 가 목록 화면으로 되돌린다 — 여기서는 그 자리가 아니므로 되돌린 것을 취소한다.
+    navPush(.terminal);
+}
+
+fn rejectHostKey() void {
+    hostkey_answer = 2;
+    hostkey_prompt = false;
+    if (screenTop() == .host_key) navPop();
+}
+
 /// 비밀번호 화면. **친 글자를 안 보인다** — 어깨 너머로 읽히는 자리이고, 폰은 그 위험이 크다.
 /// 대신 **몇 자 쳤는지**는 보인다(아무 표시도 없으면 키보드가 먹는지 알 수 없다).
 fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
@@ -4258,6 +4385,41 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         }
     }
 
+    // ── 호스트키 승인 화면. 두 줄뿐이다(승인·취소).
+    if (screenTop() == .host_key) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome)) return 0;
+                hk_press.begin(x, y, time_ms, false);
+                hk_pressed = if (setHit(hk_ok_rect, x, y)) .ok else if (setHit(hk_cancel_rect, x, y)) .cancel else .none;
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                if (hk_press.move(x, y)) hk_pressed = .none;
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                const was = hk_pressed;
+                hk_pressed = .none;
+                routeClear();
+                if (phase == 3) {
+                    hk_press.cancel();
+                    return 1;
+                }
+                if (hk_press.end() != .tap) return 1;
+                switch (was) {
+                    .ok => acceptHostKey(),
+                    .cancel => rejectHostKey(),
+                    .none => {},
+                }
+                return 1;
+            },
+        }
+    }
+
     // ── 비밀번호 화면. 두 줄뿐이다(접속·취소) — 글자는 키보드가 넣는다.
     if (screenTop() == .password) {
         switch (phase) {
@@ -4578,6 +4740,11 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
 
 /// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
 pub export fn maru_mobile_pop_screen() u32 {
+    if (screenTop() == .host_key) {
+        // **뒤로가기는 거절이다.** 화면만 닫고 답을 안 주면 펌프가 2분을 기다린다.
+        rejectHostKey();
+        return 1;
+    }
     if (screenTop() == .password) {
         // **뒤로가기는 취소다** — 친 것을 지우고 화면을 거둔다(안 지우면 다음 물음에 그것이 간다).
         wipePassword();
@@ -4784,6 +4951,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .servers => drawServers(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

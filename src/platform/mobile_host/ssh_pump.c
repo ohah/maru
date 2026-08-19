@@ -320,24 +320,51 @@ static int step_idle(void) {
 }
 
 /// 호스트키를 판정한다. **자동 승인은 없다**(SSH 계약 §4) — 미리 받은 지문과 같아야 한다.
+/// 호스트키 판정 결과. **"아직" 이 값이다** — 사람에게 물어야 할 때가 있어서다.
+enum { HOST_KEY_OK = 0, HOST_KEY_FAIL = -1, HOST_KEY_ASK = 1 };
+
 static int decide_host_key(void) {
     const char *fp = maru_mobile_ssh_host_key_fingerprint(g_handle);
     if (fp == NULL || fp[0] == 0) {
         set_error("fingerprint_missing");
-        return -1;
+        return HOST_KEY_FAIL;
     }
-    if (g_cfg.expect_fingerprint == NULL || g_cfg.expect_fingerprint[0] == 0) {
-        set_error("fingerprint_not_pinned");
-        return -1;
+    // **핀이 있으면 그것만 본다.** 다르면 붙지 않는다 — 사용자에게 묻지도 않는다: 아는 서버가
+    // 다른 키를 내미는 것은 중간자일 수 있고, 그 자리에서 "그래도 붙을까요" 를 띄우면 사람은
+    // 대개 누른다(SSH 계약 §4).
+    if (g_cfg.expect_fingerprint != NULL && g_cfg.expect_fingerprint[0] != 0) {
+        if (strcmp(fp, g_cfg.expect_fingerprint) != 0) {
+            set_error("host_key_mismatch");
+            return HOST_KEY_FAIL;
+        }
+        if (maru_mobile_ssh_accept_host_key(g_handle) != MARU_SSH_OK) {
+            set_error("accept_failed");
+            return HOST_KEY_FAIL;
+        }
+        return HOST_KEY_OK;
     }
-    if (strcmp(fp, g_cfg.expect_fingerprint) != 0) {
-        set_error("host_key_mismatch");
-        return -1;
-    }
-    if (maru_mobile_ssh_accept_host_key(g_handle) != MARU_SSH_OK) {
-        set_error("accept_failed");
-        return -1;
-    }
+    // **핀이 없다 — 처음 보는 서버다.** 예전에는 여기서 `fingerprint_not_pinned` 로 끝냈는데,
+    // 그러면 지문을 미리 아는 사람만 붙을 수 있다(폰에서 그것을 알아낼 길이 없다). 자동 승인은
+    // 여전히 안 한다(§4) — **사람에게 보여 주고 묻는다.**
+    return HOST_KEY_ASK;
+}
+
+/// 사용자의 답(0=아직, 1=승인, 2=거절). 화면이 정하고 host 가 넣는다.
+static int g_host_key_answer;
+
+/// 지금 상대가 내민 호스트키의 지문(없으면 빈 문자열). **host 가 화면에 띄우려면 필요하다** —
+/// 세션 핸들은 펌프가 들고 있어 밖에서 못 묻는다.
+const char *maru_ssh_pump_host_key_fingerprint(void) {
+    pthread_mutex_lock(&g_session_lock);
+    const char *fp = g_handle ? maru_mobile_ssh_host_key_fingerprint(g_handle) : "";
+    pthread_mutex_unlock(&g_session_lock);
+    return fp ? fp : "";
+}
+
+int maru_ssh_pump_accept_host_key(int accept) {
+    pthread_mutex_lock(&g_session_lock);
+    g_host_key_answer = accept ? 1 : 2;
+    pthread_mutex_unlock(&g_session_lock);
     return 0;
 }
 
@@ -438,6 +465,7 @@ static void *pump_main(void *unused) {
     set_state(maru_mobile_ssh_state(g_handle));
 
     unsigned int password_waited_ms = 0;
+    unsigned int host_key_waited_ms = 0;
     while (!g_stop) {
         pthread_mutex_lock(&g_session_lock);
         int bad = flush_out();
@@ -449,8 +477,36 @@ static void *pump_main(void *unused) {
         if (state == MARU_SSH_STATE_HOST_KEY_DECISION) {
             pthread_mutex_lock(&g_session_lock);
             int rc = decide_host_key();
+            int answer = g_host_key_answer;
             pthread_mutex_unlock(&g_session_lock);
-            if (rc != 0) break;
+            if (rc == HOST_KEY_FAIL) break;
+            if (rc == HOST_KEY_ASK) {
+                // **사람을 기다린다**(비밀번호와 같은 자리). 상태는 이미 host 가 보고 있고,
+                // 지문은 `maru_mobile_ssh_host_key_fingerprint` 로 읽어 화면에 띄운다.
+                if (answer == 0) {
+                    host_key_waited_ms += PUMP_PASSWORD_POLL_MS;
+                    if (host_key_waited_ms >= PUMP_PASSWORD_TIMEOUT_MS) {
+                        set_error("host_key_timeout");
+                        break;
+                    }
+                    struct timespec ts;
+                    ts.tv_sec = 0;
+                    ts.tv_nsec = (long)PUMP_PASSWORD_POLL_MS * 1000000L;
+                    nanosleep(&ts, NULL);
+                    continue;
+                }
+                if (answer == 2) {
+                    set_error("host_key_rejected");
+                    break;
+                }
+                pthread_mutex_lock(&g_session_lock);
+                int ok = maru_mobile_ssh_accept_host_key(g_handle);
+                pthread_mutex_unlock(&g_session_lock);
+                if (ok != MARU_SSH_OK) {
+                    set_error("accept_failed");
+                    break;
+                }
+            }
             if (step_idle() != 0) break; // 승인은 상태만 옮긴다 — 밀어 줘야 `NEWKEYS` 가 나간다
             continue;
         }
@@ -570,6 +626,7 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     g_cfg.user = g_user;
     g_cfg.expect_fingerprint = g_fingerprint;
     g_hooks = hooks ? *hooks : (MaruSshPumpHooks){0};
+    g_host_key_answer = 0; // 지난 세션의 답을 물려주지 않는다
     g_has_secret = cfg->secret != NULL;
     if (g_has_secret) memcpy(g_secret, cfg->secret, sizeof g_secret);
     else memset(g_secret, 0, sizeof g_secret);

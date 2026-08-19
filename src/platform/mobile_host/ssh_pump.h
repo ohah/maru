@@ -68,6 +68,14 @@ int maru_ssh_pump_is_running(void);
 /// 그 자리에서 기다리고 있다가 코어에 넘기고 **바로 지운다**(계약 §3.4 — 저장하지 않는다).
 /// 넣지 않으면 2분 뒤 `password_timeout` 으로 끝난다.
 int maru_ssh_pump_password(const char *password, unsigned int len);
+/// **처음 보는 서버의 호스트키를 승인하거나 거절한다**(상태가 `MARU_SSH_STATE_HOST_KEY_DECISION`
+/// 이고 config 에 지문이 없을 때). 지문이 이미 있으면 펌프가 그것만 보고 판정하므로 이 함수를
+/// 부를 일이 없다 — **아는 서버가 다른 키를 내밀면 묻지 않고 끊는다**(SSH 계약 §4).
+/// 안 넣으면 2분 뒤 `host_key_timeout` 으로 끝난다.
+int maru_ssh_pump_accept_host_key(int accept);
+/// 지금 상대가 내민 호스트키의 지문(없으면 빈 문자열). 세션 핸들은 펌프가 들고 있으므로
+/// host 는 이것으로 읽어 화면에 띄운다.
+const char *maru_ssh_pump_host_key_fingerprint(void);
 /// 지금 세션이 키를 몇 번 갈았나. 안 돌고 있으면 0.
 unsigned int maru_ssh_pump_rekeys(void);
 /// 마지막 실패 이름. 없으면 빈 문자열.

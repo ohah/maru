@@ -3659,8 +3659,10 @@ test "붙어 있는 동안은 다시 요청하지 않는다 — 끊기면 다시
 
 test "고르는 것은 온전한 첫 서버다 — 반쯤 적은 줄은 건너뛴다" {
     // 자동 요청은 프로세스마다 한 번이라 그 경로로는 한 경우밖에 못 잰다. 규칙 자체를 잰다.
-    const half = mobile_config.Server{ .host = "a", .user = "me" }; // 지문이 없다
-    const full = mobile_config.Server{ .host = "b", .user = "me", .fingerprint = "SHA256:x" };
+    // **지문이 없는 것은 이제 온전한 줄이다**(처음 붙는 서버 — 그때 물어본다). 못 붙는 줄은
+    // 주소나 사용자가 빈 줄이다.
+    const half = mobile_config.Server{ .user = "me" }; // 주소가 없다
+    const full = mobile_config.Server{ .host = "b", .user = "me" };
     try std.testing.expectEqual(@as(?usize, 1), bridge.firstComplete(&.{ half, full }));
     try std.testing.expectEqual(@as(?usize, 0), bridge.firstComplete(&.{ full, half }));
     try std.testing.expectEqual(@as(?usize, null), bridge.firstComplete(&.{half}));
@@ -3727,7 +3729,6 @@ test "접속할 수 없는 줄은 눌러도 요청이 안 나간다" {
     // 요청을 내면 host 가 반쯤 적은 줄로 붙으러 가고, 그 실패는 네트워크 문제처럼 보인다.
     const half =
         \\ssh.server.1.host = a
-        \\ssh.server.1.user = me
     ;
     bridge.maru_mobile_set_input_sink(0);
     bridge.maru_mobile_load_config(half, half.len);
@@ -4277,4 +4278,86 @@ test "화면의 접속 버튼이 친 값을 내보낸다" {
     const n = bridge.maru_mobile_take_password(&out, out.len);
     try std.testing.expectEqualStrings("pw", out[0..n]);
     bridge.maru_mobile_set_password_prompt(0);
+}
+
+// ── 처음 보는 서버의 지문 승인 (S9b-3) ───────────────────────────────────────
+
+const one_server_no_fp =
+    \\ssh.server.1.name = 새서버
+    \\ssh.server.1.host = 10.0.0.9
+    \\ssh.server.1.port = 22
+    \\ssh.server.1.user = me
+;
+const fp_text = "SHA256:lF6TLdkxElSISC+SNhf4YLdhkoo6Q1SgLLgzGQBL9gk";
+
+test "승인하면 그 지문이 그 서버 줄에 적힌다" {
+    // **안 적으면 다음에도 또 묻는다** — 매번 묻는 물음은 사람이 안 읽고, 그러면 이 화면이
+    // 지키려던 것(중간자 확인)이 형식만 남는다.
+    var pops: u32 = 0;
+    while (pops < 6) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(one_server_no_fp, one_server_no_fp.len);
+    // 자동 요청이 그 서버를 골랐다 — 승인한 지문이 갈 자리가 그것이다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+
+    bridge.maru_mobile_set_host_key_prompt(fp_text, fp_text.len);
+    try std.testing.expectEqualStrings("host_key", bridge.currentScreenName());
+    try std.testing.expectEqualStrings(fp_text, bridge.hostKeyFingerprintShown());
+
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const ok = bridge.hostKeyOkCenter();
+    tapAt(ok.x, ok.y);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_host_key_decision());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_host_key_decision()); // 가져가면 사라진다
+
+    // **파일에 적힌다.**
+    const n = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.indexOf(u8, drain[0..n], fp_text) != null);
+    // 그리고 목록에도 반영돼 이제 접속 대상이다.
+    var buf: [128]u8 = undefined;
+    const fn_ = bridge.maru_mobile_server_field(0, 3, &buf, buf.len);
+    try std.testing.expectEqualStrings(fp_text, buf[0..fn_]);
+}
+
+test "거절하면 아무것도 안 적힌다" {
+    var pops: u32 = 0;
+    while (pops < 6) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(one_server_no_fp, one_server_no_fp.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+
+    bridge.maru_mobile_set_host_key_prompt(fp_text, fp_text.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const cancel = bridge.hostKeyCancelCenter();
+    tapAt(cancel.x, cancel.y);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_host_key_decision()); // 거절
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
+}
+
+test "하드웨어 뒤로가기는 거절이다" {
+    // 화면만 닫고 답을 안 주면 펌프가 2분을 기다린다 — 사용자에게는 "멈춘" 앱이다.
+    var pops: u32 = 0;
+    while (pops < 6) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_load_config(one_server_no_fp, one_server_no_fp.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_set_host_key_prompt(fp_text, fp_text.len);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_host_key_decision());
+}
+
+test "자리보다 긴 지문은 안 받는다 — 반쪽을 보여 주지 않는다" {
+    // 반쪽 지문을 보여 주면 사용자는 **확인할 수 없는 것을 확인한 셈**이 된다.
+    var pops: u32 = 0;
+    while (pops < 6) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_clear_error();
+    const long = "S" ** 200;
+    bridge.maru_mobile_set_host_key_prompt(long, long.len);
+    try std.testing.expectEqualStrings("host_key_fp_too_long", std.mem.span(bridge.maru_mobile_last_error()));
+    try std.testing.expect(!std.mem.eql(u8, "host_key", bridge.currentScreenName()));
+    bridge.maru_mobile_clear_error();
 }

@@ -1198,12 +1198,46 @@ pub const WindowsShell = enum {
     cmd,
 };
 
+/// 그 OS 에서 **대화형 셸이 필요로 하는 기본 argv**. 순수 — OS 만 본다.
+///
+/// **답이 OS 마다 다르다.** POSIX 의 `/bin/sh` 는 `-i` 가 있어야 대화형으로 서지만, Windows 의
+/// pwsh·cmd 는 콘솔에 붙는 순간 이미 대화형이라 **아무것도 필요 없다.**
+///
+/// **`-i` 를 Windows 에 그대로 넘기면 셸이 안 뜬다 — 실측했다.** PowerShell 5.1 에서 `-i` 는
+/// `-InputFormat` 의 **축약**이고 그 매개변수는 **값을 요구한다**:
+///
+/// ```text
+/// powershell.exe -i                     exit=-196608, 사용법 출력 — 안 뜬다
+/// powershell.exe -i -Command '…'        같음(‑Command 를 값으로 못 먹는다)
+/// powershell.exe -i Text -Command 'Y'   exit=0, Y — `-i` 가 InputFormat 이라는 증거
+/// ```
+///
+/// pwsh 7 은 통과하고 cmd 는 무시한다. **하필 5.1 이 셸 사다리의 2 순위**라(§3.1a), pwsh 7 이 없는
+/// 기기에서는 터미널이 아예 안 열린다. "죽지는 않는다" 고 적었던 첫 판단은 5.1 을 안 재서 나온
+/// 것이었다(적대적 검증이 잡았다).
+///
+/// **`os_tag` 를 인자로 받는 이유**는 이 저장소의 다른 OS 갈래와 같다 — `builtin` 으로 분기하면
+/// Windows 갈래가 macOS·Linux CI 에서 한 번도 안 돌아 공허참이 된다.
+pub fn defaultShellArgsFor(os_tag: std.Target.Os.Tag) []const []const u8 {
+    return if (os_tag == .windows) &.{} else &.{"-i"};
+}
+
+test "defaultShellArgsFor: 두 OS 갈래가 모든 타깃에서 돈다" {
+    try std.testing.expectEqual(@as(usize, 0), defaultShellArgsFor(.windows).len);
+    for ([_]std.Target.Os.Tag{ .macos, .linux }) |os| {
+        const args = defaultShellArgsFor(os);
+        try std.testing.expectEqual(@as(usize, 1), args.len);
+        try std.testing.expectEqualStrings("-i", args[0]);
+    }
+}
 pub const ShellConfig = struct {
     /// 셸 실행 파일 경로(절대경로). 빈 값(기본)이면 `resolveInteractiveShell()` 폴백. loader `shell.command`.
     command: []const u8 = "",
-    /// 셸 인자(argv, command 제외). 기본 `-i`(대화형). loader `shell.args`가 공백으로 토큰 분리해 교체한다
-    /// (빈 줄이면 인자 없음). 따옴표 미지원 — 셸 플래그는 보통 단순(`-i`·`-l`).
-    args: []const []const u8 = &.{"-i"},
+    /// 셸 인자(argv, command 제외). **기본값이 OS 마다 다르다** — POSIX 는 `-i`(대화형), Windows 는
+    /// 없음. 근거는 `defaultShellArgsFor` 의 doc 에 있다(5.1 은 `-i` 를 받으면 안 뜬다).
+    /// loader `shell.args`가 공백으로 토큰 분리해 교체한다(빈 줄이면 인자 없음).
+    /// 따옴표 미지원 — 셸 플래그는 보통 단순(`-i`·`-l`).
+    args: []const []const u8 = defaultShellArgsFor(@import("builtin").os.tag),
     /// **Windows 전용** — 기본 셸 종류. `command`가 비어 있을 때만 본다(명시 경로가 더 구체적이므로 그쪽이 이긴다).
     /// 다른 OS에서는 읽히지만 쓰이지 않는다 — 키를 OS별로 숨기면 dotfiles를 공유하는 사용자가 macOS에서
     /// "알 수 없는 키" diagnostic을 받는다.

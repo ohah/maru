@@ -1177,14 +1177,28 @@ shell.command         = /bin/zsh
 > 스모크가 `config_shell: windows_shell=… command=… resolved=… spawned_args=… config_args=…` 한 줄을
 > 찍어 설정과 결과를 나란히 둔다.
 >
-> **`shell.args` 는 아직 안 배선했다 — 기본값 결정이 필요하다(미결).** 같은 슬라이스에서 한 번
-> 배선해 보고 되돌렸다. `ShellConfig.args` 의 기본이 `&.{"-i"}` (대화형 sh/zsh 플래그)라 "사용자가
-> 값을 줬는가" 를 길이로 판정할 수 없고, config 가 없어도 Windows 셸에 `-i` 가 붙는다(실측:
-> `spawned_args` 가 0 에서 1 로). cmd 는 무시하고 pwsh 는 받아들여 둘 다 죽지는 않지만 의미가 틀린
-> 인자다. **Windows 에서 `shell.args` 기본이 무엇인가**를 이 문서가 정해야 배선할 수 있다 —
-> `&.{}` (빈 argv)가 자연스러워 보이지만, 문서화된 기본값을 OS 별로 가르는 것은 config 계약 변경이라
-> 사용자 확정이 필요하다. 그때까지 리포트가 `spawned_args` 와 `config_args` 를 따로 찍어 **갈려 있다는
-> 사실 자체가 보이게** 해 둔다.
+> **`shell.args` 도 배선했다 — 기본값을 OS 별로 갈랐다(W8.1b, 사용자 확정).** 한때 배선할 수 없었던
+> 이유는 `ShellConfig.args` 의 기본이 `&.{"-i"}` 하나뿐이라 "사용자가 값을 줬는가" 를 길이로 판정할 수
+> 없었기 때문이다. 그래서 `defaultShellArgsFor(os_tag)` 를 두고 **POSIX 는 `-i`, Windows 는 없음**으로
+> 가른다 — 이 기본값이 답하는 질문이 *"이 OS 에서 대화형 셸이 필요로 하는 argv 는 무엇인가"* 이고 그
+> 답이 OS 마다 다르다. 셸 자체(`resolveInteractiveShellFor`)와 경로(`shell.command.windows`)가 이미
+> OS 로 갈리므로 `args` 만 OS 무관이던 것이 오히려 예외였다.
+>
+> **`-i` 를 Windows 에 넘기면 셸이 안 뜬다 — 실측했다.** PowerShell 5.1 에서 `-i` 는 `-InputFormat` 의
+> **축약**이고 그 매개변수는 **값을 요구한다**:
+>
+> ```text
+> powershell.exe -i                     exit=-196608, 사용법 출력 — 안 뜬다
+> powershell.exe -i -Command '…'        같음
+> powershell.exe -i Text -Command 'Y'   exit=0, Y — `-i` 가 InputFormat 이라는 증거
+> ```
+>
+> pwsh 7 은 통과하고 cmd 는 무시한다. **하필 5.1 이 셸 사다리의 2 순위**라(§3.1a) pwsh 7 이 없는
+> 기기에서는 터미널이 아예 안 열린다. 처음에 "둘 다 죽지는 않는다" 고 적었던 것은 **5.1 을 안 재서**
+> 나온 판단이었다(적대적 검증이 잡았다).
+>
+> 리포트는 이제 `args=` 하나만 찍는다 — `spawned_args`·`config_args` 를 따로 찍던 것은 배선 전에
+> 둘이 갈려 있던 동안의 진단이다.
 >
 > 배선하자마자 **§5 의 정규화가 spawn 에서 터졌다**(cmd 의 argv\[0\]). §5 규칙 1 의 뒤집힌 결정을 보라.
 

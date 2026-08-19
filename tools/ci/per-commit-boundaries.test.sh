@@ -13,6 +13,14 @@
 set -eu
 
 SCRIPT="$(cd "$(dirname "$0")/../.." && pwd)/tools/ci/per-commit-boundaries.sh"
+
+# `zig` 가 없으면 이 테스트는 아무것도 못 지킨다 — 파싱 검사 경로가 통째로 안 돌기 때문이다.
+# **조용히 건너뛰지 않고 여기서 죽는다.** 실제로 이 테스트를 mise 가 없는 job 에 붙였다가 CI 가 그것을
+# 잡았고, 그때 "zig: not found" 가 테스트 실패로 보여 원인을 찾는 데 시간이 들었다.
+if ! command -v zig >/dev/null 2>&1; then
+  echo "zig 가 PATH 에 없다 — 이 테스트는 `zig ast-check` 경로를 돈다. mise 가 있는 job 에서 돌려야 한다." >&2
+  exit 2
+fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT INT TERM
 fails=0

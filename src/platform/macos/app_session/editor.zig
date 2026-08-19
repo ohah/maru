@@ -183,6 +183,164 @@ pub fn buildPaneOps(
     return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece, .scrollbar = w.scrollbar, .horizontal_scrollbar = w.horizontal_scrollbar };
 }
 
+/// 편집기 본문의 화면 좌표를 **문서 offset**으로 옮긴다 — §4.1g의 다섯 단계.
+///
+/// `null`이면 이 좌표가 이 함수의 것이 아니다: 편집기 Term이 아니거나, 아직 그린 프레임이 없거나
+/// (`editor_hit_rows_len == 0`), 좌표가 본문 사각 **밖**이다. **gutter는 여기 오지 않는다** — 줄 번호·
+/// 접힘 화살표가 있는 자리라 그 클릭은 §4.1f의 접기/펼치기가 먼저 가져간다.
+///
+/// **비교 뷰는 아직 다루지 않는다**(§4.1g 결정표). 좌우가 `split_x`로 갈리고 어느 쪽인지부터 정해야
+/// 하는데, 가로 스크롤 입력이 같은 이유로 비교를 뺐다 — 같은 자리에서 함께 연다.
+///
+/// 세로 밖은 첫/마지막 **보이는 행**으로 clamp한다. 드래그는 pane을 벗어나는 것이 정상이고, 그때
+/// `null`을 주면 호출자가 분기를 하나 더 져야 한다(§10이 *"항상 유효한 offset"*이라 정한 것과 같은 결).
+pub fn hitTestBody(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?usize {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+
+    const body_outer = editorBodyRect(self, leaf_rect, term);
+    if (body_outer.w == 0 or body_outer.h == 0) return null;
+
+    // **렌더가 그린 원점은 사각 그대로가 아니라 한 겹 안쪽이다**(`frame.content_inset_px`).
+    // `appendPaneFrame`이 `inner = {x + inset, y + inset, w - inset*2, h - inset*2}`를 만들어 그 위에
+    // 셀을 깔고, 스크롤바 기하도 같은 `inset`을 더해 창 좌표로 옮긴다(`shiftScrollbar`). 역변환에서
+    // 그것을 안 빼면 **모든 클릭이 그만큼 밀린다** — 적대적 검증이 실측으로 잡았다: inset 4px가 8px
+    // 셀의 정확히 절반이라 1칸 글자의 앞/뒤 판정이 전부 뒤집혔고, 세로로는 행마다 아래 25%가 다음
+    // 줄로 갔으며, gutter 오른쪽 4px 띠가 본문 0열로 접수됐다.
+    const inset = chrome_editor.frame.content_inset_px;
+    const body: maru.session.SplitRect = .{
+        .x = body_outer.x + @as(i32, @intCast(inset)),
+        .y = body_outer.y + @as(i32, @intCast(inset)),
+        .w = body_outer.w -| inset * 2,
+        .h = body_outer.h -| inset * 2,
+    };
+    if (body.w == 0 or body.h == 0) return null;
+
+    // ① 픽셀 → 행·본문 안 x. **가로는 본문 사각 밖이면 받지 않는다**(gutter가 그쪽을 가져간다).
+    const cell_w: i64 = @intCast(self.cell_width_px);
+    const cell_h: i64 = @intCast(self.cell_height_px);
+    // **캐스트 전에 묶는다.** `@intFromFloat`는 표현 불가능한 값(NaN·무한대·i64 범위 밖)에서
+    // illegal behavior이고 안전 빌드에서 죽는다 — 실측으로 `x = 1e300`이 SIGABRT였다(2차 적대적
+    // 검증). 이 함수는 계약상 *"드래그가 pane을 벗어나는 것은 정상"*인 자리라 극단값이 오는 것을
+    // 막을 수 없고, 어차피 아래에서 clamp하므로 미리 묶어도 답이 달라지지 않는다.
+    const px_limit: f64 = 1 << 30;
+    const clamped_x: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
+    const clamped_y: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
+    const rel_x_raw: i64 = @as(i64, @intFromFloat(clamped_x)) - @as(i64, body.x);
+    const rel_y: i64 = @as(i64, @intFromFloat(clamped_y)) - @as(i64, body.y);
+    // **오른쪽 밖은 거절하지 않고 clamp한다.** 계약의 *"행 끝 너머 → 그 행의 끝"*이 그 자리이고,
+    // 드래그가 pane 오른쪽으로 나가는 것은 정상이다(세로 밖을 clamp하는 것과 같은 이유). 왼쪽은
+    // 다르다 — gutter가 있어 아래에서 거절한다.
+    const rel_x: i64 = @min(rel_x_raw, @as(i64, body.w) - 1);
+    if (rel_x < 0) return null;
+
+    // **렌더와 같은 인자로 같은 계산을 부른다.** `buildPaneOps`가 `inner`(= 사각에서 inset을 뺀 것)를
+    // `buildSide`에 넘기고 그쪽이 `sideMetrics(rect.w, rect.h, …)`를 부르므로, 여기서 사각 원본 폭을
+    // 주면 **8px 넓은 폭**으로 계산해 `content.width`가 한 열 커진다(적대적 검증 실측: hit 90 /
+    // render 89). 그 값이 `byteAtPoint`의 행 끝 판정에 들어가므로, 랩을 켜면 행 끝 너머 클릭이 다음
+    // 행의 첫 글자를 답하게 된다. `body`는 위에서 이미 inset을 뺀 값이다.
+    const line_count = term.rt.editor_lines.len;
+    const m = chrome_editor.diff_frame.sideMetrics(body.w, body.h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    const layout = chrome_editor.geometry.compute(m.total_cols, line_count, .{});
+    const content_left_px: i64 = @as(i64, layout.contentLeft()) * cell_w;
+    if (rel_x < content_left_px) return null; // gutter — 접힘이 가져간다
+
+    // 세로는 clamp한다(위 doc). 행이 음수면 첫 행, 넘치면 마지막 행.
+    const row_i: usize = if (rel_y < 0) 0 else blk: {
+        const r: usize = @intCast(@divFloor(rel_y, cell_h));
+        break :blk @min(r, rows_len - 1);
+    };
+    const v = term.rt.editor_hit_rows[row_i];
+    // (초판에 있던 `v.line >= editorLines(term).len` 가드는 **축이 달라 아무것도 막지 못했다** —
+    //  `v.line`은 상대 인덱스이고 그 배열은 절대 인덱스다. 아래 ③이 `visible_idx`로 제대로 막는다.)
+
+    // ③ 보이는 줄 → 원본 논리 줄은 **렌더 시점에 이미 풀렸다**(`storeHitRows`). 여기서 다시 풀면
+    // `editor_first_line`·`editor_visible_numbers`를 live로 읽게 되고, 그 둘은 프레임 사이에 바뀐다
+    // (스크롤·접힘 토글이 `metal_dirty`만 세운다) — 실측으로 접힘 뒤 클릭이 36줄 어긋났다.
+    const source_line: usize = term.rt.editor_hit_lines[row_i];
+    if (source_line >= term.rt.editor_lines.len) return null;
+
+    // ④ 조각·열·칸 안 픽셀 → 줄 안 byte.
+    const text = term.rt.editor_lines[source_line];
+    // **렌더가 쓰는 그 값을 쓴다**(`frame.default_tab_width` — 단일 출처). 여기서 다른 값을 쓰면
+    // 클릭이 화면과 어긋난다: 탭 폭이 곧 열 계산이라 한 칸만 달라도 커서가 글자에서 밀린다.
+    const tab_w: u16 = chrome_editor.frame.default_tab_width;
+    const off_in_line = chrome_editor.content.byteAtPoint(
+        text,
+        tab_w,
+        @min(v.start_byte, text.len),
+        v.start_col,
+        layout.content.width,
+        @intCast(rel_x - content_left_px),
+        @intCast(self.cell_width_px),
+    );
+
+    // ⑤ 줄 안 byte → 문서 offset. `Selection`이 문서 전체 offset을 요구한다.
+    const doc = term.rt.editor_doc orelse return null;
+    const line = doc.file.lines.line(source_line) orelse return null;
+    return line.start + @min(off_in_line, line.contentEnd() - line.start);
+}
+
+/// 마지막 프레임의 행들을 Term에 복사하고, **그 자리에서 절대 원본 줄까지 푼다**.
+///
+/// 저장소는 **필요한 만큼만 한 번 잡고 재사용**한다 — 화면 행 수는 창 크기로 정해지므로 프레임마다
+/// 흔들리지 않는다.
+///
+/// **푸는 것을 여기서 하는 이유**는 `editor_hit_lines` doc에 있다: `VisualRow.line`을 절대 줄로 바꾸려면
+/// `editor_first_line`과 `editor_visible_numbers`가 필요한데 **둘 다 프레임 사이에 바뀐다**. 렌더 시점에
+/// 풀어 두면 `hitTestBody`가 live 상태를 하나도 안 읽는다.
+fn storeHitRows(self: *AppSession, term: *Term, rows: []const chrome_editor.visual_map.VisualRow) void {
+    if (rows.len > term.rt.editor_hit_rows.len) {
+        const grown = self.allocator.alloc(chrome_editor.visual_map.VisualRow, rows.len) catch {
+            term.rt.editor_hit_rows_len = 0; // 못 잡았다 — 이 프레임은 클릭을 못 받는다
+            return;
+        };
+        const grown_lines = self.allocator.alloc(u32, rows.len) catch {
+            self.allocator.free(grown);
+            term.rt.editor_hit_rows_len = 0;
+            return;
+        };
+        if (term.rt.editor_hit_rows.len > 0) self.allocator.free(term.rt.editor_hit_rows);
+        if (term.rt.editor_hit_lines.len > 0) self.allocator.free(term.rt.editor_hit_lines);
+        term.rt.editor_hit_rows = grown;
+        term.rt.editor_hit_lines = grown_lines;
+    }
+    @memcpy(term.rt.editor_hit_rows[0..rows.len], rows);
+
+    // **③ 보이는 줄 → 원본 논리 줄을 여기서 푼다.**
+    //
+    // `v.line`은 뷰포트 첫 줄로부터의 **상대 인덱스**라 `first_line`을 더해야 보이는 줄이 되고
+    // (gutter가 같은 표를 그렇게 읽는다 — `gutter.zig`의 `first_line + v.line`), 접힘이 켜져 있으면
+    // 그 보이는 줄을 번호 표로 한 번 더 옮겨야 원본 줄이 된다.
+    const first_line = term.rt.editor_first_line;
+    const numbers = term.rt.editor_visible_numbers;
+    const doc_lines = term.rt.editor_lines.len;
+    for (rows, 0..) |v, i| {
+        const visible_idx: usize = @as(usize, v.line) + first_line;
+        var source: usize = visible_idx;
+        if (numbers.len > 0) {
+            if (visible_idx < numbers.len) {
+                // 표에 번호가 없는 자리는 `rebuildVisible`의 방어적 꼬리 채움이다 — 그때는 앞 줄을
+                // 잇는다(그 줄이 화면에서 그 자리를 차지하고 있다).
+                var k: usize = visible_idx;
+                while (true) {
+                    if (numbers[k]) |n| {
+                        source = n - 1; // 표는 1-based
+                        break;
+                    }
+                    if (k == 0) break;
+                    k -= 1;
+                }
+            } else source = doc_lines; // 범위 밖 — 아래 가드가 막는다
+        }
+        term.rt.editor_hit_lines[i] = @intCast(@min(source, std.math.maxInt(u32)));
+    }
+    term.rt.editor_hit_rows_len = rows.len;
+}
+
 /// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
 /// 여기서는 pane 여백만 반영한다 — Chrome Lab이 같은 함수를 불러 캡처가 제품을 예고한다.
 pub fn buildDiffPaneOps(
@@ -305,9 +463,10 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 스크롤바로 이미 경계를 만든다. padding까지 적용하면 pane 안에 쓰이지 않는 띠가 한 겹 더 생겨
     // 문서가 차지할 자리가 줄고, 배경이 그 띠에서 끊겨 pane 배경이 비친다(2026-08-13 사용자 결정).
     //
-    // **hit-test는 아직 이 사각을 소비하지 않는다.** N1은 읽기 전용이라 편집기 pane에 포인터·IME
-    // 경로가 없다. 그것이 붙을 때(N2~) 그쪽도 같은 `body`를 읽어야 "보이는 자리"와 "누르는 자리"가
-    // 갈리지 않는다 — 터미널이 `grid`를 쓰는 것과 달라지는 지점이므로 그때 함께 정한다.
+    // **hit-test가 이 사각을 소비한다**(2026-08-19 — `hitTestBody`, §4.1g). 같은 `body`를 읽어야
+    // "보이는 자리"와 "누르는 자리"가 갈리지 않는다 — 터미널이 `grid`를 쓰는 것과 달라지는 지점이다.
+    // **한 겹 안쪽(`content_inset_px`)까지 같이 읽어야 한다**: 렌더가 그 안에 셀을 깔므로, 역변환에서
+    // 그것을 빼먹으면 4px가 8px 셀의 절반이라 1칸 글자의 앞/뒤 판정이 전부 뒤집힌다(적대적 검증 실측).
     const rect = editorBodyRect(self, leaf_rect, term);
     if (rect.w == 0 or rect.h == 0) return null;
 
@@ -393,6 +552,13 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         );
     } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
+    // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
+    // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
+    // 싣는 것과 같은 자리·같은 이유다(*"접힘을 아는 것은 렌더뿐"*).
+    //
+    // **못 담으면 그냥 안 담는다.** 저장소를 못 잡아도 화면은 이미 다 그렸고, 클릭이 그 프레임 동안
+    // 안 될 뿐이다(§2.1 캐시가 "못 잡으면 없이 그린다"와 같은 결).
+    storeHitRows(self, term, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
@@ -1568,6 +1734,11 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_doc = null;
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
+    if (term.rt.editor_hit_rows.len > 0) self.allocator.free(term.rt.editor_hit_rows);
+    term.rt.editor_hit_rows = &.{};
+    if (term.rt.editor_hit_lines.len > 0) self.allocator.free(term.rt.editor_hit_lines);
+    term.rt.editor_hit_lines = &.{};
+    term.rt.editor_hit_rows_len = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
@@ -5145,5 +5316,176 @@ test "[측정] 조각 시작을 함께 내는 비용 — 렌더 루프에 걸음
             slowest,
             term.rt.editor_lines.len,
         });
+    }
+}
+
+test "hitTestBody: 렌더가 그린 자리를 기준선으로 삼는다 (§4.1g 다섯 단계)" {
+    // **기준선이 구현이면 아무것도 못 잡는다.** 초판은 좌표를 구현과 **같은 식**으로 만들었고
+    // (`sideMetrics(body.w, …)`, 원점 `body`), 그래서 렌더 원점의 `content_inset_px`(4px)를 빠뜨린
+    // 것과 layout 인자가 렌더와 다른 것을 **둘 다 통과**시켰다 — 적대적 검증이 실측으로 잡았다.
+    //
+    // 그래서 여기서는 **렌더가 실제로 그린 op의 좌표**를 읽어 그 자리를 클릭한다. 그러면 어느 층이
+    // 어긋나도 이 테스트가 먼저 깨진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const io_dir = fx.dir.dir;
+    try io_dir.writeFile(io, .{ .sub_path = "hit.txt", .data = "abcdef\nghijkl\nmnopqr\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try io_dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "hit.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **그리기 전에는 받지 않는다** — 행 배열이 비어 있다.
+    try testing.expectEqual(@as(?usize, null), hitTestBody(fx.session, term, fx.leaf_rect, 500, 100));
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
+
+    // **렌더가 그린 첫 글자 셀을 찾는다.** `PaneDraw.rect`가 op 원점이고(여백 안쪽), 셀은 그 위에
+    // `cell_w × cell_h`로 깔린다. 첫 텍스트 셀의 창 좌표가 곧 "화면에서 'a'가 있는 자리"다.
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    var first_cell: ?struct { x: f64, y: f64 } = null;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint != 'a') continue;
+        first_cell = .{
+            .x = @as(f64, @floatFromInt(drawn.rect.x)) + @as(f64, @floatFromInt(c.col)) * cw,
+            .y = @as(f64, @floatFromInt(drawn.rect.y)) + @as(f64, @floatFromInt(c.row)) * ch,
+        };
+        break;
+    }
+    const a = first_cell orelse return error.NoFirstCell;
+
+    // 'a' 칸의 **왼쪽 절반** → 그 글자 앞(offset 0), **오른쪽 절반** → 뒤(offset 1).
+    // caret 모델이라 1칸 안에 두 자리가 있다(§4.1g 9회차).
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + 1));
+    try testing.expectEqual(@as(?usize, 1), hitTestBody(fx.session, term, fx.leaf_rect, a.x + cw - 1, a.y + 1));
+    // 셋째 칸 왼쪽 → offset 2.
+    try testing.expectEqual(@as(?usize, 2), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 2 * cw + 1, a.y + 1));
+
+    // **같은 행의 아래쪽 픽셀도 같은 줄이다** — 세로 원점이 밀리면 여기서 다음 줄이 나온다.
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + ch - 1));
+
+    // 둘째 줄 첫 글자 = 문서 offset 7("abcdef\n" 다음).
+    try testing.expectEqual(@as(?usize, 7), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + ch + 1));
+
+    // **행 끝 너머는 그 행의 끝**(6) — 줄 맨 끝이지 문서 끝이 아니다.
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const right_edge: f64 = @as(f64, @floatFromInt(body.x)) + @as(f64, @floatFromInt(body.w)) - 1;
+    try testing.expectEqual(@as(?usize, 6), hitTestBody(fx.session, term, fx.leaf_rect, right_edge, a.y + 1));
+
+    // **gutter는 받지 않는다** — 접힘 화살표가 먼저 가져간다. 본문 왼쪽 1픽셀도 포함이다.
+    try testing.expectEqual(@as(?usize, null), hitTestBody(fx.session, term, fx.leaf_rect, a.x - 1, a.y + 1));
+
+    // **세로 밖은 clamp한다** — 드래그가 pane을 벗어나는 것은 정상이다.
+    //
+    // 아래로 나가면 **마지막 보이는 행**이다. 이 문서는 끝 개행이 만든 **빈 4번째 줄**까지 있어
+    // (`"…mnopqr\n"` → 줄 넷) 그 줄의 시작 offset 21이 답이다 — 초판은 3줄이라고 가정해 14를
+    // 적었고, 그것은 3번 줄의 *시작*이지 마지막 행이 아니었다(2차 적대적 검증이 잡았다).
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y - 500));
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 전제: 빈 4번째 줄이 있다
+    try testing.expectEqual(@as(?usize, 21), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + 5000));
+}
+
+test "[주 판정] 무작위 좌표를 쏴도 클릭이 화면과 어긋나지 않는다 (§4.1g)" {
+    // **계약이 "이 슬라이스의 주 판정"이라 지목한 것이다.** §4.1g: *"무작위 좌표를 쏘아 결과가 늘
+    // cluster 경계인지 본다 — 알파벳은 §3.8 문자 포함"*.
+    //
+    // **오라클은 gutter가 그린 줄 번호다.** 구현과 같은 식으로 좌표를 만들면 어긋남을 못 잡으므로
+    // (1차 검증이 그 함정을 잡았다), 화면에 실제로 나온 번호로 "이 행이 몇 번 줄인가"를 읽는다.
+    //
+    // **cluster 경계만으로는 부족하다**(2차 검증의 발견). layout 인자가 어긋나도 답은 여전히 같은
+    // 줄의 cluster 경계라 그 판정을 통과한다. 그래서 **행 경계 부등식**을 함께 본다 — 한 행의
+    // 오른쪽 끝이 다음 행의 시작을 넘어서면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // §3.8 문자를 포함한 알파벳 — §4.1c가 정한 규율이고, Vim이 아직 못 고친 함정이 이 종류다.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    const units = [_][]const u8{ "ab", "\t", "가나", "😀", "\u{202E}x", "  ", "z" };
+    var prng = std.Random.DefaultPrng.init(0x4A11);
+    const rand = prng.random();
+    for (0..60) |_| {
+        const n = 3 + rand.uintLessThan(usize, 12);
+        for (0..n) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
+        try text.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "adv.txt", .data = text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "adv.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 랩·스크롤을 섞어 `start_col`·`start_byte`·`piece`가 실제로 움직이게 한다.
+    for ([_]struct { wrap: bool, first: usize }{
+        .{ .wrap = false, .first = 0 },
+        .{ .wrap = true, .first = 0 },
+        .{ .wrap = true, .first = 5 },
+        .{ .wrap = false, .first = 7 },
+    }) |cfg| {
+        term.rt.editor_wrap = cfg.wrap;
+        term.rt.editor_first_line = @min(cfg.first, term.rt.editor_lines.len -| 1);
+        term.rt.editor_row_cache.filled = false;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse continue;
+        defer drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_hit_rows_len;
+        if (rows == 0) continue;
+
+        const body_outer = editorBodyRect(fx.session, fx.leaf_rect, term);
+        const inset = chrome_editor.frame.content_inset_px;
+        const bx: f64 = @floatFromInt(body_outer.x + @as(i32, @intCast(inset)));
+        const by: f64 = @floatFromInt(body_outer.y + @as(i32, @intCast(inset)));
+        const bw: f64 = @floatFromInt(body_outer.w -| inset * 2);
+        const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+
+        var prev_row_right: ?usize = null;
+        for (0..rows) |r| {
+            const row_top = by + @as(f64, @floatFromInt(r)) * ch + 1;
+            var last_off: usize = 0;
+            var x: f64 = bx + 1;
+            var first_off: ?usize = null;
+            while (x < bx + bw) : (x += 3) {
+                const off = hitTestBody(fx.session, term, fx.leaf_rect, x, row_top) orelse continue;
+                if (first_off == null) first_off = off;
+
+                // ⑴ **cluster 경계인가.** 그 자리에서 줄 끝까지 걸으면 정확히 도달한다.
+                const src = term.rt.editor_hit_lines[r];
+                const line_text = term.rt.editor_lines[@min(src, term.rt.editor_lines.len - 1)];
+                const doc = term.rt.editor_doc.?;
+                const li = doc.file.lines.line(@min(src, term.rt.editor_lines.len - 1)).?;
+                try testing.expect(off >= li.start and off <= li.contentEnd());
+                var walk = off - li.start;
+                var wcol: u32 = 0;
+                while (walk < line_text.len) {
+                    const st = chrome_editor.content.stepColumn(line_text, walk, wcol, chrome_editor.frame.default_tab_width);
+                    walk = st.next_byte;
+                    wcol = st.next_col;
+                }
+                try testing.expectEqual(line_text.len, walk);
+
+                // ⑵ **한 행 안에서 x가 커지면 offset이 줄지 않는다.**
+                try testing.expect(off >= last_off);
+                last_off = off;
+            }
+            // ⑶ **행 경계 부등식** — 앞 행의 오른쪽 끝이 이 행의 시작을 넘지 않는다(같은 줄일 때만).
+            if (prev_row_right) |pr| {
+                if (r > 0 and term.rt.editor_hit_lines[r] == term.rt.editor_hit_lines[r - 1]) {
+                    try testing.expect(pr <= (first_off orelse pr));
+                }
+            }
+            prev_row_right = last_off;
+        }
     }
 }

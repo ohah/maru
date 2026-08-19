@@ -452,6 +452,10 @@ pub const Table = struct {
     /// 사용자가 친다. 그래서 문구가 동작이 아니라 **넣어 줄 명령**을 말한다.
     scm_menu_push: [:0]const u8,
     scm_menu_pull: [:0]const u8,
+    /// 브랜치 줄 `∨` 메뉴 — ahead/behind의 **기준**을 고른다(§3.5. `origin/HEAD`가 없는 저장소에 필요하다).
+    scm_menu_pick_base: [:0]const u8,
+    /// 기준 목록의 첫 줄 — 고른 기준을 버리고 `origin/HEAD`로 돌아간다.
+    scm_base_default: [:0]const u8,
     /// 명령을 넣을 터미널이 없다(활성 surface가 터미널이 아니다).
     scm_no_terminal: [:0]const u8,
     scm_changes: [:0]const u8,
@@ -1003,6 +1007,8 @@ pub const en: Table = .{
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
     .scm_menu_pull = "Type git pull",
+    .scm_menu_pick_base = "Choose base branch…",
+    .scm_base_default = "Default (origin/HEAD)",
     .scm_no_terminal = "No terminal to type into",
     .scm_changes = "Changes",
     .scm_history = "History",
@@ -1487,6 +1493,8 @@ pub const ko: Table = .{
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",
     .scm_menu_pull = "git pull 넣기",
+    .scm_menu_pick_base = "기준 브랜치 고르기…",
+    .scm_base_default = "기본값(origin/HEAD)",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

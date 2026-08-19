@@ -40,13 +40,31 @@ const scm_view = app_session_mod.scm_view;
 
 /// git 읽기를 건다. 소스 컨트롤 뷰를 보고 있지 않으면 아무것도 하지 않는다 — 안 보는 화면 때문에 프로세스를
 /// 띄우지 않는다. 이미 in-flight면 건너뛴다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다 — §3.5).
+/// 기준이 바뀌었는데 아직 그 기준으로 못 읽었으면 다시 건다(§3.5).
+///
+/// **도는 읽기를 버리지 않는다.** 버리면 백엔드가 아직 안 걷힌 결과를 들고 있어 새 제출이 거절될 수
+/// 있고(그 슬롯은 깊이 1이다), 그러면 이 갱신이 통째로 사라진다. 옛 기준의 답이 한 프레임 늦게 보였다가
+/// 바로잡히는 쪽이, 영영 안 바뀌는 쪽보다 낫다.
+///
+/// **도는 동안에는 아무것도 안 한다**(적대적 검증 2026-08-19). 이 자리는 tick housekeeping이고 그
+/// 블록의 규율이 "blocking I/O를 늘리지 않는다"인데, `refreshGitStatus`는 저장소 walk-up과 git 실행
+/// 파일 탐색으로 `access(2)`를 친다 — 플래그가 오래 서 있는 상황(git 없음·저장소 아님)에서 매 프레임
+/// 그 질문을 다시 하면 답은 늘 같고 비용만 든다. 그래서 **도는 것이 끝난 뒤 한 번만** 시도하고,
+/// 결과와 무관하게 플래그를 내린다: 그때도 못 걸었다면 이유가 지속적인 것이고, 도크를 여는 경로가
+/// 어차피 새 읽기를 건다(그 읽기는 이미 고른 기준으로 나간다).
+pub fn pumpBaseReread(self: *AppSession) void {
+    if (!self.scm_base_reread_pending) return;
+    if (self.git_inflight != 0 or self.scm_write_inflight != 0) return; // 아직 도는 중 — 끝나면 이 자리로 온다
+    self.scm_base_reread_pending = false;
+    refreshGitStatus(self);
+}
+
 pub fn refreshGitStatus(self: *AppSession) void {
     if (self.dock.view != .source_control) return;
     // 목록을 다시 읽는 시점은 **비활성 저장소들의 머리 줄도** 다시 읽을 시점이다(P3d-③) — 그쪽은
     // 감시 대상이 아니라 이 시점 말고는 갱신될 길이 없다. 지우지 않고 낡음 표시만 한다: 지우면 다시
     // 읽는 동안 머리 줄이 "읽는 중…"으로 되돌아가 화면이 깜빡인다.
     scm_dock_ops.markRepoStatusStale(self);
-    if (self.git_inflight != 0) return;
     if (self.git_inflight != 0) return;
     if (self.scm_write_inflight != 0) return; // 위와 같은 이유(§6-1)
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -89,8 +107,15 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
         if (!std.mem.eql(u8, ring_repo, repo)) break :blk "";
         break :blk if (self.turn_ring.latest()) |snap| snap.oid() else "";
     };
-    if (self.git_backend.?.submit(git_exe, repo, snapshot, self.turnIndexPath() orelse "", self.git_request_seq)) {
+    // **비교 기준을 함께 넘긴다**(§3.5). 고른 것이 없으면 빈 값이고 그러면 `origin/HEAD`다 —
+    // 이 하나가 ahead/behind·merge-base·브랜치 범위 셋의 왼쪽이라 여기서 갈리면 화면의 숫자와
+    // 그 아래 목록이 서로 다른 질문의 답이 된다.
+    const base = scm_dock_ops.scmBaseRefFor(self, repo);
+    if (self.git_backend.?.submit(git_exe, repo, snapshot, self.turnIndexPath() orelse "", base, self.git_request_seq)) {
         self.git_inflight = self.git_request_seq;
+        // **여기서만 내린다**(§3.5). 고른 기준이 실제로 argv에 실린 자리가 여기이고, 위의 어느 이른
+        // 반환이든 그 선택은 아직 화면에 닿지 않았다 — 그때 플래그를 내리면 조용히 잊는 것이다.
+        self.scm_base_reread_pending = false;
     }
 }
 
@@ -278,7 +303,11 @@ pub fn drainGitStatus(self: *AppSession) void {
         settings_ops.clearBranchMenuText(self);
         self.branch_menu_text = owned;
         self.branch_menu_len = git_command.collectBranches(self.branch_menu_text, &self.branch_menu_names);
-        settings_ops.openBranchMenu(self);
+        // **어느 클릭의 답인지는 요청이 기억해 뒀다**(§3.5) — 목록 자체는 용도를 모른다.
+        switch (self.branch_menu_purpose) {
+            .switch_branch => settings_ops.openBranchMenu(self),
+            .pick_base => scm_dock_ops.openBaseMenu(self),
+        }
     }
     while (backend.takeSnapshotResult()) |taken| {
         var snapshot = taken;

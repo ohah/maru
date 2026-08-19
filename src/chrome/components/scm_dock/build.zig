@@ -553,7 +553,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const menu_action = table.append(
         props.snapshot_generation,
         .open_remote_menu,
-        props.fetch.enabled,
+        props.remote_menu_enabled,
     ) catch return error.InsufficientActionBuffer;
     fetch_slot[1] = tree.card(.{
         .id = NodeIds.remote_menu,
@@ -570,7 +570,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .shadow = .none,
         },
         .action = menu_action,
-        .cursor = if (props.fetch.enabled) .press else .arrow,
+        .cursor = if (props.remote_menu_enabled) .press else .arrow,
         .overflow = .clip,
     }, &.{});
     top[3] = tree.card(.{
@@ -788,6 +788,7 @@ test "`∨`는 칩 오른쪽의 **자기 히트 사각형**이고 도는 중에�
         .items = &.{},
         .branch = "main",
         .fetch = .{ .enabled = true, .running = true },
+        .remote_menu_enabled = true,
     }, &storage);
 
     const chip = frame.tree.entries[frame.tree.find(NodeIds.fetch) orelse return error.MissingFetch].rect;
@@ -811,7 +812,7 @@ test "`∨`는 칩 오른쪽의 **자기 히트 사각형**이고 도는 중에�
     };
     try testing.expect(saw_menu);
 
-    // 원격이 없으면 둘 다 꺼진다 — `push`/`pull`도 원격이 없으면 무엇을 골라도 실패한다.
+    // 아직 아무것도 못 읽은 프레임에서는 둘 다 꺼진다 — 그때 아는 것은 "모른다"뿐이다.
     var storage_off: Storage = .{};
     const off = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
@@ -823,6 +824,32 @@ test "`∨`는 칩 오른쪽의 **자기 히트 사각형**이고 도는 중에�
         .open_remote_menu, .fetch_remote => try testing.expect(!entry.enabled),
         else => {},
     };
+}
+
+test "원격이 없어도 `∨`는 열린다 — 기준 고르기가 남아 있다 (§3.5)" {
+    // 이 둘을 한 값으로 묶어 두면 `origin/HEAD`가 없는 저장소, 즉 **기준을 골라야 하는 바로 그
+    // 저장소**에서 메뉴가 안 열린다(원격 없는 저장소에는 `origin/HEAD`도 없다).
+    var storage: Storage = .{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .fetch = .{ .enabled = false }, // 원격 없음 — 갱신은 무엇을 눌러도 실패한다
+        .remote_menu_enabled = true,
+    }, &storage);
+
+    var saw_menu = false;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .open_remote_menu => {
+            saw_menu = true;
+            try testing.expect(entry.enabled);
+        },
+        .fetch_remote => try testing.expect(!entry.enabled),
+        else => {},
+    };
+    try testing.expect(saw_menu);
+    const menu_index = frame.tree.find(NodeIds.remote_menu) orelse return error.MissingRemoteMenu;
+    try testing.expectEqual(tree.CursorHint.press, frame.tree.entries[menu_index].cursor);
 }
 
 test "브랜치를 못 잡으면 원격 갱신 칩도 함께 사라진다 (P6)" {

@@ -2221,11 +2221,36 @@ pub const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
 /// 브랜치 메뉴에 띄우는 최대 개수. `for-each-ref`는 최근 순이라 위쪽이 대개 원하는 것이고, 목록이 길면
 /// 메뉴가 화면을 넘어 쓸모가 없어진다. 넘치는 만큼은 터미널에서 `git branch`로 보는 게 맞다.
 const max_branch_menu_items: usize = 12;
+
+/// 브랜치 목록의 **용도**(§3.5). 읽기는 하나이고 쓰임이 둘이다.
+pub const BranchMenuPurpose = enum {
+    /// 상태바 브랜치 항목 — 고른 이름을 `git switch`로 터미널에 넣는다.
+    switch_branch,
+    /// 도크 `∨` — 고른 이름이 ahead/behind·merge-base·브랜치 범위의 **기준**이 된다.
+    pick_base,
+};
+
+/// 도크 `∨` 메뉴에 실릴 수 있는 항목. 원격이 없으면 앞의 둘이 빠진다.
+pub const RemoteMenuItem = enum { push, pull, pick_base };
+const max_remote_menu_items: usize = 3;
+
+/// 기준 목록의 한 줄이 **무엇인가**. 줄이 걸러지거나(원격 이름) 빠질 수 있어(`기본값`) 자리만으로는
+/// 알 수 없다 — 자리와 뜻을 같은 자리에서 만든다.
+pub const BaseMenuRow = union(enum) {
+    /// 고른 기준을 버리고 `origin/HEAD`로 돌아간다.
+    default_base,
+    /// `branch_menu_names`의 그 자리.
+    branch: usize,
+};
+const max_base_menu_rows: usize = max_branch_menu_items + 1;
 const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
 comptime {
     // 라벨 버퍼는 **공유**다(`context_menu_items_buf`). 그룹 메뉴엔 이 가드가 있었는데 브랜치·리소스엔 없었다 —
     // 넘치면 버퍼 밖에 쓴다. 상한을 늘릴 때 여기서 멈추게 한다.
     if (max_branch_menu_items > ctx_menu_count) @compileError("branch menu exceeds context_menu_items_buf");
+    // 기준 목록은 브랜치 목록에 `기본값` 줄 하나가 더 붙는다 — 그 하나 때문에 넘칠 수 있고, 넘치면
+    // 조용히 잘리는 게 아니라 버퍼 밖을 쓴다(브랜치 목록이 같은 이유로 여기 서 있다).
+    if (max_base_menu_rows > ctx_menu_count) @compileError("base menu exceeds context_menu_items_buf");
     // 라벨 슬라이스는 머리글 2줄 + 탭 행 + 앱 행이 **함께** 들어간다 — 행만 재면 3만큼 낙관적이다.
     if (max_resource_rows + resource_header_rows + resource_footer_rows > ctx_menu_count)
         @compileError("resource rows + headers + app row exceed context_menu_items_buf");
@@ -3596,6 +3621,10 @@ pub const AppSession = struct {
     branch_menu_len: usize = 0,
     /// 브랜치 목록을 요청해 두고 결과를 기다리는 중인지. 클릭 연타로 요청이 쌓이지 않게 한다.
     branch_menu_pending: bool = false,
+    /// 그 목록을 **무엇에 쓰려고** 읽었나(§3.5). 결과 슬롯이 하나뿐이라 용도를 요청한 쪽이 기억해 둔다 —
+    /// 안 기억하면 기준을 고르려고 연 목록이 브랜치 **전환** 메뉴로 열리고, 고른 이름이 터미널에
+    /// `git switch`로 들어간다(고르기만 하려던 사용자에게 그것은 사고다).
+    branch_menu_purpose: BranchMenuPurpose = .switch_branch,
     /// 웹 탭 페이지 내 찾기(§8 슬라이스 ②). Swift가 `WKWebView.find`를 부르고 결과를 되돌린다.
     /// **request id로 늦은 회신을 버린다** — find는 completion handler라 결과가 오기 전에 탭이 바뀌거나
     /// 오버레이가 닫힐 수 있고, 그대로 반영하면 "누른 적 없는 상태"가 뜬다(상태바 브랜치 메뉴에서 실제로 났다).
@@ -3910,6 +3939,28 @@ pub const AppSession = struct {
     /// 브랜치 줄 `∨`의 보조 메뉴가 열려 있나(P6b). 다른 메뉴 상태와 **배타**다 — 이 플래그를 빠뜨리면
     /// 다음 메뉴의 accept가 엉뚱한 분기로 간다(브랜치·리소스 메뉴가 같은 규율을 갖는다).
     scm_remote_menu_open: bool = false,
+    /// 그 메뉴에 **실제로 실린** 항목들. 원격이 없으면 `push`/`pull`이 빠지므로 index만으로는 무엇을
+    /// 골랐는지 알 수 없다 — 인덱스를 뜻으로 되돌리는 표를 여기 둔다(자리 계산을 두 곳에서 하지 않는다).
+    scm_remote_menu_items: [max_remote_menu_items]RemoteMenuItem = undefined,
+    scm_remote_menu_len: usize = 0,
+    /// 그 메뉴에서 연 **기준 브랜치 목록**이 떠 있나(§3.5). 브랜치 전환 목록과 같은 버퍼를 쓰되
+    /// accept가 가는 곳이 다르다.
+    scm_base_menu_open: bool = false,
+    /// 그 목록에 **실제로 실린** 줄들. 원격 이름은 걸러지고 `기본값`은 저장소에 따라 빠지므로
+    /// 자리만으로는 무엇을 골랐는지 알 수 없다(`∨` 메뉴와 같은 규율).
+    scm_base_menu_rows: [max_base_menu_rows]BaseMenuRow = undefined,
+    scm_base_menu_len: usize = 0,
+    /// 사용자가 고른 **비교 기준**과 그 기준이 붙는 저장소(owned, 없으면 `origin/HEAD`).
+    ///
+    /// **저장소를 함께 든다.** 기준은 저장소마다 다른 사실인데 이 필드가 하나뿐이라, 저장소가 바뀌면
+    /// 그 기준은 남의 것이 된다 — 짝이 안 맞으면 안 쓴다(§3.5. 저장소별로 기억하는 것은 workspace 몫이다).
+    scm_base_ref: ?[]u8 = null,
+    scm_base_repo: ?[]u8 = null,
+    /// 기준이 바뀌었는데 **아직 그 기준으로 읽지 못했다**. 고른 순간 읽기가 이미 돌고 있거나(§6-1 쓰기
+    /// 포함) 백엔드가 거절하면 `refreshGitStatus`가 그냥 돌아가는데, 그러면 사용자가 고른 것이 화면에
+    /// 반영되지 않은 채 조용히 사라진다 — "골랐는데 안 바뀐다"가 이 기능의 가장 나쁜 실패다.
+    /// 낙관하지 않고 **사실로 남겨** 다음 tick이 다시 건다(제출에 성공한 자리에서만 내린다).
+    scm_base_reread_pending: bool = false,
     /// 낙관적으로 옮겨 놓은 행(§7). **경로는 세션 allocator 소유**다 — 모델 버퍼는 프레임마다 다시 만들어져
     /// 그 슬라이스를 들고 있으면 다음 프레임에 남의 글자를 가리킨다.
     ///
@@ -13884,6 +13935,7 @@ pub const AppSession = struct {
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다 + 활성 터미널이 옮겨 갔는지 확인(저주기 cwd 조회)
+        git_ops.pumpBaseReread(self); // 고른 기준으로 아직 못 읽었으면 다시 건다(§3.5 — 조용히 잊지 않는다)
         // 끝난 쓰기를 **읽기보다 먼저** 거둔다 — 거두는 순간 목록 읽기를 한 번 걸므로, 순서가 반대면
         // 그 읽기가 같은 tick에 안 돌고 화면이 한 프레임 늦게 갱신된다(쓰기 문서 §6-1).
         scm_dock_ops.drainScmWrite(self);
@@ -13950,7 +14002,7 @@ pub const AppSession = struct {
             // 브랜치 항목이 **선 뒤에만** 요청한다 — 그 전에는 저장소 판정이 실패해 오류 알림이 화면에 남는다.
             for (self.statusBarTree().entries) |e| {
                 if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
-                settings_ops.requestBranchMenu(self);
+                settings_ops.requestBranchMenu(self, .switch_branch);
                 break;
             }
         }
@@ -14006,6 +14058,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
+        debug_fixtures.applyForcedBaseMenu(self); // 캡처 전용: 기준 목록은 그 메뉴를 한 번 더 눌러야 뜬다(§3.5)
         debug_fixtures.applyForcedCommitWheel(self); // 캡처 전용: 휠은 포인터 장치 입력이라 하니스가 못 낸다
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
@@ -16697,7 +16750,7 @@ pub const AppSession = struct {
             .running_agents => self.openAgentMenu(false),
             .blocked_agents => self.openAgentMenu(true),
             .cwd => dock_ops.openDockTo(self, .explorer),
-            .git_branch => settings_ops.requestBranchMenu(self), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
+            .git_branch => settings_ops.requestBranchMenu(self, .switch_branch), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
             .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
@@ -17432,6 +17485,8 @@ pub const AppSession = struct {
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
         if (self.scm_fetch_repo) |path| self.allocator.free(path); // 도는 fetch가 향한 저장소(P6)
+        if (self.scm_base_ref) |ref| self.allocator.free(ref); // 고른 비교 기준(§3.5)
+        if (self.scm_base_repo) |path| self.allocator.free(path);
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);
@@ -48724,6 +48779,20 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
     settings_ops.clearBranchMenuText(session);
     try std.testing.expect(!session.branch_menu_open);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+
+    // **기준 목록도 같은 버퍼를 빌린다**(§3.5). 플래그가 다르다는 이유로 이 가드 밖에 두면 같은 UAF다 —
+    // 실제로 그렇게 냈다가 적대적 검증에서 잡았다(2026-08-19).
+    session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    for (session.branch_menu_names[0..session.branch_menu_len], 0..) |name, i| session.context_menu_items_buf[i] = name;
+    session.context_menu_items_len = session.branch_menu_len;
+    session.scm_base_menu_open = true;
+    session.chrome_host.context_menu.show(0, 0, session.branch_menu_len);
+    try std.testing.expect(session.chrome_host.context_menu.open);
+
+    settings_ops.clearBranchMenuText(session);
+    try std.testing.expect(!session.scm_base_menu_open);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
 // SB1: **브랜치를 고르면 우리가 checkout하지 않고 터미널에 명령을 넣는다.** 읽기 전용 계약
@@ -54981,7 +55050,7 @@ test "브랜치 메뉴도 `.unknown`을 저장소 없음으로 단정하지 않�
         std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
     );
 
-    settings_ops.requestBranchMenu(session);
+    settings_ops.requestBranchMenu(session, .switch_branch);
     try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않고 사용자에게 말한다
     try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, git_ops.noticeRepoUnknown()));
     // **`branch_menu_pending`은 일부러 단언하지 않는다.** 위에서 백엔드를 `shutting_down`으로 두었으므로
@@ -56808,6 +56877,12 @@ test "소스 컨트롤: `∨` 메뉴는 명령을 넣어 줄 뿐이고, 넣을 �
     scm_dock_ops.applyRemoteMenuSelection(session, 9);
     try std.testing.expect(session.scm_write_error == null);
 
+    // **메뉴에 실린 항목이 곧 인덱스의 뜻이다**(§3.5). 원격이 있는 저장소의 메뉴가 이 모양이다.
+    session.scm_remote_menu_items[0] = .push;
+    session.scm_remote_menu_items[1] = .pull;
+    session.scm_remote_menu_items[2] = .pick_base;
+    session.scm_remote_menu_len = 3;
+
     // 활성 Term을 web으로 바꿔 "넣을 터미널이 없는" 상태를 만든다.
     const term = pane_ops.activePane(session).activeTerm();
     const saved = term.kind;
@@ -56815,6 +56890,143 @@ test "소스 컨트롤: `∨` 메뉴는 명령을 넣어 줄 뿐이고, 넣을 �
     defer term.kind = saved;
     scm_dock_ops.applyRemoteMenuSelection(session, 0);
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_terminal), session.scm_write_error.?);
+}
+
+test "소스 컨트롤: 메뉴를 닫아도 항목 표는 남는다 — accept가 닫은 뒤에 읽는다 (§3.5)" {
+    // accept 경로는 **먼저 닫고** 고른 자리를 적용한다(주입한 명령이 메뉴에 가리지 않게 — P6b).
+    // 그래서 닫을 때 표를 지우면 그 뒤의 조회가 전부 범위 밖이 되고, 메뉴가 **아무 일도 안 하게** 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.scm_remote_menu_items[0] = .push;
+    session.scm_remote_menu_len = 1;
+    settings_ops.closeContextMenu(session);
+    try std.testing.expect(!session.scm_remote_menu_open);
+    try std.testing.expectEqual(@as(usize, 1), session.scm_remote_menu_len);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    const saved = term.kind;
+    term.kind = .web;
+    defer term.kind = saved;
+    scm_dock_ops.applyRemoteMenuSelection(session, 0);
+    // 표가 살아 있어야 여기까지 온다(지웠다면 조용히 돌아가 이 문구가 없다).
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_terminal), session.scm_write_error.?);
+}
+
+test "소스 컨트롤: 기준 목록은 줄과 뜻을 함께 만든다 — 자리로 되짚지 않는다 (§3.5)" {
+    // 줄은 빠지기도 하고(`기본값` 없는 저장소) 걸러지기도 한다(원격 이름 `origin`). 그래서 자리를
+    // 나중에 다시 세면 **한 칸씩 밀린 이름**이 기준이 된다 — 고른 것과 다른 답이 화면에 뜬다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.git_repo = try allocator.dupe(u8, "/repo/a");
+    // `for-each-ref`가 내는 모양 그대로다 — `refs/remotes/origin/HEAD`의 짧은 이름이 `origin`이다.
+    session.branch_menu_text = try allocator.dupe(u8, "main\norigin\norigin/main\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    try std.testing.expectEqual(@as(usize, 3), session.branch_menu_len);
+    session.git_result = .{
+        .remotes = try git_backend_mod.worker_allocator.dupe(u8, "origin\n"),
+        .default_base = try git_backend_mod.worker_allocator.dupe(u8, "origin/main\n"),
+    };
+
+    // ① 기준이 있는 저장소: `기본값` + (원격 이름을 뺀) 브랜치들.
+    try std.testing.expect(!scm_dock_ops.scmDefaultBaseMissing(session));
+    try std.testing.expectEqual(@as(usize, 3), scm_dock_ops.buildBaseMenuRowsForTest(session));
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_base_default), session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings("main", session.context_menu_items_buf[1]);
+    // `origin`은 빠졌다 — 그 줄은 0번(`기본값`)과 같은 것을 가리킨다.
+    try std.testing.expectEqualStrings("origin/main", session.context_menu_items_buf[2]);
+
+    scm_dock_ops.applyBaseMenuSelection(session, 2);
+    try std.testing.expectEqualStrings("origin/main", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+    // **다른 저장소에는 안 쓴다.** 기준은 저장소마다 다른 사실인데 필드가 하나라, 짝을 안 보면
+    // 남의 저장소에서 고른 이름으로 숫자를 센다(그 숫자는 아무 뜻도 없다).
+    try std.testing.expectEqualStrings("", scm_dock_ops.scmBaseRefFor(session, "/repo/b"));
+
+    // ② `origin/HEAD`가 없는 저장소: `기본값` 줄이 통째로 빠져 0번이 첫 브랜치다.
+    git_backend_mod.worker_allocator.free(session.git_result.?.default_base);
+    session.git_result.?.default_base = &.{};
+    try std.testing.expect(scm_dock_ops.scmDefaultBaseMissing(session));
+    try std.testing.expectEqual(@as(usize, 2), scm_dock_ops.buildBaseMenuRowsForTest(session));
+    scm_dock_ops.applyBaseMenuSelection(session, 0);
+    try std.testing.expectEqualStrings("main", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+
+    // ③ 기준을 버리면 다시 기본값이다(빈 값 = `origin/HEAD`).
+    session.git_result.?.default_base = try git_backend_mod.worker_allocator.dupe(u8, "origin/main\n");
+    _ = scm_dock_ops.buildBaseMenuRowsForTest(session);
+    scm_dock_ops.applyBaseMenuSelection(session, 0);
+    try std.testing.expectEqualStrings("", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+
+    session.git_result.?.deinit(git_backend_mod.worker_allocator);
+    session.git_result = null;
+}
+
+test "소스 컨트롤: 읽기가 도는 중에 고른 기준도 잊지 않는다 (§3.5 적대적 검증)" {
+    // `refreshGitStatus`는 읽기·쓰기가 도는 동안 그냥 돌아간다(§6-1). 그 자리에서 끝내면 사용자가 고른
+    // 기준이 **아무 흔적도 없이** 사라진다 — 화면은 옛 기준의 숫자를 계속 들고 있고, 다시 고를 방법도
+    // 없다(같은 값을 또 골라도 상태가 이미 그 값이라 아무 일도 안 일어난다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.git_repo = try allocator.dupe(u8, "/repo/a");
+    session.branch_menu_text = try allocator.dupe(u8, "main\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    session.git_result = .{ .default_base = try git_backend_mod.worker_allocator.dupe(u8, "origin/main\n") };
+    _ = scm_dock_ops.buildBaseMenuRowsForTest(session);
+
+    // 읽기가 도는 중이다 — 이때 고른다.
+    session.git_inflight = 7;
+    scm_dock_ops.applyBaseMenuSelection(session, 1);
+    try std.testing.expectEqualStrings("main", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+    // **사실로 남아 있어야 한다.** 이 플래그가 서 있어야 다음 tick이 다시 건다.
+    try std.testing.expect(session.scm_base_reread_pending);
+
+    // 도는 읽기를 버리지 않는다 — 옛 기준의 답이 한 프레임 늦게 보였다가 바로잡히는 쪽을 골랐다.
+    try std.testing.expectEqual(@as(u64, 7), session.git_inflight);
+    // 도는 동안에는 pump가 아무것도 안 한다 — 이 블록은 tick housekeeping이라 매 프레임 저장소 walk-up을
+    // 새로 치면 안 된다(그 규율이 이 함수 위에 적혀 있다). 플래그는 그대로 남는다.
+    git_ops.pumpBaseReread(session);
+    try std.testing.expect(session.scm_base_reread_pending);
+    try std.testing.expectEqual(@as(u64, 7), session.git_inflight);
+
+    // 읽기가 끝나면 **한 번** 시도하고, 결과와 무관하게 내린다(못 걸리는 이유는 지속적인 것이고,
+    // 그때는 도크를 여는 경로가 어차피 새 읽기를 건다 — 그 읽기는 이미 고른 기준으로 나간다).
+    session.git_inflight = 0;
+    git_ops.pumpBaseReread(session);
+    try std.testing.expect(!session.scm_base_reread_pending);
+
+    session.git_result.?.deinit(git_backend_mod.worker_allocator);
+    session.git_result = null;
+}
+
+test "소스 컨트롤: `∨` 메뉴의 인덱스는 **자리가 아니라 뜻**으로 읽는다 (§3.5)" {
+    // 원격이 없는 저장소의 메뉴에는 `push`/`pull`이 없어 0번이 기준 고르기다. 자리를 다시 세는 구현이면
+    // 그 저장소에서 0번이 `git push`가 되고, 원격도 없는데 터미널에 그 글자가 들어간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.scm_remote_menu_items[0] = .pick_base;
+    session.scm_remote_menu_len = 1;
+
+    // 넣을 터미널이 없는 상태로 둔다 — `push`로 잘못 읽었다면 그 사실이 `scm_write_error`에 적힌다.
+    const term = pane_ops.activePane(session).activeTerm();
+    const saved = term.kind;
+    term.kind = .web;
+    defer term.kind = saved;
+    scm_dock_ops.applyRemoteMenuSelection(session, 0);
+    try std.testing.expect(session.scm_write_error == null); // 터미널로 나가는 명령이 아니다
 }
 
 test "소스 컨트롤: 방금 누른 동작의 결과는 어느 탭에서도 보인다 (P6)" {

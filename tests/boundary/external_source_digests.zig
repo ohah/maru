@@ -587,7 +587,9 @@ pub const inventory = [_]Proof{
     // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
     // 셀 밴드 제거를 main 에 다시 리베이스하며 값이 또 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
     // 같은 파일을 건드려 digest 가 낡았기 때문이고, count 와 사유는 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "69be895dd30456c52de10f932fa51355a62311b53ed0c91252d7bcd82fd805ee" },
+    // 죽은 pub 19개를 닫으며 바뀐다(2026-08-19): 파일 밖에서 아무도 이름으로 참조하지 않는 타입·함수·상수의
+    // `pub` 만 뗐다(선언·본문·동작은 그대로). count 는 2 그대로다 — `@field` 반사나 Client 구성은 안 건드린다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "a6d667669f50670c1dbfdd0f9982c0093590ec47594ab4ce64f8b8be44bcc756" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

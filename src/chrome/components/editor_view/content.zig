@@ -1958,6 +1958,47 @@ test "[실측] 원본 기준 랩 분할은 전개 기준과 갈리는가" {
     );
 }
 
+test "[실측] 대조 도구부터 검증한다 — 탭도 §3.8도 없으면 두 방식이 같아야 한다" {
+    // **17%라는 수치는 `piecesFromSourceProto`가 `visual_map.Pieces`의 규칙을 옳게 흉내 냈을 때만
+    // 뜻이 있다.** 프로토타입에 버그가 있으면 그 불일치는 "좌표계가 갈린다"가 아니라 "내 흉내가
+    // 틀렸다"를 잰 것이 된다.
+    //
+    // 그래서 **갈릴 이유가 없는 입력**으로 먼저 맞춘다: 탭도 §3.8 문자도 없는 줄은 전개해도 원본과
+    // 같은 바이트열이므로 두 방식이 **정확히 같은 조각**을 내야 한다. 여기서 어긋나면 위 수치를
+    // 믿을 수 없다.
+    const alloc = std.testing.allocator;
+    const alphabet = [_][]const u8{ "a", "b", "z", "가", "나", "😀", " " }; // 탭·hazard 없음
+    var prng = std.Random.DefaultPrng.init(0xA11CE);
+    const rand = prng.random();
+
+    var mismatch: usize = 0;
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+    const scratch = try alloc.alloc(u8, 64 * 1024);
+    defer alloc.free(scratch);
+    const src_starts = try alloc.alloc(u32, 4096);
+    defer alloc.free(src_starts);
+
+    for (0..600) |_| {
+        line.clearRetainingCapacity();
+        const len = 100 + rand.uintLessThan(usize, 500);
+        for (0..len) |_| try line.appendSlice(alloc, alphabet[rand.uintLessThan(usize, alphabet.len)]);
+        const view_cols: u16 = @intCast(80 + rand.uintLessThan(u16, 121));
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u16, 8));
+
+        const exp = expandTabs(line.items, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+        if (exp.truncated) continue;
+        var it = visual_map.pieces(exp.text, view_cols, true);
+        var expanded_pieces: usize = 0;
+        while (it.next()) |_| expanded_pieces += 1;
+        const source_pieces = piecesFromSourceProto(line.items, tab_width, view_cols, src_starts);
+        if (expanded_pieces != source_pieces) mismatch += 1;
+    }
+    std.debug.print("\n[실측] 대조 도구 자기검증(탭·§3.8 없음): {d}/600 불일치\n", .{mismatch});
+    // **여기가 0이 아니면 위 17%는 좌표계가 아니라 이 도구를 잰 것이다.**
+    try std.testing.expectEqual(@as(usize, 0), mismatch);
+}
+
 test "[실측] 열이 두 좌표계의 다리가 되는가 — 전개 byte ↔ 원본 byte" {
     // **(가)안이 죽은 뒤 남은 길이다.** 조각 경계는 전개 좌표계에 있고(`visual_map.Pieces`),
     // `Selection`은 원본 byte를 요구한다. 둘을 **열**로 이으면 새 규칙 없이 왕복할 수 있다:

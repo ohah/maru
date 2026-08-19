@@ -3672,9 +3672,12 @@ pub const AppSession = struct {
     /// 프로세스 전역 환경을 직접 읽으면 그 분기를 확인하려는 테스트가 env를 건드려야 하고, 그것이
     /// 같은 프로세스의 다른 테스트로 샌다.
     native_diff: bool = false,
-    /// 일반 텍스트 파일을 네이티브 편집기로 열까(`MARU_NATIVE_TEXT`). `native_diff`와 달리 **기본이
-    /// 끔**이다 — 네이티브는 아직 읽기 전용이라 켜면 탐색기에서 연 파일을 고칠 수 없다(그 근거는
-    /// `editor.nativeTextFromEnv`가 소유한다). 읽는 시점이 init인 이유도 `native_diff`와 같다.
+    /// 일반 텍스트 파일을 네이티브 편집기로 열까(`MARU_NATIVE_TEXT` — **기본이 네이티브다**,
+    /// 2026-08-19 사용자 결정). 그 기본이 무엇을 내주는지와 되돌리는 길은 `editor.nativeTextFromEnv`가
+    /// 소유한다. 읽는 시점이 init인 이유는 `native_diff`와 같다.
+    ///
+    /// **여기 선언 기본값은 여전히 false다** — 테스트가 필드를 직접 세워 분기를 확인하므로, 선언이
+    /// 켜져 있으면 "꺼진 경로"를 만들려는 테스트가 환경에 기대게 된다(`native_diff`와 같은 규칙).
     native_text: bool = false,
     dock_initialized: bool = false,
     /// 확장 grab band 안에서 divider의 정확한 선이 아닌 곳을 눌러도 첫 drag에서 경계가 포인터로 점프하지 않게,

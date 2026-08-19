@@ -171,8 +171,8 @@ pub fn openFileTermInActivePane(
     // **비교는 네이티브 편집기로도 열 수 있다**(N1.5 b). 훅이 꺼져 있으면 지금까지대로 CM6 웹 Term이다 —
     // 화면이 서고 골든이 붙는 슬라이스 c 전에는 기본 경로를 바꾸지 않는다. entry 소유·`surface_id` 배선은
     // 아래에서 그대로 이어지므로, 결과를 흘리는 배관(`takeDiffResult` → entry)이 두 경우에 같다.
-    // **일반 텍스트도 네이티브 편집기로 열 수 있다**(`MARU_NATIVE_TEXT` — 기본 끔, 근거는
-    // `editor.nativeTextFromEnv`). 읽기를 **Term 분기 앞에서** 하는 이유는 못 읽는 파일이 있기
+    // **일반 텍스트도 네이티브 편집기로 연다**(`MARU_NATIVE_TEXT` — **기본이 네이티브다**, 그 기본이
+    // 무엇을 내주는지는 `editor.nativeTextFromEnv`가 소유한다). 읽기를 **Term 분기 앞에서** 하는 이유는 못 읽는 파일이 있기
     // 때문이다(§3.5 — UTF-8 아님·상한 초과·권한). 그런 파일까지 네이티브로 보내면 훅을 켠 것이
     // **특정 파일을 아예 못 여는 이유**가 된다. 못 읽으면 조용히 지금까지의 CM6 경로로 간다.
     var prepared: ?editor_ops.Prepared = if (kind == .text and self.native_text)

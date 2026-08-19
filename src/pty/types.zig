@@ -5,7 +5,14 @@ const os_env = @import("../os_env.zig"); // 환경변수를 UTF-8 로 읽는다 
 /// Windows에서 기본으로 띄울 셸의 종류(config `shell.windows-shell`). 값의 뜻은
 /// `config/theme.zig`의 `WindowsShell`이 소유한다 — 여기서는 티어를 고르는 스위치로만 쓴다.
 /// 중립 pty 레이어가 config 모듈을 import하지 않도록 같은 모양을 따로 둔다(값 전달은 호출자 몫).
-pub const WindowsShellKind = enum { powershell, cmd };
+pub const WindowsShellKind = enum {
+    /// PowerShell 7(`pwsh.exe`)을 **먼저** 본다. 없으면 5.1 로 내려간다.
+    pwsh,
+    /// Windows PowerShell 5.1 을 **먼저** 본다. 없으면 pwsh 7 로 올라간다.
+    powershell,
+    /// `cmd.exe` 로 곧장 간다.
+    cmd,
+};
 
 /// Windows 기본 셸 후보의 **정적 경로**. 실제 기기 경로가 여기서 벗어나면(비표준 `%SystemRoot%` 등) 아래
 /// `%COMSPEC%` 폴백과 `shell.command` 명시 지정이 받아 준다 — 그 두 개가 있어 정적 목록으로 충분하다.
@@ -48,11 +55,24 @@ pub fn interactiveShellCandidates(
         return buf[0..1];
     }
     var n: usize = 0;
-    if (kind == .powershell) {
-        buf[n] = win_pwsh7;
-        n += 1;
-        buf[n] = win_powershell51;
-        n += 1;
+    // **PowerShell 두 갈래는 별개 프로그램이다.** 같은 셸의 버전 차이가 아니라 매개변수 집합이 다르다 —
+    // 실측: `-i` 를 5.1 은 `-InputFormat` 축약으로 읽고 값을 요구해 **안 뜨고**, pwsh 7 은 통과한다.
+    // 그래서 사용자가 이름으로 고를 수 있어야 하고(계약 §3.1a), 그래도 **없는 것을 고르면 다른 쪽으로
+    // 내려간다** — 고정이 아니라 선호다. 고정하고 싶으면 `shell.command` 로 경로를 못 박는다.
+    switch (kind) {
+        .pwsh => {
+            buf[n] = win_pwsh7;
+            n += 1;
+            buf[n] = win_powershell51;
+            n += 1;
+        },
+        .powershell => {
+            buf[n] = win_powershell51;
+            n += 1;
+            buf[n] = win_pwsh7;
+            n += 1;
+        },
+        .cmd => {},
     }
     // `%COMSPEC%`을 정적 cmd 경로보다 **먼저** 본다 — 비표준 설치에서 정확한 값을 아는 유일한 출처다.
     // 자격 검사는 **여기 순수 함수 안에서** 한다. 한때 호출자에서만 걸렀더니 순수 함수는 상대 경로를 그대로
@@ -474,13 +494,24 @@ test "interactiveShellCandidates: POSIX는 /bin/sh 하나, Windows는 티어 순
         }
     }
 
-    // Windows + powershell: pwsh 7 → 5.1 → %COMSPEC% → cmd.exe (계약 §3.1a).
+    // Windows + pwsh: pwsh 7 → 5.1 → %COMSPEC% → cmd.exe (계약 §3.1a, 기본값).
     {
-        const c = interactiveShellCandidates(.windows, .powershell, "D:\\alt\\cmd.exe", &buf);
+        const c = interactiveShellCandidates(.windows, .pwsh, "D:\\alt\\cmd.exe", &buf);
         try t.expectEqual(@as(usize, 4), c.len);
         try t.expectEqualStrings(win_pwsh7, c[0]);
         try t.expectEqualStrings(win_powershell51, c[1]);
         try t.expectEqualStrings("D:\\alt\\cmd.exe", c[2]); // 비표준 설치를 아는 유일한 출처라 정적 경로보다 먼저
+        try t.expectEqualStrings(win_cmd, c[3]);
+    }
+
+    // Windows + powershell: **5.1 이 먼저**다. 두 PowerShell 은 매개변수 집합이 다른 별개 프로그램이라
+    // 사용자가 이름으로 고를 수 있어야 한다 — 다만 **없으면 다른 쪽으로 내려간다**(고정이 아니라 선호).
+    {
+        const c = interactiveShellCandidates(.windows, .powershell, "D:\\alt\\cmd.exe", &buf);
+        try t.expectEqual(@as(usize, 4), c.len);
+        try t.expectEqualStrings(win_powershell51, c[0]);
+        try t.expectEqualStrings(win_pwsh7, c[1]);
+        try t.expectEqualStrings("D:\\alt\\cmd.exe", c[2]);
         try t.expectEqualStrings(win_cmd, c[3]);
     }
 

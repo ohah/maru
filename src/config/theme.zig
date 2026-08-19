@@ -1190,8 +1190,13 @@ pub const FilePanelConfig = struct {
 /// 때문이다 — pwsh 7은 설치 여부가 갈리고 Windows PowerShell 5.1은 `%SystemRoot%`에 매여 있다. 종류만 고르면
 /// 해석은 `pty.resolveInteractiveShellFor`의 티어가 한다(docs/windows-platform.md §3.1a).
 pub const WindowsShell = enum {
-    /// pwsh 7 → Windows PowerShell 5.1 → cmd 순으로 있는 것을 쓴다. **기본값**(계약 §3.1a — cmd는 `OSC 133 D`를
-    /// 원리적으로 못 내 통합이 가장 약하므로 기본이 되면 ADE가 반쯤 꺼진 채 시작한다).
+    /// **PowerShell 7**(`pwsh.exe`)을 먼저. 없으면 5.1 로 내려간다. **기본값**(계약 §3.1a — cmd 는
+    /// `OSC 133 D` 를 원리적으로 못 내 통합이 가장 약하므로 기본이 되면 ADE 가 반쯤 꺼진 채 시작한다).
+    pwsh,
+    /// **Windows PowerShell 5.1** 을 먼저. 없으면 pwsh 7 로 올라간다.
+    ///
+    /// **5.1 과 7 은 같은 셸의 버전 차이가 아니다** — 매개변수 집합이 다르다(실측: `-i` 를 5.1 은
+    /// `-InputFormat` 축약으로 읽고 값을 요구해 **안 뜬다**). 그래서 이름으로 고를 수 있어야 한다.
     powershell,
     /// `cmd.exe`를 곧장 쓴다. PowerShell 실행 정책·시작 시간을 피하려는 사용자를 위한 선택이며, 셸 통합이
     /// 제한된다는 것을 받아들이는 뜻이다(§3.4).
@@ -1241,7 +1246,7 @@ pub const ShellConfig = struct {
     /// **Windows 전용** — 기본 셸 종류. `command`가 비어 있을 때만 본다(명시 경로가 더 구체적이므로 그쪽이 이긴다).
     /// 다른 OS에서는 읽히지만 쓰이지 않는다 — 키를 OS별로 숨기면 dotfiles를 공유하는 사용자가 macOS에서
     /// "알 수 없는 키" diagnostic을 받는다.
-    windows_shell: WindowsShell = .powershell,
+    windows_shell: WindowsShell = .pwsh,
 
     // command(text)·windows_shell(enum→dropdown)이 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
     pub const schema = .{

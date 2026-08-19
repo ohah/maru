@@ -478,11 +478,44 @@ pub fn createEditorTerm(self: *AppSession) !*Term {
     return term;
 }
 
-/// 경로를 열어 **활성 pane에 편집기 Term으로 붙인다**. N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
+/// 일반 텍스트 파일을 **네이티브 편집기로** 열까. **기본은 끔이다.**
 ///
-/// 실패는 호출자가 사용자에게 알린다 — §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고 정했으므로
-/// 나머지 이유를 같은 메시지로 뭉개면 그 계약을 확인할 수 없다.
-pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*Term {
+/// 비교(`MARU_NATIVE_DIFF`)는 기본이 네이티브지만 이쪽은 다르다 — diff는 CM6에서도 **읽기 전용**이라
+/// 바꿔도 잃는 것이 없었고, 일반 텍스트는 CM6에서 편집·저장이 된다(`EntryKind.text`의 기본 mode가
+/// `.source_edit`이다). 네이티브 편집기는 N1이라 읽기 전용이므로, 기본을 켜면 **탐색기에서 연 파일을
+/// 고칠 수 없게 된다** — 그것은 기능 후퇴다. 기본 전환은 편집이 붙는 N2의 일이다.
+///
+/// 그때까지 이 훅이 하는 일은 **개발·검증 경로를 실제 클릭 경로로 만드는 것**이다. 지금까지 네이티브
+/// 편집기를 제품에서 보려면 `MARU_NATIVE_EDITOR=<경로>`로 앱을 띄워야 했고(시작할 때 한 파일),
+/// 다른 파일을 보려면 앱을 다시 띄워야 했다.
+///
+/// **세션이 init에서 한 번 읽어 든다**(`AppSession.native_text`) — `native_diff`와 같은 이유다.
+pub fn nativeTextFromEnv() bool {
+    const raw = std.c.getenv("MARU_NATIVE_TEXT") orelse return false;
+    return editor_diff_ops.valueEnables(std.mem.span(raw));
+}
+
+/// 문서를 Term에 붙이기 **직전까지** 만들어 둔 것 — 문서·줄 배열·경로 복사 셋.
+///
+/// **왜 중간 상태에 이름을 줬나.** 파일 Term을 여는 경로(`pane.openFileTermInActivePane`)는 Term을
+/// 만드는 **분기 전에** 이 파일을 네이티브로 열 수 있는지 알아야 한다 — 못 읽으면 CM6로 열어야
+/// 하는데, 읽기와 부착이 한 함수에 붙어 있으면 그 판정을 할 수 없다(Term이 이미 만들어진 뒤다).
+pub const Prepared = struct {
+    opened: Opened,
+    lines: [][]const u8,
+    path: []u8,
+
+    /// 아직 Term에 넘기지 않은 것을 되돌린다. **부착 뒤에는 부르지 않는다** — 그때부터 소유는
+    /// Term이고 `destroyTerm`이 같은 것을 푼다(이중 해제).
+    pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
+        self.opened.deinit(allocator);
+        allocator.free(self.lines);
+        allocator.free(self.path);
+    }
+};
+
+/// 경로를 읽어 부착 직전까지 만든다. **실패할 수 있는 일은 전부 여기서 끝난다.**
+pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
     var opened = try openPath(self.io, self.allocator, path);
     errdefer opened.deinit(self.allocator);
 
@@ -493,26 +526,21 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     errdefer self.allocator.free(lines);
     for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
 
-    const term = createEditorTerm(self) catch return error.OutOfMemory;
-    errdefer term_ops.destroyTerm(self, term);
-
-    // **실패할 수 있는 일을 먼저 끝내고, 넘기는 것은 마지막에 한꺼번에 한다.**
-    //
-    // 예전에는 `term.rt`에 먼저 넘긴 뒤 경로 복사와 pane 등록을 했다. 그 둘이 실패하면 위
-    // `errdefer term_ops.destroyTerm`이 doc·lines를 풀고, 그 아래 `errdefer opened.deinit`과
-    // `errdefer free(lines)`가 **같은 것을 또 푼다** — 이중 해제다. 같은 모양을 `materialize`와
-    // `computeMarks`에서 이미 두 번 잡았고(할당 실패 주입), 이 자리가 세 번째다.
-    //
-    // 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
     const path_copy = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
-    errdefer self.allocator.free(path_copy);
+    return .{ .opened = opened, .lines = lines, .path = path_copy };
+}
 
-    const pane = pane_ops.activePane(self);
-    pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
-
-    term.rt.editor_doc = opened;
-    term.rt.editor_lines = lines;
-    term.rt.editor_path = path_copy;
+/// 준비한 문서를 Term에 넘긴다. **실패하지 않는다** — 호출자는 이 앞에서 실패할 수 있는 일을 모두
+/// 끝내 두어야 한다.
+///
+/// 예전에는 `term.rt`에 먼저 넘긴 뒤 경로 복사와 pane 등록을 했다. 그 둘이 실패하면 `errdefer
+/// term_ops.destroyTerm`이 doc·lines를 풀고, 호출자의 `errdefer`가 **같은 것을 또 푼다** — 이중
+/// 해제다. 같은 모양을 `materialize`와 `computeMarks`에서 이미 두 번 잡았고, 이 자리가 세 번째다.
+/// 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
+pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
+    term.rt.editor_doc = prepared.opened;
+    term.rt.editor_lines = prepared.lines;
+    term.rt.editor_path = prepared.path;
 
     // **접을 범위를 여기서 센다** — §4.1f가 정한 갱신 시점이 "문서를 열 때"다. 첫 접기 명령까지
     // 미루면 **펼쳐진 화살표(▾)가 그때까지 안 보여** 접을 수 있는 자리를 알 수 없다.
@@ -524,6 +552,24 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     // 것을 안다(굴려 보기 전에는 알 길이 없다. 2026-08-18 사용자 지적). 접힘 화살표와 같은 이유·
     // 같은 시점이다. 할당하지 않으므로 실패 지점이 없다.
     ensureMaxCols(term, false);
+}
+
+/// 경로를 열어 **활성 pane에 편집기 Term으로 붙인다**. N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
+///
+/// 실패는 호출자가 사용자에게 알린다 — §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고 정했으므로
+/// 나머지 이유를 같은 메시지로 뭉개면 그 계약을 확인할 수 없다.
+pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*Term {
+    var prepared = try preparePath(self, path);
+    errdefer prepared.deinit(self.allocator);
+
+    const term = createEditorTerm(self) catch return error.OutOfMemory;
+    errdefer term_ops.destroyTerm(self, term);
+
+    const pane = pane_ops.activePane(self);
+    pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
+
+    // 여기부터 실패 지점이 없다 — 소유가 Term으로 넘어간다.
+    finishAttach(self, term, prepared);
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;
@@ -4824,4 +4870,146 @@ test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {
     );
     try testing.expectEqual(layout.folding.start, mark_col);
     try testing.expect(number_col < mark_col);
+}
+
+/// 테스트 전용 libc 바인딩. Zig 0.16 std에는 `setenv`가 없고, 훅 확인은 **환경을 실제로 켜야만**
+/// 성립한다(끈 상태로 비교하면 양쪽 다 false라 아무것도 증명하지 못한다 — 비교 훅에서 실제로
+/// 그렇게 써서 뮤턴트가 살아남았다). 켠 값은 곧바로 되돌린다.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "훅이 켜지면 텍스트 파일이 편집기 Term으로 열린다 — 꺼져 있으면 지금까지대로다" {
+    // **이 분기가 이 슬라이스의 전부다.** 지금까지 네이티브 편집기를 제품에서 보려면 시작할 때
+    // `MARU_NATIVE_EDITOR=<경로>`로 한 파일을 열어야 했고, 다른 파일을 보려면 앱을 다시 띄워야 했다.
+    // 기본이 CM6 그대로인 것도 함께 고정한다 — "기본 경로를 바꾸지 않는다"는 말의 근거가 이 단언이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "off.txt", .data = "one\ntwo\nthree" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "on.txt", .data = "one\ntwo\nthree" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.bin", .data = "\xff\xfe\x00binary" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# title" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const off_path = try std.fs.path.join(allocator, &.{ root, "off.txt" });
+    defer allocator.free(off_path);
+    const on_path = try std.fs.path.join(allocator, &.{ root, "on.txt" });
+    defer allocator.free(on_path);
+    const bad_path = try std.fs.path.join(allocator, &.{ root, "bad.bin" });
+    defer allocator.free(bad_path);
+    const md_path = try std.fs.path.join(allocator, &.{ root, "doc.md" });
+    defer allocator.free(md_path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 꺼진 상태(기본) — 웹 Term이다.
+    session.native_text = false;
+    const off = try pane_ops.openFileTermInActivePane(session, off_path, .text);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, off.term.kind);
+    try testing.expect(!off.term.file_entry.?.native_editor);
+
+    // 켜진 상태 — 편집기 Term이고, **문서가 실려 있다**. Term 종류만 보면 빈 편집기를 열어도 통과한다.
+    session.native_text = true;
+    const on = try pane_ops.openFileTermInActivePane(session, on_path, .text);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.editor, on.term.kind);
+    try testing.expectEqual(@as(usize, 3), on.term.rt.editor_lines.len);
+    try testing.expectEqualStrings("two", on.term.rt.editor_lines[1]);
+    try testing.expectEqualStrings(on_path, on.term.rt.editor_path.?);
+    try testing.expect(on.term.file_entry.?.native_editor);
+    try testing.expectEqual(on.term.surfaceId(), on.term.file_entry.?.surface_id);
+
+    // **못 읽는 파일은 훅이 켜져 있어도 CM6로 간다**(§3.5 — UTF-8 아님). 훅을 켠 것이 특정 파일을
+    // 아예 못 여는 이유가 되면 안 된다.
+    const bad = try pane_ops.openFileTermInActivePane(session, bad_path, .text);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, bad.term.kind);
+    try testing.expect(!bad.term.file_entry.?.native_editor);
+
+    // 텍스트가 아닌 종류는 훅과 무관하다 — 마크다운은 리치 프리뷰가 주 가치라 네이티브로 가지 않는다.
+    const md = try pane_ops.openFileTermInActivePane(session, md_path, .markdown);
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, md.term.kind);
+}
+
+test "init이 MARU_NATIVE_TEXT를 읽는다 — 안 읽으면 훅이 아무 일도 안 한다" {
+    // 비교 훅이 실제로 그 상태로 커밋된 적이 있다(읽기를 `init`이 아니라 `deinit`에 넣어 값이 영영
+    // false였다). 테스트가 필드를 직접 세우면 그래도 전부 통과한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const had = std.c.getenv("MARU_NATIVE_TEXT");
+    defer if (had) |old_value| {
+        _ = setenv("MARU_NATIVE_TEXT", old_value, 1);
+    } else {
+        _ = unsetenv("MARU_NATIVE_TEXT");
+    };
+    _ = setenv("MARU_NATIVE_TEXT", "1", 1);
+    try testing.expect(nativeTextFromEnv()); // 전제: 환경이 켜졌다
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    try testing.expect(session.native_text);
+}
+
+test "훅 기본은 끔이다 — 켜면 편집이 안 되는 파일이 생긴다" {
+    // `MARU_NATIVE_DIFF`와 **다른 기본값**이다. 비교는 CM6에서도 읽기 전용이라 바꿔도 잃는 것이
+    // 없었지만, 텍스트는 CM6에서 편집·저장이 된다. 이 단언이 무너지면 탐색기에서 연 파일을 고칠 수
+    // 없게 된다 — 기본 전환은 편집이 붙는 N2의 일이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const had = std.c.getenv("MARU_NATIVE_TEXT");
+    defer if (had) |old_value| {
+        _ = setenv("MARU_NATIVE_TEXT", old_value, 1);
+    } else {
+        _ = unsetenv("MARU_NATIVE_TEXT");
+    };
+    _ = unsetenv("MARU_NATIVE_TEXT");
+    try testing.expect(!nativeTextFromEnv());
+}
+
+test "네이티브로 연 텍스트는 CM6 스냅샷을 기다리지 않는다 — 안 그러면 탭이 안 닫힌다" {
+    // **`.text`의 기본 mode가 `.source_edit`이라** `filePanelEntryNeedsDirtyProtection`이 늘 참이었다.
+    // 닫기는 그 상태에서 CM6에 dirty 스냅샷을 요청하고 응답을 기다리는데, 네이티브 Term에는 응답할
+    // CM6가 없다 — 그대로 두면 **네이티브로 연 탭이 닫히지 않는다**. 브리지 술어를 kind에서 entry로
+    // 올린 이유가 이것이다.
+    const dock_panel = maru.session.dock_panel;
+    const file_panel_ops = @import("file_panel.zig");
+
+    var path_buf = "x.txt".*;
+    var entry: dock_panel.Entry = .{
+        .id = 1,
+        .path = &path_buf,
+        .kind = .text,
+        .mode = dock_panel.Mode.defaultFor(.text),
+    };
+    // CM6로 열린 텍스트는 지금까지대로 브리지를 쓰고 보호를 요구한다.
+    try testing.expect(entry.usesEditorBridge());
+    try testing.expect(file_panel_ops.filePanelEntryNeedsDirtyProtection(entry));
+
+    // 네이티브로 열면 둘 다 아니다.
+    entry.native_editor = true;
+    try testing.expect(!entry.usesEditorBridge());
+    try testing.expect(!file_panel_ops.filePanelEntryNeedsDirtyProtection(entry));
+
+    // **dirty 자체가 서면 여전히 보호한다** — 술어를 통째로 꺼 버리면 이 단언이 무너진다.
+    entry.dirty = true;
+    try testing.expect(file_panel_ops.filePanelEntryNeedsDirtyProtection(entry));
 }

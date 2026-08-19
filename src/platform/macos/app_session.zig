@@ -3672,6 +3672,10 @@ pub const AppSession = struct {
     /// 프로세스 전역 환경을 직접 읽으면 그 분기를 확인하려는 테스트가 env를 건드려야 하고, 그것이
     /// 같은 프로세스의 다른 테스트로 샌다.
     native_diff: bool = false,
+    /// 일반 텍스트 파일을 네이티브 편집기로 열까(`MARU_NATIVE_TEXT`). `native_diff`와 달리 **기본이
+    /// 끔**이다 — 네이티브는 아직 읽기 전용이라 켜면 탐색기에서 연 파일을 고칠 수 없다(그 근거는
+    /// `editor.nativeTextFromEnv`가 소유한다). 읽는 시점이 init인 이유도 `native_diff`와 같다.
+    native_text: bool = false,
     dock_initialized: bool = false,
     /// 확장 grab band 안에서 divider의 정확한 선이 아닌 곳을 눌러도 첫 drag에서 경계가 포인터로 점프하지 않게,
     /// mouse-down 시 실제 dock 시작점과 포인터 사이 signed backing-px 간격을 drag 세션 동안 보존한다.
@@ -4490,6 +4494,7 @@ pub const AppSession = struct {
         // 수명 동안 고정이고, 분기가 매번 `getenv`를 부르면 그 분기를 확인하려는 테스트가 전역 환경을
         // 건드려야 한다(그것이 같은 프로세스의 다른 테스트로 샌다).
         self.native_diff = editor_diff_ops.nativeDiffFromEnv();
+        self.native_text = editor_ops.nativeTextFromEnv();
         // FP8 frame/mouse layout은 append-only scratch를 쓴다. group 상한만큼 init에서 한 번 예약해 frame tick에서
         // allocator를 호출하지 않는다(leaf=N, divider=N-1).
         try self.drag_overlay_cells_scratch.ensureTotalCapacity(allocator, 256);
@@ -7722,7 +7727,7 @@ pub const AppSession = struct {
         success: bool,
     ) FilePanelWriteError!void {
         const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+        if (!entry.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         return file_panel_ops.completeFileConflictReload(self, surface_id, success);

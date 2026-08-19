@@ -155,7 +155,7 @@ pub fn activeFileEntry(self: *AppSession) ?*dock_panel.Entry {
 pub fn markFilePanelCloseDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry, request_id: u64) void {
     // source→read 전환 뒤에도 CM6 buffer와 dirty 상태는 surface에 남는다. 닫기 transaction은 mode와 무관하게
     // 최신 snapshot을 요구해야 read-mode dirty 탭이 즉시 닫히지 않는다.
-    if (!entry.kind.usesEditorBridge() or entry.surface_id == 0) return;
+    if (!entry.usesEditorBridge() or entry.surface_id == 0) return;
     entry.dirty_sync_pending = true;
     queueFilePanelDirtySyncAction(self, entry.surface_id, request_id);
 }
@@ -837,7 +837,7 @@ pub fn pinInitialFilePanelIdentity(
 ) void {
     _ = self;
     const entry = opened.term.file_entry orelse return;
-    if (!opened.created or !entry.kind.usesEditorBridge()) return;
+    if (!opened.created or !entry.usesEditorBridge()) return;
     const expected = identity orelse return;
     entry.initial_file_identity_device = expected.device;
     entry.initial_file_identity_inode = expected.inode;
@@ -2290,9 +2290,14 @@ pub fn projectFileTreeOpenStates(self: *AppSession) !void {
     projectFileTreeOpenStatesAssumeCapacity(self);
 }
 
+/// 닫기가 **CM6 스냅샷을 기다려야 하나**. `mode.isEditable()`을 브리지 조건과 묶어 두는 이유는,
+/// 네이티브 편집기로 연 `.text`가 편집 모드인 채 브리지를 안 쓰기 때문이다 — 묶지 않으면 오지 않을
+/// 응답을 기다리다 **탭이 안 닫힌다**. 나머지 항목(dirty·external_change 등)은 네이티브에서 서지
+/// 않으므로 그대로 둔다.
 pub fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
     return entry.dirty or entry.dirty_sync_pending or entry.external_change or
-        entry.conflict_reload_pending or entry.mode.isEditable() or entry.mutation_pending_id != 0;
+        entry.conflict_reload_pending or (entry.usesEditorBridge() and entry.mode.isEditable()) or
+        entry.mutation_pending_id != 0;
 }
 
 pub fn tabHasProtectedFilePanel(tab: *Tab) bool {
@@ -3557,7 +3562,7 @@ pub fn requestFilePanelClose(self: *AppSession, surface_id: u64) void {
     }
     // HTML과 안정된 native-clean Markdown/text read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는
     // 살아 있으므로 dirty/pending/conflict인 편집 브리지 kind는 mode와 무관하게 revision-pinned coordinator를 거친다.
-    if (entry.kind.usesEditorBridge() and filePanelEntryNeedsDirtyProtection(entry.*)) {
+    if (entry.usesEditorBridge() and filePanelEntryNeedsDirtyProtection(entry.*)) {
         if (self.file_panel_close_request_id >= max_file_panel_close_request_id) {
             self.showNoticeKey(.fp_close_id_exhausted);
             return;
@@ -3651,7 +3656,7 @@ pub fn selectedFileTreeRow(self: *const AppSession) ?usize {
 /// 스냅샷 요청이 실제로 나갔으면 true. 호출자가 "요청했으니 기다린다"와 "보낼 대상이 없다"를 구분해야
 /// 하는 자리(scope close 지연)가 있어 결과를 돌려준다.
 pub fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) bool {
-    if (!entry.kind.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return false;
+    if (!entry.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return false;
     entry.dirty_sync_pending = true;
     queueFilePanelDirtySyncAction(self, entry.surface_id, 0);
     return true;
@@ -3898,7 +3903,7 @@ pub fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
 pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
     if (!self.dock_initialized) return error.SurfaceNotFound;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.usesEditorBridge()) return error.WrongKind;
     if (!entry.conflict_reload_pending) {
         if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
         return;
@@ -4081,7 +4086,7 @@ pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id
 pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
     if (!self.dock_initialized) return error.SurfaceNotFound;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.usesEditorBridge()) return error.WrongKind;
     if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
     if (entry.editor_recovery_required) return error.RecoveryRequired;
     if (entry.mutation_pending_id != 0) return error.MutationPending;
@@ -4123,7 +4128,7 @@ pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64,
 pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
     if (!self.dock_initialized) return error.SurfaceNotFound;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.usesEditorBridge()) return error.WrongKind;
     if (document_id == 0) return error.StaleDocument;
 
     // stale/멱등 begin은 close transaction을 포함한 어떤 상태도 바꾸지 않는다. 동일 active document의
@@ -4172,7 +4177,7 @@ pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u
 pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
     if (!self.dock_initialized) return 0;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return 0;
-    if (!entry.kind.usesEditorBridge()) return 0;
+    if (!entry.usesEditorBridge()) return 0;
     // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
     // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
     if (entry.editor_surface_id != surface_id) return 1;
@@ -4200,7 +4205,7 @@ pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
 pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
     if (!self.dock_initialized) return error.SurfaceNotFound;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.usesEditorBridge()) return error.WrongKind;
     if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
     if (entry.editor_recovery_required) return error.RecoveryRequired;
     if (entry.mutation_pending_id != 0) return error.MutationPending;
@@ -4227,7 +4232,7 @@ pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, con
 pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
     if (!self.dock_initialized) return error.SurfaceNotFound;
     const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.usesEditorBridge()) return error.WrongKind;
     // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
     // non-positive epoch을 거부한다.
     const test_unbound = builtin.is_test and report.editor_epoch == 0 and entry.editor_epoch == 0 and !entry.editor_document_active;

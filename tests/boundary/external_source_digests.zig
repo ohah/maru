@@ -635,7 +635,7 @@ pub const inventory = [_]Proof{
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
     // editor-surface-structure.md, §9 → plans/editor-surface.md). count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "04a5e8866dae482f20efef788af5f28addc95e020bddb790b6cc2e5b0aabe2bc" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "d979f32e05129fc07be5d09bd13168fbe3808a37f2c70a9016091c50d149fbb1" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.

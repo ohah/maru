@@ -367,9 +367,12 @@ pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
     });
 }
 
-/// UI에 새로 노출해도 되는 config 키인가. `chrome.theme=tui`와 `chrome.preset=cell`은 이미 저장된
-/// config를 읽는 호환 경로만 남기며, GUI·검색에서 다시 선택·변경할 수 있게 만들지 않는다.
-/// 이 예외를 field 생성과 section 생성이 함께 써야 검색/직접 섹션 전환 중 되살아나는 우회가 없다.
+/// 이 섹션에 보일 행이 하나라도 있는가(좌측 네비에 그 섹션을 넣을지 판정).
+///
+/// 앞 세 줄은 `settingsExposesConfigKey` 라는 **이름 기반 예외 필터**를 설명하고 있었는데, 그 함수는
+/// 동어반복이라 지워졌다(키 존재와 무관하게 늘 같은 답을 냈다). 지금 `chrome.theme`·`chrome.preset` 이
+/// 안 보이는 이유는 그 필터가 아니라 **스키마에 없어서**이고, 되살아남을 막는 것은 실제 행 목록을 훑는
+/// 테스트다. 지운 메커니즘을 설명하는 주석이 남아 있으면 다음 사람이 없는 방어를 믿는다.
 pub fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
     // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
     // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.

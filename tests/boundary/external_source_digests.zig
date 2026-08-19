@@ -572,6 +572,9 @@ pub const inventory = [_]Proof{
     // 텍스트 파일을 네이티브 편집기로 여는 분기(2026-08-19)로 또 바뀐다: `native_text` 필드 하나가
     // 늘고 init이 그것을 읽는다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
     // 집합도 안 건드린다(필드 추가는 이 원장이 세는 축이 아니다).
+    // 편집기 상태바 셋(2026-08-19)으로 움직인다: 활성 pane이 편집기일 때만 우측에 저하·읽기 전용·줄바꿈을
+    // 싣는 블록과 그 두 exhaustive switch 가지가 는다. **새 읽기·새 상태가 없다** — 이미 든 문서 형식과
+    // 행 수 캐시를 읽을 뿐이다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "679393ba25070b53b1051d51954878b6882d6f98718d0a37bbdf16390a6f2571" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -686,5 +689,7 @@ pub const inventory = [_]Proof{
     // tui chrome 룩 제거(2026-08-19)로 바뀐다: 설정 행 라벨 `cfg_chrome_theme`(필드 선언 + en/ko 값 3줄)이
     // 소비처를 잃어 지웠다 — `chrome.theme` Meta가 사라지면서 이 키를 읽는 곳이 0이 됐다. count는 1 그대로다
     // — 문자열 상수만 줄었고 `@field` 반사나 Client 구성은 안 건드린다.
+    // 편집기 상태바(2026-08-19): 읽기 전용·행 수 세는 중 두 문구가 키로 들어와 digest가 움직인다.
+    // count는 1 그대로다.
     .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "53a3e08fe9d4f4bc86694af301a219661494b1671b77053c2d2eee12480eac59" },
 };

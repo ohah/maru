@@ -149,6 +149,11 @@ pub const CommitItem = struct {
     short_oid: []const u8 = "",
     /// 첫 ref 칩 하나만 그린다. 여럿이면 좁은 도크에서 제목을 다 밀어낸다.
     ref: []const u8 = "",
+    /// 그리지 **않은** 나머지 ref 수(§3.5.3 "칩이 많으면 `+N`으로 접는다"). 0이면 접을 것이 없다.
+    ///
+    /// **개수만 싣는다.** 이름들을 실으면 화면에 못 그릴 문자열을 프레임마다 들고 다니게 되고, 접힌
+    /// 이름을 보여 주는 길(툴팁·펼치기)이 아직 없다 — 그 길이 생기는 날 그때 싣는다.
+    ref_more: u32 = 0,
     /// 그 칩이 **지금 체크아웃된 브랜치**인가(색이 갈린다).
     ref_is_head: bool = false,
     /// 지금 고른 커밋인가(강조).
@@ -376,6 +381,9 @@ pub const DockMetrics = struct {
     action_extent: u32,
     /// 글자가 든 칩의 좌우 여백(원격 갱신). 아이콘 버튼과 달리 폭이 글자에서 나오므로 여백만 상수다.
     chip_pad_x: u32,
+    /// 커밋 줄에서 **제목이 지키는 최소 칸 수**. `+N`을 그릴지 여기서 갈린다 — 부가 정보가 제목을
+    /// 밀어내면 "무엇을 한 커밋인가"가 사라진다(§3.5.3: 제목이 마지막까지 남는다).
+    commit_subject_min_cols: u32,
     /// 그룹 헤더의 접힘 표시가 차지하는 가로 자리.
     disclosure_extent: u32,
     /// **아이콘 한 변(logical px)**. 셀 크기가 아니라 디자인 토큰(`ui/icon.Size`)에서 온다 — 셀로 그리면
@@ -418,6 +426,8 @@ pub const DockMetrics = struct {
             .status_extent = s.px(14, scale_milli),
             .action_extent = s.px(20, scale_milli),
             .chip_pad_x = s.px(6, scale_milli),
+            // 칸 수는 배율과 무관하다(셀 폭이 이미 배율을 든다).
+            .commit_subject_min_cols = 8,
             .disclosure_extent = s.px(16, scale_milli),
             // 행 높이 24px에 18pt 아이콘은 꽉 차 보인다 — 목록 행은 밀집한 자리라 `compact`가 맞다.
             .icon_extent = s.px(ui_icon.Size.compact.extentPt(), scale_milli),

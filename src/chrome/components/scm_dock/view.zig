@@ -113,10 +113,11 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 1;
             bytes += more_label_bytes + count_digits;
         },
-        // 제목·작성자·시각·해시·ref 칩 — 다섯.
+        // 제목·작성자·시각·해시·ref 칩·`+N` 접힘 — 여섯.
         .commit => |commit| {
-            text_ops += 5;
+            text_ops += 6;
             bytes += commit.subject.len + commit.author.len + commit.when.len + commit.short_oid.len + commit.ref.len;
+            bytes += 8; // `+N` 접힘 표시(§3.5.3) — 자릿수가 늘어도 담기게 넉넉히 잡는다
         },
         // 제목·에이전트·시각 — 셋.
         .turn => |turn| {
@@ -966,6 +967,31 @@ const Writer = struct {
             }
         }
         const title_right = rect.rect.x + rect.rect.width - inset;
+        // **접힌 ref는 `+N`으로 말한다**(§3.5.3). 그리지 않은 칩이 있다는 사실 자체가 정보다 — 없으면
+        // 사용자는 그 커밋에 태그가 하나뿐이라고 읽는다.
+        //
+        // **제목이 마지막까지 남는다**: `+N`을 그린 뒤 제목에 최소 칸 수가 안 남으면 그리지 않는다.
+        // 부가 정보가 "무엇을 한 커밋인가"를 밀어내면 이 목록의 쓸모가 사라진다.
+        if (commit.ref_more > 0) {
+            var buf: [8]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "+{d}", .{commit.ref_more}) catch "";
+            const w = self.measureBudget(text);
+            const min_subject: f32 = @floatFromInt(m.commit_subject_min_cols * @max(self.cell_width_px, 1));
+            if (text.len > 0 and left + w + gap + min_subject <= title_right) {
+                try self.emit(
+                    left,
+                    rect.rect.y + pad_y + (title_h - sub_h) / 2,
+                    text,
+                    self.colsFor(w),
+                    .muted_fg,
+                    .supporting,
+                    false,
+                    @intFromFloat(@max(w, 0)),
+                    .origin,
+                );
+                left += w + gap;
+            }
+        }
         if (title_right > left) {
             try self.emit(
                 left,
@@ -1693,6 +1719,58 @@ test "도는 중에는 칩이 그 사실을 말한다 (P6)" {
     };
     try testing.expect(seen_running);
     try testing.expect(!seen_idle); // 두 문구가 함께 뜨지 않는다
+}
+
+test "ref가 여럿이면 `+N`으로 접고, 좁으면 제목이 남는다 (§3.5.3)" {
+    // 접힌 칩이 있다는 **사실 자체가 정보**다 — 없으면 사용자는 그 커밋에 태그가 하나뿐이라고 읽는다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "제목", .author = "a", .when = "방금", .short_oid = "abc1234", .ref = "main", .ref_is_head = true, .ref_more = 2 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const chip = findExactText(draws, "main") orelse return error.MissingChip;
+    const more = findExactText(draws, "+2") orelse return error.MissingMore;
+    const subject = findExactText(draws, "제목") orelse return error.MissingSubject;
+    // 왼쪽부터 칩 → `+N` → 제목. 같은 자리면 셋 다 못 읽는다.
+    try testing.expect(chip.origin.x < more.origin.x);
+    try testing.expect(more.origin.x < subject.origin.x);
+    // 접힘 표시는 상태 진술이라 흐리다(체크아웃된 브랜치 칩만 강조색이다).
+    try testing.expectEqual(tokens.ColorRole.muted_fg, more.role);
+
+    // 접을 것이 없으면 그리지 않는다 — `+0`은 아무 말도 하지 않는다.
+    var storage_one: TestStorage = .{};
+    const one = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "제목", .author = "a", .when = "방금", .short_oid = "abc1234", .ref = "main", .ref_more = 0 } },
+    };
+    const one_draws = try renderFixture(&storage_one, .{}, &one);
+    try testing.expect(findExactText(one_draws, "+0") == null);
+}
+
+test "좁은 줄에서는 `+N`이 먼저 사라진다 — 제목이 마지막까지 남는다 (§3.5.3)" {
+    // 부가 정보가 "무엇을 한 커밋인가"를 밀어내면 이 목록의 쓸모가 사라진다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "제목", .author = "a", .when = "방금", .short_oid = "abc1234", .ref = "release-candidate-2026", .ref_more = 3 } },
+    };
+    const props: types.Props = .{
+        // 칩을 그리고 나면 제목 최소 칸(8칸)만 겨우 남는 폭 — 여기에 `+N`까지 넣으면 제목이 그 아래로
+        // 내려간다. 더 좁히면 제목 자체가 잘려 "제목이 남는다"를 문자열로 확인할 수 없다.
+        .viewport_px = .{ .x = 0, .y = 0, .width = 260, .height = 200 },
+        .items = &items,
+        .active_tab = .history,
+        .show_summary = false,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    try testing.expect(findExactText(draws, "+3") == null); // 접힘 표시가 먼저 빠진다
+    try testing.expect(findExactText(draws, "제목") != null); // 제목은 남는다
 }
 
 test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다" {

@@ -55534,6 +55534,39 @@ test "히스토리 탭: 커밋 원문이 행이 되고 상대 시각은 **우리
     try std.testing.expectEqualStrings("", projection.items[1].commit.when);
 }
 
+test "히스토리: ref가 여럿이면 그리지 않은 나머지를 센다(`+N`의 N)" {
+    // §3.5.3은 "칩이 많으면 `+N`으로 접는다"고 정했는데, 그전까지는 첫 칩만 그리고 나머지를 **조용히
+    // 버렸다** — 화면은 그 커밋에 태그가 하나뿐이라고 말하고 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    // 실측 `%D` 형식: `HEAD -> main, origin/main, tag: v1.2.0`. **`HEAD -> main`은 칩 하나**다.
+    session.scm_log_text = try allocator.dupe(u8, "aaaaaaa1111\x1fp\x1fA\x1f1\x1fHEAD -> main, origin/main, tag: v1.2.0\x1f셋\x1e" ++
+        "bbbbbbb2222\x1fp\x1fA\x1f1\x1fmain\x1f하나\x1e" ++
+        "ccccccc3333\x1fp\x1fA\x1f1\x1f\x1f없음\x1e");
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    scm_dock_ops.selectScmTab(session, .history);
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expectEqual(@as(usize, 3), projection.items.len);
+    // 셋 중 첫 칩만 그리므로 나머지는 둘이다.
+    try std.testing.expectEqualStrings("main", projection.items[0].commit.ref);
+    try std.testing.expect(projection.items[0].commit.ref_is_head);
+    try std.testing.expectEqual(@as(u32, 2), projection.items[0].commit.ref_more);
+    // 하나뿐이면 접을 것이 없다(`+0`은 아무 말도 하지 않는다).
+    try std.testing.expectEqual(@as(u32, 0), projection.items[1].commit.ref_more);
+    // ref가 없으면 칩도 접힘도 없다.
+    try std.testing.expectEqualStrings("", projection.items[2].commit.ref);
+    try std.testing.expectEqual(@as(u32, 0), projection.items[2].commit.ref_more);
+}
+
 test "히스토리 탭에서는 커밋 상자가 키를 먹지 않는다 (P4 적대적 검증)" {
     // 그 탭에는 상자가 **그려지지 않는다**. 플래그만 보면 키가 계속 그 상자로 가고, 사용자는 자기가
     // 친 글자가 어디로 갔는지 알 수 없다.

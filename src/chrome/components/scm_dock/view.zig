@@ -30,6 +30,10 @@ const m_inset_fallback: u32 = 8;
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);
 const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
 const branch_icon = icons.utf8Fit(.git_branch, .standard);
+/// "아직 안 보낸 것이 있다"는 점. **글자 하나다** — 등록 아이콘이 아니라도 되는 이유는 이것이 컨트롤이
+/// 아니라 상태 표식이고(누를 수 없다), `●`는 PUA가 아니라 어떤 폰트에도 있는 BMP 글자이기 때문이다
+/// (행 동작의 `+`/`−`와 같은 판단 — `∨`가 PUA라 아이콘 경로를 타야 했던 것과 대비된다).
+const unpushed_dot = "●";
 /// 저장소 머리 줄의 종류 아이콘. 주 워크트리는 작업 폴더 자체이고, 링크된 워크트리는 그 저장소에
 /// **딸린 다른 체크아웃**이다 — 두 줄이 한 화면에 서므로 그 차이가 글리프로 보여야 한다.
 const repo_icon = icons.utf8Fit(.folder, .standard);
@@ -68,15 +72,15 @@ pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, Insuf
 /// 바이트는 **추정하지 않고 실제 문자열을 더한다** — 경로 길이에 상한이 없어서(`name`+`dir`이 곧 git
 /// 경로다) 행당 고정값은 어떤 값을 골라도 그보다 긴 저장소가 있다.
 pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 6(아이콘·이름·↑·↓·원격 갱신 칩·`∨`) + 호버 동작 1.
+    // 고정 chrome: 탭 3 + 요약 2 + 브랜치 7(아이콘·이름·미push 점·↑·↓·원격 갱신 칩·`∨`) + 호버 동작 1.
     // **커밋 줄도 빈 안내도 고정이 아니다**(②b) — 저장소마다 나므로 아래 항목 루프가 센다.
-    var text_ops: usize = 12;
+    var text_ops: usize = 13;
     var quad_extra: usize = 0;
     var bytes: usize = 0;
     for (build.tab_order) |tab| bytes += tabTitle(tab).len + count_digits + 3; // ` (N)`
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     // 브랜치 줄 — 이름·아이콘 + `↑ N`/`↓ N` 둘(화살표 3바이트 + 공백 + 자릿수).
-    bytes += props.branch.len + icon_bytes * 2 + (count_digits + 5) * 2;
+    bytes += props.branch.len + icon_bytes * 2 + (count_digits + 5) * 2 + unpushed_dot.len;
     // 원격 갱신 칩 — **긴 쪽으로 잡는다**(도는 중 문구가 더 길다). 모자라면 도크가 통째로 빈다.
     bytes += @max(i18n.t(.scm_fetch).len, i18n.t(.scm_fetching).len);
 
@@ -294,7 +298,19 @@ pub fn view(
         if (frame.tree.find(build.NodeIds.branch)) |index| {
             const rect = frame.tree.entries[index];
             try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
-            try writer.line(rect, @floatFromInt(m.inset_x + m.disclosure_extent + m.gap), props.branch, .surface_fg, .control, true);
+            const branch_x: f32 = @floatFromInt(m.inset_x + m.disclosure_extent + m.gap);
+            try writer.line(rect, branch_x, props.branch, .surface_fg, .control, true);
+            // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
+            // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
+            if (props.unpushed) {
+                const name_w = writer.measureBudget(props.branch);
+                const dot_x = branch_x + name_w + @as(f32, @floatFromInt(m.gap));
+                const dot_w = writer.measureBudget(unpushed_dot);
+                // 오른쪽 묶음(↑↓·칩)을 침범하지 않을 때만 그린다 — 겹치면 둘 다 못 읽는다.
+                if (dot_x + dot_w < rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x))) {
+                    try writer.line(rect, dot_x, unpushed_dot, .accent_bar, .supporting, false);
+                }
+            }
             // ── 원격 갱신 칩(P6). **글자는 tree가 준 rect 안에 놓는다** — 여기서 자기 산수로 자리를
             // 잡으면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(탭 칸에서 이미 겪은 갈림).
             const fetch_label = types.fetchLabel(props.fetch);
@@ -1643,6 +1659,53 @@ test "히스토리 커밋 줄은 두 줄이다(제목이 마지막까지 남는�
     // 체크아웃된 브랜치 칩만 강조색이다.
     const ref = findText(draws, "main") orelse return error.MissingRef;
     try testing.expectEqual(tokens.ColorRole.focus_accent, ref.role);
+}
+
+test "아직 안 보낸 것이 있으면 브랜치 이름 뒤에 점이 선다 (§3.5)" {
+    // **개수가 아니라 사실 하나다**(2026-08-19 사용자 결정) — 위 `↑`/`↓`는 기본 브랜치 기준이라,
+    // 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
+    var storage: TestStorage = .{};
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "feat/x",
+        .has_ab = true,
+        .ahead = 3,
+        .unpushed = true,
+        .fetch = .{ .enabled = true },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    const name = findExactText(draws, "feat/x") orelse return error.MissingBranch;
+    const dot = findExactText(draws, "●") orelse return error.MissingDot;
+    // 이름 **뒤**에 서고, 오른쪽 묶음(↑↓)보다는 앞이다.
+    try testing.expect(dot.origin.x > name.origin.x);
+    const ahead = findExactText(draws, "↑ 3") orelse return error.MissingAhead;
+    try testing.expect(dot.origin.x < ahead.origin.x);
+    // 색은 "할 일이 있다"는 신호 — 테마 시그니처 색이다(꺼진 회색이 아니다).
+    try testing.expectEqual(tokens.ColorRole.accent_bar, dot.role);
+
+    // 보낼 것이 없으면 점도 없다 — 늘 켜져 있으면 아무 말도 하지 않는다.
+    var storage_clean: TestStorage = .{};
+    var clean = props;
+    clean.unpushed = false;
+    const clean_frame = try build.build(clean, .{
+        .nodes = &storage_clean.nodes,
+        .entries = &storage_clean.entries,
+        .layout_items = &storage_clean.layout_items,
+        .flex_scratch = &storage_clean.flex_scratch,
+        .child_rects = &storage_clean.child_rects,
+        .actions = &storage_clean.actions,
+    });
+    const clean_draws = try viewBudgeted(&storage_clean, clean, clean_frame, .{});
+    try testing.expect(findExactText(clean_draws, "●") == null);
 }
 
 test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 (P6)" {

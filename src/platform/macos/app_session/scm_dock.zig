@@ -258,6 +258,10 @@ pub const Projection = struct {
     ahead: u32,
     behind: u32,
     has_ab: bool,
+    /// 아직 push하지 않은 것이 있나(`@{u}` 기준). 기본 브랜치 기준인 위 둘과 **다른 사실**이다.
+    /// 히스토리·에이전트 탭은 `branch`가 빈 값이라 브랜치 줄 자체가 없고(높이 0), 그래서 이 값도 그 탭들에선
+    /// 쓰이지 않는다 — 기본값 false로 둔다.
+    unpushed: bool = false,
     summary: component.types.Summary,
     /// 커밋 버튼을 켤 수 있나 = index에 무언가 올라가 있나. **모델이 status로 판정한 것만 쓴다**
     /// (낙관적으로 추정하지 않는다 — 쓰기 문서 §7).
@@ -448,6 +452,9 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .ahead = if (ab) |v| v.ahead else model.head.ahead,
         .behind = if (ab) |v| v.behind else model.head.behind,
         .has_ab = ab != null or model.head.has_ab,
+        // **`@{u}` 기준 ahead**가 여기 쓰인다(§3.5 — 그 값은 "push 됐는지"를 보여 주는 데만 쓴다).
+        // 위 `ahead`/`behind`는 기본 브랜치 기준이라 서로 다른 사실이고, 그래서 개수가 아니라 **점 하나**다.
+        .unpushed = model.head.has_ab and model.head.ahead > 0,
         .summary = .{ .added = model.total_added, .removed = model.total_removed },
         .has_rows = model.rows.len > 0,
         .file_count = countFiles(model.rows),
@@ -926,6 +933,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .ahead = projection.ahead,
         .behind = projection.behind,
         .has_ab = projection.has_ab,
+        .unpushed = projection.unpushed,
         // 원격 갱신 버튼(P6). **누를 수 있는가는 저장소 사실이고**(원격이 있나), **도는 중인가는 세션
         // 상태다** — 둘을 한 값으로 합치면 도는 동안 "원격이 없다"로 보인다.
         .fetch = .{

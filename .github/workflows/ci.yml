@@ -55,8 +55,6 @@ jobs:
       # 분류가 틀리면 게이트가 조용히 열린다. 판정을 쓰기 전에 분류기 자신을 먼저 검증한다
       # (순수 sh라 수 초). web.yml·performance.yml은 같은 스크립트를 쓰므로 여기서 한 번만 돈다.
       - run: sh tools/ci/changed-areas.test.sh
-      # 같은 이유로 중간 커밋 판정자도 자기 검증을 먼저 돌린다 — 그 판정이 조용히 열렸던 적이 있다.
-      - run: sh tools/ci/per-commit-boundaries.test.sh
       - id: areas
         # push(main)에서는 두 값이 비어 전 영역 실행으로 떨어진다 — main은 항상 전부 검증한다.
         env:
@@ -154,6 +152,12 @@ jobs:
       #
       # **빌드를 안 한다** — `git` 과 `zig ast-check` 로 두 서명만 본다(실측: 9 커밋 구간 2.4초).
       # 커밋마다 게이트를 돌리는 판을 만들었다가 실측이 커밋당 3분 48초로 나와 버렸다.
+      # 판정자 자신을 먼저 검증한다(`changes` job 의 `changed-areas.test.sh` 와 같은 이유 — 분류가 틀리면
+      # 게이트가 조용히 열린다). **`changes` job 이 아니라 여기다** — 그 job 에는 mise 가 없어 `zig` 를 못
+      # 찾고, 이 테스트는 `zig ast-check` 경로를 실제로 돈다(거기 두었다가 CI 가 그것을 잡았다).
+      - name: 중간 커밋 판정자 자신을 검증한다
+        if: ${{ github.event_name == 'pull_request' }}
+        run: sh tools/ci/per-commit-boundaries.test.sh
       - name: 중간 커밋도 경계 게이트를 통과하는가
         if: ${{ github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
         env:

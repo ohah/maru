@@ -1146,18 +1146,38 @@ fn runWin32FileTreeSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var backend = try file_tree_backend.Backend.init(allocator, io);
     defer backend.deinit();
 
+    // **제품 흐름을 그대로 밟는다.** `file_panel.zig` 는 루트를 세울 때 먼저 검증하고, 그때 열린
+    // **no-follow 디렉터리 능력을 첫 스캔에 넘긴다**(`submitValidatedRootScan`). 처음엔 평범한
+    // `submit` 으로 짰는데, 그것은 하위 디렉터리를 펼칠 때 쓰는 **다른 길**이라 W8.1 이 고친 자리를
+    // 하나도 안 밟았다 — 두 수정을 되돌려도 스모크가 통과했다(적대적 검증이 잡았다).
+    var validated = (try file_tree_backend.validateRootSnapshot(allocator, io, root_path)) orelse {
+        try stderr.writeAll("maru win32-file-tree-smoke: root validation failed\n");
+        return error.RootValidationFailed;
+    };
+    var validated_owned = true;
+    defer if (validated_owned) validated.deinit(allocator, io);
+    const validated_dir = validated.dir orelse {
+        try stderr.writeAll("maru win32-file-tree-smoke: root validation returned no directory\n");
+        return error.RootValidationFailed;
+    };
+    validated.dir = null; // 첫 스캔이 이 능력을 가져간다.
+
     const owned = try allocator.dupe(u8, root_path);
-    if (!backend.submit(owned, 0)) {
+    if (!backend.submitValidatedRootScan(owned, 0, validated_dir)) {
         allocator.free(owned);
-        try stderr.writeAll("maru win32-file-tree-smoke: could not submit the scan\n");
+        validated_dir.close(io);
+        try stderr.writeAll("maru win32-file-tree-smoke: could not submit the validated root scan\n");
         return error.ScanSubmitFailed;
     }
+    validated.deinit(allocator, io);
+    validated_owned = false;
 
     // **상한을 실제로 강제한다.** 결과가 안 오면 행이 아니라 실패다.
     var rounds: usize = 0;
     var scanned = false;
     var entry_count: usize = 0;
-    while (rounds < 2000) : (rounds += 1) {
+    var sub_scanned = false;
+    while (rounds < 4000) : (rounds += 1) {
         if (backend.takeResult()) |taken| {
             var result = taken;
             defer result.deinit(allocator, io);
@@ -1165,17 +1185,28 @@ fn runWin32FileTreeSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
                 try stderr.print("maru win32-file-tree-smoke: scan failed for {s}\n", .{result.path});
                 return error.ScanFailed;
             }
-            entry_count = result.entries.items.len;
             var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
             defer inputs.deinit(allocator);
             for (result.entries.items) |e| try inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity });
             try tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items);
-            scanned = true;
-            break;
+            if (!scanned) {
+                entry_count = result.entries.items.len;
+                scanned = true;
+                // **하위 디렉터리는 평범한 `submit` 으로 펼친다** — 제품이 그렇게 한다(두 번째 길).
+                const sub_owned = try allocator.dupe(u8, sub);
+                if (!backend.submit(sub_owned, 0)) {
+                    allocator.free(sub_owned);
+                    try stderr.writeAll("maru win32-file-tree-smoke: could not submit the child scan\n");
+                    return error.ScanSubmitFailed;
+                }
+            } else {
+                sub_scanned = true;
+                break;
+            }
         }
         io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
-    if (!scanned) {
+    if (!scanned or !sub_scanned) {
         try stderr.writeAll("maru win32-file-tree-smoke: the scan did not finish in time\n");
         return error.ScanTimeout;
     }

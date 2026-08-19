@@ -324,7 +324,17 @@ fn validateRootSnapshotImpl(
 /// **모든 타깃에서** 테스트된다.
 fn openCanonicalDirectoryNoFollow(io: std.Io, absolute_path: []const u8) ?std.Io.Dir {
     const root_len = path_shape.rootPrefixLenFor(builtin.os.tag, absolute_path) orelse return null;
-    var current = std.Io.Dir.openDirAbsolute(io, absolute_path[0..root_len], .{ .follow_symlinks = false }) catch return null;
+    // **마지막 칸만 순회 권한으로 연다.** 이 함수가 낸 디렉터리는 첫 스캔에 넘어가 `iterate()` 되는데,
+    // Windows 에서 `.iterate` 없이 연 핸들은 `FILE_LIST_DIRECTORY` 가 없어 **순회가 `AccessDenied`** 다
+    // (실측: 같은 디렉터리를 두 방식으로 열어 비교했다 — 없으면 0 개에서 실패, 켜면 정상). POSIX 는
+    // 디렉터리 fd 하나라 이 구분이 없어 macOS 에서는 한 번도 안 드러났다.
+    //
+    // **중간 칸에는 안 켠다.** 지나가는 데 필요한 것은 traverse 뿐이고, list 까지 요구하면 traverse 만
+    // 허용된 디렉터리(일부 프로필 상위)에서 걷기가 통째로 막힌다 — 가드를 넓히는 대신 좁힌다.
+    var current = std.Io.Dir.openDirAbsolute(io, absolute_path[0..root_len], .{
+        .follow_symlinks = false,
+        .iterate = true, // 세그먼트가 없으면 이것이 곧 마지막 칸이다
+    }) catch return null;
     var transferred = false;
     defer if (!transferred) current.close(io);
     // **구분자 집합을 `path_shape` 에서 받는다.** 여기 `"/" ++ 역슬래시` 를 박으면 POSIX 에서
@@ -333,7 +343,11 @@ fn openCanonicalDirectoryNoFollow(io: std.Io, absolute_path: []const u8) ?std.Io
     var it = std.mem.tokenizeAny(u8, absolute_path[root_len..], path_shape.separatorsFor(builtin.os.tag));
     while (it.next()) |component| {
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return null;
-        const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return null;
+        const is_last = it.peek() == null;
+        const next = current.openDir(io, component, .{
+            .follow_symlinks = false,
+            .iterate = is_last,
+        }) catch return null;
         current.close(io);
         current = next;
     }
@@ -486,13 +500,30 @@ fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u
             .kind = kind,
             .identity = .{
                 .device = dir_identity.device,
-                .inode = @intCast(entry.inode),
+                .inode = entryInode(io, owned_dir, entry),
                 .kind = kindTag(entry.kind),
             },
         });
     }
     result.ok = true;
     return result;
+}
+
+/// 순회가 준 항목의 **inode**. 0 이면 그 자리에서 `stat` 으로 채운다.
+///
+/// **Windows 의 디렉터리 순회는 inode 를 안 준다 — 실측: 모든 항목이 `entry.inode = 0` 이다**(같은
+/// 파일을 `stat` 으로 재면 진짜 값이 나온다). 그대로 두면 스캔이 기록한 identity 가 전부 0 이 되고,
+/// 그 디렉터리를 나중에 열어 잰 identity 와 **반드시 불일치**한다 — `applySnapshotWithIdentity` 가
+/// `IdentityMismatch` 를 내고 파일 트리가 서지 않는다. identity 축은 이 저장소의 TOCTOU 가드라
+/// (`openValidatedFileTreeRow` 가 그것으로 판정한다) 0 으로 채워 두면 가드가 통째로 무의미해진다.
+///
+/// **판정을 OS 가 아니라 값으로 한다.** `entry.inode == 0` 일 때만 `stat` 을 부른다 — POSIX 에서
+/// readdir 이 주는 inode 는 0 이 아니므로 그쪽은 **한 번도 안 부른다**(공짜 값을 버리지 않는다).
+/// 뒤에 다른 플랫폼이 같은 사정을 가져도 이 판정이 그대로 맞는다.
+fn entryInode(io: std.Io, dir: std.Io.Dir, entry: std.Io.Dir.Entry) u64 {
+    if (entry.inode != 0) return @intCast(entry.inode);
+    const stat = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch return 0;
+    return @intCast(stat.inode);
 }
 
 fn directoryIdentity(io: std.Io, dir: std.Io.Dir) !file_tree.Identity {

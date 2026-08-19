@@ -70,6 +70,7 @@ const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 const spawn_util = @import("windows_spawn.zig");
 const integration = @import("windows_integration.zig");
+const path_shape = @import("../path_shape.zig"); // spawn 경계에서 구분자를 native 로 되돌린다
 
 // ── Win32 ─────────────────────────────────────────────────────────────────────────────────────
 // 바인딩을 손으로 둔다. PoC에서 이 정확한 선언들로 실측을 끝냈고(§6), std 바인딩을 섞으면 그 실측과
@@ -1416,11 +1417,17 @@ fn spawnChild(allocator: std.mem.Allocator, request: types.SpawnRequest, hpc: HA
     // 하고, 사용자가 준 인자는 앞에 그대로 남는다). 그 외 셸은 인자를 건드리지 않는다.
     var argv = try integrationArgv(allocator, request);
     defer argv.deinit(allocator);
-    const cmdline_utf8 = try spawn_util.buildCommandLine(allocator, request.command, argv.items);
+    // **여기가 OS 경계다 — 구분자를 native 로 되돌린다.** 중립 레이어는 `/`를 쓰지만(계약 §5 규칙 1)
+    // `cmd.exe`는 argv[0]에 `/`가 있으면 자기 이름을 못 풀고 실패한다. 근거와 실측표는
+    // `path_shape.toNativeSeparatorsFor`의 doc에 있다. `command`만 바꾼다 — `args`는 경로가 아니고,
+    // 셸 스크립트에 들어간 `/`를 건드리면 그쪽이 깨진다.
+    const native_command = try path_shape.toNativeSeparatorsFor(builtin.os.tag, allocator, request.command);
+    defer allocator.free(native_command);
+    const cmdline_utf8 = try spawn_util.buildCommandLine(allocator, native_command, argv.items);
     defer allocator.free(cmdline_utf8);
     const cmdline = try wide(allocator, cmdline_utf8);
     defer allocator.free(cmdline);
-    const app = try wide(allocator, request.command);
+    const app = try wide(allocator, native_command);
     defer allocator.free(app);
     const cwd: ?[:0]u16 = if (request.cwd) |c| try wide(allocator, c) else null;
     defer if (cwd) |c| allocator.free(c);
@@ -1877,6 +1884,43 @@ test "w5-cmd-off: 통합을 안 켜면 OSC가 없다(대조군)" {
     defer out.deinit(a);
     try collectFor(&s, a, &out, 2500);
     try testing.expect(std.mem.indexOf(u8, out.items, "]9;9;") == null);
+}
+
+// ── 정규화된 경로로도 셸이 뜨는가 (W7.6b) ─────────────────────────────────────────────────────
+// `shell.command` 를 spawn 까지 배선하자 config 가 정규화한 `C:/…` 가 `lpCommandLine` 의 argv[0] 으로
+// 갔고, **cmd 가 자기 이름을 못 풀고 죽었다.** 되돌림은 `spawnChild` 한 자리에 있는데 그 자리는 순수
+// 함수가 아니라 단위 테스트로 못 박을 수 없다 — 그래서 **실제로 띄워서** 잰다.
+//
+// 근거표(각 셸에 한 줄을 시켜 출력을 읽은 실측)는 `path_shape.toNativeSeparatorsFor` 의 doc 에 있다.
+
+test "w7.6b: 정규화된 `/` 경로로도 cmd 가 실제로 돈다" {
+    const a = std.testing.allocator;
+    // 중립 레이어가 넘기는 모양 그대로 — 계약 §5 규칙 1 이 만든 값이다.
+    const normalized = "C:/Windows/System32/cmd.exe";
+    var s = try PtySession.spawn(a, .{ .command = normalized, .size = .{ .cols = 120, .rows = 30 } });
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    out.clearRetainingCapacity();
+    try s.writeInput("echo MARU-NATIVE-OK" ++ crlf);
+    try collectFor(&s, a, &out, 2500);
+    // 되돌림이 빠지면 cmd 는 여기까지 못 온다 — 자기 이름을 못 풀고 이미 죽어 있다.
+    try testing.expect(std.mem.indexOf(u8, out.items, "MARU-NATIVE-OK") != null);
+}
+
+test "w7.6b: native 경로도 그대로 돈다 (대조군)" {
+    // 위 테스트가 "정규화 경로라서" 통과하는 것인지 "아무 경로나 통과"하는 것인지 가른다.
+    const a = std.testing.allocator;
+    var s = try PtySession.spawn(a, .{ .command = testShell(), .size = .{ .cols = 120, .rows = 30 } });
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    out.clearRetainingCapacity();
+    try s.writeInput("echo MARU-NATIVE-OK" ++ crlf);
+    try collectFor(&s, a, &out, 2500);
+    try testing.expect(std.mem.indexOf(u8, out.items, "MARU-NATIVE-OK") != null);
 }
 
 test "w5-cmd-user: 사용자 PROMPT를 덮지 않는다" {

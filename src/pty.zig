@@ -38,6 +38,8 @@ pub fn windowsConptyRejectReason() []const u8 {
 // W7에서 배선할 때 `pty.types.`를 직접 파고들지 않도록 여기서 함께 내보낸다.
 pub const WindowsShellKind = types.WindowsShellKind;
 pub const resolveInteractiveShellFor = types.resolveInteractiveShellFor;
+pub const resolveShell = types.resolveShell;
+pub const configuredShellCandidate = types.configuredShellCandidate;
 pub const interactiveShellCandidates = types.interactiveShellCandidates;
 pub const SpawnRequest = types.SpawnRequest;
 pub const plannedBackendForMacOS = types.plannedBackendForMacOS;

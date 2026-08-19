@@ -111,6 +111,8 @@ test "familyOf: 경로·대소문자·구분자를 가리지 않는다" {
         .{ .in = "C:\\Program Files\\PowerShell\\7\\pwsh.exe", .want = .powershell },
         .{ .in = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", .want = .powershell },
         .{ .in = "PWSH.EXE", .want = .powershell },
+        // 정규화된 경로는 이제 **실제 입력**이다 — config 값이 `/` 로 들어온다(계약 §5 규칙 1).
+        .{ .in = "C:/Program Files/PowerShell/7/pwsh.exe", .want = .powershell },
         // 모르는 셸에는 아무것도 심지 않는다.
         .{ .in = "C:\\msys64\\usr\\bin\\bash.exe", .want = .other },
         .{ .in = "C:\\Windows\\System32\\wsl.exe", .want = .other },

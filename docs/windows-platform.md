@@ -976,6 +976,19 @@ shell.command         = /bin/zsh
 아래 티어가 하고, 경로를 못 박고 싶으면 `shell.command`(+`.windows`)를 쓴다. 다른 OS에서는 읽히되 쓰이지
 않는다 — 키를 OS별로 숨기면 dotfiles를 공유하는 사용자가 macOS에서 "알 수 없는 키" 경고를 받는다.
 
+> **배선을 끝냈다 — W7.6b(2026-08-19).** 위 규칙은 W7 에 적혀 있었지만 **소비자가 없었다**: 로더가
+> `shell.command`·`shell.windows-shell` 을 파싱·검증해 두기만 하고, Windows 진입점은 전부 인자 없는
+> `resolveInteractiveShell()`(`.powershell` 고정)을 불렀다. 실측으로 확인한 증상 — config 가 `cmd` 를
+> 지정했는데 띄워진 자식은 `pwsh.exe` 였다. **로더가 값을 받아 두는 것과 그 값이 쓰이는 것은 별개**라,
+> 소비자가 없으면 설정은 조용히 없는 것과 같다.
+>
+> `pty.resolveShell(configured, kind)` 가 1순위 티어를 맡고(`configuredShellCandidate` 가 형식 판정 —
+> `os_tag` 를 받아 두 갈래가 모든 타깃에서 돈다), `maru.windowsShellKindOf` 가 config 열거를 중립 pty
+> 열거로 옮긴다(명시 `switch` — `@enumFromInt` 는 집합이 갈렸을 때 **조용히 다른 셸을 띄운다**).
+> 스모크가 `config_shell: windows_shell=… command=… resolved=…` 한 줄을 찍어 설정과 결과를 나란히 둔다.
+>
+> 배선하자마자 **§5 의 정규화가 spawn 에서 터졌다**(cmd 의 argv\[0\]). §5 규칙 1 의 뒤집힌 결정을 보라.
+
 **탭별로 다른 셸을 여는 "프로필"은 이 계약 밖이다.** 지금 maru에는 그 개념이 없고(전역 `shell.command` 하나),
 macOS도 마찬가지다. 즉 **Windows 고유 요구가 아니라 제품 기능**이므로 별도 이니셔티브로 둔다 — 다만 Windows는
 한 기기에 cmd·PowerShell·WSL이 공존하는 것이 정상이라 **수요가 macOS보다 크다**는 점은 기록해 둔다.
@@ -1653,8 +1666,28 @@ Windows에서 경로는 **모든 출처가 백슬래시로** 들어온다: OSC 9
    > 접두 문법이라 정규화가 그것을 `//server/share`로 바꾸는데, Win32 가 그것을 받는지가 의심스러웠다.
    > 측정 결과 `GetFullPathNameW`·`GetFileAttributesW` 둘 다 받는다 — `//localhost/C$/Windows`가
    > `\\localhost\C$\Windows`로 정규화되고 존재 판정도 통과한다(드라이브 경로·혼합 경로도 같다).
-   > **그래서 OS 경계에서 native 로 되돌리는 변환을 두지 않는다** — 없는 문제에 코드를 넣으면 검증되지
-   > 않은 경로가 남는다.
+   > 한때 여기서 **"OS 경계에서 native 로 되돌리는 변환을 두지 않는다"**고 정했다. 근거는 위 실측이었고
+   > 실측 자체는 지금도 맞다 — 다만 **파일 API만 봤다.** 아래에서 뒤집힌다.
+   >
+   > **뒤집혔다 — spawn 경계에는 되돌림이 필요하다(W7.6b, 2026-08-19).** `shell.command` 를 실제로 spawn
+   > 까지 배선하자(§3.1a) 정규화된 값이 `CreateProcessW` 의 `lpCommandLine` 으로 갔고, **cmd.exe 가 자기
+   > argv\[0\] 을 못 풀고 죽었다.** cmd 는 커맨드라인을 CRT argv 규칙으로 파싱하지 않는다(§4.2) — 같은
+   > 이유의 다른 얼굴이다. 변수를 하나씩 바꿔 가며, "살아 있는가"가 아니라 `echo MARU-OK` 출력을 파이프로
+   > 읽어 **실제로 도는가**로 잰 것:
+   >
+   > | 셸 | `argv[0]=C:\…`(native) | `argv[0]=C:/…`(정규화) |
+   > |---|---|---|
+   > | `cmd.exe` | `MARU-OK` | **exit=1 "지정된 경로를 찾을 수 없습니다"** |
+   > | `pwsh 7` | `MARU-OK` | `MARU-OK` |
+   > | `PowerShell 5.1` | `MARU-OK` | `MARU-OK` |
+   >
+   > `lpApplicationName`·`lpCurrentDirectory` 는 어느 쪽이든 `/` 를 받는다(따로 실측) — 깨지는 것은
+   > **argv\[0\] 한 자리**이고 **cmd 하나**다. 그래도 갈라 두지 않고 `path_shape.toNativeSeparatorsFor` 로
+   > spawn 경계에서 함께 되돌린다: 한쪽만 native 로 두면 "왜 이쪽만" 이 남아 다음 사람이 그 비대칭을
+   > 정리하다 argv\[0\] 을 되돌려 놓는다.
+   >
+   > **규칙 1 은 그대로다.** 중립 레이어는 계속 `/` 를 본다. 되돌림은 OS 에 넘기기 직전 **한 자리**
+   > (`pty/windows.zig` 의 spawn)에만 있고, 그 자리를 늘리지 않는 것이 이 결정의 조건이다.
 2. **"절대경로인가" 판정은 `[0]=='/'`를 쓰지 않는다.** 드라이브 절대(`X:`)와 UNC(`//`)를 명시적으로 함께
    판정한다. 정규화 이전에 역슬래시로 거르던 가드는 **정규화 이후에도 같은 것을 막도록 다시 쓴다.**
 

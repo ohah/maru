@@ -47,11 +47,11 @@ const Entry = struct { path: []const u8, count: usize };
 const inventory = [_]Entry{
     // ── 영어 고정 표면(§7.1) ──
     // **토크나이저로 바꾸자 드러난 것들.** 줄 단위 스캐너는 멀티라인 문자열(`\\`)을 못 봤다.
-    //   · `cli/browser.zig` 20 — **help 텍스트가 한국어다**(§7.1 위반). 영어화는 후속이 든다.
-    //   · `main.zig` 1 — Windows 스모크 usage 한 줄(같은 성격).
-    .{ .path = "src/cli/browser.zig", .count = 20 },
-    .{ .path = "src/main.zig", .count = 1 },
-    // `cli/browser/run.zig`(41) 는 **0 이 되어 원장에서 빠졌다**. `cli/ssh.zig` 에 남은 하나는
+    //   · `cli/browser.zig`(20) 와 `main.zig`(1) 은 **0 이 되어 원장에서 빠졌다.** 둘 다 §7.1 이 영어로
+    //     고정한 표면인데 한국어였다 — 계약이 금지한 것이 코드에 있었고, 이 원장이 그것을 "알려진 위반"
+    //     으로 세고 있었다. `maru browser --help` 본문과 Windows 스모크 usage 한 줄을 영어로 옮겼다.
+    //     CLI 출력을 영어로 두는 이유는 §7.1 이 적은 대로 **스크립트가 파싱하기 때문**이다.
+    // `cli/browser/run.zig`(41) 도 **0 이 되어 빠졌다**. `cli/ssh.zig` 에 남은 하나는
     // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
 

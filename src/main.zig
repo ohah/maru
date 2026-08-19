@@ -2655,7 +2655,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
         \\  maru win32-terminal-smoke
-        \\  maru win32-clipboard-smoke [<expected값> | --paste-encode]
+        \\  maru win32-clipboard-smoke [<expected> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]

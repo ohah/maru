@@ -1717,6 +1717,18 @@ fn keybarIndexAt(x: f32, y: f32) ?usize {
 pub export fn maru_mobile_take_copy(out: [*]u8, cap: u32) u32 {
     if (!copy_pending) return 0;
     copy_pending = false;
+    // **정해진 글자를 복사하는 자리도 여기다.** 요청을 둘로 두면 host 가 두 번 가져가야 하고,
+    // 한쪽만 배선한 host 에서는 복사가 조용히 안 된다(그 화면만 안 되는 것을 사람이 못 찾는다).
+    if (copy_text_len > 0) {
+        const text = copy_text_buf[0..copy_text_len];
+        copy_text_len = 0;
+        if (text.len > cap) {
+            setLastError("copy_truncated");
+            return 0; // 반쪽 공개키는 서버에서 조용히 안 먹는다 — 자르느니 안 준다
+        }
+        @memcpy(out[0..text.len], text);
+        return @intCast(text.len);
+    }
     const core = &(term_core orelse return 0);
     const text = (core.extractSelection(term_allocator) catch {
         setLastError("copy_extract");
@@ -3245,9 +3257,21 @@ pub fn serverEditRowCenterY(i: usize) ?f32 {
     return srv_edit_rects[i].y + srv_edit_rects[i].h / 2;
 }
 
+/// 편집 화면에서 **그 일을 하는 줄이 몇 번인가**(테스트용). 번호를 테스트가 손으로 적으면
+/// 줄을 하나 끼울 때 조용히 다른 줄을 누르게 된다(공개키 줄을 넣다 실제로 그랬다).
+pub fn serverEditPubkeyRow() usize {
+    return server_field_n;
+}
+pub fn serverEditSaveRow() usize {
+    return server_field_n + 1;
+}
+pub fn serverEditDeleteRow() usize {
+    return server_field_n + 2;
+}
+
 /// 편집 화면의 줄 수(칸 + 저장 + 삭제).
 pub fn serverEditRowN() usize {
-    return server_field_n + 2;
+    return srv_edit_rects.len;
 }
 
 /// 서버 목록의 지금 스크롤 위치(테스트용).
@@ -3482,10 +3506,41 @@ pub fn textWidthForTest(text: []const u8, px: i32) i32 {
     return textWidth(text, px);
 }
 
+/// **이 기기의 공개키 한 줄**(`ssh-ed25519 ... maru`). 키는 host 가 들고(Keystore·파일) 브리지는
+/// 보여 주기만 한다 — 이 층엔 OS 호출이 없다(§3). 없으면 빈 값이고 화면이 그렇게 말한다.
+var pubkey_buf: [256]u8 = undefined;
+var pubkey_len: usize = 0;
+/// 방금 복사했다는 표시. **시간을 안 센다** — 화면을 떠나면 사라지는 한 프레임짜리 사실이라
+/// 타이머를 두면 그 상태를 지우는 자리가 또 생긴다.
+var pubkey_copied = false;
+
+/// host 가 자기 키의 한 줄을 알린다(`maru_mobile_ssh_public_key_line` 이 만든 것).
+pub export fn maru_mobile_set_public_key(ptr: [*]const u8, len: usize) void {
+    if (len > pubkey_buf.len) {
+        // **자르지 않는다** — 반쪽 공개키를 서버에 붙이면 조용히 안 먹는다.
+        setLastError("public_key_too_long");
+        pubkey_len = 0;
+        return;
+    }
+    @memcpy(pubkey_buf[0..len], ptr[0..len]);
+    pubkey_len = len;
+}
+
+/// 화면이 "복사했다" 를 보이고 있나(테스트·진단용). **라벨이 거짓말하면 사용자는 안 붙은 키를
+/// 붙였다고 믿는다.**
+pub fn publicKeyCopiedShown() bool {
+    return pubkey_copied;
+}
+
+/// 지금 아는 공개키 한 줄(없으면 빈 슬라이스).
+pub fn publicKeyLine() []const u8 {
+    return pubkey_buf[0..pubkey_len];
+}
+
 var srv_draft: ServerDraft = .{};
 /// 편집 중인 서버의 목록 번호. null 이면 **새로 만드는 중**이다(저장할 때 끝에 붙는다).
 var srv_edit_index: ?usize = null;
-var srv_edit_rects: [server_field_n + 2]SetRect = @splat(.{}); // 칸 다섯 + 저장 + 삭제
+var srv_edit_rects: [server_field_n + 3]SetRect = @splat(.{}); // 칸 다섯 + 공개키 + 저장 + 삭제
 var srv_edit_pressed: ?usize = null;
 var srv_edit_back_rect: SetRect = .{};
 var srv_edit_back_pressed = false;
@@ -3508,6 +3563,7 @@ fn openServerEdit(i: ?usize) void {
     }
     edit_target = .none;
     set_edit_len = 0;
+    pubkey_copied = false; // 들어올 때마다 새로 — 지난번 표시가 남으면 거짓말이 된다
     navPush(.server_edit);
 }
 
@@ -3777,18 +3833,40 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
         y += set_row_h;
     }
 
+    // ── 이 기기의 공개키. **여기 있는 이유**: 이 서버에 붙으려면 그 서버 `authorized_keys` 에
+    // 이 줄을 넣어야 한다 — 주소·지문을 치는 바로 그 자리에서 복사할 수 있어야 한 화면에서 끝난다.
+    y += 12;
+    const key_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    srv_edit_rects[server_field_n] = key_rect;
+    if (srv_edit_pressed == server_field_n) push(.{ .x = @intFromFloat(key_rect.x), .y = @intFromFloat(key_rect.y), .w = @intFromFloat(key_rect.w), .h = @intFromFloat(key_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    const key_label = maru.i18n.tIn(.ko, if (pubkey_copied) .mob_pubkey_copied else .mob_pubkey);
+    pushText(key_label, @intFromFloat(key_rect.x + set_pad_x), @intFromFloat(key_rect.y + (set_row_h - 16) / 2), 16, tk.get(if (pubkey_copied) .accent_bar else .surface_fg));
+    {
+        // 키가 없으면 **그렇게 말한다** — 빈 줄을 보이면 눌러도 아무 일이 안 나는 줄이 된다.
+        const line = publicKeyLine();
+        var key_fit: [96]u8 = undefined;
+        const key_room = @as(i32, @intFromFloat(key_rect.w - set_pad_x * 2 - 12)) - textWidth(key_label, 16);
+        const shown = if (line.len == 0)
+            maru.i18n.tIn(.ko, .mob_pubkey_absent)
+        else
+            fitRight(line, @max(40, key_room), 15, &key_fit);
+        pushText(shown, @intFromFloat(key_rect.x + key_rect.w - set_pad_x - @as(f32, @floatFromInt(textWidth(shown, 15)))), @intFromFloat(key_rect.y + (set_row_h - 15) / 2), 15, tk.get(.muted_fg));
+    }
+    push(.{ .x = @intFromFloat(key_rect.x), .y = @intFromFloat(key_rect.y + set_row_h - 1), .w = @intFromFloat(key_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    y += set_row_h;
+
     // ── 저장 · 삭제. **저장이 위다** — 흔한 쪽이 손가락에 가깝고, 지우기가 실수로 눌리면 안 된다.
     y += 12;
     const save_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
-    srv_edit_rects[server_field_n] = save_rect;
-    if (srv_edit_pressed == server_field_n) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    srv_edit_rects[server_field_n + 1] = save_rect;
+    if (srv_edit_pressed == server_field_n + 1) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_save), @intFromFloat(save_rect.x + set_pad_x), @intFromFloat(save_rect.y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y + set_row_h - 1), .w = @intFromFloat(save_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     y += set_row_h;
 
     const del_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
-    srv_edit_rects[server_field_n + 1] = del_rect;
-    if (srv_edit_pressed == server_field_n + 1) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    srv_edit_rects[server_field_n + 2] = del_rect;
+    if (srv_edit_pressed == server_field_n + 2) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_delete), @intFromFloat(del_rect.x + set_pad_x), @intFromFloat(del_rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
@@ -4142,8 +4220,16 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 }
                 if (was) |i| {
                     if (i == server_field_n) {
-                        saveServerDraft();
+                        // 공개키를 클립보드로. **없으면 아무 일도 안 한다** — 화면이 이미
+                        // "아직 키가 없다" 고 말하고 있다.
+                        const line = publicKeyLine();
+                        if (line.len > 0) {
+                            requestCopyText(line);
+                            pubkey_copied = true;
+                        }
                     } else if (i == server_field_n + 1) {
+                        saveServerDraft();
+                    } else if (i == server_field_n + 2) {
                         deleteServerDraft();
                     } else {
                         // 그 칸을 입력 대상으로 삼는다(설정의 글자 칸과 같은 규칙 — S9b-1).
@@ -4455,6 +4541,20 @@ fn copyEnabled() bool {
 /// 복사 요청. host 가 다음에 `maru_mobile_take_copy` 로 가져간다 — **클립보드는 OS 것이라
 /// 브리지가 못 쓴다**(§3: 여기엔 OS 호출이 없다).
 var copy_pending = false;
+/// 코어 선택이 아니라 **정해진 글자**를 복사할 때 그 글자(공개키 한 줄 등). 0 이면 선택에서 뽑는다.
+var copy_text_buf: [256]u8 = undefined;
+var copy_text_len: usize = 0;
+
+/// 그 글자를 클립보드로 보내 달라고 요청한다(host 가 `take_copy` 로 가져간다).
+fn requestCopyText(text: []const u8) void {
+    if (text.len == 0 or text.len > copy_text_buf.len) {
+        setLastError("copy_text_size");
+        return;
+    }
+    @memcpy(copy_text_buf[0..text.len], text);
+    copy_text_len = text.len;
+    copy_pending = true;
+}
 
 /// 레이아웃 id 는 이 값에 인덱스를 더한다. 라벨 id 는 카드 id + 100.
 const key_bar_id_base: u64 = 500;

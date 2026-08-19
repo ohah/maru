@@ -322,18 +322,30 @@ pub export fn maru_mobile_ssh_generate_key(
     @memcpy(secret[32..64], &pair.public_key.toBytes());
     std.crypto.secureZero(u8, &seed);
 
-    // 공개키 한 줄. **blob 은 코어가 만든다** — 형식이 두 벌이 되면 갈린다.
+    if (writeLine(secret, out_line, line_cap) != ok) {
+        std.crypto.secureZero(u8, &secret);
+        return err_bad_arg;
+    }
+
+    @memcpy(out_secret[0..secret_key_bytes], &secret);
+    std.crypto.secureZero(u8, &secret);
+    last_load_error = "";
+    return ok;
+}
+
+/// `authorized_keys` 한 줄을 적는다(끝에 0). **형식은 한 곳에서만 만든다** — 만드는 자리와
+/// 보여 주는 자리가 각자 조립하면 두 벌이 되고, 사용자는 어느 쪽이 진짜인지 모른다.
+fn writeLine(secret: [secret_key_bytes]u8, out_line: [*]u8, line_cap: u32) c_int {
+    // **blob 은 코어가 만든다** — 형식이 두 벌이 되면 갈린다.
     var blob_buf: [128]u8 = undefined;
     const blob = userauth.publicKeyBlob(&blob_buf, secret) catch {
         last_load_error = "public_blob_failed";
-        std.crypto.secureZero(u8, &secret);
         return err_bad_arg;
     };
     const encoder = std.base64.standard.Encoder;
     const need = hostkey.alg_name.len + 1 + encoder.calcSize(blob.len) + " maru".len + 1;
     if (line_cap < need) {
         last_load_error = "line_too_small";
-        std.crypto.secureZero(u8, &secret);
         return err_bad_arg;
     }
     var n: usize = 0;
@@ -346,11 +358,27 @@ pub export fn maru_mobile_ssh_generate_key(
     @memcpy(out_line[n..][0..5], " maru");
     n += 5;
     out_line[n] = 0;
-
-    @memcpy(out_secret[0..secret_key_bytes], &secret);
-    std.crypto.secureZero(u8, &secret);
     last_load_error = "";
     return ok;
+}
+
+/// **이미 있는 키의 한 줄**을 만든다(`seed ‖ public` 64바이트 → `ssh-ed25519 <base64> maru`).
+///
+/// 만들 때(`generate_key`)만 한 줄을 내주면 **다시 켠 기기에서는 그 줄을 영영 못 본다** —
+/// Android 는 Keystore 에 봉인해 둔 것을 풀어 쓰고 iOS 는 파일을 읽으므로, 그때는 만드는 일이
+/// 안 일어난다. 사용자는 그 한 줄을 서버 `authorized_keys` 에 붙여야 접속을 시작할 수 있다.
+///
+/// **개인키는 안 나간다** — 씨앗 32바이트는 blob 에 안 들어간다.
+pub export fn maru_mobile_ssh_public_key_line(
+    secret: [*]const u8,
+    out_line: [*]u8,
+    line_cap: u32,
+) c_int {
+    if (line_cap > 0) out_line[0] = 0;
+    var copy: [secret_key_bytes]u8 = undefined;
+    @memcpy(&copy, secret[0..secret_key_bytes]);
+    defer std.crypto.secureZero(u8, &copy);
+    return writeLine(copy, out_line, line_cap);
 }
 
 /// 키 읽기 실패 이름. **세션이 아직 없으므로 세션별 자리에 못 남긴다** — 이 자리가 그것을 든다.

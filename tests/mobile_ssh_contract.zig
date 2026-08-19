@@ -542,6 +542,7 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_last_error",             "maru_mobile_ssh_clear_error",
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
         "maru_mobile_ssh_rekeys",                 "maru_mobile_ssh_generate_key",
+        "maru_mobile_ssh_public_key_line",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -660,4 +661,62 @@ test "한 줄 자리가 모자라면 자르지 않고 실패한다" {
     try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &tiny, tiny.len));
     try testing.expectEqualStrings("line_too_small", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
     try testing.expectEqual(@as(u8, 0), tiny[0]);
+}
+
+test "다시 켠 기기도 자기 공개키 한 줄을 낼 수 있다" {
+    // **만들 때만 한 줄을 내주면 그 줄을 영영 못 본다** — Keystore 에서 풀거나 파일에서 읽은
+    // 뒤에는 만드는 일이 안 일어난다. 사용자는 그 줄을 서버에 붙여야 접속을 시작할 수 있다.
+    var entropy: [32]u8 = @splat(7);
+    var secret: [64]u8 = undefined;
+    var made: [256]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), ssh.maru_mobile_ssh_generate_key(&entropy, &secret, &made, made.len));
+
+    var again: [256]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), ssh.maru_mobile_ssh_public_key_line(&secret, &again, again.len));
+    // **만든 줄과 글자 하나까지 같아야 한다** — 두 자리가 각자 조립하면 사용자는 어느 쪽이
+    // 진짜인지 모른다(서버에 붙인 줄과 화면이 보이는 줄이 다르면 접속이 안 된다).
+    try testing.expectEqualStrings(std.mem.span(@as([*:0]const u8, @ptrCast(&made))), std.mem.span(@as([*:0]const u8, @ptrCast(&again))));
+
+    // 자리가 모자라면 **자르지 않고 실패**한다(반쪽 공개키는 서버에서 조용히 안 먹는다).
+    var small: [16]u8 = undefined;
+    try testing.expect(ssh.maru_mobile_ssh_public_key_line(&secret, &small, small.len) != 0);
+    try testing.expectEqual(@as(u8, 0), small[0]);
+    try testing.expectEqualStrings("line_too_small", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+}
+
+test "공개키 한 줄에 개인키가 안 들어간다" {
+    // 그 줄은 사용자가 **서버에 붙이는** 값이다. 씨앗이 섞여 나가면 키가 통째로 새어 나간다.
+    var entropy: [32]u8 = @splat(9);
+    var secret: [64]u8 = undefined;
+    var line: [256]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), ssh.maru_mobile_ssh_generate_key(&entropy, &secret, &line, line.len));
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(&line)));
+    // 씨앗 32바이트가 그대로 들어 있지 않다(base64 이전 원문 기준).
+    try testing.expect(std.mem.indexOf(u8, text, secret[0..32]) == null);
+    // 공개키 32바이트는 blob 안에 base64 로 들어간다 — 원문 그대로는 아니다.
+    try testing.expect(std.mem.indexOf(u8, text, secret[32..64]) == null);
+}
+
+test "공개키 한 줄은 OpenSSH 형식 그대로다" {
+    // **형식을 서로 대조만 하면 둘이 같이 틀려도 통과한다**(변이로 확인했다 — `maru` 를 `MARU`
+    // 로 바꿔도 두 자리가 함께 바뀌어 초록이었다). 그래서 형식 자체를 못박는다: 서버가 읽는
+    // 것은 이 문자열이지 우리 두 함수의 일치가 아니다.
+    var entropy: [32]u8 = @splat(3);
+    var secret: [64]u8 = undefined;
+    var line: [256]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), ssh.maru_mobile_ssh_generate_key(&entropy, &secret, &line, line.len));
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(&line)));
+
+    try testing.expect(std.mem.startsWith(u8, text, "ssh-ed25519 "));
+    try testing.expect(std.mem.endsWith(u8, text, " maru"));
+    // 가운데는 base64 이고, 풀면 **blob 안에도 같은 알고리즘 이름**이 string 으로 들어 있다
+    // (RFC 4253 §6.6 — `string` 은 4바이트 길이가 앞에 붙는다).
+    const b64 = text["ssh-ed25519 ".len .. text.len - " maru".len];
+    var blob: [128]u8 = undefined;
+    const n = try std.base64.standard.Decoder.calcSizeForSlice(b64);
+    try std.base64.standard.Decoder.decode(blob[0..n], b64);
+    try testing.expect(n > 4 + 11);
+    try testing.expectEqualStrings("ssh-ed25519", blob[4 .. 4 + 11]);
+    // 그 뒤 32바이트가 공개키다 — `secret` 의 뒤 절반과 같아야 한다.
+    try testing.expectEqualSlices(u8, secret[32..64], blob[n - 32 .. n]);
 }

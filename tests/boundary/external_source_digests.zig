@@ -743,5 +743,5 @@ pub const inventory = [_]Proof{
     // 편집 화면(S9b-2b-2)이 칸 라벨·저장·삭제 키를 더하고, 안 쓰게 된 하나
     // (`mob_servers_empty_hint`)를 뺀다 — 등록 수단이 생겨 "config 에 이렇게 적어라" 가 틀린
     // 말이 됐다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "9fa78037edf0f8d922d9233fb1d7ea95e57e41dcdc94402f074540aa283663be" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "6e63252e6fc2b3f554921616750c83b7dead8322c0444151cbfc502145cf467a" },
 };

@@ -119,6 +119,7 @@ static void syncInputKind(void);
 static void raiseKeyboardIfAsked(void);
 static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
+static void publishPublicKey(struct android_app *app);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -1614,6 +1615,68 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     return 0;
 }
 
+/// **이 기기의 공개키 한 줄을 브리지에 알린다**(화면이 그것을 보여 주고 복사한다 — S9c-4).
+///
+/// **접속 전에 있어야 한다.** 사용자는 그 줄을 서버 `authorized_keys` 에 붙여야 처음 붙을 수
+/// 있는데, 예전에는 키를 **접속할 때**(서비스가 뜰 때) 처음 열었다 — 그러면 붙기 전에는 볼 수
+/// 없어서 순서가 거꾸로다.
+///
+/// 파일(`id_ed25519.pub`)이 있으면 그것을 읽는다 — **개인키를 안 연다**. 없으면 그때만 Keystore
+/// 에서 풀어 한 줄을 만들고 파일로 남긴다(다음부터는 안 연다). 공개키라 파일에 있어도 된다.
+static void publishPublicKey(struct android_app *app) {
+    if (!app || !app->activity || !app->activity->internalDataPath) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/id_ed25519.pub", app->activity->internalDataPath);
+
+    unsigned char line[256];
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        size_t n = fread(line, 1, sizeof line - 1, f);
+        fclose(f);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--; // 개행은 값이 아니다
+        if (n > 0) {
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_set_public_key(line, (unsigned long)n);
+            pthread_mutex_unlock(&g_bridge_lock);
+            LOGI("MARU_SSH public_key_from_file bytes=%zu", n);
+            return;
+        }
+    }
+
+    // 파일이 없다 — Keystore 를 열어 한 줄을 만들고 남긴다(그 뒤로는 위 경로만 탄다).
+    JNIEnv *env = NULL;
+    JavaVM *vm = app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jclass cls = (*env)->FindClass(env, "dev/maru/MaruKeyStore");
+    jmethodID m = cls ? (*env)->GetStaticMethodID(env, cls, "loadOrCreate",
+                                                  "(Landroid/content/Context;)[B") : NULL;
+    jbyteArray arr = m ? (jbyteArray)(*env)->CallStaticObjectMethod(env, cls, m, app->activity->clazz) : NULL;
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (arr && (*env)->GetArrayLength(env, arr) == MARU_SSH_SECRET_KEY_BYTES) {
+        unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+        (*env)->GetByteArrayRegion(env, arr, 0, MARU_SSH_SECRET_KEY_BYTES, (jbyte *)secret);
+        int rc = maru_mobile_ssh_public_key_line(secret, line, sizeof line);
+        memset(secret, 0, sizeof secret); // 개인키 사본은 바로 지운다
+        if (rc == MARU_SSH_OK) {
+            size_t n = strlen((const char *)line);
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_set_public_key(line, (unsigned long)n);
+            pthread_mutex_unlock(&g_bridge_lock);
+            FILE *w = fopen(path, "wb");
+            if (w) {
+                fprintf(w, "%s\n", (const char *)line);
+                fclose(w);
+            }
+            LOGI("MARU_SSH public_key_from_keystore bytes=%zu", n);
+        } else {
+            LOGI("MARU_SSH public_key_failed=%s", maru_mobile_ssh_last_load_error());
+        }
+    } else {
+        LOGI("MARU_SSH public_key_absent");
+    }
+    (*vm)->DetachCurrentThread(vm);
+}
+
 /// config 파일을 읽어 브리지에 넘긴다. **자리는 앱 전용 내부 저장소**(`filesDir/config` —
 /// docs/mobile-config.md §2). 없으면 아무것도 안 한다 — 기본값으로 도는 것이 정상 상태다.
 /// 브리지가 세운 저장 요청을 파일에 쓴다. **가져가는 것은 한 번뿐**이라 매 프레임 불러도
@@ -2077,6 +2140,7 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
     if (cmd == APP_CMD_INIT_WINDOW && app->window && g.ready) return;  // 이미 서 있으면 그대로
     if (cmd == APP_CMD_INIT_WINDOW && app->window) {
         loadConfigFile(app); // 첫 프레임부터 그 색으로 그린다
+        publishPublicKey(app); // 접속 **전에** 보여 줘야 서버에 붙일 수 있다
         int32_t dpi = AConfiguration_getDensity(app->config);
         g.scale = (dpi > 0 && dpi != ACONFIGURATION_DENSITY_ANY &&
                    dpi != ACONFIGURATION_DENSITY_NONE) ? (float)dpi / 160.0f : 2.0f;

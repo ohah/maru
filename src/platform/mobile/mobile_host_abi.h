@@ -574,6 +574,20 @@ void maru_mobile_set_public_key(const unsigned char *bytes, unsigned long len);
 /// **끄는 것도 host 몫**이다: 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
 void maru_mobile_set_password_prompt(unsigned int wanted);
 
+/// **처음 보는 서버의 지문을 물어라**(길이 0 이면 화면을 거둔다). host 가 세션이
+/// `MARU_SSH_STATE_HOST_KEY_DECISION` 에 서고 **config 에 지문이 없을 때** 부른다 —
+/// 지문이 이미 있으면 펌프가 그것만 보고 판정하므로 물을 일이 없다(아는 서버가 다른 키를
+/// 내밀면 **묻지 않고 끊는다**, SSH 계약 §4).
+///
+/// 길이가 자리보다 길면 **안 받는다**: 반쪽 지문을 보여 주면 사용자가 확인할 수 없는 것을
+/// 확인한 셈이 된다.
+void maru_mobile_set_host_key_prompt(const unsigned char *fingerprint, unsigned long len);
+
+/// 사용자의 답을 가져간다(0=아직, 1=승인, 2=거절). **가져가면 사라진다.** 승인이면 브리지가
+/// 그 지문을 **그 서버 줄에 적어 둔다** — 안 적으면 다음에도 또 묻고, 매번 묻는 물음은 사람이
+/// 안 읽는다.
+unsigned int maru_mobile_take_host_key_decision(void);
+
 /// 사용자가 친 비밀번호를 가져간다(없으면 0). **가져가면 사라진다** — 브리지에도 안 남는다
 /// (계약 §3.4: 저장하지 않는다). 자리가 모자라면 **0 이고 아무것도 안 준다**: 자르면 틀린
 /// 비밀번호를 보내는 셈이라 사용자는 맞게 쳤는데 실패한다.

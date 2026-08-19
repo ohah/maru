@@ -55,7 +55,9 @@ pub const inventory = [_]Proof{
     // 순수 함수라 `@field` 반사는 안 쓴다(count 14 그대로).
     // 서버 목록(S9b-2a)이 붙어 또 바뀐다 — `ssh.server.<n>.*` 는 **스키마 엔진 밖의 명시 가지**라
     // (`theme.palette.N` 과 같은 부류) `@field` 로 도는 자리를 안 늘린다. count 는 14 그대로다.
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "66fc39698991014f08f2925a4e5c50f62fb4271bcbf6208ebb92a845cc9de266" },
+    // 처음 붙는 서버의 지문 승인(S9b-3)이 `isComplete` 에서 지문을 빼고 `isFirstConnect` 를
+    // 더해 또 바뀐다 — 판정 규칙이 바뀐 것이고 `@field` 로 도는 자리는 그대로다(count 14).
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "79bcd3aaac8cb9bb230c42d1e5ad7a008c9ae5cb00b5c7bf91b702c9ce4d4594" },
     // 경로 값 입구 정규화(W7.5)가 붙어 바뀐다 — `Meta.isPath()` 인 필드는 파싱에서 구분자를 POSIX 로
     // 정규화한다(docs/windows-platform.md §5 규칙 1: Windows 사용자가 `workspace.root = C:\proj` 로 적으면
     // L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다). count 는 108 그대로다 — 늘어난 것은
@@ -772,5 +774,7 @@ pub const inventory = [_]Proof{
     // 이 파일을 부르는 자리가 바뀐 것이 아니다.
     // ssh 비밀번호 슬라이스가 같은 표에 키를 더해 값이 또 수렴했다(2026-08-20) — 아래 해시는 두 변경이
     // 함께 있는 상태의 것이고, 리베이스 뒤 도구로 다시 잰다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8503fc5f931b204d14b9c5e8fc154d6832da90f5f6218daf991f2364492d7658" },
+    // 지문 승인 화면(S9b-3)이 문구 넷을 더하고 목록의 안내 하나를 둘로 갈라 또 바뀐다.
+    // count 는 1 그대로 — 표에 항목이 늘 뿐이다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "2aa7256e090bb396cf73e6751247c898b2c3270d09b128c7fe87ccebbf3d9c2c" },
 };

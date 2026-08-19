@@ -121,6 +121,7 @@ static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
 static void publishPublicKey(struct android_app *app);
 static void drainPassword(void);
+static void drainHostKeyDecision(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -743,6 +744,7 @@ static void drawFrame(void) {
     raiseKeyboardIfAsked();
     startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
     drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
+    drainHostKeyDecision(); // 지문 승인·거절도 같은 자리에서 나른다
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1048,6 +1050,14 @@ static void ssh_state(void *ctx, unsigned int state) {
     // **비밀번호를 물어야 하면 화면을 연다** — 그 자리에서 펌프가 기다리고 있다. 벗어나면 끈다:
     // 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
     maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
+    // **처음 보는 서버면 지문을 물어야 한다.** 지문이 이미 있으면 펌프가 그 자리에서 판정하고
+    // 이 상태를 스쳐 지나가므로, 그때는 화면이 안 뜬다(`fp` 를 넘겨도 펌프가 먼저 끝낸다).
+    if (state == MARU_SSH_STATE_HOST_KEY_DECISION) {
+        const char *fp = maru_ssh_pump_host_key_fingerprint();
+        if (fp && fp[0]) maru_mobile_set_host_key_prompt((const unsigned char *)fp, strlen(fp));
+    } else {
+        maru_mobile_set_host_key_prompt((const unsigned char *)"", 0);
+    }
     pthread_mutex_unlock(&g_bridge_lock);
     if (state != MARU_SSH_STATE_CLOSED) return;
     // **끝났으면 서비스를 내린다.** 안 내리면 알림이 "유지 중" 인 채로 남아, 끊긴 것을 알리는
@@ -1282,7 +1292,11 @@ static void startSshIfAsked(void) {
     if (!req) return;
     // **비어 있으면 안 붙는다.** 브리지가 온전한 줄만 요청하지만, 버퍼가 모자라도 0 이 오므로
     // (자르지 않는 계약) 여기서도 본다 — 반쪽 주소로 붙으면 실패가 오타처럼 보인다.
-    if (!host_len || !user_len || !fp_len || !port) {
+    //
+    // **지문은 빼고 본다.** 처음 붙는 서버는 지문이 없는 것이 정상이고(그때 화면이 묻는다),
+    // 여기서 필수로 보면 그 서버에는 영영 못 붙는다 — 같은 규칙을 브리지와 여기 두 곳에서
+    // 세다가 실제로 그렇게 갈렸다.
+    if (!host_len || !user_len || !port) {
         LOGI("MARU_SSH connect_incomplete index=%u", req - 1);
         return;
     }
@@ -1631,6 +1645,16 @@ static void drainPassword(void) {
     maru_ssh_pump_password((const char *)pw, (unsigned int)n);
     memset(pw, 0, sizeof pw);
     LOGI("MARU_SSH password_supplied bytes=%lu", n);
+}
+
+/// **지문 승인·거절을 펌프로 넘긴다**(비밀번호와 같은 자리·같은 규율).
+static void drainHostKeyDecision(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int d = maru_mobile_take_host_key_decision();
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (d == 0) return;
+    maru_ssh_pump_accept_host_key(d == 1);
+    LOGI("MARU_SSH host_key_%s", d == 1 ? "accepted" : "rejected");
 }
 
 /// **이 기기의 공개키 한 줄을 브리지에 알린다**(화면이 그것을 보여 주고 복사한다 — S9c-4).

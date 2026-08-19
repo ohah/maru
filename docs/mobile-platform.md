@@ -194,6 +194,10 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
   **"원격 세션이 있나" 는 입력 목적지가 이미 아는 사실**이라 그것을 본다(host 가 세션 상태로
   세운다) — 같은 사실을 두 번 세면 갈린다.
 - **온전하지 않은 줄은 요청하지 않는다.** 주소·이름·지문 중 하나라도 비면 접속 대상이 아니다.
+- **처음 보는 서버의 지문도 화면이 묻는다**(`maru_mobile_set_host_key_prompt` ·
+  `maru_mobile_take_host_key_decision` · 펌프 `maru_ssh_pump_accept_host_key`). 승인하면 브리지가
+  그 지문을 **그 서버 줄에 적는다** — host 는 나르기만 한다. 지문이 이미 있으면 펌프가 그것만
+  보고 판정하므로 화면이 안 뜬다(**다르면 묻지 않고 끊는다**).
 - **비밀번호는 화면이 묻고 host 가 나른다.** 세션이 `MARU_SSH_STATE_PASSWORD_NEEDED` 로 서면
   host 가 `maru_mobile_set_password_prompt(1)` 로 화면을 열고, 사용자가 확정하면
   `maru_mobile_take_password` 로 가져가 펌프(`maru_ssh_pump_password`)에 넘긴다. **가져가면

@@ -71,8 +71,18 @@ pub const Server = struct {
 
     /// 붙을 수 있는 줄인가. **반쯤 적은 줄로 붙으러 가지 않는다** — 그러면 실패 이유가
     /// "네트워크" 처럼 보여 사용자가 무엇을 안 적었는지 모른다.
+    ///
+    /// **지문은 여기 없다.** 처음 붙는 서버는 지문을 모르는 것이 정상이고(폰에서 미리 알아낼
+    /// 길이 없다), 그때는 서버가 내민 지문을 **보여 주고 승인받는다**(S9b-3). 승인하면 그 값이
+    /// 이 줄에 적히고 다음부터는 핀 고정이다. 예전에는 지문을 필수로 봐서 **지문을 미리 아는
+    /// 사람만** 붙을 수 있었다.
     pub fn isComplete(self: Server) bool {
-        return self.host.len > 0 and self.user.len > 0 and self.fingerprint.len > 0;
+        return self.host.len > 0 and self.user.len > 0;
+    }
+
+    /// 이 줄이 **처음 붙는 서버**인가(지문이 아직 없다). 화면이 그렇게 알린다 — 오류가 아니다.
+    pub fn isFirstConnect(self: Server) bool {
+        return self.fingerprint.len == 0;
     }
 };
 
@@ -226,16 +236,24 @@ test "포트는 없으면 22, 못 읽으면 그대로 22" {
     try std.testing.expectEqual(@as(u16, 22), p.servers[1].port); // 기본값을 지킨다(forgiving)
 }
 
-test "반쯤 적은 줄은 접속 대상이 아니다" {
-    // 목록에는 보이되(사용자가 고쳐야 하니까) 붙으러 가지는 않는다 — 그러면 실패 이유가
-    // "네트워크" 처럼 보인다.
+test "지문이 없는 줄은 처음 붙는 서버다 — 못 붙는 줄이 아니다" {
+    // **예전에는 지문을 필수로 봤다.** 그러면 지문을 미리 아는 사람만 붙을 수 있고, 폰에서는
+    // 그것을 알아낼 길이 없다 — 이제는 서버가 내민 지문을 보여 주고 승인받는다(S9b-3).
     var p = try parse(std.testing.allocator,
         \\ssh.server.1.host = a
         \\ssh.server.1.user = me
     );
     defer p.deinit();
-    try std.testing.expectEqual(@as(usize, 1), p.server_count); // 목록에는 있다
-    try std.testing.expect(!p.servers[0].isComplete()); // 지문이 없다
+    try std.testing.expectEqual(@as(usize, 1), p.server_count);
+    try std.testing.expect(p.servers[0].isComplete()); // 붙을 수 있다
+    try std.testing.expect(p.servers[0].isFirstConnect()); // 다만 지문은 아직 없다
+}
+
+test "주소나 사용자가 없으면 접속 대상이 아니다" {
+    // 그 줄로 붙으러 가면 실패 이유가 "네트워크" 처럼 보인다 — 무엇을 안 적었는지 모른다.
+    var p = try parse(std.testing.allocator, "ssh.server.1.host = a");
+    defer p.deinit();
+    try std.testing.expect(!p.servers[0].isComplete()); // 사용자가 없다
 }
 
 test "상한 밖 번호와 모르는 필드는 무시한다" {

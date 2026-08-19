@@ -302,18 +302,36 @@ fn validateRootSnapshotImpl(
     if (builtin.is_test and force_identity_failure) return null;
     const identity = directoryIdentity(io, dir) catch return null;
     if (identity.kind != @intFromEnum(file_tree.IdentityKind.directory)) return null;
-    const owned_path = try allocator.dupe(u8, real_buf[0..real_len]);
+    // **입구 정규화**(계약 §5 규칙 1, 입구 Ⓑ = OS API). `realPath` 는 native 를 준다 — Windows 에서는
+    // 역슬래시 경로다. 그대로 들고 있으면 이 값을 중립 레이어의 `/` 경로와 비교하는 소비자가 전부
+    // 어긋난다. 실측: `openValidatedFileTreeRow` 가 정상 파일에도 null 을 냈다(W8.1) —
+    // `std.mem.eql(validated.path, root_path)` 가 native 와 정규화본을 비교하고 있었다.
+    const owned_path = try path_shape.normalizeSeparatorsFor(builtin.os.tag, allocator, real_buf[0..real_len]);
     transferred = true;
     return .{ .path = owned_path, .identity = identity, .dir = dir };
 }
 
+/// 절대경로를 **한 칸씩** 내려가며 연다 — 매 칸이 `follow_symlinks = false` 다. 중간 어느 칸이든
+/// 링크면 거기서 멈춘다(루트 밖으로 새는 것을 막는 규율).
+///
+/// **루트가 OS 마다 다르다.** POSIX 는 `/` 하나지만 Windows 는 드라이브(`C:/`)와 UNC
+/// (`//server/share`)가 각각 루트다. 한때 `openDirAbsolute(io, "/")` 로 시작하고 `path[1..]` 를
+/// `/` 로만 잘랐는데 Windows 에서는 **셋 다 틀린다** — 그런 루트가 없고, `D:/x` 는 첫 글자가 `/` 가
+/// 아니며, `realPath` 가 주는 것은 native 라 `/` 로만 자르면 통째로 한 조각이 된다.
+/// 실측: `validateRootSnapshot` 이 Windows 에서 늘 `null` 이었다(W8.1).
+///
+/// 루트 접두 판정은 `path_shape.rootPrefixLenFor(os_tag, …)` 가 소유한다 — 순수 함수라 두 갈래가
+/// **모든 타깃에서** 테스트된다.
 fn openCanonicalDirectoryNoFollow(io: std.Io, absolute_path: []const u8) ?std.Io.Dir {
-    if (!std.fs.path.isAbsolute(absolute_path)) return null;
-    var current = std.Io.Dir.openDirAbsolute(io, "/", .{ .follow_symlinks = false }) catch return null;
+    const root_len = path_shape.rootPrefixLenFor(builtin.os.tag, absolute_path) orelse return null;
+    var current = std.Io.Dir.openDirAbsolute(io, absolute_path[0..root_len], .{ .follow_symlinks = false }) catch return null;
     var transferred = false;
     defer if (!transferred) current.close(io);
-    var components = std.mem.tokenizeScalar(u8, if (absolute_path.len > 0) absolute_path[1..] else absolute_path, '/');
-    while (components.next()) |component| {
+    // **구분자 집합을 `path_shape` 에서 받는다.** 여기 `"/" ++ 역슬래시` 를 박으면 POSIX 에서
+    // 역슬래시가 든 **하나의 디렉터리 이름**이 두 칸으로 갈린다 — W1.5 가 낸 회귀를 여기서
+    // 또 한 번 냈고 적대적 검증이 잡았다. 판정은 `separatorsFor` 가 단일 출처다.
+    var it = std.mem.tokenizeAny(u8, absolute_path[root_len..], path_shape.separatorsFor(builtin.os.tag));
+    while (it.next()) |component| {
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return null;
         const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return null;
         current.close(io);
@@ -367,21 +385,58 @@ pub fn openValidatedFileTreeRow(
             current = next;
         }
     }
-    const leaf_z = allocator.dupeZ(u8, leaf) catch return null;
-    defer allocator.free(leaf_z);
-    const fd = std.posix.openat(current.handle, leaf_z, .{
-        .ACCMODE = .RDONLY,
-        .NONBLOCK = true,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0) catch return null;
-    var file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    var file = openLeafNoFollow(allocator, io, current, leaf) catch return null;
     var file_transferred = false;
     defer if (!file_transferred) file.close(io);
     const actual = identityOfFile(io, file) catch return null;
     if (!actual.eql(expected_leaf_identity)) return null;
     file_transferred = true;
     return .{ .file = file };
+}
+
+/// 열린 디렉터리 핸들 **아래의 리프 하나**를 심볼릭 링크를 따라가지 않고 연다.
+///
+/// **`NOFOLLOW` 가 이 함수의 존재 이유다.** 부모 순회는 이미 `openDir(.follow_symlinks = false)` 로
+/// 내려오는데, 마지막 한 칸만 링크를 따라가면 그 위의 규율이 통째로 무의미해진다 — 루트 밖 파일을
+/// 열어 주는 자리가 된다.
+///
+/// **OS 로 갈린다. macOS 갈래는 한 글자도 안 바꿨다.**
+///
+/// - **macOS**: `openat` + `O_NONBLOCK`. 그 플래그가 필요한 이유는 **FIFO** 다 — 읽기로 여는 순간
+///   쓰는 쪽이 붙을 때까지 **멈춘다**. 리프 종류 검사(`expected_leaf_identity.kind == regular`)는
+///   **연 뒤에** 하므로, 그 사이에 멈추면 검사에 닿지도 못한다. 그래서 먼저 검사하고 열 수도 없다
+///   (검사와 열기 사이가 갈리는 것이 이 파일이 `*at` 로 피하는 바로 그 경합이다).
+/// - **macOS 외**: `std.Io.Dir.openFile`. Windows 에서 `std.posix.openat` 의 플래그 타입이 `void` 라
+///   컴파일 자체가 안 된다(W8.1 실측). `follow_symlinks = false` 가 같은 규율을 주고,
+///   `allow_directory = false` 는 오히려 한 겹 더 조인다(전에는 디렉터리가 열린 뒤 identity 비교에서
+///   걸렸다 — 결과는 같고 syscall 이 하나 준다).
+///
+/// **`NONBLOCK` 을 못 넘기는 것이 이 갈래의 한계다.** `OpenFileOptions` 에 그 축이 없다. Windows 는
+/// 이름 있는 파이프가 파일 트리 경로에 안 나타나므로(`\.\pipe\` 네임스페이스가 따로다) 실질
+/// 노출이 없다. Linux 는 지금 컴파일 대상이지 제품 호스트가 아니다 — 거기서 제품을 띄우게 되면
+/// 이 자리를 다시 봐야 한다.
+fn openLeafNoFollow(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    leaf: []const u8,
+) !std.Io.File {
+    if (comptime builtin.os.tag != .macos) {
+        return dir.openFile(io, leaf, .{
+            .mode = .read_only,
+            .follow_symlinks = false,
+            .allow_directory = false,
+        });
+    }
+    const leaf_z = try allocator.dupeZ(u8, leaf);
+    defer allocator.free(leaf_z);
+    const fd = try std.posix.openat(dir.handle, leaf_z, .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    return .{ .handle = fd, .flags = .{ .nonblocking = true } };
 }
 
 fn identityAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, leaf: []const u8) !file_tree.Identity {
@@ -737,6 +792,151 @@ test "validated file tree row capability remains bound across leaf replacement a
         link,
         identityFromStat(link_stat),
     ) == null);
+}
+
+// W8.1 — 리프 열기가 **모든 호스트에서** 같은 것을 지키는가.
+//
+// 위 macOS 전용 테스트와 같은 성질을 보되 `std.posix.Stat`·`fstatat` 을 안 쓴다(Windows 에서
+// 그 타입이 없다). 그래서 이 테스트는 **macOS 와 Windows 양쪽에서 돈다.**
+//
+// **Windows 에서 `NOFOLLOW` 의 의미가 다르다 — 실측했다.** POSIX 는 링크를 만나면 open 자체가
+// 실패하는데, Windows 의 `openFile(.follow_symlinks = false)` 는 **링크 자신을 연다**(거부하지
+// 않는다). 그래도 가드가 서는 이유는 그 핸들의 identity 가 기대값과 **다르기** 때문이다 —
+// 실측: 링크 핸들 inode 3377699722174903 vs 바깥 파일 3940649675596210.
+//
+// **그래서 identity 비교를 "NOFOLLOW 가 있으니 없어도 된다" 고 지우면 안 된다.** Windows 에서는
+// 그 비교가 유일한 방벽이다. 이 테스트가 그 사실을 고정한다.
+test "leaf open: 링크로 바꿔치기하면 capability 가 거부된다 (macOS·Windows 공통)" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "SECRET-OUTSIDE" });
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/leaf.md", .data = "inside" });
+
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root_native = tmp_buf[0..try tmp.dir.realPath(io, &tmp_buf)];
+    // 중립 레이어 규약대로 `/` 로 정규화한다(계약 §5 규칙 1) — `pathWithinRoot` 가 그 모양을 본다.
+    const tmp_root = try path_shape.normalizeSeparators(allocator, tmp_root_native);
+    defer allocator.free(tmp_root);
+    // **`std.fs.path.join` 을 쓰지 않는다.** Windows 에서 그것은 **native `\`** 로 잇는다 — 정규화한
+    // `D:/…/tmp` 에 붙이면 백슬래시가 섞인 경로가 나오고, 중립 레이어의 `pathWithinRoot`
+    // 가 그것을 루트 밖으로 본다(실측: `validateRootSnapshot` 이 null). 계약 §5 가 경고한 모양이
+    // 표준 라이브러리 헬퍼에서 나오는 자리다.
+    const root = try std.fmt.allocPrint(allocator, "{s}/root", .{tmp_root});
+    defer allocator.free(root);
+    const leaf = try std.fmt.allocPrint(allocator, "{s}/leaf.md", .{root});
+    defer allocator.free(leaf);
+
+    var validated_root = (try validateRootSnapshot(allocator, io, root)) orelse return error.TestUnexpectedResult;
+    defer validated_root.deinit(allocator, io);
+
+    const opened = try std.Io.Dir.cwd().openFile(io, leaf, .{ .follow_symlinks = false });
+    defer opened.close(io);
+    const leaf_identity = try identityOfFile(io, opened);
+
+    // ⓐ 정상 경로 — capability 가 선다.
+    var capability = openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        leaf,
+        leaf_identity,
+    ) orelse return error.TestUnexpectedResult;
+    capability.deinit(io);
+
+    // ⓑ 리프를 **루트 밖을 가리키는 링크**로 바꿔치기한다. 만들 수 없는 기기(개발자 모드 꺼짐)면
+    //    여기서 멈춘다 — 조용히 통과시키지 않고 건너뛴다는 것을 이름으로 남긴다.
+    try tmp.dir.deleteFile(io, "root/leaf.md");
+    tmp.dir.symLink(io, "../outside.txt", "root/leaf.md", .{}) catch |e| {
+        // **SKIP 은 조용한 통과라 위험하다.** 이 기기가 링크를 못 만들면 이 테스트는 아무것도
+        // 검증하지 않는데, 이유가 안 남으면 초록과 구분되지 않는다(Windows 는 개발자 모드나
+        // 관리자 권한이 필요하다). 그래서 왜 건너뛰는지 찍고 나간다.
+        std.debug.print("[skip] symLink failed ({s}) - symlink guard unverified on this host\n", .{@errorName(e)});
+        return error.SkipZigTest;
+    };
+
+    // 같은 기대 identity(원래 regular 파일의 것)로 다시 요구하면 **거부되어야** 한다.
+    try std.testing.expect(openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        leaf,
+        leaf_identity,
+    ) == null);
+}
+
+// **위 테스트가 "옳은 이유로" 통과하는지 가른다.** 링크로 바꿔치기하면 null 인 것은 맞는데,
+// 그 null 이 "링크를 막아서" 인지 "그 전 단계에서 이미 걸려서" 인지 구분되지 않는다.
+//
+// 그래서 여기서는 **루트 밖 파일의 identity 를 그대로 요구한다.** 링크가 따라가진다면 열린 핸들의
+// identity 가 그 바깥 파일과 같아져 **capability 가 선다** — 그것이 곧 유출이다. 서면 안 된다.
+test "leaf open: 루트 밖 identity 를 요구해도 링크로는 못 연다" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "SECRET" });
+    try tmp.dir.createDir(io, "root", .default_dir);
+
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const native = tmp_buf[0..try tmp.dir.realPath(io, &tmp_buf)];
+    const tmp_root = try path_shape.normalizeSeparators(allocator, native);
+    defer allocator.free(tmp_root);
+    const root = try std.fmt.allocPrint(allocator, "{s}/root", .{tmp_root});
+    defer allocator.free(root);
+    const leaf = try std.fmt.allocPrint(allocator, "{s}/escape.txt", .{root});
+    defer allocator.free(leaf);
+
+    // root/escape.txt -> ../outside.txt
+    tmp.dir.symLink(io, "../outside.txt", "root/escape.txt", .{}) catch |e| {
+        // **SKIP 은 조용한 통과라 위험하다.** 이 기기가 링크를 못 만들면 이 테스트는 아무것도
+        // 검증하지 않는데, 이유가 안 남으면 초록과 구분되지 않는다(Windows 는 개발자 모드나
+        // 관리자 권한이 필요하다). 그래서 왜 건너뛰는지 찍고 나간다.
+        std.debug.print("[skip] symLink failed ({s}) - symlink guard unverified on this host\n", .{@errorName(e)});
+        return error.SkipZigTest;
+    };
+
+    var validated_root = (try validateRootSnapshot(allocator, io, root)) orelse return error.TestUnexpectedResult;
+    defer validated_root.deinit(allocator, io);
+
+    // **루트 밖 파일의 identity** — 링크가 따라가지면 이것과 일치해 capability 가 선다.
+    const outside = try tmp.dir.openFile(io, "outside.txt", .{ .mode = .read_only });
+    defer outside.close(io);
+    const outside_identity = try identityOfFile(io, outside);
+
+    try std.testing.expect(openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        leaf,
+        outside_identity,
+    ) == null);
+
+    // **대조군 — 같은 루트에서 평범한 파일은 정상적으로 선다.** 이게 없으면 위 null 이 "링크를
+    // 막아서" 인지 "이 경로가 애초에 아무것도 못 열어서" 인지 갈리지 않는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/plain.txt", .data = "inside" });
+    const plain = try std.fmt.allocPrint(allocator, "{s}/plain.txt", .{root});
+    defer allocator.free(plain);
+    const opened = try std.Io.Dir.cwd().openFile(io, plain, .{ .follow_symlinks = false });
+    defer opened.close(io);
+    var cap = openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        plain,
+        try identityOfFile(io, opened),
+    ) orelse return error.TestUnexpectedResult;
+    cap.deinit(io);
 }
 
 test "file tree backend rejects mutual directory symlink cycles" {

@@ -1877,6 +1877,26 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
+
+    // **파일 트리 백엔드는 모든 호스트에서 테스트한다**(W8.1, 계약 §2m). 이 파일은
+    // `src/platform/macos/` 에 있지만 macOS 프레임워크를 하나도 안 쓴다 — 순수 Zig + std 이고
+    // 갈리는 것은 리프 열기 한 자리(`openLeafNoFollow`)뿐이다. 그런데 테스트가 `app_session` 모듈에
+    // 실려 있어 **macOS 호스트에서만 돌았다** — Windows 에서 그 갈래를 고쳐도 아무도 안 밟는다.
+    //
+    // 그래서 이 파일만 도는 산출물을 따로 세워 `test` 에 매단다. macOS 에서는 `app_session` 경로와
+    // 중복이지만(같은 테스트가 두 번 돈다) 그 비용이 "Windows 갈래가 검증 없이 남는 것" 보다 싸다.
+    // 파일 위치가 `platform/macos/` 인 것은 이제 이름과 안 맞는다 — 옮기는 것은 소비자가 생기는
+    // W8.2 와 함께 볼 일이다.
+    const file_tree_backend_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/file_tree_backend.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(file_tree_backend_tests).step);
     // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다. 한때
     // 그래서 macOS에서만 걸었지만, W2가 그 자리들을 **호스트 OS 게이트**로 접어(컨트롤 소켓 → "인스턴스 없음",
     // `maru ssh`·`install-cli` → 미지원 안내, `publishBrowserResult` → `error.UnsupportedOnWindows`) 이제 모든

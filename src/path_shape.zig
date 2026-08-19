@@ -290,6 +290,80 @@ pub fn normalizeSeparators(allocator: std.mem.Allocator, path: []const u8) ![]u8
     return normalizeSeparatorsFor(@import("builtin").os.tag, allocator, path);
 }
 
+/// 그 OS 에서 **경로 구분자로 쳐야 하는 바이트들**. 세그먼트를 자를 때 쓴다.
+///
+/// **POSIX 에서 `\` 를 넣으면 안 된다.** 거기서 그것은 **파일 이름에 쓸 수 있는 평범한 글자**라,
+/// 구분자로 자르면 역슬래시가 든 **하나의 디렉터리 이름**이 두 칸으로 갈린다. W1.5 에서
+/// `pathWithin` 에 `\` 를 구분자로 넣었다가 정확히 그 회귀를 냈고, W8.1 에서 `openCanonicalDirectory`
+/// 를 고치다 **또 한 번 되살렸다**(적대적 검증이 잡았다). 그래서 판정을 여기 한 곳에 둔다.
+pub fn separatorsFor(os_tag: std.Target.Os.Tag) []const u8 {
+    return if (os_tag == .windows) "/\\" else "/";
+}
+
+test "separatorsFor: POSIX 는 역슬래시를 구분자로 안 본다" {
+    try testing.expectEqualStrings("/", separatorsFor(.linux));
+    try testing.expectEqualStrings("/", separatorsFor(.macos));
+    try testing.expectEqualStrings("/\\", separatorsFor(.windows));
+
+    // **이 성질이 이 함수의 존재 이유다** — POSIX 에서 역슬래시가 든 이름은 한 칸이다.
+    var posix = std.mem.tokenizeAny(u8, "a\x5Cb/c", separatorsFor(.linux));
+    try testing.expectEqualStrings("a\x5Cb", posix.next().?);
+    try testing.expectEqualStrings("c", posix.next().?);
+    try testing.expect(posix.next() == null);
+
+    // Windows 에서는 두 칸이다.
+    var win = std.mem.tokenizeAny(u8, "a\x5Cb/c", separatorsFor(.windows));
+    try testing.expectEqualStrings("a", win.next().?);
+    try testing.expectEqualStrings("b", win.next().?);
+    try testing.expectEqualStrings("c", win.next().?);
+}
+
+/// 절대경로에서 **파일시스템 루트 접두**의 길이. 그 앞부분이 "여기서부터 한 칸씩 내려간다" 의
+/// 출발점이고, 나머지가 세그먼트다. 못 고르면 `null`(= 절대경로가 아니다).
+///
+/// **`os_tag` 를 인자로 받는다.** 이 판정을 `builtin` 으로 하면 Windows 갈래가 macOS·Linux CI 에서
+/// 한 번도 안 돌아 공허참이 된다 — 이 저장소가 W1.5·W2 에서 두 번 밟은 함정이다.
+///
+/// | 입력 | POSIX | Windows |
+/// |---|---|---|
+/// | `/a/b` | 1 (`/`) | 1 (`/` — 현재 드라이브 기준 루트) |
+/// | `C:/a` | null | 3 (`C:/`) |
+/// | `C:\a` | null | 3 (`C:\`) |
+/// | `C:` | null | null (루트가 아니라 드라이브 상대다) |
+/// | `//srv/share/x` | 1 | 그 share 까지 (UNC 는 통째로 하나의 루트다) |
+///
+/// **Win32 의 장치·확장 네임스페이스(`//./…`·`//?/…`)는 형태상 UNC 와 같아 접두가 나온다.** 그것을
+/// 따로 거르지 않는 이유는 **여는 단계가 이미 거르기** 때문이다 — `//./pipe` 를 디렉터리로 열면
+/// 실패하고 호출자가 null 로 접는다. 여기서 이름을 손으로 알아보려 들면 그 목록이 OS 파서보다
+/// 좁아져 오히려 우회로가 된다(`drivePrefixLen` 이 문자 종류를 안 묻는 것과 같은 이유).
+pub fn rootPrefixLenFor(os_tag: std.Target.Os.Tag, path: []const u8) ?usize {
+    if (path.len == 0) return null;
+    if (os_tag == .windows) {
+        // UNC: `\server\share` 또는 `//server/share` — **share 까지가 루트다.** 그 위로는 못 올라간다.
+        if (path.len >= 2 and isSep(path[0]) and isSep(path[1])) {
+            var i: usize = 2;
+            var seen: usize = 0; // 서버, share 두 조각을 지나야 한다
+            while (i < path.len and seen < 2) {
+                if (i >= path.len or isSep(path[i])) return null; // 빈 조각 — `//` 나 `//srv//`
+                while (i < path.len and !isSep(path[i])) i += 1;
+                seen += 1;
+                if (seen < 2) {
+                    while (i < path.len and isSep(path[i])) i += 1;
+                }
+            }
+            return if (seen == 2) i else null;
+        }
+        // 드라이브: `C:/` 또는 `C:\`. `C:` 만 있으면 **드라이브 상대**라 루트가 아니다.
+        // 드라이브 판정은 `drivePrefixLen` 이 단일 출처다 — 문자 종류를 묻지 않는 이유가 그 doc 에 있고,
+        // 여기서 다시 좁게 적으면 그 차이가 그대로 우회로가 된다.
+        if (drivePrefixLen(path)) |d| {
+            if (path.len > d and isSep(path[d])) return d + 1;
+            return null;
+        }
+    }
+    if (isSep(path[0])) return 1;
+    return null;
+}
 /// `normalizeSeparatorsFor`의 **역** — 중립 레이어의 `/` 경로를 OS 경계에서 native(`\`)로 되돌린다.
 ///
 /// **한때 이 변환은 필요 없다고 적혀 있었다**(docs/windows-platform.md §5). 근거는 Win32 파일 API가 `/`를
@@ -804,4 +878,50 @@ test "relativeUnderRoot: 구분자가 둘인 루트에서도 결과가 상대 �
     // 루트가 구분자뿐이어도 상대 경로는 루트 밖이다.
     try testing.expect(relativeUnderRoot("a", "/") == null);
     try testing.expect(relativeUnderRoot("a", "//") == null);
+}
+
+test "rootPrefixLenFor: 두 OS 갈래가 모든 타깃에서 돈다" {
+    const w = std.Target.Os.Tag.windows;
+    const p = std.Target.Os.Tag.linux;
+
+    // POSIX 루트는 어느 갈래에서나 한 글자다.
+    try testing.expectEqual(@as(?usize, 1), rootPrefixLenFor(p, "/a/b"));
+    try testing.expectEqual(@as(?usize, 1), rootPrefixLenFor(w, "/a/b"));
+
+    // 드라이브 루트는 Windows 에서만.
+    try testing.expectEqual(@as(?usize, 3), rootPrefixLenFor(w, "C:/a"));
+    try testing.expectEqual(@as(?usize, 3), rootPrefixLenFor(w, "C:\x5Ca"));
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(p, "C:/a"));
+
+    // `C:` 만은 **드라이브 상대**라 루트가 아니다 — 여기서 1 을 내면 그 아래를 훑는 쪽이
+    // 현재 디렉터리 기준으로 풀려 엉뚱한 자리를 연다.
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(w, "C:"));
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(w, "C:x"));
+
+    // UNC 는 **share 까지가 통째로 루트**다 — 그 위로 못 올라간다.
+    try testing.expectEqual(@as(?usize, "//srv/share".len), rootPrefixLenFor(w, "//srv/share/x"));
+    try testing.expectEqual(@as(?usize, 11), rootPrefixLenFor(w, "\x5C\x5Csrv\x5Cshare\x5Cx"));
+    try testing.expectEqual(@as(?usize, "//srv/share".len), rootPrefixLenFor(w, "//srv/share"));
+    // 조각이 모자라거나 비면 루트가 아니다.
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(w, "//srv"));
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(w, "//"));
+
+    // 상대경로·빈 입력.
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(w, "a/b"));
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(p, ""));
+
+    // **드라이브 문자를 알파벳으로 제한하지 않는다** — `drivePrefixLen` 의 근거를 그대로 잇는다.
+    // 가드가 OS 파서보다 좁으면 그 차이가 우회로가 된다.
+    try testing.expectEqual(@as(?usize, 3), rootPrefixLenFor(w, "1:/x"));
+}
+
+test "rootPrefixLenFor: 멀티바이트 드라이브 문자도 루트로 본다" {
+    // `drivePrefixLen` 의 doc 이 세운 규칙 — Win32 는 드라이브 문자를 A–Z 로 제한하지 않고
+    // `SetVolumeMountPointW` 로 비알파벳 드라이브를 만들 수 있다. **가드가 OS 파서보다 좁으면
+    // 그 차이가 그대로 우회로가 된다.** 여기서도 같은 규칙을 지키는지 못 박는다.
+    try testing.expectEqual(@as(?usize, 3), rootPrefixLenFor(.windows, "1:/x"));
+    // 멀티바이트 첫 코드포인트 — `λ` 는 UTF-8 2바이트라 접두가 4다.
+    try testing.expectEqual(@as(?usize, 4), rootPrefixLenFor(.windows, "\u{03BB}:/x"));
+    // 그 갈래도 구분자가 없으면 루트가 아니다(드라이브 상대).
+    try testing.expectEqual(@as(?usize, null), rootPrefixLenFor(.windows, "\u{03BB}:x"));
 }

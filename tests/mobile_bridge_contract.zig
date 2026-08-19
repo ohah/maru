@@ -2926,8 +2926,21 @@ test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
 
 // 같은 규칙이 설정 목록에도 있어야 한다 — 여기서는 **누른 적 없는 설정이 바뀐다**. 키바보다
 // 나쁘다: 터미널로 간 화살표는 대개 지나가지만, 뒤집힌 토글은 파일에 남는다.
+/// 화면에 보이는 **토글 줄**의 y. 없으면 null.
+///
+/// **줄 목록은 스키마에서 나온다** — 설정이 늘면 순서가 밀리고 "맨 위에 토글이 있다" 는 가정은
+/// 그때 조용히 깨진다(색 줄이 생기자 실제로 깨졌다). 가정 대신 찾고, 못 찾으면 실패한다.
+fn findToggleY(win_h: u32) ?f32 {
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(win_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind == .toggle) return y;
+    }
+    return null;
+}
+
 test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐다" {
-    const small_h: u32 = 300; // 목록이 확실히 넘친다
+    const small_h: u32 = 560; // 토글 줄까지 보이되 목록은 여전히 넘친다(내용 ~700)
     // **앞 테스트가 설정 화면을 열어 둔 채 끝났을 수 있다**(편집 중이면 pop 한 번은 편집만
     // 거둔다). 열린 채로 톱니를 누르면 여는 것이 아니라 설정 안을 누른 것이 되고, 그러면
     // 스크롤이 앞 테스트 자리에 남아 이 테스트가 아무것도 안 재게 된다.
@@ -2956,15 +2969,7 @@ test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐
     try std.testing.expect(a != b); // 정말 흐르고 있다
 
     // 흐르는 중에 토글 줄을 짚었다 뗀다.
-    var toggle_y: ?f32 = null;
-    var y: f32 = 0;
-    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
-        const idx = bridge.settingsRowAt(200, y) orelse continue;
-        if (bridge.settingsRows()[idx].kind != .toggle) continue;
-        toggle_y = y;
-        break;
-    }
-    const ty = toggle_y orelse return error.TestUnexpectedResult;
+    const ty = findToggleY(small_h) orelse return error.TestUnexpectedResult;
     // **값이 바뀌었는지는 저장 요청으로 본다** — 토글이 뒤집히면 host 가 가져갈 쓰기가 선다.
     var drain: [1 << 16]u8 = undefined;
     _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
@@ -3169,7 +3174,7 @@ test "키바: 둘째 손가락이 첫 손가락의 탭 판정을 오염시키지
 }
 
 test "설정 목록: 둘째 손가락이 값을 바꾸지 않는다" {
-    const small_h: u32 = 300;
+    const small_h: u32 = 560; // 토글 줄까지 보이되 목록은 여전히 넘친다(내용 ~700)
     var pops: u32 = 0;
     while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
     openSettings(402, small_h);
@@ -3180,17 +3185,7 @@ test "설정 목록: 둘째 손가락이 값을 바꾸지 않는다" {
     bridge.maru_mobile_pointer(0, 11, 200, 250, now());
     bridge.maru_mobile_pointer(1, 11, 200, 200, now());
     // **둘째 손가락이 토글 줄을 짚었다 뗀다** — 소유자가 아니므로 아무 일도 없어야 한다.
-    var ty: f32 = 0;
-    var found = false;
-    var y: f32 = 0;
-    while (y < @as(f32, @floatFromInt(small_h))) : (y += 4) {
-        const idx = bridge.settingsRowAt(200, y) orelse continue;
-        if (bridge.settingsRows()[idx].kind != .toggle) continue;
-        ty = y;
-        found = true;
-        break;
-    }
-    try std.testing.expect(found);
+    const ty = findToggleY(small_h) orelse return error.TestUnexpectedResult;
     bridge.maru_mobile_pointer(0, 22, 200, ty, now());
     bridge.maru_mobile_pointer(2, 22, 200, ty, now());
     _ = bridge.maru_mobile_build(402, small_h, now());
@@ -3605,4 +3600,161 @@ test "코어가 서기 전에 온 원격 출력도 안 잃는다" {
     try std.testing.expectEqual(before + 5, after);
     // 코어가 있으면 곧바로 들어가므로 오류가 없다.
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+// ── 문자열 줄 편집(S9b-1) ───────────────────────────────────────────────────
+
+/// 문자열(색) 줄의 y 를 찾는다.
+fn findTextRowY(win_h: u32) ?f32 {
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(win_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind == .text) return y;
+    }
+    return null;
+}
+
+test "문자열 줄을 짚으면 그 줄이 입력 대상이 된다" {
+    // **"눌러도 아무 일이 안 나는 줄" 이 없어야 한다** — 색 줄이 그동안 안 나온 이유가 그것이고,
+    // 편집 수단이 생겼으니 이제 나온다.
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    // 친 글자가 터미널이 아니라 그 줄로 간다.
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("#abc", 4);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    _ = bridge.maru_mobile_pop_screen(); // 편집 취소
+}
+
+test "한 글자씩 지운다 — 한 바이트가 아니다" {
+    // UTF-8 은 글자마다 길이가 다르다. 바이트로 지우면 한글이 **반쪽 바이트**로 남아 화면이
+    // 깨지고, 그 조각이 파일에도 그대로 실린다.
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+
+    _ = bridge.maru_mobile_input("가나", 6); // 3바이트 글자 둘
+    try std.testing.expectEqual(@as(usize, 6), bridge.settingsEditLen());
+    // **키 id 4 가 백스페이스다**(1 은 엔터 — 처음에 그것을 눌러 놓고 "지워졌다" 고 읽었다.
+    // 엔터는 편집을 끝내므로 길이가 0 이 되어 **틀린 이유로 통과**했다).
+    _ = bridge.maru_mobile_key(4, 0, 0);
+    try std.testing.expectEqual(@as(usize, 3), bridge.settingsEditLen()); // 한 글자만 지운다
+    _ = bridge.maru_mobile_key(4, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), bridge.settingsEditLen());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "못 쓰는 색은 안 들어간다" {
+    // 색이 깨지면 화면이 통째로 안 보이게 될 수 있고, 그 값이 파일에 실리면 다음 실행에서도
+    // 그대로다 — **확정에서 막는다.**
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len); // 밀린 쓰기를 비운다
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("빨강\n", 8); // 색이 아닌 값 + 확정
+    try std.testing.expectEqualStrings("settings_color_parse", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    // **파일에 나갈 것이 없어야 한다** — 값이 안 바뀌었으므로.
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
+}
+
+test "쓸 수 있는 색은 값이 되고 파일로 나간다" {
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    const idx = bridge.settingsRowAt(200, ty).?;
+    const key = bridge.settingsRows()[idx].key;
+
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("#ff0000\n", 8);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // **파일에 그 키와 값이 실린다** — 화면만 바뀌고 파일이 안 바뀌면 다음 실행에 되돌아간다.
+    const n = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    try std.testing.expect(n > 0);
+    const text = drain[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, text, key) != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "#ff0000") != null);
+}
+
+test "색 줄에는 글자 키보드가 뜬다 — 그리고 터미널과는 다른 값이다" {
+    // **숫자 패드로는 `#` 도 `a~f` 도 못 친다** — 그 줄에서 아무것도 못 넣게 된다(기기에서
+    // 그 상태로 막혔다). 숫자 줄은 그대로 숫자 패드다.
+    //
+    // 배열이 같다고 **값까지 터미널과 같으면 안 된다**: host 는 이 값으로 "설정 칸을 편집 중"
+    // 을 보고 하드웨어 키보드의 글자를 어디로 보낼지 고른다. 0 으로 뭉치면 그 글자가 조용히
+    // 사라진다(블루투스 키보드로 색을 못 쳤다).
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_input_kind()); // 글자 칸
+    _ = bridge.maru_mobile_pop_screen();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 편집이 끝나면 터미널
+
+    // 숫자 줄을 찾아 같은 것을 확인한다.
+    var y: f32 = 0;
+    var num_y: ?f32 = null;
+    while (y < @as(f32, @floatFromInt(h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind == .number) {
+            num_y = y;
+            break;
+        }
+    }
+    const ny = num_y orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ny, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ny, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_input_kind()); // 숫자
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "엔터 키로도 문자열 줄이 확정된다" {
+    // 소프트 키보드의 엔터는 글자가 아니라 **키**로 온다(`maru_mobile_key`). 그 경로가 숫자
+    // 확정을 부르면 문자열 줄에서는 값이 안 들어가고 오류 이름만 남는다 — 사용자에게는
+    // "엔터를 눌러도 아무 일이 안 나는" 상태다.
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_input("#00ff00", 7); // 개행 없이 친다
+    _ = bridge.maru_mobile_key(1, 0, 0); // 엔터 키
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    const n = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.indexOf(u8, drain[0..n], "#00ff00") != null);
 }

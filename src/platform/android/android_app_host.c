@@ -1306,20 +1306,36 @@ Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jin
             // 주지 않으므로(그건 글자가 아니다) 이 자리가 없으면 **조용히 사라진다** — 블루투스
             // 키보드를 붙인 태블릿·크롬북에서 Ctrl+C 로 프로세스를 못 멈췄다. iOS 는 같은 키를
             // `charactersIgnoringModifiers` 로 태우고 있었다(대칭이 빠져 있었다).
-            // **숫자 칸을 편집 중이면 맨 글자도 받는다.** 소프트 키보드는 숫자를 `commitText`
+            // **설정 칸을 편집 중이면 맨 글자도 받는다.** 소프트 키보드는 글자를 `commitText`
             // 로 주지만 하드웨어 키보드는 키 이벤트로 준다 — 그 자리에서 버리면 블루투스
             // 키보드로는 설정값을 못 친다(에뮬레이터의 `input text` 도 같은 경로다).
+            // **숫자 칸만 보면 안 된다**(kind==1): 색 같은 글자 칸(kind==2)도 같은 목적지다.
             if (unicode > 0 && !(mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD))) {
                 pthread_mutex_lock(&g_bridge_lock);
                 unsigned int kind = maru_mobile_input_kind();
-                if (kind == 1) {
-                    char one[4];
+                if (kind != 0) {
+                    // **UTF-8 로 적는다** — ASCII 만 넣으면 글자 칸에서 한글·기호가 사라진다.
+                    unsigned char utf8[4];
+                    unsigned int c = (unsigned int)unicode;
                     int n = 0;
-                    if (unicode < 0x80) { one[n++] = (char)unicode; }
-                    if (n) maru_mobile_input((const unsigned char *)one, (unsigned long)n);
+                    if (c < 0x80) { utf8[n++] = (unsigned char)c; }
+                    else if (c < 0x800) {
+                        utf8[n++] = (unsigned char)(0xC0 | (c >> 6));
+                        utf8[n++] = (unsigned char)(0x80 | (c & 0x3F));
+                    } else if (c < 0x10000) {
+                        utf8[n++] = (unsigned char)(0xE0 | (c >> 12));
+                        utf8[n++] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+                        utf8[n++] = (unsigned char)(0x80 | (c & 0x3F));
+                    } else if (c <= 0x10FFFF) {
+                        utf8[n++] = (unsigned char)(0xF0 | (c >> 18));
+                        utf8[n++] = (unsigned char)(0x80 | ((c >> 12) & 0x3F));
+                        utf8[n++] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+                        utf8[n++] = (unsigned char)(0x80 | (c & 0x3F));
+                    }
+                    if (n) maru_mobile_input(utf8, (unsigned long)n);
                 }
                 pthread_mutex_unlock(&g_bridge_lock);
-                if (kind == 1) return;
+                if (kind != 0) return;
             }
             if ((mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD)) && unicode > 0) {
                 pthread_mutex_lock(&g_bridge_lock);

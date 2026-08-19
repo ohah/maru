@@ -150,7 +150,7 @@ test "없는 키·틀린 값은 기본값을 지킨다" {
 // `.terminal`) 모바일 화면은 사용자가 찾는 주제로 묶는다 — 부분집합이 아니라 다른 체계다
 // (계약 §3). 그래서 namespace → 헤더를 여기서 정한다.
 
-pub const Kind = enum { toggle, choice, number };
+pub const Kind = enum { toggle, choice, number, text };
 
 /// "고른 프리셋이 없다" — 색이 어느 프리셋과도 안 맞는 상태(개별 색을 손댔거나 기본값 그대로).
 /// 화면은 이 값을 **빈 자리**로 그린다. 아무 이름이나 적으면 고르지도 않은 것을 고른 것처럼 보인다.
@@ -219,7 +219,17 @@ pub const rows: []const Row = blk: {
                     for (@typeInfo(FieldT).@"enum".fields) |ef| items = items ++ [_][]const u8{dashed(ef.name)};
                     break :e Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .choice, .items = items, .section = sectionOf(cf.name) };
                 },
-                else => null, // []const u8(색·문자열) — 편집 수단이 없다
+                // **문자열(색)은 이제 낸다 — 편집 수단이 생겼다.** 이 줄들이 안 나오던 이유는
+                // "눌러도 아무 일이 안 나는 줄을 만들지 않는다" 였고, 텍스트 입력이 생기면서
+                // 그 이유가 사라졌다(계약 §3.0 — 입력 목적지를 가르는 그 자리를 쓴다).
+                //
+                // **팔레트 16색은 아직 안 낸다.** 그것까지 내면 목록이 색으로 뒤덮여 나머지
+                // 설정을 못 찾는다 — 색 고르개가 생기는 슬라이스에서 함께 낸다.
+                .pointer => |ptr| if (ptr.child == u8 and !std.mem.startsWith(u8, key, "theme.palette"))
+                    Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .text, .section = sectionOf(cf.name) }
+                else
+                    null,
+                else => null,
             };
             if (row) |r| list = list ++ [_]Row{r};
         }
@@ -227,15 +237,16 @@ pub const rows: []const Row = blk: {
     break :blk list;
 };
 
-test "줄은 스키마에서 나오고, 편집 수단이 없는 것은 안 나온다" {
+test "줄은 스키마에서 나오고, 문자열 줄도 이제 나온다" {
     try std.testing.expect(rows.len >= 6);
     var saw_toggle = false;
     var saw_choice = false;
     var saw_number = false;
+    var saw_text = false;
     for (rows) |r| {
-        // 색은 안 나온다 — 눌러도 아무 일이 안 나는 줄을 만들지 않는다.
-        try std.testing.expect(!std.mem.eql(u8, r.key, "theme.background"));
         try std.testing.expect(r.label.len > 0);
+        // **팔레트는 아직 안 나온다** — 목록이 색으로 뒤덮이면 나머지를 못 찾는다.
+        try std.testing.expect(!std.mem.startsWith(u8, r.key, "theme.palette"));
         switch (r.kind) {
             .toggle => saw_toggle = true,
             .choice => {
@@ -243,9 +254,19 @@ test "줄은 스키마에서 나오고, 편집 수단이 없는 것은 안 나�
                 try std.testing.expect(r.items.len > 0);
             },
             .number => saw_number = true,
+            .text => saw_text = true,
         }
     }
     try std.testing.expect(saw_toggle and saw_choice and saw_number);
+    // 배경색은 문자열 줄로 나온다 — 편집 수단이 생겼기 때문이다.
+    var saw_background = false;
+    for (rows) |r| {
+        if (std.mem.eql(u8, r.key, "theme.background")) {
+            saw_background = true;
+            try std.testing.expectEqual(Kind.text, r.kind);
+        }
+    }
+    try std.testing.expect(saw_text and saw_background);
 }
 
 // ── 값 읽기·쓰기 (화면이 쓴다) ────────────────────────────────────────────────
@@ -332,7 +353,38 @@ pub fn textOf(row: Row, v: i64, buf: []u8) []const u8 {
         .toggle => if (v != 0) "true" else "false",
         .choice => if (v >= 0 and v < row.items.len) row.items[@intCast(v)] else row.items[0],
         .number => std.fmt.bufPrint(buf, "{d}", .{v}) catch "0",
+        // **문자열 줄은 숫자로 표현되지 않는다.** 값은 편집기가 들고 있고 그대로 파일에 간다 —
+        // 이 함수를 부르는 쪽이 그것을 알아야 해서 빈 값을 준다(그 값이 파일에 실리면 키가
+        // 지워진 것과 같으므로, 호출자는 `textOf` 대신 친 문자열을 넘긴다).
+        .text => "",
     };
+}
+
+/// 문자열 줄의 지금 값. **화면이 자기 상태를 들지 않는다** — 값은 config 에서만 읽는다.
+pub fn textValueOf(c: Config, key: []const u8) []const u8 {
+    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                const meta: theme.Meta = comptime @field(sch, sf.name);
+                const seg = comptime (meta.key_seg orelse dashed(sf.name));
+                const full = comptime (if (meta.key) |k| k else cf.name ++ "." ++ seg);
+                const FieldT = @TypeOf(@field(@field(c, cf.name), sf.name));
+                if (@typeInfo(FieldT) == .pointer and @typeInfo(FieldT).pointer.child == u8) {
+                    if (std.mem.eql(u8, full, key)) return @field(@field(c, cf.name), sf.name);
+                }
+            }
+        }
+    }
+    return "";
+}
+
+test "문자열 값은 config 에서 읽는다" {
+    const c: Config = .{};
+    // 모바일 기본 배경(§4.5 — 기기가 다르면 기본값도 다르다).
+    try std.testing.expectEqualStrings("#1e1e2e", textValueOf(c, "theme.background"));
+    try std.testing.expectEqualStrings("", textValueOf(c, "없는.키"));
 }
 
 test "값을 읽고 쓰는 것이 같은 키로 돈다" {

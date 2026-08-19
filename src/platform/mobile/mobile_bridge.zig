@@ -265,7 +265,13 @@ pub fn settingsFieldCount() usize {
 /// 숫자 칸이면 숫자 패드). 브리지가 정하는 이유는 "무엇을 누르고 있나" 를 아는 쪽이 여기이기
 /// 때문이다 — host 가 화면 상태를 다시 추측하면 갈린다(§3 "판단은 코어가 한다").
 pub export fn maru_mobile_input_kind() u32 {
-    return if (set_edit != null) 1 else 0; // 0=글자(터미널) · 1=숫자
+    // **줄의 종류를 봐야 한다 — "편집 중인가" 가 아니다.** 색 줄에 숫자 패드를 띄우면 `#` 도
+    // `a~f` 도 못 쳐서 **아무것도 못 넣는다**(기기에서 그 상태로 막혔다).
+    //
+    // 그리고 **"안 하는 중" 과 "글자 칸" 은 다른 값이어야 한다** — 같은 0 으로 말하면 host 가
+    // 하드웨어 키보드로 친 글자를 어디로 보낼지 못 고른다(터미널 vs 설정 칸).
+    const i = set_edit orelse return 0; // 0=글자(터미널) · 1=숫자 칸 · 2=글자 칸
+    return if (set_items[i].field.kind == .number) 1 else 2;
 }
 
 /// **키보드를 올려 달라는 요청.** 한 번 가져가면 사라진다(복사와 같은 규율).
@@ -322,12 +328,88 @@ fn commitNumberEdit() void {
     settingChanged(row, v);
 }
 
+/// 문자열 줄에 친 글자를 담는다. **확정 전에는 config 를 안 건드린다**(숫자 줄과 같은 이유 —
+/// 중간 값이 그대로 적용되면 화면이 치는 동안 요동친다).
+fn editTextInput(bytes: []const u8) void {
+    for (bytes) |c| {
+        if (c == '\n' or c == '\r') { // 확정
+            commitTextEdit();
+            return;
+        }
+        if (set_edit_len == set_edit_buf.len) {
+            setLastError("settings_text_overflow");
+            return;
+        }
+        set_edit_buf[set_edit_len] = c;
+        set_edit_len += 1;
+    }
+}
+
+/// **한 글자를 지운다 — 한 바이트가 아니다.** UTF-8 은 글자마다 길이가 다르므로 바이트로
+/// 지우면 한글이 반쪽 바이트로 남아 화면이 깨진다(그 조각은 파일에도 그대로 실린다).
+fn editBackspace() void {
+    if (set_edit_len == 0) return;
+    var n = set_edit_len - 1;
+    while (n > 0 and (set_edit_buf[n] & 0xC0) == 0x80) n -= 1; // 이어지는 바이트를 건너뛴다
+    set_edit_len = n;
+}
+
+/// 문자열 편집을 확정한다. **못 쓰는 값이면 안 넣는다** — 색이 깨지면 화면이 통째로 안 보이게
+/// 될 수 있고, 그 상태로 파일에 실리면 다음 실행에서도 그대로다.
+fn commitTextEdit() void {
+    const i = set_edit orelse return;
+    defer {
+        set_edit = null;
+        set_edit_len = 0;
+    }
+    if (set_edit_len == 0) return; // 아무것도 안 치고 확정 — 값을 안 바꾼다
+    const row = set_items[i].field;
+    const text = set_edit_buf[0..set_edit_len];
+    if (std.mem.startsWith(u8, row.key, "theme.") or std.mem.startsWith(u8, row.key, "cursor.")) {
+        if (color.parseHex(text) == null) {
+            setLastError("settings_color_parse");
+            return;
+        }
+    }
+    settingChangedText(row, text);
+}
+
+/// 문자열 값을 config 에 넣고 파일에 실을 준비를 한다(숫자 쪽 `settingChanged` 와 같은 순서).
+fn settingChangedText(row: mobile_config.Row, text: []const u8) void {
+    const next = mobile_config.withKey(term_allocator, cfg_source, row.key, text) catch {
+        setLastError("config_write_build");
+        return;
+    };
+    if (cfg_source.len > 0) term_allocator.free(cfg_source);
+    cfg_source = next;
+    // **파일이 곧 값이다** — 새 본문을 다시 파싱해 화면·코어가 같은 것을 본다(§1: 화면이
+    // 자기 상태를 들면 파일과 갈린다).
+    const parsed = mobile_config.parse(term_allocator, cfg_source) catch {
+        setLastError("config_parse");
+        return;
+    };
+    if (cfg_parsed) |*old_parsed| old_parsed.deinit();
+    cfg_parsed = parsed;
+    if (term_core) |*core| applyConfigToCore(core);
+    if (cfg_write.len > 0) term_allocator.free(cfg_write);
+    cfg_write = term_allocator.dupe(u8, cfg_source) catch blk: {
+        setLastError("config_write_alloc");
+        break :blk &.{};
+    };
+}
+
 /// 지금 편집 중인 설정 줄(그 줄에 숫자를 친다). null 이면 편집 중이 아니다.
 var set_edit: ?usize = null;
 /// 편집 중인 값의 자릿수 버퍼. **확정 전에는 config 를 안 건드린다** — 중간 값(예: "5")이
 /// 그대로 적용되면 스크롤백이 5줄로 줄었다가 돌아오는 것이 화면에 보인다.
-var set_edit_buf: [12]u8 = undefined;
+var set_edit_buf: [64]u8 = undefined;
 var set_edit_len: usize = 0;
+
+/// 지금 편집 중인 값의 길이(테스트·진단용). **한 글자 지우기가 바이트 단위인지 글자 단위인지**를
+/// 밖에서 재려면 이 값이 필요하다.
+pub fn settingsEditLen() usize {
+    return set_edit_len;
+}
 
 /// 팝업이 한 번에 그릴 수 있는 항목 수(테스트·진단용).
 /// 지금 고른 프리셋의 색인(테스트·진단용). 어느 것과도 안 맞으면 `presetNone()`.
@@ -522,8 +604,8 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 친 숫자가 거기로 간다 — 그전에는 키보드가 떠 있는데 글자를 버리고 있었다("키보드는 있는데
     // 아무것도 안 써지는" 상태). 받을 곳이 없을 때만 버리고, 그때는 **신호를 남긴다**(§5).
     if (screenTop() != .terminal) {
-        if (set_edit != null) {
-            editNumberInput(ptr[0..len]);
+        if (set_edit) |i| {
+            if (set_items[i].field.kind == .text) editTextInput(ptr[0..len]) else editNumberInput(ptr[0..len]);
             return @intCast(delivered_len);
         }
         setLastError("input_screen_pushed");
@@ -701,14 +783,20 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     if (screenTop() != .terminal) {
         // **편집 중이면 지우기·확정은 그 칸의 것이다.** 그전에는 통째로 버려서 숫자 칸에서
         // 백스페이스가 아무 일도 안 했다 — 오타를 낸 사용자가 고칠 방법이 없었다.
-        if (set_edit != null) {
+        if (set_edit) |edit_i| {
+            const is_text = set_items[edit_i].field.kind == .text;
             switch (key_id) {
                 4 => { // BACKSPACE
-                    if (set_edit_len > 0) set_edit_len -= 1;
+                    // **글자 단위로 지운다.** 숫자 줄은 한 바이트가 곧 한 글자라 결과가 같지만,
+                    // 문자열 줄에서 바이트로 지우면 한글이 반쪽으로 남아 화면과 파일이 깨진다.
+                    editBackspace();
                     return @intCast(delivered_len);
                 },
                 1 => { // ENTER
-                    commitNumberEdit();
+                    // **줄 종류에 맞는 확정을 부른다.** 문자열 줄에 숫자 확정을 부르면 값이
+                    // 안 들어가고 `settings_number_parse` 만 남는다 — 사용자에게는 "엔터를
+                    // 눌러도 아무 일이 안 나는" 상태다.
+                    if (is_text) commitTextEdit() else commitNumberEdit();
                     return @intCast(delivered_len);
                 },
                 2 => { // ESCAPE = 취소
@@ -3175,6 +3263,19 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                         const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
                         pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(role));
                     },
+                    .text => {
+                        // 편집 중이면 치는 값을, 아니면 지금 값을 보인다. 캐럿(▏)으로 그 줄이
+                        // 입력 대상임을 알린다(숫자 줄과 같은 규칙 — 두 줄이 다르게 굴면
+                        // 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다).
+                        const editing = set_edit != null and set_edit.? == i;
+                        var buf: [80]u8 = undefined;
+                        const t = if (editing)
+                            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+                        else
+                            mobile_config.textValueOf(cfg(), row.key);
+                        const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
+                        pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(role));
+                    },
                     .choice => {
                         // **고른 것이 없으면 이름을 안 적는다**(§프리셋 되짚기). 아무거나 적으면
                         // 고르지도 않은 값을 고른 것처럼 보인다.
@@ -3467,7 +3568,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     set_open = i;
                     set_pop_sa.reset(); // 열 때마다 처음부터 — 지난번 자리가 남으면 엉뚱한 데서 뜬다
                 },
-                .number => {
+                .number, .text => {
                     // **그 줄을 입력 대상으로 삼는다.** 소프트 키보드는 이미 떠 있고(설정을
                     // 열어도 안 내린다, §5.2) 지금까지 그 글자를 버리고 있었다 — 사용자에게는
                     // "키보드는 있는데 아무것도 안 써지는" 상태였다.

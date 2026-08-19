@@ -56619,6 +56619,44 @@ test "소스 컨트롤: 원격이 없으면 fetch를 걸지 않고 이유를 적
     try std.testing.expect(session.scm_write_error == null);
 }
 
+test "소스 컨트롤: 아직 안 보낸 것이 있으면 점을 켠다(`@{u}` 기준) — 기본 브랜치 숫자와 다른 사실이다" {
+    // §3.5는 "`@{u}`는 별도로 push 됐는지를 보여 주는 데만 쓴다"고 정해 뒀는데 그 값이 아무 데도 안 쓰이고
+    // 있었다. 개수가 아니라 **점 하나**인 이유는 위 `↑`/`↓`가 기본 브랜치 기준이기 때문이다(2026-08-19 결정).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    git_ops.rememberGitRepo(session, "/repo");
+
+    // `@{u}` 기준으로 둘 앞섰다 = 아직 안 보낸 것이 있다. 기본 브랜치 기준으로는 차이가 없다(0 0).
+    if (session.git_result) |*old_result| old_result.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +2 -0\n"),
+        .ahead_behind = try git_backend_mod.worker_allocator.dupe(u8, "0\t0\n"),
+        .ok = true,
+    };
+    const unpushed = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expect(unpushed.unpushed);
+    try std.testing.expectEqual(@as(u32, 0), unpushed.ahead); // 기준이 다른 값이 서로를 안 덮는다
+
+    // 다 보냈으면 점도 없다.
+    git_backend_mod.worker_allocator.free(session.git_result.?.status);
+    session.git_result.?.status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +0 -0\n");
+    const clean = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expect(!clean.unpushed);
+
+    // **upstream이 없으면 켜지 않는다** — 보낼 곳이 없는 것과 "안 보냈다"는 다른 사실이다.
+    git_backend_mod.worker_allocator.free(session.git_result.?.status);
+    session.git_result.?.status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head feat/x\n");
+    const no_upstream = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expect(!no_upstream.unpushed);
+}
+
 test "소스 컨트롤: ahead/behind 기준은 기본 브랜치이고, 없으면 `@{u}`로 돌아간다 (§3.5)" {
     // PR 브랜치의 `@{u}`는 보통 `origin/<자기 브랜치>`라 `# branch.ab`가 늘 `+0 -0`이다(실측 2026-08-18:
     // 같은 브랜치가 `origin/HEAD` 기준으로는 `0 1`이었다). 그 값을 그리면 화면이 "차이 없음"이라고

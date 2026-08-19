@@ -5127,7 +5127,14 @@ test "[측정] 조각 시작을 함께 내는 비용 — 렌더 루프에 걸음
         const frames: usize = 30;
         for (0..frames) |_| {
             const t0 = monotonicMsForTest();
-            _ = appendPaneFrame(fx.session, leaf, term);
+            // **draw list를 풀어야 한다.** `appendPaneFrame`은 프레임마다 새 리스트를 만들어 주고
+            // 소유를 호출자에게 넘긴다 — `_ =`로 버리면 그 할당이 그대로 샌다. 30프레임 × 2회면
+            // 60번 새는 것이고, 러너는 그것을 **error 로그**로 보고해 테스트가 다 통과해도 종료
+            // 코드를 1로 만든다(CI가 정확히 그렇게 실패했다).
+            if (appendPaneFrame(fx.session, leaf, term)) |drawn| {
+                var d = drawn;
+                d.dl.deinit(allocator);
+            }
             const dt = monotonicMsForTest() - t0;
             total += dt;
             if (dt > slowest) slowest = dt;

@@ -124,13 +124,15 @@ def main() -> int:
             print(output.strip()[-2000:], file=sys.stderr)
             return 1
 
-        INVENTORY.write_text(
-            entry_pattern(path).sub(
-                lambda m: m["head"] + m["count"] + m["mid"] + want_digest, source, count=1
-            ),
-            encoding="utf-8",
-            newline="\n",  # 줄 끝 번역을 끈다 — 안 끄면 한 해시 바꾸려다 원장 전체가 CRLF 가 된다
-        )
+        # 줄 끝 번역을 끈다 — 안 끄면 한 해시 바꾸려다 원장 전체가 CRLF 가 된다.
+        # `Path.write_text(newline=...)` 는 **3.10+** 라 3.9 에서 TypeError 로 죽는다(이 저장소의
+        # 개발기 python 이 3.9.6 이었다). `open(newline=...)` 은 옛날부터 있어 어느 쪽에서도 돈다.
+        with INVENTORY.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(
+                entry_pattern(path).sub(
+                    lambda m: m["head"] + m["count"] + m["mid"] + want_digest, source, count=1
+                )
+            )
         updated.append((path, have_digest, want_digest))
     else:
         print(f"{MAX_ROUNDS}회 갱신해도 수렴하지 않았다 — 손으로 확인하라.", file=sys.stderr)

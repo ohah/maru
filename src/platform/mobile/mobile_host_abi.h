@@ -484,6 +484,12 @@ void maru_mobile_ssh_clear_error(unsigned int handle);
 int maru_mobile_ssh_generate_key(const unsigned char *entropy, unsigned char *out_secret,
                                  unsigned char *out_line, unsigned int line_cap);
 
+/// **이미 있는 키의 한 줄**을 만든다(`seed ‖ public` 64바이트 → `ssh-ed25519 <base64> maru`).
+/// 만들 때만 한 줄을 내주면 **다시 켠 기기에서는 그 줄을 영영 못 본다** — 그때는 만드는 일이
+/// 안 일어나기 때문이다(Keystore 복원·파일 읽기). 실패 이유는 `maru_mobile_ssh_last_load_error`.
+int maru_mobile_ssh_public_key_line(const unsigned char *secret, unsigned char *out_line,
+                                    unsigned int line_cap);
+
 /// 개인키 파일 내용(PEM 텍스트)에서 `seed(32) ‖ public(32)` 를 만든다. **파일은 host 가 읽는다** —
 /// 이 층은 OS 를 모른다. 나온 64바이트를 `open` 에 넘긴 뒤 host 는 **자기 사본을 지운다**.
 /// 암호 걸린 키면 `passphrase` 를 준다(없으면 길이 0). 실패하면 `MARU_SSH_ERR_BAD_ARG` 이고
@@ -535,6 +541,15 @@ unsigned int maru_mobile_server_port(unsigned int index);
 /// 첫 config 를 읽을 때 온전한 첫 서버를 **한 번만** 자동으로 요청한다(임시 — S9b-2b 가 그
 /// 자리를 화면 탭으로 바꾼다). 매번 요청하면 배경에서 돌아올 때마다 다시 붙는다.
 unsigned int maru_mobile_take_server_connect(void);
+
+/// **이 기기의 공개키 한 줄**을 알린다(`ssh-ed25519 <base64> maru`). 키는 host 가 들고
+/// (Keystore·앱 전용 파일) 브리지는 화면에 보여 주고 클립보드로 넘기는 일만 한다.
+///
+/// **접속 전에 알려야 한다** — 사용자는 그 줄을 서버 `authorized_keys` 에 붙여야 처음 붙을 수
+/// 있다. 접속할 때 처음 열면 순서가 거꾸로다(붙어야 볼 수 있고, 보려면 붙어야 한다).
+/// 길이가 자리보다 길면 **안 받고** `public_key_too_long` 을 남긴다 — 반쪽 공개키를 서버에
+/// 붙이면 조용히 안 먹는다.
+void maru_mobile_set_public_key(const unsigned char *bytes, unsigned long len);
 
 /// 지금 터미널 격자(열·행). 원격에 알릴 pty 크기는 **코어가 들고 있는 값**이어야 한다 —
 /// host 가 따로 세면 그리는 격자와 원격이 믿는 크기가 갈린다. 화면이 아직 없으면 0.

@@ -1223,6 +1223,47 @@ static void pumpSshOnMainThread(void) {
     }
 }
 
+/// **이 기기의 공개키 한 줄을 브리지에 알린다**(화면이 보여 주고 복사한다 — S9c-4).
+///
+/// iOS 는 키를 **앱 전용 파일**로 든다(Keychain 은 실기기 검증까지 보류 — 계획 S9c-2). 그
+/// 파일에서 한 줄을 만들어 두면 사용자가 **붙기 전에** 서버 `authorized_keys` 에 넣을 수 있다.
+/// 파일이 없으면 아무것도 안 알린다 — 화면이 "아직 키가 없다" 고 말한다.
+static void publishPublicKey(void) {
+    NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+                                                          inDomain:NSUserDomainMask
+                                                 appropriateForURL:nil
+                                                            create:YES
+                                                             error:nil];
+    if (!support) return;
+    NSURL *keyFile = [[support URLByAppendingPathComponent:@"maru" isDirectory:YES]
+        URLByAppendingPathComponent:@"id_ed25519" isDirectory:NO];
+    static unsigned char pem[16 * 1024];
+    FILE *kf = fopen(keyFile.fileSystemRepresentation, "rb");
+    if (!kf) {
+        NSLog(@"MARU_SSH public_key_absent path=%@", keyFile.path);
+        return;
+    }
+    size_t pem_len = fread(pem, 1, sizeof pem, kf);
+    fclose(kf);
+    static unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+    int loaded = maru_mobile_ssh_load_key(pem, (unsigned int)pem_len,
+                                          (const unsigned char *)"", 0, secret);
+    memset(pem, 0, sizeof pem); // 읽은 원문을 안 남긴다
+    if (loaded != MARU_SSH_OK) {
+        NSLog(@"MARU_SSH public_key_load_failed=%s", maru_mobile_ssh_last_load_error());
+        return;
+    }
+    unsigned char line[256];
+    int rc = maru_mobile_ssh_public_key_line(secret, line, sizeof line);
+    memset(secret, 0, sizeof secret); // 개인키 사본은 바로 지운다
+    if (rc != MARU_SSH_OK) {
+        NSLog(@"MARU_SSH public_key_failed=%s", maru_mobile_ssh_last_load_error());
+        return;
+    }
+    maru_mobile_set_public_key(line, strlen((const char *)line));
+    NSLog(@"MARU_SSH public_key_ready");
+}
+
 /// **붙어 달라는 요청을 실행한다.** 어느 서버인지는 브리지가 말한다(config 가 단일 출처 —
 /// `ssh.server.<n>.*`, docs/mobile-config.md §4.3). 예전에는 이 함수가 `ssh.conf` 를 직접
 /// 파싱했는데, 그러면 같은 사실이 두 자리에 살아 화면이 고른 것과 갈린다.
@@ -1345,6 +1386,7 @@ static void loadConfigFile(void) {
     // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
     // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
     loadConfigFile(); // 뷰가 서기 전에 — 첫 프레임부터 그 색으로 그린다
+    publishPublicKey(); // 접속 **전에** 보여 줘야 서버에 붙일 수 있다
     startSshIfAsked();
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];

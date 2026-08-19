@@ -4104,7 +4104,7 @@ test "서버를 화면에서 등록한다 — 그리고 그 값이 파일로 나
     typeServerField(402, h, 3, "me"); // 사용자
     typeServerField(402, h, 4, "SHA256:abc"); // 지문
 
-    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    const save_y = bridge.serverEditRowCenterY(bridge.serverEditSaveRow()) orelse return error.TestUnexpectedResult;
     tapAt(200, save_y);
     _ = bridge.maru_mobile_build(402, h, now());
 
@@ -4137,7 +4137,7 @@ test "편집은 그 서버만 고치고 번호는 그대로다" {
     try std.testing.expectEqualStrings("server_edit", bridge.currentScreenName());
 
     typeServerField(402, h, 1, "새주소"); // 주소만 고친다
-    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    const save_y = bridge.serverEditRowCenterY(bridge.serverEditSaveRow()) orelse return error.TestUnexpectedResult;
     tapAt(200, save_y);
     _ = bridge.maru_mobile_build(402, h, now());
 
@@ -4164,7 +4164,7 @@ test "삭제하면 그 줄만 빠지고 나머지가 앞으로 당겨진다" {
     const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
     tapAt(e.x, e.y);
     _ = bridge.maru_mobile_build(402, h, now());
-    const del_y = bridge.serverEditRowCenterY(6) orelse return error.TestUnexpectedResult;
+    const del_y = bridge.serverEditRowCenterY(bridge.serverEditDeleteRow()) orelse return error.TestUnexpectedResult;
     tapAt(200, del_y);
     _ = bridge.maru_mobile_build(402, h, now());
 
@@ -4273,7 +4273,7 @@ test "칸에 안 들어가는 값은 조용히 잘리지 않는다" {
     bridge.maru_mobile_clear_error();
 
     // 저장하면 **원래 값**이 그대로다(안 들어간 값이 몰래 실리지 않는다).
-    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    const save_y = bridge.serverEditRowCenterY(bridge.serverEditSaveRow()) orelse return error.TestUnexpectedResult;
     tapAt(200, save_y);
     _ = bridge.maru_mobile_build(402, h, now());
     var buf: [128]u8 = undefined;
@@ -4300,4 +4300,84 @@ test "긴 값은 라벨을 안 덮는다 — 앞을 자르고 뒤를 남긴다" 
 
     // 짧은 값은 그대로다(쓸데없이 자르지 않는다).
     try std.testing.expectEqualStrings("22", bridge.fitRightForTest("22", full, 15, &buf));
+}
+
+// ── 이 기기의 공개키 (S9c-4) ─────────────────────────────────────────────────
+
+const pub_line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhRsXoywv6ai55lGk2BxO9qt2+/jFpEFs+KIV/ZUNF2 maru";
+
+/// 편집 화면을 연다(첫 서버).
+fn openFirstServerEdit(w: u32, h: u32) !void {
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(w, h);
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(w, h, now());
+}
+
+test "공개키 줄을 누르면 클립보드로 간다" {
+    // **이 줄이 없으면 새 기기는 접속을 시작할 수 없다** — 서버 `authorized_keys` 에 넣을
+    // 방법이 없기 때문이다(개인키는 기기 밖으로 안 나간다는 계약의 짝이다).
+    const h: u32 = 874;
+    bridge.maru_mobile_set_public_key(pub_line, pub_line.len);
+    try openFirstServerEdit(402, h);
+
+    var out: [512]u8 = undefined;
+    _ = bridge.maru_mobile_take_copy(&out, out.len); // 앞선 요청을 비운다
+    const y = bridge.serverEditRowCenterY(bridge.serverEditPubkeyRow()) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    const n = bridge.maru_mobile_take_copy(&out, out.len);
+    try std.testing.expectEqualStrings(pub_line, out[0..n]);
+    // **가져가면 사라진다**(복사 규율) — 매 프레임 같은 것을 다시 쓰지 않는다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&out, out.len));
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "키가 없으면 복사도 없다" {
+    // 빈 줄을 클립보드에 넣으면 사용자는 붙여넣고 나서야 안다.
+    const h: u32 = 874;
+    bridge.maru_mobile_set_public_key("", 0);
+    try openFirstServerEdit(402, h);
+    var out: [512]u8 = undefined;
+    _ = bridge.maru_mobile_take_copy(&out, out.len);
+    bridge.maru_mobile_clear_error();
+    const y = bridge.serverEditRowCenterY(bridge.serverEditPubkeyRow()) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&out, out.len));
+    // **라벨도 거짓말하면 안 된다** — "복사했다" 를 보이면 사용자는 안 붙은 키를 붙였다고 믿는다.
+    try std.testing.expect(!bridge.publicKeyCopiedShown());
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "자리가 모자라면 반쪽 공개키를 안 준다" {
+    // 잘라 주면 그 줄을 서버에 붙여도 **조용히 안 먹는다** — 사용자는 키를 넣었다고 믿는다.
+    const h: u32 = 874;
+    bridge.maru_mobile_set_public_key(pub_line, pub_line.len);
+    try openFirstServerEdit(402, h);
+    var out: [512]u8 = undefined;
+    _ = bridge.maru_mobile_take_copy(&out, out.len);
+    const y = bridge.serverEditRowCenterY(bridge.serverEditPubkeyRow()) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    bridge.maru_mobile_clear_error();
+    var small: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&small, small.len));
+    try std.testing.expectEqualStrings("copy_truncated", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "너무 긴 공개키는 안 받는다 — 자르지 않는다" {
+    const long = "x" ** 300;
+    bridge.maru_mobile_clear_error();
+    bridge.maru_mobile_set_public_key(long, long.len);
+    try std.testing.expectEqualStrings("public_key_too_long", std.mem.span(bridge.maru_mobile_last_error()));
+    try std.testing.expectEqual(@as(usize, 0), bridge.publicKeyLine().len);
+    bridge.maru_mobile_clear_error();
+    bridge.maru_mobile_set_public_key(pub_line, pub_line.len); // 다음 테스트를 위해 되돌린다
 }

@@ -575,7 +575,33 @@ Enter 한 번이다).
 | iOS | `UITextInputTraits` — autocapitalization·autocorrection·spellChecking·smartQuotes·smartDashes·smartInsertDelete 를 전부 끈다 |
 | Android | `EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS` + `IME_FLAG_NO_EXTRACT_UI`·`NO_FULLSCREEN`·`ACTION_NONE` |
 
-**키보드 종류(`keyboardType`)는 안 건드린다** — ASCII 배열을 요구하면 한글 입력이 불편해진다.
+**키보드 종류(`keyboardType`)는 터미널에서 안 건드린다** — ASCII 배열을 요구하면 한글 입력이
+불편해진다. 설정 칸은 다르다(아래).
+
+### 설정 칸 입력 (S9b-1)
+
+설정 화면의 줄은 셋이다: 켜고 끄는 것(toggle)·고르는 것(choice)·**치는 것**(숫자·글자).
+치는 줄을 누르면 그 줄이 입력 대상이 되고, 그때부터 들어오는 글자는 터미널이 아니라 그 칸으로
+간다. 무엇을 편집 중인지는 브리지만 알므로 **키보드 종류도 브리지가 정한다**:
+
+| `maru_mobile_input_kind()` | 뜻 | host 가 하는 일 |
+|---|---|---|
+| 0 | 터미널 | 기본 키보드. 친 글자는 코어로 |
+| 1 | 숫자 칸 | 숫자 패드(iOS `UIKeyboardTypeNumberPad`). 친 글자는 편집 칸으로 |
+| 2 | 글자 칸 | 기본 키보드. 친 글자는 편집 칸으로 |
+
+**1 과 2 를 가르는 것은 배열이고, 0 과 2 를 가르는 것은 목적지다.** 색(`#RRGGBB`) 같은 글자
+칸에 숫자 패드를 띄우면 `#` 도 `a~f` 도 못 쳐 **아무것도 못 넣는다**(기기에서 그 상태로 막혔다).
+반대로 글자 칸을 터미널과 같은 0 으로 말하면, host 는 하드웨어 키보드로 온 글자를 어디로 보낼지
+못 고른다 — 그 글자가 **조용히 사라진다**(블루투스 키보드로 색을 못 쳤다).
+
+편집 중의 키는 **줄 종류에 맞는 자리로 간다**: 백스페이스는 한 바이트가 아니라 **한 글자**를
+지우고(한글이 반쪽으로 남으면 화면과 파일이 같이 깨진다), 엔터는 숫자 칸이면 숫자 확정,
+글자 칸이면 글자 확정이다. 확정된 값만 `maru_mobile_take_config_write` 로 나가 파일이 된다 —
+치는 도중에는 안 쓴다.
+
+색 칸은 **팔레트(`theme.palette*`)를 안 낸다** — 16색을 한 줄씩 늘어놓으면 화면이 그것뿐이고,
+고르는 UI 없이 hex 를 손으로 치게 하는 것도 맞지 않다. 그 줄은 화면이 생길 때 따로 정한다.
 
 **버튼은 좌표로 실행하지 않는다.** chrome 이 이미 `UiActionId` + `snapshot_generation` 계약을
 갖고 있고([chrome 상호작용 이관](chrome-interaction-migration.md)의 intent table), 모바일도

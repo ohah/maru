@@ -18,7 +18,7 @@
 // 정의는 파일 뒤에 있고 그리는 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다
 // (Android 에서 같은 순서로 두 번 데였다).
 static void drainConfigWrite(void);
-static void startSshIfConfigured(void);
+static void startSshIfAsked(void);
 static void pumpSshOnMainThread(void);
 
 static NSString *const kShader =
@@ -1123,10 +1123,9 @@ static void loadConfigFile(void);
     loadConfigFile();
     [(ChromeView *)self.window.rootViewController.view setRenderingPaused:NO];
     maru_mobile_report_focus(1);
-    // **SSH 에는 재개가 없다**(계약 §4.1) — 끊긴 세션은 되살릴 수 없고 다시 붙는 수밖에 없다.
-    // 이미 돌고 있으면 펌프가 거절하므로 여기서는 그냥 부른다.
     [self endSshBackgroundTask]; // 돌아왔으니 유예 시간은 돌려준다
-    startSshIfConfigured();
+    // 다시 읽은 config 에서 브리지가 "원격 세션이 없으면" 요청을 세운다 — 그 요청을 실행한다.
+    startSshIfAsked();
     NSLog(@"MARU_LIFECYCLE foreground");
 }
 /// config 파일을 읽어 브리지에 넘긴다. **자리는 `Library/Application Support/maru/config`**
@@ -1224,52 +1223,56 @@ static void pumpSshOnMainThread(void) {
     }
 }
 
-/// **개발용 접속 자리.** `Application Support/maru/ssh.conf` 가 있으면 그 서버로 붙는다.
-/// 형식은 안드로이드와 같다(`host`·`port`·`user`·`identity`·`fingerprint`). 서버 목록 화면(S9b)이
-/// 이 자리를 대신하고 키는 Keychain(S9c)으로 옮긴다. 파일이 없으면 아무 일도 안 한다.
-static void startSshIfConfigured(void) {
+/// **붙어 달라는 요청을 실행한다.** 어느 서버인지는 브리지가 말한다(config 가 단일 출처 —
+/// `ssh.server.<n>.*`, docs/mobile-config.md §4.3). 예전에는 이 함수가 `ssh.conf` 를 직접
+/// 파싱했는데, 그러면 같은 사실이 두 자리에 살아 화면이 고른 것과 갈린다.
+///
+/// **키는 config 에 없다.** 앱 전용 파일(`Application Support/maru/id_ed25519`)을 읽는다 —
+/// 경로가 고정이라 설정에 적을 것이 없다(iOS Keychain 은 실기기 검증까지 보류: 계획 S9c-2).
+static void startSshIfAsked(void) {
     if (maru_ssh_pump_is_running()) return;
+    unsigned int req = maru_mobile_take_server_connect();
+    if (!req) return;
+    unsigned int idx = req - 1;
+
+    unsigned char host[256], user[MARU_SSH_MAX_USER], fp[128];
+    unsigned long host_len = maru_mobile_server_field(idx, MARU_SERVER_HOST, host, sizeof host - 1);
+    unsigned long user_len = maru_mobile_server_field(idx, MARU_SERVER_USER, user, sizeof user - 1);
+    unsigned long fp_len = maru_mobile_server_field(idx, MARU_SERVER_FINGERPRINT, fp, sizeof fp - 1);
+    unsigned int port = maru_mobile_server_port(idx);
+    // **비어 있으면 안 붙는다.** 브리지가 온전한 줄만 요청하지만 버퍼가 모자라도 0 이 오므로
+    // (자르지 않는 계약) 여기서도 본다 — 반쪽 주소로 붙으면 실패가 오타처럼 보인다.
+    if (!host_len || !user_len || !fp_len || !port) {
+        NSLog(@"MARU_SSH connect_incomplete index=%u", idx);
+        return;
+    }
+    host[host_len] = 0;
+    user[user_len] = 0;
+    fp[fp_len] = 0;
+
     NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
                                                           inDomain:NSUserDomainMask
                                                  appropriateForURL:nil
                                                             create:YES
                                                              error:nil];
     if (!support) return;
-    NSURL *file = [[support URLByAppendingPathComponent:@"maru" isDirectory:YES]
-        URLByAppendingPathComponent:@"ssh.conf" isDirectory:NO];
-    NSString *text = [NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:nil];
-    if (!text) return;
-
-    NSMutableDictionary<NSString *, NSString *> *conf = [NSMutableDictionary dictionary];
-    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
-        NSRange eq = [line rangeOfString:@"="];
-        if (eq.location == NSNotFound) continue;
-        conf[[line substringToIndex:eq.location]] =
-            [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:
-                NSCharacterSet.whitespaceCharacterSet];
-    }
-    NSString *host = conf[@"host"], *user = conf[@"user"], *identity = conf[@"identity"],
-             *fingerprint = conf[@"fingerprint"];
-    if (!host || !user || !identity || !fingerprint) {
-        NSLog(@"MARU_SSH conf_incomplete");
-        return;
-    }
+    NSURL *keyFile = [[support URLByAppendingPathComponent:@"maru" isDirectory:YES]
+        URLByAppendingPathComponent:@"id_ed25519" isDirectory:NO];
 
     // **키는 우리가 읽고 ABI 가 푼다.** 파일 바이트는 이 함수 밖으로 안 나간다.
     //
     // **`NSData` 로 읽지 않는다.** 그 바이트는 우리가 못 지우고(autorelease 라 언제 풀릴지도
-    // 모른다) 힙에 개인키가 그대로 남는다 — Android 쪽은 자기 버퍼를 쓰고 지우고 있었는데
-    // 여기만 안 그랬다. 같은 규율로 맞춘다.
+    // 모른다) 힙에 개인키가 그대로 남는다 — Android 쪽은 자기 버퍼를 쓰고 지운다. 같은 규율이다.
     static unsigned char pem[16 * 1024];
-    FILE *kf = fopen(identity.fileSystemRepresentation, "rb");
+    FILE *kf = fopen(keyFile.fileSystemRepresentation, "rb");
     if (!kf) {
-        NSLog(@"MARU_SSH key_unreadable path=%@", identity);
+        NSLog(@"MARU_SSH key_unreadable path=%@", keyFile.path);
         return;
     }
     size_t pem_len = fread(pem, 1, sizeof pem, kf);
     fclose(kf);
     if (pem_len == 0) {
-        NSLog(@"MARU_SSH key_empty path=%@", identity);
+        NSLog(@"MARU_SSH key_empty path=%@", keyFile.path);
         return;
     }
     static unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
@@ -1284,14 +1287,14 @@ static void startSshIfConfigured(void) {
     // 문자열은 펌프가 복사해 간다.
     MaruSshPumpConfig cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.host = host.UTF8String;
-    cfg.port = (unsigned short)[conf[@"port"] ?: @"22" intValue];
-    cfg.user = user.UTF8String;
+    cfg.host = (const char *)host;
+    cfg.port = (unsigned short)port;
+    cfg.user = (const char *)user;
     cfg.secret = secret;
     unsigned int cols = maru_mobile_term_cols(), rows = maru_mobile_term_rows();
     cfg.cols = cols ? cols : 80;
     cfg.rows = rows ? rows : 24;
-    cfg.expect_fingerprint = fingerprint.UTF8String;
+    cfg.expect_fingerprint = (const char *)fp;
 
     MaruSshPumpHooks hooks;
     memset(&hooks, 0, sizeof hooks);
@@ -1299,7 +1302,7 @@ static void startSshIfConfigured(void) {
     hooks.state_changed = sshState;
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     memset(secret, 0, sizeof secret);
-    NSLog(@"MARU_SSH start host=%@ port=%u user=%@ rc=%d", host, cfg.port, user, rc);
+    NSLog(@"MARU_SSH start host=%s port=%u user=%s rc=%d", host, cfg.port, user, rc);
 }
 
 static void loadConfigFile(void) {
@@ -1342,7 +1345,7 @@ static void loadConfigFile(void) {
     // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
     // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
     loadConfigFile(); // 뷰가 서기 전에 — 첫 프레임부터 그 색으로 그린다
-    startSshIfConfigured();
+    startSshIfAsked();
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];
     vc.view = [[ChromeView alloc] initWithFrame:UIScreen.mainScreen.bounds];

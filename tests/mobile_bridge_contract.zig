@@ -3822,11 +3822,15 @@ test "host 는 config 의 서버를 ABI 로만 본다" {
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_server_count());
 
     var buf: [128]u8 = undefined;
-    const n = bridge.maru_mobile_server_field(0, 1, &buf, buf.len); // HOST
+    // **필드 번호는 헤더가 단일 출처다** — 여기서 숫자를 손으로 적으면 host 가 다른 뜻으로
+    // 부를 때 조용히 어긋난다(주소 자리에 사용자 이름이 온다).
+    const nn = bridge.maru_mobile_server_field(0, c_abi.MARU_SERVER_NAME, &buf, buf.len);
+    try std.testing.expectEqualStrings("집", buf[0..nn]);
+    const n = bridge.maru_mobile_server_field(0, c_abi.MARU_SERVER_HOST, &buf, buf.len);
     try std.testing.expectEqualStrings("10.0.0.5", buf[0..n]);
-    const un = bridge.maru_mobile_server_field(0, 2, &buf, buf.len); // USER
+    const un = bridge.maru_mobile_server_field(0, c_abi.MARU_SERVER_USER, &buf, buf.len);
     try std.testing.expectEqualStrings("me", buf[0..un]);
-    const fn_ = bridge.maru_mobile_server_field(0, 3, &buf, buf.len); // FINGERPRINT
+    const fn_ = bridge.maru_mobile_server_field(0, c_abi.MARU_SERVER_FINGERPRINT, &buf, buf.len);
     try std.testing.expectEqualStrings("SHA256:abc", buf[0..fn_]);
     try std.testing.expectEqual(@as(u32, 2222), bridge.maru_mobile_server_port(0));
     // 포트를 안 적은 줄은 22 다 — host 가 기본값을 따로 적으면 파일과 갈린다.
@@ -3845,15 +3849,22 @@ test "자리가 모자라면 자르지 않고 0 이다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_server_port(9)); // 붙을 수 없는 포트
 }
 
-test "접속 요청은 한 번만 나가고 가져가면 사라진다" {
-    // **두 번 붙으면 세션이 둘 생긴다.** 그리고 배경에서 돌아올 때마다 config 를 다시 읽으므로,
-    // 읽을 때마다 요청하면 돌아올 때마다 또 붙는다.
+test "붙어 있는 동안은 다시 요청하지 않는다 — 끊기면 다시 한다" {
+    // 두 번 붙으면 **세션이 둘** 생긴다. config 는 배경에서 돌아올 때마다 다시 읽으므로
+    // (계약 §7) 그 자리가 곧 재접속 자리다 — 붙어 있으면 조용하고, 끊겨 있으면 다시 붙는다.
+    bridge.maru_mobile_set_input_sink(0);
     bridge.maru_mobile_load_config(two_servers, two_servers.len);
-    const req = bridge.maru_mobile_take_server_connect();
-    try std.testing.expectEqual(@as(u32, 1), req); // 첫 서버(번호+1)
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect()); // 첫 서버(번호+1)
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect()); // 가져가면 없다
+
+    bridge.maru_mobile_set_input_sink(1); // 붙었다
     bridge.maru_mobile_load_config(two_servers, two_servers.len); // 배경에서 돌아왔다
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+    bridge.maru_mobile_set_input_sink(0); // 끊겼다
+    bridge.maru_mobile_load_config(two_servers, two_servers.len); // 그 뒤에 돌아왔다
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+    bridge.maru_mobile_set_input_sink(0);
 }
 
 test "고르는 것은 온전한 첫 서버다 — 반쯤 적은 줄은 건너뛴다" {
@@ -3864,4 +3875,15 @@ test "고르는 것은 온전한 첫 서버다 — 반쯤 적은 줄은 건너�
     try std.testing.expectEqual(@as(?usize, 0), bridge.firstComplete(&.{ full, half }));
     try std.testing.expectEqual(@as(?usize, null), bridge.firstComplete(&.{half}));
     try std.testing.expectEqual(@as(?usize, null), bridge.firstComplete(&.{}));
+}
+
+test "서버 상한은 헤더와 브리지가 같은 값이다" {
+    // **자리를 미리 잡는 쪽(브리지)과 그것을 믿는 쪽(host)이 다른 수를 들면** host 가 없는
+    // 번호를 묻거나, 있는 서버를 못 본다. 숫자의 단일 출처는 헤더다.
+    try std.testing.expectEqual(@as(usize, c_abi.MARU_MAX_SERVERS), mobile_config.max_servers);
+    // 필드 번호도 마찬가지다 — 브리지의 switch 가 이 순서를 전제한다.
+    try std.testing.expectEqual(@as(u32, 0), c_abi.MARU_SERVER_NAME);
+    try std.testing.expectEqual(@as(u32, 1), c_abi.MARU_SERVER_HOST);
+    try std.testing.expectEqual(@as(u32, 2), c_abi.MARU_SERVER_USER);
+    try std.testing.expectEqual(@as(u32, 3), c_abi.MARU_SERVER_FINGERPRINT);
 }

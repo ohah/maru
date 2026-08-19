@@ -211,10 +211,9 @@ public class MaruActivity extends android.app.NativeActivity {
     protected void onResume() {
         super.onResume();
         applyLongPressTimeout();
-        // **돌아올 때마다 본다.** SSH 에는 재개가 없어서(계약 §4.1) 끊긴 세션은 되살릴 수 없고
-        // 다시 붙는 수밖에 없다 — `onCreate` 에서만 보면 한 번 끊긴 뒤 프로세스를 죽였다
-        // 켜야만 다시 붙는다. 이미 돌고 있으면 네이티브가 거절하므로 여기서는 그냥 부른다.
-        maybeStartSsh();
+        // **재접속은 여기서 안 정한다.** 돌아오면 창이 다시 서면서 config 를 다시 읽고
+        // (docs/mobile-config.md §7), 브리지가 "원격 세션이 없으면" 붙어 달라고 요청한다 —
+        // 그 판단이 여기 또 있으면 두 자리가 갈린다(SSH 에는 재개가 없어 되살리기는 없다).
     }
 
     @Override
@@ -234,40 +233,21 @@ public class MaruActivity extends android.app.NativeActivity {
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());
     }
 
-    /// **개발용 접속 자리.** `filesDir/ssh.conf` 가 있으면 그 서버로 붙는다.
+    /// **네이티브가 부른다 — 이 서버에 붙어라.** 어느 서버인지는 브리지가 정하고(config 가
+    /// 단일 출처, docs/mobile-config.md §4.3) 여기서는 소켓을 들 자리를 만든다.
     ///
-    /// 서버 목록 화면(S9b)이 그 자리를 대신하고 키는 Keystore(S9c)로 옮긴다 — 지금은 배선이
-    /// 도는지 보는 것이 목적이라, 화면 없이도 붙을 수 있는 자리를 하나 둔다. 파일이 없으면
-    /// 아무 일도 안 한다(기존 동작 그대로).
-    ///
-    /// 형식은 `키=값` 한 줄씩: `host` · `port` · `user` · `fingerprint`(`SHA256:...`).
-    /// **지문은 필수다** — 자동 승인은 없다(SSH 계약 §4). **키는 여기 없다** — 기기가 만들어
-    /// Keystore 에 봉인해 둔 것을 쓴다(S9c).
-    private void maybeStartSsh() {
-        java.io.File conf = new java.io.File(getFilesDir(), "ssh.conf");
-        if (!conf.exists()) return;
-        java.util.Properties p = new java.util.Properties();
-        try (java.io.FileInputStream in = new java.io.FileInputStream(conf)) {
-            p.load(in);
-        } catch (java.io.IOException e) {
-            android.util.Log.i("MaruChrome", "MARU_SSH conf_read_failed " + e);
-            return;
-        }
-
-        String host = p.getProperty("host");
-        String user = p.getProperty("user");
-        String fingerprint = p.getProperty("fingerprint");
-        if (host == null || user == null || fingerprint == null) {
-            android.util.Log.i("MaruChrome", "MARU_SSH conf_incomplete");
-            return;
-        }
-        Intent intent = new Intent(this, MaruSshService.class);
+    /// **키는 여기서 안 만진다** — 서비스가 Keystore 에서 풀어 쓰고 지운다. 그래서 개인키가
+    /// `Intent` 를 타지 않는다(`system_server` 를 지나게 된다).
+    public static void startSsh(String host, int port, String user, String fingerprint) {
+        MaruActivity a = current;
+        if (a == null) return;
+        Intent intent = new Intent(a, MaruSshService.class);
         intent.putExtra("host", host);
-        intent.putExtra("port", Integer.parseInt(p.getProperty("port", "22")));
+        intent.putExtra("port", port);
         intent.putExtra("user", user);
         intent.putExtra("fingerprint", fingerprint);
         // **`startForegroundService` 여야 한다.** 배경에서 `startService` 는 API 26+ 에서 막힌다.
-        startForegroundService(intent);
+        a.startForegroundService(intent);
     }
 
     /// IME inset 을 native 로 넘긴다. **익명 클래스를 안 쓴다**(위 `ShowKeyboard` 와 같은 이유 —

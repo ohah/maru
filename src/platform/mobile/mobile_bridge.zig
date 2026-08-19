@@ -169,9 +169,6 @@ var preedit_len: usize = 0;
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
 /// 붙어 달라는 요청(0=없음, 아니면 번호+1). **가져가면 사라진다** — 두 번 붙으면 세션이 둘이다.
 var ssh_connect_req: u32 = 0;
-/// 자동 요청을 이미 했나. **한 번만 한다**(임시 — 목록 화면이 없어 붙을 길이 그것뿐이다).
-/// 매번 하면 배경에서 돌아와 config 를 다시 읽을 때마다 또 붙는다(§3.0).
-var ssh_auto_requested = false;
 
 /// 붙을 수 있는 첫 서버. **반쯤 적은 줄은 건너뛴다** — 그걸로 붙으러 가면 실패 이유가
 /// "네트워크" 처럼 보여 사용자가 무엇을 안 적었는지 모른다(계약 §4.3).
@@ -196,12 +193,18 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     };
     if (cfg_parsed) |*old| old.deinit();
     cfg_parsed = next;
-    // **온전한 첫 서버를 한 번만 자동으로 요청한다**(임시 — S9b-2b 가 화면 탭으로 바꾼다).
-    if (!ssh_auto_requested) {
-        if (firstComplete(next.servers[0..next.server_count])) |i| {
-            ssh_connect_req = @intCast(i + 1);
-            ssh_auto_requested = true;
-        }
+    // **원격 세션이 없을 때만 온전한 첫 서버를 자동으로 요청한다**(임시 — S9b-2b 가 이 자리를
+    // 화면 탭으로 바꾼다). 두 조건이 다 필요하다.
+    //
+    // - 붙어 있는 동안 또 요청하면 **세션이 둘** 생긴다. config 는 배경에서 돌아올 때마다 다시
+    //   읽으므로(계약 §7) 그 자리가 곧 재접속 자리가 된다.
+    // - 끊긴 뒤에는 **다시 붙어야 한다**. SSH 에는 재개가 없어서(SSH 계약 §4.1) 되살릴 수 없고
+    //   새로 붙는 수밖에 없다 — 예전에는 host 가 `onResume` 마다 파일을 다시 읽어 그 일을 했다.
+    //
+    // "원격 세션이 있나" 는 **입력 목적지가 이미 아는 사실**이다(host 가 상태로 세운다) — 그
+    // 사실을 두 번 세면 갈린다.
+    if (input_sink == 0) {
+        if (firstComplete(next.servers[0..next.server_count])) |i| ssh_connect_req = @intCast(i + 1);
     }
     if (cfg_source.len > 0) term_allocator.free(cfg_source);
     cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {

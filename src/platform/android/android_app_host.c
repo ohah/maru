@@ -117,6 +117,7 @@ static void recreateVulkan(struct android_app *app);
 static void drainConfigWrite(struct android_app *app);
 static void syncInputKind(void);
 static void raiseKeyboardIfAsked(void);
+static void startSshIfAsked(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -737,6 +738,7 @@ static void drawFrame(void) {
     if (g_app) drainConfigWrite(g_app);
     syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
     raiseKeyboardIfAsked();
+    startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1248,6 +1250,56 @@ static void raiseKeyboardIfAsked(void) {
     if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
     (*vm)->DetachCurrentThread(vm);
     LOGI("MARU_INPUT keyboard_raised");
+}
+
+/// **붙어 달라는 요청을 실행한다.** 어느 서버인지는 브리지가 말하고(config 가 단일 출처,
+/// docs/mobile-config.md §4.3) 여기서는 소켓을 드는 자리를 만들 뿐이다 — 포그라운드 서비스가
+/// 배경에서도 세션을 살려 둔다(§3.0).
+///
+/// **파일을 여기서 다시 읽지 않는다.** 예전에는 `ssh.conf` 를 이 host 가 직접 파싱했는데,
+/// 그러면 같은 사실이 두 자리에 살아 화면이 고른 것과 갈린다.
+static void startSshIfAsked(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int req = maru_mobile_take_server_connect();
+    unsigned char host[256], user[MARU_SSH_MAX_USER], fp[128];
+    unsigned long host_len = 0, user_len = 0, fp_len = 0;
+    unsigned int port = 0;
+    if (req) {
+        unsigned int idx = req - 1;
+        host_len = maru_mobile_server_field(idx, MARU_SERVER_HOST, host, sizeof host);
+        user_len = maru_mobile_server_field(idx, MARU_SERVER_USER, user, sizeof user);
+        fp_len = maru_mobile_server_field(idx, MARU_SERVER_FINGERPRINT, fp, sizeof fp);
+        port = maru_mobile_server_port(idx);
+    }
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (!req) return;
+    // **비어 있으면 안 붙는다.** 브리지가 온전한 줄만 요청하지만, 버퍼가 모자라도 0 이 오므로
+    // (자르지 않는 계약) 여기서도 본다 — 반쪽 주소로 붙으면 실패가 오타처럼 보인다.
+    if (!host_len || !user_len || !fp_len || !port) {
+        LOGI("MARU_SSH connect_incomplete index=%u", req - 1);
+        return;
+    }
+    if (!g_activity_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "startSsh",
+                                            "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
+    if (m) {
+        // 길이로 오므로 0 을 붙여 넘긴다(ABI 는 끝에 0 을 안 붙인다).
+        host[host_len] = 0;
+        user[user_len] = 0;
+        fp[fp_len] = 0;
+        jstring jhost = (*env)->NewStringUTF(env, (const char *)host);
+        jstring juser = (*env)->NewStringUTF(env, (const char *)user);
+        jstring jfp = (*env)->NewStringUTF(env, (const char *)fp);
+        (*env)->CallStaticVoidMethod(env, g_activity_cls, m, jhost, (jint)port, juser, jfp);
+        (*env)->DeleteLocalRef(env, jhost);
+        (*env)->DeleteLocalRef(env, juser);
+        (*env)->DeleteLocalRef(env, jfp);
+        LOGI("MARU_SSH connect_requested index=%u port=%u", req - 1, port);
+    }
+    (*vm)->DetachCurrentThread(vm);
 }
 
 static void syncInputKind(void) {

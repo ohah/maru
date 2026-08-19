@@ -1316,25 +1316,29 @@ static void startSshIfAsked(void) {
     //
     // **`NSData` 로 읽지 않는다.** 그 바이트는 우리가 못 지우고(autorelease 라 언제 풀릴지도
     // 모른다) 힙에 개인키가 그대로 남는다 — Android 쪽은 자기 버퍼를 쓰고 지운다. 같은 규율이다.
-    static unsigned char pem[16 * 1024];
-    FILE *kf = fopen(keyFile.fileSystemRepresentation, "rb");
-    if (!kf) {
-        NSLog(@"MARU_SSH key_unreadable path=%@", keyFile.path);
-        return;
-    }
-    size_t pem_len = fread(pem, 1, sizeof pem, kf);
-    fclose(kf);
-    if (pem_len == 0) {
-        NSLog(@"MARU_SSH key_empty path=%@", keyFile.path);
-        return;
-    }
+    // **키가 없어도 붙는다.** 비밀번호만 여는 서버에는 키가 필요 없는데, 예전에는 여기서
+    // 돌아서서 그 서버에도 못 붙었다(사용자 지적). 키가 없으면 `NULL` 을 넘기고 코어가
+    // `none` 으로 방법 목록만 묻는다(SSH 계약 §3.4).
     static unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
-    int loaded = maru_mobile_ssh_load_key(pem, (unsigned int)pem_len,
-                                          (const unsigned char *)"", 0, secret);
-    memset(pem, 0, sizeof pem); // 읽은 원문을 안 남긴다
-    if (loaded != MARU_SSH_OK) {
-        NSLog(@"MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
-        return;
+    int have_key = 0;
+    {
+        static unsigned char pem[16 * 1024];
+        FILE *kf = fopen(keyFile.fileSystemRepresentation, "rb");
+        if (kf) {
+            size_t pem_len = fread(pem, 1, sizeof pem, kf);
+            fclose(kf);
+            if (pem_len > 0) {
+                int loaded = maru_mobile_ssh_load_key(pem, (unsigned int)pem_len,
+                                                      (const unsigned char *)"", 0, secret);
+                memset(pem, 0, sizeof pem); // 읽은 원문을 안 남긴다
+                if (loaded == MARU_SSH_OK) have_key = 1;
+                else NSLog(@"MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
+            } else {
+                NSLog(@"MARU_SSH key_empty path=%@", keyFile.path);
+            }
+        } else {
+            NSLog(@"MARU_SSH key_absent path=%@ — 비밀번호만 여는 서버라면 그래도 붙는다", keyFile.path);
+        }
     }
 
     // 문자열은 펌프가 복사해 간다.
@@ -1343,7 +1347,7 @@ static void startSshIfAsked(void) {
     cfg.host = (const char *)host;
     cfg.port = (unsigned short)port;
     cfg.user = (const char *)user;
-    cfg.secret = secret;
+    cfg.secret = have_key ? secret : NULL;
     unsigned int cols = maru_mobile_term_cols(), rows = maru_mobile_term_rows();
     cfg.cols = cols ? cols : 80;
     cfg.rows = rows ? rows : 24;

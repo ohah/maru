@@ -43,6 +43,12 @@ pub const msg_userauth_method_specific: u8 = 60;
 pub const service_name = "ssh-userauth";
 pub const method_publickey = "publickey";
 pub const method_password = "password";
+/// **키도 비밀번호도 아직 없다** — 서버에게 "무엇을 받나" 만 묻는 방법(RFC 4252 §5.2).
+///
+/// 명세는 이것이 **늘 실패해야 한다**고 못박는다(서버가 성공을 돌려주면 그 계정은 인증이
+/// 없는 것이다). 우리가 이걸 보내는 이유는 그 실패에 실려 오는 **방법 목록** 때문이다 —
+/// 키가 없는 기기(iOS 에 아직 키 파일이 없는 경우)는 이것 말고 목록을 알 길이 없다.
+pub const method_none = "none";
 /// 인증이 끝나면 열 서비스. 요청의 'service name' 자리에 들어간다(§7 의 서명에도 포함된다).
 pub const connection_service = "ssh-connection";
 
@@ -153,6 +159,16 @@ pub fn writePasswordRequest(out: []u8, user: []const u8, password: []const u8) E
     return w.written();
 }
 
+/// `none` 요청(§5.2) — 방법 목록을 받으려고 보낸다. 성공을 기대하지 않는다.
+pub fn writeNoneRequest(out: []u8, user: []const u8) Error![]const u8 {
+    var w = wire.Writer.init(out);
+    try w.byte(msg_userauth_request);
+    try w.string(user);
+    try w.string(connection_service);
+    try w.string(method_none);
+    return w.written();
+}
+
 /// 서버 응답.
 pub const Response = union(enum) {
     success,
@@ -174,7 +190,7 @@ pub const Response = union(enum) {
 };
 
 /// 어느 방법으로 요청했나 — **번호 60 의 해석이 여기 달렸다**(위 상수 주석).
-pub const Method = enum { publickey, password };
+pub const Method = enum { publickey, password, none };
 
 pub fn parseResponse(payload: []const u8, method: Method) Error!Response {
     var r = wire.Reader.init(payload);
@@ -189,6 +205,9 @@ pub fn parseResponse(payload: []const u8, method: Method) Error!Response {
             .language = try r.string(),
         } },
         msg_userauth_method_specific => switch (method) {
+            // **`none` 에는 60번이 없다**(§5.2 — 방법별 메시지가 없는 방법이다). 오면 규약 위반이라
+            // 오류로 올린다: 여기서 아무 뜻이나 붙이면 서버가 보낸 것을 우리가 지어내는 셈이다.
+            .none => Error.UnexpectedMessage,
             .publickey => .{ .pk_ok = .{
                 .algorithm = try r.string(),
                 .key_blob = try r.string(),

@@ -162,9 +162,9 @@ test "닫으면 비밀이 남지 않는다" {
     try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &key, &seed, "xterm", 5, 80, 24, 0, 1, &h));
 
     const index = (h & 0xFFFF) - 1;
-    try testing.expect(std.mem.indexOfScalar(u8, &ssh.slots[index].cl.opts.secret_key, 0xAB) != null);
+    try testing.expect(std.mem.indexOfScalar(u8, &ssh.slots[index].cl.opts.secret_key.?, 0xAB) != null);
     try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_close(h));
-    for (ssh.slots[index].cl.opts.secret_key) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (ssh.slots[index].cl.opts.secret_key.?) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "예측 가능한 씨앗은 안 받는다" {
@@ -748,4 +748,16 @@ test "그 자리가 아닌데 비밀번호를 넣으면 '아직 아니다' 다" 
     try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_password(h, "pw", 2));
     // 핸들이 틀리면 그것대로 말한다.
     try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_password(h + 1, "pw", 2));
+}
+
+test "키 없이도 연다 — 그때는 none 으로 묻는다" {
+    // **키가 없다고 시작조차 못 하면 비밀번호만 여는 서버에는 영영 못 붙는다**(iOS 가 그랬다).
+    var seed: [32]u8 = @splat(21);
+    var h: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, null, &seed, "xterm", 5, 80, 24, 0, 1, &h));
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    const index = (h & 0xFFFF) - 1;
+    try testing.expectEqual(@as(?[64]u8, null), ssh.slots[index].cl.opts.secret_key);
+    // 버전 줄은 그대로 나간다(키와 무관한 걸음이다).
+    try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
 }

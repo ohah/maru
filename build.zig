@@ -2445,18 +2445,37 @@ pub fn build(b: *std.Build) void {
     // **두 host 가 쓸 C 펌프**(`src/platform/mobile_host/ssh_pump.c`)를 그대로 링크해 실서버와
     // 왕복한다. 기기에 올리기 전에 소켓·스레드·세션 루프·호스트키 핀이 도는 것을 여기서 본다 —
     // 그러면 기기에서 실패했을 때 남는 후보가 host 배선뿐이다.
-    const ssh_pump_mod = b.createModule(.{
-        .root_source_file = b.path("tools/ssh/pump_smoke.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "mobile_ssh", .module = mobile_ssh_mod }},
-    });
-    ssh_pump_mod.addIncludePath(b.path("src/platform/mobile_host"));
-    ssh_pump_mod.addIncludePath(b.path("src/platform/mobile"));
-    ssh_pump_mod.addCSourceFile(.{ .file = b.path("src/platform/mobile_host/ssh_pump.c"), .flags = &.{"-std=c11"} });
-    ssh_pump_mod.link_libc = true;
-    const ssh_pump_smoke_exe = b.addExecutable(.{ .name = "ssh-pump-smoke", .root_module = ssh_pump_mod });
-    ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_pump_smoke_exe, .{}).step);
+    //
+    // **호스트 타깃이 Windows 면 통째로 뺀다.** 펌프는 iOS·Android host 가 쓰는 **POSIX 코드**다 —
+    // `<netdb.h>`·`<sys/socket.h>` 를 직접 부르고, 스모크(`tools/ssh/pump_smoke.zig`)도 `std.c.timespec`
+    // 처럼 Windows 에서 `void` 로 풀리는 타입을 쓴다. Windows 타깃은 이 펌프의 **소비자가 아니다**
+    // (모바일 = iOS + Android). 그런데 스텝이 무조건 걸려 있어 Windows 기기에서는 `zig build test` 가
+    // 통째로 실패했다 — 자기 변경과 무관한 빨강이라 그 기기의 개발자가 게이트를 아예 못 돌린다.
+    //
+    // **이식성 가드는 그대로 남는다.** 아래 `check-ssh-pump-portable` 이 linux-gnu 로 **크로스 컴파일**
+    // 하므로 어느 호스트에서도 돌고, 그것이 이 파일의 진짜 이식성 검사다(glibc feature macro 사고를
+    // 잡으려고 만든 자리). 여기서 빠지는 것은 **호스트에서 실서버와 왕복하는 스모크**뿐이다.
+    const pump_host_supported = target.result.os.tag != .windows;
+    if (pump_host_supported) {
+        const ssh_pump_mod = b.createModule(.{
+            .root_source_file = b.path("tools/ssh/pump_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "mobile_ssh", .module = mobile_ssh_mod }},
+        });
+        ssh_pump_mod.addIncludePath(b.path("src/platform/mobile_host"));
+        ssh_pump_mod.addIncludePath(b.path("src/platform/mobile"));
+        ssh_pump_mod.addCSourceFile(.{ .file = b.path("src/platform/mobile_host/ssh_pump.c"), .flags = &.{"-std=c11"} });
+        ssh_pump_mod.link_libc = true;
+        const ssh_pump_smoke_exe = b.addExecutable(.{ .name = "ssh-pump-smoke", .root_module = ssh_pump_mod });
+        ssh_client_smoke_step.dependOn(&b.addInstallArtifact(ssh_pump_smoke_exe, .{}).step);
+
+        // 펌프의 단위 테스트(핀 없는 접속·인자 검사)는 소켓을 쓰므로 sans-io 게이트 밖이다.
+        const ssh_pump_tests = addProjectTest(b, .{ .root_module = ssh_pump_mod });
+        const run_ssh_pump_tests = b.addRunArtifact(ssh_pump_tests);
+        test_step.dependOn(&run_ssh_pump_tests.step);
+        test_mobile_step.dependOn(&run_ssh_pump_tests.step);
+    }
 
     // **펌프는 리눅스로도 컴파일된다.** 이 파일은 세 경로(빌드 스크립트·NDK·Xcode)로 불리는데,
     // 표준 모드에 따라 glibc 가 POSIX 선언을 감춰 **한 경로에서만 깨지는** 일이 실제로 났다
@@ -2478,11 +2497,6 @@ pub fn build(b: *std.Build) void {
     pump_linux_step.dependOn(&pump_linux.step);
     boundary_step.dependOn(pump_linux_step);
 
-    // 펌프의 단위 테스트(핀 없는 접속·인자 검사)는 소켓을 쓰므로 sans-io 게이트 밖이다.
-    const ssh_pump_tests = addProjectTest(b, .{ .root_module = ssh_pump_mod });
-    const run_ssh_pump_tests = b.addRunArtifact(ssh_pump_tests);
-    test_step.dependOn(&run_ssh_pump_tests.step);
-    test_mobile_step.dependOn(&run_ssh_pump_tests.step);
     boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,

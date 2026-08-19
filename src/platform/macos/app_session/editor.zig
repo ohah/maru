@@ -5016,3 +5016,75 @@ test "네이티브로 연 텍스트는 CM6 스냅샷을 기다리지 않는다 �
     entry.dirty = true;
     try testing.expect(file_panel_ops.filePanelEntryNeedsDirtyProtection(entry));
 }
+
+/// **측정용 프로토타입** — 목표 열 이하에서 가장 가까운 cluster 경계의 byte.
+///
+/// `caretAtPoint`가 필요로 하는 **역방향**이다(포인터 → 열 → byte, `Selection`이 byte offset 기반).
+/// `content.stepColumn` 하나를 되짚으므로 규칙이 갈리지 않는다 — 탭스톱·cluster 분절·§3.8 표기가
+/// 그 함수에만 있고, 이 방향을 따로 짜면 그 셋이 두 곳으로 갈린다(그렇게 갈려서 강조가 7칸 밀린
+/// 전례가 §4.1c에 적혀 있다).
+fn byteAtColumnProto(bytes: []const u8, tab_width: u16, target_col: u32) usize {
+    var i: usize = 0;
+    var col: u32 = 0;
+    while (i < bytes.len) {
+        const st = chrome_editor.content.stepColumn(bytes, i, col, tab_width);
+        if (st.next_col > target_col) break;
+        i = st.next_byte;
+        col = st.next_col;
+    }
+    return i;
+}
+
+test "[측정] 열→byte 역방향 — 클릭 지점까지 훑는 비용" {
+    // **`caretAtPoint`의 뼈대 비용이다.** 클릭한 픽셀은 열이 되고, 열은 byte가 되어야 selection이
+    // 그것을 든다. 이 방향이 거리에 비례하면 §4.1c의 `max_first_col` 상한과 **같은 성질의 상한**이
+    // 클릭에도 필요해진다 — 그 판단의 근거를 여기서 만든다.
+    //
+    // **정방향(`columnOfByte`)과 나란히 잰다.** 둘이 같은 비용이면 "역방향이 특별히 비싸다"는 말은
+    // 틀린 것이고, 상한은 방향이 아니라 **거리**의 문제가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const cases = [_]struct { name: []const u8, unit: []const u8 }{
+        .{ .name = "ASCII", .unit = "abcdefghij" },
+        .{ .name = "한글(2칸)", .unit = "가나다라마" },
+        .{ .name = "탭+ASCII", .unit = "\tabc\tdef" },
+        .{ .name = "BiDi 표기(§3.8)", .unit = "ab\u{202E}cd" },
+    };
+    const reps = 20_000;
+    for (cases) |c| {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(alloc);
+        for (0..reps) |_| try line.appendSlice(alloc, c.unit);
+        const total_cols = chrome_editor.content.lineColumns(line.items, 4);
+        const scratch = try alloc.alloc(u8, line.items.len * 8 + 64);
+        defer alloc.free(scratch);
+
+        std.debug.print("\n[측정] {s}: {d}B, {d}열\n", .{ c.name, line.items.len, total_cols });
+        for ([_]u32{ 100, 1_000, 10_000, 100_000 }) |target| {
+            if (target > total_cols) continue;
+            // **회귀 감지에 필요한 만큼만 돈다.** 문서에 실은 수치는 이 하니스로 이미 얻었고
+            // (§4.1g), 여기 남기는 목적은 그 값이 크게 어긋나는 것을 잡는 것이다 — 200회를
+            // 유지하면 이 테스트 하나가 전체 실행에 수십 초를 더한다.
+            const rounds: usize = 20;
+            var sink: usize = 0;
+            const r0 = monotonicMsForTest();
+            for (0..rounds) |_| sink +%= byteAtColumnProto(line.items, 4, target);
+            const r1 = monotonicMsForTest();
+
+            const off = byteAtColumnProto(line.items, 4, target);
+            var sink2: u32 = 0;
+            const f0 = monotonicMsForTest();
+            for (0..rounds) |_| sink2 +%= chrome_editor.content.columnOfByte(line.items, 4, off, scratch);
+            const f1 = monotonicMsForTest();
+
+            std.debug.print("  col={d:>7}  역방향={d:>7.1}µs  정방향={d:>7.1}µs  (byte={d})\n", .{
+                target,
+                @as(f64, @floatFromInt(r1 - r0)) * 1000.0 / @as(f64, @floatFromInt(rounds)),
+                @as(f64, @floatFromInt(f1 - f0)) * 1000.0 / @as(f64, @floatFromInt(rounds)),
+                off,
+            });
+            std.mem.doNotOptimizeAway(sink);
+            std.mem.doNotOptimizeAway(sink2);
+        }
+    }
+}

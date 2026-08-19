@@ -1831,3 +1831,207 @@ test "탭이 든 긴 줄도 행 수가 절단되지 않는다" {
     try std.testing.expectEqual(want.rows, got.rows);
     try std.testing.expect(got.rows > 200); // 8 KiB였다면 103행이다
 }
+
+/// **측정용 프로토타입** — 목표 열 이하에서 가장 가까운 cluster 경계의 원본 byte.
+///
+/// `stepColumn`을 되짚을 뿐이라 탭스톱·cluster 분절·§3.8 표기 규칙이 갈리지 않는다.
+fn byteAtColumnProto(bytes: []const u8, tab_width: u16, target_col: u32) usize {
+    var i: usize = 0;
+    var col: u32 = 0;
+    while (i < bytes.len) {
+        const st = stepColumn(bytes, i, col, tab_width);
+        if (st.next_col > target_col) break;
+        i = st.next_byte;
+        col = st.next_col;
+    }
+    return i;
+}
+
+/// **측정용 프로토타입** — 전개하지 않고 **원본에서** 랩 조각 경계를 낸다.
+///
+/// `caretAtPoint`가 원본 byte offset을 돌려주어야 하므로(§4.1g — `Selection`이 byte 기반),
+/// 조각 경계도 원본 byte였으면 좋겠다. 지금은 `visual_map.Pieces`가 **전개 텍스트**를 자르므로
+/// 그 경계가 전개 좌표계에 있다. 이 프로토타입은 "원본에서 같은 규칙으로 자르면 같은 경계가
+/// 나오는가"를 재기 위한 것이다 — 같으면 전개 없이 갈 수 있고, 다르면 그 길은 죽는다.
+fn piecesFromSourceProto(bytes: []const u8, tab_width: u16, view_cols: u16, out: []u32) usize {
+    if (out.len == 0) return 0;
+    var n: usize = 0;
+    out[n] = 0;
+    n += 1;
+    if (bytes.len == 0 or view_cols == 0) return n;
+
+    var i: usize = 0;
+    var abs_col: u32 = 0; // 줄 전체 기준 — 탭스톱이 이 값으로 정해진다
+    var row_start_byte: usize = 0;
+    var row_start_col: u32 = 0;
+    while (i < bytes.len) {
+        const st = stepColumn(bytes, i, abs_col, tab_width);
+        if (st.next_col - row_start_col > view_cols) {
+            if (i == row_start_byte) {
+                // 한 cluster가 뷰보다 넓다 — 그래도 하나는 넣고 전진한다(`Pieces`와 같은 규칙).
+                i = st.next_byte;
+                abs_col = st.next_col;
+            }
+            if (n >= out.len) return n;
+            out[n] = @intCast(i);
+            n += 1;
+            row_start_byte = i;
+            row_start_col = abs_col;
+            continue;
+        }
+        i = st.next_byte;
+        abs_col = st.next_col;
+    }
+    return n;
+}
+
+test "[실측] 원본 기준 랩 분할은 전개 기준과 갈리는가" {
+    // **§4.1g의 (가)안이 여기서 살거나 죽는다.** 전개하지 않고 원본에서 조각을 나눌 수 있으면
+    // `caretAtPoint`가 원본 byte를 곧장 다루고, 전개 좌표계 ↔ 원본 좌표계 환산이 통째로 없어진다.
+    //
+    // §4.1c가 이미 비슷한 것을 기록해 두었다 — 행 수를 세는 "경량 경로"를 따로 두었다가 990건 중
+    // 80건이 갈렸고, 원인 중 하나가 **탭이 행 경계에서 쪼개진다는 것**이었다. 그 결론은 "전개 결과를
+    // 그대로 세면 규칙이 한 곳이라 갈릴 수 없다"였다. 그 판단이 이 방향에도 그대로 적용되는지 **재서**
+    // 확인한다 — 문서가 그렇다고 적혀 있다는 것과 지금 이 코드가 그렇다는 것은 다른 말이다.
+    const alloc = std.testing.allocator;
+    const alphabet = [_][]const u8{
+        "a",  "b",
+        "가",
+        "나",
+        "😀",
+        "\t", " ",
+        "z",
+        "\u{202E}", // BiDi override — §3.8 표기로 8칸이 된다
+        "\u{200D}", // ZWJ — cluster를 늘린다
+        "\u{00AD}", // soft hyphen
+    };
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const rand = prng.random();
+
+    var mismatch: usize = 0;
+    var total: usize = 0;
+    var first_bad: ?struct { cols: u16, tab: u16, src: usize, exp: usize } = null;
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+    const scratch = try alloc.alloc(u8, 64 * 1024);
+    defer alloc.free(scratch);
+    const src_starts = try alloc.alloc(u32, 4096);
+    defer alloc.free(src_starts);
+
+    for (0..600) |_| {
+        line.clearRetainingCapacity();
+        const len = 100 + rand.uintLessThan(usize, 500);
+        for (0..len) |_| try line.appendSlice(alloc, alphabet[rand.uintLessThan(usize, alphabet.len)]);
+        // **현실적인 본문 폭으로 잰다**(적대적 검증 5회차). 초판은 2~31열이었는데 2열에서는 2칸
+        // 글자가 **늘** 행을 걸치므로 쪼개짐 비율이 구조적으로 부풀려진다. 실제 본문은 80~200열이다.
+        const view_cols: u16 = @intCast(80 + rand.uintLessThan(u16, 121));
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u16, 8));
+
+        // ① 지금 경로 — 전개한 뒤 `visual_map`이 자른다.
+        const exp = expandTabs(line.items, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+        var it = visual_map.pieces(exp.text, view_cols, true);
+        var expanded_pieces: usize = 0;
+        while (it.next()) |_| expanded_pieces += 1;
+
+        // ② 프로토타입 — 원본에서 같은 규칙으로 자른다.
+        const source_pieces = piecesFromSourceProto(line.items, tab_width, view_cols, src_starts);
+
+        total += 1;
+        if (expanded_pieces != source_pieces) {
+            mismatch += 1;
+            if (first_bad == null) first_bad = .{
+                .cols = view_cols,
+                .tab = tab_width,
+                .src = source_pieces,
+                .exp = expanded_pieces,
+            };
+        }
+    }
+    std.debug.print(
+        "\n[실측] 원본 기준 vs 전개 기준 랩 분할: {d}/{d} 불일치\n",
+        .{ mismatch, total },
+    );
+    if (first_bad) |b| std.debug.print(
+        "  첫 불일치: view_cols={d} tab_width={d} → 원본 {d}조각, 전개 {d}조각\n",
+        .{ b.cols, b.tab, b.src, b.exp },
+    );
+}
+
+test "[실측] 열이 두 좌표계의 다리가 되는가 — 전개 byte ↔ 원본 byte" {
+    // **(가)안이 죽은 뒤 남은 길이다.** 조각 경계는 전개 좌표계에 있고(`visual_map.Pieces`),
+    // `Selection`은 원본 byte를 요구한다. 둘을 **열**로 이으면 새 규칙 없이 왕복할 수 있다:
+    //
+    //   전개 byte --`columnsOf`--> 열 --`stepColumn` 되짚기--> 원본 byte
+    //
+    // 성립 조건은 **열의 정의가 두 좌표계에서 같다**는 것이다. 원본 쪽은 `stepColumn`이 세고
+    // (탭스톱·§3.8 표기 포함), 전개 쪽은 전개 결과를 `columnsOf`가 센다 — 정의상 같아야 하지만,
+    // §4.1c가 "이 정의를 어긴 자리가 두 곳 있었다"고 적은 자리라 **재서** 확인한다.
+    const alloc = std.testing.allocator;
+    const alphabet = [_][]const u8{
+        "a",        "b",
+        "가",
+        "나",
+        "😀",
+        "\t",       " ",
+        "z",        "\u{202E}",
+        "\u{200D}", "\u{00AD}",
+    };
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rand = prng.random();
+
+    var col_mismatch: usize = 0;
+    var roundtrip_bad: usize = 0;
+    var checked_pieces: usize = 0;
+    var lines: usize = 0;
+    var split_tab: usize = 0;
+    var split_wide: usize = 0;
+    var split_other: usize = 0;
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+    const scratch = try alloc.alloc(u8, 64 * 1024);
+    defer alloc.free(scratch);
+    const scratch2 = try alloc.alloc(u8, 64 * 1024);
+    defer alloc.free(scratch2);
+
+    for (0..600) |_| {
+        line.clearRetainingCapacity();
+        const len = 100 + rand.uintLessThan(usize, 500);
+        for (0..len) |_| try line.appendSlice(alloc, alphabet[rand.uintLessThan(usize, alphabet.len)]);
+        // **현실적인 본문 폭으로 잰다**(적대적 검증 5회차). 초판은 2~31열이었는데 2열에서는 2칸
+        // 글자가 **늘** 행을 걸치므로 쪼개짐 비율이 구조적으로 부풀려진다. 실제 본문은 80~200열이다.
+        const view_cols: u16 = @intCast(80 + rand.uintLessThan(u16, 121));
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u16, 8));
+        lines += 1;
+
+        const exp = expandTabs(line.items, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+        if (exp.truncated) continue;
+
+        // ① 열 정의가 두 좌표계에서 같은가.
+        if (lineColumns(line.items, tab_width) != columnsOf(exp.text)) col_mismatch += 1;
+
+        // ② 조각 시작을 열로 옮기고, 그 열에서 원본 byte를 얻어 **다시 열로** 돌아온다.
+        var it = visual_map.pieces(exp.text, view_cols, true);
+        while (it.next()) |p| {
+            const col_at_piece = columnsOf(exp.text[0..p.start]);
+            const src_off = byteAtColumnProto(line.items, tab_width, col_at_piece);
+            const back = columnOfByte(line.items, tab_width, src_off, scratch2);
+            checked_pieces += 1;
+            if (back != col_at_piece) {
+                roundtrip_bad += 1;
+                // **무엇이 그 자리에 있었나.** 조각 시작이 원본 cluster의 **안쪽**이면 대응하는
+                // byte가 없다 — 결함이 아니라 구조적 사실이다(§10 "역방향은 왕복이 아니다").
+                // 어느 문자가 그렇게 쪼개지는지 세어 결정표의 근거로 삼는다.
+                if (src_off < line.items.len) {
+                    const b = line.items[src_off];
+                    if (b == '\t') split_tab += 1 else if (b >= 0x80) split_wide += 1 else split_other += 1;
+                }
+            }
+        }
+    }
+    std.debug.print(
+        "\n[실측] 열 정의 불일치 {d}/{d}줄 · 조각 시작이 원본 cluster 안쪽 {d}/{d} (탭 {d} · 넓은글자·표기 {d} · 그밖 {d})\n",
+        .{ col_mismatch, lines, roundtrip_bad, checked_pieces, split_tab, split_wide, split_other },
+    );
+}

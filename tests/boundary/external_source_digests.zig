@@ -616,7 +616,9 @@ pub const inventory = [_]Proof{
     // P7b(저장소별 기준을 workspace에 기억)로 또 움직인다: 짝 하나를 들던 필드 둘이 **목록**이 되고
     // (`scm_base_entries`), 그 목록을 만드는 자리에서 못 실을 값을 거른다. count는 2 그대로다 —
     // 세션 상태와 테스트만 늘었고 외부에서 부르는 자리는 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ce2bfd637d07067a5475165f4003236730f7af94b9df8416bab9ef28578a214d" },
+    // 발행이 세대를 따라오게 고치며(히스토리 클릭이 죽던 결함) 회귀 넷과 헬퍼 둘이 늘어 또 움직인다.
+    // count는 2 그대로다 — 테스트만 늘었다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c62598f492bfcdea23dcfa0801066cb1d5be01326e758236bd099c3fe821f7bb" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -249,9 +249,15 @@ fn clearScmResult(self: *AppSession) void {
 
 /// 소스 컨트롤 도크의 스냅샷 세대를 올린다. 늦게 도착한 포인터가 옛 목록의 행 인덱스로 엉뚱한 파일을
 /// 열지 못하게 하는 유일한 장치다. **그리는 쪽에서 올리면 안 된다** — 그 프레임의 클릭이 전부 거부된다.
+///
+/// **다시 그리기를 함께 세운다.** 세대를 올린 순간부터 그 화면의 클릭은 표가 새 세대로 **다시 발행될
+/// 때까지** 거부되는데, 그 발행은 렌더가 도는 프레임에만 일어난다 — `metal_dirty`가 안 서면 표가 영영
+/// 안 따라오고 클릭이 죽은 채로 남는다. 지금까지는 호출부 넷이 저마다 세우고 있었을 뿐이라 **하나만
+/// 빠져도** 같은 버그가 조용히 돌아왔다. 그 짝을 호출 규약이 아니라 이 함수가 진다.
 pub fn bumpScmDockGeneration(self: *AppSession) void {
     self.scm_dock_snapshot_generation +%= 1;
     if (self.scm_dock_snapshot_generation == 0) self.scm_dock_snapshot_generation = 1;
+    self.metal_dirty = true;
 }
 
 /// 이미 비어 있나. `.none`이 매 tick 반복되므로 무효화가 한 번만 돌게 하는 가드다 — 없으면 `metal_dirty`가

@@ -55956,6 +55956,127 @@ test "커밋을 펼치면 턴 펼침이 접힌다(슬롯이 하나다) (P5 적�
     try std.testing.expectEqualStrings("abcdef1234567", session.scm_expanded_commit.?);
 }
 
+/// 히스토리 탭 커밋 줄 하나를 눌러 나온 intent. 발행된 rect로 좌표를 잡으므로 **그린 것과 같은 기하**를
+/// 지난다(제품 포인터 경로와 같은 자리).
+fn clickFirstHistoryRow(session: *AppSession) !?chrome.components.scm_dock.ids.Intent {
+    const content = dock_ops.dockGeometry(session).tree_content;
+    var row: ?chrome.ui.layout.UiRect = null;
+    for (session.scm_dock_entries.items) |e| {
+        if (e.id == chrome.components.scm_dock.build.NodeIds.item(0)) row = e.rect;
+    }
+    const r = row orelse return error.MissingCommitRow;
+    const x = @as(f64, @floatFromInt(content.x)) + r.x + r.width / 2;
+    const y = @as(f64, @floatFromInt(content.y)) + r.y + r.height / 2;
+    _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+    return scm_dock_ops.scmDockPointer(session, .up, x, y);
+}
+
+/// 히스토리 목록이 실린 소스 컨트롤 도크를 세우고 한 번 발행한다.
+fn openScmHistoryPublished(session: *AppSession, allocator: std.mem.Allocator, arena: std.mem.Allocator) !void {
+    try openScmDockWithCommitBox(session, allocator, arena);
+    // 커밋 제목은 **자리 표시자**다(이 테스트가 보는 것은 클릭 경로이지 글자가 아니다). ASCII로 둬서
+    // i18n 원장의 미번역 리터럴을 늘리지 않는다.
+    session.scm_log_text = try allocator.dupe(u8, "aaaaaaa1111\x1fp\x1fA\x1f1\x1f\x1ffirst\x1e" ++
+        "bbbbbbb2222\x1fp\x1fA\x1f2\x1f\x1fsecond\x1e");
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    scm_dock_ops.selectScmTab(session, .history);
+    try republishScmDock(session, arena, 0);
+}
+
+test "세대만 올라도 다음 발행이 표를 따라온다 — 히스토리 클릭이 죽지 않는다 (P4b 적대적 검증)" {
+    // `git status` 결과는 히스토리 목록을 **안 바꾼다**(`projectHistory`는 `git log`만 쓰고 브랜치 줄도
+    // 비운다). 그래서 그 결과가 도착해 **세대만** 오르면 tree가 그대로라 `frameEql`이 발행을 건너뛰었고,
+    // action 표가 옛 세대로 굳어 그 화면의 클릭이 **영영** stale로 거부됐다 — 커밋을 눌러도, 탭을 눌러도
+    // 아무 일이 없었다(사용자 보고 2026-08-20). 스크롤처럼 rect가 바뀌는 일이 있어야 겨우 풀렸다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmHistoryPublished(session, allocator, arena);
+
+    switch (try clickFirstHistoryRow(session) orelse return error.NoIntentBefore) {
+        .select_commit => {},
+        else => return error.UnexpectedIntent,
+    }
+
+    // 배경에서 `git status` 결과가 도착했다 = 세대만 오른다(히스토리 화면은 한 픽셀도 안 바뀐다).
+    git_ops.bumpScmDockGeneration(session);
+    try republishScmDock(session, arena, 0);
+
+    switch (try clickFirstHistoryRow(session) orelse return error.ClickDeadAfterBump) {
+        .select_commit => {},
+        else => return error.UnexpectedIntent,
+    }
+}
+
+test "세대가 오르고 아직 발행 전이면 옛 클릭은 거부된다(방어는 살아 있다) (P4b 적대적 검증)" {
+    // 위 회귀를 고치면서 세대 대조를 **무동작으로 만들지 않았는지**를 본다. 모델이 바뀐 뒤 표가 아직
+    // 그 세대로 다시 발행되지 않은 창에서는, intent가 싣는 자리(모델 인덱스·목록 자리)를 믿을 수 없으므로
+    // 거부가 맞다 — 이 테스트가 빨간불이면 늦은 클릭이 엉뚱한 커밋을 열 수 있다는 뜻이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmHistoryPublished(session, allocator, arena);
+
+    git_ops.bumpScmDockGeneration(session); // 목록이 새로 왔다 — 아직 다시 그리지 않았다
+    const clicked = try clickFirstHistoryRow(session);
+    try std.testing.expect(clicked == null);
+}
+
+test "세대를 올리면 다시 그리기가 함께 선다(표가 따라올 프레임이 보장된다) (P4b 적대적 검증)" {
+    // 세대만 오르고 `metal_dirty`가 안 서면 발행이 안 돌아 표가 **영영** 옛 세대로 남는다. 지금까지는
+    // 호출부 넷이 저마다 세우고 있었을 뿐이라 하나만 빠져도 같은 버그가 조용히 돌아왔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.metal_dirty = false;
+    git_ops.bumpScmDockGeneration(session);
+    try std.testing.expect(session.metal_dirty);
+}
+
+test "같은 화면을 다시 발행해도 누르고 있던 클릭은 살아 있다 (frameEql의 몫)" {
+    // 표를 무조건 갱신하도록 바꾸면서 `capture`까지 함께 버리면, 방금 누른 행이 AppKit의 mouse-up 전에
+    // 취소된다 — `frameEql`이 원래 막던 것이 그것이다. 두 관심사를 갈랐지 없앤 것이 아님을 여기서 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmHistoryPublished(session, allocator, arena);
+
+    const content = dock_ops.dockGeometry(session).tree_content;
+    var row: ?chrome.ui.layout.UiRect = null;
+    for (session.scm_dock_entries.items) |e| {
+        if (e.id == chrome.components.scm_dock.build.NodeIds.item(0)) row = e.rect;
+    }
+    const r = row orelse return error.MissingCommitRow;
+    const x = @as(f64, @floatFromInt(content.x)) + r.x + r.width / 2;
+    const y = @as(f64, @floatFromInt(content.y)) + r.y + r.height / 2;
+
+    _ = scm_dock_ops.scmDockPointer(session, .down, x, y); // 누른 채로
+    try republishScmDock(session, arena, 0); // 같은 화면이 다시 발행된다
+    try std.testing.expect(session.scm_dock_interaction.capture != null);
+    switch (scm_dock_ops.scmDockPointer(session, .up, x, y) orelse return error.CaptureLost) {
+        .select_commit => {},
+        else => return error.UnexpectedIntent,
+    }
+}
+
 test "에이전트 탭: 턴 파일 클릭은 **턴 비교**를 연다 (P5 적대적 검증)" {
     // 같은 줄 모양을 두 탭이 쓰지만 여는 비교가 다르다 — 구분이 없으면 intent가 커밋 경로로만 가서
     // 턴 파일 클릭이 **아무 일도 안 한다**.

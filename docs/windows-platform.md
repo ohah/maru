@@ -1014,6 +1014,32 @@ Windows 에서는 **하나도 안 돌았다** — 그 상태로 Windows 갈래�
 이 파일만 도는 테스트 산출물을 `build.zig` 가 **모든 호스트**에 매단다. 파일 위치가
 `platform/macos/` 인 것은 이제 이름과 안 맞는다 — 옮기는 것은 소비자가 생기는 W8.2 와 함께 볼 일이다.
 
+### 2m.4 파일 트리 데이터 경로가 Windows 에서 끝까지 흐른다 (W8.2 ⒜, 실측 2026-08-20)
+
+W8.1 이 백엔드 한 겹(루트 검증·리프 열기)을 열었다. 그 위의 **중립 로직 전체**가 도는지는 별개 질문이라
+`maru win32-file-tree-smoke` 로 잰다 — 루트 등록(`replaceExplicitRoots`) → 백엔드 스캔 →
+`applySnapshotWithIdentity` → `buildRows`.
+
+**그림보다 계약이 먼저다**(§2a 가 프레임으로 물었던 것과 같은 순서). 화면에 붙이기 전에 데이터가
+끝까지 가는지를 본다.
+
+```text
+maru.win32-file-tree-smoke.v1
+root=D:/ohah/maru/zig-out/maru-file-tree-smoke
+scan_entries=4 rows=6 dirs=1 files=3
+found: alpha=true beta=true hangul=true sub=true
+```
+
+**판정은 행 수가 아니라 내용이다.** 행이 몇 개인지만 세면 스캔이 빈 결과를 내도 초록으로 보인다 —
+이 저장소가 여러 번 밟은 부류다. 그래서 fixture 이름이 실제로 행에 있는지를 본다. 대조군으로
+확인했다: 스캔 결과를 트리에 안 넣으면 `rc=1`.
+
+**fixture 에 비-ASCII 이름을 하나 섞는다.** 백엔드가 WTF-8 경로를 끝까지 나르는지가 이 슬라이스의
+숨은 판정이고, 그것이 깨지면 한글 사용자 이름을 가진 기기에서 파일 패널이 통째로 빈다.
+
+**남은 것은 ⒝ 그리기다.** chrome 은 이미 Windows 로 컴파일되므로(§2m) 행을 프레임으로 낮추는 배선이
+남았고, 그 앞에 `std.fs.path.join` 제품 자리 둘을 봐야 한다(§2m.3).
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -1081,7 +1107,7 @@ Windows 에서는 **하나도 안 돌았다** — 그 상태로 Windows 갈래�
 |---|---|---|
 | **W8.0** | **게이트를 먼저 넓힌다** — `check-targets` 가 ADE 표면(chrome 도크 셋·백엔드 공개 표면)을 **명시 참조로 강제 분석**하게 한다. 안 하면 W8 의 나머지가 검증 없이 쌓인다(§2m.2) | 없음 |
 | **W8.1** | **파일 트리 백엔드가 Windows 에서 돈다** — 완료. 아래 §2m.3 | W8.0 |
-| **W8.2** | **파일 패널 표면** — 중립 `file_panel_bridge`·`file_tree` 를 Win32 호스트에 배선하고 chrome 이 그린다 | W8.1 |
+| **W8.2** | **파일 패널 표면** — ⒜ 데이터 경로(스캔→트리→행)를 Win32 에서 끝까지 흘린다(**완료**, §2m.4) ⒝ chrome 이 그것을 그린다(다음) | W8.1 |
 | **W8.3** | **에디터 표면** — `session/editor/` 는 이미 중립이다. 배선과 입력 라우팅 | W8.2 |
 | **W8.4** | **소스 컨트롤** — `git_backend` 의 Windows 프로세스 러너(`fork`/`execve`/`pipe` → `CreateProcessW` + 파이프). §4 의 spawn 절차를 재사용한다. **세 백엔드 중 유일하게 진짜 포팅이다** | W8.1 |
 | **W8.5b** | **에이전트 도크** — `agent_*` 백엔드 셋 | W8.2 |

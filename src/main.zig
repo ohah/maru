@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
 const win32_window = @import("platform/windows/win32_window.zig");
@@ -101,6 +102,10 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
+        try runWin32FileTreeSmoke(io, allocator, stdout, stderr);
+        return;
+    }
     if (std.mem.eql(u8, command, "win32-terminal-smoke")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runWin32TerminalSmoke(io, allocator, stdout, stderr);
@@ -1091,6 +1096,130 @@ fn runWin32ClipboardSmoke(
     try stdout.flush();
     try stderr.flush();
     if (failed > 0 or errors > 0) return error.ClipboardRoundtripFailed;
+}
+
+/// `maru win32-file-tree-smoke` — W8.2. **중립 파일 트리가 Windows 에서 실제 디렉터리를 훑는다.**
+///
+/// W8.1 이 백엔드 한 겹(루트 검증·리프 열기)을 열었고, 여기서는 그 위의 **중립 로직 전체**를 돌린다:
+/// 루트 등록 → 백엔드 스캔 → `applySnapshotWithIdentity` → `buildRows`. 즉 파일 패널이 화면에 붙기
+/// 전에 **데이터가 끝까지 흐르는지**를 먼저 본다(§2a 가 프레임으로 물었던 것과 같은 순서 — 그림보다
+/// 계약이 먼저다).
+///
+/// **판정은 행 수가 아니라 내용이다.** 행이 몇 개인지만 세면 스캔이 빈 결과를 내도 "성공" 처럼 보인다
+/// (이 저장소가 여러 번 밟은 부류). 그래서 만든 fixture 의 이름들이 실제로 행에 있는지를 본다.
+///
+/// 스캔은 백엔드의 워커 스레드가 돌리므로 `takeResult` 를 폴링한다 — 상한 안에 안 오면 **실패**다(행은
+/// CI 에서 실패보다 나쁘다, §4 의 같은 규율).
+fn runWin32FileTreeSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-file-tree-smoke: Windows only\n");
+        return error.UnsupportedPlatform;
+    }
+
+    // ── fixture ─────────────────────────────────────────────────────────────────────────────
+    // 실제 디렉터리를 만든다. 이름을 **비-ASCII 하나** 섞는다 — 백엔드가 WTF-8 경로를 끝까지 나르는지가
+    // 이 슬라이스의 숨은 판정이고, 그것이 깨지면 한글 사용자 이름에서 파일 패널이 통째로 빈다.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_native = cwd_buf[0..try std.Io.Dir.cwd().realPath(io, &cwd_buf)];
+    const base = try maru.path_shape.normalizeSeparators(allocator, base_native);
+    defer allocator.free(base);
+    const root_path = try std.fmt.allocPrint(allocator, "{s}/zig-out/maru-file-tree-smoke", .{base});
+    defer allocator.free(root_path);
+
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, root_path) catch {};
+    try cwd.createDirPath(io, root_path);
+    const sub = try std.fmt.allocPrint(allocator, "{s}/sub", .{root_path});
+    defer allocator.free(sub);
+    try cwd.createDirPath(io, sub);
+    for ([_][]const u8{ "alpha.txt", "beta.md", "\u{d55c}\u{ae00}.txt" }) |name| {
+        const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_path, name });
+        defer allocator.free(p);
+        try cwd.writeFile(io, .{ .sub_path = p, .data = "x" });
+    }
+
+    // ── 중립 트리 + 백엔드 ───────────────────────────────────────────────────────────────────
+    var tree = maru.session.file_tree.Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{root_path});
+
+    var backend = try file_tree_backend.Backend.init(allocator, io);
+    defer backend.deinit();
+
+    const owned = try allocator.dupe(u8, root_path);
+    if (!backend.submit(owned, 0)) {
+        allocator.free(owned);
+        try stderr.writeAll("maru win32-file-tree-smoke: could not submit the scan\n");
+        return error.ScanSubmitFailed;
+    }
+
+    // **상한을 실제로 강제한다.** 결과가 안 오면 행이 아니라 실패다.
+    var rounds: usize = 0;
+    var scanned = false;
+    var entry_count: usize = 0;
+    while (rounds < 2000) : (rounds += 1) {
+        if (backend.takeResult()) |taken| {
+            var result = taken;
+            defer result.deinit(allocator, io);
+            if (!result.ok) {
+                try stderr.print("maru win32-file-tree-smoke: scan failed for {s}\n", .{result.path});
+                return error.ScanFailed;
+            }
+            entry_count = result.entries.items.len;
+            var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+            defer inputs.deinit(allocator);
+            for (result.entries.items) |e| try inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity });
+            try tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items);
+            scanned = true;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    if (!scanned) {
+        try stderr.writeAll("maru win32-file-tree-smoke: the scan did not finish in time\n");
+        return error.ScanTimeout;
+    }
+
+    // ── 행을 만든다 ──────────────────────────────────────────────────────────────────────────
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(allocator);
+    try tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, &rows);
+
+    // ── 판정: 이름이 실제로 행에 있는가 ──────────────────────────────────────────────────────
+    var found_alpha = false;
+    var found_beta = false;
+    var found_hangul = false;
+    var found_sub = false;
+    var dirs: usize = 0;
+    var files: usize = 0;
+    for (rows.items) |row| {
+        switch (row) {
+            .directory => |d| {
+                dirs += 1;
+                if (std.mem.eql(u8, d.label, "sub")) found_sub = true;
+            },
+            .file => |f| {
+                files += 1;
+                if (std.mem.eql(u8, f.label, "alpha.txt")) found_alpha = true;
+                if (std.mem.eql(u8, f.label, "beta.md")) found_beta = true;
+                if (std.mem.eql(u8, f.label, "\u{d55c}\u{ae00}.txt")) found_hangul = true;
+            },
+            else => {},
+        }
+    }
+
+    try stdout.print("maru.win32-file-tree-smoke.v1\n", .{});
+    try stdout.print("root={s}\n", .{root_path});
+    try stdout.print("scan_entries={d} rows={d} dirs={d} files={d}\n", .{ entry_count, rows.items.len, dirs, files });
+    try stdout.print("found: alpha={} beta={} hangul={} sub={}\n", .{ found_alpha, found_beta, found_hangul, found_sub });
+    try stdout.flush();
+
+    // **내용으로 판정한다** — 행 수만 보면 빈 스캔도 성공처럼 보인다.
+    if (!(found_alpha and found_beta and found_hangul and found_sub)) {
+        try stderr.writeAll("maru win32-file-tree-smoke: fixture names are missing from the rows\n");
+        return error.RowsMissing;
+    }
+    try stderr.flush();
 }
 
 /// `maru win32-terminal-smoke` — W7.2c-2. **actual 터미널 화면이 Windows에 뜬다.**

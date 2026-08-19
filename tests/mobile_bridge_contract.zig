@@ -112,11 +112,12 @@ test "선택을 복사로 꺼낸다" {
     // **누르기 전에는 아무것도 안 나온다** — 선택이 있다고 저절로 복사되면 안 된다.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
 
-    // `copy` 는 표의 마지막이다. **밀어야 창 안에 들어온다** — 키가 손가락 크기라 폰 폭을 넘친다.
+    // **복사는 앱 바에 있다**(키바가 두 줄 격자가 되며 옮겼다 — 선택이 있을 때만 뜬다).
     const sent_before = bridge.maru_mobile_input("", 0);
-    keybarScrollToEnd();
-    const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
-    try std.testing.expectEqual(@as(u32, 1), keybarTap(c.x, c.y));
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const c = bridge.terminalCopyCenter() orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, c.x, c.y, now());
+    bridge.maru_mobile_pointer(2, 1, c.x, c.y, now());
     const n = bridge.maru_mobile_take_copy(&buf, buf.len);
     try std.testing.expectEqualStrings("copyme", buf[0..n]);
     // **copy 는 키를 안 보낸다.** 키 경로로 새면 코드포인트 0 이 인코더로 가서 `key_unknown_id`
@@ -455,56 +456,6 @@ test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
 // 쪽이 재므로 샐 수가 없다.
 //
 // **양쪽을 다 잰다.** "키바 제스처는 본문을 안 흘린다" 만 재면 **관성을 통째로 지워도 통과**한다.
-test "관성은 본문 제스처의 것이다 — 키바로 간 손짓은 본문을 안 흘린다" {
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
-    var i: u32 = 0;
-    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
-    bridge.maru_mobile_scroll(400); // 과거를 보는 자리 — 위아래로 움직일 수 있다
-    const parked = bridge.maru_mobile_view_offset();
-    try std.testing.expect(parked > 0);
-
-    keybarScrollToStart();
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-
-    // ① 키바를 비스듬히 튕긴다 — 가로로 밀되 세로 성분이 크다.
-    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    const k = keyCenter(vis);
-    bridge.maru_mobile_pointer(0, 11, k.x, k.y, now());
-    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
-    bridge.maru_mobile_pointer(1, 11, k.x - 60, k.y - 40, now());
-    bridge.maru_mobile_pointer(2, 11, k.x - 60, k.y - 40, now());
-    var f: u32 = 0;
-    while (f < 12) : (f += 1) _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(parked, bridge.maru_mobile_view_offset());
-
-    // ② 같은 세기로 **본문을** 튕기면 손을 뗀 뒤에도 흘러야 한다(관성이 살아 있다는 증거).
-    keybarScrollToStart();
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
-    bridge.maru_mobile_pointer(0, 12, q.x, q.y, now());
-    try std.testing.expectEqualStrings("body", bridge.currentRouteName());
-    bridge.maru_mobile_pointer(1, 12, q.x, q.y - 40, now());
-    bridge.maru_mobile_pointer(2, 12, q.x, q.y - 40, now());
-    const at_release = bridge.maru_mobile_view_offset();
-    f = 0;
-    while (f < 12) : (f += 1) _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expect(bridge.maru_mobile_view_offset() != at_release);
-
-    keybarScrollToStart();
-    endAnyGesture();
-    bridge.maru_mobile_scroll_to_bottom();
-    bridge.maru_mobile_clear_error();
-}
-
-// **관성은 유한한 거리에서 멈춘다.** 감쇠가 빠지면 화면이 **영영 흐른다** — 그런데도 "떼고
-// 나서 움직였나" 만 재는 테스트는 전부 통과한다(움직이기는 하니까). 멈추는 것까지 재야 한다.
-// 정지 임계(`stop_below`)는 **눈에 보이는 성질이 아니다** — 그 아래로 남는 거리가 다 합쳐도
-// 6px(한 줄 미만)이라 지워도 화면은 같다. 계산을 끝내는 값이고, 무엇보다 본문·키바·설정이
-// 같은 곡선이어야 해서 `scroll_area.Touch` 의 것을 그대로 쓴다. 그래서 여기서 안 잰다.
 test "관성은 유한한 거리에서 멈춘다" {
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -694,54 +645,6 @@ test "소유권을 이어받아도 앞 손가락의 속도는 안 따라온다" 
 // 코어로 옮기면서 규칙이 "본문을 짚으면 본문이 선다" 로 좁혀졌다 — 흐르는 화면을 세우려고
 // 키를 누르는 사람은 없고, 키를 누르려던 사람이 화면까지 멈추기를 바라지도 않는다.
 // **행동이 바뀐 자리이므로 테스트로 적어 둔다**(사고가 아니라 결정이라는 뜻이다).
-test "흐르는 본문은 키바를 눌러도 안 서고, 본문을 짚으면 선다" {
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-    var i: u32 = 0;
-    while (i < 200) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
-    bridge.maru_mobile_scroll(600);
-    keybarScrollToStart();
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-
-    const q = pointForCell(4, 1) orelse return error.TestUnexpectedResult;
-    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    const k = keyCenter(vis);
-
-    // ① 본문을 튕기고, 흐르는 중에 **키바**를 누른다 — 계속 흘러야 한다.
-    bridge.maru_mobile_pointer(0, 31, q.x, q.y, now());
-    bridge.maru_mobile_pointer(1, 31, q.x, q.y + 40, now());
-    bridge.maru_mobile_pointer(2, 31, q.x, q.y + 40, now());
-    advanceFrame(402, 874, 16);
-    bridge.maru_mobile_pointer(0, 32, k.x, k.y, now());
-    try std.testing.expectEqualStrings("keybar", bridge.currentRouteName());
-    const at_press = bridge.maru_mobile_view_offset();
-    advanceFrame(402, 874, 16);
-    advanceFrame(402, 874, 16);
-    try std.testing.expect(bridge.maru_mobile_view_offset() != at_press);
-    bridge.maru_mobile_pointer(2, 32, k.x, k.y, now());
-    endAnyGesture();
-
-    // ② 같은 상황에서 **본문**을 짚으면 그 자리에 선다.
-    bridge.maru_mobile_pointer(0, 33, q.x, q.y, now());
-    bridge.maru_mobile_pointer(1, 33, q.x, q.y + 40, now());
-    bridge.maru_mobile_pointer(2, 33, q.x, q.y + 40, now());
-    advanceFrame(402, 874, 16);
-    bridge.maru_mobile_pointer(0, 34, q.x, q.y, now());
-    const stopped = bridge.maru_mobile_view_offset();
-    advanceFrame(402, 874, 16);
-    advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(stopped, bridge.maru_mobile_view_offset());
-
-    endAnyGesture();
-    bridge.maru_mobile_scroll_to_bottom();
-    bridge.maru_mobile_clear_error();
-}
-
-// **멈췄다 재개한 프레임이 화면을 날리면 안 된다.** 관성이 host 에 있을 때는 두 host 가 각자
-// `dt` 를 100ms 로 잘랐다 — 코어로 옮기면서 그 상한을 빠뜨렸다가 여기서 잡았다. 배경에 오래
-// 있다 온 프레임의 간격은 초 단위이고, 그것을 속도에 그대로 곱하면 한 프레임에 스크롤백
-// 끝까지 간다. `Touch.step` 이 [1,100] 으로 자르는 것과 같은 규칙이다.
 test "관성은 오래 멈췄다 온 프레임에 튀지 않는다" {
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -898,7 +801,8 @@ test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
     bridge.maru_mobile_clear_error();
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
 
-    const ctrl = keyCenter(2); // 표의 셋째가 ctrl
+    // **번호를 손으로 안 적는다** — 배열이 바뀌면 조용히 다른 키를 누른다(실제로 겪었다).
+    const ctrl = keyCenter(bridge.keybarIndexOf("ctrl") orelse return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(u32, 1), keybarTap(ctrl.x, ctrl.y));
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods()); // MARU_MOD_CTRL
 
@@ -926,7 +830,7 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
-    const ctrl = keyCenter(2);
+    const ctrl = keyCenter(bridge.keybarIndexOf("ctrl") orelse return error.TestUnexpectedResult);
     _ = keybarTap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
 
@@ -946,7 +850,7 @@ test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
 test "Ctrl 을 다시 누르면 꺼진다" {
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
-    const ctrl = keyCenter(2);
+    const ctrl = keyCenter(bridge.keybarIndexOf("ctrl") orelse return error.TestUnexpectedResult);
     _ = keybarTap(ctrl.x, ctrl.y);
     try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
     _ = keybarTap(ctrl.x, ctrl.y);
@@ -1163,20 +1067,21 @@ test "복사 버퍼가 모자라면 알린다" {
     bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
     holdPast(600);
     bridge.maru_mobile_pointer(2, 1, q.x, q.y, now()); // 손을 뗀다 — 선택은 남는다
-    keybarScrollToEnd(); // `copy` 는 줄 끝이라 밀어야 창 안에 들어온다
-    const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
+    // **복사는 앱 바에 있다**(키바가 두 줄 격자가 되며 옮겼다 — 선택이 있을 때만 뜬다).
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const c = bridge.terminalCopyCenter() orelse return error.TestUnexpectedResult;
 
     // ① 딱 맞으면 자르지 않고 알리지도 않는다.
     var exact: [6]u8 = undefined;
     bridge.maru_mobile_clear_error();
-    _ = keybarTap(c.x, c.y);
+    tapAt(c.x, c.y);
     try std.testing.expectEqual(@as(u32, 6), bridge.maru_mobile_take_copy(&exact, exact.len));
     try std.testing.expectEqualStrings("abcdef", &exact);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 
     // ② 한 칸 모자라면 채울 만큼 채우고 **알린다**.
     var small: [5]u8 = undefined;
-    _ = keybarTap(c.x, c.y);
+    tapAt(c.x, c.y);
     try std.testing.expectEqual(@as(u32, 5), bridge.maru_mobile_take_copy(&small, small.len));
     try std.testing.expectEqualStrings("abcde", &small);
     try std.testing.expectEqualStrings("copy_truncated", std.mem.span(bridge.maru_mobile_last_error()));
@@ -1922,10 +1827,9 @@ test "재현: 복사가 잘려도 유효한 UTF-8 만 내준다" {
     // copy 키를 눌러 코어가 추출하게 한다. **눌렸는지 단언한다** — 키가 창 밖이면 탭이
     // 빗나가고 그러면 아래 검사가 통째로 건너뛰어져 **통과가 보장된 테스트**가 된다
     // (앞 테스트가 키바를 미는 바람에 실제로 한 번 그렇게 됐다).
-    keybarScrollToEnd();
-    const copy_i = bridge.maru_mobile_keybar_count() - 1;
-    const c = keyCenter(copy_i);
-    try std.testing.expectEqual(@as(u32, 1), keybarTap(c.x, c.y));
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const c = bridge.terminalCopyCenter() orelse return error.TestUnexpectedResult;
+    tapAt(c.x, c.y);
 
     var out: [8]u8 = undefined; // 3의 배수가 아니라 한글이면 반드시 중간에서 잘린다
     const n = bridge.maru_mobile_take_copy(&out, out.len);
@@ -2350,6 +2254,15 @@ test "config 를 여러 번 갈아 끼워도 값이 매번 따라온다" {
     bridge.maru_mobile_load_config(empty, 0);
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
+}
+
+fn findToggleY(win_h: u32) ?f32 {
+    var y: f32 = 0;
+    while (y < @as(f32, @floatFromInt(win_h))) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind == .toggle) return y;
+    }
+    return null;
 }
 
 test "설정 줄은 스키마에서 나온다 — 무엇이 나오는지 값으로 본다" {
@@ -2880,67 +2793,6 @@ test "설정 목록은 손가락을 따라 움직이고 떼면 미끄러진다" 
 // "세우려던 것"이고, 그 자리에 있던 키가 나가면 **누른 적 없는 입력이 터미널에 간다**. 스크롤
 // 컴포넌트로 옮기면서 `begin()` 이 관성을 죽이지만 그 사실을 호출자에게 안 알려 줘서, 브리지는
 // 여전히 눌림을 잡고 뗄 때 키를 보내고 있었다.
-test "흐르는 키바를 짚으면 멈추기만 하고 키는 안 나간다" {
-    _ = bridge.maru_mobile_build(402, 874, now());
-    bridge.maru_mobile_clear_error();
-    keybarScrollToStart();
-
-    // **끝까지 밀지 않는다** — 끝에 닿으면 관성이 그 자리에서 죽어 재현이 안 된다.
-    const c = keyCenter(0);
-    bridge.maru_mobile_pointer(0, 1, c.x, c.y, now());
-    var x = c.x;
-    var step: u32 = 0;
-    while (step < 5) : (step += 1) {
-        x -= 20;
-        bridge.maru_mobile_pointer(1, 1, x, c.y, now());
-        // **move 사이에 프레임을 돌린다.** 안 그러면 100px 이 한 프레임에 들어간 것이 되어
-        // 6px/ms 짜리 손짓이 된다 — 실기기에서는 프레임마다 몇 표본씩 온다.
-        _ = bridge.maru_mobile_build(402, 874, now());
-    }
-    bridge.maru_mobile_pointer(2, 1, x, c.y, now()); // 뗀다 — 여기서 관성이 시작된다
-
-    // 정말 흐르고 있는지부터 값으로 본다(안 흐르면 이 테스트는 아무것도 안 재는 것이다).
-    // **화면에 남아 있는 키**로 잰다 — 밀려 나간 키는 rect 가 0 이라 늘 같은 값이 나온다.
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const vis = firstVisibleKey().?;
-    const a = keyCenter(vis).x;
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const b = keyCenter(vis).x;
-    try std.testing.expect(a != b);
-
-    // 흐르는 중에 보이는 키 하나를 짚었다 뗀다.
-    const t = keyCenter(firstVisibleKey().?);
-    const before = bridge.maru_mobile_input("", 0);
-    bridge.maru_mobile_pointer(0, 1, t.x, t.y, now());
-    bridge.maru_mobile_pointer(2, 1, t.x, t.y, now());
-
-    // ① 멈춘다 — 두 프레임 사이에 자리가 안 바뀐다.
-    _ = bridge.maru_mobile_build(402, 874, now());
-    const stop_key = firstVisibleKey().?;
-    const c1 = keyCenter(stop_key).x;
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expectEqual(c1, keyCenter(stop_key).x);
-
-    // ② 그 짚음으로는 **한 바이트도 안 나간다**.
-    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0));
-    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
-}
-
-// 같은 규칙이 설정 목록에도 있어야 한다 — 여기서는 **누른 적 없는 설정이 바뀐다**. 키바보다
-// 나쁘다: 터미널로 간 화살표는 대개 지나가지만, 뒤집힌 토글은 파일에 남는다.
-/// 화면에 보이는 **토글 줄**의 y. 없으면 null.
-///
-/// **줄 목록은 스키마에서 나온다** — 설정이 늘면 순서가 밀리고 "맨 위에 토글이 있다" 는 가정은
-/// 그때 조용히 깨진다(색 줄이 생기자 실제로 깨졌다). 가정 대신 찾고, 못 찾으면 실패한다.
-fn findToggleY(win_h: u32) ?f32 {
-    var y: f32 = 0;
-    while (y < @as(f32, @floatFromInt(win_h))) : (y += 4) {
-        const idx = bridge.settingsRowAt(200, y) orelse continue;
-        if (bridge.settingsRows()[idx].kind == .toggle) return y;
-    }
-    return null;
-}
-
 test "흐르는 설정 목록을 짚으면 멈추기만 하고 값은 안 바뀐다" {
     const small_h: u32 = 560; // 토글 줄까지 보이되 목록은 여전히 넘친다(내용 ~700)
     // **앞 테스트가 설정 화면을 열어 둔 채 끝났을 수 있다**(편집 중이면 pop 한 번은 편집만
@@ -3079,68 +2931,6 @@ test "키바: 누르면 눌린 티가 나고 밀면 사라진다" {
 
 // **흐르는 키바를 짚으면 눌린 티도 안 난다.** 결과(키가 안 나감)만 재면 `Press.end` 가 막아도
 // 통과하므로 표시를 따로 잰다 — 둘이 겹쳐 있어 한쪽만 깨면 안 드러난다(변이로 확인했다).
-test "키바: 흐르는 것을 세우는 짚음은 눌린 티가 안 난다" {
-    openTerminal(402, 874);
-    keybarScrollToStart();
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-
-    // **덜 세게 민다** — 한 번에 끝(최대 오프셋)까지 가면 관성이 갈 자리가 없어 "흐르고 있다"
-    // 가 거짓이 된다(그렇게 짰다가 걸렀다). move 사이에 프레임을 돌려야 속도가 선다.
-    const vis0 = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    const ky = keyCenter(vis0).y;
-    bridge.maru_mobile_pointer(0, 62, 340, ky, now());
-    bridge.maru_mobile_pointer(1, 62, 320, ky, now());
-    _ = bridge.maru_mobile_build(402, 874, now());
-    bridge.maru_mobile_pointer(1, 62, 300, ky, now());
-    _ = bridge.maru_mobile_build(402, 874, now());
-    bridge.maru_mobile_pointer(2, 62, 300, ky, now());
-    const at_release = bridge.keybarScrollPx();
-    _ = bridge.maru_mobile_build(402, 874, now());
-    try std.testing.expect(bridge.keybarScrollPx() != at_release); // 흐르고 있다
-
-    // 흐르는 중에 키 자리를 짚는다 — 세우기만 한다.
-    const v2 = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    const k2 = keyCenter(v2);
-    bridge.maru_mobile_pointer(0, 63, k2.x, k2.y, now());
-    try std.testing.expectEqual(@as(?usize, null), bridge.keybarPressed());
-
-    endAnyGesture();
-    keybarScrollToStart();
-    bridge.maru_mobile_clear_error();
-}
-
-// **이어받은 손가락은 키를 내지 않는다.** 소유자가 떠나면 남은 손가락이 제스처를 잇는데,
-// 그 손가락은 **아무것도 누른 적이 없다** — 그 자리에서 떼는 것으로 키가 나가면 밀다가 손을
-// 바꾼 사람에게 글자가 찍힌다.
-test "키바: 이어받은 손가락이 떼도 키가 안 나간다" {
-    openTerminal(402, 874);
-    keybarScrollToStart();
-    endAnyGesture();
-    _ = bridge.maru_mobile_build(402, 874, now());
-
-    const vis = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    const k = keyCenter(vis);
-    const before = bridge.maru_mobile_input("", 0);
-
-    // 첫 손가락이 짚고, 둘째가 다른 키 자리에 닿는다.
-    bridge.maru_mobile_pointer(0, 71, k.x, k.y, now());
-    const v2 = firstVisibleKey() orelse return error.TestUnexpectedResult;
-    _ = v2;
-    bridge.maru_mobile_pointer(0, 72, k.x + 60, k.y, now());
-    // **소유자가 떠난다** — 둘째가 이어받는다.
-    bridge.maru_mobile_pointer(2, 71, k.x, k.y, now());
-    // 이어받은 손가락이 그 자리에서 그대로 뗀다.
-    bridge.maru_mobile_pointer(2, 72, k.x + 60, k.y, now());
-    _ = bridge.maru_mobile_build(402, 874, now());
-
-    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0));
-
-    endAnyGesture();
-    keybarScrollToStart();
-    bridge.maru_mobile_clear_error();
-}
-
 test "키바: 둘째 손가락이 첫 손가락의 탭 판정을 오염시키지 않는다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
@@ -4380,4 +4170,111 @@ test "너무 긴 공개키는 안 받는다 — 자르지 않는다" {
     try std.testing.expectEqual(@as(usize, 0), bridge.publicKeyLine().len);
     bridge.maru_mobile_clear_error();
     bridge.maru_mobile_set_public_key(pub_line, pub_line.len); // 다음 테스트를 위해 되돌린다
+}
+
+// ── 비밀번호 묻기 (S6a-2) ────────────────────────────────────────────────────
+
+test "물으면 화면이 서고, 친 값은 한 번만 나간다" {
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+
+    bridge.maru_mobile_set_password_prompt(1);
+    try std.testing.expectEqualStrings("password", bridge.currentScreenName());
+    // **글자는 이 화면으로 간다** — 터미널로 새면 안 보이는 셸에 비밀번호가 실행된다.
+    _ = bridge.maru_mobile_input("pw123", 5);
+    try std.testing.expectEqual(@as(usize, 5), bridge.settingsEditLen());
+    _ = bridge.maru_mobile_key(1, 0, 0); // 엔터 = 접속
+
+    var out: [256]u8 = undefined;
+    const n = bridge.maru_mobile_take_password(&out, out.len);
+    try std.testing.expectEqualStrings("pw123", out[0..n]);
+    // **가져가면 사라진다**(계약 §3.4).
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_password(&out, out.len));
+    bridge.maru_mobile_set_password_prompt(0);
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+}
+
+test "취소하면 친 값이 안 나간다" {
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+    bridge.maru_mobile_set_password_prompt(1);
+    _ = bridge.maru_mobile_input("secret", 6);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen()); // 하드웨어 뒤로가기
+
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_password(&out, out.len));
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    // **다음 물음에 지난 값이 뜨면 안 된다.**
+    bridge.maru_mobile_set_password_prompt(1);
+    try std.testing.expectEqual(@as(usize, 0), bridge.settingsEditLen());
+    bridge.maru_mobile_set_password_prompt(0);
+}
+
+test "자리가 모자라면 자른 비밀번호를 안 준다" {
+    // 자르면 **사용자는 맞게 쳤는데 실패한다** — 그리고 그 실패는 오타처럼 보인다.
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+    bridge.maru_mobile_set_password_prompt(1);
+    _ = bridge.maru_mobile_input("0123456789", 10);
+    _ = bridge.maru_mobile_key(1, 0, 0);
+    bridge.maru_mobile_clear_error();
+    var small: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_password(&small, small.len));
+    try std.testing.expectEqualStrings("password_truncated", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    var out: [256]u8 = undefined;
+    _ = bridge.maru_mobile_take_password(&out, out.len); // 비운다
+    bridge.maru_mobile_set_password_prompt(0);
+}
+
+test "비밀번호 화면에서도 글자 키보드다" {
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+    bridge.maru_mobile_set_password_prompt(1);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_input_kind());
+    bridge.maru_mobile_set_password_prompt(0);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
+}
+
+test "화면의 취소 버튼도 친 값을 지운다" {
+    // 하드웨어 뒤로가기만 재면 **화면 버튼 경로가 비어 있는 것**을 못 본다(변이로 드러났다).
+    // 사용자가 실제로 누르는 자리는 이쪽이다.
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+    bridge.maru_mobile_set_password_prompt(1);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_input("secret", 6);
+
+    const c = bridge.passwordCancelCenter();
+    tapAt(c.x, c.y);
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_password(&out, out.len));
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    // **친 것도 남으면 안 된다** — 다음 물음에 지난 비밀번호가 떠 있으면 그것이 그대로 나간다.
+    try std.testing.expectEqual(@as(usize, 0), bridge.settingsEditLen());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 목적지도 거뒀다
+    bridge.maru_mobile_set_password_prompt(1);
+    try std.testing.expectEqual(@as(usize, 0), bridge.settingsEditLen());
+    bridge.maru_mobile_set_password_prompt(0);
+}
+
+test "화면의 접속 버튼이 친 값을 내보낸다" {
+    var pops: u32 = 0;
+    while (pops < 5) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openTerminal(402, 874);
+    bridge.maru_mobile_set_password_prompt(1);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_input("pw", 2);
+
+    const c = bridge.passwordOkCenter();
+    tapAt(c.x, c.y);
+    var out: [256]u8 = undefined;
+    const n = bridge.maru_mobile_take_password(&out, out.len);
+    try std.testing.expectEqualStrings("pw", out[0..n]);
+    bridge.maru_mobile_set_password_prompt(0);
 }

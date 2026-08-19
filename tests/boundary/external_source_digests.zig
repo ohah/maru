@@ -760,5 +760,5 @@ pub const inventory = [_]Proof{
     // 리베이스로 값이 수렴했다(2026-08-20): 모바일 편집 화면과 기준 고르기(§3.5)가 같은 표에 각각
     // 키를 더해 양쪽 digest 가 모두 낡았다. 사유는 위아래 둘 다 살아 있고 count 는 1 그대로다.
     // 그 수렴 값을 도구로 다시 재 넣었다 — 두 슬라이스의 키가 한 표에 함께 있는 상태의 해시다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "b1b69d6d803e9567eb365fcfececf72dd9ab30c518c6b6c0b626b8b0603c1a8a" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "fd00987ce8673488766c04dbf8b79cfe77e687bd6b2486d77372887e6b56e1c9" },
 };

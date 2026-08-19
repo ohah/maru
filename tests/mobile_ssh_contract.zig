@@ -340,8 +340,8 @@ test "닫자마자 같은 핸들로는 아무것도 못 한다" {
     try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_out_len(h));
 }
 
-test "상태 열두 개가 전부 헤더 값으로 나온다" {
-    // 하나만 재면 나머지 열한 개가 밀려도 초록이다 — **전수로** 돈다. 이름은 헤더의 상수 이름을
+test "상태 열넷이 전부 헤더 값으로 나온다" {
+    // 하나만 재면 나머지가 밀려도 초록이다 — **전수로** 돈다. 이름은 헤더의 상수 이름을
     // 코어 enum 이름에서 만든다(둘이 갈리면 여기서 걸린다).
     const h = try openReady();
     defer _ = ssh.maru_mobile_ssh_close(h);
@@ -357,7 +357,7 @@ test "상태 열두 개가 전부 헤더 값으로 나온다" {
         try expectHeader(name, ssh.maru_mobile_ssh_state(h));
         checked += 1;
     }
-    try testing.expectEqual(@as(usize, 13), checked); // 상태가 늘면 헤더도 늘어야 한다
+    try testing.expectEqual(@as(usize, 14), checked); // 상태가 늘면 헤더도 늘어야 한다
 }
 
 test "가져가지 않으면 멈춘다 — 잃지 않는다" {
@@ -417,7 +417,9 @@ test "오류는 하나도 빠짐없이 실패 코드로 내려온다" {
     inline for (@typeInfo(@typeInfo(@TypeOf(ssh.statusOf)).@"fn".params[0].type.?).error_set.?) |e| {
         const status = ssh.statusOf(@field(anyerror, e.name));
         try testing.expect(status < 0);
-        try testing.expect(status >= ssh.err_buffer and status <= ssh.err_bad_handle);
+        // **범위는 가장 작은 코드로 넓힌다** — 코드가 하나 늘 때 이 줄을 안 고치면 새 코드가
+        // "범위 밖" 으로 걸린다(비밀번호 변경 -9 가 그랬다).
+        try testing.expect(status >= ssh.err_password_change and status <= ssh.err_bad_handle);
         seen += 1;
     }
     try testing.expect(seen >= 40); // 48개 언저리 — 줄어들면 무엇이 사라졌는지 봐야 한다
@@ -434,6 +436,10 @@ test "host 가 분기하는 세 갈래가 제 코드로 온다" {
     try testing.expectEqual(ssh.err_not_ready, ssh.statusOf(error.NotReady));
     try testing.expectEqual(ssh.err_buffer, ssh.statusOf(error.ShortBuffer));
     try testing.expectEqual(ssh.err_protocol, ssh.statusOf(error.MalformedPacket));
+    // **비밀번호 만료는 인증 실패와 다른 코드다** — 사용자가 할 일이 "다시 치기" 가 아니라
+    // "서버에서 바꾸기" 라서, 같은 코드로 접으면 화면이 틀린 안내를 한다.
+    try testing.expectEqual(ssh.err_password_change, ssh.statusOf(error.PasswordChangeRequired));
+    try testing.expect(ssh.err_password_change != ssh.err_auth);
 }
 
 test "먼저 난 실패가 남는다" {
@@ -542,7 +548,7 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_last_error",             "maru_mobile_ssh_clear_error",
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
         "maru_mobile_ssh_rekeys",                 "maru_mobile_ssh_generate_key",
-        "maru_mobile_ssh_public_key_line",
+        "maru_mobile_ssh_public_key_line",        "maru_mobile_ssh_password",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -719,4 +725,27 @@ test "공개키 한 줄은 OpenSSH 형식 그대로다" {
     try testing.expectEqualStrings("ssh-ed25519", blob[4 .. 4 + 11]);
     // 그 뒤 32바이트가 공개키다 — `secret` 의 뒤 절반과 같아야 한다.
     try testing.expectEqualSlices(u8, secret[32..64], blob[n - 32 .. n]);
+}
+
+test "비밀번호 상태·코드는 헤더 숫자 그대로다" {
+    // **숫자가 갈리면 host 가 다른 뜻으로 읽는다** — "비밀번호를 물어야 한다" 를 "끝났다" 로
+    // 읽으면 화면이 아무것도 안 묻고 세션이 조용히 죽는다.
+    try testing.expectEqual(@as(u32, 13), c.MARU_SSH_STATE_PASSWORD_NEEDED);
+    try testing.expectEqual(@as(c_int, -9), c.MARU_SSH_ERR_PASSWORD_CHANGE);
+    try testing.expectEqual(ssh.err_password_change, c.MARU_SSH_ERR_PASSWORD_CHANGE);
+}
+
+test "그 자리가 아닌데 비밀번호를 넣으면 '아직 아니다' 다" {
+    // **'틀렸다' 가 아니다.** 같은 코드로 접으면 화면이 "비밀번호가 틀렸습니다" 를 보여 주고,
+    // 사용자는 맞는 값을 계속 다시 친다.
+    var entropy: [32]u8 = @splat(5);
+    var secret: [64]u8 = undefined;
+    var line: [256]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), ssh.maru_mobile_ssh_generate_key(&entropy, &secret, &line, line.len));
+    var h: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &secret, &entropy, "xterm", 5, 80, 24, 0, 1, &h));
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_password(h, "pw", 2));
+    // 핸들이 틀리면 그것대로 말한다.
+    try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_password(h + 1, "pw", 2));
 }

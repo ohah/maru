@@ -133,6 +133,10 @@ ListenAddress 127.0.0.1
 HostKey $DIR/hostkey
 PidFile $_pidfile
 LogLevel ERROR
+# **회차별 설정이 먼저 온다 — sshd 는 먼저 나온 값이 이긴다.** 뒤에 두면 아래 기본값이 이겨
+# 회차가 조용히 무력화된다(비밀번호 회차에서 `PasswordAuthentication yes` 가 그렇게 죽었다:
+# 서버는 키만 받고, 드라이버는 "물어야 했는데 안 물었다" 로만 알 수 있었다).
+$_extra
 StrictModes no
 UsePAM no
 PubkeyAuthentication yes
@@ -140,7 +144,6 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthorizedKeysFile $DIR/authorized_keys
 PermitRootLogin no
-$_extra
 ForceCommand $_cmd
 EOF
 		chmod 600 "$_conf"
@@ -250,6 +253,28 @@ start_sshd "$DIR/sshd6.pid" "$((PORT + 5))" "$DIR/sshd6.log" "true" "MaxAuthTrie
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 disconnect
 ROUNDS=$((ROUNDS + 1))
 
+# **여러 줄 설정은 변수에 담아 넘긴다.** 인자 안에 개행을 그대로 두면 셸이 그 뒤를 **명령으로**
+# 읽는다(실측: `PasswordAuthentication: command not found` — 그러고도 sshd 는 떠서, 회차는
+# "물어야 했는데 안 물었다" 로만 실패했다).
+PASSWORD_ONLY='PubkeyAuthentication no
+PasswordAuthentication yes'
+
+# 9b) **비밀번호 회차.** 서버가 키를 안 받고 `password` 만 열어 두면(`PubkeyAuthentication no`),
+#     코어는 `USERAUTH_FAILURE` 의 방법 목록을 보고 **멈춰서 물어야** 한다. 그 자리
+#     (`password_needed`)는 실서버로 여기 말고 밟는 데가 없다 — 없으면 "서버가 열어 둔 문 앞에서
+#     돌아서는" 결함이 다시 나도 아무도 모른다.
+#
+#     **붙는 것까지는 못 본다**: 진짜 계정 비밀번호가 필요한데 스모크는 그것을 모르고 사람에게
+#     물을 수도 없다. 드라이버가 틀린 값을 한 번 보내고 **실패로 끝나는 것**(되묻는 고리가
+#     아니다)까지 단언한다.
+start_sshd "$DIR/sshd6b.pid" "$((PORT + 11))" "$DIR/sshd6b.log" "true" "$PASSWORD_ONLY" || {
+	sed -n '1,5p' "$DIR/sshd6b.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 비밀번호 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 password
+ROUNDS=$((ROUNDS + 1))
+
 # 10) **모바일 ABI 회차(S9-2).** 위 아홉 회차는 코어(`client.zig`)를 직접 부르는 드라이버가
 #     돌린다 — 그 사이에 낀 `maru_mobile_ssh_*` 는 한 줄도 안 지난다. 기기에서 "안 된다" 가
 #     났을 때 가장 비싼 물음이 **프로토콜 탓이냐 배선 탓이냐**이고, ABI 만으로 한 번 붙여 두면
@@ -354,8 +379,8 @@ ROUNDS=$((ROUNDS + 1))
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 14 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 14 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 15 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 15 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열네 회차 완주"
+echo "[ssh-client-smoke] 열다섯 회차 완주"

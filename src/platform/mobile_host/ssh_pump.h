@@ -60,6 +60,10 @@ unsigned int maru_ssh_pump_state(void);
 /// **지금 돌고 있나.** 상태(`state`)로는 이것을 못 판단한다 — 끝난 세션도 `CLOSED` 를 들고
 /// 있어야 host 가 알림을 내릴 수 있기 때문이다. "다시 붙어도 되나" 는 이 함수가 답한다.
 int maru_ssh_pump_is_running(void);
+/// **사용자가 친 비밀번호를 넣는다**(상태가 `MARU_SSH_STATE_PASSWORD_NEEDED` 일 때). 펌프가
+/// 그 자리에서 기다리고 있다가 코어에 넘기고 **바로 지운다**(계약 §3.4 — 저장하지 않는다).
+/// 넣지 않으면 2분 뒤 `password_timeout` 으로 끝난다.
+int maru_ssh_pump_password(const char *password, unsigned int len);
 /// 지금 세션이 키를 몇 번 갈았나. 안 돌고 있으면 0.
 unsigned int maru_ssh_pump_rekeys(void);
 /// 마지막 실패 이름. 없으면 빈 문자열.

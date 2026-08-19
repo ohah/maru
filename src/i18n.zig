@@ -626,6 +626,12 @@ pub const Table = struct {
     mob_pubkey: [:0]const u8,
     mob_pubkey_copied: [:0]const u8,
     mob_pubkey_absent: [:0]const u8,
+    mob_password_title: [:0]const u8,
+    mob_password_hint: [:0]const u8,
+    mob_password_empty: [:0]const u8,
+    mob_password_ok: [:0]const u8,
+    mob_password_cancel: [:0]const u8,
+    mob_copy: [:0]const u8,
     mob_appearance: [:0]const u8,
 
     // ── 작업공간 복원 (I3f) ──
@@ -1011,6 +1017,12 @@ pub const en: Table = .{
     .mob_pubkey = "This device's public key",
     .mob_pubkey_copied = "Copied - paste into authorized_keys",
     .mob_pubkey_absent = "no key yet",
+    .mob_password_title = "Password",
+    .mob_password_hint = "The server asks for a password. It is not stored.",
+    .mob_password_empty = "type it",
+    .mob_password_ok = "Connect",
+    .mob_password_cancel = "Cancel",
+    .mob_copy = "copy",
     .mob_appearance = "Appearance",
     .ws_restore_incomplete = "The saved workspace was only partially restored — on quit the previous checkpoint is kept as workspace.v1.bak before saving.",
     .grant_scope_storage = "read and write this site's cookies and storage (including login tokens)",
@@ -1510,6 +1522,12 @@ pub const ko: Table = .{
     .mob_pubkey = "이 기기의 공개키",
     .mob_pubkey_copied = "복사했다 — authorized_keys 에 붙인다",
     .mob_pubkey_absent = "아직 키가 없다",
+    .mob_password_title = "비밀번호",
+    .mob_password_hint = "서버가 비밀번호를 요구한다. 저장하지 않는다.",
+    .mob_password_empty = "여기에 친다",
+    .mob_password_ok = "접속",
+    .mob_password_cancel = "취소",
+    .mob_copy = "복사",
     .mob_appearance = "모양",
     .ws_restore_incomplete = "저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.",
     .grant_scope_storage = "이 사이트의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
@@ -1649,7 +1667,14 @@ pub const ko: Table = .{
 };
 
 /// 키 목록은 `Table`에서 **자동 파생**한다 — 손으로 두 벌 유지하면 그 둘이 갈리는 순간 조용히 어긋난다.
-pub const Key = std.meta.FieldEnum(Table);
+///
+/// **분기 한도를 올린다.** 이 파생은 필드 수만큼 comptime 루프를 도는데(`std.meta.FieldEnum` →
+/// `std.simd.iota`), 표가 자라 기본값(1000)을 넘겼다 — 넘긴 순간 **이 파일을 쓰는 모든 모듈이
+/// 컴파일 실패**한다(모바일 브리지에서 그렇게 드러났다). 표는 앞으로도 자라므로 넉넉히 둔다.
+pub const Key = blk: {
+    @setEvalBranchQuota(20_000);
+    break :blk std.meta.FieldEnum(Table);
+};
 
 /// 현재 언어. **UI 스레드가 소유한다**(계약 §5.2) — 쓰기는 config 로드·설정 변경 경로에서만이고, 읽기는
 /// 문자열을 DrawList로 옮기는 락 아래 구간이다. 렌더 스레드는 이 값을 보지 않고 이미 해석된 슬라이스만

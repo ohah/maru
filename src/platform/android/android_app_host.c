@@ -120,6 +120,7 @@ static void raiseKeyboardIfAsked(void);
 static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
 static void publishPublicKey(struct android_app *app);
+static void drainPassword(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -741,6 +742,7 @@ static void drawFrame(void) {
     syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
     raiseKeyboardIfAsked();
     startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
+    drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1043,6 +1045,9 @@ static void ssh_state(void *ctx, unsigned int state) {
     // 아무 데도 안 가고 조용히 쌓인다.
     pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+    // **비밀번호를 물어야 하면 화면을 연다** — 그 자리에서 펌프가 기다리고 있다. 벗어나면 끈다:
+    // 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
+    maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
     pthread_mutex_unlock(&g_bridge_lock);
     if (state != MARU_SSH_STATE_CLOSED) return;
     // **끝났으면 서비스를 내린다.** 안 내리면 알림이 "유지 중" 인 채로 남아, 끊긴 것을 알리는
@@ -1613,6 +1618,19 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         return 1;
     }
     return 0;
+}
+
+/// **사용자가 친 비밀번호를 펌프로 넘긴다.** 화면(브리지)이 받아 두고 여기서 가져간다 —
+/// 브리지엔 소켓이 없고 펌프엔 화면이 없다. 넘긴 뒤 **자기 사본을 지운다**(계약 §3.4).
+static void drainPassword(void) {
+    unsigned char pw[256];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long n = maru_mobile_take_password(pw, sizeof pw);
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (n == 0) return;
+    maru_ssh_pump_password((const char *)pw, (unsigned int)n);
+    memset(pw, 0, sizeof pw);
+    LOGI("MARU_SSH password_supplied bytes=%lu", n);
 }
 
 /// **이 기기의 공개키 한 줄을 브리지에 알린다**(화면이 그것을 보여 주고 복사한다 — S9c-4).

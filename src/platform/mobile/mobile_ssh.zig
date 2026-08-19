@@ -40,6 +40,7 @@ pub const err_auth: c_int = -5;
 pub const err_protocol: c_int = -6;
 pub const err_not_ready: c_int = -7;
 pub const err_buffer: c_int = -8;
+pub const err_password_change: c_int = -9;
 
 /// 세션 하나. **자리를 고정해서 든다** — `client.Client` 는 교환 해시에 쓸 원문을 안에 들고 있어
 /// 복사·이동하면 어긋난다(계약 §3.5). 그래서 전역 배열이고, 핸들은 그 자리의 번호다.
@@ -118,6 +119,8 @@ pub fn statusOf(e: client.Error) c_int {
         => err_host_key,
         // 인증.
         error.AuthFailed, error.UnexpectedService => err_auth,
+        // **비밀번호 만료는 인증 실패와 다르다** — 다시 쳐도 안 되고 서버에서 바꿔야 한다.
+        error.PasswordChangeRequired => err_password_change,
         // host 가 준 값이 이상하다(키 바이트).
         error.BadSeed, error.BadPrivateKey => err_bad_arg,
         // 아직 못 쓴다.
@@ -178,6 +181,7 @@ fn stateOf(st: client.State) u32 {
         .awaiting_new_keys => 5,
         .requesting_service => 6,
         .authenticating => 7,
+        .password_needed => 13,
         .opening_channel => 8,
         .requesting_pty => 9,
         .starting_shell => 10,
@@ -602,6 +606,27 @@ pub export fn maru_mobile_ssh_host_key_fingerprint(handle: u32) [*:0]const u8 {
 pub export fn maru_mobile_ssh_accept_host_key(handle: u32) c_int {
     const s = slotOf(handle) orelse return err_bad_handle;
     s.cl.acceptHostKey();
+    return ok;
+}
+
+/// **사용자가 친 비밀번호를 넣는다**(`password_needed` 에서만). 코어가 요청 패킷으로 만들어
+/// `out` 에 쌓고, 만든 자리를 지운다 — 이 층에도 남기지 않는다(계약 §3.4).
+pub export fn maru_mobile_ssh_password(handle: u32, password: [*]const u8, len: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    // **`out` 에 쌓는다** — 다른 걸음과 같은 자리로 나가야 host 가 보내는 코드를 한 벌만 든다.
+    var scratch: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch); // 요청에는 비밀번호가 들어 있다
+    const wire = s.cl.providePassword(password[0..len], &scratch) catch |e| {
+        setError(s, @errorName(e));
+        // 그 자리가 아니면 "아직 아니다" 다 — 비밀번호가 틀렸다는 뜻이 아니다.
+        return if (e == client.Error.UnexpectedMessage) err_not_ready else statusOf(e);
+    };
+    if (s.out_len + wire.len > s.out.len) {
+        setError(s, "out_full");
+        return err_buffer;
+    }
+    @memcpy(s.out[s.out_len..][0..wire.len], wire);
+    s.out_len += wire.len;
     return ok;
 }
 

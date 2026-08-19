@@ -396,6 +396,10 @@ unsigned int maru_mobile_hit_cell(float x, float y);
 /// 셸이 떴다 — 화면 바이트가 오고 키 입력을 보낼 수 있다.
 #define MARU_SSH_STATE_READY 11
 #define MARU_SSH_STATE_CLOSED 12
+/// **비밀번호를 사용자에게 물어야 한다.** 키가 거절됐고 서버가 `password` 를 열어 뒀다 —
+/// `maru_mobile_ssh_password` 를 부르기 전에는 한 발도 안 나간다(호스트키 승인과 같은 모양).
+/// 비밀번호를 코어가 안 들고 있기 때문이다(계약 §3.4: 저장하지 않는다 — 묻고 지운다).
+#define MARU_SSH_STATE_PASSWORD_NEEDED 13
 /// 핸들이 틀렸다(이미 닫았거나 세대가 지났다).
 #define MARU_SSH_STATE_INVALID 0xFFFFFFFFu
 
@@ -414,6 +418,9 @@ unsigned int maru_mobile_hit_cell(float x, float y);
 #define MARU_SSH_ERR_NOT_READY (-7)
 /// 버퍼가 찼다 — **오류가 아니라 배압이다.** `out`·`screen` 을 비우고 다시 부른다.
 #define MARU_SSH_ERR_BUFFER (-8)
+/// **서버가 비밀번호를 바꾸라고 한다**(RFC 4252 §8 — 만료된 계정). `MARU_SSH_ERR_AUTH` 와
+/// 가르는 이유는 사용자가 할 일이 다르기 때문이다 — 다시 쳐도 안 되고, 서버에서 바꿔야 한다.
+#define MARU_SSH_ERR_PASSWORD_CHANGE (-9)
 
 /// 세션을 연다. 성공이면 `*out_handle` 에 핸들이 들어가고 **버전 줄이 이미 `out` 에 쌓여 있다** —
 /// 여는 것과 첫 바이트를 내는 것을 나누면 host 가 한쪽을 잊는다.
@@ -425,6 +432,14 @@ int maru_mobile_ssh_open(const unsigned char *user, unsigned int user_len,
                          const unsigned char *term, unsigned int term_len,
                          unsigned int cols, unsigned int rows, unsigned int window,
                          unsigned int pty, unsigned int *out_handle);
+/// **사용자가 친 비밀번호를 넣는다**(`MARU_SSH_STATE_PASSWORD_NEEDED` 에서만 뜻이 있다).
+/// 코어는 그 값을 **안 들고 있는다** — 요청 패킷으로 만들어 `out` 에 내보내고 만든 자리를 지운다.
+/// host 도 넘긴 뒤 자기 버퍼를 지운다(계약 §3.4).
+///
+/// 그 자리가 아니면 `MARU_SSH_ERR_NOT_READY`. 보낼 바이트는 `out` 에 쌓이므로 평소처럼
+/// `out_ptr`/`out_len`/`out_consume` 로 내보낸다.
+int maru_mobile_ssh_password(unsigned int handle, const unsigned char *password, unsigned int len);
+
 /// 닫는다. **비밀을 지운다**(개인키·세션키). 이미 닫힌 핸들이면 `MARU_SSH_ERR_BAD_HANDLE`.
 int maru_mobile_ssh_close(unsigned int handle);
 /// 지금 상태(`MARU_SSH_STATE_*`). 핸들이 틀리면 `MARU_SSH_STATE_INVALID`.
@@ -550,6 +565,16 @@ unsigned int maru_mobile_take_server_connect(void);
 /// 길이가 자리보다 길면 **안 받고** `public_key_too_long` 을 남긴다 — 반쪽 공개키를 서버에
 /// 붙이면 조용히 안 먹는다.
 void maru_mobile_set_public_key(const unsigned char *bytes, unsigned long len);
+
+/// **비밀번호를 물어야 한다고 알린다**(1=물어라, 0=끝났다). host 가 세션 상태
+/// (`MARU_SSH_STATE_PASSWORD_NEEDED`)를 보고 켜고, 세션이 그 자리를 벗어나면 끈다 —
+/// **끄는 것도 host 몫**이다: 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
+void maru_mobile_set_password_prompt(unsigned int wanted);
+
+/// 사용자가 친 비밀번호를 가져간다(없으면 0). **가져가면 사라진다** — 브리지에도 안 남는다
+/// (계약 §3.4: 저장하지 않는다). 자리가 모자라면 **0 이고 아무것도 안 준다**: 자르면 틀린
+/// 비밀번호를 보내는 셈이라 사용자는 맞게 쳤는데 실패한다.
+unsigned long maru_mobile_take_password(unsigned char *out, unsigned long cap);
 
 /// 지금 터미널 격자(열·행). 원격에 알릴 pty 크기는 **코어가 들고 있는 값**이어야 한다 —
 /// host 가 따로 세면 그리는 격자와 원격이 믿는 크기가 갈린다. 화면이 아직 없으면 0.

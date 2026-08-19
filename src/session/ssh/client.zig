@@ -35,6 +35,11 @@ pub const Error = error{
     HostKeyChanged,
     /// 인증이 거절됐다.
     AuthFailed,
+    /// **서버가 비밀번호를 바꾸라고 한다**(RFC 4252 §8 — 만료된 계정). 우리는 바꾸는 대화를
+    /// 안 하므로 여기서 끝낸다 — 다만 `AuthFailed` 와 **다른 이름**이다: 사용자가 할 일이
+    /// "다시 쳐 보기" 가 아니라 "서버에서 비밀번호를 바꾸기" 라서, 같은 이름으로 묶으면
+    /// 화면이 틀린 안내를 하게 된다.
+    PasswordChangeRequired,
     /// 서버가 채널을 안 열어 줬다.
     ChannelRefused,
     /// 채널 요청(`pty-req`·`shell`)이 거절됐다.
@@ -72,6 +77,13 @@ pub const State = enum {
     requesting_service,
     /// 인증 결과를 기다린다.
     authenticating,
+    /// **비밀번호를 사용자에게 물어야 한다.** 키로 거절당했고 서버가 `password` 를 열어 뒀다 —
+    /// `providePassword` 를 부르기 전에는 한 발도 안 나간다(호스트키 승인과 같은 모양).
+    ///
+    /// 이 자리에서 멈추는 이유는 **비밀번호를 코어가 들고 있지 않기 때문**이다. 계약(§3.4)이
+    /// "저장하지 않는다 — 접속할 때마다 묻고 지운다" 로 정해 두었고, 그러면 물을 수 있는 것은
+    /// 화면을 가진 쪽뿐이다.
+    password_needed,
     /// 채널 열기 확인을 기다린다.
     opening_channel,
     /// `pty-req` 답을 기다린다.
@@ -210,6 +222,13 @@ pub const Client = struct {
     host_key_len: usize = 0,
     host_key_accepted: bool = false,
 
+    /// 방금 보낸 인증 방식. **응답 파싱이 이 값을 본다** — §7(`PK_OK`)과 §8(비밀번호 변경 요구)이
+    /// 같은 번호(60)를 서로 다르게 읽으므로, 무엇을 보냈는지 모르면 답을 오해한다.
+    auth_method: userauth.Method = .publickey,
+    /// 비밀번호를 한 번이라도 보냈나. **다시 묻지 않기 위한 것**이다 — 서버는 틀린 비밀번호에도
+    /// 같은 방법 목록을 돌려주므로(RFC 4252 §5.1), 안 세면 되묻는 고리가 된다.
+    password_tried: bool = false,
+
     /// 재키잉 중에 미뤄 둔 채널 응답. **재키잉 중에는 채널 메시지를 못 보낸다**(계약 §3.0.1).
     deferred_close: bool = false,
     /// 모르는 채널 요청에 답할 것이 밀려 있나(§5.4 — `want_reply` 면 답해야 한다).
@@ -288,6 +307,26 @@ pub const Client = struct {
     /// 사용자가 호스트키를 승인했다(계약 §4 — TOFU).
     pub fn acceptHostKey(self: *Client) void {
         self.host_key_accepted = true;
+    }
+
+    /// **사용자가 친 비밀번호를 넣는다**(`password_needed` 상태에서만 뜻이 있다).
+    ///
+    /// 코어는 그 값을 **안 들고 있는다** — 이 함수 안에서 요청 패킷으로 만들어 선에 내보내고,
+    /// 만든 자리를 지운다. 계약 §3.4 가 "저장하지 않는다" 로 정한 것을 코어에서도 지킨다
+    /// (호출자가 자기 버퍼를 지우는 것은 호출자 몫이다).
+    ///
+    /// 선 버퍼가 모자라면 `ShortBuffer` 다 — 조용히 반만 보내면 서버가 프레이밍을 못 읽는다.
+    pub fn providePassword(self: *Client, password: []const u8, wire_out: []u8) Error![]const u8 {
+        if (self.state != .password_needed) return Error.UnexpectedMessage;
+        if (wire_out.len < min_wire_out) return Error.ShortBuffer;
+        var w: Out = .{ .buf = wire_out };
+        var req: [1024]u8 = undefined;
+        defer std.crypto.secureZero(u8, &req); // 비밀번호가 스택에 남지 않게
+        self.auth_method = .password;
+        self.password_tried = true;
+        try self.emit(&w, try userauth.writePasswordRequest(&req, self.opts.user, password));
+        self.state = .authenticating;
+        return w.written();
     }
 
     /// 사용자에게 보여 줄 지문. `host_key_decision` 상태에서 유효하다.
@@ -751,14 +790,31 @@ pub const Client = struct {
     }
 
     fn onAuthResponse(self: *Client, payload: []const u8, w: *Out) Error!void {
-        switch (try userauth.parseResponse(payload, .publickey)) {
+        // **어느 방식의 답인지는 우리가 안다** — 방금 보낸 것이 그것이다. 키를 보내 놓고
+        // `password` 로 파싱하면 서버의 `PK_OK`(§7)를 비밀번호 변경 요구(§8)로 읽는다.
+        switch (try userauth.parseResponse(payload, self.auth_method)) {
             .success => {
                 var buf: [256]u8 = undefined;
                 try self.emit(w, try self.ch.writeOpen(&buf, 0));
                 self.state = .opening_channel;
             },
             .banner => {}, // 위 `onBanner` 가 이미 처리한다(여기 오지 않는다)
-            .failure => return Error.AuthFailed,
+            // **§7 과 §8 은 같은 번호(60)를 다르게 읽는다** — 무엇을 보냈는지(`auth_method`)가
+            // 그 둘을 가른다. 비밀번호 쪽은 "바꿔야 한다" 이므로 이름 있는 오류로 올린다.
+            .passwd_change_req => return Error.PasswordChangeRequired,
+            .failure => |f| {
+                // **서버가 무엇을 열어 뒀는지 여기 적혀 있다**(RFC 4252 §5.1 — 계속 시도할 수
+                // 있는 방법 목록). 키가 거절됐어도 `password` 가 있으면 아직 길이 남아 있다 —
+                // 그걸 안 보고 끝내면 **서버가 열어 둔 문 앞에서 돌아서는** 셈이다.
+                //
+                // 비밀번호를 이미 한 번 보냈으면 다시 묻지 않는다. 서버는 틀린 비밀번호에도
+                // 같은 목록을 돌려주므로(§5.1), 그대로 두면 무한히 되묻는 고리가 된다.
+                if (!self.password_tried and f.methods.has(userauth.method_password)) {
+                    self.state = .password_needed;
+                    return;
+                }
+                return Error.AuthFailed;
+            },
             else => return Error.UnexpectedMessage,
         }
     }
@@ -1740,6 +1796,157 @@ test "SERVICE_ACCEPT 는 인증으로 넘어간다" {
     try testing.expectEqual(State.authenticating, step.state);
     const dec = try packet.read(step.wire);
     try testing.expectEqual(userauth.msg_userauth_request, dec.payload[0]);
+}
+
+/// 인증 응답을 기다리는 자리에 세운 클라이언트(위 SERVICE_ACCEPT 테스트와 같은 준비).
+fn authenticatingClient(prng: *std.Random.DefaultPrng) Client {
+    const kp = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(7)) catch unreachable;
+    var secret: [userauth.secret_key_len]u8 = undefined;
+    @memcpy(secret[0..32], &@as([32]u8, @splat(7)));
+    @memcpy(secret[32..64], &kp.public_key.toBytes());
+    var c = Client.init(.{
+        .user = "u",
+        .secret_key = secret,
+        .size = .{ .cols = 80, .rows = 24 },
+    }, prng.random());
+    c.state = .authenticating;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+    return c;
+}
+
+/// `USERAUTH_FAILURE` 한 통(계속 시도할 수 있는 방법 목록 + partial).
+fn authFailure(out: []u8, methods: []const []const u8, prng: *std.Random.DefaultPrng) []const u8 {
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    w.byte(userauth.msg_userauth_failure) catch unreachable;
+    w.nameList(methods) catch unreachable;
+    w.boolean(false) catch unreachable;
+    const n = packet.write(out, w.written(), prng.random()) catch unreachable;
+    return out[0..n];
+}
+
+test "키가 거절돼도 서버가 비밀번호를 열어 뒀으면 물어본다" {
+    // **서버가 열어 둔 문 앞에서 돌아서지 않는다.** 예전에는 `USERAUTH_FAILURE` 를 그대로
+    // `AuthFailed` 로 올려, 비밀번호만 받는 서버에는 영영 못 붙었다(계약 §2 는 그 방식을
+    // 지원한다고 적어 두었는데 세션이 안 쓰고 있었다).
+    var prng = std.Random.DefaultPrng.init(41);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(authFailure(&pbuf, &.{ "publickey", "password" }, &prng), &out, &scr);
+    try testing.expectEqual(State.password_needed, step.state);
+    // **아직 아무것도 안 보낸다** — 비밀번호는 코어가 안 들고 있다(§3.4).
+    try testing.expectEqual(@as(usize, 0), step.wire.len);
+}
+
+test "비밀번호를 안 여는 서버면 그대로 실패다" {
+    // 물어봐도 보낼 곳이 없다 — 되묻는 화면만 띄우면 사용자는 무엇이 잘못됐는지 모른다.
+    var prng = std.Random.DefaultPrng.init(42);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    try testing.expectError(Error.AuthFailed, c.feed(authFailure(&pbuf, &.{ "publickey", "keyboard-interactive" }, &prng), &out, &scr));
+}
+
+test "친 비밀번호는 요청으로 나가고 코어에 안 남는다" {
+    var prng = std.Random.DefaultPrng.init(43);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(authFailure(&pbuf, &.{"password"}, &prng), &out, &scr);
+
+    var wire_out: [8192]u8 = undefined;
+    const secret_pw = "hunter2";
+    const sent = try c.providePassword(secret_pw, &wire_out);
+    try testing.expect(sent.len > 0);
+    try testing.expectEqual(State.authenticating, c.state);
+    const dec = try packet.read(sent);
+    try testing.expectEqual(userauth.msg_userauth_request, dec.payload[0]);
+    // 방식 이름이 `password` 다(그 자리가 틀리면 서버가 방식을 못 고른다).
+    var r = wire.Reader.init(dec.payload[1..]);
+    try testing.expectEqualStrings("u", try r.string());
+    try testing.expectEqualStrings("ssh-connection", try r.string());
+    try testing.expectEqualStrings("password", try r.string());
+
+    // **코어 안에는 안 남는다**(§3.4 — 저장하지 않는다). 클라이언트 구조체 바이트를 통째로 훑는다.
+    const raw = std.mem.asBytes(&c);
+    try testing.expect(std.mem.indexOf(u8, raw, secret_pw) == null);
+}
+
+test "비밀번호가 틀려도 되묻는 고리에 안 빠진다" {
+    // 서버는 틀린 비밀번호에도 **같은 방법 목록**을 돌려준다(RFC 4252 §5.1) — 그것을 안 세면
+    // 화면이 영원히 다시 묻는다.
+    var prng = std.Random.DefaultPrng.init(44);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(authFailure(&pbuf, &.{"password"}, &prng), &out, &scr);
+    var wire_out: [8192]u8 = undefined;
+    _ = try c.providePassword("틀린값", &wire_out);
+    // 서버가 또 거절한다 — 이번에는 실패로 끝난다.
+    var pbuf2: [1024]u8 = undefined;
+    try testing.expectError(Error.AuthFailed, c.feed(authFailure(&pbuf2, &.{"password"}, &prng), &out, &scr));
+}
+
+test "비밀번호를 바꾸라는 답은 그 이름으로 올라온다" {
+    // **`AuthFailed` 와 섞으면 화면이 틀린 안내를 한다** — 사용자가 할 일은 "다시 쳐 보기" 가
+    // 아니라 "서버에서 비밀번호 바꾸기" 다. 그리고 이 갈림은 **무엇을 보냈는지**로만 정해진다
+    // (§7 `PK_OK` 와 §8 이 같은 번호 60 을 쓴다).
+    var prng = std.Random.DefaultPrng.init(46);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(authFailure(&pbuf, &.{"password"}, &prng), &out, &scr);
+    var wire_out: [8192]u8 = undefined;
+    _ = try c.providePassword("x", &wire_out);
+
+    var buf: [256]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(userauth.msg_userauth_method_specific);
+    try w.string("expired - change it"); // prompt
+    try w.string("en"); // language
+    var pbuf2: [1024]u8 = undefined;
+    const n = try packet.write(&pbuf2, w.written(), prng.random());
+    try testing.expectError(Error.PasswordChangeRequired, c.feed(pbuf2[0..n], &out, &scr));
+}
+
+test "비밀번호가 맞으면 채널을 연다" {
+    // **성공 경로는 실서버로 못 잰다** — 진짜 계정 비밀번호가 필요하고 스모크는 그것을 모른다
+    // (사람에게 물을 수도 없다). 그래서 여기서 닫는다: 서버가 `SUCCESS` 를 주면 그 다음 걸음
+    // (채널 열기)이 실제로 나가야 한다.
+    var prng = std.Random.DefaultPrng.init(47);
+    var c = authenticatingClient(&prng);
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    _ = try c.feed(authFailure(&pbuf, &.{"password"}, &prng), &out, &scr);
+    var wire_out: [8192]u8 = undefined;
+    _ = try c.providePassword("맞는값", &wire_out);
+
+    var buf: [64]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(userauth.msg_userauth_success);
+    var pbuf2: [1024]u8 = undefined;
+    const n = try packet.write(&pbuf2, w.written(), prng.random());
+    const step = try c.feed(pbuf2[0..n], &out, &scr);
+    try testing.expectEqual(State.opening_channel, step.state);
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(@as(u8, 90), dec.payload[0]); // CHANNEL_OPEN
+}
+
+test "비밀번호를 물어보지도 않았는데 넣으면 거절한다" {
+    // 상태가 아닌데 보내면 서버가 순서를 못 읽는다(그리고 그 비밀번호는 선에 그냥 흘러간다).
+    var prng = std.Random.DefaultPrng.init(45);
+    var c = authenticatingClient(&prng);
+    var wire_out: [8192]u8 = undefined;
+    try testing.expectError(Error.UnexpectedMessage, c.providePassword("x", &wire_out));
 }
 
 test "재키잉 중 전역 요청이 쏟아져도 세는 값이 안 감싸 돈다" {

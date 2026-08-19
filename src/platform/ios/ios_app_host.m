@@ -1190,12 +1190,24 @@ static void sshState(void *ctx, unsigned int state) {
         // **입력 목적지를 세션과 함께 옮긴다.** 안 옮기면 친 글자가 화면에 한 번 찍히고 원격에는
         // 영영 안 간다(안드로이드에서 실측한 것과 같은 자리다).
         maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+        // **비밀번호를 물어야 하면 화면을 연다**(그 자리에서 펌프가 기다린다). 벗어나면 끈다.
+        maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
     });
 }
 
 /// 프레임마다 main 에서 돈다: 친 것을 원격으로, 코어가 만든 답도 원격으로, 격자가 바뀌면 알린다.
 static void pumpSshOnMainThread(void) {
     if (!maru_ssh_pump_is_running()) return;
+    // **사용자가 친 비밀번호를 넘긴다**(Android 와 같은 자리). 넘긴 뒤 사본을 지운다(계약 §3.4).
+    {
+        unsigned char pw[256];
+        unsigned long n = maru_mobile_take_password(pw, sizeof pw);
+        if (n > 0) {
+            maru_ssh_pump_password((const char *)pw, (unsigned int)n);
+            memset(pw, 0, sizeof pw);
+            NSLog(@"MARU_SSH password_supplied bytes=%lu", n);
+        }
+    }
     if (maru_ssh_pump_state() == MARU_SSH_STATE_READY) {
         // **`ready` 일 때만 가져간다** — 가져가면 브리지에서 사라지는데 그때 못 보내면 그
         // 글자가 통째로 없어진다(그전에는 브리지에 남아 type-ahead 가 된다).

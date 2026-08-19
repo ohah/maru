@@ -167,6 +167,59 @@ var preedit_len: usize = 0;
 
 /// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
+/// **비밀번호를 묻는 중인가.** host 가 세션 상태를 보고 켠다(`maru_mobile_set_password_prompt`).
+/// 화면이 그 값을 보고 서고, 사용자가 확정하면 host 가 가져간다.
+var password_prompt = false;
+/// 사용자가 친 비밀번호. **가져가면 사라진다**(계약 §3.4 — 저장하지 않는다).
+var password_buf: [256]u8 = undefined;
+var password_len: usize = 0;
+var password_ready = false;
+
+/// host 가 "비밀번호를 물어야 한다" 를 알린다(1=물어라, 0=끝났다).
+///
+/// **끄는 자리도 host 다** — 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
+pub export fn maru_mobile_set_password_prompt(wanted: u32) void {
+    const on = wanted != 0;
+    if (password_prompt == on) return;
+    password_prompt = on;
+    if (on) {
+        set_edit_len = 0;
+        edit_target = .password;
+        kb_raise_req = true;
+        navPush(.password);
+    } else {
+        // 화면을 거둔다. 친 것이 남아 있으면 지운다 — 다음 물음에 지난 값이 뜨면 안 된다.
+        wipePassword();
+        if (screenTop() == .password) navPop();
+    }
+}
+
+/// 친 비밀번호를 가져간다(없으면 0). **가져가면 사라진다.**
+pub export fn maru_mobile_take_password(out: [*]u8, cap: usize) usize {
+    if (!password_ready) return 0;
+    const n = password_len;
+    if (n > cap) {
+        // 자르면 **틀린 비밀번호를 보내는** 것이 된다 — 사용자는 맞게 쳤는데 실패한다.
+        setLastError("password_truncated");
+        return 0;
+    }
+    @memcpy(out[0..n], password_buf[0..n]);
+    wipePassword();
+    return n;
+}
+
+/// 친 비밀번호를 지운다. **브리지에도 안 남긴다**(계약 §3.4).
+fn wipePassword() void {
+    @memset(&password_buf, 0);
+    password_len = 0;
+    password_ready = false;
+    if (edit_target == .password) {
+        edit_target = .none;
+        @memset(&set_edit_buf, 0); // 치는 중이던 것도 남기지 않는다
+        set_edit_len = 0;
+    }
+}
+
 /// 붙어 달라는 요청(0=없음, 아니면 번호+1). **가져가면 사라진다** — 두 번 붙으면 세션이 둘이다.
 var ssh_connect_req: u32 = 0;
 
@@ -316,6 +369,8 @@ pub fn settingsFieldCount() usize {
 /// 숫자 칸이면 숫자 패드). 브리지가 정하는 이유는 "무엇을 누르고 있나" 를 아는 쪽이 여기이기
 /// 때문이다 — host 가 화면 상태를 다시 추측하면 갈린다(§3 "판단은 코어가 한다").
 pub export fn maru_mobile_input_kind() u32 {
+    // 비밀번호는 글자 키보드다 — 가림(●)은 우리가 그린다(OS 에 맡기면 그 칸이 우리 것이 아니다).
+    if (edit_target == .password) return 2;
     // **줄의 종류를 봐야 한다 — "편집 중인가" 가 아니다.** 색 줄에 숫자 패드를 띄우면 `#` 도
     // `a~f` 도 못 쳐서 **아무것도 못 넣는다**(기기에서 그 상태로 막혔다).
     //
@@ -413,6 +468,7 @@ fn editBackspace() void {
 /// 문자열 편집을 확정한다. **못 쓰는 값이면 안 넣는다** — 색이 깨지면 화면이 통째로 안 보이게
 /// 될 수 있고, 그 상태로 파일에 실리면 다음 실행에서도 그대로다.
 fn commitTextEdit() void {
+    if (edit_target == .password) return commitPassword();
     if (edit_target == .server_field) return commitServerFieldEdit();
     const i = set_edit orelse return;
     defer {
@@ -457,7 +513,7 @@ fn settingChangedText(row: mobile_config.Row, text: []const u8) void {
 
 /// **무엇을 편집 중인가.** 버퍼와 입력 경로는 하나지만 확정이 갈 곳은 둘이다(설정 줄 · 서버
 /// 칸). 두 벌을 두면 백스페이스·넘침·취소 규칙이 갈리고, 한쪽만 고치는 일이 생긴다.
-const EditTarget = enum { none, setting, server_field };
+const EditTarget = enum { none, setting, server_field, password };
 var edit_target: EditTarget = .none;
 /// 서버 편집 화면에서 지금 치고 있는 칸(`ServerField`).
 var srv_edit_field: usize = 0;
@@ -532,12 +588,6 @@ pub fn terminalBackHitAt(x: f32, y: f32) bool {
 /// 그 뒤로가기가 지금 눌린 것으로 그려지나(테스트용 — 눌림은 색만 바꿔 quad 수로 안 잡힌다).
 pub fn terminalBackPressed() bool {
     return term_back_pressed;
-}
-
-/// 키바가 지금 얼마나 밀려 있나(px). 설정 목록의 같은 훅과 짝이다 — 관성이 도는지를
-/// **그린 결과**로 재려면 이 값이 있어야 한다(키 rect 는 화면 밖으로 나가면 0 이 된다).
-pub fn keybarScrollPx() u32 {
-    return kb_sa.offset_y_px;
 }
 
 pub fn settingsRows() []const mobile_config.Row {
@@ -706,6 +756,12 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 아무것도 안 써지는" 상태). 받을 곳이 없을 때만 버리고, 그때는 **신호를 남긴다**(§5).
     if (screenTop() != .terminal) {
         // 서버 칸도 같은 입력 경로다(버퍼·백스페이스·넘침 규칙이 하나여야 갈리지 않는다).
+        if (edit_target == .password) {
+            // 비밀번호도 같은 버퍼·같은 규칙이다(넘침·글자 단위 지우기). 다른 것은 **안 보인다**
+            // 는 것뿐이고, 그것은 그리는 쪽이 정한다.
+            editTextInput(ptr[0..len]);
+            return @intCast(delivered_len);
+        }
         if (edit_target == .server_field) {
             const f: ServerField = @enumFromInt(srv_edit_field);
             if (f == .port) editNumberInput(ptr[0..len]) else editTextInput(ptr[0..len]);
@@ -890,6 +946,23 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     if (screenTop() != .terminal) {
         // **편집 중이면 지우기·확정은 그 칸의 것이다.** 그전에는 통째로 버려서 숫자 칸에서
         // 백스페이스가 아무 일도 안 했다 — 오타를 낸 사용자가 고칠 방법이 없었다.
+        if (edit_target == .password) {
+            switch (key_id) {
+                4 => { // BACKSPACE
+                    editBackspace();
+                    return @intCast(delivered_len);
+                },
+                1 => { // ENTER = 접속
+                    commitPassword();
+                    return @intCast(delivered_len);
+                },
+                2 => { // ESCAPE = 취소(친 것을 지운다)
+                    wipePassword();
+                    return @intCast(delivered_len);
+                },
+                else => {},
+            }
+        }
         if (edit_target == .server_field) {
             switch (key_id) {
                 4 => { // BACKSPACE — 글자 단위(S9b-1 과 같은 규칙)
@@ -1341,6 +1414,16 @@ const edge_w: f32 = 26.0;
 
 /// 키바 밴드의 **세로 범위**(스크롤 판정용). 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고,
 /// 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
+/// 앱 바의 **복사** 자리. 폭이 0 이면 지금 선택이 없어 안 그려졌다는 뜻이다.
+var term_copy_rect: SetRect = .{};
+var term_copy_pressed = false;
+
+/// 그 자리 한가운데(테스트용). 선택이 없으면 null — **없는 버튼을 누르는 테스트**를 막는다.
+pub fn terminalCopyCenter() ?struct { x: f32, y: f32 } {
+    if (term_copy_rect.w <= 0) return null;
+    return .{ .x = term_copy_rect.x + term_copy_rect.w / 2, .y = term_copy_rect.y + term_copy_rect.h / 2 };
+}
+
 /// 터미널 앱 바의 자리(레이아웃이 잡아 준 값). **폭이 0 이면 안 그려졌다는 뜻**이고 그때는
 /// 누름 판정도 서지 않는다 — 옛 자리를 답하면 없는 버튼이 눌린다(키바가 같은 규율을 갖는다).
 /// 그 세션의 이름. **목록과 앱 바가 같은 말을 써야** 어디에 있는지 안다 — 두 곳에 따로 적으면
@@ -1385,7 +1468,9 @@ var route: ?Route = null;
 /// 어긋났으면 **다음 `down` 이 고친다**.
 fn routeStale() bool {
     return switch (route orelse return false) {
-        .keybar => kb_touch.owner == null,
+        // **손가락이 잡고 있는 동안은 안 놓는다**(계약 §3.1). 스크롤이 없어졌다고 이 조건까지
+        // 없애면, 둘째 손가락이 본문에 닿는 순간 목적지를 뺏겨 **선택이 지워진다**(테스트가 잡았다).
+        .keybar => kb_owner == null,
         .chrome => set_touch.owner == null and !set_press.active() and !sess_press.active() and !term_press.active(),
         .body => body_owner == null,
     };
@@ -1462,6 +1547,31 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
         quad_count += 1;
     }
 
+    // **복사는 선택이 있을 때만 있다.** 키바에 늘 두던 것을 여기로 옮겼다(사용자 요청으로 키바가
+    // 두 줄 격자가 되며 자리가 없어졌다) — 그리고 이 편이 맞다: 쓸 수 없는 버튼이 늘 한 칸을
+    // 먹는 대신, 쓸 수 있을 때만 나타난다.
+    //
+    // **나타나고 사라지는 것이 다른 버튼을 안 민다.** 오른쪽 끝 고정 자리이고, 뒤로가기·제목은
+    // 왼쪽에 있다(키바에서 "조건부 키를 두면 손가락이 겨눈 자리가 바뀐다" 고 적어 둔 그 이유다).
+    term_copy_rect = .{};
+    if (copyEnabled()) {
+        term_copy_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+        if (term_copy_pressed) push(.{
+            .x = @intFromFloat(term_copy_rect.x),
+            .y = @intFromFloat(term_copy_rect.y),
+            .w = @intFromFloat(term_copy_rect.w),
+            .h = @intFromFloat(term_copy_rect.h),
+        }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+        const label = maru.i18n.tIn(.ko, .mob_copy);
+        pushText(
+            label,
+            @intFromFloat(term_copy_rect.x + (set_head_h - @as(f32, @floatFromInt(textWidth(label, 15)))) / 2),
+            @intFromFloat(term_copy_rect.y + (set_head_h - 15) / 2),
+            15,
+            tk.get(.accent_bar),
+        );
+    }
+
     // 제목은 그 세션의 이름이다 — 목록에서 누른 그 줄과 같은 말이라야 어디에 있는지 안다.
     pushText(
         session_title,
@@ -1479,7 +1589,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
 }
 
 /// 키 하나를 그린다 — 테두리 + 키캡 면 + 가운데 라벨.
-fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
+fn drawKey(i: usize, kx: f32, ky: f32, kw: f32, tk: *const tokens.Tokens) void {
     // **눌린 키는 눌린 것처럼 보인다.** armed(sticky 수정자가 켜진 상태)와 다른 축이다 —
     // armed 는 `ctrl` 처럼 **다음 글자까지 유지되는 상태**이고, pressed 는 **지금 손가락이
     // 닿아 있다**는 순간 표시다. 이게 없으면 `ctrl` 말고는 눌러도 화면이 답하지 않는다.
@@ -1491,7 +1601,7 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
     const r: draw.Rect = .{
         .x = @intFromFloat(kx),
         .y = @intFromFloat(ky),
-        .w = @intFromFloat(key_w),
+        .w = @intFromFloat(kw),
         .h = @intFromFloat(key_h),
     };
     // **경계선을 또렷하게 긋는다.** 손가락은 마우스와 달리 hover 로 더듬을 수 없어 **눌리는
@@ -1510,7 +1620,7 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
         if (!reserveQuad()) return;
         const rgb = tk.get(if (armed or pressed) .accent_bar else if (dimmed) .muted_fg else .surface_fg);
         quad_buf[quad_count] = .{
-            .x = kx + (key_w - ic) / 2,
+            .x = kx + (kw - ic) / 2,
             .y = ky + (key_h - ic) / 2,
             .w = ic,
             .h = ic,
@@ -1531,22 +1641,7 @@ fn drawKey(i: usize, kx: f32, ky: f32, tk: *const tokens.Tokens) void {
     // 라벨은 키 한가운데. **실제 폭으로 잰다** — 글자 수 × 근사치로 재면 advance 가 다른 글자가
     // 왼쪽으로 쏠린다(화면으로 확인).
     const label_w: f32 = @floatFromInt(textWidth(key_bar[i].label, @intFromFloat(key_font)));
-    pushText(key_bar[i].label, @intFromFloat(kx + (key_w - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed or pressed) .accent_bar else if (dimmed) .muted_fg else .surface_fg));
-}
-
-fn clampKeyBarScroll() void {
-    kb_sa.clamp(@intFromFloat(@max(0, key_bar_max_scroll)));
-}
-
-/// 남은 가로 관성을 한 프레임 몫만큼 흘린다. 터미널 세로 관성(host `fling_vy`)과 같은 모양이다.
-///
-/// **손가락이 닿아 있는 동안에는 안 흘린다.** `move` 가 이미 그만큼 스크롤했는데 여기서 또
-/// 흘리면 **같은 이동량이 두 번** 적용돼 손가락보다 두 배로 미끄러진다. 관성은 손을 뗀 뒤의 것이다.
-fn stepKeyBarFling() void {
-    // **밀린 화면이 있으면 키바도 멈춘다.** 안 그러면 손을 뗀 뒤 남은 관성이 설정 화면 뒤에서
-    // 계속 흘러, 돌아왔을 때 키 줄이 딴 자리에 가 있다(본문 관성과 같은 이유).
-    if (screenTop() != .terminal) return;
-    _ = kb_touch.step(&kb_sa, @intFromFloat(@max(0, key_bar_max_scroll)), frame_dt_ms);
+    pushText(key_bar[i].label, @intFromFloat(kx + (kw - label_w) / 2), @intFromFloat(ky + (key_h - key_font) / 2), @intFromFloat(key_font), tk.get(if (armed or pressed) .accent_bar else if (dimmed) .muted_fg else .surface_fg));
 }
 
 /// 본문 세로 관성을 한 프레임 몫만큼 흘린다. **키바·설정과 같은 자리에서 돈다.**
@@ -1587,92 +1682,61 @@ fn kbScroll() f32 {
 /// up 까지 기다려 **움직인 거리가 임계 아래일 때만** 키로 친다.
 ///
 /// phase: 0=down · 1=move · 2=up · 3=cancel. 반환 1=키바가 먹었다(플랫폼은 본문 처리 안 함).
+/// 라벨로 키 번호를 찾는다(테스트·진단용). **번호를 손으로 적으면 배열이 바뀔 때 조용히 다른
+/// 키를 누른다** — 두 줄 격자로 재배치하며 실제로 그랬다(ctrl 이 셋째에서 일곱째가 됐다).
+pub fn keybarIndexOf(label: []const u8) ?u32 {
+    for (key_bar, 0..) |k, i| {
+        if (std.mem.eql(u8, k.label, label)) return @intCast(i);
+    }
+    return null;
+}
+
+/// 이 격자를 잡고 있는 손가락. **소유자가 떼야 놓인다**(계약 §3.1) — 둘째 손가락이 떼는 것으로
+/// 목적지가 풀리면, 첫 손가락이 아직 키 위에 있는데 다음 터치가 본문으로 샌다.
+var kb_owner: ?u32 = null;
+
 fn keybarPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 {
     // **취소는 잡고 있지 않아도 받는다.** host 는 배경으로 나갈 때 좌표 없이 취소만 보내는데
     // (`maru_mobile_pointer(3,0,0,0)` 과 짝), 그때 여기서 안 풀면 목적지가 남아 **복귀 후
     // 첫 터치가 통째로 키바로 간다** — 본문을 눌러도 아무 일이 안 일어난다.
     if (phase == 3) {
         if (routeIs(.keybar)) routeClear();
+        kb_owner = null;
         kb_pressed = null;
         kb_press.cancel();
-        kb_touch.cancel();
         return 0;
     }
     if (phase == 0) {
-        // 가로는 안 본다 — 키바가 한 줄을 통째로 쓰고, 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
         if (!key_bar_ready) return 0;
         if (y < key_bar_band.top or y >= key_bar_band.bot) return 0;
-        // **둘째 손가락은 누름 판정을 안 건드린다.** 표면마다 한 번에 한 제스처이므로(계약
-        // §3.1) 눌림·이동량·기준은 **소유자의 것**이다. 이 가드가 없으면 둘째 손가락의 down 이
-        // `kb_down_x`·`kb_moved` 를 덮어써 **첫 손가락의 "탭이냐 스크롤이냐" 판정이 오염된다**.
-        if (routeIs(.keybar)) {
-            _ = kb_touch.begin(pointer_id, x); // 코어는 이 손가락도 추적한다(이어받기 대비)
-            return 1;
-        }
+        // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
+        if (routeIs(.keybar)) return 1;
         if (!routeClaim(.keybar)) return 0; // 이미 다른 표면의 제스처다
-        kb_last_x = x;
-        // **흐르는 중에 짚으면 멈추기만 한다.** 그 짚음은 세우려던 것이지 키를 누른 것이
-        // 아니다 — 안 가리면 멈추려던 손가락이 그 자리 키를 터미널로 보낸다(재현했다).
-        kb_press.begin(x, y, time_ms, kb_touch.begin(pointer_id, x));
+        kb_owner = pointer_id;
+        kb_press.begin(x, y, time_ms, false); // **흐르는 것이 없다** — 두 줄 격자라 스크롤이 없다
         // **누르는 즉시 보여 준다.** 입력은 up 에서 나가지만 표시는 down 에서 서야 손가락이
         // "닿았다" 를 안다 — hover 가 없는 자리를 이것이 메운다(§2.4).
-        kb_pressed = if (kb_press.canTap()) keybarIndexAt(x, y) else null;
+        kb_pressed = keybarIndexAt(x, y);
         return 1;
     }
     if (!routeIs(.keybar)) return 0;
     if (phase == 1) {
-        // **비소유자의 move 도 코어에 넘긴다** — 그 손가락의 기준이 낡으면 이어받는 순간
-        // 옛 자리에서 델타가 나와 화면이 점프한다. 다만 **눌림·이동량은 소유자만** 건드린다.
-        if (kb_touch.owner != pointer_id) {
-            kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
-            return 1;
-        }
-        kb_last_x = x;
-        // **임계를 넘기 전에는 스크롤도 안 한다.** 예전에는 이동량을 늘 반영해서, 살짝 민 손짓이
-        // **화면도 조금 움직이고 키도 나가는** 두 일을 한꺼번에 했다 — 같은 손짓이 어떨 때는
-        // 스크롤로, 어떨 때는 입력으로 보이는 원인이었다(사용자가 화면에서 짚었다).
-        // 임계를 넘는 순간부터 밀기이고, 그때 눌림 표시도 거둔다(누른 것이 아니었으므로).
-        //
-        // **재는 법이 바뀌었다**: 전에는 `|dx|` 를 **더해** 왕복까지 쌓았고, 지금은 짚은 자리에서
-        // **가장 멀리 간 거리**로 잰다(AOSP `touchSlop` 과 같은 뜻). 제자리에서 떠는 손가락이
-        // 슬롭을 채워 키를 삼키던 자리가 없어진다.
+        // **소유자의 움직임만 판정을 건드린다.** 둘째 손가락이 움직였다고 첫 손가락의
+        // "탭이냐 아니냐" 가 바뀌면 안 된다.
+        if (kb_owner != pointer_id) return 1;
+        // 임계를 넘으면 밀려던 것이다 — 누른 것이 아니므로 표시를 거둔다. 밀 곳은 없지만
+        // (격자다) **손가락이 미끄러진 채로 키가 나가면 안 되는 것**은 그대로다.
         if (kb_press.move(x, y)) kb_pressed = null;
-        if (kb_press.state == .pressed) return 1;
-        kb_touch.move(&kb_sa, pointer_id, x, @intFromFloat(@max(0, key_bar_max_scroll)));
         return 1;
     }
     // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1).
-    if (kb_touch.owner != pointer_id) {
-        kb_touch.end(pointer_id, frame_dt_ms);
-        return 1;
-    }
+    if (kb_owner != pointer_id) return 1;
+    kb_owner = null;
     kb_pressed = null;
-    // 뗄 때 관성이 시작된다(취소는 위에서 이미 거뒀다).
-    kb_touch.end(pointer_id, frame_dt_ms);
-    // **마지막 손가락이면 목적지를 놓는다**(계약 §3.1). 안 놓으면 그 표면이 다음 터치까지
-    // 계속 먹어 **다른 자리를 눌러도 아무 일이 안 난다**.
-    if (kb_touch.owner == null) routeClear();
-    // **소유자가 떼졌는데 손가락이 남았으면 제스처는 이어진다** — 코어가 새 소유자를 골랐다.
-    // 그 손가락은 자기 기준을 갖고 있으므로 여기서는 **눌림만 거두고** 이동량을 새로 센다.
-    if (kb_touch.owner) |next| {
-        kb_last_x = x;
-        kb_press.adoptAsScroll(x, y); // 이미 밀기다 — 이어받은 손가락이 키를 내지 않는다
-        _ = next;
-        return 1;
-    }
+    routeClear();
     const down_x = kb_press.down_x;
     const down_y = kb_press.down_y;
-    // **탭은 `pressed` 에서만 나온다** — 밀었거나 세우려던 짚음이면 그 손짓은 이미 뜻이 있다.
-    if (kb_press.end() == .tap) {
-        kb_touch.cancel(); // 탭이면 관성이 없다
-        // **`<`/`>` 는 누르는 것이 아니라 신호다.** 한때 데스크톱 탭바의 `‹›` 가 클릭 가능하다는
-        // 이유로 한 화면씩 옮기게 했는데, 두 가지가 어긋났다 — ① 데스크톱이 그런 것은 **마우스**
-        // 이기 때문이고 터치에서는 **밀면 된다**(§2.4 "입력 방식이 다르면 같은 요소도 다르게
-        // 동작한다"), ② 표시 폭이 26px 이라 **44 기준에 미달하는 버튼**을 새로 만드는 꼴이었다
-        // (44 를 지키려고 시작한 작업에서). 그래서 표시로만 두고, 그 자리를 눌러도 스크롤의
-        // 시작점일 뿐 아무 키도 안 나간다.
-        _ = keybarTapAt(down_x, down_y);
-    }
+    if (kb_press.end() == .tap) _ = keybarTapAt(down_x, down_y);
     return 1;
 }
 
@@ -2903,7 +2967,8 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 자식 없는 카드 하나가 **밴드 자리**만 잡는다. 키는 아래에서 직접 그린다.
     const bar = tree.card(.{
         .id = key_bar_id_base - 1,
-        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = key_h + 10.0 } },
+        // **줄 수만큼 높다.** 숫자를 손으로 적으면 키를 더했을 때 아래 줄이 잘린다.
+        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = @as(f32, @floatFromInt(key_bar_rows)) * (key_h + key_gap) + 10.0 } },
     }, &.{});
 
     // ── 상단 앱 바: **돌아갈 길이 보여야 한다.** U3b 가 하단 바를 걷어내며 터미널 화면의
@@ -2989,82 +3054,22 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 짚었다). 밴드 자체는 화면 폭이므로 여기서 좌우를 물린다.
         const band_x = band.x + key_bar_pad_x;
         const band_w = band.width - 2 * key_bar_pad_x;
-        // 자투리(`slack`)는 아래에서 좌우 표시 영역이 나눠 먹는다 — `view_x` 는 그만큼 오른쪽에서
-        // 시작한다(왼쪽 표시가 넓어진다).
-        var view_x: f32 = band_x + edge_w;
-        // **`copy` 자리는 예약한다.** 없애 보니 `copy` 가 창 밖으로 밀려 **누르려면 찾아 밀어야
-        // 했다**(선택을 잡자마자 쓰는 버튼이라 그건 못 쓴다). 오른쪽 끝 고정 자리에 둔다.
-        // **`copy` 도 스크롤을 탄다**(사용자 결정). 늘 줄에 있으므로 나타났다 사라지며 나머지
-        // 키를 미는 일이 없고, 고정 자리를 예약할 이유도 없다 — 예약은 오른쪽에 죽은 공간을
-        // 남길 뿐이었다. 목록 끝이 그 자리이고 밀어서 닿는다.
-        const copy_slot_w: f32 = 0;
-        // **창을 키 단위로 맞춘다.** 자투리를 남기면 스크롤 0 에서도 오른쪽에 **아무것도 없는
-        // 자리**가 뜬다(사용자가 화면에서 짚었다) — 완전히 들어온 키만 그리므로 그 자투리는
-        // 영영 안 채워진다. 남는 폭은 좌우 표시 영역이 나눠 먹어 눈에 안 띈다.
-        const per_key = key_w + key_gap;
-        const raw_view_w = band_w - 2 * edge_w - copy_slot_w;
-        const fit_n = @max(1.0, @floor((raw_view_w + key_gap) / per_key));
-        const view_w = fit_n * per_key - key_gap;
-        const slack = raw_view_w - view_w;
-        view_x += @floor(slack / 2);
-        const scroll_n = bar_n;
-        // **마지막 키 뒤에는 gap 이 없다.** `n * (w + gap)` 으로 재면 끝까지 밀었을 때 gap 만큼
-        // 빈 자리가 남는다(화면으로 확인). 키 n개 사이의 gap 은 n-1 개다.
-        const content = if (scroll_n == 0) 0 else @as(f32, @floatFromInt(scroll_n)) * key_w + @as(f32, @floatFromInt(scroll_n - 1)) * key_gap;
-        key_bar_max_scroll = @max(0, content - view_w);
-        clampKeyBarScroll();
-
-        // 창 왼쪽에서 스크롤 오프셋만큼 물러난 자리에서 시작한다. 창 밖으로 나간 키는
-        // 그리지도 않는다 — 화면 밖 quad 는 낭비이고, 잘린 조각이 옆 UI 위에 얹힌다.
-        var kx = view_x - kbScroll();
-        const ky = @floor(band.y + 5.0); // 세로도 같은 이유로 정수에 맞춘다(위 `kxi` 주석)
+        // **칸을 화면 폭으로 나눈다.** 예전에는 44px 고정에 가로 스크롤이었는데, 밀어야 닿는
+        // 키는 급할 때 못 찾는다(Ctrl·화살표가 그렇다 — 사용자 요청으로 두 줄 격자가 됐다).
+        // 나눈 칸은 44 보다 넓어 손가락에도 낫다.
+        const cell_w = band_w / @as(f32, @floatFromInt(key_bar_cols));
+        const kw = @floor(cell_w) - key_gap;
         for (0..key_bar.len) |i| {
-            defer kx += key_w + key_gap;
-            // **창 밖 키는 자리도 안 남긴다.** rect 를 그대로 두면 화살표 아래로 숨은 키가
-            // 여전히 눌린다 — 보이지 않는 것이 눌리면 사용자는 왜 그 키가 나갔는지 알 수 없다.
-            // **창에 완전히 들어온 키만 그리고, 그것만 누른다.** 조건이 하나다 — 걸친 것을 그리면
-            // 반쯤 잘린 키가 `>` 옆에 붙어 **표시를 묻고**(사용자가 화면에서 짚었다), 그리는
-            // 범위와 누르는 범위가 갈리면 **보이는데 안 눌리는 키**가 생긴다. 스크롤 중 키가
-            // 44px 단위로 나타났다 사라지지만, "보이는 것이 눌린다" 가 그보다 중요하다.
-            //
-            // 좌표는 `@floor` 로 정수에 맞춘다 — 그리기는 절삭되는데 히트가 f32 면 1px 어긋나
-            // 가장자리에서 옆 키가 나간다.
-            const kxi = @floor(kx);
-            if (kx < view_x - 0.5 or kx + key_w > view_x + view_w + 0.5) {
-                key_bar_rects[i] = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-                continue;
-            }
-            key_bar_rects[i] = .{ .x = kxi, .y = ky, .w = key_w, .h = key_h };
-            drawKey(i, kxi, ky, tk);
+            const col = i % key_bar_cols;
+            const row = i / key_bar_cols;
+            const kx = @floor(band_x + @as(f32, @floatFromInt(col)) * cell_w + key_gap / 2);
+            const ky = @floor(band.y + 5.0 + @as(f32, @floatFromInt(row)) * (key_h + key_gap));
+            key_bar_rects[i] = .{ .x = kx, .y = ky, .w = kw, .h = key_h };
+            drawKey(i, kx, ky, kw, tk);
         }
-        // **밴드를 찾았을 때만 "섰다" 고 답한다.** 이 값이 `false` 면 포인터가 키바를 안 먹는다 —
-        // 레이아웃에서 키바가 빠진 프레임에 **옛 자리를 그대로 답해 없는 키가 눌리는 것**을 막는
-        // 판정이다. 밴드 entry 를 못 찾으면 이 블록에 아예 안 들어와 `false` 로 남는다(위에서
-        // 그렇게 초기화한다). 놓은 키 수를 여기 또 세지 않는다 — 늘 `bar_n` 이라 **항상 참인
-        // 조건**이 되어 판정이 죽는다(전에 그랬다).
+        // **스크롤 표시(`<`/`>`)는 없앴다** — 두 줄 격자라 전부 한눈에 들어와서 "더 있다" 를
+        // 알릴 것이 없다. 남겨 두면 아무 데도 안 미는 화살표가 가장자리 칸을 먹는다.
         key_bar_ready = bar_n > 0;
-
-        // **더 있다는 것을 알린다.** 잘린 자리는 화면에서 "끝" 과 구별되지 않는다 — 밀 수 있다는
-        // 신호가 없으면 사용자는 `~ / -` 가 존재하는 줄도 모른다. 키 **위에** 그리므로 지나가는
-        // 키가 화살표를 덮지 않는다(그리기 순서가 곧 위아래다).
-        // **불투명하게, 밝게, 크게.** 처음엔 14px 폭에 흐린 색으로 얹었더니 지나가는 키가 비쳐
-        // 화살표인지도 알아보기 어려웠다(화면으로 확인). 이건 "더 있다" 를 알리는 신호라
-        // 본문보다 또렷해야 한다 — 배경을 완전히 덮고, 안쪽 경계에 선을 그어 잘리는 자리를 못박는다.
-        const edge_bg = tk.get(.surface_bg);
-        const edge_fg = tk.get(.surface_fg);
-        if (kbScroll() > 0.5) {
-            const er: draw.Rect = .{ .x = @intFromFloat(band_x), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
-            push(er, edge_bg, 0xFF, 0, 0);
-            push(.{ .x = er.x + @as(i32, @intFromFloat(edge_w)) - 1, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
-            pushText("<", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth("<", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
-        }
-        if (kbScroll() < key_bar_max_scroll - 0.5) {
-            const ex = band_x + band_w - edge_w;
-            const er: draw.Rect = .{ .x = @intFromFloat(ex), .y = @intFromFloat(ky), .w = @intFromFloat(edge_w), .h = @intFromFloat(key_h) };
-            push(er, edge_bg, 0xFF, 0, 0);
-            push(.{ .x = er.x, .y = er.y, .w = 1, .h = er.h }, tk.get(.divider), 0xFF, 0, 0);
-            pushText(">", er.x + @divTrunc(@as(i32, @intFromFloat(edge_w)) - textWidth(">", 22), 2), @intFromFloat(ky + (key_h - 22) / 2), 22, edge_fg);
-        }
     }
 
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
@@ -3091,7 +3096,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers, server_edit };
+const Screen = enum { sessions, terminal, settings, servers, server_edit, password };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -3771,6 +3776,70 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
 
 /// 편집 화면. **설정 화면과 같은 줄 모양**이다(라벨 왼쪽, 값 오른쪽, 눌러서 편집) — 두 화면이
 /// 다르게 굴면 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다.
+/// 비밀번호 화면. **친 글자를 안 보인다** — 어깨 너머로 읽히는 자리이고, 폰은 그 위험이 크다.
+/// 대신 **몇 자 쳤는지**는 보인다(아무 표시도 없으면 키보드가 먹는지 알 수 없다).
+fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_password_title), @intFromFloat(win.x + set_pad_x), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    var y = win.y + set_head_h + 1;
+    pushText(maru.i18n.tIn(.ko, .mob_password_hint), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + 16), 14, tk.get(.muted_fg));
+    y += 52;
+
+    // 친 글자 수만큼 가림표. **글자 자체는 안 그린다.**
+    var dots: [96]u8 = undefined;
+    var n: usize = 0;
+    var chars: usize = 0;
+    var i: usize = 0;
+    while (i < set_edit_len) : (i += 1) {
+        if ((set_edit_buf[i] & 0xC0) == 0x80) continue; // 이어지는 바이트는 한 글자가 아니다
+        chars += 1;
+        if (n + 3 <= dots.len) {
+            @memcpy(dots[n..][0..3], "\u{2022}");
+            n += 3;
+        }
+    }
+    const shown = if (chars == 0) maru.i18n.tIn(.ko, .mob_password_empty) else dots[0..n];
+    const role: tokens.ColorRole = if (chars == 0) .muted_fg else .surface_fg;
+    pushText(shown, @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 20, tk.get(role));
+    y += 40;
+    push(.{ .x = @intFromFloat(win.x + set_pad_x), .y = @intFromFloat(y), .w = @intFromFloat(win.w - set_pad_x * 2), .h = 1 }, tk.get(.accent_bar), 0xFF, 0, 0);
+    y += 24;
+
+    pw_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    if (pw_pressed == .ok) push(.{ .x = @intFromFloat(pw_ok_rect.x), .y = @intFromFloat(pw_ok_rect.y), .w = @intFromFloat(pw_ok_rect.w), .h = @intFromFloat(pw_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_password_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
+    y += set_row_h;
+    pw_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    if (pw_pressed == .cancel) push(.{ .x = @intFromFloat(pw_cancel_rect.x), .y = @intFromFloat(pw_cancel_rect.y), .w = @intFromFloat(pw_cancel_rect.w), .h = @intFromFloat(pw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_password_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
+}
+
+/// 비밀번호 화면의 두 버튼 한가운데(테스트용 — 좌표를 테스트가 다시 계산하지 않는다).
+pub fn passwordOkCenter() struct { x: f32, y: f32 } {
+    return .{ .x = pw_ok_rect.x + pw_ok_rect.w / 2, .y = pw_ok_rect.y + pw_ok_rect.h / 2 };
+}
+pub fn passwordCancelCenter() struct { x: f32, y: f32 } {
+    return .{ .x = pw_cancel_rect.x + pw_cancel_rect.w / 2, .y = pw_cancel_rect.y + pw_cancel_rect.h / 2 };
+}
+
+var pw_ok_rect: SetRect = .{};
+var pw_cancel_rect: SetRect = .{};
+var pw_pressed: enum { none, ok, cancel } = .none;
+var pw_press: gesture.Press = .{};
+
+/// 친 것을 확정한다 — host 가 `maru_mobile_take_password` 로 가져간다.
+fn commitPassword() void {
+    if (set_edit_len == 0) return; // 빈 값은 안 보낸다(서버가 실패로 셈한다)
+    @memcpy(password_buf[0..set_edit_len], set_edit_buf[0..set_edit_len]);
+    password_len = set_edit_len;
+    password_ready = true;
+    edit_target = .none;
+    @memset(&set_edit_buf, 0);
+    set_edit_len = 0;
+}
+
 fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
@@ -4094,6 +4163,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         switch (phase) {
             0 => {
                 if (routeIs(.chrome)) return 1; // 둘째 손가락은 이 표면의 제스처를 안 건드린다
+                // **복사가 먼저다** — 뒤로가기와 자리가 다르지만, 판정 순서를 고정해 둬야
+                // 나중에 자리가 겹칠 때 조용히 한쪽이 죽지 않는다.
+                if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) {
+                    if (!routeClaim(.chrome)) return 0;
+                    term_press.begin(x, y, time_ms, false);
+                    term_copy_pressed = true;
+                    return 1;
+                }
                 if (term_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
                 if (!setHit(term_back_rect, x, y)) return 0;
                 if (!routeClaim(.chrome)) return 0;
@@ -4104,15 +4181,25 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             1 => {
                 if (!routeIs(.chrome)) return 0;
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(다른 화면과 같은 규칙).
-                if (term_press.move(x, y)) term_back_pressed = false;
+                if (term_press.move(x, y)) {
+                    term_back_pressed = false;
+                    term_copy_pressed = false;
+                }
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
+                const was_copy = term_copy_pressed;
                 term_back_pressed = false;
+                term_copy_pressed = false;
                 routeClear(); // 이 띠는 한 손가락 자리다 — 뗀 순간 끝이다
                 if (phase == 3) {
                     term_press.cancel();
+                    return 1;
+                }
+                if (was_copy) {
+                    // **복사는 화면 전환이 아니다** — 그 자리에 머문 채 요청만 세운다.
+                    if (term_press.end() == .tap and copyEnabled()) copy_pending = true;
                     return 1;
                 }
                 // **눌림 표시를 또 보지 않는다.** `down` 이 버튼 안에서만 잡으므로 "눌려 있었나"
@@ -4163,6 +4250,46 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                         navPush(.servers);
                         srv_sa.reset();
                         srv_touch.cancel();
+                    },
+                    .none => {},
+                }
+                return 1;
+            },
+        }
+    }
+
+    // ── 비밀번호 화면. 두 줄뿐이다(접속·취소) — 글자는 키보드가 넣는다.
+    if (screenTop() == .password) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome)) return 0;
+                pw_press.begin(x, y, time_ms, false);
+                pw_pressed = if (setHit(pw_ok_rect, x, y)) .ok else if (setHit(pw_cancel_rect, x, y)) .cancel else .none;
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                if (pw_press.move(x, y)) pw_pressed = .none;
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                const was = pw_pressed;
+                pw_pressed = .none;
+                routeClear();
+                if (phase == 3) {
+                    pw_press.cancel();
+                    return 1;
+                }
+                if (pw_press.end() != .tap) return 1;
+                switch (was) {
+                    .ok => commitPassword(),
+                    // **취소는 친 것을 지운다** — 화면만 닫고 값을 남기면 다음 물음에 그것이 간다.
+                    .cancel => {
+                        wipePassword();
+                        password_prompt = false;
+                        navPop();
                     },
                     .none => {},
                 }
@@ -4451,6 +4578,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
 
 /// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
 pub export fn maru_mobile_pop_screen() u32 {
+    if (screenTop() == .password) {
+        // **뒤로가기는 취소다** — 친 것을 지우고 화면을 거둔다(안 지우면 다음 물음에 그것이 간다).
+        wipePassword();
+        password_prompt = false;
+        navPop();
+        return 1;
+    }
     if (edit_target == .server_field) {
         // 서버 칸도 같다 — 하드웨어 뒤로가기(Android)·스와이프(iOS)가 **먼저 편집을 거둔다**.
         // 안 거두면 화면을 나가도 목적지가 남아, 다음 화면에서 친 글자가 **안 보이는 초안**으로
@@ -4515,22 +4649,35 @@ const KeyBarItem = struct {
 
 /// **개수 상한이 없다** — 44px 를 지키고 가로로 스크롤하므로 폰 폭에 안 들어가도 된다
 /// (한때 11개가 상한이었다). 늘어나면 미는 거리가 길어지는 것이 유일한 대가다.
+/// 키바는 **두 줄 · 여섯 칸**이다(사용자 확정 — 레퍼런스 배열). 한 줄로 늘어놓고 가로로 밀던
+/// 것을 바꿨다: 밀어야 닿는 키는 **급할 때 못 찾는다**(Ctrl·화살표가 그렇다). 두 줄이면 전부
+/// 한눈에 있고, 칸을 화면 폭으로 나눠 손가락에도 더 크다.
+///
+/// **여기 있는 것은 소프트 키보드에 없는 키뿐이다.** `|`·`~`·`/`·`-` 는 어느 키보드에나 기호
+/// 층에 있어 뺐다(그 자리를 Home/End·PgUp/PgDn 이 쓴다 — 그것들은 어디에도 없다).
+/// `copy` 는 **터미널 앱 바**로 옮겼다: 선택이 있을 때만 뜨는 것이 맞고, 늘 한 칸을 먹을 이유가
+/// 없다(그리고 두 줄 열두 칸에는 자리가 없다).
 const key_bar = [_]KeyBarItem{
+    // ── 1행
     .{ .label = "esc", .key_id = 2 },
     .{ .label = "tab", .key_id = 3 },
-    .{ .label = "ctrl", .key_id = 0, .sticky_mod = 2 }, // MARU_MOD_CTRL
-    // 방향키는 **아이콘**이다(슬롯 6~9 — `maru_mobile_icon_build` 순서). 라벨은 접근성·계측용
-    // 이름으로 남긴다.
+    .{ .label = "home", .key_id = 9 },
     .{ .label = "\u{2191}", .key_id = 5, .icon_slot = arrow_slot_base + 0 },
-    .{ .label = "\u{2193}", .key_id = 6, .icon_slot = arrow_slot_base + 1 },
+    .{ .label = "end", .key_id = 10 },
+    .{ .label = "pgup", .key_id = 13 },
+    // ── 2행
+    .{ .label = "ctrl", .key_id = 0, .sticky_mod = 2 }, // MARU_MOD_CTRL
+    .{ .label = "alt", .key_id = 0, .sticky_mod = 4 }, // MARU_MOD_ALT
     .{ .label = "\u{2190}", .key_id = 7, .icon_slot = arrow_slot_base + 2 },
+    .{ .label = "\u{2193}", .key_id = 6, .icon_slot = arrow_slot_base + 1 },
     .{ .label = "\u{2192}", .key_id = 8, .icon_slot = arrow_slot_base + 3 },
-    .{ .label = "|", .key_id = 0, .codepoint = '|' },
-    .{ .label = "~", .key_id = 0, .codepoint = '~' },
-    .{ .label = "/", .key_id = 0, .codepoint = '/' },
-    .{ .label = "-", .key_id = 0, .codepoint = '-' },
-    .{ .label = "copy", .key_id = 0, .is_copy = true },
+    .{ .label = "pgdn", .key_id = 14 },
 };
+
+/// 한 줄에 몇 칸인가. **줄 수는 여기서 파생된다** — 키를 더하면 줄이 늘고, 두 값을 따로 적으면
+/// 갈린다.
+const key_bar_cols: usize = 6;
+const key_bar_rows: usize = (key_bar.len + key_bar_cols - 1) / key_bar_cols;
 
 /// `copy` 가 지금 쓸 수 있나(선택이 있나). 표시와 판정이 같은 값을 본다.
 fn copyEnabled() bool {
@@ -4614,7 +4761,6 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
     resetAtlasIfTextSizeChanged();
-    stepKeyBarFling();
     stepSetFling();
     stepBodyFling();
     if (term_core) |*core| checkLongPress(core);
@@ -4637,6 +4783,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .settings => drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .servers => drawServers(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

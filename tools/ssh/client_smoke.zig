@@ -175,6 +175,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **서버가 끊기를 기대하는 회차**(`MaxAuthTries 0`). `Step.disconnect` 는 이 자리 말고
     // 소비자가 없어서, 이 회차가 없으면 사유·설명 경로를 실서버로는 아무도 안 밟는다.
     const expect_disconnect = std.mem.eql(u8, mode, "disconnect");
+    // **비밀번호 회차.** 서버가 `password` 만 열어 두면(`PubkeyAuthentication no`) 우리 키는
+    // 거절당하고, 코어는 거기서 **멈춰 물어야** 한다. 그 자리(`password_needed`)는 실서버로
+    // 이 회차 말고 밟는 데가 없다 — 없으면 "서버가 열어 둔 문 앞에서 돌아서는" 결함이 다시 나도
+    // 아무도 모른다.
+    //
+    // **붙는 것까지는 못 본다** — 진짜 계정 비밀번호가 필요한데 스모크가 그것을 알 수 없다
+    // (사람에게 물을 수도 없다). 그래서 "물어야 할 자리에서 물었다" 와 "틀린 비밀번호는 실패로
+    // 끝난다"(되묻는 고리가 아니다) 둘을 단언한다.
+    const expect_password = std.mem.eql(u8, mode, "password");
 
     var parsed = try loadKey(key_path);
     defer parsed.clear();
@@ -196,12 +205,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **셸이 뜰 때까지 민다.** 중간에 호스트키를 물으면 승인한다 — 스모크는 방금 만든 일회용
     // 서버라 TOFU 가 그대로 맞다(제품에서는 사용자가 답한다, 계약 §4).
     var rounds: usize = 0;
+    var password_sent = false;
     while (rounds < 100_000) : (rounds += 1) {
-        const st = try pump();
+        // **틀린 비밀번호는 실패로 끝나야 한다** — 그것이 이 회차의 절반이다(나머지 절반은
+        // "물어야 할 자리에서 물었다"). 되묻는 고리에 빠지면 위 `password_needed` 로 다시 와
+        // 이 루프가 100_000 번 돌고 실패한다.
+        const st = pump() catch |e| {
+            if (expect_password and password_sent and e == error.AuthFailed) {
+                say("틀린 비밀번호는 실패로 끝난다 — 되묻지 않는다", .{});
+                say("OK", .{});
+                return;
+            }
+            return e;
+        };
         if (st == .host_key_decision) {
             var fp: [128]u8 = undefined;
             say("호스트키 {s}", .{try cl.hostKeyFingerprint(&fp)});
             cl.acceptHostKey();
+            continue;
+        }
+        if (st == .password_needed) {
+            if (!expect_password) return fail("비밀번호를 물었는데 그럴 회차가 아니다");
+            say("서버가 비밀번호를 요구한다 — 물어야 할 자리에서 물었다", .{});
+            // 스모크는 진짜 비밀번호를 모른다. **틀린 값을 한 번 보내고** 그 뒤가 실패로
+            // 끝나는지 본다(되묻는 고리에 빠지면 여기서 영원히 돈다).
+            const r = cl.providePassword("maru-smoke-wrong-password", &wire_out) catch |e| {
+                std.debug.print("[ssh-client-smoke] FAIL: providePassword {s}\n", .{@errorName(e)});
+                return error.SmokeFailed;
+            };
+            try sock.writeAll(r);
+            password_sent = true;
             continue;
         }
         if (st == .ready) break;
@@ -220,6 +253,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try fill();
     }
     if (expect_disconnect) return fail("서버가 끊기를 기대했는데 안 끊었다");
+    if (expect_password) return fail("비밀번호를 물어야 했는데 안 물었다");
     if (cl.state != .ready) return fail("셸이 안 떴다");
     say("셸 준비됨 ({s})", .{mode});
 

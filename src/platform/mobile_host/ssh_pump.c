@@ -61,6 +61,11 @@
 /// 붙는 데 이만큼 넘게 걸리면 실패로 본다. **기본값에 맡기면 안 된다** — 닿지 않는 주소에서
 /// 커널 재시도는 1분을 넘고, 그동안 `stop` 이 스레드를 못 거둬 화면은 "접속 중" 에 붙어 있다.
 #define PUMP_CONNECT_TIMEOUT_MS 15000
+/// **사용자가 비밀번호를 칠 시간.** 무한히 기다리면 앱을 닫아도 스레드가 남고, 짧으면 폰에서
+/// 비밀번호 앱을 열었다 돌아오는 사이에 끊긴다 — 2분으로 둔다.
+#define PUMP_PASSWORD_TIMEOUT_MS 120000
+/// 그 기다림의 폴링 간격.
+#define PUMP_PASSWORD_POLL_MS 100
 /// 그 기다림을 쪼개는 단위. 이 주기마다 **정지 표시를 본다** — 사용자가 취소하면 곧 멈춘다.
 #define PUMP_CONNECT_POLL_MS 100
 
@@ -334,6 +339,24 @@ static int decide_host_key(void) {
     return 0;
 }
 
+/// **사용자가 친 비밀번호를 기다리는 자리.** 호스트키 승인은 미리 받은 지문으로 그 자리에서
+/// 판정하지만(위), 비밀번호는 **사람이 쳐야** 나온다 — 펌프 스레드는 UI 를 못 여니 상태만
+/// 알리고 기다린다. 계약 §3.4 가 "저장하지 않는다" 로 정했으므로 쓰고 바로 지운다.
+static char g_password[256];
+static unsigned int g_password_len;
+static int g_password_ready;
+
+/// host 가 사용자에게 받은 비밀번호를 넣는다. **한 번 쓰고 지운다.**
+int maru_ssh_pump_password(const char *password, unsigned int len) {
+    if (password == NULL || len == 0 || len >= sizeof g_password) return -1;
+    pthread_mutex_lock(&g_session_lock);
+    memcpy(g_password, password, len);
+    g_password_len = len;
+    g_password_ready = 1;
+    pthread_mutex_unlock(&g_session_lock);
+    return 0;
+}
+
 /// 선에서 읽은 바이트를 모아 두는 자리(스택이 아니라 정적 — 2MiB 스택에 256KiB 를 또 얹지 않는다).
 static unsigned char g_in[PUMP_IN_CAP];
 static unsigned long g_in_len;
@@ -412,6 +435,7 @@ static void *pump_main(void *unused) {
     }
     set_state(maru_mobile_ssh_state(g_handle));
 
+    unsigned int password_waited_ms = 0;
     while (!g_stop) {
         pthread_mutex_lock(&g_session_lock);
         int bad = flush_out();
@@ -426,6 +450,35 @@ static void *pump_main(void *unused) {
             pthread_mutex_unlock(&g_session_lock);
             if (rc != 0) break;
             if (step_idle() != 0) break; // 승인은 상태만 옮긴다 — 밀어 줘야 `NEWKEYS` 가 나간다
+            continue;
+        }
+        // **비밀번호는 사람이 쳐야 온다.** 상태만 알리고(host 가 그것으로 화면을 연다) 기다린다.
+        // 무한히는 아니다 — 앱이 배경으로 가거나 사용자가 잊으면 스레드가 영영 남는다.
+        if (state == MARU_SSH_STATE_PASSWORD_NEEDED) {
+            if (!g_password_ready) {
+                password_waited_ms += PUMP_PASSWORD_POLL_MS;
+                if (password_waited_ms >= PUMP_PASSWORD_TIMEOUT_MS) {
+                    set_error("password_timeout");
+                    break;
+                }
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = (long)PUMP_PASSWORD_POLL_MS * 1000000L;
+                nanosleep(&ts, NULL);
+                continue;
+            }
+            pthread_mutex_lock(&g_session_lock);
+            int rc = maru_mobile_ssh_password(g_handle, (const unsigned char *)g_password, g_password_len);
+            // **쓰자마자 지운다**(계약 §3.4) — 실패했더라도 남길 이유가 없다.
+            memset(g_password, 0, sizeof g_password);
+            g_password_len = 0;
+            g_password_ready = 0;
+            pthread_mutex_unlock(&g_session_lock);
+            if (rc != MARU_SSH_OK) {
+                set_error(maru_mobile_ssh_last_error(g_handle));
+                break;
+            }
+            if (step_idle() != 0) break; // 보낸 것을 밀어 준다(호스트키 승인과 같은 자리)
             continue;
         }
         if (state == MARU_SSH_STATE_CLOSED) {

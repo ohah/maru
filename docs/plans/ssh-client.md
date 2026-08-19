@@ -18,7 +18,7 @@
 | S4b | **전송 루프** — 시퀀스 번호(방향별)·`NEWKEYS` 전환(옛 키로 보내고 그 뒤 교체)·평문↔암호 프레이밍 전환·추측 패킷 폐기(번호는 올린다)·strict KEX 수신 게이트 넷([계약 §4](../ssh-client.md)) | 바이트 열로 상태 전이 |
 | S5a | **호스트키 서명·지문** — `ssh-ed25519` blob 파싱, 교환 해시 서명 검증, `SHA256:` 지문 | RFC 8032 §7.1 벡터 + `ssh-keygen -lf` 와 지문 일치 |
 | S5b | **`known_hosts` 대조** — 호스트 매칭(평문 패턴·부정·해시 `\|1\|`)·`@revoked`·`@cert-authority` 제외·판정 넷 | 줄 파싱 + 판정 + `ssh-keygen -H` 와 해시 일치 |
-| S6a | **인증 프로토콜** — service 요청, `publickey`(session_id 를 덮는 서명)·`password`, 응답 넷, 배너 거르기 | RFC 8032 벡터로 서명 + 응답 파싱 |
+| S6a | **인증 프로토콜** — service 요청, `publickey`(session_id 를 덮는 서명)·`password`, 응답 넷, 배너 거르기. **S6a-2**(완료): 그 `password` 를 세션이 실제로 쓴다 — 키가 거절되고 서버가 열어 뒀으면 멈춰서 묻고(`password_needed`), 답을 받아 잇는다. ABI(`maru_mobile_ssh_password`)·펌프·두 host·묻는 화면까지 배선했다 | RFC 8032 벡터로 서명 + 응답 파싱, **실서버 열다섯째 회차**(비밀번호만 여는 sshd 에서 묻는 자리에 서고 틀린 값은 되묻지 않는다) + **기기**(두 기기에서 화면에 치면 sshd 가 `Failed password` 를 남긴다) |
 | S6b | **`openssh-key-v1` 파싱** — 평문 키와 암호화 키(`aes256-ctr` + OpenSSH bcrypt KDF), `checkint`·패딩·공개키 일치 검사 | `ssh-keygen` 이 만든 같은 키의 평문본·암호본이 같은 값을 낸다 |
 | S7 | **채널** — `session`·`pty-req`·`shell`·데이터·`window-change`·`exit-status` + **보내는 쪽 흐름 제어**(윈도·최대 패킷을 넘겨 보내지 않는다 — 실서버가 초기 윈도 `0` 을 광고하므로 첫 바이트부터 필요하다) | 상태 전이 + 실서버 왕복 |
 | S7b | **받는 쪽 흐름 제어** — 우리 윈도 소비(자동)와 `WINDOW_ADJUST` 보내기(절반에서). 잊으면 조용히 멈추는 대신 `WindowExhausted` 로 죽는다 | 초기 윈도의 3000 배를 흘려 보낸다 — 보충 없이는 못 지난다 |

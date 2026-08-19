@@ -700,6 +700,10 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         const expanded = if (self.scm_expanded_commit) |oid| std.mem.eql(u8, oid, commit.oid) else false;
         var refs = maru.session.git_log.refs(commit.refs);
         const first_ref = refs.next();
+        // **그리지 않은 나머지를 센다**(§3.5.3 — `+N`으로 접는다). 이름은 안 싣는다: 화면에 못 그릴
+        // 문자열을 프레임마다 들고 다닐 이유가 없고, 접힌 이름을 보여 주는 길이 아직 없다.
+        var ref_more: u32 = 0;
+        while (refs.next()) |_| ref_more +|= 1;
         items[n] = .{
             .commit = .{
                 .index = index,
@@ -710,6 +714,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .short_oid = commit.shortOid(),
                 .ref = if (first_ref) |ref| ref.name else "",
                 .ref_is_head = if (first_ref) |ref| ref.kind == .head else false,
+                .ref_more = ref_more,
                 .selected = if (self.scm_selected_commit) |sel| std.mem.eql(u8, sel, commit.oid) else false,
                 .expanded = expanded,
             },

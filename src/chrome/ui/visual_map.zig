@@ -34,6 +34,15 @@ const text_layout = @import("../text_layout.zig"); // cluster 분절 단일 출�
 pub const Piece = struct {
     start: usize,
     end: usize,
+    /// 이 조각이 차지하는 **열 수**.
+    ///
+    /// **세는 김에 내는 값이다.** `next`가 조각 경계를 정하려고 이미 열을 세고 있으므로 여기 실어도
+    /// 비용이 늘지 않는다. 호출자가 다시 세면 그것이 곧 두 번째 규칙이 되고, 걸친 2칸 글자나 §3.8
+    /// 표기에서 갈린다([native-editor-visual-mapping.md](../../../docs/native-editor-visual-mapping.md) §4.1g).
+    ///
+    /// 이 값을 누적하면 **조각의 시작 열**이 나오고, 그것이 랩된 줄에서 강조·선택을 그리는 전제다
+    /// (지금은 그 값이 없어 `frame.paintBands`가 이어진 조각을 통째로 건너뛴다).
+    cols: u32,
 
     pub fn slice(self: Piece, text: []const u8) []const u8 {
         return text[self.start..self.end];
@@ -62,14 +71,14 @@ pub const Pieces = struct {
         // 붙으면 이 자리에 시작 열이 들어온다).
         if (!self.wrap or self.view_cols == 0) {
             self.done = true;
-            return .{ .start = 0, .end = self.text.len };
+            return .{ .start = 0, .end = self.text.len, .cols = columnsOfText(self.text) };
         }
 
         const start = self.pos;
         if (start >= self.text.len) {
             self.done = true;
             // 줄 전체가 비었을 때만 빈 조각을 낸다. 앞에서 이미 조각을 냈다면 끝이다.
-            return if (start == 0) Piece{ .start = 0, .end = 0 } else null;
+            return if (start == 0) Piece{ .start = 0, .end = 0, .cols = 0 } else null;
         }
 
         var col: usize = 0;
@@ -97,12 +106,31 @@ pub const Pieces = struct {
             const base = text_layout.decodeCodepoint(self.text, i);
             const end = @min(text_layout.clusterEndAfter(self.text, i, base.advance), self.text.len);
             i = @max(start + 1, end);
+            // **그 글자의 실제 폭을 센다.** 위 루프는 `col`을 못 늘리고 나왔는데(안 들어가서 break),
+            // 여기서 억지로 넣은 글자는 화면에서 자기 폭만큼 차지한다. `col`(=0)을 그대로 두면 다음
+            // 조각의 시작 열이 이 글자를 안 지나간 것이 되어 **그 줄 전체의 열이 밀린다**.
+            col = columnsOfText(self.text[start..i]);
         }
 
         self.pos = i;
-        return .{ .start = start, .end = i };
+        return .{ .start = start, .end = i, .cols = @intCast(col) };
     }
 };
+
+/// 전개된 텍스트의 열 수. **전개 결과 전용이다** — 탭도 §3.8 표기도 이미 문자로 바뀐 뒤라
+/// cluster 폭만 더하면 된다(원본에서 세는 규칙은 `content.stepColumn`이 따로 소유한다).
+fn columnsOfText(text: []const u8) u32 {
+    var col: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const base = text_layout.decodeCodepoint(text, i);
+        const end = @min(text_layout.clusterEndAfter(text, i, base.advance), text.len);
+        const n = @max(1, end - i);
+        col += display_width.clusterCols(text, i, i + n);
+        i += n;
+    }
+    return col;
+}
 
 /// 전개된 줄 하나에 대한 이터레이터를 만든다.
 pub fn pieces(text: []const u8, view_cols: u16, wrap: bool) Pieces {
@@ -121,6 +149,26 @@ pub const VisualRow = struct {
     line: u32,
     /// 그 줄 안에서 몇 번째 조각인가(0-based). 조각 수는 화면 행 수를 넘지 않으므로 u32로 충분하다.
     piece: u32,
+
+    /// 이 행이 **줄의 몇 열에서 시작하는가**. 첫 조각이면 0이고, 랩된 줄의 두 번째 행부터 커진다.
+    ///
+    /// **이것이 없어서 `frame.paintBands`가 이어진 조각을 통째로 건너뛴다** — 강조 위치를 줄 처음부터
+    /// 세는데 그 행이 어디서 시작하는지 모르기 때문이다. 선택 하이라이트도 같은 경로를 타므로 같은
+    /// 자리에서 빈다([visual-mapping](../../../docs/native-editor-visual-mapping.md) §4.1g).
+    start_col: u32 = 0,
+
+    /// 이 행이 시작하는 **원본 byte**(줄 안 offset). `start_col`과 짝이다.
+    ///
+    /// **`start`가 아니라 따로 드는 이유**는 `Piece.start`가 **전개 텍스트** 기준이기 때문이다 —
+    /// 탭이 공백 여럿으로, §3.8 위험 문자가 `<U+202E>` 표기로 바뀐 뒤의 offset이라 문서 위치가 아니다.
+    /// 클릭은 원본 byte를 돌려주어야 하고(`Selection`이 byte 기반), 줄 시작부터 다시 걷는 비용을
+    /// 피하려면 그 값이 행마다 있어야 한다(§4.1g의 실측: 랩을 켜면 가로 상한이 없어 거리가 줄 길이에
+    /// 비례한다).
+    ///
+    /// **조각 시작이 원본 cluster 안쪽일 수 있다** — 쪼개진 탭, 걸친 2칸 글자, 8칸 표기의 중간(실측
+    /// 48%). 그때는 그 cluster의 **시작**을 가리킨다. 거기서 클릭 열까지 걷는 거리는 여전히 조각 폭
+    /// 이내다.
+    start_byte: u32 = 0,
 
     /// 이 행에 줄 번호를 그리는가. **랩된 줄의 두 번째 이후에는 비운다**(§4) — 안 그러면 같은
     /// 번호가 연달아 보인다(VSCode 관례).

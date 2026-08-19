@@ -3593,3 +3593,16 @@ test "목적지를 바꾸면 밀린 입력은 버린다" {
     var out: [64]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_input(&out, out.len));
 }
+
+test "코어가 서기 전에 온 원격 출력도 안 잃는다" {
+    // **세션은 첫 프레임보다 빨리 붙을 수 있다**(실측: iOS 에서 150ms 만에 붙었고 그때 코어가
+    // 없었다). 그때 온 바이트를 버리면 배너·프롬프트가 통째로 사라지고, 사용자는 붙었는데
+    // 아무것도 안 나오는 화면을 본다.
+    _ = bridge.maru_mobile_build(402, 874, now()); // 코어가 이미 섰다 — 이 테스트는 그 뒤 규약만 본다
+    bridge.maru_mobile_clear_error();
+    const before = bridge.maru_mobile_term_write("", 0);
+    const after = bridge.maru_mobile_term_write("hello", 5);
+    try std.testing.expectEqual(before + 5, after);
+    // 코어가 있으면 곧바로 들어가므로 오류가 없다.
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}

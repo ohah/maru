@@ -290,6 +290,75 @@ pub fn normalizeSeparators(allocator: std.mem.Allocator, path: []const u8) ![]u8
     return normalizeSeparatorsFor(@import("builtin").os.tag, allocator, path);
 }
 
+/// `normalizeSeparatorsFor`의 **역** — 중립 레이어의 `/` 경로를 OS 경계에서 native(`\`)로 되돌린다.
+///
+/// **한때 이 변환은 필요 없다고 적혀 있었다**(docs/windows-platform.md §5). 근거는 Win32 파일 API가 `/`를
+/// 받는다는 실측이었고 그 실측 자체는 맞다 — `GetFullPathNameW`·`GetFileAttributesW`·`CreateProcessW`의
+/// `lpApplicationName`·`lpCurrentDirectory` 전부 `/`를 받는다. 빠진 것은 **파일 API가 아닌 소비자**였다.
+///
+/// `cmd.exe`는 자기 커맨드라인을 CRT argv 규칙으로 파싱하지 않는다(계약 §4.2). `lpCommandLine`의 argv\[0\]이
+/// `"C:/Windows/System32/cmd.exe"`면 **cmd 혼자 실패한다** — `lpApplicationName`이 이미 올바른 파일을 가리켜
+/// 프로세스는 뜨는데, cmd가 자기 이름을 다시 풀다가 넘어진다.
+///
+/// **변수를 하나씩 바꿔 가며 실측했다.** 각 셸에 `echo MARU-OK` 한 줄을 시키고 출력을 파이프로 읽었다 —
+/// "살아 있는가"가 아니라 "실제로 도는가"를 봐야 pwsh가 무사한지 말할 수 있다:
+///
+/// ```text
+///                argv[0]=C:\…(native)      argv[0]=C:/…(정규화)
+/// cmd.exe        MARU-OK                   exit=1 "지정된 경로를 찾을 수 없습니다"   ← 여기만 깨진다
+/// pwsh 7         MARU-OK                   MARU-OK
+/// PowerShell 5.1 MARU-OK                   MARU-OK
+/// ```
+///
+/// `lpApplicationName`은 어느 쪽이든 `/`를 받는다(따로 실측) — 문제는 **argv\[0\] 한 자리**다. 그래도 둘을
+/// 갈라 두지 않고 spawn 경계에서 함께 되돌린다: 한쪽만 native면 "왜 이쪽만"이 남고, 다음 사람이 그 비대칭을
+/// 정리하다 argv\[0\]을 되돌려 놓는다.
+///
+/// 정규화를 걷어내는 것이 아니다 — 중립 레이어는 계속 `/`를 보고, **OS에 넘기기 직전 한 자리**에서만
+/// native가 된다.
+///
+/// `os_tag`가 인자인 이유는 `normalizeSeparatorsFor`와 같다: POSIX에서 `/`는 진짜 구분자라 바꾸면 다른
+/// 경로가 된다. 반환은 항상 `allocator` 소유다(같은 이유 — 조건부 소유권은 호출자가 반드시 틀린다).
+pub fn toNativeSeparatorsFor(
+    os_tag: std.Target.Os.Tag,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) ![]u8 {
+    const copy = try allocator.dupe(u8, path);
+    if (os_tag != .windows) return copy;
+    for (copy) |*c| {
+        if (c.* == '/') c.* = '\\';
+    }
+    return copy;
+}
+
+test "toNativeSeparatorsFor: Windows 에서만 되돌리고, 정규화와 왕복한다" {
+    const a = std.testing.allocator;
+
+    // Windows: `/` → `\`
+    const w = try toNativeSeparatorsFor(.windows, a, "C:/Windows/System32/cmd.exe");
+    defer a.free(w);
+    try std.testing.expectEqualStrings("C:\\Windows\\System32\\cmd.exe", w);
+
+    // POSIX: 무동작 — `/`는 진짜 구분자다
+    const p = try toNativeSeparatorsFor(.linux, a, "/usr/bin/zsh");
+    defer a.free(p);
+    try std.testing.expectEqualStrings("/usr/bin/zsh", p);
+
+    // native → 정규화 → native 왕복이 원본이다(Windows). 이 성질이 깨지면 spawn 경로가 조용히 달라진다.
+    const original = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+    const normalized = try normalizeSeparatorsFor(.windows, a, original);
+    defer a.free(normalized);
+    const back = try toNativeSeparatorsFor(.windows, a, normalized);
+    defer a.free(back);
+    try std.testing.expectEqualStrings(original, back);
+
+    // 반환은 언제나 소유 — 바꿀 것이 없어도 복사본이라 호출자의 free가 한 갈래다.
+    const same = try toNativeSeparatorsFor(.windows, a, "C:\\already\\native");
+    defer a.free(same);
+    try std.testing.expect(same.ptr != @as([]const u8, "C:\\already\\native").ptr);
+}
+
 /// 경로가 **이미 구분자로 끝나는가** — 그 아래에 자식을 이어 붙일 때 구분자를 하나 더 넣으면 안 되는 모양.
 ///
 /// 포함 판정(`pathWithin`)이 묻는 것이 정확히 이 질문이다: 루트가 `/`나 `C:/`처럼 구분자로 끝나면 루트 바로

@@ -36,3 +36,24 @@ test "WindowsShell(config)과 WindowsShellKind(pty)는 같은 변형 집합이�
     try std.testing.expectEqual(a.len, b.len);
     inline for (a, b) |fa, fb| try std.testing.expectEqualStrings(fa.name, fb.name);
 }
+
+/// 사용자가 고른 `config.theme.WindowsShell`을 중립 pty의 `WindowsShellKind`로 옮긴다. 두 타입이 함께
+/// 보이는 자리가 여기뿐이라(위 테스트의 근거와 같다) 변환도 여기 둔다 — 진입점마다 `switch`를 복사하면
+/// 변형이 늘 때 한 곳만 고쳐진다.
+///
+/// **`@enumFromInt`로 적지 않는다.** 위 테스트가 이름과 순서를 못 박지만, 그것이 깨졌을 때
+/// `@enumFromInt`는 **조용히 다른 셸을 띄운다**. 명시 `switch`는 변형이 늘면 컴파일이 멈춘다.
+pub fn windowsShellKindOf(shell: config.theme.WindowsShell) pty.WindowsShellKind {
+    return switch (shell) {
+        .powershell => .powershell,
+        .cmd => .cmd,
+    };
+}
+
+test "windowsShellKindOf: 모든 변형이 같은 이름으로 옮겨진다" {
+    const std = @import("std");
+    inline for (@typeInfo(config.theme.WindowsShell).@"enum".fields) |f| {
+        const got = windowsShellKindOf(@field(config.theme.WindowsShell, f.name));
+        try std.testing.expectEqualStrings(f.name, @tagName(got));
+    }
+}

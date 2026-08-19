@@ -178,6 +178,99 @@ pub fn resolveInteractiveShell() []const u8 {
     return resolveInteractiveShellFor(.powershell);
 }
 
+/// config `shell.command` 값이 **형식상** 셸 후보로 쓸 수 있는가. 순수 — 문자열과 `os_tag`만 본다.
+/// 다듬은 슬라이스를 돌려주고, 못 쓰면 null.
+///
+/// `isUsableComspec`과 규칙이 **일부러 다르다.** 저쪽은 sentinel(`[:0]`)을 잃으면 안 돼서 공백이 섞이면
+/// 통째로 버리는데, 여기 값은 config arena 소유 슬라이스라 다듬어도 된다 — 사용자가 config 파일에 적다가
+/// 남긴 공백 하나로 설정이 조용히 무시되면 원인을 알 수 없다.
+///
+/// **절대경로만 받는다.** 상대 경로를 그대로 두면 존재 검사가 maru의 **작업 디렉터리** 기준으로 풀려,
+/// 사용자가 방금 연 워크스페이스에 놓인 동명 실행 파일이 먼저 잡힌다(`isUsableComspec`과 같은 근거).
+/// 로더도 같은 것을 `Meta.abs_path`로 거르지만 여기서 다시 본다 — 이 함수만 보는 호출자(config를 파일이
+/// 아닌 다른 경로로 채운 테스트·GUI)가 그 가드를 우회할 수 있다.
+pub fn configuredShellCandidate(os_tag: std.Target.Os.Tag, configured: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, configured, " \t\r\n");
+    if (trimmed.len == 0) return null; // 미설정(기본) — 티어가 받는다
+    const absolute = if (os_tag == .windows)
+        std.fs.path.isAbsoluteWindows(trimmed)
+    else
+        std.fs.path.isAbsolutePosix(trimmed);
+    return if (absolute) trimmed else null;
+}
+
+/// **계약 §3.1a의 1순위 티어** — config `shell.command`가 있으면 그것을, 아니면 `resolveInteractiveShellFor`의
+/// 기본 티어를 쓴다. Windows 진입점이 사용자 설정을 실제로 존중하는 자리다.
+///
+/// 이 함수가 없던 동안 `shell.command`·`shell.windows-shell`은 **파싱·검증만 되고 spawn까지 가지 않았다**
+/// (실측: config가 `cmd`를 지정했는데 띄워진 자식은 `pwsh.exe`였다). 로더가 값을 받아 두는 것과 그 값이
+/// 쓰이는 것은 별개라, 소비자가 없으면 설정은 조용히 없는 것과 같다.
+///
+/// 존재 검사(`shellPathExists`)를 통과 못 하면 티어로 내려간다 — 사용자가 지운 셸을 가리키는 낡은 config
+/// 하나로 터미널이 안 열리는 것보다, 기본 셸로 열리는 편이 낫다. 형식 오류(상대경로·빈 값)는 로더가 이미
+/// 진단을 냈으므로 여기서 조용히 폴백해도 사용자는 원인을 본다.
+///
+/// **반환 슬라이스의 출처가 둘이다 — 수명이 짧은 쪽에 맞춰야 한다.** config가 이기면 `configured`의 부분
+/// 슬라이스이고(그 소유자는 호출자의 config arena), 티어로 내려가면 정적 리터럴이거나 프로세스 수명
+/// 정적 버퍼다(`resolveInteractiveShellFor`). 즉 **`configured`가 살아 있는 동안만 유효하다.** 호출자가
+/// 임시 버퍼를 넘기고 그것을 놓아 버리면 댕글링이다 — config를 읽는 진입점은 `loaded`를 스폰 이후까지
+/// 살려 두므로 지금 호출자들은 안전하다.
+///
+/// **구분자는 정규화된 채로 나간다.** 되돌리는 자리는 spawn 경계 하나다
+/// (`pty/windows.zig` — `path_shape.toNativeSeparatorsFor`). 여기서 되돌리면 되돌림이 두 자리가 되고,
+/// 표시용으로 이 값을 쓰는 자리(`surfaces[].command`)까지 native가 되어 중립 레이어 규약과 어긋난다.
+pub fn resolveShell(configured: []const u8, kind: WindowsShellKind) []const u8 {
+    if (configuredShellCandidate(@import("builtin").os.tag, configured)) |c| {
+        // `shellPathExists`가 `[:0]`를 요구한다 — config 값에는 sentinel이 없으므로 스택 버퍼에 담아 본다.
+        // 넘치면 **자르지 않고 티어로 내려간다.** 잘린 경로는 다른 파일을 가리키므로 존재 검사가
+        // "있다"고 답할 수도 있다 — 그러면 사용자가 지정하지 않은 실행 파일이 셸로 뜬다.
+        // 크기 근거는 `shellPathExists`의 wide 버퍼와 같다(그쪽 doc: `max_path_bytes`는 스택에 못 올린다).
+        var buf: [1024]u8 = undefined;
+        if (c.len < buf.len) {
+            @memcpy(buf[0..c.len], c);
+            buf[c.len] = 0;
+            if (shellPathExists(buf[0..c.len :0])) return c;
+        }
+    }
+    return resolveInteractiveShellFor(kind);
+}
+
+test "configuredShellCandidate: 두 OS 갈래가 모든 타깃에서 돈다" {
+    const win = std.Target.Os.Tag.windows;
+    const posix = std.Target.Os.Tag.linux;
+
+    // 미설정·공백뿐 — 티어로 내려간다
+    try std.testing.expect(configuredShellCandidate(win, "") == null);
+    try std.testing.expect(configuredShellCandidate(posix, "   ") == null);
+
+    // 앞뒤 공백은 **다듬어 받는다**(`isUsableComspec`과 다른 자리 — doc 참고)
+    try std.testing.expectEqualStrings(
+        "C:\\pwsh.exe",
+        configuredShellCandidate(win, "  C:\\pwsh.exe \r\n").?,
+    );
+    try std.testing.expectEqualStrings("/bin/zsh", configuredShellCandidate(posix, " /bin/zsh\n").?);
+
+    // 상대경로는 버린다 — 작업 디렉터리에 놓인 동명 파일이 잡히면 안 된다
+    try std.testing.expect(configuredShellCandidate(win, "pwsh.exe") == null);
+    try std.testing.expect(configuredShellCandidate(posix, "zsh") == null);
+    try std.testing.expect(configuredShellCandidate(posix, "~/bin/zsh") == null); // `~`는 확장 전이라 상대다
+
+    // **OS가 판정을 가른다** — 이 두 줄이 없으면 갈래 하나가 공허참으로 남는다.
+    try std.testing.expect(configuredShellCandidate(posix, "C:\\pwsh.exe") == null); // POSIX에 드라이브 절대는 없다
+    try std.testing.expect(configuredShellCandidate(win, "/bin/zsh") != null); // Windows는 루트-상대도 절대로 본다
+}
+
+test "resolveShell: 없는 경로를 가리키는 config 는 티어로 내려간다" {
+    // 존재하지 않는 절대경로 — 형식은 통과하지만 존재 검사에서 걸린다.
+    const absent = if (@import("builtin").os.tag == .windows)
+        "C:\\maru-no-such-shell-xyz.exe"
+    else
+        "/maru-no-such-shell-xyz";
+    try std.testing.expectEqualStrings(resolveInteractiveShellFor(.powershell), resolveShell(absent, .powershell));
+    // 미설정도 같다.
+    try std.testing.expectEqualStrings(resolveInteractiveShellFor(.cmd), resolveShell("", .cmd));
+}
+
 pub const Backend = enum {
     macos_openpty,
     windows_conpty,

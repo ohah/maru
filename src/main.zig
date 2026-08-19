@@ -1171,7 +1171,13 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     const start = win32_window.cellsForClient(initial.width_px, initial.height_px, cell_w, cell_h) orelse
         maru.terminal.Size{ .cols = 80, .rows = 24 };
     const script = maru.app.fixture_script.interactiveEcho(@import("builtin").os.tag);
-    const command = maru.pty.resolveInteractiveShell();
+    // **셸도 config에서 온다** — `shell.command`가 1순위, 없으면 `shell.windows-shell`이 고른 티어.
+    // 이 배선이 없던 동안 두 키는 파싱·검증만 되고 spawn까지 가지 않았다(실측: config가 `cmd`를 지정했는데
+    // 자식은 `pwsh.exe`였다). 폰트를 바로 위에서 `cfg`로 뽑으면서 셸만 기본값이던, 읽어 놓고 안 쓰던 자리다.
+    //
+    // fixture는 이 선택에 안 흔들린다 — `interactiveEcho(.windows)`는 인자가 비어 있고 입력이
+    // `echo …\r\nexit\r\n`이라 cmd·PowerShell 양쪽에서 같게 돈다.
+    const command = maru.pty.resolveShell(cfg.shell.command, maru.windowsShellKindOf(cfg.shell.windows_shell));
 
     var live: maru.app.LivePtySession = undefined;
     try live.init(io, allocator, 10, .{ .command = command, .args = script.args, .size = start }, 16);
@@ -1849,6 +1855,12 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             paste_protection, bracketed_paste_is_safe, @tagName(right_click_action), option_as_meta, std.zig.fmtString(default_word_separators),
         });
         try stdout.print("config_osc52_read={s} diagnostics={d}\n", .{ @tagName(osc52_read_policy), loaded.diagnostics.len });
+        // **어떤 셸이 골라졌는지 찍는다.** `shell.command`·`shell.windows-shell`이 spawn 까지 가는지는
+        // 리포트에 안 보이면 확인할 방법이 프로세스 트리를 뒤지는 것뿐이었다 — 그 상태로 두 키가 배선
+        // 없이 오래 남아 있었다(#8). 설정값과 결과를 나란히 찍어 한눈에 어긋남이 보이게 한다.
+        try stdout.print("config_shell: windows_shell={s} command=\"{s}\" resolved=\"{s}\"\n", .{
+            @tagName(cfg.shell.windows_shell), cfg.shell.command, command,
+        });
         try stdout.print("conpty={s}{s}{s}\n", .{
             @tagName(maru.pty.windowsConptySource()),
             if (reason.len > 0) " reason=" else "",

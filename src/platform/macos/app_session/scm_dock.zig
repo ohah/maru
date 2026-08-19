@@ -1097,7 +1097,12 @@ pub fn publishScmDockFrame(self: *AppSession, frame: component.build.Frame, wind
     // 알아야 하는데, 상자가 저장소마다 하나씩이라 고정 id가 없다(②b). 발행과 같은 자리에서 적어야
     // 테스트가 제품과 다른 경로로 발행해도 둘이 어긋나지 않는다.
     rememberCommitBoxNode(self, window);
-    if (frameEql(self.scm_dock_entries.items, self.scm_dock_actions.items, frame.tree.entries, frame.actions)) return;
+    // **같은 tree가 다시 나왔는가.** 이 판정이 좌우하는 것은 `capture` 하나뿐이다 — 표까지 함께 얼리면
+    // **세대만 오른 프레임**에서 표가 옛 세대로 굳고, 그 화면의 클릭이 영영 stale로 거부된다. 히스토리
+    // 탭에서 실제로 그랬다: `git status` 결과는 그 목록을 안 바꾸므로(`projectHistory`는 `git log`만 쓴다)
+    // tree가 늘 같아 발행이 계속 건너뛰어졌고, 표는 옛 세대에 남았다. **두 관심사를 한 `return`에 묶은
+    // 것이 그 버그의 구조였다** — capture 보존과 표 동결은 다른 요구다.
+    const replaced = !frameEql(self.scm_dock_entries.items, self.scm_dock_actions.items, frame.tree.entries, frame.actions);
     // 두 저장소를 **먼저** 확보한다. 할당이 실패해도 마지막으로 온전히 그린 hit tree가 남아야 한다.
     self.scm_dock_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
     self.scm_dock_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
@@ -1105,11 +1110,14 @@ pub fn publishScmDockFrame(self: *AppSession, frame: component.build.Frame, wind
     self.scm_dock_actions.clearRetainingCapacity();
     self.scm_dock_entries.appendSlice(self.allocator, frame.tree.entries) catch return;
     self.scm_dock_actions.appendSlice(self.allocator, frame.actions) catch return;
-    // 기하·action 매핑이 바뀌었으므로 진행 중인 capture는 더 이상 유효하지 않다.
-    self.scm_dock_interaction.capture = null;
+    // 기하·action 매핑이 **바뀌었을 때만** 진행 중인 capture를 버린다(같은 tree는 교체가 아니다).
+    if (replaced) self.scm_dock_interaction.capture = null;
     // **세대는 여기서 올리지 않는다.** action 표는 그리기 직전의 세대로 태깅되므로, 발행 직후 올리면
     // 그 프레임의 클릭이 전부 stale로 거부된다(테스트가 "행을 눌렀는데 0개 열림"으로 잡았다).
     // 세대는 **목록이 바뀔 때**(새 git 결과·목록 폐기) 올린다 — `git.zig`가 그 지점을 소유한다.
+    // 세대가 무효로 만드는 것은 intent가 싣는 **모델 인덱스·목록 자리**이지 화면이 아니라서, 그 기준을
+    // 여기로 옮기면 정의와 사용처가 갈린다. 이 함수의 몫은 **그 세대를 표가 따라오게 하는 것**이고,
+    // 위의 무조건 갱신이 그 길이다.
 }
 
 fn frameEql(

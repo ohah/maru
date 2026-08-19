@@ -20,6 +20,7 @@ const terminal = @import("../terminal.zig");
 const schema = @import("schema.zig");
 const builtin = @import("builtin");
 const path_shape = @import("../path_shape.zig"); // 입구 구분자 정규화(계약 §5)
+const os_env = @import("../os_env.zig"); // 환경변수를 UTF-8 로 읽는다 — Windows 의 ANSI getenv 회피
 const user_paths = @import("../user_paths.zig"); // config 자리 판정(OS 인자 순수 정책)
 
 pub const LoadError = std.mem.Allocator.Error;
@@ -1024,15 +1025,21 @@ pub fn loadFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Load
 /// 자리 판정은 `user_paths.defaultConfigPathFor`(순수·OS 인자)가 소유하고 여기서는 환경변수 읽기만 한다 —
 /// Windows 레이아웃을 왜 `%LOCALAPPDATA%`로 정했는지는 그 모듈의 doc과 계약 §5.3에.
 pub fn defaultConfigPath(allocator: std.mem.Allocator) LoadError!?[]const u8 {
-    if (std.c.getenv("MARU_CONFIG")) |override_z| {
-        const override = std.mem.span(override_z);
+    // **`getenv` 를 쓰지 않는다.** Windows 에서 그것은 CRT 의 ANSI 환경이라 사용자명이 비-ASCII 면
+    // 값이 ACP 바이트로 온다(실측: `C:\Users\홍길동\…` → cp949, `valid_utf8=false`). 그 바이트로
+    // 파일을 열면 실패하고, 아래 `loadFile` 의 forgiving 처리가 그것을 "파일 없음" 과 구분하지 못해
+    // **사용자 config 를 통째로 잃는다**. `os_env` 가 wide 환경을 읽는 단일 출처다.
+    if (os_env.allocValue(allocator, "MARU_CONFIG")) |override| {
+        defer allocator.free(override);
         // **여기도 정규화한다.** 아래 `%LOCALAPPDATA%` 갈래가 하는 것과 같은 이유이고, 이쪽이 오히려
         // **우선순위가 높은 환경변수**다. 빼먹으면 사용자가 어떻게 띄웠느냐에 따라 config 경로 철자가
         // 둘로 갈려, 그 경로를 잇거나 비교하는 소비자가 어긋난다.
-        if (override.len > 0) return try path_shape.normalizeSeparators(allocator, override);
+        return try path_shape.normalizeSeparators(allocator, override);
     }
-    const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
-    const local: ?[]const u8 = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
+    const home = os_env.allocValue(allocator, "HOME");
+    defer if (home) |h| allocator.free(h);
+    const local = os_env.allocValue(allocator, "LOCALAPPDATA");
+    defer if (local) |l| allocator.free(l);
     const raw = (try user_paths.defaultConfigPathFor(allocator, builtin.os.tag, home, local)) orelse return null;
     defer allocator.free(raw);
     // 입구 정규화(계약 §5) — 환경변수에서 온 값은 native 구분자다. 중립 레이어가 `/`로 이으므로

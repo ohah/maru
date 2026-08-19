@@ -1,5 +1,6 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
+const os_env = @import("../os_env.zig"); // 환경변수를 UTF-8 로 읽는다 — Windows 의 ANSI getenv 회피
 
 /// Windows에서 기본으로 띄울 셸의 종류(config `shell.windows-shell`). 값의 뜻은
 /// `config/theme.zig`의 `WindowsShell`이 소유한다 — 여기서는 티어를 고르는 스위치로만 쓴다.
@@ -94,6 +95,38 @@ fn shellPathExists(path: [:0]const u8) bool {
     return attrs & file_attribute_directory == 0;
 }
 
+/// 프로세스 수명 동안 유효한 **NUL 종단** 환경변수 사본. spawn 인자로 가는 값이라 `[:0]const u8` 이어야
+/// 하고 해제 시점이 없다 — 그래서 소유 슬라이스가 아니라 정적 버퍼에 한 번 담아 빌려준다.
+///
+/// **`std.c.getenv` 를 쓰지 않는 이유**는 `os_env` 의 doc 그대로다: Windows 의 ANSI 환경은 비-ASCII
+/// 사용자명에서 ACP 바이트를 준다. 셸 경로가 그런 디렉터리 아래에 있으면 spawn 이 실패한다.
+const ShellEnvCache = struct {
+    buf: [512]u8 = undefined,
+    len: usize = 0,
+    resolved: bool = false,
+};
+
+var shell_override_cache: ShellEnvCache = .{};
+var comspec_cache: ShellEnvCache = .{};
+
+fn cachedShellEnv(cache: *ShellEnvCache, key: []const u8) ?[:0]const u8 {
+    if (!cache.resolved) {
+        cache.resolved = true;
+        const gpa = std.heap.smp_allocator;
+        if (os_env.allocValue(gpa, key)) |value| {
+            defer gpa.free(value);
+            // 넘치면 **자르지 않고 없는 것으로 본다** — 잘린 셸 경로는 다른 파일을 가리킨다.
+            if (value.len > 0 and value.len < cache.buf.len) {
+                @memcpy(cache.buf[0..value.len], value);
+                cache.buf[value.len] = 0;
+                cache.len = value.len;
+            }
+        }
+    }
+    if (cache.len == 0) return null;
+    return cache.buf[0..cache.len :0];
+}
+
 /// 대화형 shell 경로를 한 곳에서 결정한다. 진입점(main, app session, metal smoke)마다
 /// 복사하면 fallback이나 trim 정책이 갈라진다(실제로 `/bin/sh` vs `/bin/zsh`, trim 유무로
 /// 어긋나 있었다). 환경값은 앞뒤 공백을 제거해 trailing newline이 경로에 섞여 spawn이
@@ -117,8 +150,8 @@ fn shellPathExists(path: [:0]const u8) bool {
 /// `kind`는 config `shell.windows-shell`에서 온다. 기본값(`.powershell`)은 계약 §3.1a의 사용자 확정이다 —
 /// cmd는 `OSC 133 D`를 원리적으로 못 내(§3.4) 기본이 되면 ADE가 반쯤 꺼진 채 시작한다.
 pub fn resolveInteractiveShellFor(kind: WindowsShellKind) []const u8 {
-    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
-        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+    if (cachedShellEnv(&shell_override_cache, "MARU_INTERACTIVE_SHELL")) |raw| {
+        const value = std.mem.trim(u8, raw, " \t\r\n");
         if (value.len > 0) return value;
     }
     if (@import("builtin").os.tag != .windows) {
@@ -130,7 +163,7 @@ pub fn resolveInteractiveShellFor(kind: WindowsShellKind) []const u8 {
     }
 
     // 자격 검사(절대경로·공백)는 `interactiveShellCandidates`가 한다 — 규칙을 한 곳에 둔다.
-    const comspec: ?[:0]const u8 = if (std.c.getenv("COMSPEC")) |raw| std.mem.span(raw) else null;
+    const comspec: ?[:0]const u8 = cachedShellEnv(&comspec_cache, "COMSPEC");
     var buf: [max_shell_candidates][:0]const u8 = undefined;
     const candidates = interactiveShellCandidates(.windows, kind, comspec, &buf);
     for (candidates) |c| if (shellPathExists(c)) return c;

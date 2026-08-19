@@ -206,12 +206,34 @@ fn dispatch(
 /// `maru.user_paths.homeDirFor`(순수·OS 인자)가 한다 — 규칙이 갈리지 않게 네 소비자가 이 함수 하나를 쓴다
 /// (terminfo 캐시 · `install-cli` 위치 · ssh control path · `trace anonymize`의 매칭 키).
 ///
-/// 반환 슬라이스는 **환경 블록을 borrow**한다(`std.mem.span` — free하지 않는다). 프로세스 수명 동안
-/// 유효하고, `main`이 환경을 바꾸지 않으므로 안전하다.
+/// 반환 슬라이스는 **프로세스 수명 동안 유효**하다(호출자 넷이 free하지 않는다). 예전에는 환경 블록을
+/// 그대로 borrow했는데, 이제는 한 번 읽어 아래 고정 버퍼에 담고 그것을 빌려준다 — 소유권 계약은 그대로다.
+///
+/// **`std.c.getenv`를 쓰지 않는다.** Windows에서 그것은 CRT의 **ANSI 환경**이라 사용자명이 비-ASCII면
+/// 값이 ACP 바이트로 온다(실측: `C:\Users\홍길동\…`가 cp949, `valid_utf8=false`). 그 바이트로 파일을
+/// 열면 실패하고, 이 함수의 소비자 넷(terminfo 캐시·`install-cli` 위치·ssh control path·
+/// `trace anonymize` 매칭 키)이 전부 조용히 어긋난다. 자세한 근거는 `os_env`의 doc에.
+var host_home_buf: [1024]u8 = undefined;
+var host_home_len: usize = 0;
+var host_home_resolved: bool = false;
+
 fn hostHomeDir() ?[]const u8 {
-    const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
-    const userprofile: ?[]const u8 = if (std.c.getenv("USERPROFILE")) |u| std.mem.span(u) else null;
-    return maru.user_paths.homeDirFor(@import("builtin").os.tag, home, userprofile);
+    if (host_home_resolved) return if (host_home_len == 0) null else host_home_buf[0..host_home_len];
+    host_home_resolved = true;
+
+    const gpa = std.heap.smp_allocator;
+    const home = maru.os_env.allocValue(gpa, "HOME");
+    defer if (home) |h| gpa.free(h);
+    const userprofile = maru.os_env.allocValue(gpa, "USERPROFILE");
+    defer if (userprofile) |u| gpa.free(u);
+
+    const picked = maru.user_paths.homeDirFor(@import("builtin").os.tag, home, userprofile) orelse return null;
+    // 홈 경로가 버퍼를 넘으면 **자르지 않고 없는 것으로 본다** — 잘린 경로는 다른 디렉터리를 가리켜
+    // 그 아래에 파일을 쓰는 소비자(terminfo 캐시·install-cli)가 엉뚱한 자리를 만든다.
+    if (picked.len == 0 or picked.len > host_home_buf.len) return null;
+    @memcpy(host_home_buf[0..picked.len], picked);
+    host_home_len = picked.len;
+    return host_home_buf[0..host_home_len];
 }
 
 /// `maru win32-window-smoke` — W7.1이 actual로 무엇을 하는지 사람이 눈으로 확인하는 자리.
@@ -2224,8 +2246,11 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
     try stdout.print("maru CLI installed: {s} -> {s}\n", .{ link, exe_path });
 
     // bin 디렉터리가 PATH에 없으면 추가 방법을 안내한다.
-    if (std.c.getenv("PATH")) |path_z| {
-        if (!maru.cli.install.pathContainsDir(std.mem.span(path_z), bindir)) {
+    // `PATH` 도 경로 값이라 `os_env` 로 읽는다 — 비-ASCII 사용자명이 든 항목이 ACP 바이트로 오면
+    // `pathContainsDir` 의 비교가 어긋나 "PATH 에 없다" 는 안내가 잘못 뜬다.
+    if (maru.os_env.allocValue(allocator, "PATH")) |path_value| {
+        defer allocator.free(path_value);
+        if (!maru.cli.install.pathContainsDir(path_value, bindir)) {
             try stdout.print(
                 "\nnote: {s} is not on PATH. Add the following to your shell config (~/.zshrc etc.):\n  export PATH=\"{s}:$PATH\"\n",
                 .{ bindir, bindir },
@@ -2281,8 +2306,13 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     // `C:\Users\me/.cache/maru/terminfo`였다. POSIX에서는 무동작이라 macOS 동작이 바뀌지 않는다.
     // base 판정은 `user_paths.cacheBaseFor`가 소유한다 — `$XDG_CACHE_HOME`이 모든 OS에서 최우선이고,
     // Windows에서는 그 다음이 `%LOCALAPPDATA%`다(계약 §5.3). 여기서는 환경변수 읽기와 입구 정규화만 한다.
-    const xdg_raw = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
-    const local_raw = if (std.c.getenv("LOCALAPPDATA")) |l| std.mem.span(l) else null;
+    // `getenv` 가 아니라 `os_env` 로 읽는다 — Windows 의 ANSI 환경은 비-ASCII 사용자명에서 ACP 바이트를
+    // 준다(그 doc 참조). 여기서 그것을 정규화하면 cp949 trail 바이트가 `0x5C` 일 때 글자 한가운데를 바꿔
+    // **다른 캐시 디렉터리**를 만든다.
+    const xdg_raw = maru.os_env.allocValue(allocator, "XDG_CACHE_HOME");
+    defer if (xdg_raw) |x| allocator.free(x);
+    const local_raw = maru.os_env.allocValue(allocator, "LOCALAPPDATA");
+    defer if (local_raw) |l| allocator.free(l);
     const base_raw = maru.user_paths.cacheBaseFor(@import("builtin").os.tag, xdg_raw, local_raw);
     const xdg: ?[]const u8 = if (base_raw) |b| try maru.path_shape.normalizeSeparators(allocator, b) else null;
     defer if (xdg) |x| allocator.free(x);

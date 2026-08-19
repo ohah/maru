@@ -442,6 +442,9 @@ const char *maru_mobile_ssh_host_key_fingerprint(unsigned int handle);
 /// 사용자가 승인했다. 이 뒤에야 다음 발이 나간다.
 int maru_mobile_ssh_accept_host_key(unsigned int handle);
 
+/// 지금까지 키를 몇 번 갈았나(재키잉). 오래 산 세션은 반드시 이 길을 지난다 — 검증이 "쟀다" 고
+/// 말하려면 이 값이 0 이 아니어야 하고, 기기 로그에서는 세션 수명의 가늠자다.
+unsigned int maru_mobile_ssh_rekeys(unsigned int handle);
 /// 서버가 끊은 이유(RFC 4253 §11.1). 0=안 끊겼다. 설명은 **이미 걸러져 있다**(제어문자 제거).
 unsigned int maru_mobile_ssh_disconnect_reason(unsigned int handle);
 const char *maru_mobile_ssh_disconnect_description(unsigned int handle);

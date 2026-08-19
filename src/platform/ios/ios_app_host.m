@@ -1256,14 +1256,26 @@ static void startSshIfConfigured(void) {
     }
 
     // **키는 우리가 읽고 ABI 가 푼다.** 파일 바이트는 이 함수 밖으로 안 나간다.
-    NSData *pem = [NSData dataWithContentsOfFile:identity];
-    if (!pem) {
+    //
+    // **`NSData` 로 읽지 않는다.** 그 바이트는 우리가 못 지우고(autorelease 라 언제 풀릴지도
+    // 모른다) 힙에 개인키가 그대로 남는다 — Android 쪽은 자기 버퍼를 쓰고 지우고 있었는데
+    // 여기만 안 그랬다. 같은 규율로 맞춘다.
+    static unsigned char pem[16 * 1024];
+    FILE *kf = fopen(identity.fileSystemRepresentation, "rb");
+    if (!kf) {
         NSLog(@"MARU_SSH key_unreadable path=%@", identity);
         return;
     }
+    size_t pem_len = fread(pem, 1, sizeof pem, kf);
+    fclose(kf);
+    if (pem_len == 0) {
+        NSLog(@"MARU_SSH key_empty path=%@", identity);
+        return;
+    }
     static unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
-    int loaded = maru_mobile_ssh_load_key(pem.bytes, (unsigned int)pem.length,
+    int loaded = maru_mobile_ssh_load_key(pem, (unsigned int)pem_len,
                                           (const unsigned char *)"", 0, secret);
+    memset(pem, 0, sizeof pem); // 읽은 원문을 안 남긴다
     if (loaded != MARU_SSH_OK) {
         NSLog(@"MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
         return;

@@ -312,11 +312,22 @@ case "$pin_out" in
 esac
 ROUNDS=$((ROUNDS + 1))
 
+# 14) **펌프로 재키잉을 지난다.** 앞의 펌프 회차는 한 줄 받고 끝나서 키를 갈 일이 없다 —
+#     그런데 모바일 세션은 길게 살아 **반드시** 재키잉을 만난다(OpenSSH 기본 1GB/1시간).
+#     `RekeyLimit 1M` 서버에서 4MiB 를 받으면 그 길을 실제로 지난다.
+start_sshd "$DIR/sshd10.pid" "$((PORT + 13))" "$DIR/sshd10.log" "$BULK_CMD" "RekeyLimit 1M" || {
+	sed -n '1,5p' "$DIR/sshd10.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 펌프 재키잉 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$HOSTKEY_FP" MARU_PUMP_OK "$EXPECT_BYTES"
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 12 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 12 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 13 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 13 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열두 회차 완주"
+echo "[ssh-client-smoke] 열세 회차 완주"

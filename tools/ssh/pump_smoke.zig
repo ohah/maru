@@ -95,6 +95,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const key_path = it.next() orelse return fail("개인키 경로를 인자로 준다");
     const fingerprint = it.next() orelse return fail("기대 지문을 인자로 준다");
     const marker = it.next() orelse return fail("화면에서 찾을 문자열을 인자로 준다");
+    // 0 이면 표시만 찾는다. 크면 **그만큼 받을 때까지** 기다린다(재키잉을 태우는 회차).
+    const expect_bytes = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
     const port = try std.fmt.parseInt(u16, port_str, 10);
 
     // **키는 ABI 가 푼다** — host 는 파일만 읽는다(기기에서도 같다).
@@ -137,8 +139,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // **끝날 때까지 기다린다.** `ForceCommand` 가 한 줄 찍고 나가므로 세션이 스스로 닫힌다.
+    // 대량 수신 회차는 그만큼 받을 때까지 더 기다린다(재키잉이 그 사이에 여러 번 일어난다).
+    const budget_ms: usize = if (expect_bytes > 0) 180_000 else 30_000;
     var waited_ms: usize = 0;
-    while (waited_ms < 30_000) : (waited_ms += 50) {
+    while (waited_ms < budget_ms) : (waited_ms += 50) {
         if (pump.maru_ssh_pump_state() == 12) break; // CLOSED
         sleepMs(50);
     }
@@ -154,6 +158,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **거쳐 간 상태를 단언한다** — 안 그러면 "붙지도 못하고 조용히 끝난 것" 과 구별이 안 된다.
     if (!state_seen[4]) return fail("호스트키를 판정하는 자리를 안 지났다");
     if (!state_seen[11]) return fail("셸이 뜬 자리를 안 지났다");
+    if (expect_bytes > 0) {
+        // **재키잉을 태우는 회차다.** 서버가 `RekeyLimit 1M` 이면 이만큼 받는 동안 여러 번 키를
+        // 간다 — 펌프·ABI 는 그 길을 한 번도 안 지나 봤다(모바일 세션은 길게 살아서 반드시
+        // 만난다). 받은 양이 모자라면 그 사이에 멈춘 것이다.
+        if (screen_total < expect_bytes) {
+            say("받은 {d}B < 기대 {d}B (오류=[{s}])", .{ screen_total, expect_bytes, err });
+            return fail("대량 수신이 도중에 멈췄다");
+        }
+        // **재키잉을 실제로 지났는지 센다.** 안 세면 서버가 키를 한 번도 안 갈아도 이 회차가
+        // 초록이 된다 — "쟀다" 고 말할 수 없는 초록이 이 저장소에서 여러 번 나왔다.
+        const rekeys = pump.maru_ssh_pump_rekeys();
+        if (rekeys < 2) {
+            say("재키잉 {d} 회 — 이 회차는 그 길을 재려고 있다", .{rekeys});
+            return fail("재키잉이 안 일어났다");
+        }
+        say("대량 수신 {d}B, 재키잉 {d} 회, 거쳐 간 상태 12개", .{ screen_total, rekeys });
+        say("OK", .{});
+        return;
+    }
     if (std.mem.indexOf(u8, screen_head[0..screen_head_len], marker) == null) {
         say("화면 {d}B 안에 표시가 없다", .{screen_total});
         return fail("원격 출력이 host 훅으로 안 왔다");

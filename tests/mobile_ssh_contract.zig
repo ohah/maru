@@ -541,6 +541,7 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_exit_status",            "maru_mobile_ssh_exit_signal",
         "maru_mobile_ssh_last_error",             "maru_mobile_ssh_clear_error",
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
+        "maru_mobile_ssh_rekeys",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -590,4 +591,13 @@ test "개인키 PEM 을 읽어 64바이트를 만든다" {
     // 빈 입력도 **이름을 남긴다**(§5) — 조용히 실패하면 host 는 왜 안 붙는지 모른다.
     try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_load_key("", 0, "", 0, &secret));
     try testing.expectEqualStrings("key_empty", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+}
+
+test "재키잉 횟수는 세션 것이고 핸들이 틀리면 0 이다" {
+    const h = try openReady();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_rekeys(h)); // 아직 안 갈았다
+    ssh.slots[(h & 0xFFFF) - 1].cl.rekeys = 3;
+    try testing.expectEqual(@as(u32, 3), ssh.maru_mobile_ssh_rekeys(h));
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_rekeys(h ^ 0x1000)); // 틀린 핸들
 }

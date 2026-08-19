@@ -507,6 +507,14 @@ pub export fn maru_mobile_ssh_accept_host_key(handle: u32) c_int {
     return ok;
 }
 
+/// 지금까지 키를 몇 번 갈았나(재키잉 — 계약 §3.0.1). **오래 산 세션은 반드시 이 길을 지난다**
+/// (OpenSSH 기본 1GB/1시간). 0 이면 그 길을 한 번도 안 밟은 것이라, 검증에서 "쟀다" 고 말할 수
+/// 없다 — 기기 로그로도 "이 세션이 얼마나 오래 살았나" 를 가늠하는 값이다.
+pub export fn maru_mobile_ssh_rekeys(handle: u32) u32 {
+    const s = slotOf(handle) orelse return 0;
+    return @intCast(s.cl.rekeys);
+}
+
 pub export fn maru_mobile_ssh_disconnect_reason(handle: u32) u32 {
     const s = slotOf(handle) orelse return 0;
     return s.disconnect_reason;

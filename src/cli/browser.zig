@@ -18,28 +18,29 @@ const cp = @import("../session/control_plane.zig");
 pub const browser_help =
     \\usage: maru browser <command> [--surface <id>] [args]
     \\
-    \\web surface(브라우저 패널)를 제어한다. 먼저 `maru browser list`로 대상 web surface_id를 발견하고,
-    \\나머지 명령에 --surface <id>로 지정한다. 권한이 없으면 확인 모달이 뜨고, 허용하면 실행된다(§9.2 Model B).
+    \\Control a web surface (browser panel). First discover the target web surface_id with
+    \\`maru browser list`, then pass it to the other commands as --surface <id>. Without a
+    \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
     \\
     \\commands:
-    \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
-    \\  navigate    --surface <id> <url>       URL로 이동
-    \\  get-url     --surface <id>             현재 문서 URL 출력
-    \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   JavaScript 표현식 실행·await
-    \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
-    \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
-    \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
-    \\  get-local-storage    --surface <id> --key k             localStorage 값 출력
-    \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
-    \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
-    \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
-    \\  click   --surface <id> (--selector <css> | --ref <e#>)          요소 클릭(selector 또는 snapshot ref)
-    \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   요소(input)에 값 입력
-    \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          요소로 스크롤
-    \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
-    \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
-    \\  console --surface <id> [--clear]                        페이지 콘솔 로그(level·text) 출력, --clear=회수 후 비움
-    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
+    \\  list                                   list open web panels (id, url, title — for discovery)
+    \\  navigate    --surface <id> <url>       navigate to URL
+    \\  get-url     --surface <id>             print the current document URL
+    \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
+    \\  get-cookies --surface <id>             print cookies for the current document host as JSON
+    \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   set a cookie
+    \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      delete a cookie
+    \\  get-local-storage    --surface <id> --key k             print a localStorage value
+    \\  set-local-storage    --surface <id> --key k --value v   set a localStorage value
+    \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
+    \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
+    \\  click   --surface <id> (--selector <css> | --ref <e#>)          click an element (by selector or snapshot ref)
+    \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   type text into an element (input)
+    \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          scroll an element into view
+    \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
+    \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
+    \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
+    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
     \\
 ;
 

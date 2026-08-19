@@ -478,20 +478,20 @@ pub fn createEditorTerm(self: *AppSession) !*Term {
     return term;
 }
 
-/// 일반 텍스트 파일을 **네이티브 편집기로** 열까. **기본은 끔이다.**
+/// 일반 텍스트 파일을 **네이티브 편집기로** 열까. **기본이 네이티브다**(2026-08-19 사용자 결정).
 ///
-/// 비교(`MARU_NATIVE_DIFF`)는 기본이 네이티브지만 이쪽은 다르다 — diff는 CM6에서도 **읽기 전용**이라
-/// 바꿔도 잃는 것이 없었고, 일반 텍스트는 CM6에서 편집·저장이 된다(`EntryKind.text`의 기본 mode가
-/// `.source_edit`이다). 네이티브 편집기는 N1이라 읽기 전용이므로, 기본을 켜면 **탐색기에서 연 파일을
-/// 고칠 수 없게 된다** — 그것은 기능 후퇴다. 기본 전환은 편집이 붙는 N2의 일이다.
+/// **무엇을 내주고 정한 것인지 적어 둔다.** 비교(`MARU_NATIVE_DIFF`)는 CM6에서도 **읽기 전용**이라
+/// 바꿔도 잃는 것이 없었지만, 일반 텍스트는 CM6에서 편집·저장이 된다(`EntryKind.text`의 기본 mode가
+/// `.source_edit`이다). 네이티브 편집기는 N1이라 **읽기 전용이므로, 이 기본은 탐색기에서 연 파일을
+/// 고칠 수 없게 만든다** — 편집이 붙는 N2까지 그렇다. 계획은 원래 이 전환을 N2에 두었고, 사용자가
+/// 그 대가를 알고 앞당겼다(../../../../docs/plans/native-editor.md N1).
 ///
-/// 그때까지 이 훅이 하는 일은 **개발·검증 경로를 실제 클릭 경로로 만드는 것**이다. 지금까지 네이티브
-/// 편집기를 제품에서 보려면 `MARU_NATIVE_EDITOR=<경로>`로 앱을 띄워야 했고(시작할 때 한 파일),
-/// 다른 파일을 보려면 앱을 다시 띄워야 했다.
+/// **`MARU_NATIVE_TEXT=0`으로 되돌릴 수 있다.** 고쳐야 하는 파일을 만나면 그 길로 CM6를 부른다 —
+/// 훅을 지우는 것은 편집이 붙어 그 경로를 실제로 안 쓰게 된 뒤의 일이다(비교 훅과 같은 규율).
 ///
 /// **세션이 init에서 한 번 읽어 든다**(`AppSession.native_text`) — `native_diff`와 같은 이유다.
 pub fn nativeTextFromEnv() bool {
-    const raw = std.c.getenv("MARU_NATIVE_TEXT") orelse return false;
+    const raw = std.c.getenv("MARU_NATIVE_TEXT") orelse return true;
     return editor_diff_ops.valueEnables(std.mem.span(raw));
 }
 
@@ -4878,10 +4878,11 @@ test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-test "훅이 켜지면 텍스트 파일이 편집기 Term으로 열린다 — 꺼져 있으면 지금까지대로다" {
+test "텍스트 파일이 편집기 Term으로 열린다 — 되돌리면 지금까지의 CM6다" {
     // **이 분기가 이 슬라이스의 전부다.** 지금까지 네이티브 편집기를 제품에서 보려면 시작할 때
     // `MARU_NATIVE_EDITOR=<경로>`로 한 파일을 열어야 했고, 다른 파일을 보려면 앱을 다시 띄워야 했다.
-    // 기본이 CM6 그대로인 것도 함께 고정한다 — "기본 경로를 바꾸지 않는다"는 말의 근거가 이 단언이다.
+    // **되돌린 경로도 함께 고정한다** — 기본이 네이티브가 된 지금(2026-08-19) `MARU_NATIVE_TEXT=0`이
+    // 편집 수단이므로, 그 경로가 조용히 죽으면 사용자는 파일을 고칠 길을 잃는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;
@@ -4915,13 +4916,13 @@ test "훅이 켜지면 텍스트 파일이 편집기 Term으로 열린다 — �
     });
     defer session.deinit();
 
-    // 꺼진 상태(기본) — 웹 Term이다.
+    // 되돌린 상태(`MARU_NATIVE_TEXT=0`) — 지금까지의 웹 Term이다.
     session.native_text = false;
     const off = try pane_ops.openFileTermInActivePane(session, off_path, .text);
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, off.term.kind);
     try testing.expect(!off.term.file_entry.?.native_editor);
 
-    // 켜진 상태 — 편집기 Term이고, **문서가 실려 있다**. Term 종류만 보면 빈 편집기를 열어도 통과한다.
+    // 기본 상태 — 편집기 Term이고, **문서가 실려 있다**. Term 종류만 보면 빈 편집기를 열어도 통과한다.
     session.native_text = true;
     const on = try pane_ops.openFileTermInActivePane(session, on_path, .text);
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.editor, on.term.kind);
@@ -4931,13 +4932,13 @@ test "훅이 켜지면 텍스트 파일이 편집기 Term으로 열린다 — �
     try testing.expect(on.term.file_entry.?.native_editor);
     try testing.expectEqual(on.term.surfaceId(), on.term.file_entry.?.surface_id);
 
-    // **못 읽는 파일은 훅이 켜져 있어도 CM6로 간다**(§3.5 — UTF-8 아님). 훅을 켠 것이 특정 파일을
-    // 아예 못 여는 이유가 되면 안 된다.
+    // **못 읽는 파일은 CM6로 간다**(§3.5 — UTF-8 아님). 기본이 네이티브인 것이 특정 파일을 아예
+    // 못 여는 이유가 되면 안 된다.
     const bad = try pane_ops.openFileTermInActivePane(session, bad_path, .text);
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, bad.term.kind);
     try testing.expect(!bad.term.file_entry.?.native_editor);
 
-    // 텍스트가 아닌 종류는 훅과 무관하다 — 마크다운은 리치 프리뷰가 주 가치라 네이티브로 가지 않는다.
+    // 텍스트가 아닌 종류는 이 결정과 무관하다 — 마크다운은 리치 프리뷰가 주 가치라 CM6에 남는다.
     const md = try pane_ops.openFileTermInActivePane(session, md_path, .markdown);
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.web, md.term.kind);
 }
@@ -4970,10 +4971,10 @@ test "init이 MARU_NATIVE_TEXT를 읽는다 — 안 읽으면 훅이 아무 일�
     try testing.expect(session.native_text);
 }
 
-test "훅 기본은 끔이다 — 켜면 편집이 안 되는 파일이 생긴다" {
-    // `MARU_NATIVE_DIFF`와 **다른 기본값**이다. 비교는 CM6에서도 읽기 전용이라 바꿔도 잃는 것이
-    // 없었지만, 텍스트는 CM6에서 편집·저장이 된다. 이 단언이 무너지면 탐색기에서 연 파일을 고칠 수
-    // 없게 된다 — 기본 전환은 편집이 붙는 N2의 일이다.
+test "훅 기본은 켬이고 0으로 되돌릴 수 있다 — 되돌릴 길이 곧 편집 수단이다" {
+    // **기본이 네이티브다**(2026-08-19 사용자 결정). N1은 읽기 전용이므로 그 기본은 탐색기에서 연
+    // 파일을 고칠 수 없게 만들고, `0`이 유일한 편집 수단이다 — 그 값이 안 먹으면 사용자는 되돌릴
+    // 길을 잃는다. 그래서 기본값과 되돌림을 **한 테스트에서 함께** 고정한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const had = std.c.getenv("MARU_NATIVE_TEXT");
     defer if (had) |old_value| {
@@ -4982,6 +4983,8 @@ test "훅 기본은 끔이다 — 켜면 편집이 안 되는 파일이 생긴�
         _ = unsetenv("MARU_NATIVE_TEXT");
     };
     _ = unsetenv("MARU_NATIVE_TEXT");
+    try testing.expect(nativeTextFromEnv());
+    _ = setenv("MARU_NATIVE_TEXT", "0", 1);
     try testing.expect(!nativeTextFromEnv());
 }
 

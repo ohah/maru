@@ -28,20 +28,23 @@ check() { # <이름> <기대 종료코드> <실제 종료코드> [기대 문구]
   echo "ok   $name"
 }
 
-# 픽스처 저장소: base → 무관 커밋 → 게이트 입력을 건드린 커밋 → 팁
+# 픽스처 저장소: base → 소스 변경 → **원장만 고치는 커밋**(안티패턴) → 팁
 repo="$work/repo"
 mkdir -p "$repo"
 (
   cd "$repo"
   git init -q .
   git config user.email t@t; git config user.name t
-  mkdir -p tests/boundary
-  echo "x" > README.md
-  echo "inventory" > tests/boundary/external_source_digests.zig
+  mkdir -p tests/boundary src/config
+  printf 'const x = 1;\n' > src/config/schema.zig
+  printf 'pub const inventory = .{ .{ .path = "src/config/schema.zig", .digest_hex = "aa" } };\n' > tests/boundary/external_source_digests.zig
   git add -A; git commit -qm base
-  echo "y" >> README.md; git add -A; git commit -qm "무관한 커밋"
-  echo "moved" >> tests/boundary/external_source_digests.zig; git add -A; git commit -qm "원장을 건드린 커밋"
-  echo "z" >> README.md; git add -A; git commit -qm tip
+  printf 'const x = 2;\n' > src/config/schema.zig; git add -A; git commit -qm "소스를 바꾼다"
+  printf 'pub const inventory = .{ .{ .path = "src/config/schema.zig", .digest_hex = "bb" } };\n' > tests/boundary/external_source_digests.zig
+  git add -A; git commit -qm "원장만 맞춘다(안티패턴)"
+  printf 'const x = 3;\n' > src/config/schema.zig
+  printf 'pub const inventory = .{ .{ .path = "src/config/schema.zig", .digest_hex = "cc" } };\n' > tests/boundary/external_source_digests.zig
+  git add -A; git commit -qm "소스와 원장을 함께(정상)"
 )
 base="$(git -C "$repo" rev-parse HEAD~3)"
 head="$(git -C "$repo" rev-parse HEAD)"
@@ -55,21 +58,59 @@ rc=$?
 set -e
 check "얕은 클론은 조용히 통과하지 않는다" 2 "$rc" "fetch-depth"
 
-# 2) 게이트 입력을 안 건드린 범위 → 빌드 없이 0
+# 2) **원장만 고치는 커밋**을 잡는다(사고 2 의 서명)
 set +e
-(cd "$repo" && sh "$SCRIPT" "$base" "$(git -C "$repo" rev-parse HEAD~2)") > "$work/out" 2>&1
+(cd "$repo" && sh "$SCRIPT" "$base" "$head") > "$work/out" 2>&1
 rc=$?
 set -e
-check "게이트 입력을 안 건드리면 곧장 끝낸다" 0 "$rc" "안 건드린 PR"
+check "원장만 고치는 커밋을 잡는다" 1 "$rc" "원장만 고치는 커밋"
 
-# 3) 중간 커밋이 없는 단일 커밋 PR → 0
+# 3) 소스와 원장을 **함께** 고친 구간은 통과한다(정상 패턴을 막으면 못 쓴다)
 set +e
 (cd "$repo" && sh "$SCRIPT" "$(git -C "$repo" rev-parse HEAD~1)" "$head") > "$work/out" 2>&1
 rc=$?
 set -e
-check "단일 커밋 PR 은 볼 중간이 없다" 0 "$rc"
+check "소스와 원장을 함께 고치면 통과한다" 0 "$rc"
 
-# 4) base 가 없는 인자 → 2 (오타·잘못된 ref 도 조용히 통과하면 안 된다)
+# 4) 원장 **단독 수정 PR**(main 의 드리프트를 고치는 정상 PR)은 잡지 않는다 — 앞에 소스 커밋이 없다
+solo="$work/solo"
+mkdir -p "$solo"
+(
+  cd "$solo"
+  git init -q .; git config user.email t@t; git config user.name t
+  mkdir -p tests/boundary
+  printf 'pub const inventory = .{ .{ .path = "x.zig", .digest_hex = "aa" } };\n' > tests/boundary/external_source_digests.zig
+  git add -A; git commit -qm base
+  printf 'pub const inventory = .{ .{ .path = "x.zig", .digest_hex = "bb" } };\n' > tests/boundary/external_source_digests.zig
+  git add -A; git commit -qm "원장 드리프트만 고치는 PR"
+)
+set +e
+(cd "$solo" && sh "$SCRIPT" "$(git -C "$solo" rev-parse HEAD~1)" "$(git -C "$solo" rev-parse HEAD)") > "$work/out" 2>&1
+rc=$?
+set -e
+check "원장 단독 수정 PR 은 오탐이 아니다" 0 "$rc"
+
+# 5) **파싱 안 되는 .zig** 를 잡는다(사고 1 의 서명)
+broken="$work/broken"
+mkdir -p "$broken"
+(
+  cd "$broken"
+  git init -q .; git config user.email t@t; git config user.name t
+  mkdir -p tests/boundary
+  printf 'const a = .{};\n' > build.zig
+  printf 'pub const inventory = .{ .{ .path = "build.zig", .digest_hex = "aa" } };\n' > tests/boundary/external_source_digests.zig
+  git add -A; git commit -qm base
+  printf 'const a = .{\n' > build.zig   # 닫히지 않은 초기화 — 자동 해소가 낸 것과 같은 형태
+  git add -A; git commit -qm "반쪽 섞인 build.zig"
+  printf 'const a = .{};\n' > build.zig; git add -A; git commit -qm "팁에서 고침"
+)
+set +e
+(cd "$broken" && sh "$SCRIPT" "$(git -C "$broken" rev-parse HEAD~2)" "$(git -C "$broken" rev-parse HEAD)") > "$work/out" 2>&1
+rc=$?
+set -e
+check "파싱 안 되는 .zig 를 잡는다" 1 "$rc" "파싱되지 않는다"
+
+# 6) 없는 base → 2 (오타·잘못된 ref 도 조용히 통과하면 안 된다)
 set +e
 (cd "$repo" && sh "$SCRIPT" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$head") > "$work/out" 2>&1
 rc=$?

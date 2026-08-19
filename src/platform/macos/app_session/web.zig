@@ -770,7 +770,7 @@ pub fn webSurfaceRect(self: *AppSession, surface_id: u64) ?web_panel_layout.Rect
 pub fn webContextIsEditable(self: *AppSession, surface_id: u64) bool {
     return if (self.dock_initialized)
         if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry|
-            entry.kind.usesEditorBridge() and entry.mode.isEditable()
+            entry.usesEditorBridge() and entry.mode.isEditable()
         else
             false
     else

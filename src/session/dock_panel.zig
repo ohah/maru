@@ -50,7 +50,10 @@ pub const EntryKind = enum {
     /// document epoch·외부변경·초기 hydration identity 보호 게이트가 이 술어를 공유한다(§2.2·§3). markdown 라이브
     /// 프리뷰·링크·readAsset·mermaid 전용 경로는 별도로 `== .markdown`을 유지한다. svg는 소스 편집(xml)이 이 브리지를
     /// 쓰고 읽기 모드는 격리 render origin의 sanitize 프리뷰다(§2.2·FP13).
-    pub fn usesEditorBridge(self: EntryKind) bool {
+    /// **kind만 보는 판정이다.** 실제 소비처는 `Entry.usesEditorBridge`를 쓴다 — 같은 kind 안에서도
+    /// 네이티브 편집기로 연 문서는 브리지를 안 쓰기 때문이다. 이름을 나눠 둔 것은 그 둘을 헷갈려
+    /// 호출하면 컴파일러가 잡지 못해서다.
+    pub fn usesEditorBridgeByKind(self: EntryKind) bool {
         return switch (self) {
             .markdown, .text, .svg => true,
             // diff는 CM6를 쓰지만 **읽기 전용 비교 결과**라 file.read/write·dirty·저장·epoch 흐름이 없다.
@@ -186,6 +189,10 @@ pub const Entry = struct {
     id: EntryId,
     path: []u8,
     kind: EntryKind,
+    /// 이 문서를 **네이티브 편집기 Term**이 들고 있나(N1 — `MARU_NATIVE_TEXT`). kind로 가를 수 없어
+    /// entry에 둔다: `.text`는 CM6로도 네이티브로도 열리고, 그 둘은 저장·dirty·epoch 흐름이 있고
+    /// 없고가 갈린다. `.diff`는 kind 자체가 브리지를 안 써서 이 필드가 필요 없었다.
+    native_editor: bool = false,
     /// 런타임 entry 생성자는 신규 정책(`Mode.defaultFor`)인지 복원된 명시 mode인지 반드시 선택한다.
     /// wire 호환용 `.read` fallback은 `PersistedEntry`에만 남겨 둘을 조용히 섞지 않는다.
     mode: Mode,
@@ -265,6 +272,13 @@ pub const Entry = struct {
     mutation_pending_id: u64 = 0,
     /// FP3 runtime handle. workspace.v1에는 저장하지 않고 복원/재소환 때 앱 전역 allocator에서 새 id를 발급한다.
     surface_id: u64 = 0,
+    /// 이 entry가 **지금** CM6 브리지를 쓰는가 — read/write·dirty·저장·document epoch·외부변경 게이트가
+    /// 공유하는 술어. kind에서 entry로 올린 이유는 네이티브 편집기로 연 텍스트가 같은 kind를 쓰면서
+    /// 브리지를 안 쓰기 때문이다. 그것을 kind로만 판정하면, 오지 않을 CM6 응답을 기다리다 **탭이 안
+    /// 닫힌다**(닫기가 dirty 스냅샷을 요구한다 — `filePanelEntryNeedsDirtyProtection`).
+    pub fn usesEditorBridge(self: *const Entry) bool {
+        return self.kind.usesEditorBridgeByKind() and !self.native_editor;
+    }
 };
 
 /// workspace.v1에 들어가는 entry 부분집합. dirty는 파일 내용이 아니라 휘발성 편집 상태라 의도적으로 빠진다.
@@ -360,9 +374,9 @@ pub const DockPanel = struct {
 
 test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     // 신뢰 편집 브리지 kind: markdown+text만. html은 격리 read-only.
-    try std.testing.expect(EntryKind.markdown.usesEditorBridge());
-    try std.testing.expect(EntryKind.text.usesEditorBridge());
-    try std.testing.expect(!EntryKind.html.usesEditorBridge());
+    try std.testing.expect(EntryKind.markdown.usesEditorBridgeByKind());
+    try std.testing.expect(EntryKind.text.usesEditorBridgeByKind());
+    try std.testing.expect(!EntryKind.html.usesEditorBridgeByKind());
 
     // 기본 모드: markdown=읽기(라이브 백로그), html=읽기, text=소스.
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.markdown));
@@ -372,7 +386,7 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.pdf)); // FP15: read 뷰 전용.
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.media)); // FP15 media: read 뷰 전용(모드 선택기 없음).
     // media는 격리 loadFileURL(WebKit media document)이라 CM6 편집 브리지를 쓰지 않는다.
-    try std.testing.expect(!EntryKind.media.usesEditorBridge());
+    try std.testing.expect(!EntryKind.media.usesEditorBridgeByKind());
 
     // 허용 모드: markdown=읽기|소스, html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
     try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.rich.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown));

@@ -171,7 +171,18 @@ pub fn openFileTermInActivePane(
     // **비교는 네이티브 편집기로도 열 수 있다**(N1.5 b). 훅이 꺼져 있으면 지금까지대로 CM6 웹 Term이다 —
     // 화면이 서고 골든이 붙는 슬라이스 c 전에는 기본 경로를 바꾸지 않는다. entry 소유·`surface_id` 배선은
     // 아래에서 그대로 이어지므로, 결과를 흘리는 배관(`takeDiffResult` → entry)이 두 경우에 같다.
-    const term = if (kind == .diff and self.native_diff)
+    // **일반 텍스트도 네이티브 편집기로 열 수 있다**(`MARU_NATIVE_TEXT` — 기본 끔, 근거는
+    // `editor.nativeTextFromEnv`). 읽기를 **Term 분기 앞에서** 하는 이유는 못 읽는 파일이 있기
+    // 때문이다(§3.5 — UTF-8 아님·상한 초과·권한). 그런 파일까지 네이티브로 보내면 훅을 켠 것이
+    // **특정 파일을 아예 못 여는 이유**가 된다. 못 읽으면 조용히 지금까지의 CM6 경로로 간다.
+    var prepared: ?editor_ops.Prepared = if (kind == .text and self.native_text)
+        editor_ops.preparePath(self, path) catch null
+    else
+        null;
+    errdefer if (prepared) |*p| p.deinit(self.allocator);
+
+    const native = (kind == .diff and self.native_diff) or prepared != null;
+    const term = if (native)
         try editor_ops.createEditorTerm(self)
     else
         try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
@@ -179,6 +190,10 @@ pub fn openFileTermInActivePane(
     errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     // 소유권이 여기서 Term으로 넘어간다. 이후 실패 지점이 없으므로 위 errdefer들은 돌지 않는다.
+    if (prepared) |p| editor_ops.finishAttach(self, term, p);
+    // **entry도 네이티브임을 안다.** CM6 브리지를 공유하는 게이트(저장·dirty·닫기 스냅샷)가 이것을
+    // 보고 갈린다 — kind로는 `.text`의 두 경로를 구분할 수 없다(`Entry.usesEditorBridge`).
+    entry.native_editor = native;
     term.file_entry = entry;
     entry.surface_id = term.surfaceId();
     self.focusTerm(pane.terms.items.len - 1);

@@ -34,7 +34,7 @@ VSCode가 여는 유형 대부분을 도크로 흡수하되, 새 렌더 경로�
 
 | kind | 컨텍스트 | 전송 채널 | 편집 | 초과·실패 폴백 |
 |---|---|---|---|---|
-| `text` | ~~신뢰 shell(markdown과 동일 trust config·bridge)~~ → **네이티브 등폭 GPU 뷰**(2026-08-09 개정, §1 · [native-editor.md](native-editor.md)) | ~~8 MiB UTF-8 텍스트 브리지~~ → 브리지를 거치지 않는다. 크기 상한은 native-editor §3.0이 별도로 정한다 | 소스 편집만 | ~~`> max_file_bytes`면 열지 않고 외부 앱~~ → 위와 같이 재결정 |
+| `text` | ~~신뢰 shell(markdown과 동일 trust config·bridge)~~ → **네이티브 등폭 GPU 뷰**(2026-08-09 개정, §1 · [native-editor.md](native-editor.md) — **이관 중**: 2026-08-19부터 `MARU_NATIVE_TEXT=1`이면 탐색기 클릭이 네이티브로 열린다. **기본은 아직 CM6다** — 네이티브가 읽기 전용인 동안 기본을 켜면 이 kind가 잃는 것이 편집이다. 기본 전환은 [plans/native-editor.md](plans/native-editor.md) N2) | ~~8 MiB UTF-8 텍스트 브리지~~ → 브리지를 거치지 않는다. 크기 상한은 native-editor §3.0이 별도로 정한다 | 소스 편집만 | ~~`> max_file_bytes`면 열지 않고 외부 앱~~ → 위와 같이 재결정 |
 | `svg` | 소스=신뢰 shell / 프리뷰=격리 render origin | 텍스트 브리지 + sanitize→`data:` URL | 소스 편집만(프리뷰는 파생) | 8 MiB 초과 외부 앱 |
 | `image`(FP14b) | 격리 loadFileURL(직접) | WebKit image document + 주입 뷰어 스크립트(줌·팬·체커) | 불가 | 디코드 실패 시 WebKit 기본 표시(빈 문서) |
 | `media` | 격리 loadFileURL(직접) | 디스크 스트리밍(range) | 불가 | **인앱 컨테이너 allowlist 밖이면 열기 시점에 외부 앱** |
@@ -52,6 +52,12 @@ VSCode가 여는 유형 대부분을 도크로 흡수하되, 새 렌더 경로�
   - **남는 한계**: 지원 컨테이너 안의 미지원 코덱(예: AV1-in-MP4)은 인앱에서 빈 플레이어가 된다 — 런타임 감지·폴백은 §13 백로그(보고 채널이 생기면).
 - **모드**: `markdown`은 `read`(기본)|`rich`|`source_edit`(§1), `text`는 `source_edit` 단일 모드(읽기 없음), `svg`는 `read`(프리뷰 기본)|`source_edit`, `image`/`media`/`pdf`는 모드 없는 `read` 뷰다. `Mode.defaultFor`/`allowedFor`(`dock_panel.zig`)와 `dock_layout.modesForKind`가 kind별 유일 출처이고 `.html`의 read-only 계약을 그대로 확장한다.
 - **하이라이트(text/code)**: `textLanguageForPath`(basename→확장자 순)가 `TextLanguage`를 정하고 wire 이름을 shell URL `?lang=`으로 실으면 web `source-language.ts`가 문법을 골라 마운트한다. **전용 `@codemirror/lang-*`**(json·javascript(js/ts/jsx/tsx)·python·css·xml(svg 포함)·yaml)과 **`@codemirror/legacy-modes` StreamLanguage**(toml·ini/properties·shell·sql·rust·go·c·cpp·java·csharp·kotlin·swift·ruby·lua·dockerfile·perl·r·powershell·groovy·scala·haskell·clojure·dart)를 쓴다. 그 외 확장자는 `plain`(색 없음, 편집 가능). 편집기는 `indentUnit(2 spaces)`·`indentOnInput`·`bracketMatching`·`closeBrackets`·`indentWithTab`으로 Enter 자동 들여쓰기·Tab 들여쓰기를 제공한다. 하이라이트 색은 theme 책임(§1)이라 `HighlightStyle`이 Lezer 태그(keyword/string/number/comment…)를 `--maru-syntax-*` CSS custom property에만 매핑한다. **색 소스는 Maru 터미널 색상 테마다(사용자 결정 2026-07-22)** — 시스템 light/dark가 아니라 `theme.palette`(ANSI 16색)+fg/bg에서 각 syntax 역할 색을 파생해 네이티브가 shell에 주입한다(FP12b, §2.3). 폴백(주입 실패·주입 전)은 `app.css`의 `--maru-syntax-*` light/dark 기본값이다. CM6 언어 패키지는 exact name/version/license를 `third-party-licenses.md`에 기록한다(FP12 완료).
+- **브리지를 쓰는지는 kind가 아니라 entry가 안다**(2026-08-19). `text`가 CM6와 네이티브 두 경로로 열리므로
+  `EntryKind.usesEditorBridgeByKind`만으로는 답이 갈리지 않는다 — read/write·dirty·저장·document epoch·외부변경
+  게이트는 `Entry.usesEditorBridge`(= kind 술어 ∧ `!native_editor`)를 쓴다. kind로만 판정하면 닫기가 **오지 않을
+  CM6 dirty 스냅샷을 기다려** 네이티브로 연 탭이 닫히지 않는다(`.text`의 기본 mode가 `.source_edit`이라
+  `filePanelEntryNeedsDirtyProtection`이 늘 참이다).
+
 - **`max_file_bytes`(8 MiB) 유지 근거**: ⑴ 브리지가 통짜 전송이라(스트리밍 없음) 내용이 Zig 버퍼·ABI 복사·JS 문자열·CM6 문서로 여러 번 뜨고 프레임 틱 blocking을 유발한다([performance-budget.md]), ⑵ write 보안 모델의 "피해 반경 = 그 파일 1개"가 bounded read 위에서 성립한다(§3·§12), ⑶ 초장문 single-line(minified/거대 JSON) 편집 실용성. 초과 파일은 외부 앱으로 폴백하고, **대형 파일 read-only 스트리밍 뷰는 §13 백로그**다.
 
 ### 2.6 문서 영역 컨텍스트 메뉴

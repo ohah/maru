@@ -24,6 +24,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const terminal = maru.terminal;
+const path_shape = maru.path_shape; // 이 파일이 만드는 경로는 전부 중립 층으로 간다 — native 이음 금지(계약 §5 규칙 1)
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
 const latchExternalFileChange = app_session_mod.latchExternalFileChange;
@@ -2198,7 +2199,7 @@ pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: 
     request.selection_generation = self.file_tree_selection.generation;
     const reserved = target.edit_kind == .rename;
     if (reserved) {
-        const new_path = std.fs.path.join(self.allocator, &.{ plan.parent, plan.name }) catch {
+        const new_path = path_shape.joinNeutral(self.allocator, plan.parent, plan.name) catch {
             request.deinit(self.allocator);
             self.showNoticeKey(.fp_rename_plan_failed);
             return false;

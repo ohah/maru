@@ -944,6 +944,57 @@ git_backend                  69곳  fork·execve·pipe·dup·environ·getcwd·na
 "0 오류" 를 믿는다.** `std.c.fork` 가 Windows 에서 `void` 라 호출이 **반드시** 컴파일 오류인 것이
 이 대조군의 성질이다.
 
+### 2m.3 파일 트리 백엔드 — 컴파일이 아니라 **세 자리**가 막고 있었다 (W8.1, 실측 2026-08-19)
+
+"컴파일되는가" 만 봤을 때는 `openat` 하나로 보였다. 실제로 **돌려 보니** 막는 것이 셋이었고, 셋 다
+성격이 다르다.
+
+| # | 자리 | 증상 | 고친 것 |
+|---|---|---|---|
+| ⑴ | `openValidatedFileTreeRow` 의 `std.posix.openat` | Windows 에서 플래그 타입이 `void` — **컴파일 불가** | `openLeafNoFollow` 로 갈라, macOS 는 그대로 두고 그 외는 `Io.Dir.openFile(.follow_symlinks = false, .allow_directory = false)` |
+| ⑵ | `openCanonicalDirectoryNoFollow` | `openDirAbsolute("/")` + `path[1..]` + `/` 로만 자르기 — Windows 에 그런 루트가 없고 `realPath` 는 native 를 준다. **`validateRootSnapshot` 이 늘 null** | `path_shape.rootPrefixLenFor(os_tag, …)`(신규·순수)로 루트 접두를 고르고 두 구분자로 자른다 |
+| ⑶ | `validateRootSnapshotImpl` 의 `owned_path` | `realPath` 의 native 값을 그대로 들고 있어 중립 `/` 경로와의 비교가 어긋남. **정상 파일에도 null** | 입구 정규화(§5 규칙 1, 입구 Ⓑ = OS API) |
+
+⑶ 이 특히 계약이 예고한 자리다 — §5 의 입구 Ⓑ("OS API")를 이 백엔드가 안 걸고 있었다.
+
+> **적대적 검증이 ⑵ 를 고치다 낸 회귀를 잡았다.** 세그먼트를 `"/" ++ 역슬래시` 로 자르게 썼는데,
+> **POSIX 에서 역슬래시는 파일 이름 글자**라 그런 이름이 든 디렉터리 하나가 두 칸으로 갈린다.
+> W1.5 가 `pathWithin` 에서 낸 것과 **같은 부류를 또 낸 것**이다. 판정을
+> `path_shape.separatorsFor(os_tag)` 하나로 모으고, "POSIX 에서 역슬래시 이름은 한 칸" 을 테스트가
+> 못 박는다.
+>
+> **유출이 없다는 것도 따로 쟀다.** "링크로 바꿔치기하면 null" 만으로는 그 null 이 링크를 막아서인지
+> 앞 단계에서 이미 걸려서인지 안 갈린다. 그래서 **루트 밖 파일의 identity 를 그대로 요구**해 본다 —
+> 링크가 따라가지면 그 identity 와 일치해 capability 가 서고, 그것이 곧 유출이다. 서지 않는다.
+> 같은 루트의 평범한 파일이 정상적으로 서는 것을 대조군으로 함께 본다.
+>
+> **identity 비교가 유일한 방벽이라는 것도 실측했다** — 그 한 줄을 지우면 두 테스트 중 하나가 즉시
+> FAIL 한다. Windows 에서 `NOFOLLOW` 가 링크를 거부하지 않으므로, 그 비교를 "중복" 으로 보고 지우면
+> 그 순간 루트 밖이 열린다.
+>
+> **링크를 못 만드는 기기에서는 이 검증이 없다 — 그 사실을 찍는다.** Windows 는 심볼릭 링크 생성에
+> 개발자 모드나 관리자 권한이 필요하다. 그때 조용히 `SkipZigTest` 를 내면 "검증했다" 와 "검증할 수
+> 없었다" 가 똑같이 초록이라, `[skip] symLink failed (<이유>) - symlink guard unverified on this host`
+> 를 찍고 나간다(대조군으로 확인). SSH 스모크 스크립트가 세운 "SKIP 은 조용한 통과라 위험하다" 와
+> 같은 규율이다.
+
+**`NOFOLLOW` 의 의미가 OS 마다 다르다 — 실측했다.** POSIX 는 링크를 만나면 open 자체가 실패하는데,
+Windows 의 `openFile(.follow_symlinks = false)` 는 **링크 자신을 연다**(거부하지 않는다). 그래도 가드가
+서는 이유는 그 핸들의 identity 가 기대값과 다르기 때문이다 — 실측: 링크 핸들 inode
+`3377699722174903` vs 루트 밖 파일 `3940649675596210`. **그래서 identity 비교를 "NOFOLLOW 가 있으니
+없어도 된다" 고 지우면 안 된다.** Windows 에서는 그 비교가 유일한 방벽이다.
+
+**`std.fs.path.join` 을 중립 경로에 쓰면 안 된다.** Windows 에서 그것은 **native 구분자**로 잇는다 —
+정규화한 `D:/…/tmp` 에 붙이면 역슬래시가 섞인 경로가 나오고, `pathWithinRoot` 가 그것을 루트 밖으로
+본다(실측). 저장소에 `std.fs.path.join` 이 **107 곳** 있고 대부분은 테스트지만
+`agent_session_archive_backend`·`app_session/file_panel` 처럼 **제품 자리도 있다.** 지금은 그 파일들이
+macOS 전용이라 잠복이고, **W8 이 그것들을 배선할 때 함께 봐야 한다.**
+
+**테스트가 macOS 호스트에서만 돌고 있었다.** 이 백엔드의 테스트는 `app_session` 모듈에 실려 있어
+Windows 에서는 **하나도 안 돌았다** — 그 상태로 Windows 갈래를 고쳐 봐야 아무도 안 밟는다. 그래서
+이 파일만 도는 테스트 산출물을 `build.zig` 가 **모든 호스트**에 매단다. 파일 위치가
+`platform/macos/` 인 것은 이제 이름과 안 맞는다 — 옮기는 것은 소비자가 생기는 W8.2 와 함께 볼 일이다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -1010,7 +1061,7 @@ git_backend                  69곳  fork·execve·pipe·dup·environ·getcwd·na
 | 슬라이스 | 내용 | 선행 |
 |---|---|---|
 | **W8.0** | **게이트를 먼저 넓힌다** — `check-targets` 가 ADE 표면(chrome 도크 셋·백엔드 공개 표면)을 **명시 참조로 강제 분석**하게 한다. 안 하면 W8 의 나머지가 검증 없이 쌓인다(§2m.2) | 없음 |
-| **W8.1** | **파일 트리 백엔드** — 읽기 쪽 `openat` 을 Windows 가 받는 형태로 옮기고, 두 백엔드가 실제 디렉터리를 훑는 스모크로 런타임을 잰다 | W8.0 |
+| **W8.1** | **파일 트리 백엔드가 Windows 에서 돈다** — 완료. 아래 §2m.3 | W8.0 |
 | **W8.2** | **파일 패널 표면** — 중립 `file_panel_bridge`·`file_tree` 를 Win32 호스트에 배선하고 chrome 이 그린다 | W8.1 |
 | **W8.3** | **에디터 표면** — `session/editor/` 는 이미 중립이다. 배선과 입력 라우팅 | W8.2 |
 | **W8.4** | **소스 컨트롤** — `git_backend` 의 Windows 프로세스 러너(`fork`/`execve`/`pipe` → `CreateProcessW` + 파이프). §4 의 spawn 절차를 재사용한다. **세 백엔드 중 유일하게 진짜 포팅이다** | W8.1 |

@@ -100,6 +100,10 @@ fn shellPathExists(path: [:0]const u8) bool {
 ///
 /// **`std.c.getenv` 를 쓰지 않는 이유**는 `os_env` 의 doc 그대로다: Windows 의 ANSI 환경은 비-ASCII
 /// 사용자명에서 ACP 바이트를 준다. 셸 경로가 그런 디렉터리 아래에 있으면 spawn 이 실패한다.
+///
+/// **락이 없다 — 호출자가 전부 메인 스레드다**(진입점·app_session 의 UI 스레드). 두 스레드가 동시에
+/// 처음 부르면 같은 값을 두 번 쓸 뿐이라 결과는 같지만, `resolved` 가 원자적이지 않아 형식상 경합이다.
+/// 워커 스레드에서 부르는 호출자가 생기면 여기에 락을 세워야 한다(`pty/windows.zig` 의 `SRWLOCK` 처럼).
 const ShellEnvCache = struct {
     buf: [512]u8 = undefined,
     len: usize = 0,
@@ -109,7 +113,7 @@ const ShellEnvCache = struct {
 var shell_override_cache: ShellEnvCache = .{};
 var comspec_cache: ShellEnvCache = .{};
 
-fn cachedShellEnv(cache: *ShellEnvCache, key: []const u8) ?[:0]const u8 {
+fn cachedShellEnv(cache: *ShellEnvCache, key: [:0]const u8) ?[:0]const u8 {
     if (!cache.resolved) {
         cache.resolved = true;
         const gpa = std.heap.smp_allocator;

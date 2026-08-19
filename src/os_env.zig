@@ -40,9 +40,14 @@ const builtin = @import("builtin");
 /// 소유권이 `getenv`와 다르다(그쪽은 빌린 포인터). 그래서 이름을 `getenv`처럼 짓지 않았다 — 이름이 같으면
 /// 호출자가 해제를 잊는다.
 ///
+/// **`key`가 `[:0]`인 이유는 POSIX 갈래다.** 그쪽은 `std.c.getenv`를 부르므로 NUL 종단이 필요한데,
+/// `[]const u8`로 받고 `@ptrCast(key.ptr)`하면 그 요구가 **말없이** 생긴다 — 리터럴만 넘기는 동안은
+/// 돌고, 슬라이스를 넘기는 호출자가 처음 생기는 순간 경계 밖을 읽는다. 타입으로 못 박으면 그 실수가
+/// 컴파일에서 걸린다(리터럴은 그대로 통과하므로 호출부는 하나도 안 바뀐다).
+///
 /// 빈 값을 `null`로 접는 이유: 이 저장소의 소비자들이 전부 "빈 값 = 설정 안 함"으로 다룬다(`MARU_CONFIG`가
 /// 빈 문자열이면 기본 경로를 쓴다). 그 판정을 자리마다 반복하지 않는다.
-pub fn allocValue(gpa: std.mem.Allocator, key: []const u8) ?[]u8 {
+pub fn allocValue(gpa: std.mem.Allocator, key: [:0]const u8) ?[]u8 {
     if (builtin.os.tag == .windows) {
         const env: std.process.Environ = .{ .block = std.process.Environ.GlobalBlock.global };
         const value = env.getAlloc(gpa, key) catch return null;

@@ -60,14 +60,50 @@ pub const Config = struct {
     scrollback: ScrollbackConfig = .{},
 };
 
+/// 등록한 서버 하나. **자격증명은 없다** — 개인키는 Keystore·앱 전용 파일에 있고 여기엔 그것을
+/// 가리키는 값도 없다(기기가 가진 키가 하나라서다. 계약 [모바일 config](../../../docs/mobile-config.md) §4.3).
+pub const Server = struct {
+    name: []const u8 = "",
+    host: []const u8 = "",
+    port: u16 = 22,
+    user: []const u8 = "",
+    fingerprint: []const u8 = "",
+
+    /// 붙을 수 있는 줄인가. **반쯤 적은 줄로 붙으러 가지 않는다** — 그러면 실패 이유가
+    /// "네트워크" 처럼 보여 사용자가 무엇을 안 적었는지 모른다.
+    pub fn isComplete(self: Server) bool {
+        return self.host.len > 0 and self.user.len > 0 and self.fingerprint.len > 0;
+    }
+};
+
+/// 서버 자리 수. **미리 잡아 두므로 숫자가 곧 상주 메모리다**(브리지엔 할당이 없다).
+/// 헤더의 `MARU_MAX_SERVERS` 와 같은 값이어야 한다 — 계약 테스트가 대조한다.
+pub const max_servers = 16;
+
 pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
     config: Config,
+    /// 앞에서부터 `server_count` 개만 뜻이 있다. **파일의 번호가 아니라 순서다** — 파일에
+    /// 1·3 만 있으면 여기서는 0·1 이고, 다음 저장에서 1·2 로 다시 매겨진다.
+    servers: [max_servers]Server = @splat(.{}),
+    server_count: usize = 0,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
 };
+
+/// `ssh.server.<n>.<field>` 를 쪼갠다. 번호가 1..`max_servers` 밖이거나 모양이 다르면 null 이다.
+/// **스키마 엔진 밖의 명시 가지**다(`theme.palette.N` 과 같은 부류 — 계약 §3).
+fn parseServerKey(key: []const u8) ?struct { index: usize, field: []const u8 } {
+    const prefix = "ssh.server.";
+    if (!std.mem.startsWith(u8, key, prefix)) return null;
+    const rest = key[prefix.len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    const n = std.fmt.parseInt(usize, rest[0..dot], 10) catch return null;
+    if (n < 1 or n > max_servers) return null;
+    return .{ .index = n - 1, .field = rest[dot + 1 ..] };
+}
 
 /// `key = value` 한 줄에 하나, `#` 주석. **forgiving** — 없는 키·틀린 값은 기본값을 지키고 넘어간다
 /// (데스크톱과 같은 규율). 파일이 없거나 비어도 정상이다.
@@ -88,6 +124,8 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Parsed {
 
     var config: Config = .{};
     var diags: std.ArrayList(schema.Diag) = .empty;
+    var slots: [max_servers]Server = @splat(.{});
+    var seen: [max_servers]bool = @splat(false);
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -105,9 +143,29 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Parsed {
             if (theme.parseDashedEnum(theme.ThemePreset, value)) |p| config.theme = theme.presetColors(p);
             continue;
         }
+        // **서버 목록도 스키마 밖이다**(§4.3) — 번호가 키에 들어 있어 comptime 반영으로는 못 닿는다.
+        if (parseServerKey(key)) |sk| {
+            const dst = &slots[sk.index];
+            seen[sk.index] = true;
+            const dup = a.dupe(u8, value) catch continue;
+            if (std.mem.eql(u8, sk.field, "name")) dst.name = dup
+                // 포트만 숫자다. **못 읽는 값은 기본(22)을 지킨다** — forgiving 규율(§3)이고,
+                // 여기서 0 으로 떨어뜨리면 붙을 수 없는 줄이 조용히 생긴다.
+            else if (std.mem.eql(u8, sk.field, "host")) dst.host = dup else if (std.mem.eql(u8, sk.field, "user")) dst.user = dup else if (std.mem.eql(u8, sk.field, "fingerprint")) dst.fingerprint = dup else if (std.mem.eql(u8, sk.field, "port")) dst.port = std.fmt.parseInt(u16, value, 10) catch dst.port;
+            continue;
+        }
         _ = schema.tryParse(a, &config, key, value, &diags, line_no) catch continue;
     }
-    return .{ .arena = arena, .config = config };
+    // **빈 자리를 없애고 앞으로 당긴다.** 번호는 이름이 아니라 순서다(§4.3) — 파일에 1·3 만
+    // 있어도 목록은 둘이고, 다음 저장에서 1·2 가 된다.
+    var out: [max_servers]Server = @splat(.{});
+    var n: usize = 0;
+    for (slots, seen) |srv, was_seen| {
+        if (!was_seen) continue;
+        out[n] = srv;
+        n += 1;
+    }
+    return .{ .arena = arena, .config = config, .servers = out, .server_count = n };
 }
 
 test "빌린 sub-struct 의 키가 스키마 엔진으로 파싱된다" {
@@ -121,6 +179,76 @@ test "빌린 sub-struct 의 키가 스키마 엔진으로 파싱된다" {
     try std.testing.expectEqualStrings("#101820", p.config.theme.background);
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
     try std.testing.expectEqual(@as(u32, 250), p.config.scrollback.lines);
+}
+
+test "서버 목록은 번호 키에서 나온다" {
+    var p = try parse(std.testing.allocator,
+        \\ssh.server.1.name = 집
+        \\ssh.server.1.host = 10.0.0.5
+        \\ssh.server.1.user = me
+        \\ssh.server.1.port = 2222
+        \\ssh.server.1.fingerprint = SHA256:abc
+        \\scrollback.lines = 250
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p.server_count);
+    try std.testing.expectEqualStrings("집", p.servers[0].name);
+    try std.testing.expectEqualStrings("10.0.0.5", p.servers[0].host);
+    try std.testing.expectEqualStrings("me", p.servers[0].user);
+    try std.testing.expectEqual(@as(u16, 2222), p.servers[0].port);
+    try std.testing.expectEqualStrings("SHA256:abc", p.servers[0].fingerprint);
+    try std.testing.expect(p.servers[0].isComplete());
+    // 다른 키는 그대로 스키마 엔진이 먹는다 — 가지를 더해도 나머지가 안 막힌다.
+    try std.testing.expectEqual(@as(u32, 250), p.config.scrollback.lines);
+}
+
+test "빈 번호는 앞으로 당겨진다 — 번호는 이름이 아니라 순서다" {
+    // 파일에 1·3 만 있어도 목록은 둘이다. 안 당기면 화면에 **빈 줄**이 생기고, 그 줄을 눌러도
+    // 아무 일이 안 난다(§4.3).
+    var p = try parse(std.testing.allocator,
+        \\ssh.server.1.host = a
+        \\ssh.server.3.host = c
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 2), p.server_count);
+    try std.testing.expectEqualStrings("a", p.servers[0].host);
+    try std.testing.expectEqualStrings("c", p.servers[1].host);
+}
+
+test "포트는 없으면 22, 못 읽으면 그대로 22" {
+    var p = try parse(std.testing.allocator,
+        \\ssh.server.1.host = a
+        \\ssh.server.2.host = b
+        \\ssh.server.2.port = 숫자아님
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u16, 22), p.servers[0].port);
+    try std.testing.expectEqual(@as(u16, 22), p.servers[1].port); // 기본값을 지킨다(forgiving)
+}
+
+test "반쯤 적은 줄은 접속 대상이 아니다" {
+    // 목록에는 보이되(사용자가 고쳐야 하니까) 붙으러 가지는 않는다 — 그러면 실패 이유가
+    // "네트워크" 처럼 보인다.
+    var p = try parse(std.testing.allocator,
+        \\ssh.server.1.host = a
+        \\ssh.server.1.user = me
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p.server_count); // 목록에는 있다
+    try std.testing.expect(!p.servers[0].isComplete()); // 지문이 없다
+}
+
+test "상한 밖 번호와 모르는 필드는 무시한다" {
+    var p = try parse(std.testing.allocator,
+        \\ssh.server.0.host = 영번
+        \\ssh.server.17.host = 넘침
+        \\ssh.server.x.host = 숫자아님
+        \\ssh.server.1.host = a
+        \\ssh.server.1.모르는필드 = 값
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p.server_count);
+    try std.testing.expectEqualStrings("a", p.servers[0].host);
 }
 
 test "프리셋은 색 세트를 통째로 깐다" {

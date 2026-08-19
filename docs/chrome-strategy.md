@@ -334,7 +334,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 
 ### 7.4 config & 세팅 GUI (거의 공짜)
 
-`chrome.tab-style`은 (제거된 `chrome.theme`가 그랬듯) **최상위 스칼라 enum**으로 `Config.schema` + `Meta{ .key="chrome.tab-style", .widget=.dropdown, .section=.theme }`(CS-2b 패턴)에 등록한다. 다만 schema 등록은 parser/serialize와 문서 정합의 단일 출처일 뿐 항상 GUI 노출을 뜻하지 않는다. 전환 정책상 `settingsExposesConfigKey`가 `chrome.theme`과 `chrome.preset`을 모두 걸러 TUI 재진입을 막고, `chrome.tab-style`만 rich/Metal 선택지로 세팅 화면에 보인다. `configuration.md` 키 표에는 호환 키까지 행을 유지해야 한다(**CS-3 doc-drift 가드**). **ABI 무변경**(스타일은 Zig 렌더가 소유 — Swift로 나가는 필드 없음).
+`chrome.tab-style`은 (제거된 `chrome.theme`가 그랬듯) **최상위 스칼라 enum**으로 `Config.schema` + `Meta{ .key="chrome.tab-style", .widget=.dropdown, .section=.theme }`(CS-2b 패턴)에 등록한다. 다만 schema 등록은 parser/serialize와 문서 정합의 단일 출처일 뿐 항상 GUI 노출을 뜻하지 않는다. `chrome.theme`·`chrome.preset`은 **스키마에서 빠져** 행이 애초에 안 만들어지고(그래서 TUI 재진입 경로가 없다), `chrome.tab-style`만 rich/Metal 선택지로 세팅 화면에 보인다. 예전에는 `settingsExposesConfigKey`가 그 두 키를 **이름으로** 걸렀는데, 그 가드는 키 존재와 무관하게 항상 같은 답을 내는 동어반복이라 적대적 검증이 지웠다 — 지금 그 회귀를 막는 것은 실제 행 목록(`currentSectionFields`)을 훑는 테스트다. `configuration.md` 키 표에는 호환 키까지 행을 유지해야 한다(**CS-3 doc-drift 가드**). **ABI 무변경**(스타일은 Zig 렌더가 소유 — Swift로 나가는 필드 없음).
 
 ### 7.5 큐레이션·검증
 

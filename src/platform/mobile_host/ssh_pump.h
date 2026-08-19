@@ -60,6 +60,8 @@ unsigned int maru_ssh_pump_state(void);
 /// **지금 돌고 있나.** 상태(`state`)로는 이것을 못 판단한다 — 끝난 세션도 `CLOSED` 를 들고
 /// 있어야 host 가 알림을 내릴 수 있기 때문이다. "다시 붙어도 되나" 는 이 함수가 답한다.
 int maru_ssh_pump_is_running(void);
+/// 지금 세션이 키를 몇 번 갈았나. 안 돌고 있으면 0.
+unsigned int maru_ssh_pump_rekeys(void);
 /// 마지막 실패 이름. 없으면 빈 문자열.
 const char *maru_ssh_pump_error(void);
 /// 키 입력을 원격으로 보낸다(host 의 IME·키바가 부른다). 보낸 바이트 수.

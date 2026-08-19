@@ -74,6 +74,9 @@ static volatile unsigned int g_state = MARU_SSH_STATE_INVALID;
 static unsigned int g_handle;
 static int g_fd = -1;
 static char g_error[64];
+/// 세션이 끝난 뒤에도 남는 재키잉 횟수. **핸들을 닫으면 값이 사라지므로** 닫기 직전에 챙긴다 —
+/// 검증과 로그는 세션이 끝난 다음에 읽는다.
+static unsigned int g_last_rekeys;
 static MaruSshPumpConfig g_cfg;
 /// **문자열은 우리가 복사해 든다.** 호출자에게 "start 가 도는 동안 살려 두라" 고 요구하면
 /// 언젠가 안 지켜진다 — 서비스가 다시 시작되면서 같은 자리를 덮어쓰는 것이 가장 흔한 모양이고,
@@ -398,6 +401,10 @@ static void *pump_main(void *unused) {
                                   g_secret, entropy, (const unsigned char *)"xterm-256color", 14,
                                   g_cfg.cols, g_cfg.rows, 0, 1, &g_handle);
     memset(entropy, 0, sizeof entropy);
+    // **키 사본은 여기서 끝난다.** 코어가 자기 몫을 챙겼으므로(그쪽은 `close` 가 지운다) 이
+    // 사본을 세션 내내 들고 있을 이유가 없다 — 남는 시간이 짧을수록 덤프·크래시 리포트에
+    // 실릴 확률이 낮다.
+    memset(g_secret, 0, sizeof g_secret);
     if (st != MARU_SSH_OK) {
         set_error(maru_mobile_ssh_last_error(g_handle));
         set_error("open_failed");
@@ -464,6 +471,7 @@ static void *pump_main(void *unused) {
 done:
     if (g_handle != 0) {
         pthread_mutex_lock(&g_session_lock);
+        g_last_rekeys = maru_mobile_ssh_rekeys(g_handle);
         maru_mobile_ssh_close(g_handle);
         g_handle = 0;
         pthread_mutex_unlock(&g_session_lock);
@@ -509,6 +517,7 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     g_hooks = hooks ? *hooks : (MaruSshPumpHooks){0};
     memcpy(g_secret, cfg->secret, sizeof g_secret);
     g_error[0] = 0;
+    g_last_rekeys = 0;
     g_handle = 0;
     g_stop = 0;
     g_state = MARU_SSH_STATE_INVALID;
@@ -549,6 +558,14 @@ void maru_ssh_pump_stop(void) {
 unsigned int maru_ssh_pump_state(void) { return g_state; }
 
 int maru_ssh_pump_is_running(void) { return g_running ? 1 : 0; }
+
+unsigned int maru_ssh_pump_rekeys(void) {
+    if (g_handle == 0) return g_last_rekeys;
+    pthread_mutex_lock(&g_session_lock);
+    unsigned int n = maru_mobile_ssh_rekeys(g_handle);
+    pthread_mutex_unlock(&g_session_lock);
+    return n;
+}
 
 const char *maru_ssh_pump_error(void) { return g_error; }
 

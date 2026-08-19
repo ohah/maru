@@ -4065,3 +4065,239 @@ test "목록이 줄면 스크롤도 따라 줄어든다" {
     try std.testing.expectEqual(@as(usize, 2), bridge.serverRowCount());
     _ = bridge.maru_mobile_pop_screen();
 }
+
+// ── 서버 편집 화면 (S9b-2b-2) ───────────────────────────────────────────────
+
+fn tapAt(x: f32, y: f32) void {
+    bridge.maru_mobile_pointer(0, 1, x, y, now());
+    bridge.maru_mobile_pointer(2, 1, x, y, now());
+}
+
+/// 편집 화면에서 그 칸을 눌러 값을 치고 엔터로 확정한다.
+fn typeServerField(w: u32, h: u32, row: usize, text: []const u8) void {
+    const y = bridge.serverEditRowCenterY(row) orelse return;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_input(text.ptr, text.len);
+    _ = bridge.maru_mobile_key(1, 0, 0); // 엔터
+    _ = bridge.maru_mobile_build(w, h, now());
+}
+
+test "서버를 화면에서 등록한다 — 그리고 그 값이 파일로 나간다" {
+    // **화면이 유일한 입력 경로다**(config 계약 §2). 등록 수단이 없으면 목록 화면은 읽기
+    // 전용이고, 사용자는 서버를 늘릴 방법이 없다.
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config("", 0);
+    _ = bridge.maru_mobile_take_server_connect();
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    openServers(402, h);
+
+    const add = bridge.serverAddCenter() orelse return error.TestUnexpectedResult;
+    tapAt(add.x, add.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expectEqualStrings("server_edit", bridge.currentScreenName());
+
+    typeServerField(402, h, 0, "집"); // 이름
+    typeServerField(402, h, 1, "10.0.0.5"); // 주소
+    typeServerField(402, h, 2, "2222"); // 포트(숫자 칸)
+    typeServerField(402, h, 3, "me"); // 사용자
+    typeServerField(402, h, 4, "SHA256:abc"); // 지문
+
+    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    tapAt(200, save_y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    // 목록으로 돌아가고, 그 서버가 있다.
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_server_count());
+    var buf: [128]u8 = undefined;
+    const n = bridge.maru_mobile_server_field(0, 1, &buf, buf.len);
+    try std.testing.expectEqualStrings("10.0.0.5", buf[0..n]);
+    try std.testing.expectEqual(@as(u32, 2222), bridge.maru_mobile_server_port(0));
+
+    // **파일로도 나간다** — 화면만 바뀌고 파일이 그대로면 다음에 켤 때 사라진다.
+    const wrote = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    try std.testing.expect(wrote > 0);
+    try std.testing.expect(std.mem.indexOf(u8, drain[0..wrote], "ssh.server.1.host = 10.0.0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drain[0..wrote], "ssh.server.1.port = 2222") != null);
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "편집은 그 서버만 고치고 번호는 그대로다" {
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, h);
+
+    const e = bridge.serverEditHitCenter(1) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expectEqualStrings("server_edit", bridge.currentScreenName());
+
+    typeServerField(402, h, 1, "새주소"); // 주소만 고친다
+    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    tapAt(200, save_y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_server_count());
+    var buf: [128]u8 = undefined;
+    // 둘째 서버만 바뀌고 첫째는 그대로다.
+    const n0 = bridge.maru_mobile_server_field(0, 1, &buf, buf.len);
+    try std.testing.expectEqualStrings("10.0.0.5", buf[0..n0]);
+    const n1 = bridge.maru_mobile_server_field(1, 1, &buf, buf.len);
+    try std.testing.expectEqualStrings("새주소", buf[0..n1]);
+    // 안 건드린 칸도 남는다(지문을 잃으면 접속 불가가 된다).
+    const f1 = bridge.maru_mobile_server_field(1, 3, &buf, buf.len);
+    try std.testing.expectEqualStrings("SHA256:def", buf[0..f1]);
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "삭제하면 그 줄만 빠지고 나머지가 앞으로 당겨진다" {
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, h);
+
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    const del_y = bridge.serverEditRowCenterY(6) orelse return error.TestUnexpectedResult;
+    tapAt(200, del_y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_server_count());
+    var buf: [128]u8 = undefined;
+    const n = bridge.maru_mobile_server_field(0, 1, &buf, buf.len);
+    try std.testing.expectEqualStrings("work.example.com", buf[0..n]); // 둘째가 첫째가 됐다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "포트 칸은 숫자 키보드, 나머지는 글자 키보드다" {
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, h);
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    const host_y = bridge.serverEditRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, host_y);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_input_kind()); // 글자 칸
+    const port_y = bridge.serverEditRowCenterY(2) orelse return error.TestUnexpectedResult;
+    tapAt(200, port_y);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_input_kind()); // 숫자 패드
+    _ = bridge.maru_mobile_key(2, 0, 0); // 취소
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "나가면 저장 안 한다 — 서버 한 줄은 값이 함께 맞아야 뜻이 있다" {
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    openServers(402, h);
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    typeServerField(402, h, 1, "안저장될주소");
+    // **화면의 뒤로 화살표**로 나간다 — 사용자가 실제로 누르는 자리다(하드웨어 뒤로는 아래에서).
+    const back = bridge.serverEditBackCenter();
+    tapAt(back.x, back.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+
+    var buf: [128]u8 = undefined;
+    const n = bridge.maru_mobile_server_field(0, 1, &buf, buf.len);
+    try std.testing.expectEqualStrings("10.0.0.5", buf[0..n]); // 그대로다
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "하드웨어 뒤로가기는 편집을 먼저 거둔다" {
+    // 안 거두면 화면을 나가도 입력 목적지가 남아, 다음 화면에서 친 글자가 **안 보이는 초안**
+    // 으로 들어간다(그 화면은 이미 없다).
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, h);
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    const host_y = bridge.serverEditRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, host_y);
+    _ = bridge.maru_mobile_input("abc", 3);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_input_kind()); // 편집 중이다
+
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen()); // 편집을 거둔다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind());
+    try std.testing.expectEqualStrings("server_edit", bridge.currentScreenName()); // 화면은 그대로
+    _ = bridge.maru_mobile_pop_screen(); // 이제 화면이 빠진다
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "칸에 안 들어가는 값은 조용히 잘리지 않는다" {
+    // 잘라 넣으면 **원인과 증상이 멀어진다** — 지문이 반쪽이면 접속이 "호스트키가 다르다" 로
+    // 실패하고, 이름이 잘리면 목록에서 엉뚱한 서버를 고른다.
+    const h: u32 = 874;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, h);
+    const e = bridge.serverEditHitCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(e.x, e.y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    bridge.maru_mobile_clear_error();
+
+    // 이름 칸(48바이트)에 50바이트를 친다.
+    const long_name = "0123456789" ** 5;
+    typeServerField(402, h, 0, long_name);
+    try std.testing.expectEqualStrings("server_field_invalid", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    // 포트에 65535 를 넘기면 u16 이 아니다 — 그것도 안 들어간다.
+    typeServerField(402, h, 2, "99999");
+    try std.testing.expectEqualStrings("server_field_invalid", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    // 저장하면 **원래 값**이 그대로다(안 들어간 값이 몰래 실리지 않는다).
+    const save_y = bridge.serverEditRowCenterY(5) orelse return error.TestUnexpectedResult;
+    tapAt(200, save_y);
+    _ = bridge.maru_mobile_build(402, h, now());
+    var buf: [128]u8 = undefined;
+    const n = bridge.maru_mobile_server_field(0, 0, &buf, buf.len); // 이름
+    try std.testing.expectEqualStrings("집", buf[0..n]);
+    try std.testing.expectEqual(@as(u32, 2222), bridge.maru_mobile_server_port(0));
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "긴 값은 라벨을 안 덮는다 — 앞을 자르고 뒤를 남긴다" {
+    // 지문은 라벨보다 훨씬 길다. 안 자르면 **라벨 위에 겹쳐** 둘 다 못 읽는다(기기 화면으로
+    // 잡았다). 뒤를 자르면 `SHA256:` 만 남아 서버를 구별할 수 없으므로 **앞**을 자른다.
+    const long = "SHA256:lF6TLdkxElSISC+SNhf4YLdhkoo6Q1SgLLgzGQBL9gk";
+    var buf: [96]u8 = undefined;
+    // **폭 숫자를 손으로 적지 않는다** — 헤드리스에서는 아틀라스가 비어 폴백 폭이라, 상수를
+    // 적으면 그 값이 우연히 넉넉해져 **아무것도 안 자르면서 통과**한다(실제로 그랬다).
+    const full = bridge.textWidthForTest(long, 15);
+    const room = @divTrunc(full, 2);
+    const fit = bridge.fitRightForTest(long, room, 15, &buf);
+    try std.testing.expect(fit.len < long.len);
+    try std.testing.expect(std.mem.startsWith(u8, fit, "\u{2026}")); // 앞이 잘렸다
+    try std.testing.expect(std.mem.endsWith(u8, fit, "9gk")); // 뒤는 남았다
+    try std.testing.expect(bridge.textWidthForTest(fit, 15) <= room);
+
+    // 짧은 값은 그대로다(쓸데없이 자르지 않는다).
+    try std.testing.expectEqualStrings("22", bridge.fitRightForTest("22", full, 15, &buf));
+}

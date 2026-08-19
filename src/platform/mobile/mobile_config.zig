@@ -567,6 +567,92 @@ test "없던 키는 새로 붙는다" {
     try std.testing.expect(std.mem.indexOf(u8, out, "# 비어 있다") != null);
 }
 
+/// 서버 목록을 통째로 다시 적은 본문을 만든다. **`withKey` 로는 못 한다** — 그 함수는 값을
+/// 고칠 뿐이라 지우기(삭제)와 번호 다시 매기기를 못 하고, 반쯤 지워진 줄이 남으면 다음에 읽을 때
+/// 없는 서버가 되살아난다.
+///
+/// **`ssh.server.*` 줄만 걷어내고 나머지는 그대로 둔다**(주석·모르는 키 보존, 계약 §7). 새 줄은
+/// 파일 끝에 1번부터 다시 적는다 — 번호는 이름이 아니라 순서라서(§4.3) 그래도 되고, 그래야
+/// 지운 자리의 구멍이 안 남는다.
+pub fn withServers(allocator: std.mem.Allocator, original: []const u8, list: []const Server) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, original, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, &std.ascii.whitespace);
+        if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+            const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
+            if (parseServerKey(key) != null) continue; // 옛 서버 줄은 안 옮긴다
+        }
+        try out.appendSlice(allocator, raw);
+        try out.append(allocator, '\n');
+    }
+    // 끝에 빈 줄이 겹치지 않게 다듬는다(원문이 개행으로 끝나면 위 루프가 빈 조각을 하나 더 낸다).
+    while (out.items.len > 0 and out.items[out.items.len - 1] == '\n') _ = out.pop();
+    if (out.items.len > 0) try out.append(allocator, '\n');
+
+    for (list, 1..) |srv, n| {
+        if (srv.name.len > 0) try out.print(allocator, "ssh.server.{d}.name = {s}\n", .{ n, srv.name });
+        if (srv.host.len > 0) try out.print(allocator, "ssh.server.{d}.host = {s}\n", .{ n, srv.host });
+        // **포트는 늘 적는다.** 기본값(22)이라 안 적으면 사용자가 22 를 골랐는지 안 골랐는지
+        // 파일만 봐서는 모른다 — 화면이 유일한 입력 경로라 파일이 그 기록이다.
+        try out.print(allocator, "ssh.server.{d}.port = {d}\n", .{ n, srv.port });
+        if (srv.user.len > 0) try out.print(allocator, "ssh.server.{d}.user = {s}\n", .{ n, srv.user });
+        if (srv.fingerprint.len > 0) try out.print(allocator, "ssh.server.{d}.fingerprint = {s}\n", .{ n, srv.fingerprint });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "서버를 다시 적으면 주석과 모르는 키는 남고 번호는 1부터다" {
+    const original =
+        \\# 내 설정
+        \\theme.preset = nord
+        \\ssh.server.1.host = 옛것
+        \\ssh.server.3.host = 지운것
+        \\window.padding-x = 8
+    ;
+    const list = [_]Server{
+        .{ .name = "집", .host = "10.0.0.5", .port = 2222, .user = "me", .fingerprint = "SHA256:a" },
+        .{ .host = "b", .port = 22, .user = "you", .fingerprint = "SHA256:b" },
+    };
+    const out = try withServers(std.testing.allocator, original, &list);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 내 설정") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "window.padding-x = 8") != null); // 모르는 키
+    try std.testing.expect(std.mem.indexOf(u8, out, "옛것") == null); // 옛 서버 줄은 사라진다
+    try std.testing.expect(std.mem.indexOf(u8, out, "지운것") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ssh.server.1.host = 10.0.0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ssh.server.2.host = b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ssh.server.2.port = 22") != null); // 기본값도 적는다
+    // 이름이 없으면 그 줄은 안 적는다(빈 값을 적으면 다음에 읽을 때 빈 이름이 된다).
+    try std.testing.expect(std.mem.indexOf(u8, out, "ssh.server.2.name") == null);
+}
+
+test "다시 적은 본문을 다시 읽으면 같은 목록이다" {
+    // **왕복이 맞아야 한다** — 화면이 쓴 것을 화면이 다시 읽는다(파일이 단일 출처).
+    const list = [_]Server{
+        .{ .name = "집", .host = "h1", .port = 2222, .user = "me", .fingerprint = "SHA256:a" },
+        .{ .host = "h2", .port = 22, .user = "you", .fingerprint = "SHA256:b" },
+    };
+    const text = try withServers(std.testing.allocator, "", &list);
+    defer std.testing.allocator.free(text);
+    var p = try parse(std.testing.allocator, text);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 2), p.server_count);
+    try std.testing.expectEqualStrings("집", p.servers[0].name);
+    try std.testing.expectEqual(@as(u16, 2222), p.servers[0].port);
+    try std.testing.expectEqualStrings("h2", p.servers[1].host);
+    try std.testing.expectEqualStrings("SHA256:b", p.servers[1].fingerprint);
+}
+
+test "마지막 서버를 지우면 그 줄이 통째로 사라진다" {
+    const original = "ssh.server.1.host = a\nssh.server.1.port = 22\n";
+    const out = try withServers(std.testing.allocator, original, &.{});
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ssh.server") == null);
+}
+
 /// 그 키의 스키마 범위 밖인가. **범위는 스키마가 소유한다** — 화면이 숫자를 따로 적으면
 /// 파일 파싱과 GUI 가 다른 값을 받아들인다.
 pub fn outOfRange(key: []const u8, v: i64) bool {

@@ -51,9 +51,11 @@ pub const inventory = [_]Proof{
     // 글자 칸(S9b-1)이 `textValueOf` 를 더해 9 → 14 다. 늘어난 다섯은 **전부 같은 스키마 반영**이다
     // — 문자열 필드의 지금 값을 키로 찾아 돌려준다(줄 기술자·숫자 읽기와 같은 자리, 손으로 적은 키
     // 표를 만들지 않기 위해서다: docs/mobile-config.md §6). Client receiver 나 제품 vtable 과는 무관하다.
+    // 등록·수정·삭제(S9b-2b-2)의 `withServers` 가 붙어 또 바뀐다 — 목록을 통째로 다시 적는
+    // 순수 함수라 `@field` 반사는 안 쓴다(count 14 그대로).
     // 서버 목록(S9b-2a)이 붙어 또 바뀐다 — `ssh.server.<n>.*` 는 **스키마 엔진 밖의 명시 가지**라
     // (`theme.palette.N` 과 같은 부류) `@field` 로 도는 자리를 안 늘린다. count 는 14 그대로다.
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "f3869dabc9ce1edfc9fc78dbc45bd1083c1b9112b3231eb1d0d32bdf01a3065b" },
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "66fc39698991014f08f2925a4e5c50f62fb4271bcbf6208ebb92a845cc9de266" },
     // 경로 값 입구 정규화(W7.5)가 붙어 바뀐다 — `Meta.isPath()` 인 필드는 파싱에서 구분자를 POSIX 로
     // 정규화한다(docs/windows-platform.md §5 규칙 1: Windows 사용자가 `workspace.root = C:\proj` 로 적으면
     // L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다). count 는 108 그대로다 — 늘어난 것은
@@ -731,10 +733,15 @@ pub const inventory = [_]Proof{
     // — 문자열 상수만 줄었고 `@field` 반사나 Client 구성은 안 건드린다.
     // 편집기 상태바(2026-08-19): 읽기 전용·행 수 세는 중 두 문구가 키로 들어와 digest가 움직인다.
     // count는 1 그대로다.
+    // 편집 화면(S9b-2b-2)이 키를 더 넣고 안 쓰게 된 하나(`mob_servers_empty_hint`)를 빼서 또
+    // 바뀐다 — 등록 수단이 생겨 "파일을 이렇게 적어라" 안내가 틀린 말이 됐다. count 는 1 그대로다.
     // 모바일 서버 목록 화면(S9b-2b)이 키 넷을 더해 바뀐다 — 표에 항목이 는 것뿐이라 `@field`
     // 로 도는 자리는 그대로다(count 1).
     // 기준 고르기(§3.5) 문구 둘(`scm_menu_pick_base`·`scm_base_default`)로 또 움직인다. count는 그대로다 —
     // 표에 키가 늘어난 것이지 이 파일을 부르는 자리가 는 것이 아니다. 두 슬라이스가 같은 표에 각각
     // 키를 더해 값이 수렴했다(2026-08-19) — 사유는 위아래 둘 다 살아 있다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "e50dcf8e14b8e3c4c4226c6c7282733ac9f0e13e152838e4818d3d539372e141" },
+    // 편집 화면(S9b-2b-2)이 칸 라벨·저장·삭제 키를 더하고, 안 쓰게 된 하나
+    // (`mob_servers_empty_hint`)를 뺀다 — 등록 수단이 생겨 "config 에 이렇게 적어라" 가 틀린
+    // 말이 됐다. count는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "9fa78037edf0f8d922d9233fb1d7ea95e57e41dcdc94402f074540aa283663be" },
 };

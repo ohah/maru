@@ -245,8 +245,10 @@ chrome-ios)
     for f in Regular Bold Italic BoldItalic; do
         cp "$ROOT/assets/fonts/Jetendard/Jetendard-$f.ttf" "$APP/"
     done
+    # **펌프도 같이 링크한다** — 소켓 루프는 두 host 가 함께 쓰는 C 한 벌이다(S9-3).
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
-        "$IOS/ios_app_host.m" "$LIB_OUT/libmaru-mobile-ios-sim.a" \
+        "$IOS/ios_app_host.m" "$ROOT/src/platform/mobile_host/ssh_pump.c" \
+        "$LIB_OUT/libmaru-mobile-ios-sim.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
         -framework CoreText -framework CoreGraphics \
         -o "$APP/MaruChrome"

@@ -5,6 +5,7 @@
 // L4 platform 이 그리기)이다. 계약은 docs/mobile-platform.md 가 단일 출처다.
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
+#include "../mobile_host/ssh_pump.h"
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -17,6 +18,8 @@
 // 정의는 파일 뒤에 있고 그리는 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다
 // (Android 에서 같은 순서로 두 번 데였다).
 static void drainConfigWrite(void);
+static void startSshIfConfigured(void);
+static void pumpSshOnMainThread(void);
 
 static NSString *const kShader =
     @"#include <metal_stdlib>\n"
@@ -1040,10 +1043,18 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     [e endEncoding];
     [cb presentDrawable:d];
     [cb commit];
+
+    // **원격과 주고받는 자리도 여기다.** 브리지 호출은 전부 main 에서 돈다는 모델을 지키려면
+    // 펌프에서 당기지 말고 이 프레임에서 가져가야 한다(위 주석).
+    pumpSshOnMainThread();
 }
 @end
 
-@interface AppDelegate : UIResponder <UIApplicationDelegate>
+@interface AppDelegate : UIResponder <UIApplicationDelegate> {
+    /// 배경 유예 시간을 얻은 자리. **끝나면 반드시 돌려줘야 한다** — 안 돌려주면 OS 가 앱을
+    /// 종료한다.
+    UIBackgroundTaskIdentifier _sshBackgroundTask;
+}
 @property (strong, nonatomic) UIWindow *window;
 @end
 
@@ -1052,6 +1063,19 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 static void loadConfigFile(void);
 
 @implementation AppDelegate
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _sshBackgroundTask = UIBackgroundTaskInvalid;
+    return self;
+}
+
+/// 유예 시간을 돌려준다. **두 번 불려도 안전해야 한다** — 만료 핸들러와 복귀 경로가 둘 다 부른다.
+- (void)endSshBackgroundTask {
+    if (_sshBackgroundTask == UIBackgroundTaskInvalid) return;
+    [UIApplication.sharedApplication endBackgroundTask:_sshBackgroundTask];
+    _sshBackgroundTask = UIBackgroundTaskInvalid;
+}
 // **생명주기**: 백그라운드에서는 그리지 않는다. iOS 는 창을 없애지 않아 Android 처럼
 // 스왑체인을 부술 필요는 없지만, CADisplayLink 를 멈추지 않으면 복귀 시 밀린 프레임이
 // 몰린다. 재개 후 다시 도는지가 판정 기준이다.
@@ -1076,6 +1100,20 @@ static void loadConfigFile(void);
     // 포커스도 코어에 알린다(DEC 1004 — vim 의 FocusGained/Lost). 모바일은 배경↔복귀가
     // 데스크톱보다 훨씬 잦은데 아무 신호도 안 보내고 있었다.
     maru_mobile_report_focus(0);
+
+    // **iOS 에는 안드로이드의 포그라운드 서비스 같은 것이 없다.** 배경에서 소켓을 계속 들
+    // 방법이 없어서(앱이 곧 정지된다) 여기서 할 수 있는 것은 **유예 시간**을 얻는 것뿐이다.
+    // 그 시간이 끝나면 **정직하게 끊는다** — 그냥 두면 앱이 정지되며 소켓이 조용히 죽고,
+    // 돌아왔을 때 화면은 붙어 있는 것처럼 보인다(그 상태가 사용자를 가장 헷갈리게 한다).
+    if (maru_ssh_pump_is_running() && _sshBackgroundTask == UIBackgroundTaskInvalid) {
+        __weak typeof(self) weakSelf = self;
+        _sshBackgroundTask = [app beginBackgroundTaskWithName:@"maru-ssh" expirationHandler:^{
+            NSLog(@"MARU_SSH background_expired — 세션을 끊는다");
+            maru_ssh_pump_stop();
+            [weakSelf endSshBackgroundTask];
+        }];
+        NSLog(@"MARU_SSH background_grace task=%lu", (unsigned long)_sshBackgroundTask);
+    }
     NSLog(@"MARU_LIFECYCLE background");
 }
 - (void)applicationWillEnterForeground:(UIApplication *)app {
@@ -1084,6 +1122,10 @@ static void loadConfigFile(void);
     loadConfigFile();
     [(ChromeView *)self.window.rootViewController.view setRenderingPaused:NO];
     maru_mobile_report_focus(1);
+    // **SSH 에는 재개가 없다**(계약 §4.1) — 끊긴 세션은 되살릴 수 없고 다시 붙는 수밖에 없다.
+    // 이미 돌고 있으면 펌프가 거절하므로 여기서는 그냥 부른다.
+    [self endSshBackgroundTask]; // 돌아왔으니 유예 시간은 돌려준다
+    startSshIfConfigured();
     NSLog(@"MARU_LIFECYCLE foreground");
 }
 /// config 파일을 읽어 브리지에 넘긴다. **자리는 `Library/Application Support/maru/config`**
@@ -1118,6 +1160,133 @@ static void drainConfigWrite(void) {
         return;
     }
     NSLog(@"MARU_CONFIG wrote bytes=%lu path=%@", n, file.path);
+}
+
+// ── SSH 세션(S9-3c) ─────────────────────────────────────────────────────────
+//
+// **소켓 루프는 여기 없다.** 두 host 가 함께 쓰는 `ssh_pump.c` 가 든다 — 이 파일은 접속 정보를
+// 읽어 넘기고, 원격 출력을 화면에 넣는다.
+//
+// **자물쇠 대신 main 큐를 쓴다.** iOS 의 브리지 호출은 전부 main 에서 돈다는 것이 이 host 의
+// 모델이고(계약 §3), 펌프 스레드가 끼어들면 그 모델이 깨진다. 그래서 펌프가 주는 것은
+// **main 으로 던지고**(`dispatch_async`), 가져오는 것은 **프레임 tick 이 main 에서** 한다 —
+// `dispatch_sync` 로 당기면 `stop` 이 그 스레드를 기다리는 순간 교착한다(main 이 join 을 하고,
+// 펌프는 main 을 기다린다).
+
+static void sshScreen(void *ctx, const unsigned char *bytes, unsigned long len) {
+    (void)ctx;
+    // **복사한다.** 이 포인터는 코어 안을 가리키고 다음 걸음이면 사라진다 — 블록이 나중에
+    // 실행되므로 그때는 이미 다른 내용이다.
+    NSData *copy = [NSData dataWithBytes:bytes length:len];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        maru_mobile_term_write(copy.bytes, copy.length);
+    });
+}
+
+static void sshState(void *ctx, unsigned int state) {
+    (void)ctx;
+    NSLog(@"MARU_SSH state=%u error=%s", state, maru_ssh_pump_error());
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // **입력 목적지를 세션과 함께 옮긴다.** 안 옮기면 친 글자가 화면에 한 번 찍히고 원격에는
+        // 영영 안 간다(안드로이드에서 실측한 것과 같은 자리다).
+        maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+    });
+}
+
+/// 프레임마다 main 에서 돈다: 친 것을 원격으로, 코어가 만든 답도 원격으로, 격자가 바뀌면 알린다.
+static void pumpSshOnMainThread(void) {
+    if (!maru_ssh_pump_is_running()) return;
+    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY) {
+        // **`ready` 일 때만 가져간다** — 가져가면 브리지에서 사라지는데 그때 못 보내면 그
+        // 글자가 통째로 없어진다(그전에는 브리지에 남아 type-ahead 가 된다).
+        static unsigned char input_buf[4096];
+        unsigned long got = maru_mobile_take_input(input_buf, sizeof input_buf);
+        if (got > 0) {
+            unsigned long sent = maru_ssh_pump_write(input_buf, got);
+            if (sent != got) NSLog(@"MARU_SSH input_partial sent=%lu of=%lu", sent, got);
+        }
+        static unsigned char response_buf[256];
+        unsigned long resp = maru_mobile_take_response(response_buf, sizeof response_buf);
+        if (resp > 0) maru_ssh_pump_write(response_buf, resp);
+    }
+    // 격자가 바뀌면 원격에 알린다 — 키보드가 오르내리면 행 수가 바뀐다.
+    static unsigned int last_cols, last_rows;
+    unsigned int cols = maru_mobile_term_cols();
+    unsigned int rows = maru_mobile_term_rows();
+    if (cols && rows && (cols != last_cols || rows != last_rows)) {
+        if (last_cols) {
+            maru_ssh_pump_resize(cols, rows);
+            NSLog(@"MARU_SSH resize cols=%u rows=%u", cols, rows);
+        }
+        last_cols = cols;
+        last_rows = rows;
+    }
+}
+
+/// **개발용 접속 자리.** `Application Support/maru/ssh.conf` 가 있으면 그 서버로 붙는다.
+/// 형식은 안드로이드와 같다(`host`·`port`·`user`·`identity`·`fingerprint`). 서버 목록 화면(S9b)이
+/// 이 자리를 대신하고 키는 Keychain(S9c)으로 옮긴다. 파일이 없으면 아무 일도 안 한다.
+static void startSshIfConfigured(void) {
+    if (maru_ssh_pump_is_running()) return;
+    NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+                                                          inDomain:NSUserDomainMask
+                                                 appropriateForURL:nil
+                                                            create:YES
+                                                             error:nil];
+    if (!support) return;
+    NSURL *file = [[support URLByAppendingPathComponent:@"maru" isDirectory:YES]
+        URLByAppendingPathComponent:@"ssh.conf" isDirectory:NO];
+    NSString *text = [NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:nil];
+    if (!text) return;
+
+    NSMutableDictionary<NSString *, NSString *> *conf = [NSMutableDictionary dictionary];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        NSRange eq = [line rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        conf[[line substringToIndex:eq.location]] =
+            [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceCharacterSet];
+    }
+    NSString *host = conf[@"host"], *user = conf[@"user"], *identity = conf[@"identity"],
+             *fingerprint = conf[@"fingerprint"];
+    if (!host || !user || !identity || !fingerprint) {
+        NSLog(@"MARU_SSH conf_incomplete");
+        return;
+    }
+
+    // **키는 우리가 읽고 ABI 가 푼다.** 파일 바이트는 이 함수 밖으로 안 나간다.
+    NSData *pem = [NSData dataWithContentsOfFile:identity];
+    if (!pem) {
+        NSLog(@"MARU_SSH key_unreadable path=%@", identity);
+        return;
+    }
+    static unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+    int loaded = maru_mobile_ssh_load_key(pem.bytes, (unsigned int)pem.length,
+                                          (const unsigned char *)"", 0, secret);
+    if (loaded != MARU_SSH_OK) {
+        NSLog(@"MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
+        return;
+    }
+
+    // 문자열은 펌프가 복사해 간다.
+    MaruSshPumpConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.host = host.UTF8String;
+    cfg.port = (unsigned short)[conf[@"port"] ?: @"22" intValue];
+    cfg.user = user.UTF8String;
+    cfg.secret = secret;
+    unsigned int cols = maru_mobile_term_cols(), rows = maru_mobile_term_rows();
+    cfg.cols = cols ? cols : 80;
+    cfg.rows = rows ? rows : 24;
+    cfg.expect_fingerprint = fingerprint.UTF8String;
+
+    MaruSshPumpHooks hooks;
+    memset(&hooks, 0, sizeof hooks);
+    hooks.screen = sshScreen;
+    hooks.state_changed = sshState;
+    int rc = maru_ssh_pump_start(&cfg, &hooks);
+    memset(secret, 0, sizeof secret);
+    NSLog(@"MARU_SSH start host=%@ port=%u user=%@ rc=%d", host, cfg.port, user, rc);
 }
 
 static void loadConfigFile(void) {
@@ -1160,6 +1329,7 @@ static void loadConfigFile(void) {
     // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
     // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
     loadConfigFile(); // 뷰가 서기 전에 — 첫 프레임부터 그 색으로 그린다
+    startSshIfConfigured();
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];
     vc.view = [[ChromeView alloc] initWithFrame:UIScreen.mainScreen.bounds];

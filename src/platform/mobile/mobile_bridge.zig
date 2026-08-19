@@ -455,9 +455,20 @@ fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
 ///
 /// **어느 세션의 바이트인지는 아직 안 가른다** — 화면이 하나이기 때문이다. 세션이 여럿이 되면
 /// 그 라우팅은 서버 목록(S9b)·세션 호스트 부착(S10)이 정한다.
+/// 코어가 서기 전에 온 원격 출력. **버리면 세션의 첫 출력이 사라진다** — 첫 프레임에 흘려 넣는다.
+var pre_core: [8192]u8 = undefined;
+var pre_core_len: usize = 0;
+
 pub export fn maru_mobile_term_write(ptr: [*]const u8, len: usize) usize {
     const core = &(term_core orelse {
-        setLastError("term_write_before_core");
+        // 아직 화면이 없다 — 첫 프레임까지 들고 있는다.
+        if (pre_core_len + len > pre_core.len) {
+            setLastError("term_write_before_core");
+            return term_written;
+        }
+        @memcpy(pre_core[pre_core_len..][0..len], ptr[0..len]);
+        pre_core_len += len;
+        term_written += len;
         return term_written;
     });
     core.write(ptr[0..len]) catch {
@@ -1774,6 +1785,13 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         applyConfigToCore(&term_core.?);
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
         drainUnconsumed(&term_core.?);
+        // **코어가 서기 전에 온 원격 출력을 여기서 흘려 넣는다.** 세션은 첫 프레임보다 빨리
+        // 붙을 수 있고(실측: iOS 에서 접속이 150ms, 그때 코어가 없었다), 그때 온 바이트를
+        // 버리면 **세션의 첫 출력이 통째로 사라진다** — 배너·프롬프트가 그 자리다.
+        if (pre_core_len > 0) {
+            term_core.?.write(pre_core[0..pre_core_len]) catch setLastError("core_write_pre");
+            pre_core_len = 0;
+        }
     }
     const core = &(term_core orelse return);
     // **격자를 도는 기준은 코어가 실제로 들고 있는 크기다.** 우리가 요청한 크기를 쓰면

@@ -240,8 +240,9 @@ public class MaruActivity extends android.app.NativeActivity {
     /// 도는지 보는 것이 목적이라, 화면 없이도 붙을 수 있는 자리를 하나 둔다. 파일이 없으면
     /// 아무 일도 안 한다(기존 동작 그대로).
     ///
-    /// 형식은 `키=값` 한 줄씩: `host` · `port` · `user` · `identity`(개인키 파일 경로) ·
-    /// `fingerprint`(`SHA256:...`). **지문은 필수다** — 자동 승인은 없다(SSH 계약 §4).
+    /// 형식은 `키=값` 한 줄씩: `host` · `port` · `user` · `fingerprint`(`SHA256:...`).
+    /// **지문은 필수다** — 자동 승인은 없다(SSH 계약 §4). **키는 여기 없다** — 기기가 만들어
+    /// Keystore 에 봉인해 둔 것을 쓴다(S9c).
     private void maybeStartSsh() {
         java.io.File conf = new java.io.File(getFilesDir(), "ssh.conf");
         if (!conf.exists()) return;
@@ -252,8 +253,7 @@ public class MaruActivity extends android.app.NativeActivity {
             android.util.Log.i("MaruChrome", "MARU_SSH conf_read_failed " + e);
             return;
         }
-        String identity = p.getProperty("identity");
-        if (identity == null) return;
+
         String host = p.getProperty("host");
         String user = p.getProperty("user");
         String fingerprint = p.getProperty("fingerprint");
@@ -265,9 +265,6 @@ public class MaruActivity extends android.app.NativeActivity {
         intent.putExtra("host", host);
         intent.putExtra("port", Integer.parseInt(p.getProperty("port", "22")));
         intent.putExtra("user", user);
-        // **키는 경로만 넘긴다** — extra 는 `system_server` 를 지난다(개인키가 프로세스 밖으로
-        // 나가면 안 된다). 파일은 네이티브가 우리 프로세스 안에서 읽는다.
-        intent.putExtra("identity", identity);
         intent.putExtra("fingerprint", fingerprint);
         // **`startForegroundService` 여야 한다.** 배경에서 `startService` 는 API 26+ 에서 막힌다.
         startForegroundService(intent);

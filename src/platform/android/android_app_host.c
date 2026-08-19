@@ -7,6 +7,9 @@
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
 #include "../mobile_host/ssh_pump.h"
+
+#include <errno.h>
+#include <sys/random.h>
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <android_native_app_glue.h>
 #include <android/log.h>
@@ -1009,6 +1012,21 @@ static unsigned long ssh_take_response(void *ctx, unsigned char *out, unsigned l
     return maru_mobile_take_response(out, cap);
 }
 
+/// OS 난수. **키 씨앗과 세션 난수가 여기서 나온다** — 브리지는 OS 를 못 부른다.
+static int getEntropy(unsigned char *out, unsigned long len) {
+    unsigned long off = 0;
+    while (off < len) {
+        long n = getrandom(out + off, len - off, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        off += (unsigned long)n;
+    }
+    return 0;
+}
+
 /// 서비스 클래스. **세션이 끝났다고 알릴 자리**라 들고 있는다.
 static jclass g_ssh_service_cls;
 
@@ -1041,19 +1059,45 @@ static char g_ssh_user[128];
 static char g_ssh_fingerprint[128];
 static unsigned char g_ssh_secret[MARU_SSH_SECRET_KEY_BYTES];
 
-/// 개인키 파일을 읽는다. **우리 프로세스 안에서만 읽는다** — 경로만 건네받는 이유다.
-static unsigned int readKeyFile(const char *path, unsigned char *out, unsigned int cap) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    size_t n = fread(out, 1, cap, f);
-    fclose(f);
-    return (unsigned int)n;
+/// **키를 만든다**(계약 §3.4 — 키는 앱이 만든다). 씨앗은 OS 난수이고, 나온 64바이트를 Java 가
+/// 받아 Keystore 로 봉인한다. 공개키 한 줄은 여기서 로그·파일로 낸다 — 화면에 보여 주는 자리
+/// (S9c-4)가 아직 없어서인데, **공개키라 밖에 나가도 되는 값**이다.
+JNIEXPORT jbyteArray JNICALL
+Java_dev_maru_MaruKeyStore_nativeGenerateKey(JNIEnv *env, jclass cls) {
+    (void)cls;
+    unsigned char seed[MARU_SSH_ENTROPY_BYTES];
+    if (getEntropy(seed, sizeof seed) != 0) {
+        LOGI("MARU_SSH entropy_failed");
+        return NULL;
+    }
+    unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+    unsigned char line[256];
+    int rc = maru_mobile_ssh_generate_key(seed, secret, line, sizeof line);
+    memset(seed, 0, sizeof seed);
+    if (rc != MARU_SSH_OK) {
+        LOGI("MARU_SSH generate_failed=%s", maru_mobile_ssh_last_load_error());
+        return NULL;
+    }
+    LOGI("MARU_SSH generated_public_key %s", (const char *)line);
+    if (g_app && g_app->activity && g_app->activity->internalDataPath) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/id_ed25519.pub", g_app->activity->internalDataPath);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fprintf(f, "%s\n", (const char *)line);
+            fclose(f);
+        }
+    }
+    jbyteArray out = (*env)->NewByteArray(env, MARU_SSH_SECRET_KEY_BYTES);
+    if (out) (*env)->SetByteArrayRegion(env, out, 0, MARU_SSH_SECRET_KEY_BYTES, (const jbyte *)secret);
+    memset(secret, 0, sizeof secret);
+    return out;
 }
 
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring host, jint port,
-                                            jstring user, jstring key_path, jstring fingerprint) {
-    if (!host || !user || !key_path || !fingerprint) {
+                                            jstring user, jbyteArray sealed_secret, jstring fingerprint) {
+    if (!host || !user || !sealed_secret || !fingerprint) {
         LOGI("MARU_SSH start_missing_args");
         return;
     }
@@ -1077,21 +1121,13 @@ Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring hos
     snprintf(g_ssh_fingerprint, sizeof g_ssh_fingerprint, "%s", f ? f : "");
     if (f) (*env)->ReleaseStringUTFChars(env, fingerprint, f);
 
-    // **키는 우리가 읽고 ABI 가 푼다.** 파일 바이트는 이 함수 밖으로 안 나간다.
-    static unsigned char pem[16 * 1024];
-    const char *kp = (*env)->GetStringUTFChars(env, key_path, NULL);
-    unsigned int pem_len = kp ? readKeyFile(kp, pem, sizeof pem) : 0;
-    if (kp) (*env)->ReleaseStringUTFChars(env, key_path, kp);
-    if (pem_len == 0) {
-        LOGI("MARU_SSH key_unreadable");
+    // **키는 Keystore 가 봉인해 둔 것이다**(Java 쪽 `MaruKeyStore`). 여기서는 그 64바이트를
+    // 받아 쓰고, 받은 배열은 Java 가 곧바로 지운다 — 파일에서 읽는 경로는 없앴다.
+    if ((*env)->GetArrayLength(env, sealed_secret) != MARU_SSH_SECRET_KEY_BYTES) {
+        LOGI("MARU_SSH key_bad_length");
         return;
     }
-    int loaded = maru_mobile_ssh_load_key(pem, pem_len, (const unsigned char *)"", 0, g_ssh_secret);
-    memset(pem, 0, sizeof pem);
-    if (loaded != MARU_SSH_OK) {
-        LOGI("MARU_SSH key_failed=%s", maru_mobile_ssh_last_load_error());
-        return;
-    }
+    (*env)->GetByteArrayRegion(env, sealed_secret, 0, MARU_SSH_SECRET_KEY_BYTES, (jbyte *)g_ssh_secret);
 
     MaruSshPumpConfig cfg;
     memset(&cfg, 0, sizeof cfg);

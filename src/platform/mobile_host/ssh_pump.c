@@ -87,6 +87,9 @@ static unsigned char g_secret[MARU_SSH_SECRET_KEY_BYTES];
 /// 여기서 직렬화한다 — 브리지 자물쇠(host 것)와는 다른 자물쇠다: 이건 세션용이다.
 static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/// 상대가 끊었을 때의 이름을 정한다(정의는 아래 — `flush_out` 이 먼저 부른다).
+static void set_closed_error(void);
+
 static void set_error(const char *name) {
     // **먼저 난 실패를 남긴다** — 뒤에 난 것으로 덮으면 원인이 결과에 가린다.
     if (g_error[0] != 0) return;
@@ -211,6 +214,14 @@ static int flush_out(void) {
 #endif
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
+            // **끊긴 것은 쓰기에서도 드러난다.** 상대가 먼저 닫으면 우리 쓰기가 `EPIPE`·
+            // `ECONNRESET` 으로 실패하는데, 그것을 `write_failed` 로 부르면 **같은 사실이
+            // 세 가지 이름으로 보고된다**(EOF·읽기 리셋·쓰기 실패 — 어느 쪽이 먼저 걸리는지는
+            // 타이밍이다. 테스트가 그 셋 사이를 오갔다).
+            if (n < 0 && (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN)) {
+                set_closed_error();
+                return -1;
+            }
             set_error("write_failed");
             return -1;
         }
@@ -258,6 +269,20 @@ static void drain_screen(void) {
             if (sent == 0) break; // 창이 닫혔다 — 다음 바퀴에 다시
             off += sent;
         }
+    }
+}
+
+/// 상대가 끊었을 때의 이름. **끊긴 시점을 함께 본다** — "상대가 끊었다" 만 남기면 SSH 가 아닌
+/// 상자(캡티브 포털·프록시)에 붙었을 때도 같은 말이 나오고, 사용자는 주소를 고쳐야 하는지
+/// 기다려야 하는지 모른다. 상태는 추측이 아니라 우리가 아는 사실이다.
+static void set_closed_error(void) {
+    unsigned int at = maru_mobile_ssh_state(g_handle);
+    if (at == MARU_SSH_STATE_VERSION_EXCHANGE) {
+        set_error("no_ssh_version"); // 버전 줄을 끝내 안 줬다
+    } else if (at != MARU_SSH_STATE_READY && at != MARU_SSH_STATE_CLOSED) {
+        set_error("closed_before_ready"); // 붙는 중에 끊겼다(인증·채널 단계)
+    } else {
+        set_error("closed_by_peer");
     }
 }
 
@@ -329,8 +354,17 @@ static int feed_buffered(void) {
             continue;
         }
         if (st != MARU_SSH_OK) {
-            set_error(maru_mobile_ssh_last_error(g_handle));
-            set_error("feed_failed");
+            // **버전 줄을 읽는 중의 실패는 "SSH 가 아니다" 다.** 그 단계에서 코어가 거절했다는
+            // 것은 상대가 SSH 로 말하지 않았다는 뜻이고(HTTP 응답·프록시 인사말 따위), 그것을
+            // 일반 오류로 접으면 사용자는 주소를 고쳐야 하는지 기다려야 하는지 모른다.
+            // 끊김 경로(EOF)와 **같은 이름**을 쓰는 것이 요점이다 — 어느 쪽이 먼저 오느냐는
+            // 타이밍이라, 이름이 갈리면 같은 상황이 두 가지로 보고된다(테스트가 흔들렸다).
+            if (maru_mobile_ssh_state(g_handle) == MARU_SSH_STATE_VERSION_EXCHANGE) {
+                set_error("no_ssh_version");
+            } else {
+                set_error(maru_mobile_ssh_last_error(g_handle));
+                set_error("feed_failed");
+            }
             return -1;
         }
         // 상태는 **먹일 때마다** 본다 — 바깥에서 한 번만 보면 한 번의 `feed` 안에서 지나간
@@ -409,11 +443,18 @@ static void *pump_main(void *unused) {
             if (errno == EINTR) continue;
             // 타임아웃은 실패가 아니다 — 정지 표시를 보라는 신호다.
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            // **상대가 끊은 것은 하나의 사실이다.** 그것이 EOF 로 오는지 `ECONNRESET` 으로
+            // 오는지는 타이밍이라, 이름을 갈라 두면 **같은 상황이 두 가지로 보고된다**
+            // (테스트가 그 때문에 흔들렸다 — 실측).
+            if (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE) {
+                set_closed_error();
+                break;
+            }
             set_error("read_failed");
             break;
         }
         if (n == 0) {
-            set_error("closed_by_peer");
+            set_closed_error();
             break;
         }
         g_in_len += (unsigned long)n;

@@ -3473,7 +3473,6 @@ pub const AppSession = struct {
     // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
     // 이벤트마다 통째로 다시 만든다.
-    sidebar_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. tui/빈이면
     // 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
@@ -15420,7 +15419,7 @@ pub const AppSession = struct {
                     }
                 }
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
                     self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
@@ -15500,7 +15499,7 @@ pub const AppSession = struct {
                         const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
                         // 스탬프는 **부분 swap이 실제로 성공했을 때만** 올린다(full 경로와 같은 트랜잭션 규칙) —
                         // `catch {}`로 삼킨 실패에서 기하만 전진하면 옛 사이드바 셀과 새 헤더/슬롯 높이가 갈린다.
-                        if (self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| {
+                        if (self.metal_buffer.replaceSidebar(self.allocator, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| {
                             self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                         } else |_| {}
                         sidebar_ops.applySidebarGlyphPyTop(self); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
@@ -17175,10 +17174,10 @@ pub const AppSession = struct {
     fn chromeGeometrySnapshot(self: *const AppSession) metal_frame.ChromeGeometry {
         const scissor = sidebar_ops.sidebarScissorPx(
             self.backing_height_px,
-            // **밴드가 아니라 "사이드바에 그릴 셀이 있는가"다.** `self.sidebar_cells`는 tui 밴드만 담고
-            // 카드 제목은 별도 프레임(`sidebar_frame`)으로 간다 — rich 테마는 밴드가 GPU quad라 이 배열이
-            // 비고, 그래서 게이트가 항상 false가 되어 **scissor가 한 번도 안 걸렸다**. 그 결과 스크롤한
-            // 카드 제목이 상단 검색바 위로 샜다(rich가 기본이라 사실상 상시).
+            // **"사이드바에 그릴 것이 있는가"다** — 특정 배열이 비었는지가 아니다. 예전에는 옛 tui 밴드
+            // 배열(`sidebar_cells`)의 길이를 게이트로 썼는데, 밴드가 GPU quad로 가는 rich에서는 그 배열이
+            // 늘 비어 게이트가 항상 false가 됐고 **scissor가 한 번도 안 걸렸다**(스크롤한 카드 제목이 상단
+            // 검색바 위로 샜다). 자료구조가 아니라 의미로 묻는다.
             self.sidebar_width_px > 0 and self.tabs.items.len > 0,
             self.sidebar_header_height_px,
             self.sidebar_scroll_offset_px,
@@ -17448,7 +17447,6 @@ pub const AppSession = struct {
         self.scm_commit_drafts.deinit(self.allocator);
         self.metal_buffer.deinit(self.allocator);
         self.clearMeasuredTextCaches();
-        self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.overlay_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
@@ -37770,32 +37768,6 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
     const orphan_tabs = [_]maru.session.workspace.Tab{.{ .tree = &orphan_tree, .panes = &panes }};
     try std.testing.expectError(error.MalformedTree, workspace_ops.applyWorkspaceWindow(session, .{ .tabs = &orphan_tabs }));
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-}
-
-test "sidebar_ops.sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
-    // 순수 함수: 폭/cell 폭/표시 행/origin_y/높이/색만으로 밴드 셀을 만든다(OS 무관). 사이드바 꺼짐(폭 0)·cell 폭 0이면 null.
-    try std.testing.expect(sidebar_ops.sidebarBandCell(0, 8, 0, 0, 40, 0xFF112233) == null);
-    try std.testing.expect(sidebar_ops.sidebarBandCell(180, 0, 0, 0, 40, 0xFF112233) == null);
-
-    // 180px 폭, cell 폭 9px → floor(180/9)=20칸. col 0, width 20, sentinel UV, 배경=색. origin_y/height는 가변 높이 소스(#7).
-    const cell = sidebar_ops.sidebarBandCell(180, 9, 0, 100, 40, 0xFF112233).?;
-    try std.testing.expectEqual(@as(u16, 0), cell.col);
-    try std.testing.expectEqual(@as(u16, 20), cell.width);
-    try std.testing.expectEqual(@as(u16, 0), cell.row);
-    try std.testing.expectEqual(@as(u32, 100), cell.origin_y); // content-상대 rowTop(.m이 header+scroll 더함, #7)
-    try std.testing.expectEqual(@as(u32, 40), cell.atlas_height_px); // 밴드 행 높이(가변) — .m cell_h 소스(#7)
-    try std.testing.expectEqual(@as(f32, -1.0), cell.u0); // sentinel UV: 셰이더가 atlas 샘플 없이 배경만
-    try std.testing.expectEqual(@as(u32, 0xFF112233), cell.background);
-    try std.testing.expectEqual(@as(u32, 0), cell.foreground);
-
-    // 밴드 폭은 floor라 origin_x를 넘지 않는다: 17px 폭/8px cell → 2칸(2*8=16<=17). ceil(=3,24px)이면 침범.
-    try std.testing.expectEqual(@as(u16, 2), sidebar_ops.sidebarBandCell(17, 8, 0, 0, 40, 0xFF000000).?.width);
-    // 표시 행은 인자대로(탭 i = 행 i): 3번째 탭이면 row 2.
-    try std.testing.expectEqual(@as(u16, 2), sidebar_ops.sidebarBandCell(180, 9, 2, 0, 40, 0xFF000000).?.row);
-    // 그룹 헤더 밴드는 얇은 높이(header_row_h)를 그대로 나른다(카드 slot_h와 다름) — .m이 이 값으로 얇게 그린다.
-    try std.testing.expectEqual(@as(u32, 18), sidebar_ops.sidebarBandCell(180, 9, 0, 0, 18, 0xFF000000).?.atlas_height_px);
-    // cell 폭이 사이드바 폭보다 크면 0칸 → null(밴드 없음).
-    try std.testing.expect(sidebar_ops.sidebarBandCell(8, 16, 0, 0, 40, 0xFF000000) == null);
 }
 
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이

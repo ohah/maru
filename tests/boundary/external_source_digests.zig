@@ -578,7 +578,14 @@ pub const inventory = [_]Proof{
     // 편집기 상태바 셋(2026-08-19)으로 움직인다: 활성 pane이 편집기일 때만 우측에 저하·읽기 전용·줄바꿈을
     // 싣는 블록과 그 두 exhaustive switch 가지가 는다. **새 읽기·새 상태가 없다** — 이미 든 문서 형식과
     // 행 수 캐시를 읽을 뿐이다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e235a739fb9a17c10af83e7346d21dbeb29a97b0059bb1ca2489696ce412bb99" },
+    // 셀 밴드 갈래 제거(2026-08-19)로 또 바뀐다: 밴드 source 배열(`sidebar_cells`)과 그 lowering 인자가
+    // 사라지고, scissor 게이트 인자 이름이 의미 기준(`has_sidebar_content`)으로 바뀐다. count는 2 그대로다
+    // — `@field` 반사나 Client 구성은 안 건드린다.
+    // 셀 밴드 제거를 main 에 리베이스하며 값이 다시 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
+    // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
+    // 셀 밴드 제거를 main 에 다시 리베이스하며 값이 또 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
+    // 같은 파일을 건드려 digest 가 낡았기 때문이고, count 와 사유는 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "69be895dd30456c52de10f932fa51355a62311b53ed0c91252d7bcd82fd805ee" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -566,7 +566,10 @@ pub const inventory = [_]Proof{
     // Client 구성·receiver 집합도 안 건드린다.
     // 위 tui 제거를 main 에 리베이스하며 값이 다시 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
     // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b4f9922884ec957a0f35225501d3daf4e994e33e5b0571d79a198d1a4311f4b4" },
+    // 텍스트 파일을 네이티브 편집기로 여는 분기(2026-08-19)로 또 바뀐다: `native_text` 필드 하나가
+    // 늘고 init이 그것을 읽는다. count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver
+    // 집합도 안 건드린다(필드 추가는 이 원장이 세는 축이 아니다).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "679393ba25070b53b1051d51954878b6882d6f98718d0a37bbdf16390a6f2571" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

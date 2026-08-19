@@ -929,6 +929,10 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
 - (void)tick {
     [self recordPace];
+    // **원격과 주고받는 것은 그리기와 무관하다.** 아래 `nextDrawable` 이 nil 이면 이 함수는
+    // 곧바로 돌아가는데(창이 바뀌는 순간 등) 그 자리에 두면 **친 글자가 그동안 안 나간다** —
+    // 그리기가 잠깐 막힌 것과 입력이 막히는 것은 사용자에게 전혀 다른 일이다.
+    pumpSshOnMainThread();
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
@@ -1044,9 +1048,6 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     [cb presentDrawable:d];
     [cb commit];
 
-    // **원격과 주고받는 자리도 여기다.** 브리지 호출은 전부 main 에서 돈다는 모델을 지키려면
-    // 펌프에서 당기지 말고 이 프레임에서 가져가야 한다(위 주석).
-    pumpSshOnMainThread();
 }
 @end
 

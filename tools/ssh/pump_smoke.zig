@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
+const posix = std.posix;
 const abi = @import("mobile_ssh");
 
 const pump = @cImport({
@@ -274,4 +275,251 @@ test "끝난 뒤에는 다시 붙을 수 있다" {
     // 그리고 다시 붙을 수 있어야 한다.
     try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, null));
     pump.maru_ssh_pump_stop();
+}
+
+// ── 적대적 서버 ─────────────────────────────────────────────────────────────
+//
+// **정상 sshd 로만 재면 절반만 잰 것이다.** 선 위의 상대는 우리가 못 고르고, 모바일에서는
+// 중간 상자(캡티브 포털·프록시·통신사 장비)가 아무 바이트나 보내기도 한다. 여기서 보는 것은
+// "붙느냐" 가 아니라 **안 죽고, 안 멈추고, 이름 있는 실패로 끝나느냐** 다.
+
+const FakeServer = struct {
+    fd: c.fd_t,
+    port: u16,
+    script: Script,
+    thread: ?std.Thread = null,
+
+    const Script = enum {
+        /// 붙자마자 끊는다(포트만 열린 상자).
+        close_immediately,
+        /// 아무것도 안 보내고 붙들고만 있다(블랙홀).
+        silent,
+        /// SSH 가 아닌 바이트를 쏟는다(HTTP 프록시 같은 것).
+        garbage,
+        /// 버전 줄만 주고 끊는다.
+        version_then_close,
+    };
+
+    fn listen(script: Script) !FakeServer {
+        const fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        var on: c_int = 1;
+        _ = c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, @ptrCast(&on), @sizeOf(c_int));
+        var addr: posix.sockaddr.in = .{
+            .family = posix.AF.INET,
+            .port = 0, // 커널이 고른다 — 포트 충돌로 테스트가 흔들리지 않게
+            .addr = std.mem.nativeToBig(u32, 0x7F00_0001),
+            .zero = @splat(0),
+        };
+        if (c.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) != 0) return error.BindFailed;
+        var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        if (c.getsockname(fd, @ptrCast(&addr), &len) != 0) return error.SockNameFailed;
+        if (c.listen(fd, 1) != 0) return error.ListenFailed;
+        return .{ .fd = fd, .port = std.mem.bigToNative(u16, addr.port), .script = script };
+    }
+
+    fn serve(self: *FakeServer) void {
+        const client = c.accept(self.fd, null, null);
+        if (client < 0) return;
+        defer _ = c.close(client);
+        switch (self.script) {
+            .close_immediately => {},
+            .silent => {
+                // **진짜로 붙들고만 있는다.** 한 번 읽고 돌아오면 소켓이 닫혀 "조용한 상대" 가
+                // 아니라 "끊는 상대" 가 된다 — 처음에 그렇게 써서 테스트가 다른 것을 쟀다.
+                // 상대(펌프)가 닫을 때까지 읽기만 한다.
+                var junk: [256]u8 = undefined;
+                while (c.read(client, &junk, junk.len) > 0) {}
+            },
+            .garbage => {
+                const junk = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" ++ ("\x00\xff" ** 64);
+                _ = c.write(client, junk.ptr, junk.len);
+            },
+            .version_then_close => {
+                const line = "SSH-2.0-FakeServer\r\n";
+                _ = c.write(client, line.ptr, line.len);
+            },
+        }
+    }
+
+    fn start(self: *FakeServer) !void {
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+    }
+
+    fn stop(self: *FakeServer) void {
+        // **듣는 소켓을 먼저 깨운다.** `accept` 에 걸린 스레드를 그냥 `join` 하면 아무도 안
+        // 붙는 판에서 영영 안 돌아온다 — 테스트가 멈추고, 그 멈춤이 제품 결함처럼 보인다
+        // (실제로 그렇게 보였다: 펌프는 멀쩡한데 하네스가 붙들고 있었다).
+        _ = c.shutdown(self.fd, posix.SHUT.RDWR);
+        _ = c.close(self.fd);
+        if (self.thread) |t| t.join();
+    }
+};
+
+/// 적대적 서버 한 판. **끝나야 하고, 이름이 남아야 하고, 다시 붙을 수 있어야 한다.**
+fn runHostile(script: FakeServer.Script) ![]const u8 {
+    var server = try FakeServer.listen(script);
+    defer server.stop();
+    try server.start();
+
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    @memcpy(host_z[0.."127.0.0.1".len], "127.0.0.1");
+    var user_z: [8]u8 = @splat(0);
+    user_z[0] = 'u';
+    var fp_z: [64]u8 = @splat(0);
+    @memcpy(fp_z[0.."SHA256:zzz".len], "SHA256:zzz");
+    var cfg: pump.MaruSshPumpConfig = .{
+        .host = &host_z,
+        .port = server.port,
+        .user = &user_z,
+        .secret = &secret,
+        .cols = 80,
+        .rows = 24,
+        .expect_fingerprint = &fp_z,
+    };
+    var hooks: pump.MaruSshPumpHooks = .{
+        .lock = null,
+        .unlock = null,
+        .screen = onScreen,
+        .take_response = onTakeResponse,
+        .state_changed = onState,
+        .ctx = null,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, &hooks));
+
+    // **스스로 끝나기를 기다린다.** 안 끝나면(멈춤) 그 자체가 결함이다 — 아래에서 잡는다.
+    var waited: usize = 0;
+    while (waited < 8000 and pump.maru_ssh_pump_is_running() != 0) : (waited += 20) sleepMs(20);
+    const stalled = pump.maru_ssh_pump_is_running() != 0;
+    pump.maru_ssh_pump_stop();
+    if (stalled and script != .silent) return error.PumpStalled;
+    return std.mem.span(pump.maru_ssh_pump_error());
+}
+
+test "붙자마자 끊는 상대: 버전 줄을 안 줬다고 말한다" {
+    // **"상대가 끊었다" 로 뭉뚱그리면 안 된다** — 그 말은 붙었다 끊긴 것과 구별이 안 된다.
+    try std.testing.expectEqualStrings("no_ssh_version", try runHostile(.close_immediately));
+}
+
+test "SSH 가 아닌 바이트를 쏟는 상대: 안 죽고, SSH 가 아니라고 말한다" {
+    // 캡티브 포털·프록시가 HTTP 응답을 던지는 자리다. 여기서 패닉하면 앱이 죽고, "끊겼다" 로만
+    // 말하면 사용자는 주소를 고쳐야 하는지 기다려야 하는지 모른다.
+    try std.testing.expectEqualStrings("no_ssh_version", try runHostile(.garbage));
+}
+
+test "버전 줄만 주고 끊는 상대: 그 뒤 단계에서 끊겼다고 말한다" {
+    // 버전 줄은 받았으니 SSH 는 맞다 — 그 다음(협상·인증)에서 끊겼다는 것이 사실이다.
+    try std.testing.expectEqualStrings("closed_before_ready", try runHostile(.version_then_close));
+}
+
+test "아무 말도 안 하는 상대: 붙들려도 멈추라면 멈춘다" {
+    // **블랙홀이 가장 나쁜 부류다** — 오류도 안 나고 끝나지도 않는다. 사용자가 취소할 수
+    // 있어야 하고(정지 표시), `stop` 이 곧 돌아와야 한다.
+    var server = try FakeServer.listen(.silent);
+    defer server.stop();
+    try server.start();
+
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    @memcpy(host_z[0.."127.0.0.1".len], "127.0.0.1");
+    var user_z: [8]u8 = @splat(0);
+    user_z[0] = 'u';
+    var fp_z: [8]u8 = @splat(0);
+    var cfg: pump.MaruSshPumpConfig = .{
+        .host = &host_z,
+        .port = server.port,
+        .user = &user_z,
+        .secret = &secret,
+        .cols = 80,
+        .rows = 24,
+        .expect_fingerprint = &fp_z,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, null));
+
+    // **조용한 것은 실패가 아니다.** 터미널의 정상 상태가 바로 이것이다 — 아무도 안 치고 원격도
+    // 조용한 시간이 대부분이다. 읽기 타임아웃(2초)을 실패로 보면 **유휴 세션이 2초마다 죽는다**.
+    sleepMs(5000); // 타임아웃 두 번을 넘긴다
+    try std.testing.expect(pump.maru_ssh_pump_is_running() != 0);
+    try std.testing.expectEqualStrings("", std.mem.span(pump.maru_ssh_pump_error()));
+
+    const before = monotonicMs();
+    pump.maru_ssh_pump_stop();
+    const elapsed = monotonicMs() - before;
+    // 읽기 타임아웃(2초)마다 정지 표시를 보므로 그 안에는 돌아와야 한다.
+    try std.testing.expect(elapsed < 4000);
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
+}
+
+// ── 동시성과 수명 ───────────────────────────────────────────────────────────
+//
+// **모바일은 이 자리를 계속 흔든다.** 화면을 껐다 켜고, 앱을 오갔다 하고, 회전하고, 그때마다
+// 세션이 서고 죽는다. 여기서 새는 것(교착·크래시·자원)은 오래 쓴 뒤에야 드러난다.
+
+/// 붙들고만 있는 상대에 붙는다. 반환값은 그 서버 — 끝나면 `stop()` 해야 한다.
+fn startAgainstSilent(server: *FakeServer, secret: *[64]u8, host_z: *[16]u8, user_z: *[8]u8, fp_z: *[8]u8) !void {
+    @memcpy(host_z[0.."127.0.0.1".len], "127.0.0.1");
+    user_z[0] = 'u';
+    var cfg: pump.MaruSshPumpConfig = .{
+        .host = host_z,
+        .port = server.port,
+        .user = user_z,
+        .secret = secret,
+        .cols = 80,
+        .rows = 24,
+        .expect_fingerprint = fp_z,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, null));
+}
+
+test "빠르게 서고 죽여도 새지 않는다" {
+    // **앱을 오가면 이 짓을 반복한다.** 스레드를 안 거두면 그만큼 쌓이고, 상태가 남으면 다음
+    // 세션이 옛 값을 본다. 여덟 번을 돌려 크래시·교착·거절이 없어야 한다(더 돌리면 테스트가 느려지기만 한다 — 새는 것은 첫 몇 번에 드러난다).
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    var user_z: [8]u8 = @splat(0);
+    var fp_z: [8]u8 = @splat(0);
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        var server = try FakeServer.listen(.silent);
+        defer server.stop();
+        try server.start();
+        try startAgainstSilent(&server, &secret, &host_z, &user_z, &fp_z);
+        // 붙는 도중에 죽인다 — 가장 흔한 자리다(사용자가 곧바로 앱을 내린다).
+        sleepMs(5);
+        pump.maru_ssh_pump_stop();
+        try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
+    }
+}
+
+test "도는 중에 다른 스레드가 써도 안 깨진다" {
+    // 키 입력과 회전은 **UI 스레드**에서 온다 — 펌프가 `feed` 중일 때도 온다. 세션 슬롯을
+    // 두 스레드가 만지므로, 자물쇠가 없으면 여기서 조용히 깨진다(증상은 한참 뒤에 나온다).
+    var server = try FakeServer.listen(.silent);
+    defer server.stop();
+    try server.start();
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    var user_z: [8]u8 = @splat(0);
+    var fp_z: [8]u8 = @splat(0);
+    try startAgainstSilent(&server, &secret, &host_z, &user_z, &fp_z);
+    defer pump.maru_ssh_pump_stop();
+
+    // 셸이 안 떴으므로 보낸 양은 0 이어야 한다(창이 없다) — **그래도 안 죽어야 한다.**
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try std.testing.expectEqual(@as(c_ulong, 0), pump.maru_ssh_pump_write("x", 1));
+        pump.maru_ssh_pump_resize(80 + @as(c_uint, @intCast(i % 40)), 24);
+    }
+    try std.testing.expect(pump.maru_ssh_pump_is_running() != 0);
+    try std.testing.expectEqualStrings("", std.mem.span(pump.maru_ssh_pump_error()));
+}
+
+test "안 돌 때 쓰거나 크기를 바꿔도 조용하다" {
+    // host 는 세션 없이도 이 함수를 부른다(화면이 먼저 뜨고 세션은 나중에 선다). 여기서
+    // 죽거나 옛 세션에 쓰면 안 된다.
+    pump.maru_ssh_pump_stop(); // 확실히 멈춘 상태로
+    try std.testing.expectEqual(@as(c_ulong, 0), pump.maru_ssh_pump_write("x", 1));
+    pump.maru_ssh_pump_resize(100, 40);
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
 }

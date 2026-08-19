@@ -58,7 +58,10 @@ pub const inventory = [_]Proof{
     // 저장소에 Windows 러너가 없어 Windows 갈래가 한 번도 안 돌고, 정규화를 지워도 CI 가 초록이었다
     // (리뷰 지적, 대조군으로 확인). count 는 여전히 108 이다 — 인자 하나가 늘고 호출이 `~For` 로
     // 바뀌었을 뿐 `@field` 반사 자리는 그대로다.
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "cbeea97783995a582c4c69fafa136d0aebf78745c6309969b0c0b1087ce240b1" },
+    // 설정 폼 필터가 **언어와 무관하게** 판정하도록 `Field` 5종이 해석된 `doc` 과 함께 `doc_key` 를 싣게
+    // 되며 움직인다(생성 지점 9곳이 `.doc_key = meta.doc` 을 함께 준다). count 는 108 그대로다 — 반사 접근이
+    // 늘거나 준 것이 아니라 **필드가 하나 늘었을 뿐**이다.
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "7ba20afc4dcce2524ef70fd34e23c51246ed7983b9af788fbbed0bed2d2ad0a3" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
@@ -633,7 +636,11 @@ pub const inventory = [_]Proof{
     // count는 3 그대로다 — `@field` 반사나 Client 구성은 안 건드린다.
     // 위 tui 제거를 main 에 리베이스하며 값이 다시 수렴했다(2026-08-19). 사이에 들어온 main 커밋들이
     // 같은 파일을 건드려 양쪽 digest 가 모두 낡았기 때문이고, count 와 사유는 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "6d600a60d6a2b2a1e9a1805ae3620428c4511bb59adb6ff463036324c16c77d0" },
+    // 필터 판정이 **모든 언어의 문장**을 보게 되며 움직인다. **여기서 count 가 3 → 4 로 는다** —
+    // `settingsRowMatches` 가 `Lang` enum 을 `inline for` 로 돌며 `@field` 로 각 변형을 꺼내기 때문이다.
+    // 반사가 는 것이 맞고, 그 반사가 이 계약의 핵심이다: 언어가 늘면 판정이 **자동으로** 그 언어까지 본다.
+    // 손으로 두 언어를 나열했다면 셋째 언어를 더하는 날 조용히 어긋난다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "a5442b89299b77e7e7486aa422757001740771e9d4e077c75b9d704076d07821" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

@@ -69,11 +69,21 @@ pub const ScrollItems = struct {
 fn commitViewCols(self: *const AppSession) u16 {
     const content = dock_ops.dockGeometry(self).tree_content;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    // **상자는 이제 목록 줄이다**(②b) — 스크롤 영역이 오른쪽에 스크롤바 자리를 늘 비워 두므로(gutter)
-    // 줄 폭은 content 폭이 아니다. 여기서 그걸 빼지 않으면 host가 세는 열 수가 view보다 많아져,
-    // 상자 높이가 실제 줄 수보다 적게 나오고 마지막 줄이 잘린다.
-    const gutter = m.scrollbar_width + m.scrollbar_inset_x * 2;
+    // **상자는 이제 목록 줄이다**(②b) — 스크롤 영역이 오른쪽에 스크롤바 자리를 비우면(gutter) 줄 폭은
+    // content 폭이 아니다. 여기서 그걸 빼지 않으면 host가 세는 열 수가 view보다 많아져, 상자 높이가
+    // 실제 줄 수보다 적게 나오고 마지막 줄이 잘린다.
+    //
+    // **그 자리는 넘칠 때만 생긴다**(2026-08-20). 조건을 여기서 다시 판정하면 같은 폭을 두 곳에서 재는
+    // 것이라, 마지막 프레임이 실제로 쓴 값(`scm_list_overflows`)을 읽는다 — 지금 화면에 있는 상자의
+    // 폭과 같은 사실이다.
+    const gutter = if (self.scm_list_overflows) m.scrollbar_width + m.scrollbar_inset_x * 2 else 0;
     return m.commitViewCols(@floatFromInt(content.w -| gutter), self.cell_width_px);
+}
+
+/// 테스트가 부르는 이름 — host가 **랩에 쓰는 열 수**다. 테스트는 이 값이 발행된 상자 rect에서 나온
+/// 열 수와 같은지 본다(그 둘이 갈리면 상자 높이와 실제 줄 수가 어긋난다).
+pub fn commitViewColsForTest(self: *const AppSession) u16 {
+    return commitViewCols(self);
 }
 
 /// 커밋 상자 한 줄의 높이. **`view`와 같은 폴백을 쓴다**(0 → 1000) — `@max(scale, 1)`로 두면 scale이
@@ -928,6 +938,14 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .items = window,
         .scroll_offset_px = projection.scroll.offset_y_px,
         .content_h_px = projection.scroll.content_height_px,
+        // 스크롤바가 **실제로 설 때만** 그 자리를 비운다(§3.5 — 빈 띠를 남기지 않는다). 창 높이를
+        // 아는 쪽이 여기라 판정도 여기서 한다.
+        .list_overflows = blk: {
+            // **여기서 한 번 정하고 세션에 남긴다** — 커밋 상자의 랩 계산이 같은 값을 읽어야 host가
+            // 세는 줄 수와 view가 그리는 줄 수가 안 갈린다.
+            self.scm_list_overflows = projection.scroll.max_offset_px > 0;
+            break :blk self.scm_list_overflows;
+        },
         .content_first_item_origin_y_px = projection.scroll.first_origin_y_px,
         .branch = projection.branch,
         .ahead = projection.ahead,

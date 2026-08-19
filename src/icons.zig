@@ -102,6 +102,8 @@ pub const Icon = enum(u21) {
     arrow_right = 0xF002A,
     /// standard: assets/icons/collapse-all.svg (0xF002B)
     collapse_all = 0xF002B,
+    /// standard: assets/icons/cloud-download.svg (0xF002C)
+    cloud_download = 0xF002C,
 };
 
 /// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
@@ -147,6 +149,7 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
         .arrow_left => fit == .standard,
         .arrow_right => fit == .standard,
         .collapse_all => fit == .standard,
+        .cloud_download => fit == .standard,
     };
 }
 
@@ -212,6 +215,7 @@ pub fn utf8(icon: Icon) []const u8 {
         .arrow_left => "\u{F0029}",
         .arrow_right => "\u{F002A}",
         .collapse_all => "\u{F002B}",
+        .cloud_download => "\u{F002C}",
     };
 }
 
@@ -277,6 +281,7 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0029 => .{ .icon = .arrow_left, .fit = .standard },
         0xF002A => .{ .icon = .arrow_right, .fit = .standard },
         0xF002B => .{ .icon = .collapse_all, .fit = .standard },
+        0xF002C => .{ .icon = .cloud_download, .fit = .standard },
         else => null,
     };
 }

@@ -494,9 +494,16 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .offset_px = props.scroll_offset_px,
             .content_h_px = props.content_h_px,
             .first_item_origin_y_px = props.content_first_item_origin_y_px,
-            // 스크롤바가 목록 위에 겹치지 않게 오른쪽에 남겨 두는 자리. 스크롤바가 나타나고 사라져도
-            // 행 폭이 reflow하지 않는다.
-            .gutter_px = @floatFromInt(m.scrollbar_width + m.scrollbar_inset_x * 2),
+            // 스크롤바가 목록 위에 겹치지 않게 오른쪽에 남겨 두는 자리 — **넘칠 때만** 준다
+            // (사용자 지적 2026-08-20: 스크롤바가 없는 화면에도 12px이 이유 없이 비어 보였다).
+            //
+            // 폭이 바뀌는 순간은 **목록이 창을 넘기 시작/멈추는 때**뿐이다. 그때는 어차피 행이 늘거나
+            // 준 때라 폭 변화가 따로 도드라지지 않는다 — 스크롤하는 동안에는 절대 안 바뀐다(그것이
+            // 원래 이 예약이 막으려던 것이다).
+            .gutter_px = if (props.list_overflows)
+                @floatFromInt(m.scrollbar_width + m.scrollbar_inset_x * 2)
+            else
+                0,
             .metrics = m.scrollbarMetrics(),
             .track = .{ .id = NodeIds.scroll_track, .action = scroll_track, .paint = .{ .background = .inset_bg } },
             .thumb = .{ .id = NodeIds.scroll_thumb, .action = scroll_thumb, .paint = .{ .background = .muted_fg } },
@@ -519,14 +526,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .fetch_remote,
         props.fetch.enabled and !props.fetch.running,
     ) catch return error.InsufficientActionBuffer;
-    const fetch_label = types.fetchLabel(props.fetch);
     // **카드다**(투명 버튼이 아니라). 행 동작 아이콘은 행 호버 밴드가 affordance를 대신하지만 **브랜치
     // 줄에는 그 밴드가 없다** — 투명하게 두면 커서만 바뀌고 눌린다는 신호가 화면에 하나도 없다. 카드로
     // 두면 호버·눌림 해석이 `paint_style.resolveCard`를 지나 면이 밝아진다(커밋 버튼과 같은 길).
     fetch_slot[0] = tree.card(.{
         .id = NodeIds.fetch,
         .style = .{
-            .width = .{ .px = @floatFromInt(m.fetchChipWidthPx(fetch_label, props.cell_width_px)) },
+            .width = .{ .px = @floatFromInt(m.fetchChipWidthPx()) },
             .height = .{ .px = @floatFromInt(m.action_extent) },
             // 칩과 `∨` 사이는 **좁게** 둔다 — 둘이 한 컨트롤 묶음으로 읽혀야 한다(목업의 `Fetch ∨`).
             .margin = .{ .right = @floatFromInt(m.gap) },
@@ -766,7 +772,9 @@ test "브랜치 줄의 원격 갱신 칩: 자리는 늘 있고 켜짐은 원격�
         try testing.expect(!entry.enabled);
     };
 
-    // 도는 중에도 거절한다(쓰기 하나씩과 같은 규율) — 그리고 **칩이 커진다**(문구가 길어지므로).
+    // 도는 중에도 거절한다(쓰기 하나씩과 같은 규율). 그리고 **칩 폭이 안 변한다**(2026-08-20): 글자
+    // 라벨이던 때는 `가져오는 중…`으로 넓어져 그 옆 `↑`/`↓`가 밀렸다 — 상태가 바뀌었다고 **다른 값의
+    // 자리가 움직이면** 사용자는 숫자를 다시 찾아 읽어야 한다.
     var storage_run: Storage = .{};
     const running = try buildTest(.{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
@@ -775,7 +783,7 @@ test "브랜치 줄의 원격 갱신 칩: 자리는 늘 있고 켜짐은 원격�
         .fetch = .{ .enabled = true, .running = true },
     }, &storage_run);
     const run_chip = running.tree.entries[running.tree.find(NodeIds.fetch) orelse return error.MissingFetch].rect;
-    try testing.expect(run_chip.width > chip.width);
+    try testing.expectEqual(chip.width, run_chip.width);
     for (running.actions) |entry| if (entry.intent == .fetch_remote) {
         try testing.expect(!entry.enabled);
     };
@@ -824,6 +832,37 @@ test "`∨`는 칩 오른쪽의 **자기 히트 사각형**이고 도는 중에�
         .open_remote_menu, .fetch_remote => try testing.expect(!entry.enabled),
         else => {},
     };
+}
+
+test "목록이 안 넘치면 스크롤바 자리를 안 비운다 (사용자 지적 2026-08-20)" {
+    // 늘 비워 두면 스크롤바가 없는 화면에도 이유를 말하지 않는 12px 띠가 남는다(머리 줄 동작 아이콘의
+    // 빈 띠와 같은 종류). 반대로 넘칠 때 안 비우면 스크롤바가 행 글자 위에 앉는다 — 둘 다 계약이다.
+    var storage_fit: Storage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "a.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
+    };
+    const fit = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+        .list_overflows = false,
+    }, &storage_fit);
+    const fit_row = fit.tree.entries[fit.tree.find(NodeIds.item(0)) orelse return error.MissingRow].rect;
+
+    var storage_over: Storage = .{};
+    const over = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+        .list_overflows = true,
+        .content_h_px = 4000,
+    }, &storage_over);
+    const over_row = over.tree.entries[over.tree.find(NodeIds.item(0)) orelse return error.MissingRow].rect;
+
+    const m = types.DockMetrics.resolve(1000);
+    const gutter: f32 = @floatFromInt(m.scrollbar_width + m.scrollbar_inset_x * 2);
+    // 넘칠 때만 행이 그만큼 좁다 — 그 차이가 곧 스크롤바가 앉을 자리다.
+    try testing.expectEqual(fit_row.width - gutter, over_row.width);
 }
 
 test "원격이 없어도 `∨`는 열린다 — 기준 고르기가 남아 있다 (§3.5)" {

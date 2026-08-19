@@ -9,7 +9,6 @@ const layout = @import("../../ui/layout.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const ui_icon = @import("../../ui/icon.zig");
 const typography = @import("../../ui/typography.zig");
-const display_width = @import("../../../display_width.zig"); // 칩 폭 = 표시 칸 수 × 셀 폭(§4.2와 같은 규칙)
 const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 
 /// 목록 그룹. `scm_view.Section`과 **같은 값 집합**이지만 component는 그쪽을 import하지 않는다 —
@@ -241,6 +240,13 @@ pub const Props = struct {
     /// 스크롤 상태(전체 높이·현재 offset·첫 항목의 local y).
     scroll_offset_px: u32 = 0,
     content_h_px: u32 = 0,
+    /// 목록이 창을 **넘치나**(스크롤바가 실제로 서나). 넘치지 않으면 오른쪽에 그 자리를 안 비운다 —
+    /// 늘 비워 두면 스크롤바가 없는 화면에도 이유를 말하지 않는 12px 띠가 남는다(사용자 지적 2026-08-20,
+    /// 머리 줄 동작 아이콘의 빈 띠와 같은 종류의 문제다).
+    ///
+    /// **판정은 host가 준다**: 창 높이를 아는 쪽이 그쪽이고(스크롤 투영을 이미 거기서 만든다),
+    /// component가 다시 재면 같은 값의 출처가 둘이 된다.
+    list_overflows: bool = false,
     content_first_item_origin_y_px: i32 = 0,
     /// 브랜치 줄. 없으면(저장소를 못 잡음) 빈 문자열이고 그 줄을 그리지 않는다.
     branch: []const u8 = "",
@@ -298,23 +304,6 @@ pub const FetchState = struct {
 
 /// 그 버튼에 적을 말. **`build`와 `view`가 같은 함수를 본다** — 폭은 build가 정하고 글자는 view가
 /// 그리므로, 문자열을 두 곳에서 고르면 "칩은 좁은데 글자는 긴" 프레임이 나온다.
-pub fn fetchLabel(state: FetchState) []const u8 {
-    return if (state.running) i18n.t(.scm_fetching) else i18n.t(.scm_fetch);
-}
-
-/// 그 말이 차지하는 **표시 칸 수**. 한글은 두 칸이라 바이트 길이로 세면 칩이 절반 폭이 된다.
-pub fn fetchLabelCols(text: []const u8) u32 {
-    var cols: u32 = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + n, text.len);
-        cols += @intCast(display_width.clusterCols(text, i, end));
-        i = end;
-    }
-    return cols;
-}
-
 /// 커밋 실행 상태. `slow`는 **문구일 뿐**이다 — 상한을 넘겨도 프로세스를 죽이지 않는다(쓰기 문서 §3:
 /// hook은 테스트 전체를 돌 수도 있고, 중간에 죽이면 index·`.git`이 어중간해진다).
 pub const CommitRun = enum { idle, running, slow };
@@ -516,9 +505,11 @@ pub const DockMetrics = struct {
         return self.gap * 2;
     }
 
-    pub fn fetchChipWidthPx(self: DockMetrics, label: []const u8, cell_width_px: u32) u32 {
-        const cols = fetchLabelCols(label);
-        return cols * @max(cell_width_px, 1) + self.chip_pad_x * 2;
+    /// 원격 갱신 칩의 폭. **글자가 아니라 아이콘**이라 라벨 길이와 무관하다(사용자 결정 2026-08-20:
+    /// `가져오기` 넉 자가 브랜치 줄 오른쪽을 계속 차지했다). 도는 중에도 폭이 안 변한다 — 라벨이었다면
+    /// `가져오는 중…`으로 넓어져 그 옆 `↑`/`↓`가 밀린다.
+    pub fn fetchChipWidthPx(self: DockMetrics) u32 {
+        return self.action_extent + self.chip_pad_x * 2;
     }
 
     pub fn scrollbarMetrics(self: DockMetrics) scroll_area.ScrollbarMetrics {

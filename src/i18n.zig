@@ -442,8 +442,6 @@ pub const Table = struct {
     editor_readonly: [:0]const u8,
     /// 행 수를 아직 다 못 셌다 — 그동안 스크롤바 길이가 실제보다 짧다(§2.1의 "없는 대로 그린다").
     editor_counting_rows: [:0]const u8,
-    scm_fetch: [:0]const u8,
-    scm_fetching: [:0]const u8,
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
@@ -1040,8 +1038,6 @@ pub const en: Table = .{
     .scm_commit_slow = "The commit is taking a while",
     .editor_readonly = "Read-only",
     .editor_counting_rows = "Counting rows…",
-    .scm_fetch = "Fetch",
-    .scm_fetching = "Fetching…",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
@@ -1545,8 +1541,6 @@ pub const ko: Table = .{
     .scm_commit_slow = "커밋이 오래 걸리는 중",
     .editor_readonly = "읽기 전용",
     .editor_counting_rows = "행 수 세는 중…",
-    .scm_fetch = "가져오기",
-    .scm_fetching = "가져오는 중…",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",

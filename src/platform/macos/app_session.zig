@@ -3972,6 +3972,13 @@ pub const AppSession = struct {
     /// 반영되지 않은 채 조용히 사라진다 — "골랐는데 안 바뀐다"가 이 기능의 가장 나쁜 실패다.
     /// 낙관하지 않고 **사실로 남겨** 다음 tick이 다시 건다(제출에 성공한 자리에서만 내린다).
     scm_base_reread_pending: bool = false,
+    /// 마지막으로 만든 프레임에서 **목록이 창을 넘쳤나**(그래서 오른쪽에 스크롤바 자리를 비웠나).
+    ///
+    /// 커밋 상자의 랩 계산이 이 값을 쓴다: 상자는 목록 줄이라 그 자리만큼 좁아지는데, host가 그 조건을
+    /// 따로 판정하면 **같은 폭을 두 곳에서 재는 것**이 되고 어긋나는 순간 host가 2줄이라 믿는 상자에
+    /// view가 3줄을 그린다(마지막 줄이 잘리고 caret이 안 보이는 줄에 선다). 값은 props를 만들 때 서고,
+    /// 그 props가 곧 화면에 나간 프레임이라 **지금 그려진 상자의 폭과 같은 사실**이다.
+    scm_list_overflows: bool = false,
     /// 낙관적으로 옮겨 놓은 행(§7). **경로는 세션 allocator 소유**다 — 모델 버퍼는 프레임마다 다시 만들어져
     /// 그 슬라이스를 들고 있으면 다음 프레임에 남의 글자를 가리킨다.
     ///
@@ -57708,11 +57715,19 @@ test "소스 컨트롤: 커밋 상자 폭은 도크 content 폭과 같다(랩 �
     const content = dock_ops.dockGeometry(session).tree_content;
     const rect = scm_dock_ops.commitBoxRectAt(session, 0) orelse return error.MissingCommitBox;
     try std.testing.expectEqual(@as(f32, 0), rect.x);
-    // **상자는 목록 줄이다**(②b) — 스크롤 영역이 오른쪽에 스크롤바 자리를 늘 비워 두므로 그만큼 좁다.
-    // 그 폭이 곧 랩의 입력이고, host가 같은 값을 써야 상자 높이와 실제 줄 수가 갈리지 않는다.
+    // **공식이 아니라 계약을 단언한다**(2026-08-20). 상자는 목록 줄이라 스크롤바 자리만큼 좁아지는데,
+    // 그 자리는 이제 **넘칠 때만** 생긴다 — 폭을 여기서 다시 계산하면 이 테스트가 자리 규칙의 사본이
+    // 되고, 규칙이 바뀔 때 함께 낡는다(실제로 그렇게 낡아 한 번 빨갛게 났다).
+    //
+    // 지켜야 하는 것은 하나다: **발행된 상자 폭에서 나온 열 수 = host가 랩에 쓰는 열 수.** 그 둘이
+    // 갈리면 host가 2줄이라 믿는 상자에 view가 3줄을 그리고 caret이 안 보이는 줄에 선다.
     const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
-    const gutter = m.scrollbar_width + m.scrollbar_inset_x * 2;
-    try std.testing.expectEqual(@as(f32, @floatFromInt(content.w - gutter)), rect.width);
+    try std.testing.expect(rect.width > 0);
+    try std.testing.expect(rect.width <= @as(f32, @floatFromInt(content.w)));
+    try std.testing.expectEqual(
+        m.commitViewCols(rect.width, session.cell_width_px),
+        scm_dock_ops.commitViewColsForTest(session),
+    );
 }
 
 test "소스 컨트롤: 붙여넣기는 개행·탭을 남기고 CR·제어문자·손상 바이트를 버린다" {

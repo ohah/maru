@@ -49,6 +49,12 @@ fn repoFailedLabel() []const u8 {
 const worktree_icon = icons.utf8Fit(.git_branch, .standard);
 /// 머리 줄의 동작 아이콘(②c). **이미 있는 자산을 쓴다** — 커밋 ✓는 그룹 안 버튼과 겹쳐 넣지 않는다.
 const refresh_icon = icons.utf8Fit(.reset, .standard);
+/// 원격 갱신(fetch). ⟳를 안 쓰는 이유는 그것이 같은 패널에서 **로컬 다시 읽기**를 뜻하기 때문이다.
+const fetch_icon = icons.utf8Fit(.cloud_download, .standard);
+/// 그 갱신이 **도는 중**. 글자 라벨을 뗐으므로 이 상태를 말할 것이 색밖에 없는데, 꺼진 칩도 같은 회색이라
+/// "돌고 있다"와 "원격이 없다"가 한 그림이 된다 — 눌렀는데 표시가 없으면 사용자는 다시 누른다(그 두 번째
+/// 누름은 조용히 거부된다). 그래서 **글리프를 바꾼다**.
+const fetching_icon = icons.utf8Fit(.hourglass, .standard);
 const stage_all_icon = icons.utf8Fit(.plus, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
@@ -81,8 +87,9 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     // 브랜치 줄 — 이름·아이콘 + `↑ N`/`↓ N` 둘(화살표 3바이트 + 공백 + 자릿수).
     bytes += props.branch.len + icon_bytes * 2 + (count_digits + 5) * 2 + unpushed_dot.len;
-    // 원격 갱신 칩 — **긴 쪽으로 잡는다**(도는 중 문구가 더 길다). 모자라면 도크가 통째로 빈다.
-    bytes += @max(i18n.t(.scm_fetch).len, i18n.t(.scm_fetching).len);
+    // 원격 갱신 칩 — 이제 **글자가 아니라 아이콘**이다(2026-08-20). 상태에 따라 글리프가 갈리므로
+    // 둘 중 긴 쪽으로 잡는다. 모자라면 op이 하나 빠지는 게 아니라 도크가 통째로 빈다.
+    bytes += @max(fetch_icon.len, fetching_icon.len);
 
     for (props.items) |item| switch (item) {
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
@@ -341,7 +348,6 @@ pub fn view(
             }
             // ── 원격 갱신 칩(P6). **글자는 tree가 준 rect 안에 놓는다** — 여기서 자기 산수로 자리를
             // 잡으면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(탭 칸에서 이미 겪은 갈림).
-            const fetch_label = types.fetchLabel(props.fetch);
             var fetch_right: u32 = m.inset_x;
             // `∨`(P6b)는 칩 오른쪽이다 — 글리프는 그룹 접힘과 같은 자산을 쓴다(같은 뜻: "여기 더 있다").
             if (frame.tree.find(build.NodeIds.remote_menu)) |menu_index| {
@@ -368,7 +374,13 @@ pub fn view(
                 // **꺼진 것이 더 밝은** 뒤집힌 화면이 나왔다. `accent_bar`는 테마의 시그니처 색이고
                 // 탭 언더바·개수 배지가 이미 그 색이라, 같은 화면 안에서 "누를 수 있는 것"으로 읽힌다.
                 const role: tokens.ColorRole = if (props.fetch.enabled and !props.fetch.running) .accent_bar else .muted_fg;
-                try writer.centered(chip, fetch_label, role, .control);
+                // **글자가 아니라 아이콘이다**(사용자 결정 2026-08-20). `가져오기` 넉 자가 브랜치 줄
+                // 오른쪽을 계속 차지했고, 도는 중에는 `가져오는 중…`으로 더 넓어져 옆의 `↑`/`↓`를 밀었다.
+                // 글리프는 `reset`(⟳)이 아니라 **구름↓**이다: ⟳는 같은 패널에서 이미 "로컬 다시 읽기"
+                // (머리 줄 새로고침)를 뜻하고, `↓` 화살표는 바로 옆 `↓ N`(behind 개수)과 겹친다.
+                const glyph_x = (chip.rect.width - @as(f32, @floatFromInt(m.icon_extent))) / 2;
+                const glyph = if (props.fetch.running) fetching_icon else fetch_icon;
+                try writer.icon(chip, @max(glyph_x, 0), glyph, m.icon_extent, role);
                 // ahead/behind는 그 **묶음 전체**(칩 + `∨`)를 비켜 앉는다. 칩 폭만 빼면 `∨` 위에 겹친다.
                 const group_left = chip.rect.x;
                 const row_right = rect.rect.x + rect.rect.width;
@@ -1782,7 +1794,7 @@ test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 
     });
     const draws = try viewBudgeted(&storage, props, frame, .{});
 
-    const chip = findText(draws, i18n.t(.scm_fetch)) orelse return error.MissingFetchLabel;
+    const chip = findExactText(draws, fetch_icon) orelse return error.MissingFetchLabel;
     // **켜진 칩은 강조색이다** — 꺼진 것과 같은 회색이면 "누를 수 있다"가 화면에 하나도 안 남는다
     // (브랜치 줄에는 행 호버 밴드가 없어서 색이 유일한 신호다).
     try testing.expectEqual(tokens.ColorRole.accent_bar, chip.role);
@@ -1821,18 +1833,19 @@ test "도는 중에는 칩이 그 사실을 말한다 (P6)" {
         .actions = &storage.actions,
     });
     const draws = try viewBudgeted(&storage, props, frame, .{});
-    // **정확히 그 문구다.** 부분 일치로 보면 영어에서 `Fetching…`이 `Fetch`를 포함해 둘 다 통과한다.
+    // **글리프가 갈린다.** 색만으로는 못 가른다 — 꺼진 칩(원격 없음)도 같은 회색이라, 도는 중과
+    // 못 누르는 것이 한 그림이 된다.
     var seen_running = false;
     var seen_idle = false;
     for (draws.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, i18n.t(.scm_fetching))) seen_running = true;
-            if (std.mem.eql(u8, run.text, i18n.t(.scm_fetch))) seen_idle = true;
+            if (std.mem.eql(u8, run.text, fetching_icon)) seen_running = true;
+            if (std.mem.eql(u8, run.text, fetch_icon)) seen_idle = true;
         },
         else => {},
     };
     try testing.expect(seen_running);
-    try testing.expect(!seen_idle); // 두 문구가 함께 뜨지 않는다
+    try testing.expect(!seen_idle); // 두 글리프가 함께 뜨지 않는다
 }
 
 test "ref가 여럿이면 `+N`으로 접고, 좁으면 제목이 남는다 (§3.5.3)" {
@@ -2005,11 +2018,12 @@ test "파일 행에 종류 아이콘이 붙는다(탐색기와 같은 분류기)
         },
         else => {},
     };
-    // 파일 종류 + 브랜치 줄 아이콘 + 브랜치 줄 `∨`(P6b) = 셋. 그룹 헤더가 없는 fixture이고, **커밋 버튼의
-    // `∨`는 이제 목록 항목**이라 여기 없다(②b에서 커밋 줄이 저장소 그룹 안으로 내려갔다).
+    // 파일 종류 + 브랜치 줄 아이콘 + 브랜치 줄 `∨`(P6b) + **원격 갱신 칩**(2026-08-20에 글자에서
+    // 아이콘이 됐다) = 넷. 그룹 헤더가 없는 fixture이고, **커밋 버튼의 `∨`는 이제 목록 항목**이라
+    // 여기 없다(②b에서 커밋 줄이 저장소 그룹 안으로 내려갔다).
     //
-    // **`∨`가 아이콘 경로로 세어져야 한다**: 글자 경로로 그리면 폰트 폴백이 작은 네모를 낸다(실측).
-    try testing.expectEqual(@as(usize, 3), icons_seen);
+    // **`∨`와 칩이 아이콘 경로로 세어져야 한다**: 글자 경로로 그리면 폰트 폴백이 작은 네모를 낸다(실측).
+    try testing.expectEqual(@as(usize, 4), icons_seen);
 }
 
 test "파일 이름은 아이콘 슬롯을 침범하지 않는다" {

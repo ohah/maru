@@ -127,6 +127,11 @@ ICONS = [
     # 읽히고(방향이 반대다), `sidebar_collapse`는 사이드바를 접는 다른 동작이다. 마주 보는 chevron 둘이
     # "모은다"를 그려 접기를 가리킨다. Maru 자작(획 굵기는 arrow_* 와 같은 결로 맞췄다).
     ("collapse_all", FIT_STANDARD, 0xF002B, "assets/icons/collapse-all.svg"),
+    # 소스 컨트롤의 **원격에서 받아오기**(fetch). `reset`(⟳)을 쓰지 않는 이유는 그 글리프가 같은 패널에서
+    # 이미 **로컬 다시 읽기**(저장소 머리 줄 새로고침)를 뜻하기 때문이다 — 같은 그림이 두 동작이면 어느
+    # 쪽이 네트워크를 타는지 화면으로 알 수 없다. `arrow_down`도 안 쓴다: 브랜치 줄에 이미 `↓ N`(behind
+    # 개수)이 있어 화살표가 두 뜻이 된다. 구름 + 아래 화살표가 "원격에서 내려받는다"를 그린다.
+    ("cloud_download", FIT_STANDARD, 0xF002C, "assets/icons/cloud-download.svg"),
 ]
 
 

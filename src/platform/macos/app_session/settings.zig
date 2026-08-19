@@ -305,11 +305,34 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
     self.chrome_host.settings.setFieldCount(cf.total());
 }
 
-/// 세팅 검색 매칭 — 쿼리가 비었으면 항상 true, 아니면 라벨(보이는 텍스트) 또는 키에 부분일치(ASCII 대소문자 무시;
-/// 한글은 대소문자가 없어 그대로 부분일치). 필터의 단일 출처 — currentSectionFields가 모든 행 종류에 같은 규칙 적용.
-pub fn settingsRowMatches(label: []const u8, key: []const u8, query: []const u8) bool {
+/// 세팅 검색 매칭 — 쿼리가 비었으면 항상 true, 아니면 **모든 언어의** 문서 문장 또는 키에 부분일치
+/// (ASCII 대소문자 무시; 한글은 대소문자가 없어 그대로 부분일치). 필터의 단일 출처 —
+/// `currentSectionFields` 가 모든 행 종류에 같은 규칙을 적용한다.
+///
+/// **판정이 현재 언어를 안 본다는 것이 이 함수의 계약이다.** 예전에는 현재 언어로 푼 문자열 하나만 봤고,
+/// 그래서 통과 행 집합과 순서가 언어를 탔다 — `selected` 는 인덱스일 뿐이라 언어가 바뀌는 순간 다른 설정을
+/// 가리키게 되고, 확정이 **사용자가 열지도 않은 키**에 값을 썼다. 실측으로 542개 쿼리 중 386개가 두 언어에서
+/// 서로 다른 집합을 냈다. 전환 지점마다 선택을 다시 앉히는 방식으로도 막아 봤지만, 다른 창이 언어를 바꾼
+/// 경우처럼 **이 창이 아무 코드도 안 도는 경로**가 남았다(i18n 계약 §5.2). 판정에서 언어를 빼면 그 경로가
+/// 통째로 사라진다 — 흔들릴 것이 없으므로 붙잡을 것도 없다.
+///
+/// 대가는 **화면에 안 보이는 문장으로 행이 통과하는 것**이다(영어 UI 에서 `폰트` 로 걸러도 그 행이 남는다).
+/// 그 성질 자체는 새롭지 않다 — 키 매칭이 이미 그랬다. 실측으로 통과 행이 36% 늘고 짧은 쿼리에 몰린다.
+/// 그것을 감수하는 이유는, "결과가 조금 많다" 와 "선택이 조용히 다른 키로 미끄러진다" 가 같은 무게가 아니기
+/// 때문이다. 부수 효과로 **영어 이름으로도 찾을 수 있다**(한국어 화면에서 `language` 로 `ui.language` 를).
+pub fn settingsRowMatches(doc_key: ?maru.i18n.Key, label: []const u8, key: []const u8, query: []const u8) bool {
     if (query.len == 0) return true;
-    return std.ascii.indexOfIgnoreCase(label, query) != null or std.ascii.indexOfIgnoreCase(key, query) != null;
+    if (std.ascii.indexOfIgnoreCase(key, query) != null) return true;
+    // 키가 있으면 **모든 언어**를 본다. 없으면(환경변수 이름·chord 표기처럼 번역 대상이 아닌 라벨) 그 라벨
+    // 하나만 보는데, 그런 라벨은 애초에 언어를 안 타므로 판정도 언어 독립이다.
+    if (doc_key) |dk| {
+        inline for (@typeInfo(maru.i18n.Lang).@"enum".fields) |lf| {
+            const sentence = maru.i18n.tIn(@field(maru.i18n.Lang, lf.name), dk);
+            if (std.ascii.indexOfIgnoreCase(sentence, query) != null) return true;
+        }
+        return false;
+    }
+    return std.ascii.indexOfIgnoreCase(label, query) != null;
 }
 
 /// 언어 드롭다운의 표시 목록. **`Preference` 선언 순서 그대로** 만든다 — 팝업 선택은 인덱스로
@@ -1712,6 +1735,10 @@ pub fn applyAppearancePreservingZoom(self: *AppSession, new_appearance: config_m
 /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
 /// resetAllSettings(통합 리셋)와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
 pub fn reloadConfig(self: *AppSession) void {
+    // **행 집합이 바뀌기 전에** 지금 선택된 행의 키를 떠 둔다(아래 `restoreSelectedRowKey` 가 쓴다).
+    var anchored_buf: [128]u8 = undefined;
+    const anchored = captureSelectedRowKey(self, &anchored_buf);
+
     var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
     // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
     // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
@@ -1776,6 +1803,36 @@ pub fn reloadConfig(self: *AppSession) void {
     self.global_hotkeys_dirty = true;
     // follow-system이 켜져 있으면(파일 새 값) 위에서 깐 파일 테마 위에 현재 시스템 외관 프리셋을 다시 덮는다(F2-9).
     self.applyFollowSystemTheme();
+    // **설정 폼이 열린 채로 이 경로가 돈다.** reload 는 모달을 닫지 않으므로(닫는 것은 confirm/notice 경로뿐),
+    // 파일이 `env.*`·`macro.*` 를 더하거나 지웠으면 통과 행 집합이 그 자리에서 바뀐다. `selected` 는 인덱스라
+    // 그 자리에 다른 설정이 들어와도 모르고, `count` 도 옛 값에 멈춰 ↑↓ 가 갇힌다.
+    //
+    // 이것은 **언어와 무관한 축**이라 필터를 언어 독립으로 만든 것으로는 안 닫힌다 — 행 집합을 바꾸는 것이
+    // 언어가 아니라 파일이기 때문이다. 그래서 키로 다시 앉히는 그 기계를 여기에 붙인다.
+    restoreSelectedRowKey(self, anchored);
+}
+
+/// 행 집합이 바뀌기 **전에** 지금 선택된 행의 키를 떠 둔다. `null` 이면 앉힐 자리가 없다는 뜻이다.
+///
+/// **바뀐 뒤에 뜨면 늦다** — 그때 `selected` 가 가리키는 것은 이미 다른 행이라, 그 키로 앉히면 미끄러진
+/// 자리를 그대로 고정한다. 같은 실수를 다중 창 경로에서 한 번 했고, 그때는 애초에 뜰 기회가 없어 못
+/// 고쳤다. 여기서는 기회가 있으므로 순서만 지키면 된다.
+fn captureSelectedRowKey(self: *AppSession, buf: []u8) ?[]const u8 {
+    if (!self.chrome_host.settings.open) return null;
+    return selectedSettingsKey(self, buf);
+}
+
+/// 행 집합이 바뀐 뒤, 앞서 떠 둔 키로 선택을 다시 앉히고 행 수를 다시 알린다.
+///
+/// 그 행이 사라졌으면(파일이 지운 `env.FOO`) 앉힐 자리가 없으므로 행 수만 갱신한다 — 그때 컴포넌트가
+/// `selected` 를 범위 안으로 clamp 한다.
+fn restoreSelectedRowKey(self: *AppSession, anchored: ?[]const u8) void {
+    if (!self.chrome_host.settings.open) return;
+    if (anchored) |key| {
+        reanchorSelectedByKey(self, key);
+    } else {
+        refreshSettingsFieldCount(self);
+    }
 }
 
 /// **통합 리셋** — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(ABI `reset_defaults`)와 커맨드
@@ -1978,49 +2035,17 @@ pub fn reapplyScrollback(self: *AppSession) void {
 /// `ui.language` 를 현재 UI 언어에 반영한다.
 ///
 /// **재시작을 요구하지 않는다**(i18n 계약 §5.1) — 번역 대상이 전부 chrome 이 매 프레임 그리는 표면이라
-/// 전역만 바꾸면 다음 프레임에 반영된다. 그래서 여기서 하는 일은 전역 갱신과 **선택 재고정**뿐이고,
-/// 다시 그리라는 신호는 이 함수를 부르는 경로들이 이미 세운다.
+/// 전역만 바꾸면 다음 프레임에 반영된다. 그래서 여기서 하는 일은 전역 갱신뿐이고, 다시 그리라는 신호는
+/// 이 함수를 부르는 경로들이 이미 세운다.
 ///
-/// 부르는 경로는 넷이다 — 드롭다운 라이브 프리뷰 · ↺리셋 · 파일 reload · 전체 초기화. 넷 다 UI
-/// 스레드이고, 쓰기가 UI 스레드에서만 일어나는 것이 §5.2 의 소유 규칙이다.
+/// **선택을 다시 앉히지 않는다 — 앉힐 필요가 없다.** 예전에는 여기서 선택 행의 키를 붙잡았다가 언어를
+/// 바꾼 뒤 다시 앉혔다. 설정 폼 필터가 현재 언어의 문장으로 판정해서, 언어가 바뀌면 통과 행 집합과 순서가
+/// 함께 바뀌었기 때문이다. 그 방식은 "언어가 바뀌는 지점" 을 하나씩 세는 것이라 **네 번 연속으로 구멍을
+/// 냈고**, 마지막에는 다른 창이 언어를 바꾼 경우처럼 **이 창이 아무 코드도 안 도는 경로**가 남았다.
+/// 지금은 `settingsRowMatches` 가 언어를 안 보므로(그 함수의 계약) 행 집합도 순서도 안 흔들린다 —
+/// 흔들릴 것이 없으므로 붙잡을 것도 없다. 그 성질은 전칭 테스트가 지킨다.
 pub fn reapplyUiLanguage(self: *AppSession) void {
-    // 설정 폼이 열려 있으면 **바꾸기 전에** 지금 선택된 행의 키를 붙잡는다. 언어가 바뀌면 폼 필터의
-    // 매칭 키(`meta.doc`)가 통째로 다른 언어가 되어 통과 행 집합과 순서가 함께 바뀌는데, `selected` 는
-    // 인덱스라 그 자리에 다른 설정이 들어와도 모른다 — 확정이 **사용자가 열지도 않은 키**에 값을 쓴다.
-    //
-    // 재고정을 이 함수 안에 두는 이유는 언어를 바꾸는 경로가 넷이기 때문이다 — 드롭다운 프리뷰·↺리셋·
-    // 파일 reload(다른 창이나 편집기가 바꿔도 온다)·전체 초기화. 호출부마다 붙이면 그중 하나를 빠뜨리고,
-    // 실제로 앞선 판에서 뒤 둘을 빠뜨렸다. 언어를 바꾸는 **단일 지점**이 여기이므로 여기서 한다.
-    //
-    // 붙잡는 것은 `ui.language` 가 아니라 **지금 선택된 그 키**다. 어느 행에 서 있든 라벨이 다 바뀌므로
-    // 미끄러짐은 그 행에서도 똑같이 난다.
-    //
-    // **언어가 안 바뀌면 여기서 곧장 나간다 — 아무것도 만지지 않는다.** 이 함수는 config 가 바뀔 때마다
-    // (`reapplyLoadedConfig`) 불리므로, 행 목록을 만드는 것만으로도 부작용이 생긴다. `currentSectionFields`
-    // 는 첫 문장에서 `keep_alive_after_quit` 를 앱 전역으로 되동기화하는데, keep-alive 토글은 ①config 에
-    // 새 값을 쓰고 ②`reapplyLoadedConfig` 를 부르고 ③전역을 세우는 순서라 ②가 ①을 **옛 전역으로 되돌린다**.
-    // 판정을 먼저 하면 그 경로가 아예 안 들어온다(언어를 안 바꾸는 토글이므로).
-    const next_lang = maru.i18n.resolve(self.loaded_config.config.ui_language, maru.i18n.osLocale());
-    if (next_lang == maru.i18n.lang()) return;
-
-    // 키를 **복사**해 둔다. `env.FOO`·`macro.<chord>` 행의 키는 `currentSectionFields` 가 arena 에 만든
-    // 것이라(정적 리터럴이 아니다) 그 arena 가 죽으면 dangling 이다 — 그 슬라이스로 비교하면 조용히
-    // 어긋난다. 스키마 키의 최대 길이보다 넉넉하게 잡고, 넘치면 재고정을 포기한다(잘린 키로 남의 행을
-    // 찾는 것보다 안 움직이는 편이 낫다).
-    var anchored_buf: [128]u8 = undefined;
-    const anchored: ?[]const u8 = if (self.chrome_host.settings.open)
-        selectedSettingsKey(self, &anchored_buf)
-    else
-        null;
-
-    maru.i18n.setLang(next_lang);
-    if (anchored) |key| {
-        reanchorSelectedByKey(self, key);
-    } else if (self.chrome_host.settings.open) {
-        // 앵커를 못 잡았어도 **행 수는 이미 달라졌다** — 통과 집합이 언어를 타기 때문이다. 이걸 안 하면
-        // `moveSelection` 이 옛 셈으로 wrap 해 ↑↓ 가 갇힌다. 앵커 유무와 무관하게 필요한 갱신이다.
-        refreshSettingsFieldCount(self);
-    }
+    maru.i18n.applyPreference(self.loaded_config.config.ui_language);
 }
 
 /// 지금 선택된 행의 config 키를 `buf` 에 **복사해서** 돌려준다.
@@ -2560,40 +2585,42 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
     var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
     try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
+    // 합성 행도 `doc_key` 를 함께 싣는다. 이 행들의 필터 판정은 **그 자리에서** 키를 직접 넘기므로 지금은
+    // 안 실어도 무해하지만, 나중에 누군가 `doc_key` 로 다시 거르면 그 행에서만 조용히 언어 의존이 되살아난다.
     // 검색 쿼리(폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러 인덱싱이
     // 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과. **쿼리가 있으면(cross) 섹션 게이트를 무시**해 전 섹션의
     // 매칭 행을 보여준다(교차 섹션 검색 — 설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만.
     const q = self.chrome_host.settings.searchQuery();
     const cross = q.len > 0;
     var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-    for (bools_all.items) |b| if ((cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
+    for (bools_all.items) |b| if ((cross or b.section == sel_sec) and settingsRowMatches(b.doc_key, b.doc, b.key, q)) try bools.append(arena, b);
     var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-    for (nums_all.items) |n| if ((cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
+    for (nums_all.items) |n| if ((cross or n.section == sel_sec) and settingsRowMatches(n.doc_key, n.doc, n.key, q)) try nums.append(arena, n);
     var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-    for (enums_all.items) |e| if ((cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
+    for (enums_all.items) |e| if ((cross or e.section == sel_sec) and settingsRowMatches(e.doc_key, e.doc, e.key, q)) try enums.append(arena, e);
     // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
     // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
     // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
-    if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches(maru.i18n.t(.set_theme_preset), "theme.preset", q)) {
+    if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches(.set_theme_preset, "", "theme.preset", q)) {
         // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
         // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
         const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else maru.i18n.t(.set_custom);
-        try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = maru.i18n.t(.set_theme_preset), .current = cur_name, .section = .theme });
+        try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = maru.i18n.t(.set_theme_preset), .doc_key = .set_theme_preset, .current = cur_name, .section = .theme });
     }
     var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-    for (texts_all.items) |t| if ((cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
+    for (texts_all.items) |t| if ((cross or t.section == sel_sec) and settingsRowMatches(t.doc_key, t.doc, t.key, q)) try texts.append(arena, t);
     // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
     // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
     if (cross or sel_sec == .terminal) {
-        if (settingsRowMatches(maru.i18n.t(.set_shell_args_ph), "shell.args", q))
-            try texts.append(arena, .{ .key = "shell.args", .doc = maru.i18n.t(.set_shell_args_ph), .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
+        if (settingsRowMatches(.set_shell_args_ph, "", "shell.args", q))
+            try texts.append(arena, .{ .key = "shell.args", .doc = maru.i18n.t(.set_shell_args_ph), .doc_key = .set_shell_args_ph, .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
         for (self.loaded_config.config.env) |entry| {
             const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
-            if (settingsRowMatches(entry[0..eq], "env", q))
+            if (settingsRowMatches(null, entry[0..eq], "env", q))
                 try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
         }
-        if (settingsRowMatches(maru.i18n.t(.set_env_ph), "env", q))
-            try texts.append(arena, .{ .key = "env.", .doc = maru.i18n.t(.set_env_ph), .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
+        if (settingsRowMatches(.set_env_ph, "", "env", q))
+            try texts.append(arena, .{ .key = "env.", .doc = maru.i18n.t(.set_env_ph), .doc_key = .set_env_ph, .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
     }
     // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
     // 선례). 라벨=chord 표시(formatChord), 값=rhs config 문자열(macroRhsString, 예 "text:hello"). 키="macro.<chord
@@ -2602,36 +2629,36 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
         for (self.loaded_config.terminal_bindings) |b| {
             var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
             const disp = command_catalog.formatChord(b.chord, &disp_buf);
-            if (settingsRowMatches(disp, "macro", q)) {
+            if (settingsRowMatches(null, disp, "macro", q)) {
                 var chord_buf: [64]u8 = undefined; // 매치된 행만 chord config 표기 계산(필터된 행 낭비 제거)
                 const chord_cfg = b.chord.toConfigString(&chord_buf);
                 try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
             }
         }
-        if (settingsRowMatches(maru.i18n.t(.set_macro_ph), "macro", q))
-            try texts.append(arena, .{ .key = "macro.", .doc = maru.i18n.t(.set_macro_ph), .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
+        if (settingsRowMatches(.set_macro_ph, "", "macro", q))
+            try texts.append(arena, .{ .key = "macro.", .doc = maru.i18n.t(.set_macro_ph), .doc_key = .set_macro_ph, .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
     }
     // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
     // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
     if (cross or sel_sec == .workspace) {
-        if (settingsRowMatches(maru.i18n.t(.set_cwd_ph), "workspace.root", q))
-            try texts.append(arena, .{ .key = "workspace.root", .doc = maru.i18n.t(.set_cwd_ph), .value = self.loaded_config.config.workspace.root, .section = .workspace });
+        if (settingsRowMatches(.set_cwd_ph, "", "workspace.root", q))
+            try texts.append(arena, .{ .key = "workspace.root", .doc = maru.i18n.t(.set_cwd_ph), .doc_key = .set_cwd_ph, .value = self.loaded_config.config.workspace.root, .section = .workspace });
     }
     var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-    for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
+    for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc_key, c.doc, c.key, q)) try colors.append(arena, c);
     // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
     // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
     // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
     var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
     if (cross or sel_sec == .input) {
-        for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
+        for (command_catalog.entries) |entry| if (settingsRowMatches(null, entry.title, entry.key, q)) try keybinds.append(arena, entry);
     }
-    const palette_on = (cross or sel_sec == .theme) and settingsRowMatches(maru.i18n.t(.set_ansi_palette), "theme.palette", q);
+    const palette_on = (cross or sel_sec == .theme) and settingsRowMatches(.set_ansi_palette, "", "theme.palette", q);
     // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
     // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
     var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
     if (cross or sel_sec == .global_hotkey) {
-        for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title(), entry.key, q)) try globals.append(arena, entry);
+        for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title_key, "", entry.key, q)) try globals.append(arena, entry);
     }
     return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
 }
@@ -3081,80 +3108,6 @@ fn settingsKeyAt(self: *AppSession, allocator: std.mem.Allocator, i: usize) !?[]
     return try allocator.dupe(u8, key);
 }
 
-// 필터가 걸린 채로 언어를 라이브 프리뷰하면 **선택이 다른 키로 미끄러지던** 것을 막는다.
-//
-// 폼 필터는 `meta.doc` 로 검색하는데 그 `doc` 이 언어를 탄다. 그래서 언어를 바꾸는 순간 통과 행 집합과
-// 순서가 같이 바뀌고, `selected` 는 인덱스라 그대로 남는다 — 그 자리에 다른 설정이 들어와 있으면
-// 사용자가 열지도 않은 키에 값이 써진다. 크래시가 아니라 **조용한 오기록**이라 다른 테스트가 못 잡는다.
-test "언어를 바꿔도 선택은 같은 설정에 남는다 (검색 필터가 켜진 채로)" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const lang_before = maru.i18n.lang();
-    defer maru.i18n.setLang(lang_before);
-
-    session.chrome_host.settings.show();
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
-
-    // 두 언어 모두에서 여러 행을 통과시키는 쿼리 — 통과 집합이 언어마다 달라 순서가 밀린다.
-    session.chrome_host.settings.startSearch();
-    session.chrome_host.settings.appendSearchCp('o');
-
-    const before = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-    session.chrome_host.settings.selected = before;
-
-    // 드롭다운에서 `en` 을 고른 것과 같은 경로 — 프리뷰라 persist=false.
-    applyDropdownIndex(session, try uiLanguageVariantIndex(session, allocator, "en"), false);
-    try std.testing.expectEqual(maru.i18n.Lang.en, maru.i18n.lang()); // 언어가 실제로 바뀌었어야 아래가 의미 있다
-
-    // 선택은 여전히 그 키를 가리킨다(인덱스는 옮겨졌을 수 있다 — 키가 기준이다).
-    const after = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(after, session.chrome_host.settings.selected);
-
-    // 행이 **필터에 남아 있는** 이 경로에서도 행 수는 이미 달라졌다(통과 집합이 언어를 타므로).
-    // 다시 알리지 않으면 `moveSelection` 이 옛 셈으로 wrap 해 ↑↓ 가 갇힌다 — 앞선 판은 이 갱신을
-    // 폴백에만 두어 흔한 쪽이 비어 있었다.
-    {
-        var count_arena = std.heap.ArenaAllocator.init(allocator);
-        defer count_arena.deinit();
-        const visible = try currentSectionFields(session, count_arena.allocator());
-        try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
-    }
-
-    // 이 자리가 **실제로 미끄러지는** 자리였음을 확인한다 — 안 그러면 위 단언은 아무것도 안 지킨다.
-    // 옛 인덱스에는 이제 다른 설정이 앉아 있고, 그것이 바로 예전에 값이 잘못 써지던 키다.
-    try std.testing.expect(after != before);
-    const key_at_old = (try settingsKeyAt(session, allocator, before)) orelse return error.TestUnexpectedResult;
-    defer allocator.free(key_at_old);
-    try std.testing.expect(!std.mem.eql(u8, key_at_old, "ui.language"));
-
-    // 새 언어의 라벨이 쿼리와 안 맞아 행이 **사라지는** 경우엔 필터를 푼다 — 편집 중인 행이 목록 밖에
-    // 남는 것보다 낫다. (`언어` 는 한국어 라벨에만 있다.)
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
-    session.chrome_host.settings.startSearch();
-    var q_it = (try std.unicode.Utf8View.init("언어")).iterator();
-    while (q_it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
-    session.chrome_host.settings.selected =
-        indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-
-    applyDropdownIndex(session, try uiLanguageVariantIndex(session, allocator, "en"), false);
-    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.searchQuery().len);
-    const rescued = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(rescued, session.chrome_host.settings.selected);
-}
-
 /// `ui.language` 드롭다운에서 `name` 변형의 인덱스(테스트 헬퍼 — 선언 순서를 테스트에 박지 않는다).
 fn uiLanguageVariantIndex(self: *AppSession, allocator: std.mem.Allocator, name: []const u8) !usize {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -3165,142 +3118,12 @@ fn uiLanguageVariantIndex(self: *AppSession, allocator: std.mem.Allocator, name:
     return error.TestUnexpectedResult;
 }
 
-// 적대적 검증이 낸 재현: **다른 섹션에 서서** 교차 검색으로 언어 행을 고른 경우.
-//
-// 검색은 교차 섹션이라(쿼리가 있으면 섹션 게이트가 무시된다) `font` 섹션에 서서 `app` 섹션의
-// `ui.language` 행을 고를 수 있다. 앞선 판은 폴백에서 쿼리만 지웠는데, 그러면 섹션 게이트가 되살아나
-// 그 행이 **여전히 목록에 없고** `selected` 는 남의 행을 가리킨 채로 남았다. 결과가 둘이었다 —
-// 확정이 엉뚱한 키에 쓸 위험, 그리고 `markConfigKeyDirty` 가 안 불려 **고른 언어가 파일에 안 써지는 것**.
-test "다른 섹션에서 교차 검색으로 고른 언어 행도 선택을 잃지 않는다" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const lang_before = maru.i18n.lang();
-    defer maru.i18n.setLang(lang_before);
-
-    session.chrome_host.settings.show();
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
-
-    // `app` 이 **아닌** 섹션에 선다 — 그래야 교차 검색이 아니면 언어 행이 안 보인다.
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const sections = try buildSectionList(session, arena_state.allocator());
-    const lang_section = sectionIndexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-    var other_section: ?usize = null;
-    for (sections, 0..) |_, i| if (i != lang_section) {
-        other_section = i;
-        break;
-    };
-    session.chrome_host.settings.section = other_section orelse return error.TestUnexpectedResult;
-
-    // 한국어 라벨에만 있는 쿼리 — 영어로 바꾸면 이 행은 필터에서 **사라진다**.
-    session.chrome_host.settings.startSearch();
-    var q_it = (try std.unicode.Utf8View.init("언어")).iterator();
-    while (q_it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
-    session.chrome_host.settings.selected =
-        indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-
-    applyDropdownIndex(session, try uiLanguageVariantIndex(session, allocator, "en"), true);
-
-    // 필터가 풀리고 **섹션도 함께 옮겨져** 그 행이 다시 목록에 있다.
-    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.searchQuery().len);
-    try std.testing.expectEqual(lang_section, session.chrome_host.settings.section);
-    const after = indexOfSettingsKey(session, "ui.language") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(after, session.chrome_host.settings.selected);
-
-    // 그리고 그 행이 실제로 `ui.language` 다 — 인덱스만 맞고 다른 키면 아무것도 못 지킨다.
-    const key_at = (try settingsKeyAt(session, allocator, session.chrome_host.settings.selected)) orelse
-        return error.TestUnexpectedResult;
-    defer allocator.free(key_at);
-    try std.testing.expectEqualStrings("ui.language", key_at);
-
-    // 확정 경로가 **그 키를 dirty 로 표시**했는가. 이것이 안 되면 언어는 인메모리로만 바뀌고
-    // 재시작하면 사라진다 — 화면만 보면 성공처럼 보이는 종류의 손실이다.
-    try std.testing.expect(isConfigKeyDirty(session, "ui.language"));
-
-    // 행 수도 다시 알렸는가. 안 알리면 `moveSelection` 이 **옛** `count` 로 wrap 해 ↑↓ 가 못 움직인다 —
-    // 필터가 걸렸을 때와 풀렸을 때의 행 수는 다르므로, 지금 보이는 행 수와 같아야 한다.
-    var count_arena = std.heap.ArenaAllocator.init(allocator);
-    defer count_arena.deinit();
-    const visible = try currentSectionFields(session, count_arena.allocator());
-    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
-}
-
 /// `key` 가 config 쓰기 대기 목록에 올랐는가(테스트 헬퍼).
 fn isConfigKeyDirty(self: *AppSession, key: []const u8) bool {
     for (self.config_dirty_keys.items) |dirty| {
         if (std.mem.eql(u8, dirty, key)) return true;
     }
     return false;
-}
-
-// 적대적 검증 3차가 낸 재현: **스키마 필드가 아닌 행**(`shell.args` — 라벨이 키를 거치는 합성 행).
-//
-// 앞선 판은 섹션을 스키마에서 찾았는데, 스키마에 없는 행은 늘 `null` 이라 섹션 이동이 통째로 무동작이었다.
-// 그러면 폴백이 쿼리만 지운 꼴이 되고, 그 행은 여전히 목록 밖이며 `selected` 는 남의 행을 가리킨다 —
-// 커밋이 고쳤다고 적은 바로 그 상태다. 합성 행을 아는 유일한 자리가 행 빌더이므로 그것으로 찾는다.
-test "스키마 필드가 아닌 행도 언어가 바뀌면 제자리로 돌아온다" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const lang_before = maru.i18n.lang();
-    defer maru.i18n.setLang(lang_before);
-
-    session.chrome_host.settings.show();
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
-
-    // `shell.args` 는 스키마 필드가 아니라 `currentSectionFields` 가 만드는 합성 text 행이다.
-    // 그 행이 사는 섹션이 **아닌** 곳에 서서, 교차 검색으로 그 행을 고른다.
-    const home_section = sectionIndexOfSettingsKey(session, "shell.args") orelse return error.TestUnexpectedResult;
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const sections = try buildSectionList(session, arena_state.allocator());
-    var elsewhere: ?usize = null;
-    for (0..sections.len) |i| if (i != home_section) {
-        elsewhere = i;
-        break;
-    };
-    session.chrome_host.settings.section = elsewhere orelse return error.TestUnexpectedResult;
-
-    // 한국어 라벨에만 있는 쿼리 — 영어로 바꾸면 이 행은 필터에서 사라진다.
-    session.chrome_host.settings.startSearch();
-    var q_it = (try std.unicode.Utf8View.init("셸 인자")).iterator();
-    while (q_it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
-    session.chrome_host.settings.selected =
-        indexOfSettingsKey(session, "shell.args") orelse return error.TestUnexpectedResult;
-
-    // 파일 reload 경로 — 다른 창이나 편집기가 언어를 바꾸면 이렇게 온다.
-    session.loaded_config.config.ui_language = .en;
-    reapplyUiLanguage(session);
-
-    // 섹션이 그 행이 사는 곳으로 옮겨졌고, 선택은 여전히 **그 행**이다.
-    try std.testing.expectEqual(home_section, session.chrome_host.settings.section);
-    const key_at = (try settingsKeyAt(session, allocator, session.chrome_host.settings.selected)) orelse
-        return error.TestUnexpectedResult;
-    defer allocator.free(key_at);
-    try std.testing.expectEqualStrings("shell.args", key_at);
 }
 
 // 언어를 **안** 바꾸는 config 변경이 이 경로에서 부작용을 내지 않는가.
@@ -3336,86 +3159,6 @@ test "언어를 안 바꾸는 토글은 config 미러를 되돌리지 않는다"
 
     // 새 값이 살아 있어야 한다. 되돌아가면 껐는데 켜진 채로 남는다.
     try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
-}
-
-// 적대적 검증 4차가 낸 재현: **전역 단축키 행**.
-//
-// 이 행은 스키마 필드가 아니고(`SettingsSectionFields.global_entries`), 라벨은 `GlobalEntry.title()` 이
-// `t(title_key)` 로 만들어 **언어를 정통으로 탄다**. 그런데 앵커를 뜨는 `keyAtRow` 가 스키마 다섯 종류만
-// 알아서 이 행에서는 앵커가 `null` 이 됐고, 그러면 재고정도 행 수 갱신도 **통째로 안 돌았다** — 재고정이
-// 가장 필요한 행에서 가장 안 돌던 셈이다.
-test "전역 단축키 행도 언어가 바뀌면 제자리로 돌아온다" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = app_session_mod.abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const lang_before = maru.i18n.lang();
-    defer maru.i18n.setLang(lang_before);
-
-    session.chrome_host.settings.show();
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
-
-    // 전역 단축키 행이 실제로 있는 섹션을 찾는다 — 없으면 이 테스트가 지킬 것이 없다.
-    var probe_arena = std.heap.ArenaAllocator.init(allocator);
-    defer probe_arena.deinit();
-    const sections = try buildSectionList(session, probe_arena.allocator());
-    var home: ?usize = null;
-    var anchor_key: ?[]const u8 = null;
-    const saved_section = session.chrome_host.settings.section;
-    for (0..sections.len) |i| {
-        session.chrome_host.settings.section = i;
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const cf = try currentSectionFields(session, arena.allocator());
-        if (cf.globalKeybindRowStart()) |start| {
-            home = i;
-            session.chrome_host.settings.selected = start;
-            anchor_key = (try settingsKeyAt(session, allocator, start)) orelse null;
-            break;
-        }
-    }
-    session.chrome_host.settings.section = saved_section;
-    const home_section = home orelse return error.SkipZigTest;
-    const key = anchor_key orelse return error.TestUnexpectedResult;
-    defer allocator.free(key);
-
-    // 그 행이 사는 섹션이 **아닌** 곳에 서서 교차 검색으로 그 행을 고른다.
-    var elsewhere: ?usize = null;
-    for (0..sections.len) |i| if (i != home_section) {
-        elsewhere = i;
-        break;
-    };
-    session.chrome_host.settings.section = elsewhere orelse return error.TestUnexpectedResult;
-    session.chrome_host.settings.startSearch();
-    var q_it = (try std.unicode.Utf8View.init("토글")).iterator();
-    while (q_it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
-    session.chrome_host.settings.selected =
-        indexOfSettingsKey(session, key) orelse return error.SkipZigTest; // 그 쿼리에 안 걸리면 볼 것이 없다
-
-    session.loaded_config.config.ui_language = .en;
-    reapplyUiLanguage(session);
-
-    // 선택이 **그 행**에 남아 있다. 앵커를 못 뜨면 여기서 남의 행을 가리킨다.
-    const key_now = (try settingsKeyAt(session, allocator, session.chrome_host.settings.selected)) orelse
-        return error.TestUnexpectedResult;
-    defer allocator.free(key_now);
-    try std.testing.expectEqualStrings(key, key_now);
-
-    // 그리고 행 수도 다시 알렸다.
-    var count_arena = std.heap.ArenaAllocator.init(allocator);
-    defer count_arena.deinit();
-    const visible = try currentSectionFields(session, count_arena.allocator());
-    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
 }
 
 // #8 의 근본 — **토글이 전역보다 config 미러를 먼저 쓰면 되돌려진다.**
@@ -3527,10 +3270,102 @@ test "keyAtRow 는 모든 섹션의 모든 행에 앵커를 준다 (행 종류�
 
 // 앵커를 **못 잡는** 경로에도 행 수 갱신은 와야 한다.
 //
-// 쿼리가 0행을 통과시키면 `keyAtRow` 가 `null` 이고 재고정은 할 것이 없다. 그래도 통과 행 수는
-// 달라졌으므로 `setFieldCount` 는 줘야 한다 — 안 주면 `moveSelection` 이 옛 셈으로 wrap 해 ↑↓ 가
-// 갇힌다. 브랜치의 다른 테스트는 전부 유효한 행에 앉히므로 이 분기를 한 번도 안 탔다.
+// 쿼리가 0행을 통과시키면 붙잡을 키가 없고 재고정은 할 것이 없다. 그래도 통과 행 수는 달라졌으므로
+// `setFieldCount` 는 줘야 한다 — 안 주면 `moveSelection` 이 옛 셈으로 wrap 해 ↑↓ 가 갇힌다.
 test "앵커를 못 잡아도 행 수는 다시 알린다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.chrome_host.settings.show();
+
+    // 아무 행도 통과시키지 않는 쿼리 — 그러면 선택이 가리킬 행이 없어 앵커가 `null` 이다.
+    session.chrome_host.settings.startSearch();
+    for ("zzqqxx") |c| session.chrome_host.settings.appendSearchCp(c);
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const empty = try currentSectionFields(session, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 0), empty.total()); // 전제가 성립하는지 먼저 본다
+    }
+    session.chrome_host.settings.setFieldCount(999); // 낡은 셈을 심어 둔다
+
+    var probe_buf: [128]u8 = undefined;
+    restoreSelectedRowKey(session, captureSelectedRowKey(session, &probe_buf));
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const visible = try currentSectionFields(session, arena.allocator());
+    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
+}
+
+// 행 집합이 **파일 때문에** 바뀌어도 선택은 같은 설정에 남는다.
+//
+// `reloadConfig` 는 설정 폼을 닫지 않으므로(닫는 것은 confirm/notice 경로뿐) 폼이 열린 채로 돈다. 파일이
+// `env.*`·`macro.*` 를 더하거나 지우면 통과 행 집합이 그 자리에서 바뀌는데, `selected` 는 인덱스라 그 자리에
+// 다른 설정이 들어와도 모른다. **이것은 언어와 무관한 축**이라 필터를 언어 독립으로 만든 것으로는 안 닫힌다 —
+// 행 집합을 바꾸는 것이 언어가 아니라 파일이기 때문이다.
+test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload 축)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.chrome_host.settings.show();
+    // env 행이 사는 섹션으로 간다 — 거기서 행이 늘어나는 것을 관찰한다.
+    const home = sectionIndexOfSettingsKey(session, "env.") orelse return error.SkipZigTest;
+    session.chrome_host.settings.section = home;
+    refreshSettingsFieldCount(session);
+
+    const anchor = "env."; // 빈 KEY sentinel = "환경변수 추가" 행. env 행들 **뒤에** 선다
+    const before = indexOfSettingsKey(session, anchor) orelse return error.TestUnexpectedResult;
+    session.chrome_host.settings.selected = before;
+
+    // reload 가 하는 순서 그대로 — **바뀌기 전에** 뜨고, 바꾸고, 앉힌다.
+    var anchored_buf: [128]u8 = undefined;
+    const anchored = captureSelectedRowKey(session, &anchored_buf);
+    session.setEnvVar("AAA_PROBE", "1"); // 파일이 env 변수를 더한 것과 같은 상태 — 뒤 행들이 밀린다
+    restoreSelectedRowKey(session, anchored);
+
+    // 선택은 여전히 그 행이고, 행 수도 다시 알렸다.
+    const after = indexOfSettingsKey(session, anchor) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(after, session.chrome_host.settings.selected);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const visible = try currentSectionFields(session, arena.allocator());
+    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
+
+    // 이 자리가 **실제로 밀리는** 자리였는지 — 아니면 위 단언이 아무것도 안 지킨다.
+    try std.testing.expect(after != before);
+}
+
+// **통과 행 집합과 순서는 `i18n.lang()` 에 의존하지 않는다** — 이 브랜치의 핵심 계약을 전칭으로 못 박는다.
+//
+// 앞서 이 결함은 "언어가 바뀌는 지점마다 선택을 다시 앉히는" 방식으로 막았는데, 그 방식은 지점을 하나씩
+// 세는 것이라 **네 번 연속으로 구멍을 냈다**(경로 넷 중 둘만 막음 → 스키마 밖 행을 못 봄 → 앵커를 뜨는
+// 쪽이 행 종류 다섯만 앎 → 다른 창은 그 지점을 아예 안 지남). 세는 방식으로는 다 셀 수 없다는 것이
+// 그 네 번이 보여 준 것이다. 그래서 지점이 아니라 **성질**을 잰다.
+//
+// 성질이 참이면 선택뿐 아니라 `count`·스크롤 위치·열린 팝업의 인덱스·사용자의 검색어까지 전부 따라온다 —
+// 흔들릴 것이 없으므로 붙잡을 것도 없다.
+test "통과 행 집합과 순서는 화면 언어에 의존하지 않는다 (i18n 계약 §5.2)" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -3546,27 +3381,88 @@ test "앵커를 못 잡아도 행 수는 다시 알린다" {
 
     const lang_before = maru.i18n.lang();
     defer maru.i18n.setLang(lang_before);
-
     session.chrome_host.settings.show();
-    session.loaded_config.config.ui_language = .ko;
-    reapplyUiLanguage(session);
 
-    // 아무 행도 통과시키지 않는 쿼리 — 그러면 선택이 가리킬 행이 없어 앵커가 `null` 이다.
-    session.chrome_host.settings.startSearch();
-    for ("zzqqxx") |c| session.chrome_host.settings.appendSearchCp(c);
-    {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const empty = try currentSectionFields(session, arena.allocator());
-        try std.testing.expectEqual(@as(usize, 0), empty.total()); // 전제가 성립하는지 먼저 본다
+    // 두 언어의 문장 조각·config 키 조각·짧은 접두어를 섞는다. 짧은 쿼리가 통과 행이 가장 많이 갈리는
+    // 자리라 일부러 넣는다(증분 검색이 실제로 지나는 길이기도 하다).
+    const queries = [_][]const u8{
+        "",
+        "언어",
+        "표시",
+        "커서",
+        "폰트",
+        "테마",
+        "알림",
+        "font",
+        "cursor",
+        "theme",
+        "language",
+        "notification",
+        "shell",
+        "o",
+        "on",
+        "in",
+        "the",
+        "to",
+        "ui",
+        ".",
+        "zzqq", // 아무것도 통과 못 하는 쿼리 — 빈 집합도 두 언어에서 같아야 한다
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const sections = try buildSectionList(session, arena_state.allocator());
+    try std.testing.expect(sections.len > 0);
+
+    var compared: usize = 0;
+    for (queries) |query| {
+        for (0..sections.len) |sec| {
+            session.chrome_host.settings.section = sec;
+            session.chrome_host.settings.startSearch();
+            var it = (try std.unicode.Utf8View.init(query)).iterator();
+            while (it.nextCodepoint()) |cp| session.chrome_host.settings.appendSearchCp(cp);
+
+            // 같은 상태를 두 언어로 각각 펼쳐 **키 나열**을 통째로 비교한다. 집합이 아니라 나열이라
+            // 순서까지 함께 본다 — 순서가 갈리면 인덱스가 미끄러지는 것은 마찬가지다.
+            const ko = try settingsRowKeys(session, allocator, .ko);
+            defer freeKeyList(allocator, ko);
+            const en = try settingsRowKeys(session, allocator, .en);
+            defer freeKeyList(allocator, en);
+
+            if (ko.len != en.len) {
+                std.debug.print("\n쿼리 '{s}' 섹션 {d}: 통과 행 수가 언어마다 다르다 (ko {d} / en {d})\n", .{ query, sec, ko.len, en.len });
+                return error.TestUnexpectedResult;
+            }
+            for (ko, en, 0..) |a, b, i| {
+                if (!std.mem.eql(u8, a, b)) {
+                    std.debug.print("\n쿼리 '{s}' 섹션 {d}: {d}번 행이 다르다 (ko '{s}' / en '{s}')\n", .{ query, sec, i, a, b });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            compared += 1;
+        }
     }
-    session.chrome_host.settings.setFieldCount(999); // 낡은 셈을 심어 둔다
+    // 아무것도 안 비교했으면 위 루프가 무의미하다 — 그 상태도 "전부 같다" 로 통과한다.
+    try std.testing.expect(compared > 0);
+}
 
-    session.loaded_config.config.ui_language = .en;
-    reapplyUiLanguage(session);
+/// `lang` 으로 펼친 현재 섹션·현재 쿼리의 행 키 나열(테스트 헬퍼). 호출자가 해제한다.
+fn settingsRowKeys(self: *AppSession, allocator: std.mem.Allocator, lang: maru.i18n.Lang) ![][]const u8 {
+    maru.i18n.setLang(lang);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const cf = try currentSectionFields(self, scratch.allocator());
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer freeKeyList(allocator, out.items);
+    var probe: [128]u8 = undefined;
+    for (0..cf.total()) |i| {
+        const key = keyAtRow(cf, i, &probe) orelse return error.TestUnexpectedResult;
+        try out.append(allocator, try allocator.dupe(u8, key));
+    }
+    return out.toOwnedSlice(allocator);
+}
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const visible = try currentSectionFields(session, arena.allocator());
-    try std.testing.expectEqual(visible.total(), session.chrome_host.settings.count);
+fn freeKeyList(allocator: std.mem.Allocator, keys: [][]const u8) void {
+    for (keys) |k| allocator.free(k);
+    allocator.free(keys);
 }

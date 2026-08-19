@@ -555,7 +555,7 @@ pub const inventory = [_]Proof{
     // 목록 스크롤바 드래그(2026-08-19)로 움직인다: 드래그 상태 하나(`scm_scroll_drag` — 규칙은
     // `scroll_area.Drag`가 소유한다)가 붙는다. **위치는 새로 안 든다** — `scm_scroll`이 그대로 단일
     // 출처다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0e95f15b398b8614fa3964db87b781d667bf72f5de3893a24dc524c90fe89927" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7fd47f718550049e366e6457c3d4fa050ed11a265663ec19c8ecabaeaef027cc" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

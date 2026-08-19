@@ -111,6 +111,21 @@ src/platform/
 > 컴파일**하므로 Windows 호스트에서도 돈다 — glibc feature macro 조합처럼 "한 경로에서만 깨지는"
 > 사고를 잡는 진짜 자리는 그쪽이다. Windows 에서 빠지는 것은 **실서버와 왕복하는 스모크**뿐이고,
 > 그 회차는 macOS·Linux CI 가 계속 돈다.
+>
+> **드라이버 둘(`ssh-client-smoke`·`ssh-abi-smoke`)도 같은 이유로 빠진다.** 이유가 두 겹이고
+> 둘 다 실측했다. ⒜ `tools/ssh/{client,abi}_smoke.zig` 가 `std.c.socket`·`std.c.open` 을 직접
+> 부르는데 Windows 에서 `std.c.O` 는 `void` 라 컴파일이 안 되고, `std.process.Args.Iterator.init`
+> 도 Windows 에서 `@compileError` 다. Zig 0.16 의 크로스플랫폼 소켓 API 는 `std.Io.net` 인데
+> **이 저장소는 아직 한 곳도 안 쓴다.** ⒝ 더 중요한 것은 **구동할 하네스가 없다**는 점이다 —
+> `tools/ssh/client_smoke.sh` 는 `#!/bin/sh` 이고 `/usr/sbin/sshd`·`ssh-keygen` 을 찾아 일회용
+> sshd 를 띄운다. Zig 쪽만 포팅하면 **Windows 에서 돌릴 것이 없는 소켓 코드 한 벌**이 남는다.
+>
+> Windows 에서 이 스모크를 진짜로 돌리려면 ⒜ `std.Io.net` 포팅과 ⒝ OpenSSH for Windows 를 쓰는
+> PowerShell 하네스가 **둘 다** 필요하고, 그것은 `maru ssh` 의 Windows 지원(W9)과 함께 갈 일이다.
+>
+> **빠지는 것은 조용하지 않다.** 빠진 자리마다 빌드가 `[skip] <스텝>: <이유>` 한 줄을 찍는다
+> (`noteSkippedStep`). 아무것도 안 만드는 스텝이 말없이 exit 0 이면 그 기기의 개발자가 "돌았다"
+> 고 읽는데, 이 저장소는 그 부류의 사고를 이미 한 번 밟았다(체크가 0 개인데 전부 초록으로 봄).
 
 **Vulkan 백엔드를 Linux 와 공유할지는 아직 정하지 않는다.** Linux 백엔드가 생길 때
 공통분모가 드러나므로, 그전에 추상 층을 만들면 하나뿐인 사용처에 맞춘 잘못된 경계가 된다.

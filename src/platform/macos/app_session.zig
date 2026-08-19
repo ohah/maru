@@ -2220,7 +2220,13 @@ pub const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_
 pub const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
 /// 브랜치 메뉴에 띄우는 최대 개수. `for-each-ref`는 최근 순이라 위쪽이 대개 원하는 것이고, 목록이 길면
 /// 메뉴가 화면을 넘어 쓸모가 없어진다. 넘치는 만큼은 터미널에서 `git branch`로 보는 게 맞다.
-const max_branch_menu_items: usize = 12;
+///
+/// **12에서 24로 올렸다**(적대적 검증 2026-08-19). 위 근거("최근 순이면 위쪽이 원하는 것")는 **브랜치
+/// 전환**의 근거다 — 방금 쓰던 브랜치로 돌아가는 일이니까. 그런데 같은 목록을 기준 고르기(§3.5)가
+/// 다시 쓰는데, 기준으로 고르는 이름은 보통 `main`·`origin/main`처럼 **내가 건드리지 않는** ref다.
+/// 즉 그 질문에서는 정렬이 원하는 것을 아래로 밀어낸다. 자리를 넓히는 것으로 그 확률을 줄인다
+/// (컨텍스트 메뉴 상한 `ctx_menu_count`가 25라 `기본값` 줄까지 정확히 들어간다).
+const max_branch_menu_items: usize = 24;
 
 /// 브랜치 목록의 **용도**(§3.5). 읽기는 하나이고 쓰임이 둘이다.
 pub const BranchMenuPurpose = enum {

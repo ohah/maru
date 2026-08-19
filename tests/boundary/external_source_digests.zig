@@ -610,10 +610,13 @@ pub const inventory = [_]Proof{
     // 테스트가 늘었다. **count는 그대로다** — 외부에서 부르는 자리가 아니라 세션 상태와 테스트만 늘었다.
     // 그 슬라이스를 main 에 두 번 리베이스하며 값이 그때마다 수렴했다(2026-08-19): 사이에 들어온 편집기·
     // 셀 밴드·죽은 pub 정리 커밋들이 같은 파일을 건드려 **양쪽 digest 가 모두 낡았다**. 사유는 다 살아 있다.
+    // 그 슬라이스의 적대적 검증에서 브랜치 목록 상한이 12 → 24로 올라 또 움직인다: 그 목록을 기준
+    // 고르기가 다시 쓰는데, "최근 것이 원하는 것"이라는 정렬 근거는 **전환**의 근거라 기준으로 고르는
+    // 이름(`main`·`origin/main`)을 아래로 민다. count는 2 그대로다 — 상수 하나가 바뀌었을 뿐이다.
     // P7b(저장소별 기준을 workspace에 기억)로 또 움직인다: 짝 하나를 들던 필드 둘이 **목록**이 되고
     // (`scm_base_entries`), 그 목록을 만드는 자리에서 못 실을 값을 거른다. count는 2 그대로다 —
     // 세션 상태와 테스트만 늘었고 외부에서 부르는 자리는 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "00d422d66268402836f50f1173ff4778bca2dad05bfbf532f4cef8d546cf10b1" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ce2bfd637d07067a5475165f4003236730f7af94b9df8416bab9ef28578a214d" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -754,5 +757,6 @@ pub const inventory = [_]Proof{
     // 말이 됐다. count는 1 그대로다.
     // 리베이스로 값이 수렴했다(2026-08-20): 모바일 편집 화면과 기준 고르기(§3.5)가 같은 표에 각각
     // 키를 더해 양쪽 digest 가 모두 낡았다. 사유는 위아래 둘 다 살아 있고 count 는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8741885e596a6ffb0429caa6e5e32956e9af85aea2a9bf224b873dd8f438bbbf" },
+    // 그 수렴 값을 도구로 다시 재 넣었다 — 두 슬라이스의 키가 한 표에 함께 있는 상태의 해시다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "b1b69d6d803e9567eb365fcfececf72dd9ab30c518c6b6c0b626b8b0603c1a8a" },
 };

@@ -1197,6 +1197,80 @@ test "leaf open: 리프가 디렉터리면 거부된다 (두 호스트에서 이
     cap.deinit(io);
 }
 
+// **스캔이 만든 identity 가 실제로 가드 역할을 하는가.**
+//
+// 위 `leaf open:` 테스트들은 identity 를 `identityOfFile` 로 **직접** 만들어 넣는다. 그런데 제품이
+// 쓰는 것은 **스캔이 기록한 identity** 다(디렉터리를 훑어 얻은 값). Windows 에서는 그 두 출처가
+// 갈릴 수 있었다 — 순회가 inode 를 안 줘서 스캔 쪽이 전부 0 이었다(W8.2 실측). 지금은 배치 file id
+// 로 메우는데, **그 값으로도 가드가 서는지**는 별개 질문이라 여기서 못 박는다.
+//
+// 이것이 없으면 "스캔이 0 이 아닌 무언가를 넣는다" 까지만 검증되고, 그 값이 **바꿔치기를 잡는가**는
+// 아무도 안 본다.
+//
+// **하중은 Windows 에서만 받는다** — macOS 는 `entry.inode` 가 원래 0 이 아니라 배치 보강을 되돌려도
+// 통과한다(돌연변이로 확인). CI 에 Windows 러너가 없으므로 이 테스트가 그 수정을 지키는 것은
+// 사람이 Windows 에서 돌릴 때뿐이다 — docs/windows-platform.md §2m.4 의 표가 그것을 적는다.
+test "스캔이 만든 identity 로도 바꿔치기가 잡힌다 (macOS·Windows 공통)" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/leaf.md", .data = "original" });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const native = buf[0..try tmp.dir.realPath(io, &buf)];
+    const tmp_root = try path_shape.normalizeSeparators(allocator, native);
+    defer allocator.free(tmp_root);
+    const root = try std.fmt.allocPrint(allocator, "{s}/root", .{tmp_root});
+    defer allocator.free(root);
+    const leaf = try std.fmt.allocPrint(allocator, "{s}/leaf.md", .{root});
+    defer allocator.free(leaf);
+
+    var validated_root = (try validateRootSnapshot(allocator, io, root)) orelse return error.TestUnexpectedResult;
+    defer validated_root.deinit(allocator, io);
+
+    // **스캔을 돌려 그 값을 쓴다** — 제품이 identity 를 얻는 자리와 같다.
+    const owned = try allocator.dupe(u8, root);
+    var scan = scanDirectory(allocator, io, owned);
+    defer scan.deinit(allocator, io);
+    try std.testing.expect(scan.ok);
+
+    var scanned_identity: ?file_tree.Identity = null;
+    for (scan.entries.items) |e| {
+        if (std.mem.eql(u8, e.name, "leaf.md")) scanned_identity = e.identity;
+    }
+    const identity = scanned_identity orelse return error.TestUnexpectedResult;
+    // 스캔이 **의미 있는 값**을 넣었는가 — 0 이면 아래 판정이 공허해진다.
+    try std.testing.expect(identity.inode != 0);
+
+    // ⓐ 그 identity 로 열린다.
+    var cap = openValidatedFileTreeRow(allocator, io, root, validated_root.identity, leaf, identity) orelse
+        return error.TestUnexpectedResult;
+    cap.deinit(io);
+
+    // ⓑ 파일을 **다른 파일로 바꿔치기**하면 같은 identity 로는 못 연다.
+    try tmp.dir.deleteFile(io, "root/leaf.md");
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/leaf.md", .data = "replaced" });
+    try std.testing.expect(openValidatedFileTreeRow(allocator, io, root, validated_root.identity, leaf, identity) == null);
+
+    // ⓒ **대조군** — 새 파일의 스캔 identity 로는 다시 열린다. 없으면 ⓑ 의 null 이 "바꿔치기를 잡아서"
+    //    인지 "이 경로가 이제 아무것도 못 열어서" 인지 안 갈린다.
+    const owned2 = try allocator.dupe(u8, root);
+    var scan2 = scanDirectory(allocator, io, owned2);
+    defer scan2.deinit(allocator, io);
+    var fresh: ?file_tree.Identity = null;
+    for (scan2.entries.items) |e| {
+        if (std.mem.eql(u8, e.name, "leaf.md")) fresh = e.identity;
+    }
+    const fresh_identity = fresh orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!fresh_identity.eql(identity)); // 다른 파일이니 값이 달라야 한다
+    var cap2 = openValidatedFileTreeRow(allocator, io, root, validated_root.identity, leaf, fresh_identity) orelse
+        return error.TestUnexpectedResult;
+    cap2.deinit(io);
+}
+
 test "file tree backend rejects mutual directory symlink cycles" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

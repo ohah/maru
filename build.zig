@@ -242,6 +242,20 @@ pub fn build(b: *std.Build) void {
     app_pty_interactive_loop_smoke_cmd.addArg("app-pty-interactive-loop-smoke");
     app_pty_interactive_loop_smoke_step.dependOn(&app_pty_interactive_loop_smoke_cmd.step);
 
+    // `win32-file-tree-smoke` 도 다른 스모크와 같이 step 으로 세운다. 처음엔 CLI 하위 명령으로만
+    // 뒀는데, 이 저장소의 스모크는 전부 `zig build <이름>` 으로 도는 것이 관례라 **혼자만 안 도는
+    // 것을 발견할 방법이 없었다**(적대적 검증에서 내가 직접 `no step named` 로 걸렸다).
+    // Windows 전용이므로 다른 호스트에서는 rc=1 대신 **시끄럽게 건너뛴다** — 조용한 성공이 가장 나쁘다.
+    const win32_file_tree_smoke_step = b.step("win32-file-tree-smoke", "Run the Windows file tree data-path smoke");
+    if (target.result.os.tag == .windows) {
+        const win32_file_tree_smoke_cmd = b.addRunArtifact(exe);
+        win32_file_tree_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_file_tree_smoke_cmd.addArg("win32-file-tree-smoke");
+        win32_file_tree_smoke_step.dependOn(&win32_file_tree_smoke_cmd.step);
+    } else {
+        win32_file_tree_smoke_step.dependOn(noteSkippedStep(b, "win32-file-tree-smoke", "Windows 호스트 전용 — 실제 Win32 디렉터리 순회를 잰다 (docs/windows-platform.md §2m.4)"));
+    }
+
     const app_pty_smoke_step = b.step("app-pty-smoke", "Run the live PTY app host frame smoke");
     const app_pty_smoke_cmd = b.addRunArtifact(exe);
     app_pty_smoke_cmd.step.dependOn(b.getInstallStep());

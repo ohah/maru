@@ -366,9 +366,11 @@ pub fn rootPrefixLenFor(os_tag: std.Target.Os.Tag, path: []const u8) ?usize {
 }
 /// `normalizeSeparatorsFor`의 **역** — 중립 레이어의 `/` 경로를 OS 경계에서 native(`\`)로 되돌린다.
 ///
-/// **한때 이 변환은 필요 없다고 적혀 있었다**(docs/windows-platform.md §5). 근거는 Win32 파일 API가 `/`를
-/// 받는다는 실측이었고 그 실측 자체는 맞다 — `GetFullPathNameW`·`GetFileAttributesW`·`CreateProcessW`의
-/// `lpApplicationName`·`lpCurrentDirectory` 전부 `/`를 받는다. 빠진 것은 **파일 API가 아닌 소비자**였다.
+/// **이것은 규칙 1(입구 정규화)의 예외가 아니라 다른 층이다.** 규칙 1 은 "중립 레이어가 무엇을 보는가",
+/// 이 함수는 "OS 를 부를 때 무엇을 넘기는가" 다. 한때 계약 §5 가 "경계에 되돌림을 두지 않는다" 고 적었던
+/// 것은 그 둘을 안 나눴기 때문이고, 근거였던 실측(Win32 **파일 API** 가 `/` 를 받는다)은 지금도 맞다 —
+/// `GetFullPathNameW`·`GetFileAttributesW`·`CreateProcessW` 의 `lpApplicationName`·`lpCurrentDirectory`
+/// 전부 `/` 를 받는다. 빠진 것은 **파일 API 가 아닌 소비자**였다.
 ///
 /// `cmd.exe`는 자기 커맨드라인을 CRT argv 규칙으로 파싱하지 않는다(계약 §4.2). `lpCommandLine`의 argv\[0\]이
 /// `"C:/Windows/System32/cmd.exe"`면 **cmd 혼자 실패한다** — `lpApplicationName`이 이미 올바른 파일을 가리켜
@@ -388,8 +390,18 @@ pub fn rootPrefixLenFor(os_tag: std.Target.Os.Tag, path: []const u8) ?usize {
 /// 갈라 두지 않고 spawn 경계에서 함께 되돌린다: 한쪽만 native면 "왜 이쪽만"이 남고, 다음 사람이 그 비대칭을
 /// 정리하다 argv\[0\]을 되돌려 놓는다.
 ///
+/// **우리 정규화 탓이 아니다.** `C:/Windows/System32/cmd.exe` 는 Windows 에서 완전히 정상인 경로이고
+/// 사용자가 config 에 그렇게 적을 수 있다 — 정규화를 아예 안 해도 그 사용자는 깨진다. 즉 이 함수는
+/// **사용자 입력의 다양성을 받는 자리**다.
+///
+/// **선례 셋이 같은 것을 가리킨다**(계약 §5 에 표로 있다): .NET `Process.Start` 는 `/` 경로를 줘도 자식의
+/// argv\[0\] 을 `\` 로 준다(실측). VS Code 는 `URI.path` 를 **항상 `/`** 로 두고 `URI.fsPath` 가
+/// `replace(/\//g, '\')` 로 OS 경계를 맡는다. 그 터미널이 쓰는 node-pty 는 `argsToCommandLine` 에서
+/// 셸 경로를 **그대로** argv\[0\] 에 넣는다 — 앞 계층이 이미 했다고 전제한다. 우리가 이 자리를 직접
+/// 만난 이유는 ConPTY spawn 때문에 `lpCommandLine` 을 손으로 조립하기 때문이다.
+///
 /// 정규화를 걷어내는 것이 아니다 — 중립 레이어는 계속 `/`를 보고, **OS에 넘기기 직전 한 자리**에서만
-/// native가 된다.
+/// native가 된다. 그 자리를 늘리지 않는 것이 조건이다.
 ///
 /// `os_tag`가 인자인 이유는 `normalizeSeparatorsFor`와 같다: POSIX에서 `/`는 진짜 구분자라 바꾸면 다른
 /// 경로가 된다. 반환은 항상 `allocator` 소유다(같은 이유 — 조건부 소유권은 호출자가 반드시 틀린다).

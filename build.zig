@@ -1936,6 +1936,21 @@ pub fn build(b: *std.Build) void {
     const run_mobile_ssh_tests = b.addRunArtifact(mobile_ssh_tests);
     test_step.dependOn(&run_mobile_ssh_tests.step);
     test_mobile_step.dependOn(&run_mobile_ssh_tests.step);
+    // **모바일 config 자신의 테스트도 돈다.** 이 파일은 브리지가 *import* 만 하므로 그 스위트에
+    // 안 실린다 — 여기 있던 파싱·부분 저장 테스트가 **한 번도 안 돌고 있었다**(`mise run check`
+    // 로그에 이름이 없는 것으로 확인했다). 스키마 밖 가지(서버 목록·프리셋)가 여기 있어
+    // 브리지를 안 거치고 재는 자리가 필요하다.
+    const mobile_config_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/mobile/mobile_config.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    const run_mobile_config_tests = b.addRunArtifact(mobile_config_tests);
+    test_step.dependOn(&run_mobile_config_tests.step);
+    test_mobile_step.dependOn(&run_mobile_config_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.

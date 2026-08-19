@@ -363,6 +363,17 @@ unsigned int maru_mobile_hit_cell(float x, float y);
 #define MARU_SSH_ENTROPY_BYTES 32
 #define MARU_SSH_MAX_USER 64
 #define MARU_SSH_MAX_TERM 32
+/// 등록할 수 있는 서버 수. **자리를 미리 잡아 두므로 숫자가 곧 상주 메모리다**(브리지엔 할당이
+/// 없다). config 의 `ssh.server.<n>.*` 에서 오고, 넘는 번호는 무시한다
+/// (단일 출처: docs/mobile-config.md §4.3).
+#define MARU_MAX_SERVERS 16
+
+/// `maru_mobile_server_field` 가 무엇을 달라는지. **포트는 여기 없다** — 숫자라
+/// `maru_mobile_server_port` 가 따로 답한다(문자열로 주면 host 가 다시 파싱해야 한다).
+#define MARU_SERVER_NAME 0
+#define MARU_SERVER_HOST 1
+#define MARU_SERVER_USER 2
+#define MARU_SERVER_FINGERPRINT 3
 /// 세션 하나가 드는 버퍼. **선(out)은 최소 한 걸음(4KiB)보다 넉넉해야** 하고, 화면은 채널 패킷
 /// 하나(32KiB)가 들어가야 한다 — 못 담으면 코어가 한 발도 못 나간다(계약 §3.5).
 #define MARU_SSH_OUT_BYTES 32768
@@ -497,6 +508,33 @@ unsigned int maru_mobile_input_sink(void);
 /// 안 지운다 — 잘라 보내면 명령이 반만 나간다. 셸이 뜨기 전에 친 글자도 여기 모였다가 함께
 /// 나간다(type-ahead).
 unsigned long maru_mobile_take_input(unsigned char *out, unsigned long cap);
+
+/// ── 등록한 서버 목록 ────────────────────────────────────────────────────────
+///
+/// **접속 정보는 config 가 든다**(`ssh.server.<n>.*` — docs/mobile-config.md §4.3). 브리지가
+/// 파싱해 들고 host 는 이 함수들로만 본다. host 가 파일을 다시 해석하면 화면이 고른 것과 갈린다.
+///
+/// **이름이 `maru_mobile_ssh_*` 가 아닌 이유**: 그 계열은 *세션 하나*를 다루고 전부
+/// `mobile_ssh.zig` 에 산다(계약 테스트가 그 전제로 개수까지 센다). 여기 있는 것은 세션이 아니라
+/// **config 에서 나온 목록**이라 브리지가 답한다 — 같은 이름표를 붙이면 그 게이트가 거짓이 된다.
+
+/// 등록된 서버 수(0..`MARU_MAX_SERVERS`). **번호는 순서다** — config 의 번호가 아니라
+/// 목록에서의 자리다(빈 번호는 읽을 때 앞으로 당겨진다).
+unsigned int maru_mobile_server_count(void);
+/// 그 서버의 문자열 값(`MARU_SERVER_*`)을 채운다. 반환값은 채운 바이트 수. **끝에 0 을
+/// 안 붙인다** — 길이로 다룬다(다른 take 계열과 같은 규율). 자리가 모자라거나 번호·종류가
+/// 틀리면 0 이고 아무것도 안 쓴다.
+unsigned long maru_mobile_server_field(unsigned int index, unsigned int field,
+                                           unsigned char *out, unsigned long cap);
+/// 그 서버의 포트. 번호가 틀리면 0 이다(0 은 붙을 수 없는 포트라 그대로 오류 신호가 된다).
+unsigned int maru_mobile_server_port(unsigned int index);
+/// **어느 서버에 붙어 달라는 요청**을 가져간다(0=없음, 아니면 **번호+1**). 한 번 가져가면
+/// 사라진다 — 두 번 붙으면 세션이 둘 생긴다.
+///
+/// 요청을 세우는 쪽이 브리지인 이유는 **누르는 화면이 거기**라서다. 지금은 목록 화면이 없어
+/// 첫 config 를 읽을 때 온전한 첫 서버를 **한 번만** 자동으로 요청한다(임시 — S9b-2b 가 그
+/// 자리를 화면 탭으로 바꾼다). 매번 요청하면 배경에서 돌아올 때마다 다시 붙는다.
+unsigned int maru_mobile_take_server_connect(void);
 
 /// 지금 터미널 격자(열·행). 원격에 알릴 pty 크기는 **코어가 들고 있는 값**이어야 한다 —
 /// host 가 따로 세면 그리는 격자와 원격이 믿는 크기가 갈린다. 화면이 아직 없으면 0.

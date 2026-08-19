@@ -5,6 +5,8 @@
 //! 잡느라 오래 걸린 것들이라, 값이 싼 자리로 내려 둔다.
 const std = @import("std");
 const bridge = @import("mobile_bridge");
+/// 서버 목록의 타입은 config 쪽이 소유한다 — 테스트가 목록을 직접 만들 때 쓴다.
+const mobile_config = bridge.mobile_config;
 /// 헤더를 C 로 읽어 그대로 부른다 — 정규식 게이트가 못 보는 **인자 타입**을 컴파일이 잡는다.
 const c_abi = @cImport(@cInclude("mobile_host_abi.h"));
 
@@ -3800,4 +3802,66 @@ test "칸이 넘치면 조용히 버리지 않는다" {
     try std.testing.expectEqualStrings("settings_text_overflow", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
     _ = bridge.maru_mobile_pop_screen();
+}
+
+// ── 등록한 서버 목록 (S9b-2a) ────────────────────────────────────────────────
+
+const two_servers =
+    \\ssh.server.1.name = 집
+    \\ssh.server.1.host = 10.0.0.5
+    \\ssh.server.1.user = me
+    \\ssh.server.1.port = 2222
+    \\ssh.server.1.fingerprint = SHA256:abc
+    \\ssh.server.2.host = work.example.com
+    \\ssh.server.2.user = you
+    \\ssh.server.2.fingerprint = SHA256:def
+;
+
+test "host 는 config 의 서버를 ABI 로만 본다" {
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_server_count());
+
+    var buf: [128]u8 = undefined;
+    const n = bridge.maru_mobile_server_field(0, 1, &buf, buf.len); // HOST
+    try std.testing.expectEqualStrings("10.0.0.5", buf[0..n]);
+    const un = bridge.maru_mobile_server_field(0, 2, &buf, buf.len); // USER
+    try std.testing.expectEqualStrings("me", buf[0..un]);
+    const fn_ = bridge.maru_mobile_server_field(0, 3, &buf, buf.len); // FINGERPRINT
+    try std.testing.expectEqualStrings("SHA256:abc", buf[0..fn_]);
+    try std.testing.expectEqual(@as(u32, 2222), bridge.maru_mobile_server_port(0));
+    // 포트를 안 적은 줄은 22 다 — host 가 기본값을 따로 적으면 파일과 갈린다.
+    try std.testing.expectEqual(@as(u32, 22), bridge.maru_mobile_server_port(1));
+}
+
+test "자리가 모자라면 자르지 않고 0 이다" {
+    // 잘라 주면 host 가 **반쪽 주소**로 붙으러 간다 — 그 실패는 오타처럼 보인다.
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    var small: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_server_field(0, 1, &small, small.len));
+    // 없는 번호·모르는 종류도 0 이다.
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_server_field(9, 1, &buf, buf.len));
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_server_field(0, 77, &buf, buf.len));
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_server_port(9)); // 붙을 수 없는 포트
+}
+
+test "접속 요청은 한 번만 나가고 가져가면 사라진다" {
+    // **두 번 붙으면 세션이 둘 생긴다.** 그리고 배경에서 돌아올 때마다 config 를 다시 읽으므로,
+    // 읽을 때마다 요청하면 돌아올 때마다 또 붙는다.
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    const req = bridge.maru_mobile_take_server_connect();
+    try std.testing.expectEqual(@as(u32, 1), req); // 첫 서버(번호+1)
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect()); // 가져가면 없다
+    bridge.maru_mobile_load_config(two_servers, two_servers.len); // 배경에서 돌아왔다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+}
+
+test "고르는 것은 온전한 첫 서버다 — 반쯤 적은 줄은 건너뛴다" {
+    // 자동 요청은 프로세스마다 한 번이라 그 경로로는 한 경우밖에 못 잰다. 규칙 자체를 잰다.
+    const half = mobile_config.Server{ .host = "a", .user = "me" }; // 지문이 없다
+    const full = mobile_config.Server{ .host = "b", .user = "me", .fingerprint = "SHA256:x" };
+    try std.testing.expectEqual(@as(?usize, 1), bridge.firstComplete(&.{ half, full }));
+    try std.testing.expectEqual(@as(?usize, 0), bridge.firstComplete(&.{ full, half }));
+    try std.testing.expectEqual(@as(?usize, null), bridge.firstComplete(&.{half}));
+    try std.testing.expectEqual(@as(?usize, null), bridge.firstComplete(&.{}));
 }

@@ -75,7 +75,8 @@ var quad_count: usize = 0;
 // "maru 터미널이 실제로 계산한 격자"다.
 const terminal = maru.terminal;
 const color = maru.color;
-const mobile_config = @import("mobile_config.zig");
+/// **밖에서도 보인다** — 계약 테스트가 서버 목록을 직접 만들어 고르는 규칙을 잰다.
+pub const mobile_config = @import("mobile_config.zig");
 // **SSH 진입점을 링크에 남긴다.** `maru_mobile_ssh_*` 는 이 파일이 안 부르는 export 라, 참조가
 // 없으면 정적 라이브러리에서 통째로 빠지고 host 는 링크 오류를 본다(계약 ABI 는 한 벌이다).
 comptime {
@@ -166,6 +167,28 @@ var preedit_len: usize = 0;
 
 /// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
+/// 붙어 달라는 요청(0=없음, 아니면 번호+1). **가져가면 사라진다** — 두 번 붙으면 세션이 둘이다.
+var ssh_connect_req: u32 = 0;
+/// 자동 요청을 이미 했나. **한 번만 한다**(임시 — 목록 화면이 없어 붙을 길이 그것뿐이다).
+/// 매번 하면 배경에서 돌아와 config 를 다시 읽을 때마다 또 붙는다(§3.0).
+var ssh_auto_requested = false;
+
+/// 붙을 수 있는 첫 서버. **반쯤 적은 줄은 건너뛴다** — 그걸로 붙으러 가면 실패 이유가
+/// "네트워크" 처럼 보여 사용자가 무엇을 안 적었는지 모른다(계약 §4.3).
+///
+/// 자동 요청은 프로세스마다 한 번뿐이라 그 경로로는 이 규칙을 한 가지 경우밖에 못 잰다 —
+/// 그래서 고르는 일만 순수 함수로 떼어 둔다(테스트가 목록을 직접 준다).
+pub fn firstComplete(list: []const mobile_config.Server) ?usize {
+    for (list, 0..) |srv, i| if (srv.isComplete()) return i;
+    return null;
+}
+
+/// 지금 들고 있는 서버 목록. config 를 안 읽었으면 빈 목록이다.
+fn servers() []const mobile_config.Server {
+    const p = cfg_parsed orelse return &.{};
+    return p.servers[0..p.server_count];
+}
+
 pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     const next = mobile_config.parse(term_allocator, ptr[0..len]) catch {
         setLastError("config_parse");
@@ -173,6 +196,13 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     };
     if (cfg_parsed) |*old| old.deinit();
     cfg_parsed = next;
+    // **온전한 첫 서버를 한 번만 자동으로 요청한다**(임시 — S9b-2b 가 화면 탭으로 바꾼다).
+    if (!ssh_auto_requested) {
+        if (firstComplete(next.servers[0..next.server_count])) |i| {
+            ssh_connect_req = @intCast(i + 1);
+            ssh_auto_requested = true;
+        }
+    }
     if (cfg_source.len > 0) term_allocator.free(cfg_source);
     cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {
         setLastError("config_source_alloc");
@@ -561,6 +591,43 @@ pub export fn maru_mobile_term_write(ptr: [*]const u8, len: usize) usize {
     if (core.shellEvents().len > 0) core.clearShellEvents();
     term_written += len;
     return term_written;
+}
+
+/// 등록된 서버 수. **자리가 아니라 개수다** — 빈 번호는 파싱에서 이미 당겨졌다.
+pub export fn maru_mobile_server_count() u32 {
+    return @intCast(servers().len);
+}
+
+/// 그 서버의 문자열 값을 채운다. 자리가 모자라면 **0 이고 아무것도 안 쓴다** — 잘라 주면
+/// host 가 반쪽 주소로 붙으러 간다.
+pub export fn maru_mobile_server_field(index: u32, field: u32, out: [*]u8, cap: usize) usize {
+    const list = servers();
+    if (index >= list.len) return 0;
+    const srv = list[index];
+    const text: []const u8 = switch (field) {
+        0 => srv.name,
+        1 => srv.host,
+        2 => srv.user,
+        3 => srv.fingerprint,
+        else => return 0,
+    };
+    if (text.len == 0 or text.len > cap) return 0;
+    @memcpy(out[0..text.len], text);
+    return text.len;
+}
+
+/// 그 서버의 포트. 번호가 틀리면 0 이다 — 0 은 붙을 수 없는 포트라 그대로 오류 신호가 된다.
+pub export fn maru_mobile_server_port(index: u32) u32 {
+    const list = servers();
+    if (index >= list.len) return 0;
+    return list[index].port;
+}
+
+/// 붙어 달라는 요청을 가져간다. **가져가면 사라진다**(복사·키보드 올리기와 같은 규율).
+pub export fn maru_mobile_take_server_connect() u32 {
+    const req = ssh_connect_req;
+    ssh_connect_req = 0;
+    return req;
 }
 
 /// 지금 터미널 격자(열·행). **host 가 따로 세면 두 값이 갈린다** — 원격에 알릴 pty 크기는

@@ -45,6 +45,7 @@ test "WindowsShell(config)과 WindowsShellKind(pty)는 같은 변형 집합이�
 /// `@enumFromInt`는 **조용히 다른 셸을 띄운다**. 명시 `switch`는 변형이 늘면 컴파일이 멈춘다.
 pub fn windowsShellKindOf(shell: config.theme.WindowsShell) pty.WindowsShellKind {
     return switch (shell) {
+        .pwsh => .pwsh,
         .powershell => .powershell,
         .cmd => .cmd,
     };

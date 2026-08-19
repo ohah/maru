@@ -3293,7 +3293,7 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32) void {
     // 화면이 무엇을 담는지도 안 보인다.
     sess_servers_rect = .{ .x = win.x, .y = sess_row_rect.y + row_h + 1, .w = win.w, .h = row_h };
     if (sess_pressed == .servers) push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y), .w = @intFromFloat(sess_servers_rect.w), .h = @intFromFloat(sess_servers_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
-    pushText("서버", @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
+    pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     var cnt: [8]u8 = undefined;
     const cnt_text = std.fmt.bufPrint(&cnt, "{d}", .{servers().len}) catch "?";
     pushText(cnt_text, @intFromFloat(sess_servers_rect.x + sess_servers_rect.w - 16 - @as(f32, @floatFromInt(textWidth(cnt_text, 15)))), @intFromFloat(sess_servers_rect.y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
@@ -3351,7 +3351,7 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         };
         quad_count += 1;
     }
-    pushText("서버", @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 
     srv_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
@@ -3363,8 +3363,8 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
     // **빈 목록도 말을 한다.** 아무것도 안 그리면 화면이 고장 난 것처럼 보이고, 사용자는
     // 무엇을 해야 하는지 모른다(등록 수단은 다음 슬라이스라 지금은 어디에 적는지를 알린다).
     if (list.len == 0) {
-        pushText("등록된 서버가 없다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24), 17, tk.get(.surface_fg));
-        pushText("config 의 ssh.server.1.host 부터 적는다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24 + 26), 14, tk.get(.muted_fg));
+        pushText(maru.i18n.tIn(.ko, .mob_servers_empty), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24), 17, tk.get(.surface_fg));
+        pushText(maru.i18n.tIn(.ko, .mob_servers_empty_hint), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24 + 26), 14, tk.get(.muted_fg));
         return;
     }
 
@@ -3384,7 +3384,7 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         // **온전하지 않으면 그렇게 말한다.** 눌러도 안 붙는 줄을 멀쩡한 줄처럼 그리면 실패가
         // 네트워크 문제처럼 보인다(계약 §4.3).
         const sub_role: tokens.ColorRole = if (srv.isComplete()) .muted_fg else .accent_bar;
-        pushText(if (srv.isComplete()) addr else "지문이 없다 — 접속할 수 없다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
+        pushText(if (srv.isComplete()) addr else maru.i18n.tIn(.ko, .mob_server_no_fingerprint), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
         push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry + srv_row_h - 1), .w = @intFromFloat(srv_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     }
 }

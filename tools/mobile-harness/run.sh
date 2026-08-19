@@ -327,7 +327,8 @@ chrome-android-app)
     # IME shim 과 **SSH 포그라운드 서비스** 둘뿐이다. `android.*` 만 써서 AndroidX 도
     # kotlin-stdlib 도 없다 — 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(§1).
     javac -source 8 -target 8 -nowarn -bootclasspath "$SDK/platforms/android-35/android.jar" \
-        -d "$OUT/java" "$ANDROID/MaruActivity.java" "$ANDROID/MaruSshService.java"
+        -d "$OUT/java" "$ANDROID/MaruActivity.java" "$ANDROID/MaruSshService.java" \
+        "$ANDROID/MaruKeyStore.java"
     "$BT/d8" --min-api 29 --output "$OUT" $(find "$OUT/java" -name '*.class')
     python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.write(sys.argv[3],"classes.dex");z.close()' \
         "$OUT/base.apk" "$OUT/libmaruchrome.so" "$OUT/classes.dex"

@@ -29,11 +29,10 @@ public class MaruSshService extends Service {
 
     /** 접속을 시작한다. 문자열은 네이티브가 복사해 간다.
      *
-     *  **키는 경로로 넘긴다 — 바이트가 아니다.** 서비스를 시작하는 `Intent` 의 extra 는
-     *  `system_server` 를 지나므로, 거기 개인키를 실으면 우리 프로세스 밖으로 나간다.
-     *  경로만 넘기고 파일은 네이티브가 우리 프로세스 안에서 읽는다. */
+     *  **키는 이 프로세스 안에서만 오간다.** Keystore 가 푼 64바이트를 JNI 로 바로 넘기고
+     *  (`Intent` extra 로 넣으면 `system_server` 를 지난다) 넘긴 뒤 배열을 지운다. */
     private static native void nativeSshStart(
-            String host, int port, String user, String keyPath, String fingerprint);
+            String host, int port, String user, byte[] secret, String fingerprint);
 
     /** 끊는다. 스레드가 끝날 때까지 기다린다. */
     private static native void nativeSshStop();
@@ -65,10 +64,17 @@ public class MaruSshService extends Service {
             String host = intent.getStringExtra("host");
             int port = intent.getIntExtra("port", 22);
             String user = intent.getStringExtra("user");
-            String keyPath = intent.getStringExtra("identity");
             String fingerprint = intent.getStringExtra("fingerprint");
-            if (host != null && user != null && keyPath != null && fingerprint != null) {
-                nativeSshStart(host, port, user, keyPath, fingerprint);
+            if (host != null && user != null && fingerprint != null) {
+                // **키는 여기서 연다** — Keystore 가 봉인해 둔 것을 풀어 바로 넘기고 지운다.
+                byte[] secret = MaruKeyStore.loadOrCreate(this);
+                if (secret == null) {
+                    android.util.Log.i("MaruChrome", "MARU_SSH no_key — 접속하지 않는다");
+                    stopSelf();
+                    return START_NOT_STICKY;
+                }
+                nativeSshStart(host, port, user, secret, fingerprint);
+                java.util.Arrays.fill(secret, (byte) 0);
             }
         }
         // 죽으면 **다시 안 띄운다.** 재접속은 앱이 정하는 일이고, OS 가 임의로 되살리면

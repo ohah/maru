@@ -16,6 +16,8 @@ const std = @import("std");
 const maru = @import("maru");
 const client = maru.session.ssh.client;
 const private_key = maru.session.ssh.private_key;
+const userauth = maru.session.ssh.userauth;
+const hostkey = maru.session.ssh.hostkey;
 
 // 숫자의 단일 출처는 `mobile_host_abi.h` 다. 여기 상수는 그 값을 **그대로** 든다 —
 // 계약 테스트가 헤더를 읽어 대조한다(한쪽만 고치면 링크는 되고 동작만 어긋난다).
@@ -279,6 +281,74 @@ pub export fn maru_mobile_ssh_load_key(
     parsed.clear();
     std.crypto.secureZero(u8, &key_scratch);
     std.crypto.secureZero(u8, &key_blob);
+    last_load_error = "";
+    return ok;
+}
+
+/// 기기에서 키쌍을 만든다(계약 §3.4 — **키는 앱이 만든다**).
+///
+/// **씨앗은 host 가 준다**(`open` 과 같은 규칙 — 이 층은 OS 난수를 못 부른다). 그 32바이트가
+/// 곧 개인키의 씨앗이므로, 예측 가능한 값을 주면 **그 키로 지킬 수 있는 것이 아무것도 없다** —
+/// 0 은 거절한다.
+///
+/// 나오는 것은 둘이다: `open` 에 그대로 넘길 **64바이트**(`seed ‖ public`)와, 사용자가 서버
+/// `authorized_keys` 에 붙일 **한 줄**(`ssh-ed25519 <base64> maru`). 개인키는 이 함수 밖으로
+/// 안 나가고, 나간 한 줄에는 공개키만 들어 있다.
+pub export fn maru_mobile_ssh_generate_key(
+    entropy: [*]const u8,
+    out_secret: [*]u8,
+    out_line: [*]u8,
+    line_cap: u32,
+) c_int {
+    @memset(out_secret[0..secret_key_bytes], 0);
+    if (line_cap > 0) out_line[0] = 0;
+
+    var seed: [32]u8 = undefined;
+    @memcpy(&seed, entropy[0..32]);
+    var any: u8 = 0;
+    for (seed) |b| any |= b;
+    if (any == 0) {
+        last_load_error = "entropy_zero";
+        return err_bad_arg;
+    }
+
+    const pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed) catch {
+        last_load_error = "key_generate_failed";
+        std.crypto.secureZero(u8, &seed);
+        return err_bad_arg;
+    };
+    var secret: [secret_key_bytes]u8 = undefined;
+    @memcpy(secret[0..32], &seed);
+    @memcpy(secret[32..64], &pair.public_key.toBytes());
+    std.crypto.secureZero(u8, &seed);
+
+    // 공개키 한 줄. **blob 은 코어가 만든다** — 형식이 두 벌이 되면 갈린다.
+    var blob_buf: [128]u8 = undefined;
+    const blob = userauth.publicKeyBlob(&blob_buf, secret) catch {
+        last_load_error = "public_blob_failed";
+        std.crypto.secureZero(u8, &secret);
+        return err_bad_arg;
+    };
+    const encoder = std.base64.standard.Encoder;
+    const need = hostkey.alg_name.len + 1 + encoder.calcSize(blob.len) + " maru".len + 1;
+    if (line_cap < need) {
+        last_load_error = "line_too_small";
+        std.crypto.secureZero(u8, &secret);
+        return err_bad_arg;
+    }
+    var n: usize = 0;
+    @memcpy(out_line[0..hostkey.alg_name.len], hostkey.alg_name);
+    n += hostkey.alg_name.len;
+    out_line[n] = ' ';
+    n += 1;
+    const encoded = encoder.encode(out_line[n .. n + encoder.calcSize(blob.len)], blob);
+    n += encoded.len;
+    @memcpy(out_line[n..][0..5], " maru");
+    n += 5;
+    out_line[n] = 0;
+
+    @memcpy(out_secret[0..secret_key_bytes], &secret);
+    std.crypto.secureZero(u8, &secret);
     last_load_error = "";
     return ok;
 }

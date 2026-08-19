@@ -87,6 +87,22 @@ fn readAll(path: []const u8, out: []u8) ![]u8 {
 
 var file_buf: [8192]u8 = undefined;
 
+/// 씨앗 파일(32B)로 **기기에서 만드는 것과 같은 키**를 만든다.
+///
+/// **씨앗을 인자로 받는 것이 요점이다.** 제품은 OS 난수를 넣고, 검증은 같은 씨앗을 두 번 넣어
+/// (한 번은 공개키 줄을 뽑고, 한 번은 그 키로 붙어서) **만든 키가 진짜 OpenSSH 에 먹히는지**를
+/// 잰다 — 형식만 그럴싸한 공개키는 붙여 넣고서야 안 먹는 것을 알게 된다.
+fn generateFromSeedFile(path: []const u8, out: *[64]u8, line: []u8) !usize {
+    var seed_buf: [64]u8 = undefined;
+    const seed = try readAll(path, &seed_buf);
+    if (seed.len < 32) return error.SeedTooShort;
+    if (abi.maru_mobile_ssh_generate_key(seed.ptr, out, line.ptr, @intCast(line.len)) != abi.ok) {
+        say("키를 못 만들었다: {s}", .{std.mem.span(abi.maru_mobile_ssh_last_load_error())});
+        return error.KeyGenerateFailed;
+    }
+    return std.mem.len(@as([*:0]const u8, @ptrCast(line.ptr)));
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var it = std.process.Args.Iterator.init(init.args);
     _ = it.next();
@@ -99,14 +115,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const expect_bytes = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
     const port = try std.fmt.parseInt(u16, port_str, 10);
 
-    // **키는 ABI 가 푼다** — host 는 파일만 읽는다(기기에서도 같다).
+    // **키는 ABI 가 든다** — host 는 파일만 읽거나(기존 키) 씨앗을 넣어 만들게 한다(기기와 같다).
     var secret: [64]u8 = undefined;
-    const pem = try readAll(key_path, &file_buf);
-    if (abi.maru_mobile_ssh_load_key(pem.ptr, @intCast(pem.len), "", 0, &secret) != abi.ok) {
-        say("키를 못 읽었다: {s}", .{std.mem.span(abi.maru_mobile_ssh_last_load_error())});
-        return fail("키 읽기 실패");
-    }
     defer std.crypto.secureZero(u8, &secret);
+    if (std.mem.startsWith(u8, key_path, "seed:")) {
+        var line: [256]u8 = @splat(0);
+        const n = try generateFromSeedFile(key_path["seed:".len..], &secret, &line);
+        if (std.mem.eql(u8, marker, "PRINT_PUBLIC_LINE")) {
+            // 공개키 줄만 찍고 끝낸다 — 스크립트가 그것을 `authorized_keys` 에 넣는다.
+            var out_buf: [512]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&out_buf, "{s}\n", .{line[0..n]});
+            _ = c.write(1, msg.ptr, msg.len);
+            return;
+        }
+    } else {
+        const pem = try readAll(key_path, &file_buf);
+        if (abi.maru_mobile_ssh_load_key(pem.ptr, @intCast(pem.len), "", 0, &secret) != abi.ok) {
+            say("키를 못 읽었다: {s}", .{std.mem.span(abi.maru_mobile_ssh_last_load_error())});
+            return fail("키 읽기 실패");
+        }
+    }
 
     var user_z: [128]u8 = @splat(0);
     @memcpy(user_z[0..user.len], user);

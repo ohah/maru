@@ -541,7 +541,7 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_exit_status",            "maru_mobile_ssh_exit_signal",
         "maru_mobile_ssh_last_error",             "maru_mobile_ssh_clear_error",
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
-        "maru_mobile_ssh_rekeys",
+        "maru_mobile_ssh_rekeys",                 "maru_mobile_ssh_generate_key",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -600,4 +600,64 @@ test "재키잉 횟수는 세션 것이고 핸들이 틀리면 0 이다" {
     ssh.slots[(h & 0xFFFF) - 1].cl.rekeys = 3;
     try testing.expectEqual(@as(u32, 3), ssh.maru_mobile_ssh_rekeys(h));
     try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_rekeys(h ^ 0x1000)); // 틀린 핸들
+}
+
+test "기기에서 만든 키는 그 자리에서 쓸 수 있다" {
+    // **키는 앱이 만든다**(계약 §3.4). 만든 것이 실제로 세션을 열 수 있어야 하고(64바이트),
+    // 사용자가 붙일 한 줄이 함께 나와야 한다 — 둘 중 하나만 맞으면 붙지도 못하거나 붙일 수도
+    // 없다.
+    var seed: [32]u8 = @splat(0);
+    seed[0] = 1; // 0 만 아니면 된다
+    var secret: [64]u8 = @splat(0);
+    var line: [256]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &line, line.len));
+
+    // 앞 32바이트는 우리가 준 씨앗, 뒤 32바이트는 **그 씨앗에서 나온 공개키**여야 한다 —
+    // 아니면 서버가 광고한 키와 서명이 안 맞아 인증이 조용히 실패한다.
+    try testing.expectEqualSlices(u8, &seed, secret[0..32]);
+    const derived = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+    try testing.expectEqualSlices(u8, &derived.public_key.toBytes(), secret[32..64]);
+
+    // 한 줄은 `ssh-ed25519 <base64> maru` 다.
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(&line)));
+    try testing.expect(std.mem.startsWith(u8, text, "ssh-ed25519 "));
+    try testing.expect(std.mem.endsWith(u8, text, " maru"));
+
+    // **그 base64 를 풀면 우리 공개키가 나온다.** 형식만 그럴싸하고 값이 다르면 사용자는
+    // 붙여 넣고도 못 붙는다 — 그때 원인을 짚기가 아주 어렵다.
+    const b64 = text["ssh-ed25519 ".len .. text.len - " maru".len];
+    var blob: [128]u8 = undefined;
+    const decoder = std.base64.standard.Decoder;
+    const blob_len = try decoder.calcSizeForSlice(b64);
+    try decoder.decode(blob[0..blob_len], b64);
+    // blob = string("ssh-ed25519") ‖ string(32바이트 공개키)
+    try testing.expectEqualSlices(u8, secret[32..64], blob[blob_len - 32 ..][0..32]);
+
+    // 그리고 그 64바이트로 세션이 열려야 한다.
+    var h: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &secret, &seed, "xterm", 5, 80, 24, 0, 1, &h));
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
+}
+
+test "예측 가능한 씨앗으로는 키를 안 만든다" {
+    // 씨앗이 곧 개인키다. 0 을 받아 그대로 만들면 **그 키로 지킬 수 있는 것이 아무것도 없는데**
+    // 화면에는 정상으로 보인다.
+    var zero: [32]u8 = @splat(0);
+    var secret: [64]u8 = @splat(0xAB);
+    var line: [256]u8 = @splat(0xAB);
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_generate_key(&zero, &secret, &line, line.len));
+    try testing.expectEqualStrings("entropy_zero", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+    for (secret) |b| try testing.expectEqual(@as(u8, 0), b); // 실패하면 자리를 비운다
+    try testing.expectEqual(@as(u8, 0), line[0]);
+}
+
+test "한 줄 자리가 모자라면 자르지 않고 실패한다" {
+    // 잘린 공개키는 붙여 넣어도 안 먹는다 — 사용자는 "붙였는데 왜 안 되지" 를 겪는다.
+    var seed: [32]u8 = @splat(7);
+    var secret: [64]u8 = @splat(0);
+    var tiny: [16]u8 = @splat(0xAB);
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &tiny, tiny.len));
+    try testing.expectEqualStrings("line_too_small", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+    try testing.expectEqual(@as(u8, 0), tiny[0]);
 }

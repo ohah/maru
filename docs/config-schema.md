@@ -45,7 +45,12 @@ pub const FontConfig = struct {
 pub const Meta = struct {
     /// 키 segment override. 없으면 필드명을 그대로 쓴다(`_`는 유지 — `-` 변환은 안전하지 않아 명시).
     key_seg: ?[]const u8 = null,
-    doc: []const u8,
+    /// **전체 키** override(없으면 `<namespace>.<segment>`로 유도). 최상위 스칼라는 필수.
+    key: ?[]const u8 = null,
+    /// 표시 문장의 **키**(i18n 계약 §5). 예전에는 문장을 직접 담았는데, 그러면 설정 화면이 그 문장을
+    /// 현재 언어로 못 바꾼다. 값 해석은 `schema.docText(meta.doc)` 가 하고, 필터는 **모든 언어의**
+    /// 문장을 봐야 하므로 `Field` 5종이 해석된 `doc` 과 함께 이 키를 `doc_key` 로 함께 싣는다.
+    doc: ?i18n.Key = null,
     /// 숫자 범위(min,max). enum/bool/문자열엔 무의미(null). 파서 검증과 GUI 숫자 입력 박스 clamp가 공유.
     range: ?[2]f64 = null,
     /// 파일 파싱 전용 범위 override(없으면 range와 동일). GUI 위젯 범위보다 config 파일 직접 편집을 더 넓게
@@ -57,6 +62,15 @@ pub const Meta = struct {
     widget: Widget = .auto,
     /// 세팅 페이지 좌측 섹션. 없으면 부모 struct 이름에서 유추.
     section: ?Section = null,
+    /// **설정 GUI에서 숨김**(config 파일로만 편집). 파일 저장·파싱은 그대로라 파일로는 켤 수 있다 —
+    /// 미완성·실험 opt-in을 일반 사용자 UI에서 가리는 데 쓴다. `section = null`(기타 그룹 노출)과 다르다.
+    hidden: bool = false,
+    /// text 필드가 **절대경로**를 요구하는가(예: `shell.command`). true면 파일 파싱이 비절대 값을
+    /// diagnostic + 기본값 유지로 거른다 — GUI와 파일이 같은 규칙을 쓰게 한다.
+    abs_path: bool = false,
+    /// 값이 **경로**인가. Windows 호스트에서 구분자를 정규화한다(POSIX 에서는 `\`가 파일 이름
+    /// 글자라 아무것도 안 바꾼다). `abs_path` 가 이것을 **함의한다** — 절대경로 요구 필드는 정의상 경로다.
+    path_value: bool = false,
 };
 ```
 

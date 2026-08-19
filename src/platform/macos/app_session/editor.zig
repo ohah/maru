@@ -272,6 +272,7 @@ pub fn hitTestBody(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
         text,
         tab_w,
         @min(v.start_byte, text.len),
+        v.start_byte_col,
         v.start_col,
         layout.content.width,
         @intCast(rel_x - content_left_px),
@@ -558,7 +559,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     //
     // **못 담으면 그냥 안 담는다.** 저장소를 못 잡아도 화면은 이미 다 그렸고, 클릭이 그 프레임 동안
     // 안 될 뿐이다(§2.1 캐시가 "못 잡으면 없이 그린다"와 같은 결).
-    storeHitRows(self, term, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
+    // **비교 뷰에서는 담지 않는다.** `hitTestBody`가 diff를 첫 줄에서 거절하므로 결과가 영영 안
+    // 쓰이고, 게다가 비교 경로의 `visual_rows`는 좌우 열이 섞인 배열이라 이 축으로 해석하면 값
+    // 자체가 틀린다 — 뒷날 diff 가드를 풀 때 조용히 잘못된 값을 내는 지뢰가 된다(7차 적대적 검증).
+    if (term.rt.editor_diff == null) {
+        storeHitRows(self, term, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
+    }
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
@@ -5393,16 +5399,67 @@ test "hitTestBody: 렌더가 그린 자리를 기준선으로 삼는다 (§4.1g 
     try testing.expectEqual(@as(?usize, 21), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + 5000));
 }
 
-test "[주 판정] 무작위 좌표를 쏴도 클릭이 화면과 어긋나지 않는다 (§4.1g)" {
-    // **계약이 "이 슬라이스의 주 판정"이라 지목한 것이다.** §4.1g: *"무작위 좌표를 쏘아 결과가 늘
-    // cluster 경계인지 본다 — 알파벳은 §3.8 문자 포함"*.
-    //
-    // **오라클은 gutter가 그린 줄 번호다.** 구현과 같은 식으로 좌표를 만들면 어긋남을 못 잡으므로
-    // (1차 검증이 그 함정을 잡았다), 화면에 실제로 나온 번호로 "이 행이 몇 번 줄인가"를 읽는다.
-    //
-    // **cluster 경계만으로는 부족하다**(2차 검증의 발견). layout 인자가 어긋나도 답은 여전히 같은
-    // 줄의 cluster 경계라 그 판정을 통과한다. 그래서 **행 경계 부등식**을 함께 본다 — 한 행의
-    // 오른쪽 끝이 다음 행의 시작을 넘어서면 안 된다.
+// ─────────────────── [주 판정] 화면과 클릭이 어긋나지 않는가 (§4.1g) ───────────────────
+//
+// **오라클은 렌더가 실제로 낸 것뿐이다** — 그린 글자(`DrawList.cells`), gutter가 그린 줄 번호,
+// 렌더의 원점(`PaneDraw.rect`). 구현식을 다시 쓰지 않는다.
+//
+// **초판은 판정력이 0이었다**(3차 적대적 검증). 좌표는 33,048발이나 쐈지만 ⑴ 가장 긴 줄이 70열인데
+// 본문이 89열이라 **랩이 한 번도 안 걸렸고**(`piece`·`start_col`·`start_byte`가 네 config 모두 0),
+// ⑵ 그래서 행 경계 부등식이 **0회** 실행됐으며, ⑶ 판정에 쓰는 줄을 `editor_hit_lines`에서 읽어
+// **자기가 검증한다는 배열로 기대값을 만들었다**. 뮤턴트 8개를 전부 통과시켰고, 그중에는
+// `return line.start;`(x를 아예 안 보는 것)도 있었다.
+
+/// 그 **화면 칸을 소유한 cluster**가 화면 글자와 1:1로 대응하지 않는가(탭·§3.8 표기).
+///
+/// 오라클 테스트가 "그린 글자 == 클릭이 답한 글자"를 비교할 때, 이런 칸은 비교 자체가 성립하지
+/// 않으므로 뺀다 — 원본 하나가 화면 여럿이기 때문이다.
+///
+/// **답을 기준으로 거르면 안 된다**(적대적 검증 6회차가 세 규칙을 계측했다). 표기 여덟 칸 중 중점
+/// 오른쪽 칸들은 **다음 cluster**를 답하고 그 cluster에는 hazard가 없어, 답의 cp만 보면 3,003건이
+/// 답의 cluster를 훑어도 1,966건이 남았다. **칸을 소유한 cluster로 가르자 0건**이 됐다.
+///
+/// **그래도 §3.8 판정력은 남는다**: 표기 앞뒤의 정상 글자 칸은 그대로 비교되므로, 표기가 만든 열
+/// 어긋남이 이웃에 드러나면 잡힌다(실측으로 뮤턴트 여덟을 잡는다).
+fn advCellIsUnmappable(line: []const u8, row: chrome_editor.visual_map.VisualRow, screen_col: u16, content_left: u16) bool {
+    const abs_col: u32 = row.start_col + (screen_col - content_left);
+    var i: usize = @min(row.start_byte, line.len);
+    var col: u32 = row.start_byte_col;
+    while (i < line.len) {
+        const st = chrome_editor.content.stepColumn(line, i, col, chrome_editor.frame.default_tab_width);
+        if (st.next_col > abs_col) {
+            if (line[i] == '\t') return true;
+            const end = @min(
+                maru.chrome.text_layout.clusterEndAfter(line, i, maru.chrome.text_layout.decodeCodepoint(line, i).advance),
+                line.len,
+            );
+            var scan = i;
+            while (scan < end) {
+                if (maru.hazard.classifyInText(line, scan) != null) return true;
+                const seq = std.unicode.utf8ByteSequenceLength(line[scan]) catch 1;
+                scan += @max(1, @min(seq, end - scan));
+            }
+            return false;
+        }
+        i = st.next_byte;
+        col = st.next_col;
+    }
+    return false;
+}
+
+/// 행마다 gutter가 실제로 그린 줄 번호(1-based). 이어진 조각은 `null`.
+fn advGutterNumbers(dl: renderer.DrawList, content_left: u16, out: []?u32) void {
+    for (out) |*o| o.* = null;
+    for (dl.cells) |c| {
+        if (c.col >= content_left) continue;
+        if (c.codepoint < '0' or c.codepoint > '9') continue;
+        if (c.row >= out.len) continue;
+        const d: u32 = @intCast(c.codepoint - '0');
+        out[c.row] = if (out[c.row]) |v| v * 10 + d else d;
+    }
+}
+
+test "ADV3-A 그려진 글자가 곧 클릭이 답한 글자다 (랩이 실제로 걸린 문서)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;
@@ -5410,30 +5467,392 @@ test "[주 판정] 무작위 좌표를 쏴도 클릭이 화면과 어긋나지 �
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    // §3.8 문자를 포함한 알파벳 — §4.1c가 정한 규율이고, Vim이 아직 못 고친 함정이 이 종류다.
+    // **본문 폭(89열)보다 훨씬 긴 줄**을 만들어 랩이 실제로 걸리게 한다.
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
-    const units = [_][]const u8{ "ab", "\t", "가나", "😀", "\u{202E}x", "  ", "z" };
-    var prng = std.Random.DefaultPrng.init(0x4A11);
+    var prng = std.Random.DefaultPrng.init(0xAD3);
     const rand = prng.random();
-    for (0..60) |_| {
-        const n = 3 + rand.uintLessThan(usize, 12);
-        for (0..n) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
+    // **§3.8 문자와 cluster 안 hazard를 넣는다**(§4.1g가 *"알파벳은 §3.8 문자 포함"*이라 이름을
+    // 대어 요구한 규율). 5차 적대적 검증이 이 누락 때문에 결함 셋이 살아남았다고 짚었다 — 특히
+    // `ad<ZWJ>min`처럼 **첫 codepoint가 정상이고 뒤에 hazard가 붙은 cluster**가 없으면, 걸친 것을
+    // 자를지 버릴지 가르는 판정이 틀려도 아무도 못 잡는다.
+    const units = [_][]const u8{ "a", "b", "Z", "7", "가", "힣", "\u{202E}", "ad\u{200D}min" };
+    for (0..30) |_| {
+        for (0..120 + rand.uintLessThan(usize, 120)) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
         try text.append(allocator, '\n');
     }
-    try fx.dir.dir.writeFile(io, .{ .sub_path = "adv.txt", .data = text.items });
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "adv3a.txt", .data = text.items });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
-    const path = try std.fs.path.join(allocator, &.{ root, "adv.txt" });
+    const path = try std.fs.path.join(allocator, &.{ root, "adv3a.txt" });
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    // 랩·스크롤을 섞어 `start_col`·`start_byte`·`piece`가 실제로 움직이게 한다.
+    var checked: usize = 0;
+    var mismatch: usize = 0;
+    var line_mismatch: usize = 0;
+    var wrapped_rows: usize = 0;
+    var first_bad: ?struct { row: usize, col: u16, want: u21, got: u21 } = null;
+
     for ([_]struct { wrap: bool, first: usize }{
-        .{ .wrap = false, .first = 0 },
         .{ .wrap = true, .first = 0 },
-        .{ .wrap = true, .first = 5 },
-        .{ .wrap = false, .first = 7 },
+        .{ .wrap = true, .first = 3 },
+        .{ .wrap = false, .first = 2 },
+    }) |cfg| {
+        term.rt.editor_wrap = cfg.wrap;
+        term.rt.editor_first_line = cfg.first;
+        term.rt.editor_first_piece = 0;
+        term.rt.editor_row_cache.filled = false;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse continue;
+        defer drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_hit_rows_len;
+        if (rows == 0) continue;
+
+        const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+        const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+        const ox: f64 = @floatFromInt(drawn.rect.x);
+        const oy: f64 = @floatFromInt(drawn.rect.y);
+
+        // 오라클 ①: gutter가 그린 번호 → 그 행의 원본 줄(이어진 조각은 위에서 물려받는다).
+        var nums_buf: [512]?u32 = undefined;
+        const content_left: u16 = 8; // gutter 폭 — 자릿수가 아니라 `geometry.min_line_number_cells = 5`가 정한다 → 여백1+5+접힘1+여백1
+        advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
+        var carry: ?u32 = null;
+        var line_of_row: [512]?u32 = undefined;
+        for (0..rows) |r| {
+            if (nums_buf[r]) |n| carry = n else wrapped_rows += 1;
+            line_of_row[r] = carry;
+        }
+
+        for (drawn.dl.cells) |c| {
+            if (c.col < content_left) continue;
+            if (c.row >= rows) continue;
+            const x = ox + @as(f64, @floatFromInt(c.col)) * cw + 1;
+            const y = oy + @as(f64, @floatFromInt(c.row)) * ch + 1;
+            const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse continue;
+
+            // 오라클 ②: 그 offset이 gutter가 말한 줄 안에 있는가.
+            const want_line = line_of_row[c.row] orelse continue;
+            const doc = term.rt.editor_doc.?;
+            const li = doc.file.lines.line(want_line - 1) orelse continue;
+            if (off < li.start or off > li.contentEnd()) {
+                line_mismatch += 1;
+                continue;
+            }
+
+            // 오라클 ③: 그 자리에 **그려진 글자**가 곧 그 offset의 글자인가.
+            const lt = term.rt.editor_lines[want_line - 1];
+            const rel = off - li.start;
+            if (rel >= lt.len) continue; // 줄 끝 — 그릴 글자가 없다
+            const seq_len = std.unicode.utf8ByteSequenceLength(lt[rel]) catch continue;
+            if (rel + seq_len > lt.len) continue;
+            const cp = std.unicode.utf8Decode(lt[rel .. rel + seq_len]) catch continue;
+            if (advCellIsUnmappable(lt, term.rt.editor_hit_rows[c.row], c.col, content_left)) continue;
+            checked += 1;
+            if (cp != c.codepoint) {
+                mismatch += 1;
+                if (first_bad == null) first_bad = .{ .row = c.row, .col = c.col, .want = c.codepoint, .got = cp };
+            }
+        }
+    }
+
+    std.debug.print("\n[ADV3-A] checked={d} glyph_mismatch={d} line_mismatch={d} wrapped_rows={d}\n", .{ checked, mismatch, line_mismatch, wrapped_rows });
+    if (first_bad) |b| std.debug.print("[ADV3-A] 첫 불일치: row={d} col={d} 그린 글자=U+{X} 클릭이 답한 글자=U+{X}\n", .{ b.row, b.col, b.want, b.got });
+    try testing.expect(checked > 1000); // 판정이 실제로 돌았는가
+    try testing.expect(wrapped_rows > 10); // 랩이 실제로 걸렸는가
+    try testing.expectEqual(@as(usize, 0), line_mismatch);
+    try testing.expectEqual(@as(usize, 0), mismatch);
+}
+
+test "ADV3-B 접힘을 켜도 클릭이 gutter가 그린 줄을 답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for (0..60) |i| {
+        var lb: [64]u8 = undefined;
+        try text.appendSlice(allocator, try std.fmt.bufPrint(&lb, "head{d}\n", .{i}));
+        for (0..4) |j| try text.appendSlice(allocator, try std.fmt.bufPrint(&lb, "    body{d}_{d}\n", .{ i, j }));
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "adv3b.txt", .data = text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "adv3b.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(term.rt.editor_visible_numbers.len > 0);
+    term.rt.editor_first_line = 11; // 접힌 상태에서 스크롤까지 섞는다
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    defer drawn.dl.deinit(allocator);
+    const rows = term.rt.editor_hit_rows_len;
+    try testing.expect(rows > 3);
+
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    const ox: f64 = @floatFromInt(drawn.rect.x);
+    const oy: f64 = @floatFromInt(drawn.rect.y);
+    const content_left: u16 = 8; // 101줄 → 자릿수 3, 최소 5가 이긴다
+
+    var nums_buf: [512]?u32 = undefined;
+    advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
+
+    var bad: usize = 0;
+    var judged: usize = 0;
+    for (0..rows) |r| {
+        const want = nums_buf[r] orelse continue;
+        const x = ox + @as(f64, @floatFromInt(content_left)) * cw + 1;
+        const y = oy + @as(f64, @floatFromInt(r)) * ch + 1;
+        const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse {
+            bad += 1;
+            continue;
+        };
+        const doc = term.rt.editor_doc.?;
+        const li = doc.file.lines.line(want - 1).?;
+        judged += 1;
+        if (off != li.start) {
+            bad += 1;
+            std.debug.print("[ADV3-B] row={d} gutter가 그린 줄={d} 기대 offset={d} 실제={d} (hit_lines={d})\n", .{ r, want, li.start, off, term.rt.editor_hit_lines[r] });
+        }
+    }
+    std.debug.print("\n[ADV3-B] judged={d} bad={d} rows={d} first_line={d} visible={d}\n", .{ judged, bad, rows, term.rt.editor_first_line, term.rt.editor_visible_lines.len });
+    try testing.expect(judged > 3);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "ADV3-C 랩된 행의 오른쪽 끝 너머는 그 행의 끝이다 (다음 조각 시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var prng = std.Random.DefaultPrng.init(0xC3);
+    const rand = prng.random();
+    // **§3.8 문자와 cluster 안 hazard를 넣는다**(§4.1g가 *"알파벳은 §3.8 문자 포함"*이라 이름을
+    // 대어 요구한 규율). 5차 적대적 검증이 이 누락 때문에 결함 셋이 살아남았다고 짚었다 — 특히
+    // `ad<ZWJ>min`처럼 **첫 codepoint가 정상이고 뒤에 hazard가 붙은 cluster**가 없으면, 걸친 것을
+    // 자를지 버릴지 가르는 판정이 틀려도 아무도 못 잡는다.
+    const units = [_][]const u8{ "a", "b", "Z", "7", "가", "힣", "\u{202E}", "ad\u{200D}min" };
+    for (0..20) |_| {
+        for (0..150 + rand.uintLessThan(usize, 100)) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
+        try text.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "advc.txt", .data = text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "advc.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_wrap = true;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    defer drawn.dl.deinit(allocator);
+    const rows = term.rt.editor_hit_rows_len;
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    const oy: f64 = @floatFromInt(drawn.rect.y);
+    const right: f64 = @as(f64, @floatFromInt(body.x)) + @as(f64, @floatFromInt(body.w)) - 1;
+
+    var judged: usize = 0;
+    var bad: usize = 0;
+    for (0..rows -| 1) |r| {
+        const a = term.rt.editor_hit_rows[r];
+        const b = term.rt.editor_hit_rows[r + 1];
+        if (b.piece != a.piece + 1) continue; // 같은 줄의 다음 조각만 본다
+        if (term.rt.editor_hit_lines[r] != term.rt.editor_hit_lines[r + 1]) continue;
+        const src = term.rt.editor_hit_lines[r];
+        const li = term.rt.editor_doc.?.file.lines.line(src).?;
+        // **오라클이 순환이다** — 기대값을 검증 대상 배열(`editor_hit_rows`)에서 만든다. §4.1g가
+        // *"구현과 같은 식으로 좌표를 만들면 어긋남을 못 잡는다"*고 경고한 형태이고, 실제로 `build`와
+        // `byteAtPoint`가 **함께 움직이는** 뮤턴트를 통과시킨다.
+        //
+        // **그래도 남긴다**: 이 판정이 보는 것("행 끝 너머는 다음 조각의 시작")은 독립 오라클인
+        // ADV3-A와 [주 판정]이 각각 다른 각도로 함께 잡으므로 여기서 중복으로 걸린다. 지우면 그
+        // 각도가 하나 줄고, 남겨도 거짓 통과를 만들지 않는다(7차 적대적 검증이 "이제 중복"이라 확인).
+        const want = li.start + b.start_byte;
+        const got = hitTestBody(fx.session, term, fx.leaf_rect, right, oy + @as(f64, @floatFromInt(r)) * ch + 1) orelse {
+            bad += 1;
+            continue;
+        };
+        judged += 1;
+        if (got != want) {
+            bad += 1;
+            if (bad <= 3) std.debug.print("[ADV3-C] row={d} 기대={d} 실제={d} (차이 {d}바이트)\n", .{ r, want, got, @as(i64, @intCast(got)) - @as(i64, @intCast(want)) });
+        }
+    }
+    std.debug.print("\n[ADV3-C] judged={d} bad={d} rows={d}\n", .{ judged, bad, rows });
+    try testing.expect(judged > 10);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 상수를 따른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "advd.txt", .data = "\tX\n\t\tY\nZ\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "advd.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const tw: u16 = chrome_editor.frame.default_tab_width;
+    const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    const ox: f64 = @floatFromInt(drawn.rect.x);
+    const oy: f64 = @floatFromInt(drawn.rect.y);
+
+    var x_col: ?u16 = null;
+    var y_col: ?u16 = null;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint == 'X' and c.row == 0) x_col = c.col;
+        if (c.codepoint == 'Y' and c.row == 1) y_col = c.col;
+    }
+    const xc = x_col orelse return error.NoX;
+    const yc = y_col orelse return error.NoY;
+    std.debug.print("\n[ADV3-D] tab_width={d} 렌더가 그린 X열={d}(본문 {d}) Y열={d}(본문 {d})\n", .{ tw, xc, xc - content_left, yc, yc - content_left });
+    // 렌더가 상수를 따르는가.
+    try testing.expectEqual(tw, xc - content_left);
+    try testing.expectEqual(tw * 2, yc - content_left);
+    // hit-test가 **같은** 상수를 따르는가: 그 자리를 누르면 탭 다음 byte(=1, =2)다.
+    try testing.expectEqual(@as(?usize, 1), hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(xc)) * cw + 1, oy + 1));
+    try testing.expectEqual(@as(?usize, 5), hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(yc)) * cw + 1, oy + ch + 1)); // 둘째 줄 시작(3) + 2
+}
+
+test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var prng = std.Random.DefaultPrng.init(0xE3);
+    const rand = prng.random();
+    // §3.8 문자를 함께 넣는다 — 탭과 같은 "잘라 그리는" 갈래이고, cluster 안 hazard까지 덮는다.
+    const units = [_][]const u8{ "a", "b", "\t", "가", "Z", "\t", "\u{202E}", "ad\u{200D}min" };
+    for (0..25) |_| {
+        for (0..80 + rand.uintLessThan(usize, 60)) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
+        try text.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "adve.txt", .data = text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "adve.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var checked: usize = 0;
+    var mismatch: usize = 0;
+    var first_bad: ?struct { col: u16, want: u21, got: u21, fc: u16 } = null;
+
+    for ([_]u16{ 0, 7, 33, 60 }) |fc| {
+        term.rt.editor_wrap = false;
+        term.rt.editor_first_col = fc;
+        term.rt.editor_first_line = 0;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse continue;
+        defer drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_hit_rows_len;
+        if (rows == 0) continue;
+        const eff = term.rt.editor_first_col;
+
+        const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+        const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+        const ox: f64 = @floatFromInt(drawn.rect.x);
+        const oy: f64 = @floatFromInt(drawn.rect.y);
+        const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
+
+        var nums_buf: [512]?u32 = undefined;
+        advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
+
+        for (drawn.dl.cells) |c| {
+            if (c.col < content_left or c.row >= rows) continue;
+            if (c.codepoint == ' ') continue; // 탭이 편 공백 — 원본 글자와 대조할 수 없다
+            const want_line = nums_buf[c.row] orelse continue;
+            const off = hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(c.col)) * cw + 1, oy + @as(f64, @floatFromInt(c.row)) * ch + 1) orelse continue;
+            const li = term.rt.editor_doc.?.file.lines.line(want_line - 1) orelse continue;
+            const lt = term.rt.editor_lines[want_line - 1];
+            if (off < li.start or off > li.contentEnd()) {
+                mismatch += 1;
+                continue;
+            }
+            const rel = off - li.start;
+            if (rel >= lt.len) continue;
+            const n = std.unicode.utf8ByteSequenceLength(lt[rel]) catch continue;
+            if (rel + n > lt.len) continue;
+            const cp = std.unicode.utf8Decode(lt[rel .. rel + n]) catch continue;
+
+            if (advCellIsUnmappable(lt, term.rt.editor_hit_rows[c.row], c.col, content_left)) continue;
+
+            checked += 1;
+            if (cp != c.codepoint) {
+                mismatch += 1;
+                if (first_bad == null) first_bad = .{ .col = c.col, .want = c.codepoint, .got = cp, .fc = eff };
+            }
+        }
+        std.debug.print("[ADV3-E] first_col 요청={d} 실제={d} rows={d}\n", .{ fc, eff, rows });
+    }
+    std.debug.print("[ADV3-E] checked={d} mismatch={d}\n", .{ checked, mismatch });
+    try testing.expect(checked > 500);
+    if (first_bad) |b| std.debug.print("[ADV3-E] 첫 불일치: first_col={d} col={d} 그린 글자=U+{X} 클릭이 답한 글자=U+{X}\n", .{ b.fc, b.col, b.want, b.got });
+    try testing.expectEqual(@as(usize, 0), mismatch);
+}
+
+test "[주 판정] cluster 경계 · 단조성 · 행 경계 부등식 (§4.1g)" {
+    // **§4.1g가 이름을 대어 요구한 셋이다.** 앞선 판정들(ADV3-*)은 "그린 글자 == 답한 글자"를 보는데,
+    // 그것만으로는 **오른쪽 경계 규칙**이 안 보인다 — 7차 적대적 검증이 그 공백에서 뮤턴트 하나(잔여분
+    // 중점을 오른쪽에도 적용)가 전 스위트를 통과하는 것을 실측했다. 그 뮤턴트는 답을 뒤로 보냈다가
+    // 다시 앞으로 오게 만들어 **단조성**을 깬다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var prng = std.Random.DefaultPrng.init(0x7A11);
+    const rand = prng.random();
+    const units = [_][]const u8{ "a", "b", "Z", "가", "힣", "\t", "\u{202E}", "ad\u{200D}min", " " };
+    for (0..40) |_| {
+        for (0..80 + rand.uintLessThan(usize, 120)) |_| try text.appendSlice(allocator, units[rand.uintLessThan(usize, units.len)]);
+        try text.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "main.txt", .data = text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "main.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var judged: usize = 0;
+    var rule3: usize = 0;
+    for ([_]struct { wrap: bool, first: usize }{
+        .{ .wrap = true, .first = 0 },
+        .{ .wrap = true, .first = 4 },
+        .{ .wrap = false, .first = 0 },
     }) |cfg| {
         term.rt.editor_wrap = cfg.wrap;
         term.rt.editor_first_line = @min(cfg.first, term.rt.editor_lines.len -| 1);
@@ -5445,47 +5864,56 @@ test "[주 판정] 무작위 좌표를 쏴도 클릭이 화면과 어긋나지 �
 
         const body_outer = editorBodyRect(fx.session, fx.leaf_rect, term);
         const inset = chrome_editor.frame.content_inset_px;
-        const bx: f64 = @floatFromInt(body_outer.x + @as(i32, @intCast(inset)));
-        const by: f64 = @floatFromInt(body_outer.y + @as(i32, @intCast(inset)));
+        const ox: f64 = @floatFromInt(body_outer.x + @as(i32, @intCast(inset)));
+        const oy: f64 = @floatFromInt(body_outer.y + @as(i32, @intCast(inset)));
         const bw: f64 = @floatFromInt(body_outer.w -| inset * 2);
         const ch: f64 = @floatFromInt(fx.session.cell_height_px);
 
-        var prev_row_right: ?usize = null;
+        var prev_right: ?usize = null;
+        var prev_line: ?u32 = null;
         for (0..rows) |r| {
-            const row_top = by + @as(f64, @floatFromInt(r)) * ch + 1;
-            var last_off: usize = 0;
-            var x: f64 = bx + 1;
-            var first_off: ?usize = null;
-            while (x < bx + bw) : (x += 3) {
-                const off = hitTestBody(fx.session, term, fx.leaf_rect, x, row_top) orelse continue;
-                if (first_off == null) first_off = off;
+            const y = oy + @as(f64, @floatFromInt(r)) * ch + 1;
+            const src = term.rt.editor_hit_lines[r];
+            if (src >= term.rt.editor_lines.len) continue;
+            const lt = term.rt.editor_lines[src];
+            const li = term.rt.editor_doc.?.file.lines.line(src) orelse continue;
 
-                // ⑴ **cluster 경계인가.** 그 자리에서 줄 끝까지 걸으면 정확히 도달한다.
-                const src = term.rt.editor_hit_lines[r];
-                const line_text = term.rt.editor_lines[@min(src, term.rt.editor_lines.len - 1)];
-                const doc = term.rt.editor_doc.?;
-                const li = doc.file.lines.line(@min(src, term.rt.editor_lines.len - 1)).?;
+            var last: ?usize = null;
+            var first: ?usize = null;
+            var x: f64 = ox + 1;
+            while (x < ox + bw) : (x += 3) {
+                const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse continue;
+                judged += 1;
+
+                // ⑴ **cluster 경계이고 줄 범위 안.**
                 try testing.expect(off >= li.start and off <= li.contentEnd());
                 var walk = off - li.start;
                 var wcol: u32 = 0;
-                while (walk < line_text.len) {
-                    const st = chrome_editor.content.stepColumn(line_text, walk, wcol, chrome_editor.frame.default_tab_width);
+                while (walk < lt.len) {
+                    const st = chrome_editor.content.stepColumn(lt, walk, wcol, chrome_editor.frame.default_tab_width);
                     walk = st.next_byte;
                     wcol = st.next_col;
                 }
-                try testing.expectEqual(line_text.len, walk);
+                try testing.expectEqual(lt.len, walk);
 
                 // ⑵ **한 행 안에서 x가 커지면 offset이 줄지 않는다.**
-                try testing.expect(off >= last_off);
-                last_off = off;
+                if (last) |l| try testing.expect(off >= l);
+                if (first == null) first = off;
+                last = off;
             }
-            // ⑶ **행 경계 부등식** — 앞 행의 오른쪽 끝이 이 행의 시작을 넘지 않는다(같은 줄일 때만).
-            if (prev_row_right) |pr| {
-                if (r > 0 and term.rt.editor_hit_lines[r] == term.rt.editor_hit_lines[r - 1]) {
-                    try testing.expect(pr <= (first_off orelse pr));
+
+            // ⑶ **행 경계 부등식** — 같은 논리 줄의 이어진 두 행에서 앞 행의 끝 ≤ 뒤 행의 시작.
+            if (prev_right) |pr| {
+                if (prev_line != null and prev_line.? == src) {
+                    rule3 += 1;
+                    try testing.expect(pr <= (first orelse pr));
                 }
             }
-            prev_row_right = last_off;
+            prev_right = last;
+            prev_line = src;
         }
     }
+    std.debug.print("\n[주 판정] judged={d} 행경계판정={d}\n", .{ judged, rule3 });
+    try testing.expect(judged > 5_000);
+    try testing.expect(rule3 > 0); // 랩이 실제로 걸렸다 — 셋째 규칙이 죽어 있지 않다
 }

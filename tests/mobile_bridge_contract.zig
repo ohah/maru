@@ -3887,3 +3887,181 @@ test "서버 상한은 헤더와 브리지가 같은 값이다" {
     try std.testing.expectEqual(@as(u32, 2), c_abi.MARU_SERVER_USER);
     try std.testing.expectEqual(@as(u32, 3), c_abi.MARU_SERVER_FINGERPRINT);
 }
+
+// ── 서버 목록 화면 (S9b-2b) ─────────────────────────────────────────────────
+
+/// 세션 목록에서 "서버" 줄을 눌러 서버 화면으로 간다.
+fn openServers(w: u32, h: u32) void {
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(w, h, now());
+    const c = bridge.serversEntryCenter();
+    bridge.maru_mobile_pointer(0, 1, c.x, c.y, now());
+    bridge.maru_mobile_pointer(2, 1, c.x, c.y, now());
+    _ = bridge.maru_mobile_build(w, h, now());
+}
+
+test "서버 목록 화면이 config 의 서버를 보인다" {
+    // **화면이 목록을 따로 들지 않는다** — config 가 단일 출처다(계약 §1).
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect(); // 자동 요청은 여기서 소비한다
+    openServers(402, 874);
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+    try std.testing.expectEqual(@as(usize, 2), bridge.serverRowCount());
+
+    // 서버가 없으면 줄도 없다(빈 목록도 화면은 뜬다).
+    _ = bridge.maru_mobile_pop_screen();
+    bridge.maru_mobile_load_config("", 0);
+    openServers(402, 874);
+    try std.testing.expectEqual(@as(usize, 0), bridge.serverRowCount());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "줄을 누르면 그 서버로 붙어 달라고 하고 터미널로 간다" {
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, y, now());
+    bridge.maru_mobile_pointer(2, 1, 200, y, now());
+    // **두 번째 줄을 눌렀으면 두 번째 서버다** — 번호를 잃으면 엉뚱한 서버에 붙는다.
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+}
+
+test "접속할 수 없는 줄은 눌러도 요청이 안 나간다" {
+    // 지문이 없는 줄이다. 화면이 이미 "접속할 수 없다" 고 말하고 있으므로 그 자리에 머문다 —
+    // 요청을 내면 host 가 반쯤 적은 줄로 붙으러 가고, 그 실패는 네트워크 문제처럼 보인다.
+    const half =
+        \\ssh.server.1.host = a
+        \\ssh.server.1.user = me
+    ;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(half, half.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+    const y = bridge.serverRowCenterY(0) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, y, now());
+    bridge.maru_mobile_pointer(2, 1, 200, y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName()); // 머문다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "화면 밖 줄은 눌리지 않는다" {
+    // **안 보이는데 눌린다** 는 이 저장소에서 여러 번 난 결함이다(키바·설정 목록). 화면 밖
+    // 줄이 rect 를 그대로 들고 있으면 사용자는 아무것도 없는 자리를 눌러 엉뚱한 서버에 붙는다.
+    var text: [1 << 12]u8 = undefined;
+    var w: usize = 0;
+    for (1..17) |n| { // 상한만큼 채운다
+        w += (std.fmt.bufPrint(text[w..], "ssh.server.{d}.host = h{d}\nssh.server.{d}.user = me\nssh.server.{d}.fingerprint = SHA256:x\n", .{ n, n, n, n }) catch unreachable).len;
+    }
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(text[0..w].ptr, w);
+    _ = bridge.maru_mobile_take_server_connect();
+    try std.testing.expectEqual(@as(u32, 16), bridge.maru_mobile_server_count());
+
+    const h: u32 = 320; // 작은 창 — 줄 높이 64 라 네댓 줄만 들어간다
+    openServers(402, h);
+    const drawn = bridge.serverRowCount();
+    try std.testing.expect(drawn > 0);
+    try std.testing.expect(drawn < 16); // 다 그리면 화면 밖까지 rect 를 든 것이다
+    // 마지막 줄은 아직 안 그려졌으므로 좌표도 없다.
+    try std.testing.expectEqual(@as(?f32, null), bridge.serverRowCenterY(15));
+
+    // 밀어서 끝으로 가면 그때는 그려지고, 처음 줄은 사라진다.
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 12) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 60, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300 - 12 * 60, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expect(bridge.serverRowCenterY(15) != null); // 끝 줄이 보인다
+    try std.testing.expectEqual(@as(?f32, null), bridge.serverRowCenterY(0)); // 첫 줄은 지나갔다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+/// 서버 열여섯 개짜리 config 본문을 만든다(여러 테스트가 같은 목록을 쓴다).
+fn sixteenServers(buf: []u8) []const u8 {
+    var w: usize = 0;
+    for (1..17) |n| {
+        w += (std.fmt.bufPrint(buf[w..], "ssh.server.{d}.host = h{d}\nssh.server.{d}.user = me\nssh.server.{d}.fingerprint = SHA256:x\n", .{ n, n, n, n }) catch unreachable).len;
+    }
+    return buf[0..w];
+}
+
+test "끝을 지나 밀어도 목록이 빈 자리로 안 넘어간다" {
+    // 한계를 안 잡으면 손가락만큼 계속 흘러 **아무것도 없는 화면**이 된다 — 사용자는 목록이
+    // 사라졌다고 읽는다(돌아올 방법도 스크롤뿐이다).
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const h: u32 = 320;
+    openServers(402, h);
+
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 60) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 100, now());
+    bridge.maru_mobile_pointer(3, 1, 200, 0, now()); // 취소로 끝내 관성을 안 남긴다
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    // 내용 높이(16*64) - 목록 높이보다 더 내려가지 않는다.
+    const content: f32 = 16 * 64;
+    const list_h: f32 = @as(f32, @floatFromInt(h)) - 52 - 1;
+    try std.testing.expect(bridge.serverScrollY() <= content - list_h + 0.5);
+    try std.testing.expect(bridge.serverRowCount() > 0); // 화면에 줄이 남아 있다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "손을 뗀 뒤에도 서버 목록이 흐른다" {
+    // 관성은 컴포넌트가 들지만 **화면마다 밟아 줘야 한다**. 한쪽만 밟으면 같은 손짓이 화면마다
+    // 다르게 굴어(설정은 흐르고 서버는 즉시 멈춘다) 사용자가 매번 시험해 봐야 한다.
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const h: u32 = 320;
+    openServers(402, h);
+
+    // 빠르게 밀고 손을 뗀다.
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 5) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 40, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 100, now());
+    const after_release = bridge.serverScrollY();
+    _ = bridge.maru_mobile_build(402, h, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expect(bridge.serverScrollY() > after_release); // 손이 없어도 더 흘렀다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "목록이 줄면 스크롤도 따라 줄어든다" {
+    // **밀 때만 한계를 잡으면 안 된다.** 배경에서 돌아오면 config 를 다시 읽는데(계약 §7) 그때
+    // 서버가 줄어 있으면, 내려가 있던 스크롤이 그대로 남아 **아무것도 없는 화면**이 된다 —
+    // 사용자는 목록이 사라졌다고 읽고, 돌아올 방법도 스크롤뿐이다.
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const h: u32 = 320;
+    openServers(402, h);
+
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 30) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 60, now());
+    bridge.maru_mobile_pointer(3, 1, 200, 0, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expect(bridge.serverScrollY() > 0); // 내려가 있다
+
+    bridge.maru_mobile_load_config(two_servers, two_servers.len); // 돌아왔더니 둘뿐이다
+    _ = bridge.maru_mobile_build(402, h, now());
+    try std.testing.expectEqual(@as(f32, 0), bridge.serverScrollY()); // 둘은 한 화면에 들어간다
+    try std.testing.expectEqual(@as(usize, 2), bridge.serverRowCount());
+    _ = bridge.maru_mobile_pop_screen();
+}

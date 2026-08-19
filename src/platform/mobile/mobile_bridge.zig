@@ -180,10 +180,28 @@ pub fn firstComplete(list: []const mobile_config.Server) ?usize {
     return null;
 }
 
+/// 그 서버에 붙어 달라고 요청하고 터미널로 간다. **여기가 사용자가 고르는 자리**다 —
+/// 자동 요청(config 를 읽을 때)은 붙을 길이 이것뿐이던 때의 임시 경로이고, 이제 둘 다 같은
+/// 요청 하나로 모인다(host 는 어디서 왔는지 안 봐도 된다).
+///
+/// **온전하지 않은 줄은 요청하지 않는다.** 화면이 그 줄을 "접속할 수 없다" 고 이미 말하고
+/// 있으므로, 눌렀을 때 조용히 아무 일도 안 하는 대신 그 자리에 머문다.
+fn connectToServer(i: usize) void {
+    const list = servers();
+    if (i >= list.len or !list[i].isComplete()) return;
+    ssh_connect_req = @intCast(i + 1);
+    navPop(); // 목록 → 세션 목록
+    navPush(.terminal);
+}
+
 /// 지금 들고 있는 서버 목록. config 를 안 읽었으면 빈 목록이다.
 fn servers() []const mobile_config.Server {
-    const p = cfg_parsed orelse return &.{};
-    return p.servers[0..p.server_count];
+    // **포인터로 잡는다.** 값으로 캡처하면 `Parsed` 를 통째로 스택에 복사하고, 돌려주는
+    // 슬라이스가 **그 복사본**을 가리킨다 — 함수가 끝나면 사라지는 자리다. 값 하나만 읽을
+    // 때는 우연히 동작해서(같은 프레임 안이라) 오래 안 드러난다: 화면이 그 목록으로 글자를
+    // 만들자 그 자리에서 죽었다(테스트가 잡았다).
+    if (cfg_parsed) |*parsed| return parsed.servers[0..parsed.server_count];
+    return &.{};
 }
 
 pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
@@ -3024,7 +3042,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings };
+const Screen = enum { sessions, terminal, settings, servers };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -3137,6 +3155,9 @@ fn setScroll() f32 {
 
 fn stepSetFling() void {
     _ = set_touch.step(&set_sa, @intFromFloat(@max(0, set_max_scroll)), frame_dt_ms);
+    // **서버 목록도 같은 걸음으로 흐른다.** 한쪽만 밟으면 손을 뗀 뒤 그 화면만 즉시 멈춘다 —
+    // 같은 손짓이 화면마다 다르게 굴면 사용자는 매번 시험해 봐야 한다.
+    _ = srv_touch.step(&srv_sa, @intFromFloat(@max(0, srv_max_scroll)), frame_dt_ms);
 }
 
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
@@ -3156,6 +3177,34 @@ fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
 /// 화면 전환 규칙이 바뀌면 테스트가 제품에게 물어야 한다.
 pub fn currentScreenName() []const u8 {
     return @tagName(screenTop());
+}
+
+/// 세션 목록의 **서버 줄** 한가운데(테스트용 — 좌표를 테스트가 다시 계산하지 않는다).
+pub fn serversEntryCenter() struct { x: f32, y: f32 } {
+    return .{ .x = sess_servers_rect.x + sess_servers_rect.w / 2, .y = sess_servers_rect.y + sess_servers_rect.h / 2 };
+}
+
+/// 서버 목록의 지금 스크롤 위치(테스트용).
+pub fn serverScrollY() f32 {
+    return srvScroll();
+}
+
+/// 서버 화면에 실제로 **그려진** 줄 수. 목록 길이가 아니라 rect 를 센다 — 화면 밖 줄이 rect 를
+/// 들고 있으면 "안 보이는데 눌린다" 가 되므로, 그 둘이 같은지도 이 값으로 본다.
+pub fn serverRowCount() usize {
+    var n: usize = 0;
+    for (srv_row_rects) |r| {
+        if (r.w > 0 and r.h > 0) n += 1;
+    }
+    return n;
+}
+
+/// 그 서버 줄의 세로 한가운데(안 그려졌으면 null).
+pub fn serverRowCenterY(i: usize) ?f32 {
+    if (i >= srv_row_rects.len) return null;
+    const r = srv_row_rects[i];
+    if (r.h <= 0) return null;
+    return r.y + r.h / 2;
 }
 
 /// 세션 목록의 톱니 한가운데. 테스트가 좌표를 손으로 적으면 헤더 높이를 바꿀 때 조용히 빗나간다.
@@ -3182,7 +3231,11 @@ pub fn sessionsGearSize() struct { w: f32, h: f32 } {
 /// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
 var sess_gear_rect: SetRect = .{};
 var sess_row_rect: SetRect = .{};
-var sess_pressed: enum { none, gear, row } = .none;
+var sess_pressed: enum { none, gear, row, servers } = .none;
+/// 서버 목록으로 들어가는 줄. **여기서 들어간다** — UX 계약(§2.1)은 서버 목록을 세션 목록
+/// *위*에 두지만, 뿌리를 바꾸면 앱이 뜨는 자리와 뒤로가기 스택이 함께 움직인다(그 재배치는
+/// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다.
+var sess_servers_rect: SetRect = .{};
 /// 세션 목록의 제스처. **설정 화면과 나눠 쓰지 않는다** — 전에는 `set_active`·`set_moved` 를
 /// 그대로 썼고(한 번에 한 화면만 떠서 동작하기는 했다), 이름이 거짓말을 하는 데다 둘 중
 /// 하나를 고치면 다른 하나가 조용히 바뀐다.
@@ -3230,6 +3283,110 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(session_title, @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y + row_h), .w = @intFromFloat(sess_row_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    drawServersEntry(win, tk, row_h);
+}
+
+/// 세션 화면 아래에 붙는 **서버 목록 입구**. 화면을 나눠 그리는 이유는 하나다 — 세션 줄과
+/// 이 줄은 뜻이 다르다(하나는 지금 보고 있는 것, 하나는 붙을 수 있는 것).
+fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32) void {
+    // ── 서버 목록 입구. **개수를 함께 적는다** — 0 이면 들어가서야 비었음을 알게 되고, 그
+    // 화면이 무엇을 담는지도 안 보인다.
+    sess_servers_rect = .{ .x = win.x, .y = sess_row_rect.y + row_h + 1, .w = win.w, .h = row_h };
+    if (sess_pressed == .servers) push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y), .w = @intFromFloat(sess_servers_rect.w), .h = @intFromFloat(sess_servers_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText("서버", @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
+    var cnt: [8]u8 = undefined;
+    const cnt_text = std.fmt.bufPrint(&cnt, "{d}", .{servers().len}) catch "?";
+    pushText(cnt_text, @intFromFloat(sess_servers_rect.x + sess_servers_rect.w - 16 - @as(f32, @floatFromInt(textWidth(cnt_text, 15)))), @intFromFloat(sess_servers_rect.y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+    push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y + row_h), .w = @intFromFloat(sess_servers_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+}
+
+// ── 서버 목록 화면 (S9b-2b) ─────────────────────────────────────────────────
+
+/// 서버 줄 높이. **두 줄이 들어간다**(이름 + `user@host:port`) — 주소를 안 보이면 이름이
+/// 비슷한 서버를 못 가른다.
+const srv_row_h: f32 = 64;
+var srv_list: SetRect = .{};
+var srv_sa: scroll_area.State = .{};
+var srv_touch: scroll_area.Touch = .{};
+var srv_max_scroll: f32 = 0;
+var srv_back_rect: SetRect = .{};
+var srv_back_pressed = false;
+var srv_row_rects: [mobile_config.max_servers]SetRect = @splat(.{});
+var srv_pressed: ?usize = null;
+var srv_press: gesture.Press = .{};
+var srv_last_y: f32 = 0;
+
+fn srvScroll() f32 {
+    return @floatFromInt(srv_sa.offset_y_px);
+}
+
+/// 목록에 보일 이름. **비면 `user@host` 다** — 이름을 안 적었다고 빈 줄을 보이면 누를 것이
+/// 무엇인지 알 수 없다(계약 [모바일 config](../../../docs/mobile-config.md) §4.3).
+fn serverLabel(srv: mobile_config.Server, buf: []u8) []const u8 {
+    if (srv.name.len > 0) return srv.name;
+    return std.fmt.bufPrint(buf, "{s}@{s}", .{ srv.user, srv.host }) catch srv.host;
+}
+
+fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    // ── 헤더: 뒤로 + 제목(설정 화면과 같은 모양 — 두 화면이 다르게 굴면 매번 시험해 봐야 한다)
+    srv_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    if (srv_back_pressed) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = srv_back_rect.x + (set_head_h - 22) / 2,
+            .y = srv_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2, // arrow_left
+        };
+        quad_count += 1;
+    }
+    pushText("서버", @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    srv_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
+    const list = servers();
+    srv_max_scroll = @max(0, @as(f32, @floatFromInt(list.len)) * srv_row_h - srv_list.h);
+    srv_sa.clamp(@intFromFloat(@max(0, srv_max_scroll)));
+    srv_row_rects = @splat(.{});
+
+    // **빈 목록도 말을 한다.** 아무것도 안 그리면 화면이 고장 난 것처럼 보이고, 사용자는
+    // 무엇을 해야 하는지 모른다(등록 수단은 다음 슬라이스라 지금은 어디에 적는지를 알린다).
+    if (list.len == 0) {
+        pushText("등록된 서버가 없다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24), 17, tk.get(.surface_fg));
+        pushText("config 의 ssh.server.1.host 부터 적는다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + 24 + 26), 14, tk.get(.muted_fg));
+        return;
+    }
+
+    for (list, 0..) |srv, i| {
+        const ry = srv_list.y + @as(f32, @floatFromInt(i)) * srv_row_h - srvScroll();
+        // **안 보이는 행은 rect 를 안 남긴다** — 남기면 화면 밖인데 눌린다(설정 목록에서 겪었다).
+        if (ry + srv_row_h < srv_list.y or ry > srv_list.y + srv_list.h) continue;
+        srv_row_rects[i] = .{ .x = srv_list.x, .y = ry, .w = srv_list.w, .h = srv_row_h };
+        if (srv_pressed == i) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+
+        var name_buf: [96]u8 = undefined;
+        const label = serverLabel(srv, &name_buf);
+        pushText(label, @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12), 17, tk.get(.surface_fg));
+
+        var addr_buf: [128]u8 = undefined;
+        const addr = std.fmt.bufPrint(&addr_buf, "{s}@{s}:{d}", .{ srv.user, srv.host, srv.port }) catch srv.host;
+        // **온전하지 않으면 그렇게 말한다.** 눌러도 안 붙는 줄을 멀쩡한 줄처럼 그리면 실패가
+        // 네트워크 문제처럼 보인다(계약 §4.3).
+        const sub_role: tokens.ColorRole = if (srv.isComplete()) .muted_fg else .accent_bar;
+        pushText(if (srv.isComplete()) addr else "지문이 없다 — 접속할 수 없다", @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
+        push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry + srv_row_h - 1), .w = @intFromFloat(srv_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    }
 }
 
 fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
@@ -3495,7 +3652,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 sess_press.begin(x, y, time_ms, false); // 이 화면에는 흐르는 것이 없다
-                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else .none;
+                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else .none;
                 return 1;
             },
             1 => {
@@ -3521,8 +3678,68 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                         set_touch.cancel();
                     },
                     .row => navPush(.terminal),
+                    .servers => {
+                        navPush(.servers);
+                        srv_sa.reset();
+                        srv_touch.cancel();
+                    },
                     .none => {},
                 }
+                return 1;
+            },
+        }
+    }
+
+    // ── 서버 목록 화면. 설정과 같은 규칙이다(밀면 스크롤, 짧게 누르면 그 줄).
+    if (screenTop() == .servers) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome)) return 0;
+                srv_last_y = y;
+                // 흐르는 목록을 세우려 짚었는데 그 자리 서버에 붙으면 안 된다(키바·설정과 같은 규율).
+                const stopped = srv_touch.begin(pointer_id, y);
+                srv_press.begin(x, y, time_ms, stopped);
+                srv_back_pressed = setHit(srv_back_rect, x, y);
+                srv_pressed = null;
+                if (!srv_back_pressed and !stopped) {
+                    for (srv_row_rects, 0..) |r, i| {
+                        if (setHit(r, x, y)) {
+                            srv_pressed = i;
+                            break;
+                        }
+                    }
+                }
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                if (srv_press.move(x, y)) { // 임계를 넘으면 밀려던 것이다
+                    srv_pressed = null;
+                    srv_back_pressed = false;
+                }
+                srv_touch.move(&srv_sa, pointer_id, y, @intFromFloat(@max(0, srv_max_scroll)));
+                srv_last_y = y;
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                const was_back = srv_back_pressed;
+                const was_row = srv_pressed;
+                srv_back_pressed = false;
+                srv_pressed = null;
+                srv_touch.end(pointer_id, frame_dt_ms);
+                routeClear();
+                if (phase == 3) {
+                    srv_press.cancel();
+                    return 1;
+                }
+                if (srv_press.end() != .tap) return 1;
+                if (was_back) {
+                    navPop();
+                    return 1;
+                }
+                if (was_row) |i| connectToServer(i);
                 return 1;
             },
         }
@@ -3814,6 +4031,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .terminal => {},
         .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .settings => drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .servers => drawServers(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

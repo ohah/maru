@@ -3758,3 +3758,46 @@ test "엔터 키로도 문자열 줄이 확정된다" {
     try std.testing.expect(n > 0);
     try std.testing.expect(std.mem.indexOf(u8, drain[0..n], "#00ff00") != null);
 }
+
+// **편집 중 색(앰버)은 여기서 못 잰다** — 헤드리스에서는 아틀라스가 안 구워져 chrome 글자가
+// quad 로 안 나온다(kind=1 이 0개인 것을 실측했다). 그 축은 기기 픽셀로만 본다.
+
+test "취소는 값을 안 남긴다 — 파일도 안 건드린다" {
+    // ESCAPE 는 **되돌리기**다. 여기서 확정해 버리면 사용자가 "아니오" 라고 한 값이 파일에
+    // 실린다(그리고 다음 실행에도 그대로다).
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    var drain: [1 << 16]u8 = undefined;
+    _ = bridge.maru_mobile_take_config_write(&drain, drain.len);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+
+    _ = bridge.maru_mobile_input("#123456", 7);
+    _ = bridge.maru_mobile_key(2, 0, 0); // ESCAPE
+    try std.testing.expectEqual(@as(usize, 0), bridge.settingsEditLen());
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_config_write(&drain, drain.len));
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_input_kind()); // 편집이 끝났다
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "칸이 넘치면 조용히 버리지 않는다" {
+    // 넘친 글자를 말없이 버리면 사용자에게는 "키보드가 갑자기 안 먹는" 상태다 — §5(조용히
+    // 실패하지 않는다)가 막는 바로 그 모양이다.
+    const h: u32 = 560;
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    openSettings(402, h);
+    const ty = findTextRowY(h) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, ty, now());
+    bridge.maru_mobile_pointer(2, 1, 200, ty, now());
+    bridge.maru_mobile_clear_error();
+
+    const long = "0123456789" ** 8; // 80바이트 — 칸(64)보다 길다
+    _ = bridge.maru_mobile_input(long, long.len);
+    try std.testing.expectEqualStrings("settings_text_overflow", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_pop_screen();
+}

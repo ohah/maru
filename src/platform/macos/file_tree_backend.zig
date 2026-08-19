@@ -488,6 +488,11 @@ fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u
     const dir_identity = directoryIdentity(io, owned_dir) catch return result;
     result.identity = dir_identity;
 
+    // **ID 표를 한 번에 읽는다**(Windows). 항목마다 `stat` 을 부르면 1,000 항목에 58 ms 인데 이쪽은
+    // 순회와 같은 0.4 ms 다 — 실측. POSIX 에서는 빈 표라 `entry.inode` 를 그대로 쓴다.
+    var ids = readFileIdMap(allocator, owned_dir);
+    defer ids.deinit();
+
     result.entries.ensureTotalCapacity(allocator, file_tree.max_children_per_directory) catch return result;
     var it = owned_dir.iterate();
     while (result.entries.items.len < file_tree.max_children_per_directory) {
@@ -500,13 +505,110 @@ fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u
             .kind = kind,
             .identity = .{
                 .device = dir_identity.device,
-                .inode = entryInode(io, owned_dir, entry),
+                .inode = entryInode(io, owned_dir, &ids, entry),
                 .kind = kindTag(entry.kind),
             },
         });
     }
     result.ok = true;
     return result;
+}
+
+/// Windows 에서 **한 디렉터리의 `이름 → 파일 ID`** 를 한 번에 읽는다. POSIX 에서는 쓰지 않는다.
+///
+/// **왜 필요한가.** Windows 의 디렉터리 순회는 inode 를 안 준다 — 실측: 모든 항목이
+/// `entry.inode = 0` 이다. 그대로 두면 스캔이 기록한 identity 가 전부 0 이라 나중에 잰 값과 반드시
+/// 어긋나고(`IdentityMismatch`), identity 축은 이 저장소의 TOCTOU 가드라 그러면 가드가 무의미해진다.
+///
+/// **왜 항목마다 `stat` 이 아닌가 — 145 배 차이다.** 1,000 항목 디렉터리에서 실측:
+///
+/// ```text
+/// 순회만                    0.4 ms
+/// 순회 + 항목마다 stat     58.2 ms   ← 항목당 57.8 us
+/// 배치 file id             0.4 ms   ← 순회와 같다
+/// ```
+///
+/// 디렉터리 상한이 4,096 이라(`file_tree.max_children_per_directory`) 항목별 `stat` 은 최악
+/// **~237 ms** 다 — 펼치기가 눈에 보이게 멈춘다. `GetFileInformationByHandleEx` 는 열거하면서 ID 를
+/// 함께 주므로 그 비용이 사라진다.
+///
+/// **실패하면 빈 표를 낸다.** 그러면 호출자가 `stat` 폴백으로 내려간다 — 느릴 뿐 틀리지 않는다.
+const FileIdMap = struct {
+    /// 이름(WTF-8) → 파일 ID. 디렉터리 하나 분량이라 스캔이 끝나면 통째로 버린다.
+    map: std.StringHashMapUnmanaged(u64) = .empty,
+    arena: std.heap.ArenaAllocator,
+
+    fn deinit(self: *FileIdMap) void {
+        self.arena.deinit();
+    }
+
+    fn get(self: *const FileIdMap, name: []const u8) ?u64 {
+        return self.map.get(name);
+    }
+};
+
+const FILE_ID_BOTH_DIR_INFO = extern struct {
+    NextEntryOffset: u32,
+    FileIndex: u32,
+    CreationTime: i64,
+    LastAccessTime: i64,
+    LastWriteTime: i64,
+    ChangeTime: i64,
+    EndOfFile: i64,
+    AllocationSize: i64,
+    FileAttributes: u32,
+    FileNameLength: u32,
+    EaSize: u32,
+    ShortNameLength: u8,
+    ShortName: [12]u16,
+    FileId: i64,
+    // FileName 은 가변 길이라 이 구조체 **뒤에** 붙는다.
+};
+const file_id_both_dir_info_class: u32 = 10;
+
+extern "kernel32" fn GetFileInformationByHandleEx(
+    hFile: ?*anyopaque,
+    class: u32,
+    info: *anyopaque,
+    size: u32,
+) callconv(.winapi) i32;
+
+/// 디렉터리 하나의 ID 표를 만든다. Windows 가 아니거나 실패하면 **빈 표**(호출자가 폴백).
+fn readFileIdMap(allocator: std.mem.Allocator, dir: std.Io.Dir) FileIdMap {
+    var out: FileIdMap = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    if (comptime builtin.os.tag != .windows) return out;
+    const a = out.arena.allocator();
+
+    // 64 KiB 는 한 번에 수백 항목을 담는다 — 커널이 채울 만큼 채우고 나머지는 다음 호출로 준다.
+    var buf: [64 * 1024]u8 align(8) = undefined;
+    while (GetFileInformationByHandleEx(dir.handle, file_id_both_dir_info_class, &buf, buf.len) != 0) {
+        var off: usize = 0;
+        while (true) {
+            const info: *align(1) const FILE_ID_BOTH_DIR_INFO = @ptrCast(&buf[off]);
+            const name_off = off + @sizeOf(FILE_ID_BOTH_DIR_INFO);
+            const name_len = info.FileNameLength / 2; // 바이트 수로 온다
+            if (name_off + info.FileNameLength <= buf.len and name_len > 0) {
+                // 이름은 구조체 뒤에 **정렬 보장 없이** 붙는다 — 정렬된 버퍼로 옮겨 읽는다.
+                var name_wide: [520]u16 = undefined;
+                if (name_len > name_wide.len) {
+                    if (info.NextEntryOffset == 0) break;
+                    off += info.NextEntryOffset;
+                    continue;
+                }
+                @memcpy(std.mem.sliceAsBytes(name_wide[0..name_len]), buf[name_off..][0..info.FileNameLength]);
+                if (std.unicode.utf16LeToUtf8Alloc(a, name_wide[0..name_len])) |name| {
+                    // `.`·`..` 는 표에 안 넣는다 — 스캔이 그것을 항목으로 보지 않는다.
+                    if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
+                        out.map.put(a, name, @bitCast(info.FileId)) catch {};
+                    }
+                } else |_| {}
+            }
+            if (info.NextEntryOffset == 0) break;
+            off += info.NextEntryOffset;
+            if (off >= buf.len) break;
+        }
+    }
+    return out;
 }
 
 /// 순회가 준 항목의 **inode**. 0 이면 그 자리에서 `stat` 으로 채운다.
@@ -520,8 +622,11 @@ fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u
 /// **판정을 OS 가 아니라 값으로 한다.** `entry.inode == 0` 일 때만 `stat` 을 부른다 — POSIX 에서
 /// readdir 이 주는 inode 는 0 이 아니므로 그쪽은 **한 번도 안 부른다**(공짜 값을 버리지 않는다).
 /// 뒤에 다른 플랫폼이 같은 사정을 가져도 이 판정이 그대로 맞는다.
-fn entryInode(io: std.Io, dir: std.Io.Dir, entry: std.Io.Dir.Entry) u64 {
+fn entryInode(io: std.Io, dir: std.Io.Dir, ids: *const FileIdMap, entry: std.Io.Dir.Entry) u64 {
     if (entry.inode != 0) return @intCast(entry.inode);
+    if (ids.get(entry.name)) |id| return id;
+    // 표가 비었거나(그 OS 가 안 주거나 호출이 실패) 이름이 없으면 그 항목만 `stat` 으로 채운다 —
+    // 느릴 뿐 틀리지 않는다.
     const stat = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch return 0;
     return @intCast(stat.inode);
 }

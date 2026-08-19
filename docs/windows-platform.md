@@ -1046,7 +1046,25 @@ found: alpha=true beta=true hangul=true sub=true
 | # | 증상 | 원인 |
 |---|---|---|
 | ⑴ | 넘겨받은 디렉터리를 **순회할 수 없다**(`ScanFailed`) | `openCanonicalDirectoryNoFollow` 가 `.iterate` 없이 열어 Windows 에서 `FILE_LIST_DIRECTORY` 가 빠진다 — 실측: 없는 쪽은 **0 개에서 `AccessDenied`**, 켠 쪽은 정상. **마지막 칸만** 켠다(중간 칸에 list 까지 요구하면 traverse 만 허용된 상위에서 걷기가 막힌다) |
-| ⑵ | `IdentityMismatch` 로 트리가 안 선다 | **Windows 의 디렉터리 순회는 inode 를 안 준다** — 실측: 모든 항목이 `entry.inode = 0`, `stat` 은 진짜 값. 스캔이 기록한 identity 가 전부 0 이라 나중에 잰 값과 반드시 어긋난다. identity 축은 TOCTOU 가드라 0 으로 채우면 가드가 무의미해진다. **판정을 OS 가 아니라 값으로** 한다 — `inode == 0` 일 때만 `stat` 이라 POSIX 는 공짜 값을 그대로 쓴다 |
+| ⑵ | `IdentityMismatch` 로 트리가 안 선다 | **Windows 의 디렉터리 순회는 inode 를 안 준다** — 실측: 모든 항목이 `entry.inode = 0`, `stat` 은 진짜 값. 스캔이 기록한 identity 가 전부 0 이라 나중에 잰 값과 반드시 어긋난다. identity 축은 TOCTOU 가드라 0 으로 채우면 가드가 무의미해진다 |
+
+**⑵ 의 첫 수정은 맞지만 145 배 느렸다 — 적대적 검증이 그것을 잡았다.** 항목마다 `stat` 을 부르게
+했는데, 1,000 항목 디렉터리에서 재 보니:
+
+```text
+순회만                    0.4 ms
+순회 + 항목마다 stat     58.2 ms   ← 항목당 57.8 us
+배치 file id             0.4 ms   ← 순회와 같다
+```
+
+디렉터리 상한이 4,096 이라 최악 **~237 ms** 다 — 펼치기가 눈에 보이게 멈춘다. Windows 는
+`GetFileInformationByHandleEx(FileIdBothDirectoryInfo)` 가 **열거하면서 ID 를 함께** 주므로 그 비용이
+사라진다. 스캔이 디렉터리마다 `이름 → 파일 ID` 표를 한 번 만들고 기존 순회가 조회한다.
+**끝단 실측: 1,000 항목 스캔이 6.6 ms.**
+
+**판정을 OS 가 아니라 값으로 한다.** `entry.inode != 0` 이면 그대로 쓰고(POSIX 는 여기서 끝난다),
+표에 있으면 표를, 둘 다 없으면 그 항목만 `stat` 으로 채운다 — 표가 실패해도 **느릴 뿐 틀리지 않는다**
+(대조군: 표를 강제로 비워도 스모크가 통과한다. identity 를 0 으로 만들면 rc=1).
 
 둘 다 POSIX 에서는 원리적으로 안 드러난다(디렉터리 fd 하나, readdir 이 inode 를 준다).
 

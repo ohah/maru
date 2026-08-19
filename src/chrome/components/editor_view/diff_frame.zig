@@ -57,7 +57,10 @@ pub const Props = struct {
     /// 첫 행에서 건너뛸 **조각 수**(§4.1d). 세로를 공유하므로 좌우 공통이다.
     first_piece: u32 = 0,
     wrap: bool = false,
-    tab_width: u8 = 4,
+    /// **기본값은 `frame.default_tab_width`에서 온다.** 여기에 숫자를 다시 쓰면 그것이 두 번째
+    /// 출처가 되고, "렌더가 쓰는 값"을 참조하는 쪽(hit-test)이 조용히 갈린다 — 2차 적대적 검증이
+    /// 잡았다: 이 자리가 `4`를 하드코딩해 `frame.default_tab_width`를 바꿔도 렌더는 안 따라왔다.
+    tab_width: u8 = frame.default_tab_width,
     /// 내용이 설 사각(호출자가 여백을 이미 반영해 넘긴다).
     rect: draw.Rect,
     /// 배경이 덮을 바깥 사각. 각 열의 배경은 여기서 자기 몫으로 잘린다 — 바깥 가장자리만 여백만큼
@@ -169,7 +172,10 @@ pub const Shared = struct {
     /// 같은 시각 행에서 시작해야 같은 줄이 같은 높이에 선다.
     first_piece: u32 = 0,
     wrap: bool = false,
-    tab_width: u8 = 4,
+    /// **기본값은 `frame.default_tab_width`에서 온다.** 여기에 숫자를 다시 쓰면 그것이 두 번째
+    /// 출처가 되고, "렌더가 쓰는 값"을 참조하는 쪽(hit-test)이 조용히 갈린다 — 2차 적대적 검증이
+    /// 잡았다: 이 자리가 `4`를 하드코딩해 `frame.default_tab_width`를 바꿔도 렌더는 안 따라왔다.
+    tab_width: u8 = frame.default_tab_width,
     cell_w_px: u16,
     cell_h_px: u16,
     font_px: u16,

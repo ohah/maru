@@ -977,6 +977,15 @@ git_backend                  69곳  fork·execve·pipe·dup·environ·getcwd·na
 > 없었다" 가 똑같이 초록이라, `[skip] symLink failed (<이유>) - symlink guard unverified on this host`
 > 를 찍고 나간다(대조군으로 확인). SSH 스모크 스크립트가 세운 "SKIP 은 조용한 통과라 위험하다" 와
 > 같은 규율이다.
+>
+> **핸들 누수도 Windows 쪽 대칭을 만들었다.** macOS 에는 `std.c.fcntl(F.GETFD)` 로 fd 를 세는 테스트가
+> 있는데 Windows 에 그 축이 없어 같은 성질이 **한 번도 검증되지 않고 있었다**. `GetProcessHandleCount`
+> 가 이 기기에서 흔들리지 않는 것을 먼저 재고(무작업 drift 0), 실패·성공 세 갈래를 200 회씩 돈다.
+>
+> **처음 쓴 판은 공허했다** — 존재하지 않는 경로로만 돌렸는데 그것은 `realPath` 에서 먼저 끝나
+> **핸들을 열지도 않는다**. 실패 경로에서 안 닫도록 고의로 망가뜨려도 통과했다. macOS 대칭 테스트가
+> 쓰는 두 갈래(`openCanonicalDirectoryNoFollow` 직접 호출 · `force_identity_failure`)로 바꾸고 나서야
+> **두 갈래가 각각 독립적으로 FAIL** 하는 것을 확인했다.
 
 **`NOFOLLOW` 의 의미가 OS 마다 다르다 — 실측했다.** POSIX 는 링크를 만나면 open 자체가 실패하는데,
 Windows 의 `openFile(.follow_symlinks = false)` 는 **링크 자신을 연다**(거부하지 않는다). 그래도 가드가

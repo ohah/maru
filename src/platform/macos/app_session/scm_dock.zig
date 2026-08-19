@@ -19,6 +19,7 @@ const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const metal_frame = app_session_mod.metal_frame;
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
+const scroll_ops = @import("scroll.zig"); // 목록 스크롤 상한(스크롤바 기하의 max_offset)
 const term_ops = @import("term.zig"); // 명령 주입 대상(활성 터미널) 판정 — P6b
 const settings_ops = @import("settings.zig"); // 컨텍스트 메뉴 열고 닫기(브랜치 메뉴와 같은 장치)
 const agent_dock = @import("agent_dock.zig");
@@ -1117,6 +1118,76 @@ fn frameEql(
     return true;
 }
 
+/// 발행된 track·thumb rect로 만든 스크롤바 기하. **그린 것이 곧 잡는 것**이다 — 여기서 비율을 다시
+/// 재면 화면의 막대와 손가락이 어긋난다(목록 자신이 이미 그 rect로 그려졌다).
+///
+/// 막대가 없으면(넘치지 않는 목록) null이고, 그때는 잡을 것도 없다.
+fn scmScrollbarGeometry(self: *AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
+    var track: ?chrome.ui.layout.UiRect = null;
+    var thumb: ?chrome.ui.layout.UiRect = null;
+    for (self.scm_dock_entries.items) |entry| {
+        if (entry.id == component.build.NodeIds.scroll_track) track = entry.rect;
+        if (entry.id == component.build.NodeIds.scroll_thumb) thumb = entry.rect;
+    }
+    const t = track orelse return null;
+    const h = thumb orelse return null;
+    const max_offset = scroll_ops.scmScrollExtent(self).max_offset_px;
+    if (max_offset == 0) return null; // 다 보이면 막대는 거짓 신호다
+    return .{
+        .track_x = t.x,
+        .track_y = t.y,
+        .track_w = t.width,
+        .track_h = t.height,
+        .hit_x = t.x,
+        .hit_w = t.width,
+        .thumb_y = h.y,
+        .thumb_h = h.height,
+        .max_offset_px = max_offset,
+    };
+}
+
+/// 스크롤바 위에서 눌렀다 — 드래그를 연다. **thumb인지 track 빈 곳인지 가르는 규칙은
+/// `scroll_area.Drag.begin`이 소유한다**(빈 곳이면 그 지점으로 먼저 점프하고, 이어지는 드래그는 옮긴 뒤
+/// 기하를 쓴다 — 그래서 눌렀다 그대로 끌 때 위치가 안 튄다). 스크롤바 밖이면 열리지 않는다.
+fn beginScmScrollbarDrag(self: *AppSession, local_x: f64, local_y: f64) void {
+    const geometry = scmScrollbarGeometry(self) orelse return;
+    if (self.scm_scroll_drag.begin(geometry, local_x, local_y)) |jumped| applyScmScrollOffset(self, jumped);
+}
+
+/// 드래그 한 걸음. 좌표는 흡수만 하고 **적용은 한 번**이다(같은 프레임의 move 여럿이 한 번으로 접힌다).
+///
+/// **기하가 바뀌면 끝낸다.** 끄는 동안 목록이 바뀌면(git 결과 도착·저장소 전환) 막대의 자리가 달라지는데,
+/// 잡을 때의 기하로 계속 계산하면 손가락과 화면이 어긋난 채 목록이 움직인다. 파일 트리 스크롤바가 같은
+/// 이유로 스냅샷을 대조한다(그쪽은 carry verdict, 이쪽은 발행된 rect 비교로 같은 사실을 본다).
+fn dragScmScrollbar(self: *AppSession, local_x: f64, local_y: f64) void {
+    if (!scmScrollbarSameGeometry(self)) {
+        endScmScrollbarDrag(self);
+        return;
+    }
+    self.scm_scroll_drag.absorb(local_x, local_y);
+    if (self.scm_scroll_drag.takeOffset()) |offset| applyScmScrollOffset(self, offset);
+}
+
+/// 잡을 때의 track·최대 offset이 지금도 같은가. thumb의 **자리**는 스크롤에 따라 움직이는 값이라 보지
+/// 않는다(그걸 보면 자기 드래그가 자기를 취소한다).
+fn scmScrollbarSameGeometry(self: *AppSession) bool {
+    const live = scmScrollbarGeometry(self) orelse return false;
+    const held = self.scm_scroll_drag.geometry;
+    return live.track_y == held.track_y and live.track_h == held.track_h and
+        live.thumb_h == held.thumb_h and live.max_offset_px == held.max_offset_px;
+}
+
+fn applyScmScrollOffset(self: *AppSession, offset_px: u32) void {
+    if (offset_px == self.scm_scroll.offset_y_px) return;
+    self.scm_scroll.offset_y_px = offset_px;
+    self.scm_scroll.dropWheelResidue(); // 위치가 확정됐다 — 가는 도중이던 휠 잔여는 뜻이 없다
+    self.metal_dirty = true;
+}
+
+pub fn endScmScrollbarDrag(self: *AppSession) void {
+    self.scm_scroll_drag.end();
+}
+
 /// 포인터를 도크 tree로 라우팅한다. 반환된 intent는 호출자가 그 프레임에 적용한다.
 pub fn scmDockPointer(
     self: *AppSession,
@@ -1142,6 +1213,28 @@ pub fn scmDockPointer(
             break;
         }
     }
+    // **드래그를 버리지 않는다.** 이 tree에서 drag를 선언한 것은 스크롤바뿐이고(그 선언이 곧 계약이다),
+    // 지금까지는 이 결과를 흘려서 막대가 **보이는데 안 잡히는** 컨트롤이었다.
+    // **누른 순간 드래그를 연다.** `began`은 threshold를 넘은 뒤에 오므로, 거기서 잡으면 그 사이 움직인
+    // 만큼 thumb이 손가락 아래로 튄다(threshold가 0이어도 첫 좌표는 move에서 온다).
+    if (phase == .down) beginScmScrollbarDrag(self, local_x, local_y);
+    if (dispatched.drag) |event| switch (event) {
+        .began, .moved => |update| {
+            dragScmScrollbar(self, update.x_px, update.y_px);
+            return null; // 드래그 중에는 클릭 intent가 없다
+        },
+        .dropped => |update| {
+            dragScmScrollbar(self, update.x_px, update.y_px);
+            endScmScrollbarDrag(self);
+            return null;
+        },
+        .cancelled => {
+            endScmScrollbarDrag(self);
+            return null;
+        },
+    };
+    // 손을 뗐으면 잡은 자리도 놓는다(드래그가 안 시작된 클릭도 여기로 온다).
+    if (phase == .up) endScmScrollbarDrag(self);
     const action = dispatched.action orelse return null;
     var table = component.ids.Table.init(self.scm_dock_actions.items);
     table.count = self.scm_dock_actions.items.len;
@@ -1397,6 +1490,8 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
         .fetch_remote => submitFetch(self),
         // `∨` — `push`/`pull`을 넣어 줄 보조 메뉴(P6b).
         .open_remote_menu => openRemoteMenu(self),
+        // 스크롤바는 **누른 순간**(`beginScmScrollbarDrag`) 이미 처리됐다 — thumb은 잡기만 하고, track의
+        // 빈 곳은 그 지점으로 뛴다. 여기 click intent로 다시 다루면 같은 누름이 두 번 적용된다.
         .scroll_thumb, .scroll_track => {},
     }
 }

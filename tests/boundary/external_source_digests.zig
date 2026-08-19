@@ -552,6 +552,9 @@ pub const inventory = [_]Proof{
     // 비교 뷰 막대 드래그로 또 바뀐다: 오른쪽 열 기하 둘(`editor_scrollbar_right`·
     // `editor_horizontal_scrollbar_right`)과 잡은 열 플래그(`editor_hscroll_right`)가 붙는다.
     // count는 2 그대로다 — 새 `@field` 반사가 없고 Client 구성·receiver 집합도 안 건드린다.
+    // 목록 스크롤바 드래그(2026-08-19)로 움직인다: 드래그 상태 하나(`scm_scroll_drag` — 규칙은
+    // `scroll_area.Drag`가 소유한다)가 붙는다. **위치는 새로 안 든다** — `scm_scroll`이 그대로 단일
+    // 출처다. count는 2 그대로다(새 `@field` 반사·Client 구성 변화 없음).
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0e95f15b398b8614fa3964db87b781d667bf72f5de3893a24dc524c90fe89927" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

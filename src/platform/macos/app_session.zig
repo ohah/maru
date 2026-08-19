@@ -3970,6 +3970,10 @@ pub const AppSession = struct {
     /// 트랙패드는 한 틱이 한 행보다 작고, 그 조각을 버리면 부드러운 스크롤이 계단으로 끊긴다.
     /// 목록·사이드바가 픽셀로 같은 것을 드는 것과 같은 자리다(`scroll_area.State.wheel_residue_px`).
     scm_commit_wheel_residue: f64 = 0,
+    /// 목록 스크롤바 드래그. **규칙은 `scroll_area.Drag`가 소유한다**(잡은 자리 · track 빈 곳 점프 ·
+    /// 틱 합치기) — 파일 트리·사이드바·편집기가 쓰는 그 타입이다. 위치의 단일 출처는 `scm_scroll`이고
+    /// 여기 든 것은 그 값을 계산할 기준뿐이다.
+    scm_scroll_drag: chrome.ui.scroll_area.Drag = .{},
     /// 캡처 게이트가 상자를 이미 굴렸나(`MARU_FORCE_SCM_COMMIT_WHEEL`). 매 tick 굴리면 끝까지 가 버려
     /// 중간 상태가 캡처에 안 남는다 — 강제 호버·커밋 메시지가 쓰는 것과 같은 1회성 래치다.
     debug_commit_wheel_done: bool = false,
@@ -56819,6 +56823,129 @@ test "소스 컨트롤: 클릭한 자리에 caret이 선다(두 칸 글자의 �
     const right = try commitBoxPoint(session, @as(f64, @floatFromInt(m.inset_x)) + cell * 1.5, @floatFromInt(m.commit_pad_y + 2));
     scm_dock_ops.focusCommitAt(session, 0, "/repo", right.x, right.y);
     try std.testing.expectEqual(@as(usize, 3), session.scm_commit_field.caret);
+}
+
+/// 목록이 넘치도록 파일 행을 채우고 발행한다(스크롤바가 서려면 넘쳐야 한다).
+fn fillScmListAndPublish(session: *AppSession, allocator: std.mem.Allocator, arena: std.mem.Allocator) !void {
+    var status: std.ArrayList(u8) = .empty;
+    defer status.deinit(allocator);
+    try status.appendSlice(allocator, "# branch.head main\n");
+    // **넉넉히 넘치게 채운다.** 40개로는 이 창 높이에서 안 넘쳐 스크롤바가 아예 안 섰다(실측).
+    // 섹션 상한(`모두 보기`)에 걸려도 접힌 줄이 남으므로 목록은 계속 길어진다.
+    for (0..200) |i| {
+        var line: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b file{d}.txt\n", .{i});
+        try status.appendSlice(allocator, text);
+    }
+    // 앞 결과를 **먼저 지운다**(worker allocator 소유 — 그냥 덮어쓰면 샌다).
+    if (session.git_result) |*old_result| old_result.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, status.items),
+        .ok = true,
+    };
+    // 상한에 걸린 그룹을 펼쳐 둔다 — 접힌 채면 줄 수가 상한에서 멈춰 목록이 안 넘칠 수 있다.
+    session.scm_expanded = @splat(true);
+    try republishScmDock(session, arena, 0);
+    // **넘치는지 먼저 단언한다.** 안 넘치면 스크롤바가 아예 없고, 그러면 아래 테스트들은 "막대를 못
+    // 찾았다"만 말하고 정작 무엇이 틀렸는지는 안 말한다.
+    try std.testing.expect(scroll_ops.scmScrollExtent(session).max_offset_px > 0);
+}
+
+/// 발행된 tree에서 그 노드의 rect(도크-로컬)를 되읽는다.
+fn scmNodeRectForTest(session: *AppSession, id: u64) ?chrome.ui.layout.UiRect {
+    for (session.scm_dock_entries.items) |entry| {
+        if (entry.id == id) return entry.rect;
+    }
+    return null;
+}
+
+test "소스 컨트롤: 목록 스크롤바 thumb을 끌면 목록이 따라온다" {
+    // 그전까지 이 도크에는 스크롤바 **드래그 경로가 없었다** — tree는 drag를 선언하는데 host가 그
+    // 결과를 흘려서, 막대가 "보이는데 안 잡히는" 컨트롤이었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    try fillScmListAndPublish(session, allocator, arena_state.allocator());
+
+    const thumb = scmNodeRectForTest(session, chrome.components.scm_dock.build.NodeIds.scroll_thumb) orelse
+        return error.MissingThumb;
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const x = @as(f64, @floatFromInt(content.x)) + thumb.x + thumb.width / 2;
+    const y = @as(f64, @floatFromInt(content.y)) + thumb.y + thumb.height / 2;
+
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+    _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+    // 아직 안 움직였다 — thumb을 **잡기만** 했다(누른 자리가 곧 목록 위치가 되면 화면이 튄다).
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+
+    _ = scm_dock_ops.scmDockPointer(session, .move, x, y + 40);
+    try std.testing.expect(session.scm_scroll.offset_y_px > 0); // 아래로 끌면 목록이 내려간다
+    const after_move = session.scm_scroll.offset_y_px;
+
+    _ = scm_dock_ops.scmDockPointer(session, .up, x, y + 40);
+    try std.testing.expectEqual(after_move, session.scm_scroll.offset_y_px); // 떼도 그 자리다
+    // 뗀 뒤의 움직임은 목록을 건드리지 않는다(잡은 자리를 놓았다).
+    _ = scm_dock_ops.scmDockPointer(session, .move, x, y + 200);
+    try std.testing.expectEqual(after_move, session.scm_scroll.offset_y_px);
+}
+
+test "소스 컨트롤: track의 빈 곳을 누르면 그 지점으로 뛴다(같은 누름이 두 번 적용되지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    try fillScmListAndPublish(session, allocator, arena_state.allocator());
+
+    const track = scmNodeRectForTest(session, chrome.components.scm_dock.build.NodeIds.scroll_track) orelse
+        return error.MissingTrack;
+    const thumb = scmNodeRectForTest(session, chrome.components.scm_dock.build.NodeIds.scroll_thumb) orelse
+        return error.MissingThumb;
+    const content = dock_ops.dockGeometry(session).tree_content;
+    // thumb **아래쪽**의 빈 track(맨 아래에서 한 칸 위 — 끝에 딱 붙으면 clamp와 구별이 안 된다).
+    const y_local = @min(thumb.y + thumb.height + 4, track.y + track.height - 2);
+    const x = @as(f64, @floatFromInt(content.x)) + track.x + track.width / 2;
+    const y = @as(f64, @floatFromInt(content.y)) + y_local;
+
+    _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+    const jumped = session.scm_scroll.offset_y_px;
+    try std.testing.expect(jumped > 0); // 눌린 지점으로 뛰었다
+
+    // **떼는 것이 다시 적용되지 않는다** — click intent로 한 번 더 다루면 같은 누름이 두 번 간다.
+    _ = scm_dock_ops.scmDockPointer(session, .up, x, y);
+    try std.testing.expectEqual(jumped, session.scm_scroll.offset_y_px);
+}
+
+test "소스 컨트롤: 스크롤바 밖에서 시작한 드래그는 목록을 굴리지 않는다" {
+    // `Drag.begin`이 track 밖이면 열지 않는다 — 파일 행을 눌러 끌 때 목록이 따라 움직이면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
+    try fillScmListAndPublish(session, allocator, arena_state.allocator());
+
+    const track = scmNodeRectForTest(session, chrome.components.scm_dock.build.NodeIds.scroll_track) orelse
+        return error.MissingTrack;
+    const content = dock_ops.dockGeometry(session).tree_content;
+    // 막대보다 **왼쪽**(목록 본문)에서 누른다.
+    const x = @as(f64, @floatFromInt(content.x)) + @max(track.x - 40, 4);
+    const y = @as(f64, @floatFromInt(content.y)) + track.y + 20;
+
+    _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+    _ = scm_dock_ops.scmDockPointer(session, .move, x, y + 60);
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
 }
 
 test "소스 컨트롤: 편집 중인 상자는 늘 창 안에 온전히 있다(휠·클릭 판정이 그 위에 선다)" {

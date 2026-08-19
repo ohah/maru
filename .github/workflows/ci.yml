@@ -137,6 +137,15 @@ jobs:
           else
             echo "이 job이 소유한 게이트를 건드리지 않은 변경(web 전용 등) — 실행할 검사가 없다"
           fi
+      # 중간 커밋도 경계 게이트를 통과하는가. `mise run check` 는 **팁만** 보므로, 리베이스 수렴을 팁에
+      # 몰아 넣으면 앞 커밋들이 빨간 채로 머지된다 — 이 저장소가 그 사고를 두 번 냈다(9 커밋이 빌드 불가,
+      # 2 커밋이 게이트 실패). 규율은 `docs/project-rules.md` `## 리베이스와 머지` 이고 이것이 그 기계 절반이다.
+      #
+      # PR 에서만 돈다(push 는 볼 "중간" 이 없다). 코드가 안 바뀐 PR 은 위 스텝이 이미 건너뛰었으므로
+      # 여기서도 건너뛴다 — 원장이 보는 파일은 전부 코드다.
+      - name: 중간 커밋도 경계 게이트를 통과하는가
+        if: ${{ github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+        run: sh tools/ci/per-commit-boundaries.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
       - name: Upload check artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

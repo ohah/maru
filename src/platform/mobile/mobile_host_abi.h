@@ -427,6 +427,9 @@ unsigned int maru_mobile_hit_cell(float x, float y);
 ///
 /// `secret_key`(64B)와 `entropy`(32B)는 **복사한 뒤 호출자가 지운다.** 브리지도 `close` 에서 지운다.
 /// `window` 0=기본(2MiB). `pty` 0 이면 stdout·stderr 가 따로 온다(계약 §3.5).
+/// **`secret` 은 NULL 일 수 있다** — 키가 아직 없는 기기다. 그때는 `none` 으로 방법 목록만 물어
+/// (RFC 4252 §5.2) 비밀번호만 여는 서버에 붙는다. 키가 없다고 시작조차 안 하면 그 서버에는
+/// 영영 못 붙는다(iOS 가 그랬다).
 int maru_mobile_ssh_open(const unsigned char *user, unsigned int user_len,
                          const unsigned char *secret_key, const unsigned char *entropy,
                          const unsigned char *term, unsigned int term_len,

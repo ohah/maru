@@ -100,7 +100,11 @@ pub const State = enum {
 pub const Options = struct {
     user: []const u8,
     /// `seed(32) ‖ public(32)`. host 가 Keychain·Keystore 에서 꺼내 온다.
-    secret_key: [userauth.secret_key_len]u8,
+    ///
+    /// **없을 수 있다.** 키가 아직 없는 기기(iOS 에 키 파일을 안 넣은 경우)도 **비밀번호만 여는
+    /// 서버에는 붙을 수 있어야** 한다 — 예전에는 host 가 키가 없으면 아예 시작을 안 해서, 키가
+    /// 필요 없는 서버조차 못 붙었다. 없으면 `none` 으로 방법 목록만 묻는다(RFC 4252 §5.2).
+    secret_key: ?[userauth.secret_key_len]u8,
     /// `TERM` 값. 원격이 이것으로 terminfo 를 고른다.
     term: []const u8 = "xterm-256color",
     size: channel.TerminalSize,
@@ -280,7 +284,7 @@ pub const Client = struct {
         self.t.clear();
         if (self.eph) |*e| e.clear();
         std.crypto.secureZero(u8, &self.k);
-        std.crypto.secureZero(u8, &self.opts.secret_key);
+        if (self.opts.secret_key) |*k| std.crypto.secureZero(u8, k);
         self.state = .closed;
         self.shell_ready = false;
     }
@@ -679,13 +683,21 @@ pub const Client = struct {
     }
 
     fn sendAuth(self: *Client, w: *Out) Error!void {
+        var req: [1024]u8 = undefined;
+        const secret = self.opts.secret_key orelse {
+            // **키가 없으면 `none` 으로 묻는다**(§5.2). 이 요청은 실패하는 것이 정상이고, 그
+            // 실패에 실려 오는 **방법 목록**이 목적이다 — 그것 없이는 비밀번호를 물을지조차 모른다.
+            self.auth_method = .none;
+            try self.emit(w, try userauth.writeNoneRequest(&req, self.opts.user));
+            self.state = .authenticating;
+            return;
+        };
         var kb: [128]u8 = undefined;
-        const key_blob = try userauth.publicKeyBlob(&kb, self.opts.secret_key);
+        const key_blob = try userauth.publicKeyBlob(&kb, secret);
         var sd: [512]u8 = undefined;
         const signed = try userauth.signedData(&sd, &self.session_id, self.opts.user, key_blob);
         var sig: [128]u8 = undefined;
-        const sig_blob = try userauth.signBlob(&sig, self.opts.secret_key, signed);
-        var req: [1024]u8 = undefined;
+        const sig_blob = try userauth.signBlob(&sig, secret, signed);
         try self.emit(w, try userauth.writePublicKeyRequest(&req, self.opts.user, key_blob, sig_blob));
         self.state = .authenticating;
     }
@@ -1042,7 +1054,7 @@ test "clear 는 비밀을 지운다" {
     c.k = @splat(7);
     c.clear();
     try testing.expect(std.mem.allEqual(u8, &c.k, 0));
-    try testing.expect(std.mem.allEqual(u8, &c.opts.secret_key, 0));
+    try testing.expect(std.mem.allEqual(u8, &c.opts.secret_key.?, 0));
 }
 
 /// 셸이 뜬 클라이언트를 만든다 — 채널 사건만 시험하려는 테스트용.
@@ -1825,6 +1837,62 @@ fn authFailure(out: []u8, methods: []const []const u8, prng: *std.Random.Default
     w.boolean(false) catch unreachable;
     const n = packet.write(out, w.written(), prng.random()) catch unreachable;
     return out[0..n];
+}
+
+test "키가 없으면 none 으로 방법 목록을 묻는다" {
+    // **키가 없다고 시작조차 못 하면 안 된다** — 비밀번호만 여는 서버에는 키가 필요 없다.
+    // 예전에는 host 가 키 파일이 없으면 아예 접속을 안 했고(iOS), 그 서버에도 못 붙었다.
+    var prng = std.Random.DefaultPrng.init(51);
+    var c = Client.init(.{
+        .user = "u",
+        .secret_key = null, // 키 없음
+        .size = .{ .cols = 80, .rows = 24 },
+    }, prng.random());
+    c.state = .requesting_service;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+
+    var buf: [64]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(userauth.msg_service_accept);
+    try w.string("ssh-userauth");
+    var pbuf: [1024]u8 = undefined;
+    const n = try packet.write(&pbuf, w.written(), prng.random());
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(pbuf[0..n], &out, &scr);
+    try testing.expectEqual(State.authenticating, step.state);
+
+    // 나간 것이 **`none` 요청**이다(키가 없으니 서명할 것도 없다).
+    const dec = try packet.read(step.wire);
+    try testing.expectEqual(userauth.msg_userauth_request, dec.payload[0]);
+    var r = wire.Reader.init(dec.payload[1..]);
+    try testing.expectEqualStrings("u", try r.string());
+    try testing.expectEqualStrings("ssh-connection", try r.string());
+    try testing.expectEqualStrings("none", try r.string());
+}
+
+test "키 없이 물은 뒤에도 비밀번호로 이어 간다" {
+    // `none` 은 실패하는 것이 정상이다(§5.2). 그 실패의 목록에 `password` 가 있으면 거기서
+    // 묻는다 — 이 이음매가 없으면 키 없는 기기는 목록만 받고 끝난다.
+    var prng = std.Random.DefaultPrng.init(52);
+    var c = Client.init(.{
+        .user = "u",
+        .secret_key = null,
+        .size = .{ .cols = 80, .rows = 24 },
+    }, prng.random());
+    c.state = .authenticating;
+    c.auth_method = .none;
+    c.t.phase = .established;
+    c.t.kex_send_done = true;
+    c.t.kex_recv_done = true;
+
+    var pbuf: [1024]u8 = undefined;
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    const step = try c.feed(authFailure(&pbuf, &.{"password"}, &prng), &out, &scr);
+    try testing.expectEqual(State.password_needed, step.state);
 }
 
 test "키가 거절돼도 서버가 비밀번호를 열어 뒀으면 물어본다" {

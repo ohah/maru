@@ -275,6 +275,12 @@ start_sshd "$DIR/sshd6b.pid" "$((PORT + 11))" "$DIR/sshd6b.log" "true" "$PASSWOR
 "$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 password
 ROUNDS=$((ROUNDS + 1))
 
+# 9c) **키 없이 붙는 회차.** 키 파일이 아직 없는 기기(iOS)를 흉내 낸다 — 드라이버가 키를 안 넘기고
+#     코어는 `none` 으로 방법 목록만 묻는다(RFC 4252 §5.2). 같은 서버를 그대로 쓴다:
+#     "키가 없다고 시작조차 못 하면 비밀번호만 여는 서버에는 영영 못 붙는다" 가 이 회차의 뜻이다.
+"$DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 nokey
+ROUNDS=$((ROUNDS + 1))
+
 # 10) **모바일 ABI 회차(S9-2).** 위 아홉 회차는 코어(`client.zig`)를 직접 부르는 드라이버가
 #     돌린다 — 그 사이에 낀 `maru_mobile_ssh_*` 는 한 줄도 안 지난다. 기기에서 "안 된다" 가
 #     났을 때 가장 비싼 물음이 **프로토콜 탓이냐 배선 탓이냐**이고, ABI 만으로 한 번 붙여 두면
@@ -379,8 +385,8 @@ ROUNDS=$((ROUNDS + 1))
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 15 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 15 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 16 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 16 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열다섯 회차 완주"
+echo "[ssh-client-smoke] 열여섯 회차 완주"

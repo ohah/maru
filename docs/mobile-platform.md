@@ -206,6 +206,9 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
   `authorized_keys` 에 붙여야 처음 붙을 수 있는데, 접속할 때 키를 처음 열면 순서가 거꾸로다.
   Android 는 `id_ed25519.pub` 가 있으면 **개인키를 안 열고** 그것을 읽는다(없을 때만 Keystore 를
   열어 한 줄을 만들고 파일로 남긴다). iOS 는 앱 전용 키 파일에서 만든다.
+- **키가 없어도 붙는다**(`maru_mobile_ssh_open` 의 `secret` 이 NULL, 펌프 `cfg.secret` 도 NULL).
+  키가 아직 없는 기기는 코어가 `none` 으로 방법 목록만 물어 비밀번호만 여는 서버에 붙는다 —
+  iOS 는 키 파일이 없으면 **접속 자체를 안 하고 있었다**.
 - **키는 config 에 없다.** Android 는 Keystore 가 봉인한 것을 풀어 쓰고, iOS 는 앱 전용 파일
   (`Application Support/maru/id_ed25519`)을 읽는다 — 경로가 고정이라 설정에 적을 것이 없다
   (iOS Keychain 은 실기기 검증까지 보류: [SSH 계획](plans/ssh-client.md) S9c-2).

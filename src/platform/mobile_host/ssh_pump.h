@@ -21,6 +21,10 @@ typedef struct {
     unsigned short port;
     const char *user;
     /// `seed(32) ‖ public(32)` — `maru_mobile_ssh_load_key` 가 만든 값.
+    ///
+    /// **NULL 일 수 있다**: 키가 아직 없는 기기다. 그때는 코어가 `none` 으로 방법 목록만 물어
+    /// (RFC 4252 §5.2) 비밀번호만 여는 서버에 붙는다 — 키가 없다고 시작조차 안 하면 그 서버에는
+    /// 영영 못 붙는다(iOS 가 그랬다).
     const unsigned char *secret;
     unsigned int cols;
     unsigned int rows;

@@ -183,7 +183,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // **붙는 것까지는 못 본다** — 진짜 계정 비밀번호가 필요한데 스모크가 그것을 알 수 없다
     // (사람에게 물을 수도 없다). 그래서 "물어야 할 자리에서 물었다" 와 "틀린 비밀번호는 실패로
     // 끝난다"(되묻는 고리가 아니다) 둘을 단언한다.
-    const expect_password = std.mem.eql(u8, mode, "password");
+    const expect_password = std.mem.eql(u8, mode, "password") or std.mem.eql(u8, mode, "nokey");
+    // **키 없이 붙는 회차.** 키 파일이 아직 없는 기기(iOS)를 흉내 낸다 — 코어가 `none` 으로
+    // 방법 목록만 묻고, 그 목록에 `password` 가 있으면 거기서 멈춰 물어야 한다. 키를 안 읽는
+    // 경로는 실서버로 여기 말고 밟는 데가 없다.
+    const no_key = std.mem.eql(u8, mode, "nokey");
 
     var parsed = try loadKey(key_path);
     defer parsed.clear();
@@ -193,7 +197,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     cl = client.Client.init(.{
         .user = user,
-        .secret_key = parsed.secret,
+        .secret_key = if (no_key) null else parsed.secret,
         .size = .{ .cols = 80, .rows = 24 },
         .window = want_window,
         .pty = want_pty,

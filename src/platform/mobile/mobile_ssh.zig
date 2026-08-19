@@ -399,7 +399,7 @@ pub export fn maru_mobile_ssh_last_load_error() [*:0]const u8 {
 pub export fn maru_mobile_ssh_open(
     user: [*]const u8,
     user_len: u32,
-    secret_key: [*]const u8,
+    secret_key: ?[*]const u8,
     entropy: [*]const u8,
     term: [*]const u8,
     term_len: u32,
@@ -439,8 +439,15 @@ pub export fn maru_mobile_ssh_open(
     s.csprng = std.Random.DefaultCsprng.init(seed);
     std.crypto.secureZero(u8, &seed);
 
-    var key: [secret_key_bytes]u8 = undefined;
-    @memcpy(&key, secret_key[0..secret_key_bytes]);
+    // **키는 없을 수 있다**(`NULL`). 키가 없는 기기도 비밀번호만 여는 서버에는 붙어야 한다 —
+    // 코어가 그때는 `none` 으로 방법 목록만 묻는다(SSH 계약 §3.4).
+    var key: ?[secret_key_bytes]u8 = null;
+    if (secret_key) |ptr| {
+        var k: [secret_key_bytes]u8 = undefined;
+        @memcpy(&k, ptr[0..secret_key_bytes]);
+        key = k;
+    }
+    defer if (key) |*k| std.crypto.secureZero(u8, k);
     s.cl = client.Client.init(.{
         .user = s.user[0..s.user_len],
         .secret_key = key,
@@ -449,7 +456,6 @@ pub export fn maru_mobile_ssh_open(
         .window = window,
         .pty = pty != 0,
     }, s.csprng.random());
-    std.crypto.secureZero(u8, &key);
 
     // **여는 것과 첫 바이트를 내는 것을 안 나눈다.** 나누면 host 가 한쪽을 잊고, 잊으면 서버는
     // 우리 버전 줄을 영영 못 받아 "연결은 됐는데 아무 일도 안 난다" 가 된다.

@@ -91,6 +91,8 @@ static char g_user[128];
 static char g_fingerprint[128];
 static MaruSshPumpHooks g_hooks;
 static unsigned char g_secret[MARU_SSH_SECRET_KEY_BYTES];
+/// 키를 받았나. **없을 수 있다** — 키가 아직 없는 기기도 비밀번호만 여는 서버에는 붙는다.
+static int g_has_secret;
 /// `write`·`resize` 는 **다른 스레드에서** 온다(IME·회전). 세션 슬롯을 두 스레드가 만지므로
 /// 여기서 직렬화한다 — 브리지 자물쇠(host 것)와는 다른 자물쇠다: 이건 세션용이다.
 static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -421,7 +423,7 @@ static void *pump_main(void *unused) {
         goto done;
     }
     int st = maru_mobile_ssh_open((const unsigned char *)g_cfg.user, (unsigned int)strlen(g_cfg.user),
-                                  g_secret, entropy, (const unsigned char *)"xterm-256color", 14,
+                                  g_has_secret ? g_secret : NULL, entropy, (const unsigned char *)"xterm-256color", 14,
                                   g_cfg.cols, g_cfg.rows, 0, 1, &g_handle);
     memset(entropy, 0, sizeof entropy);
     // **키 사본은 여기서 끝난다.** 코어가 자기 몫을 챙겼으므로(그쪽은 `close` 가 지운다) 이
@@ -556,7 +558,7 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
         g_joinable = 0;
     }
     if (g_running) return -1;
-    if (cfg == NULL || cfg->host == NULL || cfg->user == NULL || cfg->secret == NULL) return -2;
+    if (cfg == NULL || cfg->host == NULL || cfg->user == NULL) return -2;
     if (cfg->port == 0 || cfg->cols == 0 || cfg->rows == 0) return -2;
 
     g_cfg = *cfg;
@@ -568,7 +570,9 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     g_cfg.user = g_user;
     g_cfg.expect_fingerprint = g_fingerprint;
     g_hooks = hooks ? *hooks : (MaruSshPumpHooks){0};
-    memcpy(g_secret, cfg->secret, sizeof g_secret);
+    g_has_secret = cfg->secret != NULL;
+    if (g_has_secret) memcpy(g_secret, cfg->secret, sizeof g_secret);
+    else memset(g_secret, 0, sizeof g_secret);
     g_error[0] = 0;
     g_last_rekeys = 0;
     g_handle = 0;

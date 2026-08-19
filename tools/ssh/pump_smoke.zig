@@ -247,10 +247,22 @@ test "지문이 다르면 붙지 않는다" {
 
     // 인자가 모자라면 아예 안 뜬다. **하나씩 다 본다** — 하나만 재면 나머지 가지가 죽어도
     // 초록이고, 그 값들은 그대로 `open` 에 실려 간다(0 열·0 행짜리 pty 를 요구하게 된다).
-    inline for (.{ "host", "user", "secret" }) |field| {
+    inline for (.{ "host", "user" }) |field| {
         var bad = cfg;
         @field(bad, field) = null;
         try std.testing.expectEqual(@as(c_int, -2), pump.maru_ssh_pump_start(&bad, null));
+    }
+    // **`secret` 은 없어도 된다** — 키가 아직 없는 기기가 비밀번호만 여는 서버에 붙는 길이다
+    // (RFC 4252 §5.2 의 `none`). 여기서 거절하면 그 서버에는 영영 못 붙는다(iOS 가 그랬다).
+    {
+        var no_key = cfg;
+        no_key.secret = null;
+        try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&no_key, null));
+        var waited2: usize = 0;
+        while (waited2 < 2000 and pump.maru_ssh_pump_error()[0] == 0) : (waited2 += 20) sleepMs(20);
+        pump.maru_ssh_pump_stop();
+        // 이 회차의 주소는 아무도 안 듣는 자리라 **붙는 것부터** 실패한다 — 키가 없어서가 아니다.
+        try std.testing.expectEqualStrings("connect_failed", std.mem.span(pump.maru_ssh_pump_error()));
     }
     inline for (.{ "port", "cols", "rows" }) |field| {
         var bad = cfg;

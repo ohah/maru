@@ -1178,7 +1178,14 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // fixture는 이 선택에 안 흔들린다 — `interactiveEcho(.windows)`는 인자가 비어 있고 입력이
     // `echo …\r\nexit\r\n`이라 cmd·PowerShell 양쪽에서 같게 돈다.
     const command = maru.pty.resolveShell(cfg.shell.command, maru.windowsShellKindOf(cfg.shell.windows_shell));
-
+    // **`shell.args`는 아직 안 배선한다 — 기본값이 POSIX 전용이다.** 한 번 배선해 보고 되돌렸다:
+    // `ShellConfig.args` 의 기본이 `&.{"-i"}`(대화형 sh/zsh 플래그)라 `len > 0` 조건이 **항상 참**이고,
+    // config 가 없어도 Windows 셸에 `-i` 가 붙었다(실측: `args=1`). 두 셸 모두 죽지는 않지만
+    // (cmd 는 무시, pwsh 는 수용) 의미가 틀린 인자다.
+    //
+    // 제대로 하려면 "Windows 에서 `shell.args` 기본값이 무엇인가" 를 정해야 하는데 문서에 없다.
+    // 사용자 결정 전까지 fixture 인자를 그대로 쓴다 — `shell.command`·`shell.windows-shell` 배선과
+    // 달리 이쪽은 기본값을 건드리지 않고는 옳게 만들 수 없다.
     var live: maru.app.LivePtySession = undefined;
     try live.init(io, allocator, 10, .{ .command = command, .args = script.args, .size = start }, 16);
     defer live.deinit();
@@ -1858,8 +1865,10 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         // **어떤 셸이 골라졌는지 찍는다.** `shell.command`·`shell.windows-shell`이 spawn 까지 가는지는
         // 리포트에 안 보이면 확인할 방법이 프로세스 트리를 뒤지는 것뿐이었다 — 그 상태로 두 키가 배선
         // 없이 오래 남아 있었다(#8). 설정값과 결과를 나란히 찍어 한눈에 어긋남이 보이게 한다.
-        try stdout.print("config_shell: windows_shell={s} command=\"{s}\" resolved=\"{s}\"\n", .{
-            @tagName(cfg.shell.windows_shell), cfg.shell.command, command,
+        // `spawned_args` 와 `config_args` 를 **따로** 찍는다 — 둘이 갈려 있다는 것 자체가 지금 남은
+        // 미배선(`shell.args`)이고, 한 숫자만 찍으면 그 사실이 안 보인다.
+        try stdout.print("config_shell: windows_shell={s} command=\"{s}\" resolved=\"{s}\" spawned_args={d} config_args={d}\n", .{
+            @tagName(cfg.shell.windows_shell), cfg.shell.command, command, script.args.len, cfg.shell.args.len,
         });
         try stdout.print("conpty={s}{s}{s}\n", .{
             @tagName(maru.pty.windowsConptySource()),

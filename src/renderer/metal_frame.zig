@@ -1247,15 +1247,15 @@ fn setCellsPaneOrigin(cells: []NativeMetalCell, origin_x: u32, origin_y: u32) vo
     }
 }
 
+/// 사이드바 셀 = **제목 glyph**뿐이다. 밴드(활성·호버·드롭존)는 GPU quad로 나가므로 여기 안 섞인다 —
+/// 옛 tui 룩에서만 밴드가 셀이었고, 그때는 이 함수가 `band ++ glyph` 를 이어 붙였다.
 fn buildMergedSidebarCells(
     allocator: std.mem.Allocator,
-    band: []const NativeMetalCell,
     sidebar_frame: ?renderer.RenderFrame,
     colors: CellColors,
 ) ![]NativeMetalCell {
     var list: std.ArrayList(NativeMetalCell) = .empty;
     errdefer list.deinit(allocator);
-    try list.appendSlice(allocator, band);
     if (sidebar_frame) |sf| {
         const glyphs = try buildNativeCellsFromGlyphQuads(allocator, sf.glyph_quad_frame, sf.draw_list.cells, colors);
         defer allocator.free(glyphs);
@@ -1445,7 +1445,6 @@ pub const MetalFrameBuffer = struct {
         // 사이드바 상단 헤더 glyph(검색 placeholder + ⚙·+ 아이콘) — 절대 좌표(origin 0,0 기반 cells). 카드(sidebar_frame)는
         // 슬롯 row 기반이라 .m이 header_h 시프트하지만, 헤더는 헤더 영역 [0,header)에 그대로 박는다. null이면 헤더 없음.
         sidebar_header_frame: ?renderer.RenderFrame,
-        sidebar_band_cells: []const NativeMetalCell,
         sidebar_colors: CellColors,
         // per-pane 탭 바 chrome 셀(배경 밴드 등). 각 셀이 자기 origin_x/origin_y를 들어 터미널 셀과 같은 경로로
         // 렌더된다(maru_fill_cell_quad). 터미널 셀 '앞'에 두어 활성 panel 커서가 합쳐진 cells의 끝(suffix)에
@@ -1574,7 +1573,7 @@ pub const MetalFrameBuffer = struct {
         const new_clips = try clip_table.toOwnedSlice(allocator);
         errdefer allocator.free(new_clips);
 
-        const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
+        const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
 
         // 멀티 페인 grow 견고성: 페인들이 한 atlas를 여러 빌드로 공유하므로, 먼저 빌드된 페인은 grow
@@ -1695,12 +1694,11 @@ pub const MetalFrameBuffer = struct {
     pub fn replaceSidebar(
         self: *MetalFrameBuffer,
         allocator: std.mem.Allocator,
-        sidebar_band_cells: []const NativeMetalCell,
         sidebar_frame: ?renderer.RenderFrame,
         sidebar_colors: CellColors,
         atlas_config: renderer.GlyphAtlasConfig,
     ) !void {
-        const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
+        const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
         // atlas가 grow 안 했다는 전제(호출자 폴백)이므로 현재 dims는 self.cells가 정규화된 dims와 같다 —
         // 사이드바 셀만 같은 dims로 정규화하면 UV가 self.cells와 일관한다(atlas px는 grow 불변, replace와 동일 규율).
@@ -2757,31 +2755,14 @@ test "appendRaster concatenates pixels and shifts upload offsets into the merged
     try std.testing.expectEqual(@as(u32, 5), uploads.items[0].slot_id);
 }
 
-test "buildMergedSidebarCells prepends band cells before sidebar title glyph cells" {
-    // 사이드바 셀 = 밴드(전달) ++ 제목 glyph. 제목 frame 없으면 밴드만. 밴드가 앞이라 렌더러에서
-    // 배경(밴드) 위에 제목 glyph가 painter 순서로 얹힌다.
+test "buildMergedSidebarCells carries sidebar title glyphs and nothing else" {
+    // 사이드바 셀은 **제목 glyph 뿐**이다 — 밴드(활성·호버·드롭존)는 GPU quad 로 나가 이 배열에 안 섞인다.
+    // 옛 tui 룩에서는 밴드가 셀이라 이 함수가 `band ++ glyph` 를 이어 붙였고, 이 테스트도 그 순서를 봤다.
+    // 그 갈래가 도달 불가가 되어 사라진 뒤로는 "glyph 만 실린다"가 계약이다.
     const allocator = std.testing.allocator;
-    const band = [_]NativeMetalCell{.{
-        .row = 0,
-        .col = 0,
-        .width = 10,
-        .codepoint = ' ',
-        .slot_id = 0,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = 0,
-        .u0 = -1.0,
-        .v0 = -1.0,
-        .u1 = -1.0,
-        .v1 = -1.0,
-        .background = 0xFF112233,
-    }};
-    const merged = try buildMergedSidebarCells(allocator, &band, null, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    const merged = try buildMergedSidebarCells(allocator, null, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
     defer allocator.free(merged);
-    try std.testing.expectEqual(@as(usize, 1), merged.len); // 제목 frame 없으면 밴드만
-    try std.testing.expectEqual(@as(u32, 0xFF112233), merged[0].background);
-    try std.testing.expectEqual(@as(u32, 0), merged[0].slot_id); // 밴드는 slot_id 0(렌더러가 슬롯 전체로 그림)
+    try std.testing.expectEqual(@as(usize, 0), merged.len); // 제목 frame 이 없으면 실을 것이 없다
 }
 
 test "setCellsPaneOrigin stamps the panel pixel origin on every terminal cell" {
@@ -3097,7 +3078,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
         try std.testing.expectEqual(@as(u32, 1), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
@@ -3108,7 +3089,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
         try std.testing.expectEqual(@as(u32, 0), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
@@ -3117,7 +3098,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         const frame = buf.view();
         try std.testing.expectEqual(@as(usize, 0), frame.modal_cells_start);
         try std.testing.expectEqual(@as(u32, 1), frame.overlay_cells_present);
@@ -3153,7 +3134,7 @@ test "replace [5]: 모달(caret)+드래그 고스트 공존 → modal caret이 �
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
     // 마우스 드래그 중 ⌘F: overlay_frame(모달)+drag_overlay_frame(고스트) 공존. replace가 [고스트][모달] 순으로 조립.
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, modal_pf, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, modal_pf, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // cursor_cells는 **모달**의 caret만(고스트 caret은 overlay_cursor_cells에 안 실림). 그 suffix가 버퍼 맨 끝 = 모달
     // 셀이어야 blink chop이 맞다. 고스트를 모달 '뒤'에 append하는 리팩터([0] 재발)면 buf.cells 끝이 고스트(origin 500)라 실패.
@@ -3179,7 +3160,7 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // ★ 커서 구간이 살아 있어야 한다(옛 코드는 0이라 blink가 죽었다).
     try std.testing.expect(buf.cursor_cells >= 1);
@@ -3213,7 +3194,7 @@ test "replace: 셀이 자기 clip index를 들고 가고 표가 그 사각형을
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     const v = buf.view();
     try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
@@ -3254,17 +3235,17 @@ test "replace: 목록 pane이 없는 프레임을 지나도 다음 프레임의 
     defer buf.deinit(allocator);
 
     var with_list = [_]PaneFrame{listed};
-    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
 
     // 목록이 빠진 프레임 — 자를 셀이 없으니 표도 비어야 한다(그 프레임엔 목록 셀도 없다).
     var without_list = [_]PaneFrame{plain};
-    try buf.replace(allocator, &without_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &without_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(usize, 0), buf.view().cell_clip_count);
     for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 0), cell.clip_index);
 
     // 다시 목록이 있는 프레임 — clip이 온전히 돌아온다.
-    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     const v = buf.view();
     try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
     try std.testing.expectEqual(clip.y, v.cell_clips.?[0].y);
@@ -3289,7 +3270,7 @@ test "replace: 같은 clip을 쓰는 pane들이 표 항목 하나를 공유한�
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
     for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 1), cell.clip_index);
@@ -3306,8 +3287,7 @@ test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid
     const cells_ptr = buf.cells.ptr;
     buf.generation = 7;
 
-    const band = [_]NativeMetalCell{.{ .row = 0, .col = 0, .width = 1, .codepoint = 0, .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0, .background = 0xFF223344 }};
-    try buf.replaceSidebar(allocator, &band, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, .{});
+    try buf.replaceSidebar(allocator, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, .{});
 
     try std.testing.expectEqual(@as(u64, 8), buf.generation); // generation++
     // grid cells 불변(포인터·길이·내용).
@@ -3315,9 +3295,10 @@ test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid
     try std.testing.expectEqual(@as(usize, 1), buf.cells.len);
     try std.testing.expectEqual(@as(u16, 3), buf.cells[0].row);
     try std.testing.expectEqual(@as(u32, 'X'), buf.cells[0].codepoint);
-    // sidebar_cells는 새 band로 교체.
-    try std.testing.expectEqual(@as(usize, 1), buf.sidebar_cells.len);
-    try std.testing.expectEqual(@as(u32, 0xFF223344), buf.sidebar_cells[0].background);
+    // sidebar_cells 는 새 결과로 교체된다. 제목 frame 을 안 넘겼으니 **빈 슬라이스**이고, 그게 요점이다 —
+    // 이 테스트가 지키는 것은 "무엇이 실렸나"가 아니라 **sidebar 축만 갈리고 grid 축은 안 갈린다**는 격리다
+    // (밴드가 셀이던 시절에는 여기 밴드 하나가 실려 그 길이를 봤다).
+    try std.testing.expectEqual(@as(usize, 0), buf.sidebar_cells.len);
 }
 
 // SB1-S2a: 상태바 높이는 **투영 스탬프**를 타고 ABI로 나간다. 렌더러는 이 값으로 사이드바 배경 strip의

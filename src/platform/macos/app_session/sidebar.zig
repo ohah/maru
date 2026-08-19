@@ -872,7 +872,6 @@ pub fn commitSidebarDragPreview(self: *AppSession) void {
 /// 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가/전환/메트릭/호버 변경 때 호출한다. 실패(OOM)는
 /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
 pub fn rebuildSidebar(self: *AppSession) !void {
-    self.sidebar_cells.clearRetainingCapacity();
     // **자기 레이어(0)만 비운다.** 옛 코드는 `gpu_quads`를 통째로 비웠는데, 이 함수는 hover·드래그·탭 전환 등
     // 수십 개 이벤트 핸들러에서 **tick 사이에** 불린다. 그 직후 tick이 full 투영이 아니면(sync hold + chrome
     // 애니메이션 없음 → idle 분기) per-frame 레이어(탭 밴드 2·스크롤바 3·배지 4)가 재충전되지 않아 **그 프레임에
@@ -1194,13 +1193,13 @@ pub fn rebuildSidebar(self: *AppSession) !void {
 
 pub fn sidebarScissorPx(
     backing_height_px: u32,
-    sidebar_cells_present: bool,
+    has_sidebar_content: bool,
     header_height_px: u32,
     scroll_offset_px: u32,
     status_bar_height_px: u32,
 ) SidebarScissor {
     const none = SidebarScissor{ .top = 0, .bottom = 0 };
-    if (!sidebar_cells_present or backing_height_px == 0) return none;
+    if (!has_sidebar_content or backing_height_px == 0) return none;
 
     // 구간 값은 뷰포트가 소유하고, 여기서는 "언제 자르나"만 정한다(위아래 이유가 다르다 — SidebarScissor 문서).
     const viewport = sidebarViewportPx(backing_height_px, header_height_px, status_bar_height_px);
@@ -1443,8 +1442,8 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
     if (slot_h == 0) return;
     // SG8d: tint 소스 역매핑도 렌더 도메인(카드 드래그 중=preview_rows) — 밴드 op을 낸 view와 같은 rows를 본다.
     const rrows = sidebarRenderRows(self);
-    // gpu_quad(rich 밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이 header_h 시프트하는
-    // 건 sidebar_cells(텍스트·tui 밴드)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합). 좌측 accent 막대는
+    // gpu_quad(밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이 header_h 시프트하는
+    // 건 사이드바 셀(= 제목 glyph)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합). 좌측 accent 막대는
     // chrome op이 아니라 카드별 색으로 rebuildSidebar의 per-tab accent 루프가 직접 그린다(배경 tint와 같은 경로).
     const header_f: f32 = @floatFromInt(self.sidebar_header_height_px);
     for (ops) |op| switch (op) {
@@ -1474,25 +1473,13 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                         color = blendRgb(color, self.tabs.items[h.tab].group_color & 0x00FF_FFFF, tab_bg_tint_alpha);
                 },
             };
-            const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
-            if (!has_radius) {
-                // tui: 직각 → 셀 밴드. 세로 위치·높이를 chrome이 준 **content-상대 rowTop(q.rect.y)·row 높이(q.rect.h)**로
-                // 그대로 셀에 실어(.m이 균일 row*slot_h 대신 그걸 씀) 그룹 헤더(얇은 한 줄)와 정합한다(code-review #7).
-                // past-end(리스트 아래 새 워크스페이스 드롭 행)도 bandFill이 q.rect.y=contentHeight로 내므로, 옛
-                // `sidebarBandRow(q.rect.y) orelse continue`가 null로 삼키던 드롭 하이라이트 셀이 이제 방출된다(#8).
-                if (q.rect.y < 0) continue; // 이 경로 y는 항상 ≥0(방어)
-                const origin_y: u32 = @intCast(q.rect.y);
-                // .row는 tint 역매핑·디버그용 표시 row(past-end면 rows.len — .m 세로 위치는 origin_y가 단일 출처).
-                const ri = sidebarBandRow(self, q.rect.y) orelse rrows.len;
-                const row: u16 = @intCast(@min(ri, @as(usize, std.math.maxInt(u16))));
-                // 드롭 타겟(.drop_zone)은 드래그 중 "어디 떨어질지" 단서라 window.opacity 미적용 — focus 테두리·accent와 동급(불투명 유지).
-                // 나머지 밴드(활성/호버)만 셀 경로 premultiply. drop_zone은 α=1이라 premult==straight로 어느 경로든 안전.
-                const band_bg = if (q.fill_role == .drop_zone) color else self.chromeCellBg(color);
-                if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, origin_y, q.rect.h, band_bg)) |cell| {
-                    self.sidebar_cells.append(self.allocator, cell) catch {};
-                }
-            } else {
-                // rich: GPU quad 프리미티브(둥근 밴드) — 셀 그리드와 별개 파이프라인으로 렌더된다.
+            {
+                // 밴드는 **GPU quad 프리미티브**다 — 셀 그리드와 별개 파이프라인으로 렌더된다.
+                //
+                // 옛 tui 룩에서는 여기 갈래가 하나 더 있었다: quad radius가 0이면 셀 밴드(`sidebar_cells`)로
+                // 낮췄다. tui 제거로 `Tokens.rich`가 유일 토큰셋이 되어 `shape.corner_radius_px`가 항상 8이고
+                // (`chrome/components/sidebar.zig`의 `bandFill`이 그 값을 그대로 radii에 싣는다), 그 갈래는
+                // 도달할 수 없게 됐다 — 테스트 전 범위·실앱 기본·실앱 그룹 헤더 강제에서 모두 도달 0회로 실측했다.
                 const sr = sidebarScrollClipQuad(self, @as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
                 // 상단이 헤더에 걸려 잘리면 둥근 모서리를 죽인다(헤더 경계에 abut한 라운드 상단이 어색하지 않게).
                 const radii: [4]f32 = if (sr.clipped) .{ 0, 0, 0, 0 } else .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) };
@@ -2618,32 +2605,6 @@ pub fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
 /// 실어 준다 — .m 렌더러가 옛 균일 `row*slot_h`/`slot_h` 대신 이 둘을 써 그룹 헤더(얇은 한 줄)와 정합한다(glyph 옵션2와
 /// 동형). height는 glyph 없는 sentinel 셀이라 미사용인 `atlas_height_px` 필드로 나른다(atlas 미참조라 안전). `row`는
 /// tint 역매핑·디버그용 표시 row(세로 위치는 origin_y가 단일 출처). 순수 함수라 OS와 무관하게 단위 테스트한다
-/// (lowerSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
-pub fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, row: u16, origin_y: u32, height: u32, active_bg: u32) ?metal_frame.NativeMetalCell {
-    if (sidebar_width_px == 0 or cell_width_px == 0) return null;
-    const cols_u32 = @min(sidebar_width_px / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    const sidebar_cols: u16 = @intCast(cols_u32);
-    if (sidebar_cols == 0) return null;
-    return .{
-        .row = row,
-        .col = 0,
-        .width = sidebar_cols,
-        .codepoint = ' ',
-        .slot_id = 0,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = height, // 밴드 행 높이(가변 — 카드=slot_h·헤더=header_row_h)를 .m cell_h로 나른다(#7)
-        .u0 = -1.0,
-        .v0 = -1.0,
-        .u1 = -1.0,
-        .v1 = -1.0,
-        .foreground = 0,
-        .background = active_bg,
-        .origin_y = origin_y, // content-상대 rowTop(헤더·스크롤 제외). .m이 header 시프트·scroll을 더한다(glyph 옵션2 동형, #7)
-    };
-}
-
 /// per-tab 배경색(우클릭 "배경: …") tint 세기 — rich gpu_quad·tui 밴드 두 경로 단일 출처. 0xB0 ≈ 69%
 /// (0x66 ≈ 40%에서 올림 — 옅어서 안 보인다는 라이브 요청). 0=투명, 0xFF=완전 불투명.
 pub const tab_bg_tint_alpha: u8 = 0xB0;

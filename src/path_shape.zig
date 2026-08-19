@@ -406,18 +406,29 @@ pub fn trimTrailingSep(base: []const u8) []const u8 {
 ///
 /// 루트 자신이면 빈 슬라이스다. 반환값은 **앞에 구분자가 없다.**
 pub fn relativeUnderRoot(path: []const u8, root: []const u8) ?[]const u8 {
-    if (root.len == 0) return null;
-    // **후행 구분자를 먼저 벗기고 잰다.** 안 그러면 길이 비교가 비대칭을 만든다 — 루트가 `/proj/`
-    // (6바이트)일 때 그 **직계 자식의 부모**인 `/proj`(5바이트)가 루트보다 짧아 거절되는데, 손자
-    // `/proj/a/x`는 통과한다. `pathWithin`은 같은 입력을 받아들이므로 그쪽과도 어긋난다.
-    // (루트가 `/` 하나뿐이면 벗기지 않는다 — 빈 문자열이 되면 절대경로가 상대경로로 바뀐다.)
-    const base = trimTrailingSep(root);
+    if (root.len == 0 or path.len == 0) return null;
+    // **후행 구분자를 먼저, 전부 벗기고 잰다.** 하나만 벗기면 두 가지가 어긋난다.
+    //
+    // ⓐ 벗기지 않으면 길이 비교가 비대칭을 만든다 — 루트가 `/proj/`(6바이트)일 때 그 **직계 자식의
+    //    부모**인 `/proj`(5바이트)가 루트보다 짧아 거절되는데, 손자 `/proj/a/x`는 통과한다.
+    //    `pathWithin`은 같은 입력을 받아들이므로 그쪽과도 어긋난다.
+    // ⓑ **하나만** 벗기면 구분자가 둘인 루트에서 결과가 상대 경로가 아니게 된다 — 실측:
+    //    `rel("/proj//x", "/proj//")`가 `x`가 아니라 **`/x`**(선두 구분자!)를 냈다. 그 값을 루트에
+    //    다시 이어 붙이는 소비자(`file_tree`·`git_write_command`)가 절대경로로 오해할 수 있다.
+    //    config 가 `workspace.root = C:\proj\\` 를 정규화하면 정확히 그 루트가 나온다.
+    var end = root.len;
+    while (end > 0 and root[end - 1] == '/') end -= 1;
+    const base = root[0..end]; // 루트가 구분자뿐(`/`·`//`)이면 빈 문자열 — 접두로 비교할 것이 없다
     if (path.len < base.len) return null;
     if (!std.mem.eql(u8, path[0..base.len], base)) return null;
-    if (path.len == base.len) return path[path.len..]; // 루트 자신 — 빈 슬라이스
-    if (endsWithSep(base)) return path[base.len..]; // 루트가 `/` 하나인 경우
-    if (path[base.len] != '/') return null; // 경계가 아니다 — `/a/proj` vs `/a/project`
-    return path[base.len + 1 ..];
+
+    // 경계의 구분자를 **전부** 건너뛴다. 루트에도 경로에도 `//` 가 있을 수 있고, 어느 쪽이든 결과는
+    // 선두 구분자가 없는 상대 경로여야 한다.
+    var i = base.len;
+    while (i < path.len and path[i] == '/') i += 1;
+    if (i == path.len) return path[path.len..]; // 루트 자신(후행 구분자 포함) — 빈 슬라이스
+    if (i == base.len) return null; // 경계가 아니다 — `/a/proj` vs `/a/project`
+    return path[i..];
 }
 
 const testing = std.testing;
@@ -765,4 +776,32 @@ test "endsWithSep: 구분자로 끝나는 모든 루트를 맞힌다" {
     // L2 계약이 POSIX라 `\`로 끝나는 경로는 여기 오지 않는다. 와도 구분자로 세지 않는다 —
     // POSIX에서 `a\`는 그런 이름의 파일이다.
     try testing.expect(!endsWithSep("C:\\"));
+}
+
+test "relativeUnderRoot: 구분자가 둘인 루트에서도 결과가 상대 경로다" {
+    // **적대적 검증에서 내가 낸 회귀다.** 후행 구분자를 하나만 벗기던 판이 `/x`(선두 구분자!)를 냈다.
+    // 그 값을 루트에 다시 이어 붙이는 소비자가 절대경로로 오해할 수 있다.
+    // 도달 경로: config `workspace.root = C:\proj\` → 정규화 → `C:/proj//`.
+    try testing.expectEqualStrings("x", relativeUnderRoot("/proj//x", "/proj//").?);
+    try testing.expectEqualStrings("x", relativeUnderRoot("/proj/x", "/proj//").?);
+    try testing.expectEqualStrings("x", relativeUnderRoot("/proj//x", "/proj").?);
+    try testing.expectEqualStrings("a", relativeUnderRoot("C://a", "C://").?);
+
+    // **반환값에 선두 구분자가 없다는 것**이 이 함수의 계약이다 — 위 넷을 한 성질로 묶어 둔다.
+    for ([_][2][]const u8{
+        .{ "/proj//x", "/proj//" },
+        .{ "/proj///a/b", "/proj/" },
+        .{ "C:///a", "C:/" },
+        .{ "//srv/share//f", "//srv/share" },
+    }) |c| {
+        const rel = relativeUnderRoot(c[0], c[1]).?;
+        try testing.expect(rel.len > 0 and rel[0] != '/');
+    }
+
+    // 경계 판정은 그대로다 — 구분자를 건너뛰는 것이 형제 루트를 통과시키면 안 된다.
+    try testing.expect(relativeUnderRoot("/proj2/x", "/proj//") == null);
+    try testing.expect(relativeUnderRoot("/project", "/proj") == null);
+    // 루트가 구분자뿐이어도 상대 경로는 루트 밖이다.
+    try testing.expect(relativeUnderRoot("a", "/") == null);
+    try testing.expect(relativeUnderRoot("a", "//") == null);
 }

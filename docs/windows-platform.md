@@ -985,7 +985,17 @@ shell.command         = /bin/zsh
 > `pty.resolveShell(configured, kind)` 가 1순위 티어를 맡고(`configuredShellCandidate` 가 형식 판정 —
 > `os_tag` 를 받아 두 갈래가 모든 타깃에서 돈다), `maru.windowsShellKindOf` 가 config 열거를 중립 pty
 > 열거로 옮긴다(명시 `switch` — `@enumFromInt` 는 집합이 갈렸을 때 **조용히 다른 셸을 띄운다**).
-> 스모크가 `config_shell: windows_shell=… command=… resolved=…` 한 줄을 찍어 설정과 결과를 나란히 둔다.
+> 스모크가 `config_shell: windows_shell=… command=… resolved=… spawned_args=… config_args=…` 한 줄을
+> 찍어 설정과 결과를 나란히 둔다.
+>
+> **`shell.args` 는 아직 안 배선했다 — 기본값 결정이 필요하다(미결).** 같은 슬라이스에서 한 번
+> 배선해 보고 되돌렸다. `ShellConfig.args` 의 기본이 `&.{"-i"}` (대화형 sh/zsh 플래그)라 "사용자가
+> 값을 줬는가" 를 길이로 판정할 수 없고, config 가 없어도 Windows 셸에 `-i` 가 붙는다(실측:
+> `spawned_args` 가 0 에서 1 로). cmd 는 무시하고 pwsh 는 받아들여 둘 다 죽지는 않지만 의미가 틀린
+> 인자다. **Windows 에서 `shell.args` 기본이 무엇인가**를 이 문서가 정해야 배선할 수 있다 —
+> `&.{}` (빈 argv)가 자연스러워 보이지만, 문서화된 기본값을 OS 별로 가르는 것은 config 계약 변경이라
+> 사용자 확정이 필요하다. 그때까지 리포트가 `spawned_args` 와 `config_args` 를 따로 찍어 **갈려 있다는
+> 사실 자체가 보이게** 해 둔다.
 >
 > 배선하자마자 **§5 의 정규화가 spawn 에서 터졌다**(cmd 의 argv\[0\]). §5 규칙 1 의 뒤집힌 결정을 보라.
 

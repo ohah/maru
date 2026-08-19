@@ -1923,6 +1923,25 @@ test "w7.6b: native 경로도 그대로 돈다 (대조군)" {
     try testing.expect(std.mem.indexOf(u8, out.items, "MARU-NATIVE-OK") != null);
 }
 
+test "w7.6b: UNC 셸 경로가 정규화→native 왕복 뒤에도 돈다" {
+    // §5 규칙 1 은 `\\localhost\C$\…` 를 `//localhost/C$/…` 로 바꾼다 — 앞 두 역슬래시는 구분자가 아니라
+    // **UNC 접두 문법**이라 이 왕복이 깨지기 쉽다. spawn 경계의 되돌림이 그것을 원래 모양으로 세워야 한다.
+    //
+    // **관리 공유(`C$`)가 꺼진 기기가 있다.** 그럴 때는 spawn 이 실패하는 것이 정상이므로 건너뛴다 —
+    // 여기서 실패로 처리하면 기기 설정에 따라 흔들리는 테스트가 된다. 뜨기만 하면 **실제로 도는지**까지 본다.
+    const a = std.testing.allocator;
+    const unc = "//localhost/C$/Windows/System32/cmd.exe";
+    var s = PtySession.spawn(a, .{ .command = unc, .size = .{ .cols = 120, .rows = 30 } }) catch return;
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try collectFor(&s, a, &out, 2500);
+    out.clearRetainingCapacity();
+    try s.writeInput("echo MARU-UNC-OK" ++ crlf);
+    try collectFor(&s, a, &out, 2500);
+    try testing.expect(std.mem.indexOf(u8, out.items, "MARU-UNC-OK") != null);
+}
+
 test "w5-cmd-user: 사용자 PROMPT를 덮지 않는다" {
     const a = std.testing.allocator;
     var s = try PtySession.spawn(a, .{

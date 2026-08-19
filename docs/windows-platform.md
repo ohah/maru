@@ -899,6 +899,125 @@ em 크기만 받아 소비자가 없다. 그것들의 소비자는 chrome·app �
 `dwrite-text-smoke`는 **일부러** 빈 이름을 넘긴다 — 티어가 실제로 고르는지 보는 스모크라 config가
 끼면 그 판정이 흐려진다.
 
+
+### 2m. ADE 표면 — 무엇이 이미 Windows 로 컴파일되고 무엇이 남았나 (W8 착수 실측, 2026-08-19)
+
+**W8 을 "60k 줄 포팅" 으로 잡으면 틀린다.** 착수 전에 무엇이 실제로 플랫폼에 묶여 있는지 쟀고, 답이
+계획을 크게 바꿨다.
+
+| 층 | 어디 | Windows 상태 | 근거 |
+|---|---|---|---|
+| **chrome**(사이드바·탭·모달·팔레트·설정 GUI·파일 패널 뷰) | `src/chrome/` 77 파일 | **컴파일된다 — 그러나 게이트가 ADE 표면을 안 본다** | 아래 |
+| **session**(파일 트리·에디터·git 명령·에이전트 관측) | `src/session/` | 같음 | 같음 |
+| **파일 트리 읽기 백엔드** | `src/platform/macos/file_tree_backend.zig` | **안 된다** — `openat` 플래그 | 아래 |
+| **파일 트리 변경 백엔드** | `src/platform/macos/file_tree_mutation_backend.zig` | **컴파일된다**(런타임 미검증) | 아래 |
+| **git 백엔드** | `src/platform/macos/git_backend.zig` | **안 된다** — `std.c.pipe` 부터 | 아래 |
+| **오케스트레이터** | `src/platform/macos/app_session.zig` (60,273 줄) | **모듈 자체가 macOS 전용** | `maru.zig` 에 없다 |
+
+**백엔드 셋은 macOS 프레임워크를 하나도 안 쓴다.** `objc`·`Foundation`·`AppKit` 참조가 **0** 이다 —
+순수 Zig + std 이고, 묶여 있는 것은 **POSIX 시스템 호출**뿐이다:
+
+```text
+file_tree_backend            14곳  fstatat·fstat·openat·fcntl (+ Stat·S·AT 상수)
+file_tree_mutation_backend   12곳  renameat·fstatat·fstat
+git_backend                  69곳  fork·execve·pipe·dup·environ·getcwd·nanosleep·open·close
+```
+
+`identityAt`·`identityOfFile` 은 이미 `if (comptime builtin.os.tag != .macos)` 갈래로
+`std.Io.Dir.statFile`·`file.stat` 을 쓴다. 그래서 **변경 백엔드는 통과한다.** 읽기 백엔드가 걸리는
+자리는 하나다 — `openValidatedFileTreeRow` 의 `std.posix.openat(…, .{ .ACCMODE = .RDONLY,
+.NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true }, 0)` 인데 Windows 에서 그 플래그 타입이
+`void` 다(`error: type 'void' does not support struct initialization syntax`). git 백엔드는
+`std.c.pipe(&pipe_fds)` 부터 걸린다(`*[2]c_int` vs `*[2]*anyopaque`).
+
+### 2m.1 이 측정을 세 번 틀렸다 — 프로브를 먼저 검증한다
+
+**세 번 다 "0 오류" 를 봤고, 세 번 다 공허했다.** 적대적 검증 5 회차가 그것을 잡았다.
+
+| 프로브 | 결과 | 대조군(`std.c.fork()` 심기)이 잡았나 |
+|---|---|---|
+| `build-exe` + `comptime { refAllDecls(m) }` | 0 오류 | **못 잡음** — `refAllDecls` 는 **비재귀**라 최상위 이름만 닿는다 |
+| `zig test --test-no-exec` (그 파일 자체 테스트) | 0 오류 | **못 잡음** — 테스트가 `openValidatedFileTreeRow` 를 안 부른다 |
+| `zig test --test-no-exec` + **공개 표면을 `_ = &fn;` 로 명시 참조** | 오류 잡음 | **잡음** |
+
+**그래서 규칙은 하나다 — 프로브에 고의로 깨지는 호출을 심어 그것이 잡히는 것을 본 뒤에만 그 프로브의
+"0 오류" 를 믿는다.** `std.c.fork` 가 Windows 에서 `void` 라 호출이 **반드시** 컴파일 오류인 것이
+이 대조군의 성질이다.
+
+### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
+
+`check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
+**커버리지는 테스트가 참조하는 만큼**이다. 같은 대조군을 심어 쓸어 본 결과:
+
+```text
+덮임      chrome/draw.Rect.inset          (테스트가 실제로 부른다)
+덮임      path_shape.relativeUnderRoot
+안 덮임   chrome/components/archive_detail/view.view
+안 덮임   chrome/components/session_dock/view.view
+안 덮임   chrome/components/scm_dock/view.view
+```
+
+**하필 안 덮인 셋이 전부 ADE 표면이다**(에이전트 도크 상세·세션 도크·소스 컨트롤 도크). 명시 참조로
+강제해 보면 셋 다 실제로는 Windows 에서 **컴파일된다** — 즉 코드는 지금 멀쩡하지만 **그것을 지키는
+게이트가 없다.** W8 이 이 표면들을 건드리므로, 슬라이스보다 먼저 게이트를 넓히는 것이 순서다.
+
+**닫았다 — W8.0.** `src/cross_target_surface.zig` 가 `maru.zig` 가 내보내는 **중립 모듈 21 개 전부**를
+재귀로 훑어 주소를 잡고, `check-targets` 가 그것을 세 타깃으로 컴파일한다(처음엔 7 개만 훑어
+`renderer`·`pty`·`app`·`cli`·`observability` 등 14 개가 빠져 있었다 — 적대적 검증이 잡았다).
+깊이 상한은 조용한 `return` 이 아니라 `@compileError` 다: 실측 최대 깊이가 5 인데 상한을 6 으로
+뒀더니 여유가 1 뿐이었고, 상한에 닿아 건너뛴 것과 검사한 것이 똑같이 초록으로 보였다.
+
+**모듈 이름을 손으로 나열하지 않는다 — `maru.zig` 에서 유도한다.** 나열했더니 21 개 중 14 개가
+빠져 있었다. 그리고 **훑은 선언 수에 하한을 둔다**(실측 2,937, 하한 2,000): 그것이 없으면
+`refAllRecursive` 호출을 지워도 게이트가 초록이라 **조용히 무력화**된다.
+
+**하한은 반드시 컴파일 타임이어야 한다.** `check-targets` 는 Run 없이 컴파일만 하므로 런타임
+`std.testing.expect` 는 그 게이트에서 **한 번도 안 돈다** — 하한을 999999 로 올려도 초록이었다(실측).
+`@compileError` 로 옮기고 나서야 "비우면 rc=1" 이 성립했다. 같은 대조군으로 확인했다: 도크 셋의 `view` 가
+`안 덮임` → `덮임`. 표본을 넓혀 `session/file_tree`·`editor/document`·`chrome/settings`·
+`config/serialize` 도 덮인다. 깊이 4(`editor_view.frame`·`scm_dock.build`)까지 닿는다.
+
+**그래도 "전체" 는 아니다 — 두 구멍을 실측했다.**
+
+| 구멍 | 덮이나 | 왜 | 지금 노출 |
+|---|---|---|---|
+| **제네릭 함수 본문** | **안 덮임** | 인스턴스화 없이는 본문 분석이 불가능하다 | 중립 표면에 16 개(chrome 3·session 9·config 4) |
+| **비공개 + 미참조 함수** | **안 덮임** | `std.meta.declarations` 는 공개 선언만 준다 | 죽은 코드라 무해하지만 썩는다 |
+
+타입 생성자형 제네릭은 소비자가 인스턴스화하며 분석되므로 실질 노출은 더 작다. 남는 위험은
+`anytype` 을 받는 평범한 함수이고, 그런 것에는 **호출하는 테스트**가 이 게이트의 대체재다.
+
+**walker 를 `maru.zig` 에 넣지 않는다.** 넣어 봤더니 호스트 `zig build test` 에서 `session_dock`·
+`archive_detail`·`ui.button` 의 44 개가 한 번 더 돌았다(2983 → 3028) — 이미 `test-chrome-ui` 에서
+도는 것들이라 순수한 중복이었다. 적대적 검증이 그것을 잡았고, 그래서 `check-targets` 안에서만
+자기 루트로 선다.
+
+> **컴파일된다 ≠ 돈다.** 변경 백엔드가 통과한 것도 컴파일까지다 — `renameat` 자리의 런타임 의미는
+> 아직 안 봤다. W8.1 이 그것을 잰다.
+
+즉 **디렉터리 위치만 macOS 다.** 앞 둘은 "루트를 한 번 열고 그 아래를 `*at` 로만 만진다"는 TOCTOU 규율
+때문에 POSIX 를 쓰는 것이고, `std.Io.Dir` 이 같은 규율을 핸들 기준으로 준다(이미 일부는 그것을 쓴다 —
+`submitValidatedRootScan(… dir: std.Io.Dir)`). `git_backend` 는 **손으로 쓴 프로세스 러너**라 성격이
+다르다 — Windows 에서는 `CreateProcessW` + 파이프이고, 그것은 §4 의 ConPTY spawn 이 이미 밟은 자리다.
+
+**`app_session.zig` 의 "AppKit" 참조 32 개는 거의 다 주석이다.** 실제 결합은 C ABI(`app_host_abi.zig`)를
+통한 Swift 호스트이고, 그 파일이 하는 일은 **정책과 조립**(어떤 표면을 언제 열고, 프레임을 어떻게 만들고,
+이벤트를 어디로 보내는가)이다. 그 정책은 플랫폼과 무관하다.
+
+**그래서 W8 은 표면 단위로 자른다.** W7 이 세운 패턴 그대로다 — 중립 로직(chrome + session)을 Win32
+호스트에 배선하고, 그 표면이 필요로 하는 백엔드만 Windows 로 만든다.
+
+| 슬라이스 | 내용 | 선행 |
+|---|---|---|
+| **W8.0** | **게이트를 먼저 넓힌다** — `check-targets` 가 ADE 표면(chrome 도크 셋·백엔드 공개 표면)을 **명시 참조로 강제 분석**하게 한다. 안 하면 W8 의 나머지가 검증 없이 쌓인다(§2m.2) | 없음 |
+| **W8.1** | **파일 트리 백엔드** — 읽기 쪽 `openat` 을 Windows 가 받는 형태로 옮기고, 두 백엔드가 실제 디렉터리를 훑는 스모크로 런타임을 잰다 | W8.0 |
+| **W8.2** | **파일 패널 표면** — 중립 `file_panel_bridge`·`file_tree` 를 Win32 호스트에 배선하고 chrome 이 그린다 | W8.1 |
+| **W8.3** | **에디터 표면** — `session/editor/` 는 이미 중립이다. 배선과 입력 라우팅 | W8.2 |
+| **W8.4** | **소스 컨트롤** — `git_backend` 의 Windows 프로세스 러너(`fork`/`execve`/`pipe` → `CreateProcessW` + 파이프). §4 의 spawn 절차를 재사용한다. **세 백엔드 중 유일하게 진짜 포팅이다** | W8.1 |
+| **W8.5b** | **에이전트 도크** — `agent_*` 백엔드 셋 | W8.2 |
+| **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
+
+**웹 패널을 마지막에 두는 이유**는 그것만 미결 결정에 걸려 있기 때문이다 — 앞의 다섯을 막지 않는다.
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

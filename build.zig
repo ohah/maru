@@ -782,6 +782,26 @@ pub fn build(b: *std.Build) void {
         // **Run이 없다** — 컴파일 산출물에만 의존한다.
         check_targets_step.dependOn(&cross_tests.step);
 
+        // **중립 표면 전체를 강제로 분석한다**(W8.0, 계약 §2m.2). 위 `cross_mod` 만으로는
+        // **테스트가 참조하는 것까지만** 분석된다 — Zig 는 함수 본문을 게으르게 보고
+        // `refAllDecls` 는 비재귀다. 실측으로 그 구멍이 ADE 표면 크기였다(도크 셋의 `view`).
+        //
+        // **이 walker 를 `maru.zig` 에 넣지 않는다.** 넣어 봤더니 호스트 `zig build test` 에서
+        // `session_dock`·`archive_detail`·`ui.button` 의 44 개가 **한 번 더** 돌았다 — 그것들은
+        // 이미 `test-chrome-ui` 에서 돌고 있어서 순수한 중복이었다(적대적 검증이 잡았다).
+        // 크로스 타깃 컴파일에만 필요한 것이므로 여기서만 자기 루트로 세운다.
+        const surface_mod = b.createModule(.{
+            .root_source_file = b.path("src/cross_target_surface.zig"),
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        });
+        surface_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+        surface_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
+        const surface_tests = addProjectTest(b, .{ .root_module = surface_mod });
+        check_targets_step.dependOn(&surface_tests.step);
+
         // **`main.zig`도 반드시 넣는다.** 중립 모듈(`maru.zig`)만 컴파일하면 CLI 진입점이 빠지는데,
         // 거기가 W2의 호스트 게이트(`hostGateReason`·terminfo·`install-cli`·`maru ssh`)와 W8.5의 경로
         // 정책이 사는 자리라 타깃별로 가장 잘 깨진다. 실측으로 확인했다 — `main.zig`에 macOS 전용 타입

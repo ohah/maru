@@ -65,6 +65,16 @@ pub const inventory = [_]Proof{
     // 되며 움직인다(생성 지점 9곳이 `.doc_key = meta.doc` 을 함께 준다). count 는 108 그대로다 — 반사 접근이
     // 늘거나 준 것이 아니라 **필드가 하나 늘었을 뿐**이다.
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "62337834d551b98525d47d45b3bab88bc61f61a122434d498fa60b588a1c551b" },
+    // **크로스 타깃 표면 walker**(W8.0, 계약 §2m.2). `@field` 두 자리는 **전부 재귀 참조**다 —
+    // `maru.zig` 의 선언을 comptime 에 훑어 `_ = &@field(T, name)` 으로 주소를 잡는다. 그것이 함수
+    // 본문을 의미 분석하게 만들고, 그래서 `check-targets` 가 세 타깃에서 중립 표면을 본다.
+    // Client receiver·제품 vtable 과 무관하고 런타임 동작이 없다.
+    //
+    // **손으로 목록을 적지 않으려고 반사를 쓴다.** 적대적 검증이 그 이유를 두 번 확인했다 — 모듈을
+    // 나열했더니 21 개 중 14 개가 빠졌고, ADE 표면 셋(`archive_detail`·`session_dock`·`scm_dock` 의
+    // `view`)이 정확히 그 구멍이었다. 지금은 `maru.zig` 하나에서 유도하고, 훑은 선언 수에 컴파일
+    // 타임 하한을 둬(실측 2,937 / 하한 2,000) walker 를 비우면 게이트가 선다.
+    .{ .path = "src/cross_target_surface.zig", .count = 2, .digest_hex = "92ae6c5dcc32080f35e040abb2d312f693f191ee408f39b906e859c5b2ccd560" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

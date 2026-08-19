@@ -48,8 +48,11 @@ done
 
 WATCHED="$(sed -n 's/.*\.path = "\([^"]*\)".*/\1/p' "$LEDGER" | sort -u)"
 COMMITS="$(git rev-list --reverse "$BASE..$HEAD_SHA")"
-tmp_zig="$(mktemp -t percommit).zig"
-trap 'rm -f "$tmp_zig"' EXIT INT TERM
+# `mktemp -t X` 는 `X.XXXX` 를 만든다 — 거기에 `.zig` 를 덧붙이면 **원본 스텁이 남는다**(적대적 검증이
+# TMPDIR 에서 실측: 7회 호출에 11 → 18). 디렉터리를 만들고 그 안에 이름을 두면 하나만 지우면 된다.
+tmp_dir="$(mktemp -d)"
+tmp_zig="$tmp_dir/probe.zig"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 [ -n "$COMMITS" ] || { echo "빈 범위 — 볼 커밋이 없다."; exit 0; }
 
 failed=0

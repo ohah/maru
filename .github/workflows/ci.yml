@@ -55,6 +55,8 @@ jobs:
       # 분류가 틀리면 게이트가 조용히 열린다. 판정을 쓰기 전에 분류기 자신을 먼저 검증한다
       # (순수 sh라 수 초). web.yml·performance.yml은 같은 스크립트를 쓰므로 여기서 한 번만 돈다.
       - run: sh tools/ci/changed-areas.test.sh
+      # 같은 이유로 중간 커밋 판정자도 자기 검증을 먼저 돌린다 — 그 판정이 조용히 열렸던 적이 있다.
+      - run: sh tools/ci/per-commit-boundaries.test.sh
       - id: areas
         # push(main)에서는 두 값이 비어 전 영역 실행으로 떨어진다 — main은 항상 전부 검증한다.
         env:
@@ -75,10 +77,16 @@ jobs:
     needs: changes
     if: ${{ github.event.pull_request.draft != true && !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          # **중간 커밋 검사가 히스토리를 요구한다.** 기본 depth=1 이면 `base.sha` 도 `head.sha` 도
+          # 이 클론에 없어 `git rev-list base..head` 가 `fatal: Invalid revision range` 로 죽는다 —
+          # 그 상태로 게이트를 붙였다가 **항상 무동작·항상 초록**이 됐다(적대적 검증이 재현했다).
+          # 같은 이유로 `changes` job 이 이미 `fetch-depth: 0` 을 쓴다.
+          fetch-depth: 0
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.2.7
@@ -149,7 +157,10 @@ jobs:
       # PR diff 에 없으면 검사할 것이 없다. 빌드가 실제로 도는 것은 그 좁은 경우뿐이다.
       - name: 중간 커밋도 경계 게이트를 통과하는가
         if: ${{ github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-        run: sh tools/ci/per-commit-boundaries.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh tools/ci/per-commit-boundaries.sh "$BASE" "$HEAD"
       - name: Upload check artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

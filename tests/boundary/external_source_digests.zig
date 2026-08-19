@@ -610,7 +610,10 @@ pub const inventory = [_]Proof{
     // 테스트가 늘었다. **count는 그대로다** — 외부에서 부르는 자리가 아니라 세션 상태와 테스트만 늘었다.
     // 그 슬라이스를 main 에 두 번 리베이스하며 값이 그때마다 수렴했다(2026-08-19): 사이에 들어온 편집기·
     // 셀 밴드·죽은 pub 정리 커밋들이 같은 파일을 건드려 **양쪽 digest 가 모두 낡았다**. 사유는 다 살아 있다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "89d851576f6233a631b87c6fef5eb5cc8cd4e95526b8d62090a898a4a7fb6fdf" },
+    // P7b(저장소별 기준을 workspace에 기억)로 또 움직인다: 짝 하나를 들던 필드 둘이 **목록**이 되고
+    // (`scm_base_entries`), 그 목록을 만드는 자리에서 못 실을 값을 거른다. count는 2 그대로다 —
+    // 세션 상태와 테스트만 늘었고 외부에서 부르는 자리는 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "00d422d66268402836f50f1173ff4778bca2dad05bfbf532f4cef8d546cf10b1" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -695,7 +698,11 @@ pub const inventory = [_]Proof{
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "b86809f9b52d6fc794ef73387b65eac18dc48d179c8ed00ca58f7cc9c3fa33eb" },
-    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
+    // 저장소별 비교 기준(§3.5 P7b)으로 움직인다: 창 줄에 `scm-bases` 필드 하나가 늘고(탐색기 root와 같은
+    // 인코딩·같은 커서), 그 값을 저장·읽기 양쪽에서 거르는 검사 둘이 붙는다. 형태 판정은 여기서 다시
+    // 쓰지 않고 `git_command.isSafeBaseRef`를 부른다 — 저장이 받는 값과 실행이 받는 값이 갈리지 않게.
+    // count는 1 그대로다 — 새 `@field` 반사가 없다.
+    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "324f93c4707e67d14a05da10fef125863d1b494f06061cdfb520e9bd305b6f9c" },
     // i18n 표시 문자열 leaf(i18n.md 계약 §3)를 새로 등재한다. 반사는 `tIn`의
     // `@field(tbl.*, @tagName(k))` **하나**뿐이고, 그것이 필요한 이유는 키 목록을 두 벌 유지하지 않기
     // 위해서다 — `Key`를 `Table`에서 `std.meta.FieldEnum`으로 파생하고 런타임 key를 `inline else`로
@@ -737,11 +744,15 @@ pub const inventory = [_]Proof{
     // 바뀐다 — 등록 수단이 생겨 "파일을 이렇게 적어라" 안내가 틀린 말이 됐다. count 는 1 그대로다.
     // 모바일 서버 목록 화면(S9b-2b)이 키 넷을 더해 바뀐다 — 표에 항목이 는 것뿐이라 `@field`
     // 로 도는 자리는 그대로다(count 1).
+    // P7b의 적대적 검증에서 문구 하나(`scm_base_limit`)가 더 붙어 또 움직인다: 기억 자리가 꽉 차
+    // 기준을 못 바꿨을 때 **그 사실을 적는다**(조용히 돌아가면 "골랐는데 아무 일도 없다"가 된다).
     // 기준 고르기(§3.5) 문구 둘(`scm_menu_pick_base`·`scm_base_default`)로 또 움직인다. count는 그대로다 —
     // 표에 키가 늘어난 것이지 이 파일을 부르는 자리가 는 것이 아니다. 두 슬라이스가 같은 표에 각각
     // 키를 더해 값이 수렴했다(2026-08-19) — 사유는 위아래 둘 다 살아 있다.
     // 편집 화면(S9b-2b-2)이 칸 라벨·저장·삭제 키를 더하고, 안 쓰게 된 하나
     // (`mob_servers_empty_hint`)를 뺀다 — 등록 수단이 생겨 "config 에 이렇게 적어라" 가 틀린
     // 말이 됐다. count는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "6e63252e6fc2b3f554921616750c83b7dead8322c0444151cbfc502145cf467a" },
+    // 리베이스로 값이 수렴했다(2026-08-20): 모바일 편집 화면과 기준 고르기(§3.5)가 같은 표에 각각
+    // 키를 더해 양쪽 digest 가 모두 낡았다. 사유는 위아래 둘 다 살아 있고 count 는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "8741885e596a6ffb0429caa6e5e32956e9af85aea2a9bf224b873dd8f438bbbf" },
 };

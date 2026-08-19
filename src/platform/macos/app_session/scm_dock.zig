@@ -1598,13 +1598,13 @@ fn scmNodeRect(self: *AppSession, id: u64) ?chrome.ui.layout.UiRect {
 
 /// 이 저장소에 **고른 기준**이 있으면 그것(없으면 빈 값 — 그러면 `origin/HEAD`다).
 ///
-/// **저장소를 대조한다.** 기준 필드는 하나뿐인데 기준은 저장소마다 다른 사실이라, 짝이 안 맞으면
-/// 남의 저장소에서 고른 이름으로 숫자를 세게 된다(§3.5).
+/// **저장소로 찾는다.** 기준은 저장소마다 다른 사실이라, 짝을 안 보면 남의 저장소에서 고른 이름으로
+/// 숫자를 센다(§3.5).
 pub fn scmBaseRefFor(self: *AppSession, repo: []const u8) []const u8 {
-    const ref = self.scm_base_ref orelse return &.{};
-    const owner = self.scm_base_repo orelse return &.{};
-    if (!std.mem.eql(u8, owner, repo)) return &.{};
-    return ref;
+    for (self.scm_base_entries[0..self.scm_base_len]) |entry| {
+        if (std.mem.eql(u8, entry.repo, repo)) return entry.base;
+    }
+    return &.{};
 }
 
 /// `origin/HEAD`가 **없는** 저장소인가(§3.5). 없으면 되돌아갈 기본값이 없으므로 기준 목록에서
@@ -1652,6 +1652,49 @@ pub fn buildBaseMenuRowsForTest(self: *AppSession) usize {
     return buildBaseMenuRows(self);
 }
 
+/// 그 저장소의 기준을 세우거나(`ref`) 지운다(`null`). 세웠으면 true — 실패하면 화면을 안 바꾼다.
+///
+/// **자리가 꽉 차면 오래된 것을 버리지 않고 거절한다**(workspace의 상한과 같은 규율): 조용히 밀어내면
+/// 사용자는 "어제 고른 기준이 왜 기본값이지"를 겪고, 그 이유가 화면 어디에도 없다.
+pub fn rememberScmBase(self: *AppSession, repo: []const u8, ref: ?[]const u8) bool {
+    // **들어오는 자리에서 거른다**(적대적 검증 2026-08-19). 저장 쪽(`workspace.serialize`)도 같은 검사를
+    // 하는데, 그쪽이 걸리면 **workspace 저장이 통째로 실패한다** — 탭·pane·창 위치까지 함께 잃는다.
+    // 기준 하나 때문에 그 폭발 반경을 감수할 이유가 없으므로, 못 실을 값은 여기서 안 받는다.
+    if (ref) |name| {
+        if (!maru.session.git_command.isSafeBaseRef(name)) return false;
+        if (!std.fs.path.isAbsolute(repo) or repo.len > std.fs.max_path_bytes) return false;
+    }
+    var index: ?usize = null;
+    for (self.scm_base_entries[0..self.scm_base_len], 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.repo, repo)) index = i;
+    }
+    if (ref == null) {
+        const at = index orelse return true; // 원래 없던 것을 지우는 것은 성공이다
+        self.allocator.free(self.scm_base_entries[at].repo);
+        self.allocator.free(self.scm_base_entries[at].base);
+        self.scm_base_len -= 1;
+        if (at != self.scm_base_len) self.scm_base_entries[at] = self.scm_base_entries[self.scm_base_len];
+        return true;
+    }
+    const name = self.allocator.dupe(u8, ref.?) catch return false;
+    if (index) |at| {
+        self.allocator.free(self.scm_base_entries[at].base);
+        self.scm_base_entries[at].base = name;
+        return true;
+    }
+    if (self.scm_base_len == self.scm_base_entries.len) {
+        self.allocator.free(name);
+        return false;
+    }
+    const repo_copy = self.allocator.dupe(u8, repo) catch {
+        self.allocator.free(name); // 짝이 반만 서면 다음 프레임이 남의 기준을 쓴다
+        return false;
+    };
+    self.scm_base_entries[self.scm_base_len] = .{ .repo = repo_copy, .base = name };
+    self.scm_base_len += 1;
+    return true;
+}
+
 /// 이 이름이 **원격 이름**인가(`git remote` 출력 한 줄과 정확히 같은가).
 fn isRemoteName(self: *AppSession, name: []const u8) bool {
     const result = self.git_result orelse return false;
@@ -1694,17 +1737,18 @@ pub fn applyBaseMenuSelection(self: *AppSession, index: usize) void {
     }
 }
 
+/// 테스트가 부르는 이름 — 메뉴 줄 표를 세우지 않고 "이 이름을 골랐다"만 재현한다(자리↔뜻 대응은
+/// 그쪽 테스트가 따로 고정한다).
+pub fn applyBaseMenuSelectionForTest(self: *AppSession, ref: []const u8) void {
+    setScmBase(self, ref);
+}
+
 fn setScmBase(self: *AppSession, ref: ?[]const u8) void {
     const repo = self.git_repo orelse return;
-    if (self.scm_base_ref) |old| self.allocator.free(old);
-    self.scm_base_ref = null;
-    if (ref) |name| {
-        self.scm_base_ref = self.allocator.dupe(u8, name) catch null;
-        // 복사에 실패했으면 저장소도 세우지 않는다 — 짝이 반만 서면 다음 프레임이 남의 기준을 쓴다.
-        if (self.scm_base_ref == null) return;
-    }
-    if (self.scm_base_repo) |old| self.allocator.free(old);
-    self.scm_base_repo = self.allocator.dupe(u8, repo) catch null;
+    // **거절당하면 그 사실을 적는다**(적대적 검증 2026-08-19). 조용히 돌아가면 사용자는 메뉴에서 이름을
+    // 골랐는데 화면이 그대로인 것만 본다 — 같은 값을 다시 골라도 아무 일이 없다(상태가 이미 그 값이거나,
+    // 애초에 못 받는 값이라서). P7a가 "읽기가 도는 중"에 대해 고친 실패와 **같은 종류**다.
+    if (!rememberScmBase(self, repo, ref)) return setScmWriteNotice(self, maru.i18n.t(.scm_base_limit));
     // 기준이 바뀌면 숫자와 "브랜치에 COMMIT 됨" 목록이 **함께** 달라진다 — 셋이 한 읽기에서 오므로
     // 다시 읽는 것 말고 다른 갱신 경로가 없다. 지금 못 걸 수도 있으므로(읽기·쓰기가 도는 중) 사실로
     // 남겨 두고, 실제로 제출된 자리에서 내린다.

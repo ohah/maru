@@ -595,11 +595,15 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
         n += 2;
 
         // ── 바뀐 글자 ────────────────────────────────────────────────────────
-        // **접힌 조각에는 아직 칠하지 않는다.** 열 계산이 줄 처음부터이므로 두 번째 조각의 열은
-        // 그 조각이 어디서 시작하는지를 알아야 하는데, 그 값은 `visual_map`이 자를 때만 안다.
-        // 접힘 조각 경계를 프레임까지 들고 오는 것은 별도 작업이라, 그때까지 랩된 줄은 **밴드만**
-        // 남는다(강조가 엉뚱한 자리에 서는 것보다 없는 편이 낫다).
-        if (v.piece != 0) continue;
+        // **이어진 조각에도 칠한다**(2026-08-19). 오랫동안 `v.piece != 0`이면 통째로 건너뛰었는데,
+        // 이유는 *"그 조각이 어디서 시작하는지를 `visual_map`이 자를 때만 안다"*는 것이었다. 이제
+        // 그 값이 행마다 실려 온다(`VisualRow.start_col` — §4.1g ①). 랩을 켜고 긴 줄을 보면 첫
+        // 조각만 강조되고 나머지가 비던 것이 이것으로 닫힌다.
+        //
+        // **`start_col`이 가로 스크롤도 함께 담는다.** 랩이 꺼지면 조각이 하나이고 그 값이 곧
+        // `first_col`이며(그렇게 초기화한다), 랩이 켜지면 가로 축이 없어 `first_col`이 0이라
+        // 조각 누적만 남는다 — 두 경우가 한 식으로 처리되므로 아래에서 그것만 쓴다.
+        const row_start_col: u32 = v.start_col;
         const marks = (props.row_marks orelse continue);
         if (idx >= marks.len) continue;
         const row_marks = marks[idx];
@@ -617,7 +621,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             offsets[k * 2 + 1] = m.start + m.len;
         }
         // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
-        content.columnsAtOffsets(line, props.tab_width, offsets, offsets, @as(u32, props.first_col) + layout.content.width); // 제자리 채우기
+        content.columnsAtOffsets(line, props.tab_width, offsets, offsets, row_start_col + layout.content.width); // 제자리 채우기
         for (row_marks[0..max_pairs], 0..) |_, k| {
             if (n >= out.len) break;
             const start_col = offsets[k * 2];
@@ -626,12 +630,12 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
             // **왼쪽도 자른다.** 화면 밖에서 시작하는 마크를 그대로 쓰면 아래 뺄셈이 음수가 되고
             // (u32라 오버플로로 죽는다), 가로 스크롤이 붙는 순간 그 자리에서 터진다.
-            const from = @max(start_col, props.first_col);
-            const to = @min(end_col, @as(u32, props.first_col) + layout.content.width);
+            const from = @max(start_col, row_start_col);
+            const to = @min(end_col, row_start_col + layout.content.width);
             if (to <= from) continue;
             // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
             // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
-            const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - props.first_col);
+            const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - row_start_col);
             const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
             out[n] = .{ .quad = .{
                 .rect = .{ .x = x, .y = y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
@@ -1217,12 +1221,12 @@ test "랩된 줄은 이어진 조각까지 한 색이다 — 한 줄로 읽혀�
         .row_bands = &bands,
         .visible_rows = 6,
         .wrap = true,
-        .rect = .{ .x = 0, .y = 0, .w = 120, .h = 96 },
+        .rect = .{ .x = 0, .y = 0, .w = 160, .h = 96 },
         .cell_w_px = 8,
         .cell_h_px = 16,
         .font_px = 16,
-        .total_cols = 10,
-        .scrollbar_gutter_px = 12,
+        .total_cols = 20,
+        .scrollbar_gutter_px = 0,
         .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
     }, .{
         .ops = &ops,
@@ -1620,10 +1624,14 @@ test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
     try testing.expectEqual(@as(usize, 1), found);
 }
 
-test "랩된 줄: 첫 조각에만 강조가 서고 이어진 조각에는 안 선다" {
-    // **의도된 한계를 고정한다.** 두 번째 조각의 시작 열은 `visual_map`이 자를 때만 아는 값이라,
-    // 지금은 첫 조각에만 그린다. 이 테스트가 없으면 나중에 조각 경계를 넘길 때 "원래 그려졌는지"를
-    // 아무도 모른다 — 한계인지 회귀인지 구분이 안 된다.
+test "랩된 줄: 마크가 어느 조각에 있든 그 조각에 강조가 선다" {
+    // **옛 이름은 "첫 조각에만 선다"였고 그 한계를 고정한다고 적혀 있었다.** 한계는 §4.1g ①이
+    // 없앴다(`VisualRow.start_col`).
+    //
+    // **그런데 그 테스트는 애초에 판정력이 없었다.** `total_cols = 10`에 gutter가 8열을 먹어 본문이
+    // **2열**이었고, 20글자 줄이 조각 10개가 되며 `visible_rows = 6`이라 뒤쪽 마크(byte 15 = 8번째
+    // 조각)가 **화면 밖**이었다 — 옛 동작이든 새 동작이든 y=0 하나만 나왔다. 이름이 말하는 것을
+    // 확인하지 못하는 테스트였고, 그래서 조건을 고쳐 **마크 둘이 서로 다른 보이는 조각**에 오게 한다.
     var ops: [256]draw.Op = undefined;
     var text: [2048]u8 = undefined;
     var runs: [256]draw.Run = undefined;
@@ -1648,12 +1656,12 @@ test "랩된 줄: 첫 조각에만 강조가 서고 이어진 조각에는 안 �
         .row_marks = &marks,
         .visible_rows = 6,
         .wrap = true,
-        .rect = .{ .x = 0, .y = 0, .w = 120, .h = 96 },
+        .rect = .{ .x = 0, .y = 0, .w = 160, .h = 96 },
         .cell_w_px = 8,
         .cell_h_px = 16,
         .font_px = 16,
-        .total_cols = 10,
-        .scrollbar_gutter_px = 12,
+        .total_cols = 20,
+        .scrollbar_gutter_px = 0,
         .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
     }, .{
         .ops = &ops,
@@ -1676,10 +1684,17 @@ test "랩된 줄: 첫 조각에만 강조가 서고 이어진 조각에는 안 �
             n += 1;
         }
     }
-    // 강조는 **첫 조각(y = 0)에만** 선다 — 접힌 뒤쪽 마크는 지금 그리지 않는다.
-    try testing.expect(n > 0);
-    for (mark_rows[0..n]) |y| try testing.expectEqual(@as(i32, 0), y);
-    // 밴드는 조각 전부에 깔린다(그쪽은 이미 고정돼 있다) — 강조만 첫 조각인 것이 이 한계다.
+    // **강조가 서로 다른 행에 선다** — 마크 둘이 다른 조각에 있으므로. 옛 계약에서는 뒤쪽이
+    // 통째로 빠져 y가 전부 0이었다.
+    try testing.expect(n >= 2);
+    var saw_first = false;
+    var saw_later = false;
+    for (mark_rows[0..n]) |y| {
+        if (y == 0) saw_first = true;
+        if (y > 0) saw_later = true;
+    }
+    try testing.expect(saw_first);
+    try testing.expect(saw_later);
 }
 
 test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱스로 읽는다" {
@@ -1809,4 +1824,68 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
     try testing.expect(!showsHorizontalBar(true, 500, 40)); // 랩
     try testing.expect(!showsHorizontalBar(false, null, 40)); // 안 셌다
     try testing.expect(!showsHorizontalBar(false, 40, 40)); // 딱 들어간다
+}
+
+test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 비어 있던 자리 (§4.1g)" {
+    // **`v.piece != 0`이면 통째로 건너뛰던 자리다.** 조각이 어디서 시작하는지 몰라서였고, 이제
+    // `VisualRow.start_col`이 그 값을 실어 온다. 이 테스트가 없으면 그 필드가 실려 있어도 아무도
+    // 안 쓰는 상태로 조용히 돌아갈 수 있다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    // 본문 폭보다 긴 줄 하나 — 랩을 켜면 조각 둘이 된다.
+    const lines = [_][]const u8{"aaaaaaaaaabbbbbbbbbb"};
+    const bands = [_]RowBand{.removed};
+    // **두 번째 조각 안**의 글자를 강조한다(byte 12~13). 첫 조각만 그리던 시절에는 이것이 안 나왔다.
+    const marks_row = [_]Mark{.{ .start = 12, .len = 2 }};
+    const marks = [_][]const Mark{&marks_row};
+
+    const total_cols: u16 = 20; // gutter를 빼면 본문이 10열 남짓 — 20글자 줄이 두 조각이 된다
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .row_bands = &bands,
+        .row_marks = &marks,
+        .visible_rows = 4,
+        .wrap = true,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    // 전제: 실제로 두 조각으로 접혔다.
+    try testing.expect(w.visual_rows >= 2);
+    try testing.expectEqual(@as(u32, 0), visual_rows[0].piece);
+    try testing.expectEqual(@as(u32, 1), visual_rows[1].piece);
+    // 두 번째 조각은 첫 조각 폭만큼 밀린 열에서 시작한다.
+    try testing.expect(visual_rows[1].start_col > 0);
+
+    // 강조가 **두 번째 조각의 행**에 섰는가. 그 행의 y는 첫 행 아래다.
+    var found_on_second_row = false;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diff_removed_bg) continue;
+        if (op.quad.alpha != mark_alpha) continue;
+        if (op.quad.rect.y >= 16) found_on_second_row = true;
+    }
+    try testing.expect(found_on_second_row);
 }

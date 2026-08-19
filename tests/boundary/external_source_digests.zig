@@ -637,7 +637,7 @@ pub const inventory = [_]Proof{
     // `settingsRowMatches` 가 `Lang` enum 을 `inline for` 로 돌며 `@field` 로 각 변형을 꺼내기 때문이다.
     // 반사가 는 것이 맞고, 그 반사가 이 계약의 핵심이다: 언어가 늘면 판정이 **자동으로** 그 언어까지 본다.
     // 손으로 두 언어를 나열했다면 셋째 언어를 더하는 날 조용히 어긋난다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "a5442b89299b77e7e7486aa422757001740771e9d4e077c75b9d704076d07821" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "90c25202cce93fa0d70027dd400ca8e3b9a43f7dc757b3921248ffc14a50477f" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

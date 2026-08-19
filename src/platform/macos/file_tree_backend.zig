@@ -1001,6 +1001,66 @@ test "windows: 루트 검증이 실패·성공 어느 쪽에서도 핸들을 안
     try std.testing.expect(windowsHandleCount() <= before_c + slack);
 }
 
+// 리프가 **디렉터리**면 거부되는가. 두 호스트에서 **이유가 다르다** — 그래서 결과가 같은 것을
+// 못 박아 둔다.
+//
+// - macOS: `openat(O_RDONLY)` 는 디렉터리를 **연다.** 걸러 내는 것은 그 뒤 identity 비교다
+//   (`expected_leaf_identity.kind` 가 regular 라 kind 가 다르다).
+// - 그 외: `openFile(.allow_directory = false)` 가 **여는 단계에서** `error.IsDir` 로 끝낸다.
+//
+// 결과가 같으므로 호출자는 차이를 몰라도 되지만, 한쪽만 바뀌면 그때부터 갈린다. 그 갈림을 여기서
+// 잡는다.
+test "leaf open: 리프가 디렉터리면 거부된다 (두 호스트에서 이유는 달라도 결과는 같다)" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.createDir(io, "root/subdir", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/plain.txt", .data = "inside" });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const native = buf[0..try tmp.dir.realPath(io, &buf)];
+    const tmp_root = try path_shape.normalizeSeparators(allocator, native);
+    defer allocator.free(tmp_root);
+    const root = try std.fmt.allocPrint(allocator, "{s}/root", .{tmp_root});
+    defer allocator.free(root);
+    const subdir = try std.fmt.allocPrint(allocator, "{s}/subdir", .{root});
+    defer allocator.free(subdir);
+    const plain = try std.fmt.allocPrint(allocator, "{s}/plain.txt", .{root});
+    defer allocator.free(plain);
+
+    var validated_root = (try validateRootSnapshot(allocator, io, root)) orelse return error.TestUnexpectedResult;
+    defer validated_root.deinit(allocator, io);
+
+    // 평범한 파일의 identity 로 **디렉터리**를 요구한다 — 서면 안 된다.
+    const opened = try std.Io.Dir.cwd().openFile(io, plain, .{ .follow_symlinks = false });
+    defer opened.close(io);
+    const regular_identity = try identityOfFile(io, opened);
+
+    try std.testing.expect(openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        subdir,
+        regular_identity,
+    ) == null);
+
+    // 대조군 — 같은 identity 로 그 파일 자신을 요구하면 선다. 없으면 위 null 이 "디렉터리를 막아서"
+    // 인지 "이 경로가 애초에 아무것도 못 열어서" 인지 안 갈린다.
+    var cap = openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        plain,
+        regular_identity,
+    ) orelse return error.TestUnexpectedResult;
+    cap.deinit(io);
+}
+
 test "file tree backend rejects mutual directory symlink cycles" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

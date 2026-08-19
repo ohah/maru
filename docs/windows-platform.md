@@ -985,7 +985,17 @@ git_backend                  69곳  fork·execve·pipe·dup·environ·getcwd·na
 > **처음 쓴 판은 공허했다** — 존재하지 않는 경로로만 돌렸는데 그것은 `realPath` 에서 먼저 끝나
 > **핸들을 열지도 않는다**. 실패 경로에서 안 닫도록 고의로 망가뜨려도 통과했다. macOS 대칭 테스트가
 > 쓰는 두 갈래(`openCanonicalDirectoryNoFollow` 직접 호출 · `force_identity_failure`)로 바꾸고 나서야
-> **두 갈래가 각각 독립적으로 FAIL** 하는 것을 확인했다.
+> **두 갈래가 각각 독립적으로 FAIL** 하는 것을 확인했다. 5 회 연속 돌려 흔들리지 않는 것도 봤다
+> (백엔드가 워커 스레드를 띄우므로 프로세스 전역 카운트가 튈 수 있어 따로 쟀다).
+>
+> **리프가 디렉터리인 경우는 두 호스트에서 이유가 다르다.** macOS 는 `openat(O_RDONLY)` 가 디렉터리를
+> **열고** 그 뒤 identity 비교가 거른다. 그 외에는 `allow_directory = false` 가 **여는 단계에서**
+> 끝낸다. 결과가 같으므로 호출자는 차이를 몰라도 되지만 한쪽만 바뀌면 갈리므로 테스트로 묶었다 —
+> 대조군으로 `allow_directory` 를 되돌려도 identity 비교가 받고, **둘 다 지우면 뚫리는 것**을 봤다.
+>
+> **UNC 루트도 끝까지 돈다**(실측): `//localhost/D$/…/root` 에서 접두 14 를 고르고 그 아래를 한 칸씩
+> 내려가 검증이 성공하며, 반환 경로도 정규화 형태다. `C:/`·`D:/`·`//localhost/C$` 를 실제로 여는 것도
+> 따로 확인했다.
 
 **`NOFOLLOW` 의 의미가 OS 마다 다르다 — 실측했다.** POSIX 는 링크를 만나면 open 자체가 실패하는데,
 Windows 의 `openFile(.follow_symlinks = false)` 는 **링크 자신을 연다**(거부하지 않는다). 그래도 가드가

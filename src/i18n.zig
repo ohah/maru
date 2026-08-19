@@ -456,6 +456,9 @@ pub const Table = struct {
     scm_menu_pick_base: [:0]const u8,
     /// 기준 목록의 첫 줄 — 고른 기준을 버리고 `origin/HEAD`로 돌아간다.
     scm_base_default: [:0]const u8,
+    /// 고른 기준을 **기억하지 못했다**(기억할 저장소 수 상한). 조용히 돌아가면 사용자는 "골랐는데
+    /// 아무 일도 안 일어난다"만 겪는다 — 그것이 이 기능의 가장 나쁜 실패다(§3.5).
+    scm_base_limit: [:0]const u8,
     /// 명령을 넣을 터미널이 없다(활성 surface가 터미널이 아니다).
     scm_no_terminal: [:0]const u8,
     scm_changes: [:0]const u8,
@@ -1033,6 +1036,7 @@ pub const en: Table = .{
     .scm_menu_pull = "Type git pull",
     .scm_menu_pick_base = "Choose base branch…",
     .scm_base_default = "Default (origin/HEAD)",
+    .scm_base_limit = "Too many repositories remembered, so the base branch was not changed",
     .scm_no_terminal = "No terminal to type into",
     .scm_changes = "Changes",
     .scm_history = "History",
@@ -1531,6 +1535,7 @@ pub const ko: Table = .{
     .scm_menu_pull = "git pull 넣기",
     .scm_menu_pick_base = "기준 브랜치 고르기…",
     .scm_base_default = "기본값(origin/HEAD)",
+    .scm_base_limit = "기억하는 저장소가 너무 많아 기준을 바꾸지 못했습니다",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

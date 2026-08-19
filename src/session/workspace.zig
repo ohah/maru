@@ -13,6 +13,9 @@
 const std = @import("std");
 const dock_panel = @import("dock_panel.zig");
 const split_tree = @import("split_tree.zig");
+// 기준 ref의 형태 판정은 **git 명령을 만드는 쪽이 소유한다**(§3.5). 여기서 규칙을 다시 쓰면 저장이 받는
+// 값과 실행이 받는 값이 갈린다 — 같은 L2 계층이라 그대로 부른다.
+const git_command = @import("git_command.zig");
 const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
 pub const header = "maru.workspace.v1";
@@ -36,6 +39,9 @@ pub const max_dock_entries = dock_panel.max_entries;
 /// attacker-controlled workspace 크기와 분리한다. 일반 in-process surface는 이 cap에 포함하지 않는다.
 pub const max_runtime_bindings = 4096;
 pub const max_explorer_roots: usize = 256;
+/// 기억하는 저장소 기준의 최대 개수. 목록이 아니라 **기억**이라 상한이 낮아도 된다 — 넘으면 오래된
+/// 것부터 버리는 것이 아니라 저장을 거절한다(잘린 기억은 "안 고른 것"과 구별되지 않는다).
+pub const max_scm_bases: usize = 64;
 pub const max_explorer_root_payload_bytes: usize = 1_049_860;
 pub const max_explorer_root_raw_bytes: usize = 2_099_720;
 
@@ -180,6 +186,20 @@ pub const Frame = struct {
 };
 
 /// null=inferred legacy mode, non-null=explicit snapshot(빈 slice도 유효한 explicit-empty).
+/// 저장소별 **비교 기준**(docs/editor-surface-dock.md §3.5). `origin/HEAD`가 없는 저장소에서 사용자가
+/// 고른 값이고, 그 선택은 앱을 다시 켜도 남아야 한다("고를 수 있는데 매번 다시 골라야 한다"는 반쪽이다).
+///
+/// **창 줄에 실린다.** 저장소 단위 사실이라 최상위가 더 맞아 보이지만, 저장은 창마다 따로 일어난다
+/// (`serializeWindow` — 각 세션이 자기 블록을 내고 Swift가 헤더 아래로 모은다). 최상위 섹션은 **쓸 주인이
+/// 없다.** 그래서 탐색기 root 목록과 같은 자리에 같은 방식으로 싣는다.
+pub const ScmBase = struct {
+    /// 저장소 루트(절대 경로).
+    repo: []const u8,
+    /// 기준 ref 이름(`origin/main` 형태). `git_command.isSafeBaseRef`를 통과한 값만 싣는다 —
+    /// 이 값은 다음 실행에서 **argv에 실린다**(§6: 파일을 거쳐 온 문자열은 인자 자리에서 다시 본다).
+    base: []const u8,
+};
+
 pub const ExplorerPersistedState = struct {
     roots: ?[]const []const u8 = null,
 };
@@ -202,6 +222,8 @@ pub const Window = struct {
     // 라인에 둔다. 기본값은 키를 전부 생략해 옛 파일 고정점과 양방향 호환을 유지한다.
     dock: dock_panel.PersistedState = .{},
     explorer: ExplorerPersistedState = .{},
+    /// 저장소별 비교 기준(§3.5). 빈 목록이면 전부 기본값(`origin/HEAD`)이다.
+    scm_bases: []const ScmBase = &.{},
     tabs: []const Tab,
 };
 
@@ -304,6 +326,7 @@ pub fn windowFrame(ws: Workspace, index: usize) ?Frame {
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     try validateDockState(win.dock);
     try validateExplorerState(win.explorer);
+    try validateScmBases(win.scm_bases);
     try w.print("window tabs={d} active-tab={d}", .{ win.tabs.len, win.active_tab });
     // 활성(key) 창 마커(M3e §8A.8). false면 키 생략(additive·key-addressed — 옛 파일/비활성 창의 라인 문자열을 안
     // 바꿔 round-trip 고정점·양쪽 호환, group-collapsed와 동일). true면 active-window=1 스칼라로 쓴다.
@@ -330,6 +353,17 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
         }
         try w.writeByte('"');
     }
+    // 저장소별 비교 기준(§3.5) — 탐색기 root와 같은 인코딩(길이 접두 + escape)이라 커서를 공유한다.
+    if (win.scm_bases.len != 0) {
+        try w.print(" scm-bases=\"{d}:", .{win.scm_bases.len});
+        for (win.scm_bases) |entry| {
+            try w.print("{d}:", .{entry.repo.len});
+            try writeEscaped(w, entry.repo);
+            try w.print("{d}:", .{entry.base.len});
+            try writeEscaped(w, entry.base);
+        }
+        try w.writeByte('"');
+    }
     // FP16 §5.0: 파일 목록은 창 줄이 아니라 각 `pane` 줄의 `file-term` 필드로 나간다. 창 줄에 남는 도크 키는
     // **탐색기 것뿐**이다(dock-size·dock-collapsed·dock-presented·dock-tree-roots).
     // 옛 `dock-entry`/`dock-entry-v2`/`dock-node`/`dock-group-*`는 **읽기만** 유지한다(1회 마이그레이션).
@@ -340,6 +374,22 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
 fn dockStateHasEntries(dock: dock_panel.PersistedState) bool {
     if (dock.entries.len != 0) return true;
     return false;
+}
+
+/// 저장 전에 거른다(§3.5). **읽을 때도 같은 검사를 다시 한다** — 파일은 우리 밖의 것이고, 이 값의
+/// 다음 정거장은 git argv다. 여기서만 걸러 두면 손으로 고친 파일이 그 검사를 통째로 건너뛴다.
+fn validateScmBases(entries: []const ScmBase) !void {
+    if (entries.len > max_scm_bases) return error.InvalidScmBases;
+    for (entries, 0..) |entry, i| {
+        if (entry.repo.len == 0 or entry.repo.len > std.fs.max_path_bytes or
+            !std.fs.path.isAbsolute(entry.repo) or !std.unicode.utf8ValidateSlice(entry.repo))
+            return error.InvalidScmBases;
+        // 형태 판정의 출처는 git 명령을 만드는 쪽이다 — 저장이 받는 값과 실행이 받는 값이 갈리지 않게.
+        if (!git_command.isSafeBaseRef(entry.base)) return error.InvalidScmBases;
+        // 같은 저장소가 둘이면 **어느 쪽이 맞는지 알 수 없다**. 나중 것으로 덮는 규칙을 여기 두면
+        // 그 규칙이 파일 형식의 일부가 되고, 읽는 쪽마다 다르게 해석될 자리를 남긴다.
+        for (entries[0..i]) |prior| if (std.mem.eql(u8, prior.repo, entry.repo)) return error.InvalidScmBases;
+    }
 }
 
 fn validateExplorerState(explorer: ExplorerPersistedState) !void {
@@ -585,10 +635,51 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines, limits));
-    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .tabs = try tabs.toOwnedSlice(a) };
+    // 기준 목록은 **못 읽으면 없는 것으로 본다**(탐색기 root와 다르다 — 그쪽은 도크 표시 여부까지 걸린다).
+    // 기억이 사라지면 사용자는 기본값 화면을 보고 다시 고르면 되지만, 깨진 값을 실으면 다음 실행이
+    // 그 값을 argv에 넣는다. 잃는 쪽이 안전한 쪽이다.
+    const scm_bases = parseScmBases(a, f.find("scm-bases"));
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 const ExplorerRootsParse = struct { roots: ?[]const []const u8, valid: bool };
+
+/// 저장소별 기준을 읽는다(§3.5). 탐색기 root와 **같은 인코딩·같은 커서**를 쓴다: `<개수>:` 뒤로
+/// `<길이>:<저장소><길이>:<기준>`이 이어진다.
+///
+/// **한 항목이라도 이상하면 목록 전체를 버린다.** 부분 복원은 "어떤 저장소는 기억됐고 어떤 것은 아니다"를
+/// 만드는데, 사용자에게 그 둘은 구별되지 않는다(둘 다 그냥 기본값으로 보인다).
+fn parseScmBases(a: std.mem.Allocator, maybe_field: ?LineFields.Field) []const ScmBase {
+    const field = maybe_field orelse return &.{};
+    // 원시 바이트 상한은 탐색기 root와 **같은 값을 일부러 공유한다**: 이 필드도 같은 커서로 읽히므로
+    // 한쪽만 넉넉하면 그 차이가 곧 파서의 두 번째 규칙이 된다. 실제 상한은 아래 개수 검사가 좁힌다.
+    if (!field.is_quoted or field.raw.len > max_explorer_root_raw_bytes) return &.{};
+    var cursor = ExplorerQuotedCursor{ .raw = field.raw };
+    const count = cursor.parseLength() catch return &.{};
+    if (count > max_scm_bases) return &.{};
+    const entries = a.alloc(ScmBase, count) catch return &.{};
+    for (entries, 0..) |*entry, index| {
+        const repo = readCursorString(a, &cursor, std.fs.max_path_bytes) orelse return &.{};
+        const base = readCursorString(a, &cursor, git_command.max_base_ref_len) orelse return &.{};
+        // 저장할 때 건 검사를 **읽을 때 다시 건다**. 파일은 우리 밖의 것이라 그 사이에 바뀔 수 있고,
+        // 이 값의 다음 정거장은 git argv다(§6 심층 방어).
+        if (!std.fs.path.isAbsolute(repo) or !std.unicode.utf8ValidateSlice(repo)) return &.{};
+        if (!git_command.isSafeBaseRef(base)) return &.{};
+        for (entries[0..index]) |prior| if (std.mem.eql(u8, prior.repo, repo)) return &.{}; // 같은 저장소가 둘이면 어느 쪽이 맞는지 알 수 없다
+        entry.* = .{ .repo = repo, .base = base };
+    }
+    if ((cursor.next() catch return &.{}) != null) return &.{}; // 남은 바이트 = 우리가 쓴 것이 아니다
+    return entries;
+}
+
+/// 커서에서 길이 접두 문자열 하나를 읽는다(빈 문자열·상한 초과는 실패).
+fn readCursorString(a: std.mem.Allocator, cursor: *ExplorerQuotedCursor, max_len: usize) ?[]const u8 {
+    const len = cursor.parseLength() catch return null;
+    if (len == 0 or len > max_len) return null;
+    const out = a.alloc(u8, len) catch return null;
+    for (out) |*byte| byte.* = (cursor.next() catch return null) orelse return null;
+    return out;
+}
 
 fn parseExplorerRoots(a: std.mem.Allocator, maybe_field: ?LineFields.Field) ExplorerRootsParse {
     const field = maybe_field orelse return .{ .roots = null, .valid = true };
@@ -1155,6 +1246,106 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
+}
+
+test "workspace: 저장소별 비교 기준이 왕복한다 (§3.5 P7b)" {
+    const surfaces = [_]Surface{.{ .cwd = "/repo/a", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .tree = &tree, .panes = &panes }};
+    const bases = [_]ScmBase{
+        .{ .repo = "/repo/a", .base = "origin/main" },
+        .{ .repo = "/repo/b", .base = "release-1.2.x" },
+    };
+    const windows = [_]Window{.{ .active_tab = 0, .scm_bases = &bases, .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "scm-bases=\"2:7:/repo/a11:origin/main7:/repo/b13:release-1.2.x\"") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const got = parsed.workspace.windows[0].scm_bases;
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("/repo/a", got[0].repo);
+    try std.testing.expectEqualStrings("origin/main", got[0].base);
+    try std.testing.expectEqualStrings("/repo/b", got[1].repo);
+    try std.testing.expectEqualStrings("release-1.2.x", got[1].base);
+}
+
+test "workspace: 따옴표·공백·한글이 든 저장소 경로도 왕복한다 (§3.5 P7b)" {
+    // 길이 접두는 **디코딩된 바이트 수**를 세고, escape는 그보다 길게 쓰인다. 그 둘이 어긋나면
+    // 이어지는 항목의 시작이 밀려 목록 전체가 조용히 깨진다(탐색기 root와 같은 커서를 쓰는 이유다).
+    const surfaces = [_]Surface{.{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .tree = &tree, .panes = &panes }};
+    const tricky = "/Users/한글/my \"repo\" dir";
+    const bases = [_]ScmBase{
+        .{ .repo = tricky, .base = "origin/main" },
+        .{ .repo = "/plain", .base = "main" },
+    };
+    const windows = [_]Window{.{ .active_tab = 0, .scm_bases = &bases, .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const got = parsed.workspace.windows[0].scm_bases;
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings(tricky, got[0].repo);
+    try std.testing.expectEqualStrings("origin/main", got[0].base);
+    // **뒤 항목까지 온전해야 한다** — 앞 항목의 길이가 밀렸다면 여기서 드러난다.
+    try std.testing.expectEqualStrings("/plain", got[1].repo);
+    try std.testing.expectEqualStrings("main", got[1].base);
+}
+
+test "workspace: 기준이 없으면 그 키를 아예 안 쓴다 (옛 리더가 모르는 키를 안 만난다)" {
+    const surfaces = [_]Surface{.{ .cwd = "/repo/a", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .active_tab = 0, .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "scm-bases") == null);
+}
+
+test "workspace: 이상한 기준은 **목록 전체**를 버린다(부분 복원을 안 만든다)" {
+    // 부분 복원은 "어떤 저장소는 기억됐고 어떤 것은 아니다"를 만드는데, 사용자에게 그 둘은
+    // 구별되지 않는다(둘 다 그냥 기본값으로 보인다). 그리고 이 값의 다음 정거장은 git argv다.
+    const base_line = "maru.workspace.v1\nwindow tabs=1 active-tab=0";
+    const tail = "\ntab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/repo/a\" command=\"/bin/zsh\" cols=80 rows=24\n";
+
+    const cases = [_][]const u8{
+        " scm-bases=\"1:7:/repo/a15:--upload-pack=x\"", // 옵션 주입
+        " scm-bases=\"1:7:/repo/a4:a..b\"", // 우리가 붙이는 `...HEAD`와 합쳐져 다른 범위가 된다
+        " scm-bases=\"1:6:repo/a11:origin/main\"", // 상대 경로 — 어느 저장소인지 알 수 없다
+        " scm-bases=\"2:7:/repo/a11:origin/main7:/repo/a4:main\"", // 같은 저장소가 둘
+        " scm-bases=\"1:7:/repo/a0:\"", // 빈 기준
+    };
+    for (cases) |bad| {
+        const text = try std.mem.concat(std.testing.allocator, u8, &.{ base_line, bad, tail });
+        defer std.testing.allocator.free(text);
+        var parsed = try parse(std.testing.allocator, text);
+        defer parsed.deinit();
+        // 창은 살아 있고 기억만 사라진다 — 사용자는 기본값 화면을 보고 다시 고르면 된다.
+        try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
+        try std.testing.expectEqual(@as(usize, 0), parsed.workspace.windows[0].scm_bases.len);
+    }
+}
+
+test "workspace: 저장 쪽도 같은 검사를 건다(못 실을 값이면 저장을 거절한다)" {
+    const surfaces = [_]Surface{.{ .cwd = "/repo/a", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .tree = &tree, .panes = &panes }};
+    const bad = [_]ScmBase{.{ .repo = "/repo/a", .base = "--upload-pack=x" }};
+    const windows = [_]Window{.{ .active_tab = 0, .scm_bases = &bad, .tabs = &tabs }};
+    try std.testing.expectError(error.InvalidScmBases, serialize(std.testing.allocator, .{ .windows = &windows }));
 }
 
 test "workspace serialize: split 트리(중첩) + 멀티 pane" {

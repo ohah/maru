@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const scm_dock_ops = @import("scm_dock.zig"); // 고른 비교 기준을 세션에 되싣는다(§3.5 P7b)
 const session_host = @import("../session_host.zig");
 
 const chrome = maru.chrome;
@@ -508,7 +509,13 @@ pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_ac
         for (roots, 0..) |*root, i| root.* = try arena.dupe(u8, self.file_tree.rootAt(i).?);
         break :blk roots;
     } else null;
-    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots } };
+    // 고른 비교 기준(§3.5 P7b). 세션이 든 짝을 그대로 낸다 — 저장 쪽 검사(절대 경로·ref 형태·중복)는
+    // `workspace.serialize`가 다시 걸므로 여기서 또 판정하지 않는다(같은 규칙이 두 곳에 살지 않게).
+    const scm_bases = try arena.alloc(maru.session.workspace.ScmBase, self.scm_base_len);
+    for (scm_bases, self.scm_base_entries[0..self.scm_base_len]) |*out, entry| {
+        out.* = .{ .repo = try arena.dupe(u8, entry.repo), .base = try arena.dupe(u8, entry.base) };
+    }
+    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases };
 }
 
 /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
@@ -580,6 +587,12 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
             defer self.allocator.free(root);
             try new_file_tree.recordOpened(entry.path, root);
         }
+    }
+    // 기억해 둔 비교 기준을 되싣는다(§3.5 P7b). **저장소가 지금 있는지는 안 본다** — 없는 저장소의
+    // 기억은 화면에 아무 영향이 없고(그 저장소를 열 때만 쓰인다), 여기서 지우면 잠시 마운트가 빠진
+    // 외장 디스크의 저장소 기억이 조용히 사라진다.
+    for (win.scm_bases) |entry| {
+        if (!scm_dock_ops.rememberScmBase(self, entry.repo, entry.base)) break; // 상한을 넘으면 거기서 멈춘다
     }
     if (win.explorer.roots) |roots| {
         var validated: [file_tree.max_roots]file_tree_backend.ValidatedRoot = undefined;

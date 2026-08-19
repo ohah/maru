@@ -2230,6 +2230,10 @@ pub const BranchMenuPurpose = enum {
     pick_base,
 };
 
+/// 저장소 하나의 비교 기준(세션 소유 문자열 둘). workspace의 `ScmBase`와 같은 사실이고, 그쪽은
+/// 파일 표현이라 슬라이스가 arena를 빌린다 — 여기서는 세션 allocator가 소유한다.
+pub const ScmBaseEntry = struct { repo: []u8, base: []u8 };
+
 /// 도크 `∨` 메뉴에 실릴 수 있는 항목. 원격이 없으면 앞의 둘이 빠진다.
 pub const RemoteMenuItem = enum { push, pull, pick_base };
 const max_remote_menu_items: usize = 3;
@@ -3950,12 +3954,13 @@ pub const AppSession = struct {
     /// 자리만으로는 무엇을 골랐는지 알 수 없다(`∨` 메뉴와 같은 규율).
     scm_base_menu_rows: [max_base_menu_rows]BaseMenuRow = undefined,
     scm_base_menu_len: usize = 0,
-    /// 사용자가 고른 **비교 기준**과 그 기준이 붙는 저장소(owned, 없으면 `origin/HEAD`).
+    /// 사용자가 고른 **비교 기준**을 저장소마다 든다(owned, 없으면 그 저장소는 `origin/HEAD`).
     ///
-    /// **저장소를 함께 든다.** 기준은 저장소마다 다른 사실인데 이 필드가 하나뿐이라, 저장소가 바뀌면
-    /// 그 기준은 남의 것이 된다 — 짝이 안 맞으면 안 쓴다(§3.5. 저장소별로 기억하는 것은 workspace 몫이다).
-    scm_base_ref: ?[]u8 = null,
-    scm_base_repo: ?[]u8 = null,
+    /// **저장소와 짝이다.** 기준은 저장소마다 다른 사실이라, 짝을 안 보면 남의 저장소에서 고른 이름으로
+    /// 숫자를 센다. P7a는 이 자리에 짝 **하나**만 들었고(그래서 저장소를 옮기면 잊었다), P7b가 목록으로
+    /// 넓혀 workspace에 함께 실었다(§3.5).
+    scm_base_entries: [maru.session.workspace.max_scm_bases]ScmBaseEntry = undefined,
+    scm_base_len: usize = 0,
     /// 기준이 바뀌었는데 **아직 그 기준으로 읽지 못했다**. 고른 순간 읽기가 이미 돌고 있거나(§6-1 쓰기
     /// 포함) 백엔드가 거절하면 `refreshGitStatus`가 그냥 돌아가는데, 그러면 사용자가 고른 것이 화면에
     /// 반영되지 않은 채 조용히 사라진다 — "골랐는데 안 바뀐다"가 이 기능의 가장 나쁜 실패다.
@@ -17485,8 +17490,11 @@ pub const AppSession = struct {
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
         if (self.scm_fetch_repo) |path| self.allocator.free(path); // 도는 fetch가 향한 저장소(P6)
-        if (self.scm_base_ref) |ref| self.allocator.free(ref); // 고른 비교 기준(§3.5)
-        if (self.scm_base_repo) |path| self.allocator.free(path);
+        for (self.scm_base_entries[0..self.scm_base_len]) |entry| { // 고른 비교 기준들(§3.5)
+            self.allocator.free(entry.repo);
+            self.allocator.free(entry.base);
+        }
+        self.scm_base_len = 0;
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);
@@ -56914,6 +56922,88 @@ test "소스 컨트롤: 메뉴를 닫아도 항목 표는 남는다 — accept�
     scm_dock_ops.applyRemoteMenuSelection(session, 0);
     // 표가 살아 있어야 여기까지 온다(지웠다면 조용히 돌아가 이 문구가 없다).
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_no_terminal), session.scm_write_error.?);
+}
+
+test "소스 컨트롤: 고른 기준은 저장소마다 따로 남고 파일까지 왕복한다 (§3.5 P7b)" {
+    // P7a는 짝 하나만 들어서 저장소를 옮기면 잊었다. 기준은 저장소마다 다른 사실이므로 목록이어야 하고,
+    // 앱을 다시 켰을 때도 남아야 한다("고를 수 있는데 매번 다시 골라야 한다"는 반쪽이다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try std.testing.expect(scm_dock_ops.rememberScmBase(session, "/repo/a", "origin/main"));
+    try std.testing.expect(scm_dock_ops.rememberScmBase(session, "/repo/b", "release-1.2.x"));
+    try std.testing.expectEqualStrings("origin/main", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+    try std.testing.expectEqualStrings("release-1.2.x", scm_dock_ops.scmBaseRefFor(session, "/repo/b"));
+    // 같은 저장소를 다시 고르면 **덮어쓴다**(줄이 둘로 늘지 않는다 — 어느 쪽이 맞는지 알 수 없어진다).
+    try std.testing.expect(scm_dock_ops.rememberScmBase(session, "/repo/a", "main"));
+    try std.testing.expectEqualStrings("main", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+    try std.testing.expectEqual(@as(usize, 2), session.scm_base_len);
+
+    // 파일까지 왕복한다: 캡처 → 직렬화 → 파싱.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    try std.testing.expectEqual(@as(usize, 2), captured.scm_bases.len);
+    const text = try maru.session.workspace.serialize(arena.allocator(), .{ .windows = &.{captured} });
+    var parsed = try maru.session.workspace.parse(arena.allocator(), text);
+    defer parsed.deinit();
+    const restored = parsed.workspace.windows[0].scm_bases;
+    try std.testing.expectEqual(@as(usize, 2), restored.len);
+
+    // 기준을 버리면 그 줄이 사라진다 — 빈 값은 "기본값(`origin/HEAD`)"이라는 뜻이고, 저장할 것이 없다.
+    try std.testing.expect(scm_dock_ops.rememberScmBase(session, "/repo/a", null));
+    try std.testing.expectEqualStrings("", scm_dock_ops.scmBaseRefFor(session, "/repo/a"));
+    try std.testing.expectEqualStrings("release-1.2.x", scm_dock_ops.scmBaseRefFor(session, "/repo/b"));
+    try std.testing.expectEqual(@as(usize, 1), session.scm_base_len);
+}
+
+test "소스 컨트롤: 못 실을 기준은 **들어올 때** 막는다 — 저장 전체를 실패시키지 않는다 (§3.5 적대적 검증)" {
+    // `workspace.serialize`도 같은 검사를 하지만, 거기서 걸리면 **workspace 저장이 통째로 실패한다**
+    // (탭·pane·창 위치까지 함께 잃는다). 기준 하나 때문에 그 폭발 반경을 감수할 이유가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try std.testing.expect(!scm_dock_ops.rememberScmBase(session, "/repo/a", "--upload-pack=x"));
+    try std.testing.expect(!scm_dock_ops.rememberScmBase(session, "/repo/a", "a..b"));
+    try std.testing.expect(!scm_dock_ops.rememberScmBase(session, "repo/a", "main")); // 상대 경로
+    try std.testing.expectEqual(@as(usize, 0), session.scm_base_len);
+
+    // 막힌 뒤에도 저장은 성립한다 — 기억만 안 남는다.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    const text = try maru.session.workspace.serialize(arena.allocator(), .{ .windows = &.{captured} });
+    try std.testing.expect(std.mem.indexOf(u8, text, "scm-bases") == null);
+}
+
+test "소스 컨트롤: 기억 자리가 꽉 차면 **거절한다**(오래된 것을 조용히 밀어내지 않는다) (§3.5 P7b)" {
+    // 밀어내면 사용자는 "어제 고른 기준이 왜 기본값이지"를 겪고, 그 이유가 화면 어디에도 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < maru.session.workspace.max_scm_bases) : (i += 1) {
+        const repo = try std.fmt.bufPrint(&buf, "/repo/{d}", .{i});
+        try std.testing.expect(scm_dock_ops.rememberScmBase(session, repo, "main"));
+    }
+    try std.testing.expect(!scm_dock_ops.rememberScmBase(session, "/repo/overflow", "main"));
+    // **거절은 조용하지 않다**: 고르는 경로로 들어오면 이유가 화면에 적힌다(P7a가 고친 실패와 같은 종류).
+    session.git_repo = try allocator.dupe(u8, "/repo/overflow");
+    scm_dock_ops.applyBaseMenuSelectionForTest(session, "main");
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_base_limit), session.scm_write_error.?);
+    // 꽉 찬 뒤에도 **이미 있는 저장소는 바꿀 수 있다**(자리가 필요 없다).
+    try std.testing.expect(scm_dock_ops.rememberScmBase(session, "/repo/0", "origin/main"));
+    try std.testing.expectEqualStrings("origin/main", scm_dock_ops.scmBaseRefFor(session, "/repo/0"));
 }
 
 test "소스 컨트롤: 기준 목록은 줄과 뜻을 함께 만든다 — 자리로 되짚지 않는다 (§3.5)" {

@@ -459,6 +459,15 @@ const char *maru_mobile_ssh_exit_signal(unsigned int handle);
 const char *maru_mobile_ssh_last_error(unsigned int handle);
 void maru_mobile_ssh_clear_error(unsigned int handle);
 
+/// **기기에서 키쌍을 만든다**(계약 §3.4 — 키는 앱이 만들고 개인키는 기기 밖으로 안 나간다).
+///
+/// `entropy`(32B)가 곧 개인키의 씨앗이다 — 예측 가능한 값을 주면 그 키로 지킬 수 있는 것이
+/// 없다. 0 은 거절한다. 나오는 것은 `open` 에 넘길 64바이트와, 사용자가 서버
+/// `authorized_keys` 에 붙일 한 줄(`ssh-ed25519 <base64> maru`, NUL 로 끝난다)이다.
+/// 자리가 모자라면 실패한다 — 잘린 공개키는 붙여도 안 먹는다.
+int maru_mobile_ssh_generate_key(const unsigned char *entropy, unsigned char *out_secret,
+                                 unsigned char *out_line, unsigned int line_cap);
+
 /// 개인키 파일 내용(PEM 텍스트)에서 `seed(32) ‖ public(32)` 를 만든다. **파일은 host 가 읽는다** —
 /// 이 층은 OS 를 모른다. 나온 64바이트를 `open` 에 넘긴 뒤 host 는 **자기 사본을 지운다**.
 /// 암호 걸린 키면 `passphrase` 를 준다(없으면 길이 0). 실패하면 `MARU_SSH_ERR_BAD_ARG` 이고

@@ -323,11 +323,39 @@ start_sshd "$DIR/sshd10.pid" "$((PORT + 13))" "$DIR/sshd10.log" "$BULK_CMD" "Rek
 "$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "$DIR/clientkey" "$HOSTKEY_FP" MARU_PUMP_OK "$EXPECT_BYTES"
 ROUNDS=$((ROUNDS + 1))
 
+# 15) **기기에서 만든 키로 붙는다(S9c).** 계약 §3.4 는 "키는 앱이 만든다" 고 정했다 — 그 키가
+#     진짜 OpenSSH 에 먹히는지는 **붙어 봐야** 안다(형식만 그럴싸한 공개키는 붙여 넣고서야
+#     안 먹는 것을 알게 된다). 같은 씨앗을 두 번 넣어 한 번은 공개키 줄을 뽑고, 한 번은 그
+#     키로 접속한다.
+dd if=/dev/urandom of="$DIR/seed" bs=32 count=1 2>/dev/null
+"$PUMP_DRIVER" 1 x "seed:$DIR/seed" x PRINT_PUBLIC_LINE > "$DIR/generated.pub"
+case "$(cat "$DIR/generated.pub")" in
+"ssh-ed25519 "*" maru") : ;;
+*)
+	echo "[ssh-client-smoke] FAIL: 만든 공개키 줄이 형식과 다르다: $(cat "$DIR/generated.pub")" >&2
+	exit 1
+	;;
+esac
+# **OpenSSH 가 그 줄을 읽는지 남의 도구로 판정한다.**
+ssh-keygen -lf "$DIR/generated.pub" >/dev/null 2>&1 || {
+	echo "[ssh-client-smoke] FAIL: ssh-keygen 이 우리가 만든 공개키를 못 읽는다" >&2
+	exit 1
+}
+cat "$DIR/generated.pub" > "$DIR/authorized_keys"
+chmod 600 "$DIR/authorized_keys"
+start_sshd "$DIR/sshd11.pid" "$((PORT + 15))" "$DIR/sshd11.log" "echo MARU_GENKEY_OK" || {
+	sed -n '1,5p' "$DIR/sshd11.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 생성키 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+"$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "seed:$DIR/seed" "$HOSTKEY_FP" MARU_GENKEY_OK
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 13 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 13 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 14 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 14 가 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열세 회차 완주"
+echo "[ssh-client-smoke] 열네 회차 완주"

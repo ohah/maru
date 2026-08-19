@@ -30,7 +30,7 @@
 붙는다(초기화 진입점을 낼지, host 가 `term_write` 로 `\x1b[2J` 를 넣을지). (2) 소켓 스레드와 그리기
 스레드의 자물쇠 — iOS 도 이제 직렬화가 필요하다([모바일 계약](../mobile-platform.md) §3) | S9-1·S9-2 는 실서버 열 회차(pty·no-pty·echo·rekey·rekey-echo·self-rekey·banner·disconnect·**ABI**·**ABI 에코**), S9-3 은 기기 |
 | S9b | **서버 목록 화면** — 호스트·사용자·포트·키를 등록·관리(모바일은 UI 가 유일한 입력 경로) | 화면 |
-| S9c | **키 생성 + 공개키 보여 주기** — 기기에서 ed25519 를 만들고 한 줄을 복사하게 한다 | 기기 |
+| S9c | **키 생성 + 공개키 보여 주기** — 기기에서 ed25519 를 만들고 한 줄을 복사하게 한다. **S9c-1**(완료): 만드는 ABI(`maru_mobile_ssh_generate_key`) — 씨앗은 host 가 주고 0 은 거절한다. **S9c-2·3**: iOS Keychain · Android Keystore 보관. **S9c-4**: 공개키 한 줄을 화면에 보여 주고 복사 | S9c-1 은 **실서버**(만든 키를 `authorized_keys` 에 넣고 그 키로 붙는다 + `ssh-keygen -lf` 가 읽는다), 나머지는 기기 |
 | S10 | **세션 호스트 부착** — 같은 채널 위에 컨트롤 플레인을 얹는다(M3 이 여기로 흡수된다) | 후속 |
 
 **S8 은 제품 경로가 아니라 시험대다.** 데스크톱의 `maru ssh` 는 시스템 `ssh` 를 부르는 래퍼로

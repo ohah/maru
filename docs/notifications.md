@@ -172,9 +172,12 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **빈 상태 일러스트**: 알림이 없으면 헤더 아래 본문에 **종-슬래시 아이콘(🔕) + 굵은 제목("아직 알림이 없습니다") +
   부제("알림이 여기에 표시됩니다.")**를 가로 가운데로 그린다(예전 좌상단 "알림 없음" 한 줄을 대체). 아이콘은
   이모지라 CoreText fallback에 의존 — 실제 렌더로 확인하고 깨지면 BMP 기호로 교체한다(종 글리프와 같은 규율, §5).
-- **폭 cap·말줄임**: 패널 폭은 `[min_panel_cols=30, max_panel_cols=44]`로 cap한다(내용이 길어도 패널이 화면을 가로지를
-  만큼 넓어지지 않게 — 사용자 피드백 "maxwidth가 있어서 적당한 크기"). cap을 넘는 제목/본문은 `overlay_input.truncateToCols`
-  (EAW 폭 기준, 끝에 `…`)로 말줄임한다. 빈 상태는 제목/부제 폭으로 폭을 잡되 같은 cap을 따른다.
+- **폭 cap·말줄임**: 패널 폭은 최소~`max_panel_cols`로 cap한다(내용이 길어도 패널이 화면을 가로지를
+  만큼 넓어지지 않게 — 사용자 피드백 "maxwidth가 있어서 적당한 크기"). **최소 폭은 상수가 아니라 `minPanelCols()`가
+  헤더 라벨(제목 + 두 버튼)에서 잰다** — 언어가 바뀌면 필요한 폭도 바뀌므로 상수로 박으면 영어에서 제목과 버튼이 조용히
+  겹친다(i18n 계약 §6.1, `plans/i18n.md` I3c에서 실물로 나온 자리). `min_panel_cols_floor`는 "카드가 답답하지 않은"
+  하한으로만 남는다. cap을 넘는 제목/본문은 `overlay_input.truncateToCols`(EAW 폭 기준, 끝에 `…`)로 말줄임한다.
+  빈 상태는 제목/부제 폭으로 폭을 잡되 같은 cap을 따른다.
 - **말풍선 팝오버(형태)**: `openNotificationPanel`이 content top을 `anchor_y = 2*cell_h + modal_padding_px`로 둔다(단일 출처).
   rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼 **outset**하므로
   **보이는** 패널 상단 = `anchor_y − mp` = 줄2(=2ch) — mp를 더해 보이는 상단을 줄2에 맞춘다(안 더하면 보이는 패널이

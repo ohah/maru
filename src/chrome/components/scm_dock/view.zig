@@ -88,6 +88,10 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         // 접힘 아이콘·(워크트리면) 종류 아이콘·이름·브랜치 칩·개수 — 다섯.
         .repo => |repo| {
             text_ops += 5 + build.repo_action_count; // 동작 아이콘 둘(②c)
+            // 호버한 머리 줄은 그 아이콘 **밑을 덮는** 사각형 하나를 더 낸다(빈 띠를 없앤 대가).
+            // 호버는 한 줄에만 걸리지만 예산은 **줄마다** 잡는다 — 어느 줄일지는 여기서 모르고,
+            // 모자라면 그 프레임이 통째로 버려진다(이 함수 위 주석의 두 사고가 그것이었다).
+            quad_extra += 1;
             bytes += icon_bytes * 2 + repo.name.len +
                 @max(repo.branch.len, @max(repoPendingLabel().len, repoFailedLabel().len)) + count_digits;
         },
@@ -239,22 +243,46 @@ pub fn view(
             // 목록 끝의 "더 보기". `모두 보기`와 같은 자리·같은 색이다(둘 다 목록을 늘리는 컨트롤이다).
             // 펼친 커밋의 파일 줄 — 상태 문자는 오른쪽 끝, 이름은 한 칸 더 들여쓴다(그 커밋에 속한다).
             .commit_file => |file| try writer.commitFileRow(row, file, m),
-            .load_more => try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), i18n.t(.scm_load_more), .focus_accent, .control, false),
+            .load_more => try writer.line(row, @floatFromInt(m.iconColumnX()), i18n.t(.scm_load_more), .focus_accent, .control, false),
             .section => |section| try writer.sectionRow(row, section, m),
             .file => |file| try writer.fileRow(row, file, m),
             .more => |more| {
                 var buf: [48]u8 = undefined;
                 const text = i18n.format(&buf, i18n.t(.scm_show_all_more), &.{.{ .d = more.hidden }});
-                try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), text, .focus_accent, .control, false);
+                try writer.line(row, @floatFromInt(m.iconColumnX()), text, .focus_accent, .control, false);
             },
             // 안내는 상태 진술이라 강조색을 쓰지 않는다(빈 안내와 같은 톤).
-            .notice => |text| try writer.line(row, @floatFromInt(m.inset_x + m.disclosure_extent), text, .muted_fg, .supporting, false),
+            .notice => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .muted_fg, .supporting, false),
         }
         // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
         if (item == .repo) {
             const repo = item.repo;
             const hovered = isHovered(state, row.id) or hoveredRepoAction(state, index);
             if (hovered) {
+                // **아이콘 밑을 먼저 덮는다**(사용자 지적 2026-08-19). 이 줄은 자리를 비워 두지 않으므로
+                // 배지와 브랜치 이름이 그 밑에 이미 그려져 있다 — 안 덮으면 아이콘이 글자 위에 겹친다
+                // (예약을 넣기 전 2026-08-17에 실제로 그랬던 화면이다).
+                //
+                // 색은 **칠하는 쪽에 되묻는다**(`resolveCard`) — 상태로 추측하면 어긋난다: 포인터가
+                // 자식 버튼 위에 있으면 행 자체의 hover는 풀려서 배경이 평상시 색이고, 그때 hover 색을
+                // 깔면 그 띠만 다른 색으로 뜬다. 같은 파일의 커밋 버튼 글자색이 그 교훈으로 이렇게 한다.
+                if (frame.tree.find(build.NodeIds.repoAction(index, 0))) |first_index| {
+                    const first = frame.tree.entries[first_index];
+                    const left = first.rect.x - @as(f32, @floatFromInt(m.gap));
+                    const right = row.rect.x + row.rect.width;
+                    if (right > left) {
+                        if (rowBackgroundRole(row, state, writer.tokens_ref)) |role| try writer.appendQuad(.{
+                            .rect = .{
+                                .x = @intFromFloat(@floor(left)),
+                                .y = @intFromFloat(@floor(row.rect.y)),
+                                .w = @intFromFloat(@ceil(right - left)),
+                                .h = @intFromFloat(@ceil(row.rect.height)),
+                            },
+                            .fill_role = role,
+                            .corner_radii = .{ 0, 0, 0, 0 },
+                        });
+                    }
+                }
                 inline for (.{ refresh_icon, stage_all_icon }, 0..) |glyph, slot| {
                     if (frame.tree.find(build.NodeIds.repoAction(index, slot))) |slot_index| {
                         const rect = frame.tree.entries[slot_index];
@@ -298,7 +326,7 @@ pub fn view(
         if (frame.tree.find(build.NodeIds.branch)) |index| {
             const rect = frame.tree.entries[index];
             try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
-            const branch_x: f32 = @floatFromInt(m.inset_x + m.disclosure_extent + m.gap);
+            const branch_x: f32 = @floatFromInt(m.iconColumnX()); // 아이콘 열과 같은 자리(단일 출처)
             try writer.line(rect, branch_x, props.branch, .surface_fg, .control, true);
             // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
             // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
@@ -402,6 +430,22 @@ fn commitLabelRole(
     // 채운 면(accent) 위에서만 reverse다. 호버·눌림·비활성 면은 전부 어두우므로 보통 글자가 읽힌다.
     if (resolved.background == .accent_bar) return .surface_bg;
     return if (enabled) .surface_fg else .muted_fg;
+}
+
+/// 그 행이 **실제로 칠해진 배경**의 색 역할. 카드가 아니면 null이다(덮을 근거가 없으므로 안 덮는다).
+///
+/// `commitLabelRole`과 같은 규율이다 — 상태 표를 새로 만들지 않고 painter가 쓰는 `resolveCard`에
+/// 같은 입력을 물어본다. 그래야 호버·눌림·비활성에서 색이 갈리지 않는다.
+fn rowBackgroundRole(
+    entry: tree.RectEntry,
+    state: interaction.InteractionState,
+    tk: *const tokens.Tokens,
+) ?tokens.ColorRole {
+    const visual = switch (entry.visual) {
+        .card => |card| card,
+        else => return null,
+    };
+    return paint_style.resolveCard(entry.id, visual, entry.action, state, tk).background;
 }
 
 /// 빈 커밋 상자의 안내 문구. **컴포넌트가 소유한다** — platform이 넘기면 창마다 갈릴 수 있다.
@@ -568,15 +612,21 @@ const Writer = struct {
     /// 종류이고 무엇이 브랜치인지 읽히지 않는다 — 그래서 칩은 **글자만** 그린다.
     fn repoRow(self: *Writer, rect: tree.RectEntry, repo: types.RepoItem, m: types.DockMetrics) ViewError!void {
         const scale = effectiveScale(self.props.scale_milli);
-        // **동작 아이콘 자리를 늘 비켜 둔다**(②c). 호버할 때만 비키면 브랜치 칩과 개수 배지가 마우스를
-        // 따라 움직이고, 안 비키면 아이콘이 그 위에 겹쳐 그려진다(제품 캡처 2026-08-17에서 실제로 그랬다).
-        const action_band: u32 = @intCast(build.repo_action_count * (m.action_extent + m.gap));
+        // **동작 아이콘 자리를 비워 두지 않는다**(사용자 지적 2026-08-19). 그전에는 늘 비켜 뒀는데,
+        // 아이콘은 호버해야 나타나므로 평소 화면에는 **이유를 말하지 않는 빈 띠**만 52px 남았다.
+        //
+        // 그렇다고 호버할 때만 비키면 브랜치와 배지가 마우스를 따라 움직인다(2026-08-17에 그래서 예약을
+        // 넣었다). 그래서 세 번째 답을 쓴다 — **자리는 안 비우고, 호버하면 그 위에 덮어 그린다**:
+        // 아래에서 행 배경과 같은 색 사각형을 깔고 그 위에 아이콘을 놓는다. 히트 사각형은 build가
+        // 늘 두므로 클릭 판정은 그대로다(어차피 호버해야 누를 수 있어 보이는 것과 눌리는 것이 안 갈린다).
         const inset: f32 = @floatFromInt(m.inset_x);
-        const right_inset: u32 = m.inset_x + action_band;
+        const right_inset: u32 = m.inset_x;
         try self.icon(rect, inset, if (repo.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
         // 주 워크트리는 폴더, 링크된 워크트리는 브랜치 글리프 — 워크트리는 "딸린 것"이라는 사실이
         // 보여야 같은 이름의 두 줄을 사용자가 구별한다.
-        const kind_x = inset + @as(f32, @floatFromInt(m.disclosure_extent));
+        // **화살표와 붙지 않게 한 칸 띄운다**(사용자 지적 2026-08-19). 이 열은 그룹 제목·브랜치 글자가
+        // 이미 서 있던 자리라, 아이콘만 6px 왼쪽에 혼자 있었던 셈이다.
+        const kind_x = @as(f32, @floatFromInt(m.iconColumnX()));
         try self.icon(rect, kind_x, if (repo.primary) repo_icon else worktree_icon, m.icon_extent, .muted_fg);
 
         // 개수 배지는 **접혀 있어도** 그린다 — "여기 뭔가 있다"를 접힌 채로도 알아야 편다.
@@ -604,7 +654,9 @@ const Writer = struct {
             return;
         }
         const right_edge: f32 = if (pill) |p|
-            @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
+            // 배지 왼쪽 여백은 `gap`보다 넓다 — 칠해진 알약이라 같은 간격이면 브랜치 이름에
+            // 달라붙어 보인다(사용자 지적 2026-08-19: "11이 겹쳐 보인다").
+            @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.badgeGapPx()))
         else
             rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset));
 
@@ -684,7 +736,7 @@ const Writer = struct {
         });
 
         // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
-        const title_x = rect.rect.x + inset + @as(f32, @floatFromInt(m.disclosure_extent + m.gap));
+        const title_x = rect.rect.x + @as(f32, @floatFromInt(m.iconColumnX())); // 같은 아이콘 열
         // 제목은 **오른쪽에 있는 것 전부**를 비켜선다: 배지, 그리고 그 왼쪽의 일괄 동작 버튼.
         // 배지만 기준으로 삼으면 그 사이에 앉은 버튼 위로 긴 제목이 그려진다(적대적 검증에서 잡혔다).
         const action_reserve: f32 = if (section.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
@@ -727,12 +779,12 @@ const Writer = struct {
     fn fileRow(self: *Writer, rect: tree.RectEntry, file: types.FileItem, m: types.DockMetrics) ViewError!void {
         // 이름은 **아이콘 폭만큼 더** 들어간다. 그룹 헤더의 화살표 자리(`disclosure_extent`)만 비우면
         // 아이콘이 이름 위에 겹쳐 그려진다(제품 캡처에서 실제로 그랬다 — 슬롯 폭과 gap은 다른 값이다).
-        const inset: f32 = @floatFromInt(m.inset_x + m.disclosure_extent + m.icon_extent + m.gap);
+        const inset: f32 = @floatFromInt(m.iconColumnX() + m.icon_extent + m.gap);
         // **종류 아이콘은 탐색기와 같은 분류기**를 쓴다 — 같은 파일이 두 화면에서 다른 아이콘이면 안 된다.
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var glyph_buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(cp, &glyph_buf) catch 0;
-            if (len > 0) try self.icon(rect, @floatFromInt(m.inset_x + m.disclosure_extent), glyph_buf[0..len], m.icon_extent, .muted_fg);
+            if (len > 0) try self.icon(rect, @floatFromInt(m.iconColumnX()), glyph_buf[0..len], m.icon_extent, .muted_fg);
         }
         // 상태 문자는 오른쪽 끝(VS Code 배치). 색은 종류가 정하고, 글자는 그대로 그린다.
         var letter_buf: [1]u8 = .{file.letter};
@@ -1093,9 +1145,8 @@ const Writer = struct {
     /// 펼친 커밋 아래의 파일 한 줄(P4b). 파일 행과 같은 격자이되 **동작 버튼이 없다** — 지난 커밋의
     /// 파일은 스테이지할 대상이 아니다.
     fn commitFileRow(self: *Writer, rect: tree.RectEntry, file: types.CommitFileItem, m: types.DockMetrics) ViewError!void {
-        const inset: f32 = @floatFromInt(m.inset_x);
-        // 그 커밋에 속한다는 것을 들여쓰기로 말한다(그룹 안의 파일 행과 같은 규율).
-        const indent = inset + @as(f32, @floatFromInt(m.disclosure_extent));
+        // 그 커밋에 속한다는 것을 들여쓰기로 말한다(그룹 안의 파일 행과 같은 규율 — 같은 아이콘 열).
+        const indent = @as(f32, @floatFromInt(m.iconColumnX()));
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var icon_buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(cp, &icon_buf) catch 0;
@@ -2598,6 +2649,92 @@ test "저장소 머리 줄: 이름·브랜치·개수가 함께 서고 워크트
         else => {},
     };
     try testing.expect(saw_repo and saw_worktree);
+}
+
+test "머리 줄: 접힘 화살표와 종류 아이콘이 붙지 않는다 (사용자 지적 2026-08-19)" {
+    // 그전에는 화살표 칸이 끝나는 자리에 아이콘이 **간격 0**으로 붙어 둘이 한 덩어리로 보였다.
+    // 이름 앞에만 간격이 있었고, 그래서 왼쪽 두 글리프만 유독 빽빽했다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .primary = true, .count = 3 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const m = types.DockMetrics.resolve(1000);
+
+    const chevron = findExactText(draws, chevron_down_icon) orelse return error.MissingChevron;
+    const folder = findExactText(draws, repo_icon) orelse return error.MissingFolder;
+    // 화살표는 왼쪽 여백에, 아이콘은 **아이콘 열**에 선다 — 그 사이가 한 칸이다.
+    try testing.expect(folder.origin.x - chevron.origin.x >= @as(i32, @intCast(m.disclosure_extent + m.gap)));
+    try testing.expectEqual(@as(i32, @intCast(m.iconColumnX())), folder.origin.x);
+}
+
+test "머리 줄 아이콘과 파일 행 아이콘은 **같은 열**에 선다" {
+    // 값이 흩어져 있으면 한 줄만 고쳤을 때 열이 어긋난다 — 그래서 `iconColumnX()` 하나에서 온다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .primary = true, .count = 1 } },
+        .{ .file = .{ .model_index = 0, .name = "build.zig", .dir = "", .letter = 'M', .status = .modified, .action = .none } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const folder = findExactText(draws, repo_icon) orelse return error.MissingFolder;
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(i32, @intCast(m.iconColumnX())), folder.origin.x);
+    // 파일 아이콘은 분류기가 고른 글리프라 이름으로 찾지 않고 **자리만** 본다: 같은 열에, 머리 줄보다 아래.
+    var saw_file_icon_in_column = false;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| {
+            if (text.origin.x == @as(i32, @intCast(m.iconColumnX())) and text.origin.y > folder.origin.y) {
+                saw_file_icon_in_column = true;
+            }
+        },
+        else => {},
+    };
+    try testing.expect(saw_file_icon_in_column);
+}
+
+test "머리 줄: 브랜치와 개수 배지 사이는 `gap` 하나보다 넓다 (사용자 지적 2026-08-19)" {
+    // 배지는 칠해진 알약이라 같은 간격이면 시각 무게 때문에 이름에 달라붙어 보인다("11이 겹쳐 보인다").
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/x", .primary = true, .count = 11 } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const m = types.DockMetrics.resolve(1000);
+    const pill = findBadgeQuad(draws) orelse return error.MissingBadge;
+    const branch = findExactText(draws, "feat/x") orelse return error.MissingBranch;
+    // 브랜치는 **오른쪽 정렬**이라 그 op의 자리 자체가 "배지 왼쪽에서 이만큼 떨어진 곳"이다.
+    // 글자 폭을 여기서 다시 재면(측정기가 없다) 출처가 둘이 되므로, 방출된 폭 예산으로 끝을 구한다.
+    const branch_right = branch.origin.x + @as(i32, @intCast(branch.max_width_px orelse 0));
+    try testing.expect(pill.rect.x - branch_right >= @as(i32, @intCast(m.badgeGapPx())));
+}
+
+test "머리 줄: 동작 아이콘은 자리를 비워 두지 않고 호버할 때 **덮어** 그린다 (사용자 지적 2026-08-19)" {
+    // 늘 비워 두면 아이콘이 호버해야 나오므로 평소 화면에는 이유를 말하지 않는 빈 띠만 남는다.
+    // 덮개 없이 그리면 배지·브랜치 글자 위에 아이콘이 겹친다(예약을 넣기 전 그 화면이었다).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .primary = true, .count = 11, .can_stage_all = true } },
+    };
+    // ① 호버가 없으면 덮개도 없다 — 평소 화면에 덧칠이 늘지 않는다.
+    const plain = try renderFixture(&storage, .{}, &items);
+    const badge_plain = findBadgeQuad(plain) orelse return error.MissingBadge;
+
+    // ② 호버하면 그 아이콘 자리를 덮는 사각형이 **배지보다 뒤에** 온다(그려지는 순서 = 덮는 순서).
+    var storage_hover: TestStorage = .{};
+    const hover = try renderFixture(&storage_hover, .{ .hovered = build.NodeIds.item(0) }, &items);
+    var badge_index: ?usize = null;
+    var cover_index: ?usize = null;
+    for (hover.ops, 0..) |op, i| switch (op) {
+        .quad => |quad| {
+            if (quad.fill_role == .accent_bar and quad.rect.h >= badge_min_height) badge_index = i;
+            // 덮개는 배지가 아니라 **행 배경 색**이고, 배지보다 넓다(아이콘 둘을 담는다).
+            if (quad.fill_role != .accent_bar and quad.rect.w > badge_plain.rect.w) cover_index = i;
+        },
+        else => {},
+    };
+    const cover = cover_index orelse return error.MissingCover;
+    const badge_at = badge_index orelse return error.MissingBadge;
+    try testing.expect(cover > badge_at);
 }
 
 test "접힌 저장소도 개수 배지를 그린다(접힌 채로 '여기 뭔가 있다'를 안다)" {

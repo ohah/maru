@@ -501,6 +501,21 @@ pub const DockMetrics = struct {
 
     /// 원격 갱신 칩의 폭(P6). 글자 + 좌우 여백이고, **글자가 길어지면 칩도 커진다**(`가져오는 중…`) —
     /// 고정 폭으로 두면 도는 동안 글자가 잘려 무슨 상태인지 못 읽는다.
+    /// **아이콘 열의 x**(왼쪽 여백 + 접힘 화살표 칸 + 한 칸). 머리 줄의 종류 아이콘, 파일 행의 아이콘,
+    /// 안내·`더 보기` 글자가 전부 이 열에 선다 — 값이 흩어져 있으면 한 줄만 고쳤을 때 열이 어긋난다.
+    ///
+    /// **화살표와 아이콘 사이에 `gap`을 둔다**(사용자 지적 2026-08-19). 그전에는 화살표 칸이 끝나는
+    /// 자리에 아이콘이 바로 붙어(간격 0) 둘이 한 덩어리로 보였다 — 이름 앞에만 간격이 있었다.
+    pub fn iconColumnX(self: DockMetrics) u32 {
+        return self.inset_x + self.disclosure_extent + self.gap;
+    }
+
+    /// 개수 배지 **왼쪽**에 두는 여백. 보통 `gap`의 두 배다 — 배지는 칠해진 알약이라 같은 간격이면
+    /// 글자보다 시각 무게가 커서 브랜치 이름에 달라붙어 보인다(사용자 지적 2026-08-19).
+    pub fn badgeGapPx(self: DockMetrics) u32 {
+        return self.gap * 2;
+    }
+
     pub fn fetchChipWidthPx(self: DockMetrics, label: []const u8, cell_width_px: u32) u32 {
         const cols = fetchLabelCols(label);
         return cols * @max(cell_width_px, 1) + self.chip_pad_x * 2;

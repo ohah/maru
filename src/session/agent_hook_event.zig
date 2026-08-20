@@ -907,3 +907,38 @@ test "패치 본문에 든 가짜 표식을 경로로 읽지 않는다" {
     try testing.expectEqualStrings("/repo/docs/a.md", it.next().?);
     try testing.expect(it.next() == null); // 본문의 가짜 표식은 세지 않는다
 }
+
+test "provider 가 필드의 형을 바꿔도 줄 전체를 잃지 않는다" {
+    // 파서에는 «형이 예상과 다르면 그 필드만 포기하고 계속» 하는 분기가 셋 있는데(객체 아닌 `tool_input`,
+    // 배열 아닌 `background_tasks`, 불리언 아닌 `stop_hook_active`) 그 방어가 실제로 도는지 본 적이 없었다.
+    // provider 가 payload 모양을 바꾸는 일은 실제로 일어나고, 그때 **줄 전체를 잃으면** 그 턴이 통째로 사라진다.
+
+    // `tool_input` 이 객체가 아니다 → 그 필드만 비고 나머지는 읽힌다.
+    const not_object = "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_input\":\"문자열이 왔다\"," ++
+        "\"tool_name\":\"Bash\",\"prompt_id\":\"p1\"}";
+    const a = parseLine(not_object).?;
+    try testing.expectEqual(Kind.pre_tool_use, a.kind);
+    try testing.expectEqualStrings("Bash", a.tool_name);
+    try testing.expectEqualStrings("p1", a.turn_key);
+    try testing.expectEqualStrings("", a.file_path);
+
+    // `background_tasks` 가 배열이 아니다 → «없음» 으로 보고 계속.
+    const not_array = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":42,\"prompt_id\":\"p2\"}";
+    const b = parseLine(not_array).?;
+    try testing.expect(!b.has_background_tasks);
+    try testing.expectEqualStrings("p2", b.turn_key);
+
+    // `stop_hook_active` 가 불리언이 아니다 → 거짓으로 보고 계속(턴 종료를 놓치는 쪽이 아니라 세는 쪽).
+    const not_bool = "claude\t{\"hook_event_name\":\"Stop\",\"stop_hook_active\":\"yes\",\"prompt_id\":\"p3\"}";
+    const c = parseLine(not_bool).?;
+    try testing.expect(!c.stop_hook_active);
+    try testing.expectEqualStrings("p3", c.turn_key);
+
+    // 중첩이 더 깊어져도(`tool_input` 안에 객체·배열) 최상위 필드는 그대로 읽힌다.
+    const nested = "claude\t{\"hook_event_name\":\"PreToolUse\"," ++
+        "\"tool_input\":{\"edits\":[{\"file_path\":\"/deep/a.txt\"}],\"file_path\":\"/top/b.txt\"}," ++
+        "\"prompt_id\":\"p4\"}";
+    const d = parseLine(nested).?;
+    try testing.expectEqualStrings("/top/b.txt", d.file_path); // 한 겹 안의 키만 인정한다
+    try testing.expectEqualStrings("p4", d.turn_key);
+}

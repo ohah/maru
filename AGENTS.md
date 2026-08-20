@@ -59,7 +59,7 @@
 - [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md) — 절별 소유: [kind 분기](docs/file-panel-kinds.md)·[웹 스택과 렌더](docs/file-panel-web-stack.md)·[리치 편집 모드](docs/file-panel-rich-edit.md)·[도크 UI](docs/file-panel-dock-ui.md)·[테스트·검증](docs/file-panel-verification.md)
 - [파일 탐색기(도크 트리·watcher·root)](docs/file-explorer.md)
 - [선택 영역을 에이전트에 보내기(파일 패널 → 터미널 CLI)](docs/send-selection-to-agent.md)
-- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)
+- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)·[에이전트 훅 통합(provider 훅 수신·모드)](docs/agent-hooks.md)·[에이전트 턴 변경분(훅 경계·AI 소행·영속성)](docs/agent-turn-changes.md)·[턴 변경분 단계 계획](docs/plans/agent-turn-changes.md)
 - [네이티브 편집기(등폭 GPU 텍스트 뷰·편집·diff)](docs/native-editor.md) — 절별 소유: [레이어 배치](docs/native-editor-layering.md)·[문서 모델](docs/native-editor-document-model.md)·[시각 매핑](docs/native-editor-visual-mapping.md)·[diff·떠 있는 UI·설정](docs/native-editor-ui.md)
 
 ## 설계 문서
@@ -113,7 +113,7 @@
 - [SSH 클라이언트](docs/ssh-client.md) — maru 가 SSH 를 직접 말한다(모바일에는 `ssh` 바이너리가 없다) · [구현 계획](docs/plans/ssh-client.md)
 - [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md) — 절별 소유: [transport·프로토콜](docs/control-plane-protocol.md)·[보안](docs/control-plane-security.md)·[`browser.*` 코어와 CLI](docs/control-plane-browser.md)·[라이브 배선](docs/control-plane-browser-wiring.md)·[프로토콜 리뷰](docs/control-plane-browser-review.md)·[지속 세션](docs/control-plane-browser-session.md)·[구현 Phase와 검증](docs/control-plane-implementation.md)
 - [웹 패널 인프라(WKWebView 합성)](docs/web-panel.md) — 절별 소유: [빠진 기능](docs/web-panel-features.md)·[구현 계획](docs/plans/web-panel.md)
-- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)
+- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)·[에이전트 훅 통합(provider 훅 수신·모드)](docs/agent-hooks.md)·[에이전트 턴 변경분(훅 경계·AI 소행·영속성)](docs/agent-turn-changes.md)·[턴 변경분 단계 계획](docs/plans/agent-turn-changes.md)
 - [네이티브 편집기(등폭 GPU 텍스트 뷰·편집·diff)](docs/native-editor.md) — 절별 소유: [레이어 배치](docs/native-editor-layering.md)·[문서 모델](docs/native-editor-document-model.md)·[시각 매핑](docs/native-editor-visual-mapping.md)·[diff·떠 있는 UI·설정](docs/native-editor-ui.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)

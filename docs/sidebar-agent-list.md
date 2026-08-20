@@ -415,6 +415,18 @@ walk-up해 캐시하므로 비활성 Term을 함께 읽어도 비용이 늘지 �
 
 ### 7.2.2 보강 — claude 상태줄 훅(옵션, 기본 on)
 
+> **훅 모드에서는 이 절의 경로 전체가 쓰이지 않는다(2026-08-20)**: 마지막 교환이 훅 payload에 그대로 온다 —
+> 프롬프트는 `UserPromptSubmit.prompt`, 응답은 `Stop.last_assistant_message`(실측 확인). 그래서 세션 신원
+> 해소도 tail 파싱도 필요 없다. 계약은 [에이전트 훅 통합](agent-hooks.md)이 소유하고, 이 절은 **관측 모드**
+> (훅 미설치·게이트 off·claude/codex 아닌 에이전트)에서만 적용한다.
+
+> **대체 예정(2026-08-20)**: 이 훅이 하는 일은 payload에서 `session_id`를 뽑아 pane 파일에 적는 것
+> 하나인데, provider 훅 `SessionStart`가 `session_id` + `transcript_path` + `cwd`를 함께 준다 —
+> 상위집합이고 경로 조립도 사라진다. [에이전트 훅 통합](agent-hooks.md) AH2에서 이 절의 statusLine
+> 훅을 제거하고 그쪽으로 옮긴다. 사용자 `statusLine.command`를 감싸던 침습이 없어지는 것이 순이득이다.
+> 그때까지는 이 절이 그대로 유효하다.
+
+
 §7.2.1은 **자식이 존재할 때만** 신원을 읽는다. 도구를 한 번도 실행하지 않는 세션은 그 창이 없어 대화 줄이 빈다.
 그 빈틈을 claude 상태줄로 메운다 — `sidebar.agent-transcript-hook`으로 끌 수 있다(기본 on).
 

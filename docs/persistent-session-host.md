@@ -6355,6 +6355,15 @@ P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
   base(parent 또는 explicit env)와 그 뒤 `env.*` upsert 규칙을 따른다. 정리가 필요하면 P1에서 갱신하는
   `agent-session.md` support runbook이 식별하는 Maru marker hook·Maru mapping 파일만 사용자가 직접 제거하며, 다른 사용자
   hook이나 mapping 디렉터리 전체를 일괄 삭제하지 않는다.
+- **이 금지의 범위(2026-08-20 해석 확정)**: 위 "provider config/mapping을 자동 수정하지 않는다"는 **legacy
+  session continuity 경로**에 한한다 — 과거 source build가 설치한 hook과 그 mapping 파일을 Maru가 자동으로
+  고치거나 지우던 동작이 대상이다. **목적이 명확하고 config 게이트가 있으며 끄면 스스로 제거되는 설치는 각자의
+  계약이 소유한다.** 근거는 실제 코드다 — 사이드바 대화 표시용 statusLine hook
+  ([sidebar-agent-list.md §7.2.2](sidebar-agent-list.md))이 P1 이후에도 `~/.claude/settings.json`을 갱신하며
+  살아 있다. 넓게 읽으면 그 기능이 P1과 모순되므로, 이 절은 그것을 금지한 적이 없다고 읽는 것이 맞다.
+  현재 이 예외를 쓰는 곳: statusLine hook(위), [에이전트 훅 통합](agent-hooks.md) AH2.
+  **legacy 잔재는 여전히 자동 정리 대상이 아니다** — 새 설치는 자기 표식의 항목만 다루고, 과거 표식
+  (`MARU_AGENT_MAP_HOOK_V2` 등)은 건드리지 않는다.
 - 현재 foreground process·screen 관측에 쓰는 **live** `Term.agent_kind/agent_state`는 provider session continuity가 아니므로 유지한다.
 - `agent-session.md`, `workspace-restore.md`, `configuration.md`, `notifications.md`, implementation plan, verification matrix는
   현재 계약으로 갱신했다. 삭제된 parser/hook/transcript 절차와 설정 상세는 제품 SSOT에 역사로 복제하지 않고 Git/PR 이력으로

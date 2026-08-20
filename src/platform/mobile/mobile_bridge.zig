@@ -167,6 +167,55 @@ var preedit_len: usize = 0;
 
 /// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
+/// 지금 접속의 상태. **화면이 이것으로 말한다** — 예전에는 실패가 로그에만 남아, 사용자는
+/// 목록을 눌렀는데 빈 터미널만 봤다(무엇을 고쳐야 하는지 알 길이 없었다).
+var conn_state: u32 = 0;
+/// host 가 준 실패 이름(`connect_failed`·`AuthFailed`…). 사람 말로 바꾸는 것은 화면이 한다 —
+/// 이름은 로그·계측의 것이고, 화면에 그대로 내면 사용자는 못 읽는다.
+var conn_err: [64]u8 = undefined;
+var conn_err_len: usize = 0;
+
+/// host 가 세션 상태와 실패 이름을 알린다(`state` 는 `MARU_SSH_STATE_*`).
+pub export fn maru_mobile_set_ssh_status(state: u32, err: [*]const u8, len: usize) void {
+    conn_state = state;
+    const n = @min(len, conn_err.len);
+    @memcpy(conn_err[0..n], err[0..n]);
+    conn_err_len = n;
+}
+
+/// 지금 상태를 **사람 말로**. 붙는 중·붙음·실패 이유가 한 문장이다.
+///
+/// **이름을 그대로 안 보인다.** `connect_failed` 는 우리 말이고, 사용자가 할 일은 "주소와
+/// 포트를 확인" 이다 — 화면은 그것을 말해야 한다.
+fn connectionMessage() ?[]const u8 {
+    const err = conn_err[0..conn_err_len];
+    if (err.len > 0) {
+        const key: maru.i18n.Key = if (std.mem.eql(u8, err, "connect_failed") or std.mem.eql(u8, err, "resolve_failed"))
+            .mob_conn_unreachable
+        else if (std.mem.eql(u8, err, "AuthFailed") or std.mem.eql(u8, err, "auth"))
+            .mob_conn_auth
+        else if (std.mem.eql(u8, err, "host_key_mismatch"))
+            .mob_conn_hostkey
+        else if (std.mem.eql(u8, err, "host_key_rejected"))
+            .mob_conn_rejected
+        else if (std.mem.eql(u8, err, "host_key_timeout") or std.mem.eql(u8, err, "password_timeout"))
+            .mob_conn_timeout
+        else if (std.mem.eql(u8, err, "closed_by_peer"))
+            .mob_conn_closed
+        else
+            .mob_conn_failed;
+        return maru.i18n.tIn(.ko, key);
+    }
+    // 오류가 없으면 진행 상태다. **붙은 뒤에는 아무 말도 안 한다** — 화면이 곧 답이다.
+    if (conn_state == 0 or conn_state == 11) return null;
+    return maru.i18n.tIn(.ko, .mob_conn_connecting);
+}
+
+/// 지금 화면이 보일 연결 문구(테스트·진단용).
+pub fn connectionMessageNow() ?[]const u8 {
+    return connectionMessage();
+}
+
 /// **처음 보는 서버의 지문을 묻는 중인가.** host 가 세션 상태를 보고 켠다.
 var hostkey_prompt = false;
 var hostkey_fp: [128]u8 = undefined;
@@ -1465,6 +1514,9 @@ const edge_w: f32 = 26.0;
 /// 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
 /// 앱 바의 **복사** 자리. 폭이 0 이면 지금 선택이 없어 안 그려졌다는 뜻이다.
 var term_copy_rect: SetRect = .{};
+/// 배너가 먹은 높이(0 이면 없다). **본문을 밀지 않는다** — 코어 격자를 줄이면 원격이 믿는
+/// 크기와 갈리고, 배너는 잠깐 뜨는 것이라 그 값이 오르내리면 원격에 resize 가 쏟아진다.
+var term_banner_h: f32 = 0;
 var term_copy_pressed = false;
 
 /// 그 자리 한가운데(테스트용). 선택이 없으면 null — **없는 버튼을 누르는 테스트**를 막는다.
@@ -1558,6 +1610,24 @@ var kb_last_x: f32 = 0;
 
 /// 터미널 앱 바 — 왼쪽 뒤로가기, 가운데 세션 이름. **오른쪽은 비운다**(설정 입구는 부모
 /// 화면에 있고, 여기 또 두면 같은 것이 두 자리가 된다).
+/// 연결 상태 배너. **본문보다 나중에 그린다** — 앱 바 바로 아래는 본문 사각형이 시작하는
+/// 자리라, 먼저 그리면 셀 격자가 그 위를 덮는다(기기에서 아무것도 안 보였다).
+fn drawConnBanner(tk: *const tokens.Tokens) void {
+    if (term_bar_rect.w <= 0) return;
+    // **연결 상태.** 실패했을 때 사용자가 있는 자리가 이 화면이다(빈 터미널) —
+    // 로그로만 남기면 무엇을 고쳐야 하는지 알 길이 없다. 붙은 뒤에는 아무 말도 안 한다.
+    term_banner_h = 0;
+    if (connectionMessage()) |msg| {
+        const bh: f32 = 30;
+        const by = term_bar_rect.y + term_bar_rect.h;
+        push(.{ .x = @intFromFloat(term_bar_rect.x), .y = @intFromFloat(by), .w = @intFromFloat(term_bar_rect.w), .h = @intFromFloat(bh) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        // 실패는 강조색, 진행 중은 흐린 색 — 같은 자리에 두되 **읽는 무게가 다르다**.
+        const role: tokens.ColorRole = if (conn_err_len > 0) .accent_bar else .muted_fg;
+        pushText(msg, @intFromFloat(term_bar_rect.x + set_pad_x), @intFromFloat(by + (bh - 14) / 2), 14, tk.get(role));
+        term_banner_h = bh;
+    }
+}
+
 fn drawTerminalBar(tk: *const tokens.Tokens) void {
     term_back_rect = .{};
     if (term_bar_rect.w <= 0) return; // 안 그려졌으면 누름 판정도 안 선다
@@ -3127,6 +3197,8 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         pushTerminal(entry.rect, tk);
         break;
     }
+    // **본문 뒤에** 그린다 — 앱 바 아래는 본문이 시작하는 자리라 먼저 그리면 덮인다.
+    if (screenTop() == .terminal) drawConnBanner(tk);
 
     // 하단 아이콘 줄은 **없다**(위 "하단 바는 없다"). `status_cps` 는 남는다 — 그 배열이
     // 아이콘 아틀라스의 출처이고, 톱니 글리프는 세션 목록 화면이 쓴다.
@@ -3818,9 +3890,14 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         pushText(maru.i18n.tIn(.ko, .mob_server_edit_short), @intFromFloat(srv_list.x + srv_list.w - 88 + 16), @intFromFloat(ry + (srv_row_h - 15) / 2), 15, tk.get(.accent_bar));
 
         // **지문이 없는 것은 오류가 아니다** — 처음 붙는 서버다(누르면 지문을 보여 주고 묻는다).
+        // **지금 이 줄에 붙어 있나.** 붙는 중·붙음을 목록에서도 보인다 — 어느 서버가 살아 있는지
+        // 를 목록이 말 못 하면 사용자는 눌러 보고서야 안다.
+        const connected = ssh_connecting != null and ssh_connecting.? == i and conn_state != 0;
         const first = srv.isFirstConnect();
         const sub_role: tokens.ColorRole = if (!srv.isComplete()) .accent_bar else if (first) .accent_bar else .muted_fg;
-        const sub_text = if (!srv.isComplete())
+        const sub_text = if (connected and conn_err_len == 0)
+            maru.i18n.tIn(.ko, if (conn_state == 11) .mob_conn_ready else .mob_conn_connecting)
+        else if (!srv.isComplete())
             maru.i18n.tIn(.ko, .mob_server_incomplete)
         else if (first)
             maru.i18n.tIn(.ko, .mob_server_first_connect)

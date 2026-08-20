@@ -4361,3 +4361,36 @@ test "자리보다 긴 지문은 안 받는다 — 반쪽을 보여 주지 않�
     try std.testing.expect(!std.mem.eql(u8, "host_key", bridge.currentScreenName()));
     bridge.maru_mobile_clear_error();
 }
+
+// ── 연결 진단 (S9b-3b) ───────────────────────────────────────────────────────
+
+test "실패는 사람 말로 뜬다 — 이름 그대로가 아니다" {
+    // **`connect_failed` 는 우리 말이다.** 사용자가 할 일은 "주소와 포트를 확인" 이고,
+    // 화면은 그것을 말해야 한다 — 예전에는 실패가 로그에만 남아 빈 터미널만 보였다.
+    bridge.maru_mobile_set_ssh_status(12, "connect_failed", 14);
+    const msg = bridge.connectionMessageNow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "connect_failed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "주소") != null);
+
+    // 실패마다 **다른 말**이다 — 하나로 뭉치면 무엇을 고칠지 못 고른다.
+    bridge.maru_mobile_set_ssh_status(12, "host_key_mismatch", 17);
+    const m2 = bridge.connectionMessageNow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!std.mem.eql(u8, msg, m2));
+    bridge.maru_mobile_set_ssh_status(12, "AuthFailed", 10);
+    const m3 = bridge.connectionMessageNow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!std.mem.eql(u8, m2, m3));
+
+    // 모르는 이름도 **무언가는 말한다**(빈 화면보다 낫다).
+    bridge.maru_mobile_set_ssh_status(12, "무슨오류", 12);
+    try std.testing.expect(bridge.connectionMessageNow() != null);
+}
+
+test "붙은 뒤에는 아무 말도 안 한다 — 화면이 곧 답이다" {
+    bridge.maru_mobile_set_ssh_status(11, "", 0); // READY
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+    // 붙는 중에는 그렇게 말한다.
+    bridge.maru_mobile_set_ssh_status(7, "", 0);
+    try std.testing.expect(bridge.connectionMessageNow() != null);
+    bridge.maru_mobile_set_ssh_status(0, "", 0); // 세션 없음 — 조용하다
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+}

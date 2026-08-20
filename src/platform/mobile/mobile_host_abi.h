@@ -583,6 +583,14 @@ void maru_mobile_set_password_prompt(unsigned int wanted);
 /// 확인한 셈이 된다.
 void maru_mobile_set_host_key_prompt(const unsigned char *fingerprint, unsigned long len);
 
+/// **지금 접속이 어떻게 되고 있나**를 알린다(`state` 는 `MARU_SSH_STATE_*`, `err` 는 펌프의
+/// 실패 이름 — 없으면 길이 0). 화면이 이것으로 말한다: 실패는 사용자가 있는 자리(터미널)에
+/// 사람 말로 뜬다 — 로그로만 남기면 무엇을 고쳐야 하는지 알 길이 없다.
+///
+/// **이름을 그대로 보이지 않는다.** `connect_failed` 는 우리 말이고, 사용자가 할 일은
+/// "주소와 포트를 확인" 이다 — 그 번역은 브리지가 한다(host 마다 문구를 적으면 갈린다).
+void maru_mobile_set_ssh_status(unsigned int state, const unsigned char *err, unsigned long len);
+
 /// 사용자의 답을 가져간다(0=아직, 1=승인, 2=거절). **가져가면 사라진다.** 승인이면 브리지가
 /// 그 지문을 **그 서버 줄에 적어 둔다** — 안 적으면 다음에도 또 묻고, 매번 묻는 물음은 사람이
 /// 안 읽는다.

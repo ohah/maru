@@ -1047,6 +1047,11 @@ static void ssh_state(void *ctx, unsigned int state) {
     // 아무 데도 안 가고 조용히 쌓인다.
     pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+    // **상태와 실패 이름을 화면에 알린다.** 이름 → 사람 말은 브리지가 한다(host 마다 적으면 갈린다).
+    {
+        const char *err = maru_ssh_pump_error();
+        maru_mobile_set_ssh_status(state, (const unsigned char *)err, err ? strlen(err) : 0);
+    }
     // **비밀번호를 물어야 하면 화면을 연다** — 그 자리에서 펌프가 기다리고 있다. 벗어나면 끈다:
     // 세션이 끝났는데 화면만 남으면 사용자는 안 가는 곳에 계속 친다.
     maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);

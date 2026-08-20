@@ -910,6 +910,29 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    terminalize하고, canonical runtime rows를 `published_new | frozen_unavailable | ended` 중 하나로 모두 닫은 뒤에만
    `host_reconnect_runtime_ledger.summarizeTerminalRows` 결과를 job completion 증거로 게시한다.
 
+   이 반복은 CR4의 단일-runtime `publishHostReconnectGeneration`이 job을 즉시 파기하던 수명을 그대로 재사용하지 않는다.
+   CR5b-2c의 host job은 sealed `runtime_cursor`와 행별 canonical `RuntimeRow`를 소유하고, 한 행의 CR4 scratch
+   (`PreparedReconnect`, caught-up stage, mutation digest, controller generation)를 job final address에서만 재사용한다. 행 성공의
+   no-fail publication 뒤에는 해당 row를 exact `new_controller_evidenced/published_new/open`으로 먼저 게시하고 scratch를 tombstone한
+   다음 cursor를 한 칸 전진한다. 마지막 행 전에는 job allocation을 해제하거나 replacement receipt를 consume하지 않는다.
+   allocation-free cursor는 typed reject·authority conflict·takeover unknown·ended disposition을 canonical
+   `frozen_unavailable/closed` 또는 이미 ended인 경우 `gone_positive/ended/closed`로 닫고, 아직 시작하지 않은 뒤쪽 행은 wire를
+   보내지 않은 채 `old_valid/frozen_unavailable/closed`로 forward-resolve한다. 이때 앞선 `published_new` 행의 generation,
+   screen, mutation epoch는 rollback 0이다. 모든 row가 terminal이 된 뒤 summary의 `published_old`가 exact 0이고
+   `retry_reserved == frozen_unavailable`일 때만 job을 terminal로 봉인한다. summary seal 전 allocator 실패는 허용하지 않으므로
+   summary와 row backing은 job의 기존 inline storage를 사용한다. all-success는 각 runtime의 retiring generation을 먼저
+   회수하고 마지막 summary 직전에 shared retired Client를 exact once 회수해 replacement receipt를 tombstone한다. 반대로
+   `frozen_unavailable`이 하나라도 있으면 그 runtime의 terminal attachment가 아직 shared retired Client를 참조하므로 receipt와
+   Client를 terminal job에 `retry_reserved`로 유지하고, backend/job 최종 정산이 모든 runtime owner를 먼저 해제한 뒤 Client를
+   회수한다. 이를 all-success와 같은 즉시 Client 회수로 합치지 않는다.
+
+   CR5b-2c의 actual 3-runtime k=1/2/3 제품 표는 shared Client가 usable인 `authority_conflict`를 사용하므로 앞선
+   `published_new/open` 행과 실제 transport usability가 함께 보존된다. candidate/resize/transport terminal failure처럼 shared
+   Client 자체를 fail-close하는 경우는 앞선 성공 행도 더 이상 input-open으로 볼 수 없다. 그 host-wide terminal 전이와 Window
+   notice/action은 다음 CR5 Window/host-failure gate에서 닫기 전까지 CR5b-2c 완료 증거에 포함하지 않는다. 현재 제품
+   completion leaf는 이런 failure가 첫 success 뒤 발생하면 terminal summary를 게시하지 않고 기존 fail-closed job을 그대로
+   보존해 거짓 `published_new/open` 증거를 만들지 않는다.
+
    현재 CR4a 제품 행은 실제 manifest/socket connect와 same-adapter replacement 뒤, 동일 job final address에서 observer
    candidate와 staged receipt까지 게시한다. connect에서 발급한 absolute deadline을 attach/snapshot/delta/barrier에 그대로
    전달하며, candidate 전 만료는 sealed failed job과 published Client fail-close로 닫는다. staged receipt가 뒤늦게 만료되면

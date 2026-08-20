@@ -81,10 +81,11 @@ test "CR3c C2 경계는 matching RemoteGeneration 뒤 retired Client 회수만 �
     try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "prepareOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "preflightOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "commitOrderedRetiringReclaimAtTickEndNoFail("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "prepareRetiringReclaim("));
+    // CR5b-2c adds one remote-only preflight while retaining the shared retired Client.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "prepareRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "preflightRetiringReclaim("));
-    try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "retiringPayload("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime_product, "commitRetiringReclaimInPlaceNoFail("));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime_product, "retiringPayload("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_product, "commitRetiringReclaimInPlaceNoFail("));
     const ordered_prepare = between(
         runtime_product,
         "pub fn prepareOrderedRetiringReclaim(",
@@ -117,7 +118,7 @@ test "CR3c C2 경계는 matching RemoteGeneration 뒤 retired Client 회수만 �
     try std.testing.expectEqual(@as(usize, 1), count(tick_leaf, "self.prepareOrderedRetiringReclaim("));
     try std.testing.expectEqual(@as(usize, 1), count(tick_leaf, "self.commitOrderedRetiringReclaimAtTickEndNoFail("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR3c C2는"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, "self.slot.commitRetiringReclaimInPlaceNoFail("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "self.slot.commitRetiringReclaimInPlaceNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "adapter.commitRetiredClientReclaimAtTickEndNoFail("));
     const remote_commit = std.mem.indexOf(u8, runtime, "self.slot.commitRetiringReclaimInPlaceNoFail(").?;
     const client_commit = std.mem.indexOf(u8, runtime, "adapter.commitRetiredClientReclaimAtTickEndNoFail(").?;

@@ -52,8 +52,9 @@ test "CR3b R2a 경계는 callback 없는 placeholder와 detached tombstone만 �
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "context.slot.commitRetirementDetachNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "adapter.slot.validateRetirementPlaceholder("));
     // The third comparison is CR4a's forward-failed replacement projection. CR5b-2a adds the
-    // prepare and exact-validation halves; CR5b-2b adds the committed exact projection.
-    try std.testing.expectEqual(@as(usize, 6), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
+    // prepare and exact-validation halves, CR5b-2b adds the committed exact projection, and
+    // CR5b-2c adds the published-new terminal row's live adapter projection.
+    try std.testing.expectEqual(@as(usize, 7), count(runtime, ".generation => |current_adapter| if (current_adapter != adapter)"));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductSourcesExceptTwo(

@@ -144,7 +144,8 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(backend, "validateReconnectControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "abortReconnectControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(backend, "abortReconnectControllerEvidence"));
-    try std.testing.expectEqual(@as(usize, 4), countIdentifier(backend, "executeHostReconnectTakeover"));
+    // CR5b-2c reuses the sole product takeover entry in its three-runtime loop.
+    try std.testing.expectEqual(@as(usize, 5), countIdentifier(backend, "executeHostReconnectTakeover"));
 
     const start = std.mem.indexOf(u8, build, "const session_host_cr4b_step =").?;
     const end = std.mem.indexOfPos(u8, build, start, "const session_host_cr4c_c1_step =").?;

@@ -1606,6 +1606,27 @@ pub const ReconnectGenerationOwner = struct {
             self.screen_source.?.unavailableExact(unavailable_generation);
     }
 
+    fn hostReconnectPublishedNewExact(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        mutation_owner: *const reconnect_mutation_seal.MutationOwner,
+        input_epoch: u64,
+    ) bool {
+        self.validate() catch return false;
+        if (!self.screen_published or input_epoch == 0) return false;
+        const generation = self.currentGeneration() catch return false;
+        const current = self.slot.currentPayload() catch return false;
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter) return false,
+            .legacy => return false,
+        }
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return false,
+        };
+        return attachment.allowsMutation() and mutation_owner.admits(generation, input_epoch);
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -2158,6 +2179,40 @@ pub const ReconnectGenerationOwner = struct {
     pub fn reclaimRetiring(self: *ReconnectGenerationOwner) !void {
         try self.validate();
         try self.slot.reclaimRetiringInPlace(self.allocator.?, deinitRemoteGeneration);
+    }
+
+    /// CR5 host-wide reconnect keeps one retired shared Client alive until every runtime has
+    /// released its matching retiring generation. The ordinary CR3c leaf below still owns the
+    /// final remote-first/client-second pair; this intermediate leaf proves that the retained
+    /// Client is the exact matching generation, then reclaims only this runtime's remote owner.
+    fn reclaimRetiringGenerationRetainingClientAtTickEnd(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) !void {
+        try self.validate();
+        var remote: RemoteGenerationSlot.PreparedRetiringReclaim = .{};
+        try self.slot.prepareRetiringReclaim(&remote);
+        const payload = try self.slot.retiringPayload(&remote);
+        switch (payload.connection) {
+            .generation => |remote_adapter| if (remote_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        switch (payload.attachment) {
+            .generation => |attachment| if (!generationAttachmentTerminal(&attachment))
+                return error.NotReady,
+            .legacy => return error.InvalidAuthority,
+        }
+        var retained_client: client_slot_mod.PreparedRetiredClientReclaim = .{};
+        try adapter.prepareRetiredClientReclaim(&retained_client);
+        if (payload.connection_generation == 0 or
+            payload.connection_generation != retained_client.connection_generation)
+            return error.InvalidAuthority;
+        self.slot.commitRetiringReclaimInPlaceNoFail(
+            &remote,
+            self.allocator.?,
+            deinitRemoteGeneration,
+        );
     }
 
     /// 두 owner를 읽기만 하는 prepare 단계다. generation mismatch나 어느 한쪽의
@@ -2718,6 +2773,37 @@ pub const RemoteRuntime = struct {
             return runtime.generation_owner.hostWideRetirementCommittedExact(adapter);
         }
 
+        pub fn hostReconnectPublishedNewExact(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.hostReconnectPublishedNewExact(
+                adapter,
+                &runtime.mutation_owner,
+                runtime.input_batches.epoch,
+            );
+        }
+
+        pub fn hostReconnectTerminalIdentityExact(
+            runtime: *RemoteRuntime,
+            expected_runtime_id: u128,
+            expected_shell_generation: u64,
+        ) bool {
+            if (expected_runtime_id == 0 or expected_shell_generation == 0) return false;
+            const runtime_id = std.fmt.parseInt(u128, &runtime.runtime_id_hex, 16) catch return false;
+            const generation = runtime.generation_owner.currentGeneration() catch return false;
+            return runtime_id == expected_runtime_id and generation == expected_shell_generation;
+        }
+
+        pub fn reclaimHostWideRetiringGenerationRetainingClient(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+        ) anyerror!void {
+            try runtime.admitRuntimeOperation();
+            try runtime.generation_owner.reclaimRetiringGenerationRetainingClientAtTickEnd(adapter);
+        }
+
         /// CR4a single-runtime forward transaction. Fresh Client ownership stays in the backend job;
         /// this leaf only performs the canonical old-generation retirement and same-adapter publication.
         /// Once the unavailable shell is published, failures are forward-only. The caller must seal a
@@ -3008,7 +3094,7 @@ pub const RemoteRuntime = struct {
             );
         }
 
-        pub fn publishReconnectPromotedCandidate(
+        fn publishReconnectPromotedCandidateImpl(
             runtime: *RemoteRuntime,
             adapter: *host_adapter_mod.HostAdapter,
             published: *const r2a_client_slot.PreparedClientReplacement,
@@ -3016,6 +3102,7 @@ pub const RemoteRuntime = struct {
             stage: *const catchup_stage_contract.PreparedStage,
             controller_generation: u64,
             expected_size: terminal.Size,
+            retain_shared_client: bool,
         ) anyerror!void {
             try runtime.admitRuntimeOperation();
             try runtime.generation_owner.preflightCandidatePromotedPublication(
@@ -3061,10 +3148,57 @@ pub const RemoteRuntime = struct {
                 ),
                 .legacy => process_seal_service.fatalIntegrity(.proof_loss),
             }
-            var reclaim: PreparedOrderedRetiringReclaim = .{};
-            runtime.generation_owner.prepareOrderedRetiringReclaim(adapter, &reclaim) catch
-                process_seal_service.fatalIntegrity(.proof_loss);
-            runtime.generation_owner.commitOrderedRetiringReclaimAtTickEndNoFail(adapter, &reclaim);
+            if (retain_shared_client) {
+                runtime.generation_owner.reclaimRetiringGenerationRetainingClientAtTickEnd(adapter) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
+            } else {
+                var reclaim: PreparedOrderedRetiringReclaim = .{};
+                runtime.generation_owner.prepareOrderedRetiringReclaim(adapter, &reclaim) catch
+                    process_seal_service.fatalIntegrity(.proof_loss);
+                runtime.generation_owner.commitOrderedRetiringReclaimAtTickEndNoFail(adapter, &reclaim);
+            }
+        }
+
+        pub fn publishReconnectPromotedCandidate(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+            expected_size: terminal.Size,
+        ) anyerror!void {
+            return publishReconnectPromotedCandidateImpl(
+                runtime,
+                adapter,
+                published,
+                reconnect,
+                stage,
+                controller_generation,
+                expected_size,
+                false,
+            );
+        }
+
+        pub fn publishReconnectPromotedCandidateRetainingSharedClient(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            published: *const r2a_client_slot.PreparedClientReplacement,
+            reconnect: *PreparedReconnect,
+            stage: *const catchup_stage_contract.PreparedStage,
+            controller_generation: u64,
+            expected_size: terminal.Size,
+        ) anyerror!void {
+            return publishReconnectPromotedCandidateImpl(
+                runtime,
+                adapter,
+                published,
+                reconnect,
+                stage,
+                controller_generation,
+                expected_size,
+                true,
+            );
         }
 
         pub fn reconnectMutationSealDigest(

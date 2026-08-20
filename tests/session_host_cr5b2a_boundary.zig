@@ -51,8 +51,8 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         attachment_count: usize = 0,
         screen_count: usize = 0,
     }{
-        // CR5b-2b actual shared-replacement fixture reuses the product retirement entry once.
-        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 7 },
+        // CR5b-2b and CR5b-2c actual shared-replacement fixtures each reuse the product entry.
+        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 8 },
         .{ .identifier = "prepareHostWideRetirement", .backend_count = 1, .runtime_count = 3 },
         // CR5b-2b adds one whole-set revalidation in its reserved state and two explicit
         // pre-commit mutation-zero assertions in the actual three-runtime fixture.

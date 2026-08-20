@@ -25,19 +25,31 @@ pub const Error = error{
     Unsupported,
 };
 
-/// 자식이 남긴 것. `stdout` 은 호출자가 해제한다.
+/// **어느 스트림을 받을지.** git 백엔드가 이 축을 요구한다 — 읽기 명령은 stdout 을 파싱하고, 쓰기
+/// 명령은 실패했을 때 보여 줄 stderr 를 받는다(§5 "가공해서 보여 준다"). 두 갈래가 각각 6 곳에서 쓰인다.
+///
+/// **합치기를 기본으로 두면 안 된다.** 처음엔 stdout+stderr 를 한 파이프로 합쳤는데, 그러면 git 의
+/// 진단이 porcelain 출력에 섞여 **파서가 잡음을 데이터로 읽는다**. 갈아 끼우려다 발견했다.
+pub const Stream = enum {
+    /// stdout 만 받고 stderr 는 버린다(읽기 명령).
+    stdout_only,
+    /// stderr 만 받고 stdout 은 버린다(쓰기 명령의 실패 진단).
+    stderr_only,
+    /// 둘을 한 파이프로 받는다. 순서가 섞여도 되는 자리에서만 쓴다.
+    merged,
+};
+
+/// 자식이 남긴 것. `bytes` 는 호출자가 해제한다.
 pub const Output = struct {
-    /// stdout 과 stderr 를 **한 파이프로 합쳐** 받는다. git 은 진단을 stderr 로 내는데, 두 파이프를
-    /// 각자 읽으면 한쪽이 가득 차 자식이 막히는 동안 다른 쪽을 읽고 있을 수 있다(교착). 합치면
-    /// 그 순서 문제가 사라진다 — 호출자가 둘을 구분해야 하면 그때 갈래를 늘린다.
-    stdout: []u8,
+    /// 고른 스트림이 낸 바이트. 버려진 쪽은 여기 안 온다.
+    bytes: []u8,
     exit_code: u32,
     /// 상한에 걸려 뒷부분을 버렸나. **플래그만 세우고 아무도 안 읽으면 화면은 "결과가 없다" 와 같은
     /// 모습이 된다** — `scm_view.build` 가 이 사실을 행으로 만든다(그쪽 doc 의 2026-08-14 사례).
     truncated: bool,
 
     pub fn deinit(self: *Output, allocator: std.mem.Allocator) void {
-        allocator.free(self.stdout);
+        allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -85,6 +97,10 @@ const handle_flag_inherit: u32 = 0x00000001;
 const infinite: u32 = 0xFFFFFFFF;
 const wait_object_0: u32 = 0;
 const error_broken_pipe: u32 = 109;
+const generic_write: u32 = 0x40000000;
+const file_share_read: u32 = 0x00000001;
+const file_share_write: u32 = 0x00000002;
+const open_existing: u32 = 3;
 
 extern "kernel32" fn CreatePipe(read: *HANDLE, write: *HANDLE, sa: ?*SECURITY_ATTRIBUTES, size: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetHandleInformation(h: HANDLE, mask: u32, flags: u32) callconv(.winapi) i32;
@@ -93,6 +109,7 @@ extern "kernel32" fn ReadFile(h: HANDLE, buf: [*]u8, n: u32, read: ?*u32, ov: ?*
 extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) i32;
 extern "kernel32" fn WaitForSingleObject(h: HANDLE, ms: u32) callconv(.winapi) u32;
 extern "kernel32" fn GetExitCodeProcess(h: HANDLE, code: *u32) callconv(.winapi) i32;
+extern "kernel32" fn CreateFileW(name: [*:0]const u16, access: u32, share: u32, sa: ?*SECURITY_ATTRIBUTES, disp: u32, flags: u32, tmpl: HANDLE) callconv(.winapi) HANDLE;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 
 /// 마지막 Win32 오류 — 실패를 보고할 때 숫자를 함께 남긴다(`pty/windows.zig` 와 같은 결).
@@ -110,6 +127,7 @@ pub fn capture(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
     cwd: ?[]const u8,
+    stream: Stream,
     max_bytes: usize,
 ) Error!Output {
     if (builtin.os.tag != .windows) return error.Unsupported;
@@ -157,10 +175,39 @@ pub fn capture(
         return error.CreatePipeFailed;
     }
 
+    // **버리는 쪽은 `NUL` 로 보낸다.** POSIX 의 `/dev/null` 자리다. `null` 핸들로 두면 자식이 그
+    // 스트림에 쓸 때 실패하는데, git 은 진단을 못 쓰면 다르게 굴 수 있다 — 버리되 **쓸 수는 있게** 한다.
+    const nul_h: HANDLE = if (stream == .merged) null else blk: {
+        const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
+        const h = CreateFileW(nul_name, generic_write, file_share_read | file_share_write, &sa, open_existing, 0, null);
+        if (h == invalid_handle_value) {
+            last_error = GetLastError();
+            _ = CloseHandle(write_h);
+            return error.CreatePipeFailed;
+        }
+        break :blk h;
+    };
+    defer if (nul_h != null) {
+        _ = CloseHandle(nul_h);
+    };
+
     var si = STARTUPINFOW{ .cb = @sizeOf(STARTUPINFOW) };
     si.dwFlags = startf_use_std_handles;
-    si.hStdOutput = write_h;
-    si.hStdError = write_h; // 합쳐 받는다 — 두 파이프를 각자 읽으면 한쪽이 차서 막힌다.
+    switch (stream) {
+        .stdout_only => {
+            si.hStdOutput = write_h;
+            si.hStdError = nul_h;
+        },
+        .stderr_only => {
+            si.hStdOutput = nul_h;
+            si.hStdError = write_h;
+        },
+        // 합칠 때만 한 파이프다. 두 파이프를 각자 읽으면 한쪽이 차서 자식이 막힌다(교착).
+        .merged => {
+            si.hStdOutput = write_h;
+            si.hStdError = write_h;
+        },
+    }
     si.hStdInput = null;
 
     var pi: PROCESS_INFORMATION = std.mem.zeroes(PROCESS_INFORMATION);
@@ -227,7 +274,7 @@ pub fn capture(
     }
 
     return .{
-        .stdout = out.toOwnedSlice(allocator) catch return error.OutOfMemory,
+        .bytes = out.toOwnedSlice(allocator) catch return error.OutOfMemory,
         .exit_code = code,
         .truncated = truncated,
     };
@@ -240,17 +287,17 @@ const testing = std.testing;
 test "capture: 자식의 출력을 끝까지 읽는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo", "hello-from-child" }, null, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo", "hello-from-child" }, null, .stdout_only, 1 << 20);
     defer r.deinit(a);
     try testing.expectEqual(@as(u32, 0), r.exit_code);
     try testing.expect(!r.truncated);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "hello-from-child") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "hello-from-child") != null);
 }
 
 test "capture: 종료 코드를 그대로 낸다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "exit", "7" }, null, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "exit", "7" }, null, .stdout_only, 1 << 20);
     defer r.deinit(a);
     try testing.expectEqual(@as(u32, 7), r.exit_code);
 }
@@ -259,9 +306,9 @@ test "capture: stderr 도 같은 파이프로 온다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
     // `1>&2` 로 stdout 을 stderr 로 돌린다 — 합쳐 받지 않으면 이 글자가 사라진다.
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo only-on-stderr 1>&2" }, null, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo only-on-stderr 1>&2" }, null, .merged, 1 << 20);
     defer r.deinit(a);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "only-on-stderr") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "only-on-stderr") != null);
 }
 
 // **상한이 자식을 막지 않는지가 판정이다.** 상한에서 읽기를 멈추면 파이프가 차서 자식이 쓰다 멈추고,
@@ -270,10 +317,10 @@ test "capture: 상한을 넘겨도 자식이 막히지 않는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
     // 파이프 기본 버퍼(약 4 KiB)보다 확실히 많이 쓴다.
-    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789" }, null, 256);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789" }, null, .stdout_only, 256);
     defer r.deinit(a);
     try testing.expect(r.truncated);
-    try testing.expectEqual(@as(usize, 256), r.stdout.len);
+    try testing.expectEqual(@as(usize, 256), r.bytes.len);
     try testing.expectEqual(@as(u32, 0), r.exit_code);
 }
 
@@ -287,20 +334,20 @@ test "capture: cwd 에서 돈다" {
     const root = try path_shape.normalizeSeparators(a, native);
     defer a.free(root);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "marker.txt", .data = "x" });
-    var r = try capture(a, &.{ "cmd.exe", "/c", "dir", "/b" }, root, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "dir", "/b" }, root, .stdout_only, 1 << 20);
     defer r.deinit(a);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "marker.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "marker.txt") != null);
 }
 
 test "capture: 없는 실행 파일은 조용히 성공하지 않는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    try testing.expectError(error.SpawnFailed, capture(a, &.{"maru-no-such-binary-xyz.exe"}, null, 1 << 20));
+    try testing.expectError(error.SpawnFailed, capture(a, &.{"maru-no-such-binary-xyz.exe"}, null, .stdout_only, 1 << 20));
 }
 
 test "capture: 빈 argv 를 거부한다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try testing.expectError(error.InvalidCommand, capture(testing.allocator, &.{}, null, 1 << 20));
+    try testing.expectError(error.InvalidCommand, capture(testing.allocator, &.{}, null, .stdout_only, 1 << 20));
 }
 
 // 중립 경로(`/`)로 줘도 돈다 — 계약 §5 규칙 1 이 중립 층에 `/` 를 요구하므로 호출자가 그 모양으로
@@ -308,9 +355,9 @@ test "capture: 빈 argv 를 거부한다" {
 test "capture: 정규화된 `/` 경로로도 돈다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "C:/Windows/System32/cmd.exe", "/c", "echo", "slash-path-ok" }, null, 1 << 20);
+    var r = try capture(a, &.{ "C:/Windows/System32/cmd.exe", "/c", "echo", "slash-path-ok" }, null, .stdout_only, 1 << 20);
     defer r.deinit(a);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "slash-path-ok") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "slash-path-ok") != null);
 }
 
 // **진짜 표적은 git 이다.** 위 테스트들은 `cmd.exe` 로 러너 자체를 재고, 이것은 러너가 **git 을 상대로**
@@ -328,21 +375,52 @@ test "capture: git 을 상대로 돈다 — 임시 저장소의 상태를 읽어
     const repo = try path_shape.normalizeSeparators(a, native);
     defer a.free(repo);
 
-    var init_out = capture(a, &.{ "git", "init", "-q" }, repo, 1 << 20) catch return error.SkipZigTest;
+    var init_out = capture(a, &.{ "git", "init", "-q" }, repo, .stdout_only, 1 << 20) catch return error.SkipZigTest;
     init_out.deinit(a);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked.txt", .data = "x" });
 
-    var st = try capture(a, &.{ "git", "status", "--porcelain=v2", "--branch" }, repo, 1 << 20);
+    var st = try capture(a, &.{ "git", "status", "--porcelain=v2", "--branch" }, repo, .stdout_only, 1 << 20);
     defer st.deinit(a);
     try testing.expectEqual(@as(u32, 0), st.exit_code);
     // 추적되지 않은 파일은 porcelain v2 에서 `? <경로>` 다. 이름이 실제로 실려 와야 한다 —
     // 종료 코드만 보면 **빈 출력도 통과**한다.
-    try testing.expect(std.mem.indexOf(u8, st.stdout, "tracked.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, st.bytes, "tracked.txt") != null);
 
     // **실패하는 git 도 제대로 전한다.** 없는 리비전을 물으면 git 은 0 이 아닌 코드로 끝나고 진단을
     // stderr 로 낸다 — 합쳐 받으므로 그 글자가 우리에게 온다.
-    var bad = try capture(a, &.{ "git", "rev-parse", "maru-no-such-rev" }, repo, 1 << 20);
+    var bad = try capture(a, &.{ "git", "rev-parse", "maru-no-such-rev" }, repo, .stdout_only, 1 << 20);
     defer bad.deinit(a);
     try testing.expect(bad.exit_code != 0);
-    try testing.expect(bad.stdout.len > 0);
+    try testing.expect(bad.bytes.len > 0);
+}
+
+// **이 축이 이 파일에 있는 이유가 이 테스트다.** 자식이 **양쪽에 다** 쓰게 해 두고, 고른 쪽만 오는지
+// 본다. 합쳐 받으면 git 의 진단이 porcelain 출력에 섞여 **파서가 잡음을 데이터로 읽는다**.
+test "capture: stdout_only 는 stderr 를 버린다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stdout_only, 1 << 20);
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-OUT") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-ERR") == null);
+}
+
+test "capture: stderr_only 는 stdout 을 버린다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stderr_only, 1 << 20);
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-ERR") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-OUT") == null);
+}
+
+// **버리는 쪽도 쓸 수는 있어야 한다.** `NUL` 대신 빈 핸들을 주면 자식이 그 스트림에 쓸 때 실패하고,
+// git 은 진단을 못 쓰면 다르게 굴 수 있다. 버려지는 쪽에 많이 쓰는 자식이 **정상 종료**하는지 본다.
+test "capture: 버려지는 스트림에 많이 써도 자식이 정상 종료한다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,2000) do @echo 0123456789012345678901234567890123456789 1>&2" }, null, .stdout_only, 1 << 20);
+    defer r.deinit(a);
+    try testing.expectEqual(@as(u32, 0), r.exit_code);
+    try testing.expectEqual(@as(usize, 0), r.bytes.len);
 }

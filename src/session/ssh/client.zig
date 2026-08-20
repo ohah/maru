@@ -3152,8 +3152,9 @@ test "열지 않은 채널 번호로 온 메시지는 받지 않는다" {
     var pkt: [4096]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(33);
     const n = try packet.write(&pkt, try channelData(&buf, 9, "nope"), prng.random());
+    // 이름이 정확하다: **틀린 채널**이지 "모르는 메시지" 가 아니다(§5 위반의 이름을 남긴다).
     try testing.expectError(
-        Error.UnexpectedMessage,
+        channel.Error.WrongChannel,
         c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl }),
     );
 }

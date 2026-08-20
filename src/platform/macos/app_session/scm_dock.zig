@@ -284,13 +284,13 @@ fn forgetScrollExtent(self: *AppSession) void {
 /// 히스토리·에이전트 탭에서 0으로 두면 화면이 "바뀐 것이 없다"고 **거짓말**을 하고, 사용자는 변경 사항
 /// 탭을 눌러 보고서야 아니라는 것을 안다(실제 증상이었다).
 ///
-/// 섹션 헤더의 `count`를 더해서 낸다 — 그 값은 접혀 있어도 잘려 있어도 전체를 말하므로, 화면 행을 세는
-/// 것과 달리 10행 상한·접기에 흔들리지 않는다.
+/// **모델을 만들지 않는다.** 이 수를 알려고 `buildScmModel`을 부르면 행마다 numstat 전체를 훑는
+/// 비용까지 함께 내는데(285파일·"모두 보기"에서 실측 378µs), 그 숫자는 탭 라벨에 쓰이지 않는다 —
+/// 이 자리는 히스토리·에이전트 탭의 **매 프레임 투영**이라 그 차이가 그대로 낭비가 된다. 세는 술어
+/// (`belongs`)는 목록과 같은 것을 쓴다(실측 12.8µs — 적대적 검증 4회차).
 fn changedFileCount(self: *AppSession) u32 {
-    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
-    var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return 0;
-    return countFiles(model.rows);
+    const result = self.git_result orelse return 0;
+    return scm_view.changedFileCount(result.status);
 }
 
 pub const Projection = struct {

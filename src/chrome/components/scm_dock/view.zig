@@ -571,7 +571,9 @@ const Writer = struct {
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
         if (rect.rect.height < line_h or rect.rect.width <= 0) return;
 
-        // 활성 탭 이름 옆에만 개수를 붙인다. 나머지 둘은 아직 셀 것이 없다(P4·P5).
+        // 개수는 `변경 사항` 탭 이름 옆에만 붙는다 — 나머지 둘은 셀 것이 다르다(커밋·턴은 목록이 스스로
+        // 길이를 말한다). **활성 탭인지와는 무관하다**: 이 수는 작업트리 사실이라 히스토리를 보는 동안에도
+        // 참이고, 활성일 때만 채우면 다른 탭에서 `(0)`이 되어 화면이 "바뀐 것이 없다"고 거짓말한다.
         var buf: [48]u8 = undefined;
         const label: []const u8 = if (tab == .changes)
             std.fmt.bufPrint(&buf, "{s} ({d})", .{ tabTitle(tab), self.props.changed_file_count }) catch tabTitle(tab)

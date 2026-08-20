@@ -383,6 +383,10 @@ pub fn drainGitStatus(self: *AppSession) void {
         // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번
         // 유계화하지만 **raw 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다. 탐색기가
         // `updateFileTree`에서 같은 일을 하는 것과 같은 자리다.
+        //
+        // **여기서 쓰는 상한은 아직 옛 목록의 것이다** — 새 결과로 만든 목록은 다음 투영에서 나온다.
+        // 그래서 이 호출은 근사이고, 정확히 당기는 것은 그 투영(`rememberScrollExtent`)이다. 그래도
+        // 남겨 두는 이유는 도크가 접혀 투영이 한동안 안 도는 동안에도 raw 값이 자라지 않게 하는 것이다.
         scroll_ops.clampScmScroll(self);
         self.metal_dirty = true;
         // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다

@@ -74,8 +74,8 @@ fn commitViewCols(self: *const AppSession) u16 {
     // 실제 줄 수보다 적게 나오고 마지막 줄이 잘린다.
     //
     // **그 자리는 넘칠 때만 생긴다**(2026-08-20). 조건을 여기서 다시 판정하면 같은 폭을 두 곳에서 재는
-    // 것이라, 마지막 프레임이 실제로 쓴 값(`scm_list_overflows`)을 읽는다 — 지금 화면에 있는 상자의
-    // 폭과 같은 사실이다.
+    // 것이라, 마지막 투영이 정한 값(`scm_list_overflows` — `rememberScrollExtent`가 스크롤 상한과 함께
+    // 남긴다)을 읽는다. 그 목록이 곧 지금 화면에 있는 상자와 같은 사실이다.
     const gutter = if (self.scm_list_overflows) m.scrollbar_width + m.scrollbar_inset_x * 2 else 0;
     return m.commitViewCols(@floatFromInt(content.w -| gutter), self.cell_width_px);
 }
@@ -233,32 +233,64 @@ fn statusOf(file: scm_view.FileRow) component.types.StatusKind {
     };
 }
 
-/// 모델 행 하나의 높이. **정책은 component의 `itemHeight`가 소유한다** — 여기서 숫자를 다시 고르면
-/// 스크롤 상한과 그린 자리가 갈린다. 그래서 높이 계산에 필요한 최소 항목을 만들어 그 함수에 묻는다.
-fn rowHeightPx(m: component.types.DockMetrics, row: scm_view.Row) u32 {
-    const probe: component.types.Item = switch (row) {
-        .section => .{ .section = .{ .section = .changes, .count = 0, .collapsed = false, .action = .none } },
-        .file => .{ .file = .{ .name = "", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
-        .more => .{ .more = .{ .section = .changes, .hidden = 0 } },
-        .notice => .{ .notice = "" },
-    };
-    return m.itemHeight(probe);
+pub const Extent = AppSession.FileTreeScrollExtent;
+
+/// 목록 스크롤 상한. 휠·스크롤바 드래그·클램프가 이 값을 쓰고, **값을 만드는 자리는 투영 하나**다
+/// (`rememberScrollExtent`) — 여기서 다시 세지 않는다.
+///
+/// 예전에는 이 함수가 **변경 사항 탭의 모델을 직접 세어** 상한을 만들었다. 그 값은 두 가지로 틀렸다:
+/// ⑴ 히스토리·에이전트 탭의 목록은 출처가 아예 다른데(커밋·턴) 상한만 작업트리에서 왔다 — 작업트리가
+/// 깨끗하면 상한이 0이라 그 탭들이 **아예 안 굴러갔고**, 스크롤바도 `max_offset == 0`이면 잡히지 않아
+/// 끌 수도 없었다. ⑵ 변경 사항 탭에서도 `model.rows`만 세어 **저장소 머리 줄·커밋 상자·안내 줄**이
+/// 빠졌다 — 목록이 실제보다 짧다고 믿으니 끝까지 내려가지지 않았다.
+/// **값은 마지막 투영의 것이다** — 투영을 한 번도 안 지났으면 0이고(그리지 않은 목록에는 굴릴 것도
+/// 없다), 목록이 바뀌는 순간은 곧 다시 그리는 순간이라 한 프레임 이상 낡지 않는다.
+pub fn scrollExtent(self: *AppSession) Extent {
+    return self.scm_scroll_extent;
 }
 
-pub const Extent = struct { content_h_px: u32, viewport_h_px: u32, max_offset_px: u32 };
+/// 이번 투영이 만든 상한을 세션에 남긴다. **목록을 만든 그 자리가 그 목록의 높이를 아는 유일한 자리**라
+/// 세 투영(변경 사항·히스토리·에이전트)이 전부 여기를 지난다.
+fn rememberScrollExtent(self: *AppSession, scroll: chrome.ui.scroll_area.Projection, viewport_h_px: u32) void {
+    self.scm_scroll_extent = .{
+        .content_h_px = scroll.content_height_px,
+        .viewport_h_px = viewport_h_px,
+        .max_offset_px = scroll.max_offset_px,
+    };
+    // **넘치는가도 같은 자리에서 정한다.** 커밋 상자의 랩 계산이 이 값으로 스크롤바 자리(gutter)를 빼는데,
+    // 그 판정을 props를 만드는 쪽에 따로 두면 두 값이 **갈릴 창**이 생긴다 — props는 그리는 프레임에만
+    // 지나가고 투영은 포인터 경로에서도 지나가기 때문이다. 같은 `max_offset`에서 나오는 두 사실이므로
+    // 한 번에 정한다.
+    self.scm_list_overflows = scroll.max_offset_px > 0;
+    // raw offset도 그 상한 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번 유계화하지만 **raw
+    // 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다(git 결과가 올 때 `clampScmScroll`이
+    // 하던 일이고, 이제 상한을 아는 자리가 여기다).
+    self.scm_scroll.clamp(scroll.max_offset_px);
+}
 
-/// 목록 스크롤 상한. 휠·클램프가 이 값을 쓰고, 렌더는 같은 기하를 `project`로 다시 받는다.
-pub fn scrollExtent(self: *AppSession) Extent {
+/// 목록을 못 만들었다 — 상한도 없다. **옛 값을 남기지 않는다**: 남기면 아무것도 안 그린 화면에서
+/// 스크롤바가 서고 휠이 먹는다(그 상한은 이미 사라진 목록의 것이다).
+fn forgetScrollExtent(self: *AppSession) void {
+    self.scm_scroll_extent = .{
+        .content_h_px = 0,
+        .viewport_h_px = listViewportHeightPx(self, false),
+        .max_offset_px = 0,
+    };
+    self.scm_list_overflows = false; // 목록이 없으면 스크롤바 자리도 없다(빈 띠를 남기지 않는다)
+    self.scm_scroll.clamp(0);
+}
+
+/// 탭 이름 옆에 붙는 **변경 파일 수**. `git status`가 답하는 작업트리 사실이라 **활성 탭과 무관하다** —
+/// 히스토리·에이전트 탭에서 0으로 두면 화면이 "바뀐 것이 없다"고 **거짓말**을 하고, 사용자는 변경 사항
+/// 탭을 눌러 보고서야 아니라는 것을 안다(실제 증상이었다).
+///
+/// 섹션 헤더의 `count`를 더해서 낸다 — 그 값은 접혀 있어도 잘려 있어도 전체를 말하므로, 화면 행을 세는
+/// 것과 달리 10행 상한·접기에 흔들리지 않는다.
+fn changedFileCount(self: *AppSession) u32 {
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
-    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse
-        return .{ .content_h_px = 0, .viewport_h_px = listViewportHeightPx(self, false), .max_offset_px = 0 };
-    var content: u32 = 0;
-    for (model.rows) |row| content +|= rowHeightPx(m, row);
-    const has_branch = model.head.detached or model.head.branch != null;
-    const viewport = listViewportHeightPx(self, has_branch);
-    return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
+    const model = git_ops.buildScmModel(self, &rows_buf, &scratch) orelse return 0;
+    return countFiles(model.rows);
 }
 
 pub const Projection = struct {
@@ -286,7 +318,17 @@ pub const Projection = struct {
 
 /// 모델 → 항목 열 + 스크롤 투영. **렌더와 포인터가 같은 함수를 지난다** — 두 곳이 각자 만들면 스크롤한
 /// 뒤 누른 행과 열리는 행이 어긋난다.
+///
+/// 투영이 없으면(모델을 못 만들었다·버퍼가 없다) **스크롤 상한도 버린다** — 그리지 못한 화면에 옛
+/// 상한이 남으면 스크롤바가 서고 휠이 먹는다.
 pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
+    return projectTab(self, arena) orelse {
+        forgetScrollExtent(self);
+        return null;
+    };
+}
+
+fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // **히스토리 탭은 다른 목록이다**(P4). 같은 스크롤·같은 격자를 쓰지만 행의 출처가 `git log`라
     // 여기서 갈린다 — 두 목록을 한 함수에 섞으면 "이 행이 어느 탭 것인가" 판정이 행마다 생긴다.
     if (self.scm_tab == .history) return projectHistory(self, arena);
@@ -451,6 +493,8 @@ pub fn project(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         list_items.extent(viewport_h),
         self.scm_scroll.offset_y_px,
     );
+    // **이 목록이 곧 이 탭의 스크롤 상한이다** — 휠·스크롤바가 읽을 값을 여기서 남긴다.
+    rememberScrollExtent(self, scroll, viewport_h);
     // **기준은 기본 브랜치다**(§3.5). `status`의 `# branch.ab`는 `@{u}` 기준이라 PR 브랜치에서 늘 `0 0`이고
     // (실측 2026-08-18), 그 숫자를 그대로 그리면 화면이 "차이 없음"이라고 **거짓말**한다. 기본 브랜치 기준
     // 읽기가 성공했으면 그것을 쓰고, 없으면(origin/HEAD가 없는 저장소·unborn) `@{u}` 값으로 돌아간다.
@@ -616,6 +660,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         list_items.extent(viewport_h),
         self.scm_scroll.offset_y_px,
     );
+    // **이 목록이 곧 이 탭의 스크롤 상한이다** — 휠·스크롤바가 읽을 값을 여기서 남긴다.
+    rememberScrollExtent(self, scroll, viewport_h);
     return .{
         .items = items[0..n],
         .scroll = scroll,
@@ -625,7 +671,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .has_ab = false,
         .summary = .{ .added = 0, .removed = 0 },
         .has_rows = rows.len > 0,
-        .file_count = 0,
+        .file_count = changedFileCount(self),
         .has_staged = false,
     };
 }
@@ -800,6 +846,8 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         list_items.extent(viewport_h),
         self.scm_scroll.offset_y_px,
     );
+    // **이 목록이 곧 이 탭의 스크롤 상한이다** — 휠·스크롤바가 읽을 값을 여기서 남긴다.
+    rememberScrollExtent(self, scroll, viewport_h);
     return .{
         .items = items[0..n],
         .scroll = scroll,
@@ -809,7 +857,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .has_ab = false,
         .summary = .{ .added = 0, .removed = 0 },
         .has_rows = count > 0,
-        .file_count = 0,
+        .file_count = changedFileCount(self),
         .has_staged = false,
     };
 }
@@ -943,12 +991,9 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .content_h_px = projection.scroll.content_height_px,
         // 스크롤바가 **실제로 설 때만** 그 자리를 비운다(§3.5 — 빈 띠를 남기지 않는다). 창 높이를
         // 아는 쪽이 여기라 판정도 여기서 한다.
-        .list_overflows = blk: {
-            // **여기서 한 번 정하고 세션에 남긴다** — 커밋 상자의 랩 계산이 같은 값을 읽어야 host가
-            // 세는 줄 수와 view가 그리는 줄 수가 안 갈린다.
-            self.scm_list_overflows = projection.scroll.max_offset_px > 0;
-            break :blk self.scm_list_overflows;
-        },
+        // **투영이 정한 값을 읽기만 한다**(`rememberScrollExtent`) — 커밋 상자의 랩 계산이 읽는 그 값이라,
+        // 여기서 다시 판정하면 host가 세는 줄 수와 view가 그리는 줄 수가 갈릴 수 있다.
+        .list_overflows = self.scm_list_overflows,
         .content_first_item_origin_y_px = projection.scroll.first_origin_y_px,
         .branch = projection.branch,
         .ahead = projection.ahead,
@@ -1845,6 +1890,9 @@ pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
     self.scm_tab = tab;
     // 목록·히스토리는 서로 다른 스크롤 축이다 — 남겨 두면 히스토리 첫 화면이 엉뚱한 자리에서 시작한다.
     self.scm_scroll = .{};
+    // **상한도 함께 버린다.** 그 값은 방금 떠난 목록의 것이고, 다음 투영이 새 목록으로 채운다 — 남겨
+    // 두면 그 한 프레임 동안 휠·스크롤바가 남의 목록 길이로 움직인다.
+    forgetScrollExtent(self);
     self.metal_dirty = true;
 }
 

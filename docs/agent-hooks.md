@@ -125,6 +125,18 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 훅을 신뢰한다. 그 값이 **훅 내용을 따라 바뀌므로** 나중에 이벤트를 더하면 **사용자에게 재승인을 다시
 요구**한다.
 
+⚠️ **Codex 에는 `Notification` 이벤트가 없다(2026-08-20 실측).** codex 바이너리의 훅 이벤트 열거는
+`PreToolUse`·`PermissionRequest`·`PostToolUse`·`PreCompact`·`PostCompact`·`SessionStart`·`SessionEnd`·
+`UserPromptSubmit`·`SubagentStart`·`SubagentStop`·`Stop` 이고 `Notification` 이 없다(`hooks/src/events/`
+아래에도 그 파일이 없다 — 알림은 훅이 아니라 별도 `notify` 경로다). **그래서 Codex 세트는 5개다.**
+
+그 항목을 넣었을 때 **파일 전체 파싱이 깨지는지 조용히 무시되는지는 미검증**이다(serde 열거에 catch-all이
+있는지 문자열만으로는 못 가른다). 깨진다면 우리 설치가 **사용자의 `hooks.json` 을 통째로 무효화**하므로,
+AH2b는 넣기 전에 그것부터 실험한다. 어느 쪽이든 Codex 에는 넣지 않는다.
+
+이것은 `agent_hook_command.events` 가 **provider 별로 갈려야 한다**는 뜻이다 — 지금은 전역 하나이고
+`agent_hook_install.planForSet` 이 그 길이를 세트 크기로 쓴다(§5).
+
 ⚠️ **해시의 입력은 아직 모른다(2026-08-20 실측).** 이 기계의 `config.toml`에 남은 값 여섯을 현재·백업
 `hooks.json`의 커맨드·핸들러 JSON·그룹 JSON·`키+커맨드` 등 어느 조합으로도 **재현하지 못했다**(그 사이
 파일이 바뀌었을 수 있어 «커맨드 해시가 아니다»라고 단정할 수도 없다). 같은 커맨드가 이벤트마다 다른

@@ -1003,6 +1003,8 @@ pub fn build(b: *std.Build) void {
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{
             "provider files remain unchanged across AppSession.init when the statusline hook is off",
+            "agent hooks install into the claude hooks array and leave user entries untouched",
+            "agent hooks stay out of provider files while the gate is off",
             "agent statusline hook edits only the statusLine key and preserves the wrapped user command",
             "agent statusline hook serializes, preserves file identity, and refuses to guess",
             "legacy provider workspace fields are ignored across multi-window parse apply and write-new",
@@ -1013,8 +1015,8 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
-    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 10 = 위 필터 5개 + 이름 없는 test 블록 5개.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=10");
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 12 = 위 필터 7개 + 이름 없는 test 블록 5개.
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=12");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

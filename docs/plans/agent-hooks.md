@@ -17,8 +17,8 @@
 
 **구현됨(순수 층)**: [`session/agent_hook_command.zig`](../../src/session/agent_hook_command.zig)(인라인 커맨드
 빌더·표식·legacy 식별)와 [`session/agent_hook_event.zig`](../../src/session/agent_hook_event.zig)(ndjson 파서·
-tail 커서). 단위 24개 + 실제 셸 게이트 `zig build check-agent-hook-command`(계약 6개). **남은 것은 platform
-배선**(파일 읽기·회전·정리)이고 AH2와 함께 붙인다.
+tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-command`(계약 8개 — 로그 파일 `0600`을
+넉넉한 umask에서 확인하는 것을 AH2a에서 더했다). **로그를 읽는 쪽은 아직 없다**(회전·정리는 AH3).
 
 
 - 훅 스크립트: stdin 전량 소비 → pane 식별자 확인 → `<cache>/maru/agent-turn-events/<surface_id>.ndjson`에
@@ -34,6 +34,17 @@ tail 커서). 단위 24개 + 실제 셸 게이트 `zig build check-agent-hook-co
 - 검증: 부분 라인·회전 경계·오프셋 전진·상한 절단·손상 라인 무시(순수 모듈 단위), 동시 append 인터리브.
 
 ### AH2 — 설치와 제거
+
+**AH2a(claude) ✅ 완료.** `sidebar.agent-hooks`(기본 `false`) 게이트와 claude `settings.json` 배선이 섰다 —
+판정·트리 수술은 [`session/agent_hook_install.zig`](../../src/session/agent_hook_install.zig)(순수, 단위 21개),
+파일 세계는 `app_session/agent.zig`의 `reconcileAgentHooks`가 지킨다. **시작 시 로그 정리**(`cleanupAgentHookLogs`)도 함께 들어갔다 — 소비자가 아직 없어(AH3) 회전이 돌지 않으므로
+그것이 없으면 프롬프트·명령 원문이 담긴 파일이 무한히 자란다. 검증은 **제품 경로 무인 게이트**
+(`zig build test-provider-session-removal`)가 `AppSession.init`을 실제로 돌려 본다: 사용자 항목 순서 보존,
+과거 표식 잔존, 로그 디렉터리 `0700`, 지난 실행 로그 정리와 남의 파일 보존, 재실행 시 바이트 무변경,
+**게이트 off에서 `hooks` 키 무생성**.
+남은 것은 AH2b(codex)와 statusLine 훅 제거, 그리고 **제거를 부르는 사용자 액션**이다 — 지금은 켤 수는 있는데
+빼려면 `settings.json`을 손으로 고쳐야 한다(계약 §5의 ⚠️). **그 구멍을 닫기 전에는 게이트 기본값을 켜지 않는다.**
+
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는
   `config.toml`의 `trusted_hash`를 **함께** 갱신한다.

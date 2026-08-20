@@ -634,6 +634,11 @@ pub const inventory = [_]Proof{
     // 부르는 자리는 그대로다.
     // 리베이스로 값이 또 수렴했다(2026-08-20, 같은 날 두 번째): 사유는 위 둘 다 살아 있고, 아래 값은
     // 그 둘이 한 트리에 함께 있는 상태에서 게이트가 낸 전체 64자다.
+    // AH2a(훅 설치)가 제품 경로 테스트 둘과 그 fixture 상수(`agent_hooks_on_config`)를 더해 또 움직였다.
+    // 테스트 본문은 마스크가 빼지만 **최상위 const 는 비-test 토큰**이라 digest 에 잡힌다. count 는 2
+    // 그대로다 — `@field` 반사 접근도 Client 구성·receiver 집합도 손대지 않았다.
+    // 리베이스로 또 수렴했다(2026-08-20, 세 번째): 위 사유 넷이 모두 살아 있고, 아래 값은 그것들이 한
+    // 트리에 함께 있는 상태에서 도구가 다시 잰 것이다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0cd946790121cec0d6e7248c33bd3fbe2b7548425aa31a3d232263e0113e2397" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
@@ -709,7 +714,7 @@ pub const inventory = [_]Proof{
     // 같은 슬라이스의 적대적 검증에서 한 줄이 더 붙어 값이 또 움직였다(2026-08-19): `clearBranchMenuText`의
     // "열린 메뉴를 먼저 닫는다" 가드가 **기준 목록까지** 본다. 그 목록도 같은 버퍼에서 이름을 빌리므로
     // 플래그만 다를 뿐 같은 UAF였다. count는 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "3235d07e9f13729c3ea54a7cf45ff035fb1e521cd03aa60fdd13ec8e90a60e86" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "3d87f5fb5c4e2fbda70d4f3f4dc0e6c15149994a816512d86e5e6ec9da74deff" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
@@ -785,5 +790,5 @@ pub const inventory = [_]Proof{
     // count 는 1 그대로 — 표에 항목이 늘 뿐이다.
     // 연결 진단(S9b-3b)이 상태·실패 문구 아홉을 더해 또 바뀐다. count 는 1 그대로다.
     // 자판 버튼 문구(`mob_keyboard`)가 더해져 또 바뀐다. count 는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "7ebc8079df1cbc56dda1b42d6be1adb316f5dc8e371c9feca844435ce5257f2e" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "dc0176922a90b014748cea74361e94f43d81b6267e227f74c5f089bc8852efa6" },
 };

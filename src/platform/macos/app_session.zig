@@ -18180,6 +18180,230 @@ test "provider files remain unchanged across AppSession.init when the statusline
     try std.testing.expectEqualStrings(mapping_77, fallback_mapping_77_after);
 }
 
+/// 훅 게이트를 켠 fixture. **상태줄 훅은 꺼 둔다** — 둘은 별개 키이고, 켜 두면 늘어난 파일이 어느 쪽 것인지
+/// 흐려진다(docs/agent-hooks.md §5).
+const agent_hooks_on_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = true\n";
+
+test "agent hooks install into the claude hooks array and leave user entries untouched" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const hook_install = maru.session.agent_hook_install;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "cache");
+
+    // 사용자 파일에 있어선 안 될 일 셋: 다른 최상위 키가 사라지는 것, 사용자 훅이 사라지거나 **순서가 밀리는** 것,
+    // 그리고 과거 표식 항목이 자동으로 정리되는 것(P1 — 우리는 우리 표식만 다룬다).
+    const user_hook = "printf ok # user hook";
+    const legacy_hook = "cat > /tmp/x # " ++ hook_command.legacy_markers[0];
+    const settings_before = "{\"model\":\"opus\",\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"command\":\"" ++
+        user_hook ++ "\"}]}],\"Stop\":[{\"hooks\":[{\"command\":\"" ++ legacy_hook ++ "\"}]}]}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    // 지난 실행이 남긴 로그 둘을 미리 둔다 — 시작 시 정리가 **실제로** 지우는지 보기 위해서다. 소비자가
+    // 없는 지금 이것이 없으면 파일이 무한히 자란다(계약 §4.2·§5).
+    try tmp.dir.createDirPath(io, "cache/maru/agent-turn-events");
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/7.ndjson", .data = "claude\t{}\n" });
+    // 우리 이름 모양이 **아닌** 것은 남의 것이라 건드리지 않는다. 두 가드(확장자·숫자 stem)를 따로 물게
+    // 하려고 둘 다 둔다 — 하나만 두면 다른 가드를 지워도 이 검사가 통과한다(뮤테이션으로 확인했다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/notes.txt", .data = "keep me" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/abc.ndjson", .data = "not ours" });
+    // 숫자 이름이지만 확장자가 우리 것이 아니다 — 이것이 확장자 가드를 무는 자리다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/9.log", .data = "not ours" });
+
+    // 정리는 **프로세스에 한 번**이라(창마다 도는 것을 막는다) 같은 바이너리의 앞선 테스트가 이미 썼다.
+    // 이 테스트가 그 경로를 보려면 되돌려야 한다 — 그 되돌림이 필요하다는 사실 자체가 계약의 일부다.
+    agent_ops.hook_logs_cleaned = false;
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
+
+    {
+        const events_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-turn-events", .{cache});
+        defer a.free(events_dir);
+        try expectProviderFixtureEntries(io, events_dir, &.{
+            .{ .name = "notes.txt", .kind = .file },
+            .{ .name = "abc.ndjson", .kind = .file },
+            .{ .name = "9.log", .kind = .file },
+        });
+    }
+
+    // **claude 디렉터리에 새 파일을 만들지 않는다** — 훅은 `settings.json` 안의 항목이고 스크립트 파일이 없다
+    // (계약 §4.1: 커맨드는 인라인이다). 상태줄 경로가 남기던 스크립트·마커가 여기엔 없어야 한다.
+    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
+
+    // **로그 디렉터리를 만들었고 0700이다.** 이걸 빠뜨리면 훅은 돌지만 아무것도 적지 않는다(계약 §4.2).
+    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/maru/{s}", .{ cache, hook_command.log_dir_rel }, 0);
+    defer a.free(log_dir);
+    {
+        var stat: std.posix.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, log_dir.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW));
+        try std.testing.expect(std.posix.S.ISDIR(stat.mode));
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), stat.mode & 0o777);
+    }
+
+    var want: std.ArrayListUnmanaged(u8) = .empty;
+    defer want.deinit(a);
+    try hook_command.build(&want, a, "claude", log_dir);
+
+    const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    defer a.free(settings_after);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_after, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        // 최상위 키는 그대로 둘이다.
+        try std.testing.expectEqual(@as(usize, 2), obj.count());
+        try std.testing.expectEqualStrings("opus", obj.get("model").?.string);
+
+        const hooks = obj.get("hooks").?.object;
+        // 사용자 항목이 **먼저** 온다 — 우리가 앞에 끼면 사용자가 정한 실행 순서가 바뀐다.
+        const pre = hooks.get("PreToolUse").?.array;
+        try std.testing.expectEqual(@as(usize, 2), pre.items.len);
+        try std.testing.expectEqualStrings("Bash", pre.items[0].object.get("matcher").?.string);
+        try std.testing.expectEqualStrings(user_hook, pre.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string);
+        // 우리 항목은 matcher·timeout까지 세트 그대로다.
+        try std.testing.expectEqualStrings("*", pre.items[1].object.get("matcher").?.string);
+        const ours = pre.items[1].object.get("hooks").?.array.items[0].object;
+        try std.testing.expectEqualStrings("command", ours.get("type").?.string);
+        try std.testing.expectEqualStrings(want.items, ours.get("command").?.string);
+        try std.testing.expectEqual(@as(i64, hook_command.timeout_seconds), ours.get("timeout").?.integer);
+
+        // 과거 표식 항목은 그대로 있다(P1 — 자동 정리하지 않는다).
+        const stop = hooks.get("Stop").?.array;
+        try std.testing.expectEqualStrings(legacy_hook, stop.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string);
+
+        // 세트 전체가 덮였고, 그 판정이 «할 일 없음»으로 수렴한다.
+        const known = hook_install.scanClaude(obj.get("hooks"), want.items) orelse return error.UnknownShape;
+        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.ours);
+        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.ours_current);
+        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.events_covered);
+        try std.testing.expectEqual(@as(usize, 0), known.events_outside);
+        try std.testing.expect(known.legacy_present);
+        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.{ .known = known }, .ensure));
+    }
+
+    // **다시 띄워도 파일을 건드리지 않는다.** 바이트까지 같아야 한다 — 매 시작마다 사용자 파일의 mtime을 흔들면
+    // 백업·동기화 도구가 계속 깨어난다.
+    {
+        // **두 번째 세션 = 두 번째 창이다.** 그때 정리가 또 돌면 먼저 열린 창이 지금 쓰고 있는 로그를 지운다 —
+        // 지금은 소비자가 없어 티가 안 나지만 AH3에서 그대로 조용한 유실이 된다. 살아 있는 로그를 하나 두고
+        // 그것이 살아남는지 본다(`hook_logs_cleaned`를 여기서는 되돌리지 않는다 — 그게 실제 두 번째 창의 상태다).
+        try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/5.ndjson", .data = "claude\t{}\n" });
+
+        var again: AppSession = undefined;
+        try again.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        again.deinit();
+        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        defer a.free(twice);
+        try std.testing.expectEqualStrings(settings_after, twice);
+
+        const live = try tmp.dir.readFileAlloc(io, "cache/maru/agent-turn-events/5.ndjson", a, .limited(4096));
+        defer a.free(live);
+        try std.testing.expectEqualStrings("claude\t{}\n", live);
+    }
+}
+
+test "agent hooks stay out of provider files while the gate is off" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    // 기본값이 `false`라는 계약을 **제품 경로에서** 못 박는다. 위 hook-off fixture는 상태줄 키만 끄므로,
+    // 훅 게이트가 실수로 기본 on이 되면 그 테스트가 아니라 여기가 먼저 걸린다.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = ""; // 아무 설정도 주지 않는다 = 전부 기본값
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "cache");
+    const settings_before = "{\"model\":\"opus\"}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
+
+    // **`hooks` 키가 생기지 않았다.** 기본 config 그대로 돌렸으므로 상태줄 훅(그쪽은 기본 on)은 `statusLine`을
+    // 쓸 수 있다 — 그것까지 없다고 단언하면 이 테스트가 남의 계약을 검사하게 된다. 우리 축만 본다.
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(4096));
+    defer a.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, maru.session.agent_hook_command.marker) == null);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, after, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("hooks") == null);
+        try std.testing.expectEqualStrings("opus", parsed.value.object.get("model").?.string);
+    }
+    // 로그 디렉터리도 만들지 않는다 — 끈 사람의 디스크에 우리 자리를 잡아 두지 않는다.
+    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/maru/{s}", .{ cache, maru.session.agent_hook_command.log_dir_rel }, 0);
+    defer a.free(log_dir);
+    var stat: std.posix.Stat = undefined;
+    try std.testing.expect(std.c.fstatat(std.posix.AT.FDCWD, log_dir.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0);
+}
+
 test "agent statusline hook edits only the statusLine key and preserves the wrapped user command" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const sl = maru.session.agent_statusline;

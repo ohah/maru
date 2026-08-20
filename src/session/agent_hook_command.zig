@@ -109,8 +109,9 @@ pub fn build(
     // 조용히 파싱 실패» 로 나타나므로, 상수가 탭이 아니게 되면 **컴파일이 깨지게** 묶어 둔다.
     comptime {
         if (event.field_separator != '\t') {
-            @compileError("훅 커맨드가 쓰는 구분자와 `agent_hook_event.field_separator` 가 어긋났다 — " ++
-                "포맷 문자열의 `\\t` 를 함께 고쳐라");
+            // 개발자 메시지는 영어로 둔다(i18n 원장 §7.2 — 표시 문자열이 아니고 컴파일 로그에 뜬다).
+            @compileError("hook command separator drifted from `agent_hook_event.field_separator`; " ++
+                "update the `\\t` in the printf format string too");
         }
     }
     try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> ", .{provider});

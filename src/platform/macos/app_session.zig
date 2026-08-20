@@ -4518,6 +4518,16 @@ pub const AppSession = struct {
     // step_ms를 넘으면 한 줄 스크롤 후 그만큼 빼 잔여를 보존한다(반올림 누적 오차 없이 ≈30줄/s 유지). drag_autoscroll
     // 이 0이면(드래그가 grid 안으로 복귀) 0으로 리셋해 다음 진입이 새로 누적한다.
     drag_autoscroll_accum_ms: u32 = 0,
+    /// 편집기 **본문 선택** 드래그가 pane 밖에 머무는 방향(-1 위, +1 아래, 0 안). 위 터미널용과
+    /// 같은 관례이고 소유자만 다르다 — `pointer_gesture_owner`가 `.editor_selection`일 때만 선다.
+    /// 스크롤 단위도 갈린다: 터미널은 grid 행, 편집기는 논리 줄이다.
+    editor_drag_autoscroll: i8 = 0,
+    /// 그 경과 누적(ms). **tick 수가 아니라 ms로 게이트한다** — tick마다 한 줄이면 30→60Hz에서
+    /// 두 배 빨라진다(바로 위 터미널 필드가 그 사고를 겪고 고친 자리다).
+    editor_drag_autoscroll_accum_ms: u32 = 0,
+    /// 자동 스크롤이 선택을 늘릴 때 쓸 **마지막 x 좌표**(창 좌표). 세로로만 굴러가므로 가로 위치는
+    /// 드래그가 마지막으로 알려 준 곳에 머문다.
+    editor_drag_x_px: f64 = 0,
     // 스크롤바 thumb 드래그 중일 때, 잡은 지점의 thumb_top 기준 y 오프셋(px). null=드래그 안 함.
     // down(1)이 스크롤바 영역을 hit하면 세워지고, drag(2)가 마우스 y를 view_offset으로 매핑, up(3)이 푼다.
     // 마우스가 스크롤바 영역 위에 있는지(hover 강조 — full alpha·살짝 굵게). hoverCursor가 매 이동 갱신한다.
@@ -14131,6 +14141,20 @@ pub const AppSession = struct {
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         scroll_ops.applyDragAutoscroll(self); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
+        // 편집기 본문 선택도 같은 자리에서 굴린다(§4.1g). 소유자가 다르므로 함수가 갈리고, 스크롤
+        // 단위도 다르다(터미널은 grid 행, 편집기는 논리 줄).
+        if (self.pointerGestureIs(.editor_selection)) {
+            var sel_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+            defer sel_rects.deinit(self.allocator);
+            if (tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &sel_rects)) |_| {
+                const owner_term = self.pointer_gesture_owner.editor_selection.term;
+                for (sel_rects.items) |lr| {
+                    if (lr.leaf.activeTerm() != owner_term) continue;
+                    editor_ops.applyDragAutoscroll(self, lr.rect);
+                    break;
+                }
+            } else |_| {}
+        }
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)

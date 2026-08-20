@@ -1313,6 +1313,49 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     return true;
 }
 
+/// 선택 드래그가 pane 밖에 머무는 동안 **한 줄씩 굴리고 선택을 늘린다**(frame-loop tick마다).
+/// 화면보다 긴 범위를 드래그로 고르는 표준 동작이고, 없으면 보이는 만큼만 고를 수 있다.
+///
+/// **tick 수가 아니라 경과 ms로 게이트한다.** tick마다 한 줄이면 30→60Hz에서 두 배 빨라진다 —
+/// 터미널이 그 사고를 겪고 고친 자리이고(`scroll.applyDragAutoscroll`), 같은 상수를 쓴다.
+///
+/// **굴린 뒤에 다시 hit-test한다.** 스크롤이 행 배열을 바꾸므로, 같은 화면 좌표가 새 줄을 가리킨다 —
+/// 그것이 "선택이 따라 늘어난다"의 구현이다. 다만 그 배열은 **다음 렌더**가 갱신하므로 이 tick에서는
+/// 아직 옛 배열이다. 한 프레임 늦게 따라오는 것이 맞다(렌더가 굳힌 것만 읽는다는 §4.1g 계약).
+pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect) void {
+    if (self.editor_drag_autoscroll == 0) {
+        self.editor_drag_autoscroll_accum_ms = 0;
+        return;
+    }
+    const owner = switch (self.pointer_gesture_owner) {
+        .editor_selection => |g| g,
+        else => {
+            // 제스처가 끝났는데 방향이 남아 있으면 영원히 굴린다 — 터미널이 그 latch를 겪었다.
+            self.editor_drag_autoscroll = 0;
+            self.editor_drag_autoscroll_accum_ms = 0;
+            return;
+        },
+    };
+    self.editor_drag_autoscroll_accum_ms += self.msPerTick();
+    if (self.editor_drag_autoscroll_accum_ms < scroll_ops.drag_autoscroll_step_ms) return;
+    self.editor_drag_autoscroll_accum_ms -= scroll_ops.drag_autoscroll_step_ms;
+
+    if (!scrollLines(self, owner.term, leaf_rect, self.editor_drag_autoscroll)) return;
+
+    // 굴린 방향의 **가장자리 행**으로 선택을 늘린다. 지금 배열은 굴리기 전 것이므로 그 끝 행을
+    // 쓰면 한 줄씩 정확히 따라간다(다음 렌더가 배열을 갱신하면 그 자리가 새 줄이 된다).
+    const g = owner.term.rt.editor_hit_geom;
+    if (g.cell_h_px == 0 or owner.term.rt.editor_hit_rows_len == 0) return;
+    // 위로 굴리면(양수) 가장자리는 **첫 행**, 아래로 굴리면 마지막 행이다(터미널이 같은 식을 쓴다).
+    const edge_row: usize = if (self.editor_drag_autoscroll > 0) 0 else owner.term.rt.editor_hit_rows_len - 1;
+    const edge_y: f64 = @as(f64, @floatFromInt(g.body_y)) +
+        @as(f64, @floatFromInt(edge_row * g.cell_h_px)) + 1;
+    _ = dragBodySelection(self, 2, self.editor_drag_x_px, edge_y);
+    // `dragBodySelection`이 가장자리 좌표를 "안"으로 읽어 방향을 지운다 — 다시 세운다.
+    self.editor_drag_autoscroll = if (edge_row == 0) 1 else -1;
+    self.metal_dirty = true;
+}
+
 /// 편집기 본문에서 **더블클릭(단어)·트리플클릭(줄)**. 잡았으면 `true`.
 ///
 /// **`AnchorKind`가 여기서 정해진다.** `anchor`가 점이 아니라 **범위**인 이유가 이것이다 — 단어를
@@ -1356,6 +1399,19 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
     };
     switch (kind) {
         2 => {
+            // **위아래로 벗어났는가.** 굳은 기하로 잰다(§4.1g "스냅숏의 경계") — live로 다시 구하면
+            // 행 배열과 다른 프레임의 값이 된다. 벗어난 동안 tick이 한 줄씩 굴리고 선택을 늘린다.
+            const g = owner.term.rt.editor_hit_geom;
+            self.editor_drag_x_px = x_px;
+            if (g.cell_h_px > 0 and owner.term.rt.editor_hit_rows_len > 0) {
+                const top: f64 = @floatFromInt(g.body_y);
+                const bottom = top + @as(f64, @floatFromInt(owner.term.rt.editor_hit_rows_len * g.cell_h_px));
+                // **부호는 `scrollLines`의 규약을 따른다**: 양수가 문서의 **앞쪽**(위)이다(터미널
+                // 스크롤백과 같은 방향 규약이고 `drag_autoscroll`도 그렇다). 반대로 넣었다가
+                // SEL5가 잡았다 — 아래로 끌면 위로 굴리려 하고 맨 위라 clamp에 막혔다.
+                self.editor_drag_autoscroll = if (y_px < top) 1 else if (y_px > bottom) -1 else 0;
+                if (self.editor_drag_autoscroll == 0) self.editor_drag_autoscroll_accum_ms = 0;
+            }
             const off = hitTestBody(owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
             if (owner.term.rt.editor_selection) |*sel| {
                 // **잡은 단위로 늘어난다**(`AnchorKind` doc). 더블클릭 뒤 끌면 지나가는 단어가
@@ -1381,6 +1437,8 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
             return true;
         },
         3 => {
+            self.editor_drag_autoscroll = 0; // 손을 뗐다 — 안 끄면 tick이 영원히 굴린다
+            self.editor_drag_autoscroll_accum_ms = 0;
             self.finishPointerGesture();
             return true;
         },
@@ -7082,4 +7140,96 @@ test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어�
     try testing.expect(copySelection(fx.session));
     try testing.expectEqualStrings("alpha beta gamma\ndelta epsilon", fx.session.chrome_clipboard_write);
     try testing.expect(dragBodySelection(fx.session, 3, on_beta, row1));
+}
+
+test "SEL5 드래그가 pane 밖에 머물면 굴러가고, 손을 떼면 멈춘다 (§4.1g)" {
+    // **없으면 보이는 만큼만 고를 수 있다.** 화면보다 긴 범위를 드래그로 고르는 것은 표준 동작이다.
+    //
+    // 이 테스트가 지키는 것 셋: ⑴ 밖으로 나가면 방향이 서고 ⑵ tick이 굴리며 선택이 늘고
+    // ⑶ **손을 떼면 멈춘다** — 방향이 latch되면 tick이 영원히 굴린다(터미널이 그 사고를 겪었고,
+    // `app_session.zig`에 그 자리 주석이 남아 있다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..300) |i| { // 화면보다 훨씬 길다
+        var num: [24]u8 = undefined;
+        const line = std.fmt.bufPrint(&num, "line {d}\n", .{i}) catch unreachable;
+        try doc.appendSlice(allocator, line);
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "s.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "s.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    // **랩을 끈다.** 랩이 켜지면 `scrollLines`가 논리 줄 대신 **조각**을 민다(그 함수의 갈래) —
+    // 자동 스크롤이 굴러가는지를 재는 데 그 축이 섞이면 무엇이 깨졌는지 말하지 못한다. 랩 상태의
+    // 자동 스크롤은 별개 축이고, 조각 단위 스크롤이 붙을 때 함께 잰다.
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
+    const top_y: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
+    const pane = pane_ops.activePane(fx.session);
+
+    try testing.expect(beginBodySelection(fx.session, pane, text_x, top_y));
+    try testing.expectEqual(@as(i8, 0), fx.session.editor_drag_autoscroll); // 안에서는 안 선다
+
+    // ⑴ **아래로 벗어난다.**
+    const below: f64 = @floatFromInt(@as(i32, @intCast(body.y + body.h)) + 200);
+    try testing.expect(dragBodySelection(fx.session, 2, text_x, below));
+    try testing.expectEqual(@as(i8, -1), fx.session.editor_drag_autoscroll); // 아래로 = 문서 뒤쪽 = 음수
+
+    // ⑵ **tick이 굴린다.** 한 스텝에 못 미치는 누적으로는 안 움직인다(frame rate 무관 속도).
+    const first_line0 = term.rt.editor_first_line;
+    const sel_end0 = (term.rt.editor_selection orelse return error.NoSelection).end();
+    // **렌더를 함께 돌린다.** 스크롤 상한(`editor_max_top_line`)과 행 배열은 렌더가 세우므로,
+    // tick만 돌리면 상한이 0에 묶여 아무리 굴려도 안 움직인다 — 제품은 tick마다 그리므로 그
+    // 순환을 여기서도 재현해야 한다(§4.1g "렌더가 굳힌 것만 읽는다"의 대가다).
+    var ticks: usize = 0;
+    while (ticks < 40 and term.rt.editor_first_line == first_line0) : (ticks += 1) {
+        applyDragAutoscroll(fx.session, fx.leaf_rect);
+        if (appendPaneFrame(fx.session, fx.leaf_rect, term)) |*d| {
+            var dd = d.*;
+            dd.dl.deinit(allocator);
+        }
+    }
+    try testing.expect(term.rt.editor_first_line > first_line0); // 굴렀다
+    try testing.expect(ticks > 0); // 첫 tick에 바로 굴리지 않는다 — ms를 누적한다
+
+    // **선택은 한 프레임 늦게 따라온다.** 굴린 직후 행 배열은 아직 이전 프레임 것이라, 가장자리
+    // 행이 가리키는 줄이 그대로다 — 다음 렌더가 배열을 갱신해야 그 자리가 새 줄이 된다. 렌더가
+    // 굳힌 것만 읽는다는 §4.1g 계약의 대가이고, live로 다시 구하면 11~16차가 판 결함으로 돌아간다.
+    for (0..12) |_| {
+        applyDragAutoscroll(fx.session, fx.leaf_rect);
+        if (appendPaneFrame(fx.session, fx.leaf_rect, term)) |*d| {
+            var dd = d.*;
+            dd.dl.deinit(allocator);
+        }
+    }
+    const sel_end1 = (term.rt.editor_selection orelse return error.NoSelection).end();
+    try testing.expect(sel_end1 > sel_end0);
+
+    // ⑶ **손을 떼면 멈춘다.**
+    try testing.expect(dragBodySelection(fx.session, 3, text_x, below));
+    try testing.expectEqual(@as(i8, 0), fx.session.editor_drag_autoscroll);
+    const parked = term.rt.editor_first_line;
+    for (0..80) |_| applyDragAutoscroll(fx.session, fx.leaf_rect);
+    try testing.expectEqual(parked, term.rt.editor_first_line); // 더 안 굴렀다
+
+    // ⑷ **제스처가 딴 데로 넘어가도 latch가 안 남는다.**
+    fx.session.editor_drag_autoscroll = -1; // 방향만 남은 상태를 인위로 만든다
+    applyDragAutoscroll(fx.session, fx.leaf_rect);
+    try testing.expectEqual(@as(i8, 0), fx.session.editor_drag_autoscroll);
+    try testing.expectEqual(parked, term.rt.editor_first_line);
 }

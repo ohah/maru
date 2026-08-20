@@ -1482,6 +1482,13 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     while (frames < 900 and !window.quit_requested and !close_requested) : (frames += 1) {
         for (window.poll()) |ev| switch (ev) {
             .close_requested => close_requested = true,
+            // **스왑체인은 따라가야 한다.** 형제 스모크 셋이 모두 이렇게 하는데 이것만 빼먹고 있었다
+            // (적대적 검증이 잡았다) — 안 맞추면 크기를 바꾼 뒤 표현이 깨진다.
+            //
+            // 셀은 다시 만들지 않는다. `cellFromNative` 가 놓는 자리는 행·열 × 셀 크기라 **창 크기와
+            // 무관**하므로 글자는 제자리에 남는다. 다만 창을 키워도 **행이 더 보이지는 않는다** —
+            // 그리기 창은 시작 크기로 한 번 정해진다. 스모크의 한계이지 잘못 그리는 것은 아니다.
+            .resized => |r| try present.resize(r.width_px, r.height_px),
             else => {},
         };
         try present.beginFrame(clear);
@@ -1490,6 +1497,42 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
         _ = usleep(16_000);
     }
 
+    // **판정은 글리프 수가 아니라 내용이다.** `prepared()` 는 "글리프가 잡혔고 아틀라스가 찼다" 까지만
+    // 본다 — 엉뚱한 행을 그려도, 라벨이 통째로 비어도 참이다. ⒜ 가 "행 수가 아니라 이름을 본다" 로
+    // 못 박은 것과 같은 자리인데 이 스모크가 그것을 어겼다(적대적 검증이 잡았다).
+    //
+    // 그려진 셀에서 글자를 도로 읽어 **각 행의 라벨이 그 줄에 실제로 있는지** 확인한다. 디렉터리가
+    // 무엇이든 성립하는 판정이라 fixture 에 안 묶인다.
+    var labels_checked: usize = 0;
+    var labels_matched: usize = 0;
+    {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        var row_index: u16 = 0;
+        while (row_index < visible) : (row_index += 1) {
+            const label: []const u8 = switch (rows.items[row_index]) {
+                .root => |v| v.label,
+                .directory => |v| v.label,
+                .file, .recent_file => |v| v.label,
+                else => continue,
+            };
+            if (label.len == 0) continue;
+            line.clearRetainingCapacity();
+            // **`cells` 는 격자가 아니라 그려진 셀만 담은 목록이다.** 처음엔 `row * cols + col` 로 훑었는데
+            // 19 개 중 1 개만 맞았다 — 재구성이 틀린 것이지 그림이 틀린 것이 아니었다(스크린샷은 정확했다).
+            // 각 셀이 자기 `row`·`col` 을 들고 있으므로 그것으로 고른다.
+            for (frame.draw_list.cells) |cell| {
+                if (cell.row != row_index or cell.codepoint == 0) continue;
+                var enc: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(cell.codepoint), &enc) catch continue;
+                try line.appendSlice(allocator, enc[0..n]);
+            }
+            labels_checked += 1;
+            // 라벨이 칸보다 길면 잘린다 — 그때는 **앞부분**이 있는지 본다(자름 자체는 정상 동작이다).
+            const needle = if (label.len > 16) label[0..16] else label;
+            if (std.mem.indexOf(u8, line.items, needle) != null) labels_matched += 1;
+        }
+    }
     // **보고는 `renderer.frame_probe` 가 단일 출처다.** 처음엔 손으로 몇 줄을 골라 찍었는데, 그 모듈의
     // 머리말이 정확히 그 결함을 예고한다 — "각 smoke가 따로 구현하면 GlyphFrameStats 가 바뀔 때마다
     // 여러 곳을 손으로 맞춰야 하고 키 schema 도 서로 어긋난다(**한 smoke만 fallback_count 를 빼먹는
@@ -1503,13 +1546,14 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     try stdout.print("rows={d} drawn_rows={d}\n", .{ rows.items.len, visible });
     try stdout.print("d3d_cells={d} atlas_region_uploads={d}\n", .{ cells.items.len, region_uploads });
     try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("labels_matched={d}/{d}\n", .{ labels_matched, labels_checked });
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
     try stdout.flush();
 
     // **판정은 프레임 수가 아니라 준비된 프레임이다.** 프레임만 세면 빈 창도 초록이다 — ⒜ 에서 행 수만
     // 세면 빈 스캔이 초록이던 것과 같은 부류다. `prepared()` 는 내부 일관성에 더해 글리프가 실제로
     // 잡혔고 아틀라스가 채워졌는지까지 본다 — 손으로 짠 `cells.len != 0` 보다 강하다.
-    if (!stats.prepared() or cells.items.len == 0) {
+    if (!stats.prepared() or cells.items.len == 0 or labels_checked == 0 or labels_matched != labels_checked) {
         try stderr.writeAll("maru win32-file-tree-draw-smoke: the frame was not prepared\n");
         try stderr.flush();
         return error.NothingDrawn;

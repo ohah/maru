@@ -256,6 +256,19 @@ pub fn build(b: *std.Build) void {
         win32_file_tree_smoke_step.dependOn(noteSkippedStep(b, "win32-file-tree-smoke", "Windows 호스트 전용 — 실제 Win32 디렉터리 순회를 잰다 (docs/windows-platform.md §2m.4)"));
     }
 
+    // 그리기 스모크도 step 으로 세운다 — #2457 이 세운 관례다(스모크가 CLI 하위 명령으로만 있으면
+    // 혼자만 안 도는 것을 발견할 방법이 없다). 이 슬라이스에서 그 규칙을 내가 다시 어겼고 적대적
+    // 검증이 잡았다.
+    const win32_file_tree_draw_smoke_step = b.step("win32-file-tree-draw-smoke", "Run the Windows file tree drawing smoke");
+    if (target.result.os.tag == .windows) {
+        const win32_file_tree_draw_smoke_cmd = b.addRunArtifact(exe);
+        win32_file_tree_draw_smoke_cmd.step.dependOn(b.getInstallStep());
+        win32_file_tree_draw_smoke_cmd.addArg("win32-file-tree-draw-smoke");
+        win32_file_tree_draw_smoke_step.dependOn(&win32_file_tree_draw_smoke_cmd.step);
+    } else {
+        win32_file_tree_draw_smoke_step.dependOn(noteSkippedStep(b, "win32-file-tree-draw-smoke", "Windows 호스트 전용 — D3D11 창을 열고 파일 트리 행을 실제로 그린다 (docs/windows-platform.md §2m.6)"));
+    }
+
     const app_pty_smoke_step = b.step("app-pty-smoke", "Run the live PTY app host frame smoke");
     const app_pty_smoke_cmd = b.addRunArtifact(exe);
     app_pty_smoke_cmd.step.dependOn(b.getInstallStep());

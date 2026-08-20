@@ -14,6 +14,7 @@ const dwrite_font = @import("platform/windows/dwrite_font.zig");
 // W7.2c 중립 텍스트 계약 어댑터와 프레임 빌더.
 const win32_text = @import("platform/windows/win32_text.zig");
 const win32_terminal = @import("platform/windows/win32_terminal.zig");
+const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = @import("platform/windows/win32_keys.zig");
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
@@ -102,6 +103,10 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "win32-file-tree-draw-smoke")) {
+        try runWin32FileTreeDrawSmoke(io, allocator, stdout, stderr);
+        return;
+    }
     if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
         try runWin32FileTreeSmoke(io, allocator, stdout, stderr);
         return;
@@ -1251,6 +1256,264 @@ fn runWin32FileTreeSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
         return error.RowsMissing;
     }
     try stderr.flush();
+}
+
+/// `maru win32-file-tree-draw-smoke` — W8.2 ⒝. **파일 트리가 Windows 화면에 실제로 뜬다.**
+///
+/// ⒜ 는 데이터가 행까지 흐르는 것을 텍스트로 봤다. 이것은 그 행을 **픽셀까지** 내린다.
+///
+/// **이 슬라이스가 작은 이유**는 적대적 검증이 찾아냈다. §2m.4 에 "Windows 에는 `ChromeDraw` 를 낮추는
+/// 층이 없다" 고 적었는데, 탐색기 행의 **텍스트 투영은 이미 중립**이었다 —
+/// `coretext_frame_builder.buildFileTreeDrawList` 가 이름과 달리 CoreText 를 한 번도 안 부르고
+/// `renderer.DrawList` 를 낸다. 실측 순서: 그 함수 본문에 `coretext_*` 참조 0 회 → OS 가드 없음 →
+/// Windows 로 컴파일·링크됨(해시 확인) → **런타임에 실제로 글자가 나온다**(`"vproj>src README.md"`).
+/// 앞의 셋만으로는 부족하다는 것을 이 저장소가 두 번 밟았다(`system_text` 는 컴파일되지만
+/// `builtin.os.tag != .macos` 에서 곧장 에러다).
+///
+/// 그래서 남은 것은 그 DrawList 를 Windows 가 이미 가진 셀 파이프라인에 먹이는 일뿐이다. 터미널이 밟는
+/// 길과 **정확히 같은 네 단계**를 쓴다: `buildFrameFromDrawListWithRasterizer` → 아틀라스 부분 업로드 →
+/// `buildNativeCellsFromGlyphQuads` → `cellFromNative` → `pipeline.draw`. 다른 길을 내면 한쪽만
+/// 고쳐지는 순간 조용히 갈린다(`win32_terminal.zig` 머리말이 경고하는 것).
+///
+/// **아직 배경 띠(hover·선택·활성)는 없다.** 그것은 쿼드라서 D3D11 에 두 번째 파이프라인이 필요하고
+/// (`d3d11_cells` 가 "둘이 되는 시점(chrome quad·kitty 이미지)" 으로 예고해 둔 자리다) 이 슬라이스
+/// 밖이다. 글자가 먼저 뜨는 것이 순서다 — 띠만 있고 글자가 없으면 아무것도 못 읽는다.
+fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    var raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+        try stderr.print("maru win32-file-tree-draw-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer raster.destroy();
+    const cell_w = raster.metrics.width_px;
+    const cell_h = raster.metrics.height_px;
+
+    const scratch = try allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h));
+    defer allocator.free(scratch);
+    const shaper = win32_text.Shaper{ .raster = raster };
+    const rasterizer = win32_text.NeutralRasterizer{ .raster = raster, .scratch = scratch };
+
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W8.2 file tree)");
+    var window = win32_window.Window.create(allocator, title, 900, 620) catch |err| {
+        try stderr.print("maru win32-file-tree-draw-smoke: could not create the window({s}, Win32 error {d})\n", .{ @errorName(err), win32_window.last_create_error });
+        if (win32_window.last_create_error == 8)
+            try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted - check how many processes this session has.\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer window.destroy();
+    window.show();
+
+    const initial = window.clientSize() orelse win32_window.ClientSize{ .width_px = 900, .height_px = 620 };
+    var present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+        try stderr.print("maru win32-file-tree-draw-smoke: could not set up the present path({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_present.last_hresult)) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer present.destroy();
+    window.present.opaque_handle = @ptrCast(present);
+
+    var renderer_state = maru.renderer.RendererState.init(allocator, .{
+        .text = .{
+            .font_size_px = maru.renderer.textConfigFromFontSize(cfg.font.size, 1).font_size_px,
+            .device_scale = 1,
+            .cell_width_px = @intCast(cell_w),
+            .glyph_cell_width_px = @intCast(cell_w),
+            .cell_height_px = @intCast(cell_h),
+        },
+    });
+    defer renderer_state.deinit();
+
+    var atlas_w = renderer_state.atlas.config.atlas_width_px;
+    var atlas_h = renderer_state.atlas.config.atlas_height_px;
+    var pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch |err| {
+        try stderr.print("maru win32-file-tree-draw-smoke: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        if (d3d11_cells.shaderError().len > 0)
+            try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer pipeline.destroy();
+
+    // ── 진짜 디렉터리를 훑는다 ───────────────────────────────────────────────────────────────
+    //
+    // fixture 를 만들지 않고 **저장소 자신**을 연다. 화면에 뜨는 것이 진짜 파일 이름이라야 "그럴듯한
+    // 그림" 과 "실제로 도는 것" 이 구별된다.
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_native = root_buf[0..try std.Io.Dir.cwd().realPath(io, &root_buf)];
+    const root_path = try maru.path_shape.normalizeSeparators(allocator, root_native);
+    defer allocator.free(root_path);
+
+    var tree = maru.session.file_tree.Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{root_path});
+
+    var backend = try file_tree_backend.Backend.init(allocator, io);
+    defer backend.deinit();
+
+    var validated = (try file_tree_backend.validateRootSnapshot(allocator, io, root_path)) orelse {
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: root validation failed\n");
+        return error.RootValidationFailed;
+    };
+    var validated_owned = true;
+    defer if (validated_owned) validated.deinit(allocator, io);
+    const validated_dir = validated.dir orelse {
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: root validation returned no directory\n");
+        return error.RootValidationFailed;
+    };
+    validated.dir = null;
+
+    const owned = try allocator.dupe(u8, root_path);
+    if (!backend.submitValidatedRootScan(owned, 0, validated_dir)) {
+        allocator.free(owned);
+        validated_dir.close(io);
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: could not submit the validated root scan\n");
+        return error.ScanSubmitFailed;
+    }
+    validated.deinit(allocator, io);
+    validated_owned = false;
+
+    var rounds: usize = 0;
+    var scanned = false;
+    while (rounds < 4000 and !scanned) : (rounds += 1) {
+        if (backend.takeResult()) |taken| {
+            var result = taken;
+            defer result.deinit(allocator, io);
+            if (!result.ok) {
+                try stderr.print("maru win32-file-tree-draw-smoke: scan failed for {s}\n", .{result.path});
+                return error.ScanFailed;
+            }
+            var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+            defer inputs.deinit(allocator);
+            for (result.entries.items) |e| try inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity });
+            try tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items);
+            scanned = true;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    if (!scanned) {
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: the scan did not finish in time\n");
+        return error.ScanTimeout;
+    }
+
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(allocator);
+    try tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, &rows);
+
+    // ── 행 → DrawList ────────────────────────────────────────────────────────────────────────
+    const grid = win32_window.cellsForClient(initial.width_px, initial.height_px, cell_w, cell_h) orelse
+        maru.terminal.Size{ .cols = 80, .rows = 24 };
+    // **창을 넘겨 그리지 않는다.** 스크롤이 0 이라 앞에서부터 창 높이만큼이다 —
+    // `session/file_tree_layout.drawWindow` 가 세는 것과 같은 규율의 특수한 경우다.
+    const visible: u16 = @intCast(@min(rows.items.len, grid.rows));
+    const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 } };
+    const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    var draw_list = try coretext_frame_builder.buildFileTreeDrawList(
+        allocator,
+        rows.items,
+        null,
+        0,
+        visible,
+        grid.cols,
+        fg,
+        active_fg,
+        null,
+        null,
+        null,
+    );
+
+    // ── DrawList → 화면 ──────────────────────────────────────────────────────────────────────
+    // **DrawList 소유권은 프레임으로 넘어간다.** `RenderFrame.deinit` 이 `self.draw_list.deinit` 을
+    // 부르므로 여기서 또 `defer draw_list.deinit` 을 걸면 **double free** 다. 적대적 검증이 잡았고,
+    // 그때까지 안 보였던 이유가 중요하다 — 앞선 실행들은 스크린샷을 찍고 **프로세스를 죽였기** 때문에
+    // teardown 이 한 번도 안 돌았다. 빈 디렉터리(행 2 개)가 900 프레임을 빨리 지나 거기까지 갔다.
+    // 실패 경로에서는 아직 프레임이 없으니 우리가 해제한다.
+    var frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, draw_list, shaper, rasterizer) catch |err| {
+        draw_list.deinit(allocator);
+        return err;
+    };
+    defer frame.deinit(allocator);
+
+    const now_w = renderer_state.atlas.config.atlas_width_px;
+    const now_h = renderer_state.atlas.config.atlas_height_px;
+    if (now_w != atlas_w or now_h != atlas_h) {
+        try pipeline.resizeAtlas(now_w, now_h);
+        atlas_w = now_w;
+        atlas_h = now_h;
+    }
+    var region_uploads: usize = 0;
+    const rf = frame.glyph_raster_frame;
+    for (rf.uploads) |up| {
+        const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
+        pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch continue;
+        region_uploads += 1;
+    }
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+        allocator,
+        frame.glyph_quad_frame,
+        frame.draw_list.cells,
+        colors,
+    );
+    defer allocator.free(native);
+
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+    try cells.ensureTotalCapacity(allocator, native.len);
+    for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+
+    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+    var close_requested = false;
+    var frames: usize = 0;
+    while (frames < 900 and !window.quit_requested and !close_requested) : (frames += 1) {
+        for (window.poll()) |ev| switch (ev) {
+            .close_requested => close_requested = true,
+            else => {},
+        };
+        try present.beginFrame(clear);
+        try pipeline.draw(cells.items, present.width_px, present.height_px);
+        try present.present(false);
+        _ = usleep(16_000);
+    }
+
+    // **보고는 `renderer.frame_probe` 가 단일 출처다.** 처음엔 손으로 몇 줄을 골라 찍었는데, 그 모듈의
+    // 머리말이 정확히 그 결함을 예고한다 — "각 smoke가 따로 구현하면 GlyphFrameStats 가 바뀔 때마다
+    // 여러 곳을 손으로 맞춰야 하고 키 schema 도 서로 어긋난다(**한 smoke만 fallback_count 를 빼먹는
+    // 식**)." 적대적 검증에서 이모지 이름이 두부(□)로 그려지는데 내 보고에 그 사실이 **한 줄도 없던**
+    // 것을 보고 알았다. 지금은 `fallback_count`·`replacement_count` 가 자동으로 실린다.
+    const stats = maru.renderer.renderFrameStats(frame, renderer_state.atlas.entryCount());
+
+    try stdout.writeAll("maru.win32-file-tree-draw-smoke.v1\n");
+    try stdout.print("root={s}\n", .{root_path});
+    try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
+    try stdout.print("rows={d} drawn_rows={d}\n", .{ rows.items.len, visible });
+    try stdout.print("d3d_cells={d} atlas_region_uploads={d}\n", .{ cells.items.len, region_uploads });
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
+    try stdout.flush();
+
+    // **판정은 프레임 수가 아니라 준비된 프레임이다.** 프레임만 세면 빈 창도 초록이다 — ⒜ 에서 행 수만
+    // 세면 빈 스캔이 초록이던 것과 같은 부류다. `prepared()` 는 내부 일관성에 더해 글리프가 실제로
+    // 잡혔고 아틀라스가 채워졌는지까지 본다 — 손으로 짠 `cells.len != 0` 보다 강하다.
+    if (!stats.prepared() or cells.items.len == 0) {
+        try stderr.writeAll("maru win32-file-tree-draw-smoke: the frame was not prepared\n");
+        try stderr.flush();
+        return error.NothingDrawn;
+    }
 }
 
 /// `maru win32-terminal-smoke` — W7.2c-2. **actual 터미널 화면이 Windows에 뜬다.**

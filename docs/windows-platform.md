@@ -1174,6 +1174,73 @@ native 를 요구한다(§4.2). 판정 근거는 "그 파일이 만든 경로가
 **남은 자리는 원장에 적었다.** `agent_session_archive_backend.zig`·`agent_session_archive_scope_backend.zig`
 가 같은 방식으로 `~/.claude/projects`·`~/.codex/sessions` 를 잇고 그 값이 에이전트 도크 목록으로 간다.
 같은 결함이지만 그 표면은 **W8.5b** 몫이라 이번에 안 건드렸고, 경계 파일 주석이 그것을 원장으로 남긴다.
+
+### 2m.6 파일 트리가 Windows 화면에 뜬다 (W8.2 ⒝, 실측 2026-08-20)
+
+`maru win32-file-tree-draw-smoke` 가 **저장소 자신**을 훑어 그 행을 D3D11 창에 그린다. fixture 를 안
+만드는 이유는 화면에 뜨는 것이 진짜 파일 이름이라야 "그럴듯한 그림" 과 "실제로 도는 것" 이 갈리기
+때문이다.
+
+```text
+root=D:/ohah/maru
+rows=20 drawn_rows=20
+renderer_frame_prepared=true
+renderer_glyph_count=306
+```
+
+**⒝ 가 두 슬라이스가 아니라 하나였다 — §2m.4 의 표가 과대평가였다.** 거기 "Windows 에는 `ChromeDraw`
+를 낮추는 층이 없다" 고 적었는데, 탐색기 행의 **텍스트 투영은 이미 중립**이었다.
+`coretext_frame_builder.buildFileTreeDrawList` 가 이름과 달리 CoreText 를 한 번도 안 부르고
+`renderer.DrawList` 를 낸다. 그래서 남은 것은 Windows 가 이미 가진 셀 파이프라인에 그것을 먹이는
+일뿐이었다. 렌더 경로는 터미널과 **같은 네 단계**를 그대로 쓴다 — 다른 길을 내면 한쪽만 고쳐지는
+순간 조용히 갈린다(`win32_terminal.zig` 머리말).
+
+**"컴파일된다" 로 결론 내지 않았다 — 네 단계로 재고 나서야 그렇게 적었다.**
+
+| 단계 | 결과 |
+|---|---|
+| 함수 본문의 `coretext_*` 참조 | 0 회 |
+| OS 가드 | 없음 |
+| Windows 컴파일·링크 | 통과(편집·rc·바이너리 해시 확인) |
+| **런타임 호출** | `"vproj>src README.md"` |
+
+앞의 셋만으로는 부족하다는 **반례가 같은 저장소에 있다**: `system_text.zig` 는 Windows 로 컴파일되지만
+`shapeUnresolvedRun` 첫 줄이 `if (builtin.os.tag != .macos) return error.UnsupportedSystemText` 다.
+그 한 줄을 못 봤으면 "낮추기는 거의 공짜" 라고 적을 뻔했다. **컴파일 표면과 런타임 배선은 다른 축이고,
+이 문서가 그것을 양방향으로 한 번씩 틀렸다**(§2m.4 는 과소, 그 직후 가설은 과대).
+
+**아직 배경 띠(hover·선택·활성)는 없다.** 쿼드라서 D3D11 에 두 번째 파이프라인이 필요하고
+(`d3d11_cells` 가 "둘이 되는 시점(chrome quad·kitty 이미지)" 으로 예고해 둔 자리다) 이 슬라이스 밖이다.
+글자가 먼저인 것이 순서다 — 띠만 있고 글자가 없으면 아무것도 못 읽는다.
+
+**적대적 검증이 셋을 찾았다.**
+
+| # | 무엇 | 왜 안 보였나 |
+|---|---|---|
+| ⑴ | **double free** — `RenderFrame.deinit` 이 `draw_list` 를 소유하는데 우리가 또 해제했다 | 스크린샷을 찍고 **프로세스를 죽여서** teardown 이 한 번도 안 돌았다. 빈 디렉터리(행 2 개)가 900 프레임을 빨리 지나 거기까지 갔다 |
+| ⑵ | 보고가 **글리프 대체를 숨겼다** | 손으로 몇 줄만 골라 찍었다. 이모지 이름이 두부(□)로 그려지는데 출력에 **한 줄도 없었다** |
+| ⑶ | 스모크가 **build step 이 아니었다** | #2457 이 세운 관례를 이 슬라이스에서 다시 어겼다 |
+
+⑵ 는 `renderer.frame_probe` 로 고쳤다 — 그 모듈 머리말이 정확히 이 결함을 예고한다("**한 smoke만
+fallback_count 를 빼먹는 식**"). 판정도 손으로 짠 `cells.len != 0` 에서 `stats.prepared()` 로 올렸다.
+그것은 내부 일관성에 더해 **글리프가 실제로 잡혔고 아틀라스가 채워졌는지**까지 본다.
+
+**적대적 디렉터리로도 쟀다** — 66 항목(창 34 행보다 많다), 한글 폴더, 일본어·러시아어 파일, 이모지,
+124 자 이름.
+
+```text
+rows=68 drawn_rows=34            ← 창을 넘겨 그리지 않는다
+renderer_glyph_fallback_count=3  ← 한글 2 자 + 이모지
+renderer_glyph_replacement_count=0
+```
+
+`rows=68` 은 66 항목 + 루트 + `Recent files` 머리다. **`.git` 이 빠진 것은 결함이 아니다**
+(`Tree.shouldExcludeName`). 124 자 이름이 화면에 없어 누락을 의심했는데, 정렬이 대소문자를 무시해
+`f031` 뒤로 간 것이었다 — 잘린 것이지 빠진 것이 아니다.
+
+**이모지가 두부로 그려지는 것은 이 경로의 결함이 아니라 폰트 커버리지다.** `replacement_count=0` 이
+그것을 가른다 — 대체 문자(U+FFFD)로 바뀐 것이 아니라 폴백 사슬이 글리프를 못 찾은 것이다. 터미널과
+같은 사슬을 쓰므로 여기만의 문제가 아니고, 고치려면 이모지 폰트를 사슬에 넣어야 한다(별건).
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

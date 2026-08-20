@@ -12621,6 +12621,7 @@ pub const ClientSlot = struct {
         reservation: AttachmentBindingReservation,
         lease: *lease_mod.ConnectionLease,
     ) BindingError!void {
+        try self.preflightAttachmentDrop(binding, reservation, lease);
         const operation = try self.beginCanonicalAuthorityAccess();
         defer self.endRegisteredClientOperation(operation);
         if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
@@ -12663,6 +12664,51 @@ pub const ClientSlot = struct {
             lease.stream_id,
         ) catch unreachable;
         operation.node.pin_owner.active_cleanup = 1;
+    }
+
+    /// Allocation-free half of `beginAttachmentDrop`. CR5 host-wide preparation runs this for
+    /// every sibling before any attachment or shared Client state is changed.
+    pub fn preflightAttachmentDrop(
+        self: *ClientSlot,
+        binding: *contract.PreparedAttachmentBinding,
+        reservation: AttachmentBindingReservation,
+        lease: *lease_mod.ConnectionLease,
+    ) BindingError!void {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        if (operation.node.active_operation_generation != 0) return error.AdminBusy;
+        if (!operation.node.rpc_free_evidence.emptyExact()) return error.AdminBusy;
+        if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
+        if (!contract.attachmentRoleRawValid(&reservation.identity.role))
+            return error.InvalidIdentity;
+        const canonical = binding.identity orelse return error.InvalidIdentity;
+        if (!canonical.matches(reservation.identity) or
+            canonical.binding_storage_addr != @intFromPtr(binding) or
+            binding.lifecycle != .committed or
+            lease.stream_id == 0 or !lease.canRelease(self.pid))
+            return error.InvalidLease;
+        switch (try operation.node.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            canonical,
+        )) {
+            .settled => {},
+            .busy => return error.AdminBusy,
+            .invalid => return error.InvalidState,
+        }
+        switch (try operation.node.cleanup_registry.rpcResponseSettlementReadiness(
+            reservation.cleanup,
+            canonical,
+        )) {
+            .settled => {},
+            .busy => return error.AdminBusy,
+            .invalid => return error.InvalidState,
+        }
+        try operation.node.cleanup_registry.preflightBoundDrop(
+            reservation.cleanup,
+            canonical,
+            lease.stream_id,
+        );
     }
 
     /// No-fail suffix for a successfully begun attachment drop. The owner must call this exactly

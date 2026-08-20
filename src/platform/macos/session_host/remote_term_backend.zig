@@ -129,6 +129,7 @@ const HostReconnectJobState = enum(u8) {
     pre_takeover_failed = 11,
     controller_promoted = 12,
     preparing = 13,
+    retirements_prepared = 14,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -310,6 +311,7 @@ const HostReconnectJob = struct {
             @intFromEnum(HostReconnectJobState.pre_takeover_failed),
             @intFromEnum(HostReconnectJobState.controller_promoted),
             @intFromEnum(HostReconnectJobState.preparing),
+            @intFromEnum(HostReconnectJobState.retirements_prepared),
             => true,
             else => false,
         };
@@ -446,6 +448,26 @@ const HostReconnectJob = struct {
                     !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
                     self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
                     self.controller_generation != 0) return false;
+            },
+            @intFromEnum(HostReconnectJobState.retirements_prepared) => {
+                if (self.client == null or self.client.?.fd < 0 or self.client.?.host_id != self.host_id or
+                    !self.client.?.runtime_catchup_barrier_v1 or self.client.?.connection_profile != .gui or
+                    adapter.connectionGeneration() != self.expected_connection_generation or
+                    self.runtime_handle != 0 or self.runtime_addr != 0 or self.runtime_generation != 0 or
+                    !std.meta.eql(self.replacement, client_slot_mod.PreparedClientReplacement{}) or
+                    self.request_nonce != 0 or self.candidate_failure_reason_raw != 0 or
+                    !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
+                    self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
+                    self.controller_generation != 0) return false;
+                for (self.runtimeRowsSlice() orelse return false) |row| {
+                    const entry = backend.runtimes.get(row.identity.runtime_handle) orelse return false;
+                    if (!RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+                        entry.runtime,
+                        adapter,
+                        @intFromPtr(self),
+                        self.job_generation,
+                    )) return false;
+                }
             },
             @intFromEnum(HostReconnectJobState.replacement_published) => {
                 if (self.client != null or self.runtime_handle == 0 or self.runtime_addr == 0 or
@@ -799,6 +821,29 @@ const HostReconnectJob = struct {
 
     fn abort(self: *HostReconnectJob, backend: *RemoteTermBackend) !void {
         if (!self.valid(backend)) return error.InvalidHostReconnectJob;
+        if (self.state_raw == @intFromEnum(HostReconnectJobState.retirements_prepared)) {
+            const pool = backend.host_pool orelse return error.InvalidHostReconnectJob;
+            const adapter = pool.get(self.host_id) orelse return error.InvalidHostReconnectJob;
+            var index = @as(usize, self.runtime_row_count);
+            while (index > 0) {
+                index -= 1;
+                const row = self.runtime_rows[index];
+                const entry = backend.runtimes.get(row.identity.runtime_handle) orelse
+                    process_seal.fatalIntegrity(.proof_loss);
+                RemoteRuntime.backend_api.abortHostWideRetirement(
+                    entry.runtime,
+                    adapter,
+                    @intFromPtr(self),
+                    self.job_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            }
+            self.state_raw = @intFromEnum(HostReconnectJobState.connected);
+            self.seal = process_seal.hostReconnectJobSeal(
+                self.pid,
+                self.process_nonce,
+                self.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+        }
         if (self.state_raw != @intFromEnum(HostReconnectJobState.connected)) return error.Busy;
         var owned = self.client;
         self.client = null;
@@ -1151,6 +1196,56 @@ pub const RemoteTermBackend = struct {
         try job.abort(self);
         self.host_reconnect_job = null;
         self.allocator.destroy(job);
+    }
+
+    /// CR5b-2a freezes every captured runtime before the shared Client is touched. A failure at
+    /// row k releases rows 0..k-1 in reverse order and leaves the connected job reusable/abortable.
+    pub fn prepareHostReconnectRuntimeRetirements(self: *RemoteTermBackend) anyerror!void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or job.state_raw != @intFromEnum(HostReconnectJobState.connected))
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        if (@intFromPtr(adapter) != job.adapter_addr or
+            adapter.connectionGeneration() != job.expected_connection_generation)
+            return error.InvalidHostReconnectJob;
+
+        var prepared_count: usize = 0;
+        errdefer {
+            var index = prepared_count;
+            while (index > 0) {
+                index -= 1;
+                const row = job.runtime_rows[index];
+                const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                    process_seal.fatalIntegrity(.proof_loss);
+                RemoteRuntime.backend_api.abortHostWideRetirement(
+                    entry.runtime,
+                    adapter,
+                    @intFromPtr(job),
+                    job.job_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            }
+        }
+        for (job.runtimeRowsSlice() orelse return error.InvalidHostReconnectJob) |row| {
+            const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                return error.InvalidHostReconnectJob;
+            try RemoteRuntime.backend_api.prepareHostWideRetirement(
+                entry.runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            );
+            prepared_count += 1;
+        }
+        job.state_raw = @intFromEnum(HostReconnectJobState.retirements_prepared);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
     }
 
     /// Connected job의 fresh Client를 같은 HostAdapter의 next connection generation으로 exact once 게시한다.
@@ -3837,6 +3932,234 @@ test "CR5b-1 host job runtime set은 copy membership identity drift와 empty를 
     backend_value.host_reconnect_job = null;
 }
 
+test "CR5b-2a host job은 three-runtime retirement를 모두 준비한 뒤 mutation 없이 abort한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+
+    var current_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &current_fds));
+    var current: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = current_fds[0],
+        .host_id = 91,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var attach_peer = try std.Thread.spawn(
+        .{},
+        remote_runtime.testing_api.serveSemanticAttachPeers,
+        .{ current_fds[1], @as(usize, 3) },
+    );
+    var attach_peer_joined = false;
+    defer if (!attach_peer_joined) attach_peer.join();
+
+    var pool = AdapterPool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expectEqual(@as(u128, 91), try addOwnedClient(&pool, testing.allocator, &current));
+    const adapter = pool.get(91).?;
+    const adapter_generation = pool.adapterGeneration(91).?;
+    const connection_generation_before = adapter.connectionGeneration();
+    var backend_value = RemoteTermBackend.initAttachOnlyWithPool(
+        testing.allocator,
+        testing.io,
+        &pool,
+        @ptrFromInt(@alignOf(SurfaceRuntime)),
+    );
+    try backend_value.claimProductSingleton();
+    defer backend_value.deinit();
+
+    var runtimes: [3]RemoteRuntime = undefined;
+    var initialized: usize = 0;
+    defer {
+        var index = initialized;
+        while (index > 0) {
+            index -= 1;
+            remote_runtime.testing_api.deinitSemanticRuntimeOnAdapter(&runtimes[index]);
+        }
+    }
+    const ids = [_][32]u8{
+        "000000000000000000000000000000a1".*,
+        "000000000000000000000000000000a2".*,
+        "000000000000000000000000000000a3".*,
+    };
+    for (&runtimes, 0..) |*runtime, index| {
+        try remote_runtime.testing_api.initSemanticRuntimeOnAdapter(
+            runtime,
+            adapter,
+            testing.allocator,
+            ids[index],
+            @intCast(index + 1),
+        );
+        initialized += 1;
+        try backend_value.runtimes.put(testing.allocator, @intCast((index + 1) * 10), .{
+            .runtime = runtime,
+            .host_id = 91,
+            .host_adapter_generation = adapter_generation,
+            .runtime_generation = @intCast(index + 1),
+        });
+    }
+    attach_peer.join();
+    attach_peer_joined = true;
+    defer {
+        _ = backend_value.runtimes.remove(10);
+        _ = backend_value.runtimes.remove(20);
+        _ = backend_value.runtimes.remove(30);
+    }
+
+    var fresh_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fresh_fds));
+    defer _ = c.close(fresh_fds[1]);
+    var fresh: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fresh_fds[0],
+        .host_id = 91,
+        .runtime_catchup_barrier_v1 = true,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var clock = struct {
+        now_ns: i128 = 10,
+        fn read(context: *anyopaque) i128 {
+            return @as(*@This(), @ptrCast(@alignCast(context))).now_ns;
+        }
+    }{};
+    const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, .fromInjected(
+        .{ .context = &clock, .now_ns = @TypeOf(clock).read },
+        100,
+    ));
+    const job = try testing.allocator.create(HostReconnectJob);
+    job.* = .{};
+    backend_value.host_reconnect_job = job;
+    var job_owned = true;
+    defer if (job_owned) {
+        if (job.client) |*owned| owned.deinit();
+        backend_value.host_reconnect_job = null;
+        testing.allocator.destroy(job);
+    };
+    try job.prepareForConnect(&backend_value, 91, phase);
+    try testing.expectEqual(HostReconnectStart.connected, job.adoptConnected(
+        &backend_value,
+        91,
+        phase,
+        &fresh,
+    ));
+    const generations_before = [_]u64{
+        (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(&runtimes[0])).shell_generation,
+        (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(&runtimes[1])).shell_generation,
+        (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(&runtimes[2])).shell_generation,
+    };
+
+    for (0..runtimes.len) |busy_index| {
+        remote_runtime.testing_api.setHostRetirementBusy(&runtimes[busy_index], true);
+        try testing.expectError(error.Busy, backend_value.prepareHostReconnectRuntimeRetirements());
+        remote_runtime.testing_api.setHostRetirementBusy(&runtimes[busy_index], false);
+        try testing.expect(job.valid(&backend_value));
+        try testing.expectEqual(@intFromEnum(HostReconnectJobState.connected), job.state_raw);
+        try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+        for (&runtimes, 0..) |*runtime, index| {
+            try testing.expectEqual(
+                generations_before[index],
+                (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(runtime)).shell_generation,
+            );
+            try testing.expect(!RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+                runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            ));
+            try testing.expect(remote_runtime.testing_api.hostRetirementPristine(runtime));
+        }
+    }
+
+    for (0..runtimes.len) |corrupt_index| {
+        const previous = remote_runtime.testing_api.setHostRetirementLifecycleRaw(
+            &runtimes[corrupt_index],
+            0xff,
+        );
+        try testing.expectError(
+            error.InvalidOwner,
+            backend_value.prepareHostReconnectRuntimeRetirements(),
+        );
+        _ = remote_runtime.testing_api.setHostRetirementLifecycleRaw(
+            &runtimes[corrupt_index],
+            previous,
+        );
+        try testing.expect(job.valid(&backend_value));
+        try testing.expectEqual(@intFromEnum(HostReconnectJobState.connected), job.state_raw);
+        try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+        for (&runtimes, 0..) |*runtime, index| {
+            try testing.expectEqual(
+                generations_before[index],
+                (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(runtime)).shell_generation,
+            );
+            try testing.expect(remote_runtime.testing_api.hostRetirementPristine(runtime));
+        }
+    }
+
+    for (0..runtimes.len) |corrupt_index| {
+        const previous = remote_runtime.testing_api.setHostRetirementPayloadReleaseStateRaw(
+            &runtimes[corrupt_index],
+            0xff,
+        );
+        try testing.expectError(
+            error.InvalidOwner,
+            backend_value.prepareHostReconnectRuntimeRetirements(),
+        );
+        _ = remote_runtime.testing_api.setHostRetirementPayloadReleaseStateRaw(
+            &runtimes[corrupt_index],
+            previous,
+        );
+        try testing.expect(job.valid(&backend_value));
+        try testing.expectEqual(@intFromEnum(HostReconnectJobState.connected), job.state_raw);
+        try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+        for (&runtimes) |*runtime| try testing.expect(
+            remote_runtime.testing_api.hostRetirementPristine(runtime),
+        );
+    }
+
+    const drift_entry = backend_value.runtimes.getPtr(20).?;
+    drift_entry.runtime_generation += 1;
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.prepareHostReconnectRuntimeRetirements(),
+    );
+    drift_entry.runtime_generation -= 1;
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+    for (&runtimes) |*runtime| try testing.expect(
+        remote_runtime.testing_api.hostRetirementPristine(runtime),
+    );
+
+    try backend_value.prepareHostReconnectRuntimeRetirements();
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(@intFromEnum(HostReconnectJobState.retirements_prepared), job.state_raw);
+    for (&runtimes) |*runtime| try testing.expect(
+        RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+            runtime,
+            adapter,
+            @intFromPtr(job),
+            job.job_generation,
+        ),
+    );
+    var copied_job = job.*;
+    try testing.expect(!copied_job.valid(&backend_value));
+    try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+
+    try backend_value.abortHostReconnectConnect();
+    job_owned = false;
+    try testing.expectEqual(@as(?*HostReconnectJob, null), backend_value.host_reconnect_job);
+    try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+    for (&runtimes, 0..) |*runtime, index| {
+        try testing.expectEqual(
+            generations_before[index],
+            (try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(runtime)).shell_generation,
+        );
+        try testing.expect(remote_runtime.testing_api.hostRetirementPristine(runtime));
+    }
+}
+
 const Cr4aActualIssuerCandidateCase = enum {
     success,
     expired,
@@ -3879,6 +4202,9 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     try short_endpoint.prepareCurrentUserNamespace();
     var socket_buf: [128]u8 = undefined;
     const socket = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    // An interrupted fixture can leave the pathname behind after its daemon has gone. Do not let
+    // that stale readiness observation send the next run into a blocking hello on the wrong cut.
+    _ = c.unlink(socket.ptr);
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -3904,13 +4230,25 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         _ = c.rmdir(base.ptr);
     }
 
-    var initial: client_mod.Client = blk: {
-        var attempts: usize = 0;
-        while (attempts < 200) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket, .gui)) |connected| break :blk connected else |_| _ = usleep(20 * 1000);
-        }
-        return error.TestUnexpectedResult;
-    };
+    // SocketServer binds before the daemon finishes manifest/rollback preparation. A plain
+    // blocking connect can therefore complete at the kernel backlog and then wait forever for
+    // hello_ack while the daemon is still preparing (or has failed). Poll only for endpoint
+    // publication, then bound connect readiness + the complete hello exchange with one deadline.
+    var attempts: usize = 0;
+    while (attempts < 200 and c.access(socket.ptr, c.F_OK) != 0) : (attempts += 1)
+        _ = usleep(20 * 1000);
+    try testing.expect(c.access(socket.ptr, c.F_OK) == 0);
+    const initial_connect_deadline = try client_deadline.AbsoluteDeadline.after(
+        io,
+        30 * std.time.ns_per_s,
+    );
+    var initial = try client_mod.Client.connectUntil(
+        allocator,
+        socket,
+        .gui,
+        protocol.version_major,
+        initial_connect_deadline,
+    );
     var pool = AdapterPool.init(allocator);
     defer pool.deinit();
     try testing.expectEqual(host_id, try addOwnedClient(&pool, allocator, &initial));

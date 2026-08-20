@@ -225,6 +225,22 @@ pub const RemoteAttachment = struct {
         return self.deinitWithDropPolicy(false);
     }
 
+    pub const PayloadDeinitReadiness = enum { ready, busy, corrupt };
+
+    /// Host-wide reconnect may only enter its no-fail suffix after every sibling attachment can
+    /// release without publishing a terminal handoff. Pending generation leases are drained by
+    /// their ordinary owner turns before this preparation; guessing through `deinitPayloadOnly`
+    /// would otherwise allow the kth runtime to fail after earlier runtimes were destroyed.
+    pub fn preflightPayloadOnlyDeinit(self: *const RemoteAttachment) PayloadDeinitReadiness {
+        if (self.transport == null) return .corrupt;
+        if (self.failed_release != null) return .busy;
+        if (self.pending_batch_head > self.pending_batches.items.len) return .corrupt;
+        if (self.pending_batch_head != self.pending_batches.items.len) return .busy;
+        if (!failedReleaseStateRawValid(&self.state.failed_release_state)) return .corrupt;
+        if (self.state.failed_release_state != .none) return .corrupt;
+        return .ready;
+    }
+
     fn deinitWithDropPolicy(self: *RemoteAttachment, drop_stream: bool) PayloadDeinitOutcome {
         if (self.transport) |transport| {
             if (self.failed_release) |lease| {
@@ -630,6 +646,11 @@ pub const RemoteAttachment = struct {
         self.state.controller_generation = successor_generation;
     }
 };
+
+fn failedReleaseStateRawValid(state: *const FailedReleaseState) bool {
+    const raw = @as(*const u8, @ptrCast(state)).*;
+    return raw <= @intFromEnum(FailedReleaseState.indeterminate);
+}
 
 fn exactOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
     const actual = std.meta.fields(Actual);

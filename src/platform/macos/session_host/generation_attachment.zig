@@ -67,6 +67,7 @@ pub const Lifecycle = enum(u8) {
     attached,
     cleaning,
     terminal,
+    retirement_prepared,
 };
 
 fn testAllocationProvenance(generation: u64) executed_response_mod.AllocationProvenance {
@@ -113,6 +114,9 @@ pub const GenerationAttachment = struct {
     event_owner: generation_transport_mod.EventOwner = .{},
     event_generation_mirror: u64 = 0,
     catchup_stage_owner: CatchupStageOwner = .{},
+    retirement_transaction_addr: usize = 0,
+    retirement_transaction_generation: u64 = 0,
+    retirement_adapter_addr: usize = 0,
 
     const CatchupStageOwner = struct {
         const State = enum(u8) {
@@ -723,7 +727,7 @@ pub const GenerationAttachment = struct {
                 .busy => return .busy,
                 .invalid => return .corrupt,
             },
-            .binding_prepared => return .busy,
+            .binding_prepared, .retirement_prepared => return .busy,
             .executing => return .busy,
             .cleaning => return .busy,
             .attached => {
@@ -795,6 +799,94 @@ pub const GenerationAttachment = struct {
         }
         self.lifecycle = .terminal;
         return .cleaned;
+    }
+
+    /// Freezes one attachment for the CR5 host-wide destructive prefix. Every fallible readiness
+    /// check runs before the lifecycle changes; once prepared, ordinary attachment operations are
+    /// rejected by their existing `.attached` guards until abort or no-fail commit.
+    pub fn prepareHostRetirement(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) error{ Busy, InvalidOwner }!void {
+        if (transaction_addr == 0 or transaction_generation == 0 or
+            self.retirement_transaction_addr != 0 or self.retirement_transaction_generation != 0 or
+            self.retirement_adapter_addr != 0) return error.InvalidOwner;
+        if (!rawLifecycleValid(&self.lifecycle) or !self.catchup_stage_owner.stateRawValid() or
+            !self.valid()) return error.InvalidOwner;
+        if (self.lifecycle != .attached or self.catchup_stage_owner.state != .idle)
+            return error.Busy;
+        if (!self.response.lifecycleRawValid()) return error.InvalidOwner;
+        if (self.response.lifecycle != .terminal) return error.Busy;
+        switch (generation_transport_mod.eventReadinessOwned(
+            &self.transport,
+            @intFromPtr(self),
+            &self.event_owner,
+            self.event_generation_mirror,
+        )) {
+            .ready => {},
+            .busy => return error.Busy,
+            .invalid => return error.InvalidOwner,
+        }
+        switch (generation_transport_mod.preflightTerminalizeOwned(
+            &self.transport,
+            @intFromPtr(self),
+        )) {
+            .ready => {},
+            .busy => return error.Busy,
+            .invalid => return error.InvalidOwner,
+        }
+        const payload = &(self.payload orelse return error.InvalidOwner);
+        switch (payload.preflightPayloadOnlyDeinit()) {
+            .ready => {},
+            .busy => return error.Busy,
+            .corrupt => return error.InvalidOwner,
+        }
+        self.batch_adapter.preflightDraining() catch return error.InvalidOwner;
+        adapter.preflightAttachmentDrop(
+            &self.binding,
+            self.reservation orelse return error.InvalidOwner,
+            &self.lease,
+        ) catch |err| return switch (err) {
+            error.AdminBusy => error.Busy,
+            else => error.InvalidOwner,
+        };
+        self.retirement_transaction_addr = transaction_addr;
+        self.retirement_transaction_generation = transaction_generation;
+        self.retirement_adapter_addr = @intFromPtr(adapter);
+        self.lifecycle = .retirement_prepared;
+    }
+
+    pub fn hostRetirementPreparedExact(
+        self: *const GenerationAttachment,
+        adapter: *const host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) bool {
+        return rawLifecycleValid(&self.lifecycle) and self.valid() and
+            self.lifecycle == .retirement_prepared and self.catchup_stage_owner.stateRawValid() and
+            self.catchup_stage_owner.state == .idle and
+            self.retirement_transaction_addr == transaction_addr and
+            self.retirement_transaction_generation == transaction_generation and
+            self.retirement_adapter_addr == @intFromPtr(adapter);
+    }
+
+    pub fn abortHostRetirement(
+        self: *GenerationAttachment,
+        adapter: *const host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) error{InvalidOwner}!void {
+        if (!self.hostRetirementPreparedExact(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        )) return error.InvalidOwner;
+        self.retirement_transaction_addr = 0;
+        self.retirement_transaction_generation = 0;
+        self.retirement_adapter_addr = 0;
+        self.lifecycle = .attached;
     }
 
     pub fn deinit(self: *GenerationAttachment, adapter: *host_adapter_mod.HostAdapter) void {
@@ -1736,7 +1828,7 @@ pub fn executeRequestWithDecoderOwned(
 
 fn rawLifecycleValid(value: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(Lifecycle.terminal);
+    return raw <= @intFromEnum(Lifecycle.retirement_prepared);
 }
 
 fn recursivelyContainsPointer(comptime T: type) bool {
@@ -2042,7 +2134,7 @@ pub const testing_api = if (builtin.is_test) struct {
                 },
                 .attached => attachment.deinit(adapter),
                 .shell => attachment.lifecycle = .terminal,
-                .pristine, .cleaning, .terminal => {},
+                .pristine, .retirement_prepared, .cleaning, .terminal => {},
             }
         }
         try attachment.binding.beginExecute(receipt);

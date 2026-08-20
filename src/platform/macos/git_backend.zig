@@ -11,6 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const win32_process = @import("../windows/win32_process.zig"); // Windows 캡처 러너. **`maru.zig` 로 내보내지 않는다** — 그러면 중립 배럴이 Windows 어댑터를 품어 `check-targets` 가 macOS·Linux 로 컴파일하다 깨진다(실측). 이 파일은 `platform/macos` 안이지만 두 OS 를 다 탄다(`file_tree_backend.zig` 와 같은 사정)
 const git_command = maru.session.git_command;
 const git_write_command = maru.session.git_write_command;
 const git_locate = maru.session.git_locate;
@@ -1618,6 +1619,14 @@ fn runArgvWithEnv(
     argv_slices: []const []const u8,
     index_file: ?[]const u8,
 ) !Output {
+    // **Windows 는 `CreateProcessW` + 익명 파이프로 간다.** 아래 POSIX 갈래는 `fork`/`execve` 를 쓰는데
+    // Windows 에는 없다(`std.c.fork` 가 그 타깃에서 `void` 라 분석되는 순간 컴파일이 깨진다). `comptime`
+    // 분기라 **고른 쪽만 분석**되므로 두 갈래가 한 파일에 있어도 서로를 안 깨뜨린다.
+    //
+    // **POSIX 갈래는 한 줄도 안 건드린다.** 돌아가는 검증된 경로를 옮기지 않는 것이 이 배선의 전제다 —
+    // 옮기면 검증할 수 없는 코드로 검증된 코드를 바꾸는 일이 된다(Windows 호스트에서는 POSIX 테스트를
+    // 못 돌린다).
+    if (comptime builtin.os.tag == .windows) return runArgvWithEnvWindows(allocator, argv_slices, index_file);
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —
@@ -1679,6 +1688,51 @@ fn runArgvWithEnv(
     if (spawned.exit_code != 0) return error.GitFailed;
     // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
     return .{ .bytes = spawned.stdout_bytes, .truncated = spawned.stdout_bytes.len >= max_output_bytes };
+}
+
+/// `runArgvWithEnv` 의 Windows 갈래. **POSIX 갈래와 같은 계약을 지킨다** — 읽기라 stdout 만 받고,
+/// 환경은 상속한 뒤 덮어쓰며, 사용자 환경의 `GIT_INDEX_FILE` 은 통째로 뺀다(남겨 두면 우리 명령이
+/// 남의 index 에 쓴다).
+///
+/// 실행기는 `platform/windows/win32_process.zig` 다. `std.process.Child` 를 안 쓰는 것은 이 저장소의
+/// 방침이고(0.16 에서 io 기반으로 개편 — `ssh_upload.zig`·`update_check.zig` 가 같은 이유로 피한다),
+/// 그쪽은 `pty/windows.zig` 가 검증한 결(`CreateProcessW` + 익명 파이프)을 따른다.
+fn runArgvWithEnvWindows(
+    allocator: std.mem.Allocator,
+    argv_slices: []const []const u8,
+    index_file: ?[]const u8,
+) !Output {
+    // 덮어쓰기 목록은 POSIX 갈래와 **같은 단일 출처**에서 온다(`git_command.env_overrides`) — 두 벌로
+    // 만들면 한쪽만 갱신되는 순간 Windows 에서만 `GIT_TERMINAL_PROMPT` 가 빠져 자격 증명 창이 뜬다.
+    var overrides: std.ArrayList(win32_process.EnvVar) = .empty;
+    defer overrides.deinit(allocator);
+    for (git_command.env_overrides) |o| {
+        overrides.append(allocator, .{ .name = o.name, .value = o.value }) catch return error.GitFailed;
+    }
+    if (index_file) |path| {
+        overrides.append(allocator, .{ .name = "GIT_INDEX_FILE", .value = path }) catch return error.GitFailed;
+    }
+
+    var result = win32_process.capture(
+        allocator,
+        argv_slices,
+        null, // git 은 `-C <repo>` 로 저장소를 받는다 — cwd 를 또 바꾸면 판정의 주인이 둘이 된다.
+        .stdout_only,
+        overrides.items,
+        // 덮어쓰기에 이미 있으면 그쪽이 이기므로 중복이 아니다. 없을 때(스냅샷이 아닌 명령) 사용자
+        // 환경의 값을 **빼는** 것이 이 자리의 일이다.
+        &.{"GIT_INDEX_FILE"},
+        max_output_bytes,
+    ) catch return error.GitFailed;
+    errdefer result.deinit(allocator);
+
+    // POSIX 갈래와 같은 판정이다 — 0 이 아니면 실패고, 그때 stdout 은 버린다(부분 출력을 정상 결과로
+    // 싣지 않는다).
+    if (result.exit_code != 0) {
+        result.deinit(allocator);
+        return error.GitFailed;
+    }
+    return .{ .bytes = result.bytes, .truncated = result.truncated };
 }
 
 /// **어느 스트림 하나만** 파이프로 받을지. 읽기와 쓰기가 정확히 반대다.

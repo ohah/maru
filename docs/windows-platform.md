@@ -1421,6 +1421,49 @@ drawn="feat/w8.4-…0 0vChanges3build.zig+18 -0Mgitchain.zigsrc/Uwin32_process.z
 **러너는 아직 아무도 안 부른다.** git 백엔드를 이 러너로 갈아 끼우는 것은 다음 슬라이스다 — 그 파일은
 `std.c.*` 를 69 곳에서 쓰고 실행 자리가 둘(`spawnCapture`·`runQuiet`)이라, 러너를 세우는 것과 갈아
 끼우는 것을 한 PR 에 섞으면 무엇이 깨졌는지 못 가른다.
+
+### 2m.9 git 백엔드가 Windows 에서 돈다 (W8.4, 실측 2026-08-20)
+
+`maru win32-git-smoke` 가 임시 저장소를 만들어 **제품 진입점**으로 상태를 읽는다 —
+`Backend.submitRepoStatus` → 백그라운드 스레드 → `takeRepoStatusResult`.
+
+```text
+repo=D:/ohah/maru/zig-out/maru-git-smoke
+ok=true text_bytes=69  branch=master  entries=2
+found: alpha=true hangul=true
+```
+
+**POSIX 갈래는 한 줄도 안 건드렸다.** `runArgvWithEnv` 맨 앞에 `comptime` 분기 한 줄을 넣고 Windows 만
+캡처 러너로 보낸다. 처음엔 실행 코드를 배럴(`src/process_capture/`)로 뽑아 양쪽을 대등하게 두려 했는데,
+그것은 **돌아가는 검증된 macOS 코드를 한 번도 못 돌려 본 코드로 교체하는 일**이었다(Windows 호스트에서는
+POSIX 테스트를 못 돌린다). 실제로 그 교체본에서 결함 하나를 찾았고 — 상한 처리를 근거 없이 바꿔 둔 것 —
+한 번 읽어 하나가 나왔다면 못 찾은 것이 더 있다고 보는 쪽이 맞다. 배럴은 버렸다.
+
+**`comptime` 분기가 성립하는 근거**는 고른 쪽만 분석된다는 것이다. POSIX 갈래의 `std.c.fork` 는 Windows
+타깃에서 `void` 라 분석되는 순간 컴파일이 깨진다.
+
+**그런데 그 성질이 함정이기도 하다.** Windows 갈래를 아무도 안 부르면 **그것도 분석되지 않는다** —
+실제로 없는 함수(`ok()`)를 부르는 채로 `zig build` 가 통과했고, 모든 공개 선언을 강제 참조하고 나서야
+드러났다. 그래서 이 스모크가 필요하다. 단위 테스트로는 못 메운다: `git_backend.zig` 를 테스트 루트로
+세우면 그 파일의 **POSIX 전용 테스트 본문**까지 분석돼 Windows 에서 깨진다(런타임 `SkipZigTest` 는
+컴파일을 막지 못한다).
+
+**적대적 검증이 셋을 찾았다.**
+
+| # | 무엇 | 어떻게 |
+|---|---|---|
+| ⑴ | Windows 갈래가 **분석조차 안 됨** — 없는 함수를 부르는 채로 빌드 통과 | 공개 선언 강제 참조 |
+| ⑵ | `git_backend.zig` 테스트가 **한 개도 안 돌고 있었다**(`build.zig` 에 등록 없음) | 새 테스트가 출력에 안 나타남 |
+| ⑶ | 결과를 **잘못된 할당기로 해제** — "Invalid free" 패닉 | 스모크를 끝까지 돌림 |
+
+⑵ 는 등록해 고쳤다 — 단 **비-Windows 로 가둔다**(위의 POSIX 본문 분석 문제). ⑶ 은 결과가 백그라운드
+스레드의 `worker_allocator` 로 만들어지기 때문이다. 제품도 같은 자리에서 그것을 쓴다(`scm_dock.zig`).
+
+**캡처 러너를 `maru.zig` 로 내보내면 안 된다.** 잠깐 그렇게 했더니 `check-targets` 가 깨졌다 — 중립
+배럴이 Windows 어댑터를 품는 순간 그것이 macOS·Linux 로 컴파일된다. 게이트 말이 맞아서 되돌렸고,
+`git_backend` 가 상대 경로로 가져온다.
+
+**아직 읽기뿐이다.** 쓰기(스테이지·커밋)는 `spawnCapture(.stderr_only)` 를 타는 다른 자리라 남았다.
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

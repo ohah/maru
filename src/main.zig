@@ -15,6 +15,8 @@ const dwrite_font = @import("platform/windows/dwrite_font.zig");
 const win32_text = @import("platform/windows/win32_text.zig");
 const win32_terminal = @import("platform/windows/win32_terminal.zig");
 const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
+const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
+const win32_process = @import("platform/windows/win32_process.zig"); // 캡처 러너 — 스모크가 fixture 저장소를 만들 때 쓴다
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = @import("platform/windows/win32_keys.zig");
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
@@ -100,6 +102,10 @@ fn dispatch(
     if (std.mem.eql(u8, command, "win32-frame-smoke")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         try runWin32FrameSmoke(io, allocator, stdout, stderr);
+        return;
+    }
+    if (std.mem.eql(u8, command, "win32-git-smoke")) {
+        try runWin32GitSmoke(io, allocator, stdout, stderr);
         return;
     }
 
@@ -1604,6 +1610,113 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
         try stderr.writeAll("maru win32-file-tree-draw-smoke: the frame was not prepared\n");
         try stderr.flush();
         return error.NothingDrawn;
+    }
+}
+
+/// `maru win32-git-smoke` — W8.4. **git 백엔드가 Windows 에서 제품 경로로 돈다.**
+///
+/// **이 스모크가 없으면 그 코드는 분석조차 안 된다.** Windows 갈래는 `comptime` 분기 뒤에 있어 아무도
+/// 안 부르면 컴파일러가 안 본다 — 실제로 없는 함수를 부르는 채로 `zig build` 가 통과했고, 강제 참조로
+/// 재고 나서야 드러났다. 단위 테스트로는 못 메운다: `git_backend.zig` 를 테스트 루트로 세우면 그 파일의
+/// **POSIX 전용 테스트 본문**(`std.c.pipe`·`std.c.fork`)까지 분석돼 Windows 에서 깨진다(런타임
+/// `SkipZigTest` 는 컴파일을 막지 못한다).
+///
+/// 그래서 파일 트리와 같은 방식으로 **제품 진입점**을 태운다 — `Backend.submitRepoStatus` →
+/// 백그라운드 스레드 → `takeRepoStatusResult`. 백엔드가 실제로 쓰는 길이고, 중간을 건너뛰면 그 자리가
+/// 안 밟힌다(⒜ 에서 `submit` 과 `submitValidatedRootScan` 을 헷갈려 W8.1 수정을 하나도 안 밟았던 것과
+/// 같은 종류의 실수를 막는다).
+fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-git-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // ── 임시 저장소를 만든다 ─────────────────────────────────────────────────────────────────
+    //
+    // 이 저장소를 그대로 쓰면 커밋 상태에 따라 결과가 달라져 통과가 무엇을 뜻하는지 흐려진다.
+    const cwd = std.Io.Dir.cwd();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_native = root_buf[0..try cwd.realPath(io, &root_buf)];
+    const cwd_norm = try maru.path_shape.normalizeSeparators(allocator, cwd_native);
+    defer allocator.free(cwd_norm);
+    const repo = try std.fmt.allocPrint(allocator, "{s}/zig-out/maru-git-smoke", .{cwd_norm});
+    defer allocator.free(repo);
+    cwd.deleteTree(io, repo) catch {};
+    try cwd.createDir(io, repo, .default_dir);
+
+    var init_out = win32_process.capture(allocator, &.{ "git", "init", "-q" }, repo, .stdout_only, &.{}, &.{}, 1 << 20) catch |err| {
+        try stderr.print("maru win32-git-smoke: git init failed({s})\n", .{@errorName(err)});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    init_out.deinit(allocator);
+
+    // **비-ASCII 이름을 하나 섞는다.** 경로가 WTF-8 로 끝까지 가는지가 숨은 판정이고, 깨지면 한글
+    // 사용자 이름을 가진 기기에서 목록이 통째로 빈다.
+    const names = [_][]const u8{ "alpha.txt", "\u{d55c}\u{ae00}.txt" };
+    for (names) |name| {
+        const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo, name });
+        defer allocator.free(p);
+        try cwd.writeFile(io, .{ .sub_path = p, .data = "x" });
+    }
+
+    // ── 제품 진입점 ──────────────────────────────────────────────────────────────────────────
+    var backend = try git_backend_mod.Backend.init(io);
+    defer backend.deinit();
+    if (!backend.submitRepoStatus("git", repo, 1)) {
+        try stderr.writeAll("maru win32-git-smoke: could not submit the repo status request\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // **상한을 실제로 강제한다.** 결과가 안 오면 빈 결과가 아니라 실패다.
+    var rounds: usize = 0;
+    var result: ?git_backend_mod.RepoStatusResult = null;
+    while (rounds < 6000) : (rounds += 1) {
+        if (backend.takeRepoStatusResult()) |taken| {
+            result = taken;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    var status = result orelse {
+        try stderr.writeAll("maru win32-git-smoke: the repo status did not finish in time\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    // **`worker_allocator` 로 해제한다.** 결과는 백그라운드 스레드가 그 할당기로 만든다 — 스모크의
+    // 할당기로 해제하면 "Invalid free" 다(실측: 처음에 그렇게 짜서 패닉했다). 제품도 같은 자리에서
+    // `git_backend_mod.worker_allocator` 를 쓴다(`scm_dock.zig`).
+    defer status.deinit(git_backend_mod.worker_allocator);
+
+    // ── 판정: 내용이다 ───────────────────────────────────────────────────────────────────────
+    //
+    // `ok` 만 보면 **빈 출력도 통과**한다. porcelain v2 는 추적되지 않은 파일을 `? <경로>` 로 내므로
+    // 두 이름이 실제로 실려 왔는지 본다.
+    var found_alpha = false;
+    var found_hangul = false;
+    var it = maru.session.git_status.iterate(status.text);
+    var entries: usize = 0;
+    while (it.next()) |entry| {
+        entries += 1;
+        if (std.mem.indexOf(u8, entry.path, "alpha.txt") != null) found_alpha = true;
+        if (std.mem.indexOf(u8, entry.path, "\u{d55c}\u{ae00}.txt") != null) found_hangul = true;
+    }
+    const head = maru.session.git_status.parseHead(status.text);
+
+    try stdout.writeAll("maru.win32-git-smoke.v1\n");
+    try stdout.print("repo={s}\n", .{repo});
+    try stdout.print("ok={} text_bytes={d}\n", .{ status.ok, status.text.len });
+    try stdout.print("branch={s}\n", .{head.branch orelse "(none)"});
+    try stdout.print("entries={d}\n", .{entries});
+    try stdout.print("found: alpha={} hangul={}\n", .{ found_alpha, found_hangul });
+    try stdout.flush();
+
+    if (!status.ok or !found_alpha or !found_hangul) {
+        try stderr.writeAll("maru win32-git-smoke: the status did not carry the fixture names\n");
+        try stderr.flush();
+        return error.UnknownCommand;
     }
 }
 

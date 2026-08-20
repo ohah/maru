@@ -518,7 +518,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         var index_scratch: [4096]u8 = undefined;
         const counted = @min(line_count, row_capacity);
         for (lines[0..counted], 0..) |line, i| {
-            counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, true, &index_scratch).rows;
+            counts[i] = editor_view.content.rowCount(line, lab_tab_width, layout.content.width, true, &index_scratch).rows;
         }
         var starts: [row_capacity + 1]u32 = undefined;
         const index = editor_view.visual_map.buildIndex(counts[0..counted], &starts);
@@ -560,6 +560,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
 
     const fw = editor_view.frame.build(.{
         .lines = lines,
+        .tab_width = lab_tab_width,
         .first_line = first_line,
         .first_piece = first_piece,
         .first_col = vp.first_col,

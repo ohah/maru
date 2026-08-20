@@ -54,7 +54,22 @@ pub const Event = struct {
     matcher: ?[]const u8 = null,
 };
 
-pub const events = [_]Event{
+/// 훅을 설치하는 대상. **세트가 provider 마다 다르므로** 이 값이 곧 «어떤 이벤트를 거는가» 를 정한다.
+pub const Provider = enum {
+    claude,
+    codex,
+
+    /// 로그 줄 앞에 붙는 표식(파서가 읽는 그 값). `looksLikeProvider` 를 통과하는 이름이어야 한다.
+    pub fn tag(self: Provider) []const u8 {
+        return switch (self) {
+            .claude => "claude",
+            .codex => "codex",
+        };
+    }
+};
+
+/// claude 세트(계약 §2). **한 번에 확정한다.**
+pub const claude_events = [_]Event{
     .{ .name = "SessionStart" },
     .{ .name = "UserPromptSubmit" },
     .{ .name = "Stop" },
@@ -62,6 +77,28 @@ pub const events = [_]Event{
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
 };
+
+/// codex 세트 — **`Notification` 이 없다**(계약 §2.1 실측: codex 의 훅 이벤트 열거에 그 이름이 없고
+/// `hooks/src/events/` 아래에도 그 파일이 없다. 알림은 훅이 아니라 별도 경로다). 없는 이벤트를 걸면
+/// 잘해야 무시되고, 나쁘면 그 파일의 파싱을 통째로 깨뜨린다 — 남의 설정 파일이라 시험 삼아 넣지 않는다.
+///
+/// 나머지 다섯은 claude 와 같은 이름이다(codex 도 `hooks.json` 에는 PascalCase 로 적는다 — 실측).
+pub const codex_events = [_]Event{
+    .{ .name = "SessionStart" },
+    .{ .name = "UserPromptSubmit" },
+    .{ .name = "Stop" },
+    .{ .name = "PermissionRequest", .matcher = "*" },
+    .{ .name = "PreToolUse", .matcher = "*" },
+};
+
+/// 그 provider 가 거는 이벤트. **전역 세트를 두지 않는다** — 하나로 두면 codex 에 없는 이벤트가
+/// 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
+pub fn eventsFor(provider: Provider) []const Event {
+    return switch (provider) {
+        .claude => &claude_events,
+        .codex => &codex_events,
+    };
+}
 
 /// 셸 single-quote 이스케이프. 경로에 `'`가 있어도 커맨드가 깨지지 않게 `'\''`로 끊어 붙인다.
 fn appendQuoted(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
@@ -250,27 +287,47 @@ test "표식에 사람이 읽는 안내가 있고, 그 문구는 언어에 따�
     for (marker_comment) |c| try testing.expect(c < 0x80);
 }
 
-test "이벤트 세트는 계약 §2 그대로다" {
-    try testing.expectEqual(@as(usize, 6), events.len);
-    var star: usize = 0;
-    for (events) |e| {
-        if (e.matcher) |m| {
-            try testing.expectEqualStrings("*", m);
-            star += 1;
+test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
+    try testing.expectEqual(@as(usize, 6), claude_events.len);
+    // codex 에는 `Notification` 이 없다(계약 §2.1 실측).
+    try testing.expectEqual(@as(usize, 5), codex_events.len);
+    for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "Notification"));
+    // 그 하나를 뺀 나머지는 같아야 한다 — 두 세트가 따로 흘러가면 provider 마다 다른 상태가 된다.
+    for (codex_events) |c| {
+        var found = false;
+        for (claude_events) |cl| {
+            if (std.mem.eql(u8, c.name, cl.name)) {
+                try testing.expectEqual(cl.matcher == null, c.matcher == null);
+                if (cl.matcher) |m| try testing.expectEqualStrings(m, c.matcher.?);
+                found = true;
+            }
         }
+        try testing.expect(found);
     }
-    // matcher가 붙는 것은 도구 이벤트 둘뿐이다(PermissionRequest·PreToolUse).
-    try testing.expectEqual(@as(usize, 2), star);
-    // PostToolUse는 세트에 없다 — payload가 originalFile을 실어 상한에 잘린다(계약 §3.1).
-    for (events) |e| try testing.expect(!std.mem.eql(u8, e.name, "PostToolUse"));
 
-    // **이름이 겹치면 안 된다.** 겹치면 설치가 그 이벤트에 항목을 둘 넣는데, 설치 판정은 이벤트를 «덮었나»로
-    // 세므로 「우리 항목 수 = 세트 크기」가 영영 맞지 않는다 → 시작할 때마다 사용자 파일을 다시 쓴다
-    // (`agent_hook_install.planFor`의 마지막 검사). 손으로 보면 안 보이는 종류의 실수라 여기서 막는다.
-    for (events, 0..) |a_ev, i| {
-        for (events[i + 1 ..]) |b_ev| {
-            try testing.expect(!std.mem.eql(u8, a_ev.name, b_ev.name));
+    for ([_]Provider{ .claude, .codex }) |provider| {
+        const set = eventsFor(provider);
+        var star: usize = 0;
+        for (set) |e| {
+            if (e.matcher) |m| {
+                try testing.expectEqualStrings("*", m);
+                star += 1;
+            }
         }
+        // matcher가 붙는 것은 도구 이벤트 둘뿐이다(PermissionRequest·PreToolUse).
+        try testing.expectEqual(@as(usize, 2), star);
+        // PostToolUse는 세트에 없다 — payload가 originalFile을 실어 큰 파일 편집에서 상한에 잘린다(계약 §3.1).
+        for (set) |e| try testing.expect(!std.mem.eql(u8, e.name, "PostToolUse"));
+        // **이름이 겹치면 안 된다.** 겹치면 설치가 그 이벤트에 항목을 둘 넣는데, 설치 판정은 이벤트를 «덮었나»로
+        // 세므로 「우리 항목 수 = 세트 크기」가 영영 맞지 않는다 → 시작할 때마다 사용자 파일을 다시 쓴다
+        // (`agent_hook_install.planFor`의 마지막 검사). 손으로 보면 안 보이는 종류의 실수라 여기서 막는다.
+        for (set, 0..) |a_ev, i| {
+            for (set[i + 1 ..]) |b_ev| {
+                try testing.expect(!std.mem.eql(u8, a_ev.name, b_ev.name));
+            }
+        }
+        // 표식은 파서가 인정하는 이름이어야 한다 — 아니면 훅이 적은 줄을 우리가 못 읽는다.
+        try testing.expect(event.looksLikeProvider(provider.tag()));
     }
 }
 
@@ -331,7 +388,8 @@ test "payload 상한이 줄 상한을 넘기지 않는다 — 경계에서만 �
 test "세트의 모든 이벤트를 파서가 안다 — 한쪽만 늘면 그 이벤트가 조용히 unknown 이 된다" {
     // 세트(여기)와 `Kind`(파서)는 따로 적혀 있다. 이벤트를 하나 더 걸고 파서에 넣는 것을 잊으면 그 이벤트는
     // 로그에 쌓이면서 `unknown` 으로만 읽혀, 소비자가 «아무 일도 없었다» 와 구분하지 못한다.
-    for (events) |e| {
+    // 두 세트를 합쳐 본다 — provider 하나만 보면 다른 쪽에만 있는 이벤트가 빠진다.
+    for (claude_events ++ codex_events) |e| {
         var line: std.ArrayListUnmanaged(u8) = .empty;
         defer line.deinit(testing.allocator);
         try line.appendSlice(testing.allocator, "claude");

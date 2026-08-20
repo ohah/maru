@@ -718,7 +718,7 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     log_dir_handle.close(self.io);
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
-    hook_command.build(&cmd, a, "claude", log_dir) catch return;
+    hook_command.build(&cmd, a, hook_command.Provider.claude.tag(), log_dir) catch return;
 
     const settings_path = std.fmt.allocPrintSentinel(a, "{s}/settings.json", .{claude_dir}, 0) catch return;
 
@@ -751,13 +751,13 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
                 .object => |o| o,
                 else => break :blk .unreadable,
             };
-            break :blk if (install.scanClaude(root.get("hooks"), cmd.items)) |known|
+            break :blk if (install.scan(.claude, root.get("hooks"), cmd.items)) |known|
                 .{ .known = known }
             else
                 .unreadable;
         },
     };
-    const plan = install.planForSet(state, .ensure);
+    const plan = install.planForSet(.claude, state, .ensure);
     if (!install.mutates(plan)) return; // leave·abort — 손대지 않는다
 
     // 계획을 세운 그 바이트를 다시 읽어 트리를 만든다. 읽기 실패·파싱 실패는 여기서도 «쓰지 않음»이다.
@@ -793,7 +793,7 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
         .object => |o| o,
         else => return, // scan이 이미 걸렀어야 하지만, 쓰기 직전에 한 번 더 본다
     };
-    install.applyClaude(a, &hooks, cmd.items, .install) catch return;
+    install.apply(.claude, a, &hooks, cmd.items, .install) catch return;
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {

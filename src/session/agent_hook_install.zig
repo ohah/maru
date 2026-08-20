@@ -9,6 +9,10 @@
 const std = @import("std");
 const command = @import("agent_hook_command.zig");
 
+/// 어느 provider 의 세트든 넘지 않는 크기. 순수 층이라 할당하지 않으므로 고정 배열의 상한이 필요하다.
+/// 세트가 이보다 커지면 컴파일이 막힌다(아래 테스트).
+pub const max_events: usize = 8;
+
 /// platform 이 설정 파일을 훑어 채우는 요약. **우리 항목만** 센다 — 사용자 항목은 세지 않는다(건드리지 않으므로).
 pub const Known = struct {
     /// 우리 표식이 붙은 항목 수(모든 이벤트에 걸쳐).
@@ -60,7 +64,7 @@ pub const Plan = enum {
     abort,
 };
 
-/// `want_events` 는 계약 §2 세트의 이벤트 수다(`agent_hook_command.events.len`).
+/// `want_events` 는 계약 §2 세트의 이벤트 수다(`agent_hook_command.claude_events.len`).
 pub fn planFor(state: State, intent: Intent, want_events: usize) Plan {
     switch (state) {
         // **모르는 상태는 건드리지 않는다.** 지우는 쪽도 마찬가지다 — 무엇을 지우는지 모르는 채로 쓰면
@@ -92,11 +96,13 @@ pub fn planFor(state: State, intent: Intent, want_events: usize) Plan {
     }
 }
 
-/// 계약 §2 세트로 판정한다. **호출자가 세트 크기를 넘기지 않는다** — 그 값이 어긋나면 «다 덮었다» 를
-/// 잘못 판정하는데, 세트는 이 저장소 안의 상수라 넘겨받을 이유가 없다. `planFor` 의 인자는 테스트가 다른
-/// 크기를 넣어 경계를 보기 위한 것이다.
-pub fn planForSet(state: State, intent: Intent) Plan {
-    return planFor(state, intent, command.events.len);
+/// 그 provider 의 세트로 판정한다. **호출자가 세트 «크기» 를 넘기지 않는다** — 그 값이 어긋나면 «다
+/// 덮었다» 를 잘못 판정하는데, 세트는 이 저장소 안의 상수라 넘겨받을 이유가 없다. `planFor` 의 인자는
+/// 테스트가 다른 크기를 넣어 경계를 보기 위한 것이다.
+///
+/// **provider 는 넘겨받는다** — 세트가 그것으로 갈리기 때문이다(codex 에는 `Notification` 이 없다).
+pub fn planForSet(provider: command.Provider, state: State, intent: Intent) Plan {
+    return planFor(state, intent, command.eventsFor(provider).len);
 }
 
 /// 이 계획이 사용자 파일을 **바꾸는가**. platform 이 락·백업·atomic write 를 준비할지 정하는 데 쓴다.
@@ -151,9 +157,9 @@ fn entryIsCurrent(
     return have_matcher == null;
 }
 
-/// 세트에서 이 이벤트를 찾는다(없으면 «세트 밖»).
-fn setEventIndex(name: []const u8) ?usize {
-    for (command.events, 0..) |e, i| {
+/// 그 provider 의 세트에서 이 이벤트를 찾는다(없으면 «세트 밖»).
+fn setEventIndex(provider: command.Provider, name: []const u8) ?usize {
+    for (command.eventsFor(provider), 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) return i;
     }
     return null;
@@ -164,21 +170,23 @@ fn setEventIndex(name: []const u8) ?usize {
 ///
 /// **모양을 모르면 `null` 을 돌려준다.** 배열이어야 할 자리에 문자열이 있는 파일은 우리가 아는 파일이 아니고,
 /// 거기에 쓰면 사용자 설정을 우리 해석대로 뭉갠다. 호출자는 이것을 `State.unreadable` 로 접어 손대지 않는다.
-pub fn scanClaude(hooks_value: ?std.json.Value, want_command: []const u8) ?Known {
+pub fn scan(provider: command.Provider, hooks_value: ?std.json.Value, want_command: []const u8) ?Known {
     var known: Known = .{};
     const hooks = switch (hooks_value orelse return known) {
         .object => |o| o,
         // 키는 있는데 객체가 아니다 — 우리가 아는 모양이 아니다.
         else => return null,
     };
-    var covered = [_]bool{false} ** command.events.len;
+    const set = command.eventsFor(provider);
+    // 세트 크기는 provider 마다 다르므로 최대치로 잡고 앞부분만 쓴다(순수 층이라 할당하지 않는다).
+    var covered = [_]bool{false} ** max_events;
     for (hooks.keys(), hooks.values()) |name, groups_value| {
         const groups = switch (groups_value) {
             .array => |arr| arr,
             else => return null,
         };
-        const set_index = setEventIndex(name);
-        const want_matcher: ?[]const u8 = if (set_index) |i| command.events[i].matcher else null;
+        const set_index = setEventIndex(provider, name);
+        const want_matcher: ?[]const u8 = if (set_index) |i| set[i].matcher else null;
         for (groups.items) |group_value| {
             const group = switch (group_value) {
                 .object => |o| o,
@@ -210,7 +218,7 @@ pub fn scanClaude(hooks_value: ?std.json.Value, want_command: []const u8) ?Known
             }
         }
     }
-    for (covered) |c| {
+    for (covered[0..set.len]) |c| {
         if (c) known.events_covered += 1;
     }
     return known;
@@ -274,8 +282,8 @@ fn stripOurs(a: std.mem.Allocator, hooks: *std.json.ObjectMap) ApplyError!void {
 }
 
 /// 세트대로 우리 항목을 **배열 끝에** 붙인다. 사용자 항목이 앞에 그대로 남는다.
-fn appendOurs(a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8) ApplyError!void {
-    for (command.events) |e| {
+fn appendOurs(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8) ApplyError!void {
+    for (command.eventsFor(provider)) |e| {
         var entry: std.json.ObjectMap = .empty;
         try entry.put(a, "type", .{ .string = "command" });
         try entry.put(a, "command", .{ .string = want_command });
@@ -308,9 +316,9 @@ pub const Mode = enum { install, remove };
 /// 계약이 요구하는 **한 번의 쓰기**가 이렇게 성립한다(중간 상태가 파일에 닿지 않는다).
 ///
 /// 적용 뒤 `hooks` 가 비면 호출자가 그 키를 지운다(빈 객체를 남기지 않는다).
-pub fn applyClaude(a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8, mode: Mode) ApplyError!void {
+pub fn apply(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8, mode: Mode) ApplyError!void {
     try stripOurs(a, hooks);
-    if (mode == .install) try appendOurs(a, hooks, want_command);
+    if (mode == .install) try appendOurs(provider, a, hooks, want_command);
 }
 
 const testing = std.testing;
@@ -415,12 +423,12 @@ test "우리 항목이 세트보다 많으면 중복이다 — 훅이 두 번 �
 test "세트 크기는 호출자가 넘기지 않는다" {
     // 호출자가 그 수를 넘기면 어긋난 값이 «다 덮었다» 를 잘못 판정한다. 세트는 저장소 안의 상수다.
     const full: State = .{ .known = .{
-        .ours = command.events.len,
-        .ours_current = command.events.len,
-        .events_covered = command.events.len,
+        .ours = command.claude_events.len,
+        .ours_current = command.claude_events.len,
+        .events_covered = command.claude_events.len,
     } };
-    try testing.expectEqual(Plan.leave, planForSet(full, .ensure));
-    try testing.expectEqual(Plan.remove, planForSet(full, .uninstall));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, full, .ensure));
+    try testing.expectEqual(Plan.remove, planForSet(.claude, full, .uninstall));
 }
 
 test "Known 의 필드가 늘면 판정 누락을 잡는다" {
@@ -431,32 +439,32 @@ test "Known 의 필드가 늘면 판정 누락을 잡는다" {
 
     // 각 필드가 실제로 계획을 움직이는지(또는 의도적으로 안 움직이는지) 하나씩 흔들어 본다.
     const base: Known = .{
-        .ours = command.events.len,
-        .ours_current = command.events.len,
-        .events_covered = command.events.len,
+        .ours = command.claude_events.len,
+        .ours_current = command.claude_events.len,
+        .events_covered = command.claude_events.len,
     };
-    try testing.expectEqual(Plan.leave, planForSet(.{ .known = base }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = base }, .ensure));
 
     var no_ours = base;
     no_ours.ours = 0;
-    try testing.expectEqual(Plan.install, planForSet(.{ .known = no_ours }, .ensure));
+    try testing.expectEqual(Plan.install, planForSet(.claude, .{ .known = no_ours }, .ensure));
 
     var stale = base;
     stale.ours_current -= 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = stale }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = stale }, .ensure));
 
     var partial = base;
     partial.events_covered -= 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = partial }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = partial }, .ensure));
 
     var outside = base;
     outside.events_outside = 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = outside }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = outside }, .ensure));
 
     // `legacy_present` 는 **의도적으로** 계획을 바꾸지 않는다(P1 — 자동 정리 금지).
     var legacy = base;
     legacy.legacy_present = true;
-    try testing.expectEqual(Plan.leave, planForSet(.{ .known = legacy }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = legacy }, .ensure));
 }
 
 // ── 트리 수술 테스트 ────────────────────────────────────────────────────────────────────────────
@@ -483,7 +491,7 @@ fn runClaude(a: std.mem.Allocator, json_text: []const u8, want_command: []const 
         .object => |o| o,
         else => return error.Unrecognized,
     };
-    try applyClaude(a, &hooks, want_command, mode);
+    try apply(.claude, a, &hooks, want_command, mode);
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {
@@ -503,7 +511,7 @@ fn scanText(a: std.mem.Allocator, json_text: []const u8, want_command: []const u
         .object => |o| o,
         else => return error.Unrecognized,
     };
-    return scanClaude(root.get("hooks"), want_command);
+    return scan(.claude, root.get("hooks"), want_command);
 }
 
 fn testArena() std.heap.ArenaAllocator {
@@ -518,16 +526,16 @@ test "빈 설정에 넣으면 세트 전체가 최신으로 선다" {
 
     const before = try scanText(a, "{}", want);
     try testing.expectEqual(Known{}, before.?);
-    try testing.expectEqual(Plan.install, planForSet(.{ .known = before.? }, .ensure));
+    try testing.expectEqual(Plan.install, planForSet(.claude, .{ .known = before.? }, .ensure));
 
     const after_text = try runClaude(a, "{}", want, .install);
     const after = (try scanText(a, after_text, want)).?;
-    try testing.expectEqual(@as(usize, command.events.len), after.ours);
-    try testing.expectEqual(@as(usize, command.events.len), after.ours_current);
-    try testing.expectEqual(@as(usize, command.events.len), after.events_covered);
+    try testing.expectEqual(@as(usize, command.claude_events.len), after.ours);
+    try testing.expectEqual(@as(usize, command.claude_events.len), after.ours_current);
+    try testing.expectEqual(@as(usize, command.claude_events.len), after.events_covered);
     try testing.expectEqual(@as(usize, 0), after.events_outside);
     // **쓴 것을 다시 읽었을 때 «할 일 없음» 이 나와야** 매 시작마다 사용자 파일을 다시 쓰지 않는다.
-    try testing.expectEqual(Plan.leave, planForSet(.{ .known = after }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
 }
 
 test "다시 넣어도 항목이 늘지 않는다 — 멱등" {
@@ -610,13 +618,13 @@ test "낡은 커맨드는 걷어 내고 다시 넣는다 — 한 벌만 남는�
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 1), before.ours);
     try testing.expectEqual(@as(usize, 0), before.ours_current); // 커맨드가 다르다
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     try testing.expect(std.mem.indexOf(u8, after_text, "maru-hooks-old") == null); // 낡은 것이 남지 않는다
     const after = (try scanText(a, after_text, want)).?;
-    try testing.expectEqual(@as(usize, command.events.len), after.ours); // 두 벌이 되지 않는다
-    try testing.expectEqual(Plan.leave, planForSet(.{ .known = after }, .ensure));
+    try testing.expectEqual(@as(usize, command.claude_events.len), after.ours); // 두 벌이 되지 않는다
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
 }
 
 test "matcher 나 timeout 이 어긋난 항목은 최신이 아니다" {
@@ -641,7 +649,7 @@ test "matcher 나 timeout 이 어긋난 항목은 최신이 아니다" {
     const s2 = (try scanText(a, no_matcher, want)).?;
     try testing.expectEqual(@as(usize, 1), s2.ours);
     try testing.expectEqual(@as(usize, 0), s2.ours_current);
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = s2 }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = s2 }, .ensure));
 
     // 대조: 셋 다 맞으면 최신이다(위 둘이 «커맨드가 달라서» 걸린 것이 아님을 증명한다).
     const ok = try std.fmt.allocPrint(a,
@@ -665,7 +673,7 @@ test "세트 밖 이벤트에 남은 우리 항목을 걷어 낸다" {
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 1), before.events_outside);
     try testing.expectEqual(@as(usize, 0), before.events_covered);
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     try testing.expect(std.mem.indexOf(u8, after_text, "PostToolUse") == null);
@@ -689,12 +697,12 @@ test "같은 이벤트에 우리 항목이 둘이면 하나로 줄인다" {
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 2), before.ours);
     try testing.expectEqual(@as(usize, 1), before.events_covered); // «덮었다» 로 세어 앞 검사를 통과한다
-    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     const after = (try scanText(a, after_text, want)).?;
-    try testing.expectEqual(@as(usize, command.events.len), after.ours); // 한 벌만 남는다
-    try testing.expectEqual(Plan.leave, planForSet(.{ .known = after }, .ensure));
+    try testing.expectEqual(@as(usize, command.claude_events.len), after.ours); // 한 벌만 남는다
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
 }
 
 test "과거 표식 항목은 세되 건드리지 않는다" {
@@ -720,6 +728,59 @@ test "과거 표식 항목은 세되 건드리지 않는다" {
     try testing.expect(std.mem.indexOf(u8, removed, command.marker) == null);
 }
 
+test "codex 세트로 넣으면 Notification 이 들어가지 않는다" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+
+    // 같은 함수에 provider 만 바꿔 넣는다 — 파일 모양이 같으므로(실측) 코드가 갈릴 이유가 없다.
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
+    var root_obj = parsed.value.object;
+    var hooks: std.json.ObjectMap = .empty;
+    try apply(.codex, a, &hooks, want, .install);
+    try root_obj.put(a, "hooks", .{ .object = hooks });
+
+    try testing.expectEqual(@as(usize, command.codex_events.len), hooks.count());
+    try testing.expect(hooks.get("Notification") == null); // codex 에 없는 이벤트다
+    try testing.expect(hooks.get("SessionStart") != null);
+
+    const known = scan(.codex, root_obj.get("hooks"), want).?;
+    try testing.expectEqual(@as(usize, command.codex_events.len), known.ours);
+    try testing.expectEqual(@as(usize, command.codex_events.len), known.events_covered);
+    try testing.expectEqual(@as(usize, 0), known.events_outside);
+    try testing.expectEqual(Plan.leave, planForSet(.codex, .{ .known = known }, .ensure));
+}
+
+test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+
+    // claude 세트로 넣은 파일을 codex 세트로 훑으면 `Notification` 이 «세트 밖» 이다.
+    // 이 대조가 **세트 분리가 실제로 판정을 바꾼다**는 것을 보인다 — 안 그러면 분리가 장식이다.
+    var hooks: std.json.ObjectMap = .empty;
+    try apply(.claude, a, &hooks, want, .install);
+    var wrapper: std.json.ObjectMap = .empty;
+    try wrapper.put(a, "hooks", .{ .object = hooks });
+
+    const as_codex = scan(.codex, wrapper.get("hooks"), want).?;
+    try testing.expectEqual(@as(usize, 1), as_codex.events_outside); // Notification 하나
+    try testing.expectEqual(Plan.refresh, planForSet(.codex, .{ .known = as_codex }, .ensure));
+
+    const as_claude = scan(.claude, wrapper.get("hooks"), want).?;
+    try testing.expectEqual(@as(usize, 0), as_claude.events_outside);
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = as_claude }, .ensure));
+}
+
+test "세트가 고정 배열 상한을 넘지 않는다" {
+    // `scan` 이 순수 층이라 할당하지 않고 고정 배열로 «덮은 이벤트» 를 센다. 세트가 그보다 커지면
+    // 조용히 잘리는 것이 아니라 여기서 걸려야 한다.
+    try testing.expect(command.claude_events.len <= max_events);
+    try testing.expect(command.codex_events.len <= max_events);
+}
+
 test "모르는 모양이면 판정을 포기한다 — 거기에 쓰면 사용자 설정을 뭉갠다" {
     var arena = testArena();
     defer arena.deinit();
@@ -740,5 +801,5 @@ test "모르는 모양이면 판정을 포기한다 — 거기에 쓰면 사용�
         try testing.expectEqual(@as(?Known, null), try scanText(a, text, want));
     }
     // 호출자는 이것을 `unreadable` 로 접고, 그 계획은 `abort` 다.
-    try testing.expectEqual(Plan.abort, planForSet(.unreadable, .ensure));
+    try testing.expectEqual(Plan.abort, planForSet(.claude, .unreadable, .ensure));
 }

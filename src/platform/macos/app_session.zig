@@ -18308,13 +18308,13 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         try std.testing.expectEqualStrings(legacy_hook, stop.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string);
 
         // 세트 전체가 덮였고, 그 판정이 «할 일 없음»으로 수렴한다.
-        const known = hook_install.scanClaude(obj.get("hooks"), want.items) orelse return error.UnknownShape;
-        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.ours);
-        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.ours_current);
-        try std.testing.expectEqual(@as(usize, hook_command.events.len), known.events_covered);
+        const known = hook_install.scan(.claude, obj.get("hooks"), want.items) orelse return error.UnknownShape;
+        try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.ours);
+        try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.ours_current);
+        try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.events_covered);
         try std.testing.expectEqual(@as(usize, 0), known.events_outside);
         try std.testing.expect(known.legacy_present);
-        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.{ .known = known }, .ensure));
+        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.claude, .{ .known = known }, .ensure));
     }
 
     // **다시 띄워도 파일을 건드리지 않는다.** 바이트까지 같아야 한다 — 매 시작마다 사용자 파일의 mtime을 흔들면

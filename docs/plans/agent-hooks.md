@@ -52,9 +52,8 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
   `agent_hook_command.events` 를 **provider 별로 가른다**(`planForSet` 이 쓰는 세트 크기도 함께 갈린다).
   그 항목이 파일 파싱을 깨는지 조용히 무시되는지도 실험으로 확인한다 — 깨면 사용자의 `hooks.json` 이
   통째로 무효가 된다.
-- **AH2b의 둘째 일은 그 해시의 입력을 확정하는 실험이다**(계약 §2.1의 ⚠️ — 실측으로 재현하지 못했다).
-  알려진 훅을 심고 codex를 한 번 돌려 기록된 값을 얻은 뒤 내용으로 역산한다. 못 맞히면 설치가
-  **매 실행 승인 프롬프트**로 돌아온다.
+- **해시 입력은 확정됐다**(계약 §2.1 — 이벤트 신원 객체, 실측). 남은 미검증은 `stop`·`permission_request`의
+  matcher 취급이고, 그것은 «키가 비어 있을 때만 쓴다» 규칙으로 감당한다(최악이 승인 프롬프트 1회).
 - Codex `hooks.json`도 claude `settings.json`과 **같은 모양**이다(실측: `hooks` → 이벤트 → 그룹 →
   `hooks[]` → `{type, command}`). 그래서 `agent_hook_install`의 트리 수술을 그대로 쓴다 — 다른 것은
   이벤트 이름이 snake_case인 trust 키와 파일 위치뿐이다.

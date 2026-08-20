@@ -673,7 +673,22 @@ static bool maru_append_cell_units(
 ) {
     UniChar scratch[2];
     CFIndex n = 0;
-    if (!maru_append_utf16_scalar(cell.codepoint, scratch, &n, 2)) {
+    // **한 번도 쓰인 적 없는 칸(codepoint 0)은 공백으로 셰이핑한다.** 그 칸은 화면에서 빈 칸이고
+    // record 도 안 만들지만(`maru_category_for_codepoint` 가 0 을 Space 로 본다), 셰이핑 **문자열**에는
+    // 들어간다 — 거기에 U+0000 을 그대로 실으면 CoreText 의 contextual alternates 가 NUL 몇 개 뒤부터
+    // 죽어, 같은 줄에서 **앞쪽 합자만 붙고 뒤쪽은 원본 글자로 남는다**.
+    //
+    // 실측(2026-08-20, JetBrains Mono 13pt): `) \0 === \0 !== \0 !== \0 ==` 를 셰이핑하면 앞 두 그룹은
+    // 합자 글리프(1572·913)가 나오지만 뒤 두 그룹은 원본(814·1049)으로 풀렸다. 같은 문자열의 NUL 을
+    // 공백으로만 바꾸면 네 그룹이 모두 합자가 된다.
+    //
+    // 이 칸이 생기는 경로: Ink 기반 TUI(Claude Code 입력창)는 다시 그릴 때 **글자 칸만 하나씩** 쓰고
+    // 사이 칸은 `ESC[K` 로 지운 채 둔다(실측 raw: `ESC[H ESC[4C ESC[34B =`). 셸은 공백을 0x20 으로
+    // 실제로 쓰기 때문에 이 문제가 안 보였다. 동작 비교 오라클인 Ghostty 도 셰이퍼 run 을 만들 때
+    // 빈 셀을 공백으로 바꾼다(`references/ghostty/src/font/shaper/run.zig` — 빈 셀은 공백으로 다룬다는
+    // 일반 규범이고, 합자를 근거로 든 주석은 없다).
+    const uint32_t base_codepoint = cell.codepoint == 0 ? (uint32_t)' ' : cell.codepoint;
+    if (!maru_append_utf16_scalar(base_codepoint, scratch, &n, 2)) {
         return false;
     }
     if (*unit_len + n > capacity) {
@@ -684,8 +699,10 @@ static bool maru_append_cell_units(
         unit_cell[*unit_len] = (uint32_t)cell_index;
         (*unit_len)+= 1;
     }
-    // cluster 본체(악센트·VS16·NFD 한글 V/T·키캡)도 같은 셀 소유로 이어 붙인다 — 셀 단위 경로가 base 뒤에
-    // 풀 전체를 무손실로 붙이던 것과 동일하다(maru_create_string_for_draw_cell 참고).
+    // cluster 본체(악센트·VS16·NFD 한글 V/T·키캡)도 같은 셀 소유로 이어 붙인다 — base 뒤에 풀 전체를
+    // 무손실로 붙여야 원본 시퀀스 그대로 셰이핑된다(키캡은 풀에 VS16이 있어 CoreText가 컬러를 고른다).
+    // 셀마다 CTLine을 만들던 시절의 `maru_create_string_for_draw_cell`이 하던 일을 이 함수가 물려받았고,
+    // 그 함수는 호출처가 없어져 지웠다(2026-08-20 — 빈 셀을 U+0000으로 넘기는 같은 결함을 품고 있었다).
     if (cell.grapheme_count == 0 ||
         (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count > grapheme_pool_len) {
         return true;
@@ -823,40 +840,6 @@ uint64_t maru_macos_coretext_phys_footprint_bytes(void) {
         return 0; // phys_footprint 가 채워지지 않았다 — 0은 호출자가 "못 쟀다"로 읽는다.
     }
     return (uint64_t)info.phys_footprint;
-}
-
-static CFStringRef maru_create_string_for_draw_cell(
-    MaruCoreTextDrawCell cell,
-    const uint32_t *grapheme_pool,
-    size_t grapheme_pool_len
-) {
-    // base + cluster 본체(grapheme_pool)를 그대로 CoreText에 넘긴다 — 악센트·VS16·NFD 한글 V/T·키캡
-    // (base+VS16+U+20E3)이 store에 온전히 담겨 있어, 단일 combining 슬롯 시절의 VS16 재주입 같은 보정이
-    // 필요 없다(원본 시퀀스 그대로 셰이핑). 키캡은 풀에 VS16이 들어 있어 CoreText가 컬러 키캡을 고른다.
-    UniChar base_units[2];
-    CFIndex base_len = 0;
-    if (!maru_append_utf16_scalar(cell.codepoint, base_units, &base_len, 2)) {
-        return NULL;
-    }
-    // extra 없음(또는 범위 밖) — base 한 글자. 대부분의 셀이라 빠른 경로(할당 1회)로 둔다.
-    if (cell.grapheme_count == 0 ||
-        (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count > grapheme_pool_len) {
-        return CFStringCreateWithCharacters(kCFAllocatorDefault, base_units, base_len);
-    }
-    // cluster — 가변 길이라 CFMutableString으로 base 뒤에 풀 전체를 무손실 append.
-    CFMutableStringRef str = CFStringCreateMutable(kCFAllocatorDefault, 0);
-    if (str == NULL) {
-        return NULL;
-    }
-    CFStringAppendCharacters(str, base_units, base_len);
-    for (uint16_t i = 0; i < cell.grapheme_count; i++) {
-        UniChar scalar[2];
-        CFIndex n = 0;
-        if (maru_append_utf16_scalar(grapheme_pool[cell.grapheme_offset + i], scalar, &n, 2)) {
-            CFStringAppendCharacters(str, scalar, n);
-        }
-    }
-    return str;
 }
 
 static bool maru_validate_raster_request(

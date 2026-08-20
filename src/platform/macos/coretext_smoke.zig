@@ -1208,6 +1208,98 @@ test "CoreText draw-list shaper normalizes synthesized box glyph to codepoint ca
     try std.testing.expect(box_seen >= 1);
 }
 
+test "CoreText draw-list shaper shapes never-written cells as blanks so ligatures survive to the end of the line" {
+    // 회귀 고정(2026-08-20 사용자 제보): **한 번도 쓰인 적 없는 칸(codepoint 0)**을 U+0000 그대로 셰이핑
+    // 문자열에 실으면 CoreText의 contextual alternates가 NUL 몇 개 뒤부터 죽어, 같은 줄에서 앞쪽 합자만
+    // 붙고 뒤쪽은 원본 글자로 남았다(`) === !== !== ==`가 `) ≡ ≢ !== ==`로 그려졌다).
+    //
+    // 이 칸이 생기는 경로는 셸이 아니라 Ink 기반 TUI(Claude Code 입력창)다 — 다시 그릴 때 글자 칸만
+    // 하나씩 쓰고 사이 칸은 `ESC[K`로 지운 채 둔다. 셸은 공백을 0x20으로 실제로 쓰기 때문에 이 회귀가
+    // 셸에서는 보이지 않는다. 그래서 여기서는 CUF(`ESC[C`)로 칸을 건너뛰어 그 상태를 만든다.
+    //
+    // 계약: **빈 셀은 공백과 같은 셰이핑 결과를 낸다.** 두 입력의 칸별 glyph_id가 같아야 한다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    const cols: u16 = 24;
+    const Probe = struct {
+        /// 칸별 drawable glyph_id(없으면 null). drawable 글리프만 runs.glyphs에 들어오므로, 합자의
+        /// 빈 앞칸은 자연히 null이 된다.
+        fn colGlyphs(
+            a: std.mem.Allocator,
+            sh: coretext_shaper.CoreTextDrawListShaper,
+            bytes: []const u8,
+            out: []?renderer.GlyphId,
+        ) !void {
+            var core = try terminal.TerminalCore.init(a, .{ .cols = cols, .rows = 1 });
+            defer core.deinit();
+            core.clearDirty();
+            try core.write(bytes);
+            var dl = try renderer.buildDrawList(a, core.snapshot());
+            defer dl.deinit(a);
+            var fr = renderer.FontIdentityRegistry.init(a);
+            defer fr.deinit();
+            var shaped = try sh.shape(a, dl, &fr);
+            defer shaped.deinit(a);
+            @memset(out, null);
+            for (shaped.runs.glyphs) |g| {
+                if (g.col < out.len) out[g.col] = g.glyph_id;
+            }
+        }
+
+        /// 전제 확인 — CUF로 건너뛴 칸이 정말 공백(0x20)이 아닌 **빈 셀**이어야 이 테스트가 의미를 갖는다.
+        fn expectNeverWrittenCell(a: std.mem.Allocator, bytes: []const u8, col: usize) !void {
+            var core = try terminal.TerminalCore.init(a, .{ .cols = cols, .rows = 1 });
+            defer core.deinit();
+            try core.write(bytes);
+            try std.testing.expectEqual(@as(u21, 0), core.snapshot().cells[col].codepoint);
+        }
+    };
+
+    // col: 0-2 `===` / 3 / 4-6 `!==` / 7 / 8-10 `!==` / 11 / 12-13 `==`
+    const spaced_bytes = "=== !== !== ==";
+    // 빈 칸을 만드는 두 경로를 함께 든다: CUF로 건너뛴 칸과, 한 번 쓴 뒤 EL(`ESC[K`)로 지운 칸.
+    // Ink TUI가 실제로 쓰는 것은 후자이므로(`ESC[K` 뒤 글자 칸만 다시 씀), 둘 다 공백과 동치여야 한다.
+    const gapped_bytes = "===\x1b[C!==\x1b[C!==\x1b[C==";
+    const erased_bytes = "xxxxxxxxxxxxxx\r\x1b[K===\x1b[C!==\x1b[C!==\x1b[C==";
+    try Probe.expectNeverWrittenCell(allocator, gapped_bytes, 3);
+    try Probe.expectNeverWrittenCell(allocator, erased_bytes, 3);
+
+    var spaced: [cols]?renderer.GlyphId = undefined;
+    var gapped: [cols]?renderer.GlyphId = undefined;
+    var erased: [cols]?renderer.GlyphId = undefined;
+    try Probe.colGlyphs(allocator, shaper, spaced_bytes, &spaced);
+    try Probe.colGlyphs(allocator, shaper, gapped_bytes, &gapped);
+    try Probe.colGlyphs(allocator, shaper, erased_bytes, &erased);
+    for (spaced, gapped, erased, 0..) |want, got_gap, got_erase, col| {
+        std.testing.expectEqual(want, got_gap) catch |e| {
+            std.debug.print("col {d}: 공백 구분={?d} CUF 빈 칸={?d}\n", .{ col, want, got_gap });
+            return e;
+        };
+        std.testing.expectEqual(want, got_erase) catch |e| {
+            std.debug.print("col {d}: 공백 구분={?d} EL로 지운 칸={?d}\n", .{ col, want, got_erase });
+            return e;
+        };
+    }
+
+    // 빈 칸을 **공백으로 셰이핑**하되 **그리지는 않는다**(공백은 glyph record가 없다는 기존 출력 계약).
+    // 이 단언이 없으면 빈 칸에 space 글리프를 그리는 회귀가 위 동치 비교를 그대로 통과한다.
+    try std.testing.expectEqual(@as(?renderer.GlyphId, null), gapped[3]);
+    try std.testing.expectEqual(@as(?renderer.GlyphId, null), erased[3]);
+
+    // 합자가 실제로 걸린 폰트에서만 "줄 끝까지 유지"를 못박는다 — 합자 없는 폰트로 폴백된 환경에서
+    // 거짓 실패하지 않게, 첫 그룹이 합자일 때만 마지막 그룹도 합자임을 요구한다(회귀의 핵심이 그것이다).
+    const first_group_ligated = gapped[0] == null and gapped[1] == null and gapped[2] != null;
+    if (first_group_ligated) {
+        try std.testing.expect(gapped[8] == null and gapped[9] == null and gapped[10] != null); // 셋째 `!==`
+        try std.testing.expect(gapped[12] == null and gapped[13] != null); // 넷째 `==`
+    }
+}
+
 test "CoreText draw-list shaper composes an NFD Hangul cluster identically to its precomposed syllable (HG3a)" {
     // 회귀 고정(HG3a): macOS 파일명 NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB가 한 셀
     // cluster로 저장된다. DrawList가 grapheme_pool에 [중성, 종성]을 싣고 셰이퍼가 base 뒤에 붙여

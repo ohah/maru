@@ -149,9 +149,23 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
         return noInstance(stderr, "failed to send the auth selector");
 
     // ── 요청 전송(응답/chunk 읽기는 caller) ──
-    if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
-        return noInstance(stderr, "failed to send the request");
+    // **빈 요청은 안 보낸다.** 중계(`maru control --stdio`)는 자기 요청이 없고 **남의 요청을
+    // 흘려 보내는** 것이라, 여기서 빈 줄을 하나 보내면 서버가 그것을 프레임으로 읽고 파싱 오류를
+    // 낸다(프로토콜 §4.2 — 프레임은 한 줄이다).
+    if (request_bytes.len > 0) {
+        if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
+            return noInstance(stderr, "failed to send the request");
+    }
     return fd; // 성공 — caller가 읽고 close(errdefer 미발동)
+}
+
+/// 소켓을 열고 `auth.self` 까지만 보낸다 — **요청은 caller 가 흘려 보낸다**.
+///
+/// 중계(`maru control --stdio`)의 자리다: 폰이 보낸 프레임을 그대로 밀어 넣으므로 이 층이 만들
+/// 요청이 없다. 발견·연결·auth 규칙은 `connectSend` 와 **한 벌**이라야 한다 — 두 벌이면 한쪽만
+/// 고쳐지고, 그 차이는 "CLI 는 붙는데 폰만 못 붙는다" 로 나타난다.
+pub fn connectStream(io: std.Io, allocator: std.mem.Allocator, stderr: *std.Io.Writer) !std.c.fd_t {
+    return connectSend(io, allocator, "", stderr);
 }
 
 /// **단일 응답 소켓 왕복(sessions/browser 단일-응답 CLI 공유)**: `connectSend`로 열고 hello notification skip 후

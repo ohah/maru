@@ -776,6 +776,25 @@ pub fn build(b: *std.Build) void {
         test_macos_glyph_text_smoke_step.dependOn(&run_macos_glyph_text_smoke_tests.step);
     }
 
+    // **중계만 따로 돌리는 스텝**(S10c). 전체 스위트는 3천 개가 넘어 한 번 도는 데 20분 넘게
+    // 걸리고, 그 안에서는 변이 검사를 실무적으로 못 한다 — 이 파일의 규칙(바이트를 해석하지
+    // 않는다·끝을 세 갈래로 가른다)은 변이로 재야 값이 있다.
+    //
+    // 이름 필터는 매치가 0개여도 "All 0 tests passed." 로 초록이라, **개수를 못박는다**
+    // (같은 사고를 이 저장소가 파일 탐색기 게이트에서 겪었다).
+    const cli_relay_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"control_relay"},
+    });
+    const run_cli_relay_tests = b.addRunArtifact(cli_relay_tests);
+    run_cli_relay_tests.setCwd(b.path("."));
+    // 27 = 이름이 필터에 걸리는 중계 테스트 6개 + 이 모듈 그래프의 **이름 없는 test 블록** 21개
+    // (필터는 이름 있는 것만 거르고 익명 블록은 늘 컴파일된다 — 파일 탐색기 게이트와 같은 셈법).
+    // 숫자가 틀렸다고 나오면 먼저 **어느 테스트가 빠졌는지** 보고, 정당한 증감일 때만 갱신한다.
+    run_cli_relay_tests.addArg("--maru-expect-tests=27");
+    const test_cli_relay_step = b.step("test-cli-relay", "Run the `maru control --stdio` relay tests only");
+    test_cli_relay_step.dependOn(&run_cli_relay_tests.step);
+
     const core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
     });

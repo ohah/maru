@@ -190,6 +190,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "control")) {
+        try runControl(io, allocator, &args, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "browser")) {
         try maru.cli.browser_run.run(io, allocator, &args, stdout, stderr);
         return;
@@ -2834,6 +2839,30 @@ fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const
 const gate_ssh = hostGateReason(builtin.os.tag, .ssh);
 const gate_install_cli = hostGateReason(builtin.os.tag, .install_cli);
 const gate_control_socket = hostGateReason(builtin.os.tag, .control_socket);
+
+/// `maru control --stdio` — 폰이 SSH 채널로 이 PC 의 컨트롤 플레인에 닿는 중계(S10c).
+///
+/// **stdout 은 오직 wire 다.** 그래서 사용법·오류는 전부 stderr 로 낸다 — 한 줄만 섞여도 폰의
+/// ndjson 파서가 그 프레임을 잃는다([컨트롤 플레인 §4a](../docs/control-plane.md)).
+fn runControl(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: *std.process.Args.Iterator,
+    stderr: *std.Io.Writer,
+) !void {
+    var rest: std.ArrayList([]const u8) = .empty;
+    defer rest.deinit(allocator);
+    while (args.next()) |a| try rest.append(allocator, a);
+
+    switch (maru.cli.control_relay.parseArgs(rest.items)) {
+        .usage => |msg| {
+            try stderr.print("{s}\n", .{msg});
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+        .stdio => try maru.cli.control_relay.relay(io, allocator, stderr),
+    }
+}
 
 fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     // Windows 미지원(백로그 W9) — 이유는 `HostGatedFeature.ssh`. 여기서 접지 않으면 W2의 목표(Windows에서

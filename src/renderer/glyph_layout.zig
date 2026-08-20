@@ -5,6 +5,18 @@ const terminal = @import("../terminal.zig");
 pub const FontId = u32;
 pub const GlyphId = u32;
 
+/// 한 글리프가 덮을 수 있는 **최대 칸 수**. `GlyphRun.cell_width`·`GlyphCacheKey.cell_width`의 상한이고,
+/// atlas slot 폭이 `cell_width_px × cell_width`라 슬롯 크기의 상한이기도 하다.
+///
+/// 내역: EAW wide 셀 2칸 + 합자 왼쪽 오버항 최대 3칸 = 5. 오버항 3칸의 근거는 폰트 실측이다 — 설치된
+/// 252 패밀리와 번들 5종의 **모든 글리프**를 순회해 ink가 advance 왼쪽으로 넘치는 칸 수를 쟀을 때
+/// 코딩 폰트의 최대가 3칸이었다(`<!--`·`<==>`·`####` 같은 4글자 합자). 상한을 소유하는 셰이퍼 쪽 근거는
+/// `platform/macos/coretext_smoke.m`의 `maru_left_overhang_cells` 주석이 단일 출처다.
+///
+/// **타입과 함께 움직여야 한다.** `cell_width`가 `u3`(0~7)라 이 값이 7을 넘으면 `@intCast`가 터진다 —
+/// 예전 `u2` 시절에 상한만 올렸다가 headless tick 테스트가 signal TRAP으로 죽은 이력이 있다.
+pub const max_glyph_cell_span: u16 = 5;
+
 pub const ColorGlyphKind = enum {
     monochrome,
     color,
@@ -65,10 +77,11 @@ pub const GlyphCacheKey = struct {
     // cache identity의 일부다. (높이는 advance×line-height의 cell_height_px.)
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
-    // 셀 span(EAW 폭: wide=2, 그 외 1). atlas slot 폭 = cell_width_px × cell_width(estimateGlyphBitmapSize)라 **slot
-    // 크기에 영향**을 주므로 cache identity의 일부다. 빠지면 같은 glyph를 span=1로 먼저 캐시한 1칸 slot을 span=2 요청이
+    // 셀 span(EAW 폭 wide=2·그 외 1, **합자는 왼쪽 오버항만큼 더 넓다** — `max_glyph_cell_span` 참고).
+    // atlas slot 폭 = cell_width_px × cell_width(estimateGlyphBitmapSize)라 **slot 크기에 영향**을 주므로
+    // cache identity의 일부다. 빠지면 같은 glyph를 span=1로 먼저 캐시한 1칸 slot을 span=2 요청이
     // 재사용해 wide 글리프 오른쪽이 잘린다(공유 atlas에서 한 경로가 wide 폭을 안 줬을 때 — 한글 ㄱ 잘림 회귀).
-    cell_width: u2 = 1,
+    cell_width: u3 = 1,
     // 목표 raster 크기(device px). 0이면 위 셀 메트릭에서 slot 크기를 산출한다(기존 동작). >0이면
     // estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡아, atlas에 글리프를 **최종 크기로
     // 직접 굽는다** — GPU slot-stretch(셀 크기로 굽고 확대)로 생기는 blur를 없애는 경로(헤더 아이콘 등).
@@ -83,7 +96,7 @@ pub const GlyphCacheKey = struct {
 pub const GlyphRun = struct {
     row: u16,
     col: u16,
-    cell_width: u2,
+    cell_width: u3,
     codepoint: u21,
     font_id: FontId,
     glyph_id: GlyphId,
@@ -271,7 +284,7 @@ test "fake glyph layout maps primary and fallback fonts" {
     try std.testing.expectEqual(@as(u21, '한'), glyphs.glyphs[1].codepoint);
     try std.testing.expectEqual(@as(FontId, 2), glyphs.glyphs[1].font_id);
     try std.testing.expect(glyphs.glyphs[1].fallback);
-    try std.testing.expectEqual(@as(u2, 2), glyphs.glyphs[1].cell_width);
+    try std.testing.expectEqual(@as(u3, 2), glyphs.glyphs[1].cell_width);
     try std.testing.expectEqual(@as(u21, 'e'), glyphs.glyphs[2].codepoint);
     try std.testing.expect(glyphs.overlays.len > 0);
 }

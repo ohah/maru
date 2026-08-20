@@ -1028,14 +1028,24 @@ static uint16_t maru_left_overhang_cells(CTFontRef font, CGGlyph glyph) {
     // 일반 글자는 0.1 수준이므로 반올림이 그 둘을 가른다.
     const double cells = round((double)(-bounds.origin.x) / (double)advance.width);
     if (!(cells >= 1.0)) return 0;
-    // **상한 2칸.** downstream 의 `cell_width` 가 `u2`(0~3)라 한 글리프가 덮을 수 있는 칸이 최대 3이다
-    // (`renderer/glyph_layout.zig`·`shaped_records.zig`·`coretext_font.zig`). 그래서 일반 글자(1칸)에
-    // 오버항 2칸까지가 한계다 — `===`·`!==` 같은 3글자 합자는 온전히 그려지고, `<!--` 처럼 4글자 합자는
-    // 3칸만 덮어 첫 글자가 여전히 잘린다(한계로 기록).
+    // **상한 3칸.** downstream 의 `cell_width` 가 `u3`(0~7)라 한 글리프가 덮을 수 있는 칸에 여유가 있다
+    // (`renderer/glyph_layout.zig`·`shaped_records.zig`·`coretext_font.zig`). 3 이면 일반 글자(1칸)에
+    // 오버항 3칸 = 4칸까지 덮어 `<!--`·`<==>`·`####` 같은 **4글자 합자가 온전히** 그려진다.
     //
-    // 4로 허용했다가 실제로 크래시를 봤다: `@intCast(4)` 가 u2 를 넘겨 headless tick 테스트가 signal
-    // TRAP 으로 죽었다(로컬 CI 게이트가 잡았다). 상한은 그 타입과 함께 움직여야 한다.
-    return (uint16_t)fmin(cells, 2.0);
+    // **3 이 어디서 나온 값인가**: 설치된 폰트 252 패밀리 + 번들 5 종의 **모든 글리프**를 순회해 ink 가
+    // advance 왼쪽으로 몇 칸 넘치는지 쟀다(2026-08-20). 코딩 폰트의 최대가 3칸이다 — JetBrains Mono 7 개
+    // (`<!--` `<#--` `<==>` `####` `{{--` `{!--` `--}}`), Fira Code 1 개(`<!--`), 번들 기본 Jetendard 7 개.
+    // Cascadia Code·Hack 과 한글/CJK/이모지 fallback 폰트는 전부 2칸 이하다.
+    //
+    // 4칸이 필요한 폰트도 있지만(Mishafi·Diwan Thuluth·Mishafi Gold 아랍어 서예체, Zapfino·Trattatello
+    // swash) 상한을 거기 맞추지 않는다: 터미널 폰트로 쓰이지 않고, 앞 칸이 실제 잉크를 가져
+    // `prev_glyph_zero_ink` 조건에서 어차피 오버항이 부여되지 않으며, 걸려도 잘려 보일 뿐이다. 상한을
+    // 키우면 쓰이지도 않을 5칸 슬롯을 아틀라스가 떠안고 "앞 글자를 덮을" 위험 면적만 넓어진다.
+    //
+    // 예전에 2 였을 때 4 로 올렸다가 크래시를 봤다: `@intCast(4)` 가 그때의 `u2` 를 넘겨 headless tick
+    // 테스트가 signal TRAP 으로 죽었다(로컬 CI 게이트가 잡았다). **상한은 그 타입과 함께 움직여야 한다** —
+    // 이번에 3 으로 올릴 수 있는 것도 downstream 타입을 `u3` 로 함께 넓혔기 때문이다.
+    return (uint16_t)fmin(cells, 3.0);
 }
 
 /// 글리프가 잉크를 하나도 갖지 않는가(합자의 첫 칸처럼 폰트가 의도적으로 비운 글리프).

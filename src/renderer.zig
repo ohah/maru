@@ -63,6 +63,7 @@ pub const GlyphCacheKey = glyph_layout.GlyphCacheKey;
 pub const GlyphId = glyph_layout.GlyphId;
 pub const GlyphRun = glyph_layout.GlyphRun;
 pub const GlyphRunList = glyph_layout.GlyphRunList;
+pub const max_glyph_cell_span = glyph_layout.max_glyph_cell_span;
 pub const GlyphUpload = glyph_frame.GlyphUpload;
 pub const RasterStyleFlags = glyph_layout.RasterStyleFlags;
 pub const RenderFrame = types.RenderFrame;

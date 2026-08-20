@@ -6,7 +6,7 @@ const terminal = maru.terminal;
 pub const CoreTextGlyphRecord = struct {
     row: u16 = 0,
     col: u16,
-    cell_width: u2 = 1,
+    cell_width: u3 = 1,
     codepoint: u21,
     glyph_id: renderer.GlyphId,
     font_name: []const u8,
@@ -135,7 +135,7 @@ test "CoreText font bridge preserves renderer-neutral glyph metadata" {
 
     try std.testing.expectEqual(@as(u16, 2), shaped.row);
     try std.testing.expectEqual(@as(u16, 3), shaped.col);
-    try std.testing.expectEqual(@as(u2, 2), shaped.cell_width);
+    try std.testing.expectEqual(@as(u3, 2), shaped.cell_width);
     try std.testing.expect(shaped.fallback);
     try std.testing.expect(shaped.style.bold);
     try std.testing.expect(shaped.style.underline);

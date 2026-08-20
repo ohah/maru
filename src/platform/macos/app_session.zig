@@ -33030,7 +33030,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         try std.testing.expect(has_caret);
 
         // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
-        var ga_span: ?u2 = null;
+        var ga_span: ?u3 = null;
         var ga_slot_w: u32 = 0;
         var a_slot_w: u32 = 0;
         for (ff.frame.glyph_quad_frame.glyphs) |q| {
@@ -33043,7 +33043,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         }
         // 핵심: '가'는 span=2여야 하고, atlas slot이 ASCII(span 1)의 2배 폭이어야 wide 글리프가 안 잘린다.
         // slot이 1칸이면 rasterizer가 글자를 1칸에 가운데정렬+우측 클립해 왼쪽 절반(ㄱ)만 남는다.
-        try std.testing.expectEqual(@as(?u2, 2), ga_span);
+        try std.testing.expectEqual(@as(?u3, 2), ga_span);
         try std.testing.expect(a_slot_w > 0);
         try std.testing.expectEqual(a_slot_w * 2, ga_slot_w);
     }
@@ -33084,7 +33084,7 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
         }
         try std.testing.expect(has_caret);
 
-        var ga_span: ?u2 = null;
+        var ga_span: ?u3 = null;
         var ga_slot_w: u32 = 0;
         var a_slot_w: u32 = 0;
         for (ff.frame.glyph_quad_frame.glyphs) |q| {
@@ -33095,7 +33095,7 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
                 a_slot_w = q.slot.width_px;
             }
         }
-        try std.testing.expectEqual(@as(?u2, 2), ga_span); // 팝업 '가'도 span=2(find와 같은 경로)
+        try std.testing.expectEqual(@as(?u3, 2), ga_span); // 팝업 '가'도 span=2(find와 같은 경로)
         try std.testing.expect(a_slot_w > 0);
         try std.testing.expectEqual(a_slot_w * 2, ga_slot_w); // 2칸 slot — 안 잘림
     }

@@ -1629,7 +1629,7 @@ test "톱니 히트는 손가락 기준을 넘는다" {
 // 남아 있던 상태 때문에 아무 데나 먹으면 그 손짓이 통째로 사라진다(코드 리뷰가 잡은 결함).
 // 계약이 두 번 바뀐 자리다: "톱니 밖은 안 먹는다"(U3a) → "아무것도 안 먹는다"(U3b) →
 // **"뒤로가기만 먹는다"**(A — 돌아갈 길이 보여야 한다).
-test "터미널 화면에서 chrome 은 뒤로가기만 먹는다" {
+test "터미널 화면에서 chrome 은 앱 바 버튼만 먹는다" {
     openTerminal(402, 874);
     _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
@@ -1642,9 +1642,11 @@ test "터미널 화면에서 chrome 은 뒤로가기만 먹는다" {
         var x: f32 = 0;
         while (x < 402) : (x += 53) {
             bridge.maru_mobile_pointer(0, 1, x, y, now());
-            const on_back = bridge.terminalBackHitAt(x, y);
+            // **앱 바 버튼 자리면 chrome 이, 아니면 키바·본문이 받는다.** 자판(늘 있다)·복사
+            // (선택이 있을 때)도 그 띠에 있으므로 뒤로가기만 세면 그 둘이 "본문이 먹어야 하는
+            // 자리" 로 잘못 판정된다.
+            const on_back = bridge.terminalChromeHitAt(x, y);
             const is_chrome = std.mem.eql(u8, "chrome", bridge.currentRouteName());
-            // 뒤로가기 자리면 chrome 이, 아니면 키바·본문이 받는다.
             try std.testing.expectEqual(on_back, is_chrome);
             bridge.maru_mobile_pointer(3, 1, x, y, now());
         }

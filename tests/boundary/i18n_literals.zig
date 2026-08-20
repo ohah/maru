@@ -88,7 +88,10 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/session_host/remote_term_backend.zig", .count = 2 },
     .{ .path = "src/platform/macos/session_host/shutdown_n1_baseline.zig", .count = 1 },
     .{ .path = "src/platform/macos/session_host/test_scratch.zig", .count = 2 },
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 3 },
+    // 데모 바이트를 없애며 0 이 됐다(그 안의 한국어가 마지막 리터럴이었다 — 화면 문구는
+    // 이미 전부 `i18n` 키다). **원장은 늘 실측으로 내린다**: 남겨 두면 새 리터럴 셋이
+    // 들어와도 게이트가 조용하다.
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 0 },
     .{ .path = "src/session/agent_observer.zig", .count = 3 },
     .{ .path = "src/session/agent_selection.zig", .count = 1 },
     .{ .path = "src/session/agent_statusline.zig", .count = 5 },

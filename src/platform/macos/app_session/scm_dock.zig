@@ -531,7 +531,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         if (self.scm_commit_files_truncated) file_rows += 1;
     }
     const notice_rows: usize = if (rows.len == 0) 1 else 0;
-    // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — `가져오기`는 어느 탭에서도 눌린다).
+    // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
+    // 따라온다**).
     const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
     const items = arena.alloc(component.types.Item, rows.len + notice_rows + action_rows + file_rows) catch return null;
     var n: usize = 0;
@@ -687,8 +688,10 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     }
 
     const notice_rows: usize = if (count == 0) 1 else 0;
-    // **방금 누른 동작의 결과는 어느 탭에서도 보여야 한다**(P6). `가져오기`는 브랜치 줄에 있어 히스토리·
-    // 에이전트 탭에서도 눌린다 — 이 줄이 없으면 눌러도 아무 말이 없어 "고장"으로 읽힌다.
+    // **방금 누른 동작의 결과는 탭을 따라와야 한다**(P6). 쓰기를 거는 컨트롤은 전부 변경 사항 탭에 있다
+    // — 브랜치 줄은 `branch`가 빈 이 탭에 서지 않으므로 `가져오기`도 여기서는 tree에 **없다**(아래
+    // `.branch = ""`). 그래도 이 줄이 필요한 이유는 **커밋한 직후 여기로 옮겨 방금 만든 커밋을 확인하는**
+    // 흐름이다: 옮기는 순간 결과가 사라지면 커밋이 됐는지 알 길이 없다.
     const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
     // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
     // 눌러도 아무 일이 없어 고장으로 읽힌다.

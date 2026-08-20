@@ -60,7 +60,13 @@ pub const Event = struct {
     /// `tool_input.description` — 사람이 읽는 도구 설명. 진행 중 배지가 쓴다(명령 원문은 길고 민감해 쓰지 않는다).
     tool_description: []const u8 = "",
     /// `tool_input.file_path` — 편집 도구가 만지는 경로. AI 소행 확정이 쓴다.
+    ///
+    /// **Claude 에만 있다.** Codex 의 `tool_input` 은 `command` 하나뿐이고 경로는 그 안의 패치 텍스트에
+    /// 들어 있다(실측 2026-08-20). Codex 경로는 `patchPaths` 로 훑는다.
     file_path: []const u8 = "",
+    /// `tool_input.command` 원문(이스케이프 미해제). Codex 의 `apply_patch` 는 여기에 패치 전체가 들어오고,
+    /// 셸 도구는 실행할 명령이 들어온다.
+    tool_command: []const u8 = "",
     /// `UserPromptSubmit.prompt` 또는 `Stop.last_assistant_message`. 사이드바 대화 줄이 쓴다.
     text: []const u8 = "",
     /// `SessionStart.source`(startup/resume/…).
@@ -135,6 +141,8 @@ pub fn parseLine(line: []const u8) ?Event {
                     ev.file_path = scan.stringValue() orelse return null;
                 } else if (std.mem.eql(u8, inner, "description")) {
                     ev.tool_description = scan.stringValue() orelse return null;
+                } else if (std.mem.eql(u8, inner, "command")) {
+                    ev.tool_command = scan.stringValue() orelse return null;
                 } else if (!scan.skipValue()) return null;
             }
             if (scan.failed) return null;
@@ -143,6 +151,58 @@ pub fn parseLine(line: []const u8) ?Event {
     if (scan.failed) return null;
     if (!saw_event_name) return null;
     return ev;
+}
+
+/// Codex `apply_patch` 의 패치 텍스트에서 **바뀌는 파일 경로**를 훑는다.
+///
+/// **왜 필요한가**: Claude 는 `tool_input.file_path` 로 경로를 직접 주지만, **Codex 는 주지 않는다** —
+/// `tool_input` 이 `command` 하나뿐이고 그 안에 패치 전체가 들어 있다(실측 2026-08-20). 그래서 AI 소행
+/// 확정이 Codex 에서 통째로 비었다.
+///
+/// 패치 형식은 실측한 모양 그대로다:
+/// ```text
+/// *** Begin Patch
+/// *** Update File: /abs/path.txt
+/// @@
+/// -alpha
+/// +beta
+/// *** End Patch
+/// ```
+/// **한 패치에 파일이 여럿일 수 있으므로 이터레이터**다 — 첫 경로만 집으면 나머지가 조용히 빠진다.
+/// 입력은 JSON 문자열 원문이라 줄바꿈이 `\n`(두 글자)로 이스케이프돼 있고, 그 상태 그대로 훑는다.
+pub const PatchPaths = struct {
+    rest: []const u8,
+
+    const markers = [_][]const u8{ "*** Update File: ", "*** Add File: ", "*** Delete File: " };
+
+    pub fn next(self: *PatchPaths) ?[]const u8 {
+        while (self.rest.len > 0) {
+            var best: ?usize = null;
+            var best_len: usize = 0;
+            for (markers) |m| {
+                if (std.mem.indexOf(u8, self.rest, m)) |at| {
+                    if (best == null or at < best.?) {
+                        best = at;
+                        best_len = m.len;
+                    }
+                }
+            }
+            const at = best orelse return null;
+            const from = at + best_len;
+            self.rest = self.rest[from..];
+            // 경로는 다음 줄 경계까지다. payload 안에서 줄바꿈은 `\n` 두 글자로 이스케이프돼 있다.
+            const end = std.mem.indexOf(u8, self.rest, "\\n") orelse self.rest.len;
+            const path = self.rest[0..end];
+            self.rest = self.rest[@min(end + 2, self.rest.len)..];
+            if (path.len > 0) return path;
+        }
+        return null;
+    }
+};
+
+/// 이 이벤트가 만지는 경로를 훑는다. Claude 는 `file_path` 하나를, Codex 는 패치 텍스트의 여러 경로를 준다.
+pub fn patchPaths(ev: Event) PatchPaths {
+    return .{ .rest = ev.tool_command };
 }
 
 /// 손상된 줄 안에서 **온전한 이벤트를 다시 찾는다**(재동기화).
@@ -171,11 +231,20 @@ pub fn parseLineResync(line: []const u8) ?Resynced {
         const sep = from + sep_rel;
         from = sep + 1;
         if (from >= line.len or line[from] != '{') continue;
-        // 이 구분자 앞의 provider 토큰까지 포함해 다시 읽는다 — 토큰은 구분자 바로 앞의 연속 바이트다.
+        // 이 구분자 앞의 토큰을 되짚는다. **provider 글자만 따라간다** — 이전 구분자까지 거슬러 가면 A의
+        // payload 꼬리를 통째로 토큰으로 삼게 되고, 그러면 멀쩡한 B도 «모양이 아니다»라며 버린다.
         var start = sep;
-        while (start > 0 and line[start - 1] != field_separator and line[start - 1] != '}') start -= 1;
-        if (start == sep) continue; // provider 토큰이 비었다
-        if (parseLine(line[start..])) |ev| return .{ .event = ev, .recovered = true };
+        while (start > 0 and sep - start < max_provider_len and isProviderChar(line[start - 1])) start -= 1;
+        if (!looksLikeProvider(line[start..sep])) continue;
+        if (parseLine(line[start..])) |ev| {
+            var recovered_ev = ev;
+            // **섞인 줄에서는 발신자를 확신할 수 없다.** 이 토큰은 A의 payload 꼬리에 B의 이름이 붙은
+            // 조각일 수 있다(실측한 인터리브가 정확히 그 모양이었다). provider 를 그대로 실으면 «누가
+            // 보냈는지 틀린» 이벤트가 상태·소행에 섞이므로, 모른다고 말한다 — `recovered` 가 그 사실을
+            // 알리고, 소비자는 파일 컨텍스트(파일당 pane 하나)에서 필요한 만큼 메운다.
+            recovered_ev.provider = "";
+            return .{ .event = recovered_ev, .recovered = true };
+        }
     }
     return null;
 }
@@ -186,6 +255,23 @@ pub fn parseLineResync(line: []const u8) ?Resynced {
 /// 겹치는지는 재현이 안 돼 세지 못했다. 관측된 모양은 모두 한 겹(A 사이에 B 하나)이었고, 겹이 깊어질수록
 /// 그 줄에서 건질 값어치도 떨어진다. 상한이 없으면 병리적인 줄 하나가 tick 을 붙잡으므로 작게 잡는다.
 pub const max_resync_attempts: usize = 4;
+
+/// provider 토큰의 최대 길이. 이름은 `claude`·`codex` 처럼 짧고, 상한이 있어야 손상 줄에서 긴 쓰레기가
+/// 토큰으로 인정되지 않는다.
+pub const max_provider_len: usize = 16;
+
+fn isProviderChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
+}
+
+/// 토큰이 provider 이름 모양인가 — 비어 있지 않고, 짧고, 소문자·숫자·하이픈뿐인가.
+fn looksLikeProvider(token: []const u8) bool {
+    if (token.len == 0 or token.len > max_provider_len) return false;
+    for (token) |c| {
+        if (!isProviderChar(c)) return false;
+    }
+    return true;
+}
 
 /// JSON 문자열 이스케이프를 풀어 `out`에 담는다(표시 직전에만 쓴다). 담을 수 있는 만큼만 담고 자른다 —
 /// 사이드바 한 줄에 들어갈 분량이면 충분하고, 여기서 할당하지 않기 위해서다.
@@ -683,19 +769,59 @@ test "섞인 줄 안의 온전한 이벤트를 건진다 — 버리면 멀쩡한
     try testing.expect(r.recovered);
     try testing.expectEqual(Kind.stop, r.event.kind);
     try testing.expectEqualStrings("p-inner", r.event.turn_key);
+    // **발신자는 비운다** — 이 토큰은 A의 payload 꼬리에 B의 이름이 붙은 조각일 수 있다.
+    try testing.expectEqualStrings("", r.event.provider);
 
     // 멀쩡한 줄은 «건졌다»로 세지 않는다 — 그 수가 인터리브의 신호이기 때문이다.
     const clean = parseLineResync("claude\t{\"hook_event_name\":\"Stop\"}").?;
     try testing.expect(!clean.recovered);
 }
 
-test "재동기화가 손상 줄을 무한히 뒤지지 않는다" {
-    // 구분자만 잔뜩 든 병리적인 줄로 상한을 확인한다 — 없으면 줄 하나가 tick 을 붙잡는다.
+test "재동기화 시도 상한이 실제로 멈춘다" {
+    // **상한이 없어도 통과하는 테스트는 상한을 검증하지 못한다.** 그래서 «상한 너머에 멀쩡한 이벤트를 두고
+    // 그것을 못 찾는지»로 본다 — 상한을 지우면 이 단언이 깨진다(뮤테이션 가능).
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(testing.allocator);
-    try buf.appendSlice(testing.allocator, "claude\t{");
-    for (0..64) |_| try buf.appendSlice(testing.allocator, "x\t");
+    try buf.appendSlice(testing.allocator, "claude\t{broken");
+    // 시도 상한보다 많은 «구분자만 있는» 후보를 깔아 시도를 소진시킨다.
+    for (0..max_resync_attempts + 2) |_| try buf.appendSlice(testing.allocator, "\tnope");
+    // 그 너머에 멀쩡한 이벤트가 있어도 도달하지 못해야 한다.
+    try buf.appendSlice(testing.allocator, "\tclaude\t{\"hook_event_name\":\"Stop\"}");
     try testing.expect(parseLineResync(buf.items) == null);
+
+    // 같은 이벤트가 **상한 안**에 있으면 건진다 — 위 실패가 «상한 때문»임을 이 대조가 증명한다.
+    var near: std.ArrayListUnmanaged(u8) = .empty;
+    defer near.deinit(testing.allocator);
+    try near.appendSlice(testing.allocator, "claude\t{broken\tclaude\t{\"hook_event_name\":\"Stop\"}");
+    try testing.expect(parseLineResync(near.items) != null);
+}
+
+test "손상 조각을 provider 로 인정하지 않는다" {
+    // 재동기화는 쓰레기 바이트 위를 걷는다. 토큰 검증이 없으면 «누가 보냈는지 틀린» 이벤트가 만들어지고,
+    // 그건 버리는 것보다 나쁘다(상태·소행에 섞인다).
+    // 토큰이 «모양은 맞는» 조각이면 이벤트는 건지되 **발신자는 비운다** — 이벤트 자체는 진짜이고,
+    // 그 이름이 A의 꼬리에서 잘려 나온 것인지 B의 진짜 이름인지 구분할 방법이 없기 때문이다.
+    const bogus = "claude\t{aaa\u{7f}\u{7f}bad name\t{\"hook_event_name\":\"Stop\"}";
+    const salvaged = parseLineResync(bogus).?;
+    try testing.expect(salvaged.recovered);
+    try testing.expectEqual(Kind.stop, salvaged.event.kind);
+    try testing.expectEqualStrings("", salvaged.event.provider);
+
+    // 구분자 앞이 provider 글자가 아니면 토큰이 비고, 그때는 건지지 않는다 — 되짚기가 «어디부터가 이름인지»
+    // 를 못 정하는 자리다.
+    try testing.expect(parseLineResync("claude\t{x }\t{\"hook_event_name\":\"Stop\"}") == null);
+
+    // 앞에서부터 멀쩡히 읽힌 줄은 발신자를 그대로 싣는다(재동기화가 아니므로 확신할 수 있다).
+    const straight = parseLineResync("codex\t{\"hook_event_name\":\"Stop\"}").?;
+    try testing.expect(!straight.recovered);
+    try testing.expectEqualStrings("codex", straight.event.provider);
+
+    // 정상 provider 이름은 그대로 통과한다.
+    try testing.expect(looksLikeProvider("claude"));
+    try testing.expect(looksLikeProvider("codex"));
+    try testing.expect(looksLikeProvider("mimo-code"));
+    try testing.expect(!looksLikeProvider(""));
+    try testing.expect(!looksLikeProvider("Claude")); // 대문자는 우리 표기가 아니다
 }
 
 test "커서가 건진 이벤트를 세고 그 사실을 알린다" {
@@ -708,4 +834,39 @@ test "커서가 건진 이벤트를 세고 그 사실을 알린다" {
     try testing.expectEqual(@as(usize, 2), batch.count);
     try testing.expectEqual(@as(usize, 1), batch.recovered);
     try testing.expectEqual(@as(usize, 0), batch.dropped);
+}
+
+test "Codex apply_patch 의 경로를 패치 텍스트에서 훑는다 — 그쪽엔 file_path 가 없다" {
+    // 실측(2026-08-20, 격리 CODEX_HOME): Codex `PreToolUse.tool_input` 은 `command` 하나뿐이고
+    // 경로는 그 안의 `*** Update File: …` 줄에 있다. Claude 처럼 `file_path` 를 기대하면 통째로 빈다.
+    const line = "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"apply_patch\"," ++
+        "\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: /repo/a.txt\\n@@\\n-alpha\\n+beta\\n*** End Patch\"}}";
+    const ev = parseLine(line).?;
+    try testing.expectEqualStrings("apply_patch", ev.tool_name);
+    try testing.expectEqualStrings("", ev.file_path); // Codex 는 이 필드를 주지 않는다
+    var it = patchPaths(ev);
+    try testing.expectEqualStrings("/repo/a.txt", it.next().?);
+    try testing.expect(it.next() == null);
+}
+
+test "한 패치에 파일이 여럿이면 모두 훑는다 — 첫 경로만 집으면 나머지가 조용히 빠진다" {
+    const line = "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"apply_patch\"," ++
+        "\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: /repo/a.zig\\n@@\\n-x\\n+y\\n" ++
+        "*** Add File: /repo/b.md\\n+new\\n*** Delete File: /repo/c.txt\\n*** End Patch\"}}";
+    const ev = parseLine(line).?;
+    var it = patchPaths(ev);
+    try testing.expectEqualStrings("/repo/a.zig", it.next().?);
+    try testing.expectEqualStrings("/repo/b.md", it.next().?);
+    try testing.expectEqualStrings("/repo/c.txt", it.next().?);
+    try testing.expect(it.next() == null);
+}
+
+test "셸 도구의 command 는 경로를 내지 않는다 — 그 안의 파일 변경은 훅이 못 본다" {
+    const line = "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"sed -i '' s/alpha/gamma/ /repo/d.txt\"}}";
+    const ev = parseLine(line).?;
+    try testing.expectEqualStrings("sed -i '' s/alpha/gamma/ /repo/d.txt", ev.tool_command);
+    var it = patchPaths(ev);
+    // 패치 표식이 없으므로 경로가 나오지 않는다 — 계약이 말하는 셸 사각지대가 여기서 드러난다.
+    try testing.expect(it.next() == null);
 }

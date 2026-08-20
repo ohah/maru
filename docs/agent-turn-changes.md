@@ -36,9 +36,9 @@
 | 훅 `SessionStart` | ✅ **직접 실행**(`source=startup`) | ✅ **직접 실행**(격리 `CODEX_HOME`, `source=startup`) |
 | 훅 `UserPromptSubmit` | ✅ 직접 실행 | ✅ 직접 실행(`turn_id` + `prompt` 원문) |
 | 훅 `Stop` | ✅ 직접 실행 | ✅ 실물 payload(maru v2 훅이 남긴 것) |
-| 훅 `PreToolUse`(편집 도구) | ✅ 직접 실행(`tool_input.file_path`·`description`) | ❌ **미검증** — 실측 중 provider 사용량 한도로 모델 호출 실패 |
+| 훅 `PreToolUse`(편집 도구) | ✅ 직접 실행(`file_path`·`description`) | ✅ **직접 실행** — `command` 하나뿐이라 경로는 패치 텍스트에서 훑는다([계약 §2.1](agent-hooks.md)) |
 | 훅 `PostToolUse`(편집 도구) | ✅ 직접 실행, `structuredPatch`·`originalFile` 확보 — **크기 때문에 세트에서 제외**([계약 §3.1](agent-hooks.md)) | ❌ 미검증 |
-| 훅 `PostToolUse`(셸)에 파일 정보 없음 | ✅ 직접 실측 | ❌ 미검증(설계상 동일할 것으로 본다) |
+| 셸 편집에 파일 정보 없음 | ✅ 직접 실측 | ✅ **직접 실측**(`sed -i` 로 고쳤으나 명령 문자열 외에 경로 정보 없음) |
 | 세션 파일의 변경 기록 | ✅ 파일 파싱 | ✅ 파일 파싱 |
 | 세션 시작 커밋 | 필드 없음을 확인 | ✅ `session_meta.git.commit_hash` |
 | 커밋 없이 tree 스냅샷 비교 | ✅ 실증(§2.4) | provider 무관 |
@@ -258,8 +258,8 @@ provider 기록의 내용: Claude는 transcript user 라인의
 2. 턴 중 사용자가 저장한 파일도 `· 턴 중 변경`에 섞인다. 워크스페이스를 대화마다 하나 쓰면 실질적으로 사라진다.
 3. 링 8개 = 최대 7턴 + 진행 중(§6.1 결정). 커밋 여부와 무관한 별개 상한이다.
 4. maru가 떠 있지 않은 동안의 턴은 애초에 없다. 빈 목록은 오류가 아니다.
-5. Codex의 도구 훅 payload는 미검증이다(§2.1). 세트에서 `PostToolUse`가 빠졌으므로 남은 것은
-   Codex `PreToolUse`다.
+5. Codex 는 `PreToolUse.tool_input` 에 `command` 만 주므로 편집 경로를 **패치 텍스트에서 훑어야** 한다
+   ([계약 §2.1](agent-hooks.md)). 셸(`exec`) 편집은 Claude 와 마찬가지로 잡히지 않는다(실측).
 6. git 아닌 워크스페이스에서는 `✎` 목록만 나온다. FSEvents 워처로 메우는 길이 있으나(macOS 어댑터는
    `MaruAppHost.swift`에 이미 있다) 실제 수요가 생길 때까지 만들지 않는다.
 

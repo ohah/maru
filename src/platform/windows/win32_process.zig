@@ -11,9 +11,9 @@
 //! **읽기가 영원히 안 끝난다**(교착이지 오류가 아니라서 조용하다).
 const std = @import("std");
 const builtin = @import("builtin");
-const maru = @import("maru");
-const windows_spawn = maru.pty.windows_spawn;
-const path_shape = maru.path_shape;
+// **형제 경로로 가져온다.** `maru.zig` 가 이 파일을 내보내므로 `@import("maru")` 는 순환이다.
+const windows_spawn = @import("../../pty/windows_spawn.zig");
+const path_shape = @import("../../path_shape.zig");
 
 pub const Error = error{
     CreatePipeFailed,
@@ -194,7 +194,12 @@ fn eqlNameW(wide_name: []const u16, name: []const u8) bool {
 }
 
 /// 마지막 Win32 오류 — 실패를 보고할 때 숫자를 함께 남긴다(`pty/windows.zig` 와 같은 결).
-pub var last_error: u32 = 0;
+/// **`pub var` 가 아니다.** `cross_target_surface` 워커가 공개 선언을 comptime 에 훑는데 `var` 는 그
+/// 자리에서 값이 안 잡혀 게이트가 깨진다(실측). 접근자로 낸다.
+var last_error_value: u32 = 0;
+pub fn lastError() u32 {
+    return last_error_value;
+}
 
 fn wide(allocator: std.mem.Allocator, s: []const u8) ![:0]u16 {
     return std.unicode.utf8ToUtf16LeAllocZ(allocator, s) catch error.OutOfMemory;
@@ -248,7 +253,7 @@ pub fn capture(
     var read_h: HANDLE = null;
     var write_h: HANDLE = null;
     if (CreatePipe(&read_h, &write_h, &sa, 0) == 0) {
-        last_error = GetLastError();
+        last_error_value = GetLastError();
         return error.CreatePipeFailed;
     }
     errdefer _ = CloseHandle(read_h);
@@ -256,7 +261,7 @@ pub fn capture(
     // ⑵ **읽는 쪽은 상속시키지 않는다.** 자식이 읽기 핸들 사본을 가지면 자식이 끝나도 파이프가 안 닫혀
     //    **EOF 가 영원히 안 온다.** 오류가 아니라 교착이라 조용하다.
     if (SetHandleInformation(read_h, handle_flag_inherit, 0) == 0) {
-        last_error = GetLastError();
+        last_error_value = GetLastError();
         _ = CloseHandle(write_h);
         return error.CreatePipeFailed;
     }
@@ -267,7 +272,7 @@ pub fn capture(
         const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
         const h = CreateFileW(nul_name, generic_write, file_share_read | file_share_write, &sa, open_existing, 0, null);
         if (h == invalid_handle_value) {
-            last_error = GetLastError();
+            last_error_value = GetLastError();
             _ = CloseHandle(write_h);
             return error.CreatePipeFailed;
         }
@@ -282,7 +287,7 @@ pub fn capture(
         const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
         const h = CreateFileW(nul_name, generic_read, file_share_read | file_share_write, &sa, open_existing, 0, null);
         if (h == invalid_handle_value) {
-            last_error = GetLastError();
+            last_error_value = GetLastError();
             _ = CloseHandle(write_h);
             return error.CreatePipeFailed;
         }
@@ -338,7 +343,7 @@ pub fn capture(
         &pi,
     );
     if (ok == 0) {
-        last_error = GetLastError();
+        last_error_value = GetLastError();
         _ = CloseHandle(write_h);
         return error.SpawnFailed;
     }
@@ -360,7 +365,7 @@ pub fn capture(
             const e = GetLastError();
             // 자식이 끝나 쓰기 쪽이 닫히면 `ERROR_BROKEN_PIPE` 다 — 오류가 아니라 EOF 다.
             if (e == error_broken_pipe) break;
-            last_error = e;
+            last_error_value = e;
             _ = CloseHandle(read_h);
             return error.ReadFailed;
         }
@@ -378,12 +383,12 @@ pub fn capture(
     _ = CloseHandle(read_h);
 
     if (WaitForSingleObject(pi.hProcess, infinite) != wait_object_0) {
-        last_error = GetLastError();
+        last_error_value = GetLastError();
         return error.WaitFailed;
     }
     var code: u32 = 0;
     if (GetExitCodeProcess(pi.hProcess, &code) == 0) {
-        last_error = GetLastError();
+        last_error_value = GetLastError();
         return error.WaitFailed;
     }
 

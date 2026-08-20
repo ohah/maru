@@ -67,6 +67,14 @@ OpenSSH 서버에서 "길이가 쓰레기로 풀린다/태그 불일치" 로 **�
 agent 전달, 포트 포워딩, X11, SFTP/SCP, `keyboard-interactive`. 채널은 **위 표의 둘까지**이고
 그 밖의 채널 종류(`direct-tcpip`·`direct-streamlocal`)는 안 연다.
 
+**안 연다는 것은 "거절한다" 는 뜻이지 "무시한다" 가 아니다.** 서버는 `x11`·`forwarded-tcpip`·
+`auth-agent@openssh.com` 을 **열자고 할 수 있고**, §5.1 은 그 메시지에 "either
+SSH_MSG_CHANNEL_OPEN_CONFIRMATION or SSH_MSG_CHANNEL_OPEN_FAILURE" 로 답하라고 못박는다.
+`UNIMPLEMENTED` 로 답하면 안 된다 — 그것은 §11.4 의 모르는 **메시지 번호**용이고,
+`CHANNEL_OPEN` 은 우리가 아는 번호다. 엉뚱한 답을 받은 상대는 **열지도 닫지도 못한 채널을 붙들고
+기다린다**. 우리는 `SSH_OPEN_UNKNOWN_CHANNEL_TYPE`(3)으로 거절하고, 답의 채널 번호는 **상대가
+보낸 sender channel** 이다(우리 번호가 아니다).
+
 ### 3.0.1 재키잉은 한다 — 안 하면 한 시간 뒤에 멈춘다
 
 서버는 일정 트래픽·시간마다 `SSH_MSG_KEXINIT` 을 다시 보내 키를 갈자고 한다(OpenSSH 기본

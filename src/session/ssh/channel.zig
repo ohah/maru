@@ -187,6 +187,36 @@ pub const TerminalSize = struct {
 };
 
 /// `session` 채널 하나.
+/// 상대가 열자고 한 채널을 **거절**한다(§5.1).
+///
+/// **채널이 아니라 메시지에 답하는 것이라 인스턴스가 없다.** 우리는 `session` 둘 말고는
+/// 안 열므로(계약 §3), 서버가 `x11`·`forwarded-tcpip`·`auth-agent@openssh.com` 을 열자고
+/// 하면 여기로 온다.
+///
+/// **`UNIMPLEMENTED` 로 답하면 안 된다.** 그것은 §11.4 의 "모르는 **메시지 번호**" 용이고,
+/// `CHANNEL_OPEN` 은 우리가 아는 번호다. 명세는 이 메시지에 **"either
+/// SSH_MSG_CHANNEL_OPEN_CONFIRMATION or SSH_MSG_CHANNEL_OPEN_FAILURE"** 로 답하라고
+/// 못박는다 — 엉뚱한 답을 보내면 상대는 열린 것도 실패한 것도 아닌 채널을 붙들고 기다린다.
+///
+/// `recipient channel` 은 **상대가 보낸 sender channel** 이다(우리 번호가 아니다).
+pub fn writeOpenFailure(out: []u8, sender_channel: u32, reason: OpenFailureReason) Error![]const u8 {
+    var w = wire.Writer.init(out);
+    try w.byte(msg_channel_open_failure);
+    try w.u32be(sender_channel);
+    try w.u32be(@intFromEnum(reason));
+    try w.string("maru opens no channels");
+    try w.string(""); // language tag (RFC 3066) — 비워 둔다
+    return w.written();
+}
+
+/// 상대가 보낸 `CHANNEL_OPEN` 에서 **그쪽 채널 번호**를 읽는다(§5.1: type, sender channel, …).
+pub fn readOpenSender(payload: []const u8) Error!u32 {
+    var r = wire.Reader.init(payload);
+    if (try r.byte() != msg_channel_open) return Error.UnexpectedMessage;
+    _ = try r.string(); // channel type
+    return try r.u32be();
+}
+
 pub const Channel = struct {
     /// 우리가 고른 번호. 채널이 하나뿐이라 값 자체는 아무것이나 되지만, **상대가 보낸 번호와
     /// 대조하는 데 쓴다**.

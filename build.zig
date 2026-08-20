@@ -1924,6 +1924,24 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(file_tree_backend_tests).step);
+
+    // Windows 캡처 러너. **Windows 호스트에서만 건다** — `kernel32` 를 직접 부르므로 다른 호스트에서는
+    // 링크할 심볼이 없다. 테스트가 전부 `builtin.os.tag != .windows` 에서 skip 이라 다른 호스트에
+    // 걸어 봐야 아무것도 안 재고 링크만 깨진다. 그 대신 **시끄럽게 건너뛴다**.
+    if (target.result.os.tag == .windows) {
+        const win32_process_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/windows/win32_process.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(win32_process_tests).step);
+    } else {
+        test_step.dependOn(noteSkippedStep(b, "win32_process 단위 테스트", "Windows 호스트 전용 — CreateProcessW + 익명 파이프를 실제로 돌린다 (docs/windows-platform.md §2m.8)"));
+    }
     // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다. 한때
     // 그래서 macOS에서만 걸었지만, W2가 그 자리들을 **호스트 OS 게이트**로 접어(컨트롤 소켓 → "인스턴스 없음",
     // `maru ssh`·`install-cli` → 미지원 안내, `publishBrowserResult` → `error.UnsupportedOnWindows`) 이제 모든

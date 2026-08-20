@@ -1326,6 +1326,48 @@ style.background → resolveColor → NativeMetalCell.background → colorFromAr
 **이 문서가 ⒝ 를 세 번 다시 쟀다** — §2m.4 는 과소(낮추기가 없다), 그 직후 가설은 과대(컴파일되니 공짜),
 §2m.6 은 다시 과대(쿼드가 필요하다). 공통 원인은 **코드를 읽고 결론을 냈다**는 것이다. 세 번 다
 **돌려 보고 나서야** 답이 나왔다.
+
+### 2m.8 Windows 캡처 러너 — git 을 부르는 길 (W8.4 준비, 실측 2026-08-20)
+
+git 백엔드는 POSIX `fork+exec+pipe` 로 자식을 띄운다. Windows 에는 그것이 없고, **`std.process.Child` 는
+이 저장소가 의도적으로 피한다** — 0.16 에서 io 기반으로 개편되어 `ssh_upload.zig`·`update_check.zig`·
+`app_session.zig` 셋이 명시적으로 그렇게 적는다(0.16 의 `Child` 에 `run` 이 없는 것을 확인했다).
+
+**결정: `pty/windows.zig` 가 이미 검증한 결을 따른다** — `CreateProcessW` + 익명 파이프.
+`src/platform/windows/win32_process.zig` 가 그 하나뿐인 자리다. 명령줄 조립은 PTY 와 **같은 단일
+출처**(`pty/windows_spawn.buildCommandLine` — 조립→재파싱 왕복 테스트를 갖고 있다)를 쓴다.
+
+**세 가지를 정확히 해야 하고, 어느 하나만 틀려도 증상이 같다 — 읽기가 영원히 안 끝난다.**
+
+| # | 무엇 | 빠뜨리면 |
+|---|---|---|
+| ⑴ | 파이프를 **상속 가능**하게 만든다 | 자식이 쓰기 핸들을 못 받아 출력이 안 온다 |
+| ⑵ | **읽는 쪽은 상속시키지 않는다**(`SetHandleInformation`) | 자식이 읽기 사본을 쥐어 자식이 끝나도 **EOF 가 안 온다** |
+| ⑶ | 스폰 직후 **우리 쪽 쓰기 핸들을 놓는다** | 쓰는 쪽이 살아 있어 `ReadFile` 이 EOF 를 못 본다 |
+
+셋 다 오류가 아니라 **교착**이라 조용하다. POSIX 에서는 `fork` 뒤 부모가 자기 쓰기 fd 를 닫는 한 줄로
+끝나는 자리가 Windows 에서는 셋으로 갈린다.
+
+**stdout 과 stderr 를 한 파이프로 합친다.** git 은 진단을 stderr 로 내는데, 두 파이프를 각자 읽으면
+한쪽이 가득 차 자식이 막히는 동안 다른 쪽을 읽고 있을 수 있다 — 또 교착이다.
+
+**상한을 넘겨도 읽기를 멈추지 않는다.** 멈추면 파이프가 차서 자식이 쓰다 막히고, 우리는 그 자식을
+기다린다. 그래서 상한 뒤로는 **읽되 버린다**. 테스트가 그것을 직접 잰다 — 상한 256 바이트에 자식은
+파이프 기본 버퍼(약 4 KiB)를 훨씬 넘겨 쓰게 해 두었고, `truncated=true` 로 끝나야 통과다.
+
+**끝단 실측 — 사슬이 통한다.** 캡처 러너 → git → 중립 파서 → 모델 → 투영:
+
+```text
+branch=[feat/w8.4-win32-capture-runner]   model rows=4
+drawn="feat/w8.4-…0 0vChanges3build.zig+18 -0Mgitchain.zigsrc/Uwin32_process.zigsrc/plat"
+```
+
+브랜치·변경 수·파일 경로·numstat·상태 문자가 전부 나온다. **중립 층은 하나도 안 고쳤다** —
+`git_status.parseHead`·`scm_view.build`·`buildDockScmDrawList` 를 그대로 썼다.
+
+**러너는 아직 아무도 안 부른다.** git 백엔드를 이 러너로 갈아 끼우는 것은 다음 슬라이스다 — 그 파일은
+`std.c.*` 를 69 곳에서 쓰고 실행 자리가 둘(`spawnCapture`·`runQuiet`)이라, 러너를 세우는 것과 갈아
+끼우는 것을 한 PR 에 섞으면 무엇이 깨졌는지 못 가른다.
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

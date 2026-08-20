@@ -863,7 +863,14 @@ fn validateCallbackAuthorities(frame: *PreparationFrame) void {
 fn validateDtoContent(frame: *const PreparationFrame) void {
     if (std.mem.allEqual(u8, &frame.dto_content_digest, 0)) return;
     const descriptor = frame.scratch.descriptors[0];
-    if (descriptor.present != 1 or
+    const empty = frame.scratch.dto_backing.items.len == 0;
+    if (empty) {
+        if (frame.scratch.dto_backing.capacity != 0 or
+            !std.meta.eql(descriptor, cleanup.CleanupDescriptor{}) or
+            frame.scratch.live_mask & 1 != 0 or
+            frame.scratch.tombstone_mask & 1 != 0)
+            process_seal.fatalIntegrity(.callback_drift);
+    } else if (descriptor.present != 1 or
         frame.scratch.live_mask & 1 == 0 or
         frame.scratch.tombstone_mask & 1 != 0 or
         descriptor.address != @intFromPtr(frame.scratch.dto_backing.items.ptr) or
@@ -1130,12 +1137,22 @@ fn allocateFrameRole(frame: *PreparationFrame, role: usize, count: usize) Alloca
 }
 
 fn freeFrameRole(frame: *PreparationFrame, role: usize) void {
-    if (frame.scratch.live_mask & (@as(u8, 1) << @intCast(role)) == 0) return;
-    const descriptor = frame.scratch.descriptors[role];
     // Role 0 is a decode-only DTO. Once reverse cleanup reaches it, no later semantic read may
-    // depend on its bytes; drop the content seal before ArrayList.deinit mutates its slice fields
-    // inside the allocator callback. Its descriptor and allocator authority remain sealed.
-    if (role == 0) frame.dto_content_digest = [_]u8{0} ** 32;
+    // depend on its bytes; drop the content seal even when the canonical empty DTO did not allocate
+    // a role. For an allocated DTO this must still happen before ArrayList.deinit mutates its slice
+    // fields inside the allocator callback. Its descriptor and allocator authority remain sealed.
+    const live = frame.scratch.live_mask & (@as(u8, 1) << @intCast(role)) != 0;
+    if (role == 0 and !std.mem.allEqual(u8, &frame.dto_content_digest, 0)) {
+        frame.dto_content_digest = [_]u8{0} ** 32;
+        // The empty DTO has no allocator callback below, so publish the changed content-seal state
+        // here. Allocated role 0 is resealed by the normal callback evidence refresh.
+        if (!live) {
+            refreshCleanupEvidence(frame);
+            return;
+        }
+    }
+    if (!live) return;
+    const descriptor = frame.scratch.descriptors[role];
     frame.allocator_context.expected_role_raw = @intCast(role);
     frame.allocator_context.callback_active_raw = 1;
     frame.allocator_context.requested_len = descriptor.capacity_bytes;
@@ -1537,6 +1554,15 @@ test "C3-3b2b3 preparation byte snapshot binds descriptor and content" {
     list.items[0] = 'z';
     const second = try snapshotBytes(&list);
     try std.testing.expect(!std.mem.eql(u8, &first.content_digest, &second.content_digest));
+
+    // A metadata DTO with no decoded strings or processes has no allocation descriptor, but the
+    // BLAKE3 digest of its canonical empty content is still nonzero. This is a valid sealed state,
+    // not evidence that role 0 must be live.
+    var empty_frame: PreparationFrame = undefined;
+    empty_frame.scratch = .{};
+    empty_frame.dto_content_digest = rawDigest("maru.pending-frame.dto-content.v1", "");
+    try std.testing.expect(!std.mem.allEqual(u8, &empty_frame.dto_content_digest, 0));
+    validateDtoContent(&empty_frame);
 }
 
 test "C3-3b2b3 preparation pending control digest uses semantic canonical bytes" {

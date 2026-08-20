@@ -155,6 +155,12 @@ wire에서 `kind`는 `"editor"` 문자열이고 detail은 `EditorMeta`다 — **
 - **`hello` 를 무한히 기다리지 않는다.** 강제 명령이 걸린 서버는 **무언가를 출력하며 오래 살
   수도** 있어, "안 오면 끈다" 만으로는 영영 안 끝난다. 시한을 두고 넘으면 채널을 닫는다 —
   값은 S10c 가 정한다(프로토콜에는 `hello` 지연 규정이 없다).
+- **`hello` 는 "왔다" 만 보는 게 아니라 **읽어야** 한다.** 그 안에 `protocol`·`server_version`·
+  `capabilities` 가 있다([프로토콜](control-plane-protocol.md) §4.1). 폰은 앱스토어로 따로
+  배포되므로 **서버 maru 와 버전이 어긋날 확률이 데스크톱보다 구조적으로 높다** — 사용자가 그 PC
+  의 maru 를 안 올릴 수 있다. 그러니 폰은 `capabilities` 에 없는 메서드를 **부르지 않고**, 그
+  기능을 화면에서 지운다(불러 놓고 `method-not-found` 를 에러로 보여 주는 것과 다르다).
+  `protocol` 이 `maru.control.v1` 이 아니면 컨트롤 축을 끈다.
 - **어느 인스턴스인가를 정해야 한다.** 소켓 경로는 인스턴스 키를 갖는다
   (`control_socket.socketPathIn(dir, key)`) — 그 PC 에 maru 가 여럿 떠 있으면 **어디에 붙을지가
   안 정해져 있다**. S10c 가 정한다(하나면 그것, 여럿이면 고르게 — 임의로 첫 번째를 잡지 않는다).

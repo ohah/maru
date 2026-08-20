@@ -21,7 +21,8 @@
 // 정확히 같아야 한다. 재고에 없는 파일은 **0**이다(새 파일이 생기면 자동으로 이 규칙을 받는다).
 //
 // **0건 규칙을 전역으로 세울 수 없는 이유**는 두 가지이고 재고가 그 둘을 구분한다.
-//   - `control_client.zig`·`browser/run.zig`: **의도된 예외**. 이 파일들의 존재 이유가 접착이다.
+//   - `control_client.zig`·`browser/run.zig`·`control_relay.zig`: **의도된 예외**. 이 파일들의
+//     존재 이유가 접착이다.
 //   - `ssh.zig`: **테스트 전용 헬퍼**. `expectNotifyLifecycle`이 fork/pipe로 셸 스크립트의 신호 수명을
 //     실측하는데, top-level `fn`이라 `test` 블록 마스크에 걸리지 않는다. 제품 경로는 순수하다.
 //
@@ -65,6 +66,11 @@ const inventory = [_]Entry{
         .path = "control_client.zig",
         .expect = .exempt,
         .why = "cli/의 의도된 impure 예외 — 컨트롤 소켓 발견·connect·auth·왕복이 이 파일의 존재 이유다.",
+    },
+    .{
+        .path = "control_relay.zig",
+        .expect = .exempt,
+        .why = "cli/의 의도된 impure 예외 — `maru control --stdio` 는 **중계 그 자체**라 poll/read/write 가 존재 이유다(S10c). 순수 절반(인자 판정·읽기 결과 분류·끝 문구)은 같은 파일 안에 있고 테스트가 그것만 따로 잰다.",
     },
     .{
         .path = "browser/run.zig",

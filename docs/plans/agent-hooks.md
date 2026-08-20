@@ -78,11 +78,19 @@ codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 
 
 ### AH3 — 모드 판정
 
-**순수 층 완료**: [`session/agent_hook_mode.zig`](../../src/session/agent_hook_mode.zig) — `modeFor`(게이트·
-로그 파일·에이전트 셋이 다 서야 훅 모드)와 `next`(턴 경계 전이). 배지 상태는 관측 모드의 열거를 **그대로**
-쓴다(복사하지 않는다). 파서의 `Kind` 전체를 comptime 으로 돌아 «전이가 있는 이벤트» 와 «의도적으로 상태를
-안 흔드는 이벤트» 를 강제 분류하므로, 새 이벤트를 파서에 넣고 여기를 잊으면 컴파일이 아니라 테스트가 잡는다.
-**남은 것은 platform 배선**(tick 소비·관측 입력 차단)이다.
+✅ **완료**(AH4 상태·대화 소비 포함). 순수 층은
+[`session/agent_hook_mode.zig`](../../src/session/agent_hook_mode.zig) — `modeFor`(게이트·로그 파일·에이전트
+셋이 다 서야 훅 모드)와 `next`(턴 경계 전이). 배지 상태는 관측 모드의 열거를 **그대로** 쓴다(복사하지
+않는다 — 복사하면 배지가 소스마다 다른 값을 갖는다). 파서의 `Kind` 전체를 comptime 으로 돌아 «전이가 있는
+이벤트» 와 «의도적으로 상태를 안 흔드는 이벤트» 를 강제 분류한다.
+
+platform 은 `pollAgentHookEvents` 가 tick 마다 로그를 tail 파싱해 `agent_state` 와 **마지막 대화**를 채우고
+(`UserPromptSubmit.prompt` / `Stop.last_assistant_message`), `pollAgentKinds` 의 소비자 분기가 모드로 갈린다 —
+훅 모드면 `pollAgentState`·`pollAgentTranscript` 를 **아예 부르지 않는다**. `drainOscNotificationFrom` 도 훅 모드
+Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루프가 그 Term 에서 멈춘다).
+
+**남은 것은 AH5(알림 소비)** 다 — 지금은 훅 모드에서 OSC 알림이 꺼지기만 하고 훅 payload 로 알림을 만들지
+않는다.
 
 
 - 정적: 설치됨 + 게이트 on → 훅 모드로 시작. 동적: **그 pane의 로그 파일이 없으면** 관측 모드로 강등 +

@@ -18,6 +18,7 @@ const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
+const agent_ops = @import("agent.zig");
 const notificationLocation = app_session_mod.notificationLocation;
 const is_macos = app_session_mod.is_macos;
 const notification_location_buf_len = app_session_mod.notification_location_buf_len;
@@ -135,6 +136,17 @@ pub fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focus
     defer term.surface.unlockCore(self.io);
     const pending = term.surface.core.pendingNotification() orelse return null;
     if (!self.loaded_config.config.notifications.osc) {
+        term.surface.core.clearNotification();
+        return null;
+    }
+    // **훅 모드 Term 에서는 OSC 알림을 쓰지 않는다**(계약 §1.1). 그 Term 의 알림은 훅 payload 에서 오고,
+    // 여기서 함께 방출하면 같은 턴에 두 번 울린다. 게이트와 같은 모양으로 **pending 은 비운다** — 안 비우면
+    // 다음 tick 마다 같은 것을 다시 보고 루프가 그 Term 에서 멈춘다.
+    //
+    // ⚠️ 이 자리는 «훅 모드면 버린다» 이고, 계약 §1.2가 말한 «강등 전까지 보류» 는 아직 아니다. 보류는
+    // 훅 모드로 **시작했는데 훅이 안 오는** 구간을 위한 것인데, 지금 판정은 로그 파일이 생긴 뒤에만 훅
+    // 모드가 되므로 그 구간 자체가 없다(파일이 없으면 관측 모드이고 알림은 그대로 나간다).
+    if (agent_ops.agentHookMode(self, term) == .hook) {
         term.surface.core.clearNotification();
         return null;
     }

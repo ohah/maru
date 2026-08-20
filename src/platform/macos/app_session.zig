@@ -18563,6 +18563,125 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
 /// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
 const agent_hooks_off_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = false\n";
 
+test "hook mode fills state and conversation from the event log, and only then" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const hook_mode = maru.session.agent_hook_mode;
+    const hook_command = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "cache");
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    // provider 디렉터리를 만들지 않아 설치는 돌지 않는다 — 이 테스트가 보는 것은 **소비** 쪽이다.
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+
+    test_config_text = agent_hooks_on_config; // 게이트 on
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    // 에이전트가 붙은 것으로 둔다 — 프로세스 관측은 헤드리스로 재현할 수 없고, 이 테스트가 보는 것은
+    // 그 뒤의 소비 경로다.
+    term.agent_kind = .claude;
+
+    // ① 로그 파일이 없으면 **관측 모드**다. 게이트가 켜졌다고 훅 모드로 앉히면, 훅이 깨진 사람은
+    //    영영 빈 배지를 본다(관측도 안 도니까).
+    try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+    defer a.free(events_dir);
+    try tmp.dir.createDirPath(io, events_dir);
+    const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
+    defer a.free(log_rel);
+
+    // ② 턴이 시작된다.
+    const start_line = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\"}\n";
+    const prompt_line = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"테스트 프롬프트\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = start_line ++ prompt_line });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+
+    try std.testing.expect(term.agent_hook_log_present);
+    try std.testing.expectEqual(hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term)); // 이제 훅 모드
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqualStrings("테스트 프롬프트", term.agent_transcript.owned.prompt());
+
+    // ③ 턴이 끝난다 — **이어 붙인 부분만** 읽어야 한다(커서가 전진했으므로).
+    const stop_line = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"끝났습니다\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = start_line ++ prompt_line ++ stop_line });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expectEqualStrings("끝났습니다", term.agent_transcript.owned.reply());
+    try std.testing.expectEqualStrings("테스트 프롬프트", term.agent_transcript.owned.prompt());
+
+    // ④ 새 프롬프트가 오면 **이전 응답은 지운다** — 남겨 두면 「질문은 새것, 답은 옛것」이 붙는다.
+    const next_prompt = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"다음 질문\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = start_line ++ prompt_line ++ stop_line ++ next_prompt });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("다음 질문", term.agent_transcript.owned.prompt());
+    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    // ⑤ **커서가 실제로 전진한다.** 파일을 통째로 다시 읽어도 마지막 상태는 같아서 상태만 보면 그 차이가
+    //    드러나지 않는다(뮤테이션이 «못 잡음» 으로 그것을 보여 줬다). 읽은 지점 자체를 단언한다.
+    {
+        const st = try tmp.dir.statFile(io, log_rel, .{});
+        try std.testing.expectEqual(st.size, term.agent_hook_cursor.offset);
+    }
+
+    // ⑥ **회전을 크기만으로 판정하면 놓친다.** 같은 크기(또는 더 큰) 새 파일로 갈리면 옛 오프셋으로 새
+    //    내용을 읽어 줄 가운데부터 파싱한다. 그 상황을 실제로 만든다: 새 파일의 **앞쪽**에 의미 있는
+    //    이벤트를 두고, 옛 오프셋이 떨어지는 자리는 파싱되지 않는 긴 패딩으로 채운다.
+    //    - inode 를 보면: 처음부터 읽어 `Stop` 을 만나 idle 이 된다.
+    //    - 크기만 보면: 옛 오프셋(패딩 한가운데)부터 읽어 아무 이벤트도 못 얻고 상태가 그대로 남는다.
+    {
+        var rotated: std.ArrayListUnmanaged(u8) = .empty;
+        defer rotated.deinit(a);
+        try rotated.appendSlice(a, stop_line);
+        try rotated.appendSlice(a, "claude\t");
+        try rotated.appendNTimes(a, 'x', 4096); // JSON 이 아니라 파서가 버리는 줄
+        try rotated.append(a, '\n');
+        try tmp.dir.deleteFile(io, log_rel); // 새 inode 를 강제한다
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = rotated.items });
+
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    }
+
+    // ⑦ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
+    session.loaded_config.config.sidebar.agent_hooks = false;
+    try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+    session.loaded_config.config.sidebar.agent_hooks = true;
+
+    // ⑧ 에이전트가 없으면 모드를 논할 것도 없다.
+    term.agent_kind = .none;
+    try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+}
+
 test "turning the agent hooks gate off removes what we installed and nothing else" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;

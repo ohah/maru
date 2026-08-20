@@ -381,9 +381,20 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
                     }
                 }
-                if (observer_probe and observation_current and term.agent_kind != .none) {
-                    pollAgentState(self, term, displayed);
-                    pollAgentTranscript(self, term, displayed);
+                if (observer_probe and term.agent_kind != .none) {
+                    // **소스는 Term 마다 정확히 하나다**(계약 §1). 훅 모드면 화면·OSC 를 아예 읽지 않고,
+                    // 관측 모드면 훅 로그를 읽지 않는다. 여기서 섞으면 «배지가 가끔 틀림» 이 되는데 그
+                    // 증상은 재현되지 않는다.
+                    //
+                    // 훅 로그 확인은 `observation_current` 를 요구하지 않는다 — 그것은 화면 관측이 최신인지의
+                    // 조건이고, 파일을 읽는 데는 상관이 없다.
+                    switch (agentHookMode(self, term)) {
+                        .hook => pollAgentHookEvents(self, term, displayed),
+                        .observe => if (observation_current) {
+                            pollAgentState(self, term, displayed);
+                            pollAgentTranscript(self, term, displayed);
+                        },
+                    }
                 }
             }
         }
@@ -1097,6 +1108,108 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
     tr.parseCodexTail(parse_arena.allocator(), tail, &fresh);
     tr.mergeKeepingMissing(&cache.owned, &fresh);
     return true;
+}
+
+/// 이 Term 이 지금 **어느 모드인가**(계약 §1.2). 판정의 유일한 동적 입력은 «그 pane 의 로그 파일이 있는가» 다.
+///
+/// 파일 확인은 tick 마다 하지 않는다 — 한 번 생긴 파일은 세션 중에 사라지지 않고(회전은 우리가 하고 그때
+/// 다시 만든다), 없는 파일은 훅이 처음 도는 순간 생긴다. 그래서 **아직 없을 때만** 다시 본다.
+pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mode.Mode {
+    const mode_mod = maru.session.agent_hook_mode;
+    return mode_mod.modeFor(.{
+        .gate_on = self.loaded_config.config.sidebar.agent_hooks,
+        .log_present = term.agent_hook_log_present,
+        .agent_present = term.agent_kind != .none,
+    });
+}
+
+/// 훅 이벤트 로그를 읽어 `term.agent_state` 를 채운다(계약 §4). 관측 모드의 `pollAgentState` 와 **같은 자리에
+/// 같은 값을 쓰는** 대신 소스만 다르다 — 그래서 사이드바·탭 라벨은 아무것도 바뀌지 않는다.
+///
+/// **이 함수가 훅 모드의 유일한 상태 소스다.** 같은 tick 에서 `pollAgentState` 를 함께 부르면 두 소스가 한
+/// Term 에 섞이고, 그 증상은 «배지가 가끔 틀림» 이라 재현되지 않는다(계약 §1이 금지하는 그것).
+pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void {
+    if (!is_macos) return;
+    const event = maru.session.agent_hook_event;
+    const mode_mod = maru.session.agent_hook_mode;
+
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const log_path = agentHookLogPath(a, term) orelse return;
+
+    // 파일이 아직 없으면 훅이 한 번도 안 돈 것이다 — 모드 판정이 그것으로 관측 모드를 유지한다.
+    const st = std.Io.Dir.cwd().statFile(self.io, log_path, .{}) catch {
+        term.agent_hook_log_present = false;
+        return;
+    };
+    term.agent_hook_log_present = true;
+
+    // **회전을 크기만으로 판정하지 않는다.** 같은 크기로 갈린 파일이 있으면 옛 오프셋으로 새 내용을 읽어
+    // 줄 가운데부터 파싱한다. inode 를 함께 본다.
+    const same_file = st.inode == term.agent_hook_cursor_inode;
+    term.agent_hook_cursor_inode = st.inode;
+    _ = term.agent_hook_cursor.resetIfRotated(st.size, same_file);
+
+    if (st.size <= term.agent_hook_cursor.offset) return; // 새 내용이 없다
+
+    const want = st.size - term.agent_hook_cursor.offset;
+    const chunk_len: usize = @intCast(@min(want, @as(u64, event.max_line_bytes * event.max_events_per_tick)));
+    const buf = a.alloc(u8, chunk_len) catch return;
+    const file = std.Io.Dir.cwd().openFile(self.io, log_path, .{}) catch return;
+    defer file.close(self.io);
+    const n = file.readPositionalAll(self.io, buf, term.agent_hook_cursor.offset) catch return;
+    if (n == 0) return;
+
+    var events: [event.max_events_per_tick]event.Event = undefined;
+    const batch = term.agent_hook_cursor.take(buf[0..n], &events);
+
+    const before = term.agent_state;
+    const had_reply = term.agent_transcript.owned.reply().len > 0;
+    var conversation_changed = false;
+    for (events[0..batch.count]) |ev| {
+        term.agent_state = mode_mod.next(term.agent_state, ev);
+        // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
+        // 256 KiB tail 파싱·폴링이 통째로 빠진다. 파서가 `prompt` 와 `last_assistant_message` 를 같은
+        // 필드에 싣는다 — 어느 쪽인지는 이벤트 종류가 말해 준다.
+        switch (ev.kind) {
+            .user_prompt_submit => if (ev.text.len > 0) {
+                term.agent_transcript.owned.setPrompt(ev.text);
+                // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
+                term.agent_transcript.owned.setReply("");
+                conversation_changed = true;
+            },
+            .stop => if (ev.text.len > 0) {
+                term.agent_transcript.owned.setReply(ev.text);
+                conversation_changed = true;
+            },
+            else => {},
+        }
+        // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
+        term.agent_last_output_ms = self.awakeMs();
+        term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+    }
+    if (batch.dropped != 0 or batch.recovered != 0) {
+        // **개수만** 남긴다 — payload 에는 프롬프트 원문과 셸 명령이 들어 있다(계약 §7).
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agenthook).info(
+            "hook batch: count={d} dropped={d} recovered={d} more={}",
+            .{ batch.count, batch.dropped, batch.recovered, batch.more },
+        );
+    }
+    if (displayed and term.agent_state != before) self.metal_dirty = true;
+    // 응답 줄이 생기거나 사라지면 **행 높이가 바뀐다** — 재투영까지 해야 옛 높이가 남지 않는다
+    // (관측 모드의 `pollAgentKinds` 가 같은 이유로 그렇게 한다).
+    if (conversation_changed) {
+        const has_reply = term.agent_transcript.owned.reply().len > 0;
+        if (has_reply != had_reply) sidebar_ops.rebuildSidebar(self) catch {} else if (displayed) self.metal_dirty = true;
+    }
+}
+
+/// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<surface_id>.ndjson`). 훅 커맨드가 적는 그 이름이다.
+fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
+    const dir = agentHookLogDir(a) orelse return null;
+    return std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ dir, term.surfaceId() }) catch null;
 }
 
 /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에

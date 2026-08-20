@@ -14,6 +14,7 @@ const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_observer = @import("agent_observer.zig");
 const agent_transcript_mod = @import("agent_transcript.zig");
+const agent_hook_event = @import("agent_hook_event.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig");
 const dock_panel = @import("dock_panel.zig"); // FP16: 파일 entry 소유를 Term으로 옮긴다(§1). 의존은 workspace.zig 경유로 이미 존재. // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
@@ -97,6 +98,15 @@ pub fn Model(comptime Rt: type) type {
             /// 표시는 이 값으로 잰다. 판정용 activity window는 계속 awake clock을 쓴다 — 그쪽은 "앱이 깨어 있는
             /// 동안 얼마나 최근인가"가 맞는 질문이라 의미가 다르다.
             agent_last_output_wall_ns: i96 = 0,
+            /// 훅 모드에서 이벤트 로그를 어디까지 읽었는가(docs/agent-hooks.md §4.2). 파일이 회전하면
+            /// 커서가 스스로 되돌아간다. 훅을 쓰지 않는 Term 에서는 손대지 않으므로 비용이 0이다.
+            agent_hook_cursor: agent_hook_event.Cursor = .{},
+            /// 그 pane 의 이벤트 로그가 **있는가**(마지막 tick 기준). 모드 판정의 유일한 입력이다
+            /// (계약 §1.2 — 이벤트 개수나 시간으로 잡으면 가만히 있는 세션·이미 돌던 세션이 잘못 강등된다).
+            agent_hook_log_present: bool = false,
+            /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
+            /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
+            agent_hook_cursor_inode: u64 = 0,
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},

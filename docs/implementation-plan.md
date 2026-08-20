@@ -157,7 +157,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
    runtime size golden으로 고정한다. e3은 다음 세 하위 gate를 순서대로 닫는다. **e3a**는 실제 제품
    `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
-   **e3a1 완료** (candidate allocation 1개, CR4 staged receipt owner 반영 뒤 Debug 3,424바이트/ReleaseFast 3,408바이트; abort baseline 복원,
+   **e3a1 완료** (candidate allocation 1개, CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트; abort baseline 복원,
    두 reconnect 뒤 heap current 1개, teardown final 0)와,
    별도 ReleaseFast process RSS를 측정하고, generation당 구조적 charge 상한
    `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은 64개 fixed
@@ -1217,8 +1217,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    함께 봉인한다. host당 active job 하나가 최대 4,096행을 inline 소유하고 전체 job 크기는 512 KiB 이하로 제한한다.
    connect 실패·OOM·빈 집합은 runtime map과 adapter를 바꾸지 않고 목록 owner를 회수하며, copied job,
    runtime add/remove/address·generation·runtime-id drift는 후속 Client publication 전에 거부한다. 이 단계는 목록의 각 행을
-   아직 takeover하거나 terminal summary로 닫지 않는다. CR5b-2가 이 동일 owner의 행을 runtime별 CR4 transaction으로
-   전진시키고 k번째 실패를 forward-resolve한다.
+   아직 takeover하거나 terminal summary로 닫지 않는다. CR5b-2는 이 동일 owner를 바꾸지 않고 다음 세 단계로 닫는다.
+   CR5b-2a는 모든 captured runtime의 old attachment retirement와 unavailable publication 권위를 먼저 final-address job에
+   준비하며, k번째 preflight 실패에서 앞선 runtime·공유 Client·screen·ledger를 하나도 바꾸지 않는다. CR5b-2b는 모든
+   prepared runtime을 no-fail suffix로 unavailable에 전환한 뒤 공유 old Client를 한 번만 정산하고 같은 adapter에 replacement를
+   exact 한 번 게시한다. CR5b-2c는 그 published replacement receipt를 각 행의 CR4 observer/takeover/publication transaction이
+   순서대로 재검증해 소비하고, k번째 post-publication 실패를 앞선 성공은 `published_new`, 실패/잔여 행은
+   `frozen_unavailable` 또는 `ended`로 forward-resolve한 terminal summary로 닫는다. 어느 단계도 runtime마다 Client replacement를
+   반복하거나 첫 runtime 정산 중 sibling attachment가 참조하는 shared Client를 파괴하지 않는다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

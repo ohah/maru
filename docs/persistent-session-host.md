@@ -683,7 +683,7 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
   generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
   candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
-  CR4 staged receipt owner 반영 뒤 Debug 3,424바이트/ReleaseFast 3,408바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
+  CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
   teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행한다. e3a2는 host base
   SSOT인 generation당 `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은
   64개 fixed inventory를 검증한다. 둘의 곱인 `max_tracked_bytes`는 구조적 표현 한계이고 app-global 정책 예산은 아니다.
@@ -722,9 +722,10 @@ generation의 resize wire sequence·baseline과 pump summary를 뜻한다. paylo
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
 CR3c2의 process/slot/node incarnation 결속, CR4a staged receipt owner와 CR4b stable mutation owner까지 포함한 현재
-`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,392/11,248`, ReleaseFast `3,376/11,200`다.
+`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,424/11,280`, ReleaseFast `3,408/11,232`다.
 CR3c2의 authority seal 128 KiB와 screen sequence 64 KiB에 더해 staged receipt owner는
-runtime당 304바이트, 4,096 runtime 상한에서 1,216 KiB를 추가한다. CR2a는 이 물리적
+runtime당 304바이트, 4,096 runtime 상한에서 1,216 KiB를 추가한다. CR5b-2a retirement preparation
+authority는 runtime당 32바이트, 4,096 runtime 상한에서 128 KiB를 추가한다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -881,6 +882,21 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    runtime add/remove/address·generation·runtime-id drift를 Client publication 전에 재검증한다. host당 active job은 하나이고
    `HostReconnectJob` 전체 크기는 512 KiB 이하를 유지한다. runtime-set capture owner는 목록의 membership authority만 소유하고,
    runtime별 observer/takeover/publication 전진과 k번째 실패 forward resolution은 동일 목록을 소비하는 runtime transaction이 소유한다.
+
+   다중 runtime transaction의 destructive prefix는 runtime별 CR4 Client-replacement leaf를 반복 호출하지 않는다. 같은
+   `HostAdapter.ClientSlot`은 모든 captured runtime attachment가 공유하므로, 첫 runtime에서 shared Client를 retire하면 아직
+   terminalize되지 않은 sibling attachment가 그 Client를 참조하게 된다. `HostReconnectJob`은 먼저 모든 행의 exact runtime,
+   generation, attachment, stable-screen live target과 unavailable next generation에 대한 allocation-free prepared authority를
+   final address에 결속한다. k번째 prepare가 Busy/corrupt/drift이면 앞선 prepared authority만 취소하고 runtime screen,
+   attachment, shared Client, ledger mutation은 0이다. 전 행이 준비된 뒤에만 owner turn 하나가 각 attachment와 stable-screen을
+   no-fail unavailable suffix로 전환하고, 마지막 runtime까지 전환된 뒤 shared Client retirement와 same-adapter replacement를
+   exact 한 번 수행한다. 이 suffix에 들어간 뒤 recoverable rollback은 없으며 proof drift는 common proof-loss fail-stop이다.
+
+   replacement 게시 뒤에는 같은 immutable `PreparedClientReplacement`를 각 runtime의 observer candidate가 재검증한다. 행별
+   CR4 transaction은 자기 candidate, controller evidence, mutation epoch와 publication만 소유하고 Client를 다시 교체하지 않는다.
+   k번째 행이 실패하면 이미 게시된 앞선 행을 old graph로 되돌리지 않는다. 아직 전진하지 않은 행도 unavailable/closed로
+   terminalize하고, canonical runtime rows를 `published_new | frozen_unavailable | ended` 중 하나로 모두 닫은 뒤에만
+   `host_reconnect_runtime_ledger.summarizeTerminalRows` 결과를 job completion 증거로 게시한다.
 
    현재 CR4a 제품 행은 실제 manifest/socket connect와 same-adapter replacement 뒤, 동일 job final address에서 observer
    candidate와 staged receipt까지 게시한다. connect에서 발급한 absolute deadline을 attach/snapshot/delta/barrier에 그대로
@@ -2265,8 +2281,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,248/ReleaseFast 11,200 bytes이며
-   `PendingEventOwner` 외 remainder는 각각 8,528/8,480 bytes다. CR4b가 stable shell에 inline으로 둔
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,280/ReleaseFast 11,232 bytes이며
+   `PendingEventOwner` 외 remainder는 각각 8,560/8,512 bytes다. CR4b가 stable shell에 inline으로 둔
    `MutationOwner` 576/560 bytes는 reconnect freeze 중 active lease와 generation을 보존하는 제품 권위이고,
    paused input metadata와 final-address paste store는 추가 464/480 bytes(runtime 상한에서 1,856/1,920 KiB)로
    원문 key/IME/control을 남기지 않고 완전한 paste 하나의 bounded owner만 결속한다.

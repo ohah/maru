@@ -51,7 +51,11 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     try std.testing.expectEqual(@as(usize, 1), count(begin, "host_connect.connectExistingHostUntil("));
 
     try std.testing.expectEqual(@as(usize, 13), countIdentifier(backend, "host_reconnect_runtime_ledger"));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "reconnectRuntimeSetIdentity"));
+    const backend_product = backend[0 .. std.mem.indexOf(u8, backend, "const testing = std.testing;") orelse
+        return error.TestUnexpectedResult];
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend_product, "reconnectRuntimeSetIdentity"));
+    // CR5b-2a adds one hostile generation-preservation oracle; product callers remain exact two.
+    try std.testing.expectEqual(@as(usize, 8), countIdentifier(backend, "reconnectRuntimeSetIdentity"));
     inline for (.{ "host_reconnect_runtime_ledger", "reconnectRuntimeSetIdentity" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),
@@ -62,7 +66,7 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
             }),
         );
 
-    const gate = between(build, "const session_host_cr5b1_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5b1_step =", "const session_host_cr5b2a_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b1\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5b1_step.dependOn(session_host_cr5a_step);"));

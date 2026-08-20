@@ -26,6 +26,14 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     const finish_start = std.mem.indexOf(u8, backend, "fn finishHostReconnectTakeoverOutcome(").?;
     const finish_end = std.mem.indexOfPos(u8, backend, finish_start, "fn sealHostReconnectCandidateFailure(").?;
     const finish_takeover = backend[finish_start..finish_end];
+    const actual_job_start = std.mem.indexOf(u8, backend, "fn runCr4aActualIssuerReplacementStage(").?;
+    const actual_job_end = std.mem.indexOfPos(
+        u8,
+        backend,
+        actual_job_start,
+        "test \"CR4a actual issuer job은",
+    ).?;
+    const actual_job = backend[actual_job_start..actual_job_end];
     const controller_start = std.mem.indexOf(u8, attachment, "pub fn executeControllerTakeoverUntil(").?;
     const controller_end = std.mem.indexOfPos(u8, attachment, controller_start, "pub fn validateControllerEvidence(").?;
     const controller_takeover = attachment[controller_start..controller_end];
@@ -42,6 +50,16 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     try std.testing.expectEqual(@as(usize, 2), count(mutation, "test \"CR4b paused paste는"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR4b stable queue seal은"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR4b actual socket controller takeover는"));
+    // The daemon binds its listener before manifest/rollback preparation completes. The actual
+    // host fixture must never turn that early kernel readiness into an unbounded hello read.
+    try std.testing.expectEqual(@as(usize, 0), count(actual_job, "client_mod.Client.connect("));
+    try std.testing.expectEqual(@as(usize, 1), count(actual_job, "client_mod.Client.connectUntil("));
+    // One pre-fork stale cleanup plus one deferred teardown cleanup.
+    try std.testing.expectEqual(@as(usize, 2), count(actual_job, "_ = c.unlink(socket.ptr);"));
+    try std.testing.expect(
+        std.mem.indexOf(u8, actual_job, "c.access(socket.ptr, c.F_OK)").? <
+            std.mem.indexOf(u8, actual_job, "client_mod.Client.connectUntil(").?,
+    );
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn executeControllerTakeoverUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(controller_takeover, "self.catchup_stage_owner.state = .controller_committing;"));
     try std.testing.expect(

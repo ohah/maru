@@ -219,7 +219,7 @@ Maru 작업에서 사용하는 기본 명령이다.
   정책으로 고정하지 않는다.
 - 영속 세션 호스트 CR2e-e3a1 resident ledger gate: `zig build test-session-host-cr2e-e3a1`. CR2e-e2b를 상속하고
   empty-screen 제품 fixture에서 `RemoteGeneration` candidate prepare가 추가하는 structural base allocation 1개와
-  Debug 3,424바이트/ReleaseFast 3,408바이트,
+  CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트,
   abort의 baseline 복원, publish 동안 current+retiring 동시 resident, reclaim 뒤 heap current 1개만 남는 두 연속
   reconnect, owner teardown final 0을 runtime 2개+boundary 1개로 exact-count한다. 이는 가변 screen/metadata를
   포함하지 않는 allocator logical base lower bound이며 raw process RSS나 app-global cap을 대신하지 않는다.
@@ -375,6 +375,18 @@ Maru 작업에서 사용하는 기본 명령이다.
   membership·address·generation·runtime-id drift는 Client publication 전 mutation 0으로 거부해야 한다. 이 gate의 green은
   runtime-set capture 제품 배선을 뜻하지만 runtime별 observer/takeover/publication, k번째 실패 forward resolution,
   Window move/close 경쟁이나 CR5 완료를 뜻하지 않는다.
+- 영속 세션 호스트 CR5b-2a host-wide prepublication preparation gate: `zig build test-session-host-cr5b2a`. CR5b-1을
+  상속하고 Debug·ReleaseFast에서 3-runtime 제품 행 1개와 source boundary 1개를 exact-count한다. attachment/stable-screen
+  prepared authority를 전부 먼저 봉인하고, k번째
+  Busy·corrupt·identity drift는 앞선 prepared row만 취소하고 runtime·screen·shared Client·ledger mutation 0이어야 한다.
+  이 gate는 shared Client retirement/replacement, observer candidate, takeover/publication을 실행하지 않는다.
+- 영속 세션 호스트 CR5b-2b shared replacement gate: `zig build test-session-host-cr5b2b`. 2a를 상속하고 모든 runtime의
+  unavailable no-fail suffix 뒤에만 shared old Client cleanup과 same-adapter replacement를 각각 exact 1 수행한다. runtime별
+  Client replacement 반복과 sibling attachment가 남은 상태의 Client deinit은 0이다.
+- 영속 세션 호스트 CR5b-2c runtime transaction gate: `zig build test-session-host-cr5b2c`. 2b를 상속하고 동일 published
+  replacement receipt에서 각 runtime의 CR4 observer/takeover/publication을 전진시킨다. 3-runtime success와 k번째 실패에서
+  rollback 0, finite forward resolution, `published_old=0` terminal summary와 final resource zero를 확인한다. Window move/close
+  경쟁은 이 gate 뒤의 CR5 Window gate가 소유한다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

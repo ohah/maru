@@ -113,6 +113,10 @@ pub const StableScreenSource = struct {
     writer_wait_total_ns: std.atomic.Value(u64) = .init(0),
     writer_wait_max_ns: std.atomic.Value(u64) = .init(0),
     lifecycle: Lifecycle = .ready,
+    prepared_transaction_addr: usize = 0,
+    prepared_transaction_generation: u64 = 0,
+    prepared_expected_generation: u64 = 0,
+    prepared_next_generation: u64 = 0,
     unavailable: UnavailableCore,
     current: Target,
     pinned_target: ?Target = null,
@@ -275,6 +279,70 @@ pub const StableScreenSource = struct {
             .kind = .unavailable,
         };
         return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
+    }
+
+    /// CR5 host-wide preparation keeps the writer gate across sibling preflights. This freezes the
+    /// exact live target without changing what readers see; abort releases the gate unchanged and
+    /// commit is a store-only suffix after every sibling attachment has been prepared.
+    pub fn prepareUnavailableFromLive(
+        self: *StableScreenSource,
+        expected_generation: u64,
+        generation: u64,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) PublishError!void {
+        if (transaction_addr == 0 or transaction_generation == 0 or
+            self.prepared_transaction_addr != 0 or self.prepared_transaction_generation != 0 or
+            self.prepared_expected_generation != 0 or self.prepared_next_generation != 0)
+            return error.InvalidOwner;
+        try self.beginWriter();
+        errdefer self.endWriter();
+        if (self.lifecycle != .ready) return error.Closed;
+        if (self.current.kind != .live or self.current.generation != expected_generation)
+            return error.InvalidGeneration;
+        try self.validateNextGeneration(generation);
+        self.prepared_transaction_addr = transaction_addr;
+        self.prepared_transaction_generation = transaction_generation;
+        self.prepared_expected_generation = expected_generation;
+        self.prepared_next_generation = generation;
+    }
+
+    pub fn preparedUnavailableExact(
+        self: *const StableScreenSource,
+        expected_generation: u64,
+        generation: u64,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) bool {
+        return self.validOwner() and self.lifecycle == .ready and
+            self.writer_pending.load(.acquire) and self.pinned_target == null and
+            self.current.kind == .live and self.current.generation == expected_generation and
+            self.prepared_transaction_addr == transaction_addr and
+            self.prepared_transaction_generation == transaction_generation and
+            self.prepared_expected_generation == expected_generation and
+            self.prepared_next_generation == generation;
+    }
+
+    pub fn abortPreparedUnavailable(
+        self: *StableScreenSource,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) PublishError!void {
+        if (!self.preparedUnavailableExact(
+            self.prepared_expected_generation,
+            self.prepared_next_generation,
+            transaction_addr,
+            transaction_generation,
+        )) return error.InvalidOwner;
+        self.clearPreparedUnavailable();
+        self.endWriter();
+    }
+
+    fn clearPreparedUnavailable(self: *StableScreenSource) void {
+        self.prepared_transaction_addr = 0;
+        self.prepared_transaction_generation = 0;
+        self.prepared_expected_generation = 0;
+        self.prepared_next_generation = 0;
     }
 
     /// CR3c integration leaf. The callback may report a pre-mutation Busy/authority failure while

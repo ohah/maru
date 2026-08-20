@@ -1228,7 +1228,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   runtime size golden이 이를 고정한다. generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류하며,
   mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3a1은 actual
   empty-screen candidate→publish→retiring→reclaim allocator ledger의 structural base allocation 1개,
-  CR4 staged receipt owner 반영 뒤 Debug 3,424바이트/ReleaseFast 3,408바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
+  CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
   final-zero를 runtime 2개+boundary 1개로 고정한다. 가변 screen/metadata를 포함하지 않는 lower bound이므로
   e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence와 기존 host base SSOT를 결합한다. generation
   1개의 최대 구조적 charge는 `base_update_max_bytes`(16 MiB screen+256 KiB metadata), fixed inventory는 mutation
@@ -1987,6 +1987,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   + sibling-host fixture, 빈 집합, allocation fail-index, copied job, runtime add/remove와 handle/address/generation/runtime-id drift는
   Client publication과 runtime mutation 전에 reject·final zero여야 한다. 이 증거는 runtime-set 제품 owner의 capture만 닫으며,
   행별 observer/takeover/publication, k번째 실패 forward resolution과 Window 경쟁은 CR5b-2 이후 증거다.
+- CR5b-2는 공유 Client를 runtime마다 교체하는 루프를 허용하지 않는다. CR5b-2a gate는 3-runtime host job에서 각 old
+  attachment와 stable-screen unavailable publication authority를 모두 먼저 준비하고, 1/2/3번째 Busy·corrupt·identity drift,
+  copied/moved prepared owner와 runtime add/remove에서 전 runtime screen/attachment, ClientSlot, ledger mutation 0과 prepared owner
+  final zero를 증명한다. CR5b-2b gate는 전 행의 prepared authority를 재검증한 뒤 unavailable 전환 전체와 shared Client
+  retirement/replacement exact 1을 한 owner-turn no-fail suffix로 실행하며, sibling attachment가 남은 동안 Client deinit 0,
+  final unavailable count=total, old Client cleanup exact 1을 검증한다. CR5b-2c gate는 같은 published replacement receipt를
+  runtime별 CR4 transaction이 소비하고, 3-runtime success 및 k번째 post-publication failure 표에서 앞선 성공 rollback 0,
+  잔여 runtime의 finite forward resolution, `published_old=0` terminal summary와 final registry/pin/batch/allocator 0을 검증한다.
+  이 세 gate가 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

@@ -24,7 +24,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
     // Three product readiness gates plus the CR4b teardown projection used by the actual-socket
     // hostile fixture. The projection is test-only and keeps the product caller inventory fixed.
-    try std.testing.expectEqual(@as(usize, 4), count(attachment, "generation_transport_mod.eventReadinessOwned("));
+    // CR5b-2a adds one allocation-free retirement preflight before any sibling mutation.
+    try std.testing.expectEqual(@as(usize, 5), count(attachment, "generation_transport_mod.eventReadinessOwned("));
     // b4와 b5의 test-only 실제 close fixture가 제품과 같은 take를 각각 한 번 실행한다.
     try std.testing.expectEqual(@as(usize, 4), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
@@ -89,8 +90,9 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 2, .top_level_test = 5 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
-        // The lexical product bucket includes the builtin.is_test CR4b teardown projection.
-        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 0 },
+        // The lexical product bucket includes the builtin.is_test CR4b teardown projection and
+        // CR5b-2a's allocation-free all-runtime retirement preflight.
+        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 5, .top_level_test = 0 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 0 },
     });
     // raw Client event ownership을 실제 함수별로 좁혀 legacy 호출이 generation branch로 되돌아오지 못하게 한다.

@@ -1581,6 +1581,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionFailedClosed" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "failCloseAttachmentConnection" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentConnectionUsable" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentDrop" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readInitialSnapshotGuardedUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "readInitialSnapshotGuardedInternal" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
@@ -2310,8 +2311,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        // 위 operation들과 CR4c controller 승격 preflight/no-fail commit이 같은 등록 operation을 닫는다.
-        @as(usize, 26),
+        // 위 operation들과 CR4c controller 승격, CR5 host-wide attachment-drop preflight가
+        // 같은 등록 operation을 닫는다.
+        @as(usize, 27),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
@@ -7709,11 +7711,13 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // checks and C2 adds one trusted-mirror pointer reconstruction for prepared normal
             // release; it still does not store or mint another lease. Transport and external
             // movable owners may not name the cleanup capability. C3-3a3 adds one exact
-            // event-lease destination range to the activation transaction preflight.
+            // event-lease destination range to the activation transaction preflight. CR5 adds one
+            // ClientSlot preflight signature and one HostAdapter forwarding signature for the
+            // host-wide attachment-drop preflight.
             const expected_lease_count: usize = if (is_client_slot)
-                17
+                18
             else if (is_host_adapter)
-                4
+                5
             else if (is_generation_attachment)
                 1
             else if (is_generation_event_contract)
@@ -7769,8 +7773,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            // 기존 두 제품 경로와 CR4b의 test-only deinit readiness projection만 preflight한다.
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 3 },
+            // 기존 두 제품 경로, CR4b test-only readiness와 CR5 host-wide retirement가 preflight한다.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 4 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)

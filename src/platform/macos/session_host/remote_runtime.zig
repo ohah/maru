@@ -1465,6 +1465,98 @@ pub const ReconnectGenerationOwner = struct {
         );
     }
 
+    fn prepareHostWideRetirement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) !void {
+        try self.validate();
+        if (!self.screen_published or transaction_addr == 0 or transaction_generation == 0)
+            return error.InvalidAuthority;
+        const expected_generation = try self.currentGeneration();
+        const next_generation = std.math.add(u64, expected_generation, 1) catch
+            return error.InvalidAuthority;
+        const current = @constCast(try self.slot.currentPayload());
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter)
+                return error.InvalidAuthority,
+            .legacy => return error.InvalidAuthority,
+        }
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return error.InvalidAuthority,
+        };
+        try attachment.prepareHostRetirement(adapter, transaction_addr, transaction_generation);
+        errdefer attachment.abortHostRetirement(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+        try self.screen_source.?.prepareUnavailableFromLive(
+            expected_generation,
+            next_generation,
+            transaction_addr,
+            transaction_generation,
+        );
+    }
+
+    fn hostWideRetirementPreparedExact(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) bool {
+        self.validate() catch return false;
+        if (!self.screen_published or transaction_addr == 0 or transaction_generation == 0)
+            return false;
+        const expected_generation = self.currentGeneration() catch return false;
+        const next_generation = std.math.add(u64, expected_generation, 1) catch return false;
+        const current = @constCast(self.slot.currentPayload() catch return false);
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter) return false,
+            .legacy => return false,
+        }
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return false,
+        };
+        return attachment.hostRetirementPreparedExact(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        ) and self.screen_source.?.preparedUnavailableExact(
+            expected_generation,
+            next_generation,
+            transaction_addr,
+            transaction_generation,
+        );
+    }
+
+    fn abortHostWideRetirement(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) !void {
+        if (!self.hostWideRetirementPreparedExact(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        )) return error.InvalidAuthority;
+        const current = @constCast(try self.slot.currentPayload());
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return error.InvalidAuthority,
+        };
+        try self.screen_source.?.abortPreparedUnavailable(transaction_addr, transaction_generation);
+        attachment.abortHostRetirement(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -2510,6 +2602,48 @@ pub const RemoteRuntime = struct {
             const shell_generation = try runtime.generation_owner.currentGeneration();
             if (runtime_id == 0 or shell_generation == 0) return error.InvalidAuthority;
             return .{ .runtime_id = runtime_id, .shell_generation = shell_generation };
+        }
+
+        pub fn prepareHostWideRetirement(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            transaction_addr: usize,
+            transaction_generation: u64,
+        ) !void {
+            try runtime.admitRuntimeOperation();
+            return runtime.generation_owner.prepareHostWideRetirement(
+                adapter,
+                transaction_addr,
+                transaction_generation,
+            );
+        }
+
+        pub fn hostWideRetirementPreparedExact(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            transaction_addr: usize,
+            transaction_generation: u64,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.hostWideRetirementPreparedExact(
+                adapter,
+                transaction_addr,
+                transaction_generation,
+            );
+        }
+
+        pub fn abortHostWideRetirement(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            transaction_addr: usize,
+            transaction_generation: u64,
+        ) !void {
+            try runtime.admitRuntimeOperation();
+            return runtime.generation_owner.abortHostWideRetirement(
+                adapter,
+                transaction_addr,
+                transaction_generation,
+            );
         }
 
         /// CR4a single-runtime forward transaction. Fresh Client ownership stays in the backend job;
@@ -6299,6 +6433,141 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
 
 pub const testing_api = if (builtin.is_test) struct {
     pub const SemanticFixture = B4SemanticFixture;
+
+    pub fn initSemanticRuntimeOnAdapter(
+        runtime: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        runtime_id_hex: [32]u8,
+        surface_id: u64,
+    ) !void {
+        try runtime.initializeGenerationOwner(
+            .{ .generation = adapter },
+            allocator,
+            std.testing.io,
+            .{ .cols = 1, .rows = 1 },
+        );
+        errdefer runtime.deinitGenerationOwnerAndScreenSource();
+        runtime.pending_event_owner = .{};
+        runtime.runtime_lifetime = .{};
+        try runtime.initializePendingEventOwner();
+        runtime.allocator = allocator;
+        runtime.io = std.testing.io;
+        runtime.runtime_id_hex = runtime_id_hex;
+        runtime.currentGeneration().resize_seq = 0;
+        runtime.currentGeneration().resize_generation = 0;
+        runtime.currentGeneration().resize_baseline_present = false;
+        runtime.direct_input = .empty;
+        runtime.input_batches = .{};
+        runtime.direct_input_offset = 0;
+        runtime.pending_controls = .empty;
+        runtime.blocking_flush_active = false;
+        runtime.currentGeneration().pump_ended = false;
+        runtime.currentGeneration().resync_needed = false;
+        runtime.currentGeneration().observation = .{};
+        runtime.close_authority = .{};
+        runtime.shutdown_attempt_authority = .{};
+        runtime.shutdown_current_admin = .{};
+        try runtime.attachAndAssemble(surface_id, .{ .cols = 1, .rows = 1 });
+    }
+
+    pub fn deinitSemanticRuntimeOnAdapter(runtime: *RemoteRuntime) void {
+        runtime.surface.deinit();
+        runtime.deinitGenerationOwnerAndScreenSource();
+        runtime.direct_input.deinit(runtime.allocator);
+        runtime.input_batches.deinit(runtime.allocator);
+        runtime.pending_controls.deinit(runtime.allocator);
+    }
+
+    pub fn serveSemanticAttachPeers(fd: c.fd_t, count: usize) void {
+        defer _ = c.close(fd);
+        const allocator = std.heap.page_allocator;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const request = readPeerFrame(fd, allocator) catch return;
+            defer allocator.free(request.payload);
+            const stream_id: u64 = @intCast(index + 7);
+            const response_json = std.fmt.allocPrint(
+                allocator,
+                "{{\"result\":{{\"stream_id\":{d},\"controller_generation\":3," ++
+                    "\"granted\":{{\"observe\":true,\"input\":true,\"resize\":true}}," ++
+                    "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}}}",
+                .{stream_id},
+            ) catch return;
+            defer allocator.free(response_json);
+            const response = framing.encodeFrame(
+                allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                response_json,
+            ) catch return;
+            defer allocator.free(response);
+            var records: std.ArrayListUnmanaged(u8) = .empty;
+            defer records.deinit(allocator);
+            const meta = screen_stream.encodeScreenMeta(
+                allocator,
+                .{ .kind = .screen_meta, .generation = 1 },
+                .{ .cols = 1, .rows = 1, .cursor = .{} },
+            ) catch return;
+            defer allocator.free(meta);
+            screen_stream.appendRecord(&records, allocator, meta) catch return;
+            var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+            const row = screen_stream.encodeRow(
+                allocator,
+                .{ .kind = .row, .generation = 1 },
+                .{ .row_index = 0, .runs = &runs },
+            ) catch return;
+            defer allocator.free(row);
+            screen_stream.appendRecord(&records, allocator, row) catch return;
+            const snapshot = framing.encodeFrame(
+                allocator,
+                .{ .kind = .snapshot_chunk, .stream_id = stream_id, .flags = protocol.Flags.end_stream },
+                records.items,
+            ) catch return;
+            defer allocator.free(snapshot);
+            socket_server.writeAll(fd, response) catch return;
+            socket_server.writeAll(fd, snapshot) catch return;
+        }
+    }
+
+    pub fn setHostRetirementBusy(runtime: *RemoteRuntime, busy: bool) void {
+        const attachment = &runtime.currentGeneration().attachment.generation;
+        if (attachment.lifecycle != .attached)
+            @panic("host retirement busy seam requires an attached generation");
+        attachment.catchup_stage_owner.state = if (busy) .building else .idle;
+    }
+
+    pub fn setHostRetirementLifecycleRaw(runtime: *RemoteRuntime, raw: u8) u8 {
+        const attachment = &runtime.currentGeneration().attachment.generation;
+        const lifecycle_raw = @as(*u8, @ptrCast(&attachment.lifecycle));
+        const previous = lifecycle_raw.*;
+        lifecycle_raw.* = raw;
+        return previous;
+    }
+
+    pub fn setHostRetirementPayloadReleaseStateRaw(runtime: *RemoteRuntime, raw: u8) u8 {
+        const attachment = &runtime.currentGeneration().attachment.generation;
+        const payload = &(attachment.payload orelse
+            @panic("host retirement payload seam requires an attached payload"));
+        const state_raw = @as(*u8, @ptrCast(&payload.state.failed_release_state));
+        const previous = state_raw.*;
+        state_raw.* = raw;
+        return previous;
+    }
+
+    pub fn hostRetirementPristine(runtime: *RemoteRuntime) bool {
+        const attachment = &runtime.currentGeneration().attachment.generation;
+        const source = runtime.screen_source;
+        return attachment.lifecycle == .attached and
+            attachment.retirement_transaction_addr == 0 and
+            attachment.retirement_transaction_generation == 0 and
+            attachment.retirement_adapter_addr == 0 and
+            source.current.kind == .live and
+            !source.writer_pending.load(.acquire) and
+            source.prepared_transaction_addr == 0 and
+            source.prepared_transaction_generation == 0 and
+            source.prepared_expected_generation == 0 and
+            source.prepared_next_generation == 0;
+    }
 
     pub fn armOrderedReconnectReclaimTrace() void {
         Cr3c2OrderedReclaimTestState.arm();
@@ -10962,8 +11231,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3440,
-        .ReleaseFast => 3424,
+        .Debug => 3472,
+        .ReleaseFast => 3456,
         else => error.SkipZigTest,
     };
 }
@@ -14300,26 +14569,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11248,
-            .ReleaseFast => 11200,
+            .Debug => 11280,
+            .ReleaseFast => 11232,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 11232,
-            .ReleaseFast => 11184,
+            .Debug => 11264,
+            .ReleaseFast => 11216,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8528,
-            .ReleaseFast => 8480,
+            .Debug => 8560,
+            .ReleaseFast => 8512,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 8512,
-            .ReleaseFast => 8464,
+            .Debug => 8544,
+            .ReleaseFast => 8496,
             else => unreachable,
         },
         else => unreachable,
@@ -17130,20 +17399,20 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3392,
-        .ReleaseFast => 3376,
+        .Debug => 3424,
+        .ReleaseFast => 3408,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11248,
-            .ReleaseFast => 11200,
+            .Debug => 11280,
+            .ReleaseFast => 11232,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 11232,
-            .ReleaseFast => 11184,
+            .Debug => 11264,
+            .ReleaseFast => 11216,
             else => unreachable,
         },
         else => unreachable,

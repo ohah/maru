@@ -672,6 +672,15 @@ pub const HostAdapter = struct {
         return self.slot.beginAttachmentDrop(binding, reservation, lease);
     }
 
+    pub fn preflightAttachmentDrop(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        lease: *connection_lease.ConnectionLease,
+    ) client_slot_mod.BindingError!void {
+        return self.slot.preflightAttachmentDrop(binding, reservation, lease);
+    }
+
     pub fn finishActiveAttachmentDrop(
         self: *HostAdapter,
         binding: *generation_contract.PreparedAttachmentBinding,

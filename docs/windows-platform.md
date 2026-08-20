@@ -1511,6 +1511,34 @@ after: staged_alpha=true untracked=1
 
 `alpha.txt` 가 index 로 갔고 한글 이름 파일은 추적되지 않은 채 남았다(1). 되돌림 대조군: 쓰기 갈래가
 아무것도 안 하고 성공만 보고하게 하면 `staged_alpha=false untracked=2` 로 rc=1 이다.
+
+### 2m.10 소스 컨트롤이 Windows 화면에 뜬다 (W8.4 마무리, 실측 2026-08-21)
+
+`maru win32-scm-draw-smoke` 가 **저장소 자신**의 git 상태를 D3D11 창에 그린다. 제품 진입점을 그대로
+탄다 — `Backend.submitRepoStatus` → `takeRepoStatusResult` → `scm_view.build` →
+`buildDockScmDrawList` → (파일 트리와 같은 네 단계) → `pipeline.draw`.
+
+```text
+branch=feat/w8.4-scm-on-screen  model_rows=2  empty=false
+grid=82x30  d3d_cells=47  branch_drawn=true
+renderer_glyph_fallback_count=0  renderer_glyph_replacement_count=0
+```
+
+화면에 브랜치 줄, `Changes` 섹션(개수), 파일 행(이름·흐린 경로·상태 문자)이 목업(§3.5) 구조 그대로
+나온다. **대체 글리프가 0 이다** — 47 개가 전부 기본 폰트에서 나왔고 아이콘도 포함이다.
+
+**이 슬라이스가 짧은 이유**는 앞이 다 깔려 있었기 때문이다. 데이터는 #2496·#2501 이 뚫었고, 투영은
+원래 중립이었으며(§2m.6 에서 15 개 투영 전부가 그렇다는 것을 실측했다), 렌더 경로는 파일 트리
+그리기가 이미 열었다. **새로 쓴 것은 그 셋을 잇는 스모크뿐이다.**
+
+**numstat 셋은 비운다.** 제품의 목록 경로도 그렇게 부른다(증감은 그 저장소를 **열 때** 채워진다 —
+`scm_dock.zig`). 채우면 제품이 안 밟는 자리를 재게 된다.
+
+**판정은 셀 수가 아니라 브랜치 이름이다.** 셀 수만 세면 빈 목록도 초록이다. 그려진 셀에서 글자를 도로
+읽어 브랜치 이름이 실제로 있는지 본다 — 이 저장소는 늘 브랜치 위에 있으므로 fixture 없이 성립한다.
+
+**선택 띠는 안 넣었다** — 그 기계는 파일 트리 슬라이스(§2m.7)가 이미 다뤘고, 여기서 다시 하면 같은
+것을 두 번 재는 것이다.
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

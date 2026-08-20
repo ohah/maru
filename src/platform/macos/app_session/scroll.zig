@@ -185,8 +185,10 @@ pub fn applyPendingEditorHScroll(self: *AppSession) void {
 /// 소스 컨트롤 목록의 스크롤 좌표계(SV3a). **브랜치 헤더 한 줄을 뺀** 나머지가 뷰포트다 — 헤더는
 /// 스크롤에서 고정이므로 스크롤 좌표에 들어가지 않는다. 탐색기와 같은 이유로 세 값을 한 자리에서
 /// 만든다(상한이 호출부마다 갈리면 목록이 빈 곳으로 스크롤된다).
-/// 목록 스크롤 상한. **기하의 단일 출처는 component**다(P1b) — 예전에는 여기서 셀 높이를 다시 곱했고,
-/// 그 산술이 렌더와 갈리면 목록 아래에 빈 곳이 생기거나 마지막 행이 잘렸다.
+/// 목록 스크롤 상한. **값의 단일 출처는 그 탭의 투영**이다(`scm_dock.scrollExtent`) — 여기서도 도크
+/// 안에서도 다시 세지 않는다. 예전에는 셀 높이를 여기서 다시 곱했고(P1b에서 component 기하로 옮겼다),
+/// 그다음 판에서도 도크가 **변경 사항 모델을 다시 세어** 히스토리·에이전트 탭이 자기 목록과 무관한
+/// 상한으로 굴러가지 않았다. 세는 자리가 목록을 만드는 자리와 같아야 그 갈림이 원리적으로 없어진다.
 pub fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
     const extent = scm_dock_ops.scrollExtent(self);
     return .{

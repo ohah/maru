@@ -3885,6 +3885,12 @@ pub const AppSession = struct {
     /// 스크롤 단위는 **backing pixel**이다(SV3a — 탐색기와 같은 좌표계). 브랜치 헤더 한 줄은 이
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
     scm_scroll: chrome.ui.scroll_area.State = .{},
+    /// **지금 그려진 목록의 스크롤 상한**(`scm_dock.scrollExtent`가 읽는 자리). 휠·스크롤바 드래그·클램프가
+    /// 이 값을 쓴다. 목록을 만든 투영(`scm_dock.project`)이 채우고, 그 밖에서는 다시 세지 않는다 —
+    /// 예전에는 그 셋이 **변경 사항 탭의 모델을 다시 세어** 상한을 만들었고, 그래서 히스토리·에이전트
+    /// 탭에서는 자기 목록과 무관한 상한이 걸려 굴러가지 않았다(작업트리가 깨끗하면 상한이 0이라 아예 못
+    /// 움직였고, 스크롤바도 `max_offset == 0`이면 잡히지 않았다).
+    scm_scroll_extent: FileTreeScrollExtent = .{ .content_h_px = 0, .viewport_h_px = 0, .max_offset_px = 0 },
     /// 소스 컨트롤 도크가 지금 보고 있는 **탭**(P4). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록·히스토리는 매번 새로 읽는 값이라 탭만 남겨 봐야 다음 실행의 내용과 대응이 보장되지 않는다.
     scm_tab: chrome.components.scm_dock.types.Tab = .changes,
@@ -55245,9 +55251,13 @@ test "dock list viewport ends exactly where the status bar begins" {
     }
 }
 
-test "소스 컨트롤 스크롤 상한은 component 기하에서 나온다" {
+test "소스 컨트롤 스크롤 상한은 그린 목록에서 나온다" {
     // P1b: 예전에는 여기서 셀 높이를 다시 곱했다. 그 산술이 렌더와 갈리면 목록 아래에 빈 곳이 생기거나
     // 마지막 행이 잘린다 — 이제 상한과 그린 자리가 같은 `DockMetrics`를 지난다.
+    //
+    // 그다음 판(이 테스트가 고정하는 것)은 **누가 세는가**이다. 상한을 별도 함수가 모델에서 다시 세던
+    // 동안에는 그 값이 목록과 두 군데서 갈렸다 — 저장소 머리 줄·커밋 상자가 빠져 실제보다 짧았고,
+    // 히스토리·에이전트 탭에서는 아예 다른 목록의 길이가 걸렸다. 이제 **투영이 낸 값 하나**다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -55270,21 +55280,43 @@ test "소스 컨트롤 스크롤 상한은 component 기하에서 나온다" {
     };
     session.scm_expanded[@intFromEnum(scm_view.Section.changes)] = true;
 
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     const extent = scroll_ops.scmScrollExtent(session);
-    const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
-    // 헤더 1 + 파일 80 — 높이는 component가 정한다(여기서 숫자를 다시 고르지 않는다).
-    try std.testing.expectEqual(m.section_h + m.row_h * 80, extent.content_h_px);
+    // **투영이 센 값 그대로다** — 여기서 다시 세지 않는다(두 벌이 되는 순간 그린 목록과 상한이 갈린다).
+    try std.testing.expectEqual(projection.scroll.content_height_px, extent.content_h_px);
+    try std.testing.expectEqual(projection.scroll.max_offset_px, extent.max_offset_px);
+    // 파일 80개는 이 창에서 넘친다 — 안 넘치면 아래 단언들이 아무것도 증명하지 않는다.
     try std.testing.expect(extent.max_offset_px > 0);
+    // 목록에는 파일 줄만 있는 것이 아니다(저장소 머리 줄·커밋 상자도 든다). 파일 줄만 세던 옛 상한은
+    // 실제보다 짧아 목록 끝에 닿지 못했다.
+    const m = chrome.components.scm_dock.types.DockMetrics.resolve(scm_dock_ops.scmDockScaleMilli(session));
+    try std.testing.expect(extent.content_h_px > m.section_h + m.row_h * 80);
 
     // 상한을 넘겨 요청해도 그 값에서 멈춘다.
     session.scm_scroll.offset_y_px = std.math.maxInt(u32);
     scroll_ops.clampScmScroll(session);
     try std.testing.expectEqual(extent.max_offset_px, session.scm_scroll.offset_y_px);
 
-    // 목록이 비면 스크롤도 없다(빈 화면에서 스크롤 막대가 남지 않게).
+    // **파일 줄이 사라져도 목록이 비지는 않는다** — 저장소 머리 줄과 커밋 상자는 남는다(②b). 옛 상한은
+    // 파일 줄만 세어 이 경우를 "넘치지 않는다"고 말했고, 그래서 창이 짧으면 상자가 잘린 채 내려가지지
+    // 않았다. 지금은 남은 줄의 높이가 그대로 상한이 된다 — 파일 80개가 빠진 만큼 줄어들 뿐이다.
     if (session.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
     session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    const empty = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    try std.testing.expectEqual(empty.scroll.max_offset_px, scroll_ops.scmScrollExtent(session).max_offset_px);
+    try std.testing.expect(scroll_ops.scmScrollExtent(session).max_offset_px < extent.max_offset_px);
+
+    // **투영이 아예 없으면 상한도 버린다.** 그리지 못한 화면에 옛 상한이 남으면 스크롤바가 서고 휠이
+    // 먹는다 — 그 상한은 이미 사라진 목록의 것이다.
+    if (session.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
+    session.git_result = null;
+    try std.testing.expect(scm_dock_ops.project(session, arena) == null);
     try std.testing.expectEqual(@as(u32, 0), scroll_ops.scmScrollExtent(session).max_offset_px);
+    try std.testing.expect(!session.scm_list_overflows); // 목록이 없으면 스크롤바 자리도 없다
 }
 
 test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component 경로)" {
@@ -57290,6 +57322,94 @@ test "소스 컨트롤: 방금 누른 동작의 결과는 어느 탭에서도 �
             else => return error.FirstRowIsNotTheNotice,
         }
     }
+}
+
+test "소스 컨트롤: 탭 이름 옆의 개수는 **어느 탭에서도** 작업트리 사실이다" {
+    // 사용자 보고(2026-08-20): `변경 사항 (285)`인 저장소인데 히스토리·에이전트 탭에 서면 `(0)`이 됐고,
+    // 변경 사항 탭을 눌러야 숫자가 돌아왔다. 원인은 그 두 탭의 투영이 `file_count`를 0으로 **하드코딩**한
+    // 것이었다 — 그 수는 작업트리가 답하는 사실이라 보고 있는 탭과 무관하다. `(0)`은 "바뀐 것이 없다"는
+    // 틀린 진술이고, 사용자는 탭을 눌러 보고서야 아니라는 것을 안다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    // 스테이지된 것 하나 + 작업트리 하나 = 두 섹션에 하나씩.
+    if (session.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(
+            u8,
+            "# branch.head main\n1 M. N... 1 2 3 a b staged.txt\n1 .M N... 1 2 3 a b work.txt\n",
+        ),
+        .ok = true,
+    };
+    session.scm_log_text = try allocator.dupe(u8, "abcdef1234567\x1fp\x1fA\x1f1\x1f\x1f제목\x1e");
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+
+    for ([_]chrome.components.scm_dock.types.Tab{ .changes, .history, .agent }) |tab| {
+        scm_dock_ops.selectScmTab(session, tab);
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        const props = scm_dock_ops.testProps(session, projection);
+        try std.testing.expectEqual(@as(u32, 2), props.changed_file_count);
+    }
+}
+
+test "소스 컨트롤: 히스토리 탭의 스크롤 상한은 **커밋 목록**이 정한다" {
+    // 사용자 보고(2026-08-20): 히스토리 탭에서 휠도 스크롤바 드래그도 안 먹었다. 상한을 내는 함수가
+    // 활성 탭과 무관하게 **작업트리 모델**을 세고 있었기 때문이다 — 작업트리가 깨끗하면 상한이 0이라
+    // 커밋이 몇백 개여도 목록이 못 움직였고, 스크롤바 기하는 `max_offset == 0`이면 아예 null이라
+    // 끌 수조차 없었다. 상한은 **지금 그린 목록**에서 나와야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    // **작업트리는 깨끗하다** — 옛 상한이라면 여기서 0이 나온다(그것이 이 버그의 모습이었다).
+    if (session.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .ok = true,
+    };
+
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(allocator);
+    for (0..120) |i| {
+        var line: [96]u8 = undefined;
+        try log.appendSlice(allocator, try std.fmt.bufPrint(
+            &line,
+            "abcdef{d:0>7}\x1fp\x1fA\x1f1\x1f\x1f커밋 {d}\x1e",
+            .{ i, i },
+        ));
+    }
+    session.scm_log_text = try allocator.dupe(u8, log.items);
+    session.scm_log_repo = try allocator.dupe(u8, "/repo");
+    scm_dock_ops.selectScmTab(session, .history);
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const extent = scroll_ops.scmScrollExtent(session);
+    try std.testing.expectEqual(projection.scroll.max_offset_px, extent.max_offset_px);
+    try std.testing.expect(extent.max_offset_px > 0); // 커밋 120개는 이 창에서 넘친다
+
+    // 그리고 휠이 실제로 목록을 굴린다(상한이 0이면 여기서 제자리다).
+    const content = dock_ops.dockGeometry(session).tree_content;
+    session.scrollWheel(
+        -3,
+        0,
+        false,
+        @floatFromInt(content.x + content.w / 2),
+        @floatFromInt(content.y + content.h / 2),
+    );
+    try std.testing.expect(session.scm_scroll.offset_y_px > 0);
 }
 
 test "소스 컨트롤: fetch는 쓰기 슬롯을 잡지 않는다(느린 원격이 커밋을 막지 않는다)" {

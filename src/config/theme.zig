@@ -908,11 +908,28 @@ pub const SidebarConfig = struct {
     ///
     /// codex는 해당 없다 — 외부 스크립트를 실행하는 상태줄/훅 설정이 없어 자식 신원 경로만 쓴다.
     agent_transcript_hook: bool = true,
+    /// provider 훅(claude `settings.json` / codex `hooks.json`)을 설치할지(**기본 false — opt-in**).
+    /// loader `sidebar.agent-hooks`.
+    ///
+    /// **왜 옵션인가**: 켜면 Maru가 사용자 소유 설정 파일에 훅 항목을 써 넣는다. 위의
+    /// `agent_transcript_hook`이 상태줄 하나를 건드리는 것과 달리, 이쪽은 턴 경계·상태·알림을 통째로
+    /// 훅에서 받는 **모드 전환**이라 대가가 더 크다(docs/agent-hooks.md §1 — 두 모드는 섞이지 않는다).
+    ///
+    /// **끔은 «설치하지 않음»이지 «제거»가 아니다**(계약 §5). 인스턴스 둘이 서로 다른 게이트 값을 가지면
+    /// (정식 빌드와 dev 빌드 등) 한쪽이 설치하고 한쪽이 지우는 왕복이 무한히 돈다. 제거는 명시적
+    /// 사용자 액션에서만 하는데 ⚠️ **그 액션이 아직 없다** — 지금 되돌리려면 `settings.json`에서
+    /// `MARU_HOOK_V3` 표식이 붙은 항목을 손으로 지운다. 그래서 이 기본값을 켜지 않는다.
+    ///
+    /// 위의 `agent_transcript_hook`과는 **자리가 겹친다** — 훅 모드가 서면 상태줄 훅이 하던 일
+    /// (세션 신원 하나)은 `SessionStart`의 부분집합이 되어 그 훅을 제거한다(계약 §5). 그 전까지는 둘이
+    /// 공존하고, 이 키가 켜졌다고 저 키가 자동으로 꺼지지는 않는다.
+    agent_hooks: bool = false,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = .cfg_sidebar_show_branch, .widget = .toggle, .section = .sidebar },
         .show_folder = Meta{ .doc = .cfg_sidebar_show_folder, .widget = .toggle, .section = .sidebar },
         .agent_transcript_hook = Meta{ .doc = .cfg_sidebar_agent_transcript_hook, .widget = .toggle, .section = .sidebar },
+        .agent_hooks = Meta{ .doc = .cfg_sidebar_agent_hooks, .widget = .toggle, .section = .sidebar },
         // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
         .width_pt = Meta{ .key_seg = "width", .doc = .cfg_sidebar_width_pt, .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
     };

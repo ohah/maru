@@ -42,6 +42,11 @@ pub const max_payload_bytes: usize = event.max_line_bytes - event.max_provider_l
 /// 잃는 것과 사용자의 턴이 멈추는 것 중 전자가 낫다.
 pub const timeout_seconds: u32 = 2;
 
+/// 이벤트 로그가 사는 자리(`sessionCacheBase()` 아래 상대 경로). platform 이 **미리 만들고**(0700) 그
+/// 절대 경로를 `build` 에 넘긴다 — 커맨드는 디렉터리를 만들지 않는다(훅이 하는 일이 적을수록 턴이 빨리 끝나고,
+/// `mkdir` 이 실패하는 경우를 훅 안에서 처리할 방법도 없다).
+pub const log_dir_rel = "agent-turn-events";
+
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
     name: []const u8,
@@ -91,6 +96,12 @@ pub fn build(
     // «훅은 적었는데 파서는 못 읽는» 이름이 생긴다.
     if (!event.looksLikeProvider(provider)) return error.InvalidProvider;
     // `|| :` — provider가 `sh -e`로 실행해도 마지막 줄의 read 실패(개행 없이 끝남)가 훅을 죽이지 않게.
+    // **파일 권한을 훅이 정한다.** 이 로그에는 payload 가 그대로 실리고 거기엔 소스 코드와 셸 명령 원문이
+    // 들어간다(계약 §7). `>>` 가 만드는 파일의 권한은 **셸의 umask** 에 끌려가므로, 두지 않으면 흔한 기본값
+    // (022)에서 0644 로 만들어져 같은 머신의 다른 사용자가 읽는다. 디렉터리는 platform 이 0700 으로 만들지만
+    // 그것만으로는 부족하다 — 디렉터리 권한은 나중에 사용자가 바꿀 수 있고, 파일 자체가 안전해야 한다.
+    // `umask` 는 셸 내장이라 프로세스가 늘지 않는다.
+    try out.appendSlice(allocator, "umask 077; ");
     try out.appendSlice(allocator, "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ");
     // **pane 식별자를 숫자로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
     // `MARU_PANE_ID='../outside/pwned'` 로 로그 디렉터리 **밖에** 파일이 만들어지는 것을 실측으로 확인했다.
@@ -252,6 +263,15 @@ test "이벤트 세트는 계약 §2 그대로다" {
     try testing.expectEqual(@as(usize, 2), star);
     // PostToolUse는 세트에 없다 — payload가 originalFile을 실어 상한에 잘린다(계약 §3.1).
     for (events) |e| try testing.expect(!std.mem.eql(u8, e.name, "PostToolUse"));
+
+    // **이름이 겹치면 안 된다.** 겹치면 설치가 그 이벤트에 항목을 둘 넣는데, 설치 판정은 이벤트를 «덮었나»로
+    // 세므로 「우리 항목 수 = 세트 크기」가 영영 맞지 않는다 → 시작할 때마다 사용자 파일을 다시 쓴다
+    // (`agent_hook_install.planFor`의 마지막 검사). 손으로 보면 안 보이는 종류의 실수라 여기서 막는다.
+    for (events, 0..) |a_ev, i| {
+        for (events[i + 1 ..]) |b_ev| {
+            try testing.expect(!std.mem.eql(u8, a_ev.name, b_ev.name));
+        }
+    }
 }
 
 test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
@@ -268,6 +288,8 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
     // fixture 가 치환하는 자리표시자가 그대로 있는지.
     try testing.expect(std.mem.indexOf(u8, cmd, "'__LOG_DIR__'") != null);
     try testing.expect(std.mem.endsWith(u8, cmd, marker_comment));
+    // 권한을 **가장 먼저** 좁힌다 — 뒤에 두면 그 사이에 만들어진 파일이 넓은 권한으로 남는다.
+    try testing.expect(std.mem.startsWith(u8, cmd, "umask 077; "));
 }
 
 test "커맨드가 쓴 줄을 파서가 읽는다 — 형식이 두 곳에 따로 적히면 조용히 깨진다" {

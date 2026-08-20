@@ -60,6 +60,16 @@ grep -q "^claude	{" "$logdir/7.ndjson" || fail "provider 표식과 payload 사�
 grep -q '"hook_event_name":"Stop"' "$logdir/7.ndjson" || fail "payload 가 그대로 실리지 않았다"
 pass "append 형식"
 
+echo "1b) 로그 파일 권한이 0600 이다 — payload 에 소스와 명령 원문이 실린다"
+# **넉넉한 umask 에서 돌린다.** 기본 umask 가 이미 077 인 환경에서 돌리면 커맨드에 `umask` 가 없어도
+# 통과해 검사가 아무것도 증명하지 못한다(같은 함정을 동시 append 검사에서 한 번 겪었다).
+rm -f "$logdir/9.ndjson"
+printf '%s\n' "$payload" | env MARU_PANE_ID=9 /bin/sh -c "umask 022; $cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
+mode=$(ls -l "$logdir/9.ndjson" | cut -c2-10)
+[ "$mode" = "rw-------" ] || fail "로그 파일 권한이 rw------- 여야 하는데 $mode 다(umask 가 빠졌다)"
+rm -f "$logdir/9.ndjson"
+pass "로그 파일 권한(넉넉한 umask 에서도 0600)"
+
 echo "2) pane 식별자가 없으면 아무것도 쓰지 않고 0 으로 끝난다"
 printf '%s\n' "$payload" | env -u MARU_PANE_ID /bin/sh -c "$cmd" || fail "가드 경로가 0 으로 끝나지 않았다"
 [ "$(ls "$logdir" | wc -l)" -eq 1 ] || fail "maru 밖 세션이 파일을 남겼다"

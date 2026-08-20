@@ -1078,6 +1078,7 @@ test "parse: full config sets every field" {
         \\editor.wrap = true
         \\sidebar.show-folder = false
         \\sidebar.agent-transcript-hook = false
+        \\sidebar.agent-hooks = true
         \\text.blink = true
         \\theme.bold-is-bright = true
         \\input.shift-enter = native
@@ -1109,6 +1110,8 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.sidebar.show_folder); // sidebar.show-folder 파싱(기본 true)
     // 이 키가 파싱돼야 "사용자 파일을 건드리는 기능을 끌 수 있다"는 계약이 성립한다(docs/agent-session.md).
     try std.testing.expectEqual(false, p.config.sidebar.agent_transcript_hook); // sidebar.agent-transcript-hook 파싱(기본 true)
+    // **켜는 쪽으로 확인한다** — 기본이 false라 false를 넣으면 파싱이 안 돌아도 통과한다(바로 위 editor.wrap과 같은 함정).
+    try std.testing.expectEqual(true, p.config.sidebar.agent_hooks); // sidebar.agent-hooks 파싱(기본 false)
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
     try std.testing.expectEqual(true, p.config.bold_is_bright); // theme.bold-is-bright 파싱(기본 false)
     try std.testing.expectEqual(theme.ShiftEnter.native, p.config.input.shift_enter); // input.shift-enter 파싱(기본 newline)

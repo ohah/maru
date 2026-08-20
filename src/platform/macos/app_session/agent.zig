@@ -607,6 +607,206 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
 }
 
+/// 훅 이벤트 로그 디렉터리의 절대 경로. **설치와 정리가 같은 자리를 봐야 한다** — 두 곳에서 따로 조립하면
+/// 한쪽만 바뀌었을 때 «설치는 A 에 쓰고 정리는 B 를 지운다» 가 조용히 성립하고, 증상은 「로그가 안 줄어든다」
+/// 하나뿐이라 원인에 닿기 어렵다.
+fn agentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
+    const base = sessionCacheBase(a) orelse return null;
+    return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ base, maru.session.agent_hook_command.log_dir_rel }, 0) catch null;
+}
+
+/// 이 프로세스가 훅 로그를 이미 정리했는가(위 «프로세스에 한 번» 규칙). 테스트는 한 바이너리에서 세션을
+/// 여러 번 만들므로 정리 경로를 보려면 이 값을 되돌린다.
+pub var hook_logs_cleaned = false;
+
+/// 시작할 때 남아 있는 훅 이벤트 로그를 **읽지 않고 지운다**(docs/agent-hooks.md §4.2·§5).
+///
+/// **게이트와 무관하게 돈다.** 게이트를 꺼도 이미 설치된 훅은 계속 쓰는데, 회전이 «소비»에 붙어 있어
+/// (§4.2) 소비자가 없으면 파일이 무한히 자란다. 그 안에는 프롬프트 원문·셸 명령·편집 전후 문자열이
+/// 평문으로 들어 있으므로(§7) 자라게 두는 것 자체가 손해다.
+///
+/// **시작할 때만 부른다.** config 재적용 때 같이 돌면 살아 있는 세션이 방금 적은 이벤트를 지운다 —
+/// 지금은 소비자가 없어 차이가 없지만, AH3이 들어오는 순간 조용한 유실이 된다.
+///
+/// 지난 실행의 이벤트를 버리는 것은 의도다. 로그는 «기록»이 아니라 «큐»이고(§4.2), 이미 끝난 세션의
+/// 큐에는 옮길 곳이 없다.
+pub fn cleanupAgentHookLogs(self: *AppSession) void {
+    if (!is_macos) return;
+    // **프로세스에 한 번이다.** `AppSession`은 **창마다** 만들어지므로(`maru_macos_app_session_create`), 창을
+    // 하나 더 열 때마다 이 함수가 다시 돌면 **먼저 열린 창의 터미널이 지금 쓰고 있는 로그를 지운다.** 지금은
+    // 소비자가 없어 티가 안 나지만 AH3이 들어오면 그대로 조용한 유실이다.
+    if (hook_logs_cleaned) return;
+    hook_logs_cleaned = true;
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const log_dir = agentHookLogDir(a) orelse return;
+    var dir = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
+
+    // **훑고 나서 지운다.** 순회 중에 지우면 readdir이 뒤 항목을 건너뛸 수 있어 매번 몇 개씩 남는다.
+    var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(self.io) catch return) |entry| {
+        if (entry.kind != .file) continue;
+        // **우리가 만든 이름만 지운다** — pane 식별자(숫자) + `.ndjson`. 남이 이 디렉터리에 무엇을 두었든
+        // 그것까지 치우는 것은 우리 일이 아니다.
+        if (!std.mem.endsWith(u8, entry.name, ".ndjson")) continue;
+        const stem = entry.name[0 .. entry.name.len - ".ndjson".len];
+        if (stem.len == 0) continue;
+        var all_digits = true;
+        for (stem) |c| {
+            if (c < '0' or c > '9') all_digits = false;
+        }
+        if (!all_digits) continue;
+        doomed.append(a, a.dupe(u8, entry.name) catch return) catch return;
+    }
+    for (doomed.items) |name| dir.deleteFile(self.io, name) catch {};
+}
+
+/// provider 훅을 config(`sidebar.agent-hooks`)에 맞춰 claude `settings.json`에 설치한다. 앱 시작 시 한 번,
+/// config 재적용 때 한 번 — 위 `reconcileAgentStatusline`과 같은 자리에서 돈다(docs/agent-hooks.md §5).
+///
+/// **판정과 트리 수술은 여기서 하지 않는다.** `session/agent_hook_install.zig`가 순수 층으로 소유하고
+/// (파일 없이 전수로 돌 수 있다), 여기서는 그 층이 요구하는 것을 파일 세계에서 지킨다:
+/// - **읽지 못한 파일은 건드리지 않는다.** 0바이트 창(provider가 쓰는 중)을 «빈 설정»으로 접으면 사용자
+///   설정을 통째로 날린다 — 같은 계열의 상태줄 경로가 실제로 낸 사고다.
+/// - **`flock`으로 인스턴스 사이를 직렬화**하되, 잠글 것은 `settings.json` **자신**이다. 상태줄 경로는 잠글
+///   대상이 스크립트·settings 둘이라 별도 마커가 필요했지만, 여기서는 고치는 파일이 하나뿐이라 남의 홈에
+///   새 파일을 만들 이유가 없다.
+/// - **compare-and-swap.** 읽고 쓰는 사이에 provider나 사용자가 바꾼 값을 덮지 않는다.
+/// - **한 번만 쓴다.** «걷어 내고 다시 넣기»를 두 번에 나눠 쓰면 그 사이에 죽었을 때 훅이 사라진 파일이 남는다.
+///
+/// **끔은 «설치하지 않음»이지 «제거»가 아니다**(계약 §5). 게이트가 꺼져 있으면 여기서 그냥 나간다 —
+/// 인스턴스 둘이 서로 다른 게이트 값을 가지면(정식 빌드와 dev 빌드) 설치·삭제가 무한히 왕복하기 때문이다.
+///
+/// best-effort다. 실패는 조용히 지나가고, 그러면 그 세션은 관측 모드로 남는다(계약 §1.2).
+pub fn reconcileAgentHooks(self: *AppSession) void {
+    if (!is_macos) return;
+    const install = maru.session.agent_hook_install;
+    const hook_command = maru.session.agent_hook_command;
+
+    // 게이트가 꺼져 있으면 **아무것도 하지 않는다**(제거도 하지 않는다 — 위 doc comment 참조).
+    if (!self.loaded_config.config.sidebar.agent_hooks) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // **claude가 설치돼 있을 때만 손댄다.** 디렉터리가 없으면 claude를 쓰지 않는 사람이므로 만들지 않는다.
+    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
+    const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
+    dir_handle.close(self.io);
+
+    // **로그 디렉터리를 먼저 만든다.** 훅은 디렉터리를 만들지 않고 없으면 조용히 아무것도 적지 않는다
+    // (그 조용함은 의도다 — 계약 §4.1). 설치만 하고 이 자리를 빠뜨리면 훅이 도는데 이벤트가 0인,
+    // 진단하기 가장 나쁜 상태가 된다. 권한은 0700이고 파일 쪽 0600은 커맨드의 `umask`가 지킨다.
+    // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 둘을 차례로 만든다.
+    const cache_base = sessionCacheBase(a) orelse return;
+    const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
+    _ = std.c.mkdir(base_z.ptr, 0o700);
+    const log_dir = agentHookLogDir(a) orelse return;
+    _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
+    // **이미 있던 디렉터리도 좁힌다.** `mkdir`은 EEXIST면 권한을 손대지 않으므로, 옛 버전이나 넉넉한 umask가
+    // 만들어 둔 `0755` 디렉터리가 그대로 남는다. 우리가 만든 자리이니 우리가 맞춘다(파일 쪽은 훅의 `umask`).
+    _ = std.c.chmod(log_dir.ptr, 0o700);
+    // **만들지 못했으면 설치하지 않는다.** 훅만 걸고 디렉터리가 없으면 이벤트가 0인 채로 도는, 진단하기 가장
+    // 나쁜 상태가 된다(그 조용함은 훅 커맨드의 의도된 성질이라 사용자에게 아무 신호도 가지 않는다).
+    const log_dir_handle = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{}) catch return;
+    log_dir_handle.close(self.io);
+
+    var cmd: std.ArrayListUnmanaged(u8) = .empty;
+    hook_command.build(&cmd, a, "claude", log_dir) catch return;
+
+    const settings_path = std.fmt.allocPrintSentinel(a, "{s}/settings.json", .{claude_dir}, 0) catch return;
+
+    // `settings.json` 자신을 잠근다. **파일이 없으면 만들지 않는다**(`create = false`) — 잠그자고 남의 홈에
+    // 빈 파일을 만들 이유가 없고, 그때는 락 없이 진행한다(설치 전과 같은 위험이고 더 나빠지지 않는다).
+    //
+    // **심링크는 실체를 잠근다.** dotfile 관리자가 `~/.claude/settings.json`을 심링크로 두는 구성이 흔한데
+    // (`writeExecutableFile`이 같은 이유로 실체를 해석한다), 락은 `O_NOFOLLOW`로 열기 때문에 심링크면 열기
+    // 자체가 실패해 **직렬화가 조용히 사라진다.** 쓰는 쪽이 실체를 갈아 끼우므로 잠글 것도 실체다.
+    const lock_path = blk: {
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = std.Io.Dir.realPathFileAbsolute(self.io, settings_path, &real_buf) catch break :blk settings_path;
+        break :blk std.fmt.allocPrintSentinel(a, "{s}", .{real_buf[0..len]}, 0) catch break :blk settings_path;
+    };
+    const lock = switch (StatuslineLock.acquire(lock_path, false)) {
+        .contended => return, // 다른 인스턴스가 지금 같은 일을 하고 있다
+        .unlockable => |l| l,
+        .locked => |l| l,
+    };
+    defer lock.release();
+
+    // 여기부터 끝까지가 하나의 read-modify-write다.
+    const before = readFileState(self.io, a, settings_path);
+    const state: install.State = switch (before) {
+        .unreadable => .unreadable,
+        .absent => .absent,
+        .present => |text| blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch break :blk .unreadable;
+            const root = switch (parsed.value) {
+                .object => |o| o,
+                else => break :blk .unreadable,
+            };
+            break :blk if (install.scanClaude(root.get("hooks"), cmd.items)) |known|
+                .{ .known = known }
+            else
+                .unreadable;
+        },
+    };
+    const plan = install.planForSet(state, .ensure);
+    if (!install.mutates(plan)) return; // leave·abort — 손대지 않는다
+
+    // 계획을 세운 그 바이트를 다시 읽어 트리를 만든다. 읽기 실패·파싱 실패는 여기서도 «쓰지 않음»이다.
+    var root: std.json.ObjectMap = .empty;
+    switch (before) {
+        .absent => {},
+        .unreadable => return,
+        .present => |text| {
+            const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return;
+            switch (parsed.value) {
+                .object => |o| root = o,
+                else => return,
+            }
+        },
+    }
+
+    // compare-and-swap: 판단 근거가 아직 유효한가. **여기서는 `stillOwns`(inode 대조)를 따로 보지 않는다** —
+    // 파일 바이트 전체를 대조하는 이쪽이 더 강하고(내용이 같으면 어느 inode든 우리가 본 그 상태다), 상태줄
+    // 경로가 inode를 봐야 했던 것은 그쪽이 마커 파일을 지웠다 만들기 때문이다. 로그 디렉터리 생성과 커맨드 조립 사이에 provider가
+    // 자기 훅을 넣었을 수 있다.
+    const now = readFileState(self.io, a, settings_path);
+    const unchanged = switch (before) {
+        .absent => now == .absent,
+        .unreadable => false,
+        .present => |old| switch (now) {
+            .present => |fresh| std.mem.eql(u8, old, fresh),
+            else => false,
+        },
+    };
+    if (!unchanged) return;
+
+    var hooks: std.json.ObjectMap = switch (root.get("hooks") orelse std.json.Value{ .object = .empty }) {
+        .object => |o| o,
+        else => return, // scan이 이미 걸렀어야 하지만, 쓰기 직전에 한 번 더 본다
+    };
+    install.applyClaude(a, &hooks, cmd.items, .install) catch return;
+    if (hooks.count() == 0) {
+        _ = root.orderedRemove("hooks");
+    } else {
+        root.put(a, "hooks", .{ .object = hooks }) catch return;
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(a, &out);
+    std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer) catch return;
+    out = aw.toArrayList();
+    writeExecutableFile(self.io, settings_path, out.items, false) catch return;
+}
+
 /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex
 /// `CODEX_THREAD_ID`). 이미 값이 있으면 자식이 없어도 유지하고, 새 값이 오면 교체한다(`/clear`로 세션이
 /// 갈리는 경우 — 같은 프로세스가 새 id를 내려준다).

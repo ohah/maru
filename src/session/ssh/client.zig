@@ -3039,3 +3039,48 @@ test "닫는 중에 온 컨트롤 데이터는 버린다" {
     try testing.expectEqual(@as(usize, 0), step.control.len);
     try testing.expect(step.state != .closed);
 }
+
+test "컨트롤 채널도 윈도를 보충한다" {
+    // 보충을 잊으면 **상대가 멈춘다**(계약 §3.1). 터미널에서 겪은 그 결함이 컨트롤에서 다시
+    // 나면, 목록이 작을 때는 멀쩡하고 큰 답에서 갑자기 멈춘다 — 원인을 짚기 가장 어려운 모양이다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+
+    // 윈도 절반을 넘길 때까지 먹인다(기본 2MiB, 한 번에 20KiB).
+    const chunk = 20 * 1024;
+    var data: [chunk]u8 = @splat('y');
+    var buf: [64 * 1024]u8 = undefined;
+    var pkt: [64 * 1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(21);
+    var adjusts: usize = 0;
+    var i: usize = 0;
+    while (i < 60) : (i += 1) {
+        const n = try packet.write(&pkt, try channelData(&buf, control_local_id, &data), prng.random());
+        const step = try c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl });
+        // 평문이라 그대로 보인다: WINDOW_ADJUST + 상대 번호(77)
+        if (std.mem.indexOf(u8, step.wire, &[_]u8{ channel.msg_channel_window_adjust, 0, 0, 0, 77 }) != null) {
+            adjusts += 1;
+        }
+    }
+    try testing.expect(adjusts > 0);
+}
+
+test "컨트롤 채널의 모르는 요청에도 want_reply 면 답한다" {
+    // OpenSSH 는 `keepalive@openssh.com` 을 채널 요청으로 보낸다(§5.4) — 답이 없으면 연결이
+    // 죽은 것으로 본다. 터미널 채널에는 그 답이 있는데 컨트롤에만 없으면, **목록 화면을 오래
+    // 열어 둔 세션이 끊긴다**.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(control_local_id);
+    try wr.string("keepalive@openssh.com");
+    try wr.boolean(true);
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+    try testing.expect(std.mem.indexOf(u8, step.wire, &[_]u8{ channel.msg_channel_failure, 0, 0, 0, 77 }) != null);
+}

@@ -18344,6 +18344,255 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     }
 }
 
+fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
+    try std.testing.expectEqual(
+        maru.session.agent_hook_install.Plan.leave,
+        maru.session.agent_hook_install.planForSet(.codex, .{ .known = known }, .ensure),
+    );
+}
+
+test "agent hooks install into codex and record trust without touching existing entries" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const hook_install = maru.session.agent_hook_install;
+    const hook_trust = maru.session.agent_hook_trust;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "cache");
+
+    // 과거 표식 항목은 P1대로 살아남아야 하고, 사용자 훅도 순서 그대로 남아야 한다.
+    const legacy_hook = "cat > /tmp/x # " ++ hook_command.legacy_markers[0];
+    const hooks_before = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ legacy_hook ++ "\"}]}]}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = hooks_before });
+    // 사용자가 쓰던 config.toml — 우리 항목만 뒤에 붙어야 한다.
+    const config_before = "model = \"gpt-5\"\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = config_before });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    // **CODEX_HOME 을 심링크로 준다.** 신뢰 키는 실체 경로여야 하는데(계약 §2.1), 픽스처가 이미 실체
+    // 경로면 그 규칙을 어겨도 테스트가 통과한다 — 실제로 그 상태였고 뮤테이션이 «못 잡음» 으로 드러났다.
+    // dotfile 관리자와 macOS 의 `/tmp` 가 만드는 흔한 구성이기도 하다.
+    const codex_link = try std.fmt.allocPrintSentinel(a, "{s}/codex-link", .{root}, 0);
+    defer a.free(codex_link);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(codex.ptr, codex_link.ptr));
+
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex_link.ptr, 1));
+    // claude 디렉터리는 만들지 않는다 — 한쪽이 없어도 다른 쪽이 서야 한다(그 자체가 이 테스트의 단언이다).
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
+
+    const log_dir = try std.fmt.allocPrint(a, "{s}/maru/{s}", .{ cache, hook_command.log_dir_rel });
+    defer a.free(log_dir);
+    var want: std.ArrayListUnmanaged(u8) = .empty;
+    defer want.deinit(a);
+    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir);
+
+    const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+    defer a.free(hooks_after);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, hooks_after, .{});
+        defer parsed.deinit();
+        const hooks = parsed.value.object.get("hooks").?.object;
+        // **codex 세트다** — `Notification` 이 들어가면 안 된다.
+        try std.testing.expect(hooks.get("Notification") == null);
+        const known = hook_install.scan(.codex, parsed.value.object.get("hooks"), want.items) orelse
+            return error.UnknownShape;
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known.ours_current);
+        try std.testing.expect(known.legacy_present); // 과거 표식은 그대로
+        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.codex, .{ .known = known }, .ensure));
+        // 사용자(legacy) 항목이 우리 것보다 **앞**이다.
+        const stop = hooks.get("Stop").?.array;
+        try std.testing.expectEqualStrings(
+            legacy_hook,
+            stop.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string,
+        );
+    }
+
+    // 신뢰 항목: 우리 항목 다섯의 키가 **실체 경로**로 적히고 값이 우리 계산과 같아야 한다.
+    const config_after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(config_after);
+    try std.testing.expect(std.mem.startsWith(u8, config_after, config_before)); // 사용자 설정이 앞에 그대로
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, hooks_after, .{});
+        defer parsed.deinit();
+        var slots: [hook_install.max_events]hook_install.Placement = undefined;
+        const found = hook_install.ourPlacements(parsed.value.object.get("hooks"), want.items, &slots);
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), found);
+
+        // 링크가 아니라 **실체** 경로로 적혔어야 한다.
+        const hooks_real = try std.fmt.allocPrint(a, "{s}/codex/hooks.json", .{root});
+        try std.testing.expect(std.mem.indexOf(u8, config_after, "codex-link") == null);
+        defer a.free(hooks_real);
+        for (slots[0..found]) |placement| {
+            const entry = hook_trust.forEvent(placement.json_name).?;
+            var matcher: ?[]const u8 = null;
+            for (hook_command.eventsFor(.codex)) |e| {
+                if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
+            }
+            var key: std.ArrayListUnmanaged(u8) = .empty;
+            defer key.deinit(a);
+            try hook_trust.appendKey(&key, a, hooks_real, entry, placement.group_index, placement.handler_index);
+            var hash: std.ArrayListUnmanaged(u8) = .empty;
+            defer hash.deinit(a);
+            try hook_trust.appendHash(&hash, a, entry, want.items, hook_command.timeout_seconds, matcher);
+
+            if (std.mem.indexOf(u8, config_after, key.items) == null) {
+                std.debug.print("missing trust key: {s}\n", .{key.items});
+                return error.MissingTrustKey;
+            }
+            if (std.mem.indexOf(u8, config_after, hash.items) == null) {
+                std.debug.print("missing trust hash for {s}\n", .{placement.json_name});
+                return error.MissingTrustHash;
+            }
+        }
+    }
+
+    // 신뢰 파일이 **없던** 경우도 본다: 새로 만들면 권한이 umask 를 타므로 우리가 0600 으로 좁혀야 한다
+    // (그 파일에 어떤 훅을 신뢰하는지가 적힌다). 기존 파일이면 승계라 손대지 않는다.
+    // 훅 파일과 신뢰 파일이 **둘 다 없는** 상태에서도 서야 한다 — 새 사용자의 첫 실행이 이 경로다.
+    // (순수 층은 «빈 설정에 넣기» 를 보지만, 제품 경로에서 파일을 새로 만드는 것은 여기서만 드러난다.)
+    {
+        try tmp.dir.deleteFile(io, "codex/hooks.json");
+        try tmp.dir.deleteFile(io, "codex/config.toml");
+        var fresh_both: AppSession = undefined;
+        try fresh_both.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        fresh_both.deinit();
+        const made_hooks = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        defer a.free(made_hooks);
+        var parsed_new = try std.json.parseFromSlice(std.json.Value, a, made_hooks, .{});
+        defer parsed_new.deinit();
+        const known_new = hook_install.scan(.codex, parsed_new.value.object.get("hooks"), want.items) orelse
+            return error.UnknownShape;
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known_new.ours_current);
+        const made_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(made_config);
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), std.mem.count(u8, made_config, "trusted_hash"));
+        // 원래 fixture 로 되돌려 아래 검사를 잇는다.
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = hooks_after });
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = config_after });
+    }
+
+    {
+        try tmp.dir.deleteFile(io, "codex/config.toml");
+        var fresh_session: AppSession = undefined;
+        try fresh_session.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        fresh_session.deinit();
+        const created = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(created);
+        try std.testing.expect(std.mem.indexOf(u8, created, "trusted_hash") != null);
+        const config_z = try std.fmt.allocPrintSentinel(a, "{s}/codex/config.toml", .{root}, 0);
+        defer a.free(config_z);
+        var st: std.posix.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, config_z.ptr, &st, std.posix.AT.SYMLINK_NOFOLLOW));
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.mode & 0o777);
+        // 사용자 설정을 지우고 만든 것이므로 원본 내용은 없다 — 다시 써 넣어 아래 검사를 잇는다.
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = config_after });
+    }
+
+    // **낡은 커맨드는 갱신된다.** 캐시 경로가 바뀌면(다른 `XDG_CACHE_HOME`, 캐시 정리) 커맨드 안의 로그
+    // 경로가 달라져 우리 항목이 낡는다. 그때 두 벌이 되지 않고 한 벌로 교체돼야 한다.
+    {
+        var stale: std.ArrayListUnmanaged(u8) = .empty;
+        defer stale.deinit(a);
+        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir");
+        const stale_json = try std.fmt.allocPrint(a,
+            \\{{ "hooks": {{ "Stop": [ {{ "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
+        , .{std.json.fmt(std.json.Value{ .string = stale.items }, .{})});
+        defer a.free(stale_json);
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = stale_json });
+
+        var refreshed: AppSession = undefined;
+        try refreshed.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        refreshed.deinit();
+
+        const fixed = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        defer a.free(fixed);
+        try std.testing.expect(std.mem.indexOf(u8, fixed, "maru-old-log-dir") == null); // 낡은 것이 남지 않는다
+        var parsed_fixed = try std.json.parseFromSlice(std.json.Value, a, fixed, .{});
+        defer parsed_fixed.deinit();
+        const known_fixed = hook_install.scan(.codex, parsed_fixed.value.object.get("hooks"), want.items) orelse
+            return error.UnknownShape;
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known_fixed.ours); // 두 벌이 아니다
+        try testing_expect_leave(known_fixed);
+        // ⚠️ 이 경로가 드러내는 성질: 항목의 **위치가 바뀌면 신뢰 키도 바뀐다**(키가 인덱스를 담는다).
+        // 옛 키의 항목은 `config.toml` 에 남는데, codex 는 어떤 훅과도 짝이 안 맞는 키를 그냥 무시하므로
+        // 고장은 아니고 **잔재**다. 우리는 «비어 있을 때만 쓴다» 규칙 때문에 남의 줄을 지우지 않는다.
+        const after_refresh_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(after_refresh_config);
+        try std.testing.expect(after_refresh_config.len >= config_after.len); // 줄지 않는다(지우지 않으므로)
+
+        // 되돌린다 — 훅 파일과 신뢰 파일을 **둘 다** 되돌려야 아래 바이트 비교가 성립한다.
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = hooks_after });
+        try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = config_after });
+    }
+
+    // **다시 띄워도 신뢰 항목이 늘지 않는다.** 같은 테이블을 두 번 적으면 codex 가 config 를 통째로 못 읽는다.
+    {
+        var again: AppSession = undefined;
+        try again.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        again.deinit();
+        const twice = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(twice);
+        try std.testing.expectEqualStrings(config_after, twice);
+        const hooks_twice = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        defer a.free(hooks_twice);
+        try std.testing.expectEqualStrings(hooks_after, hooks_twice);
+    }
+}
+
 test "agent hooks stay out of provider files while the gate is off" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     // 기본값이 `false`라는 계약을 **제품 경로에서** 못 박는다. 위 hook-off fixture는 상태줄 키만 끄므로,
@@ -18357,9 +18606,14 @@ test "agent hooks stay out of provider files while the gate is off" {
     test_config_text = ""; // 아무 설정도 주지 않는다 = 전부 기본값
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
     try tmp.dir.createDirPath(io, "cache");
     const settings_before = "{\"model\":\"opus\"}";
     try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+    // **codex 도 함께 본다** — 게이트 하나가 두 provider 를 다 막는지 확인해야 한다(한쪽만 막히면 끈
+    // 사람의 다른 설정 파일이 조용히 고쳐진다).
+    const codex_before = "{\"hooks\":{}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = codex_before });
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
@@ -18367,12 +18621,15 @@ test "agent hooks stay out of provider files while the gate is off" {
     defer a.free(home);
     const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
     defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
     const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
     defer a.free(cache);
     const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
     defer a.free(config);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
@@ -18402,6 +18659,12 @@ test "agent hooks stay out of provider files while the gate is off" {
     defer a.free(log_dir);
     var stat: std.posix.Stat = undefined;
     try std.testing.expect(std.c.fstatat(std.posix.AT.FDCWD, log_dir.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0);
+
+    // codex 쪽도 그대로다 — 훅 파일은 바이트까지 같고, 신뢰 파일은 아예 생기지 않는다.
+    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(4096));
+    defer a.free(codex_after);
+    try std.testing.expectEqualStrings(codex_before, codex_after);
+    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
 }
 
 test "agent statusline hook edits only the statusLine key and preserves the wrapped user command" {

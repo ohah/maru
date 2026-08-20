@@ -9,6 +9,46 @@
 const std = @import("std");
 const command = @import("agent_hook_command.zig");
 
+// ── provider 별 자리 ────────────────────────────────────────────────────────────────────────────
+//
+// **경로 규칙을 platform 이 추측하지 않게** 순수 층에 둔다. 두 provider 가 «환경 변수 우선, 없으면 홈 아래
+// 숨김 폴더» 라는 같은 모양을 쓰는데, 이름만 다르다. platform 에 흩어 두면 한쪽만 고쳐지고 그 어긋남은
+// «그 provider 만 설치가 안 됨» 으로 나타나 눈에 잘 안 띈다.
+
+/// 설정 디렉터리를 가리키는 환경 변수 이름.
+pub fn configDirEnv(provider: command.Provider) [:0]const u8 {
+    return switch (provider) {
+        .claude => "CLAUDE_CONFIG_DIR",
+        .codex => "CODEX_HOME",
+    };
+}
+
+/// 환경 변수가 없을 때 홈 아래에서 찾는 폴더 이름.
+pub fn homeSubdir(provider: command.Provider) []const u8 {
+    return switch (provider) {
+        .claude => ".claude",
+        .codex => ".codex",
+    };
+}
+
+/// 훅 항목이 사는 파일 이름. claude 는 **다른 설정과 한 파일을 나눠 쓰고**(그래서 나머지 키를 반드시
+/// 보존해야 한다), codex 는 훅 전용 파일이다.
+pub fn hooksFileName(provider: command.Provider) []const u8 {
+    return switch (provider) {
+        .claude => "settings.json",
+        .codex => "hooks.json",
+    };
+}
+
+/// 설정 디렉터리 절대 경로. **빈 환경 변수는 «설정하지 않음» 과 같게 본다** — 빈 경로를 그대로 쓰면
+/// 루트에 파일을 만든다.
+pub fn configDir(provider: command.Provider, buf: []u8, env_value: ?[]const u8, home: ?[]const u8) ?[]const u8 {
+    if (env_value) |dir| {
+        if (dir.len > 0) return std.fmt.bufPrint(buf, "{s}", .{dir}) catch null;
+    }
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ home orelse return null, homeSubdir(provider) }) catch null;
+}
+
 /// 어느 provider 의 세트든 넘지 않는 크기. 순수 층이라 할당하지 않으므로 고정 배열의 상한이 필요하다.
 /// 세트가 이보다 커지면 컴파일이 막힌다(아래 테스트).
 pub const max_events: usize = 8;
@@ -904,4 +944,19 @@ test "담을 자리가 모자라면 그 사실이 드러난다 — 조용히 자
     const n = ourPlacements(parsed.value.object.get("hooks"), want, &one);
     try testing.expectEqual(@as(usize, command.claude_events.len), n); // 총 개수를 돌려준다
     try testing.expect(n > one.len);
+}
+
+test "provider 별 자리: 환경 변수 우선, 빈 값은 설정하지 않음과 같다" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings("/opt/claude", configDir(.claude, &buf, "/opt/claude", "/Users/a").?);
+    try testing.expectEqualStrings("/Users/a/.claude", configDir(.claude, &buf, null, "/Users/a").?);
+    try testing.expectEqualStrings("/Users/a/.claude", configDir(.claude, &buf, "", "/Users/a").?);
+    try testing.expectEqualStrings("/opt/codex", configDir(.codex, &buf, "/opt/codex", "/Users/a").?);
+    try testing.expectEqualStrings("/Users/a/.codex", configDir(.codex, &buf, null, "/Users/a").?);
+    try testing.expectEqual(@as(?[]const u8, null), configDir(.codex, &buf, null, null));
+
+    // 두 provider 가 같은 자리를 가리키면 한쪽 설치가 다른 쪽을 덮는다.
+    try testing.expect(!std.mem.eql(u8, homeSubdir(.claude), homeSubdir(.codex)));
+    try testing.expect(!std.mem.eql(u8, hooksFileName(.claude), hooksFileName(.codex)));
+    try testing.expect(!std.mem.eql(u8, configDirEnv(.claude), configDirEnv(.codex)));
 }

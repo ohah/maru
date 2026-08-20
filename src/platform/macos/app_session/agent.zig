@@ -501,7 +501,7 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
     dir_handle.close(self.io);
     const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
-    const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
+    const hooks_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
     const marker_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude_dir, sl.marker_name }, 0) catch return;
 
     const want = self.loaded_config.config.sidebar.agent_transcript_hook;
@@ -537,7 +537,7 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
         .present => |body| body,
         else => null,
     };
-    const settings = readStatusLineState(a, self.io, settings_path);
+    const settings = readStatusLineState(a, self.io, hooks_path);
     const marker: ?sl.Marker = switch (readFileState(self.io, a, marker_path)) {
         .present => |text| sl.parseMarker(text),
         else => null,
@@ -551,8 +551,8 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
             // 현재 상태를 못 읽었다 — 지우고 나면 되돌릴 근거가 사라지므로 **아무것도 하지 않는다**.
             .unknown => return,
             .leave => true,
-            .set => |cmd| writeStatusLineCommand(a, self.io, settings_path, cmd, settings),
-            .clear => writeStatusLineCommand(a, self.io, settings_path, null, settings),
+            .set => |cmd| writeStatusLineCommand(a, self.io, hooks_path, cmd, settings),
+            .clear => writeStatusLineCommand(a, self.io, hooks_path, null, settings),
         };
         // **복원에 실패했으면 근거를 지우지 않는다.** 지워버리면 사용자가 나중에 파일을 고쳐도 되살릴 것이 없다.
         if (!restored) return;
@@ -600,11 +600,11 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
     if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
         if (settings != .command or !sl.commandIsOurs(settings.command))
-            _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
+            _ = writeStatusLineCommand(a, self.io, hooks_path, script_path, settings);
         return;
     };
     writeExecutableFile(self.io, script_path, body.items, true) catch return;
-    _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
+    _ = writeStatusLineCommand(a, self.io, hooks_path, script_path, settings);
 }
 
 /// 훅 이벤트 로그 디렉터리의 절대 경로. **설치와 정리가 같은 자리를 봐야 한다** — 두 곳에서 따로 조립하면
@@ -684,20 +684,33 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
 /// best-effort다. 실패는 조용히 지나가고, 그러면 그 세션은 관측 모드로 남는다(계약 §1.2).
 pub fn reconcileAgentHooks(self: *AppSession) void {
     if (!is_macos) return;
-    const install = maru.session.agent_hook_install;
     const hook_command = maru.session.agent_hook_command;
 
     // 게이트가 꺼져 있으면 **아무것도 하지 않는다**(제거도 하지 않는다 — 위 doc comment 참조).
     if (!self.loaded_config.config.sidebar.agent_hooks) return;
 
+    // **provider 마다 따로 돈다.** 한쪽이 없거나 실패해도 다른 쪽은 서야 한다 — 둘을 한 트랜잭션으로
+    // 묶으면 claude 를 안 쓰는 사람에게 codex 훅도 안 걸린다.
+    inline for (.{ hook_command.Provider.claude, hook_command.Provider.codex }) |provider| {
+        reconcileProviderHooks(self, provider);
+    }
+}
+
+/// 한 provider 의 훅 파일을 맞춘다. 위 `reconcileAgentHooks` 의 doc comment 가 규율의 단일 출처다.
+fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_command.Provider) void {
+    const install = maru.session.agent_hook_install;
+    const hook_command = maru.session.agent_hook_command;
+
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    // **claude가 설치돼 있을 때만 손댄다.** 디렉터리가 없으면 claude를 쓰지 않는 사람이므로 만들지 않는다.
-    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
-    const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
+    // **그 provider 가 설치돼 있을 때만 손댄다.** 디렉터리가 없으면 그것을 쓰지 않는 사람이므로 만들지 않는다.
+    var config_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const env_value = if (std.c.getenv(install.configDirEnv(provider))) |v| std.mem.span(v) else null;
+    const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
+    const config_dir = install.configDir(provider, &config_dir_buf, env_value, home) orelse return;
+    const dir_handle = std.Io.Dir.openDirAbsolute(self.io, config_dir, .{}) catch return;
     dir_handle.close(self.io);
 
     // **로그 디렉터리를 먼저 만든다.** 훅은 디렉터리를 만들지 않고 없으면 조용히 아무것도 적지 않는다
@@ -718,20 +731,20 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     log_dir_handle.close(self.io);
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
-    hook_command.build(&cmd, a, hook_command.Provider.claude.tag(), log_dir) catch return;
+    hook_command.build(&cmd, a, provider.tag(), log_dir) catch return;
 
-    const settings_path = std.fmt.allocPrintSentinel(a, "{s}/settings.json", .{claude_dir}, 0) catch return;
+    const hooks_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) }, 0) catch return;
 
-    // `settings.json` 자신을 잠근다. **파일이 없으면 만들지 않는다**(`create = false`) — 잠그자고 남의 홈에
+    // 훅 파일 자신을 잠근다. **파일이 없으면 만들지 않는다**(`create = false`) — 잠그자고 남의 홈에
     // 빈 파일을 만들 이유가 없고, 그때는 락 없이 진행한다(설치 전과 같은 위험이고 더 나빠지지 않는다).
     //
-    // **심링크는 실체를 잠근다.** dotfile 관리자가 `~/.claude/settings.json`을 심링크로 두는 구성이 흔한데
+    // **심링크는 실체를 잠근다.** dotfile 관리자가 그 파일을 심링크로 두는 구성이 흔한데
     // (`writeExecutableFile`이 같은 이유로 실체를 해석한다), 락은 `O_NOFOLLOW`로 열기 때문에 심링크면 열기
     // 자체가 실패해 **직렬화가 조용히 사라진다.** 쓰는 쪽이 실체를 갈아 끼우므로 잠글 것도 실체다.
     const lock_path = blk: {
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const len = std.Io.Dir.realPathFileAbsolute(self.io, settings_path, &real_buf) catch break :blk settings_path;
-        break :blk std.fmt.allocPrintSentinel(a, "{s}", .{real_buf[0..len]}, 0) catch break :blk settings_path;
+        const len = std.Io.Dir.realPathFileAbsolute(self.io, hooks_path, &real_buf) catch break :blk hooks_path;
+        break :blk std.fmt.allocPrintSentinel(a, "{s}", .{real_buf[0..len]}, 0) catch break :blk hooks_path;
     };
     const lock = switch (StatuslineLock.acquire(lock_path, false)) {
         .contended => return, // 다른 인스턴스가 지금 같은 일을 하고 있다
@@ -741,7 +754,7 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     defer lock.release();
 
     // 여기부터 끝까지가 하나의 read-modify-write다.
-    const before = readFileState(self.io, a, settings_path);
+    const before = readFileState(self.io, a, hooks_path);
     const state: install.State = switch (before) {
         .unreadable => .unreadable,
         .absent => .absent,
@@ -751,14 +764,20 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
                 .object => |o| o,
                 else => break :blk .unreadable,
             };
-            break :blk if (install.scan(.claude, root.get("hooks"), cmd.items)) |known|
+            break :blk if (install.scan(provider, root.get("hooks"), cmd.items)) |known|
                 .{ .known = known }
             else
                 .unreadable;
         },
     };
-    const plan = install.planForSet(.claude, state, .ensure);
-    if (!install.mutates(plan)) return; // leave·abort — 손대지 않는다
+    const plan = install.planForSet(provider, state, .ensure);
+    if (plan == .abort) return; // 모르는 상태 — 손대지 않는다
+    if (!install.mutates(plan)) {
+        // 이미 설치돼 있어도 **신뢰 항목은 확인한다** — 훅 파일은 그대로인데 `config.toml` 쪽만
+        // 지워졌을 수 있고(캐시 정리·수동 편집), 그러면 훅이 돌지 않는다.
+        if (provider == .codex) ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items);
+        return;
+    }
 
     // 계획을 세운 그 바이트를 다시 읽어 트리를 만든다. 읽기 실패·파싱 실패는 여기서도 «쓰지 않음»이다.
     var root: std.json.ObjectMap = .empty;
@@ -778,7 +797,7 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     // 파일 바이트 전체를 대조하는 이쪽이 더 강하고(내용이 같으면 어느 inode든 우리가 본 그 상태다), 상태줄
     // 경로가 inode를 봐야 했던 것은 그쪽이 마커 파일을 지웠다 만들기 때문이다. 로그 디렉터리 생성과 커맨드 조립 사이에 provider가
     // 자기 훅을 넣었을 수 있다.
-    const now = readFileState(self.io, a, settings_path);
+    const now = readFileState(self.io, a, hooks_path);
     const unchanged = switch (before) {
         .absent => now == .absent,
         .unreadable => false,
@@ -793,7 +812,7 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
         .object => |o| o,
         else => return, // scan이 이미 걸렀어야 하지만, 쓰기 직전에 한 번 더 본다
     };
-    install.apply(.claude, a, &hooks, cmd.items, .install) catch return;
+    install.apply(provider, a, &hooks, cmd.items, .install) catch return;
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {
@@ -804,7 +823,105 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     var aw: std.Io.Writer.Allocating = .fromArrayList(a, &out);
     std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer) catch return;
     out = aw.toArrayList();
-    writeExecutableFile(self.io, settings_path, out.items, false) catch return;
+    writeExecutableFile(self.io, hooks_path, out.items, false) catch return;
+
+    // 쓴 **뒤에** 신뢰를 맞춘다 — 키가 항목의 위치 인덱스를 담으므로 파일이 확정된 다음이라야 한다.
+    if (provider == .codex) ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items);
+}
+
+/// codex `config.toml` 의 신뢰 항목을 맞춘다(계약 §2.1). codex 는 신뢰가 적혀 있지 않은 훅을 실행하지
+/// 않으므로, 이것이 없으면 설치는 됐는데 아무것도 안 도는 상태가 된다.
+///
+/// **비어 있는 키만 채운다.** 이미 값이 있으면 우리 것이든 codex 가 고친 것이든 건드리지 않는다 —
+/// codex 쪽 포맷이 바뀌어 우리 값이 틀려졌을 때, 사용자가 승인해 codex 가 적은 올바른 값을 매번 덮어
+/// 지우면 **무한 승인 프롬프트**가 된다. 비어 있을 때만 쓰면 최악이 프롬프트 한 번이고 그 뒤로 낫는다.
+///
+/// best-effort다. 실패하면 codex 가 한 번 물어볼 뿐이다.
+fn ensureCodexTrust(
+    self: *AppSession,
+    a: std.mem.Allocator,
+    config_dir: []const u8,
+    hooks_path: []const u8,
+    cmd: []const u8,
+) void {
+    const install = maru.session.agent_hook_install;
+    const hook_command = maru.session.agent_hook_command;
+    const trust = maru.session.agent_hook_trust;
+
+    // 방금 쓴 파일을 **다시 읽어** 자리를 잡는다. 메모리의 트리를 그대로 쓰면 rename 이 실패했거나 다른
+    // 인스턴스가 끼어든 경우에도 «썼다» 고 믿게 된다.
+    const text = switch (readFileState(self.io, a, hooks_path)) {
+        .present => |body| body,
+        else => return,
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return;
+    const root_obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return,
+    };
+    var slots: [install.max_events]install.Placement = undefined;
+    const found = install.ourPlacements(root_obj.get("hooks"), cmd, &slots);
+    if (found == 0 or found > slots.len) return; // 넘치면 어느 것이 빠졌는지 모른다 — 손대지 않는다
+
+    // **키는 실체 경로로 만든다** — 심링크 경로로 적으면 codex 가 정규화한 키와 어긋나 그 훅이 영영
+    // 미신뢰로 남는다(계약 §2.1 실측).
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const hooks_real = if (std.Io.Dir.realPathFileAbsolute(self.io, hooks_path, &real_buf)) |len|
+        real_buf[0..len]
+    else |_|
+        hooks_path;
+
+    const config_path = std.fmt.allocPrint(a, "{s}/config.toml", .{config_dir}) catch return;
+    const before: []const u8 = switch (readFileState(self.io, a, config_path)) {
+        .present => |body| body,
+        .absent => "",
+        // 읽지 못한 파일에는 쓰지 않는다 — 우리가 모르는 상태다(설치 경로와 같은 규율).
+        .unreadable => return,
+    };
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    out.appendSlice(a, before) catch return;
+    var added: usize = 0;
+    for (slots[0..found]) |placement| {
+        const entry = trust.forEvent(placement.json_name) orelse continue;
+        // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
+        var matcher: ?[]const u8 = null;
+        for (hook_command.eventsFor(.codex)) |e| {
+            if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
+        }
+
+        var key: std.ArrayListUnmanaged(u8) = .empty;
+        defer key.deinit(a);
+        trust.appendKey(&key, a, hooks_real, entry, placement.group_index, placement.handler_index) catch return;
+        if (trust.hasTrustEntry(out.items, key.items)) continue; // 이미 있다 — 건드리지 않는다
+
+        var hash: std.ArrayListUnmanaged(u8) = .empty;
+        defer hash.deinit(a);
+        trust.appendHash(&hash, a, entry, cmd, hook_command.timeout_seconds, matcher) catch return;
+        trust.appendTrustEntry(&out, a, out.items, key.items, hash.items) catch return;
+        added += 1;
+    }
+    if (added == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
+
+    // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**
+    // 잠글 것이 없어(그때는 만들지 않는다) 두 인스턴스가 동시에 여기 올 수 있다. 그대로 두면 둘 다
+    // 붙여서 **같은 테이블이 두 번** 적히고, 그 순간 codex 는 `config.toml` 전체를 못 읽는다 — 훅이
+    // 아니라 사용자의 설정이 통째로 죽는다. 읽은 바이트가 그대로일 때만 쓴다.
+    const now: []const u8 = switch (readFileState(self.io, a, config_path)) {
+        .present => |body| body,
+        .absent => "",
+        .unreadable => return,
+    };
+    if (!std.mem.eql(u8, before, now)) return; // 그 사이 누가 고쳤다 — 다음 기회에 맞춘다
+
+    writeExecutableFile(self.io, config_path, out.items, false) catch return;
+    // **새로 만든 파일은 좁힌다.** 기존 파일이면 `writeExecutableFile` 이 권한을 승계하므로 손대지 않는다
+    // (사용자가 일부러 넓혀 둔 것을 우리가 되돌릴 이유가 없다). 없던 파일은 umask 를 타므로 우리가 정한다.
+    if (before.len == 0) {
+        const path_z = std.fmt.allocPrintSentinel(a, "{s}", .{config_path}, 0) catch return;
+        _ = std.c.chmod(path_z.ptr, 0o600);
+    }
 }
 
 /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex

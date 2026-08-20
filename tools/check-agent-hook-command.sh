@@ -31,11 +31,16 @@ zig_marker=$(sed -n 's/^pub const marker = "\([^"]*\)";$/\1/p' "$src")
 grep -q "$zig_marker" "$golden" || fail_early "golden 이 낡았다 — 빌더 표식은 '$zig_marker' 인데 fixture 에 없다"
 # 표식만 보면 **표식을 안 올린 로직 변경**을 통째로 놓친다(상한을 바꿔도 표식은 그대로다). 커맨드에 박히는
 # 값도 함께 대조한다 — 여기서 걸리면 fixture 를 다시 뽑아야 한다는 뜻이다.
+# 커맨드가 박는 상한은 **줄 상한에서 접두를 뺀 값**이다(`max_payload_bytes`) — 줄 상한 자체가 아니다.
+# 그 관계를 여기서도 그대로 계산한다. 셸이 zig 상수를 읽는 자리라 취약하지만, 못 찾으면 조용히 넘어가지
+# 않고 «fixture 를 다시 뽑아라» 로 멈춘다.
 ev_src="$root/src/session/agent_hook_event.zig"
 zig_kib=$(sed -n 's/^pub const max_line_bytes: usize = \([0-9]*\) \* 1024;$/\1/p' "$ev_src")
-[ -n "$zig_kib" ] || fail_early "빌더에서 상한 상수를 찾지 못했다: $ev_src"
-zig_limit=$((zig_kib * 1024))
-grep -q "gt $zig_limit" "$golden" || fail_early "golden 이 낡았다 — 상한이 $zig_limit 인데 fixture 와 다르다"
+zig_provider=$(sed -n 's/^pub const max_provider_len: usize = \([0-9]*\);$/\1/p' "$ev_src")
+[ -n "$zig_kib" ] || fail_early "줄 상한 상수를 찾지 못했다: $ev_src"
+[ -n "$zig_provider" ] || fail_early "provider 이름 상한 상수를 찾지 못했다: $ev_src"
+zig_limit=$((zig_kib * 1024 - zig_provider - 1))
+grep -q "gt $zig_limit" "$golden" || fail_early "golden 이 낡았다 — payload 상한이 $zig_limit 인데 fixture 와 다르다"
 
 cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
 

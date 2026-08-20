@@ -85,7 +85,11 @@ pub fn build(
     allocator: std.mem.Allocator,
     provider: []const u8,
     log_dir_abs: []const u8,
-) !void {
+) error{ OutOfMemory, InvalidProvider }!void {
+    // **provider 이름을 검증한다.** 이 값은 줄 앞에 그대로 적히므로 탭이나 개행이 들어오면 **모든 줄이
+    // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
+    // «훅은 적었는데 파서는 못 읽는» 이름이 생긴다.
+    if (!event.looksLikeProvider(provider)) return error.InvalidProvider;
     // `|| :` — provider가 `sh -e`로 실행해도 마지막 줄의 read 실패(개행 없이 끝남)가 훅을 죽이지 않게.
     try out.appendSlice(allocator, "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ");
     // **pane 식별자를 숫자로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
@@ -326,4 +330,20 @@ test "타임아웃이 실측 비용보다 넉넉하되 턴을 물지 않을 만�
     // 여기서 «있다» 와 «범위» 를 함께 고정한다.
     try testing.expect(timeout_seconds >= 1); // 실측 12.27 ms 의 80배 이상
     try testing.expect(timeout_seconds <= 5); // 이보다 길면 사용자가 멈춤을 체감한다
+}
+
+test "provider 이름이 줄을 깨뜨릴 수 있으면 거절한다" {
+    // 이 값은 줄 앞에 그대로 적힌다 — 탭이면 구분자가 둘이 되고 개행이면 줄이 둘로 갈린다. 그런 이름으로
+    // 커맨드를 만들면 **그 provider 의 모든 이벤트가 조용히 파싱 실패**한다.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\taude", "/tmp/ev"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\naude", "/tmp/ev"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "", "/tmp/ev"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "Claude", "/tmp/ev"));
+
+    // 우리가 쓰는 이름은 통과한다.
+    out.clearRetainingCapacity();
+    try build(&out, testing.allocator, "claude", "/tmp/ev");
+    try testing.expect(out.items.len > 0);
 }

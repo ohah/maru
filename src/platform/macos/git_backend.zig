@@ -2016,6 +2016,11 @@ pub fn runWriteSync(
     if (paths.len > git_write_command.max_batch_paths) return error.TooManyPaths;
     const argv_slices = try git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf);
 
+    // **Windows 는 캡처 러너로 간다.** 읽기 갈래(`runArgvWithEnv`)와 같은 이유이고, 여기서 갈리는 것은
+    // **어느 스트림을 받느냐**다 — 쓰기는 stderr 를 받는다(git 이 왜 거부했는지 못 보여 주면 쓸 수 없는
+    // 기능이다). argv 조립은 위에서 이미 끝났으므로 두 갈래가 **같은 argv** 를 쓴다.
+    if (comptime builtin.os.tag == .windows) return runWriteSyncWindows(allocator, argv_slices);
+
     var argv_store: std.ArrayList([:0]u8) = .empty;
     defer {
         for (argv_store.items) |a| allocator.free(a);
@@ -2069,6 +2074,47 @@ pub fn runWriteSync(
         .exit_code = spawned.exit_code,
         .stderr_bytes = spawned.stderr_bytes,
         .stderr_truncated = spawned.stderr_bytes.len >= max_output_bytes,
+    };
+}
+
+/// `runWriteSync` 의 Windows 갈래. **읽기 갈래와 정확히 반대다** — stderr 를 받고 stdout 을 버린다
+/// (`add` 는 조용하고 `rm --cached` 의 목록은 화면에 안 낸다). git 이 왜 거부했는지 못 보여 주면 쓸 수
+/// 없는 기능이라 stderr 가 이 경로의 산출물이다(docs/editor-surface-dock-write.md 의 스트림 표).
+///
+/// **읽기와 달리 실패를 오류로 올리지 않는다.** 0 이 아닌 종료 코드는 "git 이 거부했다" 는 **사실**이고,
+/// 화면이 그것을 보여 줘야 한다. 여기서 `error.GitFailed` 로 바꾸면 그 이유가 사라진다.
+fn runWriteSyncWindows(
+    allocator: std.mem.Allocator,
+    argv_slices: []const []const u8,
+) !WriteOutput {
+    // 읽기 갈래와 같이 **배럴을 통해** 온다 — 상대 경로로 가져오면 모듈 루트가 `platform/macos` 안인
+    // 아티팩트에서 모듈 밖이 되어 macOS 빌드가 깨진다(§2m.9 에 그 실측이 있다).
+    const win32_process = maru.win32_process;
+    var overrides: std.ArrayList(win32_process.EnvVar) = .empty;
+    defer overrides.deinit(allocator);
+    // 읽기 갈래와 **같은 단일 출처**다(`git_command.env_overrides`) — 두 벌로 만들면 한쪽만 갱신되는
+    // 순간 쓰기에서만 `GIT_TERMINAL_PROMPT` 가 빠져 자격 증명 창이 뜨고 커밋이 영영 안 끝난다.
+    for (git_command.env_overrides) |o| {
+        overrides.append(allocator, .{ .name = o.name, .value = o.value }) catch return error.GitFailed;
+    }
+
+    const result = win32_process.capture(
+        allocator,
+        argv_slices,
+        null, // git 은 `-C <repo>` 로 저장소를 받는다.
+        .stderr_only,
+        overrides.items,
+        &.{"GIT_INDEX_FILE"},
+        max_output_bytes,
+    ) catch return error.GitFailed;
+
+    return .{
+        // POSIX 갈래는 정상 종료가 아니면 -1 을 싣는다. Windows 는 `GetExitCodeProcess` 가 성공하면
+        // 언제나 값이 있으므로 그대로 옮긴다 — 다만 `c_int` 로 좁히면서 아주 큰 코드(`0xC0000005` 같은
+        // 예외 코드)가 음수가 될 수 있는데, 판정이 `== 0` 이라 결과가 갈리지 않는다.
+        .exit_code = @bitCast(result.exit_code),
+        .stderr_bytes = result.bytes,
+        .stderr_truncated = result.truncated,
     };
 }
 

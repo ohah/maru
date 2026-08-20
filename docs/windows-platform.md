@@ -1493,7 +1493,24 @@ POSIX 테스트를 못 돌린다). 실제로 그 교체본에서 결함 하나�
 배럴이 Windows 어댑터를 품는 순간 그것이 macOS·Linux 로 컴파일된다. 게이트 말이 맞아서 되돌렸고,
 `git_backend` 가 상대 경로로 가져온다.
 
-**아직 읽기뿐이다.** 쓰기(스테이지·커밋)는 `spawnCapture(.stderr_only)` 를 타는 다른 자리라 남았다.
+
+**쓰기도 붙였다.** `runWriteSync` 에 같은 모양의 `comptime` 갈래를 넣는다. **읽기와 갈리는 것은 어느
+스트림을 받느냐다** — 쓰기는 stderr 를 받는다(git 이 왜 거부했는지 못 보여 주면 쓸 수 없는 기능이다).
+argv 조립은 그 전에 끝나므로 두 갈래가 **같은 argv** 를 쓴다.
+
+**읽기와 달리 실패를 오류로 올리지 않는다.** 0 이 아닌 종료 코드는 "git 이 거부했다" 는 **사실**이고
+화면이 그것을 보여 줘야 한다 — 여기서 `error.GitFailed` 로 바꾸면 그 이유가 사라진다.
+
+**판정은 종료 코드가 아니라 상태다.** `add` 가 아무것도 안 해도 exit 0 이다. 스테이지한 뒤 다시 읽어
+그 파일이 **index 축으로 옮겨졌는지** 본다:
+
+```text
+write: exit=0 stderr_bytes=0
+after: staged_alpha=true untracked=1
+```
+
+`alpha.txt` 가 index 로 갔고 한글 이름 파일은 추적되지 않은 채 남았다(1). 되돌림 대조군: 쓰기 갈래가
+아무것도 안 하고 성공만 보고하게 하면 `staged_alpha=false untracked=2` 로 rc=1 이다.
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

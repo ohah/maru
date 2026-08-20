@@ -28,8 +28,11 @@ pub const marker = "MARU_HOOK_V3";
 pub const marker_comment = "# " ++ marker ++ " managed by maru: added and removed automatically, do not copy";
 
 /// payload 길이 상한. 넘으면 훅이 **표식 한 줄로 바꿔** 적는다(잘라서 반쪽 JSON을 만들지 않는다).
-/// 값의 근거는 `agent_hook_event.max_line_bytes`와 같은 실측이다.
-pub const max_payload_bytes: usize = event.max_line_bytes;
+///
+/// **줄 상한에서 접두를 뺀 값이다.** 훅이 적는 줄은 `<provider><구분자><payload>` 라서 payload 를 줄 상한과
+/// 같게 두면 그만큼 줄이 길어져 **파서가 버린다** — 커맨드는 통과시키고 파서는 버리는, 상한 경계에서만
+/// 나타나는 유실이다. 접두 최대치(provider 이름 + 구분자 1)를 미리 뺀다.
+pub const max_payload_bytes: usize = event.max_line_bytes - event.max_provider_len - 1;
 
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
@@ -89,6 +92,15 @@ pub fn build(
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
     // 없을 때 그 메시지가 provider 화면으로 샜다. 훅은 어떤 실패도 사용자에게 보이지 않아야 한다.
+    // **구분자는 파서와 같은 상수여야 한다.** 셸 포맷 문자열에는 `\t` 를 글자로 적을 수밖에 없어(작은따옴표
+    // 안의 실제 탭은 읽는 사람이 못 본다) 두 곳에 따로 적히는 모양이 된다. 그 드리프트는 «모든 이벤트가
+    // 조용히 파싱 실패» 로 나타나므로, 상수가 탭이 아니게 되면 **컴파일이 깨지게** 묶어 둔다.
+    comptime {
+        if (event.field_separator != '\t') {
+            @compileError("훅 커맨드가 쓰는 구분자와 `agent_hook_event.field_separator` 가 어긋났다 — " ++
+                "포맷 문자열의 `\\t` 를 함께 고쳐라");
+        }
+    }
     try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> ", .{provider});
     try appendQuoted(out, allocator, log_dir_abs);
     // 파일명은 pane 식별자다 — 따옴표 밖에서 확장해야 값이 들어간다.
@@ -243,4 +255,40 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
     // fixture 가 치환하는 자리표시자가 그대로 있는지.
     try testing.expect(std.mem.indexOf(u8, cmd, "'__LOG_DIR__'") != null);
     try testing.expect(std.mem.endsWith(u8, cmd, marker_comment));
+}
+
+test "커맨드가 쓴 줄을 파서가 읽는다 — 형식이 두 곳에 따로 적히면 조용히 깨진다" {
+    // 셸 게이트는 «파일에 이 모양으로 적혔다» 까지 보고, 파서 테스트는 «이 모양을 읽는다» 를 본다.
+    // 그 사이가 비면 형식 드리프트가 «모든 이벤트가 파싱 실패» 로만 드러난다. 여기서 양쪽을 잇는다.
+    const cmd = try buildAlloc("codex", "/tmp/ev");
+    defer testing.allocator.free(cmd);
+    // 커맨드가 만드는 줄 모양: <provider><구분자><payload>
+    try testing.expect(std.mem.indexOf(u8, cmd, "printf 'codex\\t%s\\n'") != null);
+
+    var line: std.ArrayListUnmanaged(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    try line.appendSlice(testing.allocator, "codex");
+    try line.append(testing.allocator, event.field_separator);
+    try line.appendSlice(testing.allocator, "{\"hook_event_name\":\"Stop\"}");
+    const ev = event.parseLine(line.items).?;
+    try testing.expectEqualStrings("codex", ev.provider);
+    try testing.expectEqual(event.Kind.stop, ev.kind);
+}
+
+test "payload 상한이 줄 상한을 넘기지 않는다 — 경계에서만 나는 유실이다" {
+    // 훅이 적는 줄은 `<provider><구분자><payload>` 다. payload 상한을 줄 상한과 같게 두면 접두만큼 길어져
+    // 커맨드는 통과시키고 **파서가 버린다**. 그 유실은 딱 경계에서만 나타나 눈에 안 띈다.
+    const longest_prefix = event.max_provider_len + 1; // 이름 + 구분자
+    try testing.expect(max_payload_bytes + longest_prefix <= event.max_line_bytes);
+
+    // 실제로 상한 크기의 payload 로 만든 줄이 파서의 상한 안에 드는지 본다.
+    var line: std.ArrayListUnmanaged(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    try line.appendSlice(testing.allocator, "mimo-code"); // 우리가 아는 이름 중 긴 편
+    try line.append(testing.allocator, event.field_separator);
+    try line.appendSlice(testing.allocator, "{\"hook_event_name\":\"Stop\",\"pad\":\"");
+    while (line.items.len < max_payload_bytes) try line.append(testing.allocator, 'x');
+    try line.appendSlice(testing.allocator, "\"}");
+    try testing.expect(line.items.len <= event.max_line_bytes);
+    try testing.expect(event.parseLine(line.items) != null);
 }

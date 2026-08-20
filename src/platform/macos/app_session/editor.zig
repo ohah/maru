@@ -213,7 +213,13 @@ pub fn buildPaneOps(
 /// |---|---|
 /// | 셀 크기·pane 기하·layout | **타입** — `AppSession`이 인자에 없다 |
 /// | `term.rt`의 스냅숏 필드(`editor_hit_*`) | 규율뿐 — `storeHitRows`가 함께 세우고 함께 지운다 |
-/// | `term.rt`의 live 필드(`editor_tab_width`·`editor_first_line`·번호 표) | **아무것도 안 막는다** — 판정자가 필요하고, 탭 폭 축은 ADV3-H가 맡는다 |
+/// | `term.rt`의 live 필드 **전부** | **아무것도 안 막는다** — 판정자뿐이다 |
+///
+/// **열거하지 않는다.** 13차는 이 행이 축을 셋으로 줄여 적은 것을 잡았고, 그래서 열둘을 적었더니
+/// 14차가 그 목록에서 `editor_first_line`이 빠진 것을 잡았다 — 같은 파일이 두 곳에서 그 필드가
+/// 프레임 사이에 바뀐다고 적고 있는데도. 축을 손으로 세는 문장은 **셀 때마다 새로 틀린다.**
+/// 규칙만 남긴다: **`rt`의 필드 중 렌더가 굳힌 스냅숏(`editor_hit_*`)이 아닌 것은 전부 live이고,
+/// 그것을 읽는 것을 막는 장치는 없다.** 지금 판정자가 있는 축은 탭 폭 하나뿐이다(ADV3-H).
 ///
 /// 문서 내용(`editor_lines`·`editor_doc`)은 일부러 live로 읽는다 — 편집이 곧 렌더라 배열과 함께
 /// 갱신된다.
@@ -372,9 +378,12 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         .body_y = @intCast(body_outer.y + inset),
         .content_left_px = @as(u32, lay.contentLeft()) * @as(u32, self.cell_width_px),
         .content_width = lay.content.width,
-        // **묶지 않는다** — 여덟 줄 위 `sideMetrics(..., @intCast(self.cell_width_px), ...)`가 이미
-        // u16 인자에 맨 캐스트를 넣으므로, 셀이 u16을 넘으면 여기 오기 전에 트랩한다. 묶으면 그
-        // 트랩이 죽고 조용히 잘린 값이 굳는다(같은 이유로 아래 반환도 `assert`다).
+        // **묶지 않는다** — 위 `sideMetrics(..., @intCast(self.cell_width_px), ...)`가 이미
+        // u16 인자에 맨 캐스트를 넣으므로, 셀이 u16을 넘으면 **여기 오기 전에** 걸린다(안전 빌드는
+        // 트랩, 배포 `ReleaseFast`는 UB). 그래서 이 자리는 도달 불가다. 초판은 여기에 *"묶으면 그
+        // 트랩이 죽는다"*고 적었는데 **거짓이다** — 위 캐스트는 독립 식이라 여기서 무엇을 하든 죽지
+        // 않는다(13차 적대적 검증). 남는 이유는 하나뿐이다: 도달 불가한 자리에 clamp를 두면 그것이
+        // 죽은 코드이고, 이 커밋이 죽은 코드를 걷어내는 커밋이다.
         .cell_w_px = @intCast(self.cell_width_px),
         .cell_h_px = @intCast(self.cell_height_px),
         .tab_width = term.rt.editor_tab_width,
@@ -1648,6 +1657,66 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// 가장 긴 줄이 접혀 숨어도 가로 상한이 그대로면 빈 곳으로 밀린다 — 실측: 2,000열짜리 줄이 숨었는데
 /// `max_cols`가 2000이라 `first_col`이 1911까지 갔다(화면엔 두 줄뿐. 적대적 검증 2026-08-17).
 /// 렌더가 싣는 값들도 옛 배열의 것이라 함께 버린다.
+/// 탭 폭을 바꾸는 **단일 지점**. 필드에 직접 대입하지 말고 여기를 부른다.
+///
+/// **탭 폭은 파생값을 셋 낡게 만든다.** 12차가 `ensureMaxCols`·`piecesOfLine`·`ensureFoldRanges`가
+/// 상수를 읽는 것을 잡아 필드 추종으로 바꿨는데, 그것만으로는 **절반이었다**(13차): 둘은 `if (캐시가
+/// 있으면) return`이라 탭 폭이 바뀌어도 옛 값이 그대로 남는다. 실측으로 같은 8열(28.6%) 부족이
+/// 재현됐다 — 상수 경로만 막고 낡음 경로를 안 막았다.
+///
+/// | 파생값 | 탭 폭에 따라 갈리는가 | 무엇이 지키는가 |
+/// |---|---|---|
+/// | `editor_max_cols`·`_right` | 그렇다(탭 8에서 20 → 28열) | **이 함수** — `if (cache.* != 0) return` |
+/// | `editor_fold_ranges` | **섞인 들여쓰기에서만** 그렇다 | **이 함수** — `if (len > 0) return` |
+/// | `RowCache` 접두합 | 그렇다 | `frame.RowCache.hits()`가 `tab_width`를 키에 넣는다(스스로 지킨다) |
+///
+/// 접힘이 갈리는 조건은 좁다. 겹수는 탭 폭에 대해 **단조 스케일**이라 순수 탭·순수 스페이스 문서는
+/// 4↔8에서 층 순서가 안 바뀐다 — 갈리는 것은 **탭과 스페이스가 섞인** 줄뿐이다(14차 실측: 문서 6개
+/// 중 1개. 초판이 "6개 중 4개"라 적었는데 근거가 없었다). 그래도 버려야 한다: 좁은 조건이 안 나는
+/// 조건은 아니고, ADV3-I가 그 조건을 만들어 잰다.
+///
+/// `editor_hit_geom.tab_width`는 여기서 안 건드린다 — 그것은 **렌더가 굳히는 스냅숏**이고, 다음
+/// 프레임이 통째로 덮는다(§4.1g "스냅숏의 경계").
+/// **같은 값으로 불러도 무효화한다.** 초판은 `if (같으면) return`으로 건너뛰었는데, 그러면 누가
+/// 필드에 **직접 대입한 뒤** 이 함수를 부를 때 무효화가 안 된다 — 그것이 정확히 이 함수가 막으려는
+/// 상태다. ADV3-I가 그 조합에서 바로 걸렸다(옛 상한 27이 남아 19를 기대한 단언이 깨졌다). 탭 폭
+/// 변경은 드문 이벤트라 그 최적화는 값이 없고, 값이 있어도 낡음과 바꿀 것이 아니다.
+pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
+    term.rt.editor_tab_width = tab_width;
+    dropFoldState(self, term);
+    invalidateFoldDerived(self, term); // `max_cols`·가로 위치·세로 상한·행 수 캐시가 여기서 죽는다
+}
+
+/// 접힘 상태를 **통째로** 놓는다 — `ensureFoldRanges`가 한 단위로 잡는 넷과 짝이다.
+///
+/// **하나만 놓으면 셋이 고아가 된다.** 초판은 `editor_fold_ranges`만 free했는데, `ensureFoldRanges`가
+/// 다시 통과하면서 `editor_folded_buf`·`editor_folded_prev`·`editor_fold_marks`의 포인터를 덮어써
+/// **호출마다 세 할당이 샜다**(14차 적대적 검증 실측: 세터 3회 호출에 6 leaked, 테스트 명령이 단언은
+/// 전부 통과하는데도 exit 1). 그 함수의 doc이 *"잡을 것을 모두 잡은 뒤 한꺼번에 넘긴다"*고 넷을 한
+/// 단위로 선언했으므로, 놓는 쪽도 한 단위여야 한다.
+///
+/// **접힌 상태도 함께 편다.** 안 펴면 `editor_folded_len`·`editor_visible_lines`가 옛 범위를 가리킨
+/// 채 남고, 다음 `ensureFoldRanges`가 `folded_len`을 0으로 만들면 `unfoldAll`이 `folded_len == 0`을
+/// 보고 **거절해 숨은 줄을 영영 못 되찾는다**(`applyFold` doc이 2026-08-17에 막은 그 상태다 —
+/// 14차 실측: 8줄 문서에서 5줄이 숨은 채 `unfoldAll = false`).
+fn dropFoldState(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
+    if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
+    if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
+    if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
+    term.rt.editor_fold_ranges = &.{};
+    term.rt.editor_folded_buf = &.{};
+    term.rt.editor_folded_prev = &.{};
+    term.rt.editor_fold_marks = &.{};
+    term.rt.editor_folded_len = 0;
+    term.rt.editor_fold_marks_len = 0;
+    // 보이는 줄 배열도 접힘에서 나온 것이라 함께 놓는다 — 남기면 접힌 화면이 그대로 보인다.
+    if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
+    if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+    term.rt.editor_visible_lines = &.{};
+    term.rt.editor_visible_numbers = &.{};
+}
+
 fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
     term.rt.editor_max_cols = 0;
     term.rt.editor_max_cols_right = 0;
@@ -1799,12 +1868,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_hit_geom = .{};
     term.rt.editor_hit_rows_len = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
-    if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
-    if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
-    if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
-    if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
-    if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
-    if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
+    dropFoldState(self, term); // 접힘 여섯 배열은 한 단위다(그 함수 doc)
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
     term.rt.editor_row_cache = .{ .prefix = &.{} };
     term.rt.editor_path = null;
@@ -6277,4 +6341,96 @@ test "ADV3-G 번호 표가 행보다 짧으면 그 행의 클릭은 답하지 �
     // 표 안에 있는 첫 행은 여전히 답한다 — 가드가 전부를 막는 것이 아니다.
     const py0: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
     try testing.expect(hitTestBody(term, px, py0) != null);
+}
+
+test "ADV3-I 탭 폭 파생값 셋이 같은 값을 따르고, 바뀌면 낡지 않는다 (§4.1a·§4.1f)" {
+    // **12차가 고친 자리 셋에 판정자가 하나도 없었다**(13차 적대적 검증: `ensureMaxCols`·
+    // `piecesOfLine`·`ensureFoldRanges`를 상수 읽기로 되돌린 뮤턴트 셋이 editor 테스트 153개를
+    // **전부 통과**했다). 그래서 11차가 배선을 뚫고도 세 자리를 놓쳤고, 12차가 고친 뒤에도
+    // **무효화 지점이 없어 같은 8열(28.6%) 부족이 낡은 캐시로 재현됐다.**
+    //
+    // 이 테스트는 둘을 함께 잰다: ⑴ 파생값이 상수가 아니라 필드를 따르는가 ⑵ 필드가 바뀌면 파생값이
+    // 다시 서는가(`setEditorTabWidth`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // **탭과 스페이스를 섞는다.** 순수 탭·순수 스페이스 문서는 겹수가 탭 폭에 대해 **단조 스케일**이라
+    // 4↔8에서 접힘 범위가 안 갈린다 — 14차 적대적 검증이 문서 6개를 재어 **갈린 것은 혼합 하나뿐**임을
+    // 보였고, 그때 이 테스트가 쓰던 순수 탭 문서도 안 갈렸다(그래서 ⑶이 항진명제였다). 섞으면 탭 하나가
+    // 스페이스 넷과 같아지는지 여덟과 같아지는지에 따라 층이 재배열된다.
+    const doc =
+        "root\n" ++
+        "\tlevel_a\n" ++ // 탭 하나 = 4열 또는 8열
+        "    spaces4\n" ++ // 스페이스 넷 = 늘 4열
+        "\t    mixed\n" ++ // 탭+스페이스 = 8열 또는 12열
+        "        spaces8\n" ++ // 스페이스 여덟 = 늘 8열
+        "\t\tdeep\n" ++
+        "end\n";
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "t.txt", .data = doc });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "t.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **탭 폭 4에서의 기준선.**
+    setEditorTabWidth(fx.session, term, 4);
+    ensureMaxCols(term, false);
+    try ensureFoldRanges(fx.session, term);
+    const cols4 = term.rt.editor_max_cols;
+    const folds4 = term.rt.editor_fold_ranges.len;
+    // 범위는 **복사해 둔다** — 세터가 그 배열을 놓으므로 포인터를 들고 있으면 dangling이다.
+    const ranges4 = try allocator.dupe(editor_fold.Range, term.rt.editor_fold_ranges);
+    defer allocator.free(ranges4);
+    var pieces4: u32 = 0;
+    for (0..editorLines(term).len) |i| pieces4 += piecesOfLine(term, i, 8); // 좁은 폭 — 랩이 걸린다
+    try testing.expect(cols4 > 0);
+
+    // **폭을 바꾼다.** 세터를 거치므로 파생값이 버려진다.
+    setEditorTabWidth(fx.session, term, 8);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_max_cols); // 버려졌다
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_ranges.len);
+
+    ensureMaxCols(term, false);
+    try ensureFoldRanges(fx.session, term);
+    const cols8 = term.rt.editor_max_cols;
+    var pieces8: u32 = 0;
+    for (0..editorLines(term).len) |i| pieces8 += piecesOfLine(term, i, 8);
+
+    // ⑴ **가장 긴 줄**: 탭이 넓어지면 반드시 늘어난다(들여쓴 줄이 있으므로).
+    std.debug.print("\n[ADV3-I] max_cols 4→{d} 8→{d} / fold_ranges {d}→{d} / pieces {d}→{d}\n", .{ cols4, cols8, folds4, term.rt.editor_fold_ranges.len, pieces4, pieces8 });
+    try testing.expect(cols8 > cols4);
+
+    // ⑵ **랩 조각 수**: 같은 폭에서 탭이 넓어지면 줄이 더 많이 접힌다.
+    try testing.expect(pieces8 > pieces4);
+
+    // ⑶ **접힘 범위가 실제로 갈린다.** 초판은 `len > 0`만 봐서 **항진명제**였다 — `ensureFoldRanges`는
+    //     어떤 탭 폭으로 세든 뭔가를 채우므로, 상수를 읽도록 되돌린 뮤턴트가 그대로 통과했다(14차).
+    //     범위를 통째로 비교해야 그 축이 잡힌다.
+    const ranges8 = term.rt.editor_fold_ranges;
+    var same = ranges8.len == ranges4.len;
+    if (same) {
+        for (ranges4, ranges8) |a4, a8| {
+            if (!std.meta.eql(a4, a8)) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (same) {
+        std.debug.print("[ADV3-I] 접힘 범위가 탭 폭 4와 8에서 같다 — 이 문서로는 그 축을 못 잰다\n", .{});
+        return error.FoldRangesDidNotDiffer;
+    }
+
+    // ⑷ **낡음 재현 방지**: 세터를 안 거치고 필드만 바꾸면 옛 값이 남는다는 것을 못 박는다 —
+    //    그것이 13차가 잡은 결함이고, 그래서 필드 직접 대입을 금지한다.
+    term.rt.editor_tab_width = 4; // (일부러 세터를 안 쓴다)
+    ensureMaxCols(term, false);
+    try testing.expectEqual(cols8, term.rt.editor_max_cols); // 옛 값 그대로 — 세터가 필요한 이유
+    setEditorTabWidth(fx.session, term, 4);
+    ensureMaxCols(term, false);
+    try testing.expectEqual(cols4, term.rt.editor_max_cols); // 세터를 거치면 돌아온다
 }

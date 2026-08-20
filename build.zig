@@ -2625,6 +2625,15 @@ pub fn build(b: *std.Build) void {
     const run_config_docs_tests = b.addRunArtifact(config_docs_tests);
     run_config_docs_tests.setCwd(b.path("."));
 
+    // 훅 인라인 커맨드는 **문자열 검사만으로 충분하지 않다**. stdin 을 삼키는지·가드에서 빠져나가는지·
+    // 리다이렉션 실패까지 조용한지는 실제 셸을 돌려야 안다(그중 stderr 누출은 이 게이트가 실제로 잡았다).
+    // 훅이 그 계약을 어기면 에이전트 턴이 멈추므로 상시 게이트로 둔다. POSIX 셸만 있으면 도는 검사다.
+    const agent_hook_command_check = b.addSystemCommand(&.{ "sh", "tools/check-agent-hook-command.sh" });
+    agent_hook_command_check.setCwd(b.path("."));
+    const agent_hook_command_step = b.step("check-agent-hook-command", "Run the agent hook inline command against a real shell");
+    agent_hook_command_step.dependOn(&agent_hook_command_check.step);
+    test_step.dependOn(&agent_hook_command_check.step);
+
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 

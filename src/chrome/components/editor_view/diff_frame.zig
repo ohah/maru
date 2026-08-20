@@ -22,6 +22,9 @@ const geometry = @import("geometry.zig"); // 본문 열 수 — 가로 막대가
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
+    /// 논리 줄마다의 **선택 범위**(§4.1g). 단일 편집기만 쓴다 — 비교 뷰는 아직 선택을 안 받는다.
+    selection_marks: ?[]const []const frame.Mark = null,
+
     /// 그 쪽 **행**들의 표시 텍스트. 좌우 길이가 같아야 같은 인덱스가 같은 높이다.
     lines: []const []const u8,
     /// gutter 자릿수를 정하는 **문서** 줄 수(행 수가 아니다). `null`이면 `lines.len`.
@@ -222,6 +225,7 @@ pub fn buildSide(
         .folds = side.folds,
         .content_max_cols = side.content_max_cols,
         .row_cache = side.row_cache,
+        .selection_marks = side.selection_marks,
         .row_bands = side.bands,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,

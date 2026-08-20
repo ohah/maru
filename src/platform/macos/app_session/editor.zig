@@ -158,6 +158,8 @@ pub fn buildPaneOps(
     content_max_cols: ?u32,
     /// 줄별 시각 행 수 캐시(§2.1). `null`이면 매 프레임 다시 센다 — 그래도 그림은 같다.
     row_cache: ?*chrome_editor.frame.RowCache,
+    /// 논리 줄마다의 **선택 범위**(§4.1g). `null`이면 선택이 없거나 caret뿐이다.
+    selection_marks: ?[]const []const chrome_editor.frame.Mark,
     wrap: bool,
     /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
     /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
@@ -177,7 +179,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -590,7 +592,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -607,7 +609,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1209,6 +1211,77 @@ fn widthDragActive(self: *const AppSession) bool {
         pane_ops.dividerCaptureActive(self);
 }
 
+/// 활성 편집기의 **본문 선택을 클립보드로** 복사한다(§4.1g). 복사할 것이 없으면 `false`.
+///
+/// **바이트를 지금 뜬다**(*"나중에 지금 선택을 복사해"*가 아니라). 주소창 ⌘X가 같은 규율을 쓰고,
+/// 이유도 같다 — 비동기로 미루면 그 사이 선택이 바뀌어 사용자가 본 것과 다른 것이 복사된다.
+/// Swift가 다음 tick `pendingClipboard` drain에서 NSPasteboard에 쓴다(OSC52 write와 같은 경로라
+/// 새 ABI가 필요 없다).
+///
+/// **문서 원본에서 뜬다** — 화면에 그린 것(`editor_lines`)이 아니라 `editor_doc`의 byte다. 둘은
+/// §3.8 표기(`<U+202E>`)와 초장문 줄 축소에서 갈리고, 사용자가 붙여넣기를 기대하는 것은 **원본**이다.
+pub fn copySelection(self: *AppSession) bool {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return false;
+    const sel = term.rt.editor_selection orelse return false;
+    const doc = term.rt.editor_doc orelse return false;
+    const lo = sel.start();
+    const hi = sel.end();
+    if (hi <= lo) return false; // caret뿐이다
+    const bytes = doc.file.doc.content;
+    if (lo >= bytes.len) return false;
+    const slice = bytes[lo..@min(hi, bytes.len)];
+    const captured = self.allocator.dupe(u8, slice) catch return false; // OOM이면 복사 안 함(선택 보존)
+    if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+    self.chrome_clipboard_write = captured;
+    return true;
+}
+
+/// 선택(문서 offset 범위)을 **줄별 byte 범위**로 자른다 — 렌더가 요구하는 축이다.
+///
+/// **자르는 것이 제품의 일인 이유**: 컴포넌트는 어느 줄이 문서 몇 번째 byte에서 시작하는지 모른다.
+/// 그 표는 `line_index`가 들고 있고 제품만 그것에 닿는다(§4.1g ⑤가 같은 이유로 제품 쪽이다).
+///
+/// **보이는 줄만 채운다.** 저장소는 문서 줄 수만큼 한 번 잡고 재사용한다 — 화면 밖 줄은 빈 슬라이스라
+/// 렌더가 건너뛴다. 못 잡으면 선택이 안 그려질 뿐 다른 것은 그대로다(그리는 것은 곁가지이고, 선택
+/// 자체는 `editor_selection`이 들고 있다).
+fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_editor.frame.Mark {
+    const sel = term.rt.editor_selection orelse return null;
+    if (sel.len() == 0) return null; // caret뿐 — 그릴 띠가 없다
+    const doc = term.rt.editor_doc orelse return null;
+    const lines_len = term.rt.editor_lines.len;
+    if (lines_len == 0) return null;
+
+    if (term.rt.editor_selection_marks.len < lines_len) {
+        const grown_rows = self.allocator.alloc([]const chrome_editor.frame.Mark, lines_len) catch return null;
+        const grown_buf = self.allocator.alloc(chrome_editor.frame.Mark, lines_len) catch {
+            self.allocator.free(grown_rows);
+            return null;
+        };
+        if (term.rt.editor_selection_marks.len > 0) self.allocator.free(term.rt.editor_selection_marks);
+        if (term.rt.editor_selection_mark_buf.len > 0) self.allocator.free(term.rt.editor_selection_mark_buf);
+        term.rt.editor_selection_marks = grown_rows;
+        term.rt.editor_selection_mark_buf = grown_buf;
+    }
+    const rows = term.rt.editor_selection_marks[0..lines_len];
+    const buf = term.rt.editor_selection_mark_buf[0..lines_len];
+    @memset(rows, &.{});
+
+    const lo = sel.start();
+    const hi = sel.end();
+    for (0..lines_len) |i| {
+        const line = doc.file.lines.line(i) orelse continue;
+        const line_end = line.contentEnd();
+        if (line_end <= lo or line.start >= hi) continue; // 이 줄은 선택 밖
+        const from = if (lo > line.start) lo - line.start else 0;
+        const to = @min(hi, line_end) - line.start;
+        if (to <= from) continue;
+        buf[i] = .{ .start = @intCast(from), .len = @intCast(to - from) };
+        rows[i] = buf[i .. i + 1];
+    }
+    return rows;
+}
+
 /// 편집기 **본문**을 눌렀는가(§4.1g 배선). 눌렀으면 선택을 시작하고 `true`를 준다.
 ///
 /// **이 함수가 `hitTestBody`의 첫 제품 호출자다.** 그 전까지 좌표계는 판정자만 부르고 있었고,
@@ -1788,6 +1861,14 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
 /// 채 남고, 다음 `ensureFoldRanges`가 `folded_len`을 0으로 만들면 `unfoldAll`이 `folded_len == 0`을
 /// 보고 **거절해 숨은 줄을 영영 못 되찾는다**(`applyFold` doc이 2026-08-17에 막은 그 상태다 —
 /// 14차 실측: 8줄 문서에서 5줄이 숨은 채 `unfoldAll = false`).
+fn dropSelectionState(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_selection_marks.len > 0) self.allocator.free(term.rt.editor_selection_marks);
+    if (term.rt.editor_selection_mark_buf.len > 0) self.allocator.free(term.rt.editor_selection_mark_buf);
+    term.rt.editor_selection_marks = &.{};
+    term.rt.editor_selection_mark_buf = &.{};
+    term.rt.editor_selection = null;
+}
+
 fn dropFoldState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
@@ -1963,6 +2044,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_hit_rows_len = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
     dropFoldState(self, term); // 접힘 층을 통째로 놓는다(그 함수 doc)
+    dropSelectionState(self, term);
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
     term.rt.editor_row_cache = .{ .prefix = &.{} };
     term.rt.editor_path = null;
@@ -6820,4 +6902,62 @@ test "SEL2 gutter와 막대 띠는 본문 선택이 가져가지 않는다 (§4.
     const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
     try testing.expect(beginBodySelection(fx.session, pane, text_x, y));
     try testing.expect(term.rt.editor_selection != null);
+}
+
+test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 (§4.1g)" {
+    // **선택은 서는데 안 보이면 없는 것과 같다.** 그리고 복사는 화면에 그린 것이 아니라 **문서
+    // 원본**을 떠야 한다 — 둘은 §3.8 표기(`<U+202E>`)와 초장문 줄 축소에서 갈리고, 붙여넣기가
+    // 기대되는 것은 원본이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "alpha beta\ngamma delta\nepsilon\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "c.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 선택이 없으면 띠도 복사도 없다.
+    {
+        var d0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d0.dl.deinit(allocator);
+        try testing.expect(!copySelection(fx.session));
+    }
+
+    // "beta\ngamma"를 고른다(6 .. 16) — **줄을 걸친다**.
+    term.rt.editor_selection = .{ .anchor_start = 6, .anchor_end = 6, .focus = 16 };
+
+    // ⑴ 줄별로 잘린다.
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    try testing.expectEqual(@as(usize, 1), marks[0].len);
+    try testing.expectEqual(@as(u32, 6), marks[0][0].start); // "alpha "(6) 뒤
+    try testing.expectEqual(@as(u32, 4), marks[0][0].len); // "beta"
+    try testing.expectEqual(@as(usize, 1), marks[1].len);
+    try testing.expectEqual(@as(u32, 0), marks[1][0].start); // 둘째 줄은 머리부터
+    try testing.expectEqual(@as(u32, 5), marks[1][0].len); // "gamma"
+    try testing.expectEqual(@as(usize, 0), marks[2].len); // 셋째 줄은 선택 밖
+
+    // ⑵ 그린다 — 여기서는 **죽지 않는 것과 마크가 렌더로 흘러가는 것**만 본다. 띠가 실제로 서는지는
+    //     컴포넌트 쪽(`frame.zig`)이 op 수로 잰다: draw list는 셀 크기 quad를 셀 배경으로 접으므로
+    //     제품 층에서 세면 그 접힘까지 함께 재게 되고, 그러면 무엇이 깨졌는지 말하지 못한다.
+    {
+        var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d2.dl.deinit(allocator);
+        try testing.expect(d2.dl.cells.len > 0);
+    }
+
+    // ⑶ 복사가 문서 원본을 뜬다.
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("beta\ngamma", fx.session.chrome_clipboard_write);
+
+    // ⑷ caret뿐이면 복사가 없다 — 빈 문자열을 클립보드에 넣으면 사용자가 가진 것을 지운다.
+    fx.session.allocator.free(fx.session.chrome_clipboard_write);
+    fx.session.chrome_clipboard_write = &.{};
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(6);
+    try testing.expect(!copySelection(fx.session));
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_clipboard_write.len);
 }

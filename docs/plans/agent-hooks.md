@@ -13,7 +13,13 @@
 
 ## 1. 단계
 
-### AH1 — 전달 채널
+### AH1 — 전달 채널 ✅ 코어 완료
+
+**구현됨(순수 층)**: [`session/agent_hook_command.zig`](../../src/session/agent_hook_command.zig)(인라인 커맨드
+빌더·표식·legacy 식별)와 [`session/agent_hook_event.zig`](../../src/session/agent_hook_event.zig)(ndjson 파서·
+tail 커서). 단위 24개 + 실제 셸 게이트 `zig build check-agent-hook-command`(계약 6개). **남은 것은 platform
+배선**(파일 읽기·회전·정리)이고 AH2와 함께 붙인다.
+
 
 - 훅 스크립트: stdin 전량 소비 → pane 식별자 확인 → `<cache>/maru/agent-turn-events/<surface_id>.ndjson`에
   **한 줄 append** → `exit 0`. **백그라운드 서브셸로 분리하지 않는다** — 실측에서 오히려 2 ms 느렸다

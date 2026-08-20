@@ -81,7 +81,7 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 | `UserPromptSubmit` | — | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | 턴 종료 스냅샷, 턴 제목(`last_assistant_message`), 완료 상태·완료 알림, **`background_tasks`**(비어 있지 않으면 «턴은 끝났으나 작업이 도는 중» — 완료로 단정하지 않는다) |
 | `PermissionRequest` | `*` | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§8-6) |
-| `PreToolUse` | `*` | 진행 중 세부(`tool_name` + `tool_input.description` — 명령 원문은 길고 민감해 쓰지 않는다) **및 AI 소행 경로**(`tool_input.file_path`). 도구 종료는 다음 `PreToolUse`/`Stop`이 알려준다 |
+| `PreToolUse` | `*` | 진행 중 세부 **및 AI 소행 경로**. 도구 종료는 다음 `PreToolUse`/`Stop`이 알려준다. **두 provider의 payload 모양이 다르다 — §2.1** |
 | `Notification` | — | provider가 알리고 싶은 시점(`notification_type`) |
 
 - `Stop`의 `stop_hook_active`가 참이면 **턴 종료로 세지 않는다**(서브에이전트·백그라운드로 재발화한다).
@@ -96,6 +96,21 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
   구분한다.
 - Claude의 `AskUserQuestion`은 자동 허용이라 `PermissionRequest`가 오지 않고 **`PreToolUse`로만** 온다.
   `*` matcher가 이 경우를 자동으로 덮는다.
+
+### 2.1 `PreToolUse` 의 payload 는 provider 마다 다르다
+
+실측(2026-08-20, 양쪽 직접 실행)에서 드러난 차이다. **하나의 필드 이름으로 처리할 수 없다.**
+
+| | Claude | Codex |
+| --- | --- | --- |
+| `tool_input` 키 | `file_path`·`old_string`·`new_string`·`command`·`description`·… | **`command` 하나뿐** |
+| 편집 경로 | `tool_input.file_path` | **없다** — `command` 안의 패치 텍스트(`*** Update File: <경로>`)를 훑어야 한다 |
+| 사람이 읽는 설명 | `tool_input.description` | **없다** — 명령 원문뿐 |
+| `tool_response` | 객체 | **문자열** |
+
+그래서 소행 경로는 `PatchPaths` 이터레이터로 훑는다 — 한 패치에 파일이 여럿일 수 있어 첫 경로만 집으면
+나머지가 조용히 빠진다. Codex 의 진행 중 라벨은 `description` 이 없으므로 **도구 이름과 명령의 첫 토큰**까지만
+쓴다(명령 원문 전체는 길고 민감하다).
 
 **세트는 한 번에 확정한다.** Codex는 `~/.codex/config.toml`의
 `[hooks.state."<파일>:<이벤트>:<그룹>:<핸들러>"] trusted_hash`가 커맨드 바이트의 sha256이라, 나중에 이벤트를
@@ -346,8 +361,9 @@ provider는 턴 종료와 권한 요구를 `Claude is waiting for your input` �
 2. 훅은 **셸 안에서 일어난 파일 변경을 모른다.** Bash/exec는 provider가 프로세스를 띄우고 stdout만 받으므로
    CLI에 그 정보가 없다 — 훅을 더 걸어도 생기지 않는다([agent-turn-changes.md](agent-turn-changes.md) §2.3).
 3. 도구 훅은 비용이 크다(§3). 측정 전까지 세트는 잠정이다.
-4. Codex의 도구 훅 payload는 **미검증**이다(실측 중 provider 사용량 한도로 모델 호출 실패). 세트에서
-   `PostToolUse`를 뺐으므로 남은 미검증은 Codex `PreToolUse`다.
+4. **Codex 셸(`exec`) 편집도 훅에 안 잡힌다** — 실측에서 `sed -i` 로 파일을 고쳤고 `PreToolUse.tool_input.command`
+   에 그 명령이 그대로 왔지만, 어느 파일이 바뀌었는지는 그 문자열 안에만 있다(패치 표식이 없으므로 경로
+   이터레이터가 아무것도 내지 않는다). Claude 와 같은 사각지대다.
 5. 훅은 claude·codex에만 있다. 다른 에이전트는 항상 관측 모드다.
 5a. **MCP·커스텀 도구가 고친 파일은 소행 확정에서 빠진다.** `tool_input` 스키마가 도구마다 달라 경로를
    일반적으로 뽑을 수 없다(도구별 키 맵을 유지하는 길도 있으나 v1 범위 밖). tree 비교가 잡으므로

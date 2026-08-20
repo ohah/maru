@@ -5170,6 +5170,41 @@ pub fn build(b: *std.Build) void {
         session_host_cr5a_step.dependOn(&run_cr5a_boundary_tests.step);
         boundary_step.dependOn(&run_cr5a_boundary_tests.step);
     }
+    const session_host_cr5b1_step = b.step(
+        "test-session-host-cr5b1",
+        "CR5b-1 backend-owned final-address runtime-set capture gates",
+    );
+    session_host_cr5b1_step.dependOn(session_host_cr5a_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b1_optimize| {
+        const cr5b1_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr5b1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5b-1 host job"},
+        });
+        const run_cr5b1_backend_tests = b.addRunArtifact(cr5b1_backend_tests);
+        run_cr5b1_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr5b1_backend_tests.setCwd(b.path("."));
+        session_host_cr5b1_step.dependOn(&run_cr5b1_backend_tests.step);
+
+        const cr5b1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr5b1_boundary.zig"),
+                .target = target,
+                .optimize = cr5b1_optimize,
+            }),
+            .filters = &.{"CR5b-1 경계는"},
+        });
+        const run_cr5b1_boundary_tests = b.addRunArtifact(cr5b1_boundary_tests);
+        run_cr5b1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr5b1_boundary_tests.setCwd(b.path("."));
+        session_host_cr5b1_step.dependOn(&run_cr5b1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr5b1_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

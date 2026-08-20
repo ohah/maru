@@ -865,13 +865,22 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    actual issuer의 제품 owner는 `AppSession`이나 개별 `RemoteRuntime`이 아니라 `RemoteTermBackend`의 host별
    `HostReconnectJob`이다. `AppSession`은 base-cache path와 owner-turn 호출 capability만 빌려 주고 Client나 prepared
-   receipt를 보존하지 않는다. job은 같은 host의 admission runtime을 먼저 닫힌 목록으로 봉인한 뒤 exact manifest descriptor를
+   receipt를 보존하지 않는다. job은 대상 host의 현재 runtime을 먼저 닫힌 목록으로 봉인한 뒤 exact manifest descriptor를
    pin하고, 하나의 non-resettable absolute deadline으로 connect/hello, Client replacement, observer attach, snapshot, delta와
    barrier를 순서대로 수행한다. host당 active job은 최대 하나이며 actual `connectExistingHostUntil` 호출과 Client replacement
    publication도 각각 exact 한 번이다. CR4a의 단일-runtime 제품 행은 이 동일 host-job 경계를 통과하며, CR5는 owner를 바꾸지 않고
    sealed runtime 목록만 여러 runtime으로 확장한다. pre-publication connect/manifest/hello 실패는 HostPool·adapter·old
    graph mutation 0이고, publication 뒤 local OOM/cap/deadline/peer failure는 소비한 wire cut을 재사용하지 않고 candidate와
    published Client를 fail-close해 다음 job generation으로 넘긴다.
+
+   runtime-set capture의 제품 owner는 별도 heap list가 아니라 heap-pin된 `HostReconnectJob` 안의 최대 4,096행 고정 backing이다.
+   capture는 `{runtime handle,address,generation,runtime id,shell generation}`을 handle 순으로 정렬하고 같은
+   `{host_id,pool_membership_generation,expected_connection_generation}`만 포함한다. sibling host는 포함하지 않으며 빈 목록은
+   connect 전 거부한다. job generation은 capture 성공 시 단조 게시되어 connect 실패 뒤 같은 heap 주소가 재사용돼도 이전 seal을
+   재생할 수 없다. 전체 목록 digest·backing final address·process/backend/job/adapter identity를 함께 seal하고, 후속 owner turn은
+   runtime add/remove/address·generation·runtime-id drift를 Client publication 전에 재검증한다. host당 active job은 하나이고
+   `HostReconnectJob` 전체 크기는 512 KiB 이하를 유지한다. runtime-set capture owner는 목록의 membership authority만 소유하고,
+   runtime별 observer/takeover/publication 전진과 k번째 실패 forward resolution은 동일 목록을 소비하는 runtime transaction이 소유한다.
 
    현재 CR4a 제품 행은 실제 manifest/socket connect와 same-adapter replacement 뒤, 동일 job final address에서 observer
    candidate와 staged receipt까지 게시한다. connect에서 발급한 absolute deadline을 attach/snapshot/delta/barrier에 그대로

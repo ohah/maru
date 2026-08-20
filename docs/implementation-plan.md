@@ -1212,6 +1212,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    첫 CR5a prerequisite는 CR2e reducer의 runtime/local/mutation enum을 재사용하는 canonical runtime-set 값 계약과 terminal
    summary를 고정한다. 이 단계의 제품 caller는 0이며, 다음 제품 slice가 같은 계약을 `RemoteTermBackend.HostReconnectJob`의
    final-address runtime-set owner에 결속한다. 별도 model enum이나 AppSession-owned ledger를 만들지 않는다.
+   CR5b-1은 actual connect/manifest I/O 전에 backend의 같은 `{host_id,pool_membership_generation}` runtime을 정렬된 exact
+   목록으로 캡처하고, job final address·process identity·backend generation·connection generation과 job 내부 고정 backing/digest를
+   함께 봉인한다. host당 active job 하나가 최대 4,096행을 inline 소유하고 전체 job 크기는 512 KiB 이하로 제한한다.
+   connect 실패·OOM·빈 집합은 runtime map과 adapter를 바꾸지 않고 목록 owner를 회수하며, copied job,
+   runtime add/remove/address·generation·runtime-id drift는 후속 Client publication 전에 거부한다. 이 단계는 목록의 각 행을
+   아직 takeover하거나 terminal summary로 닫지 않는다. CR5b-2가 이 동일 owner의 행을 runtime별 CR4 transaction으로
+   전진시키고 k번째 실패를 forward-resolve한다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

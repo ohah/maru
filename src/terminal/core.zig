@@ -7196,6 +7196,45 @@ test "emoji_wide promotes VS16/keycap to width 2 without mode 2027 (text.emoji-w
     try std.testing.expectEqual(@as(u2, 1), narrow.screen.cells[0].width);
 }
 
+test "emoji_wide: 스킨톤·ZWJ·국기가 mode 2027 없이도 한 셀로 묶인다 (text.emoji-width=wide)" {
+    // 회귀 고정(2026-08-20 사용자 제보): 같은 설정에서 ❤+VS16 은 2칸으로 묶이는데 👨‍👩‍👧‍👦 는 구성 이모지마다
+    // 셀을 먹어 **10칸**이 됐다. 실측 `|👍🏽|`=3.8칸 · `|👨‍👩‍👧‍👦|`=10.4칸(같은 줄의 `|❤️|`·`|🇰🇷|`·`|人|`은 2칸).
+    // 모던 TUI(Ink 기반 앱)는 cluster 단위로 폭을 세므로 그 앱의 표·박스가 밀렸다.
+    //
+    // VS16 승격이 이미 `emoji_wide` 로 열려 있었는데(바로 위 테스트) cluster 흡수만 2027 게이트에 남아
+    // 있던 것이 원인이다. 둘의 게이트를 맞춘다 — Ghostty 도 `grapheme-width-method` 가 기본 `unicode` 라
+    // 2027 없이 cluster 단위로 센다. `text.emoji-width=narrow` 면 옛 동작(아래 테스트)이 남는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 4 });
+    defer core.deinit();
+    core.emoji_wide = true; // app_session 이 config(text.emoji-width=wide 기본)에서 켜는 값
+    try std.testing.expect(!core.grapheme_cluster_mode); // 2027 없이도
+
+    // 스킨톤: 👍🏽 한 셀 width 2(modifier 가 별도 셀을 안 먹는다).
+    try core.write("\u{1F44D}\u{1F3FD}");
+    try std.testing.expectEqual(@as(u21, 0x1F44D), core.screen.cells[0].codepoint);
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{0x1F3FD});
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[0].width);
+    try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
+
+    // ZWJ 가족: 👨‍👩‍👧 한 셀 width 2(구성 이모지마다 셀을 먹지 않는다 — 이 회귀의 핵심).
+    try core.write("\r\n\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+    try std.testing.expectEqual(@as(u21, 0x1F468), core.screen.cells[12].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[12].width);
+    try expectCluster(&core, core.screen.cells[12].grapheme_id, &.{ 0x200D, 0x1F469, 0x200D, 0x1F467 });
+    try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
+
+    // 국기: 🇰🇷 한 셀 width 2(RI 쌍).
+    try core.write("\r\n\u{1F1F0}\u{1F1F7}");
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[24].codepoint);
+    try expectCluster(&core, core.screen.cells[24].grapheme_id, &.{0x1F1F7});
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[24].width);
+
+    // dump 무손실 — 묶어도 원본 시퀀스가 복원된다(클립보드·재출력).
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}") != null);
+}
+
 test "mode 2027: skin tone and flags cluster only when on" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();

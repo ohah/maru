@@ -1209,6 +1209,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 7. **CR5 — 멀티윈도우·다중 runtime:** CR2e-e3c의 reconnect-only `SessionHostCoordinator` shell을 host job,
    runtime별 authority ledger와 upgrade gate로 확장하고,
    부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.
+   첫 CR5a prerequisite는 CR2e reducer의 runtime/local/mutation enum을 재사용하는 canonical runtime-set 값 계약과 terminal
+   summary를 고정한다. 이 단계의 제품 caller는 0이며, 다음 제품 slice가 같은 계약을 `RemoteTermBackend.HostReconnectJob`의
+   final-address runtime-set owner에 결속한다. 별도 model enum이나 AppSession-owned ledger를 만들지 않는다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

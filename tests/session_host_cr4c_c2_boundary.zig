@@ -93,7 +93,8 @@ test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered recl
     ));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR4c C2 actual socket forced resize는"));
 
-    const gate = functionSlice(build, "const session_host_cr4c_c2_step =", "const b3_1_boundary_tests =");
+    // CR5 follows CR4c in the build graph; keep this inherited inventory scoped to CR4c itself.
+    const gate = functionSlice(build, "const session_host_cr4c_c2_step =", "const session_host_cr5a_step =");
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr4c-c2\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr4c\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr4c_c2_step.dependOn(session_host_cr4c_c1_step);"));

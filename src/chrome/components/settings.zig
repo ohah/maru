@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const icons = @import("../../icons.zig");
+const i18n = @import("../../i18n.zig"); // 표시 문자열 단일 출처
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
@@ -82,7 +83,14 @@ const pick_sv_cols: u32 = 16; // 채도 0~100
 const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
 const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
 const pick_hue_cols: u32 = 16; // hue 0~360
-const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세  # hex  i 스포이드  Enter 확정  Esc 취소";
+// 힌트 넷은 **런타임 값**이라 comptime `const` 로 둘 수 없다 — 언어가 바뀌면 다음 프레임에 따라와야 한다.
+// 그래서 상수가 아니라 함수다. 폭 계산과 그리기가 **같은 문자열**을 봐야 하므로 한 자리에서 준다.
+fn pickHelp() []const u8 {
+    return i18n.t(.set_color_pick_help);
+}
+fn searchPrompt() []const u8 {
+    return i18n.t(.set_search_prompt);
+}
 // picker 콘텐츠 행: 제목(0) + SV 그리드(1..pick_sv_rows) + hue 스트립 + 미리보기 + 도움말.
 const pick_hue_row: u32 = 1 + pick_sv_rows;
 const pick_preview_row: u32 = pick_hue_row + 1;
@@ -118,7 +126,7 @@ fn hueColForHue(h: u16) u32 {
 /// 도움말 폭 중 큰 쪽으로 content_cols. null이면 화면이 너무 좁음.
 fn pickerLayout(p: props.ChromeProps, tk: *const tokens.Tokens) ?modal_box.Box {
     const sv_w = pick_sv_cols * pick_swatch_w;
-    const help_cols: u32 = @intCast(overlay_input.displayCols(pick_help));
+    const help_cols: u32 = @intCast(overlay_input.displayCols(pickHelp()));
     return modal_box.layout(@max(sv_w, help_cols), pick_content_rows, p, tk);
 }
 
@@ -585,8 +593,6 @@ comptime {
     std.debug.assert((std.unicode.utf8Decode(reset_glyph) catch 0) == reset_glyph_cp);
 }
 /// 검색 입력줄 프롬프트 접두 — view의 제목 렌더와 searchCaretRect(IME 후보창 위치)가 같은 폭을 쓰게 하는 단일 출처.
-const search_prompt = "검색: ";
-
 /// 인라인 편집 중인 행의 편집 버퍼 텍스트(accent 강조) + 끝 셀 caret을 그린다 — `.font`/`.text` 편집 경로가 공유한다
 /// (중복 제거, code-review). control 좌단(ctrl.x) 좌측정렬, caret은 표시폭 끝 셀에 cursor fill 1칸(palette 입력 caret 패턴).
 fn drawInlineEdit(box: modal_box.Box, ctrl: draw.Rect, shown: []const u8, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
@@ -624,7 +630,7 @@ pub fn view(
         // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자 위에 겹친다(preedit는
         // caret 위치에 안 더함 — 단일 줄 append라 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관, find와 동일).
         // macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
-        const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ search_prompt, state.searchQuery() });
+        const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ searchPrompt(), state.searchQuery() });
         try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
         const committed_cols = overlay_input.displayCols(committed);
         const caret_x = box.inner_x + @as(i32, @intCast(committed_cols * box.cw));
@@ -643,7 +649,7 @@ pub fn view(
         try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
         // 검색 진입점 힌트 — 제목 행 우측에 muted로 `/ 검색`을 두어 클릭(또는 `/`)으로 검색됨을 알린다.
         // handlePointer가 제목 행(row 0) 클릭을 startSearch로 받는다(키 `/`와 같은 경로). config-gui §6.8.
-        const search_hint = "/ 검색";
+        const search_hint = i18n.t(.set_search_hint);
         const hint_cols = overlay_input.displayCols(search_hint);
         if (box.inner_cols > hint_cols) { // 좁아 제목과 겹칠 땐 생략(제목 우선)
             const hint_x = box.inner_x + @as(i32, @intCast((box.inner_cols - hint_cols) * box.cw));
@@ -796,7 +802,7 @@ pub fn view(
                 // control 열에 현재 단축키 표시(dropdown과 같은 좌단 정렬 text). 녹음 중인 선택 행이면 "키 입력 대기..."
                 // accent로(platform이 raw 키를 가로채 chord 캡처). 빈 chord는 "(미지정)".
                 const recording_this = state.recording and actual == state.selected;
-                const shown: []const u8 = if (recording_this) "키 입력 대기..." else if (chord.len > 0) chord else "(미지정)";
+                const shown: []const u8 = if (recording_this) i18n.t(.set_key_recording) else if (chord.len > 0) chord else i18n.t(.set_key_unset);
                 const text_role: tokens.ColorRole = if (recording_this) .accent_bar else .surface_fg;
                 const runs = try arena.alloc(draw.Run, 1);
                 runs[0] = .{ .text = shown };
@@ -818,7 +824,7 @@ pub fn view(
     }
 
     // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). 방향키 영역 모델: ← 네비 · → 설정으로 포커스, ↑↓로 그 영역 이동.
-    const nav_hint = "← 섹션 · → 설정 · ↑↓ 이동 · ⏎ 선택";
+    const nav_hint = i18n.t(.set_nav_hint);
     const hint_w = overlay_input.displayCols(nav_hint);
     const hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
     try modal_box.text(box, hx, hint_row, nav_hint, .muted_fg, arena, out);
@@ -833,12 +839,12 @@ pub fn view(
 
 /// 검색 입력줄 caret의 셀 rect(backing px) — IME 후보창 위치(platform imeCursorRect)에 쓴다. 검색 중이 아니거나
 /// 레이아웃 불가면 null(platform이 터미널 커서로 폴백). 위치 = 제목 행(0)의 "검색: " + query **끝**(= 조합 시작) —
-/// view의 caret_x와 같은 폭 규약(search_prompt + queryCols, EAW). preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐 그려짐 — 단일 줄 append라 뒤 텍스트 없음).
+/// view의 caret_x와 같은 폭 규약(searchPrompt() + queryCols, EAW). preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐 그려짐 — 단일 줄 append라 뒤 텍스트 없음).
 pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
     if (!state.open or state.picking or !state.searching) return null;
     const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
     const box = l.box;
-    const caret_cols = overlay_input.displayCols(search_prompt) + overlay_input.displayCols(state.searchQuery());
+    const caret_cols = overlay_input.displayCols(searchPrompt()) + overlay_input.displayCols(state.searchQuery());
     return .{
         .x = box.inner_x + @as(i32, @intCast(caret_cols * box.cw)),
         .y = modal_box.rowY(box, 0),
@@ -928,7 +934,7 @@ fn renderPicker(
 ) !void {
     const box = pickerLayout(p, tk) orelse return;
     try modal_box.frame(box, p, arena, out);
-    try modal_box.text(box, box.inner_x, 0, "HSV 색 선택", .accent_bar, arena, out);
+    try modal_box.text(box, box.inner_x, 0, i18n.t(.set_color_pick_title), .accent_bar, arena, out);
 
     const sw_px: i32 = @intCast(pick_swatch_w * box.cw);
     // SV 그리드 — 행 1..pick_sv_rows. 각 셀은 (col→채도, row→명도)로 현재 hue의 원색.
@@ -961,14 +967,14 @@ fn renderPicker(
     try out.append(arena, .{ .swatch = .{ .rect = preview, .rgb = cur } });
     const text_x = box.inner_x + sw_px + @as(i32, @intCast(box.cw));
     if (state.editing) {
-        const buf = try std.fmt.allocPrint(arena, "{s}▏ hex 입력", .{state.editText()});
+        const buf = try std.fmt.allocPrint(arena, "{s}▏ {s}", .{ state.editText(), i18n.t(.set_color_hex_prompt) });
         try modal_box.text(box, text_x, pick_preview_row, buf, .accent_bar, arena, out);
     } else {
         const info = try std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}  H{d} S{d} V{d}", .{ cur.r, cur.g, cur.b, state.pick_h, state.pick_s, state.pick_v });
         try modal_box.text(box, text_x, pick_preview_row, info, .surface_fg, arena, out);
     }
 
-    try modal_box.text(box, box.inner_x, pick_help_row, pick_help, .surface_fg, arena, out);
+    try modal_box.text(box, box.inner_x, pick_help_row, pickHelp(), .surface_fg, arena, out);
 }
 
 /// 키 처리(열려 있을 때만 host 호출). 방향키 영역 모델: ←=네비 포커스·→=폼 포커스, ↑↓=포커스 영역 내 이동(네비=섹션·
@@ -2278,7 +2284,7 @@ test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control �
     s.recording = true;
     try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_prompt = false;
-    for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "키 입력 대기") != null and op.text.role == .accent_bar) {
+    for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, i18n.t(.set_key_recording)) != null and op.text.role == .accent_bar) {
         has_prompt = true;
     };
     try std.testing.expect(has_prompt);

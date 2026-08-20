@@ -25995,7 +25995,10 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
-        try std.testing.expectEqualStrings("\u{00b7} Codex 상태 확인 중", label);
+        // 문구를 박지 않는다 — 상태 라벨이 이제 키를 거치므로 언어가 바뀌면 이 단언만 옛 것을 잰다.
+        const expect_unknown = try std.fmt.allocPrint(a, "\u{00b7} Codex {s}", .{maru.i18n.t(.sb_agent_unknown)});
+        defer a.free(expect_unknown);
+        try std.testing.expectEqualStrings(expect_unknown, label);
     }
 
     // (4) **claude도 같은 규칙**이다(사용자 확인 2026-08-13). 종류는 `kind_name`으로만 갈리고 경로는 하나지만,
@@ -26005,7 +26008,9 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
-        try std.testing.expectEqualStrings("\u{2713} Claude Code 대기중", label);
+        const expect_idle = try std.fmt.allocPrint(a, "\u{2713} Claude Code {s}", .{maru.i18n.t(.sb_agent_idle)});
+        defer a.free(expect_idle);
+        try std.testing.expectEqualStrings(expect_idle, label);
     }
 }
 
@@ -26388,8 +26393,8 @@ test "사이드바 세션 목록: 터미널도 행이 되고, 에이전트 Term�
     defer a.free(agent_label);
     const term_label = try sidebar_ops.agentRowLabelOwned(session, t1);
     defer a.free(term_label);
-    try std.testing.expect(std.mem.indexOf(u8, agent_label, "대기중") != null); // 에이전트=상태 문구
-    try std.testing.expect(std.mem.indexOf(u8, term_label, "대기중") == null); // 터미널=상태 문구 없음
+    try std.testing.expect(std.mem.indexOf(u8, agent_label, maru.i18n.t(.sb_agent_idle)) != null); // 에이전트=상태 문구
+    try std.testing.expect(std.mem.indexOf(u8, term_label, maru.i18n.t(.sb_agent_idle)) == null); // 터미널=상태 문구 없음
     try std.testing.expectEqual(icons.codepoint(.sparkle), sidebar_ops.sessionRowIconCodepoint(t0));
     try std.testing.expectEqual(@as(u21, 0), sidebar_ops.sessionRowIconCodepoint(t1)); // 일반 터미널=아이콘 없음
 }

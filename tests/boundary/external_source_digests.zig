@@ -32,7 +32,7 @@ pub const inventory = [_]Proof{
     // C3-3b5가 공통 close/remove progress enum을 추가했다. 값 타입 선언뿐이라 기존 `@field` 세 곳과 Client receiver는 그대로다.
     // AppSession close 순서를 실제 제품 래퍼에서 검증하는 test-only progress sequence가 붙었다. 제품 vtable과
     // `@field` 세 곳은 그대로이고, 조건부 testing facade 밖의 Client receiver도 늘지 않는다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "c878f073ab79366baa0e22af36f9490bf11098773ef48f19032d292c06349239" },
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "120c33268e951eaf8a3e9cd87596733679bc9a5398ed26f3d18a7fc453a69c8c" },
     // `schema.tryParse` 를 Config 타입에서 뗐다(M10b0) — 파라미터를 `anytype` 으로 열고 본문의
     // `theme.Config` 반영 둘을 그 파라미터의 타입으로 바꿨다. 모바일 config 가 자기 스키마 메타를
     // 들고 같은 엔진을 타게 하려는 것이고(docs/mobile-config.md §3), 데스크톱은 계속 같은 타입을
@@ -57,7 +57,7 @@ pub const inventory = [_]Proof{
     // (`theme.palette.N` 과 같은 부류) `@field` 로 도는 자리를 안 늘린다. count 는 14 그대로다.
     // 처음 붙는 서버의 지문 승인(S9b-3)이 `isComplete` 에서 지문을 빼고 `isFirstConnect` 를
     // 더해 또 바뀐다 — 판정 규칙이 바뀐 것이고 `@field` 로 도는 자리는 그대로다(count 14).
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "79bcd3aaac8cb9bb230c42d1e5ad7a008c9ae5cb00b5c7bf91b702c9ce4d4594" },
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 14, .digest_hex = "e1585fa7df64d94665ce2f6397ebbaf9d45a7356f594dfc61fe73bd4c66a7241" },
     // 경로 값 입구 정규화(W7.5)가 붙어 바뀐다 — `Meta.isPath()` 인 필드는 파싱에서 구분자를 POSIX 로
     // 정규화한다(docs/windows-platform.md §5 규칙 1: Windows 사용자가 `workspace.root = C:\proj` 로 적으면
     // L2 가 `/` 로 이어 붙인 결과와 섞여 `C:\proj/docs` 가 된다). count 는 108 그대로다 — 늘어난 것은
@@ -70,7 +70,7 @@ pub const inventory = [_]Proof{
     // 설정 폼 필터가 **언어와 무관하게** 판정하도록 `Field` 5종이 해석된 `doc` 과 함께 `doc_key` 를 싣게
     // 되며 움직인다(생성 지점 9곳이 `.doc_key = meta.doc` 을 함께 준다). count 는 108 그대로다 — 반사 접근이
     // 늘거나 준 것이 아니라 **필드가 하나 늘었을 뿐**이다.
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "62337834d551b98525d47d45b3bab88bc61f61a122434d498fa60b588a1c551b" },
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "1dc38a85f24b1eab672919f0a7c99dcee63abcf7fa3b3549fbe5e63103f7c91f" },
     // **크로스 타깃 표면 walker**(W8.0, 계약 §2m.2). `@field` 두 자리는 **전부 재귀 참조**다 —
     // `maru.zig` 의 선언을 comptime 에 훑어 `_ = &@field(T, name)` 으로 주소를 잡는다. 그것이 함수
     // 본문을 의미 분석하게 만들고, 그래서 `check-targets` 가 세 타깃에서 중립 표면을 본다.
@@ -80,7 +80,7 @@ pub const inventory = [_]Proof{
     // 나열했더니 21 개 중 14 개가 빠졌고, ADE 표면 셋(`archive_detail`·`session_dock`·`scm_dock` 의
     // `view`)이 정확히 그 구멍이었다. 지금은 `maru.zig` 하나에서 유도하고, 훑은 선언 수에 컴파일
     // 타임 하한을 둬(실측 2,937 / 하한 2,000) walker 를 비우면 게이트가 선다.
-    .{ .path = "src/cross_target_surface.zig", .count = 2, .digest_hex = "92ae6c5dcc32080f35e040abb2d312f693f191ee408f39b906e859c5b2ccd560" },
+    .{ .path = "src/cross_target_surface.zig", .count = 2, .digest_hex = "838e962b1a88f42b2f82293727f6947a43eb34847acf156ebb9c7e917cd28c93" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
@@ -125,7 +125,7 @@ pub const inventory = [_]Proof{
     // origin/HEAD`)과 `Job.base`가 늘고, `submit`이 그 기준을 받아 세 명령(ahead/behind·merge-base·브랜치
     // 범위)에 같은 값으로 넘긴다. `submitBranches`는 목록 종류를 인자로 받는다(전환용/기준 후보용).
     // **count는 그대로다** — 새 진입점이 아니라 기존 두 진입점의 인자가 늘었을 뿐이다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "b8ebf1c8523305520d3ae36ab2294098957aa618217fd038c16295de6b23020c" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "bb9c34ed8bc86258092871e45f518e4adc350f57ac6b28cf1a99345bad204838" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -639,7 +639,7 @@ pub const inventory = [_]Proof{
     // 그대로다 — `@field` 반사 접근도 Client 구성·receiver 집합도 손대지 않았다.
     // 리베이스로 또 수렴했다(2026-08-20, 세 번째): 위 사유 넷이 모두 살아 있고, 아래 값은 그것들이 한
     // 트리에 함께 있는 상태에서 도구가 다시 잰 것이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "72c597541166cb26fabbf6d4f79eb728d7d1d8608d975bbacbc8aebe28c6732d" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0f3a5c5de0c2951ad4e766cb4e8ced1a2dfea906f9e07adbda6cccedd9352964" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -714,21 +714,21 @@ pub const inventory = [_]Proof{
     // 같은 슬라이스의 적대적 검증에서 한 줄이 더 붙어 값이 또 움직였다(2026-08-19): `clearBranchMenuText`의
     // "열린 메뉴를 먼저 닫는다" 가드가 **기준 목록까지** 본다. 그 목록도 같은 버퍼에서 이름을 빌리므로
     // 플래그만 다를 뿐 같은 UAF였다. count는 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "3d87f5fb5c4e2fbda70d4f3f4dc0e6c15149994a816512d86e5e6ec9da74deff" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "843b4771f1cc65e6396a631f0c24134ecb36bd4d303b87a9dac2523a85a1c930" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
     // editor-surface-structure.md, §9 → plans/editor-surface.md). count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "d979f32e05129fc07be5d09bd13168fbe3808a37f2c70a9016091c50d149fbb1" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "d5c39f0f9acbf1679ce0851bc9c0e54f2af1f32fd5164a7e39787fae95d50bfb" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
-    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "b86809f9b52d6fc794ef73387b65eac18dc48d179c8ed00ca58f7cc9c3fa33eb" },
+    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "25336be6293885f80ac29b132dbca095aa412c59573463b50a27bd098be02c9d" },
     // 저장소별 비교 기준(§3.5 P7b)으로 움직인다: 창 줄에 `scm-bases` 필드 하나가 늘고(탐색기 root와 같은
     // 인코딩·같은 커서), 그 값을 저장·읽기 양쪽에서 거르는 검사 둘이 붙는다. 형태 판정은 여기서 다시
     // 쓰지 않고 `git_command.isSafeBaseRef`를 부른다 — 저장이 받는 값과 실행이 받는 값이 갈리지 않게.
     // count는 1 그대로다 — 새 `@field` 반사가 없다.
-    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "324f93c4707e67d14a05da10fef125863d1b494f06061cdfb520e9bd305b6f9c" },
+    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "8ce6cb2a7563878fb39c62b9ef7a8cf5c835ab2bbd19816c4b16af7ca7b478aa" },
     // i18n 표시 문자열 leaf(i18n.md 계약 §3)를 새로 등재한다. 반사는 `tIn`의
     // `@field(tbl.*, @tagName(k))` **하나**뿐이고, 그것이 필요한 이유는 키 목록을 두 벌 유지하지 않기
     // 위해서다 — `Key`를 `Table`에서 `std.meta.FieldEnum`으로 파생하고 런타임 key를 `inline else`로
@@ -790,5 +790,5 @@ pub const inventory = [_]Proof{
     // count 는 1 그대로 — 표에 항목이 늘 뿐이다.
     // 연결 진단(S9b-3b)이 상태·실패 문구 아홉을 더해 또 바뀐다. count 는 1 그대로다.
     // 자판 버튼 문구(`mob_keyboard`)가 더해져 또 바뀐다. count 는 1 그대로다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "dc0176922a90b014748cea74361e94f43d81b6267e227f74c5f089bc8852efa6" },
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "2ee62f913ca1fd44d166787e1d2cd8b12af1668ed73e70a501aeb12574ff832e" },
 };

@@ -87,8 +87,23 @@ pub fn topLevelTestTokenMask(
     return excluded;
 }
 
-/// `path` 의 소스에서 digest 와 반사 개수를 낸다. **옛 인라인 구현과 같은 값을 내는 것이 계약이다** —
-/// 토큰 순회 순서·구분자(`\0`)·`@field` 판정이 그대로여야 원장이 안 움직인다.
+/// `path` 의 소스에서 digest 와 반사 개수를 낸다.
+///
+/// **digest 는 반사 표현식만 덮는다** — `@field` 부터 짝이 맞는 `)` 까지의 토큰들, 파일에 나온 순서대로.
+/// 그 바깥(주석·다른 함수·남의 슬라이스가 스친 자리)은 안 본다.
+///
+/// 예전에는 **파일 전체 토큰**을 덮었다. 그러면 digest 가 움직였다는 사실이 "반사 대상이 달라졌다" 에
+/// 대해 거의 아무 정보도 주지 않는다 — 실측으로 원장을 건드린 커밋 236 개 중 `count` 가 바뀐 것은 5 개
+/// 인데 digest 는 212 번 움직였다. 사전 확률 2% 짜리 사건에 **거의 항상 켜지는 경보**를 단 셈이고,
+/// 그래서 사람이 그 경보를 보고 하는 일이 "해시를 다시 재 넣는다" 뿐이었다.
+///
+/// 좁히면 신호가 약해지는 것이 아니라 **그때 비로소 생긴다**: 이제 digest 가 움직이는 순간이 곧
+/// "반사 표현식이 달라졌다" 이고, 그때는 사람이 실제로 볼 것이 있다.
+///
+/// **놓치는 것 — 정직하게.** 반사 표현식의 **글자**가 그대로인데 의미가 달라지는 경우는 못 본다
+/// (`@field(self.x, name)` 에서 `x` 의 타입이 딴 곳에서 바뀐 것 따위). 옛 형태도 그것을 **의미로** 잡지는
+/// 못했고 — 파일이 바뀌면 그냥 움직였을 뿐이다 — 그 움직임이 정보를 안 줬다는 것이 위 수치다.
+/// 그 클래스는 digest 가 아니라 타입 검사와 리뷰가 맡는다.
 ///
 /// `@field` 를 **토큰 문자열로** 찾는 이유는 이 판정이 AST 의미가 아니라 표기를 보기 때문이다. 별칭을
 /// 거쳐 부르면(`const f = @field;` 같은 것) 안 잡힌다 — 놓치는 방향이라 없는 위반을 만들지는 않는다.
@@ -106,10 +121,32 @@ pub fn compute(allocator: std.mem.Allocator, tree: *const std.zig.Ast, path: []c
     var token: std.zig.Ast.TokenIndex = 0;
     while (token + 1 < tree.tokens.len) : (token += 1) {
         if (test_tokens[token]) continue;
-        hasher.update(tree.tokenSlice(token));
-        hasher.update(&.{0});
         if (!std.mem.eql(u8, tree.tokenSlice(token), "@field")) continue;
         if (!session_host) reflection_count += 1;
+
+        // 이 반사 표현식의 토큰만 해싱한다 — `@field` 부터 짝이 맞는 `)` 까지.
+        // 여는 괄호를 못 찾거나 짝이 안 맞으면 **조용히 넘기지 않는다**: 그 상태로 해싱하면 digest 가
+        // "무엇을 덮었는지" 를 모르는 값이 된다.
+        var cursor = token;
+        while (cursor < tree.tokens.len and !std.mem.eql(u8, tree.tokenSlice(cursor), "(")) : (cursor += 1) {}
+        if (cursor == tree.tokens.len) return error.TestUnexpectedResult;
+        var depth: usize = 0;
+        while (cursor < tree.tokens.len) : (cursor += 1) {
+            const part = tree.tokenSlice(cursor);
+            if (std.mem.eql(u8, part, "(")) depth += 1;
+            if (std.mem.eql(u8, part, ")")) {
+                depth -= 1;
+                if (depth == 0) break;
+            }
+        }
+        if (cursor == tree.tokens.len or depth != 0) return error.TestUnexpectedResult;
+        var t = token;
+        while (t <= cursor) : (t += 1) {
+            hasher.update(tree.tokenSlice(t));
+            hasher.update(&.{0});
+        }
+        // 표현식 사이 경계 — 붙여 놓으면 두 표현식의 토큰이 다르게 갈려도 같은 해시가 될 수 있다.
+        hasher.update("\x01");
     }
 
     var out: Result = .{ .digest = undefined, .reflection_count = reflection_count };
@@ -155,12 +192,39 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
     const r2 = try compute(a, &tree2, "src/x.zig");
     try std.testing.expectEqual(r.digest, r2.digest);
 
-    // 반면 **제품 코드가 바뀌면** 움직인다(안 움직이면 이 게이트는 아무것도 안 지킨다).
-    const src3 =
+    // **반사와 무관한 제품 코드 변경에는 안 움직인다** — 이것이 좁히기가 산 것이다. 예전에는 주석 한
+    // 줄에도 움직여서, 그 움직임이 "반사가 달라졌다" 에 대해 아무 정보도 주지 않았다.
+    const unrelated =
         \\pub fn f() void {
         \\    const x = @field(S, "a");
         \\    _ = x;
-        \\    const w = 2;
+        \\}
+        \\pub fn unrelatedFn() void {}
+    ;
+    var tree_u = try std.zig.Ast.parse(a, unrelated, .zig);
+    defer tree_u.deinit(a);
+    try std.testing.expectEqual(r.digest, (try compute(a, &tree_u, "src/x.zig")).digest);
+
+    // **반사 대상이 달라지면 움직인다 — 개수가 그대로여도.** digest 가 존재하는 이유가 이 한 줄이다
+    // (`count` 는 이 경우를 못 잡는다).
+    const retargeted =
+        \\pub fn f() void {
+        \\    const x = @field(OTHER, "a");
+        \\    _ = x;
+        \\}
+    ;
+    var tree_t = try std.zig.Ast.parse(a, retargeted, .zig);
+    defer tree_t.deinit(a);
+    const rt = try compute(a, &tree_t, "src/x.zig");
+    try std.testing.expectEqual(r.reflection_count, rt.reflection_count); // 개수는 같다
+    try std.testing.expect(!std.mem.eql(u8, &r.digest, &rt.digest)); // 그런데 digest 는 다르다
+
+    // 반사가 **하나 늘면** 둘 다 움직인다.
+    const src3 =
+        \\pub fn f() void {
+        \\    const x = @field(S, "a");
+        \\    const w = @field(S, "c");
+        \\    _ = x;
         \\    _ = w;
         \\}
     ;

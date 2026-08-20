@@ -572,6 +572,23 @@ var set_edit: ?usize = null;
 /// 편집 중인 값의 자릿수 버퍼. **확정 전에는 config 를 안 건드린다** — 중간 값(예: "5")이
 /// 그대로 적용되면 스크롤백이 5줄로 줄었다가 돌아오는 것이 화면에 보인다.
 var set_edit_buf: [64]u8 = undefined;
+
+/// 편집 중인 칸에 보일 글자 = **확정 버퍼 + 조합 중 글자 + 캐럿**.
+///
+/// **조합을 빼먹으면 한글이 안 보인다.** IME 는 확정 전까지 `setComposingText` 로만 알리고
+/// (`maru_mobile_set_preedit` 이 그것을 받는다), 그 버퍼를 안 그리는 칸은 치는 동안 화면이 멈춘
+/// 것처럼 보인다 — 실제로 그것을 그리는 자리는 **터미널 하나뿐**이었고 편집 칸 셋(서버·설정 숫자·
+/// 설정 글자)은 각자 같은 줄을 만들면서 조합을 빠뜨렸다(기기 실측 2026-08-20: 한글을 쳐도 칸에
+/// 아무것도 안 나왔다). 같은 줄을 세 번 만들면 하나만 고쳐지므로 규칙을 여기 하나로 둔다.
+const editing_text_cap = set_edit_buf.len + preedit_buf.len + 4; // +4 = 캐럿(U+258F, 3바이트)
+fn editingText(buf: *[editing_text_cap]u8) []const u8 {
+    // 버퍼가 두 원본을 다 담으므로 실패할 길이 없다 — `catch` 는 형식상 남긴다(모자라면 치던
+    // 값까지 사라지는데, `editing_text_cap` 이 그 경우를 없앤다).
+    return std.fmt.bufPrint(buf, "{s}{s}\u{258F}", .{
+        set_edit_buf[0..set_edit_len],
+        preedit_buf[0..preedit_len],
+    }) catch "\u{258F}";
+}
 var set_edit_len: usize = 0;
 
 /// 지금 편집 중인 값의 길이(테스트·진단용). **한 글자 지우기가 바이트 단위인지 글자 단위인지**를
@@ -4011,9 +4028,9 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
 
         // 값(편집 중이면 치는 값 + 캐럿). 설정의 글자 칸과 **같은 규칙**이다(S9b-1).
         const editing = edit_target == .server_field and srv_edit_field == i;
-        var buf: [96]u8 = undefined;
+        var buf: [editing_text_cap]u8 = undefined;
         const value = if (editing)
-            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+            editingText(&buf)
         else if (field == .port)
             (std.fmt.bufPrint(&buf, "{d}", .{srv_draft.port}) catch "?")
         else
@@ -4159,9 +4176,9 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                         // 어디에 쓰이는지 모르는" 그 혼란이 그대로 남는다. 캐럿(▏)으로 그 줄이
                         // 입력 대상임을 알린다.
                         const editing = set_edit != null and set_edit.? == i;
-                        var buf: [20]u8 = undefined;
+                        var buf: [editing_text_cap]u8 = undefined;
                         const t = if (editing)
-                            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+                            editingText(&buf)
                         else
                             (std.fmt.bufPrint(&buf, "{d}", .{val}) catch "?");
                         const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
@@ -4172,9 +4189,9 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                         // 입력 대상임을 알린다(숫자 줄과 같은 규칙 — 두 줄이 다르게 굴면
                         // 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다).
                         const editing = set_edit != null and set_edit.? == i;
-                        var buf: [80]u8 = undefined;
+                        var buf: [editing_text_cap]u8 = undefined;
                         const t = if (editing)
-                            (std.fmt.bufPrint(&buf, "{s}\u{258F}", .{set_edit_buf[0..set_edit_len]}) catch "\u{258F}")
+                            editingText(&buf)
                         else
                             mobile_config.textValueOf(cfg(), row.key);
                         const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;

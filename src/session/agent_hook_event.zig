@@ -359,6 +359,10 @@ pub const Cursor = struct {
     /// **마지막 줄에 개행이 없으면 그 줄은 남긴다.** 훅이 쓰는 중일 수 있고, 반쪽 줄을 파싱하면 정상 이벤트를
     /// 손상으로 오인해 버린다. 그 줄은 다음 tick에 완결된 채로 다시 온다(오프셋을 전진시키지 않았으므로).
     pub fn take(self: *Cursor, chunk: []const u8, out: []Event) Batch {
+        // **빈 `out` 은 진전을 만들지 못한다.** 호출자가 `more` 를 보고 반복하는 흔한 모양에서 그대로
+        // 무한 루프가 된다(한 줄도 담지 못하니 오프셋이 안 움직이고, 남은 개행이 있으니 `more` 는 계속 참이다).
+        // 호출자의 실수를 여기서 멈춘다.
+        std.debug.assert(out.len > 0);
         var count: usize = 0;
         var dropped: usize = 0;
         var recovered: usize = 0;
@@ -941,4 +945,16 @@ test "provider 가 필드의 형을 바꿔도 줄 전체를 잃지 않는다" {
     const d = parseLine(nested).?;
     try testing.expectEqualStrings("/top/b.txt", d.file_path); // 한 겹 안의 키만 인정한다
     try testing.expectEqualStrings("p4", d.turn_key);
+}
+
+test "빈 out 은 진전을 못 만든다 — more 로 도는 호출자가 무한 루프에 빠진다" {
+    // `take` 는 이 경우를 assert 로 멈춘다. 여기서는 그 조건이 실제로 «진전 0 · more 참» 이라는 것을,
+    // 즉 막지 않으면 무한 루프가 된다는 것을 고정한다.
+    var cur: Cursor = .{};
+    var out: [1]Event = undefined;
+    const two = "claude\t{\"hook_event_name\":\"Stop\"}\nclaude\t{\"hook_event_name\":\"Stop\"}\n";
+    const batch = cur.take(two, &out);
+    try testing.expectEqual(@as(usize, 1), batch.count);
+    try testing.expect(batch.advanced > 0); // out 이 있으면 반드시 전진한다
+    try testing.expect(batch.more);
 }

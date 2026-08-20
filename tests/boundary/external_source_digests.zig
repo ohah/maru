@@ -639,6 +639,10 @@ pub const inventory = [_]Proof{
     // 그대로다 — `@field` 반사 접근도 Client 구성·receiver 집합도 손대지 않았다.
     // 리베이스로 또 수렴했다(2026-08-20, 세 번째): 위 사유 넷이 모두 살아 있고, 아래 값은 그것들이 한
     // 트리에 함께 있는 상태에서 도구가 다시 잰 것이다.
+    // AH2b(codex 설치·신뢰)가 제품 경로 테스트 하나와 그 안에서 쓰는 최상위 헬퍼를 더해 또 움직였다.
+    // count 는 2 그대로다 — `@field` 반사 접근도 Client 구성·receiver 집합도 손대지 않았다.
+    // 리베이스로 또 수렴했다: 위 사유들이 모두 살아 있고, 아래 값은 그것들이 한 트리에 함께 있는
+    // 상태에서 도구가 다시 잰 것이다(어느 쪽 값도 그 상태를 말하지 않는다).
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0f3a5c5de0c2951ad4e766cb4e8ced1a2dfea906f9e07adbda6cccedd9352964" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

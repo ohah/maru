@@ -42,8 +42,14 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 (`zig build test-provider-session-removal`)가 `AppSession.init`을 실제로 돌려 본다: 사용자 항목 순서 보존,
 과거 표식 잔존, 로그 디렉터리 `0700`, 지난 실행 로그 정리와 남의 파일 보존, 재실행 시 바이트 무변경,
 **게이트 off에서 `hooks` 키 무생성**.
-남은 것은 AH2b(codex)와 statusLine 훅 제거, 그리고 **제거를 부르는 사용자 액션**이다 — 지금은 켤 수는 있는데
-빼려면 `settings.json`을 손으로 고쳐야 한다(계약 §5의 ⚠️). **그 구멍을 닫기 전에는 게이트 기본값을 켜지 않는다.**
+**AH2b(codex) ✅ 완료.** 세트를 provider 별로 가르고(codex 5개), 신뢰 값 계산을 순수 층으로 세우고
+(`agent_hook_trust.zig` — golden 다섯이 **codex 자신이 계산한 값**), `hooks.json` 설치와 `config.toml`
+신뢰 기록을 배선했다. 제품 경로 게이트가 `AppSession.init`으로 확인한다: codex 세트대로 설치, 과거 표식
+잔존, 사용자 항목이 앞, **신뢰 키가 실체 경로**(심링크 `CODEX_HOME` 픽스처로 못박음), 재실행 시 바이트
+무변경, 새 `config.toml` 은 `0600`.
+
+남은 것은 statusLine 훅 제거와 **제거를 부르는 사용자 액션**이다 — 지금은 켤 수는 있는데 빼려면 설정
+파일을 손으로 고쳐야 한다(계약 §5의 ⚠️). **그 구멍을 닫기 전에는 게이트 기본값을 켜지 않는다.**
 
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는

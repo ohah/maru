@@ -236,10 +236,14 @@ pub const Cursor = struct {
         };
     }
 
-    /// 파일이 회전(rename 후 새로 생성)되면 오프셋을 되돌린다. **크기가 줄었다는 것이 유일한 신호**다 —
-    /// inode를 보는 것은 platform의 몫이고, 이 순수 층은 크기만으로 판정한다.
-    pub fn resetIfTruncated(self: *Cursor, file_size: u64) bool {
-        if (file_size >= self.offset) return false;
+    /// 파일이 회전(rename 후 새로 생성)됐으면 오프셋을 되돌린다.
+    ///
+    /// **크기만으로는 부족하다.** 회전 직후 훅이 몰아치면 새 파일이 옛 오프셋보다 이미 커져 있을 수 있고,
+    /// 그러면 «줄어들지 않았으니 같은 파일»로 오인해 **앞부분을 통째로 건너뛴다**(그만큼 이벤트를 잃는다).
+    /// 그래서 파일 **아이덴티티**(platform이 보는 inode·생성 시각 등)가 바뀌었는지를 함께 받는다 —
+    /// 판정 재료는 platform이 모으고, 그것으로 무엇을 할지는 이 순수 층이 정한다.
+    pub fn resetIfRotated(self: *Cursor, file_size: u64, same_file: bool) bool {
+        if (same_file and file_size >= self.offset) return false;
         self.offset = 0;
         return true;
     }
@@ -599,12 +603,18 @@ test "빈 줄은 손상이 아니다" {
     try testing.expectEqual(@as(usize, 0), batch.dropped);
 }
 
-test "파일이 회전하면 오프셋을 되돌린다" {
+test "파일이 회전하면 오프셋을 되돌린다 — 크기만 보면 놓친다" {
     var cur: Cursor = .{ .offset = 4096 };
-    try testing.expect(!cur.resetIfTruncated(4096)); // 같은 크기 = 그대로
-    try testing.expect(!cur.resetIfTruncated(8192)); // 자란 것 = 그대로
-    try testing.expect(cur.resetIfTruncated(10)); // 줄었다 = 회전
+    try testing.expect(!cur.resetIfRotated(4096, true)); // 같은 파일·같은 크기 = 그대로
+    try testing.expect(!cur.resetIfRotated(8192, true)); // 같은 파일·자람 = 그대로
+    try testing.expect(cur.resetIfRotated(10, true)); // 같은 파일인데 줄었다 = truncate
     try testing.expectEqual(@as(u64, 0), cur.offset);
+
+    // **크기만 보는 판정이 놓치는 경우**: 회전 직후 훅이 몰아쳐 새 파일이 옛 오프셋보다 이미 크다.
+    // 아이덴티티를 안 보면 «자랐으니 같은 파일»로 오인해 앞부분을 건너뛴다.
+    var busy: Cursor = .{ .offset = 4096 };
+    try testing.expect(busy.resetIfRotated(9000, false));
+    try testing.expectEqual(@as(u64, 0), busy.offset);
 }
 
 test "decodeInto는 담을 수 있는 만큼만 담는다" {

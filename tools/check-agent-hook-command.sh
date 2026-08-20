@@ -29,6 +29,13 @@ src="$root/src/session/agent_hook_command.zig"
 zig_marker=$(sed -n 's/^pub const marker = "\([^"]*\)";$/\1/p' "$src")
 [ -n "$zig_marker" ] || fail_early "빌더에서 표식 상수를 찾지 못했다: $src"
 grep -q "$zig_marker" "$golden" || fail_early "golden 이 낡았다 — 빌더 표식은 '$zig_marker' 인데 fixture 에 없다"
+# 표식만 보면 **표식을 안 올린 로직 변경**을 통째로 놓친다(상한을 바꿔도 표식은 그대로다). 커맨드에 박히는
+# 값도 함께 대조한다 — 여기서 걸리면 fixture 를 다시 뽑아야 한다는 뜻이다.
+ev_src="$root/src/session/agent_hook_event.zig"
+zig_kib=$(sed -n 's/^pub const max_line_bytes: usize = \([0-9]*\) \* 1024;$/\1/p' "$ev_src")
+[ -n "$zig_kib" ] || fail_early "빌더에서 상한 상수를 찾지 못했다: $ev_src"
+zig_limit=$((zig_kib * 1024))
+grep -q "gt $zig_limit" "$golden" || fail_early "golden 이 낡았다 — 상한이 $zig_limit 인데 fixture 와 다르다"
 
 cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
 
@@ -75,17 +82,22 @@ printf '%s\n' "$payload" | env MARU_PANE_ID=7 /bin/sh -c "$cmd" 2>"$err" || fail
 mkdir -p "$logdir"
 pass "디렉터리 부재(조용함 포함)"
 
-echo "6) 동시 append 가 서로의 줄을 깨지 않는다"
+echo "6) 동시 append 가 서로의 줄을 깨지 않는다 — 큰 payload 로 본다"
+# **작은 payload 로는 이 검사가 아무것도 증명하지 못한다.** 짧은 write 는 원자적으로 들어가 섞일 일이 없고,
+# 인터리브는 payload 가 커질수록 난다. 서브에이전트가 병렬로 도구를 부르면 같은 pane 파일에 큰 이벤트가
+# 동시에 떨어지는데, 그때 줄이 섞이면 파서가 양쪽을 다 버린다.
+fat=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"pad\":\""; for (i = 0; i < 6000; i++) printf "p"; printf "\"}" }')
+fat_size=$(printf '%s' "$fat" | wc -c | tr -d ' ')
 i=0
 while [ "$i" -lt 24 ]; do
-  printf '%s\n' "$payload" | env MARU_PANE_ID=c /bin/sh -c "$cmd" &
+  printf '%s\n' "$fat" | env MARU_PANE_ID=c /bin/sh -c "$cmd" &
   i=$((i + 1))
 done
 wait
 lines=$(wc -l < "$logdir/c.ndjson")
 [ "$lines" -eq 24 ] || fail "24 줄이어야 하는데 $lines 줄이다"
 broken=$(grep -cv '^claude	{.*}$' "$logdir/c.ndjson" || true)
-[ "$broken" -eq 0 ] || fail "$broken 줄이 깨졌다"
-pass "동시 append"
+[ "$broken" -eq 0 ] || fail "$broken 줄이 깨졌다(줄당 $fat_size B)"
+pass "동시 append(줄당 $fat_size B x 24)"
 
 echo "OK: 훅 커맨드가 실제 셸에서 계약 6개를 지킨다"

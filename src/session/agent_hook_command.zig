@@ -292,3 +292,23 @@ test "payload 상한이 줄 상한을 넘기지 않는다 — 경계에서만 �
     try testing.expect(line.items.len <= event.max_line_bytes);
     try testing.expect(event.parseLine(line.items) != null);
 }
+
+test "세트의 모든 이벤트를 파서가 안다 — 한쪽만 늘면 그 이벤트가 조용히 unknown 이 된다" {
+    // 세트(여기)와 `Kind`(파서)는 따로 적혀 있다. 이벤트를 하나 더 걸고 파서에 넣는 것을 잊으면 그 이벤트는
+    // 로그에 쌓이면서 `unknown` 으로만 읽혀, 소비자가 «아무 일도 없었다» 와 구분하지 못한다.
+    for (events) |e| {
+        var line: std.ArrayListUnmanaged(u8) = .empty;
+        defer line.deinit(testing.allocator);
+        try line.appendSlice(testing.allocator, "claude");
+        try line.append(testing.allocator, event.field_separator);
+        try line.print(testing.allocator, "{{\"hook_event_name\":\"{s}\"}}", .{e.name});
+        const ev = event.parseLine(line.items) orelse {
+            std.debug.print("\n세트의 이벤트를 파싱하지 못했다: {s}\n", .{e.name});
+            return error.TestUnexpectedResult;
+        };
+        if (ev.kind == .unknown) {
+            std.debug.print("\n파서가 모르는 이벤트가 세트에 있다: {s}\n", .{e.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}

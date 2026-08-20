@@ -2630,6 +2630,9 @@ pub fn build(b: *std.Build) void {
     // 훅이 그 계약을 어기면 에이전트 턴이 멈추므로 상시 게이트로 둔다. POSIX 셸만 있으면 도는 검사다.
     const agent_hook_command_check = b.addSystemCommand(&.{ "sh", "tools/check-agent-hook-command.sh" });
     agent_hook_command_check.setCwd(b.path("."));
+    // 진행 줄을 그대로 흘린다. 기본 정책은 stdout/stderr 를 캡처해 «출력이 있으면 실패»로 보는데,
+    // 이 검사는 단계마다 `ok` 를 찍는 것이 진단의 절반이다 — 종료 코드만 본다.
+    agent_hook_command_check.stdio = .inherit;
     const agent_hook_command_step = b.step("check-agent-hook-command", "Run the agent hook inline command against a real shell");
     agent_hook_command_step.dependOn(&agent_hook_command_check.step);
     test_step.dependOn(&agent_hook_command_check.step);

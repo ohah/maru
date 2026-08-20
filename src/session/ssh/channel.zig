@@ -1,8 +1,11 @@
-//! `session` 채널 하나 — 열기·`pty-req`·`shell`·데이터·`window-change`·종료(RFC 4254 §5·§6).
+//! `session` 채널 하나 — 열기·`pty-req`·`shell`·`exec`·데이터·`window-change`·종료(RFC 4254 §5·§6).
 //!
-//! **채널은 하나뿐이다**(계약 §3). 터미널 한 개가 지금 필요한 전부이고, 여러 개를 열면 그만큼
-//! 상태와 라우팅이 는다. 그래서 이 파일은 채널 **표**가 아니라 채널 **하나**를 든다 — 우리 것이
-//! 아닌 번호로 온 메시지는 받지 않는다.
+//! **이 파일은 채널 하나를 든다** — 채널 표가 아니다. 여러 채널을 여는 것은 드라이버
+//! (`client.zig`)가 이 구조체를 여러 개 들고 **받은 번호로 골라 주는** 일이고, 여기서는 우리 것이
+//! 아닌 번호로 온 메시지를 받지 않는 것으로 그 규율을 받친다.
+//!
+//! 지금 열리는 채널은 둘이다: 터미널(`pty-req`+`shell`)과 컨트롤(`exec`, pty 없음 —
+//! [컨트롤 플레인 §4a](../../../docs/control-plane.md)).
 //!
 //! **흐름 제어는 양방향 다 여기 있다.**
 //!
@@ -42,6 +45,7 @@ pub const channel_type_session = "session";
 /// 채널 요청 이름(§6.2·§6.5·§6.7·§6.10).
 pub const request_pty = "pty-req";
 pub const request_shell = "shell";
+pub const request_exec = "exec";
 pub const request_window_change = "window-change";
 pub const request_exit_status = "exit-status";
 pub const request_exit_signal = "exit-signal";
@@ -202,6 +206,15 @@ pub const Channel = struct {
     remote_window: u32 = 0,
     remote_max_packet: u32 = 0,
 
+    /// 상대의 `CHANNEL_CLOSE` 를 받았나. **`state` 만으로는 못 센다** — `close` 는 양쪽이 각자
+    /// 보내야 끝나는데(§5.3), 그 순서가 둘이라서다. 우리가 먼저 보냈으면 `close_sent` 에서
+    /// 상대 것을 받아 `closed` 가 되지만, **상대가 먼저 보냈을 때**는 우리가 답을 쓰는 자리에서
+    /// "이미 받았다" 를 알아야 `closed` 로 갈 수 있다.
+    ///
+    /// 이 값이 없으면 그 경우 채널이 영영 `close_sent` 에 남고, **번호를 다시 못 쓴다** —
+    /// 컨트롤 채널을 닫았다 다시 여는 길이 막힌다(적대적 검증이 이 자리를 잡았다).
+    remote_closed: bool = false,
+
     /// `CHANNEL_OPEN` 을 쓴다(§5.1). 쓴 뒤 상태가 `opening` 이 된다.
     pub fn writeOpen(self: *Channel, out: []u8, local_id: u32) Error![]const u8 {
         if (self.state != .idle) return Error.UnexpectedMessage;
@@ -254,6 +267,26 @@ pub const Channel = struct {
         try w.u32be(self.remote_id);
         try w.string(request_shell);
         try w.boolean(true);
+        return w.written();
+    }
+
+    /// `exec` 을 쓴다(§6.5) — 셸 대신 **명령 하나**를 돌린다.
+    ///
+    /// 컨트롤 채널이 이것을 쓴다([컨트롤 플레인 §4a](../../../docs/control-plane.md)): 터미널
+    /// 채널에 명령을 쳐 넣으면 pty 에코와 프롬프트가 섞여 ndjson 이 깨지므로, **채널을 따로 열고
+    /// pty 없이** 명령을 돌린다.
+    ///
+    /// **`want_reply` 를 켠다** — `shell` 과 같은 이유다. 다만 성공 답이 뜻하는 것은 "명령을
+    /// 시작했다" 까지이고, 그 명령이 실제로 있었는지는 `exit-status` 로 온다(없는 명령이면
+    /// 셸이 127 을 낸다 — 채널 요청 자체는 성공한다).
+    pub fn writeExec(self: *Channel, out: []u8, command: []const u8) Error![]const u8 {
+        if (self.state != .open) return Error.UnexpectedMessage;
+        var w = wire.Writer.init(out);
+        try w.byte(msg_channel_request);
+        try w.u32be(self.remote_id);
+        try w.string(request_exec);
+        try w.boolean(true);
+        try w.string(command);
         return w.written();
     }
 
@@ -317,7 +350,8 @@ pub const Channel = struct {
         var w = wire.Writer.init(out);
         try w.byte(msg_channel_close);
         try w.u32be(self.remote_id);
-        self.state = .close_sent;
+        // 상대 것을 이미 받았으면 이 한 번으로 끝이다 — 안 그러면 답을 기다린다.
+        self.state = if (self.remote_closed) .closed else .close_sent;
         return w.written();
     }
 
@@ -352,6 +386,7 @@ pub const Channel = struct {
                 try self.expectOurChannel(&r, &.{ .open, .eof_sent, .close_sent });
                 // **양쪽이 다 보내야 닫힌 것이다**(§5.3). 우리가 아직 안 보냈으면 드라이버가
                 // `writeClose` 로 답해야 하고, 상태는 그때 `closed` 가 된다.
+                self.remote_closed = true;
                 if (self.state == .close_sent) self.state = .closed;
                 break :blk .closed;
             },
@@ -834,7 +869,10 @@ test "닫기는 양쪽이 보내야 끝난다" {
 
     var out: [64]u8 = undefined;
     _ = try ch.writeClose(&out);
-    try testing.expectEqual(State.close_sent, ch.state);
+    // **이제 양쪽이 다 보냈다 — 닫힌 것이다.** 예전에는 이 자리에서 `close_sent` 로 남았는데,
+    // 그러면 §5.3 이 말하는 "both sent and received" 를 만족하고도 상태가 안 따라가서 **번호를
+    // 영영 못 쓴다**(컨트롤 채널을 닫았다 다시 여는 길이 막힌다 — 적대적 검증이 잡았다).
+    try testing.expectEqual(State.closed, ch.state);
 
     // 반대 순서로도 같은 결론이다.
     var ch2 = try openedChannel(1000, 1000);

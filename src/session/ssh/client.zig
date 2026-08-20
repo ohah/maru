@@ -96,6 +96,30 @@ pub const State = enum {
     closed,
 };
 
+/// 채널 번호는 **우리가 고른다**(§5.1 — "sender channel"). 터미널이 0, 컨트롤이 1 이다.
+/// 값 자체에 뜻은 없지만 **받은 메시지를 어느 채널로 보낼지 고르는 열쇠**라서 고정해 둔다.
+const shell_local_id: u32 = 0;
+const control_local_id: u32 = 1;
+
+/// 컨트롤 채널이 어디까지 왔나. **터미널 상태(`State`)와 섞지 않는다** — 컨트롤이 어떻게 되든
+/// 터미널은 그대로 살아야 하고, 그 규율은 상태를 따로 두는 데서 시작한다.
+pub const ControlState = enum {
+    /// 안 열었다.
+    none,
+    /// `CHANNEL_OPEN` 을 보내고 답을 기다린다.
+    opening,
+    /// `exec` 을 보내고 답을 기다린다.
+    requesting_exec,
+    /// 명령이 돌고 있다 — 이제 ndjson 이 오간다.
+    ready,
+    /// 끝났다(상대가 닫았거나 우리가 닫았거나, 열기·`exec` 이 거절됐거나).
+    closed,
+};
+
+/// 컨트롤 채널이 돌릴 명령의 최대 길이. 절대경로 + 인자 한둘이면 충분하고, 넘으면 조용히 자르지
+/// 않고 거절한다 — 잘린 명령은 **다른 명령**이다.
+pub const max_control_command = 512;
+
 /// 연결에 필요한 것들. **비밀은 호출자가 든다.**
 pub const Options = struct {
     user: []const u8,
@@ -147,6 +171,12 @@ pub const Step = struct {
     /// **화면에 그릴 바이트**(호출자가 준 `screen_out` 안). 원격의 stdout·stderr 를 합친 것이다 —
     /// pty 를 쓰면 서버가 이미 합쳐 보내므로 여기서도 가르지 않는다.
     screen: []const u8,
+    /// **컨트롤 채널의 stdout**(호출자가 준 `Buffers.control` 안). 컨트롤 채널을 안 열었으면 늘
+    /// 비어 있다. 화면 바이트와 **섞지 않는다** — 섞으면 ndjson 파서가 사람 화면을 읽게 된다.
+    ///
+    /// **줄 경계가 아니다.** 여기 오는 것은 패킷이 실어 온 만큼이라, 호출자가 줄 단위로 이어
+    /// 붙여야 한다(계약 §4a — 프레임 상한과 채널 배압이 만나는 자리).
+    control: []const u8 = &.{},
     state: State,
     /// 셸이 끝났다면 그 코드.
     exit_status: ?u32 = null,
@@ -199,7 +229,27 @@ pub const DisconnectReason = enum(u32) {
 pub const Client = struct {
     state: State = .idle,
     t: transport.Transport = .{},
-    ch: channel.Channel = .{},
+    ch: channel.Channel = .{ .local_id = shell_local_id },
+    /// 두 번째 채널. **`null` 이면 안 연 것이다** — 터미널만 쓰는 접속에서는 열지 않는다
+    /// (계약 §4a "언제 여는가": 채널을 여는 것은 그 서버에서 명령을 하나 실행하는 일이다).
+    control: ?channel.Channel = null,
+    control_state: ControlState = .none,
+    /// 돌릴 명령. `CHANNEL_OPEN` 을 보낸 뒤 **열렸다는 답이 올 때까지** 들고 있어야 한다.
+    control_cmd_buf: [max_control_command]u8 = undefined,
+    control_cmd_len: usize = 0,
+    /// 컨트롤 채널의 종료 코드. **터미널 것과 따로 둔다** — 계약이 이 값으로 "그 서버에 maru 가
+    /// 없다"(127)와 "다른 프로그램이 돌았다"(그 밖)를 가른다(§4a).
+    control_exit_status: ?u32 = null,
+    /// 컨트롤 채널의 **stderr 첫 조각**. 계약은 "stdout 은 오직 wire, 로그·경고는 stderr" 인데,
+    /// 그 stderr 를 버리면 사용자는 왜 안 되는지 알 길이 없다. 첫 줄이 대개 원인이라
+    /// (`maru: command not found`) **앞을 남기고 뒤를 버린다**.
+    control_stderr_buf: [256]u8 = undefined,
+    control_stderr_len: usize = 0,
+    /// 터미널 채널이 닫혔나. **세션을 닫을지 판정하는 재료**다 — 채널 상태만 보면 "우리 close 를
+    /// 아직 안 보낸" 자리와 구별이 안 된다.
+    shell_closed: bool = false,
+    control_deferred_close: bool = false,
+    control_deferred_request_failure: bool = false,
     opts: Options,
     rand: std.Random,
 
@@ -339,7 +389,23 @@ pub const Client = struct {
     }
 
     /// 선에서 읽은 바이트를 먹인다. **막지 않는다** — 더 필요하면 `consumed` 만큼만 먹고 돌아온다.
+    /// `feed` 가 쓸 호출자 버퍼들. **컨트롤은 안 열었으면 안 줘도 된다.**
+    pub const Buffers = struct {
+        wire: []u8,
+        screen: []u8,
+        /// 컨트롤 채널의 stdout 이 여기로 온다. 채널을 열어 놓고 이것을 비워 두면 `ShortBuffer`
+        /// 다 — **조용히 버리지 않는다**. 버리면 ndjson 이 한 줄씩 사라져 파서가 이유 없이 깨진다.
+        control: []u8 = &.{},
+    };
+
+    /// 터미널만 쓰는 호출자를 위한 짧은 이름. 컨트롤 채널을 여는 호출자는 `feedBuffers` 를 쓴다.
     pub fn feed(self: *Client, input: []const u8, wire_out: []u8, screen_out: []u8) Error!Step {
+        return self.feedBuffers(input, .{ .wire = wire_out, .screen = screen_out });
+    }
+
+    pub fn feedBuffers(self: *Client, input: []const u8, bufs: Buffers) Error!Step {
+        const wire_out = bufs.wire;
+        const screen_out = bufs.screen;
         // **버퍼가 한 걸음도 못 담으면 시작하지 않는다.** 조용히 0 을 돌려주면 호출자가 영원히
         // 맴돈다 — 이 저장소에서 "아무것도 안 하면서 초록" 을 여러 번 겪었다.
         // **`start` 를 안 불렀으면 오류다.** 조용히 아무 일도 안 하면 호출자가 영원히 읽는다.
@@ -348,6 +414,7 @@ pub const Client = struct {
         if (screen_out.len < self.ch.local_max_packet) return Error.ShortBuffer;
         var w: Out = .{ .buf = wire_out };
         var s: Out = .{ .buf = screen_out };
+        var c: Out = .{ .buf = bufs.control };
         var consumed: usize = 0;
         self.banner_len = 0; // 지난 호출의 것을 물려주지 않는다
 
@@ -365,7 +432,7 @@ pub const Client = struct {
             if (w.remaining() < min_wire_out or s.remaining() < self.ch.local_max_packet) break;
             const before_consumed = consumed;
             const before_state = self.state;
-            try self.step(input[consumed..], &consumed, &w, &s);
+            try self.step(input[consumed..], &consumed, &w, &s, &c);
             // **밀린 것을 비운다.** 입력이 없어도 비워야 한다 — 서버의 keepalive(채널 요청
             // `keepalive@openssh.com`, 실측)에 답하는 자리라서, 다음 패킷이 올 때까지 미루면
             // 서버가 우리를 죽은 것으로 본다. (`stepPacket` 도 끝에서 같은 것을 부르지만 그쪽은
@@ -380,6 +447,7 @@ pub const Client = struct {
             .consumed = consumed,
             .wire = w.written(),
             .screen = s.written(),
+            .control = c.written(),
             .state = self.state,
             .exit_status = self.exit_status,
             .exit_signal = if (self.exit_signal_len == 0) null else self.exit_signal_buf[0..self.exit_signal_len],
@@ -434,6 +502,91 @@ pub const Client = struct {
         return w.written();
     }
 
+    /// **두 번째 채널을 연다** — 원격에서 명령 하나를 돌린다(계약 §4a: `maru control --stdio`).
+    ///
+    /// **터미널이 떠 있어야 부를 수 있다.** 인증도 안 끝난 자리에서 열 수는 없고, 무엇보다 이
+    /// 채널은 "세션 목록을 보려 할 때" 열리는 것이라 그 시점에는 늘 셸이 있다.
+    ///
+    /// **pty 를 안 붙인다.** 붙이면 개행 변환·에코가 끼어 ndjson 이 깨진다(계약 §4a).
+    pub fn openControl(self: *Client, command: []const u8, wire_out: []u8) Error![]const u8 {
+        if (!self.shell_ready) return Error.NotReady;
+        // **두 번 열지 않는다.** 이미 열려 있는데 또 열면 채널 번호가 겹쳐 두 흐름이 섞인다.
+        if (self.control_state != .none and self.control_state != .closed) return Error.UnexpectedMessage;
+        // **닫는 중인 번호도 다시 쓰지 않는다.** `close` 는 양쪽이 오가야 끝나는데(§5.3),
+        // 우리 것만 보낸 자리에서 같은 번호로 새 채널을 열면 **상대의 늦은 `close` 가 새 채널로
+        // 배달된다** — 방금 연 채널이 이유 없이 닫힌다(적대적 검증이 잡았다).
+        if (self.control) |ctl| {
+            if (ctl.state != .closed) return Error.UnexpectedMessage;
+        }
+        // **자르지 않는다** — 잘린 명령은 다른 명령이다.
+        if (command.len > self.control_cmd_buf.len) return Error.ShortBuffer;
+        if (!self.t.canSendChannelMessages()) return wire_out[0..0];
+
+        @memcpy(self.control_cmd_buf[0..command.len], command);
+        self.control_cmd_len = command.len;
+        self.control_exit_status = null;
+        self.control_stderr_len = 0;
+        var ctl: channel.Channel = .{};
+        if (self.opts.window != 0) {
+            ctl.local_window_max = self.opts.window;
+            ctl.local_window = self.opts.window;
+        }
+        var buf: [256]u8 = undefined;
+        var w: Out = .{ .buf = wire_out };
+        const payload = try ctl.writeOpen(&buf, control_local_id);
+        try self.emit(&w, payload);
+        self.control = ctl;
+        self.control_state = .opening;
+        return w.written();
+    }
+
+    /// 컨트롤 채널로 보낸다(ndjson 한 조각). 터미널의 `write` 와 같은 규칙 — **상대가 허락한
+    /// 만큼만** 나가고, 나머지는 호출자가 다시 준다.
+    pub fn writeControl(self: *Client, data: []const u8, wire_out: []u8) Error!struct { wire: []const u8, sent: usize } {
+        if (self.control_state != .ready) return Error.NotReady;
+        const ctl = if (self.control) |*p| p else return Error.NotReady;
+        if (!self.t.canSendChannelMessages()) return .{ .wire = wire_out[0..0], .sent = 0 };
+        const room = ctl.sendableLen();
+        if (room == 0) return .{ .wire = wire_out[0..0], .sent = 0 };
+        const n = @min(@as(usize, room), data.len);
+        var buf: [packet.max_packet]u8 = undefined;
+        const payload = try ctl.writeData(&buf, data[0..n]);
+        var w: Out = .{ .buf = wire_out };
+        try self.emit(&w, payload);
+        return .{ .wire = w.written(), .sent = n };
+    }
+
+    /// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
+    pub fn closeControl(self: *Client, wire_out: []u8) Error![]const u8 {
+        const ctl = if (self.control) |*p| p else return wire_out[0..0];
+        self.control_state = .closed;
+        if (ctl.state == .closed or ctl.state == .close_sent) return wire_out[0..0];
+        if (!self.t.canSendChannelMessages()) {
+            // 재키잉 중이면 못 보낸다 — 미뤄 두면 `flushDeferred` 가 낸다.
+            self.control_deferred_close = true;
+            return wire_out[0..0];
+        }
+        var buf: [64]u8 = undefined;
+        var w: Out = .{ .buf = wire_out };
+        try self.emit(&w, try ctl.writeClose(&buf));
+        return w.written();
+    }
+
+    /// 컨트롤 채널이 어디까지 왔나.
+    pub fn controlState(self: Client) ControlState {
+        return self.control_state;
+    }
+
+    /// 컨트롤 명령의 종료 코드. `127` 이면 그 서버에 `maru` 가 없다(계약 §4a).
+    pub fn controlExitStatus(self: Client) ?u32 {
+        return self.control_exit_status;
+    }
+
+    /// 컨트롤 명령이 stderr 로 낸 첫 조각(진단용). 비어 있을 수 있다.
+    pub fn controlStderr(self: *const Client) []const u8 {
+        return self.control_stderr_buf[0..self.control_stderr_len];
+    }
+
     // ---- 안쪽 ----
 
     const Out = struct {
@@ -463,7 +616,7 @@ pub const Client = struct {
     }
 
     /// 한 걸음. 입력에서 먹을 수 있으면 먹고, 상태를 옮긴다.
-    fn step(self: *Client, input: []const u8, consumed: *usize, w: *Out, s: *Out) Error!void {
+    fn step(self: *Client, input: []const u8, consumed: *usize, w: *Out, s: *Out, c: *Out) Error!void {
         switch (self.state) {
             .idle => unreachable, // `feed` 가 입구에서 막는다
             // **닫힌 뒤에 온 것은 흘려보낸다.** 세션은 끝났고 그 바이트로 할 일이 없다 — 파싱하면
@@ -494,12 +647,12 @@ pub const Client = struct {
                 if (!self.host_key_accepted) return; // 답을 기다린다 — 한 발도 안 나간다
                 try self.afterHostKey(w);
             },
-            else => try self.stepPacket(input, consumed, w, s),
+            else => try self.stepPacket(input, consumed, w, s, c),
         }
     }
 
     /// 패킷 하나를 꺼내 지금 상태에 맞게 다룬다.
-    fn stepPacket(self: *Client, input: []const u8, consumed: *usize, w: *Out, s: *Out) Error!void {
+    fn stepPacket(self: *Client, input: []const u8, consumed: *usize, w: *Out, s: *Out, c: *Out) Error!void {
         if (input.len == 0) return;
         var pkt: [packet.max_packet]u8 = undefined;
         const got = (self.t.feed(&pkt, input) catch |e| {
@@ -515,12 +668,12 @@ pub const Client = struct {
                 consumed.* += p.consumed;
                 // **시퀀스 번호를 같이 넘긴다** — 모르는 메시지에 답할 때 그 번호를 실어야 한다
                 // (§11.4: "packet sequence number of rejected message").
-                try self.dispatch(p.payload, p.seq, w, s);
+                try self.dispatch(p.payload, p.seq, w, s, c);
             },
         }
     }
 
-    fn dispatch(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out) Error!void {
+    fn dispatch(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out, c: *Out) Error!void {
         const msg = payload[0];
         // **전송 계층 잡 메시지는 어느 상태에서나 온다**(계약 §3.2). 분류는 S7c 가 넓히고,
         // 여기서는 세션을 죽이지 않게만 다룬다.
@@ -583,7 +736,7 @@ pub const Client = struct {
                 try self.sendAuth(w);
             },
             .authenticating => try self.onAuthResponse(payload, w),
-            .opening_channel, .requesting_pty, .starting_shell, .ready => try self.onChannel(payload, seq, w, s),
+            .opening_channel, .requesting_pty, .starting_shell, .ready => try self.onChannel(payload, seq, w, s, c),
             else => return Error.UnexpectedMessage,
         }
     }
@@ -831,7 +984,34 @@ pub const Client = struct {
         }
     }
 
-    fn onChannel(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out) Error!void {
+    /// 채널 메시지가 말하는 **받는 쪽 채널 번호**(§5 — 모든 `CHANNEL_*` 메시지의 첫 필드).
+    /// 채널 메시지가 아니거나 너무 짧으면 `null` 이다.
+    ///
+    /// **여기가 다채널의 전부다.** 채널 구조체는 자기 번호가 아닌 메시지를 거절하므로, 고르는
+    /// 일만 정확하면 나머지는 각 채널이 스스로 지킨다.
+    fn recipientOf(payload: []const u8) ?u32 {
+        if (payload.len < 5) return null;
+        switch (payload[0]) {
+            channel.msg_channel_open_confirmation,
+            channel.msg_channel_open_failure,
+            channel.msg_channel_window_adjust,
+            channel.msg_channel_data,
+            channel.msg_channel_extended_data,
+            channel.msg_channel_eof,
+            channel.msg_channel_close,
+            channel.msg_channel_request,
+            channel.msg_channel_success,
+            channel.msg_channel_failure,
+            => {},
+            else => return null,
+        }
+        return std.mem.readInt(u32, payload[1..5], .big);
+    }
+
+    fn onChannel(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out, c: *Out) Error!void {
+        if (recipientOf(payload)) |id| {
+            if (id == control_local_id) return self.onControlChannel(payload, w, c);
+        }
         var buf: [1024]u8 = undefined;
         // **채널 메시지가 아니면 `UNIMPLEMENTED` 로 답한다**(§11.4 — MUST). 끊으면 안 된다:
         // 서버가 우리가 모르는 확장을 하나 보냈다고 세션이 죽으면, 그 서버에는 영영 못 붙는다.
@@ -874,7 +1054,16 @@ pub const Client = struct {
             .eof => {},
             .closed => {
                 self.deferred_close = true;
-                self.state = .closed;
+                // **세션은 마지막 채널이 닫혀야 닫힌다**(RFC 4254 §5 — 채널은 서로 독립이다).
+                // 예전에는 여기서 바로 `closed` 로 갔는데, 채널이 둘이 되면 그 규칙은 **중계
+                // 프로세스가 끝나는 순간 터미널까지 죽이는** 규칙이 된다(계약 §4a 가 이 결함을
+                // 적어 뒀다). 터미널이 먼저 끝났으면 남은 컨트롤 채널도 닫으라고 이르고,
+                // 세션을 닫는 것은 둘 다 닫힌 뒤다.
+                if (self.control_state == .opening or self.control_state == .requesting_exec or self.control_state == .ready) {
+                    self.control_deferred_close = true;
+                }
+                self.shell_closed = true;
+                self.closeIfLastChannelGone();
             },
             .window_adjusted => {},
             // **`want_reply` 면 답해야 한다**(§5.4 — "If the request is not recognized ...
@@ -885,6 +1074,73 @@ pub const Client = struct {
             },
         }
         try self.flushDeferred(w);
+    }
+
+    /// 컨트롤 채널로 온 메시지. **터미널과 다른 규칙으로 산다** — pty 도 셸도 없고, 여기서
+    /// 무슨 일이 나도 `State` 는 안 건드린다(터미널이 그 값을 쓴다).
+    fn onControlChannel(self: *Client, payload: []const u8, w: *Out, c: *Out) Error!void {
+        // 우리 번호로 왔는데 채널이 없다 — 열지도 않은 채널에 온 메시지다(§5 위반).
+        const ch = if (self.control) |*ctl| ctl else return Error.UnexpectedMessage;
+        var buf: [max_control_command + 64]u8 = undefined;
+        const ev = ch.receive(payload) catch |e| {
+            // 컨트롤 채널의 모르는 메시지는 **세션을 죽일 이유가 안 된다**. 터미널 쪽은 seq 를
+            // 받아 `UNIMPLEMENTED` 로 답하지만, 그 답은 전송 계층의 일이라 여기서 또 하지 않는다.
+            if (e != channel.Error.NotChannelMessage) return e;
+            return;
+        };
+        switch (ev) {
+            .opened => {
+                self.control_state = .requesting_exec;
+                try self.emit(w, try ch.writeExec(&buf, self.control_cmd_buf[0..self.control_cmd_len]));
+            },
+            // **열기 거절도 세션을 안 죽인다.** 서버가 채널 수를 제한할 수 있고(§5.1), 그때
+            // 터미널까지 잃을 이유가 없다 — 컨트롤 축만 끄고 화면이 그렇게 말한다(계약 §4a).
+            .open_failed => {
+                self.control_state = .closed;
+                self.control = null;
+            },
+            .request_success => self.control_state = .ready,
+            // `exec` 이 거절됐다 — 명령을 시작조차 못 했다. 채널을 닫고 축을 끈다.
+            .request_failure => {
+                self.control_state = .closed;
+                self.control_deferred_close = true;
+            },
+            .data => |d| try c.append(d),
+            // **stderr 는 wire 가 아니다**(계약 §4a). 화면에도 안 섞고 컨트롤 흐름에도 안 섞는다 —
+            // 진단으로 앞부분만 남긴다.
+            .extended_data => |x| self.appendControlStderr(x.data),
+            .exit_status => |code| self.control_exit_status = code,
+            .exit_signal => {},
+            .eof => {},
+            .closed => {
+                self.control_deferred_close = true;
+                self.control_state = .closed;
+                self.closeIfLastChannelGone();
+            },
+            .window_adjusted => {},
+            .unknown_request => |u| if (u.want_reply) {
+                self.control_deferred_request_failure = true;
+            },
+        }
+        try self.flushDeferred(w);
+    }
+
+    /// stderr 첫 조각을 남긴다. **앞을 남기고 뒤를 버린다** — 첫 줄이 대개 원인이다.
+    fn appendControlStderr(self: *Client, data: []const u8) void {
+        const room = self.control_stderr_buf.len - self.control_stderr_len;
+        if (room == 0) return;
+        const n = @min(room, data.len);
+        @memcpy(self.control_stderr_buf[self.control_stderr_len..][0..n], data[0..n]);
+        self.control_stderr_len += n;
+    }
+
+    /// **세션은 마지막 채널이 닫혀야 닫힌다.** 터미널이 살아 있으면 컨트롤이 끝나도 세션은 산다.
+    fn closeIfLastChannelGone(self: *Client) void {
+        if (!self.shell_closed) return;
+        switch (self.control_state) {
+            .none, .closed => self.state = .closed,
+            .opening, .requesting_exec, .ready => {},
+        }
     }
 
     /// 미뤄 둔 채널 송신과 흐름 제어 보충. **재키잉 중에는 아무것도 안 보낸다**(계약 §3.0.1).
@@ -908,6 +1164,21 @@ pub const Client = struct {
         }
         if (self.ch.pendingWindowAdjust() != 0) {
             try self.emit(w, try self.ch.writeWindowAdjust(&buf));
+        }
+        // **컨트롤 채널도 같은 자리에서 비운다.** 내보내는 자리를 나누면 한쪽이 조용히 안 도는
+        // 상태가 생긴다 — 터미널 쪽이 이미 그 이유로 한 자리에 모여 있다.
+        if (self.control) |*ctl| {
+            if (self.control_deferred_request_failure) {
+                self.control_deferred_request_failure = false;
+                try self.emit(w, try ctl.writeChannelFailure(&buf));
+            }
+            if (self.control_deferred_close) {
+                self.control_deferred_close = false;
+                if (ctl.state != .closed) try self.emit(w, try ctl.writeClose(&buf));
+            }
+            if (ctl.pendingWindowAdjust() != 0) {
+                try self.emit(w, try ctl.writeWindowAdjust(&buf));
+            }
         }
     }
 
@@ -1061,13 +1332,17 @@ test "clear 는 비밀을 지운다" {
 ///
 /// **전송기를 평문으로 둔다.** 암호를 붙이면 이 테스트가 KEX 를 다시 짜야 하는데, 여기서 보려는
 /// 것은 채널 사건 처리이지 암호가 아니다.
+/// 테스트용 난수. **함수 안의 `var prng` 를 쓰면 안 된다** — `Client` 는 `std.Random`(그 prng 를
+/// 가리키는 포인터)을 들고 나가는데, 헬퍼가 돌아가는 순간 그 자리는 죽은 스택 프레임이다.
+/// 오래 초록이었지만 UB 였고, 필드 하나를 더한 것만으로 `emit` 안에서 터졌다(실측: SIGSEGV).
+var test_prng = std.Random.DefaultPrng.init(99);
+
 fn readyClient() Client {
-    var prng = std.Random.DefaultPrng.init(99);
     var c = Client.init(.{
         .user = "u",
         .secret_key = @splat(0),
         .size = .{ .cols = 80, .rows = 24 },
-    }, prng.random());
+    }, test_prng.random());
     c.state = .ready;
     c.shell_ready = true;
     c.t.phase = .established;
@@ -1320,8 +1595,8 @@ test "거대한 exit-signal 이름은 잘라서 담는다" {
 
 /// 인증 프로토콜 중인 클라이언트를 만든다(암호는 안 붙인다 — 여기서 볼 것은 배너 처리다).
 fn authPhaseClient(state: State) Client {
-    var prng = std.Random.DefaultPrng.init(61);
-    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, prng.random());
+    // 같은 이유로 정적 prng 를 쓴다(`test_prng` 주석 참고).
+    var c = Client.init(.{ .user = "u", .secret_key = @splat(0), .size = .{ .cols = 80, .rows = 24 } }, test_prng.random());
     c.state = state;
     c.t.phase = .established;
     c.t.kex_send_done = true;
@@ -2315,4 +2590,340 @@ test "재키잉에서 호스트키가 바뀌면 끊는다" {
     try testing.expectError(Error.HostKeyChanged, c.onKexReply(w.written(), &o));
     // **바뀐 키를 보관하지도 않는다** — 그 뒤에 지문을 물으면 승인한 키가 나와야 한다.
     try testing.expectEqualSlices(u8, blob_a, c.host_key_buf[0..c.host_key_len]);
+}
+
+// ---- 컨트롤 채널(S10b) ------------------------------------------------------
+//
+// 계약은 [컨트롤 플레인 §4a](../../../docs/control-plane.md) 다. 여기서 재는 것은 그 계약이
+// **코어에서 성립하는지**다: pty 없는 `exec` 채널이 따로 열리고, 그 바이트가 화면과 안 섞이고,
+// 그 채널이 끝나도 터미널이 안 죽는다.
+
+/// 컨트롤 채널까지 연 클라이언트. `readyClient` 위에 `openControl` 을 실제로 태운다 —
+/// 필드를 손으로 세우면 **여는 경로 자체가 안 덮인다**("shell 수락" 테스트가 그 교훈이다).
+fn controlOpenedClient(out: []u8) !Client {
+    var c = readyClient();
+    _ = try c.openControl("maru control --stdio", out);
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_confirmation);
+    try wr.u32be(control_local_id); // 받는 쪽 = 우리가 고른 번호
+    try wr.u32be(77); // 상대 번호
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    _ = try feedChannelBuffers(&c, wr.written(), out, &scr, &ctl);
+    // `exec` 성공
+    var ok: [16]u8 = undefined;
+    var okw = wire.Writer.init(&ok);
+    try okw.byte(channel.msg_channel_success);
+    try okw.u32be(control_local_id);
+    _ = try feedChannelBuffers(&c, okw.written(), out, &scr, &ctl);
+    return c;
+}
+
+fn feedChannelBuffers(c: *Client, payload: []const u8, wire_out: []u8, screen_out: []u8, control_out: []u8) !Step {
+    var buf: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const n = try packet.write(&buf, payload, prng.random());
+    return c.feedBuffers(buf[0..n], .{ .wire = wire_out, .screen = screen_out, .control = control_out });
+}
+
+/// 채널 데이터 페이로드 하나.
+fn channelData(buf: []u8, recipient: u32, data: []const u8) ![]const u8 {
+    var wr = wire.Writer.init(buf);
+    try wr.byte(channel.msg_channel_data);
+    try wr.u32be(recipient);
+    try wr.string(data);
+    return wr.written();
+}
+
+test "컨트롤 채널은 pty 없이 exec 을 요청한다" {
+    // 계약 §4a: 터미널 채널에 명령을 쳐 넣으면 에코·프롬프트가 섞이므로 **채널을 따로 열고
+    // pty 를 안 붙인다**. 그래서 선에 나가야 하는 것은 `pty-req` 가 아니라 `exec` 이다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    const opened = try c.openControl("maru control --stdio", &out);
+    try testing.expect(opened.len > 0);
+    try testing.expectEqual(ControlState.opening, c.controlState());
+
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_confirmation);
+    try wr.u32be(control_local_id);
+    try wr.u32be(77);
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    // 나간 것이 `exec` 이고 명령이 그대로 실려 있다. **`pty-req` 는 없다.**
+    const sent = step.wire;
+    try testing.expect(std.mem.indexOf(u8, sent, channel.request_exec) != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "maru control --stdio") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, channel.request_pty) == null);
+    try testing.expectEqual(ControlState.requesting_exec, c.controlState());
+    // **터미널은 그대로다** — 컨트롤이 열려도 세션 상태는 안 움직인다.
+    try testing.expectEqual(State.ready, step.state);
+}
+
+test "컨트롤 바이트는 화면과 섞이지 않는다" {
+    // 계약 §4a: "stdout 은 오직 wire 다." 섞이면 ndjson 파서가 사람 화면을 읽게 된다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    try testing.expectEqual(ControlState.ready, c.controlState());
+
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [256]u8 = undefined;
+
+    // 컨트롤 채널로 온 ndjson 한 줄
+    const line = "{\"jsonrpc\":\"2.0\"}\n";
+    const step = try feedChannelBuffers(&c, try channelData(&buf, control_local_id, line), &out, &scr, &ctl);
+    try testing.expectEqualStrings(line, step.control);
+    try testing.expectEqual(@as(usize, 0), step.screen.len);
+
+    // 터미널 채널로 온 화면 바이트는 반대다.
+    const step2 = try feedChannelBuffers(&c, try channelData(&buf, shell_local_id, "hi"), &out, &scr, &ctl);
+    try testing.expectEqualStrings("hi", step2.screen);
+    try testing.expectEqual(@as(usize, 0), step2.control.len);
+}
+
+test "컨트롤 채널이 닫혀도 터미널은 산다" {
+    // 이것이 S10b 의 이유다 — 예전 코어는 **채널이 닫히면 세션을 닫았다**(계약 §4a 가 적어 둔
+    // 결함). 그대로 두면 중계 프로세스가 끝나는 순간 셸까지 죽는다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_close);
+    try wr.u32be(control_local_id);
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    try testing.expectEqual(ControlState.closed, c.controlState());
+    try testing.expectEqual(State.ready, step.state);
+    // 터미널로 계속 쓸 수 있다.
+    const r = try c.write("ls\n", &out);
+    try testing.expectEqual(@as(usize, 3), r.sent);
+}
+
+test "터미널이 닫히면 세션이 닫힌다 — 컨트롤이 없을 때" {
+    // 채널을 늘리면서 **옛 규칙을 잃지 않았는지** 본다: 컨트롤을 안 연 접속에서는 터미널이
+    // 닫히는 순간 세션이 끝난다(모바일 host 가 이 값으로 소켓을 닫는다).
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_close);
+    try wr.u32be(shell_local_id);
+    const step = try feedChannel(&c, wr.written(), &out, &scr);
+    try testing.expectEqual(State.closed, step.state);
+}
+
+test "터미널이 먼저 닫혀도 컨트롤이 남아 있으면 세션은 안 닫힌다" {
+    // **마지막 채널이 닫혀야 닫힌다**(RFC 4254 §5 — 채널은 서로 독립이다). 그리고 남은 채널에
+    // 닫으라고 이른다 — 안 그러면 세션이 영영 안 끝난다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_close);
+    try wr.u32be(shell_local_id);
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+    try testing.expect(step.state != .closed);
+    // 우리 close 가 두 채널 모두로 나갔다(터미널 것 + 컨트롤 것).
+    var closes: usize = 0;
+    for (step.wire) |b| if (b == channel.msg_channel_close) {
+        closes += 1;
+    };
+    try testing.expect(closes >= 2);
+
+    // 컨트롤까지 닫히면 그때 세션이 닫힌다.
+    var wr2 = wire.Writer.init(&buf);
+    try wr2.byte(channel.msg_channel_close);
+    try wr2.u32be(control_local_id);
+    const step2 = try feedChannelBuffers(&c, wr2.written(), &out, &scr, &ctl);
+    try testing.expectEqual(State.closed, step2.state);
+}
+
+test "컨트롤 stderr 는 wire 에도 화면에도 안 섞인다" {
+    // 계약 §4a: 로그·경고는 stderr 로 가고, 그것을 버리면 사용자는 왜 안 되는지 모른다 —
+    // 진단으로 앞부분만 남긴다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [256]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_extended_data);
+    try wr.u32be(control_local_id);
+    try wr.u32be(channel.extended_data_stderr);
+    try wr.string("maru: command not found\n");
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    try testing.expectEqual(@as(usize, 0), step.control.len);
+    try testing.expectEqual(@as(usize, 0), step.screen.len);
+    try testing.expectEqualStrings("maru: command not found\n", c.controlStderr());
+}
+
+test "127 은 exit-status 로 온다 — 채널 요청은 성공한다" {
+    // 계약 §4a: OpenSSH 는 `exec` 을 사용자 셸에 물려 돌리므로 `maru` 가 없어도 **채널 요청은
+    // 성공**하고 셸이 127 로 죽는다. `CHANNEL_FAILURE` 를 기다리면 영영 안 온다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    try testing.expectEqual(ControlState.ready, c.controlState());
+
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_request);
+    try wr.u32be(control_local_id);
+    try wr.string(channel.request_exit_status);
+    try wr.boolean(false);
+    try wr.u32be(127);
+    _ = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    try testing.expectEqual(@as(?u32, 127), c.controlExitStatus());
+    // **터미널 것과 섞이지 않는다** — 셸은 아직 안 끝났다.
+    try testing.expectEqual(@as(?u32, null), c.exit_status);
+}
+
+test "exec 이 거절되면 컨트롤만 접고 터미널은 안 건드린다" {
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru control --stdio", &out);
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_confirmation);
+    try wr.u32be(control_local_id);
+    try wr.u32be(77);
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    _ = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    var fw = wire.Writer.init(&buf);
+    try fw.byte(channel.msg_channel_failure);
+    try fw.u32be(control_local_id);
+    const step = try feedChannelBuffers(&c, fw.written(), &out, &scr, &ctl);
+    try testing.expectEqual(ControlState.closed, c.controlState());
+    try testing.expectEqual(State.ready, step.state);
+}
+
+test "채널 열기를 서버가 거절해도 세션은 안 죽는다" {
+    // §5.1 — 서버가 채널 수를 제한할 수 있다. 그때 터미널까지 잃을 이유가 없다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru control --stdio", &out);
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_failure);
+    try wr.u32be(control_local_id);
+    try wr.u32be(@intFromEnum(channel.OpenFailureReason.administratively_prohibited));
+    try wr.string("no");
+    try wr.string("");
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+    try testing.expectEqual(ControlState.closed, c.controlState());
+    try testing.expectEqual(State.ready, step.state);
+}
+
+test "컨트롤 채널을 두 번 열지 않는다" {
+    // 두 번 열면 같은 번호를 두 흐름이 나눠 쓰게 되고, 그러면 라우팅이 무너진다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    try testing.expectError(Error.UnexpectedMessage, c.openControl("maru control --stdio", &out));
+}
+
+test "긴 명령은 자르지 않고 거절한다" {
+    // 잘린 명령은 **다른 명령**이다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    const long: [max_control_command + 1]u8 = @splat('a');
+    try testing.expectError(Error.ShortBuffer, c.openControl(&long, &out));
+    try testing.expectEqual(ControlState.none, c.controlState());
+}
+
+test "컨트롤 버퍼를 안 주면 조용히 버리지 않는다" {
+    // 버리면 ndjson 이 한 줄씩 사라져 파서가 이유 없이 깨진다 — 이 저장소가 여러 번 겪은
+    // "아무것도 안 하면서 초록" 의 데이터 판이다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [256]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const payload = try channelData(&buf, control_local_id, "{}\n");
+    const n = try packet.write(&pkt, payload, prng.random());
+    try testing.expectError(Error.ShortBuffer, c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr }));
+}
+
+test "컨트롤로 쓴 것은 컨트롤 채널 번호로 나간다" {
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    const r = try c.writeControl("{\"m\":1}\n", &out);
+    try testing.expectEqual(@as(usize, 8), r.sent);
+    // 평문 패킷이라 그대로 보인다: DATA + 상대 번호(77)
+    try testing.expect(std.mem.indexOf(u8, r.wire, &[_]u8{ channel.msg_channel_data, 0, 0, 0, 77 }) != null);
+}
+
+test "컨트롤이 아직 안 열렸으면 쓰지 못한다" {
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    try testing.expectError(Error.NotReady, c.writeControl("{}\n", &out));
+}
+
+test "컨트롤 채널은 닫은 뒤 다시 열 수 있다" {
+    // 계약 §4a "언제 여는가": 목록 화면에 들어갈 때 열고 나올 때 닫는다 — 그러면 **다시 여는
+    // 것이 정상 경로**다. 닫기가 §5.3 대로 끝나야(양쪽이 다 보냄) 번호를 다시 쓸 수 있다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+
+    // 우리가 닫고,
+    _ = try c.closeControl(&out);
+    // 상대 답이 온다.
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [4096]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_close);
+    try wr.u32be(control_local_id);
+    _ = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
+
+    // 이제 다시 열린다.
+    const again = try c.openControl("maru control --stdio", &out);
+    try testing.expect(again.len > 0);
+    try testing.expectEqual(ControlState.opening, c.controlState());
+}
+
+test "닫는 중인 번호는 다시 쓰지 않는다" {
+    // 우리 `close` 만 나간 자리에서 같은 번호로 새 채널을 열면 **상대의 늦은 close 가 새 채널로
+    // 배달된다** — 방금 연 채널이 이유 없이 닫힌다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    _ = try c.closeControl(&out); // 상대 답은 아직 안 왔다
+    try testing.expectError(Error.UnexpectedMessage, c.openControl("maru control --stdio", &out));
+}
+
+test "재키잉 중에는 컨트롤 채널을 안 연다" {
+    // 계약 §3.0.1 — 재키잉 중에는 채널 메시지를 못 보낸다. 그때 여는 시늉을 하면 **열렸다고
+    // 믿는 채널이 선에는 없다**. 0 바이트를 돌려주고 상태를 안 옮겨, 호출자가 다시 부르면 된다.
+    var c = readyClient();
+    try c.t.beginRekey();
+    var out: [8192]u8 = undefined;
+    const bytes = try c.openControl("maru control --stdio", &out);
+    try testing.expectEqual(@as(usize, 0), bytes.len);
+    try testing.expectEqual(ControlState.none, c.controlState());
 }

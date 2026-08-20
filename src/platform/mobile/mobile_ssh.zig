@@ -197,7 +197,21 @@ fn copyZ(dst: []u8, src: []const u8) void {
 }
 
 /// `feed` 한 걸음이 낸 것을 슬롯에 챙긴다. **다음 `feed` 면 사라지는 값들이라 여기서 복사한다.**
+///
+/// **여기서 안 챙긴 필드는 조용히 사라진다.** 이 저장소가 여러 번 겪은 부류라(관측 필드가
+/// `view()` 를 안 타서 제품이 무동작이던 자리), 코어가 `Step` 에 필드를 더하면 **컴파일이
+/// 멈추게** 해 둔다. 늘어난 필드를 여기서 챙길지 정하고 이 숫자를 옮기면 된다.
+///
+/// 지금 안 챙기는 것: `state`(호출자가 `maru_mobile_ssh_state` 로 따로 읽는다),
+/// `consumed`(`feed` 가 그 자리에서 돌려준다), `control`(컨트롤 채널은 **ABI 에 아직 없다** —
+/// S10b-2 가 이 자리에 컨트롤 흐름을 더한다).
 fn absorb(s: *Slot, step: client.Step) void {
+    comptime {
+        const fields = @typeInfo(client.Step).@"struct".fields.len;
+        if (fields != 9) @compileError(
+            "client.Step 의 필드 수가 바뀌었다 — 새 필드를 absorb 가 흘리고 있지 않은지 보고 이 숫자를 고쳐라",
+        );
+    }
     s.out_len += step.wire.len;
     s.screen_len += step.screen.len;
     if (step.banner) |b| {

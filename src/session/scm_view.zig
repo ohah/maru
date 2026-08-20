@@ -263,6 +263,31 @@ fn belongs(entry: git_status.Entry, section: Section) bool {
     };
 }
 
+/// 탭 이름 옆에 붙는 **전체 변경 파일 수**(`변경 사항 (N)`). 두 섹션의 파일을 더한다 — `MM` 파일은
+/// 양쪽에 한 줄씩 서므로 두 번 세어지고, 그것이 목록에 실제로 나는 줄 수와 같다(섹션 배지의 합).
+///
+/// **모델을 만들지 않는다.** 이 수를 알려고 `build`를 부르면 행마다 numstat 전체를 훑는 비용
+/// (`findDelta`)까지 함께 내는데, 그 숫자는 이 답에 쓰이지 않는다 — 285파일·"모두 보기" 상태에서
+/// 실측 378µs 대 여기 몇 µs다(2026-08-20). 히스토리·에이전트 탭은 이 수만 필요하므로 그 차이가
+/// 매 프레임 그대로 낭비가 된다.
+///
+/// **접기·펼치기·잘림과 무관하다** — `status` 전체를 세므로 화면에 몇 줄이 났는지와 상관없이 같은
+/// 답을 낸다(섹션 헤더의 `count`가 그런 것과 같은 이유).
+pub fn changedFileCount(status_text: []const u8) u32 {
+    // **한 번만 훑는다.** 섹션마다 `countFor`를 부르면 같은 출력을 두 번 파싱한다 — 답은 같지만
+    // 이 함수가 매 프레임 도는 자리에 있어 그 두 배가 그대로 비용이다.
+    var it = git_status.iterate(status_text);
+    var total: usize = 0;
+    while (it.next()) |entry| {
+        // 판정은 `belongs` 하나가 소유한다(섹션 배지·행 배치와 같은 술어) — 여기서 다시 쓰면 탭의
+        // 숫자와 목록의 줄 수가 갈린다.
+        inline for (.{ Section.staged, Section.changes }) |section| {
+            if (belongs(entry, section)) total += 1;
+        }
+    }
+    return std.math.cast(u32, total) orelse std.math.maxInt(u32);
+}
+
 fn countFor(status_text: []const u8, section: Section) usize {
     var it = git_status.iterate(status_text);
     var count: usize = 0;
@@ -333,6 +358,39 @@ const fixture_total = "-\t-\tblob.bin\n2\t0\tkeep.txt\n0\t0\tgone.txt => renamed
 
 fn buildFixture(out: []Row, scratch: []u8) Model {
     return build(fixture_status, fixture_staged, fixture_worktree, fixture_total, .{false} ** section_count, .{true} ** section_count, false, out, scratch);
+}
+
+test "탭의 파일 수는 목록이 세운 섹션 배지의 합과 같다 — 합치는 방식이 둘이어도 답은 하나다" {
+    // `changedFileCount`(status 한 번 순회)와 목록이 만든 섹션 헤더의 `count` 합은 **같은 사실**이다.
+    // 전자는 히스토리·에이전트 탭이(모델 없이), 후자는 변경 사항 탭이(이미 만든 모델에서) 쓴다.
+    // 두 경로가 갈리면 탭의 숫자와 목록의 줄 수가 다른 말을 하므로 여기서 못 박는다.
+    //
+    // 표본은 **경계 상태를 전부 담는다** — `MM`(양쪽에 한 줄씩), 스테이지만, 작업트리만, 추적되지 않음,
+    // 충돌(스테이지된 것이 아니라 `변경 사항`에 든다), 하위 모듈.
+    const status =
+        "# branch.head main\n" ++
+        "1 MM N... 100644 100644 100644 aaa bbb both.txt\n" ++
+        "1 M. N... 100644 100644 100644 aaa bbb staged.txt\n" ++
+        "1 .M N... 100644 100644 100644 aaa bbb work.txt\n" ++
+        "? untracked.txt\n" ++
+        "u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt\n" ++
+        "1 .M S..U 160000 160000 160000 aaa bbb sub\n";
+    var rows: [64]Row = undefined;
+    var scratch: [1024]u8 = undefined;
+    // 접힘·펼침 어느 상태에서도 같아야 한다 — 화면에 몇 줄이 났는지와 무관한 값이기 때문이다.
+    for ([_][section_count]bool{ .{ false, false }, .{ true, true } }) |collapsed| {
+        for ([_][section_count]bool{ .{ false, false }, .{ true, true } }) |expanded| {
+            const model = build(status, "", "", "", collapsed, expanded, false, &rows, &scratch);
+            var badge_total: u32 = 0;
+            for (model.rows) |row| switch (row) {
+                .section => |section| badge_total += @intCast(section.count),
+                else => {},
+            };
+            try std.testing.expectEqual(badge_total, changedFileCount(status));
+        }
+    }
+    // `MM`이 두 번 세어지는 것이 계약이다(두 섹션에 각각 한 줄로 서므로) — 6줄 입력에 7이 나온다.
+    try std.testing.expectEqual(@as(u32, 7), changedFileCount(status));
 }
 
 test "섹션은 비교 기준이고 MM 파일은 양쪽에 각각 난다" {

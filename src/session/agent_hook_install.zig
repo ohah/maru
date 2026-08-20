@@ -7,6 +7,7 @@
 //! 사용자 `settings.json` 을 통째로 날렸다. 판정을 순수 층으로 빼면 그 분기들을 **파일 없이** 전수로 돌릴 수 있다.
 
 const std = @import("std");
+const command = @import("agent_hook_command.zig");
 
 /// platform 이 설정 파일을 훑어 채우는 요약. **우리 항목만** 센다 — 사용자 항목은 세지 않는다(건드리지 않으므로).
 pub const Known = struct {
@@ -14,8 +15,12 @@ pub const Known = struct {
     ours: usize = 0,
     /// 그중 커맨드 바이트가 **지금 만들 것과 같은** 항목 수. 경로·상한·표식이 바뀌면 이 수가 줄어든다.
     ours_current: usize = 0,
-    /// 우리 항목이 덮는 **이벤트 수**(중복 제외). 세트보다 적으면 일부만 설치된 것이다.
+    /// **세트에 있는** 이벤트 중 우리 항목이 덮은 수(중복 제외). 세트보다 적으면 일부만 설치된 것이다.
     events_covered: usize = 0,
+    /// **세트에 없는** 이벤트에 붙어 있는 우리 항목 수. 세트에서 이벤트를 뺐을 때(예: `PostToolUse`) 그
+    /// 자리에 남은 우리 항목이 여기 잡힌다 — 개수만 비교하면 «6개를 덮었다» 로 보여 **잘못된 이벤트에 남은
+    /// 항목이 영영 안 지워진다**. 0 이 아니면 걷어 내고 다시 넣는다.
+    events_outside: usize = 0,
     /// 과거 표식 항목이 있는가. **건드리지 않는다**([persistent-session-host.md](../../docs/persistent-session-host.md)
     /// P1 — legacy 잔재를 자동 정리하지 않는다). 안내에만 쓴다.
     legacy_present: bool = false,
@@ -45,6 +50,9 @@ pub const Plan = enum {
     /// 우리 항목을 새로 넣는다.
     install,
     /// 우리 항목을 걷어 내고 다시 넣는다(낡았거나 일부만 있다).
+    ///
+    /// **한 번의 쓰기로 끝낸다.** 걷어 내기와 넣기를 두 번에 나눠 쓰면 그 사이에 죽었을 때 사용자에게
+    /// «훅이 사라진» 파일이 남는다. platform 은 트리를 메모리에서 다 고친 뒤 atomic 하게 한 번 쓴다.
     refresh,
     /// 우리 항목을 걷어 낸다.
     remove,
@@ -71,10 +79,19 @@ pub fn planFor(state: State, intent: Intent, want_events: usize) Plan {
                 // 순서·중복을 다루는 분기를 늘리는데, 우리 항목은 언제나 같은 모양이라 얻는 것이 없다.
                 if (k.ours_current != k.ours) return .refresh;
                 if (k.events_covered != want_events) return .refresh;
+                // 세트에서 뺀 이벤트에 우리 항목이 남아 있으면 개수만으로는 «다 덮었다» 로 보인다.
+                if (k.events_outside != 0) return .refresh;
                 return .leave;
             },
         },
     }
+}
+
+/// 계약 §2 세트로 판정한다. **호출자가 세트 크기를 넘기지 않는다** — 그 값이 어긋나면 «다 덮었다» 를
+/// 잘못 판정하는데, 세트는 이 저장소 안의 상수라 넘겨받을 이유가 없다. `planFor` 의 인자는 테스트가 다른
+/// 크기를 넣어 경계를 보기 위한 것이다.
+pub fn planForSet(state: State, intent: Intent) Plan {
+    return planFor(state, intent, command.events.len);
 }
 
 /// 이 계획이 사용자 파일을 **바꾸는가**. platform 이 락·백업·atomic write 를 준비할지 정하는 데 쓴다.
@@ -149,4 +166,69 @@ test "바꾸는 계획만 락·백업을 요구한다" {
     try testing.expect(mutates(.remove));
     try testing.expect(!mutates(.leave));
     try testing.expect(!mutates(.abort));
+}
+
+test "세트에서 뺀 이벤트에 남은 우리 항목을 걷어 낸다" {
+    // 개수만 비교하면 «세트 6개를 다 덮었다» 로 보여 그 항목이 영영 안 지워진다. 실제로 세트에서
+    // `PostToolUse` 를 뺀 적이 있으므로(계약 §3.1) 가상의 상황이 아니다.
+    const leftover: State = .{
+        .known = .{
+            .ours = 7,
+            .ours_current = 7,
+            .events_covered = 6, // 세트의 6개는 다 덮었지만
+            .events_outside = 1, // 세트 밖 이벤트에 하나가 더 남아 있다
+        },
+    };
+    try testing.expectEqual(Plan.refresh, planFor(leftover, .ensure, 6));
+
+    // 그 하나가 없으면 그대로 둔다 — 이 대조가 «세트 밖 항목 때문» 임을 증명한다.
+    const clean: State = .{ .known = .{ .ours = 6, .ours_current = 6, .events_covered = 6 } };
+    try testing.expectEqual(Plan.leave, planFor(clean, .ensure, 6));
+}
+
+test "세트 크기는 호출자가 넘기지 않는다" {
+    // 호출자가 그 수를 넘기면 어긋난 값이 «다 덮었다» 를 잘못 판정한다. 세트는 저장소 안의 상수다.
+    const full: State = .{ .known = .{
+        .ours = command.events.len,
+        .ours_current = command.events.len,
+        .events_covered = command.events.len,
+    } };
+    try testing.expectEqual(Plan.leave, planForSet(full, .ensure));
+    try testing.expectEqual(Plan.remove, planForSet(full, .uninstall));
+}
+
+test "Known 의 필드가 늘면 판정 누락을 잡는다" {
+    // 필드를 더하고 판정에 안 넣으면 **조용히 무시**된다. 개수로 못 박아 그 드리프트를 컴파일이 아니라
+    // 테스트에서 잡는다 — 새 필드를 넣는 사람이 여기서 «이 필드는 판정에 어떻게 쓰이나» 를 묻게 된다.
+    const fields = @typeInfo(Known).@"struct".fields;
+    try testing.expectEqual(@as(usize, 5), fields.len);
+
+    // 각 필드가 실제로 계획을 움직이는지(또는 의도적으로 안 움직이는지) 하나씩 흔들어 본다.
+    const base: Known = .{
+        .ours = command.events.len,
+        .ours_current = command.events.len,
+        .events_covered = command.events.len,
+    };
+    try testing.expectEqual(Plan.leave, planForSet(.{ .known = base }, .ensure));
+
+    var no_ours = base;
+    no_ours.ours = 0;
+    try testing.expectEqual(Plan.install, planForSet(.{ .known = no_ours }, .ensure));
+
+    var stale = base;
+    stale.ours_current -= 1;
+    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = stale }, .ensure));
+
+    var partial = base;
+    partial.events_covered -= 1;
+    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = partial }, .ensure));
+
+    var outside = base;
+    outside.events_outside = 1;
+    try testing.expectEqual(Plan.refresh, planForSet(.{ .known = outside }, .ensure));
+
+    // `legacy_present` 는 **의도적으로** 계획을 바꾸지 않는다(P1 — 자동 정리 금지).
+    var legacy = base;
+    legacy.legacy_present = true;
+    try testing.expectEqual(Plan.leave, planForSet(.{ .known = legacy }, .ensure));
 }

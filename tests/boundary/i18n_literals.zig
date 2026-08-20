@@ -65,7 +65,10 @@ const inventory = [_]Entry{
     //   · `remote_runtime.zig` 3 — 진단 문자열.
     .{ .path = "src/platform/macos/shell_integration.zig", .count = 48 },
     .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
-    .{ .path = "src/chrome/components/settings.zig", .count = 8 },
+    // `components/settings.zig`(8) 은 **0 이 되어 빠졌다.** 키 힌트·색 선택기·단축키 녹음 문구가
+    // comptime `const` 라 언어를 못 탔다 — 값이 컴파일 시점에 박히므로 `t()` 를 넣어도 안 바뀐다.
+    // 상수를 **함수로** 바꿔야 언어 전환이 다음 프레임에 따라온다. 폭 계산과 그리기가 같은 문자열을
+    // 봐야 하므로 한 자리에서 준다.
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
     .{ .path = "src/config/loader.zig", .count = 25 },
     .{ .path = "src/config/schema.zig", .count = 28 },
@@ -74,7 +77,9 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/app_session.zig", .count = 16 },
     .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 1 },
-    .{ .path = "src/platform/macos/app_session/sidebar.zig", .count = 3 },
+    // `sidebar.zig`(3) 는 **0 이 되어 빠졌다.** 에이전트 상태줄 넷 중 running 만 키를 거치고 나머지
+    // 셋(`입력 대기`·`대기중`·`상태 확인 중`)이 한국어 리터럴이라, 영어 화면에서 **한 줄 안에 언어가
+    // 섞였다**(사용자 보고). 같은 자리에 서는 문구는 함께 옮겨야 한다는 것이 그 사고의 형태다.
     .{ .path = "src/platform/macos/app_session/term.zig", .count = 1 },
     .{ .path = "src/platform/macos/chrome/lab.zig", .count = 15 },
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 2 },

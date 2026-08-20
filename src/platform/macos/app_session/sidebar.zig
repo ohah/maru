@@ -1758,9 +1758,10 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
     if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
     return switch (term.agent_state) {
         .running => runningStatusLine(self), // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처)
-        .blocked => self.allocator.dupe(u8, "? 입력 대기"),
-        .idle => self.allocator.dupe(u8, "\u{2713} 대기중"),
-        .unknown => self.allocator.dupe(u8, "\u{00b7} 상태 확인 중"),
+        // 마커(`?`·`✓`·`·`)는 **번역 대상이 아니다** — 기호이지 문장이 아니다. 문구만 키를 거친다.
+        .blocked => std.fmt.allocPrint(self.allocator, "? {s}", .{maru.i18n.t(.sb_awaiting_input)}),
+        .idle => std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{maru.i18n.t(.sb_agent_idle)}),
+        .unknown => std.fmt.allocPrint(self.allocator, "\u{00b7} {s}", .{maru.i18n.t(.sb_agent_unknown)}),
     };
 }
 

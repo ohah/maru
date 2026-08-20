@@ -281,17 +281,6 @@ pub fn build(b: *std.Build) void {
         win32_git_smoke_step.dependOn(noteSkippedStep(b, "win32-git-smoke", "Windows 호스트 전용 — git 백엔드의 Windows 갈래를 제품 경로로 잰다 (docs/windows-platform.md §2m.9)"));
     }
 
-    // 소스 컨트롤 그리기 스모크. 다른 스모크와 같이 step 으로 세운다(#2457 관례).
-    const win32_scm_draw_smoke_step = b.step("win32-scm-draw-smoke", "Run the Windows source control drawing smoke");
-    if (target.result.os.tag == .windows) {
-        const win32_scm_draw_smoke_cmd = b.addRunArtifact(exe);
-        win32_scm_draw_smoke_cmd.step.dependOn(b.getInstallStep());
-        win32_scm_draw_smoke_cmd.addArg("win32-scm-draw-smoke");
-        win32_scm_draw_smoke_step.dependOn(&win32_scm_draw_smoke_cmd.step);
-    } else {
-        win32_scm_draw_smoke_step.dependOn(noteSkippedStep(b, "win32-scm-draw-smoke", "Windows 호스트 전용 — git 상태를 D3D11 창에 그린다 (docs/windows-platform.md §2m.10)"));
-    }
-
     const app_pty_smoke_step = b.step("app-pty-smoke", "Run the live PTY app host frame smoke");
     const app_pty_smoke_cmd = b.addRunArtifact(exe);
     app_pty_smoke_cmd.step.dependOn(b.getInstallStep());

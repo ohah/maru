@@ -55,6 +55,25 @@ test "헤더 상수와 브리지 상수가 같다" {
     try expectHeader("MARU_SSH_MAX_TERM", ssh.max_term);
     try expectHeader("MARU_SSH_OUT_BYTES", ssh.out_bytes);
     try expectHeader("MARU_SSH_SCREEN_BYTES", ssh.screen_bytes);
+    // 컨트롤 축(S10b-2). **목록에서 빠지면 그 상수는 안 재어진다** — 한쪽만 고쳐도 링크는 되고
+    // 동작만 어긋나는데, 그것을 막으려고 이 테스트가 있다.
+    try expectHeader("MARU_SSH_CONTROL_BYTES", ssh.control_bytes);
+    try expectHeader("MARU_SSH_CONTROL_COMMAND_BYTES", ssh.control_command_bytes);
+    try expectHeader("MARU_SSH_CONTROL_NONE", ssh.control_none);
+    try expectHeader("MARU_SSH_CONTROL_OPENING", ssh.control_opening);
+    try expectHeader("MARU_SSH_CONTROL_REQUESTING_EXEC", ssh.control_requesting_exec);
+    try expectHeader("MARU_SSH_CONTROL_READY", ssh.control_ready);
+    try expectHeader("MARU_SSH_CONTROL_CLOSED", ssh.control_closed);
+}
+
+test "컨트롤 버퍼는 코어가 광고하는 한 패킷보다 크다" {
+    // **이 관계가 깨지면 컨트롤 채널이 아예 안 된다.** 코어는 살아 있는 채널에 한 패킷 몫을
+    // 요구하므로(계약 §3.4.1), 버퍼가 그보다 작으면 `feed` 가 **매번** `ShortBuffer` 다 —
+    // 코어가 패킷을 키우는 것만으로 이 층이 조용히 죽는다.
+    const one_packet = @import("mobile_ssh").test_client.control_max_packet;
+    try testing.expect(ssh.control_bytes >= one_packet);
+    // 한 패킷 몫만 대면 `feed` 한 번에 패킷 하나씩만 지난다 — 여유를 둔다는 약속도 함께 잰다.
+    try testing.expect(ssh.control_bytes >= 2 * one_packet);
 }
 
 test "헤더 결과 코드와 브리지 결과 코드가 같다" {

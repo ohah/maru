@@ -17,6 +17,7 @@ const maru = @import("maru");
 const client = maru.session.ssh.client;
 /// **계약 테스트가 서버 답을 지어내는 데 쓴다.** 그쪽은 `maru` 모듈을 못 보고(이 파일만 본다),
 /// 바이트를 손으로 적으면 프레이밍이 바뀔 때 테스트만 조용히 낡는다.
+pub const test_client = client;
 pub const test_wire = maru.session.ssh.wire;
 pub const test_packet = maru.session.ssh.packet;
 const private_key = maru.session.ssh.private_key;
@@ -35,8 +36,9 @@ pub const screen_bytes = 65536;
 /// 컨트롤 채널이 받아 둘 자리. 코어가 광고하는 한 패킷(`client.control_max_packet` = 8KiB)의
 /// **두 배**다 — 한 패킷 몫만 대면 `feed` 한 번에 패킷 하나씩만 지난다(계약 §3.4.1).
 pub const control_bytes = 16384;
-/// 컨트롤 명령의 최대 길이. 코어 상한(`client.max_control_command`)과 같은 값을 든다.
-pub const control_command_bytes = 512;
+/// 컨트롤 명령의 최대 길이. **숫자를 옮겨 적지 않고 코어 것을 그대로 든다** — 두 벌이면
+/// 코어가 상한을 바꿀 때 이쪽만 옛 값으로 남아 "왜인지 긴 명령이 거절된다" 가 된다.
+pub const control_command_bytes = client.max_control_command;
 
 /// 컨트롤 채널 상태(`MARU_SSH_CONTROL_*`). **터미널 상태와 다른 축이다** — 컨트롤이 어떻게 되든
 /// 터미널은 산다(계약 §3.4.1).

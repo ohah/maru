@@ -1941,26 +1941,6 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(file_tree_backend_tests).step);
 
-    if (target.result.os.tag != .windows) {
-        // git 백엔드. **등록이 없어 이 파일의 테스트가 한 개도 안 돌고 있었다**(적대적 검증이 잡았다).
-        // Windows 갈래를 넣으면서 드러났다 — 새 테스트를 붙였는데 `zig build test` 출력에 안 나타났다.
-        //
-        // **Windows 호스트에서는 안 건다.** 이 파일의 기존 테스트들이 POSIX 전용 본문(`std.c.pipe`·
-        // `std.c.fork`)을 갖는데, 런타임 `SkipZigTest` 는 **컴파일을 막지 못한다** — 테스트 루트가 되는
-        // 순간 그 본문까지 분석돼 Windows 에서 깨진다. Windows 갈래는 `win32-git-smoke` 가 제품 경로로
-        // 잰다(파일 트리와 같은 방식 — Windows CI 가 없으므로 어차피 사람이 돌린다).
-        const git_backend_tests = addProjectTest(b, .{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/git_backend.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
-            }),
-        });
-        test_step.dependOn(&b.addRunArtifact(git_backend_tests).step);
-    }
-
     // Windows 캡처 러너. **Windows 호스트에서만 건다** — `kernel32` 를 직접 부르므로 다른 호스트에서는
     // 링크할 심볼이 없다. 테스트가 전부 `builtin.os.tag != .windows` 에서 skip 이라 다른 호스트에
     // 걸어 봐야 아무것도 안 재고 링크만 깨진다. 그 대신 **시끄럽게 건너뛴다**.

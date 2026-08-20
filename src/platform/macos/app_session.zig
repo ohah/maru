@@ -3703,6 +3703,8 @@ pub const AppSession = struct {
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
+    /// 캡처 전용 — `MARU_FORCE_TAB_COUNT` 이 탭을 이미 늘렸나(`applyForcedTabCount`, 한 번만).
+    debug_tab_count_applied: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
     debug_web_term_opened: bool = false,
     // FP3: 파일 패널은 workspace 탭 트리와 독립적인 창-로컬 도크다. 실패 중 deinit을 위해
@@ -14078,6 +14080,8 @@ pub const AppSession = struct {
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
+        debug_fixtures.applyForcedTabCount(self); // 캡처 전용: 탭 바를 넘치게 해 ‹› 를 띄운다(한 번만)
+        debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)

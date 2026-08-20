@@ -993,3 +993,59 @@ fn forceCommitRun(self: *AppSession) void {
     if (self.scm_commit_field.text.items.len == 0) return; // 성공 뒤에는 상자가 비어 있다
     scm_dock_ops.submitCommit(self);
 }
+
+/// 탭 바를 **넘치게** 만든다(캡처 전용, `MARU_FORCE_TAB_COUNT=<n>`).
+///
+/// 좌우 스크롤 버튼(`‹`/`›`)은 탭이 바를 넘칠 때만 나타난다. rich 고정 폭이 `tab_width_cols`(코드
+/// 상수)라 1920px 창에서는 **탭 12개 이상**이 필요한데, 탭 추가는 `Cmd+T`(앱 단축키)라 PTY 입력으로
+/// 만들 수 없고 workspace 복원은 스크린샷 모드에서 적용되지 않는다. 그래서 그 버튼들의 렌더가 헤드리스로
+/// 확인되지 못했다 — 실측으로 배경이 glyph 와 같은 한 칸만 칠해지던 결함(#2478)이 그 사각에 있었다.
+///
+/// 사용자 `Cmd+T`와 **같은 진입점**(`newTermInActivePane`)을 태운다. 실제 셸이 그 수만큼 뜨므로 캡처
+/// 시나리오에서만 쓴다. 한 번만 동작한다(`debug_tab_count_applied`).
+pub fn applyForcedTabCount(self: *AppSession) void {
+    if (self.debug_tab_count_applied) return;
+    const raw = std.c.getenv("MARU_FORCE_TAB_COUNT") orelse return;
+    if (!self.surface_initialized) return; // 아직 pane 이 없다 — 다음 tick 에 다시 온다
+    self.debug_tab_count_applied = true;
+    const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return;
+    const cap = @min(want, 64); // 캡처 하네스가 셸을 무한히 띄우지 않게
+    var have = pane_ops.activePane(self).terms.items.len;
+    while (have < cap) : (have += 1) {
+        pane_ops.newTermInActivePane(self) catch break;
+    }
+}
+
+/// 탭 바 버튼의 **호버 배경**을 세운다(캡처 전용, `MARU_FORCE_TAB_HOVER=close|plus`).
+///
+/// ✕ glyph 와 `‹`/`›` 는 호버 없이도 그려지지만(각각 `close_tab=true`, 버튼 자리 상시 점유) **배경 quad
+/// 는 호버일 때만** 얹힌다. 그 배경이 버튼 폭을 덮는지가 #2478 의 쟁점이었는데, 캡처 하네스에 포인터가
+/// 없어 확인할 방법이 없었다 — `reapplyForcedSidebarHover` 가 사이드바 카드에서 푼 것과 같은 문제다.
+///
+/// **매 tick 다시 세운다.** 포인터가 탭 바 밖에 있으면 `hoverCursor` 가 곧바로 지운다(마우스가 창 위를
+/// 지나기만 해도 그렇다). 같은 값이면 재적용하지 않는다.
+///
+/// - `close` — 활성 탭의 ✕ 배경. 탭이 여럿일 때 그 탭에만 얹힌다.
+/// - `plus` — "+"(새 Term) 버튼 배경.
+///
+/// env 미설정이면 무동작.
+pub fn reapplyForcedTabHover(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_TAB_HOVER") orelse return;
+    if (!self.surface_initialized) return;
+    const spec = std.mem.span(raw);
+    const pane = pane_ops.activePane(self);
+    if (std.mem.eql(u8, spec, "close")) {
+        const idx = pane_ops.paneActiveTermIndex(self, pane);
+        if (self.hovered_tab_close) |cur| {
+            if (cur.pane == pane and cur.tab == idx) return;
+        }
+        tab_ops.setHoveredTabClose(self, .{ .pane = pane, .tab = idx });
+        self.metal_dirty = true;
+    } else if (std.mem.eql(u8, spec, "plus")) {
+        if (self.hovered_plus) |cur| {
+            if (cur == pane) return;
+        }
+        tab_ops.setHoveredPlus(self, pane);
+        self.metal_dirty = true;
+    }
+}

@@ -613,3 +613,61 @@ test "capture: env_drop 이 상속된 변수를 없앤다" {
     // cmd 는 없는 변수를 이름 그대로 남긴다 — 그것이 "없다" 의 모습이다.
     try testing.expect(std.mem.indexOf(u8, r.bytes, "[%MARU_DROP_PROBE%]") != null);
 }
+
+// **빈 값 덮어쓰기가 "없음" 이 아니라 "빈 값" 으로 가는가.** git 의 실제 덮어쓰기에 `GIT_ASKPASS=""` 가
+// 있다. 그 둘은 git 에게 **다른 뜻**이다 — 빈 값은 "askpass 를 쓰지 마라", 없음은 "기본 askpass 를
+// 골라라"(Windows 에서는 자격 증명 관리자일 수 있다). Windows 가 블록의 빈 항목을 버리면 우리는
+// 상속분을 걸러낸 뒤 **아무것도 안 남겨** 가드를 조용히 약화시킨다.
+test "capture: 빈 값으로 덮어쓰면 자식에게 '빈 값' 으로 간다 — '없음' 이 아니다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    setEnvForTest("MARU_EMPTY_PROBE", "inherited-nonempty");
+    defer setEnvForTest("MARU_EMPTY_PROBE", null);
+    // cmd 는 **정의된** 변수만 `set` 목록에 낸다. 이름이 목록에 있으면 정의된 것이고, 값이 비어 있으면
+    // 빈 값이다. `%VAR%` 확장만 보면 "빈 값" 과 "없음" 이 구별되지 않아 판정이 안 된다.
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "set MARU_EMPTY_PROBE" },
+        null,
+        .merged,
+        &.{.{ .name = "MARU_EMPTY_PROBE", .value = "" }},
+        &.{},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    std.debug.print("\n  EMPTYPROBE exit={d} out=[{s}]\n", .{ r.exit_code, r.bytes });
+    // `set NAME` 은 그 이름이 **정의돼 있을 때만** 0 으로 끝난다 — 이것이 "빈 값" 과 "없음" 을 가르는
+    // 진짜 판정이다. 실측: `MARU_EMPTY_PROBE=` 가 목록에 나오고 exit 0 이다.
+    try testing.expectEqual(@as(u32, 0), r.exit_code);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "MARU_EMPTY_PROBE=") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "inherited-nonempty") == null);
+}
+
+// **블록이 상속을 온전히 나르는가.** 정렬하지 않은 블록이나 잘못 만든 종결자는 자식이 보는 변수를
+// **조용히 줄인다** — 그러면 git 이 `HOME`·`PATH` 를 못 찾아 셸에서 보는 것과 다른 답을 낸다.
+// 덮어쓰기가 있는 자식과 없는 자식(부모 환경 그대로)이 **같은 수**를 보는지 센다.
+test "capture: 덮어쓰기가 있어도 자식이 보는 변수 수가 줄지 않는다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+
+    // 상속 그대로(블록을 안 만드는 갈래).
+    var plain = try capture(a, &.{ "cmd.exe", "/c", "set" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
+    defer plain.deinit(a);
+    // 덮어쓰기 하나(블록을 만드는 갈래). 새 이름이라 상속에서 걸러지는 것이 없다.
+    var built = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "set" },
+        null,
+        .stdout_only,
+        &.{.{ .name = "MARU_COUNT_PROBE", .value = "1" }},
+        &.{},
+        1 << 20,
+    );
+    defer built.deinit(a);
+
+    const plain_n = std.mem.count(u8, plain.bytes, "\n");
+    const built_n = std.mem.count(u8, built.bytes, "\n");
+    std.debug.print("\n  COUNTPROBE plain={d} built={d}\n", .{ plain_n, built_n });
+    // 우리가 하나 더했으므로 정확히 하나 늘어야 한다. 줄어들면 블록이 무언가를 잃은 것이다.
+    try testing.expectEqual(plain_n + 1, built_n);
+}

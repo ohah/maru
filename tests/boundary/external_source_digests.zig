@@ -627,7 +627,9 @@ pub const inventory = [_]Proof{
     // 리베이스로 값이 또 수렴했다(2026-08-20): 그 고침과 스크롤바 자리 슬라이스가 같은 파일을 건드려
     // 양쪽 digest 가 모두 낡았다. 사유는 위아래 둘 다 살아 있고 count 는 2 그대로다.
     // 수렴 뒤 도구로 다시 잰 값이다 — 두 변경이 한 트리에 함께 있는 상태의 해시다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f45b3cd505480544bf53354abf1647186230f873ffcd597901079904b07b7b47" },
+    // 탭바 버튼(✕·‹·›)을 3칸+가운데로 통일하며 hover 배경을 버튼 폭 전체로 칠하게 바꿔 또 낡았다
+    // (2026-08-20). 반사 접근은 그대로라 count 는 2 다 — 바뀐 것은 배경 quad 를 도는 루프뿐이다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b94c0c05909af6fdb12d1d11f3f5c2e5c8b9ccf835d6efce306afbc8cea023cd" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

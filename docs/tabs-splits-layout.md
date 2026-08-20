@@ -246,8 +246,14 @@ Node = leaf(Pane)
   (`coretext` `plus_start`)가 같은 값을 써 단일 정합("보이는 + = 클릭되는 +"). **`inPlusZone`은 cols까지가 아니라 버튼 폭
   (`plus_button_cols`)으로 한정** — "+" 오른쪽 빈 바 영역을 클릭해도 새 Term이 안 생긴다(빈 영역 무동작, 사용자 결정 ①; 그 영역은
   마지막 탭으로 clamp되는 기존 동작). 탭이 넘쳐 `has_scroll`이면 "+"는 ‹› 뒤 far-right로 폴백.
-  **버튼 폭은 처음 2칸이었다가 3칸으로 넓혔다**(2026-08-18 — 좁아서 누르기 어려웠다). 같은 변경에서 ‹›도 1칸에서
-  `scroll_button_cols`(2칸)로 넓혔고, 그래서 far-right 폴백 위치도 `tab_cols + 3`이 아니라 `tab_cols + scroll_button_cols * 2`다.
+  **네 버튼(✕·‹·›·+)은 모두 3칸이고 glyph 는 그 가운데 칸에 놓인다** — `close_button_cols`·`scroll_button_cols`·
+  `plus_button_cols`가 각자 폭을 소유하고, hit-test zone·hover 배경·glyph 위치가 **같은 상수**에서 나온다.
+  far-right 폴백 위치도 그래서 `tab_cols + scroll_button_cols * 2`다.
+  이력: "+"는 처음 2칸이었다가 3칸이 됐고(2026-08-18 — 좁아서 누르기 어려웠다), 같은 변경에서 ‹›가 1칸에서 2칸이
+  됐다. 그때 ‹›의 glyph 를 **바깥쪽 칸**에 둬 두 버튼 사이 여백을 만들었는데, 그러면 버튼 배경 안에서 glyph 가
+  한쪽에 붙는다 — ‹ 는 왼쪽 패딩이, › 는 오른쪽 패딩이 0이었다(사용자 보고 2026-08-20). ✕ 도 같은 문제였다:
+  렌더는 좌우 1칸씩 비웠는데 **클릭 zone 과 hover 배경이 2칸**이라 배경이 ✕ 왼쪽 가장자리에 붙었다. 셋 다 3칸+
+  가운데로 통일해 "+"와 같은 규율로 맞췄다.
 - **divider 렌더·드래그 리사이즈(PR6)**: 두 panel 사이 경계에 divider 선을 그리고, 끌어서 비율을 조절한다. 선은
   layout을 안 바꾸고(틈 없이 abut) **seam 중심 overlay 셀**로 터미널 위·커서 아래에 그린다(`metal_frame.replace`의
   `pane_overlay_cells`, cursor suffix 앞 insert). hit-test는 `layoutDividers`가 주는 seg(split 노드+경계 pos+부모

@@ -1960,6 +1960,61 @@ test "w5-cmd-user: 사용자 PROMPT를 덮지 않는다" {
     try testing.expect(kept and osc);
 }
 
+/// Windows PowerShell 5.1 의 실기 경로. **pwsh 7 과 갈라 두는 이유가 있다** — 5.1 은 모든 Windows 에
+/// 기본으로 있고 pwsh 7 은 따로 깔아야 한다. 즉 **기본값으로 쓰이는 쪽은 5.1** 인데, 여기 오기 전까지
+/// 실제로 띄워 보는 테스트가 하나도 없었다(pwsh 7 과 cmd 만 있었다).
+///
+/// 둘은 `integration.familyOf` 가 똑같이 `.powershell` 로 보고 **같은 인자를 받는다.** 그래서 pwsh 7 에서
+/// 통과한다고 5.1 에서 통과한다는 보장이 없다 — 프롬프트 본문이 7 전용 문법(삼항·`??`·`$PSStyle`)을
+/// 쓰면 5.1 에서만 조용히 깨진다. 그 갈림을 여기서 못 박는다.
+const powershell51_test_path = "C:" ++ back_slash ++ "Windows" ++ back_slash ++ "System32" ++ back_slash ++
+    "WindowsPowerShell" ++ back_slash ++ "v1.0" ++ back_slash ++ "powershell.exe";
+
+test "w5-powershell51: 통합을 켜면 Windows PowerShell 5.1 도 OSC 를 내고 대화형으로 남는다" {
+    const a = std.testing.allocator;
+    var s = PtySession.spawn(a, .{
+        .command = powershell51_test_path,
+        .shell_integration = .inline_injection,
+        .size = .{ .cols = 120, .rows = 30 },
+    }) catch return error.SkipZigTest;
+    defer s.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    // 5.1 은 7 보다 뜨는 데 오래 걸린다 — 짧게 잡으면 "OSC 가 없다" 가 아니라 "아직 안 떴다" 를 잰다.
+    try collectFor(&s, a, &out, 8000);
+    out.clearRetainingCapacity();
+
+    try s.writeInput("cd C:" ++ back_slash ++ "Windows" ++ crlf);
+    try collectFor(&s, a, &out, 8000);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]9;9;C:" ++ back_slash ++ "Windows") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;B") != null);
+
+    // 종료 코드가 프롬프트에 실린다 — 값까지 본다. D 가 나오기만 하고 코드가 틀리면 거터가 거짓말한다.
+    out.clearRetainingCapacity();
+    try s.writeInput("cmd /c exit 3" ++ crlf);
+    try collectFor(&s, a, &out, 8000);
+    try testing.expect(std.mem.indexOf(u8, out.items, "]133;D") != null);
+    try expectExitCode(out.items, "3");
+
+    out.clearRetainingCapacity();
+    try s.writeInput("cmd /c exit 0" ++ crlf);
+    try collectFor(&s, a, &out, 8000);
+    try expectExitCode(out.items, "0");
+}
+
+// **대조군** — 위 테스트가 `SkipZigTest` 로 조용히 빠지면 아무것도 안 잰 채 초록이 된다. 5.1 은 모든
+// Windows 에 있으므로, Windows 에서 **그 실행 파일이 실제로 있는지**를 따로 못 박는다. 없으면 위
+// 테스트의 skip 이 "이 기계에 없어서" 가 아니라 **경로가 틀려서**라는 뜻이다.
+test "w5-powershell51: 실기 경로가 이 호스트에 실제로 있다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = std.Io.Dir.cwd().openFile(std.testing.io, powershell51_test_path, .{}) catch |err| {
+        std.debug.print("PS 5.1 을 못 열었다({s}): {s}\n", .{ powershell51_test_path, @errorName(err) });
+        return err;
+    };
+    f.close(std.testing.io);
+}
+
 test "w5-pwsh: 통합을 켜면 pwsh가 OSC를 내고 대화형으로 남는다" {
     const a = std.testing.allocator;
     var s = PtySession.spawn(a, .{

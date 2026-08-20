@@ -25,6 +25,7 @@ const workspace_ops = @import("workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
+const editor_selection = maru.session.editor.selection;
 const chrome_editor = maru.chrome.components.editor_view;
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
@@ -1312,6 +1313,38 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     return true;
 }
 
+/// 편집기 본문에서 **더블클릭(단어)·트리플클릭(줄)**. 잡았으면 `true`.
+///
+/// **`AnchorKind`가 여기서 정해진다.** `anchor`가 점이 아니라 **범위**인 이유가 이것이다 — 단어를
+/// 잡고 뒤로 끌어도 그 단어가 통째로 남아야 하는데, 점이면 잘린다(`selection.zig` 머리말).
+/// 이어지는 드래그가 그 단위로 늘어나는 것은 `dragBodySelection`이 맡는다.
+///
+/// **`pxToCell`보다 먼저 불려야 한다** — 그 함수는 영역 밖 좌표를 터미널 grid로 clamp하므로,
+/// 편집기 좌표가 거기까지 가면 터미널에 단어/줄 선택 블록이 생긴다(도크가 같은 부류로 제보됐다).
+pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64) bool {
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return false;
+    const off = hitTestBody(term, x_px, y_px) orelse return false;
+    const doc = term.rt.editor_doc orelse return false;
+
+    const range: struct { lo: usize, hi: usize, kind: editor_selection.AnchorKind } = if (whole_line) blk: {
+        // **줄 전체.** 개행은 뺀다 — 붙여넣기가 줄바꿈을 하나 더 만들지 않게 한다(트리플클릭이
+        // 문단 사이를 벌리는 것은 사용자가 기대하는 바가 아니다).
+        const li = doc.file.lines.lineAt(@min(off, doc.file.lines.byteLen()));
+        const line = doc.file.lines.line(li) orelse return false;
+        break :blk .{ .lo = line.start, .hi = line.contentEnd(), .kind = .line };
+    } else blk: {
+        const w = editor_selection.wordRangeAt(doc.file.doc.content, off);
+        break :blk .{ .lo = w.lo, .hi = w.hi, .kind = .word };
+    };
+
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, range.kind);
+    // **드래그를 이어서 arm한다** — 더블클릭 후 끌면 단어 단위로 늘어난다. 뗌이 소유권을 놓는다.
+    self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
+    self.metal_dirty = true;
+    return true;
+}
+
 /// 드래그·뗌을 소비한다. `kind`는 호스트 관례(2=drag, 3=up).
 ///
 /// **`focus`만 움직인다** — `anchor_*`는 down이 세운 자리에 남는다. 그것이 드래그 선택의 정의이고,
@@ -1325,7 +1358,24 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
         2 => {
             const off = hitTestBody(owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
             if (owner.term.rt.editor_selection) |*sel| {
-                sel.focus = off;
+                // **잡은 단위로 늘어난다**(`AnchorKind` doc). 더블클릭 뒤 끌면 지나가는 단어가
+                // 통째로, 트리플클릭 뒤 끌면 줄이 통째로 들어온다 — 글자 단위로 늘면 잡은 단어의
+                // 반쪽이 남아 사용자가 본 것과 어긋난다.
+                sel.focus = switch (sel.kind) {
+                    .simple => off,
+                    .word => blk: {
+                        const doc = owner.term.rt.editor_doc orelse break :blk off;
+                        const w = editor_selection.wordRangeAt(doc.file.doc.content, off);
+                        // 앞으로 끌면 그 단어의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
+                        break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
+                    },
+                    .line => blk: {
+                        const doc = owner.term.rt.editor_doc orelse break :blk off;
+                        const li = doc.file.lines.lineAt(@min(off, doc.file.lines.byteLen()));
+                        const line = doc.file.lines.line(li) orelse break :blk off;
+                        break :blk if (off >= sel.anchorHi()) line.contentEnd() else line.start;
+                    },
+                };
                 self.metal_dirty = true;
             }
             return true;
@@ -6960,4 +7010,76 @@ test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(6);
     try testing.expect(!copySelection(fx.session));
     try testing.expectEqual(@as(usize, 0), fx.session.chrome_clipboard_write.len);
+}
+
+test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {
+    // **`AnchorKind`가 있는 이유를 재는 테스트다.** anchor가 점이면 단어를 잡고 뒤로 끌 때 그
+    // 단어가 잘린다 — `selection.zig` 머리말이 anchor를 **범위**로 둔 근거가 그것이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // "alpha beta gamma\ndelta epsilon\n" — 단어 경계가 뚜렷하다.
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "w.txt", .data = "alpha beta gamma\ndelta epsilon\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    const text_x0: i32 = @as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px));
+    const y0: i32 = @as(i32, @intCast(body.y)) + inset;
+    const pane = pane_ops.activePane(fx.session);
+    // 첫 줄 8열("beta"의 b는 6열, 8열은 그 안).
+    const on_beta: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(8 * @as(u32, geom.cell_w_px))));
+    const row0: f64 = @floatFromInt(y0 + 1);
+
+    // ⑴ **더블클릭 → 단어.** "beta"는 6..10.
+    try testing.expect(selectWordOrLineAt(fx.session, pane, false, on_beta, row0));
+    const w = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(editor_selection.AnchorKind.word, w.kind);
+    try testing.expectEqual(@as(usize, 6), w.start());
+    try testing.expectEqual(@as(usize, 10), w.end());
+
+    // ⑵ **드래그가 단어 단위로 는다.** "gamma"(11..16) 안으로 끌면 그 끝까지 삼킨다.
+    const on_gamma: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(13 * @as(u32, geom.cell_w_px))));
+    try testing.expect(dragBodySelection(fx.session, 2, on_gamma, row0));
+    const w2 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 6), w2.start()); // 잡은 단어의 시작이 남는다
+    try testing.expectEqual(@as(usize, 16), w2.end()); // "gamma" 끝까지
+
+    // ⑶ **뒤로 끌어도 잡은 단어가 안 잘린다.** "alpha"(0..5) 안으로 끈다.
+    const on_alpha: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(2 * @as(u32, geom.cell_w_px))));
+    try testing.expect(dragBodySelection(fx.session, 2, on_alpha, row0));
+    const w3 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 0), w3.start()); // "alpha" 시작까지
+    try testing.expectEqual(@as(usize, 10), w3.end()); // **"beta" 끝이 남는다** — anchor가 범위다
+    try testing.expect(dragBodySelection(fx.session, 3, on_alpha, row0));
+
+    // ⑷ **트리플클릭 → 줄.** 개행은 뺀다.
+    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row0));
+    const l = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(editor_selection.AnchorKind.line, l.kind);
+    try testing.expectEqual(@as(usize, 0), l.start());
+    try testing.expectEqual(@as(usize, 16), l.end()); // "alpha beta gamma" — 개행 앞
+
+    // ⑸ **줄 단위 드래그.** 둘째 줄로 끌면 그 줄 끝까지.
+    const row1: f64 = @floatFromInt(y0 + @as(i32, @intCast(geom.cell_h_px)) + 1);
+    try testing.expect(dragBodySelection(fx.session, 2, on_beta, row1));
+    const l2 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 0), l2.start());
+    try testing.expectEqual(@as(usize, 30), l2.end()); // "delta epsilon" 끝(17+13)
+
+    // ⑹ 복사가 그 범위를 뜬다.
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("alpha beta gamma\ndelta epsilon", fx.session.chrome_clipboard_write);
+    try testing.expect(dragBodySelection(fx.session, 3, on_beta, row1));
 }

@@ -542,9 +542,36 @@ fn buildDrawListGlyphFrameProbe(
     var font_registry = renderer.FontIdentityRegistry.init(allocator);
     defer font_registry.deinit();
 
+    // **덤프를 요청했을 때만 실제 셀 메트릭을 싣는다.** 메트릭이 없으면(0) atlas 가 슬롯을 셀 배수가
+    // 아니라 `font_size × scale` **정사각**으로 잡고(`glyph_atlas.estimateGlyphBitmapSize` 폴백),
+    // `writeGridBitmapDump` 는 그 슬롯 폭에서 셀 크기를 거꾸로 추정한다. 그래서 격자 덤프의 픽셀 배치가
+    // 제품과 어긋난다 — **이 덤프가 "눈으로 보는 유일한 헤드리스 경로"인데 거짓 신호를 준다.**
+    //
+    // 실측으로 두 번 오판을 유도했다(2026-08-20): ⑴ 4글자 합자 슬롯이 4칸으로 안 넓어진 것처럼 보였다
+    // (실제로는 span 이 정사각 폴백에 반영되지 않은 것), ⑵ 탭 바 버튼의 glyph 가 칸 안에서 3px 씩
+    // 치우쳐 보였다(네 glyph 가 **똑같이** 3px 이라 글리프 특성이 아니라 계통 오차였다). 메트릭을 실으면
+    // 같은 픽스처에서 버튼 좌우 여백이 17px/18px 로 대칭이 된다.
+    //
+    // **기본 경로(덤프 없음)는 그대로 둔다.** `cache_key.cell_width_px` 가 0 이 아니게 되면 atlas 슬롯
+    // 크기와 upload_bytes 가 달라져 계약 테스트가 잠근 값이 흔들린다. 덤프는 "눈으로 보는" 모드라
+    // 그 값을 계약으로 쓰지 않으므로 여기서만 바꾼다(`MARU_CORETEXT_SMOKE_TEXT` 가 계약 값을 흔드는
+    // 것을 허용하는 것과 같은 규율).
+    const dump_metrics: ?coretext_bridge.CellMetricsResult = if (std.c.getenv("MARU_CORETEXT_GLYPH_DUMP") == null) null else blk: {
+        var m: coretext_bridge.CellMetricsResult = .{};
+        coretext_bridge.maru_macos_coretext_font_cell_metrics(
+            appearance.font.family.ptr,
+            appearance.font.family.len,
+            appearance.font.size,
+            &m,
+        );
+        break :blk if (m.status == 0 and m.cell_width_px > 0 and m.cell_height_px > 0) m else null;
+    };
     const shaper = coretext_shaper.CoreTextDrawListShaper{
         .appearance = appearance,
         .shape_draw_list = maru_macos_coretext_shape_draw_list,
+        .cell_width_px = if (dump_metrics) |m| @intCast(m.cell_width_px) else 0,
+        .glyph_cell_width_px = if (dump_metrics) |m| @intCast(m.cell_width_px) else 0,
+        .cell_height_px = if (dump_metrics) |m| @intCast(m.cell_height_px) else 0,
     };
     var shaped = try shaper.shape(allocator, draw_list, &font_registry);
     defer shaped.deinit(allocator);
@@ -870,6 +897,11 @@ fn readSmokeText() []const u8 {
 ///
 /// 업로드된 슬롯을 가로로 이어 붙인다(슬롯 폭이 칸 수에 비례하므로 합자는 2~3배 넓게 나온다).
 /// 글리프를 **셀 격자 위 제 자리에** 합성해 화면에 가까운 PGM 을 남긴다(배경·커서는 없다).
+///
+/// **픽셀 배치를 믿으려면 셀 메트릭이 실려 있어야 한다.** 덤프 모드는 shaper 에 실제 폰트 메트릭을
+/// 넣어(`dump_metrics`) 슬롯이 셀 배수로 잡히게 한다 — 메트릭이 0 이면 atlas 가 정사각으로 폴백하고
+/// 이 덤프가 그 슬롯에서 셀 크기를 거꾸로 추정해 배치가 어긋난다(실측 2026-08-20: 탭 바 버튼 glyph 가
+/// 칸 안에서 일제히 3px 밀려 보였다). 그 함정의 근거는 shaper 를 만드는 자리의 주석이 소유한다.
 ///
 /// 글리프를 가로로 이어 붙인 덤프(`writeGlyphBitmapDump`)는 "이 글리프가 온전한가"는 보여 주지만
 /// **레이아웃은 못 보여 준다** — 탭 폭처럼 배치가 문제인 회귀는 그 그림으로 판정할 수 없다. 이 덤프는

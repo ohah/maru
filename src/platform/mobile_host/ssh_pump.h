@@ -55,8 +55,9 @@ typedef struct {
     /// 사람 화면을 읽게 된다(계약 docs/control-plane.md §4a).
     ///
     /// **줄 경계가 아니다.** 패킷이 실어 온 만큼이라 host 가 줄 단위로 이어 붙인다.
-    /// 없으면 컨트롤 바이트를 **안 가져간다** — 그러면 코어가 배압으로 멈추므로, 채널을 열
-    /// 생각이면 이 훅도 함께 둔다.
+    /// **이 훅이 없으면 채널을 못 연다**(`maru_ssh_pump_open_control` 이 거절한다). 받을 사람이
+    /// 없으면 컨트롤 버퍼가 차서 코어가 배압으로 멈추고 **터미널까지 함께 멈춘다** — 채널 둘을
+    /// 독립으로 만든 이유를 그 자리에서 잃는다.
     void (*control)(void *ctx, const unsigned char *bytes, unsigned long len);
     void *ctx;
 } MaruSshPumpHooks;

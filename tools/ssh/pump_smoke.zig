@@ -646,3 +646,50 @@ test "안 돌 때 쓰거나 크기를 바꿔도 조용하다" {
     pump.maru_ssh_pump_resize(100, 40);
     try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
 }
+
+test "컨트롤 훅이 없으면 채널을 못 연다" {
+    // **받을 사람이 없으면 열지 않는다.** 열어 두면 컨트롤 버퍼가 차서 코어가 배압으로 멈추고
+    // 터미널까지 함께 멈춘다 — 채널 둘을 독립으로 만든 이유를 그 자리에서 잃는다.
+    //
+    // **도는 중에 재야 한다.** 안 도는 펌프는 훅과 무관하게 실패하므로, 그 상태로 재면 이 규칙을
+    // 지워도 초록이다(변이 검사에서 실제로 살아남았다). 그래서 조용한 상대에 붙여 두고 부른다 —
+    // 셸은 안 떴지만 훅 검사가 **그보다 먼저** 나오므로 이름으로 가릴 수 있다.
+    var server = try FakeServer.listen(.silent);
+    defer server.stop();
+    try server.start();
+
+    var secret: [64]u8 = @splat(1);
+    var host_z: [16]u8 = @splat(0);
+    @memcpy(host_z[0.."127.0.0.1".len], "127.0.0.1");
+    var user_z: [8]u8 = @splat(0);
+    user_z[0] = 'u';
+    var fp_z: [64]u8 = @splat(0);
+    @memcpy(fp_z[0.."SHA256:zzz".len], "SHA256:zzz");
+    var cfg: pump.MaruSshPumpConfig = .{
+        .host = &host_z,
+        .port = server.port,
+        .user = &user_z,
+        .secret = &secret,
+        .cols = 80,
+        .rows = 24,
+        .expect_fingerprint = &fp_z,
+    };
+    var hooks: pump.MaruSshPumpHooks = .{
+        .lock = null,
+        .unlock = null,
+        .screen = onScreen,
+        .take_response = onTakeResponse,
+        .state_changed = onState,
+        .control = null, // **훅이 없다**
+        .ctx = null,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, &hooks));
+    defer pump.maru_ssh_pump_stop();
+
+    var waited: usize = 0;
+    while (waited < 2000 and pump.maru_ssh_pump_is_running() == 0) : (waited += 20) sleepMs(20);
+
+    try std.testing.expect(pump.maru_ssh_pump_open_control("x", 1) != 0);
+    try std.testing.expectEqualStrings("no_control_hook", std.mem.span(pump.maru_ssh_pump_error()));
+    try std.testing.expectEqual(@as(c_uint, 0), pump.maru_ssh_pump_control_state());
+}

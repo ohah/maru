@@ -248,6 +248,8 @@ static int flush_out(void) {
 /// **가져가야 코어가 계속 돈다** — 안 가져가면 배압으로 `feed` 가 멈춘다(계약 §3.4.1). 훅이
 /// 없으면 채널을 열 일도 없으므로 그때는 들어올 바이트도 없다.
 static void drain_control(void) {
+    // 훅이 없으면 채널도 안 열렸다(`maru_ssh_pump_open_control` 이 막는다) — 올 바이트가 없다.
+    if (!g_hooks.control) return;
     pthread_mutex_lock(&g_session_lock);
     unsigned int len = maru_mobile_ssh_control_len(g_handle);
     const unsigned char *ptr = maru_mobile_ssh_control_ptr(g_handle);
@@ -255,16 +257,12 @@ static void drain_control(void) {
     if (len == 0) return;
 
     host_lock();
-    if (g_hooks.control) g_hooks.control(g_hooks.ctx, ptr, len);
+    g_hooks.control(g_hooks.ctx, ptr, len);
     host_unlock();
 
-    // **훅이 있을 때만 지운다.** 없는데 지우면 그 바이트는 아무도 못 본 채 사라진다 —
-    // 조용히 사라지는 대신 코어가 배압으로 멈추게 두는 편이 낫다(원인이 보인다).
-    if (g_hooks.control) {
-        pthread_mutex_lock(&g_session_lock);
-        maru_mobile_ssh_control_consume(g_handle, len);
-        pthread_mutex_unlock(&g_session_lock);
-    }
+    pthread_mutex_lock(&g_session_lock);
+    maru_mobile_ssh_control_consume(g_handle, len);
+    pthread_mutex_unlock(&g_session_lock);
 }
 
 /// 화면 바이트를 host 에 넘기고, 코어가 만든 답을 원격으로 돌려보낸다.
@@ -726,7 +724,22 @@ unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len)
 }
 
 int maru_ssh_pump_open_control(const char *command, unsigned int len) {
-    if (!g_running || g_handle == 0) return -1;
+    // **훅 검사가 먼저다.** 훅 유무는 펌프가 도는지와 무관한 정적 조건이고, 뒤에 두면 붙는
+    // 중에는 "안 돈다" 로만 답해 **host 가 진짜 이유를 못 본다**(그 상태로 붙고 나서 다시 부르면
+    // 그때야 진짜 이유가 나온다 — 두 번 걸리는 실수다).
+    //
+    // **받을 사람이 없으면 열지 않는다.** 처음에는 "훅이 없으면 안 가져간다" 로 뒀는데, 그러면
+    // 컨트롤 버퍼가 차서 코어가 배압으로 멈추고 **터미널까지 함께 멈춘다** — 채널 둘을 독립으로
+    // 만든 이유를 그 자리에서 잃는다(적대적 검증이 잡았다). 여는 자리에서 거절하면 그 상황이
+    // 아예 생기지 않는다.
+    if (!g_hooks.control) {
+        set_error("no_control_hook");
+        return -1;
+    }
+    if (!g_running || g_handle == 0) {
+        set_error("not_running");
+        return -1;
+    }
     pthread_mutex_lock(&g_session_lock);
     int st = maru_mobile_ssh_open_control(g_handle, (const unsigned char *)command, len);
     pthread_mutex_unlock(&g_session_lock);

@@ -1101,8 +1101,24 @@ Windows 아닌 호스트에서는 시끄럽게 건너뛴다.
 > **편집 반영(grep)·빌드 rc·바이너리 해시 변화** 셋을 확인하고, 하나라도 어긋나면 그 측정을 버린다.
 > "대조군을 돌렸다" 는 그 셋을 본 뒤에만 할 수 있는 말이다.
 
-**남은 것은 ⒝ 그리기다.** chrome 은 이미 Windows 로 컴파일되므로(§2m) 행을 프레임으로 낮추는 배선이
-남았고, 그 앞에 `std.fs.path.join` 제품 자리 둘을 봐야 한다(§2m.3).
+**⒝ 그리기는 배선이 아니다 — 앞 문장이 틀렸었다.** 여기 "chrome 이 Windows 로 컴파일되므로 행을 프레임으로
+낮추는 배선만 남았다" 고 적었는데, 재 보니 아니다. **컴파일되는 것과 그릴 호스트가 있는 것은 다른
+이야기**였다(W8.0 이 세운 것은 앞쪽뿐이다). 두 가지가 통째로 없다.
+
+| 빠진 것 | 실측 |
+|---|---|
+| **Windows 의 `ChromeDraw` 낮추기** | macOS 는 `chrome/chrome_draw_lowering.zig`(1,012 줄)+`metal_lowering.zig`(300 줄), 모바일은 `mobile_bridge.zig`(4,818 줄). **Windows 는 없다** — D3D11 은 터미널 셀만 그리고, 공용 `buildFrameAfterDrainWithRasterizer` 도 `renderSnapshot()` 하나만 조립한다 |
+| **탐색기의 중립 뷰** | ADE 표면 넷 중 셋(`session_dock`·`scm_dock`·`archive_detail`)은 `ViewError!draw.ChromeDraw` 를 내는데 **파일 트리만 없다.** `app_session.zig`(60,814 줄, macOS 전용)가 `file_tree_rows` 를 직접 훑어 Metal 셀·쿼드를 찍는다 — 관련 참조 166 곳 |
+
+Windows 렌더러가 그것을 이미 적어 두었다 — `d3d11_cells.zig` 가 "파이프라인이 하나뿐이라 문제가 없고,
+둘이 되는 시점(**chrome quad**·kitty 이미지)에는 각자가 자기…" 라고 쓴다. 추론이 아니라 기록이다.
+
+**선례는 계약 안에 있다.** W7.2c 가 터미널에서 "공용 조립기 + 꽂는 래스터라이저" 로 분담을 정했고
+(`buildFrameAfterDrainWithRasterizer`), `win32_terminal.zig` 머리말이 거울 코드를 경고한다 —
+*"한쪽만 고쳐지는 순간 조용히 깨진다."* ADE 에 같은 분담을 적용하면 위 표의 두 칸이 곧 두 슬라이스다.
+
+**⒝-0(경로 조립)은 끝났다**(§2m.5). 남은 둘은 서로 독립이고, 어느 쪽을 먼저 할지는 결정 사항이라
+여기 적어 두고 진행하지 않는다(AGENTS.md 핵심 원칙).
 
 
 ### 2m.5 이름 바꾸기가 만든 경로가 중립 층에서 "루트 밖" 으로 답한다 (W8.2 ⒝-0, 실측 2026-08-20)

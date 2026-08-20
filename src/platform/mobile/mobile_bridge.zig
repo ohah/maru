@@ -2055,6 +2055,44 @@ fn resolveColor(c: terminal.types.Color, fallback: color.Rgb) color.Rgb {
     };
 }
 
+/// 그 칸이 실제로 낼 **글자색**(테스트·진단용). 화면 quad 는 아틀라스에 셀이 있어야 나므로
+/// (굽기가 밀리면 안 난다) 속성이 제대로 풀리는지는 이 값으로 잰다 — 예전에는 데모 줄을
+/// 눈으로 보는 것이 유일한 판정이었다.
+pub fn cellFgAt(row: u16, col: u16) ?color.Rgb {
+    const core = &(term_core orelse return null);
+    const snap = core.snapshot();
+    if (row >= term_rows or col >= term_cols) return null;
+    const tk = tokens.Tokens.rich(themeColors());
+    return paintCell(snap.cells[core.index(row, col)].style, &tk).fg;
+}
+
+/// 그 칸의 글자가 차지하는 칸 수(1 또는 2). 폭이 틀리면 화면이 통째로 밀린다.
+pub fn cellWidthAt(row: u16, col: u16) ?u8 {
+    const core = &(term_core orelse return null);
+    const snap = core.snapshot();
+    if (row >= term_rows or col >= term_cols) return null;
+    const cell = snap.cells[core.index(row, col)];
+    if (cell.continuation) return 0; // 2셀 글자의 **뒷칸**이다(앞칸이 폭을 든다)
+    if (cell.codepoint == 0) return 1;
+    return @intCast(maru.width.cellWidth(cell.codepoint));
+}
+
+/// 팔레트 색(테스트·진단용). **테스트가 색 숫자를 손으로 적으면** 팔레트가 바뀔 때 조용히
+/// 어긋난다 — 제품이 쓰는 함수를 그대로 묻는다.
+pub fn paletteColor(i: u8) color.Rgb {
+    return color.xterm256(i);
+}
+
+/// 지금 테마의 본문 배경색(테스트·진단용 — 숨김 셀의 글자가 이 색이다).
+pub fn terminalBackgroundColor() color.Rgb {
+    return hex(cfg().theme.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E });
+}
+
+/// 지금 테마의 전경색(테스트·진단용 — 반전 셀의 배경이 이 색이다).
+pub fn foregroundColor() color.Rgb {
+    return hex(cfg().theme.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA });
+}
+
 /// 셀 하나가 실제로 낼 색과 장식. **코어가 셀에 담은 속성을 여기서 푼다** — 예전에는
 /// `foreground` 하나만 읽어서 배경색·reverse·밑줄·dim 이 전부 화면에서 사라졌다.
 const CellPaint = struct {

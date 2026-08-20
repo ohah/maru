@@ -4396,3 +4396,153 @@ test "붙은 뒤에는 아무 말도 안 한다 — 화면이 곧 답이다" {
     bridge.maru_mobile_set_ssh_status(0, "", 0); // 세션 없음 — 조용하다
     try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
 }
+
+// ── 화면으로만 보던 것을 여기서 잰다 (데모 바이트 제거의 짝) ────────────────────
+//
+// **데모 바이트가 유일한 판정자였다.** 터미널에 박아 둔 시험용 줄이 박스·블록·브라유·SGR·
+// 양폭 한글을 화면에 뿌렸고, 그것이 "합성·속성 경로가 서 있나" 의 판정이었다 — 사람이 볼 때만.
+// 그 줄을 없애면서(사용자 요청) 판정자도 같이 사라졌으므로, 그 축들을 여기로 옮긴다.
+
+/// 본문에 그 색 배경 quad(kind=0)가 있나. 색은 0~255 로 준다.
+fn hasBgQuad(n: u32, r: u8, g: u8, b: u8) bool {
+    const quads = bridge.maru_mobile_quads();
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const q = quads[i];
+        if (q.kind != 0) continue;
+        const qr: u8 = @intFromFloat(@round(q.r * 255));
+        const qg: u8 = @intFromFloat(@round(q.g * 255));
+        const qb: u8 = @intFromFloat(@round(q.b * 255));
+        if (qr == r and qg == g and qb == b) return true;
+    }
+    return false;
+}
+
+/// **입력 목적지를 로컬로 돌린다.** 앞 SSH 테스트가 원격(`sink=1`)으로 두고 끝나면 친 글자가
+/// 코어에 안 가고 본문이 통째로 빈다 — 그러면 이 테스트들이 chrome 라벨만 세며 초록이 된다.
+fn localInput() void {
+    bridge.maru_mobile_set_input_sink(0);
+}
+
+/// 이 글자들을 아틀라스에 미리 굽는다(본문 quad 가 나오려면 셀이 있어야 한다).
+fn prebake(text: []const u8) void {
+    // **길이를 손으로 안 센다** — 11바이트를 10 으로 적었더니 뒤 글자가 그 시퀀스에 먹혀
+    // 본문이 통째로 비었고, 테스트는 chrome 라벨만 세며 초록이 될 뻔했다.
+    const clear = "\x1b[2J\x1b[H\x1b[0m";
+    _ = bridge.maru_mobile_input(clear, clear.len);
+    _ = bridge.maru_mobile_input(text.ptr, text.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bakeMisses();
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+fn feedFresh(text: []const u8) u32 {
+    // **글자를 먼저 구워 둔다.** 안 구우면 본문에 글자 quad 가 아예 안 나고, 그러면 이 테스트가
+    // chrome 라벨만 세면서 초록이 된다(실제로 그랬다 — 배경일치 0, kind1 5개가 전부 chrome).
+    // **길이를 손으로 안 센다** — 11바이트를 10 으로 적었더니 뒤 글자가 그 시퀀스에 먹혀
+    // 본문이 통째로 비었고, 테스트는 chrome 라벨만 세며 초록이 될 뻔했다.
+    const clear = "\x1b[2J\x1b[H\x1b[0m";
+    _ = bridge.maru_mobile_input(clear, clear.len);
+    _ = bridge.maru_mobile_input(text.ptr, text.len);
+    return bridge.maru_mobile_build(402, 874, now());
+}
+
+test "합성 대상 글자도 굽기 목록에 오른다 — 컬러가 아니다" {
+    // 박스 드로잉·블록·브라유는 폰트가 아니라 **절차 합성**으로 나오는 것들이라(계약 §글리프),
+    // 그 코드포인트가 굽기 목록에 오르지 않으면 화면에서 통째로 빈칸이 된다. 예전에는 데모
+    // 줄을 눈으로 보는 것이 유일한 판정이었다.
+    openTerminal(402, 874);
+    localInput();
+    bridge.maru_mobile_missing_clear();
+    _ = feedFresh("\u{250C}\u{2500}\u{2588}\u{2591}\u{283F}");
+
+    for ([_]u32{ 0x250C, 0x2500, 0x2588, 0x2591, 0x283F }) |cp| {
+        var found = false;
+        var i: u32 = 0;
+        while (i < bridge.maru_mobile_missing_count()) : (i += 1) {
+            if (bridge.maru_mobile_missing_cp_at(i, 0) != cp) continue;
+            found = true;
+            // **커버리지 아틀라스로 간다** — 컬러로 보내면 실루엣만 남는다(이모지와 반대 축).
+            try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_missing_is_color(i));
+        }
+        if (!found) {
+            std.debug.print("\n합성 대상 U+{X} 가 굽기 목록에 없다\n", .{cp});
+            return error.TestUnexpectedResult;
+        }
+    }
+    _ = bakeMisses();
+}
+
+test "SGR 배경·반전이 화면 quad 로 나온다" {
+    // 코어가 셀에 담은 속성이 **화면까지** 오는지를 데모 줄이 보여 주고 있었다(한때 전경색만
+    // 읽어 배경·반전이 평범한 글자로 나왔다). 그 자리를 여기서 잰다.
+    openTerminal(402, 874);
+    localInput();
+    bridge.maru_mobile_missing_clear();
+    // ANSI 파랑 배경(44). 팔레트 4번이 그 색이다.
+    const n1 = feedFresh("\x1b[44m bg \x1b[0m");
+    _ = bakeMisses();
+    const n2 = bridge.maru_mobile_build(402, 874, now());
+    _ = n1;
+    const pal4 = bridge.paletteColor(4);
+    try std.testing.expect(hasBgQuad(n2, pal4.r, pal4.g, pal4.b));
+
+    // 반전(7)은 **전경색이 배경으로** 온다 — 그 색 배경 quad 가 생긴다.
+    bridge.maru_mobile_missing_clear();
+    _ = feedFresh("\x1b[7m rev \x1b[0m");
+    _ = bakeMisses();
+    const n3 = bridge.maru_mobile_build(402, 874, now());
+    const fg = bridge.foregroundColor();
+    try std.testing.expect(hasBgQuad(n3, fg.r, fg.g, fg.b));
+}
+
+test "숨김(SGR 8)은 글자를 배경색으로 만든다 — 안 보인다" {
+    // **quad 를 안 내는 것이 아니다**(그렇게 짐작했다가 테스트가 반증했다). 코어 계약은
+    // "전경을 그 칸의 배경색으로 만든다" 이고, 화면에서는 그것이 곧 안 보이는 것이다 —
+    // 사람 눈으로는 "안 그려진 것" 과 구별이 안 돼 데모 줄로는 못 재던 자리다.
+    //
+    // **quad 로 재지 않는다**: 화면 quad 는 아틀라스에 셀이 있어야 나므로, 굽기가 밀린
+    // 상태에서는 아무것도 안 세면서 초록이 된다(실제로 그랬다). 제품이 푼 색을 직접 묻는다.
+    openTerminal(402, 874);
+    localInput();
+    _ = feedFresh("\x1b[8mab\x1b[0m");
+    const hidden = bridge.cellFgAt(0, 0) orelse return error.TestUnexpectedResult;
+    const bg = bridge.terminalBackgroundColor();
+    try std.testing.expectEqual(bg.r, hidden.r);
+    try std.testing.expectEqual(bg.g, hidden.g);
+    try std.testing.expectEqual(bg.b, hidden.b);
+
+    // 평범한 글자는 배경색이 아니다(위 단언이 늘 참이 아님을 보인다).
+    _ = feedFresh("ab");
+    const plain = bridge.cellFgAt(0, 0) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(plain.r != bg.r or plain.g != bg.g or plain.b != bg.b);
+}
+
+test "SGR 색이 셀에 풀린다 — 팔레트 값 그대로" {
+    // 전경색만 읽던 시절이 있었고, 그때 배경·반전이 화면에서 통째로 사라졌다.
+    openTerminal(402, 874);
+    localInput();
+    _ = feedFresh("\x1b[32mA\x1b[0m");
+    const green = bridge.cellFgAt(0, 0) orelse return error.TestUnexpectedResult;
+    const pal2 = bridge.paletteColor(2); // ANSI 초록
+    try std.testing.expectEqual(pal2.r, green.r);
+    try std.testing.expectEqual(pal2.g, green.g);
+    try std.testing.expectEqual(pal2.b, green.b);
+
+    // 반전(7)은 **전경이 배경색이 된다**(그 칸의 배경이 원래 전경색으로 칠해진다).
+    _ = feedFresh("\x1b[7mA\x1b[0m");
+    const rev = bridge.cellFgAt(0, 0) orelse return error.TestUnexpectedResult;
+    const bg = bridge.terminalBackgroundColor();
+    try std.testing.expectEqual(bg.r, rev.r);
+    try std.testing.expectEqual(bg.g, rev.g);
+    try std.testing.expectEqual(bg.b, rev.b);
+}
+
+test "양폭 한글은 두 칸을 쓴다" {
+    // 폭이 틀리면 화면이 통째로 밀린다 — 데모 줄의 한글이 그 판정이었다.
+    openTerminal(402, 874);
+    localInput();
+    _ = feedFresh("한a");
+    try std.testing.expectEqual(@as(?u8, 2), bridge.cellWidthAt(0, 0)); // 한글은 두 칸
+    try std.testing.expectEqual(@as(?u8, 1), bridge.cellWidthAt(0, 2)); // 'a' 는 두 칸 뒤에 한 칸
+}

@@ -6,7 +6,7 @@ const terminal = @import("../terminal.zig");
 pub const ShapedGlyphRecord = struct {
     row: u16 = 0,
     col: u16,
-    cell_width: u2 = 1,
+    cell_width: u3 = 1,
     codepoint: u21,
     font_id: glyph_layout.FontId,
     glyph_id: glyph_layout.GlyphId,
@@ -200,7 +200,7 @@ test "shaped records build backend neutral glyph runs" {
     try std.testing.expectEqual(@as(usize, 2), result.runs.fallback_count);
     try std.testing.expectEqual(@as(usize, 1), result.color_glyph_count);
     try std.testing.expectEqual(@as(u21, 'A'), result.runs.glyphs[0].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), result.runs.glyphs[1].cell_width);
+    try std.testing.expectEqual(@as(u3, 2), result.runs.glyphs[1].cell_width);
     try std.testing.expectEqual(@as(glyph_layout.ColorGlyphKind, .color), result.runs.glyphs[2].cache_key.color_glyph_kind);
     try std.testing.expectEqual(@as(u16, 17), result.runs.glyphs[0].cache_key.font_size_px);
     try std.testing.expectEqual(@as(u16, 2), result.runs.glyphs[0].cache_key.device_scale);

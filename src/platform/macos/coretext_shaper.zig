@@ -38,7 +38,8 @@ pub const NativeDrawGlyphRecord = extern struct {
     cell_width: u16,
     /// 이 글리프의 ink 가 자기 칸 **왼쪽으로 넘치는 칸 수**(합자). 옛 `reserved` 자리라 ABI 크기는
     /// 그대로다. 셰이퍼(`maru_left_overhang_cells`)가 폰트 ink bounds 로 재서 채운다 — 0 이 대부분이고,
-    /// 합자 글리프만 1(실측: `//`·`::`·`~~`·`===`)이다.
+    /// 합자 글리프만 1~3 이다(실측: `//`·`::`·`~~` 는 1, `===`·`!==` 는 2, `<!--`·`<==>`·`####` 는 3).
+    /// 상한과 그 근거는 `maru_left_overhang_cells` 주석과 `renderer.max_glyph_cell_span` 이 소유한다.
     left_overhang_cells: u16 = 0,
     codepoint: u32,
     glyph_id: u32,
@@ -242,10 +243,11 @@ fn coreTextGlyphRecordFromDrawRecord(
     cells: []const renderer.DrawCell,
 ) !coretext_font.CoreTextGlyphRecord {
     if (record.cell_index >= cells.len) return error.CoreTextDrawListRecordOutsideInput;
-    // **폭 상한 3.** downstream 의 `cell_width` 가 `u2`(0~3)다(`renderer/glyph_layout.zig` 등) — 4 를
-    // 허용했다가 `@intCast` 가 u2 를 넘겨 headless tick 테스트가 signal TRAP 으로 죽었다(로컬 CI 게이트가
-    // 잡았다). `glyph_atlas` 는 슬롯을 `cell_width` 만큼 넓히므로 이 값이 한 글리프가 먹는 최대 칸 수다.
-    if (record.cell_width > 3) return error.CoreTextDrawListInvalidCellWidth;
+    // **폭 상한 `max_glyph_cell_span`.** downstream 의 `cell_width` 가 `u3`(0~7)다
+    // (`renderer/glyph_layout.zig` 등). `glyph_atlas` 는 슬롯을 `cell_width` 만큼 넓히므로 이 값이 한
+    // 글리프가 먹는 최대 칸 수다. **상한과 타입은 함께 움직여야 한다** — 예전 `u2` 시절에 상한만 4 로
+    // 올렸다가 `@intCast(4)` 가 타입을 넘겨 headless tick 테스트가 signal TRAP 으로 죽었다.
+    if (record.cell_width > renderer.max_glyph_cell_span) return error.CoreTextDrawListInvalidCellWidth;
     if (record.codepoint > std.math.maxInt(u21)) return error.CoreTextDrawListInvalidCodepoint;
 
     const source_cell = cells[@intCast(record.cell_index)];
@@ -259,7 +261,7 @@ fn coreTextGlyphRecordFromDrawRecord(
     //
     // 화면 왼쪽 경계는 넘지 않는다(`@min(.., col)`) — col 0 의 글리프가 오버항을 주장하면 그만큼만 당긴다.
     const overhang: u16 = @min(record.left_overhang_cells, record.col);
-    if (record.cell_width + overhang > 3) return error.CoreTextDrawListInvalidCellWidth;
+    if (record.cell_width + overhang > renderer.max_glyph_cell_span) return error.CoreTextDrawListInvalidCellWidth;
     return .{
         .row = record.row,
         .col = record.col - overhang,
@@ -363,7 +365,13 @@ pub fn buildProbeDrawListFromCoreTextGlyphs(
             .row = record.row,
             .col = record.col,
             .codepoint = record.codepoint,
-            .width = record.cell_width,
+            // **DrawCell.width 는 격자 폭(EAW: 1 또는 2)이라 `u2` 다.** record 의 `cell_width` 는 합자 왼쪽
+            // 오버항이 더해진 **글리프가 덮는 칸 수**(`u3`, 최대 `max_glyph_cell_span`)라 4~5 가 올 수 있어
+            // 그대로는 담기지 않는다. 이 DrawList 는 렌더 입력이 아니라 "record 가 RenderFrame 까지 이동
+            // 가능한가"만 보는 probe artifact 이므로 격자 폭 범위로 클램프한다 — 오버항은 이동 가능성
+            // 검증에 쓰이지 않는다. 제품 경로는 `coreTextGlyphRecordFromDrawRecord` 가 오버항을 온전히
+            // 실어 보내므로 여기 클램프가 화면에 영향을 주지 않는다.
+            .width = @intCast(@min(record.cell_width, 2)),
             .style = record.style,
         });
     }
@@ -774,7 +782,7 @@ test "CoreText draw list shaper preserves DrawList metadata and styles" {
     try std.testing.expect(shaped.runs.glyphs[0].style.underline);
     try std.testing.expect(shaped.runs.glyphs[0].cache_key.style.bold);
     try std.testing.expect(shaped.runs.glyphs[1].fallback);
-    try std.testing.expectEqual(@as(u2, 2), shaped.runs.glyphs[1].cell_width);
+    try std.testing.expectEqual(@as(u3, 2), shaped.runs.glyphs[1].cell_width);
 }
 
 test "CoreText draw list shaper closes native failures before frame building" {

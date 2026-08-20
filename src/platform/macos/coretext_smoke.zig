@@ -1300,6 +1300,45 @@ test "CoreText draw-list shaper shapes never-written cells as blanks so ligature
     }
 }
 
+test "CoreText draw-list shaper gives a four-glyph ligature all four cells (left overhang 3)" {
+    // 회귀 고정(2026-08-20): 4글자 합자는 **왼쪽으로 3칸** 넘친다. 폰트가 앞 세 칸을 빈 글리프로 두고
+    // 마지막 칸 글리프에 네 글자를 합친 모양을 몰아넣기 때문이다(실측 JetBrains Mono 13pt: `<!--` 의
+    // 앵커 글리프 1595 는 ink_x=-22.4, advance 7.80 → 22.4/7.80 = 2.87 → round 3).
+    //
+    // 오버항 상한이 2 이던 때는 3칸만 덮어 `<` 가 잘려 나갔다. 상한 3 + `cell_width: u3` 로 넓힌 뒤
+    // 앵커가 **col 0 까지 당겨지고 4칸을 덮는지**를 못박는다. 슬롯 픽셀이 아니라 이 계약을 보는 이유는
+    // 헤드리스 스모크에는 셀 메트릭(`cell_width_px`)이 없어 슬롯이 정사각으로 폴백되기 때문이다 —
+    // span 은 제품 경로에서만 슬롯 폭에 반영된다(`glyph_atlas.estimateGlyphBitmapSize`).
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("<!--"); // col 0~3
+
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer draw_list.deinit(allocator);
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+    var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+    defer shaped.deinit(allocator);
+
+    // 합자가 걸리면 잉크를 가진 글리프는 **하나**뿐이다(앞 세 칸은 빈 글리프라 drawable 이 아니다).
+    // 합자 없는 폰트로 폴백된 환경에서는 네 개가 그대로 남으므로 그때는 이 계약을 요구하지 않는다.
+    if (shaped.runs.glyphs.len != 1) return;
+
+    const anchor = shaped.runs.glyphs[0];
+    try std.testing.expectEqual(@as(u16, 0), anchor.col); // 3칸 당겨져 줄 맨 앞에서 시작
+    try std.testing.expectEqual(@as(u3, 4), anchor.cell_width); // 자기 칸 1 + 오버항 3
+    try std.testing.expectEqual(@as(u3, 4), anchor.cache_key.cell_width); // 슬롯 폭도 4칸이어야 잘리지 않는다
+    try std.testing.expect(anchor.cell_width <= renderer.max_glyph_cell_span);
+}
+
 test "CoreText draw-list shaper composes an NFD Hangul cluster identically to its precomposed syllable (HG3a)" {
     // 회귀 고정(HG3a): macOS 파일명 NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB가 한 셀
     // cluster로 저장된다. DrawList가 grapheme_pool에 [중성, 종성]을 싣고 셰이퍼가 base 뒤에 붙여

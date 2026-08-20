@@ -230,7 +230,9 @@ features-android)
         "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
         $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
-    "$TC/aarch64-linux-android30-clang" "$HARNESS/features_vk.c" -lvulkan -o "$OUT/features-vk"
+    # 같은 이유로 16KB 정렬(아래 `chrome-android-app` 참조) — 이것도 기기에서 실행된다.
+    "$TC/aarch64-linux-android30-clang" -Wl,-z,max-page-size=16384 \
+        "$HARNESS/features_vk.c" -lvulkan -o "$OUT/features-vk"
     $ADB push "$OUT/features-vk" /data/local/tmp/features-vk >/dev/null
     $ADB shell chmod 755 /data/local/tmp/features-vk
     $ADB shell /data/local/tmp/features-vk
@@ -303,7 +305,12 @@ chrome-android-app)
     # 앱이 "네이티브 진입점 없음"으로 죽는다.
     # **펌프도 같이 링크한다.** 소켓 루프는 두 host 가 함께 쓰는 C 한 벌이다
     # (`src/platform/mobile_host/ssh_pump.c` — 데스크톱 스모크가 같은 파일을 링크해 증명한다).
+    # **16KB 페이지로 정렬한다.** Android 15+ 는 16KB 페이지 기기를 허용하는데, 4KB 정렬 ELF 는
+    # 그 커널에서 **로드 자체가 안 된다**(앱이 안 뜬다). NDK r27 은 16KB 가 기본이지만 그 기본값은
+    # ndk-build/CMake 가 넣어 주는 것이라, 여기처럼 clang 을 직접 부르는 경로에는 안 들어온다 —
+    # 실측으로 LOAD 정렬이 전부 `0x1000` 이었고 기기가 "ELF 정렬 검사 실패" 를 띄웠다.
     "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -shared -O2 \
+        -Wl,-z,max-page-size=16384 \
         "$ANDROID/android_app_host.c" "$ROOT/src/platform/mobile_host/ssh_pump.c" \
         "$OUT/glue.o" "$LIB_OUT/libmaru-mobile-android.a" \
         -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -ljnigraphics -lm \

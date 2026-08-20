@@ -655,7 +655,26 @@ pub export fn maru_mobile_ssh_open_control(handle: u32, cmd: [*]const u8, cmd_le
     const s = slotOf(handle) orelse return err_bad_handle;
     if (cmd_len == 0 or cmd_len > control_command_bytes) return err_bad_arg;
     const before = s.cl.controlState();
+    // **이미 열려 있는데 또 여는 것은 호출자의 순서 실수다.** 코어는 그것을
+    // `UnexpectedMessage` 로 내는데, 그대로 흘리면 `MARU_SSH_ERR_PROTOCOL`("세션은 못 산다")
+    // 이 되어 host 가 **멀쩡한 연결을 접는다**. 여기서 가려 `BAD_ARG` 로 답한다.
+    switch (before) {
+        .opening, .requesting_exec, .ready => {
+            setError(s, "control_already_open");
+            return err_bad_arg;
+        },
+        .none, .closed => {},
+    }
     const bytes = s.cl.openControl(cmd[0..cmd_len], outFree(s)) catch |e| {
+        // **닫는 중인 번호는 다시 못 쓴다**(§5.3 — 양쪽이 오가야 끝난다). 그것도 세션 실패가
+        // 아니라 **조금 뒤에 다시 부르면 되는** 자리다.
+        //
+        // **이름을 먼저 정하고 한 번만 적는다** — `setError` 는 먼저 난 것을 남기므로
+        // (§5 의 "먼저 난 실패가 남는다"), 코어 이름을 적고 나서 덮으려 하면 안 덮인다.
+        if (e == client.Error.UnexpectedMessage) {
+            setError(s, "control_closing");
+            return err_not_ready;
+        }
         setError(s, @errorName(e));
         return statusOf(e);
     };

@@ -1010,3 +1010,32 @@ test "핸들이 틀리면 컨트롤 쪽도 빈 것을 준다" {
     try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_write_control(bad, "x", 1, &sent));
     try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_close_control(bad));
 }
+
+test "순서 실수는 세션을 죽이는 코드로 안 내려간다" {
+    // **`ERR_PROTOCOL` 은 "세션은 못 산다" 는 뜻이다**(헤더). 중복 열기·닫는 중 재사용은
+    // 호출자의 순서 실수일 뿐 연결은 멀쩡한데, 그 코드로 내려가면 host 가 **멀쩡한 연결을
+    // 접는다** — 그리고 사용자는 "가끔 접속이 끊긴다" 로만 본다.
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    // ① 이미 열려 있는데 또 열기
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_open_control(h, "x", 1));
+    try testing.expectEqualStrings("control_already_open", std.mem.span(ssh.maru_mobile_ssh_last_error(h)));
+    try testing.expectEqual(@as(u32, 11), ssh.maru_mobile_ssh_state(h)); // 세션은 그대로 READY
+    ssh.maru_mobile_ssh_clear_error(h);
+
+    // ② 닫는 중(우리 close 만 나갔다)에 다시 열기
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_close_control(h));
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_open_control(h, "x", 1));
+    try testing.expectEqualStrings("control_closing", std.mem.span(ssh.maru_mobile_ssh_last_error(h)));
+    try testing.expectEqual(@as(u32, 11), ssh.maru_mobile_ssh_state(h));
+
+    // ③ 상대 close 가 오면 그때는 열린다 — "다시 부르면 된다" 가 참이어야 한다.
+    ssh.maru_mobile_ssh_clear_error(h);
+    var buf: [64]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(97); // CHANNEL_CLOSE
+    try w.u32be(1);
+    try feedPlain(h, w.written());
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open_control(h, "maru control --stdio", 20));
+}

@@ -156,6 +156,10 @@ LOAD 정렬이 전부 `0x1000` 이었고 4KB 기기가 "ELF 정렬 검사 실패
 | 플랫폼 → 코어 | 원격에서 읽은 바이트(SSH) | `maru_mobile_ssh_feed(h, bytes, len, &consumed)` |
 | 코어 → 플랫폼 | 원격으로 보낼 바이트 | `maru_mobile_ssh_out_ptr/len` · `_out_consume` |
 | 코어 → 플랫폼 | 화면에 그릴 원격 출력 | `maru_mobile_ssh_screen_ptr/len` · `_screen_consume` |
+| 플랫폼 → 코어 | **두 번째 채널**을 연다(원격 명령 하나) | `maru_mobile_ssh_open_control(h, cmd, len)` |
+| 코어 → 플랫폼 | 컨트롤 채널이 받은 ndjson | `maru_mobile_ssh_control_ptr/len` · `_control_consume` |
+| 플랫폼 → 코어 | 컨트롤 채널로 보낼 ndjson | `maru_mobile_ssh_write_control(h, bytes, len, &sent)` |
+| 코어 → 플랫폼 | 컨트롤 채널 상태·종료 코드·stderr | `maru_mobile_ssh_control_state` · `_control_exit_status` · `_control_stderr` |
 | 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
 | 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
 | 플랫폼 → 코어 | 원격 출력을 화면에 넣는다 | `maru_mobile_term_write(bytes, len)` |
@@ -272,6 +276,14 @@ iOS 는 프레임에서 가져간다. 답은 원격이 보낸 질의에 대한 �
 **"다시 붙어도 되나" 는 상태로 판단하지 않는다.** 끝난 세션도 `CLOSED` 를 들고 있어야 하므로,
 그것으로 재시작을 막으면 **한 번 끊긴 뒤 재접속이 영영 막힌다**(프로세스를 죽였다 켜야만 된다).
 `maru_ssh_pump_is_running()` 이 그 물음에 답한다.
+
+**컨트롤 채널은 화면과 다른 흐름이다**(계약 [컨트롤 플레인 §4a](control-plane.md)). 같은 연결에
+채널을 하나 더 열어 원격 명령을 돌리는 길이고, ABI 도 **다른 이름·다른 버퍼**로 낸다 — 한 흐름에
+합치면 ndjson 파서가 사람 화면을 읽게 된다. 규약은 화면·선과 같다: **가져갈 때까지 남아 있고,
+안 가져가면 배압으로 멈춘다**(잃지 않는다). 여는 것은 **사용자가 세션 목록을 보려 할 때**이고,
+터미널만 쓰는 접속에서는 열지 않는다 — 채널을 여는 것은 그 서버에서 명령을 하나 실행하는 일이라
+감사 로그에 남는다. 펌프도 같은 축을 낸다(`maru_ssh_pump_open_control` 과 `control` 훅) —
+**훅이 없으면 그 바이트를 안 가져간다**(조용히 버리는 대신 코어가 멈추게 두어 원인이 보이게 한다).
 
 **키는 앱이 만든다**([SSH 계약](ssh-client.md) §3.4). `maru_mobile_ssh_generate_key` 가 host 가
 준 32바이트 씨앗으로 ed25519 를 만들고, `open` 에 넘길 64바이트와 사용자가 서버

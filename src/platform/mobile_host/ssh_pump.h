@@ -51,6 +51,13 @@ typedef struct {
     /// `MARU_SSH_STATE_CLOSED` 가 한 번 온다. host 는 그때 알림을 내리고 서비스를 접는다.
     /// 이 훅 **안에서** `maru_ssh_pump_stop` 을 불러도 된다(자기 자신은 안 거둔다).
     void (*state_changed)(void *ctx, unsigned int state);
+    /// **컨트롤 채널이 받은 바이트**(ndjson). 화면과 **다른 훅**이다 — 한 훅으로 합치면 파서가
+    /// 사람 화면을 읽게 된다(계약 docs/control-plane.md §4a).
+    ///
+    /// **줄 경계가 아니다.** 패킷이 실어 온 만큼이라 host 가 줄 단위로 이어 붙인다.
+    /// 없으면 컨트롤 바이트를 **안 가져간다** — 그러면 코어가 배압으로 멈추므로, 채널을 열
+    /// 생각이면 이 훅도 함께 둔다.
+    void (*control)(void *ctx, const unsigned char *bytes, unsigned long len);
     void *ctx;
 } MaruSshPumpHooks;
 
@@ -84,6 +91,24 @@ const char *maru_ssh_pump_error(void);
 unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len);
 /// 창 크기가 바뀌었다.
 void maru_ssh_pump_resize(unsigned int cols, unsigned int rows);
+
+/// **두 번째 채널을 연다** — 원격에서 명령 하나를 돌린다(계약 docs/control-plane.md §4a).
+/// 0=열기 시작함, 음수=못 열었다(`maru_ssh_pump_error` 에 이름이 남는다).
+///
+/// **셸이 뜬 뒤에 부른다**(`MARU_SSH_STATE_READY`). 재키잉 중이면 실패로 돌아오고 **아무것도
+/// 안 나갔으므로 다시 부르면 된다**.
+int maru_ssh_pump_open_control(const char *command, unsigned int len);
+/// 컨트롤 채널로 보낸다. 돌려주는 값은 **실제로 보낸 바이트 수**다(터미널 `write` 와 같은 규약).
+unsigned long maru_ssh_pump_write_control(const unsigned char *bytes, unsigned long len);
+/// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
+void maru_ssh_pump_close_control(void);
+/// 컨트롤 채널 상태(`MARU_SSH_CONTROL_*`). 안 돌고 있으면 `MARU_SSH_CONTROL_NONE`.
+unsigned int maru_ssh_pump_control_state(void);
+/// 컨트롤 명령의 종료 코드를 `*code` 에 넣는다. 아직 안 끝났으면 0 이 아닌 값을 돌려준다.
+/// **`127` 이면 그 서버에 `maru` 가 없다**(계약 §4a).
+int maru_ssh_pump_control_exit_status(unsigned int *code);
+/// 컨트롤 명령이 stderr 로 낸 첫 조각(진단용). 화면에도 wire 에도 안 섞인 것이다.
+const char *maru_ssh_pump_control_stderr(void);
 
 #ifdef __cplusplus
 }

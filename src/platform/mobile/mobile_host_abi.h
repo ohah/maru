@@ -378,6 +378,19 @@ unsigned int maru_mobile_hit_cell(float x, float y);
 /// 하나(32KiB)가 들어가야 한다 — 못 담으면 코어가 한 발도 못 나간다(계약 §3.5).
 #define MARU_SSH_OUT_BYTES 32768
 #define MARU_SSH_SCREEN_BYTES 65536
+/// 컨트롤 채널이 받아 둘 자리. 코어가 그 채널에 광고하는 한 패킷(8KiB)의 **두 배**다 —
+/// 한 패킷 몫만 대면 `feed` 한 번에 패킷 하나씩만 지난다(계약 docs/ssh-client.md §3.4.1).
+#define MARU_SSH_CONTROL_BYTES 16384
+/// 컨트롤 채널이 돌릴 명령의 최대 길이. **자르지 않는다** — 넘으면 `MARU_SSH_ERR_BAD_ARG`.
+#define MARU_SSH_CONTROL_COMMAND_BYTES 512
+
+/// 컨트롤 채널 상태. **터미널 상태(`MARU_SSH_STATE_*`)와 다른 축이다** — 컨트롤이 어떻게 되든
+/// 터미널은 산다(계약 docs/control-plane.md §4a).
+#define MARU_SSH_CONTROL_NONE 0
+#define MARU_SSH_CONTROL_OPENING 1
+#define MARU_SSH_CONTROL_REQUESTING_EXEC 2
+#define MARU_SSH_CONTROL_READY 3
+#define MARU_SSH_CONTROL_CLOSED 4
 
 /// 상태. **숫자는 이 헤더가 단일 출처다** — 브리지가 코어 enum 을 여기 값으로 명시적으로
 /// 옮기므로 Zig 쪽 선언 순서가 바뀌어도 host 가 읽는 값은 안 움직인다(계약 테스트가 대조한다).
@@ -469,6 +482,34 @@ int maru_mobile_ssh_out_consume(unsigned int handle, unsigned int n);
 const unsigned char *maru_mobile_ssh_screen_ptr(unsigned int handle);
 unsigned int maru_mobile_ssh_screen_len(unsigned int handle);
 int maru_mobile_ssh_screen_consume(unsigned int handle, unsigned int n);
+
+/// **두 번째 채널** — 같은 연결 위에서 원격 명령 하나를 돌린다(계약 docs/control-plane.md §4a).
+/// 폰이 세션 목록을 받는 길이고, 터미널 채널과 **서로를 안 죽인다**.
+///
+/// 여는 것은 **사용자가 목록을 보려 할 때**다 — 채널을 여는 것은 그 서버에서 명령을 하나
+/// 실행하는 일이라 감사 로그에 남는다. 터미널만 쓰는 접속에서는 열지 않는다.
+///
+/// `MARU_SSH_STATE_READY` 에서만 열 수 있고, 재키잉 중이면 `MARU_SSH_ERR_NOT_READY` 다
+/// (그때는 아무것도 안 나갔으니 **다시 부르면 된다**).
+int maru_mobile_ssh_open_control(unsigned int handle, const unsigned char *cmd,
+                                 unsigned int cmd_len);
+/// 컨트롤 채널로 보낸다. 터미널 `write` 와 같은 규약 — 보낸 만큼을 `sent` 로 알려 준다.
+int maru_mobile_ssh_write_control(unsigned int handle, const unsigned char *bytes,
+                                  unsigned int len, unsigned int *sent);
+/// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
+int maru_mobile_ssh_close_control(unsigned int handle);
+/// 컨트롤 채널 상태(`MARU_SSH_CONTROL_*`). 핸들이 틀리면 `MARU_SSH_STATE_INVALID`.
+unsigned int maru_mobile_ssh_control_state(unsigned int handle);
+/// 컨트롤 채널이 받은 바이트(ndjson). **화면과 섞이지 않는다.** 규칙은 `out`·`screen` 과 같다 —
+/// `consume` 을 부를 때까지 남아 있고, **줄 경계가 아니다**(host 가 줄 단위로 이어 붙인다).
+const unsigned char *maru_mobile_ssh_control_ptr(unsigned int handle);
+unsigned int maru_mobile_ssh_control_len(unsigned int handle);
+int maru_mobile_ssh_control_consume(unsigned int handle, unsigned int n);
+/// 컨트롤 명령의 종료 코드. **`127` 이면 그 서버에 `maru` 가 없다**(채널 요청 자체는 성공한다).
+/// 아직 안 끝났으면 `MARU_SSH_ERR_NOT_READY`.
+int maru_mobile_ssh_control_exit_status(unsigned int handle, unsigned int *code);
+/// 컨트롤 명령이 stderr 로 낸 첫 조각(진단용). 화면에도 wire 에도 안 섞인 것이다.
+const char *maru_mobile_ssh_control_stderr(unsigned int handle);
 
 /// 호스트키 지문(`SHA256:...`). `MARU_SSH_STATE_HOST_KEY_DECISION` 에서 사용자에게 보인다.
 /// 아직 없으면 빈 문자열. 다음 호출까지 산다.

@@ -243,6 +243,30 @@ static int flush_out(void) {
     return 0;
 }
 
+/// 컨트롤 채널이 받은 바이트를 host 에 넘긴다.
+///
+/// **가져가야 코어가 계속 돈다** — 안 가져가면 배압으로 `feed` 가 멈춘다(계약 §3.4.1). 훅이
+/// 없으면 채널을 열 일도 없으므로 그때는 들어올 바이트도 없다.
+static void drain_control(void) {
+    pthread_mutex_lock(&g_session_lock);
+    unsigned int len = maru_mobile_ssh_control_len(g_handle);
+    const unsigned char *ptr = maru_mobile_ssh_control_ptr(g_handle);
+    pthread_mutex_unlock(&g_session_lock);
+    if (len == 0) return;
+
+    host_lock();
+    if (g_hooks.control) g_hooks.control(g_hooks.ctx, ptr, len);
+    host_unlock();
+
+    // **훅이 있을 때만 지운다.** 없는데 지우면 그 바이트는 아무도 못 본 채 사라진다 —
+    // 조용히 사라지는 대신 코어가 배압으로 멈추게 두는 편이 낫다(원인이 보인다).
+    if (g_hooks.control) {
+        pthread_mutex_lock(&g_session_lock);
+        maru_mobile_ssh_control_consume(g_handle, len);
+        pthread_mutex_unlock(&g_session_lock);
+    }
+}
+
 /// 화면 바이트를 host 에 넘기고, 코어가 만든 답을 원격으로 돌려보낸다.
 static void drain_screen(void) {
     // **세션 슬롯은 한 자물쇠가 지킨다.** 화면 쪽과 선 쪽이 다른 배열이라 지금은 부딪히지
@@ -313,6 +337,7 @@ static int step_idle(void) {
     }
     set_state(maru_mobile_ssh_state(g_handle));
     drain_screen();
+    drain_control();
     pthread_mutex_lock(&g_session_lock);
     int bad = flush_out();
     pthread_mutex_unlock(&g_session_lock);
@@ -402,6 +427,7 @@ static int feed_buffered(void) {
         if (st == MARU_SSH_ERR_BUFFER) {
             // 배압 — 비우고 다시 준다.
             drain_screen();
+            drain_control();
             pthread_mutex_lock(&g_session_lock);
             int bad = flush_out();
             pthread_mutex_unlock(&g_session_lock);
@@ -426,6 +452,7 @@ static int feed_buffered(void) {
         // 상태를 통째로 놓친다(셸이 뜬 자리를 못 보고 끝나는 것이 실측이다).
         set_state(maru_mobile_ssh_state(g_handle));
         drain_screen();
+        drain_control();
         pthread_mutex_lock(&g_session_lock);
         int bad = flush_out();
         pthread_mutex_unlock(&g_session_lock);
@@ -696,6 +723,65 @@ unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len)
         off += sent;
     }
     return off;
+}
+
+int maru_ssh_pump_open_control(const char *command, unsigned int len) {
+    if (!g_running || g_handle == 0) return -1;
+    pthread_mutex_lock(&g_session_lock);
+    int st = maru_mobile_ssh_open_control(g_handle, (const unsigned char *)command, len);
+    pthread_mutex_unlock(&g_session_lock);
+    if (st != MARU_SSH_OK) {
+        // **왜 못 열었는지를 남긴다** — 재키잉 중이면 다시 부르면 되고, 그 밖이면 축을 접어야 한다.
+        set_error(maru_mobile_ssh_last_error(g_handle));
+        return st;
+    }
+    return 0;
+}
+
+unsigned long maru_ssh_pump_write_control(const unsigned char *bytes, unsigned long len) {
+    if (!g_running || g_handle == 0) return 0;
+    unsigned long off = 0;
+    while (off < len) {
+        unsigned int sent = 0;
+        pthread_mutex_lock(&g_session_lock);
+        int st = maru_mobile_ssh_write_control(g_handle, bytes + off, (unsigned int)(len - off), &sent);
+        pthread_mutex_unlock(&g_session_lock);
+        if (st != MARU_SSH_OK) break;
+        if (sent == 0) break; // 창이 닫혔다 — 나머지는 호출자가 다시 준다
+        off += sent;
+    }
+    return off;
+}
+
+void maru_ssh_pump_close_control(void) {
+    if (!g_running || g_handle == 0) return;
+    pthread_mutex_lock(&g_session_lock);
+    maru_mobile_ssh_close_control(g_handle);
+    pthread_mutex_unlock(&g_session_lock);
+}
+
+unsigned int maru_ssh_pump_control_state(void) {
+    if (!g_running || g_handle == 0) return MARU_SSH_CONTROL_NONE;
+    pthread_mutex_lock(&g_session_lock);
+    unsigned int st = maru_mobile_ssh_control_state(g_handle);
+    pthread_mutex_unlock(&g_session_lock);
+    return st;
+}
+
+int maru_ssh_pump_control_exit_status(unsigned int *code) {
+    if (!g_running || g_handle == 0) return -1;
+    pthread_mutex_lock(&g_session_lock);
+    int st = maru_mobile_ssh_control_exit_status(g_handle, code);
+    pthread_mutex_unlock(&g_session_lock);
+    return st;
+}
+
+const char *maru_ssh_pump_control_stderr(void) {
+    if (!g_running || g_handle == 0) return "";
+    pthread_mutex_lock(&g_session_lock);
+    const char *msg = maru_mobile_ssh_control_stderr(g_handle);
+    pthread_mutex_unlock(&g_session_lock);
+    return msg;
 }
 
 void maru_ssh_pump_resize(unsigned int cols, unsigned int rows) {

@@ -206,6 +206,8 @@ fn copyZ(dst: []u8, src: []const u8) void {
 /// `consumed`(`feed` 가 그 자리에서 돌려준다), `control`(컨트롤 채널은 **ABI 에 아직 없다** —
 /// S10b-2 가 이 자리에 컨트롤 흐름을 더한다).
 fn absorb(s: *Slot, step: client.Step) void {
+    // **아래 문구는 표시가 아니라 컴파일 진단이다**(i18n §7 — 화면에 안 간다).
+    // `tests/boundary/i18n_literals.zig` 원장이 그 사실과 함께 이 한 개를 적어 둔다.
     comptime {
         const fields = @typeInfo(client.Step).@"struct".fields.len;
         if (fields != 9) @compileError(

@@ -1190,6 +1190,9 @@ static void sshState(void *ctx, unsigned int state) {
         // **입력 목적지를 세션과 함께 옮긴다.** 안 옮기면 친 글자가 화면에 한 번 찍히고 원격에는
         // 영영 안 간다(안드로이드에서 실측한 것과 같은 자리다).
         maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
+        // 상태와 실패 이름을 화면에 알린다(Android 와 같은 자리).
+        const char *serr = maru_ssh_pump_error();
+        maru_mobile_set_ssh_status(state, (const unsigned char *)serr, serr ? strlen(serr) : 0);
         // **비밀번호를 물어야 하면 화면을 연다**(그 자리에서 펌프가 기다린다). 벗어나면 끈다.
         maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
         // **처음 보는 서버면 지문을 묻는다**(Android 와 같은 자리). 지문이 이미 있으면 펌프가

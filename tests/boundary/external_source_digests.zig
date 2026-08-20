@@ -776,5 +776,6 @@ pub const inventory = [_]Proof{
     // 함께 있는 상태의 것이고, 리베이스 뒤 도구로 다시 잰다.
     // 지문 승인 화면(S9b-3)이 문구 넷을 더하고 목록의 안내 하나를 둘로 갈라 또 바뀐다.
     // count 는 1 그대로 — 표에 항목이 늘 뿐이다.
-    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "2aa7256e090bb396cf73e6751247c898b2c3270d09b128c7fe87ccebbf3d9c2c" },
+    // 연결 진단(S9b-3b)이 상태·실패 문구 아홉을 더해 또 바뀐다. count 는 1 그대로다.
+    .{ .path = "src/i18n.zig", .count = 1, .digest_hex = "281bad6888121d230decdd270a65df1e7a0f71b5ab57e91fcb40b35624c1fedd" },
 };

@@ -112,24 +112,40 @@ public class MaruActivity extends android.app.NativeActivity {
     /// 과정이 화면에 안 나온다. true 면 프레임워크가 Editable 버퍼를 두지만 우리는 콜백만
     /// 가로채 쓰므로 그 버퍼는 안 읽는다.
     private static final class TerminalInputConnection extends BaseInputConnection {
+        /// **지금 조합 중인 글자.** `finishComposingText` 는 "조합 중인 것을 확정하라" 는 뜻인데
+        /// 그 콜백에는 **글자가 실려 오지 않는다** — 무엇을 확정할지는 받는 쪽이 기억하고 있어야
+        /// 한다. 안 들고 있으면 확정된 글자가 통째로 사라진다.
+        private String composing = "";
+
         TerminalInputConnection(View target) {
             super(target, true);
         }
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
-            nativeComposing(text == null ? "" : text.toString());
+            composing = text == null ? "" : text.toString();
+            nativeComposing(composing);
             return true;
         }
 
         @Override
         public boolean finishComposingText() {
+            // **조합을 확정으로 넘긴다.** 겉치레만 지우면 그 글자가 사라진다 — 한글은 조합이
+            // 끝나는 순간을 `commitText` 가 아니라 이 콜백으로 알리는 IME 가 있고(삼성 키보드에서
+            // 스페이스로 확정할 때 실측: `commitText` 로는 공백 한 바이트만 왔고 '마' 는 유실됐다),
+            // 그때 친 글자가 통째로 없어졌다.
+            final String done = composing;
+            composing = "";
             nativeComposing("");   // 조합이 끝났다 — 겉치레를 지운다
+            if (!done.isEmpty()) nativeCommit(done);
             return true;
         }
 
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
+            // **조합을 먼저 비운다.** 이 호출 자체가 확정이므로, 안 비우면 뒤따라오는
+            // `finishComposingText` 가 같은 글자를 **한 번 더** 넣는다(IME 마다 순서가 다르다).
+            composing = "";
             nativeComposing("");
             nativeCommit(text == null ? "" : text.toString());
             return true;

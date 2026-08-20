@@ -85,6 +85,7 @@ pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 
 pub const agent_hook_command = @import("session/agent_hook_command.zig"); // provider 훅 인라인 커맨드(docs/agent-hooks.md §4.1, 순수)
 pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이벤트 로그 파서·tail 커서(§4, 순수)
 pub const agent_hook_install = @import("session/agent_hook_install.zig"); // 훅 설치 계획 판정(§5, 순수)
+pub const agent_hook_trust = @import("session/agent_hook_trust.zig"); // codex 훅 신뢰 값 계산(§2.1, 순수)
 pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");
 pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파일 도크의 OS-중립 소유 모델 + 단일 그룹 영속 DTO

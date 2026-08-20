@@ -224,6 +224,56 @@ pub fn scan(provider: command.Provider, hooks_value: ?std.json.Value, want_comma
     return known;
 }
 
+/// 우리 항목이 트리의 **어디에** 놓였는가. codex 의 신뢰 키가 `<경로>:<이벤트>:<그룹>:<핸들러>` 로
+/// **위치 인덱스**를 담기 때문에 필요하다 — 그 값을 추측하면(예: 「우리 것은 늘 마지막이니 len-1」)
+/// 사용자 항목이 뒤에 붙는 순간 조용히 어긋나고, 증상은 「그 훅만 신뢰되지 않음」이라 찾기 어렵다.
+pub const Placement = struct {
+    json_name: []const u8,
+    group_index: usize,
+    handler_index: usize,
+};
+
+/// 트리를 훑어 우리 항목의 자리를 채운다. 담을 수 있는 만큼만 채우고 **찾은 총 개수**를 돌려준다
+/// (넘치면 호출자가 그 사실을 안다 — 조용히 자르지 않는다).
+pub fn ourPlacements(hooks_value: ?std.json.Value, want_command: []const u8, out: []Placement) usize {
+    _ = want_command; // 표식으로 고른다 — 경로·상한이 달라도 우리 것이다(`isOurs` 와 같은 규율)
+    var found: usize = 0;
+    const hooks = switch (hooks_value orelse return 0) {
+        .object => |o| o,
+        else => return 0,
+    };
+    for (hooks.keys(), hooks.values()) |name, groups_value| {
+        const groups = switch (groups_value) {
+            .array => |arr| arr,
+            else => continue,
+        };
+        for (groups.items, 0..) |group_value, gi| {
+            const group = switch (group_value) {
+                .object => |o| o,
+                else => continue,
+            };
+            const entries = switch (group.get("hooks") orelse continue) {
+                .array => |arr| arr,
+                else => continue,
+            };
+            for (entries.items, 0..) |entry_value, hi| {
+                const entry = switch (entry_value) {
+                    .object => |o| o,
+                    else => continue,
+                };
+                const cmd = switch (entry.get("command") orelse continue) {
+                    .string => |x| x,
+                    else => continue,
+                };
+                if (!command.isOurs(cmd)) continue;
+                if (found < out.len) out[found] = .{ .json_name = name, .group_index = gi, .handler_index = hi };
+                found += 1;
+            }
+        }
+    }
+    return found;
+}
+
 pub const ApplyError = error{ OutOfMemory, Unrecognized };
 
 /// 우리 표식이 붙은 항목을 **전부** 걷어 낸다. 비게 된 group·이벤트 키는 함께 지운다 — 남겨 두면 사용자
@@ -802,4 +852,56 @@ test "모르는 모양이면 판정을 포기한다 — 거기에 쓰면 사용�
     }
     // 호출자는 이것을 `unreadable` 로 접고, 그 계획은 `abort` 다.
     try testing.expectEqual(Plan.abort, planForSet(.claude, .unreadable, .ensure));
+}
+
+test "우리 항목의 자리를 정확히 집는다 — 신뢰 키가 그 인덱스를 담는다" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+
+    // 사용자 항목이 **앞에** 둘 있는 이벤트를 만든다. 우리 것은 그 뒤에 붙으므로 group_index 가 2 다.
+    const user =
+        \\{
+        \\  "hooks": {
+        \\    "PreToolUse": [
+        \\      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "a.sh" } ] },
+        \\      { "matcher": "*", "hooks": [ { "type": "command", "command": "b.sh" } ] }
+        \\    ]
+        \\  }
+        \\}
+    ;
+    const after_text = try runClaude(a, user, want, .install);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, after_text, .{});
+    const root_obj = parsed.value.object;
+
+    var slots: [max_events]Placement = undefined;
+    const n = ourPlacements(root_obj.get("hooks"), want, &slots);
+    try testing.expectEqual(@as(usize, command.claude_events.len), n);
+
+    var seen_pre = false;
+    for (slots[0..n]) |pl| {
+        try testing.expectEqual(@as(usize, 0), pl.handler_index); // 우리 group 에는 항목이 하나뿐이다
+        if (std.mem.eql(u8, pl.json_name, "PreToolUse")) {
+            seen_pre = true;
+            try testing.expectEqual(@as(usize, 2), pl.group_index); // 사용자 둘 뒤
+        } else {
+            try testing.expectEqual(@as(usize, 0), pl.group_index); // 새로 만든 이벤트는 첫 자리
+        }
+    }
+    try testing.expect(seen_pre);
+}
+
+test "담을 자리가 모자라면 그 사실이 드러난다 — 조용히 자르지 않는다" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+    const after_text = try runClaude(a, "{}", want, .install);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, after_text, .{});
+
+    var one: [1]Placement = undefined;
+    const n = ourPlacements(parsed.value.object.get("hooks"), want, &one);
+    try testing.expectEqual(@as(usize, command.claude_events.len), n); // 총 개수를 돌려준다
+    try testing.expect(n > one.len);
 }

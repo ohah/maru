@@ -41,7 +41,7 @@ pub const Piece = struct {
     /// 표기에서 갈린다([native-editor-visual-mapping.md](../../../docs/native-editor-visual-mapping.md) §4.1g).
     ///
     /// 이 값을 누적하면 **조각의 시작 열**이 나오고, 그것이 랩된 줄에서 강조·선택을 그리는 전제다
-    /// (지금은 그 값이 없어 `frame.paintBands`가 이어진 조각을 통째로 건너뛴다).
+    /// (그 값이 없던 동안 `frame.paintBands`가 이어진 조각을 통째로 건너뛰었다 — 2026-08-19에 닫혔다).
     cols: u32,
 
     pub fn slice(self: Piece, text: []const u8) []const u8 {
@@ -152,7 +152,7 @@ pub const VisualRow = struct {
 
     /// 이 행이 **줄의 몇 열에서 시작하는가**. 첫 조각이면 0이고, 랩된 줄의 두 번째 행부터 커진다.
     ///
-    /// **이것이 없어서 `frame.paintBands`가 이어진 조각을 통째로 건너뛴다** — 강조 위치를 줄 처음부터
+    /// **이것이 없어서 `frame.paintBands`가 이어진 조각을 통째로 건너뛰었다** — 강조 위치를 줄 처음부터
     /// 세는데 그 행이 어디서 시작하는지 모르기 때문이다. 선택 하이라이트도 같은 경로를 타므로 같은
     /// 자리에서 빈다([visual-mapping](../../../docs/native-editor-visual-mapping.md) §4.1g).
     start_col: u32 = 0,

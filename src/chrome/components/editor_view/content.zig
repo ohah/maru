@@ -427,7 +427,9 @@ pub fn byteAtPoint(
         // 세우는 불변식(`start_byte_col <= start_col`)에 기대는데, 그 결합이 이 함수 밖에 있어
         // 호출자가 바뀌면 조용히 깨진다 — 그때 `-`는 u32 언더플로로 **죽는다**. 답이 달라지지
         // 않으면서 죽지만 않게 한다(7차 적대적 검증이 짚었다).
-        const lo = if (col > screen_col0) (col -| screen_col0) * cell_w_px else 0;
+        // (`if (col > screen_col0)` 가드는 뺐다 — `-|`가 saturating이라 그 경우 이미 0이고, 9차
+        //  적대적 검증이 **동치 뮤턴트**로 확인했다.)
+        const lo = (col -| screen_col0) * cell_w_px;
         const hi = (st.next_col -| screen_col0) * cell_w_px;
         if (click_px < lo + (hi - lo) / 2) return i;
         if (click_px < hi) return st.next_byte;
@@ -2344,16 +2346,22 @@ test "byteAtPoint: 아무 픽셀을 쏴도 cluster 경계이고 줄 범위 안�
 
                 // ⑴ 줄 범위 안
                 try std.testing.expect(off <= line.items.len);
-                // ⑵ cluster 경계 — 그 위치에서 시작해 줄 끝까지 걸으면 정확히 도달한다.
-                //    (경계가 아니면 UTF-8 중간이거나 cluster 안쪽이라 도달 못 하거나 어긋난다)
-                var walk = off;
+                // ⑵ cluster 경계 — **줄 머리에서 걸어 도달하는 자리인가.**
+                //
+                //    초판은 "그 위치에서 줄 끝까지 걸으면 도달한다"를 봤는데 **항진명제**였다:
+                //    `stepColumn`은 늘 1 이상 전진하고 `next_byte`를 `@min(…, len)`으로 묶으므로
+                //    어떤 시작점에서도 끝에 닿는다(8차 적대적 검증이 실측했다 — 경계 아닌 시작점
+                //    9개를 하나도 못 걸렀다).
+                var reachable = off == 0;
+                var walk: usize = 0;
                 var wcol: u32 = 0;
-                while (walk < line.items.len) {
+                while (walk < line.items.len and walk < off) {
                     const st = stepColumn(line.items, walk, wcol, tab_width);
                     walk = st.next_byte;
                     wcol = st.next_col;
+                    if (walk == off) reachable = true;
                 }
-                try std.testing.expectEqual(line.items.len, walk);
+                try std.testing.expect(reachable);
                 // ⑶ 이 행이 시작한 자리보다 앞으로 가지 않는다
                 try std.testing.expect(off >= start_byte);
             }
@@ -2429,4 +2437,32 @@ test "byteAtPoint: 왼쪽에서 잘린 cluster는 보이는 잔여분의 중점�
         try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 4, 0, 0, 5, 3, 14, cw));
         try std.testing.expectEqual(@as(usize, 3), byteAtPoint(line, 4, 0, 0, 5, 3, 15, cw));
     }
+}
+
+test "byteAtPoint: 홀수 셀 폭에서도 중점 반올림 방향이 고정이다 (§4.1g)" {
+    // **코퍼스가 전부 짝수 폭이라 이 규칙이 원리상 안 보였다**(8차 적대적 검증). 제품 fixture는
+    // `cell_width_px = 8`, 다른 단위 테스트는 `cw = 10`이라 `hi - lo`가 늘 짝수이고, 그러면 내림과
+    // 올림이 같은 답을 낸다 — §4.1g가 문단 하나를 들여 *"중점도 정수 나눗셈으로 내린다"*고 정하고
+    // 7px 셀 예까지 들었는데 그 방향을 바꿔도 전 스위트가 통과했다.
+    //
+    // 작은 폰트에서 홀수 셀 폭은 실제로 나온다.
+    const cw: u16 = 7;
+    const line = "\tX"; // 탭 폭 3 → 21px. 중점은 10.5px이고 **내림이면 10**이다.
+    try std.testing.expectEqual(@as(usize, 0), byteAtPoint(line, 3, 0, 0, 0, 3, 9, cw));
+    // 10px은 내림 중점과 같으므로 "오른쪽"이다 — 올림(11)이면 여기서 0이 나온다.
+    try std.testing.expectEqual(@as(usize, 1), byteAtPoint(line, 3, 0, 0, 0, 3, 10, cw));
+}
+
+test "byteAtPoint: 시작 열이 화면 0열보다 뒤여도 죽지 않는다 (saturating)" {
+    // **`-|`가 실제로 하는 일을 재는 유일한 테스트다.** 9차 적대적 검증이 이 경로가 도달 가능함을
+    // 보였다 — `-`로 되돌리면 여기서 u32 언더플로로 **SIGABRT**다.
+    //
+    // 정상 경로에서는 `build`가 `start_byte_col <= start_col`을 세우므로 안 온다. 그런데 그 결합이
+    // 이 함수 밖에 있어 호출자가 하나 늘면 조용히 깨지고, 그때 죽는 것보다 답을 내는 편이 낫다
+    // (§10이 *"항상 유효한 offset"*이라 정한 것과 같은 결).
+    // **값을 못 박는다.** `off <= 3`은 이 인자에서 **항진명제**였다 — 모든 반환 경로가 `≤ bytes.len`
+    // 이라 어떤 답이든 통과했고, 행 끝 반환을 `start_byte`로 바꾼 뮤턴트(3→0)를 못 잡았다(11차
+    // 적대적 검증). `screen_col0`이 줄 전체보다 뒤라 걸음이 한 칸도 못 서고 행 끝으로 나가므로 3이다.
+    const off = byteAtPoint("abc", 4, 0, 0, 5, 10, 4, 8);
+    try std.testing.expectEqual(@as(usize, 3), off);
 }

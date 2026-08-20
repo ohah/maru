@@ -24,7 +24,7 @@ tail 커서). 단위 24개 + 실제 셸 게이트 `zig build check-agent-hook-co
 - 훅 스크립트: stdin 전량 소비 → pane 식별자 확인 → `<cache>/maru/agent-turn-events/<surface_id>.ndjson`에
   **한 줄 append** → `exit 0`. **백그라운드 서브셸로 분리하지 않는다** — 실측에서 오히려 2 ms 느렸다
   (계약 §3). 비용의 대부분은 `sh` spawn이라 스크립트로 줄일 수 있는 것이 없다.
-- 훅 항목에 **`timeout`을 명시**한다(계약 §4.1). 기본값에 맡기지 않는다.
+- 훅 항목에 **`timeout`을 명시**한다(계약 §4.1). 값과 근거는 `agent_hook_command.timeout_seconds` 가 소유한다.
 - **커맨드는 인라인**이다(계약 §4.1) — 스크립트 파일을 두지 않는다. 우리 항목 식별은 커맨드 안의 표식.
 - 로그는 **소비 즉시 회전·삭제**한다(계약 §4.2). 파일 `0600`, 디렉터리 `0700`.
 - 각 줄에 **provider 표식**을 우리가 붙인다(계약 §4.1) — payload에는 없다.

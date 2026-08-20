@@ -34,6 +34,14 @@ pub const marker_comment = "# " ++ marker ++ " managed by maru: added and remove
 /// 나타나는 유실이다. 접두 최대치(provider 이름 + 구분자 1)를 미리 뺀다.
 pub const max_payload_bytes: usize = event.max_line_bytes - event.max_provider_len - 1;
 
+/// 훅 항목에 함께 적는 타임아웃(초). **기본값에 맡기지 않는다** — provider 가 그 기본을 바꾸면 우리 훅이
+/// 조용히 길어지고, 그동안 에이전트 턴이 물린다(계약 §4.1).
+///
+/// **2초인 근거**: 훅 1회 실측이 12.27 ms 이고 하는 일은 로컬 파일 append 하나뿐이다. 그 100배를 넘겨도
+/// 안 끝난다면 디스크·파일 잠금에 뭔가 잘못된 것이고, 그때는 **훅을 포기하는 쪽이 옳다** — 이벤트 하나를
+/// 잃는 것과 사용자의 턴이 멈추는 것 중 전자가 낫다.
+pub const timeout_seconds: u32 = 2;
+
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
     name: []const u8,
@@ -311,4 +319,11 @@ test "세트의 모든 이벤트를 파서가 안다 — 한쪽만 늘면 그 �
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "타임아웃이 실측 비용보다 넉넉하되 턴을 물지 않을 만큼 짧다" {
+    // 기본값에 맡기면 provider 가 그 기본을 바꿀 때 우리 훅이 조용히 길어진다. 값이 없는 것 자체가 결함이라
+    // 여기서 «있다» 와 «범위» 를 함께 고정한다.
+    try testing.expect(timeout_seconds >= 1); // 실측 12.27 ms 의 80배 이상
+    try testing.expect(timeout_seconds <= 5); // 이보다 길면 사용자가 멈춤을 체감한다
 }

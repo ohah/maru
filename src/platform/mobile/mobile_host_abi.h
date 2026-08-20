@@ -491,6 +491,11 @@ int maru_mobile_ssh_screen_consume(unsigned int handle, unsigned int n);
 ///
 /// `MARU_SSH_STATE_READY` 에서만 열 수 있고, 재키잉 중이면 `MARU_SSH_ERR_NOT_READY` 다
 /// (그때는 아무것도 안 나갔으니 **다시 부르면 된다**).
+///
+/// **순서 실수는 세션을 죽이는 코드로 안 온다.** 이미 열려 있으면 `MARU_SSH_ERR_BAD_ARG`
+/// (`control_already_open`), 닫는 중이면 `MARU_SSH_ERR_NOT_READY`(`control_closing`) 다 —
+/// 둘 다 연결은 멀쩡하다. `MARU_SSH_ERR_PROTOCOL` 은 "세션은 못 산다" 는 뜻이므로 이 자리에
+/// 오면 host 가 **멀쩡한 연결을 접는다**.
 int maru_mobile_ssh_open_control(unsigned int handle, const unsigned char *cmd,
                                  unsigned int cmd_len);
 /// 컨트롤 채널로 보낸다. 터미널 `write` 와 같은 규약 — 보낸 만큼을 `sent` 로 알려 준다.

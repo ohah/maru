@@ -1485,11 +1485,22 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
                 if ((self.grapheme_cluster_mode or self.emoji_wide) and cp == 0xFE0F) promoteLastToEmojiWidth(self);
                 return;
             }
-            // mode 2027: emoji grapheme(스킨톤·국기 RI 쌍·ZWJ 시퀀스)을 한 셀로 묶는다(앱과 너비 합의
-            // 상태라 안전). 셋은 서로 다른 UAX#29 규칙이지만(GB9 modifier·GB12/13 RI·GB11 ZWJ)
-            // emojiClusterExtends 한 판정 + 단일 흡수+폭승격 경로를 공유한다. promoteLastToEmojiWidth는
-            // RI(폭 1→2)만 올리고 이미 폭 2인 스킨톤·ZWJ엔 no-op이다.
-            if (self.grapheme_cluster_mode) {
+            // emoji grapheme(스킨톤·국기 RI 쌍·ZWJ 시퀀스)을 한 셀로 묶는다. 셋은 서로 다른 UAX#29
+            // 규칙이지만(GB9 modifier·GB12/13 RI·GB11 ZWJ) emojiClusterExtends 한 판정 + 단일 흡수+폭승격
+            // 경로를 공유한다. promoteLastToEmojiWidth는 RI(폭 1→2)만 올리고 이미 폭 2인 스킨톤·ZWJ엔 no-op이다.
+            //
+            // **게이트는 VS16 승격(위)과 같다**: (1) mode 2027 — 앱이 너비를 합의했다, (2) emoji_wide
+            // (`text.emoji-width=wide`, 기본). 옛 코드는 (1)만 열어 두었는데, 그러면 같은 설정에서
+            // ❤+VS16은 2칸으로 묶이면서 👨‍👩‍👧‍👦는 구성 이모지마다 셀을 먹어 **10칸**이 됐다 — "이모지를 항상
+            // 2칸으로 본다"는 `emoji_wide`의 약속과 정면으로 어긋난다(실측 2026-08-20: `|👍🏽|`=3.8칸,
+            // `|👨‍👩‍👧‍👦|`=10.4칸. 같은 줄의 `|❤️|`·`|🇰🇷|`·`|人|`은 정확히 2칸이었다).
+            //
+            // **베이스/결정(사실상 표준)**: 단일 표준이 없다. Ghostty는 `grapheme-width-method`가
+            // **기본 `unicode`**라 mode 2027 없이도 cluster 단위로 센다. maru도 같은 쪽을 택한다 —
+            // 모던 TUI(Ink 기반 앱 등)가 cluster 단위로 폭을 계산하므로, 터미널이 구성요소별로 세면
+            // 그 앱의 테이블·박스가 어긋난다(사용자 제보: Claude Code 화면의 표 테두리가 밀렸다).
+            // `text.emoji-width=narrow`면 옛 동작(mode 2027에서만)이라 wcwidth로 세는 환경도 남는다.
+            if (self.grapheme_cluster_mode or self.emoji_wide) {
                 if (self.screen.last_print) |last| {
                     const last_cell = self.screen.cells[self.index(last.row, last.col)];
                     if (emojiClusterExtends(self, last_cell, cp)) {

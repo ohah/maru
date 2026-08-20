@@ -1685,6 +1685,16 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
     //    못 박은 그 사고와 같은 것이다.
     const anchor = topDocLine(term);
     term.rt.editor_tab_width = tab_width;
+
+    // ⓪ **접을 수 없는 상태면 접힘 층을 건드리지 않는다** — `applyFold`·`unfoldAll`이 지키는 계약
+    //    셋 중 첫째다(초판은 둘만 졌다). 비교 뷰에서는 `foldSourceLines`가 비어 **다시 셀 수 없으므로**,
+    //    지우면 돌아올 길이 없다: 실측으로 `marks=true ranges=8`이 `marks=false ranges=0`이 되고
+    //    **비교를 꺼도 그대로**였다(16차 적대적 검증). 파생 캐시만 버리고 나간다.
+    if (foldsUnavailable(term)) {
+        invalidateFoldDerived(self, term);
+        return;
+    }
+
     dropFoldState(self, term);
     invalidateFoldDerived(self, term); // `max_cols`·가로 위치·세로 상한·행 수 캐시가 여기서 죽는다
 
@@ -1696,7 +1706,11 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
     //    **접힌 상태는 되살리지 않는다.** 탭 폭이 바뀌면 범위 자체가 달라져 "어느 범위가 접혀 있었나"가
     //    대응되지 않는다. 그래서 `unfoldAll`과 같은 결과(전부 펼침)로 가고, 보던 줄만 지킨다.
     ensureFoldRanges(self, term) catch {}; // 못 잡으면 접힘 없이 간다 — 다음 접기 명령이 다시 시도한다
-    rebuildVisible(self, term) catch {}; // 펼치는 쪽이라 실패할 것이 없다(`unfoldAll`과 같은 근거)
+    // `rebuildVisible`은 여기서 **반드시** `heads.len == 0` 갈래를 탄다(`dropFoldState`가
+    // `folded_len`을 0으로 세웠다). 그 갈래는 할당이 없어 실패하지 않고, 끝에서
+    // `invalidateFoldDerived`를 **다시 부른다** — 그래서 위 호출은 이 경로에서 죽은 줄이 아니라
+    // **비교 뷰 조기 반환을 위해** 남아 있다(16차가 그것을 죽은 줄로 지목했고, ⓪을 세우면서 몫이 생겼다).
+    rebuildVisible(self, term) catch {};
     restoreTop(term, anchor);
 }
 
@@ -6464,20 +6478,15 @@ test "ADV3-I 탭 폭 파생값 셋이 같은 값을 따르고, 바뀌면 낡지 
 }
 
 test "ADV3-J 접은 채로 탭 폭을 바꿔도 숨은 줄이 돌아오고 보던 자리를 지킨다 (§4.1f)" {
-    // **세터의 접힘 절반에 판정자가 하나도 없었다**(15차 적대적 검증). ADV3-I가 세터를 부르기 전에
-    // 한 번도 접지 않아 `visible_lines`·`folded_len`·`fold_marks_len` 축이 통째로 미실행이었고,
-    // 뮤턴트 넷이 154개 테스트를 전부 통과했다:
+    // **이 테스트가 재는 것은 세터의 계약이다** — 접은 채로 폭을 바꿔도 ⑴ 숨은 줄이 돌아오고
+    // ⑵ 화살표가 다시 서고 ⑶ 보던 자리를 지킨다. 세터가 접힘을 푸는 **세 번째 경로**인데
+    // `applyFold`·`unfoldAll`이 지키는 앵커 계약(`topDocLine`/`restoreTop`) 밖에 있어 뷰포트가
+    // 300줄 튀었고, 접힘 층을 다시 안 세워 화살표가 사라진 채 다음 접기 명령까지 안 돌아왔다(15차).
     //
-    // | 뮤턴트 | 되돌린 것 | 그 결과 |
-    // |---|---|---|
-    // | S2 | `dropFoldState`가 `visible_*` 둘을 안 놓음 | 14차가 잡은 **숨은 줄 영구 손실**이 그대로 |
-    // | G1 | `editor_folded_len = 0` 제거 | `foldedHeads`에서 범위 밖 — safe 빌드 panic, ReleaseFast는 UB |
-    // | G2 | `editor_fold_marks_len = 0` 제거 | `foldMarks`에서 범위 밖 |
-    // | G4 | `visible_*` 포인터를 `&.{}`로 안 세움 | **이중 해제** |
-    //
-    // 그리고 세터가 접힘을 푸는 **세 번째 경로**인데 `applyFold`·`unfoldAll`이 지키는 앵커 계약
-    // (`topDocLine`/`restoreTop`) 밖에 있어 뷰포트가 튀었고, 접힘 층을 다시 안 세워 gutter 화살표가
-    // 사라진 채 다음 접기 명령까지 안 돌아왔다.
+    // **`dropFoldState`의 내부 축은 여기서 안 잡힌다.** 세터가 그 뒤에 `ensureFoldRanges`·
+    // `rebuildVisible`을 불러 `folded_len`·`fold_marks_len`·`visible_*`를 **덮어쓰기 때문**이다 —
+    // 16차 적대적 검증이 그 셋을 되돌린 뮤턴트가 전부 살아남는 것을 실측했고, 초판 주석은 그것들이
+    // "여기서 죽는다"고 적어 **소스에 거짓을 박아 두고 있었다**. 그 축은 ADV3-K가 직접 잰다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;
@@ -6519,9 +6528,9 @@ test "ADV3-J 접은 채로 탭 폭을 바꿔도 숨은 줄이 돌아오고 보�
     // **접은 채로 탭 폭을 바꾼다.**
     setEditorTabWidth(fx.session, term, 8);
 
-    // ⑴ 숨은 줄이 전부 돌아왔다(S2가 여기서 죽는다).
+    // ⑴ 숨은 줄이 전부 돌아왔다.
     try testing.expectEqual(doc_lines, editorLines(term).len);
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len); // G1
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
     try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
 
     // ⑵ 화살표가 다시 선다 — 사라진 채로 두면 접을 자리를 화면에서 알 수 없다.
@@ -6529,11 +6538,119 @@ test "ADV3-J 접은 채로 탭 폭을 바꿔도 숨은 줄이 돌아오고 보�
     try testing.expect(term.rt.editor_fold_ranges.len > 0);
 
     // ⑶ 보던 자리를 지킨다(앵커 계약). 실측으로 900줄 문서에서 300줄 튀었다.
-    std.debug.print("\n[ADV3-J] doc={d} 접힘={d} 앵커={d} 세터뒤 first_line={d}\n", .{ doc_lines, visible_folded, want_doc_line, term.rt.editor_first_line });
-    try testing.expectEqual(want_doc_line, term.rt.editor_first_line);
+    testing.expectEqual(want_doc_line, term.rt.editor_first_line) catch |err| {
+        std.debug.print("\n[ADV3-J] doc={d} 접힘={d} 앵커={d} 세터뒤 first_line={d}\n", .{ doc_lines, visible_folded, want_doc_line, term.rt.editor_first_line });
+        return err;
+    };
 
     // ⑷ 다시 접고 펴는 왕복이 성립한다 — 상태가 일관되지 않으면 여기서 깨진다.
     try testing.expect(foldAll(fx.session));
     try testing.expect(unfoldAll(fx.session));
     try testing.expectEqual(doc_lines, editorLines(term).len);
+}
+
+test "ADV3-K dropFoldState는 접힘 층을 통째로 놓는다 — 세터를 거치지 않고 직접 잰다 (§4.1f)" {
+    // **세터를 거치면 이 축을 못 잰다.** 세터가 `dropFoldState` 뒤에 `ensureFoldRanges`·
+    // `rebuildVisible`을 불러 `folded_len`·`fold_marks_len`·`visible_*`를 **덮어쓰기 때문**이다 —
+    // 16차 적대적 검증이 그 셋을 되돌린 뮤턴트가 155개 테스트를 전부 통과하는 것을 실측했고,
+    // ADV3-J 주석은 그것들이 "여기서 죽는다"고 **거짓을 적고 있었다**. 그래서 직접 부른다.
+    //
+    // 이 함수가 지키는 것: ⑴ 여섯 배열을 다 놓는다(하나라도 빠지면 누수) ⑵ 포인터를 비운다(안 비우면
+    // 다음 호출자가 **이중 해제**) ⑶ 길이 둘을 0으로 세운다(안 세우면 `foldedHeads`·`foldMarks`가
+    // 빈 배열에 옛 길이로 접근해 범위 밖이다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..20) |i| {
+        var num: [24]u8 = undefined;
+        const head = std.fmt.bufPrint(&num, "b{d}\n", .{i}) catch unreachable;
+        try doc.appendSlice(allocator, head);
+        try doc.appendSlice(allocator, "\tx\n\ty\n");
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "k.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "k.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(term.rt.editor_folded_len > 0);
+    try testing.expect(term.rt.editor_fold_marks_len > 0);
+    try testing.expect(term.rt.editor_visible_lines.len > 0);
+
+    dropFoldState(fx.session, term);
+
+    // ⑵ 포인터가 비었는가 — 안 비면 아래 두 번째 호출이 이중 해제다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_ranges.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_buf.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_prev.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_marks.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_visible_lines.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_visible_numbers.len);
+
+    // ⑶ 길이 둘이 0인가 — `foldedHeads`·`foldMarks`가 빈 배열에 옛 길이로 접근하면 범위 밖이다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_marks_len);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len); // G1이 여기서 죽는다
+    try testing.expectEqual(@as(?[]const chrome_editor.gutter.Fold, null), foldMarks(term)); // G2
+
+    // 접힘이 풀렸으므로 문서 전체가 보인다.
+    try testing.expectEqual(term.rt.editor_lines.len, editorLines(term).len);
+
+    // **두 번 불러도 안전하다** — 포인터를 안 비우는 뮤턴트가 여기서 이중 해제로 죽는다(G4).
+    dropFoldState(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_ranges.len);
+
+    // 다시 세울 수 있다 — 놓기만 하고 못 세우면 그것도 결함이다.
+    try ensureFoldRanges(fx.session, term);
+    try testing.expect(term.rt.editor_fold_ranges.len > 0);
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(unfoldAll(fx.session));
+}
+
+test "ADV3-L 비교 뷰에서는 탭 폭을 바꿔도 접힘 층을 파괴하지 않는다 (§4.1f 계약 ⓪)" {
+    // **`applyFold`·`unfoldAll`이 지키는 계약 셋 중 첫째를 세터가 안 졌다**(16차 적대적 검증).
+    // 비교 뷰에서는 `foldSourceLines`가 비어 층을 **다시 셀 수 없으므로**, 지우면 돌아올 길이 없다 —
+    // 실측으로 `marks=true ranges=8`이 `marks=false ranges=0`이 되고 **비교를 꺼도 그대로**였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "a\n\tb\n\tc\nd\n\te\n\tf\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try ensureFoldRanges(fx.session, term);
+    const ranges_before = term.rt.editor_fold_ranges.len;
+    try testing.expect(ranges_before > 0);
+    try testing.expect(foldMarks(term) != null);
+
+    // **비교 상태로 만든다** — `foldSourceLines`가 비어 접힘을 셀 수 없는 상태다.
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    try testing.expect(foldsUnavailable(term));
+
+    setEditorTabWidth(fx.session, term, 8);
+
+    // 층이 그대로다 — 지웠으면 비교를 꺼도 안 돌아온다.
+    try testing.expectEqual(ranges_before, term.rt.editor_fold_ranges.len);
+
+    // 파생 캐시는 버려졌다(그것은 다시 셀 수 있다).
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_max_cols);
+
+    // **비교를 끄면 화살표가 여전히 있다.**
+    term.rt.editor_diff = null;
+    try testing.expect(foldMarks(term) != null);
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(unfoldAll(fx.session));
 }

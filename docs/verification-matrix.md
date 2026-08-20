@@ -1997,8 +1997,24 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   확인한다. commit hostile은 copied/moved/replayed reservation과 sealed slot/old-node/job generation drift를 첫 runtime mutation 전에
   거부하고, 첫 runtime commit 이후 proof drift는 common proof-loss로만 끝나는지 확인한다. suffix 안의 allocation/callback은 0이다.
   CR5b-2c gate는 같은 published replacement receipt를
-  runtime별 CR4 transaction이 소비하고, 3-runtime success 및 k번째 post-publication failure 표에서 앞선 성공 rollback 0,
+  runtime별 CR4 transaction이 소비한다. 제품 socket 표는 3-runtime success 및 shared Client를 fail-close하지 않는 k번째
+  `authority_conflict`에서 앞선 성공 rollback 0,
   잔여 runtime의 finite forward resolution, `published_old=0` terminal summary와 final registry/pin/batch/allocator 0을 검증한다.
+  cursor는 handle 정렬 순서로만 전진하고 한 시점의 active CR4 scratch는 exact 1이다. success 행은
+  `new_controller_evidenced/published_new/open`, 현재 conflict 행은 exact `authority_conflict/frozen_unavailable/closed`, untouched
+  suffix는 `old_valid/frozen_unavailable/closed`로 닫는다. allocation-free cursor 계약은 typed reject·takeover unknown·ended
+  disposition도 canonical row로만 투영한다. shared Client를 fail-close하는 candidate/resize/transport failure가 앞선
+  `published_new/open` 행 전체에 미치는 host-wide terminal 정책은 다음 CR5 Window/host-failure gate 전까지 제품 완료로 세지 않는다.
+  대신 CR5b-2c actual socket hostile은 첫 success 뒤 deadline으로 shared Client가 fail-close되면 terminal summary 0,
+  기존 cursor/job seal 보존으로 거부되는 것을 고정한다.
+  k=1/2/3 conflict 표는
+  앞선 success generation/screen/mutation projection의 bytewise 불변, 뒤쪽 status/takeover/resize/publication wire 0, summary seal 뒤
+  replay/copy/cursor·row·replacement drift mutation 0을 확인한다. 첫 success 뒤에도 job/replacement는 live이고 마지막 row terminal
+  summary 뒤에만 exact once 정산된다. summary 작성과 row 전이는 기존 inline backing에서 allocation/callback 0이어야 한다.
+  all-success에서는 각 runtime의 retiring generation을 먼저 없앤 뒤 shared retired Client를 마지막에 exact once 회수하고
+  replacement receipt를 tombstone한다. failure summary의 `frozen_unavailable` 행은 아직 terminal attachment가 shared retired
+  Client를 참조하므로 `retry_reserved` receipt/Client를 job에 유지하며, backend 최종 정산은 runtime owner를 먼저 파괴한 뒤
+  Client를 회수한다. 두 경로 모두 Client-before-RemoteGeneration 파괴는 0이어야 한다.
   이 세 gate가 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품

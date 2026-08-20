@@ -148,7 +148,8 @@ test "CR4c C1 경계는 evidenced observer binding만 unpublished controller로 
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "promoteReconnectControllerEvidence"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "validateReconnectPromotedController"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(runtime, "abortReconnectPromotedController"));
-    try std.testing.expectEqual(@as(usize, 3), countIdentifier(backend, "promoteHostReconnectControllerBinding"));
+    // CR5b-2c reuses the sole product promotion entry in its three-runtime loop.
+    try std.testing.expectEqual(@as(usize, 4), countIdentifier(backend, "promoteHostReconnectControllerBinding"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR4c C1 actual host job은"));
 
     const gate = functionSlice(build, "const session_host_cr4c_c1_step =", "const session_host_cr4c_c2_step =");

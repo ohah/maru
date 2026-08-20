@@ -73,7 +73,9 @@ test "CR5b-2b 경계는 all-runtime terminal 뒤 shared Client exact once public
         slot: usize = 0,
     }{
         .{ .id = "commitHostWideRetirementNoFail", .backend = 1, .runtime = 3 },
-        .{ .id = "hostWideRetirementCommittedExact", .backend = 2, .runtime = 3 },
+        // CR5b-2b preparation/commit validation plus CR5b-2c terminal-row
+        // validation are the three backend-owned consumers.
+        .{ .id = "hostWideRetirementCommittedExact", .backend = 3, .runtime = 3 },
         .{ .id = "commitHostRetirementNoFail", .runtime = 1, .attachment = 1 },
         .{ .id = "hostRetirementCommittedExact", .runtime = 1, .attachment = 1 },
         .{ .id = "commitPreparedUnavailableNoFail", .runtime = 1, .screen = 1 },
@@ -104,7 +106,7 @@ test "CR5b-2b 경계는 all-runtime terminal 뒤 shared Client exact once public
         ));
     }
 
-    const gate = between(build, "const session_host_cr5b2b_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5b2b_step =", "const session_host_cr5b2c_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b2b\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5b2b_step.dependOn(session_host_cr5b2a_step);"));

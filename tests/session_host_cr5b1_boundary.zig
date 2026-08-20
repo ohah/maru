@@ -50,17 +50,20 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     try std.testing.expectEqual(@as(usize, 1), count(begin, "job.prepareForConnect("));
     try std.testing.expectEqual(@as(usize, 1), count(begin, "host_connect.connectExistingHostUntil("));
 
-    try std.testing.expectEqual(@as(usize, 13), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // CR5b-2c adds the sealed cursor, terminal summary, product success/failure projections, and
+    // terminal live-state/summary recomputation plus the k-conflict row oracle.
+    try std.testing.expectEqual(@as(usize, 23), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     const backend_product = backend[0 .. std.mem.indexOf(u8, backend, "const testing = std.testing;") orelse
         return error.TestUnexpectedResult];
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend_product, "reconnectRuntimeSetIdentity"));
-    // CR5b-2a adds one hostile generation-preservation oracle; product callers remain exact two.
-    try std.testing.expectEqual(@as(usize, 8), countIdentifier(backend, "reconnectRuntimeSetIdentity"));
+    // CR5b-2a adds one hostile oracle and CR5b-2c records prior successful rows in its product E2E.
+    try std.testing.expectEqual(@as(usize, 10), countIdentifier(backend, "reconnectRuntimeSetIdentity"));
     inline for (.{ "host_reconnect_runtime_ledger", "reconnectRuntimeSetIdentity" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),
             try countProductIdentifiersExcept(allocator, identifier, &.{
                 "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
+                "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
                 "platform/macos/session_host/remote_term_backend.zig",
                 "platform/macos/session_host/remote_runtime.zig",
             }),

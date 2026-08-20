@@ -186,7 +186,8 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
         }),
     );
     // CR3c2만 R3 receipt를 actual RemoteGeneration retiring owner와 조합한다.
-    try std.testing.expectEqual(@as(usize, 4), count(runtime, "RetiredClientReclaim"));
+    // CR5b-2c remote-only reclaim holds one typed matching-Client preflight receipt.
+    try std.testing.expectEqual(@as(usize, 6), count(runtime, "RetiredClientReclaim"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "destroyRetiredClient("));
     try std.testing.expectEqual(
         @as(usize, 0),

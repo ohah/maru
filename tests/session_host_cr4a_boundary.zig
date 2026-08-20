@@ -346,8 +346,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "pub fn publishHostReconnectReplacement("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn publishReconnectClientReplacement("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "RemoteRuntime.backend_api.publishReconnectClientReplacement("));
-    try std.testing.expectEqual(@as(usize, 9), count(remote_backend, "HostReconnectJobState.replacement_published"));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_backend, "HostReconnectJobState.replacement_failed"));
+    // CR5b-2c adds one typed failure-to-terminal classification from the active row.
+    try std.testing.expectEqual(@as(usize, 10), count(remote_backend, "HostReconnectJobState.replacement_published"));
+    // CR5b-2c excludes pre-shared replacement failure from cursor-bearing states.
+    try std.testing.expectEqual(@as(usize, 7), count(remote_backend, "HostReconnectJobState.replacement_failed"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn preflightReconnectClientReplacementFailure("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_backend, "preflightReconnectClientReplacementFailure("));
     // Product backend deinit and the CR5b-2b shared-publication fixture each reclaim the
@@ -516,7 +518,9 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     // CR4a issuer teardown + CR4b usable authority-conflict teardown.
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(remote_backend, "abortReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "prepareObserverReconnectCandidateUntil"));
-    try std.testing.expectEqual(@as(usize, 7), countIdentifier(remote_backend, "prepareHostReconnectObserverStage"));
+    // CR5b-2c reuses the product observer-stage entry for success, usable
+    // kth-failure rows, and the shared-Client terminal-after-success guard.
+    try std.testing.expectEqual(@as(usize, 10), countIdentifier(remote_backend, "prepareHostReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn catchupProjection("));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "catchupProjection"));
     // CR4a prepare/validate 두 경로와 CR4b controller-evidence 재검증 한 경로.

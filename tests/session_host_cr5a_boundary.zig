@@ -12,6 +12,11 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
     defer allocator.free(build);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);
+    const transaction = try readSource(
+        allocator,
+        "src/platform/macos/session_host/host_reconnect_runtime_transaction.zig",
+    );
+    defer allocator.free(transaction);
 
     inline for (.{
         "pub const HostJobIdentity = struct {",
@@ -29,19 +34,31 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
     try std.testing.expectEqual(@as(usize, 1), count(contract, "    job: HostJobIdentity,"));
     try std.testing.expectEqual(@as(usize, 2), count(contract, "std.meta.eql(row.identity.job, job)"));
     try std.testing.expectEqual(@as(usize, 4), count(contract, "test \"CR5a runtime ledger는"));
-    inline for (.{ "summarizeTerminalRows", "inputAllowed" }) |identifier| try std.testing.expectEqual(
+    try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductIdentifiersExcept(allocator, identifier, &.{
+        try countProductIdentifiersExcept(allocator, "summarizeTerminalRows", &.{
             "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
+            "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
+    try std.testing.expectEqual(@as(usize, 0), try countProductIdentifiersExcept(
+        allocator,
+        "inputAllowed",
+        &.{"platform/macos/session_host/host_reconnect_runtime_ledger.zig"},
+    ));
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(transaction, "summarizeTerminalRows"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "validateCanonicalRows"));
-    try std.testing.expectEqual(@as(usize, 13), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifier(backend, "summarizeTerminalRows"));
+    // CR5b-2c terminal validation adds canonical local-state checks, summary recomputation, and
+    // the actual k-conflict row oracle without opening another ledger implementation.
+    try std.testing.expectEqual(@as(usize, 23), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),
             try countProductIdentifiersExcept(allocator, identifier, &.{
                 "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
+                "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
                 "platform/macos/session_host/remote_term_backend.zig",
             }),
         );

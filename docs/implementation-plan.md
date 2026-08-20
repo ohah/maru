@@ -1224,9 +1224,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    exact 한 번 게시한다. replacement node backing과 identity는 old graph가 live인 준비 구간에서 final-address reserved receipt로
    먼저 확보하고, commit suffix 안에서는 allocation·identity 발급·callback 없이 전 runtime unavailable → shared old Client
    cleanup → fresh Client move → replacement publish만 수행한다. CR5b-2c는 그 published replacement receipt를 각 행의 CR4 observer/takeover/publication transaction이
-   순서대로 재검증해 소비하고, k번째 post-publication 실패를 앞선 성공은 `published_new`, 실패/잔여 행은
-   `frozen_unavailable` 또는 `ended`로 forward-resolve한 terminal summary로 닫는다. 어느 단계도 runtime마다 Client replacement를
-   반복하거나 첫 runtime 정산 중 sibling attachment가 참조하는 shared Client를 파괴하지 않는다.
+   순서대로 재검증해 소비하고, usable shared Client 아래 k번째 `authority_conflict`를 앞선 성공은 `published_new`, 실패/잔여 행은
+   `frozen_unavailable` 또는 `ended`로 forward-resolve한 terminal summary로 닫는다. host job은 inline runtime cursor와 한 행짜리
+   final-address CR4 scratch를 재사용하며, 각 성공 publication 뒤 row commit→scratch tombstone→cursor advance를 no-fail 순서로
+   수행한다. 마지막 row의 terminal summary를 봉인하기 전에는 job과 shared replacement receipt를 파기하지 않는다. 어느 단계도 runtime마다 Client replacement를
+   반복하거나 첫 runtime 정산 중 sibling attachment가 참조하는 shared Client를 파괴하지 않는다. shared Client 자체를
+   fail-close하는 candidate/resize/transport failure의 앞선 published 행 전체 전이는 다음 Window/host-failure gate가 소유한다.
+   그 전까지 completion leaf는 이 조합의 terminal summary 게시를 거부한다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

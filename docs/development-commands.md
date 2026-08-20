@@ -387,9 +387,16 @@ Maru 작업에서 사용하는 기본 명령이다.
   allocation/callback 0을 검증한다. Debug·ReleaseFast 각각 reserved-node/OOM·abort 제품형 행 1개,
   three-runtime shared-publication 제품 행 1개, source boundary 1개를 exact-count한다.
 - 영속 세션 호스트 CR5b-2c runtime transaction gate: `zig build test-session-host-cr5b2c`. 2b를 상속하고 동일 published
-  replacement receipt에서 각 runtime의 CR4 observer/takeover/publication을 전진시킨다. 3-runtime success와 k번째 실패에서
-  rollback 0, finite forward resolution, `published_old=0` terminal summary와 final resource zero를 확인한다. Window move/close
-  경쟁은 이 gate 뒤의 CR5 Window gate가 소유한다.
+  replacement receipt에서 각 runtime의 CR4 observer/takeover/publication을 전진시킨다. 3-runtime success와 k번째
+  `authority_conflict`에서
+  rollback 0, finite forward resolution, `published_old=0` terminal summary와 final resource zero를 확인한다. 각 최적화
+  모드에서 allocation-free cursor 계약 3개, 실제 manifest/daemon/socket을 지나는 three-runtime success 및 k=1/2/3
+  usable-connection conflict
+  제품 행 2개, source boundary 1개를 exact-count한다. success는 각 runtime의 retiring generation만 먼저 정산하고 마지막
+  terminal summary에서 shared retired Client를 exact once 회수한다. failure는 앞선 published generation을 보존하고 retry가
+  필요한 frozen suffix가 참조하는 shared retired Client/receipt를 terminal job에 유지했다가 backend 정산에서 remote-first로
+  회수한다. 첫 success 뒤 shared Client terminal failure는 앞선 행을 `published_new/open`으로 잘못 봉인하지 않고 terminal
+  summary 게시 0으로 거부한다. 그 all-row 전이는 Window move/close 경쟁과 함께 다음 CR5 Window/host-failure gate가 소유한다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

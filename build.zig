@@ -5323,6 +5323,56 @@ pub fn build(b: *std.Build) void {
         session_host_cr5b2b_step.dependOn(&run_cr5b2b_boundary_tests.step);
         boundary_step.dependOn(&run_cr5b2b_boundary_tests.step);
     }
+    const session_host_cr5b2c_step = b.step(
+        "test-session-host-cr5b2c",
+        "CR5b-2c ordered runtime transaction and terminal summary gates",
+    );
+    session_host_cr5b2c_step.dependOn(session_host_cr5b2b_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b2c_optimize| {
+        const cr5b2c_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_runtime_transaction.zig"),
+                .target = target,
+                .optimize = cr5b2c_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5b-2c cursor는"},
+        });
+        const run_cr5b2c_contract_tests = b.addRunArtifact(cr5b2c_contract_tests);
+        run_cr5b2c_contract_tests.addArg("--maru-expect-tests=3");
+        run_cr5b2c_contract_tests.setCwd(b.path("."));
+        session_host_cr5b2c_step.dependOn(&run_cr5b2c_contract_tests.step);
+
+        const cr5b2c_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = cr5b2c_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5b-2c actual host job은"},
+        });
+        const run_cr5b2c_backend_tests = b.addRunArtifact(cr5b2c_backend_tests);
+        run_cr5b2c_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr5b2c_backend_tests.setCwd(b.path("."));
+        session_host_cr5b2c_step.dependOn(&run_cr5b2c_backend_tests.step);
+
+        const cr5b2c_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr5b2c_boundary.zig"),
+                .target = target,
+                .optimize = cr5b2c_optimize,
+            }),
+            .filters = &.{"CR5b-2c 경계는"},
+        });
+        const run_cr5b2c_boundary_tests = b.addRunArtifact(cr5b2c_boundary_tests);
+        run_cr5b2c_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr5b2c_boundary_tests.setCwd(b.path("."));
+        session_host_cr5b2c_step.dependOn(&run_cr5b2c_boundary_tests.step);
+        boundary_step.dependOn(&run_cr5b2c_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

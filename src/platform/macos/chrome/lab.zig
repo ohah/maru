@@ -7,6 +7,11 @@ const std = @import("std");
 const maru = @import("maru");
 const lowering = @import("metal_lowering.zig");
 
+/// **Lab 안의 탭 폭 단일 출처.** 제품은 `Term.rt.editor_tab_width`를 쓰는데 Lab에는 Term이 없다.
+/// 소비처가 각자 상수를 읽으면 한 캡처 안에서 갈리므로(가장 긴 줄 계수 ↔ `diff_frame.build`) 여기서
+/// 한 번 정한다 — 설정이 배선되면 이 한 줄만 고치면 된다(12차 적대적 검증).
+const lab_tab_width: u8 = chrome.components.editor_view.frame.default_tab_width;
+
 const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
 const scm_dock = chrome.components.scm_dock;
@@ -471,7 +476,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 여는 경로에서 세는 그 계산과 같아야 캡처가 제품을 예고하기 때문이다(§4.1a).
     const hscroll_max_cols: ?u32 = if (scenario.id == .editor_hscroll) blk: {
         var widest: u32 = 0;
-        for (lines) |line| widest = @max(widest, editor_view.content.lineColumnsUpTo(line, editor_view.frame.default_tab_width, editor_view.frame.max_cols_count_limit));
+        for (lines) |line| widest = @max(widest, editor_view.content.lineColumnsUpTo(line, lab_tab_width, editor_view.frame.max_cols_count_limit));
         break :blk widest;
     } else null;
     // 행 저장소가 고정이므로 **거기에 맞춰 자른다.** 지금 fixture로는 넘지 않지만, 줄을 늘리거나
@@ -685,6 +690,7 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
             .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands, .marks = &right_marks },
         // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
         .first_line = if (scrolled) 40 else 0,
+        .tab_width = lab_tab_width,
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
         .cell_w_px = scenario.cell_w_px,

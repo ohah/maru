@@ -99,9 +99,9 @@
 - **L3 시각 매핑도 헤드리스**다. 다만 왕복 불변식을 무조건으로 적으면 틀린다 — 정확한 계약은 셋으로 나뉜다.
   **이 셋을 실제 좌표계로 옮긴 것은 [native-editor-visual-mapping.md](native-editor-visual-mapping.md) §4.1g다**
   (2026-08-19 — 걸친 자리마다 무엇을 답하는지, 왜 역방향이 왕복이 아닌지, 실측이 그 비율을 얼마로 말하는지).
-  - **보이는 offset에 대해서만 왕복한다**: `o`가 접힘·스크롤로 가려지지 않았을 때 `caretAtPoint(caretRect(o)) == o`. 접힘·랩·가상줄 조합에서 이 조건부 왕복을 고정한다.
+  - **보이는 offset에 대해서만 왕복한다**: `o`가 접힘·스크롤로 가려지지 않았을 때 `hitTestBody(caretRect(o)) == o`(역방향의 구현 이름 — visual-mapping §4.1g "이름 정리". `caretRect`는 아직 없어 이 불변식은 **미검증**이다). 접힘·랩·가상줄 조합에서 이 조건부 왕복을 고정한다.
   - **접힌 offset은 왕복 대상이 아니다.** `caretRect`가 무엇을 반환하는지(접힘 대표 위치 / 없음)를 먼저 정하고 그 정의를 테스트한다.
-  - **역방향은 왕복이 아니다.** `caretAtPoint`는 줄 끝 너머·가상 텍스트 위·여백 좌표에서도 **항상 유효한 offset을 반환**(clamp)하므로, `caretRect(caretAtPoint(p))`가 `p`를 포함한다는 보장이 없다. 이 방향은 "clamp 결과가 그래핌 경계이고 문서 범위 안"이라는 더 약한 불변식으로 검증한다.
+  - **역방향은 왕복이 아니다.** `hitTestBody`는 줄 끝 너머·가상 텍스트 위·여백 좌표에서도 **항상 유효한 offset을 반환**(clamp)하므로, `caretRect(caretAtPoint(p))`가 `p`를 포함한다는 보장이 없다. 이 방향은 "clamp 결과가 그래핌 경계이고 문서 범위 안"이라는 더 약한 불변식으로 검증한다.
 - **레이어 경계는 `check-boundaries`에 규칙을 더해 강제한다.** 현재 그 step은 facade import·chrome text cluster·icon literal 세 가지만 검사하며 **editor 코어 규칙은 아직 없다** — [editor-surface-structure.md](editor-surface-structure.md) §3이 "editor 코어의 platform import 금지를 추가한다"고 **계획**해 둔 상태다. 문서 모델 파일들이 그 규칙에 함께 걸리도록 하되, **규칙을 만드는 것 자체가 이 이관의 작업 항목**이다(새 규칙 *종류*를 발명하는 것이 아니라 기존 boundary 테스트 형식에 항목을 더한다).
 - **IME·firstResponder·실제 GPU 출력은 헤드리스 불가**다. GUI 손 테스트가 유일 안전망이며([web-panel.md](web-panel.md) §11 규율), 무엇을 손으로 확인하는지는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 - **CM6 대비 성능 baseline은 재지 않는다**(2026-08-09 사용자 결정). 이관 전후를 비교하는 계측 하니스를 세우는 것은 이 작업에 비해 과하다고 판단했다. 그 귀결을 회피하지 않고 적는다: **성능 개선을 주장할 수 없다**(§1.0에서 근거 자체를 뺐다). 문서·PR·커밋에 "빨라졌다"·"더 빠르다"를 쓰지 않으며, 쓰려면 그때 측정부터 한다.
@@ -234,7 +234,7 @@
     - **text edits 적용** = code action·rename·포맷 → §3.6
     이 넷은 전부 계약 **안**이다.
   - **"정의로 이동"은 팝업이 아니라 파일 열기라 계약 안이다** — §5.2가 소유한다.
-- **virtual space**(줄 끝 너머 caret) — 이것은 "정의하지 않음"이 아니라 **명시적 배제**다. §10의 `caretAtPoint` clamp 계약이 그 위에 서므로, 되살리려면 그 계약부터 바꿔야 한다.
+- **virtual space**(줄 끝 너머 caret) — 이것은 "정의하지 않음"이 아니라 **명시적 배제**다. §10의 역방향(`hitTestBody`) clamp 계약이 그 위에 서므로, 되살리려면 그 계약부터 바꿔야 한다.
 - **접근성(VoiceOver)** — [text-field-editor.md](text-field-editor.md) §1이 단일행 필드에서 이미 비목표로 둔 항목이고, 이 문서도 같은 범위를 잇는다.
   - **이것은 "미룬다"가 아니라 "잃는다"에 가깝다.** WKWebView + CM6 경로에서는 DOM이 있어 **WebKit이 접근성 트리를 자동 생성**했다(§1.0 역량 행이 말한 대가). 네이티브 GPU 뷰는 화면에 픽셀만 있고 구조 정보가 없어 VoiceOver가 읽을 것이 없다.
   - **다만 완전 신규는 아니다.** [chrome-interaction-migration.md](chrome-interaction-migration.md)가 이미 방향을 정해 뒀다 — **Zig tree는 `NSAccessibility` 객체를 보유하지 않고 semantic descriptor만 내며, Swift adapter가 그것을 native accessibility element로 투영**한다. 편집기 접근성도 그 패턴을 따르면 되고, 편집기 고유의 일은 "무엇을 descriptor로 낼 것인가"(현재 줄·caret 위치·선택 범위·진단)를 정하는 것이다.

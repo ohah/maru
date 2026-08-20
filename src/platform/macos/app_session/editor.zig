@@ -200,9 +200,23 @@ pub fn buildPaneOps(
 ///
 /// **`AppSession`을 아예 안 받는다** — 기하도 셀 크기도 렌더가 굳힌 스냅숏(`editor_hit_geom`)에서
 /// 온다. live로 다시 구하면 행 배열과 다른 프레임의 값이 되고, 실측으로 폭이 바뀐 뒤 클릭의 **80%**,
-/// 폰트가 바뀐 뒤 **93%**가 다른 답을 냈다(10·11차 적대적 검증). 인자에서 뺀 것이 판정자보다 강한
-/// 보장이다 — 이제 live 상태를 읽는 코드를 **쓸 수가 없다**. 문서 내용(`editor_lines`·`editor_doc`)만
-/// `Term`에서 읽고, 그 둘은 편집이 곧 렌더라 배열과 함께 갱신된다.
+/// 폰트가 바뀐 뒤 **93%**가 다른 답을 냈다(10·11차 적대적 검증).
+///
+/// **그 인자 제거가 막는 것은 절반이다.** `AppSession`에만 있는 축(셀 크기·pane 기하)은 이제 타입이
+/// 막지만, **`term.rt`는 통째로 live**이고 여기서 읽을 수 있다 — 이 함수 자신이 `editor_diff`를
+/// 그렇게 읽는다(비교 뷰 거절). 실제로 `tab_w`를 `geom.tab_width` 대신 `term.rt.editor_tab_width`로
+/// 바꾼 뮤턴트가 **컴파일되고 판정자 15개를 전부 통과했다**(12차 적대적 검증). 앞선 회차들이
+/// *"live를 하나도 안 읽는다"* → *"layout만 live로 다시 구한다"* → *"쓸 수가 없다"*로 세 번 연속
+/// 거짓을 적었으므로, 여기서는 **막는 축과 안 막는 축을 나눠 적는다**:
+///
+/// | 축 | 무엇이 막는가 |
+/// |---|---|
+/// | 셀 크기·pane 기하·layout | **타입** — `AppSession`이 인자에 없다 |
+/// | `term.rt`의 스냅숏 필드(`editor_hit_*`) | 규율뿐 — `storeHitRows`가 함께 세우고 함께 지운다 |
+/// | `term.rt`의 live 필드(`editor_tab_width`·`editor_first_line`·번호 표) | **아무것도 안 막는다** — 판정자가 필요하고, 탭 폭 축은 ADV3-H가 맡는다 |
+///
+/// 문서 내용(`editor_lines`·`editor_doc`)은 일부러 live로 읽는다 — 편집이 곧 렌더라 배열과 함께
+/// 갱신된다.
 ///
 /// 세로 밖은 첫/마지막 **보이는 행**으로 clamp한다. 드래그는 pane을 벗어나는 것이 정상이고, 그때
 /// `null`을 주면 호출자가 분기를 하나 더 져야 한다(§10이 *"항상 유효한 offset"*이라 정한 것과 같은 결).
@@ -216,8 +230,11 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     // 다른 프레임의 값이 되고, 실측으로 폭이 바뀐 뒤 클릭의 80%가, 폰트가 바뀐 뒤 93%가 다른 답을
     // 냈다(10·11차 적대적 검증). **둘을 섞어도 같은 결과다** — 굳은 열에 live 셀 폭을 곱하면 그
     // 곱 자체가 어느 프레임의 것도 아니게 된다.
+    // **셀 0 가드가 없다** — `geom`이 기본값(0)인 상태는 *"한 번도 안 그렸다"* 또는 *"해제됐다"*뿐이고
+    // 둘 다 `rows_len == 0`이라 위에서 이미 걸린다(`storeHitRows`가 넷을 함께 세우고
+    // `releaseEditorTerm`이 함께 지운다). 그린 프레임의 셀 크기는 0일 수 없다 — `appendPaneFrame`이
+    // 맨 앞에서 `cell_width_px == 0 or cell_height_px == 0`이면 `null`을 내므로 그리기 자체가 없다.
     const geom = term.rt.editor_hit_geom;
-    if (geom.cell_w_px == 0 or geom.cell_h_px == 0) return null;
     const cell_h: i64 = @intCast(geom.cell_h_px);
 
     // **캐스트 전에 묶는다.** `@intFromFloat`는 표현 불가능한 값(NaN·무한대·i64 범위 밖)에서
@@ -234,7 +251,7 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     // **본문 오른쪽 밖을 여기서 묶지 않는다.** 결정표의 *"행 끝 너머 → 그 행의 끝"*을 실제로 지키는
     // 것은 `byteAtPoint`의 `next_col > row_end_col` break다(`content.zig`). 여기서 한 번 더 묶어도
     // 답이 안 바뀐다 — 실측: 랩 끔·500바이트 줄·`content_width=89`에서 사각 밖 +500px 클릭이 clamp
-    // 유무와 무관하게 **89**를 냈다(11차 적대적 검증. 그 clamp를 지운 뮤턴트를 판정자 13개가 하나도
+    // 유무와 무관하게 **89**를 냈다(11차 적대적 검증. 그 clamp를 지운 뮤턴트를 판정자 열셋가 하나도
     // 못 잡았고, 그것이 죽은 코드라는 증거였다).
 
     // 세로는 clamp한다(위 doc). 행이 음수면 첫 행, 넘치면 마지막 행.
@@ -265,9 +282,12 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
         v.start_byte_col,
         v.start_col,
         geom.content_width,
-        // **캐스트 안전만 맡는 clamp다**(행 끝 규칙이 아니다 — 위 문단). `rel_x_raw`는 위 gutter
-        // 가드가 하한을 세웠고, 상한은 `px_limit`과 `body_x`가 각각 i32라 합이 i32를 넘을 수 있다.
-        @intCast(@min(rel_x_raw - content_left_px, @as(i64, std.math.maxInt(i32)))),
+        // **여기 clamp가 없다.** 11차는 이 캐스트를 묶었는데 그 근거(*"`body_x`가 i32라 합이 i32를
+        // 넘을 수 있다"*)가 **거짓이었다** — 식은 뺄셈이고 `body_x`는 `SplitRect.x: u32`에서 오므로
+        // 항상 `≥ 0`이다. 그래서 `rel_x_raw ≤ px_limit = 2^30`이고 여기서 뺄셈이 그것을 더 키우지
+        // 못한다(위 gutter 가드가 하한도 세웠다). 실측으로 극단 입력 36발(±1e300·±inf·NaN·2^40)에서
+        // 죽지 않고, clamp를 지운 뮤턴트를 판정자 15개가 하나도 못 잡았다(12차 적대적 검증).
+        @intCast(rel_x_raw - content_left_px),
         geom.cell_w_px,
     );
 
@@ -352,9 +372,11 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         .body_y = @intCast(body_outer.y + inset),
         .content_left_px = @as(u32, lay.contentLeft()) * @as(u32, self.cell_width_px),
         .content_width = lay.content.width,
-        // 셀 크기는 폰트 크기라 u16을 넘을 수 없다(`sideMetrics`도 같은 폭으로 받는다).
-        .cell_w_px = @intCast(@min(self.cell_width_px, std.math.maxInt(u16))),
-        .cell_h_px = @intCast(@min(self.cell_height_px, std.math.maxInt(u16))),
+        // **묶지 않는다** — 여덟 줄 위 `sideMetrics(..., @intCast(self.cell_width_px), ...)`가 이미
+        // u16 인자에 맨 캐스트를 넣으므로, 셀이 u16을 넘으면 여기 오기 전에 트랩한다. 묶으면 그
+        // 트랩이 죽고 조용히 잘린 값이 굳는다(같은 이유로 아래 반환도 `assert`다).
+        .cell_w_px = @intCast(self.cell_width_px),
+        .cell_h_px = @intCast(self.cell_height_px),
         .tab_width = term.rt.editor_tab_width,
     };
 }
@@ -935,7 +957,7 @@ fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
     var scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined; // 렌더와 같은 크기
     const c = chrome_editor.content.rowCount(
         lines[line],
-        chrome_editor.frame.default_tab_width,
+        term.rt.editor_tab_width, // 렌더와 같은 값(단일 출처) — 갈리면 화면과 스크롤이 어긋난다
         content_cols,
         true,
         &scratch,
@@ -1424,7 +1446,10 @@ fn ensureMaxCols(term: *Term, right: bool) void {
     const lines = if (right) rightTexts(term) else editorLines(term);
     if (lines.len == 0) return;
 
-    const tab_width = chrome_editor.frame.default_tab_width; // 렌더가 쓰는 그 값(단일 출처)
+    // **렌더가 쓰는 그 값**(`editor_tab_width` — 단일 출처). 상수를 읽으면 필드가 기본값이 아닐 때
+    // 가로 막대 상한이 화면과 갈린다: 실측으로 탭 폭 8인 문서에서 상한이 20열로 나왔고 실제 가장 긴
+    // 줄은 28열이라 **8열(29%)이 모자랐다**(12차 적대적 검증).
+    const tab_width = term.rt.editor_tab_width;
     const limit = chrome_editor.frame.max_cols_count_limit;
     var max: u32 = 0;
     for (lines) |line| {
@@ -1449,7 +1474,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const lines = foldSourceLines(term);
     if (lines.len == 0) return;
 
-    const tab_width = chrome_editor.frame.default_tab_width;
+    const tab_width = term.rt.editor_tab_width; // 렌더와 같은 값(단일 출처)
     const n = editor_fold.countRanges(lines, tab_width);
     if (n == 0) return;
 
@@ -5225,7 +5250,7 @@ test "네이티브로 연 텍스트는 CM6 스냅샷을 기다리지 않는다 �
 
 /// **측정용 프로토타입** — 목표 열 이하에서 가장 가까운 cluster 경계의 byte.
 ///
-/// `caretAtPoint`가 필요로 하는 **역방향**이다(포인터 → 열 → byte, `Selection`이 byte offset 기반).
+/// **역방향**(`hitTestBody`)이 필요로 하는 걸음이다(포인터 → 열 → byte, `Selection`이 byte offset 기반).
 /// `content.stepColumn` 하나를 되짚으므로 규칙이 갈리지 않는다 — 탭스톱·cluster 분절·§3.8 표기가
 /// 그 함수에만 있고, 이 방향을 따로 짜면 그 셋이 두 곳으로 갈린다(그렇게 갈려서 강조가 7칸 밀린
 /// 전례가 §4.1c에 적혀 있다).
@@ -5242,7 +5267,7 @@ fn byteAtColumnProto(bytes: []const u8, tab_width: u16, target_col: u32) usize {
 }
 
 test "[측정] 열→byte 역방향 — 클릭 지점까지 훑는 비용" {
-    // **`caretAtPoint`의 뼈대 비용이다.** 클릭한 픽셀은 열이 되고, 열은 byte가 되어야 selection이
+    // **역방향(`hitTestBody`)의 뼈대 비용이다.** 클릭한 픽셀은 열이 되고, 열은 byte가 되어야 selection이
     // 그것을 든다. 이 방향이 거리에 비례하면 §4.1c의 `max_first_col` 상한과 **같은 성질의 상한**이
     // 클릭에도 필요해진다 — 그 판단의 근거를 여기서 만든다.
     //
@@ -5758,7 +5783,7 @@ test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 값을 따른�
 
     // **기본값이 아닌 탭 폭으로 잰다.** 기본값(`4`)으로만 재면 렌더도 hit-test도 같은 comptime 상수를
     // 읽으므로 **하드코딩과 단일 출처 참조를 원리상 구분할 수 없다** — 실측으로 `tab_w`를 `4`로
-    // 하드코딩한 뮤턴트를 판정자 13개가 하나도 못 잡았다(11차 적대적 검증). 4가 아닌 값을 넣을 수
+    // 하드코딩한 뮤턴트를 판정자 열셋가 하나도 못 잡았다(11차 적대적 검증). 4가 아닌 값을 넣을 수
     // 있게 `editor_tab_width` 필드와 `buildPaneOps`의 인자를 그때 뚫었다.
     term.rt.editor_tab_width = 3;
     const tw: u16 = term.rt.editor_tab_width;
@@ -6112,29 +6137,99 @@ test "ADV3-F 셀 크기도 스냅숏이다 — 폰트가 바뀌고 아직 안 �
     // 답이 셀 크기를 아예 안 본다는 뜻일 수도 있다. 굳은 값을 바꾸면 **반드시** 답이 흔들려야 한다.
     // (이 방향의 뮤턴트는 주입할 수 없다 — `hitTestBody`가 `AppSession`을 안 받으므로 live를 읽는
     //  코드를 쓸 수가 없다. 그 대신 굳은 값 자체를 흔들어 의존을 보인다.)
-    term.rt.editor_hit_geom.cell_w_px = geom.cell_w_px * 2;
-    term.rt.editor_hit_geom.cell_h_px = geom.cell_h_px * 2;
+    // **축을 따로 흔든다.** 둘을 함께 흔들면 한쪽만 굳혀도 문턱을 넘는다 — 실측으로 폭만 ×2가
+    // 56/64, 높이만 ×2가 56/64였다(12차 적대적 검증). 그러면 `cell_h_px`를 스냅숏에서 뺀 뮤턴트를
+    // 못 잡는다.
+    inline for (.{ "cell_w_px", "cell_h_px" }) |axis| {
+        @field(term.rt.editor_hit_geom, axis) = @field(geom, axis) * 2;
+        var shifted: usize = 0;
+        for (probes[0..n], before[0..n]) |p, b| {
+            if (hitTestBody(term, p[0], p[1]) != b) shifted += 1;
+        }
+        @field(term.rt.editor_hit_geom, axis) = @field(geom, axis);
+        try testing.expect(shifted >= n / 2);
+    }
+}
+
+test "ADV3-H 탭 폭도 스냅숏이다 — 프레임 사이에 설정이 바뀌어도 답이 안 흔들린다 (§4.1g)" {
+    // **탭 폭 축에 판정자가 하나도 없었다**(12차 적대적 검증: `tab_w`를 `geom.tab_width` 대신
+    // live `term.rt.editor_tab_width`로 읽는 뮤턴트가 **컴파일되고 판정자 15개를 전부 통과**했다).
+    // `AppSession`을 인자에서 뺀 것은 그 축을 못 막는다 — `term.rt`는 통째로 live다.
+    //
+    // 탭 폭은 설정이 바뀌면 프레임 사이에 바뀌고, 그때 옛 행 배열 × 새 탭 폭이면 클릭이 화면과
+    // 어긋난다(탭 폭이 곧 열 계산이다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 탭이 줄마다 있어야 폭이 답을 가른다.
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "tabs.txt", .data = "\tone\ttwo\tthree\n\t\tfour\tfive\n\tsix\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "tabs.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_tab_width = 4;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const geom = term.rt.editor_hit_geom;
+    try testing.expectEqual(@as(u8, 4), geom.tab_width);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    var probes: [24][2]f64 = undefined;
+    var before: [24]?usize = undefined;
+    var n: usize = 0;
+    for (0..3) |row| {
+        for (0..8) |k| {
+            const px: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset +
+                @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(k * 2 * geom.cell_w_px)));
+            const py: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset +
+                @as(i32, @intCast(row * @as(usize, geom.cell_h_px))) + 1);
+            probes[n] = .{ px, py };
+            before[n] = hitTestBody(term, px, py);
+            n += 1;
+        }
+    }
+    var distinct: usize = 0;
+    for (before[0..n]) |b| {
+        if (b != null and b != before[0]) distinct += 1;
+    }
+    try testing.expect(distinct >= 8); // 판정할 것이 실제로 있다
+
+    // **설정만 바꾸고 다시 안 그린다.**
+    term.rt.editor_tab_width = 8;
+    var moved: usize = 0;
+    for (probes[0..n], before[0..n]) |p, b| {
+        if (hitTestBody(term, p[0], p[1]) != b) moved += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), moved);
+
+    // 역방향 — 굳은 값을 흔들면 반드시 답이 흔들린다(안 그러면 위가 항진명제다).
+    term.rt.editor_hit_geom.tab_width = 8;
     var shifted: usize = 0;
     for (probes[0..n], before[0..n]) |p, b| {
         if (hitTestBody(term, p[0], p[1]) != b) shifted += 1;
     }
-    term.rt.editor_hit_geom.cell_w_px = geom.cell_w_px;
-    term.rt.editor_hit_geom.cell_h_px = geom.cell_h_px;
-    try testing.expect(shifted >= n / 2);
+    term.rt.editor_hit_geom.tab_width = geom.tab_width;
+    try testing.expect(shifted >= n / 3);
 }
 
 test "ADV3-G 번호 표가 행보다 짧으면 그 행의 클릭은 답하지 않는다 (§4.1g ③)" {
     // **`source_line >= editor_lines.len` 가드에 판정자가 없었다**(11차 적대적 검증: `>=`를 `>`로
-    // 바꾼 뮤턴트를 판정자 13개가 하나도 못 잡았다). 그 가드는 `storeHitRows`의
+    // 바꾼 뮤턴트를 판정자 열셋가 하나도 못 잡았다). 그 가드는 `storeHitRows`의
     // `else source = doc_lines;`와 짝이다 — 번호 표가 보이는 줄 수보다 짧으면 그 행은 원본 줄을
     // 모르고, 모르는 채로 답하면 **엉뚱한 줄이 선택된다**. 죽은 코드가 아니라 무판정이었다.
     //
-    // **그 뮤턴트는 사실 판정자가 아니라 스위트를 깬다.** `>`로 완화하면 `editor_lines[len]`이
-    // 범위 밖 읽기가 되고, 실측으로 **릭·세그폴트가 실행마다 다른 자리에서** 났다(477번 테스트,
-    // 다음 실행은 1028번 — 둘 다 편집기와 무관한 테스트다). 메모리 오염이라 어느 판정자도 그것을
-    // "이 가드의 결함"으로 보고할 수 없다. 그래서 이 테스트가 재는 뮤턴트는 그쪽이 아니라
-    // `storeHitRows`가 모르는 자리를 **엉뚱한 줄로 답하는** 쪽이다(`else source = 0`) — 범위 안에
-    // 머물면서 계약만 어기므로 판정이 성립한다.
+    // **그 뮤턴트는 범위 밖 읽기라 판정이 불안정하다.** `>`로 완화하면 `editor_lines[len]`을 읽는다.
+    // 12차 실측은 그것이 이 테스트 자리에서 **결정적으로 panic**한다고 보고했지만, 11차 실행에서는
+    // **릭·세그폴트가 실행마다 다른 자리에서** 났다(477번 테스트, 다음 실행은 1028번 — 둘 다 편집기와
+    // 무관하다). 어느 쪽이든 그 뮤턴트로는 "이 가드가 무엇을 지키는가"를 안정적으로 못 잰다.
+    // 그래서 이 테스트가 재는 것은 그쪽이 아니라 `storeHitRows`가 모르는 자리를 **엉뚱한 줄로
+    // 답하는** 쪽이다(`else source = 0`) — 범위 안에 머물면서 계약만 어기므로 판정이 성립한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;

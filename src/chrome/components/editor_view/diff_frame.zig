@@ -366,6 +366,7 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
     const rect: draw.Rect = .{ .x = 0, .y = 0, .w = 640, .h = 320 }; // 320/16 = 20행
 
     const spilled = build(.{
+        .tab_width = frame.default_tab_width,
         .left = .{ .lines = &lines, .content_max_cols = 4 },
         .right = .{ .lines = &lines, .content_max_cols = 400 }, // 오른쪽만 넘친다
         .rect = rect,
@@ -375,6 +376,7 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
     }, s);
 
     const flat = build(.{
+        .tab_width = frame.default_tab_width,
         .left = .{ .lines = &lines, .content_max_cols = 4 },
         .right = .{ .lines = &lines, .content_max_cols = 4 }, // 아무도 안 넘친다
         .rect = rect,
@@ -442,6 +444,7 @@ test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩
     const left = [_][]const u8{ "aaaa", "bbbb" };
     const right = [_][]const u8{ "cccc", "dddd" };
     const w = build(.{
+        .tab_width = frame.default_tab_width,
         .left = .{ .lines = &left },
         .right = .{ .lines = &right },
         .rect = .{ .x = 0, .y = 0, .w = 400, .h = 100 },
@@ -473,6 +476,7 @@ test "op 배열이 비어도 죽지 않는다" {
     var count_scratch: [0]u8 = undefined;
     const line = [_][]const u8{"x"};
     const w = build(.{
+        .tab_width = frame.default_tab_width,
         .left = .{ .lines = &line },
         .right = .{ .lines = &line },
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 50 },
@@ -521,6 +525,7 @@ test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane�
         var h: u32 = 0;
         while (h <= 40) : (h += 8) {
             const out = build(.{
+                .tab_width = frame.default_tab_width,
                 .left = .{ .lines = &left, .total_lines = 1 },
                 .right = .{ .lines = &right, .total_lines = 1 },
                 .rect = .{ .x = 0, .y = 0, .w = w, .h = h },
@@ -550,6 +555,7 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
     var count_scratch: [64]u8 = undefined;
     const line = [_][]const u8{"x"};
     const out = build(.{
+        .tab_width = frame.default_tab_width,
         .left = .{ .lines = &line },
         .right = .{ .lines = &line },
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },

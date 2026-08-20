@@ -135,6 +135,11 @@ pub const ScenarioId = enum {
     /// 것은 그 다음 구간이다 — 읽은 줄이 셀 격자에 놓이기까지 경로가 이어져 있는가. BOM을 안 떼면
     /// §3.8 가시화가 `<U+FEFF>`를 첫 줄에 그리고, 탭 전개가 틀리면 들여쓴 행의 열이 어긋난다.
     editor_real_file,
+    /// N1 §4.1g — **본문 텍스트 선택**을 픽셀로 본다. 띠가 글자 위가 아니라 **뒤**에 서고(알파로
+    /// 얹으므로 글자가 읽혀야 한다), 줄을 걸친 선택이 첫 줄은 중간부터·끝 줄은 머리부터 칠해지고,
+    /// gutter를 침범하지 않는지가 단위 테스트로 안 보이는 부분이다 — 열을 셀 폭으로 환산해 놓는
+    /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다(강조가 7칸 밀린 §4.1c 전례).
+    editor_selection,
     /// N1.5 §7 — **나란한 비교.** 좌우 두 열이 같은 행을 같은 높이에 세우는지, 짝을 맞추려 넣은 빈
     /// 행이 반대쪽 줄을 밀지 않는지, 두 gutter가 **각자 문서의 번호**를 다는지를 픽셀로 본다.
     /// 세로 어긋남은 단위 테스트로도 잡히지만(같은 y), **한 칸 어긋난 gutter 폭이나 가운데 틈이
@@ -227,7 +232,7 @@ pub fn buildFrame(
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -268,6 +273,31 @@ pub fn buildFrame(
 /// `build` **전체**가 OutOfSpace로 죽고 **편집기가 통째로 안 그려진다**(그 줄만이 아니다).
 /// 상한이 있으면 화면 폭까지만 만들고 나머지는 애초에 만들지 않는다.
 const long_line = "\t" ++ ("longline " ** 260); // 2340자
+
+/// `editor_selection` 픽스처. **줄을 걸친 선택**을 보여야 하므로 짧고 뚜렷한 줄로 짠다 —
+/// 첫 줄은 중간부터, 가운데 줄은 통째로, 끝 줄은 머리부터 칠해지는 세 모양이 한 화면에 든다.
+const editor_selection_lines = [_][]const u8{
+    "fn render(self: *View) void {",
+    "    const rows = self.visibleRows();",
+    "    for (rows) |row| self.paint(row);",
+    "}",
+    "",
+    "// 선택 밖 — 띠가 여기까지 오면 안 된다",
+};
+
+/// 줄별 선택 범위. `render(self` 뒤부터 셋째 줄 `for (rows)`까지 — 세 줄에 걸친다.
+const editor_selection_marks_row0 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 10, .len = 18 }}; // "self: *View) void" 
+const editor_selection_marks_row1 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 0, .len = 34 }}; // 줄 전체
+const editor_selection_marks_row2 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 0, .len = 14 }}; // "    for (rows)"
+const editor_selection_marks_none = [_]chrome.components.editor_view.frame.Mark{};
+const editor_selection_marks = [_][]const chrome.components.editor_view.frame.Mark{
+    &editor_selection_marks_row0,
+    &editor_selection_marks_row1,
+    &editor_selection_marks_row2,
+    &editor_selection_marks_none,
+    &editor_selection_marks_none,
+    &editor_selection_marks_none,
+};
 
 const editor_fixture_lines = [_][]const u8{
     // 8칸마다 `|`인 자. **격자 배치의 회귀 가드다** — 격자면 파이프 간격이 정확히 cell_w의
@@ -452,6 +482,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_wide_glyph => &editor_width_lines,
         .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
         .editor_folded => &editor_folded_lines,
+        .editor_selection => &editor_selection_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -568,6 +599,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .total_lines = if (scenario.id == .editor_folded) 24 else line_count,
         .line_numbers = if (scenario.id == .editor_folded) &editor_folded_numbers else null,
         .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
+        .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
         // **가로 스크롤 시나리오만 막대를 세운다.** 값은 손으로 적지 않고 fixture에서 센다 —
         // 제품이 여는 경로에서 세는 그 값과 같은 계산이어야 캡처가 제품을 예고한다(§4.1a).
         .content_max_cols = hscroll_max_cols,
@@ -812,7 +844,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_diff, .editor_diff_scrolled => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

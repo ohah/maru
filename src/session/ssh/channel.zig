@@ -1243,3 +1243,21 @@ test "닫힌 채널은 보충이 필요하다고 말하지 않는다" {
     try std.testing.expectEqual(@as(u32, 0), ch.pendingWindowAdjust());
     try std.testing.expectError(Error.UnexpectedMessage, ch.writeWindowAdjust(&buf));
 }
+
+test "exec 은 RFC 4254 §6.5 의 자리 그대로다" {
+    // **`want_reply` 를 손으로 확인한다.** 드라이버 테스트는 우리가 성공 답을 먹여 주므로
+    // 이 비트를 꺼도 통과한다(변이 검사에서 실제로 살아남았다) — 그러나 실제로 끄면 서버가
+    // 답을 안 보내고 우리는 `requesting_exec` 에서 **영영 기다린다**.
+    var ch = try openedChannel(1000, 1000);
+    var out: [128]u8 = undefined;
+    const bytes = try ch.writeExec(&out, "maru control --stdio");
+
+    try testing.expectEqual(msg_channel_request, bytes[0]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 42 }, bytes[1..5]); // recipient
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 4 }, bytes[5..9]);
+    try testing.expectEqualStrings("exec", bytes[9..13]);
+    try testing.expectEqual(@as(u8, 1), bytes[13]); // want_reply
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 20 }, bytes[14..18]);
+    try testing.expectEqualStrings("maru control --stdio", bytes[18..38]);
+    try testing.expectEqual(@as(usize, 38), bytes.len);
+}

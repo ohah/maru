@@ -101,6 +101,7 @@ const generic_write: u32 = 0x40000000;
 const file_share_read: u32 = 0x00000001;
 const file_share_write: u32 = 0x00000002;
 const open_existing: u32 = 3;
+const create_unicode_environment: u32 = 0x00000400;
 
 extern "kernel32" fn CreatePipe(read: *HANDLE, write: *HANDLE, sa: ?*SECURITY_ATTRIBUTES, size: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetHandleInformation(h: HANDLE, mask: u32, flags: u32) callconv(.winapi) i32;
@@ -110,7 +111,86 @@ extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) i32;
 extern "kernel32" fn WaitForSingleObject(h: HANDLE, ms: u32) callconv(.winapi) u32;
 extern "kernel32" fn GetExitCodeProcess(h: HANDLE, code: *u32) callconv(.winapi) i32;
 extern "kernel32" fn CreateFileW(name: [*:0]const u16, access: u32, share: u32, sa: ?*SECURITY_ATTRIBUTES, disp: u32, flags: u32, tmpl: HANDLE) callconv(.winapi) HANDLE;
+extern "kernel32" fn GetEnvironmentStringsW() callconv(.winapi) ?[*:0]u16;
+extern "kernel32" fn FreeEnvironmentStringsW(block: [*:0]u16) callconv(.winapi) i32;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+
+/// 자식 환경에 **덮어쓸** 변수 하나.
+pub const EnvVar = struct { name: []const u8, value: []const u8 };
+
+/// UTF-16 환경 블록을 만든다 — `NAME=VALUE\0…\0\0`.
+///
+/// **상속한 뒤 덮어쓴다.** 상속을 통째로 버리면 사용자의 git 설정 경로(`HOME`·`USERPROFILE`·`PATH`)가
+/// 달라져 셸에서 보는 것과 다른 답이 나온다. 그래서 현재 블록을 복사하되 덮어쓸 이름은 건너뛰고,
+/// 마지막에 우리 값을 붙인다(뒤에 오는 것이 이긴다는 규약에 기대지 않는다 — 애초에 하나만 남긴다).
+///
+/// **이름 비교는 대소문자를 안 가린다.** Windows 환경 변수는 그렇게 동작하므로, POSIX 쪽의 정확 비교를
+/// 그대로 옮기면 `Git_Terminal_Prompt` 로 상속된 변수가 우리 `GIT_TERMINAL_PROMPT` 를 **가린다** —
+/// 그러면 git 이 자격 증명을 물으려 멈춘다.
+fn buildEnvBlock(allocator: std.mem.Allocator, overrides: []const EnvVar, drop: []const []const u8) Error![:0]u16 {
+    var block: std.ArrayList(u16) = .empty;
+    errdefer block.deinit(allocator);
+
+    const current = GetEnvironmentStringsW() orelse return error.OutOfMemory;
+    defer _ = FreeEnvironmentStringsW(current);
+
+    var i: usize = 0;
+    while (current[i] != 0) {
+        const start = i;
+        while (current[i] != 0) : (i += 1) {}
+        const entry = current[start..i];
+        i += 1; // 이 항목의 NUL 을 넘는다.
+        // `=C:` 처럼 `=` 로 시작하는 항목이 있다(드라이브별 현재 디렉터리). 이름이 비어 이 규칙 밖이라
+        // 그대로 나른다.
+        const eq = std.mem.indexOfScalar(u16, entry, '=') orelse {
+            block.appendSlice(allocator, entry) catch return error.OutOfMemory;
+            block.append(allocator, 0) catch return error.OutOfMemory;
+            continue;
+        };
+        if (eq == 0) {
+            block.appendSlice(allocator, entry) catch return error.OutOfMemory;
+            block.append(allocator, 0) catch return error.OutOfMemory;
+            continue;
+        }
+        const name = entry[0..eq];
+        var skip = false;
+        for (overrides) |o| if (eqlNameW(name, o.name)) {
+            skip = true;
+        };
+        if (!skip) for (drop) |d| if (eqlNameW(name, d)) {
+            skip = true;
+        };
+        if (skip) continue;
+        block.appendSlice(allocator, entry) catch return error.OutOfMemory;
+        block.append(allocator, 0) catch return error.OutOfMemory;
+    }
+
+    for (overrides) |o| {
+        appendUtf8(allocator, &block, o.name) catch return error.OutOfMemory;
+        block.append(allocator, '=') catch return error.OutOfMemory;
+        appendUtf8(allocator, &block, o.value) catch return error.OutOfMemory;
+        block.append(allocator, 0) catch return error.OutOfMemory;
+    }
+    // 블록 자체를 끝내는 NUL. `toOwnedSliceSentinel` 이 그것을 붙인다.
+    return block.toOwnedSliceSentinel(allocator, 0) catch error.OutOfMemory;
+}
+
+fn appendUtf8(allocator: std.mem.Allocator, out: *std.ArrayList(u16), s: []const u8) !void {
+    const w = try std.unicode.utf8ToUtf16LeAlloc(allocator, s);
+    defer allocator.free(w);
+    try out.appendSlice(allocator, w);
+}
+
+/// ASCII 대소문자를 무시한 UTF-16 ↔ UTF-8 이름 비교. 환경 변수 이름은 실제로 ASCII 다.
+fn eqlNameW(wide_name: []const u16, name: []const u8) bool {
+    if (wide_name.len != name.len) return false;
+    for (wide_name, name) |w, a| {
+        if (w > 127) return false;
+        const lw = std.ascii.toLower(@intCast(w));
+        if (lw != std.ascii.toLower(a)) return false;
+    }
+    return true;
+}
 
 /// 마지막 Win32 오류 — 실패를 보고할 때 숫자를 함께 남긴다(`pty/windows.zig` 와 같은 결).
 pub var last_error: u32 = 0;
@@ -128,6 +208,11 @@ pub fn capture(
     argv: []const []const u8,
     cwd: ?[]const u8,
     stream: Stream,
+    /// 자식 환경에 덮어쓸 변수들. 비어 있으면 부모 환경을 그대로 상속한다.
+    env_overrides: []const EnvVar,
+    /// 상속에서 **통째로 빼** 버릴 이름들(값이 무엇이든). git 은 사용자 환경의 `GIT_INDEX_FILE` 이
+    /// 남아 있으면 우리 명령이 남의 index 에 쓰게 되므로 그것을 여기로 준다.
+    env_drop: []const []const u8,
     max_bytes: usize,
 ) Error!Output {
     if (builtin.os.tag != .windows) return error.Unsupported;
@@ -191,6 +276,14 @@ pub fn capture(
         _ = CloseHandle(nul_h);
     };
 
+    // **환경 블록.** 덮어쓸 것이 없으면 `null` 로 두어 그냥 상속한다 — 블록을 만들면 그 순간 우리가
+    // 본 환경으로 고정되므로, 필요 없을 때는 안 만드는 쪽이 맞다.
+    const env_block: ?[:0]u16 = if (env_overrides.len == 0 and env_drop.len == 0)
+        null
+    else
+        try buildEnvBlock(allocator, env_overrides, env_drop);
+    defer if (env_block) |b| allocator.free(b);
+
     var si = STARTUPINFOW{ .cb = @sizeOf(STARTUPINFOW) };
     si.dwFlags = startf_use_std_handles;
     switch (stream) {
@@ -217,8 +310,11 @@ pub fn capture(
         null,
         null,
         1, // bInheritHandles — ⑴ 이 의미를 갖게 하는 자리다.
-        create_no_window, // 콘솔 창을 띄우지 않는다. 없으면 git 을 부를 때마다 창이 깜박인다.
-        null,
+        // 콘솔 창을 띄우지 않는다(없으면 git 을 부를 때마다 창이 깜박인다). 유니코드 환경 블록을 주면
+        // `CREATE_UNICODE_ENVIRONMENT` 가 **반드시** 있어야 한다 — 없으면 Windows 가 그 블록을 ANSI 로
+        // 읽어 첫 항목에서 끊긴다.
+        create_no_window | (if (env_block != null) create_unicode_environment else @as(u32, 0)),
+        if (env_block) |b| @ptrCast(@constCast(b.ptr)) else null,
         if (cwd_w) |w| w.ptr else null,
         &si,
         &pi,
@@ -287,7 +383,7 @@ const testing = std.testing;
 test "capture: 자식의 출력을 끝까지 읽는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo", "hello-from-child" }, null, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo", "hello-from-child" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expectEqual(@as(u32, 0), r.exit_code);
     try testing.expect(!r.truncated);
@@ -297,7 +393,7 @@ test "capture: 자식의 출력을 끝까지 읽는다" {
 test "capture: 종료 코드를 그대로 낸다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "exit", "7" }, null, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "exit", "7" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expectEqual(@as(u32, 7), r.exit_code);
 }
@@ -306,7 +402,7 @@ test "capture: stderr 도 같은 파이프로 온다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
     // `1>&2` 로 stdout 을 stderr 로 돌린다 — 합쳐 받지 않으면 이 글자가 사라진다.
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo only-on-stderr 1>&2" }, null, .merged, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo only-on-stderr 1>&2" }, null, .merged, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "only-on-stderr") != null);
 }
@@ -317,7 +413,7 @@ test "capture: 상한을 넘겨도 자식이 막히지 않는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
     // 파이프 기본 버퍼(약 4 KiB)보다 확실히 많이 쓴다.
-    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789" }, null, .stdout_only, 256);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789" }, null, .stdout_only, &.{}, &.{}, 256);
     defer r.deinit(a);
     try testing.expect(r.truncated);
     try testing.expectEqual(@as(usize, 256), r.bytes.len);
@@ -334,7 +430,7 @@ test "capture: cwd 에서 돈다" {
     const root = try path_shape.normalizeSeparators(a, native);
     defer a.free(root);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "marker.txt", .data = "x" });
-    var r = try capture(a, &.{ "cmd.exe", "/c", "dir", "/b" }, root, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "dir", "/b" }, root, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "marker.txt") != null);
 }
@@ -342,12 +438,12 @@ test "capture: cwd 에서 돈다" {
 test "capture: 없는 실행 파일은 조용히 성공하지 않는다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    try testing.expectError(error.SpawnFailed, capture(a, &.{"maru-no-such-binary-xyz.exe"}, null, .stdout_only, 1 << 20));
+    try testing.expectError(error.SpawnFailed, capture(a, &.{"maru-no-such-binary-xyz.exe"}, null, .stdout_only, &.{}, &.{}, 1 << 20));
 }
 
 test "capture: 빈 argv 를 거부한다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try testing.expectError(error.InvalidCommand, capture(testing.allocator, &.{}, null, .stdout_only, 1 << 20));
+    try testing.expectError(error.InvalidCommand, capture(testing.allocator, &.{}, null, .stdout_only, &.{}, &.{}, 1 << 20));
 }
 
 // 중립 경로(`/`)로 줘도 돈다 — 계약 §5 규칙 1 이 중립 층에 `/` 를 요구하므로 호출자가 그 모양으로
@@ -355,7 +451,7 @@ test "capture: 빈 argv 를 거부한다" {
 test "capture: 정규화된 `/` 경로로도 돈다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "C:/Windows/System32/cmd.exe", "/c", "echo", "slash-path-ok" }, null, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "C:/Windows/System32/cmd.exe", "/c", "echo", "slash-path-ok" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "slash-path-ok") != null);
 }
@@ -375,11 +471,11 @@ test "capture: git 을 상대로 돈다 — 임시 저장소의 상태를 읽어
     const repo = try path_shape.normalizeSeparators(a, native);
     defer a.free(repo);
 
-    var init_out = capture(a, &.{ "git", "init", "-q" }, repo, .stdout_only, 1 << 20) catch return error.SkipZigTest;
+    var init_out = capture(a, &.{ "git", "init", "-q" }, repo, .stdout_only, &.{}, &.{}, 1 << 20) catch return error.SkipZigTest;
     init_out.deinit(a);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked.txt", .data = "x" });
 
-    var st = try capture(a, &.{ "git", "status", "--porcelain=v2", "--branch" }, repo, .stdout_only, 1 << 20);
+    var st = try capture(a, &.{ "git", "status", "--porcelain=v2", "--branch" }, repo, .stdout_only, &.{}, &.{}, 1 << 20);
     defer st.deinit(a);
     try testing.expectEqual(@as(u32, 0), st.exit_code);
     // 추적되지 않은 파일은 porcelain v2 에서 `? <경로>` 다. 이름이 실제로 실려 와야 한다 —
@@ -388,7 +484,7 @@ test "capture: git 을 상대로 돈다 — 임시 저장소의 상태를 읽어
 
     // **실패하는 git 도 제대로 전한다.** 없는 리비전을 물으면 git 은 0 이 아닌 코드로 끝나고 진단을
     // stderr 로 낸다 — 합쳐 받으므로 그 글자가 우리에게 온다.
-    var bad = try capture(a, &.{ "git", "rev-parse", "maru-no-such-rev" }, repo, .stdout_only, 1 << 20);
+    var bad = try capture(a, &.{ "git", "rev-parse", "maru-no-such-rev" }, repo, .stdout_only, &.{}, &.{}, 1 << 20);
     defer bad.deinit(a);
     try testing.expect(bad.exit_code != 0);
     try testing.expect(bad.bytes.len > 0);
@@ -399,7 +495,7 @@ test "capture: git 을 상대로 돈다 — 임시 저장소의 상태를 읽어
 test "capture: stdout_only 는 stderr 를 버린다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-OUT") != null);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-ERR") == null);
@@ -408,7 +504,7 @@ test "capture: stdout_only 는 stderr 를 버린다" {
 test "capture: stderr_only 는 stdout 을 버린다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stderr_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "echo TO-OUT& echo TO-ERR 1>&2" }, null, .stderr_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-ERR") != null);
     try testing.expect(std.mem.indexOf(u8, r.bytes, "TO-OUT") == null);
@@ -419,8 +515,101 @@ test "capture: stderr_only 는 stdout 을 버린다" {
 test "capture: 버려지는 스트림에 많이 써도 자식이 정상 종료한다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = testing.allocator;
-    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,2000) do @echo 0123456789012345678901234567890123456789 1>&2" }, null, .stdout_only, 1 << 20);
+    var r = try capture(a, &.{ "cmd.exe", "/c", "for /L %i in (1,1,2000) do @echo 0123456789012345678901234567890123456789 1>&2" }, null, .stdout_only, &.{}, &.{}, 1 << 20);
     defer r.deinit(a);
     try testing.expectEqual(@as(u32, 0), r.exit_code);
     try testing.expectEqual(@as(usize, 0), r.bytes.len);
+}
+
+// ── 환경 ──────────────────────────────────────────────────────────────────────────────────────
+
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) i32;
+
+fn setEnvForTest(comptime name: []const u8, comptime value: ?[]const u8) void {
+    const n = std.unicode.utf8ToUtf16LeStringLiteral(name);
+    if (value) |v| {
+        _ = SetEnvironmentVariableW(n, std.unicode.utf8ToUtf16LeStringLiteral(v));
+    } else {
+        _ = SetEnvironmentVariableW(n, null);
+    }
+}
+
+test "capture: 덮어쓴 변수가 자식에게 간다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "echo [%MARU_ENV_PROBE%]" },
+        null,
+        .stdout_only,
+        &.{.{ .name = "MARU_ENV_PROBE", .value = "from-override" }},
+        &.{},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "[from-override]") != null);
+}
+
+// **상속을 통째로 버리지 않는다.** 버리면 사용자의 git 설정 경로가 달라져 셸에서 보는 것과 다른 답이
+// 나온다. 덮어쓸 것 하나를 주면서 **다른 변수는 그대로 남는지** 본다.
+test "capture: 덮어써도 나머지 환경은 상속된다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    setEnvForTest("MARU_ENV_INHERITED", "still-here");
+    defer setEnvForTest("MARU_ENV_INHERITED", null);
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "echo [%MARU_ENV_INHERITED%]" },
+        null,
+        .stdout_only,
+        &.{.{ .name = "MARU_ENV_PROBE", .value = "x" }},
+        &.{},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "[still-here]") != null);
+}
+
+// **이 테스트가 대소문자 규칙의 이유다.** Windows 환경 변수 이름은 대소문자를 안 가리므로, 정확 비교로
+// 걸러내면 다른 대소문자로 상속된 변수가 **살아남아 우리 값을 가린다**. git 에서는 그것이
+// `GIT_TERMINAL_PROMPT` 를 무력화해 **자격 증명 대화상자가 뜨고 캡처가 영원히 멈추는** 결과가 된다.
+test "capture: 다른 대소문자로 상속된 변수를 덮어쓰기가 이긴다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    setEnvForTest("Maru_Case_Probe", "inherited-value");
+    defer setEnvForTest("Maru_Case_Probe", null);
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "echo [%MARU_CASE_PROBE%]" },
+        null,
+        .stdout_only,
+        &.{.{ .name = "MARU_CASE_PROBE", .value = "override-wins" }},
+        &.{},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "[override-wins]") != null);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "inherited-value") == null);
+}
+
+// `env_drop` 은 값을 주지 않고 **통째로 없앤다**. git 의 `GIT_INDEX_FILE` 이 그 자리다 — 남아 있으면
+// 우리 명령이 남의 index 에 쓴다.
+test "capture: env_drop 이 상속된 변수를 없앤다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    setEnvForTest("MARU_DROP_PROBE", "should-be-gone");
+    defer setEnvForTest("MARU_DROP_PROBE", null);
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "echo [%MARU_DROP_PROBE%]" },
+        null,
+        .stdout_only,
+        &.{},
+        &.{"MARU_DROP_PROBE"},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "should-be-gone") == null);
+    // cmd 는 없는 변수를 이름 그대로 남긴다 — 그것이 "없다" 의 모습이다.
+    try testing.expect(std.mem.indexOf(u8, r.bytes, "[%MARU_DROP_PROBE%]") != null);
 }

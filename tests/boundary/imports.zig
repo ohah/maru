@@ -1,6 +1,8 @@
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("posix_walk.zig").posixWalk;
+/// 원장 판정 규칙의 단일 출처 — digest 가 무엇을 덮고 count 가 무엇을 세는지는 그 파일이 소유한다.
+const source_digest = @import("source_digest.zig");
 
 const ClientReceiverClass = enum { guarded, construction, unchecked, observation };
 const ClientReceiverSpec = struct {
@@ -1203,7 +1205,7 @@ test "B3b-S reflection digest excludes top-level tests with a lexical token mask
     ;
     var tree = try std.zig.Ast.parse(allocator, source, .zig);
     defer tree.deinit(allocator);
-    const excluded = try topLevelTestTokenMask(allocator, &tree);
+    const excluded = try source_digest.topLevelTestTokenMask(allocator, &tree);
     defer allocator.free(excluded);
 
     var retained_count: usize = 0;
@@ -1237,7 +1239,7 @@ test "B3b-S reflection digest excludes top-level tests with a lexical token mask
     try std.testing.expect(malformed_tree.errors.len != 0);
     try std.testing.expectError(
         error.TestUnexpectedResult,
-        topLevelTestTokenMask(allocator, &malformed_tree),
+        source_digest.topLevelTestTokenMask(allocator, &malformed_tree),
     );
 }
 
@@ -9674,11 +9676,13 @@ fn scanClientConstructionSource(
     unreviewed: *usize,
     report_unreviewed: bool,
 ) !void {
-    const top_level_test_tokens = try topLevelTestTokenMask(std.testing.allocator, tree);
+    const top_level_test_tokens = try source_digest.topLevelTestTokenMask(std.testing.allocator, tree);
     defer std.testing.allocator.free(top_level_test_tokens);
     var reflection_observed = [_]usize{0} ** client_reflection_owners.len;
-    var external_source_hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var external_reflection_count: usize = 0;
+    // **digest 와 count 는 `source_digest` 가 소유한다.** 아래 루프는 session_host 반사 심사(닫힌 세계
+    // 계약)를 계속 하지만, 원장에 들어가는 두 값은 여기서 손으로 세지 않는다 — 규칙이 두 곳에 있으면
+    // 그 둘이 갈리는 순간 조용히 어긋난다.
+    const external = try source_digest.compute(std.testing.allocator, tree, path);
     for (0..tree.nodes.len) |raw_node| {
         const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
@@ -9706,8 +9710,6 @@ fn scanClientConstructionSource(
     var token: std.zig.Ast.TokenIndex = 0;
     while (token + 1 < tree.tokens.len) : (token += 1) {
         if (top_level_test_tokens[token]) continue;
-        external_source_hasher.update(tree.tokenSlice(token));
-        external_source_hasher.update(&.{0});
         if (std.mem.eql(u8, tree.tokenSlice(token), "@field")) {
             var lookahead = token + 1;
             while (lookahead < tree.tokens.len and
@@ -9722,9 +9724,6 @@ fn scanClientConstructionSource(
                 if (std.mem.eql(u8, part, ")")) depth -= 1;
             }
             if (depth != 0) return error.TestUnexpectedResult;
-            if (!std.mem.startsWith(u8, path, "src/platform/macos/session_host/")) {
-                external_reflection_count += 1;
-            }
             const reflection_closed_world = std.mem.startsWith(
                 u8,
                 path,
@@ -9820,9 +9819,7 @@ fn scanClientConstructionSource(
     if (!std.mem.startsWith(u8, path, "src/platform/macos/session_host/") and
         !std.mem.eql(u8, path, "synthetic.zig"))
     {
-        var digest: [32]u8 = undefined;
-        external_source_hasher.final(&digest);
-        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        const digest_hex = external.digestHex();
         var proof_match: ?external_digests.Proof = null;
         for (external_digests.inventory) |proof| {
             if (!std.mem.eql(u8, proof.path, path)) continue;
@@ -9830,19 +9827,19 @@ fn scanClientConstructionSource(
             break;
         }
         if (proof_match) |proof| {
-            if (proof.count != external_reflection_count or
+            if (proof.count != external.reflection_count or
                 !std.mem.eql(u8, proof.digest_hex, &digest_hex))
             {
                 if (report_unreviewed) std.debug.print(
                     "external source inventory mismatch: {s} count={} digest={s}\n",
-                    .{ path, external_reflection_count, &digest_hex },
+                    .{ path, external.reflection_count, &digest_hex },
                 );
                 return error.TestUnexpectedResult;
             }
-        } else if (external_reflection_count != 0) {
+        } else if (external.reflection_count != 0) {
             if (report_unreviewed) std.debug.print(
                 "unreviewed external reflection inventory: {s} count={} digest={s}\n",
-                .{ path, external_reflection_count, &digest_hex },
+                .{ path, external.reflection_count, &digest_hex },
             );
             return error.TestUnexpectedResult;
         }
@@ -10090,53 +10087,6 @@ fn expectedClientConstructionContainer(receiver: []const u8, use: ClientConstruc
         std.mem.eql(u8, use.enclosing_fn, "validate"))
         return "Prepared";
     return "<root>";
-}
-
-fn topLevelTestTokenMask(
-    allocator: std.mem.Allocator,
-    tree: *const std.zig.Ast,
-) ![]bool {
-    if (tree.errors.len != 0) return error.TestUnexpectedResult;
-    const excluded = try allocator.alloc(bool, tree.tokens.len);
-    errdefer allocator.free(excluded);
-    @memset(excluded, false);
-
-    var lexical_depth: usize = 0;
-    var token: std.zig.Ast.TokenIndex = 0;
-    while (token < tree.tokens.len) {
-        const part = tree.tokenSlice(token);
-        if (lexical_depth == 0 and std.mem.eql(u8, part, "test")) {
-            var cursor = token;
-            var body_depth: usize = 0;
-            var body_started = false;
-            while (cursor < tree.tokens.len) : (cursor += 1) {
-                excluded[cursor] = true;
-                const body_part = tree.tokenSlice(cursor);
-                if (std.mem.eql(u8, body_part, "{")) {
-                    body_started = true;
-                    body_depth += 1;
-                } else if (std.mem.eql(u8, body_part, "}")) {
-                    if (!body_started or body_depth == 0)
-                        return error.TestUnexpectedResult;
-                    body_depth -= 1;
-                    if (body_depth == 0) break;
-                }
-            }
-            if (!body_started or body_depth != 0 or cursor == tree.tokens.len)
-                return error.TestUnexpectedResult;
-            token = cursor + 1;
-            continue;
-        }
-        if (std.mem.eql(u8, part, "{")) {
-            lexical_depth += 1;
-        } else if (std.mem.eql(u8, part, "}")) {
-            if (lexical_depth == 0) return error.TestUnexpectedResult;
-            lexical_depth -= 1;
-        }
-        token += 1;
-    }
-    if (lexical_depth != 0) return error.TestUnexpectedResult;
-    return excluded;
 }
 
 const ClientReferenceOwner = struct {

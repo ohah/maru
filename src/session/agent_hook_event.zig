@@ -101,7 +101,7 @@ pub fn parseLine(line: []const u8) ?Event {
     if (!scan.expectObjectStart()) return null;
 
     var saw_event_name = false;
-    while (scan.nextKey(1)) |key| {
+    while (scan.nextKey()) |key| {
         if (std.mem.eql(u8, key, "hook_event_name")) {
             const v = scan.stringValue() orelse return null;
             ev.kind = kindFromName(v);
@@ -125,10 +125,12 @@ pub fn parseLine(line: []const u8) ?Event {
         } else if (std.mem.eql(u8, key, "tool_input")) {
             // 중첩 객체 안에서도 **키 위치**만 본다. 값 안에 같은 단어가 있어도 걸리지 않는다.
             if (!scan.expectObjectStart()) {
-                if (!scan.skipValueAfterPeek()) return null;
+                // 객체가 아니면(형이 바뀌었다) 값을 통째로 건너뛴다 — `expectObjectStart` 는 실패해도
+                // 커서를 옮기지 않으므로 그 값이 그대로 남아 있다.
+                if (!scan.skipValue()) return null;
                 continue;
             }
-            while (scan.nextKey(2)) |inner| {
+            while (scan.nextKey()) |inner| {
                 if (std.mem.eql(u8, inner, "file_path")) {
                     ev.file_path = scan.stringValue() orelse return null;
                 } else if (std.mem.eql(u8, inner, "description")) {
@@ -142,6 +144,48 @@ pub fn parseLine(line: []const u8) ?Event {
     if (!saw_event_name) return null;
     return ev;
 }
+
+/// 손상된 줄 안에서 **온전한 이벤트를 다시 찾는다**(재동기화).
+///
+/// **왜 필요한가**: 동시 append 는 간헐적으로 줄을 섞는다(실측 2026-08-20 — 24개 동시 쓰기에서 회차마다
+/// 0~2줄, 같은 조건에서도 결과가 갈렸다). `printf` 가 큰 출력을 여러 write 로 쪼개면 O_APPEND 는 각 write 의
+/// 오프셋만 원자적으로 잡아 주기 때문이다. 그때 섞인 줄은 보통 «A의 앞부분 + **B 전체** + A의 뒷부분» 모양이라,
+/// 버리기만 하면 **멀쩡한 B까지 함께 잃는다**. 계약이 "이벤트를 조용히 없애지 않는다"를 요구하므로 건진다.
+///
+/// 줄 앞부터 파싱해 보고, 실패하면 다음 «`구분자` + `{`» 자리부터 다시 시도한다. 시도 횟수를 묶어 둬서
+/// 손상 줄 하나가 파싱 비용을 무한히 끌지 않게 한다.
+pub const Resynced = struct {
+    event: Event,
+    /// 줄 앞에서 바로 읽히지 않고 **안쪽에서 건진** 것인가. 호출자가 세기만 하고 내용은 남기지 않는다(§7).
+    recovered: bool,
+};
+
+pub fn parseLineResync(line: []const u8) ?Resynced {
+    if (parseLine(line)) |ev| return .{ .event = ev, .recovered = false };
+    // **인덱스로 훑는다**(포인터 산술이 아니라). 슬라이스 주소 차이로 위치를 되짚는 방식은 맞더라도
+    // 읽는 사람이 검산해야 하고, 여기서 필요한 것은 «다음 후보의 시작 위치» 하나뿐이다.
+    var from: usize = 0;
+    var attempts: usize = 0;
+    while (attempts < max_resync_attempts) : (attempts += 1) {
+        const sep_rel = std.mem.indexOfScalar(u8, line[from..], field_separator) orelse return null;
+        const sep = from + sep_rel;
+        from = sep + 1;
+        if (from >= line.len or line[from] != '{') continue;
+        // 이 구분자 앞의 provider 토큰까지 포함해 다시 읽는다 — 토큰은 구분자 바로 앞의 연속 바이트다.
+        var start = sep;
+        while (start > 0 and line[start - 1] != field_separator and line[start - 1] != '}') start -= 1;
+        if (start == sep) continue; // provider 토큰이 비었다
+        if (parseLine(line[start..])) |ev| return .{ .event = ev, .recovered = true };
+    }
+    return null;
+}
+
+/// 손상 줄 하나에서 재동기화를 시도할 횟수.
+///
+/// **4는 실측이 아니라 판단이다.** 실측한 것은 «섞임이 일어난다»와 «간헐적이다»까지이고, 한 줄에 몇 겹이
+/// 겹치는지는 재현이 안 돼 세지 못했다. 관측된 모양은 모두 한 겹(A 사이에 B 하나)이었고, 겹이 깊어질수록
+/// 그 줄에서 건질 값어치도 떨어진다. 상한이 없으면 병리적인 줄 하나가 tick 을 붙잡으므로 작게 잡는다.
+pub const max_resync_attempts: usize = 4;
 
 /// JSON 문자열 이스케이프를 풀어 `out`에 담는다(표시 직전에만 쓴다). 담을 수 있는 만큼만 담고 자른다 —
 /// 사이드바 한 줄에 들어갈 분량이면 충분하고, 여기서 할당하지 않기 위해서다.
@@ -194,6 +238,8 @@ pub const Cursor = struct {
         consumed: usize,
         /// 상한에 걸려 버린 줄 수. 0이 아니면 관측에 센다(내용은 남기지 않는다 — 계약 §7).
         dropped: usize,
+        /// 섞인 줄에서 재동기화로 건진 이벤트 수(§동시 append). 0이 아니면 그 파일에 인터리브가 있었다는 뜻이다.
+        recovered: usize,
         /// 상한(`max_events_per_tick`)에 걸려 남은 줄이 있다. 다음 tick이 이어 읽는다.
         more: bool,
     };
@@ -205,6 +251,7 @@ pub const Cursor = struct {
     pub fn take(self: *Cursor, chunk: []const u8, out: []Event) Batch {
         var count: usize = 0;
         var dropped: usize = 0;
+        var recovered: usize = 0;
         var consumed: usize = 0;
         const limit = @min(out.len, max_events_per_tick);
         var rest = chunk;
@@ -220,9 +267,10 @@ pub const Cursor = struct {
                 dropped += 1;
                 continue;
             }
-            if (parseLine(line)) |ev| {
-                out[count] = ev;
+            if (parseLineResync(line)) |r| {
+                out[count] = r.event;
                 count += 1;
+                if (r.recovered) recovered += 1;
             } else {
                 dropped += 1;
             }
@@ -232,6 +280,7 @@ pub const Cursor = struct {
             .count = count,
             .consumed = consumed,
             .dropped = dropped,
+            .recovered = recovered,
             .more = std.mem.indexOfScalar(u8, rest, '\n') != null,
         };
     }
@@ -280,9 +329,12 @@ const Scanner = struct {
         return true;
     }
 
-    /// `depth` 위치의 다음 키를 돌려준다(객체가 닫히면 `null`). 값은 호출자가 읽거나 건너뛴다.
-    fn nextKey(self: *Scanner, depth: usize) ?[]const u8 {
-        _ = depth; // 깊이는 호출 구조가 보장한다(중첩 진입은 호출자가 명시적으로 한다)
+    /// 현재 객체의 다음 키를 돌려준다(객체가 닫히면 `null`). 값은 호출자가 읽거나 건너뛴다.
+    ///
+    /// **깊이는 인자로 받지 않는다.** 중첩 진입은 호출자가 `expectObjectStart` 로 명시하고 그 객체가 닫힐
+    /// 때까지 도는 구조라, 깊이를 넘겨받아도 쓸 데가 없다. 예전에는 `depth` 를 받아 버렸는데(`_ = depth`),
+    /// 읽는 사람에게 «깊이 검증이 있다»는 **거짓 신호**만 줬다.
+    fn nextKey(self: *Scanner) ?[]const u8 {
         if (self.failed) return null;
         var c = self.peek() orelse {
             self.failed = true;
@@ -417,11 +469,6 @@ const Scanner = struct {
     fn skipValue(self: *Scanner) bool {
         const c = self.peek() orelse return false;
         return self.skipValueWith(c);
-    }
-
-    /// `peek`으로 이미 `{`를 본 뒤 그것이 객체가 아니었을 때 쓰는 경로.
-    fn skipValueAfterPeek(self: *Scanner) bool {
-        return self.skipValue();
     }
 
     fn skipValueWith(self: *Scanner, c: u8) bool {
@@ -624,4 +671,41 @@ test "decodeInto는 담을 수 있는 만큼만 담는다" {
     try testing.expectEqualStrings("a\nb", decodeInto(&nl, "a\\nb"));
     var uni: [8]u8 = undefined;
     try testing.expectEqualStrings("a?b", decodeInto(&uni, "a\\u0041b")); // 코드포인트는 자리만 지킨다
+}
+
+test "섞인 줄 안의 온전한 이벤트를 건진다 — 버리면 멀쩡한 것까지 잃는다" {
+    // 실측한 인터리브 모양: A의 앞부분이 나가다 B가 통째로 끼어들고 A의 뒷부분이 이어진다.
+    // 앞에서부터 읽으면 A가 깨져 실패하지만, 그 안의 B는 멀쩡하다.
+    const mixed = "claude\t{\"hook_event_name\":\"PreToolUse\",\"pad\":\"aaa" ++
+        "claude\t{\"hook_event_name\":\"Stop\",\"prompt_id\":\"p-inner\"}";
+    try testing.expect(parseLine(mixed) == null); // 앞부터는 못 읽는다
+    const r = parseLineResync(mixed).?; // 안쪽 B는 건진다
+    try testing.expect(r.recovered);
+    try testing.expectEqual(Kind.stop, r.event.kind);
+    try testing.expectEqualStrings("p-inner", r.event.turn_key);
+
+    // 멀쩡한 줄은 «건졌다»로 세지 않는다 — 그 수가 인터리브의 신호이기 때문이다.
+    const clean = parseLineResync("claude\t{\"hook_event_name\":\"Stop\"}").?;
+    try testing.expect(!clean.recovered);
+}
+
+test "재동기화가 손상 줄을 무한히 뒤지지 않는다" {
+    // 구분자만 잔뜩 든 병리적인 줄로 상한을 확인한다 — 없으면 줄 하나가 tick 을 붙잡는다.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try buf.appendSlice(testing.allocator, "claude\t{");
+    for (0..64) |_| try buf.appendSlice(testing.allocator, "x\t");
+    try testing.expect(parseLineResync(buf.items) == null);
+}
+
+test "커서가 건진 이벤트를 세고 그 사실을 알린다" {
+    var cur: Cursor = .{};
+    var out: [4]Event = undefined;
+    const mixed = "claude\t{\"hook_event_name\":\"PreToolUse\",\"pad\":\"aaa" ++
+        "claude\t{\"hook_event_name\":\"Stop\"}\n";
+    const clean = "claude\t{\"hook_event_name\":\"SessionStart\"}\n";
+    const batch = cur.take(mixed ++ clean, &out);
+    try testing.expectEqual(@as(usize, 2), batch.count);
+    try testing.expectEqual(@as(usize, 1), batch.recovered);
+    try testing.expectEqual(@as(usize, 0), batch.dropped);
 }

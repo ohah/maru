@@ -77,7 +77,11 @@ pub fn build(
 ) !void {
     // `|| :` — provider가 `sh -e`로 실행해도 마지막 줄의 read 실패(개행 없이 끝남)가 훅을 죽이지 않게.
     try out.appendSlice(allocator, "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ");
-    try out.appendSlice(allocator, "[ -n \"$MARU_PANE_ID\" ] || exit 0; ");
+    // **pane 식별자를 숫자로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
+    // `MARU_PANE_ID='../outside/pwned'` 로 로그 디렉터리 **밖에** 파일이 만들어지는 것을 실측으로 확인했다.
+    // maru 가 주입하는 값은 언제나 surface.id(숫자)이므로(`pty/macos.zig`), 그 밖의 모양이면 우리 세션이
+    // 아니라고 보고 나간다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
+    try out.appendSlice(allocator, "case \"$MARU_PANE_ID\" in ''|*[!0-9]*) exit 0 ;; esac; ");
     try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then mh_p='{{\"hook_event_name\":\"{s}\"}}'; fi; ", .{
         max_payload_bytes,
         event.oversized_marker,
@@ -119,6 +123,17 @@ fn buildAlloc(provider: []const u8, dir: []const u8) ![]u8 {
     return out.toOwnedSlice(testing.allocator);
 }
 
+test "pane 식별자가 숫자가 아니면 나간다 — 그 값이 파일명이 되므로 경로를 벗어날 수 있다" {
+    // 실측: 검증이 없을 때 `MARU_PANE_ID='../outside/pwned'` 가 로그 디렉터리 밖에 파일을 만들었다.
+    const cmd = try buildAlloc("claude", "/tmp/ev");
+    defer testing.allocator.free(cmd);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*[!0-9]*") != null);
+    // 검증이 파일에 쓰기 **전에** 와야 한다.
+    const guard = std.mem.indexOf(u8, cmd, "*[!0-9]*").?;
+    const write = std.mem.indexOf(u8, cmd, "printf").?;
+    try testing.expect(guard < write);
+}
+
 test "커맨드는 추가 프로세스를 하나도 띄우지 않는다" {
     // 비용의 65%가 sh spawn이라 스크립트가 프로세스를 더 부르면 그만큼 도구 호출마다 얹힌다.
     // `cat`·`mkdir`·`head`·`tr`·`jq`는 모두 프로세스다 — 셸 내장(`read`·`printf`·`${#var}`)으로만 짠다.
@@ -137,7 +152,7 @@ test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온�
     defer testing.allocator.free(cmd);
     const read_at = std.mem.indexOf(u8, cmd, "read -r mh_p").?;
     const drain_at = std.mem.indexOf(u8, cmd, "while IFS= read -r mh_x").?;
-    const guard_at = std.mem.indexOf(u8, cmd, "[ -n \"$MARU_PANE_ID\" ]").?;
+    const guard_at = std.mem.indexOf(u8, cmd, "case \"$MARU_PANE_ID\" in").?;
     try testing.expect(read_at < drain_at);
     try testing.expect(drain_at < guard_at);
 }
@@ -164,7 +179,7 @@ test "어떤 경로로 나가든 exit 0이다" {
     const cmd = try buildAlloc("claude", "/tmp/ev");
     defer testing.allocator.free(cmd);
     // 가드 탈출도, 정상 종료도 0이어야 훅이 에이전트 턴을 물지 않는다.
-    try testing.expect(std.mem.indexOf(u8, cmd, "|| exit 0") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, ") exit 0 ;; esac") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "; exit 0 ") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "2>/dev/null") != null);
 }

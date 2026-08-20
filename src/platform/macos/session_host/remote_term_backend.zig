@@ -64,7 +64,7 @@ const nonblocking_input_chunk: usize = 16 * 1024;
 const RemoteRuntime = remote_runtime.RemoteRuntime;
 const HostAdapter = host_adapter_mod.HostAdapter;
 const AdapterPool = host_pool_mod.HostPool(HostAdapter);
-pub const max_remote_backend_runtimes: usize = 4096;
+pub const max_remote_backend_runtimes: usize = protocol.max_inventory_runtimes;
 
 pub const ReconnectDrainResult = enum { idle, started, retry_later, discarded_stale };
 

@@ -421,6 +421,11 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
     defer allocator.free(reducer);
     const tests = try readSource(allocator, "tests/session_host_cr2e_reducer.zig");
     defer allocator.free(tests);
+    const cr5_runtime_set = try readSource(
+        allocator,
+        "src/platform/macos/session_host/host_reconnect_runtime_ledger.zig",
+    );
+    defer allocator.free(cr5_runtime_set);
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
 
@@ -439,8 +444,13 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
         "pub fn completeJob(before: State, summary: TerminalSummary) Error!Result {",
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(reducer, declaration));
     try std.testing.expectEqual(@as(usize, 5), count(tests, "test \"CR2e-a reducer는"));
+    // CR5a reuses the CR2e tags for host-wide aggregation instead of defining parallel enums.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        cr5_runtime_set,
+        "const reconnect_reducer = @import(\"reconnect_reducer.zig\");",
+    ));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         try countProductSourcesExceptTwo(
             allocator,
             "@import(\"reconnect_reducer",

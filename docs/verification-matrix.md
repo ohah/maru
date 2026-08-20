@@ -1975,6 +1975,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   grid/scrollback/selection/search/link/image backing은 0이며 Retry full snapshot이 새 screen을 구성해야 한다. store-only
   detach commit 중 callback/allocation 0, finish cleanup exact once와 실제 placeholder marker/title/runtime ID를
   production-type/headless render로 검증한다.
+  첫 CR5a prerequisite는 이 제품 전이를 임의의 병렬 enum으로 다시 만들지 않고 CR2e의 `RuntimeLedger`, `LocalState`,
+  `MutationState`를 그대로 사용하는 pointer-free runtime-set validator로 시작한다. canonical set은
+  `{job_generation,host_id,pool_membership_generation,expected_connection_generation}`과
+  runtime handle/address/generation/runtime ID/shell generation을 결속하고 handle 순 정렬과 handle/address/runtime ID 유일성을 요구한다.
+  terminal summary는 같은 host-job identity, 세 local terminal count와 retry reservation만 pointer-free로 내보내며 제품 caller는 0이다. 이 값 계약의
+  green은 backend `HostReconnectJob`이 여러 runtime을 소유하거나 실제 Window를 게시했다는 증거가 아니다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

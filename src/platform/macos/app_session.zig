@@ -1704,6 +1704,17 @@ const TermRuntime = struct {
     /// 12×24로 바뀌고 아직 다시 안 그린 창에서 본문 격자 64발 중 **60발(93%)**이 정합 상태와 달랐고,
     /// **59발(92%)**이 화면에 실제로 보이는 것과도 달랐다 — 어느 쪽 기준으로도 틀린 답이다. 노출 창은
     /// 리사이즈와 **같은 폭**이고, 그 폭이 이 필드를 만든 근거였다.
+    /// 본문 **텍스트 선택**(§4.1g가 좌표계를, `session/editor/selection.zig`가 모델을 소유한다).
+    ///
+    /// `null`이면 선택도 caret도 없다 — 읽기 전용 뷰라 caret을 늘 그리지는 않는다(N2에서 편집이
+    /// 들어오면 그때 늘 있는 것이 된다).
+    ///
+    /// **문서 전체 offset이다**(줄 안 offset이 아니다). `Selection`이 다중 줄 선택을 표현해야 하므로
+    /// 그렇게 정했고, `hitTestBody`가 ⑤단계에서 `line_index`로 옮겨 준다.
+    ///
+    /// 렌더가 아니라 **입력이 세운다**. 렌더는 이 값을 읽어 띠를 그릴 뿐이고, 다음 프레임이 덮지
+    /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
+    editor_selection: ?maru.session.editor.selection.Selection = null,
     editor_hit_geom: struct {
         body_x: i32 = 0,
         body_y: i32 = 0,
@@ -2217,6 +2228,9 @@ const PointerGestureOwner = union(enum) {
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
     address_selection,
+    /// 편집기 **본문 텍스트** 드래그 선택(§4.1g). 잡은 Term을 든다 — 드래그 중 포커스가 옮겨져도
+    /// 그 문서가 선택된다(스크롤바 드래그가 같은 규율을 쓴다).
+    editor_selection: struct { term: *Term },
 };
 const file_tree_trash_capacity: usize = 16;
 
@@ -4970,7 +4984,7 @@ pub const AppSession = struct {
         if (tab_drag_pane) |pane| term_ops.ensureActiveTermVisible(self, pane);
     }
 
-    fn beginPointerGesture(self: *AppSession, owner: PointerGestureOwner) void {
+    pub fn beginPointerGesture(self: *AppSession, owner: PointerGestureOwner) void {
         self.cancelPointerGesture();
         self.pointer_gesture_owner = owner;
     }
@@ -9907,6 +9921,13 @@ pub const AppSession = struct {
         // 터미널·탭으로 새면 안 되기 때문이다. 그래서 이 구간은 kind 2/3만 잡고 kind 1은 아래로 흘린다.
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
         // down(1)은 호출자(`mouse`)의 일반 라우팅으로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
+        // 편집기 본문 드래그 선택(2/3). **여기서 받는 이유는 이 함수의 첫 문단이 적은 그대로다** —
+        // 드래그 도중 비동기로 뜬 오버레이가 up을 삼키면 제스처가 영영 안 끝나고, 그때 선택이 화면에
+        // 박힌 채 손을 뗀 사용자는 되돌릴 방법이 없다. down(1)은 여기서 안 잡는다(아래로 흘려 pane
+        // 라우팅이 막대 뒤·포커스 앞 순서로 처리한다).
+        if (kind == 2 or kind == 3) {
+            if (editor_ops.dragBodySelection(self, @intCast(kind), x_px, y_px)) return true;
+        }
         if (self.pointerGestureIs(.sidebar_tab) and (kind == 2 or kind == 3)) {
             const drag = &self.pointer_gesture_owner.sidebar_tab;
             if (kind == 2 and drag.index < self.tabs.items.len) {
@@ -10804,6 +10825,16 @@ pub const AppSession = struct {
                         _ = pane_ops.focusPaneByPtr(self, pane); // 잡았으면 그 pane이 활성이 되는 것이 자연스럽다
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
+                        return;
+                    }
+                    // ⓒ 편집기 **본문** 클릭 → 텍스트 선택 시작(§4.1g 배선). **막대 뒤·포커스 앞**이다 —
+                    //    막대 띠는 본문 사각 안에 있어 여기서 먼저 보면 막대를 눌러도 선택이 시작된다
+                    //    (결정표가 *"막대 위 클릭은 상위가 먼저 가져간다"*고 적은 그 순서다). gutter는
+                    //    `hitTestBody`가 `null`을 주므로 접힘 화살표 자리를 안 뺏는다.
+                    if (editor_ops.beginBodySelection(self, pane, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false; // 터미널 선택이 아니다 — 소유자가 다르다
                         return;
                     }
                     if (pane != pane_ops.activePane(self) and pane_ops.focusPaneByPtr(self, pane)) {

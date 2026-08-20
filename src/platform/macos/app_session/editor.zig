@@ -1209,6 +1209,62 @@ fn widthDragActive(self: *const AppSession) bool {
         pane_ops.dividerCaptureActive(self);
 }
 
+/// 편집기 **본문**을 눌렀는가(§4.1g 배선). 눌렀으면 선택을 시작하고 `true`를 준다.
+///
+/// **이 함수가 `hitTestBody`의 첫 제품 호출자다.** 그 전까지 좌표계는 판정자만 부르고 있었고,
+/// §4.1g의 "아직 검증되지 않는 문장" 표가 그 사실 위에 서 있었다.
+///
+/// **순서는 스크롤바 뒤·pane 포커스 앞이다.**
+///
+/// | 자리 | 누가 가져가나 | 왜 |
+/// |---|---|---|
+/// | pane 경계(seam) | divider 캡처 | 더 바깥이다 |
+/// | 막대 띠 | `beginScrollbarGesture` | pane 안쪽 거터이고, 눌렀는데 포커스만 옮겨지면 두 번 눌러야 한다 |
+/// | **본문 텍스트 열** | **이 함수** | gutter는 `hitTestBody`가 `null`을 준다(접힘 화살표 자리) |
+/// | 그 밖 | pane 포커스 이동 | |
+///
+/// 결정표가 *"막대 위 클릭은 상위가 먼저 가져간다"*고 적은 것을 이 순서가 지킨다 — 그 문장은 그동안
+/// 순서를 보장하는 코드가 없어 **예고**였다.
+///
+/// **잡은 Term을 든다.** 드래그가 pane을 벗어나거나 포커스가 옮겨져도 그 문서가 선택된다(스크롤바
+/// 드래그가 같은 규율을 쓴다). 좌표가 본문 밖으로 나가면 `hitTestBody`가 clamp한 offset을 주므로
+/// 호출자가 분기를 더 지지 않는다(§10 *"항상 유효한 offset"*).
+pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return false;
+    const off = hitTestBody(term, x_px, y_px) orelse return false;
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
+    self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 드래그·뗌을 소비한다. `kind`는 호스트 관례(2=drag, 3=up).
+///
+/// **`focus`만 움직인다** — `anchor_*`는 down이 세운 자리에 남는다. 그것이 드래그 선택의 정의이고,
+/// 뒤로 끌면 `anchorLo`/`anchorHi`가 `@min`/`@max`로 읽어 범위가 뒤집히지 않는다(`Selection` doc).
+pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) bool {
+    const owner = switch (self.pointer_gesture_owner) {
+        .editor_selection => |g| g,
+        else => return false,
+    };
+    switch (kind) {
+        2 => {
+            const off = hitTestBody(owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
+            if (owner.term.rt.editor_selection) |*sel| {
+                sel.focus = off;
+                self.metal_dirty = true;
+            }
+            return true;
+        },
+        3 => {
+            self.finishPointerGesture();
+            return true;
+        },
+        else => return false,
+    }
+}
+
 /// 편집기 스크롤바를 **잡았는가**. 잡았으면 드래그를 시작하고 `true`를 준다.
 ///
 /// **세로·가로를 한 자리에서 판정한다** — 두 막대는 pane 안에서 겹치지 않으므로(세로는 오른쪽 거터,
@@ -6653,4 +6709,115 @@ test "ADV3-L 비교 뷰에서는 탭 폭을 바꿔도 접힘 층을 파괴하지
     try testing.expect(foldMarks(term) != null);
     try testing.expect(foldAll(fx.session));
     try testing.expect(unfoldAll(fx.session));
+}
+
+test "SEL1 본문 클릭이 선택을 세우고, 드래그가 범위를 넓히고, 뗌이 소유권을 놓는다 (§4.1g 배선)" {
+    // **`hitTestBody`의 첫 제품 호출자를 재는 테스트다.** 그 전까지 좌표계는 판정자만 부르고 있었고
+    // (호출 29곳 전부 테스트), §4.1g의 "아직 검증되지 않는 문장" 표가 그 사실 위에 서 있었다 —
+    // 적대적 검증 열일곱 회차가 "배선이 없어 못 재는 계약"을 반복해서 지적했다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "s.txt", .data = "alpha beta\ngamma delta\nepsilon\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "s.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    const text_x0: i32 = @as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px));
+    const y0: i32 = @as(i32, @intCast(body.y)) + inset;
+
+    // 첫 줄 3열을 누른다.
+    const down_x: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(3 * @as(u32, geom.cell_w_px))));
+    const down_y: f64 = @floatFromInt(y0 + 1);
+    const pane = pane_ops.activePane(fx.session);
+    try testing.expect(beginBodySelection(fx.session, pane, down_x, down_y));
+
+    const sel0 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(sel0.anchor_start, sel0.focus); // 클릭만으로는 범위가 없다(caret)
+    try testing.expectEqual(@as(usize, 3), sel0.focus); // "alpha…"의 3번째 byte
+
+    // **드래그가 focus만 움직인다.** 둘째 줄로 끈다.
+    const drag_x: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(2 * @as(u32, geom.cell_w_px))));
+    const drag_y: f64 = @floatFromInt(y0 + @as(i32, @intCast(geom.cell_h_px)) + 1);
+    try testing.expect(dragBodySelection(fx.session, 2, drag_x, drag_y));
+    const sel1 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(sel0.anchor_start, sel1.anchor_start); // anchor는 제자리
+    try testing.expectEqual(@as(usize, 13), sel1.focus); // "alpha beta\n"(11) + 2
+    try testing.expect(sel1.focus > sel1.anchor_start);
+
+    // **뒤로 끌어도 범위가 뒤집히지 않는다**(`anchorLo`/`anchorHi`가 min/max로 읽는다).
+    try testing.expect(dragBodySelection(fx.session, 2, @floatFromInt(text_x0), down_y));
+    const sel2 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 0), sel2.focus);
+    try testing.expect(sel2.anchor_start > sel2.focus); // 뒤집힌 상태로 들고 있어도 되는 모델이다
+
+    // **뗌이 소유권을 놓는다** — 안 놓으면 다음 클릭이 옛 제스처에 갇힌다.
+    try testing.expect(fx.session.pointerGestureIs(.editor_selection));
+    try testing.expect(dragBodySelection(fx.session, 3, drag_x, drag_y));
+    try testing.expect(!fx.session.pointerGestureIs(.editor_selection));
+
+    // 제스처가 없으면 드래그를 소비하지 않는다 — 소비하면 터미널 선택이 죽는다.
+    try testing.expect(!dragBodySelection(fx.session, 2, drag_x, drag_y));
+}
+
+test "SEL2 gutter와 막대 띠는 본문 선택이 가져가지 않는다 (§4.1g 결정표)" {
+    // **순서 계약을 재는 첫 판정자다.** 결정표의 *"막대 위 클릭은 상위가 먼저 가져간다"*와
+    // *"gutter 클릭은 이 좌표계가 받지 않는다"*는 그동안 **순서를 보장하는 코드가 없어 예고**였고,
+    // §4.1g의 "아직 검증되지 않는 문장" 표에 그렇게 적혀 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..400) |i| { // 세로 막대가 서려면 넘쳐야 한다
+        var num: [24]u8 = undefined;
+        const line = std.fmt.bufPrint(&num, "line {d}\n", .{i}) catch unreachable;
+        try doc.appendSlice(allocator, line);
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "g.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "g.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const y: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
+    const pane = pane_ops.activePane(fx.session);
+
+    // **gutter를 눌러도 선택이 안 선다** — 줄 번호·접힘 화살표 자리다.
+    const gutter_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + 1);
+    try testing.expect(!beginBodySelection(fx.session, pane, gutter_x, y));
+    try testing.expectEqual(@as(?maru.session.editor.selection.Selection, null), term.rt.editor_selection);
+
+    // **막대 띠를 눌러도 선택이 안 선다** — 막대가 먼저 가져간다.
+    const bar = term.rt.editor_scrollbar orelse return error.NoScrollbar;
+    const bar_x: f64 = @as(f64, bar.track_x) + 1;
+    try testing.expect(beginScrollbarGesture(fx.session, pane, bar_x, y));
+    try testing.expectEqual(@as(?maru.session.editor.selection.Selection, null), term.rt.editor_selection);
+    fx.session.cancelPointerGesture();
+
+    // 본문은 가져간다 — 위 둘이 항진명제가 아니라는 대조군이다.
+    const geom = term.rt.editor_hit_geom;
+    const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
+    try testing.expect(beginBodySelection(fx.session, pane, text_x, y));
+    try testing.expect(term.rt.editor_selection != null);
 }

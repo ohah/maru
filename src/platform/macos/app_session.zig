@@ -14666,8 +14666,19 @@ pub const AppSession = struct {
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
                         const sw = chrome.components.tabbar.Metrics.scroll_button_cols;
-                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols, self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
-                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw, self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
+                        // **배경은 버튼 폭 전체**(`scroll_button_cols`)를 덮는다 — glyph 는 그 가운데 칸이라
+                        // 좌우 여백이 대칭이 된다("+" 와 같은 규율). 옛 코드는 한 칸만 칠해 배경이 glyph 에
+                        // 딱 붙어 ‹ 는 왼쪽 패딩이, › 는 오른쪽 패딩이 없어 보였다(사용자 보고 2026-08-20).
+                        const l_bg = self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
+                        const r_bg = self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
+                        var sb_i: u32 = 0;
+                        while (sb_i < sw and m.tab_cols + sb_i < m.cols) : (sb_i += 1) {
+                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sb_i, l_bg);
+                        }
+                        sb_i = 0;
+                        while (sb_i < sw and m.tab_cols + sw + sb_i < m.cols) : (sb_i += 1) {
+                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw + sb_i, r_bg);
+                        }
                     };
                     // ✕·"+" 호버 배경 — ‹/› 와 **같은 신호**다(사용자 요청 2026-08-18). 그 둘만 호버 표시가
                     // 없어서 작은 글리프를 조준하는 느낌이었다. 배경은 호버일 때만 얹는다: ‹/› 는 항상 버튼
@@ -14683,7 +14694,9 @@ pub const AppSession = struct {
                         if (self.hovered_tab_close) |hc| if (hc.pane == lr.leaf) {
                             const seg = m.segOf(hc.tab);
                             if (seg.has_close and seg.end_col > seg.start_col) {
-                                var i: u32 = seg.end_col -| 2;
+                                // 배경은 ✕ 의 클릭 zone(`close_button_cols`)과 **같은 칸들**을 덮는다 —
+                                // 하드코딩 2 는 zone(3칸)보다 좁아 배경이 ✕ 왼쪽에 붙었다(사용자 보고 2026-08-20).
+                                var i: u32 = seg.end_col -| chrome.components.tabbar.Metrics.close_button_cols;
                                 while (i < seg.end_col and i < m.cols) : (i += 1) {
                                     scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
                                 }

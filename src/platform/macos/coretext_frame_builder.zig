@@ -704,8 +704,9 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
     // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
     // ‹›(2칸) 둘 여유(base>2)도 필요.
-    // ‹·› 는 각 `scroll_button_cols`(2칸) 이라 넷을 예약한다 — 옛 3칸(‹1·gap1·›1)은 클릭 폭이 한 칸이라
-    // 실제로 누르기 어려웠다(사용자 보고 2026-08-18). 폭은 hit-test 와 **같은 상수**에서 나온다(§5.4).
+    // ‹·› 는 각 `scroll_button_cols`(3칸: 좌여백·glyph·우여백) 이라 여섯을 예약한다 — 옛 1칸은 누르기
+    // 어려웠고(사용자 보고 2026-08-18), 그때 늘린 2칸은 glyph 가 버튼 안에서 한쪽에 붙었다(2026-08-20).
+    // 폭은 hit-test 와 **같은 상수**에서 나온다(§5.4).
     const scroll_zone_cols: u16 = @intCast(tabbar.Metrics.scroll_button_cols * 2);
     const has_scroll = tab_width_fixed > 0 and total > base and base > scroll_zone_cols; // 버튼 넷을 뗄 여유
     const tab_cols: u16 = if (has_scroll) base - scroll_zone_cols else base;
@@ -1481,7 +1482,9 @@ pub fn buildPaneTabBarDrawList(
             // nominal tab_w로 판정하면 우단에서 잘린 탭이 ✕를 이웃 칸에 그리고 제목이 통째로 사라진다(code-review max).
             // tabbar.segOf의 has_close와 **같은 조건**이어야 "보이는 ✕ == 클릭되는 ✕"가 성립한다.
             const is_close = close_all and seg_end > start and (seg_end - start) >= 5;
-            const title_end: u32 = if (is_close) seg_end - 3 else seg_end;
+            // 제목은 ✕ 의 3칸 zone 앞에서 멈춘다 — zone 첫 칸이 곧 ✕ 의 좌여백이다(`close_button_cols` 단일 출처).
+            const close_w: u32 = tabbar.Metrics.close_button_cols;
+            const title_end: u32 = if (is_close) seg_end - close_w else seg_end;
             // 활성 Term 탭은 글자를 강조색(active_fg) + bold로, 나머지는 fg(흐림) regular로 — 활성 탭 글자 강조.
             // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(사이드바 활성 행과 같은 규칙).
             const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
@@ -1489,10 +1492,10 @@ pub fn buildPaneTabBarDrawList(
             // rename 중인 탭이면 tail 앵커 — 넘칠 때 선두를 "…"로 자르고 이름 끝(caret)을 세그먼트 안에 유지한다(긴 이름 입력 가시성).
             const tab_anchor: text_layout.Anchor = if (editing_tab != null and editing_tab.? == tab_index) .tail else .head;
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false, tab_anchor); // pane 탭 제목(터미널 OSC) — widen 안 함
-            if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
+            if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개 — 3칸 zone 의 **가운데** 칸(hit-test 와 같은 규칙).
                 try cells.append(allocator, .{
                     .row = 0,
-                    .col = @intCast(seg_end - 2),
+                    .col = @intCast(seg_end - close_w + close_w / 2),
                     .codepoint = sidebar_close_glyph,
                     .width = 1,
                     .style = style,
@@ -1509,11 +1512,12 @@ pub fn buildPaneTabBarDrawList(
         const max_scroll: u32 = total - tab_cols; // has_scroll이면 total > tab_cols 보장(total > base ≥ tab_cols+3)
         const left_style: terminal.Style = if (layout.eff_scroll > 0) .{ .foreground = active_fg } else style; // 왼쪽 더 있으면 강조, scroll=0이면 흐림
         const right_style: terminal.Style = if (layout.eff_scroll < max_scroll) .{ .foreground = active_fg } else style; // 오른쪽 더 있으면 강조, 끝이면 흐림
-        // glyph 는 각자 자기 2칸 버튼의 **바깥쪽** 칸에 둔다(hit-test 의 `scrollLeftGlyphCol`/`scrollRightGlyphCol`
-        // 과 같은 규칙 — §5.4 단일 소스). 그래서 두 버튼 사이에 2칸 여백이 생기고 덜 붐빈다.
+        // glyph 는 각자 자기 3칸 버튼의 **가운데** 칸에 둔다(hit-test 의 `scrollLeftGlyphCol`/`scrollRightGlyphCol`
+        // 과 같은 규칙 — §5.4 단일 소스). 버튼 배경 안에서 glyph 가 한쪽에 붙지 않는다("+" 와 같은 규칙 —
+        // 옛 2칸·바깥쪽 배치는 ‹ 의 왼쪽 패딩이, › 의 오른쪽 패딩이 0 이었다: 사용자 보고 2026-08-20).
         const scroll_w: u16 = @intCast(tabbar.Metrics.scroll_button_cols);
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = left_style });
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + scroll_w * 2 - 1), .codepoint = '>', .width = 1, .style = right_style });
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + scroll_w / 2), .codepoint = '<', .width = 1, .style = left_style });
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + scroll_w + scroll_w / 2), .codepoint = '>', .width = 1, .style = right_style });
     }
     // "+"(새 Term) 버튼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면 옛대로 far-right
     // (tab_cols+2 뒤, ‹·gap·› 다음). plus_start+1 col에 '+'. hit-test(tabbar.Metrics.plusZoneStart)와 단일 정합 —
@@ -2681,14 +2685,14 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
 
 test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘침 무스크롤" {
     // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll.
-    // ‹·› 는 **각 2칸**이라 넷을 뗀다(옛 3칸: ‹·gap·›). tab_cols = 37 - 4 = 33.
+    // ‹·› 는 **각 3칸**(좌여백·glyph·우여백)이라 여섯을 뗀다. tab_cols = 37 - 6 = 31.
     const ovf = tabLayout(40, 3, 16, 0);
     try std.testing.expect(ovf.has_scroll);
-    try std.testing.expectEqual(@as(u16, 33), ovf.tab_cols); // 37 - 4(‹2칸·›2칸)
+    try std.testing.expectEqual(@as(u16, 31), ovf.tab_cols); // 37 - 6(‹3칸·›3칸)
     try std.testing.expectEqual(@as(u16, 16), ovf.tab_w);
     try std.testing.expectEqual(@as(u32, 0), ovf.eff_scroll); // scroll 0
-    // #1: 큰 scroll(stale 등)은 max(=total 48 - tab_cols 33 = 15)로 clamp.
-    try std.testing.expectEqual(@as(u32, 15), tabLayout(40, 3, 16, 100).eff_scroll);
+    // #1: 큰 scroll(stale 등)은 max(=total 48 - tab_cols 31 = 17)로 clamp.
+    try std.testing.expectEqual(@as(u32, 17), tabLayout(40, 3, 16, 100).eff_scroll);
     // 2탭 → 균등 폭 18(=37/2)이 고정 16보다 넓어 **바를 꽉 채운다**(고정 폭은 하한). total=36 <= 37 →
     // no scroll, tab_cols=37(그대로), eff 0(stale 무시).
     const fit = tabLayout(40, 2, 16, 50);
@@ -3250,6 +3254,51 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
 // #3: 넘침 스크롤 시 ‹/›를 스크롤 여지 있는 방향만 active_fg(강조)·없는 방향(경계)은 fg(muted)로 그린다 —
 // ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48,
 // ‹·›가 각 2칸이라 tab_cols=33, max_scroll=15.
+test "탭바 버튼 glyph 는 각자 3칸 버튼의 가운데 칸에 놓인다(✕·‹·›·+)" {
+    // 회귀 고정(사용자 보고 2026-08-20): 버튼 배경 안에서 glyph 가 한쪽에 붙어 있었다 — ‹ 는 왼쪽 패딩이,
+    // › 는 오른쪽 패딩이 0 이었고, ✕ 는 클릭 zone(2칸)이 glyph 왼쪽 가장자리에 붙어 배경이 비대칭이었다.
+    // 넷 다 `*_button_cols`(3칸) 버튼의 **가운데** 칸이어야 좌우 여백이 같다. hit-test 쪽 계약은
+    // `chrome/components/tabbar.zig` 테스트가 같은 상수로 고정한다(§5.4 단일 소스).
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+
+    // 넘치는 경우: cols=40 → base=37, ‹›6칸 → tab_cols=31. ‹[31,34) ›[34,37) +[37,40).
+    {
+        const titles = [_][]const u8{ "a", "b", "c" };
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, fg, false, null, bright, 16, 0, null);
+        defer dl.deinit(allocator);
+        var lt: ?u16 = null;
+        var gt: ?u16 = null;
+        var plus: ?u16 = null;
+        for (dl.cells) |c| switch (c.codepoint) {
+            '<' => lt = c.col,
+            '>' => gt = c.col,
+            '+' => plus = c.col,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(?u16, 32), lt); // ‹[31,34) 의 가운데
+        try std.testing.expectEqual(@as(?u16, 35), gt); // ›[34,37) 의 가운데
+        try std.testing.expectEqual(@as(?u16, 38), plus); // +[37,40) 의 가운데
+    }
+
+    // ✕: 탭 폭이 넉넉하면 각 탭 우측 3칸 zone 의 가운데(seg_end-2)에 놓이고, 제목은 그 zone 앞에서 멈춘다.
+    {
+        const titles = [_][]const u8{"abcdefgh"};
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, fg, true, null, bright, 0, 0, null);
+        defer dl.deinit(allocator);
+        var close_col: ?u16 = null;
+        var max_title_col: u16 = 0;
+        for (dl.cells) |c| {
+            if (c.codepoint == sidebar_close_glyph) close_col = c.col;
+            if (c.codepoint != sidebar_close_glyph and c.codepoint != '+' and c.col > max_title_col) max_title_col = c.col;
+        }
+        const seg_end: u16 = @intCast(paneTabAreaCols(20)); // 탭 1개 = 탭 영역 전체
+        try std.testing.expectEqual(@as(?u16, seg_end - 2), close_col); // 3칸 zone [seg_end-3, seg_end) 의 가운데
+        try std.testing.expect(max_title_col < seg_end - 3); // 제목은 zone(좌여백 포함) 앞에서 멈춘다
+    }
+}
+
 test "scroll ‹/› highlight only the scrollable direction (boundary uses muted fg)" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } }; // fg(muted)
@@ -3273,9 +3322,9 @@ test "scroll ‹/› highlight only the scrollable direction (boundary uses mute
         }
         try std.testing.expect(saw_l and saw_r);
     }
-    // scroll=15(맨 오른쪽=max_scroll): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
+    // scroll=17(맨 오른쪽=max_scroll = total 48 - tab_cols 31): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
     {
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, false, null, bright, 16, 15, null);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, false, null, bright, 16, 17, null);
         defer dl.deinit(allocator);
         var saw_l = false;
         var saw_r = false;

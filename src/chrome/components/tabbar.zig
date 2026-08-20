@@ -79,7 +79,7 @@ pub const Metrics = struct {
             .end_col = end_col,
             .start_px = self.colPx(start_col),
             .end_px = self.colPx(end_col),
-            .close_start_px = if (has_close) self.colPx(end_col - 2) else 0,
+            .close_start_px = if (has_close) self.colPx(end_col - close_button_cols) else 0,
             .has_close = has_close,
         };
     }
@@ -149,10 +149,23 @@ pub const Metrics = struct {
     /// 아니라 세 칸이다. 인라인 + 오른쪽 빈 바는 여전히 무동작(사용자 결정 ①).
     pub const plus_button_cols: u32 = 3;
 
-    /// ‹ / › 스크롤 버튼 하나의 클릭 폭(컬럼). 옛값은 1칸(≈cell 폭)이라 실제로 누르기 어려웠다
-    /// (사용자 보고 2026-08-18 "누르는 위치 너무 협소하고 작음"). 2칸이면 glyph 를 바깥쪽 칸에 두어
-    /// 두 버튼 사이에 자연스러운 여백이 생기고, 클릭 영역은 두 배가 된다.
-    pub const scroll_button_cols: u32 = 2;
+    /// ✕(탭 닫기) 버튼의 클릭 폭(컬럼). **3칸: 좌여백·glyph·우여백**이라 glyph 가 버튼 한가운데에 놓인다 —
+    /// `plus_button_cols`·`scroll_button_cols` 와 같은 규칙이다.
+    ///
+    /// **렌더는 이미 좌우 1칸씩 비우고 있었다**(`buildPaneTabBarDrawList`: 제목은 `seg_end-3`까지, ✕ 는
+    /// `seg_end-2`, `seg_end-1` 은 우여백). 어긋난 것은 **클릭 zone** 이었다 — 2칸(`[end_col-2, end_col)`)이라
+    /// 버튼 배경이 ✕ 왼쪽 가장자리에 딱 붙어 왼쪽 패딩이 없어 보였다(사용자 보고 2026-08-20). zone 을 3칸으로
+    /// 넓히면 glyph 위치와 제목 끝은 그대로 두고 배경만 좌우 대칭이 된다.
+    pub const close_button_cols: u32 = 3;
+
+    /// ‹ / › 스크롤 버튼 하나의 클릭 폭(컬럼). **3칸: 좌여백·glyph·우여백**이라 glyph 가 버튼 한가운데에
+    /// 놓인다 — `plus_button_cols` 와 같은 규칙이다.
+    ///
+    /// 이력: 옛값 1칸은 누르기 어려웠고(사용자 보고 2026-08-18 "누르는 위치 너무 협소하고 작음"), 그때
+    /// 2칸으로 늘리며 glyph 를 **바깥쪽 칸**에 두어 두 버튼 사이 여백을 만들었다. 그러면 버튼 배경 안에서
+    /// glyph 가 한쪽에 붙어 ‹ 는 왼쪽 패딩이, › 는 오른쪽 패딩이 없다(사용자 보고 2026-08-20). 3칸+가운데는
+    /// 클릭 영역을 더 넓히면서 그 비대칭을 없앤다.
+    pub const scroll_button_cols: u32 = 3;
 
     /// x_px가 "+" 버튼([plusZoneStart, +plus_button_cols)) 안인가. **인라인이라 cols까지가 아니라 버튼 폭으로 한정** —
     /// 마지막 탭 오른쪽 빈 영역을 클릭해도 새 Term이 안 생긴다(①). "+" glyph(plusZoneStart+1)를 포함하는 영역.
@@ -163,15 +176,15 @@ pub const Metrics = struct {
         return x_px >= self.colPx(ps) and x_px < self.colPx(end);
     }
 
-    /// ‹ glyph 가 놓이는 컬럼 — 자기 zone 의 **바깥쪽**(왼쪽) 칸. 렌더가 이 값을 그대로 쓴다(§5.4 단일 소스).
+    /// ‹ glyph 가 놓이는 컬럼 — 자기 3칸 zone 의 **가운데** 칸. 렌더가 이 값을 그대로 쓴다(§5.4 단일 소스).
     pub fn scrollLeftGlyphCol(self: Metrics) u32 {
-        return self.tab_cols;
+        return self.tab_cols + scroll_button_cols / 2;
     }
 
-    /// › glyph 가 놓이는 컬럼 — 자기 zone 의 **바깥쪽**(오른쪽) 칸. 두 glyph 를 바깥으로 붙이면 버튼은 각각
-    /// 2칸이면서 사이에는 2칸 여백이 생겨, 옛 `‹·gap·›`(1칸씩) 보다 누르기 쉽고 덜 붐빈다.
+    /// › glyph 가 놓이는 컬럼 — 자기 3칸 zone 의 **가운데** 칸(‹ zone 다음). 두 버튼 모두 가운데 정렬이라
+    /// 배경 안에서 glyph 가 한쪽에 붙지 않는다.
     pub fn scrollRightGlyphCol(self: Metrics) u32 {
-        return self.tab_cols + scroll_button_cols * 2 - 1;
+        return self.tab_cols + scroll_button_cols + scroll_button_cols / 2;
     }
 
     /// "+" glyph 가 놓이는 컬럼 — 3칸 버튼의 **가운데** 칸.
@@ -220,13 +233,14 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     // **2칸 탭엔 ✕가 없다**(제목 자리를 남겨야 하므로 tab_w>=4에서만) — 좁은 탭에서 close zone은 항상 false.
     try std.testing.expect(!m.inCloseZone(0, 100));
     try std.testing.expect(!m.inCloseZone(0, 115));
-    // 넉넉한 폭(보이는 폭 5칸 이상)에서만 ✕가 생긴다: tab_w=5 → 탭0=[100,140), ✕ zone=[colPx(3)=124, 140).
+    // 넉넉한 폭(보이는 폭 5칸 이상)에서만 ✕가 생긴다: tab_w=5 → 탭0=[100,140), ✕ zone은 우측
+    // `close_button_cols`(3)칸 = [colPx(2)=116, 140). glyph 는 그 가운데 칸(col 3)이라 좌우 여백이 대칭이다.
     var wide4 = m;
     wide4.tab_w = 5;
     wide4.tab_cols = 10;
     wide4.tab_count = 2;
-    try std.testing.expect(!wide4.inCloseZone(0, 123)); // 제목 영역
-    try std.testing.expect(wide4.inCloseZone(0, 124));
+    try std.testing.expect(!wide4.inCloseZone(0, 115)); // 제목 영역
+    try std.testing.expect(wide4.inCloseZone(0, 116)); // zone 첫 칸(✕ 좌여백)도 누르면 닫힌다
     try std.testing.expect(wide4.inCloseZone(0, 139));
     try std.testing.expect(!wide4.inCloseZone(0, 140)); // 탭0 밖
     // "+" zone [8,10)칸 = [164,180).
@@ -259,12 +273,12 @@ test "tabbar 인라인 +: 탭이 영역을 안 채우면 마지막 탭 바로 �
     try std.testing.expect(m.inPlusZone(155)); // + 우단 직전
     try std.testing.expect(!m.inPlusZone(156)); // + 버튼 밖(빈 영역 시작) — 새 Term 안 만듦(①)
     try std.testing.expect(!m.inPlusZone(170)); // 옛 far-right 자리도 이제 +가 아니다
-    // 넘쳐서 has_scroll이면 far-right 유지(인라인 아님): plusZoneStart = tab_cols(6) + ‹›(2+2) = 10.
+    // 넘쳐서 has_scroll이면 far-right 유지(인라인 아님): plusZoneStart = tab_cols(6) + ‹›(3+3) = 12.
     var ov = testMetrics();
     ov.has_scroll = true;
     ov.tab_cols = 6;
     ov.tab_count = 8; // 넘침
-    try std.testing.expectEqual(@as(u32, 10), ov.plusZoneStart()); // ‹(2칸)·›(2칸) 뒤 far-right
+    try std.testing.expectEqual(@as(u32, 12), ov.plusZoneStart()); // ‹(3칸)·›(3칸) 뒤 far-right
     try std.testing.expect(!ov.inPlusZone(160)); // ‹› 영역은 + 아님
 }
 
@@ -286,7 +300,7 @@ test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-�
     wide.tab_count = 2;
     const w0 = wide.segOf(0);
     try std.testing.expect(w0.has_close);
-    try std.testing.expectEqual(wide.colPx(w0.end_col - 2), w0.close_start_px);
+    try std.testing.expectEqual(wide.colPx(w0.end_col - Metrics.close_button_cols), w0.close_start_px);
     const s3 = m.segOf(3);
     try std.testing.expectEqual(@as(f64, 148), s3.start_px);
     try std.testing.expectEqual(@as(f64, 164), s3.end_px);
@@ -338,25 +352,25 @@ test "tabbar: 왼쪽으로 스크롤아웃된 탭이 있어도 보이는 탭을 
 
 // ‹ / › 버튼은 **각 2칸**이다(옛 1칸은 누르기 어려웠다 — 사용자 보고 2026-08-18). glyph 는 자기 버튼의
 // 바깥쪽 칸에 놓여 둘 사이에 여백이 생기고, "+" 는 3칸 버튼의 가운데 칸이다.
-test "tabbar: ‹›는 각 2칸 버튼이고 glyph는 바깥쪽, +는 3칸 버튼의 가운데" {
+test "tabbar: ‹›·+ 는 각 3칸 버튼이고 glyph 는 모두 가운데 칸" {
     var m = testMetrics();
     m.has_scroll = true;
-    m.tab_cols = 4; // ‹[4,6) ›[6,8) plus[8,11). colPx: 4=132,5=140,6=148,7=156,8=164,9=172,10=180.
-    // ‹ 버튼은 두 칸을 모두 받는다 — 옛 계약이면 148 은 이미 버튼 밖이었다.
+    m.cols = 14; // ‹[4,7) ›[7,10) plus[10,13) 을 담을 폭
+    m.tab_cols = 4; // colPx: 4=132,5=140,6=148,7=156,8=164,9=172,10=180,11=188,12=196,13=204.
     try std.testing.expect(m.inScrollLeftZone(132));
-    try std.testing.expect(m.inScrollLeftZone(147));
-    try std.testing.expect(!m.inScrollLeftZone(148)); // 여기부터 ›
-    try std.testing.expect(m.inScrollRightZone(148));
-    try std.testing.expect(m.inScrollRightZone(163));
-    try std.testing.expect(!m.inScrollRightZone(164)); // 여기부터 +
-    // glyph 는 바깥쪽 칸: ‹ 는 왼쪽 끝(4), › 는 오른쪽 끝(7) — 사이 두 칸이 여백이다.
-    try std.testing.expectEqual(@as(u32, 4), m.scrollLeftGlyphCol());
-    try std.testing.expectEqual(@as(u32, 7), m.scrollRightGlyphCol());
-    // + 는 ‹› 뒤 3칸이고 glyph 는 가운데(9).
-    try std.testing.expectEqual(@as(u32, 8), m.plusZoneStart());
-    try std.testing.expectEqual(@as(u32, 9), m.plusGlyphCol());
-    try std.testing.expect(m.inPlusZone(164));
-    try std.testing.expect(m.inPlusZone(179));
+    try std.testing.expect(m.inScrollLeftZone(155));
+    try std.testing.expect(!m.inScrollLeftZone(156)); // 여기부터 ›
+    try std.testing.expect(m.inScrollRightZone(156));
+    try std.testing.expect(m.inScrollRightZone(179));
+    try std.testing.expect(!m.inScrollRightZone(180)); // 여기부터 +
+    // **glyph 는 셋 다 자기 3칸 버튼의 가운데 칸**이라 버튼 배경 안에서 한쪽에 붙지 않는다
+    // (옛 2칸·바깥쪽 배치는 ‹ 의 왼쪽 패딩이, › 의 오른쪽 패딩이 0 이었다 — 사용자 보고 2026-08-20).
+    try std.testing.expectEqual(@as(u32, 5), m.scrollLeftGlyphCol()); // ‹[4,7) 의 가운데
+    try std.testing.expectEqual(@as(u32, 8), m.scrollRightGlyphCol()); // ›[7,10) 의 가운데
+    try std.testing.expectEqual(@as(u32, 10), m.plusZoneStart());
+    try std.testing.expectEqual(@as(u32, 11), m.plusGlyphCol()); // +[10,13) 의 가운데
+    try std.testing.expect(m.inPlusZone(180));
+    try std.testing.expect(m.inPlusZone(203));
     try std.testing.expect(!m.inPlusZone(140)); // ‹ 위치는 plus 아님
     // has_scroll=false면 ‹› 없음(scroll zone false), plus는 tab_cols(8)부터 3칸.
     const no = testMetrics();

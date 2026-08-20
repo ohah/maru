@@ -335,8 +335,11 @@ pub const Cursor = struct {
     pub const Batch = struct {
         /// 이번에 채운 이벤트 수.
         count: usize,
-        /// 오프셋을 이만큼 전진시킨다(마지막 **완결된 줄**까지만).
-        consumed: usize,
+        /// 이번에 읽어 낸 바이트 수(마지막 **완결된 줄**까지만).
+        ///
+        /// **커서는 이미 이만큼 전진했다.** 이 값으로 `cursor.offset` 을 또 더하면 두 번 전진해 그 구간을
+        /// 통째로 건너뛴다. 이 값이 필요한 곳은 «넘긴 chunk 에서 남은 부분이 어디부터인가» 하나다.
+        advanced: usize,
         /// 상한에 걸려 버린 줄 수. 0이 아니면 관측에 센다(내용은 남기지 않는다 — 계약 §7).
         dropped: usize,
         /// 섞인 줄에서 재동기화로 건진 이벤트 수(§동시 append). 0이 아니면 그 파일에 인터리브가 있었다는 뜻이다.
@@ -346,6 +349,12 @@ pub const Cursor = struct {
     };
 
     /// `chunk`(파일의 `offset` 이후 바이트)에서 완결된 줄만 뽑아 `out`에 채운다.
+    ///
+    /// **호출자가 지켜야 할 것 둘.**
+    /// 1. `out` 에 담긴 `Event` 의 문자열은 **`chunk` 를 빌린다**(할당하지 않는다). 그 버퍼를 다음 읽기에
+    ///    재사용하려면 **이번 tick 안에 필요한 값을 옮겨 담아라** — 안 그러면 다음 tick 이 그 위를 덮는다.
+    /// 2. 파일이 회전했는지는 `resetIfRotated` 로 **먼저** 판정하라. 회전한 파일을 옛 오프셋으로 읽으면
+    ///    엉뚱한 지점부터 파싱한다.
     ///
     /// **마지막 줄에 개행이 없으면 그 줄은 남긴다.** 훅이 쓰는 중일 수 있고, 반쪽 줄을 파싱하면 정상 이벤트를
     /// 손상으로 오인해 버린다. 그 줄은 다음 tick에 완결된 채로 다시 온다(오프셋을 전진시키지 않았으므로).
@@ -379,7 +388,7 @@ pub const Cursor = struct {
         self.offset += consumed;
         return .{
             .count = count,
-            .consumed = consumed,
+            .advanced = consumed,
             .dropped = dropped,
             .recovered = recovered,
             .more = std.mem.indexOfScalar(u8, rest, '\n') != null,
@@ -706,7 +715,7 @@ test "커서는 완결된 줄만 소비하고 반쪽 줄을 남긴다" {
     try testing.expectEqual(Kind.user_prompt_submit, out[1].kind);
     // 반쪽 줄은 오프셋에 넣지 않는다 — 다음 tick에 완결된 채로 다시 온다.
     const half_len = "claude\t{\"hook_event_name\":\"Sto".len;
-    try testing.expectEqual(chunk.len - half_len, batch.consumed);
+    try testing.expectEqual(chunk.len - half_len, batch.advanced);
     try testing.expectEqual(@as(u64, chunk.len - half_len), cur.offset);
 }
 
@@ -720,7 +729,7 @@ test "tick당 상한을 지키고 남은 줄을 다음 tick에 넘긴다" {
     try testing.expect(first.more);
     try testing.expectEqual(@as(u64, one.len * 2), cur.offset);
 
-    const second = cur.take(chunk[first.consumed..], &out);
+    const second = cur.take(chunk[first.advanced..], &out);
     try testing.expectEqual(@as(usize, 2), second.count);
     try testing.expect(!second.more);
     try testing.expectEqual(@as(u64, chunk.len), cur.offset);

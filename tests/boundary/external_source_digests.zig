@@ -639,7 +639,7 @@ pub const inventory = [_]Proof{
     // 그대로다 — `@field` 반사 접근도 Client 구성·receiver 집합도 손대지 않았다.
     // 리베이스로 또 수렴했다(2026-08-20, 세 번째): 위 사유 넷이 모두 살아 있고, 아래 값은 그것들이 한
     // 트리에 함께 있는 상태에서 도구가 다시 잰 것이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "0cd946790121cec0d6e7248c33bd3fbe2b7548425aa31a3d232263e0113e2397" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "72c597541166cb26fabbf6d4f79eb728d7d1d8608d975bbacbc8aebe28c6732d" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

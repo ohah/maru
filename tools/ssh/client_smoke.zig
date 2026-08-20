@@ -90,6 +90,10 @@ var in_buf: [1 << 20]u8 = undefined;
 var in_len: usize = 0;
 var wire_out: [1 << 19]u8 = undefined;
 var screen_out: [1 << 19]u8 = undefined;
+/// 컨트롤 채널의 stdout. **화면과 다른 버퍼여야** 이 회차가 무언가를 재게 된다.
+var control_out: [1 << 16]u8 = undefined;
+var control_seen: [4096]u8 = undefined;
+var control_len: usize = 0;
 
 var cl: client.Client = undefined;
 var prng = std.Random.DefaultPrng.init(0x5390);
@@ -113,8 +117,18 @@ var made_progress = false;
 
 /// 한 번 먹이고 나온 것을 선에 보낸다. 화면 바이트는 세기만 한다.
 fn pump() !client.State {
-    const step = try cl.feed(in_buf[0..in_len], &wire_out, &screen_out);
-    made_progress = step.consumed > 0 or step.screen.len > 0 or step.wire.len > 0;
+    const step = try cl.feedBuffers(in_buf[0..in_len], .{
+        .wire = &wire_out,
+        .screen = &screen_out,
+        .control = &control_out,
+    });
+    made_progress = step.consumed > 0 or step.screen.len > 0 or step.wire.len > 0 or step.control.len > 0;
+    // **컨트롤 바이트는 화면과 따로 센다** — 섞이면 이 회차가 아무것도 안 재게 된다.
+    if (step.control.len > 0) {
+        const n = @min(step.control.len, control_seen.len - control_len);
+        @memcpy(control_seen[control_len..][0..n], step.control[0..n]);
+        control_len += n;
+    }
     if (step.consumed > 0) consume(step.consumed);
     if (step.wire.len > 0) try sock.writeAll(step.wire);
     got += step.screen.len;
@@ -167,7 +181,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const expect_bytes = try std.fmt.parseInt(usize, expect_bytes_str, 10);
     const expect_stderr = try std.fmt.parseInt(usize, expect_stderr_str, 10);
     const want_window = try std.fmt.parseInt(u32, window_arg, 10);
-    const want_pty = std.mem.eql(u8, mode, "pty");
+    // 컨트롤 회차의 **터미널** 채널은 제품과 같이 pty 를 쓴다 — 컨트롤만 pty 를 안 붙인다.
+    const want_pty = std.mem.eql(u8, mode, "pty") or std.mem.eql(u8, mode, "control") or
+        std.mem.eql(u8, mode, "control-missing");
     // 이 회차의 서버가 배너를 켰나(스크립트가 정한다).
     const expect_banner = std.mem.eql(u8, mode, "banner");
     const want_echo = std.mem.eql(u8, mode, "echo") or std.mem.eql(u8, mode, "rekey-echo") or
@@ -188,6 +204,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // 방법 목록만 묻고, 그 목록에 `password` 가 있으면 거기서 멈춰 물어야 한다. 키를 안 읽는
     // 경로는 실서버로 여기 말고 밟는 데가 없다.
     const no_key = std.mem.eql(u8, mode, "nokey");
+    // **컨트롤 채널 회차(S10b-1).** 터미널이 뜬 뒤 같은 연결에 채널을 하나 더 열고 pty 없이
+    // 명령을 돌린다(계약 §4a). 단위 테스트는 우리가 만든 서버 답을 먹이지만, **진짜 sshd 가
+    // `exec` 을 받아 주는지**는 여기 말고 밟는 데가 없다.
+    const want_control = std.mem.eql(u8, mode, "control");
+    // **없는 명령 회차.** 계약이 "127 은 `CHANNEL_FAILURE` 가 아니라 `exit-status` 로 온다" 고
+    // 적어 두었는데, 그 값이 실서버에서 정말 그렇게 오는지는 실측이라야 안다.
+    const want_control_missing = std.mem.eql(u8, mode, "control-missing");
 
     var parsed = try loadKey(key_path);
     defer parsed.clear();
@@ -261,6 +284,51 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (cl.state != .ready) return fail("셸이 안 떴다");
     say("셸 준비됨 ({s})", .{mode});
 
+    if (want_control or want_control_missing) {
+        const cmd = if (want_control_missing)
+            "maru-command-that-does-not-exist-xyz"
+        else
+            "echo MARU_CONTROL_OK";
+        try sock.writeAll(try cl.openControl(cmd, &wire_out));
+
+        var spins: usize = 0;
+        while (spins < 100_000) : (spins += 1) {
+            const st = try pump();
+            if (st == .closed) return fail("컨트롤 채널을 여는 동안 세션이 닫혔다");
+            if (want_control and control_len >= "MARU_CONTROL_OK".len) break;
+            if (want_control_missing and cl.controlExitStatus() != null) break;
+            if (made_progress and in_len > 0) continue;
+            fill() catch |e| switch (e) {
+                error.Closed, error.Stalled => break,
+                else => return e,
+            };
+        }
+
+        if (want_control) {
+            if (std.mem.indexOf(u8, control_seen[0..control_len], "MARU_CONTROL_OK") == null) {
+                return fail("컨트롤 채널로 명령 출력이 안 왔다");
+            }
+            // **화면에는 안 섞였다.** 섞이면 ndjson 파서가 사람 화면을 읽게 된다(계약 §4a).
+            if (std.mem.indexOf(u8, screen_out[0..@min(got, screen_out.len)], "MARU_CONTROL_OK") != null) {
+                return fail("컨트롤 출력이 화면 바이트에도 섞였다");
+            }
+            say("컨트롤 채널로 {d}B 받았다 — 화면과 안 섞였다", .{control_len});
+        } else {
+            const code = cl.controlExitStatus() orelse return fail("없는 명령인데 exit-status 가 없다");
+            // 실측 대상: 셸이 없는 명령에 내는 코드다(POSIX 셸은 127).
+            if (code != 127) return fail("없는 명령의 종료 코드가 127 이 아니다");
+            say("없는 명령: exit-status {d} (채널 요청은 성공했다)", .{code});
+        }
+
+        // **터미널은 그대로 산다** — 이것이 이 회차의 절반이다.
+        if (cl.state == .closed) return fail("컨트롤 채널 때문에 세션이 닫혔다");
+        const r = try cl.write("\n", &wire_out);
+        if (r.wire.len > 0) try sock.writeAll(r.wire);
+        say("터미널은 그대로 산다 (state={s})", .{@tagName(cl.state)});
+        say("OK", .{});
+        return;
+    }
+
     // 보내는 회차: **상대가 허락한 만큼만** 나간다(계약 §3.1). 못 보내면 받아서 윈도를 연다.
     var sent: usize = 0;
     if (want_echo) {
@@ -279,10 +347,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try sock.writeAll(r.wire);
             sent += r.sent;
         }
-        // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
-        try sock.writeAll(try cl.eof(&wire_out));
-        // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
-        try sock.writeAll(try cl.eof(&wire_out));
         // **EOF 를 보내야 `cat` 이 끝난다**(§5.3). 안 보내면 서버가 stdin 을 계속 기다린다.
         try sock.writeAll(try cl.eof(&wire_out));
         say("보낸 바이트 {d}", .{sent});

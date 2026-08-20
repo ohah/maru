@@ -889,6 +889,75 @@ pub const GenerationAttachment = struct {
         self.lifecycle = .attached;
     }
 
+    pub fn commitHostRetirementNoFail(
+        self: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) void {
+        if (!self.hostRetirementPreparedExact(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        )) process_seal.fatalIntegrity(.proof_loss);
+        const payload = &(self.payload orelse process_seal.fatalIntegrity(.proof_loss));
+        adapter.beginAttachmentDrop(
+            &self.binding,
+            self.reservation orelse process_seal.fatalIntegrity(.proof_loss),
+            &self.lease,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        self.lifecycle = .cleaning;
+        self.retirement_transaction_addr = 0;
+        self.retirement_transaction_generation = 0;
+        self.retirement_adapter_addr = 0;
+        self.batch_adapter.commitDraining();
+        self.terminalizeTransport();
+        switch (payload.deinitPayloadOnly()) {
+            .cleaned => {},
+            .terminal_handoff => {
+                const view = payload.terminalCleanupView() catch
+                    process_seal.fatalIntegrity(.proof_loss);
+                var handoff: generation_batch_registry.TerminalCleanupHandoff = .{};
+                self.batch_adapter.preflightTerminalCleanup(view, &handoff) catch
+                    process_seal.fatalIntegrity(.proof_loss);
+                self.batch_adapter.commitTerminalCleanupNoFail(view, &handoff);
+                payload.consumeTerminalCleanupSourcesNoFail(view.token_count);
+                if (payload.deinitPayloadOnly() != .cleaned)
+                    process_seal.fatalIntegrity(.proof_loss);
+                self.payload = null;
+                adapter.finishActiveAttachmentDrop(
+                    &self.binding,
+                    self.reservation.?,
+                    &self.lease,
+                );
+                self.batch_adapter.poisonTerminalCleanupNoFail();
+                self.batch_adapter.finishDraining();
+                self.lifecycle = .terminal;
+                return;
+            },
+            .corrupt => process_seal.fatalIntegrity(.proof_loss),
+        }
+        self.batch_adapter.finishDraining();
+        self.payload = null;
+        adapter.finishActiveAttachmentDrop(
+            &self.binding,
+            self.reservation.?,
+            &self.lease,
+        );
+        self.lifecycle = .terminal;
+    }
+
+    pub fn hostRetirementCommittedExact(
+        self: *const GenerationAttachment,
+        adapter: *const host_adapter_mod.HostAdapter,
+    ) bool {
+        return rawLifecycleValid(&self.lifecycle) and self.valid() and self.lifecycle == .terminal and
+            self.payload == null and self.retirement_transaction_addr == 0 and
+            self.retirement_transaction_generation == 0 and self.retirement_adapter_addr == 0 and
+            self.binding.lifecycle == .terminal and self.reservation != null and
+            adapter.hostId() != 0 and adapter.connectionGeneration() != 0;
+    }
+
     pub fn deinit(self: *GenerationAttachment, adapter: *host_adapter_mod.HostAdapter) void {
         const outcome = self.tryDeinit(adapter);
         if (outcome != .cleaned and outcome != .terminal_handoff)

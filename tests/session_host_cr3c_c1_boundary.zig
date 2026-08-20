@@ -127,8 +127,11 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
             "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
-    try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementDetachBeforeAdmissionClose("));
-    try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightRetirementCleanupBeforeAdmissionClose("));
+    // CR5b-2b's host-wide reservation validates the shared detach/cleanup while the old
+    // admission is still open; the no-fail suffix revalidates only after closing it.
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "preflightRetirementDetachBeforeAdmissionClose("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "preflightRetirementCleanupBeforeAdmissionClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightClientReplacement("));
-    try std.testing.expectEqual(@as(usize, 7), count(backend, "preflightPublishedClientReplacement("));
+    // Seven product state validations plus the CR5b-2b final hostile fixture assertion.
+    try std.testing.expectEqual(@as(usize, 8), count(backend, "preflightPublishedClientReplacement("));
 }

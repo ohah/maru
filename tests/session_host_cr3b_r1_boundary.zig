@@ -34,9 +34,10 @@ test "CR3b R1 경계는 raw Client escape 없이 admission close만 연다" {
     try std.testing.expectEqual(@as(usize, 6), count(slot, ".connection_generation = 1"));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "connection_generation +="));
     // R3가 exact-capacity retired 배열, oldest reclaim 준비와 guarded-address hostile oracle에서
-    // 네 번 더 참조한다.
-    // 이 누적 경계는 phrase 증가를 명시적으로 승인하되 R3 의미 계약은 R3 경계가 소유한다.
-    try std.testing.expectEqual(@as(usize, 11), count(slot, "retired_node"));
+    // 네 번 더 참조한다. CR5b-2b reserved replacement도 old graph mutation 전에 같은 guarded
+    // retired ranges를 새 node에 복사하므로 exact 두 필드 초기화를 추가한다.
+    // 이 누적 경계는 phrase 증가를 명시적으로 승인하되 의미 계약은 R3/CR5b-2b 경계가 소유한다.
+    try std.testing.expectEqual(@as(usize, 13), count(slot, "retired_node"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {

@@ -51,15 +51,18 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         attachment_count: usize = 0,
         screen_count: usize = 0,
     }{
-        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 6 },
+        // CR5b-2b actual shared-replacement fixture reuses the product retirement entry once.
+        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 7 },
         .{ .identifier = "prepareHostWideRetirement", .backend_count = 1, .runtime_count = 3 },
-        .{ .identifier = "hostWideRetirementPreparedExact", .backend_count = 3, .runtime_count = 4 },
+        // CR5b-2b adds one whole-set revalidation in its reserved state and two explicit
+        // pre-commit mutation-zero assertions in the actual three-runtime fixture.
+        .{ .identifier = "hostWideRetirementPreparedExact", .backend_count = 6, .runtime_count = 5 },
         .{ .identifier = "abortHostWideRetirement", .backend_count = 2, .runtime_count = 3 },
         .{ .identifier = "prepareHostRetirement", .runtime_count = 1, .attachment_count = 1 },
-        .{ .identifier = "hostRetirementPreparedExact", .runtime_count = 1, .attachment_count = 2 },
+        .{ .identifier = "hostRetirementPreparedExact", .runtime_count = 1, .attachment_count = 3 },
         .{ .identifier = "abortHostRetirement", .runtime_count = 2, .attachment_count = 1 },
         .{ .identifier = "prepareUnavailableFromLive", .runtime_count = 1, .screen_count = 1 },
-        .{ .identifier = "preparedUnavailableExact", .runtime_count = 1, .screen_count = 2 },
+        .{ .identifier = "preparedUnavailableExact", .runtime_count = 1, .screen_count = 3 },
         .{ .identifier = "abortPreparedUnavailable", .runtime_count = 1, .screen_count = 1 },
     };
     for (owner_inventory) |entry| {
@@ -78,6 +81,15 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
     try std.testing.expectEqual(@as(usize, 1), count(prepare, "RemoteRuntime.backend_api.abortHostWideRetirement("));
     try std.testing.expectEqual(@as(usize, 0), count(prepare, "publishReconnectClientReplacement("));
     try std.testing.expectEqual(@as(usize, 0), count(prepare, "publishHostReconnectReplacement("));
+    const shared_state = between(
+        backend,
+        "@intFromEnum(HostReconnectJobState.shared_replacement_reserved) => {",
+        "@intFromEnum(HostReconnectJobState.replacement_published) => {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(shared_state, "RemoteRuntime.backend_api.hostWideRetirementPreparedExact("),
+    );
 
     inline for (.{
         "prepareHostReconnectRuntimeRetirements",
@@ -100,7 +112,7 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         }),
     );
 
-    const gate = between(build, "const session_host_cr5b2a_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5b2a_step =", "const session_host_cr5b2b_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b2a\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5b2a_step.dependOn(session_host_cr5b1_step);"));

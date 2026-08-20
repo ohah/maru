@@ -71,10 +71,16 @@ test "CR3b R2c 경계는 final Client node와 current generation 원자 게시�
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn publishClientSlotReplacement("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn clientReplacementCandidateDigest("));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         count(slot, "const next_generation = std.math.add(u64, expected_generation, 1)"),
     );
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "source.fd < 0 or source.unusable"));
+    // Existing replacement publication plus CR5b-2b reserve/preflight/no-fail publish checks.
+    try std.testing.expectEqual(@as(usize, 4), count(slot, "source.fd < 0 or source.unusable"));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn reserveClientReplacementNode("));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(slot, "pub fn publishReservedClientReplacementAfterRetirementNoFail("),
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         count(slot, ".connection_generation = self.current.connection_generation"),

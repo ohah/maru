@@ -1557,6 +1557,55 @@ pub const ReconnectGenerationOwner = struct {
         ) catch process_seal_service.fatalIntegrity(.proof_loss);
     }
 
+    fn commitHostWideRetirementNoFail(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) void {
+        if (!self.hostWideRetirementPreparedExact(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        )) process_seal_service.fatalIntegrity(.proof_loss);
+        const current = @constCast(self.slot.currentPayload() catch
+            process_seal_service.fatalIntegrity(.proof_loss));
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => process_seal_service.fatalIntegrity(.proof_loss),
+        };
+        attachment.commitHostRetirementNoFail(
+            adapter,
+            transaction_addr,
+            transaction_generation,
+        );
+        self.screen_source.?.commitPreparedUnavailableNoFail(
+            transaction_addr,
+            transaction_generation,
+        );
+    }
+
+    fn hostWideRetirementCommittedExact(
+        self: *ReconnectGenerationOwner,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) bool {
+        self.validate() catch return false;
+        if (!self.screen_published) return false;
+        const expected_generation = self.currentGeneration() catch return false;
+        const unavailable_generation = std.math.add(u64, expected_generation, 1) catch return false;
+        const current = @constCast(self.slot.currentPayload() catch return false);
+        switch (current.connection) {
+            .generation => |current_adapter| if (current_adapter != adapter) return false,
+            .legacy => return false,
+        }
+        const attachment = switch (current.attachment) {
+            .generation => |*value| value,
+            .legacy => return false,
+        };
+        return attachment.hostRetirementCommittedExact(adapter) and
+            self.screen_source.?.unavailableExact(unavailable_generation);
+    }
+
     pub fn prepare(
         self: *ReconnectGenerationOwner,
         out: *PreparedReconnect,
@@ -2644,6 +2693,29 @@ pub const RemoteRuntime = struct {
                 transaction_addr,
                 transaction_generation,
             );
+        }
+
+        pub fn commitHostWideRetirementNoFail(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+            transaction_addr: usize,
+            transaction_generation: u64,
+        ) void {
+            runtime.admitRuntimeOperation() catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            runtime.generation_owner.commitHostWideRetirementNoFail(
+                adapter,
+                transaction_addr,
+                transaction_generation,
+            );
+        }
+
+        pub fn hostWideRetirementCommittedExact(
+            runtime: *RemoteRuntime,
+            adapter: *host_adapter_mod.HostAdapter,
+        ) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return runtime.generation_owner.hostWideRetirementCommittedExact(adapter);
         }
 
         /// CR4a single-runtime forward transaction. Fresh Client ownership stays in the backend job;

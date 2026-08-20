@@ -32,6 +32,8 @@ test "CR3b R2b 경계는 final cleanup handle move와 gate 밖 exact once 정산
     defer allocator.free(client);
     const adapter = try readSource(allocator, "src/platform/macos/session_host/host_adapter.zig");
     defer allocator.free(adapter);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
     const seal_service = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
     defer allocator.free(seal_service);
     const seal_contract = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
@@ -76,35 +78,43 @@ test "CR3b R2b 경계는 final cleanup handle move와 gate 밖 exact once 정산
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareRetirementCleanup("));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn abortRetirementCleanup("));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn finishRetirementCleanup("));
-    for ([_][]const u8{
-        "prepareRetirementCleanup(",
-        "abortRetirementCleanup(",
-        "finishRetirementCleanup(",
-    }) |needle| try std.testing.expectEqual(
-        @as(usize, 0),
-        try countProductSourcesExceptThree(
-            allocator,
-            needle,
-            "platform/macos/session_host/client_slot.zig",
-            "platform/macos/session_host/host_adapter.zig",
-            "platform/macos/session_host/remote_runtime.zig",
-        ),
-    );
+    for ([_]struct { needle: []const u8, expected: usize }{
+        .{ .needle = "prepareRetirementCleanup(", .expected = 1 },
+        // CR5b-2b owns both prepare rollback and HostReconnectJob teardown rollback.
+        .{ .needle = "abortRetirementCleanup(", .expected = 2 },
+        .{ .needle = "finishRetirementCleanup(", .expected = 1 },
+    }) |entry| {
+        const needle = entry.needle;
+        try std.testing.expectEqual(entry.expected, count(backend, needle));
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try countProductSourcesExceptFour(
+                allocator,
+                needle,
+                "platform/macos/session_host/client_slot.zig",
+                "platform/macos/session_host/host_adapter.zig",
+                "platform/macos/session_host/remote_runtime.zig",
+                "platform/macos/session_host/remote_term_backend.zig",
+            ),
+        );
+    }
     for ([_][]const u8{
         "preflightRetirementCleanup(",
         "commitRetirementCleanupNoFail(",
     }) |needle| try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExceptTwo(
+        try countProductSourcesExceptFour(
             allocator,
             needle,
             "platform/macos/session_host/client_slot.zig",
             "platform/macos/session_host/remote_runtime.zig",
+            "platform/macos/session_host/host_adapter.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
         ),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExceptFive(
+        try countProductSourcesExceptSix(
             allocator,
             "PreparedRetirementCleanup",
             "platform/macos/session_host/client_slot.zig",
@@ -112,6 +122,7 @@ test "CR3b R2b 경계는 final cleanup handle move와 gate 밖 exact once 정산
             "platform/macos/session_host/remote_runtime.zig",
             "platform/macos/session_host/event_cleanup_seal.zig",
             "platform/macos/session_host/process_seal_service.zig",
+            "platform/macos/session_host/remote_term_backend.zig",
         ),
     );
     try std.testing.expectEqual(
@@ -177,6 +188,34 @@ fn countProductSourcesExceptThree(
     return total;
 }
 
+fn countProductSourcesExceptFour(
+    allocator: std.mem.Allocator,
+    needle: []const u8,
+    first_excluded_path: []const u8,
+    second_excluded_path: []const u8,
+    third_excluded_path: []const u8,
+    fourth_excluded_path: []const u8,
+) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, first_excluded_path) or
+            std.mem.eql(u8, entry.path, second_excluded_path) or
+            std.mem.eql(u8, entry.path, third_excluded_path) or
+            std.mem.eql(u8, entry.path, fourth_excluded_path)) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += count(source, needle);
+    }
+    return total;
+}
+
 fn countProductSourcesExceptFive(
     allocator: std.mem.Allocator,
     needle: []const u8,
@@ -198,6 +237,38 @@ fn countProductSourcesExceptFive(
             std.mem.eql(u8, entry.path, third_excluded_path) or
             std.mem.eql(u8, entry.path, fourth_excluded_path) or
             std.mem.eql(u8, entry.path, fifth_excluded_path)) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += count(source, needle);
+    }
+    return total;
+}
+
+fn countProductSourcesExceptSix(
+    allocator: std.mem.Allocator,
+    needle: []const u8,
+    first_excluded_path: []const u8,
+    second_excluded_path: []const u8,
+    third_excluded_path: []const u8,
+    fourth_excluded_path: []const u8,
+    fifth_excluded_path: []const u8,
+    sixth_excluded_path: []const u8,
+) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, first_excluded_path) or
+            std.mem.eql(u8, entry.path, second_excluded_path) or
+            std.mem.eql(u8, entry.path, third_excluded_path) or
+            std.mem.eql(u8, entry.path, fourth_excluded_path) or
+            std.mem.eql(u8, entry.path, fifth_excluded_path) or
+            std.mem.eql(u8, entry.path, sixth_excluded_path)) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         defer allocator.free(path);
         const source = try readSource(allocator, path);

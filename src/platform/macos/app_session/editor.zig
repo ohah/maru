@@ -1250,7 +1250,13 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
     const sel = term.rt.editor_selection orelse return null;
     if (sel.len() == 0) return null; // caret뿐 — 그릴 띠가 없다
     const doc = term.rt.editor_doc orelse return null;
-    const lines_len = term.rt.editor_lines.len;
+    // **렌더가 보는 축으로 만든다.** 접혀 있으면 렌더가 받는 배열은 `editor_visible_lines`(보이는 줄)
+    // 이고 `paintSelection`은 그 축의 인덱스로 읽는다 — 문서 줄 축으로 만들면 접힘이 켜지는 순간
+    // **화면이 조용히 거짓말한다**: 실측으로 보이는 줄의 띠가 사라지고(1→0), 숨긴 줄을 고르면
+    // 엉뚱한 보이는 줄에 띠가 섰다(0→1). §4.1f와 §4.1g가 처음 만나는 자리다.
+    const numbers = term.rt.editor_visible_numbers;
+    const visible = term.rt.editor_visible_lines;
+    const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
     if (lines_len == 0) return null;
 
     if (term.rt.editor_selection_marks.len < lines_len) {
@@ -1271,7 +1277,12 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
     const lo = sel.start();
     const hi = sel.end();
     for (0..lines_len) |i| {
-        const line = doc.file.lines.line(i) orelse continue;
+        // 보이는 줄 → 원본 문서 줄. 번호 표는 1-based이고, 표에 없는 자리는 그릴 수 없다.
+        const doc_line: usize = if (visible.len > 0 and numbers.len > 0) blk: {
+            if (i >= numbers.len) continue;
+            break :blk (numbers[i] orelse continue) - 1;
+        } else i;
+        const line = doc.file.lines.line(doc_line) orelse continue;
         const line_end = line.contentEnd();
         if (line_end <= lo or line.start >= hi) continue; // 이 줄은 선택 밖
         const from = if (lo > line.start) lo - line.start else 0;
@@ -1364,9 +1375,35 @@ pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect)
 ///
 /// **`pxToCell`보다 먼저 불려야 한다** — 그 함수는 영역 밖 좌표를 터미널 grid로 clamp하므로,
 /// 편집기 좌표가 거기까지 가면 터미널에 단어/줄 선택 블록이 생긴다(도크가 같은 부류로 제보됐다).
+/// 이 좌표가 편집기 **막대 띠** 위인가. 순수 판정이다 — `beginScrollbarGesture`는 잡는 부작용이
+/// 있어 "눌렀는가"만 묻는 자리에서는 못 쓴다.
+///
+/// **띠 전체를 본다**(막대 자체가 아니라). 트랙 위 클릭도 막대가 가져가므로(그 지점으로 점프한다)
+/// 본문 선택이 그 자리를 뺏으면 안 된다.
+fn pointOnEditorScrollbar(term: *Term, x_px: f64, y_px: f64) bool {
+    inline for (.{ term.rt.editor_scrollbar, term.rt.editor_scrollbar_right }) |maybe| {
+        if (maybe) |bar| {
+            if (x_px >= bar.hit_x and x_px < bar.hit_x + bar.hit_w and
+                y_px >= bar.track_y and y_px < bar.track_y + bar.track_h) return true;
+        }
+    }
+    inline for (.{ term.rt.editor_horizontal_scrollbar, term.rt.editor_horizontal_scrollbar_right }) |maybe| {
+        if (maybe) |bar| {
+            if (y_px >= bar.track_y and y_px < bar.track_y + bar.track_h and
+                x_px >= bar.track_x and x_px < bar.track_x + bar.track_w) return true;
+        }
+    }
+    return false;
+}
+
 pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64) bool {
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
+    // **막대 띠는 여기서도 거절한다.** 단일 클릭은 pane 라우팅이 `divider → 막대 → 본문` 순서로
+    // 걸러 주는데 kind 4/5는 그 블록을 안 타므로, 이 자리에서 같은 순서를 져야 한다 — 안 그러면
+    // 막대 위 더블클릭이 **진행 중인 막대 드래그를 취소하고** 본문 선택을 연다(실측). 결정표의
+    // *"막대 위 클릭은 상위가 먼저 가져간다"*가 kind에 따라 갈리면 그것은 규칙이 아니다.
+    if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
     const doc = term.rt.editor_doc orelse return false;
 
@@ -1381,7 +1418,12 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
         break :blk .{ .lo = w.lo, .hi = w.hi, .kind = .word };
     };
 
-    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, range.kind);
+    // **빈 범위면 `.simple`이어야 한다.** `fromAnchorRange`가 `(kind == .simple) == (lo == hi)`를
+    // 단언하는데, **빈 줄**을 트리플클릭하면 `line.start == contentEnd()`라 그 단언이 깨진다
+    // (안전 빌드는 panic, ReleaseFast는 확장 단위를 모르는 `.line`이 남는다 — 그 assert가 막으려던
+    // 바로 그 상태다). 빈 줄에 caret을 두는 것이 옳다: 고를 것이 없다.
+    const kind = if (range.lo == range.hi) editor_selection.AnchorKind.simple else range.kind;
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
     // **드래그를 이어서 arm한다** — 더블클릭 후 끌면 단어 단위로 늘어난다. 뗌이 소유권을 놓는다.
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
@@ -7062,6 +7104,12 @@ test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 
     try testing.expect(copySelection(fx.session));
     try testing.expectEqualStrings("beta\ngamma", fx.session.chrome_clipboard_write);
 
+    // **두 번 복사해도 안 샌다.** 앞의 것을 안 놓는 뮤턴트가 살아남았다(적대적 검증) — 누수는
+    // 단언이 아니라 exit code로만 드러나므로 여기서 그 경로를 밟아 둔다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("alpha", fx.session.chrome_clipboard_write);
+
     // ⑷ caret뿐이면 복사가 없다 — 빈 문자열을 클립보드에 넣으면 사용자가 가진 것을 지운다.
     fx.session.allocator.free(fx.session.chrome_clipboard_write);
     fx.session.chrome_clipboard_write = &.{};
@@ -7139,7 +7187,18 @@ test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어�
     // ⑹ 복사가 그 범위를 뜬다.
     try testing.expect(copySelection(fx.session));
     try testing.expectEqualStrings("alpha beta gamma\ndelta epsilon", fx.session.chrome_clipboard_write);
+
+    // ⑺ **줄 단위도 뒤로 끌 수 있다.** 둘째 줄을 잡고 첫 줄로 끌면 첫 줄 **머리**까지 삼키면서
+    //    잡은 줄의 끝이 남는다 — 그 갈래를 지운 뮤턴트가 살아남았다(적대적 검증).
     try testing.expect(dragBodySelection(fx.session, 3, on_beta, row1));
+    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row1)); // 둘째 줄을 잡는다
+    const l3 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 17), l3.start());
+    try testing.expect(dragBodySelection(fx.session, 2, on_beta, row0)); // 첫 줄로 끈다
+    const l4 = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 0), l4.start()); // 첫 줄 머리까지
+    try testing.expectEqual(@as(usize, 30), l4.end()); // 잡은 줄의 끝이 남는다
+    try testing.expect(dragBodySelection(fx.session, 3, on_beta, row0));
 }
 
 test "SEL5 드래그가 pane 밖에 머물면 굴러가고, 손을 떼면 멈춘다 (§4.1g)" {
@@ -7205,7 +7264,11 @@ test "SEL5 드래그가 pane 밖에 머물면 굴러가고, 손을 떼면 멈춘
         }
     }
     try testing.expect(term.rt.editor_first_line > first_line0); // 굴렀다
-    try testing.expect(ticks > 0); // 첫 tick에 바로 굴리지 않는다 — ms를 누적한다
+    // **정확한 tick 수를 못 박는다.** `ticks > 0`은 루프 카운터라 몸통이 한 번만 돌아도 참이라
+    // **항진명제였다** — ms 게이트를 통째로 지운 뮤턴트가 그대로 통과했다(적대적 검증). 이 fixture는
+    // `msPerTick() == 17`이고 상수가 33이므로 첫 스크롤까지 정확히 **2 tick**이다.
+    try testing.expectEqual(@as(u32, 17), fx.session.msPerTick()); // 전제
+    try testing.expectEqual(@as(usize, 2), ticks);
 
     // **선택은 한 프레임 늦게 따라온다.** 굴린 직후 행 배열은 아직 이전 프레임 것이라, 가장자리
     // 행이 가리키는 줄이 그대로다 — 다음 렌더가 배열을 갱신해야 그 자리가 새 줄이 된다. 렌더가
@@ -7232,4 +7295,65 @@ test "SEL5 드래그가 pane 밖에 머물면 굴러가고, 손을 떼면 멈춘
     applyDragAutoscroll(fx.session, fx.leaf_rect);
     try testing.expectEqual(@as(i8, 0), fx.session.editor_drag_autoscroll);
     try testing.expectEqual(parked, term.rt.editor_first_line);
+}
+
+test "SEL6 막대 띠 위 더블·트리플 클릭은 선택을 열지 않는다 (§4.1g 결정표)" {
+    // **kind 4/5는 pane 라우팅 블록을 안 탄다.** 단일 클릭은 그 블록이 `divider → 막대 → 본문`
+    // 순서로 걸러 주는데 더블·트리플은 `pxToCell` 앞의 별도 블록에서 처리되므로, 같은 순서를
+    // `selectWordOrLineAt` 자신이 져야 한다 — 안 그러면 막대 위 더블클릭이 **진행 중인 막대
+    // 드래그를 취소하고** 본문 선택을 연다(적대적 검증 실측).
+    //
+    // **디스패처(`mouse()`)까지는 이 하니스로 못 잰다** — 실제 창이 없어 `termRect()`가 비고,
+    // `paneAtPoint`가 좌표를 못 찾아 배선까지 도달하지 않는다. 그래서 §4.1g "아직 검증되지 않는
+    // 문장" 표에 그 세 줄이 남아 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..300) |i| {
+        var num: [24]u8 = undefined;
+        const line = std.fmt.bufPrint(&num, "alpha{d} beta\n", .{i}) catch unreachable;
+        try doc.appendSlice(allocator, line);
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    const row0: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
+    const pane = pane_ops.activePane(fx.session);
+
+    const bar = term.rt.editor_scrollbar orelse return error.NoScrollbar;
+    const bar_x: f64 = @as(f64, bar.hit_x) + 1;
+
+    // ⑴ **막대를 잡은 채 더블클릭해도 선택이 안 열린다.**
+    try testing.expect(beginScrollbarGesture(fx.session, pane, bar_x, row0));
+    try testing.expect(!selectWordOrLineAt(fx.session, pane, false, bar_x, row0));
+    try testing.expectEqual(@as(?editor_selection.Selection, null), term.rt.editor_selection);
+    // 막대 드래그가 살아 있다 — 편집기 막대는 `pointer_gesture_owner`가 아니라 이 필드가 든다.
+    try testing.expectEqual(term, fx.session.editor_scrollbar_term);
+    fx.session.editor_scrollbar_term = null;
+    fx.session.cancelPointerGesture();
+
+    // ⑵ 트리플클릭도 같다.
+    try testing.expect(!selectWordOrLineAt(fx.session, pane, true, bar_x, row0));
+    try testing.expectEqual(@as(?editor_selection.Selection, null), term.rt.editor_selection);
+
+    // ⑶ **본문은 연다** — 위 둘이 항진명제가 아니라는 대조군.
+    const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
+    try testing.expect(selectWordOrLineAt(fx.session, pane, false, text_x, row0));
+    try testing.expect(term.rt.editor_selection != null);
+    fx.session.cancelPointerGesture();
 }

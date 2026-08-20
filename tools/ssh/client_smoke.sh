@@ -119,6 +119,13 @@ start_sshd() {
 	_log=$3
 	_cmd=$4
 	_extra=${5:-}
+	# **강제 명령을 안 거는 회차도 있다.** 컨트롤 채널(S10b-1)은 `exec` 으로 우리 명령을 돌리는데,
+	# `ForceCommand` 가 걸린 서버는 그것을 **무시하고** 강제된 명령을 실행한다(계약 §4a 가 컨트롤
+	# 축을 그런 서버에서 안 켜는 이유다). 빈 문자열을 주면 그 줄을 안 쓴다.
+	_force=""
+	if [ -n "$_cmd" ]; then
+		_force="ForceCommand $_cmd"
+	fi
 	_conf="$_pidfile.conf"
 	STARTED_PORT=""
 	_try=0
@@ -144,7 +151,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthorizedKeysFile $DIR/authorized_keys
 PermitRootLogin no
-ForceCommand $_cmd
+$_force
 EOF
 		chmod 600 "$_conf"
 		rm -f "$_pidfile"
@@ -372,7 +379,10 @@ ssh-keygen -lf "$DIR/generated.pub" >/dev/null 2>&1 || {
 	echo "[ssh-client-smoke] FAIL: ssh-keygen 이 우리가 만든 공개키를 못 읽는다" >&2
 	exit 1
 }
-cat "$DIR/generated.pub" > "$DIR/authorized_keys"
+# **덮어쓰지 않고 덧붙인다.** 예전에는 `>` 로 갈아 끼웠는데, 그러면 **이 뒤에 오는 회차**가
+# 원래 클라이언트 키로 못 붙는다 — 뒤에 회차를 하나 더 놓자마자 "인증 실패" 로 드러났고,
+# 그 전까지는 이것이 마지막 회차라 아무도 안 밟았다. 서버 하나가 키 둘을 받는 것은 정상이다.
+cat "$DIR/generated.pub" >> "$DIR/authorized_keys"
 chmod 600 "$DIR/authorized_keys"
 start_sshd "$DIR/sshd11.pid" "$((PORT + 15))" "$DIR/sshd11.log" "echo MARU_GENKEY_OK" || {
 	sed -n '1,5p' "$DIR/sshd11.log" >&2 2>/dev/null || true
@@ -382,11 +392,31 @@ start_sshd "$DIR/sshd11.pid" "$((PORT + 15))" "$DIR/sshd11.log" "echo MARU_GENKE
 "$PUMP_DRIVER" "$STARTED_PORT" "$USER_NAME" "seed:$DIR/seed" "$HOSTKEY_FP" MARU_GENKEY_OK
 ROUNDS=$((ROUNDS + 1))
 
+# 17) **컨트롤 채널 회차(S10b-1).** 같은 연결에 채널을 하나 더 열고 pty 없이 명령을 돌린다.
+#     **강제 명령을 안 건 서버**라야 우리 `exec` 이 실제로 돈다 — 위 회차들의 서버는 전부
+#     `ForceCommand` 라 우리 명령이 무시된다(그것이 계약 §4a 가 그런 서버에서 컨트롤 축을 안
+#     켜는 이유이고, 여기서는 그 반대편을 잰다). 단위 테스트는 우리가 만든 답을 먹이므로
+#     **진짜 sshd 가 `exec` 을 받아 주는지**는 이 회차 말고 밟는 데가 없다.
+start_sshd "$DIR/sshd10.pid" "$((PORT + 10))" "$DIR/sshd10.log" "" || {
+	sed -n '1,5p' "$DIR/sshd10.log" >&2 2>/dev/null || true
+	echo "[ssh-client-smoke] FAIL: 컨트롤 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
+	exit 1
+}
+CONTROL_PORT=$STARTED_PORT
+"$DRIVER" "$CONTROL_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 control
+ROUNDS=$((ROUNDS + 1))
+
+# 18) **없는 명령 회차.** 계약 §4a 는 "`maru` 가 없어도 채널 요청은 성공하고 셸이 127 을 내며
+#     그것은 `exit-status` 로 온다" 고 적었다 — `CHANNEL_FAILURE` 를 기다리면 영영 안 온다.
+#     그 값이 실서버에서 정말 그렇게 오는지는 실측이라야 안다.
+"$DRIVER" "$CONTROL_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 control-missing
+ROUNDS=$((ROUNDS + 1))
+
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 16 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 16 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 18 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 18 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열여섯 회차 완주"
+echo "[ssh-client-smoke] 열여덟 회차 완주"

@@ -126,6 +126,10 @@ pub const Action = union(enum) {
     // 팝업과 사용자 키바인딩으로 쓴다 — 아무 chord도 뺏지 않는다.
     fold_all,
     unfold_all,
+    // 활성 편집기의 **본문 선택을 클립보드로** 복사한다(§4.1g). **기본 chord가 없다** — ⌘C는
+    // 터미널 선택 복사가 이미 쓰고 있고, 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리가
+    // 없다(위 `fold_all`과 같은 이유·같은 N2 몫). 그때까지는 커맨드 팝업과 사용자 키바인딩으로 쓴다.
+    copy_editor_selection,
     // 그 **중첩 레벨**의 블록만 접는다(VSCode `editor.foldLevelN`). 레벨 1이 문서 맨 바깥이다.
     // **셋까지만 낸다** — 커맨드 팝업 항목이 레벨마다 하나씩 늘고, 4단계보다 깊은 곳을 레벨로
     // 지목하는 일은 드물다(그 깊이는 전체 접기가 더 빠르다). VSCode는 7까지 두지만 그쪽은 chord로
@@ -205,6 +209,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "install_cli")) return .install_cli;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
+    if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "fold_all")) return .fold_all;
     if (std.mem.eql(u8, value, "unfold_all")) return .unfold_all;
     if (std.mem.eql(u8, value, "fold_level_1")) return .fold_level_1;

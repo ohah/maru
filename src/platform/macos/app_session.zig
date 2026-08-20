@@ -1715,6 +1715,11 @@ const TermRuntime = struct {
     /// 렌더가 아니라 **입력이 세운다**. 렌더는 이 값을 읽어 띠를 그릴 뿐이고, 다음 프레임이 덮지
     /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
     editor_selection: ?maru.session.editor.selection.Selection = null,
+    /// 위 선택을 **줄별 byte 범위**로 자른 것(렌더가 요구하는 축). 화면 밖 줄은 빈 슬라이스다.
+    /// 문서 줄 수만큼 한 번 잡고 재사용한다 — `editor_hit_rows`와 같은 관례다.
+    editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
+    /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
+    editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
     editor_hit_geom: struct {
         body_x: i32 = 0,
         body_y: i32 = 0,
@@ -7458,6 +7463,7 @@ pub const AppSession = struct {
             .toggle_find => self.toggleFind(),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
+            .copy_editor_selection => _ = editor_ops.copySelection(self),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).

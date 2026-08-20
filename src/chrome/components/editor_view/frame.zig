@@ -117,6 +117,10 @@ pub const Props = struct {
     row_bands: ?[]const RowBand = null,
     /// 논리 줄마다 바뀐 글자 범위(없으면 빈 슬라이스). `row_bands`와 같은 인덱스 축이다.
     row_marks: ?[]const []const Mark = null,
+    /// 논리 줄마다의 **선택 범위**(§4.1g). `row_marks`와 같은 축이고, diff가 아니어도 선다.
+    /// 선택은 문서 전체 offset인데 그것을 줄로 자르는 것은 제품의 일이다 — 컴포넌트는 어느 줄이
+    /// 문서 몇 번째 byte에서 시작하는지 모른다.
+    selection_marks: ?[]const []const Mark = null,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -177,6 +181,9 @@ pub const RowBand = enum { none, added, removed };
 /// 줄 배경의 세기. **알파로 얹는다** — 배경색을 가정하면 한쪽 테마에서 글자가 안 읽힌다
 /// (CM6 `diff-theme.ts`가 같은 이유로 16%를 썼다. 여기 값은 그 관측을 옮긴 것이다).
 pub const band_alpha: u8 = 41; // ≈16%
+/// **선택**의 세기. 글자가 읽혀야 하므로 배경처럼 옅게 얹는다 — diff의 바뀐 글자(`mark_alpha`)보다
+/// 진하면 선택이 내용을 덮는다.
+pub const selection_alpha: u8 = 77; // ≈30%
 /// **바뀐 글자**의 세기(§3.5 "줄 전체에 옅은 색을 깔고 바뀐 글자만 진하게"). 줄 배경 위에 한 겹 더
 /// 얹으므로 그 차이가 곧 "이 글자가 달라졌다"는 신호다(CM6 `diff-theme.ts`가 34%를 쓴 그 자리다).
 pub const mark_alpha: u8 = 87; // ≈34%
@@ -524,6 +531,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     };
 
     const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
+    // **선택은 밴드 뒤에 얹는다** — diff 줄 배경 위에 선택이 보여야지 그 반대면 선택한 줄이
+    // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
 
     const sw = scrollbar.build(.{
         .content = .{
@@ -539,7 +549,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
-    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..]);
+    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
     // **본문 아래 거터에 선다.** 호출자가 그 자리를 이미 비워 두었다(`showsHorizontalBar`로 물어
@@ -557,7 +567,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .first_col = props.first_col,
             .cell_w_px = props.cell_w_px,
             .metrics = props.metrics,
-        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sw.ops ..])
+        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
 
@@ -565,7 +575,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + hw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -619,40 +629,90 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
         if (row_marks.len == 0) continue;
         const line = if (idx < props.lines.len) props.lines[idx] else continue;
 
-        // **줄을 한 번만 지난다.** 위치마다 앞부분을 다시 펴면 마크가 많은 줄에서 비용이 곱으로 붙는다
-        // (200자 줄에 마크 100개 = 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만). 물어볼 위치를
-        // 모아 한 번에 채운다 — 저장소가 모자라면 앞에서부터 담을 수 있는 만큼만 그린다.
-        const max_pairs = @min(row_marks.len, scratch_cols.len / (2 * @sizeOf(u32)));
-        if (max_pairs == 0) continue;
-        const offsets = std.mem.bytesAsSlice(u32, scratch_cols[0 .. max_pairs * 2 * @sizeOf(u32)]);
-        for (row_marks[0..max_pairs], 0..) |m, k| {
-            offsets[k * 2] = m.start;
-            offsets[k * 2 + 1] = m.start + m.len;
-        }
-        // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
-        content.columnsAtOffsets(line, props.tab_width, offsets, offsets, row_start_col + layout.content.width); // 제자리 채우기
-        for (row_marks[0..max_pairs], 0..) |_, k| {
-            if (n >= out.len) break;
-            const start_col = offsets[k * 2];
-            const end_col = offsets[k * 2 + 1];
-            if (end_col <= start_col) continue;
-            // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
-            // **왼쪽도 자른다.** 화면 밖에서 시작하는 마크를 그대로 쓰면 아래 뺄셈이 음수가 되고
-            // (u32라 오버플로로 죽는다), 가로 스크롤이 붙는 순간 그 자리에서 터진다.
-            const from = @max(start_col, row_start_col);
-            const to = @min(end_col, row_start_col + layout.content.width);
-            if (to <= from) continue;
-            // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
-            // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
-            const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - row_start_col);
-            const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
-            out[n] = .{ .quad = .{
-                .rect = .{ .x = x, .y = y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
-                .fill_role = role,
-                .alpha = mark_alpha,
-            } };
-            n += 1;
-        }
+        n += paintRowMarks(props, layout, .{
+            .line = line,
+            .row_start_col = row_start_col,
+            .y = y,
+            .marks = row_marks,
+            .role = role,
+            .alpha = mark_alpha,
+        }, out[n..], scratch_cols);
+    }
+    return n;
+}
+
+/// 한 행의 **글자 범위 강조**를 화면 quad로 놓는다. diff의 "바뀐 글자"와 본문 선택이 같은 길을 쓴다.
+///
+/// **둘로 갈리면 안 되는 이유가 §4.1c에 있다** — 열 계산 규칙이 두 곳에 있으면 하나만 고쳐져 강조가
+/// 7칸 밀린 전례가 그것이다. 색과 세기만 다르고 나머지는 같다.
+const RowMarkPaint = struct {
+    line: []const u8,
+    row_start_col: u32,
+    y: i32,
+    marks: []const Mark,
+    role: tokens.ColorRole,
+    alpha: u8,
+};
+
+fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []draw.Op, scratch_cols: []u8) usize {
+    var n: usize = 0;
+    // **줄을 한 번만 지난다.** 위치마다 앞부분을 다시 펴면 마크가 많은 줄에서 비용이 곱으로 붙는다
+    // (200자 줄에 마크 100개 = 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만). 물어볼 위치를
+    // 모아 한 번에 채운다 — 저장소가 모자라면 앞에서부터 담을 수 있는 만큼만 그린다.
+    const max_pairs = @min(p.marks.len, scratch_cols.len / (2 * @sizeOf(u32)));
+    if (max_pairs == 0) return 0;
+    const offsets = std.mem.bytesAsSlice(u32, scratch_cols[0 .. max_pairs * 2 * @sizeOf(u32)]);
+    for (p.marks[0..max_pairs], 0..) |m, k| {
+        offsets[k * 2] = m.start;
+        offsets[k * 2 + 1] = m.start + m.len;
+    }
+    // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
+    content.columnsAtOffsets(p.line, props.tab_width, offsets, offsets, p.row_start_col + layout.content.width); // 제자리 채우기
+    for (p.marks[0..max_pairs], 0..) |_, k| {
+        if (n >= out.len) break;
+        const start_col = offsets[k * 2];
+        const end_col = offsets[k * 2 + 1];
+        if (end_col <= start_col) continue;
+        // 가로 스크롤·본문 폭 밖은 자른다 — 넘치면 gutter나 옆 열을 침범한다.
+        // **왼쪽도 자른다.** 화면 밖에서 시작하는 마크를 그대로 쓰면 아래 뺄셈이 음수가 되고
+        // (u32라 오버플로로 죽는다), 가로 스크롤이 붙는 순간 그 자리에서 터진다.
+        const from = @max(start_col, p.row_start_col);
+        const to = @min(end_col, p.row_start_col + layout.content.width);
+        if (to <= from) continue;
+        // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
+        // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
+        const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - p.row_start_col);
+        const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
+        out[n] = .{ .quad = .{
+            .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
+            .fill_role = p.role,
+            .alpha = p.alpha,
+        } };
+        n += 1;
+    }
+    return n;
+}
+
+/// 본문 **텍스트 선택**을 그린다(§4.1g 배선). `row_bands`와 달리 diff가 아니어도 선다.
+///
+/// 줄별 byte 범위를 받는다 — 선택은 문서 전체 offset이지만 그것을 줄로 자르는 것은 **제품의 일**이다
+/// (컴포넌트는 어느 줄이 문서 몇 번째 byte에서 시작하는지 모른다). `row_marks`와 같은 축이다.
+fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+    const sel = props.selection_marks orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        const idx = props.first_line + v.line;
+        if (idx >= sel.len or idx >= props.lines.len) continue;
+        if (sel[idx].len == 0) continue;
+        n += paintRowMarks(props, layout, .{
+            .line = props.lines[idx],
+            .row_start_col = v.start_col,
+            .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
+            .marks = sel[idx],
+            .role = .selection,
+            .alpha = selection_alpha,
+        }, out[n..], scratch_cols);
     }
     return n;
 }
@@ -1833,6 +1893,80 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
     try testing.expect(!showsHorizontalBar(true, 500, 40)); // 랩
     try testing.expect(!showsHorizontalBar(false, null, 40)); // 안 셌다
     try testing.expect(!showsHorizontalBar(false, 40, 40)); // 딱 들어간다
+}
+
+test "선택 띠가 diff가 아닌 본문에도 서고, 가로 스크롤 밖은 잘린다 (§4.1g)" {
+    // **`row_bands`가 없어도 서야 한다.** 선택은 diff와 무관하고, `paintBands`는 밴드가 없으면
+    // 통째로 돌아가므로 그 함수에 얹으면 단일 편집기에서 선택이 영영 안 보인다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const lines = [_][]const u8{ "hello world", "second line" };
+    const sel_row0 = [_]Mark{.{ .start = 6, .len = 5 }}; // "world"
+    const sel_none = [_]Mark{};
+    const sel = [_][]const Mark{ &sel_row0, &sel_none };
+
+    const total_cols: u16 = 24;
+    const scratch: Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    };
+    const base_props: Props = .{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 2,
+        .visible_rows = 4,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    };
+
+    // 선택이 없을 때의 op 수를 기준선으로 삼는다.
+    const without = build(base_props, scratch);
+
+    var with_props = base_props;
+    with_props.selection_marks = &sel;
+    const with = build(with_props, scratch);
+
+    // **띠 하나가 늘어야 한다** — 첫 줄에만 선택이 있다.
+    try std.testing.expectEqual(without.ops + 1, with.ops);
+
+    // 그 op이 selection 색이고, 본문 시작 열 뒤에 선다.
+    var found: ?draw.Op = null;
+    for (ops[0..with.ops]) |op| {
+        if (op == .quad and op.quad.fill_role == .selection) found = op;
+    }
+    const q = (found orelse return error.NoSelectionQuad).quad;
+    try std.testing.expectEqual(@as(u32, 5 * 8), q.rect.w); // "world" 다섯 칸
+    try std.testing.expect(q.rect.x > 0); // gutter 위가 아니다
+
+    // **가로 스크롤 밖은 잘린다.** 8열을 밀면 "world"(6~10열)가 왼쪽 밖으로 나간다.
+    var scrolled = with_props;
+    scrolled.first_col = 12;
+    const cut = build(scrolled, scratch);
+    var still: bool = false;
+    for (ops[0..cut.ops]) |op| {
+        if (op == .quad and op.quad.fill_role == .selection) still = true;
+    }
+    try std.testing.expect(!still);
 }
 
 test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 비어 있던 자리 (§4.1g)" {

@@ -1512,33 +1512,68 @@ after: staged_alpha=true untracked=1
 `alpha.txt` 가 index 로 갔고 한글 이름 파일은 추적되지 않은 채 남았다(1). 되돌림 대조군: 쓰기 갈래가
 아무것도 안 하고 성공만 보고하게 하면 `staged_alpha=false untracked=2` 로 rc=1 이다.
 
-### 2m.10 소스 컨트롤이 Windows 화면에 뜬다 (W8.4 마무리, 실측 2026-08-21)
+### 2m.10 죽은 경로를 그려 놓고 "화면이 뜬다" 고 적었다 — 되돌림 (실측 2026-08-21)
 
-`maru win32-scm-draw-smoke` 가 **저장소 자신**의 git 상태를 D3D11 창에 그린다. 제품 진입점을 그대로
-탄다 — `Backend.submitRepoStatus` → `takeRepoStatusResult` → `scm_view.build` →
-`buildDockScmDrawList` → (파일 트리와 같은 네 단계) → `pipeline.draw`.
+`win32-scm-draw-smoke` 를 넣어 "소스 컨트롤이 Windows 화면에 뜬다" 고 적었다가 **되돌렸다.** 그 스모크가
+쓴 `buildDockScmDrawList` 는 **제품이 안 쓰는 경로**다.
 
-```text
-branch=feat/w8.4-scm-on-screen  model_rows=2  empty=false
-grid=82x30  d3d_cells=47  branch_drawn=true
-renderer_glyph_fallback_count=0  renderer_glyph_replacement_count=0
-```
+**계획서에 이미 적혀 있었다.** `plans/scm-dock.md` 의 첫 표가 렌더 기반을
+`터미널 셀 그리드(buildDockScmDrawList)` → `chrome/ui typed tree` 로 바꾼다고 적고, P1 항목이
+**"셀 그리드 경로(`buildDockScmDrawList`·`scmRowAt`)를 제거한다"** 로 **함수 이름까지** 적는다.
+커밋 `2b05369e`("소스 컨트롤 도크를 컴포넌트 렌더로 배선하고 셀 그리드를 제거한다")가 그 이관이다.
 
-화면에 브랜치 줄, `Changes` 섹션(개수), 파일 행(이름·흐린 경로·상태 문자)이 목업(§3.5) 구조 그대로
-나온다. **대체 글리프가 0 이다** — 47 개가 전부 기본 폰트에서 나왔고 아이콘도 포함이다.
+**"중립이다" 와 "제품이 쓴다" 는 다른 축이다.** §2m.6 에서 투영 15 개가 전부 중립임을 실측하고, 거기서
+"다른 표면도 같은 방식이 통할 것" 으로 이었다. **제품 호출자를 안 셌다.** 세어 보니:
 
-**이 슬라이스가 짧은 이유**는 앞이 다 깔려 있었기 때문이다. 데이터는 #2496·#2501 이 뚫었고, 투영은
-원래 중립이었으며(§2m.6 에서 15 개 투영 전부가 그렇다는 것을 실측했다), 렌더 경로는 파일 트리
-그리기가 이미 열었다. **새로 쓴 것은 그 셋을 잇는 스모크뿐이다.**
+| 투영 | 제품 호출자 |
+|---|---|
+| `buildSidebarDrawList` | 23 |
+| `buildPaneTabBarDrawList` | 11 |
+| `buildFileTreeDrawList` | **4** — 파일 트리 슬라이스(§2m.6·2m.7)는 이것이라 그 주장은 선다 |
+| `buildFloatingTabDrawList`·`buildPaneAddressBarDrawList` | 4 |
+| `buildDockViewBarDrawList` | 3 |
+| `buildPaneLabelDrawList`·`buildPaneGripDrawList` | 2 |
+| `buildFilePanelHeaderDrawList`·`buildDockNoticeDrawList`·`buildStatusBarItemDrawList`·`buildFileDockToggleDrawList`·`buildStickyCommandDrawList` | 1 |
+| **`buildDockScmDrawList`** | **0** |
+| **`buildDockSessionListDrawList`** | **0** |
 
-**numstat 셋은 비운다.** 제품의 목록 경로도 그렇게 부른다(증감은 그 저장소를 **열 때** 채워진다 —
-`scm_dock.zig`). 채우면 제품이 안 밟는 자리를 재게 된다.
+죽은 둘은 **컴포넌트로 옮긴 표면**(소스 컨트롤·세션 도크)의 옛 셀 그리드 경로다. 하필 그중 하나를
+골랐다. 제거 여부는 그 표면들의 판단이라 여기서 정하지 않는다 — 테스트가 붙어 있다.
 
-**판정은 셀 수가 아니라 브랜치 이름이다.** 셀 수만 세면 빈 목록도 초록이다. 그려진 셀에서 글자를 도로
-읽어 브랜치 이름이 실제로 있는지 본다 — 이 저장소는 늘 브랜치 위에 있으므로 fixture 없이 성립한다.
+**돌려 봤는데도 못 걸렀다.** 화면에 진짜 git 상태가 떴고 `fallback_count=0` 이었다 — **죽은 경로도
+돌아가는 데는 아무 문제가 없다.** "실행해서 확인했다" 가 "제품이 그렇게 한다" 를 뜻하지 않는다.
 
-**선택 띠는 안 넣었다** — 그 기계는 파일 트리 슬라이스(§2m.7)가 이미 다뤘고, 여기서 다시 하면 같은
-것을 두 번 재는 것이다.
+**그래서 규칙 하나를 더 둔다: 표면을 고르기 전에 그 표면의 계획서를 먼저 읽는다.**
+`plans/<표면>.md` 가 렌더 기반과 걷어낸 경로를 적는다. 이번엔 그것을 안 읽어 세 가지 확인
+(이름·중립성·런타임)을 통과했는데도 틀린 것을 골랐다.
+
+**Windows 소스 컨트롤 화면의 진짜 관문**은 chrome 컴포넌트(`components/scm_dock/view.zig`) →
+`ChromeDraw` → lowering 이고, 그 길은 `system_text.shapeUnresolvedRun` 이
+`builtin.os.tag != .macos` 에서 곧장 에러다(§2m.6). **DirectWrite 셰이핑 다리**가 그 관문이다.
+
+데이터 절반(읽기 #2496 · 쓰기 #2501)은 제품 경로라 그대로 남는다.
+
+### 2m.11 이름값 정리는 슬라이스가 아니다 (실측 2026-08-21)
+
+`file_tree_backend.zig`·`coretext_frame_builder.zig`·`git_backend.zig` 는 `platform/macos/` 에 있으면서
+두 OS 를 탄다. 옮기자는 제안이 반복해 나오므로 **왜 간단한 이동이 아닌지**를 적는다.
+
+**`src/platform/macos/` 를 모듈 루트로 삼는 아티팩트가 171 개다.** 그 아티팩트가 임포트하는 파일은 그
+디렉터리 안에 있거나 **모듈로 와야** 한다. 예를 들어 `chrome_lab_smoke.zig`(CI 가 도는 스모크)는
+`coretext_frame_builder.zig` 를 직접 임포트한다 — 파일을 밖으로 옮기면 그 순간 모듈 밖이 된다.
+
+| 방법 | 왜 안 되나 |
+|---|---|
+| 파일만 옮기기 | 171 개 아티팩트 루트가 못 따라온다 |
+| `maru.zig` 배럴 경유 | 그 파일들이 `maru` 를 임포트하므로 **순환** |
+| 각각을 build 모듈로 | 171 곳에 의존성 추가 — 하나만 빠뜨려도 CI 에서 발견 |
+
+`win32_process.zig` 는 배럴로 풀렸다(§2m.9). 그건 그 파일이 **`maru` 를 안 쓰기 때문**이고, 같은 수를
+위 셋에는 못 쓴다.
+
+즉 이 정리는 **171 개 아티팩트의 모듈 루트를 옮기는 일**이고 별도 프로젝트다. 참조 수만 보면 싸 보인다 —
+`git_backend` 는 참조 230 곳 중 실제 `@import` 가 3 개뿐이라 "import 만 바꾸면 된다" 로 읽힌다. **모듈
+경계를 같이 보지 않으면 그렇게 잘못 읽는다.**
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

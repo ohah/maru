@@ -180,16 +180,24 @@ pub const PatchPaths = struct {
             var best: ?usize = null;
             var best_len: usize = 0;
             for (markers) |m| {
-                if (std.mem.indexOf(u8, self.rest, m)) |at| {
-                    if (best == null or at < best.?) {
-                        best = at;
-                        best_len = m.len;
+                var from: usize = 0;
+                // **줄 시작의 표식만 인정한다.** 패치 *본문*에도 같은 글자가 들어올 수 있다 — 이 표식을
+                // 설명하는 문서를 편집하면 그 줄이 `+*** Update File: …` 로 패치에 실린다. 줄 위치를 안 보면
+                // 그 가짜 경로가 «AI 가 고친 파일» 로 둔갑한다.
+                while (std.mem.indexOfPos(u8, self.rest, from, m)) |at| {
+                    if (isLineStart(self.rest, at)) {
+                        if (best == null or at < best.?) {
+                            best = at;
+                            best_len = m.len;
+                        }
+                        break;
                     }
+                    from = at + 1;
                 }
             }
             const at = best orelse return null;
-            const from = at + best_len;
-            self.rest = self.rest[from..];
+            const from_path = at + best_len;
+            self.rest = self.rest[from_path..];
             // 경로는 다음 줄 경계까지다. payload 안에서 줄바꿈은 `\n` 두 글자로 이스케이프돼 있다.
             const end = std.mem.indexOf(u8, self.rest, "\\n") orelse self.rest.len;
             const path = self.rest[0..end];
@@ -197,6 +205,13 @@ pub const PatchPaths = struct {
             if (path.len > 0) return path;
         }
         return null;
+    }
+
+    /// 이 위치가 줄의 처음인가 — 문자열의 시작이거나 바로 앞이 이스케이프된 줄바꿈(`\n`, 두 글자)인가.
+    fn isLineStart(text: []const u8, at: usize) bool {
+        if (at == 0) return true;
+        if (at < 2) return false;
+        return text[at - 2] == '\\' and text[at - 1] == 'n';
     }
 };
 
@@ -869,4 +884,17 @@ test "셸 도구의 command 는 경로를 내지 않는다 — 그 안의 파일
     var it = patchPaths(ev);
     // 패치 표식이 없으므로 경로가 나오지 않는다 — 계약이 말하는 셸 사각지대가 여기서 드러난다.
     try testing.expect(it.next() == null);
+}
+
+test "패치 본문에 든 가짜 표식을 경로로 읽지 않는다" {
+    // 이 표식을 설명하는 문서를 편집하면 그 줄이 `+*** Update File: …` 로 패치 본문에 실린다.
+    // 줄 위치를 안 보면 그 가짜 경로가 «AI 가 고친 파일» 로 둔갑한다 — 실제로 이 저장소의 계약 문서가
+    // 그 문자열을 담고 있다.
+    const line = "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"apply_patch\"," ++
+        "\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: /repo/docs/a.md\\n@@\\n" ++
+        "+*** Update File: /etc/passwd\\n+설명 문장\\n*** End Patch\"}}";
+    const ev = parseLine(line).?;
+    var it = patchPaths(ev);
+    try testing.expectEqualStrings("/repo/docs/a.md", it.next().?);
+    try testing.expect(it.next() == null); // 본문의 가짜 표식은 세지 않는다
 }

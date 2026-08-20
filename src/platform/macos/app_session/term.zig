@@ -578,6 +578,14 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
     tab_ops.cancelTabDragForTerm(self, term);
     // 편집기 막대 드래그도 `*Term`을 프레임 간 들고 있다 — 같은 barrier가 필요하다(죽은 포인터로
     // 스크롤하면 그 자리에서 터진다).
+    // **본문 선택 제스처도 같은 부류다**(§4.1g 배선). `PointerGestureOwner.editor_selection`이
+    // `*Term`을 프레임 간 들고, tick의 자동 스크롤과 다음 마우스 move가 그것을 역참조한다 —
+    // barrier가 없으면 죽은 `Term.rt`를 읽는다. 형제 둘에는 걸어 두고 이것만 빠져 있었다.
+    if (self.pointerGestureIs(.editor_selection) and self.pointer_gesture_owner.editor_selection.term == term) {
+        self.editor_drag_autoscroll = 0;
+        self.editor_drag_autoscroll_accum_ms = 0;
+        self.finishPointerGesture();
+    }
     if (self.editor_scrollbar_term == term) {
         self.editor_scrollbar_term = null;
         self.dock_list_scroll_drag.end();

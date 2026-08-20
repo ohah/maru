@@ -43,10 +43,14 @@ pub fn wordRangeAt(bytes: []const u8, offset: usize) struct { lo: usize, hi: usi
     const probe = if (at == bytes.len or at == 0) (if (at == 0) at else at - 1) else at;
     const word = isWordByte(bytes[probe]);
 
+    // **줄을 넘지 않는다.** 개행은 구분자이므로 구분자 런이 그대로 다음 줄까지 흐른다 — 줄 끝
+    // 공백을 더블클릭하면 개행이 딸려오고(실측: `"foo  \nbar"`의 4를 누르면 `{32,32,10}`), 빈 줄을
+    // 누르면 개행 넷이 잡혀 네 줄이 선택됐다. 복사가 그 개행을 그대로 낸다.
+    if (bytes[probe] == '\n') return .{ .lo = probe, .hi = probe }; // 개행 자체는 고를 것이 없다
     var lo = probe;
-    while (lo > 0 and isWordByte(bytes[lo - 1]) == word) lo -= 1;
+    while (lo > 0 and bytes[lo - 1] != '\n' and isWordByte(bytes[lo - 1]) == word) lo -= 1;
     var hi = probe + 1;
-    while (hi < bytes.len and isWordByte(bytes[hi]) == word) hi += 1;
+    while (hi < bytes.len and bytes[hi] != '\n' and isWordByte(bytes[hi]) == word) hi += 1;
     return .{ .lo = lo, .hi = hi };
 }
 
@@ -770,4 +774,60 @@ test "커서 상한이 있다 — 검색 '모두 선택'이 입력을 멈추지 
     // 상한은 "얼마나 많으면 매핑이 입력을 멈추는가"에서 나온 값이다. 정확한 수치보다 **상한이
     // 존재한다는 것**이 계약이며, 넘었을 때 잘랐다는 사실을 알리는 것도 함께다(§3.2).
     try testing.expectEqual(@as(usize, 10_000), max_cursors);
+}
+
+test "wordRangeAt: 줄을 넘지 않고, 낱말/구분자 런을 각각 잡는다" {
+    // **직접 테스트가 0개였다**(적대적 검증). 제품 두 곳이 부르는데 줄 경계·ASCII 밖·`$` 규칙이
+    // 전부 무판정이라, 셋을 각각 되돌린 뮤턴트가 전 스위트를 통과했다.
+    const t = std.testing;
+
+    // ⑴ **줄을 안 넘는다.** 줄 끝 공백을 눌러도 개행이 안 딸려온다(그 전에는 `{32,32,10}`이었다).
+    {
+        const b = "foo  \nbar   baz\n";
+        const r = wordRangeAt(b, 4);
+        try t.expectEqual(@as(usize, 3), r.lo);
+        try t.expectEqual(@as(usize, 5), r.hi); // 개행 앞에서 멈춘다
+    }
+    // ⑵ **빈 줄은 고를 것이 없다.** 그 전에는 개행 넷이 잡혀 네 줄이 선택됐다.
+    {
+        const b = "a\n\n\n\nb\n";
+        const r = wordRangeAt(b, 2);
+        try t.expectEqual(r.lo, r.hi);
+    }
+    // ⑶ 낱말 런.
+    {
+        const b = "alpha beta gamma";
+        const r = wordRangeAt(b, 8);
+        try t.expectEqual(@as(usize, 6), r.lo);
+        try t.expectEqual(@as(usize, 10), r.hi);
+    }
+    // ⑷ **구분자 런도 잡는다** — 빈 범위를 주면 클릭이 씹힌 것으로 보인다.
+    {
+        const b = "foo(((bar";
+        const r = wordRangeAt(b, 4);
+        try t.expectEqual(@as(usize, 3), r.lo);
+        try t.expectEqual(@as(usize, 6), r.hi);
+    }
+    // ⑸ **`$`와 `_`는 낱말이다**(식별자를 이룬다).
+    {
+        const b = "let $x_1 = 2";
+        const r = wordRangeAt(b, 5);
+        try t.expectEqual(@as(usize, 4), r.lo);
+        try t.expectEqual(@as(usize, 8), r.hi); // "$x_1" 통째로
+    }
+    // ⑹ **ASCII 밖은 통째로 한 낱말**이고, UTF-8 경계를 깨지 않는다.
+    {
+        const b = "say 안녕하세요 ok";
+        const r = wordRangeAt(b, 6); // 다중 byte 글자 **중간**
+        try t.expect(std.unicode.utf8ValidateSlice(b[r.lo..r.hi]));
+        try t.expectEqualStrings("안녕하세요", b[r.lo..r.hi]);
+    }
+    // ⑺ 줄 끝·문서 끝을 눌러도 앞 글자를 본다(그 자리에는 글자가 없다).
+    {
+        const b = "abc";
+        const r = wordRangeAt(b, 3);
+        try t.expectEqual(@as(usize, 0), r.lo);
+        try t.expectEqual(@as(usize, 3), r.hi);
+    }
+    try t.expectEqual(@as(usize, 0), wordRangeAt("", 0).hi);
 }

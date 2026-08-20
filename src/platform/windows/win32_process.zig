@@ -97,6 +97,7 @@ const handle_flag_inherit: u32 = 0x00000001;
 const infinite: u32 = 0xFFFFFFFF;
 const wait_object_0: u32 = 0;
 const error_broken_pipe: u32 = 109;
+const generic_read: u32 = 0x80000000;
 const generic_write: u32 = 0x40000000;
 const file_share_read: u32 = 0x00000001;
 const file_share_write: u32 = 0x00000002;
@@ -276,6 +277,19 @@ pub fn capture(
         _ = CloseHandle(nul_h);
     };
 
+    // **읽기용 `NUL`** — 자식의 stdin 이다. 쓰기용과 접근 권한이 달라 따로 연다.
+    const stdin_nul_h: HANDLE = blk: {
+        const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
+        const h = CreateFileW(nul_name, generic_read, file_share_read | file_share_write, &sa, open_existing, 0, null);
+        if (h == invalid_handle_value) {
+            last_error = GetLastError();
+            _ = CloseHandle(write_h);
+            return error.CreatePipeFailed;
+        }
+        break :blk h;
+    };
+    defer _ = CloseHandle(stdin_nul_h);
+
     // **환경 블록.** 덮어쓸 것이 없으면 `null` 로 두어 그냥 상속한다 — 블록을 만들면 그 순간 우리가
     // 본 환경으로 고정되므로, 필요 없을 때는 안 만드는 쪽이 맞다.
     const env_block: ?[:0]u16 = if (env_overrides.len == 0 and env_drop.len == 0)
@@ -301,7 +315,11 @@ pub fn capture(
             si.hStdError = write_h;
         },
     }
-    si.hStdInput = null;
+    // **stdin 도 `NUL` 이다.** `null` 핸들로 두면 그것은 "EOF" 가 아니라 **무효 핸들**이고, stdin 을 읽는
+    // 자식은 EOF 대신 오류를 본다. POSIX 갈래가 `/dev/null` 을 `dup2` 하는 자리와 같은 이유다 —
+    // `GIT_TERMINAL_PROMPT=0` 은 git **자신의** 프롬프트만 막고, 저장소가 심어 둔 hook 스크립트가
+    // 입력을 읽는 것은 못 막는다. `NUL` 이면 즉시 EOF 라 hook 이 진행하거나 스스로 실패한다.
+    si.hStdInput = stdin_nul_h;
 
     var pi: PROCESS_INFORMATION = std.mem.zeroes(PROCESS_INFORMATION);
     const ok = CreateProcessW(
@@ -670,4 +688,33 @@ test "capture: 덮어쓰기가 있어도 자식이 보는 변수 수가 줄지 �
     std.debug.print("\n  COUNTPROBE plain={d} built={d}\n", .{ plain_n, built_n });
     // 우리가 하나 더했으므로 정확히 하나 늘어야 한다. 줄어들면 블록이 무언가를 잃은 것이다.
     try testing.expectEqual(plain_n + 1, built_n);
+}
+
+// **stdin 을 읽는 자식이 멈추지 않는가.** `GIT_TERMINAL_PROMPT=0` 은 git 자신의 프롬프트만 막고, 저장소가
+// 심어 둔 hook 스크립트가 입력을 읽는 것은 못 막는다 — POSIX 갈래가 stdin 을 `/dev/null` 로 돌리는 이유다.
+// `hStdInput = null` 은 **EOF 가 아니라 무효 핸들**이라 같지 않다. 자식이 실제로 stdin 을 읽게 해 두고
+// 끝나는지 본다. 막히면 이 테스트가 안 끝난다.
+test "capture: stdin 을 읽는 자식이 즉시 EOF 를 보고 끝난다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    // `set /p` 는 stdin 에서 한 줄을 읽는다. 상속된 콘솔이면 사용자를 기다린다.
+    // `sort` 는 stdin 을 **EOF 까지** 읽고 정렬해 낸다. 유효한 빈 입력이면 조용히 exit 0 이고, 핸들이
+    // 무효면 읽기에 실패해 다른 코드로 끝난다 — 그래서 이 자식은 둘을 **가른다**.
+    var r = try capture(
+        a,
+        &.{ "cmd.exe", "/c", "sort" },
+        null,
+        .merged,
+        &.{},
+        &.{},
+        1 << 20,
+    );
+    defer r.deinit(a);
+    // 끝났다는 것 자체가 판정이다 — 종료 코드는 읽기 실패로 1 일 수 있다.
+    std.debug.print("\n  STDINPROBE exit={d} bytes={d}\n", .{ r.exit_code, r.bytes.len });
+    // **유효한 빈 stdin 이면 `sort` 는 조용히 성공한다.** 무효 핸들이면 읽기에 실패해 다른 코드로 끝난다
+    // (실측: `hStdInput = null` 로 되돌리면 **exit 2**). 이 한 줄이 없으면 이 테스트는 "자식이 끝났다"
+    // 까지만 보고 두 상황을 못 가른다 — 처음에 `set /p` 로 짰다가 그것이 무효 핸들에서도 즉시 실패해
+    // **돌연변이가 통과하는** 것을 보고 자식을 바꿨다.
+    try testing.expectEqual(@as(u32, 0), r.exit_code);
 }

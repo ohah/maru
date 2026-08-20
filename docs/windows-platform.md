@@ -1396,6 +1396,20 @@ porcelain 출력에 섞여 **파서가 잡음을 데이터로 읽었다** — �
 남아 있으면 우리 명령이 **남의 index 에 쓴다**.
 **끝단 실측 — 사슬이 통한다.** 캡처 러너 → git → 중립 파서 → 모델 → 투영:
 
+
+**stdin 도 `NUL` 이어야 한다 — `null` 핸들은 EOF 가 아니다.** POSIX 갈래가 stdin 을 `/dev/null` 로
+돌리는 이유가 있다: `GIT_TERMINAL_PROMPT=0` 은 git **자신의** 프롬프트만 막고, 저장소가 심어 둔 hook
+스크립트가 입력을 읽는 것은 못 막는다. Windows 에서 `hStdInput = null` 로 두면 그것은 "EOF" 가 아니라
+**무효 핸들**이라 자식이 EOF 대신 오류를 본다.
+
+**이 테스트를 두 번 짰다.** 처음엔 `set /p` 로 재려 했는데 그것이 무효 핸들에서도 즉시 실패해
+**돌연변이가 통과했다** — 아무것도 안 가르는 테스트였다. `sort` 로 바꿨다: stdin 을 EOF 까지 읽으므로
+유효한 빈 입력이면 조용히 exit 0, 무효 핸들이면 읽기에 실패한다. 실측으로 갈린다:
+
+```text
+stdin = NUL   → exit 0, 출력 0 바이트
+stdin = null  → exit 2, 오류 42 바이트
+```
 ```text
 branch=[feat/w8.4-win32-capture-runner]   model rows=4
 drawn="feat/w8.4-…0 0vChanges3build.zig+18 -0Mgitchain.zigsrc/Uwin32_process.zigsrc/plat"

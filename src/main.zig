@@ -1418,6 +1418,15 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     const visible: u16 = @intCast(@min(rows.items.len, grid.rows));
     const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 } };
     const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+
+    // **선택 계약을 실제로 태운다.** `FileTreeSelectionPaint` 는 **전경만** 나르고 배경은 렌더가
+    // 그린다는 계약이다(그 doc: "the background renderer resolves the same transient selection
+    // index"). 그 둘이 **같은 인덱스**를 봐야 글자와 띠가 어긋나지 않으므로, 여기서 한 번 정해
+    // 양쪽에 넘긴다 — 두 번 계산하면 그 순간 갈린다.
+    //
+    // 스모크에는 사용자 조작이 없으니 인덱스를 정해 둔다. 행이 모자라면 선택이 없다.
+    const selected_row: ?usize = if (visible > 3) 3 else null;
+    const selection_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
     var draw_list = try coretext_frame_builder.buildFileTreeDrawList(
         allocator,
         rows.items,
@@ -1427,7 +1436,7 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
         grid.cols,
         fg,
         active_fg,
-        null,
+        if (selected_row) |index| .{ .index = index, .foreground = selection_fg } else null,
         null,
         null,
     );
@@ -1473,7 +1482,34 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
-    try cells.ensureTotalCapacity(allocator, native.len);
+    // ── 선택 띠 ──────────────────────────────────────────────────────────────────────────────
+    //
+    // **행 띠에는 새 쿼드 파이프라인이 필요 없었다.** `d3d11_cells` 가 "둘이 되는 시점(chrome quad·
+    // kitty 이미지)" 으로 예고해 둔 자리를 여기서 밟을 줄 알았는데, 실험해 보니 **띠는 곧 "배경이 있는
+    // 셀"** 이라 기존 파이프라인이 그대로 그린다(`Cell.bg` — 그 doc: "알파가 판정이다"). 쿼드가
+    // 필요한 것은 **셀 격자에 안 맞는 것**(둥근 모서리·부분 테두리·셀 사이에 걸친 선)이지 행 띠가 아니다.
+    //
+    // **글리프보다 먼저 넣는다** — 뒤에 넣었더니 그 행 글자를 통째로 덮었다(실측). 그리는 순서가 곧
+    // z 순서다.
+    var band_cells: usize = 0;
+    if (selected_row) |band_row| {
+        var c: u32 = 0;
+        while (c < grid.cols) : (c += 1) {
+            try cells.append(allocator, .{
+                .rect = .{
+                    @floatFromInt(c * cell_w),
+                    @floatFromInt(@as(u32, @intCast(band_row)) * cell_h),
+                    @floatFromInt(cell_w),
+                    @floatFromInt(cell_h),
+                },
+                .uv = .{ 0, 0, 0, 0 },
+                .fg = .{ 0, 0, 0, 0 },
+                .bg = d3d11_cells.colorFromArgb(0xFF3A5FCD),
+            });
+            band_cells += 1;
+        }
+    }
+    try cells.ensureUnusedCapacity(allocator, native.len);
     for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
 
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
@@ -1554,13 +1590,17 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     try stdout.print("d3d_cells={d} atlas_region_uploads={d}\n", .{ cells.items.len, region_uploads });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("labels_matched={d}/{d}\n", .{ labels_matched, labels_checked });
+    try stdout.print("selected_row={?d} band_cells={d}\n", .{ selected_row, band_cells });
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
     try stdout.flush();
 
     // **판정은 프레임 수가 아니라 준비된 프레임이다.** 프레임만 세면 빈 창도 초록이다 — ⒜ 에서 행 수만
     // 세면 빈 스캔이 초록이던 것과 같은 부류다. `prepared()` 는 내부 일관성에 더해 글리프가 실제로
     // 잡혔고 아틀라스가 채워졌는지까지 본다 — 손으로 짠 `cells.len != 0` 보다 강하다.
-    if (!stats.prepared() or cells.items.len == 0 or labels_checked == 0 or labels_matched != labels_checked) {
+    // 선택이 있으면 띠도 **전폭**이어야 한다. 몇 칸만 깔리면 화면에서는 그럴듯한데 행 끝이 비어
+    // 선택이 어디서 끝나는지 안 보인다 — 수를 세는 것이 그것을 잡는다.
+    const band_ok = if (selected_row == null) band_cells == 0 else band_cells == grid.cols;
+    if (!stats.prepared() or cells.items.len == 0 or labels_checked == 0 or labels_matched != labels_checked or !band_ok) {
         try stderr.writeAll("maru win32-file-tree-draw-smoke: the frame was not prepared\n");
         try stderr.flush();
         return error.NothingDrawn;

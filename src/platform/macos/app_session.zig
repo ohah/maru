@@ -18351,6 +18351,136 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
     );
 }
 
+/// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
+const agent_hooks_off_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = false\n";
+
+test "turning the agent hooks gate off removes what we installed and nothing else" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const hook_install = maru.session.agent_hook_install;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "cache");
+
+    // 설치 전 상태. claude 는 다른 설정과 한 파일을 나눠 쓰고, codex 에는 과거 표식과 사용자 신뢰가 있다.
+    const user_hook = "printf ok # user hook";
+    const settings_before = "{\"model\":\"opus\",\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ user_hook ++ "\"}]}]}}";
+    const legacy_hook = "cat > /tmp/x # " ++ hook_command.legacy_markers[0];
+    const codex_hooks_before = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ legacy_hook ++ "\"}]}]}}";
+    // 사용자가 **직접 승인해** codex 가 적은 신뢰 항목 — 우리 표식이 없으므로 살아남아야 한다.
+    const codex_config_before = "model = \"gpt-5\"\n\n[hooks.state.\"/somewhere/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:user\"\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = codex_hooks_before });
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = codex_config_before });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    // ① 켠다 — 두 provider 에 설치된다.
+    test_config_text = agent_hooks_on_config;
+    {
+        var on: AppSession = undefined;
+        try on.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        on.deinit();
+        const installed_claude = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        defer a.free(installed_claude);
+        try std.testing.expect(std.mem.indexOf(u8, installed_claude, hook_command.marker) != null);
+        const installed_codex = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        defer a.free(installed_codex);
+        try std.testing.expect(std.mem.indexOf(u8, installed_codex, hook_command.marker) != null);
+        const installed_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(installed_config);
+        try std.testing.expectEqual(@as(usize, hook_command.codex_events.len + 1), std.mem.count(u8, installed_config, "trusted_hash"));
+    }
+
+    // ② 끈다 — 우리 것만 사라지고 남의 것은 그대로여야 한다.
+    test_config_text = agent_hooks_off_config;
+    defer test_config_text = "";
+    {
+        var off: AppSession = undefined;
+        try off.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        off.deinit();
+    }
+
+    const claude_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    defer a.free(claude_after);
+    try std.testing.expect(std.mem.indexOf(u8, claude_after, hook_command.marker) == null);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, claude_after, .{});
+        defer parsed.deinit();
+        // 다른 최상위 키와 사용자 훅이 살아 있다.
+        try std.testing.expectEqualStrings("opus", parsed.value.object.get("model").?.string);
+        try std.testing.expectEqualStrings(user_hook, parsed.value.object.get("hooks").?.object
+            .get("Stop").?.array.items[0].object
+            .get("hooks").?.array.items[0].object
+            .get("command").?.string);
+        try std.testing.expectEqual(@as(usize, 0), hook_install.scan(.claude, parsed.value.object.get("hooks"), "").?.ours);
+    }
+
+    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+    defer a.free(codex_after);
+    try std.testing.expect(std.mem.indexOf(u8, codex_after, hook_command.marker) == null);
+    try std.testing.expect(std.mem.indexOf(u8, codex_after, legacy_hook) != null); // 과거 표식은 P1대로 남는다
+
+    // **신뢰는 우리 것만 갔다.** 사용자가 직접 승인한 항목이 사라지면 그 사람은 다음 실행에 다시 묻힌다.
+    const codex_config_after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(codex_config_after);
+    try std.testing.expectEqualStrings(codex_config_before, codex_config_after);
+
+    // 다시 꺼도 아무 일이 없다 — 판정이 개수에만 달려 있어(`ours > 0`) 무동작이다.
+    {
+        var again: AppSession = undefined;
+        try again.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        again.deinit();
+        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        defer a.free(twice);
+        try std.testing.expectEqualStrings(claude_after, twice);
+        const twice_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+        defer a.free(twice_config);
+        try std.testing.expectEqualStrings(codex_config_before, twice_config);
+    }
+}
+
 test "agent hooks install into codex and record trust without touching existing entries" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;

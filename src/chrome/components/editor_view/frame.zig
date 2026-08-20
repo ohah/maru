@@ -181,9 +181,11 @@ pub const RowBand = enum { none, added, removed };
 /// 줄 배경의 세기. **알파로 얹는다** — 배경색을 가정하면 한쪽 테마에서 글자가 안 읽힌다
 /// (CM6 `diff-theme.ts`가 같은 이유로 16%를 썼다. 여기 값은 그 관측을 옮긴 것이다).
 pub const band_alpha: u8 = 41; // ≈16%
-/// **선택**의 세기. 글자가 읽혀야 하므로 배경처럼 옅게 얹는다 — diff의 바뀐 글자(`mark_alpha`)보다
-/// 진하면 선택이 내용을 덮는다.
-pub const selection_alpha: u8 = 77; // ≈30%
+/// **선택**의 세기. 캡처로 정했다 — 30%로 두니 어두운 테마에서 배경(20,20,20)과 선택 띠가
+/// (31,41,53)이라 **거의 구별되지 않았다**. 선택은 "지금 무엇을 골랐는가"를 말하는 것이므로 diff의
+/// 바뀐 글자(`mark_alpha` 34%)보다 진해도 된다 — 그쪽은 이미 깔린 줄 배경 **위에** 얹는 강조라
+/// 기준이 다르다. 글자가 읽히는 선은 지킨다.
+pub const selection_alpha: u8 = 115; // ≈45%
 /// **바뀐 글자**의 세기(§3.5 "줄 전체에 옅은 색을 깔고 바뀐 글자만 진하게"). 줄 배경 위에 한 겹 더
 /// 얹으므로 그 차이가 곧 "이 글자가 달라졌다"는 신호다(CM6 `diff-theme.ts`가 34%를 쓴 그 자리다).
 pub const mark_alpha: u8 = 87; // ≈34%
@@ -768,6 +770,7 @@ const TestBuffers = struct {
 
 fn testProps(lines: []const []const u8, wrap: bool) Props {
     return .{
+        .tab_width = default_tab_width,
         .lines = lines,
         .first_line = 0,
         .total_lines = lines.len,
@@ -1183,6 +1186,7 @@ test "밴드는 바뀐 줄에만 서고 빈 행에는 안 선다" {
     const lines = [_][]const u8{ "keep", "gone", "", "tail" };
     const bands = [_]RowBand{ .none, .removed, .none, .none }; // 3행은 짝을 맞추려 넣은 빈 행
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 4,
@@ -1236,6 +1240,7 @@ test "밴드는 스크롤을 따라간다 — 표를 절대 인덱스로 읽는�
     const lines = [_][]const u8{ "a", "b", "c", "d", "e" };
     const bands = [_]RowBand{ .none, .none, .none, .added, .none }; // 4번째 줄만 추가
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 2, // 화면 맨 위가 문서의 3번째 줄
         .total_lines = 5,
@@ -1284,6 +1289,7 @@ test "랩된 줄은 이어진 조각까지 한 색이다 — 한 줄로 읽혀�
     const lines = [_][]const u8{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
     const bands = [_]RowBand{.removed};
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 1,
@@ -1346,6 +1352,7 @@ test "랩된 문서에서 막대가 시각 행 자리에 선다 — 논리 줄�
         .count_scratch = &count_scratch,
     };
     const base: Props = .{
+        .tab_width = default_tab_width,
         .lines = &lines_buf,
         .first_line = 0,
         .total_lines = lines_buf.len,
@@ -1389,6 +1396,7 @@ test "밴드는 스크롤바보다 먼저 나온다 — 나중이면 막대 위�
     const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
     const bands = [_]RowBand{ .removed, .none, .none, .none, .none, .none, .none, .none };
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = lines.len,
@@ -1453,6 +1461,7 @@ test "막대 위치는 total_visual_rows를 받은 경로에서도 시각 행 �
         .count_scratch = &count_scratch,
     };
     var props: Props = .{
+        .tab_width = default_tab_width,
         .lines = &lines_buf,
         .first_line = 5,
         .total_lines = lines_buf.len,
@@ -1495,6 +1504,7 @@ test "바뀐 글자만 한 겹 더 진하다 — 줄 밴드 위에 그 범위만
     const marks_row = [_]Mark{.{ .start = 6, .len = 1 }}; // "a"
     const marks = [_][]const Mark{&marks_row};
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 1,
@@ -1602,6 +1612,7 @@ test "마크가 저장소보다 많으면 앞에서부터 그리고 죽지 않�
     const marks = [_][]const Mark{&marks_row};
 
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 1,
@@ -1655,6 +1666,7 @@ test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
     const layout = geometry.compute(12, 1, .{});
 
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .first_col = 10, // 열 10부터 보인다 — 앞의 마크는 화면 밖이다
@@ -1718,6 +1730,7 @@ test "랩된 줄: 마크가 어느 조각에 있든 그 조각에 강조가 선�
     const marks = [_][]const Mark{&marks_row};
 
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 1,
@@ -1786,6 +1799,7 @@ test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱
     const marks = [_][]const Mark{ &.{}, &.{}, &.{}, &marks_3, &.{} };
 
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 2, // 화면 맨 위가 문서의 3번째 줄
         .total_lines = lines.len,
@@ -1849,6 +1863,7 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
         .count_scratch = &count_scratch,
     };
     const base: Props = .{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = lines.len,
@@ -1893,6 +1908,58 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
     try testing.expect(!showsHorizontalBar(true, 500, 40)); // 랩
     try testing.expect(!showsHorizontalBar(false, null, 40)); // 안 셌다
     try testing.expect(!showsHorizontalBar(false, 40, 40)); // 딱 들어간다
+}
+
+test "줄 끝까지 선택해도 띠가 선다 — 캡처가 잡은 자리 (§4.1g)" {
+    // **캡처가 아니었으면 못 봤다.** Lab 픽스처가 우연히 `start + len == 줄 길이`였고, 그 행만
+    // 띠가 **통째로 안 그려졌다**(다른 두 행은 멀쩡했다). 줄 끝까지 드래그하는 것은 흔한 동작이라
+    // 그대로 두면 "가끔 선택이 안 보인다"가 된다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const lines = [_][]const u8{"fn render(self: *View) void {"}; // 29 byte
+    const to_eol = [_]Mark{.{ .start = 10, .len = 19 }}; // 10 + 19 == 29 = 줄 끝
+    const sel = [_][]const Mark{&to_eol};
+
+    const total_cols: u16 = 48;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .selection_marks = &sel,
+        .visible_rows = 2,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var found: ?draw.Op = null;
+    for (ops[0..w.ops]) |op| {
+        if (op == .quad and op.quad.fill_role == .selection) found = op;
+    }
+    const q = (found orelse return error.SelectionToEndOfLineNotPainted).quad;
+    try std.testing.expectEqual(@as(u32, 19 * 8), q.rect.w); // 10열~29열 = 19칸
 }
 
 test "선택 띠가 diff가 아닌 본문에도 서고, 가로 스크롤 밖은 잘린다 (§4.1g)" {
@@ -1991,6 +2058,7 @@ test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 �
 
     const total_cols: u16 = 20; // gutter를 빼면 본문이 10열 남짓 — 20글자 줄이 두 조각이 된다
     const w = build(.{
+        .tab_width = default_tab_width,
         .lines = &lines,
         .first_line = 0,
         .total_lines = 1,

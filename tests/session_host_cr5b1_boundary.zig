@@ -1,56 +1,72 @@
-//! CR5a canonical multi-runtime ledger contract and CR5b backend-owner consumer boundary.
+//! CR5b-1 actual backend runtime-set capture and final-address owner boundary.
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와 backend owner를 고정한다" {
+test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backend job 하나에 고정한다" {
     const allocator = std.testing.allocator;
-    const contract = try readSource(allocator, "src/platform/macos/session_host/host_reconnect_runtime_ledger.zig");
-    defer allocator.free(contract);
-    const build = try readSource(allocator, "build.zig");
-    defer allocator.free(build);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const seal = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
+    defer allocator.free(seal);
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
 
-    inline for (.{
-        "pub const HostJobIdentity = struct {",
-        "pub const RuntimeIdentity = struct {",
-        "pub const RuntimeRow = struct {",
-        "pub const TerminalSummary = struct {",
-        "pub fn validateCanonicalRows(",
-        "pub fn summarizeTerminalRows(",
-        "pub fn inputAllowed(",
-    }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(contract, declaration));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const RuntimeLedger = reconnect_reducer.RuntimeLedger;"));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const LocalState = reconnect_reducer.LocalState;"));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const MutationState = reconnect_reducer.MutationState;"));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const max_runtime_rows: usize = protocol.max_inventory_runtimes;"));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "    job: HostJobIdentity,"));
-    try std.testing.expectEqual(@as(usize, 2), count(contract, "std.meta.eql(row.identity.job, job)"));
-    try std.testing.expectEqual(@as(usize, 4), count(contract, "test \"CR5a runtime ledger는"));
-    inline for (.{ "summarizeTerminalRows", "inputAllowed" }) |identifier| try std.testing.expectEqual(
-        @as(usize, 0),
-        try countProductIdentifiersExcept(allocator, identifier, &.{
-            "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
-        }),
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(backend, "const host_reconnect_runtime_ledger = @import(\"host_reconnect_runtime_ledger.zig\");"),
     );
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "validateCanonicalRows"));
+    inline for (.{
+        "runtime_row_count: u32 = 0,",
+        "runtime_rows: [host_reconnect_runtime_ledger.max_runtime_rows]host_reconnect_runtime_ledger.RuntimeRow = undefined,",
+        "runtime_rows_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,",
+        "fn prepareForConnect(",
+        "fn validateRuntimeSet(",
+        "fn runtimeRowsDigest(",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), count(backend, needle));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "preparing = 13,"));
+    try std.testing.expectEqual(@as(usize, 2), count(backend, "test \"CR5b-1 host job"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const RuntimeSetIdentityProjection = struct {"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn reconnectRuntimeSetIdentity("));
+    inline for (.{
+        "runtime_row_count: u32,",
+        "runtime_rows_addr: u64,",
+        "runtime_rows_digest: Digest,",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), count(seal, needle));
+
+    const begin = between(
+        backend,
+        "pub fn beginHostReconnectConnect(",
+        "pub fn abortHostReconnectConnect(",
+    ) orelse return error.TestUnexpectedResult;
+    const capture_pos = std.mem.indexOf(u8, begin, "job.prepareForConnect(") orelse
+        return error.TestUnexpectedResult;
+    const connect_pos = std.mem.indexOf(u8, begin, "host_connect.connectExistingHostUntil(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(capture_pos < connect_pos);
+    try std.testing.expectEqual(@as(usize, 1), count(begin, "job.prepareForConnect("));
+    try std.testing.expectEqual(@as(usize, 1), count(begin, "host_connect.connectExistingHostUntil("));
+
     try std.testing.expectEqual(@as(usize, 13), countIdentifier(backend, "host_reconnect_runtime_ledger"));
-    inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "reconnectRuntimeSetIdentity"));
+    inline for (.{ "host_reconnect_runtime_ledger", "reconnectRuntimeSetIdentity" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),
             try countProductIdentifiersExcept(allocator, identifier, &.{
                 "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
                 "platform/macos/session_host/remote_term_backend.zig",
+                "platform/macos/session_host/remote_runtime.zig",
             }),
         );
 
-    const gate = between(build, "const session_host_cr5a_step =", "const session_host_cr5b1_step =") orelse
+    const gate = between(build, "const session_host_cr5b1_step =", "const b3_1_boundary_tests =") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5a\""));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5a_step.dependOn(session_host_cr4c_step);"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=4"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b1\""));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5b1_step.dependOn(session_host_cr5a_step);"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=1"));
 }
 

@@ -961,6 +961,14 @@ pub const DirectReleaseProjection = struct {
     runtime_id: [16]u8 = [_]u8{0} ** 16,
 };
 
+/// CR5 host job이 connect 전에 runtime membership을 봉인할 때 읽는 최소 identity다.
+/// mutation/local 전이는 host job의 runtime ledger가 소유하므로 이 projection은 stable runtime id와
+/// 현재 shell generation만 내보낸다.
+pub const RuntimeSetIdentityProjection = struct {
+    runtime_id: u128,
+    shell_generation: u64,
+};
+
 pub const CloseEventTag = enum(u8) {
     termination_requested = 1,
     reconnect_quiesced = 2,
@@ -2492,6 +2500,17 @@ pub const RemoteRuntime = struct {
             published,
             forward_failed: anyerror,
         };
+
+        pub fn reconnectRuntimeSetIdentity(
+            runtime: *RemoteRuntime,
+        ) !RuntimeSetIdentityProjection {
+            try runtime.admitRuntimeOperation();
+            const runtime_id = std.fmt.parseInt(u128, &runtime.runtime_id_hex, 16) catch
+                return error.InvalidAuthority;
+            const shell_generation = try runtime.generation_owner.currentGeneration();
+            if (runtime_id == 0 or shell_generation == 0) return error.InvalidAuthority;
+            return .{ .runtime_id = runtime_id, .shell_generation = shell_generation };
+        }
 
         /// CR4a single-runtime forward transaction. Fresh Client ownership stays in the backend job;
         /// this leaf only performs the canonical old-generation retirement and same-adapter publication.

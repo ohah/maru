@@ -1981,6 +1981,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   runtime handle/address/generation/runtime ID/shell generation을 결속하고 handle 순 정렬과 handle/address/runtime ID 유일성을 요구한다.
   terminal summary는 같은 host-job identity, 세 local terminal count와 retry reservation만 pointer-free로 내보내며 제품 caller는 0이다. 이 값 계약의
   green은 backend `HostReconnectJob`이 여러 runtime을 소유하거나 실제 Window를 게시했다는 증거가 아니다.
+  CR5b-1은 이 caller-zero 경계를 처음 해제한다. `RemoteTermBackend.beginHostReconnectConnect`가 manifest/socket I/O보다 먼저
+  같은 host의 runtime 행을 정렬·봉인하고, final-address job이 최대 4,096행 inline backing과 content digest를 exact once 소유하며
+  `@sizeOf(HostReconnectJob) <= 512 KiB`를 지켜야 한다. 3-runtime
+  + sibling-host fixture, 빈 집합, allocation fail-index, copied job, runtime add/remove와 handle/address/generation/runtime-id drift는
+  Client publication과 runtime mutation 전에 reject·final zero여야 한다. 이 증거는 runtime-set 제품 owner의 capture만 닫으며,
+  행별 observer/takeover/publication, k번째 실패 forward resolution과 Window 경쟁은 CR5b-2 이후 증거다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

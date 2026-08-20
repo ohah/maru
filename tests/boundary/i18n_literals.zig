@@ -81,7 +81,11 @@ const inventory = [_]Entry{
     // 셋(`입력 대기`·`대기중`·`상태 확인 중`)이 한국어 리터럴이라, 영어 화면에서 **한 줄 안에 언어가
     // 섞였다**(사용자 보고). 같은 자리에 서는 문구는 함께 옮겨야 한다는 것이 그 사고의 형태다.
     .{ .path = "src/platform/macos/app_session/term.zig", .count = 1 },
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 15 },
+    // **표시 문자열이 아니라 캡처 픽스처다**(§7 "표시가 아니면 그 사실을 적고 원장을 올린다").
+    // Lab은 골든 캡처용 합성 입력만 소유하고, 그 안의 한국어는 **그려지는 내용 자체**다 — 한글이
+    // 두 칸으로 서는지·선택 띠가 어디까지 오는지를 픽셀로 보려면 한국어 문자열이 있어야 한다.
+    // 16번째는 `editor_selection` 시나리오의 "선택 밖" 줄이다(띠가 거기까지 오면 안 된다는 대조군).
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 16 },
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 2 },
     .{ .path = "src/platform/macos/control_server.zig", .count = 1 },
     .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },

@@ -178,6 +178,79 @@ pub fn appendTrustEntry(
     try out.print(a, "\n# {s}\n[hooks.state.\"{s}\"]\ntrusted_hash = \"{s}\"\n", .{ command.marker, key, hash });
 }
 
+/// 우리 표식이 붙은 신뢰 블록을 거둔다. **표식이 유일한 기준이다** — 사용자가 직접 승인해 codex 가 적은
+/// 항목에는 표식이 없으므로 살아남는다. 그 판정을 키로 하면(«우리가 만들 법한 키인가») 사용자가 같은 훅을
+/// 손수 승인한 경우를 우리 것으로 오인해 **남의 신뢰를 지운다**.
+///
+/// 우리가 쓰는 모양은 `appendTrustEntry` 가 정한 그대로다:
+///
+///     <빈 줄>
+///     # MARU_HOOK_V3
+///     [hooks.state."<키>"]
+///     trusted_hash = "sha256:…"
+///
+/// 표식 줄을 만나면 **다음 테이블 헤더 직전까지** 건너뛴다(그 사이가 그 테이블의 몸통이다).
+/// 거둔 것이 있으면 `true`.
+pub fn removeTrustEntries(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, config_text: []const u8) !bool {
+    var removed = false;
+    var skipping = false;
+    // 표식 **바로 뒤의** 헤더는 우리 테이블 자신이다. 그것을 «다음 테이블» 로 오인하면 우리 헤더만 남고
+    // 몸통이 사라져 파일이 더 이상해진다(첫 구현이 그랬다).
+    var our_header_pending = false;
+
+    var it = std.mem.splitScalar(u8, config_text, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        // **표식 검사가 가장 먼저다.** skip 분기 뒤에 두면 우리 블록이 연달아 있을 때 두 번째 표식에
+        // 영영 닿지 못해 그 블록이 살아남는다(두 번째 구현이 그랬다).
+        if (std.mem.startsWith(u8, trimmed, "#") and std.mem.indexOf(u8, trimmed, command.marker) != null) {
+            skipping = true;
+            our_header_pending = true;
+            removed = true;
+            // 표식 **앞의** 빈 줄도 우리가 넣은 것이라 함께 거둔다(안 그러면 껐다 켤 때마다 빈 줄이 쌓인다).
+            while (out.items.len >= 2 and
+                out.items[out.items.len - 1] == '\n' and
+                out.items[out.items.len - 2] == '\n')
+            {
+                out.items.len -= 1;
+            }
+            continue;
+        }
+
+        if (skipping) {
+            if (std.mem.startsWith(u8, trimmed, "[")) {
+                if (our_header_pending) {
+                    our_header_pending = false; // 우리 헤더 — 함께 거둔다
+                    continue;
+                }
+                skipping = false; // 남의 테이블이 시작됐다
+            } else {
+                continue;
+            }
+        }
+
+        try out.appendSlice(a, line);
+        try out.append(a, '\n');
+    }
+
+    // `splitScalar` 는 마지막 개행 뒤의 빈 조각도 주므로 개행이 하나 더 붙는다. 원본이 개행으로 끝났으면
+    // 그 하나를 되돌린다(원본이 개행 없이 끝났으면 우리가 더한 것도 없다).
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') out.items.len -= 1;
+    if (config_text.len > 0 and config_text[config_text.len - 1] == '\n' and
+        out.items.len > 0 and out.items[out.items.len - 1] != '\n')
+    {
+        try out.append(a, '\n');
+    }
+    return removed;
+}
+
+/// 거둔 뒤 남은 것이 **우리 것 말고 없는가**(공백뿐인가). platform 은 이때 파일째 지워 설치 전 상태로
+/// 되돌린다 — 우리가 만든 파일이었다는 뜻이기 때문이다.
+pub fn isBlank(text: []const u8) bool {
+    return std.mem.trim(u8, text, " \t\r\n").len == 0;
+}
+
 const testing = std.testing;
 
 fn hashAlloc(entry: EventTrust, cmd: []const u8, timeout_seconds: u32, matcher: ?[]const u8) ![]u8 {
@@ -365,4 +438,97 @@ test "우리 세트 전체를 붙여도 키가 겹치지 않는다" {
         try appendTrustEntry(&out, a, out.items, key.items, "sha256:x");
         try testing.expect(hasTrustEntry(out.items, key.items));
     }
+}
+
+test "우리 표식이 붙은 신뢰 블록만 거둔다 — 사용자가 승인한 것은 남는다" {
+    const a = testing.allocator;
+    // 사용자가 직접 승인해 codex 가 적은 항목에는 우리 표식이 없다. 그 줄을 지우면 남의 신뢰를 지우는 것이다.
+    const before =
+        "model = \"gpt-5\"\n" ++
+        "\n[hooks.state.\"/h.json:session_start:0:0\"]\ntrusted_hash = \"sha256:user\"\n" ++
+        "\n# " ++ command.marker ++ "\n[hooks.state.\"/h.json:stop:1:0\"]\ntrusted_hash = \"sha256:ours\"\n";
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try removeTrustEntries(&out, a, before));
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "sha256:ours") == null); // 우리 것은 갔다
+    try testing.expect(std.mem.indexOf(u8, out.items, "sha256:user") != null); // 남의 것은 남았다
+    try testing.expect(std.mem.indexOf(u8, out.items, "session_start") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "stop:1:0") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "model = \"gpt-5\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, command.marker) == null);
+}
+
+test "거둘 것이 없으면 바꾸지 않는다" {
+    const a = testing.allocator;
+    const before = "model = \"gpt-5\"\n\n[hooks.state.\"/h.json:stop:0:0\"]\ntrusted_hash = \"sha256:user\"\n";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(!(try removeTrustEntries(&out, a, before)));
+    try testing.expectEqualStrings(before, out.items);
+}
+
+test "넣었다 거두면 원래 바이트로 돌아온다 — 껐다 켜도 빈 줄이 쌓이지 않는다" {
+    const a = testing.allocator;
+    const before = "model = \"gpt-5\"\n";
+
+    var installed: std.ArrayListUnmanaged(u8) = .empty;
+    defer installed.deinit(a);
+    try installed.appendSlice(a, before);
+    try appendTrustEntry(&installed, a, before, "/h.json:stop:0:0", "sha256:x");
+    try appendTrustEntry(&installed, a, installed.items, "/h.json:session_start:0:0", "sha256:y");
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try removeTrustEntries(&out, a, installed.items));
+    try testing.expectEqualStrings(before, out.items);
+}
+
+test "블록 뒤에 사용자 내용이 있어도 빈 줄이 남지 않는다" {
+    // 우리 블록이 **파일 끝일 때는** 꼬리 정규화가 빈 줄을 대신 흡수해 버려서, 그 경우만 보면 앞의 빈 줄을
+    // 거두는 코드가 있으나 없으나 같아 보인다(뮤테이션이 «못 잡음» 으로 그것을 드러냈다). 뒤에 사용자
+    // 내용이 오는 배치라야 그 차이가 나타난다.
+    const a = testing.allocator;
+    const head = "a = 1\n";
+    const tail = "\n[other]\nv = 1\n";
+
+    var installed: std.ArrayListUnmanaged(u8) = .empty;
+    defer installed.deinit(a);
+    try installed.appendSlice(a, head);
+    try appendTrustEntry(&installed, a, head, "/h.json:stop:0:0", "sha256:x");
+    try installed.appendSlice(a, tail);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try removeTrustEntries(&out, a, installed.items));
+    try testing.expectEqualStrings("a = 1\n[other]\nv = 1\n", out.items);
+}
+
+test "우리 것만 있던 파일은 비어서 돌아온다 — platform 이 그때 파일째 지운다" {
+    const a = testing.allocator;
+    var installed: std.ArrayListUnmanaged(u8) = .empty;
+    defer installed.deinit(a);
+    for ([_][]const u8{ "/h.json:stop:0:0", "/h.json:pre_tool_use:0:0" }) |key| {
+        try appendTrustEntry(&installed, a, installed.items, key, "sha256:x");
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try removeTrustEntries(&out, a, installed.items));
+    try testing.expect(isBlank(out.items));
+    // 대조: 사용자 줄이 하나라도 있으면 «비었다» 가 아니다.
+    try testing.expect(!isBlank("model = \"gpt-5\"\n"));
+}
+
+test "표식 뒤에 다른 테이블이 붙어 있어도 그 테이블은 살아남는다" {
+    const a = testing.allocator;
+    const before =
+        "\n# " ++ command.marker ++ "\n[hooks.state.\"/h.json:stop:0:0\"]\ntrusted_hash = \"sha256:ours\"\n" ++
+        "\n[other.table]\nvalue = 1\n";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try removeTrustEntries(&out, a, before));
+    try testing.expect(std.mem.indexOf(u8, out.items, "sha256:ours") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "[other.table]") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "value = 1") != null);
 }

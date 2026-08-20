@@ -686,18 +686,24 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     if (!is_macos) return;
     const hook_command = maru.session.agent_hook_command;
 
-    // 게이트가 꺼져 있으면 **아무것도 하지 않는다**(제거도 하지 않는다 — 위 doc comment 참조).
-    if (!self.loaded_config.config.sidebar.agent_hooks) return;
+    // **끄면 지운다**(계약 §5). 게이트 값이 곧 의도다 — 켜고 끄기가 한 쌍이라야 사용자가 되돌릴 수 있다.
+    // 판정이 개수에만 달려 있어(`ours > 0`) 이미 지워진 상태에서 다시 돌아도 무동작이다.
+    const intent: maru.session.agent_hook_install.Intent =
+        if (self.loaded_config.config.sidebar.agent_hooks) .ensure else .uninstall;
 
     // **provider 마다 따로 돈다.** 한쪽이 없거나 실패해도 다른 쪽은 서야 한다 — 둘을 한 트랜잭션으로
     // 묶으면 claude 를 안 쓰는 사람에게 codex 훅도 안 걸린다.
     inline for (.{ hook_command.Provider.claude, hook_command.Provider.codex }) |provider| {
-        reconcileProviderHooks(self, provider);
+        reconcileProviderHooks(self, provider, intent);
     }
 }
 
 /// 한 provider 의 훅 파일을 맞춘다. 위 `reconcileAgentHooks` 의 doc comment 가 규율의 단일 출처다.
-fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_command.Provider) void {
+fn reconcileProviderHooks(
+    self: *AppSession,
+    provider: maru.session.agent_hook_command.Provider,
+    intent: maru.session.agent_hook_install.Intent,
+) void {
     const install = maru.session.agent_hook_install;
     const hook_command = maru.session.agent_hook_command;
 
@@ -716,19 +722,23 @@ fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_c
     // **로그 디렉터리를 먼저 만든다.** 훅은 디렉터리를 만들지 않고 없으면 조용히 아무것도 적지 않는다
     // (그 조용함은 의도다 — 계약 §4.1). 설치만 하고 이 자리를 빠뜨리면 훅이 도는데 이벤트가 0인,
     // 진단하기 가장 나쁜 상태가 된다. 권한은 0700이고 파일 쪽 0600은 커맨드의 `umask`가 지킨다.
-    // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 둘을 차례로 만든다.
-    const cache_base = sessionCacheBase(a) orelse return;
-    const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
-    _ = std.c.mkdir(base_z.ptr, 0o700);
+    // **지울 때는 디렉터리를 만들지 않는다.** 끄는 사람의 디스크에 우리 자리를 새로 잡을 이유가 없다.
+    // 경로 자체는 커맨드를 만들 때 필요하므로(그 문자열이 우리 항목의 모양이다) 계산은 양쪽 다 한다.
     const log_dir = agentHookLogDir(a) orelse return;
-    _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
-    // **이미 있던 디렉터리도 좁힌다.** `mkdir`은 EEXIST면 권한을 손대지 않으므로, 옛 버전이나 넉넉한 umask가
-    // 만들어 둔 `0755` 디렉터리가 그대로 남는다. 우리가 만든 자리이니 우리가 맞춘다(파일 쪽은 훅의 `umask`).
-    _ = std.c.chmod(log_dir.ptr, 0o700);
-    // **만들지 못했으면 설치하지 않는다.** 훅만 걸고 디렉터리가 없으면 이벤트가 0인 채로 도는, 진단하기 가장
-    // 나쁜 상태가 된다(그 조용함은 훅 커맨드의 의도된 성질이라 사용자에게 아무 신호도 가지 않는다).
-    const log_dir_handle = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{}) catch return;
-    log_dir_handle.close(self.io);
+    if (intent == .ensure) {
+        // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 둘을 차례로 만든다.
+        const cache_base = sessionCacheBase(a) orelse return;
+        const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
+        _ = std.c.mkdir(base_z.ptr, 0o700);
+        _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
+        // **이미 있던 디렉터리도 좁힌다.** `mkdir`은 EEXIST면 권한을 손대지 않으므로, 옛 버전이나 넉넉한 umask가
+        // 만들어 둔 `0755` 디렉터리가 그대로 남는다. 우리가 만든 자리이니 우리가 맞춘다(파일 쪽은 훅의 `umask`).
+        _ = std.c.chmod(log_dir.ptr, 0o700);
+        // **만들지 못했으면 설치하지 않는다.** 훅만 걸고 디렉터리가 없으면 이벤트가 0인 채로 도는, 진단하기 가장
+        // 나쁜 상태가 된다(그 조용함은 훅 커맨드의 의도된 성질이라 사용자에게 아무 신호도 가지 않는다).
+        const log_dir_handle = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{}) catch return;
+        log_dir_handle.close(self.io);
+    }
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
     hook_command.build(&cmd, a, provider.tag(), log_dir) catch return;
@@ -770,12 +780,14 @@ fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_c
                 .unreadable;
         },
     };
-    const plan = install.planForSet(provider, state, .ensure);
+    const plan = install.planForSet(provider, state, intent);
     if (plan == .abort) return; // 모르는 상태 — 손대지 않는다
     if (!install.mutates(plan)) {
         // 이미 설치돼 있어도 **신뢰 항목은 확인한다** — 훅 파일은 그대로인데 `config.toml` 쪽만
         // 지워졌을 수 있고(캐시 정리·수동 편집), 그러면 훅이 돌지 않는다.
-        if (provider == .codex) ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items);
+        if (provider == .codex and intent == .ensure) ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items);
+        // 지우는 쪽은 훅 항목이 없어도 **신뢰 잔재가 남아 있을 수 있다**(위치가 바뀌어 옛 키가 남은 경우).
+        if (provider == .codex and intent == .uninstall) removeCodexTrust(self, a, config_dir);
         return;
     }
 
@@ -812,7 +824,11 @@ fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_c
         .object => |o| o,
         else => return, // scan이 이미 걸렀어야 하지만, 쓰기 직전에 한 번 더 본다
     };
-    install.apply(provider, a, &hooks, cmd.items, .install) catch return;
+    const mode: maru.session.agent_hook_install.Mode = switch (intent) {
+        .ensure => .install,
+        .uninstall => .remove,
+    };
+    install.apply(provider, a, &hooks, cmd.items, mode) catch return;
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {
@@ -826,7 +842,52 @@ fn reconcileProviderHooks(self: *AppSession, provider: maru.session.agent_hook_c
     writeExecutableFile(self.io, hooks_path, out.items, false) catch return;
 
     // 쓴 **뒤에** 신뢰를 맞춘다 — 키가 항목의 위치 인덱스를 담으므로 파일이 확정된 다음이라야 한다.
-    if (provider == .codex) ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items);
+    if (provider == .codex) {
+        switch (intent) {
+            .ensure => ensureCodexTrust(self, a, config_dir, hooks_path, cmd.items),
+            .uninstall => removeCodexTrust(self, a, config_dir),
+        }
+    }
+}
+
+/// codex `config.toml` 에서 **우리 표식이 붙은 신뢰 블록**을 거둔다(계약 §5 — 끄면 지운다).
+///
+/// **표식이 유일한 기준이다.** 사용자가 직접 승인해 codex 가 적은 항목에는 표식이 없으므로 살아남는다.
+/// 키 모양으로 판정하면 같은 훅을 손수 승인한 사람의 신뢰를 지운다.
+///
+/// 거둔 뒤 남은 것이 공백뿐이면 **파일째 지운다** — 우리가 만든 파일이었다는 뜻이라, 그래야 설치 전
+/// 상태로 정확히 돌아간다(빈 파일을 남기면 «껐는데 뭔가 남았다» 가 된다).
+///
+/// best-effort다. 실패하면 잔재가 남을 뿐이고, codex 는 짝이 안 맞는 키를 무시한다.
+fn removeCodexTrust(self: *AppSession, a: std.mem.Allocator, config_dir: []const u8) void {
+    const trust = maru.session.agent_hook_trust;
+
+    const config_path = std.fmt.allocPrint(a, "{s}/config.toml", .{config_dir}) catch return;
+    const before: []const u8 = switch (readFileState(self.io, a, config_path)) {
+        .present => |body| body,
+        // 없으면 지울 것도 없다. 읽지 못한 파일에는 손대지 않는다(설치 경로와 같은 규율).
+        .absent, .unreadable => return,
+    };
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    const removed = trust.removeTrustEntries(&out, a, before) catch return;
+    if (!removed) return; // 우리 것이 없었다 — 사용자 파일의 mtime 을 흔들지 않는다
+
+    // compare-and-swap: 읽은 바이트가 그대로일 때만 쓴다(설치 경로와 같은 이유 — 훅 파일이 없으면
+    // 잠글 것이 없어 두 인스턴스가 동시에 여기 올 수 있다).
+    const now: []const u8 = switch (readFileState(self.io, a, config_path)) {
+        .present => |body| body,
+        .absent => "",
+        .unreadable => return,
+    };
+    if (!std.mem.eql(u8, before, now)) return;
+
+    if (trust.isBlank(out.items)) {
+        std.Io.Dir.cwd().deleteFile(self.io, config_path) catch {};
+        return;
+    }
+    writeExecutableFile(self.io, config_path, out.items, false) catch return;
 }
 
 /// codex `config.toml` 의 신뢰 항목을 맞춘다(계약 §2.1). codex 는 신뢰가 적혀 있지 않은 훅을 실행하지

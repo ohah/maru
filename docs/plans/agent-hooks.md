@@ -48,8 +48,10 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 잔존, 사용자 항목이 앞, **신뢰 키가 실체 경로**(심링크 `CODEX_HOME` 픽스처로 못박음), 재실행 시 바이트
 무변경, 새 `config.toml` 은 `0600`.
 
-남은 것은 statusLine 훅 제거와 **제거를 부르는 사용자 액션**이다 — 지금은 켤 수는 있는데 빼려면 설정
-파일을 손으로 고쳐야 한다(계약 §5의 ⚠️). **그 구멍을 닫기 전에는 게이트 기본값을 켜지 않는다.**
+**끄면 지운다**(계약 §5): 게이트가 꺼져 있으면 같은 read-modify-write 를 `Intent.uninstall` 로 타고,
+codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 없으면 파일째 지워 설치 전 상태로 돌린다.
+
+남은 것은 statusLine 훅 제거다.
 
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는

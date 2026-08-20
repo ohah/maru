@@ -48,6 +48,12 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는
   `config.toml`의 `trusted_hash`를 **함께** 갱신한다.
+- **AH2b의 첫 일은 그 해시의 입력을 확정하는 실험이다**(계약 §2.1의 ⚠️ — 실측으로 재현하지 못했다).
+  알려진 훅을 심고 codex를 한 번 돌려 기록된 값을 얻은 뒤 내용으로 역산한다. 못 맞히면 설치가
+  **매 실행 승인 프롬프트**로 돌아온다.
+- Codex `hooks.json`도 claude `settings.json`과 **같은 모양**이다(실측: `hooks` → 이벤트 → 그룹 →
+  `hooks[]` → `{type, command}`). 그래서 `agent_hook_install`의 트리 수술을 그대로 쓴다 — 다른 것은
+  이벤트 이름이 snake_case인 trust 키와 파일 위치뿐이다.
 - `hooks`는 배열 항목이므로 **표식 기반 추가·선별 제거**다(감싸기가 아니다). 사용자 항목은 순서까지 보존한다.
 - atomic write + `flock` 직렬화. config 게이트로 끄면 흔적까지 지우고 관측 모드로 복귀한다.
 - **statusLine 훅을 제거한다** — `SessionStart`가 그 역할의 상위집합이고, 관측 모드용으로도 남기지

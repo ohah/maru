@@ -88,12 +88,19 @@ pub fn relay(io: std.Io, allocator: std.mem.Allocator, stderr: *std.Io.Writer) !
     try finish(stderr, end);
 }
 
+/// **Windows 에는 이 transport 가 없다**(계약 §8 — 컨트롤 소켓 자체가 아직 없다).
+/// `control_client.gate` 와 같은 판정을 쓰고, 아래 POSIX 본문은 comptime 으로 **의미 분석조차
+/// 되지 않게** 둔다 — `poll`·`socketpair` 는 그 타깃의 `std.c` 에 없어서, 안 그러면 **쓰지도
+/// 않는 코드가 빌드를 깬다**(CI 의 `check-targets` 가 그것을 잡았다).
+const posix_relay = control_client.gate == null;
+
 /// 중계 루프 그 자체. **fd 를 인자로 받는다** — 그래야 테스트가 파이프와 소켓쌍으로 **진짜
 /// 왕복**을 잴 수 있다. `relay` 가 소켓을 찾아 주고 이 함수가 바이트를 옮긴다.
 ///
 /// 오류를 안 내고 `End` 를 돌려준다: 끝나는 것은 실패가 아니라 **정상 경로**이고, 왜 끝났는지는
 /// 세 갈래로 갈라야 한다(끝을 하나로 뭉치면 진단이 "무언가 끝났다" 밖에 못 된다).
 pub fn relayFds(in_fd: std.c.fd_t, out_fd: std.c.fd_t, sock_fd: std.c.fd_t) End {
+    if (!posix_relay) return .io_error;
     const c = std.c;
     var buf: [chunk_bytes]u8 = undefined;
     var fds = [_]std.c.pollfd{
@@ -164,6 +171,9 @@ test "끝 메시지는 세 갈래가 서로 다르다" {
 }
 
 /// 테스트용 파이프 한 쌍. `[0]`=읽기, `[1]`=쓰기.
+///
+/// **POSIX 에서만 쓴다.** 아래 왕복 테스트들은 `pipe`·`socketpair` 를 부르는데 Windows 타깃에는
+/// 그 심벌이 없다 — 테스트도 제품과 같은 게이트 뒤에 둔다.
 fn testPipe() ![2]std.c.fd_t {
     var fds: [2]std.c.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return error.PipeFailed;
@@ -177,6 +187,7 @@ fn testSocketPair() ![2]std.c.fd_t {
 }
 
 test "폰이 보낸 바이트가 소켓으로 그대로 간다" {
+    if (!posix_relay) return error.SkipZigTest;
     // **바이트를 해석하지 않는다**(줄을 세거나 다시 묶지 않는다) — 그것을 여기서 잰다.
     // 프레임 조립은 폰 한 곳뿐이고, 두 곳이면 상한과 배압 규칙이 갈린다.
     const in = try testPipe();
@@ -199,6 +210,7 @@ test "폰이 보낸 바이트가 소켓으로 그대로 간다" {
 }
 
 test "maru 가 낸 바이트가 stdout 으로 그대로 간다" {
+    if (!posix_relay) return error.SkipZigTest;
     const in = try testPipe();
     const out = try testPipe();
     const sock = try testSocketPair();
@@ -219,6 +231,7 @@ test "maru 가 낸 바이트가 stdout 으로 그대로 간다" {
 }
 
 test "끝을 두 갈래로 가른다 — 누가 닫았는지" {
+    if (!posix_relay) return error.SkipZigTest;
     // 같은 끝으로 뭉치면 "폰이 나갔다" 와 "maru 가 꺼졌다" 가 구별이 안 된다. 화면이 사용자에게
     // 할 말이 달라지는 자리다.
     const in = try testPipe();

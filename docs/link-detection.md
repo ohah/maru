@@ -202,6 +202,16 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
 - **포커스와의 관계**: 링크가 아닌 일반 클릭은 그대로 `Model.paneAtPoint`로 그 pane에 포커스를 옮긴다(수식키+클릭은
   URL 열기가 먼저 소비하므로 포커스가 안 옮겨간다). 즉 "브라우저를 보다가 옆 터미널 링크를 Cmd+클릭" 흐름에서
   포커스는 브라우저에 남고 링크만 열린다.
+- **소비한 클릭의 짝도 앱에 안 간다**(2026-08-20 사용자 보고). host는 링크 클릭의 `down`을 소비하는데(Swift
+  `handleUrlClick`이 true면 `handleMouse`를 안 부른다) 그 짝인 `up`은 리포트 경로로 흘러, 트래킹 중인 TUI가
+  **press 없이 release만** 받았다. Claude Code가 그 release를 클릭으로 읽고 **자기도 같은 URL을 `/usr/bin/open`
+  으로 열어** 브라우저가 두 번 떴다(LaunchServices 로그에 `maru-macos-app` 한 건과 `open` 한 건이 1초 간격으로
+  남는다 — 그 1초는 자식 프로세스가 뜨는 시간이다). OSC 8 링크는 TUI가 스스로 만든 것이라 자체 열기 대상에서
+  빠져 멀쩡했고, 화면 텍스트에서 TUI가 찾아낸 생 URL만 겹쳤다.
+  짝을 맞추는 자리는 **리포트 직전 한 곳**이다(`app_session.mouse`의 `mouse_report_press_buttons`) — `mouse()`에는
+  `kind == 1`에서만 삼키는 게이트가 여럿이라(상태바·팔레트·모달) 게이트마다 짝을 맞추면 규칙이 그 수만큼 늘고,
+  새 게이트가 생길 때마다 같은 결함이 되살아난다. 링크만 100% 재현된 것은 그것이 **터미널 pane 안**이라 up이
+  리포트까지 닿기 때문이지 나머지가 안전해서가 아니다.
 
 ## 링크를 어디에 여는가 (`input.link-open-target`)
 

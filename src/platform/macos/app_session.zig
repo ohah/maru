@@ -4395,6 +4395,25 @@ pub const AppSession = struct {
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
+    /// 마우스 리포팅에서 **누른 적 없는 버튼의 뗌·끌기를 앱에 보내지 않기** 위한 짝 추적
+    /// (surface_id + 버튼 비트). xterm 프로토콜에서 release는 press의 짝이고, 짝 없는 release는
+    /// 프로토콜 위반이다 — 받은 앱이 그것을 클릭으로 해석해도 이상하지 않다.
+    ///
+    /// **실측으로 드러난 자리**(2026-08-20 사용자 보고): Cmd+클릭으로 링크를 열면 host가 그 `down`을
+    /// 소비하는데(Swift `handleUrlClick`이 true면 `handleMouse`를 안 부른다) 짝인 `up`은 그대로 이
+    /// 경로로 흘러, TUI가 press 없이 release만 받았다. Claude Code가 그 release를 클릭으로 읽고
+    /// **자기도 같은 URL을 `/usr/bin/open`으로 열어** 브라우저가 두 번 떴다(LaunchServices 로그에
+    /// `maru-macos-app` 한 건과 `open` 한 건이 1초 간격으로 남는다).
+    ///
+    /// **링크 클릭만의 문제가 아니다.** `mouse()`에는 `kind == 1`에서만 삼키는 게이트가 여럿이고
+    /// (상태바·팔레트·모달), 그 짝인 up은 같은 게이트를 지나지 않는다. 링크가 100% 재현된 것은 그것이
+    /// **터미널 pane 안**이라 up이 리포트까지 닿기 때문이고, 나머지는 pane 밖에서 시작해 셀 변환에서
+    /// 걸러질 뿐 구조는 같다. 그래서 게이트마다 짝을 맞추는 대신 **리포트 직전 한 자리**에서 막는다.
+    ///
+    /// 마우스는 하나뿐이라 `(surface, buttons)` 한 쌍이면 족하다 — 다른 surface에서 누른 버튼의 뗌은
+    /// 그 surface의 것이 아니므로 함께 걸러진다.
+    mouse_report_press_surface: u64 = 0,
+    mouse_report_press_buttons: u8 = 0,
     // 드래그 자동 스크롤 방향(+1=위/과거, -1=아래, 0=없음). 드래그 좌표가 grid 위/아래 밖으로
     // 나가면 세워지고, 경과 ms가 drag_autoscroll_step_ms를 넘을 때 한 줄 스크롤하며 선택을 가장자리 행으로 확장한다.
     drag_autoscroll: i8 = 0,
@@ -10768,8 +10787,39 @@ pub const AppSession = struct {
             break :blk core.mouse_tracking != .none;
         };
         if (do_report) {
+            // 리포팅 pane에서는 선택 드래그를 쓰지 않는다 — **짝 없는 이벤트로 빠져나가는 경로에서도**
+            // 이 정리는 해 둔다(그 전에 남아 있던 autoscroll이 frame-loop로 계속 도는 것을 막는다).
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
+            // **짝 없는 뗌·끌기는 보내지 않는다**(`mouse_report_press_buttons`). press를 안 받은 앱에
+            // release만 주면 그 앱이 그것을 클릭으로 해석한다 — 링크 Cmd+클릭에서 브라우저가 두 번
+            // 뜨던 결함의 루트커즈다. **여기서 막는 이유**는 `kind == 1`만 삼키는 게이트가 위에 여럿이라
+            // (상태바·팔레트·모달) 게이트마다 짝을 맞추면 규칙이 그 수만큼 늘어나기 때문이다.
+            //
+            // 더블/트리플클릭(4·5)은 press로 친다 — 그 직후의 up이 짝을 찾아야 한다.
+            const button_bit: u8 = if (button >= 0 and button < 8)
+                @as(u8, 1) << @intCast(button)
+            else
+                0;
+            const pressed_here = self.mouse_report_press_surface == click_surface.id and
+                (self.mouse_report_press_buttons & button_bit) != 0;
+            switch (kind) {
+                1, 4, 5 => {
+                    // 다른 surface에서 누르고 있던 버튼은 이 press가 대체한다(마우스는 하나다).
+                    if (self.mouse_report_press_surface != click_surface.id) self.mouse_report_press_buttons = 0;
+                    self.mouse_report_press_surface = click_surface.id;
+                    self.mouse_report_press_buttons |= button_bit;
+                },
+                // 뗌: 짝이 없으면 **조용히 버린다**. 선택 해제·autoscroll 정리는 위에서 이미 했다.
+                3 => {
+                    if (!pressed_here) return;
+                    self.mouse_report_press_buttons &= ~button_bit;
+                },
+                // 버튼 끌기도 press의 연장이다. 버튼 없는 hover 이동은 이 경로가 아니라
+                // `mouseMoved`(DECSET 1003)가 따로 낸다 — 그쪽은 짝의 대상이 아니다.
+                2 => if (!pressed_here) return,
+                else => {},
+            }
             // 버튼 이벤트(누름/뗌/더블/트리플)는 남은 선택을 해제한다 — 이 pane의 마우스는 앱이 소유하므로
             // (스크롤·클릭을 앱이 제 방식대로 처리한다) 하이라이트만 남으면 지울 방법이 없는 유령이 된다.
             // ⌘A 선택이 트래킹 TUI pane에서 영원히 안 지워지던 결함의 직접 수정 지점이다. 베이스: Ghostty
@@ -25743,11 +25793,111 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     tab_surface.core.mouse_tracking = .any;
     tab_surface.core.mouse_format = .sgr;
 
+    // **그 버튼이 눌려 있다고 세워 둔다.** 리포트 경로는 짝 없는 끌기·뗌을 버리므로(press 없이 release만
+    // 받은 TUI가 그것을 클릭으로 읽어 링크가 두 번 열리던 결함의 수정) 드래그가 그냥은 안 나간다.
+    // `mouse(1, …)`을 부르지 않는 이유는 down 경로가 이 하네스가 세우지 않은 사이드바 드래그 상태까지
+    // 읽기 때문이다 — 이 테스트가 볼 것은 마스킹 하나이고, 짝 규칙은 아래 전용 테스트가 고정한다.
+    session.mouse_report_press_surface = tab_surface.id;
+    session.mouse_report_press_buttons = 1; // button 0
     // Cmd(mods=32) 드래그(motion) → cb = button(0) + mods(0=마스킹) + motion(32) = 32. 32비트가 안 빠졌으면 cb=64로 오염.
     session.mouse(2, 16.0, 16.0, 0, 32);
     try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<32;") != null); // 정상: cb=32(motion만)
     try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<64;") == null); // 오염 없음: command 32가 안 섞임
     try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<96;") == null); // 방어: 32+32+32=96도 없음
+}
+
+test "마우스 리포팅: 누른 적 없는 버튼의 뗌·끌기는 앱에 보내지 않는다(링크 Cmd+클릭 이중 열림)" {
+    // 사용자 보고(2026-08-20): 터미널에 출력된 생 URL을 Cmd+클릭하면 **브라우저가 두 번** 떴다. 실측으로
+    // 발신자를 갈랐더니 LaunchServices에 `maru-macos-app` 한 건과 `open` 한 건이 1초 간격으로 남았다 —
+    // 두 번째는 maru가 아니라 **터미널 안의 TUI가 띄운 `/usr/bin/open`**이었다.
+    //
+    // 원인은 반쪽 이벤트다. host는 링크 클릭의 `down`을 소비하는데(Swift `handleUrlClick`이 true면
+    // `handleMouse`를 안 부른다) 짝인 `up`은 그대로 리포트 경로로 흘러, TUI가 press 없이 release만 받고
+    // 그것을 클릭으로 해석해 자기도 같은 URL을 열었다. xterm 프로토콜에서 release는 press의 짝이므로
+    // 짝 없는 release를 보내는 것 자체가 위반이고, 받은 쪽이 어떻게 반응해도 이상하지 않다.
+    //
+    // **게이트마다 짝을 맞추는 대신 리포트 직전 한 자리에서 막는다** — `mouse()`에는 `kind == 1`에서만
+    // 삼키는 게이트가 여럿이고(상태바·팔레트·모달), 링크만 100% 재현된 것은 그것이 터미널 pane 안이라
+    // up이 여기까지 닿기 때문이지 나머지가 안전해서가 아니다.
+    var session: AppSession = undefined;
+    session.addr_edit = null;
+    session.tabs = .empty;
+    session.pointer_gesture_owner = .none;
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.dock_list_scroll_drag = .{};
+    session.dock_list_scroll_drag_owner = null;
+    session.dock_list_scroll_entry_count = 0;
+    session.dock_list_scroll_generation = 0;
+    session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io();
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+
+    var capture_buf: std.ArrayList(u8) = .empty;
+    defer capture_buf.deinit(std.testing.allocator);
+    var cap_ctx = ReportCaptureCtx{ .buf = &capture_buf };
+    var test_rt: app.SurfaceRuntime = undefined;
+    test_rt = app.SurfaceRuntime.init(std.testing.allocator);
+    session.runtime = &test_rt;
+    defer session.runtime.deinit();
+    _ = try session.runtime.attach(&tab_surface, tab_surface.id, .{ .ctx = &cap_ctx, .write_input = ReportCaptureCtx.write, .resize_fn = testNoopPtyResize });
+
+    session.metal_dirty = false;
+    session.chrome_host = .{};
+    session.rename = null;
+    session.drag_autoscroll = 0;
+    session.mouse_drag_selecting = false;
+    session.mouse_report_press_surface = 0;
+    session.mouse_report_press_buttons = 0;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.scale_milli = 1000;
+    session.sidebar_width_px = 0;
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 64, .h = 64 };
+    session.last_drag_col = 0;
+    tab_surface.core.mouse_tracking = .normal;
+    tab_surface.core.mouse_format = .sgr;
+
+    // ① **누름을 삼킨 클릭의 뗌**(링크 Cmd+클릭이 그 모양이다) — 아무것도 나가지 않는다.
+    session.mouse(3, 16.0, 16.0, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), capture_buf.items.len);
+
+    // ② 짝 없는 끌기도 마찬가지다. 버튼 없는 hover 이동은 이 경로가 아니라 `mouseMoved`가 낸다.
+    session.mouse(2, 24.0, 16.0, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), capture_buf.items.len);
+
+    // ③ 짝이 맞으면 **평소대로 나간다** — 이 가드가 정상 클릭을 죽이지 않는다는 것이 핵심이다.
+    //
+    // 누름을 `mouse(1, …)`로 태우지 않는 것은 down 경로가 이 하네스가 세우지 않은 사이드바 드래그
+    // 상태까지 읽기 때문이다. 여기서 고정하는 계약은 "짝이 있으면 통과하고, 그 뗌이 짝을 소비한다"이고,
+    // 누름이 짝을 세우는 쪽은 같은 블록의 한 줄(`mouse_report_press_buttons |= button_bit`)이다.
+    session.mouse_report_press_surface = tab_surface.id;
+    session.mouse_report_press_buttons = 1; // button 0
+    session.mouse(3, 16.0, 16.0, 0, 0);
+    try std.testing.expect(capture_buf.items.len > 0); // 짝이 있는 뗌은 리포트된다
+    try std.testing.expect(std.mem.endsWith(u8, capture_buf.items, "m")); // SGR 뗌은 `m`으로 끝난다
+
+    // ④ 뗌이 짝을 **소비했으니** 그다음 뗌은 다시 버려진다(래치가 남아 이중으로 새지 않는다).
+    const after_release = capture_buf.items.len;
+    session.mouse(3, 16.0, 16.0, 0, 0);
+    try std.testing.expectEqual(after_release, capture_buf.items.len);
+
+    // ⑤ **다른 surface에서 눌린 버튼의 뗌도 아니다.** 마우스는 하나뿐이라 짝은 (surface, 버튼) 쌍이고,
+    //    남의 pane에서 시작한 제스처의 뗌이 이 pane의 앱에 클릭처럼 들어가면 안 된다.
+    session.mouse_report_press_surface = tab_surface.id + 1;
+    session.mouse_report_press_buttons = 1;
+    session.mouse(3, 16.0, 16.0, 0, 0);
+    try std.testing.expectEqual(after_release, capture_buf.items.len);
 }
 
 // B1 헬퍼 — 각 위치의 (그룹 마커 이름 첫 글자<<8 | group_depth) 시그니처. 구조적으로 동일한 두 세션의 착지 비교용.

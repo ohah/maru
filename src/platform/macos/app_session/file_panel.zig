@@ -82,6 +82,7 @@ const file_panel_bridge = app_session_mod.file_panel_bridge;
 const file_tree = app_session_mod.file_tree;
 const file_tree_mutation_backend = app_session_mod.file_tree_mutation_backend;
 const file_tree_navigation = app_session_mod.file_tree_navigation;
+const file_tree_layout = maru.session.file_tree_layout; // 그리기와 히트테스트가 같은 산술을 쓰게 하는 단일 출처
 const hasProtectedFilePanelsForExit = AppSession.hasProtectedFilePanelsForExit;
 const layout_math = app_session_mod.layout_math;
 const usizeOptEql = AppSession.usizeOptEql;
@@ -1964,13 +1965,14 @@ pub fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     const tree_rect = dock_ops.dockGeometry(self).tree_content;
     if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
     if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
-    // 픽셀 스크롤이므로 뷰포트 안 y는 **content 좌표로 올린 뒤** 행 높이로 나눈다. 창의 첫 행이
-    // 위로 밀려 있어도(부분 행) 같은 식이 그 행을 준다 — 렌더가 origin을 그만큼 올리는 것과 짝이다.
-    const local_px = y_px - @as(f64, @floatFromInt(tree_rect.y));
-    if (local_px < 0) return null;
-    const content_y = @as(f64, @floatFromInt(fileTreeEffectiveScrollPx(self))) + local_px;
-    const index: usize = @intFromFloat(content_y / @as(f64, @floatFromInt(self.cell_height_px)));
-    return if (index < self.file_tree_rows.items.len) index else null;
+    // 산술은 `session/file_tree_layout.zig` 가 단일 출처다 — `fileTreeDrawWindow` 와 **같은 함수 쌍**이라
+    // 그린 자리를 누르면 그 행이 나온다(그 짝은 그쪽 테스트가 조합을 훑어 못 박는다).
+    return file_tree_layout.rowAtLocalY(
+        self.cell_height_px,
+        fileTreeEffectiveScrollPx(self),
+        y_px - @as(f64, @floatFromInt(tree_rect.y)),
+        self.file_tree_rows.items.len,
+    );
 }
 
 pub fn fileTreeSelectionPath(self: *const AppSession) ?[]const u8 {
@@ -2576,21 +2578,15 @@ pub fn releaseFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, u
 /// 행 높이가 균일(`cell_height_px`)하므로 `scroll_area.project`의 walk 대신 나눗셈으로 같은 답을
 /// 낸다 — 탐색기 행은 수천 개가 될 수 있고 창은 매 프레임 필요하다. 그 둘이 같은 답이라는 것은
 /// 테스트가 `project`와 대조해 고정한다(도크는 카드 높이가 가변이라 walk가 필수다).
-pub fn fileTreeDrawWindow(self: *const AppSession) struct { start: usize, count: u16, origin_shift_px: u32 } {
-    const row_h = self.cell_height_px;
-    if (row_h == 0) return .{ .start = 0, .count = 0, .origin_shift_px = 0 };
-    const offset = fileTreeEffectiveScrollPx(self);
-    const start: usize = offset / row_h;
-    const shift = offset % row_h;
-    const viewport = dock_ops.dockGeometry(self).tree_content.h;
-    // 위로 shift만큼 밀린 상태에서 뷰포트를 덮으려면 올림이 필요하다 — 내림이면 바닥에 배경이 남는다.
-    const needed: usize = (@as(usize, viewport) + shift + row_h - 1) / row_h;
-    const remaining = self.file_tree_rows.items.len -| start;
-    return .{
-        .start = start,
-        .count = @intCast(@min(@min(needed, remaining), @as(usize, std.math.maxInt(u16)))),
-        .origin_shift_px = shift,
-    };
+pub fn fileTreeDrawWindow(self: *const AppSession) file_tree_layout.DrawWindow {
+    // 산술은 `session/file_tree_layout.zig` 가 단일 출처다 — 히트테스트와 **같은 함수 쌍**을 써야
+    // 누른 행과 강조되는 행이 안 갈린다(그 짝은 그쪽 테스트가 못 박는다).
+    return file_tree_layout.drawWindow(
+        self.cell_height_px,
+        fileTreeEffectiveScrollPx(self),
+        dock_ops.dockGeometry(self).tree_content.h,
+        self.file_tree_rows.items.len,
+    );
 }
 
 pub fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {

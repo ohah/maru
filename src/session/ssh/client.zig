@@ -337,6 +337,10 @@ pub const Client = struct {
         if (self.opts.secret_key) |*k| std.crypto.secureZero(u8, k);
         self.state = .closed;
         self.shell_ready = false;
+        // **컨트롤도 함께 못박는다.** 안 그러면 `clear` 뒤에도 `control_state` 가 `ready` 로 남아
+        // `writeControl` 이 오류 대신 **조용히 0 바이트**를 돌려준다 — 터미널 `write` 는 같은
+        // 자리에서 `NotReady` 다. 두 축이 다르게 굴면 호출자가 한쪽에서만 실수를 발견한다.
+        self.control_state = .closed;
     }
 
     /// 우리 버전 줄을 낸다. **`feed` 보다 먼저 한 번 부른다.**
@@ -412,6 +416,12 @@ pub const Client = struct {
         if (self.state == .idle) return Error.NotStarted;
         if (wire_out.len < min_wire_out) return Error.ShortBuffer;
         if (screen_out.len < self.ch.local_max_packet) return Error.ShortBuffer;
+        // **컨트롤 버퍼도 같은 대접을 받는다.** 채널을 열어 놓고 한 패킷도 못 담는 버퍼를 주면
+        // 첫 데이터에서 `ShortBuffer` 로 세션이 죽는다 — 화면 쪽이 입구에서 거절하는 것과 같은
+        // 이유로 여기서 거절한다(조용히 흘리지도, 도중에 죽지도 않게).
+        if (self.control) |ctl| {
+            if (bufs.control.len < ctl.local_max_packet) return Error.ShortBuffer;
+        }
         var w: Out = .{ .buf = wire_out };
         var s: Out = .{ .buf = screen_out };
         var c: Out = .{ .buf = bufs.control };
@@ -430,6 +440,11 @@ pub const Client = struct {
             // 한 걸음이 실제로 필요한 만큼만 남겨 둔다. 넉넉히 잡으면(예: 패킷 상한 256KiB)
             // 모바일이 못 쓸 크기를 요구하게 된다.
             if (w.remaining() < min_wire_out or s.remaining() < self.ch.local_max_packet) break;
+            // 컨트롤도 마찬가지다 — 차면 멈추고 호출자가 비운 뒤 다시 부른다. 이 줄이 없으면
+            // 큰 답(프로토콜 프레임 상한 ≈1MiB)이 올 때 **오류로 죽는다**(화면은 안 그런다).
+            if (self.control) |ctl| {
+                if (c.remaining() < ctl.local_max_packet) break;
+            }
             const before_consumed = consumed;
             const before_state = self.state;
             try self.step(input[consumed..], &consumed, &w, &s, &c);
@@ -2611,7 +2626,7 @@ fn controlOpenedClient(out: []u8) !Client {
     try wr.u32be(1 << 20);
     try wr.u32be(32768);
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     _ = try feedChannelBuffers(&c, wr.written(), out, &scr, &ctl);
     // `exec` 성공
     var ok: [16]u8 = undefined;
@@ -2655,7 +2670,7 @@ test "컨트롤 채널은 pty 없이 exec 을 요청한다" {
     try wr.u32be(1 << 20);
     try wr.u32be(32768);
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
 
     // 나간 것이 `exec` 이고 명령이 그대로 실려 있다. **`pty-req` 는 없다.**
@@ -2675,7 +2690,7 @@ test "컨트롤 바이트는 화면과 섞이지 않는다" {
     try testing.expectEqual(ControlState.ready, c.controlState());
 
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [256]u8 = undefined;
 
     // 컨트롤 채널로 온 ndjson 한 줄
@@ -2697,7 +2712,7 @@ test "컨트롤 채널이 닫혀도 터미널은 산다" {
     var c = try controlOpenedClient(&out);
 
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [64]u8 = undefined;
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_close);
@@ -2732,7 +2747,7 @@ test "터미널이 먼저 닫혀도 컨트롤이 남아 있으면 세션은 안 
     var c = try controlOpenedClient(&out);
 
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [64]u8 = undefined;
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_close);
@@ -2761,7 +2776,7 @@ test "컨트롤 stderr 는 wire 에도 화면에도 안 섞인다" {
     var c = try controlOpenedClient(&out);
 
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [256]u8 = undefined;
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_extended_data);
@@ -2783,7 +2798,7 @@ test "127 은 exit-status 로 온다 — 채널 요청은 성공한다" {
     try testing.expectEqual(ControlState.ready, c.controlState());
 
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [128]u8 = undefined;
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_request);
@@ -2810,7 +2825,7 @@ test "exec 이 거절되면 컨트롤만 접고 터미널은 안 건드린다" {
     try wr.u32be(1 << 20);
     try wr.u32be(32768);
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     _ = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
 
     var fw = wire.Writer.init(&buf);
@@ -2834,7 +2849,7 @@ test "채널 열기를 서버가 거절해도 세션은 안 죽는다" {
     try wr.string("no");
     try wr.string("");
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
     try testing.expectEqual(ControlState.closed, c.controlState());
     try testing.expectEqual(State.ready, step.state);
@@ -2895,7 +2910,7 @@ test "컨트롤 채널은 닫은 뒤 다시 열 수 있다" {
     _ = try c.closeControl(&out);
     // 상대 답이 온다.
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [4096]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
     var buf: [64]u8 = undefined;
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_close);
@@ -2926,4 +2941,53 @@ test "재키잉 중에는 컨트롤 채널을 안 연다" {
     const bytes = try c.openControl("maru control --stdio", &out);
     try testing.expectEqual(@as(usize, 0), bytes.len);
     try testing.expectEqual(ControlState.none, c.controlState());
+}
+
+test "컨트롤 버퍼가 차면 죽지 않고 멈춘다" {
+    // 화면 쪽은 "차면 멈추고 다음에 준다" 인데 컨트롤만 오류로 죽으면, 큰 답 한 번에 세션이
+    // 끝난다. 두 축이 같은 규칙을 따라야 한다.
+    //
+    // **한 패킷으로는 이것을 못 잰다** — 입구 검사가 이미 한 패킷 몫을 요구하므로 첫 패킷은
+    // 언제나 들어간다. 두 패킷을 **한 번에** 먹여야 두 번째에서 자리가 모자란 상황이 된다
+    // (변이 검사에서 한 패킷짜리 테스트가 그대로 살아남았다).
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined; // 20KiB 하나는 담고 둘은 못 담는다
+
+    const chunk = 20 * 1024;
+    var data: [chunk]u8 = @splat('x');
+    var buf: [64 * 1024]u8 = undefined;
+    var pkt: [128 * 1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(11);
+    const n1 = try packet.write(&pkt, try channelData(&buf, control_local_id, &data), prng.random());
+    const n2 = try packet.write(pkt[n1..], try channelData(&buf, control_local_id, &data), prng.random());
+
+    const step = try c.feedBuffers(pkt[0 .. n1 + n2], .{ .wire = &out, .screen = &scr, .control = &ctl });
+    // 첫 패킷만 먹고 멈췄다 — 오류가 아니다.
+    try testing.expectEqual(@as(usize, chunk), step.control.len);
+    try testing.expectEqual(n1, step.consumed);
+
+    // 비우고 다시 부르면 나머지가 온다 — 잃은 바이트가 없다.
+    const step2 = try c.feedBuffers(pkt[n1 .. n1 + n2], .{ .wire = &out, .screen = &scr, .control = &ctl });
+    try testing.expectEqual(@as(usize, chunk), step2.control.len);
+}
+
+test "컨트롤 채널이 열렸는데 작은 버퍼를 주면 입구에서 거절한다" {
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var tiny: [16]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(12);
+    var buf: [256]u8 = undefined;
+    const n = try packet.write(&pkt, try channelData(&buf, control_local_id, "{}\n"), prng.random());
+    try testing.expectError(Error.ShortBuffer, c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &tiny }));
+}
+
+test "clear 뒤에는 컨트롤로도 못 쓴다" {
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    c.clear();
+    try testing.expectError(Error.NotReady, c.writeControl("{}\n", &out));
 }

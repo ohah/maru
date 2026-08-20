@@ -45,7 +45,10 @@ grep -q "gt $zig_limit" "$golden" || fail_early "golden 이 낡았다 — payloa
 cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
-pass() { echo "  ok  $1"; }
+# **개수는 세고 적지 않는다.** 손으로 적은 수는 검사를 더할 때마다 어긋나고("계약 6개"라고 적힌 채 7개를
+# 돌고 있었다), 그러면 «몇 개가 도는지»를 아무도 믿지 않게 된다.
+checks=0
+pass() { checks=$((checks + 1)); echo "  ok  $1"; }
 
 payload='{"hook_event_name":"Stop","session_id":"s1","last_assistant_message":"끝"}'
 
@@ -127,4 +130,4 @@ bytes=$(wc -c < "$logdir/11.ndjson" | tr -d ' ')
 intact=$(grep -c '^claude	{.*}$' "$logdir/11.ndjson" 2>/dev/null || true)
 pass "동시 append(줄당 $fat_size B x $runs, 온전한 줄 $intact/$runs)"
 
-echo "OK: 훅 커맨드가 실제 셸에서 계약 6개를 지킨다"
+echo "OK: 훅 커맨드가 실제 셸에서 계약 $checks 개를 지킨다"

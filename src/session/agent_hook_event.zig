@@ -280,7 +280,10 @@ fn isProviderChar(c: u8) bool {
 }
 
 /// 토큰이 provider 이름 모양인가 — 비어 있지 않고, 짧고, 소문자·숫자·하이픈뿐인가.
-fn looksLikeProvider(token: []const u8) bool {
+///
+/// 커맨드 빌더도 같은 규칙으로 입력을 검증한다 — 두 곳이 다른 기준을 쓰면 «훅은 적었는데 파서는 못 읽는»
+/// 이름이 생긴다.
+pub fn looksLikeProvider(token: []const u8) bool {
     if (token.len == 0 or token.len > max_provider_len) return false;
     for (token) |c| {
         if (!isProviderChar(c)) return false;

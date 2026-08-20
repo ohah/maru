@@ -3084,3 +3084,76 @@ test "컨트롤 채널의 모르는 요청에도 want_reply 면 답한다" {
     const step = try feedChannelBuffers(&c, wr.written(), &out, &scr, &ctl);
     try testing.expect(std.mem.indexOf(u8, step.wire, &[_]u8{ channel.msg_channel_failure, 0, 0, 0, 77 }) != null);
 }
+
+test "한 feed 안에 두 채널의 데이터가 섞여 와도 각자 간다" {
+    // 실서버는 두 채널의 패킷을 **한 TCP 조각에 섞어** 보낸다. 라우팅이 상태에 의존하면(예:
+    // "마지막으로 본 채널") 이 자리에서 갈린다 — 우리는 받은 번호로만 고르므로 순서가 어떻든
+    // 같아야 한다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    // **한 패킷 몫만 주면 한 번에 하나씩만 간다**(배압 규칙이 그렇다 — 화면 버퍼도 같다).
+    // 여러 패킷을 한 걸음에 처리하려면 그만큼 여유가 있어야 한다.
+    var ctl: [128 * 1024]u8 = undefined;
+    var buf: [256]u8 = undefined;
+    var pkt: [8192]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(31);
+
+    var n: usize = 0;
+    n += try packet.write(pkt[n..], try channelData(&buf, control_local_id, "{\"a\":1}\n"), prng.random());
+    n += try packet.write(pkt[n..], try channelData(&buf, shell_local_id, "screen1"), prng.random());
+    n += try packet.write(pkt[n..], try channelData(&buf, control_local_id, "{\"b\":2}\n"), prng.random());
+    n += try packet.write(pkt[n..], try channelData(&buf, shell_local_id, "screen2"), prng.random());
+
+    const step = try c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl });
+    try testing.expectEqual(n, step.consumed);
+    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n", step.control);
+    try testing.expectEqualStrings("screen1screen2", step.screen);
+}
+
+test "같은 feed 안에서 컨트롤이 닫히고 터미널 데이터가 이어져도 잃지 않는다" {
+    // 두 사건이 한 조각에 오면, 닫힘 처리가 루프를 끊거나 상태를 잘못 옮길 때 **뒤에 온 화면
+    // 바이트가 사라진다**. 사라진 바이트는 "가끔 글자가 빠진다" 로만 보인다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var buf: [256]u8 = undefined;
+    var pkt: [8192]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(32);
+
+    var close_buf: [16]u8 = undefined;
+    var cw = wire.Writer.init(&close_buf);
+    try cw.byte(channel.msg_channel_close);
+    try cw.u32be(control_local_id);
+
+    var n: usize = 0;
+    n += try packet.write(pkt[n..], cw.written(), prng.random());
+    n += try packet.write(pkt[n..], try channelData(&buf, shell_local_id, "after"), prng.random());
+
+    const step = try c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl });
+    try testing.expectEqual(ControlState.closed, c.controlState());
+    try testing.expectEqualStrings("after", step.screen);
+    try testing.expect(step.state != .closed);
+}
+
+test "열지 않은 채널 번호로 온 메시지는 받지 않는다" {
+    // 우리가 연 번호는 둘뿐이다(터미널 0·컨트롤 1). 그 밖의 번호로 온 채널 메시지는 프로토콜
+    // 위반이라 거절한다 — 조용히 삼키면 **어느 흐름의 바이트인지 모르는 채로** 화면이나 wire 에
+    // 섞일 길이 생긴다.
+    //
+    // (변이 검사 메모: 라우팅 조건을 `!= shell` 로 바꿔도 결과가 같다 — 어느 채널이 받든
+    //  자기 번호가 아니면 거절하기 때문이다. 그 변이는 **동등**이고, 그것이 이 설계의 안전판이다.)
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [64 * 1024]u8 = undefined;
+    var buf: [256]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(33);
+    const n = try packet.write(&pkt, try channelData(&buf, 9, "nope"), prng.random());
+    try testing.expectError(
+        Error.UnexpectedMessage,
+        c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl }),
+    );
+}

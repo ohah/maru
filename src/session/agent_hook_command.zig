@@ -315,11 +315,12 @@ test "세트의 모든 이벤트를 파서가 안다 — 한쪽만 늘면 그 �
         try line.append(testing.allocator, event.field_separator);
         try line.print(testing.allocator, "{{\"hook_event_name\":\"{s}\"}}", .{e.name});
         const ev = event.parseLine(line.items) orelse {
-            std.debug.print("\n세트의 이벤트를 파싱하지 못했다: {s}\n", .{e.name});
+            // 진단 메시지는 영어로 둔다 — CI 로그를 사람과 스크립트가 함께 읽고, 원장(§7.2)을 늘리지 않는다.
+            std.debug.print("\nhook event in the set failed to parse: {s}\n", .{e.name});
             return error.TestUnexpectedResult;
         };
         if (ev.kind == .unknown) {
-            std.debug.print("\n파서가 모르는 이벤트가 세트에 있다: {s}\n", .{e.name});
+            std.debug.print("\nset has an event the parser does not know: {s}\n", .{e.name});
             return error.TestUnexpectedResult;
         }
     }

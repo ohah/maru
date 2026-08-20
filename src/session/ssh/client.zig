@@ -116,6 +116,18 @@ pub const ControlState = enum {
     closed,
 };
 
+/// 컨트롤 채널이 광고하는 **최대 패킷**. 터미널(32KiB)보다 작게 잡는다.
+///
+/// **버퍼를 대는 쪽이 모바일이기 때문이다.** 받는 쪽 상한은 우리가 정하는 값이고(§5.1),
+/// 호출자는 이 값 이상의 버퍼를 대야 한다(계약 §3.4.1). 터미널과 같은 32KiB 를 광고하면 폰의
+/// 세션 하나가 그만큼 더 든다 — 컨트롤로 오는 것은 ndjson 줄이라 큰 패킷이 이득도 아니다.
+/// 큰 답은 이 크기로 **여러 번** 나뉘어 온다.
+pub const control_max_packet: u32 = 8 * 1024;
+
+/// 컨트롤 채널이 광고하는 **윈도**. 터미널(2MiB)보다 작게 잡는다 — 같은 이유이고, 보충은
+/// 절반에서 자동으로 나간다(`pendingWindowAdjust`).
+pub const control_window: u32 = 256 * 1024;
+
 /// 컨트롤 채널이 돌릴 명령의 최대 길이. 절대경로 + 인자 한둘이면 충분하고, 넘으면 조용히 자르지
 /// 않고 거절한다 — 잘린 명령은 **다른 명령**이다.
 pub const max_control_command = 512;
@@ -545,11 +557,13 @@ pub const Client = struct {
         self.control_cmd_len = command.len;
         self.control_exit_status = null;
         self.control_stderr_len = 0;
-        var ctl: channel.Channel = .{};
-        if (self.opts.window != 0) {
-            ctl.local_window_max = self.opts.window;
-            ctl.local_window = self.opts.window;
-        }
+        // **터미널 옵션(`Options.window`)을 따르지 않는다** — 그 값은 화면 흐름을 위한 것이고,
+        // 이 채널은 다른 성질(작은 줄이 자주)이다.
+        var ctl: channel.Channel = .{
+            .local_window = control_window,
+            .local_window_max = control_window,
+            .local_max_packet = control_max_packet,
+        };
         var buf: [256]u8 = undefined;
         var w: Out = .{ .buf = wire_out };
         const payload = try ctl.writeOpen(&buf, control_local_id);
@@ -2979,9 +2993,10 @@ test "컨트롤 버퍼가 차면 죽지 않고 멈춘다" {
     var out: [8192]u8 = undefined;
     var c = try controlOpenedClient(&out);
     var scr: [64 * 1024]u8 = undefined;
-    var ctl: [32 * 1024]u8 = undefined; // 20KiB 하나는 담고 둘은 못 담는다
+    // 컨트롤 채널의 한 패킷 몫(`control_max_packet`)보다 크되 둘은 못 담는 크기.
+    var ctl: [12 * 1024]u8 = undefined;
 
-    const chunk = 20 * 1024;
+    const chunk = 7 * 1024;
     var data: [chunk]u8 = @splat('x');
     var buf: [64 * 1024]u8 = undefined;
     var pkt: [128 * 1024]u8 = undefined;
@@ -3059,7 +3074,7 @@ test "컨트롤 채널도 윈도를 보충한다" {
     var ctl: [32 * 1024]u8 = undefined;
 
     // 윈도 절반을 넘길 때까지 먹인다(기본 2MiB, 한 번에 20KiB).
-    const chunk = 20 * 1024;
+    const chunk = 7 * 1024;
     var data: [chunk]u8 = @splat('y');
     var buf: [64 * 1024]u8 = undefined;
     var pkt: [64 * 1024]u8 = undefined;

@@ -181,6 +181,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const marker = it.next() orelse return fail("화면에서 찾을 문자열을 인자로 준다");
     // 0 이면 받기만 한다. 크면 그만큼 **보내고** 그대로 돌아오는지 본다(서버가 `cat` 인 회차).
     const send_bytes = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+    // **컨트롤 회차(S10b-2).** 같은 연결에 채널을 하나 더 열고 pty 없이 명령을 돌린다 —
+    // `maru_mobile_ssh_*control*` 만으로. 코어 스모크가 같은 것을 코어로 재지만, 그 사이에 낀
+    // ABI 는 한 줄도 안 지난다(그것을 가르려고 이 드라이버가 있다).
+    const mode = it.next() orelse "";
+    const want_control = std.mem.eql(u8, mode, "control");
     const port = try std.fmt.parseInt(u16, port_str, 10);
 
     // **에코 회차는 pty 를 안 쓴다.** pty 를 붙이면 라인 디시플린이 canonical 모드라 개행 없는
@@ -251,6 +256,58 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (!ready) return fail("셸이 안 떴다");
     say("셸 준비됨 (ABI 만으로)", .{});
+
+    if (want_control) {
+        const cmd = "echo MARU_ABI_CONTROL_OK";
+        if (abi.maru_mobile_ssh_open_control(h, cmd, cmd.len) != abi.ok) {
+            say("open_control error={s}", .{std.mem.span(abi.maru_mobile_ssh_last_error(h))});
+            return fail("컨트롤 채널을 못 열었다");
+        }
+        try flush(h);
+
+        const want = "MARU_ABI_CONTROL_OK";
+        var spins: usize = 0;
+        while (spins < 200_000) : (spins += 1) {
+            const len = abi.maru_mobile_ssh_control_len(h);
+            if (len >= want.len) {
+                const ptr = abi.maru_mobile_ssh_control_ptr(h);
+                if (std.mem.indexOf(u8, ptr[0..len], want) != null) break;
+            }
+            if (abi.maru_mobile_ssh_state(h) == 12) return fail("컨트롤을 여는 동안 세션이 닫혔다");
+            const n = sock.read(in_buf[in_len..]) catch |e| switch (e) {
+                error.Closed, error.Stalled => break,
+                else => return e,
+            };
+            in_len += n;
+            _ = try pump(h);
+        }
+
+        const len = abi.maru_mobile_ssh_control_len(h);
+        const ptr = abi.maru_mobile_ssh_control_ptr(h);
+        if (len == 0 or std.mem.indexOf(u8, ptr[0..len], want) == null) {
+            say("컨트롤 {d}B, 상태={d}, stderr={s}", .{
+                len, abi.maru_mobile_ssh_control_state(h), std.mem.span(abi.maru_mobile_ssh_control_stderr(h)),
+            });
+            return fail("컨트롤 바이트가 ABI 를 안 지났다");
+        }
+        // **화면과 안 섞였다** — 섞이면 ndjson 파서가 사람 화면을 읽게 된다(계약 §4a).
+        if (std.mem.indexOf(u8, screen_head[0..screen_head_len], want) != null) {
+            return fail("컨트롤 출력이 화면 바이트에도 섞였다");
+        }
+        say("컨트롤 {d}B 받았다 — 화면과 안 섞였다", .{len});
+
+        // **가져가면 사라진다.** 이 규약이 ABI 를 지나는지도 여기서 본다.
+        if (abi.maru_mobile_ssh_control_consume(h, len) != abi.ok) return fail("consume 이 실패했다");
+        if (abi.maru_mobile_ssh_control_len(h) != 0) return fail("가져갔는데 안 줄었다");
+
+        // **터미널은 그대로 산다** — 이것이 이 회차의 절반이다.
+        if (abi.maru_mobile_ssh_state(h) == 12) return fail("컨트롤 때문에 세션이 닫혔다");
+        var sent: u32 = 0;
+        if (abi.maru_mobile_ssh_write(h, "\n", 1, &sent) != abi.ok) return fail("터미널로 못 쓴다");
+        say("터미널은 그대로 산다 (state={d})", .{abi.maru_mobile_ssh_state(h)});
+        say("OK", .{});
+        return;
+    }
 
     if (send_bytes > 0) {
         // **보내는 쪽도 ABI 를 지난다.** 상대가 허락한 만큼만 나가므로(흐름 제어) 못 보낸 만큼은

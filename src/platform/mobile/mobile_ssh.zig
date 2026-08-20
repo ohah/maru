@@ -15,6 +15,10 @@
 const std = @import("std");
 const maru = @import("maru");
 const client = maru.session.ssh.client;
+/// **계약 테스트가 서버 답을 지어내는 데 쓴다.** 그쪽은 `maru` 모듈을 못 보고(이 파일만 본다),
+/// 바이트를 손으로 적으면 프레이밍이 바뀔 때 테스트만 조용히 낡는다.
+pub const test_wire = maru.session.ssh.wire;
+pub const test_packet = maru.session.ssh.packet;
 const private_key = maru.session.ssh.private_key;
 const userauth = maru.session.ssh.userauth;
 const hostkey = maru.session.ssh.hostkey;
@@ -28,6 +32,19 @@ pub const max_user = 64;
 pub const max_term = 32;
 pub const out_bytes = 32768;
 pub const screen_bytes = 65536;
+/// 컨트롤 채널이 받아 둘 자리. 코어가 광고하는 한 패킷(`client.control_max_packet` = 8KiB)의
+/// **두 배**다 — 한 패킷 몫만 대면 `feed` 한 번에 패킷 하나씩만 지난다(계약 §3.4.1).
+pub const control_bytes = 16384;
+/// 컨트롤 명령의 최대 길이. 코어 상한(`client.max_control_command`)과 같은 값을 든다.
+pub const control_command_bytes = 512;
+
+/// 컨트롤 채널 상태(`MARU_SSH_CONTROL_*`). **터미널 상태와 다른 축이다** — 컨트롤이 어떻게 되든
+/// 터미널은 산다(계약 §3.4.1).
+pub const control_none: u32 = 0;
+pub const control_opening: u32 = 1;
+pub const control_requesting_exec: u32 = 2;
+pub const control_ready: u32 = 3;
+pub const control_closed: u32 = 4;
 
 pub const state_invalid: u32 = 0xFFFF_FFFF;
 
@@ -60,6 +77,12 @@ const Slot = struct {
     out_len: usize = 0,
     screen: [screen_bytes]u8 = undefined,
     screen_len: usize = 0,
+    /// 컨트롤 채널의 stdout. **화면과 다른 자리여야** ndjson 파서가 사람 화면을 안 읽는다.
+    control: [control_bytes]u8 = undefined,
+    control_len: usize = 0,
+    /// 컨트롤 stderr 의 NUL 로 끝나는 사본. 코어 것은 다음 `feed` 까지만 사는 값이 아니지만
+    /// (코어 안에 남는다) host 는 C 문자열을 기대하므로 여기서 끝을 붙인다.
+    control_stderr: [288]u8 = @splat(0),
 
     /// 지문·배너·끊긴 설명·신호 이름은 **코어 안을 가리키는 값이라 다음 `feed` 까지만 산다**
     /// (계약 §3.5). host 가 나중에 읽어도 맞도록 여기 복사해 둔다.
@@ -203,11 +226,11 @@ fn copyZ(dst: []u8, src: []const u8) void {
 /// 멈추게** 해 둔다. 늘어난 필드를 여기서 챙길지 정하고 이 숫자를 옮기면 된다.
 ///
 /// 지금 안 챙기는 것: `state`(호출자가 `maru_mobile_ssh_state` 로 따로 읽는다),
-/// `consumed`(`feed` 가 그 자리에서 돌려준다), `control`(컨트롤 채널은 **ABI 에 아직 없다** —
-/// S10b-2 가 이 자리에 컨트롤 흐름을 더한다).
+/// `consumed`(`feed` 가 그 자리에서 돌려준다).
 fn absorb(s: *Slot, step: client.Step) void {
     // **아래 문구는 표시가 아니라 컴파일 진단이다**(i18n §7 — 화면에 안 간다).
     // `tests/boundary/i18n_literals.zig` 원장이 그 사실과 함께 이 한 개를 적어 둔다.
+    s.control_len += step.control.len;
     comptime {
         const fields = @typeInfo(client.Step).@"struct".fields.len;
         if (fields != 9) @compileError(
@@ -225,6 +248,12 @@ fn absorb(s: *Slot, step: client.Step) void {
         s.disconnect_reason = @intFromEnum(d.reason);
         copyZ(&s.disconnect_desc, d.description);
     }
+}
+
+/// 컨트롤 채널이 받아 둘 남은 자리. **채널을 안 열었으면 빈 슬라이스여도 된다** — 코어가
+/// 살아 있는 채널에만 자리를 요구한다(계약 §3.4.1).
+fn controlFree(s: *Slot) []u8 {
+    return s.control[s.control_len..];
 }
 
 /// 선에 낼 자리. **한 걸음이 필요한 만큼 없으면 배압이다**(계약 §3.5).
@@ -515,7 +544,11 @@ pub export fn maru_mobile_ssh_feed(handle: u32, bytes: [*]const u8, len: u32, co
     // 같은 검사를 또 하면 두 벌이 되어 갈리고(코어가 상한을 바꾸면 이쪽만 옛 값이다), 이름도
     // 안 남아 §5 의 "왜 실패했나" 가 사라진다. 그 오류를 `MARU_SSH_ERR_BUFFER` 로 낮춘다 —
     // **오류가 아니라 배압이다**: 비우고 다시 부르면 된다.
-    const step = s.cl.feed(bytes[0..len], outFree(s), screenFree(s)) catch |e| {
+    const step = s.cl.feedBuffers(bytes[0..len], .{
+        .wire = outFree(s),
+        .screen = screenFree(s),
+        .control = controlFree(s),
+    }) catch |e| {
         setError(s, @errorName(e));
         return statusOf(e);
     };
@@ -609,6 +642,112 @@ pub export fn maru_mobile_ssh_screen_consume(handle: u32, n: u32) c_int {
     std.mem.copyForwards(u8, s.screen[0 .. s.screen_len - n], s.screen[n..s.screen_len]);
     s.screen_len -= n;
     return ok;
+}
+
+/// **두 번째 채널을 연다** — 원격에서 명령 하나를 돌린다(계약 [컨트롤 플레인 §4a]).
+///
+/// **터미널이 떠 있어야 한다**(`MARU_SSH_STATE_READY`). 재키잉 중이면 아무것도 안 나가고
+/// 상태도 안 옮긴다 — 그때는 `MARU_SSH_ERR_NOT_READY` 로 알려 host 가 **다시 부르게** 한다.
+/// 조용히 성공을 돌려주면 host 는 열렸다고 믿는데 선에는 아무것도 없다.
+pub export fn maru_mobile_ssh_open_control(handle: u32, cmd: [*]const u8, cmd_len: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    if (cmd_len == 0 or cmd_len > control_command_bytes) return err_bad_arg;
+    const before = s.cl.controlState();
+    const bytes = s.cl.openControl(cmd[0..cmd_len], outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += bytes.len;
+    // **안 나갔으면 안 열린 것이다.** 재키잉 중이 그 자리다(코어가 0 바이트를 돌려준다).
+    if (bytes.len == 0 and s.cl.controlState() == before) {
+        setError(s, "ssh_rekeying");
+        return err_not_ready;
+    }
+    return ok;
+}
+
+/// 컨트롤 채널로 보낸다(ndjson 한 조각). 터미널 `write` 와 같은 규약이다 — **보낸 만큼**을
+/// 알려 주고 나머지는 host 가 다시 준다.
+pub export fn maru_mobile_ssh_write_control(handle: u32, bytes: [*]const u8, len: u32, sent: *u32) c_int {
+    sent.* = 0;
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const room = outFree(s).len;
+    if (room <= frame_overhead) {
+        setError(s, "ssh_out_full");
+        return err_buffer;
+    }
+    const cut = @min(@as(usize, len), room - frame_overhead);
+    const r = s.cl.writeControl(bytes[0..cut], outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += r.wire.len;
+    sent.* = @intCast(r.sent);
+    return ok;
+}
+
+/// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
+pub export fn maru_mobile_ssh_close_control(handle: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const bytes = s.cl.closeControl(outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += bytes.len;
+    return ok;
+}
+
+/// 컨트롤 채널이 어디까지 왔나(`MARU_SSH_CONTROL_*`). 핸들이 틀리면 `MARU_SSH_STATE_INVALID`.
+pub export fn maru_mobile_ssh_control_state(handle: u32) u32 {
+    const s = slotOf(handle) orelse return state_invalid;
+    return switch (s.cl.controlState()) {
+        .none => control_none,
+        .opening => control_opening,
+        .requesting_exec => control_requesting_exec,
+        .ready => control_ready,
+        .closed => control_closed,
+    };
+}
+
+pub export fn maru_mobile_ssh_control_ptr(handle: u32) [*]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    return &s.control;
+}
+
+pub export fn maru_mobile_ssh_control_len(handle: u32) u32 {
+    const s = slotOf(handle) orelse return 0;
+    return @intCast(s.control_len);
+}
+
+/// 가져간 만큼 지운다. **`n` 이 있는 것보다 크면 아무것도 안 지우고 실패다** — 조용히 다 지우면
+/// 아직 안 읽은 줄이 사라진다.
+pub export fn maru_mobile_ssh_control_consume(handle: u32, n: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    if (n > s.control_len) return err_bad_arg;
+    std.mem.copyForwards(u8, s.control[0 .. s.control_len - n], s.control[n..s.control_len]);
+    s.control_len -= n;
+    return ok;
+}
+
+/// 컨트롤 명령의 종료 코드. **`127` 이면 그 서버에 `maru` 가 없다**(계약 §4a).
+/// 아직 안 끝났으면 `MARU_SSH_ERR_NOT_READY`.
+pub export fn maru_mobile_ssh_control_exit_status(handle: u32, code: *u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const got = s.cl.controlExitStatus() orelse return err_not_ready;
+    code.* = got;
+    return ok;
+}
+
+/// 컨트롤 명령이 stderr 로 낸 첫 조각(진단용, NUL 로 끝난다). 비어 있을 수 있다.
+///
+/// **화면에도 wire 에도 안 섞인 것이다**(계약 §4a) — 사용자에게 "왜 안 되나" 를 말할 유일한 재료다.
+pub export fn maru_mobile_ssh_control_stderr(handle: u32) [*:0]const u8 {
+    const s = slotOf(handle) orelse return &empty;
+    const src = s.cl.controlStderr();
+    const n = @min(src.len, s.control_stderr.len - 1);
+    @memcpy(s.control_stderr[0..n], src[0..n]);
+    s.control_stderr[n] = 0;
+    return @ptrCast(&s.control_stderr);
 }
 
 pub export fn maru_mobile_ssh_host_key_fingerprint(handle: u32) [*:0]const u8 {

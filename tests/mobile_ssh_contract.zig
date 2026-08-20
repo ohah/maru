@@ -7,6 +7,8 @@
 const std = @import("std");
 const ssh = @import("mobile_ssh");
 const testing = std.testing;
+const wire = ssh.test_wire;
+const packet = ssh.test_packet;
 
 const header = @embedFile("mobile_ssh_abi_for_test");
 
@@ -549,6 +551,12 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
         "maru_mobile_ssh_rekeys",                 "maru_mobile_ssh_generate_key",
         "maru_mobile_ssh_public_key_line",        "maru_mobile_ssh_password",
+        // 컨트롤 채널(S10b-2) — 터미널과 **다른 축**이라 이름도 흐름도 따로다.
+        "maru_mobile_ssh_open_control",           "maru_mobile_ssh_write_control",
+        "maru_mobile_ssh_close_control",          "maru_mobile_ssh_control_state",
+        "maru_mobile_ssh_control_ptr",            "maru_mobile_ssh_control_len",
+        "maru_mobile_ssh_control_consume",        "maru_mobile_ssh_control_exit_status",
+        "maru_mobile_ssh_control_stderr",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -760,4 +768,226 @@ test "키 없이도 연다 — 그때는 none 으로 묻는다" {
     try testing.expectEqual(@as(?[64]u8, null), ssh.slots[index].cl.opts.secret_key);
     // 버전 줄은 그대로 나간다(키와 무관한 걸음이다).
     try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
+}
+
+// ---- 컨트롤 채널(S10b-2) ----------------------------------------------------
+//
+// 코어가 채널 둘을 드는 것은 S10b-1 이 냈고, 여기서는 **그것이 ABI 를 지나오는지**를 잰다.
+// 기기에서 "안 된다" 가 났을 때 가장 비싼 물음이 프로토콜 탓이냐 배선 탓이냐이고, 그 사이에 낀
+// 이 층이 안 재어지면 그 물음을 못 가른다.
+
+/// 컨트롤 채널까지 연 세션. 서버 답은 **평문 패킷**으로 먹인다(전송기는 established 라 그대로 읽는다).
+fn openReadyWithControl() !u32 {
+    const h = try openReady();
+    const s = &ssh.slots[(h & 0xFFFF) - 1];
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open_control(h, "maru control --stdio", 20));
+    try testing.expectEqual(ssh.control_opening, ssh.maru_mobile_ssh_control_state(h));
+    s.out_len = 0; // 여느라 나간 바이트는 이 테스트의 관심이 아니다
+
+    var payload: [64]u8 = undefined;
+    var w = wire.Writer.init(&payload);
+    try w.byte(91); // CHANNEL_OPEN_CONFIRMATION
+    try w.u32be(1); // 우리 컨트롤 번호
+    try w.u32be(77);
+    try w.u32be(1 << 20);
+    try w.u32be(32768);
+    try feedPlain(h, w.written());
+
+    var ok_payload: [16]u8 = undefined;
+    var ow = wire.Writer.init(&ok_payload);
+    try ow.byte(99); // CHANNEL_SUCCESS
+    try ow.u32be(1);
+    try feedPlain(h, ow.written());
+    try testing.expectEqual(ssh.control_ready, ssh.maru_mobile_ssh_control_state(h));
+    s.out_len = 0;
+    return h;
+}
+
+fn feedPlain(h: u32, payload: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const n = try packet.write(&buf, payload, prng.random());
+    var consumed: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_feed(h, &buf, @intCast(n), &consumed));
+    try testing.expectEqual(@as(u32, @intCast(n)), consumed);
+}
+
+fn controlData(buf: []u8, data: []const u8) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.byte(94); // CHANNEL_DATA
+    try w.u32be(1);
+    try w.string(data);
+    return w.written();
+}
+
+test "컨트롤 바이트는 화면과 다른 자리로 온다" {
+    // **이 층에서 섞이면 코어가 갈라 놓은 것이 소용없다.** 한 흐름으로 합치는 배선 실수는
+    // 컴파일로 안 잡히고, 기기에서는 "ndjson 이 가끔 깨진다" 로만 보인다.
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    var buf: [256]u8 = undefined;
+    try feedPlain(h, try controlData(&buf, "{\"jsonrpc\":\"2.0\"}\n"));
+    try testing.expectEqual(@as(u32, 18), ssh.maru_mobile_ssh_control_len(h));
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_screen_len(h));
+
+    const ptr = ssh.maru_mobile_ssh_control_ptr(h);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\"}\n", ptr[0..18]);
+
+    // 터미널 바이트는 반대쪽으로 간다.
+    var sbuf: [64]u8 = undefined;
+    var sw = wire.Writer.init(&sbuf);
+    try sw.byte(94);
+    try sw.u32be(0);
+    try sw.string("hi");
+    try feedPlain(h, sw.written());
+    try testing.expectEqual(@as(u32, 2), ssh.maru_mobile_ssh_screen_len(h));
+    try testing.expectEqual(@as(u32, 18), ssh.maru_mobile_ssh_control_len(h)); // 그대로다
+}
+
+test "컨트롤도 가져가지 않으면 멈춘다 — 잃지 않는다" {
+    // 화면·선과 같은 규약이다. 여기만 규약이 다르면 host 가 한 축에서만 배압을 다루게 된다.
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    const s = &ssh.slots[(h & 0xFFFF) - 1];
+
+    s.control_len = ssh.control_bytes; // 안 가져갔다
+    var buf: [256]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(9);
+    const n = try packet.write(&pkt, try controlData(&buf, "{}\n"), prng.random());
+    var consumed: u32 = 0xFFFF;
+    try testing.expectEqual(ssh.err_buffer, ssh.maru_mobile_ssh_feed(h, &pkt, @intCast(n), &consumed));
+    try testing.expectEqual(@as(u32, 0), consumed); // 한 바이트도 안 먹었다
+
+    // 비우면 다시 돈다.
+    s.control_len = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_feed(h, &pkt, @intCast(n), &consumed));
+    try testing.expectEqual(@as(u32, 3), ssh.maru_mobile_ssh_control_len(h));
+}
+
+test "컨트롤 consume 은 가져간 만큼만 지운다" {
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    var buf: [256]u8 = undefined;
+    try feedPlain(h, try controlData(&buf, "abcdef"));
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_control_consume(h, 7)); // 있는 것보다 크다
+    try testing.expectEqual(@as(u32, 6), ssh.maru_mobile_ssh_control_len(h)); // 안 지웠다
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_control_consume(h, 2));
+    try testing.expectEqual(@as(u32, 4), ssh.maru_mobile_ssh_control_len(h));
+    const ptr = ssh.maru_mobile_ssh_control_ptr(h);
+    try testing.expectEqualStrings("cdef", ptr[0..4]);
+}
+
+test "컨트롤로 쓴 것은 선 버퍼로 나간다" {
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    var sent: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_write_control(h, "{\"m\":1}\n", 8, &sent));
+    try testing.expectEqual(@as(u32, 8), sent);
+    try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
+}
+
+test "127 은 컨트롤 쪽 코드로 온다 — 터미널 것과 안 섞인다" {
+    // 계약 §4a 가 이 값으로 "그 서버에 maru 가 없다" 를 판정한다. 터미널 `exit_status` 와
+    // 한 자리에 담으면 셸 종료와 구별이 안 된다.
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    var code: u32 = 0xFFFF;
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_control_exit_status(h, &code));
+
+    var buf: [128]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(98); // CHANNEL_REQUEST
+    try w.u32be(1);
+    try w.string("exit-status");
+    try w.boolean(false);
+    try w.u32be(127);
+    try feedPlain(h, w.written());
+
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_control_exit_status(h, &code));
+    try testing.expectEqual(@as(u32, 127), code);
+    // 터미널 쪽은 여전히 "안 끝났다" 다.
+    var shell_code: u32 = 0;
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_exit_status(h, &shell_code));
+}
+
+test "컨트롤 stderr 는 NUL 로 끝나는 사본으로 온다" {
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    var buf: [128]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(95); // CHANNEL_EXTENDED_DATA
+    try w.u32be(1);
+    try w.u32be(1); // stderr
+    try w.string("maru: command not found\n");
+    try feedPlain(h, w.written());
+
+    const msg = ssh.maru_mobile_ssh_control_stderr(h);
+    try testing.expectEqualStrings("maru: command not found\n", std.mem.span(msg));
+    // **화면에도 컨트롤 흐름에도 안 섞였다.**
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_control_len(h));
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_screen_len(h));
+}
+
+test "컨트롤 채널이 닫혀도 터미널은 산다" {
+    const h = try openReadyWithControl();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+
+    var buf: [64]u8 = undefined;
+    var w = wire.Writer.init(&buf);
+    try w.byte(97); // CHANNEL_CLOSE
+    try w.u32be(1);
+    try feedPlain(h, w.written());
+
+    try testing.expectEqual(ssh.control_closed, ssh.maru_mobile_ssh_control_state(h));
+    try testing.expectEqual(@as(u32, 11), ssh.maru_mobile_ssh_state(h)); // READY
+    var sent: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_write(h, "ls\n", 3, &sent));
+    try testing.expectEqual(@as(u32, 3), sent);
+}
+
+test "셸이 뜨기 전에는 컨트롤을 못 연다" {
+    var key: [64]u8 = @splat(0);
+    var seed: [32]u8 = @splat(51);
+    var h: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &key, &seed, "xterm", 5, 80, 24, 0, 1, &h));
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_open_control(h, "x", 1));
+    try testing.expectEqual(ssh.control_none, ssh.maru_mobile_ssh_control_state(h));
+}
+
+test "긴 명령·빈 명령은 자르지 않고 거절한다" {
+    const h = try openReady();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    var long: [ssh.control_command_bytes + 1]u8 = @splat('a');
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_open_control(h, &long, long.len));
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_open_control(h, &long, 0));
+    try testing.expectEqual(ssh.control_none, ssh.maru_mobile_ssh_control_state(h));
+}
+
+test "재키잉 중에는 컨트롤을 안 열고 그렇게 말한다" {
+    // 조용히 성공을 돌려주면 host 는 열렸다고 믿는데 선에는 아무것도 없다.
+    const h = try openReady();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    const s = &ssh.slots[(h & 0xFFFF) - 1];
+    try s.cl.t.beginRekey();
+    try testing.expectEqual(ssh.err_not_ready, ssh.maru_mobile_ssh_open_control(h, "x", 1));
+    try testing.expectEqual(ssh.control_none, ssh.maru_mobile_ssh_control_state(h));
+}
+
+test "핸들이 틀리면 컨트롤 쪽도 빈 것을 준다" {
+    const bad: u32 = 0xDEAD;
+    try testing.expectEqual(ssh.state_invalid, ssh.maru_mobile_ssh_control_state(bad));
+    try testing.expectEqual(@as(u32, 0), ssh.maru_mobile_ssh_control_len(bad));
+    try testing.expectEqualStrings("", std.mem.span(ssh.maru_mobile_ssh_control_stderr(bad)));
+    try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_control_consume(bad, 1));
+    var code: u32 = 0;
+    try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_control_exit_status(bad, &code));
+    var sent: u32 = 0;
+    try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_write_control(bad, "x", 1, &sent));
+    try testing.expectEqual(ssh.err_bad_handle, ssh.maru_mobile_ssh_close_control(bad));
 }

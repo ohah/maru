@@ -35,6 +35,10 @@ fn fail(comptime msg: []const u8) error{SmokeFailed} {
     return error.SmokeFailed;
 }
 
+var control_head: [4096]u8 = undefined;
+var control_head_len: usize = 0;
+var control_total: usize = 0;
+
 /// host 가 하는 일 — 화면에 넣는다. 여기서는 세고 앞부분만 보관한다.
 fn onScreen(_: ?*anyopaque, bytes: [*c]const u8, len: c_ulong) callconv(.c) void {
     const n = @min(@as(usize, @intCast(len)), screen_head.len - screen_head_len);
@@ -43,6 +47,17 @@ fn onScreen(_: ?*anyopaque, bytes: [*c]const u8, len: c_ulong) callconv(.c) void
         screen_head_len += n;
     }
     screen_total += @intCast(len);
+}
+
+/// 컨트롤 채널이 받은 바이트. **화면과 다른 자리에 쌓는다** — 한 자리에 합치면 이 회차가
+/// "안 섞였다" 를 못 잰다.
+fn onControl(_: ?*anyopaque, bytes: [*c]const u8, len: c_ulong) callconv(.c) void {
+    const n = @min(@as(usize, @intCast(len)), control_head.len - control_head_len);
+    if (n > 0) {
+        @memcpy(control_head[control_head_len..][0..n], bytes[0..n]);
+        control_head_len += n;
+    }
+    control_total += @intCast(len);
 }
 
 /// 답을 돌려줄 것이 없다(터미널 코어가 없는 스모크다). 0 을 준다.
@@ -113,6 +128,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const marker = it.next() orelse return fail("화면에서 찾을 문자열을 인자로 준다");
     // 0 이면 표시만 찾는다. 크면 **그만큼 받을 때까지** 기다린다(재키잉을 태우는 회차).
     const expect_bytes = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+    // **컨트롤 회차(S10b-2).** 펌프가 두 번째 채널을 열고 그 바이트를 **화면과 다른 훅**으로
+    // 올리는지 본다. ABI 회차는 Zig 이 소켓을 들었고, 여기서는 기기가 쓸 C 가 그 길을 지난다.
+    const want_control = std.mem.eql(u8, it.next() orelse "", "control");
     const port = try std.fmt.parseInt(u16, port_str, 10);
 
     // **키는 ABI 가 든다** — host 는 파일만 읽거나(기존 키) 씨앗을 넣어 만들게 한다(기기와 같다).
@@ -158,12 +176,54 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .screen = onScreen,
         .take_response = onTakeResponse,
         .state_changed = onState,
+        .control = onControl,
         .ctx = null,
     };
 
     if (pump.maru_ssh_pump_start(&cfg, &hooks) != 0) {
         say("시작 실패: {s}", .{std.mem.span(pump.maru_ssh_pump_error())});
         return fail("펌프를 못 띄웠다");
+    }
+
+    if (want_control) {
+        // 셸이 뜰 때까지 기다렸다가 채널을 연다 — 그 전에는 열 수 없다(계약 §3.4.1).
+        var waited: usize = 0;
+        while (waited < 30_000 and pump.maru_ssh_pump_state() != 11) : (waited += 50) sleepMs(50);
+        if (pump.maru_ssh_pump_state() != 11) return fail("셸이 안 떴다");
+
+        const cmd = "echo MARU_PUMP_CONTROL_OK";
+        // **재키잉 중이면 실패로 온다 — 다시 부른다.** 조용히 성공을 돌려주면 열린 줄 안다.
+        var tries: usize = 0;
+        while (tries < 100) : (tries += 1) {
+            if (pump.maru_ssh_pump_open_control(cmd, cmd.len) == 0) break;
+            sleepMs(50);
+        }
+        if (pump.maru_ssh_pump_control_state() == 0) return fail("컨트롤 채널을 못 열었다");
+
+        waited = 0;
+        while (waited < 30_000) : (waited += 50) {
+            if (control_total >= "MARU_PUMP_CONTROL_OK".len) break;
+            sleepMs(50);
+        }
+        const got = control_head[0..control_head_len];
+        if (std.mem.indexOf(u8, got, "MARU_PUMP_CONTROL_OK") == null) {
+            say("컨트롤 {d}B, 상태={d}, stderr={s}", .{
+                control_total, pump.maru_ssh_pump_control_state(), std.mem.span(pump.maru_ssh_pump_control_stderr()),
+            });
+            return fail("컨트롤 바이트가 펌프를 안 지났다");
+        }
+        // **화면 훅과 안 섞였다** — 섞이면 파서가 사람 화면을 읽게 된다(계약 §4a).
+        if (std.mem.indexOf(u8, screen_head[0..screen_head_len], "MARU_PUMP_CONTROL_OK") != null) {
+            return fail("컨트롤 출력이 화면 훅으로도 왔다");
+        }
+        say("컨트롤 {d}B 받았다 — 화면 훅과 안 섞였다", .{control_total});
+
+        // **터미널은 그대로 산다.**
+        if (pump.maru_ssh_pump_state() == 12) return fail("컨트롤 때문에 세션이 닫혔다");
+        pump.maru_ssh_pump_close_control();
+        pump.maru_ssh_pump_stop();
+        say("OK", .{});
+        return;
     }
 
     // **끝날 때까지 기다린다.** `ForceCommand` 가 한 줄 찍고 나가므로 세션이 스스로 닫힌다.

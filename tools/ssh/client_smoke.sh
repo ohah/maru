@@ -406,6 +406,18 @@ CONTROL_PORT=$STARTED_PORT
 "$DRIVER" "$CONTROL_PORT" "$USER_NAME" "$DIR/clientkey" 0 0 control
 ROUNDS=$((ROUNDS + 1))
 
+# 17b) **ABI 로 컨트롤 채널을 여는 회차(S10b-2).** 위 회차는 코어를 직접 부르는 드라이버가
+#      돌린다 — 그 사이에 낀 `maru_mobile_ssh_*control*` 은 한 줄도 안 지난다. 기기에서 실패했을 때
+#      프로토콜 탓인지 배선 탓인지 가르려면 이 회차가 있어야 한다(ABI 회차 9·10 과 같은 이유).
+"$ABI_DRIVER" "$CONTROL_PORT" "$USER_NAME" "$DIR/clientkey" MARU_UNUSED_MARKER 0 control
+ROUNDS=$((ROUNDS + 1))
+
+# 17c) **펌프로 컨트롤 채널을 여는 회차(S10b-2).** 기기 두 대가 그대로 링크하는 C 가 두 번째
+#      채널을 열고, 그 바이트를 **화면과 다른 훅**으로 올리는지 본다. 위 회차는 Zig 이 소켓을
+#      들었으므로 이 길(C 펌프 + 컨트롤 훅)은 여기 말고 밟는 데가 없다.
+"$PUMP_DRIVER" "$CONTROL_PORT" "$USER_NAME" "$DIR/clientkey" "$HOSTKEY_FP" MARU_UNUSED_MARKER 0 control
+ROUNDS=$((ROUNDS + 1))
+
 # 18) **없는 명령 회차.** 계약 §4a 는 "`maru` 가 없어도 채널 요청은 성공하고 셸이 127 을 내며
 #     그것은 `exit-status` 로 온다" 고 적었다 — `CHANNEL_FAILURE` 를 기다리면 영영 안 온다.
 #     그 값이 실서버에서 정말 그렇게 오는지는 실측이라야 안다.
@@ -415,8 +427,8 @@ ROUNDS=$((ROUNDS + 1))
 # **회차 수를 못박는다.** 이 스모크에서 "조용히 통과" 가 네 번 나왔다(보충 0 회 · SKIP · 포트 충돌 ·
 # 스크립트 버그). 그때마다 개별로 막았지만, 그 부류는 **아직 생각 못 한 이유로 또 생긴다**. 세 회차가
 # 다 돌지 않으면 왜든 실패라고 여기서 한 번에 막는다.
-if [ "$ROUNDS" -ne 18 ]; then
-	echo "[ssh-client-smoke] FAIL: 회차가 18 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
+if [ "$ROUNDS" -ne 20 ]; then
+	echo "[ssh-client-smoke] FAIL: 회차가 20 이 아니라 $ROUNDS 이다 — 조용히 건너뛴 자리가 있다" >&2
 	exit 1
 fi
-echo "[ssh-client-smoke] 열여덟 회차 완주"
+echo "[ssh-client-smoke] 스무 회차 완주"

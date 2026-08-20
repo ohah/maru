@@ -10874,6 +10874,24 @@ pub const AppSession = struct {
         // 더블클릭이 같은 동작을 두 번 일으킨다. 여기서는 "터미널 것이 아니다"만 말하고 소비한다.
         if ((kind == 4 or kind == 5) and dock_ops.dockVisible(self) and
             layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) return;
+        // **편집기 본문의 더블·트리플 클릭**(§4.1g). `pxToCell` **앞**이어야 한다 — 그 함수는 영역
+        // 밖 좌표를 터미널 grid 안으로 **clamp**하므로, 편집기 pane 좌표도 유효한 (row, col)이 되어
+        // 아래 `select_word`/`select_line`이 터미널에 블록을 그린다(도크가 그 부류로 제보된 적이
+        // 있다 — 바로 위 문단). down(1)은 여기 안 온다: pane 라우팅이 이미 잡았다.
+        if (kind == 4 or kind == 5) {
+            var dbl_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+            defer dbl_rects.deinit(self.allocator);
+            if (tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &dbl_rects)) |_| {
+                if (Model.paneAtPoint(dbl_rects.items, x_px, y_px)) |pane| {
+                    if (editor_ops.selectWordOrLineAt(self, pane, kind == 5, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
+                }
+            } else |_| {}
+        }
         const cell = self.pxToCell(x_px, y_px) orelse {
             // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
             // 멈춘다(안 그러면 mouseUp이 좌표 손상으로 와도 autoscroll이 frame-loop로 영원히 돈다).

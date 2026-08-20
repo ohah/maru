@@ -16,6 +16,40 @@ const std = @import("std");
 ///
 /// 이 값이 없으면 드래그 중에 "원래 무엇을 잡았는지"를 알 수 없어 항상 글자 단위가 된다.
 /// VSCode의 `SelectionStartKind`에 대응한다.
+/// 이 byte가 **낱말 글자**인가. 소스 코드 기준이다 — 식별자를 이루는 것(영숫자·`_`·`$`)과 ASCII
+/// 밖(한글·CJK·이모지)이 낱말이고 나머지는 구분자다.
+///
+/// **주소창(`text_field.zig`)과 규칙이 다른 것이 맞다.** 그쪽은 URL이라 `/`·`.`·`?`가 의미 있는
+/// 경계이지만, 코드에서 `foo.bar()`를 더블클릭하면 `foo`만 잡히기를 기대한다. VSCode도 에디터와
+/// 입력 위젯의 단어 규칙을 따로 둔다(`wordCharacterClass` vs 위젯 기본값).
+///
+/// **ASCII 밖을 통째로 낱말로 치는 것은 근사다.** 한글 `안녕하세요`를 더블클릭하면 전체가 잡히는데,
+/// 형태소 경계를 아는 것이 옳지만 그것은 ICU 급 사전이 필요하다. CJK를 구분자로 치면 한 글자씩만
+/// 잡혀 훨씬 나쁘다 — 그래서 이쪽으로 근사한다(VSCode도 CJK를 한 덩어리로 잡는다).
+fn isWordByte(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or
+        (b >= '0' and b <= '9') or b == '_' or b == '$' or b >= 0x80;
+}
+
+/// `offset`이 놓인 **낱말의 범위**. 구분자 위면 그 구분자 하나만 잡는다(빈 범위를 주지 않는다 —
+/// 더블클릭이 아무 일도 안 하면 사용자는 클릭이 씹힌 것으로 읽는다).
+///
+/// **UTF-8 경계로 스냅하지 않는다.** `isWordByte`가 이어 byte(`0x80` 이상)를 전부 낱말로 치므로
+/// 다중 byte 글자는 통째로 한 덩어리에 들어간다 — 중간에서 끊길 수 없다.
+pub fn wordRangeAt(bytes: []const u8, offset: usize) struct { lo: usize, hi: usize } {
+    if (bytes.len == 0) return .{ .lo = 0, .hi = 0 };
+    const at = @min(offset, bytes.len);
+    // 줄 끝(또는 문서 끝)을 눌렀으면 **앞** 글자를 본다 — 그 자리에는 글자가 없다.
+    const probe = if (at == bytes.len or at == 0) (if (at == 0) at else at - 1) else at;
+    const word = isWordByte(bytes[probe]);
+
+    var lo = probe;
+    while (lo > 0 and isWordByte(bytes[lo - 1]) == word) lo -= 1;
+    var hi = probe + 1;
+    while (hi < bytes.len and isWordByte(bytes[hi]) == word) hi += 1;
+    return .{ .lo = lo, .hi = hi };
+}
+
 pub const AnchorKind = enum {
     /// 단순 클릭·키보드 이동. anchor 범위가 비어 있다.
     simple,

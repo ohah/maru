@@ -399,7 +399,8 @@ test "조립: 실서버가 하는 대로 — 초기 윈도 0 · 답보다 먼저
     try w8.u32be(0);
     try std.testing.expect((try ch.receive(w8.written())) == .closed);
     _ = try ch.writeClose(&out);
-    try std.testing.expectEqual(channel.State.close_sent, ch.state);
+    // 상대 것을 받고 우리도 보냈다 — §5.3 대로 닫힌 것이다.
+    try std.testing.expectEqual(channel.State.closed, ch.state);
 }
 
 test "조립: 채널 층은 남의 메시지를 자기 것으로 착각하지 않는다" {

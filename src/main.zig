@@ -1479,7 +1479,14 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
     var close_requested = false;
     var frames: usize = 0;
-    while (frames < 900 and !window.quit_requested and !close_requested) : (frames += 1) {
+    // **프레임 수에 근거를 둔다.** 처음엔 900 이었는데 실측 **27 초**였다 — ⒜ 스모크가 67 ms 인 것에
+    // 견주면 400 배다. build step 은 반복해서 도는데 그때마다 창이 27 초를 차지한다(적대적 검증이 잡았다).
+    //
+    // **판정은 루프 전에 이미 끝나 있다** — 행·라벨·프레임 준비는 한 번 재고, 루프가 더하는 것은
+    // "반복 표현과 크기 변경이 견디는가" 뿐이다. 그 둘에는 120 프레임(약 3.5 초)이면 족하고, 스크린샷을
+    // 잡기에도 충분하다(캡처가 200 ms 마다 창을 찾는다).
+    const present_frames = 120;
+    while (frames < present_frames and !window.quit_requested and !close_requested) : (frames += 1) {
         for (window.poll()) |ev| switch (ev) {
             .close_requested => close_requested = true,
             // **스왑체인은 따라가야 한다.** 형제 스모크 셋이 모두 이렇게 하는데 이것만 빼먹고 있었다

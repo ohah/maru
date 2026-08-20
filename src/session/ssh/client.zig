@@ -1028,6 +1028,16 @@ pub const Client = struct {
     }
 
     fn onChannel(self: *Client, payload: []const u8, seq: u32, w: *Out, s: *Out, c: *Out) Error!void {
+        // **서버가 채널을 열자고 하면 제대로 거절한다**(§5.1). 우리는 `session` 말고는 안 열지만
+        // (계약 §3), 서버는 `x11`·`forwarded-tcpip`·`auth-agent@openssh.com` 을 열자고 할 수 있다.
+        // 예전에는 이 메시지가 "모르는 것" 으로 흘러 `UNIMPLEMENTED` 를 받았는데, 그것은 모르는
+        // **메시지 번호**용이라 상대는 답을 못 받은 셈이 되어 **열지도 닫지도 못한 채널을 붙든다**.
+        if (payload.len > 0 and payload[0] == channel.msg_channel_open) {
+            var buf: [128]u8 = undefined;
+            const sender = channel.readOpenSender(payload) catch return;
+            try self.emit(w, try channel.writeOpenFailure(&buf, sender, .unknown_channel_type));
+            return;
+        }
         if (recipientOf(payload)) |id| {
             if (id == control_local_id) return self.onControlChannel(payload, w, c);
         }
@@ -3157,4 +3167,50 @@ test "열지 않은 채널 번호로 온 메시지는 받지 않는다" {
         channel.Error.WrongChannel,
         c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr, .control = &ctl }),
     );
+}
+
+test "서버가 채널을 열자고 하면 UNIMPLEMENTED 가 아니라 OPEN_FAILURE 로 답한다" {
+    // §5.1 — "responds with either SSH_MSG_CHANNEL_OPEN_CONFIRMATION or
+    // SSH_MSG_CHANNEL_OPEN_FAILURE". 우리는 `session` 말고는 안 열지만(계약 §3), 서버는
+    // `x11`·`forwarded-tcpip`·`auth-agent@openssh.com` 을 열자고 할 수 있다.
+    //
+    // 예전에는 이 메시지가 "모르는 것" 으로 흘러 `UNIMPLEMENTED`(§11.4 — 모르는 **번호**용)를
+    // 받았다. 그러면 상대는 답을 못 받은 셈이라 **열지도 닫지도 못한 채널을 붙들고 기다린다**.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open);
+    try wr.string("x11");
+    try wr.u32be(31); // 상대가 고른 번호
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    const step = try feedChannel(&c, wr.written(), &out, &scr);
+
+    const sent = try packet.read(step.wire);
+    try testing.expectEqual(channel.msg_channel_open_failure, sent.payload[0]);
+    // **상대가 보낸 번호로 답한다** — 우리 번호가 아니다.
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 31 }, sent.payload[1..5]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 3 }, sent.payload[5..9]); // unknown channel type
+    // 세션은 그대로 산다.
+    try testing.expectEqual(State.ready, step.state);
+}
+
+test "거절 답은 우리 채널 상태를 안 건드린다" {
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open);
+    try wr.string("auth-agent@openssh.com");
+    try wr.u32be(0); // **우리 번호와 같은 값**을 보내도 우리 채널을 건드리면 안 된다
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    _ = try feedChannel(&c, wr.written(), &out, &scr);
+    try testing.expectEqual(channel.State.open, c.ch.state);
+    const r = try c.write("ls\n", &out);
+    try testing.expectEqual(@as(usize, 3), r.sent);
 }

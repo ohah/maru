@@ -1039,3 +1039,20 @@ test "순서 실수는 세션을 죽이는 코드로 안 내려간다" {
     try feedPlain(h, w.written());
     try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open_control(h, "maru control --stdio", 20));
 }
+
+test "선 버퍼가 차 있으면 컨트롤을 열지 않고 상태도 안 옮긴다" {
+    // **반쯤 연 상태가 남으면 안 된다.** 코어가 `CHANNEL_OPEN` 을 선에 못 실었는데 상태만
+    // `opening` 으로 가면, host 는 오지 않을 답을 기다리고 다시 열지도 못한다(중복 열기로 막힌다).
+    const h = try openReady();
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    const s = &ssh.slots[(h & 0xFFFF) - 1];
+    s.out_len = ssh.out_bytes; // 선 버퍼가 꽉 찼다
+
+    try testing.expectEqual(ssh.err_buffer, ssh.maru_mobile_ssh_open_control(h, "maru control --stdio", 20));
+    try testing.expectEqual(ssh.control_none, ssh.maru_mobile_ssh_control_state(h));
+
+    // 비우면 그때 열린다 — "다시 부르면 된다" 가 참이어야 한다.
+    s.out_len = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open_control(h, "maru control --stdio", 20));
+    try testing.expectEqual(ssh.control_opening, ssh.maru_mobile_ssh_control_state(h));
+}

@@ -92,6 +92,10 @@ const inventory = [_]Entry{
     // 이미 전부 `i18n` 키다). **원장은 늘 실측으로 내린다**: 남겨 두면 새 리터럴 셋이
     // 들어와도 게이트가 조용하다.
     .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 0 },
+    // **표시가 아니라 컴파일 진단이다**(§7 의 셋째 경우). `absorb` 가 `client.Step` 의 필드 수를
+    // comptime 으로 못박아 두는데, 그 `@compileError` 문구가 유일한 한국어 리터럴이다 — 사용자
+    // 화면에는 한 글자도 안 간다(빌드가 멈추면서 개발자가 읽는다).
+    .{ .path = "src/platform/mobile/mobile_ssh.zig", .count = 1 },
     .{ .path = "src/session/agent_observer.zig", .count = 3 },
     .{ .path = "src/session/agent_selection.zig", .count = 1 },
     .{ .path = "src/session/agent_statusline.zig", .count = 5 },

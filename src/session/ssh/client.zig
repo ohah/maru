@@ -419,8 +419,12 @@ pub const Client = struct {
         // **컨트롤 버퍼도 같은 대접을 받는다.** 채널을 열어 놓고 한 패킷도 못 담는 버퍼를 주면
         // 첫 데이터에서 `ShortBuffer` 로 세션이 죽는다 — 화면 쪽이 입구에서 거절하는 것과 같은
         // 이유로 여기서 거절한다(조용히 흘리지도, 도중에 죽지도 않게).
-        if (self.control) |ctl| {
-            if (bufs.control.len < ctl.local_max_packet) return Error.ShortBuffer;
+        //
+        // **살아 있는 채널만 요구한다.** 닫은 뒤에도 요구하면 목록 화면을 닫고 버퍼를 놓아준
+        // 호출자가 **그 뒤 모든 `feed` 에서 죽는다** — 이 채널은 화면을 드나들 때마다 열고 닫는
+        // 것이라 그 자리에 반드시 닿는다(적대적 검증이 잡았다).
+        if (self.controlAlive()) {
+            if (bufs.control.len < self.control.?.local_max_packet) return Error.ShortBuffer;
         }
         var w: Out = .{ .buf = wire_out };
         var s: Out = .{ .buf = screen_out };
@@ -442,8 +446,8 @@ pub const Client = struct {
             if (w.remaining() < min_wire_out or s.remaining() < self.ch.local_max_packet) break;
             // 컨트롤도 마찬가지다 — 차면 멈추고 호출자가 비운 뒤 다시 부른다. 이 줄이 없으면
             // 큰 답(프로토콜 프레임 상한 ≈1MiB)이 올 때 **오류로 죽는다**(화면은 안 그런다).
-            if (self.control) |ctl| {
-                if (c.remaining() < ctl.local_max_packet) break;
+            if (self.controlAlive()) {
+                if (c.remaining() < self.control.?.local_max_packet) break;
             }
             const before_consumed = consumed;
             const before_state = self.state;
@@ -1120,7 +1124,10 @@ pub const Client = struct {
                 self.control_state = .closed;
                 self.control_deferred_close = true;
             },
-            .data => |d| try c.append(d),
+            // **닫는 중에 온 데이터는 버린다.** `close` 를 보낸 뒤에도 상대는 아직 모르고 보낼
+            // 수 있다(§5.3). 그때 호출자는 이미 컨트롤 버퍼를 놓아줬을 수 있으므로 담으려 들면
+            // `ShortBuffer` 로 세션이 죽는다 — 받을 사람이 없는 바이트다.
+            .data => |d| if (self.control_state != .closed) try c.append(d),
             // **stderr 는 wire 가 아니다**(계약 §4a). 화면에도 안 섞고 컨트롤 흐름에도 안 섞는다 —
             // 진단으로 앞부분만 남긴다.
             .extended_data => |x| self.appendControlStderr(x.data),
@@ -1147,6 +1154,15 @@ pub const Client = struct {
         const n = @min(room, data.len);
         @memcpy(self.control_stderr_buf[self.control_stderr_len..][0..n], data[0..n]);
         self.control_stderr_len += n;
+    }
+
+    /// 컨트롤 채널이 아직 살아 있나(버퍼를 요구할 자격이 있나).
+    fn controlAlive(self: Client) bool {
+        if (self.control == null) return false;
+        return switch (self.control_state) {
+            .none, .closed => false,
+            .opening, .requesting_exec, .ready => true,
+        };
     }
 
     /// **세션은 마지막 채널이 닫혀야 닫힌다.** 터미널이 살아 있으면 컨트롤이 끝나도 세션은 산다.
@@ -2990,4 +3006,36 @@ test "clear 뒤에는 컨트롤로도 못 쓴다" {
     var c = try controlOpenedClient(&out);
     c.clear();
     try testing.expectError(Error.NotReady, c.writeControl("{}\n", &out));
+}
+
+test "컨트롤을 닫으면 그 버퍼를 더 안 요구한다" {
+    // 이 채널은 목록 화면을 드나들 때마다 열고 닫는다 — 닫은 뒤에도 버퍼를 요구하면 호출자가
+    // 그것을 놓아주는 순간 **그 뒤 모든 `feed` 가 죽는다**.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    _ = try c.closeControl(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(13);
+    var buf: [256]u8 = undefined;
+    // 컨트롤 버퍼 없이 터미널 데이터를 먹인다 — 오류가 아니어야 한다.
+    const n = try packet.write(&pkt, try channelData(&buf, shell_local_id, "hi"), prng.random());
+    const step = try c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr });
+    try testing.expectEqualStrings("hi", step.screen);
+}
+
+test "닫는 중에 온 컨트롤 데이터는 버린다" {
+    // §5.3 — `close` 를 보낸 뒤에도 상대는 아직 모르고 보낸다. 받을 사람이 없는 바이트를
+    // 담으려 들면(호출자는 이미 버퍼를 놓아줬다) 세션이 죽는다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out);
+    _ = try c.closeControl(&out);
+    var scr: [64 * 1024]u8 = undefined;
+    var pkt: [4096]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(14);
+    var buf: [256]u8 = undefined;
+    const n = try packet.write(&pkt, try channelData(&buf, control_local_id, "{}\n"), prng.random());
+    const step = try c.feedBuffers(pkt[0..n], .{ .wire = &out, .screen = &scr });
+    try testing.expectEqual(@as(usize, 0), step.control.len);
+    try testing.expect(step.state != .closed);
 }

@@ -892,6 +892,18 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    no-fail unavailable suffix로 전환하고, 마지막 runtime까지 전환된 뒤 shared Client retirement와 same-adapter replacement를
    exact 한 번 수행한다. 이 suffix에 들어간 뒤 recoverable rollback은 없으며 proof drift는 common proof-loss fail-stop이다.
 
+   CR5b-2b의 `no-fail`은 replacement node 할당을 unavailable 전환 뒤로 미룬다는 뜻이 아니다. job은 전 runtime prepared
+   authority를 재검증한 뒤, 아직 old Client와 screen이 live인 preparation 구간에서 shared admission-close/retirement-cleanup
+   receipt와 replacement node backing·node incarnation을 exact 한 번 예약한다. 이때 fresh Client는 여전히 job이 소유하며,
+   예약된 node는 Client payload를 갖지 않는 final-address `reserved` 상태다. 어느 준비가 실패해도 node와 reservation을
+   취소하고 fresh Client, old Client, runtime attachment/screen을 원상태로 보존한다. 모든 준비가 끝난 뒤 commit owner turn은
+   `(1) 전 runtime prepared authority 재검증`, `(2) 전 attachment terminalize와 stable-screen unavailable 게시`,
+   `(3) shared admission close와 old Client retirement/cleanup exact 한 번`, `(4) fresh Client를 예약 node로 no-fail move`,
+   `(5) 같은 adapter의 ClientSlot replacement exact 한 번` 순서만 수행한다. node allocation, identity 발급, allocator callback,
+   외부 callback은 이 suffix에서 0이다. 첫 sibling commit 이후의 authority drift는 rollback하거나 다음 runtime으로 계속하지 않고
+   common proof-loss로 끝낸다. 준비 receipt는 job final address·job generation·adapter/slot/current-node incarnation·old/new
+   connection generation·reservation address/generation을 봉인하고 copy/move/replay와 same-address ABA를 mutation 0으로 거부한다.
+
    replacement 게시 뒤에는 같은 immutable `PreparedClientReplacement`를 각 runtime의 observer candidate가 재검증한다. 행별
    CR4 transaction은 자기 candidate, controller evidence, mutation epoch와 publication만 소유하고 Client를 다시 교체하지 않는다.
    k번째 행이 실패하면 이미 게시된 앞선 행을 old graph로 되돌리지 않는다. 아직 전진하지 않은 행도 unavailable/closed로

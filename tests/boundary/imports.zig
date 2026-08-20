@@ -578,6 +578,9 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = client_path, .enclosing_fn = "moveToGenerationNode" },
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
             .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
+            .{ .path = slot_path, .enclosing_fn = "reserveClientReplacementNode" },
+            .{ .path = slot_path, .enclosing_fn = "preflightReservedClientReplacementNode" },
+            .{ .path = slot_path, .enclosing_fn = "publishReservedClientReplacementAfterRetirementNoFail" },
         } },
         .{ .receiver = "canRetireFromGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "retiredNodeReadyForReclaim" },
@@ -588,10 +591,12 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "bindGenerationAccountingLedger", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
             .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
+            .{ .path = slot_path, .enclosing_fn = "publishReservedClientReplacementAfterRetirementNoFail" },
         } },
         .{ .receiver = "moveToGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
             .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
+            .{ .path = slot_path, .enclosing_fn = "publishReservedClientReplacementAfterRetirementNoFail" },
         } },
         .{ .receiver = "clientProjectionAuthorityDigest", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 2 },
@@ -735,6 +740,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "bindOperationFence", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
             .{ .path = slot_path, .enclosing_fn = "prepareClientReplacement" },
+            .{ .path = slot_path, .enclosing_fn = "publishReservedClientReplacementAfterRetirementNoFail" },
         } },
     };
     var wrong_construction_category = construction;
@@ -2117,6 +2123,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedClientReplacementLifecycleRawValid" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishClientSlotReplacement" },
                 .{ .parent = "ClientSlot", .kind = "field", .visibility = "private", .modifier = "", .name = "retired" },
+                .{ .parent = "ClientSlot", .kind = "field", .visibility = "private", .modifier = "", .name = "reserved_replacement_addr" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "retiredNodeValid" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumedRetirementCleanupValid" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementSeal" },
@@ -2125,6 +2132,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedClientReplacementValid" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "clientReplacementCandidateDigest" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientReplacementError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "reserveClientReplacementNode" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightReservedClientReplacementNode" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortReservedClientReplacementNode" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "reservedClientReplacementReceiptValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishReservedClientReplacementAfterRetirementNoFail" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareClientReplacement" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortClientReplacement" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishClientReplacementNoFail" },
@@ -2290,11 +2302,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     for (fence_bit_contract) |declaration|
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(client, declaration));
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // Initial publication, ordinary replacement, and CR5b reserved-node publication each
+        // create one node-local operation fence before the Client becomes current.
+        @as(usize, 3),
         countOccurrences(client_slot, "client_mod.ClientOperationFence.initInPlace("),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         countIdentifierOutsideTopLevelTests(client_slot, "bindOperationFence"),
     );
     try std.testing.expectEqual(
@@ -2317,8 +2331,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        // 일반 teardown, 2d2 terminal aggregate teardown과 R2c replacement prepare가 같은 배타적 fence를 연다.
-        @as(usize, 4),
+        // 일반 teardown, 2d2 terminal aggregate teardown, R2c ordinary replacement와 CR5b
+        // reserved-node publication이 같은 배타적 fence를 연다.
+        @as(usize, 5),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
@@ -4796,8 +4811,9 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 1), read_references);
     // 일반 release와 2d2 terminal aggregate drain이 같은 canonical accounting permit을 쓴다.
     try std.testing.expectEqual(@as(usize, 2), prepare_references);
-    // 최초 node와 R2c replacement node가 같은 canonical accounting ledger binding을 쓴다.
-    try std.testing.expectEqual(@as(usize, 2), bind_references);
+    // 최초 node, R2c ordinary replacement와 CR5b reserved replacement node가 같은 canonical
+    // accounting ledger binding을 쓴다.
+    try std.testing.expectEqual(@as(usize, 3), bind_references);
     // Batch, one-shot initial snapshot, RPC prepare/execute/publication과 R2b test-only external
     // fixture는 purpose-tagged node-local allocator scope를 공유한다. 그 밖의 파일에는 raw
     // allocator authority가 없다.
@@ -7731,7 +7747,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         }
         const move_count = countIdentifierOutsideTopLevelTests(source, "moveToGenerationNode");
         const expected_move_count: usize = if (is_client_slot)
-            2
+            // Initial node, ordinary replacement, and CR5b reserved replacement publication.
+            3
         else if (std.mem.eql(
             u8,
             entry.path,
@@ -7744,8 +7761,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
                 countIdentifierOutsideTopLevelTests(source, "slot.current"),
             );
         try std.testing.expectEqual(
-            // GenerationAttachment는 일반 payload teardown과 terminal handoff 뒤 source-zero를 각각 확인한다.
-            @as(usize, if (is_remote_attachment) 1 else if (is_generation_attachment) 2 else 0),
+            // GenerationAttachment는 일반 payload teardown, terminal handoff, CR5b host-wide
+            // prepare와 no-fail commit에서 source-zero를 각각 확인한다.
+            @as(usize, if (is_remote_attachment) 1 else if (is_generation_attachment) 4 else 0),
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(

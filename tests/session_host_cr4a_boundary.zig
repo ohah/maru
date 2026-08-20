@@ -350,8 +350,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 6), count(remote_backend, "HostReconnectJobState.replacement_failed"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "pub fn preflightReconnectClientReplacementFailure("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_backend, "preflightReconnectClientReplacementFailure("));
-    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.prepareRetiredClientReclaim(&reclaim)"));
-    try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim)"));
+    // Product backend deinit and the CR5b-2b shared-publication fixture each reclaim the
+    // canonical retired Client through the same tick-end leaf.
+    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "adapter.prepareRetiredClientReclaim(&reclaim)"));
+    try std.testing.expectEqual(@as(usize, 2), count(remote_backend, "adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim)"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_connect.connectExistingHostUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(cleanup_seal, "pub const HostReconnectJobSealInput = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "candidate_failure_reason_raw: u8 = 0"));

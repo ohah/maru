@@ -196,6 +196,76 @@ pub const HostAdapter = struct {
         return self.slot.prepareRetirementCleanup(permit, placeholder_generation, out);
     }
 
+    pub fn preflightRetirementCleanupBeforeAdmissionClose(
+        self: *HostAdapter,
+        permit: *const client_slot_mod.PreparedAdmissionClose,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) client_slot_mod.ClientSlot.RetirementCleanupError!void {
+        return self.slot.preflightRetirementCleanupBeforeAdmissionClose(
+            permit,
+            cleanup,
+            placeholder_generation,
+        );
+    }
+
+    pub fn preflightRetirementDetachBeforeAdmissionClose(
+        self: *HostAdapter,
+        permit: *const client_slot_mod.PreparedAdmissionClose,
+        expected_connection_generation: u64,
+        placeholder_generation: u64,
+    ) client_slot_mod.ClientSlot.RetirementDetachError!void {
+        return self.slot.preflightRetirementDetachBeforeAdmissionClose(
+            permit,
+            expected_connection_generation,
+            placeholder_generation,
+        );
+    }
+
+    pub fn preflightRetirementCleanup(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+        cleanup: *client_slot_mod.PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) client_slot_mod.ClientSlot.RetirementCleanupError!void {
+        return self.slot.preflightRetirementCleanup(permit, cleanup, placeholder_generation);
+    }
+
+    pub fn preflightRetirementDetach(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+        expected_connection_generation: u64,
+        placeholder_generation: u64,
+    ) client_slot_mod.ClientSlot.RetirementDetachError!void {
+        return self.slot.preflightRetirementDetach(
+            permit,
+            expected_connection_generation,
+            placeholder_generation,
+        );
+    }
+
+    pub fn commitRetirementCleanupNoFail(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+        cleanup: *client_slot_mod.PreparedRetirementCleanup,
+        placeholder_generation: u64,
+    ) void {
+        self.slot.commitRetirementCleanupNoFail(permit, cleanup, placeholder_generation);
+    }
+
+    pub fn commitRetirementDetachNoFail(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+        expected_connection_generation: u64,
+        placeholder_generation: u64,
+    ) void {
+        self.slot.commitRetirementDetachNoFail(
+            permit,
+            expected_connection_generation,
+            placeholder_generation,
+        );
+    }
+
     pub fn abortRetirementCleanup(
         self: *HostAdapter,
         cleanup: *client_slot_mod.PreparedRetirementCleanup,
@@ -225,6 +295,54 @@ pub const HostAdapter = struct {
         if (kind != self.kind or source.screen_codec_version != profile.screen_codec_version)
             return error.InvalidOwner;
         return self.slot.prepareClientReplacement(cleanup, source, out);
+    }
+
+    pub fn reserveClientReplacementNode(
+        self: *HostAdapter,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        source: *const client_mod.Client,
+        out: *client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        const profile = compatibility.profileForMajor(source.wire_major) orelse
+            return error.InvalidOwner;
+        const kind: Kind = switch (profile.kind) {
+            .current => .current,
+            .previous => .previous,
+        };
+        if (kind != self.kind or source.screen_codec_version != profile.screen_codec_version)
+            return error.InvalidOwner;
+        return self.slot.reserveClientReplacementNode(cleanup, source, out);
+    }
+
+    pub fn preflightReservedClientReplacementNode(
+        self: *HostAdapter,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        source: *const client_mod.Client,
+        reserved: *const client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        return self.slot.preflightReservedClientReplacementNode(cleanup, source, reserved);
+    }
+
+    pub fn abortReservedClientReplacementNode(
+        self: *HostAdapter,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        source: *const client_mod.Client,
+        reserved: *client_slot_mod.PreparedClientReplacement,
+    ) client_slot_mod.ClientSlot.ClientReplacementError!void {
+        return self.slot.abortReservedClientReplacementNode(cleanup, source, reserved);
+    }
+
+    pub fn publishReservedClientReplacementAfterRetirementNoFail(
+        self: *HostAdapter,
+        cleanup: *const client_slot_mod.PreparedRetirementCleanup,
+        source: *client_mod.Client,
+        reserved: *client_slot_mod.PreparedClientReplacement,
+    ) void {
+        self.slot.publishReservedClientReplacementAfterRetirementNoFail(
+            cleanup,
+            source,
+            reserved,
+        );
     }
 
     pub fn abortClientReplacement(

@@ -30,9 +30,10 @@ test "CR3a-2d2 경계는 aggregate terminal handoff와 typed teardown owner를 �
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn preflightTerminalCleanup("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn tryDeinitWithTerminalCleanup("));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         count(generation, ".terminal_handoff => {"),
     );
+    // CR5b-2b의 host-wide retirement commit도 동일 typed terminal handoff를 소비한다.
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-2d2\""));
     // 최종 gate는 contract/registry/attachment/slot/product 다섯 owner category를 각각 등록한다.
     try std.testing.expectEqual(@as(usize, 5), count(build, "session_host_2d2_step,"));

@@ -338,6 +338,34 @@ pub const StableScreenSource = struct {
         self.endWriter();
     }
 
+    pub fn commitPreparedUnavailableNoFail(
+        self: *StableScreenSource,
+        transaction_addr: usize,
+        transaction_generation: u64,
+    ) void {
+        if (!self.preparedUnavailableExact(
+            self.prepared_expected_generation,
+            self.prepared_next_generation,
+            transaction_addr,
+            transaction_generation,
+        )) @panic("CR5b prepared unavailable authority drifted after whole-set preflight");
+        self.current = .{
+            .source = self.unavailable.screenSource(),
+            .generation = self.prepared_next_generation,
+            .kind = .unavailable,
+        };
+        self.clearPreparedUnavailable();
+        self.endWriter();
+    }
+
+    pub fn unavailableExact(self: *const StableScreenSource, generation: u64) bool {
+        return self.validOwner() and self.lifecycle == .ready and
+            !self.writer_pending.load(.acquire) and self.pinned_target == null and
+            self.current.kind == .unavailable and self.current.generation == generation and
+            self.prepared_transaction_addr == 0 and self.prepared_transaction_generation == 0 and
+            self.prepared_expected_generation == 0 and self.prepared_next_generation == 0;
+    }
+
     fn clearPreparedUnavailable(self: *StableScreenSource) void {
         self.prepared_transaction_addr = 0;
         self.prepared_transaction_generation = 0;

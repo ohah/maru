@@ -94,11 +94,24 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
         "fn finishDeinitGraph(",
     ) orelse return error.MissingFinishDeinitGraph;
     const can_retire = client[can_retire_start..can_retire_end];
+    const cr5b_reserve_start = std.mem.indexOf(
+        u8,
+        slot,
+        "pub fn reserveClientReplacementNode(",
+    ) orelse return error.MissingCr5bReservation;
+    const cr5b_reserve_end = std.mem.indexOfPos(
+        u8,
+        slot,
+        cr5b_reserve_start,
+        "pub fn preflightReservedClientReplacementNode(",
+    ) orelse return error.MissingCr5bReservationEnd;
+    const cr5b_reserve = slot[cr5b_reserve_start..cr5b_reserve_end];
 
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub const max_retired_clients: usize = 2;"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "retired: [max_retired_clients]?*ClientNode"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn overlapsRetiredNode("));
-    try std.testing.expectEqual(@as(usize, 4), count(slot, "self.overlapsRetiredNode("));
+    try std.testing.expectEqual(@as(usize, 7), count(slot, "self.overlapsRetiredNode("));
+    try std.testing.expectEqual(@as(usize, 3), count(cr5b_reserve, "self.overlapsRetiredNode("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn canRetireFromGenerationNode("));
     try std.testing.expectEqual(
         @as(usize, 1),

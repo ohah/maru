@@ -1221,7 +1221,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    CR5b-2a는 모든 captured runtime의 old attachment retirement와 unavailable publication 권위를 먼저 final-address job에
    준비하며, k번째 preflight 실패에서 앞선 runtime·공유 Client·screen·ledger를 하나도 바꾸지 않는다. CR5b-2b는 모든
    prepared runtime을 no-fail suffix로 unavailable에 전환한 뒤 공유 old Client를 한 번만 정산하고 같은 adapter에 replacement를
-   exact 한 번 게시한다. CR5b-2c는 그 published replacement receipt를 각 행의 CR4 observer/takeover/publication transaction이
+   exact 한 번 게시한다. replacement node backing과 identity는 old graph가 live인 준비 구간에서 final-address reserved receipt로
+   먼저 확보하고, commit suffix 안에서는 allocation·identity 발급·callback 없이 전 runtime unavailable → shared old Client
+   cleanup → fresh Client move → replacement publish만 수행한다. CR5b-2c는 그 published replacement receipt를 각 행의 CR4 observer/takeover/publication transaction이
    순서대로 재검증해 소비하고, k번째 post-publication 실패를 앞선 성공은 `published_new`, 실패/잔여 행은
    `frozen_unavailable` 또는 `ended`로 forward-resolve한 terminal summary로 닫는다. 어느 단계도 runtime마다 Client replacement를
    반복하거나 첫 runtime 정산 중 sibling attachment가 참조하는 shared Client를 파괴하지 않는다.

@@ -382,7 +382,10 @@ Maru 작업에서 사용하는 기본 명령이다.
   이 gate는 shared Client retirement/replacement, observer candidate, takeover/publication을 실행하지 않는다.
 - 영속 세션 호스트 CR5b-2b shared replacement gate: `zig build test-session-host-cr5b2b`. 2a를 상속하고 모든 runtime의
   unavailable no-fail suffix 뒤에만 shared old Client cleanup과 same-adapter replacement를 각각 exact 1 수행한다. runtime별
-  Client replacement 반복과 sibling attachment가 남은 상태의 Client deinit은 0이다.
+  Client replacement 반복과 sibling attachment가 남은 상태의 Client deinit은 0이다. replacement node allocation·identity 발급은
+  suffix 전 final-address reserved preparation에서 끝내고, 준비 실패는 fresh/old Client와 전 runtime mutation 0, commit suffix의
+  allocation/callback 0을 검증한다. Debug·ReleaseFast 각각 reserved-node/OOM·abort 제품형 행 1개,
+  three-runtime shared-publication 제품 행 1개, source boundary 1개를 exact-count한다.
 - 영속 세션 호스트 CR5b-2c runtime transaction gate: `zig build test-session-host-cr5b2c`. 2b를 상속하고 동일 published
   replacement receipt에서 각 runtime의 CR4 observer/takeover/publication을 전진시킨다. 3-runtime success와 k번째 실패에서
   rollback 0, finite forward resolution, `published_old=0` terminal summary와 final resource zero를 확인한다. Window move/close

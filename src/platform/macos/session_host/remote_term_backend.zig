@@ -96,6 +96,8 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var cr5b_before_connect_seen: bool = false;
     threadlocal var cr5b_before_connect_valid: bool = false;
     threadlocal var cr5b_before_connect_row_count: u32 = 0;
+    threadlocal var cr5b2b_runtime_commit_count: usize = 0;
+    threadlocal var cr5b2b_retired_counts: [3]usize = .{0} ** 3;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -130,6 +132,8 @@ const HostReconnectJobState = enum(u8) {
     controller_promoted = 12,
     preparing = 13,
     retirements_prepared = 14,
+    shared_replacement_reserved = 15,
+    shared_replacement_published = 16,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -180,6 +184,8 @@ const HostReconnectJob = struct {
     runtime_handle: RuntimeHandle = 0,
     runtime_addr: u64 = 0,
     runtime_generation: u64 = 0,
+    shared_admission: client_slot_mod.PreparedAdmissionClose = .{},
+    shared_cleanup: client_slot_mod.PreparedRetirementCleanup = .{},
     replacement: client_slot_mod.PreparedClientReplacement = .{},
     request_nonce: u128 = 0,
     candidate_failure_reason_raw: u8 = 0,
@@ -312,6 +318,8 @@ const HostReconnectJob = struct {
             @intFromEnum(HostReconnectJobState.controller_promoted),
             @intFromEnum(HostReconnectJobState.preparing),
             @intFromEnum(HostReconnectJobState.retirements_prepared),
+            @intFromEnum(HostReconnectJobState.shared_replacement_reserved),
+            @intFromEnum(HostReconnectJobState.shared_replacement_published),
             => true,
             else => false,
         };
@@ -326,6 +334,8 @@ const HostReconnectJob = struct {
             self.deadline == null and self.client == null and
             self.runtime_row_count == 0 and std.mem.allEqual(u8, &self.runtime_rows_digest, 0) and
             self.runtime_handle == 0 and self.runtime_addr == 0 and self.runtime_generation == 0 and
+            std.meta.eql(self.shared_admission, client_slot_mod.PreparedAdmissionClose{}) and
+            std.meta.eql(self.shared_cleanup, client_slot_mod.PreparedRetirementCleanup{}) and
             std.meta.eql(self.replacement, client_slot_mod.PreparedClientReplacement{}) and
             self.request_nonce == 0 and self.candidate_failure_reason_raw == 0 and
             std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) and
@@ -337,6 +347,14 @@ const HostReconnectJob = struct {
 
     fn replacementLifecycleRaw(self: *const HostReconnectJob) u8 {
         return @as(*const u8, @ptrCast(&self.replacement.lifecycle)).*;
+    }
+
+    fn sharedAdmissionLifecycleRaw(self: *const HostReconnectJob) u8 {
+        return @as(*const u8, @ptrCast(&self.shared_admission.lifecycle)).*;
+    }
+
+    fn sharedCleanupLifecycleRaw(self: *const HostReconnectJob) u8 {
+        return @as(*const u8, @ptrCast(&self.shared_cleanup.lifecycle)).*;
     }
 
     fn reconnectLifecycleRaw(self: *const HostReconnectJob) u8 {
@@ -386,6 +404,12 @@ const HostReconnectJob = struct {
             .runtime_handle = self.runtime_handle,
             .runtime_addr = self.runtime_addr,
             .runtime_generation = self.runtime_generation,
+            .shared_admission_addr = @intFromPtr(&self.shared_admission),
+            .shared_admission_lifecycle_raw = self.sharedAdmissionLifecycleRaw(),
+            .shared_admission_seal = self.shared_admission.seal,
+            .shared_cleanup_addr = @intFromPtr(&self.shared_cleanup),
+            .shared_cleanup_lifecycle_raw = self.sharedCleanupLifecycleRaw(),
+            .shared_cleanup_seal = self.shared_cleanup.seal,
             .replacement_addr = @intFromPtr(&self.replacement),
             .replacement_slot_addr = @intCast(self.replacement.slot_addr),
             .replacement_old_node_addr = @intCast(self.replacement.old_node_addr),
@@ -428,6 +452,10 @@ const HostReconnectJob = struct {
         if (@intFromPtr(adapter) != self.adapter_addr or
             pool.adapterGeneration(self.host_id) != self.adapter_generation) return false;
         if (!self.validateRuntimeSet(backend)) return false;
+        if (self.state_raw != @intFromEnum(HostReconnectJobState.shared_replacement_reserved) and
+            (!std.meta.eql(self.shared_admission, client_slot_mod.PreparedAdmissionClose{}) or
+                !std.meta.eql(self.shared_cleanup, client_slot_mod.PreparedRetirementCleanup{})))
+            return false;
         switch (self.state_raw) {
             @intFromEnum(HostReconnectJobState.preparing) => {
                 if (self.client != null or adapter.connectionGeneration() != self.expected_connection_generation or
@@ -466,6 +494,62 @@ const HostReconnectJob = struct {
                         adapter,
                         @intFromPtr(self),
                         self.job_generation,
+                    )) return false;
+                }
+            },
+            @intFromEnum(HostReconnectJobState.shared_replacement_reserved) => {
+                if (self.client == null or self.client.?.fd < 0 or self.client.?.host_id != self.host_id or
+                    !self.client.?.runtime_catchup_barrier_v1 or self.client.?.connection_profile != .gui or
+                    adapter.connectionGeneration() != self.expected_connection_generation or
+                    self.runtime_handle != 0 or self.runtime_addr != 0 or self.runtime_generation != 0 or
+                    self.replacementLifecycleRaw() !=
+                        @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.reserved) or
+                    self.request_nonce != 0 or self.candidate_failure_reason_raw != 0 or
+                    !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
+                    self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
+                    self.controller_generation != 0) return false;
+                adapter.preflightRetirementCleanupBeforeAdmissionClose(
+                    &self.shared_admission,
+                    &self.shared_cleanup,
+                    self.replacement.next_connection_generation,
+                ) catch return false;
+                adapter.preflightRetirementDetachBeforeAdmissionClose(
+                    &self.shared_admission,
+                    self.expected_connection_generation,
+                    self.replacement.next_connection_generation,
+                ) catch return false;
+                adapter.preflightReservedClientReplacementNode(
+                    &self.shared_cleanup,
+                    &self.client.?,
+                    &self.replacement,
+                ) catch return false;
+                for (self.runtimeRowsSlice() orelse return false) |row| {
+                    const entry = backend.runtimes.get(row.identity.runtime_handle) orelse return false;
+                    if (!RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+                        entry.runtime,
+                        adapter,
+                        @intFromPtr(self),
+                        self.job_generation,
+                    )) return false;
+                }
+            },
+            @intFromEnum(HostReconnectJobState.shared_replacement_published) => {
+                if (self.client != null or self.runtime_handle != 0 or self.runtime_addr != 0 or
+                    self.runtime_generation != 0 or self.replacementLifecycleRaw() !=
+                    @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published) or
+                    self.request_nonce != 0 or self.candidate_failure_reason_raw != 0 or
+                    !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
+                    self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
+                    self.controller_generation != 0 or
+                    adapter.connectionGeneration() != self.replacement.next_connection_generation or
+                    self.replacement.expected_connection_generation != self.expected_connection_generation)
+                    return false;
+                adapter.preflightPublishedClientReplacement(&self.replacement) catch return false;
+                for (self.runtimeRowsSlice() orelse return false) |row| {
+                    const entry = backend.runtimes.get(row.identity.runtime_handle) orelse return false;
+                    if (!RemoteRuntime.backend_api.hostWideRetirementCommittedExact(
+                        entry.runtime,
+                        adapter,
                     )) return false;
                 }
             },
@@ -688,11 +772,17 @@ const HostReconnectJob = struct {
                 runtime_entry.host_adapter_generation != self.adapter_generation or
                 @intFromPtr(runtime_entry.runtime) != row.identity.runtime_addr or
                 runtime_entry.runtime_generation != row.identity.runtime_generation) return false;
-            const projection = RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(
-                runtime_entry.runtime,
-            ) catch return false;
-            if (projection.runtime_id != row.identity.runtime_id or
-                projection.shell_generation != row.identity.shell_generation) return false;
+            // The shared publication suffix terminalizes every old attachment. At that point the
+            // ordinary runtime-operation admission used by the live runtime projection is
+            // intentionally closed; the captured row plus the state-specific committed oracle
+            // below remain the canonical authority instead of reopening the dead generation.
+            if (self.state_raw != @intFromEnum(HostReconnectJobState.shared_replacement_published)) {
+                const projection = RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(
+                    runtime_entry.runtime,
+                ) catch return false;
+                if (projection.runtime_id != row.identity.runtime_id or
+                    projection.shell_generation != row.identity.shell_generation) return false;
+            }
         }
         var same_host_count: usize = 0;
         var iterator = backend.runtimes.iterator();
@@ -821,6 +911,28 @@ const HostReconnectJob = struct {
 
     fn abort(self: *HostReconnectJob, backend: *RemoteTermBackend) !void {
         if (!self.valid(backend)) return error.InvalidHostReconnectJob;
+        if (self.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_reserved)) {
+            const pool = backend.host_pool orelse return error.InvalidHostReconnectJob;
+            const adapter = pool.get(self.host_id) orelse return error.InvalidHostReconnectJob;
+            adapter.abortReservedClientReplacementNode(
+                &self.shared_cleanup,
+                &self.client.?,
+                &self.replacement,
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+            adapter.abortRetirementCleanup(&self.shared_cleanup) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            adapter.cancelAdmissionClose(&self.shared_admission) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            self.shared_admission = .{};
+            self.shared_cleanup = .{};
+            self.replacement = .{};
+            self.state_raw = @intFromEnum(HostReconnectJobState.retirements_prepared);
+            self.seal = process_seal.hostReconnectJobSeal(
+                self.pid,
+                self.process_nonce,
+                self.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+        }
         if (self.state_raw == @intFromEnum(HostReconnectJobState.retirements_prepared)) {
             const pool = backend.host_pool orelse return error.InvalidHostReconnectJob;
             const adapter = pool.get(self.host_id) orelse return error.InvalidHostReconnectJob;
@@ -1047,6 +1159,7 @@ pub const RemoteTermBackend = struct {
                 job.seal = [_]u8{0} ** 32;
                 job.* = .{};
             } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_published) or
+                job.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_published) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.authority_conflict) or
@@ -1240,6 +1353,141 @@ pub const RemoteTermBackend = struct {
             prepared_count += 1;
         }
         job.state_raw = @intFromEnum(HostReconnectJobState.retirements_prepared);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// CR5b-2b completes every fallible shared-Client preparation before the first runtime is
+    /// changed. The reserved node has no Client payload; abort therefore preserves both Clients.
+    pub fn prepareHostReconnectSharedReplacement(self: *RemoteTermBackend) anyerror!void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.retirements_prepared))
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        if (@intFromPtr(adapter) != job.adapter_addr or
+            adapter.connectionGeneration() != job.expected_connection_generation)
+            return error.InvalidHostReconnectJob;
+        const placeholder_generation = std.math.add(
+            u64,
+            job.expected_connection_generation,
+            1,
+        ) catch return error.InvalidHostReconnectJob;
+
+        try adapter.prepareAdmissionClose(
+            job.expected_connection_generation,
+            &job.shared_admission,
+        );
+        var admission_prepared = true;
+        errdefer if (admission_prepared)
+            adapter.cancelAdmissionClose(&job.shared_admission) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        try adapter.prepareRetirementCleanup(
+            &job.shared_admission,
+            placeholder_generation,
+            &job.shared_cleanup,
+        );
+        var cleanup_prepared = true;
+        errdefer if (cleanup_prepared)
+            adapter.abortRetirementCleanup(&job.shared_cleanup) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        try adapter.reserveClientReplacementNode(
+            &job.shared_cleanup,
+            &job.client.?,
+            &job.replacement,
+        );
+        var replacement_reserved = true;
+        errdefer if (replacement_reserved)
+            adapter.abortReservedClientReplacementNode(
+                &job.shared_cleanup,
+                &job.client.?,
+                &job.replacement,
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+
+        job.state_raw = @intFromEnum(HostReconnectJobState.shared_replacement_reserved);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+        replacement_reserved = false;
+        cleanup_prepared = false;
+        admission_prepared = false;
+    }
+
+    pub fn commitHostReconnectSharedReplacement(self: *RemoteTermBackend) !void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.shared_replacement_reserved))
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        if (@intFromPtr(adapter) != job.adapter_addr or
+            adapter.connectionGeneration() != job.expected_connection_generation)
+            return error.InvalidHostReconnectJob;
+
+        // `job.valid` above is the last recoverable whole-set preflight. From the first runtime
+        // transition onward every drift is common proof loss and no callback/allocation is allowed.
+        for (job.runtimeRowsSlice() orelse process_seal.fatalIntegrity(.proof_loss)) |row| {
+            const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            RemoteRuntime.backend_api.commitHostWideRetirementNoFail(
+                entry.runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            );
+            if (builtin.is_test and B5TestState.cr5b2b_runtime_commit_count <
+                B5TestState.cr5b2b_retired_counts.len)
+            {
+                B5TestState.cr5b2b_retired_counts[B5TestState.cr5b2b_runtime_commit_count] =
+                    adapter.slot.retiredClientCount();
+                B5TestState.cr5b2b_runtime_commit_count += 1;
+            }
+        }
+        adapter.commitAdmissionClose(&job.shared_admission) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        adapter.preflightRetirementCleanup(
+            &job.shared_admission,
+            &job.shared_cleanup,
+            job.replacement.next_connection_generation,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        adapter.preflightRetirementDetach(
+            &job.shared_admission,
+            job.expected_connection_generation,
+            job.replacement.next_connection_generation,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        adapter.commitRetirementCleanupNoFail(
+            &job.shared_admission,
+            &job.shared_cleanup,
+            job.replacement.next_connection_generation,
+        );
+        adapter.commitRetirementDetachNoFail(
+            &job.shared_admission,
+            job.expected_connection_generation,
+            job.replacement.next_connection_generation,
+        );
+        adapter.finishRetirementCleanup(&job.shared_cleanup) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        adapter.publishReservedClientReplacementAfterRetirementNoFail(
+            &job.shared_cleanup,
+            &job.client.?,
+            &job.replacement,
+        );
+        job.client = null;
+        job.shared_admission = .{};
+        job.shared_cleanup = .{};
+        job.state_raw = @intFromEnum(HostReconnectJobState.shared_replacement_published);
         job.seal = process_seal.hostReconnectJobSeal(
             job.pid,
             job.process_nonce,
@@ -3969,7 +4217,6 @@ test "CR5b-2a host job은 three-runtime retirement를 모두 준비한 뒤 mutat
     );
     try backend_value.claimProductSingleton();
     defer backend_value.deinit();
-
     var runtimes: [3]RemoteRuntime = undefined;
     var initialized: usize = 0;
     defer {
@@ -4158,6 +4405,216 @@ test "CR5b-2a host job은 three-runtime retirement를 모두 준비한 뒤 mutat
         );
         try testing.expect(remote_runtime.testing_api.hostRetirementPristine(runtime));
     }
+}
+
+test "CR5b-2b host job은 three-runtime을 unavailable로 만든 뒤 shared Client를 exact once 교체한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+
+    var current_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &current_fds));
+    var current: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = current_fds[0],
+        .host_id = 91,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var attach_peer = try std.Thread.spawn(
+        .{},
+        remote_runtime.testing_api.serveSemanticAttachPeers,
+        .{ current_fds[1], @as(usize, 3) },
+    );
+    var attach_peer_joined = false;
+    defer if (!attach_peer_joined) attach_peer.join();
+
+    var pool = AdapterPool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expectEqual(@as(u128, 91), try addOwnedClient(&pool, testing.allocator, &current));
+    const adapter = pool.get(91).?;
+    const adapter_generation = pool.adapterGeneration(91).?;
+    const connection_generation_before = adapter.connectionGeneration();
+    var backend_value = RemoteTermBackend.initAttachOnlyWithPool(
+        testing.allocator,
+        testing.io,
+        &pool,
+        @ptrFromInt(@alignOf(SurfaceRuntime)),
+    );
+    try backend_value.claimProductSingleton();
+    defer backend_value.deinit();
+    defer while (adapter.slot.retiredClientCount() != 0) {
+        var reclaim: client_slot_mod.PreparedRetiredClientReclaim = .{};
+        adapter.prepareRetiredClientReclaim(&reclaim) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim);
+    };
+
+    var runtimes: [3]RemoteRuntime = undefined;
+    var initialized: usize = 0;
+    defer {
+        var index = initialized;
+        while (index > 0) {
+            index -= 1;
+            remote_runtime.testing_api.deinitSemanticRuntimeOnAdapter(&runtimes[index]);
+        }
+    }
+    const ids = [_][32]u8{
+        "000000000000000000000000000000b1".*,
+        "000000000000000000000000000000b2".*,
+        "000000000000000000000000000000b3".*,
+    };
+    for (&runtimes, 0..) |*runtime, index| {
+        try remote_runtime.testing_api.initSemanticRuntimeOnAdapter(
+            runtime,
+            adapter,
+            testing.allocator,
+            ids[index],
+            @intCast(index + 1),
+        );
+        initialized += 1;
+        try backend_value.runtimes.put(testing.allocator, @intCast((index + 1) * 10), .{
+            .runtime = runtime,
+            .host_id = 91,
+            .host_adapter_generation = adapter_generation,
+            .runtime_generation = @intCast(index + 1),
+        });
+    }
+    attach_peer.join();
+    attach_peer_joined = true;
+    defer {
+        _ = backend_value.runtimes.remove(10);
+        _ = backend_value.runtimes.remove(20);
+        _ = backend_value.runtimes.remove(30);
+    }
+
+    var fresh_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fresh_fds));
+    defer _ = c.close(fresh_fds[1]);
+    var fresh: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fresh_fds[0],
+        .host_id = 91,
+        .runtime_catchup_barrier_v1 = true,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var clock = struct {
+        now_ns: i128 = 10,
+        fn read(context: *anyopaque) i128 {
+            return @as(*@This(), @ptrCast(@alignCast(context))).now_ns;
+        }
+    }{};
+    const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, .fromInjected(
+        .{ .context = &clock, .now_ns = @TypeOf(clock).read },
+        100,
+    ));
+    const job = try testing.allocator.create(HostReconnectJob);
+    job.* = .{};
+    backend_value.host_reconnect_job = job;
+    defer {
+        if (backend_value.host_reconnect_job) |active_job| {
+            if (active_job.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_published)) {
+                active_job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+                active_job.seal = [_]u8{0} ** 32;
+                active_job.* = .{};
+                backend_value.host_reconnect_job = null;
+                testing.allocator.destroy(active_job);
+            } else {
+                backend_value.abortHostReconnectConnect() catch
+                    process_seal.fatalIntegrity(.proof_loss);
+            }
+        }
+    }
+    try job.prepareForConnect(&backend_value, 91, phase);
+    try testing.expectEqual(HostReconnectStart.connected, job.adoptConnected(
+        &backend_value,
+        91,
+        phase,
+        &fresh,
+    ));
+    try backend_value.prepareHostReconnectRuntimeRetirements();
+    try backend_value.prepareHostReconnectSharedReplacement();
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(
+        @intFromEnum(HostReconnectJobState.shared_replacement_reserved),
+        job.state_raw,
+    );
+    try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+    try testing.expectEqual(@as(usize, 0), adapter.slot.retiredClientCount());
+    for (&runtimes) |*runtime| try testing.expect(
+        RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+            runtime,
+            adapter,
+            @intFromPtr(job),
+            job.job_generation,
+        ),
+    );
+
+    var copied_job = job.*;
+    try testing.expect(!copied_job.valid(&backend_value));
+    backend_value.host_reconnect_job = &copied_job;
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.commitHostReconnectSharedReplacement(),
+    );
+    backend_value.host_reconnect_job = job;
+    try testing.expect(job.valid(&backend_value));
+    job.replacement.slot_incarnation +%= 1;
+    try testing.expect(!job.valid(&backend_value));
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.commitHostReconnectSharedReplacement(),
+    );
+    job.replacement.slot_incarnation -%= 1;
+    try testing.expect(job.valid(&backend_value));
+    job.job_generation +%= 1;
+    try testing.expect(!job.valid(&backend_value));
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.commitHostReconnectSharedReplacement(),
+    );
+    job.job_generation -%= 1;
+    try testing.expect(job.valid(&backend_value));
+    job.replacement.old_node_incarnation +%= 1;
+    try testing.expect(!job.valid(&backend_value));
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.commitHostReconnectSharedReplacement(),
+    );
+    job.replacement.old_node_incarnation -%= 1;
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(connection_generation_before, adapter.connectionGeneration());
+    for (&runtimes) |*runtime| try testing.expect(
+        RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+            runtime,
+            adapter,
+            @intFromPtr(job),
+            job.job_generation,
+        ),
+    );
+
+    B5TestState.cr5b2b_runtime_commit_count = 0;
+    B5TestState.cr5b2b_retired_counts = .{0} ** 3;
+    try backend_value.commitHostReconnectSharedReplacement();
+    try testing.expect(job.valid(&backend_value));
+    try testing.expectEqual(
+        @intFromEnum(HostReconnectJobState.shared_replacement_published),
+        job.state_raw,
+    );
+    try testing.expectEqual(connection_generation_before + 1, adapter.connectionGeneration());
+    try testing.expectEqual(@as(usize, 1), adapter.slot.retiredClientCount());
+    try testing.expectEqual(@as(usize, 3), B5TestState.cr5b2b_runtime_commit_count);
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, B5TestState.cr5b2b_retired_counts);
+    try testing.expectEqual(@as(?client_mod.Client, null), job.client);
+    for (&runtimes) |*runtime| try testing.expect(
+        RemoteRuntime.backend_api.hostWideRetirementCommittedExact(runtime, adapter),
+    );
+    try testing.expectError(
+        error.InvalidHostReconnectJob,
+        backend_value.commitHostReconnectSharedReplacement(),
+    );
 }
 
 const Cr4aActualIssuerCandidateCase = enum {

@@ -1992,7 +1992,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   copied/moved prepared owner와 runtime add/remove에서 전 runtime screen/attachment, ClientSlot, ledger mutation 0과 prepared owner
   final zero를 증명한다. CR5b-2b gate는 전 행의 prepared authority를 재검증한 뒤 unavailable 전환 전체와 shared Client
   retirement/replacement exact 1을 한 owner-turn no-fail suffix로 실행하며, sibling attachment가 남은 동안 Client deinit 0,
-  final unavailable count=total, old Client cleanup exact 1을 검증한다. CR5b-2c gate는 같은 published replacement receipt를
+  final unavailable count=total, old Client cleanup exact 1을 검증한다. replacement node allocation과 identity 발급은 suffix 전
+  reserved preparation에서 끝나야 하며, fail-index는 runtime/Client/screen mutation 0과 fresh Client job ownership 보존을
+  확인한다. commit hostile은 copied/moved/replayed reservation과 sealed slot/old-node/job generation drift를 첫 runtime mutation 전에
+  거부하고, 첫 runtime commit 이후 proof drift는 common proof-loss로만 끝나는지 확인한다. suffix 안의 allocation/callback은 0이다.
+  CR5b-2c gate는 같은 published replacement receipt를
   runtime별 CR4 transaction이 소비하고, 3-runtime success 및 k번째 post-publication failure 표에서 앞선 성공 rollback 0,
   잔여 runtime의 finite forward resolution, `published_old=0` terminal summary와 final registry/pin/batch/allocator 0을 검증한다.
   이 세 gate가 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.

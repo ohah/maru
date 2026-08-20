@@ -159,6 +159,12 @@ pub fn buildPaneOps(
     /// 줄별 시각 행 수 캐시(§2.1). `null`이면 매 프레임 다시 센다 — 그래도 그림은 같다.
     row_cache: ?*chrome_editor.frame.RowCache,
     wrap: bool,
+    /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
+    /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
+    /// 상수로 두면 **탭 폭 단일 출처를 재는 테스트(ADV3-D)가 자기 제목을 원리상 못 잰다** — 렌더도
+    /// hit-test도 같은 comptime `4`를 읽으므로 하드코딩과 단일 출처 참조를 구분할 수 없다
+    /// (11차 적대적 검증). 4가 아닌 값을 줄 수 있어야 그 둘이 갈린다.
+    tab_width: u8,
     rect: chrome_draw.Rect,
     cell_w_px: u16,
     cell_h_px: u16,
@@ -172,7 +178,7 @@ pub fn buildPaneOps(
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
         .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache },
-        .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -192,61 +198,44 @@ pub fn buildPaneOps(
 /// **비교 뷰는 아직 다루지 않는다**(§4.1g 결정표). 좌우가 `split_x`로 갈리고 어느 쪽인지부터 정해야
 /// 하는데, 가로 스크롤 입력이 같은 이유로 비교를 뺐다 — 같은 자리에서 함께 연다.
 ///
+/// **`AppSession`을 아예 안 받는다** — 기하도 셀 크기도 렌더가 굳힌 스냅숏(`editor_hit_geom`)에서
+/// 온다. live로 다시 구하면 행 배열과 다른 프레임의 값이 되고, 실측으로 폭이 바뀐 뒤 클릭의 **80%**,
+/// 폰트가 바뀐 뒤 **93%**가 다른 답을 냈다(10·11차 적대적 검증). 인자에서 뺀 것이 판정자보다 강한
+/// 보장이다 — 이제 live 상태를 읽는 코드를 **쓸 수가 없다**. 문서 내용(`editor_lines`·`editor_doc`)만
+/// `Term`에서 읽고, 그 둘은 편집이 곧 렌더라 배열과 함께 갱신된다.
+///
 /// 세로 밖은 첫/마지막 **보이는 행**으로 clamp한다. 드래그는 pane을 벗어나는 것이 정상이고, 그때
 /// `null`을 주면 호출자가 분기를 하나 더 져야 한다(§10이 *"항상 유효한 offset"*이라 정한 것과 같은 결).
-pub fn hitTestBody(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?usize {
+pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
-    if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
 
-    const body_outer = editorBodyRect(self, leaf_rect, term);
-    if (body_outer.w == 0 or body_outer.h == 0) return null;
+    // **기하도 셀 크기도 렌더가 굳힌 값을 쓴다**(`editor_hit_geom`). 여기서 다시 구하면 행 배열과
+    // 다른 프레임의 값이 되고, 실측으로 폭이 바뀐 뒤 클릭의 80%가, 폰트가 바뀐 뒤 93%가 다른 답을
+    // 냈다(10·11차 적대적 검증). **둘을 섞어도 같은 결과다** — 굳은 열에 live 셀 폭을 곱하면 그
+    // 곱 자체가 어느 프레임의 것도 아니게 된다.
+    const geom = term.rt.editor_hit_geom;
+    if (geom.cell_w_px == 0 or geom.cell_h_px == 0) return null;
+    const cell_h: i64 = @intCast(geom.cell_h_px);
 
-    // **렌더가 그린 원점은 사각 그대로가 아니라 한 겹 안쪽이다**(`frame.content_inset_px`).
-    // `appendPaneFrame`이 `inner = {x + inset, y + inset, w - inset*2, h - inset*2}`를 만들어 그 위에
-    // 셀을 깔고, 스크롤바 기하도 같은 `inset`을 더해 창 좌표로 옮긴다(`shiftScrollbar`). 역변환에서
-    // 그것을 안 빼면 **모든 클릭이 그만큼 밀린다** — 적대적 검증이 실측으로 잡았다: inset 4px가 8px
-    // 셀의 정확히 절반이라 1칸 글자의 앞/뒤 판정이 전부 뒤집혔고, 세로로는 행마다 아래 25%가 다음
-    // 줄로 갔으며, gutter 오른쪽 4px 띠가 본문 0열로 접수됐다.
-    const inset = chrome_editor.frame.content_inset_px;
-    const body: maru.session.SplitRect = .{
-        .x = body_outer.x + @as(i32, @intCast(inset)),
-        .y = body_outer.y + @as(i32, @intCast(inset)),
-        .w = body_outer.w -| inset * 2,
-        .h = body_outer.h -| inset * 2,
-    };
-    if (body.w == 0 or body.h == 0) return null;
-
-    // ① 픽셀 → 행·본문 안 x. **가로는 본문 사각 밖이면 받지 않는다**(gutter가 그쪽을 가져간다).
-    const cell_w: i64 = @intCast(self.cell_width_px);
-    const cell_h: i64 = @intCast(self.cell_height_px);
     // **캐스트 전에 묶는다.** `@intFromFloat`는 표현 불가능한 값(NaN·무한대·i64 범위 밖)에서
-    // illegal behavior이고 안전 빌드에서 죽는다 — 실측으로 `x = 1e300`이 SIGABRT였다(2차 적대적
-    // 검증). 이 함수는 계약상 *"드래그가 pane을 벗어나는 것은 정상"*인 자리라 극단값이 오는 것을
-    // 막을 수 없고, 어차피 아래에서 clamp하므로 미리 묶어도 답이 달라지지 않는다.
+    // illegal behavior이고 안전 빌드에서 죽는다 — 이 함수는 계약상 *"드래그가 pane을 벗어나는 것은
+    // 정상"*인 자리라 극단값이 오는 것을 막을 수 없고, 어차피 아래에서 clamp한다.
     const px_limit: f64 = 1 << 30;
     const clamped_x: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
     const clamped_y: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
-    const rel_x_raw: i64 = @as(i64, @intFromFloat(clamped_x)) - @as(i64, body.x);
-    const rel_y: i64 = @as(i64, @intFromFloat(clamped_y)) - @as(i64, body.y);
-    // **오른쪽 밖은 거절하지 않고 clamp한다.** 계약의 *"행 끝 너머 → 그 행의 끝"*이 그 자리이고,
-    // 드래그가 pane 오른쪽으로 나가는 것은 정상이다(세로 밖을 clamp하는 것과 같은 이유). 왼쪽은
-    // 다르다 — gutter가 있어 아래에서 거절한다.
-    const rel_x: i64 = @min(rel_x_raw, @as(i64, body.w) - 1);
-    if (rel_x < 0) return null;
+    const rel_x_raw: i64 = @as(i64, @intFromFloat(clamped_x)) - @as(i64, geom.body_x);
+    const rel_y: i64 = @as(i64, @intFromFloat(clamped_y)) - @as(i64, geom.body_y);
 
-    // **렌더와 같은 인자로 같은 계산을 부른다.** `buildPaneOps`가 `inner`(= 사각에서 inset을 뺀 것)를
-    // `buildSide`에 넘기고 그쪽이 `sideMetrics(rect.w, rect.h, …)`를 부르므로, 여기서 사각 원본 폭을
-    // 주면 **8px 넓은 폭**으로 계산해 `content.width`가 한 열 커진다(적대적 검증 실측: hit 90 /
-    // render 89). 그 값이 `byteAtPoint`의 행 끝 판정에 들어가므로, 랩을 켜면 행 끝 너머 클릭이 다음
-    // 행의 첫 글자를 답하게 된다. `body`는 위에서 이미 inset을 뺀 값이다.
-    const line_count = term.rt.editor_lines.len;
-    const m = chrome_editor.diff_frame.sideMetrics(body.w, body.h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
-    const layout = chrome_editor.geometry.compute(m.total_cols, line_count, .{});
-    const content_left_px: i64 = @as(i64, layout.contentLeft()) * cell_w;
-    if (rel_x < content_left_px) return null; // gutter — 접힘이 가져간다
+    const content_left_px: i64 = @intCast(geom.content_left_px);
+    if (rel_x_raw < content_left_px) return null; // gutter — 이 좌표계가 받지 않는다
+    // **본문 오른쪽 밖을 여기서 묶지 않는다.** 결정표의 *"행 끝 너머 → 그 행의 끝"*을 실제로 지키는
+    // 것은 `byteAtPoint`의 `next_col > row_end_col` break다(`content.zig`). 여기서 한 번 더 묶어도
+    // 답이 안 바뀐다 — 실측: 랩 끔·500바이트 줄·`content_width=89`에서 사각 밖 +500px 클릭이 clamp
+    // 유무와 무관하게 **89**를 냈다(11차 적대적 검증. 그 clamp를 지운 뮤턴트를 판정자 13개가 하나도
+    // 못 잡았고, 그것이 죽은 코드라는 증거였다).
 
     // 세로는 clamp한다(위 doc). 행이 음수면 첫 행, 넘치면 마지막 행.
     const row_i: usize = if (rel_y < 0) 0 else blk: {
@@ -265,24 +254,31 @@ pub fn hitTestBody(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
 
     // ④ 조각·열·칸 안 픽셀 → 줄 안 byte.
     const text = term.rt.editor_lines[source_line];
-    // **렌더가 쓰는 그 값을 쓴다**(`frame.default_tab_width` — 단일 출처). 여기서 다른 값을 쓰면
-    // 클릭이 화면과 어긋난다: 탭 폭이 곧 열 계산이라 한 칸만 달라도 커서가 글자에서 밀린다.
-    const tab_w: u16 = chrome_editor.frame.default_tab_width;
+    // **렌더가 그 프레임에 실제로 쓴 값을 쓴다**(`editor_hit_geom.tab_width` — 단일 출처를 스냅숏으로
+    // 받는다). 여기서 다른 값을 쓰면 클릭이 화면과 어긋난다: 탭 폭이 곧 열 계산이라 한 칸만 달라도
+    // 커서가 글자에서 밀린다.
+    const tab_w: u16 = geom.tab_width;
     const off_in_line = chrome_editor.content.byteAtPoint(
         text,
         tab_w,
         @min(v.start_byte, text.len),
         v.start_byte_col,
         v.start_col,
-        layout.content.width,
-        @intCast(rel_x - content_left_px),
-        @intCast(self.cell_width_px),
+        geom.content_width,
+        // **캐스트 안전만 맡는 clamp다**(행 끝 규칙이 아니다 — 위 문단). `rel_x_raw`는 위 gutter
+        // 가드가 하한을 세웠고, 상한은 `px_limit`과 `body_x`가 각각 i32라 합이 i32를 넘을 수 있다.
+        @intCast(@min(rel_x_raw - content_left_px, @as(i64, std.math.maxInt(i32)))),
+        geom.cell_w_px,
     );
 
     // ⑤ 줄 안 byte → 문서 offset. `Selection`이 문서 전체 offset을 요구한다.
     const doc = term.rt.editor_doc orelse return null;
     const line = doc.file.lines.line(source_line) orelse return null;
-    return line.start + @min(off_in_line, line.contentEnd() - line.start);
+    // **묶지 않고 단언한다.** `editor_lines[i]`는 `lineText(i) = bytes[start..contentEnd()]`이므로
+    // `text.len == contentEnd() - start`가 항등이고, `byteAtPoint`의 모든 반환 경로가 `≤ text.len`
+    // 이다. 묶으면 그 항등이 깨져도 조용히 다른 답을 내므로, 깨지는 순간 죽는 편이 낫다.
+    std.debug.assert(off_in_line <= line.contentEnd() - line.start);
+    return line.start + off_in_line;
 }
 
 /// 마지막 프레임의 행들을 Term에 복사하고, **그 자리에서 절대 원본 줄까지 푼다**.
@@ -292,8 +288,10 @@ pub fn hitTestBody(self: *AppSession, term: *Term, leaf_rect: maru.session.Split
 ///
 /// **푸는 것을 여기서 하는 이유**는 `editor_hit_lines` doc에 있다: `VisualRow.line`을 절대 줄로 바꾸려면
 /// `editor_first_line`과 `editor_visible_numbers`가 필요한데 **둘 다 프레임 사이에 바뀐다**. 렌더 시점에
-/// 풀어 두면 `hitTestBody`가 live 상태를 하나도 안 읽는다.
-fn storeHitRows(self: *AppSession, term: *Term, rows: []const chrome_editor.visual_map.VisualRow) void {
+/// 풀어 두면 `hitTestBody`가 **행 해석에** live 상태를 안 읽는다. 기하와 셀 크기도 같은 이유로 이
+/// 함수가 함께 굳힌다(아래 `editor_hit_geom` 대입) — 셋이 한 함수 안에서 사이에 return 없이 세워지므로
+/// "행 배열과 다른 프레임의 기하"가 생길 자리가 없다.
+fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, rows: []const chrome_editor.visual_map.VisualRow) void {
     if (rows.len > term.rt.editor_hit_rows.len) {
         const grown = self.allocator.alloc(chrome_editor.visual_map.VisualRow, rows.len) catch {
             term.rt.editor_hit_rows_len = 0; // 못 잡았다 — 이 프레임은 클릭을 못 받는다
@@ -340,6 +338,25 @@ fn storeHitRows(self: *AppSession, term: *Term, rows: []const chrome_editor.visu
         term.rt.editor_hit_lines[i] = @intCast(@min(source, std.math.maxInt(u32)));
     }
     term.rt.editor_hit_rows_len = rows.len;
+
+    // **기하도 같은 순간에 굳힌다**(`editor_hit_geom` doc). ①(픽셀 → 행·열)과 ④(행 폭)가 클릭
+    // 시점에 다시 계산하면 행 배열과 다른 프레임의 값이 된다.
+    const body_outer = editorBodyRect(self, leaf_rect, term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner_w = body_outer.w -| inset * 2;
+    const inner_h = body_outer.h -| inset * 2;
+    const m = chrome_editor.diff_frame.sideMetrics(inner_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    const lay = chrome_editor.geometry.compute(m.total_cols, term.rt.editor_lines.len, .{});
+    term.rt.editor_hit_geom = .{
+        .body_x = @intCast(body_outer.x + inset),
+        .body_y = @intCast(body_outer.y + inset),
+        .content_left_px = @as(u32, lay.contentLeft()) * @as(u32, self.cell_width_px),
+        .content_width = lay.content.width,
+        // 셀 크기는 폰트 크기라 u16을 넘을 수 없다(`sideMetrics`도 같은 폭으로 받는다).
+        .cell_w_px = @intCast(@min(self.cell_width_px, std.math.maxInt(u16))),
+        .cell_h_px = @intCast(@min(self.cell_height_px, std.math.maxInt(u16))),
+        .tab_width = term.rt.editor_tab_width,
+    };
 }
 
 /// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
@@ -350,6 +367,12 @@ pub fn buildDiffPaneOps(
     first_line: usize,
     first_piece: u32,
     wrap: bool,
+    /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
+    /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
+    /// 상수로 두면 **탭 폭 단일 출처를 재는 테스트(ADV3-D)가 자기 제목을 원리상 못 잰다** — 렌더도
+    /// hit-test도 같은 comptime `4`를 읽으므로 하드코딩과 단일 출처 참조를 구분할 수 없다
+    /// (11차 적대적 검증). 4가 아닌 값을 줄 수 있어야 그 둘이 갈린다.
+    tab_width: u8,
     rect: chrome_draw.Rect,
     cell_w_px: u16,
     cell_h_px: u16,
@@ -369,6 +392,7 @@ pub fn buildDiffPaneOps(
         .first_line = first_line,
         .first_piece = first_piece,
         .wrap = wrap,
+        .tab_width = tab_width,
         .rect = inner,
         .background_rect = .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
         .cell_w_px = cell_w_px,
@@ -535,7 +559,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -545,13 +569,14 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
+            term.rt.editor_tab_width,
             pane_rect,
             @intCast(self.cell_width_px),
             @intCast(self.cell_height_px),
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, wrap, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -563,7 +588,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 쓰이고, 게다가 비교 경로의 `visual_rows`는 좌우 열이 섞인 배열이라 이 축으로 해석하면 값
     // 자체가 틀린다 — 뒷날 diff 가드를 풀 때 조용히 잘못된 값을 내는 지뢰가 된다(7차 적대적 검증).
     if (term.rt.editor_diff == null) {
-        storeHitRows(self, term, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
+        storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
     }
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
@@ -1744,6 +1769,9 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_hit_rows = &.{};
     if (term.rt.editor_hit_lines.len > 0) self.allocator.free(term.rt.editor_hit_lines);
     term.rt.editor_hit_lines = &.{};
+    // **기하도 함께 지운다** — 셋은 한 단위다(`storeHitRows`가 함께 세운다). `rows_len = 0`이 이미
+    // 클릭을 막지만, 세우는 쪽만 한 단위이고 놓는 쪽이 아니면 그 규율이 반쪽이 된다.
+    term.rt.editor_hit_geom = .{};
     term.rt.editor_hit_rows_len = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
@@ -2271,6 +2299,7 @@ test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하
         0,
         0,
         false,
+        chrome_editor.frame.default_tab_width,
         .{ .x = 0, .y = 0, .w = 800, .h = 300 },
         8,
         16,
@@ -5347,7 +5376,7 @@ test "hitTestBody: 렌더가 그린 자리를 기준선으로 삼는다 (§4.1g 
     const term = try openPathInActivePane(fx.session, path);
 
     // **그리기 전에는 받지 않는다** — 행 배열이 비어 있다.
-    try testing.expectEqual(@as(?usize, null), hitTestBody(fx.session, term, fx.leaf_rect, 500, 100));
+    try testing.expectEqual(@as(?usize, null), hitTestBody(term, 500, 100));
 
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
@@ -5370,33 +5399,33 @@ test "hitTestBody: 렌더가 그린 자리를 기준선으로 삼는다 (§4.1g 
 
     // 'a' 칸의 **왼쪽 절반** → 그 글자 앞(offset 0), **오른쪽 절반** → 뒤(offset 1).
     // caret 모델이라 1칸 안에 두 자리가 있다(§4.1g 9회차).
-    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + 1));
-    try testing.expectEqual(@as(?usize, 1), hitTestBody(fx.session, term, fx.leaf_rect, a.x + cw - 1, a.y + 1));
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(term, a.x + 1, a.y + 1));
+    try testing.expectEqual(@as(?usize, 1), hitTestBody(term, a.x + cw - 1, a.y + 1));
     // 셋째 칸 왼쪽 → offset 2.
-    try testing.expectEqual(@as(?usize, 2), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 2 * cw + 1, a.y + 1));
+    try testing.expectEqual(@as(?usize, 2), hitTestBody(term, a.x + 2 * cw + 1, a.y + 1));
 
     // **같은 행의 아래쪽 픽셀도 같은 줄이다** — 세로 원점이 밀리면 여기서 다음 줄이 나온다.
-    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + ch - 1));
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(term, a.x + 1, a.y + ch - 1));
 
     // 둘째 줄 첫 글자 = 문서 offset 7("abcdef\n" 다음).
-    try testing.expectEqual(@as(?usize, 7), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + ch + 1));
+    try testing.expectEqual(@as(?usize, 7), hitTestBody(term, a.x + 1, a.y + ch + 1));
 
     // **행 끝 너머는 그 행의 끝**(6) — 줄 맨 끝이지 문서 끝이 아니다.
     const body = editorBodyRect(fx.session, fx.leaf_rect, term);
     const right_edge: f64 = @as(f64, @floatFromInt(body.x)) + @as(f64, @floatFromInt(body.w)) - 1;
-    try testing.expectEqual(@as(?usize, 6), hitTestBody(fx.session, term, fx.leaf_rect, right_edge, a.y + 1));
+    try testing.expectEqual(@as(?usize, 6), hitTestBody(term, right_edge, a.y + 1));
 
     // **gutter는 받지 않는다** — 접힘 화살표가 먼저 가져간다. 본문 왼쪽 1픽셀도 포함이다.
-    try testing.expectEqual(@as(?usize, null), hitTestBody(fx.session, term, fx.leaf_rect, a.x - 1, a.y + 1));
+    try testing.expectEqual(@as(?usize, null), hitTestBody(term, a.x - 1, a.y + 1));
 
     // **세로 밖은 clamp한다** — 드래그가 pane을 벗어나는 것은 정상이다.
     //
     // 아래로 나가면 **마지막 보이는 행**이다. 이 문서는 끝 개행이 만든 **빈 4번째 줄**까지 있어
     // (`"…mnopqr\n"` → 줄 넷) 그 줄의 시작 offset 21이 답이다 — 초판은 3줄이라고 가정해 14를
     // 적었고, 그것은 3번 줄의 *시작*이지 마지막 행이 아니었다(2차 적대적 검증이 잡았다).
-    try testing.expectEqual(@as(?usize, 0), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y - 500));
+    try testing.expectEqual(@as(?usize, 0), hitTestBody(term, a.x + 1, a.y - 500));
     try testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 전제: 빈 4번째 줄이 있다
-    try testing.expectEqual(@as(?usize, 21), hitTestBody(fx.session, term, fx.leaf_rect, a.x + 1, a.y + 5000));
+    try testing.expectEqual(@as(?usize, 21), hitTestBody(term, a.x + 1, a.y + 5000));
 }
 
 // ─────────────────── [주 판정] 화면과 클릭이 어긋나지 않는가 (§4.1g) ───────────────────
@@ -5529,7 +5558,7 @@ test "ADV3-A 그려진 글자가 곧 클릭이 답한 글자다 (랩이 실제�
             if (c.row >= rows) continue;
             const x = ox + @as(f64, @floatFromInt(c.col)) * cw + 1;
             const y = oy + @as(f64, @floatFromInt(c.row)) * ch + 1;
-            const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse continue;
+            const off = hitTestBody(term, x, y) orelse continue;
 
             // 오라클 ②: 그 offset이 gutter가 말한 줄 안에 있는가.
             const want_line = line_of_row[c.row] orelse continue;
@@ -5599,7 +5628,7 @@ test "ADV3-B 접힘을 켜도 클릭이 gutter가 그린 줄을 답한다" {
     const ch: f64 = @floatFromInt(fx.session.cell_height_px);
     const ox: f64 = @floatFromInt(drawn.rect.x);
     const oy: f64 = @floatFromInt(drawn.rect.y);
-    const content_left: u16 = 8; // 101줄 → 자릿수 3, 최소 5가 이긴다
+    const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
 
     var nums_buf: [512]?u32 = undefined;
     advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
@@ -5610,7 +5639,7 @@ test "ADV3-B 접힘을 켜도 클릭이 gutter가 그린 줄을 답한다" {
         const want = nums_buf[r] orelse continue;
         const x = ox + @as(f64, @floatFromInt(content_left)) * cw + 1;
         const y = oy + @as(f64, @floatFromInt(r)) * ch + 1;
-        const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse {
+        const off = hitTestBody(term, x, y) orelse {
             bad += 1;
             continue;
         };
@@ -5663,7 +5692,23 @@ test "ADV3-C 랩된 행의 오른쪽 끝 너머는 그 행의 끝이다 (다음 
     const body = editorBodyRect(fx.session, fx.leaf_rect, term);
     const ch: f64 = @floatFromInt(fx.session.cell_height_px);
     const oy: f64 = @floatFromInt(drawn.rect.y);
-    const right: f64 = @as(f64, @floatFromInt(body.x)) + @as(f64, @floatFromInt(body.w)) - 1;
+    // **본문 텍스트의 마지막 픽셀을 쏜다.** 초판은 `body.x + body.w - 1`(사각의 끝 = 막대 띠 위)이라
+    // 자기 제목의 자리를 한 번도 안 눌렀고, 다음 판은 `bar.track_x`에서 만들어 **항진 구조**가 됐다
+    // (막대 왼쪽이 수락되는지를 막대 좌표로 물으면 띠를 없애는 뮤턴트를 못 잡는다 — 9차 적대적 검증).
+    // 여기서는 막대와 무관한 값으로 만든다: 본문 왼쪽 + 본문 폭.
+    const right: f64 = blk: {
+        const inset = chrome_editor.frame.content_inset_px;
+        const cw_i: u32 = @intCast(fx.session.cell_width_px);
+        const m = chrome_editor.diff_frame.sideMetrics(
+            body.w -| inset * 2,
+            body.h -| inset * 2,
+            @intCast(fx.session.cell_width_px),
+            @intCast(fx.session.cell_height_px),
+        );
+        const lay = chrome_editor.geometry.compute(m.total_cols, term.rt.editor_lines.len, .{});
+        const text_right: u32 = (@as(u32, lay.contentLeft()) + lay.content.width) * cw_i;
+        break :blk @as(f64, @floatFromInt(body.x + @as(i32, @intCast(inset)))) + @as(f64, @floatFromInt(text_right)) - 1;
+    };
 
     var judged: usize = 0;
     var bad: usize = 0;
@@ -5682,7 +5727,7 @@ test "ADV3-C 랩된 행의 오른쪽 끝 너머는 그 행의 끝이다 (다음 
         // ADV3-A와 [주 판정]이 각각 다른 각도로 함께 잡으므로 여기서 중복으로 걸린다. 지우면 그
         // 각도가 하나 줄고, 남겨도 거짓 통과를 만들지 않는다(7차 적대적 검증이 "이제 중복"이라 확인).
         const want = li.start + b.start_byte;
-        const got = hitTestBody(fx.session, term, fx.leaf_rect, right, oy + @as(f64, @floatFromInt(r)) * ch + 1) orelse {
+        const got = hitTestBody(term, right, oy + @as(f64, @floatFromInt(r)) * ch + 1) orelse {
             bad += 1;
             continue;
         };
@@ -5697,24 +5742,31 @@ test "ADV3-C 랩된 행의 오른쪽 끝 너머는 그 행의 끝이다 (다음 
     try testing.expectEqual(@as(usize, 0), bad);
 }
 
-test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 상수를 따른다" {
+test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 값을 따른다 (기본값이 아닌 폭으로 잰다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.testing.io;
 
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    try fx.dir.dir.writeFile(io, .{ .sub_path = "advd.txt", .data = "\tX\n\t\tY\nZ\n" });
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "advd.txt", .data = "\tXabcdef\n\t\tY\nZ\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
     const path = try std.fs.path.join(allocator, &.{ root, "advd.txt" });
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
+    // **기본값이 아닌 탭 폭으로 잰다.** 기본값(`4`)으로만 재면 렌더도 hit-test도 같은 comptime 상수를
+    // 읽으므로 **하드코딩과 단일 출처 참조를 원리상 구분할 수 없다** — 실측으로 `tab_w`를 `4`로
+    // 하드코딩한 뮤턴트를 판정자 13개가 하나도 못 잡았다(11차 적대적 검증). 4가 아닌 값을 넣을 수
+    // 있게 `editor_tab_width` 필드와 `buildPaneOps`의 인자를 그때 뚫었다.
+    term.rt.editor_tab_width = 3;
+    const tw: u16 = term.rt.editor_tab_width;
+    try testing.expect(tw != chrome_editor.frame.default_tab_width); // 이 테스트의 전제
+
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
     defer drawn.dl.deinit(allocator);
 
-    const tw: u16 = chrome_editor.frame.default_tab_width;
     const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
     const cw: f64 = @floatFromInt(fx.session.cell_width_px);
     const ch: f64 = @floatFromInt(fx.session.cell_height_px);
@@ -5733,9 +5785,20 @@ test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 상수를 따�
     // 렌더가 상수를 따르는가.
     try testing.expectEqual(tw, xc - content_left);
     try testing.expectEqual(tw * 2, yc - content_left);
-    // hit-test가 **같은** 상수를 따르는가: 그 자리를 누르면 탭 다음 byte(=1, =2)다.
-    try testing.expectEqual(@as(?usize, 1), hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(xc)) * cw + 1, oy + 1));
-    try testing.expectEqual(@as(?usize, 5), hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(yc)) * cw + 1, oy + ch + 1)); // 둘째 줄 시작(3) + 2
+    // hit-test가 **같은** 값을 따르는가: 그 자리를 누르면 탭 다음 byte(=1, =2)다.
+    try testing.expectEqual(@as(?usize, 1), hitTestBody(term, ox + @as(f64, @floatFromInt(xc)) * cw + 1, oy + 1));
+    try testing.expectEqual(@as(?usize, 11), hitTestBody(term, ox + @as(f64, @floatFromInt(yc)) * cw + 1, oy + ch + 1)); // 둘째 줄 시작(9) + 2
+
+    // **탭에서 떨어진 자리도 누른다 — 안 그러면 위 둘이 폭을 못 가른다.** 실측: 탭 **바로 뒤**
+    // 좌표는 폭 3과 4가 **같은 답**을 낸다(탭이 넓어지면 그 자리가 탭 안쪽 마지막 칸이 되는데,
+    // 중점을 넘었으므로 역시 탭 다음 byte로 간다). 그래서 `editor_tab_width` 배선을 뚫고 이 테스트를
+    // 폭 3으로 돌린 **뒤에도** `tab_w`를 `4`로 하드코딩한 뮤턴트가 통과했다 — 배선만으로는 부족했다.
+    // 탭에서 세 칸 떨어지면 갈린다(그 뮤턴트가 여기서 `expected 4, found 3`으로 잡힌다):
+    //   tab_w=3 → `\t`(0‥2) `X`=3 `a`=4 `b`=5 **`c`=6** → byte 4
+    //   tab_w=4 → `\t`(0‥3) `X`=4 `a`=5 **`b`=6** → byte 3
+    // 렌더와 hit-test가 같은 값을 따르면 답은 폭과 **무관하게** 4다(`X`·`a`·`b`를 지난 자리이므로).
+    const far_col: f64 = @floatFromInt(content_left + tw + 3);
+    try testing.expectEqual(@as(?usize, 4), hitTestBody(term, ox + far_col * cw + 1, oy + 1));
 }
 
 test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자" {
@@ -5790,7 +5853,7 @@ test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자"
             if (c.col < content_left or c.row >= rows) continue;
             if (c.codepoint == ' ') continue; // 탭이 편 공백 — 원본 글자와 대조할 수 없다
             const want_line = nums_buf[c.row] orelse continue;
-            const off = hitTestBody(fx.session, term, fx.leaf_rect, ox + @as(f64, @floatFromInt(c.col)) * cw + 1, oy + @as(f64, @floatFromInt(c.row)) * ch + 1) orelse continue;
+            const off = hitTestBody(term, ox + @as(f64, @floatFromInt(c.col)) * cw + 1, oy + @as(f64, @floatFromInt(c.row)) * ch + 1) orelse continue;
             const li = term.rt.editor_doc.?.file.lines.line(want_line - 1) orelse continue;
             const lt = term.rt.editor_lines[want_line - 1];
             if (off < li.start or off > li.contentEnd()) {
@@ -5882,19 +5945,28 @@ test "[주 판정] cluster 경계 · 단조성 · 행 경계 부등식 (§4.1g)"
             var first: ?usize = null;
             var x: f64 = ox + 1;
             while (x < ox + bw) : (x += 3) {
-                const off = hitTestBody(fx.session, term, fx.leaf_rect, x, y) orelse continue;
+                const off = hitTestBody(term, x, y) orelse continue;
                 judged += 1;
 
                 // ⑴ **cluster 경계이고 줄 범위 안.**
+                //
+                // **줄 머리에서 걸어 도달하는 자리인지 본다.** 초판은 답에서 줄 끝까지 걸어
+                // `walk == len`을 요구했는데 그것은 **항진명제**였다 — `stepColumn`은 늘 1 이상
+                // 전진하고 `next_byte`를 `@min(…, len)`으로 묶으므로 **어떤 시작점에서도** 끝에
+                // 닿는다. 실측으로 시작점 20개 중 9개가 진짜 경계가 아닌데 걸러낸 것이 0개였고,
+                // "답을 1바이트 민다"(UTF-8 연속 바이트를 답한다)는 뮤턴트가 통과했다(8차 검증).
                 try testing.expect(off >= li.start and off <= li.contentEnd());
-                var walk = off - li.start;
+                const target = off - li.start;
+                var reachable = target == 0;
+                var walk: usize = 0;
                 var wcol: u32 = 0;
-                while (walk < lt.len) {
+                while (walk < lt.len and walk < target) {
                     const st = chrome_editor.content.stepColumn(lt, walk, wcol, chrome_editor.frame.default_tab_width);
                     walk = st.next_byte;
                     wcol = st.next_col;
+                    if (walk == target) reachable = true;
                 }
-                try testing.expectEqual(lt.len, walk);
+                try testing.expect(reachable);
 
                 // ⑵ **한 행 안에서 x가 커지면 offset이 줄지 않는다.**
                 if (last) |l| try testing.expect(off >= l);
@@ -5916,4 +5988,198 @@ test "[주 판정] cluster 경계 · 단조성 · 행 경계 부등식 (§4.1g)"
     std.debug.print("\n[주 판정] judged={d} 행경계판정={d}\n", .{ judged, rule3 });
     try testing.expect(judged > 5_000);
     try testing.expect(rule3 > 0); // 랩이 실제로 걸렸다 — 셋째 규칙이 죽어 있지 않다
+}
+
+test "비교 뷰는 hit-test가 받지 않고, 행도 담지 않는다 (§4.1g 결정표)" {
+    // **양쪽 다 판정자가 없었다**(8차 적대적 검증): `hitTestBody`의 diff 거절을 지워도, `storeHitRows`의
+    // diff 건너뛰기를 지워도 전 스위트가 통과했다. 게다가 전자의 주석이 후자를 정당화하는 근거였다 —
+    // 논거도 결론도 아무도 안 지키는 상태였다.
+    //
+    // 계약 결정표: *"비교(diff) 뷰 → 이 슬라이스는 다루지 않는다"*(좌우가 `split_x`로 갈리고 어느
+    // 쪽인지부터 정해야 한다). 그리고 비교 경로의 `visual_rows`는 좌우 열이 섞인 배열이라 담아 두면
+    // 뒷날 조용히 틀린 값을 내는 지뢰가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "alpha\nbeta\ngamma\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 먼저 일반 Term으로 그려 행을 담는다 — 그 상태에서 클릭이 된다.
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const probe_x: f64 = @as(f64, @floatFromInt(body.x + @as(i32, @intCast(inset)))) + 200;
+    const probe_y: f64 = @as(f64, @floatFromInt(body.y + @as(i32, @intCast(inset)))) + 1;
+    try testing.expect(hitTestBody(term, probe_x, probe_y) != null);
+
+    // **비교 상태가 되면 받지 않는다.**
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer term.rt.editor_diff = null;
+    try testing.expectEqual(@as(?usize, null), hitTestBody(term, probe_x, probe_y));
+
+    // **그 상태로 그려도 행을 담지 않는다** — 담기면 길이가 갱신된다.
+    term.rt.editor_hit_rows_len = 0;
+    if (appendPaneFrame(fx.session, fx.leaf_rect, term)) |*d2| {
+        var d = d2.*;
+        d.dl.deinit(allocator);
+    }
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_hit_rows_len);
+}
+
+test "ADV3-F 셀 크기도 스냅숏이다 — 폰트가 바뀌고 아직 안 그린 창에서 답이 안 흔들린다 (§4.1g)" {
+    // **원점·폭만 굳히고 셀 크기를 live로 두면 한 표현식 안에서 두 프레임이 섞인다**(11차 적대적
+    // 검증). 8×16으로 그린 뒤 폰트가 12×24로 바뀌고 아직 다시 안 그린 창에서 본문 격자 64발 중
+    // **60발(93%)**이 정합 상태와 달랐고 **59발(92%)**이 화면에 실제로 보이는 것과도 달랐다 —
+    // 어느 쪽 기준으로도 틀린 답이다. 노출 창은 리사이즈와 같은 폭이고, 그 폭이 `editor_hit_geom`을
+    // 만든 근거였다.
+    //
+    // 이 테스트가 지키는 것: `hitTestBody`가 `self.cell_*_px`를 읽지 않는다. 읽으면 아래 두 번째
+    // 걸음에서 답이 달라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **긴 줄이 필요하다** — 짧으면 어느 셀 폭으로 읽어도 답이 줄 끝으로 몰려 차이가 안 난다.
+    var doc_buf: std.ArrayList(u8) = .empty;
+    defer doc_buf.deinit(allocator);
+    for (0..40) |i| {
+        for (0..200) |j| try doc_buf.append(allocator, @intCast('a' + (i + j) % 26));
+        try doc_buf.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "wide.txt", .data = doc_buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wide.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    try testing.expectEqual(fx.session.cell_width_px, @as(u32, geom.cell_w_px));
+    try testing.expectEqual(fx.session.cell_height_px, @as(u32, geom.cell_h_px));
+
+    // 본문 격자 8×8발. 굳은 기하로 자리를 잡는다 — 클릭이 실제로 오는 좌표계다.
+    var probes: [64][2]f64 = undefined;
+    var before: [64]?usize = undefined;
+    var n: usize = 0;
+    for (0..8) |gy| {
+        for (0..8) |gx| {
+            const px: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset +
+                @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(gx * 7 * geom.cell_w_px)));
+            const py: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset +
+                @as(i32, @intCast(gy * 3 * geom.cell_h_px)));
+            probes[n] = .{ px, py };
+            before[n] = hitTestBody(term, px, py);
+            n += 1;
+        }
+    }
+    // 판정할 것이 실제로 있는가 — 답이 전부 같으면 아래 비교가 항진명제가 된다.
+    var distinct: usize = 0;
+    for (before[0..n]) |b| {
+        if (b != null and b != before[0]) distinct += 1;
+    }
+    try testing.expect(distinct >= 32);
+
+    // **폰트만 바꾸고 다시 안 그린다.** 실제로 이 창이 생기는 것은 폰트 크기 변경·디스플레이 전환이다.
+    fx.session.cell_width_px = 12;
+    fx.session.cell_height_px = 24;
+
+    var moved: usize = 0;
+    for (probes[0..n], before[0..n]) |p, b| {
+        const after = hitTestBody(term, p[0], p[1]);
+        if (after != b) moved += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), moved);
+
+    // **역방향도 확인한다 — 안 그러면 위 단언이 항진명제다.** "폰트를 바꿔도 답이 안 변한다"만으로는
+    // 답이 셀 크기를 아예 안 본다는 뜻일 수도 있다. 굳은 값을 바꾸면 **반드시** 답이 흔들려야 한다.
+    // (이 방향의 뮤턴트는 주입할 수 없다 — `hitTestBody`가 `AppSession`을 안 받으므로 live를 읽는
+    //  코드를 쓸 수가 없다. 그 대신 굳은 값 자체를 흔들어 의존을 보인다.)
+    term.rt.editor_hit_geom.cell_w_px = geom.cell_w_px * 2;
+    term.rt.editor_hit_geom.cell_h_px = geom.cell_h_px * 2;
+    var shifted: usize = 0;
+    for (probes[0..n], before[0..n]) |p, b| {
+        if (hitTestBody(term, p[0], p[1]) != b) shifted += 1;
+    }
+    term.rt.editor_hit_geom.cell_w_px = geom.cell_w_px;
+    term.rt.editor_hit_geom.cell_h_px = geom.cell_h_px;
+    try testing.expect(shifted >= n / 2);
+}
+
+test "ADV3-G 번호 표가 행보다 짧으면 그 행의 클릭은 답하지 않는다 (§4.1g ③)" {
+    // **`source_line >= editor_lines.len` 가드에 판정자가 없었다**(11차 적대적 검증: `>=`를 `>`로
+    // 바꾼 뮤턴트를 판정자 13개가 하나도 못 잡았다). 그 가드는 `storeHitRows`의
+    // `else source = doc_lines;`와 짝이다 — 번호 표가 보이는 줄 수보다 짧으면 그 행은 원본 줄을
+    // 모르고, 모르는 채로 답하면 **엉뚱한 줄이 선택된다**. 죽은 코드가 아니라 무판정이었다.
+    //
+    // **그 뮤턴트는 사실 판정자가 아니라 스위트를 깬다.** `>`로 완화하면 `editor_lines[len]`이
+    // 범위 밖 읽기가 되고, 실측으로 **릭·세그폴트가 실행마다 다른 자리에서** 났다(477번 테스트,
+    // 다음 실행은 1028번 — 둘 다 편집기와 무관한 테스트다). 메모리 오염이라 어느 판정자도 그것을
+    // "이 가드의 결함"으로 보고할 수 없다. 그래서 이 테스트가 재는 뮤턴트는 그쪽이 아니라
+    // `storeHitRows`가 모르는 자리를 **엉뚱한 줄로 답하는** 쪽이다(`else source = 0`) — 범위 안에
+    // 머물면서 계약만 어기므로 판정이 성립한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "n.txt", .data = "one\ntwo\nthree\nfour\nfive\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "n.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len >= 3);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const geom = term.rt.editor_hit_geom;
+    const px: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset +
+        @as(i32, @intCast(geom.content_left_px)) + 1);
+    const py: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset +
+        @as(i32, @intCast(2 * @as(u32, geom.cell_h_px))) + 1);
+
+    // 평상시엔 답한다.
+    try testing.expect(hitTestBody(term, px, py) != null);
+
+    // **표가 첫 줄만 덮게 만든다.** 셋째 행은 표 밖이라 `storeHitRows`가 `doc_lines`를 세우고,
+    // `hitTestBody`의 가드가 그것을 받아 `null`을 낸다.
+    var numbers = try allocator.alloc(?u32, 1);
+    numbers[0] = 1;
+    const saved = term.rt.editor_visible_numbers;
+    term.rt.editor_visible_numbers = numbers;
+    defer {
+        term.rt.editor_visible_numbers = saved;
+        allocator.free(numbers);
+    }
+
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len >= 3);
+    try testing.expectEqual(@as(?usize, null), hitTestBody(term, px, py));
+
+    // 표 안에 있는 첫 행은 여전히 답한다 — 가드가 전부를 막는 것이 아니다.
+    const py0: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
+    try testing.expect(hitTestBody(term, px, py0) != null);
 }

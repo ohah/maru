@@ -1574,7 +1574,8 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     // 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + 입력 박스 값 text)=2. 마지막=내비 힌트 1줄.
     try std.testing.expect(out.items[0] == .quad); // 박스 bg
     try std.testing.expect(out.items[1] == .text); // 제목
-    try std.testing.expectEqualStrings("/ 검색", out.items[2].text.runs[0].text); // 검색 진입점 힌트(제목 우측, muted)
+    // 문구를 박지 않는다 — 힌트가 이제 키를 거치므로 언어가 바뀌면 이 단언만 옛 것을 잰다.
+    try std.testing.expectEqualStrings(i18n.t(.set_search_hint), out.items[2].text.runs[0].text);
     try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
     try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
     try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
@@ -1588,7 +1589,7 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     const hint = out.items[out.items.len - 1];
     try std.testing.expect(hint == .text);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, hint.text.role);
-    try std.testing.expect(std.mem.indexOf(u8, hint.text.runs[0].text, "섹션") != null);
+    try std.testing.expectEqualStrings(i18n.t(.set_nav_hint), hint.text.runs[0].text);
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(입력박스) 클릭=.toggle(편집 진입), 라벨=.selection_changed" {
@@ -1961,7 +1962,7 @@ test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑
     for (out.items) |op| {
         if (op == .swatch) swatch_count += 1;
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "▾")) marker_count += 1;
-        if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "채도") != null) has_help = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, pickHelp())) has_help = true;
     }
     try std.testing.expectEqual(@as(usize, pick_sv_cols * pick_sv_rows + pick_hue_cols + 1), swatch_count);
     try std.testing.expectEqual(@as(usize, 2), marker_count); // SV 선택 + hue 선택
@@ -2152,7 +2153,7 @@ test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Ent
     var out2: std.ArrayList(draw.Op) = .empty;
     try view(&s, no_sections, &rows2, no_items, test_props, &tk2, arena, &out2);
     var saw_search = false;
-    for (out2.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "검색: fo") != null and op.text.role == .accent_bar) {
+    for (out2.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, searchPrompt()) != null and std.mem.indexOf(u8, op.text.runs[0].text, "fo") != null and op.text.role == .accent_bar) {
         saw_search = true;
     };
     try std.testing.expect(saw_search);
@@ -2178,7 +2179,8 @@ test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + c
     var saw_committed = false;
     var saw_preedit = false;
     for (out.items) |op| if (op == .text and op.text.role == .accent_bar) {
-        if (std.mem.indexOf(u8, op.text.runs[0].text, "검색: a") != null) saw_committed = true;
+        if (std.mem.indexOf(u8, op.text.runs[0].text, searchPrompt()) != null and
+            std.mem.indexOf(u8, op.text.runs[0].text, "a") != null) saw_committed = true;
         if (std.mem.eql(u8, op.text.runs[0].text, "\xea\xb0\x80")) saw_preedit = true;
     };
     try std.testing.expect(saw_committed);
@@ -2187,7 +2189,7 @@ test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + c
     // caret은 "검색: a" 끝(=조합 시작)에 있어 조합 글자 "가"를 덮는다 — searchCaretRect가 preedit를 안 더한다.
     const cr = searchCaretRect(&s, no_sections, &rows, test_props, &tk).?;
     const l = computeLayout(no_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
-    const expect_cols = overlay_input.displayCols("검색: ") + overlay_input.displayCols("a");
+    const expect_cols = overlay_input.displayCols(searchPrompt()) + overlay_input.displayCols("a");
     try std.testing.expectEqual(l.box.inner_x + @as(i32, @intCast(expect_cols * l.box.cw)), cr.x);
 
     // commitSearchPreedit: 조합을 query로 확정(query="a가", 조합 비움).
@@ -2230,7 +2232,8 @@ test "settings 안내 배너(§6.9): message가 있으면 힌트 줄 대신 폼 
     var out: std.ArrayList(draw.Op) = .empty;
     try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var saw_hint = false;
-    for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "섹션") != null) {
+    // 문구를 박지 않는다 — 힌트가 키를 거치므로 언어가 바뀌면 이 단언만 옛 것을 잰다.
+    for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, i18n.t(.set_nav_hint))) {
         saw_hint = true;
     };
     try std.testing.expect(saw_hint);

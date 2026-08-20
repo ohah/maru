@@ -109,6 +109,8 @@ unsigned int maru_ssh_pump_control_state(void);
 /// **`127` 이면 그 서버에 `maru` 가 없다**(계약 §4a).
 int maru_ssh_pump_control_exit_status(unsigned int *code);
 /// 컨트롤 명령이 stderr 로 낸 첫 조각(진단용). 화면에도 wire 에도 안 섞인 것이다.
+///
+/// **들고 있으려면 복사한다** — 다음 호출이 그 자리를 덮는다(`maru_ssh_pump_error` 와 같은 규칙).
 const char *maru_ssh_pump_control_stderr(void);
 
 #ifdef __cplusplus

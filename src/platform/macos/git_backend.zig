@@ -1701,11 +1701,11 @@ fn runArgvWithEnvWindows(
     argv_slices: []const []const u8,
     index_file: ?[]const u8,
 ) !Output {
-    // **import 를 함수 안에 둔다.** 파일 맨 위에 두면 모듈 루트가 `platform/macos` 안인 아티팩트
-    // (`macos-chrome-lab-smoke` 등)에서 `../windows/` 가 **모듈 밖**이 되어 macOS 빌드가 깨진다(실측 —
-    // CI 를 그렇게 깼다). 함수 안이면 이 함수가 분석될 때만 풀리고, macOS 에서는 `comptime` 분기가
-    // 이 함수를 안 밟으므로 한 번도 안 풀린다.
-    const win32_process = @import("../windows/win32_process.zig");
+    // 캡처 러너는 **배럴을 통해** 온다. 상대 경로(`../windows/…`)로 가져오면 모듈 루트가
+    // `platform/macos` 안인 아티팩트(`macos-chrome-lab-smoke` 등)에서 **모듈 밖**이 되어 macOS 빌드가
+    // 깨진다 — 함수 안으로 옮겨도 소용없다. `@import` 는 파일 단위로 먼저 해석되기 때문이다(실측으로
+    // 두 번 확인했다).
+    const win32_process = maru.win32_process;
     // 덮어쓰기 목록은 POSIX 갈래와 **같은 단일 출처**에서 온다(`git_command.env_overrides`) — 두 벌로
     // 만들면 한쪽만 갱신되는 순간 Windows 에서만 `GIT_TERMINAL_PROMPT` 가 빠져 자격 증명 창이 뜬다.
     var overrides: std.ArrayList(win32_process.EnvVar) = .empty;

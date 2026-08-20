@@ -16,7 +16,6 @@ const win32_text = @import("platform/windows/win32_text.zig");
 const win32_terminal = @import("platform/windows/win32_terminal.zig");
 const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
-const win32_process = @import("platform/windows/win32_process.zig"); // 캡처 러너 — 스모크가 fixture 저장소를 만들 때 쓴다
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = @import("platform/windows/win32_keys.zig");
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
@@ -1645,7 +1644,7 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     cwd.deleteTree(io, repo) catch {};
     try cwd.createDir(io, repo, .default_dir);
 
-    var init_out = win32_process.capture(allocator, &.{ "git", "init", "-q" }, repo, .stdout_only, &.{}, &.{}, 1 << 20) catch |err| {
+    var init_out = maru.win32_process.capture(allocator, &.{ "git", "init", "-q" }, repo, .stdout_only, &.{}, &.{}, 1 << 20) catch |err| {
         try stderr.print("maru win32-git-smoke: git init failed({s})\n", .{@errorName(err)});
         try stderr.flush();
         return error.UnknownCommand;

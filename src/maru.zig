@@ -7,6 +7,7 @@ pub const config = @import("config.zig");
 pub const observability = @import("observability.zig");
 pub const plugin = @import("plugin.zig");
 pub const pty = @import("pty.zig");
+pub const win32_process = @import("platform/windows/win32_process.zig"); // Windows 캡처 러너. **배럴에 거는 이유는 모듈 경로다** — 이것을 쓰는 `git_backend.zig` 가 모듈 루트가 `platform/macos` 안인 아티팩트에서도 컴파일되는데, 상대 경로로 가져오면 그때 모듈 밖이 되어 깨진다(실측: macOS CI)
 pub const redact = @import("redact.zig"); // 민감정보 redaction 단일 출처(코드) — env·argv·fixture 공용 중립 leaf
 pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");

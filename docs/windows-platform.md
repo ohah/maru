@@ -1471,10 +1471,21 @@ POSIX 테스트를 못 돌린다). 실제로 그 교체본에서 결함 하나�
 돌기 시작하므로** 별건으로 다룬다 — 무엇이 깨지는지 모른 채 이 슬라이스에 섞을 일이 아니다.
 
 
-**import 를 함수 안에 둔다.** 파일 맨 위에 두면 **모듈 루트가 `platform/macos` 안인 아티팩트**
-(`macos-chrome-lab-smoke` 등)에서 `../windows/` 가 모듈 밖이 되어 macOS 빌드가 깨진다 — CI 를 그렇게
-깼다. 함수 안이면 그 함수가 분석될 때만 풀리고, macOS 에서는 `comptime` 분기가 이 함수를 안 밟으므로
-한 번도 안 풀린다.
+
+**캡처 러너는 `maru.zig` 배럴을 통해 온다.** 상대 경로(`../windows/…`)로 가져오면 **모듈 루트가
+`platform/macos` 안인 아티팩트**(`macos-chrome-lab-smoke` 등)에서 모듈 밖이 되어 macOS 빌드가 깨진다.
+
+**이것을 두 번 잘못 짚었다.** 처음엔 테스트 등록이 원인인 줄 알고 되돌렸는데 같은 오류가 그대로 났고,
+다음엔 import 를 함수 안으로 옮기면 될 줄 알았는데 그것도 안 됐다 — **`@import` 는 파일 단위로 먼저
+해석되므로** 분석되지 않는 함수 안에 있어도 경로가 풀린다.
+
+배럴에 걸 때 걸림돌이 하나 있었다. `cross_target_surface` 워커가 공개 선언을 comptime 에 훑는데
+`pub var last_error` 를 그 자리에서 못 읽어 `check-targets` 가 깨진다 — **`pub var` 를 접근자
+(`lastError()`)로 바꿔** 풀었다.
+
+**재현은 `zig build -Dtarget=aarch64-macos` 로 부족하다.** 그 명령은 기본 아티팩트만 세우고, 깨진 것은
+별도 스모크 아티팩트였다. **CI 가 도는 step 이름을 그대로 붙여야** 재현된다
+(`zig build -Dtarget=aarch64-macos macos-chrome-lab-smoke`).
 
 `zig build -Dtarget=aarch64-macos` 만으로는 못 잡았다 — 그 명령은 기본 아티팩트만 세우고, 깨진 것은
 **별도 스모크 아티팩트**였다. CI 가 도는 step 을 그대로 불러야 재현된다.

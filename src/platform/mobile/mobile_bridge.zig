@@ -118,39 +118,9 @@ var term_written: usize = 0;
 var term_cols: u16 = 0;
 var term_rows: u16 = 0;
 
-/// 실제 셸 세션이 낼 법한 바이트열. 색·굵기·한글이 섞여 있어야 코어를 통과했다는 게
-/// 화면에서 드러난다.
-const term_feed =
-    "$ zig build test\r\n" ++
-    "\x1b[32mAll 11 passed.\x1b[0m\r\n" ++
-    "$ git status --short\r\n" ++
-    "\x1b[33m M \x1b[0msrc/chrome/ui/tree.zig\r\n" ++
-    "$ maru \x1b[36m0.1.0\x1b[0m (arm64)\r\n" ++
-    "\x1b[35m한글 터미널\x1b[0m 세션 목록\r\n" ++
-    "$ \x1b[1m설정 검색 알림\x1b[0m\r\n" ++
-    // TUI 한 줄. 박스 드로잉·블록·브라유는 maru 가 **폰트 대신 절차 합성**하는 것들이라
-    // (renderer.synthesizeGlyph) 화면에 이게 제대로 나오는지가 곧 합성 경로가 서 있는지다.
-    "┌──┬──┐ █▄▀░ ⠿⠇\r\n" ++
-    "│ab│cd│\r\n" ++
-    // SGR 한 줄. 코어가 셀에 담는 속성이 화면까지 오는지 보는 자리다 — 배경(44)·반전(7)·
-    // 밑줄(4)·굵게(1). 예전에는 전경색만 읽어서 넷 다 평범한 글자로 나왔다.
-    "\x1b[44m bg \x1b[0m\x1b[7m rev \x1b[0m\x1b[4m under \x1b[0m\x1b[1m bold \x1b[0m\r\n" ++
-    // 나머지 속성도 한 줄에 모은다 — **만들고 화면으로 안 본 것을 남기지 않으려고** 넣었다.
-    // `hid`(8)는 안 보이는 것이 정답이고, `ucol`(58)은 밑줄만 빨갛다.
-    "\x1b[2mdim\x1b[0m \x1b[3mital\x1b[0m \x1b[21mdbl\x1b[0m \x1b[9mst\x1b[0m " ++
-    "\x1b[53move\x1b[0m \x1b[4;58;5;196mucol\x1b[0m \x1b[8mhid\x1b[0m|\r\n" ++
-    // 이모지 한 줄. BMP 밖 글자(서러게이트 쌍)와 **컬러 아틀라스**가 서 있는지가 화면에서
-    // 드러난다 — 이 줄이 없으면 이모지가 빈칸이던 것도 화면으로는 못 봤다(M4a6).
-    //
-    // 뒤의 셋은 **host 굽기 경로의 시각 판정자**다(계약 테스트가 못 닿는 자리라 이 줄이 유일한
-    // 판정자다):
-    //   - `\u{2764}`(❤) — 번들 폰트에 **없는** 기호. 시스템 폰트 폴백이 빠지면 빈칸이 된다.
-    //   - `\u{2764}\u{FE0F}`(❤️) — 같은 base 에 VS16 이 붙은 **클러스터**. 브리지가 열을 안
-    //     넘기거나 host 가 열을 문자열로 안 이으면 **앞의 ❤ 와 똑같이** 그려진다. 즉 이 둘이
-    //     **나란히 달라 보여야** 클러스터 경로가 산 것이다.
-    //   - `\u{1D400}`(𝐀) — **BMP 밖 비컬러** 글자. 서러게이트 쌍 조립이 빠지면 엉뚱한 글자가 된다.
-    // 셋 다 컬러 이모지와 **다른 경로**를 타므로 이모지만 보고는 회귀를 못 잡는다.
-    "emoji \u{1F600}\u{1F389}\u{1F680} + 한글 가나 \u{2764} \u{2764}\u{FE0F} \u{1D400}\r\n";
+// **데모 바이트는 없앴다**(사용자 요청). 화면을 채워 보이려고 넣어 둔 글이었는데,
+// 붙기 전에도 터미널이 뭔가 하고 있는 것처럼 보이고 원격 출력이 그 밑에 붙어 섞였다.
+// 빈 화면이 정직하다 — 무엇이 원격에서 온 것인지가 화면만 봐도 분명해진다.
 
 // ── 입력 ─────────────────────────────────────────────────────────────────────
 // 플랫폼이 키를 받아 **바이트로** 넘긴다. 코어는 그것을 PTY 에서 온 것과 구분하지 않는다 —
@@ -698,6 +668,15 @@ pub fn terminalBackCenter() struct { x: f32, y: f32 } {
 /// 어긋나 "안 눌러야 할 자리가 눌렸다" 로 잘못 읽힌다(실제로 그렇게 짰다가 걸렀다).
 pub fn terminalBackHitAt(x: f32, y: f32) bool {
     return term_back_rect.w > 0 and setHit(term_back_rect, x, y);
+}
+
+/// 그 점이 **앱 바의 어느 버튼**에든 닿나(테스트용). 테스트가 자리를 다시 계산하면 버튼을
+/// 하나 더할 때 조용히 어긋난다 — 자판 버튼을 넣다 실제로 그랬다.
+pub fn terminalChromeHitAt(x: f32, y: f32) bool {
+    if (terminalBackHitAt(x, y)) return true;
+    if (term_kb_rect.w > 0 and setHit(term_kb_rect, x, y)) return true;
+    if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) return true;
+    return false;
 }
 
 /// 그 뒤로가기가 지금 눌린 것으로 그려지나(테스트용 — 눌림은 색만 바꿔 quad 수로 안 잡힌다).
@@ -1531,6 +1510,15 @@ const edge_w: f32 = 26.0;
 /// 스크롤로 밀려 키가 없는 자리도 밴드 안이다.
 /// 앱 바의 **복사** 자리. 폭이 0 이면 지금 선택이 없어 안 그려졌다는 뜻이다.
 var term_copy_rect: SetRect = .{};
+/// 키보드를 다시 올리는 자리(앱 바). **늘 있다** — 없으면 한 번 내린 키보드를 못 올린다.
+var term_kb_rect: SetRect = .{};
+var term_kb_pressed = false;
+
+/// 그 자리 한가운데(테스트용).
+pub fn terminalKeyboardCenter() ?struct { x: f32, y: f32 } {
+    if (term_kb_rect.w <= 0) return null;
+    return .{ .x = term_kb_rect.x + term_kb_rect.w / 2, .y = term_kb_rect.y + term_kb_rect.h / 2 };
+}
 /// 배너가 먹은 높이(0 이면 없다). **본문을 밀지 않는다** — 코어 격자를 줄이면 원격이 믿는
 /// 크기와 갈리고, 배너는 잠깐 뜨는 것이라 그 값이 오르내리면 원격에 resize 가 쏟아진다.
 var term_banner_h: f32 = 0;
@@ -1689,6 +1677,26 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     //
     // **나타나고 사라지는 것이 다른 버튼을 안 민다.** 오른쪽 끝 고정 자리이고, 뒤로가기·제목은
     // 왼쪽에 있다(키바에서 "조건부 키를 두면 손가락이 겨눈 자리가 바뀐다" 고 적어 둔 그 이유다).
+    // **키보드를 다시 올리는 자리.** 앱이 키보드를 안 내리지만 사용자가 한 번 내리면
+    // (스와이프·⌘K) 다시 올릴 길이 없었다 — 설정 칸을 누르는 것 말고는(사용자 요청).
+    term_kb_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 2, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    if (term_kb_pressed) push(.{
+        .x = @intFromFloat(term_kb_rect.x),
+        .y = @intFromFloat(term_kb_rect.y),
+        .w = @intFromFloat(term_kb_rect.w),
+        .h = @intFromFloat(term_kb_rect.h),
+    }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    {
+        const kb_label = maru.i18n.tIn(.ko, .mob_keyboard);
+        pushText(
+            kb_label,
+            @intFromFloat(term_kb_rect.x + (set_head_h - @as(f32, @floatFromInt(textWidth(kb_label, 15)))) / 2),
+            @intFromFloat(term_kb_rect.y + (set_head_h - 15) / 2),
+            15,
+            tk.get(.surface_fg),
+        );
+    }
+
     term_copy_rect = .{};
     if (copyEnabled()) {
         term_copy_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
@@ -2208,7 +2216,6 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         // **config 를 여기서 흘려 넣는다.** host 가 화면보다 먼저 config 를 읽으므로 그때는
         // 코어가 없었다 — 여기서 안 세우면 그 값들이 조용히 버려진다.
         applyConfigToCore(&term_core.?);
-        term_core.?.write(term_feed) catch setLastError("core_write_feed");
         drainUnconsumed(&term_core.?);
         // **코어가 서기 전에 온 원격 출력을 여기서 흘려 넣는다.** 세션은 첫 프레임보다 빨리
         // 붙을 수 있고(실측: iOS 에서 접속이 150ms, 그때 코어가 없었다), 그때 온 바이트를
@@ -2407,19 +2414,34 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
 
 /// 데스크톱 기본 테마에 가까운 값. **아직 config 를 안 읽는다** — 모바일이 config 를
 /// 어디서 받을지가 원격 연결(M3)과 함께 정해진다.
+/// 두 색을 섞는다(`t` 는 0~255 — b 쪽 비중).
+fn mix(a: anytype, b: @TypeOf(a), t: u16) @TypeOf(a) {
+    return .{
+        .r = @intCast((@as(u16, a.r) * (255 - t) + @as(u16, b.r) * t) / 255),
+        .g = @intCast((@as(u16, a.g) * (255 - t) + @as(u16, b.g) * t) / 255),
+        .b = @intCast((@as(u16, a.b) * (255 - t) + @as(u16, b.b) * t) / 255),
+    };
+}
+
 fn themeColors() tokens.ThemeColors {
     const t = cfg().theme;
+    const bg = hex(t.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E });
+    const fg = hex(t.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA });
     return .{
-        .foreground = hex(t.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA }),
-        .sidebar_background = .{ .r = 0x24, .g = 0x24, .b = 0x2E },
-        .sidebar_foreground = .{ .r = 0xD0, .g = 0xD0, .b = 0xD8 },
-        .sidebar_active = .{ .r = 0x3A, .g = 0x3A, .b = 0x4A },
+        .foreground = fg,
+        // **chrome 색도 사용자 테마에서 나온다**(사용자 요청). 예전에는 여기 값이 박혀 있어
+        // 배경을 흰색으로 바꿔도 설정·목록 화면만 어두운 채로 남았다 — 같은 앱이 화면마다
+        // 다른 테마를 쓰는 셈이었다. 본문 배경에서 **글자색 쪽으로 조금 섞어** 만든다:
+        // 그래야 어떤 테마에서도 chrome 이 본문과 구별되면서 같은 계열로 보인다.
+        .sidebar_background = mix(bg, fg, 18),
+        .sidebar_foreground = mix(fg, bg, 24),
+        .sidebar_active = mix(bg, fg, 46),
         .search_match = .{ .r = 0x4A, .g = 0x4A, .b = 0x20 },
         .search_match_current = .{ .r = 0x8A, .g = 0x7A, .b = 0x20 },
         .selection = hex(t.selection, .{ .r = 0x30, .g = 0x40, .b = 0x60 }),
         // **터미널 본문 배경은 사이드바와 별개 입력이다**(tokens.zig §4.1b). `theme.background`
         // 가 그 자리다 — 사이드바는 chrome 색이라 따로 둔다.
-        .terminal_background = hex(t.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E }),
+        .terminal_background = bg,
         // 비교 본문 색. 모바일은 아직 diff 를 안 그리지만(§2.4 — 도크·편집기 미이식) 토큰이
         // 필수 입력이라 데스크톱 파생 규칙에 가까운 값을 준다.
         .diff_added = .{ .r = 0x20, .g = 0x40, .b = 0x28 },
@@ -4386,6 +4408,12 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1; // 둘째 손가락은 이 표면의 제스처를 안 건드린다
                 // **복사가 먼저다** — 뒤로가기와 자리가 다르지만, 판정 순서를 고정해 둬야
                 // 나중에 자리가 겹칠 때 조용히 한쪽이 죽지 않는다.
+                if (term_kb_rect.w > 0 and setHit(term_kb_rect, x, y)) {
+                    if (!routeClaim(.chrome)) return 0;
+                    term_press.begin(x, y, time_ms, false);
+                    term_kb_pressed = true;
+                    return 1;
+                }
                 if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) {
                     if (!routeClaim(.chrome)) return 0;
                     term_press.begin(x, y, time_ms, false);
@@ -4405,17 +4433,25 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (term_press.move(x, y)) {
                     term_back_pressed = false;
                     term_copy_pressed = false;
+                    term_kb_pressed = false;
                 }
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
                 const was_copy = term_copy_pressed;
+                const was_kb = term_kb_pressed;
                 term_back_pressed = false;
                 term_copy_pressed = false;
+                term_kb_pressed = false;
                 routeClear(); // 이 띠는 한 손가락 자리다 — 뗀 순간 끝이다
                 if (phase == 3) {
                     term_press.cancel();
+                    return 1;
+                }
+                if (was_kb) {
+                    // **화면 전환이 아니다** — 그 자리에 머문 채 올려 달라고만 한다.
+                    if (term_press.end() == .tap) kb_raise_req = true;
                     return 1;
                 }
                 if (was_copy) {

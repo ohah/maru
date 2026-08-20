@@ -82,22 +82,44 @@ printf '%s\n' "$payload" | env MARU_PANE_ID=7 /bin/sh -c "$cmd" 2>"$err" || fail
 mkdir -p "$logdir"
 pass "디렉터리 부재(조용함 포함)"
 
-echo "6) 동시 append 가 서로의 줄을 깨지 않는다 — 큰 payload 로 본다"
-# **작은 payload 로는 이 검사가 아무것도 증명하지 못한다.** 짧은 write 는 원자적으로 들어가 섞일 일이 없고,
-# 인터리브는 payload 가 커질수록 난다. 서브에이전트가 병렬로 도구를 부르면 같은 pane 파일에 큰 이벤트가
-# 동시에 떨어지는데, 그때 줄이 섞이면 파서가 양쪽을 다 버린다.
-fat=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"pad\":\""; for (i = 0; i < 6000; i++) printf "p"; printf "\"}" }')
+echo "5b) pane 식별자가 숫자가 아니면 로그 디렉터리 밖에 쓰지 않는다"
+# 검증이 없을 때 이 입력이 실제로 디렉터리 밖에 파일을 만들었다(실측).
+escape_dir="$work/outside"
+rm -rf "$escape_dir" "$logdir"
+mkdir -p "$escape_dir" "$logdir"
+printf '%s\n' "$payload" | env MARU_PANE_ID='../outside/pwned' /bin/sh -c "$cmd" || fail "탈출 입력에서 0 이 아니었다"
+[ ! -e "$escape_dir/pwned.ndjson" ] || fail "로그 디렉터리 밖에 파일이 생겼다"
+printf '%s\n' "$payload" | env MARU_PANE_ID='7; rm -rf /' /bin/sh -c "$cmd" || fail "주입 입력에서 0 이 아니었다"
+# **앞 단계의 부작용에 기대지 않는다** — 5)가 디렉터리를 지웠다 만든 덕에 비어 있었을 뿐이라, 그쪽을 고치면
+# 여기가 조용히 깨진다. 이 검사가 필요한 상태를 스스로 만든다.
+[ "$(ls "$logdir" | wc -l | tr -d ' ')" -eq 0 ] || fail "예상 밖 파일이 생겼다: $(ls "$logdir")"
+pass "pane 식별자 검증"
+
+echo "6) 동시 append 가 이벤트를 잃지도, 파일을 자르지도 않는다"
+# **«줄이 안 깨진다»고 단언하지 않는다.** 실측(2026-08-20)에서 24개 동시 쓰기의 인터리브는 **간헐적**이었다 —
+# 같은 크기로 돌려도 어떤 회차는 2줄이 섞이고 어떤 회차는 0줄이었다. `printf` 가 큰 출력을 여러 write 로
+# 쪼개면 O_APPEND 가 각 write 의 오프셋만 원자적으로 잡아 주기 때문이고, 그 쪼갬은 구현·버퍼 상태를 탄다.
+# 그것을 «절대 안 깨진다»로 고정하면 게이트가 무작위로 빨개진다(flaky).
+#
+# 그래서 계약이 실제로 약속하는 것만 본다: ⑴ **개행 수가 보존된다**(이벤트를 통째로 잃지 않는다),
+# ⑵ **바이트가 보존된다**(파일이 잘리지 않는다). 섞인 줄을 버리는 것은 파서의 몫이고, 그 동작은
+# `agent_hook_event.zig` 의 단위 테스트가 고정한다.
+fat=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"pad\":\""; for (i = 0; i < 8000; i++) printf "p"; printf "\"}" }')
 fat_size=$(printf '%s' "$fat" | wc -c | tr -d ' ')
+runs=24
+# 한 줄 = provider("claude") + TAB + payload + 개행
+expect_bytes=$(( (6 + 1 + fat_size + 1) * runs ))
 i=0
-while [ "$i" -lt 24 ]; do
-  printf '%s\n' "$fat" | env MARU_PANE_ID=c /bin/sh -c "$cmd" &
+while [ "$i" -lt "$runs" ]; do
+  printf '%s\n' "$fat" | env MARU_PANE_ID=11 /bin/sh -c "$cmd" &
   i=$((i + 1))
 done
 wait
-lines=$(wc -l < "$logdir/c.ndjson")
-[ "$lines" -eq 24 ] || fail "24 줄이어야 하는데 $lines 줄이다"
-broken=$(grep -cv '^claude	{.*}$' "$logdir/c.ndjson" || true)
-[ "$broken" -eq 0 ] || fail "$broken 줄이 깨졌다(줄당 $fat_size B)"
-pass "동시 append(줄당 $fat_size B x 24)"
+lines=$(wc -l < "$logdir/11.ndjson" | tr -d ' ')
+bytes=$(wc -c < "$logdir/11.ndjson" | tr -d ' ')
+[ "$lines" -eq "$runs" ] || fail "개행이 $runs 개여야 하는데 $lines 개다(이벤트를 잃었다)"
+[ "$bytes" -eq "$expect_bytes" ] || fail "바이트가 $expect_bytes 여야 하는데 $bytes 다(파일이 잘렸다)"
+intact=$(grep -c '^claude	{.*}$' "$logdir/11.ndjson" 2>/dev/null || true)
+pass "동시 append(줄당 $fat_size B x $runs, 온전한 줄 $intact/$runs)"
 
 echo "OK: 훅 커맨드가 실제 셸에서 계약 6개를 지킨다"

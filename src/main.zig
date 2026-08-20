@@ -1712,6 +1712,61 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("found: alpha={} hangul={}\n", .{ found_alpha, found_hangul });
     try stdout.flush();
 
+    // ── 쓰기 경로 ────────────────────────────────────────────────────────────────────────────
+    //
+    // 읽기와 **다른 자리**를 탄다(`runWriteSync` → stderr 를 받는다). 읽기만 재고 넘어가면 그 갈래는
+    // 분석조차 안 된 채 남는다 — 이 슬라이스가 그것으로 한 번 데였다.
+    //
+    // **결과를 상태로 확인한다.** 종료 코드만 보면 `add` 가 아무것도 안 해도 통과한다. 스테이지한 뒤
+    // 다시 읽어 그 파일이 **staged 축**으로 옮겨졌는지 본다.
+    var write_out = git_backend_mod.runWriteSync(allocator, .stage, "git", repo, &.{"alpha.txt"}, null) catch |err| {
+        try stderr.print("maru win32-git-smoke: stage failed({s})\n", .{@errorName(err)});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer allocator.free(write_out.stderr_bytes);
+
+    if (!backend.submitRepoStatus("git", repo, 2)) {
+        try stderr.writeAll("maru win32-git-smoke: could not submit the second repo status request\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    var rounds2: usize = 0;
+    var after: ?git_backend_mod.RepoStatusResult = null;
+    while (rounds2 < 6000) : (rounds2 += 1) {
+        if (backend.takeRepoStatusResult()) |taken| {
+            after = taken;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    var status2 = after orelse {
+        try stderr.writeAll("maru win32-git-smoke: the second repo status did not finish in time\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer status2.deinit(git_backend_mod.worker_allocator);
+
+    // porcelain v2 의 추적되는 항목은 `1 <XY> …` 로 오고 `XY` 의 **첫 글자가 index 축**이다.
+    // 스테이지된 새 파일은 `A.` 다 — 추적되지 않은 `?` 에서 옮겨 왔다는 뜻이다.
+    var staged_alpha = false;
+    var untracked_after: usize = 0;
+    var it2 = maru.session.git_status.iterate(status2.text);
+    while (it2.next()) |entry| {
+        // `staged` 가 index 축이다. 추적되지 않던 파일을 `add` 하면 그 축이 `added` 가 된다.
+        if (entry.staged == .unchanged) untracked_after += 1;
+        if (std.mem.indexOf(u8, entry.path, "alpha.txt") != null and entry.staged == .added) staged_alpha = true;
+    }
+
+    try stdout.print("write: exit={d} stderr_bytes={d}\n", .{ write_out.exit_code, write_out.stderr_bytes.len });
+    try stdout.print("after: staged_alpha={} untracked={d}\n", .{ staged_alpha, untracked_after });
+    try stdout.flush();
+
+    if (!write_out.ok() or !staged_alpha) {
+        try stderr.writeAll("maru win32-git-smoke: the stage did not move the file into the index\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
     if (!status.ok or !found_alpha or !found_hangul) {
         try stderr.writeAll("maru win32-git-smoke: the status did not carry the fixture names\n");
         try stderr.flush();

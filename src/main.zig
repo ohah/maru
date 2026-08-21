@@ -1799,6 +1799,36 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 /// 계속 출력해 줄이 어긋난다.
 /// 스모크가 도는 최대 스핀 수. 한 스핀이 약 16ms 라 대략 10 초다 — 사람이 눈으로 보기에 충분하고
 /// 자동 캡처가 기다릴 수 있는 길이다. **앱(`win32-terminal`)에는 이 상한이 없다.**
+/// config 와 해석된 테마를 코어에 건다. **Windows 진입점 둘이 같은 값을 쓰도록 한 자리에 둔다.**
+///
+/// 리더 스레드가 뜨기 전에 부르므로 코어를 직접 만진다 — 큐를 거치는 것은 리더가 도는 동안의 규율이고,
+/// 여기는 그 전이다(macOS 도 spawn 전에 같은 값을 적용한다).
+fn applyCoreConfig(
+    core: *maru.terminal.TerminalCore,
+    cfg: maru.config.theme.Config,
+    appearance: maru.config.appearance.ResolvedAppearance,
+    cell_w: u32,
+    cell_h: u32,
+) void {
+    maru.session.core_command.apply(core, .{
+        .set_runtime_config = .{
+            .max_scrollback = cfg.scrollback.lines,
+            .ambiguous_wide = cfg.ambiguous_width == .wide,
+            .emoji_wide = cfg.emoji_width == .wide,
+            .palette = appearance.theme.palette,
+            .default_colors = .{ .foreground = appearance.theme.foreground, .background = appearance.theme.background },
+            .cell_metrics = .{ .width = cell_w, .height = cell_h },
+            // config 의 모양 enum 과 코어의 것은 **다른 타입**이다(같은 세 값이지만 층이 다르다).
+            // macOS 도 같은 자리에서 옮긴다(`configCursorShape`).
+            .default_cursor_shape = switch (appearance.cursor.shape) {
+                .block => .block,
+                .bar => .bar,
+                .underline => .underline,
+            },
+        },
+    });
+}
+
 const smoke_spin_cap: usize = 600;
 
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize) !void {
@@ -1818,6 +1848,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var loaded = try maru.config.loader.loadDefault(io, allocator);
     defer loaded.deinit();
     const cfg = loaded.config;
+    // **hex 문자열을 여기서 파싱하지 않는다.** `appearance.resolve` 가 색 해석·대비 보정·기본값 폴백을
+    // 소유한다(macOS 도 같은 함수를 쓴다). 실패하면 값이 잘못된 것이므로 **조용히 기본값으로 접지 않고**
+    // 알린 뒤 빌트인으로 간다 — 키바인딩 검증과 같은 규율이다.
+    const appearance = maru.config.appearance.resolve(cfg) catch |err| blk: {
+        try stderr.print("  warning: theme colors are invalid({s}) — falling back to built-ins\n", .{@errorName(err)});
+        break :blk try maru.config.appearance.resolve(.{});
+    };
 
     // ── 폰트와 셀 격자 ─────────────────────────────────────────────────────────────────────
     //
@@ -1893,6 +1930,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     surfaces[0].title = "win32 terminal";
     surfaces[0].command = command;
 
+    // **앱 수준 config 를 코어에 한 번에 건다.** 스크롤백 길이·팔레트·기본 전경/배경·모호폭/이모지폭·
+    // 커서 모양이 여기서 온다 — 예전에는 전부 코어 기본값이라 `scrollback.lines` 를 바꿔도 무동작이었다.
+    //
+    // **`set_runtime_config` 한 묶음으로 보낸다.** 값마다 명령을 따로 보내면 자식의 첫 출력이 그 사이에
+    // 끼어 **옛 설정으로 파싱**되는 자리가 생긴다(macOS 가 같은 이유로 이 묶음을 쓴다). 리더가 뜨기 전에
+    // 거는 것도 같은 이유다.
+    //
+    // **셀 크기도 함께 준다.** 코어가 링크 판정·마우스 좌표에 셀 크기를 쓰는데, 안 주면 기본값으로 굳어
+    // 폰트를 키워도 그 계산만 옛 값을 본다.
+    applyCoreConfig(&surfaces[0].core, cfg, appearance, cell_w, cell_h);
+
     var tab_ptrs = [_]*maru.session.surface.Surface{&surfaces[0]};
     var app_window: maru.session.window.AppWindow = .{ .tabs = &tab_ptrs };
 
@@ -1935,18 +1983,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
 
+    // **색도 config 에서 온다.** 예전에는 이 여섯 값이 리터럴이었다 — config 를 읽어 놓고 폰트만 쓰던
+    // 자리와 같은 부류다(§2l 이 폰트에서 그것을 잡았다). `appearance.resolve` 가 `"#1e2430"` 같은
+    // 문자열을 `Rgb` 로 풀고 대비·기본값 규칙까지 소유하므로, 여기서 hex 를 다시 파싱하지 않는다.
+    //
+    // 커서 색은 `cursor.color`/`cursor.text` 가 있으면 그것, 없으면 테마의 `cursor`/`background` 다 —
+    // macOS 와 같은 폴백이라 두 플랫폼이 같은 화면을 낸다.
+    // OSC 4 팔레트 복사본. 프레임마다 코어에서 채운다(위 doc).
+    var palette_copy: [256]?maru.terminal.Rgb = @splat(null);
     var colors = maru.renderer.metal_frame.CellColors{
-        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
-        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        .default_fg = appearance.theme.foreground,
+        .default_bg = appearance.theme.background,
         // **커서를 켠다.** 기본값 `null`은 "커서를 투영하지 않는다"이고(그 doc: 아틀라스 픽셀을 그대로
         // 검증하는 골든 스모크가 커서 블록에 흔들리지 않게 하려는 것), 터미널 화면에는 커서가 있어야 한다.
         // 켜지 않으면 화면이 그럴듯해 보여도 커서 오버레이 투영 경로가 한 번도 안 돈다.
         .cursor = .{
-            .block = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
-            .text = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+            .block = appearance.cursor.color orelse appearance.theme.cursor,
+            .text = appearance.cursor.text orelse appearance.theme.background,
         },
+        .selection_bg = appearance.theme.selection,
+        .search_match_bg = appearance.theme.search_match,
+        .current_match_bg = appearance.theme.search_match_current,
+        .config_palette = &appearance.theme.palette,
     };
-    const clear = d3d11_present.clearColorFromArgb(0xFF1E2430);
+    // **지우는 색도 테마 배경이다.** 이 값이 셀 배경과 다르면 창 가장자리(격자에 안 맞는 나머지 픽셀)만
+    // 다른 색으로 남아 테두리처럼 보인다 — 리터럴이던 동안은 테마를 바꿔도 그 띠가 안 따라왔다.
+    const clear = d3d11_present.clearColorFromArgb(0xFF000000 |
+        (@as(u32, appearance.theme.background.r) << 16) |
+        (@as(u32, appearance.theme.background.g) << 8) |
+        @as(u32, appearance.theme.background.b));
 
     // **리졸버 조립은 `Parsed` 가 소유한다.** 손으로 세 필드를 옮겨 담으면 바인딩 종류가 늘 때 이 자리만
     // 빠진다 — macOS 도 같은 헬퍼를 쓴다.
@@ -2471,6 +2536,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 읽기라 메인 스레드에서 해도 된다(코어 mutate 만 리더 위임이다 — 같은 루프의
         // `active.core.mouse_tracking` 과 같은 자리다). macOS 도 같은 한 줄이다.
+        // **OSC 4 팔레트도 매 프레임 가져온다.** 앱이 `OSC 4` 로 색을 바꾸면 그것이 config 보다
+        // 우선한다(우선순위: OSC4 → config → xterm256). 안 가져오면 `config_palette` 만 보여
+        // **앱이 바꾼 색이 화면에 안 나온다** — 선택·커서와 같은 "상태는 생기는데 안 그려지는" 부류다.
+        //
+        // **포인터가 아니라 복사본을 준다.** 코어는 리더 스레드가 계속 쓰고 있어, 프레임 만드는 동안
+        // 코어 포인터를 들고 있으면 값이 중간에 바뀔 수 있다(macOS 도 같은 이유로 복사한다).
+        if (app_window.active()) |a| {
+            palette_copy = a.core.paletteOverride().*;
+            colors.palette = &palette_copy;
+        }
         colors.selection = if (app_window.active()) |a| a.core.selectionViewportSpan() else null;
         if (colors.selection != null) selection_frames += 1;
 
@@ -2499,6 +2574,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.writeAll("maru.win32-terminal-smoke.v1\n");
     try stdout.print("font_family={s}\n", .{raster.family});
     try stdout.print("cell_px={d}x{d}\n", .{ cell_w, cell_h });
+    // **설정이 코어까지 갔는지 값으로 본다.** 색은 화면으로 판정되지만 스크롤백 길이는 안 보인다 —
+    // 안 세면 `scrollback.lines` 를 바꿔도 무동작인 것을 못 잡는다(예전이 그랬다).
+    try stdout.print("config_runtime: scrollback_cap={d} palette_set={d} cursor_shape={s}\n", .{
+        surfaces[0].core.screen.sb.cap,
+        blk: {
+            var n: usize = 0;
+            for (appearance.theme.palette) |c| {
+                if (c != null) n += 1;
+            }
+            break :blk n;
+        },
+        @tagName(appearance.cursor.shape),
+    });
     try stdout.print("terminal_size={d}x{d}\n", .{ start.cols, start.rows });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("cells_drawn_last={d}\n", .{last_cells});

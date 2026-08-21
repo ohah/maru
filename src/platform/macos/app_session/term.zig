@@ -581,6 +581,12 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
     // **본문 선택 제스처도 같은 부류다**(§4.1g 배선). `PointerGestureOwner.editor_selection`이
     // `*Term`을 프레임 간 들고, tick의 자동 스크롤과 다음 마우스 move가 그것을 역참조한다 —
     // barrier가 없으면 죽은 `Term.rt`를 읽는다. 형제 둘에는 걸어 두고 이것만 빠져 있었다.
+    // 비교 뷰 선택 제스처도 같은 부류다 — `*Term`을 프레임 간 든다.
+    if (self.pointerGestureIs(.editor_diff_selection_drag) and
+        self.pointer_gesture_owner.editor_diff_selection_drag.term == term)
+    {
+        self.finishPointerGesture();
+    }
     if (self.pointerGestureIs(.editor_selection) and self.pointer_gesture_owner.editor_selection.term == term) {
         self.editor_drag_autoscroll = 0;
         self.editor_drag_autoscroll_accum_ms = 0;

@@ -1777,7 +1777,85 @@ test "DSEL1 비교 뷰 좌표계: 좌우를 갈라 그 열의 행과 byte를 답
     const l7 = editor_ops.hitTestDiffBody(fx.term, left_text_x, far_below, null) orelse return error.NoHit;
     try testing.expectEqual(fx.term.rt.editor_diff_hit_len_left - 1, l7.row);
 
-    // ⑻ **비교가 아니면 받지 않는다.**
+    // ⑻ **비교가 아니면 받지 않는다.** view를 바꾼 채 끝나면 `release`가 `compare` 자원을 안 놓아
+    //    누수가 난다(그 함수가 `view == .compare`일 때만 `deinit`한다) — 반드시 되돌린다.
+    const saved_view = fx.term.rt.editor_diff.?.view;
     fx.term.rt.editor_diff.?.view = .loading;
     try testing.expectEqual(@as(?editor_ops.DiffHit, null), editor_ops.hitTestDiffBody(fx.term, left_text_x, y0, null));
+    fx.term.rt.editor_diff.?.view = saved_view;
+}
+
+test "DSEL2 비교 뷰 선택: 한 열에 머물고, 빈 행은 복사에서 빠진다 (§4.1g 비교 뷰)" {
+    // **좌우를 걸치는 선택은 만들지 않는다**(계약). 두 파일의 조각을 이어 붙인 텍스트는 어느 쪽
+    // 파일에도 없던 것이다. 그리고 **짝맞춤 빈 행은 복사에서 빠진다** — 그 자리에 줄이 없으므로
+    // 개행을 내면 원본에 없던 빈 줄이 붙는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 가운데 줄이 한쪽에만 있다 → 반대쪽에 짝맞춤 빈 행이 생긴다.
+    var entry = testEntry("keep\ntail\n", "keep\nadded\ntail\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn.dl.deinit(allocator);
+
+    const g = fx.term.rt.editor_diff_hit_geom;
+    const y0: f64 = @floatFromInt(g.body_y + 1);
+    const left_x: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + 1);
+    const right_x: f64 = @floatFromInt(g.right_x + @as(i32, @intCast(g.content_left_px)) + 1);
+    const pane = pane_ops.activePane(fx.session);
+    // **편집기 Term을 활성으로 세운다** — Fixture는 추가만 하고 활성을 안 바꾼다. 배선 함수들이
+    // `pane.activeTerm()`으로 대상을 고르므로(제품 경로와 같다) 이것이 없으면 터미널을 본다.
+    for (pane.terms.items, 0..) |t, i| {
+        if (t == fx.term) pane.active_term = i;
+    }
+    try testing.expectEqual(fx.term, pane.activeTerm());
+
+    // ⑴ **왼쪽 열을 눌러 선택을 연다.**
+    try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane, left_x, y0));
+    const s0 = fx.term.rt.editor_diff_selection orelse return error.NoSelection;
+    try testing.expectEqual(editor_ops.DiffSide.left, s0.side);
+    try testing.expectEqual(s0.anchor_row, s0.focus_row); // 클릭만으로는 범위가 없다
+
+    // ⑵ **오른쪽 열로 끌어도 왼쪽에 머문다** — 계약의 핵심.
+    const last_y: f64 = @floatFromInt(g.body_y + @as(i32, @intCast(2 * @as(u32, g.cell_h_px))) + 1);
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, right_x, last_y));
+    const s1 = fx.term.rt.editor_diff_selection orelse return error.NoSelection;
+    try testing.expectEqual(editor_ops.DiffSide.left, s1.side);
+    try testing.expect(s1.focus_row > s0.anchor_row); // 세로로는 따라갔다
+
+    // ⑶ **선택 띠가 그 열에만 선다.**
+    try testing.expect(editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .left) != null);
+    try testing.expectEqual(
+        @as(?[]const []const chrome_editor.frame.Mark, null),
+        editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .right),
+    );
+
+    // ⑷ **복사가 빈 행을 건너뛴다.** 왼쪽은 "keep"·(빈 행)·"tail"이므로 빈 줄이 안 낀다.
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("keep\ntail", fx.session.chrome_clipboard_write);
+
+    // ⑸ **뗌이 소유권을 놓는다.**
+    try testing.expect(fx.session.pointerGestureIs(.editor_diff_selection_drag));
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, right_x, last_y));
+    try testing.expect(!fx.session.pointerGestureIs(.editor_diff_selection_drag));
+
+    // ⑹ **오른쪽 열도 같다** — ⑵가 항진명제가 아니라는 대조군.
+    try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane, right_x, y0));
+    const s2 = fx.term.rt.editor_diff_selection orelse return error.NoSelection;
+    try testing.expectEqual(editor_ops.DiffSide.right, s2.side);
+    // **행 끝까지 끈다.** 열 머리에 두면 마지막 행의 byte가 0이라 그 줄이 빈다 — ⑵는 반대 열
+    //    좌표가 왼쪽 열로 clamp되면서 우연히 행 끝까지 갔던 것이고, 여기서는 명시해야 한다.
+    const right_far_x: f64 = @floatFromInt(g.right_x + @as(i32, @intCast(g.content_left_px)) + @as(i32, @intCast(40 * @as(u32, g.cell_w_px))));
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, right_far_x, last_y));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("keep\nadded\ntail", fx.session.chrome_clipboard_write);
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, right_far_x, last_y));
 }

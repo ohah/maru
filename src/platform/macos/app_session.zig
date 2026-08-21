@@ -1720,12 +1720,31 @@ const TermRuntime = struct {
     editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
+    /// 비교 뷰의 **선택**(§4.1g "비교 뷰"). 단일 편집기의 `editor_selection`과 자리는 같고 축이
+    /// 다르다 — 이쪽은 문서 offset이 아니라 `(어느 열, 행, 행 안 byte)`다.
+    ///
+    /// **한 열만 든다.** 좌우를 걸치는 선택은 만들지 않으므로 `side`가 하나뿐이다.
+    editor_diff_selection: ?struct {
+        side: editor_ops.DiffSide,
+        /// 잡은 자리(고정단). 드래그가 뒤로 가도 여기가 남는다.
+        anchor_row: usize,
+        anchor_byte: usize,
+        /// 움직이는 끝.
+        focus_row: usize,
+        focus_byte: usize,
+    } = null,
     /// 비교 뷰의 **좌우 행 배열**(§4.1g "비교 뷰"). 단일 편집기의 `editor_hit_rows`와 같은 관례이고
     /// 축만 다르다 — 이쪽은 그 열의 **정렬된 행 배열**(`left_texts`/`right_texts`) 인덱스다.
     ///
     /// **둘로 나눠 담는 것이 계약이다.** 하나로 담으면 좌우가 섞여 이 축으로 해석한 값이 틀린다
     /// (7차 적대적 검증이 그것을 지적해 통째로 안 담고 있었다). 렌더 쪽은 이미 `splitScratch`가
     /// 저장소를 반으로 갈라 각 열이 자기 몫만 채우므로, 여기서도 갈라 받으면 그 지적이 성립하지 않는다.
+    /// 비교 뷰 선택을 줄별 범위로 자른 것(좌우 각각). 단일 편집기의 `editor_selection_marks`와
+    /// 같은 관례다 — 한 번 잡고 재사용한다.
+    editor_diff_marks_left: [][]const chrome.components.editor_view.frame.Mark = &.{},
+    editor_diff_marks_right: [][]const chrome.components.editor_view.frame.Mark = &.{},
+    editor_diff_mark_buf_left: []chrome.components.editor_view.frame.Mark = &.{},
+    editor_diff_mark_buf_right: []chrome.components.editor_view.frame.Mark = &.{},
     editor_diff_hit_rows_left: []chrome.ui.visual_map.VisualRow = &.{},
     editor_diff_hit_rows_right: []chrome.ui.visual_map.VisualRow = &.{},
     editor_diff_hit_len_left: usize = 0,
@@ -2255,6 +2274,9 @@ const PointerGestureOwner = union(enum) {
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
     address_selection,
+    /// 비교 뷰 **본문** 드래그 선택(§4.1g "비교 뷰"). 잡은 Term과 **잡은 열**을 든다 — 드래그가
+    /// 반대 열로 넘어가도 그 열에 머문다는 계약이 이 필드로 선다.
+    editor_diff_selection_drag: struct { term: *Term, side: editor_ops.DiffSide },
     /// 편집기 **본문 텍스트** 드래그 선택(§4.1g). 잡은 Term을 든다 — 드래그 중 포커스가 옮겨져도
     /// 그 문서가 선택된다(스크롤바 드래그가 같은 규율을 쓴다).
     editor_selection: struct { term: *Term },
@@ -7495,7 +7517,8 @@ pub const AppSession = struct {
             .toggle_find => self.toggleFind(),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
-            .copy_editor_selection => _ = editor_ops.copySelection(self),
+            // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
+            .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).
@@ -9965,6 +9988,7 @@ pub const AppSession = struct {
         // 라우팅이 막대 뒤·포커스 앞 순서로 처리한다).
         if (kind == 2 or kind == 3) {
             if (editor_ops.dragBodySelection(self, @intCast(kind), x_px, y_px)) return true;
+            if (editor_ops.dragDiffBodySelection(self, @intCast(kind), x_px, y_px)) return true;
         }
         if (self.pointerGestureIs(.sidebar_tab) and (kind == 2 or kind == 3)) {
             const drag = &self.pointer_gesture_owner.sidebar_tab;
@@ -10869,6 +10893,13 @@ pub const AppSession = struct {
                     //    막대 띠는 본문 사각 안에 있어 여기서 먼저 보면 막대를 눌러도 선택이 시작된다
                     //    (결정표가 *"막대 위 클릭은 상위가 먼저 가져간다"*고 적은 그 순서다). gutter는
                     //    `hitTestBody`가 `null`을 주므로 접힘 화살표 자리를 안 뺏는다.
+                    // 비교 뷰는 축이 달라 함수가 갈린다(§4.1g "비교 뷰"). 같은 순서 자리다.
+                    if (editor_ops.beginDiffBodySelection(self, pane, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
                     if (editor_ops.beginBodySelection(self, pane, x_px, y_px)) {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;

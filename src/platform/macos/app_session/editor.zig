@@ -733,8 +733,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -1512,6 +1512,144 @@ pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect)
     self.metal_dirty = true;
 }
 
+/// 비교 뷰 본문을 눌렀는가(§4.1g "비교 뷰"). 눌렀으면 선택을 시작하고 `true`.
+///
+/// 단일 편집기의 `beginBodySelection`과 같은 자리·같은 순서(막대 뒤·pane 포커스 앞)에 선다.
+pub fn beginDiffBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return false;
+    if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
+    const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
+    term.rt.editor_diff_selection = .{
+        .side = hit.side,
+        .anchor_row = hit.row,
+        .anchor_byte = hit.byte,
+        .focus_row = hit.row,
+        .focus_byte = hit.byte,
+    };
+    self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 비교 뷰 선택의 드래그·뗌. `kind`는 호스트 관례(2=drag, 3=up).
+///
+/// **잡은 열로 강제한다** — 반대 열로 끌어도 그 열의 경계에 머문다(계약: 좌우를 걸치는 선택은
+/// 만들지 않는다).
+pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) bool {
+    const owner = switch (self.pointer_gesture_owner) {
+        .editor_diff_selection_drag => |g| g,
+        else => return false,
+    };
+    switch (kind) {
+        2 => {
+            const hit = hitTestDiffBody(owner.term, x_px, y_px, owner.side) orelse return true;
+            if (owner.term.rt.editor_diff_selection) |*sel| {
+                sel.focus_row = hit.row;
+                sel.focus_byte = hit.byte;
+                self.metal_dirty = true;
+            }
+            return true;
+        },
+        3 => {
+            self.finishPointerGesture();
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// 비교 뷰 선택을 **줄별 byte 범위**로 자른다 — 그 열의 렌더가 요구하는 축이다.
+///
+/// 단일 편집기의 `buildSelectionMarks`와 같은 일인데 훨씬 짧다: 행 배열이 곧 화면이라 축 변환이 없다.
+pub fn buildDiffSelectionMarksForTest(self: *AppSession, term: *Term, side: DiffSide) ?[]const []const chrome_editor.frame.Mark {
+    return buildDiffSelectionMarks(self, term, side);
+}
+
+fn buildDiffSelectionMarks(self: *AppSession, term: *Term, side: DiffSide) ?[]const []const chrome_editor.frame.Mark {
+    const sel = term.rt.editor_diff_selection orelse return null;
+    if (sel.side != side) return null; // 다른 열은 선택이 없다
+    const st = term.rt.editor_diff orelse return null;
+    if (st.view != .compare) return null;
+    const texts = if (side == .right) st.right_texts else st.left_texts;
+    if (texts.len == 0) return null;
+
+    // 정규화: 뒤로 끌었으면 뒤집는다.
+    const back = sel.focus_row < sel.anchor_row or
+        (sel.focus_row == sel.anchor_row and sel.focus_byte < sel.anchor_byte);
+    const lo_row = if (back) sel.focus_row else sel.anchor_row;
+    const lo_byte = if (back) sel.focus_byte else sel.anchor_byte;
+    const hi_row = if (back) sel.anchor_row else sel.focus_row;
+    const hi_byte = if (back) sel.anchor_byte else sel.focus_byte;
+    if (lo_row == hi_row and lo_byte == hi_byte) return null; // caret뿐 — 그릴 띠가 없다
+
+    const rows_field = if (side == .right) &term.rt.editor_diff_marks_right else &term.rt.editor_diff_marks_left;
+    const buf_field = if (side == .right) &term.rt.editor_diff_mark_buf_right else &term.rt.editor_diff_mark_buf_left;
+    if (rows_field.len < texts.len) {
+        const grown_rows = self.allocator.alloc([]const chrome_editor.frame.Mark, texts.len) catch return null;
+        const grown_buf = self.allocator.alloc(chrome_editor.frame.Mark, texts.len) catch {
+            self.allocator.free(grown_rows);
+            return null;
+        };
+        if (rows_field.len > 0) self.allocator.free(rows_field.*);
+        if (buf_field.len > 0) self.allocator.free(buf_field.*);
+        rows_field.* = grown_rows;
+        buf_field.* = grown_buf;
+    }
+    const rows = rows_field.*[0..texts.len];
+    const buf = buf_field.*[0..texts.len];
+    @memset(rows, &.{});
+
+    for (lo_row..@min(hi_row + 1, texts.len)) |i| {
+        const text = texts[i];
+        const from: u32 = if (i == lo_row) @intCast(@min(lo_byte, text.len)) else 0;
+        const to: u32 = if (i == hi_row) @intCast(@min(hi_byte, text.len)) else @intCast(text.len);
+        if (to <= from) continue;
+        buf[i] = .{ .start = from, .len = to - from };
+        rows[i] = buf[i .. i + 1];
+    }
+    return rows;
+}
+
+/// 비교 뷰 선택을 클립보드로. 복사할 것이 없으면 `false`.
+///
+/// **빈 행은 건너뛴다.** 짝맞춤 행은 그 자리에 줄이 **없는** 것이므로, 개행을 내면 원본에 없던
+/// 빈 줄이 붙는다(줄 번호가 `null`인 행이 그것이다). §4.1g "비교 뷰"가 정한 규칙이다.
+pub fn copyDiffSelection(self: *AppSession) bool {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return false;
+    const sel = term.rt.editor_diff_selection orelse return false;
+    const st = term.rt.editor_diff orelse return false;
+    if (st.view != .compare) return false;
+    const texts = if (sel.side == .right) st.right_texts else st.left_texts;
+    const numbers = if (sel.side == .right) st.right_numbers else st.left_numbers;
+
+    const back = sel.focus_row < sel.anchor_row or
+        (sel.focus_row == sel.anchor_row and sel.focus_byte < sel.anchor_byte);
+    const lo_row = if (back) sel.focus_row else sel.anchor_row;
+    const lo_byte = if (back) sel.focus_byte else sel.anchor_byte;
+    const hi_row = if (back) sel.anchor_row else sel.focus_row;
+    const hi_byte = if (back) sel.anchor_byte else sel.focus_byte;
+    if (lo_row == hi_row and lo_byte == hi_byte) return false;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    for (lo_row..@min(hi_row + 1, texts.len)) |i| {
+        if (i < numbers.len and numbers[i] == null) continue; // 짝맞춤 빈 행 — 그 자리에 줄이 없다
+        const text = texts[i];
+        const from = if (i == lo_row) @min(lo_byte, text.len) else 0;
+        const to = if (i == hi_row) @min(hi_byte, text.len) else text.len;
+        if (out.items.len > 0) out.append(self.allocator, '\n') catch return false;
+        if (to > from) out.appendSlice(self.allocator, text[from..to]) catch return false;
+    }
+    if (out.items.len == 0) return false;
+
+    const captured = self.allocator.dupe(u8, out.items) catch return false;
+    if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+    self.chrome_clipboard_write = captured;
+    return true;
+}
+
 /// 편집기 본문에서 **더블클릭(단어)·트리플클릭(줄)**. 잡았으면 `true`.
 ///
 /// **`AnchorKind`가 여기서 정해진다.** `anchor`가 점이 아니라 **범위**인 이유가 이것이다 — 단어를
@@ -2157,6 +2295,24 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
 /// 보고 **거절해 숨은 줄을 영영 못 되찾는다**(`applyFold` doc이 2026-08-17에 막은 그 상태다 —
 /// 14차 실측: 8줄 문서에서 5줄이 숨은 채 `unfoldAll = false`).
 fn dropSelectionState(self: *AppSession, term: *Term) void {
+    // 비교 뷰 선택도 함께 놓는다 — 같은 부류이고 같은 수명이다.
+    if (term.rt.editor_diff_hit_rows_left.len > 0) self.allocator.free(term.rt.editor_diff_hit_rows_left);
+    if (term.rt.editor_diff_hit_rows_right.len > 0) self.allocator.free(term.rt.editor_diff_hit_rows_right);
+    if (term.rt.editor_diff_marks_left.len > 0) self.allocator.free(term.rt.editor_diff_marks_left);
+    if (term.rt.editor_diff_marks_right.len > 0) self.allocator.free(term.rt.editor_diff_marks_right);
+    if (term.rt.editor_diff_mark_buf_left.len > 0) self.allocator.free(term.rt.editor_diff_mark_buf_left);
+    if (term.rt.editor_diff_mark_buf_right.len > 0) self.allocator.free(term.rt.editor_diff_mark_buf_right);
+    term.rt.editor_diff_hit_rows_left = &.{};
+    term.rt.editor_diff_hit_rows_right = &.{};
+    term.rt.editor_diff_marks_left = &.{};
+    term.rt.editor_diff_marks_right = &.{};
+    term.rt.editor_diff_mark_buf_left = &.{};
+    term.rt.editor_diff_mark_buf_right = &.{};
+    term.rt.editor_diff_hit_len_left = 0;
+    term.rt.editor_diff_hit_len_right = 0;
+    term.rt.editor_diff_selection = null;
+    term.rt.editor_diff_hit_geom = .{};
+
     if (term.rt.editor_selection_marks.len > 0) self.allocator.free(term.rt.editor_selection_marks);
     if (term.rt.editor_selection_mark_buf.len > 0) self.allocator.free(term.rt.editor_selection_mark_buf);
     term.rt.editor_selection_marks = &.{};

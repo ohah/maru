@@ -817,10 +817,14 @@ const status_bar_item_pad_pt: u32 = 4;
 const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
-/// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
-// blocked·running·알림 + 편집기 셋(저하·읽기 전용·줄바꿈) + 리소스. 편집기 셋은 활성 pane이
-// 편집기일 때만 실리므로 평소에는 넷만 쓴다.
-const max_status_bar_right_items: usize = 7;
+/// 상태바 우측 항목 상한.
+// blocked·running·알림 + 편집기 **넷**(커서 위치·저하·읽기 전용·줄바꿈) + 리소스. 편집기 넷은
+// 활성 pane이 편집기일 때만 실리므로 평소에는 넷만 쓴다.
+// 편집기 커서 위치가 더해지며 **여덟**이 됐다(2026-08-21). 안 올리면 마지막 후보(리소스)가 폭과
+// **무관하게** 사라진다 — 실측으로 2,500px가 남은 채로 빠졌고, 그것은 `status-bar.md` §3이 정한
+// 폭 규칙이 아니라 배열 상한이라 화면만 봐서는 "폭이 모자랐나 보다"로 읽힌다(그 문서가 금지한
+// 조용한 절단이다). **후보 원장에서 되짚어** 다음 항목이 붙을 때 이 값을 잊지 못하게 한다.
+const max_status_bar_right_items: usize = chrome.components.status_bar.right_candidates.len;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -16820,15 +16824,47 @@ pub const AppSession = struct {
             }
         }
 
-        // **편집기 pane이 활성일 때만 나오는 셋**(native-editor-layering.md §2.2). 상태바는 창 전폭 띠라
+        // **편집기 pane이 활성일 때만 나오는 넷**(native-editor-layering.md §2.2). 상태바는 창 전폭 띠라
         // 늘 떠 있으면 터미널을 쓰는 동안에도 기존 항목을 밀어낸다 — 그래서 조건부다.
         //
-        // 배열 순서 = 버려지는 순서다(뒤가 먼저 사라진다). **저하 → 읽기 전용 → 줄바꿈** 순으로 넣어
+        // 배열 순서 = 버려지는 순서다(뒤가 먼저 사라진다). **커서 위치 → 저하 → 읽기 전용 → 줄바꿈** 순으로 넣어
         // "축소가 일어났다"는 사실이 가장 오래 남게 한다(§2.2: 조용히 줄어들면 사용자는 버그로 읽는다).
         // 리소스보다는 **앞**이다 — 리소스가 가장 먼저 사라져야 한다는 아래 계약을 그대로 둔다.
         if (rn < max_status_bar_right_items and self.surface_initialized and self.tabs.items.len > 0) {
             const active_term = pane_ops.activePane(self).activeTerm();
             if (active_term.kind == .editor) {
+                // ⓪ 커서 위치(줄:열). §2.2 표의 첫 항목이라 **가장 오래 살아남아야 한다** — 우측
+                //    묶음은 먼저 더한 것이 오른쪽에 서고 뒤로 갈수록 먼저 버려지므로 맨 앞에 둔다.
+                //    선택이 없으면 항목 자체가 없다(읽기 전용이라 caret이 늘 있지는 않다).
+                if (editor_ops.cursorPosition(active_term)) |pos| {
+                    if (rn < max_status_bar_right_items) {
+                        var buf: [48]u8 = undefined;
+                        // 상한을 넘으면 `+`를 붙인다 — 그 너머는 세지 않았다는 사실을 숨기지 않는다.
+                        const text = if (pos.truncated)
+                            std.fmt.bufPrint(&buf, "{d}:{d}+", .{ pos.line, pos.column }) catch null
+                        else
+                            std.fmt.bufPrint(&buf, "{d}:{d}", .{ pos.line, pos.column }) catch null;
+                        if (text) |t| if (self.buildStatusBarItem(null, t, bar_cols, fg, icon_fg, .plain)) |dl| {
+                            // **숫자는 잘리면 안 된다** — 리소스가 같은 이유로 같은 가드를 갖는다
+                            //  (아래). 잘린 `199999:7` → `19999…`는 **다른 값으로 읽힌다**.
+                            //
+                            // 판정 기준은 다르다: 이 텍스트는 ASCII(숫자·`:`·`+`)뿐이라 **byte 수 = 셀
+                            // 수**인데, 리소스는 `·`가 2바이트라 그 등식이 깨져 `text_cols` 상수를 든다.
+                            if (dl.size.cols >= t.len) {
+                                right_frames[rn] = dl;
+                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                                right_ids[rn] = .editor_cursor;
+                                rn += 1;
+                            } else {
+                                // **버린 것은 푼다.** `defer`가 도는 대상은 배열에 실린 것뿐이라
+                                // (`right_frames[0..rn]`), 여기서 안 풀면 좁은 창에서 편집기를 보는
+                                // 동안 **프레임마다** cells·overlays·grapheme_pool이 샌다.
+                                var truncated = dl;
+                                truncated.deinit(self.allocator);
+                            }
+                        };
+                    }
+                }
                 // ① 저하: 행 수를 아직 다 못 셌다 → 스크롤바가 실제보다 짧다(§2.1).
                 if (active_term.rt.editor_row_cache.countingIncomplete() and rn < max_status_bar_right_items) {
                     if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_counting_rows), bar_cols, fg, icon_fg, .plain)) |dl| {
@@ -17057,9 +17093,9 @@ pub const AppSession = struct {
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
             .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
-            // 편집기 셋은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
+            // 편집기 넷은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
             // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
-            .editor_degraded, .editor_readonly, .editor_eol => {},
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor => {},
         }
         self.metal_dirty = true;
     }
@@ -17073,7 +17109,7 @@ pub const AppSession = struct {
             .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
-            .editor_degraded, .editor_readonly, .editor_eol => false,
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor => false,
         };
     }
 
@@ -48421,7 +48457,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     }
 
     // ② 편집기 pane을 연다 — 이 저장소의 실제 파일을 그대로 쓴다(줄바꿈이 LF인 파일).
-    _ = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
+    const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
     session.collectStatusBarItems(&collected, builder, colors);
@@ -48441,6 +48477,66 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     if (eol_at) |eol_i| {
         const entries = session.statusBarTree().entries;
         try std.testing.expect(entries[eol_i].rect.x < entries[readonly_at.?].rect.x);
+    }
+
+    // ③ **커서 위치는 편집기 묶음에서 가장 오른쪽 = 가장 오래 산다**(§2.2 표의 첫 항목).
+    //    이것이 커밋 전체의 논거인데 재는 자리가 없어, 코드에서 자리를 정반대(묶음 맨 뒤)로 옮겨도
+    //    스위트가 전부 초록이었다. 화면 x로 본다 — "더하는 순서"는 구현이고, 계약은 좌우다.
+    editor_term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    var cursor_at: ?usize = null;
+    var group_x: ?f32 = null; // 커서를 뺀 편집기 항목들의 가장 오른쪽 x
+    for (session.statusBarTree().entries, 0..) |e, i| {
+        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+            .editor_cursor => cursor_at = i,
+            .editor_degraded, .editor_readonly, .editor_eol => {
+                if (group_x == null or e.rect.x > group_x.?) group_x = e.rect.x;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(cursor_at != null);
+    const entries = session.statusBarTree().entries;
+    try std.testing.expect(entries[cursor_at.?].rect.x > group_x.?);
+}
+
+// **상한이 후보보다 작으면 마지막 후보가 폭과 무관하게 사라진다.** 실제로 커서 위치를 더했을 때
+// 리소스가 폭 2,500px를 남긴 채로 빠졌고, 화면만 봐서는 폭 부족과 구분되지 않는다.
+//
+// 상한은 `right_candidates.len`에서 파생되고 그 원장은 다시 `ItemId`에서 파생되므로, "항목만 더하고
+// 상한을 잊는" 경로는 **구조적으로 막혀 있다**. 남는 위험은 조립부가 원장 밖 id를 싣는 것이라,
+// 그건 **조립 결과로** 잰다 — comptime 단언은 `X >= X`가 되어 항진명제다(적대적 검증 2026-08-21).
+test "SB1: 조립된 우측 항목은 전부 우측 후보 원장 안에 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    _ = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    const sb = chrome.components.status_bar;
+    const bar_mid = session.statusBarTree().entries.len;
+    try std.testing.expect(bar_mid > 0); // 아무것도 안 실렸으면 아래가 항진명제다
+    for (session.statusBarTree().entries) |e| {
+        const id: sb.ItemId = @enumFromInt(e.id);
+        if (id == .git_branch or id == .cwd) continue; // 좌측 전용
+        var found = false;
+        for (sb.right_candidates) |c| {
+            if (c == id) found = true;
+        }
+        try std.testing.expect(found);
     }
 }
 
@@ -49885,6 +49981,78 @@ test "SB-R: 폴링 두 번이면 실제 backend 표본으로 표시가 생긴다
     const text = session.resourceText() orelse return error.TestExpectedResourceText;
     try std.testing.expectEqual(maru.session.resource_usage.text_cols, try std.unicode.utf8CountCodepoints(text));
     try std.testing.expect(session.resource_reading != null);
+}
+
+// SB-C 적대적: **커서 위치도 같은 가드를 갖는다 — 그리고 버린 DrawList를 푼다.**
+//
+// 이 분기는 좁은 창 + 편집기 pane + 선택이 **동시에** 있어야 열린다. 기존 좁은 창 테스트(SB-R)는
+// 터미널 pane이라 `cursorPosition`에 닿지 않아, 가드를 통째로 지워도 스위트가 전부 초록이었다
+// (적대적 검증 2026-08-21). 누수는 `testing.allocator`가 잡는다 — `defer`가 도는 대상은 배열에
+// 실린 것뿐이라, 버린 항목을 안 풀면 상태바가 **프레임마다** 샌다.
+test "SB-C: 커서 위치도 폭이 모자라면 내리고, 버린 DrawList를 푼다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 열이 커야 텍스트가 길어진다(`1:14097+` = 10칸). 짧으면 좁은 창에서도 들어가 가드가 안 열린다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const wide = editor_ops.max_status_column + 500;
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendNTimes(allocator, 'x', wide);
+    try long.append(allocator, '\n');
+    try tmp.dir.writeFile(io, .{ .sub_path = "wide.txt", .data = long.items });
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = rb[0..try tmp.dir.realPath(io, &rb)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wide.txt" });
+    defer allocator.free(path);
+
+    const term = editor_ops.openPathInActivePane(session, path) catch return error.SkipZigTest;
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(wide);
+
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+
+    // ① 넓은 창: 온전히 뜬다 — 아래 ②가 항진명제가 아니다.
+    _ = try session.resize(session.sidebar_width_px + 900, 600, session.scale_milli);
+    try std.testing.expect(cursorItemPublished(session, allocator, colors));
+
+    // ② 좁은 창: 예산(바 폭/3)이 모자라 통째로 내려간다. 잘린 `1:140…`은 다른 값으로 읽힌다.
+    //
+    // **폭 전제를 손으로 세지 않는다** — 표시 텍스트를 실제로 만들어 그 길이로 잰다. 처음에 `1:14097+`를
+    // 10칸으로 어림했다가(실제 8칸) 예산 9칸에 그대로 들어가 테스트가 거짓 실패했다.
+    const pos = editor_ops.cursorPosition(term) orelse return error.NoCursorPos;
+    var want_buf: [48]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "{d}:{d}{s}", .{
+        pos.line,
+        pos.column,
+        if (pos.truncated) "+" else "",
+    });
+
+    _ = try session.resize(180, 600, session.scale_milli);
+    const bar_cols = session.backing_width_px / session.cell_width_px;
+    try std.testing.expect(@max(1, bar_cols / 3) < want.len); // 전제: 예산이 그 텍스트에 못 미친다
+    try std.testing.expect(!cursorItemPublished(session, allocator, colors));
+}
+
+fn cursorItemPublished(
+    session: *AppSession,
+    allocator: std.mem.Allocator,
+    colors: metal_frame.CellColors,
+) bool {
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+    for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
+        if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.editor_cursor)) return true;
+    }
+    return false;
 }
 
 // SB-R 적대적: **좁은 창에서 숫자가 잘리면 안 된다.** 텍스트 예산은 바 폭의 1/3이라 창이 좁으면 리소스
